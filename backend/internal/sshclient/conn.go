@@ -67,17 +67,28 @@ func NewClient(opts *Options, stderr io.Writer) (*Client, error) {
 		timeout = defaultDialTimeout
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+	var conn net.Conn
+	if opts.ProxyCommand != "" {
+		// ProxyCommand 模式：不进行 DNS 解析与 TCP 拨号，由外部命令
+		// （如 connect.exe）负责建立到目标主机的连接；目标地址只作为
+		// %h/%p 令牌传给代理命令（与 OpenSSH 一致）。
+		conn, err = startProxyCommand(opts, stderr)
+		if err != nil {
+			return nil, fmt.Errorf("proxy command: %w", err)
+		}
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
 
-	network := opts.Network
-	if network == "" {
-		network = "tcp"
-	}
-	dialer := net.Dialer{Timeout: timeout}
-	conn, err := dialer.DialContext(ctx, network, addr)
-	if err != nil {
-		return nil, fmt.Errorf("connect to %s: %w", addr, err)
+		network := opts.Network
+		if network == "" {
+			network = "tcp"
+		}
+		dialer := net.Dialer{Timeout: timeout}
+		conn, err = dialer.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, fmt.Errorf("connect to %s: %w", addr, err)
+		}
 	}
 
 	// 关键：SSH 握手（KEX + 认证）同样受 timeout 约束。
@@ -85,6 +96,7 @@ func NewClient(opts *Options, stderr io.Writer) (*Client, error) {
 	// 此处是手动拨号后传入 NewClientConn，若服务器 accept TCP 后不回包（半开连接、
 	// docker-proxy 转发但容器内 sshd 未就绪等），握手会永久阻塞。
 	// 因此用 conn deadline 包住整个握手，超时后 NewClientConn 返回 i/o timeout。
+	// ProxyCommand 的 proxyConn 以 timer→Close() 模拟 deadline（见 proxy.go）。
 	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("set deadline on connection to %s: %w", addr, err)

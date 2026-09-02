@@ -89,6 +89,7 @@ ssh-client [options] [user@]host [command]
 | `CertificateFile` | `-o CertificateFile=~/.ssh/id_ed25519-cert.pub` | 用户证书文件路径（可重复，与 IdentityFile 按出现顺序配对） |
 | `LogLevel` | `-o LogLevel=DEBUG` | 日志级别 |
 | `Compression` | `-o Compression=yes` | 启用压缩 |
+| `ProxyCommand` | `-o ProxyCommand="connect.exe -H 127.0.0.1:10810 %h %p"` | 通过外部命令建立连接（支持 %h/%n/%k/%p/%r/%% 令牌） |
 | `ProxyJump` | — | 仅解析，未实现（忽略并警告） |
 
 ### 2.4 示例

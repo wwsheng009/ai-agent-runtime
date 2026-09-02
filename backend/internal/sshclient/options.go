@@ -65,6 +65,13 @@ type Options struct {
 	// Network 拨号网络（"" 自动 / "tcp4" / "tcp6"），对应 -4/-6。
 	Network string
 
+	// ProxyCommand 代理命令（OpenSSH ProxyCommand 指令），非空时通过子进程建立连接。
+	ProxyCommand string
+
+	// OriginalHost 是命令行传入的原始主机名（或别名），用于 ProxyCommand 令牌 %n 展开。
+	// 在 ApplyConfig 之前由 main 设置。
+	OriginalHost string
+
 	// Verbose 是否输出调试信息（-v）。
 	Verbose bool
 	// Quiet 是否抑制警告与横幅（-q）。
@@ -89,7 +96,9 @@ func (o *Options) ApplyConfig(c *ResolvedConfig) {
 	if o.User == "" && c.User != "" {
 		o.User = c.User
 	}
-	if o.Host == "" && c.HostName != "" {
+	// HostName 覆盖连接目标（OpenSSH 语义）：config 中 Host 模式匹配后，实际连接目标是
+	// HostName；命令行/配置文件中的原始别名保留在 o.OriginalHost（供 ProxyCommand %n 令牌展开）。
+	if c.HostName != "" && o.Host != c.HostName {
 		o.Host = c.HostName
 	}
 	if o.Port == 22 && c.Port != 0 {
@@ -132,6 +141,9 @@ func (o *Options) ApplyConfig(c *ResolvedConfig) {
 	}
 	if o.LogLevel == "INFO" && c.LogLevel != "" {
 		o.LogLevel = c.LogLevel
+	}
+	if o.ProxyCommand == "" && c.ProxyCommand != "" {
+		o.ProxyCommand = c.ProxyCommand
 	}
 }
 

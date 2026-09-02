@@ -106,7 +106,7 @@ Notes:
     accepts TCP but never completes the handshake will time out instead of hanging.
   - Dead-link detection: -o ServerAliveInterval=15 -o ServerAliveCountMax=3.
   - Host key verification: -o StrictHostKeyChecking=yes|accept-new|no (default accept-new).
-  - -o ProxyJump is parsed but not implemented (ignored with a warning).
+  - ProxyCommand (via config file) is supported; ProxyJump is parsed but not implemented.
 `)
 	}
 
@@ -257,12 +257,11 @@ func run(flags *cliFlags) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ssh-client: warning: %v\n", err)
 	} else {
+		// 保留原始别名（供 ProxyCommand 的 %n 令牌展开），再应用 config 覆盖。
+		opts.OriginalHost = opts.Host
 		opts.ApplyConfig(cfg)
 		if !opts.Quiet && cfg.ProxyJump != "" {
 			fmt.Fprintf(os.Stderr, "ssh-client: warning: ProxyJump %q is not implemented; ignored\n", cfg.ProxyJump)
-		}
-		if !opts.Quiet && cfg.ProxyCommand != "" {
-			fmt.Fprintf(os.Stderr, "ssh-client: warning: ProxyCommand %q is not implemented; connecting directly\n", cfg.ProxyCommand)
 		}
 		if opts.Verbose {
 			fmt.Fprintf(os.Stderr, "ssh-client: using config host %q -> %s:%d\n", cfg.Host, cfg.HostName, cfg.Port)
@@ -422,6 +421,7 @@ func applyOptions(opts *sshclient.Options, options []string) error {
 		"LogLevel":                true,
 		"Compression":             true,
 		"ProxyJump":               true, // 只警告，不实现
+		"ProxyCommand":            true,
 		"CertificateFile":         true,
 	}
 
@@ -470,6 +470,8 @@ func applyOptions(opts *sshclient.Options, options []string) error {
 			opts.Compression = val == "yes" || val == "true"
 		case "ProxyJump":
 			fmt.Fprintf(os.Stderr, "ssh-client: warning: ProxyJump not implemented, ignoring %q\n", val)
+		case "ProxyCommand":
+			opts.ProxyCommand = val
 		case "CertificateFile":
 			opts.CertificateFiles = append(opts.CertificateFiles, val)
 		}
