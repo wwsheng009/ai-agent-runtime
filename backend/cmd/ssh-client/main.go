@@ -114,13 +114,13 @@ Notes:
 	fs.StringVarP(&flags.user, "user", "l", "", "Login username")
 	fs.StringArrayVarP(&flags.identityFiles, "identity-file", "i", nil, "Identity file path (can be repeated)")
 	fs.StringVar(&flags.password, "password", "", "Password (no short option; interactive if omitted)")
-	fs.StringArrayVarP(&flags.options, "option", "o", nil, "OpenSSH config option (key=value)")
+	fs.StringArrayVarP(&flags.options, "option", "o", nil, "OpenSSH config option (key=value or 'key value')")
 	fs.BoolVarP(&flags.quiet, "quiet", "q", false, "Quiet mode (suppress warnings/banners)")
 	fs.BoolVarP(&flags.verbose, "verbose", "v", false, "Verbose output (debug)")
 	fs.StringVarP(&flags.configFile, "config-file", "F", "", "ssh_config file path (default ~/.ssh/config)")
 	fs.BoolVarP(&flags.noSession, "no-session", "N", false, "Do not execute remote command (forwarding only)")
-	fs.StringArrayVarP(&flags.localForwards, "local-forward", "L", nil, "Local port forwarding (bind:port:host:hostport)")
-	fs.StringArrayVarP(&flags.remoteForwards, "remote-forward", "R", nil, "Remote port forwarding (bind:port:host:hostport)")
+	fs.StringArrayVarP(&flags.localForwards, "local-forward", "L", nil, "Local port forwarding ([bind:]port:host:hostport; bind defaults to localhost)")
+	fs.StringArrayVarP(&flags.remoteForwards, "remote-forward", "R", nil, "Remote port forwarding ([bind:]port:host:hostport; bind defaults to localhost)")
 	fs.BoolVarP(&flags.noTty, "no-tty", "T", false, "Disable pseudo-terminal allocation")
 	fs.BoolVarP(&flags.forceTty, "tty", "t", false, "Force pseudo-terminal allocation")
 	fs.BoolVarP(&flags.showVersion, "version", "V", false, "Show version")
@@ -139,7 +139,7 @@ Notes:
 		}
 		fmt.Fprintln(os.Stderr, "ssh-client:", err)
 		fs.Usage()
-		os.Exit(254)
+		os.Exit(255)
 	}
 	if flags.showHelp {
 		fs.Usage()
@@ -161,7 +161,7 @@ Notes:
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "ssh-client: missing host")
 		fs.Usage()
-		os.Exit(254)
+		os.Exit(255)
 	}
 	flags.host = args[0]
 	flags.command = args[1:]
@@ -249,7 +249,7 @@ func run(flags *cliFlags) int {
 	// 应用 -o 选项
 	if err := applyOptions(opts, flags.options); err != nil {
 		fmt.Fprintf(os.Stderr, "ssh-client: %v\n", err)
-		return 254
+		return 255
 	}
 
 	// 2. 加载 ssh_config（文件不存在则空配置，不报错）
@@ -421,7 +421,12 @@ func applyOptions(opts *sshclient.Options, options []string) error {
 	for _, o := range options {
 		kv := strings.SplitN(o, "=", 2)
 		if len(kv) != 2 {
-			return fmt.Errorf("invalid -o option %q (expected key=value)", o)
+			// OpenSSH 兼容：-o "Option Value"（与 ssh_config 文件格式一致）。
+			// 值本身可含空格，因此只按第一个空格拆分。
+			kv = strings.SplitN(o, " ", 2)
+		}
+		if len(kv) != 2 {
+			return fmt.Errorf("invalid -o option %q (expected key=value or 'key value')", o)
 		}
 		key := strings.TrimSpace(kv[0])
 		val := strings.TrimSpace(kv[1])
@@ -463,17 +468,76 @@ func applyOptions(opts *sshclient.Options, options []string) error {
 	return nil
 }
 
-// startLocalForward 启动本地端口转发。
-func startLocalForward(client *ssh.Client, spec string) error {
-	// spec: bind:port:host:hostport
-	parts := strings.SplitN(spec, ":", 4)
-	if len(parts) < 4 {
-		return fmt.Errorf("invalid local forward spec %q (expected bind:port:host:hostport)", spec)
+// parseForwardSpec 解析 OpenSSH 兼容的转发规格：
+//
+//	[bind_address:]port:host:hostport
+//
+// bind_address 可省略（默认 localhost），可为 IPv4（如 192.168.1.1）、
+// 带方括号的 IPv6（如 [::1]）或 "*"（所有接口）。host 也可以是带方括号的
+// IPv6（如 [::1]）。解析从右向左进行，方括号内的冒号不会被当作分隔符。
+func parseForwardSpec(spec string) (bind, port, host, hostport string, err error) {
+	bind = "localhost" // OpenSSH 默认绑定回环地址
+	invalid := func() error {
+		return fmt.Errorf("invalid forward spec %q (expected [bind:]port:host:hostport)", spec)
 	}
-	bind := parts[0]
-	portStr := parts[1]
-	remoteHost := parts[2]
-	remotePortStr := parts[3]
+
+	// 1. 末尾 hostport 必须紧跟最后一段，且为数字
+	lastColon := strings.LastIndex(spec, ":")
+	if lastColon < 0 {
+		return "", "", "", "", invalid()
+	}
+	hostport = spec[lastColon+1:]
+	if _, err := strconv.Atoi(hostport); err != nil {
+		return "", "", "", "", invalid()
+	}
+	rest := spec[:lastColon]
+
+	// 2. 提取 host：若 rest 以 "]" 结尾则 host 是带方括号的 IPv6
+	var head string
+	if strings.HasSuffix(rest, "]") {
+		open := strings.LastIndex(rest, "[")
+		if open < 0 {
+			return "", "", "", "", invalid()
+		}
+		host = rest[open:]
+		head = strings.TrimSuffix(rest[:open], ":")
+	} else {
+		hc := strings.LastIndex(rest, ":")
+		if hc < 0 {
+			return "", "", "", "", invalid()
+		}
+		host = rest[hc+1:]
+		head = rest[:hc]
+	}
+	if host == "" {
+		return "", "", "", "", invalid()
+	}
+
+	// 3. head 为 "port" 或 "bind:port"
+	if pc := strings.LastIndex(head, ":"); pc >= 0 {
+		bind = head[:pc]
+		port = head[pc+1:]
+	} else {
+		port = head
+	}
+	if port == "" {
+		return "", "", "", "", invalid()
+	}
+
+	// 4. 规范化 bind：去掉 IPv6 方括号；"*"/"" 表示所有接口
+	bind = strings.Trim(bind, "[]")
+	if bind == "*" {
+		bind = ""
+	}
+	return bind, port, host, hostport, nil
+}
+
+// startLocalForward 启动本地端口转发（-L）。
+func startLocalForward(client *ssh.Client, spec string) error {
+	bind, portStr, remoteHost, remotePortStr, err := parseForwardSpec(spec)
+	if err != nil {
+		return err
+	}
 
 	localAddr := net.JoinHostPort(bind, portStr)
 	remoteAddr := net.JoinHostPort(remoteHost, remotePortStr)
@@ -506,17 +570,12 @@ func startLocalForward(client *ssh.Client, spec string) error {
 	return nil
 }
 
-// startRemoteForward 启动远程端口转发。
+// startRemoteForward 启动远程端口转发（-R）。
 func startRemoteForward(client *ssh.Client, spec string) error {
-	// spec: bind:port:host:hostport
-	parts := strings.SplitN(spec, ":", 4)
-	if len(parts) < 4 {
-		return fmt.Errorf("invalid remote forward spec %q (expected bind:port:host:hostport)", spec)
+	bind, portStr, localHost, localPortStr, err := parseForwardSpec(spec)
+	if err != nil {
+		return err
 	}
-	bind := parts[0]
-	portStr := parts[1]
-	localHost := parts[2]
-	localPortStr := parts[3]
 
 	remoteAddr := net.JoinHostPort(bind, portStr)
 	localAddr := net.JoinHostPort(localHost, localPortStr)
