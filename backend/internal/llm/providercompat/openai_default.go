@@ -309,12 +309,19 @@ func normalizeOpenAICompatibleToolCall(call map[string]interface{}) (map[string]
 		if !hasName || strings.TrimSpace(name) == "" {
 			return call, false
 		}
+		arguments := "{}"
+		if rawArgs, hasArgs := call["arguments"]; hasArgs {
+			if normalized, _ := normalizeOpenAICompatibleToolArguments(rawArgs); normalized != "" {
+				arguments = normalized
+			}
+		} else if rawInput, hasInput := call["input"]; hasInput {
+			if normalized, _ := normalizeOpenAICompatibleToolArguments(rawInput); normalized != "" {
+				arguments = normalized
+			}
+		}
 		function = map[string]interface{}{
 			"name":      strings.TrimSpace(name),
-			"arguments": "{}",
-		}
-		if arguments, ok := normalizeOpenAICompatibleToolArguments(call["arguments"]); ok {
-			function["arguments"] = arguments
+			"arguments": arguments,
 		}
 		mutable := ensureMutable()
 		mutable["function"] = function
@@ -360,8 +367,14 @@ func normalizeOpenAICompatibleStreamToolCall(call map[string]interface{}) (map[s
 		function = map[string]interface{}{
 			"name": strings.TrimSpace(name),
 		}
-		if arguments, ok := normalizeOpenAICompatibleStreamToolArguments(call["arguments"]); ok {
-			function["arguments"] = arguments
+		if rawArgs, hasArgs := call["arguments"]; hasArgs {
+			if normalized, _ := normalizeOpenAICompatibleStreamToolArguments(rawArgs); normalized != "" {
+				function["arguments"] = normalized
+			}
+		} else if rawInput, hasInput := call["input"]; hasInput {
+			if normalized, _ := normalizeOpenAICompatibleStreamToolArguments(rawInput); normalized != "" {
+				function["arguments"] = normalized
+			}
 		}
 		mutable := ensureMutable()
 		mutable["function"] = function
@@ -385,13 +398,15 @@ func normalizeOpenAICompatibleStreamToolCall(call map[string]interface{}) (map[s
 
 // isOpenAICompatibleToolCallType reports whether a tool_calls[].type value is
 // already acceptable on the OpenAI Chat Completions wire. The standard enum is
-// "function"; "custom_tool_call" is the project's own extension used by the
-// codex protocol for custom tools and is deliberately left untouched. Any other
-// spelling (notably "function_call", the Responses API item type that leaks in
-// when raw history is replayed) is coerced to "function".
+// only "function". The project's own extension "custom_tool_call" (used by the
+// codex protocol for custom tools) must be projected to "function" before
+// replaying history to an OpenAI-compatible endpoint, otherwise strict gateways
+// reject the request with HTTP 400 (unknown variant). Any other spelling
+// (notably "function_call", the Responses API item type that leaks in when raw
+// history is replayed) is also coerced to "function".
 func isOpenAICompatibleToolCallType(raw interface{}) bool {
 	toolType := strings.ToLower(strings.TrimSpace(stringValue(raw)))
-	return toolType == "function" || toolType == "custom_tool_call"
+	return toolType == "function"
 }
 
 func normalizeOpenAICompatibleToolArguments(raw interface{}) (string, bool) {

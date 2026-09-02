@@ -269,6 +269,31 @@ func TestPrepareRequestBody_OpenAIToolCallTypeNormalization(t *testing.T) {
 								"arguments": "{}",
 							},
 						},
+					},
+				},
+			},
+		}
+
+		normalized := PrepareRequestBody(Context{Protocol: "openai"}, body)
+		messages := normalized["messages"].([]map[string]interface{})
+		toolCalls := messages[0]["tool_calls"].([]map[string]interface{})
+		if got := toolCalls[0]["type"]; got != "function" {
+			t.Fatalf("expected standard %q preserved, got %#v", "function", got)
+		}
+		// Canonical history must not be mutated.
+		origCalls := body["messages"].([]map[string]interface{})[0]["tool_calls"].([]map[string]interface{})
+		if got, ok := origCalls[0]["type"].(string); !ok || got != "function" {
+			t.Fatalf("original history was mutated: type = %#v", got)
+		}
+	})
+
+	t.Run("custom_tool_call coerced to function", func(t *testing.T) {
+		body := map[string]interface{}{
+			"model": "test-model",
+			"messages": []map[string]interface{}{
+				{
+					"role": "assistant",
+					"tool_calls": []map[string]interface{}{
 						{
 							"id":    "call_2",
 							"type":  "custom_tool_call",
@@ -284,10 +309,22 @@ func TestPrepareRequestBody_OpenAIToolCallTypeNormalization(t *testing.T) {
 		messages := normalized["messages"].([]map[string]interface{})
 		toolCalls := messages[0]["tool_calls"].([]map[string]interface{})
 		if got := toolCalls[0]["type"]; got != "function" {
-			t.Fatalf("expected standard %q preserved, got %#v", "function", got)
+			t.Fatalf("expected tool_calls[0].type to be coerced to %q, got %#v", "function", got)
 		}
-		if got := toolCalls[1]["type"]; got != "custom_tool_call" {
-			t.Fatalf("expected %q preserved, got %#v", "custom_tool_call", got)
+		fn, ok := toolCalls[0]["function"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected function field, got %#v", toolCalls[0])
+		}
+		if got := fn["name"]; got != "my_custom_tool" {
+			t.Fatalf("expected function.name %q, got %#v", "my_custom_tool", got)
+		}
+		if got := fn["arguments"]; got != `{"x":1}` {
+			t.Fatalf("expected function.arguments %q, got %#v", `{"x":1}`, got)
+		}
+		// Canonical history must not be mutated.
+		origCalls := body["messages"].([]map[string]interface{})[0]["tool_calls"].([]map[string]interface{})
+		if got, ok := origCalls[0]["type"].(string); !ok || got != "custom_tool_call" {
+			t.Fatalf("original history was mutated: type = %#v", got)
 		}
 	})
 }

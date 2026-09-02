@@ -3,8 +3,14 @@ version: "v1"
 # Windows 7 uses the Go 1.20-compatible SQLite driver. Keep its session
 # database (and WAL/SHM sidecars) separate from the main build's newer driver.
 sessions:
+  # Read-replica mode: the runtime server reads from a private copy of the
+  # master session-history database. aicli holds the master's WAL/-shm file
+  # locks; direct reads from the master get blocked. The replica is re-synced
+  # from the master every replicaSyncInterval and hot-swapped.
   backend: sqlite
-  storePath: session_history_win7.sqlite
+  storePath: session_history_win7_replica.sqlite
+  replicaSource: session_history_win7.sqlite
+  replicaSyncInterval: 30s
 
 agent:
   # The model decides when the run is complete. Positive limits are explicit

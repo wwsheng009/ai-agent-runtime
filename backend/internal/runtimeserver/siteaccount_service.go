@@ -14,11 +14,12 @@ import (
 
 // LocalSiteAccountService implements runtime Web/CLI-shared site detect + account sync.
 type LocalSiteAccountService struct {
-	configPath    string
-	authStorePath string
-	client        *siteaccount.Client
-	loadConfig    func(path string) (*agentconfig.Config, error)
-	now           func() time.Time
+	configPath      string
+	authStorePath   string
+	client          *siteaccount.Client
+	loadConfig      func(path string) (*agentconfig.Config, error)
+	now             func() time.Time
+	providerReloader func(cfg *agentconfig.Config) error
 }
 
 // NewLocalSiteAccountService builds a service bound to the runtime config + auth store.
@@ -49,6 +50,33 @@ func (s *LocalSiteAccountService) SetClient(client *siteaccount.Client) {
 		client = siteaccount.NewClient(nil)
 	}
 	s.client = client
+}
+
+// SetProviderReloader installs a callback that atomically refreshes the live
+// in-memory provider registry after provider config changes are persisted.
+// This makes api_key / provider edits take effect immediately without a restart.
+func (s *LocalSiteAccountService) SetProviderReloader(reloader func(cfg *agentconfig.Config) error) {
+	if s == nil {
+		return
+	}
+	s.providerReloader = reloader
+}
+
+// reloadRuntimeProviders reloads the latest config from disk and refreshes the
+// in-memory provider registry. Errors are surfaced as warnings on the result
+// instead of failing the underlying account refresh operation.
+func (s *LocalSiteAccountService) reloadRuntimeProviders(out *skillsapi.SiteAccountRefreshResult) error {
+	if s == nil || s.providerReloader == nil {
+		return nil
+	}
+	cfg, err := s.loadConfigOrDefault(s.configPath)
+	if err != nil {
+		return fmt.Errorf("reload runtime config: %w", err)
+	}
+	if err := s.providerReloader(cfg); err != nil {
+		return fmt.Errorf("refresh runtime provider registry: %w", err)
+	}
+	return nil
 }
 
 // Detect probes base_url and returns a normalized DetectResult.
@@ -322,6 +350,9 @@ func (s *LocalSiteAccountService) RefreshProvider(
 			out.Warnings = append(out.Warnings, fmt.Sprintf("save account auth failed: %v", err))
 		} else {
 			out.AccountAuthRef = authRef
+			if !persist {
+				appendProviderReloadWarning(out, s.reloadRuntimeProviders(out))
+			}
 		}
 	}
 
@@ -344,6 +375,7 @@ func (s *LocalSiteAccountService) RefreshProvider(
 			return out, fmt.Errorf("persist provider account: %w", err)
 		}
 		out.Persisted = true
+		appendProviderReloadWarning(out, s.reloadRuntimeProviders(out))
 	}
 	return out, nil
 }
@@ -365,8 +397,21 @@ func (s *LocalSiteAccountService) persistSiteTypeOnly(providerName string, out *
 	if strings.TrimSpace(out.AccountAuthRef) != "" {
 		update.AccountAuthRef = stringPtr(out.AccountAuthRef)
 	}
-	_, err := agentconfig.UpdateProviderConfig(s.configPath, update)
-	return err
+	if _, err := agentconfig.UpdateProviderConfig(s.configPath, update); err != nil {
+		return err
+	}
+	appendProviderReloadWarning(out, s.reloadRuntimeProviders(out))
+	return nil
+}
+
+func appendProviderReloadWarning(out *skillsapi.SiteAccountRefreshResult, err error) {
+	if err == nil {
+		return
+	}
+	if out == nil {
+		return
+	}
+	out.Warnings = append(out.Warnings, fmt.Sprintf("provider 配置已保存，但刷新运行中 provider 注册表失败: %v", err))
 }
 
 func (s *LocalSiteAccountService) clientOrDefault() *siteaccount.Client {

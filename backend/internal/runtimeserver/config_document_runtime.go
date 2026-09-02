@@ -189,7 +189,7 @@ func (r *RuntimeConfigHotReloader) Apply(
 		if r.bootstrap == nil {
 			result.Warnings = append(result.Warnings,
 				"provider 配置已保存，但当前进程未接入 provider 热替换目标。")
-		} else if err := r.bootstrap.ReloadProviderConfigs(buildRuntimeProviderConfigs(nextCfg)); err != nil {
+		} else if err := r.bootstrap.ReloadProviderConfigs(BuildRuntimeProviderConfigs(nextCfg)); err != nil {
 			result.Warnings = append(result.Warnings,
 				fmt.Sprintf("provider 配置已保存，但热替换 provider 注册表失败: %v", err))
 		} else {

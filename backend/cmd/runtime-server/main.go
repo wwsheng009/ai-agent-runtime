@@ -884,6 +884,7 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	}
 	runtimeConfig := runtimeManager.Get()
 	runtimeConfig.Sessions.Dir = resolveRuntimeServerSessionDir(runtimeManager.GetFilePath(), runtimeConfig.Sessions.Dir)
+	applyRuntimeServerSessionReplicaDefaults(runtimeConfig)
 	sessionruntime.ApplyDefaults(runtimeConfig, sessionruntime.ResolveOptions{
 		Config:     runtimeConfig,
 		ConfigFile: runtimeManager.GetFilePath(),
@@ -922,7 +923,11 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	bootstrapManager.ApplyToSkillsHandler(handler)
 	handler.SetAICLIConfig(cfg)
 	handler.SetFileTransferService(filetransport.NewLocalService())
-	handler.SetSiteAccountService(runtimeserver.NewLocalSiteAccountService(configPath, config.DefaultAuthStorePath()))
+	siteAccountService := runtimeserver.NewLocalSiteAccountService(configPath, config.DefaultAuthStorePath())
+	siteAccountService.SetProviderReloader(func(nextCfg *config.Config) error {
+		return bootstrapManager.ReloadProviderConfigs(runtimeserver.BuildRuntimeProviderConfigs(nextCfg))
+	})
+	handler.SetSiteAccountService(siteAccountService)
 	handler.SetRuntimeConfig(runtimeConfig, runtimeManager.GetFilePath())
 	handler.SetRuntimeLogFilePath(strings.TrimSpace(cfg.Log.FilePath))
 	handler.SetRuntimeConfigResolver(func(scope skillsapi.UsageScope) *runtimecfg.RuntimeConfig {
@@ -1063,6 +1068,25 @@ func resolveRuntimeServerSessionDir(configFile, target string) string {
 		return aiclipaths.DefaultSessionsDir()
 	}
 	return resolvePathFromConfigFile(configFile, target)
+}
+
+// applyRuntimeServerSessionReplicaDefaults enables read-replica mode by
+// default when the operator did not explicitly configure sessions. The
+// runtime server reads from a private copy of the master session-history
+// database so aicli's write locks never block its queries.
+func applyRuntimeServerSessionReplicaDefaults(cfg *runtimecfg.RuntimeConfig) {
+	if cfg == nil {
+		return
+	}
+	if strings.TrimSpace(cfg.Sessions.ReplicaSource) == "" {
+		cfg.Sessions.ReplicaSource = aiclipaths.DefaultSessionHistoryFileName
+	}
+	if strings.TrimSpace(cfg.Sessions.StorePath) == "" {
+		cfg.Sessions.StorePath = "session_history_replica.sqlite"
+	}
+	if cfg.Sessions.ReplicaSyncInterval <= 0 {
+		cfg.Sessions.ReplicaSyncInterval = 30 * time.Second
+	}
 }
 
 func (a *runtimeServerApp) configureServiceControl(pidFile, listenAddr, configPath, cwd string) {

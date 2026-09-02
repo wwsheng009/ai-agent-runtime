@@ -72,7 +72,7 @@ func TestBuildRuntimeProviderConfigsMergesGlobalAndProviderProxy(t *testing.T) {
 		},
 	}
 
-	result := buildRuntimeProviderConfigs(cfg)
+	result := BuildRuntimeProviderConfigs(cfg)
 	require.Contains(t, result, "openai-main")
 	require.NotNil(t, result["openai-main"].Proxy)
 	require.Equal(t, "http://127.0.0.1:10810", result["openai-main"].Proxy.HTTP)

@@ -268,3 +268,60 @@ func TestLocalSiteAccountServiceRefreshProviderUsesAuthStore(t *testing.T) {
 	require.True(t, result.Persisted)
 	require.NotNil(t, result.Account)
 }
+
+func TestLocalSiteAccountServiceRefreshTriggersProviderReloader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/usage", r.URL.Path)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"mode": "quota_limited",
+			"unit": "USD",
+			"quota": map[string]any{
+				"limit":     50,
+				"used":      10,
+				"remaining": 40,
+				"unit":      "USD",
+			},
+			"remaining": 40,
+		})
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	authPath := filepath.Join(dir, "auth.json")
+	raw := fmt.Sprintf(`providers:
+  default_provider: alpha
+  items:
+    alpha:
+      enabled: true
+      protocol: openai
+      base_url: %s
+      api_key: sk-alpha
+      default_model: gpt-4.1-mini
+`, server.URL)
+	require.NoError(t, os.WriteFile(configPath, []byte(raw), 0o644))
+
+	service := NewLocalSiteAccountService(configPath, authPath)
+	service.SetClient(siteaccount.NewClient(server.Client()))
+
+	var reloaded *agentconfig.Config
+	reloadCalls := 0
+	service.SetProviderReloader(func(nextCfg *agentconfig.Config) error {
+		reloadCalls++
+		reloaded = nextCfg
+		return nil
+	})
+
+	result, err := service.RefreshProvider(context.Background(), "alpha", skillsapi.SiteAccountRefreshRequest{
+		SiteType:   "sub2api",
+		SkipDetect: true,
+	})
+	require.NoError(t, err)
+	require.True(t, result.Persisted)
+	require.Equal(t, 1, reloadCalls, "provider reloader should be invoked once after successful persist")
+	require.NotNil(t, reloaded, "reloader should receive the freshly reloaded config")
+	item, ok := reloaded.Providers.Items["alpha"]
+	require.True(t, ok, "reloaded config should still contain the provider")
+	require.Equal(t, "sub2api", item.SiteType)
+	require.NotNil(t, item.Account)
+}

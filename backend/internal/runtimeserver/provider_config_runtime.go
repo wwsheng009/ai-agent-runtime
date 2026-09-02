@@ -7,7 +7,10 @@ import (
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 )
 
-func buildRuntimeProviderConfigs(cfg *agentconfig.Config) map[string]*runtimellm.ProviderConfig {
+// BuildRuntimeProviderConfigs builds the runtime LLM provider config map from an
+// agent config. It is used both at startup and by hot reload to atomically
+// refresh the in-memory provider registry from the latest on-disk config.
+func BuildRuntimeProviderConfigs(cfg *agentconfig.Config) map[string]*runtimellm.ProviderConfig {
 	providerConfigs := make(map[string]*runtimellm.ProviderConfig)
 	if cfg == nil {
 		return providerConfigs

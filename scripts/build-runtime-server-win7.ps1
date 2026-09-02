@@ -35,8 +35,12 @@ param(
     [string]$Version = "",
     [string]$OutputDir = "",
     [string]$GoProxy = "",
+    [string]$ApiBaseUrl = "",
     [switch]$SkipTests,
     [switch]$SkipDependencyCheck,
+    [switch]$BuildFrontend,
+    [switch]$SkipFrontendInstall,
+    [switch]$EmbedPlaceholder,
     [switch]$KeepEmbeddedWebUI
 )
 
@@ -56,6 +60,7 @@ else {
 $script:repoRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptDirectory ".."))
 $script:goCommand = "go"
 $script:webUIBackup = $null
+$script:webUIEntryAsset = $null
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -212,12 +217,140 @@ function Restore-Environment {
     }
 }
 
+function Test-BinaryContainsText {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Text
+    )
+    if ([string]::IsNullOrEmpty($Text)) {
+        return $false
+    }
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $content = $utf8.GetString([System.IO.File]::ReadAllBytes($Path))
+    return $content.IndexOf($Text, [System.StringComparison]::Ordinal) -ge 0
+}
+
+function Assert-Command {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
+        throw "Required command '$Name' was not found in PATH."
+    }
+}
+
+function Assert-LastExitCode {
+    param([Parameter(Mandatory = $true)][string]$Step)
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Step failed with exit code $LASTEXITCODE."
+    }
+}
+
+function Get-AssetManifestHash {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $normalizedRoot = [System.IO.Path]::GetFullPath($Root)
+    $rootPrefix = $normalizedRoot
+    if (-not $rootPrefix.EndsWith([System.IO.Path]::DirectorySeparatorChar.ToString())) {
+        $rootPrefix += [System.IO.Path]::DirectorySeparatorChar
+    }
+    $fileByPath = @{}
+    foreach ($file in Get-ChildItem -LiteralPath $normalizedRoot -Recurse -File) {
+        $relativePath = $file.FullName.Substring($rootPrefix.Length).Replace([char]92, [char]47)
+        if ($relativePath -eq "build-info.json") {
+            continue
+        }
+        $fileByPath[$relativePath] = $file.FullName
+    }
+    [string[]]$paths = @($fileByPath.Keys)
+    [System.Array]::Sort($paths, [System.StringComparer]::Ordinal)
+    $records = foreach ($relativePath in $paths) {
+        $contentHash = (Get-FileHash -LiteralPath $fileByPath[$relativePath] -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$contentHash  $relativePath"
+    }
+    $manifestText = if ($records.Count -gt 0) {
+        [string]::Join("`n", [string[]]$records) + "`n"
+    } else {
+        ""
+    }
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $sha256.ComputeHash($utf8.GetBytes($manifestText))
+    }
+    finally {
+        $sha256.Dispose()
+    }
+    return [System.BitConverter]::ToString($digest).Replace("-", "").ToLowerInvariant()
+}
+
+function Get-FrontendEntryAsset {
+    param([Parameter(Mandatory = $true)][string]$IndexPath)
+    $html = [System.IO.File]::ReadAllText($IndexPath)
+    $scriptTags = [regex]::Matches(
+        $html,
+        '<script\b[^>]*>',
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+    foreach ($tag in $scriptTags) {
+        if (-not [regex]::IsMatch($tag.Value, '\btype\s*=\s*["'']module["'']', 'IgnoreCase')) {
+            continue
+        }
+        $source = [regex]::Match($tag.Value, '\bsrc\s*=\s*["''](?<src>[^"'']+)["'']', 'IgnoreCase')
+        if ($source.Success) {
+            $entryAsset = $source.Groups['src'].Value.Trim()
+            if (-not $entryAsset.StartsWith('/') -and -not $entryAsset.Contains('://')) {
+                $entryAsset = '/' + $entryAsset.TrimStart('.', '/')
+            }
+            return $entryAsset
+        }
+    }
+    throw "Frontend index '$IndexPath' does not contain a module entry asset."
+}
+
+function Invoke-FrontendBuild {
+    param(
+        [Parameter(Mandatory = $true)][string]$FrontendDir,
+        [Parameter(Mandatory = $true)][string]$ApiBaseUrl
+    )
+    Assert-Command "node"
+    Assert-Command "pnpm"
+    $oldApiBaseUrl = $env:VITE_API_BASE_URL
+    Push-Location -LiteralPath $FrontendDir
+    try {
+        $env:VITE_API_BASE_URL = $ApiBaseUrl.Trim()
+        if (-not $SkipFrontendInstall) {
+            & pnpm install --frozen-lockfile
+            Assert-LastExitCode "Install frontend dependencies"
+        }
+        & pnpm build
+        Assert-LastExitCode "Build frontend"
+    }
+    finally {
+        $env:VITE_API_BASE_URL = $oldApiBaseUrl
+        Pop-Location
+    }
+}
+
 function Prepare-EmbeddedWebUI {
-    param([Parameter(Mandatory = $true)][string]$WebUIDir)
+    param(
+        [Parameter(Mandatory = $true)][string]$WebUIDir,
+        [Parameter(Mandatory = $true)][string]$FrontendDist,
+        [Parameter(Mandatory = $true)][string]$BuildTime
+    )
 
     if ($KeepEmbeddedWebUI) {
         Write-Host "  Keeping existing embedded web UI assets (-KeepEmbeddedWebUI)."
         return
+    }
+
+    if ($EmbedPlaceholder) {
+        Write-Host "  Embedding placeholder web UI only (-EmbedPlaceholder)."
+    }
+    else {
+        # Default: package the production frontend.
+        $frontendIndex = Join-Path $FrontendDist "index.html"
+        if (-not (Test-Path -LiteralPath $frontendIndex -PathType Leaf)) {
+            throw "Frontend dist is missing '$frontendIndex' (run 'pnpm build' in frontend/ or pass -EmbedPlaceholder)."
+        }
+        Write-Host "  Staging production frontend: $FrontendDist"
     }
 
     $parent = Split-Path -Parent $WebUIDir
@@ -226,57 +359,70 @@ function Prepare-EmbeddedWebUI {
     }
 
     $hadOriginalDirectory = Test-Path -LiteralPath $WebUIDir -PathType Container
-    if (-not $hadOriginalDirectory) {
-        New-Item -ItemType Directory -Path $WebUIDir -Force | Out-Null
+    $backup = $null
+    $wasPlaceholderOnly = $false
+    if ($hadOriginalDirectory) {
+        $entries = @(Get-ChildItem -LiteralPath $WebUIDir -Force)
+        $wasPlaceholderOnly = ($entries.Count -eq 1 -and $entries[0].Name -eq "placeholder.txt" -and $entries[0].PSIsContainer -eq $false)
+        if ($wasPlaceholderOnly) {
+            Write-Host "  Current embedded web UI contains only the placeholder (will be restored after build)."
+        }
+        else {
+            $backup = Join-Path $parent ("dist.win7-backup-{0}-{1}" -f $PID, ([Guid]::NewGuid().ToString("N")))
+            Move-Item -LiteralPath $WebUIDir -Destination $backup -Force
+            Write-Host "  Backed up existing web UI assets for restore after build."
+        }
+    }
+    else {
+        Write-Host "  Creating embedded web UI directory for build."
+    }
+    New-Item -ItemType Directory -Path $WebUIDir -Force | Out-Null
+
+    if ($EmbedPlaceholder) {
+        # Replace with placeholder-only content.
+        Get-ChildItem -LiteralPath $WebUIDir -Force | Remove-Item -Recurse -Force
         $placeholder = Join-Path $WebUIDir "placeholder.txt"
         $utf8 = New-Object System.Text.UTF8Encoding($false)
         [System.IO.File]::WriteAllText($placeholder, "Win7 build: frontend disabled.`n", $utf8)
-        $script:webUIBackup = [pscustomobject]@{
-            Original = $WebUIDir
-            Backup = $null
-            HadOriginalDirectory = $false
+    }
+    else {
+        # Stage the production frontend.
+        Get-ChildItem -LiteralPath $WebUIDir -Force |
+            Where-Object { $_.Name -ne "placeholder.txt" } |
+            Remove-Item -Recurse -Force
+        Copy-Item -Path (Join-Path $FrontendDist "*") -Destination $WebUIDir -Recurse -Force
+
+        $embeddedIndex = Join-Path $WebUIDir "index.html"
+        if (-not (Test-Path -LiteralPath $embeddedIndex -PathType Leaf)) {
+            throw "Failed to stage the frontend in '$WebUIDir'."
         }
-        Write-Host "  Created placeholder embedded web UI directory."
-        return
+
+        $frontendManifestHash = Get-AssetManifestHash -Root $WebUIDir
+        $frontendEntryAsset = Get-FrontendEntryAsset -IndexPath $embeddedIndex
+        $frontendBuildInfo = [ordered]@{
+            asset_manifest_hash = $frontendManifestHash
+            build_time = $BuildTime
+            entry_asset = $frontendEntryAsset
+        }
+        $frontendBuildInfoPath = Join-Path $WebUIDir "build-info.json"
+        $frontendBuildInfoJson = $frontendBuildInfo | ConvertTo-Json -Depth 3
+        $utf8 = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($frontendBuildInfoPath, $frontendBuildInfoJson + "`n", $utf8)
+
+        $verifiedManifestHash = Get-AssetManifestHash -Root $WebUIDir
+        if ($verifiedManifestHash -ne $frontendManifestHash) {
+            throw "Frontend manifest hash changed after writing build-info.json."
+        }
+        Write-Host "  Frontend manifest: $frontendManifestHash"
+        Write-Host "  Frontend entry:    $frontendEntryAsset"
+        $script:webUIEntryAsset = $frontendEntryAsset
     }
 
-    $entries = @(Get-ChildItem -LiteralPath $WebUIDir -Force)
-    $onlyPlaceholder = ($entries.Count -eq 1 -and $entries[0].Name -eq "placeholder.txt" -and $entries[0].PSIsContainer -eq $false)
-    if ($onlyPlaceholder) {
-        Write-Host "  Embedded web UI already contains only the Win7 placeholder."
-        return
-    }
-
-    $backup = Join-Path $parent ("dist.win7-backup-{0}-{1}" -f $PID, ([Guid]::NewGuid().ToString("N")))
-    Move-Item -LiteralPath $WebUIDir -Destination $backup -Force
-    try {
-        New-Item -ItemType Directory -Path $WebUIDir -Force | Out-Null
-        $sourcePlaceholder = Join-Path $backup "placeholder.txt"
-        $destinationPlaceholder = Join-Path $WebUIDir "placeholder.txt"
-        if (Test-Path -LiteralPath $sourcePlaceholder -PathType Leaf) {
-            Copy-Item -LiteralPath $sourcePlaceholder -Destination $destinationPlaceholder -Force
-        }
-        else {
-            $utf8 = New-Object System.Text.UTF8Encoding($false)
-            [System.IO.File]::WriteAllText($destinationPlaceholder, "Win7 build: frontend disabled.`n", $utf8)
-        }
-        $script:webUIBackup = [pscustomobject]@{
-            Original = $WebUIDir
-            Backup = $backup
-            HadOriginalDirectory = $true
-        }
-        Write-Host "  Temporarily staged Win7 placeholder web UI (original will be restored)."
-    }
-    catch {
-        # If staging the replacement failed, put the original tree back before
-        # surfacing the error.  This avoids leaving a local checkout half-moved.
-        if (Test-Path -LiteralPath $WebUIDir -PathType Container) {
-            Remove-Item -LiteralPath $WebUIDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
-        if (Test-Path -LiteralPath $backup -PathType Container) {
-            Move-Item -LiteralPath $backup -Destination $WebUIDir -Force -ErrorAction SilentlyContinue
-        }
-        throw
+    $script:webUIBackup = [pscustomobject]@{
+        Original = $WebUIDir
+        Backup = $backup
+        HadOriginalDirectory = $hadOriginalDirectory
+        WasPlaceholderOnly = $wasPlaceholderOnly
     }
 }
 
@@ -296,6 +442,13 @@ function Restore-EmbeddedWebUI {
             }
             Move-Item -LiteralPath $state.Backup -Destination $state.Original -Force
         }
+        elseif ($state.HadOriginalDirectory -and $state.WasPlaceholderOnly) {
+            # Restore placeholder-only state, preserving the tracked placeholder.txt.
+            New-Item -ItemType Directory -Path $state.Original -Force | Out-Null
+            $placeholder = Join-Path $state.Original "placeholder.txt"
+            $utf8 = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText($placeholder, "Win7 build: frontend disabled.`n", $utf8)
+        }
     }
     finally {
         $script:webUIBackup = $null
@@ -304,6 +457,7 @@ function Restore-EmbeddedWebUI {
 
 $backendDir = Join-Path $script:repoRoot "backend"
 $webUIDir = Join-Path $backendDir "internal/webui/dist"
+$frontendDist = Join-Path $script:repoRoot "frontend/dist"
 $outputRoot = $null
 $failureMessage = $null
 $environmentSnapshot = @{}
@@ -412,7 +566,16 @@ try {
         }
     }
 
-    Prepare-EmbeddedWebUI -WebUIDir $webUIDir
+    # Build the frontend if requested (default: reuse existing frontend/dist).
+    if ($BuildFrontend) {
+        Write-Host "==> Building production frontend for Win7 embedding"
+        Invoke-FrontendBuild -FrontendDir (Join-Path $script:repoRoot "frontend") -ApiBaseUrl $ApiBaseUrl
+    }
+    else {
+        Write-Host "  Reusing existing frontend/dist ($(if(Test-Path (Join-Path $frontendDist 'index.html')){'found'}else{'MISSING!'}))"
+    }
+
+    Prepare-EmbeddedWebUI -WebUIDir $webUIDir -FrontendDist $frontendDist -BuildTime $buildTime
     try {
         $binaryPath = Join-Path $outputRoot "runtime-server-win7.exe"
         $checksumPath = $binaryPath + ".sha256"
@@ -438,6 +601,25 @@ try {
         }
 
         Verify-Binary -Path $binaryPath -Label "runtime-server"
+        # Smoke-verify that the binary embeds frontend assets and build-info.json.
+        # The build strips the symbol table (-s -w), so verify by content search.
+        if ([string]::IsNullOrWhiteSpace($script:webUIEntryAsset)) {
+            Write-Host "  INFO: No frontend entry recorded (placeholder or kept build)."
+        }
+        else {
+            $embeddedEntryFile = [System.IO.Path]::GetFileName($script:webUIEntryAsset)
+            $frontendFound = Test-BinaryContainsText -Path $binaryPath -Text $embeddedEntryFile
+            $buildInfoFound = Test-BinaryContainsText -Path $binaryPath -Text "asset_manifest_hash"
+            if ($frontendFound -and $buildInfoFound) {
+                Write-Host "  Embedded frontend verified: entry=$embeddedEntryFile manifest=present"
+            }
+            elseif (-not $frontendFound -and -not $buildInfoFound) {
+                Write-Host "  WARNING: Binary does not embed frontend assets (placeholder build)."
+            }
+            else {
+                Write-Host "  WARNING: Partial frontend embedding (entry=$frontendFound manifest=$buildInfoFound)."
+            }
+        }
         Write-Host "Win7 runtime-server build completed successfully."
     }
     finally {

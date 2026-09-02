@@ -158,6 +158,8 @@ type SessionsConfig struct {
 	CleanupInterval       time.Duration `yaml:"cleanupInterval" json:"cleanupInterval"`
 	IdleTimeout           time.Duration `yaml:"idleTimeout" json:"idleTimeout"`
 	AutoArchive           bool          `yaml:"autoArchive" json:"autoArchive"`
+	ReplicaSource         string        `yaml:"replicaSource" json:"replicaSource"`
+	ReplicaSyncInterval   time.Duration `yaml:"replicaSyncInterval" json:"replicaSyncInterval"`
 }
 
 // TraceConfig configures runtime trace exports.

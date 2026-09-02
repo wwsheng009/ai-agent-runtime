@@ -1,5 +1,17 @@
 version: "v1"
 
+sessions:
+  # Read-replica mode: the runtime server reads from a private copy of the
+  # master session-history database (session_history.sqlite, owned/written by
+  # aicli processes). aicli holds the master's WAL/-shm file locks; direct
+  # reads from the master get blocked and return
+  # "会话存储查询超时（共享数据库被并发写入占用）". The replica is re-synced
+  # from the master every replicaSyncInterval and hot-swapped.
+  backend: sqlite
+  storePath: session_history_replica.sqlite
+  replicaSource: session_history.sqlite
+  replicaSyncInterval: 30s
+
 agent:
   # The model decides when the run is complete. Positive limits are explicit
   # operator policies; zero keeps the normal agent loop unbounded.

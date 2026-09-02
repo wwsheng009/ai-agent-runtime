@@ -1,7 +1,9 @@
 package bootstrap
 
 import (
+	"context"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -51,6 +53,7 @@ type Manager struct {
 	registry        *skill.Registry
 	loader          *skill.Loader
 	sessionManager  *chat.SessionManager
+	sessionReplica  *chat.SessionReplica
 	hotReload       *skill.HotReload
 	embeddingRouter *skill.SemanticEmbeddingRouter
 	teamStore       team.Store
@@ -69,7 +72,7 @@ func NewManager(opts *Options) (*Manager, error) {
 		config = runtimecfg.DefaultRuntimeConfig()
 	}
 
-	sessionManager, err := newSessionManager(config)
+	sessionManager, sessionReplica, err := newSessionManager(config)
 	if err != nil {
 		return nil, err
 	}
@@ -89,6 +92,7 @@ func NewManager(opts *Options) (*Manager, error) {
 		registry:        skill.NewRegistry(opts.MCPManager),
 		loader:          skill.NewLoader(opts.MCPManager),
 		sessionManager:  sessionManager,
+		sessionReplica:  sessionReplica,
 	}
 	cleanupOnError := true
 	defer func() {
@@ -154,7 +158,7 @@ func NewManager(opts *Options) (*Manager, error) {
 	return manager, nil
 }
 
-func newSessionManager(config *runtimecfg.RuntimeConfig) (*chat.SessionManager, error) {
+func newSessionManager(config *runtimecfg.RuntimeConfig) (*chat.SessionManager, *chat.SessionReplica, error) {
 	if config != nil {
 		if dir := strings.TrimSpace(config.Sessions.Dir); dir != "" {
 			storageConfig := chat.DefaultPersistentSessionStorageConfig(dir)
@@ -168,10 +172,7 @@ func newSessionManager(config *runtimecfg.RuntimeConfig) (*chat.SessionManager, 
 			storageConfig.MaxInlineMessageBytes = config.Sessions.MaxInlineMessageBytes
 			storageConfig.SQLiteCacheKiB = config.Sessions.SQLiteCacheKiB
 			storageConfig.BusyTimeout = config.Sessions.BusyTimeout
-			storage, err := chat.OpenPersistentSessionStorage(storageConfig)
-			if err != nil {
-				return nil, fmt.Errorf("failed to initialize persistent session storage: %w", err)
-			}
+
 			managerConfig := chat.DefaultSessionManagerConfig()
 			if config.Sessions.MaxHistory > 0 {
 				managerConfig.MaxHistory = config.Sessions.MaxHistory
@@ -185,11 +186,33 @@ func newSessionManager(config *runtimecfg.RuntimeConfig) (*chat.SessionManager, 
 			if config.Sessions.IdleTimeout > 0 {
 				managerConfig.IdleTimeout = config.Sessions.IdleTimeout
 			}
-			return chat.NewSessionManager(storage, managerConfig), nil
+
+			// Read-replica mode: the runtime server reads from a private copy of
+			// the master session-history database so aicli's write locks never
+			// block its queries. The replica is periodically re-synced in the
+			// background and hot-swapped.
+			if src := strings.TrimSpace(config.Sessions.ReplicaSource); src != "" {
+				srcPath := src
+				if !filepath.IsAbs(srcPath) {
+					srcPath = filepath.Join(dir, src)
+				}
+				replica, err := chat.OpenSessionReplica(context.Background(), storageConfig, srcPath, config.Sessions.ReplicaSyncInterval)
+				if err != nil {
+					return nil, nil, fmt.Errorf("failed to initialize session storage read replica: %w", err)
+				}
+				replica.Run(context.Background())
+				return chat.NewSessionManager(replica.Storage(), managerConfig), replica, nil
+			}
+
+			storage, err := chat.OpenPersistentSessionStorage(storageConfig)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to initialize persistent session storage: %w", err)
+			}
+			return chat.NewSessionManager(storage, managerConfig), nil, nil
 		}
 	}
 
-	return chat.NewSessionManager(chat.NewInMemoryStorage(), nil), nil
+	return chat.NewSessionManager(chat.NewInMemoryStorage(), nil), nil, nil
 }
 
 func (m *Manager) buildLLMRuntime(gatewayProviderName string) (*llm.LLMRuntime, error) {
@@ -581,6 +604,9 @@ func (m *Manager) Stop() error {
 		}
 		if m.sessionManager != nil {
 			m.sessionManager.Stop()
+		}
+		if m.sessionReplica != nil {
+			m.sessionReplica.Close()
 		}
 		if m.teamStore != nil {
 			if err := m.teamStore.Close(); err != nil && m.stopErr == nil {
