@@ -504,6 +504,8 @@ func (c *Collector) CursorMetaInfo() CursorMeta {
 	if c == nil {
 		return CursorMeta{}
 	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return CursorMeta{
 		Epoch:      c.epoch,
 		InstanceID: c.instanceID,

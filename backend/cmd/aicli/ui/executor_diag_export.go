@@ -47,6 +47,7 @@ func executorDiagTextSummary(d ExecutorRecoveryDiag) string {
 	fmt.Fprintf(&b, "  armedBackoff             : %d\n", d.ArmedBackoff)
 	fmt.Fprintf(&b, "  backoffEngaged           : %d\n", d.BackoffEngaged)
 	fmt.Fprintf(&b, "  flushesWhileBackoff      : %d\n", d.FlushesWhileBackoff)
+	fmt.Fprintf(&b, "  handoffsWhileBackoff     : %d\n", d.HandoffsWhileBackoff)
 	fmt.Fprintf(&b, "  generationAdvancesInWin  : %d\n", d.GenerationAdvancesInWindow)
 	fmt.Fprintf(&b, "  frameErrorsInWindow      : %d\n", d.FrameErrorsInWindow)
 	fmt.Fprintf(&b, "  scrollbackResetsInWindow : %d\n", d.ScrollbackResetsInWindow)
@@ -66,6 +67,7 @@ func executorDiagTextSummary(d ExecutorRecoveryDiag) string {
 		fmt.Fprintf(&b, "  lastFrameErr             : %q\n", last.FrameErr)
 		fmt.Fprintf(&b, "  lastBackoffEngaged       : %v\n", last.BackoffEngaged)
 		fmt.Fprintf(&b, "  lastFlushedWhileBackoff  : %v\n", last.FlushedWhileBackoff)
+		fmt.Fprintf(&b, "  lastHandoffWhileBackoff  : %v\n", last.HandoffWhileBackoff)
 		fmt.Fprintf(&b, "  lastArmedBackoff         : %v\n", last.ArmedBackoff)
 		fmt.Fprintf(&b, "  lastContinued            : %v\n", last.Continued)
 	}
