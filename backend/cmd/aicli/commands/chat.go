@@ -74,6 +74,8 @@ type ChatSession struct {
 	HTTPClient                      *http.Client
 	cancelCtx                       context.Context               // 可取消的上下文
 	cancelFunc                      context.CancelFunc            // 取消函数
+	composerWakeMu                  sync.Mutex                    // 保护 composer 读取唤醒取消
+	composerWakeCancel              context.CancelFunc            // 当前 composer 读取的唤醒取消
 	interrupted                     atomic.Bool                   // 是否被中断（原子操作，避免竞态）
 	interruptCleanupMu              sync.Mutex                    // 保护当前中断清理完成信号
 	interruptCleanupDone            chan struct{}                 // 阻止下一轮与上一轮异步清理交错
@@ -212,6 +214,36 @@ type chatRuntimeHTTPCapture struct {
 // Interrupt 中断当前操作
 func (s *ChatSession) Interrupt() {
 	s.interrupt(false)
+}
+
+// newComposerReadContext 返回一个可被 Web 输入唤醒的 composer 读取上下文。
+// 每次 composer 读取开始时调用；返回的 done 用于在读取结束时清理本地取消。
+func (s *ChatSession) newComposerReadContext() (context.Context, func()) {
+	if s == nil {
+		return context.Background(), func() {}
+	}
+	s.composerWakeMu.Lock()
+	if s.composerWakeCancel != nil {
+		s.composerWakeCancel() // 兜底：上一轮未清理的取消
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.composerWakeCancel = cancel
+	s.composerWakeMu.Unlock()
+	return ctx, func() { cancel() }
+}
+
+// wakeComposerRead 唤醒当前阻塞在交互式 composer 读取中的主循环
+// （Web 客户端注入输入后调用），使下一轮循环重新检查输入队列。
+func (s *ChatSession) wakeComposerRead() {
+	if s == nil {
+		return
+	}
+	s.composerWakeMu.Lock()
+	defer s.composerWakeMu.Unlock()
+	if s.composerWakeCancel != nil {
+		s.composerWakeCancel()
+		s.composerWakeCancel = nil
+	}
 }
 
 // InterruptPreservePendingInput 中断当前 Agent 运行，但保留用户在运行期间
@@ -526,6 +558,14 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 	finalCleanup := buildChatFinalCleanup(session, cleanupSession)
 	registerExitCleanup(finalCleanup)
 	defer runExitCleanup()
+
+	// 注册渲染/显示状态 HTTP provider：/debug/chat/status 端点回调此函数
+	// 获取当前会话快照，实现 --debug/--pprof 模式下在线连续采样渲染状态。
+	// 会话结束时注销（返回 nil），避免端点拿到已销毁的会话。
+	RegisterChatDebugDisplayProvider(func() *ChatSession { return session })
+	registerExitCleanup(func() {
+		RegisterChatDebugDisplayProvider(func() *ChatSession { return nil })
+	})
 
 	// Welcome/meta preamble stays TUI-gated, but restored history must still
 	// replay so `aicli resume <id>` / `aicli chat --session` match in-chat
@@ -1301,6 +1341,13 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 				// Ctrl+D (EOF)：交互行编辑器场景静默忽略；队列/普通 reader 场景在输入结束后退出循环，避免空转。
 				if errors.Is(err, io.EOF) {
 					if !shouldUseInteractiveLineEditor(session) {
+						// Web 输入唤醒（/web/api/input 排队后取消读取上下文）会把
+						// context.Canceled 归一化为 io.EOF；若输入队列中已有 Web
+						// 输入待消费，不能当作 stdin 关闭退出，应继续下一轮优先
+						// 消费队列（chatInteractiveReadLine 顶部会先读队列）。
+						if chatInputQueueHasQueuedLines(session) {
+							continue
+						}
 						printDirectInteractiveOutput(session, "\n")
 						break
 					}

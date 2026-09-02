@@ -75,10 +75,18 @@ func main() {
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 		// pprof 诊断端点按需启动：--pprof 或 AICLI_PPROF 环境变量显式开启，
 		// 默认监听 127.0.0.1 随机空闲端口，实际地址打印到 stderr。
+		// 当 --debug 开启时也自动启动（内置 /debug/chat/status 端点提供
+		// 会话渲染/显示状态 JSON 快照，供在线连续采样）。
 		pprofFlag, _ := rootCmd.Flags().GetBool("pprof")
 		pprofEnv := strings.TrimSpace(os.Getenv("AICLI_PPROF"))
+		debugFlag := false
+		if cmd != nil {
+			if f := cmd.Flags().Lookup("debug"); f != nil {
+				debugFlag, _ = cmd.Flags().GetBool("debug")
+			}
+		}
 		pprofAddr := ""
-		if pprofFlag {
+		if pprofFlag || debugFlag {
 			pprofAddr = "127.0.0.1:0" // 默认随机空闲端口
 		}
 		if pprofEnv != "" {
@@ -92,6 +100,10 @@ func main() {
 			}
 			pprofHandle = handle
 			fmt.Fprintf(os.Stderr, "Info: pprof endpoint enabled: %s\n", handle.URL())
+			fmt.Fprintf(os.Stderr, "Info: chat render status endpoint: %s (JSON; ?format=text for plain text)\n", handle.DisplayURL())
+			fmt.Fprintf(os.Stderr, "Info: chat screen content endpoint: %s (JSON; ?format=text for plain text)\n", handle.ScreenURL())
+			fmt.Fprintf(os.Stderr, "Info: chat debug endpoints list: %s (JSON; ?format=text for plain text)\n", handle.EndpointsURL())
+			fmt.Fprintf(os.Stderr, "Info: runtime observe plane: %s (local in-process; capabilities/snapshot/sessions/events)\n", handle.Addr()+strings.TrimRight(commands.ChatDebugObservePrefix(), "/"))
 		}
 
 		if !shouldBootstrapConfigForCommand(cmd, args) {
@@ -331,6 +343,9 @@ func main() {
 		},
 	}
 	rootCmd.AddCommand(versionCmd)
+
+	// replay 子命令 — 离线回放录屏到虚拟终端（B2 场景）
+	rootCmd.AddCommand(commands.NewReplayCommand())
 
 	// mcp 子命令
 	mcpCmd := commands.MCPCommand()

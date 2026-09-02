@@ -58,6 +58,9 @@ func TestStartPprofServerEndpoints(t *testing.T) {
 		"/debug/pprof/goroutine",
 		"/debug/pprof/allocs",
 		"/debug/pprof/cmdline",
+		"/debug/chat/status",
+		"/debug/chat/screen",
+		"/debug/endpoints",
 	}
 	for _, path := range endpoints {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
