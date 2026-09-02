@@ -169,6 +169,14 @@ func (e *aicliSharedChatExecutor) execute(ctx context.Context, session *ChatSess
 	if isGoalContinuation {
 		history = append(history, goalContinuationInstructionMessage(opts.ContinuationPrompt))
 	}
+	// sendMessage 已把当前 prompt 预追加到 session.Messages 并持久化；
+	// executeToolLoop 会根据 req.Prompt 再次追加该用户消息，因此从历史中
+	// 移除尾部重复项，避免同一 prompt 在请求上下文中出现两次。
+	if !isGoalContinuation && len(history) > 0 {
+		if last := &history[len(history)-1]; last.Role == "user" && last.Content == prompt {
+			history = history[:len(history)-1]
+		}
+	}
 
 	var selection *aicliFunctionSelection
 	var exposureDetails *skillExposureDetails

@@ -11,38 +11,51 @@ import (
 // can observe the recovery loop's per-iteration state — the exact signal that
 // was previously invisible to CPU/goroutine profiles.
 type ExecutorRecoveryDiagEntry struct {
-	Seq               uint64 `json:"seq"`
-	AtUnixMs          int64  `json:"atUnixMs"` // wall-clock stamp of the iteration
-	Branch            string `json:"branch"`   // "scheduled" | "snapshot"
-	Revision          uint64 `json:"revision"`
-	RevisionAfter     uint64 `json:"revisionAfter"`
-	Generation        uint64 `json:"generation"`
-	TerminalEpoch     uint64 `json:"terminalEpoch"`
-	ProjectionUnknown bool   `json:"projectionUnknown"`
-	ReconciliationReq bool   `json:"reconciliationRequired"`
-	BackoffEngaged    bool   `json:"backoffEngaged"`
-	FlushedWhileBackoff bool `json:"flushedWhileBackoff"`
-	FullRepaint       bool   `json:"fullRepaint"`
-	ScrollbackReset   bool   `json:"scrollbackReset"`
-	FrameErr          string `json:"frameErr"`
-	ObligationPending bool   `json:"obligationPending"`
-	ArmedBackoff      bool   `json:"armedBackoff"`
-	Continued         bool   `json:"continued"`
+	Seq                 uint64 `json:"seq"`
+	AtUnixMs            int64  `json:"atUnixMs"` // wall-clock stamp of the iteration
+	Branch              string `json:"branch"`   // "scheduled" | "snapshot"
+	Revision            uint64 `json:"revision"`
+	RevisionAfter       uint64 `json:"revisionAfter"`
+	Generation          uint64 `json:"generation"`
+	TerminalEpoch       uint64 `json:"terminalEpoch"`
+	ProjectionUnknown   bool   `json:"projectionUnknown"`
+	ReconciliationReq   bool   `json:"reconciliationRequired"`
+	BackoffEngaged      bool   `json:"backoffEngaged"`
+	FlushedWhileBackoff bool   `json:"flushedWhileBackoff"`
+	// HandoffWhileBackoff marks a cycle that, with the scrollback-reset backoff
+	// engaged in success mode, still claimed and delivered pending history
+	// commits (a normal handoff WITHOUT the scrollback reset). A growing count
+	// proves the active band keeps committing new messages into the unified
+	// renderer even while the recovery obligation is parked at an unchanged
+	// layout generation.
+	HandoffWhileBackoff bool   `json:"handoffWhileBackoff"`
+	FullRepaint         bool   `json:"fullRepaint"`
+	ScrollbackReset     bool   `json:"scrollbackReset"`
+	FrameErr            string `json:"frameErr"`
+	ObligationPending   bool   `json:"obligationPending"`
+	ArmedBackoff        bool   `json:"armedBackoff"`
+	Continued           bool   `json:"continued"`
 }
 
 // ExecutorRecoveryDiag is the JSON-exportable recovery-loop diagnostic of one
 // TerminalSessionExecutor. It is a bounded ring buffer: at most the most recent
 // diagRecoveryRingSize iterations are retained.
 type ExecutorRecoveryDiag struct {
-	Entries         []ExecutorRecoveryDiagEntry `json:"entries"`
-	BackoffEngaged  uint64                      `json:"backoffEngaged"`
-	ArmedBackoff    uint64                      `json:"armedBackoff"`
+	Entries        []ExecutorRecoveryDiagEntry `json:"entries"`
+	BackoffEngaged uint64                      `json:"backoffEngaged"`
+	ArmedBackoff   uint64                      `json:"armedBackoff"`
 	// FlushesWhileBackoff counts plain viewport flushes performed while the
 	// scrollback-reset backoff was engaged. A growing count proves the bottom
 	// surface (prompt input) is still being rendered under backoff — the guard
 	// suppresses scrollback resets only, not live rendering.
 	FlushesWhileBackoff uint64 `json:"flushesWhileBackoff"`
-	TotalRecoveries uint64                      `json:"totalRecoveries"`
+	// HandoffsWhileBackoff counts pending history commits delivered while the
+	// scrollback-reset backoff was engaged (success mode). The backoff must
+	// suppress the expensive reset+replay only — new message content still has
+	// to cross into native scrollback, otherwise post-resume messages never
+	// render.
+	HandoffsWhileBackoff uint64 `json:"handoffsWhileBackoff"`
+	TotalRecoveries      uint64 `json:"totalRecoveries"`
 	// GeneratedAtUnixMs is when this snapshot was assembled; it lets a caller
 	// compute whether the loop is still advancing between two polls.
 	GeneratedAtUnixMs int64 `json:"generatedAtUnixMs"`
@@ -50,7 +63,7 @@ type ExecutorRecoveryDiag struct {
 	// from the reported replay loop: a backoff that is armed but never engaged
 	// (ArmedBackoff>0, BackoffEngaged==0) is a dead guard, not a working one.
 	// Single-counter reads are misleading; the verdict compares both.
-	Diagnosis string `json:"diagnosis"` // "idle" | "healthy" | "backoff_engaged" | "dead_guard" | "unknown"
+	Diagnosis string `json:"diagnosis"` // "idle" | "healthy" | "backoff_engaged" | "backoff_engaged_handing_off" | "dead_guard"
 	// WindowRecoveriesPerSec is the recovery rate over the retained window
 	// (entries[0].AtUnixMs .. entries[last].AtUnixMs). A continuously growing
 	// rate under an unchanged generation is the loop signature.
@@ -95,6 +108,24 @@ var ErrTerminalTransactionMissingResult = errors.New("terminal transaction omitt
 const (
 	terminalScrollbackResetBackoff      = 100 * time.Millisecond
 	terminalScrollbackResetBackoffYield = 10 * time.Millisecond
+	// terminalScrollbackResetRetryWindow bounds how long a SUCCESS-mode
+	// (flush-ok-but-non-converging) backoff stays engaged before the executor
+	// is allowed one more same-generation scrollback reset. It must be
+	// comfortably above one recovery cycle (WaitIdle drains the transcript
+	// replay, ~500ms in production): a window below the cycle always expires
+	// before the next schedule read and the guard never engages (the original
+	// 100ms failure mode, 439 arms / 0 engages at ~2 cores). A window above
+	// the cycle both rate-limits the loop AND guarantees a bounded retry, so
+	// a reconciliation that was dropped because ProjectionUnknown was still
+	// set when its first barrier arrived gets a second chance once the
+	// projection has recovered.
+	terminalScrollbackResetRetryWindow = 2 * time.Second
+	// terminalScrollbackResetMaxRetries caps consecutive same-generation
+	// success-mode resets. Once the budget is exhausted the guard parks until
+	// a real geometry/theme change (new LayoutGeneration); a genuinely
+	// non-converging obligation must not re-run the expensive reset+replay at
+	// the retry cadence forever.
+	terminalScrollbackResetMaxRetries = 3
 )
 
 // TerminalSessionExecutor is the bounded physical worker used by
@@ -132,6 +163,11 @@ type TerminalSessionExecutor struct {
 	// (the fix for the post-resume frozen input area), distinct from the
 	// suppressed scrollback resets.
 	diagFlushedWhileBackoff uint64
+	// diagHandoffWhileBackoff counts how many pending history commits were
+	// delivered while the scrollback-reset backoff was engaged (success mode).
+	// A growing count proves the active band keeps committing new messages to
+	// the unified renderer even while recovery is parked.
+	diagHandoffWhileBackoff uint64
 
 	// lastResetAt / lastResetEpoch are the scrollback recovery progress guard.
 	// A reconciliation that did not converge must not be re-armed on the next
@@ -158,12 +194,19 @@ type TerminalSessionExecutor struct {
 	//   - false: the flush succeeded but did NOT converge (ProjectionUnknown /
 	//     ReconciliationRequired still pending, or a scrollback reset whose
 	//     generation did not advance). Transcript replay re-arms the
-	//     obligation every cycle (~238 actions/cycle, Revision +240) without
-	//     ever advancing LayoutGeneration, so the guard must persist until a
-	//     real geometry/theme change; a time window would expire before the
-	//     next schedule read (cycle ~500ms >> 100ms window) and the executor
-	//     would busy-loop at ~2 cores (observed: 439 arms, 0 engages).
+	//     obligation every cycle (~238 actions/cycle, Revision +240). The
+	//     guard engages for a bounded retry window (terminalScrollbackResetRetryWindow)
+	//     to rate-limit the loop while still allowing a bounded number of
+	//     same-generation retries, so a reconciliation whose first barrier was
+	//     dropped while ProjectionUnknown was set gets a second chance after
+	//     the projection recovers. After terminalScrollbackResetMaxRetries
+	//     consecutive non-converging attempts the guard parks until a real
+	//     geometry/theme change.
 	lastResetFailed bool
+	// lastResetSuccessRetries counts consecutive non-converging same-generation
+	// success-mode resets, consumed from the retry budget. Reset to 0 on
+	// generation change (new LayoutGeneration) or on a writer-failure record.
+	lastResetSuccessRetries int
 }
 
 // NewTerminalSessionExecutor creates the bounded physical worker.
@@ -190,6 +233,7 @@ func (e *TerminalSessionExecutor) RecoveryDiag() ExecutorRecoveryDiag {
 		BackoffEngaged:             e.diagBackoffEngaged,
 		ArmedBackoff:               e.diagArmedBackoff,
 		FlushesWhileBackoff:        e.diagFlushedWhileBackoff,
+		HandoffsWhileBackoff:       e.diagHandoffWhileBackoff,
 		TotalRecoveries:            e.diagSeq,
 		GeneratedAtUnixMs:          time.Now().UnixMilli(),
 		GenerationAdvancesInWindow: executorDiagGenerationAdvances(entries),
@@ -240,6 +284,13 @@ func executorDiagDiagnosis(d ExecutorRecoveryDiag) string {
 	if d.ArmedBackoff > 0 && d.BackoffEngaged == 0 {
 		return "dead_guard"
 	}
+	// Backoff engaged AND content still flowing: the guard is live and the
+	// pending-commit handoff is delivering new messages (the fix for
+	// post-resume messages never rendering). This is a parked-but-progressing
+	// state, not a stall.
+	if d.BackoffEngaged > 0 && d.HandoffsWhileBackoff > 0 {
+		return "backoff_engaged_handing_off"
+	}
 	// Backoff has engaged at least once (or there is none armed). Look at the
 	// most recent iteration: if it is currently throttled the guard is live;
 	// otherwise the recovery either converged or is making genuine progress.
@@ -265,6 +316,9 @@ func (e *TerminalSessionExecutor) recordRecoveryDiag(entry ExecutorRecoveryDiagE
 	if entry.FlushedWhileBackoff {
 		e.diagFlushedWhileBackoff++
 	}
+	if entry.HandoffWhileBackoff {
+		e.diagHandoffWhileBackoff++
+	}
 	if len(e.diagRing) == diagRecoveryRingSize {
 		copy(e.diagRing, e.diagRing[1:])
 		e.diagRing[len(e.diagRing)-1] = entry
@@ -284,14 +338,19 @@ func (e *TerminalSessionExecutor) recordRecoveryDiag(entry ExecutorRecoveryDiagE
 //   - Writer failure (lastResetFailed=true): bounded rate-limit window. The
 //     physical writer may heal, so after the window expires the same
 //     generation may retry once.
-//   - Success without convergence (lastResetFailed=false): NO wall-clock
-//     window. A recovery cycle is dominated by WaitIdle draining the
-//     transcript replay (~238 actions/cycle in production, ~500ms), so a time
-//     window shorter than the cycle always expires before the next schedule
-//     read and the guard never engages (observed: 439 arms, 0 engages,
-//     executor pinned at ~2 cores). The generation discriminator alone is the
-//     correct progress signal; the guard persists until LayoutGeneration
-//     advances.
+//   - Success without convergence (lastResetFailed=false): bounded retry
+//     window (terminalScrollbackResetRetryWindow). A recovery cycle is
+//     dominated by WaitIdle draining the transcript replay (~238 actions/cycle
+//     in production, ~500ms), so the window must be comfortably ABOVE the
+//     cycle: a window shorter than the cycle always expires before the next
+//     schedule read and the guard never engages (observed with the original
+//     100ms window: 439 arms, 0 engages, executor pinned at ~2 cores). With a
+//     window above the cycle the guard rate-limits the reset+replay loop AND
+//     still expires, allowing a bounded retry (terminalScrollbackResetMaxRetries
+//     consecutive attempts) so a reconciliation whose first barrier was
+//     dropped while ProjectionUnknown was set can converge after the
+//     projection recovers. After the budget is exhausted the guard parks
+//     until a real geometry/theme change advances LayoutGeneration.
 func (e *TerminalSessionExecutor) scrollbackResetBackoff(stateGeneration uint64) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -301,7 +360,12 @@ func (e *TerminalSessionExecutor) scrollbackResetBackoff(stateGeneration uint64)
 	if e.lastResetFailed {
 		return time.Since(e.lastResetAt) < terminalScrollbackResetBackoff
 	}
-	return true
+	// Success mode: engage for the retry window, park permanently once the
+	// same-generation retry budget is exhausted.
+	if e.lastResetSuccessRetries >= terminalScrollbackResetMaxRetries {
+		return true
+	}
+	return time.Since(e.lastResetAt) < terminalScrollbackResetRetryWindow
 }
 
 // scrollbackResetSuccessMode reports whether the engaged backoff came from a
@@ -326,6 +390,16 @@ func (e *TerminalSessionExecutor) recordScrollbackReset(epoch, stateGeneration u
 	e.mu.Lock()
 	e.lastResetAt = time.Now()
 	e.lastResetEpoch = epoch
+	if e.lastResetGeneration != stateGeneration || failed {
+		// New generation (first attempt or a real geometry/theme change) or a
+		// writer-failure record: start a fresh retry budget. A failure does not
+		// consume the success-mode budget; the writer heals independently.
+		e.lastResetSuccessRetries = 0
+	} else {
+		// Another consecutive same-generation success-mode reset: consume one
+		// retry-budget slot. The backoff then parks once the budget is spent.
+		e.lastResetSuccessRetries++
+	}
 	e.lastResetGeneration = stateGeneration
 	e.lastResetFailed = failed
 	e.mu.Unlock()
@@ -545,10 +619,13 @@ func (e *TerminalSessionExecutor) runOne() bool {
 			//     but the recovery obligation will not converge at this layout
 			//     generation. A full scrollback reset would re-enter the
 			//     reset+replay loop (the observed ~2-core busy loop), so that
-			//     stays suppressed. But yielding without ANY flush would starve
-			//     the bottom surface — prompt input rendering depends on this
-			//     executor's flush, so after `resume` the user's keystrokes
-			//     would never reach the terminal (frozen input area). Perform a
+			//     stays suppressed. Suppressing the reset must NOT suppress the
+			//     handoff of new content: the active band commits new messages
+			//     as pending history tokens, and if the executor never claims
+			//     them the message never reaches the unified renderer's
+			//     scrollback (post-resume messages render nothing). Claim and
+			//     deliver pending tokens exactly like the normal path, just
+			//     without the reset+replay. When no token is pending, perform a
 			//     plain viewport transaction instead, which keeps prompt
 			//     rendering live while still suppressing the expensive
 			//     reset+replay. publishResult may also post
@@ -556,11 +633,71 @@ func (e *TerminalSessionExecutor) runOne() bool {
 			//     the projection known, which heals the obligation and exits
 			//     the guard naturally.
 			if e.scrollbackResetSuccessMode() {
+				if schedule.pendingToken != 0 {
+					// New content exists: deliver it now. The scrollback reset
+					// stays suppressed (it would re-enter the reset+replay
+					// loop), but a pending commit is genuine forward progress —
+					// the active band's stable prefix crossing into native
+					// scrollback. Without this, new messages after `resume`
+					// stall forever while the success-mode backoff persists at
+					// an unchanged layout generation.
+					if !e.controller.Post(BeginHistoryCommit{
+						Token: schedule.pendingToken, LayoutGeneration: schedule.pendingGeneration,
+					}) {
+						return false
+					}
+					e.controller.WaitIdle()
+					claimedToken := schedule.pendingToken
+					snapshot := e.controller.terminalSessionSnapshot(claimedToken)
+					if snapshot.claimed != nil {
+						plan := composeTerminalViewportTransactionPlan(snapshot.appState, snapshot.claimed, snapshot.bootstrap)
+						result := e.session.FlushTransaction(plan)
+						continued := e.publishResult(plan.Frame.LayoutGeneration, snapshot.claimed, result)
+						e.recordRecoveryDiag(ExecutorRecoveryDiagEntry{
+							Branch:              "scheduled",
+							Revision:            schedule.stateRevision,
+							RevisionAfter:       e.controller.Revision(),
+							Generation:          plan.Frame.LayoutGeneration,
+							TerminalEpoch:       result.TerminalEpoch,
+							ProjectionUnknown:   snapshot.projectionUnknown,
+							ReconciliationReq:   snapshot.reconciliationRequired,
+							BackoffEngaged:      true,
+							HandoffWhileBackoff: true,
+							FullRepaint:         result.Frame.FullRepaint,
+							ScrollbackReset:     result.ScrollbackReset,
+							FrameErr:            frameErrString(result.Frame.Err),
+							ObligationPending:   e.controller.terminalHistoryRecoveryObligationPending(),
+							Continued:           continued,
+						})
+						return continued
+					}
+					// The claim raced a reducer action (token rebased or
+					// invalidated). Fall through to the recovery-actionable
+					// re-check below instead of spinning on the stale token.
+				}
 				snapshot := e.controller.terminalSessionSnapshot(0)
 				if terminalSessionSnapshotRecoveryActionable(snapshot) {
 					plan := composeTerminalViewportTransactionPlan(snapshot.appState, nil)
+					// A known-projection viewport flush must not silently keep
+					// an outstanding scrollback reconciliation obligation alive
+					// forever. The non-backoff recovery path below switches to
+					// the scrollback reconciliation plan whenever
+					// ReconciliationRequired is set; the success-mode backoff
+					// flush branch must do the same, otherwise the obligation
+					// can only be cleared by reconcileScrollback (a fresh
+					// terminal epoch via HistoryScrollbackReconciled), which
+					// never runs here. Result: the unified renderer's
+					// scrollback freezes (only the bottom viewport keeps
+					// repainting) exactly like the reported post-resume stall
+					// (observed: reconciliationRequired=true,
+					// projectionUnknown=false, 256/256 diag entries
+					// flushedWhileBackoff with scrollbackResetsInWindow=0).
+					if snapshot.reconciliationRequired {
+						plan = composeTerminalViewportScrollbackReconciliationPlan(snapshot.appState)
+					}
 					result := e.session.FlushTransaction(plan)
 					e.publishResult(plan.Frame.LayoutGeneration, nil, result)
+					armed := e.armRecoveryBackoff(result, schedule.stateGeneration)
 					e.recordRecoveryDiag(ExecutorRecoveryDiagEntry{
 						Branch:              "scheduled",
 						Revision:            schedule.stateRevision,
@@ -575,6 +712,7 @@ func (e *TerminalSessionExecutor) runOne() bool {
 						ScrollbackReset:     result.ScrollbackReset,
 						FrameErr:            frameErrString(result.Frame.Err),
 						ObligationPending:   e.controller.terminalHistoryRecoveryObligationPending(),
+						ArmedBackoff:        armed,
 						Continued:           false,
 					})
 					return false

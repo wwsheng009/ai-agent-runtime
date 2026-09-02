@@ -24,6 +24,12 @@ type aicliActorChatExecutor struct{}
 
 const aicliActorReadyPollInterval = 20 * time.Millisecond
 
+// aicliActorReadyWaitTimeout bounds the wait-for-ready poll. Without a timeout
+// the prompt hangs forever with no LLM request and no user-visible feedback when
+// the actor carries a stale busy state left by a previous process (resume after
+// a crash/kill), e.g. Status=SessionRunning with a turn that will never finish.
+var aicliActorReadyWaitTimeout = 30 * time.Second
+
 // submitAICLIActorPrompt serializes an interactive user turn behind an
 // internally-triggered parent turn (for example a supervision auto-wake).
 // SessionActor still rejects concurrent control-plane submissions; only the
@@ -75,6 +81,8 @@ func waitForAICLIActorReady(ctx context.Context, actor *runtimechat.SessionActor
 	}
 	ticker := time.NewTicker(aicliActorReadyPollInterval)
 	defer ticker.Stop()
+	timeout := time.NewTimer(aicliActorReadyWaitTimeout)
+	defer timeout.Stop()
 	for {
 		if state, ok := actor.StateSummary(); !ok || !state.Busy() {
 			return nil
@@ -82,6 +90,15 @@ func waitForAICLIActorReady(ctx context.Context, actor *runtimechat.SessionActor
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-timeout.C:
+			state, _ := actor.StateSummary()
+			return fmt.Errorf(
+				"actor 等待就绪超时（%v）：status=%s turn=%s pending_tool=%v pending_approval=%v active_jobs=%d；"+
+					"resume 可能遗留了上一进程未结束的 turn，可 Ctrl+C 中断后重新 resume 或使用 /team 清理",
+				aicliActorReadyWaitTimeout,
+				state.Status, state.CurrentTurnID,
+				state.PendingToolName, state.PendingApproval, state.ActiveJobCount,
+			)
 		case <-ticker.C:
 		}
 	}

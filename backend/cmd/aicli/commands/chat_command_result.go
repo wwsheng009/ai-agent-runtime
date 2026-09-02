@@ -100,6 +100,12 @@ type CommandResult struct {
 	// mounted transcript would duplicate rows instead of giving the user a
 	// navigable history view.
 	OpenTranscript bool
+	// OpenDebugOverlay requests the lease-bound alternate-screen debug viewer
+	// for /debug display. It has no document payload: the debug snapshot is
+	// captured once after the command result crosses the dispatch boundary and
+	// rendered on its own screen (like /resume list and /history), never as a
+	// Scene command cell in the main message stream.
+	OpenDebugOverlay bool
 	// OpenResumePicker requests the typed alternate-screen session picker. It
 	// has no document payload: the picker borrows a ScreenLease, publishes its
 	// lease-bound state through the UI actor, and only its final result becomes
@@ -634,7 +640,8 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 
 // tryExecuteStructuredDebugCommand retains finite diagnostics, debug toggles,
 // and archive export as one semantic command transaction. None of these
-// variants owns a prompt, a background stream, or an alternate screen.
+// variants owns a prompt or a background stream; /debug display is the sole
+// alternate-screen variant and commits no Scene cell (see OpenDebugOverlay).
 func tryExecuteStructuredDebugCommand(session *ChatSession, command string) (CommandResult, bool) {
 	action, opts, err := parseChatDebugCommand(extractCommandArgument(command))
 	if err != nil {
@@ -664,9 +671,12 @@ func tryExecuteStructuredDebugCommand(session *ChatSession, command string) (Com
 		if session != nil && session.RuntimeEventBridge != nil {
 			session.RuntimeEventBridge.recordInteractionAnchor("debug")
 		}
+		// /debug display renders on a dedicated alternate screen (like /resume
+		// list and /history), never into the main message stream: no Scene cell
+		// is committed, and dispatch opens the lease-bound viewer instead.
 		return CommandResult{
-			Blocks: []RenderBlock{{Document: buildChatDebugDisplayDocument(session)}},
-			Action: CommandContinue,
+			Action:           CommandContinue,
+			OpenDebugOverlay: true,
 		}, true
 	case "export":
 		result, err := exportChatDebugArchive(session, opts)

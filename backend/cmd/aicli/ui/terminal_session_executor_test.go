@@ -600,6 +600,71 @@ func TestTerminalSessionExecutorFrameFailureReconcilesWithoutBlindHandoff(t *tes
 	}
 }
 
+func TestTerminalSessionExecutorSuccessBackoffReconcilesRequiredScrollback(t *testing.T) {
+	controller := newHistoryExecutorController(t, nil)
+	postHistoryEffectFixture(t, controller, 20)
+	controller.WaitIdle()
+
+	writer := &terminalSessionShortWriter{}
+	executor := NewTerminalSessionExecutor(controller, NewTerminalSession(writer))
+	t.Cleanup(executor.Close)
+
+	// Commit the whole fixture through the normal path so the projection is
+	// known, the ledger is clean and no token is pending.
+	executor.Request()
+	executor.WaitIdle()
+	controller.WaitIdle()
+
+	state := controller.State()
+	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.ReconciliationRequired || state.HistoryEffects.HasPending() {
+		t.Fatalf("fixture did not settle into a known reconciled projection: %#v", state.HistoryEffects)
+	}
+
+	// Reproduce the post-resume production stall: the recovery obligation is
+	// set (ReconciliationRequired=true) while the viewport projection is
+	// known, and the executor's scrollback-reset backoff is armed in success
+	// mode at the current (unchanged) layout generation.  In this state the
+	// executor enters the success-mode backoff flush branch with
+	// pendingToken=0 and must run the reconciliation plan to clear the
+	// obligation — a plain viewport-only flush would leave it stuck forever.
+	controller.mu.Lock()
+	controller.state.HistoryEffects.ReconciliationRequired = true
+	generation := controller.state.LayoutGeneration
+	controller.mu.Unlock()
+	executor.recordScrollbackReset(0, generation, false) // success-mode arm
+
+	writer.bytes.Reset() // only observe the backoff-cycle transaction
+
+	executor.Request()
+	executor.WaitIdle()
+	controller.WaitIdle()
+
+	if !bytes.Contains(writer.bytes.Bytes(), []byte("\x1b[3J")) {
+		t.Fatalf("success-mode backoff flush branch did not reconcile required scrollback (no reset): %q", writer.bytes.String())
+	}
+
+	// Drain the re-enqueued pending tokens that the reconciliation replan
+	// created, so the final assertion looks at the settled state.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		state = controller.State()
+		if !state.HistoryEffects.ProjectionUnknown && !state.HistoryEffects.ReconciliationRequired && !state.HistoryEffects.HasPending() {
+			break
+		}
+		executor.Request()
+		executor.WaitIdle()
+		controller.WaitIdle()
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out draining reconciliation replan: %#v", state.HistoryEffects)
+		}
+	}
+
+	state = controller.State()
+	if state.HistoryEffects.ReconciliationRequired {
+		t.Fatalf("scrollback reconciliation obligation survived the backoff cycle: %#v", state.HistoryEffects)
+	}
+}
+
 func TestTerminalSessionExecutorPartialHistoryWriteReconcilesWithoutResize(t *testing.T) {
 	var executor *TerminalSessionExecutor
 	controller := newHistoryExecutorController(t, func(effect Effect) {
@@ -789,10 +854,12 @@ func TestTerminalSessionExecutorWorkerTeardownReusesFreshDoneChannel(t *testing.
 }
 
 // TestTerminalSessionExecutorScrollbackResetBackoffIsGenerationBased locks in
-// the progress guard: a failing writer must not turn the executor into an
-// unbounded reset+replay loop, while a genuine layout change (new generation)
-// always allows the next recovery attempt. The predicate is exercised
-// directly so the test is deterministic and has no wall-clock races.
+// the dual-factor progress guard: a failing writer is rate-limited by a bounded
+// window, a successful-but-non-converging reset is rate-limited by a bounded
+// retry window (above the ~500ms cycle to guarantee engagement) and a retry
+// budget, and a genuine layout change (new generation) always allows the next
+// recovery attempt. The predicate is exercised directly so the test is
+// deterministic and has no wall-clock races.
 func TestTerminalSessionExecutorScrollbackResetBackoffIsGenerationBased(t *testing.T) {
 	controller := NewUIController(UIControllerConfig{}, nil, nil)
 	executor := NewTerminalSessionExecutor(controller, NewTerminalSession(&bytes.Buffer{}))
@@ -802,7 +869,7 @@ func TestTerminalSessionExecutorScrollbackResetBackoffIsGenerationBased(t *testi
 		t.Fatal("backoff engaged before any scrollback reset")
 	}
 
-	// A confirmed reset at generation 7 must block a same-generation retry.
+	// A confirmed reset at generation 7 must block a same-generation retry
 	// (Non-failed mode: success without convergence — persistent backoff.)
 	executor.recordScrollbackReset(3, 7, false)
 	if !executor.scrollbackResetBackoff(7) {
@@ -823,28 +890,59 @@ func TestTerminalSessionExecutorScrollbackResetBackoffIsGenerationBased(t *testi
 		t.Fatal("same-generation recovery was not rate-limited after the second reset")
 	}
 
-	// The backoff is deliberately NOT wall-clock gated: a recovery cycle is
-	// dominated by WaitIdle draining the transcript replay (~500ms in
-	// production), so a time window shorter than the cycle always expires
-	// before the next schedule read and the guard never engages (observed
-	// 439 arms / 0 engages with the executor pinned at ~2 cores). The same
-	// generation must therefore keep blocking retries regardless of elapsed
-	// time; only a real generation change (Resize / theme) may retry.
+	// The backoff is now also wall-clock gated, but the window is chosen
+	// ABOVE the recovery cycle (~500ms) so the guard still engages between
+	// retries. After the retry window expires at the same generation (and
+	// the retry budget is not exhausted), the executor is allowed one more
+	// same-generation reset attempt — this is the deadlock fix: a
+	// reconciliation whose first barrier was dropped while ProjectionUnknown
+	// was set can converge after the projection recovers.
+	executor.mu.Lock()
+	executor.lastResetAt = time.Now().Add(-time.Hour)
+	executor.mu.Unlock()
+	if executor.scrollbackResetBackoff(8) {
+		t.Fatal("same-generation retry was blocked after the retry window expired (budget not exhausted)")
+	}
+
+	// After a second success-mode record at the same generation the retry
+	// budget is consumed (retries=0 → 1). The window elapses, and the
+	// backoff releases again (budget still has room).
+	executor.recordScrollbackReset(6, 8, false)
+	executor.mu.Lock()
+	executor.lastResetAt = time.Now().Add(-time.Hour)
+	executor.mu.Unlock()
+	if executor.scrollbackResetBackoff(8) {
+		t.Fatal("same-generation retry blocked after second window expiry")
+	}
+
+	// After the budget is exhausted (>= terminalScrollbackResetMaxRetries),
+	// the guard parks permanently at the same generation until a real
+	// geometry/theme change.
+	executor.recordScrollbackReset(7, 8, false)  // retries = 2
+	executor.recordScrollbackReset(8, 8, false)  // retries = 3 ≥ maxRetries
+	if !executor.scrollbackResetBackoff(8) {
+		t.Fatal("same-generation retry was not parked after budget exhausted")
+	}
 	executor.mu.Lock()
 	executor.lastResetAt = time.Now().Add(-time.Hour)
 	executor.mu.Unlock()
 	if !executor.scrollbackResetBackoff(8) {
-		t.Fatal("long-elapsed same-generation retry was not still blocked by backoff")
+		t.Fatal("exhausted-budget same-generation retry was not still blocked after window expiry")
 	}
 
-	// Writer-failure mode: the backoff is a bounded rate-limit window so a
+	// A new generation always resets the budget and allows recovery.
+	if executor.scrollbackResetBackoff(9) {
+		t.Fatal("new-generation recovery was blocked by stale backoff")
+	}
+
+	// Writer-failure mode: unchanged — bounded rate-limit window so a
 	// transient writer error can heal and retry.
 	executor.recordScrollbackReset(5, 9, true)
 	if !executor.scrollbackResetBackoff(9) {
 		t.Fatal("failed-mode backoff did not rate-limit within window")
 	}
 	executor.mu.Lock()
-	executor.lastResetAt = time.Now().Add(-terminalScrollbackResetBackoff - time.Millisecond)
+	executor.lastResetAt = time.Now().Add(-terminalScrollbackResetBackoff - 50*time.Millisecond)
 	executor.mu.Unlock()
 	if executor.scrollbackResetBackoff(9) {
 		t.Fatal("failed-mode expired window still blocked a same-generation retry")
@@ -852,10 +950,100 @@ func TestTerminalSessionExecutorScrollbackResetBackoffIsGenerationBased(t *testi
 
 	// The epoch bookkeeping follows the reset that armed the guard.
 	executor.mu.Lock()
-	gotEpoch, gotGeneration, gotFailed := executor.lastResetEpoch, executor.lastResetGeneration, executor.lastResetFailed
+	gotEpoch, gotGeneration, gotFailed, gotRetries := executor.lastResetEpoch, executor.lastResetGeneration, executor.lastResetFailed, executor.lastResetSuccessRetries
 	executor.mu.Unlock()
-	if gotEpoch != 5 || gotGeneration != 9 || !gotFailed {
-		t.Fatalf("last reset bookkeeping = epoch %d generation %d failed %t, want 5 / 9 / true", gotEpoch, gotGeneration, gotFailed)
+	if gotEpoch != 5 || gotGeneration != 9 || !gotFailed || gotRetries != 0 {
+		t.Fatalf("last reset bookkeeping = epoch %d gen %d failed %t retries %d, want 5 / 9 / true / 0", gotEpoch, gotGeneration, gotFailed, gotRetries)
+	}
+}
+
+// TestTerminalSessionExecutorReconciliationRetryAfterDeadlock is the
+// regression test for the unified-renderer freeze. The deadlock condition:
+//   - ReconciliationRequired=true, ProjectionUnknown=false (projection
+//     recovered but the reconciliation barrier was dropped earlier)
+//   - Success-mode backoff armed at the same layout generation
+//   - Without the fix: no more scrollback resets at this generation ever,
+//     so ReconciliationRequired persists forever (epoch frozen, unified
+//     scrollback renderer stopped, only active band updates).
+//
+// The fix bounds the success-mode backoff with a retry window. After the
+// window expires the executor must retry the scrollback reconciliation reset,
+// and since ProjectionUnknown is now false the reducer accepts the fresh
+// HistoryScrollbackReconciled barrier, clearing ReconciliationRequired.
+func TestTerminalSessionExecutorReconciliationRetryAfterDeadlock(t *testing.T) {
+	controller := newHistoryExecutorController(t, nil)
+	writer := &terminalSessionShortWriter{}
+	executor := NewTerminalSessionExecutor(controller, NewTerminalSession(writer))
+	t.Cleanup(executor.Close)
+
+	postHistoryEffectFixture(t, controller, 2)
+	controller.WaitIdle()
+	executor.WaitIdle()
+	controller.WaitIdle()
+
+	startGen := controller.LayoutGeneration()
+
+	// Model the deadlock state: the projection is known (recovered via a
+	// later plain viewport flush) but the reconciliation barrier from the
+	// first reset was dropped while ProjectionUnknown was still set, so
+	// ReconciliationRequired still=true. The success-mode backoff is armed
+	// at the same generation (non-converging reset).
+	controller.mu.Lock()
+	controller.state.HistoryEffects.ProjectionUnknown = false
+	controller.state.HistoryEffects.ReconciliationRequired = true
+	controller.mu.Unlock()
+	executor.recordScrollbackReset(1, startGen, false)
+
+	// Verify the backoff is engaged (within the retry window).
+	if !executor.scrollbackResetBackoff(startGen) {
+		t.Fatal("backoff not engaged after a non-converging reset at the same generation")
+	}
+	if !executor.scrollbackResetSuccessMode() {
+		t.Fatal("backoff not in success mode")
+	}
+
+	// Expire the retry window: the fix allows a bounded retry at the same
+	// generation after the window elapses.
+	executor.mu.Lock()
+	executor.lastResetAt = time.Now().Add(-terminalScrollbackResetRetryWindow - time.Millisecond)
+	executor.mu.Unlock()
+	if executor.scrollbackResetBackoff(startGen) {
+		t.Fatal("backoff did not release after retry window expired (deadlock fix missing)")
+	}
+
+	// Second cycle: the executor sees recoveryActionable (ReconciliationRequired
+	// is still true) and the backoff is released, so it performs a full
+	// scrollback reconciliation reset. This time ProjectionUnknown is false,
+	// so the reducer accepts HistoryScrollbackReconciled → reconcileScrollback
+	// → ReconciliationRequired cleared.
+	executor.Request()
+	executor.WaitIdle()
+	controller.WaitIdle()
+
+	state := controller.State()
+	if state.HistoryEffects.ReconciliationRequired {
+		t.Fatal("second reconciliation reset did not converge: ReconciliationRequired still set")
+	}
+	if state.HistoryEffects.ProjectionUnknown {
+		t.Fatal("second reconciliation reset left ProjectionUnknown set")
+	}
+	if got := state.HistoryEffects.TerminalEpoch; got == 0 {
+		t.Fatalf("terminal epoch after retry = 0 (no fresh epoch barrier was accepted)")
+	}
+	// The executor must have actually performed the retry scrollback reset
+	// (not just a plain viewport flush): verify a reset landed after the
+	// backoff released, and the reconciled scrollback content was committed.
+	foundReset := false
+	for _, entry := range executor.RecoveryDiag().Entries {
+		if entry.ScrollbackReset {
+			foundReset = true
+		}
+	}
+	if !foundReset {
+		t.Fatal("retry cycle did not perform a scrollback reset (plain flush only)")
+	}
+	if !strings.Contains(writer.bytes.String(), "final") {
+		t.Fatalf("reconciled scrollback missing cell content: %q", writer.bytes.String())
 	}
 }
 
@@ -1112,6 +1300,138 @@ func TestTerminalSessionExecutorFlushesWhileSuccessBackoff(t *testing.T) {
 	}
 }
 
+// TestTerminalSessionExecutorHandsOffPendingHistoryWhileSuccessBackoff locks in
+// the post-resume multi-turn regression: ReconciliationRequired can remain set
+// at an unchanged layout generation while ProjectionUnknown is false. In that
+// state new finalized cells still produce eligible history tokens. The
+// success-mode reset backoff must suppress only reset+replay; if it also
+// suppresses those tokens, viewport/active-band frames continue to move while
+// every finalized turn is permanently absent from native scrollback.
+func TestTerminalSessionExecutorHandsOffPendingHistoryWhileSuccessBackoff(t *testing.T) {
+	controller := newHistoryExecutorController(t, nil)
+	writer := &terminalSessionShortWriter{}
+	executor := NewTerminalSessionExecutor(controller, NewTerminalSession(writer))
+	t.Cleanup(executor.Close)
+
+	postHistoryEffectFixture(t, controller, 1)
+	controller.WaitIdle()
+
+	// Model the settled state left by a successful-but-non-converging resume
+	// recovery: the viewport projection is known, but source-backed scrollback
+	// reconciliation remains required at this generation.
+	controller.mu.Lock()
+	controller.state.HistoryEffects.ProjectionUnknown = false
+	controller.state.HistoryEffects.ReconciliationRequired = true
+	controller.mu.Unlock()
+
+	schedule := controller.terminalSessionSchedule()
+	if !schedule.recoveryActionable || schedule.pendingToken == 0 {
+		t.Fatalf("test setup did not expose recovery plus pending history: %+v", schedule)
+	}
+	executor.recordScrollbackReset(1, schedule.stateGeneration, false)
+	if !executor.scrollbackResetBackoff(schedule.stateGeneration) {
+		t.Fatal("test setup did not engage success-mode backoff")
+	}
+
+	executor.Request()
+	executor.WaitIdle()
+	controller.WaitIdle()
+	drainSuccessBackoffExecutor(t, executor, controller)
+
+	state := controller.State()
+	if pending := state.HistoryEffects.Pending(); len(pending) != 0 {
+		t.Fatalf("success-mode backoff starved pending history: %+v", pending)
+	}
+	if !strings.Contains(writer.bytes.String(), "final") {
+		t.Fatalf("pending history never reached the terminal: %q", writer.bytes.String())
+	}
+
+	// Keep the same generation/backoff engaged and append another finalized
+	// turn. This is the user-visible failure mode: the first recovered frame
+	// can look healthy, then later turns update only the active band unless
+	// each newly eligible token is allowed through the parked recovery guard.
+	if !controller.Post(ReplaceTranscriptAction{Snapshot: &scene.Snapshot{
+		Revision: 2,
+		Cells: []*scene.TranscriptCell{
+			{ID: 1, Revision: 1, Kind: scene.KindAssistant, Source: "final", Phase: scene.CellCommitted},
+			{ID: 2, Revision: 1, Kind: scene.KindAssistant, Source: "second-final", Phase: scene.CellCommitted},
+		},
+	}}) {
+		t.Fatal("post second finalized turn")
+	}
+	controller.WaitIdle()
+	secondSchedule := controller.terminalSessionSchedule()
+	// The reconciliation replan cleared the obligation (ReconciliationRequired
+	// went false) and the second cell appends after the acked prefix, so
+	// transcriptReplacementInvalidatesAckedHistory does not re-raise it. The
+	// second turn must still enqueue an eligible pending token that the
+	// executor hands off through the normal incremental-commit path — the
+	// success-mode backoff must not suppress it.
+	if secondSchedule.recoveryActionable || secondSchedule.pendingToken == 0 {
+		t.Fatalf("second turn did not expose pending history after reconciliation: %+v", secondSchedule)
+	}
+	if secondSchedule.stateGeneration != schedule.stateGeneration {
+		t.Fatalf("second turn unexpectedly changed layout generation: %d -> %d",
+			schedule.stateGeneration, secondSchedule.stateGeneration)
+	}
+	executor.Request()
+	executor.WaitIdle()
+	controller.WaitIdle()
+	drainSuccessBackoffExecutor(t, executor, controller)
+	if pending := controller.State().HistoryEffects.Pending(); len(pending) != 0 {
+		t.Fatalf("persistent success-mode backoff starved the second turn: %+v", pending)
+	}
+	if !strings.Contains(writer.bytes.String(), "second-final") {
+		t.Fatalf("second finalized turn never reached the terminal: %q", writer.bytes.String())
+	}
+
+	diag := executor.RecoveryDiag()
+	if diag.HandoffsWhileBackoff < 1 {
+		t.Fatalf("backoff handoff was not recorded: %+v", diag)
+	}
+	// The second turn's projection was invalidated by the transcript change,
+	// so its claim fails while ProjectionUnknown is set and the executor must
+	// run the scrollback reconciliation plan under the engaged backoff instead
+	// of a viewport-only flush (which would keep the obligation forever).
+	if diag.ScrollbackResetsInWindow < 1 {
+		t.Fatalf("reconciliation under success-mode backoff was not recorded: %+v", diag)
+	}
+	found := false
+	for _, entry := range diag.Entries {
+		if entry.BackoffEngaged && entry.HandoffWhileBackoff {
+			found = true
+			if entry.ScrollbackReset {
+				t.Fatal("pending handoff unexpectedly performed a scrollback reset")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("missing handoff-under-backoff diagnostic entry: %+v", diag.Entries)
+	}
+}
+
+// drainSuccessBackoffExecutor keeps requesting the executor until the history
+// ledger settles. Under success-mode backoff the executor may hand off pending
+// tokens AND run a scrollback reconciliation (which replans the transcript
+// under a fresh terminal epoch), so one Request is not enough to reach a
+// quiescent state.
+func drainSuccessBackoffExecutor(t *testing.T, executor *TerminalSessionExecutor, controller *UIController) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		state := controller.State()
+		if !state.HistoryEffects.HasPending() && !terminalHistoryRecoveryActionable(state) {
+			return
+		}
+		executor.Request()
+		executor.WaitIdle()
+		controller.WaitIdle()
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out draining executor: %#v", state.HistoryEffects)
+		}
+	}
+}
+
 // TestExecutorDiagDiagnosisIdle verifies that a fresh diag reports "idle".
 func TestExecutorDiagDiagnosisIdle(t *testing.T) {
 	d := ExecutorRecoveryDiag{}
@@ -1150,6 +1470,21 @@ func TestExecutorDiagDiagnosisBackoffEngaged(t *testing.T) {
 	}
 	if got := executorDiagDiagnosis(d); got != "backoff_engaged" {
 		t.Fatalf("backoff-engaged signature: diagnosis=%q, want backoff_engaged", got)
+	}
+}
+
+func TestExecutorDiagDiagnosisBackoffEngagedHandingOff(t *testing.T) {
+	d := ExecutorRecoveryDiag{
+		TotalRecoveries:      5,
+		ArmedBackoff:         5,
+		BackoffEngaged:       3,
+		HandoffsWhileBackoff: 2,
+		Entries: []ExecutorRecoveryDiagEntry{
+			{Seq: 5, BackoffEngaged: true, HandoffWhileBackoff: true, Generation: 1},
+		},
+	}
+	if got := executorDiagDiagnosis(d); got != "backoff_engaged_handing_off" {
+		t.Fatalf("handoff-under-backoff signature: diagnosis=%q, want backoff_engaged_handing_off", got)
 	}
 }
 

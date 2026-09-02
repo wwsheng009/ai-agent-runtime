@@ -1080,14 +1080,24 @@ func buildChatSessionIDLine(session *ChatSession) string {
 // buildChatFlagStatusLine returns the --pprof / --debug flag status segment.
 // Always non-empty (shows on/off for each flag) so the second status row
 // remains visible as a persistent diagnostic indicator.
+// When both --pprof and --debug are active, shows the actual pprof endpoint
+// URLs instead of the flag status text, since the user can see the flags are
+// on from the endpoint being available.
 func buildChatFlagStatusLine() string {
+	pprofURL := chatDebugPprofEndpointURL()
 	pprof := "off"
-	if chatDebugPprofEndpointURL() != "" {
+	if pprofURL != "" {
 		pprof = "on"
 	}
 	debug := "off"
 	if chatDebugFlagEnabled() {
 		debug = "on"
+	}
+	// 当 --pprof 和 --debug 同时启用时，显示实际的端点地址代替 on/off 状态。
+	// endpoints 使用完整 URL（含随机端口），web 使用同主机同端口的 /web/ 路径，
+	// 两者均可直接访问（微 Web 客户端页面 + 调试端点清单）。
+	if pprofURL != "" && chatDebugFlagEnabled() {
+		return "endpoints: " + chatDebugPprofEndpointsURL() + "  web: " + chatDebugPprofWebURL()
 	}
 	return "--pprof " + pprof + "  --debug " + debug
 }
@@ -3242,7 +3252,9 @@ func (c *chatInteractionCoordinator) RenderReasoningDelta(block *runtimetypes.Re
 	defer func() {
 		c.mu.Unlock()
 		if activeShadowAction != nil {
-			_ = c.postCausalUIAction(activeShadowAction)
+			if !c.postCausalUIAction(activeShadowAction) {
+				writeSessionDebugInfo(c.session, "[band] RenderReasoningDelta shadow action dropped", false)
+			}
 		}
 	}()
 	if !c.reasoningActive {
@@ -3290,6 +3302,12 @@ func (c *chatInteractionCoordinator) RenderReasoningDelta(block *runtimetypes.Re
 		// coordinator must not retain a second copy of provider body bytes or
 		// derive a divider, Markdown mode, or terminal output from them.
 		activeShadowAction = c.unifiedSceneActiveCellActionLocked()
+		if activeShadowAction == nil {
+			// Same mount gap as RenderAssistantDelta: when invoked outside the
+			// UI actor reducer (compatibility core loop), the reducer-side
+			// ReplaceTranscript mount never runs, so mount here.
+			activeShadowAction = c.unifiedSceneMountActionLocked()
+		}
 		return
 	}
 	if c.shouldLiveStreamOutputLocked() {
@@ -3328,7 +3346,9 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 			// helper falls back to the normal durable mailbox post.
 			// This is a shadow AppState update only; legacy ActiveBand painting
 			// above remains unchanged.
-			_ = c.postCausalUIAction(activeShadowAction)
+			if !c.postCausalUIAction(activeShadowAction) {
+				writeSessionDebugInfo(c.session, "[band] RenderAssistantDelta shadow action dropped", false)
+			}
 		}
 	}()
 	if !c.streamingActive {
@@ -3368,6 +3388,15 @@ func (c *chatInteractionCoordinator) RenderAssistantDelta(delta string) {
 		// projection or legacy ActiveBand frame: the Scene snapshot and the
 		// fenced AppState update below are the only visual source.
 		activeShadowAction = c.unifiedSceneActiveCellActionLocked()
+		if activeShadowAction == nil {
+			// The Scene carries a mutable active cell that AppState has not
+			// mounted yet. The reducer-side mount (applyRuntimeEventActionWithContext)
+			// only runs when the RuntimeEvent is delivered through the UI actor
+			// mailbox; RenderAssistantDelta is also invoked from the
+			// compatibility core loop, where that sibling never executes.
+			// Falling back here keeps the unified band populated on every path.
+			activeShadowAction = c.unifiedSceneMountActionLocked()
+		}
 		return
 	}
 	if c.streamMode != assistantStreamModeMarkdown {

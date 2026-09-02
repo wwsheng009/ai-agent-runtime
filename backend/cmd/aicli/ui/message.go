@@ -298,7 +298,12 @@ func IndentAssistantContent(content string) string {
 }
 
 func DisplayWidth(text string) int {
-	return messageDisplayWidth(text)
+	// Delegate to the grapheme-cluster-aware width so emoji presentation
+	// sequences (e.g. U+2139+U+FE0F "ℹ️", rendered as 2 terminal columns) are
+	// measured exactly as the terminal renders them. The legacy rune-by-rune
+	// counter (messageDisplayWidth) undercounts such glyphs by one column,
+	// which pushed padded full-screen rows one column past the right edge.
+	return render.Width(text)
 }
 
 // SanitizeTerminalText removes terminal control sequences and unsafe bidi

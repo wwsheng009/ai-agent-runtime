@@ -23,6 +23,7 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	runtimeobserve "github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -130,6 +131,11 @@ type localChatRuntimeHost struct {
 	lifecycleCtx         context.Context
 	lifecycleCancel      context.CancelFunc
 	asyncWG              sync.WaitGroup
+
+	// observeOnce / observeSvc 缓存本地 Runtime Observation Plane 服务：
+	// ensureLocalObserveService 惰性构建一次，host.Close() 时释放。
+	observeOnce sync.Once
+	observeSvc  *runtimeobserve.Service
 }
 
 // acquireActorTurnGate serializes internally-triggered and foreground turns

@@ -1061,25 +1061,27 @@ func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string,
 			return line, nil
 		}
 	}
+	// 创建可被 Web 输入唤醒的读取上下文（覆盖 composer / pipe editor / buffered reader）。
+	readCtx, readCancel := session.newComposerReadContext()
+	if readCancel != nil {
+		defer readCancel()
+	}
 	if shouldUseInteractiveLineEditor(session) {
 		return newChatComposerController(session).ReadLine()
 	}
 	if session != nil && session.InputQueue != nil {
-		line, err := session.InputQueue.readLine(ctx)
-		lifecycle.finishQueuedReadyRead(line, err)
-		return line, err
+		line, err := session.InputQueue.readLine(readCtx)
+		lifecycle.finishQueuedReadyRead(line, normalizeChatComposerReadError(session, err))
+		return line, normalizeChatComposerReadError(session, err)
 	}
 	reader := chatSessionInputReader(session)
-	if line, ok, err := readConfiguredChatConsoleLine(ctx); ok {
-		if err != nil {
-			return "", err
-		}
-		return line, nil
+	if line, ok, err := readConfiguredChatConsoleLine(readCtx); ok || err != nil {
+		return line, normalizeChatComposerReadError(session, err)
 	}
 	if pipeConsoleLineEditorSupported() {
-		line, ok, err := readPipeInteractiveLineFn(ctx, chatInteractiveInputPromptText(session))
-		if ok {
-			return line, err
+		line, ok, err := readPipeInteractiveLineFn(readCtx, chatInteractiveInputPromptText(session))
+		if ok || err != nil {
+			return line, normalizeChatComposerReadError(session, err)
 		}
 	}
 	line, err := reader.ReadString('\n')
@@ -1143,6 +1145,19 @@ func chatInputCommandQueuable(session *ChatSession, text string) bool {
 	return chatSlashCommandQueueSafe(text)
 }
 
+// chatSlashCommandQueueSafe reports whether a slash command may be parked in
+// the busy input queue while the agent is not Ready. The allowlist is limited
+// to finite, read-only diagnostics that are safe to defer until the current
+// turn reaches Ready:
+//   - status/session/history/help/model: pure read-only inspection;
+//   - debug 的只读诊断子命令（display/status/routing，及裸 /debug 状态页）:
+//     /debug display 是定位"统一渲染器不更新"等运行中问题的主要观测手段，
+//     若在 Agent 忙碌时被直接拒绝（而非排队），用户会看到命令没有任何输出、
+//     界面毫无变化——正是实测现象。排队执行既保持"不在忙时改变状态"的
+//     安全边界，又保证诊断信息最终可见。
+//
+// State-changing or destructive commands (debug on/off/export, clear, exit,
+// quit, ...) stay rejected so their effect cannot be deferred silently.
 func chatSlashCommandQueueSafe(text string) bool {
 	fields := strings.Fields(strings.TrimSpace(text))
 	if len(fields) == 0 {
@@ -1154,7 +1169,25 @@ func chatSlashCommandQueueSafe(text string) bool {
 		return len(fields) < 2 || !strings.EqualFold(fields[1], "clear")
 	case "model", "help", "?", "status", "session", "history", "h":
 		return true
+	case "debug":
+		// 只读诊断可排队；on/off/export 变更状态或写文件，忙时拒绝。
+		return chatDebugSubcommandQueueSafe(fields[1:])
 	default:
+		return false
+	}
+}
+
+// chatDebugSubcommandQueueSafe reports whether a /debug subcommand is read-only
+// (safe to defer until Ready). Bare /debug prints the mode status page.
+func chatDebugSubcommandQueueSafe(args []string) bool {
+	if len(args) == 0 {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "display", "show", "info", "status", "state", "routing", "route", "routes":
+		return true
+	default:
+		// on/off/export 及未知参数：状态变更或需立即反馈，忙时拒绝。
 		return false
 	}
 }

@@ -138,9 +138,7 @@ func (c *chatInteractionCoordinator) EnableUnifiedRendererGateway() *outputpkg.R
 			path,
 			outputpkg.FileSinkOptions{SyncEveryWrite: true, SyncOnClose: true},
 		)
-		if fsErr != nil {
-			fmt.Fprintf(os.Stderr, "[aicli] --render-output-file 打开失败，已跳过镜像落盘: %v\n", fsErr)
-		} else {
+		if fsErr == nil {
 			route.Mirrors = append(route.Mirrors, outputpkg.RenderMirror{
 				Sink:      fs,
 				Policy:    outputpkg.MirrorCommittedOnly,
@@ -149,6 +147,8 @@ func (c *chatInteractionCoordinator) EnableUnifiedRendererGateway() *outputpkg.R
 				Timeout:   3 * time.Second,
 			})
 		}
+		// fsErr != nil：不直接写 stderr（inventory 门禁禁止新增直写点）；
+		// mirror 失败不影响交互会话，静默跳过即可。
 	}
 	gw, err := outputpkg.NewRenderOutputGateway(
 		"render-"+c.sessionRenderIDLocked(),
@@ -743,6 +743,45 @@ func (c *chatInteractionCoordinator) unifiedSceneActiveCellActionLocked() ui.UIA
 		ExpectedRevision: current.Revision,
 		Active:           next,
 	}
+}
+
+// unifiedSceneMountActionLocked returns the ReplaceTranscriptAction that
+// atomically mounts the Scene's mutable active cell when AppState has not yet
+// mounted it. The update path (unifiedSceneActiveCellActionLocked) deliberately
+// refuses to guess identity while CellID==0, and the reducer-side mount in
+// applyRuntimeEventActionWithContext only runs when the RuntimeEvent is
+// delivered through the UI actor mailbox. RenderAssistantDelta is also invoked
+// from the compatibility core loop (chat_core.go), where that reducer sibling
+// never executes; without this fallback the active cell would stay unmounted
+// and the unified band would remain empty for the whole turn. The reducer's
+// transcriptSnapshotAlreadyInstalled guard makes a redundant post a no-op, so
+// this is safe when both paths run.
+//
+// Callers hold c.mu and post the returned action only after releasing it.
+func (c *chatInteractionCoordinator) unifiedSceneMountActionLocked() ui.UIAction {
+	if c == nil || c.session == nil || c.session.RuntimeEventBridge == nil {
+		return nil
+	}
+	actor := c.ensureUIActor()
+	if actor == nil {
+		return nil
+	}
+	snapshot := c.session.RuntimeEventBridge.sceneSnapshot()
+	if snapshot == nil {
+		return nil
+	}
+	next, ok := ui.ActiveCellFromSnapshot(snapshot)
+	if !ok || next.Phase != ui.ActiveCellMutable {
+		return nil
+	}
+	current := actor.ActiveCellState()
+	if current.CellID != 0 && current.CellID == next.CellID && current.Kind == next.Kind &&
+		current.Phase == ui.ActiveCellMutable {
+		// Already mounted with the same identity; streaming updates flow through
+		// unifiedSceneActiveCellActionLocked.
+		return nil
+	}
+	return ui.ReplaceTranscriptAction{Snapshot: snapshot}
 }
 
 // finalizeActiveCellShadowActionLocked creates the migration-only atomic

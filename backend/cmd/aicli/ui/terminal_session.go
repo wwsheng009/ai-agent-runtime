@@ -454,6 +454,23 @@ func (s *TerminalSession) RenderOutputSnapshot() *outputpkg.RenderOutputSnapshot
 	return &snap
 }
 
+// RecentDeliveries 返回最近 limit 个封存 DeliveryRecord（detached），供
+// /debug Render Output 节展示最近 N 笔交付摘要。s 未接 gateway 时返回 nil。
+func (s *TerminalSession) RecentDeliveries(limit int) []outputpkg.DeliveryRecord {
+	if s == nil {
+		return nil
+	}
+	port := s.output
+	if port == nil {
+		return nil
+	}
+	gw, ok := port.(*outputpkg.RenderOutputGateway)
+	if !ok {
+		return nil
+	}
+	return gw.RecentDeliveries(limit)
+}
+
 // InvalidateProjection requests a recovery full repaint from the next frame
 // plan. It never reads content back from the terminal or the front buffer.
 func (s *TerminalSession) InvalidateProjection() {

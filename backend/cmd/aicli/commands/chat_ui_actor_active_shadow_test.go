@@ -2,6 +2,7 @@ package commands
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 	"time"
 
@@ -385,5 +386,53 @@ func TestRuntimeDeltaSnapshotDoesNotEraseShadowStreamingLedger(t *testing.T) {
 	}
 	if state.Active.Stable.End != len("hello world") {
 		t.Fatalf("runtime snapshot erased shadow stable range: %+v", state.Active)
+	}
+}
+func TestRenderAssistantDeltaUnifiedMountsNewCell(t *testing.T) {
+	const width, height = 100, 22
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	session := &ChatSession{Stream: true}
+	coordinator := newChatInteractionCoordinator(session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(width, height)
+	surface.SetPhysicalWritesEnabled(false)
+	coordinator.SetSurface(surface)
+
+	var output bytes.Buffer
+	if !coordinator.enableUnifiedRendererWithWriter(&output) {
+		t.Fatal("unified renderer did not attach")
+	}
+
+	// Encode one assistant delta into the Scene so a mutable active cell exists.
+	bridge.encodeRenderModelEvent(runtimeevents.Event{
+		Type:    runtimechat.EventAssistantDelta,
+		Payload: map[string]interface{}{"delta": "partial"},
+	})
+	if snapshot := bridge.sceneSnapshot(); snapshot == nil || len(snapshot.Cells) != 1 {
+		t.Fatalf("mutable Scene snapshot = %#v", snapshot)
+	}
+
+	// Call RenderAssistantDelta directly from the test goroutine, simulating
+	// the compatibility core-loop path where the reducer-side mount in
+	// applyRuntimeEventActionWithContext never runs. The mount must occur via
+	// unifiedSceneMountActionLocked so the unified band is populated.
+	coordinator.RenderAssistantDelta("partial")
+	coordinator.waitUIActorIdle()
+
+	active := coordinator.uiActor.AppState().Active
+	if active.CellID == 0 || active.Phase != ui.ActiveCellMutable {
+		t.Fatalf("unified band active cell was not mounted: CellID=%d Phase=%d Kind=%v Source=%q",
+			active.CellID, active.Phase, active.Kind, active.Source)
+	}
+	if !strings.Contains(active.Source, "partial") {
+		t.Fatalf("active cell source does not contain delta content: %q", active.Source)
 	}
 }

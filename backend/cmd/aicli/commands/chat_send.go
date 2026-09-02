@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
+	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // sendMessage 发送消息
@@ -45,6 +47,10 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 	defer stopBusyInputCapture()
 	ensureChatSystemPromptMessage(session)
 	beginChatUserTurn(session, userMessage)
+	// 用户输入 prompt 时立即持久化该 turn 的用户消息，确保退出时不丢失最后 turn。
+	if strings.TrimSpace(userMessage) != "" {
+		appendChatTurnUserMessage(session, userMessage)
+	}
 	executor, err := ensureChatExecutor(session)
 	if err != nil {
 		logChatTurnFailureIfUnrecorded(session, userMessage, err)
@@ -241,4 +247,36 @@ func beginChatUserTurn(session *ChatSession, userMessage string) {
 	if session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
 	}
+}
+
+// appendChatTurnUserMessage 在用户输入 prompt 时立即把该 turn 的用户消息追加到
+// session.Messages 并同步到会话存储，保证退出时不丢失最后 turn 的会话信息。
+// 与 actor 内部 shouldAppendUserPromptMessage 的去重语义一致：若最后一条消息
+// 已是内容相同的用户消息（如 executor 已追加过），则跳过，避免重复。
+func appendChatTurnUserMessage(session *ChatSession, userMessage string) {
+	if session == nil || strings.TrimSpace(userMessage) == "" {
+		return
+	}
+	var prepared *runtimetypes.Message
+	if len(session.ImagePaths) > 0 {
+		withImages, err := runtimellm.NewUserPromptMessageWithImages(userMessage, session.ImagePaths)
+		if err != nil {
+			withImages = runtimellm.NewUserPromptMessage(userMessage)
+		}
+		prepared = withImages
+	} else {
+		prepared = runtimellm.NewUserPromptMessage(userMessage)
+	}
+	if prepared == nil {
+		return
+	}
+	if count := len(session.Messages); count > 0 {
+		last := &session.Messages[count-1]
+		if last.Role == "user" && last.Content == prepared.Content &&
+			!runtimellm.MessageHasLocalInputImages(prepared) == !runtimellm.MessageHasLocalInputImages(last) {
+			return
+		}
+	}
+	appendRuntimeMessage(session, *prepared)
+	warnIfChatSessionSyncFails(session, "send-prompt persist", syncRuntimeSessionFromChat(session))
 }

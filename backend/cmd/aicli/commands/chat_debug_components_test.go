@@ -29,16 +29,11 @@ func TestChatDebugDisplayShowsObserveEntrypointsAndComponents(t *testing.T) {
 	})
 
 	for _, expected := range []string{
-		"调试入口与组件:",
-		"Observe API:",
-		"已启用",
-		"route=/api/runtime/observe/v1",
-		"GET /api/runtime/observe/v1/capabilities",
-		"GET /api/runtime/observe/v1/snapshot",
-		"GET /api/runtime/observe/v1/sessions/{session_id}",
-		"GET /api/runtime/observe/v1/events",
-		"[enabled]",
-		"组件:",
+		"运行时组件:",
+		"Runtime Core:",
+		"Observe Service:",
+		"ready",
+		"Observe Collector:",
 		"Observe Redactor:",
 		"key_ref=runtime-observe-fingerprint-v1",
 	} {
@@ -67,8 +62,8 @@ func TestChatDebugDisplayObserveDisabled(t *testing.T) {
 	})
 
 	for _, expected := range []string{
-		"调试入口与组件:",
-		"Observe API:",
+		"运行时组件:",
+		"Observe Service:",
 		"未启用",
 		"[disabled]",
 	} {
@@ -107,8 +102,9 @@ func TestChatDebugDisplayShowsObserveActualBaseURL(t *testing.T) {
 	})
 
 	for _, expected := range []string{
-		"Observe API:",
-		"已启用",
+		"HTTP 调试端点:",
+		"runtime-observe  (Runtime Observation Plane)",
+		"Base:",
 		"http://127.0.0.1:8101/api/runtime/observe/v1",
 		"GET http://127.0.0.1:8101/api/runtime/observe/v1/capabilities",
 		"GET http://127.0.0.1:8101/api/runtime/observe/v1/snapshot",
@@ -137,13 +133,13 @@ func TestChatDebugDisplayWithoutRuntimeHost(t *testing.T) {
 		}
 	})
 
-	if !strings.Contains(output, "调试入口与组件:") {
-		t.Fatalf("expected 调试入口与组件 heading in /debug display, got:\n%s", output)
+	if !strings.Contains(output, "运行时组件:") {
+		t.Fatalf("expected 运行时组件 heading in /debug display, got:\n%s", output)
 	}
-	if !strings.Contains(output, "Observe API:") {
-		t.Fatalf("expected Observe API label in /debug display, got:\n%s", output)
+	if !strings.Contains(output, "Runtime Core:") {
+		t.Fatalf("expected Runtime Core label in /debug display, got:\n%s", output)
 	}
-	if !strings.Contains(output, "<未配置>") {
-		t.Fatalf("expected <未配置> observe status without runtime host, got:\n%s", output)
+	if !strings.Contains(output, "<none>") {
+		t.Fatalf("expected <none> without runtime host, got:\n%s", output)
 	}
 }

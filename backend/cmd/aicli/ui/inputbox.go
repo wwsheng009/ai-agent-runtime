@@ -153,6 +153,13 @@ func (ib *InputBox) ReadWithHistoryPromptWithHooks(prompt string, hooks LineEdit
 	return ib.readPromptWithHooks(prompt, hooks, true, true, true, defaultPasteBurstHoldFirstRune())
 }
 
+// ReadWithHistoryPromptWithHooksContext reads a line with history and editor
+// hooks, and returns early when ctx is cancelled. The session uses this to
+// wake a blocked composer when external input (e.g. the /web/ client) arrives.
+func (ib *InputBox) ReadWithHistoryPromptWithHooksContext(ctx context.Context, prompt string, hooks LineEditorHooks) (string, error) {
+	return ib.readPromptWithHooksContext(ctx, prompt, hooks, true, true, true, defaultPasteBurstHoldFirstRune())
+}
+
 // ReadTransientPromptWithHooks reads a transient prompt with editor hooks.
 func (ib *InputBox) ReadTransientPromptWithHooks(prompt string, hooks LineEditorHooks) (string, error) {
 	return ib.readPromptWithHooks(prompt, hooks, false, false, true, false)

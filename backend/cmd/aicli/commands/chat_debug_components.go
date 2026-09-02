@@ -7,97 +7,11 @@ import (
 	runtimeobserve "github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
 )
 
-// appendChatDebugEntrypointAndComponentLines 在 /debug display 中追加
-// "调试入口与组件:" 区块：列出 Runtime Observation Plane 的调试 HTTP 入口，
-// 以及当前 CLI 内置运行时宿主（localChatRuntimeHost）的相关组件与就绪状态。
-// 该区块为只读快照：只读取 session/host 上的配置与存在性，不做任何变更。
-func appendChatDebugEntrypointAndComponentLines(builder *chatDebugDocumentBuilder, session *ChatSession) {
-	if builder == nil {
-		return
-	}
-	builder.heading("调试入口与组件:")
-	appendChatDebugEntrypointLines(builder, session)
-	appendChatDebugComponentLines(builder, session)
-}
-
-// appendChatDebugEntrypointLines 输出"调试入口:"子区块：观察平面的版本化
-// HTTP 入口（由 runtime-server 提供，enabled 与否由 RuntimeConfig.Observe
-// 决定）。
-func appendChatDebugEntrypointLines(builder *chatDebugDocumentBuilder, session *ChatSession) {
-	builder.plain("  调试入口:")
-	observe, ok := chatSessionObserveConfig(session)
-	if !ok {
-		builder.meta("Observe API:", "<未配置>")
-		return
-	}
-	prefix := strings.TrimSpace(observe.RoutePrefix)
-	if prefix == "" {
-		prefix = runtimeobserve.DefaultConfig().RoutePrefix
-	}
-	status := "未启用"
-	flag := "[disabled]"
-	if observe.Enabled {
-		status = "已启用"
-		flag = "[enabled]"
-	}
-	// 实际访问地址：仅当当前会话已连接 runtime-server（HTTP 传输）时才能给出
-	// 完整 URL；本地 in-process 模式没有对外 HTTP 平面，回退到 route= 前缀。
-	base := chatObserveBaseURL(session)
-	if base != "" {
-		builder.meta("Observe API:", fmt.Sprintf("%s  %s%s", status, base, prefix))
-	} else {
-		builder.meta("Observe API:", fmt.Sprintf("%s  route=%s", status, prefix))
-	}
-	endpoints := []string{
-		prefix + "/capabilities",
-		prefix + "/snapshot",
-		prefix + "/sessions/{session_id}",
-		prefix + "/events",
-	}
-	for _, endpoint := range endpoints {
-		if base != "" {
-			builder.plain("  GET " + base + endpoint + "  " + flag)
-		} else {
-			builder.plain("  GET " + endpoint + "  " + flag)
-		}
-	}
-	if prefix != runtimeobserve.DefaultConfig().RoutePrefix {
-		builder.plain("  (默认前缀: " + runtimeobserve.DefaultConfig().RoutePrefix + ")")
-	}
-}
-
-// chatObserveBaseURL 返回观察平面实际可访问的基础地址（含 scheme 与 host，
-// 末尾不带 /）。仅当当前会话的 executor 是已连接的 runtime-server 客户端且
-// 地址为合法 http(s) URL 时才返回非空；本地 in-process 模式无对外 HTTP 平面，
-// 返回空串（调用方回退展示 route= 前缀）。
-func chatObserveBaseURL(session *ChatSession) string {
-	if session == nil {
-		return ""
-	}
-	provider, ok := session.ChatExecutor.(runtimeServerURLProvider)
-	if !ok {
-		return ""
-	}
-	base := strings.TrimRight(strings.TrimSpace(provider.RuntimeServerURL()), "/")
-	if !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
-		return ""
-	}
-	return base
-}
-
-// chatSessionObserveConfig 返回当前会话运行时宿主的观察平面配置；宿主或运行时
-// 配置尚未建立时返回 ok=false。
-func chatSessionObserveConfig(session *ChatSession) (runtimeobserve.Config, bool) {
-	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.RuntimeConfig == nil {
-		return runtimeobserve.Config{}, false
-	}
-	return session.LocalRuntimeHost.RuntimeConfig.Observe, true
-}
-
 // appendChatDebugComponentLines 输出"组件:"子区块：运行时宿主核心组件（存在性
-// 与就绪状态）以及观察平面组件（配置态）。
+// 与就绪状态）以及观察平面组件（配置态）。HTTP 端点的完整清单（loopback +
+// runtime-observe）统一在"HTTP 调试端点:"区块中列出，此处只显示组件状态。
 func appendChatDebugComponentLines(builder *chatDebugDocumentBuilder, session *ChatSession) {
-	builder.plain("  组件:")
+	builder.heading("运行时组件: (GET /debug/chat/status#components)")
 	host := localChatRuntimeHostOf(session)
 	if descriptor, ok := chatRuntimeExecutorDescriptor(session.ChatExecutor); ok {
 		transport := strings.TrimSpace(descriptor.Transport)
@@ -176,4 +90,32 @@ func chatDebugComponentReadyMeta(builder *chatDebugDocumentBuilder, label string
 		}
 	}
 	builder.meta(label, value)
+}
+
+// chatSessionObserveConfig 返回当前会话运行时宿主的观察平面配置；宿主或运行时
+// 配置尚未建立时返回 ok=false。
+func chatSessionObserveConfig(session *ChatSession) (runtimeobserve.Config, bool) {
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.RuntimeConfig == nil {
+		return runtimeobserve.Config{}, false
+	}
+	return session.LocalRuntimeHost.RuntimeConfig.Observe, true
+}
+
+// chatObserveBaseURL 返回观察平面实际可访问的基础地址（含 scheme 与 host，
+// 末尾不带 /）。仅当当前会话的 executor 是已连接的 runtime-server 客户端且
+// 地址为合法 http(s) URL 时才返回非空；本地 in-process 模式无对外 HTTP 平面，
+// 返回空串（调用方回退展示 route= 前缀）。
+func chatObserveBaseURL(session *ChatSession) string {
+	if session == nil {
+		return ""
+	}
+	provider, ok := session.ChatExecutor.(runtimeServerURLProvider)
+	if !ok {
+		return ""
+	}
+	base := strings.TrimRight(strings.TrimSpace(provider.RuntimeServerURL()), "/")
+	if !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
+		return ""
+	}
+	return base
 }

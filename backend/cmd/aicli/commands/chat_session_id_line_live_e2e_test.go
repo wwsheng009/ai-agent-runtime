@@ -110,7 +110,7 @@ func TestBuildChatFlagStatusLine(t *testing.T) {
 
 	// --pprof 开启（provider 返回端点 URL）
 	chatDebugPprofProvider = func() string { return "http://127.0.0.1:6060/debug/pprof/" }
-	if got := buildChatFlagStatusLine(); got != "--pprof on  --debug on" {
+	if got := buildChatFlagStatusLine(); got != "endpoints: http://127.0.0.1:6060/debug/endpoints  web: http://127.0.0.1:6060/web/" {
 		t.Fatalf("both on: got %q", got)
 	}
 
@@ -118,5 +118,42 @@ func TestBuildChatFlagStatusLine(t *testing.T) {
 	setChatDebugFlag(false)
 	if got := buildChatFlagStatusLine(); got != "--pprof on  --debug off" {
 		t.Fatalf("pprof on only: got %q", got)
+	}
+}
+
+// chatDebugPprofBaseURL / chatDebugPprofDisplayURL 从 pprof 端点 URL 派生基础
+// 地址与 /debug/chat/status 展示端点 URL。
+func TestChatDebugPprofDerivedURLs(t *testing.T) {
+	prevProvider := chatDebugPprofProvider
+	t.Cleanup(func() { chatDebugPprofProvider = prevProvider })
+
+	// 未启用 → 全部空串
+	chatDebugPprofProvider = func() string { return "" }
+	if got := chatDebugPprofBaseURL(); got != "" {
+		t.Fatalf("base url without pprof: got %q, want empty", got)
+	}
+	if got := chatDebugPprofDisplayURL(); got != "" {
+		t.Fatalf("display url without pprof: got %q, want empty", got)
+	}
+	if got := chatDebugPprofScreenURL(); got != "" {
+		t.Fatalf("screen url without pprof: got %q, want empty", got)
+	}
+
+	// 标准 pprof 端点 URL
+	chatDebugPprofProvider = func() string { return "http://127.0.0.1:6060/debug/pprof/" }
+	if got := chatDebugPprofBaseURL(); got != "http://127.0.0.1:6060" {
+		t.Fatalf("base url: got %q, want %q", got, "http://127.0.0.1:6060")
+	}
+	if got := chatDebugPprofDisplayURL(); got != "http://127.0.0.1:6060/debug/chat/status" {
+		t.Fatalf("display url: got %q, want %q", got, "http://127.0.0.1:6060/debug/chat/status")
+	}
+	if got := chatDebugPprofScreenURL(); got != "http://127.0.0.1:6060/debug/chat/screen" {
+		t.Fatalf("screen url: got %q, want %q", got, "http://127.0.0.1:6060/debug/chat/screen")
+	}
+	if got := chatDebugPprofEndpointsURL(); got != "http://127.0.0.1:6060/debug/endpoints" {
+		t.Fatalf("endpoints url: got %q, want %q", got, "http://127.0.0.1:6060/debug/endpoints")
+	}
+	if got := chatDebugPprofWebURL(); got != "http://127.0.0.1:6060/web/" {
+		t.Fatalf("web url: got %q, want %q", got, "http://127.0.0.1:6060/web/")
 	}
 }

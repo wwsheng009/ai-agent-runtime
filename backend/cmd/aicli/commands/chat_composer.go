@@ -68,7 +68,9 @@ func (c *chatComposerController) ReadLine() (string, error) {
 		return "", io.EOF
 	}
 	defer c.Close()
-	line, err := c.session.InputBox.ReadWithHistoryPromptWithHooks(c.prompt, c.hooks())
+	ctx, done := c.session.newComposerReadContext()
+	defer done()
+	line, err := c.session.InputBox.ReadWithHistoryPromptWithHooksContext(ctx, c.prompt, c.hooks())
 	return line, normalizeChatComposerReadError(c.session, err)
 }
 
@@ -233,6 +235,13 @@ func (c *chatComposerController) onTranscriptRequested(snapshot ui.LineEditorSna
 func normalizeChatComposerReadError(session *ChatSession, err error) error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, context.Canceled) {
+		// 被外部唤醒（如 /web/api/input 注入输入后要求重新检查输入队列）：
+		// 中止本次 composer 读取，主循环 continue 后会在 chatInteractiveReadLine
+		// 中优先消费输入队列中的 Web 输入。
+		resetChatComposerPrompt(session)
+		return io.EOF
 	}
 	if errors.Is(err, ui.ErrInteractiveInputTranscriptRequested) {
 		// The draft remains in Interaction state and must be repainted after the

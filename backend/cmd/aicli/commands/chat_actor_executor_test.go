@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -205,5 +206,65 @@ func TestCurrentRunMetaForSession_ForcesNoneCompletionRequirementFromRuntimeCont
 	}
 	if runMeta.Team != nil {
 		t.Fatalf("ordinary child session should not gain team run meta, got %+v", runMeta.Team)
+	}
+}
+
+func TestWaitForAICLIActorReady_TimesOutWithDiagnosticWhenActorStaysBusy(t *testing.T) {
+	// Long provider delay keeps the background turn running well past the
+	// wait-for-ready timeout, so the actor stays busy and the poll must give
+	// up with a diagnostic instead of hanging forever.
+	provider := runtimellm.NewMockProvider("mock", 2*time.Second)
+	provider.SetResponse("background", "background complete")
+	hub := buildTestSessionHubWithProvider(t, provider)
+	t.Cleanup(hub.StopAll)
+	actor, err := hub.GetOrCreate("session-1")
+	if err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
+
+	bgDone := make(chan error, 1)
+	go func() {
+		_, runErr := actor.SubmitPrompt(context.Background(), "background", nil)
+		bgDone <- runErr
+	}()
+	waitForTestActorBusy(t, actor)
+
+	origTimeout := aicliActorReadyWaitTimeout
+	aicliActorReadyWaitTimeout = 150 * time.Millisecond
+	defer func() { aicliActorReadyWaitTimeout = origTimeout }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	err = waitForAICLIActorReady(ctx, actor)
+	if err == nil {
+		t.Fatal("expected timeout error while actor stayed busy")
+	}
+	if !strings.Contains(err.Error(), "等待就绪超时") {
+		t.Fatalf("expected diagnostic timeout error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "status=") {
+		t.Fatalf("expected status diagnostic in error message, got: %v", err)
+	}
+	if state, ok := actor.StateSummary(); !ok || !state.Busy() {
+		t.Fatalf("actor should still be busy after timeout error, got %+v", state)
+	}
+	if err := <-bgDone; err != nil {
+		t.Fatalf("background run failed: %v", err)
+	}
+}
+
+func TestWaitForAICLIActorReady_ReturnsImmediatelyWhenActorIdle(t *testing.T) {
+	provider := runtimellm.NewMockProvider("mock", 10*time.Millisecond)
+	hub := buildTestSessionHubWithProvider(t, provider)
+	t.Cleanup(hub.StopAll)
+	actor, err := hub.GetOrCreate("session-1")
+	if err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := waitForAICLIActorReady(ctx, actor); err != nil {
+		t.Fatalf("idle actor should be ready immediately, got: %v", err)
 	}
 }

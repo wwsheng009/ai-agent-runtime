@@ -52,6 +52,12 @@ func handleDebugCommand(session *ChatSession, command string) bool {
 			result = commandTextResult("错误: /debug " + strings.TrimSpace(extractCommandArgument(command)) + " 尚未迁移到统一渲染命令通道。")
 		}
 		_ = renderChatCommandResult(session, result, false)
+		// /debug display is an alternate-screen viewer, not a Scene cell. It is
+		// opened after the (empty) command result crosses the dispatch boundary
+		// so the primary presenter stays suspended for the whole modal.
+		if result.OpenDebugOverlay {
+			openChatDebugOverlay(session)
+		}
 		return false
 	}
 	// §5.5 用户交互例外：/debug 输出捕获触发时刻模型尾部锚点（不进入编码器因果链）。
