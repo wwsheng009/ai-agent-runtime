@@ -72,6 +72,11 @@ backend/chat-logs/
 
 # Local runtime data (sqlite stores, session artifacts)
 backend/data/
+*_replica.sqlite
+*_replica.sqlite-wal
+*_replica.sqlite-shm
+*.sqlite-wal
+*.sqlite-shm
 
 # runtime capture artifacts (aicli-x fix verification runs)
 backend/aicli_x_fix4_stdout.txt

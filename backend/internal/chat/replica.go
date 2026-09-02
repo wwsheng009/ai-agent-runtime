@@ -57,7 +57,10 @@ func SyncSessionReplica(ctx context.Context, srcPath, dstPath string) error {
 		return fmt.Errorf("replica verification failed: %w", err)
 	}
 	// Replace the destination. Windows os.Rename cannot overwrite an existing
-	// file, so remove the old replica and its WAL sidecars first.
+	// file, so remove the old replica and its WAL sidecars first. Also remove
+	// any sidecars the verification open may have created beside the tmp file.
+	_ = os.Remove(tmpPath + "-wal")
+	_ = os.Remove(tmpPath + "-shm")
 	_ = os.Remove(dstPath)
 	_ = os.Remove(dstPath + "-wal")
 	_ = os.Remove(dstPath + "-shm")

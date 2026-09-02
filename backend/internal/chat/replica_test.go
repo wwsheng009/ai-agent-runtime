@@ -51,6 +51,7 @@ func TestSyncSessionReplica_CopiesCheckpointedMaster(t *testing.T) {
 		Path:    dst,
 	})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = replica.(SessionStorageCloser).CloseStorage() })
 	loaded, err := replica.Load(context.Background(), "s1")
 	require.NoError(t, err)
 	require.Equal(t, "hello", loaded.Metadata.Title)
@@ -83,11 +84,13 @@ func TestSwitchableSessionStorage_Swap(t *testing.T) {
 			Path:    filepath.Join(dir, name),
 		})
 		require.NoError(t, err)
+		t.Cleanup(func() { _ = st.(SessionStorageCloser).CloseStorage() })
 		return st
 	}
 
 	first := makeStore("a.sqlite")
 	wrapper := NewSwitchableSessionStorage(first)
+	t.Cleanup(func() { _ = wrapper.(SessionStorageCloser).CloseStorage() })
 
 	ctx := context.Background()
 	require.NoError(t, wrapper.Save(ctx, &Session{ID: "s1", UserID: "u1", Metadata: SessionMetadata{Title: "first"}, CreatedAt: time.Now(), UpdatedAt: time.Now()}))
