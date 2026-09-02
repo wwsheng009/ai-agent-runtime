@@ -220,7 +220,7 @@ foreach ($name in $environmentNames) {
 try {
     # ----- Output directory -------------------------------------------------
     if ([string]::IsNullOrWhiteSpace($OutputDir)) {
-        $outputRoot = Join-Path $script:repoRoot "dist"
+        $outputRoot = Join-Path $script:repoRoot "backend\dist"
     }
     else {
         $outputRoot = Resolve-RepoPath -Path $OutputDir
