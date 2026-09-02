@@ -30,6 +30,7 @@
 **共同特性：**
 
 - 公钥认证（Ed25519 / ECDSA / RSA，支持 `-i` 指定密钥文件）
+- **SSH 用户证书登录**（CA 签名证书：自动探测 `<key>-cert.pub` 或 `-o CertificateFile` 显式指定）
 - ssh-agent 自动代理密钥
 - 密码认证（命令行 `--password` 或交互式输入）
 - `~/.ssh/config` 解析（Host、HostName、Port、User、IdentityFile 等）
@@ -85,6 +86,7 @@ ssh-client [options] [user@]host [command]
 | `UserKnownHostsFile` | `-o UserKnownHostsFile=NUL` | known_hosts 文件路径 |
 | `HostKeyAlgorithms` | `-o HostKeyAlgorithms=ssh-ed25519` | 主机密钥算法白名单（逗号分隔） |
 | `PreferredAuthentications` | `-o PreferredAuthentications=password` | 认证方法优先级 |
+| `CertificateFile` | `-o CertificateFile=~/.ssh/id_ed25519-cert.pub` | 用户证书文件路径（可重复，与 IdentityFile 按出现顺序配对） |
 | `LogLevel` | `-o LogLevel=DEBUG` | 日志级别 |
 | `Compression` | `-o Compression=yes` | 启用压缩 |
 | `ProxyJump` | — | 仅解析，未实现（忽略并警告） |
@@ -194,7 +196,7 @@ sftp-client user@host:remote/dir/
 | `--user` | `-l` | 当前 OS 用户 | 登录用户名 |
 | `--identity-file` | `-i` | 自动搜索 | 私钥文件路径（可重复） |
 | `--password` | — | 交互式输入 | 密码 |
-| `--option` | `-o` | — | OpenSSH 配置选项 |
+| `--option` | `-o` | — | OpenSSH 配置选项（与 ssh-client 相同的白名单，见 §2.3） |
 | `--quiet` | `-q` | false | 静默模式 |
 | `--verbose` | `-v` | false | 调试输出 |
 | `--config-file` | `-F` | `~/.ssh/config` | ssh_config 文件路径 |
@@ -279,10 +281,44 @@ sftp-client -P 2222 testuser@localhost:data/
 
 认证按以下优先级顺序尝试：
 
-1. **公钥认证**（`-i` 指定私钥文件，或自动搜索 `~/.ssh/id_ed25519`、`~/.ssh/id_ecdsa`、`~/.ssh/id_rsa`）
-2. **ssh-agent**（运行中的 ssh-agent 自动提供密钥。若 `-i` 指定了文件且 `-o IdentitiesOnly=yes`，则跳过 agent）
+1. **ssh-agent 公钥**（运行中的 ssh-agent 自动提供密钥，含 agent 中加载的证书。优先尝试可避免对已解锁密钥重复输入口令）
+2. **文件公钥 / 用户证书**（`-i` 指定私钥文件，或自动搜索 `~/.ssh/id_ed25519`、`~/.ssh/id_ecdsa`、`~/.ssh/id_rsa`；若存在配套证书则优先以证书身份认证。文件密钥为懒加载：仅在 agent 认证失败时才读取，带口令的密钥此时才会提示）
 3. **密码认证**（`--password` 显式提供，或交互式输入）
 4. **keyboard-interactive**（密码认证的 fallback，某些服务器要求）
+
+> 提示：若 `-i` 指定了文件且 `-o IdentitiesOnly=yes`，则跳过 agent，仅使用显式指定的密钥。
+
+### 4.1 SSH 用户证书登录（CA 签名证书）
+
+与 OpenSSH 一致，客户端支持 SSH 用户证书（User Certificate）认证：服务器信任 CA 公钥
+（`TrustedUserCAKeys`），客户端使用 CA 为私钥签发的 `ssh-ed25519-cert-v01@openssh.com`
+等证书文件完成免密码登录。证书与私钥配对方式（与 OpenSSH `CertificateFile` 语义相同）：
+
+| 方式 | 说明 |
+|---|---|
+| **自动探测**（默认） | 私钥路径旁存在同名 `<key>-cert.pub`（如 `~/.ssh/id_ed25519-cert.pub`）时自动加载并优先使用 |
+| **显式指定** | `-o CertificateFile=<路径>` 或 `~/.ssh/config` 中 `CertificateFile` 指令，与 `IdentityFile` 按出现顺序配对 |
+
+证书与私钥不匹配、证书文件不是合法用户证书时自动跳过并给出警告，回退到裸私钥认证。
+
+**示例（CA 已配置在服务器端）：**
+
+```bash
+# 自动探测 ~/.ssh/id_ed25519-cert.pub
+ssh-client root@192.210.174.189 "uptime"
+
+# 显式指定证书（非标准文件名）
+ssh-client -i ~/.ssh/id_ed25519 -o CertificateFile=~/certs/id_ed25519.pub-cert root@host
+
+# sftp-client 同样支持
+sftp-client -P 2222 testuser@host:data/
+```
+
+**带口令的私钥：**
+
+- 交互式终端下会在需要时提示 `Enter passphrase for key "..."`；
+- 非交互环境可通过环境变量 `SSH_KEY_PASSPHRASE` 提供（无需修改私钥）；
+- 密钥已加载到 ssh-agent 时不会提示口令（agent 优先）。
 
 **示例：指定密钥文件**
 

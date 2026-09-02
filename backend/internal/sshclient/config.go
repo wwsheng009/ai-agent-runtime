@@ -31,6 +31,8 @@ type ResolvedConfig struct {
 	LogLevel                 string
 	// ProxyJump 首版不实现；解析到该指令时记录警告。
 	ProxyJump string
+	// CertificateFile 用户证书文件路径列表（OpenSSH CertificateFile 指令）。
+	CertificateFiles []string
 }
 
 // DefaultConfigPath 返回用户级 ssh_config 路径。
@@ -112,6 +114,7 @@ func LoadResolvedConfig(path, alias string) (*ResolvedConfig, error) {
 	// IdentityFile 可能多条：kevinburke 库的 Get 只返回一条，
 	// 这里对每条路径单独取，并补充内置默认密钥搜索（按 Ed25519 → ECDSA → RSA）。
 	cfg.IdentityFiles = collectIdentityFiles(parsed, alias)
+	cfg.CertificateFiles = collectDirective(parsed, alias, "CertificateFile")
 	if hka := get("HostKeyAlgorithms"); hka != "" {
 		cfg.HostKeyAlgorithms = strings.Split(hka, ",")
 		for i := range cfg.HostKeyAlgorithms {
@@ -123,13 +126,18 @@ func LoadResolvedConfig(path, alias string) (*ResolvedConfig, error) {
 
 // collectIdentityFiles 读取配置中所有 IdentityFile 条目。
 func collectIdentityFiles(parsed *sshconfig.Config, alias string) []string {
+	return collectDirective(parsed, alias, "IdentityFile")
+}
+
+// collectDirective 读取 ssh_config 中指定指令的所有条目，按顺序去重后返回。
+func collectDirective(parsed *sshconfig.Config, alias, directive string) []string {
 	var files []string
 	for _, host := range parsed.Hosts {
 		if !host.Matches(alias) {
 			continue
 		}
 		for _, node := range host.Nodes {
-			if kv, ok := node.(*sshconfig.KV); ok && strings.EqualFold(kv.Key, "IdentityFile") {
+			if kv, ok := node.(*sshconfig.KV); ok && strings.EqualFold(kv.Key, directive) {
 				val := strings.TrimSpace(kv.Value)
 				if val != "" {
 					files = append(files, val)

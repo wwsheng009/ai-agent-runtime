@@ -275,6 +275,7 @@ func applyOptions(opts *sshclient.Options, options []string) error {
 		"LogLevel":                 true,
 		"Compression":              true,
 		"ProxyJump":                true,
+		"CertificateFile":          true,
 	}
 
 	for _, o := range options {
@@ -316,6 +317,8 @@ func applyOptions(opts *sshclient.Options, options []string) error {
 			opts.Compression = val == "yes" || val == "true"
 		case "ProxyJump":
 			fmt.Fprintf(os.Stderr, "sftp-client: warning: ProxyJump not implemented, ignoring %q\n", val)
+		case "CertificateFile":
+			opts.CertificateFiles = append(opts.CertificateFiles, val)
 		}
 	}
 	return nil

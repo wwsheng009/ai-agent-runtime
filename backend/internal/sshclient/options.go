@@ -29,6 +29,8 @@ type Options struct {
 	IdentityFiles []string
 	// IdentitiesOnly 是否仅使用显式指定的密钥（跳过 ssh-agent 默认 key 提供）。
 	IdentitiesOnly bool
+	// CertificateFiles 显式证书文件路径列表（对应 OpenSSH CertificateFile 指令）。
+	CertificateFiles []string
 
 	// PreferredAuthentications 认证方法优先级（逗号分隔，如 "publickey,password"）。
 	PreferredAuthentications string
@@ -99,6 +101,11 @@ func (o *Options) ApplyConfig(c *ResolvedConfig) {
 	if !o.IdentitiesOnly && c.IdentitiesOnly {
 		o.IdentitiesOnly = true
 	}
+	if len(o.CertificateFiles) == 0 && len(c.CertificateFiles) > 0 {
+		o.CertificateFiles = make([]string, len(c.CertificateFiles))
+		copy(o.CertificateFiles, c.CertificateFiles)
+	}
+
 	if o.PreferredAuthentications == "" && c.PreferredAuthentications != "" {
 		o.PreferredAuthentications = c.PreferredAuthentications
 	}

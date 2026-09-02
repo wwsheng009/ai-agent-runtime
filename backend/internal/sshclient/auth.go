@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
@@ -12,21 +13,33 @@ import (
 )
 
 // BuildAuthMethods 根据 Options 构建 SSH 认证方法列表。
-// 返回的方法顺序按优先级排列：publickey → agent → password → keyboard-interactive。
+// 返回的方法顺序按 OpenSSH 语义排列：agent 公钥 → 文件公钥 → password →
+// keyboard-interactive。agent 密钥优先（已在 agent 中的密钥无需输入口令）；
+// 文件私钥通过懒加载回调按需读取，仅在 agent 认证失败时才触发私钥口令提示，
+// 与 OpenSSH 行为一致（见 buildKeySigners 的证书配对逻辑）。
 // 调用方可将它们全部传入 ssh.ClientConfig.Auth。
 func BuildAuthMethods(opts *Options, stderr io.Writer) ([]ssh.AuthMethod, error) {
 	var methods []ssh.AuthMethod
 
-	// 1. 公钥认证（文件私钥）
-	if signers, err := buildKeySigners(opts, stderr); err == nil && len(signers) > 0 {
-		methods = append(methods, ssh.PublicKeys(signers...))
-	}
-
-	// 2. ssh-agent（除非 IdentitiesOnly 且未指定 IdentityFiles）
+	// 1. ssh-agent（除非 IdentitiesOnly）——优先，避免对已在 agent 中的密钥提示口令
 	if !opts.IdentitiesOnly {
 		if agentCallback, err := dialAgentSigners(stderr); err == nil {
 			methods = append(methods, ssh.PublicKeysCallback(agentCallback))
 		}
+	}
+
+	// 2. 文件私钥（懒加载回调，认证时才读取；含证书配对）
+	if hasIdentitySource(opts) {
+		methods = append(methods, ssh.PublicKeysCallback(func() ([]ssh.Signer, error) {
+			signers, err := buildKeySigners(opts, stderr)
+			if err != nil {
+				return nil, err
+			}
+			if len(signers) == 0 {
+				return nil, errors.New("no usable private keys")
+			}
+			return signers, nil
+		}))
 	}
 
 	// 3. 密码
@@ -66,7 +79,27 @@ func BuildAuthMethods(opts *Options, stderr io.Writer) ([]ssh.AuthMethod, error)
 	return methods, nil
 }
 
+// hasIdentitySource 判断是否存在可用的文件密钥来源：
+// 显式 IdentityFile/CertificateFile，或 ~/.ssh 下的默认密钥。
+func hasIdentitySource(opts *Options) bool {
+	if len(opts.IdentityFiles) > 0 || len(opts.CertificateFiles) > 0 {
+		return true
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	for _, k := range []string{"id_ed25519", "id_ecdsa", "id_rsa"} {
+		if _, err := os.Stat(filepath.Join(home, ".ssh", k)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // buildKeySigners 读取 IdentityFiles 或默认路径中的私钥，返回 ssh.Signer 列表。
+// 每个私钥若存在配套用户证书（显式 CertificateFile 或同目录 <key>-cert.pub），
+// 证书签名器排在裸私钥之前（与 OpenSSH 行为一致：优先以证书身份认证）。
 func buildKeySigners(opts *Options, stderr io.Writer) ([]ssh.Signer, error) {
 	files := opts.IdentityFiles
 	if len(files) == 0 {
@@ -75,7 +108,7 @@ func buildKeySigners(opts *Options, stderr io.Writer) ([]ssh.Signer, error) {
 		if err == nil {
 			keys := []string{"id_ed25519", "id_ecdsa", "id_rsa"}
 			for _, k := range keys {
-				p := home + string(os.PathSeparator) + ".ssh" + string(os.PathSeparator) + k
+				p := filepath.Join(home, ".ssh", k)
 				if _, err := os.Stat(p); err == nil {
 					files = append(files, p)
 				}
@@ -84,15 +117,67 @@ func buildKeySigners(opts *Options, stderr io.Writer) ([]ssh.Signer, error) {
 	}
 
 	var signers []ssh.Signer
-	for _, f := range files {
-		s, err := loadKeyFile(f, stderr)
+	for i, f := range files {
+		// 第 i 个私钥对应的显式证书（OpenSSH 按出现顺序配对）
+		certPath := ""
+		if i < len(opts.CertificateFiles) && opts.CertificateFiles[i] != "" {
+			certPath = opts.CertificateFiles[i]
+		}
+		ss, err := loadKeySigners(f, certPath, stderr)
 		if err != nil {
 			fmt.Fprintf(stderr, "Warning: skip key %q: %v\n", f, err)
 			continue
 		}
-		signers = append(signers, s)
+		signers = append(signers, ss...)
 	}
 	return signers, nil
+}
+
+// loadKeySigners 读取私钥，并在存在配套证书时返回 [证书签名器, 裸私钥签名器]；
+// 无证书时只返回裸私钥签名器。证书路径优先取显式 certPath（CertificateFile），
+// 否则按 OpenSSH 命名约定自动探测 <私钥路径>-cert.pub。
+func loadKeySigners(keyPath, certPath string, stderr io.Writer) ([]ssh.Signer, error) {
+	raw, err := loadKeyFile(keyPath, stderr)
+	if err != nil {
+		return nil, err
+	}
+
+	if certPath == "" {
+		certPath = keyPath + "-cert.pub"
+	}
+	if _, err := os.Stat(certPath); err != nil {
+		return []ssh.Signer{raw}, nil // 无配套证书，使用裸私钥
+	}
+
+	cs, err := parseCertSigner(certPath, raw)
+	if err != nil {
+		fmt.Fprintf(stderr, "Warning: skip certificate %q: %v\n", certPath, err)
+		return []ssh.Signer{raw}, nil // 证书不可用，回退裸私钥
+	}
+	return []ssh.Signer{cs, raw}, nil
+}
+
+// parseCertSigner 解析 OpenSSH 用户证书文件并包装私钥签名器。
+// 证书文件为 authorized_keys 格式的单行 ssh-*-cert-v01@openssh.com 条目。
+// NewCertSigner 会校验证书公钥与私钥签名器匹配，不匹配返回错误。
+func parseCertSigner(certPath string, raw ssh.Signer) (ssh.Signer, error) {
+	data, err := os.ReadFile(certPath)
+	if err != nil {
+		return nil, err
+	}
+	pub, _, _, _, err := ssh.ParseAuthorizedKey(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse certificate %q: %w", certPath, err)
+	}
+	cert, ok := pub.(*ssh.Certificate)
+	if !ok {
+		return nil, fmt.Errorf("%q is not a certificate (type %s)", certPath, pub.Type())
+	}
+	cs, err := ssh.NewCertSigner(cert, raw)
+	if err != nil {
+		return nil, fmt.Errorf("certificate %q does not match its private key: %w", certPath, err)
+	}
+	return cs, nil
 }
 
 // loadKeyFile 读取单私钥文件，支持 PEM 和 OpenSSH 格式，可带密码。
