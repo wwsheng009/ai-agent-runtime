@@ -1954,10 +1954,10 @@ export const zhCN = {
       },
       maxSteps: "最大步骤数",
       maxStepsDescription:
-        "用于限制单轮里最多允许的规划 / 路由 / 工具执行步数。",
+        "用于限制单轮里最多允许的规划 / 路由 / 工具执行步数；设为 0 表示不限制。",
       currentMaxSteps: "当前值为 {{count}}。",
       maxStepsAdvice:
-        "通常 8 到 12 足够覆盖常见工作区任务，复杂编排可以提高到 15 到 20。",
+        "默认 0（不限制），由模型自行决定何时结束；需要约束时通常 8 到 12 足够覆盖常见工作区任务。",
     },
     notifications: {
       title: "工作区通知",

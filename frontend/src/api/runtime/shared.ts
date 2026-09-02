@@ -178,11 +178,20 @@ export async function parseErrorPayload(response: Response) {
   }
 }
 
+/** 默认请求超时：避免后端因共享 SQLite 被锁/排队时前端无限等待 "Connecting to runtime…"。 */
+export const RUNTIME_FETCH_TIMEOUT_MS = 10_000;
+
 export async function fetchRuntimeJson<T>(
   input: string,
   init?: RequestInit,
 ): Promise<T> {
-  const response = await fetch(input, init);
+  let effectiveInit = init;
+  // 调用方未提供自己的 signal 时，加上超时信号；超时后 fetch 立即抛
+  // TimeoutError，让 UI 能快速从 "connecting" 进入错误状态，而不是无限旋转。
+  if (!init?.signal) {
+    effectiveInit = { ...init, signal: AbortSignal.timeout(RUNTIME_FETCH_TIMEOUT_MS) };
+  }
+  const response = await fetch(input, effectiveInit);
   if (!response.ok) {
     const payload = await parseErrorPayload(response);
     throw new RuntimeApiError(response.status, payload);

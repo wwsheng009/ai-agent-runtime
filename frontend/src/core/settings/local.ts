@@ -130,7 +130,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   chat: {
     enableReact: true,
     reasoningEffort: "",
-    maxSteps: 10,
+    maxSteps: 0,
   },
 };
 
@@ -207,7 +207,7 @@ function normalizeMaxSteps(value: unknown) {
     return DEFAULT_APP_SETTINGS.chat.maxSteps;
   }
 
-  return Math.min(20, Math.max(1, Math.round(parsed)));
+  return Math.min(20, Math.max(0, Math.round(parsed)));
 }
 
 function normalizeEnableReact(value: unknown) {

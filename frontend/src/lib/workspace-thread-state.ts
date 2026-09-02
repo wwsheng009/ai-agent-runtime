@@ -554,6 +554,33 @@ function readHistoryMessageIdentity(
   return undefined;
 }
 
+const HISTORY_REASONING_METADATA_KEY = "reasoning_details";
+
+/**
+ * 从历史消息 metadata 中提取可展示的 reasoning 文本。
+ * 对齐后端 ReasoningBlock.DisplayText 语义：
+ * - visibility="none"/"opaque" 时跳过；
+ * - 优先 summary，其次 content。
+ */
+function extractHistoryReasoningText(
+  metadata: Record<string, unknown> | undefined,
+): string {
+  if (!metadata) return "";
+  const raw = metadata[HISTORY_REASONING_METADATA_KEY];
+  if (!raw || typeof raw !== "object") return "";
+  const block = raw as Record<string, unknown>;
+  const visibility =
+    typeof block.visibility === "string" ? block.visibility.trim() : "";
+  if (visibility === "none" || visibility === "opaque") return "";
+  if (typeof block.summary === "string" && block.summary.trim()) {
+    return block.summary.trim();
+  }
+  if (typeof block.content === "string" && block.content.trim()) {
+    return block.content.trim();
+  }
+  return "";
+}
+
 function buildHistoryMessage(
   sessionId: string,
   index: number,
@@ -563,6 +590,7 @@ function buildHistoryMessage(
 ): ChatMessage {
   const relatedArtifactIds = artifacts.map((artifact) => artifact.id);
   const stableId = readHistoryMessageIdentity(message);
+  const reasoningText = extractHistoryReasoningText(message.metadata);
   return {
     id: stableId || `${sessionId}-history-${index}`,
     role: message.role === "user" ? "user" : "assistant",
@@ -575,6 +603,9 @@ function buildHistoryMessage(
         type: "text",
         content: message.content?.trim() || "[empty message]",
       },
+      ...(reasoningText
+        ? [{ type: "reasoning" as const, content: reasoningText }]
+        : []),
       ...generatedImageSegments,
     ],
   };

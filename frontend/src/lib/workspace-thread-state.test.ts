@@ -320,6 +320,120 @@ describe("thread-runtime", () => {
     );
   });
 
+  it("restores reasoning from assistant metadata into the history segment", () => {
+    const response: SessionHistoryResponse = {
+      session_id: "session-1",
+      count: 1,
+      history: [
+        {
+          role: "assistant",
+          content: "Final answer",
+          metadata: {
+            reasoning_details: {
+              provider: "deepseek",
+              visibility: "summary",
+              summary: "Because the flag was unset",
+            },
+          },
+        },
+      ],
+    };
+
+    const nextThread = applySessionHistoryToThread(
+      {
+        ...createThread(),
+        messages: [],
+        artifacts: [],
+      },
+      response,
+    );
+
+    expect(nextThread.messages).toHaveLength(1);
+    expect(nextThread.messages[0].segments).toEqual([
+      {
+        type: "text",
+        content: "Final answer",
+      },
+      {
+        type: "reasoning",
+        content: "Because the flag was unset",
+      },
+    ]);
+  });
+
+  it("prefers summary over full content when both exist (backend DisplayText parity)", () => {
+    const response: SessionHistoryResponse = {
+      session_id: "session-1",
+      count: 1,
+      history: [
+        {
+          role: "assistant",
+          content: "Final answer",
+          metadata: {
+            reasoning_details: {
+              provider: "openai",
+              visibility: "full",
+              summary: "Short summary",
+              content: "Longer detailed reasoning body",
+            },
+          },
+        },
+      ],
+    };
+
+    const nextThread = applySessionHistoryToThread(
+      {
+        ...createThread(),
+        messages: [],
+        artifacts: [],
+      },
+      response,
+    );
+
+    const segments = nextThread.messages[0].segments;
+    expect(segments).toHaveLength(2);
+    expect(segments[1]).toEqual({
+      type: "reasoning",
+      content: "Short summary",
+    });
+  });
+
+  it("does not restore reasoning when visibility is none or opaque", () => {
+    const response: SessionHistoryResponse = {
+      session_id: "session-1",
+      count: 1,
+      history: [
+        {
+          role: "assistant",
+          content: "Final answer",
+          metadata: {
+            reasoning_details: {
+              provider: "openai",
+              visibility: "none",
+              content: "hidden reasoning",
+            },
+          },
+        },
+      ],
+    };
+
+    const nextThread = applySessionHistoryToThread(
+      {
+        ...createThread(),
+        messages: [],
+        artifacts: [],
+      },
+      response,
+    );
+
+    expect(nextThread.messages[0].segments).toEqual([
+      {
+        type: "text",
+        content: "Final answer",
+      },
+    ]);
+  });
+
   it("merges assistant image progress into the live assistant message", () => {
     const event: SessionRuntimeEvent = {
       type: "assistant.image_progress",

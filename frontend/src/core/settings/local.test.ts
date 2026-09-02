@@ -171,6 +171,16 @@ describe("app settings storage helpers", () => {
     });
   });
 
+  it("keeps maxSteps 0 as unlimited", () => {
+    expect(mergeAppSettings({ chat: { maxSteps: 0 } })).toEqual({
+      ...DEFAULT_APP_SETTINGS,
+      chat: {
+        ...DEFAULT_APP_SETTINGS.chat,
+        maxSteps: 0,
+      },
+    });
+  });
+
   it("migrates legacy font size presets into pixel values", () => {
     expect(
       mergeAppSettings({

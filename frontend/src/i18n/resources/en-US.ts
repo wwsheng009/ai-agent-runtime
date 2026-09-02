@@ -2008,10 +2008,10 @@ export const enUS = {
       },
       maxSteps: "Max steps",
       maxStepsDescription:
-        "Limits the maximum number of planning / routing / tool execution steps per turn.",
+        "Limits the maximum number of planning / routing / tool execution steps per turn; set 0 for no limit.",
       currentMaxSteps: "Current value: {{count}}.",
       maxStepsAdvice:
-        "Usually 8 to 12 is enough for common workspace tasks; more complex orchestration can move up to 15 or 20.",
+        "Defaults to 0 (no limit) so the model decides when a run is done; when constraining, 8 to 12 usually covers common workspace tasks.",
     },
     notifications: {
       title: "Workspace notifications",

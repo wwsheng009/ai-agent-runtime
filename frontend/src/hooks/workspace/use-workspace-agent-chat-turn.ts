@@ -73,6 +73,9 @@ export function shouldIgnoreTerminalStreamError(options: {
   return options.finalized || options.aborted;
 }
 
+/** 连接 runtime 的软超时：超过该时长仍未收到任何 SSE 事件即判定为连接失败。 */
+const RUNTIME_CONNECT_TIMEOUT_MS = 15_000;
+
 export function useWorkspaceAgentChatTurn({
   deltaCoordinator,
   onSessionTouched,
@@ -174,6 +177,7 @@ export function useWorkspaceAgentChatTurn({
     let turnFinalized = false;
     let receivedRuntimeActivity = false;
     let receivedErrorEvent = false;
+    let connectTimedOut = false;
     let pendingStreamingFrame: number | null = null;
     let pendingStreamingTimeout: number | null = null;
     const controller = new AbortController();
@@ -576,6 +580,36 @@ export function useWorkspaceAgentChatTurn({
     setPhaseAndRef("connecting");
     attachVisibilityListener();
     activeRequestControllerRef.current = controller;
+    // 连接超时保护：后端可能因共享 SQLite 被其他进程锁住而无法在有限时间内
+    // 建立 SSE 流（表现为 "Connecting to runtime…" 无限旋转）。若 N 秒内未收到
+    // 任何 runtime 事件（onMeta 等会置 receivedRuntimeActivity），主动中止请求
+    // 并进入错误状态，而不是让前端永远卡在 connecting 阶段。
+    let connectTimeoutId: number | undefined;
+    const startConnectTimeout = () => {
+      connectTimeoutId = window.setTimeout(() => {
+        if (receivedRuntimeActivity || turnFinalized || controller.signal.aborted) {
+          return;
+        }
+        connectTimedOut = true;
+        controller.abort();
+        const message =
+          "连接 runtime 超时（可能被其他 aicli 进程占用的共享数据库锁定），请稍后重试。";
+        updateStreamingError(message);
+        updateCurrentThread((thread) => ({
+          ...thread,
+          updatedAt: new Date().toISOString(),
+          transport: "error",
+          lastError: message,
+        }));
+      }, RUNTIME_CONNECT_TIMEOUT_MS);
+    };
+    const clearConnectTimeout = () => {
+      if (connectTimeoutId !== undefined && typeof window !== "undefined") {
+        window.clearTimeout(connectTimeoutId);
+      }
+      connectTimeoutId = undefined;
+    };
+    startConnectTimeout();
     if (selectedThread.id === NEW_THREAD_ID) {
       startTransition(() => {
         navigate(`/workspace/chats/${threadId}`);
@@ -741,9 +775,10 @@ export function useWorkspaceAgentChatTurn({
                 if (deltaCoordinator && !deltaCoordinator.claim(reasoningKey)) {
                   return;
                 }
-                if (reasoningText && !reasoningText.endsWith("\n")) {
-                  reasoningText += "\n";
-                }
+                // 直接拼接 delta：reasoning 增量是连续 token 片段，逐段强制
+                // 插入换行会让每个 delta 独占一行（显示异常）。与 runtime
+                // 流路径 appendReasoningToMessageSegments 一致，保持原始
+                // chunk 边界即可。
                 reasoningText += delta;
                 setPhaseAndRef("streaming");
                 scheduleStreamingMessage();
@@ -919,6 +954,11 @@ export function useWorkspaceAgentChatTurn({
           finalizeTurn();
         }
       } catch (error) {
+        if (connectTimedOut) {
+          // 连接超时错误已在超时回调中写入线程状态（transport/lastError 及
+          // 消息段错误提示），此处直接返回，避免 finalizeTurn 清空 lastError。
+          return;
+        }
         if (controller.signal.aborted) {
           finalizeTurn({}, { stopped: true });
           return;
@@ -949,6 +989,7 @@ export function useWorkspaceAgentChatTurn({
           currentSessionId || threadId,
         );
       } finally {
+        clearConnectTimeout();
         cancelStreamingFrame();
         detachVisibilityListener();
         if (activeRequestControllerRef.current === controller) {

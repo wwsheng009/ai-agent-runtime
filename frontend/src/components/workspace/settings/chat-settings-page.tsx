@@ -29,10 +29,10 @@ type ChatSettingsPageProps = {
 function clampMaxSteps(value: string) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) {
-    return 10;
+    return 0;
   }
 
-  return Math.min(20, Math.max(1, Math.round(parsed)));
+  return Math.min(20, Math.max(0, Math.round(parsed)));
 }
 
 export function ChatSettingsPage({
@@ -242,7 +242,7 @@ export function ChatSettingsPage({
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
             <input
               type="number"
-              min={1}
+              min={0}
               max={20}
               step={1}
               value={settings.chat.maxSteps}
