@@ -1,0 +1,3 @@
+flag provided but not defined: -mod
+usage: go mod graph [-go=version] [-x]
+Run 'go help mod graph' for details.
