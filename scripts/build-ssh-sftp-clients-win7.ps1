@@ -207,3 +207,132 @@ function Restore-Environment {
         }
     }
 }
+# Resolve paths and defaults before changing the process environment.
+$backendDir = Join-Path $script:repoRoot "backend"
+$outputRoot = $null
+$failureMessage = $null
+$environmentSnapshot = @{}
+$environmentNames = @("GOTOOLCHAIN", "GOOS", "GOARCH", "CGO_ENABLED", "GOFLAGS", "GOPROXY")
+foreach ($name in $environmentNames) {
+    $environmentSnapshot[$name] = [System.Environment]::GetEnvironmentVariable($name)
+}
+
+try {
+    # ----- Output directory -------------------------------------------------
+    if ([string]::IsNullOrWhiteSpace($OutputDir)) {
+        $outputRoot = Join-Path $script:repoRoot "dist"
+    }
+    else {
+        $outputRoot = Resolve-RepoPath -Path $OutputDir
+    }
+    if (-not (Test-Path -LiteralPath $outputRoot -PathType Container)) {
+        New-Item -Path $outputRoot -ItemType Directory -Force | Out-Null
+    }
+    Write-Host "Output directory: $outputRoot"
+
+    # ----- Environment ------------------------------------------------------
+    [System.Environment]::SetEnvironmentVariable("GOTOOLCHAIN", "go1.20.14", "Process")
+    [System.Environment]::SetEnvironmentVariable("GOOS", "windows", "Process")
+    [System.Environment]::SetEnvironmentVariable("GOARCH", "amd64", "Process")
+    [System.Environment]::SetEnvironmentVariable("CGO_ENABLED", "0", "Process")
+    [System.Environment]::SetEnvironmentVariable("GOFLAGS", "-modfile=go.win7.mod", "Process")
+    if (-not [string]::IsNullOrWhiteSpace($GoProxy)) {
+        [System.Environment]::SetEnvironmentVariable("GOPROXY", $GoProxy, "Process")
+    }
+
+    # ----- Dependency check (optional) -------------------------------------
+    if (-not $SkipDependencyCheck) {
+        Write-Host "Checking go.win7.mod and go.win7.sum..."
+        Assert-File -Path (Join-Path $backendDir "go.win7.mod") -Description "go.win7.mod"
+        Assert-File -Path (Join-Path $backendDir "go.win7.sum") -Description "go.win7.sum"
+
+        $goVersion = Invoke-GoCapture -Arguments @("version") -Description "Go version check"
+        Write-Host ($goVersion -join " ")
+        $versionLine = ($goVersion | Where-Object { $_ -match "go1\.20\.14" } | Select-Object -First 1)
+        if ([string]::IsNullOrWhiteSpace($versionLine)) {
+            throw "GOTOOLCHAIN=go1.20.14 did not resolve to Go 1.20.14. Installed: $($goVersion -join ' ')"
+        }
+    }
+
+    Write-Host "Build environment: GOTOOLCHAIN=go1.20.14 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 GOFLAGS=-modfile=go.win7.mod"
+
+    # Build version string for linker injection.
+    $buildTime = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
+    $versionLabel = if ([string]::IsNullOrWhiteSpace($Version)) { "win7-dev" } else { $Version }
+    $linkerFlags = "-s -w -X main.version=$versionLabel"
+
+    $targets = @(
+        [pscustomobject]@{
+            Label = "ssh-client"
+            FileName = "ssh-client-win7.exe"
+            Package = "./cmd/ssh-client"
+            LinkerFlags = $linkerFlags
+        },
+        [pscustomobject]@{
+            Label = "sftp-client"
+            FileName = "sftp-client-win7.exe"
+            Package = "./cmd/sftp-client"
+            LinkerFlags = $linkerFlags
+        }
+    )
+
+    # ----- Tests (optional) -------------------------------------------------
+    if (-not $SkipTests) {
+        Push-Location -LiteralPath $backendDir
+        try {
+            Write-Host "Running host-side tests..."
+            # Only run tests that do not require a Windows target binary.
+            # For cross-compiled test exe, a future enhancement could emulate
+            # the aicli script's -c approach.
+            Invoke-Go -Arguments @(
+                "test", "-tags", "win7compat", "-mod=readonly", "-count=1",
+                "./internal/winconsole/..."
+            ) -Description "Run winconsole package tests"
+        }
+        finally {
+            Pop-Location
+        }
+    }
+
+    # ----- Build targets ----------------------------------------------------
+    Push-Location -LiteralPath $backendDir
+    try {
+        foreach ($target in $targets) {
+            $targetPath = Join-Path $outputRoot $target.FileName
+            if (Test-Path -LiteralPath $targetPath) {
+                Remove-Item -LiteralPath $targetPath -Force
+            }
+            $checksumPath = $targetPath + ".sha256"
+            if (Test-Path -LiteralPath $checksumPath) {
+                Remove-Item -LiteralPath $checksumPath -Force
+            }
+
+            $buildArguments = @(
+                "build", "-tags", "win7compat", "-mod=readonly", "-trimpath",
+                "-ldflags", $target.LinkerFlags, "-o", $targetPath, $target.Package
+            )
+            Invoke-Go -Arguments $buildArguments -Description "Build $($target.Label) for Windows 7"
+        }
+    }
+    finally {
+        Pop-Location
+    }
+
+    # ----- Verify ------------------------------------------------------------
+    foreach ($target in $targets) {
+        Verify-Binary -Path (Join-Path $outputRoot $target.FileName) -Label $target.Label
+    }
+    Write-Host "Win7 ssh-client and sftp-client build completed successfully."
+}
+catch {
+    $failureMessage = $_.Exception.ToString()
+}
+finally {
+    Restore-Environment -Snapshot $environmentSnapshot
+}
+
+if (-not [string]::IsNullOrWhiteSpace($failureMessage)) {
+    [Console]::Error.WriteLine("build-ssh-sftp-clients-win7.ps1 failed:")
+    [Console]::Error.WriteLine($failureMessage)
+    exit 1
+}
