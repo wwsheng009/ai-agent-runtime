@@ -135,9 +135,19 @@ pwsh -File ./scripts/build-runtime-server-win7.ps1 `
   -Version win7-v1.2.3 -OutputDir dist/win7 -SkipTests
 ```
 
-runtime-server 程序默认临时使用 `backend/internal/webui/dist/placeholder.txt`，
-防止把本地生成的现代前端误嵌入 Win7 产物；编译结束（包括失败）会恢复原目录。
-确实需要保留现有前端时可显式传入 `-KeepEmbeddedWebUI`。
+runtime-server 程序默认会把 `frontend/dist` 的生产前端打包进 Win7 产物：
+脚本先将前端文件 stage 到 `backend/internal/webui/dist`，生成
+`build-info.json`（含 `asset_manifest_hash` / `build_time` / `entry_asset`），
+编译结束（包括失败）会恢复原目录。相关开关：
+
+- `-BuildFrontend`：编译前先执行 `pnpm build`（配合 `-ApiBaseUrl` 指定运行时
+  API 地址，如 `-ApiBaseUrl /api`）。默认复用已有的 `frontend/dist`。
+- `-SkipFrontendInstall`：`-BuildFrontend` 时跳过 `pnpm install`。
+- `-EmbedPlaceholder`：恢复旧行为，只嵌入 `placeholder.txt` 占位符。
+- `-KeepEmbeddedWebUI`：保留 `backend/internal/webui/dist` 现状，不做替换。
+
+构建完成后脚本会在产物中搜索前端入口文件名和 `asset_manifest_hash`，确认前端
+资源确实被嵌入（不是占位符构建）。
 
 ## 5. 验证产物
 

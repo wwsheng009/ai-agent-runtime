@@ -16,6 +16,12 @@ Recommended entry points:
   - Portable AgentDefinition, `aicli chat --agent` (with or without profile), `spawn_agent.agent_type` defaults, `aicli agent stdio` ACP host, agents three-layer meanings, and difference from skill `openai.yaml`.
 - [tool_image_generate.md](./tool_image_generate.md)
   - `openai_image_generate` / `aicli image` / chat `/image` paths: OpenAI-compatible images API vs Codex native image generation, auto path selection, and output directories.
+- [debug-chat-status.md](./debug-chat-status.md)
+  - Loopback HTTP endpoint `GET /debug/chat/status` (`--pprof` / `--debug`): live JSON/text snapshot of the chat render pipeline (render encoder, scene, render output, app-state history gates, active cell ranges, executor recovery loop, projection validity) and a five-signal diagnostic method for "renderer only updates the active band and never commits".
+- [../plan/aicli-micro-web-client-plan.md](../plan/aicli-micro-web-client-plan.md)
+  - Micro web client plan: loopback `/web/` endpoint family (HTML page + `GET /web/api/screen` + `GET /web/api/events` SSE turn events + `POST /web/api/input` prompt injection) — design only, implementation tracked in the plan.
+- [../review/aicli-micro-web-client-plan-review.md](../review/aicli-micro-web-client-plan-review.md)
+  - Review of the micro web client plan: code-reference verification, risk assessment, and Phase 1 implementation checklist.
 - [windows7.md](./windows7.md)
   - Windows 7 end-user installation, isolated configuration/session paths, console/IME modes, and troubleshooting.
 - [windows7-build.md](./windows7-build.md)
