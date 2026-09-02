@@ -379,11 +379,12 @@ type RenderOutputGateway struct {
 	attemptsMu         sync.Mutex
 	primaryAttempts    map[uint64]*primaryAttempt
 
-	closedCh  chan struct{}
-	closeOnce sync.Once
-	closeErr  error
-	runOnce   sync.Once
-	runCh     chan struct{}
+	closedCh      chan struct{}
+	closeOnce     sync.Once
+	closeErr      error
+	abandonReason string // Abandoned 终态原因（进入 GatewayAbandoned 时填充）
+	runOnce       sync.Once
+	runCh         chan struct{}
 
 	// reconfigure 两阶段状态（9.2）
 	pendingRoute              RenderRouteConfig
@@ -1373,10 +1374,12 @@ func (g *RenderOutputGateway) takeReadyRecordLocked(sequence uint64, slot *deliv
 	record := &DeliveryRecord{
 		RecordID:      randomID("rd"),
 		SchemaVersion: SchemaVersion,
-		Batch:         SanitizedBatch(slot.batch, RecordedMetadataOnly, nil),
-		Output:        slot.receipt.ToRecorded(),
-		Mirrors:       mirrors,
-		SealedAt:      g.clock.Now(),
+		// 7.2 C：journal 只保留 payload hash（hash_only），绝不保留明文
+		// bytes；/debug 等诊断面据此以 hash 呈现 payload。
+		Batch:    SanitizedBatch(slot.batch, RecordedHashOnly, defaultKeyedHash),
+		Output:   slot.receipt.ToRecorded(),
+		Mirrors:  mirrors,
+		SealedAt: g.clock.Now(),
 	}
 	slot.sealed = true
 	delete(g.recordSlots, sequence)
@@ -1472,9 +1475,11 @@ func (g *RenderOutputGateway) sealRecord(batch RenderBatch, receipt OutputReceip
 	record := DeliveryRecord{
 		RecordID:      randomID("rd"),
 		SchemaVersion: SchemaVersion,
-		Batch:         SanitizedBatch(batch, RecordedMetadataOnly, nil),
-		Output:        receipt.ToRecorded(),
-		SealedAt:      g.clock.Now(),
+		// 7.2 C：journal 只保留 payload hash（hash_only），绝不保留明文
+		// bytes；/debug 等诊断面据此以 hash 呈现 payload。
+		Batch:    SanitizedBatch(batch, RecordedHashOnly, defaultKeyedHash),
+		Output:   receipt.ToRecorded(),
+		SealedAt: g.clock.Now(),
 	}
 	g.appendDeliveryRecord(record)
 }
@@ -1550,6 +1555,7 @@ func (g *RenderOutputGateway) Snapshot() RenderOutputSnapshot {
 	stats := g.stats
 	closeCutoff := g.closeCutoff
 	busy := g.primaryBusy
+	abandonReason := g.abandonReason
 	g.mu.Unlock()
 
 	ps := primary.Snapshot()
@@ -1579,6 +1585,7 @@ func (g *RenderOutputGateway) Snapshot() RenderOutputSnapshot {
 		MirrorPending:         stats.mirrorPending,
 		MirrorInFlight:        stats.mirrorInFlight,
 		MirrorEntriesUnsealed: stats.mirrorPending + stats.mirrorInFlight,
+		AbandonedReason:       abandonReason,
 	}
 	if busy {
 		snap.PrimaryInFlight = maxInt(snap.PrimaryInFlight, 1)
@@ -1908,13 +1915,15 @@ func (g *RenderOutputGateway) finishClose(cutoff uint64, pendingRoute RenderRout
 
 	finalState := GatewayClosed
 	var terminalErr error
+	var abandonReason string
 	if deviated {
 		terminalErr = NewClassifiedError(DeliveryErrorTimeout, "gateway close deadline exceeded")
 		if !primaryTerminated {
 			finalState = GatewayAbandoned
+			abandonReason = "primary callback termination could not be proven after close deadline"
 			terminalErr = NewClassifiedError(
 				DeliveryErrorAbandoned,
-				"primary callback termination could not be proven",
+				abandonReason,
 			)
 		}
 	}
@@ -1931,6 +1940,7 @@ func (g *RenderOutputGateway) finishClose(cutoff uint64, pendingRoute RenderRout
 	g.mu.Lock()
 	g.state = finalState
 	g.closeErr = terminalErr
+	g.abandonReason = abandonReason
 	g.mu.Unlock()
 	close(g.closedCh)
 }
@@ -2207,6 +2217,7 @@ func (g *RenderOutputGateway) abandonReconfigure(
 		DeliveryErrorAbandoned,
 		"reconfigure operation deadline exceeded after plan handoff",
 	)
+	abandonReason := "reconfigure operation deadline exceeded after plan handoff"
 	g.mu.Lock()
 	// Winning closeOnce prevents Close from changing the state after the
 	// initial check; retain this guard as a fail-closed consistency assertion.
@@ -2214,6 +2225,7 @@ func (g *RenderOutputGateway) abandonReconfigure(
 		g.completeReconfigureLocked(token, terminalErr)
 		g.state = GatewayAbandoned
 		g.closeErr = terminalErr
+		g.abandonReason = abandonReason
 		g.clearReconfigureLocked()
 		g.mu.Unlock()
 		g.hub.shutdown()
@@ -2294,6 +2306,7 @@ func (g *RenderOutputGateway) abandonReconfigure(
 	g.completeReconfigureLocked(token, terminalErr)
 	g.state = GatewayAbandoned
 	g.closeErr = terminalErr
+	g.abandonReason = abandonReason
 	g.clearReconfigureLocked()
 	g.mu.Unlock()
 	close(g.closedCh)

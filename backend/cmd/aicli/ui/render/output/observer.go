@@ -209,6 +209,7 @@ type RenderOutputSnapshot struct {
 	DeliveryRecordsSealed   uint64
 	LastPrimaryDuration     time.Duration
 	Abandoned               uint64
+	AbandonedReason         string // Abandoned 终态原因描述（GatewayAbandoned 时非空）
 	EntrySealCount          uint64
 }
 

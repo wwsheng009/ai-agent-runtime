@@ -80,6 +80,12 @@ func dispatchChatCommand(session *ChatSession, command string, noInteractive boo
 				// recovery.
 				openChatExportPicker(session, *result.OpenExportPicker)
 			}
+			if renderErr == nil && result.OpenDebugOverlay && session != nil {
+				// /debug display is a lease-bound alternate-screen viewer. Its
+				// snapshot is captured on the alternate screen and never
+				// committed as a Scene command cell in the main message stream.
+				openChatDebugOverlay(session)
+			}
 			if renderErr == nil && result.ApplyBacktrack != nil && session != nil {
 				// Direct backtrack apply has no alternate screen, but it still owns
 				// the same destructive transaction: actor mutation, canonical Scene

@@ -8,6 +8,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render/output"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
@@ -172,10 +173,11 @@ func buildChatDebugDisplayDocument(session *ChatSession) render.Document {
 	ctx := snapshotChatRuntimeContext(session)
 	var builder chatDebugDocumentBuilder
 	builder.appendDocument(ui.SessionInfoDocument(buildChatSessionInfo(session), chatDebugDocumentWidth(session)))
+	builder.meta("HTTP Snapshot:", "/debug/chat/status#session (JSON) / ?format=text (文本)")
 	builder.blank()
 	appendChatDebugSessionDetails(&builder, session)
 
-	builder.heading("会话文件与目录:")
+	builder.heading("会话文件与目录: (GET /debug/chat/status#files)")
 	builder.meta("Session:", chatDebugSessionLabel(session))
 	builder.meta("Session Store:", chatDebugValueOrNone(currentRuntimeSessionStoreSummary(session)))
 	builder.meta("Session File:", chatDebugValueOrNone(currentRuntimeSessionPath(session)))
@@ -200,7 +202,7 @@ func buildChatDebugDisplayDocument(session *ChatSession) render.Document {
 		}
 	}
 
-	builder.heading("运行时调试:")
+	builder.heading("运行时调试: (GET /debug/chat/status#runtime)")
 	if session.Config != nil {
 		builder.meta("AICLI Config Path:", chatDebugValueOrNone(resolveAbsoluteChatPath(session.Config.ConfigFilePath)))
 	}
@@ -239,11 +241,11 @@ func buildChatDebugDisplayDocument(session *ChatSession) render.Document {
 	if session.Surface != nil {
 		builder.meta("Surface:", chatDebugBool(session.Surface.Enabled()))
 		if table := session.Surface.RowPlanDebugString(); table != "" {
-			builder.heading("Row Ownership (stage C):")
+			builder.heading("Row Ownership (stage C): (GET /debug/chat/status#runtime)")
 			builder.plainLines(strings.Split(strings.TrimSuffix(table, "\n"), "\n"))
 		}
 		if trace := session.Surface.PaintTraceDebugString(); trace != "" {
-			builder.heading("Render Paint Trace:")
+			builder.heading("Render Paint Trace: (GET /debug/chat/status#paint_trace)")
 			builder.plainLines(strings.Split(strings.TrimSuffix(trace, "\n"), "\n"))
 		}
 	} else {
@@ -253,13 +255,15 @@ func buildChatDebugDisplayDocument(session *ChatSession) render.Document {
 
 	appendChatDebugRoutingLines(&builder, session)
 	appendChatDebugPprofLines(&builder)
-	appendChatDebugEntrypointAndComponentLines(&builder, session)
-	builder.heading("AgentControl Registry:")
+	appendChatDebugScreenLines(&builder, session)
+	appendChatDebugEndpointListLines(&builder, session)
+	appendChatDebugComponentLines(&builder, session)
+	builder.heading("AgentControl Registry: (GET /debug/chat/status#agents)")
 	builder.plain(chatAgentPanelRegistryLine(session))
 	builder.plainLines(chatAgentControlConsistencyLines(session))
-	builder.heading("Agent Graph:")
+	builder.heading("Agent Graph: (GET /debug/chat/status#agents)")
 	builder.plainLines(chatAgentGraphLines(session))
-	builder.heading("Mailbox Pending:")
+	builder.heading("Mailbox Pending: (GET /debug/chat/status#agents)")
 	builder.plainLines(chatDebugMailboxLines(session))
 	appendChatDebugRenderEncoderLines(&builder, session)
 	appendChatDebugRenderOutputLines(&builder, session)
@@ -273,7 +277,7 @@ func appendChatDebugRenderOutputLines(builder *chatDebugDocumentBuilder, session
 	if builder == nil || session == nil {
 		return
 	}
-	builder.heading("Render Output:")
+	builder.heading("Render Output: (GET /debug/chat/status#render_output)")
 	if session.TerminalSession == nil {
 		builder.meta("Gateway:", "<none>")
 		return
@@ -306,9 +310,37 @@ func appendChatDebugRenderOutputLines(builder *chatDebugDocumentBuilder, session
 	builder.meta("Event Journal Drops:", strconv.FormatUint(snap.EventJournalDrops, 10))
 	builder.meta("Delivery Journal Drops:", strconv.FormatUint(snap.DeliveryJournalDrops, 10))
 	builder.meta("Delivery Records Sealed:", strconv.FormatUint(snap.DeliveryRecordsSealed, 10))
+	// B3：最近 N 笔 DeliveryRecord 摘要。payload 以 hash 呈现（journal 为
+	// hash_only 模式，无明文 bytes）；primary 为 nil 时显示 pre-admission
+	// rejected 语义。
+	if records := session.TerminalSession.RecentDeliveries(chatDebugRecentDeliveryCap); len(records) > 0 {
+		builder.heading("Recent Deliveries:")
+		for i, r := range records {
+			builder.plain(chatDebugDeliveryRecordSummary(i, r))
+		}
+	}
 	if snap.CloseCutoffSequence != 0 {
 		builder.meta("Close Cutoff Sequence:", strconv.FormatUint(snap.CloseCutoffSequence, 10))
 	}
+}
+
+// chatDebugRecentDeliveryCap 限制 /debug 最近 DeliveryRecord 摘要条数。
+const chatDebugRecentDeliveryCap = 8
+
+// chatDebugDeliveryRecordSummary 渲染单笔 DeliveryRecord 的单行摘要。payload
+// 只以 hash 呈现（journal hash_only），绝不输出明文 bytes。
+func chatDebugDeliveryRecordSummary(i int, r output.DeliveryRecord) string {
+	primary := "<none>"
+	if r.Output.Primary != nil {
+		primary = string(r.Output.Primary.Status)
+	}
+	hash := r.Batch.BytesHash
+	if hash == "" {
+		hash = "-"
+	}
+	return fmt.Sprintf("  [%d] record=%s seq=%d batch=%s kind=%s primary=%s payload=%s bytes=%d hash=%s",
+		i, r.RecordID, r.Batch.Sequence, r.Batch.BatchID,
+		string(r.Batch.Kind), primary, r.Batch.PayloadMode, r.Batch.BytesLength, hash)
 }
 
 // appendChatDebugAppStatePresenterLines exposes the migration's immutable
@@ -321,7 +353,7 @@ func appendChatDebugAppStatePresenterLines(builder *chatDebugDocumentBuilder, se
 		return
 	}
 	state := session.Interaction.uiActor.State()
-	builder.heading("AppState / Presenter Migration:")
+	builder.heading("AppState / Presenter Migration: (GET /debug/chat/status#app_state)")
 	builder.meta("UI Revision:", strconv.FormatUint(state.Revision, 10))
 	builder.meta("Layout Generation:", strconv.FormatUint(state.LayoutGeneration, 10))
 	builder.meta("Geometry:", fmt.Sprintf("%dx%d (generation %d)", state.Geometry.Width, state.Geometry.Height, state.Geometry.Generation))
@@ -353,7 +385,7 @@ func appendChatDebugAppStatePresenterLines(builder *chatDebugDocumentBuilder, se
 	if session.Surface == nil {
 		return
 	}
-	builder.heading("AppState Frame Parity:")
+	builder.heading("AppState Frame Parity: (GET /debug/chat/status#app_state)")
 	parity := strings.TrimSuffix(session.Surface.FrameParityWithAppLayout(state.AppState), "\n")
 	if parity == "" {
 		parity = "parity: unavailable"
@@ -392,7 +424,7 @@ func appendChatDebugRenderEncoderLines(builder *chatDebugDocumentBuilder, sessio
 		return
 	}
 	stats := bridge.renderEncoderStats()
-	builder.heading("Unified Render Encoder:")
+	builder.heading("Unified Render Encoder: (GET /debug/chat/status#render_encoder)")
 	builder.meta("Encode Count:", strconv.FormatUint(stats.EncodeCount, 10))
 	builder.meta("Append/Upsert/Remove:", fmt.Sprintf("%d / %d / %d", stats.AppendCount, stats.UpsertCount, stats.RemoveCount))
 	builder.meta("Out of Order:", strconv.FormatUint(stats.OutOfOrderCount, 10))
@@ -437,7 +469,7 @@ func appendChatDebugRenderEncoderLines(builder *chatDebugDocumentBuilder, sessio
 	// Unified Render Scene（P3：ChangeSet 消费端状态）。与模型快照对照
 	// 审计：CellID 应等于 Item.ID 的数字部分，顺序应等于模型数组顺序。
 	cells, revision, failures, lastErr := bridge.sceneStats()
-	builder.heading("Unified Render Scene:")
+	builder.heading("Unified Render Scene: (GET /debug/chat/status#scene)")
 	builder.meta("Cells:", strconv.FormatUint(cells, 10))
 	builder.meta("Revision:", strconv.FormatUint(revision, 10))
 	builder.meta("Apply Failures:", strconv.FormatUint(failures, 10))
@@ -606,7 +638,7 @@ func appendChatDebugRoutingLines(builder *chatDebugDocumentBuilder, session *Cha
 }
 
 func appendChatRoutingConfigDocument(builder *chatDebugDocumentBuilder, title string, routing *config.AICLISubagentRoutingConfig, source string) {
-	builder.heading(title + ":")
+	builder.heading(title + ": (GET /debug/chat/status#routing)")
 	if strings.TrimSpace(source) != "" {
 		builder.meta("Routing Source:", source)
 	}
