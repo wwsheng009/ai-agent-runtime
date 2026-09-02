@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
@@ -55,22 +56,40 @@ func BuildAuthMethods(opts *Options, stderr io.Writer) ([]ssh.AuthMethod, error)
 			return answers, nil
 		}))
 	} else if !opts.PasswordSet && term.IsTerminal(int(os.Stdin.Fd())) {
-		// 交互式输入密码（未通过 --password 提供时）
-		fmt.Fprint(stderr, "Password: ")
-		if pw, err := term.ReadPassword(int(os.Stdin.Fd())); err == nil {
-			fmt.Fprintln(stderr)
-			if len(pw) > 0 {
-				password := string(pw)
-				methods = append(methods, ssh.Password(password))
-				methods = append(methods, ssh.KeyboardInteractive(func(name, instruction string, questions []string, echos []bool) ([]string, error) {
-					answers := make([]string, len(questions))
-					for i := range questions {
-						answers[i] = password
-					}
-					return answers, nil
-				}))
-			}
+		// 交互式输入密码（未通过 --password 提供时）。
+		// 与 OpenSSH 一致：仅在服务器请求 password/kbd-interactive 认证
+		// （即公钥/agent 认证失败后）才提示，而不是在连接前就询问。
+		var once sync.Once
+		var cachedPw string
+		var cachedErr error
+		readPassword := func() (string, error) {
+			once.Do(func() {
+				fmt.Fprint(stderr, "Password: ")
+				pw, err := term.ReadPassword(int(os.Stdin.Fd()))
+				fmt.Fprintln(stderr)
+				if err != nil {
+					cachedErr = err
+					return
+				}
+				cachedPw = string(pw)
+			})
+			return cachedPw, cachedErr
 		}
+		methods = append(methods, ssh.PasswordCallback(func() (string, error) {
+			return readPassword()
+		}))
+		// keyboard-interactive fallback（某些服务器要求）
+		methods = append(methods, ssh.KeyboardInteractive(func(name, instruction string, questions []string, echos []bool) ([]string, error) {
+			pw, err := readPassword()
+			if err != nil {
+				return nil, err
+			}
+			answers := make([]string, len(questions))
+			for i := range questions {
+				answers[i] = pw
+			}
+			return answers, nil
+		}))
 	}
 
 	if len(methods) == 0 {

@@ -31,6 +31,8 @@ type ResolvedConfig struct {
 	LogLevel                 string
 	// ProxyJump 首版不实现；解析到该指令时记录警告。
 	ProxyJump string
+	// ProxyCommand 未实现；解析到该指令时记录警告（OpenSSH 用外部命令建立连接）。
+	ProxyCommand string
 	// CertificateFile 用户证书文件路径列表（OpenSSH CertificateFile 指令）。
 	CertificateFiles []string
 }
@@ -104,6 +106,7 @@ func LoadResolvedConfig(path, alias string) (*ResolvedConfig, error) {
 	cfg.PreferredAuthentications = get("PreferredAuthentications")
 	cfg.LogLevel = strings.ToUpper(get("LogLevel"))
 	cfg.ProxyJump = get("ProxyJump")
+	cfg.ProxyCommand = get("ProxyCommand")
 	if io := get("IdentitiesOnly"); io != "" {
 		cfg.IdentitiesOnly = parseBool(io)
 	}

@@ -203,6 +203,12 @@ func run(flags *cliFlags) int {
 		fmt.Fprintf(os.Stderr, "sftp-client: warning: %v\n", err)
 	} else {
 		opts.ApplyConfig(cfg)
+		if !opts.Quiet && cfg.ProxyJump != "" {
+			fmt.Fprintf(os.Stderr, "sftp-client: warning: ProxyJump %q is not implemented; ignored\n", cfg.ProxyJump)
+		}
+		if !opts.Quiet && cfg.ProxyCommand != "" {
+			fmt.Fprintf(os.Stderr, "sftp-client: warning: ProxyCommand %q is not implemented; connecting directly\n", cfg.ProxyCommand)
+		}
 	}
 
 	// 建立 SSH 连接
