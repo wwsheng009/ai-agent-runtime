@@ -32,9 +32,14 @@ func (h *Handler) ListSessionTurns(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	turns, err := actor.ListTurns(r.Context())
+	// turns 锚点落在共享 session_history.sqlite（win7 配置与 aicli 共享
+	// 主库），读取带截止时间快速失败，避免前端 fetchRuntimeJson 10s 超时
+	// 显示 "signal timed out"。
+	queryCtx, queryCancel := sessionStoreQueryContext(r)
+	defer queryCancel()
+	turns, err := actor.ListTurns(queryCtx)
 	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, err)
+		writeSessionStoreError(w, err)
 		return
 	}
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -66,9 +71,14 @@ func (h *Handler) ListSessionBacktrackAudit(w http.ResponseWriter, r *http.Reque
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	entries, err := actor.ListBacktrackAudit(r.Context())
+	// backtrack audit 落在共享 session_history.sqlite（win7 配置与 aicli
+	// 共享主库），读取带截止时间快速失败，避免前端 fetchRuntimeJson 10s
+	// 超时显示 "signal timed out"。
+	queryCtx, queryCancel := sessionStoreQueryContext(r)
+	defer queryCancel()
+	entries, err := actor.ListBacktrackAudit(queryCtx)
 	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, err)
+		writeSessionStoreError(w, err)
 		return
 	}
 	if entries == nil {

@@ -2984,6 +2984,43 @@ func SearchDocs() {}
 	assert.Contains(t, rec.Body.String(), "hello from llm")
 }
 
+func TestAgentChat_WorkspacePathPersistedOnSessionMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte(`package demo
+func SearchDocs() {}
+`), 0o644))
+
+	mcpManager := &testMCPManager{}
+	registry := skill.NewRegistry(mcpManager)
+	handler := NewHandler(registry, nil, mcpManager)
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 0})
+	require.NoError(t, runtime.RegisterProvider("test-model", &testLLMProvider{
+		name:    "test-model",
+		content: "hello from llm",
+	}))
+	handler.SetLLMRuntime(runtime)
+
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	handler.SetSessionManager(sessionManager)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	body := []byte(`{"messages":[{"role":"user","content":"search docs"}],"user_id":"workspace-user","workspace_path":"` + strings.ReplaceAll(tmpDir, `\`, `\\`) + `"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "hello from llm")
+
+	sessions, err := sessionManager.List(context.Background(), "workspace-user")
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, tmpDir, sessionmeta.String(sessions[0].Metadata.Context, sessionmeta.WorkspacePath))
+}
+
 func messageListContainsText(messages []types.Message, needle string) bool {
 	needle = strings.TrimSpace(needle)
 	if needle == "" {

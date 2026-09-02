@@ -105,9 +105,11 @@ func (h *Handler) UpdateSessionPlanMode(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	session, err := h.sessionManager.GetSession(r.Context(), sessionID)
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	session, err := h.sessionManager.GetSession(ctx, sessionID)
 	if err != nil {
-		h.writeError(w, http.StatusNotFound, err)
+		writeSessionStoreError(w, err)
 		return
 	}
 
@@ -115,8 +117,8 @@ func (h *Handler) UpdateSessionPlanMode(w http.ResponseWriter, r *http.Request) 
 		h.writePlanModeError(w, err)
 		return
 	}
-	if err := h.sessionManager.Update(r.Context(), session); err != nil {
-		h.writeError(w, http.StatusInternalServerError, err)
+	if err := h.sessionManager.Update(ctx, session); err != nil {
+		writeSessionStoreError(w, err)
 		return
 	}
 
@@ -131,7 +133,9 @@ func (h *Handler) loadSessionForPlanMode(r *http.Request) (*chat.Session, error)
 	if sessionID == "" {
 		return nil, errors.New(errors.ErrValidationFailed, "session id is required")
 	}
-	session, err := h.sessionManager.GetSession(r.Context(), sessionID)
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	session, err := h.sessionManager.GetSession(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}

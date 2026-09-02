@@ -257,10 +257,17 @@ func (h *Handler) ListSessionAgentControlMailbox(w http.ResponseWriter, r *http.
 		waitMs = parsed
 	}
 
+	// 共享数据库（session_history.sqlite）可能被并发 aicli CLI 进程持写锁，
+	// mailbox 存储打开/读取会阻塞在 sqlite busy_timeout。waitMs==0（前端
+	// fetchRuntimeJson，10s AbortSignal.timeout）时必须带截止时间快速失败，
+	// 否则前端显示 "signal timed out"。waitMs>0（SSE 长轮询）保留原语义，
+	// 由 AbortController 控制生命周期。
 	ctx := r.Context()
 	cancel := func() {}
 	if waitMs > 0 {
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(waitMs)*time.Millisecond)
+	} else {
+		ctx, cancel = sessionStoreQueryContext(r)
 	}
 	defer cancel()
 
@@ -379,7 +386,12 @@ func (h *Handler) GetSessionRuntimeState(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	state, err := store.LoadState(r.Context(), sessionID)
+	// runtime state store 可能后置在共享的 session_history.sqlite 上
+	// （win7 配置下与 aicli 共享主库），读取带截止时间快速失败，
+	// 避免前端 fetchRuntimeJson 10s 超时显示 "signal timed out"。
+	queryCtx, queryCancel := sessionStoreQueryContext(r)
+	defer queryCancel()
+	state, err := store.LoadState(queryCtx, sessionID)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
@@ -477,7 +489,11 @@ func (h *Handler) sessionRuntimeToolsDisabled(ctx context.Context, sessionID str
 	if h == nil || h.sessionManager == nil {
 		return false
 	}
-	session, err := h.sessionManager.Get(ctx, strings.TrimSpace(sessionID))
+	// 共享 session_history.sqlite 可能被并发 aicli 进程锁住；查询超时时
+	// 保守返回 false（工具不被禁用），避免拖垮主响应。
+	queryCtx, cancel := context.WithTimeout(ctx, sessionStoreQueryTimeout)
+	defer cancel()
+	session, err := h.sessionManager.Get(queryCtx, strings.TrimSpace(sessionID))
 	if err != nil || session == nil {
 		return false
 	}
@@ -528,10 +544,15 @@ func (h *Handler) ListSessionRuntimeEvents(w http.ResponseWriter, r *http.Reques
 		waitMs = parsed
 	}
 
+	// 同 ListSessionAgentControlMailbox：waitMs==0 时带截止时间快速失败，
+	// 避免 event store 打开/读取在共享数据库锁竞争时阻塞超过前端
+	// AbortSignal.timeout(10s)，表现为 "signal timed out"。
 	ctx := r.Context()
 	cancel := func() {}
 	if waitMs > 0 {
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(waitMs)*time.Millisecond)
+	} else {
+		ctx, cancel = sessionStoreQueryContext(r)
 	}
 	defer cancel()
 
@@ -545,14 +566,16 @@ func (h *Handler) ListSessionRuntimeEvents(w http.ResponseWriter, r *http.Reques
 	for {
 		events, err := store.ListEvents(ctx, sessionID, after, limit)
 		if err != nil {
-			h.writeError(w, http.StatusInternalServerError, err)
+			// 截止时间到期（共享数据库锁竞争）映射为 503，与其余
+			// session store handler 语义一致，前端可明确提示重试。
+			writeSessionStoreError(w, err)
 			return
 		}
 		latestSeq := int64(0)
 		if sequenceStore, ok := store.(chat.EventSequenceStore); ok {
 			seq, err := sequenceStore.LastEventSeq(ctx, sessionID)
 			if err != nil {
-				h.writeError(w, http.StatusInternalServerError, err)
+				writeSessionStoreError(w, err)
 				return
 			}
 			latestSeq = seq
@@ -610,9 +633,13 @@ func (h *Handler) ListSessionToolReceipts(w http.ResponseWriter, r *http.Request
 	}
 	toolCallID := strings.TrimSpace(r.URL.Query().Get("tool_call_id"))
 	if toolCallID != "" {
-		receipt, err := store.GetToolReceipt(r.Context(), sessionID, toolCallID)
+		// tool receipt store 可能后置在共享库上；读取带截止时间快速失败，
+		// 避免前端 fetchRuntimeJson 10s 超时显示 "signal timed out"。
+		queryCtx, queryCancel := sessionStoreQueryContext(r)
+		defer queryCancel()
+		receipt, err := store.GetToolReceipt(queryCtx, sessionID, toolCallID)
 		if err != nil {
-			h.writeError(w, http.StatusInternalServerError, err)
+			writeSessionStoreError(w, err)
 			return
 		}
 		receipts := make([]chat.ToolExecutionReceipt, 0, 1)

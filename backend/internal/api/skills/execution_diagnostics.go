@@ -67,7 +67,12 @@ type executionDiagnosticsSessionResult struct {
 
 func (h *Handler) executionDiagnosticsSnapshot(ctx context.Context) map[string]interface{} {
 	if ctx == nil {
-		ctx = context.Background()
+		// 兜底：调用方未传 ctx 时也不能让 source goroutine 无限阻塞在
+		// sqlite busy_timeout（ncruces 驱动默认 60s）。给定 snapshot 硬上限，
+		// 超时后主路径立即返回部分结果。
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), executionDiagnosticsSnapshotTimeout)
+		defer cancel()
 	}
 
 	var (

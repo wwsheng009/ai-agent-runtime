@@ -1098,9 +1098,14 @@ func (h *Handler) ExecuteSkill(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	usageScope := h.resolveUsageScope(r, executeReq.TenantID, executeReq.ProjectID, executeReq.UserID)
-	session, err := h.getOrCreateSession(ctx, usageScope.UserID, executeReq.SessionID)
+	// 会话获取/创建会写共享 session_history.sqlite，被并发 aicli 进程锁定时
+	// 会阻塞在 sqlite busy_timeout 上（驱动不响应 Go context 取消），
+	// 必须用短超时 context 包裹并在超时后快速返回 503，而不是无限等待。
+	storeCtx, storeCancel := sessionStoreQueryContext(r)
+	session, err := h.getOrCreateSession(storeCtx, usageScope.UserID, executeReq.SessionID)
+	storeCancel()
 	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, err)
+		writeSessionStoreError(w, err)
 		return
 	}
 
@@ -1426,9 +1431,14 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	if profileCleanup != nil {
 		defer profileCleanup()
 	}
-	session, err := h.getOrCreateSession(ctx, usageScope.UserID, req.SessionID)
+	// 会话获取/创建会写共享 session_history.sqlite，被并发 aicli 进程锁定时
+	// 会阻塞在 sqlite busy_timeout 上（驱动不响应 Go context 取消），
+	// 必须用短超时 context 包裹并在超时后快速返回 503，而不是无限等待。
+	storeCtx, storeCancel := sessionStoreQueryContext(r)
+	session, err := h.getOrCreateSession(storeCtx, usageScope.UserID, req.SessionID)
+	storeCancel()
 	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, err)
+		writeSessionStoreError(w, err)
 		return
 	}
 	if session != nil {
@@ -1470,8 +1480,20 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		if h.applyProfileSessionContext(session, profileState) {
 			sessionUpdated = true
 		}
+		// Persist the workspace directory on the durable session metadata so the
+		// frontend can group sessions by working directory. It is intentionally
+		// stored alongside the profile context (both freeze at first durable turn).
+		if workspacePath != "" && sessionmeta.String(session.Metadata.Context, sessionmeta.WorkspacePath) != workspacePath {
+			if session.Metadata.Context == nil {
+				session.Metadata.Context = make(map[string]interface{})
+			}
+			sessionmeta.Set(session.Metadata.Context, sessionmeta.WorkspacePath, workspacePath)
+			sessionUpdated = true
+		}
 		if sessionUpdated && h.sessionManager != nil {
-			_ = h.sessionManager.Update(ctx, session)
+			updateCtx, updateCancel := sessionStoreQueryContext(r)
+			_ = h.sessionManager.Update(updateCtx, session)
+			updateCancel()
 		}
 	}
 
@@ -1553,7 +1575,9 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	if session != nil {
 		persistExecutionRouteTransparency(session, chatRoute)
 		if h.sessionManager != nil {
-			_ = h.sessionManager.Update(ctx, session)
+			updateCtx, updateCancel := sessionStoreQueryContext(r)
+			_ = h.sessionManager.Update(updateCtx, session)
+			updateCancel()
 		}
 	}
 	if agentProvider != "" {
@@ -1751,7 +1775,9 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 				// Persist conversation turns only; strip the ephemeral request
 				// context prefix so multi-turn history does not accumulate it.
 				session.ReplaceHistory(stripLeadingContextMessages(execSession.GetMessages(), contextMessages))
-				_ = h.sessionManager.Update(ctx, session)
+				updateCtx, updateCancel := sessionStoreQueryContext(r)
+				_ = h.sessionManager.Update(updateCtx, session)
+				updateCancel()
 			}
 
 			resultPayload := buildAgentResultPayload("agent_react", reactResult)
@@ -2043,7 +2069,9 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			// Persist conversation turns only; strip the ephemeral request
 			// context prefix so multi-turn history does not accumulate it.
 			session.ReplaceHistory(stripLeadingContextMessages(execResult.UpdatedSession.GetMessages(), contextMessages))
-			_ = h.sessionManager.Update(ctx, session)
+			updateCtx, updateCancel := sessionStoreQueryContext(r)
+			_ = h.sessionManager.Update(updateCtx, session)
+			updateCancel()
 		}
 
 		responseResult := buildAgentResultPayload("agent_react", reactResult)
@@ -2236,14 +2264,19 @@ func (h *Handler) CreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	req.UserID = h.resolveServerSessionUserID(req.UserID)
 
-	session, err := h.sessionManager.CreateSession(r.Context(), req.UserID)
+	// 创建会话同样会写共享的 session_history.sqlite：并发 aicli 进程持锁时，
+	// 必须带截止时间快速失败（503），而不是跑满 10+ 次重试让前端
+	// AbortSignal.timeout 中止 → 显示 "signal timed out"。
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	session, err := h.sessionManager.CreateSession(ctx, req.UserID)
 	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, err)
+		writeSessionStoreError(w, err)
 		return
 	}
 	if req.Title != "" {
 		session.UpdateTitle(req.Title)
-		_ = h.sessionManager.Update(r.Context(), session)
+		_ = h.sessionManager.Update(ctx, session)
 	}
 
 	h.writeJSON(w, http.StatusCreated, map[string]interface{}{
@@ -2259,18 +2292,25 @@ func (h *Handler) ListSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := h.resolveServerSessionUserID(r.URL.Query().Get("user_id"))
-
-	sessions, err := h.sessionManager.List(r.Context(), userID)
+	// 用户 id 不是分组展示的关键因素；按工作目录分组展示所有会话，
+	// 使前端能按工作目录（workspace_path）分组展示用户的所有会话。
+	// 会话存储可能被并发运行的 aicli CLI 进程共享（同一 session_history.sqlite），
+	// 查询必须带上截止时间：共享数据库被写锁占用时，5s 内快速返回 503，
+	// 而不是让 HTTP 请求无限挂起（前端表现为 “Connecting to runtime…” 卡死）。
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	sessions, err := h.sessionManager.SearchSessions(ctx, &chat.SessionSearchOptions{})
 	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, err)
+		writeSessionStoreError(w, err)
 		return
 	}
+
+	resolvedUserID := h.resolveServerSessionUserID(r.URL.Query().Get("user_id"))
 
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"sessions": sessions,
 		"count":    len(sessions),
-		"user_id":  userID,
+		"user_id":  resolvedUserID,
 	})
 }
 
@@ -2282,9 +2322,11 @@ func (h *Handler) GetSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, err := h.sessionManager.GetSession(r.Context(), chat.NormalizeSessionID(mux.Vars(r)["id"]))
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	session, err := h.sessionManager.GetSession(ctx, chat.NormalizeSessionID(mux.Vars(r)["id"]))
 	if err != nil {
-		h.writeError(w, http.StatusNotFound, err)
+		writeSessionStoreError(w, err)
 		return
 	}
 
@@ -2301,14 +2343,24 @@ func (h *Handler) DeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.sessionManager.Delete(r.Context(), chat.NormalizeSessionID(mux.Vars(r)["id"])); err != nil {
-		h.writeError(w, http.StatusNotFound, err)
+	// 删除会话同样写共享的 session_history.sqlite：并发 aicli 进程持锁时，
+	// 必须带截止时间快速失败（503），而不是让前端 AbortSignal.timeout 中止
+	// 显示 "signal timed out"。会话不存在仍保留 404 语义。
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	if err := h.sessionManager.Delete(ctx, sessionID); err != nil {
+		if stderrors.Is(err, chat.ErrSessionNotFound) {
+			h.writeError(w, http.StatusNotFound, err)
+			return
+		}
+		writeSessionStoreError(w, err)
 		return
 	}
 
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"deleted": true,
-		"id":      chat.NormalizeSessionID(mux.Vars(r)["id"]),
+		"id":      sessionID,
 	})
 }
 
@@ -2339,9 +2391,11 @@ func (h *Handler) GetSessionHistory(w http.ResponseWriter, r *http.Request) {
 		}
 		beforeSeq = parsed
 	}
-	page, err := h.sessionManager.GetHistoryPage(r.Context(), sessionID, beforeSeq, limit)
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	page, err := h.sessionManager.GetHistoryPage(ctx, sessionID, beforeSeq, limit)
 	if err != nil {
-		h.writeError(w, http.StatusNotFound, err)
+		writeSessionStoreError(w, err)
 		return
 	}
 	history := page.Messages
@@ -2372,9 +2426,11 @@ func (h *Handler) GetSessionStats(w http.ResponseWriter, r *http.Request) {
 
 	userID := h.resolveServerSessionUserID(r.URL.Query().Get("user_id"))
 
-	stats, err := h.sessionManager.GetStatistics(r.Context(), userID)
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	stats, err := h.sessionManager.GetStatistics(ctx, userID)
 	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, err)
+		writeSessionStoreError(w, err)
 		return
 	}
 
@@ -2432,9 +2488,11 @@ func (h *Handler) SearchSessions(w http.ResponseWriter, r *http.Request) {
 		searchOpts.State = chat.SessionState(req.State)
 	}
 
-	sessions, err := h.sessionManager.SearchSessions(r.Context(), searchOpts)
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	sessions, err := h.sessionManager.SearchSessions(ctx, searchOpts)
 	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, err)
+		writeSessionStoreError(w, err)
 		return
 	}
 
@@ -2467,9 +2525,11 @@ func (h *Handler) UpdateSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
-	session, err := h.sessionManager.GetSession(r.Context(), sessionID)
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	session, err := h.sessionManager.GetSession(ctx, sessionID)
 	if err != nil {
-		h.writeError(w, http.StatusNotFound, err)
+		writeSessionStoreError(w, err)
 		return
 	}
 
@@ -2496,8 +2556,8 @@ func (h *Handler) UpdateSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := h.sessionManager.Update(r.Context(), session); err != nil {
-		h.writeError(w, http.StatusInternalServerError, err)
+	if err := h.sessionManager.Update(ctx, session); err != nil {
+		writeSessionStoreError(w, err)
 		return
 	}
 
@@ -2536,8 +2596,10 @@ func (h *Handler) ClearSessionHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
-	if err := h.sessionManager.ClearHistory(r.Context(), sessionID); err != nil {
-		h.writeError(w, http.StatusNotFound, err)
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	if err := h.sessionManager.ClearHistory(ctx, sessionID); err != nil {
+		writeSessionStoreError(w, err)
 		return
 	}
 
@@ -2569,14 +2631,16 @@ func (h *Handler) changeSessionState(w http.ResponseWriter, r *http.Request, act
 	}
 
 	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
-	if err := action(r.Context(), sessionID); err != nil {
-		h.writeError(w, http.StatusNotFound, err)
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	if err := action(ctx, sessionID); err != nil {
+		writeSessionStoreError(w, err)
 		return
 	}
 
-	session, err := h.sessionManager.GetSession(r.Context(), sessionID)
+	session, err := h.sessionManager.GetSession(ctx, sessionID)
 	if err != nil {
-		h.writeError(w, http.StatusNotFound, err)
+		writeSessionStoreError(w, err)
 		return
 	}
 
@@ -2607,10 +2671,12 @@ func (h *Handler) batchSessionAction(w http.ResponseWriter, r *http.Request, act
 		return
 	}
 
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
 	processed := make([]string, 0, len(req.SessionIDs))
 	failures := make(map[string]string)
 	for _, sessionID := range req.SessionIDs {
-		if err := action(r.Context(), sessionID); err != nil {
+		if err := action(ctx, sessionID); err != nil {
 			failures[sessionID] = err.Error()
 			continue
 		}
@@ -8320,6 +8386,72 @@ func skillSourceLayerForPath(path string, skillDirs []string) string {
 		}
 	}
 	return skill.SkillSourceLayerUnknown
+}
+
+// sessionStoreQueryTimeout 是会话存储查询的超时。会话存储（session_history.sqlite）
+// 与并发运行的 aicli CLI 进程共享，被写锁占用时查询会阻塞在 sqlite busy_timeout
+// 或连接池排队。带超时的 context 确保 HTTP 请求在时限内返回（503 或 504），
+// 而不是让前端无限显示 "Connecting to runtime…"。
+// 5s 严格小于前端 RUNTIME_FETCH_TIMEOUT_MS（10s），确保后端 503 在先，
+// 不会出现前端 AbortSignal.timeout 先触发 → "signal timed out"。
+const sessionStoreQueryTimeout = 5 * time.Second
+
+// sessionStoreQueryContext 为会话存储的读操作创建一个有截止时间的 context。
+// 如果父 context 已有更早的截止时间则优先使用父 context。
+func sessionStoreQueryContext(r *http.Request) (context.Context, context.CancelFunc) {
+	deadline := time.Now().Add(sessionStoreQueryTimeout)
+	if r == nil || r.Context() == nil {
+		return context.WithDeadline(context.Background(), deadline)
+	}
+	// 如果父 context 已有截止时间且早于我们的默认值，则优先使用父 context
+	parent := r.Context()
+	if parentDeadline, ok := parent.Deadline(); ok && parentDeadline.Before(deadline) {
+		return context.WithCancel(parent)
+	}
+	return context.WithDeadline(parent, deadline)
+}
+
+// writeSessionStoreError 将会话存储查询的错误映射为 HTTP 503 响应，
+// 附带对人类友好的错误提示，而不是裸 500 或无限挂起。
+func writeSessionStoreError(w http.ResponseWriter, err error) {
+	if err == nil {
+		return
+	}
+	statusCode := http.StatusServiceUnavailable
+	code := "STORE_UNAVAILABLE"
+	message := err.Error()
+
+	// 检测数据库锁错误
+	if strings.Contains(message, "database is locked") ||
+		strings.Contains(message, "database locked") {
+		code = "STORE_LOCKED"
+		message = "会话存储被其他进程（aicli CLI）锁定，请稍后重试。"
+	} else if strings.Contains(message, "context deadline exceeded") ||
+		strings.Contains(message, "deadline exceeded") {
+		code = "STORE_TIMEOUT"
+		message = "会话存储查询超时（共享数据库被并发写入占用），请稍后重试。"
+	} else if strings.Contains(message, "database is busy") ||
+		strings.Contains(message, "database busy") {
+		code = "STORE_BUSY"
+		message = "会话存储正忙，请稍后重试。"
+	} else if strings.Contains(message, "context canceled") {
+		code = "STORE_CANCELED"
+		message = "会话存储请求被取消。"
+		statusCode = http.StatusGatewayTimeout
+	}
+
+	response := map[string]interface{}{
+		"error": message,
+		"code":  code,
+	}
+	if requestID := strings.TrimSpace(w.Header().Get("X-Request-ID")); requestID != "" {
+		response["request_id"] = requestID
+	}
+
+	// 使用 writeJSON 直接写 response，避免 writeError 的额外逻辑
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 func (h *Handler) writeError(w http.ResponseWriter, statusCode int, err error) {

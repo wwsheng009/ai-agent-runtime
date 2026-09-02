@@ -35,9 +35,11 @@ func (h *Handler) GetSessionGeneratedImage(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	session, err := h.sessionManager.GetSession(r.Context(), sessionID)
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	session, err := h.sessionManager.GetSession(ctx, sessionID)
 	if err != nil {
-		h.writeError(w, http.StatusNotFound, err)
+		writeSessionStoreError(w, err)
 		return
 	}
 

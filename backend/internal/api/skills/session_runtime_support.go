@@ -3137,7 +3137,12 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 	disableTools := false
 	childReadOnly := false
 	childDepth := 0
-	if session, err := h.sessionManager.Get(context.Background(), sessionID); err == nil && session != nil {
+	// 会话存储（session_history.sqlite）可能与并发 aicli CLI 进程共享，被写锁
+	// 占用时 Get 会阻塞在 sqlite busy_timeout / 应用层重试。带截止时间查询，
+	// 失败时降级为默认配置，而不是让请求无限挂起（前端表现为 "signal timed out"）。
+	getCtx, getCancel := context.WithTimeout(context.Background(), sessionStoreQueryTimeout)
+	defer getCancel()
+	if session, err := h.sessionManager.Get(getCtx, sessionID); err == nil && session != nil {
 		getContextString := func(key string) string {
 			return sessionmeta.String(session.Metadata.Context, key)
 		}

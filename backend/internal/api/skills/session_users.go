@@ -46,9 +46,13 @@ func (h *Handler) ListSessionUsers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	defaultUserID := h.resolveServerSessionUserID("")
-	users, totalCount, err := h.listSessionUsers(r.Context(), defaultUserID, limit)
+	// 会话存储可能被并发 aicli CLI 进程共享（同一 session_history.sqlite），
+	// 查询必须带截止时间，避免共享数据库锁占用时 HTTP 请求无限挂起。
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	users, totalCount, err := h.listSessionUsers(ctx, defaultUserID, limit)
 	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, err)
+		writeSessionStoreError(w, err)
 		return
 	}
 

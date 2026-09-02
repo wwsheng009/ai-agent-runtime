@@ -14,7 +14,11 @@ func (h *Handler) attachSessionExecutionRoute(ctx context.Context, sessionID str
 	if h == nil || h.sessionManager == nil {
 		return payload
 	}
-	session, err := h.sessionManager.Get(ctx, strings.TrimSpace(sessionID))
+	// 共享 session_history.sqlite 可能被并发 aicli 进程锁住；附加路由信息
+	// 失败不应阻塞主响应（否则前端会因 AbortSignal.timeout 而显示 "signal timed out"）。
+	queryCtx, cancel := context.WithTimeout(ctx, sessionStoreQueryTimeout)
+	defer cancel()
+	session, err := h.sessionManager.Get(queryCtx, strings.TrimSpace(sessionID))
 	if err != nil || session == nil {
 		return payload
 	}

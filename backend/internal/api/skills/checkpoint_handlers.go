@@ -341,9 +341,13 @@ func (h *Handler) GetCheckpointFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer cleanup()
-	files, err := reader.GetCheckpointFiles(r.Context(), checkpointID)
+	// checkpoint files 存储可能后置在共享库上；读取带截止时间快速失败，
+	// 避免前端 fetchRuntimeJson 10s 超时显示 "signal timed out"。
+	queryCtx, queryCancel := sessionStoreQueryContext(r)
+	defer queryCancel()
+	files, err := reader.GetCheckpointFiles(queryCtx, checkpointID)
 	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, err)
+		writeSessionStoreError(w, err)
 		return
 	}
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
