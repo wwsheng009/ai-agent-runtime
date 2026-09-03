@@ -391,47 +391,47 @@ aicli micro web client 的独特优势：
 
 ### Phase 1：架构迁移（HTML/CSS/JS 独立目录 + go:embed）
 
-| 步骤 | 文件 | 工作内容 |
+| 步骤 | 文件 | 工作内容 | 状态 |
 | --- | --- | --- |
-| 1.1 | `commands/web/` | 新建目录，从 `web_page.go` 提取 HTML 到 `web/index.html` |
-| 1.2 | `commands/web/` | 从 `web_page.go` 提取 CSS 到 `web/style.css` |
-| 1.3 | `commands/web/` | 从 `web_page.go` 提取 JS 到 `web/app.js` |
-| 1.4 | `web_page.go` | 改为 `go:embed` 嵌入静态文件，新增 `webFS embed.FS` |
-| 1.5 | `pprof.go` | 注册 `/web/style.css` 和 `/web/app.js` 路由 |
-| 1.6 | `web_handlers_test.go` | 更新 `TestHandleChatWebPage` 适配新输出 |
-| 1.7 | 验证 | `go build ./cmd/aicli/...` + `go test ./cmd/aicli/commands` |
+| 1.1 | `commands/web/` | 新建目录，从 `web_page.go` 提取 HTML 到 `web/index.html` | ✅ 已完成 |
+| 1.2 | `commands/web/` | 从 `web_page.go` 提取 CSS 到 `web/style.css` | ✅ 已完成 |
+| 1.3 | `commands/web/` | 从 `web_page.go` 提取 JS 到 `web/app.js` | ✅ 已完成 |
+| 1.4 | `web_page.go` | 改为 `go:embed` 嵌入静态文件，新增 `webFS embed.FS` | ✅ 已完成 |
+| 1.5 | `pprof.go` | 注册 `/web/style.css` 和 `/web/app.js` 路由 | ✅ 已完成 |
+| 1.6 | `web_handlers_test.go` | 更新 `TestHandleChatWebPage` 适配新输出 | ✅ 已完成 |
+| 1.7 | 验证 | `go build ./cmd/aicli/...` + `go test ./cmd/aicli/commands` | ✅ 已完成 |
 
 ### Phase 2：前端体验升级
 
-| 步骤 | 文件 | 工作内容 |
+| 步骤 | 文件 | 工作内容 | 状态 |
 | --- | --- | --- |
-| 2.1 | `web/app.js` | 实现精简 Markdown 解析器（支持 `**`、`` ` ``、`[link]()`、`- list`、`# heading`、```` ``` ````） |
-| 2.2 | `web/style.css` | Markdown 样式 + 代码块基础高亮（Go/Python/JS/Shell） |
-| 2.3 | `web/app.js` + `web/style.css` | 消息历史架构改造：从 `<pre>` 覆盖改为会话式消息列表 |
-| 2.4 | `web/style.css` | 响应式布局（Media Queries，<768px） |
-| 2.5 | `web/style.css` + `web/app.js` | 深色模式（CSS 自定义属性 + prefers-color-scheme + 手动切换） |
-| 2.6 | `web/app.js` | 输入历史（↑/↓ 键，localStorage 存储最近 50 条） |
-| 2.7 | `web/app.js` | 打字机效果优化（自适应速度、代码块快速揭示） |
+| 2.1 | `web/app.js` | 实现精简 Markdown 解析器（支持 `**`、`` ` ``、`[link]()`、`- list`、`# heading`、```` ``` ````） | ✅ 已完成 |
+| 2.2 | `web/style.css` | Markdown 样式 + 代码块基础高亮（Go/Python/JS/Shell）+ 复制按钮 | ✅ 已完成 |
+| 2.3 | `web/app.js` + `web/style.css` | 消息历史架构改造：从 `<pre>` 覆盖改为会话式消息列表 | ✅ 已完成 |
+| 2.4 | `web/style.css` | 响应式布局（Media Queries，<768px） | ✅ 已完成 |
+| 2.5 | `web/style.css` + `web/app.js` | 深色模式（CSS 自定义属性 + prefers-color-scheme + 手动切换按钮） | ✅ 已完成 |
+| 2.6 | `web/app.js` | 输入历史（↑/↓ 键，localStorage 存储最近 50 条） | ✅ 已完成 |
+| 2.7 | `web/app.js` | 打字机效果优化（自适应速度、代码块快速揭示） | ✅ 已完成 |
 
 ### Phase 3：功能增强
 
-| 步骤 | 文件 | 工作内容 |
+| 步骤 | 文件 | 工作内容 | 状态 |
 | --- | --- | --- |
-| 3.1 | `web/app.js` + `web/style.css` | 推理过程折叠面板（`<details>`） |
-| 3.2 | `web/app.js` + `web/style.css` | 审批面板模态框改造 |
-| 3.3 | `web/app.js` + `web/style.css` | 图像生成预览（`image_progress` 事件监听） |
-| 3.4 | `web/app.js` | 键盘快捷键支持（Enter/↑/↓/Ctrl+K/Esc/Ctrl+L） |
-| 3.5 | `web_handlers.go` + `web/app.js` | 可选：会话删除/重命名端点 |
+| 3.1 | `web/app.js` + `web/style.css` | 推理过程折叠面板（`<details>`） | ✅ 已完成 |
+| 3.2 | `web/app.js` + `web/style.css` | 审批面板模态框改造（居中覆盖、详情展开/折叠、关闭按钮） | ✅ 已完成 |
+| 3.3 | `web/app.js` + `web/style.css` + `web_schema.go` | 图像生成预览（`image_progress` 事件监听 + 后端 image 字段透传） | ✅ 已完成 |
+| 3.4 | `web/app.js` | 键盘快捷键支持（Enter 发送 / ↑↓ 历史 / Ctrl+K 清空 / Esc 中断 / Ctrl+L 切换主题） | ✅ 已完成 |
+| 3.5 | `web_handlers.go` + `web/app.js` | 可选：会话删除/重命名端点 | ⏳ 待实现 |
 
 ### Phase 4：测试与稳定性
 
-| 步骤 | 内容 |
+| 步骤 | 内容 | 状态 |
 | --- | --- |
-| 4.1 | 更新 `TestHandleChatWebPage` 验证嵌入内容 |
-| 4.2 | 新增 Markdown 渲染测试（Node.js 语法校验） |
-| 4.3 | 消息历史持久化验证（SSE 重连后恢复） |
-| 4.4 | `-race` 测试 |
-| 4.5 | 手动端到端测试（浏览器打开页面，观察交互） |
+| 4.1 | 更新 `TestHandleChatWebPage` 验证嵌入内容 | ✅ 已完成 |
+| 4.2 | 新增 SSE 事件映射测试（`chatWebSSEDataForEvent` image 字段断言） | ✅ 已完成 |
+| 4.3 | 消息历史持久化验证（SSE 重连后恢复） | ⏳ 待验证 |
+| 4.4 | `-race` 测试 | ✅ 已完成 |
+| 4.5 | 手动端到端测试（浏览器打开页面，观察交互） | ⏳ 待执行 |
 
 ---
 

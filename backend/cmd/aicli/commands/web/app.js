@@ -12,9 +12,12 @@
   var tabLogBtn = document.getElementById("tab-log-btn");
   var tabMainEl = document.getElementById("tab-main");
   var tabLogEl = document.getElementById("tab-log");
-  var approvalPanel = document.getElementById("approval-panel");
+  var approvalOverlay = document.getElementById("approval-overlay");
+  var approvalModalTitle = document.getElementById("approval-modal-title");
   var approvalPrompt = document.getElementById("approval-prompt");
-  var approvalTitle = document.getElementById("approval-title");
+  var approvalDetail = document.getElementById("approval-detail");
+  var detailToggleBtn = document.getElementById("detail-toggle");
+  var approvalModalCloseBtn = document.getElementById("approval-modal-close");
   var approveBtn = document.getElementById("approve-btn");
   var denyBtn = document.getElementById("deny-btn");
   var questionSuggestionsEl = document.getElementById("question-suggestions");
@@ -24,6 +27,7 @@
   var sessionsRefreshBtn = document.getElementById("sessions-refresh-btn");
   var sessionsSortEl = document.getElementById("sessions-sort");
   var sessionListEl = document.getElementById("session-list");
+  var themeToggleBtn = document.getElementById("theme-toggle");
 
   var pendingApprovalRequestID = null;
   var pendingQuestionID = null;
@@ -50,12 +54,40 @@
     if (Array.isArray(savedHistory)) { inputHistory = savedHistory.slice(0, 50); }
   } catch (e) { /* ignore */ }
 
+  // ---- 主题：深色/浅色（localStorage 记忆，默认跟随系统） ----
+  var themeMode = "auto"; // auto | light | dark
+  try {
+    var savedTheme = localStorage.getItem("webTheme");
+    if (savedTheme === "light" || savedTheme === "dark" || savedTheme === "auto") { themeMode = savedTheme; }
+  } catch (e) { /* ignore */ }
+
+  function applyTheme() {
+    var root = document.documentElement;
+    // 显式深/浅：设置 class；auto：跟随系统（由 CSS prefers-color-scheme 决定）
+    root.classList.toggle("light", themeMode === "light");
+    root.classList.toggle("dark", themeMode === "dark");
+    if (themeToggleBtn) {
+      themeToggleBtn.textContent = themeMode === "light" ? "☀" : (themeMode === "dark" ? "☾" : "◐");
+      themeToggleBtn.title = "主题: " + themeMode + "（点击切换，Ctrl+L）";
+    }
+  }
+
+  function toggleTheme() {
+    // auto → light → dark → auto 循环
+    themeMode = themeMode === "auto" ? "light" : (themeMode === "light" ? "dark" : "auto");
+    try { localStorage.setItem("webTheme", themeMode); } catch (e) { /* ignore */ }
+    applyTheme();
+  }
+
+  applyTheme();
+
   // ---- 打字机状态（实时逐字揭示） ----
   var streamActive = false;          // turn_start → turn_end
   var streamEnded = false;           // turn_end 已到达，等待打字机揭示完成
   var streamReasoning = "";          // 推理文本（完整累积）
   var streamText = "";               // 助手文本（完整累积）
   var streamTool = "";               // 当前工具指示
+  var streamImages = [];             // 已渲染图像（assistant_image_progress，按 src 去重）
   var streamRevealed = 0;            // streamText 已显示的字符数
   var streamReasoningRevealed = 0;   // streamReasoning 已显示行数
   var typeTimer = null;              // 打字机定时器句柄
@@ -157,10 +189,13 @@ function startTypeTimer() {
   function renderMarkdown(text) {
     if (!text) return "";
     var html = esc(text);
-    // 代码块（```...```）
+    // 代码块（```...```）→ <pre> + 复制按钮 + 语言标签 + <code>
+    // 复制行为由 #stream-msg 上的事件委托处理（读取 <code> 文本）。
     html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, function (_, lang, code) {
-      var langClass = lang ? ' class="lang-' + lang + '"' : '';
-      return '<pre><code' + langClass + '>' + esc(code.trim()) + '</code></pre>';
+      var label = lang ? '<span class="lang-label">' + lang + '</span>' : '';
+      return '<pre><button class="copy-code-btn" type="button" title="复制代码">复制</button>'
+        + label + '<code class="lang-' + (lang || 'text') + '">'
+        + esc(code.trim()) + '</code></pre>';
     });
     // 行内代码（`...`）
     html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
@@ -192,6 +227,10 @@ function startTypeTimer() {
 
   function renderStream() {
     var parts = [];
+    // 图像预览（assistant_image_progress）
+    streamImages.forEach(function (src) {
+      parts.push('<div class="image-preview"><img src="' + esc(src) + '" alt="生成图像" loading="lazy"></div>');
+    });
     if (streamReasoningRevealed > 0) {
       var reasoningHtml = renderMarkdown(streamReasoning.substring(0, streamReasoningRevealed));
       parts.push('<details class="reasoning-block" open>');
@@ -222,6 +261,7 @@ function startTypeTimer() {
     streamText = "";
     streamRevealed = 0;
     streamTool = "";
+    streamImages = [];
     // 确保 streamMsgEl 引用有效，并显示在 screen 下方（信息流模式：不覆盖历史）
     if (!streamMsgEl) {
       streamMsgEl = document.getElementById("stream-msg");
@@ -333,32 +373,44 @@ function startTypeTimer() {
   }
 
   function hideApproval() {
-    approvalPanel.style.display = "none";
+    if (approvalOverlay) { approvalOverlay.classList.remove("active"); }
     pendingApprovalRequestID = null;
     pendingQuestionID = null;
     questionSuggestionsEl.innerHTML = "";
     approveBtn.style.display = "";
     denyBtn.style.display = "";
+    if (approvalDetail) { approvalDetail.classList.remove("open"); approvalDetail.textContent = ""; }
+    if (detailToggleBtn) { detailToggleBtn.textContent = "显示详情"; detailToggleBtn.style.display = ""; }
   }
 
   function showApproval(data) {
     pendingApprovalRequestID = (data && data.request_id) || null;
     pendingQuestionID = null;
-    approvalTitle.textContent = "待审批工具: " + (data && data.tool_name || "?");
+    approvalModalTitle.textContent = "待审批工具: " + (data && data.tool_name || "?");
     approvalPrompt.innerHTML = renderMarkdown((data && data.prompt) || "");
     questionSuggestionsEl.innerHTML = "";
     approveBtn.style.display = "";
     denyBtn.style.display = "";
-    approvalPanel.style.display = "block";
+    if (detailToggleBtn) { detailToggleBtn.style.display = ""; }
+    if (approvalDetail) {
+      var args = (data && data.arguments) || "";
+      if (typeof args === "object") { args = JSON.stringify(args, null, 2); }
+      approvalDetail.textContent = args || "";
+      approvalDetail.classList.remove("open");
+    }
+    if (detailToggleBtn) { detailToggleBtn.textContent = "显示详情"; }
+    if (approvalOverlay) { approvalOverlay.classList.add("active"); }
   }
 
   function showQuestion(data) {
     pendingQuestionID = (data && data.question_id) || null;
     pendingApprovalRequestID = null;
-    approvalTitle.textContent = "问题: " + (pendingQuestionID || "?");
+    approvalModalTitle.textContent = "问题: " + (pendingQuestionID || "?");
     approvalPrompt.innerHTML = renderMarkdown((data && data.prompt) || "");
     approveBtn.style.display = "none";
     denyBtn.style.display = "none";
+    if (detailToggleBtn) { detailToggleBtn.style.display = "none"; }
+    if (approvalDetail) { approvalDetail.classList.remove("open"); approvalDetail.textContent = ""; }
     // 建议项渲染为可点击按钮，点击即作为回答提交。
     questionSuggestionsEl.innerHTML = "";
     var suggestions = (data && data.suggestions) || [];
@@ -372,7 +424,7 @@ function startTypeTimer() {
       });
       questionSuggestionsEl.appendChild(btn);
     });
-    approvalPanel.style.display = "block";
+    if (approvalOverlay) { approvalOverlay.classList.add("active"); }
   }
 
   function sendQuestionAnswer(answer) {
@@ -640,6 +692,17 @@ function startTypeTimer() {
           renderStream();
         }
         break;
+      case "assistant_image_progress":
+        // 图像生成进度：提取可预览的 URL/base64 并渲染到流式消息中。
+        if (streamActive && data) {
+          var img = data.image || data;
+          var src = (img && typeof img === "object") ? (img.url || img.b64_data || img.data || "") : "";
+          if (src && streamImages.indexOf(src) === -1) {
+            streamImages.push(src);
+            renderStream();
+          }
+        }
+        break;
       case "turn_end":
         setTurn("就绪");
         setUI("idle", "");
@@ -698,7 +761,7 @@ function startTypeTimer() {
     };
     ["connected", "heartbeat", "screen_refresh", "turn_start", "turn_delta", "turn_end",
      "session_start", "session_end", "session_interrupted", "reasoning_delta",
-     "assistant_delta", "tool_start", "tool_end", "approval_requested",
+     "assistant_delta", "assistant_image_progress", "tool_start", "tool_end", "approval_requested",
      "approval_resolved", "question_asked", "question_answered"].forEach(function (name) {
       es.addEventListener(name, function (e) {
         var data = {};
@@ -733,19 +796,19 @@ function startTypeTimer() {
     // idle 状态
     var text = promptEl.value.trim();
     if (!text) { return; }
-    if (pendingQuestionID) {
-      if (!text) { sendStatusEl.textContent = "请输入回答"; return; }
-      sendQuestionAnswer(text);
-      promptEl.value = "";
-      return;
-    }
-    if (approvalPanel.style.display === "block" && pendingApprovalRequestID) {
-      sendStatusEl.textContent = "请使用允许/拒绝按钮";
-      return;
-    }
-    setUI("posting", "发送中…");
-    sendInput({ prompt: text });
-  });
+   if (pendingQuestionID) {
+     if (!text) { sendStatusEl.textContent = "请输入回答"; return; }
+     sendQuestionAnswer(text);
+     promptEl.value = "";
+     return;
+   }
+   if (approvalOverlay && approvalOverlay.classList.contains("active") && pendingApprovalRequestID) {
+     sendStatusEl.textContent = "请使用允许/拒绝按钮";
+     return;
+   }
+   setUI("posting", "发送中…");
+   sendInput({ prompt: text });
+ });
 
   promptEl.addEventListener("input", function () {
     if (uiState === "idle") { renderButton(); }
@@ -778,25 +841,38 @@ function startTypeTimer() {
       }
       return;
     }
+    if ((e.ctrlKey || e.metaKey) && (e.key === "l" || e.key === "L")) {
+      // Ctrl+L：切换深色/浅色主题
+      e.preventDefault();
+      toggleTheme();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")) {
+      // Ctrl+K：清空当前对话视图（仅清除本地屏幕显示，不影响会话历史）
+      e.preventDefault();
+      screenEl.textContent = "";
+      if (streamMsgEl) { streamMsgEl.innerHTML = ""; }
+      return;
+    }
     if (e.key !== "Enter") { return; }
     if (uiState === "posting" || uiState === "interrupting") { return; }
     if (uiState === "busy") {
       // 执行中：Enter 排队下一条消息（不中断当前任务）；按钮点击才触发停止。
       var text = promptEl.value.trim();
       if (!text) { return; }
-      if (pendingQuestionID) {
-        sendQuestionAnswer(text);
-        promptEl.value = "";
-        return;
-      }
-      if (approvalPanel.style.display === "block" && pendingApprovalRequestID) {
-        sendStatusEl.textContent = "请使用允许/拒绝按钮";
-        return;
-      }
-      sendInput({ prompt: text });
-      return;
-    }
-    sendBtn.click();
+     if (pendingQuestionID) {
+       sendQuestionAnswer(text);
+       promptEl.value = "";
+       return;
+     }
+     if (approvalOverlay && approvalOverlay.classList.contains("active") && pendingApprovalRequestID) {
+       sendStatusEl.textContent = "请使用允许/拒绝按钮";
+       return;
+     }
+     sendInput({ prompt: text });
+     return;
+   }
+   sendBtn.click();
   });
 
   approveBtn.addEventListener("click", function () {
@@ -828,6 +904,52 @@ function startTypeTimer() {
       sessionsSort = sessionsSortEl.value === "updated_at" ? "updated_at" : "created_at";
       try { localStorage.setItem("webSessionSort", sessionsSort); } catch (e) { /* ignore */ }
       loadSessions();
+    });
+  }
+
+  // ---- 主题切换按钮 ----
+  if (themeToggleBtn) {
+    themeToggleBtn.addEventListener("click", function () { toggleTheme(); });
+  }
+
+  // ---- 审批模态框：关闭 / 详情展开 ----
+  if (approvalModalCloseBtn) {
+    approvalModalCloseBtn.addEventListener("click", function () { hideApproval(); });
+  }
+  // 点击遮罩空白处关闭（但需有活动审批时；question/approval 均适用）
+  if (approvalOverlay) {
+    approvalOverlay.addEventListener("click", function (e) {
+      if (e.target === approvalOverlay) { hideApproval(); }
+    });
+  }
+  if (detailToggleBtn) {
+    detailToggleBtn.addEventListener("click", function () {
+      if (!approvalDetail) { return; }
+      var open = approvalDetail.classList.toggle("open");
+      detailToggleBtn.textContent = open ? "隐藏详情" : "显示详情";
+    });
+  }
+
+  // ---- 代码块复制按钮（事件委托，复制 <code> 文本） ----
+  if (streamMsgEl) {
+    streamMsgEl.addEventListener("click", function (e) {
+      var t = e.target;
+      var btn = (t && t.closest) ? t.closest(".copy-code-btn") : null;
+      if (!btn) { return; }
+      var codeEl = btn.parentNode ? btn.parentNode.querySelector("code") : null;
+      if (!codeEl) { return; }
+      var codeText = codeEl.textContent || "";
+      if (!navigator.clipboard) {
+        sendStatusEl.textContent = "复制失败（浏览器不支持剪贴板）";
+        return;
+      }
+      navigator.clipboard.writeText(codeText).then(function () {
+        var old = btn.textContent;
+        btn.textContent = "✓ 已复制";
+        setTimeout(function () { btn.textContent = old; }, 1500);
+      }).catch(function () {
+        sendStatusEl.textContent = "复制失败";
+      });
     });
   }
 

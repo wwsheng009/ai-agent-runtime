@@ -623,6 +623,27 @@ func TestChatWebSSEDataForEvent(t *testing.T) {
 	if data5["content"] != "raw thinking" {
 		t.Fatalf("reasoning string→content failed: %#v", data5)
 	}
+
+	// 6) assistant_image_progress 透传 image 元数据（含 URL 时前端可直接预览）
+	data6 := chatWebSSEDataForEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantImageProgress,
+		SessionID: "s1",
+		Payload: map[string]interface{}{
+			"turn_id": "t1",
+			"status":  "generating",
+			"image": map[string]interface{}{
+				"phase": "sampling", "image_id": "img-1", "progress": 0.5,
+				"url": "data:image/png;base64,AAAA",
+			},
+		},
+	})
+	if data6["status"] != "generating" {
+		t.Fatalf("image_progress status failed: %#v", data6)
+	}
+	img, ok := data6["image"].(map[string]interface{})
+	if !ok || img["image_id"] != "img-1" || img["url"] != "data:image/png;base64,AAAA" {
+		t.Fatalf("image_progress image field not passed through: %#v", data6)
+	}
 }
 
 func TestChatWebConnectedPayload_NoSession(t *testing.T) {

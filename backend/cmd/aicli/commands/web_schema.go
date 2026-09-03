@@ -156,6 +156,9 @@ func chatWebSSEDataForEvent(ev runtimeevents.Event) map[string]interface{} {
 	case runtimechat.EventAssistantImageProgress:
 		pickField(data, payload, "turn_id")
 		pickField(data, payload, "status")
+		// 透传 image 元数据（phase/image_id/response_id 等；含 URL/base64 时
+		// 前端可直接预览，否则仅作进度提示）。
+		pickField(data, payload, "image")
 
 	case runtimechat.EventLLMRequestFinished, "llm.request.finished":
 		// turn_end

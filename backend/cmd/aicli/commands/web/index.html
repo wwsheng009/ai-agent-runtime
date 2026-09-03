@@ -10,6 +10,7 @@
 <header>
   <h1>aicli micro web client</h1>
   <button id="sidebar-toggle" type="button" title="折叠/展开会话列表">☰</button>
+  <button id="theme-toggle" type="button" title="切换深色/浅色主题（Ctrl+L）">☾</button>
   <span id="connection-status">connecting</span>
   <span id="turn-status">-</span>
 </header>
@@ -29,12 +30,24 @@
   </aside>
 
   <div id="main-col">
-    <div id="approval-panel">
-      <div id="approval-title">待处理请求</div>
-      <div id="approval-prompt" class="prompt"></div>
-      <div id="question-suggestions"></div>
-      <button id="approve-btn">允许</button>
-      <button id="deny-btn">拒绝</button>
+    <!-- 审批模态框：替换原内联 approval-panel -->
+    <div id="approval-overlay">
+      <div id="approval-modal">
+        <div id="approval-modal-header">
+          <span id="approval-modal-title">待处理请求</span>
+          <button id="approval-modal-close" class="modal-close" type="button" title="关闭">✕</button>
+        </div>
+        <div id="approval-modal-body">
+          <div id="approval-prompt" class="approval-prompt"></div>
+          <div id="question-suggestions"></div>
+          <button id="detail-toggle" class="detail-toggle" type="button">显示详情</button>
+          <div id="approval-detail" class="approval-detail"></div>
+        </div>
+        <div id="approval-modal-footer">
+          <button id="deny-btn" class="deny-btn">拒绝</button>
+          <button id="approve-btn" class="approve-btn">允许</button>
+        </div>
+      </div>
     </div>
 
     <div class="tabs">
