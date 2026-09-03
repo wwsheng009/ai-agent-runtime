@@ -709,7 +709,7 @@ function startTypeTimer() {
       });
   }
 
-  function refreshScreen() {
+  function refreshScreen(forceClear) {
     fetch("/web/api/screen?format=json", { cache: "no-store" })
       .then(function (res) { return res.ok ? res.json() : null; })
       .then(function (data) {
@@ -717,6 +717,11 @@ function startTypeTimer() {
         if (!data || !data.available) {
           // 无可用屏幕快照（无 surface / 空帧）：保留 screenEl 已有内容
           // （finishStream 已写入流式累积文本），不覆盖为 "(empty)"。
+          // 会话切换（新建/恢复）后旧会话内容不应残留：forceClear 时清空。
+          if (forceClear) {
+            screenEl.textContent = "";
+            if (streamMsgEl) { streamMsgEl.style.display = "none"; }
+          }
           scrollToBottom();
           updateWelcome();
           return;
@@ -1204,8 +1209,9 @@ function startTypeTimer() {
                   var cur = data.current_session_id || "";
                   if (cur === id || ++attempts >= 8) {
                     sessions = data.sessions || [];
+                    localPendingPrompts = []; // 旧会话的本地回显不带到被恢复会话
                     renderSessionList();
-                    refreshScreen();
+                    refreshScreen(true);
                     sendStatusEl.textContent = cur === id ? "已切换" : "已切换(状态未同步)";
                   } else {
                     setTimeout(pollResumed, 300);
@@ -1249,8 +1255,9 @@ function startTypeTimer() {
                 var cur = data.current_session_id || "";
                 if ((cur !== "" && cur !== oldID) || ++attempts >= 8) {
                   sessions = data.sessions || [];
+                  localPendingPrompts = []; // 旧会话的本地回显不带到新会话
                   renderSessionList();
-                  refreshScreen();
+                  refreshScreen(true);
                   if (sessionsNewBtn) { sessionsNewBtn.disabled = false; }
                   sendStatusEl.textContent = (cur !== "" && cur !== oldID) ? "已新建会话" : "已新建(状态未同步)";
                 } else {
@@ -1370,7 +1377,7 @@ function startTypeTimer() {
         localPendingPrompts = []; // 旧会话的本地回显不带到新会话
         loadSessions();
         endStream();
-        refreshScreen();
+        refreshScreen(true);
         break;
       case "error":
         setUI("idle", "发生错误");

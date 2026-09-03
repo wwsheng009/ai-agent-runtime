@@ -242,14 +242,14 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
   border-radius: 0; padding: 2px 0; font-size: 11px;
 }
 
-/* 系统：居中胶囊提示条 */
-#screen .msg-row.msg-system { align-items: center; }
+/* 系统：左对齐弱化提示块（克制圆角，不再是居中胶囊） */
+#screen .msg-row.msg-system { align-items: flex-start; }
 #screen .msg-row.msg-system .msg-label { color: var(--fg4); }
 #screen .msg-row.msg-system .msg-body {
   color: var(--fg4); background: var(--bg3);
-  border: 1px solid var(--border); border-radius: 999px;
-  padding: 2px 14px; font-size: 12px; font-style: italic;
-  text-align: center; max-width: 100%;
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 10px; font-size: 12px; font-style: italic;
+  text-align: left; max-width: 100%;
 }
 .tabs { display: flex; gap: 6px; margin-top: 8px; border-bottom: 1px solid var(--border); }
 .tab-btn {
