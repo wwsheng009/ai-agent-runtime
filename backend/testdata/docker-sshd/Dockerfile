@@ -13,6 +13,12 @@ RUN sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/
     sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config && \
     echo 'KbdInteractiveAuthentication yes' >> /etc/ssh/sshd_config
 
+# 证书认证：信任 CA（TrustedUserCAKeys），允许 CA 签发的用户证书登录
+COPY keys/ca_ed25519.pub /etc/ssh/ca_ed25519.pub
+RUN chmod 644 /etc/ssh/ca_ed25519.pub && \
+    echo 'TrustedUserCAKeys /etc/ssh/ca_ed25519.pub' >> /etc/ssh/sshd_config && \
+    echo 'PubkeyAuthentication yes' >> /etc/ssh/sshd_config
+
 # 创建测试数据目录
 RUN mkdir -p /home/testuser/data && \
     echo 'hello from remote container' > /home/testuser/data/hello.txt && \
