@@ -1,7 +1,10 @@
 version: "v1"
 
-# Windows 7 uses the Go 1.20-compatible SQLite driver. Keep its session
-# database (and WAL/SHM sidecars) separate from the main build's newer driver.
+# Windows 7 uses the Go 1.21.4 toolchain with go-sqlite3 v0.22.0
+# (same driver version as the main build). The session database is
+# kept separate from the main build to avoid multi-process WAL lock
+# contention between aicli (writes master) and runtime-server (reads
+# a periodically refreshed read-replica).
 sessions:
   # Read-replica mode: the runtime server reads from a private copy of the
   # master session-history database. aicli holds the master's WAL/-shm file

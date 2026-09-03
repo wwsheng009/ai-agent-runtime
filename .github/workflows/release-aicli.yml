@@ -24,11 +24,11 @@ permissions:
 
 env:
   GO_VERSION: '1.24.2'
-  # Windows 7 兼容构建：Go 1.20 + 独立依赖图 go.win7.mod + win7compat tag。
+  # Windows 7 兼容构建：Go 1.21.4 + 独立依赖图 go.win7.mod + win7compat tag。
   # 主线 go 1.24 产物调用 ConPTY 等 Win10+ 才存在的系统 API，Win7 上
   # 启动即崩溃（0xc0000005）；兼容产物由本 workflow 的 build-win7 job
   # 随每次 v* 发布附带。
-  WIN7_GO_VERSION: '1.20.14'
+  WIN7_GO_VERSION: '1.21.4'
   WIN7_MODFILE: go.win7.mod
   WIN7_BUILD_TAGS: win7compat
   NODE_VERSION: '24'
@@ -565,8 +565,8 @@ jobs:
           retention-days: 14
 
   build-win7:
-    name: Build Windows 7 compatible aicli (Go 1.20)
-    # 独立 job：Go 1.20.14 + go.win7.mod（降级依赖图）+ win7compat build tag
+    name: Build Windows 7 compatible aicli (Go 1.21.4)
+    # 独立 job：Go 1.21.4 + go.win7.mod（降级依赖图）+ win7compat build tag
     # （裁剪要求更高 Go 版本的 MCP 依赖）产出可在 Windows 7 上运行的 aicli.exe。
     # 与主线矩阵隔离，不共享 go.sum 缓存（依赖图不同）。
     needs: [validate, release-gate]
@@ -586,7 +586,7 @@ jobs:
           cache: true
           cache-dependency-path: ${{ env.WORKDIR }}/${{ env.WIN7_MODFILE }}.sum
 
-      - name: Test Go 1.20 compatibility shims and console launcher
+      - name: Test Go 1.21.4 compatibility shims and console launcher
         working-directory: ${{ env.WORKDIR }}
         run: |
           set -euo pipefail
@@ -647,7 +647,7 @@ jobs:
             go build -tags ${{ env.WIN7_BUILD_TAGS }} -mod=mod -trimpath \
             -ldflags "-s -w -X github.com/wwsheng009/ai-agent-runtime/internal/buildinfo.version=${VERSION} -X github.com/wwsheng009/ai-agent-runtime/internal/buildinfo.buildTime=${BUILD_TIME}" \
             -o dist/runtime-server-win7.exe ${RUNTIME_SERVER_CMD_PATH}
-          # go version -m 的首行为 "<binary>: go1.20.14"。检查主程序、
+          # go version -m 的首行为 "<binary>: go1.21.4"。检查主程序、
           # 原生 Console 启动器和 runtime-server，避免把 Go 1.24 产物误发给
           # Windows 7。
           for binary in dist/aicli-win7.exe dist/aicli-console-win7.exe dist/runtime-server-win7.exe; do

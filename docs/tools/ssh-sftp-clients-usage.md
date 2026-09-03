@@ -456,7 +456,7 @@ GOOS=linux GOARCH=amd64 go build -o sftp-client-linux ./cmd/sftp-client/
 ### Windows 7 兼容构建
 
 ```powershell
-# 一键构建脚本（自动设置 Go 1.20.14、go.win7.mod、win7compat tag）
+# 一键构建脚本（自动设置 Go 1.21.4、go.win7.mod、win7compat tag）
 pwsh -File ./scripts/build-ssh-sftp-clients-win7.ps1 -Version win7-v1.0.0
 
 # 等价写法：统一构建脚本（还支持 ssh-keygen，以及 -Target windows/both）
@@ -466,8 +466,8 @@ pwsh -File ./scripts/build.ps1 -Target win7 -Tools ssh-client,sftp-client,ssh-ke
 ```
 
 Win7 构建使用 `go.win7.mod` 中的降级依赖与 `-tags win7compat`，确保兼容
-Windows 7 系统。构建环境要求 Go 1.20.14 工具链（脚本自动设置
-`GOTOOLCHAIN=go1.20.14`）。
+Windows 7 系统。构建环境要求 Go 1.21.4 工具链（脚本自动设置
+`GOTOOLCHAIN=go1.21.4`）。
 
 详细说明见 [Windows 7 构建文档](../aicli/windows7-build.md) 和
 [开发指南](../development-guidelines.md)。
@@ -485,7 +485,7 @@ Win7 构建产物：
 - Go 1.22+
 - `golang.org/x/crypto`（SSH 协议实现）
 - `github.com/spf13/pflag`（命令行参数解析）
-Win7 构建额外依赖：Go 1.20.14、`golang.org/x/crypto v0.33.0`、`go.win7.mod`。
+Win7 构建额外依赖：Go 1.21.4、`golang.org/x/crypto v0.33.0`、`go.win7.mod`。
 
 ---
 

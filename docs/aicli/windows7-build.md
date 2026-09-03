@@ -11,7 +11,10 @@ ConPTY），普通包在 Win7 上启动即崩溃（`Exception 0xc0000005 PC=0x0`
 
 因此 Win7 兼容包使用独立的构建配方：
 
-- 工具链固定 **Go 1.20.14**（最后一个官方支持 Windows 7 的 Go 版本）；
+- 工具链固定 **Go 1.21.4**（Win7 可用的最后一代 Go 1.21 系列；
+  Go 1.21 是官方支持 Windows 7 的最后一个版本，且 Go 1.21.5+ 因
+  `GetSystemTimePreciseAsFileTime` 回归在 Win7 上无法运行，见
+  golang/go#64622）；
 - 依赖图走 **`go.win7.mod`**（降级依赖，独立维护，独立 `go.win7.sum`）；
 - 编译时带 **`-tags win7compat`**，启用 `//go:build win7compat` 的兼容实现
   并裁剪要求更高 Go 版本的特性（如 MCP 集成）；
@@ -22,7 +25,7 @@ ConPTY），普通包在 Win7 上启动即崩溃（`Exception 0xc0000005 PC=0x0`
 | 维度 | 标准构建 | Win7 构建 |
 | --- | --- | --- |
 | 代码分支 | `main` | `main`（兼容代码已全部合入 main，**无需切分支**） |
-| 工具链 | Go 1.24（`go.mod` 声明） | Go 1.20.14（`GOTOOLCHAIN` 固定） |
+| 工具链 | Go 1.24（`go.mod` 声明） | Go 1.21.4（`GOTOOLCHAIN` 固定） |
 | 依赖图 | `backend/go.mod` + `go.sum` | `backend/go.win7.mod` + `go.win7.sum` |
 | build tag | 无 | `-tags win7compat` |
 | CGO | 允许 | `CGO_ENABLED=0` |
@@ -44,12 +47,12 @@ ConPTY），普通包在 Win7 上启动即崩溃（`Exception 0xc0000005 PC=0x0`
    `backend/go.win7.sum`、`backend/configs/runtime.win7.yaml`、
    `.github/workflows/build-aicli-win7.yml` 均在 main 上）。
 2. **Go 工具链**：任选其一
-   - 本机装有 Go 1.21+（如 1.24），用 `GOTOOLCHAIN=go1.20.14` 让 go 命令
-     自动下载并使用 Go 1.20.14（推荐，无需手动安装）；
-   - 或手动安装 Go 1.20.14，并保证 `go version` 输出为 `go1.20.14`。
+   - 本机装有 Go 1.21+（如 1.24），用 `GOTOOLCHAIN=go1.21.4` 让 go 命令
+     自动下载并使用 Go 1.21.4（推荐，无需手动安装）；
+   - 或手动安装 Go 1.21.4，并保证 `go version` 输出为 `go1.21.4`。
    > Go 1.20 的 go 命令本身不认识 `GOTOOLCHAIN`，该变量由启动的 go 1.21+
-   > 解释后再切换到 1.20.14 执行构建，所以 `GOTOOLCHAIN` 写法在 1.21+ 主机上有效。
-3. **网络**：首次构建需下载 go 1.20.14 工具链与 `go.win7.mod` 的依赖
+   > 解释后再切换到 1.21.4 执行构建，所以 `GOTOOLCHAIN` 写法在 1.21+ 主机上有效。
+3. **网络**：首次构建需下载 Go 1.21.4 工具链与 `go.win7.mod` 的依赖
    （国内网络建议先配置 `GOPROXY`）。
 
 ## 4. 编译
@@ -68,19 +71,19 @@ ConPTY），普通包在 Win7 上启动即崩溃（`Exception 0xc0000005 PC=0x0`
 
 ```bash
 # 主 CLI（可注入版本号，与 CI 一致）
-GOTOOLCHAIN=go1.20.14 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+GOTOOLCHAIN=go1.21.4 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
 GOFLAGS="-modfile=go.win7.mod" \
 go build -tags win7compat -trimpath \
   -ldflags "-s -w -X main.version=win7-dev -X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   -o dist/aicli-win7.exe ./cmd/aicli
 
 # 控制台前端
-GOTOOLCHAIN=go1.20.14 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+GOTOOLCHAIN=go1.21.4 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
 GOFLAGS="-modfile=go.win7.mod" \
 go build -tags win7compat -trimpath -o dist/aicli-console-win7.exe ./cmd/aicli-console
 
 # runtime server（版本注入走 internal/buildinfo，与主线 release workflow 一致）
-GOTOOLCHAIN=go1.20.14 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+GOTOOLCHAIN=go1.21.4 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
 GOFLAGS="-modfile=go.win7.mod" \
 go build -tags win7compat -trimpath \
   -ldflags "-s -w -X github.com/wwsheng009/ai-agent-runtime/internal/buildinfo.version=win7-dev -X github.com/wwsheng009/ai-agent-runtime/internal/buildinfo.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -90,7 +93,7 @@ go build -tags win7compat -trimpath \
 ### 4.2 PowerShell
 
 ```powershell
-$env:GOTOOLCHAIN = 'go1.20.14'
+$env:GOTOOLCHAIN = 'go1.21.4'
 $env:GOOS = 'windows'
 $env:GOARCH = 'amd64'
 $env:CGO_ENABLED = '0'
@@ -129,7 +132,7 @@ pwsh -File ./scripts/build.ps1 -Target both -Tools all -Version v1.2.3
 ```
 
 `-Target` 取值为 `windows`（主线 go.mod + 当前 Go 工具链）、`win7`
-（Go 1.20.14 + `go.win7.mod` + `win7compat` tag + `CGO_ENABLED=0`）、
+（Go 1.21.4 + `go.win7.mod` + `win7compat` tag + `CGO_ENABLED=0`）、
 `both`（默认，两套都构建）。`-Tools` 默认 `all`，逗号分隔指定子集；
 产物命名 `windows -> <tool>.exe`、`win7 -> <tool>-win7.exe`，写入
 `backend/dist/`（可用 `-OutputDir` 覆盖），每个 exe 旁生成 `.sha256`。
@@ -153,7 +156,7 @@ Win7 专用 Go 环境限制在自身进程内，不会污染调用者的环境�
 `windows/amd64` 交叉编译。
 
 所有脚本默认把产物写入 `backend/dist/`，并为每个 exe 生成 `.sha256` 校验文件；
-构建完成前还会检查 PE 的 `MZ` 魔数和 `go version -m` 的 `go1.20.14`。
+构建完成前还会检查 PE 的 `MZ` 魔数和 `go version -m` 的 `go1.21.4`。
 默认会执行对应的 Win7 回归测试；只想快速编译时可加 `-SkipTests`，依赖图已经
 确认过且希望跳过 `go list` / `go mod verify` 时再加 `-SkipDependencyCheck`。
 例如：
@@ -182,7 +185,7 @@ runtime-server 程序默认会把 `frontend/dist` 的生产前端打包进 Win7 
 ## 5. 验证产物
 
 ```bash
-# 1) 工具链确认：首行必须为 go1.20.14
+# 1) 工具链确认：首行必须为 go1.21.4
 go version -m dist/aicli-win7.exe | sed -n '1,4p'
 
 # 2) PE 头魔数：必须是 MZ（说明是有效 Windows 可执行文件）
@@ -199,7 +202,7 @@ aicli-win7.exe version
 aicli-win7.exe chat --help
 ```
 
-启动即 `0xc0000005 PC=0x0` 通常意味着产物不是用 Go 1.20 + `win7compat`
+启动即 `0xc0000005 PC=0x0` 通常意味着产物不是用 Go 1.21.4 + `win7compat`
 构建（例如拿普通包或遗漏了 build tag）。
 
 ## 6. 测试
@@ -249,7 +252,7 @@ configs\
 
 | 现象 | 原因与处理 |
 | --- | --- |
-| 启动即 `0xc0000005 PC=0x0` | 产物不是 Go 1.20 + `win7compat` 构建：确认 `-tags win7compat` 与 `-modfile=go.win7.mod` 都在，`go version -m` 首行是 `go1.20.14` |
+| 启动即 `0xc0000005 PC=0x0` | 产物不是 Go 1.21.4 + `win7compat` 构建：确认 `-tags win7compat` 与 `-modfile=go.win7.mod` 都在，`go version -m` 首行是 `go1.21.4` |
 | 编译报错依赖版本冲突 / 找不到模块 | 漏了 `GOFLAGS="-modfile=go.win7.mod"`，走的是标准依赖图；或 `go.win7.mod` 与 `go.win7.sum` 不同步（用 `go mod tidy -modfile=go.win7.mod` 单独维护） |
 | 编译报 Go 1.21+ API | main 上新代码使用了 Win7 构建禁止的 API。按 `go.win7.mod` 的依赖约束降级实现，并保证标准构建不受影响 |
 | 误用 `go mod tidy` 后 `go.win7.*` 被改 | 独立维护：`go mod tidy -modfile=go.win7.mod`，且不要在没有 `-modfile` 的情况下 tidy |
@@ -261,8 +264,9 @@ configs\
 
 - 推送 `win7-*` 格式的 tag 时自动编译并发布 Release（`win7-v1.2.3` 等）；
 - 也可在 Actions 页面手动触发（`workflow_dispatch`），只产出构建工件不发布；
-- 步骤：Setup Go 1.20.14 → 单元测试 → 三个命令编译（含版本注入）→
+- 步骤：Setup Go 1.21.4 → 单元测试 → 三个命令编译（含版本注入）→
   PE/工具链校验 → 打包 zip + sha256 → 上传工件 / 发布 Release。
 
 本地编译出现与 CI 不一致的结果时，以 CI 的 `GO_VERSION` / `MODFILE` /
 `BUILD_TAGS` / `CGO_ENABLED` 环境变量为准逐项核对。
+

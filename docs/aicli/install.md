@@ -94,7 +94,7 @@ aicli config --models
 
 ## 一、安装
 
-> Windows 7 需要使用 Go 1.20 构建的独立兼容包，不能使用普通 Windows
+> Windows 7 需要使用 Go 1.21.4 构建的独立兼容包，不能使用普通 Windows
 > Release。下载、终端选择和故障处理见
 > [《在 Windows 7 上使用 aicli》](./windows7.md)。
 

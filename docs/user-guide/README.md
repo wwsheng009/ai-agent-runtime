@@ -415,7 +415,7 @@ pwsh -File ./scripts/build.ps1 -Target both -Tools all -Version v2.0.0
 
 ### 6.3 Win7 构建说明
 
-Win7 构建使用 **Go 1.20.14** 工具链和独立的 `go.win7.mod` 依赖图，确保二进制在 Windows 7 SP1 上可运行。
+Win7 构建使用 **Go 1.21.4** 工具链和独立的 `go.win7.mod` 依赖图，确保二进制在 Windows 7 SP1 上可运行。
 
 - 构建标签：`-tags win7compat`
 - CGO：`CGO_ENABLED=0`
@@ -506,12 +506,12 @@ runtime-server serve --listen 127.0.0.1:8102
 
 **现象**：Win7 上启动 exe 即报 `0xc0000005 PC=0x0`。
 
-**原因**：产物不是用 Go 1.20 + `win7compat` 构建（例如遗漏了 build tag 或使用了标准 go.mod）。
+**原因**：产物不是用 Go 1.21.4 + `win7compat` 构建（例如遗漏了 build tag 或使用了标准 go.mod）。
 
 **验证**：
 ```bash
 go version -m dist/runtime-server-win7.exe | head -1
-# 必须输出 "go1.20.14"
+# 必须输出 "go1.21.4"
 ```
 
 **解决**：使用 `build.ps1 -Target win7` 重新构建，确保 `-tags win7compat` 和 `-modfile=go.win7.mod` 同时生效。

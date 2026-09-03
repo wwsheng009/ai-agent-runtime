@@ -5,7 +5,7 @@
 .DESCRIPTION
     Builds the Go command tools of this repository for either the mainline
     Windows target (current go.mod + current Go toolchain) or the Windows 7
-    compatible target (Go 1.20.14 + the isolated go.win7.mod dependency graph
+    compatible target (Go 1.21.4 + the isolated go.win7.mod dependency graph
     + the win7compat build tag + CGO_ENABLED=0 + windows/amd64).
 
     Tools: aicli, aicli-console, runtime-server, ssh-client, sftp-client,
@@ -187,7 +187,7 @@ function Verify-Binary {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][string]$Label,
-        [Parameter(Mandatory = $true)][bool]$RequireGo120
+        [Parameter(Mandatory = $true)][bool]$RequireGo121
     )
     Assert-File -Path $Path -Description $Label
     $length = (Get-Item -LiteralPath $Path).Length
@@ -195,16 +195,16 @@ function Verify-Binary {
     if (-not (Test-PEExecutable -Path $Path)) {
         throw "$Label is not a Windows PE executable (missing MZ header): $Path"
     }
-    if ($RequireGo120) {
+    if ($RequireGo121) {
         $metadata = @(Invoke-GoCapture -Arguments @("version", "-m", $Path) -Description "Inspect $Label build metadata")
         $versionLine = ($metadata | ForEach-Object { [string]$_ } |
-            Where-Object { $_ -match "(^|:\s)go1\.20\.14(?:\s|$)" } | Select-Object -First 1)
+            Where-Object { $_ -match "(^|:\s)go1\.21\.4(?:\s|$)" } | Select-Object -First 1)
         if ([string]::IsNullOrWhiteSpace($versionLine)) {
             $firstLine = ($metadata | ForEach-Object { [string]$_ } |
                 Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1)
-            throw "$Label was not built by Go 1.20.14. First metadata line: '$firstLine'"
+            throw "$Label was not built by Go 1.21.4. First metadata line: '$firstLine'"
         }
-        Write-Host "  ${Label}: $Path ($length bytes; Go 1.20.14; PE=MZ)"
+        Write-Host "  ${Label}: $Path ($length bytes; Go 1.21.4; PE=MZ)"
     }
     else {
         Write-Host "  ${Label}: $Path ($length bytes; PE=MZ)"
@@ -482,7 +482,7 @@ try {
     }
     $goInfo = Get-Command $script:goCommand -ErrorAction SilentlyContinue
     if ($null -eq $goInfo) {
-        throw "The Go command was not found in PATH. Install Go 1.21+ (for automatic toolchain download) or Go 1.20.14."
+        throw "The Go command was not found in PATH. Install Go 1.21+ (for automatic toolchain download) or Go 1.21.4."
     }
     if (-not [string]::IsNullOrWhiteSpace([string]$goInfo.Source)) {
         $script:goCommand = [string]$goInfo.Source
@@ -496,13 +496,13 @@ try {
     foreach ($target in $selectedTargets) {
         $isWin7 = ($target -eq "win7")
         Write-Host ""
-        Write-Host "==== Target: $target ($(if ($isWin7) { 'Go 1.20.14 / go.win7.mod / win7compat / CGO=0' } else { 'mainline go.mod / current toolchain / CGO=0' })) ===="
+        Write-Host "==== Target: $target ($(if ($isWin7) { 'Go 1.21.4 / go.win7.mod / win7compat / CGO=0' } else { 'mainline go.mod / current toolchain / CGO=0' })) ===="
 
         [System.Environment]::SetEnvironmentVariable("CGO_ENABLED", "0", "Process")
         if ($isWin7) {
             Assert-File -Path (Join-Path $backendDir "go.win7.mod") -Description "Win7 module file"
             Assert-File -Path (Join-Path $backendDir "go.win7.sum") -Description "Win7 module checksum file"
-            [System.Environment]::SetEnvironmentVariable("GOTOOLCHAIN", "go1.20.14", "Process")
+            [System.Environment]::SetEnvironmentVariable("GOTOOLCHAIN", "go1.21.4", "Process")
             [System.Environment]::SetEnvironmentVariable("GOFLAGS", "-modfile=go.win7.mod", "Process")
         }
         else {
@@ -521,8 +521,8 @@ try {
         $goVersionLine = ($goVersion | ForEach-Object { [string]$_ } |
             Where-Object { $_ -match "^go version\s+" } | Select-Object -First 1)
         if ($isWin7) {
-            if ([string]::IsNullOrWhiteSpace($goVersionLine) -or $goVersionLine -notmatch "^go version\s+go1\.20\.14(?:\s|$)") {
-                throw "Go 1.20.14 is required, but the selected toolchain reported: $goVersionText"
+            if ([string]::IsNullOrWhiteSpace($goVersionLine) -or $goVersionLine -notmatch "^go version\s+go1\.21\.4(?:\s|$)") {
+                throw "Go 1.21.4 is required, but the selected toolchain reported: $goVersionText"
             }
         }
         Write-Host "  $goVersionText"
@@ -551,9 +551,8 @@ try {
                     )
                     $toolNames = @($selectedTools | ForEach-Object { $_.Name })
                     if ($toolNames -contains "aicli" -or $toolNames -contains "runtime-server") {
-                        Invoke-Go -Arguments @(
-                            "test", "-tags", "win7compat", "-mod=readonly", $commonSuite, "-count=1"
-                        ) -Description "Run Win7 configuration and runtime tests"
+                        $win7TestArgs = @("test", "-tags", "win7compat", "-mod=readonly") + @($commonSuite) + @("-count=1")
+                        Invoke-Go -Arguments $win7TestArgs -Description "Run Win7 configuration and runtime tests"
                     }
                     if ($toolNames -contains "aicli") {
                         Invoke-Go -Arguments @(
@@ -673,7 +672,7 @@ try {
             }
             finally { Pop-Location }
 
-            Verify-Binary -Path $targetPath -Label "$($tool.Name) ($target)" -RequireGo120 $isWin7
+            Verify-Binary -Path $targetPath -Label "$($tool.Name) ($target)" -RequireGo121 $isWin7
         }
     }
     Write-Host ""

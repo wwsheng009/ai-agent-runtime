@@ -9,7 +9,7 @@ Windows 7 必须使用单独的 **Win7 amd64 兼容包**。普通 Windows Releas
 - Windows 7 SP1 64 位（当前不提供 32 位构建）。
 - 建议安装 Windows 7 最后的 SHA-2、根证书和 TLS 相关更新。
 - Provider 必须能从该机器访问；企业代理需要同时配置系统或进程代理环境变量。
-- 不需要安装 Go、Node.js、MSYS2 或 `winpty`。兼容包使用 Go 1.20.14、
+- 不需要安装 Go、Node.js、MSYS2 或 `winpty`。兼容包使用 Go 1.21.4、
   `CGO_ENABLED=0` 构建。
 
 ## 2. 下载和安装
@@ -33,7 +33,7 @@ C:\Tools\aicli\
     runtime.win7.yaml
 ```
 
-`runtime-server.exe` 是 Win7 兼容的 runtime server（Go 1.20 构建，使用
+`runtime-server.exe` 是 Win7 兼容的 runtime server（Go 1.21.4 构建，使用
 `--runtime-server` 远程模式或独立启动时使用；本地默认 `local` runtime
 不需要它）。
 
@@ -90,8 +90,11 @@ C:\Tools\aicli\configs\runtime.win7.yaml
 
 普通版继续使用
 `%USERPROFILE%\.aicli\sessions\session_history.sqlite`。两者的 `-wal` /
-`-shm` 文件也因此完全分离，避免 Go 1.20 兼容版的旧 SQLite 驱动与普通版
-的新驱动同时操作同一数据库。代价是两个版本的会话历史默认互不可见。
+`-shm` 文件也因此完全分离，避免多进程 WAL 锁竞争：`aicli` 持有主库的
+`-wal`/`-shm` 写锁，`runtime-server` 改为读取每 30 秒从主库刷新的只读
+副本（`session_history_win7_replica.sqlite`，配置见
+`configs\runtime.win7.yaml`），两者并发运行互不阻塞。代价是两个版本的
+会话历史默认互不可见。
 
 如果要把普通版历史一次性复制给 Win7 版，必须先正常停止所有正在访问原
 数据库的 `aicli` 和 `runtime-server` 进程；不要在 WAL 写入期间只复制主
@@ -209,7 +212,24 @@ winpty ./aicli.exe chat --compat-mode
 - 搜索工具找不到外部 `rg.exe` 时会回退到内置扫描器。若自行提供 ripgrep，
   也必须确认该 ripgrep 版本能在 Windows 7 上启动。
 
-## 6. 常见故障
+## 6. 已知限制
+
+Win7 兼容包在功能、性能与更新节奏上有以下明确限制：
+
+| 限制 | 说明 |
+|---|---|
+| 工具链冻结 | 固定使用 **Go 1.21.4** 编译。Go 1.21 是官方支持 Windows 7 的最后一个版本，且 Go 1.21.5+ 因 `GetSystemTimePreciseAsFileTime` 回归在 Win7 上无法启动（golang/go#64622），因此不能跟随主线升级 Go 版本 |
+| 依赖冻结 | 依赖图独立维护在 `go.win7.mod`，例如 JSON Schema 校验使用 `santhosh-tekuri/jsonschema/v5`（`google/jsonschema-go` 要求 go ≥ 1.23，Win7 构建不可用）；SQLite 驱动为 `ncruces/go-sqlite3 v0.22.0`（纯 Go + wasm，`CGO_ENABLED=0`） |
+| 仅 amd64 | 当前不提供 32 位（386）构建，也未提供 Linux/macOS 的 Win7 等价物 |
+| 功能裁剪 | `win7compat` build tag 裁剪了要求更高 Go 版本的特性，主要是 **MCP 集成**；需要 MCP 时请在受支持的新系统上运行 |
+| Web UI 受限 | win7 兼容包未内嵌完整前端页面（占位 `dist/`）；`runtime-server` 的 `/` 返回运行时信息，功能通过 Web API 与命令行使用 |
+| 会话历史隔离 | Win7 版使用独立的会话数据库（`session_history_win7.sqlite`），与普通版（`session_history.sqlite`）默认互不可见；`runtime-server` 读取 30 秒刷新的只读副本，改动不会立即出现在副本中 |
+| 无自动更新 | Win7 版只随 `win7-*` tag 发布，不会跟随主线 `v*` 发布自动更新；需手动下载新 Release 覆盖 |
+| 终端兼容 | Win7 conhost 不支持现代 VT/ConPTY；交互式输入依赖 `--compat-mode`（`ReadConsoleW`/`ReadConsoleInputW` 路径），第三方终端（MobaXterm、mintty、Git Bash）需配合 `aicli-console.exe` 启动器 |
+| 系统依赖 | 依赖 Win7 SP1 及最后的 SHA-2/根证书/TLS 更新；未打补丁的系统可能出现 x509/TLS 连接失败 |
+| 性能 | wasm 版 SQLite 与内置扫描器（无外部 `rg.exe` 时）性能低于现代系统；大数据量任务建议在受支持的系统上运行 |
+
+## 7. 常见故障
 
 | 现象 | 处理 |
 |---|---|

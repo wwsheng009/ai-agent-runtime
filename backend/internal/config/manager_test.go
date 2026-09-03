@@ -20,7 +20,7 @@ func TestWin7RuntimeConfigUsesDedicatedSessionDatabase(t *testing.T) {
 	mainConfig := mainManager.Get()
 	win7Config := win7Manager.Get()
 	require.Equal(t, "sqlite", win7Config.Sessions.Backend)
-	require.Equal(t, "session_history_win7.sqlite", win7Config.Sessions.StorePath)
+	require.Equal(t, "session_history_win7_replica.sqlite", win7Config.Sessions.StorePath)
 
 	// The Win7 file is an override profile, not an independent behavior fork.
 	// Keep every effective value aligned with runtime.yaml except the dedicated

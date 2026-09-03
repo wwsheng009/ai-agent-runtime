@@ -1,4 +1,4 @@
-//go:build !go1.20 || go1.21
+//go:build (!go1.20 || go1.21) && !win7compat
 
 package toolschema
 

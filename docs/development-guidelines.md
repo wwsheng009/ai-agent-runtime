@@ -76,14 +76,14 @@ Win7 兼容代码与构建资产已全部合入 `main`，以 `main` 为唯一事
 
 | 分支 | 职责 | 构建隔离 | 应承载的改动 |
 | --- | --- | --- | --- |
-| `main` | 标准系统主线 + Windows 7 兼容 | `backend/go.mod`（Go 1.24）/ `backend/go.win7.mod`（Go 1.20.14、`-tags win7compat`、Windows 7 amd64） | 通用功能、通用修复、现代系统实现、标准发布，以及 Win7 专用 API 回退、旧控制台兼容、依赖降级、配置隔离、适配测试与 Win7 发布 |
+| `main` | 标准系统主线 + Windows 7 兼容 | `backend/go.mod`（Go 1.24）/ `backend/go.win7.mod`（Go 1.21.4、`-tags win7compat`、Windows 7 amd64） | 通用功能、通用修复、现代系统实现、标准发布，以及 Win7 专用 API 回退、旧控制台兼容、依赖降级、配置隔离、适配测试与 Win7 发布 |
 | `feat/win7-go120-compat`（历史遗留） | 原 Win7 适配分支，代码已全部合入 `main`，两分支 Win7 资产零差异；仅保留用于历史发布与追溯 | — | 不再承载新改动 |
 
 边界要求：
 
 - `main` 是通用功能和现代系统实现的事实来源，不应为了兼容 Win7 而整体降级 Go 版本、依赖或现代系统能力。
 - Win7 适配代码通过技术隔离手段直接维护在 `main` 上：`go.win7.mod` 独立依赖图 + `win7compat` build tag 成对隔离 + 专用配置（`runtime.win7.yaml` 等）。
-- Win7 新增提交必须能说明具体适配目标，例如旧 Win32 API、控制台/PTY、TLS、进程管理、文件系统、SQLite、Go 1.20 或依赖兼容。
+- Win7 新增提交必须能说明具体适配目标，例如旧 Win32 API、控制台/PTY、TLS、进程管理、文件系统、SQLite、Go 1.20/1.21 或依赖兼容。
 - 与操作系统无关的功能和缺陷修复直接进入 `main`，维护一份通用实现即可。
 - Win7 专用实现必须隔离在 `//go:build win7compat` 变体中，不得进入标准构建热路径；可复用的抽象或通用修复应单独提取。
 - 完整的 Win7 编译与验证步骤见 [docs/aicli/windows7-build.md](aicli/windows7-build.md)。
@@ -236,7 +236,7 @@ Windows 7 适配代码直接维护在 `main`，以 `win7compat` build tag 隔离
 | 跨平台接口、通用协议和通用缺陷修复 | `main`（通用实现） | 通用 session 契约、与 OS 无关的并发修复 |
 | 现代系统默认实现 | `main`（`!win7compat` 变体） | 现代 Windows API、当前 Go 工具链实现 |
 | Windows 7 专用实现与回退 | `main`（`win7compat` 变体） | 缺失 Win32 API 的替代实现、旧 Console/PTY 处理 |
-| Go 1.20 或兼容依赖调整 | `main`（`go.win7.mod` 依赖图） | 替代 Go 1.21+ API、依赖降级、兼容 shim |
+| Go 1.21 或兼容依赖调整 | `main`（`go.win7.mod` 依赖图） | 替代 Go 1.22+ API、依赖降级、兼容 shim |
 | Win7 配置、会话、打包与验证 | `main` | `runtime.win7.yaml`、独立 session DB、Win7 workflow |
 
 推荐实现方式：
@@ -253,7 +253,7 @@ Windows 7 适配代码直接维护在 `main`，以 `win7compat` build tag 隔离
 Win7 构建使用：
 
 ```text
-Go 1.20.14
+Go 1.21.4
 GOFLAGS=-modfile=go.win7.mod
 -tags win7compat
 CGO_ENABLED=0
@@ -284,7 +284,7 @@ CGO_ENABLED=0
 
 ### 8.4 验证命令
 
-在安装 Go 1.20.14 的环境中执行：
+在安装 Go 1.21.4 的环境中执行：
 
 ```bash
 cd backend
@@ -300,7 +300,7 @@ go build -tags win7compat -trimpath -o dist/aicli-win7.exe ./cmd/aicli
 在 PowerShell 中使用：
 
 ```powershell
-$env:GOTOOLCHAIN = 'go1.20.14'
+$env:GOTOOLCHAIN = 'go1.21.4'
 $env:GOFLAGS = '-modfile=go.win7.mod'
 $env:CGO_ENABLED = '0'
 go test -tags win7compat ./internal/aiclipaths ./internal/agentconfig ./internal/config ./internal/chat ./cmd/runtime-server -count=1
@@ -323,7 +323,7 @@ go test ./... -count=1   # 标准依赖图回归
 - 改动包含预期的适配提交，`git diff --check` 无空白错误；
 - 标准版和 Win7 版均通过各自的最低验证；
 - 差异仅包含 Win7 适配及其必要测试、配置、依赖、工作流和文档；
-- Win7 产物确实由 Go 1.20.14、`go.win7.mod` 和 `win7compat` 构建（`go version -m` 首行为 `go1.20.14`）。
+- Win7 产物确实由 Go 1.21.4、`go.win7.mod` 和 `win7compat` 构建（`go version -m` 首行为 `go1.21.4`）。
 
 ## 9. API、配置与持久化兼容
 
@@ -377,7 +377,7 @@ go test ./... -count=1   # 标准依赖图回归
 | 浏览器交互 | 上述前端检查 + 相关 Playwright 测试 |
 | runtime-server 打包 | `pwsh scripts/package-runtime-server.ps1 ...` |
 | 发布链路 | `pwsh scripts/verify-release.ps1 ...` 或等价 CI gate |
-| Win7 相关 | 标准验证 + Go 1.20/`go.win7.mod`/`win7compat` 定向验证 |
+| Win7 相关 | 标准验证 + Go 1.21/`go.win7.mod`/`win7compat` 定向验证 |
 
 测试失败时不得只报告“失败”；应区分：
 

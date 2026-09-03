@@ -1,4 +1,4 @@
-name: Build aicli for Windows 7 (Go 1.20)
+name: Build aicli for Windows 7 (Go 1.21.4)
 
 # 触发条件：
 # 1. 推送形如 win7-*（含 win7-v1.2.3 等）的 tag 时自动编译并发布 Release
@@ -7,7 +7,7 @@ name: Build aicli for Windows 7 (Go 1.20)
 # 背景：主线 go.mod 要求 go 1.24，其编译产物会调用 Windows 7 不存在的
 # 系统 API（如 Windows 10 1903+ 才有的 ConPTY），在 Win7 上启动即崩溃
 # （Exception 0xc0000005 PC=0x0）。
-# 本 workflow 使用 Go 1.20 + 独立的 go.win7.mod（降级依赖）+ win7compat
+# 本 workflow 使用 Go 1.21.4 + 独立的 go.win7.mod（降级依赖）+ win7compat
 # build tag（裁剪要求更高 Go 版本的 MCP 依赖），产出可在 Windows 7 上运行的
 # aicli.exe。所有兼容代码由 build tag / 独立模块文件隔离，不影响主线。
 on:
@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: '1.20.14'
+  GO_VERSION: '1.21.4'
   WORKDIR: backend
   CMD_PATH: ./cmd/aicli
   CONSOLE_CMD_PATH: ./cmd/aicli-console
@@ -35,7 +35,7 @@ env:
 
 jobs:
   build-win7:
-    name: Build Windows 7 compatible aicli (Go 1.20, amd64)
+    name: Build Windows 7 compatible aicli (Go 1.21.4, amd64)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -58,17 +58,17 @@ jobs:
           go version
           go env GOOS GOARCH GOTOOLCHAIN GOPROXY CGO_ENABLED
 
-      - name: Resolve Go 1.20 dependency graph
+      - name: Resolve Go 1.21 dependency graph
         working-directory: ${{ env.WORKDIR }}
         # -modfile 通过 GOFLAGS 传入：与本地验证路径一致。
-        # go 1.20 没有 GOTOOLCHAIN 自动下载，依赖 go.mod 的 go 指令
-        # 必须 <= 1.20（go.win7.mod 已固定），此步确认解析可行。
+        # GOTOOLCHAIN=go1.21.4 由 setup-go 配置后自动下载使用；go.win7.mod
+        # 的 go 指令声明 1.21，此步确认解析与校验可行。
         run: |
           set -euo pipefail
           GOFLAGS="-modfile=${{ env.MODFILE }}" go list -m -mod=mod all >/dev/null
           GOFLAGS="-modfile=${{ env.MODFILE }}" go mod verify
 
-      - name: Test Go 1.20 compatibility shims and console launcher
+      - name: Test Go 1.21.4 compatibility shims and console launcher
         working-directory: ${{ env.WORKDIR }}
         run: |
           set -euo pipefail
@@ -91,7 +91,7 @@ jobs:
           GOFLAGS="-modfile=${{ env.MODFILE }}" \
             go test -tags ${{ env.BUILD_TAGS }} ./cmd/aicli-console -count=1
           # Cross-compile the command tests instead of executing a Windows test
-          # binary on Linux. This catches Go 1.20/build-tag regressions in the
+          # binary on Linux. This catches Go 1.21.4/build-tag regressions in the
           # ReadConsoleW Unicode/IME compatibility path.
           GOOS=windows GOARCH=amd64 GOFLAGS="-modfile=${{ env.MODFILE }}" \
             go test -tags ${{ env.BUILD_TAGS }} ./cmd/aicli/commands \
@@ -133,7 +133,7 @@ jobs:
             "dist/${{ env.CONSOLE_BIN_NAME }}.exe" \
             "dist/${{ env.RUNTIME_SERVER_BIN_NAME }}.exe"; do
             ls -lh "${binary}"
-            # go version -m 的首行为 "<binary>: go1.20.14"；旧 awk
+            # go version -m 的首行为 "<binary>: go1.21.4"；旧 awk
             # 检查错误地寻找以 "go" 开头的字段，导致有效构建被判失败。
             go version -m "${binary}" | sed -n '1,8p'
             test "$(go version -m "${binary}" | sed -n '1s/.*: //p')" = "go${{ env.GO_VERSION }}"

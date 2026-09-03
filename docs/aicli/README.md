@@ -25,7 +25,7 @@ Recommended entry points:
 - [windows7.md](./windows7.md)
   - Windows 7 end-user installation, isolated configuration/session paths, console/IME modes, and troubleshooting.
 - [windows7-build.md](./windows7-build.md)
-  - Developer build and verification recipe for the Go 1.20.14 `win7compat` binaries and release bundle.
+  - Developer build and verification recipe for the Go 1.21.4 `win7compat` binaries and release bundle.
 
 Related runtime docs:
 
