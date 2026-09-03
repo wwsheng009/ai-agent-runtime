@@ -29,10 +29,17 @@
   var sessionListEl = document.getElementById("session-list");
   var themeToggleBtn = document.getElementById("theme-toggle");
   var sessionSearchEl = document.getElementById("session-search");
+  var welcomeEl = document.getElementById("welcome");
+  var toastContainer = document.getElementById("toast-container");
+  var shortcutHelpEl = document.getElementById("shortcut-help");
+  var scrollBottomBtn = document.getElementById("scroll-bottom-btn");
+  var screenCopyBtn = document.getElementById("screen-copy-btn");
+  var conversationEl = document.getElementById("conversation");
 
   var pendingApprovalRequestID = null;
   var pendingQuestionID = null;
   var lastSequence = 0;
+  var userScrolledAway = false;    // 用户上滚阅读历史：暂停自动跟随
   var sessions = [];               // 会话列表缓存（GET /web/api/sessions）
   var sessionsQuery = "";          // 会话列表搜索词（纯前端过滤）
   var sidebarCollapsed = false;    // 侧边栏折叠状态（localStorage 记忆）
@@ -111,6 +118,7 @@
     uiState = state;
     if (statusText !== undefined) { sendStatusEl.textContent = statusText; }
     renderButton();
+    updateTitle();
     if (state === "interrupting") {
       // 兜底：若 10s 内未收到 session_interrupted / turn_end 复位事件
       //（SSE 断线 / 事件丢失 / 与 turn_end 竞态），强制回到 idle，
@@ -187,20 +195,81 @@ function startTypeTimer() {
 
   // ---- 精简 Markdown 解析器 ----
   // 将 Markdown 文本转换为安全的 HTML。
-  // 支持：**粗体**、`行内代码`、```代码块```、# 标题、- 无序列表、[链接](url)
+  // 支持：**粗体**、~~删除线~~、`行内代码`、```代码块```、# 标题、
+  //       - 无序列表、1. 有序列表、- [x] 任务列表、> 引用块、
+  //       | 表格 |、[链接](url)、裸 URL 自动链接
+  // 注意：所有输入先经 esc() 转义，因此这里匹配的是转义后的实体
+  // （如 > 为 &gt;），保证输出安全。
+
+  // 解析表格行（| a | b |），返回 <table> HTML；无表头分隔行时按普通行渲染。
+  function renderTableBlock(blockLines) {
+    function cells(row) {
+      var s = row.trim();
+      if (s.charAt(0) === "|") { s = s.slice(1); }
+      if (s.charAt(s.length - 1) === "|") { s = s.slice(0, -1); }
+      return s.split("|").map(function (c) { return c.trim(); });
+    }
+    function isSepRow(cs) {
+      return cs.length > 0 && cs.every(function (c) {
+        return /^:?-{3,}:?$/.test(c);
+      });
+    }
+    var rows = blockLines.map(cells);
+    var header = null;
+    var body = rows;
+    if (rows.length >= 2 && isSepRow(rows[1])) {
+      header = rows[0];
+      body = rows.slice(2);
+    }
+    function cellHtml(c, align) {
+      var style = align && align !== "" ? ' style="text-align:' + align + '"' : "";
+      return "<td" + style + ">" + c + "</td>";
+    }
+    function alignOf(c) {
+      if (/^:.*:$/.test(c)) { return "center"; }
+      if (/^:/.test(c)) { return "left"; }
+      if (/:$/.test(c)) { return "right"; }
+      return "";
+    }
+    var h = "";
+    if (header) {
+      var aligns = rows[1].map(alignOf);
+      h += "<thead><tr>";
+      header.forEach(function (c, i) {
+        var style = aligns[i] ? ' style="text-align:' + aligns[i] + '"' : "";
+        h += "<th" + style + ">" + c + "</th>";
+      });
+      h += "</tr></thead>";
+    }
+    if (body.length) {
+      h += "<tbody>";
+      body.forEach(function (r) {
+        h += "<tr>" + r.map(function (c) { return cellHtml(c); }).join("") + "</tr>";
+      });
+      h += "</tbody>";
+    }
+    return "<table>" + h + "</table>";
+  }
+
   function renderMarkdown(text) {
     if (!text) return "";
     var html = esc(text);
-    // 代码块（```...```）→ <pre> + 复制按钮 + 语言标签 + <code>
-    // 复制行为由 #stream-msg 上的事件委托处理（读取 <code> 文本）。
+    // 代码块（```...```）→ <pre> + 复制按钮 + 语言标签 + <code>，
+    // 先用占位符暂存，避免后续行级规则（表格/引用/列表/URL）误处理代码内容，
+    // 全部处理完成后恢复。复制行为由 #stream-msg 上的事件委托处理。
+    var codeBlocks = [];
     html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, function (_, lang, code) {
       var label = lang ? '<span class="lang-label">' + lang + '</span>' : '';
-      return '<pre><button class="copy-code-btn" type="button" title="复制代码">复制</button>'
+      var block = '<pre><button class="copy-code-btn" type="button" title="复制代码">复制</button>'
         + label + '<code class="lang-' + (lang || 'text') + '">'
         + esc(code.trim()) + '</code></pre>';
+      codeBlocks.push(block);
+      return "\u0001MDC" + (codeBlocks.length - 1) + "\u0001";
     });
     // 行内代码（`...`）
     html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+    // 删除线（~~text~~）
+    html = html.replace(/~~([^~]+)~~/g, '<del>$1</del>');
     // 标题（# ～ ######）
     html = html.replace(/^###### (.+)$/gm, '<h6>$1</h6>');
     html = html.replace(/^##### (.+)$/gm, '<h5>$1</h5>');
@@ -210,20 +279,58 @@ function startTypeTimer() {
     html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
     // 粗体（**...**）
     html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    // 链接 [text](url)
-    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    // 任务列表（- [x] / - [ ]），需在无序列表之前
+    html = html.replace(/^[-*] \[([ xX])\] (.+)$/gm, function (_, checked, item) {
+      return '<li class="task' + (checked !== " " ? " done" : "") + '">'
+        + '<input type="checkbox" disabled' + (checked !== " " ? " checked" : "") + '> '
+        + item + '</li>';
+    });
     // 无序列表（- 或 * 开头）
     html = html.replace(/^[*-] (.+)$/gm, '<li>$1</li>');
-    // 将连续 <li> 包裹为 <ul>
-    html = html.replace(/(<li>.*<\/li>)\n<li>/g, '$1\n<li>');
-    html = html.replace(/(<li>.*<\/li>)/g, function (m) {
-      if (m.indexOf('<ul>') === -1) return '<ul>' + m + '</ul>';
-      return m;
+    // 有序列表（1. text）
+    html = html.replace(/^(\d+)\. (.+)$/gm, '<li class="li-num">$2</li>');
+    // 将连续 <li> 包裹为 <ul> / <ol>（非贪婪，空行中断）
+    html = html.replace(/((?:<li[^>]*>.*?<\/li>\n?)+)/g, function (m) {
+      if (m.indexOf("<ul>") !== -1 || m.indexOf("<ol>") !== -1) { return m; }
+      var isOrdered = m.indexOf('class="li-num"') !== -1;
+      return isOrdered ? "<ol>" + m + "</ol>" : "<ul>" + m + "</ul>";
+    });
+    // 引用块（> 开头，连续行合并）
+    html = html.replace(/(^|\n)&gt;(?:[^\n]*)(?:\n&gt;[^\n]*)*/g, function (m) {
+      var lines = m.split("\n").map(function (l) {
+        return l.replace(/^&gt;/, "").replace(/^ /, "");
+      });
+      return "\n<blockquote>" + lines.join("<br>") + "</blockquote>";
+    });
+    // 表格（连续 | 行块；含 |---| 分隔行则渲染表头）
+    html = html.replace(/(?:^|\n)(?:\|[^\n]+\|\n?){2,}/g, function (m) {
+      var lines = m.split("\n").filter(function (l) { return l.trim() !== ""; });
+      // 至少两行且每行都是表格行
+      var allRows = lines.every(function (l) {
+        var t = l.trim();
+        return t.charAt(0) === "|" && t.charAt(t.length - 1) === "|";
+      });
+      if (!allRows) { return m; }
+      return "\n" + renderTableBlock(lines) + "\n";
+    });
+    // 链接 [text](url)
+    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    // 裸 URL 自动链接（排除已生成的 <a href="..."> 属性；剥离尾部标点）
+    html = html.replace(/(^|[^"'>])(https?:\/\/[^\s<]+)/g, function (m, pre, url) {
+      var clean = url.replace(/[),.;:!?'"，。；：！？」』】》]+$/, "");
+      var rest = url.slice(clean.length);
+      return pre + '<a href="' + clean + '" target="_blank" rel="noopener">' + clean + '</a>' + rest;
     });
     // 换行转 <br>
     html = html.replace(/\n/g, '<br>');
-    // 修复 <li><br> 为 <li>
+    // 修复 <li>/<blockquote> 内尾随 <br>
     html = html.replace(/<li><br>/g, '<li>');
+    html = html.replace(/<\/li><br>/g, '</li>');
+    html = html.replace(/<\/blockquote><br>/g, '</blockquote>');
+    // 恢复代码块
+    html = html.replace(/\u0001MDC(\d+)\u0001/g, function (_, i) {
+      return codeBlocks[+i] || "";
+    });
     return html;
   }
 
@@ -254,8 +361,12 @@ function startTypeTimer() {
     }
     if (!streamMsgEl) return;
     streamMsgEl.innerHTML = parts.length ? parts.join("\n") : '思考中…<span class="tw-cursor"></span>';
-    streamMsgEl.scrollIntoView(false);
-  }  function beginStream() {
+    if (!userScrolledAway) {
+      streamMsgEl.scrollIntoView(false);
+    }
+  }
+
+  function beginStream() {
     streamActive = true;
     streamEnded = false;
     streamReasoning = "";
@@ -270,7 +381,9 @@ function startTypeTimer() {
     }
     streamMsgEl.style.display = "block";
     streamMsgEl.innerHTML = '思考中…<span class="tw-cursor"></span>';
-    streamMsgEl.scrollIntoView(false);
+    if (!userScrolledAway) {
+      streamMsgEl.scrollIntoView(false);
+    }
     // 并行加载对话历史（异步，不影响流式消息渲染）
     refreshScreen();
     startTypeTimer();
@@ -327,6 +440,7 @@ function startTypeTimer() {
   function setStatus(text, connected) {
     statusEl.textContent = text;
     statusEl.className = connected ? "connected" : "disconnected";
+    updateTitle();
   }
 
   function setTurn(text) { turnEl.textContent = text; }
@@ -356,12 +470,15 @@ function startTypeTimer() {
           // 无可用屏幕快照（无 surface / 空帧）：保留 screenEl 已有内容
           // （finishStream 已写入流式累积文本），不覆盖为 "(empty)"。
           scrollToBottom();
+          updateWelcome();
           return;
         }
         // 权威屏幕内容可用：覆盖显示，隐藏 #stream-msg（由终端渲染驱动）。
         screenEl.textContent = data.text || "";
         if (streamMsgEl) { streamMsgEl.style.display = "none"; }
+        // 尊重用户滚动位置：若用户上滚阅读历史，不强制拉底（G3）。
         scrollToBottom();
+        updateWelcome();
       })
       .catch(function (err) {
         // 网络错误：保留现有内容，不覆盖。
@@ -369,9 +486,74 @@ function startTypeTimer() {
       });
   }
 
-  function scrollToBottom() {
+  function scrollToBottom(force) {
+    // force=true 强制滚底；否则尊重用户滚动位置（上滚阅读历史时不打扰）。
+    if (!force && userScrolledAway) { return; }
     var conv = document.getElementById("conversation");
     if (conv) { conv.scrollTop = conv.scrollHeight; }
+  }
+
+  // ---- textarea 自动增高 ----
+  function autoGrow() {
+    if (!promptEl) { return; }
+    promptEl.style.height = "auto";
+    promptEl.style.height = Math.min(promptEl.scrollHeight, 160) + "px";
+    updateScrollBtn();
+  }
+
+  // ---- Toast 轻提示 ----
+  var toastTimer = null;
+  function showToast(msg, kind, duration) {
+    kind = kind || "ok";
+    duration = duration || 2500;
+    if (!toastContainer) { return; }
+    clearTimeout(toastTimer);
+    toastContainer.innerHTML = "";
+    var t = document.createElement("div");
+    t.className = "toast toast-" + kind;
+    t.textContent = msg;
+    toastContainer.appendChild(t);
+    toastTimer = setTimeout(function () {
+      if (t.parentNode) { t.parentNode.removeChild(t); }
+    }, duration);
+  }
+
+  // ---- 页面标题反映运行状态 ----
+  function updateTitle() {
+    var prefix = "";
+    if (uiState === "busy") { prefix = "● "; }
+    else if (uiState === "posting") { prefix = "… "; }
+    else if (uiState === "interrupting") { prefix = "… "; }
+    else if (statusEl && statusEl.classList.contains("disconnected")) { prefix = "✗ "; }
+    document.title = prefix + "aicli micro web client";
+  }
+
+  // ---- 欢迎页显示/隐藏 ----
+  function updateWelcome() {
+    if (!welcomeEl) { return; }
+    var screenText = (screenEl.textContent || "").trim();
+    var show = !streamActive && !streamEnded &&
+      (screenText === "" || screenText === "(empty)");
+    welcomeEl.style.display = show ? "block" : "none";
+    if (screenCopyBtn) {
+      screenCopyBtn.style.display = (screenText && screenText !== "(empty)") ? "inline-block" : "none";
+    }
+  }
+
+  // ---- 浮动回底按钮显示/隐藏 ----
+  function updateScrollBtn() {
+    if (!scrollBottomBtn || !conversationEl) { return; }
+    scrollBottomBtn.style.display = userScrolledAway ? "inline-block" : "none";
+    // 定位在输入区上方，输入区多行增高时自动跟随
+    var ir = document.getElementById("input-row");
+    if (ir) { scrollBottomBtn.style.bottom = (ir.offsetHeight + 12) + "px"; }
+  }
+
+  // ---- 快捷键帮助面板切换 ----
+  function toggleShortcutHelp() {
+    if (!shortcutHelpEl) { return; }
+    var show = shortcutHelpEl.style.display !== "block";
+    shortcutHelpEl.style.display = show ? "block" : "none";
   }
 
   function hideApproval() {
@@ -464,6 +646,7 @@ function startTypeTimer() {
           if (payload && payload.prompt) { saveInputHistory(payload.prompt); }
           promptEl.value = "";
           inputHistoryIdx = -1;
+          autoGrow();
           if (uiState === "busy") {
             // 执行中排队（Enter 键入下一条）：保持 busy，不改变按钮角色
             sendStatusEl.textContent = "已排队，将在当前任务后执行…";
@@ -677,15 +860,15 @@ function startTypeTimer() {
           for (var i = 0; i < sessions.length; i++) {
             if (sessions[i].id === id) { sessions[i].title = json.title || val; break; }
           }
-          sendStatusEl.textContent = "已重命名";
+          showToast("已重命名为「" + (json.title || val) + "」", "ok");
           loadSessions();
         } else {
-          sendStatusEl.textContent = "重命名失败: " + (json.reason || json.status);
+          showToast("重命名失败: " + (json.reason || json.status), "error");
           renderSessionList();
         }
       })
       .catch(function (err) {
-        sendStatusEl.textContent = "重命名失败: " + err;
+        showToast("重命名失败: " + err, "error");
         renderSessionList();
       });
   }
@@ -704,13 +887,13 @@ function startTypeTimer() {
       .then(function (json) {
         if (json.status === "ok") {
           sessions = sessions.filter(function (x) { return x.id !== s.id; });
-          sendStatusEl.textContent = "已删除会话";
+          showToast("已删除会话", "ok");
           renderSessionList();
         } else {
-          sendStatusEl.textContent = "删除失败: " + (json.reason || json.status);
+          showToast("删除失败: " + (json.reason || json.status), "error");
         }
       })
-      .catch(function (err) { sendStatusEl.textContent = "删除失败: " + err; });
+      .catch(function (err) { showToast("删除失败: " + err, "error"); });
   }
 
   // 拉取会话列表（GET /web/api/sessions）
@@ -947,49 +1130,68 @@ function startTypeTimer() {
     // idle 状态
     var text = promptEl.value.trim();
     if (!text) { return; }
-   if (pendingQuestionID) {
-     if (!text) { sendStatusEl.textContent = "请输入回答"; return; }
-     sendQuestionAnswer(text);
-     promptEl.value = "";
-     return;
-   }
-   if (approvalOverlay && approvalOverlay.classList.contains("active") && pendingApprovalRequestID) {
-     sendStatusEl.textContent = "请使用允许/拒绝按钮";
-     return;
-   }
-   setUI("posting", "发送中…");
-   sendInput({ prompt: text });
- });
+    if (pendingQuestionID) {
+      if (!text) { sendStatusEl.textContent = "请输入回答"; return; }
+      sendQuestionAnswer(text);
+      promptEl.value = "";
+      autoGrow();
+      return;
+    }
+    if (approvalOverlay && approvalOverlay.classList.contains("active") && pendingApprovalRequestID) {
+      sendStatusEl.textContent = "请使用允许/拒绝按钮";
+      return;
+    }
+    setUI("posting", "发送中…");
+    sendInput({ prompt: text });
+  });
 
   promptEl.addEventListener("input", function () {
+    autoGrow();
     if (uiState === "idle") { renderButton(); }
   });
 
   promptEl.addEventListener("keydown", function (e) {
     if (e.key === "ArrowUp" && !e.altKey) {
-      // 输入历史：向上浏览（仅在 idle 或 busy 排队场景）
+      // 输入历史：仅当光标位于首行（向上）时才浏览历史，
+      // 否则让默认行为移动光标到上一行（多行输入场景）。
       if (uiState === "posting" || uiState === "interrupting") { return; }
+      if (promptEl.selectionStart > 0) { return; }
       if (!inputHistory.length) { return; }
       e.preventDefault();
       if (inputHistoryIdx === -1) { inputHistoryIdx = inputHistory.length - 1; }
       else if (inputHistoryIdx > 0) { inputHistoryIdx--; }
       promptEl.value = inputHistory[inputHistoryIdx];
+      autoGrow();
       return;
     }
     if (e.key === "ArrowDown" && !e.altKey) {
+      // 仅当光标位于末行（向下）时才浏览历史
       if (uiState === "posting" || uiState === "interrupting") { return; }
+      if (promptEl.selectionStart < promptEl.value.length) { return; }
       if (inputHistoryIdx === -1) { return; }
       e.preventDefault();
       if (inputHistoryIdx < inputHistory.length - 1) { inputHistoryIdx++; promptEl.value = inputHistory[inputHistoryIdx]; }
       else { inputHistoryIdx = -1; promptEl.value = ""; }
+      autoGrow();
       return;
     }
     if (e.key === "Escape") {
+      // Esc：若快捷键帮助面板打开则先关闭它
+      if (shortcutHelpEl && shortcutHelpEl.style.display === "block") {
+        toggleShortcutHelp();
+        return;
+      }
       // Esc：执行中触发中断（与「停止」按钮同路径）
       if (uiState === "busy") {
         e.preventDefault();
         sendInput({ type: "interrupt" });
       }
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === "/") {
+      // Ctrl+/：显示/隐藏快捷键帮助面板
+      e.preventDefault();
+      toggleShortcutHelp();
       return;
     }
     if ((e.ctrlKey || e.metaKey) && (e.key === "l" || e.key === "L")) {
@@ -1003,27 +1205,31 @@ function startTypeTimer() {
       e.preventDefault();
       screenEl.textContent = "";
       if (streamMsgEl) { streamMsgEl.innerHTML = ""; }
+      updateWelcome();
+      scrollToBottom(true);
       return;
     }
-    if (e.key !== "Enter") { return; }
+    if (e.key !== "Enter" || e.shiftKey) { return; } // Shift+Enter: 换行（textarea 默认）
+    if (e.isComposing || e.keyCode === 229) { return; } // IME 组合输入确认：不触发发送
     if (uiState === "posting" || uiState === "interrupting") { return; }
     if (uiState === "busy") {
       // 执行中：Enter 排队下一条消息（不中断当前任务）；按钮点击才触发停止。
       var text = promptEl.value.trim();
       if (!text) { return; }
-     if (pendingQuestionID) {
-       sendQuestionAnswer(text);
-       promptEl.value = "";
-       return;
-     }
-     if (approvalOverlay && approvalOverlay.classList.contains("active") && pendingApprovalRequestID) {
-       sendStatusEl.textContent = "请使用允许/拒绝按钮";
-       return;
-     }
-     sendInput({ prompt: text });
-     return;
-   }
-   sendBtn.click();
+      if (pendingQuestionID) {
+        sendQuestionAnswer(text);
+        promptEl.value = "";
+        autoGrow();
+        return;
+      }
+      if (approvalOverlay && approvalOverlay.classList.contains("active") && pendingApprovalRequestID) {
+        sendStatusEl.textContent = "请使用允许/拒绝按钮";
+        return;
+      }
+      sendInput({ prompt: text });
+      return;
+    }
+    sendBtn.click();
   });
 
   approveBtn.addEventListener("click", function () {
@@ -1097,7 +1303,7 @@ function startTypeTimer() {
       if (!codeEl) { return; }
       var codeText = codeEl.textContent || "";
       if (!navigator.clipboard) {
-        sendStatusEl.textContent = "复制失败（浏览器不支持剪贴板）";
+        showToast("复制失败（浏览器不支持剪贴板）", "error");
         return;
       }
       navigator.clipboard.writeText(codeText).then(function () {
@@ -1105,9 +1311,62 @@ function startTypeTimer() {
         btn.textContent = "✓ 已复制";
         setTimeout(function () { btn.textContent = old; }, 1500);
       }).catch(function () {
-        sendStatusEl.textContent = "复制失败";
+        showToast("复制失败", "error");
       });
     });
+  }
+
+  // ---- 智能滚动：用户手动上滚时暂停自动跟随 ----
+  if (conversationEl) {
+    conversationEl.addEventListener("scroll", function () {
+      var atBottom = conversationEl.scrollHeight - conversationEl.scrollTop - conversationEl.clientHeight < 40;
+      userScrolledAway = !atBottom;
+      updateScrollBtn();
+    });
+  }
+  // 浮动回底按钮
+  if (scrollBottomBtn) {
+    scrollBottomBtn.addEventListener("click", function () {
+      userScrolledAway = false;
+      scrollToBottom(true);
+      updateScrollBtn();
+    });
+  }
+  // 会话复制按钮
+  if (screenCopyBtn) {
+    screenCopyBtn.addEventListener("click", function () {
+      var text = screenEl.textContent || "";
+      if (!text || text === "(empty)") { return; }
+      if (!navigator.clipboard) { showToast("复制失败", "error"); return; }
+      navigator.clipboard.writeText(text).then(function () {
+        showToast("会话内容已复制", "ok");
+      }).catch(function () {
+        showToast("复制失败", "error");
+      });
+    });
+  }
+  // 欢迎页示例按钮
+  if (welcomeEl) {
+    welcomeEl.addEventListener("click", function (e) {
+      var chip = e.target.closest(".welcome-chip");
+      if (!chip) { return; }
+      var text = chip.getAttribute("data-prompt") || "";
+      if (!text) { return; }
+      promptEl.value = text;
+      autoGrow();
+      promptEl.focus();
+      // 程序赋值不触发 input 事件，需手动刷新按钮可用态
+      if (uiState === "idle") { renderButton(); }
+      // 自动发送（若当前 idle）
+      if (uiState === "idle") {
+        sendBtn.click();
+      }
+    });
+  }
+  // 快捷键帮助面板
+  if (shortcutHelpEl) {
+    shortcutHelpEl.querySelector(".shortcut-close").addEventListener("click", function () { toggleShortcutHelp(); });
+    shortcutHelpEl.querySelector(".shortcut-overlay").addEventListener("click", function () { toggleShortcutHelp(); });
   }
 
   // 底部栏显示完整 URL

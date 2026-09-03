@@ -61,10 +61,21 @@
     <div id="tab-main" class="tab-panel active">
       <div id="conversation">
         <pre id="screen">(empty)</pre>
+        <div id="welcome" style="display:none">
+          <h2>欢迎使用 aicli micro web client</h2>
+          <p>选择一个会话开始对话，或输入消息按回车发送。</p>
+          <div class="welcome-suggestions">
+            <button class="welcome-chip" type="button" data-prompt="帮我列出当前项目目录结构">📁 项目结构</button>
+            <button class="welcome-chip" type="button" data-prompt="解释 Go 的 defer 机制">📖 Go defer</button>
+            <button class="welcome-chip" type="button" data-prompt="写一个简单的 HTTP 服务器示例">💻 HTTP 示例</button>
+          </div>
+        </div>
         <div id="stream-msg"></div>
       </div>
+      <span id="screen-copy-btn" class="screen-copy-btn" style="display:none" title="复制会话内容">⧉ 复制</span>
+      <span id="scroll-bottom-btn" class="scroll-bottom-btn" style="display:none">↓ 最新</span>
       <div id="input-row">
-        <input id="prompt" type="text" placeholder="输入消息后回车发送…" autocomplete="off">
+        <textarea id="prompt" rows="1" placeholder="输入消息后回车发送，Shift+Enter 换行…" autocomplete="off"></textarea>
         <button id="send-btn">发送</button>
         <span id="send-status"></span>
       </div>
@@ -80,12 +91,28 @@
   </div>
 </div>
 
-<div id="footer">
-  <span id="footer-endpoints"><a href="/debug/endpoints" target="_blank" rel="noopener">/debug/endpoints</a></span>
-  <span class="sep">|</span>
-  <span id="footer-web"><a href="/web/" target="_blank" rel="noopener">/web/</a></span>
-</div>
-
-<script src="app.js"></script>
-</body>
+    <div id="footer">
+      <span id="footer-endpoints"><a href="/debug/endpoints" target="_blank" rel="noopener">/debug/endpoints</a></span>
+      <span class="sep">|</span>
+      <span id="footer-web"><a href="/web/" target="_blank" rel="noopener">/web/</a></span>
+    </div>
+    <div id="toast-container"></div>
+    <div id="shortcut-help" style="display:none">
+      <div class="shortcut-overlay"></div>
+      <div class="shortcut-panel">
+        <h3>快捷键</h3>
+        <table>
+          <tr><td>Enter</td><td>发送消息</td></tr>
+          <tr><td>Shift+Enter</td><td>换行</td></tr>
+          <tr><td>↑/↓</td><td>浏览输入历史</td></tr>
+          <tr><td>Esc</td><td>中断（停止）</td></tr>
+          <tr><td>Ctrl+L</td><td>切换深色/浅色主题</td></tr>
+          <tr><td>Ctrl+K</td><td>清空当前屏幕</td></tr>
+          <tr><td>Ctrl+/</td><td>显示/隐藏此面板</td></tr>
+        </table>
+        <button class="shortcut-close" type="button">关闭</button>
+      </div>
+    </div>
+    <script src="app.js"></script>
+    </body>
 </html>
