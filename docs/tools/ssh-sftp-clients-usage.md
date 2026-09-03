@@ -459,6 +459,9 @@ GOOS=linux GOARCH=amd64 go build -o sftp-client-linux ./cmd/sftp-client/
 # 一键构建脚本（自动设置 Go 1.20.14、go.win7.mod、win7compat tag）
 pwsh -File ./scripts/build-ssh-sftp-clients-win7.ps1 -Version win7-v1.0.0
 
+# 等价写法：统一构建脚本（还支持 ssh-keygen，以及 -Target windows/both）
+pwsh -File ./scripts/build.ps1 -Target win7 -Tools ssh-client,sftp-client,ssh-keygen -Version win7-v1.0.0
+
 # 产物：backend/dist/ssh-client-win7.exe 和 backend/dist/sftp-client-win7.exe
 ```
 

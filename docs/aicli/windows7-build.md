@@ -61,6 +61,8 @@ ConPTY），普通包在 Win7 上启动即崩溃（`Exception 0xc0000005 PC=0x0`
 | `aicli-win7.exe` | `./cmd/aicli` | 主 CLI |
 | `aicli-console-win7.exe` | `./cmd/aicli-console` | 控制台前端 |
 | `runtime-server-win7.exe` | `./cmd/runtime-server` | Win7 兼容 runtime server |
+| `ssh-client-win7.exe` | `./cmd/ssh-client` | SSH 客户端 |
+| `sftp-client-win7.exe` | `./cmd/sftp-client` | SFTP 客户端 |
 
 ### 4.1 bash（Git Bash / WSL / Linux CI）
 
@@ -105,16 +107,44 @@ go build -tags win7compat -trimpath -o dist/runtime-server-win7.exe ./cmd/runtim
 
 ### 4.3 使用 scripts 下的构建程序
 
-仓库提供了两个可重复执行的 PowerShell 构建程序。它们不依赖当前工作目录，
-会自动定位仓库根目录，并在进程范围内设置 Go 1.20.14、`go.win7.mod`、
-`win7compat`、`windows/amd64` 和 `CGO_ENABLED=0`：
+仓库提供了一个**统一构建脚本** `scripts/build.ps1`：所有工具（`aicli`、
+`aicli-console`、`runtime-server`、`ssh-client`、`sftp-client`、`ssh-keygen`）
+都能用它构建 **windows** 或 **win7** 目标，一次调用可构建多个工具：
 
 ```powershell
-# 构建主 CLI 和原生 Console 启动器
+# 全部工具 × win7（默认 -Target both 会同时构建 windows + win7 两套）
+pwsh -File ./scripts/build.ps1 -Target win7 -Tools all -Version win7-dev
+
+# 只构建主 CLI 和 Console 启动器（win7）
+pwsh -File ./scripts/build.ps1 -Target win7 -Tools aicli,aicli-console -Version win7-dev
+
+# 只构建 runtime server（win7），跳过测试
+pwsh -File ./scripts/build.ps1 -Target win7 -Tools runtime-server -SkipTests
+
+# ssh 工具族：ssh-client + sftp-client + ssh-keygen（win7）
+pwsh -File ./scripts/build.ps1 -Target win7 -Tools ssh-client,sftp-client,ssh-keygen
+
+# 全部工具 × 两套目标，产物带版本号
+pwsh -File ./scripts/build.ps1 -Target both -Tools all -Version v1.2.3
+```
+
+`-Target` 取值为 `windows`（主线 go.mod + 当前 Go 工具链）、`win7`
+（Go 1.20.14 + `go.win7.mod` + `win7compat` tag + `CGO_ENABLED=0`）、
+`both`（默认，两套都构建）。`-Tools` 默认 `all`，逗号分隔指定子集；
+产物命名 `windows -> <tool>.exe`、`win7 -> <tool>-win7.exe`，写入
+`backend/dist/`（可用 `-OutputDir` 覆盖），每个 exe 旁生成 `.sha256`。
+
+**向后兼容的薄壳包装器**（原名保留，参数原样转发到 `build.ps1`）：
+
+```powershell
+# 主 CLI + 原生 Console 启动器（= build.ps1 -Tools aicli,aicli-console -Target win7）
 pwsh -File ./scripts/build-aicli-win7.ps1 -Version win7-dev
 
-# 单独构建 runtime server
+# 单独构建 runtime server（= build.ps1 -Tools runtime-server -Target win7）
 pwsh -File ./scripts/build-runtime-server-win7.ps1 -Version win7-dev
+
+# SSH / SFTP 客户端（= build.ps1 -Tools ssh-client,sftp-client -Target win7）
+pwsh -File ./scripts/build-ssh-sftp-clients-win7.ps1 -Version win7-dev
 ```
 
 `pwsh` 也可以替换为 Windows PowerShell 5.1 的 `powershell.exe`；脚本会把
@@ -122,7 +152,7 @@ Win7 专用 Go 环境限制在自身进程内，不会污染调用者的环境�
 回归测试在宿主平台执行，只有 Windows-only console 测试和最终产物使用
 `windows/amd64` 交叉编译。
 
-两个程序默认把产物写入 `backend/dist/`，并为每个 exe 生成 `.sha256` 校验文件；
+所有脚本默认把产物写入 `backend/dist/`，并为每个 exe 生成 `.sha256` 校验文件；
 构建完成前还会检查 PE 的 `MZ` 魔数和 `go version -m` 的 `go1.20.14`。
 默认会执行对应的 Win7 回归测试；只想快速编译时可加 `-SkipTests`，依赖图已经
 确认过且希望跳过 `go list` / `go mod verify` 时再加 `-SkipDependencyCheck`。

@@ -268,7 +268,8 @@ CGO_ENABLED=0
 - `.github/workflows/build-aicli-win7.yml`
 - `docs/aicli/windows7.md`
 - `docs/aicli/windows7-build.md`（完整的编译、测试与打包步骤）
-- `scripts/build-aicli-win7.ps1` / `scripts/build-runtime-server-win7.ps1` / `scripts/build-ssh-sftp-clients-win7.ps1`（本地可重复构建）
+- `scripts/build.ps1`（统一构建入口：`-Target windows|win7|both` + `-Tools aicli,aicli-console,runtime-server,ssh-client,sftp-client,ssh-keygen`）
+- `scripts/build-aicli-win7.ps1` / `scripts/build-runtime-server-win7.ps1` / `scripts/build-ssh-sftp-clients-win7.ps1`（向后兼容薄壳，转发到 `build.ps1`，本地可重复构建）
 
 标准构建必须继续使用 `backend/go.mod`，且不能因为 Win7 兼容代码改变默认 Profile。
 
