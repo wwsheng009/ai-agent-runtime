@@ -435,6 +435,9 @@ func handleWebApproval(w http.ResponseWriter, session *ChatSession, requestID st
 		})
 		return
 	}
+	// 双入口一致性：审批已被 web 端解决，唤醒 console 端可能挂起的优先级读取，
+	// 使其通过哨兵错误跳过本次提示（见 chat_input_queue.go）。
+	chatSignalPriorityResolvedElsewhere(session)
 	writeWebAPIJSON(w, http.StatusOK, map[string]string{"status": "resolved"})
 }
 
@@ -464,7 +467,227 @@ func handleWebQuestionAnswer(w http.ResponseWriter, session *ChatSession, questi
 		})
 		return
 	}
+	// 双入口一致性：问题已被 web 端回答，唤醒 console 端可能挂起的优先级读取。
+	chatSignalPriorityResolvedElsewhere(session)
 	writeWebAPIJSON(w, http.StatusOK, map[string]string{"status": "resolved"})
+}
+
+// ---------------------------------------------------------------------------
+// GET /web/api/sessions — 会话列表（§4.2.8）
+// ---------------------------------------------------------------------------
+
+// chatWebSessionListItem 是 GET /web/api/sessions 响应的单个会话条目。
+type chatWebSessionListItem struct {
+	ID           string    `json:"id"`
+	Title        string    `json:"title"`
+	Summary      string    `json:"summary,omitempty"`
+	MessageCount int       `json:"message_count"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Current      bool      `json:"current,omitempty"`
+}
+
+// HandleChatWebAPISessions 返回可恢复的历史会话列表（含当前会话，置顶标记）。
+//
+// 响应结构：
+//
+//	{
+//	  "sessions": [ {id,title,summary,message_count,created_at,updated_at,current}, ... ],
+//	  "current_session_id": "<当前会话 ID，无会话时为空>"
+//	}
+//
+// 列表顺序：当前会话在前，其余按 UpdatedAt 新近度降序。列表项来自
+// listResumeCandidateChatSessions（已排除当前会话并过滤无对话的空会话），
+// 与 TTY /resume 选择器的候选集一致。
+func HandleChatWebAPISessions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeWebAPIJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"status": "error",
+			"reason": "method not allowed",
+		})
+		return
+	}
+
+	session := chatWebSession()
+	if session == nil || session.SessionManager == nil {
+		writeWebAPIJSON(w, http.StatusOK, map[string]interface{}{
+			"sessions":           []chatWebSessionListItem{},
+			"current_session_id": "",
+		})
+		return
+	}
+
+	currentID := currentRuntimeSessionID(session)
+	candidates, err := listResumeCandidateChatSessions(
+		session.SessionManager,
+		session.SessionUserID,
+		session.SessionFilter,
+		currentID,
+	)
+	if err != nil {
+		writeWebAPIJSON(w, http.StatusInternalServerError, map[string]string{
+			"status": "error",
+			"reason": err.Error(),
+		})
+		return
+	}
+
+	items := make([]chatWebSessionListItem, 0, len(candidates)+1)
+	if current := session.RuntimeSession; current != nil {
+		items = append(items, buildChatWebSessionListItem(current, true))
+	}
+	for _, candidate := range candidates {
+		if candidate == nil {
+			continue
+		}
+		items = append(items, buildChatWebSessionListItem(candidate, false))
+	}
+
+	writeWebAPIJSON(w, http.StatusOK, map[string]interface{}{
+		"sessions":           items,
+		"current_session_id": currentID,
+	})
+}
+
+// buildChatWebSessionListItem 从 runtimechat.Session 构建列表条目。
+// 标题为空时回退为 "(untitled)"，保持列表可扫描。
+func buildChatWebSessionListItem(s *runtimechat.Session, current bool) chatWebSessionListItem {
+	item := chatWebSessionListItem{
+		ID:      s.ID,
+		Current: current,
+	}
+	if preview := s.BuildPreview(); preview != nil {
+		item.Title = strings.TrimSpace(preview.Title)
+		item.Summary = strings.TrimSpace(preview.Summary)
+		item.MessageCount = preview.MessageCount
+		item.CreatedAt = preview.CreatedAt
+		item.UpdatedAt = preview.UpdatedAt
+	}
+	if item.Title == "" {
+		item.Title = "(untitled)"
+	}
+	return item
+}
+
+// ---------------------------------------------------------------------------
+// POST /web/api/sessions/resume — 恢复历史会话（§4.2.9）
+// ---------------------------------------------------------------------------
+
+// chatWebSessionsResumeRequest 是 POST /web/api/sessions/resume 的请求体。
+type chatWebSessionsResumeRequest struct {
+	SessionID string `json:"session_id"`
+}
+
+// HandleChatWebAPISessionsResume 将 "/resume <session-id>" 注入输入队列，
+// 由主循环安全地执行会话切换。
+//
+// 与 POST /web/api/input 的 prompt 注入共用同一机制（输入队列 +
+// wakeComposerRead），保证会话状态只被主循环单写者修改，避免 HTTP
+// goroutine 与正在运行的 turn 竞态。注入成功后 SSE 会继续投递
+// session_end/session_start/screen_refresh，前端据此刷新屏幕。
+func HandleChatWebAPISessionsResume(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeWebAPIJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"status": "error",
+			"reason": "method not allowed",
+		})
+		return
+	}
+
+	session := chatWebSession()
+	if session == nil {
+		writeWebAPIJSON(w, http.StatusConflict, map[string]string{
+			"status": "error",
+			"reason": "no active chat session",
+		})
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeWebAPIJSON(w, http.StatusBadRequest, map[string]string{
+			"status": "rejected",
+			"reason": "read body: " + err.Error(),
+		})
+		return
+	}
+
+	var req chatWebSessionsResumeRequest
+	if jsonErr := json.Unmarshal(body, &req); jsonErr != nil {
+		writeWebAPIJSON(w, http.StatusBadRequest, map[string]string{
+			"status": "rejected",
+			"reason": "invalid JSON: " + jsonErr.Error(),
+		})
+		return
+	}
+	targetID := strings.TrimSpace(req.SessionID)
+	if targetID == "" {
+		writeWebAPIJSON(w, http.StatusBadRequest, map[string]string{
+			"status": "rejected",
+			"reason": "session_id is required",
+		})
+		return
+	}
+
+	// 校验目标会话存在且属于当前用户，避免注入无效命令。
+	manager := session.SessionManager
+	if manager == nil {
+		writeWebAPIJSON(w, http.StatusConflict, map[string]string{
+			"status": "error",
+			"reason": "session manager unavailable",
+		})
+		return
+	}
+	target, err := manager.Get(context.Background(), targetID)
+	if err != nil {
+		writeWebAPIJSON(w, http.StatusNotFound, map[string]string{
+			"status": "error",
+			"reason": "session not found",
+		})
+		return
+	}
+	if target.UserID != session.SessionUserID {
+		writeWebAPIJSON(w, http.StatusForbidden, map[string]string{
+			"status": "error",
+			"reason": "session belongs to another user",
+		})
+		return
+	}
+	if currentID := currentRuntimeSessionID(session); currentID != "" && strings.EqualFold(currentID, targetID) {
+		writeWebAPIJSON(w, http.StatusOK, map[string]string{
+			"status":     "already_current",
+			"session_id": targetID,
+		})
+		return
+	}
+
+	queue := ensureChatBufferedInputQueue(session)
+	if queue == nil {
+		writeWebAPIJSON(w, http.StatusInternalServerError, map[string]string{
+			"status": "error",
+			"reason": "input queue unavailable",
+		})
+		return
+	}
+	result := queue.routeInputText("/resume " + targetID)
+	switch {
+	case result.queued():
+		session.wakeComposerRead()
+		writeWebAPIJSON(w, http.StatusOK, map[string]string{
+			"status":     "queued",
+			"session_id": targetID,
+		})
+	case result.rejected():
+		writeWebAPIJSON(w, http.StatusOK, map[string]string{
+			"status": "rejected",
+			"reason": "input rejected by command gate",
+		})
+	default:
+		writeWebAPIJSON(w, http.StatusOK, map[string]string{
+			"status":     "queued",
+			"session_id": targetID,
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------

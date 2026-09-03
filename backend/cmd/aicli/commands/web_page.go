@@ -102,46 +102,103 @@ const chatWebPageHTML = `<!DOCTYPE html>
   #footer a { color: #6aa0c0; text-decoration: none; }
   #footer a:hover { text-decoration: underline; color: #8ac0e0; }
   #footer .sep { color: #3a4a55; }
+
+  /* ---- 左侧会话列表侧边栏 ---- */
+  .layout { display: flex; flex: 1; min-height: 0; }
+  #sidebar {
+    width: 264px; min-width: 0; flex-shrink: 0;
+    display: flex; flex-direction: column;
+    margin: 8px 8px 8px 0;
+    background: #0b0e11; border: 1px solid #2a3138; border-radius: 6px;
+    overflow: hidden;
+    transition: width .15s ease, margin .15s ease, border .15s ease;
+  }
+  body.sidebar-collapsed #sidebar {
+    width: 0; margin: 8px 0;
+    border-width: 0; overflow: hidden;
+  }
+  .sidebar-header {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 8px; border-bottom: 1px solid #2a3138;
+    flex: 0 0 auto;
+  }
+  .sidebar-header .sidebar-title { font-weight: 600; font-size: 12px; color: #9aa7b0; flex: 1; }
+  .sidebar-header button {
+    padding: 2px 8px; font-size: 12px; line-height: 1.4;
+  }
+  #session-list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px; }
+  .session-empty { padding: 14px 10px; color: #7c8890; font-size: 12px; }
+  .session-item {
+    display: block; width: 100%; text-align: left;
+    padding: 6px 8px; margin-bottom: 2px;
+    background: transparent; color: #c9d6e4;
+    border: 1px solid transparent; border-radius: 4px;
+    cursor: pointer; font-size: 12px; line-height: 1.35;
+  }
+  .session-item:hover { background: #16222d; }
+  .session-item.active { background: #20354a; border-color: #3d5570; }
+  .session-item .session-title {
+    display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .session-item .session-meta { display: block; color: #7c8890; font-size: 11px; margin-top: 1px; }
+  .session-item .session-current { color: #8ff0a4; }
+  .session-item.resuming { opacity: .55; cursor: wait; }
+  #main-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  #sidebar-toggle { padding: 2px 10px; font-size: 12px; }
 </style>
 </head>
 <body>
 <header>
   <h1>aicli micro web client</h1>
+  <button id="sidebar-toggle" type="button" title="折叠/展开会话列表">☰</button>
   <span id="connection-status">connecting</span>
   <span id="turn-status">-</span>
 </header>
 
-<div id="approval-panel">
-  <div id="approval-title">待处理请求</div>
-  <div id="approval-prompt" class="prompt"></div>
-  <div id="question-suggestions"></div>
-  <button id="approve-btn">允许</button>
-  <button id="deny-btn">拒绝</button>
-</div>
+<div class="layout">
+  <aside id="sidebar">
+    <div class="sidebar-header">
+      <span class="sidebar-title">会话</span>
+      <button id="sessions-refresh-btn" type="button" title="刷新会话列表">⟳</button>
+      <button id="sidebar-collapse-btn" type="button" title="折叠会话列表">«</button>
+    </div>
+    <div id="session-list"><div class="session-empty">加载中…</div></div>
+  </aside>
 
-<div class="tabs">
-  <button class="tab-btn active" id="tab-main-btn" type="button">对话</button>
-  <button class="tab-btn" id="tab-log-btn" type="button">日志</button>
-</div>
+  <div id="main-col">
+    <div id="approval-panel">
+      <div id="approval-title">待处理请求</div>
+      <div id="approval-prompt" class="prompt"></div>
+      <div id="question-suggestions"></div>
+      <button id="approve-btn">允许</button>
+      <button id="deny-btn">拒绝</button>
+    </div>
 
-<div id="tab-main" class="tab-panel active">
-  <div id="conversation">
-    <pre id="screen">(empty)</pre>
-    <div id="stream-msg"></div>
-  </div>
-  <div id="input-row">
-    <input id="prompt" type="text" placeholder="输入消息后回车发送…" autocomplete="off">
-    <button id="send-btn">发送</button>
-    <span id="send-status"></span>
-  </div>
-</div>
+    <div class="tabs">
+      <button class="tab-btn active" id="tab-main-btn" type="button">对话</button>
+      <button class="tab-btn" id="tab-log-btn" type="button">日志</button>
+    </div>
 
-<div id="tab-log" class="tab-panel">
-  <div id="log-toolbar">
-    <button id="log-clear-btn" type="button">清空</button>
-    <span id="log-count">0 条事件</span>
+    <div id="tab-main" class="tab-panel active">
+      <div id="conversation">
+        <pre id="screen">(empty)</pre>
+        <div id="stream-msg"></div>
+      </div>
+      <div id="input-row">
+        <input id="prompt" type="text" placeholder="输入消息后回车发送…" autocomplete="off">
+        <button id="send-btn">发送</button>
+        <span id="send-status"></span>
+      </div>
+    </div>
+
+    <div id="tab-log" class="tab-panel">
+      <div id="log-toolbar">
+        <button id="log-clear-btn" type="button">清空</button>
+        <span id="log-count">0 条事件</span>
+      </div>
+      <div id="event-log"></div>
+    </div>
   </div>
-  <div id="event-log"></div>
 </div>
 
 <div id="footer">
@@ -171,10 +228,18 @@ const chatWebPageHTML = `<!DOCTYPE html>
   var approveBtn = document.getElementById("approve-btn");
   var denyBtn = document.getElementById("deny-btn");
   var questionSuggestionsEl = document.getElementById("question-suggestions");
+  var sidebarEl = document.getElementById("sidebar");
+  var sidebarToggleBtn = document.getElementById("sidebar-toggle");
+  var sidebarCollapseBtn = document.getElementById("sidebar-collapse-btn");
+  var sessionsRefreshBtn = document.getElementById("sessions-refresh-btn");
+  var sessionListEl = document.getElementById("session-list");
 
   var pendingApprovalRequestID = null;
   var pendingQuestionID = null;
   var lastSequence = 0;
+  var sessions = [];               // 会话列表缓存（GET /web/api/sessions）
+  var sidebarCollapsed = false;    // 侧边栏折叠状态（localStorage 记忆）
+  var sessionsReqSeq = 0;          // loadSessions 请求序号（丢弃过期响应）
 
   // ---- 打字机状态（实时逐字揭示） ----
   var streamActive = false;          // turn_start → turn_end
@@ -274,6 +339,21 @@ const chatWebPageHTML = `<!DOCTYPE html>
   function finishStream() {
     streamActive = false;
     streamEnded = false;
+    // 把流式累积文本持久化到屏幕区，作为无 surface 时的会话历史。
+    // 有 surface 时 refreshScreen() 会覆盖为权威屏幕快照（含全部历史）。
+    // 无 surface 时追加累积，避免多轮对话互相覆盖。
+    var persisted = "";
+    if (streamReasoning) {
+      persisted += "[reasoning]\n" + streamReasoning + "\n";
+    }
+    if (streamText) {
+      persisted += streamText;
+    }
+    if (persisted) {
+      var existing = screenEl.textContent;
+      var prefix = (existing && existing !== "(empty)") ? existing + "\n\n" : "";
+      screenEl.textContent = prefix + persisted;
+    }
     if (streamMsgEl) { streamMsgEl.style.display = "none"; }
     refreshScreen();
   }
@@ -330,10 +410,24 @@ const chatWebPageHTML = `<!DOCTYPE html>
   }
 
   function refreshScreen() {
-    fetch("/web/api/screen?format=text", { cache: "no-store" })
-      .then(function (res) { return res.ok ? res.text() : "ERROR " + res.status; })
-      .then(function (text) { screenEl.textContent = text; scrollToBottom(); })
-      .catch(function (err) { screenEl.textContent = "screen fetch failed: " + err; });
+    fetch("/web/api/screen?format=json", { cache: "no-store" })
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        if (!data || !data.available) {
+          // 无可用屏幕快照（无 surface / 空帧）：保留 screenEl 已有内容
+          // （finishStream 已写入流式累积文本），不覆盖为 "(empty)"。
+          scrollToBottom();
+          return;
+        }
+        // 权威屏幕内容可用：覆盖显示，隐藏 #stream-msg（由终端渲染驱动）。
+        screenEl.textContent = data.text || "";
+        if (streamMsgEl) { streamMsgEl.style.display = "none"; }
+        scrollToBottom();
+      })
+      .catch(function (err) {
+        // 网络错误：保留现有内容，不覆盖。
+        console.error("screen fetch failed:", err);
+      });
   }
 
   function scrollToBottom() {
@@ -410,6 +504,147 @@ const chatWebPageHTML = `<!DOCTYPE html>
       .catch(function (err) { sendStatusEl.textContent = "失败: " + err; });
   }
 
+  // ---- 左侧会话列表：折叠/展开 ----
+  function setSidebarCollapsed(collapsed) {
+    sidebarCollapsed = collapsed;
+    document.body.classList.toggle("sidebar-collapsed", collapsed);
+    try { localStorage.setItem("webSidebarCollapsed", collapsed ? "1" : "0"); } catch (e) { /* ignore */ }
+    if (sidebarToggleBtn) {
+      sidebarToggleBtn.textContent = collapsed ? "☰" : "«";
+      sidebarToggleBtn.title = collapsed ? "展开会话列表" : "折叠会话列表";
+    }
+  }
+
+  // 恢复折叠状态（localStorage 记忆）
+  try {
+    setSidebarCollapsed(localStorage.getItem("webSidebarCollapsed") === "1");
+  } catch (e) { /* ignore */ }
+
+  function fmtSessionTime(iso) {
+    if (!iso) { return ""; }
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) { return ""; }
+    var now = new Date();
+    var sameDay = d.toDateString() === now.toDateString();
+    function pad(n) { return n < 10 ? "0" + n : "" + n; }
+    var hhmm = pad(d.getHours()) + ":" + pad(d.getMinutes());
+    if (sameDay) { return hhmm; }
+    return pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + hhmm;
+  }
+
+  // 渲染会话列表；current=true 的项置顶并高亮。
+  function renderSessionList() {
+    if (!sessionListEl) { return; }
+    var items = (sessions || []).slice();
+    items.sort(function (a, b) {
+      if (a.current !== b.current) { return a.current ? -1 : 1; }
+      return 0;
+    });
+    sessionListEl.innerHTML = "";
+    if (!items.length) {
+      var empty = document.createElement("div");
+      empty.className = "session-empty";
+      empty.textContent = "暂无历史会话";
+      sessionListEl.appendChild(empty);
+      return;
+    }
+    items.forEach(function (s) {
+      var item = document.createElement("button");
+      item.type = "button";
+      item.className = "session-item" + (s.current ? " active" : "");
+      item.title = s.id;
+      var title = document.createElement("span");
+      title.className = "session-title";
+      title.textContent = s.title || "(未命名会话)";
+      var meta = document.createElement("span");
+      meta.className = "session-meta";
+      var bits = [];
+      if (s.current) { bits.push('<span class="session-current">● 当前</span>'); }
+      if (typeof s.message_count === "number") { bits.push(s.message_count + " 条消息"); }
+      var ts = fmtSessionTime(s.updated_at || s.created_at);
+      if (ts) { bits.push(ts); }
+      meta.innerHTML = bits.join(" · ");
+      item.appendChild(title);
+      item.appendChild(meta);
+      item.addEventListener("click", function () { resumeSession(s.id); });
+      sessionListEl.appendChild(item);
+    });
+  }
+
+  // 拉取会话列表（GET /web/api/sessions）
+  function loadSessions() {
+    var seq = ++sessionsReqSeq;
+    fetch("/web/api/sessions", { cache: "no-store" })
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        if (!data) { return; }
+        if (seq !== sessionsReqSeq) { return; } // 丢弃过期响应
+        sessions = data.sessions || [];
+        renderSessionList();
+      })
+      .catch(function (err) { console.error("sessions fetch failed:", err); });
+  }
+
+  // 切换会话（POST /web/api/sessions/resume → 注入 /resume <id>）
+  function resumeSession(id) {
+    if (!id) { return; }
+    // 点击项进入 resuming 状态，避免重复提交
+    var all = sessionListEl.querySelectorAll(".session-item");
+    for (var i = 0; i < all.length; i++) { all[i].classList.remove("resuming"); }
+    var target = null;
+    for (var j = 0; j < all.length; j++) {
+      if (all[j].title === id) { target = all[j]; break; }
+    }
+    if (target) { target.classList.add("resuming"); }
+    sendStatusEl.textContent = "切换会话中…";
+    fetch("/web/api/sessions/resume", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: id })
+    })
+      .then(function (res) {
+        return res.json().catch(function () { return { status: "error", reason: "bad response" }; });
+      })
+      .then(function (json) {
+        for (var k = 0; k < all.length; k++) { all[k].classList.remove("resuming"); }
+        if (json.status === "queued" || json.status === "already_current") {
+          sendStatusEl.textContent = json.status === "already_current" ? "已是当前会话" : "已切换，刷新中…";
+          if (json.status === "already_current") {
+            loadSessions();
+            refreshScreen();
+          } else {
+            // /resume 是异步注入输入队列的（主循环稍后才执行），立即刷新拿到的是旧列表。
+            // 且 CLI 侧 resume 不发布 session_end/session_start SSE 事件，无法靠 SSE 感知完成时机。
+            // 因此轮询 /web/api/sessions，直到 current_session_id 变成目标会话（带次数上限）。
+            var attempts = 0;
+            (function pollResumed() {
+              fetch("/web/api/sessions", { cache: "no-store" })
+                .then(function (r) { return r.ok ? r.json() : null; })
+                .then(function (data) {
+                  if (!data) { return; }
+                  var cur = data.current_session_id || "";
+                  if (cur === id || ++attempts >= 8) {
+                    sessions = data.sessions || [];
+                    renderSessionList();
+                    refreshScreen();
+                    sendStatusEl.textContent = cur === id ? "已切换" : "已切换(状态未同步)";
+                  } else {
+                    setTimeout(pollResumed, 300);
+                  }
+                })
+                .catch(function (err) { console.error("resume poll failed:", err); });
+            })();
+          }
+        } else {
+          sendStatusEl.textContent = "切换失败: " + (json.reason || json.status);
+        }
+      })
+      .catch(function (err) {
+        for (var m = 0; m < all.length; m++) { all[m].classList.remove("resuming"); }
+        sendStatusEl.textContent = "切换失败: " + err;
+      });
+  }
+
   // 屏幕刷新策略（§8.6 方法二）：关键事件后主动拉取屏幕内容。
   var refreshKeys = { "turn_end": 1, "tool_end": 1, "session_end": 1, "session_interrupted": 1, "error": 1, "screen_refresh": 1, "compact_end": 1 };
 
@@ -424,6 +659,7 @@ const chatWebPageHTML = `<!DOCTYPE html>
         if (data.pending_approval) { showApproval(data.pending_approval); }
         if (data.pending_question) { showQuestion(data.pending_question); }
         if (data.session_busy) { beginStream(); } else { refreshScreen(); }
+        loadSessions(); // 重连后刷新会话列表
         break;
       case "turn_start":
         setTurn("处理中 " + (data.model ? "(" + data.model + ")" : ""));
@@ -475,6 +711,14 @@ const chatWebPageHTML = `<!DOCTYPE html>
         break;
       case "question_answered":
         hideApproval();
+        break;
+      case "session_start":
+      case "session_end":
+      case "session_interrupted":
+        // 会话切换/结束：刷新会话列表（resume 后当前项高亮变化）
+        // 并刷新屏幕（原 default 分支行为）。
+        loadSessions();
+        if (!streamActive) { refreshScreen(); }
         break;
       default:
         if (refreshKeys[eventName] && !streamActive) { refreshScreen(); }
@@ -555,6 +799,17 @@ const chatWebPageHTML = `<!DOCTYPE html>
     }
   });
 
+  // ---- 侧边栏按钮 ----
+  if (sidebarToggleBtn) {
+    sidebarToggleBtn.addEventListener("click", function () { setSidebarCollapsed(!sidebarCollapsed); });
+  }
+  if (sidebarCollapseBtn) {
+    sidebarCollapseBtn.addEventListener("click", function () { setSidebarCollapsed(true); });
+  }
+  if (sessionsRefreshBtn) {
+    sessionsRefreshBtn.addEventListener("click", function () { loadSessions(); });
+  }
+
   // 底部栏显示完整 URL
   var origin = window.location.origin;
   document.getElementById("footer-endpoints").innerHTML = '<a href="' + origin + '/debug/endpoints" target="_blank" rel="noopener">' + origin + '/debug/endpoints</a>';
@@ -562,6 +817,7 @@ const chatWebPageHTML = `<!DOCTYPE html>
 
   openEventSource();
   refreshScreen();
+  loadSessions();
 })();
 </script>
 </body>

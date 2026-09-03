@@ -327,6 +327,65 @@ func TestChatRuntimeEventBridge_ReplayRestoresPriorityPromptWithoutDuplicate(t *
 	}
 }
 
+// TestChatRuntimeEventBridge_BlockingInteractiveEventsSurviveTurnMismatch
+// guards the fix where EventQuestionAsked / EventApprovalRequested were
+// silently dropped by the mismatched-turn suppression. The actor blocks
+// synchronously waiting for the answer, so dropping the event left the run
+// stuck until timeout while only out-of-band consumers (micro web client)
+// could answer. Non-blocking events must keep the original suppression
+// behaviour.
+func TestChatRuntimeEventBridge_BlockingInteractiveEventsSurviveTurnMismatch(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{})
+	bridge.setPrimarySessionID("session-1")
+	bridge.renderMu.Lock()
+	bridge.runActive = true
+	bridge.activeTurnID = "turn-1"
+	bridge.retiredTurnIDs = map[string]struct{}{}
+	bridge.renderMu.Unlock()
+
+	question := runtimeevents.Event{
+		Type:      runtimechat.EventQuestionAsked,
+		SessionID: "session-1",
+		Payload: map[string]interface{}{
+			"question_id": "question-1",
+			"prompt":      "choose a model",
+			"turn_id":     "turn-2", // mismatched with the active turn
+		},
+	}
+	if bridge.shouldSuppressMismatchedPrimaryTurnEvent(question) {
+		t.Fatal("EventQuestionAsked must not be suppressed by a turn mismatch: the actor is waiting for an answer")
+	}
+
+	approval := runtimeevents.Event{
+		Type:      runtimechat.EventApprovalRequested,
+		SessionID: "session-1",
+		Payload: map[string]interface{}{
+			"request_id": "request-1",
+			"reason":     "run shell command",
+			"tool_name":  "shell",
+		},
+		// No turn_id at all: previously suppressed when the active run had
+		// already identified its turn.
+	}
+	if bridge.shouldSuppressMismatchedPrimaryTurnEvent(approval) {
+		t.Fatal("EventApprovalRequested must not be suppressed by a turn mismatch: the actor is waiting for a decision")
+	}
+
+	// Non-blocking events with a mismatched turn must still be suppressed.
+	toolFinished := runtimeevents.Event{
+		Type:      runtimechat.EventToolFinished,
+		SessionID: "session-1",
+		Payload: map[string]interface{}{
+			"tool_call_id": "tool-1",
+			"tool_name":    "shell",
+			"turn_id":      "turn-2",
+		},
+	}
+	if !bridge.shouldSuppressMismatchedPrimaryTurnEvent(toolFinished) {
+		t.Fatal("non-blocking event with mismatched turn must still be suppressed")
+	}
+}
+
 // Runtime-event rendering already calls EventEncoder.Encode before the legacy
 // line writer. RenderAsyncLine is intentionally still a projection-only path;
 // changing it to inject would create a duplicate Scene cell for every mapped

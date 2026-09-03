@@ -880,7 +880,16 @@ func (a *SessionActor) handleApproveTool(cmd ApproveTool) {
 		ctx = context.Background()
 	}
 	state := a.stateWithoutToolSurfaces()
-	if state == nil || state.PendingApproval == nil || state.PendingApproval.ID != cmd.RequestID {
+	if state == nil {
+		cmd.Reply <- fmt.Errorf("approval request not found")
+		return
+	}
+	// 幂等：审批已被其它入口（如 web client）处理过，不再报错。
+	if state.PendingApproval == nil {
+		cmd.Reply <- nil
+		return
+	}
+	if state.PendingApproval.ID != cmd.RequestID {
 		cmd.Reply <- fmt.Errorf("approval request not found")
 		return
 	}
@@ -957,7 +966,16 @@ func (a *SessionActor) handleAnswerQuestion(cmd AnswerQuestion) {
 		ctx = context.Background()
 	}
 	state := a.StateForInspection()
-	if state == nil || state.PendingQuestion == nil || state.PendingQuestion.ID != cmd.QuestionID {
+	if state == nil {
+		cmd.Reply <- fmt.Errorf("question request not found")
+		return
+	}
+	// 幂等：问题已被其它入口（如 web client）回答过，不再报错。
+	if state.PendingQuestion == nil {
+		cmd.Reply <- nil
+		return
+	}
+	if state.PendingQuestion.ID != cmd.QuestionID {
 		cmd.Reply <- fmt.Errorf("question request not found")
 		return
 	}

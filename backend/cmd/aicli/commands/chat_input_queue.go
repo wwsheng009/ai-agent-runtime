@@ -17,6 +17,7 @@ import (
 var chatRuntimeGOOS = runtime.GOOS
 var chatIsInteractiveTerminal = ui.IsInteractiveTerminal
 var errChatInteractivePromptCancelled = errors.New("interactive prompt cancelled")
+var errChatInteractivePromptResolvedElsewhere = errors.New("interactive prompt resolved by another entry")
 
 func isChatInteractivePromptCancelError(err error) bool {
 	return errors.Is(err, errChatInteractivePromptCancelled) ||
@@ -240,12 +241,14 @@ type chatInputQueue struct {
 	draftActive bool
 	readyText   string
 
-	queuedMu      sync.Mutex
-	queuedFront   []chatQueuedInput
-	queuedPreview []chatQueuedInput
+	queuedMu                  sync.Mutex
+	queuedFront               []chatQueuedInput
+	queuedPreview             []chatQueuedInput
 
-	commandGate   func(string) bool
-	routeFeedback func(string, chatInputRouteResult)
+	commandGate               func(string) bool
+	routeFeedback             func(string, chatInputRouteResult)
+
+	priorityResolvedElsewhere chan struct{}
 }
 
 func newChatInputQueue(reader *bufio.Reader) *chatInputQueue {
@@ -259,6 +262,7 @@ func newChatInputQueue(reader *bufio.Reader) *chatInputQueue {
 		errs:                  make(chan error, 1),
 		readySignal:           make(chan struct{}, 1),
 		priorityCaptureSignal: make(chan struct{}, 1),
+		priorityResolvedElsewhere: make(chan struct{}, 1),
 	}
 }
 
@@ -857,6 +861,8 @@ func (q *chatInputQueue) readPriorityLine(ctx context.Context) (string, error) {
 	return q.readPriorityLineWithPrompt(ctx, "")
 }
 
+// readPriorityLineWithPrompt 等待一行优先级输入，并在等待期间可被外部信号
+//（priorityResolvedElsewhere）中断。调用方负责在哨兵错误上重试/跳过。
 func (q *chatInputQueue) readPriorityLineWithPrompt(ctx context.Context, prompt string) (string, error) {
 	if q == nil {
 		return "", io.EOF
@@ -870,6 +876,8 @@ func (q *chatInputQueue) readPriorityLineWithPrompt(ctx context.Context, prompt 
 		select {
 		case item := <-q.priorityLines:
 			return item.Text, nil
+		case <-q.priorityResolvedElsewhere:
+			return "", errChatInteractivePromptResolvedElsewhere
 		default:
 		}
 		if terminalErr := q.terminalError(); terminalErr != nil {
@@ -878,10 +886,14 @@ func (q *chatInputQueue) readPriorityLineWithPrompt(ctx context.Context, prompt 
 		select {
 		case item := <-q.priorityLines:
 			return item.Text, nil
+		case <-q.priorityResolvedElsewhere:
+			return "", errChatInteractivePromptResolvedElsewhere
 		case err := <-q.errs:
 			select {
 			case item := <-q.priorityLines:
 				return item.Text, nil
+			case <-q.priorityResolvedElsewhere:
+				return "", errChatInteractivePromptResolvedElsewhere
 			default:
 			}
 			return "", err
@@ -1247,6 +1259,15 @@ func chatInteractiveReadPriorityLineWithPrompt(session *ChatSession, ctx context
 	return chatInteractiveReadTransientLine(session, ctx)
 }
 
+// chatSignalPriorityResolvedElsewhere 通知 console 端的优先级读取（如提问/审批等待）
+// 答案已被其它入口（如 web client）解决，使其通过哨兵错误跳过本次提示。
+func chatSignalPriorityResolvedElsewhere(session *ChatSession) {
+	if session == nil || session.InputQueue == nil {
+		return
+	}
+	session.InputQueue.signalPriorityReadResolvedElsewhere()
+}
+
 func chatInteractiveReadPrioritySecretWithPrompt(session *ChatSession, ctx context.Context, prompt string) (string, error) {
 	restoreInputMode := pushChatComposerInputMode(session, chatInputModeSecret)
 	defer restoreInputMode()
@@ -1357,6 +1378,20 @@ func (q *chatInputQueue) ensureChannels() {
 	}
 	if q.priorityCaptureSignal == nil {
 		q.priorityCaptureSignal = make(chan struct{}, 1)
+	}
+	if q.priorityResolvedElsewhere == nil {
+		q.priorityResolvedElsewhere = make(chan struct{}, 1)
+	}
+}
+
+func (q *chatInputQueue) signalPriorityReadResolvedElsewhere() {
+	if q == nil {
+		return
+	}
+	q.ensureChannels()
+	select {
+	case q.priorityResolvedElsewhere <- struct{}{}:
+	default:
 	}
 }
 

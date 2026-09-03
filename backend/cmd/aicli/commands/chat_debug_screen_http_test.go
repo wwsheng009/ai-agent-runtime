@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
@@ -164,6 +166,125 @@ func TestChatDebugScreenPrefersDerivedAppState(t *testing.T) {
 	}
 	if snap.Height != 12 {
 		t.Fatalf("height 应来自派生几何 12，实际为 %d", snap.Height)
+	}
+}
+
+// TestChatDebugScreenTranscriptFallbackWithoutGeometry 复现 Win7 无 surface
+// 启动形态：uiActor 存在、transcript 有语义 cell，但 geometry 为 0（没有终端
+// 尺寸可派生布局）。此时必须回退到 transcriptFallbackText，从语义 cell 派生
+// 纯文本，而不是返回 "no active terminal surface" 死信号。这是 web 客户端
+// 屏幕镜像通道在 headless/后台服务下的数据平面权威来源（app_state.go 语义
+// cell 存储，与几何无关）。
+func TestChatDebugScreenTranscriptFallbackWithoutGeometry(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	session := &ChatSession{}
+	coordinator := newChatInteractionCoordinator(session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+	coordinator.SetWriter(&bytes.Buffer{})
+	actor := coordinator.ensureUIActor()
+	if actor == nil {
+		t.Fatal("expected UI actor")
+	}
+	// 不 Post Resize：geometry 保持 0，模拟无 surface / headless 启动。
+	// 注入混合语义 cell（user + reasoning + assistant + tool）。
+	const (
+		userMarker   = "FALLBACK-USER-MARKER"
+		reasonMarker = "FALLBACK-REASON-MARKER"
+		asstMarker   = "FALLBACK-ASSISTANT-MARKER"
+		toolMarker   = "FALLBACK-TOOL-MARKER"
+	)
+	if !actor.Post(ui.ReplaceTranscriptAction{Snapshot: &scene.Snapshot{
+		Revision: 1,
+		Cells: []*scene.TranscriptCell{
+			{ID: 1, Sequence: 1, Kind: scene.KindUser, Source: userMarker,
+				Revision: 1, Phase: scene.CellCommitted},
+			{ID: 2, Sequence: 2, Kind: scene.KindReasoning, Source: reasonMarker,
+				Revision: 1, Phase: scene.CellCommitted},
+			{ID: 3, Sequence: 3, Kind: scene.KindToolChain, Source: toolMarker,
+				Revision: 1, Phase: scene.CellCommitted},
+			{ID: 4, Sequence: 4, Kind: scene.KindAssistant, Source: asstMarker,
+				Revision: 1, Phase: scene.CellCommitted},
+		},
+	}}) {
+		t.Fatal("post transcript")
+	}
+	actor.WaitIdle()
+
+	old := chatDebugDisplaySessionProvider
+	chatDebugDisplaySessionProvider = func() *ChatSession { return session }
+	defer func() { chatDebugDisplaySessionProvider = old }()
+
+	snap := BuildChatDebugScreenSnapshot()
+	if !snap.Available {
+		t.Fatalf("无 geometry 但有 transcript 时应 available=true，reason=%q", snap.Reason)
+	}
+	for _, marker := range []string{userMarker, reasonMarker, asstMarker, toolMarker} {
+		if !strings.Contains(snap.Text, marker) {
+			t.Fatalf("screen 文本应包含 %q，实际为 %q", marker, snap.Text)
+		}
+	}
+	// 语义回退应带角色前缀，顺序与注入一致（对话时序）。
+	if !strings.HasPrefix(snap.Text, "user> "+userMarker) {
+		t.Fatalf("首个 cell 应为 user 前缀，实际为 %q", snap.Text)
+	}
+	// 无 geometry：Height 保持 0（回退通道不伪造终端帧尺寸）。
+	if snap.Height != 0 {
+		t.Fatalf("回退通道 height 应为 0，实际为 %d", snap.Height)
+	}
+
+	// 纯文本端点：不再输出 "Debug Screen:" 死信号。
+	text := BuildChatDebugScreenText()
+	if strings.Contains(text, "Debug Screen:") {
+		t.Fatalf("回退通道不应输出 Debug Screen 提示，实际为 %q", text)
+	}
+	if !strings.Contains(text, asstMarker) {
+		t.Fatalf("text 端点应包含 assistant 正文，实际为 %q", text)
+	}
+}
+
+// TestChatDebugScreenBridgeSceneFallback 复现无 surface + 无 uiActor 同步的
+// 启动形态（Win7 降级 / headless：unifiedRenderer 未启用，postTranscript
+// 被 UnifiedRendererEnabled 门控，uiActor 收不到快照）。此时屏幕镜像必须
+// 从 bridge 的 Scene 快照回退——bridge 订阅 EventBus，事件流到达即构建
+// Scene（applyChangeSet），不依赖 unifiedRenderer 门控。
+func TestChatDebugScreenBridgeSceneFallback(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	session := &ChatSession{}
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.session = session
+	session.RuntimeEventBridge = bridge
+
+	// 通过 encode + applyChangeSet 构建 Scene（模拟事件流到达 bridge）。
+	const marker = "BRIDGE-SCENE-MARKER"
+	bridge.renderMu.Lock()
+	bridge.applyChangeSet(bridge.renderEncoder.Encode(runtimeevents.Event{
+		Type: runtimechat.EventLLMRequestStarted,
+		Payload: map[string]interface{}{
+			"turn_id": "turn-1", "stream_id": "stream-1",
+		},
+	}))
+	bridge.applyChangeSet(bridge.renderEncoder.Encode(runtimeevents.Event{
+		Type: runtimechat.EventAssistantDelta,
+		Payload: map[string]interface{}{
+			"turn_id": "turn-1", "stream_id": "stream-1", "delta": marker, "sequence": uint64(1),
+		},
+	}))
+	bridge.renderMu.Unlock()
+
+	// 无 surface、无 uiActor、无 Interaction：仅 bridge Scene 有内容。
+	old := chatDebugDisplaySessionProvider
+	chatDebugDisplaySessionProvider = func() *ChatSession { return session }
+	defer func() { chatDebugDisplaySessionProvider = old }()
+
+	snap := BuildChatDebugScreenSnapshot()
+	if !snap.Available {
+		t.Fatalf("仅 bridge Scene 有内容时应 available=true，reason=%q", snap.Reason)
+	}
+	if !strings.Contains(snap.Text, marker) {
+		t.Fatalf("screen 文本应包含 bridge Scene 内容 %q，实际为 %q", marker, snap.Text)
 	}
 }
 

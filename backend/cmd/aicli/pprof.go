@@ -223,6 +223,8 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	mux.HandleFunc(commands.ChatWebAPIEventsPath, commands.HandleChatWebAPIEvents)
 	mux.HandleFunc(commands.ChatWebAPIInputPath, commands.HandleChatWebAPIInput)
 	mux.HandleFunc(commands.ChatWebAPISchemaPath, commands.HandleChatWebAPIEventsSchema)
+	mux.HandleFunc(commands.ChatWebAPISessionsPath, commands.HandleChatWebAPISessions)
+	mux.HandleFunc(commands.ChatWebAPISessionsResumePath, commands.HandleChatWebAPISessionsResume)
 
 	server := &http.Server{
 		Handler: mux,

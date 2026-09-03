@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -69,7 +70,7 @@ func TestEnsureLocalObserveService_EnabledWithPprofOn(t *testing.T) {
 	bus.Publish(runtimeevents.Event{Type: runtimeobserve.EventRuntimeStarted, SessionID: "session-1", Payload: map[string]interface{}{}})
 	var seq int64
 	for i := 0; i < 50; i++ {
-		snapshot, err := svc.BuildSnapshot(t.Context(), true)
+		snapshot, err := svc.BuildSnapshot(context.Background(), true)
 		if err != nil {
 			t.Fatalf("build snapshot: %v", err)
 		}

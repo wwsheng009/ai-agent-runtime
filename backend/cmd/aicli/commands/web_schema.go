@@ -15,12 +15,14 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	ChatWebPath           = "/web/"
-	ChatWebAPIScreenPath  = "/web/api/screen"
-	ChatWebAPIStatusPath  = "/web/api/status"
-	ChatWebAPIEventsPath  = "/web/api/events"
-	ChatWebAPIInputPath   = "/web/api/input"
-	ChatWebAPISchemaPath  = "/web/api/events/schema"
+	ChatWebPath                   = "/web/"
+	ChatWebAPIScreenPath          = "/web/api/screen"
+	ChatWebAPIStatusPath          = "/web/api/status"
+	ChatWebAPIEventsPath          = "/web/api/events"
+	ChatWebAPIInputPath           = "/web/api/input"
+	ChatWebAPISchemaPath          = "/web/api/events/schema"
+	ChatWebAPISessionsPath        = "/web/api/sessions"
+	ChatWebAPISessionsResumePath  = "/web/api/sessions/resume"
 )
 
 // chatWebSchemaVersion 是 SSE 事件 data 中 _event.schema_version 字段的值。

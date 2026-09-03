@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -3376,14 +3377,32 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		if hint := b.approvalPromptHint(event.SessionID, approval); hint != "" {
 			b.renderLocalApprovalSupplement(hint)
 		}
+		if !b.approvalStillPending(event.SessionID, requestID) {
+			// 双入口一致性：审批已被其它入口（如 web client）处理，无需在 console 询问。
+			return
+		}
 		priorityTarget := b.setPriorityTranscriptTarget(event)
 		answer, askErr := func() (chatApprovalAnswer, error) {
 			endAction := beginChatTitleAction(b.session, "Approval Required")
 			defer endAction()
-			return b.askApproval(approval, approvalContextLines)
+			for {
+				answer, err := b.askApproval(approval, approvalContextLines)
+				if err == nil || !errors.Is(err, errChatInteractivePromptResolvedElsewhere) {
+					return answer, err
+				}
+				// 哨兵：其它入口已解决某个审批。若当前审批仍 pending（陈旧信号），
+				// 重试读取；否则静默跳过，不再询问。
+				if !b.approvalStillPending(event.SessionID, requestID) {
+					return chatApprovalAnswer{}, errChatInteractivePromptResolvedElsewhere
+				}
+			}
 		}()
 		b.clearPriorityTranscriptTarget(priorityTarget)
 		if askErr != nil {
+			if errors.Is(askErr, errChatInteractivePromptResolvedElsewhere) {
+				// 已由其它入口解决：不渲染决议、不重复 resolve、不视为运行错误。
+				return
+			}
 			b.setRunError(askErr)
 			_ = b.resolveApproval(context.Background(), event.SessionID, requestID, false)
 			return
@@ -3405,14 +3424,32 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 			_ = b.resolveQuestion(context.Background(), event.SessionID, questionID, "")
 			return
 		}
+		if !b.questionStillPending(event.SessionID, questionID) {
+			// 双入口一致性：问题已被其它入口（如 web client）回答，无需在 console 询问。
+			return
+		}
 		priorityTarget := b.setPriorityTranscriptTarget(event)
 		answer, askErr := func() (string, error) {
 			endAction := beginChatTitleAction(b.session, "Input Required")
 			defer endAction()
-			return b.askQuestion(prompt, suggestions, required)
+			for {
+				answer, err := b.askQuestion(prompt, suggestions, required)
+				if err == nil || !errors.Is(err, errChatInteractivePromptResolvedElsewhere) {
+					return answer, err
+				}
+				// 哨兵：其它入口已回答某个问题。若当前问题仍 pending（陈旧信号），
+				// 重试读取；否则静默跳过。
+				if !b.questionStillPending(event.SessionID, questionID) {
+					return "", errChatInteractivePromptResolvedElsewhere
+				}
+			}
 		}()
 		b.clearPriorityTranscriptTarget(priorityTarget)
 		if askErr != nil {
+			if errors.Is(askErr, errChatInteractivePromptResolvedElsewhere) {
+				// 已由其它入口回答：不再 resolve（避免重复/覆盖回答）。
+				return
+			}
 			b.setRunError(askErr)
 			_ = b.resolveQuestion(context.Background(), event.SessionID, questionID, "")
 			return
@@ -3524,6 +3561,17 @@ func (b *chatRuntimeEventBridge) shouldSuppressMismatchedPrimaryTurnEvent(event 
 	// Team/task/mailbox events have their own durable team/task/message
 	// identities and may legitimately arrive after the initiating chat turn.
 	if isTeamLifecycleRuntimeEvent(event.Type) || event.Type == runtimechat.EventMailboxReceived || isCriticalSubagentLifecycleEvent(event.Type) {
+		return false
+	}
+	// Blocking interactive events (approval, question) must reach the user
+	// because the actor is synchronously waiting for a decision. The
+	// turn-ownership guard below is a data-plane optimisation for non-blocking
+	// rendering; dropping these events would leave the run stuck until timeout
+	// while only out-of-band consumers (e.g. the micro web client) can answer.
+	// Composer stage updates have already happened above, so without this
+	// exemption the console would show "Running ask_user_question ..." but
+	// never surface the question prompt itself.
+	if event.Type == runtimechat.EventApprovalRequested || event.Type == runtimechat.EventQuestionAsked {
 		return false
 	}
 	turnID := strings.TrimSpace(payloadStringValue(event.Payload["turn_id"]))
@@ -5647,6 +5695,34 @@ func (b *chatRuntimeEventBridge) lookupActor(sessionID string) (*runtimechat.Ses
 		return nil, fmt.Errorf("session hub not configured")
 	}
 	return b.session.LocalRuntimeHost.SessionHub.GetOrCreate(strings.TrimSpace(sessionID))
+}
+
+// approvalStillPending 报告指定审批是否仍在 actor 中等待处理。当无法确认时
+// （actor 不可用等）返回 true，保持原有询问行为，避免误跳过导致死锁。
+func (b *chatRuntimeEventBridge) approvalStillPending(sessionID, requestID string) bool {
+	if strings.TrimSpace(requestID) == "" {
+		return true
+	}
+	actor, err := b.lookupActor(sessionID)
+	if err != nil || actor == nil {
+		return true
+	}
+	state := actor.StateForInspection()
+	return state == nil || state.PendingApproval == nil || state.PendingApproval.ID == requestID
+}
+
+// questionStillPending 报告指定问题是否仍在 actor 中等待回答。当无法确认时
+// 返回 true，保持原有询问行为。
+func (b *chatRuntimeEventBridge) questionStillPending(sessionID, questionID string) bool {
+	if strings.TrimSpace(questionID) == "" {
+		return true
+	}
+	actor, err := b.lookupActor(sessionID)
+	if err != nil || actor == nil {
+		return true
+	}
+	state := actor.StateForInspection()
+	return state == nil || state.PendingQuestion == nil || state.PendingQuestion.ID == questionID
 }
 
 func (b *chatRuntimeEventBridge) resolveApproval(ctx context.Context, sessionID, requestID string, allow bool) error {

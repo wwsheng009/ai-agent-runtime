@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
 
 // ============================================================================
@@ -44,6 +45,14 @@ func BuildChatDebugScreenSnapshot() *chatDebugScreenSnapshot {
 	// 只保留状态行，会话正文为空。这里从 UIController 的 AppState 派生完整
 	// 文本帧，行序/宽度与 legacy 帧一致（FrameParityWithAppLayout 的 shadow
 	// 契约），回退到 legacy 帧仅用于无 uiActor 的兼容场景。
+	//
+	// 屏幕镜像的权威数据平面是语义 transcript（与 geometry 无关）：
+	//   - 第一优先：uiActor 的 AppState 布局帧（有 surface，geometry>0）
+	//   - 第二优先：uiActor 的 AppState 语义 cells（unifiedRenderer 已启用）
+	//   - 第三优先：runtime event bridge 的 Scene 快照（任何启动形态都会构建，
+	//     包括 Win7 无 ANSI 控制台 / headless / 后台服务；uiActor 同步被
+	//     UnifiedRendererEnabled 门控，bridge Scene 不依赖该门控）
+	// 三者都空时才落到 "no active terminal surface" 死信号。
 	if session.Interaction != nil && session.Interaction.uiActor != nil {
 		state := session.Interaction.uiActor.AppState()
 		layout := ui.ComposeAppTextLayout(state)
@@ -60,6 +69,28 @@ func BuildChatDebugScreenSnapshot() *chatDebugScreenSnapshot {
 			snap.Lines = lines
 			snap.Text = strings.Join(lines, "\n")
 			return snap
+		}
+		// 无 geometry（有 surface 或 unifiedRenderer 但未挂载终端尺寸）时回退
+		// 到语义 cells：TranscriptState.Cells 与几何无关（app_state.go §5）。
+		if lines := transcriptFallbackCells(state.Transcript.Cells); len(lines) > 0 {
+			snap.Available = true
+			snap.Lines = lines
+			snap.Text = strings.Join(lines, "\n")
+			return snap
+		}
+	}
+	// bridge Scene 快照：uiActor 同步被 UnifiedRendererEnabled 门控，无 surface
+	// 会话（Win7 降级 / headless）不会收到 transcript snapshot，但 bridge 在
+	// 事件流到达时照常构建 Scene（chat_runtime_events.go applyChangeSet），
+	// 是这类形态下唯一可靠的内容源。
+	if session.RuntimeEventBridge != nil {
+		if sceneSnap := session.RuntimeEventBridge.sceneSnapshot(); sceneSnap != nil {
+			if lines := transcriptFallbackSnapshot(sceneSnap); len(lines) > 0 {
+				snap.Available = true
+				snap.Lines = lines
+				snap.Text = strings.Join(lines, "\n")
+				return snap
+			}
 		}
 	}
 	if session.Surface == nil {
@@ -91,6 +122,61 @@ func BuildChatDebugScreenSnapshot() *chatDebugScreenSnapshot {
 	snap.Lines = lines
 	snap.Text = strings.Join(lines, "\n")
 	return snap
+}
+
+// transcriptFallbackCells 从语义 transcript cells 派生纯文本行。
+//
+// 与 ComposeAppTextLayout 的终端投影不同，这里不依赖 geometry：每个语义
+// cell 按 Kind 输出单行（多行 Source 保留原样），顺序即对话时序。仅用于
+// 无 surface 快照回退；有 surface 时仍走布局投影，保证行序/宽度一致。
+func transcriptFallbackCells(cells []scene.TranscriptCell) []string {
+	if len(cells) == 0 {
+		return nil
+	}
+	lines := make([]string, 0, len(cells)*2)
+	for i := range cells {
+		cell := &cells[i]
+		if cell.Source == "" {
+			continue
+		}
+		switch cell.Kind {
+		case scene.KindReasoning:
+			lines = append(lines, "[reasoning] "+cell.Source)
+		case scene.KindToolChain:
+			lines = append(lines, "[tool] "+cell.Source)
+		case scene.KindSystem:
+			lines = append(lines, "[system] "+cell.Source)
+		case scene.KindUser:
+			lines = append(lines, "user> "+cell.Source)
+		case scene.KindCommand:
+			lines = append(lines, "cmd> "+cell.Source)
+		case scene.KindDiagnostic:
+			lines = append(lines, "[diag] "+cell.Source)
+		default:
+			// KindAssistant / KindSupplement / KindRuntimeEvent：正文直出。
+			lines = append(lines, cell.Source)
+		}
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	return lines
+}
+
+// transcriptFallbackSnapshot 适配 bridge Scene 快照（Cells 为指针切片）到
+// transcriptFallbackCells 的值切片输入。
+func transcriptFallbackSnapshot(snap *scene.Snapshot) []string {
+	if snap == nil || len(snap.Cells) == 0 {
+		return nil
+	}
+	cells := make([]scene.TranscriptCell, 0, len(snap.Cells))
+	for _, cell := range snap.Cells {
+		if cell == nil {
+			continue
+		}
+		cells = append(cells, *cell)
+	}
+	return transcriptFallbackCells(cells)
 }
 
 // BuildChatDebugScreenText 返回当前屏幕合成帧的纯文本摘要（?format=text）。

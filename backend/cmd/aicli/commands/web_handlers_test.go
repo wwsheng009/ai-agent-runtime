@@ -602,3 +602,240 @@ func TestChatWebInputConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// ---------------------------------------------------------------------------
+// GET /web/api/sessions — 会话列表
+// ---------------------------------------------------------------------------
+
+func TestHandleChatWebAPISessions_NoSession(t *testing.T) {
+	withWebTestSession(t, nil)
+	req := httptest.NewRequest(http.MethodGet, ChatWebAPISessionsPath, nil)
+	rec := httptest.NewRecorder()
+	HandleChatWebAPISessions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Sessions []chatWebSessionListItem `json:"sessions"`
+		Current  string                   `json:"current_session_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(body.Sessions) != 0 {
+		t.Fatalf("sessions len = %d, want 0", len(body.Sessions))
+	}
+}
+
+func TestHandleChatWebAPISessions_NoSessionManager(t *testing.T) {
+	session := newWebTestSession()
+	withWebTestSession(t, session)
+	req := httptest.NewRequest(http.MethodGet, ChatWebAPISessionsPath, nil)
+	rec := httptest.NewRecorder()
+	HandleChatWebAPISessions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Sessions []chatWebSessionListItem `json:"sessions"`
+		Current  string                   `json:"current_session_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(body.Sessions) != 0 {
+		t.Fatalf("sessions len = %d, want 0", len(body.Sessions))
+	}
+}
+
+func TestHandleChatWebAPISessions_MethodNotAllowed(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, ChatWebAPISessionsPath, nil)
+	rec := httptest.NewRecorder()
+	HandleChatWebAPISessions(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// POST /web/api/sessions/resume — 恢复会话
+// ---------------------------------------------------------------------------
+
+func TestHandleChatWebAPISessionsResume_NoSession(t *testing.T) {
+	withWebTestSession(t, nil)
+	req := httptest.NewRequest(http.MethodPost, ChatWebAPISessionsResumePath,
+		strings.NewReader(`{"session_id":"test-id"}`))
+	rec := httptest.NewRecorder()
+	HandleChatWebAPISessionsResume(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rec.Code)
+	}
+}
+
+func TestHandleChatWebAPISessionsResume_InvalidJSON(t *testing.T) {
+	session := newWebTestSession()
+	withWebTestSession(t, session)
+	req := httptest.NewRequest(http.MethodPost, ChatWebAPISessionsResumePath,
+		strings.NewReader(`not json`))
+	rec := httptest.NewRecorder()
+	HandleChatWebAPISessionsResume(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestHandleChatWebAPISessionsResume_EmptySessionID(t *testing.T) {
+	session := newWebTestSession()
+	withWebTestSession(t, session)
+	req := httptest.NewRequest(http.MethodPost, ChatWebAPISessionsResumePath,
+		strings.NewReader(`{"session_id":""}`))
+	rec := httptest.NewRecorder()
+	HandleChatWebAPISessionsResume(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestHandleChatWebAPISessionsResume_NoSessionManager(t *testing.T) {
+	session := newWebTestSession()
+	withWebTestSession(t, session)
+	req := httptest.NewRequest(http.MethodPost, ChatWebAPISessionsResumePath,
+		strings.NewReader(`{"session_id":"test-id"}`))
+	rec := httptest.NewRecorder()
+	HandleChatWebAPISessionsResume(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rec.Code)
+	}
+}
+
+func TestHandleChatWebAPISessionsResume_MethodNotAllowed(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, ChatWebAPISessionsResumePath, nil)
+	rec := httptest.NewRecorder()
+	HandleChatWebAPISessionsResume(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GET /web/api/sessions — 带真实存储的完整测试
+// ---------------------------------------------------------------------------
+
+// newWebTestSessionWithManager 构造一个带 InMemoryStorage SessionManager 的测试会话。
+func newWebTestSessionWithManager(t *testing.T) *ChatSession {
+	t.Helper()
+	storage := runtimechat.NewInMemoryStorage()
+	manager := runtimechat.NewSessionManager(storage, nil)
+	t.Cleanup(manager.Stop)
+
+	ctx := context.Background()
+	runtimeSession, err := manager.Create(ctx, "test-user")
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	runtimeSession.Metadata.Title = "Test Session Title"
+	_ = storage.Save(ctx, runtimeSession)
+
+	session := newWebTestSession()
+	session.SessionManager = manager
+	session.SessionUserID = "test-user"
+	session.RuntimeSession = runtimeSession
+	return session
+}
+
+func TestHandleChatWebAPISessions_WithManager(t *testing.T) {
+	session := newWebTestSessionWithManager(t)
+	withWebTestSession(t, session)
+	req := httptest.NewRequest(http.MethodGet, ChatWebAPISessionsPath, nil)
+	rec := httptest.NewRecorder()
+	HandleChatWebAPISessions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Sessions []chatWebSessionListItem `json:"sessions"`
+		Current  string                   `json:"current_session_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(body.Sessions) != 1 {
+		t.Fatalf("sessions len = %d, want 1", len(body.Sessions))
+	}
+	item := body.Sessions[0]
+	if !item.Current {
+		t.Fatalf("current = false, want true")
+	}
+	if item.Title != "Test Session Title" {
+		t.Fatalf("title = %q, want %q", item.Title, "Test Session Title")
+	}
+	if item.ID == "" {
+		t.Fatalf("id is empty")
+	}
+}
+
+func TestHandleChatWebAPISessionsResume_AlreadyCurrent(t *testing.T) {
+	session := newWebTestSessionWithManager(t)
+	withWebTestSession(t, session)
+	currentID := currentRuntimeSessionID(session)
+	if currentID == "" {
+		t.Fatal("current session id is empty")
+	}
+	req := httptest.NewRequest(http.MethodPost, ChatWebAPISessionsResumePath,
+		strings.NewReader(`{"session_id":"`+currentID+`"}`))
+	rec := httptest.NewRecorder()
+	HandleChatWebAPISessionsResume(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if body.Status != "already_current" {
+		t.Fatalf("status = %q, want %q", body.Status, "already_current")
+	}
+}
+
+func TestHandleChatWebAPISessionsResume_SessionNotFound(t *testing.T) {
+	session := newWebTestSessionWithManager(t)
+	withWebTestSession(t, session)
+	req := httptest.NewRequest(http.MethodPost, ChatWebAPISessionsResumePath,
+		strings.NewReader(`{"session_id":"non-existent-id"}`))
+	rec := httptest.NewRecorder()
+	HandleChatWebAPISessionsResume(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestHandleChatWebAPISessionsResume_SessionBelongsToOtherUser(t *testing.T) {
+	session := newWebTestSessionWithManager(t)
+	withWebTestSession(t, session)
+	// 同一 manager 中创建另一个用户的会话
+	other, err := session.SessionManager.Create(context.Background(), "other-user")
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, ChatWebAPISessionsResumePath,
+		strings.NewReader(`{"session_id":"`+other.ID+`"}`))
+	rec := httptest.NewRecorder()
+	HandleChatWebAPISessionsResume(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body: %s", rec.Code, rec.Body.String())
+	}
+}
