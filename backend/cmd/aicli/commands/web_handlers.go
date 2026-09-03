@@ -61,9 +61,13 @@ func writeWebAPIJSON(w http.ResponseWriter, statusCode int, data interface{}) {
 // HandleChatWebAPIScreen 返回当前屏幕合成帧（§4.2.2）。
 //   - ?format=text（默认）：纯文本面板内容
 //   - ?format=json：结构化 JSON 快照
+//
+// web 客户端展示的是完整聊天历史，而非终端视口帧：使用
+// buildChatWebScreenSnapshot（完整语义 transcript 派生），避免 resume
+// 历史会话后视口裁剪导致只显示最后一个 turn。
 func HandleChatWebAPIScreen(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("format") == "json" {
-		body, err := MarshalChatDebugScreenJSON()
+		body, err := marshalChatWebScreenJSON()
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusInternalServerError)
@@ -75,7 +79,12 @@ func HandleChatWebAPIScreen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte(BuildChatDebugScreenText()))
+	snap := buildChatWebScreenSnapshot()
+	if !snap.Available {
+		_, _ = w.Write([]byte("Debug Screen: " + snap.Reason + "\n"))
+		return
+	}
+	_, _ = w.Write([]byte(snap.Text + "\n"))
 }
 
 // HandleChatWebAPIStatus 返回当前渲染器状态快照（§4.2.6）。

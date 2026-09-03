@@ -247,3 +247,57 @@ func BuildChatDebugScreenText() string {
 func MarshalChatDebugScreenJSON() ([]byte, error) {
 	return json.MarshalIndent(BuildChatDebugScreenSnapshot(), "", "  ")
 }
+
+// buildChatWebScreenSnapshot 返回 web 客户端所需的完整会话内容快照。
+//
+// 与 BuildChatDebugScreenSnapshot 的区别：web 展示的是聊天历史全文，而
+// 调试屏幕镜像要反映"终端用户当前实际看到的视口帧"。视口帧受终端高度
+// 裁剪（LayoutAppScreen 只保留最后 OutputBottomRow 行），resume 历史会话
+// 后 web 端会因此只看到最后一个 turn。这里按完整语义 transcript 派生：
+//   - 第一优先：uiActor AppState 的语义 cells（resume 后完整历史注入点）
+//   - 第二优先：runtime event bridge 的 Scene 快照
+//   - 第三优先：会话自身 transcript（session.Messages / RuntimeSession.History）
+//
+// 全部为空时返回 available=false（前端保留现有内容，不覆盖为空）。
+func buildChatWebScreenSnapshot() *chatDebugScreenSnapshot {
+	snap := &chatDebugScreenSnapshot{}
+	session := chatDebugDisplaySession()
+	if session == nil {
+		snap.Available = false
+		snap.Reason = "no active chat session"
+		return snap
+	}
+	if session.Interaction != nil && session.Interaction.uiActor != nil {
+		state := session.Interaction.uiActor.AppState()
+		if lines := transcriptFallbackCells(state.Transcript.Cells); len(lines) > 0 {
+			snap.Available = true
+			snap.Lines = lines
+			snap.Text = strings.Join(lines, "\n")
+			return snap
+		}
+	}
+	if session.RuntimeEventBridge != nil {
+		if sceneSnap := session.RuntimeEventBridge.sceneSnapshot(); sceneSnap != nil {
+			if lines := transcriptFallbackSnapshot(sceneSnap); len(lines) > 0 {
+				snap.Available = true
+				snap.Lines = lines
+				snap.Text = strings.Join(lines, "\n")
+				return snap
+			}
+		}
+	}
+	if lines := sessionTranscriptFallbackLines(session); len(lines) > 0 {
+		snap.Available = true
+		snap.Lines = lines
+		snap.Text = strings.Join(lines, "\n")
+		return snap
+	}
+	snap.Available = false
+	snap.Reason = "no conversation content"
+	return snap
+}
+
+// marshalChatWebScreenJSON 返回 web 屏幕快照的缩进 JSON 字节。
+func marshalChatWebScreenJSON() ([]byte, error) {
+	return json.MarshalIndent(buildChatWebScreenSnapshot(), "", "  ")
+}

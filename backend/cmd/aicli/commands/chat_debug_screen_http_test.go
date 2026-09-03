@@ -398,3 +398,81 @@ func TestChatDebugScreenSessionTranscriptFallback(t *testing.T) {
 		t.Fatalf("空会话 reason 应为 no active terminal surface，实际为 %q", snap.Reason)
 	}
 }
+
+// TestChatWebScreenSnapshotFullTranscriptNotViewportClipped 验证 web 客户端
+// 屏幕端点（buildChatWebScreenSnapshot）返回完整语义 transcript，而不是像
+// BuildChatDebugScreenSnapshot（第一优先派生通道）那样按终端视口高度裁剪。
+//
+// 缺陷复现：resume 历史会话后，完整历史注入 uiActor transcript，但
+// LayoutAppScreen 只保留最后 OutputBottomRow 行（终端视口），web 页面因此
+// 只显示最后一个 turn。web 端必须始终从语义 cells 派生全文，与 geometry 无关。
+func TestChatWebScreenSnapshotFullTranscriptNotViewportClipped(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	session := &ChatSession{}
+	coordinator := newChatInteractionCoordinator(session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+	coordinator.SetWriter(&bytes.Buffer{})
+	actor := coordinator.ensureUIActor()
+	if actor == nil {
+		t.Fatal("expected UI actor")
+	}
+	// 小视口（高 4 行）：debug 派生帧必然裁剪掉更早的 turn 内容。
+	if !actor.Post(ui.Resize{Width: 80, Height: 4, Generation: 1}) {
+		t.Fatal("post resize")
+	}
+
+	const firstMarker = "WEB-FIRST-TURN-MARKER"
+	const lastMarker = "WEB-LAST-TURN-MARKER"
+	cells := []*scene.TranscriptCell{
+		{ID: 1, Sequence: 1, Kind: scene.KindUser, Source: firstMarker,
+			Revision: 1, Phase: scene.CellCommitted},
+	}
+	// 中间填充足够多的多行 cell，使视口无法容纳（模拟长历史会话）。
+	id := 2
+	for i := 0; i < 12; i++ {
+		cells = append(cells,
+			&scene.TranscriptCell{ID: scene.CellID(id), Sequence: uint64(id), Kind: scene.KindAssistant,
+				Source: "filler-line-1\nfiller-line-2\nfiller-line-3",
+				Revision: 1, Phase: scene.CellCommitted})
+		id++
+	}
+	cells = append(cells,
+		&scene.TranscriptCell{ID: scene.CellID(id), Sequence: uint64(id), Kind: scene.KindAssistant,
+			Source: lastMarker + "\ntail",
+			Revision: 1, Phase: scene.CellCommitted})
+
+	if !actor.Post(ui.ReplaceTranscriptAction{Snapshot: &scene.Snapshot{
+		Revision: 1,
+		Cells:    cells,
+	}}) {
+		t.Fatal("post transcript")
+	}
+	actor.WaitIdle()
+
+	old := chatDebugDisplaySessionProvider
+	chatDebugDisplaySessionProvider = func() *ChatSession { return session }
+	defer func() { chatDebugDisplaySessionProvider = old }()
+
+	// debug 派生帧：受视口裁剪，最早的 turn marker 丢失。
+	debugSnap := BuildChatDebugScreenSnapshot()
+	if !debugSnap.Available {
+		t.Fatalf("debug screen 应 available=true，reason=%q", debugSnap.Reason)
+	}
+	if strings.Contains(debugSnap.Text, firstMarker) {
+		t.Fatalf("debug 视口帧不应包含早期 turn %q（已被视口裁剪），实际 text=%q", firstMarker, debugSnap.Text)
+	}
+
+	// web 快照：完整 transcript，最早与最后的 marker 都必须存在。
+	webSnap := buildChatWebScreenSnapshot()
+	if !webSnap.Available {
+		t.Fatalf("web screen 应 available=true，reason=%q", webSnap.Reason)
+	}
+	if !strings.Contains(webSnap.Text, firstMarker) {
+		t.Fatalf("web screen 应包含早期 turn %q，实际 text=%q", firstMarker, webSnap.Text)
+	}
+	if !strings.Contains(webSnap.Text, lastMarker) {
+		t.Fatalf("web screen 应包含最后 turn %q，实际 text=%q", lastMarker, webSnap.Text)
+	}
+}
