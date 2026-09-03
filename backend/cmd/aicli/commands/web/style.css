@@ -41,6 +41,10 @@
   --modalBg: #1a222c;
   --copyBtn: #6aa0c0;
   --copyBtnHover: #8ac0e0;
+  /* 滚动条：深色主题默认低调，hover/焦点时更亮 */
+  --sb-thumb: #2a3138;
+  --sb-thumb-active: #3d5570;
+  --sb-track: transparent;
 }
 
 /* ---- 浅色主题 ---- */
@@ -79,13 +83,37 @@
   --modalBg: #ffffff;
   --copyBtn: #2a6a9a;
   --copyBtnHover: #1a4a6a;
+  /* 滚动条：浅色主题默认白色（与背景融合），hover/焦点时灰色 */
+  --sb-thumb: #ffffff;
+  --sb-thumb-active: #b8c0c8;
+  --sb-track: transparent;
 }
 /* 跟随系统偏好 */
 @media (prefers-color-scheme: light) {
-  :root:not(.dark):not(.light) { --bg: #f5f7fa; --bg2: #ffffff; --bg3: #e8ecf0; --bg4: #dce0e6; --fg: #1a1e24; --fg2: #2c323a; --fg3: #5a6670; --fg4: #8a94a0; --border: #c8d0d8; --border2: #a0aab6; --accent: #2a6a9a; --accent2: #1a5a8a; --green: #1a8a3a; --greenBg: #d4f0dc; --red: #b0302a; --redBg: #fce4e2; --redBorder: #c06a6a; --redBtn: #d94a44; --codeBg: #e8ecf0; --codeFg: #2a4a6a; --reasoningFg: #8a7a4a; --reasoningBg: #f5f0e0cc; --reasoningBorder: #c8c0a8; --reasoningHover: #ece8d8; --toolFg: #2a6a9a; --hoverBg: #d0d8e0; --hoverBg2: #c8d0da; --activeBg: #c8d0d8; --shadow: rgba(0,0,0,0.15); --overlayBg: rgba(0,0,0,0.35); --modalBg: #ffffff; --copyBtn: #2a6a9a; --copyBtnHover: #1a4a6a; }
+  :root:not(.dark):not(.light) { --bg: #f5f7fa; --bg2: #ffffff; --bg3: #e8ecf0; --bg4: #dce0e6; --fg: #1a1e24; --fg2: #2c323a; --fg3: #5a6670; --fg4: #8a94a0; --border: #c8d0d8; --border2: #a0aab6; --accent: #2a6a9a; --accent2: #1a5a8a; --green: #1a8a3a; --greenBg: #d4f0dc; --red: #b0302a; --redBg: #fce4e2; --redBorder: #c06a6a; --redBtn: #d94a44; --codeBg: #e8ecf0; --codeFg: #2a4a6a; --reasoningFg: #8a7a4a; --reasoningBg: #f5f0e0cc; --reasoningBorder: #c8c0a8; --reasoningHover: #ece8d8; --toolFg: #2a6a9a; --hoverBg: #d0d8e0; --hoverBg2: #c8d0da; --activeBg: #c8d0d8; --shadow: rgba(0,0,0,0.15); --overlayBg: rgba(0,0,0,0.35); --modalBg: #ffffff; --copyBtn: #2a6a9a; --copyBtnHover: #1a4a6a; --sb-thumb: #ffffff; --sb-thumb-active: #b8c0c8; --sb-track: transparent; }
 }
 
 * { box-sizing: border-box; }
+
+/* ---- 滚动条：常态融入背景（浅色=白色），交互/焦点时显示灰色 ---- */
+* { scrollbar-width: thin; scrollbar-color: var(--sb-thumb) var(--sb-track); }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: var(--sb-track); }
+*::-webkit-scrollbar-thumb {
+  background: var(--sb-thumb);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-corner { background: transparent; }
+/* 滚动条本身被悬停/拖动时变灰 */
+*::-webkit-scrollbar-thumb:hover,
+*::-webkit-scrollbar-thumb:active { background: var(--sb-thumb-active); }
+/* 容器获得焦点（如输入框）时变灰 */
+*:focus::-webkit-scrollbar-thumb,
+*:focus-within::-webkit-scrollbar-thumb { background: var(--sb-thumb-active); }
+*:focus, *:focus-within { scrollbar-color: var(--sb-thumb-active) var(--sb-track); }
+
 body {
   margin: 0; padding: 12px;
   background: var(--bg); color: var(--fg);
