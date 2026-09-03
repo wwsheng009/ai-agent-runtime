@@ -1517,7 +1517,14 @@ func (b *chatRuntimeEventBridge) encodeRenderModelEvent(event runtimeevents.Even
 	}
 	b.renderMu.Lock()
 	defer b.renderMu.Unlock()
-	b.applyChangeSet(b.renderEncoder.Encode(event))
+	// 本地诊断/镜像事件（input.queue.*、aicli.chat.dynamic_status）只进
+	// 事件日志（TUI timeline / SSE debug / web 状态栏转发），不进入统一
+	// 渲染数据面：encoder 对未映射事件按 KindSystem 兜底 append，会在
+	// web 消息信息流里产生 "queued input drained"、"aicli.chat.dynamic_status"
+	// 一类系统消息噪声，干扰正确的用户/助手消息。
+	if !isChatRenderDataPlaneSuppressedEvent(event.Type) {
+		b.applyChangeSet(b.renderEncoder.Encode(event))
+	}
 	b.appendEventLog(event)
 }
 
