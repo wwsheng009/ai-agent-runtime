@@ -245,6 +245,41 @@ html[data-accent-tone="violet"] {
   --accent-secondary-border: rgba(143, 208, 198, 0.24);
 }
 
+/* 白色主题滚动条：全部滚动区域统一为固定中性灰、始终可见，
+   不再随主题变量 / hover 切换颜色（含未标注 .app-scrollbar 的容器）。 */
+html[data-theme="light"] {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(107, 114, 128, 0.6) transparent;
+}
+
+html[data-theme="light"] * {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(107, 114, 128, 0.6) transparent;
+}
+
+html[data-theme="light"]::-webkit-scrollbar,
+html[data-theme="light"] *::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+html[data-theme="light"]::-webkit-scrollbar-track,
+html[data-theme="light"] *::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+html[data-theme="light"]::-webkit-scrollbar-thumb,
+html[data-theme="light"] *::-webkit-scrollbar-thumb,
+html[data-theme="light"]::-webkit-scrollbar-thumb:hover,
+html[data-theme="light"] *::-webkit-scrollbar-thumb:hover,
+html[data-theme="light"]::-webkit-scrollbar-thumb:active,
+html[data-theme="light"] *::-webkit-scrollbar-thumb:active {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+  background-color: rgba(107, 114, 128, 0.6);
+}
+
 * {
   box-sizing: border-box;
 }

@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
-	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
 )
 
 // ---------------------------------------------------------------------------
@@ -15,16 +15,17 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	ChatWebPath                   = "/web/"
-	ChatWebAPIScreenPath          = "/web/api/screen"
-	ChatWebAPIStatusPath          = "/web/api/status"
-	ChatWebAPIEventsPath          = "/web/api/events"
-	ChatWebAPIInputPath           = "/web/api/input"
-	ChatWebAPISchemaPath          = "/web/api/events/schema"
-	ChatWebAPISessionsPath        = "/web/api/sessions"
-	ChatWebAPISessionsResumePath  = "/web/api/sessions/resume"
-	ChatWebAPISessionsDeletePath  = "/web/api/sessions/delete"
-	ChatWebAPISessionsRenamePath  = "/web/api/sessions/rename"
+	ChatWebPath                  = "/web/"
+	ChatWebAPIScreenPath         = "/web/api/screen"
+	ChatWebAPIStatusPath         = "/web/api/status"
+	ChatWebAPIEventsPath         = "/web/api/events"
+	ChatWebAPIInputPath          = "/web/api/input"
+	ChatWebAPISchemaPath         = "/web/api/events/schema"
+	ChatWebAPISessionsPath       = "/web/api/sessions"
+	ChatWebAPISessionsNewPath    = "/web/api/sessions/new"
+	ChatWebAPISessionsResumePath = "/web/api/sessions/resume"
+	ChatWebAPISessionsDeletePath = "/web/api/sessions/delete"
+	ChatWebAPISessionsRenamePath = "/web/api/sessions/rename"
 )
 
 // chatWebSchemaVersion 是 SSE 事件 data 中 _event.schema_version 字段的值。

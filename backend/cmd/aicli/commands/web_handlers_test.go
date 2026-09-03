@@ -599,8 +599,8 @@ func TestChatWebSSEDataForEvent(t *testing.T) {
 
 	// 3) "content" 键 fallback → "text"
 	data3 := chatWebSSEDataForEvent(runtimeevents.Event{
-		Type:      runtimechat.EventAssistantDelta,
-		Payload:   map[string]interface{}{"content": "lo", "turn_id": "t1"},
+		Type:    runtimechat.EventAssistantDelta,
+		Payload: map[string]interface{}{"content": "lo", "turn_id": "t1"},
 	})
 	if data3["text"] != "lo" {
 		t.Fatalf("content→text fallback failed: %#v", data3)
@@ -608,8 +608,8 @@ func TestChatWebSSEDataForEvent(t *testing.T) {
 
 	// 4) reasoning_delta 嵌套 reasoning → "content"
 	data4 := chatWebSSEDataForEvent(runtimeevents.Event{
-		Type:      runtimechat.EventAssistantReasoningDelta,
-		Payload:   map[string]interface{}{"reasoning": map[string]interface{}{"summary": "thinking text"}},
+		Type:    runtimechat.EventAssistantReasoningDelta,
+		Payload: map[string]interface{}{"reasoning": map[string]interface{}{"summary": "thinking text"}},
 	})
 	if data4["content"] != "thinking text" {
 		t.Fatalf("reasoning→content failed: %#v", data4)
@@ -617,8 +617,8 @@ func TestChatWebSSEDataForEvent(t *testing.T) {
 
 	// 5) reasoning_delta reasoning 为 string → "content"
 	data5 := chatWebSSEDataForEvent(runtimeevents.Event{
-		Type:      runtimechat.EventAssistantReasoningDelta,
-		Payload:   map[string]interface{}{"reasoning": "raw thinking"},
+		Type:    runtimechat.EventAssistantReasoningDelta,
+		Payload: map[string]interface{}{"reasoning": "raw thinking"},
 	})
 	if data5["content"] != "raw thinking" {
 		t.Fatalf("reasoning string→content failed: %#v", data5)
@@ -794,6 +794,27 @@ func TestHandleChatWebAPISessionsResume_MethodNotAllowed(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, ChatWebAPISessionsResumePath, nil)
 	rec := httptest.NewRecorder()
 	HandleChatWebAPISessionsResume(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
+
+func TestHandleChatWebAPISessionsNew_NoSession(t *testing.T) {
+	withWebTestSession(t, nil)
+	req := httptest.NewRequest(http.MethodPost, ChatWebAPISessionsNewPath, nil)
+	rec := httptest.NewRecorder()
+	HandleChatWebAPISessionsNew(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rec.Code)
+	}
+}
+
+func TestHandleChatWebAPISessionsNew_MethodNotAllowed(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, ChatWebAPISessionsNewPath, nil)
+	rec := httptest.NewRecorder()
+	HandleChatWebAPISessionsNew(rec, req)
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want 405", rec.Code)

@@ -24,6 +24,7 @@
   var sidebarEl = document.getElementById("sidebar");
   var sidebarToggleBtn = document.getElementById("sidebar-toggle");
   var sidebarCollapseBtn = document.getElementById("sidebar-collapse-btn");
+  var sessionsNewBtn = document.getElementById("sessions-new-btn");
   var sessionsRefreshBtn = document.getElementById("sessions-refresh-btn");
   var sessionsSortEl = document.getElementById("sessions-sort");
   var sessionListEl = document.getElementById("session-list");
@@ -969,6 +970,53 @@ function startTypeTimer() {
         sendStatusEl.textContent = "切换失败: " + err;
       });
   }// 屏幕刷新策略（§8.6 方法二）：关键事件后主动拉取屏幕内容。
+
+  // 新建会话（POST /web/api/sessions/new → 注入 /new）
+  function createNewSession() {
+    if (sessionsNewBtn) { sessionsNewBtn.disabled = true; }
+    sendStatusEl.textContent = "新建会话中…";
+    var oldID = "";
+    fetch("/web/api/sessions?sort=" + encodeURIComponent(sessionsSort), { cache: "no-store" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (data) { oldID = data.current_session_id || ""; }
+        return fetch("/web/api/sessions/new", { method: "POST" });
+      })
+      .then(function (res) {
+        return res.json().catch(function () { return { status: "error", reason: "bad response" }; });
+      })
+      .then(function (json) {
+        if (json.status === "queued") {
+          var attempts = 0;
+          (function pollNew() {
+            fetch("/web/api/sessions?sort=" + encodeURIComponent(sessionsSort), { cache: "no-store" })
+              .then(function (r) { return r.ok ? r.json() : null; })
+              .then(function (data) {
+                if (!data) { return; }
+                var cur = data.current_session_id || "";
+                if ((cur !== "" && cur !== oldID) || ++attempts >= 8) {
+                  sessions = data.sessions || [];
+                  renderSessionList();
+                  refreshScreen();
+                  if (sessionsNewBtn) { sessionsNewBtn.disabled = false; }
+                  sendStatusEl.textContent = (cur !== "" && cur !== oldID) ? "已新建会话" : "已新建(状态未同步)";
+                } else {
+                  setTimeout(pollNew, 300);
+                }
+              })
+              .catch(function () { if (sessionsNewBtn) { sessionsNewBtn.disabled = false; } });
+          })();
+        } else {
+          if (sessionsNewBtn) { sessionsNewBtn.disabled = false; }
+          sendStatusEl.textContent = "新建失败: " + (json.reason || json.status);
+        }
+      })
+      .catch(function (err) {
+        if (sessionsNewBtn) { sessionsNewBtn.disabled = false; }
+        sendStatusEl.textContent = "新建失败: " + err;
+      });
+  }
+
   var refreshKeys = { "turn_end": 1, "tool_end": 1, "session_end": 1, "session_interrupted": 1, "error": 1, "screen_refresh": 1, "compact_end": 1 };
 
   function onSSEEvent(eventName, data) {
@@ -1252,6 +1300,9 @@ function startTypeTimer() {
   }
   if (sidebarCollapseBtn) {
     sidebarCollapseBtn.addEventListener("click", function () { setSidebarCollapsed(true); });
+  }
+  if (sessionsNewBtn) {
+    sessionsNewBtn.addEventListener("click", function () { createNewSession(); });
   }
   if (sessionsRefreshBtn) {
     sessionsRefreshBtn.addEventListener("click", function () { loadSessions(); });

@@ -510,6 +510,7 @@ type chatWebSessionListItem struct {
 // 列表顺序按 sort 参数决定：
 //   - ?sort=created_at（默认）→ 按 CreatedAt 降序，当前会话带 current 标记但不置顶
 //   - ?sort=updated_at      → 按 UpdatedAt 降序
+//
 // 列表项来自 listResumeCandidateChatSessions（已排除当前会话并过滤无对话的空会话），
 // 与 TTY /resume 选择器的候选集一致。
 func HandleChatWebAPISessions(w http.ResponseWriter, r *http.Request) {
@@ -594,6 +595,62 @@ func buildChatWebSessionListItem(s *runtimechat.Session, current bool) chatWebSe
 		item.Title = "(untitled)"
 	}
 	return item
+}
+
+// ---------------------------------------------------------------------------
+// POST /web/api/sessions/new — 新建会话（§4.2.8）
+// ---------------------------------------------------------------------------
+
+// HandleChatWebAPISessionsNew 将 "/new" 注入输入队列，由主循环安全地
+// 结束当前会话并创建全新运行时会话。
+//
+// 与 resume 共用同一机制（输入队列 + wakeComposerRead），保证会话状态
+// 只被主循环单写者修改，避免与正在运行的 turn 竞态。注入成功后 SSE 会
+// 继续投递 session_end/session_start/screen_refresh，前端据此刷新屏幕；
+// 会话列表通过 current_session_id 变化轮询感知完成时机。
+func HandleChatWebAPISessionsNew(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeWebAPIJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"status": "error",
+			"reason": "method not allowed",
+		})
+		return
+	}
+
+	session := chatWebSession()
+	if session == nil {
+		writeWebAPIJSON(w, http.StatusConflict, map[string]string{
+			"status": "error",
+			"reason": "no active chat session",
+		})
+		return
+	}
+
+	queue := ensureChatBufferedInputQueue(session)
+	if queue == nil {
+		writeWebAPIJSON(w, http.StatusInternalServerError, map[string]string{
+			"status": "error",
+			"reason": "input queue unavailable",
+		})
+		return
+	}
+	result := queue.routeInputText("/new")
+	switch {
+	case result.queued():
+		session.wakeComposerRead()
+		writeWebAPIJSON(w, http.StatusOK, map[string]string{
+			"status": "queued",
+		})
+	case result.rejected():
+		writeWebAPIJSON(w, http.StatusOK, map[string]string{
+			"status": "rejected",
+			"reason": "input rejected by command gate",
+		})
+	default:
+		writeWebAPIJSON(w, http.StatusOK, map[string]string{
+			"status": "queued",
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
