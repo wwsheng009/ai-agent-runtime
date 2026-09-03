@@ -226,10 +226,25 @@ func createNewRuntimeConversation(session *ChatSession, title string) error {
 	resetChatConversationTokenUsage(session)
 	session.RuntimeSession = runtimeSession
 	updateChatRuntimeEventBridgePrimarySession(session)
-	// Only local lazy SQLite stores defer the empty-shell Save. Remote/runtime
-	// server and eager backends keep the previous Create+Save semantics so
-	// session IDs are immediately durable and listable.
-	session.runtimeSessionUnpersisted = !session.Ephemeral && sessionStorageDefersDurableOpen(session.SessionManager.GetStorage())
+	// --- 新会话持久化状态与落库策略 ---
+	//
+	// Ephemeral 会话没有磁盘存储，但仍需在内存 session store 中注册，
+	// 首次 sync 会按既有 Update 语义写入内存存储。
+	//
+	// 非 Ephemeral 会话统一标记 runtimeSessionUnpersisted=true（尚未落库），
+	// 然后按存储类型决定首次落库时机：
+	//   - Eager 存储（runtime-server / in-memory / file）：立即 sync。
+	//     首次 sync 看到 unpersisted=true 直接走 Save（创建语义），
+	//     不再依赖 "Update 失败 -> ErrSessionNotFound -> fallback Save"
+	//     的错误探测路径；会话 ID 在首次 Save 后即可用可列出。
+	//   - Deferred 存储（local lazy SQLite）：保持空 shell 在内存中，
+	//     首次真实内容或内容 shutdown 时由 ensureChatRuntimeSessionPersisted
+	//     触发 Save，避免启动时打开大 SQLite 数据库。
+	if session.Ephemeral {
+		session.runtimeSessionUnpersisted = false
+	} else {
+		session.runtimeSessionUnpersisted = true
+	}
 	clearChatTurnRecovery(session)
 	resetStableSharedToolSurface(session)
 	if rotateDiagnostics {
@@ -238,10 +253,9 @@ func createNewRuntimeConversation(session *ChatSession, title string) error {
 		}
 	}
 	ensureChatSystemPromptMessage(session)
-	// Keep the empty shell in memory only. Durable Save happens on the first
-	// real conversation content (or shutdown with content), so new-chat
-	// startup stays off the large session-history SQLite open path.
-	if !session.runtimeSessionUnpersisted {
+	// 落库时机：Ephemeral / Eager 存储立即 sync；Deferred 存储保持空 shell，
+	// 首次真实内容或内容 shutdown 时由 ensureChatRuntimeSessionPersisted 触发。
+	if session.Ephemeral || !sessionStorageDefersDurableOpen(session.SessionManager.GetStorage()) {
 		if err := syncRuntimeSessionFromChat(session); err != nil {
 			return err
 		}
@@ -586,13 +600,26 @@ func syncRuntimeSessionFromChatMode(session *ChatSession, preserveUpdatedAt bool
 	}
 	syncChatRuntimeContext(session, runtimeSession)
 
-	if err := session.SessionManager.Update(context.Background(), runtimeSession); err != nil {
-		if errors.Is(err, runtimechat.ErrSessionNotFound) {
-			if saveErr := session.SessionManager.GetStorage().Save(context.Background(), runtimeSession); saveErr != nil {
-				return saveErr
-			}
-		} else {
+	// 首次落库走创建语义（Save），已持久化会话走更新语义（Update）。
+	// 不再通过 "Update 失败 -> ErrSessionNotFound" 的错误探测来推断
+	// 会话是否已存在：新建会话由 createNewRuntimeConversation 显式标记
+	// runtimeSessionUnpersisted=true，Eager 存储（runtime-server 等）的
+	// Save 会返回服务端分配的会话 ID 并回填，Deferred 存储（lazy SQLite）
+	// 延迟到首个真实内容时落库。ErrSessionNotFound 仅保留为已持久化会话
+	// 被外部删除（TTL 过期/手动清理）时的罕见竞态恢复路径。
+	if session.runtimeSessionUnpersisted {
+		if err := session.SessionManager.GetStorage().Save(context.Background(), runtimeSession); err != nil {
 			return err
+		}
+	} else {
+		if err := session.SessionManager.Update(context.Background(), runtimeSession); err != nil {
+			if errors.Is(err, runtimechat.ErrSessionNotFound) {
+				if saveErr := session.SessionManager.GetStorage().Save(context.Background(), runtimeSession); saveErr != nil {
+					return saveErr
+				}
+			} else {
+				return err
+			}
 		}
 	}
 	session.runtimeSessionUnpersisted = false

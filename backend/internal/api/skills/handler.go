@@ -2326,6 +2326,10 @@ func (h *Handler) GetSession(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	session, err := h.sessionManager.GetSession(ctx, chat.NormalizeSessionID(mux.Vars(r)["id"]))
 	if err != nil {
+		if stderrors.Is(err, chat.ErrSessionNotFound) {
+			h.writeError(w, http.StatusNotFound, err)
+			return
+		}
 		writeSessionStoreError(w, err)
 		return
 	}
@@ -2529,6 +2533,10 @@ func (h *Handler) UpdateSession(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	session, err := h.sessionManager.GetSession(ctx, sessionID)
 	if err != nil {
+		if stderrors.Is(err, chat.ErrSessionNotFound) {
+			h.writeError(w, http.StatusNotFound, err)
+			return
+		}
 		writeSessionStoreError(w, err)
 		return
 	}
