@@ -80,6 +80,29 @@
         <button id="send-btn">发送</button>
         <span id="send-status"></span>
       </div>
+      <div id="cfg-bar">
+        <label class="cfg-item">
+          <span class="cfg-label">Provider</span>
+          <select id="cfg-provider" title="切换 provider（/model --provider）"></select>
+        </label>
+        <label class="cfg-item cfg-model">
+          <span class="cfg-label">Model</span>
+          <input id="cfg-model" list="cfg-model-options" placeholder="当前模型" title="切换模型（/model --model）">
+          <datalist id="cfg-model-options"></datalist>
+        </label>
+        <label class="cfg-item">
+          <span class="cfg-label">Reasoning</span>
+          <select id="cfg-reasoning" title="切换 reasoning_effort（/model -r）">
+            <option value="">(默认)</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+            <option value="max">max</option>
+          </select>
+        </label>
+        <span id="cfg-current" class="cfg-current" title="当前生效配置"></span>
+        <span id="cfg-status" class="cfg-status"></span>
+      </div>
     </div>
 
     <div id="tab-log" class="tab-panel">

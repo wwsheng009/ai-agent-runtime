@@ -561,10 +561,159 @@ function startTypeTimer() {
     }
   }
 
+  // ---- provider / model / reasoning_effort 配置选择器 ----
+  // 权威值来自 GET /web/api/runtime；切换动作构造 /model 命令注入
+  // /web/api/input，由主循环统一执行（与 TTY 行为一致）。
+  var cfg = { provider: "", model: "", reasoning: "" };
+  var cfgUiDirty = false; // 切换提交后保持用户选择，等待权威确认前不重设 UI
+
+  function cfgEls() {
+    return {
+      provider: document.getElementById("cfg-provider"),
+      model: document.getElementById("cfg-model"),
+      modelOpts: document.getElementById("cfg-model-options"),
+      reasoning: document.getElementById("cfg-reasoning"),
+      current: document.getElementById("cfg-current"),
+      status: document.getElementById("cfg-status")
+    };
+  }
+
+  // 拉取并同步权威配置到选择器。cfgUiDirty 时不重设用户正在操作的控件。
+  function loadRuntimeMeta() {
+    fetch("/web/api/runtime", { cache: "no-store" })
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (meta) {
+        if (!meta) { return; }
+        var els = cfgEls();
+        if (!els.provider || !els.model || !els.reasoning) { return; }
+        var cur = meta.current || {};
+        cfg.provider = cur.provider || "";
+        cfg.model = cur.model || "";
+        cfg.reasoning = cur.reasoning_effort || "";
+        var providers = meta.providers || [];
+        if (!cfgUiDirty) {
+          // provider 下拉：优先已启用 provider，当前值不在列表时补一项
+          var html = "";
+          var hasCurrent = false;
+          providers.forEach(function (p) {
+            if (p.name === cfg.provider) { hasCurrent = true; }
+            html += '<option value="' + esc(p.name) + '"' + (p.name === cfg.provider ? " selected" : "") + '>' + esc(p.name) + "</option>";
+          });
+          if (cfg.provider && !hasCurrent) {
+            html = '<option value="' + esc(cfg.provider) + '" selected>' + esc(cfg.provider) + "</option>" + html;
+          }
+          els.provider.innerHTML = html;
+          // 当前 provider 的模型 datalist
+          var curProvider = null;
+          providers.forEach(function (p) { if (p.name === cfg.provider) { curProvider = p; } });
+          var models = curProvider ? (curProvider.models || []) : [];
+          if (els.modelOpts) {
+            els.modelOpts.innerHTML = models.map(function (m) {
+              return '<option value="' + esc(m) + '"></option>';
+            }).join("");
+          }
+          els.model.value = cfg.model;
+          els.model.placeholder = cfg.model || (curProvider && curProvider.default_model) || "输入模型名";
+          els.reasoning.value = cfg.reasoning;
+        }
+        els.current.textContent = (cfg.provider || "?") + " · " + (cfg.model || "?") + (cfg.reasoning ? " · " + cfg.reasoning : "");
+      })
+      .catch(function (err) { console.error("runtime meta fetch failed:", err); });
+  }
+
+  // 选择器变更 → 构造差异化的 /model 命令并注入。
+  function applyRuntimeConfig() {
+    var els = cfgEls();
+    if (!els.provider || !els.model || !els.reasoning) { return; }
+    var provider = els.provider.value || "";
+    var model = (els.model.value || "").trim();
+    var reasoning = els.reasoning.value || "";
+    if (provider === cfg.provider && (model === cfg.model || model === "") && reasoning === cfg.reasoning) {
+      return; // 无实际变化
+    }
+    var parts = ["/model"];
+    if (provider && provider !== cfg.provider) { parts.push("--provider=" + provider); }
+    if (model && model !== cfg.model) { parts.push("--model=" + model); }
+    if (reasoning === "" && cfg.reasoning !== "") {
+      parts.push("--clear-reasoning"); // 恢复默认 effort
+    } else if (reasoning !== "" && reasoning !== cfg.reasoning) {
+      parts.push("-r=" + reasoning);
+    }
+    var cmd = parts.join(" ");
+    cfgUiDirty = true;
+    if (els.status) {
+      els.status.textContent = "切换中…";
+      els.status.className = "cfg-status busy";
+    }
+    fetch("/web/api/input", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: cmd })
+    })
+      .then(function (res) { return res.json().catch(function () { return { status: "error", reason: "bad response" }; }); })
+      .then(function (json) {
+        if (json.status !== "queued") {
+          if (els.status) {
+            els.status.textContent = "提交失败: " + (json.reason || json.status);
+            els.status.className = "cfg-status err";
+          }
+          cfgUiDirty = false;
+          loadRuntimeMeta();
+          return;
+        }
+        // 轮询权威值直到生效（命令在输入队列中稍后执行）
+        pollRuntimeMeta(provider, model, reasoning, 8);
+      })
+      .catch(function (err) {
+        if (els.status) {
+          els.status.textContent = "提交失败: " + err;
+          els.status.className = "cfg-status err";
+        }
+        cfgUiDirty = false;
+        loadRuntimeMeta();
+      });
+  }
+
+  function pollRuntimeMeta(targetProvider, targetModel, targetReasoning, attempts) {
+    var els = cfgEls();
+    if (attempts <= 0) {
+      cfgUiDirty = false;
+      loadRuntimeMeta();
+      if (els.status) {
+        els.status.textContent = "已提交（配置可能未同步）";
+        els.status.className = "cfg-status";
+      }
+      return;
+    }
+    fetch("/web/api/runtime", { cache: "no-store" })
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (meta) {
+        var cur = (meta && meta.current) || {};
+        var ok = cur.provider === targetProvider &&
+          (targetModel === "" || cur.model === targetModel) &&
+          cur.reasoning_effort === targetReasoning;
+        if (ok) {
+          cfgUiDirty = false;
+          loadRuntimeMeta();
+          if (els.status) {
+            els.status.textContent = "已生效";
+            els.status.className = "cfg-status ok";
+            setTimeout(function () { els.status.textContent = ""; els.status.className = "cfg-status"; }, 2500);
+          }
+        } else {
+          setTimeout(function () { pollRuntimeMeta(targetProvider, targetModel, targetReasoning, attempts - 1); }, 400);
+        }
+      })
+      .catch(function () {
+        setTimeout(function () { pollRuntimeMeta(targetProvider, targetModel, targetReasoning, attempts - 1); }, 400);
+      });
+  }
+
   function refreshScreen() {
     fetch("/web/api/screen?format=json", { cache: "no-store" })
       .then(function (res) { return res.ok ? res.json() : null; })
       .then(function (data) {
+        loadRuntimeMeta(); // 会话切换/命令执行后同步 provider/model/reasoning 权威值
         if (!data || !data.available) {
           // 无可用屏幕快照（无 surface / 空帧）：保留 screenEl 已有内容
           // （finishStream 已写入流式累积文本），不覆盖为 "(empty)"。
@@ -1545,12 +1694,31 @@ function startTypeTimer() {
     shortcutHelpEl.querySelector(".shortcut-close").addEventListener("click", function () { toggleShortcutHelp(); });
     shortcutHelpEl.querySelector(".shortcut-overlay").addEventListener("click", function () { toggleShortcutHelp(); });
   }
+  // provider / model / reasoning 切换选择器
+  var cfgProviderEl = document.getElementById("cfg-provider");
+  var cfgModelEl = document.getElementById("cfg-model");
+  var cfgReasoningEl = document.getElementById("cfg-reasoning");
+  var cfgBarEl = document.getElementById("cfg-bar");
+  [cfgProviderEl, cfgReasoningEl].forEach(function (el) {
+    if (el) { el.addEventListener("change", applyRuntimeConfig); }
+  });
+  if (cfgModelEl) {
+    cfgModelEl.addEventListener("change", applyRuntimeConfig); // 失焦/选择 datalist 项时提交
+    cfgModelEl.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        applyRuntimeConfig();
+        cfgModelEl.blur();
+      }
+    });
+  }
 
   // 底部栏显示完整 URL
   var origin = window.location.origin;
   document.getElementById("footer-endpoints").innerHTML = '<a href="' + origin + '/debug/endpoints" target="_blank" rel="noopener">' + origin + '/debug/endpoints</a>';
   document.getElementById("footer-web").innerHTML = '<a href="' + origin + '/web/" target="_blank" rel="noopener">' + origin + '/web/</a>';
 
+  loadRuntimeMeta();
   openEventSource();
   refreshScreen();
   loadSessions();

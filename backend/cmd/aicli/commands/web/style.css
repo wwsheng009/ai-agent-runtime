@@ -337,6 +337,27 @@ button {
 }
 button:hover { background: var(--hoverBg2); }
 #send-status { font-size: 12px; color: var(--fg3); min-width: 60px; align-self: center; }
+/* ---- provider / model / reasoning 配置选择器 ---- */
+#cfg-bar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px;
+  margin: 6px 0 2px 0; padding: 6px 8px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+  font-size: 12px;
+}
+#cfg-bar .cfg-item { display: flex; align-items: center; gap: 5px; }
+#cfg-bar .cfg-label { color: var(--fg3); font-size: 11px; }
+#cfg-bar select, #cfg-bar input {
+  padding: 3px 6px; font-family: inherit; font-size: 12px;
+  background: var(--bg3); color: var(--fg);
+  border: 1px solid var(--border2); border-radius: 5px;
+  max-width: 150px;
+}
+#cfg-bar .cfg-model input { min-width: 120px; }
+#cfg-bar .cfg-current { color: var(--fg3); margin-left: auto; font-size: 11px; }
+#cfg-bar .cfg-status { font-size: 11px; color: var(--fg4); }
+#cfg-bar .cfg-status.busy { color: var(--accent); }
+#cfg-bar .cfg-status.ok { color: var(--green); }
+#cfg-bar .cfg-status.err { color: var(--red, #e5534b); }
 #event-log { flex: 1; overflow: auto; margin-top: 8px; font-size: 11px; color: var(--fg4); }
 #event-log .ev-line { padding: 1px 0; border-bottom: 1px solid var(--border); }
 #event-log .ev-name { color: var(--accent); }
