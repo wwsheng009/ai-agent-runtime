@@ -20,6 +20,14 @@ import (
 // 无会话 / 无 surface / 空帧时返回 available=false 的轻量响应，便于轮询。
 // ============================================================================
 
+// chatWebScreenMessage 是 web 客户端结构化会话消息：角色 + 正文。
+// role 取值与 scene.CellKind / session 消息 role 一一映射：
+// user / assistant / reasoning / tool / system / command / diagnostic / runtime。
+type chatWebScreenMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
 // chatDebugScreenSnapshot 是 /debug/chat/screen 的 JSON 响应体。
 type chatDebugScreenSnapshot struct {
 	Available bool     `json:"available"`
@@ -28,6 +36,9 @@ type chatDebugScreenSnapshot struct {
 	Height    int      `json:"height,omitempty"`
 	Lines     []string `json:"lines,omitempty"`
 	Text      string   `json:"text,omitempty"`
+	// Messages 是结构化消息列表（仅 buildChatWebScreenSnapshot 填充；
+	// 调试端点保持纯文本语义，不设置该字段）。前端据此做角色气泡渲染。
+	Messages []chatWebScreenMessage `json:"messages,omitempty"`
 }
 
 // BuildChatDebugScreenSnapshot 返回当前屏幕合成帧的结构化快照。
@@ -273,6 +284,7 @@ func buildChatWebScreenSnapshot() *chatDebugScreenSnapshot {
 			snap.Available = true
 			snap.Lines = lines
 			snap.Text = strings.Join(lines, "\n")
+			snap.Messages = transcriptFallbackMessages(state.Transcript.Cells)
 			return snap
 		}
 	}
@@ -282,6 +294,7 @@ func buildChatWebScreenSnapshot() *chatDebugScreenSnapshot {
 				snap.Available = true
 				snap.Lines = lines
 				snap.Text = strings.Join(lines, "\n")
+				snap.Messages = transcriptFallbackSnapshotMessages(sceneSnap)
 				return snap
 			}
 		}
@@ -290,6 +303,7 @@ func buildChatWebScreenSnapshot() *chatDebugScreenSnapshot {
 		snap.Available = true
 		snap.Lines = lines
 		snap.Text = strings.Join(lines, "\n")
+		snap.Messages = sessionTranscriptFallbackMessages(session)
 		return snap
 	}
 	snap.Available = false
@@ -300,4 +314,109 @@ func buildChatWebScreenSnapshot() *chatDebugScreenSnapshot {
 // marshalChatWebScreenJSON 返回 web 屏幕快照的缩进 JSON 字节。
 func marshalChatWebScreenJSON() ([]byte, error) {
 	return json.MarshalIndent(buildChatWebScreenSnapshot(), "", "  ")
+}
+
+// ---------------------------------------------------------------------------
+// 结构化消息辅助函数（web 客户端 role-based 气泡渲染数据源）
+// ---------------------------------------------------------------------------
+
+// chatWebRoleForCellKind 映射 cell.Kind 到 web 消息 role 值。
+func chatWebRoleForCellKind(kind scene.CellKind) string {
+	switch kind {
+	case scene.KindUser:
+		return "user"
+	case scene.KindAssistant:
+		return "assistant"
+	case scene.KindReasoning:
+		return "reasoning"
+	case scene.KindToolChain:
+		return "tool"
+	case scene.KindRuntimeEvent:
+		return "runtime"
+	case scene.KindSupplement:
+		return "assistant"
+	case scene.KindSystem:
+		return "system"
+	case scene.KindCommand:
+		return "command"
+	case scene.KindDiagnostic:
+		return "diagnostic"
+	default:
+		return "assistant"
+	}
+}
+
+// transcriptFallbackMessages 从语义 transcript cells 派生结构化消息列表。
+func transcriptFallbackMessages(cells []scene.TranscriptCell) []chatWebScreenMessage {
+	if len(cells) == 0 {
+		return nil
+	}
+	msgs := make([]chatWebScreenMessage, 0, len(cells))
+	for i := range cells {
+		cell := &cells[i]
+		if cell.Source == "" {
+			continue
+		}
+		msgs = append(msgs, chatWebScreenMessage{
+			Role:    chatWebRoleForCellKind(cell.Kind),
+			Content: cell.Source,
+		})
+	}
+	if len(msgs) == 0 {
+		return nil
+	}
+	return msgs
+}
+
+// transcriptFallbackSnapshotMessages 适配 bridge Scene 快照（指针切片）
+// 到结构化消息列表。
+func transcriptFallbackSnapshotMessages(snap *scene.Snapshot) []chatWebScreenMessage {
+	if snap == nil || len(snap.Cells) == 0 {
+		return nil
+	}
+	cells := make([]scene.TranscriptCell, 0, len(snap.Cells))
+	for _, cell := range snap.Cells {
+		if cell == nil {
+			continue
+		}
+		cells = append(cells, *cell)
+	}
+	return transcriptFallbackMessages(cells)
+}
+
+// sessionTranscriptFallbackMessages 直接从会话 transcript（session.Messages /
+// session.RuntimeSession.History）派生结构化消息列表，不依赖 surface / uiActor。
+func sessionTranscriptFallbackMessages(session *ChatSession) []chatWebScreenMessage {
+	if session == nil {
+		return nil
+	}
+	messages := session.Messages
+	if len(messages) == 0 && session.RuntimeSession != nil {
+		messages = session.RuntimeSession.History
+	}
+	if len(messages) == 0 {
+		return nil
+	}
+	msgs := make([]chatWebScreenMessage, 0, len(messages))
+	for i := range messages {
+		msg := &messages[i]
+		text := strings.TrimSpace(msg.Content)
+		if text == "" {
+			continue
+		}
+		role := "assistant"
+		switch msg.Role {
+		case "user":
+			role = "user"
+		case "system":
+			role = "system"
+		case "tool":
+			role = "tool"
+		}
+		msgs = append(msgs, chatWebScreenMessage{Role: role, Content: text})
+	}
+	if len(msgs) == 0 {
+		return nil
+	}
+	return msgs
 }

@@ -105,6 +105,11 @@
   var TYPE_SPEED = 20;               // 每字符间隔（毫秒），越小越快
   var TYPE_CHARS_PER_TICK = 1;       // 每 tick 揭示字符数
 
+  // 本地乐观回显：已发送但尚未被服务端 screen 快照确认的 user prompt。
+  // 发送时立即以 pending 气泡追加到对话区；refreshScreen 收到服务端
+  // messages 后按内容去重确认（服务端已包含则移除，未包含则保留 pending）。
+  var localPendingPrompts = [];
+
   // ---- 发送/停止按钮状态机 ----
   // idle        就绪：按钮为「发送」，输入为空时禁用
   // posting     POST 已发出，等待队列确认：按钮为「发送中…」禁用（脉冲）
@@ -405,9 +410,20 @@ function startTypeTimer() {
       persisted += streamText;
     }
     if (persisted) {
-      var existing = screenEl.textContent;
-      var prefix = (existing && existing !== "(empty)") ? existing + "\n\n" : "";
-      screenEl.textContent = prefix + persisted;
+      // 结构化模式（服务端 messages 气泡）：以角色行追加，保留现场；
+      // 纯文本回退模式（无 surface 快照）：沿用旧拼接逻辑。
+      if (screenEl.querySelector(".msg-row")) {
+        if (streamReasoning) {
+          screenEl.insertAdjacentHTML("beforeend", chatMsgRowHtml("reasoning", streamReasoning, false));
+        }
+        if (streamText) {
+          screenEl.insertAdjacentHTML("beforeend", chatMsgRowHtml("assistant", streamText, false));
+        }
+      } else {
+        var existing = screenEl.textContent;
+        var prefix = (existing && existing !== "(empty)") ? existing + "\n\n" : "";
+        screenEl.textContent = prefix + persisted;
+      }
     }
     if (streamMsgEl) { streamMsgEl.style.display = "none"; }
     refreshScreen();
@@ -463,7 +479,80 @@ function startTypeTimer() {
     // 更新日志计数
     var countEl = document.getElementById("log-count");
     if (countEl) { countEl.textContent = eventLogEl.childNodes.length + " 条事件"; }
-  }function refreshScreen() {
+  }
+
+  // ---- 结构化对话渲染（role-based 气泡） ----
+  var MSG_LABELS = {
+    user: "你",
+    assistant: "aicli",
+    reasoning: "推理",
+    tool: "工具",
+    system: "系统",
+    command: "命令",
+    diagnostic: "诊断",
+    runtime: "事件"
+  };
+
+  // 单条消息 HTML：label（角色）+ body（内容），支持 pending 态。
+  function chatMsgRowHtml(role, content, pending) {
+    var label = MSG_LABELS[role] || "消息";
+    var cls = "msg-row msg-" + role + (pending ? " msg-pending" : "");
+    return '<div class="' + cls + '">' +
+      '<div class="msg-label">' + esc(label) + '</div>' +
+      '<div class="msg-body">' + esc(content) + '</div>' +
+      '</div>';
+  }
+
+  // 用服务端 messages 重建对话区；未确认的本地 prompt 保留为 pending 气泡。
+  function renderConversationMessages(messages) {
+    if (!screenEl) { return; }
+    var html = "";
+    var seenUser = {};
+    (messages || []).forEach(function (m) {
+      var role = m.role || "assistant";
+      var content = (m.content || "").replace(/\s+$/, "");
+      if (role === "user") { seenUser[content] = true; }
+      html += chatMsgRowHtml(role, content, false);
+    });
+    // 服务端尚未包含的本地 prompt → pending 气泡（发送中态），保留待确认。
+    localPendingPrompts = localPendingPrompts.filter(function (text) {
+      if (seenUser[text]) { return false; } // 已被服务端确认
+      html += chatMsgRowHtml("user", text, true);
+      return true;
+    });
+    screenEl.innerHTML = html || "(empty)";
+  }
+
+  // 立即追加一条本地 user pending 气泡（乐观回显，不等服务端回合）。
+  function appendPendingUserPrompt(text) {
+    if (!text) { return; }
+    localPendingPrompts.push(text);
+    if (screenEl) {
+      // 首个消息时先清除占位符 "(empty)"，避免气泡混在占位文本后。
+      if (screenEl.textContent === "(empty)" && !screenEl.querySelector(".msg-row")) {
+        screenEl.innerHTML = "";
+      }
+      screenEl.insertAdjacentHTML("beforeend", chatMsgRowHtml("user", text, true));
+    }
+    scrollToBottom(true);
+  }
+
+  // 发送失败时移除本地 pending 气泡（释放乐观回显）。
+  function dropPendingUserPrompt(text) {
+    if (!text) { return; }
+    localPendingPrompts = localPendingPrompts.filter(function (p) { return p !== text; });
+    if (screenEl) {
+      var pendingRows = screenEl.querySelectorAll(".msg-row.msg-pending");
+      pendingRows.forEach(function (el) {
+        var bodyEl = el.querySelector(".msg-body");
+        if (bodyEl && bodyEl.textContent.trim() === text) {
+          el.remove();
+        }
+      });
+    }
+  }
+
+  function refreshScreen() {
     fetch("/web/api/screen?format=json", { cache: "no-store" })
       .then(function (res) { return res.ok ? res.json() : null; })
       .then(function (data) {
@@ -474,8 +563,12 @@ function startTypeTimer() {
           updateWelcome();
           return;
         }
-        // 权威屏幕内容可用：覆盖显示，隐藏 #stream-msg（由终端渲染驱动）。
-        screenEl.textContent = data.text || "";
+        // 结构化消息可用（推荐路径）：角色气泡渲染；否则回退纯文本快照。
+        if (Array.isArray(data.messages) && data.messages.length > 0) {
+          renderConversationMessages(data.messages);
+        } else {
+          screenEl.textContent = data.text || "";
+        }
         if (streamMsgEl) { streamMsgEl.style.display = "none"; }
         // 尊重用户滚动位置：若用户上滚阅读历史，不强制拉底（G3）。
         scrollToBottom();
@@ -670,6 +763,7 @@ function startTypeTimer() {
           } else {
             setUI("idle", "失败: " + (json.reason || json.status));
           }
+          if (payload && payload.prompt) { dropPendingUserPrompt(payload.prompt); }
         }
       })
       .catch(function (err) {
@@ -680,6 +774,7 @@ function startTypeTimer() {
         } else {
           setUI("idle", "发送失败: " + err);
         }
+        if (payload && payload.prompt) { dropPendingUserPrompt(payload.prompt); }
       });
   }// ---- 左侧会话列表：折叠/展开 ----
   function setSidebarCollapsed(collapsed) {
@@ -1114,6 +1209,7 @@ function startTypeTimer() {
       case "session_end":
         // 会话切换/结束：复位按钮、刷新会话列表与屏幕
         setUI("idle", "");
+        localPendingPrompts = []; // 旧会话的本地回显不带到新会话
         loadSessions();
         endStream();
         refreshScreen();
@@ -1190,6 +1286,7 @@ function startTypeTimer() {
       return;
     }
     setUI("posting", "发送中…");
+    appendPendingUserPrompt(text); // 乐观回显：立即显示用户气泡（发送中态）
     sendInput({ prompt: text });
   });
 
@@ -1252,6 +1349,7 @@ function startTypeTimer() {
       // Ctrl+K：清空当前对话视图（仅清除本地屏幕显示，不影响会话历史）
       e.preventDefault();
       screenEl.textContent = "";
+      localPendingPrompts = [];
       if (streamMsgEl) { streamMsgEl.innerHTML = ""; }
       updateWelcome();
       scrollToBottom(true);
@@ -1274,6 +1372,7 @@ function startTypeTimer() {
         sendStatusEl.textContent = "请使用允许/拒绝按钮";
         return;
       }
+      appendPendingUserPrompt(text); // 排队期间同样先回显用户气泡
       sendInput({ prompt: text });
       return;
     }
@@ -1386,7 +1485,17 @@ function startTypeTimer() {
   // 会话复制按钮
   if (screenCopyBtn) {
     screenCopyBtn.addEventListener("click", function () {
-      var text = screenEl.textContent || "";
+      var text = "";
+      var bodies = screenEl.querySelectorAll(".msg-row .msg-body");
+      if (bodies.length) {
+        var parts = [];
+        bodies.forEach(function (el) {
+          parts.push(el.textContent);
+        });
+        text = parts.join("\n\n");
+      } else {
+        text = screenEl.textContent || "";
+      }
       if (!text || text === "(empty)") { return; }
       if (!navigator.clipboard) { showToast("复制失败", "error"); return; }
       navigator.clipboard.writeText(text).then(function () {

@@ -45,6 +45,9 @@
   --sb-thumb: #2a3138;
   --sb-thumb-active: #3d5570;
   --sb-track: transparent;
+  /* 用户消息气泡：深色主题用亮蓝底 */
+  --userMsgBg: #2a5f80;
+  --userMsgFg: #eef6fb;
 }
 
 /* ---- 浅色主题 ---- */
@@ -87,10 +90,13 @@
   --sb-thumb: #b8c0c8;
   --sb-thumb-active: #b8c0c8;
   --sb-track: transparent;
+  /* 用户消息气泡：浅色主题用深蓝底白字 */
+  --userMsgBg: #2a6a9a;
+  --userMsgFg: #ffffff;
 }
 /* 跟随系统偏好 */
 @media (prefers-color-scheme: light) {
-  :root:not(.dark):not(.light) { --bg: #f5f7fa; --bg2: #ffffff; --bg3: #e8ecf0; --bg4: #dce0e6; --fg: #1a1e24; --fg2: #2c323a; --fg3: #5a6670; --fg4: #8a94a0; --border: #c8d0d8; --border2: #a0aab6; --accent: #2a6a9a; --accent2: #1a5a8a; --green: #1a8a3a; --greenBg: #d4f0dc; --red: #b0302a; --redBg: #fce4e2; --redBorder: #c06a6a; --redBtn: #d94a44; --codeBg: #e8ecf0; --codeFg: #2a4a6a; --reasoningFg: #8a7a4a; --reasoningBg: #f5f0e0cc; --reasoningBorder: #c8c0a8; --reasoningHover: #ece8d8; --toolFg: #2a6a9a; --hoverBg: #d0d8e0; --hoverBg2: #c8d0da; --activeBg: #c8d0d8; --shadow: rgba(0,0,0,0.15); --overlayBg: rgba(0,0,0,0.35); --modalBg: #ffffff; --copyBtn: #2a6a9a; --copyBtnHover: #1a4a6a; --sb-thumb: #b8c0c8; --sb-thumb-active: #b8c0c8; --sb-track: transparent; }
+  :root:not(.dark):not(.light) { --bg: #f5f7fa; --bg2: #ffffff; --bg3: #e8ecf0; --bg4: #dce0e6; --fg: #1a1e24; --fg2: #2c323a; --fg3: #5a6670; --fg4: #8a94a0; --border: #c8d0d8; --border2: #a0aab6; --accent: #2a6a9a; --accent2: #1a5a8a; --green: #1a8a3a; --greenBg: #d4f0dc; --red: #b0302a; --redBg: #fce4e2; --redBorder: #c06a6a; --redBtn: #d94a44; --codeBg: #e8ecf0; --codeFg: #2a4a6a; --reasoningFg: #8a7a4a; --reasoningBg: #f5f0e0cc; --reasoningBorder: #c8c0a8; --reasoningHover: #ece8d8; --toolFg: #2a6a9a; --hoverBg: #d0d8e0; --hoverBg2: #c8d0da; --activeBg: #c8d0d8; --shadow: rgba(0,0,0,0.15); --overlayBg: rgba(0,0,0,0.35); --modalBg: #ffffff; --copyBtn: #2a6a9a; --copyBtnHover: #1a4a6a; --sb-thumb: #b8c0c8; --sb-thumb-active: #b8c0c8; --sb-track: transparent; --userMsgBg: #2a6a9a; --userMsgFg: #ffffff; }
 }
 
 * { box-sizing: border-box; }
@@ -137,6 +143,63 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
   margin: 0 0 8px 0;
   padding: 10px; white-space: pre-wrap; word-break: break-word;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+}
+
+/* ---- 结构化对话消息（role-based 气泡） ---- */
+#screen .msg-row {
+  display: flex; flex-direction: column;
+  margin: 0 0 12px 0; max-width: 100%;
+}
+#screen .msg-row:last-child { margin-bottom: 0; }
+#screen .msg-label {
+  font-size: 11px; color: var(--fg4);
+  margin: 0 2px 2px 2px; line-height: 1.3;
+}
+#screen .msg-body {
+  padding: 8px 12px; border-radius: 10px;
+  font-size: 13px; line-height: 1.55;
+  white-space: pre-wrap; word-break: break-word;
+}
+/* 用户消息：右对齐高亮气泡 */
+#screen .msg-row.msg-user { align-items: flex-end; }
+#screen .msg-row.msg-user .msg-body {
+  background: var(--userMsgBg); color: var(--userMsgFg);
+  border-bottom-right-radius: 2px; max-width: 92%;
+}
+#screen .msg-row.msg-user .msg-label { color: var(--fg4); }
+#screen .msg-row.msg-user.msg-pending .msg-body { opacity: 0.6; }
+#screen .msg-row.msg-user.msg-pending .msg-label::after { content: " · 发送中…"; }
+/* 助手消息：左对齐中性气泡 */
+#screen .msg-row.msg-assistant { align-items: flex-start; }
+#screen .msg-row.msg-assistant .msg-body {
+  background: var(--bg3); color: var(--fg);
+  border: 1px solid var(--border); border-bottom-left-radius: 2px;
+  max-width: 92%;
+}
+/* 推理过程 / 工具 / 系统 / 命令 / 诊断：非气泡窄行，弱化呈现 */
+#screen .msg-row.msg-reasoning,
+#screen .msg-row.msg-tool,
+#screen .msg-row.msg-system,
+#screen .msg-row.msg-runtime,
+#screen .msg-row.msg-diagnostic,
+#screen .msg-row.msg-command {
+  align-items: flex-start;
+}
+#screen .msg-row.msg-reasoning .msg-body {
+  color: var(--reasoningFg); background: var(--reasoningBg);
+  border: 1px dashed var(--reasoningBorder); font-size: 12px;
+}
+#screen .msg-row.msg-tool .msg-body,
+#screen .msg-row.msg-command .msg-body,
+#screen .msg-row.msg-runtime .msg-body,
+#screen .msg-row.msg-diagnostic .msg-body {
+  color: var(--fg3); background: transparent;
+  border: 1px dashed var(--border); font-size: 12px;
+  font-family: inherit;
+}
+#screen .msg-row.msg-system .msg-body {
+  color: var(--fg4); font-size: 12px; font-style: italic;
+  border-left: 3px solid var(--border2); padding-left: 8px; background: transparent;
 }
 .tabs { display: flex; gap: 6px; margin-top: 8px; border-bottom: 1px solid var(--border); }
 .tab-btn {

@@ -434,13 +434,13 @@ func TestChatWebScreenSnapshotFullTranscriptNotViewportClipped(t *testing.T) {
 	for i := 0; i < 12; i++ {
 		cells = append(cells,
 			&scene.TranscriptCell{ID: scene.CellID(id), Sequence: uint64(id), Kind: scene.KindAssistant,
-				Source: "filler-line-1\nfiller-line-2\nfiller-line-3",
+				Source:   "filler-line-1\nfiller-line-2\nfiller-line-3",
 				Revision: 1, Phase: scene.CellCommitted})
 		id++
 	}
 	cells = append(cells,
 		&scene.TranscriptCell{ID: scene.CellID(id), Sequence: uint64(id), Kind: scene.KindAssistant,
-			Source: lastMarker + "\ntail",
+			Source:   lastMarker + "\ntail",
 			Revision: 1, Phase: scene.CellCommitted})
 
 	if !actor.Post(ui.ReplaceTranscriptAction{Snapshot: &scene.Snapshot{
@@ -474,5 +474,29 @@ func TestChatWebScreenSnapshotFullTranscriptNotViewportClipped(t *testing.T) {
 	}
 	if !strings.Contains(webSnap.Text, lastMarker) {
 		t.Fatalf("web screen 应包含最后 turn %q，实际 text=%q", lastMarker, webSnap.Text)
+	}
+	// 结构化消息（role + content）必须完整派生：首个 user 消息与最后的
+	// assistant 消息都应按 role 归位，供 web 客户端做气泡渲染。
+	if len(webSnap.Messages) == 0 {
+		t.Fatal("web screen 应派生结构化 Messages，实际为空")
+	}
+	var firstUser *chatWebScreenMessage
+	var lastAssistant *chatWebScreenMessage
+	for i := range webSnap.Messages {
+		m := &webSnap.Messages[i]
+		if m.Role == "user" && strings.Contains(m.Content, firstMarker) && firstUser == nil {
+			firstUser = m
+		}
+		if m.Role == "assistant" && strings.Contains(m.Content, lastMarker) {
+			lastAssistant = m
+		}
+	}
+	if firstUser == nil {
+		t.Fatalf("Messages 应包含 role=user 且内容含 %q 的消息，实际 messages=%v",
+			firstMarker, webSnap.Messages)
+	}
+	if lastAssistant == nil {
+		t.Fatalf("Messages 应包含 role=assistant 且内容含 %q 的消息，实际 messages=%v",
+			lastMarker, webSnap.Messages)
 	}
 }
