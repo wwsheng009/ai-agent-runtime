@@ -23,6 +23,8 @@ const (
 	ChatWebAPISchemaPath          = "/web/api/events/schema"
 	ChatWebAPISessionsPath        = "/web/api/sessions"
 	ChatWebAPISessionsResumePath  = "/web/api/sessions/resume"
+	ChatWebAPISessionsDeletePath  = "/web/api/sessions/delete"
+	ChatWebAPISessionsRenamePath  = "/web/api/sessions/rename"
 )
 
 // chatWebSchemaVersion 是 SSE 事件 data 中 _event.schema_version 字段的值。

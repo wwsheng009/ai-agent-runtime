@@ -28,11 +28,13 @@
   var sessionsSortEl = document.getElementById("sessions-sort");
   var sessionListEl = document.getElementById("session-list");
   var themeToggleBtn = document.getElementById("theme-toggle");
+  var sessionSearchEl = document.getElementById("session-search");
 
   var pendingApprovalRequestID = null;
   var pendingQuestionID = null;
   var lastSequence = 0;
   var sessions = [];               // 会话列表缓存（GET /web/api/sessions）
+  var sessionsQuery = "";          // 会话列表搜索词（纯前端过滤）
   var sidebarCollapsed = false;    // 侧边栏折叠状态（localStorage 记忆）
   var sessionsReqSeq = 0;          // loadSessions 请求序号（丢弃过期响应）
   var sessionsSort = "created_at"; // 会话排序：created_at（默认）| updated_at
@@ -525,41 +527,190 @@ function startTypeTimer() {
 
   // 渲染会话列表。顺序完全由后端决定（默认按创建时间降序，可切更新时间），
   // 前端不排序，避免点击切换后列表位置跳动。
+  // 搜索过滤：按标题/摘要/ID 子串匹配（不区分大小写），纯前端过滤。
   function renderSessionList() {
     if (!sessionListEl) { return; }
     var items = sessions || [];
+    var query = sessionsQuery.toLowerCase();
+    if (query) {
+      items = items.filter(function (s) {
+        return (s.title || "").toLowerCase().indexOf(query) !== -1 ||
+               (s.summary || "").toLowerCase().indexOf(query) !== -1 ||
+               (s.id || "").toLowerCase().indexOf(query) !== -1;
+      });
+    }
     sessionListEl.innerHTML = "";
     if (!items.length) {
       var empty = document.createElement("div");
       empty.className = "session-empty";
-      empty.textContent = "暂无历史会话";
+      if (query && sessions && sessions.length) {
+        empty.textContent = "无匹配会话";
+        var clearBtn = document.createElement("button");
+        clearBtn.type = "button";
+        clearBtn.className = "session-search-clear";
+        clearBtn.textContent = "清除搜索";
+        clearBtn.addEventListener("click", function () {
+          if (sessionSearchEl) { sessionSearchEl.value = ""; }
+          sessionsQuery = "";
+          renderSessionList();
+        });
+        empty.appendChild(document.createElement("br"));
+        empty.appendChild(clearBtn);
+      } else {
+        empty.textContent = sessions && sessions.length ? "" : "暂无历史会话";
+      }
       sessionListEl.appendChild(empty);
       return;
     }
     items.forEach(function (s) {
-      var item = document.createElement("button");
-      item.type = "button";
+      var item = document.createElement("div");
       item.className = "session-item" + (s.current ? " active" : "");
       item.title = s.id;
+
+      var main = document.createElement("button");
+      main.type = "button";
+      main.className = "session-main";
+      main.addEventListener("click", function () { resumeSession(s.id); });
+
       var title = document.createElement("span");
       title.className = "session-title";
       title.textContent = s.title || "(未命名会话)";
+
+      var summary = null;
+      if (s.summary) {
+        summary = document.createElement("span");
+        summary.className = "session-summary";
+        summary.textContent = s.summary;
+      }
+
       var meta = document.createElement("span");
       meta.className = "session-meta";
       var bits = [];
       if (s.current) { bits.push('<span class="session-current">● 当前</span>'); }
       if (typeof s.message_count === "number") { bits.push(s.message_count + " 条消息"); }
-      // 时间戳跟随当前排序键：按创建时间排时显示创建时间，按更新时间排时显示更新时间。
       var ts = sessionsSort === "updated_at"
         ? fmtSessionTime(s.updated_at || s.created_at)
         : fmtSessionTime(s.created_at || s.updated_at);
       if (ts) { bits.push(ts); }
       meta.innerHTML = bits.join(" · ");
-      item.appendChild(title);
-      item.appendChild(meta);
-      item.addEventListener("click", function () { resumeSession(s.id); });
+
+      main.appendChild(title);
+      if (summary) { main.appendChild(summary); }
+      main.appendChild(meta);
+
+      var actions = document.createElement("span");
+      actions.className = "session-actions";
+      var renameBtn = document.createElement("button");
+      renameBtn.type = "button";
+      renameBtn.className = "session-action session-rename-btn";
+      renameBtn.title = "重命名会话";
+      renameBtn.textContent = "✎";
+      renameBtn.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        beginRenameSession(s.id, item, title);
+      });
+      actions.appendChild(renameBtn);
+      if (!s.current) {
+        var deleteBtn = document.createElement("button");
+        deleteBtn.type = "button";
+        deleteBtn.className = "session-action session-delete-btn";
+        deleteBtn.title = "删除会话";
+        deleteBtn.textContent = "🗑";
+        deleteBtn.addEventListener("click", function (ev) {
+          ev.stopPropagation();
+          confirmDeleteSession(s);
+        });
+        actions.appendChild(deleteBtn);
+      }
+
+      item.appendChild(main);
+      item.appendChild(actions);
       sessionListEl.appendChild(item);
     });
+  }
+
+  // ---- 内联重命名：标题替换为输入框，Enter/失焦提交，Esc 取消 ----
+  function beginRenameSession(id, itemEl, titleEl) {
+    if (itemEl.querySelector(".session-rename-input")) { return; }
+    var input = document.createElement("input");
+    input.type = "text";
+    input.className = "session-rename-input";
+    var raw = titleEl.textContent;
+    input.value = (raw === "(未命名会话)" || raw === "(untitled)") ? "" : raw;
+    input.maxLength = 100;
+    var committed = false;
+    var finish = function (save) {
+      if (committed) { return; }
+      committed = true;
+      if (save) {
+        var val = input.value.trim();
+        if (!val) { renderSessionList(); return; }
+        commitRenameSession(id, val, itemEl);
+      } else {
+        renderSessionList();
+      }
+    };
+    input.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter") { ev.preventDefault(); finish(true); }
+      else if (ev.key === "Escape") { ev.preventDefault(); finish(false); }
+    });
+    input.addEventListener("blur", function () { finish(true); });
+    itemEl.classList.add("renaming");
+    titleEl.style.display = "none";
+    titleEl.parentNode.insertBefore(input, titleEl.nextSibling);
+    input.focus();
+    input.select();
+  }
+
+  function commitRenameSession(id, val, itemEl) {
+    if (itemEl) { itemEl.classList.add("resuming"); }
+    fetch("/web/api/sessions/rename", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: id, title: val })
+    })
+      .then(function (res) {
+        return res.json().catch(function () { return { status: "error", reason: "bad response" }; });
+      })
+      .then(function (json) {
+        if (json.status === "ok") {
+          for (var i = 0; i < sessions.length; i++) {
+            if (sessions[i].id === id) { sessions[i].title = json.title || val; break; }
+          }
+          sendStatusEl.textContent = "已重命名";
+          loadSessions();
+        } else {
+          sendStatusEl.textContent = "重命名失败: " + (json.reason || json.status);
+          renderSessionList();
+        }
+      })
+      .catch(function (err) {
+        sendStatusEl.textContent = "重命名失败: " + err;
+        renderSessionList();
+      });
+  }
+
+  // ---- 删除确认 + 请求 ----
+  function confirmDeleteSession(s) {
+    if (!window.confirm("确定删除会话「" + (s.title || s.id) + "」？此操作不可恢复。")) { return; }
+    fetch("/web/api/sessions/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: s.id })
+    })
+      .then(function (res) {
+        return res.json().catch(function () { return { status: "error", reason: "bad response" }; });
+      })
+      .then(function (json) {
+        if (json.status === "ok") {
+          sessions = sessions.filter(function (x) { return x.id !== s.id; });
+          sendStatusEl.textContent = "已删除会话";
+          renderSessionList();
+        } else {
+          sendStatusEl.textContent = "删除失败: " + (json.reason || json.status);
+        }
+      })
+      .catch(function (err) { sendStatusEl.textContent = "删除失败: " + err; });
   }
 
   // 拉取会话列表（GET /web/api/sessions）
@@ -904,6 +1055,12 @@ function startTypeTimer() {
       sessionsSort = sessionsSortEl.value === "updated_at" ? "updated_at" : "created_at";
       try { localStorage.setItem("webSessionSort", sessionsSort); } catch (e) { /* ignore */ }
       loadSessions();
+    });
+  }
+  if (sessionSearchEl) {
+    sessionSearchEl.addEventListener("input", function () {
+      sessionsQuery = sessionSearchEl.value;
+      renderSessionList();
     });
   }
 

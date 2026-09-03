@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
@@ -705,6 +706,231 @@ func HandleChatWebAPISessionsResume(w http.ResponseWriter, r *http.Request) {
 			"session_id": targetID,
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// POST /web/api/sessions/delete — 删除历史会话（§3.5）
+// ---------------------------------------------------------------------------
+
+// chatWebSessionsDeleteRequest 是 POST /web/api/sessions/delete 的请求体。
+type chatWebSessionsDeleteRequest struct {
+	SessionID string `json:"session_id"`
+}
+
+// HandleChatWebAPISessionsDelete 删除一个非当前历史会话。
+//
+// 安全约束与 resume 一致：会话必须存在且属于当前用户；当前活动会话
+// 不可删除（主循环持有其引用，删除会导致会话状态与列表不一致）。
+// 删除成功只影响存储层与会话列表，SSE 流不受影响。
+func HandleChatWebAPISessionsDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeWebAPIJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"status": "error",
+			"reason": "method not allowed",
+		})
+		return
+	}
+
+	session := chatWebSession()
+	if session == nil {
+		writeWebAPIJSON(w, http.StatusConflict, map[string]string{
+			"status": "error",
+			"reason": "no active chat session",
+		})
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeWebAPIJSON(w, http.StatusBadRequest, map[string]string{
+			"status": "rejected",
+			"reason": "read body: " + err.Error(),
+		})
+		return
+	}
+
+	var req chatWebSessionsDeleteRequest
+	if jsonErr := json.Unmarshal(body, &req); jsonErr != nil {
+		writeWebAPIJSON(w, http.StatusBadRequest, map[string]string{
+			"status": "rejected",
+			"reason": "invalid JSON: " + jsonErr.Error(),
+		})
+		return
+	}
+	targetID := strings.TrimSpace(req.SessionID)
+	if targetID == "" {
+		writeWebAPIJSON(w, http.StatusBadRequest, map[string]string{
+			"status": "rejected",
+			"reason": "session_id is required",
+		})
+		return
+	}
+
+	manager := session.SessionManager
+	if manager == nil {
+		writeWebAPIJSON(w, http.StatusConflict, map[string]string{
+			"status": "error",
+			"reason": "session manager unavailable",
+		})
+		return
+	}
+	target, err := manager.Get(context.Background(), targetID)
+	if err != nil {
+		writeWebAPIJSON(w, http.StatusNotFound, map[string]string{
+			"status": "error",
+			"reason": "session not found",
+		})
+		return
+	}
+	if target.UserID != session.SessionUserID {
+		writeWebAPIJSON(w, http.StatusForbidden, map[string]string{
+			"status": "error",
+			"reason": "session belongs to another user",
+		})
+		return
+	}
+	if currentID := currentRuntimeSessionID(session); currentID != "" && strings.EqualFold(currentID, targetID) {
+		writeWebAPIJSON(w, http.StatusConflict, map[string]string{
+			"status": "error",
+			"reason": "cannot delete current session",
+		})
+		return
+	}
+
+	if err := manager.Delete(context.Background(), targetID); err != nil {
+		writeWebAPIJSON(w, http.StatusInternalServerError, map[string]string{
+			"status": "error",
+			"reason": "delete failed: " + err.Error(),
+		})
+		return
+	}
+
+	writeWebAPIJSON(w, http.StatusOK, map[string]string{
+		"status":     "ok",
+		"session_id": targetID,
+	})
+}
+
+// ---------------------------------------------------------------------------
+// POST /web/api/sessions/rename — 重命名会话（§3.5）
+// ---------------------------------------------------------------------------
+
+// chatWebSessionsRenameRequest 是 POST /web/api/sessions/rename 的请求体。
+type chatWebSessionsRenameRequest struct {
+	SessionID string `json:"session_id"`
+	Title     string `json:"title"`
+}
+
+// chatWebSessionTitleMaxRunes 是会话标题允许的最大字符数（按 rune 计）。
+const chatWebSessionTitleMaxRunes = 100
+
+// HandleChatWebAPISessionsRename 重命名一个会话。
+//
+// 通过 manager.SetTitle 持久化到存储层；若目标是当前活动会话，同时更新
+// 内存中 RuntimeSession 的 Metadata，保证列表与屏幕状态一致（主循环
+// 单写者原则下，这里只改元数据标题，不触碰对话内容）。
+func HandleChatWebAPISessionsRename(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeWebAPIJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			"status": "error",
+			"reason": "method not allowed",
+		})
+		return
+	}
+
+	session := chatWebSession()
+	if session == nil {
+		writeWebAPIJSON(w, http.StatusConflict, map[string]string{
+			"status": "error",
+			"reason": "no active chat session",
+		})
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeWebAPIJSON(w, http.StatusBadRequest, map[string]string{
+			"status": "rejected",
+			"reason": "read body: " + err.Error(),
+		})
+		return
+	}
+
+	var req chatWebSessionsRenameRequest
+	if jsonErr := json.Unmarshal(body, &req); jsonErr != nil {
+		writeWebAPIJSON(w, http.StatusBadRequest, map[string]string{
+			"status": "rejected",
+			"reason": "invalid JSON: " + jsonErr.Error(),
+		})
+		return
+	}
+	targetID := strings.TrimSpace(req.SessionID)
+	if targetID == "" {
+		writeWebAPIJSON(w, http.StatusBadRequest, map[string]string{
+			"status": "rejected",
+			"reason": "session_id is required",
+		})
+		return
+	}
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		writeWebAPIJSON(w, http.StatusBadRequest, map[string]string{
+			"status": "rejected",
+			"reason": "title is required",
+		})
+		return
+	}
+	if utf8.RuneCountInString(title) > chatWebSessionTitleMaxRunes {
+		writeWebAPIJSON(w, http.StatusBadRequest, map[string]string{
+			"status": "rejected",
+			"reason": "title too long (max 100 characters)",
+		})
+		return
+	}
+
+	manager := session.SessionManager
+	if manager == nil {
+		writeWebAPIJSON(w, http.StatusConflict, map[string]string{
+			"status": "error",
+			"reason": "session manager unavailable",
+		})
+		return
+	}
+	target, err := manager.Get(context.Background(), targetID)
+	if err != nil {
+		writeWebAPIJSON(w, http.StatusNotFound, map[string]string{
+			"status": "error",
+			"reason": "session not found",
+		})
+		return
+	}
+	if target.UserID != session.SessionUserID {
+		writeWebAPIJSON(w, http.StatusForbidden, map[string]string{
+			"status": "error",
+			"reason": "session belongs to another user",
+		})
+		return
+	}
+
+	if err := manager.SetTitle(context.Background(), targetID, title); err != nil {
+		writeWebAPIJSON(w, http.StatusInternalServerError, map[string]string{
+			"status": "error",
+			"reason": "rename failed: " + err.Error(),
+		})
+		return
+	}
+
+	// 当前会话：同步内存中的 RuntimeSession 元数据标题。
+	if currentID := currentRuntimeSessionID(session); currentID != "" &&
+		strings.EqualFold(currentID, targetID) && session.RuntimeSession != nil {
+		session.RuntimeSession.Metadata.Title = title
+	}
+
+	writeWebAPIJSON(w, http.StatusOK, map[string]string{
+		"status":     "ok",
+		"session_id": targetID,
+		"title":      title,
+	})
 }
 
 // ---------------------------------------------------------------------------

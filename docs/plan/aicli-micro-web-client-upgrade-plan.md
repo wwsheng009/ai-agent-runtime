@@ -330,12 +330,23 @@ mux.HandleFunc("/web/app.js", func(w http.ResponseWriter, r *http.Request) {
 ### 5.4 会话管理增强
 
 **现状**：会话列表显示创建时间、更新时间，可排序、切换。
+**状态**：✅ 已实现（Phase 3.5）。
 
 **方案**：
-- 增加会话预览（最后一条消息摘要）
-- 增加会话删除功能（POST /web/api/sessions/delete）
-- 会话搜索/过滤
-- 会话重命名（POST /web/api/sessions/rename）
+- ✅ 会话预览（最后一条消息摘要，取自 `Session.BuildPreview()` 的 summary）
+- ✅ 会话删除（POST /web/api/sessions/delete；拒绝删除当前活动会话，返回 409）
+- ✅ 会话搜索/过滤（侧边栏搜索框，按标题/摘要/ID 前端过滤）
+- ✅ 会话重命名（POST /web/api/sessions/rename；标题 ≤100 字符，当前会话同步内存元数据）
+
+**实现说明**：
+- 删除/重命名安全约束与 resume 一致：会话必须存在且属于当前用户（404/403），
+  请求体 JSON 解析失败或 session_id 为空返回 400。
+- 删除只影响存储层与会话列表；当前活动会话由主循环持有引用，不可删除（409）。
+- 重命名通过 `SessionManager.SetTitle` 持久化；目标是当前会话时同时更新
+  `RuntimeSession.Metadata.Title`，保证列表与屏幕标题一致。
+- 前端列表项悬停显示 ✎（内联重命名：Enter/失焦提交、Esc 取消）与 🗑（删除需确认）。
+- 新增测试：delete/rename 各 9 个用例（方法限制、坏 JSON、空 ID/标题、
+  超长标题、404/403/409、历史会话重命名、当前会话重命名、删除成功）。
 
 ### 5.5 键盘快捷键
 
@@ -421,7 +432,7 @@ aicli micro web client 的独特优势：
 | 3.2 | `web/app.js` + `web/style.css` | 审批面板模态框改造（居中覆盖、详情展开/折叠、关闭按钮） | ✅ 已完成 |
 | 3.3 | `web/app.js` + `web/style.css` + `web_schema.go` | 图像生成预览（`image_progress` 事件监听 + 后端 image 字段透传） | ✅ 已完成 |
 | 3.4 | `web/app.js` | 键盘快捷键支持（Enter 发送 / ↑↓ 历史 / Ctrl+K 清空 / Esc 中断 / Ctrl+L 切换主题） | ✅ 已完成 |
-| 3.5 | `web_handlers.go` + `web/app.js` | 可选：会话删除/重命名端点 | ⏳ 待实现 |
+| 3.5 | `web_handlers.go` + `web/app.js` | 会话删除/重命名端点 + 列表搜索/预览/操作按钮（§5.4） | ✅ 已完成 |
 
 ### Phase 4：测试与稳定性
 

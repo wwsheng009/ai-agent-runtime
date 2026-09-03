@@ -1014,3 +1014,270 @@ func TestHandleChatWebAPISessionsResume_SessionBelongsToOtherUser(t *testing.T) 
 		t.Fatalf("status = %d, want 403; body: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// POST /web/api/sessions/delete — 删除历史会话（§3.5）
+// ---------------------------------------------------------------------------
+
+// webPostJSON 发起一次 POST JSON 请求到指定 handler。
+func webPostJSON(t *testing.T, target, rawJSON string, handler http.HandlerFunc) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(rawJSON))
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+	return rec
+}
+
+func TestHandleChatWebAPISessionsDelete_NoSession(t *testing.T) {
+	withWebTestSession(t, nil)
+	rec := webPostJSON(t, ChatWebAPISessionsDeletePath,
+		`{"session_id":"any"}`, HandleChatWebAPISessionsDelete)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleChatWebAPISessionsDelete_MethodNotAllowed(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, ChatWebAPISessionsDeletePath, nil)
+	rec := httptest.NewRecorder()
+	HandleChatWebAPISessionsDelete(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
+
+func TestHandleChatWebAPISessionsDelete_InvalidJSON(t *testing.T) {
+	session := newWebTestSession()
+	withWebTestSession(t, session)
+	rec := webPostJSON(t, ChatWebAPISessionsDeletePath, `{broken`, HandleChatWebAPISessionsDelete)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleChatWebAPISessionsDelete_EmptySessionID(t *testing.T) {
+	session := newWebTestSession()
+	withWebTestSession(t, session)
+	rec := webPostJSON(t, ChatWebAPISessionsDeletePath, `{"session_id":"  "}`, HandleChatWebAPISessionsDelete)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleChatWebAPISessionsDelete_NoSessionManager(t *testing.T) {
+	session := newWebTestSession()
+	withWebTestSession(t, session)
+	rec := webPostJSON(t, ChatWebAPISessionsDeletePath,
+		`{"session_id":"s1"}`, HandleChatWebAPISessionsDelete)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleChatWebAPISessionsDelete_SessionNotFound(t *testing.T) {
+	session := newWebTestSessionWithManager(t)
+	withWebTestSession(t, session)
+	rec := webPostJSON(t, ChatWebAPISessionsDeletePath,
+		`{"session_id":"no-such-id"}`, HandleChatWebAPISessionsDelete)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleChatWebAPISessionsDelete_SessionBelongsToOtherUser(t *testing.T) {
+	session := newWebTestSessionWithManager(t)
+	withWebTestSession(t, session)
+	other, err := session.SessionManager.Create(context.Background(), "other-user")
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	rec := webPostJSON(t, ChatWebAPISessionsDeletePath,
+		`{"session_id":"`+other.ID+`"}`, HandleChatWebAPISessionsDelete)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleChatWebAPISessionsDelete_CurrentSessionRejected(t *testing.T) {
+	session := newWebTestSessionWithManager(t)
+	withWebTestSession(t, session)
+	rec := webPostJSON(t, ChatWebAPISessionsDeletePath,
+		`{"session_id":"`+session.RuntimeSession.ID+`"}`, HandleChatWebAPISessionsDelete)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body: %s", rec.Code, rec.Body.String())
+	}
+	// 删除被拒绝后当前会话必须仍然存在。
+	if _, err := session.SessionManager.Get(context.Background(), session.RuntimeSession.ID); err != nil {
+		t.Fatalf("current session vanished after rejected delete: %v", err)
+	}
+}
+
+func TestHandleChatWebAPISessionsDelete_Success(t *testing.T) {
+	session := newWebTestSessionWithManager(t)
+	withWebTestSession(t, session)
+	target, err := session.SessionManager.Create(context.Background(), "test-user")
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	target.Metadata.Title = "doomed"
+	target.AddMessage(*runtimetypes.NewUserMessage("to be deleted"))
+	if err := session.SessionManager.Update(context.Background(), target); err != nil {
+		t.Fatalf("manager.Update: %v", err)
+	}
+
+	rec := webPostJSON(t, ChatWebAPISessionsDeletePath,
+		`{"session_id":"`+target.ID+`"}`, HandleChatWebAPISessionsDelete)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := session.SessionManager.Get(context.Background(), target.ID); err == nil {
+		t.Fatalf("session %q still present after delete", target.ID)
+	}
+	// 当前会话不受影响。
+	if _, err := session.SessionManager.Get(context.Background(), session.RuntimeSession.ID); err != nil {
+		t.Fatalf("current session lost: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// POST /web/api/sessions/rename — 重命名会话（§3.5）
+// ---------------------------------------------------------------------------
+
+func TestHandleChatWebAPISessionsRename_NoSession(t *testing.T) {
+	withWebTestSession(t, nil)
+	rec := webPostJSON(t, ChatWebAPISessionsRenamePath,
+		`{"session_id":"any","title":"新标题"}`, HandleChatWebAPISessionsRename)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleChatWebAPISessionsRename_MethodNotAllowed(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, ChatWebAPISessionsRenamePath, nil)
+	rec := httptest.NewRecorder()
+	HandleChatWebAPISessionsRename(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
+
+func TestHandleChatWebAPISessionsRename_InvalidJSON(t *testing.T) {
+	session := newWebTestSession()
+	withWebTestSession(t, session)
+	rec := webPostJSON(t, ChatWebAPISessionsRenamePath, `{broken`, HandleChatWebAPISessionsRename)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleChatWebAPISessionsRename_EmptySessionID(t *testing.T) {
+	session := newWebTestSession()
+	withWebTestSession(t, session)
+	rec := webPostJSON(t, ChatWebAPISessionsRenamePath,
+		`{"session_id":"","title":"x"}`, HandleChatWebAPISessionsRename)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleChatWebAPISessionsRename_EmptyTitle(t *testing.T) {
+	session := newWebTestSession()
+	withWebTestSession(t, session)
+	for _, title := range []string{"", "   ", "\t"} {
+		rec := webPostJSON(t, ChatWebAPISessionsRenamePath,
+			`{"session_id":"s1","title":"`+title+`"}`, HandleChatWebAPISessionsRename)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("title %q: status = %d, want 400; body: %s", title, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestHandleChatWebAPISessionsRename_TitleTooLong(t *testing.T) {
+	session := newWebTestSessionWithManager(t)
+	withWebTestSession(t, session)
+	longTitle := strings.Repeat("长", chatWebSessionTitleMaxRunes+1)
+	rec := webPostJSON(t, ChatWebAPISessionsRenamePath,
+		`{"session_id":"s1","title":"`+longTitle+`"}`, HandleChatWebAPISessionsRename)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body: %s", rec.Code, rec.Body.String())
+	}
+	// 恰好 100 个字符应通过标题长度校验（后续走 not-found 分支）。
+	edgeTitle := strings.Repeat("长", chatWebSessionTitleMaxRunes)
+	rec = webPostJSON(t, ChatWebAPISessionsRenamePath,
+		`{"session_id":"no-such-id","title":"`+edgeTitle+`"}`, HandleChatWebAPISessionsRename)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleChatWebAPISessionsRename_SessionNotFound(t *testing.T) {
+	session := newWebTestSessionWithManager(t)
+	withWebTestSession(t, session)
+	rec := webPostJSON(t, ChatWebAPISessionsRenamePath,
+		`{"session_id":"no-such-id","title":"x"}`, HandleChatWebAPISessionsRename)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleChatWebAPISessionsRename_SessionBelongsToOtherUser(t *testing.T) {
+	session := newWebTestSessionWithManager(t)
+	withWebTestSession(t, session)
+	other, err := session.SessionManager.Create(context.Background(), "other-user")
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	rec := webPostJSON(t, ChatWebAPISessionsRenamePath,
+		`{"session_id":"`+other.ID+`","title":"hijack"}`, HandleChatWebAPISessionsRename)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleChatWebAPISessionsRename_HistorySession(t *testing.T) {
+	session := newWebTestSessionWithManager(t)
+	withWebTestSession(t, session)
+	target, err := session.SessionManager.Create(context.Background(), "test-user")
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	target.Metadata.Title = "old title"
+	if err := session.SessionManager.Update(context.Background(), target); err != nil {
+		t.Fatalf("manager.Update: %v", err)
+	}
+
+	rec := webPostJSON(t, ChatWebAPISessionsRenamePath,
+		`{"session_id":"`+target.ID+`","title":"  新标题  "}`, HandleChatWebAPISessionsRename)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	got, err := session.SessionManager.Get(context.Background(), target.ID)
+	if err != nil {
+		t.Fatalf("manager.Get: %v", err)
+	}
+	if got.Metadata.Title != "新标题" {
+		t.Fatalf("title = %q, want 新标题 (trimmed)", got.Metadata.Title)
+	}
+}
+
+func TestHandleChatWebAPISessionsRename_CurrentSession(t *testing.T) {
+	session := newWebTestSessionWithManager(t)
+	withWebTestSession(t, session)
+	rec := webPostJSON(t, ChatWebAPISessionsRenamePath,
+		`{"session_id":"`+session.RuntimeSession.ID+`","title":"当前会话新名"}`,
+		HandleChatWebAPISessionsRename)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	// 内存中的 RuntimeSession 元数据标题应同步更新。
+	if session.RuntimeSession.Metadata.Title != "当前会话新名" {
+		t.Fatalf("in-memory title = %q, want 当前会话新名", session.RuntimeSession.Metadata.Title)
+	}
+	got, err := session.SessionManager.Get(context.Background(), session.RuntimeSession.ID)
+	if err != nil {
+		t.Fatalf("manager.Get: %v", err)
+	}
+	if got.Metadata.Title != "当前会话新名" {
+		t.Fatalf("stored title = %q, want 当前会话新名", got.Metadata.Title)
+	}
+}
