@@ -357,9 +357,21 @@ func HandleChatWebAPIInput(w http.ResponseWriter, r *http.Request) {
 		handleWebApproval(w, session, req.RequestID, req.Allow)
 	case "question_answer":
 		handleWebQuestionAnswer(w, session, req.QuestionID, req.Answer)
+	case "interrupt":
+		handleWebInterrupt(w, session)
 	default:
 		handleWebPrompt(w, session, req.Prompt)
 	}
+}
+
+// handleWebInterrupt 中断当前正在执行的 turn（§4.2.4 扩展）。
+//
+// 语义与终端运行期 Esc 一致，但走 ChatSession.Interrupt()（丢弃排队输入，
+// 由 Web 端停止按钮使用）：幂等，无运行中 turn 时也安全（仅置中断标记并
+// 触发一次清理，随后由前端收到的 session_interrupted/turn_end 事件复位）。
+func handleWebInterrupt(w http.ResponseWriter, session *ChatSession) {
+	session.Interrupt()
+	writeWebAPIJSON(w, http.StatusOK, map[string]string{"status": "interrupted"})
 }
 
 // handleWebPrompt 路由普通 prompt 到 InputQueue（§4.2.4 步骤 3-5）。

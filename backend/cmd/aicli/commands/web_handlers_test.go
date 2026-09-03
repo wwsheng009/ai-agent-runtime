@@ -374,6 +374,56 @@ func TestHandleChatWebAPIInput_QuestionNoActor(t *testing.T) {
 	}
 }
 
+func TestHandleChatWebAPIInput_Interrupt(t *testing.T) {
+	session := newWebTestSession()
+	withWebTestSession(t, session)
+
+	req := httptest.NewRequest(http.MethodPost, ChatWebAPIInputPath,
+		strings.NewReader(`{"type":"interrupt"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	HandleChatWebAPIInput(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response invalid: %v", err)
+	}
+	if resp["status"] != "interrupted" {
+		t.Fatalf("status = %q, want interrupted", resp["status"])
+	}
+	// 中断标记应已设置，且未向输入队列注入任何消息。
+	if !session.IsInterrupted() {
+		t.Fatalf("session interrupted flag not set")
+	}
+	if count, _ := queuedInteractiveInputState(session); count != 0 {
+		t.Fatalf("queued input count = %d, want 0 (interrupt must not enqueue)", count)
+	}
+	// 清理：避免中断清理协程影响后续测试。
+	session.ResetInterrupt()
+}
+
+func TestHandleChatWebAPIInput_InterruptNoSession(t *testing.T) {
+	withWebTestSession(t, nil)
+
+	req := httptest.NewRequest(http.MethodPost, ChatWebAPIInputPath,
+		strings.NewReader(`{"type":"interrupt"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	HandleChatWebAPIInput(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "no active chat session") {
+		t.Fatalf("body = %q, want no-active-session reason", rec.Body.String())
+	}
+}
+
 func TestHandleChatWebAPIInput_MethodNotAllowed(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, ChatWebAPIInputPath, nil)
 	rec := httptest.NewRecorder()

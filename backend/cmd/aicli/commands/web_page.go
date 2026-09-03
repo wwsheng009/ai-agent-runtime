@@ -94,6 +94,18 @@ const chatWebPageHTML = `<!DOCTYPE html>
   @keyframes tw-blink { 50% { opacity: 0; } }
   .stream-reasoning { color: #a89a6a; font-style: italic; }
   .stream-tool { color: #6aa0c0; }
+  /* ---- 按钮状态机 ---- */
+  button.stop-btn {
+    background: #5a1f1f; color: #ffb4a8;
+    border-color: #8a3a3a;
+  }
+  button.stop-btn:hover { background: #6a2f2f; }
+  button.sending-btn {
+    opacity: 0.6; cursor: not-allowed;
+  }
+  @keyframes pulse { 0% { opacity: 0.6; } 50% { opacity: 1; } 100% { opacity: 0.6; } }
+  button.sending-btn:not(.stop-btn) { animation: pulse 1.2s ease-in-out infinite; }
+
   #footer {
     margin-top: 8px; padding-top: 6px;
     border-top: 1px solid #2a3138;
@@ -272,6 +284,55 @@ const chatWebPageHTML = `<!DOCTYPE html>
   var streamMsgEl = null;            // 流式消息容器（screen 下方追加，信息流模式）
   var TYPE_SPEED = 20;               // 每字符间隔（毫秒），越小越快
   var TYPE_CHARS_PER_TICK = 1;       // 每 tick 揭示字符数
+
+  // ---- 发送/停止按钮状态机 ----
+  // idle        就绪：按钮为「发送」，输入为空时禁用
+  // posting     POST 已发出，等待队列确认：按钮为「发送中…」禁用（脉冲）
+  // busy        turn 正在执行：按钮变为「停止」（可点击中断）
+  // interrupting 停止信号已发出，等待会话复位：按钮为「正在停止…」禁用
+  var uiState = "idle";
+  var uiResetTimer = null; // interrupting 超时保护
+
+  // setUI 切换状态机并刷新按钮外观与禁用态。
+  function setUI(state, statusText) {
+    if (state !== "interrupting") { clearTimeout(uiResetTimer); }
+    uiState = state;
+    if (statusText !== undefined) { sendStatusEl.textContent = statusText; }
+    renderButton();
+    if (state === "interrupting") {
+      // 兜底：若 10s 内未收到 session_interrupted / turn_end 复位事件
+      //（SSE 断线 / 事件丢失 / 与 turn_end 竞态），强制回到 idle，
+      // 避免按钮永久卡在「正在停止…」。
+      uiResetTimer = setTimeout(function () {
+        if (uiState === "interrupting") { setUI("idle", "已停止"); }
+      }, 10000);
+    }
+  }
+
+  function renderButton() {
+    switch (uiState) {
+      case "posting":
+        sendBtn.textContent = "发送中…";
+        sendBtn.className = "sending-btn";
+        sendBtn.disabled = true;
+        break;
+      case "busy":
+        sendBtn.textContent = "停止";
+        sendBtn.className = "stop-btn";
+        sendBtn.disabled = false;
+        break;
+      case "interrupting":
+        sendBtn.textContent = "正在停止…";
+        sendBtn.className = "stop-btn sending-btn";
+        sendBtn.disabled = true;
+        break;
+      default: // idle
+        sendBtn.textContent = "发送";
+        sendBtn.className = "";
+        sendBtn.disabled = !promptEl.value.trim();
+        break;
+    }
+  }
 
   function startTypeTimer() {
     if (typeTimer) return;
@@ -504,8 +565,12 @@ const chatWebPageHTML = `<!DOCTYPE html>
     hideApproval();
   }
 
+  // sendInput POST /web/api/input；反馈按请求类型区分：
+  //   - prompt：queued 后停留在 posting，等待 SSE turn_start 进入 busy（按钮变「停止」）
+  //   - interrupt：收到 interrupted 即进入 interrupting，等待 session_interrupted 复位
+  //   - approval / question_answer：resolved 只做轻提示，按钮状态由 SSE 驱动
   function sendInput(payload) {
-    sendStatusEl.textContent = "发送中…";
+    var isInterrupt = payload && payload.type === "interrupt";
     fetch("/web/api/input", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -513,14 +578,41 @@ const chatWebPageHTML = `<!DOCTYPE html>
     })
       .then(function (res) { return res.json().catch(function () { return { status: "error", reason: "bad response" }; }); })
       .then(function (json) {
-        if (json.status === "queued" || json.status === "resolved") {
-          sendStatusEl.textContent = "已发送";
+        if (json.status === "queued") {
           promptEl.value = "";
+          if (uiState === "busy") {
+            // 执行中排队（Enter 键入下一条）：保持 busy，不改变按钮角色
+            sendStatusEl.textContent = "已排队，将在当前任务后执行…";
+          } else {
+            setUI("posting", "已排队，等待执行…");
+          }
+        } else if (json.status === "interrupted") {
+          // 竞态防御：turn_end 可能已先行到达（此时已是 idle）。
+          // 保持 idle 并给出提示，避免按钮退回「正在停止…」卡住。
+          if (uiState === "idle") {
+            sendStatusEl.textContent = "已停止";
+          } else {
+            setUI("interrupting", "正在停止…");
+          }
+        } else if (json.status === "resolved") {
+          sendStatusEl.textContent = "已提交";
         } else {
-          sendStatusEl.textContent = "失败: " + (json.reason || json.status);
+          if (uiState === "busy") {
+            sendStatusEl.textContent = "排队失败: " + (json.reason || json.status);
+          } else {
+            setUI("idle", "失败: " + (json.reason || json.status));
+          }
         }
       })
-      .catch(function (err) { sendStatusEl.textContent = "失败: " + err; });
+      .catch(function (err) {
+        if (isInterrupt) {
+          setUI("busy", "停止失败: " + err);
+        } else if (uiState === "busy") {
+          sendStatusEl.textContent = "发送失败: " + err;
+        } else {
+          setUI("idle", "发送失败: " + err);
+        }
+      });
   }
 
   // ---- 左侧会话列表：折叠/展开 ----
@@ -677,11 +769,19 @@ const chatWebPageHTML = `<!DOCTYPE html>
         setTurn(data.session_busy ? "忙碌 turn=" + (data.turn_id || "?") : "就绪");
         if (data.pending_approval) { showApproval(data.pending_approval); }
         if (data.pending_question) { showQuestion(data.pending_question); }
-        if (data.session_busy) { beginStream(); } else { refreshScreen(); }
+        if (data.session_busy) {
+          beginStream();
+          setUI("busy", "执行中…");
+        } else {
+          refreshScreen();
+          // 若正在等待自己刚发送的 prompt 的 turn_start，保持 posting
+          if (uiState !== "posting") { setUI("idle", ""); }
+        }
         loadSessions(); // 重连后刷新会话列表
         break;
       case "turn_start":
         setTurn("处理中 " + (data.model ? "(" + data.model + ")" : ""));
+        setUI("busy", "执行中…");
         beginStream();
         break;
       case "reasoning_delta":
@@ -716,6 +816,7 @@ const chatWebPageHTML = `<!DOCTYPE html>
         break;
       case "turn_end":
         setTurn("就绪");
+        setUI("idle", "");
         endStream();
         break;
       case "approval_requested":
@@ -731,13 +832,24 @@ const chatWebPageHTML = `<!DOCTYPE html>
       case "question_answered":
         hideApproval();
         break;
+      case "session_interrupted":
+        setUI("idle", "已停止");
+        setTurn("就绪");
+        loadSessions();
+        endStream();
+        refreshScreen();
+        break;
       case "session_start":
       case "session_end":
-      case "session_interrupted":
-        // 会话切换/结束：刷新会话列表（resume 后当前项高亮变化）
-        // 并刷新屏幕（原 default 分支行为）。
+        // 会话切换/结束：复位按钮、刷新会话列表与屏幕
+        setUI("idle", "");
         loadSessions();
-        if (!streamActive) { refreshScreen(); }
+        endStream();
+        refreshScreen();
+        break;
+      case "error":
+        setUI("idle", "发生错误");
+        refreshScreen();
         break;
       default:
         if (refreshKeys[eventName] && !streamActive) { refreshScreen(); }
@@ -783,25 +895,56 @@ const chatWebPageHTML = `<!DOCTYPE html>
   }
 
   sendBtn.addEventListener("click", function () {
+    // 状态机 dispatch
+    if (uiState === "busy") {
+      // 执行中：按钮变为「停止」→ 发中断信号
+      sendInput({ type: "interrupt" });
+      return;
+    }
+    if (uiState === "posting" || uiState === "interrupting") {
+      return; // 等待中，不重复触发
+    }
+    // idle 状态
     var text = promptEl.value.trim();
     if (!text) { return; }
     if (pendingQuestionID) {
-      // 有未回答的问题：输入框内容作为回答提交。
       if (!text) { sendStatusEl.textContent = "请输入回答"; return; }
       sendQuestionAnswer(text);
       promptEl.value = "";
       return;
     }
     if (approvalPanel.style.display === "block" && pendingApprovalRequestID) {
-      // 审批模式下普通发送被拒绝；必须用允许/拒绝按钮。
       sendStatusEl.textContent = "请使用允许/拒绝按钮";
       return;
     }
+    setUI("posting", "发送中…");
     sendInput({ prompt: text });
   });
 
+  promptEl.addEventListener("input", function () {
+    if (uiState === "idle") { renderButton(); }
+  });
+
   promptEl.addEventListener("keydown", function (e) {
-    if (e.key === "Enter") { sendBtn.click(); }
+    if (e.key !== "Enter") { return; }
+    if (uiState === "posting" || uiState === "interrupting") { return; }
+    if (uiState === "busy") {
+      // 执行中：Enter 排队下一条消息（不中断当前任务）；按钮点击才触发停止。
+      var text = promptEl.value.trim();
+      if (!text) { return; }
+      if (pendingQuestionID) {
+        sendQuestionAnswer(text);
+        promptEl.value = "";
+        return;
+      }
+      if (approvalPanel.style.display === "block" && pendingApprovalRequestID) {
+        sendStatusEl.textContent = "请使用允许/拒绝按钮";
+        return;
+      }
+      sendInput({ prompt: text });
+      return;
+    }
+    sendBtn.click();
   });
 
   approveBtn.addEventListener("click", function () {
@@ -844,6 +987,7 @@ const chatWebPageHTML = `<!DOCTYPE html>
   openEventSource();
   refreshScreen();
   loadSessions();
+  renderButton(); // 初始按钮状态（idle：输入为空时禁用）
 })();
 </script>
 </body>
