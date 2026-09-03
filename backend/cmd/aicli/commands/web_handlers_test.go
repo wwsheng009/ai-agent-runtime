@@ -101,11 +101,14 @@ func TestHandleChatWebPage(t *testing.T) {
 		t.Fatalf("Content-Type = %q, want text/html", ct)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "EventSource") {
-		t.Fatal("page body missing EventSource usage")
+	if !strings.Contains(body, "style.css") {
+		t.Fatal("page body missing style.css reference")
 	}
-	if !strings.Contains(body, "/web/api/events") || !strings.Contains(body, "/web/api/input") {
-		t.Fatal("page body missing endpoint references")
+	if !strings.Contains(body, "app.js") {
+		t.Fatal("page body missing app.js reference")
+	}
+	if !strings.Contains(body, "aicli micro web client") {
+		t.Fatal("page body missing title")
 	}
 }
 

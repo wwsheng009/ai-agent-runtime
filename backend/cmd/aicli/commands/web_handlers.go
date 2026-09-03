@@ -57,18 +57,6 @@ func writeWebAPIJSON(w http.ResponseWriter, statusCode int, data interface{}) {
 // HTTP 处理函数
 // ---------------------------------------------------------------------------
 
-// HandleChatWebPage 返回微型 Web 客户端页面（§4.2.1）。
-// 内嵌 HTML/CSS/JS 字符串，通过 chatWebPageHTML 常量提供。
-func HandleChatWebPage(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
-	_, _ = w.Write([]byte(chatWebPageHTML))
-}
-
 // HandleChatWebAPIScreen 返回当前屏幕合成帧（§4.2.2）。
 //   - ?format=text（默认）：纯文本面板内容
 //   - ?format=json：结构化 JSON 快照
@@ -904,4 +892,4 @@ func chatWebSSEExampleFor(busEvent string) string {
 	}
 }
 
-// chatWebPageHTML 定义于 web_page.go。
+// HandleChatWebPage 定义于 web_page.go（go:embed 嵌入 web/index.html）。

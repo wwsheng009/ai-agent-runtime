@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aicli micro web client</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>aicli micro web client</h1>
+  <button id="sidebar-toggle" type="button" title="折叠/展开会话列表">☰</button>
+  <span id="connection-status">connecting</span>
+  <span id="turn-status">-</span>
+</header>
+
+<div class="layout">
+  <aside id="sidebar">
+    <div class="sidebar-header">
+      <span class="sidebar-title">会话</span>
+      <select id="sessions-sort" title="会话排序方式">
+        <option value="created_at">创建时间</option>
+        <option value="updated_at">更新时间</option>
+      </select>
+      <button id="sessions-refresh-btn" type="button" title="刷新会话列表">⟳</button>
+      <button id="sidebar-collapse-btn" type="button" title="折叠会话列表">«</button>
+    </div>
+    <div id="session-list"><div class="session-empty">加载中…</div></div>
+  </aside>
+
+  <div id="main-col">
+    <div id="approval-panel">
+      <div id="approval-title">待处理请求</div>
+      <div id="approval-prompt" class="prompt"></div>
+      <div id="question-suggestions"></div>
+      <button id="approve-btn">允许</button>
+      <button id="deny-btn">拒绝</button>
+    </div>
+
+    <div class="tabs">
+      <button class="tab-btn active" id="tab-main-btn" type="button">对话</button>
+      <button class="tab-btn" id="tab-log-btn" type="button">日志</button>
+    </div>
+
+    <div id="tab-main" class="tab-panel active">
+      <div id="conversation">
+        <pre id="screen">(empty)</pre>
+        <div id="stream-msg"></div>
+      </div>
+      <div id="input-row">
+        <input id="prompt" type="text" placeholder="输入消息后回车发送…" autocomplete="off">
+        <button id="send-btn">发送</button>
+        <span id="send-status"></span>
+      </div>
+    </div>
+
+    <div id="tab-log" class="tab-panel">
+      <div id="log-toolbar">
+        <button id="log-clear-btn" type="button">清空</button>
+        <span id="log-count">0 条事件</span>
+      </div>
+      <div id="event-log"></div>
+    </div>
+  </div>
+</div>
+
+<div id="footer">
+  <span id="footer-endpoints"><a href="/debug/endpoints" target="_blank" rel="noopener">/debug/endpoints</a></span>
+  <span class="sep">|</span>
+  <span id="footer-web"><a href="/web/" target="_blank" rel="noopener">/web/</a></span>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
