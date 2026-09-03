@@ -201,6 +201,23 @@ func (b *chatRuntimeEventBridge) resetCanonicalHistoryProjectionLocked() {
 	b.sceneMu.Unlock()
 }
 
+// resetRenderPlaneForNewSession clears the bridge render data plane after /new
+// creates a fresh runtime session. Unlike replaceCanonicalHistoryProjection it
+// does not reseed anything: the new conversation starts with an empty Scene.
+// It mirrors replaceCanonicalHistoryProjection's guard and refuses to reset
+// while a model run is actively rendering into this bridge.
+func (b *chatRuntimeEventBridge) resetRenderPlaneForNewSession() {
+	if b == nil {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	if b.runActive {
+		return
+	}
+	b.resetCanonicalHistoryProjectionLocked()
+}
+
 func buildPersistedHistorySeedUnits(messages []runtimetypes.Message) []persistedHistorySeedUnit {
 	toolCalls := indexChatHistoryToolCalls(messages)
 	units := make([]persistedHistorySeedUnit, 0, len(messages))

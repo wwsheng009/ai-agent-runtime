@@ -194,6 +194,27 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 	return nil
 }
 
+// resetChatConversationRenderPlane clears both render data planes after a new
+// session is created:
+//   - bridge side: rebuilds renderEncoder/renderScene so sceneSnapshot() starts
+//     empty (web client fallback source when the unified renderer is disabled);
+//   - uiActor side: posts an empty ReplaceTranscriptAction so the semantic
+//     transcript (web client primary source) no longer contains previous cells.
+//
+// It is a no-op when the corresponding plane is absent or the bridge has an
+// active model run (matching replaceCanonicalHistoryProjection semantics).
+func resetChatConversationRenderPlane(session *ChatSession) {
+	if session == nil {
+		return
+	}
+	if b := session.RuntimeEventBridge; b != nil {
+		b.resetRenderPlaneForNewSession()
+	}
+	if session.Interaction != nil {
+		session.Interaction.resetTranscriptForNewSession()
+	}
+}
+
 // createNewRuntimeConversation builds a brand-new runtime session in memory.
 // The empty shell is not written to durable storage yet: the first real
 // conversation content (or an explicit /new hand-off) opens the session store.
@@ -265,6 +286,10 @@ func createNewRuntimeConversation(session *ChatSession, title string) error {
 	if session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
 	}
+	// /new 契约：新会话必须清空渲染数据面。旧会话的 cells 不得残留在
+	// uiActor 语义 transcript（micro web client screen snapshot 的第一数据源）
+	// 或 bridge Scene 快照中，否则 "已创建新会话" 信息块会与旧消息混排。
+	resetChatConversationRenderPlane(session)
 	return nil
 }
 

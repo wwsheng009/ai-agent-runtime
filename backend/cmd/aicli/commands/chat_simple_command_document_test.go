@@ -38,19 +38,12 @@ func TestDispatchChatCommandSimpleDocumentsStayOnUnifiedTerminalSession(t *testi
 	awaitUnifiedPresenterIdle(t, coordinator)
 	terminal.Reset()
 
-	commands := []string{
-		"/help",
-		"/function",
-		"/functions",
-		"/sessions",
-		"/new",
-		"/session",
-		"/history",
-	}
 	// stdout is process-global and other terminal-focused tests use asynchronous
 	// painters. Observe the owned renderers instead of capturing stdout, which
 	// would make unrelated ANSI paint traffic look like a command regression.
-	for _, command := range commands {
+	// /new 是会话边界：它必须清空渲染数据面，因此 /new 之前的简单命令文档
+	// 只在其前验证，/new 之后的文档在清空后的 transcript 上验证。
+	for _, command := range []string{"/help", "/function", "/functions", "/sessions"} {
 		if dispatchChatCommand(session, command, false) {
 			t.Fatalf("%s unexpectedly requested chat exit", command)
 		}
@@ -58,23 +51,58 @@ func TestDispatchChatCommandSimpleDocumentsStayOnUnifiedTerminalSession(t *testi
 
 	coordinator.waitUIActorIdle()
 	awaitUnifiedPresenterIdle(t, coordinator)
-	state := coordinator.uiActor.AppState()
-	var transcript strings.Builder
-	for _, cell := range state.Transcript.Cells {
-		transcript.WriteString(cell.Source)
-		transcript.WriteByte('\n')
+
+	commit := func() string {
+		var transcript strings.Builder
+		for _, cell := range coordinator.uiActor.AppState().Transcript.Cells {
+			transcript.WriteString(cell.Source)
+			transcript.WriteByte('\n')
+		}
+		return transcript.String()
 	}
+	transcript := commit()
 	for _, marker := range []string{
 		"可用命令:",
 		"错误: 需要指定 function 名称",
 		"错误: 需要提供 prompt 预览最终暴露集合",
 		"暂无可用会话",
+	} {
+		if !strings.Contains(transcript, marker) {
+			t.Fatalf("semantic transcript is missing %q after simple commands:\n%s", marker, transcript)
+		}
+	}
+
+	if dispatchChatCommand(session, "/new", false) {
+		t.Fatal("/new unexpectedly requested chat exit")
+	}
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+	transcript = commit()
+	if strings.Contains(transcript, "可用命令:") {
+		t.Fatalf("/new did not clear pre-new command documents from the render plane:\n%s", transcript)
+	}
+	for _, marker := range []string{
 		"已创建新会话",
+	} {
+		if !strings.Contains(transcript, marker) {
+			t.Fatalf("semantic transcript is missing %q after /new:\n%s", marker, transcript)
+		}
+	}
+
+	for _, command := range []string{"/session", "/history"} {
+		if dispatchChatCommand(session, command, false) {
+			t.Fatalf("%s unexpectedly requested chat exit", command)
+		}
+	}
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+	transcript = commit()
+	for _, marker := range []string{
 		"当前会话",
 		"当前会话暂无历史消息",
 	} {
-		if !strings.Contains(transcript.String(), marker) {
-			t.Fatalf("semantic transcript is missing %q:\n%s", marker, transcript.String())
+		if !strings.Contains(transcript, marker) {
+			t.Fatalf("semantic transcript is missing %q after /new:\n%s", marker, transcript)
 		}
 	}
 	if !strings.Contains(terminal.String(), "当前会话暂无历史消息") {

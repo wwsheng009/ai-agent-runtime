@@ -4171,6 +4171,18 @@ func (c *chatInteractionCoordinator) finalAssistantOverflowHintLocked(content st
 	return fmt.Sprintf("回复共 %d 行，超出屏幕可见区；完整内容已滚入终端滚动缓冲区，请向上滚动查看", rows)
 }
 
+// resetTranscriptForNewSession clears the uiActor semantic transcript so a
+// freshly created session (/new) does not inherit the previous conversation's
+// cells. It posts an empty Scene snapshot through the durable
+// ReplaceTranscript path; the follow-up command document then renders as the
+// first cell of the new conversation.
+func (c *chatInteractionCoordinator) resetTranscriptForNewSession() {
+	if c == nil || c.uiActor == nil {
+		return
+	}
+	c.uiActor.Post(ui.ReplaceTranscriptAction{Snapshot: &scene.Snapshot{}})
+}
+
 func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {
 	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput || strings.TrimSpace(input) == "" {
 		return
