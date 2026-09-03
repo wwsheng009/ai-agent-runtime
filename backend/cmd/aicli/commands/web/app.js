@@ -497,6 +497,15 @@ function startTypeTimer() {
   function chatMsgRowHtml(role, content, pending) {
     var label = MSG_LABELS[role] || "消息";
     var cls = "msg-row msg-" + role + (pending ? " msg-pending" : "");
+    if (role === "reasoning") {
+      // 推理过程：折叠面板（与流式渲染 #stream-msg .reasoning-block 视觉一致）
+      return '<div class="' + cls + '">' +
+        '<details class="reasoning-block">' +
+        '<summary>' + esc(label) + '</summary>' +
+        '<div class="reasoning-content">' + esc(content) + '</div>' +
+        '</details>' +
+        '</div>';
+    }
     return '<div class="' + cls + '">' +
       '<div class="msg-label">' + esc(label) + '</div>' +
       '<div class="msg-body">' + esc(content) + '</div>' +
@@ -1486,11 +1495,19 @@ function startTypeTimer() {
   if (screenCopyBtn) {
     screenCopyBtn.addEventListener("click", function () {
       var text = "";
-      var bodies = screenEl.querySelectorAll(".msg-row .msg-body");
-      if (bodies.length) {
+      var rows = screenEl.querySelectorAll(".msg-row");
+      if (rows.length) {
         var parts = [];
-        bodies.forEach(function (el) {
-          parts.push(el.textContent);
+        rows.forEach(function (row) {
+          // 推理内容在折叠面板内（.reasoning-content），加前缀保留语义；
+          // 其余角色取 .msg-body 正文。按 DOM 顺序（= 对话时序）收集。
+          var reasoningEl = row.querySelector(".reasoning-content");
+          if (reasoningEl) {
+            parts.push("[推理] " + reasoningEl.textContent);
+            return;
+          }
+          var bodyEl = row.querySelector(".msg-body");
+          if (bodyEl) { parts.push(bodyEl.textContent); }
         });
         text = parts.join("\n\n");
       } else {

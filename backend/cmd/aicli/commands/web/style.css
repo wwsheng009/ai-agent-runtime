@@ -176,30 +176,80 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
   border: 1px solid var(--border); border-bottom-left-radius: 2px;
   max-width: 92%;
 }
-/* 推理过程 / 工具 / 系统 / 命令 / 诊断：非气泡窄行，弱化呈现 */
-#screen .msg-row.msg-reasoning,
-#screen .msg-row.msg-tool,
-#screen .msg-row.msg-system,
-#screen .msg-row.msg-runtime,
-#screen .msg-row.msg-diagnostic,
-#screen .msg-row.msg-command {
-  align-items: flex-start;
+/* ---- 非气泡角色：各自专属样式（弱化但可区分） ---- */
+
+/* 推理过程：折叠面板（与流式渲染 #stream-msg .reasoning-block 同款） */
+#screen .msg-row.msg-reasoning { align-items: stretch; }
+#screen .msg-row.msg-reasoning .reasoning-block {
+  margin: 2px 0; border: 1px solid var(--reasoningBorder);
+  border-radius: 6px; background: var(--reasoningBg);
+  font-size: 12px; min-width: 0;
 }
-#screen .msg-row.msg-reasoning .msg-body {
-  color: var(--reasoningFg); background: var(--reasoningBg);
-  border: 1px dashed var(--reasoningBorder); font-size: 12px;
+#screen .msg-row.msg-reasoning .reasoning-block summary {
+  cursor: pointer; padding: 4px 8px;
+  color: var(--reasoningFg); font-style: italic;
+  user-select: none; list-style: none;
 }
-#screen .msg-row.msg-tool .msg-body,
-#screen .msg-row.msg-command .msg-body,
-#screen .msg-row.msg-runtime .msg-body,
+#screen .msg-row.msg-reasoning .reasoning-block summary::before { content: "▸ "; }
+#screen .msg-row.msg-reasoning .reasoning-block[open] summary::before { content: "▾ "; }
+#screen .msg-row.msg-reasoning .reasoning-block summary:hover { background: var(--reasoningHover); }
+#screen .msg-row.msg-reasoning .reasoning-content {
+  padding: 4px 10px 8px;
+  color: var(--reasoningFg); font-style: italic;
+  border-top: 1px dashed var(--reasoningBorder);
+  white-space: pre-wrap; word-break: break-word;
+}
+
+/* 工具：等宽 + 左侧 accent 竖条，带 ❯ 前缀 */
+#screen .msg-row.msg-tool { align-items: flex-start; }
+#screen .msg-row.msg-tool .msg-label { color: var(--toolFg); }
+#screen .msg-row.msg-tool .msg-label::before { content: "❯ "; }
+#screen .msg-row.msg-tool .msg-body {
+  color: var(--toolFg); background: var(--codeBg);
+  border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: 4px; font-size: 12px;
+  font-family: Consolas, "Cascadia Mono", "Courier New", monospace;
+}
+
+/* 命令：终端代码块样式（等宽、代码底色） */
+#screen .msg-row.msg-command { align-items: flex-start; }
+#screen .msg-row.msg-command .msg-label { color: var(--codeFg); }
+#screen .msg-row.msg-command .msg-label::before { content: "$ "; }
+#screen .msg-row.msg-command .msg-body {
+  color: var(--codeFg); background: var(--codeBg);
+  border: 1px solid var(--border); border-radius: 4px;
+  font-size: 12px;
+  font-family: Consolas, "Cascadia Mono", "Courier New", monospace;
+}
+
+/* 诊断：警示色块（红底红字虚线框） */
+#screen .msg-row.msg-diagnostic { align-items: flex-start; }
+#screen .msg-row.msg-diagnostic .msg-label { color: var(--red); }
+#screen .msg-row.msg-diagnostic .msg-label::before { content: "⚠ "; }
 #screen .msg-row.msg-diagnostic .msg-body {
-  color: var(--fg3); background: transparent;
-  border: 1px dashed var(--border); font-size: 12px;
-  font-family: inherit;
+  color: var(--red); background: var(--redBg);
+  border: 1px dashed var(--redBorder); border-radius: 4px;
+  font-size: 12px;
 }
+
+/* 运行时事件：点线分隔的弱化行 */
+#screen .msg-row.msg-runtime { align-items: flex-start; }
+#screen .msg-row.msg-runtime .msg-label { color: var(--fg4); }
+#screen .msg-row.msg-runtime .msg-label::before { content: "· "; }
+#screen .msg-row.msg-runtime .msg-body {
+  color: var(--fg4); background: transparent;
+  border-bottom: 1px dotted var(--border2);
+  border-radius: 0; padding: 2px 0; font-size: 11px;
+}
+
+/* 系统：居中胶囊提示条 */
+#screen .msg-row.msg-system { align-items: center; }
+#screen .msg-row.msg-system .msg-label { color: var(--fg4); }
 #screen .msg-row.msg-system .msg-body {
-  color: var(--fg4); font-size: 12px; font-style: italic;
-  border-left: 3px solid var(--border2); padding-left: 8px; background: transparent;
+  color: var(--fg4); background: var(--bg3);
+  border: 1px solid var(--border); border-radius: 999px;
+  padding: 2px 14px; font-size: 12px; font-style: italic;
+  text-align: center; max-width: 100%;
 }
 .tabs { display: flex; gap: 6px; margin-top: 8px; border-bottom: 1px solid var(--border); }
 .tab-btn {
