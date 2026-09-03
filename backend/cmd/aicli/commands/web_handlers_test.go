@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -534,6 +535,73 @@ func TestHandleChatWebAPIEvents_ForwardsBusEvents(t *testing.T) {
 	}
 	if !strings.Contains(body, `"model":"test-model"`) {
 		t.Fatalf("SSE turn_start missing model field: %q", body)
+	}
+}
+
+// TestHandleChatWebAPIEvents_ForwardsDynamicStatus 验证动态状态栏事件
+// （aicli.chat.dynamic_status → SSE dynamic_status）被映射转发，且 payload
+// 字段（active/text/role/interruptible/started_at/elapsed_ms）原样透传。
+func TestHandleChatWebAPIEvents_ForwardsDynamicStatus(t *testing.T) {
+	bus := runtimeevents.NewBus()
+	session := newWebTestSession()
+	session.RuntimeSession = &runtimechat.Session{ID: "session-sse-dyn"}
+	session.LocalRuntimeHost = &localChatRuntimeHost{EventBus: bus}
+	withWebTestSession(t, session)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, ChatWebAPIEventsPath, nil).WithContext(ctx)
+	rec := newSyncResponseRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		HandleChatWebAPIEvents(rec, req)
+	}()
+
+	payload := map[string]interface{}{
+		"active":        true,
+		"text":          "◦ Retrying step=1 sub.aiok.club / openai / deepseek-v4-flash attempt=1/10 reason=transport delay=972ms",
+		"role":          string(style.RoleWarning),
+		"interruptible": true,
+		"started_at":    "2026-09-03T10:00:00Z",
+		"elapsed_ms":    int64(972),
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		bus.Publish(runtimeevents.Event{
+			Type:      chatWebDynamicStatusBusEvent,
+			SessionID: "session-sse-dyn",
+			Payload:   payload,
+		})
+		if strings.Contains(rec.BodyString(), "event: dynamic_status") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("SSE handler did not exit after context cancel")
+	}
+
+	body := rec.BodyString()
+	if !strings.Contains(body, "event: dynamic_status") {
+		t.Fatalf("SSE body missing dynamic_status: %q", body)
+	}
+	for _, want := range []string{
+		`"active":true`,
+		`"text":"◦ Retrying step=1 sub.aiok.club / openai / deepseek-v4-flash attempt=1/10 reason=transport delay=972ms"`,
+		`"role":"Warning"`,
+		`"interruptible":true`,
+		`"started_at":"2026-09-03T10:00:00Z"`,
+		`"elapsed_ms":972`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("SSE dynamic_status missing %s: %q", want, body)
+		}
 	}
 }
 

@@ -320,6 +320,33 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
 }
 #question-suggestions .suggestion-btn:hover { background: var(--hoverBg); }
 
+/* ---- 动态状态栏（与 aicli chat 底部活动状态行同步显示） ---- */
+#dynamic-status {
+  display: flex; align-items: center; gap: 6px;
+  margin: 0 0 6px 0; padding: 5px 10px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
+  font-size: 12px; line-height: 1.4; color: var(--fg2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#dynamic-status::before {
+  content: "●"; font-size: 9px; color: var(--accent);
+  animation: ds-pulse 1.2s ease-in-out infinite;
+}
+@keyframes ds-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
+#dynamic-status.ds-warning { color: var(--red); }
+#dynamic-status.ds-warning::before { color: var(--red); }
+#dynamic-status.ds-reasoning { color: var(--reasoningFg); }
+#dynamic-status.ds-reasoning::before { color: var(--reasoningFg); }
+#dynamic-status.ds-tool { color: var(--toolFg); }
+#dynamic-status.ds-tool::before { color: var(--toolFg); }
+#dynamic-status.ds-progress { color: var(--accent2); }
+#dynamic-status.ds-progress::before { color: var(--accent2); }
+#dynamic-status.ds-success { color: var(--green); }
+#dynamic-status.ds-success::before { color: var(--green); }
+#dynamic-status.ds-approval { color: var(--reasoningFg); }
+#dynamic-status.ds-approval::before { color: var(--reasoningFg); }
+
 #input-row { display: flex; gap: 8px; }
 #prompt {
   flex: 1; padding: 8px 10px;

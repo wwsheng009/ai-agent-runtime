@@ -1279,6 +1279,41 @@ function startTypeTimer() {
 
   var refreshKeys = { "turn_end": 1, "tool_end": 1, "session_end": 1, "session_interrupted": 1, "error": 1, "screen_refresh": 1, "compact_end": 1 };
 
+  // ---- 动态状态栏（同步 aicli chat 底部活动状态行） ----
+  // dynamicStatus: { text, role, interruptible, startedAt }
+  // 由 SSE dynamic_status 事件驱动；时钟（"(1m 52s • esc to interrupt)"）由
+  // 前端基于 started_at 本地每秒推进，格式与 Go formatChatDynamicStatusElapsed
+  // 完全一致（Ns / Nm Ns / Nh Nm Ns）。
+  var dynamicStatus = null;
+
+  function fmtElapsed(ms) {
+    var seconds = Math.max(0, Math.floor(ms / 1000));
+    if (seconds < 60) { return seconds + "s"; }
+    var minutes = Math.floor(seconds / 60);
+    var rem = seconds % 60;
+    if (minutes < 60) { return minutes + "m " + rem + "s"; }
+    var hours = Math.floor(minutes / 60);
+    return hours + "h " + (minutes % 60) + "m " + rem + "s";
+  }
+
+  function renderDynamicStatus() {
+    var el = document.getElementById("dynamic-status");
+    if (!el) { return; }
+    if (!dynamicStatus || !dynamicStatus.text) {
+      el.style.display = "none";
+      el.textContent = "";
+      return;
+    }
+    var text = dynamicStatus.text;
+    if (dynamicStatus.startedAt) {
+      var elapsed = fmtElapsed(Date.now() - dynamicStatus.startedAt);
+      text = text + (dynamicStatus.interruptible ? " (" + elapsed + " • esc to interrupt)" : " (" + elapsed + ")");
+    }
+    el.textContent = text;
+    el.className = "dynamic-status ds-" + (dynamicStatus.role || "info").toLowerCase();
+    el.style.display = "flex";
+  }
+
   function onSSEEvent(eventName, data) {
     logEvent(eventName, data);
     lastSequence = (data && data._event && data._event.sequence) || lastSequence;
@@ -1287,6 +1322,8 @@ function startTypeTimer() {
       case "connected":
         setStatus(data.session_active ? "已连接" : "已连接(无会话)", true);
         setTurn(data.session_busy ? "忙碌 turn=" + (data.turn_id || "?") : "就绪");
+        dynamicStatus = null; // 重连后等待下一次状态事件，避免显示陈旧状态
+        renderDynamicStatus();
         if (data.pending_approval) { showApproval(data.pending_approval); }
         if (data.pending_question) { showQuestion(data.pending_question); }
         if (data.session_busy) {
@@ -1374,10 +1411,27 @@ function startTypeTimer() {
       case "session_end":
         // 会话切换/结束：复位按钮、刷新会话列表与屏幕
         setUI("idle", "");
+        dynamicStatus = null;
+        renderDynamicStatus();
         localPendingPrompts = []; // 旧会话的本地回显不带到新会话
         loadSessions();
         endStream();
         refreshScreen(true);
+        break;
+      case "dynamic_status":
+        // 动态状态栏：active=false 或空文本时清除；active=true 时显示并
+        // 以 started_at 为基准本地推进时钟（服务端只在状态变化时推送一次）。
+        if (data && data.active && data.text) {
+          dynamicStatus = {
+            text: data.text,
+            role: data.role || "info",
+            interruptible: !!data.interruptible,
+            startedAt: data.started_at ? new Date(data.started_at).getTime() : 0
+          };
+        } else {
+          dynamicStatus = null;
+        }
+        renderDynamicStatus();
         break;
       case "error":
         setUI("idle", "发生错误");
@@ -1405,7 +1459,7 @@ function startTypeTimer() {
     ["connected", "heartbeat", "screen_refresh", "turn_start", "turn_delta", "turn_end",
      "session_start", "session_end", "session_interrupted", "reasoning_delta",
      "assistant_delta", "assistant_image_progress", "tool_start", "tool_end", "approval_requested",
-     "approval_resolved", "question_asked", "question_answered"].forEach(function (name) {
+     "approval_resolved", "question_asked", "question_answered", "dynamic_status"].forEach(function (name) {
       es.addEventListener(name, function (e) {
         var data = {};
         try { data = JSON.parse(e.data); } catch (err) { /* ignore */ }
@@ -1730,4 +1784,9 @@ function startTypeTimer() {
   refreshScreen();
   loadSessions();
   renderButton(); // 初始按钮状态（idle：输入为空时禁用）
+  // 动态状态栏时钟：本地每秒推进 (N • esc to interrupt) 后缀；
+  // 无活动状态时渲染函数直接置空，成本可忽略。
+  setInterval(function () {
+    if (dynamicStatus) { renderDynamicStatus(); }
+  }, 1000);
 })();

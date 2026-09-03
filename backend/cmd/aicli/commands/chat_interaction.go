@@ -23,6 +23,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -817,6 +818,52 @@ func (c *chatInteractionCoordinator) updateSurfaceStatusLocked(s chatSurfaceStat
 		c.surface.SetSessionIDLine(buildChatSessionIDLine(c.session))
 		c.scheduleDynamicStatusTickLocked(now)
 	}
+	c.publishWebDynamicStatusLocked(s, now)
+}
+
+// publishWebDynamicStatusLocked 在 TUI 动态状态行变化（开始/切换/结束）时向
+// EventBus 发布 aicli.chat.dynamic_status 事件，web 客户端经 SSE 同步显示
+// 与 aicli chat 一致的活动状态行（如 "◦ Retrying step=1 … attempt=1/10 …"）。
+//
+// payload 约定（web_schema.go §5.1 映射 + 前端 app.js dynamic_status 处理）：
+//   - active:        bool，false 表示回到 idle，前端应清除状态行；
+//   - text:          状态行前置文本（不含 "(N • esc to interrupt)" 时钟后缀），
+//                    completed 终态时为 "Worked for …"；
+//   - role:          style.Role 语义（warning/reasoning/tool/progress/success…），
+//                    前端据此着色；
+//   - interruptible: bool，是否显示 "(N • esc to interrupt)"；
+//   - started_at:    RFC3339 起始时刻（非零时），前端本地每秒推进时钟；
+//   - elapsed_ms:    发布时刻已流逝毫秒（前端首帧对齐）。
+//
+// 时钟由 updateSurfaceStatusLocked 触发一次、前端本地推进，避免每秒占用
+// EventBus；idle（active=false）事件保证状态行及时清除。
+func (c *chatInteractionCoordinator) publishWebDynamicStatusLocked(s chatSurfaceStatus, now time.Time) {
+	if c == nil || c.session == nil || c.session.LocalRuntimeHost == nil || c.session.LocalRuntimeHost.EventBus == nil {
+		return
+	}
+	payload := map[string]interface{}{
+		"active": false,
+	}
+	if c.dynamicStatusCompleted {
+		payload["active"] = true
+		payload["text"] = "Worked for " + formatChatDynamicStatusElapsed(c.dynamicStatusElapsedLocked(now))
+		payload["role"] = string(style.RoleSuccess)
+	} else if action, role, interruptible := chatDynamicStatusAction(s, c.inputMode); action != "" {
+		payload["active"] = true
+		payload["text"] = "◦ " + action
+		payload["role"] = string(role)
+		payload["interruptible"] = interruptible
+		if !c.dynamicStatusStarted.IsZero() {
+			payload["started_at"] = c.dynamicStatusStarted.UTC().Format(time.RFC3339)
+		}
+		payload["elapsed_ms"] = c.dynamicStatusElapsedLocked(now).Milliseconds()
+	}
+	c.session.LocalRuntimeHost.EventBus.Publish(runtimeevents.Event{
+		Type:      chatWebDynamicStatusBusEvent,
+		SessionID: chatDebugSessionID(c.session),
+		Timestamp: now.UTC(),
+		Payload:   payload,
+	})
 }
 
 func cloneChatStatusLineModel(model style.StatusLineModel) style.StatusLineModel {

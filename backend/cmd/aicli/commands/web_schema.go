@@ -31,6 +31,12 @@ const (
 // chatWebSchemaVersion 是 SSE 事件 data 中 _event.schema_version 字段的值。
 const chatWebSchemaVersion = "skill_runtime.sse.v1"
 
+// chatWebDynamicStatusBusEvent 是动态状态栏更新事件的 EventBus 类型名：
+// chatInteractionCoordinator 在 TUI 动态状态行变化（开始/切换/结束）时发布，
+// 经 chatWebSSEMappings 映射为 SSE "dynamic_status" 事件，web 客户端据此
+// 同步显示 aicli chat 底部的活动状态行（Retrying / Analyzing / Running …）。
+const chatWebDynamicStatusBusEvent = "aicli.chat.dynamic_status"
+
 // ---------------------------------------------------------------------------
 // EventBus → SSE 事件名称映射（§5.1）
 // ---------------------------------------------------------------------------
@@ -78,6 +84,7 @@ var chatWebSSEMappings = []chatWebSSEMapping{
 	{BusEvent: runtimechat.EventJobCancelled, SSEEvent: "job_cancelled", Desc: "Job 取消"},
 	{BusEvent: runtimechat.EventMailboxReceived, SSEEvent: "mailbox_received", Desc: "邮箱消息"},
 	{BusEvent: runtimechat.EventContextReconciled, SSEEvent: "context_reconciled", Desc: "上下文调和"},
+	{BusEvent: chatWebDynamicStatusBusEvent, SSEEvent: "dynamic_status", Desc: "动态状态栏更新（Retrying/Analyzing/Running…）"},
 }
 
 // chatWebSSEEventName 将 EventBus 事件类型映射为 SSE event 名称。
