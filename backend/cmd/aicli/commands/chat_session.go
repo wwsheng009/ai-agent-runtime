@@ -326,7 +326,7 @@ func loadRuntimeConversation(session *ChatSession, sessionID string) error {
 		return err
 	}
 	ensureChatSystemPromptMessage(session)
-	if err := syncRuntimeSessionFromChat(session); err != nil {
+	if err := syncRuntimeSessionFromChatPreservingUpdatedAt(session); err != nil {
 		return err
 	}
 	// Phase 1: 恢复后回放 canonical 完整转录（session_messages），而不是
@@ -401,7 +401,7 @@ func resumeLatestRuntimeConversation(session *ChatSession) error {
 		return err
 	}
 	ensureChatSystemPromptMessage(session)
-	return syncRuntimeSessionFromChat(session)
+	return syncRuntimeSessionFromChatPreservingUpdatedAt(session)
 }
 
 // loadLatestResumableRuntimeSession returns the newest session that actually contains
@@ -482,6 +482,17 @@ func shouldSkipRuntimeResumeSession(session *runtimechat.Session, excludedSessio
 }
 
 func syncRuntimeSessionFromChat(session *ChatSession) error {
+	return syncRuntimeSessionFromChatMode(session, false)
+}
+
+// syncRuntimeSessionFromChatPreservingUpdatedAt 与 syncRuntimeSessionFromChat
+// 相同，但不会推进会话的 UpdatedAt：/resume、/load 只是切换查看目标，
+// 不应把"最后更新时间"顶到当前，导致按更新时间排序时列表跳动。
+func syncRuntimeSessionFromChatPreservingUpdatedAt(session *ChatSession) error {
+	return syncRuntimeSessionFromChatMode(session, true)
+}
+
+func syncRuntimeSessionFromChatMode(session *ChatSession, preserveUpdatedAt bool) error {
 	if session == nil || session.SessionManager == nil || session.RuntimeSession == nil {
 		return nil
 	}
@@ -489,6 +500,9 @@ func syncRuntimeSessionFromChat(session *ChatSession) error {
 	runtimeSession := session.RuntimeSession.CloneWithoutHistory()
 	if runtimeSession == nil {
 		return runtimechat.ErrInvalidSession
+	}
+	if preserveUpdatedAt {
+		runtimeSession.PreserveUpdatedAt = true
 	}
 	runtimeSession.ReplaceHistory(session.Messages)
 	runtimeSession.MarkActive()
@@ -587,6 +601,9 @@ func syncRuntimeSessionFromChat(session *ChatSession) error {
 	// well so a long-running process does not retain every previous turn.
 	session.Messages = runtimeSession.History
 	session.StatusMessageCount = countChatStatusMessages(session.Messages)
+	// 瞬态标志只服务于本次持久化，落库后必须清除，避免后续普通 sync
+	// 克隆时把"保留 UpdatedAt"语义带进正常更新流程。
+	runtimeSession.PreserveUpdatedAt = false
 	session.RuntimeSession = runtimeSession
 	updateChatRuntimeEventBridgePrimarySession(session)
 	return nil

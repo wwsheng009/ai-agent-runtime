@@ -6,10 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
-	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // TestChatDebugScreenSnapshotNoSession 验证无会话时快照返回 available=false。
@@ -336,5 +337,64 @@ func TestMarshalChatDebugScreenJSON(t *testing.T) {
 	}
 	if h, ok := parsed["height"]; !ok || h.(float64) != 24 {
 		t.Fatalf("height 应为 24，实际为 %v", h)
+	}
+}
+
+// TestChatDebugScreenSessionTranscriptFallback 复现 Win7 降级形态下点击会话
+// 后的场景：无 surface、无 uiActor（unifiedRenderer 未启用）、无 bridge
+// Scene（历史消息不重放 live events）。resume 后历史消息只存在于
+// session.Messages / RuntimeSession.History，屏幕镜像必须直接从会话
+// transcript 兜底派生，否则 web 页面无法加载历史消息。
+func TestChatDebugScreenSessionTranscriptFallback(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	session := &ChatSession{
+		Messages: []types.Message{
+			{Role: "user", Content: "你好"},
+			{Role: "assistant", Content: "你好！我是助手。"},
+			{Role: "tool", Content: "tool-call-result"},
+			{Role: "system", Content: "system-note"},
+			{Role: "assistant", Content: "  "},
+		},
+	}
+
+	old := chatDebugDisplaySessionProvider
+	chatDebugDisplaySessionProvider = func() *ChatSession { return session }
+	defer func() { chatDebugDisplaySessionProvider = old }()
+
+	snap := BuildChatDebugScreenSnapshot()
+	if !snap.Available {
+		t.Fatalf("仅会话 transcript 有内容时应 available=true，reason=%q", snap.Reason)
+	}
+	for _, want := range []string{"user> 你好", "你好！我是助手。", "[tool] tool-call-result", "[system] system-note"} {
+		if !strings.Contains(snap.Text, want) {
+			t.Fatalf("screen 文本应包含 %q，实际为 %q", want, snap.Text)
+		}
+	}
+
+	// RuntimeSession.History 兜底路径。
+	session.Messages = nil
+	session.RuntimeSession = &runtimechat.Session{
+		History: []types.Message{
+			{Role: "user", Content: "history-question"},
+			{Role: "assistant", Content: "history-answer"},
+		},
+	}
+	snap = BuildChatDebugScreenSnapshot()
+	if !snap.Available {
+		t.Fatalf("RuntimeSession.History 有内容时应 available=true，reason=%q", snap.Reason)
+	}
+	if !strings.Contains(snap.Text, "history-question") || !strings.Contains(snap.Text, "history-answer") {
+		t.Fatalf("screen 文本应包含 RuntimeSession.History 内容，实际为 %q", snap.Text)
+	}
+
+	// 全空：应回退到 "no active terminal surface" 死信号。
+	session.RuntimeSession = nil
+	snap = BuildChatDebugScreenSnapshot()
+	if snap.Available {
+		t.Fatal("会话内容为空且无 surface 时应 available=false")
+	}
+	if snap.Reason != "no active terminal surface" {
+		t.Fatalf("空会话 reason 应为 no active terminal surface，实际为 %q", snap.Reason)
 	}
 }

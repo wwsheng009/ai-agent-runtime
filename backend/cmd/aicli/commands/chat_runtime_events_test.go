@@ -4358,7 +4358,11 @@ func TestChatRuntimeEvents_IdentitylessPrimaryEventCannotMutateIdentifiedRun(t *
 			"required":    true,
 		},
 	})
-	require.Zero(t, questionCalls)
+	// 阻塞型交互事件（question/approval）不因 turn 不匹配而被丢弃：actor
+	// 同步等待回答，丢弃会导致运行卡死（见 shouldSuppressMismatchedPrimaryTurnEvent
+	// 的豁免逻辑与 TestChatRuntimeEventBridge_BlockingInteractiveEventsSurviveTurnMismatch）。
+	// turn 归属过滤只适用于非阻塞渲染事件（如上方的 tool.requested 断言）。
+	require.Equal(t, 1, questionCalls)
 }
 
 func TestChatRuntimeEvents_FinalCommitUsesTurnIdentityNotContentDigest(t *testing.T) {

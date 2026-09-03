@@ -1,2 +1,0 @@
-This placeholder keeps the embedded web UI package buildable before the frontend is generated.
-The packaging script populates this directory from frontend/dist.

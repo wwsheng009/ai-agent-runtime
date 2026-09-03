@@ -592,7 +592,9 @@ func (s *SQLiteSessionStorage) Save(ctx context.Context, session *Session) error
 	if session.CreatedAt.IsZero() {
 		session.CreatedAt = time.Now()
 	}
-	session.UpdatedAt = time.Now()
+	if !session.PreserveUpdatedAt {
+		session.UpdatedAt = time.Now()
+	}
 
 	ctx, tx, tracker, err := s.beginWriteTx(ctx)
 	if err != nil {
@@ -758,7 +760,9 @@ func (s *SQLiteSessionStorage) updateSessionTx(ctx context.Context, tx *sql.Tx, 
 	}
 	session.CanonicalMessageCount = count
 	session.Metadata.TotalTurns = count
-	session.UpdatedAt = time.Now()
+	if !session.PreserveUpdatedAt {
+		session.UpdatedAt = time.Now()
+	}
 	return s.upsertSessionMetadataTx(ctx, tx, session, count)
 }
 

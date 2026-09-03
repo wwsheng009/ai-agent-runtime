@@ -52,7 +52,10 @@ func BuildChatDebugScreenSnapshot() *chatDebugScreenSnapshot {
 	//   - 第三优先：runtime event bridge 的 Scene 快照（任何启动形态都会构建，
 	//     包括 Win7 无 ANSI 控制台 / headless / 后台服务；uiActor 同步被
 	//     UnifiedRendererEnabled 门控，bridge Scene 不依赖该门控）
-	// 三者都空时才落到 "no active terminal surface" 死信号。
+	//   - 第四优先：会话自身 transcript（session.Messages / RuntimeSession.History，
+	//     点击会话后历史消息未注入 bridge 时仍可直接派生，Win7 降级形态下
+	//     bridge Scene 只覆盖 live events，历史不重放）
+	// 四者都空时才落到 "no active terminal surface" 死信号。
 	if session.Interaction != nil && session.Interaction.uiActor != nil {
 		state := session.Interaction.uiActor.AppState()
 		layout := ui.ComposeAppTextLayout(state)
@@ -93,6 +96,16 @@ func BuildChatDebugScreenSnapshot() *chatDebugScreenSnapshot {
 			}
 		}
 	}
+	// 会话 transcript 兜底：bridge Scene 由 live events 构建，resume 加载的
+	// 历史消息不会重放进 bridge。Win7 降级 / headless 无 surface 时，这是
+	// 点击会话后仍能展示历史消息的唯一可靠来源；回退到 Surface 之前处理，
+	// 避免 Surface == nil 时整个会话内容被丢弃。
+	if lines := sessionTranscriptFallbackLines(session); len(lines) > 0 {
+		snap.Available = true
+		snap.Lines = lines
+		snap.Text = strings.Join(lines, "\n")
+		return snap
+	}
 	if session.Surface == nil {
 		snap.Available = false
 		snap.Reason = "no active terminal surface"
@@ -122,6 +135,47 @@ func BuildChatDebugScreenSnapshot() *chatDebugScreenSnapshot {
 	snap.Lines = lines
 	snap.Text = strings.Join(lines, "\n")
 	return snap
+}
+
+// sessionTranscriptFallbackLines 直接从会话 transcript（session.Messages /
+// session.RuntimeSession.History）派生纯文本行，不依赖 surface / uiActor /
+// bridge Scene。适用于无 surface 形态（Win7 降级 / headless）点击会话后
+// 历史消息未注入 bridge 的场景；与 transcriptFallbackCells 的输出格式保持
+// 一致（user>/[system]/[tool] 前缀，正文直出）。
+func sessionTranscriptFallbackLines(session *ChatSession) []string {
+	if session == nil {
+		return nil
+	}
+	messages := session.Messages
+	if len(messages) == 0 && session.RuntimeSession != nil {
+		messages = session.RuntimeSession.History
+	}
+	if len(messages) == 0 {
+		return nil
+	}
+	lines := make([]string, 0, len(messages)*2)
+	for i := range messages {
+		msg := &messages[i]
+		text := strings.TrimSpace(msg.Content)
+		if text == "" {
+			continue
+		}
+		switch msg.Role {
+		case "user":
+			lines = append(lines, "user> "+text)
+		case "system":
+			lines = append(lines, "[system] "+text)
+		case "tool":
+			lines = append(lines, "[tool] "+text)
+		default:
+			// assistant / developer / 其他：正文直出。
+			lines = append(lines, text)
+		}
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	return lines
 }
 
 // transcriptFallbackCells 从语义 transcript cells 派生纯文本行。

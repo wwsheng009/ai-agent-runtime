@@ -410,7 +410,9 @@ func (m *SessionManager) ClearHistory(ctx context.Context, sessionID string) err
 	}
 
 	session.ClearHistory()
-	session.UpdatedAt = time.Now()
+	if !session.PreserveUpdatedAt {
+		session.UpdatedAt = time.Now()
+	}
 
 	return m.storage.Update(ctx, session)
 }

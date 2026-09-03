@@ -64,7 +64,10 @@ func (s *FileStorage) Save(ctx context.Context, session *Session) error {
 	if stored.CreatedAt.IsZero() {
 		stored.CreatedAt = time.Now()
 	}
-	stored.UpdatedAt = time.Now()
+	if !stored.PreserveUpdatedAt {
+		stored.UpdatedAt = time.Now()
+	}
+	stored.PreserveUpdatedAt = false
 
 	return s.writeSessionLocked(stored)
 }
@@ -208,7 +211,10 @@ func (s *FileStorage) Update(ctx context.Context, session *Session) error {
 	if stored == nil {
 		return ErrInvalidSession
 	}
-	stored.UpdatedAt = time.Now()
+	if !stored.PreserveUpdatedAt {
+		stored.UpdatedAt = time.Now()
+	}
+	stored.PreserveUpdatedAt = false
 	return s.writeSessionLocked(stored)
 }
 

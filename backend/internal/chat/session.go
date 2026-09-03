@@ -65,6 +65,12 @@ type Session struct {
 	UpdatedAt             time.Time       `json:"updatedAt" yaml:"updatedAt"`
 	ExpiresAt             *time.Time      `json:"expiresAt,omitempty" yaml:"expiresAt,omitempty"`
 
+	// PreserveUpdatedAt 是瞬态标志（不持久化）：置为 true 时，本会话的
+	// UpdatedAt 不会被各 mutator 和存储层 Save/Update 强制刷新。
+	// 仅用于"纯切换/恢复"路径（如 /resume、/load），避免仅仅查看一个会话
+	// 就把它的"最近更新时间"顶到当前，导致排序位置跳动。
+	PreserveUpdatedAt bool `json:"-" yaml:"-"`
+
 	// HistoryLoaded distinguishes a metadata-only listing result from an
 	// intentionally empty prompt projection. It is never serialized.
 	HistoryLoaded bool `json:"-" yaml:"-"`
@@ -126,7 +132,9 @@ func (s *Session) AddMessage(msg types.Message) {
 			s.HeadOffset = len(s.History)
 		}
 	}
-	s.UpdatedAt = time.Now()
+	if !s.PreserveUpdatedAt {
+		s.UpdatedAt = time.Now()
+	}
 
 	// 更新元数据
 	s.updateMetadata(msg)
@@ -157,7 +165,9 @@ func (s *Session) ClearHistory() {
 	s.HeadOffset = 0
 	s.CanonicalMessageCount = 0
 	s.HistoryLoaded = true
-	s.UpdatedAt = time.Now()
+	if !s.PreserveUpdatedAt {
+		s.UpdatedAt = time.Now()
+	}
 	s.Metadata.TotalTurns = 0
 	s.Metadata.Summary = ""
 }
@@ -185,7 +195,9 @@ func (s *Session) ReplaceHistory(messages []types.Message) {
 			s.HeadOffset = len(s.History)
 		}
 	}
-	s.UpdatedAt = time.Now()
+	if !s.PreserveUpdatedAt {
+		s.UpdatedAt = time.Now()
+	}
 	s.refreshDerivedMetadata()
 }
 
@@ -206,7 +218,9 @@ func (s *Session) AddTag(tag string) {
 		}
 	}
 	s.Metadata.Tags = append(s.Metadata.Tags, tag)
-	s.UpdatedAt = time.Now()
+	if !s.PreserveUpdatedAt {
+		s.UpdatedAt = time.Now()
+	}
 }
 
 // AddTags 添加多个标签
@@ -235,14 +249,18 @@ func (s *Session) RemoveTag(tag string) {
 		}
 	}
 	s.Metadata.Tags = tags
-	s.UpdatedAt = time.Now()
+	if !s.PreserveUpdatedAt {
+		s.UpdatedAt = time.Now()
+	}
 }
 
 // SetTTL 设置会话生存时间
 func (s *Session) SetTTL(ttl time.Duration) {
 	expiresAt := time.Now().Add(ttl)
 	s.ExpiresAt = &expiresAt
-	s.UpdatedAt = time.Now()
+	if !s.PreserveUpdatedAt {
+		s.UpdatedAt = time.Now()
+	}
 }
 
 // SetContext 设置上下文
@@ -251,7 +269,9 @@ func (s *Session) SetContext(key string, value interface{}) {
 		s.Metadata.Context = make(map[string]interface{})
 	}
 	s.Metadata.Context[key] = value
-	s.UpdatedAt = time.Now()
+	if !s.PreserveUpdatedAt {
+		s.UpdatedAt = time.Now()
+	}
 }
 
 // GetContext 获取上下文
@@ -266,7 +286,9 @@ func (s *Session) GetContext(key string) (interface{}, bool) {
 // UpdateState 更新会话状态
 func (s *Session) UpdateState(state SessionState) {
 	s.State = state
-	s.UpdatedAt = time.Now()
+	if !s.PreserveUpdatedAt {
+		s.UpdatedAt = time.Now()
+	}
 
 	// 如果关闭或归档，设置过期时间
 	if state == StateClosed || state == StateArchived {
@@ -292,7 +314,9 @@ func (s *Session) IsActive() bool {
 func (s *Session) UpdateTitle(title string) {
 	s.Metadata.Title = strings.TrimSpace(title)
 	s.Metadata.TitleSource = sessionTitleSourceManual
-	s.UpdatedAt = time.Now()
+	if !s.PreserveUpdatedAt {
+		s.UpdatedAt = time.Now()
+	}
 }
 
 // CompactRootTitleCandidate returns the title that multi-round compact should
@@ -375,7 +399,9 @@ func (s *Session) ApplyCompactTitleLineage(parentSessionID, rootTitleHint string
 	s.SetContext(ContextCompactParentSessionID, parentSessionID)
 	s.SetContext(ContextCompactSourceSessionID, parentSessionID)
 	s.SetContext(ContextCompactGeneration, generation)
-	s.UpdatedAt = time.Now()
+	if !s.PreserveUpdatedAt {
+		s.UpdatedAt = time.Now()
+	}
 }
 
 // repairCompactTitleMarker strips a legacy " · compact #N" marker from a title
@@ -683,6 +709,7 @@ func (s *Session) CloneWithoutHistory() *Session {
 		CreatedAt:             s.CreatedAt,
 		UpdatedAt:             s.UpdatedAt,
 		ExpiresAt:             expiresAt,
+		PreserveUpdatedAt:     s.PreserveUpdatedAt,
 		HistoryLoaded:         false,
 	}
 
@@ -966,7 +993,9 @@ func (s *Session) SetHeadOffset(offset int) {
 		offset = len(s.History)
 	}
 	s.HeadOffset = offset
-	s.UpdatedAt = time.Now()
+	if !s.PreserveUpdatedAt {
+		s.UpdatedAt = time.Now()
+	}
 	s.refreshDerivedMetadata()
 }
 

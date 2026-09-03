@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -487,7 +488,7 @@ type chatWebSessionListItem struct {
 	Current      bool      `json:"current,omitempty"`
 }
 
-// HandleChatWebAPISessions 返回可恢复的历史会话列表（含当前会话，置顶标记）。
+// HandleChatWebAPISessions 返回可恢复的历史会话列表（含当前会话，带 current 标记）。
 //
 // 响应结构：
 //
@@ -496,8 +497,10 @@ type chatWebSessionListItem struct {
 //	  "current_session_id": "<当前会话 ID，无会话时为空>"
 //	}
 //
-// 列表顺序：当前会话在前，其余按 UpdatedAt 新近度降序。列表项来自
-// listResumeCandidateChatSessions（已排除当前会话并过滤无对话的空会话），
+// 列表顺序按 sort 参数决定：
+//   - ?sort=created_at（默认）→ 按 CreatedAt 降序，当前会话带 current 标记但不置顶
+//   - ?sort=updated_at      → 按 UpdatedAt 降序
+// 列表项来自 listResumeCandidateChatSessions（已排除当前会话并过滤无对话的空会话），
 // 与 TTY /resume 选择器的候选集一致。
 func HandleChatWebAPISessions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -542,6 +545,20 @@ func HandleChatWebAPISessions(w http.ResponseWriter, r *http.Request) {
 		}
 		items = append(items, buildChatWebSessionListItem(candidate, false))
 	}
+
+	// 解析排序参数，默认按创建时间降序。
+	sortByUpdatedAt := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sort"))) == "updated_at"
+	sort.SliceStable(items, func(i, j int) bool {
+		left, right := items[i], items[j]
+		lt, rt := left.CreatedAt, right.CreatedAt
+		if sortByUpdatedAt {
+			lt, rt = left.UpdatedAt, right.UpdatedAt
+		}
+		if !lt.Equal(rt) {
+			return lt.After(rt)
+		}
+		return strings.TrimSpace(left.ID) < strings.TrimSpace(right.ID)
+	})
 
 	writeWebAPIJSON(w, http.StatusOK, map[string]interface{}{
 		"sessions":           items,

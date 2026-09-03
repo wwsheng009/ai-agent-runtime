@@ -12,6 +12,7 @@ import (
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // ---------------------------------------------------------------------------
@@ -749,6 +750,106 @@ func newWebTestSessionWithManager(t *testing.T) *ChatSession {
 	session.SessionUserID = "test-user"
 	session.RuntimeSession = runtimeSession
 	return session
+}
+
+func TestHandleChatWebAPISessions_OrderingCurrentNotPinned(t *testing.T) {
+	// 排序语义：
+	//   - 默认（无 sort 参数）与 ?sort=created_at：按创建时间降序
+	//   - ?sort=updated_at：按更新时间降序
+	// 两种模式下当前会话都不置顶（带 current 标记但不排第一）。
+	// 构造 CreatedAt 与 UpdatedAt 顺序不同的会话（oldest 最后再 Save 一次），
+	// 使两种排序产生不同结果，验证排序参数真实生效。
+	storage := runtimechat.NewInMemoryStorage()
+	manager := runtimechat.NewSessionManager(storage, nil)
+	t.Cleanup(manager.Stop)
+
+	ctx := context.Background()
+	mk := func(title string) *runtimechat.Session {
+		t.Helper()
+		s, err := manager.Create(ctx, "test-user")
+		if err != nil {
+			t.Fatalf("manager.Create: %v", err)
+		}
+		s.Metadata.Title = title
+		s.AddMessage(*runtimetypes.NewUserMessage("conversation seed"))
+		if err := storage.Save(ctx, s); err != nil {
+			t.Fatalf("storage.Save: %v", err)
+		}
+		time.Sleep(2 * time.Millisecond) // 保证下一个 Create/Save 的时间戳严格更新
+		return s
+	}
+
+	oldestCreated := mk("oldest-created") // CreatedAt 最旧
+	current := mk("current-mid")          // 创建于中间，设为当前会话
+	newestCreated := mk("newest-created") // CreatedAt 最新
+	time.Sleep(2 * time.Millisecond)
+	// 再 Save 一次 oldestCreated：其 UpdatedAt 变成最新，与 CreatedAt 顺序相反。
+	if err := storage.Save(ctx, oldestCreated); err != nil {
+		t.Fatalf("storage.Save(oldestCreated): %v", err)
+	}
+
+	session := newWebTestSession()
+	session.SessionManager = manager
+	session.SessionUserID = "test-user"
+	session.RuntimeSession = current
+	withWebTestSession(t, session)
+
+	fetchOrder := func(sortParam string) ([]string, string) {
+		t.Helper()
+		target := ChatWebAPISessionsPath
+		if sortParam != "" {
+			target += "?sort=" + sortParam
+		}
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		rec := httptest.NewRecorder()
+		HandleChatWebAPISessions(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		var body struct {
+			Sessions []chatWebSessionListItem `json:"sessions"`
+			Current  string                   `json:"current_session_id"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if len(body.Sessions) != 3 {
+			t.Fatalf("sessions len = %d, want 3", len(body.Sessions))
+		}
+		if body.Current != current.ID {
+			t.Fatalf("current_session_id = %q, want %q", body.Current, current.ID)
+		}
+		gotIDs := make([]string, 0, len(body.Sessions))
+		var gotCurrent string
+		for _, item := range body.Sessions {
+			gotIDs = append(gotIDs, item.ID)
+			if item.Current {
+				gotCurrent = item.ID
+			}
+		}
+		return gotIDs, gotCurrent
+	}
+
+	assertOrder := func(sortParam string, wantOrder []string) {
+		t.Helper()
+		gotIDs, gotCurrent := fetchOrder(sortParam)
+		for i, want := range wantOrder {
+			if gotIDs[i] != want {
+				t.Fatalf("sort=%q order[%d] = %q, want %q (full: %v)", sortParam, i, gotIDs[i], want, gotIDs)
+			}
+		}
+		if gotCurrent != current.ID {
+			t.Fatalf("sort=%q current flag on %q, want %q", sortParam, gotCurrent, current.ID)
+		}
+	}
+
+	// 创建时间降序：newest > current > oldest；当前会话（中间创建）不置顶。
+	createdOrder := []string{newestCreated.ID, current.ID, oldestCreated.ID}
+	assertOrder("", createdOrder)
+	assertOrder("created_at", createdOrder)
+	// 更新时间降序：oldestCreated（最后 Save）> newest > current。
+	assertOrder("updated_at", []string{oldestCreated.ID, newestCreated.ID, current.ID})
 }
 
 func TestHandleChatWebAPISessions_WithManager(t *testing.T) {

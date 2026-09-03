@@ -1104,3 +1104,74 @@ func withTransientStdio(t *testing.T, input string) func() {
 		_ = stdoutWrite.Close()
 	}
 }
+
+func TestChatInputQueue_PriorityReadWakesOnResolvedElsewhere(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.setExternalInputCaptureActive(true)
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := queue.readPriorityLineWithPrompt(context.Background(), "[question] path: ")
+		result <- err
+	}()
+	requireEventuallyPriorityMode(t, queue)
+
+	// 阻塞读取期间，另一入口（web client）解决了答案：哨兵必须唤醒读取。
+	queue.signalPriorityReadResolvedElsewhere()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, errChatInteractivePromptResolvedElsewhere) {
+			t.Fatalf("expected resolved-elsewhere sentinel, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for sentinel wake-up")
+	}
+}
+
+func TestChatInputQueue_PriorityReadConsumesStaleResolvedElsewhereSignal(t *testing.T) {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.setExternalInputCaptureActive(true)
+
+	// 信号先于读取到达（上一个问题被 web 端解决）：本次读取应立即消费哨兵并
+	// 返回，而不是把陈旧信号留给下一次读取。
+	queue.signalPriorityReadResolvedElsewhere()
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := queue.readPriorityLineWithPrompt(context.Background(), "[question] path: ")
+		result <- err
+	}()
+	// 哨兵已就绪，读取应立即返回（不等待 priority mode：读取可能瞬间完成并复位）。
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, errChatInteractivePromptResolvedElsewhere) {
+			t.Fatalf("expected resolved-elsewhere sentinel, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for sentinel")
+	}
+
+	// 信号已被消费：下一次阻塞读取不应立即返回哨兵。
+	result2 := make(chan error, 1)
+	go func() {
+		_, err := queue.readPriorityLineWithPrompt(context.Background(), "[question] path: ")
+		result2 <- err
+	}()
+	requireEventuallyPriorityMode(t, queue)
+	select {
+	case err := <-result2:
+		t.Fatalf("stale sentinel leaked into the next read: %v", err)
+	case <-time.After(80 * time.Millisecond):
+	}
+	queue.signalPriorityReadResolvedElsewhere()
+	select {
+	case err := <-result2:
+		if !errors.Is(err, errChatInteractivePromptResolvedElsewhere) {
+			t.Fatalf("expected sentinel, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for second sentinel")
+	}
+}

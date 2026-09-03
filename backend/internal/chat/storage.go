@@ -115,12 +115,15 @@ func (s *InMemoryStorage) Save(ctx context.Context, session *Session) error {
 		session.CreatedAt = time.Now()
 	}
 
-	session.UpdatedAt = time.Now()
+	if !session.PreserveUpdatedAt {
+		session.UpdatedAt = time.Now()
+	}
 
 	stored := session.Clone()
 	if stored == nil {
 		return ErrInvalidSession
 	}
+	stored.PreserveUpdatedAt = false
 	s.sessions[stored.ID] = stored
 
 	// 更新标签索引
@@ -253,11 +256,14 @@ func (s *InMemoryStorage) Update(ctx context.Context, session *Session) error {
 		return ErrSessionNotFound
 	}
 
-	session.UpdatedAt = time.Now()
+	if !session.PreserveUpdatedAt {
+		session.UpdatedAt = time.Now()
+	}
 	stored := session.Clone()
 	if stored == nil {
 		return ErrInvalidSession
 	}
+	stored.PreserveUpdatedAt = false
 	s.sessions[stored.ID] = stored
 
 	s.updateTagIndex(stored)

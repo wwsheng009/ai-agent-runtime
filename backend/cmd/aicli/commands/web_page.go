@@ -126,6 +126,12 @@ const chatWebPageHTML = `<!DOCTYPE html>
   .sidebar-header button {
     padding: 2px 8px; font-size: 12px; line-height: 1.4;
   }
+  .sidebar-header select#sessions-sort {
+    padding: 1px 2px; font-size: 11px; line-height: 1.4;
+    background: #16222d; color: #9aa7b0;
+    border: 1px solid #2a3138; border-radius: 4px;
+    max-width: 74px;
+  }
   #session-list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px; }
   .session-empty { padding: 14px 10px; color: #7c8890; font-size: 12px; }
   .session-item {
@@ -159,6 +165,10 @@ const chatWebPageHTML = `<!DOCTYPE html>
   <aside id="sidebar">
     <div class="sidebar-header">
       <span class="sidebar-title">会话</span>
+      <select id="sessions-sort" title="会话排序方式">
+        <option value="created_at">创建时间</option>
+        <option value="updated_at">更新时间</option>
+      </select>
       <button id="sessions-refresh-btn" type="button" title="刷新会话列表">⟳</button>
       <button id="sidebar-collapse-btn" type="button" title="折叠会话列表">«</button>
     </div>
@@ -232,6 +242,7 @@ const chatWebPageHTML = `<!DOCTYPE html>
   var sidebarToggleBtn = document.getElementById("sidebar-toggle");
   var sidebarCollapseBtn = document.getElementById("sidebar-collapse-btn");
   var sessionsRefreshBtn = document.getElementById("sessions-refresh-btn");
+  var sessionsSortEl = document.getElementById("sessions-sort");
   var sessionListEl = document.getElementById("session-list");
 
   var pendingApprovalRequestID = null;
@@ -240,6 +251,14 @@ const chatWebPageHTML = `<!DOCTYPE html>
   var sessions = [];               // 会话列表缓存（GET /web/api/sessions）
   var sidebarCollapsed = false;    // 侧边栏折叠状态（localStorage 记忆）
   var sessionsReqSeq = 0;          // loadSessions 请求序号（丢弃过期响应）
+  var sessionsSort = "created_at"; // 会话排序：created_at（默认）| updated_at
+
+  // 恢复排序偏好（localStorage 记忆）
+  try {
+    var savedSort = localStorage.getItem("webSessionSort");
+    if (savedSort === "created_at" || savedSort === "updated_at") { sessionsSort = savedSort; }
+  } catch (e) { /* ignore */ }
+  if (sessionsSortEl) { sessionsSortEl.value = sessionsSort; }
 
   // ---- 打字机状态（实时逐字揭示） ----
   var streamActive = false;          // turn_start → turn_end
@@ -532,14 +551,11 @@ const chatWebPageHTML = `<!DOCTYPE html>
     return pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + hhmm;
   }
 
-  // 渲染会话列表；current=true 的项置顶并高亮。
+  // 渲染会话列表。顺序完全由后端决定（默认按创建时间降序，可切更新时间），
+  // 前端不排序，避免点击切换后列表位置跳动。
   function renderSessionList() {
     if (!sessionListEl) { return; }
-    var items = (sessions || []).slice();
-    items.sort(function (a, b) {
-      if (a.current !== b.current) { return a.current ? -1 : 1; }
-      return 0;
-    });
+    var items = sessions || [];
     sessionListEl.innerHTML = "";
     if (!items.length) {
       var empty = document.createElement("div");
@@ -561,7 +577,10 @@ const chatWebPageHTML = `<!DOCTYPE html>
       var bits = [];
       if (s.current) { bits.push('<span class="session-current">● 当前</span>'); }
       if (typeof s.message_count === "number") { bits.push(s.message_count + " 条消息"); }
-      var ts = fmtSessionTime(s.updated_at || s.created_at);
+      // 时间戳跟随当前排序键：按创建时间排时显示创建时间，按更新时间排时显示更新时间。
+      var ts = sessionsSort === "updated_at"
+        ? fmtSessionTime(s.updated_at || s.created_at)
+        : fmtSessionTime(s.created_at || s.updated_at);
       if (ts) { bits.push(ts); }
       meta.innerHTML = bits.join(" · ");
       item.appendChild(title);
@@ -574,7 +593,7 @@ const chatWebPageHTML = `<!DOCTYPE html>
   // 拉取会话列表（GET /web/api/sessions）
   function loadSessions() {
     var seq = ++sessionsReqSeq;
-    fetch("/web/api/sessions", { cache: "no-store" })
+    fetch("/web/api/sessions?sort=" + encodeURIComponent(sessionsSort), { cache: "no-store" })
       .then(function (res) { return res.ok ? res.json() : null; })
       .then(function (data) {
         if (!data) { return; }
@@ -618,7 +637,7 @@ const chatWebPageHTML = `<!DOCTYPE html>
             // 因此轮询 /web/api/sessions，直到 current_session_id 变成目标会话（带次数上限）。
             var attempts = 0;
             (function pollResumed() {
-              fetch("/web/api/sessions", { cache: "no-store" })
+              fetch("/web/api/sessions?sort=" + encodeURIComponent(sessionsSort), { cache: "no-store" })
                 .then(function (r) { return r.ok ? r.json() : null; })
                 .then(function (data) {
                   if (!data) { return; }
@@ -808,6 +827,13 @@ const chatWebPageHTML = `<!DOCTYPE html>
   }
   if (sessionsRefreshBtn) {
     sessionsRefreshBtn.addEventListener("click", function () { loadSessions(); });
+  }
+  if (sessionsSortEl) {
+    sessionsSortEl.addEventListener("change", function () {
+      sessionsSort = sessionsSortEl.value === "updated_at" ? "updated_at" : "created_at";
+      try { localStorage.setItem("webSessionSort", sessionsSort); } catch (e) { /* ignore */ }
+      loadSessions();
+    });
   }
 
   // 底部栏显示完整 URL
