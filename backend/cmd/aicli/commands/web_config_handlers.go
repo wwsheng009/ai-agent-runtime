@@ -238,6 +238,24 @@ func refreshChatWebSessionConfigFromRuntime(session *ChatSession) {
 	}
 }
 
+// chatWebInvalidateRuntimeProvider 使会话本地 runtime 中缓存的 provider
+// 失效。LLMRuntime 在 ensureLocalRuntimeProvider 首次构建 provider 时经
+// GetAPIKey 固化 API key（Key Store 凭据来自 auth.json），此后更新 key 只
+// 改磁盘文件，已缓存的 provider 实例仍携带旧 key——表现为“保存新 key 后
+// 请求仍用旧 key”。注销后下一次调用会按最新配置重建 provider（重新解析
+// key）。
+func chatWebInvalidateRuntimeProvider(name string) {
+	session := chatWebSession()
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.Bootstrap == nil {
+		return
+	}
+	rt := session.LocalRuntimeHost.Bootstrap.LLMRuntime()
+	if rt == nil {
+		return
+	}
+	rt.UnregisterProvider(name)
+}
+
 // mergeModelCapabilities 把前端提交的每模型 reasoning 更新合并进现有
 // capabilities：只改动提交涉及的模型与字段，其余模型/字段原样保留，
 // 避免全量 map 写回时丢失未编辑模型的能力声明。
@@ -518,6 +536,7 @@ func HandleChatWebAPIConfigProviders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	chatWebRefreshSessionConfig()
+	chatWebInvalidateRuntimeProvider(req.Name)
 	writeWebAPIJSON(w, http.StatusOK, map[string]interface{}{
 		"status":   "ok",
 		"provider": req.Name,
@@ -570,6 +589,9 @@ func HandleChatWebAPIConfigProvidersDelete(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	chatWebRefreshSessionConfig()
+	for _, name := range result.Deleted {
+		chatWebInvalidateRuntimeProvider(name)
+	}
 	writeWebAPIJSON(w, http.StatusOK, map[string]interface{}{
 		"status": "ok",
 		"names":  result.Deleted,
@@ -609,6 +631,9 @@ func HandleChatWebAPIConfigProvidersEnabled(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	chatWebRefreshSessionConfig()
+	for _, name := range names {
+		chatWebInvalidateRuntimeProvider(name)
+	}
 	writeWebAPIJSON(w, http.StatusOK, map[string]interface{}{
 		"status":  "ok",
 		"enabled": req.Enabled,

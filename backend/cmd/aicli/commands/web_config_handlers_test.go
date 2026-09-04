@@ -771,6 +771,17 @@ func TestHandleChatWebAPIConfigProviders_APIKeyUpdateWritesKeyStore(t *testing.T
 	}
 }
 
+// TestChatWebInvalidateRuntimeProvider_NilGuards 验证 runtime provider 注销
+// 辅助在无会话 / 无 LocalRuntimeHost（web 测试会话形态）时安全跳过，不
+// panic；真实运行会话装配 Bootstrap 后，写端点会在保存成功时调用它使
+// 缓存 provider 失效，确保下次请求按最新 key 重建。
+func TestChatWebInvalidateRuntimeProvider_NilGuards(t *testing.T) {
+	chatWebInvalidateRuntimeProvider("alpha") // 无会话
+	withWebConfigTestSession(t, webConfigTestYAML)
+	chatWebInvalidateRuntimeProvider("alpha") // 有会话、无 LocalRuntimeHost
+	chatWebInvalidateRuntimeProvider("")      // 空名同样安全
+}
+
 // TestHandleChatWebAPIConfigProviders_Delete 验证删除 provider。
 func TestHandleChatWebAPIConfigProviders_Delete(t *testing.T) {
 	withWebConfigTestSession(t, webConfigTestYAML)
