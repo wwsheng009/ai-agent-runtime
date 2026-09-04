@@ -108,7 +108,11 @@ func HandleLogin(cmd *cobra.Command, configProvider func() *config.Config) {
 		NewAPIUserID:         stringFlag(cmd, "newapi-user-id"),
 	}
 	if req.Interactive {
-		req.Prompter = newCLILoginPrompter()
+		authStorePath := strings.TrimSpace(req.AuthStorePath)
+		if authStorePath == "" {
+			authStorePath = config.DefaultAuthStorePath()
+		}
+		req.Prompter = newCLILoginPrompter(cfg, authStorePath, req.DryRun)
 	}
 
 	executeCommand("login", outputOptions, func() (*providerLoginResult, map[string]interface{}, error) {
@@ -215,6 +219,15 @@ func renderLoginCommandResult(result *providerLoginResult, outputOptions structu
 
 type cliLoginPrompter struct {
 	reader *bufio.Reader
+	// cfg carries the loaded config so the provider picker can persist
+	// deletions (provider removal is written to config.yaml immediately).
+	cfg *config.Config
+	// authStorePath names the auth store whose orphaned refs are pruned when a
+	// provider is deleted through the picker.
+	authStorePath string
+	// dryRun disables destructive picker actions (delete keys) entirely so
+	// `aicli login --dry-run` can never mutate the config or auth store.
+	dryRun bool
 }
 
 // Compile-time contract: the standalone CLI prompter participates in the
@@ -222,8 +235,13 @@ type cliLoginPrompter struct {
 // numbered text picker as its automatic non-TTY fallback.
 var _ providerLoginSelectPrompter = (*cliLoginPrompter)(nil)
 
-func newCLILoginPrompter() *cliLoginPrompter {
-	return &cliLoginPrompter{reader: bufio.NewReader(os.Stdin)}
+func newCLILoginPrompter(cfg *config.Config, authStorePath string, dryRun bool) *cliLoginPrompter {
+	return &cliLoginPrompter{
+		reader:        bufio.NewReader(os.Stdin),
+		cfg:           cfg,
+		authStorePath: authStorePath,
+		dryRun:        dryRun,
+	}
 }
 
 func (p *cliLoginPrompter) PrintLine(line string) {
@@ -233,48 +251,140 @@ func (p *cliLoginPrompter) PrintLine(line string) {
 // PromptSelect implements providerLoginSelectPrompter for the standalone CLI
 // login: it opens the same full-screen searchable picker shared with /model
 // (instant filtering as you type + up/down navigation + Enter to confirm,
-// Esc/q to cancel). Non-TTY environments (pipes, redirects, short terminals)
-// return ui.ErrFullScreenUnavailable so the login flow falls back to the
-// numbered text picker automatically.
+// Esc/q to cancel). For provider lists the delete keys (x/X/Delete) close the
+// list with DeleteRequested; the confirm-and-persist flow then reopens the
+// list with refreshed options so the user can delete several providers in a
+// row. Non-TTY environments (pipes, redirects, short terminals) return
+// ui.ErrFullScreenUnavailable so the login flow falls back to the numbered
+// text picker automatically.
 func (p *cliLoginPrompter) PromptSelect(label, kind string, options []string, current string, allowCreate bool) (string, bool, error) {
 	terminal := ui.NewTerminal()
 	if !ui.CanUseFullScreenList(terminal) {
 		return "", false, ui.ErrFullScreenUnavailable
 	}
-	items := buildChatPickerItems(options, current, kind, kind)
-	createIndex := -1
-	if allowCreate {
-		createIndex = len(items)
-		items = append(items, ui.FullScreenListItem{
-			Title:      chatLoginPickerCreateRowTitle,
-			Detail:     kind,
-			SearchText: "create new " + kind + " 新建 provider",
-		})
+	deleteEnabled := kind == "provider" && p.cfg != nil && !p.dryRun
+	subtitle := "输入即搜索过滤，↑/↓ 选择，Enter 确认，Esc/q 取消"
+	if deleteEnabled {
+		subtitle = "输入即搜索过滤，↑/↓ 选择，Enter 确认，x/Delete 删除选中，Esc/q 取消"
 	}
-	result, err := ui.SelectFullScreenList(context.Background(), terminal, ui.FullScreenListOptions{
-		Title:        "选择 " + label,
-		Subtitle:     "输入即搜索过滤，↑/↓ 选择，Enter 确认，Esc/q 取消",
-		EmptyMessage: fmt.Sprintf("没有匹配的 %s，可清空搜索或直接选择新建", kind),
-		ConfirmLabel: fmt.Sprintf("使用选中 %s", kind),
-		Items:        items,
-	})
-	if err != nil {
-		return "", false, err
-	}
-	if result.Cancelled {
-		return "", true, nil
-	}
-	if result.Index == createIndex {
-		name, nameErr := p.PromptText("新 "+kind+" 名称", "", true)
-		if nameErr != nil {
-			return "", false, nameErr
+	for {
+		items := buildChatPickerItems(options, current, kind, kind)
+		createIndex := -1
+		if allowCreate {
+			createIndex = len(items)
+			items = append(items, ui.FullScreenListItem{
+				Title:      chatLoginPickerCreateRowTitle,
+				Detail:     kind,
+				SearchText: "create new " + kind + " 新建 provider",
+			})
 		}
-		return strings.TrimSpace(name), false, nil
+		var onDelete func(int) error
+		if deleteEnabled {
+			// Opt-in flag: the list returns DeleteRequested and closes; the
+			// confirm-and-persist flow below owns the actual deletion.
+			onDelete = func(int) error { return nil }
+		}
+		result, err := ui.SelectFullScreenList(context.Background(), terminal, ui.FullScreenListOptions{
+			Title:        "选择 " + label,
+			Subtitle:     subtitle,
+			EmptyMessage: fmt.Sprintf("没有匹配的 %s，可清空搜索或直接选择新建", kind),
+			ConfirmLabel: fmt.Sprintf("使用选中 %s", kind),
+			Items:        items,
+			OnDelete:     onDelete,
+		})
+		if err != nil {
+			return "", false, err
+		}
+		if result.Cancelled {
+			return "", true, nil
+		}
+		if result.DeleteRequested {
+			if !deleteEnabled || result.Index < 0 || result.Index >= len(options) {
+				continue
+			}
+			name := options[result.Index]
+			deleted, delErr := p.confirmAndDeleteProvider(name)
+			if delErr != nil {
+				p.PrintLine("删除失败: " + delErr.Error())
+			}
+			if deleted {
+				options = loginProviderSelectionOptions(p.cfg)
+				if resolved := resolveLoginProviderDefault(p.cfg, options); resolved != "" {
+					current = resolved
+				} else {
+					current = ""
+				}
+			}
+			continue
+		}
+		if result.Index == createIndex {
+			name, nameErr := p.PromptText("新 "+kind+" 名称", "", true)
+			if nameErr != nil {
+				return "", false, nameErr
+			}
+			return strings.TrimSpace(name), false, nil
+		}
+		if result.Index < 0 || result.Index >= len(options) {
+			return "", false, fmt.Errorf("invalid picker selection %d", result.Index)
+		}
+		return options[result.Index], false, nil
 	}
-	if result.Index < 0 || result.Index >= len(options) {
-		return "", false, fmt.Errorf("invalid picker selection %d", result.Index)
+}
+
+// confirmAndDeleteProvider asks for confirmation and persists the provider
+// removal to config.yaml (cascading group refs / default / auth-store
+// references). It returns whether the provider was actually deleted and the
+// in-memory config is kept in sync so the reopened picker reflects the change.
+func (p *cliLoginPrompter) confirmAndDeleteProvider(name string) (bool, error) {
+	answer, err := p.PromptText(
+		fmt.Sprintf("删除 provider %q？将同时清理分组引用/默认值/auth store 密钥引用（y/N）", name),
+		"N", false,
+	)
+	if err != nil {
+		return false, err
 	}
-	return options[result.Index], false, nil
+	if !strings.EqualFold(strings.TrimSpace(answer), "y") {
+		p.PrintLine("已取消删除 provider " + name)
+		return false, nil
+	}
+	result, delErr := runProviderRemoveCommand(p.cfg, config.ProviderDeleteRequest{
+		Names:        []string{name},
+		Cascade:      true,
+		ClearDefault: true,
+		PruneAuth:    true,
+		AuthStorePath: p.authStorePath,
+	})
+	if delErr != nil {
+		return false, delErr
+	}
+	if len(result.Deleted) == 0 {
+		message := fmt.Sprintf("未能删除 provider %q", name)
+		if len(result.NotFound) > 0 {
+			message += "（配置中不存在）"
+		}
+		if len(result.Blocked) > 0 {
+			message += "：" + result.Blocked[0].Message
+		}
+		p.PrintLine(message)
+		return false, nil
+	}
+	// Keep the in-memory config in sync with the persisted file so the
+	// reopened picker no longer offers the deleted provider.
+	delete(p.cfg.Providers.Items, name)
+	if strings.EqualFold(strings.TrimSpace(p.cfg.Providers.DefaultProvider), name) {
+		p.cfg.Providers.DefaultProvider = ""
+	}
+	p.PrintLine(fmt.Sprintf("已删除 provider %q（配置文件已保存：%s）", name, result.ConfigPath))
+	if len(result.RemovedGroups) > 0 {
+		p.PrintLine("  已移除分组: " + strings.Join(result.RemovedGroups, ", "))
+	}
+	if len(result.ClearedDefaults) > 0 {
+		p.PrintLine("  已清除默认 provider 设置")
+	}
+	if len(result.AuthPruned) > 0 {
+		p.PrintLine("  已清理 auth store 引用: " + strings.Join(result.AuthPruned, ", "))
+	}
+	return true, nil
 }
 
 func (p *cliLoginPrompter) PromptText(label, current string, required bool) (string, error) {

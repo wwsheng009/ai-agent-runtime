@@ -45,6 +45,12 @@ type FullScreenListOptions struct {
 	// OnConfirm runs after Enter on an enabled item. A non-nil error keeps
 	// the list open (caller may set item state); nil accepts and closes.
 	OnConfirm func(index int) error
+	// OnDelete, when non-nil, enables the delete keys (x/X/Delete) on the
+	// highlighted row. The list itself never mutates items or writes state:
+	// pressing a delete key closes the list with DeleteRequested=true so the
+	// caller can confirm the action, persist it (for example to the config
+	// file), and reopen the list with refreshed items.
+	OnDelete func(index int) error
 	// PreviewForItem, when set, replaces item.Preview for the highlighted row.
 	PreviewForItem func(index int) string
 }
@@ -53,6 +59,10 @@ type FullScreenListOptions struct {
 type FullScreenListResult struct {
 	Index     int
 	Cancelled bool
+	// DeleteRequested reports that the user pressed a delete key (x/X/Delete)
+	// on the highlighted enabled row. Index names the row. The list has
+	// already closed; the caller owns confirmation and persistence.
+	DeleteRequested bool
 }
 
 type fullScreenListState struct {
@@ -241,6 +251,15 @@ func runFullScreenListLoop(ctx context.Context, options FullScreenListOptions, h
 		}
 		result, done := applyFullScreenListKey(&state, key, options.Items, matches, height)
 		if done {
+			if result.DeleteRequested {
+				if options.OnDelete == nil {
+					// Delete keys are only meaningful when the caller opted in.
+					// Keep the list open so unconfigured callers are unaffected.
+					dirty = true
+					continue
+				}
+				return result, key, nil
+			}
 			if result.Cancelled {
 				if options.OnCancel != nil {
 					options.OnCancel()
@@ -394,6 +413,10 @@ func applyFullScreenListKey(state *fullScreenListState, key editorKey, items []F
 		switch key.r {
 		case 'q', 'Q':
 			return FullScreenListResult{Index: -1, Cancelled: true}, true
+		case 'x', 'X':
+			if len(matches) > 0 {
+				return FullScreenListResult{Index: matches[state.selected], DeleteRequested: true}, true
+			}
 		case 'j':
 			moveFullScreenListSelection(state, items, matches, 1)
 		case 'k':
@@ -415,6 +438,12 @@ func applyFullScreenListKey(state *fullScreenListState, key editorKey, items []F
 				state.query = string(key.r)
 				state.selected, state.offset = 0, 0
 			}
+		}
+	case editorKeyDelete:
+		// The Delete key is a delete action outside search mode; inside search
+		// mode it is handled above as "trim query character".
+		if len(matches) > 0 {
+			return FullScreenListResult{Index: matches[state.selected], DeleteRequested: true}, true
 		}
 	}
 	state.clampToEnabled(items, matches, pageSize)

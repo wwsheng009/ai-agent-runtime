@@ -107,6 +107,7 @@ cmd/aicli/
 ### 15. fullscreen_list.go - 全屏列表选择器
 - SelectFullScreenList() - 在备用屏幕中选择列表项目
 - 支持上下移动、翻页、首尾跳转、搜索、确认和取消
+- 可选删除键（x/X/Delete）：配置了 OnDelete 时，按删除键以 DeleteRequested 结果关闭列表，由调用方确认并持久化后重开列表
 - 离开选择器时恢复原聊天屏幕、滚动区域、光标和终端 raw mode
 
 ### 16. inputbox.go - 输入框组件
