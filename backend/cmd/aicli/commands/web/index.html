@@ -203,7 +203,10 @@
                   <span>API Key（明文不回传，仅保存到本地配置）</span>
                   <span class="cfg-key-status" id="cfg-provider-api-key-status"></span>
                 </div>
-                <input id="cfg-provider-api-key" type="password" placeholder="输入新值保存生效" autocomplete="new-password">
+                <div class="cfg-api-key-row">
+                  <input id="cfg-provider-api-key" type="password" placeholder="输入新值保存生效" autocomplete="new-password">
+                  <button type="button" class="cfg-btn" id="cfg-provider-api-key-save" disabled>更新</button>
+                </div>
                 <div class="cfg-hint" id="cfg-provider-api-key-hint"></div>
               </div>
               <div class="config-form-block">

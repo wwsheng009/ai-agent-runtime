@@ -1014,6 +1014,11 @@ function startTypeTimer() {
         ? "已标记清除"
         : (cfgApiKeySaved ? "留空则不修改，输入新值覆盖" : "输入新 API Key，保存后生效");
     }
+    var saveBtn = configEl("cfg-provider-api-key-save");
+    if (saveBtn) {
+      // 「将清除」时不提供更新；否则输入非空才可点。
+      saveBtn.disabled = cfgApiKeyClearPending || !(input && String(input.value || "").trim());
+    }
     if (!statusEl) { return; }
     if (cfgApiKeyClearPending) {
       statusEl.innerHTML = '<span class="cfg-key-status pending">将清除</span>' +
@@ -1035,6 +1040,44 @@ function startTypeTimer() {
     } else {
       hint.textContent = "填入并保存后写入本地配置；也可通过 api_key_ref（Key Store）或 auth_ref（OAuth）使用存量凭据";
     }
+  }
+
+  // 快速更新 API Key：只提交 name + api_key，其余字段不提交（后端
+  // nil=保留原值的合并语义），无需走整个表单的「保存」。成功后清空输入、
+  // 取消「将清除」待定态（新 key 已生效）并刷新配置。
+  function saveAPIKeyOnly() {
+    var nameEl = configEl("cfg-provider-name");
+    var name = (nameEl && nameEl.value ? nameEl.value : "").trim();
+    var apiKeyEl = configEl("cfg-provider-api-key");
+    var btn = configEl("cfg-provider-api-key-save");
+    if (!name) { showToast("请先输入 provider 名称", "err"); return; }
+    var key = (apiKeyEl ? apiKeyEl.value : "").trim();
+    if (!key) { showToast("请输入要更新的 API Key", "err"); return; }
+    if (btn) { btn.disabled = true; }
+    fetch("/web/api/config/providers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name, api_key: key })
+    })
+      .then(function (res) { return res.json().catch(function () { return { status: "error", reason: "bad response" }; }); })
+      .then(function (json) {
+        if (json.status !== "ok") {
+          showToast("API Key 更新失败: " + (json.reason || json.status), "err");
+          if (btn) { btn.disabled = false; }
+          return;
+        }
+        cfgApiKeyClearPending = false;
+        if (apiKeyEl) { apiKeyEl.value = ""; }
+        cfgApiKeySaved = true;
+        cfgApiKeySource = "inline";
+        renderAPIKeyStatus();
+        showToast("API Key 已更新: " + name);
+        loadConfigAdmin();
+      })
+      .catch(function (err) {
+        showToast("API Key 更新失败: " + err, "err");
+        if (btn) { btn.disabled = false; }
+      });
   }
 
   // 弹窗位置/尺寸：打开时按上次记忆的尺寸（或默认 720x70vh）居中；
@@ -2134,6 +2177,18 @@ function startTypeTimer() {
     if (form) { form.addEventListener("submit", saveProvider); }
     var fetchModelsBtn = configEl("cfg-provider-fetch-models-btn");
     if (fetchModelsBtn) { fetchModelsBtn.addEventListener("click", fetchModelsFromProvider); }
+    var apiKeySaveBtn = configEl("cfg-provider-api-key-save");
+    if (apiKeySaveBtn) { apiKeySaveBtn.addEventListener("click", saveAPIKeyOnly); }
+    var apiKeyInput = configEl("cfg-provider-api-key");
+    if (apiKeyInput) {
+      // 输入非空即可快速「更新」；「将清除」待定态下保持禁用（renderAPIKeyStatus 管理）。
+      apiKeyInput.addEventListener("input", function () {
+        var btn = configEl("cfg-provider-api-key-save");
+        if (btn && !cfgApiKeyClearPending) {
+          btn.disabled = !String(apiKeyInput.value || "").trim();
+        }
+      });
+    }
     // API key 状态行里的「清除/取消」按钮（innerHTML 动态重建，走事件委托）。
     if (form) {
       form.addEventListener("click", function (e) {

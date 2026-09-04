@@ -821,6 +821,12 @@ body.sidebar-collapsed #sidebar {
 .cfg-auth-block input[type="password"]:focus {
   outline: none; border-color: var(--border2);
 }
+.cfg-api-key-row {
+  display: flex; gap: 6px; margin-top: 6px; align-items: center;
+}
+.cfg-api-key-row input {
+  flex: 1; width: auto; margin-top: 0;
+}
 .cfg-hint { font-size: 11px; color: var(--fg4); margin-top: 4px; }
 
 /* ---- Provider 编辑弹窗：API key 状态行 + 获取模型列表 ---- */
