@@ -57,6 +57,7 @@
     <div class="tabs">
       <button class="tab-btn active" id="tab-main-btn" type="button">对话</button>
       <button class="tab-btn" id="tab-log-btn" type="button">日志</button>
+      <button class="tab-btn" id="tab-config-btn" type="button" title="provider / model / reasoning effort 配置管理">配置</button>
     </div>
 
     <div id="tab-main" class="tab-panel active">
@@ -112,6 +113,96 @@
         <span id="log-count">0 条事件</span>
       </div>
       <div id="event-log"></div>
+    </div>
+
+    <div id="tab-config" class="tab-panel">
+      <div class="config-toolbar">
+        <h2 class="config-title">配置管理</h2>
+        <span class="config-path" id="config-path" title="本地配置文件路径"></span>
+        <span class="config-toolbar-spacer"></span>
+        <button id="config-refresh-btn" type="button" title="重新读取配置文件">⟳ 刷新</button>
+        <button id="config-add-provider-btn" type="button" class="primary-btn" title="新增 provider">＋ 新增 Provider</button>
+      </div>
+
+      <div class="config-section" id="config-chat-section">
+        <div class="config-section-title">默认偏好（aicli.chat）</div>
+        <div class="config-chat-grid">
+          <label class="cfg-item">
+            <span class="cfg-label">默认 Provider</span>
+            <select id="config-chat-provider" title="新建会话默认 provider"></select>
+          </label>
+          <label class="cfg-item cfg-model">
+            <span class="cfg-label">默认 Model</span>
+            <input id="config-chat-model" list="config-chat-model-options" placeholder="默认模型" autocomplete="off">
+            <datalist id="config-chat-model-options"></datalist>
+          </label>
+          <label class="cfg-item">
+            <span class="cfg-label">默认 Reasoning</span>
+            <select id="config-chat-reasoning" title="默认 reasoning_effort">
+              <option value="">(未设置)</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="max">max</option>
+            </select>
+          </label>
+          <button id="config-chat-save-btn" type="button">保存默认偏好</button>
+          <span id="config-chat-status" class="cfg-status"></span>
+        </div>
+      </div>
+
+      <div class="config-section" id="config-providers-section">
+        <div class="config-section-title">Providers（providers.items）</div>
+        <div id="config-provider-list" class="config-table-wrap"><div class="config-empty">加载中…</div></div>
+      </div>
+
+      <div class="config-section config-editor" id="config-provider-editor" style="display:none">
+        <div class="config-section-title" id="config-editor-title">编辑 Provider</div>
+        <form id="config-provider-form" autocomplete="off">
+          <input type="hidden" id="cfg-provider-original-name">
+          <div class="config-form-grid">
+            <label class="cfg-item">
+              <span class="cfg-label">名称</span>
+              <input id="cfg-provider-name" required placeholder="如 openai" autocomplete="off">
+            </label>
+            <label class="cfg-item">
+              <span class="cfg-label">协议</span>
+              <input id="cfg-provider-protocol" placeholder="如 openai / anthropic" autocomplete="off">
+            </label>
+            <label class="cfg-item">
+              <span class="cfg-label">Base URL</span>
+              <input id="cfg-provider-base-url" placeholder="如 https://api.openai.com" autocomplete="off">
+            </label>
+            <label class="cfg-item">
+              <span class="cfg-label">API Path</span>
+              <input id="cfg-provider-api-path" placeholder="如 /v1/chat/completions" autocomplete="off">
+            </label>
+            <label class="cfg-item">
+              <span class="cfg-label">默认模型</span>
+              <input id="cfg-provider-default-model" placeholder="默认模型名" autocomplete="off">
+            </label>
+            <label class="cfg-item cfg-check">
+              <input id="cfg-provider-enabled" type="checkbox"> 启用
+            </label>
+            <label class="cfg-item cfg-check">
+              <input id="cfg-provider-set-default" type="checkbox"> 设为全局默认 provider
+            </label>
+          </div>
+          <div class="config-form-block">
+            <label class="cfg-label" for="cfg-provider-models">支持模型（每行一个；含 default_model）</label>
+            <textarea id="cfg-provider-models" rows="5" placeholder="gpt-4o&#10;gpt-4o-mini&#10;o3"></textarea>
+          </div>
+          <div class="config-form-block">
+            <div class="cfg-label">每个模型的 reasoning 配置</div>
+            <div id="cfg-model-reasoning-editors" class="cfg-model-reasoning-editors"><div class="config-empty">保存模型列表后在此逐模型配置 reasoning effort</div></div>
+          </div>
+          <div class="config-form-actions">
+            <button type="button" id="cfg-provider-cancel-btn">取消</button>
+            <button type="submit" id="cfg-provider-save-btn" class="primary-btn">保存</button>
+            <span id="cfg-provider-status" class="cfg-status"></span>
+          </div>
+        </form>
+      </div>
     </div>
   </div>
 </div>

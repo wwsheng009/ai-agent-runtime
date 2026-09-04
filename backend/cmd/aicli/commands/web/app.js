@@ -445,13 +445,21 @@ function startTypeTimer() {
     // 定时器运行中：由定时器 tick 检测揭示完成后调用 finishStream()
   }
 
+  var tabConfigBtn = document.getElementById("tab-config-btn");
+  var tabConfigEl = document.getElementById("tab-config");
+
   function activateTab(tabName) {
     var isMain = tabName === "main";
+    var isLog = tabName === "log";
+    var isConfig = tabName === "config";
     tabMainBtn.classList.toggle("active", isMain);
-    tabLogBtn.classList.toggle("active", !isMain);
+    tabLogBtn.classList.toggle("active", isLog);
+    if (tabConfigBtn) { tabConfigBtn.classList.toggle("active", isConfig); }
     tabMainEl.classList.toggle("active", isMain);
-    tabLogEl.classList.toggle("active", !isMain);
+    tabLogEl.classList.toggle("active", isLog);
+    if (tabConfigEl) { tabConfigEl.classList.toggle("active", isConfig); }
     if (isMain) { refreshScreen(); }
+    if (isConfig) { loadConfigAdmin(); }
   }
 
   function setStatus(text, connected) {
@@ -773,6 +781,342 @@ function startTypeTimer() {
     toastTimer = setTimeout(function () {
       if (t.parentNode) { t.parentNode.removeChild(t); }
     }, duration);
+  }
+
+  // ================= 配置页签：provider / model / reasoning effort CRUD =================
+  // 数据来自 GET /web/api/config（文件快照），写操作走 /web/api/config/* 端点，
+  // 成功后刷新列表并同步顶部选择器（/web/api/runtime 权威值）。
+  var configData = null;
+  var cfgReasoningDraft = {}; // model -> { reasoning_model, reasoning_efforts, default_reasoning_effort, compact_reasoning_effort }
+
+  function configEl(id) { return document.getElementById(id); }
+
+  function loadConfigAdmin() {
+    fetch("/web/api/config", { cache: "no-store" })
+      .then(function (res) { return res.json(); })
+      .then(function (snap) {
+        configData = snap || { providers: [], chat: {}, config_path: "" };
+        renderConfigAdmin();
+        loadRuntimeMeta(); // 权威切换值可能有调整（如默认 provider 变化）
+      })
+      .catch(function (err) {
+        var list = configEl("config-provider-list");
+        if (list) { list.innerHTML = '<div class="config-empty">加载失败: ' + esc(String(err)) + "</div>"; }
+      });
+  }
+
+  function providerByName(name) {
+    var providers = (configData && configData.providers) || [];
+    for (var i = 0; i < providers.length; i++) {
+      if (providers[i].name === name) { return providers[i]; }
+    }
+    return null;
+  }
+
+  function setCfgStatus(el, text, kind) {
+    if (!el) { return; }
+    el.textContent = text;
+    el.className = "cfg-status" + (kind ? " " + kind : "");
+  }
+
+  function renderConfigAdmin() {
+    var pathEl = configEl("config-path");
+    if (pathEl) { pathEl.textContent = configData.config_path || "（未识别到配置文件）"; }
+
+    var providers = configData.providers || [];
+
+    // 默认偏好区（aicli.chat）
+    var chatProv = configEl("config-chat-provider");
+    if (chatProv) {
+      var html = '<option value="">(未设置)</option>';
+      providers.forEach(function (p) {
+        html += '<option value="' + esc(p.name) + '">' + esc(p.name) + "</option>";
+      });
+      chatProv.innerHTML = html;
+      chatProv.value = (configData.chat && configData.chat.default_provider) || "";
+    }
+    var chatModel = configEl("config-chat-model");
+    if (chatModel) {
+      chatModel.value = (configData.chat && configData.chat.default_model) || "";
+      var modelOpts = configEl("config-chat-model-options");
+      if (modelOpts) {
+        var mhtml = "";
+        providers.forEach(function (p) {
+          (p.models || []).forEach(function (m) {
+            mhtml += '<option value="' + esc(m.name) + '"></option>';
+          });
+        });
+        modelOpts.innerHTML = mhtml;
+      }
+    }
+    var chatReasoning = configEl("config-chat-reasoning");
+    if (chatReasoning) { chatReasoning.value = (configData.chat && configData.chat.reasoning_effort) || ""; }
+
+    // provider 列表
+    var list = configEl("config-provider-list");
+    if (!list) { return; }
+    if (providers.length === 0) {
+      list.innerHTML = '<div class="config-empty">暂无 provider，点击右上角「＋ 新增 Provider」创建。</div>';
+      return;
+    }
+    var rows = '<table class="config-table"><thead><tr>' +
+      "<th>名称</th><th>协议</th><th>状态</th><th>默认模型</th><th>模型数</th><th>Reasoning 模型</th><th>操作</th>" +
+      "</tr></thead><tbody>";
+    providers.forEach(function (p) {
+      var models = p.models || [];
+      var reasoningCount = 0;
+      models.forEach(function (m) { if (m.reasoning_model) { reasoningCount++; } });
+      var isDefault = p.name === configData.default_provider;
+      rows += "<tr>" +
+        "<td>" + esc(p.name) + (isDefault ? ' <span class="config-badge default">默认</span>' : "") + "</td>" +
+        "<td>" + esc(p.protocol || "-") + "</td>" +
+        "<td>" + (p.enabled ? '<span class="config-badge ok">启用</span>' : '<span class="config-badge off">禁用</span>') + "</td>" +
+        "<td>" + esc(p.default_model || "-") + "</td>" +
+        "<td>" + models.length + "</td>" +
+        "<td>" + (reasoningCount ? reasoningCount + " 个" : "-") + "</td>" +
+        '<td class="config-actions">' +
+        '<button type="button" data-action="edit" data-name="' + esc(p.name) + '">编辑</button>' +
+        '<button type="button" data-action="toggle" data-name="' + esc(p.name) + '">' + (p.enabled ? "禁用" : "启用") + "</button>" +
+        '<button type="button" data-action="delete" data-name="' + esc(p.name) + '" class="danger-btn">删除</button>' +
+        "</td></tr>";
+    });
+    rows += "</tbody></table>";
+    list.innerHTML = rows;
+  }
+
+  function bindConfigTableActions() {
+    var list = configEl("config-provider-list");
+    if (!list) { return; }
+    list.onclick = function (ev) {
+      var btn = ev.target;
+      if (!btn || btn.tagName !== "BUTTON") { return; }
+      var action = btn.getAttribute("data-action");
+      var name = btn.getAttribute("data-name");
+      if (!name) { return; }
+      if (action === "edit") {
+        openProviderEditor(name);
+      } else if (action === "toggle") {
+        var p = providerByName(name);
+        setProvidersEnabled([name], !(p && p.enabled));
+      } else if (action === "delete") {
+        deleteProviders([name]);
+      }
+    };
+  }
+
+  function setProvidersEnabled(names, enabled) {
+    fetch("/web/api/config/providers/enabled", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ names: names, enabled: enabled })
+    })
+      .then(function (res) { return res.json().catch(function () { return { status: "error", reason: "bad response" }; }); })
+      .then(function (json) {
+        if (json.status !== "ok") { showToast("操作失败: " + (json.reason || json.status), "err"); return; }
+        showToast(enabled ? "已启用" : "已禁用");
+        loadConfigAdmin();
+      })
+      .catch(function (err) { showToast("操作失败: " + err, "err"); });
+  }
+
+  function deleteProviders(names) {
+    if (!window.confirm("确定删除 provider: " + names.join(", ") + "？\n将同时删除其全部配置字段。")) { return; }
+    fetch("/web/api/config/providers/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ names: names })
+    })
+      .then(function (res) { return res.json().catch(function () { return { status: "error", reason: "bad response" }; }); })
+      .then(function (json) {
+        if (json.status !== "ok") { showToast("删除失败: " + (json.reason || json.status), "err"); return; }
+        showToast("已删除: " + names.join(", "));
+        loadConfigAdmin();
+      })
+      .catch(function (err) { showToast("删除失败: " + err, "err"); });
+  }
+
+  function openProviderEditor(name) {
+    var p = name ? providerByName(name) : null;
+    cfgReasoningDraft = {};
+    var title = configEl("config-editor-title");
+    if (title) { title.textContent = p ? "编辑 Provider: " + p.name : "新增 Provider"; }
+    var orig = configEl("cfg-provider-original-name");
+    if (orig) { orig.value = p ? p.name : ""; }
+    var nameEl = configEl("cfg-provider-name");
+    if (nameEl) { nameEl.value = p ? p.name : ""; nameEl.readOnly = !!p; }
+    configEl("cfg-provider-protocol").value = p ? (p.protocol || "") : "";
+    configEl("cfg-provider-base-url").value = p ? (p.base_url || "") : "";
+    configEl("cfg-provider-api-path").value = p ? (p.api_path || "") : "";
+    configEl("cfg-provider-default-model").value = p ? (p.default_model || "") : "";
+    var enabled = configEl("cfg-provider-enabled");
+    if (enabled) { enabled.checked = p ? p.enabled : true; }
+    var setDefault = configEl("cfg-provider-set-default");
+    if (setDefault) { setDefault.checked = !!(p && p.name === configData.default_provider); }
+    // 模型列表：supported ∪ default_model（去重）
+    var models = [];
+    (p ? (p.supported_models || []) : []).forEach(function (m) {
+      if (m && models.indexOf(m) < 0) { models.push(m); }
+    });
+    if (p && p.default_model && models.indexOf(p.default_model) < 0) { models.push(p.default_model); }
+    configEl("cfg-provider-models").value = models.join("\n");
+    rebuildModelReasoningEditors(models, p);
+    showConfigEditor(true);
+    setCfgStatus(configEl("cfg-provider-status"), "", "");
+  }
+
+  function showConfigEditor(show) {
+    var editor = configEl("config-provider-editor");
+    if (editor) { editor.style.display = show ? "" : "none"; }
+  }
+
+  // 根据模型列表重建每模型的 reasoning 编辑行；已有草稿（cfgReasoningDraft）
+  // 优先展示，避免输入过程中重建丢失用户已填内容。
+  function rebuildModelReasoningEditors(models, provider) {
+    var container = configEl("cfg-model-reasoning-editors");
+    if (!container) { return; }
+    var unique = [];
+    models.forEach(function (m) {
+      m = String(m).trim();
+      if (m && unique.indexOf(m) < 0) { unique.push(m); }
+    });
+    if (unique.length === 0) {
+      container.innerHTML = '<div class="config-empty">保存模型列表后在此逐模型配置 reasoning effort</div>';
+      return;
+    }
+    var html = "";
+    unique.forEach(function (model) {
+      var spec = {
+        reasoning_model: false,
+        reasoning_efforts: "",
+        default_reasoning_effort: "",
+        compact_reasoning_effort: ""
+      };
+      if (provider) {
+        (provider.models || []).forEach(function (m) {
+          if (m.name === model) {
+            spec.reasoning_model = m.reasoning_model;
+            spec.reasoning_efforts = (m.reasoning_efforts || []).join(", ");
+            spec.default_reasoning_effort = m.default_reasoning_effort || "";
+            spec.compact_reasoning_effort = m.compact_reasoning_effort || "";
+          }
+        });
+      }
+      if (cfgReasoningDraft[model]) { spec = cfgReasoningDraft[model]; }
+      html += '<div class="cfg-model-reasoning" data-model="' + esc(model) + '">' +
+        '<div class="cfg-model-reasoning-head">' +
+        '<label class="cfg-check"><input type="checkbox" data-field="reasoning_model"' + (spec.reasoning_model ? " checked" : "") + "> " + esc(model) + ' 是 reasoning 模型</label>' +
+        "</div>" +
+        '<div class="cfg-model-reasoning-fields">' +
+        '<label class="cfg-item"><span class="cfg-label">reasoning_efforts</span>' +
+        '<input data-field="reasoning_efforts" value="' + esc(spec.reasoning_efforts) + '" placeholder="如 low, medium, high" autocomplete="off"></label>' +
+        '<label class="cfg-item"><span class="cfg-label">默认 effort</span>' +
+        '<input data-field="default_reasoning_effort" value="' + esc(spec.default_reasoning_effort) + '" placeholder="medium" autocomplete="off"></label>' +
+        '<label class="cfg-item"><span class="cfg-label">压缩 effort</span>' +
+        '<input data-field="compact_reasoning_effort" value="' + esc(spec.compact_reasoning_effort) + '" placeholder="low" autocomplete="off"></label>' +
+        "</div></div>";
+    });
+    container.innerHTML = html;
+  }
+
+  // 把 reasoning 编辑行内容收集进 draft 表（提交前与重建前调用）。
+  function collectReasoningDrafts() {
+    var container = configEl("cfg-model-reasoning-editors");
+    if (!container) { return; }
+    var rows = container.querySelectorAll(".cfg-model-reasoning");
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      var model = row.getAttribute("data-model");
+      var draft = cfgReasoningDraft[model] || {
+        reasoning_model: false,
+        reasoning_efforts: "",
+        default_reasoning_effort: "",
+        compact_reasoning_effort: ""
+      };
+      var inputs = row.querySelectorAll("input[data-field]");
+      for (var j = 0; j < inputs.length; j++) {
+        var input = inputs[j];
+        var field = input.getAttribute("data-field");
+        if (field === "reasoning_model") { draft.reasoning_model = input.checked; }
+        else { draft[field] = input.value.trim(); }
+      }
+      cfgReasoningDraft[model] = draft;
+    }
+  }
+
+  function saveProvider(ev) {
+    ev.preventDefault();
+    var statusEl = configEl("cfg-provider-status");
+    var nameEl = configEl("cfg-provider-name");
+    var name = (nameEl && nameEl.value ? nameEl.value : "").trim();
+    if (!name) { setCfgStatus(statusEl, "名称不能为空", "err"); return; }
+    collectReasoningDrafts();
+    var models = (configEl("cfg-provider-models").value || "").split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean);
+    var reasoning = {};
+    Object.keys(cfgReasoningDraft).forEach(function (model) {
+      if (models.indexOf(model) < 0) { return; } // 只提交当前模型列表内的模型
+      var d = cfgReasoningDraft[model];
+      reasoning[model] = {
+        reasoning_model: !!d.reasoning_model,
+        reasoning_efforts: d.reasoning_efforts ? d.reasoning_efforts.split(/[,，\s]+/).filter(Boolean) : [],
+        default_reasoning_effort: d.default_reasoning_effort || "",
+        compact_reasoning_effort: d.compact_reasoning_effort || ""
+      };
+    });
+    var payload = {
+      name: name,
+      protocol: (configEl("cfg-provider-protocol").value || "").trim(),
+      base_url: (configEl("cfg-provider-base-url").value || "").trim(),
+      api_path: (configEl("cfg-provider-api-path").value || "").trim(),
+      default_model: (configEl("cfg-provider-default-model").value || "").trim(),
+      supported_models: models,
+      enabled: configEl("cfg-provider-enabled").checked,
+      set_default_provider: configEl("cfg-provider-set-default").checked,
+      reasoning: reasoning
+    };
+    setCfgStatus(statusEl, "保存中…", "busy");
+    fetch("/web/api/config/providers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    })
+      .then(function (res) { return res.json().catch(function () { return { status: "error", reason: "bad response" }; }); })
+      .then(function (json) {
+        if (json.status !== "ok") {
+          setCfgStatus(statusEl, "保存失败: " + (json.reason || json.status), "err");
+          return;
+        }
+        setCfgStatus(statusEl, "", "");
+        showConfigEditor(false);
+        showToast("已保存 provider: " + name);
+        loadConfigAdmin();
+      })
+      .catch(function (err) { setCfgStatus(statusEl, "保存失败: " + err, "err"); });
+  }
+
+  function saveChatDefaults() {
+    var statusEl = configEl("config-chat-status");
+    var payload = {
+      default_provider: configEl("config-chat-provider").value || "",
+      default_model: (configEl("config-chat-model").value || "").trim(),
+      reasoning_effort: configEl("config-chat-reasoning").value || ""
+    };
+    setCfgStatus(statusEl, "保存中…", "busy");
+    fetch("/web/api/config/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    })
+      .then(function (res) { return res.json().catch(function () { return { status: "error", reason: "bad response" }; }); })
+      .then(function (json) {
+        if (json.status !== "ok") {
+          setCfgStatus(statusEl, "保存失败: " + (json.reason || json.status), "err");
+          return;
+        }
+        setCfgStatus(statusEl, "✓ 已保存", "ok");
+        showToast("默认偏好已保存");
+        loadConfigAdmin();
+      })
+      .catch(function (err) { setCfgStatus(statusEl, "保存失败: " + err, "err"); });
   }
 
   // ---- 页面标题反映运行状态 ----
@@ -1470,6 +1814,30 @@ function startTypeTimer() {
 
   tabMainBtn.addEventListener("click", function () { activateTab("main"); });
   tabLogBtn.addEventListener("click", function () { activateTab("log"); });
+  if (tabConfigBtn) { tabConfigBtn.addEventListener("click", function () { activateTab("config"); }); }
+
+  // ---- 配置页签：事件绑定 ----
+  (function initConfigTab() {
+    var refreshBtn = configEl("config-refresh-btn");
+    if (refreshBtn) { refreshBtn.addEventListener("click", function () { loadConfigAdmin(); }); }
+    var addBtn = configEl("config-add-provider-btn");
+    if (addBtn) { addBtn.addEventListener("click", function () { openProviderEditor(null); }); }
+    var cancelBtn = configEl("cfg-provider-cancel-btn");
+    if (cancelBtn) { cancelBtn.addEventListener("click", function () { showConfigEditor(false); }); }
+    var form = configEl("config-provider-form");
+    if (form) { form.addEventListener("submit", saveProvider); }
+    var chatSave = configEl("config-chat-save-btn");
+    if (chatSave) { chatSave.addEventListener("click", saveChatDefaults); }
+    var modelsInput = configEl("cfg-provider-models");
+    if (modelsInput) {
+      modelsInput.addEventListener("input", function () {
+        collectReasoningDrafts(); // 先把已填内容收进草稿，重建不丢失
+        var models = modelsInput.value.split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean);
+        rebuildModelReasoningEditors(models, null);
+      });
+    }
+    bindConfigTableActions();
+  })();
 
   var logClearBtn = document.getElementById("log-clear-btn");
   if (logClearBtn) {
