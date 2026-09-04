@@ -142,6 +142,36 @@ func TestComposeAppTextLayoutPopupCursor(t *testing.T) {
 	}
 }
 
+func TestComposeAppTextLayoutPopupInputCursorFollowsTypedText(t *testing.T) {
+	state := composeFixtureState()
+	state.Bottom.PromptVisible = false
+	state.Bottom.PromptReservedRows = 0
+	state.Bottom.Focus = BottomFocusPopup
+	state.Bottom.PopupLines = []string{"choice A", "choice B"}
+	// priority prompt 输入行：ComposerLine = 静态提示 + 已输入文本。
+	state.Bottom.ComposerLine = "请输入回答，可输入建议编号（必答）：2"
+
+	frame := ComposeAppTextLayout(state)
+	if frame.Cursor == nil || frame.Cursor.Focus != BottomFocusPopup {
+		t.Fatalf("cursor = %+v, want Popup focus", frame.Cursor)
+	}
+	// 最后一条 RowOwnerPopup 行是 popup 输入行，必须包含已输入文本。
+	lastPopup := ""
+	for _, row := range frame.Rows {
+		if row.Owner == renderengine.RowOwnerPopup {
+			lastPopup = row.Text
+		}
+	}
+	if lastPopup != state.Bottom.ComposerLine {
+		t.Fatalf("popup input row = %q, want %q", lastPopup, state.Bottom.ComposerLine)
+	}
+	// 光标列必须位于输入行显示宽度之后（跟随输入末尾），而不是钉在静态提示后。
+	want := DisplayWidth(state.Bottom.ComposerLine) + 1
+	if frame.Cursor.Col != want {
+		t.Fatalf("popup input cursor col = %d, want %d (input %q)", frame.Cursor.Col, want, state.Bottom.ComposerLine)
+	}
+}
+
 func TestComposeAppTextLayoutCursorSuppressedWhenUnknown(t *testing.T) {
 	state := composeFixtureState()
 	state.Bottom.Focus = BottomFocusNone

@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 )
 
 func TestChatPromptOverlayClearSelectionPopupResetsPromptWithoutSurface(t *testing.T) {
@@ -168,4 +170,64 @@ func TestPriorityPromptViewportUsesStructuralHeaderBodyAndFooter(t *testing.T) {
 	if got := strings.Join(viewport.FooterLines, "\n"); got != "operation choices" {
 		t.Fatalf("unexpected semantic footer: %q", got)
 	}
+}
+
+func TestChatModalComposerPrompt_SurfacePopupInputFollowsTypedText(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	const width, height = 80, 24
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(width, height)
+	surface.SetPhysicalWritesEnabled(false)
+
+	session := &ChatSession{Surface: surface}
+	lines := []string{
+		"[提问] 问题：需要执行哪些文档改动？",
+		"[提问] 1. 全部按推荐执行",
+	}
+	readPrompt, cleanup, transient := showChatRuntimePriorityPrompt(session, lines, "请输入回答，可输入建议编号（必答）：\n")
+	if !transient {
+		t.Fatal("expected surface priority prompt to run in transient popup mode")
+	}
+	if !session.priorityPopupHandle.Valid() {
+		t.Fatal("expected surface priority prompt to retain its popup handle")
+	}
+
+	composer := newChatModalComposerPrompt(session, readPrompt)
+	composer.onChange(ui.LineEditorSnapshot{Text: "2"})
+
+	// popup 输入行必须进化成“提示 + 输入”，这样 compose/legacy 光标列
+	// （行显示宽度 + 1）才会跟随输入末尾，而不是钉在静态提示后的第一列。
+	frameText := commandResultFrameText(surface)
+	if !strings.Contains(frameText, readPrompt+"2") {
+		t.Fatalf("expected popup input line %q to include typed text, frame:\n%s", readPrompt+"2", frameText)
+	}
+
+	// 继续输入：输入行继续增长并保留提示前缀。
+	composer.onChange(ui.LineEditorSnapshot{Text: "2, 3"})
+	frameText = commandResultFrameText(surface)
+	if !strings.Contains(frameText, readPrompt+"2, 3") {
+		t.Fatalf("expected popup input line %q after second change, frame:\n%s", readPrompt+"2, 3", frameText)
+	}
+
+	// cleanup 使 handle 失效；此后的输入更新必须是无副作用的安全路径。
+	cleanup()
+	if session.priorityPopupHandle.Valid() {
+		t.Fatal("expected priority popup handle to be cleared after cleanup")
+	}
+	if session.priorityPopupLines != nil {
+		t.Fatal("expected priority popup lines to be cleared after cleanup")
+	}
+	composer.onChange(ui.LineEditorSnapshot{Text: "3"}) // must not panic
+}
+
+func TestChatModalComposerPrompt_SurfacePopupInputWithoutActivePopupIsNoop(t *testing.T) {
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+	surface.SetPhysicalWritesEnabled(false)
+
+	session := &ChatSession{Surface: surface}
+	composer := newChatModalComposerPrompt(session, "prompt> ")
+	composer.onChange(ui.LineEditorSnapshot{Text: "x"}) // 无活跃 popup，no-op
 }

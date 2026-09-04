@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 )
@@ -405,10 +406,34 @@ func (c *chatModalComposerPrompt) clearPrompt() {
 }
 
 func (c *chatModalComposerPrompt) onChange(snapshot ui.LineEditorSnapshot) {
-	if c == nil || !c.trackPrompt || c.session == nil || c.session.Interaction == nil {
+	if c == nil || c.session == nil {
 		return
 	}
-	c.session.Interaction.SetPromptInput(snapshot.Text)
+	if c.trackPrompt {
+		if c.session.Interaction != nil {
+			c.session.Interaction.SetPromptInput(snapshot.Text)
+		}
+		return
+	}
+	c.updateSurfacePopupInput(snapshot.Text)
+}
+
+// updateSurfacePopupInput 在 fixed-surface 模式下把 modal 输入文本并入 priority
+// prompt popup 的输入行（ComposerLine = 提示 + 输入）。popup 输入行的静态部分
+// （ComposerLine=提示）不含用户输入，而 compose/legacy 光标列都取该行的显示
+// 宽度，导致光标被钉在提示之后的第一列；把输入并进该行后光标自然跟随输入末尾。
+func (c *chatModalComposerPrompt) updateSurfacePopupInput(text string) {
+	if c == nil || c.session == nil || c.session.Surface == nil || !c.session.Surface.Enabled() {
+		return
+	}
+	handle := c.session.priorityPopupHandle
+	if !handle.Valid() {
+		return
+	}
+	lines := append([]string(nil), c.session.priorityPopupLines...)
+	// 输入行是单行渲染；多行输入只取首行，光标跟随首行输入末尾。
+	inputLine := strings.SplitN(text, "\n", 2)[0]
+	c.session.Surface.UpdatePopupInputForHandle(handle, lines, c.prompt+inputLine, true)
 }
 
 func (c *chatModalComposerPrompt) onCancel(ui.LineEditorSnapshot) bool {

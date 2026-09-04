@@ -203,6 +203,10 @@ func (o chatPromptOverlay) showPriorityPrompt(lines []string, prompt string) (st
 	)
 	cleanup := func() {
 		once.Do(func() {
+			if o.session != nil {
+				o.session.priorityPopupHandle = ui.PopupHandle{}
+				o.session.priorityPopupLines = nil
+			}
 			if handle.Valid() {
 				o.clearPopupHandle(handle)
 			}
@@ -221,6 +225,12 @@ func (o chatPromptOverlay) showPriorityPrompt(lines []string, prompt string) (st
 			chatPriorityPromptPopupOwner,
 			priorityPromptViewport(lines),
 		)
+		// Retain the popup identity so the modal composer can fold its live
+		// input text into the popup input line (ComposerLine = prompt + input),
+		// keeping the rendered cursor at the end of the typed answer instead of
+		// pinning it to the first column after the static prompt.
+		o.session.priorityPopupHandle = handle
+		o.session.priorityPopupLines = append([]string(nil), lines...)
 		return prompt, cleanup, true
 	}
 

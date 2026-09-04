@@ -188,11 +188,13 @@ type ChatSession struct {
 	accountBalanceProvider        config.Provider
 	accountBalanceInitialized     bool
 	accountBalanceRefresher       *chatAccountBalanceRefresher
-	priorityPromptMu              sync.Mutex // serializes modal prompts that own the priority input channel
-	queuedInputDrain              bool       // suppress repeated queued-input notices while draining
-	queuedInputEchoed             bool       // queued input was already echoed in the fixed prompt while busy
-	lastInteractiveInputQueued    bool       // last chatInteractiveReadLine result came from InputQueue
-	ImagePaths                    []string   // explicit local image attachments for current turn
+	priorityPromptMu              sync.Mutex     // serializes modal prompts that own the priority input channel
+	priorityPopupHandle           ui.PopupHandle // active priority prompt popup input handle (fixed-surface mode)
+	priorityPopupLines            []string       // popup lines of the active priority prompt (fixed-surface mode)
+	queuedInputDrain              bool           // suppress repeated queued-input notices while draining
+	queuedInputEchoed             bool           // queued input was already echoed in the fixed prompt while busy
+	lastInteractiveInputQueued    bool           // last chatInteractiveReadLine result came from InputQueue
+	ImagePaths                    []string       // explicit local image attachments for current turn
 }
 
 type chatRuntimeHTTPCapture struct {
