@@ -234,6 +234,7 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	mux.HandleFunc(commands.ChatWebAPIConfigProvidersDeletePath, commands.HandleChatWebAPIConfigProvidersDelete)
 	mux.HandleFunc(commands.ChatWebAPIConfigProvidersEnabledPath, commands.HandleChatWebAPIConfigProvidersEnabled)
 	mux.HandleFunc(commands.ChatWebAPIConfigProvidersModelsPath, commands.HandleChatWebAPIConfigProvidersFetchModels)
+	mux.HandleFunc(commands.ChatWebAPIConfigProvidersAutoImportPath, commands.HandleChatWebAPIConfigProvidersAutoImport)
 	mux.HandleFunc(commands.ChatWebAPIConfigChatPath, commands.HandleChatWebAPIConfigChat)
 	// /web/style.css 和 /web/app.js 静态资源（go:embed 嵌入，与 index.html 同源）。
 	mux.HandleFunc("/web/style.css", commands.HandleChatWebStyle)

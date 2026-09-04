@@ -122,6 +122,7 @@
         <span class="config-toolbar-spacer"></span>
         <button id="config-refresh-btn" type="button" title="重新读取配置文件">⟳ 刷新</button>
         <button id="config-add-provider-btn" type="button" class="primary-btn" title="新增 provider">＋ 新增 Provider</button>
+        <button id="config-auto-import-btn" type="button" class="primary-btn config-import-btn" title="由名称、Base URL 与 API Key 自动生成 provider 配置（同 aicli login）">＋ 自动导入</button>
       </div>
 
       <div class="config-section" id="config-chat-section">
@@ -199,7 +200,14 @@
                 </label>
                 <label class="cfg-item">
                   <span class="cfg-label">协议</span>
-                  <input id="cfg-provider-protocol" placeholder="如 openai / anthropic" autocomplete="off">
+                  <input id="cfg-provider-protocol" list="cfg-provider-protocol-options" placeholder="如 openai / anthropic" autocomplete="off">
+                  <datalist id="cfg-provider-protocol-options">
+                    <option value="openai"></option>
+                    <option value="openai_image"></option>
+                    <option value="anthropic"></option>
+                    <option value="gemini"></option>
+                    <option value="codex"></option>
+                  </datalist>
                 </label>
                 <label class="cfg-item">
                   <span class="cfg-label">Base URL</span>
@@ -278,6 +286,66 @@
             </form>
           </div>
           <div id="config-editor-resize" title="拖动右下角调整大小"></div>
+        </div>
+      </div>
+
+      <!-- Provider 自动导入弹窗（同 aicli login 的自动生成逻辑）。
+           注意：不要加内联 display:none —— CSS 默认隐藏 + .active 显示，
+           内联样式优先级更高会让弹窗永远无法显示。 -->
+      <div id="config-import-overlay">
+        <div id="config-import-modal">
+          <div class="config-import-header">
+            <span class="config-import-title">自动导入 Provider</span>
+            <button type="button" id="config-import-close-btn" class="modal-close" title="关闭">×</button>
+          </div>
+          <div class="config-import-body">
+            <p class="cfg-hint" id="cfg-import-note">输入名称、Base URL 与 API Key，将自动探测协议、拉取模型列表并生成完整 provider 配置（与 <code>aicli login</code> 相同的逻辑）。API Key 会安全写入 Key Store，配置文件仅保存引用。</p>
+            <form id="config-import-form" autocomplete="off">
+              <div class="config-form-grid">
+                <label class="cfg-item cfg-import-name">
+                  <span class="cfg-label">名称</span>
+                  <input id="cfg-import-name" type="text" placeholder="例如 my-openai" required>
+                </label>
+                <label class="cfg-item cfg-import-protocol">
+                  <span class="cfg-label">协议</span>
+                  <select id="cfg-import-protocol">
+                    <option value="auto" selected>自动探测（推荐）</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="openai_image">OpenAI Image（DALL·E）</option>
+                    <option value="anthropic">Anthropic</option>
+                    <option value="gemini">Gemini</option>
+                    <option value="codex-apikey">Codex API Key</option>
+                  </select>
+                </label>
+                <label class="cfg-item cfg-import-base-url">
+                  <span class="cfg-label">Base URL</span>
+                  <input id="cfg-import-base-url" type="url" placeholder="https://api.openai.com/v1" required>
+                </label>
+                <label class="cfg-item cfg-import-api-key">
+                  <span class="cfg-label">API Key</span>
+                  <input id="cfg-import-api-key" type="password" placeholder="sk-..." required>
+                </label>
+                <label class="cfg-item cfg-import-default-model">
+                  <span class="cfg-label">默认模型（可选）</span>
+                  <input id="cfg-import-default-model" type="text" placeholder="留空则取模型列表第一个">
+                </label>
+                <label class="cfg-item cfg-import-models-path">
+                  <span class="cfg-label">模型列表路径（可选）</span>
+                  <input id="cfg-import-models-path" type="text" placeholder="留空则按协议自动推断，例如 /models">
+                </label>
+                <label class="cfg-item cfg-check cfg-import-set-default">
+                  <input id="cfg-import-set-default" type="checkbox">
+                  <span class="cfg-label">设为默认 Provider</span>
+                </label>
+              </div>
+              <div id="cfg-import-result" class="cfg-import-result" style="display:none"></div>
+              <div class="config-form-actions">
+                <button type="button" id="cfg-import-cancel-btn">取消</button>
+                <button type="submit" id="cfg-import-submit-btn" class="primary-btn">开始导入</button>
+                <span id="cfg-import-status" class="cfg-status"></span>
+              </div>
+            </form>
+          </div>
         </div>
       </div>
     </div>

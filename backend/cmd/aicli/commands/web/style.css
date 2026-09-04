@@ -730,12 +730,12 @@ body.sidebar-collapsed #sidebar {
 .config-chat-grid .cfg-item { display: flex; flex-direction: column; gap: 3px; }
 .config-chat-grid .cfg-label, .config-form-grid .cfg-label { font-size: 11px; color: var(--fg4); }
 .config-chat-grid select, .config-chat-grid input,
-.config-form-grid input, .config-form-block textarea, .cfg-model-reasoning input {
+.config-form-grid select, .config-form-grid input, .config-form-block textarea, .cfg-model-reasoning input {
   background: var(--bg3); color: var(--fg); border: 1px solid var(--border);
   border-radius: 4px; padding: 4px 8px; font-family: inherit; font-size: 12px;
 }
 .config-chat-grid select:focus, .config-chat-grid input:focus,
-.config-form-grid input:focus, .config-form-block textarea:focus, .cfg-model-reasoning input:focus {
+.config-form-grid select:focus, .config-form-grid input:focus, .config-form-block textarea:focus, .cfg-model-reasoning input:focus {
   outline: none; border-color: var(--border2);
 }
 .config-table { width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -833,6 +833,58 @@ body.sidebar-collapsed #sidebar {
 }
 #config-editor-resize:hover { opacity: 1; }
 #config-editor-modal-body .config-form-grid { margin-bottom: 0; }
+
+/* ---- Provider 自动导入弹窗 ----
+   静态居中（无拖动/缩放）；层级与编辑弹窗一致（1100）。
+   启动时（initConfigTab）同样 reparent 到 <body> 下。 */
+#config-import-overlay {
+  display: none; position: fixed; z-index: 1100;
+  inset: 0; background: var(--overlayBg);
+  justify-content: center; align-items: center;
+}
+#config-import-overlay.active { display: flex; }
+#config-import-modal {
+  position: relative; width: min(560px, calc(100vw - 32px));
+  max-height: min(85vh, 720px);
+  background: var(--modalBg); border: 1px solid var(--border2);
+  border-radius: 10px; display: flex; flex-direction: column;
+  box-shadow: 0 8px 32px var(--shadow);
+}
+.config-import-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px; border-bottom: 1px solid var(--border);
+  font-weight: 600; font-size: 13px; color: var(--fg2);
+}
+.config-import-header .modal-close {
+  margin-left: auto; cursor: pointer; padding: 2px 8px;
+  font-size: 16px; line-height: 1; background: none; border: none;
+  color: var(--fg3);
+}
+.config-import-header .modal-close:hover { color: var(--fg); }
+.config-import-body {
+  flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px;
+  font-size: 13px; line-height: 1.5;
+}
+.config-import-body #cfg-import-note { margin: 0 0 10px; font-size: 12px; }
+.config-import-body code {
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: 3px; padding: 0 4px; font-size: 11px;
+}
+#config-import-modal .config-form-grid .cfg-check { align-items: center; }
+.cfg-import-result {
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 10px; background: var(--bg3); margin-bottom: 10px;
+  font-size: 12px; line-height: 1.6;
+}
+.cfg-import-result h4 { margin: 0 0 6px; font-size: 12px; color: var(--fg2); }
+.cfg-import-result table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.cfg-import-result th, .cfg-import-result td {
+  text-align: left; padding: 2px 8px 2px 0; border-bottom: 1px solid var(--border);
+  vertical-align: top; word-break: break-all;
+}
+.cfg-import-result th { color: var(--fg4); font-weight: 500; white-space: nowrap; }
+.cfg-import-result td { color: var(--fg2); }
+.cfg-import-result .cfg-import-warn { color: var(--red, #e5534b); }
 .cfg-auth-block {
   border: 1px solid var(--border); border-radius: 6px;
   padding: 8px 10px; background: var(--bg3);

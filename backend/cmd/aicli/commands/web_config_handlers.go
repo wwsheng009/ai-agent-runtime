@@ -28,6 +28,11 @@ const (
 	ChatWebAPIConfigProvidersDeletePath  = "/web/api/config/providers/delete"
 	ChatWebAPIConfigProvidersEnabledPath = "/web/api/config/providers/enabled"
 	ChatWebAPIConfigProvidersModelsPath  = "/web/api/config/providers/fetch-models"
+	// auto-import 参照 aicli login 的自动生成逻辑（provider_login.go
+	// runProviderLogin）：由 name + base_url + api_key 探测协议、拉取模型
+	// 列表并生成完整 provider 配置（protocol / api_path / forward_url /
+	// default_model / supported_models / model_capabilities 等）。
+	ChatWebAPIConfigProvidersAutoImportPath = "/web/api/config/providers/auto-import"
 	ChatWebAPIConfigChatPath             = "/web/api/config/chat"
 )
 
@@ -152,6 +157,25 @@ type chatWebProviderFetchModelsRequest struct {
 	BaseURL    string  `json:"base_url"`
 	APIKey     *string `json:"api_key,omitempty"`
 	ModelsPath string  `json:"models_path,omitempty"`
+}
+
+// chatWebProviderAutoImportRequest 是 POST
+// /web/api/config/providers/auto-import 的请求体：参照 aicli login
+// （provider_login.go runProviderLogin），由 name + base_url + api_key
+// 一键自动生成 provider 配置。Protocol 沿用 login 的登录协议取值：空串
+// 或 "auto" 表示自动探测（依次尝试 openai / anthropic / gemini /
+// codex-apikey），也可显式指定 openai / openai_image / anthropic /
+// gemini / codex-apikey。OAuth（codex-oauth）需要设备码交互，不适合
+// Web 端，不在此支持。
+type chatWebProviderAutoImportRequest struct {
+	Name         string `json:"name"`
+	BaseURL      string `json:"base_url"`
+	APIKey       string `json:"api_key"`
+	Protocol     string `json:"protocol"`
+	DefaultModel string `json:"default_model"`
+	ModelsPath   string `json:"models_path"`
+	SetDefault   bool   `json:"set_default"`
+	TimeoutSec   int    `json:"timeout_sec"`
 }
 
 type chatWebChatWriteRequest struct {
@@ -765,6 +789,103 @@ func HandleChatWebAPIConfigProvidersFetchModels(w http.ResponseWriter, r *http.R
 		"models":      providerModelIDs(result.Models),
 		"auth_notice": authNotice,
 	})
+}
+
+// ---------------------------------------------------------------------------
+// POST /web/api/config/providers/auto-import — 自动导入 Provider
+// ---------------------------------------------------------------------------
+
+// HandleChatWebAPIConfigProvidersAutoImport 一键生成并保存 provider 配置，
+// 逻辑与 `aicli login --provider <name> --base-url <url> --api-key <key>`
+// 完全同源（复用 provider_login.go 的 runProviderLogin）：探测/校验协议、
+// 拉取并校验 models 列表、按 model card 分组生成 api_path / forward_url /
+// default_model / supported_models / model_capabilities，并把 API key 写入
+// Key Store（auth.json），config.yaml 只落 api_key_ref。无交互（Interactive
+// 关闭），任何需要人工输入的环节直接报错，不会挂起。
+func HandleChatWebAPIConfigProvidersAutoImport(w http.ResponseWriter, r *http.Request) {
+	if !chatWebRequireMethod(w, r, http.MethodPost) {
+		return
+	}
+	var req chatWebProviderAutoImportRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		chatWebWriteError(w, http.StatusBadRequest, err)
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	req.BaseURL = strings.TrimSpace(req.BaseURL)
+	req.APIKey = strings.TrimSpace(req.APIKey)
+	req.Protocol = strings.TrimSpace(req.Protocol)
+	if req.Name == "" {
+		chatWebWriteError(w, http.StatusBadRequest, errRequiredField("provider name"))
+		return
+	}
+	if req.BaseURL == "" {
+		chatWebWriteError(w, http.StatusBadRequest, errRequiredField("base_url"))
+		return
+	}
+	if req.APIKey == "" {
+		chatWebWriteError(w, http.StatusBadRequest, errRequiredField("api_key"))
+		return
+	}
+	if req.Protocol == "" {
+		req.Protocol = providerLoginProtocolAuto
+	}
+	if !isSupportedLoginProtocol(req.Protocol) {
+		chatWebWriteError(w, http.StatusBadRequest, fmt.Errorf("unsupported login protocol %q", req.Protocol))
+		return
+	}
+	if strings.EqualFold(req.Protocol, "codex-oauth") {
+		chatWebWriteError(w, http.StatusBadRequest, fmt.Errorf("codex-oauth 需要设备码交互，请在终端使用 aicli login 或选择 codex-apikey"))
+		return
+	}
+	path, err := chatWebConfigPath()
+	if err != nil {
+		chatWebWriteError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if path == "" {
+		chatWebWriteError(w, http.StatusBadRequest, errNoConfigPath())
+		return
+	}
+
+	timeout := time.Duration(req.TimeoutSec) * time.Second
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	if timeout > 120*time.Second {
+		timeout = 120 * time.Second
+	}
+	loginReq := providerLoginRequest{
+		Context:        r.Context(),
+		Config:         configPtrOrNil(chatWebSession()),
+		ConfigPath:     path,
+		ProviderName:   req.Name,
+		LoginProtocol:  req.Protocol,
+		BaseURL:        req.BaseURL,
+		APIKey:         req.APIKey,
+		DefaultModel:   strings.TrimSpace(req.DefaultModel),
+		ModelsPath:     strings.TrimSpace(req.ModelsPath),
+		SetDefault:     req.SetDefault,
+		Interactive:    false,
+		Timeout:        timeout,
+		SkipSiteDetect: true, // Web 端不做站点类型探测/账号同步，保持导入快速聚焦
+		SkipAccount:    true,
+	}
+	result, err := runProviderLogin(loginReq)
+	if err != nil {
+		chatWebWriteError(w, http.StatusBadGateway, err)
+		return
+	}
+
+	// runProviderLogin 内部已通过 applyProviderLoginConfigUpdate 更新传入的
+	// session.Config，并写盘（config.yaml + auth.json）。与其他配置端点一致，
+	// 这里再按磁盘重载会话内存配置，并失效运行时缓存的 provider 实例，
+	// 让 /web/api/runtime 与 /model 立即看到新配置。
+	chatWebRefreshSessionConfig()
+	for _, info := range result.ProviderConfigs {
+		chatWebInvalidateRuntimeProvider(info.ProviderName)
+	}
+	writeWebAPIJSON(w, http.StatusOK, result)
 }
 
 // probeClientForProvider 返回匿名探测用的 HTTP client：复用 provider 的
