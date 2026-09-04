@@ -9,7 +9,6 @@ import (
 
 	"github.com/spf13/cobra"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	"golang.org/x/term"
 )
 
 // NewLoginCommand creates the provider login command.
@@ -255,17 +254,10 @@ func (p *cliLoginPrompter) PromptSecret(label, currentMasked string, required bo
 		}
 		fmt.Print(prompt)
 		_ = os.Stdout.Sync()
-		var raw []byte
-		var err error
-		if term.IsTerminal(int(os.Stdin.Fd())) {
-			raw, err = term.ReadPassword(int(os.Stdin.Fd()))
-			fmt.Println()
-		} else {
-			line, readErr := p.reader.ReadString('\n')
-			raw = []byte(line)
-			err = readErr
-		}
-		value := strings.TrimSpace(string(raw))
+		// 输入回显：以普通行读取显示用户输入的 key（不再使用无回显的
+		// term.ReadPassword 密码模式，便于核对粘贴或手动输入的完整内容）。
+		line, err := p.reader.ReadString('\n')
+		value := strings.TrimSpace(line)
 		if err != nil && value == "" {
 			return "", err
 		}
