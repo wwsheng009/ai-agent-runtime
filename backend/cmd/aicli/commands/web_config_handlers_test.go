@@ -544,6 +544,58 @@ func TestHandleChatWebAPIConfigProviders_APIKeyMergePreserved(t *testing.T) {
 	}
 }
 
+// TestHandleChatWebAPIConfigProviders_RefreshRuntimeOnlySession 复现真实
+// 运行形态：会话只装配 RuntimeConfigPath（Config.ConfigFilePath 为空，
+// 由 chat_setup 装配）。此时 web 写盘走 RuntimeConfigPath，但
+// reloadChatConfigForModelCommand 因 ConfigFilePath 为空会跳过刷新——
+// 若不补齐，内存仍保留旧 key，fetch-models 等读 session.Config 的端点
+// 会继续用旧凭据（表现为“更新错误 key 后仍能获取模型列表”）。
+func TestHandleChatWebAPIConfigProviders_RefreshRuntimeOnlySession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(webConfigTestYAML), 0o644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	session := newWebTestSession()
+	session.RuntimeConfigPath = path
+	loaded, err := agentconfig.InitGlobalConfig(path)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	loaded.ConfigFilePath = "" // 模拟 chat_setup：内存 Config 不回写文件路径字段
+	session.Config = loaded
+	withWebTestSession(t, session)
+
+	oldKey := session.Config.Providers.Items["alpha"].APIKey
+	if oldKey != "sk-test-secret-123" {
+		t.Fatalf("fixture alpha.api_key = %q, want sk-test-secret-123", oldKey)
+	}
+
+	rec := postConfigJSON(t, HandleChatWebAPIConfigProviders, map[string]interface{}{
+		"name":    "alpha",
+		"api_key": "sk-web-new-key-999",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// 内存必须与磁盘同步：fetch-models 等端点读 session.Config，若仍为旧 key
+	// 就会拿旧凭据去验证（错误 key 更新后“看起来还能用”）。
+	got := session.Config.Providers.Items["alpha"].APIKey
+	if got != "sk-web-new-key-999" {
+		t.Errorf("session.Config 内存 key = %q, want sk-web-new-key-999（RuntimeConfigPath 会话未刷新）", got)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("re-read config: %v", err)
+	}
+	if !strings.Contains(string(raw), "sk-web-new-key-999") {
+		t.Error("磁盘配置未写入新 key")
+	}
+	if strings.Contains(string(raw), "sk-test-secret-123") {
+		t.Error("磁盘配置仍包含旧 key")
+	}
+}
+
 // TestHandleChatWebAPIConfigProviders_Delete 验证删除 provider。
 func TestHandleChatWebAPIConfigProviders_Delete(t *testing.T) {
 	withWebConfigTestSession(t, webConfigTestYAML)

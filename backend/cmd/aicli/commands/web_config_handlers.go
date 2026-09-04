@@ -197,9 +197,30 @@ func chatWebConfigPath() (string, error) {
 }
 
 // chatWebRefreshSessionConfig 写成功后刷新会话内存配置，使运行时元数据同步。
+// 注意：web 写盘路径（chatWebConfigPath）在 ConfigFilePath 为空时回退
+// RuntimeConfigPath，而 reloadChatConfigForModelCommand 只认 ConfigFilePath、
+// 为空即跳过刷新——这类会话（chat_setup 装配的真实运行形态）会留下
+// “磁盘已更新、内存仍是旧 key”的不一致，fetch-models 等读 session.Config
+// 的端点会继续用旧凭据。这里显式按 RuntimeConfigPath 补齐刷新。
 func chatWebRefreshSessionConfig() {
-	if session := chatWebSession(); session != nil {
-		_ = reloadChatConfigForModelCommand(session)
+	session := chatWebSession()
+	if session == nil {
+		return
+	}
+	_ = reloadChatConfigForModelCommand(session)
+	if session.Config == nil {
+		return
+	}
+	if strings.TrimSpace(session.Config.ConfigFilePath) != "" {
+		return
+	}
+	runtimePath := strings.TrimSpace(session.RuntimeConfigPath)
+	if runtimePath == "" {
+		return
+	}
+	reloaded, err := agentconfig.InitGlobalConfig(runtimePath)
+	if err == nil && reloaded != nil {
+		session.Config = reloaded
 	}
 }
 
