@@ -33,6 +33,9 @@ type ProviderSummary struct {
 	SupportedModelsCount int      `json:"supported_models_count"`
 	ModelsVerifiedAt     string   `json:"models_verified_at,omitempty"`
 	Groups               []string `json:"groups,omitempty"`
+	// Proxy is the provider-level proxy override (providers.items.<name>.proxy),
+	// nil when the provider has no proxy of its own.
+	Proxy *ProxyConfig `json:"proxy,omitempty"`
 }
 
 type ProviderDeleteRequest struct {
@@ -128,6 +131,7 @@ func ListProviderSummaries(cfg *Config, filter ProviderListFilter) []ProviderSum
 			SupportedModelsCount: len(provider.SupportedModels),
 			ModelsVerifiedAt:     strings.TrimSpace(provider.ModelsVerifiedAt),
 			Groups:               append([]string(nil), groupNames[strings.ToLower(name)]...),
+			Proxy:                provider.Proxy.Clone(),
 		})
 	}
 	return out

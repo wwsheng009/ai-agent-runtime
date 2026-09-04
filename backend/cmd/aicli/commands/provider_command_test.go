@@ -213,3 +213,168 @@ func mustReadFile(t *testing.T, path string) []byte {
 	}
 	return content
 }
+
+func TestProviderCommand_ProxySetAndRemove(t *testing.T) {
+	cfg, path := writeProviderCommandConfig(t, `
+providers:
+  default_provider: alpha
+  items:
+    alpha:
+      enabled: true
+      protocol: openai
+      base_url: https://alpha.example.com
+`)
+
+	httpURL := "http://127.0.0.1:7890"
+	result, err := runProviderProxySetCommand(cfg, "alpha", config.ProviderProxyUpdate{HTTP: &httpURL})
+	if err != nil {
+		t.Fatalf("runProviderProxySetCommand: %v", err)
+	}
+	if result.Proxy == nil || result.Proxy.HTTP != httpURL || !result.Proxy.Enabled {
+		t.Fatalf("unexpected proxy result: %+v", result)
+	}
+	raw := string(mustReadFile(t, path))
+	if !strings.Contains(raw, "proxy:") || !strings.Contains(raw, httpURL) {
+		t.Fatalf("proxy not written to config:\n%s", raw)
+	}
+
+	// Partial update must preserve the http value.
+	httpsURL := "http://127.0.0.1:7891"
+	result, err = runProviderProxySetCommand(cfg, "alpha", config.ProviderProxyUpdate{HTTPS: &httpsURL})
+	if err != nil {
+		t.Fatalf("runProviderProxySetCommand (https): %v", err)
+	}
+	if result.Proxy.HTTP != httpURL || result.Proxy.HTTPS != httpsURL || !result.Proxy.Enabled {
+		t.Fatalf("merge failed: %+v", result.Proxy)
+	}
+
+	// Disable keeps the proxy configuration.
+	disabled := false
+	result, err = runProviderProxySetCommand(cfg, "alpha", config.ProviderProxyUpdate{Enabled: &disabled})
+	if err != nil {
+		t.Fatalf("runProviderProxySetCommand (disable): %v", err)
+	}
+	if result.Proxy.Enabled {
+		t.Fatalf("expected disabled proxy: %+v", result.Proxy)
+	}
+
+	removed, err := runProviderProxyRemoveCommand(cfg, "alpha")
+	if err != nil {
+		t.Fatalf("runProviderProxyRemoveCommand: %v", err)
+	}
+	if !removed.Removed {
+		t.Fatalf("unexpected remove result: %+v", removed)
+	}
+	if strings.Contains(string(mustReadFile(t, path)), "proxy:") {
+		t.Fatal("expected proxy node to be removed from config")
+	}
+
+	// Invalid proxy URLs are rejected.
+	bad := "ftp://proxy.example.com:21"
+	if _, err := runProviderProxySetCommand(cfg, "alpha", config.ProviderProxyUpdate{HTTP: &bad}); err == nil {
+		t.Fatal("expected error for unsupported proxy scheme")
+	}
+}
+
+func TestProviderCommand_ProxyShowDisplaysProxy(t *testing.T) {
+	cfg, _ := writeProviderCommandConfig(t, `
+providers:
+  items:
+    alpha:
+      enabled: true
+      protocol: openai
+      proxy:
+        http: http://127.0.0.1:7890
+        https: http://user:secret@proxy.example.com:8080
+        enabled: true
+    beta:
+      enabled: true
+      protocol: anthropic
+`)
+
+	show, _, err := runProviderShowCommand(cfg, "alpha", false)
+	if err != nil {
+		t.Fatalf("runProviderShowCommand: %v", err)
+	}
+	if show.Proxy == nil || show.Proxy.HTTP != "http://127.0.0.1:7890" || !show.Proxy.Enabled {
+		t.Fatalf("unexpected proxy in show result: %+v", show.Proxy)
+	}
+	if text := formatProviderProxyDisplay(show.Proxy); !strings.Contains(text, "enabled") ||
+		!strings.Contains(text, "http://127.0.0.1:7890") ||
+		strings.Contains(text, "secret") {
+		t.Fatalf("unexpected proxy display text %q", text)
+	}
+
+	plain, _, err := runProviderShowCommand(cfg, "beta", false)
+	if err != nil {
+		t.Fatalf("runProviderShowCommand beta: %v", err)
+	}
+	if plain.Proxy != nil {
+		t.Fatalf("expected no proxy for beta: %+v", plain.Proxy)
+	}
+}
+func TestProviderCommand_GlobalProxySetAndRemove(t *testing.T) {
+	cfg, path := writeProviderCommandConfig(t, `
+providers:
+  items:
+    alpha:
+      enabled: true
+      protocol: openai
+      base_url: https://alpha.example.com
+`)
+
+	httpURL := "http://127.0.0.1:7890"
+	result, err := runProviderProxyGlobalSetCommand(cfg, config.GlobalProxyUpdate{HTTP: &httpURL})
+	if err != nil {
+		t.Fatalf("runProviderProxyGlobalSetCommand: %v", err)
+	}
+	if result.Removed || result.Proxy == nil || result.Proxy.HTTP != httpURL || !result.Proxy.Enabled {
+		t.Fatalf("unexpected global proxy result: %+v", result)
+	}
+	raw := string(mustReadFile(t, path))
+	if !strings.Contains(raw, "proxy:") || !strings.Contains(raw, httpURL) {
+		t.Fatalf("global proxy not written to config:\n%s", raw)
+	}
+
+	// Partial update preserves the http value.
+	httpsURL := "http://127.0.0.1:7891"
+	result, err = runProviderProxyGlobalSetCommand(cfg, config.GlobalProxyUpdate{HTTPS: &httpsURL})
+	if err != nil {
+		t.Fatalf("runProviderProxyGlobalSetCommand (https): %v", err)
+	}
+	if result.Proxy.HTTP != httpURL || result.Proxy.HTTPS != httpsURL || !result.Proxy.Enabled {
+		t.Fatalf("global merge failed: %+v", result.Proxy)
+	}
+
+	// Disable keeps the configuration.
+	disabled := false
+	result, err = runProviderProxyGlobalSetCommand(cfg, config.GlobalProxyUpdate{Enabled: &disabled})
+	if err != nil {
+		t.Fatalf("runProviderProxyGlobalSetCommand (disable): %v", err)
+	}
+	if result.Proxy.Enabled {
+		t.Fatalf("expected disabled global proxy: %+v", result.Proxy)
+	}
+
+	removed, err := runProviderProxyGlobalRemoveCommand(cfg)
+	if err != nil {
+		t.Fatalf("runProviderProxyGlobalRemoveCommand: %v", err)
+	}
+	if !removed.Removed {
+		t.Fatalf("unexpected remove result: %+v", removed)
+	}
+	if strings.Contains(string(mustReadFile(t, path)), "proxy:") {
+		t.Fatal("expected global proxy node to be removed from config")
+	}
+
+	// Removing again reports an error.
+	if _, err := runProviderProxyGlobalRemoveCommand(cfg); err == nil {
+		t.Fatal("expected error when removing a missing global proxy")
+	}
+
+	// Invalid proxy URLs are rejected.
+	bad := "ftp://proxy.example.com:21"
+	if _, err := runProviderProxyGlobalSetCommand(cfg, config.GlobalProxyUpdate{HTTP: &bad}); err == nil {
+		t.Fatal("expected error for unsupported proxy scheme")
+	}
+}

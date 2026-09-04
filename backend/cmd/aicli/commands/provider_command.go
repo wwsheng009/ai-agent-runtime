@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -47,6 +48,8 @@ func NewProviderCommand(configProvider func() *config.Config) *cobra.Command {
   aicli provider set-default <name>
   aicli provider enable|disable <name...>
   aicli provider remove [name...]
+  aicli provider proxy set <name> --http <url> [--https <url>] [--no-proxy <list>]
+  aicli provider proxy remove <name>
 
 首次配置 provider 请用 aicli login；连通性诊断用 aicli doctor provider。
 更多说明见 docs/aicli/quickstart.md 与 docs/aicli/faq.md。`,
@@ -56,7 +59,9 @@ func NewProviderCommand(configProvider func() *config.Config) *cobra.Command {
   aicli provider set-default openai
   aicli provider enable openai
   aicli provider disable old-provider
-  aicli provider remove old-provider --yes --cascade`,
+  aicli provider remove old-provider --yes --cascade
+  aicli provider proxy set openai --http http://127.0.0.1:7890
+  aicli provider proxy remove openai`,
 	}
 	cmd.AddCommand(newProviderListCommand(configProvider))
 	cmd.AddCommand(newProviderShowCommand(configProvider))
@@ -65,6 +70,126 @@ func NewProviderCommand(configProvider func() *config.Config) *cobra.Command {
 	cmd.AddCommand(newProviderEnableCommand(configProvider, false))
 	cmd.AddCommand(newProviderSetDefaultCommand(configProvider))
 	cmd.AddCommand(newProviderRefreshModelCardsCommand(configProvider))
+	cmd.AddCommand(newProviderProxyCommand(configProvider))
+	return cmd
+}
+
+func newProviderProxyCommand(configProvider func() *config.Config) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "proxy",
+		Aliases: []string{"px"},
+		Short:   "配置 provider 的代理（proxy）",
+		Long: `为指定 provider 新增、更新或删除代理（proxy）配置。
+
+子命令：
+  aicli provider proxy set <name> --http <url> [--https <url>] [--no-proxy <list>] [--disable]
+  aicli provider proxy remove <name>
+  aicli provider proxy global set --http <url> [--https <url>] [--no-proxy <list>] [--disable]
+  aicli provider proxy global remove
+
+说明：
+  - 代理地址支持 http://、https://、socks5://，设置时会校验格式。
+  - 配置写入 providers.items.<name>.proxy，与全局 providers.proxy 合并时 provider 级优先。
+  - global 系列子命令管理全局 providers.proxy，对所有未配置自身代理的 provider 生效。
+  - 只传部分字段时保留原有其他字段；--disable 可保留配置但停用代理。
+  - remove 只删除该 provider 的 proxy，不影响全局 providers.proxy；global remove 删除全局代理。`,
+		Example: `  aicli provider proxy set openai --http http://127.0.0.1:7890
+  aicli provider proxy set openai --http http://127.0.0.1:7890 --https http://127.0.0.1:7890 --no-proxy localhost,api.openai.com
+  aicli provider proxy set openai --disable
+  aicli provider proxy remove openai
+  aicli provider proxy global set --http http://127.0.0.1:7890
+  aicli provider proxy global remove`,
+	}
+	cmd.AddCommand(newProviderProxySetCommand(configProvider))
+	cmd.AddCommand(newProviderProxyRemoveCommand(configProvider))
+	cmd.AddCommand(newProviderProxyGlobalCommand(configProvider))
+	return cmd
+}
+
+func newProviderProxyGlobalCommand(configProvider func() *config.Config) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "global",
+		Short: "配置全局代理（providers.proxy）",
+		Long: `管理全局代理 providers.proxy，对所有未配置自身代理的 provider 生效。
+
+子命令：
+  aicli provider proxy global set --http <url> [--https <url>] [--no-proxy <list>] [--disable]
+  aicli provider proxy global remove
+
+说明：
+  - 与 provider 级代理合并时，provider 级字段优先。
+  - 只传部分字段时保留原有其他字段；--disable 可保留配置但停用代理。`,
+		Example: `  aicli provider proxy global set --http http://127.0.0.1:7890
+  aicli provider proxy global set --http http://127.0.0.1:7890 --https http://127.0.0.1:7890 --no-proxy localhost
+  aicli provider proxy global set --disable
+  aicli provider proxy global remove`,
+	}
+	cmd.AddCommand(newProviderProxyGlobalSetCommand(configProvider))
+	cmd.AddCommand(newProviderProxyGlobalRemoveCommand(configProvider))
+	return cmd
+}
+
+func newProviderProxyGlobalSetCommand(configProvider func() *config.Config) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "set",
+		Aliases: []string{"add", "update"},
+		Short:   "新增或更新全局 proxy 配置",
+		Run: func(cmd *cobra.Command, args []string) {
+			HandleProviderProxyGlobalSet(cmd, configProvider)
+		},
+	}
+	cmd.Flags().String("http", "", "http 代理地址，如 http://127.0.0.1:7890")
+	cmd.Flags().String("https", "", "https 代理地址，如 http://127.0.0.1:7890")
+	cmd.Flags().String("no-proxy", "", "不走代理的地址列表（逗号分隔）")
+	cmd.Flags().Bool("enable", false, "启用该 proxy（首次设置时的默认行为）")
+	cmd.Flags().Bool("disable", false, "停用该 proxy（保留配置）")
+	addProviderOutputFlags(cmd)
+	return cmd
+}
+
+func newProviderProxyGlobalRemoveCommand(configProvider func() *config.Config) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "remove",
+		Aliases: []string{"rm", "clear", "delete"},
+		Short:   "删除全局 proxy 配置",
+		Run: func(cmd *cobra.Command, args []string) {
+			HandleProviderProxyGlobalRemove(cmd, configProvider)
+		},
+	}
+	addProviderOutputFlags(cmd)
+	return cmd
+}
+
+func newProviderProxySetCommand(configProvider func() *config.Config) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "set <name>",
+		Aliases: []string{"add", "update"},
+		Short:   "新增或更新 provider 的 proxy 配置",
+		Args:    cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			HandleProviderProxySet(cmd, configProvider, args[0])
+		},
+	}
+	cmd.Flags().String("http", "", "http 代理地址，如 http://127.0.0.1:7890")
+	cmd.Flags().String("https", "", "https 代理地址，如 http://127.0.0.1:7890")
+	cmd.Flags().String("no-proxy", "", "不走代理的地址列表（逗号分隔）")
+	cmd.Flags().Bool("enable", false, "启用该 proxy（首次设置时的默认行为）")
+	cmd.Flags().Bool("disable", false, "停用该 proxy（保留配置）")
+	addProviderOutputFlags(cmd)
+	return cmd
+}
+
+func newProviderProxyRemoveCommand(configProvider func() *config.Config) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "remove <name>",
+		Aliases: []string{"rm", "clear", "delete"},
+		Short:   "删除 provider 的 proxy 配置",
+		Args:    cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			HandleProviderProxyRemove(cmd, configProvider, args[0])
+		},
+	}
+	addProviderOutputFlags(cmd)
 	return cmd
 }
 
@@ -270,6 +395,111 @@ func HandleProviderSetDefault(cmd *cobra.Command, configProvider func() *config.
 	executeCommand("provider set-default", outputOptions, func() (*config.ProviderDefaultResult, map[string]interface{}, error) {
 		return runProviderSetDefaultCommand(providerCommandConfig(configProvider), name)
 	}, renderProviderDefaultResult)
+}
+
+func HandleProviderProxySet(cmd *cobra.Command, configProvider func() *config.Config, name string) {
+	outputOptions, err := resolveStructuredOutputOptions(cmd, "text", "text", "json")
+	if err != nil {
+		exitCommandError("provider proxy set", "json", err, nil)
+	}
+	if boolFlag(cmd, "enable") && boolFlag(cmd, "disable") {
+		exitCommandError("provider proxy set", outputOptions.Format, fmt.Errorf("--enable 和 --disable 不能同时使用"), nil)
+	}
+	update := config.ProviderProxyUpdate{
+		Name:    name,
+		HTTP:    changedStringFlag(cmd, "http"),
+		HTTPS:   changedStringFlag(cmd, "https"),
+		NoProxy: changedStringFlag(cmd, "no-proxy"),
+	}
+	if boolFlag(cmd, "enable") {
+		enabled := true
+		update.Enabled = &enabled
+	}
+	if boolFlag(cmd, "disable") {
+		disabled := false
+		update.Enabled = &disabled
+	}
+	executeCommand("provider proxy set", outputOptions, func() (*config.ProviderProxyResult, map[string]interface{}, error) {
+		cfg := providerCommandConfig(configProvider)
+		if cfg == nil {
+			return nil, nil, fmt.Errorf("config is not loaded")
+		}
+		result, err := runProviderProxySetCommand(cfg, name, update)
+		if err != nil {
+			return result, providerResultDetails(result), err
+		}
+		return result, nil, nil
+	}, renderProviderProxyResult)
+}
+
+func HandleProviderProxyRemove(cmd *cobra.Command, configProvider func() *config.Config, name string) {
+	outputOptions, err := resolveStructuredOutputOptions(cmd, "text", "text", "json")
+	if err != nil {
+		exitCommandError("provider proxy remove", "json", err, nil)
+	}
+	executeCommand("provider proxy remove", outputOptions, func() (*config.ProviderProxyResult, map[string]interface{}, error) {
+		cfg := providerCommandConfig(configProvider)
+		if cfg == nil {
+			return nil, nil, fmt.Errorf("config is not loaded")
+		}
+		result, err := runProviderProxyRemoveCommand(cfg, name)
+		if err != nil {
+			return result, providerResultDetails(result), err
+		}
+		return result, nil, nil
+	}, renderProviderProxyResult)
+}
+
+func HandleProviderProxyGlobalSet(cmd *cobra.Command, configProvider func() *config.Config) {
+	outputOptions, err := resolveStructuredOutputOptions(cmd, "text", "text", "json")
+	if err != nil {
+		exitCommandError("provider proxy global set", "json", err, nil)
+	}
+	if boolFlag(cmd, "enable") && boolFlag(cmd, "disable") {
+		exitCommandError("provider proxy global set", outputOptions.Format, fmt.Errorf("--enable 和 --disable 不能同时使用"), nil)
+	}
+	update := config.GlobalProxyUpdate{
+		HTTP:    changedStringFlag(cmd, "http"),
+		HTTPS:   changedStringFlag(cmd, "https"),
+		NoProxy: changedStringFlag(cmd, "no-proxy"),
+	}
+	if boolFlag(cmd, "enable") {
+		enabled := true
+		update.Enabled = &enabled
+	}
+	if boolFlag(cmd, "disable") {
+		disabled := false
+		update.Enabled = &disabled
+	}
+	executeCommand("provider proxy global set", outputOptions, func() (*config.GlobalProxyResult, map[string]interface{}, error) {
+		cfg := providerCommandConfig(configProvider)
+		if cfg == nil {
+			return nil, nil, fmt.Errorf("config is not loaded")
+		}
+		result, err := runProviderProxyGlobalSetCommand(cfg, update)
+		if err != nil {
+			return result, providerResultDetails(result), err
+		}
+		return result, nil, nil
+	}, renderGlobalProxyResult)
+}
+
+func HandleProviderProxyGlobalRemove(cmd *cobra.Command, configProvider func() *config.Config) {
+	outputOptions, err := resolveStructuredOutputOptions(cmd, "text", "text", "json")
+	if err != nil {
+		exitCommandError("provider proxy global remove", "json", err, nil)
+	}
+	executeCommand("provider proxy global remove", outputOptions, func() (*config.GlobalProxyResult, map[string]interface{}, error) {
+		cfg := providerCommandConfig(configProvider)
+		if cfg == nil {
+			return nil, nil, fmt.Errorf("config is not loaded")
+		}
+		result, err := runProviderProxyGlobalRemoveCommand(cfg)
+		if err != nil {
+			return result, providerResultDetails(result), err
+		}
+		return result, nil, nil
+	}, renderGlobalProxyResult)
 }
 
 func runProviderListCommand(cfg *config.Config, protocol string, enabledOnly, disabledOnly bool) (providerListResult, map[string]interface{}, error) {
@@ -526,6 +756,38 @@ func runProviderSetDefaultCommand(cfg *config.Config, name string) (*config.Prov
 	return result, nil, nil
 }
 
+func runProviderProxySetCommand(cfg *config.Config, name string, update config.ProviderProxyUpdate) (*config.ProviderProxyResult, error) {
+	configPath, err := providerCommandConfigPath(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return config.SetProviderProxyConfig(configPath, name, update)
+}
+
+func runProviderProxyRemoveCommand(cfg *config.Config, name string) (*config.ProviderProxyResult, error) {
+	configPath, err := providerCommandConfigPath(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return config.RemoveProviderProxyConfig(configPath, name)
+}
+
+func runProviderProxyGlobalSetCommand(cfg *config.Config, update config.GlobalProxyUpdate) (*config.GlobalProxyResult, error) {
+	configPath, err := providerCommandConfigPath(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return config.SetGlobalProxyConfig(configPath, update)
+}
+
+func runProviderProxyGlobalRemoveCommand(cfg *config.Config) (*config.GlobalProxyResult, error) {
+	configPath, err := providerCommandConfigPath(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return config.RemoveGlobalProxyConfig(configPath)
+}
+
 func providerCommandConfig(configProvider func() *config.Config) *config.Config {
 	if configProvider == nil {
 		return nil
@@ -619,6 +881,11 @@ func renderProviderShowResult(result providerShowResult, outputOptions structure
 	fmt.Printf("  Header mappings:       %d\n", result.HeaderMappingsCount)
 	fmt.Printf("  Header mapping rules:  %d\n", result.HeaderMappingRulesCount)
 	fmt.Printf("  Max tokens limit:      %d\n", result.MaxTokensLimit)
+	if result.Proxy != nil && !result.Proxy.IsEmpty() {
+		fmt.Printf("  Proxy:                 %s\n", formatProviderProxyDisplay(result.Proxy))
+	} else {
+		fmt.Printf("  Proxy:                 (not set)\n")
+	}
 	if result.SupportsMaxOutputTokens != nil {
 		fmt.Printf("  Supports max output:   %t\n", *result.SupportsMaxOutputTokens)
 	}
@@ -733,6 +1000,94 @@ func renderProviderDefaultResult(result *config.ProviderDefaultResult, outputOpt
 	if result.PreviousDefault != "" {
 		fmt.Printf("Previous default: %s\n", result.PreviousDefault)
 	}
+}
+
+func renderProviderProxyResult(result *config.ProviderProxyResult, outputOptions structuredOutputOptions) {
+	if isJSONOutputFormat(outputOptions.Format) {
+		printCommandJSONOutput("provider proxy", outputOptions.Envelope, result)
+		return
+	}
+	if result.Removed {
+		fmt.Printf("Removed proxy for provider: %s\n", result.Name)
+		if result.ConfigPath != "" {
+			fmt.Printf("Config: %s\n", result.ConfigPath)
+		}
+		return
+	}
+	fmt.Printf("Provider: %s\n", result.Name)
+	if result.Proxy == nil || result.Proxy.IsEmpty() {
+		fmt.Println("Proxy: (not set)")
+	} else {
+		fmt.Printf("Proxy: %s\n", formatProviderProxyDisplay(result.Proxy))
+	}
+	if result.ConfigPath != "" {
+		fmt.Printf("Config: %s\n", result.ConfigPath)
+	}
+}
+
+// renderGlobalProxyResult renders providers.proxy set/remove results.
+func renderGlobalProxyResult(result *config.GlobalProxyResult, outputOptions structuredOutputOptions) {
+	if isJSONOutputFormat(outputOptions.Format) {
+		printCommandJSONOutput("provider proxy global", outputOptions.Envelope, result)
+		return
+	}
+	if result.Removed {
+		fmt.Println("Removed global proxy (providers.proxy)")
+	} else {
+		fmt.Printf("Global proxy: %s\n", formatProviderProxyDisplay(result.Proxy))
+	}
+	if result.ConfigPath != "" {
+		fmt.Printf("Config: %s\n", result.ConfigPath)
+	}
+}
+
+// formatProviderProxyDisplay renders a proxy config with passwords masked,
+// e.g. "enabled (http=http://127.0.0.1:7890, https=http://user:****@proxy:8080)".
+func formatProviderProxyDisplay(proxy *config.ProxyConfig) string {
+	if proxy == nil || proxy.IsEmpty() {
+		return "(not set)"
+	}
+	state := "disabled"
+	if proxy.Enabled {
+		state = "enabled"
+	}
+	var parts []string
+	if strings.TrimSpace(proxy.HTTP) != "" {
+		parts = append(parts, "http="+maskProxyURLForDisplay(proxy.HTTP))
+	}
+	if strings.TrimSpace(proxy.HTTPS) != "" {
+		parts = append(parts, "https="+maskProxyURLForDisplay(proxy.HTTPS))
+	}
+	if strings.TrimSpace(proxy.NoProxy) != "" {
+		parts = append(parts, "no_proxy="+strings.TrimSpace(proxy.NoProxy))
+	}
+	if len(parts) == 0 {
+		return state
+	}
+	return state + " (" + strings.Join(parts, ", ") + ")"
+}
+
+func maskProxyURLForDisplay(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return raw
+	}
+	if parsed.User != nil {
+		if _, has := parsed.User.Password(); has {
+			parsed.User = url.UserPassword(parsed.User.Username(), "****")
+		}
+	}
+	return parsed.String()
+}
+
+// changedStringFlag returns a pointer to the flag value only when the flag was
+// explicitly provided, so unset flags do not overwrite existing config values.
+func changedStringFlag(cmd *cobra.Command, name string) *string {
+	if !cmd.Flags().Changed(name) {
+		return nil
+	}
+	value := strings.TrimSpace(stringFlag(cmd, name))
+	return &value
 }
 
 func emptyIfBlank(value string) string {

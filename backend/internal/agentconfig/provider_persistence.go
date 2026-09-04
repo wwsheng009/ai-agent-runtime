@@ -14,18 +14,23 @@ import (
 // ProviderConfigUpdate describes a partial update to providers.items.<name>.
 // Nil fields are not touched, allowing callers to preserve unrelated provider keys.
 type ProviderConfigUpdate struct {
-	Name                  string
-	SetDefaultProvider    bool
-	Enabled               *bool
-	Protocol              *string
-	CompatibilityProfile  *string
-	BaseURL               *string
-	APIPath               *string
-	ForwardURL            *string
-	APIKey                *string
-	APIKeyRef             *string
-	AuthMode              *string
-	AuthRef               *string
+	Name                 string
+	SetDefaultProvider   bool
+	Enabled              *bool
+	Protocol             *string
+	CompatibilityProfile *string
+	BaseURL              *string
+	APIPath              *string
+	ForwardURL           *string
+	APIKey               *string
+	APIKeyRef            *string
+	AuthMode             *string
+	AuthRef              *string
+	// Proxy writes the provider-level proxy override (providers.items.<name>.proxy).
+	// Nil leaves the proxy node untouched.
+	Proxy *ProxyConfig
+	// ClearProxy removes the provider-level proxy node entirely.
+	ClearProxy            bool
 	ModelsPath            *string
 	ModelsVerifiedAt      *string
 	SupportedModels       *[]string
@@ -139,6 +144,11 @@ func applyProviderConfigYAMLUpdate(node *yaml.Node, update ProviderConfigUpdate)
 	upsertOptionalStringYAMLValue(node, "api_key_ref", update.APIKeyRef)
 	upsertOptionalStringYAMLValue(node, "auth_mode", update.AuthMode)
 	upsertOptionalStringYAMLValue(node, "auth_ref", update.AuthRef)
+	if update.ClearProxy {
+		removeYAMLMappingValue(node, "proxy")
+	} else if update.Proxy != nil {
+		upsertYAMLMappingValue(node, "proxy", providerProxyYAMLNode(*update.Proxy))
+	}
 	upsertOptionalStringYAMLValue(node, "models_path", update.ModelsPath)
 	upsertOptionalStringYAMLValue(node, "models_verified_at", update.ModelsVerifiedAt)
 	if update.SupportedModels != nil {
@@ -184,6 +194,18 @@ func applyProviderConfigYAMLUpdate(node *yaml.Node, update ProviderConfigUpdate)
 	} else if update.Account != nil {
 		upsertYAMLMappingValue(node, "account", providerAccountSnapshotYAMLNode(*update.Account))
 	}
+}
+
+// providerProxyYAMLNode builds a providers.items.<name>.proxy YAML node.
+// Enabled is always written explicitly so that a disabled proxy (e.g. after
+// --disable) overrides a previously enabled one and the global providers.proxy.
+func providerProxyYAMLNode(proxy ProxyConfig) *yaml.Node {
+	node := &yaml.Node{Kind: yaml.MappingNode}
+	upsertNonZeroStringYAMLValue(node, "http", proxy.HTTP)
+	upsertNonZeroStringYAMLValue(node, "https", proxy.HTTPS)
+	upsertNonZeroStringYAMLValue(node, "no_proxy", proxy.NoProxy)
+	upsertYAMLMappingValue(node, "enabled", boolYAMLNode(proxy.Enabled))
+	return node
 }
 
 func providerAccountSnapshotYAMLNode(snapshot ProviderAccountSnapshot) *yaml.Node {

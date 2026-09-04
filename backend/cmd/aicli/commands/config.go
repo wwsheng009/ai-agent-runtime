@@ -179,6 +179,11 @@ func displayProvider(cfg *config.Config, providerName string, showModels bool) {
 	fmt.Printf("Base URL:        %s\n", provider.BaseURL)
 	fmt.Printf("API Path:        %s\n", provider.APIPath)
 	fmt.Printf("Forward URL:     %s\n", provider.ForwardURL)
+	if provider.Proxy != nil {
+		fmt.Printf("Proxy:           %s\n", formatProviderProxyDisplay(provider.Proxy))
+	} else {
+		fmt.Println("Proxy:           (not set)")
+	}
 	if strings.TrimSpace(provider.APIKeyRef) != "" {
 		fmt.Printf("API key ref:     %s\n", provider.APIKeyRef)
 	}

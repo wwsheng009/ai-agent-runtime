@@ -170,6 +170,92 @@ aicli doctor subagent-route --difficulty hard --goal "review auth changes" --jso
 - `doctor provider`：对指定 provider 跑可复现调用矩阵，适合排查 401、超时、工具链是否暴露
 - `doctor subagent-route`：只 dry-run 路由结果，不会真正调模型
 
+## 10. 网络代理（proxy）怎么配
+
+支持两级 proxy 配置：
+
+- 全局：`providers.proxy`（对所有未单独配置 proxy 的 provider 生效）
+- provider 级：`providers.items.<name>.proxy`（只对单个 provider 生效，优先级高于全局，运行时与全局合并、provider 级字段优先）
+
+CLI 管理 provider 级 proxy：
+
+```bash
+# 新增/更新：只传部分字段时保留原有其他字段；首次设置默认启用
+aicli provider proxy set openai --http http://127.0.0.1:7890
+aicli provider proxy set openai --http http://127.0.0.1:7890 --https http://127.0.0.1:7890 --no-proxy localhost,api.openai.com
+
+# 保留配置但停用代理（不删除）
+aicli provider proxy set openai --disable
+
+# 删除该 provider 的 proxy（不影响全局 providers.proxy）
+aicli provider proxy remove openai
+
+# 查看当前 proxy（provider 详情里会显示）
+aicli provider show openai
+aicli config --provider openai --no-tui
+```
+
+CLI 管理全局 proxy：
+
+```bash
+# 设置全局代理（对所有未单独配置 proxy 的 provider 生效）
+aicli provider proxy global set --http http://127.0.0.1:7890
+aicli provider proxy global set --http http://127.0.0.1:7890 --https http://127.0.0.1:7890 --no-proxy localhost,127.0.0.1
+
+# 只传部分字段时保留其余全局字段（首次设置默认启用）
+aicli provider proxy global set --disable          # 保留配置但停用
+aicli provider proxy global set --http ""          # 清空 http 字段
+
+# 删除全局 proxy（providers.proxy；不影响 provider 级 proxy）
+aicli provider proxy global remove
+```
+
+在 `aicli config` 交互界面里也可以配置 provider 级 proxy：
+
+```text
+aicli config            # 进入交互界面（默认 TUI）
+  2. Provider 管理       → 输入 provider 编号/名称
+  p. 配置代理 (proxy)      → 进入代理菜单
+    1. HTTP 代理          输入代理地址（回车保留，clear 清除）
+    2. HTTPS 代理         同上
+    3. no_proxy           同上
+    4. 启用/禁用          true/false
+    r. 删除该 provider 的 proxy（回退到全局代理，需确认）
+    b. 返回
+```
+
+全局 proxy 在 `aicli config` 主菜单 5 里管理：
+
+```text
+aicli config
+  5. 全局代理 (providers.proxy)
+    1. HTTP 代理    输入代理地址（回车保留，clear 清除）
+    2. HTTPS 代理   同上
+    3. no_proxy     同上
+    4. 启用/禁用    true/false
+    r. 删除全局 proxy（需确认；删除后相关 provider 不再使用代理）
+    b. 返回
+```
+
+交互中新建的 proxy 默认启用（`enabled: true`）；仅输入一个字段时，其他已配置字段保持不变，
+`clear` 可单独清除某个字段。配置会立即写入当前 `config.yaml`。
+
+代理地址支持 `http://`、`https://`、`socks5://` 三种 scheme，设置时会做格式校验；
+URL 中的密码在命令回显里会被打码。也可以直接编辑配置文件：
+
+```yaml
+providers:
+  proxy:                # 全局代理：对未单独配置 proxy 的 provider 生效
+    http: http://127.0.0.1:7890
+    https: http://127.0.0.1:7890
+    enabled: true
+  items:
+    openai:
+      proxy:
+        http: http://127.0.0.2:7890   # provider 级优先于全局
+        enabled: true
+```
+
 ## 相关文档
 
 - [quickstart.md](./quickstart.md)

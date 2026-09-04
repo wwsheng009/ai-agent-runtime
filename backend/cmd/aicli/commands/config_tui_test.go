@@ -369,3 +369,267 @@ func TestConfigTUI_ChatPreferences(t *testing.T) {
 		t.Fatalf("expected stream=false, got %v", chat.Stream)
 	}
 }
+func TestConfigTUI_ProviderProxySet(t *testing.T) {
+	cfg, path := writeConfigTUITestConfig(t)
+	input := strings.NewReader(strings.Join([]string{
+		"2", // providers
+		"1", // alpha detail
+		"p", // proxy menu
+		"1", // set http
+		"http://127.0.0.1:7890",
+		"2", // set https
+		"https://user:pass@proxy.example.com:8443",
+		"3", // set no_proxy
+		"localhost,127.0.0.1",
+		"b", // back to provider detail
+		"b", // back to providers
+		"b", // back to main
+		"q",
+		"",
+	}, "\n"))
+	var output bytes.Buffer
+
+	if err := runConfigTUI(input, &output, cfg); err != nil {
+		t.Fatalf("runConfigTUI: %v\noutput:\n%s", err, output.String())
+	}
+	loaded, err := config.InitGlobalConfig(path)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	proxy := loaded.Providers.Items["alpha"].Proxy
+	if proxy == nil {
+		t.Fatalf("expected alpha proxy, got nil\noutput:\n%s", output.String())
+	}
+	if proxy.HTTP != "http://127.0.0.1:7890" {
+		t.Fatalf("unexpected http: %q", proxy.HTTP)
+	}
+	if proxy.HTTPS != "https://user:pass@proxy.example.com:8443" {
+		t.Fatalf("unexpected https: %q", proxy.HTTPS)
+	}
+	if proxy.NoProxy != "localhost,127.0.0.1" {
+		t.Fatalf("unexpected no_proxy: %q", proxy.NoProxy)
+	}
+	if !proxy.Enabled {
+		t.Fatal("expected new proxy enabled by default")
+	}
+	if !strings.Contains(output.String(), "已保存 HTTP 代理") {
+		t.Fatalf("expected save notice in output:\n%s", output.String())
+	}
+}
+
+func TestConfigTUI_ProviderProxyDisableKeepsFields(t *testing.T) {
+	cfg, path := writeConfigTUITestConfig(t)
+	httpURL := "http://127.0.0.1:7890"
+	if _, err := config.SetProviderProxyConfig(path, "alpha", config.ProviderProxyUpdate{HTTP: &httpURL}); err != nil {
+		t.Fatalf("seed proxy: %v", err)
+	}
+	cfg, err := config.InitGlobalConfig(path)
+	if err != nil {
+		t.Fatalf("reload seeded config: %v", err)
+	}
+	input := strings.NewReader(strings.Join([]string{
+		"2", // providers
+		"1", // alpha detail
+		"p", // proxy menu
+		"4", // enabled
+		"false",
+		"b",
+		"b",
+		"b",
+		"q",
+		"",
+	}, "\n"))
+	var output bytes.Buffer
+
+	if err := runConfigTUI(input, &output, cfg); err != nil {
+		t.Fatalf("runConfigTUI: %v\noutput:\n%s", err, output.String())
+	}
+	loaded, err := config.InitGlobalConfig(path)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	proxy := loaded.Providers.Items["alpha"].Proxy
+	if proxy == nil {
+		t.Fatalf("expected alpha proxy to remain\noutput:\n%s", output.String())
+	}
+	if proxy.HTTP != httpURL {
+		t.Fatalf("expected http preserved, got %q", proxy.HTTP)
+	}
+	if proxy.Enabled {
+		t.Fatal("expected proxy disabled")
+	}
+}
+
+func TestConfigTUI_ProviderProxyRemove(t *testing.T) {
+	cfg, path := writeConfigTUITestConfig(t)
+	httpURL := "http://127.0.0.1:7890"
+	if _, err := config.SetProviderProxyConfig(path, "alpha", config.ProviderProxyUpdate{HTTP: &httpURL}); err != nil {
+		t.Fatalf("seed proxy: %v", err)
+	}
+	cfg, err := config.InitGlobalConfig(path)
+	if err != nil {
+		t.Fatalf("reload seeded config: %v", err)
+	}
+	input := strings.NewReader(strings.Join([]string{
+		"2", // providers
+		"1", // alpha detail
+		"p", // proxy menu
+		"r", // remove proxy
+		"y", // confirm
+		"b",
+		"b",
+		"b",
+		"q",
+		"",
+	}, "\n"))
+	var output bytes.Buffer
+
+	if err := runConfigTUI(input, &output, cfg); err != nil {
+		t.Fatalf("runConfigTUI: %v\noutput:\n%s", err, output.String())
+	}
+	loaded, err := config.InitGlobalConfig(path)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if loaded.Providers.Items["alpha"].Proxy != nil {
+		t.Fatalf("expected alpha proxy removed, got %+v\noutput:\n%s", loaded.Providers.Items["alpha"].Proxy, output.String())
+	}
+	if !strings.Contains(output.String(), "已删除 proxy: alpha") {
+		t.Fatalf("expected removal notice in output:\n%s", output.String())
+	}
+}
+
+func TestConfigTUI_ProviderProxyInvalidURLShowsError(t *testing.T) {
+	cfg, path := writeConfigTUITestConfig(t)
+	input := strings.NewReader(strings.Join([]string{
+		"2", // providers
+		"1", // alpha detail
+		"p", // proxy menu
+		"1", // set http
+		"ftp://not-allowed",
+		"b",
+		"b",
+		"b",
+		"q",
+		"",
+	}, "\n"))
+	var output bytes.Buffer
+
+	if err := runConfigTUI(input, &output, cfg); err != nil {
+		t.Fatalf("runConfigTUI: %v\noutput:\n%s", err, output.String())
+	}
+	if !strings.Contains(output.String(), "unsupported proxy url scheme") {
+		t.Fatalf("expected validation error in output:\n%s", output.String())
+	}
+	loaded, err := config.InitGlobalConfig(path)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if loaded.Providers.Items["alpha"].Proxy != nil {
+		t.Fatalf("expected no proxy persisted, got %+v", loaded.Providers.Items["alpha"].Proxy)
+	}
+}
+func TestConfigTUI_GlobalProxySet(t *testing.T) {
+	cfg, path := writeConfigTUITestConfig(t)
+	input := strings.NewReader(strings.Join([]string{
+		"5", // global proxy
+		"1", // set http
+		"http://127.0.0.1:7890",
+		"2", // set https
+		"https://proxy.example.com:8443",
+		"3", // set no_proxy
+		"localhost,127.0.0.1",
+		"b", // back to main
+		"q",
+		"",
+	}, "\n"))
+	var output bytes.Buffer
+
+	if err := runConfigTUI(input, &output, cfg); err != nil {
+		t.Fatalf("runConfigTUI: %v\noutput:\n%s", err, output.String())
+	}
+	loaded, err := config.InitGlobalConfig(path)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	proxy := loaded.Providers.Proxy
+	if proxy.HTTP != "http://127.0.0.1:7890" {
+		t.Fatalf("unexpected http: %q", proxy.HTTP)
+	}
+	if proxy.HTTPS != "https://proxy.example.com:8443" {
+		t.Fatalf("unexpected https: %q", proxy.HTTPS)
+	}
+	if proxy.NoProxy != "localhost,127.0.0.1" {
+		t.Fatalf("unexpected no_proxy: %q", proxy.NoProxy)
+	}
+	if !proxy.Enabled {
+		t.Fatal("expected new global proxy enabled by default")
+	}
+	if !strings.Contains(output.String(), "全局代理") {
+		t.Fatalf("expected global proxy menu output:\n%s", output.String())
+	}
+}
+
+func TestConfigTUI_GlobalProxyRemove(t *testing.T) {
+	cfg, path := writeConfigTUITestConfig(t)
+	httpURL := "http://127.0.0.1:7890"
+	if _, err := config.SetGlobalProxyConfig(path, config.GlobalProxyUpdate{HTTP: &httpURL}); err != nil {
+		t.Fatalf("seed global proxy: %v", err)
+	}
+	cfg, err := config.InitGlobalConfig(path)
+	if err != nil {
+		t.Fatalf("reload seeded config: %v", err)
+	}
+	input := strings.NewReader(strings.Join([]string{
+		"5", // global proxy
+		"r", // remove
+		"y", // confirm
+		"b", // back to main
+		"q",
+		"",
+	}, "\n"))
+	var output bytes.Buffer
+
+	if err := runConfigTUI(input, &output, cfg); err != nil {
+		t.Fatalf("runConfigTUI: %v\noutput:\n%s", err, output.String())
+	}
+	loaded, err := config.InitGlobalConfig(path)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if !loaded.Providers.Proxy.IsEmpty() {
+		t.Fatalf("expected global proxy removed, got %+v", loaded.Providers.Proxy)
+	}
+	if !strings.Contains(output.String(), "已删除全局 proxy") {
+		t.Fatalf("expected removal notice in output:\n%s", output.String())
+	}
+}
+
+func TestConfigTUI_GlobalProxyInvalidURLShowsError(t *testing.T) {
+	cfg, path := writeConfigTUITestConfig(t)
+	input := strings.NewReader(strings.Join([]string{
+		"5", // global proxy
+		"1", // set http
+		"ftp://proxy.example.com:21",
+		"1",                     // set http again after the error
+		"http://127.0.0.1:7890", // valid replacement
+		"b",                     // back to main
+		"q",
+		"",
+	}, "\n"))
+	var output bytes.Buffer
+
+	if err := runConfigTUI(input, &output, cfg); err != nil {
+		t.Fatalf("runConfigTUI: %v\noutput:\n%s", err, output.String())
+	}
+	if !strings.Contains(output.String(), "unsupported proxy url scheme") {
+		t.Fatalf("expected proxy scheme error notice in output:\n%s", output.String())
+	}
+	loaded, err := config.InitGlobalConfig(path)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if loaded.Providers.Proxy.HTTP != "http://127.0.0.1:7890" {
+		t.Fatalf("invalid URL must not be persisted, got %+v", loaded.Providers.Proxy)
+	}
+}

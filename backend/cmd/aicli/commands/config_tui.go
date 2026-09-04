@@ -47,6 +47,7 @@ func (t *configTUI) run() error {
 		fmt.Fprintln(t.writer, "  2. Provider 管理")
 		fmt.Fprintln(t.writer, "  3. AICLI Chat 偏好")
 		fmt.Fprintln(t.writer, "  4. Provider Groups")
+		fmt.Fprintln(t.writer, "  5. 全局代理 (proxy)")
 		fmt.Fprintln(t.writer, "  q. 退出")
 		input, err := t.prompt("config> ")
 		if err != nil {
@@ -67,6 +68,10 @@ func (t *configTUI) run() error {
 		case "4", "groups", "g":
 			t.renderProviderGroups()
 			t.pause()
+		case "5", "global", "gp", "proxy":
+			if err := t.runGlobalProxy(); err != nil {
+				return err
+			}
 		case "q", "quit", "exit":
 			fmt.Fprintln(t.writer, "已退出配置管理。")
 			return nil
@@ -125,6 +130,7 @@ func (t *configTUI) runProviderDetail(name string) error {
 		fmt.Fprintln(t.writer, "  d. 设为默认 provider")
 		fmt.Fprintln(t.writer, "  m. 修改常用字段")
 		fmt.Fprintln(t.writer, "  a. 高级编辑")
+		fmt.Fprintln(t.writer, "  p. 配置代理 (proxy)")
 		fmt.Fprintln(t.writer, "  x. 删除该 provider")
 		fmt.Fprintln(t.writer, "  b. 返回")
 		input, err := t.prompt("provider> ")
@@ -134,6 +140,11 @@ func (t *configTUI) runProviderDetail(name string) error {
 		switch strings.ToLower(input) {
 		case "b", "back":
 			return nil
+		case "p", "proxy":
+			if err := t.editProviderProxy(name); err != nil {
+				t.notice(err.Error())
+				continue
+			}
 		case "e", "enable", "toggle":
 			result, err := config.SetProvidersEnabledConfig(t.cfg.ConfigFilePath, []string{name}, !provider.Enabled)
 			if err != nil {
@@ -480,6 +491,225 @@ func (t *configTUI) advancedEditProvider(name string) error {
 	}
 }
 
+func (t *configTUI) editProviderProxy(name string) error {
+	for {
+		provider, ok := t.cfg.Providers.Items[name]
+		if !ok {
+			return fmt.Errorf("provider 已不存在: %s", name)
+		}
+		current := provider.Proxy
+		t.printHeader("代理配置: " + name)
+		fmt.Fprintf(t.writer, "当前代理: %s\n", formatProviderProxyDisplay(current))
+		fmt.Fprintf(t.writer, "全局代理: %s\n", formatProviderProxyDisplay(&t.cfg.Providers.Proxy))
+		if current == nil || current.IsEmpty() {
+			fmt.Fprintln(t.writer, "提示: 该 provider 未配置自己的代理，将使用全局代理；新增时默认启用 (enabled=true)。")
+		}
+		fmt.Fprintln(t.writer)
+		fmt.Fprintln(t.writer, "  1. HTTP 代理")
+		fmt.Fprintln(t.writer, "  2. HTTPS 代理")
+		fmt.Fprintln(t.writer, "  3. no_proxy")
+		fmt.Fprintln(t.writer, "  4. 启用/禁用")
+		fmt.Fprintln(t.writer, "  r. 删除该 provider 的 proxy（回退到全局代理）")
+		fmt.Fprintln(t.writer, "  b. 返回")
+		input, err := t.prompt("proxy> ")
+		if err != nil {
+			return err
+		}
+		switch strings.ToLower(input) {
+		case "b", "back":
+			return nil
+		case "1", "http":
+			value, ok, err := t.promptStringUpdate("HTTP 代理", proxyFieldForDisplay(current, func(p *config.ProxyConfig) string { return p.HTTP }))
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue
+			}
+			if _, err := config.SetProviderProxyConfig(t.cfg.ConfigFilePath, name, config.ProviderProxyUpdate{HTTP: &value}); err != nil {
+				t.notice(err.Error())
+				continue
+			}
+			t.notice("已保存 HTTP 代理")
+		case "2", "https":
+			value, ok, err := t.promptStringUpdate("HTTPS 代理", proxyFieldForDisplay(current, func(p *config.ProxyConfig) string { return p.HTTPS }))
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue
+			}
+			if _, err := config.SetProviderProxyConfig(t.cfg.ConfigFilePath, name, config.ProviderProxyUpdate{HTTPS: &value}); err != nil {
+				t.notice(err.Error())
+				continue
+			}
+			t.notice("已保存 HTTPS 代理")
+		case "3", "no_proxy", "no-proxy":
+			value, ok, err := t.promptStringUpdate("no_proxy", proxyFieldForDisplay(current, func(p *config.ProxyConfig) string { return p.NoProxy }))
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue
+			}
+			if _, err := config.SetProviderProxyConfig(t.cfg.ConfigFilePath, name, config.ProviderProxyUpdate{NoProxy: &value}); err != nil {
+				t.notice(err.Error())
+				continue
+			}
+			t.notice("已保存 no_proxy")
+		case "4", "enabled", "enable", "disable":
+			enabled := false
+			if current != nil {
+				enabled = current.Enabled
+			}
+			value, ok, err := t.promptBoolUpdate("启用代理", enabled)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue
+			}
+			if _, err := config.SetProviderProxyConfig(t.cfg.ConfigFilePath, name, config.ProviderProxyUpdate{Enabled: &value}); err != nil {
+				t.notice(err.Error())
+				continue
+			}
+			t.notice("已保存启用状态")
+		case "r", "remove", "delete":
+			confirmed, err := t.promptBoolDefault("确认删除该 provider 的 proxy?", false)
+			if err != nil {
+				return err
+			}
+			if !confirmed {
+				t.notice("已取消")
+				continue
+			}
+			result, err := config.RemoveProviderProxyConfig(t.cfg.ConfigFilePath, name)
+			if err != nil {
+				t.notice(err.Error())
+				continue
+			}
+			t.notice("已删除 proxy: " + result.Name)
+		default:
+			t.notice("未知选项: " + input)
+			continue
+		}
+		if err := t.reload(); err != nil {
+			return err
+		}
+	}
+}
+
+// runGlobalProxy manages providers.proxy, the global proxy that applies to
+// every provider without a proxy of its own.
+func (t *configTUI) runGlobalProxy() error {
+	for {
+		t.printHeader("全局代理 (providers.proxy)")
+		fmt.Fprintf(t.writer, "当前全局代理: %s\n", formatProviderProxyDisplay(&t.cfg.Providers.Proxy))
+		if t.cfg.Providers.Proxy.IsEmpty() {
+			fmt.Fprintln(t.writer, "提示: 全局代理对所有未配置自身 proxy 的 provider 生效；provider 级 proxy 优先。新增时默认启用 (enabled=true)。")
+		}
+		fmt.Fprintln(t.writer)
+		fmt.Fprintln(t.writer, "  1. HTTP 代理")
+		fmt.Fprintln(t.writer, "  2. HTTPS 代理")
+		fmt.Fprintln(t.writer, "  3. no_proxy")
+		fmt.Fprintln(t.writer, "  4. 启用/禁用")
+		fmt.Fprintln(t.writer, "  r. 删除全局 proxy")
+		fmt.Fprintln(t.writer, "  b. 返回")
+		input, err := t.prompt("global-proxy> ")
+		if err != nil {
+			return err
+		}
+		switch strings.ToLower(input) {
+		case "b", "back":
+			return nil
+		case "1", "http":
+			value, ok, err := t.promptStringUpdate("HTTP 代理", proxyFieldForDisplay(&t.cfg.Providers.Proxy, func(p *config.ProxyConfig) string { return p.HTTP }))
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue
+			}
+			if _, err := config.SetGlobalProxyConfig(t.cfg.ConfigFilePath, config.GlobalProxyUpdate{HTTP: &value}); err != nil {
+				t.notice(err.Error())
+				continue
+			}
+			t.notice("已保存全局 HTTP 代理")
+		case "2", "https":
+			value, ok, err := t.promptStringUpdate("HTTPS 代理", proxyFieldForDisplay(&t.cfg.Providers.Proxy, func(p *config.ProxyConfig) string { return p.HTTPS }))
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue
+			}
+			if _, err := config.SetGlobalProxyConfig(t.cfg.ConfigFilePath, config.GlobalProxyUpdate{HTTPS: &value}); err != nil {
+				t.notice(err.Error())
+				continue
+			}
+			t.notice("已保存全局 HTTPS 代理")
+		case "3", "no_proxy", "no-proxy":
+			value, ok, err := t.promptStringUpdate("no_proxy", proxyFieldForDisplay(&t.cfg.Providers.Proxy, func(p *config.ProxyConfig) string { return p.NoProxy }))
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue
+			}
+			if _, err := config.SetGlobalProxyConfig(t.cfg.ConfigFilePath, config.GlobalProxyUpdate{NoProxy: &value}); err != nil {
+				t.notice(err.Error())
+				continue
+			}
+			t.notice("已保存全局 no_proxy")
+		case "4", "enabled", "enable", "disable":
+			value, ok, err := t.promptBoolUpdate("启用代理", t.cfg.Providers.Proxy.Enabled)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue
+			}
+			if _, err := config.SetGlobalProxyConfig(t.cfg.ConfigFilePath, config.GlobalProxyUpdate{Enabled: &value}); err != nil {
+				t.notice(err.Error())
+				continue
+			}
+			t.notice("已保存全局启用状态")
+		case "r", "remove", "delete":
+			confirmed, err := t.promptBoolDefault("确认删除全局 proxy?", false)
+			if err != nil {
+				return err
+			}
+			if !confirmed {
+				t.notice("已取消")
+				continue
+			}
+			result, err := config.RemoveGlobalProxyConfig(t.cfg.ConfigFilePath)
+			if err != nil {
+				t.notice(err.Error())
+				continue
+			}
+			if result.Removed {
+				t.notice("已删除全局 proxy")
+			}
+		default:
+			t.notice("未知选项: " + input)
+			continue
+		}
+		if err := t.reload(); err != nil {
+			return err
+		}
+	}
+}
+
+// proxyFieldForDisplay returns the current proxy field value for a prompt
+// placeholder, masking credentials when the proxy is set.
+func proxyFieldForDisplay(proxy *config.ProxyConfig, pick func(*config.ProxyConfig) string) string {
+	if proxy == nil {
+		return ""
+	}
+	return maskProxyURLForDisplay(pick(proxy))
+}
+
 func (t *configTUI) removeProvidersInteractive(providers []config.ProviderSummary) error {
 	selected, err := promptProviderRemoveSelection(t.reader, t.writer, providers)
 	if err != nil {
@@ -610,6 +840,7 @@ func (t *configTUI) renderOverview() {
 	fmt.Fprintf(t.writer, "Config file:      %s\n", emptyIfBlank(t.cfg.ConfigFilePath))
 	fmt.Fprintf(t.writer, "Server:           %s %s:%d\n", emptyIfBlank(t.cfg.Server.Name), emptyIfBlank(t.cfg.Server.Host), t.cfg.Server.Port)
 	fmt.Fprintf(t.writer, "Providers:        %d\n", len(t.cfg.Providers.Items))
+	fmt.Fprintf(t.writer, "Global proxy:     %s\n", formatProviderProxyDisplay(&t.cfg.Providers.Proxy))
 	fmt.Fprintf(t.writer, "Default provider: %s\n", emptyIfBlank(t.cfg.Providers.DefaultProvider))
 	fmt.Fprintf(t.writer, "Provider groups:  %d\n", len(t.cfg.ProviderGroups))
 	if t.cfg.AICLI != nil && t.cfg.AICLI.Theme != nil {
@@ -663,6 +894,7 @@ func (t *configTUI) renderProviderDetail(name string, provider config.Provider) 
 	fmt.Fprintf(t.writer, "Model mappings:       %d\n", len(provider.ModelMappings))
 	fmt.Fprintf(t.writer, "Model capabilities:   %d\n", len(provider.ModelCapabilities))
 	fmt.Fprintf(t.writer, "Max tokens limit:     %d\n", provider.GetMaxTokensLimit())
+	fmt.Fprintf(t.writer, "Proxy:                %s\n", formatProviderProxyDisplay(provider.Proxy))
 }
 
 func (t *configTUI) reload() error {
