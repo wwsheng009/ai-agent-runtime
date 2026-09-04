@@ -789,7 +789,8 @@ function startTypeTimer() {
   var configData = null;
   var cfgReasoningDraft = {}; // model -> { reasoning_model, reasoning_efforts, default_reasoning_effort, compact_reasoning_effort }
   var cfgEditorSize = null;   // 弹窗用户调整过的尺寸 {w, h}，会话内记忆
-  var cfgApiKeySaved = false;        // 当前编辑的 provider 是否已保存 api key
+  var cfgApiKeySaved = false;        // 当前编辑的 provider 是否已配置凭据
+  var cfgApiKeySource = "";         // 凭据来源：inline / pool / key_store / oauth
   var cfgApiKeyClearPending = false; // 用户点了「清除」等待保存生效
 
   function configEl(id) { return document.getElementById(id); }
@@ -956,9 +957,11 @@ function startTypeTimer() {
     if (enabled) { enabled.checked = p ? p.enabled : true; }
     var setDefault = configEl("cfg-provider-set-default");
     if (setDefault) { setDefault.checked = !!(p && p.name === configData.default_provider); }
-    // API key：明文不回传，输入框始终为空；状态行显示已保存/未配置，
-    // 已保存时可一键标记「清除」（cfgApiKeyClearPending，保存时移除）。
+    // API key：明文不回传，输入框始终为空；状态行按凭据来源显示
+    // 已保存（Key Store / OAuth / 密钥池 / 内联）或未配置，
+    // 已保存时可一键标记「清除」（cfgApiKeyClearPending，保存时移除全部来源）。
     cfgApiKeySaved = !!(p && p.api_key_set);
+    cfgApiKeySource = (p && p.api_key_source) || "";
     cfgApiKeyClearPending = false;
     var apiKey = configEl("cfg-provider-api-key");
     if (apiKey) { apiKey.value = ""; apiKey.disabled = false; }
@@ -986,8 +989,20 @@ function startTypeTimer() {
     setCfgStatus(configEl("cfg-provider-status"), "", "");
   }
 
-  // 刷新 API key 状态行：已保存（可一键清除）/ 未配置 / 将清除（待定态，
-  // 保存时发送空串移除密钥）。输入框在「将清除」时禁用并清空。
+  // 刷新 API key 状态行：已保存（按来源区分 chip）/ 未配置 / 将清除（待定态）。
+  // placeholder 与 hint 随状态动态变化；「将清除」时禁用并清空输入框。
+  var cfgApiKeySourceChip = {
+    inline: "已保存",
+    pool: "已保存（密钥池）",
+    key_store: "已保存（Key Store）",
+    oauth: "已保存（OAuth）"
+  };
+  var cfgApiKeySourceHint = {
+    inline: "凭据以内联 api_key 保存",
+    pool: "使用 api_keys 密钥池",
+    key_store: "凭据存放在 Key Store（api_key_ref）",
+    oauth: "使用 OAuth access token（auth_ref）"
+  };
   function renderAPIKeyStatus() {
     var statusEl = configEl("cfg-provider-api-key-status");
     var hint = configEl("cfg-provider-api-key-hint");
@@ -995,13 +1010,17 @@ function startTypeTimer() {
     if (input) {
       input.disabled = cfgApiKeyClearPending;
       if (cfgApiKeyClearPending) { input.value = ""; }
+      input.placeholder = cfgApiKeyClearPending
+        ? "已标记清除"
+        : (cfgApiKeySaved ? "留空则不修改，输入新值覆盖" : "输入新 API Key，保存后生效");
     }
     if (!statusEl) { return; }
     if (cfgApiKeyClearPending) {
       statusEl.innerHTML = '<span class="cfg-key-status pending">将清除</span>' +
         ' <button type="button" class="cfg-key-clear" data-action="clear-api-key">取消</button>';
     } else if (cfgApiKeySaved) {
-      statusEl.innerHTML = '<span class="cfg-key-status saved">已保存</span>' +
+      statusEl.innerHTML = '<span class="cfg-key-status saved">' +
+        (cfgApiKeySourceChip[cfgApiKeySource] || "已保存") + '</span>' +
         ' <button type="button" class="cfg-key-clear" data-action="clear-api-key">清除</button>';
     } else {
       statusEl.textContent = "未配置";
@@ -1009,11 +1028,12 @@ function startTypeTimer() {
     }
     if (!hint) { return; }
     if (cfgApiKeyClearPending) {
-      hint.textContent = "保存后移除已保存的 API Key；「取消」可恢复";
+      hint.textContent = "保存后将移除该 provider 的全部凭据（内联 / Key Store / OAuth / 密钥池）；「取消」可恢复";
     } else if (cfgApiKeySaved) {
-      hint.textContent = "留空则不修改；「清除」可移除";
+      var srcHint = cfgApiKeySourceHint[cfgApiKeySource] || "";
+      hint.textContent = (srcHint ? srcHint + "；" : "") + "留空不修改，「清除」可移除全部凭据";
     } else {
-      hint.textContent = "填入并保存后写入本地配置";
+      hint.textContent = "填入并保存后写入本地配置；也可通过 api_key_ref（Key Store）或 auth_ref（OAuth）使用存量凭据";
     }
   }
 
@@ -1166,7 +1186,11 @@ function startTypeTimer() {
     if (apiKeyVal) {
       payload.api_key = apiKeyVal;
     } else if (cfgApiKeyClearPending) {
+      // 清除 = 移除全部凭据来源，避免只清内联后仍显示已保存（Key Store / OAuth）。
       payload.api_key = "";
+      payload.api_key_ref = "";
+      payload.auth_ref = "";
+      payload.api_keys = [];
     }
     // Proxy：勾选移除时清除节点，否则整体写回（含 enabled 开关）。
     var removeProxyEl = configEl("cfg-provider-remove-proxy");

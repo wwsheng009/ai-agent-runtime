@@ -26,6 +26,9 @@ type ProviderConfigUpdate struct {
 	APIKeyRef            *string
 	AuthMode             *string
 	AuthRef              *string
+	// APIKeys writes the api_keys pool. Nil leaves the pool untouched;
+	// a non-nil empty slice removes it.
+	APIKeys *[]string
 	// Proxy writes the provider-level proxy override (providers.items.<name>.proxy).
 	// Nil leaves the proxy node untouched.
 	Proxy *ProxyConfig
@@ -144,6 +147,13 @@ func applyProviderConfigYAMLUpdate(node *yaml.Node, update ProviderConfigUpdate)
 	upsertOptionalStringYAMLValue(node, "api_key_ref", update.APIKeyRef)
 	upsertOptionalStringYAMLValue(node, "auth_mode", update.AuthMode)
 	upsertOptionalStringYAMLValue(node, "auth_ref", update.AuthRef)
+	if update.APIKeys != nil {
+		if len(*update.APIKeys) == 0 {
+			removeYAMLMappingValue(node, "api_keys")
+		} else {
+			upsertYAMLMappingValue(node, "api_keys", stringSliceYAMLNode(*update.APIKeys))
+		}
+	}
 	if update.ClearProxy {
 		removeYAMLMappingValue(node, "proxy")
 	} else if update.Proxy != nil {

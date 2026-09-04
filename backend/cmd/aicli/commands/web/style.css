@@ -813,6 +813,14 @@ body.sidebar-collapsed #sidebar {
   border: 1px solid var(--border); border-radius: 6px;
   padding: 8px 10px; background: var(--bg3);
 }
+.cfg-auth-block input[type="password"] {
+  background: var(--bg3); color: var(--fg); border: 1px solid var(--border);
+  border-radius: 4px; padding: 4px 8px; font-family: inherit; font-size: 12px;
+  width: 100%; margin-top: 6px; box-sizing: border-box;
+}
+.cfg-auth-block input[type="password"]:focus {
+  outline: none; border-color: var(--border2);
+}
 .cfg-hint { font-size: 11px; color: var(--fg4); margin-top: 4px; }
 
 /* ---- Provider 编辑弹窗：API key 状态行 + 获取模型列表 ---- */

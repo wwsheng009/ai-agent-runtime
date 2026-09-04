@@ -49,8 +49,10 @@ type chatWebConfigProvider struct {
 	BaseURL    string `json:"base_url"`
 	APIPath    string `json:"api_path"`
 	ForwardURL string `json:"forward_url"`
-	// APIKeySet 只表示 api_key 是否已配置，绝不回传密钥明文。
+	// APIKeySet 表示任一凭据来源（内联 api_key / api_keys 池 / Key Store
+	// api_key_ref / OAuth auth_ref）已配置；绝不回传密钥明文。
 	APIKeySet       bool                 `json:"api_key_set"`
+	APIKeySource    string               `json:"api_key_source,omitempty"`
 	APIKeyRef       string               `json:"api_key_ref,omitempty"`
 	AuthMode        string               `json:"auth_mode,omitempty"`
 	AuthRef         string               `json:"auth_ref,omitempty"`
@@ -99,11 +101,13 @@ type chatWebProviderWriteRequest struct {
 	BaseURL  string `json:"base_url"`
 	APIPath  string `json:"api_path"`
 	// 以下指针字段遵循“nil=不修改、空串=清空、非空=写入”的合并语义。
-	ForwardURL         *string                                `json:"forward_url,omitempty"`
-	APIKey             *string                                `json:"api_key,omitempty"`
-	APIKeyRef          *string                                `json:"api_key_ref,omitempty"`
-	AuthMode           *string                                `json:"auth_mode,omitempty"`
-	AuthRef            *string                                `json:"auth_ref,omitempty"`
+	ForwardURL *string `json:"forward_url,omitempty"`
+	APIKey     *string `json:"api_key,omitempty"`
+	APIKeyRef  *string `json:"api_key_ref,omitempty"`
+	AuthMode   *string `json:"auth_mode,omitempty"`
+	AuthRef    *string `json:"auth_ref,omitempty"`
+	// APIKeys 整体写回 api_keys 池：nil=不修改，非 nil 空数组=清空。
+	APIKeys            *[]string                              `json:"api_keys,omitempty"`
 	Proxy              *chatWebConfigProxy                    `json:"proxy,omitempty"`
 	ClearProxy         bool                                   `json:"clear_proxy,omitempty"`
 	Enabled            *bool                                  `json:"enabled"`
@@ -253,6 +257,31 @@ func chatWebTrimNames(names []string) []string {
 	return out
 }
 
+// providerAPIKeySource 返回该 provider 已配置凭据的来源，解析顺序与
+// agentconfig.Provider.GetAllAPIKeys 一致：
+//   - "oauth"：auth_mode=oauth 且 auth_ref 指向 Key Store 的 OAuth 记录；
+//   - "key_store"：api_key_ref 指向 Key Store 中保存的 api_key 凭据；
+//   - "pool"：api_keys 密钥池；
+//   - "inline"：api_key 内联字段。
+//
+// 只做配置层判断（ref 非空即视为已配置），不读 Key Store 内容，避免快照
+// 渲染引入磁盘 IO 与 store 文件损坏连带失败；空串表示未配置任何来源。
+func providerAPIKeySource(p agentconfig.Provider) string {
+	if strings.EqualFold(strings.TrimSpace(p.AuthMode), agentconfig.AuthKeyTypeOAuth) && strings.TrimSpace(p.AuthRef) != "" {
+		return "oauth"
+	}
+	if strings.TrimSpace(p.APIKeyRef) != "" {
+		return "key_store"
+	}
+	if len(p.APIKeys) > 0 {
+		return "pool"
+	}
+	if strings.TrimSpace(p.APIKey) != "" {
+		return "inline"
+	}
+	return ""
+}
+
 // ---------------------------------------------------------------------------
 // GET /web/api/config — 配置快照
 // ---------------------------------------------------------------------------
@@ -290,6 +319,7 @@ func HandleChatWebAPIConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for name, provider := range cfg.Providers.Items {
+		apiKeySource := providerAPIKeySource(provider)
 		entry := chatWebConfigProvider{
 			Name:            name,
 			Protocol:        strings.TrimSpace(provider.Protocol),
@@ -297,7 +327,8 @@ func HandleChatWebAPIConfig(w http.ResponseWriter, r *http.Request) {
 			BaseURL:         strings.TrimSpace(provider.BaseURL),
 			APIPath:         strings.TrimSpace(provider.APIPath),
 			ForwardURL:      strings.TrimSpace(provider.ForwardURL),
-			APIKeySet:       strings.TrimSpace(provider.APIKey) != "",
+			APIKeySet:       apiKeySource != "",
+			APIKeySource:    apiKeySource,
 			APIKeyRef:       strings.TrimSpace(provider.APIKeyRef),
 			AuthMode:        strings.TrimSpace(provider.AuthMode),
 			AuthRef:         strings.TrimSpace(provider.AuthRef),
@@ -379,6 +410,9 @@ func HandleChatWebAPIConfigProviders(w http.ResponseWriter, r *http.Request) {
 	update.APIKeyRef = req.APIKeyRef
 	update.AuthMode = req.AuthMode
 	update.AuthRef = req.AuthRef
+	if req.APIKeys != nil {
+		update.APIKeys = req.APIKeys
+	}
 	if req.ClearProxy {
 		update.ClearProxy = true
 	} else if req.Proxy != nil {

@@ -160,6 +160,9 @@ func TestHandleChatWebAPIConfig_Snapshot(t *testing.T) {
 	if !alpha.APIKeySet {
 		t.Error("alpha.api_key_set = false, want true（fixture 已写 api_key）")
 	}
+	if alpha.APIKeySource != "key_store" {
+		t.Errorf("alpha.api_key_source = %q, want key_store（api_key_ref 存在时按解析链优先于内联）", alpha.APIKeySource)
+	}
 	if alpha.APIKeyRef != "authref-alpha" || alpha.AuthMode != "api_key" || alpha.AuthRef != "oauth-alpha" {
 		t.Errorf("alpha auth refs mismatch: %+v", alpha)
 	}
@@ -390,13 +393,17 @@ func TestHandleChatWebAPIConfigProviders_UpsertAPIKeyProxy(t *testing.T) {
 }
 
 // TestHandleChatWebAPIConfigProviders_ClearAPIKeyProxy 验证显式清空语义：
-// api_key 空串移除密钥、forward_url 空串清空、clear_proxy 移除 proxy 节点。
+// api_key / api_key_ref / auth_ref 空串与 api_keys 空数组移除全部凭据来源、
+// forward_url 空串清空、clear_proxy 移除 proxy 节点。
 func TestHandleChatWebAPIConfigProviders_ClearAPIKeyProxy(t *testing.T) {
 	withWebConfigTestSession(t, webConfigTestYAML)
 
 	rec := postConfigJSON(t, HandleChatWebAPIConfigProviders, map[string]interface{}{
 		"name":        "alpha",
 		"api_key":     "",
+		"api_key_ref": "",
+		"auth_ref":    "",
+		"api_keys":    []string{},
 		"forward_url": "",
 		"clear_proxy": true,
 	})
@@ -411,11 +418,104 @@ func TestHandleChatWebAPIConfigProviders_ClearAPIKeyProxy(t *testing.T) {
 	if alpha.APIKeySet {
 		t.Error("alpha.api_key_set = true, want false（已清除）")
 	}
+	if alpha.APIKeySource != "" {
+		t.Errorf("alpha.api_key_source = %q, want 空（全部凭据来源已清除）", alpha.APIKeySource)
+	}
 	if alpha.ForwardURL != "" {
 		t.Errorf("alpha.forward_url = %q, want 空（已清除）", alpha.ForwardURL)
 	}
 	if alpha.Proxy != nil {
 		t.Errorf("alpha.proxy = %+v, want nil（已移除节点）", alpha.Proxy)
+	}
+}
+
+// TestHandleChatWebAPIConfigProviders_APIKeySources 验证快照凭据状态覆盖
+// 全部来源：oauth（auth_mode+auth_ref）/ key_store（api_key_ref）/ pool
+// （api_keys）/ inline（api_key）/ 无；api_key_source 与 GetAllAPIKeys 的
+// 解析链顺序一致。
+func TestHandleChatWebAPIConfigProviders_APIKeySources(t *testing.T) {
+	const yaml = `providers:
+  default_provider: none1
+  items:
+    oauth1:
+      enabled: true
+      protocol: openai
+      auth_mode: oauth
+      auth_ref: auth-oauth-1
+    ks1:
+      enabled: true
+      protocol: openai
+      api_key_ref: authref-ks1
+    pool1:
+      enabled: true
+      protocol: openai
+      api_keys:
+        - sk-pool-a
+        - sk-pool-b
+    inline1:
+      enabled: true
+      protocol: openai
+      api_key: sk-inline-1
+    none1:
+      enabled: true
+      protocol: openai
+`
+	path := withWebConfigTestSession(t, yaml)
+
+	rec := httptest.NewRecorder()
+	HandleChatWebAPIConfig(rec, httptest.NewRequest(http.MethodGet, "/web/api/config", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	snap := decodeConfigSnapshot(t, rec.Body.String())
+	got := map[string]chatWebConfigProvider{}
+	for _, p := range snap.Providers {
+		got[p.Name] = p
+	}
+	for _, c := range []struct {
+		name string
+		want string
+	}{
+		{"oauth1", "oauth"},
+		{"ks1", "key_store"},
+		{"pool1", "pool"},
+		{"inline1", "inline"},
+		{"none1", ""},
+	} {
+		p, ok := got[c.name]
+		if !ok {
+			t.Errorf("provider %s missing from snapshot", c.name)
+			continue
+		}
+		if p.APIKeySource != c.want {
+			t.Errorf("%s.api_key_source = %q, want %q", c.name, p.APIKeySource, c.want)
+		}
+		if p.APIKeySet != (c.want != "") {
+			t.Errorf("%s.api_key_set = %v, want %v", c.name, p.APIKeySet, c.want != "")
+		}
+	}
+
+	// 清除 pool1 的密钥池：空数组应移除 api_keys 节点，快照回到未配置。
+	rec2 := postConfigJSON(t, HandleChatWebAPIConfigProviders, map[string]interface{}{
+		"name":     "pool1",
+		"api_keys": []string{},
+	})
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("clear status = %d, want 200; body: %s", rec2.Code, rec2.Body.String())
+	}
+	rec3 := httptest.NewRecorder()
+	HandleChatWebAPIConfig(rec3, httptest.NewRequest(http.MethodGet, "/web/api/config", nil))
+	pool1 := configProviderByName(t, decodeConfigSnapshot(t, rec3.Body.String()), "pool1")
+	if pool1.APIKeySet || pool1.APIKeySource != "" {
+		t.Errorf("pool1 after clear: api_key_set=%v api_key_source=%q, want false/空",
+			pool1.APIKeySet, pool1.APIKeySource)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("re-read config: %v", err)
+	}
+	if strings.Contains(string(raw), "sk-pool-a") {
+		t.Error("api_keys 池清除后 YAML 仍包含旧密钥")
 	}
 }
 
