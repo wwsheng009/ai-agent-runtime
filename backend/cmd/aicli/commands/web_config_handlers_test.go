@@ -596,6 +596,67 @@ func TestHandleChatWebAPIConfigProviders_RefreshRuntimeOnlySession(t *testing.T)
 	}
 }
 
+// TestHandleChatWebAPIConfigProviders_FetchModelsRuntimeOnlySeesDisk 验证
+// RuntimeConfigPath 会话（Config.ConfigFilePath 为空）的读路径：磁盘配置被
+// 外部修改（CLI login / 其他进程写盘）后，fetch-models 与快照 GET 应立即
+// 看到新凭据，而不是启动时的内存快照（内联 key 从内存读，刷新缺失时会
+// 继续用旧 key 验证——表现为“改了 key 还能获取模型列表”）。
+func TestHandleChatWebAPIConfigProviders_FetchModelsRuntimeOnlySeesDisk(t *testing.T) {
+	var authHeader string
+	srv := fetchModelsTestServer(t, &authHeader)
+	defer srv.Close()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	yaml := strings.Replace(webConfigTestYAML, "https://api.example.com", srv.URL, 1)
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	session := newWebTestSession()
+	session.RuntimeConfigPath = path
+	loaded, err := agentconfig.InitGlobalConfig(path)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	loaded.ConfigFilePath = "" // 模拟 chat_setup：内存 Config 不回写文件路径字段
+	session.Config = loaded
+	withWebTestSession(t, session)
+
+	if got := session.Config.Providers.Items["alpha"].APIKey; got != "sk-test-secret-123" {
+		t.Fatalf("fixture alpha.api_key = %q, want sk-test-secret-123", got)
+	}
+
+	// 外部直接修改磁盘（模拟 CLI login / 其他进程写配置）。
+	externalYAML := strings.Replace(yaml, "sk-test-secret-123", "sk-external-456", 1)
+	if err := os.WriteFile(path, []byte(externalYAML), 0o644); err != nil {
+		t.Fatalf("overwrite config file: %v", err)
+	}
+
+	// fetch-models 不带内联 key：应使用磁盘最新内联 key 去验证。
+	rec := postConfigJSON(t, HandleChatWebAPIConfigProvidersFetchModels, map[string]interface{}{
+		"name": "alpha",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(authHeader, "sk-external-456") {
+		t.Errorf("Authorization = %q, want Bearer sk-external-456（读路径未按磁盘刷新内存 key）", authHeader)
+	}
+	if strings.Contains(authHeader, "sk-test-secret-123") {
+		t.Errorf("Authorization = %q, still using stale startup key", authHeader)
+	}
+
+	// 快照 GET 也应看到磁盘最新状态（内存已同步；fixture alpha 同时带
+	// api_key_ref，source 显示 key_store，但 api_key_set 必须为 true，
+	// 不能出现“未配置”的旧状态）。
+	rec2 := httptest.NewRecorder()
+	HandleChatWebAPIConfig(rec2, httptest.NewRequest(http.MethodGet, "/web/api/config", nil))
+	snap := decodeConfigSnapshot(t, rec2.Body.String())
+	alpha := configProviderByName(t, snap, "alpha")
+	if !alpha.APIKeySet {
+		t.Errorf("alpha key status after external write = set=%v, want true（读路径未按磁盘刷新内存）", alpha.APIKeySet)
+	}
+}
+
 // TestHandleChatWebAPIConfigProviders_Delete 验证删除 provider。
 func TestHandleChatWebAPIConfigProviders_Delete(t *testing.T) {
 	withWebConfigTestSession(t, webConfigTestYAML)

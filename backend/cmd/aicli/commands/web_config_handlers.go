@@ -191,6 +191,11 @@ func chatWebConfigPath() (string, error) {
 		return strings.TrimSpace(session.Config.ConfigFilePath), nil
 	}
 	if strings.TrimSpace(session.RuntimeConfigPath) != "" {
+		// reloadChatConfigForModelCommand 只认 ConfigFilePath，为空时跳过
+		// 刷新；快照 GET / fetch-models 等读端点与增量写前都基于
+		// session.Config，这里按 RuntimeConfigPath 补齐，保证内存与磁盘
+		// 同源（外部/其他命令改配置文件后读路径也能立即看到新凭据）。
+		refreshChatWebSessionConfigFromRuntime(session)
 		return strings.TrimSpace(session.RuntimeConfigPath), nil
 	}
 	return "", nil
@@ -208,6 +213,14 @@ func chatWebRefreshSessionConfig() {
 		return
 	}
 	_ = reloadChatConfigForModelCommand(session)
+	refreshChatWebSessionConfigFromRuntime(session)
+}
+
+// refreshChatWebSessionConfigFromRuntime 在 reloadChatConfigForModelCommand
+// 跳过刷新（Config.ConfigFilePath 为空）时，按 RuntimeConfigPath 重新
+// InitGlobalConfig 并替换 session.Config，使内存与磁盘最新内容同源。
+// 该会话形态由 chat_setup 装配（内存 Config 不携带文件路径字段）。
+func refreshChatWebSessionConfigFromRuntime(session *ChatSession) {
 	if session.Config == nil {
 		return
 	}
