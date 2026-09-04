@@ -156,52 +156,105 @@
         <div id="config-provider-list" class="config-table-wrap"><div class="config-empty">加载中…</div></div>
       </div>
 
-      <div class="config-section config-editor" id="config-provider-editor" style="display:none">
-        <div class="config-section-title" id="config-editor-title">编辑 Provider</div>
-        <form id="config-provider-form" autocomplete="off">
-          <input type="hidden" id="cfg-provider-original-name">
-          <div class="config-form-grid">
-            <label class="cfg-item">
-              <span class="cfg-label">名称</span>
-              <input id="cfg-provider-name" required placeholder="如 openai" autocomplete="off">
-            </label>
-            <label class="cfg-item">
-              <span class="cfg-label">协议</span>
-              <input id="cfg-provider-protocol" placeholder="如 openai / anthropic" autocomplete="off">
-            </label>
-            <label class="cfg-item">
-              <span class="cfg-label">Base URL</span>
-              <input id="cfg-provider-base-url" placeholder="如 https://api.openai.com" autocomplete="off">
-            </label>
-            <label class="cfg-item">
-              <span class="cfg-label">API Path</span>
-              <input id="cfg-provider-api-path" placeholder="如 /v1/chat/completions" autocomplete="off">
-            </label>
-            <label class="cfg-item">
-              <span class="cfg-label">默认模型</span>
-              <input id="cfg-provider-default-model" placeholder="默认模型名" autocomplete="off">
-            </label>
-            <label class="cfg-item cfg-check">
-              <input id="cfg-provider-enabled" type="checkbox"> 启用
-            </label>
-            <label class="cfg-item cfg-check">
-              <input id="cfg-provider-set-default" type="checkbox"> 设为全局默认 provider
-            </label>
+      <!-- Provider 编辑弹窗（模态框） -->
+      <div id="config-editor-overlay">
+        <div id="config-editor-modal">
+          <div id="config-editor-modal-header" title="按住拖动移动弹窗">
+            <span id="config-editor-title">编辑 Provider</span>
+            <span class="modal-close" id="cfg-provider-close-btn" title="关闭">×</span>
           </div>
-          <div class="config-form-block">
-            <label class="cfg-label" for="cfg-provider-models">支持模型（每行一个；含 default_model）</label>
-            <textarea id="cfg-provider-models" rows="5" placeholder="gpt-4o&#10;gpt-4o-mini&#10;o3"></textarea>
+          <div id="config-editor-modal-body">
+            <form id="config-provider-form" autocomplete="off">
+              <input type="hidden" id="cfg-provider-original-name">
+              <div class="config-form-grid">
+                <label class="cfg-item">
+                  <span class="cfg-label">名称</span>
+                  <input id="cfg-provider-name" required placeholder="如 openai" autocomplete="off">
+                </label>
+                <label class="cfg-item">
+                  <span class="cfg-label">协议</span>
+                  <input id="cfg-provider-protocol" placeholder="如 openai / anthropic" autocomplete="off">
+                </label>
+                <label class="cfg-item">
+                  <span class="cfg-label">Base URL</span>
+                  <input id="cfg-provider-base-url" placeholder="如 https://api.openai.com" autocomplete="off">
+                </label>
+                <label class="cfg-item">
+                  <span class="cfg-label">API Path</span>
+                  <input id="cfg-provider-api-path" placeholder="如 /v1/chat/completions" autocomplete="off">
+                </label>
+                <label class="cfg-item">
+                  <span class="cfg-label">转发 URL（forward_url）</span>
+                  <input id="cfg-provider-forward-url" placeholder="可选，转发到上游网关" autocomplete="off">
+                </label>
+                <label class="cfg-item">
+                  <span class="cfg-label">默认模型</span>
+                  <input id="cfg-provider-default-model" placeholder="默认模型名" autocomplete="off">
+                </label>
+                <label class="cfg-item cfg-check">
+                  <input id="cfg-provider-enabled" type="checkbox"> 启用
+                </label>
+                <label class="cfg-item cfg-check">
+                  <input id="cfg-provider-set-default" type="checkbox"> 设为全局默认 provider
+                </label>
+              </div>
+              <div class="config-form-block cfg-auth-block">
+                <div class="cfg-label cfg-label-row">
+                  <span>API Key（明文不回传，仅保存到本地配置）</span>
+                  <span class="cfg-key-status" id="cfg-provider-api-key-status"></span>
+                </div>
+                <div class="config-form-grid">
+                  <label class="cfg-item">
+                    <span class="cfg-label">API Key</span>
+                    <input id="cfg-provider-api-key" type="password" placeholder="留空表示不修改" autocomplete="new-password">
+                  </label>
+                </div>
+                <div class="cfg-hint" id="cfg-provider-api-key-hint"></div>
+              </div>
+              <div class="config-form-block">
+                <div class="cfg-label">Proxy（provider 级覆盖，providers.items.&lt;name&gt;.proxy）</div>
+                <div class="config-form-grid">
+                  <label class="cfg-item cfg-check">
+                    <input id="cfg-provider-proxy-enabled" type="checkbox"> 启用 proxy
+                  </label>
+                  <label class="cfg-item">
+                    <span class="cfg-label">HTTP</span>
+                    <input id="cfg-provider-proxy-http" placeholder="如 http://127.0.0.1:7890" autocomplete="off">
+                  </label>
+                  <label class="cfg-item">
+                    <span class="cfg-label">HTTPS</span>
+                    <input id="cfg-provider-proxy-https" placeholder="如 http://127.0.0.1:7890" autocomplete="off">
+                  </label>
+                  <label class="cfg-item">
+                    <span class="cfg-label">No Proxy</span>
+                    <input id="cfg-provider-proxy-no-proxy" placeholder="如 localhost,127.0.0.1" autocomplete="off">
+                  </label>
+                  <label class="cfg-item cfg-check" id="cfg-provider-remove-proxy-wrap" style="display:none">
+                    <input id="cfg-provider-remove-proxy" type="checkbox"> 移除 proxy 配置节点
+                  </label>
+                </div>
+              </div>
+              <div class="config-form-block">
+                <div class="cfg-label-row">
+                  <label class="cfg-label" for="cfg-provider-models">支持模型（每行一个；含 default_model）</label>
+                  <button type="button" id="cfg-provider-fetch-models-btn" class="cfg-btn" title="调用该 provider 的 GET /models 拉取模型清单，合并进下方列表">获取模型列表</button>
+                  <span id="cfg-provider-fetch-models-status" class="cfg-hint-inline"></span>
+                </div>
+                <textarea id="cfg-provider-models" rows="5" placeholder="gpt-4o&#10;gpt-4o-mini&#10;o3"></textarea>
+              </div>
+              <div class="config-form-block">
+                <div class="cfg-label">每个模型的 reasoning 配置</div>
+                <div id="cfg-model-reasoning-editors" class="cfg-model-reasoning-editors"><div class="config-empty">保存模型列表后在此逐模型配置 reasoning effort</div></div>
+              </div>
+              <div class="config-form-actions">
+                <button type="button" id="cfg-provider-cancel-btn">取消</button>
+                <button type="submit" id="cfg-provider-save-btn" class="primary-btn">保存</button>
+                <span id="cfg-provider-status" class="cfg-status"></span>
+              </div>
+            </form>
           </div>
-          <div class="config-form-block">
-            <div class="cfg-label">每个模型的 reasoning 配置</div>
-            <div id="cfg-model-reasoning-editors" class="cfg-model-reasoning-editors"><div class="config-empty">保存模型列表后在此逐模型配置 reasoning effort</div></div>
-          </div>
-          <div class="config-form-actions">
-            <button type="button" id="cfg-provider-cancel-btn">取消</button>
-            <button type="submit" id="cfg-provider-save-btn" class="primary-btn">保存</button>
-            <span id="cfg-provider-status" class="cfg-status"></span>
-          </div>
-        </form>
+          <div id="config-editor-resize" title="拖动右下角调整大小"></div>
+        </div>
       </div>
     </div>
   </div>

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 )
@@ -24,6 +25,7 @@ const (
 	ChatWebAPIConfigProvidersPath        = "/web/api/config/providers"
 	ChatWebAPIConfigProvidersDeletePath  = "/web/api/config/providers/delete"
 	ChatWebAPIConfigProvidersEnabledPath = "/web/api/config/providers/enabled"
+	ChatWebAPIConfigProvidersModelsPath  = "/web/api/config/providers/fetch-models"
 	ChatWebAPIConfigChatPath             = "/web/api/config/chat"
 )
 
@@ -41,15 +43,30 @@ type chatWebConfigSnapshot struct {
 }
 
 type chatWebConfigProvider struct {
-	Name            string               `json:"name"`
-	Protocol        string               `json:"protocol"`
-	Enabled         bool                 `json:"enabled"`
-	BaseURL         string               `json:"base_url"`
-	APIPath         string               `json:"api_path"`
-	ForwardURL      string               `json:"forward_url"`
+	Name       string `json:"name"`
+	Protocol   string `json:"protocol"`
+	Enabled    bool   `json:"enabled"`
+	BaseURL    string `json:"base_url"`
+	APIPath    string `json:"api_path"`
+	ForwardURL string `json:"forward_url"`
+	// APIKeySet 只表示 api_key 是否已配置，绝不回传密钥明文。
+	APIKeySet       bool                 `json:"api_key_set"`
+	APIKeyRef       string               `json:"api_key_ref,omitempty"`
+	AuthMode        string               `json:"auth_mode,omitempty"`
+	AuthRef         string               `json:"auth_ref,omitempty"`
+	Proxy           *chatWebConfigProxy  `json:"proxy,omitempty"`
 	DefaultModel    string               `json:"default_model"`
 	SupportedModels []string             `json:"supported_models,omitempty"`
 	Models          []chatWebConfigModel `json:"models,omitempty"`
+}
+
+// chatWebConfigProxy 是 provider 级 proxy 节点的只读视图
+// （providers.items.<name>.proxy）。
+type chatWebConfigProxy struct {
+	Enabled bool   `json:"enabled"`
+	HTTP    string `json:"http,omitempty"`
+	HTTPS   string `json:"https,omitempty"`
+	NoProxy string `json:"no_proxy,omitempty"`
 }
 
 // chatWebConfigModel 是单个模型的配置视图：模型名 + 其 capability 中与
@@ -77,11 +94,18 @@ type chatWebConfigChat struct {
 // chatWebProviderWriteRequest 是 POST /web/api/config/providers 的请求体。
 // 空字段表示不修改；Resonaning 按模型合并（只改提交的模型与字段）。
 type chatWebProviderWriteRequest struct {
-	Name               string                                 `json:"name"`
-	Protocol           string                                 `json:"protocol"`
-	BaseURL            string                                 `json:"base_url"`
-	APIPath            string                                 `json:"api_path"`
-	ForwardURL         string                                 `json:"forward_url"`
+	Name     string `json:"name"`
+	Protocol string `json:"protocol"`
+	BaseURL  string `json:"base_url"`
+	APIPath  string `json:"api_path"`
+	// 以下指针字段遵循“nil=不修改、空串=清空、非空=写入”的合并语义。
+	ForwardURL         *string                                `json:"forward_url,omitempty"`
+	APIKey             *string                                `json:"api_key,omitempty"`
+	APIKeyRef          *string                                `json:"api_key_ref,omitempty"`
+	AuthMode           *string                                `json:"auth_mode,omitempty"`
+	AuthRef            *string                                `json:"auth_ref,omitempty"`
+	Proxy              *chatWebConfigProxy                    `json:"proxy,omitempty"`
+	ClearProxy         bool                                   `json:"clear_proxy,omitempty"`
 	Enabled            *bool                                  `json:"enabled"`
 	DefaultModel       string                                 `json:"default_model"`
 	SupportedModels    []string                               `json:"supported_models"`
@@ -105,6 +129,19 @@ type chatWebProviderDeleteRequest struct {
 type chatWebProviderEnabledRequest struct {
 	Names   []string `json:"names"`
 	Enabled bool     `json:"enabled"`
+}
+
+// chatWebProviderFetchModelsRequest 是 POST /web/api/config/providers/fetch-models
+// 的请求体。Name 指向磁盘上已保存的 provider（以其配置为基底，含已保存的
+// api key / proxy / headers）；provider 尚未保存时可用 Protocol / BaseURL /
+// APIKey 直接提供连接参数做“新增前探测”。APIKey 非空时优先用于本次请求
+// （与 login 内联 key 语义一致），不会写入磁盘配置。
+type chatWebProviderFetchModelsRequest struct {
+	Name       string  `json:"name"`
+	Protocol   string  `json:"protocol"`
+	BaseURL    string  `json:"base_url"`
+	APIKey     *string `json:"api_key,omitempty"`
+	ModelsPath string  `json:"models_path,omitempty"`
 }
 
 type chatWebChatWriteRequest struct {
@@ -260,8 +297,20 @@ func HandleChatWebAPIConfig(w http.ResponseWriter, r *http.Request) {
 			BaseURL:         strings.TrimSpace(provider.BaseURL),
 			APIPath:         strings.TrimSpace(provider.APIPath),
 			ForwardURL:      strings.TrimSpace(provider.ForwardURL),
+			APIKeySet:       strings.TrimSpace(provider.APIKey) != "",
+			APIKeyRef:       strings.TrimSpace(provider.APIKeyRef),
+			AuthMode:        strings.TrimSpace(provider.AuthMode),
+			AuthRef:         strings.TrimSpace(provider.AuthRef),
 			DefaultModel:    strings.TrimSpace(provider.DefaultModel),
 			SupportedModels: append([]string(nil), provider.SupportedModels...),
+		}
+		if provider.Proxy != nil {
+			entry.Proxy = &chatWebConfigProxy{
+				Enabled: provider.Proxy.Enabled,
+				HTTP:    strings.TrimSpace(provider.Proxy.HTTP),
+				HTTPS:   strings.TrimSpace(provider.Proxy.HTTPS),
+				NoProxy: strings.TrimSpace(provider.Proxy.NoProxy),
+			}
 		}
 		for _, model := range collectRuntimeProviderModels(provider) {
 			m := chatWebConfigModel{Name: model}
@@ -325,8 +374,20 @@ func HandleChatWebAPIConfigProviders(w http.ResponseWriter, r *http.Request) {
 	if req.APIPath != "" {
 		update.APIPath = webStringPtr(strings.TrimSpace(req.APIPath))
 	}
-	if req.ForwardURL != "" {
-		update.ForwardURL = webStringPtr(strings.TrimSpace(req.ForwardURL))
+	update.ForwardURL = req.ForwardURL
+	update.APIKey = req.APIKey
+	update.APIKeyRef = req.APIKeyRef
+	update.AuthMode = req.AuthMode
+	update.AuthRef = req.AuthRef
+	if req.ClearProxy {
+		update.ClearProxy = true
+	} else if req.Proxy != nil {
+		update.Proxy = &agentconfig.ProxyConfig{
+			HTTP:    strings.TrimSpace(req.Proxy.HTTP),
+			HTTPS:   strings.TrimSpace(req.Proxy.HTTPS),
+			NoProxy: strings.TrimSpace(req.Proxy.NoProxy),
+			Enabled: req.Proxy.Enabled,
+		}
 	}
 	update.Enabled = req.Enabled
 	if req.DefaultModel != "" {
@@ -454,6 +515,87 @@ func HandleChatWebAPIConfigProvidersEnabled(w http.ResponseWriter, r *http.Reque
 		"enabled": req.Enabled,
 		"names":   names,
 	})
+}
+
+// ---------------------------------------------------------------------------
+// POST /web/api/config/providers/fetch-models — 拉取 provider 的模型列表
+// ---------------------------------------------------------------------------
+
+// HandleChatWebAPIConfigProvidersFetchModels 调用 provider 的 GET /models
+// 端点拉取模型清单（复用 login/doctor 的 validateProviderModels），供前端
+// “获取模型列表”按钮填充支持模型列表。name 存在时以磁盘已保存配置为基底
+// （含 api key / proxy / headers）；否则用请求中的 protocol / base_url /
+// api_key 临时构造，支持新增 provider 前先探测。api_key 只用于本次请求，
+// 不会写进磁盘配置。
+func HandleChatWebAPIConfigProvidersFetchModels(w http.ResponseWriter, r *http.Request) {
+	if !chatWebRequireMethod(w, r, http.MethodPost) {
+		return
+	}
+	var req chatWebProviderFetchModelsRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		chatWebWriteError(w, http.StatusBadRequest, err)
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	path, err := chatWebConfigPath()
+	if err != nil {
+		chatWebWriteError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if path == "" {
+		chatWebWriteError(w, http.StatusBadRequest, errNoConfigPath())
+		return
+	}
+
+	var provider agentconfig.Provider
+	session := chatWebSession()
+	if session != nil && session.Config != nil {
+		if saved, ok := session.Config.Providers.Items[req.Name]; ok {
+			provider = saved
+		}
+	}
+	if req.Name == "" && strings.TrimSpace(req.BaseURL) == "" {
+		chatWebWriteError(w, http.StatusBadRequest, errRequiredField("provider name 或 base_url"))
+		return
+	}
+	if strings.TrimSpace(provider.BaseURL) == "" && strings.TrimSpace(req.BaseURL) == "" {
+		chatWebWriteError(w, http.StatusBadRequest, errRequiredField("base_url（provider 未保存时需要）"))
+		return
+	}
+	if provider.BaseURL == "" {
+		provider.Protocol = strings.TrimSpace(req.Protocol)
+		provider.BaseURL = strings.TrimSpace(req.BaseURL)
+	}
+	if req.APIKey != nil && strings.TrimSpace(*req.APIKey) != "" {
+		// 内联 key 优先（与 login 的 providerModelsAPIKey 语义一致）。
+		provider.APIKey = strings.TrimSpace(*req.APIKey)
+	}
+
+	result, err := validateProviderModels(providerModelsValidationRequest{
+		Config:        configPtrOrNil(session),
+		Provider:      provider,
+		LoginProtocol: req.Protocol,
+		ModelsPath:    req.ModelsPath,
+		Timeout:       15 * time.Second,
+	})
+	if err != nil {
+		chatWebWriteError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeWebAPIJSON(w, http.StatusOK, map[string]interface{}{
+		"status":   "ok",
+		"endpoint": result.Endpoint,
+		"models":   providerModelIDs(result.Models),
+	})
+}
+
+// configPtrOrNil 返回会话的 agentconfig.Config 指针；无会话时为 nil
+// （validateProviderModels 在 nil 时退化为 http.DefaultClient 直连）。
+func configPtrOrNil(session *ChatSession) *agentconfig.Config {
+	if session == nil {
+		return nil
+	}
+	return session.Config
 }
 
 // ---------------------------------------------------------------------------

@@ -266,7 +266,7 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
 
 /* ---- 审批面板：模态对话框 ---- */
 #approval-overlay {
-  display: none; position: fixed; z-index: 1000;
+  display: none; position: fixed; z-index: 1200;
   inset: 0; background: var(--overlayBg);
   justify-content: center; align-items: center;
 }
@@ -636,7 +636,7 @@ body.sidebar-collapsed #sidebar {
 /* ---- Toast 轻提示 ---- */
 #toast-container {
   position: fixed; bottom: 68px; left: 50%; transform: translateX(-50%);
-  z-index: 1000; pointer-events: none;
+  z-index: 1300; pointer-events: none;
 }
 .toast {
   padding: 8px 16px; font-size: 12px;
@@ -766,3 +766,83 @@ body.sidebar-collapsed #sidebar {
 #tab-config .cfg-status.ok { color: var(--green); }
 #tab-config .cfg-status.busy { color: var(--accent); }
 #tab-config .cfg-status.err { color: var(--red, #e5534b); }
+
+/* ---- Provider 编辑弹窗（模态框） ----
+   层级约定：tab 内容 < 快捷键帮助(999) < 本弹窗(1100) < 审批弹窗(1200) < toast(1300)。
+   启动时（initConfigTab）会把 overlay reparent 到 <body> 下，避免受 .tab-panel
+   定位/层叠上下文影响；位置与尺寸由 JS 控制（positionConfigEditor：
+   打开时居中，标题栏拖动，右下角手柄缩放，内容区滚动）。 */
+#config-editor-overlay {
+  display: none; position: fixed; z-index: 1100;
+  inset: 0; background: var(--overlayBg);
+  justify-content: center; align-items: center;
+}
+#config-editor-overlay.active { display: flex; }
+#config-editor-modal {
+  position: fixed; min-width: 420px; min-height: 260px;
+  background: var(--modalBg); border: 1px solid var(--border2);
+  border-radius: 10px; display: flex; flex-direction: column;
+  box-shadow: 0 8px 32px var(--shadow);
+}
+#config-editor-modal-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px; border-bottom: 1px solid var(--border);
+  font-weight: 600; font-size: 13px; color: var(--fg2);
+  cursor: move; user-select: none; -webkit-user-select: none;
+}
+#config-editor-modal-header .modal-close {
+  margin-left: auto; cursor: pointer; padding: 2px 8px;
+  font-size: 16px; line-height: 1; background: none; border: none;
+  color: var(--fg3);
+}
+#config-editor-modal-header .modal-close:hover { color: var(--fg); }
+#config-editor-modal-body {
+  flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px;
+  font-size: 13px; line-height: 1.5;
+}
+#config-editor-resize {
+  position: absolute; right: 2px; bottom: 2px;
+  width: 14px; height: 14px; cursor: nwse-resize; opacity: 0.5;
+  background:
+    linear-gradient(135deg, transparent 0 46%, var(--fg4) 46% 58%, transparent 58%),
+    linear-gradient(135deg, transparent 0 64%, var(--fg4) 64% 76%, transparent 76%);
+}
+#config-editor-resize:hover { opacity: 1; }
+#config-editor-modal-body .config-form-grid { margin-bottom: 0; }
+.cfg-auth-block {
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 10px; background: var(--bg3);
+}
+.cfg-hint { font-size: 11px; color: var(--fg4); margin-top: 4px; }
+
+/* ---- Provider 编辑弹窗：API key 状态行 + 获取模型列表 ---- */
+.cfg-label-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.cfg-label-row .cfg-label { margin: 0; }
+.cfg-hint-inline { font-size: 11px; color: var(--fg4); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
+.cfg-hint-inline.ok { color: var(--green); }
+.cfg-hint-inline.err { color: var(--red, #e5534b); }
+.cfg-key-status {
+  display: inline-block; font-size: 11px; line-height: 1.4;
+  padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border2);
+  color: var(--fg3); background: var(--bg2);
+}
+.cfg-key-status.saved { color: var(--green); border-color: var(--green); background: transparent; }
+.cfg-key-status.pending { color: var(--accent); border-color: var(--accent); background: transparent; }
+.cfg-key-clear {
+  font-size: 11px; padding: 1px 8px; margin-left: 4px;
+  border: 1px solid var(--border2); border-radius: 999px;
+  background: none; color: var(--fg3); cursor: pointer;
+}
+.cfg-key-clear:hover { color: var(--red, #e5534b); border-color: var(--red, #e5534b); }
+.cfg-btn {
+  font-size: 12px; padding: 3px 10px;
+  border: 1px solid var(--border2); border-radius: 6px;
+  background: var(--bg2); color: var(--fg2); cursor: pointer;
+}
+.cfg-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.cfg-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+@media (max-width: 520px) {
+  #config-editor-modal { min-width: 0; }
+}

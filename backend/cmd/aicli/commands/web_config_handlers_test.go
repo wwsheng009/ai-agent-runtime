@@ -24,6 +24,16 @@ const webConfigTestYAML = `providers:
       protocol: openai
       base_url: https://api.example.com
       api_path: /v1/chat/completions
+      api_key: sk-test-secret-123
+      api_key_ref: authref-alpha
+      auth_mode: api_key
+      auth_ref: oauth-alpha
+      forward_url: https://fw.example.com/v1
+      proxy:
+        enabled: true
+        http: http://127.0.0.1:7890
+        https: http://127.0.0.1:7890
+        no_proxy: localhost,127.0.0.1
       default_model: gpt-4o
       supported_models:
         - gpt-4o
@@ -146,6 +156,22 @@ func TestHandleChatWebAPIConfig_Snapshot(t *testing.T) {
 	}
 	if len(alpha.SupportedModels) != 2 {
 		t.Errorf("alpha.supported_models = %v, want len 2", alpha.SupportedModels)
+	}
+	if !alpha.APIKeySet {
+		t.Error("alpha.api_key_set = false, want true（fixture 已写 api_key）")
+	}
+	if alpha.APIKeyRef != "authref-alpha" || alpha.AuthMode != "api_key" || alpha.AuthRef != "oauth-alpha" {
+		t.Errorf("alpha auth refs mismatch: %+v", alpha)
+	}
+	if strings.Contains(rec.Body.String(), "sk-test-secret-123") {
+		t.Error("快照泄露 API key 明文，必须只回传 api_key_set")
+	}
+	if alpha.ForwardURL != "https://fw.example.com/v1" {
+		t.Errorf("alpha.forward_url = %q", alpha.ForwardURL)
+	}
+	if alpha.Proxy == nil || !alpha.Proxy.Enabled || alpha.Proxy.HTTP != "http://127.0.0.1:7890" ||
+		alpha.Proxy.HTTPS != "http://127.0.0.1:7890" || alpha.Proxy.NoProxy != "localhost,127.0.0.1" {
+		t.Errorf("alpha.proxy mismatch: %+v", alpha.Proxy)
 	}
 	var gpt4o, gpt4omini *chatWebConfigModel
 	for i := range alpha.Models {
@@ -312,6 +338,112 @@ func TestHandleChatWebAPIConfigProviders_UpsertMergePreservesOthers(t *testing.T
 	}
 }
 
+// TestHandleChatWebAPIConfigProviders_UpsertAPIKeyProxy 验证写 api_key /
+// forward_url / proxy：快照只回传 api_key_set（不泄露明文），YAML 落盘。
+func TestHandleChatWebAPIConfigProviders_UpsertAPIKeyProxy(t *testing.T) {
+	path := withWebConfigTestSession(t, webConfigTestYAML)
+
+	rec := postConfigJSON(t, HandleChatWebAPIConfigProviders, map[string]interface{}{
+		"name":        "alpha",
+		"api_key":     "sk-web-new-key-999",
+		"forward_url": "https://fw2.example.com",
+		"proxy": map[string]interface{}{
+			"enabled":  true,
+			"http":     "http://127.0.0.1:1080",
+			"https":    "http://127.0.0.1:1080",
+			"no_proxy": "localhost",
+		},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// YAML 落盘检查
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	for _, want := range []string{"sk-web-new-key-999", "https://fw2.example.com", "http://127.0.0.1:1080", "no_proxy: localhost"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("config yaml 缺少 %q", want)
+		}
+	}
+
+	// 快照检查（masked）
+	rec2 := httptest.NewRecorder()
+	HandleChatWebAPIConfig(rec2, httptest.NewRequest(http.MethodGet, "/web/api/config", nil))
+	snap := decodeConfigSnapshot(t, rec2.Body.String())
+	alpha := configProviderByName(t, snap, "alpha")
+	if !alpha.APIKeySet {
+		t.Error("alpha.api_key_set = false, want true")
+	}
+	if strings.Contains(rec2.Body.String(), "sk-web-new-key-999") {
+		t.Error("快照泄露新 API key 明文")
+	}
+	if alpha.ForwardURL != "https://fw2.example.com" {
+		t.Errorf("alpha.forward_url = %q", alpha.ForwardURL)
+	}
+	if alpha.Proxy == nil || !alpha.Proxy.Enabled || alpha.Proxy.HTTP != "http://127.0.0.1:1080" ||
+		alpha.Proxy.NoProxy != "localhost" {
+		t.Errorf("alpha.proxy mismatch: %+v", alpha.Proxy)
+	}
+}
+
+// TestHandleChatWebAPIConfigProviders_ClearAPIKeyProxy 验证显式清空语义：
+// api_key 空串移除密钥、forward_url 空串清空、clear_proxy 移除 proxy 节点。
+func TestHandleChatWebAPIConfigProviders_ClearAPIKeyProxy(t *testing.T) {
+	withWebConfigTestSession(t, webConfigTestYAML)
+
+	rec := postConfigJSON(t, HandleChatWebAPIConfigProviders, map[string]interface{}{
+		"name":        "alpha",
+		"api_key":     "",
+		"forward_url": "",
+		"clear_proxy": true,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	rec2 := httptest.NewRecorder()
+	HandleChatWebAPIConfig(rec2, httptest.NewRequest(http.MethodGet, "/web/api/config", nil))
+	snap := decodeConfigSnapshot(t, rec2.Body.String())
+	alpha := configProviderByName(t, snap, "alpha")
+	if alpha.APIKeySet {
+		t.Error("alpha.api_key_set = true, want false（已清除）")
+	}
+	if alpha.ForwardURL != "" {
+		t.Errorf("alpha.forward_url = %q, want 空（已清除）", alpha.ForwardURL)
+	}
+	if alpha.Proxy != nil {
+		t.Errorf("alpha.proxy = %+v, want nil（已移除节点）", alpha.Proxy)
+	}
+}
+
+// TestHandleChatWebAPIConfigProviders_APIKeyMergePreserved 验证未提交
+// api_key / auth 字段时保留原值（nil=不修改合并语义）。
+func TestHandleChatWebAPIConfigProviders_APIKeyMergePreserved(t *testing.T) {
+	withWebConfigTestSession(t, webConfigTestYAML)
+
+	rec := postConfigJSON(t, HandleChatWebAPIConfigProviders, map[string]interface{}{
+		"name":    "alpha",
+		"api_key": nil,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	rec2 := httptest.NewRecorder()
+	HandleChatWebAPIConfig(rec2, httptest.NewRequest(http.MethodGet, "/web/api/config", nil))
+	snap := decodeConfigSnapshot(t, rec2.Body.String())
+	alpha := configProviderByName(t, snap, "alpha")
+	if !alpha.APIKeySet {
+		t.Error("未提交 api_key 时原密钥被清除，合并语义错误")
+	}
+	if alpha.APIKeyRef != "authref-alpha" || alpha.AuthRef != "oauth-alpha" {
+		t.Errorf("未提交 auth 字段时被改动: %+v", alpha)
+	}
+}
+
 // TestHandleChatWebAPIConfigProviders_Delete 验证删除 provider。
 func TestHandleChatWebAPIConfigProviders_Delete(t *testing.T) {
 	withWebConfigTestSession(t, webConfigTestYAML)
@@ -398,5 +530,122 @@ func TestHandleChatWebAPIConfigProviders_MethodNotAllowed(t *testing.T) {
 	}
 	if resp["status"] != "rejected" {
 		t.Errorf("status = %q, want rejected", resp["status"])
+	}
+}
+
+// fetchModelsTestServer 起一个 mock 的 OpenAI 风格 /v1/models 端点，
+// 记录收到的 Authorization 头以便断言内联/已保存 key 的传递。
+func fetchModelsTestServer(t *testing.T, authHeader *string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		*authHeader = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-4o"},{"id":"gpt-4o-mini"},{"id":"o3"}]}`))
+	})
+	return httptest.NewServer(mux)
+}
+
+// TestHandleChatWebAPIConfigProvidersFetchModels_SavedProvider 验证以磁盘
+// 已保存 provider 为基底拉取模型列表（api key 用已保存的）。
+func TestHandleChatWebAPIConfigProvidersFetchModels_SavedProvider(t *testing.T) {
+	var authHeader string
+	srv := fetchModelsTestServer(t, &authHeader)
+	defer srv.Close()
+
+	yaml := strings.Replace(webConfigTestYAML, "https://api.example.com", srv.URL, 1)
+	withWebConfigTestSession(t, yaml)
+
+	rec := postConfigJSON(t, HandleChatWebAPIConfigProvidersFetchModels, map[string]interface{}{
+		"name": "alpha",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Status   string   `json:"status"`
+		Endpoint string   `json:"endpoint"`
+		Models   []string `json:"models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "ok" || len(resp.Models) != 3 {
+		t.Fatalf("resp = %+v, want 3 models", resp)
+	}
+	if resp.Endpoint != srv.URL+"/v1/models" {
+		t.Errorf("endpoint = %q, want %q", resp.Endpoint, srv.URL+"/v1/models")
+	}
+	if authHeader != "Bearer sk-test-secret-123" {
+		t.Errorf("Authorization = %q, want 已保存 key", authHeader)
+	}
+	for _, want := range []string{"gpt-4o", "o3"} {
+		found := false
+		for _, m := range resp.Models {
+			if m == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("models 缺少 %q: %v", want, resp.Models)
+		}
+	}
+}
+
+// TestHandleChatWebAPIConfigProvidersFetchModels_NewProvider 验证新增流程：
+// name 尚未保存（可缺省）时用请求里的 base_url / api_key 临时探测，
+// 内联 key 优先于磁盘保存的 key。
+func TestHandleChatWebAPIConfigProvidersFetchModels_NewProvider(t *testing.T) {
+	var authHeader string
+	srv := fetchModelsTestServer(t, &authHeader)
+	defer srv.Close()
+
+	withWebConfigTestSession(t, webConfigTestYAML)
+
+	rec := postConfigJSON(t, HandleChatWebAPIConfigProvidersFetchModels, map[string]interface{}{
+		"protocol": "openai",
+		"base_url": srv.URL,
+		"api_key":  "sk-temp-probe-777",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Status string   `json:"status"`
+		Models []string `json:"models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "ok" || len(resp.Models) != 3 {
+		t.Fatalf("resp = %+v, want 3 models", resp)
+	}
+	if authHeader != "Bearer sk-temp-probe-777" {
+		t.Errorf("Authorization = %q, want 请求内联 key", authHeader)
+	}
+}
+
+// TestHandleChatWebAPIConfigProvidersFetchModels_Errors 验证参数错误：
+// 缺 name / 无 key / provider 不存在且无 base_url。
+func TestHandleChatWebAPIConfigProvidersFetchModels_Errors(t *testing.T) {
+	withWebConfigTestSession(t, webConfigTestYAML)
+
+	cases := []struct {
+		name string
+		body map[string]interface{}
+		want int
+	}{
+		{"缺 name 且缺 base_url", map[string]interface{}{}, http.StatusBadRequest},
+		{"已保存但无 api key", map[string]interface{}{"name": "beta", "base_url": "https://mock.invalid"}, http.StatusBadGateway},
+		{"未保存且无 base_url", map[string]interface{}{"name": "ghost"}, http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := postConfigJSON(t, HandleChatWebAPIConfigProvidersFetchModels, tc.body)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d; body: %s", rec.Code, tc.want, rec.Body.String())
+			}
+		})
 	}
 }
