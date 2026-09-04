@@ -114,9 +114,21 @@ func buildProviderModelsHeaders(provider config.Provider, loginProtocol string) 
 	llmAdapter := adapter.GetAdapterOrDefault(runtimeProtocol)
 	return llmAdapter.BuildHeaders(adapter.AdapterConfig{
 		Type:    runtimeProtocol,
-		APIKey:  provider.GetAPIKey(),
+		APIKey:  providerModelsAPIKey(provider),
 		Headers: provider.Headers,
 	})
+}
+
+// providerModelsAPIKey 返回 models 校验请求使用的 API key。
+// 内联配置的 APIKey 字段优先：login 交互中输入的新 key 写入该字段，而
+// api_key_ref 仍指向 auth store 中的旧凭据，若按常规优先读 ref 会用旧 key
+// 校验新输入（httptest 之外的实测表现为 HTTP 401 Invalid access key）。
+// 非 login 路径（运行时/doctor 等）APIKey 字段为空，行为与 GetAPIKey 一致。
+func providerModelsAPIKey(provider config.Provider) string {
+	if strings.TrimSpace(provider.APIKey) != "" {
+		return strings.TrimSpace(provider.APIKey)
+	}
+	return provider.GetAPIKey()
 }
 
 func resolveProviderModelsPath(loginProtocol string, provider config.Provider, override string) string {

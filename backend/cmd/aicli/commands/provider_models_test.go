@@ -19,6 +19,28 @@ func TestParseProviderModelsResponse_OpenAICompatible(t *testing.T) {
 	}
 }
 
+func TestProviderModelsAPIKey_PrefersInlineKeyOverAuthRef(t *testing.T) {
+	// login 交互中输入的新 key 写入内联 APIKey 字段，而 api_key_ref 仍指向
+	// auth store 中的旧凭据；校验必须用新输入值，否则会以旧 key 请求返回 401。
+	ghostRef := "models-api-key-test-no-such-ref"
+	got := providerModelsAPIKey(config.Provider{
+		APIKey:    "  agw_live_new_secret  ",
+		APIKeyRef: ghostRef,
+	})
+	if got != "agw_live_new_secret" {
+		t.Fatalf("expected inline APIKey to win over auth ref, got %q", got)
+	}
+}
+
+func TestProviderModelsAPIKey_FallsBackToGetAPIKeyWhenInlineEmpty(t *testing.T) {
+	// 非 login 路径 APIKey 字段为空：保持 GetAPIKey 语义（ref 不存在 → 空，
+	// 不 panic，也不 fallback 到不存在的 auth store 值）。
+	ghostRef := "models-api-key-test-no-such-ref"
+	if got := providerModelsAPIKey(config.Provider{APIKeyRef: ghostRef}); got != "" {
+		t.Fatalf("expected empty key for missing auth ref, got %q", got)
+	}
+}
+
 func TestParseProviderModelsResponse_GeminiStripsModelsPrefix(t *testing.T) {
 	models, err := parseProviderModelsResponse([]byte(`{"models":[{"name":"models/gemini-2.5-pro"},{"name":"models/gemini-2.5-flash"}]}`), "gemini")
 	if err != nil {
