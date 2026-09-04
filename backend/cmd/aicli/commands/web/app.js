@@ -792,6 +792,7 @@ function startTypeTimer() {
   var cfgApiKeySaved = false;        // 当前编辑的 provider 是否已配置凭据
   var cfgApiKeySource = "";         // 凭据来源：inline / pool / key_store / oauth
   var cfgApiKeyClearPending = false; // 用户点了「清除」等待保存生效
+  var cfgApiKeyMasked = "";          // 已保存 key 的掩码回显（快照 api_key_masked 或本地计算）
 
   // provider 列表视图状态：搜索词 / 排序键 / 分页（page 1-based，pageSize 0=全部）
   var cfgProviderQuery = "";
@@ -1118,6 +1119,7 @@ function startTypeTimer() {
     // 已保存时可一键标记「清除」（cfgApiKeyClearPending，保存时移除全部来源）。
     cfgApiKeySaved = !!(p && p.api_key_set);
     cfgApiKeySource = (p && p.api_key_source) || "";
+    cfgApiKeyMasked = (p && p.api_key_masked) || "";
     cfgApiKeyClearPending = false;
     var apiKey = configEl("cfg-provider-api-key");
     if (apiKey) { apiKey.value = ""; apiKey.disabled = false; }
@@ -1159,6 +1161,14 @@ function startTypeTimer() {
     key_store: "凭据存放在 Key Store（api_key_ref）",
     oauth: "使用 OAuth access token（auth_ref）"
   };
+  // 与后端 maskSecretForDisplay 一致：<=8 字符整段打码；否则保留前 4 +
+  // "..." + 后 4。仅用于界面回显，token 明文不落 DOM。
+  function maskAPIKey(key) {
+    var s = String(key || "").trim();
+    if (!s) { return ""; }
+    if (s.length <= 8) { return "****"; }
+    return s.slice(0, 4) + "..." + s.slice(-4);
+  }
   function renderAPIKeyStatus() {
     var statusEl = configEl("cfg-provider-api-key-status");
     var hint = configEl("cfg-provider-api-key-hint");
@@ -1180,9 +1190,24 @@ function startTypeTimer() {
       statusEl.innerHTML = '<span class="cfg-key-status pending">将清除</span>' +
         ' <button type="button" class="cfg-key-clear" data-action="clear-api-key">取消</button>';
     } else if (cfgApiKeySaved) {
-      statusEl.innerHTML = '<span class="cfg-key-status saved">' +
-        (cfgApiKeySourceChip[cfgApiKeySource] || "已保存") + '</span>' +
-        ' <button type="button" class="cfg-key-clear" data-action="clear-api-key">清除</button>';
+      // 掩码值可能来自用户输入/快照，用 DOM 节点渲染避免 innerHTML 注入。
+      statusEl.textContent = "";
+      var chip = document.createElement("span");
+      chip.className = "cfg-key-status saved";
+      chip.textContent = cfgApiKeySourceChip[cfgApiKeySource] || "已保存";
+      statusEl.appendChild(chip);
+      if (cfgApiKeyMasked) {
+        var maskEl = document.createElement("span");
+        maskEl.className = "cfg-key-masked";
+        maskEl.textContent = cfgApiKeyMasked;
+        statusEl.appendChild(maskEl);
+      }
+      var clearBtn = document.createElement("button");
+      clearBtn.type = "button";
+      clearBtn.className = "cfg-key-clear";
+      clearBtn.setAttribute("data-action", "clear-api-key");
+      clearBtn.textContent = "清除";
+      statusEl.appendChild(clearBtn);
     } else {
       statusEl.textContent = "未配置";
       statusEl.className = "cfg-key-status";
@@ -1226,6 +1251,7 @@ function startTypeTimer() {
         if (apiKeyEl) { apiKeyEl.value = ""; }
         cfgApiKeySaved = true;
         cfgApiKeySource = "inline";
+        cfgApiKeyMasked = maskAPIKey(key);
         renderAPIKeyStatus();
         showToast("API Key 已更新: " + name);
         loadConfigAdmin();

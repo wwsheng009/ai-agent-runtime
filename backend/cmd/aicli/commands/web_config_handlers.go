@@ -53,8 +53,12 @@ type chatWebConfigProvider struct {
 	ForwardURL string `json:"forward_url"`
 	// APIKeySet 表示任一凭据来源（内联 api_key / api_keys 池 / Key Store
 	// api_key_ref / OAuth auth_ref）已配置；绝不回传密钥明文。
-	APIKeySet       bool                 `json:"api_key_set"`
-	APIKeySource    string               `json:"api_key_source,omitempty"`
+	APIKeySet    bool   `json:"api_key_set"`
+	APIKeySource string `json:"api_key_source,omitempty"`
+	// APIKeyMasked 是已保存 key 的掩码回显（如 sk-1...cdef），仅用于
+	// 界面确认“已保存哪个 key”；Key Store / OAuth 来源按设计不读
+	// store 内容（见 providerAPIKeySource 注释），统一显示 ****。
+	APIKeyMasked    string               `json:"api_key_masked,omitempty"`
 	APIKeyRef       string               `json:"api_key_ref,omitempty"`
 	AuthMode        string               `json:"auth_mode,omitempty"`
 	AuthRef         string               `json:"auth_ref,omitempty"`
@@ -374,6 +378,19 @@ func HandleChatWebAPIConfig(w http.ResponseWriter, r *http.Request) {
 
 	for name, provider := range cfg.Providers.Items {
 		apiKeySource := providerAPIKeySource(provider)
+		masked := ""
+		switch apiKeySource {
+		case "inline":
+			masked = maskSecretForDisplay(strings.TrimSpace(provider.APIKey))
+		case "pool":
+			if len(provider.APIKeys) > 0 {
+				masked = maskSecretForDisplay(strings.TrimSpace(provider.APIKeys[0]))
+			}
+		case "key_store", "oauth":
+			// Key Store 明文不回传（快照渲染不读 store），以通用掩码
+			// 表示“已保存、明文仅在本地”。
+			masked = "****"
+		}
 		entry := chatWebConfigProvider{
 			Name:            name,
 			Protocol:        strings.TrimSpace(provider.Protocol),
@@ -383,6 +400,7 @@ func HandleChatWebAPIConfig(w http.ResponseWriter, r *http.Request) {
 			ForwardURL:      strings.TrimSpace(provider.ForwardURL),
 			APIKeySet:       apiKeySource != "",
 			APIKeySource:    apiKeySource,
+			APIKeyMasked:    masked,
 			APIKeyRef:       strings.TrimSpace(provider.APIKeyRef),
 			AuthMode:        strings.TrimSpace(provider.AuthMode),
 			AuthRef:         strings.TrimSpace(provider.AuthRef),

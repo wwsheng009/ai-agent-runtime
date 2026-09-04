@@ -163,11 +163,14 @@ func TestHandleChatWebAPIConfig_Snapshot(t *testing.T) {
 	if alpha.APIKeySource != "key_store" {
 		t.Errorf("alpha.api_key_source = %q, want key_store（api_key_ref 存在时按解析链优先于内联）", alpha.APIKeySource)
 	}
+	if alpha.APIKeyMasked != "****" {
+		t.Errorf("alpha.api_key_masked = %q, want ****（Key Store 来源不回传明文，只给通用掩码）", alpha.APIKeyMasked)
+	}
 	if alpha.APIKeyRef != "authref-alpha" || alpha.AuthMode != "api_key" || alpha.AuthRef != "oauth-alpha" {
 		t.Errorf("alpha auth refs mismatch: %+v", alpha)
 	}
 	if strings.Contains(rec.Body.String(), "sk-test-secret-123") {
-		t.Error("快照泄露 API key 明文，必须只回传 api_key_set")
+		t.Error("快照泄露 API key 明文，只允许回传掩码")
 	}
 	if alpha.ForwardURL != "https://fw.example.com/v1" {
 		t.Errorf("alpha.forward_url = %q", alpha.ForwardURL)
@@ -382,6 +385,9 @@ func TestHandleChatWebAPIConfigProviders_UpsertAPIKeyProxy(t *testing.T) {
 	beta := configProviderByName(t, snap, "beta")
 	if !beta.APIKeySet {
 		t.Error("beta.api_key_set = false, want true")
+	}
+	if beta.APIKeyMasked != "sk-w...-999" {
+		t.Errorf("beta.api_key_masked = %q, want sk-w...-999（内联来源回显真实掩码）", beta.APIKeyMasked)
 	}
 	if strings.Contains(rec2.Body.String(), "sk-web-new-key-999") {
 		t.Error("快照泄露新 API key 明文")

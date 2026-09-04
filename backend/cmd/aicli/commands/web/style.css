@@ -869,6 +869,7 @@ body.sidebar-collapsed #sidebar {
 }
 .cfg-key-status.saved { color: var(--green); border-color: var(--green); background: transparent; }
 .cfg-key-status.pending { color: var(--accent); border-color: var(--accent); background: transparent; }
+.cfg-key-masked { font-size: 11px; color: var(--fg3); margin-left: 6px; font-family: Consolas, monospace; user-select: all; }
 .cfg-key-clear {
   font-size: 11px; padding: 1px 8px; margin-left: 4px;
   border: 1px solid var(--border2); border-radius: 999px;
