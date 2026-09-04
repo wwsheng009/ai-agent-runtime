@@ -153,6 +153,32 @@
 
       <div class="config-section" id="config-providers-section">
         <div class="config-section-title">Providers（providers.items）</div>
+        <div id="config-provider-toolbar" class="config-provider-toolbar" hidden>
+          <div class="cfg-toolbar-row">
+            <input id="config-provider-search" class="cfg-toolbar-search" type="search"
+                   placeholder="搜索名称 / 协议 / base_url / 模型…" autocomplete="off">
+            <select id="config-provider-sort" class="cfg-toolbar-select">
+              <option value="name">名称 A→Z</option>
+              <option value="name-desc">名称 Z→A</option>
+              <option value="enabled">启用状态优先</option>
+              <option value="models">模型数（多→少）</option>
+              <option value="default-model">默认模型</option>
+            </select>
+            <select id="config-provider-page-size" class="cfg-toolbar-select">
+              <option value="10">10 / 页</option>
+              <option value="25" selected>25 / 页</option>
+              <option value="50">50 / 页</option>
+              <option value="0">全部显示</option>
+            </select>
+          </div>
+          <div class="cfg-toolbar-row cfg-toolbar-pager">
+            <span id="config-provider-count" class="cfg-toolbar-count"></span>
+            <span class="cfg-toolbar-spacer"></span>
+            <button id="config-provider-prev" type="button" class="cfg-toolbar-btn">‹ 上一页</button>
+            <span id="config-provider-page" class="cfg-toolbar-page"></span>
+            <button id="config-provider-next" type="button" class="cfg-toolbar-btn">下一页 ›</button>
+          </div>
+        </div>
         <div id="config-provider-list" class="config-table-wrap"><div class="config-empty">加载中…</div></div>
       </div>
 

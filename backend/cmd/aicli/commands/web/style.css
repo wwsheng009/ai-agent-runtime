@@ -748,6 +748,16 @@ body.sidebar-collapsed #sidebar {
 .config-badge.default { background: var(--bg4); color: var(--accent2); border: 1px solid var(--border2); }
 .config-actions { white-space: nowrap; }
 .config-actions button { margin-right: 4px; padding: 2px 8px; }
+.config-provider-toolbar { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.cfg-toolbar-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cfg-toolbar-search { flex: 1 1 220px; min-width: 160px; padding: 4px 8px; }
+.cfg-toolbar-select { padding: 4px 6px; }
+.cfg-toolbar-count { color: var(--fg4); font-size: 12px; }
+.cfg-toolbar-spacer { flex: 1; }
+.cfg-toolbar-btn { padding: 3px 10px; }
+.cfg-toolbar-btn:disabled { opacity: 0.45; cursor: default; }
+.cfg-toolbar-page { color: var(--fg2); font-size: 12px; min-width: 52px; text-align: center; }
+.cfg-toolbar-pager { justify-content: flex-end; }
 .config-empty { color: var(--fg4); font-size: 12px; padding: 8px 0; }
 .config-form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; margin-bottom: 10px; }
 .config-form-grid .cfg-item { display: flex; flex-direction: column; gap: 3px; }
