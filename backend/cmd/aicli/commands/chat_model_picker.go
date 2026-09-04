@@ -102,30 +102,69 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 
 	// Stage 2: model. Skipped when the request pinned one explicitly.
 	if modelName == "" {
-		models := modelPickerModelOptions(providerCtx.Provider, currentModelForProvider(session, providerName))
-		if len(models) == 0 {
-			closeModelPickerLease(session, lease)
-			_ = renderChatCommandResult(session, commandTextResult(fmt.Sprintf("provider %s 没有可用的模型", providerName)), false)
-			return
+		for {
+			models := modelPickerModelOptions(providerCtx.Provider, currentModelForProvider(session, providerName))
+			if len(models) == 0 {
+				closeModelPickerLease(session, lease)
+				_ = renderChatCommandResult(session, commandTextResult(fmt.Sprintf("provider %s 没有可用的模型", providerName)), false)
+				return
+			}
+			currentModel := currentModelForProvider(session, providerName)
+			picked, pickErr := chatPickerStageResult(context.Background(), session, lease, ui.FullScreenListOptions{
+				Title:        "选择模型",
+				Subtitle:     fmt.Sprintf("provider: %s · Enter 确认，x/Delete 删除选中模型，Esc 取消", providerName),
+				EmptyMessage: "没有匹配的模型",
+				ConfirmLabel: "使用选中模型",
+				Items:        buildModelPickerModelItems(models, currentModel),
+				OnDelete:     func(int) error { return nil },
+			})
+			if pickErr != nil {
+				closeModelPickerLease(session, lease)
+				_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("选择模型失败: %w", pickErr)), false)
+				return
+			}
+			if picked.Cancelled {
+				closeModelPickerLease(session, lease)
+				_ = renderChatCommandResult(session, commandTextResult("已取消切换模型"), false)
+				return
+			}
+			if picked.DeleteRequested {
+				if picked.Index < 0 || picked.Index >= len(models) {
+					continue
+				}
+				target := models[picked.Index]
+				if guardErr := chatModelRemovalGuard(providerCtx.Provider, currentModel, target); guardErr != nil {
+					_ = renderChatCommandResult(session, commandTextResult(guardErr.Error()), false)
+					continue
+				}
+				if !confirmChatModelDeletion(session, lease, providerName, target) {
+					continue
+				}
+				if persistErr := persistChatModelRemoval(session.Config, providerName, target); persistErr != nil {
+					_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("删除模型 %s 失败: %w", target, persistErr)), false)
+					continue
+				}
+				_ = renderChatCommandResult(session, commandTextResult(fmt.Sprintf("已删除模型 %s（已保存到配置文件）", target)), false)
+				// Reload so the reopened stage lists the persisted catalog.
+				if reloadedCtx, _, reloadErr := resolveModelCommandExecutionContext(session, providerName, ""); reloadErr == nil {
+					providerCtx = reloadedCtx
+				} else {
+					providerCtx.Provider.SupportedModels = filterChatProviderModels(providerCtx.Provider.SupportedModels, target)
+				}
+				continue
+			}
+			if picked.Index < 0 || picked.Index >= len(models) {
+				continue
+			}
+			modelName = models[picked.Index]
+			break
 		}
-		index, cancelled, pickErr := chatPickerStage(context.Background(), session, lease, ui.FullScreenListOptions{
-			Title:        "选择模型",
-			Subtitle:     fmt.Sprintf("provider: %s · Enter 确认，Esc 取消", providerName),
-			EmptyMessage: "没有匹配的模型",
-			ConfirmLabel: "使用选中模型",
-			Items:        buildModelPickerModelItems(models, currentModelForProvider(session, providerName)),
-		})
-		if pickErr != nil {
-			closeModelPickerLease(session, lease)
-			_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("选择模型失败: %w", pickErr)), false)
-			return
-		}
-		if cancelled {
-			closeModelPickerLease(session, lease)
-			_ = renderChatCommandResult(session, commandTextResult("已取消切换模型"), false)
-			return
-		}
-		modelName = models[index]
+	}
+
+	// Stage 2 continued: the model stage may have removed the active session
+	// model indirectly; keep the resolved context in sync before reasoning.
+	if modelName == "" {
+		modelName = currentModelForProvider(session, providerName)
 	}
 
 	// Stage 3: reasoning effort. Only when the caller asked for it and the
@@ -210,6 +249,98 @@ func buildModelProviderFullScreenItems(providers []string, current string) []ui.
 
 func buildModelPickerModelItems(models []string, current string) []ui.FullScreenListItem {
 	return buildChatPickerItems(models, current, "model", "model")
+}
+
+// chatModelRemovalGuard rejects a model deletion that would break the current
+// session or that targets an entry the picker does not own: runtime-derived
+// entries (the provider default, a session override) are not part of the
+// provider's managed supported_models list and stay untouched by /model.
+func chatModelRemovalGuard(provider config.Provider, currentModel, target string) error {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return fmt.Errorf("无效的模型名")
+	}
+	if strings.EqualFold(strings.TrimSpace(currentModel), target) {
+		return fmt.Errorf("模型 %s 正在使用中，不能删除", target)
+	}
+	for _, managed := range provider.SupportedModels {
+		if strings.EqualFold(strings.TrimSpace(managed), target) {
+			return nil
+		}
+	}
+	return fmt.Errorf("模型 %s 不在 provider 的受管模型列表（supported_models）中，无法删除", target)
+}
+
+// confirmChatModelDeletion asks for explicit confirmation on the alternate
+// screen. Raw-mode chat cannot accept free text, so the confirmation is a
+// two-item full-screen list: [确认删除, 取消].
+func confirmChatModelDeletion(session *ChatSession, lease ui.ScreenLease, providerName, model string) bool {
+	picked, err := chatPickerStageResult(context.Background(), session, lease, ui.FullScreenListOptions{
+		Title:        "删除模型",
+		Subtitle:     fmt.Sprintf("将 %s 从 %s 的 supported_models 中移除并保存到配置文件", model, providerName),
+		EmptyMessage: "没有可选项",
+		ConfirmLabel: "确认删除",
+		Items: []ui.FullScreenListItem{
+			{Title: "确认删除 " + model, SearchText: "yes confirm delete 确认 删除"},
+			{Title: "取消（返回模型列表）", SearchText: "cancel no 取消"},
+		},
+	})
+	if err != nil || picked.Cancelled {
+		return false
+	}
+	return picked.Index == 0
+}
+
+// persistChatModelRemoval removes the model from the provider's
+// supported_models in the on-disk config and syncs the in-memory copy so the
+// reopened picker stage lists the persisted catalog. When the removed model
+// was the provider's default, the default reference is cleared alongside to
+// avoid a dangling default_model node.
+func persistChatModelRemoval(cfg *config.Config, providerName, model string) error {
+	if cfg == nil {
+		return fmt.Errorf("配置未加载")
+	}
+	canonical := ""
+	var provider config.Provider
+	for name, p := range cfg.Providers.Items {
+		if strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(providerName)) {
+			canonical, provider = name, p
+			break
+		}
+	}
+	if canonical == "" {
+		return fmt.Errorf("provider %s 不存在", providerName)
+	}
+	kept := filterChatProviderModels(provider.SupportedModels, model)
+	if len(kept) == len(provider.SupportedModels) {
+		return fmt.Errorf("模型 %s 不在 %s 的 supported_models 中", model, canonical)
+	}
+	update := config.ProviderConfigUpdate{Name: canonical, SupportedModels: &kept}
+	if strings.EqualFold(strings.TrimSpace(provider.DefaultModel), strings.TrimSpace(model)) {
+		empty := ""
+		update.DefaultModel = &empty
+	}
+	if _, err := config.UpdateProviderConfig(cfg.ConfigFilePath, update); err != nil {
+		return err
+	}
+	provider.SupportedModels = kept
+	if update.DefaultModel != nil {
+		provider.DefaultModel = ""
+	}
+	cfg.Providers.Items[canonical] = provider
+	return nil
+}
+
+// filterChatProviderModels returns a copy of models without target
+// (case-insensitive compare), preserving order.
+func filterChatProviderModels(models []string, target string) []string {
+	kept := make([]string, 0, len(models))
+	for _, m := range models {
+		if !strings.EqualFold(strings.TrimSpace(m), strings.TrimSpace(target)) {
+			kept = append(kept, m)
+		}
+	}
+	return kept
 }
 
 func buildModelPickerReasoningItems(options []string, current string) []ui.FullScreenListItem {

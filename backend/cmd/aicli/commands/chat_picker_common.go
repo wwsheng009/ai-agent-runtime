@@ -126,6 +126,20 @@ func chatPickerStage(ctx context.Context, session *ChatSession, lease ui.ScreenL
 	return picked.Index, false, nil
 }
 
+// chatPickerStageResult is chatPickerStage for stages that need the full list
+// result, in particular DeleteRequested (model removal from /model). Callers
+// own the confirm-and-persist cycle and reopen the stage with refreshed items.
+func chatPickerStageResult(ctx context.Context, session *ChatSession, lease ui.ScreenLease, options ui.FullScreenListOptions) (ui.FullScreenListResult, error) {
+	if len(options.Items) == 0 {
+		return ui.FullScreenListResult{}, fmt.Errorf("没有可选项")
+	}
+	picked, err := ui.SelectFullScreenListWithLease(ctx, resumeFullScreenTerminal(session), options, lease)
+	if err != nil {
+		return ui.FullScreenListResult{}, err
+	}
+	return picked, nil
+}
+
 // chatPickerLeaseHooks binds one picker kind to its UI-actor barrier actions so
 // the lease lifecycle stays generic while each picker keeps its own action
 // identity in controller state.
