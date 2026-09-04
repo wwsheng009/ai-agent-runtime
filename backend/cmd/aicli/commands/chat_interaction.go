@@ -204,6 +204,15 @@ type chatInteractionCoordinator struct {
 	dynamicStatusCompletedElapsed time.Duration
 	dynamicStatusCompleted        bool
 	dynamicStatusTimerSeq         uint64
+	// webStatusLane 把 aicli.chat.dynamic_status 的 EventBus 发布移出 c.mu
+	// 临界区（reducer 外发布）：updateSurfaceStatusLocked 只在锁内构建快照并
+	// 非阻塞入队（满时丢最旧帧、保序 latest-wins），专用 goroutine 锁外保序
+	// 发布。即使未来出现慢/阻塞订阅者，也不会回压到持有 c.mu 的 UI reducer
+	// 或会话内部路径（历史事故：一个不消费 SSE 的 web 客户端即可经同步
+	// Bus.Publish 把 agent 循环 + UI actor + 停滞看门狗同时钉死）。
+	webStatusLaneOnce sync.Once
+	webStatusLane     chan webDynamicStatusMessage
+	webStatusLaneStop chan struct{}
 	// surfaceStatus 缓存最近一次 updateSurfaceStatusLocked 的结构化状态。
 	// 动态状态 tick 用它在每秒钟重建状态行：SetRetrying/SetNotice 等入口
 	// 写入的状态不落在 agentStage/activity flags 上，若 tick 重新派生会
@@ -818,29 +827,41 @@ func (c *chatInteractionCoordinator) updateSurfaceStatusLocked(s chatSurfaceStat
 		c.surface.SetSessionIDLine(buildChatSessionIDLine(c.session))
 		c.scheduleDynamicStatusTickLocked(now)
 	}
-	c.publishWebDynamicStatusLocked(s, now)
+	c.enqueueWebDynamicStatusLocked(s, now)
 }
 
-// publishWebDynamicStatusLocked 在 TUI 动态状态行变化（开始/切换/结束）时向
-// EventBus 发布 aicli.chat.dynamic_status 事件，web 客户端经 SSE 同步显示
-// 与 aicli chat 一致的活动状态行（如 "◦ Retrying step=1 … attempt=1/10 …"）。
+// webDynamicStatusLaneCapacity 是 web 动态状态发布通道容量。状态发布频率低
+// （状态开始/切换/结束各一次），少量缓冲足够；满时丢最旧帧保持 FIFO，
+// 仍是 latest-wins。
+const webDynamicStatusLaneCapacity = 16
+
+// webDynamicStatusMessage 是移出 c.mu 的 web 动态状态发布快照。
+type webDynamicStatusMessage struct {
+	session *ChatSession
+	payload map[string]interface{}
+	at      time.Time
+}
+
+// webDynamicStatusPayloadLocked 在 TUI 动态状态行变化（开始/切换/结束）时构建
+// aicli.chat.dynamic_status 发布快照，web 客户端经 SSE 同步显示与 aicli chat
+// 一致的活动状态行（如 "◦ Retrying step=1 … attempt=1/10 …"）。
 //
 // payload 约定（web_schema.go §5.1 映射 + 前端 app.js dynamic_status 处理）：
 //   - active:        bool，false 表示回到 idle，前端应清除状态行；
 //   - text:          状态行前置文本（不含 "(N • esc to interrupt)" 时钟后缀），
-//                    completed 终态时为 "Worked for …"；
+//     completed 终态时为 "Worked for …"；
 //   - role:          style.Role 语义（warning/reasoning/tool/progress/success…），
-//                    前端据此着色；
+//     前端据此着色；
 //   - interruptible: bool，是否显示 "(N • esc to interrupt)"；
 //   - started_at:    RFC3339 起始时刻（非零时），前端本地每秒推进时钟；
 //   - elapsed_ms:    发布时刻已流逝毫秒（前端首帧对齐）。
 //
 // 时钟由 updateSurfaceStatusLocked 触发一次、前端本地推进，避免每秒占用
 // EventBus；idle（active=false）事件保证状态行及时清除。
-func (c *chatInteractionCoordinator) publishWebDynamicStatusLocked(s chatSurfaceStatus, now time.Time) {
-	if c == nil || c.session == nil || c.session.LocalRuntimeHost == nil || c.session.LocalRuntimeHost.EventBus == nil {
-		return
-	}
+//
+// 本函数只在 c.mu 临界区内做纯内存构建（无锁外副作用），返回的 payload
+// 始终非 nil。
+func (c *chatInteractionCoordinator) webDynamicStatusPayloadLocked(s chatSurfaceStatus, now time.Time) map[string]interface{} {
 	payload := map[string]interface{}{
 		"active": false,
 	}
@@ -858,11 +879,70 @@ func (c *chatInteractionCoordinator) publishWebDynamicStatusLocked(s chatSurface
 		}
 		payload["elapsed_ms"] = c.dynamicStatusElapsedLocked(now).Milliseconds()
 	}
-	c.session.LocalRuntimeHost.EventBus.Publish(runtimeevents.Event{
+	return payload
+}
+
+// enqueueWebDynamicStatusLocked 在持 c.mu 期间只做快照 + 非阻塞入队，实际
+// EventBus 发布由 webDynamicStatusPublisher 在锁外完成。调用方（持锁的
+// updateSurfaceStatusLocked 等）绝不因 web 发布而阻塞——即使订阅者（如
+// SSE 转发器）遇到停滞的浏览器客户端，回压也只停在锁外发布 goroutine。
+func (c *chatInteractionCoordinator) enqueueWebDynamicStatusLocked(s chatSurfaceStatus, now time.Time) {
+	if c == nil || c.session == nil || c.session.LocalRuntimeHost == nil || c.session.LocalRuntimeHost.EventBus == nil {
+		return
+	}
+	msg := webDynamicStatusMessage{
+		session: c.session,
+		payload: c.webDynamicStatusPayloadLocked(s, now),
+		at:      now,
+	}
+	c.webStatusLaneOnce.Do(func() {
+		c.webStatusLane = make(chan webDynamicStatusMessage, webDynamicStatusLaneCapacity)
+		if c.webStatusLaneStop == nil {
+			c.webStatusLaneStop = make(chan struct{})
+		}
+		go c.webDynamicStatusPublisher()
+	})
+	select {
+	case c.webStatusLane <- msg:
+		return
+	default:
+	}
+	// 队列满：丢最旧一帧再补位，保持 FIFO 顺序（latest-wins）。
+	select {
+	case <-c.webStatusLane:
+	default:
+	}
+	select {
+	case c.webStatusLane <- msg:
+	default:
+		// 与消费者竞争时仍满：放弃本帧（消费者将读到更新的快照）。
+	}
+}
+
+// webDynamicStatusPublisher 是锁外保序发布消费者：发布顺序 == 入队顺序，
+// 不持任何 coordinator 锁；慢/阻塞订阅者只停住该 goroutine。Shutdown 关闭
+// webStatusLaneStop 后退出，队列中未发布的帧在进程收尾阶段丢弃即可。
+func (c *chatInteractionCoordinator) webDynamicStatusPublisher() {
+	for {
+		select {
+		case msg := <-c.webStatusLane:
+			c.publishWebDynamicStatusEvent(msg)
+		case <-c.webStatusLaneStop:
+			return
+		}
+	}
+}
+
+// publishWebDynamicStatusEvent 把快照发布到会话 EventBus（锁外）。
+func (c *chatInteractionCoordinator) publishWebDynamicStatusEvent(msg webDynamicStatusMessage) {
+	if msg.session == nil || msg.session.LocalRuntimeHost == nil || msg.session.LocalRuntimeHost.EventBus == nil {
+		return
+	}
+	msg.session.LocalRuntimeHost.EventBus.Publish(runtimeevents.Event{
 		Type:      chatWebDynamicStatusBusEvent,
-		SessionID: chatDebugSessionID(c.session),
-		Timestamp: now.UTC(),
-		Payload:   payload,
+		SessionID: chatDebugSessionID(msg.session),
+		Timestamp: msg.at.UTC(),
+		Payload:   msg.payload,
 	})
 }
 
@@ -4776,6 +4856,11 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	c.stopActiveStableCommitLocked()
 	c.stopDynamicStatusTickLocked()
 	c.mu.Unlock()
+	// 停止锁外 web 动态状态发布通道（懒创建，可能从未启动/已由 shutdown
+	// 标志保证只关闭一次）。队列中未发布帧在收尾阶段丢弃。
+	if c.webStatusLaneStop != nil {
+		close(c.webStatusLaneStop)
+	}
 	// Stop the presenter before closing the actor. closeUIActor first detaches
 	// the effect consumer, then drains its worker, so no callback can emit after
 	// the primary terminal authority has been released. It must run outside

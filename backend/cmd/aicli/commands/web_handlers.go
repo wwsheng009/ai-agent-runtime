@@ -3,11 +3,13 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -114,66 +116,231 @@ func HandleChatWebAPIEventsSchema(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
-// SSE 发射器（§4.2.3 — 带互斥锁）
+// SSE 发射器（§4.2.3 — 背压安全异步写入）
 // ---------------------------------------------------------------------------
 
-// chatWebSSEStream 是受互斥锁保护的 SSE 写入器。
+// chatWebSSEWriteTimeout 是单帧写 + Flush 的硬上限。web 客户端停止消费导致
+// TCP 背压时，写入必须在此时间内失败并把流判死，绝不允许无限期阻塞发布者。
+//
+// 历史事故：writeEvent 曾在持锁状态下做无界 Flush()，一个停滞的客户端即可
+// 经同步 Bus.Publish 把 agent 并行工具批次、UI actor、停滞看门狗与主循环
+// 同时钉死（会话显示 "Analyzing (5m 15s)" 永不刷新）。
+const chatWebSSEWriteTimeout = 10 * time.Second
+
+// chatWebSSEQueueCapacity 是发布者 goroutine（EventBus 订阅回调）与专用
+// writer goroutine 之间的缓冲帧数。慢客户端只丢帧（Dropped 计数），
+// 从不阻塞发布者。
+const chatWebSSEQueueCapacity = 256
+
+// chatWebSSEFrame 是写入队列中的一帧。
+type chatWebSSEFrame struct {
+	event       string
+	data        map[string]interface{} // 事件数据；keepalive 帧为 nil
+	sourceEvent string
+	keepalive   bool
+}
+
+// chatWebSSEStream 是异步 SSE 发射器：
+//   - writeEvent / keepalive 只做非阻塞入队（队列满或流已死则丢帧计数），
+//     可在任意发布者 goroutine（含持锁路径）安全调用，永不阻塞；
+//   - 唯一 writer goroutine 独占 http.ResponseWriter，逐帧设置写截止时间；
+//     写失败/超时后把流判死、关闭 Done 并回调 onDead（用于退订 EventBus）。
 type chatWebSSEStream struct {
 	w       http.ResponseWriter
 	flusher http.Flusher
-	mu      sync.Mutex
-	seq     int64
-	lastAt  time.Time
+	rc      *http.ResponseController
+
+	queue chan chatWebSSEFrame
+	done  chan struct{}
+	// writerDone 在 runWriter 退出时关闭。handler 返回前必须等它，保证
+	// 所有 Write/Flush 都发生在 net/http 收尾响应之前（ResponseWriter
+	// 不可在 handler 返回后并发使用，否则内部数据竞争/panic）。
+	writerDone chan struct{}
+
+	closeOnce sync.Once
+	// writeTimeout 测试可缩短；0 使用 chatWebSSEWriteTimeout。
+	writeTimeout time.Duration
+	seq          atomic.Int64 // 序列号只在 writer goroutine 内分配（FIFO 单调）
+	lastAt       atomic.Int64 // unix nanos：最近一次成功写时刻
+	dropped      atomic.Uint64
+	dead         atomic.Bool
 }
 
-// newChatWebSSEStream 创建 SSE 发射器。
+// newChatWebSSEStream 创建异步 SSE 发射器。
 func newChatWebSSEStream(w http.ResponseWriter, flusher http.Flusher) *chatWebSSEStream {
-	return &chatWebSSEStream{w: w, flusher: flusher, lastAt: time.Now()}
+	return &chatWebSSEStream{
+		w:          w,
+		flusher:    flusher,
+		rc:         http.NewResponseController(w),
+		queue:      make(chan chatWebSSEFrame, chatWebSSEQueueCapacity),
+		done:       make(chan struct{}),
+		writerDone: make(chan struct{}),
+	}
 }
 
-// writeEvent 写入一个 SSE 事件（event: + data: 两行），并递增连接内序列号。
-// data 会被套上 _event 信封（sequence / schema_version / timestamp / source_event）。
-func (s *chatWebSSEStream) writeEvent(event string, data map[string]interface{}, sourceEvent string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.seq++
-	data["_event"] = map[string]interface{}{
-		"sequence":       s.seq,
-		"schema_version": chatWebSchemaVersion,
-		"timestamp":      time.Now().UTC().Format(time.RFC3339),
-		"source_event":   sourceEvent,
+// Done 在流判死（写失败/超时）或 Close 时关闭，供 handler 主循环/订阅循环退出。
+func (s *chatWebSSEStream) Done() <-chan struct{} {
+	if s == nil {
+		return nil
 	}
-	payload, err := json.Marshal(data)
-	if err != nil {
+	return s.done
+}
+
+// Dropped 返回因队列满或流已死而丢弃的帧数（发布者不阻塞的代价）。
+func (s *chatWebSSEStream) Dropped() uint64 {
+	if s == nil {
+		return 0
+	}
+	return s.dropped.Load()
+}
+
+// Closed 报告流是否已判死/关闭（不再接受新帧）。
+func (s *chatWebSSEStream) Closed() bool {
+	if s == nil {
+		return true
+	}
+	return s.dead.Load()
+}
+
+// writeEvent 入队一个 SSE 事件帧（event: + data: 两行）。非阻塞；帧的
+// _event 信封（sequence/timestamp）由 writer goroutine 写时按 FIFO 分配。
+func (s *chatWebSSEStream) writeEvent(event string, data map[string]interface{}, sourceEvent string) {
+	s.enqueue(chatWebSSEFrame{event: event, data: data, sourceEvent: sourceEvent})
+}
+
+// keepalive 入队一行 SSE 注释帧（`: keepalive`），维持连接存活。非阻塞。
+func (s *chatWebSSEStream) keepalive() {
+	s.enqueue(chatWebSSEFrame{keepalive: true})
+}
+
+// lastEventAge 返回距最近一次成功写入的时间（无锁原子读）。
+func (s *chatWebSSEStream) lastEventAge() time.Duration {
+	if s == nil {
+		return 0
+	}
+	return time.Since(time.Unix(0, s.lastAt.Load()))
+}
+
+// start 启动专用 writer goroutine。onDead 在流判死时调用（通常用于退订
+// EventBus），最多触发一次。
+func (s *chatWebSSEStream) start(onDead func()) {
+	if s == nil {
 		return
 	}
+	go s.runWriter(onDead)
+}
+
+// Close 幂等关闭流（handler 退出时调用）；未写出的帧被丢弃。
+func (s *chatWebSSEStream) Close() {
+	if s == nil {
+		return
+	}
+	s.closeOnce.Do(func() {
+		s.dead.Store(true)
+		close(s.done)
+	})
+}
+
+// fail 把流判死：关闭 Done、回调 onDead（均只一次）。
+func (s *chatWebSSEStream) fail(onDead func()) {
+	if s == nil || !s.dead.CompareAndSwap(false, true) {
+		return
+	}
+	s.closeOnce.Do(func() { close(s.done) })
+	if onDead != nil {
+		onDead()
+	}
+}
+
+// enqueue 非阻塞入队：队列满或流已死时丢帧并计数，绝不阻塞调用方。
+func (s *chatWebSSEStream) enqueue(f chatWebSSEFrame) {
+	if s == nil || s.dead.Load() {
+		if s != nil {
+			s.dropped.Add(1)
+		}
+		return
+	}
+	select {
+	case s.queue <- f:
+	default:
+		s.dropped.Add(1)
+	}
+}
+
+// runWriter 是唯一写 socket 的 goroutine：逐帧写 + Flush，均带写截止时间。
+func (s *chatWebSSEStream) runWriter(onDead func()) {
+	defer close(s.writerDone)
+	timeout := s.writeTimeout
+	if timeout <= 0 {
+		timeout = chatWebSSEWriteTimeout
+	}
+	for {
+		select {
+		case f := <-s.queue:
+			if err := s.writeFrame(s.renderFrame(f), timeout); err != nil {
+				s.fail(onDead)
+				return
+			}
+		case <-s.done:
+			return
+		}
+	}
+}
+
+// renderFrame 生成帧字节。writer goroutine 独占调用，sequence 按 FIFO 单调。
+func (s *chatWebSSEStream) renderFrame(f chatWebSSEFrame) []byte {
 	var sb strings.Builder
+	if f.keepalive {
+		sb.WriteString(": keepalive\n\n")
+		return []byte(sb.String())
+	}
 	sb.WriteString("event: ")
-	sb.WriteString(event)
-	sb.WriteString("\n")
-	sb.WriteString("data: ")
-	sb.WriteString(string(payload))
+	sb.WriteString(f.event)
+	sb.WriteString("\ndata: ")
+	if f.data != nil {
+		f.data["_event"] = map[string]interface{}{
+			"sequence":       s.seq.Add(1),
+			"schema_version": chatWebSchemaVersion,
+			"timestamp":      time.Now().UTC().Format(time.RFC3339),
+			"source_event":   f.sourceEvent,
+		}
+		payload, err := json.Marshal(f.data)
+		if err != nil {
+			s.dropped.Add(1)
+			return nil
+		}
+		sb.Write(payload)
+	}
 	sb.WriteString("\n\n")
-	_, _ = s.w.Write([]byte(sb.String()))
-	s.flusher.Flush()
-	s.lastAt = time.Now()
+	return []byte(sb.String())
 }
 
-// keepalive 写入一行 SSE 注释（`: keepalive`），维持连接存活。
-func (s *chatWebSSEStream) keepalive() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, _ = s.w.Write([]byte(": keepalive\n\n"))
+// writeFrame 带写截止时间写出单帧；失败/超时即返回错误，由 runWriter 判死。
+//
+// recover 边界：writer goroutine 在 handler 返回后仍可能短暂写已收尾的
+// net/http response（客户端断开竞态），此时 net/http 内部 Flush 可能 panic；
+// 该 goroutine 不属于 handler，panic 会直接崩进程，必须在此转成错误走
+// 正常的判死路径。
+func (s *chatWebSSEStream) writeFrame(payload []byte, timeout time.Duration) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("sse write/flush panic: %v", r)
+		}
+	}()
+	if len(payload) == 0 {
+		return nil
+	}
+	if s.rc != nil {
+		// httptest / 不支持 deadline 的 ResponseWriter 会返回 ErrNotSupported，
+		// 忽略即可；真实 TCP 连接上该 deadline 是判死停滞客户端的关键。
+		_ = s.rc.SetWriteDeadline(time.Now().Add(timeout))
+	}
+	if _, err := s.w.Write(payload); err != nil {
+		return err
+	}
 	s.flusher.Flush()
-	s.lastAt = time.Now()
-}
-
-// lastEventAge 返回距最近一次写入的时间。
-func (s *chatWebSSEStream) lastEventAge() time.Duration {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return time.Since(s.lastAt)
+	s.lastAt.Store(time.Now().UnixNano())
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -215,9 +382,12 @@ func HandleChatWebAPIEvents(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	stream := newChatWebSSEStream(w, flusher)
-
-	// 1. connected 首事件
-	stream.writeEvent("connected", chatWebConnectedPayload(chatWebSession()), "connected")
+	// handler 返回前必须先停掉 writer goroutine：ResponseWriter 在 handler
+	// 返回后由 net/http 收尾，并发 Write/Flush 会数据竞争/panic。
+	defer func() {
+		stream.Close()
+		<-stream.writerDone
+	}()
 
 	// 订阅管理（§8.5）：curBus 与 unsub 只在本 handler 的 goroutine 间通过 subMu 访问。
 	var (
@@ -226,7 +396,20 @@ func HandleChatWebAPIEvents(w http.ResponseWriter, r *http.Request) {
 		unsub  runtimeevents.Unsubscribe = func() {}
 	)
 
+	// 死流回调：writer goroutine 写入失败/超时（web 客户端停滞）时退订
+	// EventBus。退订幂等（once），与主循环 ctx.Done 路径的重叠退订安全。
+	stream.start(func() {
+		subMu.Lock()
+		unsub()
+		subMu.Unlock()
+	})
+
+	// 1. connected 首事件（入队，由 writer goroutine 写出）
+	stream.writeEvent("connected", chatWebConnectedPayload(chatWebSession()), "connected")
+
 	// 事件转发 handler：由 EventBus.Publish 调用（发布者 goroutine）。
+	// 只做会话过滤 + 非阻塞入队；任何写/背压处理都在 stream 的 writer
+	// goroutine 内完成，发布者（含 agent、UI actor、停滞看门狗）永不被阻塞。
 	onEvent := func(ev runtimeevents.Event) {
 		// 每次事件时重新解析当前会话（§8.5），按会话过滤。
 		sessionID := ""
@@ -256,6 +439,8 @@ func HandleChatWebAPIEvents(w http.ResponseWriter, r *http.Request) {
 			select {
 			case <-ctx.Done():
 				return
+			case <-stream.Done():
+				return
 			case <-ticker.C:
 				var bus *runtimeevents.Bus
 				if session := chatWebSession(); session != nil && session.LocalRuntimeHost != nil {
@@ -281,6 +466,12 @@ func HandleChatWebAPIEvents(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-ctx.Done():
+			subMu.Lock()
+			unsub()
+			subMu.Unlock()
+			return
+		case <-stream.Done():
+			// writer 已因写入失败/超时判死并退订；这里幂等收尾退出。
 			subMu.Lock()
 			unsub()
 			subMu.Unlock()
