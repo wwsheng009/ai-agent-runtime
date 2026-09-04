@@ -341,13 +341,16 @@ func TestHandleChatWebAPIConfigProviders_UpsertMergePreservesOthers(t *testing.T
 	}
 }
 
-// TestHandleChatWebAPIConfigProviders_UpsertAPIKeyProxy 验证写 api_key /
-// forward_url / proxy：快照只回传 api_key_set（不泄露明文），YAML 落盘。
+// TestHandleChatWebAPIConfigProviders_UpsertAPIKeyProxy 验证纯内联 provider
+// （无 api_key_ref）写 api_key / forward_url / proxy：快照只回传
+// api_key_set（不泄露明文），YAML 落盘。带 api_key_ref 的 provider 更新
+// key 会走 Key Store 语义（见 APIKeyUpdateWritesKeyStore），这里用 beta
+// 覆盖内联路径。
 func TestHandleChatWebAPIConfigProviders_UpsertAPIKeyProxy(t *testing.T) {
 	path := withWebConfigTestSession(t, webConfigTestYAML)
 
 	rec := postConfigJSON(t, HandleChatWebAPIConfigProviders, map[string]interface{}{
-		"name":        "alpha",
+		"name":        "beta",
 		"api_key":     "sk-web-new-key-999",
 		"forward_url": "https://fw2.example.com",
 		"proxy": map[string]interface{}{
@@ -376,19 +379,19 @@ func TestHandleChatWebAPIConfigProviders_UpsertAPIKeyProxy(t *testing.T) {
 	rec2 := httptest.NewRecorder()
 	HandleChatWebAPIConfig(rec2, httptest.NewRequest(http.MethodGet, "/web/api/config", nil))
 	snap := decodeConfigSnapshot(t, rec2.Body.String())
-	alpha := configProviderByName(t, snap, "alpha")
-	if !alpha.APIKeySet {
-		t.Error("alpha.api_key_set = false, want true")
+	beta := configProviderByName(t, snap, "beta")
+	if !beta.APIKeySet {
+		t.Error("beta.api_key_set = false, want true")
 	}
 	if strings.Contains(rec2.Body.String(), "sk-web-new-key-999") {
 		t.Error("快照泄露新 API key 明文")
 	}
-	if alpha.ForwardURL != "https://fw2.example.com" {
-		t.Errorf("alpha.forward_url = %q", alpha.ForwardURL)
+	if beta.ForwardURL != "https://fw2.example.com" {
+		t.Errorf("beta.forward_url = %q", beta.ForwardURL)
 	}
-	if alpha.Proxy == nil || !alpha.Proxy.Enabled || alpha.Proxy.HTTP != "http://127.0.0.1:1080" ||
-		alpha.Proxy.NoProxy != "localhost" {
-		t.Errorf("alpha.proxy mismatch: %+v", alpha.Proxy)
+	if beta.Proxy == nil || !beta.Proxy.Enabled || beta.Proxy.HTTP != "http://127.0.0.1:1080" ||
+		beta.Proxy.NoProxy != "localhost" {
+		t.Errorf("beta.proxy mismatch: %+v", beta.Proxy)
 	}
 }
 
@@ -550,7 +553,13 @@ func TestHandleChatWebAPIConfigProviders_APIKeyMergePreserved(t *testing.T) {
 // reloadChatConfigForModelCommand 因 ConfigFilePath 为空会跳过刷新——
 // 若不补齐，内存仍保留旧 key，fetch-models 等读 session.Config 的端点
 // 会继续用旧凭据（表现为“更新错误 key 后仍能获取模型列表”）。
+// 带 api_key_ref 的 provider（alpha）更新 key 走 Key Store 语义：新 key 写
+// 入 auth.json（HOME 隔离），config.yaml 内联 api_key 被清除，ref 保留。
 func TestHandleChatWebAPIConfigProviders_RefreshRuntimeOnlySession(t *testing.T) {
+	authDir := t.TempDir()
+	t.Setenv("HOME", authDir)
+	t.Setenv("USERPROFILE", authDir)
+
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(webConfigTestYAML), 0o644); err != nil {
 		t.Fatalf("write config file: %v", err)
@@ -579,20 +588,32 @@ func TestHandleChatWebAPIConfigProviders_RefreshRuntimeOnlySession(t *testing.T)
 	}
 
 	// 内存必须与磁盘同步：fetch-models 等端点读 session.Config，若仍为旧 key
-	// 就会拿旧凭据去验证（错误 key 更新后“看起来还能用”）。
-	got := session.Config.Providers.Items["alpha"].APIKey
-	if got != "sk-web-new-key-999" {
-		t.Errorf("session.Config 内存 key = %q, want sk-web-new-key-999（RuntimeConfigPath 会话未刷新）", got)
+	// 就会拿旧凭据去验证（错误 key 更新后“看起来还能用”）。alpha 带
+	// api_key_ref，新 key 写入 Key Store，内联 api_key 被清除，ref 保留——
+	// 刷新后 GetAllAPIKeys（ref 优先读 store）必须返回新 key。
+	alphaMem := session.Config.Providers.Items["alpha"]
+	if strings.TrimSpace(alphaMem.APIKey) != "" {
+		t.Errorf("session.Config 内存内联 key = %q, want 空（新 key 应写入 Key Store）", alphaMem.APIKey)
+	}
+	if keys := alphaMem.GetAllAPIKeys(); len(keys) != 1 || keys[0] != "sk-web-new-key-999" {
+		t.Errorf("session.Config GetAllAPIKeys = %v, want [sk-web-new-key-999]（RuntimeConfigPath 会话未刷新）", keys)
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("re-read config: %v", err)
 	}
-	if !strings.Contains(string(raw), "sk-web-new-key-999") {
-		t.Error("磁盘配置未写入新 key")
+	if strings.Contains(string(raw), "sk-web-new-key-999") {
+		t.Error("磁盘配置不应含内联新 key（Key Store 语义）")
 	}
 	if strings.Contains(string(raw), "sk-test-secret-123") {
 		t.Error("磁盘配置仍包含旧 key")
+	}
+	record, err := agentconfig.LoadProviderAuthFromPath(filepath.Join(authDir, ".aicli", "auth.json"), "authref-alpha")
+	if err != nil {
+		t.Fatalf("load auth record: %v", err)
+	}
+	if record == nil || record.APIKey != "sk-web-new-key-999" {
+		t.Errorf("auth store api_key = %+v, want sk-web-new-key-999", record)
 	}
 }
 
@@ -654,6 +675,99 @@ func TestHandleChatWebAPIConfigProviders_FetchModelsRuntimeOnlySeesDisk(t *testi
 	alpha := configProviderByName(t, snap, "alpha")
 	if !alpha.APIKeySet {
 		t.Errorf("alpha key status after external write = set=%v, want true（读路径未按磁盘刷新内存）", alpha.APIKeySet)
+	}
+}
+
+// TestHandleChatWebAPIConfigProviders_APIKeyUpdateWritesKeyStore 复现页面
+// “输入新 key 保存”的真实语义问题：provider 已配置 api_key_ref（Key Store
+// 模式）时，页面提交的纯 key 更新必须写入 Key Store（auth.json）并清除
+// config.yaml 内联 api_key，而不是写成内联字段——否则运行时
+// （GetAllAPIKeys 优先读 ref）永远用 store 旧凭据，页面保存的 key 不生效，
+// 且 web 校验（内联优先）与运行时（ref 优先）双源分裂。
+func TestHandleChatWebAPIConfigProviders_APIKeyUpdateWritesKeyStore(t *testing.T) {
+	authDir := t.TempDir()
+	t.Setenv("HOME", authDir)
+	t.Setenv("USERPROFILE", authDir)
+
+	var authHeader string
+	srv := fetchModelsTestServer(t, &authHeader)
+	defer srv.Close()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	yaml := strings.Replace(webConfigTestYAML, "https://api.example.com", srv.URL, 1)
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	session := newWebTestSession()
+	session.RuntimeConfigPath = path
+	loaded, err := agentconfig.InitGlobalConfig(path)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	loaded.ConfigFilePath = "" // 模拟 chat_setup：内存 Config 不回写文件路径字段
+	session.Config = loaded
+	withWebTestSession(t, session)
+
+	// 预置 Key Store：模拟 login 命令此前写入的旧凭据（与页面输入不同）。
+	authPath := filepath.Join(authDir, ".aicli", "auth.json")
+	if err := agentconfig.SaveProviderAuthToPath(authPath, "authref-alpha", agentconfig.ProviderAuthRecord{
+		KeyType:  agentconfig.AuthKeyTypeAPIKey,
+		AuthMode: agentconfig.AuthKeyTypeAPIKey,
+		APIKey:   "sk-old-store-111",
+	}); err != nil {
+		t.Fatalf("seed auth store: %v", err)
+	}
+
+	// 页面输入新 key 保存（纯 key 更新：只带 name + api_key）。
+	rec := postConfigJSON(t, HandleChatWebAPIConfigProviders, map[string]interface{}{
+		"name":    "alpha",
+		"api_key": "sk-page-new-555",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// 1) 新 key 必须写入 Key Store（auth.json），而不是只写内联。
+	record, err := agentconfig.LoadProviderAuthFromPath(authPath, "authref-alpha")
+	if err != nil {
+		t.Fatalf("load auth record: %v", err)
+	}
+	if record == nil || record.APIKey != "sk-page-new-555" {
+		t.Fatalf("auth store api_key = %+v, want sk-page-new-555", record)
+	}
+
+	// 2) config.yaml 内联 api_key 必须被清除（避免双源分裂），ref 保留。
+	reloaded, err := agentconfig.InitGlobalConfig(path)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	alpha := reloaded.Providers.Items["alpha"]
+	if strings.TrimSpace(alpha.APIKey) != "" {
+		t.Errorf("alpha inline api_key = %q, want cleared (store is authoritative)", alpha.APIKey)
+	}
+	if strings.TrimSpace(alpha.APIKeyRef) != "authref-alpha" {
+		t.Errorf("alpha api_key_ref = %q, want authref-alpha", alpha.APIKeyRef)
+	}
+
+	// 3) 运行时取 key：ref（store）优先 → 新 key。
+	alphaMem := session.Config.Providers.Items["alpha"]
+	keys := alphaMem.GetAllAPIKeys()
+	if len(keys) != 1 || keys[0] != "sk-page-new-555" {
+		t.Errorf("GetAllAPIKeys = %v, want [sk-page-new-555]（运行时仍用 store 旧凭据）", keys)
+	}
+
+	// 4) web fetch-models 读路径与运行时一致：都使用新 key。
+	rec2 := postConfigJSON(t, HandleChatWebAPIConfigProvidersFetchModels, map[string]interface{}{
+		"name": "alpha",
+	})
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("fetch-models status = %d, want 200; body: %s", rec2.Code, rec2.Body.String())
+	}
+	if !strings.Contains(authHeader, "sk-page-new-555") {
+		t.Errorf("Authorization = %q, want Bearer sk-page-new-555", authHeader)
+	}
+	if strings.Contains(authHeader, "sk-old-store-111") || strings.Contains(authHeader, "sk-test-secret-123") {
+		t.Errorf("Authorization = %q, still using stale key", authHeader)
 	}
 }
 

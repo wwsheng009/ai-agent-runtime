@@ -2,6 +2,7 @@ package commands
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"sort"
@@ -440,10 +441,40 @@ func HandleChatWebAPIConfigProviders(w http.ResponseWriter, r *http.Request) {
 		update.APIPath = webStringPtr(strings.TrimSpace(req.APIPath))
 	}
 	update.ForwardURL = req.ForwardURL
+	// API key 保存语义（与 login 命令 provider_login.go 对齐）：仅当请求是
+	// “纯 key 更新”（只带 api_key，未显式携带 api_key_ref / auth_ref /
+	// auth_mode / api_keys）且目标 provider 已配置 api_key_ref（Key Store
+	// 模式、非 OAuth）时，把新 key 写入 Key Store（auth.json）并清除 YAML
+	// 内联 api_key，而不是写进 config.yaml 内联字段——否则运行时
+	// （GetAllAPIKeys 优先读 ref）与 web 校验（providerModelsAPIKey 优先读
+	// 内联）会出现双源分裂：页面保存的 key 不生效，实际请求仍用 store 里
+	// 的旧凭据。未配置 ref 的纯内联 provider 保持现状（内联是唯一键源）。
 	update.APIKey = req.APIKey
 	update.APIKeyRef = req.APIKeyRef
 	update.AuthMode = req.AuthMode
 	update.AuthRef = req.AuthRef
+	if req.APIKey != nil && strings.TrimSpace(*req.APIKey) != "" &&
+		req.APIKeyRef == nil && req.AuthRef == nil && req.AuthMode == nil && req.APIKeys == nil {
+		provider, ok := agentconfig.Provider{}, false
+		if session := chatWebSession(); session != nil && session.Config != nil {
+			provider, ok = session.Config.Providers.Items[req.Name]
+		}
+		if ok && !strings.EqualFold(strings.TrimSpace(provider.AuthMode), agentconfig.AuthKeyTypeOAuth) &&
+			strings.TrimSpace(provider.APIKeyRef) != "" {
+			ref := strings.TrimSpace(provider.APIKeyRef)
+			record := agentconfig.ProviderAuthRecord{
+				KeyType:  agentconfig.AuthKeyTypeAPIKey,
+				APIKey:   strings.TrimSpace(*req.APIKey),
+				AuthMode: agentconfig.AuthKeyTypeAPIKey,
+			}
+			if err := agentconfig.SaveProviderAuthToPath(agentconfig.DefaultAuthStorePath(), ref, record); err != nil {
+				chatWebWriteError(w, http.StatusInternalServerError, fmt.Errorf("保存 API Key 到 Key Store 失败: %w", err))
+				return
+			}
+			update.APIKey = webStringPtr("") // 清除 YAML 内联残留，消除双源分裂
+			update.APIKeyRef = nil           // 保留现有 ref 引用
+		}
+	}
 	if req.APIKeys != nil {
 		update.APIKeys = req.APIKeys
 	}
