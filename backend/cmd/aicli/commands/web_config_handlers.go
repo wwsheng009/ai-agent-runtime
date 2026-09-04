@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	httpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
 )
 
 // ---------------------------------------------------------------------------
@@ -706,11 +707,36 @@ func HandleChatWebAPIConfigProvidersFetchModels(w http.ResponseWriter, r *http.R
 		chatWebWriteError(w, http.StatusBadGateway, err)
 		return
 	}
+	// 探测该 models 端点是否校验 API key：部分网关（如 opencode.ai）的
+	// GET /models 是公开端点，匿名也能拉取完整列表——此时“获取模型列表成功”
+	// 不代表 key 有效，必须明确提示用户，避免把无效 key 误判为已生效。
+	authNotice := ""
+	probeClient := probeClientForProvider(session, &provider)
+	if modelsEndpointAllowsAnonymous(probeClient, result.Endpoint, normalizeLoginProtocol(req.Protocol, provider.AuthMode)) {
+		authNotice = "该模型列表端点未校验 API key（匿名可访问），获取模型列表成功不代表 key 有效；key 是否有效请以聊天/补全请求为准。"
+	}
 	writeWebAPIJSON(w, http.StatusOK, map[string]interface{}{
-		"status":   "ok",
-		"endpoint": result.Endpoint,
-		"models":   providerModelIDs(result.Models),
+		"status":      "ok",
+		"endpoint":    result.Endpoint,
+		"models":      providerModelIDs(result.Models),
+		"auth_notice": authNotice,
 	})
+}
+
+// probeClientForProvider 返回匿名探测用的 HTTP client：复用 provider 的
+// 代理/头配置（与 validateProviderModels 同源），仅覆盖短超时，避免公开端点
+// 探测因慢响应拖慢整个 fetch-models 流程。
+func probeClientForProvider(session *ChatSession, provider *agentconfig.Provider) *http.Client {
+	var client *http.Client
+	if session != nil && session.Config != nil {
+		client = httpclient.GetHTTPClientWithProvider(session.Config, provider)
+	}
+	if client == nil {
+		client = http.DefaultClient
+	}
+	cloned := *client
+	cloned.Timeout = 6 * time.Second
+	return &cloned
 }
 
 // configPtrOrNil 返回会话的 agentconfig.Config 指针；无会话时为 nil

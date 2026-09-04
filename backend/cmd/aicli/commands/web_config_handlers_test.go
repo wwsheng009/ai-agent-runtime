@@ -877,9 +877,31 @@ func fetchModelsTestServer(t *testing.T, authHeader *string) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
-		*authHeader = r.Header.Get("Authorization")
+		// 只记录带鉴权的请求：fetch-models 现在会附带一次匿名探测请求
+		// （判定端点是否校验 key），匿名请求不得覆盖已保存 key 的记录。
+		if v := r.Header.Get("Authorization"); v != "" {
+			*authHeader = v
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-4o"},{"id":"gpt-4o-mini"},{"id":"o3"}]}`))
+	})
+	return httptest.NewServer(mux)
+}
+
+// fetchModelsAuthRequiredServer 是校验 key 的 mock：匿名请求返回 401，
+// 带 Authorization 才返回模型列表——模拟正常鉴权网关的行为。
+func fetchModelsAuthRequiredServer(t *testing.T, authHeader *string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		if v := r.Header.Get("Authorization"); v != "" {
+			*authHeader = v
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-4o"},{"id":"gpt-4o-mini"},{"id":"o3"}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"missing api key"}}`))
 	})
 	return httptest.NewServer(mux)
 }
@@ -961,6 +983,78 @@ func TestHandleChatWebAPIConfigProvidersFetchModels_NewProvider(t *testing.T) {
 	}
 	if authHeader != "Bearer sk-temp-probe-777" {
 		t.Errorf("Authorization = %q, want 请求内联 key", authHeader)
+	}
+}
+
+// TestHandleChatWebAPIConfigProvidersFetchModels_AnonymousEndpointNotice
+// 验证公开端点（匿名也返回模型列表，如 opencode.ai 网关）在获取成功后附带
+// auth_notice，明确告知“获取模型列表成功不代表 key 有效”。
+func TestHandleChatWebAPIConfigProvidersFetchModels_AnonymousEndpointNotice(t *testing.T) {
+	var authHeader string
+	srv := fetchModelsTestServer(t, &authHeader)
+	defer srv.Close()
+
+	yaml := strings.Replace(webConfigTestYAML, "https://api.example.com", srv.URL, 1)
+	withWebConfigTestSession(t, yaml)
+
+	rec := postConfigJSON(t, HandleChatWebAPIConfigProvidersFetchModels, map[string]interface{}{
+		"name": "alpha",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Status     string   `json:"status"`
+		Models     []string `json:"models"`
+		AuthNotice string   `json:"auth_notice"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "ok" || len(resp.Models) != 3 {
+		t.Fatalf("resp = %+v, want 3 models", resp)
+	}
+	if resp.AuthNotice == "" {
+		t.Fatal("公开端点应返回 auth_notice，提示列表成功不代表 key 有效")
+	}
+	if !strings.Contains(resp.AuthNotice, "未校验 API key") {
+		t.Fatalf("auth_notice = %q, 应包含未校验提示", resp.AuthNotice)
+	}
+}
+
+// TestHandleChatWebAPIConfigProvidersFetchModels_NoNoticeWhenAuthRequired
+// 验证正常鉴权端点（匿名 401）不附带 auth_notice，保持既有行为。
+func TestHandleChatWebAPIConfigProvidersFetchModels_NoNoticeWhenAuthRequired(t *testing.T) {
+	var authHeader string
+	srv := fetchModelsAuthRequiredServer(t, &authHeader)
+	defer srv.Close()
+
+	yaml := strings.Replace(webConfigTestYAML, "https://api.example.com", srv.URL, 1)
+	withWebConfigTestSession(t, yaml)
+
+	rec := postConfigJSON(t, HandleChatWebAPIConfigProvidersFetchModels, map[string]interface{}{
+		"name": "alpha",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Status     string   `json:"status"`
+		Models     []string `json:"models"`
+		AuthNotice string   `json:"auth_notice"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "ok" || len(resp.Models) != 3 {
+		t.Fatalf("resp = %+v, want 3 models", resp)
+	}
+	if resp.AuthNotice != "" {
+		t.Fatalf("鉴权端点不应有 auth_notice, got %q", resp.AuthNotice)
+	}
+	// 匿名探测被 401 拒绝，不应影响已保存 key 的记录。
+	if authHeader != "Bearer sk-test-secret-123" {
+		t.Errorf("Authorization = %q, want 已保存 key", authHeader)
 	}
 }
 

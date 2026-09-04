@@ -108,6 +108,41 @@ func validateProviderModels(req providerModelsValidationRequest) (*providerModel
 	}, nil
 }
 
+// modelsEndpointAllowsAnonymous 探测 models 端点是否校验 API key：用不带任何
+// 鉴权头的匿名请求重放同一端点，若也返回 2xx 且能解析出非空模型列表，则说明
+// 该端点公开（如 opencode.ai 网关，匿名也能拉取完整列表）。此时“获取模型列表
+// 成功”不能证明 key 有效，调用方应在 UI 上提示用户以聊天/补全请求验证 key。
+// 探测失败（网络错误、非 2xx、解析不出模型）一律视为鉴权端点，返回 false。
+// client 由调用方提供（应复用 provider 的代理/超时配置），nil 时用短超时的
+// 裸默认 client。
+func modelsEndpointAllowsAnonymous(client *http.Client, endpoint, loginProtocol string) bool {
+	httpReq, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return false
+	}
+	httpReq.Header.Set("Accept", "application/json")
+	if client == nil {
+		client = &http.Client{Timeout: 6 * time.Second}
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if err != nil {
+		return false
+	}
+	models, err := parseProviderModelsResponse(body, loginProtocol)
+	if err != nil || len(models) == 0 {
+		return false
+	}
+	return true
+}
+
 func buildProviderModelsHeaders(provider config.Provider, loginProtocol string) map[string]string {
 	runtimeProtocol := runtimeProtocolForLoginProtocol(loginProtocol)
 	provider.Protocol = runtimeProtocol

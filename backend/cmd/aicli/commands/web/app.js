@@ -1304,6 +1304,14 @@ function startTypeTimer() {
         var okMsg = "已获取 " + json.models.length + " 个模型" + (json.endpoint ? "（" + json.endpoint + "）" : "");
         if (statusEl) { statusEl.textContent = okMsg; statusEl.className = "cfg-hint-inline ok"; }
         showToast("已获取 " + json.models.length + " 个模型");
+        // 端点是公开的（匿名可访问）：获取列表成功不代表 key 有效，明确提示。
+        if (json.auth_notice) {
+          if (statusEl) {
+            statusEl.textContent = okMsg + "。⚠ " + json.auth_notice;
+            statusEl.className = "cfg-hint-inline warn";
+          }
+          showToast(json.auth_notice, "warn");
+        }
       })
       .catch(function (err) {
         var msg = "获取失败: " + err;

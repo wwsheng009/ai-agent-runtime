@@ -837,6 +837,7 @@ body.sidebar-collapsed #sidebar {
 .cfg-hint-inline { font-size: 11px; color: var(--fg4); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
 .cfg-hint-inline.ok { color: var(--green); }
 .cfg-hint-inline.err { color: var(--red, #e5534b); }
+.cfg-hint-inline.warn { color: var(--yellow, #d29922); white-space: normal; max-width: 420px; }
 .cfg-key-status {
   display: inline-block; font-size: 11px; line-height: 1.4;
   padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border2);
