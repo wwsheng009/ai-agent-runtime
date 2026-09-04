@@ -1257,7 +1257,9 @@ function startTypeTimer() {
         if (apiKeyEl) { apiKeyEl.value = ""; }
         cfgApiKeySaved = true;
         cfgApiKeySource = "inline";
-        cfgApiKeyMasked = maskAPIKey(key);
+        // 后端保存响应回传真实掩码（Key Store 模式也能立即回显），
+        // 兼容旧后端无 masked 字段时本地兜底计算。
+        cfgApiKeyMasked = json.masked || maskAPIKey(key);
         renderAPIKeyStatus();
         showToast("API Key 已更新: " + name);
         loadConfigAdmin();

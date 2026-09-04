@@ -340,6 +340,21 @@ func providerAPIKeySource(p agentconfig.Provider) string {
 	return ""
 }
 
+// webProviderMaskedSecret 读取 Key Store 中 ref 对应凭据的明文并计算掩码
+// 回显（如 sk-proj...OpQr）。仅用于界面识别，明文不随快照回传；store
+// 缺失、损坏或 ref 无对应凭据时返回通用掩码 ****，快照渲染不因此失败。
+func webProviderMaskedSecret(path, ref, keyType string) string {
+	secret, err := agentconfig.LoadProviderAuthSecretFromPath(path, ref, keyType)
+	if err != nil {
+		return "****"
+	}
+	masked := maskAPIKeyForDisplay(secret)
+	if masked == "" {
+		return "****"
+	}
+	return masked
+}
+
 // ---------------------------------------------------------------------------
 // GET /web/api/config — 配置快照
 // ---------------------------------------------------------------------------
@@ -386,10 +401,15 @@ func HandleChatWebAPIConfig(w http.ResponseWriter, r *http.Request) {
 			if len(provider.APIKeys) > 0 {
 				masked = maskAPIKeyForDisplay(strings.TrimSpace(provider.APIKeys[0]))
 			}
-		case "key_store", "oauth":
-			// Key Store 明文不回传（快照渲染不读 store），以通用掩码
-			// 表示“已保存、明文仅在本地”。
-			masked = "****"
+		case "key_store":
+			// 读取 Key Store 明文仅用于生成掩码回显（前端识别是哪把 key），
+			// 不回传明文；store 缺失/损坏/无凭据时降级为通用掩码 ****，
+			// 快照渲染不因 store 问题连带失败。
+			masked = webProviderMaskedSecret(agentconfig.DefaultAuthStorePath(),
+				strings.TrimSpace(provider.APIKeyRef), agentconfig.AuthKeyTypeAPIKey)
+		case "oauth":
+			masked = webProviderMaskedSecret(agentconfig.DefaultAuthStorePath(),
+				strings.TrimSpace(provider.AuthRef), agentconfig.AuthKeyTypeOAuth)
 		}
 		entry := chatWebConfigProvider{
 			Name:            name,
@@ -556,10 +576,16 @@ func HandleChatWebAPIConfigProviders(w http.ResponseWriter, r *http.Request) {
 	}
 	chatWebRefreshSessionConfig()
 	chatWebInvalidateRuntimeProvider(req.Name)
-	writeWebAPIJSON(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"status":   "ok",
 		"provider": req.Name,
-	})
+	}
+	// 回传本次保存 key 的掩码（保存时明文在请求里，无需再读 Key Store），
+	// 前端保存成功后立即显示；未携带 key 的普通保存不带该字段。
+	if req.APIKey != nil && strings.TrimSpace(*req.APIKey) != "" {
+		resp["masked"] = maskAPIKeyForDisplay(strings.TrimSpace(*req.APIKey))
+	}
+	writeWebAPIJSON(w, http.StatusOK, resp)
 }
 
 // ---------------------------------------------------------------------------

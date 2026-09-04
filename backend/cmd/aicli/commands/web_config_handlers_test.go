@@ -366,6 +366,9 @@ func TestHandleChatWebAPIConfigProviders_UpsertAPIKeyProxy(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
 	}
+	if !strings.Contains(rec.Body.String(), `"masked":"sk-web-...-999"`) {
+		t.Errorf("保存响应缺少 masked 掩码回显: %s", rec.Body.String())
+	}
 
 	// YAML 落盘检查
 	raw, err := os.ReadFile(path)
@@ -774,6 +777,26 @@ func TestHandleChatWebAPIConfigProviders_APIKeyUpdateWritesKeyStore(t *testing.T
 	}
 	if strings.Contains(authHeader, "sk-old-store-111") || strings.Contains(authHeader, "sk-test-secret-123") {
 		t.Errorf("Authorization = %q, still using stale key", authHeader)
+	}
+
+	// 5) 保存响应回传真实掩码（Key Store 模式也立即回显，不再只给 ****）。
+	if !strings.Contains(rec.Body.String(), `"masked":"sk-page...-555"`) {
+		t.Errorf("保存响应缺少 masked 回显: %s", rec.Body.String())
+	}
+
+	// 6) 快照基于 Key Store 明文回传真实掩码，供重新打开编辑弹窗时识别。
+	rec3 := httptest.NewRecorder()
+	HandleChatWebAPIConfig(rec3, httptest.NewRequest(http.MethodGet, "/web/api/config", nil))
+	snap := decodeConfigSnapshot(t, rec3.Body.String())
+	alphaSnap := configProviderByName(t, snap, "alpha")
+	if alphaSnap.APIKeySource != "key_store" {
+		t.Errorf("alpha.api_key_source = %q, want key_store", alphaSnap.APIKeySource)
+	}
+	if alphaSnap.APIKeyMasked != "sk-page...-555" {
+		t.Errorf("alpha.api_key_masked = %q, want sk-page...-555（Key Store 明文掩码，不再固定 ****）", alphaSnap.APIKeyMasked)
+	}
+	if strings.Contains(rec3.Body.String(), "sk-page-new-555") {
+		t.Error("快照泄露 Key Store API key 明文")
 	}
 }
 
