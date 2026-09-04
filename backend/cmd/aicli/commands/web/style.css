@@ -750,12 +750,26 @@ body.sidebar-collapsed #sidebar {
 .config-actions button { margin-right: 4px; padding: 2px 8px; }
 .config-provider-toolbar { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
 .cfg-toolbar-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* 工具栏控件显式接入主题变量（与 config 区既有 input/select 一致），
+   否则亮/暗两套主题下会退化为浏览器默认外观，与站内色系不统一 */
+.config-provider-toolbar input,
+.config-provider-toolbar select {
+  background: var(--bg3); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 4px;
+  font-family: inherit; font-size: 12px;
+}
+.config-provider-toolbar input::placeholder { color: var(--fg4); }
+.config-provider-toolbar input:focus,
+.config-provider-toolbar select:focus {
+  outline: none; border-color: var(--border2);
+}
 .cfg-toolbar-search { flex: 1 1 220px; min-width: 160px; padding: 4px 8px; }
 .cfg-toolbar-select { padding: 4px 6px; }
 .cfg-toolbar-count { color: var(--fg4); font-size: 12px; }
 .cfg-toolbar-spacer { flex: 1; }
 .cfg-toolbar-btn { padding: 3px 10px; }
 .cfg-toolbar-btn:disabled { opacity: 0.45; cursor: default; }
+.cfg-toolbar-btn:hover:disabled { background: var(--bg3); }
 .cfg-toolbar-page { color: var(--fg2); font-size: 12px; min-width: 52px; text-align: center; }
 .cfg-toolbar-pager { justify-content: flex-end; }
 .config-empty { color: var(--fg4); font-size: 12px; padding: 8px 0; }
