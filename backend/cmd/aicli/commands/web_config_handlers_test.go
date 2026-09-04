@@ -386,8 +386,8 @@ func TestHandleChatWebAPIConfigProviders_UpsertAPIKeyProxy(t *testing.T) {
 	if !beta.APIKeySet {
 		t.Error("beta.api_key_set = false, want true")
 	}
-	if beta.APIKeyMasked != "sk-w...-999" {
-		t.Errorf("beta.api_key_masked = %q, want sk-w...-999（内联来源回显真实掩码）", beta.APIKeyMasked)
+	if beta.APIKeyMasked != "sk-web-...-999" {
+		t.Errorf("beta.api_key_masked = %q, want sk-web-...-999（内联来源回显真实掩码）", beta.APIKeyMasked)
 	}
 	if strings.Contains(rec2.Body.String(), "sk-web-new-key-999") {
 		t.Error("快照泄露新 API key 明文")

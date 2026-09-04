@@ -425,7 +425,7 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 		DryRun:                  req.DryRun,
 		ConfigPath:              configPath,
 		AuthStorePath:           authStorePathForResult(req, authMode),
-		APIKeyMasked:            maskSecretForDisplay(resolvedAPIKey),
+		APIKeyMasked:            maskAPIKeyForDisplay(resolvedAPIKey),
 		SetDefault:              req.SetDefault,
 		SiteType:                firstNonEmptyText(candidate.SiteType, siteAccount.SiteType),
 		SiteTypeConfidence:      firstNonEmptyText(candidate.SiteTypeConfidence, siteAccount.SiteTypeConfidence),
@@ -998,7 +998,7 @@ func resolveLoginAPIKey(req providerLoginRequest, existing config.Provider, exis
 	}
 	if req.Interactive && req.Prompter != nil {
 		required := current == ""
-		value, err := req.Prompter.PromptSecret("API key", maskSecretForDisplay(current), required)
+		value, err := req.Prompter.PromptSecret("API key", maskAPIKeyForDisplay(current), required)
 		if err != nil {
 			return "", err
 		}
@@ -2652,6 +2652,29 @@ func maskSecretForDisplay(secret string) string {
 		return "****"
 	}
 	return secret[:4] + "..." + secret[len(secret)-4:]
+}
+
+// maskAPIKeyForDisplay 返回 API key 的掩码回显：保留密钥标识前缀（第一个
+// "-" 及其之前，如 sk- / sk-proj- / sk-or-）并连同前缀后 4 字符与尾部 4
+// 字符一起保留，便于识别是哪一把 key（如 sk-proj...f456）。无分隔符或
+// 前缀后不足 4 个可显示字符时退化为 前4 + "..." + 后4；<=8 字符整段打码。
+func maskAPIKeyForDisplay(secret string) string {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return ""
+	}
+	if len(secret) <= 8 {
+		return "****"
+	}
+	idx := strings.Index(secret, "-")
+	if idx < 0 || idx+1 >= len(secret)-4 {
+		return secret[:4] + "..." + secret[len(secret)-4:]
+	}
+	midEnd := idx + 5
+	if midEnd > len(secret)-4 {
+		midEnd = len(secret) - 4
+	}
+	return secret[:idx+1] + secret[idx+1:midEnd] + "..." + secret[len(secret)-4:]
 }
 
 func providerLoginStringValuePtr(value string) *string {

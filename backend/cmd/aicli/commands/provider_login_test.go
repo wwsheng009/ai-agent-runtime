@@ -2256,3 +2256,26 @@ func TestPromptExplicitLoginProtocol_EmitsSingleDenseBlock(t *testing.T) {
 		}
 	}
 }
+
+// TestMaskAPIKeyForDisplay 验证 API key 掩码回显：保留标识前缀（sk- /
+// sk-proj- 等第一个 "-" 及之前）与前后各一部分值；无分隔符、过短 key
+// 分别退化为 前4...后4 与整段 ****。
+func TestMaskAPIKeyForDisplay(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"sk-web-new-key-999", "sk-web-...-999"},
+		{"sk-proj-xYzAbCdEfGhIjKlMnOpQr", "sk-proj...OpQr"},
+		{"abcdef1234567890", "abcd...7890"},
+		{"sk-123456", "sk-12...3456"},
+		{"short", "****"},
+		{"", ""},
+		{"  sk-abcdefghijklmnop  ", "sk-abcd...mnop"},
+	}
+	for _, c := range cases {
+		if got := maskAPIKeyForDisplay(c.in); got != c.want {
+			t.Errorf("maskAPIKeyForDisplay(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

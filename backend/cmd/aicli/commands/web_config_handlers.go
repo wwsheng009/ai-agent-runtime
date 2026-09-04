@@ -381,10 +381,10 @@ func HandleChatWebAPIConfig(w http.ResponseWriter, r *http.Request) {
 		masked := ""
 		switch apiKeySource {
 		case "inline":
-			masked = maskSecretForDisplay(strings.TrimSpace(provider.APIKey))
+			masked = maskAPIKeyForDisplay(strings.TrimSpace(provider.APIKey))
 		case "pool":
 			if len(provider.APIKeys) > 0 {
-				masked = maskSecretForDisplay(strings.TrimSpace(provider.APIKeys[0]))
+				masked = maskAPIKeyForDisplay(strings.TrimSpace(provider.APIKeys[0]))
 			}
 		case "key_store", "oauth":
 			// Key Store 明文不回传（快照渲染不读 store），以通用掩码

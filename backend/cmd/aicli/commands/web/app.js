@@ -1161,13 +1161,19 @@ function startTypeTimer() {
     key_store: "凭据存放在 Key Store（api_key_ref）",
     oauth: "使用 OAuth access token（auth_ref）"
   };
-  // 与后端 maskSecretForDisplay 一致：<=8 字符整段打码；否则保留前 4 +
-  // "..." + 后 4。仅用于界面回显，token 明文不落 DOM。
+  // 与后端 maskAPIKeyForDisplay 一致：<=8 字符整段打码；否则保留密钥
+  // 标识前缀（sk- / sk-proj- 等，第一个 "-" 及之前）连同其后 4 字符与
+  // 尾部 4 字符；无分隔符时退化为前 4 + "..." + 后 4。仅界面回显。
   function maskAPIKey(key) {
     var s = String(key || "").trim();
     if (!s) { return ""; }
     if (s.length <= 8) { return "****"; }
-    return s.slice(0, 4) + "..." + s.slice(-4);
+    var idx = s.indexOf("-");
+    if (idx < 0 || idx + 1 >= s.length - 4) {
+      return s.slice(0, 4) + "..." + s.slice(-4);
+    }
+    var midEnd = Math.min(idx + 5, s.length - 4);
+    return s.slice(0, idx + 1) + s.slice(idx + 1, midEnd) + "..." + s.slice(-4);
   }
   function renderAPIKeyStatus() {
     var statusEl = configEl("cfg-provider-api-key-status");
