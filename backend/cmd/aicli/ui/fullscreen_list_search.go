@@ -16,11 +16,16 @@ func fullScreenListSearchFields(item FullScreenListItem) []string {
 // fullScreenListMatches returns the item indexes matching query, ranked by
 // relevance (best first).
 //
-// The matching semantics mirror the legacy filterLoginProviders search:
+// Matching semantics:
 //   - query is split on whitespace and every token must hit;
 //   - a single token scores exact 1000 > prefix 800 > contains 600 >
-//     subsequence 300 (with density/early/length adjustments), computed per
-//     field with the best field score winning;
+//     wildcard 400~599 (when the token contains '*'), computed per field
+//     with the best field score winning;
+//   - tokens without '*' must appear as a contiguous substring (exact /
+//     prefix / contains): query characters are never matched in a split or
+//     reordered fashion, so e.g. "muse" cannot match "stepfun-ai/...";
+//   - '*' acts as a wildcard matching any run of characters (including
+//     empty), e.g. "m*spark" matches "muse-spark-1.3";
 //   - ties keep the original list order (stable sort).
 //
 // An empty query returns every item in original order.
@@ -115,42 +120,61 @@ func fullScreenListTokenScore(field, token string) (int, bool) {
 	case strings.Contains(field, token):
 		idx := strings.Index(field, token)
 		return 600 - min(idx, 100) - min(len([]rune(field))/4, 50), true
+	case strings.Contains(token, "*"):
+		return fullScreenListWildcardScore(field, token)
 	default:
-		return fullScreenListSubsequenceScore(field, token)
+		// Without an explicit wildcard, a token must match as a contiguous
+		// substring; split/order-preserving character matching is not
+		// performed ("muse" must not match "stepfun-ai/step-3.5-flash").
+		return 0, false
 	}
 }
 
-// fullScreenListSubsequenceScore mirrors the legacy
-// loginProviderSubsequenceScore: query characters must appear in order;
-// earlier, denser matches on shorter names score higher.
-func fullScreenListSubsequenceScore(field, query string) (int, bool) {
-	if query == "" {
-		return 0, true
-	}
-	nameRunes := []rune(field)
-	queryRunes := []rune(query)
-	if len(queryRunes) > len(nameRunes) {
+// fullScreenListWildcardScore matches token as a glob pattern where '*'
+// matches any run of characters. Matching is containment-style: the pattern
+// may match any substring of field, so e.g. "c*x" matches "acbxz" and
+// "gpt*4o" matches "...gpt-4o...". Contiguous contains (600) still ranks
+// above wildcard hits; longer literal prefixes rank higher.
+func fullScreenListWildcardScore(field, token string) (int, bool) {
+	if !strings.Contains(token, "*") || !globMatch(field, "*"+token+"*") {
 		return 0, false
 	}
-	j := 0
-	first := -1
-	last := -1
-	for i := 0; i < len(nameRunes) && j < len(queryRunes); i++ {
-		if nameRunes[i] != queryRunes[j] {
-			continue
-		}
-		if first < 0 {
-			first = i
-		}
-		last = i
-		j++
+	score := 400 - min(len([]rune(field))/4, 50)
+	literalPrefix := token[:strings.Index(token, "*")]
+	score += min(len([]rune(literalPrefix))*10, 100)
+	if score > 599 {
+		score = 599
 	}
-	if j != len(queryRunes) {
-		return 0, false
+	return score, true
+}
+
+// globMatch reports whether s matches pattern, where '*' matches any run of
+// characters (including the empty run). Other characters match literally.
+func globMatch(s, pattern string) bool {
+	sRunes := []rune(s)
+	pRunes := []rune(pattern)
+	if len(pRunes) == 0 {
+		return len(sRunes) == 0
 	}
-	span := last - first + 1
-	densityBonus := min(80, (len(queryRunes)*80)/max(span, 1))
-	earlyBonus := 40 - min(first, 40)
-	lengthPenalty := min(len(nameRunes), 40)
-	return 300 + densityBonus + earlyBonus - lengthPenalty, true
+	// dp[i][j]: pattern[:i] matches s[:j].
+	dp := make([][]bool, len(pRunes)+1)
+	for i := range dp {
+		dp[i] = make([]bool, len(sRunes)+1)
+	}
+	dp[0][0] = true
+	for i := 1; i <= len(pRunes); i++ {
+		if pRunes[i-1] == '*' {
+			dp[i][0] = dp[i-1][0]
+		}
+	}
+	for i := 1; i <= len(pRunes); i++ {
+		for j := 1; j <= len(sRunes); j++ {
+			if pRunes[i-1] == '*' {
+				dp[i][j] = dp[i-1][j] || dp[i][j-1]
+			} else {
+				dp[i][j] = dp[i-1][j-1] && pRunes[i-1] == sRunes[j-1]
+			}
+		}
+	}
+	return dp[len(pRunes)][len(sRunes)]
 }

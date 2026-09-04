@@ -491,42 +491,54 @@ func TestFullScreenListFuzzyMatchRanksByRelevance(t *testing.T) {
 		{Title: "deepseek-v3", SearchText: "model deepseek-v3"},
 	}
 
-	// “gpt4” 不是任何名称的子串，但通过子序列命中 gpt-4o / gpt-4o-mini，
-	// 且更短的 gpt-4o 排在最前（legacy fuzzy 语义）。
+	// “gpt4” 不是任何名称的连续子串（"gpt-4o" 中 g、p、t、4 不连续），
+	// 且不含通配符，因此不再命中（不允许拆分匹配）。
 	matches := fullScreenListMatches(items, "gpt4")
-	if len(matches) != 2 || matches[0] != 0 || matches[1] != 1 {
-		t.Fatalf("expected subsequence match ranked [0 1], got %v", matches)
+	if len(matches) != 0 {
+		t.Fatalf("expected no split-subsequence match for gpt4, got %v", matches)
 	}
 
-	// 精确/前缀匹配排在子序列匹配之前。
+	// 显式通配符恢复模糊匹配（包含式）：gpt*4o 命中字段任意位置含
+	// 连续段 "gpt"…"4o" 的条目（中间字符由 * 跳过）。
+	matches = fullScreenListMatches(items, "gpt*4o")
+	if len(matches) != 2 || matches[0] != 0 || matches[1] != 1 {
+		t.Fatalf("expected gpt*4o ranked [0 1], got %v", matches)
+	}
+
+	// 前缀匹配仍生效。
 	items = append(items, FullScreenListItem{Title: "gpt4x", SearchText: "model gpt4x"})
 	matches = fullScreenListMatches(items, "gpt4")
-	if len(matches) != 3 || matches[0] != 4 {
-		t.Fatalf("expected exact 'gpt4x' ranked first, got %v", matches)
+	if len(matches) != 1 || matches[0] != 4 {
+		t.Fatalf("expected prefix match 'gpt4x' only, got %v", matches)
 	}
 
-	// 输入完整名称时字段级精确匹配恢复生效（拼接串方案下 exact 分支会失效）。
+	// 输入完整名称时字段级精确/包含匹配生效。
 	matches = fullScreenListMatches(items, "gpt-4o")
 	if len(matches) != 2 || matches[0] != 0 || matches[1] != 1 {
 		t.Fatalf("expected exact title match ranked first, got %v", matches)
 	}
 
-	// 子序列不跨字段：Title 末尾字符与 Preview 开头字符拼不成假阳性。
+	// 不跨字段：无通配符时 Title 与 Preview 的字符合并匹配不存在。
 	items = []FullScreenListItem{
 		{Title: "abc", Preview: "xyz"},
 		{Title: "def", Preview: "uvw"},
 	}
 	matches = fullScreenListMatches(items, "cx")
 	if len(matches) != 0 {
-		t.Fatalf("expected no cross-field subsequence false positive, got %v", matches)
+		t.Fatalf("expected no cross-field merge false positive, got %v", matches)
 	}
-	// 同一 token 在单个字段内仍是子序列匹配。
+	// 同一字段内的分散字符也不匹配（"acbxz" 中 c、x 不连续），
+	// 通配符 c*x 才允许跨字符匹配。
 	items = []FullScreenListItem{
-		{Title: "abcxyz", SearchText: "model abcxyz"},
+		{Title: "acbxz", SearchText: "model acbxz"},
 	}
 	matches = fullScreenListMatches(items, "cx")
+	if len(matches) != 0 {
+		t.Fatalf("expected no split-subsequence match for cx, got %v", matches)
+	}
+	matches = fullScreenListMatches(items, "c*x")
 	if len(matches) != 1 || matches[0] != 0 {
-		t.Fatalf("expected in-field subsequence match, got %v", matches)
+		t.Fatalf("expected wildcard match for c*x, got %v", matches)
 	}
 
 	// 全空 item 不匹配任何非空查询。

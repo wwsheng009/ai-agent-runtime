@@ -1538,14 +1538,48 @@ func TestFilterLoginProviders_FuzzyRanking(t *testing.T) {
 	if matched[0] != "openai" {
 		t.Fatalf("expected openai ranked first, got %#v", matched)
 	}
-	// subsequence: oai -> openai
+	// 无通配符时不支持拆分匹配：oai 不再命中 openai。
 	matched = filterLoginProviders(options, "oai")
+	if len(matched) != 0 {
+		t.Fatalf("expected no split-subsequence match for oai, got %#v", matched)
+	}
+	// 显式通配符恢复模糊匹配：o*i -> openai。
+	matched = filterLoginProviders(options, "o*i")
 	if len(matched) == 0 || matched[0] != "openai" {
-		t.Fatalf("expected subsequence match openai first, got %#v", matched)
+		t.Fatalf("expected wildcard match openai first, got %#v", matched)
 	}
 	matched = filterLoginProviders(options, "nope")
 	if len(matched) != 0 {
 		t.Fatalf("expected no matches, got %#v", matched)
+	}
+}
+
+func TestFilterLoginProviders_NoWildcardNoSplit(t *testing.T) {
+	options := []string{
+		"muse-spark-1.2",
+		"muse-spark-1.3-contributor-free",
+		"stepfun-ai/step-3.5-flash",
+		"stepaudio-2.5-asr-stream",
+	}
+	// 连续多个字符必须完整连续匹配：muse 只命中真实含 muse 的名称。
+	matched := filterLoginProviders(options, "muse")
+	if len(matched) != 2 {
+		t.Fatalf("expected 2 contiguous muse matches, got %#v", matched)
+	}
+	for _, name := range matched {
+		if name != "muse-spark-1.2" && name != "muse-spark-1.3-contributor-free" {
+			t.Fatalf("unexpected match %q", name)
+		}
+	}
+	// *spark* 通配命中所有含 spark 的名称。
+	matched = filterLoginProviders(options, "*spark*")
+	if len(matched) != 2 {
+		t.Fatalf("expected 2 wildcard spark matches, got %#v", matched)
+	}
+	// 纯前缀匹配保持有效。
+	matched = filterLoginProviders(options, "muse-spark-1.3")
+	if len(matched) != 1 || matched[0] != "muse-spark-1.3-contributor-free" {
+		t.Fatalf("expected prefix match only, got %#v", matched)
 	}
 }
 

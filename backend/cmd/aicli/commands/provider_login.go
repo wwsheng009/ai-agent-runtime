@@ -860,48 +860,68 @@ func loginProviderMatchScore(name string, tokens []string) (int, bool) {
 		case strings.Contains(lower, token):
 			idx := strings.Index(lower, token)
 			total += 600 - minInt(idx, 100) - minInt(len([]rune(lower))/4, 50)
-		default:
-			subScore, ok := loginProviderSubsequenceScore(lower, token)
+		case strings.Contains(token, "*"):
+			// Explicit wildcard: '*' matches any run of characters.
+			score, ok := loginProviderWildcardScore(lower, token)
 			if !ok {
 				return 0, false
 			}
-			total += subScore
+			total += score
+		default:
+			// Without an explicit wildcard a token must appear as a
+			// contiguous substring; split/order-preserving character
+			// matching is not performed.
+			return 0, false
 		}
 	}
 	return total, true
 }
 
-func loginProviderSubsequenceScore(name, query string) (int, bool) {
-	if query == "" {
-		return 0, true
-	}
-	nameRunes := []rune(name)
-	queryRunes := []rune(query)
-	if len(queryRunes) > len(nameRunes) {
+// loginProviderWildcardScore matches name against token as a glob pattern
+// where '*' matches any run of characters. Matching is containment-style:
+// the pattern may match any substring of name. Contiguous matches
+// (contains) still rank above wildcard hits.
+func loginProviderWildcardScore(name, pattern string) (int, bool) {
+	if !strings.Contains(pattern, "*") || !loginProviderGlobMatch(name, "*"+pattern+"*") {
 		return 0, false
 	}
-	j := 0
-	first := -1
-	last := -1
-	for i := 0; i < len(nameRunes) && j < len(queryRunes); i++ {
-		if nameRunes[i] != queryRunes[j] {
-			continue
-		}
-		if first < 0 {
-			first = i
-		}
-		last = i
-		j++
+	score := 400 - minInt(len([]rune(name))/4, 50)
+	literalPrefix := pattern[:strings.Index(pattern, "*")]
+	score += minInt(len([]rune(literalPrefix))*10, 100)
+	if score > 599 {
+		score = 599
 	}
-	if j != len(queryRunes) {
-		return 0, false
+	return score, true
+}
+
+// loginProviderGlobMatch reports whether s matches pattern, where '*'
+// matches any run of characters (including the empty run).
+func loginProviderGlobMatch(s, pattern string) bool {
+	sRunes := []rune(s)
+	pRunes := []rune(pattern)
+	if len(pRunes) == 0 {
+		return len(sRunes) == 0
 	}
-	// Higher score for earlier and denser subsequence matches, and shorter names.
-	span := last - first + 1
-	densityBonus := minInt(80, (len(queryRunes)*80)/maxInt(span, 1))
-	earlyBonus := 40 - minInt(first, 40)
-	lengthPenalty := minInt(len(nameRunes), 40)
-	return 300 + densityBonus + earlyBonus - lengthPenalty, true
+	dp := make([][]bool, len(pRunes)+1)
+	for i := range dp {
+		dp[i] = make([]bool, len(sRunes)+1)
+	}
+	dp[0][0] = true
+	for i := 1; i <= len(pRunes); i++ {
+		if pRunes[i-1] == '*' {
+			dp[i][0] = dp[i-1][0]
+		}
+	}
+	for i := 1; i <= len(pRunes); i++ {
+		for j := 1; j <= len(sRunes); j++ {
+			if pRunes[i-1] == '*' {
+				dp[i][j] = dp[i-1][j] || dp[i][j-1]
+			} else {
+				dp[i][j] = dp[i-1][j-1] && pRunes[i-1] == sRunes[j-1]
+			}
+		}
+	}
+	return dp[len(pRunes)][len(sRunes)]
 }
 
 func maxInt(a, b int) int {
