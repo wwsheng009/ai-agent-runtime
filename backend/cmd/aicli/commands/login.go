@@ -2,12 +2,14 @@ package commands
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 )
 
@@ -215,12 +217,64 @@ type cliLoginPrompter struct {
 	reader *bufio.Reader
 }
 
+// Compile-time contract: the standalone CLI prompter participates in the
+// searchable full-screen picker flow (provider/protocol selection) with the
+// numbered text picker as its automatic non-TTY fallback.
+var _ providerLoginSelectPrompter = (*cliLoginPrompter)(nil)
+
 func newCLILoginPrompter() *cliLoginPrompter {
 	return &cliLoginPrompter{reader: bufio.NewReader(os.Stdin)}
 }
 
 func (p *cliLoginPrompter) PrintLine(line string) {
 	fmt.Println(line)
+}
+
+// PromptSelect implements providerLoginSelectPrompter for the standalone CLI
+// login: it opens the same full-screen searchable picker shared with /model
+// (instant filtering as you type + up/down navigation + Enter to confirm,
+// Esc/q to cancel). Non-TTY environments (pipes, redirects, short terminals)
+// return ui.ErrFullScreenUnavailable so the login flow falls back to the
+// numbered text picker automatically.
+func (p *cliLoginPrompter) PromptSelect(label, kind string, options []string, current string, allowCreate bool) (string, bool, error) {
+	terminal := ui.NewTerminal()
+	if !ui.CanUseFullScreenList(terminal) {
+		return "", false, ui.ErrFullScreenUnavailable
+	}
+	items := buildChatPickerItems(options, current, kind, kind)
+	createIndex := -1
+	if allowCreate {
+		createIndex = len(items)
+		items = append(items, ui.FullScreenListItem{
+			Title:      chatLoginPickerCreateRowTitle,
+			Detail:     kind,
+			SearchText: "create new " + kind + " 新建 provider",
+		})
+	}
+	result, err := ui.SelectFullScreenList(context.Background(), terminal, ui.FullScreenListOptions{
+		Title:        "选择 " + label,
+		Subtitle:     "输入即搜索过滤，↑/↓ 选择，Enter 确认，Esc/q 取消",
+		EmptyMessage: fmt.Sprintf("没有匹配的 %s，可清空搜索或直接选择新建", kind),
+		ConfirmLabel: fmt.Sprintf("使用选中 %s", kind),
+		Items:        items,
+	})
+	if err != nil {
+		return "", false, err
+	}
+	if result.Cancelled {
+		return "", true, nil
+	}
+	if result.Index == createIndex {
+		name, nameErr := p.PromptText("新 "+kind+" 名称", "", true)
+		if nameErr != nil {
+			return "", false, nameErr
+		}
+		return strings.TrimSpace(name), false, nil
+	}
+	if result.Index < 0 || result.Index >= len(options) {
+		return "", false, fmt.Errorf("invalid picker selection %d", result.Index)
+	}
+	return options[result.Index], false, nil
 }
 
 func (p *cliLoginPrompter) PromptText(label, current string, required bool) (string, error) {
