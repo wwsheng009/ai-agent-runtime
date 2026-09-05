@@ -363,7 +363,8 @@ button {
   font-family: inherit; font-size: 13px;
 }
 button:hover { background: var(--hoverBg2); }
-#send-status { font-size: 12px; color: var(--fg3); min-width: 60px; align-self: center; }
+/* 发送/排队/失败等瞬态提示：与 #turn-status 同处右上角（见 index.html header） */
+#send-status { font-size: 12px; color: var(--fg3); max-width: 32%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* ---- provider / model / reasoning 配置选择器 ---- */
 #cfg-bar {
   display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px;
@@ -745,7 +746,7 @@ body.sidebar-collapsed #sidebar {
   #input-row { flex-wrap: wrap; }
   #prompt { flex: 1 1 100%; }
   #send-btn { flex: 0 0 auto; }
-  #send-status { flex: 1 1 auto; min-width: 0; text-align: right; }
+  #send-status { flex-basis: 100%; order: 4; text-align: right; }
   .tab-btn { flex: 1; }
   #approval-modal { max-width: 96%; max-height: 90vh; }
 }

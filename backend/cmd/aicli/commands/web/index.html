@@ -13,6 +13,7 @@
   <button id="theme-toggle" type="button" title="切换深色/浅色主题（Ctrl+L）">☾</button>
   <span id="connection-status">connecting</span>
   <span id="turn-status">-</span>
+  <span id="send-status"></span>
 </header>
 
 <div class="layout">
@@ -80,7 +81,6 @@
       <div id="input-row">
         <textarea id="prompt" rows="1" placeholder="输入消息后回车发送，Shift+Enter 换行…" autocomplete="off"></textarea>
         <button id="send-btn">发送</button>
-        <span id="send-status"></span>
       </div>
       <div id="cfg-bar">
         <label class="cfg-item">
