@@ -3,6 +3,7 @@
 
 import { hideApproval, showApproval, showQuestion } from "./approvals.js";
 import { clearPendingPrompts, getUiState, refreshScreen, setUI, updateTitle } from "./chat.js";
+import { loadRuntimeMeta } from "./runtime.js";
 import { loadSessions } from "./sessions.js";
 import { addStreamImage, appendStreamReasoning, appendStreamText, beginStream, endStream, isStreamActive, renderStream, setStreamText, setStreamTool, startTypeTimer } from "./stream.js";
 
@@ -192,6 +193,12 @@ function onSSEEvent(eventName, data) {
       }
       renderDynamicStatus();
       break;
+    case "model_changed":
+      // TUI 侧 /model、/reasoning_effort 或 /login 切换落地（aicli.chat.
+      // model_selection_changed）：重新拉取权威 runtime 状态刷新底部栏。
+      // web 自己切换期间 cfgUiDirty 会防止本处刷新覆盖用户正在确认的值。
+      loadRuntimeMeta();
+      break;
     case "error":
       setUI("idle", "发生错误");
       refreshScreen();
@@ -218,7 +225,7 @@ function openEventSource() {
   ["connected", "heartbeat", "screen_refresh", "turn_start", "turn_delta", "turn_end",
    "session_start", "session_end", "session_interrupted", "reasoning_delta",
    "assistant_delta", "assistant_image_progress", "tool_start", "tool_end", "approval_requested",
-   "approval_resolved", "question_asked", "question_answered", "dynamic_status"].forEach(function (name) {
+   "approval_resolved", "question_asked", "question_answered", "dynamic_status", "model_changed"].forEach(function (name) {
     es.addEventListener(name, function (e) {
       var data = {};
       try { data = JSON.parse(e.data); } catch (err) { /* ignore */ }

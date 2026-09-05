@@ -37,6 +37,14 @@ const chatWebSchemaVersion = "skill_runtime.sse.v1"
 // 同步显示 aicli chat 底部的活动状态行（Retrying / Analyzing / Running …）。
 const chatWebDynamicStatusBusEvent = "aicli.chat.dynamic_status"
 
+// chatWebModelSelectionChangedBusEvent 是 provider/model/reasoning 切换事件
+// 的 EventBus 类型名：applyChatExecutionContext（provider/model 维度）与
+// applyReasoningEffortCommandSelection（reasoning 单维度）落地后发布，经
+// chatWebSSEMappings 映射为 SSE "model_changed" 事件，web 客户端据此重新
+// 拉取 /web/api/runtime，补齐 TUI→web 的切换同步（web→TUI 方向由注入
+// /model --direct + pollRuntimeMeta 轮询覆盖）。
+const chatWebModelSelectionChangedBusEvent = "aicli.chat.model_selection_changed"
+
 // ---------------------------------------------------------------------------
 // EventBus → SSE 事件名称映射（§5.1）
 // ---------------------------------------------------------------------------
@@ -85,6 +93,7 @@ var chatWebSSEMappings = []chatWebSSEMapping{
 	{BusEvent: runtimechat.EventMailboxReceived, SSEEvent: "mailbox_received", Desc: "邮箱消息"},
 	{BusEvent: runtimechat.EventContextReconciled, SSEEvent: "context_reconciled", Desc: "上下文调和"},
 	{BusEvent: chatWebDynamicStatusBusEvent, SSEEvent: "dynamic_status", Desc: "动态状态栏更新（Retrying/Analyzing/Running…）"},
+	{BusEvent: chatWebModelSelectionChangedBusEvent, SSEEvent: "model_changed", Desc: "provider/model/reasoning 切换落地"},
 }
 
 // chatWebSSEEventName 将 EventBus 事件类型映射为 SSE event 名称。
@@ -235,6 +244,14 @@ func chatWebSSEDataForEvent(ev runtimeevents.Event) map[string]interface{} {
 	case runtimechat.EventContextReconciled:
 		pickField(data, payload, "turn_id")
 		pickField(data, payload, "reason")
+
+	case chatWebModelSelectionChangedBusEvent:
+		// provider/model/reasoning 切换落地：web 客户端据此重新拉取
+		// /web/api/runtime（字段仅作观测，权威值以 runtime 端点为准）。
+		pickField(data, payload, "provider")
+		pickField(data, payload, "model")
+		pickField(data, payload, "reasoning_effort")
+		pickField(data, payload, "base_url")
 
 	default:
 		// 未识别的类型：复制整个 payload 供前端日志

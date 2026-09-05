@@ -1341,6 +1341,13 @@ func chatWebSSEFieldsFor(busEvent string) []webSSEFieldSpec {
 		fields = append(fields,
 			webSSEFieldSpec{Name: "checkpoint_id", Type: "string", Description: "checkpoint 标识"},
 		)
+	case chatWebModelSelectionChangedBusEvent:
+		fields = append(fields,
+			webSSEFieldSpec{Name: "provider", Type: "string", Description: "切换后的 provider 名"},
+			webSSEFieldSpec{Name: "model", Type: "string", Description: "切换后的模型名"},
+			webSSEFieldSpec{Name: "reasoning_effort", Type: "string", Description: "切换后的 reasoning_effort（可为空表示默认）"},
+			webSSEFieldSpec{Name: "base_url", Type: "string", Description: "切换后的 baseURL"},
+		)
 	}
 	return fields
 }
@@ -1370,6 +1377,8 @@ func chatWebSSEExampleFor(busEvent string) string {
 		return `{"turn_id":"turn_abc","question_id":"q_1","answer":"yes"}`
 	case runtimechat.EventCheckpointCreated:
 		return `{"turn_id":"turn_abc","checkpoint_id":"cp_1"}`
+	case chatWebModelSelectionChangedBusEvent:
+		return `{"provider":"beta","model":"beta-model","reasoning_effort":"medium","base_url":"https://beta.example.com/v1"}`
 	default:
 		return `{"turn_id":"turn_abc"}`
 	}

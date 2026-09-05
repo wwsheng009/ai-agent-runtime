@@ -6,11 +6,13 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	httpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -393,7 +395,31 @@ func applyChatExecutionContext(session *ChatSession, providerCtx *providerExecut
 	}
 	syncChatLoggerModelState(session)
 	refreshChatTitleMetadata(session)
+	publishChatModelSelectionChanged(session)
 	return nil
+}
+
+// publishChatModelSelectionChanged 在 provider/model/reasoning 切换落地后向
+// 会话 EventBus 发布 aicli.chat.model_selection_changed：经 SSE 映射为
+// model_changed,web 客户端据此重新拉取 /web/api/runtime，补齐 TUI→web 的
+// 切换同步（web→TUI 方向由注入 /model --direct + pollRuntimeMeta 轮询覆盖）。
+// 无 EventBus（单机无运行时宿主）时静默跳过；订阅方写路径非阻塞（SSE
+// 只入队），同步发布不会拖慢切换路径。
+func publishChatModelSelectionChanged(session *ChatSession) {
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.EventBus == nil {
+		return
+	}
+	session.LocalRuntimeHost.EventBus.Publish(runtimeevents.Event{
+		Type:      chatWebModelSelectionChangedBusEvent,
+		SessionID: chatDebugSessionID(session),
+		Timestamp: time.Now().UTC(),
+		Payload: map[string]interface{}{
+			"provider":         strings.TrimSpace(session.ProviderName),
+			"model":            strings.TrimSpace(effectiveRuntimeModel(session)),
+			"reasoning_effort": strings.TrimSpace(session.ReasoningEffort),
+			"base_url":         strings.TrimSpace(session.BaseURL),
+		},
+	})
 }
 
 func persistModelCommandPreferences(session *ChatSession) error {

@@ -206,6 +206,9 @@ func applyReasoningEffortCommandSelection(session *ChatSession, raw string, expl
 	if session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
 	}
+	// reasoning 单维度切换不走 applyChatExecutionContext，单独发布切换事件，
+	// 让 web 客户端底部栏同步（与 /model 切换共用 model_changed SSE 事件）。
+	publishChatModelSelectionChanged(session)
 	persistReasoningEffortCommandPreference(session)
 	return nil
 }

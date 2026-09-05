@@ -623,6 +623,8 @@ func TestChatWebSSEEventName(t *testing.T) {
 		{"llm.request.finished", "turn_end", true},
 		{runtimechat.EventApprovalRequested, "approval_requested", true},
 		{runtimechat.EventQuestionAsked, "question_asked", true},
+		{chatWebDynamicStatusBusEvent, "dynamic_status", true},
+		{chatWebModelSelectionChangedBusEvent, "model_changed", true},
 		{"unknown_event_type", "unknown_event_type", false},
 	}
 	for _, c := range cases {
