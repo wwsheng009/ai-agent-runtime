@@ -1320,9 +1320,76 @@ function startTypeTimer() {
       .catch(function (err) { showToast("删除失败: " + err, "err"); });
   }
 
+  // ---- 协议下拉（Provider 编辑弹窗）----
+  // 原生 <input list=datalist> 在 input 有值时会被浏览器按当前值过滤选项，
+  // 存在值与无值时下拉显示不一致，且无下拉箭头、跨浏览器行为不一。
+  // 改为与底部 model 字段一致的 ▼ + 自定义 popup：无论是否有值都展示
+  // 全量协议列表（选项取自 HTML datalist，单一数据源），当前值高亮；
+  // 自定义输入的协议不在预置列表时附加到列表尾部，保证可见。
+  function protocolOptionValues() {
+    var dl = configEl("cfg-provider-protocol-options");
+    if (!dl) { return []; }
+    var values = [];
+    var opts = dl.querySelectorAll("option[value]");
+    for (var i = 0; i < opts.length; i++) {
+      var v = (opts[i].getAttribute("value") || "").trim();
+      if (v && values.indexOf(v) < 0) { values.push(v); }
+    }
+    return values;
+  }
+
+  function renderProtocolPopup() {
+    var popup = configEl("cfg-provider-protocol-popup");
+    var input = configEl("cfg-provider-protocol");
+    if (!popup || !input) { return; }
+    var curVal = (input.value || "").trim();
+    var values = protocolOptionValues();
+    if (curVal && values.indexOf(curVal) < 0) { values.push(curVal); }
+    if (values.length === 0) {
+      popup.innerHTML = '<div class="cfg-combo-empty">暂无预置协议，可直接输入</div>';
+      return;
+    }
+    var html = "";
+    values.forEach(function (v) {
+      var cls = "cfg-combo-item" + (v === curVal ? " current" : "");
+      var tag = v === curVal ? '<span class="tag">当前</span>' : "";
+      html += '<button type="button" class="' + cls + '" data-protocol="' + esc(v) + '" title="' + esc(v) + '">' +
+        esc(v) + tag + "</button>";
+    });
+    popup.innerHTML = html;
+  }
+
+  function closeProtocolPopup() {
+    var popup = configEl("cfg-provider-protocol-popup");
+    if (popup) { popup.style.display = "none"; }
+  }
+
+  function toggleProtocolPopup() {
+    var popup = configEl("cfg-provider-protocol-popup");
+    var input = configEl("cfg-provider-protocol");
+    if (!popup || !input) { return; }
+    if (popup.style.display !== "none" && popup.innerHTML) {
+      closeProtocolPopup();
+      return;
+    }
+    // 打开时按当前值重渲染，保证高亮与自定义值附加始终最新。
+    renderProtocolPopup();
+    popup.style.display = "block";
+  }
+
+  function selectProtocolFromPopup(value) {
+    var input = configEl("cfg-provider-protocol");
+    value = (value || "").trim();
+    if (!input || !value) { return; }
+    input.value = value;
+    closeProtocolPopup();
+    input.focus();
+  }
+
   function openProviderEditor(name) {
     var p = name ? providerByName(name) : null;
     cfgReasoningDraft = {};
+    closeProtocolPopup();
     var title = configEl("config-editor-title");
     if (title) { title.textContent = p ? "编辑 Provider: " + p.name : "新增 Provider"; }
     var orig = configEl("cfg-provider-original-name");
@@ -1667,6 +1734,7 @@ function startTypeTimer() {
       positionConfigEditor();
       overlay.classList.add("active");
     } else {
+      closeProtocolPopup();
       overlay.classList.remove("active");
     }
   }
@@ -2633,6 +2701,38 @@ function startTypeTimer() {
     if (cancelBtn) { cancelBtn.addEventListener("click", function () { showConfigEditor(false); }); }
     var closeBtn = configEl("cfg-provider-close-btn");
     if (closeBtn) { closeBtn.addEventListener("click", function () { showConfigEditor(false); }); }
+    // 协议字段 ▼ + 自定义 popup（见 renderProtocolPopup 注释）。
+    var protoToggle = configEl("cfg-provider-protocol-toggle");
+    var protoInput = configEl("cfg-provider-protocol");
+    if (protoToggle) {
+      protoToggle.addEventListener("click", function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleProtocolPopup();
+        if (protoInput) { protoInput.focus(); }
+      });
+    }
+    if (protoInput) {
+      protoInput.addEventListener("input", function () {
+        // 输入时同步 popup 高亮与自定义值附加（popup 打开时）。
+        var popup = configEl("cfg-provider-protocol-popup");
+        if (popup && popup.style.display !== "none") { renderProtocolPopup(); }
+      });
+      protoInput.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") { closeProtocolPopup(); }
+      });
+    }
+    var protoPopup = configEl("cfg-provider-protocol-popup");
+    if (protoPopup) {
+      // 事件委托：popup 内容每次重渲染，无需重复绑定。
+      protoPopup.addEventListener("click", function (e) {
+        var btn = e.target && e.target.closest ? e.target.closest("[data-protocol]") : null;
+        if (!btn) { return; }
+        e.preventDefault();
+        e.stopPropagation();
+        selectProtocolFromPopup(btn.getAttribute("data-protocol") || "");
+      });
+    }
     var editorOverlay = configEl("config-editor-overlay");
     if (editorOverlay) {
       editorOverlay.addEventListener("click", function (e) {
@@ -3163,8 +3263,20 @@ function startTypeTimer() {
     if (els.modelToggle && (e.target === els.modelToggle || (els.modelToggle.contains && els.modelToggle.contains(e.target)))) { return; }
     closeModelPopup();
   });
+  // 协议 popup 同样点击外部关闭（wrap 内含 ▼ 与 popup，均为输入框的兄弟节点）。
+  document.addEventListener("click", function (e) {
+    var popup = configEl("cfg-provider-protocol-popup");
+    if (!popup || popup.style.display === "none") { return; }
+    var input = configEl("cfg-provider-protocol");
+    var wrap = input && input.parentNode ? input.parentNode : null;
+    if (wrap && wrap.contains(e.target)) { return; }
+    closeProtocolPopup();
+  });
   document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape") { closeModelPopup(); }
+    if (e.key === "Escape") {
+      closeModelPopup();
+      closeProtocolPopup();
+    }
   });
 
   // 底部栏显示完整 URL

@@ -205,8 +205,15 @@
                 </label>
                 <label class="cfg-item">
                   <span class="cfg-label">协议</span>
-                  <input id="cfg-provider-protocol" list="cfg-provider-protocol-options" placeholder="如 openai / anthropic" autocomplete="off">
-                  <datalist id="cfg-provider-protocol-options">
+                  <!-- 不用原生 input list=datalist：有值时浏览器会按当前值过滤
+                       选项，存在值与无值的下拉显示不一致；改为 ▼ + 自定义 popup
+                       （与底部 model 字段同方案），datalist 仅作静态数据源。 -->
+                  <span class="cfg-combo-wrap">
+                    <input id="cfg-provider-protocol" placeholder="如 openai / anthropic" autocomplete="off">
+                    <button type="button" id="cfg-provider-protocol-toggle" title="弹出协议列表">▼</button>
+                    <div id="cfg-provider-protocol-popup" class="cfg-combo-popup" style="display:none"></div>
+                  </span>
+                  <datalist id="cfg-provider-protocol-options" hidden>
                     <option value="openai"></option>
                     <option value="openai_image"></option>
                     <option value="anthropic"></option>
