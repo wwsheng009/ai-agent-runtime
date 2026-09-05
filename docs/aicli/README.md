@@ -18,6 +18,8 @@ Recommended entry points:
   - `openai_image_generate` / `aicli image` / chat `/image` paths: OpenAI-compatible images API vs Codex native image generation, auto path selection, and output directories.
 - [debug-chat-status.md](./debug-chat-status.md)
   - Loopback HTTP endpoint `GET /debug/chat/status` (`--pprof` / `--debug`): live JSON/text snapshot of the chat render pipeline (render encoder, scene, render output, app-state history gates, active cell ranges, executor recovery loop, projection validity) and a five-signal diagnostic method for "renderer only updates the active band and never commits".
+- [web-testing.md](./web-testing.md)
+  - Frontend testing guide for the micro web client (`/web/`): real-backend vs stub-API test setups, manual regression checklist (tabs, cfg-bar, config page, provider editor), and combo popup test cases for the protocol dropdown.
 - [../plan/aicli-micro-web-client-plan.md](../plan/aicli-micro-web-client-plan.md)
   - Micro web client plan: loopback `/web/` endpoint family (HTML page + `GET /web/api/screen` + `GET /web/api/events` SSE turn events + `POST /web/api/input` prompt injection) — design only, implementation tracked in the plan.
 - [../review/aicli-micro-web-client-plan-review.md](../review/aicli-micro-web-client-plan-review.md)
