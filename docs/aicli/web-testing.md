@@ -2,7 +2,13 @@
 
 `aicli` 微型 Web 客户端（loopback `/web/`）前端的测试方法：测试环境搭建、手工回归清单、自定义下拉框（combo popup）等关键组件的专项用例。
 
-前端源码位于 [backend/cmd/aicli/commands/web/](../../backend/cmd/aicli/commands/web/)，纯静态三件套（`index.html` + `app.js` + `style.css`），无构建步骤，经 `go:embed` 随二进制发布。改动后刷新浏览器即生效（重新编译二进制则需 `go build`）。
+前端源码位于 [backend/cmd/aicli/commands/web/](../../backend/cmd/aicli/commands/web/)，无构建步骤，经 `go:embed` 随二进制发布。`app.js` 为 ES module 入口（`<script type="module">`），功能域拆分为 `js/` 下 12 个模块（util / markdown / stream / chat / ui / runtime / sessions / approvals / config-admin / provider-editor / provider-import / sse），各模块导出 `initXxx()` 由入口按序调用。改动后刷新浏览器即生效（重新编译二进制则需 `go build`）。
+
+维护约束：
+
+- 新功能代码进对应功能域模块，不要再往 `app.js` 堆（入口只做 init 调用与启动序列）。
+- 模块间可变状态不直接 import 读写（import 绑定只读，赋值会 TypeError），一律走导出的访问器函数（如 `getUiState()`、`clearPendingPrompts()`、`setInputHistoryIdx()`）。
+- ES module 必须经 http(s) 加载，`file://` 直接打开 `index.html` 会因 CORS 失败——测试务必走下方方式 A/B。
 
 ## 1. 测试环境搭建
 
@@ -97,3 +103,10 @@ node --check backend/cmd/aicli/commands/web/app.js
 # 3. 涉及 cfg-bar / 弹窗样式的改动，确认两个 popup 方向都正常：
 #    底部 Model（向上）与编辑弹窗协议（向下）共用 .cfg-model-popup / .cfg-combo-popup 外观规则
 ```
+
+模块化后另有一层静态检查：用带 DOM stub 的 Node 脚本对 `app.js` 入口做动态 `import()`，可在不启浏览器的情况下抓出语法错误、缺失导出、模块求值期错误（拆分落地时即靠它在浏览器回归前拦截了两处问题）。检查思路：stub `document/window/localStorage/fetch/EventSource` 后 `await import("./app.js")`，任何模块图断裂都会在这里抛错。
+
+## 5. 已知问题（拆分时保持原行为，未修）
+
+- 代码块"复制"按钮的事件委托注册在 `#stream-msg` 元素上，且注册时机早于该元素的惰性获取（`streamMsgEl` 初始为 null，`beginStream` 时才 `getElementById`），因此该委托实际从未生效。拆分时原样保留在 `js/stream.js` 的 `initStream()` 中；如需修复，改为 document 级事件委托即可。
+
