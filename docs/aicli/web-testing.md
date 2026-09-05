@@ -55,6 +55,11 @@ aicli chat --pprof
 - [ ] Model 字段：直接输入自定义模型名可生效；点 ▼ 弹出全量模型列表，**向上展开**（`bottom: calc(100% + 4px)`），当前模型高亮 + "当前"徽标、默认模型带"默认"徽标；徽标显示"共 N 个"。
 - [ ] Model 输入框聚焦/输入时**不应**出现原生 datalist 下拉（`list` 属性已移除，避免与自定义 popup 叠成双层）。
 - [ ] 点击 popup 外部或按 `Esc` 关闭 popup；点选后立即应用并关闭。
+- [ ] **web↔TUI 切换契约**：底部栏切换注入的 `/model ...` 命令必须带 `--direct`
+      （见 `js/runtime.js` 的 `applyRuntimeConfig`）。回归方法：web 端切换
+      provider/model 时，观察同会话的 aicli chat TUI——应只打印切换结果，
+      **不得**弹出全屏 provider/model/reasoning 选择器；若 TUI 卡在全屏选择
+      器、web 端显示"已提交（配置可能未同步）"，即 `--direct` 链路被破坏。
 
 ### 2.3 配置页
 

@@ -414,8 +414,10 @@ func executeStructuredModelCommand(session *ChatSession, command string) (Comman
 
 	// Explicit mutation. When the model is pinned but reasoning is not, the
 	// interactive flow asks for reasoning through the picker; otherwise apply.
+	// DirectApply（web 注入）跳过该交互：注入方无法驱动 TUI 键盘，
+	// 弹 picker 会让 TUI 卡在全屏选择器、web 端轮询超时。
 	needsReasoningInteraction := request.ModelExplicit && !request.ReasoningExplicit && !request.ClearReasoning &&
-		canOpenChatModelPicker(session)
+		!request.DirectApply && canOpenChatModelPicker(session)
 	if needsReasoningInteraction {
 		return CommandResult{
 			Action: CommandContinue,

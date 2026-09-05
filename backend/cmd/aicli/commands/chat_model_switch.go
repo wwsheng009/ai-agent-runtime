@@ -65,7 +65,9 @@ func handleModelCommand(session *ChatSession, command string, noInteractive bool
 		return false
 	}
 
-	if err := executeModelCommand(session, request, !noInteractive); err != nil {
+	// DirectApply（web 注入的 --direct）即使处于交互会话也按非交互执行：
+	// 注入方无法驱动 TUI 的键盘选择。
+	if err := executeModelCommand(session, request, !noInteractive && !request.DirectApply); err != nil {
 		if isChatInteractivePromptCancelError(err) {
 			return false
 		}

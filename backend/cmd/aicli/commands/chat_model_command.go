@@ -42,6 +42,10 @@ type modelCommandRequest struct {
 	ProviderExplicit  bool
 	ModelExplicit     bool
 	ReasoningExplicit bool
+	// DirectApply 禁用全部交互式选择（provider/model/reasoning picker），
+	// 变更直接落盘。供 web 客户端注入的 /model 命令使用：注入方无法驱动
+	// TUI 的键盘交互，若弹 picker 会导致 TUI 卡在全屏选择器、web 轮询超时。
+	DirectApply bool
 }
 
 func (r modelCommandRequest) HasMutation() bool {
@@ -64,6 +68,8 @@ func parseModelCommandRequest(command string) (modelCommandRequest, error) {
 			req.ShowStatus = true
 		case tok == "clear-reasoning" || tok == "clear-reasoning-effort" || tok == "--clear-reasoning" || tok == "--clear-reasoning-effort":
 			req.ClearReasoning = true
+		case tok == "--direct" || tok == "--no-interactive":
+			req.DirectApply = true
 		case tok == "--provider" || tok == "-p":
 			value, next, err := consumeModelCommandValue(tokens, i)
 			if err != nil {
@@ -249,7 +255,7 @@ func executeModelCommand(session *ChatSession, request modelCommandRequest, inte
 		reasoning = request.ReasoningEffort
 	} else if request.ClearReasoning {
 		reasoning = ""
-	} else if interactive && request.ModelExplicit {
+	} else if interactive && request.ModelExplicit && !request.DirectApply {
 		reasoning, err = promptModelCommandReasoningSelection(session, providerCtx.Provider, providerCtx.Model, reasoning)
 		if err != nil {
 			return err

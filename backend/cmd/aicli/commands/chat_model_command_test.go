@@ -369,6 +369,37 @@ func TestHandleCommand_ModelSwitchPersistsProviderModelAndReasoning(t *testing.T
 	}
 }
 
+func TestHandleCommand_ModelDirectFlagSuppressesInteractiveReasoningPrompt(t *testing.T) {
+	// web 注入场景:noInteractive=false(真实交互会话)但命令带 --direct,
+	// 必须跳过 reasoning 交互提示直接落盘,保持当前 effort——注入方无法驱动
+	// TUI 键盘,弹交互选择会让 TUI 卡住、web 端轮询超时。
+	cfg, _ := testModelCommandConfig(t)
+
+	session := &ChatSession{
+		ProviderName:    "alpha",
+		Provider:        cfg.Providers.Items["alpha"],
+		Adapter:         adapter.GetAdapterOrDefault("openai"),
+		Model:           "alpha-model",
+		ReasoningEffort: "low",
+		BaseURL:         buildProviderURL(cfg.Providers.Items["alpha"], adapter.GetAdapterOrDefault("openai").GetAPIPath(), "alpha-model"),
+		Config:          cfg,
+	}
+
+	if quit := handleCommand(session, "/model --provider beta --model beta-model --direct", false); quit {
+		t.Fatal("expected /model command not to exit")
+	}
+
+	if session.ProviderName != "beta" {
+		t.Fatalf("expected provider beta, got %q", session.ProviderName)
+	}
+	if session.Model != "beta-model" {
+		t.Fatalf("expected model beta-model, got %q", session.Model)
+	}
+	if session.ReasoningEffort != "low" {
+		t.Fatalf("--direct apply must keep the current reasoning, got %q", session.ReasoningEffort)
+	}
+}
+
 func TestHandleCommand_ModelSwitchReloadsNewProviderFromLocalConfig(t *testing.T) {
 	cfg, cfgPath := testModelCommandConfig(t)
 

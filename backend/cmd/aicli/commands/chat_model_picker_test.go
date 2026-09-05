@@ -97,6 +97,43 @@ func TestExecuteStructuredModelCommandExplicitMutationAppliesDirectly(t *testing
 	}
 }
 
+func TestExecuteStructuredModelCommandDirectFlagSkipsReasoningPicker(t *testing.T) {
+	// web 客户端注入的 /model 命令带 --direct:即便存在可用的 picker surface
+	// 也必须直接落盘,不得请求 reasoning 选择阶段。注入方无法驱动 TUI 键盘,
+	// 弹 picker 会让 TUI 卡在全屏选择器、web 端轮询超时。
+	request, err := parseModelCommandRequest("/model --model gpt-4.1-mini --direct")
+	if err != nil {
+		t.Fatalf("parse --direct: %v", err)
+	}
+	if !request.DirectApply {
+		t.Fatal("--direct must set DirectApply")
+	}
+	if !request.ModelExplicit {
+		t.Fatal("--direct must not swallow --model")
+	}
+
+	session := &ChatSession{
+		ProviderName:    "alpha",
+		Provider:        config.Provider{Protocol: "openai", DefaultModel: "gpt-4.1"},
+		Model:           "gpt-4.1",
+		ReasoningEffort: "medium",
+		PermissionMode:  runtimepolicy.ModeDefault,
+	}
+	result, handled := executeStructuredModelCommand(session, "/model --model gpt-4.1-mini --direct")
+	if !handled {
+		t.Fatal("--direct mutation was not handled by the structured executor")
+	}
+	if result.OpenModelPicker != nil {
+		t.Fatalf("--direct must never open the picker, got %#v", result.OpenModelPicker)
+	}
+	if session.Model != "gpt-4.1-mini" {
+		t.Fatalf("expected model switch to gpt-4.1-mini, got %q", session.Model)
+	}
+	if session.ReasoningEffort != "medium" {
+		t.Fatalf("--direct apply must keep the current reasoning, got %q", session.ReasoningEffort)
+	}
+}
+
 func TestExecuteStructuredModelCommandModelPinnedWithoutReasoningDegradesWithoutSurface(t *testing.T) {
 	// ModelExplicit without reasoning normally requests the reasoning picker,
 	// but on this session canOpenChatModelPicker fails (no surface), so the

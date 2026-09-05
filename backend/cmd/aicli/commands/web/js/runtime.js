@@ -290,7 +290,10 @@ function applyRuntimeConfig() {
     // 仅 provider 变化且 model/reasoning 均跟随：仍需发送 provider 切换。
     if (!providerChanged) { return; }
   }
-  var cmd = parts.join(" ");
+  // --direct：声明本命令来自 web 注入，TUI 侧跳过全部交互式选择
+  // （provider/model/reasoning picker）直接落盘。不带它时，切 model 且未显式
+  // 给 reasoning 会在 TUI 弹全屏 reasoning 选择器——TUI 卡住等键盘、web 轮询超时。
+  var cmd = parts.join(" ") + " --direct";
   // 轮询期望：只校验本次实际发送的维度。provider 单切时不校验 model
   //（后端会落到新 provider 默认模型，旧值必然不匹配）。
   var expect = {
