@@ -89,8 +89,13 @@
         </label>
         <label class="cfg-item cfg-model">
           <span class="cfg-label">Model</span>
-          <input id="cfg-model" list="cfg-model-options" placeholder="当前模型" title="切换模型（/model --model）">
-          <datalist id="cfg-model-options"></datalist>
+          <span class="cfg-model-wrap">
+            <input id="cfg-model" placeholder="当前模型" title="切换模型（/model --model）：可直接输入自定义模型名，或点 ▼ 弹出列表选择" autocomplete="off">
+            <datalist id="cfg-model-options" hidden></datalist>
+            <button id="cfg-model-toggle" type="button" title="弹出模型列表">▼</button>
+            <span id="cfg-model-count" class="cfg-model-count" title="该 provider 可选模型数"></span>
+            <div id="cfg-model-popup" class="cfg-model-popup" style="display:none"></div>
+          </span>
         </label>
         <label class="cfg-item">
           <span class="cfg-label">Reasoning</span>
