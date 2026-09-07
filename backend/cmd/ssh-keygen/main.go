@@ -64,7 +64,8 @@ type cliFlags struct {
 	printPublic   bool     // -y：从私钥打印公钥
 	quiet         bool     // -q
 	verbose       bool     // -v
-	showHelp      bool     // --help
+	showHelp      bool     // -H / --help / 单独的 -h / 无参数
+	showVersion   bool     // --version
 	// 目标公钥文件（仅 -s 模式可携带）
 	keyFiles []string
 }
@@ -79,6 +80,10 @@ func main() {
 		usage()
 		os.Exit(0)
 	}
+	if flags.showVersion {
+		fmt.Fprintf(os.Stdout, "ssh-keygen %s\n", version)
+		os.Exit(0)
+	}
 	if err := run(flags); err != nil {
 		fmt.Fprintln(os.Stderr, "ssh-keygen:", err)
 		os.Exit(1)
@@ -87,6 +92,12 @@ func main() {
 
 func parseFlags(args []string) (*cliFlags, error) {
 	flags := &cliFlags{}
+
+	// 无参数时不猜测意图：直接显示帮助，避免误生成密钥覆盖 ~/.ssh/id_* 默认路径。
+	if len(args) == 0 {
+		flags.showHelp = true
+		return flags, nil
+	}
 
 	fs := pflag.NewFlagSet("ssh-keygen", pflag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -109,10 +120,21 @@ func parseFlags(args []string) (*cliFlags, error) {
 	fs.BoolVarP(&flags.printPublic, "print-public", "y", false, "print the public key of a private key file")
 	fs.BoolVarP(&flags.quiet, "quiet", "q", false, "quiet mode")
 	fs.BoolVarP(&flags.verbose, "verbose", "v", false, "verbose output")
+	// 注意：-h 被 OpenSSH 的“主机证书”语义占用，因此帮助只能注册 --help / -H；
+	// 单独的 -h 由 parseFlags 事后判定为“查看帮助”。
 	fs.BoolVarP(&flags.showHelp, "help", "H", false, "show this help and exit")
+	// -V 同样被 OpenSSH 的“有效期”占用，版本号只提供 --version 长选项。
+	fs.BoolVar(&flags.showVersion, "version", false, "show version and exit")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
+	}
+	// -h 沿用了 OpenSSH 的“主机证书”语义（仅在 -s 签发模式下有效）。
+	// 单独使用 -h 时用户几乎总是想看帮助，这里直接显示帮助而不是去生成密钥。
+	if flags.hostCert && flags.caKeyPath == "" {
+		flags.hostCert = false
+		flags.showHelp = true
+		return flags, nil
 	}
 	flags.keyFiles = fs.Args()
 	if len(flags.keyFiles) == 0 && flags.caKeyPath != "" {
@@ -171,7 +193,7 @@ func run(flags *cliFlags) error {
 
 // usage 打印帮助信息（模仿 ssh-keygen 的分节风格）。
 func usage() {
-	fmt.Fprintf(os.Stderr, `ssh-keygen (Go implementation, OpenSSH-compatible)
+	fmt.Fprintf(os.Stdout, `ssh-keygen (Go implementation, OpenSSH-compatible)
 
 Usage:
   ssh-keygen [-t type] [-b bits] [-f file] [-N passphrase] [-C comment]   generate a key pair
@@ -180,6 +202,11 @@ Usage:
   ssh-keygen -L -f cert.pub                                               print certificate contents
   ssh-keygen -l -f key.pub                                                print key fingerprint
   ssh-keygen -y -f private_key                                            print public key of a private key
+
+Help:
+  ssh-keygen                      no arguments -> show this help (never generates a key silently)
+  ssh-keygen -h | -H | --help     show this help and exit
+  ssh-keygen --version            show the version and exit
 
 Options:
   -t type       key type: ed25519 (default), rsa, ecdsa
@@ -190,7 +217,8 @@ Options:
   -s ca_key     CA private key for signing certificates
   -I identity   certificate identity (key ID), required with -s
   -n names      comma-separated principals (user names, or hostnames with -h)
-  -h            sign a host certificate (default: user certificate)
+  -h            show this help when used alone; with -s it signs a host certificate
+                (OpenSSH semantics: default is a user certificate)
   -V validity   validity: +52w | -1h:+1d | 20260101:20280101 | always:forever
   -z serial     certificate serial (default 0; -z+ auto-increments per file)
   -O option     certificate option; repeatable. See below.
@@ -199,7 +227,8 @@ Options:
   -y            print public key derived from a private key
   -q            quiet mode
   -v            verbose output
-  -H            show this help
+  -H, --help    show this help and exit (same as a lone -h, and as ssh-keygen with no args)
+  --version     show the version and exit
 
 Certificate options (-O):
   clear                          reset all permit-* extensions to off

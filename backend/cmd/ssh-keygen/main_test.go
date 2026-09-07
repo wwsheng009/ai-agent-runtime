@@ -607,6 +607,61 @@ func TestParseFlagsSerial(t *testing.T) {
 	}
 }
 
+func TestParseFlagsHelpRequests(t *testing.T) {
+	// 无参数：显示帮助，绝不生成密钥。
+	flags, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(no args): %v", err)
+	}
+	if !flags.showHelp {
+		t.Error("no args: showHelp should be true")
+	}
+
+	// 单独的 -h：视为查看帮助（而不是主机证书/生成密钥）。
+	flags, err = parseFlags([]string{"-h"})
+	if err != nil {
+		t.Fatalf("parseFlags(-h): %v", err)
+	}
+	if !flags.showHelp {
+		t.Error("-h alone: showHelp should be true")
+	}
+	if flags.hostCert {
+		t.Error("-h alone: hostCert should be cleared")
+	}
+
+	// --help / -H：保持帮助语义。
+	for _, args := range [][]string{{"--help"}, {"-H"}} {
+		flags, err = parseFlags(args)
+		if err != nil {
+			t.Fatalf("parseFlags(%v): %v", args, err)
+		}
+		if !flags.showHelp {
+			t.Errorf("%v: showHelp should be true", args)
+		}
+	}
+
+	// -s 模式下的 -h：保持 OpenSSH 的主机证书语义。
+	flags, err = parseFlags([]string{"-s", "ca", "-I", "web1", "-h", "web1.pub"})
+	if err != nil {
+		t.Fatalf("parseFlags(-s ... -h): %v", err)
+	}
+	if !flags.hostCert {
+		t.Error("-h with -s: hostCert should stay true")
+	}
+	if flags.showHelp {
+		t.Error("-h with -s: showHelp should stay false")
+	}
+
+	// 版本：仅 --version 长选项（-V 属于有效期）。
+	flags, err = parseFlags([]string{"--version"})
+	if err != nil {
+		t.Fatalf("parseFlags(--version): %v", err)
+	}
+	if !flags.showVersion {
+		t.Error("--version: showVersion should be true")
+	}
+}
+
 func TestParseFlagsErrors(t *testing.T) {
 	if _, err := parseFlags([]string{"-s", "ca", "-I", "id"}); err == nil {
 		t.Error("missing key file: expected error")
