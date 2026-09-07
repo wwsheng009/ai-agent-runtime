@@ -559,7 +559,7 @@ try {
                             "test", "-tags", "win7compat", "-mod=readonly", "./internal/agent",
                             "-run", "TestAgentWithoutCancel|TestAgentWithTimeoutCause|TestComputeAvailableToolsDoesNotExposePolicyDeniedSpawnSubagents",
                             "-count=1"
-                        ) -Description "Run Go 1.20 agent compatibility tests"
+                        ) -Description "Run agent context compatibility tests"
                         Invoke-Go -Arguments @(
                             "test", "-tags", "win7compat", "-mod=readonly", "./cmd/aicli/commands",
                             "-run", "Test(GetMCPConfigPath|ResolveGlobalRuntimeConfigPath|RunInitCommand|InitCommandHelp)",

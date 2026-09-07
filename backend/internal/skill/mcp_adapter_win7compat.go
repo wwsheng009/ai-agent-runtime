@@ -8,7 +8,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 )
 
-// 本文件是 Windows 7 兼容构建（Go 1.20 + win7compat tag）下的 MCP 适配器
+// 本文件是 Windows 7 兼容构建（Go 1.21.4 + win7compat tag）下的 MCP 适配器
 // stub。MCP 在 Win7 兼容构建中整体禁用，MCPAdapter 保持与原实现相同的
 // 导出面（FindTool/CallTool/CallToolWithMeta/ListTools/ResolveToolSource/
 // GetManager），全部返回空或"不支持"错误，保证调用方（skills 集成、

@@ -846,7 +846,7 @@ func submitSessionPrompt(actor *chat.SessionActor, requestCtx context.Context, p
 		return nil, nil, errors.New(errors.ErrConfigInvalid, "session actor not configured"), false
 	}
 
-	runCtx := withoutCancel(requestCtx)
+	runCtx := context.WithoutCancel(requestCtx)
 	resultCh := make(chan sessionRuntimeSubmitOutcome, 1)
 	go func() {
 		result, err := actor.SubmitPrompt(runCtx, prompt, runMeta)
@@ -890,7 +890,7 @@ func submitSessionContinue(actor *chat.SessionActor, requestCtx context.Context,
 		return nil, nil, errors.New(errors.ErrConfigInvalid, "session actor not configured"), false
 	}
 
-	runCtx := withoutCancel(requestCtx)
+	runCtx := context.WithoutCancel(requestCtx)
 	resultCh := make(chan sessionRuntimeSubmitOutcome, 1)
 	go func() {
 		result, err := actor.Continue(runCtx, runMeta, opts)

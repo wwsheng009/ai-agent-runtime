@@ -1,4 +1,4 @@
-//go:build (go1.20 && !go1.21) || win7compat
+//go:build win7compat
 
 package toolschema
 
@@ -17,7 +17,7 @@ const schemaBaseURI = "urn:aicli:tool-schema"
 const draft7SchemaURI = "https://json-schema.org/draft-07/schema#"
 
 // Validate compiles a canonical tool schema using santhosh-tekuri/jsonschema
-// v5, the only maintained JSON Schema compiler compatible with the Go 1.20/1.21
+// v5, the only maintained JSON Schema compiler compatible with the Go 1.21.4
 // toolchain used for Windows 7 builds (validate.go imports jsonschema-go,
 // which requires go >= 1.23 and cannot be used in win7compat builds).
 // External references are rejected without touching the filesystem or network,

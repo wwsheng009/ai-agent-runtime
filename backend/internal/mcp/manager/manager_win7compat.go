@@ -14,10 +14,10 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
 )
 
-// 本文件是 Windows 7 兼容构建（Go 1.20 + win7compat tag）下的 MCP 管理器
+// 本文件是 Windows 7 兼容构建（Go 1.21.4 + win7compat tag）下的 MCP 管理器
 // stub。internal/mcp/client、transport、server 依赖
 // github.com/modelcontextprotocol/go-sdk（其所有版本要求 go >= 1.23），
-// 无法在 Go 1.20 下编译，因此 Win7 兼容构建整体禁用 MCP：
+// 无法在 Go 1.21.4 下编译，因此 Win7 兼容构建整体禁用 MCP：
 //
 //  1. Manager 接口、生命周期类型保持与 manager.go 完全一致的形状，
 //     调用方（aicli chat 工具注册等）无需任何改动；

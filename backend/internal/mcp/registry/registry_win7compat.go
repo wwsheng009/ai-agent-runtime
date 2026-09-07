@@ -10,7 +10,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 )
 
-// 本文件是 Windows 7 兼容构建（Go 1.20 + win7compat tag）下的 MCP 注册表
+// 本文件是 Windows 7 兼容构建（Go 1.21.4 + win7compat tag）下的 MCP 注册表
 // stub，与 manager_win7compat.go 配套。保留类型与纯函数逻辑（不依赖
 // go-sdk），Registry 本体降级为空壳。注意：CanonicalToolName 的简化实现
 // 未做 64 字符截断与哈希后缀（原实现见 registry.go），该路径在 Win7
