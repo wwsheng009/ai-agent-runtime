@@ -1,8 +1,12 @@
 # 在 Windows 7 上使用 aicli
 
 Windows 7 必须使用单独的 **Win7 amd64 兼容包**。普通 Windows Release
-由 Go 1.24 编译，而 Go 1.21 起已不再支持 Windows 7；普通包可能在启动时
-直接崩溃（常见为 `Exception 0xc0000005 PC=0x0`）。
+由 Go 1.25 编译（`go.mod` 声明 go 1.25.0），而 Go 1.21 起已不再支持
+Windows 7；普通包可能在启动时直接崩溃（常见为
+`Exception 0xc0000005 PC=0x0`）。
+
+> 面向开发者的实现机制盘点见 [windows7-compat-internals.md](windows7-compat-internals.md)，
+> 从源码编译见 [windows7-build.md](windows7-build.md)。
 
 ## 1. 前提
 
@@ -69,32 +73,29 @@ aicli.exe login --provider openai --protocol openai --base-url https://api.opena
 set OPENAI_API_KEY=
 ```
 
-默认配置保存在：
-
-```text
-%USERPROFILE%\.aicli\config.win7.yaml
-```
-
-Win7 兼容版不会默认读取普通版的 `config.yaml`。兼容包内还包含独立的
-runtime 配置：
+Win7 兼容版与普通版**共享同一份用户配置**（`init --global` 写入
+`%USERPROFILE%\.aicli\config.yaml`），旧的 `config.win7.yaml` 已废弃、
+不会优先于标准配置；命令行与 Web 控制台读写的是同一个文件。兼容包内
+还包含独立的 runtime 配置：
 
 ```text
 C:\Tools\aicli\configs\runtime.win7.yaml
 ```
 
-该配置以及 Win7 分支的代码级回退值都会把会话数据库设为：
+该 runtime 配置把会话数据库指向 Win7 专属文件（主库 + 只读副本）：
 
 ```text
-%USERPROFILE%\.aicli\sessions\session_history_win7.sqlite
+%USERPROFILE%\.aicli\sessions\session_history_win7.sqlite          主库
+%USERPROFILE%\.aicli\sessions\session_history_win7_replica.sqlite  30 秒刷新副本
 ```
 
 普通版继续使用
 `%USERPROFILE%\.aicli\sessions\session_history.sqlite`。两者的 `-wal` /
 `-shm` 文件也因此完全分离，避免多进程 WAL 锁竞争：`aicli` 持有主库的
 `-wal`/`-shm` 写锁，`runtime-server` 改为读取每 30 秒从主库刷新的只读
-副本（`session_history_win7_replica.sqlite`，配置见
-`configs\runtime.win7.yaml`），两者并发运行互不阻塞。代价是两个版本的
-会话历史默认互不可见。
+副本（`session_history_win7_replica.sqlite`，见 `configs\runtime.win7.yaml`
+的 `sessions.replicaSource` / `sessions.storePath`），两者并发运行互不
+阻塞。代价是两个版本的会话历史默认互不可见。
 
 如果要把普通版历史一次性复制给 Win7 版，必须先正常停止所有正在访问原
 数据库的 `aicli` 和 `runtime-server` 进程；不要在 WAL 写入期间只复制主
@@ -200,7 +201,8 @@ winpty ./aicli.exe chat --compat-mode
   Win7 客户端 `aicli.exe chat --runtime-server <host:port>` 可连接本机或
   其他机器上的 server。win7 兼容包未内嵌完整前端页面（`win7compat`
   构建使用占位 `dist/`），`/` 返回运行时信息，功能通过 API 与 aicli 使用。
-- Win7 runtime server 默认查找 `config.win7.yaml`，并使用
+- Win7 runtime server 与普通版共享用户配置 `config.yaml`（旧的
+  `config.win7.yaml` 已废弃、不再优先），并使用独立的
   `configs\runtime.win7.yaml`。若要与普通版 server 同机并行运行，还应使用
   不同端口和 PID 文件，例如：
 
@@ -223,7 +225,7 @@ Win7 兼容包在功能、性能与更新节奏上有以下明确限制：
 | 仅 amd64 | 当前不提供 32 位（386）构建，也未提供 Linux/macOS 的 Win7 等价物 |
 | 功能裁剪 | `win7compat` build tag 裁剪了要求更高 Go 版本的特性，主要是 **MCP 集成**；需要 MCP 时请在受支持的新系统上运行 |
 | Web UI 受限 | win7 兼容包未内嵌完整前端页面（占位 `dist/`）；`runtime-server` 的 `/` 返回运行时信息，功能通过 Web API 与命令行使用 |
-| 会话历史隔离 | Win7 版使用独立的会话数据库（`session_history_win7.sqlite`），与普通版（`session_history.sqlite`）默认互不可见；`runtime-server` 读取 30 秒刷新的只读副本，改动不会立即出现在副本中 |
+| 会话历史隔离 | Win7 runtime 配置使用独立的会话数据库（`session_history_win7.sqlite` 主库 + 30 秒刷新只读副本），与普通版（`session_history.sqlite`）默认互不可见；写入主库的改动最多延迟 30 秒出现在副本中 |
 | 无自动更新 | Win7 版只随 `win7-*` tag 发布，不会跟随主线 `v*` 发布自动更新；需手动下载新 Release 覆盖 |
 | 终端兼容 | Win7 conhost 不支持现代 VT/ConPTY；交互式输入依赖 `--compat-mode`（`ReadConsoleW`/`ReadConsoleInputW` 路径），第三方终端（MobaXterm、mintty、Git Bash）需配合 `aicli-console.exe` 启动器 |
 | 系统依赖 | 依赖 Win7 SP1 及最后的 SHA-2/根证书/TLS 更新；未打补丁的系统可能出现 x509/TLS 连接失败 |

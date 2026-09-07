@@ -1,11 +1,13 @@
 # 从源码编译 Windows 7 兼容版 aicli
 
 > 本文面向需要自行编译 Win7 兼容包的开发者。最终用户无需编译，直接下载
-> Release 中文件名包含 `win7` 的压缩包并参阅 [windows7.md](windows7.md)。
+> Release 中文件名包含 `win7` 的压缩包并参阅 [windows7.md](windows7.md)；
+> 实现级兼容机制盘点见 [windows7-compat-internals.md](windows7-compat-internals.md)。
 
 ## 1. 为什么需要单独的构建
 
-普通 Release 由 Go 1.24 编译，而 Go 1.21 起官方已不再支持 Windows 7；
+普通 Release 由 Go 1.25 编译（`go.mod` 声明 go 1.25.0），而 Go 1.21 起官方
+已不再支持 Windows 7；
 且主线代码会调用 Windows 7 不存在的系统 API（如 Windows 10 1903+ 才有的
 ConPTY），普通包在 Win7 上启动即崩溃（`Exception 0xc0000005 PC=0x0`）。
 
@@ -25,13 +27,13 @@ ConPTY），普通包在 Win7 上启动即崩溃（`Exception 0xc0000005 PC=0x0`
 | 维度 | 标准构建 | Win7 构建 |
 | --- | --- | --- |
 | 代码分支 | `main` | `main`（兼容代码已全部合入 main，**无需切分支**） |
-| 工具链 | Go 1.24（`go.mod` 声明） | Go 1.21.4（`GOTOOLCHAIN` 固定） |
+| 工具链 | Go 1.25（`go.mod` 声明） | Go 1.21.4（`GOTOOLCHAIN` 固定） |
 | 依赖图 | `backend/go.mod` + `go.sum` | `backend/go.win7.mod` + `go.win7.sum` |
 | build tag | 无 | `-tags win7compat` |
 | CGO | 允许 | `CGO_ENABLED=0` |
-| 默认 CLI 配置 | `config.yaml` / `aicli.yaml` | `config.win7.yaml` / `aicli.win7.yaml` |
+| 默认 CLI 配置 | `config.yaml` / `aicli.yaml` | `config.yaml` / `aicli.yaml`（与主线**共享**；`config.win7.yaml` 已废弃） |
 | 默认 runtime 配置 | `runtime.yaml` | `runtime.win7.yaml` |
-| 会话数据库 | `session_history.sqlite` | `session_history_win7.sqlite` |
+| 会话数据库 | `session_history.sqlite` | `session_history_win7.sqlite`（`runtime.win7.yaml` 显式配置：master + 30s 刷新只读副本；profile 层默认值与主线一致） |
 
 代码隔离依赖 `//go:build win7compat` 与 `//go:build !win7compat` 成对出现，
 例如：
