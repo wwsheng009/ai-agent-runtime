@@ -76,6 +76,9 @@ func run() int {
 		case "help", "-h", "--help":
 			printRuntimeServerRootUsage()
 			return 0
+		case "version", "-V", "--version":
+			printRuntimeServerVersion()
+			return 0
 		case "serve":
 			return runServe(args[1:])
 		case "start":
@@ -97,22 +100,82 @@ func run() int {
 }
 
 func printRuntimeServerRootUsage() {
-	fmt.Fprintln(os.Stdout, "Usage:")
-	fmt.Fprintln(os.Stdout, "  runtime-server serve  [--config PATH] [--listen HOST:PORT] [--pid-file PATH] [--pprof]")
-	fmt.Fprintln(os.Stdout, "  runtime-server start  [--config PATH] [--listen HOST:PORT] [--pid-file PATH] [--wait 30s] [--pprof]")
-	fmt.Fprintln(os.Stdout, "  runtime-server stop   [--pid-file PATH] [--pid PID] [--wait 10s]")
-	fmt.Fprintln(os.Stdout, "  runtime-server status [--config PATH] [--listen HOST:PORT] [--pid-file PATH]")
-	fmt.Fprintln(os.Stdout, "")
-	fmt.Fprintln(os.Stdout, "Notes:")
-	fmt.Fprintln(os.Stdout, "  - 不带子命令时，等价于 `serve`，以前的启动方式保持兼容。")
-	fmt.Fprintln(os.Stdout, "  - `start` 会在后台启动服务并写入 PID 文件。")
-	fmt.Fprintln(os.Stdout, "  - `stop` 优先使用 PID 文件停止受管实例，也支持 `--pid` 直接停止指定进程。")
-	fmt.Fprintf(
-		os.Stdout,
-		"  - 未指定 `--config` 时，按 $HOME/.aicli/%[1]s -> ./.aicli/%[1]s -> ./%[1]s -> ./configs/%[1]s 顺序查找。\n",
-		runtimeServerDefaultConfigName,
-	)
-	fmt.Fprintln(os.Stdout, "  - 默认 PID 文件为 ./logs/runtime-server.pid。")
+	fmt.Fprintf(os.Stdout, `runtime-server - ai-agent-runtime 的本地运行时服务
+
+Description:
+  提供 Web UI、HTTP API、MCP 端点与终端会话能力。
+  不带子命令时等价于 serve，历史启动方式保持兼容。
+
+Usage:
+  runtime-server serve   [options]   前台启动服务（默认子命令）
+  runtime-server start   [options]   后台启动服务并写入 PID 文件
+  runtime-server stop    [options]   停止受管实例
+  runtime-server status  [options]   查看服务状态、配置与监听地址
+  runtime-server help | -h | --help  显示本帮助
+  runtime-server version | -V | --version   显示版本与构建信息
+
+Options (serve):
+  -c, --config PATH        配置文件路径；未指定时按 Notes 中的搜索顺序查找 %[1]s
+      --listen HOST:PORT   监听地址，优先级高于配置文件，例如 127.0.0.1:8101
+      --pid-file PATH      PID 文件路径（默认 ./logs/runtime-server.pid）
+      --pprof              启用 pprof 诊断端点（监听 127.0.0.1 随机空闲端口，可用 AICLI_PPROF 指定地址）
+  -h, --help               显示子命令帮助
+
+Options (start):
+  -c, --config PATH        同 serve
+      --listen HOST:PORT   同 serve
+      --pid-file PATH      同 serve（默认 ./logs/runtime-server.pid）
+      --wait DURATION      等待后台进程完成启动的超时时间（默认 30s）
+      --pprof              同 serve
+  -h, --help               显示子命令帮助
+
+Options (stop):
+      --pid-file PATH      PID 文件路径（默认 ./logs/runtime-server.pid）
+      --pid PID            直接停止指定 PID，跳过 PID 文件
+      --wait DURATION      等待进程退出的超时时间（默认 10s）
+  -h, --help               显示子命令帮助
+
+Options (status):
+  -c, --config PATH        同 serve
+      --listen HOST:PORT   同 serve
+      --pid-file PATH      同 serve
+  -h, --help               显示子命令帮助
+
+Examples:
+  # 前台启动（默认监听配置中的地址）
+  runtime-server serve
+
+  # 指定配置与监听地址
+  runtime-server serve --config ./configs/mcp-server.yaml --listen 127.0.0.1:8101
+
+  # 后台启动并等待就绪
+  runtime-server start --wait 30s
+
+  # 停止受管实例
+  runtime-server stop
+
+  # 查看状态
+  runtime-server status
+
+Notes:
+  - 不带子命令时，等价于 serve，以前的启动方式保持兼容。
+  - start 会在后台启动服务并写入 PID 文件。
+  - stop 优先使用 PID 文件停止受管实例，也支持 --pid 直接停止指定进程。
+  - 未指定 --config 时，按 $HOME/.aicli/%[1]s -> ./.aicli/%[1]s -> ./%[1]s -> ./configs/%[1]s 顺序查找。
+  - 默认 PID 文件为 ./logs/runtime-server.pid。
+  - 每个子命令都支持 -h / --help，例如：runtime-server serve --help。
+`, runtimeServerDefaultConfigName, aiclipaths.StandardConfigFileName)
+}
+
+func printRuntimeServerVersion() {
+	info := buildinfo.Backend()
+	fmt.Fprintf(os.Stdout, "runtime-server version %s\n", info.Version)
+	if buildTime := strings.TrimSpace(info.BuildTime); buildTime != "" {
+		fmt.Fprintf(os.Stdout, "build time: %s\n", buildTime)
+	}
+	if commit := strings.TrimSpace(info.GitCommit); commit != "" {
+		fmt.Fprintf(os.Stdout, "git commit: %s\n", commit)
+	}
 }
 
 func newRuntimeServerFlagSet(name string) *pflag.FlagSet {
