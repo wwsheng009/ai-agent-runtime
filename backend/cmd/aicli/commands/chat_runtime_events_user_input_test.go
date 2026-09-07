@@ -5,8 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
@@ -228,5 +231,128 @@ func TestRenderLayer_UserInput_ReplayPathDoesNotInject(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("live path: RenderText 缺少用户文本，rows=%q", rows)
+	}
+}
+// TestSubmitUserInputPublishesUserSubmittedBusEvent 固化"提交即刷新"优化：
+// submitUserInput 在用户 cell 成功注入渲染数据面后，向 EventBus 发布
+// aicli.chat.user_submitted 镜像事件（SSE 侧经 chatWebSSEMappings 映射为
+// screen_refresh，web 客户端立即重拉 /web/api/screen 确认 pending 气泡，
+// 长 turn 无 tool_end/turn_end 时不再等到回合结束才刷新）。
+//
+// 关键断言：
+//  1. 总线上恰好一条事件，类型/SessionID/payload 正确；
+//  2. 桥自订阅 Handle 已同步消费该事件（bus.Publish 同步派发）且未死锁
+//     —— 发布必须在 renderMu 释放后进行，否则 Handle 重入 renderMu 会
+//     死锁挂死本测试（10m 超时）；
+//  3. 镜像事件被挡在渲染数据面外：Scene 只有 1 个 KindUser 单元格，
+//     无 KindSystem 噪声。
+func TestSubmitUserInputPublishesUserSubmittedBusEvent(t *testing.T) {
+	bus := runtimeevents.NewBusWithRetention(64)
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "session-user-submitted"},
+		LocalRuntimeHost: &localChatRuntimeHost{
+			EventStore: runtimechat.NewInMemoryRuntimeStore(64),
+			EventBus:   bus,
+		},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+
+	var mu sync.Mutex
+	var got []runtimeevents.Event
+	unsub := bus.SubscribeCancelable("", func(ev runtimeevents.Event) {
+		mu.Lock()
+		got = append(got, ev)
+		mu.Unlock()
+	})
+	defer unsub()
+	// 桥自订阅（与生产路径一致：start() 里的 EventBus.Subscribe("", b.Handle)）。
+	bus.Subscribe("", bridge.Handle)
+
+	bridge.submitUserInput("hello win7")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 published event, got %d: %+v", len(got), got)
+	}
+	ev := got[0]
+	if ev.Type != chatWebUserSubmittedBusEvent {
+		t.Fatalf("event type = %q, want %q", ev.Type, chatWebUserSubmittedBusEvent)
+	}
+	if ev.SessionID != "session-user-submitted" {
+		t.Fatalf("event session id = %q", ev.SessionID)
+	}
+	if text, _ := ev.Payload["text"].(string); text != "hello win7" {
+		t.Fatalf("payload text = %q, want %q", text, "hello win7")
+	}
+
+	snap := bridge.sceneSnapshot()
+	if snap == nil {
+		t.Fatal("scene snapshot is nil")
+	}
+	var userCells, systemCells int
+	for _, c := range snap.Cells {
+		if c == nil {
+			continue
+		}
+		switch c.Kind {
+		case scene.KindUser:
+			userCells++
+		case scene.KindSystem:
+			systemCells++
+		}
+	}
+	if userCells != 1 || systemCells != 0 {
+		t.Fatalf("scene cells: user=%d system=%d (want user=1 system=0)", userCells, systemCells)
+	}
+}
+
+// TestReplayEventLogSkipsSuppressedRenderMirrorEvents 固化重放语义等价：
+// 被抑制的镜像事件（aicli.chat.user_submitted / aicli.chat.dynamic_status）
+// 写入事件日志后，新 bridge 重放时不得 re-encode 成 KindSystem 噪声
+// 单元格 —— 实时路径（Handle / encodeRenderModelEvent）已把这类事件挡在
+// 渲染数据面外（只进日志与 SSE），重放必须同源跳过（否则重启后消息信息流
+// 出现 "aicli.chat.user_submitted" 一类系统消息）。
+func TestReplayEventLogSkipsSuppressedRenderMirrorEvents(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "runtime-events.jsonl")
+
+	bridge1 := newChatRuntimeEventBridge(&ChatSession{})
+	bridge1.eventLogPathOverride = logPath
+	bridge1.submitUserInput("U1")
+	bridge1.encodeRenderModelEvent(runtimeevents.Event{
+		Type:      chatWebUserSubmittedBusEvent,
+		SessionID: "s",
+		Payload:   map[string]interface{}{"text": "U1"},
+	})
+	bridge1.encodeRenderModelEvent(runtimeevents.Event{
+		Type:      chatWebDynamicStatusBusEvent,
+		SessionID: "s",
+		Payload:   map[string]interface{}{"status": "Analyzing"},
+	})
+
+	bridge2 := newChatRuntimeEventBridge(&ChatSession{})
+	bridge2.eventLogPathOverride = logPath
+	if _, err := bridge2.replayEventLog(); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	snap := bridge2.sceneSnapshot()
+	if snap == nil {
+		t.Fatal("replayed scene snapshot is nil")
+	}
+	var userCells, systemCells int
+	for _, c := range snap.Cells {
+		if c == nil {
+			continue
+		}
+		switch c.Kind {
+		case scene.KindUser:
+			userCells++
+		case scene.KindSystem:
+			systemCells++
+		}
+	}
+	if userCells != 1 || systemCells != 0 {
+		t.Fatalf("replayed scene cells: user=%d system=%d (want user=1 system=0)", userCells, systemCells)
 	}
 }

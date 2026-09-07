@@ -20,7 +20,7 @@ func TestIsChatInputQueueDiagnosticEvent(t *testing.T) {
 }
 
 func TestIsChatRenderDataPlaneSuppressedEvent(t *testing.T) {
-	for _, typ := range []string{chatEventInputQueueDetected, chatEventInputQueueDiscarded, chatEventInputQueueDrained, chatWebDynamicStatusBusEvent} {
+	for _, typ := range []string{chatEventInputQueueDetected, chatEventInputQueueDiscarded, chatEventInputQueueDrained, chatWebDynamicStatusBusEvent, chatWebUserSubmittedBusEvent} {
 		if !isChatRenderDataPlaneSuppressedEvent(typ) {
 			t.Fatalf("expected %q to be suppressed from the render data plane", typ)
 		}

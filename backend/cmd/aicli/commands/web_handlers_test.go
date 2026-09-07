@@ -624,6 +624,7 @@ func TestChatWebSSEEventName(t *testing.T) {
 		{runtimechat.EventApprovalRequested, "approval_requested", true},
 		{runtimechat.EventQuestionAsked, "question_asked", true},
 		{chatWebDynamicStatusBusEvent, "dynamic_status", true},
+		{chatWebUserSubmittedBusEvent, "screen_refresh", true},
 		{chatWebModelSelectionChangedBusEvent, "model_changed", true},
 		{"unknown_event_type", "unknown_event_type", false},
 	}

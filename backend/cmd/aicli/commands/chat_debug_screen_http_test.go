@@ -47,6 +47,45 @@ func TestChatDebugScreenSnapshotNoSurface(t *testing.T) {
 	}
 }
 
+// TestChatWebScreenSnapshotWin7DegradedIncludesUserPrompt 是 Win7 降级形态的
+// 端到端回归测试：conhost 无 VT 时 Surface 为 nil、unifiedRenderer 关停、
+// uiActor 不接收快照，bridge Scene 是 /web/api/screen messages 的唯一可靠
+// 来源（chat_debug_screen_http.go 优先级 2）。用户提交 prompt 后 messages
+// 必须包含 role=user；旧实现用 surface 门控把用户 echo 整条跳过，Scene 缺
+// user cell，web 客户端因此渲染不出用户 prompt。
+func TestChatWebScreenSnapshotWin7DegradedIncludesUserPrompt(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	t.Cleanup(coord.Shutdown)
+	session.Interaction = coord
+
+	old := chatDebugDisplaySessionProvider
+	chatDebugDisplaySessionProvider = func() *ChatSession { return session }
+	defer func() { chatDebugDisplaySessionProvider = old }()
+
+	renderSubmittedUserInputEcho(session, "win7 prompt")
+
+	snap := buildChatWebScreenSnapshot()
+	if !snap.Available {
+		t.Fatalf("有 bridge Scene 内容时应 available=true，reason=%q", snap.Reason)
+	}
+	if len(snap.Messages) == 0 {
+		t.Fatal("web 快照 messages 不应为空")
+	}
+	found := false
+	for _, m := range snap.Messages {
+		if m.Role == "user" && strings.Contains(m.Content, "win7 prompt") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("web 快照 messages 应包含 role=user 的用户 prompt，实际为 %+v", snap.Messages)
+	}
+}
+
 // TestChatDebugScreenSnapshotWithSurface 验证有 surface 的会话返回完整快照。
 func TestChatDebugScreenSnapshotWithSurface(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")

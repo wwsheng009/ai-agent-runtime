@@ -499,7 +499,15 @@ func renderSubmittedUserInputEcho(session *ChatSession, input string) {
 	if session == nil || session.NoInteractive || session.JSONOutput || strings.TrimSpace(input) == "" {
 		return
 	}
-	if session.Surface == nil || !session.Surface.Enabled() || session.Interaction == nil {
+	// 降级形态（Win7 conhost 无 VT/DECSTBM、headless、后台服务）下 surface 为 nil，
+	// 但用户输入仍需进入 Scene 数据面，否则 /web/api/screen 的 messages 会缺少
+	// role=user 条目，导致 web 客户端渲染不出用户 prompt。
+	// 统一渲染路径（unifiedRenderer）由 Interaction 直接驱动，不受 surface 影响。
+	if session.Interaction != nil {
+		newAICLITranscriptRenderer(session).RenderUser(input)
+		return
+	}
+	if session.Surface == nil || !session.Surface.Enabled() {
 		return
 	}
 	newAICLITranscriptRenderer(session).RenderUser(input)

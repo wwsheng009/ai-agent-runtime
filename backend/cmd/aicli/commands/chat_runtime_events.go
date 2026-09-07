@@ -1538,9 +1538,18 @@ func (b *chatRuntimeEventBridge) submitUserInput(text string) {
 		return
 	}
 	b.renderMu.Lock()
-	defer b.renderMu.Unlock()
 	b.applyChangeSet(b.renderEncoder.SubmitUserInput(text))
 	b.appendUserInputLog(text)
+	b.renderMu.Unlock()
+	// 用户 cell 已提交（非空输入必然新增 KindUser 块）：发布刷新提示。
+	// 必须在 renderMu 释放后发布 —— bus.Publish 同步派发到桥自订阅
+	// Handle（内部重取 renderMu），持锁发布会死锁。SSE 侧经映射把该
+	// 事件转成 screen_refresh，web 客户端立即重拉 /web/api/screen 确认
+	// pending 气泡；无 EventBus/EventStore 的测试桥与纯本地场景下
+	// publishLocalChatDiagnosticEvent 自动 no-op。
+	publishLocalChatDiagnosticEvent(b.session, chatWebUserSubmittedBusEvent, map[string]interface{}{
+		"text": text,
+	})
 }
 
 // submitAssistant 把没有 runtime assistant 终态事件的 direct response 接入
@@ -2187,7 +2196,13 @@ func (b *chatRuntimeEventBridge) replayEventLog() (uint64, error) {
 			// nil（空模型触发）退化为 append，与实时路径一致。
 			b.applyChangeSet(b.renderEncoder.SubmitUserInteractionDocument(en.interaction, en.document, en.interactionAnchor))
 		default:
-			b.applyChangeSet(b.renderEncoder.Encode(en.event))
+			// 与实时路径 Handle 同源抑制：input.queue.* / dynamic_status /
+			// user_submitted 等镜像事件实时时已挡在渲染数据面外（只进日志
+			// 与 SSE），重放同样跳过，保证重放与实时语义等价（否则会导致
+			// "aicli.chat.dynamic_status" 一类 KindSystem 噪声单元格）。
+			if !isChatRenderDataPlaneSuppressedEvent(en.event.Type) {
+				b.applyChangeSet(b.renderEncoder.Encode(en.event))
+			}
 		}
 	}
 	b.renderMu.Unlock()

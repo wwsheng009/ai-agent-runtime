@@ -41,12 +41,16 @@ func isChatInputQueueDiagnosticEvent(eventType string) bool {
 //   - aicli.chat.dynamic_status 动态状态栏镜像事件：其消费端是 SSE
 //     "dynamic_status" 转发（web 状态栏），进入 Scene 只会产生
 //     KindSystem 单元格、以 "aicli.chat.dynamic_status" 系统消息身份
-//     污染消息信息流。
+//     污染消息信息流；
+//   - aicli.chat.user_submitted 用户输入提交镜像事件：其消费端是 SSE
+//     "screen_refresh" 映射（前端立即重拉 /web/api/screen 确认 pending
+//     气泡），用户 cell 已由 submitUserInput 经 SubmitUserInput 注入，
+//     再次 Encode 只会产生 KindSystem 单元格噪声。
 //
 // 被抑制的事件仍会写入事件日志（eventLog / replay / TUI timeline）并
 // 经 SSE 转发，只影响渲染数据面。
 func isChatRenderDataPlaneSuppressedEvent(eventType string) bool {
-	return isChatInputQueueDiagnosticEvent(eventType) || eventType == chatWebDynamicStatusBusEvent
+	return isChatInputQueueDiagnosticEvent(eventType) || eventType == chatWebDynamicStatusBusEvent || eventType == chatWebUserSubmittedBusEvent
 }
 
 func publishLocalChatDiagnosticEvent(session *ChatSession, eventType string, payload map[string]interface{}) {

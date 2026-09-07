@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -492,17 +493,42 @@ func (c *chatInteractionCoordinator) currentSurfaceStateForTest() string {
 	return c.currentSurfaceStateLocked().String()
 }
 
-func TestRenderSubmittedUserInputEchoSkipsLegacyPromptPath(t *testing.T) {
+// TestRenderSubmittedUserInputEchoRoutesToSceneWithoutSurface 是 Win7 降级形态的
+// 回归测试：conhost 无 VT 能力时 Surface 为 nil，但用户输入仍必须进入
+// Interaction 与 bridge Scene 数据面，否则 /web/api/screen 的 messages 会缺少
+// role=user 条目，web 客户端渲染不出用户 prompt。旧实现用 surface 门控把整条
+// echo 跳过（echo 只在 fixed-bottom surface 上显示），正是该 bug 的根因。
+func TestRenderSubmittedUserInputEchoRoutesToSceneWithoutSurface(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 	session.Interaction = coord
+	t.Cleanup(coord.Shutdown)
 
 	renderSubmittedUserInputEcho(session, "第一个问题")
 
-	if output.String() != "" {
-		t.Fatalf("expected submitted input echo to be gated to fixed-bottom surface, got %q", output.String())
+	// 1) 无 surface 时用户消息块仍应经 Interaction 渲染（不被 surface 门控吞掉）。
+	if !strings.Contains(output.String(), "第一个问题") {
+		t.Fatalf("expected user echo to render through interaction without surface, got %q", output.String())
+	}
+	// 2) bridge Scene 数据面必须包含 role=user 条目（web 客户端 messages 来源）。
+	if session.RuntimeEventBridge == nil {
+		t.Fatal("expected runtime event bridge to be ensured by the echo path")
+	}
+	msgs := transcriptFallbackSnapshotMessages(session.RuntimeEventBridge.sceneSnapshot())
+	if len(msgs) == 0 {
+		t.Fatalf("expected user message in bridge Scene, got no messages")
+	}
+	found := false
+	for _, m := range msgs {
+		if m.Role == "user" && strings.Contains(m.Content, "第一个问题") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected role=user message in bridge Scene messages, got %+v", msgs)
 	}
 }
 
@@ -1598,7 +1624,11 @@ func TestRunChatLoop_DrainsQueuedLinesAfterTeamSettlesBeforePrompt(t *testing.T)
 	if !strings.Contains(rendered, "现将优先处理这些输入") {
 		t.Fatalf("expected queued-input notice, got %q", rendered)
 	}
-	if strings.Contains(rendered, ui.UserPromptText(0)) {
+	// 用户 echo 的前缀与提示符字形相同（"> hello" 使用 "> "），因此不能再用
+	// 子串判断；这里断言的是 composer 提示符本身（裸 "> " 行）不得在队列排空
+	// 期间出现——即 auto-drain 时不得还原/渲染空提示符。
+	promptOnlyLine := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(strings.TrimSpace(ui.UserPromptText(0))) + `[ \t]*$`)
+	if promptOnlyLine.MatchString(rendered) {
 		t.Fatalf("expected no prompt before queued lines drain, got %q", rendered)
 	}
 }

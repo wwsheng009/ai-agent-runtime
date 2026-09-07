@@ -20,6 +20,9 @@ _baseline-check/
 # Reasonix tool local state (session/topic metadata)
 .reasonix/
 
+# WorkBuddy tool local state (session memory)
+.workbuddy-ai/
+
 # Frontend
 # Root-level shared node_modules (e.g. hoisted workspace deps).
 node_modules/

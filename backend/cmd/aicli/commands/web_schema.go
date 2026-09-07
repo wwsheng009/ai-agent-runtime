@@ -45,6 +45,14 @@ const chatWebDynamicStatusBusEvent = "aicli.chat.dynamic_status"
 // /model --direct + pollRuntimeMeta 轮询覆盖）。
 const chatWebModelSelectionChangedBusEvent = "aicli.chat.model_selection_changed"
 
+// chatWebUserSubmittedBusEvent 是用户输入提交镜像事件的 EventBus 类型名：
+// chatRuntimeEventBridge.submitUserInput 在用户 cell 成功注入渲染数据面后
+// 发布（renderMu 释放后发布，避免与桥自订阅 Handle 的 renderMu 重入死锁）。
+// 经 chatWebSSEMappings 映射为 SSE "screen_refresh"，web 客户端据此立即
+// 重拉 /web/api/screen 把 pending 气泡确认为已提交用户消息 —— 长 turn
+// （无 tool_end / turn_end）时不再等到回合结束才刷新。
+const chatWebUserSubmittedBusEvent = "aicli.chat.user_submitted"
+
 // ---------------------------------------------------------------------------
 // EventBus → SSE 事件名称映射（§5.1）
 // ---------------------------------------------------------------------------
@@ -57,7 +65,10 @@ type chatWebSSEMapping struct {
 }
 
 // chatWebSSEMappings 按 §5.1 表定义全部映射。
-// 合成事件（connected / heartbeat / screen_refresh / error）不在此表中。
+// 合成事件（connected / heartbeat / error）不在此表中；screen_refresh 是
+// 例外：除关键事件后附带合成（§8.6）外，aicli.chat.user_submitted 也映射
+// 为 screen_refresh（见 chatWebUserSubmittedBusEvent），客户端复用同一
+// 刷新路径，无需新增 JS 监听。
 var chatWebSSEMappings = []chatWebSSEMapping{
 	{BusEvent: runtimechat.EventSessionStart, SSEEvent: "session_start", Desc: "会话开始"},
 	{BusEvent: runtimechat.EventSessionEnd, SSEEvent: "session_end", Desc: "会话结束"},
@@ -93,6 +104,7 @@ var chatWebSSEMappings = []chatWebSSEMapping{
 	{BusEvent: runtimechat.EventMailboxReceived, SSEEvent: "mailbox_received", Desc: "邮箱消息"},
 	{BusEvent: runtimechat.EventContextReconciled, SSEEvent: "context_reconciled", Desc: "上下文调和"},
 	{BusEvent: chatWebDynamicStatusBusEvent, SSEEvent: "dynamic_status", Desc: "动态状态栏更新（Retrying/Analyzing/Running…）"},
+	{BusEvent: chatWebUserSubmittedBusEvent, SSEEvent: "screen_refresh", Desc: "用户输入提交（合成 screen_refresh：前端立即重拉确认 pending 气泡）"},
 	{BusEvent: chatWebModelSelectionChangedBusEvent, SSEEvent: "model_changed", Desc: "provider/model/reasoning 切换落地"},
 }
 
