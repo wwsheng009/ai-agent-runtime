@@ -25,8 +25,10 @@ Win7 兼容不是单一开关，而是贯穿 **构建 → 依赖 → 配置 → 
 PowerShell。
 
 代码隔离依赖 `//go:build win7compat`（兼容实现）与 `//go:build !win7compat`
-（主线实现）**成对出现**；另有 `//go:build go1.20 && !go1.21` 一类的 Go
-版本限定 Polyfill 文件。二者都只影响 Win7 目标，主线（go 1.25）构建不受影响。
+（主线实现）**成对出现**。二者都只影响 Win7 目标，主线（go 1.25）构建
+不受影响。Go 1.20 时代的版本限定 Polyfill 文件（`//go:build go1.20 && !go1.21`）
+已随工具链冻结在 Go 1.21.4 全部删除（min/max 为语言内建，context 系列为
+标准库自带，见 §3）。
 
 ## 2. 构建与工具链层
 
@@ -53,21 +55,25 @@ PowerShell。
 > **注意**：`go.win7.mod` 必须用 `go mod tidy -modfile=go.win7.mod` 独立维护，
 > 不能直接 `go mod tidy`（会误改标准依赖图）。
 
-## 3. Go 语言版本 Polyfill 层
+## 3. Go 语言版本兼容层
 
-Win7 工具链（Go 1.21.4，早期为 1.20）缺少 Go 1.21 才加入的标准库能力，
-仓库用 build tag 限定文件补齐，保证同一份源码在主线与 Win7 工具链下都能编译：
+Win7 工具链 Go 1.21.4 已包含 Go 1.21 的全部语言与标准库能力：`min`/`max`
+为语言内建，`context.WithoutCancel` / `context.WithTimeoutCause` /
+`context.Cause` 为标准库函数。Go 1.20 时代的 Polyfill 文件（6 个
+`compat_go120.go`、`internal/agent/compat_context.go` 手工实现、
+`internal/api/skills` 的 `builtinMin/builtinMax` 与 `withoutCancel` 包装）
+因此**全部删除**，双工具链共用同一份实现，无行为分叉。保留的项如下：
 
-| 缺失能力 | 补齐文件 | build tag |
+| 保留项 | 现状 | build tag |
 | --- | --- | --- |
-| `min` / `max` 内建（Go 1.21+） | `cmd/aicli/commands/compat_go120.go`、`cmd/aicli/ui/compat_go120.go`、`internal/chat/compat_go120.go`、`internal/chataloganalytics/compat_go120.go`、`internal/toolexec/compat_go120.go`、`internal/siteaccount/compat_go120.go` | `go1.20 && !go1.21` |
-| `context.WithoutCancel` / `context.WithTimeoutCause`（Go 1.21+） | `internal/agent/compat_context.go`（+`compat_context_go121.go` 对侧） | `!go1.21` |
-| `context.WithoutCancel`（语义统一） | `internal/team/task_execution_context.go` | 无 tag，所有工具链共用同一实现 |
-| JSON Schema 编译（`jsonschema-go` 需 go≥1.23） | `internal/toolschema/validate_go120.go` 使用 `santhosh-tekuri/jsonschema/v5`；`validate.go` 为对侧 | `(go1.20 && !go1.21) \|\| win7compat` |
+| `internal/agent/compat_context.go` | `agentWithoutCancel`/`agentWithTimeoutCause`/`agentContextCause` 直接委托标准库（由原 `compat_context_go121.go` 合并而来，行为测试保留） | 无 tag |
+| `internal/team/task_execution_context.go` | `DetachedTaskExecutionContext` 直接调 `context.WithoutCancel`（保留 nil→Background 防护） | 无 tag |
+| `internal/toolschema/validate_go120.go` | 使用 `santhosh-tekuri/jsonschema/v5`（`jsonschema-go` 需 go≥1.23）；`validate.go` 为对侧 | `win7compat`（已去掉多余的 go1.20 分支） |
 
-Polyfill 与主线实现保持**行为一致**（例如 `internal/agent/compat_context.go`
-的 `agentWithoutCancel` 用标准 `WithCancelCause` 作 "cause anchor"，使
-`context.Cause` 在 Go 1.20 下仍能传播取消原因），避免 Win7 与主线行为分叉。
+> 删除 Polyfill 后，受影响的 6 个包内 `min`/`max` 调用点直接解析为语言
+> 内建；`internal/api/skills` 的 `builtinMin(parsed, 1000)` 改为内建
+> `min(parsed, 1000)`、`withoutCancel(requestCtx)` 改为
+> `context.WithoutCancel(requestCtx)`。
 
 ## 4. 配置与路径层
 
@@ -107,7 +113,7 @@ Polyfill 与主线实现保持**行为一致**（例如 `internal/agent/compat_c
 | MCP 管理器 | `internal/mcp/manager/manager_win7compat.go` | Manager 接口形状完整保留，方法全部空实现或返回 `"MCP is not supported in the Windows 7 compatible build"` |
 | MCP 适配器 | `internal/skill/mcp_adapter_win7compat.go` | `MCPAdapter` 全方法 stub（FindTool/CallTool/ListTools…） |
 | MCP transport/server | `internal/mcp/transport/websocket.go` 等 | `//go:build !win7compat` 直接排除 |
-| JSON Schema 编译器 | `internal/toolschema/validate_go120.go` | 换用 `santhosh-tekuri/jsonschema/v5`（唯一兼容 Go 1.20/1.21 的维护中编译器），保持"拒绝外部引用"等行为一致 |
+| JSON Schema 编译器 | `internal/toolschema/validate_go120.go` | 换用 `santhosh-tekuri/jsonschema/v5`（唯一兼容 Go 1.21.4 的维护中编译器），保持"拒绝外部引用"等行为一致 |
 
 > MCP 在 Win7 兼容构建中**整体禁用**；需要 MCP 时应在受支持的新系统上运行。
 
@@ -224,7 +230,7 @@ sessions:
 
 - Win7 配置与运行时测试：`./internal/chat ./cmd/runtime-server` 等
   `commonSuite`
-- Go 1.20 agent 兼容测试：`./internal/agent` 定向
+- agent context 兼容测试：`./internal/agent` 定向
   `TestAgentWithoutCancel|TestAgentWithTimeoutCause|TestComputeAvailableToolsDoesNotExposePolicyDeniedSpawnSubagents`
 - aicli 配置测试：`./cmd/aicli/commands` 定向
   `Test(GetMCPConfigPath|ResolveGlobalRuntimeConfigPath|RunInitCommand|InitCommandHelp)`
@@ -259,7 +265,7 @@ session、SQLite、依赖或 workflow 时，必须同时通过标准构建和 Wi
 | 层 | 文件 |
 | --- | --- |
 | 构建 | `scripts/build.ps1`、`scripts/build-{aicli,runtime-server,ssh-sftp-clients}-win7.ps1`、`backend/go.win7.mod`/`.sum`、`.github/workflows/build-aicli-win7.yml` |
-| Go Polyfill | `cmd/aicli/{commands,ui}/compat_go120.go`、`internal/{chat,chataloganalytics,toolexec,siteaccount}/compat_go120.go`、`internal/agent/compat_context.go`(+`_go121`)、`internal/team/task_execution_context.go`、`internal/toolschema/validate_go120.go` |
+| Go 兼容（1.20 polyfill 已随 1.21.4 清理） | `internal/agent/compat_context.go`（stdlib 委托）、`internal/team/task_execution_context.go`、`internal/toolschema/validate_go120.go`（`win7compat` tag） |
 | 配置/路径 | `internal/aiclipaths/profile_{win7,standard}.go`、`internal/agentconfig/bootstrap.go`、`cmd/runtime-server/main.go`、`backend/configs/runtime.win7.yaml` |
 | MCP 裁剪 | `internal/mcp/{registry/registry_win7compat.go, manager/manager_win7compat.go, transport/*}`、`internal/skill/mcp_adapter_win7compat.go` |
 | 控制台 | `internal/winconsole/console_utf8_windows.go`、`cmd/aicli/ui/terminal_driver_windows.go`、`cmd/aicli/commands/chat_legacy_console_{line,editor_windows}.go`、`chat_system_console_editor_windows.go`、`cmd/aicli-console/main.go`、`internal/consolehost/consolehost_windows.go` |
