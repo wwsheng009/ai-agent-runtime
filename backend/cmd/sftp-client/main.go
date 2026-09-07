@@ -60,10 +60,13 @@ func parseFlags() *cliFlags {
 	flags := &cliFlags{}
 	fs := pflag.NewFlagSet("sftp-client", pflag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), `Usage: sftp-client [options] [user@]host[:remote-path] [local-path...]
+		fmt.Fprintf(fs.Output(), `sftp-client - OpenSSH 兼容的 SFTP 文件传输客户端
 
-OpenSSH-compatible SFTP client for file transfer (upload / download / list,
-interactive and batch modes).
+Usage:
+  sftp-client [options] [user@]host[:remote-path] [local-path...]
+
+Description:
+  Upload / download / list remote files, interactive and batch (-b) modes.
 
 Modes:
   Interactive  sftp-client user@host
@@ -124,6 +127,8 @@ Notes:
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		if err == pflag.ErrHelp {
+			fs.SetOutput(os.Stdout)
+			fs.Usage()
 			os.Exit(0)
 		}
 		fmt.Fprintln(os.Stderr, "sftp-client:", err)
@@ -131,6 +136,7 @@ Notes:
 		os.Exit(254)
 	}
 	if flags.showHelp {
+		fs.SetOutput(os.Stdout)
 		fs.Usage()
 		os.Exit(0)
 	}
