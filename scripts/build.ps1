@@ -82,7 +82,7 @@ $script:webUIEntryAsset = $null
 #   buildinfo    -> internal/buildinfo.version/buildTime (runtime-server)
 $script:toolRegistry = @(
     [pscustomobject]@{ Name = "aicli";            Package = "./cmd/aicli";            WindowsName = "aicli.exe";            Win7Name = "aicli-win7.exe";            LdflagsKind = "main-full" },
-    [pscustomobject]@{ Name = "aicli-console";    Package = "./cmd/aicli-console";    WindowsName = "aicli-console.exe";    Win7Name = "aicli-console-win7.exe";    LdflagsKind = "plain" },
+    [pscustomobject]@{ Name = "aicli-console";    Package = "./cmd/aicli-console";    WindowsName = "aicli-console.exe";    Win7Name = "aicli-console-win7.exe";    LdflagsKind = "main-version" },
     [pscustomobject]@{ Name = "runtime-server";   Package = "./cmd/runtime-server";   WindowsName = "runtime-server.exe";   Win7Name = "runtime-server-win7.exe";   LdflagsKind = "buildinfo" },
     [pscustomobject]@{ Name = "ssh-client";       Package = "./cmd/ssh-client";       WindowsName = "ssh-client.exe";       Win7Name = "ssh-client-win7.exe";       LdflagsKind = "main-version" },
     [pscustomobject]@{ Name = "sftp-client";      Package = "./cmd/sftp-client";      WindowsName = "sftp-client.exe";      Win7Name = "sftp-client-win7.exe";      LdflagsKind = "main-version" },

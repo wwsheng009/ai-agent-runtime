@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -191,6 +192,44 @@ func TestResolveAICLIExecutableFromReportsMissingTarget(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), targetEnvironmentVariable) {
 		t.Fatalf("missing target error = %q, want %s guidance", err, targetEnvironmentVariable)
+	}
+}
+
+func TestWantsConsoleLauncherHelp(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "short flag", args: []string{"-h"}, want: true},
+		{name: "long flag", args: []string{"--help"}, want: true},
+		{name: "help word", args: []string{"help"}, want: true},
+		{name: "help after other args", args: []string{"chat", "--help"}, want: true},
+		{name: "after double dash is forwarded", args: []string{"--", "--help"}, want: false},
+		{name: "no help request", args: []string{"chat", "--compat-mode"}, want: false},
+		{name: "empty", args: nil, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := wantsConsoleLauncherHelp(tt.args); got != tt.want {
+				t.Fatalf("wantsConsoleLauncherHelp(%v) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunConsoleLauncherHelpDoesNotLaunch(t *testing.T) {
+	var out bytes.Buffer
+	code := runConsoleLauncher([]string{"-h"}, &out, &out)
+	if code != 0 {
+		t.Fatalf("runConsoleLauncher(-h) exit code = %d, want 0", code)
+	}
+	help := out.String()
+	for _, want := range []string{"aicli-console", "Usage:", "Options:", "--target", "Examples:"} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("help output missing %q:\n%s", want, help)
+		}
 	}
 }
 

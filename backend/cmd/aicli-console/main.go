@@ -23,11 +23,24 @@ const (
 	targetEnvironmentVariable = "AICLI_CONSOLE_TARGET"
 )
 
+// version 通过构建参数 -X main.version=<v> 注入（例如 Win7 构建脚本）。
+var version = "0.1.0"
+
 func main() {
-	os.Exit(runConsoleLauncher(os.Args[1:], os.Stderr))
+	os.Exit(runConsoleLauncher(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-func runConsoleLauncher(args []string, stderr io.Writer) int {
+func runConsoleLauncher(args []string, stdout, stderr io.Writer) int {
+	// -h / --help / help（"--" 之前的）只打印帮助，不启动 aicli。
+	if wantsConsoleLauncherHelp(args) {
+		printConsoleLauncherUsage(stdout)
+		return 0
+	}
+	if wantsConsoleLauncherVersion(args) {
+		fmt.Fprintf(stdout, "aicli-console version %s\n", version)
+		return 0
+	}
+
 	explicitTarget, forwardedArgs, err := parseConsoleLauncherArgs(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "aicli-console: %v\n", err)
@@ -46,6 +59,85 @@ func runConsoleLauncher(args []string, stderr io.Writer) int {
 		return 1
 	}
 	return exitCode
+}
+
+// wantsConsoleLauncherHelp 判断 "--" 之前是否出现帮助请求参数。
+// "--" 之后的参数属于 aicli，不会被当成帮助请求。
+func wantsConsoleLauncherHelp(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			return false
+		}
+		if arg == "-h" || arg == "--help" || arg == "help" {
+			return true
+		}
+	}
+	return false
+}
+
+// wantsConsoleLauncherVersion 判断 "--" 之前是否出现版本请求参数。
+func wantsConsoleLauncherVersion(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			return false
+		}
+		if arg == "-V" || arg == "--version" {
+			return true
+		}
+	}
+	return false
+}
+
+// printConsoleLauncherUsage 打印启动器的多行帮助。
+func printConsoleLauncherUsage(out io.Writer) {
+	fmt.Fprint(out, `aicli-console - native console launcher for aicli
+
+Description:
+  Starts aicli inside a real Windows Console. From a pipe-backed terminal such
+  as MobaXterm/mintty it creates a new conhost window; from cmd, PowerShell or
+  another real Windows Console it keeps the current console.
+  Launcher-only arguments are consumed here; everything else is forwarded to
+  aicli unchanged.
+
+Usage:
+  aicli-console [--target PATH] [-- aicli args...]
+  aicli-console -h | --help | help
+
+Options:
+  --target PATH        aicli executable to launch (overrides AICLI_CONSOLE_TARGET
+                       and the aicli.exe found beside this launcher)
+  -h, --help, help     show this help and exit
+  -V, --version        show the launcher version and exit
+  --                   everything after it is forwarded to aicli verbatim
+
+Environment:
+  AICLI_CONSOLE_TARGET   default aicli executable when --target is not given
+
+Target resolution order:
+  1. --target PATH
+  2. $AICLI_CONSOLE_TARGET
+  3. aicli.exe beside this launcher
+  4. aicli.exe found on PATH
+
+Examples:
+  # Launch the interactive chat in a real console
+  aicli-console
+
+  # Launch a specific aicli build
+  aicli-console --target C:\Tools\aicli-win7.exe
+
+  # Forward arguments to aicli
+  aicli-console chat --compat-mode
+
+  # Forward a literal --target to aicli (anything after -- is untouched)
+  aicli-console -- chat --target model-target
+
+Exit codes:
+  0   aicli exited successfully (also used for --help)
+  1   launcher failed: aicli not found or could not be started
+  2   invalid launcher arguments (e.g. --target without a path)
+  other   the exit code returned by aicli itself
+`)
 }
 
 // parseConsoleLauncherArgs consumes launcher-only arguments before "--".
