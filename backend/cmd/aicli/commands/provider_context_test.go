@@ -4,8 +4,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 )
 
@@ -166,5 +168,97 @@ func TestEffectiveChatProviderHeaders_MissingUserAgentFallsBackToDefault(t *test
 	}
 	if got != buildinfo.UserAgent() {
 		t.Fatalf("User-Agent = %q, want default %q", got, buildinfo.UserAgent())
+	}
+}
+
+func TestEffectiveChatProviderHeaders_ResolvesSessionTemplates(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("user-42")
+	runtimeSession.ID = "sess_live_1"
+	runtimeSession.SetContext(agentcontrol.SessionContextParentSessionID, "parent_sess_7")
+
+	cfg := &config.Config{
+		Providers: config.ProvidersConfig{
+			Headers: map[string]string{
+				"x-opencode-session":  "{session_id}",
+				"x-opencode-request":  "{user_id}",
+				"x-opencode-client":   "{client}",
+				"x-opencode-provider": "{provider}",
+				"x-opencode-model":    "{model}",
+				"x-parent-session-id": "{parent_session_id}",
+				"X-Literal":           "{not_a_placeholder}",
+			},
+			Items: map[string]config.Provider{
+				"opencode.ai": {
+					Enabled:  true,
+					Protocol: "openai",
+					Headers: map[string]string{
+						"x-opencode-project": "{project_id}",
+					},
+				},
+			},
+		},
+	}
+	session := &ChatSession{
+		Config:         cfg,
+		Provider:       cfg.Providers.Items["opencode.ai"],
+		ProviderName:   "opencode.ai",
+		Model:          "deepseek-v4-flash",
+		SessionUserID:  "user-42",
+		RuntimeSession: runtimeSession,
+	}
+	effective := effectiveChatProviderHeaders(session)
+	assertHeader := func(key, want string) {
+		t.Helper()
+		got := ""
+		for k, v := range effective {
+			if strings.EqualFold(k, key) {
+				got = v
+				break
+			}
+		}
+		if got != want {
+			t.Fatalf("header %s = %q, want %q (all=%+v)", key, got, want, effective)
+		}
+	}
+	assertHeader("x-opencode-session", "sess_live_1")
+	assertHeader("x-opencode-project", headerTemplateProjectID())
+	assertHeader("x-opencode-request", "user-42")
+	assertHeader("x-opencode-client", buildinfo.Originator())
+	assertHeader("x-opencode-provider", "opencode.ai")
+	assertHeader("x-opencode-model", "deepseek-v4-flash")
+	assertHeader("x-parent-session-id", "parent_sess_7")
+	assertHeader("X-Literal", "{not_a_placeholder}")
+}
+
+func TestEffectiveChatProviderHeaders_TemplateFallsBackEmptyWithoutSession(t *testing.T) {
+	cfg := &config.Config{
+		Providers: config.ProvidersConfig{
+			Headers: map[string]string{
+				"x-opencode-session": "id={session_id}",
+			},
+			Items: map[string]config.Provider{
+				"alpha": {
+					Enabled:  true,
+					Protocol: "openai",
+				},
+			},
+		},
+	}
+	session := &ChatSession{
+		Config:       cfg,
+		Provider:     cfg.Providers.Items["alpha"],
+		ProviderName: "alpha",
+		Model:        "gpt-4.1",
+	}
+	effective := effectiveChatProviderHeaders(session)
+	got := ""
+	for k, v := range effective {
+		if strings.EqualFold(k, "x-opencode-session") {
+			got = v
+			break
+		}
+	}
+	if got != "id=" {
+		t.Fatalf("x-opencode-session = %q, want %q", got, "id=")
 	}
 }

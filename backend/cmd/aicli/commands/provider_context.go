@@ -1,11 +1,17 @@
 package commands
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 )
 
@@ -26,7 +32,45 @@ func effectiveChatProviderHeaders(session *ChatSession) map[string]string {
 	if session.Config != nil {
 		globalHeaders = session.Config.Providers.Headers
 	}
-	return config.EffectiveProviderHeaders(globalHeaders, session.Provider.Headers)
+	merged := config.EffectiveProviderHeaders(globalHeaders, session.Provider.Headers)
+	if len(merged) == 0 {
+		return merged
+	}
+	// Resolve header value templates ({session_id}, {project_id}, ...) at the
+	// single chokepoint shared by every chat request path.
+	return config.ResolveHeaderTemplates(merged, headerTemplateContext(session))
+}
+
+// headerTemplateContext builds the template resolution context from the
+// current session state. Values are trimmed; missing values resolve to "".
+func headerTemplateContext(session *ChatSession) config.HeaderTemplateContext {
+	ctx := config.HeaderTemplateContext{
+		Provider: strings.TrimSpace(session.ProviderName),
+		Model:    strings.TrimSpace(session.Model),
+		Client:   buildinfo.Originator(),
+		UserID:   strings.TrimSpace(session.SessionUserID),
+	}
+	if session.RuntimeSession != nil {
+		ctx.SessionID = strings.TrimSpace(session.RuntimeSession.ID)
+		if parent, ok := session.RuntimeSession.GetContext(agentcontrol.SessionContextParentSessionID); ok {
+			ctx.ParentSessionID = strings.TrimSpace(fmt.Sprintf("%v", parent))
+		}
+	}
+	ctx.ProjectID = headerTemplateProjectID()
+	return ctx
+}
+
+// headerTemplateProjectID derives a stable project identity from the current
+// working directory. It mirrors opencode's x-opencode-project: a stable hash
+// of the workspace so the gateway can route and cache per project without
+// receiving the raw filesystem path.
+func headerTemplateProjectID() string {
+	cwd, err := os.Getwd()
+	if err != nil || strings.TrimSpace(cwd) == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(filepath.Clean(cwd)))
+	return hex.EncodeToString(sum[:8])
 }
 
 func resolveProviderExecutionContext(cfg *config.Config, providerFlag, modelFlag string) (*providerExecutionContext, map[string]interface{}, error) {

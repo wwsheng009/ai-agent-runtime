@@ -239,6 +239,17 @@ func defaultStarterConfigYAML() string {
 # Auto-generated starter config for aicli.
 # Add providers under providers.items, then set providers.default_provider when ready.
 # Add shared upstream request headers under providers.headers when required.
+# Header values support session templates: {session_id} {parent_session_id}
+# {user_id} {project_id} {provider} {model} {client}. Example for the
+# opencode.ai gateway (https://opencode.ai/zen/go):
+#   providers:
+#     items:
+#       opencode.ai:
+#         headers:
+#           x-opencode-session: "{session_id}"
+#           x-opencode-project: "{project_id}"
+#           x-opencode-request: "{user_id}"
+#           x-opencode-client: "{client}"
 aicli:
   chat:
     stream: true
