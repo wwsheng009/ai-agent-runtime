@@ -1,6 +1,7 @@
 package runtimeserver
 
 import (
+	"fmt"
 	"os"
 	"strings"
 
@@ -38,7 +39,17 @@ func LoadRuntimeAgentConfig(configPath string) (*agentconfig.Config, AgentConfig
 		return nil, info, err
 	}
 
-	cfg, err := decodeConfigDocumentAgentConfig(effectiveDocument.Raw, format)
+	// Merge system presets (built-in + system directory + ~/.aicli/presets.yaml)
+	// below the runtime config document. MergeWithPresets returns nil when no
+	// preset layer is deployed, keeping the plain document unchanged.
+	raw := effectiveDocument.Raw
+	if mergedRaw, err := agentconfig.MergeWithPresets(raw); err != nil {
+		return nil, info, fmt.Errorf("merge system presets: %w", err)
+	} else if mergedRaw != nil {
+		raw = mergedRaw
+	}
+
+	cfg, err := decodeConfigDocumentAgentConfig(raw, format)
 	if err != nil {
 		return nil, info, err
 	}

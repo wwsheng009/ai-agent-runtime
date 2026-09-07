@@ -1,0 +1,41 @@
+# Built-in system presets shipped with the aicli / runtime-server binary.
+#
+# On first startup this file is copied to ~/.aicli/presets.yaml so users can
+# inspect and edit the defaults. Load order (lowest to highest precedence):
+#   built-in (this file) < system directory (<AICLI_SYSTEM_CONFIG_DIR> or
+#   %ProgramData%\aicli / /etc/aicli) < ~/.aicli/presets.yaml < config.yaml
+#
+# A preset is a configuration layer merged below the user config.yaml. It
+# applies when enabled and its match conditions hold:
+#   - enabled: unset means enabled; explicit false disables the preset.
+#   - match.hostname: case-insensitive glob (path.Match style: * ?) or an
+#     exact hostname; empty matches every host.
+#   - config: fragment using the same schema as config.yaml. Only keys
+#     written here participate in the merge.
+#
+# A system admin may enable a built-in preset by redeclaring it with
+# enabled: true in the system directory or ~/.aicli/presets.yaml.
+
+presets:
+  # Known-good wiring for the opencode.ai Console Go gateway
+  # (https://opencode.ai/zen/go). Enabled by default so opencode.ai requests
+  # carry the session-scoped headers out of the box; set enabled: false to
+  # opt out. It merges the session-scoped request headers (x-opencode-session
+  # and friends) into an opencode.ai provider entry; users only need to add
+  # api_key and default_model.
+  - name: opencode-gateway
+    enabled: true
+    config:
+      providers:
+        items:
+          opencode.ai:
+            enabled: true
+            protocol: openai
+            base_url: https://opencode.ai/zen/go
+            compatibility:
+              profile: opencode-console-go-2026-07
+            headers:
+              x-opencode-session: "{session_id}"
+              x-opencode-project: "{project_id}"
+              x-opencode-request: "{user_id}"
+              x-opencode-client: "{client}"

@@ -123,6 +123,11 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Info: no config found, created starter config at %s\n", configPath)
 			}
 		}
+		if presetsPath, created, presetsErr := config.EnsureUserPresetsFile(); presetsErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to prepare user presets: %v\n", presetsErr)
+		} else if created {
+			fmt.Fprintf(os.Stderr, "Info: no user presets found, created presets at %s\n", presetsPath)
+		}
 		loadedConfig, err := config.InitGlobalConfig(configPath)
 		if err != nil {
 			return fmt.Errorf("failed to load config: %w", err)

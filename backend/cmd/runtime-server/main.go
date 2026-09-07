@@ -253,6 +253,12 @@ func runServe(args []string) int {
 	}
 	opts.ConfigPath = resolveRuntimeServerConfigPath(opts.ConfigPath)
 
+	if presetsPath, created, presetsErr := config.EnsureUserPresetsFile(); presetsErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to prepare user presets: %v\n", presetsErr)
+	} else if created {
+		fmt.Fprintf(os.Stderr, "Info: no user presets found, created presets at %s\n", presetsPath)
+	}
+
 	cfg, configSnapshotInfo, err := runtimeserver.LoadRuntimeAgentConfig(opts.ConfigPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)

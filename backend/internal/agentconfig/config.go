@@ -1001,8 +1001,12 @@ func (m *Manager) Config() *Config {
 }
 
 // InitGlobalConfig loads configuration from the given YAML file path.
+// System presets (built-in defaults plus any files under the system preset
+// directory) are merged under the user config: the user file always wins.
+// When no preset files exist this is a plain single-file load.
 func InitGlobalConfig(configPath string) (*Config, error) {
 	cfg := &Config{}
+	var userYAML []byte
 	if configPath != "" {
 		if absPath, err := filepath.Abs(configPath); err == nil && absPath != "" {
 			configPath = absPath
@@ -1013,6 +1017,7 @@ func InitGlobalConfig(configPath string) (*Config, error) {
 		}
 		if err == nil {
 			data = []byte(expandEnvVars(string(data)))
+			userYAML = data
 			if err := unmarshalYAML(data, cfg); err != nil {
 				return nil, fmt.Errorf("failed to parse config file %s: %w", configPath, err)
 			}
@@ -1021,9 +1026,38 @@ func InitGlobalConfig(configPath string) (*Config, error) {
 			}
 		}
 	}
+	if merged, err := applySystemPresetLayer(userYAML, cfg); err != nil {
+		return nil, err
+	} else {
+		cfg = merged
+	}
 	cfg.ConfigFilePath = configPath
 	globalConfig = cfg
 	return cfg, nil
+}
+
+// applySystemPresetLayer merges matching enabled system presets below the
+// user config and re-validates the final result. When no preset layer is
+// deployed (no system preset directory, no ~/.aicli/presets.yaml) the user
+// config is returned unchanged. userYAML is the raw (env-expanded) user
+// config document, which keeps the merge sparse: keys the user did not
+// write cannot shadow preset values.
+func applySystemPresetLayer(userYAML []byte, userConfig *Config) (*Config, error) {
+	mergedYAML, err := MergeWithPresets(userYAML)
+	if err != nil {
+		return nil, fmt.Errorf("failed to apply system presets: %w", err)
+	}
+	if mergedYAML == nil {
+		return userConfig, nil
+	}
+	merged := &Config{}
+	if err := unmarshalYAML(mergedYAML, merged); err != nil {
+		return nil, fmt.Errorf("failed to decode merged config: %w", err)
+	}
+	if err := validateLoadedConfig(merged); err != nil {
+		return nil, fmt.Errorf("invalid config after system preset merge: %w", err)
+	}
+	return merged, nil
 }
 
 // GetGlobalConfig returns the current global config.
