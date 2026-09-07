@@ -68,6 +68,7 @@ func main() {
 		Short:   "AI CLI 工具，默认进入 chat",
 		Long:    rootCommandLongHelp,
 		Example: rootCommandExampleHelp,
+		Version: version,
 		Run: func(cmd *cobra.Command, args []string) {
 			cmd.Help()
 		},

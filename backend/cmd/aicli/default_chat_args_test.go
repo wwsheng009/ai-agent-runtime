@@ -88,6 +88,16 @@ func TestPrependDefaultChatCommand(t *testing.T) {
 			want: []string{"chat", "--session", "session_abc"},
 		},
 		{
+			name: "version flag preserves root version",
+			args: []string{"--version"},
+			want: []string{"--version"},
+		},
+		{
+			name: "short version flag preserves root version",
+			args: []string{"-V"},
+			want: []string{"-V"},
+		},
+		{
 			name: "help flag preserves root help",
 			args: []string{"--help"},
 			want: []string{"--help"},

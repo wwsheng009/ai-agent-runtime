@@ -15,7 +15,7 @@ func prependDefaultChatCommand(args []string, flags ...*pflag.FlagSet) []string 
 		return []string{"chat"}
 	}
 
-	if containsHelpFlag(args) || hasPositionalArg(args, flags) {
+	if containsHelpFlag(args) || containsVersionFlag(args) || hasPositionalArg(args, flags) {
 		return args
 	}
 
@@ -30,6 +30,22 @@ func containsHelpFlag(args []string) bool {
 		case arg == "--help":
 			return true
 		case strings.HasPrefix(arg, "--help="):
+			return true
+		}
+	}
+	return false
+}
+
+// containsVersionFlag reports whether args carry the root-only version request.
+// It must not be forwarded to the implicit chat command.
+func containsVersionFlag(args []string) bool {
+	for _, arg := range args {
+		switch {
+		case arg == "-V":
+			return true
+		case arg == "--version":
+			return true
+		case strings.HasPrefix(arg, "--version="):
 			return true
 		}
 	}
