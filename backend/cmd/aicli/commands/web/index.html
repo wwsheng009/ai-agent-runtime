@@ -287,6 +287,11 @@
                 <textarea id="cfg-provider-models" rows="5" placeholder="gpt-4o&#10;gpt-4o-mini&#10;o3"></textarea>
               </div>
               <div class="config-form-block">
+                <div class="cfg-label">Headers（providers.items.&lt;name&gt;.headers）</div>
+                <div class="cfg-hint">每行一个 <code>Header-Name: value</code>；显示的是 preset 合并后的值，保存时写入用户 config.yaml（presets.yaml 只读）。值支持 <code>{session_id}</code> <code>{project_id}</code> <code>{user_id}</code> <code>{client}</code> 等模板。</div>
+                <textarea id="cfg-provider-headers" rows="4" placeholder="x-opencode-session: {session_id}&#10;x-opencode-client: aicli" autocomplete="off" spellcheck="false"></textarea>
+              </div>
+              <div class="config-form-block">
                 <div class="cfg-label">每个模型的 reasoning 配置</div>
                 <div id="cfg-model-reasoning-editors" class="cfg-model-reasoning-editors"><div class="config-empty">保存模型列表后在此逐模型配置 reasoning effort</div></div>
               </div>

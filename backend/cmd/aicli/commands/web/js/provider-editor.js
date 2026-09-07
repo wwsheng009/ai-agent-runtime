@@ -77,6 +77,37 @@ function selectProtocolFromPopup(value) {
   input.focus();
 }
 
+// headers 对象 -> 文本域（每行 "Name: value"，按名字排序保证稳定顺序）。
+function headersToText(headers) {
+  if (!headers) { return ""; }
+  var names = Object.keys(headers).sort();
+  var lines = [];
+  names.forEach(function (name) {
+    var value = String(headers[name] || "");
+    lines.push(name + ": " + value);
+  });
+  return lines.join("\n");
+}
+
+// 文本域 -> headers 对象；空输入返回 null（不提交，保持原值），
+// 全空行返回 {}（清空 headers 节点）。
+function headersFromText(text) {
+  if (text == null) { return null; }
+  var headers = {};
+  var hasLine = false;
+  text.split(/\r?\n/).forEach(function (line) {
+    var trimmed = String(line || "").trim();
+    if (!trimmed) { return; }
+    var idx = trimmed.indexOf(":");
+    if (idx <= 0) { return; }
+    hasLine = true;
+    var name = trimmed.slice(0, idx).trim();
+    var value = trimmed.slice(idx + 1).trim();
+    if (name) { headers[name] = value; }
+  });
+  return hasLine ? headers : {};
+}
+
 export function openProviderEditor(name) {
   var p = name ? providerByName(name) : null;
   cfgReasoningDraft = {};
@@ -117,6 +148,12 @@ export function openProviderEditor(name) {
   if (removeProxy) { removeProxy.checked = false; }
   var removeProxyWrap = configEl("cfg-provider-remove-proxy-wrap");
   if (removeProxyWrap) { removeProxyWrap.style.display = proxy ? "" : "none"; }
+  // Headers：回显合并后的值（preset + 用户 config.yaml），保存时整体写回
+  // 用户配置（presets.yaml 只读）。值保留模板占位符原文。
+  var headersEl = configEl("cfg-provider-headers");
+  if (headersEl) {
+    headersEl.value = headersToText(p ? (p.headers || null) : null);
+  }
   // 模型列表：supported ∪ default_model（去重）
   var models = [];
   (p ? (p.supported_models || []) : []).forEach(function (m) {
@@ -419,6 +456,13 @@ function saveProvider(ev) {
       https: (configEl("cfg-provider-proxy-https").value || "").trim(),
       no_proxy: (configEl("cfg-provider-proxy-no-proxy").value || "").trim()
     };
+  }
+  // Headers：非空提交整体写回用户配置；用户主动清空文本域（无任何行）时
+  // 提交 {} 清除 headers 节点。
+  var headersVal = configEl("cfg-provider-headers");
+  if (headersVal) {
+    var headersPayload = headersFromText(headersVal.value);
+    if (headersPayload !== null) { payload.headers = headersPayload; }
   }
   setCfgStatus(statusEl, "保存中…", "busy");
   fetch("/web/api/config/providers", {

@@ -18,6 +18,8 @@ import (
 
 const webConfigTestYAML = `providers:
   default_provider: alpha
+  headers:
+    user-agent: "global-ua/1.0"
   items:
     alpha:
       enabled: true
@@ -34,6 +36,9 @@ const webConfigTestYAML = `providers:
         http: http://127.0.0.1:7890
         https: http://127.0.0.1:7890
         no_proxy: localhost,127.0.0.1
+      headers:
+        x-opencode-session: "{session_id}"
+        x-custom: "alpha-value"
       default_model: gpt-4o
       supported_models:
         - gpt-4o
@@ -58,8 +63,11 @@ aicli:
 `
 
 // withWebConfigTestSession 写临时配置文件并注册带 ConfigFilePath 的会话。
+// home 与系统预设目录隔离到临时目录，避免真实 ~/.aicli/presets.yaml 的
+// preset 合并污染快照断言。
 func withWebConfigTestSession(t *testing.T, yamlContent string) string {
 	t.Helper()
+	isolateWebPresetEnv(t)
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(yamlContent), 0o644); err != nil {
 		t.Fatalf("write config file: %v", err)
@@ -69,6 +77,18 @@ func withWebConfigTestSession(t *testing.T, yamlContent string) string {
 	session.Config = &agentconfig.Config{ConfigFilePath: path}
 	withWebTestSession(t, session)
 	return path
+}
+
+// isolateWebPresetEnv 把用户 home 与系统预设目录指向临时位置，使
+// InitGlobalConfig 的 preset 合并（built-in + 系统目录 + ~/.aicli/presets.yaml）
+// 在 web 配置测试中不参与。
+func isolateWebPresetEnv(t *testing.T) {
+	t.Helper()
+	previous := agentconfig.UserHomeDirForTest()
+	t.Cleanup(func() { agentconfig.SetUserHomeDirForTest(previous) })
+	home := t.TempDir()
+	agentconfig.SetUserHomeDirForTest(func() (string, error) { return home, nil })
+	t.Setenv(agentconfig.SystemPresetDirEnv, filepath.Join(t.TempDir(), "absent-system-presets"))
 }
 
 func postConfigJSON(t *testing.T, handler http.HandlerFunc, body interface{}) *httptest.ResponseRecorder {
@@ -212,6 +232,22 @@ func TestHandleChatWebAPIConfig_Snapshot(t *testing.T) {
 		t.Error("beta.enabled = true, want false")
 	}
 
+	// Headers：快照返回 provider 生效值（用户配置）+ 与全局合并后的值。
+	// EffectiveHeaders 的 key 是 canonical 形式（EffectiveProviderHeaders
+	// 会 textproto.CanonicalMIMEHeaderKey）。
+	if got := alpha.Headers["x-opencode-session"]; got != "{session_id}" {
+		t.Errorf("alpha.headers[x-opencode-session] = %q, want {session_id}", got)
+	}
+	if got := alpha.Headers["x-custom"]; got != "alpha-value" {
+		t.Errorf("alpha.headers[x-custom] = %q, want alpha-value", got)
+	}
+	if got := alpha.EffectiveHeaders["User-Agent"]; got != "global-ua/1.0" {
+		t.Errorf("alpha.effective_headers[User-Agent] = %q, want global-ua/1.0（全局 providers.headers 合并）", got)
+	}
+	if got := alpha.EffectiveHeaders["X-Opencode-Session"]; got != "{session_id}" {
+		t.Errorf("alpha.effective_headers[X-Opencode-Session] = %q, want {session_id}", got)
+	}
+
 	if snap.Chat.DefaultProvider != "alpha" || snap.Chat.DefaultModel != "gpt-4o" || snap.Chat.ReasoningEffort != "medium" {
 		t.Errorf("chat defaults mismatch: %+v", snap.Chat)
 	}
@@ -296,6 +332,81 @@ func TestHandleChatWebAPIConfigProviders_Upsert(t *testing.T) {
 	alpha := configProviderByName(t, snap, "alpha")
 	if !alpha.Enabled || alpha.DefaultModel != "gpt-4o" {
 		t.Errorf("alpha unexpectedly changed: %+v", alpha)
+	}
+}
+
+// TestHandleChatWebAPIConfigProviders_HeadersUpsert 验证 headers 整体写回：
+// 保存目标为用户 config.yaml 的 providers.items.<name>.headers（而非
+// presets.yaml），保存后快照与请求头立即反映新值。
+func TestHandleChatWebAPIConfigProviders_HeadersUpsert(t *testing.T) {
+	path := withWebConfigTestSession(t, webConfigTestYAML)
+
+	rec := postConfigJSON(t, HandleChatWebAPIConfigProviders, map[string]interface{}{
+		"name": "alpha",
+		"headers": map[string]interface{}{
+			"x-opencode-session":  "{session_id}",
+			"x-opencode-client":   "aicli",
+			"x-opencode-project":  "{project_id}",
+			"x-opencode-request":  "{user_id}",
+			"x-custom-overridden": "new",
+		},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// 磁盘 config.yaml（用户配置）必须包含新 headers；presets.yaml 不动。
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(raw)
+	for _, expected := range []string{
+		"x-opencode-session: '{session_id}'",
+		"x-opencode-client: aicli",
+		"x-custom-overridden: new",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected %q in saved config:\n%s", expected, text)
+		}
+	}
+
+	rec2 := httptest.NewRecorder()
+	HandleChatWebAPIConfig(rec2, httptest.NewRequest(http.MethodGet, "/web/api/config", nil))
+	snap := decodeConfigSnapshot(t, rec2.Body.String())
+	alpha := configProviderByName(t, snap, "alpha")
+	if got := alpha.Headers["x-opencode-client"]; got != "aicli" {
+		t.Errorf("alpha.headers[x-opencode-client] = %q, want aicli", got)
+	}
+	if got := alpha.Headers["x-opencode-session"]; got != "{session_id}" {
+		t.Errorf("alpha.headers[x-opencode-session] = %q", got)
+	}
+	if got := alpha.EffectiveHeaders["User-Agent"]; got != "global-ua/1.0" {
+		t.Errorf("effective User-Agent lost after save: %q", got)
+	}
+}
+
+// TestHandleChatWebAPIConfigProviders_HeadersClear 验证提交空 headers 清空
+// provider 的 headers 节点。
+func TestHandleChatWebAPIConfigProviders_HeadersClear(t *testing.T) {
+	path := withWebConfigTestSession(t, webConfigTestYAML)
+
+	rec := postConfigJSON(t, HandleChatWebAPIConfigProviders, map[string]interface{}{
+		"name":    "alpha",
+		"headers": map[string]interface{}{},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(raw)
+	// alpha 的 headers 节点应被移除（全局 providers.headers 保留）。
+	alphaSection := text[strings.Index(text, "alpha:"):]
+	if strings.Contains(alphaSection, "x-opencode-session") {
+		t.Fatalf("alpha headers node not removed:\n%s", alphaSection)
 	}
 }
 

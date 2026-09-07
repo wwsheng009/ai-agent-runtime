@@ -33,7 +33,7 @@ const (
 	// 列表并生成完整 provider 配置（protocol / api_path / forward_url /
 	// default_model / supported_models / model_capabilities 等）。
 	ChatWebAPIConfigProvidersAutoImportPath = "/web/api/config/providers/auto-import"
-	ChatWebAPIConfigChatPath             = "/web/api/config/chat"
+	ChatWebAPIConfigChatPath                = "/web/api/config/chat"
 )
 
 // ---------------------------------------------------------------------------
@@ -71,6 +71,13 @@ type chatWebConfigProvider struct {
 	DefaultModel    string               `json:"default_model"`
 	SupportedModels []string             `json:"supported_models,omitempty"`
 	Models          []chatWebConfigModel `json:"models,omitempty"`
+	// Headers 是该 provider 生效的请求头（preset 合并后的值，含模板占位符
+	// 原文如 {session_id}）。它同时是编辑入口：保存时整体写回用户
+	// config.yaml 的 providers.items.<name>.headers（presets.yaml 只读）。
+	Headers map[string]string `json:"headers,omitempty"`
+	// EffectiveHeaders 是最终发往上游的请求头（全局 providers.headers 合并
+	// provider.headers 后的结果），仅用于展示。
+	EffectiveHeaders map[string]string `json:"effective_headers,omitempty"`
 }
 
 // chatWebConfigProxy 是 provider 级 proxy 节点的只读视图
@@ -118,9 +125,13 @@ type chatWebProviderWriteRequest struct {
 	AuthMode   *string `json:"auth_mode,omitempty"`
 	AuthRef    *string `json:"auth_ref,omitempty"`
 	// APIKeys 整体写回 api_keys 池：nil=不修改，非 nil 空数组=清空。
-	APIKeys            *[]string                              `json:"api_keys,omitempty"`
-	Proxy              *chatWebConfigProxy                    `json:"proxy,omitempty"`
-	ClearProxy         bool                                   `json:"clear_proxy,omitempty"`
+	APIKeys    *[]string           `json:"api_keys,omitempty"`
+	Proxy      *chatWebConfigProxy `json:"proxy,omitempty"`
+	ClearProxy bool                `json:"clear_proxy,omitempty"`
+	// Headers 整体写回 providers.items.<name>.headers：nil=不修改，非 nil
+	// 空 map=清空 headers 节点。保存目标是用户 config.yaml（presets.yaml
+	// 只读）；值可含 {session_id} 等模板占位符。
+	Headers            *map[string]string                     `json:"headers,omitempty"`
 	Enabled            *bool                                  `json:"enabled"`
 	DefaultModel       string                                 `json:"default_model"`
 	SupportedModels    []string                               `json:"supported_models"`
@@ -451,6 +462,12 @@ func HandleChatWebAPIConfig(w http.ResponseWriter, r *http.Request) {
 			DefaultModel:    strings.TrimSpace(provider.DefaultModel),
 			SupportedModels: append([]string(nil), provider.SupportedModels...),
 		}
+		if len(provider.Headers) > 0 {
+			entry.Headers = cloneStringMap(provider.Headers)
+		}
+		if effective := agentconfig.EffectiveProviderHeaders(cfg.Providers.Headers, provider.Headers); len(effective) > 0 {
+			entry.EffectiveHeaders = effective
+		}
 		if provider.Proxy != nil {
 			entry.Proxy = &chatWebConfigProxy{
 				Enabled: provider.Proxy.Enabled,
@@ -569,6 +586,7 @@ func HandleChatWebAPIConfigProviders(w http.ResponseWriter, r *http.Request) {
 			Enabled: req.Proxy.Enabled,
 		}
 	}
+	update.Headers = req.Headers
 	update.Enabled = req.Enabled
 	if req.DefaultModel != "" {
 		update.DefaultModel = webStringPtr(strings.TrimSpace(req.DefaultModel))

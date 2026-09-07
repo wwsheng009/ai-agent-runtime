@@ -33,7 +33,12 @@ type ProviderConfigUpdate struct {
 	// Nil leaves the proxy node untouched.
 	Proxy *ProxyConfig
 	// ClearProxy removes the provider-level proxy node entirely.
-	ClearProxy            bool
+	ClearProxy bool
+	// Headers writes the provider-level request headers
+	// (providers.items.<name>.headers). Nil leaves headers untouched; a
+	// non-nil empty map removes the headers node. Header values may contain
+	// {session_id}-style template placeholders, resolved at request time.
+	Headers               *map[string]string
 	ModelsPath            *string
 	ModelsVerifiedAt      *string
 	SupportedModels       *[]string
@@ -158,6 +163,13 @@ func applyProviderConfigYAMLUpdate(node *yaml.Node, update ProviderConfigUpdate)
 		removeYAMLMappingValue(node, "proxy")
 	} else if update.Proxy != nil {
 		upsertYAMLMappingValue(node, "proxy", providerProxyYAMLNode(*update.Proxy))
+	}
+	if update.Headers != nil {
+		if len(*update.Headers) == 0 {
+			removeYAMLMappingValue(node, "headers")
+		} else {
+			upsertYAMLMappingValue(node, "headers", stringMapYAMLNode(*update.Headers))
+		}
 	}
 	upsertOptionalStringYAMLValue(node, "models_path", update.ModelsPath)
 	upsertOptionalStringYAMLValue(node, "models_verified_at", update.ModelsVerifiedAt)
@@ -397,6 +409,29 @@ func intMapYAMLNode(values map[string]int) *yaml.Node {
 	sort.Strings(keys)
 	for _, key := range keys {
 		node.Content = append(node.Content, stringYAMLNode(key), intYAMLNode(normalized[key]))
+	}
+	return node
+}
+
+// stringMapYAMLNode builds a providers.items.<name>.headers mapping node with
+// sorted, non-empty keys. Header names keep their original casing.
+func stringMapYAMLNode(values map[string]string) *yaml.Node {
+	node := &yaml.Node{Kind: yaml.MappingNode}
+	keys := make([]string, 0, len(values))
+	normalized := make(map[string]string, len(values))
+	for key, value := range values {
+		trimmedKey := strings.TrimSpace(key)
+		if trimmedKey == "" {
+			continue
+		}
+		if _, exists := normalized[trimmedKey]; !exists {
+			keys = append(keys, trimmedKey)
+		}
+		normalized[trimmedKey] = value
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		node.Content = append(node.Content, stringYAMLNode(key), stringYAMLNode(normalized[key]))
 	}
 	return node
 }

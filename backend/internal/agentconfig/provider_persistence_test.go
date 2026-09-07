@@ -135,6 +135,83 @@ func TestUpdateProviderConfig_WritesModelCapabilities(t *testing.T) {
 	}
 }
 
+func TestUpdateProviderConfig_WritesAndClearsHeaders(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	raw := strings.TrimSpace(`
+providers:
+  items:
+    alpha:
+      enabled: true
+      protocol: openai
+      headers:
+        x-opencode-session: "{session_id}"
+        x-custom: "old"
+`)
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	headers := map[string]string{
+		"x-opencode-session": "{session_id}",
+		"x-opencode-client":  "aicli",
+		"X-Custom":           "new-value",
+	}
+	updated, err := UpdateProviderConfig(path, ProviderConfigUpdate{
+		Name:    "alpha",
+		Headers: &headers,
+	})
+	if err != nil {
+		t.Fatalf("UpdateProviderConfig: %v", err)
+	}
+	if len(updated.Headers) != 3 {
+		t.Fatalf("unexpected headers: %+v", updated.Headers)
+	}
+	if updated.Headers["X-Custom"] != "new-value" || updated.Headers["x-opencode-client"] != "aicli" {
+		t.Fatalf("headers mismatch: %+v", updated.Headers)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(content)
+	for _, expected := range []string{
+		"headers:",
+		"x-opencode-client: aicli",
+		"X-Custom: new-value",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected %q in updated file:\n%s", expected, text)
+		}
+	}
+
+	// 清空：非 nil 空 map 移除 headers 节点。
+	empty := map[string]string{}
+	updated, err = UpdateProviderConfig(path, ProviderConfigUpdate{Name: "alpha", Headers: &empty})
+	if err != nil {
+		t.Fatalf("UpdateProviderConfig clear: %v", err)
+	}
+	if len(updated.Headers) != 0 {
+		t.Fatalf("headers not cleared: %+v", updated.Headers)
+	}
+	content, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if strings.Contains(string(content), "headers:") {
+		t.Fatalf("headers node not removed:\n%s", content)
+	}
+
+	// nil 不修改。
+	updated, err = UpdateProviderConfig(path, ProviderConfigUpdate{Name: "alpha"})
+	if err != nil {
+		t.Fatalf("UpdateProviderConfig nil headers: %v", err)
+	}
+	if len(updated.Headers) != 0 {
+		t.Fatalf("nil headers must not modify: %+v", updated.Headers)
+	}
+}
+
 func TestUpdateProviderConfig_EditsOnlyProvidedFields(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
