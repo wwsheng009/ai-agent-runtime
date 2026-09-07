@@ -71,10 +71,15 @@ func parseFlags() *cliFlags {
 
 	fs := pflag.NewFlagSet("ssh-client", pflag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), `Usage: ssh-client [options] [user@]host [command]
+		fmt.Fprintf(fs.Output(), `ssh-client - OpenSSH 兼容的 SSH 客户端
 
-OpenSSH-compatible SSH client: interactive remote shell, remote command execution,
-local/remote port forwarding.
+Usage:
+  ssh-client [options] [user@]host [command]
+
+Description:
+  Interactive remote shell, remote command execution and local/remote port
+  forwarding. Authentication order: publickey -> ssh-agent -> password ->
+  keyboard-interactive.
 
 Options:
 `)
@@ -135,6 +140,8 @@ Notes:
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		// -h/--help 未注册为显式 flag 时，pflag 会返回 ErrHelp
 		if err == pflag.ErrHelp {
+			fs.SetOutput(os.Stdout)
+			fs.Usage()
 			os.Exit(0)
 		}
 		fmt.Fprintln(os.Stderr, "ssh-client:", err)
@@ -142,6 +149,8 @@ Notes:
 		os.Exit(255)
 	}
 	if flags.showHelp {
+		// 显式请求帮助时输出到 stdout，方便管道/分页查看
+		fs.SetOutput(os.Stdout)
 		fs.Usage()
 		os.Exit(0)
 	}
