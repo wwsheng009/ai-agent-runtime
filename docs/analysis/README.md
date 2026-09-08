@@ -7,7 +7,6 @@
 | 文件 | 主题 | 日期 |
 | --- | --- | --- |
 | `renderer-stall-analysis-20260901.md` | 会话主屏幕统一渲染器停止更新（scrollback 冻结死锁）现场分析 | 2026-09-01 |
-| `goroutine-dump-20260901-1904.txt` | 上述分析的 goroutine dump 原始数据（数据源） | 2026-09-01 |
 | `aicli-resume-recovery-backoff-postmortem.md` | resume 恢复回退（recovery backoff）三层架构缺陷复盘 | 2026-08-31 |
 | `aicli-resume-input-not-reaching-llm-analysis.md` | resume 后输入 prompt 不进入 LLM 请求交互：架构分析 | 2026-08-31 |
 | `aicli-chat-unified-rendering-survey.md` | aicli 聊天统一渲染链路梳理：事件流标识与块缩进 | 2026-08-08 |

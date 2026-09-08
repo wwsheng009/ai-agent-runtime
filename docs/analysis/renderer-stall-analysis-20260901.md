@@ -2,7 +2,7 @@
 
 > 文档状态：现场故障分析归档（原始分析报告，2026-09-01 自仓库根 `analysis/` 目录迁移整理至 `docs/analysis/`）
 > 分析日期：2026-09-01
-> 数据源：`/debug/chat/status` 两次轮询 + goroutine dump（原始数据见同目录 `goroutine-dump-20260901-1904.txt`）
+> 数据源：`/debug/chat/status` 两次轮询 + 进程 goroutine dump（原始 dump 已移除，未随文档归档）
 > 主要范围：`backend/cmd/aicli/ui/controller_state.go`、`terminal_session_executor.go`、`terminal_session.go`、`history_effect_queue.go`
 > 关联文档：
 > - 修复方案与实施记录：`docs/plan/aicli-chat-unified-render-stall-analysis-and-hardening.md`
