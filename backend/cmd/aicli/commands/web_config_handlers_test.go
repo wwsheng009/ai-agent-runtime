@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 )
 
@@ -920,6 +922,109 @@ func TestChatWebInvalidateRuntimeProvider_NilGuards(t *testing.T) {
 	withWebConfigTestSession(t, webConfigTestYAML)
 	chatWebInvalidateRuntimeProvider("alpha") // 有会话、无 LocalRuntimeHost
 	chatWebInvalidateRuntimeProvider("")      // 空名同样安全
+}
+
+// webConfigInlineProviderTestYAML 是 inline api_key 形态的最小配置，避免
+// Key Store 依赖，便于断言“保存新 key 后内存 provider 对象与 runtime
+// 注册表同步重建”。
+const webConfigInlineProviderTestYAML = `providers:
+  default_provider: alpha
+  items:
+    alpha:
+      enabled: true
+      protocol: openai
+      base_url: https://api.example.com
+      api_path: /v1/chat/completions
+      api_key: sk-test-secret-123
+      default_model: gpt-4o
+      supported_models:
+        - gpt-4o
+aicli:
+  chat:
+    default_provider: alpha
+    default_model: gpt-4o
+`
+
+// webConfigEmptyProviderTestYAML 用于删除场景：配置中不再存在 alpha。
+const webConfigEmptyProviderTestYAML = `providers:
+  default_provider: alpha
+  items: {}
+aicli:
+  chat:
+    default_provider: alpha
+    default_model: gpt-4o
+`
+
+// TestChatWebInvalidateRuntimeProviderRebuildsActiveProvider 回归“更新
+// api-key 后继续对话报 provider not found、切换 provider 后才正常”：
+// 保存路径先刷新 session.Config（含新 key），再调用
+// chatWebInvalidateRuntimeProvider。注销后必须立即按最新配置重建 runtime
+// 注册表，并且同步刷新 session.Provider（否则重建仍携带旧 key）。
+func TestChatWebInvalidateRuntimeProviderRebuildsActiveProvider(t *testing.T) {
+	bootstrapManager, err := runtimebootstrap.NewManager(&runtimebootstrap.Options{
+		Config: runtimecfg.DefaultRuntimeConfig(),
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	defer bootstrapManager.Stop()
+	rt := bootstrapManager.LLMRuntime()
+
+	path := withWebConfigTestSession(t, webConfigInlineProviderTestYAML)
+	session := chatWebSession()
+	if session == nil {
+		t.Fatal("no web session registered")
+	}
+	session.LocalRuntimeHost = &localChatRuntimeHost{Bootstrap: bootstrapManager}
+	session.ProviderName = "alpha"
+
+	// 装配与真实运行一致的初始状态：会话当前使用旧 key 的 provider，
+	// 且已注册进 runtime 注册表。
+	chatWebRefreshSessionConfig()
+	current, ok := session.Config.Providers.Items["alpha"]
+	if !ok {
+		t.Fatal("alpha not found in session config")
+	}
+	session.Provider = current
+	if err := ensureLocalRuntimeProvider(rt, session); err != nil {
+		t.Fatalf("ensureLocalRuntimeProvider: %v", err)
+	}
+	if _, err := rt.GetProvider("alpha"); err != nil {
+		t.Fatalf("precondition: provider should be registered: %v", err)
+	}
+
+	// 保存新 api-key：写盘 + 刷新内存配置（与 HandleChatWebAPIConfigProviders
+	// 的更新链路一致）。
+	newYAML := strings.Replace(webConfigInlineProviderTestYAML, "sk-test-secret-123", "sk-new-999", 1)
+	if err := os.WriteFile(path, []byte(newYAML), 0o644); err != nil {
+		t.Fatalf("write updated config: %v", err)
+	}
+	chatWebRefreshSessionConfig()
+	if got := session.Provider.APIKey; got != "sk-test-secret-123" {
+		t.Fatalf("precondition: session.Provider should still hold old key before invalidate, got %q", got)
+	}
+
+	chatWebInvalidateRuntimeProvider("alpha")
+
+	// 修复点 1：注销后立即重建，保存后的下一轮对话不再 provider not found。
+	if _, err := rt.GetProvider("alpha"); err != nil {
+		t.Fatalf("保存 api-key 后 runtime provider 应立即可用（provider not found 回归）: %v", err)
+	}
+	// 修复点 2：内存 provider 对象随保存刷新，重建不再携带旧 key。
+	if got := session.Provider.APIKey; got != "sk-new-999" {
+		t.Fatalf("session.Provider.APIKey = %q, want sk-new-999（内存 provider 对象应随保存刷新）", got)
+	}
+
+	// 删除场景保持原行为：provider 不再存在于配置时注销后不重建，
+	// 下一次使用仍报 provider not found（由模型选择路径按需重建）。
+	if err := os.WriteFile(path, []byte(webConfigEmptyProviderTestYAML), 0o644); err != nil {
+		t.Fatalf("write deleted config: %v", err)
+	}
+	chatWebRefreshSessionConfig()
+	chatWebInvalidateRuntimeProvider("alpha")
+	if _, err := rt.GetProvider("alpha"); err == nil {
+		t.Fatal("已删除的 provider 注销后不应重建，GetProvider 应继续报错")
+	}
 }
 
 // TestHandleChatWebAPIConfigProviders_Delete 验证删除 provider。

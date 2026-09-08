@@ -282,8 +282,14 @@ func refreshChatWebSessionConfigFromRuntime(session *ChatSession) {
 // 失效。LLMRuntime 在 ensureLocalRuntimeProvider 首次构建 provider 时经
 // GetAPIKey 固化 API key（Key Store 凭据来自 auth.json），此后更新 key 只
 // 改磁盘文件，已缓存的 provider 实例仍携带旧 key——表现为“保存新 key 后
-// 请求仍用旧 key”。注销后下一次调用会按最新配置重建 provider（重新解析
-// key）。
+// 请求仍用旧 key”。注销后按最新配置重建 provider（重新解析 key）。
+//
+// 注销后必须立即重建：LLMRuntime 的内存注册表（providers map）只在会话
+// 启动与模型/Provider 切换（refreshLocalRuntimeAfterModelSelection →
+// ensureLocalRuntimeProvider）时填充，普通对话轮次不会触发重建。若只注销
+// 不重建，保存 api-key 后的下一轮对话会报 provider not found: <name>
+// （VALIDATION_FAILED），直到用户在界面上切换 provider 才恢复——这正是
+// “更新 api-key 后继续对话报错、切换 provider 后正常”的根因。
 func chatWebInvalidateRuntimeProvider(name string) {
 	session := chatWebSession()
 	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.Bootstrap == nil {
@@ -294,6 +300,23 @@ func chatWebInvalidateRuntimeProvider(name string) {
 		return
 	}
 	rt.UnregisterProvider(name)
+
+	// 仅当被更新的 provider 正是会话当前使用的 provider，且仍存在于最新配置
+	// 并处于启用状态时重建注册表条目：删除 / 禁用 / 非活动 provider 保持注销
+	// 后的原行为，由下一次模型选择路径按需重建。
+	name = strings.TrimSpace(name)
+	if name == "" || !strings.EqualFold(name, strings.TrimSpace(session.ProviderName)) || session.Config == nil {
+		return
+	}
+	current, ok := session.Config.Providers.Items[name]
+	if !ok || !current.Enabled {
+		return
+	}
+	// 同步会话内存中的 provider 对象：保存路径已通过 chatWebRefreshSessionConfig
+	// 重载 session.Config（config.yaml / Key Store），但 session.Provider 仍是
+	// 旧实例，直接重建会继续携带旧 key。
+	session.Provider = current
+	_ = ensureLocalRuntimeProvider(rt, session)
 }
 
 // mergeModelCapabilities 把前端提交的每模型 reasoning 更新合并进现有
