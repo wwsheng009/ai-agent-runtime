@@ -1,0 +1,435 @@
+goroutine 13624 [running]:
+runtime/pprof.writeGoroutineStacks({0x1f64280, 0xc002baa460})
+	C:/Program Files/Go/src/runtime/pprof/pprof.go:764 +0x6a
+runtime/pprof.writeGoroutine({0x1f64280?, 0xc002baa460?}, 0x32?)
+	C:/Program Files/Go/src/runtime/pprof/pprof.go:753 +0x25
+runtime/pprof.(*Profile).WriteTo(0x290b4d0?, {0x1f64280?, 0xc002baa460?}, 0xc?)
+	C:/Program Files/Go/src/runtime/pprof/pprof.go:377 +0x14b
+net/http/pprof.handler.ServeHTTP({0x198923e, 0x9}, {0x1f6c6b0, 0xc002baa460}, 0xc00130e640)
+	C:/Program Files/Go/src/net/http/pprof/pprof.go:272 +0x52f
+net/http.(*ServeMux).ServeHTTP(0x7427f9?, {0x1f6c6b0, 0xc002baa460}, 0xc00130e640)
+	C:/Program Files/Go/src/net/http/server.go:2822 +0x1c4
+net/http.serverHandler.ServeHTTP({0xc001606e40?}, {0x1f6c6b0?, 0xc002baa460?}, 0x1?)
+	C:/Program Files/Go/src/net/http/server.go:3301 +0x8e
+net/http.(*conn).serve(0xc001a9a090, {0x1f6e3d0, 0xc0003db560})
+	C:/Program Files/Go/src/net/http/server.go:2102 +0x625
+created by net/http.(*Server).Serve in goroutine 26
+	C:/Program Files/Go/src/net/http/server.go:3454 +0x485
+
+goroutine 1 [select, 16 minutes]:
+github.com/wwsheng009/ai-agent-runtime/internal/chat.(*SessionActor).SubmitPrompt(0xc0007a9b80, {0x1f6e3d0, 0xc00657a690}, {0xc0010e4540, 0xdd}, 0xc00657a6f0, {0xc000e9b210, 0x1, 0x0?})
+	E:/projects/ai/ai-agent-runtime/backend/internal/chat/actor.go:328 +0x4fc
+github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands.submitAICLIActorPrompt({0x1f6e3d0?, 0xc00657a690?}, 0xc0007a9b80, {0xc0010e4540, 0xdd}, 0xc00657a6f0, {{0x2986d20, 0x0, 0x0}, {0xc0011b8000, ...}, ...})
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/commands/chat_actor_executor.go:48 +0xfa
+github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands.(*aicliActorChatExecutor).Execute(0xc0004ce008?, {0x1f6e408, 0xc00119c280}, 0xc0004ce008, {0xc0010e4540, 0xdd})
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/commands/chat_actor_executor.go:173 +0x465
+github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands.sendMessage(0xc0004ce008, {0xc0010e4540, 0xdd})
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/commands/chat_send.go:76 +0x389
+github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands.runChatLoop(0xc0004ce008, 0x0, {0x0, 0x0})
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/commands/chat.go:1410 +0x8c5
+github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands.HandleChat(0xc000158f08, 0xc00026e008)
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/commands/chat.go:546 +0x7be
+github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands.NewChatCommand.func1(0xc000158f08, {0xc000400390?, 0x0?, 0x3?})
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/commands/chat_command.go:68 +0x29
+github.com/spf13/cobra.(*Command).execute(0xc000158f08, {0xc000400330, 0x3, 0x3})
+	C:/Users/Vince/go/pkg/mod/github.com/spf13/cobra@v1.10.2/command.go:1019 +0xa7b
+github.com/spf13/cobra.(*Command).ExecuteC(0xc000272c08)
+	C:/Users/Vince/go/pkg/mod/github.com/spf13/cobra@v1.10.2/command.go:1148 +0x40c
+github.com/spf13/cobra.(*Command).Execute(...)
+	C:/Users/Vince/go/pkg/mod/github.com/spf13/cobra@v1.10.2/command.go:1071
+main.main()
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/main.go:354 +0x17a8
+
+goroutine 26 [IO wait]:
+internal/poll.runtime_pollWait(0x172ecdd44d0, 0x72)
+	C:/Program Files/Go/src/runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0x7c6493?, 0x0?, 0x0)
+	C:/Program Files/Go/src/internal/poll/fd_poll_runtime.go:84 +0x27
+internal/poll.execIO(0xc0001a62a0, 0xc00046fbf0)
+	C:/Program Files/Go/src/internal/poll/fd_windows.go:177 +0x105
+internal/poll.(*FD).acceptOne(0xc0001a6288, 0xa40, {0xc0019110e0?, 0xc00046fc50?, 0x7cc8a5?}, 0xc00046fc84?)
+	C:/Program Files/Go/src/internal/poll/fd_windows.go:946 +0x65
+internal/poll.(*FD).Accept(0xc0001a6288, 0xc00046fdd0)
+	C:/Program Files/Go/src/internal/poll/fd_windows.go:980 +0x1b6
+net.(*netFD).accept(0xc0001a6288)
+	C:/Program Files/Go/src/net/fd_windows.go:182 +0x4b
+net.(*TCPListener).accept(0xc000312640)
+	C:/Program Files/Go/src/net/tcpsock_posix.go:159 +0x1b
+net.(*TCPListener).Accept(0xc000312640)
+	C:/Program Files/Go/src/net/tcpsock.go:380 +0x30
+net/http.(*Server).Serve(0xc0002f8a00, {0x1f6c560, 0xc000312640})
+	C:/Program Files/Go/src/net/http/server.go:3424 +0x30c
+main.startPprofServer.func3()
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/pprof.go:138 +0x1f
+created by main.startPprofServer in goroutine 1
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/pprof.go:137 +0x3ac
+
+goroutine 131 [select, 18 minutes]:
+database/sql.(*DB).connectionOpener(0xc0087b4000, {0x1f6e408, 0xc0004c00a0})
+	C:/Program Files/Go/src/database/sql/sql.go:1261 +0x87
+created by database/sql.OpenDB in goroutine 30
+	C:/Program Files/Go/src/database/sql/sql.go:841 +0x130
+
+goroutine 12 [select, 18 minutes]:
+github.com/wwsheng009/ai-agent-runtime/internal/chat.(*SessionManager).startCleanup.func1()
+	E:/projects/ai/ai-agent-runtime/backend/internal/chat/manager.go:521 +0x6b
+created by github.com/wwsheng009/ai-agent-runtime/internal/chat.(*SessionManager).startCleanup in goroutine 1
+	E:/projects/ai/ai-agent-runtime/backend/internal/chat/manager.go:519 +0x96
+
+goroutine 13 [select, 18 minutes]:
+github.com/wwsheng009/ai-agent-runtime/internal/chat.(*SessionManager).startArchive.func1()
+	E:/projects/ai/ai-agent-runtime/backend/internal/chat/manager.go:542 +0x6b
+created by github.com/wwsheng009/ai-agent-runtime/internal/chat.(*SessionManager).startArchive in goroutine 1
+	E:/projects/ai/ai-agent-runtime/backend/internal/chat/manager.go:540 +0xa5
+
+goroutine 14 [select, 16 minutes]:
+github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui.(*KeyHandler).Start.func1()
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/ui/keyhandler_windows.go:60 +0x165
+created by github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui.(*KeyHandler).Start in goroutine 1
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/ui/keyhandler_windows.go:39 +0x6e
+
+goroutine 15 [chan receive, 18 minutes]:
+gopkg.in/natefinch/lumberjack%2ev2.(*Logger).millRun(...)
+	C:/Users/Vince/go/pkg/mod/gopkg.in/natefinch/lumberjack.v2@v2.2.1/lumberjack.go:379
+created by gopkg.in/natefinch/lumberjack%2ev2.(*Logger).mill.func1 in goroutine 1
+	C:/Users/Vince/go/pkg/mod/gopkg.in/natefinch/lumberjack.v2@v2.2.1/lumberjack.go:390 +0x96
+
+goroutine 16 [chan receive]:
+github.com/wwsheng009/ai-agent-runtime/internal/pkg/dnscache.(*CachedResolver).cleanupExpired(0xc0003dfe00)
+	E:/projects/ai/ai-agent-runtime/backend/internal/pkg/dnscache/resolver.go:229 +0x6c
+created by github.com/wwsheng009/ai-agent-runtime/internal/pkg/dnscache.NewCachedResolver in goroutine 1
+	E:/projects/ai/ai-agent-runtime/backend/internal/pkg/dnscache/resolver.go:74 +0x105
+
+goroutine 50 [chan receive]:
+github.com/wwsheng009/ai-agent-runtime/internal/pkg/dnscache.(*CachedResolver).cleanupExpired(0xc0003dfe50)
+	E:/projects/ai/ai-agent-runtime/backend/internal/pkg/dnscache/resolver.go:229 +0x6c
+created by github.com/wwsheng009/ai-agent-runtime/internal/pkg/dnscache.NewCachedResolver in goroutine 1
+	E:/projects/ai/ai-agent-runtime/backend/internal/pkg/dnscache/resolver.go:74 +0x105
+
+goroutine 51 [select]:
+github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine.(*FramePump).run(0xc0002267e0)
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/ui/renderengine/frame_pump.go:131 +0xfa
+created by github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine.NewFramePumpWithConfig in goroutine 1
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/ui/renderengine/frame_pump.go:101 +0x125
+
+goroutine 52 [sync.Cond.Wait]:
+sync.runtime_notifyListWait(0xc0001cc210, 0xaa0b)
+	C:/Program Files/Go/src/runtime/sema.go:597 +0x15d
+sync.(*Cond).Wait(0x1f6bff0?)
+	C:/Program Files/Go/src/sync/cond.go:71 +0x85
+github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui.(*UIController).Run(0xc0006f4b08)
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/ui/controller.go:430 +0x726
+created by github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands.(*chatInteractionCoordinator).ensureUIActor.func1 in goroutine 1
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/commands/chat_ui_actor.go:63 +0x176
+
+goroutine 29 [select, 18 minutes]:
+github.com/wwsheng009/ai-agent-runtime/internal/chat.(*SessionManager).startArchive.func1()
+	E:/projects/ai/ai-agent-runtime/backend/internal/chat/manager.go:542 +0x6b
+created by github.com/wwsheng009/ai-agent-runtime/internal/chat.(*SessionManager).startArchive in goroutine 1
+	E:/projects/ai/ai-agent-runtime/backend/internal/chat/manager.go:540 +0xa5
+
+goroutine 28 [select, 18 minutes]:
+github.com/wwsheng009/ai-agent-runtime/internal/chat.(*SessionManager).startCleanup.func1()
+	E:/projects/ai/ai-agent-runtime/backend/internal/chat/manager.go:521 +0x6b
+created by github.com/wwsheng009/ai-agent-runtime/internal/chat.(*SessionManager).startCleanup in goroutine 1
+	E:/projects/ai/ai-agent-runtime/backend/internal/chat/manager.go:519 +0x96
+
+goroutine 27 [select]:
+github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands.(*chatTitleNotifier).run(0xc00084e2a0)
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/commands/chat_notification.go:289 +0x305
+created by github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands.newChatTitleNotifier in goroutine 1
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/commands/chat_notification.go:97 +0x298
+
+goroutine 43 [select]:
+github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands.(*chatAccountBalanceRefresher).run(0xc000ae4008)
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/commands/chat_balance_refresh.go:254 +0x107
+created by github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands.initializeChatAccountBalanceRefresh in goroutine 1
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/commands/chat_balance_refresh.go:87 +0x209
+
+goroutine 53 [select]:
+github.com/wwsheng009/ai-agent-runtime/internal/background.(*Manager).dispatchLoop(0xc0005cd1e0)
+	E:/projects/ai/ai-agent-runtime/backend/internal/background/manager.go:1161 +0x1bd
+created by github.com/wwsheng009/ai-agent-runtime/internal/background.NewManager in goroutine 1
+	E:/projects/ai/ai-agent-runtime/backend/internal/background/manager.go:188 +0xc2e
+
+goroutine 1186 [select, 16 minutes]:
+github.com/wwsheng009/ai-agent-runtime/internal/chat.(*SessionActor).run(0xc0007a9b80)
+	E:/projects/ai/ai-agent-runtime/backend/internal/chat/actor.go:717 +0xc7
+created by github.com/wwsheng009/ai-agent-runtime/internal/chat.(*SessionActor).Start.func1 in goroutine 1
+	E:/projects/ai/ai-agent-runtime/backend/internal/chat/actor.go:217 +0x56
+
+goroutine 54 [select, 18 minutes]:
+database/sql.(*DB).connectionOpener(0xc000a460d0, {0x1f6e408, 0xc0006d3810})
+	C:/Program Files/Go/src/database/sql/sql.go:1261 +0x87
+created by database/sql.OpenDB in goroutine 1
+	C:/Program Files/Go/src/database/sql/sql.go:841 +0x130
+
+goroutine 44 [select, 18 minutes]:
+database/sql.(*DB).connectionOpener(0xc008a80000, {0x1f6e408, 0xc000ac0730})
+	C:/Program Files/Go/src/database/sql/sql.go:1261 +0x87
+created by database/sql.OpenDB in goroutine 30
+	C:/Program Files/Go/src/database/sql/sql.go:841 +0x130
+
+goroutine 98 [select, 18 minutes]:
+database/sql.(*DB).connectionOpener(0xc000a7d5f0, {0x1f6e408, 0xc000ae2050})
+	C:/Program Files/Go/src/database/sql/sql.go:1261 +0x87
+created by database/sql.OpenDB in goroutine 31
+	C:/Program Files/Go/src/database/sql/sql.go:841 +0x130
+
+goroutine 32 [select]:
+github.com/wwsheng009/ai-agent-runtime/internal/teamsupervisor.(*Supervisor).supervise(0xc005f64180, {0x1f6e408, 0xc000a800f0}, 0x0?)
+	E:/projects/ai/ai-agent-runtime/backend/internal/teamsupervisor/supervisor.go:172 +0x185
+created by github.com/wwsheng009/ai-agent-runtime/internal/teamsupervisor.(*Supervisor).Start in goroutine 1
+	E:/projects/ai/ai-agent-runtime/backend/internal/teamsupervisor/supervisor.go:162 +0x1ce
+
+goroutine 33 [select, 18 minutes]:
+database/sql.(*DB).connectionOpener(0xc008a32680, {0x1f6e408, 0xc000a80140})
+	C:/Program Files/Go/src/database/sql/sql.go:1261 +0x87
+created by database/sql.OpenDB in goroutine 1
+	C:/Program Files/Go/src/database/sql/sql.go:841 +0x130
+
+goroutine 114 [select]:
+github.com/wwsheng009/ai-agent-runtime/internal/chat.(*SessionHub).sweepLoop(0xc000478de0, 0x0?)
+	E:/projects/ai/ai-agent-runtime/backend/internal/chat/hub.go:223 +0xe9
+created by github.com/wwsheng009/ai-agent-runtime/internal/chat.newSessionHub in goroutine 1
+	E:/projects/ai/ai-agent-runtime/backend/internal/chat/hub.go:71 +0x166
+
+goroutine 60 [syscall, 18 minutes]:
+os/signal.signal_recv()
+	C:/Program Files/Go/src/runtime/sigqueue.go:152 +0x29
+os/signal.loop()
+	C:/Program Files/Go/src/os/signal/signal_unix.go:23 +0x13
+created by os/signal.Notify.func1.1 in goroutine 1
+	C:/Program Files/Go/src/os/signal/signal.go:152 +0x1f
+
+goroutine 61 [select, 18 minutes]:
+github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands.setupSignalHandler.func1()
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/commands/chat_windows.go:25 +0xe8
+created by github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands.setupSignalHandler in goroutine 1
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/commands/chat_windows.go:22 +0x13a
+
+goroutine 13706 [IO wait]:
+internal/poll.runtime_pollWait(0x172ecdd42a0, 0x72)
+	C:/Program Files/Go/src/runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0x172ed182fc0?, 0x172c7730ed0?, 0x0)
+	C:/Program Files/Go/src/internal/poll/fd_poll_runtime.go:84 +0x27
+internal/poll.execIO(0xc00220b420, 0x1d831c0)
+	C:/Program Files/Go/src/internal/poll/fd_windows.go:177 +0x105
+internal/poll.(*FD).Read(0xc00220b408, {0xc001606e51, 0x1, 0x1})
+	C:/Program Files/Go/src/internal/poll/fd_windows.go:438 +0x29b
+net.(*netFD).Read(0xc00220b408, {0xc001606e51?, 0xc001565730?, 0x0?})
+	C:/Program Files/Go/src/net/fd_posix.go:55 +0x25
+net.(*conn).Read(0xc007d3edd8, {0xc001606e51?, 0xc0000be220?, 0x1332960?})
+	C:/Program Files/Go/src/net/net.go:194 +0x45
+net/http.(*connReader).backgroundRead(0xc001606e40)
+	C:/Program Files/Go/src/net/http/server.go:690 +0x37
+created by net/http.(*connReader).startBackgroundRead in goroutine 13624
+	C:/Program Files/Go/src/net/http/server.go:686 +0xb6
+
+goroutine 1211 [select, 16 minutes]:
+database/sql.(*DB).connectionOpener(0xc000ed5860, {0x1f6e408, 0xc0006d2780})
+	C:/Program Files/Go/src/database/sql/sql.go:1261 +0x87
+created by database/sql.OpenDB in goroutine 1210
+	C:/Program Files/Go/src/database/sql/sql.go:841 +0x130
+
+goroutine 188 [select, 16 minutes]:
+github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands.startBusyQueuedInputCapture.func5.2(0x0)
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/commands/chat_busy_input.go:52 +0xa6
+created by github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands.startBusyQueuedInputCapture.func5 in goroutine 1170
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/commands/chat_busy_input.go:50 +0x3c5
+
+goroutine 1210 [syscall]:
+syscall.Syscall(0xc00001d8c0?, 0xc001debe5c?, 0x4?, 0x100c00001d930?, 0x26?)
+	C:/Program Files/Go/src/runtime/syscall_windows.go:457 +0x29
+syscall.WaitForSingleObject(0x8d8, 0xffffffff)
+	C:/Program Files/Go/src/syscall/zsyscall_windows.go:1149 +0x5a
+os.(*Process).wait(0xc003f92a80?)
+	C:/Program Files/Go/src/os/exec_windows.go:28 +0xe6
+os.(*Process).Wait(...)
+	C:/Program Files/Go/src/os/exec.go:358
+os/exec.(*Cmd).Wait(0xc003f92a80)
+	C:/Program Files/Go/src/os/exec/exec.go:922 +0x45
+os/exec.(*Cmd).Run(0xc003f92a80)
+	C:/Program Files/Go/src/os/exec/exec.go:626 +0x2d
+github.com/wwsheng009/ai-agent-runtime/internal/executor.CaptureCombinedOutputWithArtifactAndMirror(0xc003f92a80, 0x40000, {0x19854ec?, 0x5f?}, {0xc0010a15e0?, 0xc00186b650?}, {0xc0006dc370?, 0x0?}, {0x1f64b60, 0xc001610790})
+	E:/projects/ai/ai-agent-runtime/backend/internal/executor/output_capture.go:117 +0x217
+github.com/wwsheng009/ai-agent-runtime/internal/toolkit/tools.(*BashTool).executeCommand(0xc000b06140, {0x1f6e3d0, 0xc00177fbc0}, {0xc0010a15e0, 0x44}, {0xc00186b650?, _}, _, {0x0, 0x0, ...})
+	E:/projects/ai/ai-agent-runtime/backend/internal/toolkit/tools/bash.go:775 +0x14d0
+github.com/wwsheng009/ai-agent-runtime/internal/toolkit/tools.(*BashTool).Execute(0xc000b06140, {0x1f6e3d0, 0xc0011d52c0}, 0xc0011ed620)
+	E:/projects/ai/ai-agent-runtime/backend/internal/toolkit/tools/bash.go:290 +0x97d
+github.com/wwsheng009/ai-agent-runtime/internal/toolkit/tools.(*ShellTool).Execute(0xc0013e5a40?, {0x1f6e3d0?, 0xc0011d52c0?}, 0xc0013e5a40?)
+	E:/projects/ai/ai-agent-runtime/backend/internal/toolkit/tools/shell.go:73 +0x25
+github.com/wwsheng009/ai-agent-runtime/internal/tools.(*Manager).ExecuteWithMeta(0xc0006fa7b0, {0x1f6e3d0, 0xc0011d52c0}, {0xc0013e5a40, 0x5}, 0xc0011ed620)
+	E:/projects/ai/ai-agent-runtime/backend/internal/tools/manager.go:179 +0xce3
+github.com/wwsheng009/ai-agent-runtime/internal/tools.(*AgentAdapter).CallToolWithMeta(0xc00041ced0?, {0x1877400?, 0xc0011d52c0?}, {0x0?, 0x0?}, {0xc0013e5a40?, 0x5?}, 0xc0011ed620?)
+	E:/projects/ai/ai-agent-runtime/backend/internal/tools/agent_adapter.go:88 +0x95
+github.com/wwsheng009/ai-agent-runtime/internal/aiclitools.(*CapabilityMCPManager).CallToolWithMeta(0xc0007721e0, {0x1877400, 0xc0011d52c0}, {0x0, 0x0}, {0xc0013e5a40?, 0x0?}, 0xc0011ed620)
+	E:/projects/ai/ai-agent-runtime/backend/internal/aiclitools/mcp_adapter.go:83 +0x36b
+github.com/wwsheng009/ai-agent-runtime/internal/agent.(*ReActLoop).act(0xc0006d2730, {0x1f6e3d0, 0xc00079faa0}, {0xc008a6e780, 0x2a}, {0xc000e8c000, 0x1f}, 0x3d, 0x0, {0xc003b93008, ...}, ...)
+	E:/projects/ai/ai-agent-runtime/backend/internal/agent/loop.go:2489 +0x7fff
+github.com/wwsheng009/ai-agent-runtime/internal/agent.(*ReActLoop).run(0xc0006d2730, {0x1f6e3d0, 0xc00079faa0}, {0xc0010e4540, 0xdd}, {{0xc008a6e780, 0x2a}, {0xc000e8c000, 0x1f}, {0xc000ed4c30, ...}, ...})
+	E:/projects/ai/ai-agent-runtime/backend/internal/agent/loop.go:943 +0x301d
+github.com/wwsheng009/ai-agent-runtime/internal/agent.(*ReActLoop).RunWithSession(0xc0006d2730, {0x1f6e3d0, 0xc00079ebd0}, {0xc0010e4540, 0xdd}, {0x1f6e520, 0xc00130e140})
+	E:/projects/ai/ai-agent-runtime/backend/internal/agent/loop.go:297 +0x387
+github.com/wwsheng009/ai-agent-runtime/internal/chat.(*SessionActor).runLoop(0xc0007a9b80, {0x1f6e3d0, 0xc00079ebd0}, {0xc0010e4540, 0xdd}, 0xc00130e140, 0x0)
+	E:/projects/ai/ai-agent-runtime/backend/internal/chat/actor.go:1447 +0x105
+github.com/wwsheng009/ai-agent-runtime/internal/chat.(*SessionActor).startSessionRun.func3()
+	E:/projects/ai/ai-agent-runtime/backend/internal/chat/actor.go:2445 +0x192
+created by github.com/wwsheng009/ai-agent-runtime/internal/chat.(*SessionActor).startSessionRun in goroutine 1186
+	E:/projects/ai/ai-agent-runtime/backend/internal/chat/actor.go:2435 +0xcbf
+
+goroutine 1209 [select]:
+github.com/wwsheng009/ai-agent-runtime/internal/chat.(*SessionActor).startRunStallWatchdog.func4()
+	E:/projects/ai/ai-agent-runtime/backend/internal/chat/actor.go:1098 +0x108
+created by github.com/wwsheng009/ai-agent-runtime/internal/chat.(*SessionActor).startRunStallWatchdog in goroutine 1186
+	E:/projects/ai/ai-agent-runtime/backend/internal/chat/actor.go:1091 +0x4b0
+
+goroutine 997 [chan receive]:
+github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands.(*chatRuntimeEventBridge).run(0xc0011a4008)
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/commands/chat_runtime_events.go:1350 +0xaa
+created by github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands.(*chatRuntimeEventBridge).startProcessor.func1 in goroutine 1
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/commands/chat_runtime_events.go:556 +0x56
+
+goroutine 980 [select]:
+github.com/wwsheng009/ai-agent-runtime/internal/chat.(*SessionLeaseHandle).renewLoop(0xc0002a61c0)
+	E:/projects/ai/ai-agent-runtime/backend/internal/chat/session_runtime_store.go:163 +0x195
+created by github.com/wwsheng009/ai-agent-runtime/internal/chat.AcquireSessionLease in goroutine 960
+	E:/projects/ai/ai-agent-runtime/backend/internal/chat/session_runtime_store.go:127 +0x25b
+
+goroutine 1170 [sleep]:
+time.Sleep(0x8bec50)
+	C:/Program Files/Go/src/runtime/time.go:338 +0x167
+github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui.platformWaitForInteractiveInputReady(0x64, 0x0?)
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/ui/inputbox_editor_windows.go:119 +0xa5
+github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui.nextInteractiveKey({0x1f6e408?, 0xc0006d20a0?}, {0x1f63200, 0xc00007e060}, 0xc001235730, 0xc00007e060)
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/ui/inputbox_editor.go:1967 +0x1e9
+github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui.readInteractiveLineWithHooksContext({0x1f6e408?, 0xc0006d20a0?}, {0x1f63200, 0xc00007e060}, {0x1f63020?, 0xc00007e068?}, {0xc000601550, 0xd}, {0x0, 0x0, ...}, ...)
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/ui/inputbox_editor.go:1087 +0x11d8
+github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui.(*InputBox).readPromptWithHooksContext(0xc0003dfd60, {0x1f6e408?, 0xc0006d20a0?}, {0xc000601550?, 0x0?}, {{0x0, 0x0}, 0x0, 0x1, 0xc00056ac50, ...}, ...)
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/ui/inputbox_editor.go:269 +0x309
+github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui.(*InputBox).ReadTransientPromptWithHooksContext(...)
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/ui/inputbox.go:164
+github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands.(*chatBusyComposerCapture).ReadLine(0xc0087c0090, {0x1f6e408, 0xc0006d20a0})
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/commands/chat_composer.go:292 +0xfd
+github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands.startBusyQueuedInputCapture.func5()
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/commands/chat_busy_input.go:69 +0x405
+created by github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands.startBusyQueuedInputCapture in goroutine 1
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/commands/chat_busy_input.go:37 +0x195
+
+goroutine 13701 [select]:
+os/exec.(*Cmd).watchCtx(0xc003f92a80, 0xc008a2b260)
+	C:/Program Files/Go/src/os/exec/exec.go:789 +0xb2
+created by os/exec.(*Cmd).Start in goroutine 1210
+	C:/Program Files/Go/src/os/exec/exec.go:775 +0x989
+
+goroutine 1171 [select, 16 minutes]:
+github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands.startChatEscapeInterruptWatcher.func2()
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/commands/chat_escape_interrupt.go:25 +0xae
+created by github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands.startChatEscapeInterruptWatcher in goroutine 1
+	E:/projects/ai/ai-agent-runtime/backend/cmd/aicli/commands/chat_escape_interrupt.go:22 +0x165
+
+goroutine 928 [select, 17 minutes]:
+database/sql.(*DB).connectionOpener(0xc000a7c0d0, {0x1f6e408, 0xc000ac0e60})
+	C:/Program Files/Go/src/database/sql/sql.go:1261 +0x87
+created by database/sql.OpenDB in goroutine 1
+	C:/Program Files/Go/src/database/sql/sql.go:841 +0x130
+
+goroutine 7796 [IO wait]:
+internal/poll.runtime_pollWait(0x172ecdd43b8, 0x72)
+	C:/Program Files/Go/src/runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0xc002592580?, 0x7f9?, 0x0)
+	C:/Program Files/Go/src/internal/poll/fd_poll_runtime.go:84 +0x27
+internal/poll.execIO(0xc001efef20, 0x1d831c0)
+	C:/Program Files/Go/src/internal/poll/fd_windows.go:177 +0x105
+internal/poll.(*FD).Read(0xc001efef08, {0xc008666c00, 0x1300, 0x1300})
+	C:/Program Files/Go/src/internal/poll/fd_windows.go:438 +0x29b
+net.(*netFD).Read(0xc001efef08, {0xc008666c00?, 0xc0006c48d0?, 0xd?})
+	C:/Program Files/Go/src/net/fd_posix.go:55 +0x25
+net.(*conn).Read(0xc008458080, {0xc008666c00?, 0x172ecb90828?, 0x172c7730a38?})
+	C:/Program Files/Go/src/net/net.go:194 +0x45
+crypto/tls.(*atLeastReader).Read(0xc000a97560, {0xc008666c00?, 0x12f3?, 0xc0095519b8?})
+	C:/Program Files/Go/src/crypto/tls/conn.go:809 +0x3b
+bytes.(*Buffer).ReadFrom(0xc0006c49b8, {0x1f663a0, 0xc000a97560})
+	C:/Program Files/Go/src/bytes/buffer.go:211 +0x98
+crypto/tls.(*Conn).readFromUntil(0xc0006c4708, {0x172ed1df028, 0xc008458080}, 0x70ead4?)
+	C:/Program Files/Go/src/crypto/tls/conn.go:831 +0xde
+crypto/tls.(*Conn).readRecordOrCCS(0xc0006c4708, 0x0)
+	C:/Program Files/Go/src/crypto/tls/conn.go:629 +0x3cf
+crypto/tls.(*Conn).readRecord(...)
+	C:/Program Files/Go/src/crypto/tls/conn.go:591
+crypto/tls.(*Conn).Read(0xc0006c4708, {0xc001839000, 0x1000, 0x100009ca703?})
+	C:/Program Files/Go/src/crypto/tls/conn.go:1385 +0x145
+bufio.(*Reader).Read(0xc001f1baa0, {0xc004b4a740, 0x9, 0x743339?})
+	C:/Program Files/Go/src/bufio/bufio.go:245 +0x197
+io.ReadAtLeast({0x1f631a0, 0xc001f1baa0}, {0xc004b4a740, 0x9, 0x9}, 0x9)
+	C:/Program Files/Go/src/io/io.go:335 +0x91
+io.ReadFull(...)
+	C:/Program Files/Go/src/io/io.go:354
+net/http.http2readFrameHeader({0xc004b4a740, 0x9, 0xc0010d9530?}, {0x1f631a0?, 0xc001f1baa0?})
+	C:/Program Files/Go/src/net/http/h2_bundle.go:1805 +0x65
+net/http.(*http2Framer).ReadFrame(0xc004b4a700)
+	C:/Program Files/Go/src/net/http/h2_bundle.go:2072 +0x7d
+net/http.(*http2clientConnReadLoop).run(0xc009551fa8)
+	C:/Program Files/Go/src/net/http/h2_bundle.go:9933 +0xda
+net/http.(*http2ClientConn).readLoop(0xc002f7a1c0)
+	C:/Program Files/Go/src/net/http/h2_bundle.go:9812 +0x79
+created by net/http.(*http2Transport).newClientConn in goroutine 7795
+	C:/Program Files/Go/src/net/http/h2_bundle.go:8334 +0xde5
+
+goroutine 13700 [syscall]:
+syscall.Syscall6(0x0?, 0x0?, 0x0?, 0x17bfe00?, 0xc0032b0ec0?, 0xc008ce5c80?, 0x707b27?, 0xc0007ce3ce?)
+	C:/Program Files/Go/src/runtime/syscall_windows.go:463 +0x38
+syscall.readFile(0xaa0, {0xc0025ce000?, 0x8000, 0xc008ce5cb8?}, 0x6f5ffc?, 0x800000?)
+	C:/Program Files/Go/src/syscall/zsyscall_windows.go:1020 +0x8b
+syscall.ReadFile(...)
+	C:/Program Files/Go/src/syscall/syscall_windows.go:453
+syscall.Read(0xc00318f688?, {0xc0025ce000?, 0xc00260e000?, 0xc008ce5d30?})
+	C:/Program Files/Go/src/syscall/syscall_windows.go:432 +0x2d
+internal/poll.(*FD).Read(0xc00318f688, {0xc0025ce000, 0x8000, 0x8000})
+	C:/Program Files/Go/src/internal/poll/fd_windows.go:424 +0x1b5
+os.(*File).read(...)
+	C:/Program Files/Go/src/os/file_posix.go:29
+os.(*File).Read(0xc00041dd50, {0xc0025ce000?, 0x743b3f?, 0x8?})
+	C:/Program Files/Go/src/os/file.go:124 +0x4f
+io.copyBuffer({0x1f64c40, 0xc00177ff20}, {0x1f632e0, 0xc00041dd70}, {0x0, 0x0, 0x0})
+	C:/Program Files/Go/src/io/io.go:429 +0x190
+io.Copy(...)
+	C:/Program Files/Go/src/io/io.go:388
+os.genericWriteTo(0xc001a9a000?, {0x1f64c40, 0xc00177ff20})
+	C:/Program Files/Go/src/os/file.go:275 +0x4f
+os.(*File).WriteTo(0x290b690?, {0x1f64c40?, 0xc00177ff20?})
+	C:/Program Files/Go/src/os/file.go:253 +0x49
+io.copyBuffer({0x1f64c40, 0xc00177ff20}, {0x1f63200, 0xc00041dd50}, {0x0, 0x0, 0x0})
+	C:/Program Files/Go/src/io/io.go:411 +0x9d
+io.Copy(...)
+	C:/Program Files/Go/src/io/io.go:388
+os/exec.(*Cmd).writerDescriptor.func1()
+	C:/Program Files/Go/src/os/exec/exec.go:596 +0x34
+os/exec.(*Cmd).Start.func2(0xc001f52000?)
+	C:/Program Files/Go/src/os/exec/exec.go:749 +0x2c
+created by os/exec.(*Cmd).Start in goroutine 1210
+	C:/Program Files/Go/src/os/exec/exec.go:748 +0x9c5
+
+goroutine 13625 [IO wait]:
+internal/poll.runtime_pollWait(0x172ecdd4188, 0x72)
+	C:/Program Files/Go/src/runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0x1f64280?, 0xc00276f970?, 0x0)
+	C:/Program Files/Go/src/internal/poll/fd_poll_runtime.go:84 +0x27
+internal/poll.execIO(0xc00220b6a0, 0x1d831c0)
+	C:/Program Files/Go/src/internal/poll/fd_windows.go:177 +0x105
+internal/poll.(*FD).Read(0xc00220b688, {0xc001868000, 0x1000, 0x1000})
+	C:/Program Files/Go/src/internal/poll/fd_windows.go:438 +0x29b
+net.(*netFD).Read(0xc00220b688, {0xc001868000?, 0xc00276fad0?, 0x7c7c45?})
+	C:/Program Files/Go/src/net/fd_posix.go:55 +0x25
+net.(*conn).Read(0xc007d3edf0, {0xc001868000?, 0x0?, 0x0?})
+	C:/Program Files/Go/src/net/net.go:194 +0x45
+net/http.(*connReader).Read(0xc0012820f0, {0xc001868000, 0x1000, 0x1000})
+	C:/Program Files/Go/src/net/http/server.go:798 +0x159
+bufio.(*Reader).fill(0xc002c020c0)
+	C:/Program Files/Go/src/bufio/bufio.go:113 +0x103
+bufio.(*Reader).Peek(0xc002c020c0, 0x4)
+	C:/Program Files/Go/src/bufio/bufio.go:152 +0x53
+net/http.(*conn).serve(0xc001a9abd0, {0x1f6e3d0, 0xc0003db560})
+	C:/Program Files/Go/src/net/http/server.go:2137 +0x785
+created by net/http.(*Server).Serve in goroutine 26
+	C:/Program Files/Go/src/net/http/server.go:3454 +0x485
