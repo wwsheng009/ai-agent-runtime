@@ -533,7 +533,7 @@ func TestDispatchChatCommandUnifiedCommandGateUsesTerminalSessionOnly(t *testing
 		"当前 approval-reuse:",
 		"错误: /not-a-command 尚未迁移到统一渲染命令通道，已在 interactive TTY 中禁用。",
 		"错误: 需要指定 shell 命令",
-		"错误: /call 尚未迁移到统一渲染命令通道，已在 interactive TTY 中禁用。",
+		"错误: 需要指定 function 名称",
 		"当前 provider:",
 	} {
 		if !strings.Contains(transcript.String(), want) {

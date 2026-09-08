@@ -68,10 +68,10 @@ func assertStderrZeroRenderIntersection(t *testing.T, stderr string, terminal *b
 func TestB4InteractiveErrorStderrZeroIntersection(t *testing.T) {
 	session, coord, terminal := newB4UnifiedSession(t)
 
-	// 已知错误 1：/agents panel 未迁移到统一渲染器（fence 错误）。
+	// 已知错误 1：未知命令在 unified TTY 中被语义 gate 消费。
 	// 已知错误 2：/retry 不接受参数（语义错误）。
 	_, stderr := captureStdoutStderr(t, func() {
-		for _, input := range []string{"/agents panel", "/retry extra-arg"} {
+		for _, input := range []string{"/not-a-command", "/retry extra-arg"} {
 			if dispatchChatCommand(session, input, false) {
 				t.Fatalf("%s unexpectedly requested chat exit", input)
 			}
@@ -92,8 +92,8 @@ func TestB4InteractiveFenceErrorRenderedToStdout(t *testing.T) {
 	session, coord, terminal := newB4UnifiedSession(t)
 
 	_, stderr := captureStdoutStderr(t, func() {
-		if dispatchChatCommand(session, "/agents panel", false) {
-			t.Fatal("/agents panel unexpectedly requested chat exit")
+		if dispatchChatCommand(session, "/not-a-command", false) {
+			t.Fatal("/not-a-command unexpectedly requested chat exit")
 		}
 	})
 	coord.waitUIActorIdle()

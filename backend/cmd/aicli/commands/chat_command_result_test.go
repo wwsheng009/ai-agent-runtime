@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -102,7 +103,32 @@ func TestTryExecuteStructuredChatCommandMigratesFiniteComposerCommands(t *testin
 	if session.PermissionMode != "plan" {
 		t.Fatalf("permission mode=%q want plan", session.PermissionMode)
 	}
-	assertDocument("/permission-mode bypass_permissions", "需要确认交互")
+	// bypass_permissions confirms through the TTY priority-line prompt; feed a
+	// cancelling answer via the queued-input path used by the approval flow.
+	session.InputQueue = newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	session.InputQueue.setExternalInputCaptureActive(true)
+	type bypassOutcome struct {
+		result  CommandResult
+		handled bool
+		err     error
+	}
+	bypassDone := make(chan bypassOutcome, 1)
+	go func() {
+		result, handled, err := tryExecuteStructuredChatCommand(session, "/permission-mode bypass_permissions")
+		bypassDone <- bypassOutcome{result: result, handled: handled, err: err}
+	}()
+	requireEventuallyPriorityMode(t, session.InputQueue)
+	session.InputQueue.routeLine(chatQueuedInput{Text: "cancel", Source: "test"})
+	outcome := <-bypassDone
+	if outcome.err != nil || !outcome.handled {
+		t.Fatalf("bypass confirm match=(%t, %v), want handled", outcome.handled, outcome.err)
+	}
+	if plain := ui.RenderDocumentPlain(outcome.result.Document()); !strings.Contains(plain, "已取消，permission-mode 保持为 plan") {
+		t.Fatalf("bypass cancel document missing cancel status:\n%s", plain)
+	}
+	if session.PermissionMode != "plan" {
+		t.Fatalf("permission mode=%q want plan (cancel must not switch)", session.PermissionMode)
+	}
 	assertDocument("/approval-reuse", "当前 approval-reuse: session_readonly_shell")
 	assertDocument("/approval-reuse off", "已切换到 approval-reuse=off")
 }
@@ -193,7 +219,7 @@ func TestUnifiedInteractiveLegacyCommandsAreFencedBeforeLegacyHandlers(t *testin
 	}{
 		{input: "/rewind 0", name: "/backtrack"},
 		{input: "/resume", name: "/resume"},
-		{input: "/agents panel", name: "/agents 的交互、发送和路由子命令尚未迁移到统一渲染命令通道。"},
+		{input: "/rewind 5", name: "/backtrack"},
 	}
 	raw := captureStdout(t, func() {
 		for _, test := range commands {
@@ -221,9 +247,6 @@ func TestUnifiedInteractiveLegacyCommandsAreFencedBeforeLegacyHandlers(t *testin
 	}
 	for index, test := range commands {
 		marker := "错误: " + test.name + " 正在迁移到统一渲染器，已拒绝旧终端直写"
-		if test.input == "/agents panel" {
-			marker = "错误: " + test.name
-		}
 		if !strings.Contains(snapshot.Cells[index].Source, marker) {
 			t.Fatalf("cell[%d] for %s did not contain fence marker %q: %+v", index, test.input, marker, snapshot.Cells[index])
 		}
@@ -581,12 +604,37 @@ func TestTryExecuteStructuredChatCommandReasoningEffort(t *testing.T) {
 		t.Fatalf("clear document missing status:\n%s", plain)
 	}
 
-	result, handled, err = tryExecuteStructuredChatCommand(session, "/reasoning_effort select")
-	if err != nil || !handled {
-		t.Fatalf("/reasoning_effort select structured match=(%t, %v), want handled", handled, err)
+	// select runs the TTY priority-line picker; feed a confirming value through
+	// the queued-input path used by interactive prompts.
+	selectSession := &ChatSession{
+		ProviderName: "beta",
+		Provider:     cfg.Providers.Items["beta"],
+		Model:        "beta-model",
+		Config:       cfg,
 	}
-	if plain := ui.RenderDocumentPlain(result.Document()); !strings.Contains(plain, "需要选择器交互") {
-		t.Fatalf("select document missing migration guard:\n%s", plain)
+	selectSession.InputQueue = newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	selectSession.InputQueue.setExternalInputCaptureActive(true)
+	type selectOutcome struct {
+		result  CommandResult
+		handled bool
+		err     error
+	}
+	selectDone := make(chan selectOutcome, 1)
+	go func() {
+		result, handled, err := tryExecuteStructuredChatCommand(selectSession, "/reasoning_effort select")
+		selectDone <- selectOutcome{result: result, handled: handled, err: err}
+	}()
+	requireEventuallyPriorityMode(t, selectSession.InputQueue)
+	selectSession.InputQueue.routeLine(chatQueuedInput{Text: "high", Source: "test"})
+	so := <-selectDone
+	if so.err != nil || !so.handled {
+		t.Fatalf("/reasoning_effort select match=(%t, %v), want handled", so.handled, so.err)
+	}
+	if selectSession.ReasoningEffort != "high" {
+		t.Fatalf("reasoning effort=%q want high", selectSession.ReasoningEffort)
+	}
+	if plain := ui.RenderDocumentPlain(so.result.Document()); !strings.Contains(plain, "当前 reasoning_effort: high") {
+		t.Fatalf("select document missing status:\n%s", plain)
 	}
 }
 

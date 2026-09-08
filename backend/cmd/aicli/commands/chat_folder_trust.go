@@ -203,10 +203,11 @@ func handleTrustCommand(session *ChatSession, command string) bool {
 	return false
 }
 
-// executeStructuredTrustCommand exposes the read-only trust state through the
-// unified command pipeline. Granting trust writes a durable security decision,
-// so it remains unavailable until a typed confirmation effect can express the
-// user's intent without reviving the legacy terminal prompt path.
+// executeStructuredTrustCommand exposes trust state and the finite grant
+// mutation through the unified command pipeline. The legacy terminal handler
+// performs the durable grant without an interactive prompt (the store write is
+// the confirmation), so the unified variant applies the same mutation and
+// commits one atomic result cell showing the new trust decision.
 func executeStructuredTrustCommand(session *ChatSession, command string) CommandResult {
 	if session == nil {
 		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
@@ -216,7 +217,29 @@ func executeStructuredTrustCommand(session *ChatSession, command string) Command
 	case "", "status":
 		return commandTextResult(folderTrustStatusText(session))
 	case "grant", "yes", "y":
-		return commandTextResult("错误: /trust grant 需要确认交互，尚未迁移到统一渲染命令通道。\n" + folderTrustStatusText(session))
+		if !foldertrust.FeatureEnabled() {
+			return commandTextResult("folder trust 功能未启用（设置 AICLI_FOLDER_TRUST=1 后生效）\n" + folderTrustStatusText(session))
+		}
+		cwd := folderTrustProjectRoot(session)
+		key, err := foldertrust.GrantTrust(cwd)
+		if err != nil {
+			return commandErrorResult(fmt.Errorf("无法写入信任记录: %w", err))
+		}
+		interactive := !session.NoInteractive
+		res := foldertrust.Resolve(foldertrust.ResolveOptions{
+			CWD:         cwd,
+			TrustGrant:  false, // already granted above
+			Interactive: &interactive,
+		})
+		// Ensure source reflects explicit grant when store already trusted.
+		if res.Trusted && res.Source == "store" {
+			res.Source = "grant"
+		}
+		if key != "" && res.WorkspaceKey == "" {
+			res.WorkspaceKey = key
+		}
+		applyChatFolderTrust(session, res)
+		return commandTextResult("已信任工作区: " + res.WorkspaceKey + "\n" + folderTrustStatusText(session))
 	default:
 		return commandTextResult("用法: /trust [status|grant]\n" + folderTrustStatusText(session))
 	}

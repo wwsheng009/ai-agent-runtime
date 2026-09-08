@@ -69,6 +69,52 @@ func handleDirectFunctionCommand(session *ChatSession, command string) bool {
 	return false
 }
 
+// executeStructuredDirectFunctionCommand is the unified interactive entry
+// point for `/call <name> [args-json]` and its alias `/tool`. It owns the
+// whole command: resolution, argument parsing, authorization and execution all
+// reuse the legacy direct-invoke chain, but the result is rendered as one
+// unified command cell instead of raw stdout (same contract as
+// executeStructuredSkillCommand).
+func executeStructuredDirectFunctionCommand(session *ChatSession, command string) (CommandResult, bool) {
+	if session == nil {
+		return commandErrorResult(fmt.Errorf("当前没有活动会话")), true
+	}
+	if session.DisableTools {
+		return commandTextResult("错误: 当前会话已禁用 tools；/call、/tool 和 /skill 不可执行"), true
+	}
+
+	payload, jsonOutput := extractCommandArgumentOptions(command)
+	jsonOutput = jsonOutput || shouldUseSessionJSONCommandOutput(session)
+	requestedName, rawArgs := splitCommandNameAndRemainder(payload)
+	if requestedName == "" {
+		return commandTextResult("错误: 需要指定 function 名称\n用法: /call <name> [args-json] 或 /tool <name> [args-json]"), true
+	}
+
+	resolvedName, _, err := resolveDirectCallableFunctionName(session, requestedName, false)
+	if err != nil {
+		return commandErrorResult(err), true
+	}
+	args, err := parseDirectFunctionArgs(rawArgs, false, resolvedName)
+	if err != nil {
+		return commandErrorResult(err), true
+	}
+	args, err = authorizeDirectFunctionInvocation(session, resolvedName, args, !jsonOutput)
+	if err != nil {
+		return commandErrorResult(err), true
+	}
+
+	report, err := executeDirectFunction(session, requestedName, resolvedName, args)
+	if err != nil {
+		return commandErrorResult(err), true
+	}
+
+	text := formatDirectFunctionInvokeReport(report, jsonOutput)
+	if text == "" {
+		text = fmt.Sprintf("Function %s 执行完成", report.FunctionName)
+	}
+	return commandTextResult(strings.TrimRight(text, "\n")), true
+}
+
 func handleDirectSkillCommand(session *ChatSession, command string) bool {
 	if rejectUnmigratedUnifiedChatCommand(session, "/skill") {
 		return false

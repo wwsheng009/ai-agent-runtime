@@ -102,12 +102,12 @@ func TestCollabSnapshotCommandStaysOnUnifiedTerminalSession(t *testing.T) {
 		transcript.WriteString(cell.Source)
 		transcript.WriteByte('\n')
 	}
-	if strings.Count(transcript.String(), "Parent Mailbox Timeline:") != 2 {
-		t.Fatalf("expected dispatch and direct collab snapshot cells, got:\n%s", transcript.String())
+	if strings.Count(transcript.String(), "Parent Mailbox Timeline:") != 3 {
+		t.Fatalf("expected dispatch, direct, and follow snapshot cells, got:\n%s", transcript.String())
 	}
 	for _, marker := range []string{
 		"<none>",
-		"/collab follow 需要持续观察 effect",
+		"Parent Mailbox Timeline:",
 	} {
 		if !strings.Contains(transcript.String(), marker) {
 			t.Fatalf("collab semantic transcript is missing %q:\n%s", marker, transcript.String())
@@ -173,7 +173,7 @@ func TestTrustStatusCommandStaysOnUnifiedTerminalSession(t *testing.T) {
 	}
 	for _, marker := range []string{
 		"feature_off (project scope allowed)",
-		"/trust grant 需要确认交互",
+		"folder trust 功能未启用（设置 AICLI_FOLDER_TRUST=1 后生效）",
 	} {
 		if !strings.Contains(transcript.String(), marker) {
 			t.Fatalf("trust semantic transcript is missing %q:\n%s", marker, transcript.String())
@@ -284,8 +284,8 @@ func TestAgentsSnapshotCommandStaysOnUnifiedTerminalSession(t *testing.T) {
 	if strings.Count(transcript.String(), "Agent Graph:") != 2 {
 		t.Fatalf("expected dispatch and direct agents snapshots, got:\n%s", transcript.String())
 	}
-	if !strings.Contains(transcript.String(), "/agents 的交互、发送和路由子命令尚未迁移") {
-		t.Fatalf("agents semantic rejection missing:\n%s", transcript.String())
+	if !strings.Contains(transcript.String(), "Agent Control Panel:") {
+		t.Fatalf("agents panel snapshot missing:\n%s", transcript.String())
 	}
 	if !strings.Contains(terminal.String(), "Agent Graph:") {
 		t.Fatalf("TerminalSession did not render /agents: %q", terminal.String())

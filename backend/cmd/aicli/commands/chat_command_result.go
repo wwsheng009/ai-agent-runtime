@@ -210,6 +210,15 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 			return result, true, nil
 		}
 	}
+	// /call and /tool are fully migrated: direct function invocation resolves,
+	// authorizes and executes through the unified command cell. Both must be
+	// recognized before the broad legacy fence so no variant can revive the
+	// terminal writer (same contract as /skill).
+	if (commandMatches(cmdLower, "/call") || commandMatches(cmdLower, "/tool")) && unifiedDirectInteractiveOutput(session) {
+		if result, handled := executeStructuredDirectFunctionCommand(session, command); handled {
+			return result, true, nil
+		}
+	}
 	// /export is fully migrated: explicit targets/formats apply through the
 	// unified command cell, and bare /export opens the typed session/format
 	// picker. It must be recognized before the broad /export legacy fence so no
@@ -246,6 +255,19 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		if result, handled := executeStructuredResumeCommand(session, command); handled {
 			return result, true, nil
 		}
+	}
+	// /clear, /yolo and /image are finite single-shot commands whose unified
+	// variants submit one confirmation (when needed) plus one mutation/result
+	// cell. They must be claimed before the compatibility fence and the broad
+	// legacy gate so no variant can revive the terminal writer.
+	if (commandMatches(cmdLower, "/clear") || commandMatches(cmdLower, "/cls")) && unifiedDirectInteractiveOutput(session) {
+		return executeStructuredClearCommand(session, command), true, nil
+	}
+	if commandMatches(cmdLower, "/yolo") && unifiedDirectInteractiveOutput(session) {
+		return executeStructuredYoloCommand(session, command), true, nil
+	}
+	if commandMatches(cmdLower, "/image") && unifiedDirectInteractiveOutput(session) {
+		return executeStructuredImageCommand(session, command), true, nil
 	}
 	// The unified interactive session has no legacy terminal writer. Commands
 	// whose old implementation still owns a raw prompt, a fullscreen picker, or
@@ -858,7 +880,13 @@ func executeStructuredPermissionModeCommand(session *ChatSession, command string
 		return commandErrorResult(err)
 	}
 	if mode == "bypass_permissions" {
-		return commandTextResult("错误: /permission-mode bypass_permissions 需要确认交互，尚未迁移到统一渲染命令通道。")
+		confirmed, message := evalBypassPermissionModeConfirmation(session, "/permission-mode")
+		if !confirmed {
+			if message == "" {
+				message = "已取消，permission-mode 保持为 " + chatRuntimePermissionModeLabel(session)
+			}
+			return commandTextResult(message)
+		}
 	}
 	setChatPermissionMode(session, mode)
 	message := fmt.Sprintf("提示: 已切换到 permission-mode=%s", mode)
@@ -1018,7 +1046,18 @@ func executeStructuredReasoningEffortCommand(session *ChatSession, command strin
 	case reasoningEffortCommandStatus:
 		return commandResultWithWarnings(buildChatReasoningEffortStatusDocument(session))
 	case reasoningEffortCommandSelect:
-		return commandTextResult("错误: /reasoning_effort select 需要选择器交互，尚未迁移到统一渲染命令通道。")
+		selected, err := selectStructuredReasoningEffort(session)
+		if err != nil {
+			if isChatInteractivePromptCancelError(err) {
+				return commandTextResult("已取消 reasoning_effort 选择")
+			}
+			return commandErrorResult(err)
+		}
+		warnings, err := applyStructuredReasoningEffortSelection(session, selected, false)
+		if err != nil {
+			return commandErrorResult(err)
+		}
+		return commandResultWithWarnings(buildChatReasoningEffortStatusDocument(session), warnings...)
 	case reasoningEffortCommandClear, reasoningEffortCommandSet:
 		raw := req.Value
 		explicit := req.Action == reasoningEffortCommandSet

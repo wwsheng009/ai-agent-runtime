@@ -277,86 +277,93 @@ func renderDoctorSubagentRouteReport(report *doctorSubagentRouteReport, outputOp
 		printCommandJSONOutput("doctor subagent-route", outputOptions.Envelope, report)
 		return
 	}
+	fmt.Print(doctorSubagentRouteReportText(report))
+}
+
+// doctorSubagentRouteReportText builds the plain-text dry-run report for
+// unified command cells; the legacy renderer prints the same rows.
+func doctorSubagentRouteReportText(report *doctorSubagentRouteReport) string {
 	if report == nil {
-		fmt.Println("Subagent route: <nil>")
-		return
+		return "Subagent route: <nil>\n"
 	}
-	fmt.Println("================================================================================")
+	var b strings.Builder
+	fmt.Fprintln(&b, "================================================================================")
 	if report.Scope == "team" {
-		fmt.Println("                           Team Route Dry Run")
+		fmt.Fprintln(&b, "                           Team Route Dry Run")
 	} else {
-		fmt.Println("                         Subagent Route Dry Run")
+		fmt.Fprintln(&b, "                         Subagent Route Dry Run")
 	}
-	fmt.Println("================================================================================")
+	fmt.Fprintln(&b, "================================================================================")
 	if report.ConfigPath != "" {
-		fmt.Printf("Config:          %s\n", report.ConfigPath)
+		fmt.Fprintf(&b, "Config:          %s\n", report.ConfigPath)
 	}
-	fmt.Printf("Scope:           %s\n", report.Scope)
-	fmt.Printf("Routing source:  %s\n", report.RoutingSource)
-	fmt.Printf("Routing enabled: %v\n", report.RoutingEnabled)
-	fmt.Println()
-	fmt.Println("[Request]")
+	fmt.Fprintf(&b, "Scope:           %s\n", report.Scope)
+	fmt.Fprintf(&b, "Routing source:  %s\n", report.RoutingSource)
+	fmt.Fprintf(&b, "Routing enabled: %v\n", report.RoutingEnabled)
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "[Request]")
 	if report.Request.Workflow != "" {
-		fmt.Printf("  Workflow:      %s\n", report.Request.Workflow)
+		fmt.Fprintf(&b, "  Workflow:      %s\n", report.Request.Workflow)
 	}
 	if report.Request.TeamID != "" || report.Request.Teammate != "" || report.Request.TaskID != "" {
-		fmt.Printf("  Team task:     team=%s teammate=%s task=%s\n",
+		fmt.Fprintf(&b, "  Team task:     team=%s teammate=%s task=%s\n",
 			emptyIfBlank(report.Request.TeamID),
 			emptyIfBlank(report.Request.Teammate),
 			emptyIfBlank(report.Request.TaskID),
 		)
 	}
-	fmt.Printf("  Role:          %s\n", emptyIfBlank(report.Request.Role))
-	fmt.Printf("  Difficulty:    %s\n", emptyIfBlank(report.Request.Difficulty))
-	fmt.Printf("  Read only:     %v\n", report.Request.ReadOnly)
+	fmt.Fprintf(&b, "  Role:          %s\n", emptyIfBlank(report.Request.Role))
+	fmt.Fprintf(&b, "  Difficulty:    %s\n", emptyIfBlank(report.Request.Difficulty))
+	fmt.Fprintf(&b, "  Read only:     %v\n", report.Request.ReadOnly)
 	if len(report.Request.WritePaths) > 0 {
-		fmt.Printf("  Write paths:   %s\n", strings.Join(report.Request.WritePaths, ", "))
+		fmt.Fprintf(&b, "  Write paths:   %s\n", strings.Join(report.Request.WritePaths, ", "))
 	}
 	if report.Request.Goal != "" {
-		fmt.Printf("  Goal:          %s\n", report.Request.Goal)
+		fmt.Fprintf(&b, "  Goal:          %s\n", report.Request.Goal)
 	}
 	if report.Request.Provider != "" || report.Request.Model != "" || report.Request.ReasoningEffort != "" {
-		fmt.Printf("  Overrides:     provider=%s model=%s reasoning_effort=%s\n",
+		fmt.Fprintf(&b, "  Overrides:     provider=%s model=%s reasoning_effort=%s\n",
 			emptyIfBlank(report.Request.Provider),
 			emptyIfBlank(report.Request.Model),
 			emptyIfBlank(report.Request.ReasoningEffort),
 		)
 	}
-	fmt.Println()
-	fmt.Println("[Parent]")
-	fmt.Printf("  Provider:      %s\n", emptyIfBlank(report.Parent.Provider))
-	fmt.Printf("  Model:         %s\n", emptyIfBlank(report.Parent.Model))
-	fmt.Printf("  Reasoning:     %s\n", emptyIfBlank(report.Parent.ReasoningEffort))
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "[Parent]")
+	fmt.Fprintf(&b, "  Provider:      %s\n", emptyIfBlank(report.Parent.Provider))
+	fmt.Fprintf(&b, "  Model:         %s\n", emptyIfBlank(report.Parent.Model))
+	fmt.Fprintf(&b, "  Reasoning:     %s\n", emptyIfBlank(report.Parent.ReasoningEffort))
 	if report.Parent.MaxTokens > 0 {
-		fmt.Printf("  Max tokens:    %d\n", report.Parent.MaxTokens)
+		fmt.Fprintf(&b, "  Max tokens:    %d\n", report.Parent.MaxTokens)
 	}
-	fmt.Println()
-	fmt.Println("[Decision]")
-	fmt.Printf("  Difficulty:    %s", emptyIfBlank(report.Decision.Difficulty))
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "[Decision]")
+	fmt.Fprintf(&b, "  Difficulty:    %s", emptyIfBlank(report.Decision.Difficulty))
 	if report.Decision.DifficultySource != "" {
-		fmt.Printf(" (%s)", report.Decision.DifficultySource)
+		fmt.Fprintf(&b, " (%s)", report.Decision.DifficultySource)
 	}
-	fmt.Println()
-	fmt.Printf("  Provider:      %s\n", emptyIfBlank(report.Decision.Provider))
-	fmt.Printf("  Model:         %s\n", emptyIfBlank(report.Decision.Model))
-	fmt.Printf("  Reasoning:     %s\n", emptyIfBlank(report.Decision.ReasoningEffort))
-	fmt.Printf("  Source:        %s\n", emptyIfBlank(report.Decision.Source))
+	fmt.Fprintln(&b)
+	fmt.Fprintf(&b, "  Provider:      %s\n", emptyIfBlank(report.Decision.Provider))
+	fmt.Fprintf(&b, "  Model:         %s\n", emptyIfBlank(report.Decision.Model))
+	fmt.Fprintf(&b, "  Reasoning:     %s\n", emptyIfBlank(report.Decision.ReasoningEffort))
+	fmt.Fprintf(&b, "  Source:        %s\n", emptyIfBlank(report.Decision.Source))
 	if report.Decision.FallbackUsed || report.Decision.FallbackReason != "" {
-		fmt.Printf("  Fallback:      used=%v reason=%s\n", report.Decision.FallbackUsed, emptyIfBlank(report.Decision.FallbackReason))
+		fmt.Fprintf(&b, "  Fallback:      used=%v reason=%s\n", report.Decision.FallbackUsed, emptyIfBlank(report.Decision.FallbackReason))
 	}
 	if report.Decision.MaxTokens > 0 {
-		fmt.Printf("  Max tokens:    %d\n", report.Decision.MaxTokens)
+		fmt.Fprintf(&b, "  Max tokens:    %d\n", report.Decision.MaxTokens)
 	}
 	if report.Decision.Timeout != "" {
-		fmt.Printf("  Timeout:       %s\n", report.Decision.Timeout)
+		fmt.Fprintf(&b, "  Timeout:       %s\n", report.Decision.Timeout)
 	}
 	if len(report.Warnings) > 0 {
-		fmt.Println()
-		fmt.Println("[Warnings]")
+		fmt.Fprintln(&b)
+		fmt.Fprintln(&b, "[Warnings]")
 		for _, warning := range report.Warnings {
-			fmt.Printf("  - %s\n", warning)
+			fmt.Fprintf(&b, "  - %s\n", warning)
 		}
 	}
+	return b.String()
 }
 
 func resolveDoctorSubagentRouteParent(

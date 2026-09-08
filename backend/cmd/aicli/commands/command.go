@@ -461,15 +461,27 @@ func updateChatSessionTitle(session *ChatSession, title string) error {
 }
 
 func confirmClearConversationHistory(session *ChatSession) bool {
+	confirmed, message := evalClearConversationConfirmation(session)
+	if !confirmed && message != "" {
+		printChatCommandOutput(session, message)
+	}
+	return confirmed
+}
+
+// evalClearConversationConfirmation runs the /clear confirmation and returns
+// the outcome plus a caller-renderable message. The plain wrapper prints the
+// message through the compatibility writer; unified command handlers surface
+// it as their own semantic command cell.
+func evalClearConversationConfirmation(session *ChatSession) (bool, string) {
 	if session == nil {
-		return false
+		return false, ""
 	}
 	messageCount := countChatStatusMessages(session.Messages)
 	if messageCount == 0 && session.MsgCount > 0 {
 		messageCount = session.MsgCount
 	}
 	if messageCount == 0 {
-		return true
+		return true, ""
 	}
 
 	lines := []string{
@@ -478,8 +490,7 @@ func confirmClearConversationHistory(session *ChatSession) bool {
 		"[会话] Goal、会话配置、团队绑定和本地文件不会被删除。",
 	}
 	if session.NoInteractive {
-		printChatCommandOutput(session, strings.Join(append(lines, "错误: 非交互模式不能确认清空会话历史"), "\n"))
-		return false
+		return false, strings.Join(append(lines, "错误: 非交互模式不能确认清空会话历史"), "\n")
 	}
 
 	restoreInputMode := pushChatComposerInputMode(session, chatInputModeConfirmation)
@@ -489,18 +500,16 @@ func confirmClearConversationHistory(session *ChatSession) bool {
 	text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), readPrompt)
 	cleanupPrompt()
 	if err != nil {
-		printChatCommandOutput(session, "已取消，会话历史未清空")
-		return false
+		return false, "已取消，会话历史未清空"
 	}
 	text = strings.TrimSpace(normalizeQueuedInputLine(text))
 	if transientPrompt {
 		renderChatRuntimePriorityPromptTranscript(session, lines, prompt, text)
 	}
 	if text != "clear" {
-		printChatCommandOutput(session, "已取消，会话历史未清空")
-		return false
+		return false, "已取消，会话历史未清空"
 	}
-	return true
+	return true, ""
 }
 
 func handlePermissionModeCommand(session *ChatSession, command string) bool {
@@ -528,12 +537,24 @@ func handlePermissionModeCommand(session *ChatSession, command string) bool {
 }
 
 func confirmBypassPermissionModeChange(session *ChatSession, source string) bool {
+	confirmed, message := evalBypassPermissionModeConfirmation(session, source)
+	if !confirmed && message != "" {
+		printChatCommandOutput(session, message)
+	}
+	return confirmed
+}
+
+// evalBypassPermissionModeConfirmation runs the bypass_permissions
+// confirmation and returns the outcome plus a caller-renderable message. The
+// plain wrapper prints the message through the compatibility writer; unified
+// command handlers surface it as their own semantic command cell.
+func evalBypassPermissionModeConfirmation(session *ChatSession, source string) (bool, string) {
 	if session == nil {
-		return false
+		return false, ""
 	}
 	currentMode := chatRuntimePermissionModeLabel(session)
 	if currentMode == "bypass_permissions" {
-		return true
+		return true, ""
 	}
 
 	lines := []string{
@@ -554,8 +575,7 @@ func confirmBypassPermissionModeChange(session *ChatSession, source string) bool
 		lines = append(lines, "[权限] 来源："+source)
 	}
 	if session.NoInteractive {
-		printChatCommandOutput(session, strings.Join(append(lines, "错误: 非交互模式不能在会话内确认 bypass_permissions；请改用启动参数显式配置"), "\n"))
-		return false
+		return false, strings.Join(append(lines, "错误: 非交互模式不能在会话内确认 bypass_permissions；请改用启动参数显式配置"), "\n")
 	}
 
 	restoreInputMode := pushChatComposerInputMode(session, chatInputModeConfirmation)
@@ -569,18 +589,16 @@ func confirmBypassPermissionModeChange(session *ChatSession, source string) bool
 	}()
 	cleanupPrompt()
 	if err != nil {
-		printfChatCommandOutput(session, "已取消，permission-mode 保持为 %s", currentMode)
-		return false
+		return false, fmt.Sprintf("已取消，permission-mode 保持为 %s", currentMode)
 	}
 	text = strings.TrimSpace(normalizeQueuedInputLine(text))
 	if transientPrompt {
 		renderChatRuntimePriorityPromptTranscript(session, lines, prompt, text)
 	}
 	if text != "bypass_permissions" {
-		printfChatCommandOutput(session, "已取消，permission-mode 保持为 %s", currentMode)
-		return false
+		return false, fmt.Sprintf("已取消，permission-mode 保持为 %s", currentMode)
 	}
-	return true
+	return true, ""
 }
 
 func handleImageAttachmentCommand(session *ChatSession, command string) bool {

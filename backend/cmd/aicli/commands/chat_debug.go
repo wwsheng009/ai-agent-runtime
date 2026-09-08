@@ -241,19 +241,38 @@ func handleChatAgentsCommand(session *ChatSession, command string) {
 	}
 }
 
-// executeStructuredAgentsCommand accepts only the finite agent-graph snapshot.
-// Picker, delivery, target mutation, panel, and routing branches have their
-// own input/effect lifecycles and cannot be represented as a static cell.
+// executeStructuredAgentsCommand exposes the agent-graph snapshot, picker,
+// delivery, target mutation, panel snapshot and routing report through the
+// unified command pipeline. Pickers run through the TTY-safe priority-line
+// primitives used by the approval flow; the live modal dashboard loop remains
+// a plain-terminal effect and is not revived — unified /agents panel commits a
+// finite snapshot cell instead.
 func executeStructuredAgentsCommand(session *ChatSession, command string) CommandResult {
 	if session == nil {
 		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
 	}
-	if strings.TrimSpace(extractCommandArgument(command)) != "" {
-		return commandTextResult("错误: /agents 的交互、发送和路由子命令尚未迁移到统一渲染命令通道。")
+	arg := strings.TrimSpace(extractCommandArgument(command))
+	verb := strings.ToLower(firstChatAgentsArgToken(arg))
+	switch verb {
+	case "":
+		lines := []string{"Agent Graph:"}
+		lines = append(lines, chatAgentGraphLines(session)...)
+		return commandTextResult(strings.Join(lines, "\n"))
+	case "pick", "select":
+		return executeStructuredAgentPickCommand(session)
+	case "send":
+		return executeStructuredAgentMessageCommand(session, arg, false)
+	case "followup", "task":
+		return executeStructuredAgentMessageCommand(session, arg, true)
+	case "target":
+		return executeStructuredAgentTargetCommand(session, arg)
+	case "panel", "pane", "dashboard":
+		return executeStructuredAgentPanelCommand(session, arg)
+	case "routing", "route":
+		return executeStructuredAgentRoutingCommand(session, arg)
+	default:
+		return commandTextResult("用法: /agents [pick|select|send|followup|target|panel|routing]")
 	}
-	lines := []string{"Agent Graph:"}
-	lines = append(lines, chatAgentGraphLines(session)...)
-	return commandTextResult(strings.Join(lines, "\n"))
 }
 
 func firstChatAgentsArgToken(argument string) string {
@@ -450,12 +469,28 @@ func parseChatAgentRoutingTestOptions(session *ChatSession, fields []string) (do
 }
 
 func printChatAgentRoutingUsage() {
-	fmt.Println("用法: /agents routing test --role <role> --difficulty <easy|normal|hard|expert> [--scope auto|subagent|team] [--workflow spawn_team] [--team-id <id>] [--teammate <id>] [--task <id>] [--write-path <path>] [--goal <text>] [--provider <name>] [--model <model>] [--reasoning-effort <value>] [--read-only=true]")
+	fmt.Println(chatAgentRoutingUsageText())
+}
+
+func chatAgentRoutingUsageText() string {
+	return "用法: /agents routing test --role <role> --difficulty <easy|normal|hard|expert> [--scope auto|subagent|team] [--workflow spawn_team] [--team-id <id>] [--teammate <id>] [--task <id>] [--write-path <path>] [--goal <text>] [--provider <name>] [--model <model>] [--reasoning-effort <value>] [--read-only=true]"
 }
 
 func sendChatAgentMessageCommand(session *ChatSession, argument string, trigger bool) error {
+	text, err := runChatAgentMessageCommand(session, argument, trigger)
+	if err != nil {
+		return err
+	}
+	fmt.Println(text)
+	return nil
+}
+
+// runChatAgentMessageCommand is the printing-free core of /agents send and
+// /agents followup. The unified command handler surfaces the returned text as
+// its atomic command cell.
+func runChatAgentMessageCommand(session *ChatSession, argument string, trigger bool) (string, error) {
 	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.ActorRegistry == nil {
-		return fmt.Errorf("agent registry not configured")
+		return "", fmt.Errorf("agent registry not configured")
 	}
 	target, message := parseChatAgentMessageCommand(argument)
 	selectedTarget := chatSessionSelectedAgentTarget(session)
@@ -470,9 +505,9 @@ func sendChatAgentMessageCommand(session *ChatSession, argument string, trigger 
 	}
 	if target == "" || message == "" {
 		if trigger {
-			return fmt.Errorf("用法: /agents followup [target] <message>")
+			return "", fmt.Errorf("用法: /agents followup [target] <message>")
 		}
-		return fmt.Errorf("用法: /agents send [target] <message>")
+		return "", fmt.Errorf("用法: /agents send [target] <message>")
 	}
 	fromSessionID := ""
 	if session.RuntimeSession != nil {
@@ -489,10 +524,9 @@ func sendChatAgentMessageCommand(session *ChatSession, argument string, trigger 
 		result, err = session.LocalRuntimeHost.ActorRegistry.SendMessage(context.Background(), fromSessionID, args)
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
-	printChatAgentMessageResult(trigger, result)
-	return nil
+	return chatAgentMessageResultText(trigger, result), nil
 }
 
 func parseChatAgentMessageCommand(argument string) (string, string) {
@@ -515,13 +549,16 @@ func parseChatAgentMessageCommand(argument string) (string, string) {
 }
 
 func printChatAgentMessageResult(trigger bool, result *toolbroker.AgentMessageResult) {
+	fmt.Println(chatAgentMessageResultText(trigger, result))
+}
+
+func chatAgentMessageResultText(trigger bool, result *toolbroker.AgentMessageResult) string {
 	action := "sent"
 	if trigger {
 		action = "followup"
 	}
 	if result == nil {
-		fmt.Printf("Agent Message: %s\n", action)
-		return
+		return fmt.Sprintf("Agent Message: %s", action)
 	}
 	mode := "queued"
 	if result.Triggered {
@@ -529,7 +566,222 @@ func printChatAgentMessageResult(trigger bool, result *toolbroker.AgentMessageRe
 	} else if result.Delivered {
 		mode = "delivered"
 	}
-	fmt.Printf("Agent Message: %s target=%s mode=%s\n", action, firstNonEmptyChatValue(result.TargetSessionID, "<none>"), mode)
+	return fmt.Sprintf("Agent Message: %s target=%s mode=%s", action, firstNonEmptyChatValue(result.TargetSessionID, "<none>"), mode)
+}
+
+// executeStructuredAgentPickCommand runs the agent picker through the
+// TTY-safe priority-line prompt. One attempt: a valid number/path/session
+// selects the target, anything else cancels into the atomic cell.
+func executeStructuredAgentPickCommand(session *ChatSession) CommandResult {
+	agents, err := chatAgentPickerItems(session)
+	if err != nil {
+		return commandErrorResult(err)
+	}
+	if len(agents) == 0 {
+		return commandTextResult("Agent Picker: <none>")
+	}
+	lines := chatAgentPickerPopupLines(agents, "")
+	restoreInputMode := pushChatComposerInputMode(session, chatInputModeConfirmation)
+	defer restoreInputMode()
+	prompt := "Agent (回车=1, q取消): "
+	readPrompt, cleanupPrompt, transientPrompt := showChatRuntimePriorityPrompt(session, lines, prompt)
+	text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), readPrompt)
+	cleanupPrompt()
+	if err != nil {
+		return commandTextResult("已取消 agent 选择")
+	}
+	text = strings.TrimSpace(normalizeQueuedInputLine(text))
+	if transientPrompt {
+		renderChatRuntimePriorityPromptTranscript(session, lines, prompt, text)
+	}
+	if text == "" {
+		text = "1"
+	}
+	if text == "q" || text == "quit" || text == "cancel" || text == "exit" {
+		return commandTextResult("已取消 agent 选择")
+	}
+	selected := resolveChatAgentPickerChoice(text, agents)
+	if selected == nil {
+		return commandTextResult("已取消 agent 选择")
+	}
+	setChatSelectedAgentTarget(session, firstNonEmptyChatValue(selected.Path, selected.SessionID, selected.ID))
+	warnIfChatSessionSyncFails(session, "set selected agent target", syncRuntimeSessionFromChat(session))
+	lines = []string{"Selected Agent:"}
+	lines = append(lines, chatAgentPickerSelectionLines(*selected)...)
+	return commandTextResult(strings.Join(lines, "\n"))
+}
+
+func executeStructuredAgentMessageCommand(session *ChatSession, argument string, trigger bool) CommandResult {
+	text, err := runChatAgentMessageCommand(session, argument, trigger)
+	if err != nil {
+		return commandErrorResult(err)
+	}
+	return commandTextResult(text)
+}
+
+func executeStructuredAgentTargetCommand(session *ChatSession, argument string) CommandResult {
+	fields := strings.Fields(strings.TrimSpace(argument))
+	if len(fields) < 2 {
+		return commandTextResult(strings.Join(chatAgentTargetLines(session), "\n"))
+	}
+	target := strings.TrimSpace(fields[1])
+	if strings.EqualFold(target, "clear") || strings.EqualFold(target, "none") {
+		setChatSelectedAgentTarget(session, "")
+		warnIfChatSessionSyncFails(session, "clear selected agent target", syncRuntimeSessionFromChat(session))
+		return commandTextResult("Selected Agent Target: <none>")
+	}
+	resolved, err := resolveChatAgentTarget(session, target)
+	if err != nil {
+		return commandErrorResult(err)
+	}
+	targetValue := firstNonEmptyChatValue(resolved.Path, resolved.SessionID, resolved.ID)
+	setChatSelectedAgentTarget(session, targetValue)
+	warnIfChatSessionSyncFails(session, "set selected agent target", syncRuntimeSessionFromChat(session))
+	return commandTextResult("Selected Agent Target: " + targetValue)
+}
+
+// executeStructuredAgentPanelCommand commits the finite panel snapshot as one
+// command cell. Navigation and close apply their surface effects; the legacy
+// live modal loop remains a plain-terminal interaction and is not revived.
+func executeStructuredAgentPanelCommand(session *ChatSession, argument string) CommandResult {
+	opts := parseChatAgentPanelOptions(argument, 8)
+	if strings.EqualFold(opts.Nav, "close") {
+		if session.Surface != nil {
+			session.Surface.ClearPopupForOwnerPreserveCursor(chatAgentPanelPopupOwner)
+		}
+		if session.Interaction != nil {
+			session.Interaction.RefreshStatus("")
+		}
+		return commandTextResult("Agent Panel 已关闭")
+	}
+	if changed, err := applyChatAgentPanelNavigation(session, opts); err != nil {
+		return commandErrorResult(err)
+	} else if changed {
+		warnIfChatSessionSyncFails(session, "set panel selected agent target", syncRuntimeSessionFromChat(session))
+	}
+	lines := chatAgentPanelSummaryLines(session, opts.Limit)
+	if opts.Full || opts.Follow {
+		lines = chatAgentPanelLines(session, opts.Limit)
+	}
+	if opts.Follow {
+		lines = append(lines, chatAgentPanelFollowLines(session, opts)...)
+	}
+	return commandTextResult(strings.Join(lines, "\n"))
+}
+
+func executeStructuredAgentRoutingCommand(session *ChatSession, argument string) CommandResult {
+	fields := splitChatCommandFields(argument)
+	if len(fields) < 2 {
+		return commandTextResult(chatAgentRoutingSummaryText(session) + "\n" + chatAgentRoutingUsageText())
+	}
+	action := strings.ToLower(strings.TrimSpace(fields[1]))
+	switch action {
+	case "test", "dry-run", "dryrun", "preview":
+		opts, err := parseChatAgentRoutingTestOptions(session, fields[2:])
+		if err != nil {
+			return commandTextResult(chatAgentRoutingUsageText() + "\n错误: " + err.Error())
+		}
+		report, details, err := runDoctorSubagentRoute(session.Config, opts)
+		if err != nil {
+			if len(details) > 0 {
+				return commandErrorResult(fmt.Errorf("%w (%v)", err, details))
+			}
+			return commandErrorResult(err)
+		}
+		return commandTextResult(doctorSubagentRouteReportText(report))
+	case "summary", "status", "config":
+		return commandTextResult(chatAgentRoutingSummaryText(session))
+	default:
+		return commandTextResult(chatAgentRoutingUsageText() + fmt.Sprintf("\n错误: 未知 /agents routing 参数: %s", fields[1]))
+	}
+}
+
+func chatAgentRoutingSummaryText(session *ChatSession) string {
+	var b strings.Builder
+	b.WriteString(chatRoutingConfigSummaryText("Subagent Routing", localChatSubagentRoutingConfig(session), "subagent"))
+	teamSource := "subagent_inherited"
+	if session != nil && session.Config != nil && session.Config.AICLI != nil && session.Config.AICLI.Teams != nil && session.Config.AICLI.Teams.Routing != nil {
+		teamSource = "team_independent"
+	}
+	b.WriteString(chatRoutingConfigSummaryText("Team Routing", localChatTeamRoutingConfig(session), teamSource))
+	return b.String()
+}
+
+// chatRoutingConfigSummaryText mirrors printChatRoutingConfigSummary without
+// the colored terminal rows, for unified command cells.
+func chatRoutingConfigSummaryText(title string, routing *config.AICLISubagentRoutingConfig, source string) string {
+	var b strings.Builder
+	b.WriteString(title + ":\n")
+	if strings.TrimSpace(source) != "" {
+		fmt.Fprintf(&b, "  Routing Source: %s\n", source)
+	}
+	fmt.Fprintf(&b, "  Routing Enabled: %s\n", chatDebugBool(modelrouting.RoutingEnabled(routing)))
+	fmt.Fprintf(&b, "  Compatibility: %s\n", modelrouting.CompatibilityMode(routing))
+	fmt.Fprintf(&b, "  Default Difficulty: %s\n", modelrouting.DefaultDifficulty(routing))
+	fmt.Fprintf(&b, "  Inherit Parent: %s\n", chatDebugBool(modelrouting.InheritParentWhenMissing(routing)))
+	fmt.Fprintf(&b, "  Validate Models: %s\n", chatDebugBool(modelrouting.ValidateModelCapabilities(routing)))
+	fmt.Fprintf(&b, "  Reasoning Policy: %s\n", modelrouting.UnsupportedReasoningPolicy(routing))
+	if routing == nil {
+		b.WriteString("  Levels: <none>\n  Roles: <none>\n")
+		return b.String()
+	}
+	fmt.Fprintf(&b, "  Provider Override: %s\n", chatDebugBool(routing.AllowExplicitProviderOverride))
+	fmt.Fprintf(&b, "  Model Override: %s\n", chatDebugBool(routing.AllowExplicitModelOverride))
+	fmt.Fprintf(&b, "  Reasoning Override: %s\n", chatDebugBool(routing.AllowExplicitReasoningOverride))
+	fmt.Fprintf(&b, "  Expert Limit: %s\n", strconv.Itoa(routing.MaxExpertConcurrency))
+	if len(routing.AllowedProviderOverrides) > 0 {
+		fmt.Fprintf(&b, "  Allowed Providers: %s\n", strings.Join(routing.AllowedProviderOverrides, ", "))
+	}
+	if len(routing.AllowedModelOverrides) > 0 {
+		fmt.Fprintf(&b, "  Allowed Models: %s\n", strings.Join(routing.AllowedModelOverrides, ", "))
+	}
+	b.WriteString(chatRouteLevelsText("Levels", routing.Levels))
+	b.WriteString(chatRouteRolesText(routing.Roles))
+	return b.String()
+}
+
+func chatRouteLevelsText(label string, levels map[string]config.AICLISubagentRouteProfile) string {
+	var b strings.Builder
+	if len(levels) == 0 {
+		fmt.Fprintf(&b, "  %s: <none>\n", label)
+		return b.String()
+	}
+	keys := make([]string, 0, len(levels))
+	for key := range levels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	fmt.Fprintf(&b, "  %s: %d configured\n", label, len(keys))
+	for _, key := range keys {
+		fmt.Fprintf(&b, "  - %s: %s\n", key, chatRouteProfileSummary(levels[key]))
+	}
+	return b.String()
+}
+
+func chatRouteRolesText(roles map[string]map[string]config.AICLISubagentRouteProfile) string {
+	var b strings.Builder
+	if len(roles) == 0 {
+		b.WriteString("  Roles: <none>\n")
+		return b.String()
+	}
+	roleNames := make([]string, 0, len(roles))
+	for role := range roles {
+		roleNames = append(roleNames, role)
+	}
+	sort.Strings(roleNames)
+	fmt.Fprintf(&b, "  Roles: %d configured\n", len(roleNames))
+	for _, role := range roleNames {
+		levels := roles[role]
+		levelNames := make([]string, 0, len(levels))
+		for level := range levels {
+			levelNames = append(levelNames, level)
+		}
+		sort.Strings(levelNames)
+		for _, level := range levelNames {
+			fmt.Fprintf(&b, "  - %s.%s: %s\n", role, level, chatRouteProfileSummary(levels[level]))
+		}
+	}
+	return b.String()
 }
 
 func handleChatAgentTargetCommand(session *ChatSession, argument string) error {
@@ -2096,16 +2348,13 @@ func printChatCollab(session *ChatSession, command string) {
 	fmt.Println(text)
 }
 
-// executeStructuredCollabCommand accepts the finite mailbox snapshot only.
-// The follow/watch branch waits for subsequent runtime state and therefore
-// remains explicitly unavailable until it has a typed effect/result stream.
+// executeStructuredCollabCommand renders the mailbox snapshot and the finite
+// follow view through the unified command pipeline. /collab follow commits one
+// snapshot cell carrying the follow-up window lines, matching the
+// plain-terminal projection which renders a single snapshot per invocation.
 func executeStructuredCollabCommand(session *ChatSession, command string) CommandResult {
 	if session == nil {
 		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
-	}
-	opts := parseChatCollabCommandConfig(command, 20)
-	if opts.Follow {
-		return commandTextResult("错误: /collab follow 需要持续观察 effect，尚未迁移到统一渲染命令通道。")
 	}
 	return commandTextResult(chatCollabCommandText(session, command))
 }
