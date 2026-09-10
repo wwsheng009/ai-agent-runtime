@@ -2,6 +2,7 @@
 // aicli micro web client 前端模块(拆分自 app.js,无构建步骤,由 app.js 入口聚合)。
 
 import { autoGrow, clearPendingPrompts, dropPendingUserPrompt, getUiState, promptEl, refreshScreen, sendStatusEl, setUI } from "./chat.js";
+import { refreshCacheAnalyticsIfActive, syncCacheSession } from "./cache.js";
 import { showToast } from "./util.js";
 
 var sidebarEl = document.getElementById("sidebar");
@@ -324,6 +325,9 @@ export function loadSessions() {
       if (!data) { return; }
       if (seq !== sessionsReqSeq) { return; } // 丢弃过期响应
       sessions = data.sessions || [];
+      // 同步当前会话 id：会话变化时缓存页签按需重拉（可见立即刷，后台则记录，
+      // 下次进入页签时由 loadCacheAnalytics 按会话不一致强制刷新）。
+      syncCacheSession(data.current_session_id);
       renderSessionList();
     })
     .catch(function (err) { console.error("sessions fetch failed:", err); });
@@ -356,6 +360,7 @@ function resumeSession(id) {
         if (json.status === "already_current") {
           loadSessions();
           refreshScreen();
+          refreshCacheAnalyticsIfActive();
         } else {
           // /resume 是异步注入输入队列的（主循环稍后才执行），立即刷新拿到的是旧列表。
           // 且 CLI 侧 resume 不发布 session_end/session_start SSE 事件，无法靠 SSE 感知完成时机。
@@ -372,6 +377,9 @@ function resumeSession(id) {
                   clearPendingPrompts(); // 旧会话的本地回显不带到被恢复会话
                   renderSessionList();
                   refreshScreen(true);
+                  // 当前会话已切换：同步会话 id，缓存页签可见则立即重拉，
+                  // 不可见则下次进入页签时按会话不一致强制刷新。
+                  syncCacheSession(cur);
                   sendStatusEl.textContent = cur === id ? "已切换" : "已切换(状态未同步)";
                 } else {
                   setTimeout(pollResumed, 300);
@@ -418,6 +426,8 @@ function createNewSession() {
                 clearPendingPrompts(); // 旧会话的本地回显不带到新会话
                 renderSessionList();
                 refreshScreen(true);
+                // 新会话就绪：同步会话 id，缓存页签按需重拉（同上）。
+                if (cur) { syncCacheSession(cur); }
                 if (sessionsNewBtn) { sessionsNewBtn.disabled = false; }
                 sendStatusEl.textContent = (cur !== "" && cur !== oldID) ? "已新建会话" : "已新建(状态未同步)";
               } else {

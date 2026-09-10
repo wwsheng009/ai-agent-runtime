@@ -7,6 +7,15 @@ import { esc } from "./util.js";
 var cacheLoaded = false;
 var cacheAvailable = null; // null=未探测, true/false
 var cacheRequestsCache = [];
+// 会话感知（修复：左侧切换会话后缓存页签仍显示旧会话数据）：
+//   currentSessionID      最近一次从 /web/api/sessions 同步到的当前会话 id；
+//   cacheLoadedSessionID  已渲染数据对应的会话 id（后端 /web/api/cache/* 按
+//                         请求时刻的当前会话解析，二者不一致即数据已过期）。
+var currentSessionID = "";
+var cacheLoadedSessionID = "";
+// 各区块请求序号：丢弃会话切换 / SSE 防抖竞态下迟到的过期响应。
+var overviewSeq = 0;
+var requestsSeq = 0;
 
 function cacheEl(id) { return document.getElementById(id); }
 
@@ -63,16 +72,39 @@ function statusLabel(status) {
 }
 
 export function loadCacheAnalytics(force) {
-  if (cacheLoaded && !force) { return; }
+  // 首次进入、强制刷新，或已渲染数据属于其他会话（切换会话发生在页签后台时
+  // 由 syncCacheSession 记录）才拉取；同一会话内重复切页签不重复发请求。
+  if (cacheLoaded && !force && cacheLoadedSessionID === currentSessionID) { return; }
   cacheLoaded = true;
   refreshCacheAnalytics();
 }
 
 // 强制刷新全部区块（页签切换后数据可能已更新；刷新按钮调用）。
 export function refreshCacheAnalytics() {
+  // 后端按请求时刻的当前会话解析 session_id，本次拉取即当前会话数据。
+  cacheLoadedSessionID = currentSessionID;
   refreshCacheCapabilities();
   refreshCacheOverview();
   refreshCacheRequests();
+}
+
+// 仅当缓存页签当前可见时刷新（同一会话内的显式刷新；避免后台页签浪费请求）。
+export function refreshCacheAnalyticsIfActive() {
+  var panel = cacheEl("tab-cache");
+  if (!panel || !panel.classList.contains("active")) { return; }
+  refreshCacheAnalytics();
+}
+
+// 会话同步（sessions.js 拿到 /web/api/sessions 的 current_session_id 时调用）。
+// 会话变化时：页签可见则立即重拉（旧会话快照不能留在屏幕上）；不可见则仅
+// 记录，待下次进入页签时由 loadCacheAnalytics 按会话不一致强制刷新。
+export function syncCacheSession(sessionID) {
+  var next = sessionID || "";
+  if (next === currentSessionID) { return; }
+  currentSessionID = next;
+  if (!cacheLoaded) { return; }                  // 尚未加载过：进入页签时自然拉取
+  if (cacheLoadedSessionID === next) { return; } // 数据已是该会话（罕见竞态）
+  refreshCacheAnalyticsIfActive();
 }
 
 // SSE cache_request_finished 到达（§6.3 增量刷新）：防抖重拉 overview +
@@ -120,11 +152,16 @@ function renderCacheError(el, err) {
 function refreshCacheOverview() {
   var el = cacheEl("cache-overview");
   if (!el) { return; }
+  var seq = ++overviewSeq;
   el.innerHTML = '<div class="cache-empty">加载中…</div>';
   cacheAPI("/web/api/cache/overview").then(function (result) {
+    if (seq !== overviewSeq) { return; } // 过期响应：期间已发出更新的拉取（如会话切换）
     if (result.status !== 200) { renderCacheError(el, result.body && result.body.error); return; }
     el.innerHTML = renderOverviewCards(result.body);
-  }).catch(function () { renderCacheError(el, null); });
+  }).catch(function () {
+    if (seq !== overviewSeq) { return; }
+    renderCacheError(el, null);
+  });
 }
 
 function renderOverviewCards(overview) {
@@ -160,13 +197,18 @@ function card(label, value) {
 function refreshCacheRequests() {
   var el = cacheEl("cache-requests");
   if (!el) { return; }
+  var seq = ++requestsSeq;
   el.innerHTML = '<div class="cache-empty">加载中…</div>';
   cacheAPI("/web/api/cache/requests?limit=50").then(function (result) {
+    if (seq !== requestsSeq) { return; } // 过期响应：期间已发出更新的拉取（如会话切换）
     if (result.status !== 200) { renderCacheError(el, result.body && result.body.error); return; }
     cacheRequestsCache = result.body.requests || [];
     el.innerHTML = renderRequestsTable(cacheRequestsCache);
     bindRequestRows(el);
-  }).catch(function () { renderCacheError(el, null); });
+  }).catch(function () {
+    if (seq !== requestsSeq) { return; }
+    renderCacheError(el, null);
+  });
 }
 
 function renderRequestsTable(requests) {

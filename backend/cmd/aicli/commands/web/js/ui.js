@@ -58,6 +58,8 @@ function activateTab(tabName) {
   if (tabCacheEl) { tabCacheEl.classList.toggle("active", isCache); }
   if (isMain) { refreshScreen(); }
   if (isConfig) { loadConfigAdmin(); }
+  // 会话感知按需拉取：cache.js 内部对比已渲染数据与当前会话 id，仅在首次进入、
+  // 会话变化时重拉；同会话重复切页签不重复发请求（页内更新由 SSE 增量刷新兜底）。
   if (isCache) { loadCacheAnalytics(); }
 }
 
