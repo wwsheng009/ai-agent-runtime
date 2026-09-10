@@ -1,9 +1,7 @@
 package bootstrap
 
 import (
-	"context"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -53,7 +51,6 @@ type Manager struct {
 	registry        *skill.Registry
 	loader          *skill.Loader
 	sessionManager  *chat.SessionManager
-	sessionReplica  *chat.SessionReplica
 	hotReload       *skill.HotReload
 	embeddingRouter *skill.SemanticEmbeddingRouter
 	teamStore       team.Store
@@ -72,7 +69,7 @@ func NewManager(opts *Options) (*Manager, error) {
 		config = runtimecfg.DefaultRuntimeConfig()
 	}
 
-	sessionManager, sessionReplica, err := newSessionManager(config)
+	sessionManager, err := newSessionManager(config)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +89,6 @@ func NewManager(opts *Options) (*Manager, error) {
 		registry:        skill.NewRegistry(opts.MCPManager),
 		loader:          skill.NewLoader(opts.MCPManager),
 		sessionManager:  sessionManager,
-		sessionReplica:  sessionReplica,
 	}
 	cleanupOnError := true
 	defer func() {
@@ -158,7 +154,7 @@ func NewManager(opts *Options) (*Manager, error) {
 	return manager, nil
 }
 
-func newSessionManager(config *runtimecfg.RuntimeConfig) (*chat.SessionManager, *chat.SessionReplica, error) {
+func newSessionManager(config *runtimecfg.RuntimeConfig) (*chat.SessionManager, error) {
 	if config != nil {
 		if dir := strings.TrimSpace(config.Sessions.Dir); dir != "" {
 			storageConfig := chat.DefaultPersistentSessionStorageConfig(dir)
@@ -187,32 +183,19 @@ func newSessionManager(config *runtimecfg.RuntimeConfig) (*chat.SessionManager, 
 				managerConfig.IdleTimeout = config.Sessions.IdleTimeout
 			}
 
-			// Read-replica mode: the runtime server reads from a private copy of
-			// the master session-history database so aicli's write locks never
-			// block its queries. The replica is periodically re-synced in the
-			// background and hot-swapped.
-			if src := strings.TrimSpace(config.Sessions.ReplicaSource); src != "" {
-				srcPath := src
-				if !filepath.IsAbs(srcPath) {
-					srcPath = filepath.Join(dir, src)
-				}
-				replica, err := chat.OpenSessionReplica(context.Background(), storageConfig, srcPath, config.Sessions.ReplicaSyncInterval)
-				if err != nil {
-					return nil, nil, fmt.Errorf("failed to initialize session storage read replica: %w", err)
-				}
-				replica.Run(context.Background())
-				return chat.NewSessionManager(replica.Storage(), managerConfig), replica, nil
-			}
-
+			// Shared mode: the runtime server opens the same master
+			// session-history database that aicli processes write. WAL plus
+			// busyTimeout make multi-process concurrent access safe, so no
+			// file copies are made.
 			storage, err := chat.OpenPersistentSessionStorage(storageConfig)
 			if err != nil {
-				return nil, nil, fmt.Errorf("failed to initialize persistent session storage: %w", err)
+				return nil, fmt.Errorf("failed to initialize persistent session storage: %w", err)
 			}
-			return chat.NewSessionManager(storage, managerConfig), nil, nil
+			return chat.NewSessionManager(storage, managerConfig), nil
 		}
 	}
 
-	return chat.NewSessionManager(chat.NewInMemoryStorage(), nil), nil, nil
+	return chat.NewSessionManager(chat.NewInMemoryStorage(), nil), nil
 }
 
 func (m *Manager) buildLLMRuntime(gatewayProviderName string) (*llm.LLMRuntime, error) {
@@ -604,9 +587,6 @@ func (m *Manager) Stop() error {
 		}
 		if m.sessionManager != nil {
 			m.sessionManager.Stop()
-		}
-		if m.sessionReplica != nil {
-			m.sessionReplica.Close()
 		}
 		if m.teamStore != nil {
 			if err := m.teamStore.Close(); err != nil && m.stopErr == nil {

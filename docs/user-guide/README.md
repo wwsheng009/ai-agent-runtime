@@ -183,9 +183,7 @@ version: "v1"
 
 sessions:
   backend: sqlite                          # 会话存储后端（仅支持 sqlite）
-  storePath: session_history_replica.sqlite # 会话数据库路径（相对 aiclipaths 数据目录）
-  replicaSource: session_history.sqlite    # 主数据库路径（aicli 写入的活跃库）
-  replicaSyncInterval: 30s                 # 从主库同步副本的间隔
+  storePath: session_history.sqlite        # 会话数据库路径（与 aicli 共享的主库，相对 sessions.dir）
 
 agent:
   maxSteps: 0                              # Agent 最大步数（0=无限制）
@@ -229,14 +227,12 @@ runtime-server 按以下顺序搜索配置文件：
 
 ### 3.4 会话存储模式
 
-当前默认使用 **Read-Replica 模式**：
+当前使用 **共享直连模式**：
 
-- **主数据库**（`session_history.sqlite`）：由 aicli 进程写入，持有 WAL 文件锁
-- **副本数据库**（`session_history_replica.sqlite`）：runtime-server 读取，每 `replicaSyncInterval` 全量同步
+- runtime-server 与 aicli 进程直接共用同一个主数据库（`session_history.sqlite`）
+- SQLite WAL 与 `busyTimeout` 保证多进程并发访问安全，不再复制任何数据库副本
 
-此模式避免 aicli 与 runtime-server 同时写入同一数据库导致的锁冲突（STORE_TIMEOUT 503）。
-
-> 如需切换为共享直连模式（两进程共用同一数据库），将 `replicaSource` 和 `replicaSyncInterval` 置空即可，但需注意并发写入冲突风险。
+> 历史版本曾使用 Read-Replica 模式（runtime-server 读取每 30s 全量同步的副本数据库），该机制已移除；旧配置中的 `replicaSource` / `replicaSyncInterval` 字段会被忽略。
 
 ---
 
@@ -445,22 +441,21 @@ Win7 构建使用 **Go 1.21.4** 工具链和独立的 `go.win7.mod` 依赖图，
 **原因**：aicli 与 runtime-server 同时操作同一 SQLite 数据库，aicli 写入锁阻塞了 runtime-server 的读取。
 
 **解决**：
-1. 确保 `runtime.yaml` 中配置了 `replicaSource`（read-replica 模式），避免直连主库
-2. 如已配置 replica，等待约 30s（`replicaSyncInterval`）后重试
-3. 检查是否有残留的旧进程（`aicli` 或 `runtime-server`）未正常退出：
+1. 检查是否有残留的旧进程（`aicli` 或 `runtime-server`）未正常退出：
    ```bash
    # Windows
    Get-Process | Where-Object { $_.ProcessName -match 'aicli|runtime-server' }
    # Linux
    ps aux | grep -E 'aicli|runtime-server'
    ```
-4. 强制结束旧进程后重启 runtime-server
+2. 强制结束旧进程后重启 runtime-server
+3. 若仍频繁超时，可调大 `sessions.busyTimeout`（默认 5s）
 
 ### 7.2 SQLite 文件锁
 
 **现象**：`os.Remove` 无法删除文件，或 `os.Rename` 失败。
 
-**原因**：Windows 上被其他进程打开的文件无法删除/重命名。Read-replica 模式下全量同步时会删除旧副本文件，若 aicli 正在读写该文件则会失败。
+**原因**：Windows 上被其他进程打开的文件无法删除/重命名。若其他进程（aicli 或 runtime-server）正在读写该 SQLite 文件则会失败。
 
 **解决**：
 - 确保 aicli 进程已退出后再重启 runtime-server

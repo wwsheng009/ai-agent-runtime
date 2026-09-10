@@ -207,21 +207,18 @@ Win7 构建曾用 Go 1.20.14 + go-sqlite3 v0.8.3，其 no-shm WAL 实现把写�
 `database is locked` 死锁；**v0.22.0 增加 proper shared memory
 （`shm_windows.go`），使 WAL 多进程并发在 Win7 上可用**。
 
-会话库采用 **read-replica 模式**（`backend/configs/runtime.win7.yaml`）：
+会话库采用 **共享直连模式**（`backend/configs/runtime.win7.yaml`）：
 
 ```yaml
 sessions:
   backend: sqlite
-  storePath: session_history_win7_replica.sqlite   # runtime-server 读的私有副本
-  replicaSource: session_history_win7.sqlite       # master（aicli 持有 WAL/-shm 锁）
-  replicaSyncInterval: 30s                          # 每 30s 从 master 同步并热切换
+  storePath: session_history.sqlite   # 与 aicli 共用的主会话库
 ```
 
-机制：`aicli` 写 master（`session_history_win7.sqlite`）并持有其 `-wal`/`-shm`
-锁；`runtime-server` 直接读 master 会被锁阻塞（`会话存储查询超时`），因此改为
-读每 30s 从 master 同步的私有副本并热切换。`cmd/runtime-server/main.go` 中
-`ReplicaSource` 为空时回退到 `aiclipaths.DefaultSessionHistoryFileName`。
-主线 `runtime.yaml` 使用同一模式（`session_history.sqlite` / `_replica`）。
+机制：go-sqlite3 v0.22.0 的 proper shared memory（`shm_windows.go`）使 Win7 上
+多进程 WAL 并发可用；`aicli` 写 master，`runtime-server` 直接读同一 master，
+配合 `busyTimeout` 等待写锁，不再复制任何副本数据库。主线 `runtime.yaml`
+使用同一模式。
 
 ## 9. 构建验证与测试矩阵
 

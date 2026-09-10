@@ -67,9 +67,7 @@ version: "v1"
 
 sessions:
   backend: sqlite                    # 会话存储后端
-  storePath: session_history_replica.sqlite
-  replicaSource: session_history.sqlite
-  replicaSyncInterval: 30s
+  storePath: session_history.sqlite  # 与 aicli 共享的主会话库（相对 sessions.dir）
 
 agent:
   maxSteps: 0                        # 最大步数（0=无限制）
