@@ -100,6 +100,7 @@ const (
 	editorKeyEOF
 	editorKeyFocusGained
 	editorKeyFocusLost
+	editorKeyEscapeDropped
 )
 
 type editorKey struct {
@@ -1124,6 +1125,25 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			}
 			continue
 		}
+		if key.kind == editorKeyEscapeDropped {
+			// 残缺转义序列被有界等待后丢弃。若正处于括号粘贴中，残缺
+			// 前缀极可能是被读块截断的 \x1b[201~ 结束标记：按粘贴结束
+			// 处理，立即回显缓冲的粘贴文本并退出粘贴模式，避免文本
+			// 滞留到下一次按键才显示，也避免粘贴模式卡死导致后续
+			// Enter 被当成换行插入。
+			wasPasteActive := pasteActive
+			if pasteActive {
+				if len(pasteBuffer) > 0 {
+					insertPastedText(string(pasteBuffer))
+					pasteBuffer = pasteBuffer[:0]
+				}
+				pasteActive = false
+			}
+			if wasPasteActive {
+				emitChange()
+			}
+			continue
+		}
 		if pasteActive && (key.kind == editorKeyEnter || key.kind == editorKeyInsertNewline) {
 			// 粘贴块里的换行是文本内容，不应触发提交。
 			key.kind = editorKeyRune
@@ -1952,6 +1972,50 @@ func nextInteractiveKey(ctx context.Context, reader io.Reader, pending *[]byte, 
 			if !ready {
 				*pending = (*pending)[:0]
 				return editorKey{kind: editorKeyCancelPopup}, true, nil
+			}
+		}
+		if len(*pending) > 1 && (*pending)[0] == '\x1b' {
+			// 残缺转义序列（典型：括号粘贴结束标记 \x1b[201~ 被 64 字节
+			// 读块截断，剩余字节永远不会再到达）。仅对单字节 ESC 做有界
+			// 等待不够：更长的残缺前缀会让本函数在 readiness 轮询里无限
+			// 空转，同时主循环的空闲回显助手（waitForBracketedPasteDisplay
+			// / waitForPasteBurstWindow）因 pending 非空而跳过，缓冲的
+			// 粘贴文本要等到下一次按键才显示。这里有界等待
+			// escapeSequenceWait，超时则丢弃残缺前缀并上报
+			// editorKeyEscapeDropped，由主循环按粘贴结束处理、立即回显。
+			ready := false
+			if stdinFile != nil && interactiveStdinNeedsPolledReadiness() {
+				polled, err := waitForInteractiveInputReady(int(stdinFile.Fd()), escapeSequenceWait)
+				if err != nil && !errors.Is(err, errInteractiveInputReadinessUnsupported) {
+					return editorKey{}, false, err
+				}
+				ready = polled
+			} else {
+				// 非控制台（管道/PTY）无法可靠轮询：退化为固定等待后丢弃，
+				// 与单字节 ESC 的处理保持一致。
+				time.Sleep(escapeSequenceWait)
+			}
+			if !ready {
+				*pending = (*pending)[:0]
+				return editorKey{kind: editorKeyEscapeDropped}, true, nil
+			}
+		}
+		if len(*pending) > 0 && (*pending)[0] != '\x1b' && !utf8.FullRune(*pending) {
+			// 残缺的多字节 UTF-8 序列（读块边界截断）：同样有界等待后
+			// 丢弃，防止 pending 永久滞留并阻塞粘贴缓冲的空闲回显。
+			ready := false
+			if stdinFile != nil && interactiveStdinNeedsPolledReadiness() {
+				polled, err := waitForInteractiveInputReady(int(stdinFile.Fd()), escapeSequenceWait)
+				if err != nil && !errors.Is(err, errInteractiveInputReadinessUnsupported) {
+					return editorKey{}, false, err
+				}
+				ready = polled
+			} else {
+				time.Sleep(escapeSequenceWait)
+			}
+			if !ready {
+				*pending = (*pending)[:0]
+				return editorKey{kind: editorKeyIgnore}, true, nil
 			}
 		}
 

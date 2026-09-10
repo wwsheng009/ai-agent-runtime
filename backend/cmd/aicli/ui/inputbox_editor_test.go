@@ -782,6 +782,61 @@ func TestReadInteractiveLine_DisplaysBracketedPasteAfterIdleBeforeEndMarker(t *t
 	}
 }
 
+func TestReadInteractiveLineBracketedPasteSplitEndMarkerRendersWithoutExtraKey(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+
+	const pasted = "split terminator paste"
+	output := &notifyingBuffer{
+		notify: make(chan struct{}),
+		match:  pasted,
+	}
+	done := make(chan struct{})
+	var (
+		line    string
+		readErr error
+	)
+	go func() {
+		line, readErr = readInteractiveLineWithOptions(reader, output, UserPromptText(0), nil, nil, true, false)
+		close(done)
+	}()
+
+	// 括号粘贴结束标记 \x1b[201~ 被读块截断为 \x1b[20，剩余字节永远
+	// 不会到达。回归验证：缓冲的粘贴文本必须无需额外按键即可回显，
+	// 而不是滞留在 pasteBuffer 里等下一次按键触发 flush。
+	if _, err := writer.WriteString("\x1b[200~" + pasted + "\x1b[20"); err != nil {
+		t.Fatalf("write split bracketed paste: %v", err)
+	}
+	select {
+	case <-output.notify:
+	case <-time.After(2 * time.Second):
+		_ = writer.Close()
+		<-done
+		t.Fatalf("split bracketed paste end marker never rendered, output=%q", output.String())
+	}
+
+	// 粘贴模式必须已随残缺结束标记退出：随后的 Enter 直接提交，
+	// 而不是被当作粘贴内容里的换行插入。
+	if _, err := writer.WriteString("\n"); err != nil {
+		t.Fatalf("write submit after dropped terminator: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for submit after dropped paste terminator")
+	}
+	if readErr != nil {
+		t.Fatalf("readInteractiveLineWithOptions: %v", readErr)
+	}
+	if line != pasted {
+		t.Fatalf("expected pasted text to submit intact, got %q", line)
+	}
+}
+
 func TestInteractiveInputViewportFollowsCursorWithinBoundedHeight(t *testing.T) {
 	line := []rune("one\ntwo\nthree\nfour\nfive\nsix\nseven\neight")
 	viewport := calculateInteractiveInputViewport(
