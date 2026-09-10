@@ -234,6 +234,7 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	mux.HandleFunc(commands.ChatWebAPIConfigProvidersDeletePath, commands.HandleChatWebAPIConfigProvidersDelete)
 	mux.HandleFunc(commands.ChatWebAPIConfigProvidersEnabledPath, commands.HandleChatWebAPIConfigProvidersEnabled)
 	mux.HandleFunc(commands.ChatWebAPIConfigProvidersModelsPath, commands.HandleChatWebAPIConfigProvidersFetchModels)
+	mux.HandleFunc(commands.ChatWebAPIConfigProvidersProbeModelsPath, commands.HandleChatWebAPIConfigProvidersProbeModels)
 	mux.HandleFunc(commands.ChatWebAPIConfigProvidersAutoImportPath, commands.HandleChatWebAPIConfigProvidersAutoImport)
 	mux.HandleFunc(commands.ChatWebAPIConfigChatPath, commands.HandleChatWebAPIConfigChat)
 	// style.css / app.js / js/*.js 等静态资源由 HandleChatWebPage 统一伺服

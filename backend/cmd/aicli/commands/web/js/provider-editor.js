@@ -10,6 +10,7 @@ var cfgApiKeySaved = false;        // 当前编辑的 provider 是否已配置�
 var cfgApiKeySource = "";         // 凭据来源：inline / pool / key_store / oauth
 var cfgApiKeyClearPending = false; // 用户点了「清除」等待保存生效
 var cfgApiKeyMasked = "";          // 已保存 key 的掩码回显（快照 api_key_masked 或本地计算）
+var assumedFetchedModels = [];     // 最近一次 fetch-models 的 assumed 模型清单（探测按钮用）
 
 // ---- 协议下拉（Provider 编辑弹窗）----
 // 原生 <input list=datalist> 在 input 有值时会被浏览器按当前值过滤选项，
@@ -112,6 +113,7 @@ export function openProviderEditor(name) {
   var p = name ? providerByName(name) : null;
   cfgReasoningDraft = {};
   closeProtocolPopup();
+  renderAssumedFetchedModels(null);
   var title = configEl("config-editor-title");
   if (title) { title.textContent = p ? "编辑 Provider: " + p.name : "新增 Provider"; }
   var orig = configEl("cfg-provider-original-name");
@@ -485,8 +487,10 @@ function saveProvider(ev) {
 }
 
 // 调用后端 /web/api/config/providers/fetch-models 拉取该 provider 的
-// GET /models 清单：优先用表单里新填的 api key，否则用已保存的 key；
-// 结果合并（去重）进「支持模型」文本域，不覆盖用户手填的行。
+// GET /models 清单：优先用表单里新填的 api key，否则用已保存的 key。
+// 后端按协议分类（与 aicli login 同源）后，models 只含与当前 provider
+// 协议一致的模型；结果合并（去重）进「支持模型」文本域，不覆盖用户
+// 手填的行，其他协议模型仅在状态栏提示、不合并。
 function fetchModelsFromProvider() {
   var btn = configEl("cfg-provider-fetch-models-btn");
   var statusEl = configEl("cfg-provider-fetch-models-status");
@@ -517,10 +521,43 @@ function fetchModelsFromProvider() {
         showToast(msg, "err");
         return;
       }
+      // 后端已按协议分类（与 aicli login 同源）：models 只含与当前 provider
+      // 协议一致且有 model card 数据支持的模型（openai 协议例外：/v1/models
+      // 是 OpenAI 风格端点，未匹配卡片的模型按当前协议假定可用，照旧合并）；
+      // 无卡数据的其他协议模型在 assumed_models / groups 里单列，不合并。
       mergeFetchedModels(json.models);
-      var okMsg = "已获取 " + json.models.length + " 个模型" + (json.endpoint ? "（" + json.endpoint + "）" : "");
-      if (statusEl) { statusEl.textContent = okMsg; statusEl.className = "cfg-hint-inline ok"; }
-      showToast("已获取 " + json.models.length + " 个模型");
+      var total = json.models_total || json.models.length;
+      var okMsg = "已获取 " + total + " 个模型" + (json.endpoint ? "（" + json.endpoint + "）" : "");
+      if (json.protocol) { okMsg += "，协议 " + json.protocol; }
+      okMsg += "。已合并 " + json.models.length + " 个" + (json.protocol ? " " + json.protocol : "") + " 协议模型";
+      var assumed = json.assumed_models || [];
+      if (assumed.length) {
+        okMsg += "。另有 " + assumed.length + " 个模型无 " + (json.protocol || "当前") +
+          " 协议匹配数据，未自动合并（网关未提供协议支持证据，确认后可在下方列表手动合并）";
+      }
+      var otherCount = json.other_models_count || 0;
+      var filtered = false;
+      if (otherCount > 0) {
+        // 各组只统计“不属于主组”的模型（跨组去重）：一个模型可能同时命中
+        // 多张多协议卡而出现在多个组里，但它对当前 provider 仍然可用，
+        // 不应重复计入“被过滤”。各组 other_models 之和 == other_models_count。
+        var parts = [];
+        (json.groups || []).forEach(function (g) {
+          if (!g.primary && g.other_models && g.other_models.length) {
+            parts.push((g.protocol || "unknown") + "×" + g.other_models.length);
+          }
+        });
+        okMsg += "。已按协议过滤 " + otherCount + " 个其他协议模型" +
+          (parts.length ? "（" + parts.join("、") + "）" : "") +
+          "；如需使用请用「自动导入」生成对应协议的 provider";
+        filtered = true;
+      }
+      renderAssumedFetchedModels(assumed, json.protocol);
+      if (statusEl) {
+        statusEl.textContent = okMsg;
+        statusEl.className = filtered ? "cfg-hint-inline warn" : "cfg-hint-inline ok";
+      }
+      showToast("已获取 " + total + " 个模型");
       // 端点是公开的（匿名可访问）：获取列表成功不代表 key 有效，明确提示。
       if (json.auth_notice) {
         if (statusEl) {
@@ -562,6 +599,143 @@ function mergeFetchedModels(fetched) {
     collectReasoningDrafts();
     var orig = (configEl("cfg-provider-original-name").value || "").trim();
     rebuildModelReasoningEditors(existing, orig ? providerByName(orig) : null);
+  }
+}
+
+// 渲染「未自动合并模型」折叠块：列出无当前协议匹配数据（仅靠协议 fallback
+// 假定可用）的模型 ID。用户确认网关确实支持这些模型后可一键全部合并
+// （去重追加，同 mergeFetchedModels）；否则保持不合并，避免污染
+// supported_models（实测部分网关会拒绝这些模型走非 openai 端点）。
+// 「探测协议支持」按钮则对这批模型做跨协议最小补全实测（probe-models），
+// supported 结论由后端写回用户级 model_cards.yaml，之后重新获取列表即可
+// 自动分类合并——把“人工确认”升级成“有证据的自动判定”。
+function renderAssumedFetchedModels(assumed, protocol) {
+  var box = configEl("cfg-provider-fetch-models-assumed");
+  if (!box) { return; }
+  var listEl = configEl("cfg-provider-fetch-models-assumed-list");
+  var countEl = configEl("cfg-provider-fetch-models-assumed-count");
+  var mergeBtn = configEl("cfg-provider-fetch-models-assumed-merge");
+  var probeBtn = configEl("cfg-provider-fetch-models-assumed-probe");
+  var probeStatus = configEl("cfg-provider-fetch-models-assumed-probe-status");
+  var probeResult = configEl("cfg-provider-fetch-models-assumed-probe-result");
+  assumedFetchedModels = (assumed || []).slice();
+  if (!assumed || !assumed.length) {
+    box.hidden = true;
+    if (listEl) { listEl.textContent = ""; }
+    if (mergeBtn) { mergeBtn.onclick = null; }
+    if (probeBtn) { probeBtn.onclick = null; }
+    if (probeStatus) { probeStatus.textContent = ""; probeStatus.className = "cfg-hint-inline"; }
+    if (probeResult) { probeResult.textContent = ""; }
+    return;
+  }
+  box.hidden = false;
+  if (countEl) { countEl.textContent = assumed.length + " 个无 " + (protocol || "当前协议") + " 协议匹配数据"; }
+  if (listEl) { listEl.textContent = assumed.join("\n"); }
+  if (mergeBtn) {
+    mergeBtn.onclick = function () {
+      mergeFetchedModels(assumed);
+      box.hidden = true;
+    };
+  }
+  if (probeBtn) { probeBtn.onclick = function () { probeAssumedModels(assumedFetchedModels); }; }
+  // 新一轮获取列表后清掉上一轮探测结果，避免与最新 assumed 集合错位。
+  if (probeStatus) { probeStatus.textContent = ""; probeStatus.className = "cfg-hint-inline"; }
+  if (probeResult) { probeResult.textContent = ""; }
+}
+
+// 对 assumed 模型清单做跨协议探测：POST /web/api/config/providers/probe-models。
+// 后端对每个模型 × 协议发送一次最小补全请求（复用运行时 adapter 的
+// 请求构造与鉴权头），按错误分类学给出 supported / unsupported / unknown；
+// supported 结论写回用户级 model_cards.yaml（探测卡片），重新获取列表后
+// 这些模型会带卡片数据自动合并。探测期间按钮禁用，结果渲染为结论矩阵。
+function probeAssumedModels(models) {
+  var btn = configEl("cfg-provider-fetch-models-assumed-probe");
+  var statusEl = configEl("cfg-provider-fetch-models-assumed-probe-status");
+  var resultEl = configEl("cfg-provider-fetch-models-assumed-probe-result");
+  if (!btn || btn.disabled) { return; }
+  if (!models || !models.length) { return; }
+  var apiKeyVal = (configEl("cfg-provider-api-key").value || "").trim();
+  var payload = {
+    name: (configEl("cfg-provider-original-name").value || "").trim(),
+    protocol: (configEl("cfg-provider-protocol").value || "").trim(),
+    base_url: (configEl("cfg-provider-base-url").value || "").trim(),
+    models: models
+  };
+  if (apiKeyVal) { payload.api_key = apiKeyVal; }
+  btn.disabled = true;
+  var oldText = btn.textContent;
+  btn.textContent = "探测中…";
+  if (statusEl) { statusEl.textContent = "正在对 " + models.length + " 个模型做跨协议探测（每模型×协议一次最小补全请求），请稍候…"; statusEl.className = "cfg-hint-inline"; }
+  if (resultEl) { resultEl.textContent = ""; }
+  fetch("/web/api/config/providers/probe-models", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  })
+    .then(function (res) {
+      return res.json().catch(function () { return { status: "error", reason: "bad response" }; });
+    })
+    .then(function (json) {
+      if (json.status !== "ok" || !json.results) {
+        var msg = "探测失败: " + (json.reason || json.status || "unknown");
+        if (statusEl) { statusEl.textContent = msg; statusEl.className = "cfg-hint-inline err"; }
+        showToast(msg, "err");
+        return;
+      }
+      renderProbeResults(json, resultEl);
+      var supportedCount = (json.supported_models || []).length;
+      var summary = "探测完成：" + supportedCount + " 个模型有协议实测支持";
+      if ((json.written_cards || []).length) {
+        summary += "；" + json.written_cards.length + " 条结论已写入 " + (json.user_cards_path || "用户卡片");
+      }
+      if (json.write_back_error) { summary += "。⚠ 写回失败: " + json.write_back_error; }
+      summary += "。重新点「获取模型列表」即可自动合并 supported 模型";
+      if (statusEl) {
+        statusEl.textContent = summary;
+        statusEl.className = json.write_back_error ? "cfg-hint-inline warn" : "cfg-hint-inline ok";
+      }
+      showToast("探测完成");
+    })
+    .catch(function (err) {
+      var msg = "探测失败: " + err;
+      if (statusEl) { statusEl.textContent = msg; statusEl.className = "cfg-hint-inline err"; }
+      showToast(msg, "err");
+    })
+    .then(function () {
+      btn.disabled = false;
+      btn.textContent = oldText;
+    });
+}
+
+// 渲染探测结论矩阵：每行一个模型 + 各协议结论 chip（悬停显示判定依据），
+// 末行附写回说明。verdict → 样式：supported 绿 / unsupported 红 / unknown 黄。
+function renderProbeResults(json, resultEl) {
+  if (!resultEl) { return; }
+  resultEl.textContent = "";
+  (json.results || []).forEach(function (result) {
+    var row = document.createElement("div");
+    row.className = "cfg-probe-row";
+    var name = document.createElement("span");
+    name.className = "cfg-probe-model";
+    name.textContent = result.model || "";
+    row.appendChild(name);
+    (result.probes || []).forEach(function (probe) {
+      var chip = document.createElement("span");
+      var verdict = probe.verdict || "unknown";
+      chip.className = "cfg-probe-chip " + verdict;
+      chip.textContent = (probe.protocol || "?") + " " + verdict;
+      var tip = (probe.detail || "").trim();
+      if (probe.http_status) { tip = "HTTP " + probe.http_status + (tip ? " · " + tip : ""); }
+      chip.title = tip || verdict;
+      row.appendChild(chip);
+    });
+    resultEl.appendChild(row);
+  });
+  if ((json.written_cards || []).length && json.user_cards_path) {
+    var note = document.createElement("div");
+    note.className = "cfg-probe-note";
+    note.textContent = "已写入探测卡片 → " + json.user_cards_path + "（手工卡片优先，探测卡可随时删除）";
+    resultEl.appendChild(note);
   }
 }
 

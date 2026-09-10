@@ -956,6 +956,33 @@ body.sidebar-collapsed #sidebar {
 .cfg-hint-inline.ok { color: var(--green); }
 .cfg-hint-inline.err { color: var(--red, #e5534b); }
 .cfg-hint-inline.warn { color: var(--yellow, #d29922); white-space: normal; max-width: 420px; }
+.cfg-fetch-assumed { margin: 6px 0 2px; font-size: 11px; color: var(--fg4); }
+.cfg-fetch-assumed summary { cursor: pointer; user-select: none; }
+.cfg-fetch-assumed summary:hover { color: var(--fg3, inherit); }
+.cfg-fetch-assumed-list {
+  margin: 6px 0; padding: 6px 8px; max-height: 160px; overflow: auto;
+  border: 1px solid var(--border2); border-radius: 6px;
+  font-family: var(--mono, monospace); font-size: 11px; line-height: 1.5;
+  white-space: pre; color: var(--fg3, inherit);
+}
+.cfg-fetch-assumed .cfg-btn { margin-top: 2px; }
+.cfg-fetch-assumed-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+/* 探测结果矩阵：每行一个模型，行内是该模型在各协议下的结论 chip。 */
+.cfg-probe-result { margin-top: 4px; display: flex; flex-direction: column; gap: 2px; }
+.cfg-probe-row { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.cfg-probe-model {
+  min-width: 150px; max-width: 320px; word-break: break-all;
+  font-family: var(--mono, monospace); color: var(--fg3, inherit);
+}
+.cfg-probe-chip {
+  display: inline-block; padding: 0 6px; border-radius: 999px;
+  font-size: 10px; line-height: 16px; border: 1px solid currentColor;
+  cursor: default; white-space: nowrap;
+}
+.cfg-probe-chip.supported { color: var(--green); }
+.cfg-probe-chip.unsupported { color: var(--red, #e5534b); }
+.cfg-probe-chip.unknown { color: var(--yellow, #d29922); }
+.cfg-probe-note { margin-top: 2px; color: var(--fg4); }
 .cfg-key-status {
   display: inline-block; font-size: 11px; line-height: 1.4;
   padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border2);

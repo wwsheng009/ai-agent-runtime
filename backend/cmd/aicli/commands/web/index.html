@@ -284,6 +284,16 @@
                   <button type="button" id="cfg-provider-fetch-models-btn" class="cfg-btn" title="调用该 provider 的 GET /models 拉取模型清单，合并进下方列表">获取模型列表</button>
                   <span id="cfg-provider-fetch-models-status" class="cfg-hint-inline"></span>
                 </div>
+                <details id="cfg-provider-fetch-models-assumed" class="cfg-fetch-assumed" hidden>
+                  <summary>未自动合并模型（<span id="cfg-provider-fetch-models-assumed-count"></span>）</summary>
+                  <div id="cfg-provider-fetch-models-assumed-list" class="cfg-fetch-assumed-list"></div>
+                  <div class="cfg-fetch-assumed-actions">
+                    <button type="button" id="cfg-provider-fetch-models-assumed-merge" class="cfg-btn">确认网关支持，全部合并</button>
+                    <button type="button" id="cfg-provider-fetch-models-assumed-probe" class="cfg-btn" title="对以上模型逐个发送各协议最小补全请求，实测网关支持情况；supported 结论会写入用户级 model_cards.yaml，之后重新获取列表即可自动合并">探测协议支持</button>
+                  </div>
+                  <div id="cfg-provider-fetch-models-assumed-probe-status" class="cfg-hint-inline"></div>
+                  <div id="cfg-provider-fetch-models-assumed-probe-result" class="cfg-probe-result"></div>
+                </details>
                 <textarea id="cfg-provider-models" rows="5" placeholder="gpt-4o&#10;gpt-4o-mini&#10;o3"></textarea>
               </div>
               <div class="config-form-block">
