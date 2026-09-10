@@ -93,41 +93,41 @@ type CacheUsage struct {
 // CacheRequestRecord 每条 LLM 请求一行（§4.1）。
 // 记录终态后不可变（assistant/user message id 回填除外，且回填不改 usage/聚合）。
 type CacheRequestRecord struct {
-	SchemaVersion      string     `json:"schema_version"`
-	LLMRequestID       string     `json:"llm_request_id"`
-	SessionID          string     `json:"session_id"`
-	TraceID            string     `json:"trace_id,omitempty"`
-	TurnID             string     `json:"turn_id,omitempty"`
-	Step               int        `json:"step,omitempty"`
-	Provider           string     `json:"provider,omitempty"`
-	Model              string     `json:"model,omitempty"`
-	Stream             bool       `json:"stream,omitempty"`
-	Status             string     `json:"status"`
-	Attempt            int        `json:"attempt,omitempty"`
-	StartedAt          time.Time  `json:"started_at"`
-	FinishedAt         *time.Time `json:"finished_at,omitempty"`
-	DurationMS         int64      `json:"duration_ms,omitempty"`
+	SchemaVersion      string      `json:"schema_version"`
+	LLMRequestID       string      `json:"llm_request_id"`
+	SessionID          string      `json:"session_id"`
+	TraceID            string      `json:"trace_id,omitempty"`
+	TurnID             string      `json:"turn_id,omitempty"`
+	Step               int         `json:"step,omitempty"`
+	Provider           string      `json:"provider,omitempty"`
+	Model              string      `json:"model,omitempty"`
+	Stream             bool        `json:"stream,omitempty"`
+	Status             string      `json:"status"`
+	Attempt            int         `json:"attempt,omitempty"`
+	StartedAt          time.Time   `json:"started_at"`
+	FinishedAt         *time.Time  `json:"finished_at,omitempty"`
+	DurationMS         int64       `json:"duration_ms,omitempty"`
 	Usage              *CacheUsage `json:"usage,omitempty"`
-	CacheHitRatio      *float64   `json:"cache_hit_ratio,omitempty"`
-	CacheWriteRatio    *float64   `json:"cache_write_ratio,omitempty"`
-	CacheStatus        string     `json:"cache_status"`
-	CacheEpoch         int        `json:"cache_epoch,omitempty"`
-	PromptCacheKey     string     `json:"prompt_cache_key,omitempty"`
-	PromptFingerprint  string     `json:"prompt_fingerprint,omitempty"`
-	UserMessageID      string     `json:"user_message_id,omitempty"`
-	AssistantMessageID string     `json:"assistant_message_id,omitempty"`
-	ProviderRequestID  string     `json:"provider_request_id,omitempty"`
-	ErrorCategory      string     `json:"error_category,omitempty"`
-	CorrelationSource  string     `json:"correlation_source,omitempty"`
+	CacheHitRatio      *float64    `json:"cache_hit_ratio,omitempty"`
+	CacheWriteRatio    *float64    `json:"cache_write_ratio,omitempty"`
+	CacheStatus        string      `json:"cache_status"`
+	CacheEpoch         int         `json:"cache_epoch,omitempty"`
+	PromptCacheKey     string      `json:"prompt_cache_key,omitempty"`
+	PromptFingerprint  string      `json:"prompt_fingerprint,omitempty"`
+	UserMessageID      string      `json:"user_message_id,omitempty"`
+	AssistantMessageID string      `json:"assistant_message_id,omitempty"`
+	ProviderRequestID  string      `json:"provider_request_id,omitempty"`
+	ErrorCategory      string      `json:"error_category,omitempty"`
+	CorrelationSource  string      `json:"correlation_source,omitempty"`
 }
 
 // CacheStatusDistribution 缓存状态分布（overview 直接画饼）。
 type CacheStatusDistribution struct {
-	Hit         int `json:"hit"`
-	Write       int `json:"write"`
+	Hit          int `json:"hit"`
+	Write        int `json:"write"`
 	ReportedZero int `json:"reported_zero"`
-	NotReported int `json:"not_reported"`
-	Error       int `json:"error"`
+	NotReported  int `json:"not_reported"`
+	Error        int `json:"error"`
 }
 
 // CoverageInfo 数据覆盖情况（自报观测洞，UI 必须可见）。
@@ -140,19 +140,19 @@ type CoverageInfo struct {
 
 // CacheOverview 会话级总览（§4.2）。
 type CacheOverview struct {
-	SchemaVersion          string                  `json:"schema_version"`
-	SessionID              string                  `json:"session_id"`
-	GeneratedAt            time.Time               `json:"generated_at"`
-	WindowFrom             *time.Time              `json:"window_from,omitempty"`
-	WindowTo               *time.Time              `json:"window_to,omitempty"`
-	RequestsTotal          int                     `json:"requests_total"`
-	RequestsWithUsage      int                     `json:"requests_with_usage"`
-	RequestsCacheReported  int                     `json:"requests_cache_reported"`
-	Tokens                 CacheOverviewTokens     `json:"tokens"`
-	CacheHitRatio          *float64                `json:"cache_hit_ratio,omitempty"`
-	CacheWriteRatio        *float64                `json:"cache_write_ratio,omitempty"`
+	SchemaVersion           string                  `json:"schema_version"`
+	SessionID               string                  `json:"session_id"`
+	GeneratedAt             time.Time               `json:"generated_at"`
+	WindowFrom              *time.Time              `json:"window_from,omitempty"`
+	WindowTo                *time.Time              `json:"window_to,omitempty"`
+	RequestsTotal           int                     `json:"requests_total"`
+	RequestsWithUsage       int                     `json:"requests_with_usage"`
+	RequestsCacheReported   int                     `json:"requests_cache_reported"`
+	Tokens                  CacheOverviewTokens     `json:"tokens"`
+	CacheHitRatio           *float64                `json:"cache_hit_ratio,omitempty"`
+	CacheWriteRatio         *float64                `json:"cache_write_ratio,omitempty"`
 	CacheStatusDistribution CacheStatusDistribution `json:"cache_status_distribution"`
-	Coverage               CoverageInfo            `json:"coverage"`
+	Coverage                CoverageInfo            `json:"coverage"`
 }
 
 // CacheOverviewTokens 总览 token 聚合。
@@ -167,23 +167,23 @@ type CacheOverviewTokens struct {
 
 // ProducedBy 消息由哪个请求产出（§4.3）。
 type ProducedBy struct {
-	LLMRequestID   string      `json:"llm_request_id"`
-	Usage          *CacheUsage `json:"usage,omitempty"`
-	CacheHitRatio  *float64    `json:"cache_hit_ratio,omitempty"`
-	CacheStatus    string      `json:"cache_status,omitempty"`
-	TraceID        string      `json:"trace_id,omitempty"`
-	TurnID         string      `json:"turn_id,omitempty"`
-	StartedAt      *time.Time  `json:"started_at,omitempty"`
+	LLMRequestID  string      `json:"llm_request_id"`
+	Usage         *CacheUsage `json:"usage,omitempty"`
+	CacheHitRatio *float64    `json:"cache_hit_ratio,omitempty"`
+	CacheStatus   string      `json:"cache_status,omitempty"`
+	TraceID       string      `json:"trace_id,omitempty"`
+	TurnID        string      `json:"turn_id,omitempty"`
+	StartedAt     *time.Time  `json:"started_at,omitempty"`
 }
 
 // ConsumedBy 消息被哪些后续请求消费（§4.3）。
 type ConsumedBy struct {
-	LLMRequestID   string     `json:"llm_request_id"`
-	Step           int        `json:"step,omitempty"`
-	TurnID         string     `json:"turn_id,omitempty"`
-	CacheHitRatio  *float64   `json:"cache_hit_ratio,omitempty"`
-	CacheStatus    string     `json:"cache_status,omitempty"`
-	StartedAt      *time.Time `json:"started_at,omitempty"`
+	LLMRequestID  string     `json:"llm_request_id"`
+	Step          int        `json:"step,omitempty"`
+	TurnID        string     `json:"turn_id,omitempty"`
+	CacheHitRatio *float64   `json:"cache_hit_ratio,omitempty"`
+	CacheStatus   string     `json:"cache_status,omitempty"`
+	StartedAt     *time.Time `json:"started_at,omitempty"`
 }
 
 // MessageNeighbors 相邻消息浅引用（供 UI 定位上下文）。
@@ -194,16 +194,16 @@ type MessageNeighbors struct {
 
 // MessageTrace 按消息 id 追溯（§4.3）。
 type MessageTrace struct {
-	SchemaVersion     string             `json:"schema_version"`
-	SessionID         string             `json:"session_id"`
-	MessageID         string             `json:"message_id"`
-	MessageRole       string             `json:"message_role,omitempty"`
-	TurnID            string             `json:"turn_id,omitempty"`
-	ProducedBy        *ProducedBy        `json:"produced_by,omitempty"`
-	ConsumedBy        []ConsumedBy       `json:"consumed_by,omitempty"`
-	Neighbors         MessageNeighbors   `json:"neighbors"`
-	HistoryAvailable  bool               `json:"history_available"`
-	CorrelationSource string             `json:"correlation_source,omitempty"`
+	SchemaVersion     string           `json:"schema_version"`
+	SessionID         string           `json:"session_id"`
+	MessageID         string           `json:"message_id"`
+	MessageRole       string           `json:"message_role,omitempty"`
+	TurnID            string           `json:"turn_id,omitempty"`
+	ProducedBy        *ProducedBy      `json:"produced_by,omitempty"`
+	ConsumedBy        []ConsumedBy     `json:"consumed_by,omitempty"`
+	Neighbors         MessageNeighbors `json:"neighbors"`
+	HistoryAvailable  bool             `json:"history_available"`
+	CorrelationSource string           `json:"correlation_source,omitempty"`
 }
 
 // RequestQuery 明细列表查询/过滤条件（§4.4）。
@@ -231,11 +231,11 @@ type RequestListResponse struct {
 
 // Capabilities 能力发现（§4.4 / §7.1：前端启动探测，不支持时优雅降级）。
 type Capabilities struct {
-	SchemaVersion        string   `json:"schema_version"`
-	DataSource           string   `json:"data_source"`
-	MaxRequestsPerSession int     `json:"max_requests_per_session"`
-	SupportsSSE          bool     `json:"supports_sse"`
-	SupportedEvents      []string `json:"supported_events,omitempty"`
+	SchemaVersion         string   `json:"schema_version"`
+	DataSource            string   `json:"data_source"`
+	MaxRequestsPerSession int      `json:"max_requests_per_session"`
+	SupportsSSE           bool     `json:"supports_sse"`
+	SupportedEvents       []string `json:"supported_events,omitempty"`
 }
 
 // MessageContext 会话历史中消息的定位信息（HistoryLookup 返回）。

@@ -34,16 +34,16 @@ const DefaultMaxRequestsPerSession = 1000
 
 // inflightRequest 已开始未终态的请求登记（§6.2 输入事件）。
 type inflightRequest struct {
-	sessionID     string
-	traceID       string
-	turnID        string
-	step          int
-	provider      string
-	model         string
-	stream        bool
-	startedAt     time.Time
-	cacheEpoch    int
-	promptCacheKey string
+	sessionID         string
+	traceID           string
+	turnID            string
+	step              int
+	provider          string
+	model             string
+	stream            bool
+	startedAt         time.Time
+	cacheEpoch        int
+	promptCacheKey    string
 	promptFingerprint string
 }
 
@@ -106,8 +106,8 @@ func Attach(bus *runtimeevents.Bus, opts Options, history HistoryLookup) *Servic
 	// 事件流均承载 cache_request_finished，默认 true；Options 可覆盖。
 	supportsSSE := opts.SupportsSSE == nil || *opts.SupportsSSE
 	return &Service{
-		collector:   collector,
-		source:      newLiveSource(projector, correlation, history, opts.MaxRequestsPerSession, supportsSSE),
+		collector: collector,
+		source:    newLiveSource(projector, correlation, history, opts.MaxRequestsPerSession, supportsSSE),
 	}
 }
 

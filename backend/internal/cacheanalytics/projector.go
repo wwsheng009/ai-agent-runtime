@@ -8,9 +8,9 @@ import (
 
 // projectorAggregates 会话级增量聚合（append/evict 各自维护，查询 O(1) 组装）。
 type projectorAggregates struct {
-	total        int
-	withUsage    int
-	cacheReported int
+	total            int
+	withUsage        int
+	cacheReported    int
 	sumPrompt        int64
 	sumCompletion    int64
 	sumTotal         int64
@@ -18,11 +18,11 @@ type projectorAggregates struct {
 	sumCacheCreation int64
 	sumReasoning     int64
 	// 命中/写入比率的分母各自只统计对应 reported 请求（§4.2：not_reported 不污染比率）。
-	sumPromptReadReported      int64
-	sumCacheReadReported       int64
-	sumPromptCreationReported  int64
-	sumCacheCreationReported   int64
-	dist                       CacheStatusDistribution
+	sumPromptReadReported     int64
+	sumCacheReadReported      int64
+	sumPromptCreationReported int64
+	sumCacheCreationReported  int64
+	dist                      CacheStatusDistribution
 }
 
 func (a *projectorAggregates) add(record *CacheRequestRecord) {
