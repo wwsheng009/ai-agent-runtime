@@ -21,7 +21,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { Link, useParams, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useParams, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
@@ -51,6 +51,11 @@ import type {
 const UsageAnalyticsCharts = lazy(() =>
   import("@/pages/usage-analytics-charts").then((module) => ({
     default: module.UsageAnalyticsCharts,
+  })),
+);
+const CacheAnalyticsView = lazy(() =>
+  import("@/pages/cache-analytics-page").then((module) => ({
+    default: module.CacheAnalyticsView,
   })),
 );
 
@@ -377,6 +382,7 @@ function UsageOverview() {
     <div className="min-h-screen min-w-0 overflow-x-hidden bg-[var(--workspace-shell-bg)] text-[var(--foreground)]">
       <div className="mx-auto flex min-h-screen w-full max-w-[1760px] flex-col gap-2 px-2.5 py-2.5 sm:px-3">
         <AnalyticsHeader onRefresh={() => void load()} refreshing={loading} />
+        <UsageViewTabs active="usage" />
         <main className="flex min-w-0 flex-1 flex-col gap-2">
           <form
             aria-label={t("filters.title")}
@@ -912,5 +918,47 @@ function outcomeTone(outcome: string) {
 
 export function UsageAnalyticsPage() {
   const { sessionId } = useParams();
+  const [searchParams] = useSearchParams();
+  const { pathname } = useLocation();
+  // 入口决策（§6.2）：缓存视图作为 /usage 页内 tab；直接访问 /usage/cache
+  // 或 ?tab=cache 时默认选中缓存 tab，其余路径保持用量视图。
+  const cacheTab = pathname.startsWith("/usage/cache") || searchParams.get("tab") === "cache";
+  if (cacheTab) {
+    return (
+      <Suspense fallback={<CacheViewFallback />}>
+        <CacheAnalyticsView sessionId={sessionId ?? null} />
+      </Suspense>
+    );
+  }
   return sessionId ? <SessionDetail /> : <UsageOverview />;
+}
+
+function CacheViewFallback() {
+  return (
+    <div className="flex min-h-screen items-center justify-center [background:var(--workspace-shell-bg)] text-[var(--muted-foreground)]">
+      <RefreshCwIcon size={16} className="mr-2 animate-spin" />
+      正在加载缓存分析…
+    </div>
+  );
+}
+
+/** 用量 / 缓存 页内 tab 切换（§6.2：同属消耗观测心智，复用页面骨架）。 */
+function UsageViewTabs({ active }: { active: "usage" | "cache" }) {
+  const { t } = useTranslation("usageAnalytics");
+  const tabClass = (isActive: boolean) => cn(
+    "rounded-[0.6rem] border px-3 py-1.5 text-sm transition",
+    isActive
+      ? "border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)] text-[var(--foreground)]"
+      : "border-transparent text-[var(--muted-foreground)] hover:bg-[var(--surface-soft)] hover:text-[var(--foreground)]",
+  );
+  return (
+    <div className="surface-panel flex items-center gap-1 rounded-[0.75rem] p-1" role="tablist" aria-label={t("cache.tabsLabel")}>
+      <Link to="/usage" role="tab" aria-selected={active === "usage"} className={tabClass(active === "usage")}>
+        {t("cache.tabUsage")}
+      </Link>
+      <Link to="/usage/cache" role="tab" aria-selected={active === "cache"} className={tabClass(active === "cache")}>
+        {t("cache.tabCache")}
+      </Link>
+    </div>
+  );
 }

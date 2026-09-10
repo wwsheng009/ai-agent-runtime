@@ -740,6 +740,11 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/sessions/{id}/backtrack", h.ApplySessionBacktrack).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/plan", h.GetSessionPlanMode).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/plan", h.UpdateSessionPlanMode).Methods(http.MethodPost)
+	// 缓存分析 collector：server 启动（路由注册）即挂载（§3.2），
+	// 避免启动初期到首个缓存请求之间的 LLM 事件丢失。
+	h.attachCacheAnalyticsService()
+	runtimeRouter.HandleFunc("/sessions/{id}/cache", h.HandleSessionCache).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/cache/{rest:.*}", h.HandleSessionCache).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/history", h.ClearSessionHistory).Methods(http.MethodDelete)
 
 	// Harness control plane (project permissions / grants / memory / plugins)

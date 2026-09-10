@@ -59,6 +59,7 @@
       <button class="tab-btn active" id="tab-main-btn" type="button">对话</button>
       <button class="tab-btn" id="tab-log-btn" type="button">日志</button>
       <button class="tab-btn" id="tab-config-btn" type="button" title="provider / model / reasoning effort 配置管理">配置</button>
+      <button class="tab-btn" id="tab-cache-btn" type="button" title="LLM 请求与缓存分析（cache.analytics.v1）">缓存</button>
     </div>
 
     <div id="tab-main" class="tab-panel active">
@@ -375,6 +376,16 @@
           </div>
         </div>
       </div>
+    </div>
+    <div id="tab-cache" class="tab-panel">
+      <div class="cache-toolbar">
+        <h2 class="cache-title">缓存分析</h2>
+        <span class="cache-capabilities" id="cache-capabilities">探测中…</span>
+        <span class="config-toolbar-spacer"></span>
+        <button id="cache-refresh-btn" type="button" title="重新拉取缓存分析数据">⟳ 刷新</button>
+      </div>
+      <div id="cache-overview" class="cache-overview"><div class="cache-empty">加载中…</div></div>
+      <div id="cache-requests" class="cache-requests"><div class="cache-empty">加载中…</div></div>
     </div>
   </div>
 </div>

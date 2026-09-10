@@ -24,6 +24,7 @@ import (
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimeobserve "github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
+	cacheanalytics "github.com/wwsheng009/ai-agent-runtime/internal/cacheanalytics"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -136,6 +137,12 @@ type localChatRuntimeHost struct {
 	// ensureLocalObserveService 惰性构建一次，host.Close() 时释放。
 	observeOnce sync.Once
 	observeSvc  *runtimeobserve.Service
+
+	// cacheOnce / cacheSvc 缓存本地 LLM 缓存分析服务（cache.analytics.v1）：
+	// ensureLocalCacheService 惰性构建一次，host.Close() 时释放；
+	// /web/api/cache/* 与 TUI /usage 命令共用同一 Source。
+	cacheOnce sync.Once
+	cacheSvc  *cacheanalytics.Service
 }
 
 // acquireActorTurnGate serializes internally-triggered and foreground turns

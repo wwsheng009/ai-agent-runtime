@@ -3,6 +3,7 @@
 
 import { hideApproval, showApproval, showQuestion } from "./approvals.js";
 import { clearPendingPrompts, getUiState, refreshScreen, setUI, updateTitle } from "./chat.js";
+import { handleCacheSSEEvent } from "./cache.js";
 import { loadRuntimeMeta } from "./runtime.js";
 import { loadSessions } from "./sessions.js";
 import { addStreamImage, appendStreamReasoning, appendStreamText, beginStream, endStream, isStreamActive, renderStream, setStreamText, setStreamTool, startTypeTimer } from "./stream.js";
@@ -199,6 +200,10 @@ function onSSEEvent(eventName, data) {
       // web 自己切换期间 cfgUiDirty 会防止本处刷新覆盖用户正在确认的值。
       loadRuntimeMeta();
       break;
+    case "cache_request_finished":
+      // LLM 缓存请求记录终态（cache.analytics.v1）：缓存页签防抖增量刷新。
+      handleCacheSSEEvent();
+      break;
     case "error":
       setUI("idle", "发生错误");
       refreshScreen();
@@ -225,7 +230,8 @@ function openEventSource() {
   ["connected", "heartbeat", "screen_refresh", "turn_start", "turn_delta", "turn_end",
    "session_start", "session_end", "session_interrupted", "reasoning_delta",
    "assistant_delta", "assistant_image_progress", "tool_start", "tool_end", "approval_requested",
-   "approval_resolved", "question_asked", "question_answered", "dynamic_status", "model_changed"].forEach(function (name) {
+   "approval_resolved", "question_asked", "question_answered", "dynamic_status", "model_changed",
+   "cache_request_finished"].forEach(function (name) {
     es.addEventListener(name, function (e) {
       var data = {};
       try { data = JSON.parse(e.data); } catch (err) { /* ignore */ }

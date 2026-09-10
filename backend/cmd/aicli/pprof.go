@@ -237,6 +237,11 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	mux.HandleFunc(commands.ChatWebAPIConfigProvidersProbeModelsPath, commands.HandleChatWebAPIConfigProvidersProbeModels)
 	mux.HandleFunc(commands.ChatWebAPIConfigProvidersAutoImportPath, commands.HandleChatWebAPIConfigProvidersAutoImport)
 	mux.HandleFunc(commands.ChatWebAPIConfigChatPath, commands.HandleChatWebAPIConfigChat)
+	// /web/api/cache/* LLM 缓存分析端点族（cache.analytics.v1）：
+	// overview / requests / messages/{id}/trace，数据源为当前会话的本地
+	// cacheanalytics.Service（复用 host.EventBus，与 TUI /usage 共用）。
+	mux.HandleFunc(commands.ChatWebAPICachePath, commands.HandleChatWebAPICache)
+	mux.HandleFunc(commands.ChatWebAPICachePath+"/", commands.HandleChatWebAPICache)
 	// style.css / app.js / js/*.js 等静态资源由 HandleChatWebPage 统一伺服
 	// （go:embed 嵌入 web/ 目录，按文件名 + 扩展名 Content-Type 返回）。
 

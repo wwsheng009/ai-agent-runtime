@@ -29,6 +29,13 @@ export {
   getAnalyticsSummary,
   listAnalyticsSessions,
 } from "./analytics";
+export {
+  getCacheCapabilities,
+  getCacheOverview,
+  getCacheRequest,
+  getCacheRequests,
+  getMessageTrace,
+} from "./cache";
 export { listRuntimeModels } from "./models";
 export {
   buildProviderAccountConfigPatch,

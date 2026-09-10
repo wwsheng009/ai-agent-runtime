@@ -3,6 +3,7 @@
 
 import { refreshScreen } from "./chat.js";
 import { loadConfigAdmin } from "./config-admin.js";
+import { loadCacheAnalytics, refreshCacheAnalytics } from "./cache.js";
 
 var tabMainBtn = document.getElementById("tab-main-btn");
 var tabLogBtn = document.getElementById("tab-log-btn");
@@ -39,19 +40,25 @@ applyTheme();
 
 var tabConfigBtn = document.getElementById("tab-config-btn");
 var tabConfigEl = document.getElementById("tab-config");
+var tabCacheBtn = document.getElementById("tab-cache-btn");
+var tabCacheEl = document.getElementById("tab-cache");
 
 function activateTab(tabName) {
   var isMain = tabName === "main";
   var isLog = tabName === "log";
   var isConfig = tabName === "config";
+  var isCache = tabName === "cache";
   tabMainBtn.classList.toggle("active", isMain);
   tabLogBtn.classList.toggle("active", isLog);
   if (tabConfigBtn) { tabConfigBtn.classList.toggle("active", isConfig); }
+  if (tabCacheBtn) { tabCacheBtn.classList.toggle("active", isCache); }
   tabMainEl.classList.toggle("active", isMain);
   tabLogEl.classList.toggle("active", isLog);
   if (tabConfigEl) { tabConfigEl.classList.toggle("active", isConfig); }
+  if (tabCacheEl) { tabCacheEl.classList.toggle("active", isCache); }
   if (isMain) { refreshScreen(); }
   if (isConfig) { loadConfigAdmin(); }
+  if (isCache) { loadCacheAnalytics(); }
 }
 
 // ---- 快捷键帮助面板切换 ----
@@ -74,7 +81,9 @@ export function initTabs() {
   tabMainBtn.addEventListener("click", function () { activateTab("main"); });
   tabLogBtn.addEventListener("click", function () { activateTab("log"); });
   if (tabConfigBtn) { tabConfigBtn.addEventListener("click", function () { activateTab("config"); }); }
-
+  if (tabCacheBtn) { tabCacheBtn.addEventListener("click", function () { activateTab("cache"); }); }
+  var cacheRefreshBtn = document.getElementById("cache-refresh-btn");
+  if (cacheRefreshBtn) { cacheRefreshBtn.addEventListener("click", function () { refreshCacheAnalytics(); }); }
 }
 
 export function initTheme() {

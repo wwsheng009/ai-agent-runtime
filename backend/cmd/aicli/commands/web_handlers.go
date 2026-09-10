@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	cacheanalytics "github.com/wwsheng009/ai-agent-runtime/internal/cacheanalytics"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 )
@@ -1348,6 +1349,23 @@ func chatWebSSEFieldsFor(busEvent string) []webSSEFieldSpec {
 			webSSEFieldSpec{Name: "reasoning_effort", Type: "string", Description: "切换后的 reasoning_effort（可为空表示默认）"},
 			webSSEFieldSpec{Name: "base_url", Type: "string", Description: "切换后的 baseURL"},
 		)
+	case cacheanalytics.EventCacheRequestFinished:
+		fields = append(fields,
+			webSSEFieldSpec{Name: "llm_request_id", Type: "string", Description: "LLM 请求标识"},
+			webSSEFieldSpec{Name: "step", Type: "integer", Description: "turn 内步序"},
+			webSSEFieldSpec{Name: "provider", Type: "string", Description: "provider 名"},
+			webSSEFieldSpec{Name: "model", Type: "string", Description: "模型名"},
+			webSSEFieldSpec{Name: "status", Type: "string", Description: "请求终态（success/error）"},
+			webSSEFieldSpec{Name: "cache_status", Type: "string", Description: "缓存状态（hit/write/reported_zero/not_reported/error）"},
+			webSSEFieldSpec{Name: "cache_hit_ratio", Type: "number", Description: "缓存命中率（未上报时缺省）"},
+			webSSEFieldSpec{Name: "cache_write_ratio", Type: "number", Description: "缓存写入率（未上报时缺省）"},
+			webSSEFieldSpec{Name: "duration_ms", Type: "integer", Description: "请求耗时（毫秒）"},
+			webSSEFieldSpec{Name: "error_category", Type: "string", Description: "错误归类（仅 error 终态）"},
+			webSSEFieldSpec{Name: "user_message_id", Type: "string", Description: "触发用户消息 ID"},
+			webSSEFieldSpec{Name: "assistant_message_id", Type: "string", Description: "产出助手消息 ID"},
+			webSSEFieldSpec{Name: "correlation_source", Type: "string", Description: "消息关联来源（event/history_inferred）"},
+			webSSEFieldSpec{Name: "usage", Type: "object", Description: "归一化 usage（与 /web/api/cache 契约一致）"},
+		)
 	}
 	return fields
 }
@@ -1379,6 +1397,8 @@ func chatWebSSEExampleFor(busEvent string) string {
 		return `{"turn_id":"turn_abc","checkpoint_id":"cp_1"}`
 	case chatWebModelSelectionChangedBusEvent:
 		return `{"provider":"beta","model":"beta-model","reasoning_effort":"medium","base_url":"https://beta.example.com/v1"}`
+	case cacheanalytics.EventCacheRequestFinished:
+		return `{"llm_request_id":"req_123","turn_id":"turn_abc","step":2,"provider":"beta","model":"beta-model","status":"success","cache_status":"hit","cache_hit_ratio":0.85,"duration_ms":1230,"assistant_message_id":"msg_a1","usage":{"prompt_tokens":1000,"cache_read_tokens":850,"cache_read_reported":true}}`
 	default:
 		return `{"turn_id":"turn_abc"}`
 	}

@@ -37,6 +37,8 @@ export default function App() {
           <Route path="/" element={<LandingPage />} />
           <Route path="/logs" element={<LogsPage />} />
           <Route path="/usage" element={<UsageAnalyticsPage />} />
+          <Route path="/usage/cache" element={<UsageAnalyticsPage />} />
+          <Route path="/usage/cache/sessions/:sessionId" element={<UsageAnalyticsPage />} />
           <Route path="/usage/sessions/:sessionId" element={<UsageAnalyticsPage />} />
           <Route path="/analytics" element={<UsageAnalyticsPage />} />
           <Route path="/runtime/config" element={<RuntimeConfigPage />} />

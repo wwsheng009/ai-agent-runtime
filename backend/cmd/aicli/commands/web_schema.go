@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	cacheanalytics "github.com/wwsheng009/ai-agent-runtime/internal/cacheanalytics"
 	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
@@ -106,6 +107,7 @@ var chatWebSSEMappings = []chatWebSSEMapping{
 	{BusEvent: chatWebDynamicStatusBusEvent, SSEEvent: "dynamic_status", Desc: "动态状态栏更新（Retrying/Analyzing/Running…）"},
 	{BusEvent: chatWebUserSubmittedBusEvent, SSEEvent: "screen_refresh", Desc: "用户输入提交（合成 screen_refresh：前端立即重拉确认 pending 气泡）"},
 	{BusEvent: chatWebModelSelectionChangedBusEvent, SSEEvent: "model_changed", Desc: "provider/model/reasoning 切换落地"},
+	{BusEvent: cacheanalytics.EventCacheRequestFinished, SSEEvent: "cache_request_finished", Desc: "LLM 缓存请求记录终态（cache.analytics.v1 投影，缓存页签增量刷新）"},
 }
 
 // chatWebSSEEventName 将 EventBus 事件类型映射为 SSE event 名称。
@@ -264,6 +266,26 @@ func chatWebSSEDataForEvent(ev runtimeevents.Event) map[string]interface{} {
 		pickField(data, payload, "model")
 		pickField(data, payload, "reasoning_effort")
 		pickField(data, payload, "base_url")
+
+	case cacheanalytics.EventCacheRequestFinished:
+		// cache_request_finished（§6.3 SSE 增量）：载荷为 CacheRequestRecord
+		// 投影，字段与 /web/api/cache/requests 契约一致；web 客户端据此
+		// 增量刷新缓存页签（防抖重拉 overview + requests）。
+		pickField(data, payload, "llm_request_id")
+		pickField(data, payload, "turn_id")
+		pickField(data, payload, "step")
+		pickField(data, payload, "provider")
+		pickField(data, payload, "model")
+		pickField(data, payload, "status")
+		pickField(data, payload, "cache_status")
+		pickField(data, payload, "cache_hit_ratio")
+		pickField(data, payload, "cache_write_ratio")
+		pickField(data, payload, "duration_ms")
+		pickField(data, payload, "error_category")
+		pickField(data, payload, "user_message_id")
+		pickField(data, payload, "assistant_message_id")
+		pickField(data, payload, "correlation_source")
+		pickField(data, payload, "usage")
 
 	default:
 		// 未识别的类型：复制整个 payload 供前端日志
