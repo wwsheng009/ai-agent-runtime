@@ -85,6 +85,18 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			AcceptsArgs: false,
 		},
 		{
+			Name:        "/usage",
+			Usage:       "/usage [cache [requests [N] | trace <message_id>]]",
+			Summary:     "显示会话用量与缓存统计",
+			Group:       string(chatSlashCommandGroupSession),
+			AcceptsArgs: true,
+			Args: []chatSlashCommandArgSpec{
+				{Token: "cache", Summary: "缓存统计（默认视图）"},
+				{Token: "requests", Summary: "最近 N 条 LLM 请求明细（默认 20，上限 100）"},
+				{Token: "trace", Summary: "按消息 id 追溯（produced_by/consumed_by）"},
+			},
+		},
+		{
 			Name:        "/debug",
 			Usage:       "/debug [on|off|status|display|routing|export|zip]",
 			Summary:     "控制 debug 模式、显示当前会话调试信息或打包调试文件",

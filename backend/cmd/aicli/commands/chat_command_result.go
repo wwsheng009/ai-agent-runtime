@@ -83,6 +83,18 @@ type SkillPickerRequest struct{}
 // and the export runs only after alternate-screen ownership is released.
 type ExportPickerRequest struct{}
 
+// UsageScreenRequest is the immutable query carried by the typed /usage
+// alternate-screen effect. It captures the parsed subcommand before dispatch:
+// Mode selects the overview / requests / trace view, Limit the request-list
+// size, and TraceID the message id for trace mode. The viewer builds its
+// snapshot from the cache analytics source only while it owns a ScreenLease,
+// and commits no Scene cell in the main message stream.
+type UsageScreenRequest struct {
+	Mode    string
+	Limit   int
+	TraceID string
+}
+
 // CommandResult is the renderer-neutral result of a local chat command.
 type CommandResult struct {
 	Blocks []RenderBlock
@@ -106,6 +118,14 @@ type CommandResult struct {
 	// rendered on its own screen (like /resume list and /history), never as a
 	// Scene command cell in the main message stream.
 	OpenDebugOverlay bool
+	// OpenUsageScreen requests the lease-bound alternate-screen usage viewer
+	// for /usage. Like OpenDebugOverlay it has no document payload in the
+	// unified interactive projection: the cache overview and the session cache
+	// request list are captured once after the command result crosses the
+	// dispatch boundary and rendered on their own screen, never as a Scene
+	// command cell in the main message stream. Plain/JSON/noninteractive
+	// projections keep the §6.4 document cell.
+	OpenUsageScreen *UsageScreenRequest
 	// OpenResumePicker requests the typed alternate-screen session picker. It
 	// has no document payload: the picker borrows a ScreenLease, publishes its
 	// lease-bound state through the UI actor, and only its final result becomes
@@ -298,7 +318,7 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 	if (commandMatches(cmdLower, "/shell") || commandMatches(cmdLower, "/cmd")) && unifiedDirectInteractiveOutput(session) {
 		return executeStructuredShellCommand(session, command), true, nil
 	}
-	if !commandMatches(cmdLower, "/debug") && !commandMatches(cmdLower, "/status") && !commandMatches(cmdLower, "/load") &&
+	if !commandMatches(cmdLower, "/debug") && !commandMatches(cmdLower, "/status") && !commandMatches(cmdLower, "/usage") && !commandMatches(cmdLower, "/load") &&
 		!commandMatches(cmdLower, "/goal") && !commandMatches(cmdLower, "/memory") && !commandMatches(cmdLower, "/stream") &&
 		cmdLower != "/s" && cmdLower != "/n" && !commandMatches(cmdLower, "/fast") && !commandMatches(cmdLower, "/reasoning") &&
 		!commandMatches(cmdLower, "/reasoning_effort") && !commandMatches(cmdLower, "/reasoning-effort") &&
@@ -463,6 +483,14 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 			Blocks: []RenderBlock{{Document: buildChatStatusDocument(session)}},
 			Action: CommandContinue,
 		}, true, nil
+	}
+
+	if commandMatches(cmdLower, "/usage") {
+		// /usage is a finite read-only cache report: the §6.4 pure render
+		// functions build one command cell, and argument/source degradation
+		// errors stay inside the document so the unified command gate never
+		// observes a fall-through.
+		return executeStructuredUsageCommand(session, command), true, nil
 	}
 
 	if commandMatches(cmdLower, "/load") {

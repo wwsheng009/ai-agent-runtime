@@ -86,6 +86,14 @@ func dispatchChatCommand(session *ChatSession, command string, noInteractive boo
 				// committed as a Scene command cell in the main message stream.
 				openChatDebugOverlay(session)
 			}
+			if renderErr == nil && result.OpenUsageScreen != nil && session != nil {
+				// /usage is a lease-bound alternate-screen viewer (like /debug
+				// display): the cache overview and the session cache request
+				// list are captured on the alternate screen and never committed
+				// as a Scene command cell. When the alternate screen cannot be
+				// hosted the viewer degrades to the §6.4 document cell.
+				openChatUsageScreen(session, *result.OpenUsageScreen)
+			}
 			if renderErr == nil && result.ApplyBacktrack != nil && session != nil {
 				// Direct backtrack apply has no alternate screen, but it still owns
 				// the same destructive transaction: actor mutation, canonical Scene
@@ -393,6 +401,9 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 
 	case "/status":
 		return handleStatusCommand(session, command)
+
+	case "/usage":
+		return handleUsageCommand(session, command)
 
 	case "/debug":
 		return handleDebugCommand(session, command)
