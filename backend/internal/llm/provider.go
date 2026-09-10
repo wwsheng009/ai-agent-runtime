@@ -181,6 +181,11 @@ type ProviderConfig struct {
 	SupportsMaxOutputTokens *bool                    `json:"supportsMaxOutputTokens,omitempty"`
 	Proxy                   *agentconfig.ProxyConfig `json:"proxy,omitempty"`
 	RequestsPerMinute       int                      `json:"requestsPerMinute,omitempty"`
+	// ResponseMarkerRules carries provider-scoped response marker strip rules.
+	// They are resolved against the effective model per request and applied
+	// before adapter parsing (stream chunks via providercompat, non-stream
+	// bodies in gateway_client / provider_wrapper).
+	ResponseMarkerRules []agentconfig.ResponseMarkerRule `json:"responseMarkerRules,omitempty"`
 
 	// StreamReadTimeout 流式读取的空闲超时；<=0 表示不启用（默认）。
 	// 只对"该有数据却没有数据"的空闲窗口生效，不影响持续产出数据的长任务。
@@ -687,6 +692,8 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 	if err := validateNonStreamingChatResponseBody(p.config.Type, body); err != nil {
 		return nil, err
 	}
+
+	body = agentconfig.StripMarkersBytes(body, agentconfig.ResolveResponseMarkers(p.config.ResponseMarkerRules, adapterRequest.Model))
 
 	// 使用 adapter 处理响应
 	callbacks := adapter.StreamCallbacks{

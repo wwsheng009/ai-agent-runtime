@@ -289,8 +289,17 @@ presets:
 	if err != nil {
 		t.Fatalf("ApplyMatchingSystemPresets: %v", err)
 	}
-	if len(otherHost.Providers.Items) != 0 || len(otherHost.Providers.Headers) != 0 {
-		t.Fatalf("presets leaked to non-matching host: %+v", otherHost.Providers)
+	if len(otherHost.Providers.Headers) != 0 {
+		t.Fatalf("hostname-gated preset headers leaked to non-matching host: %+v", otherHost.Providers.Headers)
+	}
+	leaked, ok := otherHost.Providers.Items["opencode.ai"]
+	if ok {
+		if leaked.BaseURL != "" || leaked.Enabled || len(leaked.Headers) != 0 {
+			t.Fatalf("hostname-gated opencode-gateway preset leaked to non-matching host: %+v", leaked)
+		}
+		if len(leaked.ResponseMarkerRules) == 0 {
+			t.Fatal("always-on marker-cleanup preset must apply on every host")
+		}
 	}
 }
 
@@ -445,6 +454,37 @@ func TestLoadSystemPresets_SortedFileApplication(t *testing.T) {
 	}
 }
 
+func TestApplyMatchingSystemPresets_MinimaxMarkerCleanupPreset(t *testing.T) {
+	isolatePresetTestEnv(t)
+	dir := SystemPresetDir()
+	content := `
+presets:
+  - name: opencode-gateway-minimax-marker-cleanup
+    enabled: true
+`
+	if err := os.WriteFile(filepath.Join(dir, "presets.yaml"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write presets.yaml: %v", err)
+	}
+	merged, err := ApplyMatchingSystemPresets(&Config{}, "")
+	if err != nil {
+		t.Fatalf("ApplyMatchingSystemPresets: %v", err)
+	}
+	provider, ok := merged.Providers.Items["opencode.ai"]
+	if !ok {
+		t.Fatal("marker-cleanup preset did not create opencode.ai item")
+	}
+	if len(provider.ResponseMarkerRules) != 1 {
+		t.Fatalf("expected 1 response_marker_rule, got %+v", provider.ResponseMarkerRules)
+	}
+	rule := provider.ResponseMarkerRules[0]
+	if len(rule.Models) != 1 || rule.Models[0] != "*minimax*" {
+		t.Fatalf("unexpected models: %+v", rule.Models)
+	}
+	if len(rule.Markers) != 1 || rule.Markers[0] != "]<]minimax[>[" {
+		t.Fatalf("unexpected markers: %+v", rule.Markers)
+	}
+}
+
 func TestEnsureUserPresetsFile_CreatesFromEmbedded(t *testing.T) {
 	isolatePresetTestEnv(t)
 	path, created, err := EnsureUserPresetsFile()
@@ -465,8 +505,15 @@ func TestEnsureUserPresetsFile_CreatesFromEmbedded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("created presets unparsable: %v", err)
 	}
-	if len(presets) != 1 || presets[0].Name != "opencode-gateway" {
+	if len(presets) != 2 {
 		t.Fatalf("created presets unexpected: %+v", presets)
+	}
+	names := make([]string, 0, len(presets))
+	for _, preset := range presets {
+		names = append(names, preset.Name)
+	}
+	if names[0] != "opencode-gateway" || names[1] != "opencode-gateway-minimax-marker-cleanup" {
+		t.Fatalf("created presets unexpected: %+v", names)
 	}
 }
 

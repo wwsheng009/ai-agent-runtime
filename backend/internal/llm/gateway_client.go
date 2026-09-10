@@ -586,6 +586,7 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 		ResponseBodyPreview: truncateHTTPDebugBytes(body, 4096),
 		ResponseBodyRaw:     boundHTTPDebugRawBody(body),
 	})
+	body = agentconfig.StripMarkersBytes(body, agentconfig.ResolveResponseMarkers(responseMarkerRulesFromSelected(selected), adapterRequest.Model))
 
 	// 使用 adapter 处理响应
 	callbacks := adapter.StreamCallbacks{
@@ -1612,6 +1613,19 @@ func compatibilityProfileFromSelected(selected *SelectedResource) string {
 		return strings.TrimSpace(cfg.Compatibility.Profile)
 	}
 	return ""
+}
+
+func responseMarkerRulesFromSelected(selected *SelectedResource) []agentconfig.ResponseMarkerRule {
+	if selected == nil || selected.Provider == nil {
+		return nil
+	}
+	switch cfg := selected.Provider.Config.(type) {
+	case *agentconfig.Provider:
+		return cfg.ResponseMarkerRules
+	case agentconfig.Provider:
+		return cfg.ResponseMarkerRules
+	}
+	return nil
 }
 
 func newGatewayHTTPError(statusCode int, body string, header http.Header, rules []RetryRule) error {

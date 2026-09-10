@@ -1001,6 +1001,7 @@ func buildSkillsProviderConfigs(cfg *config.Config) map[string]*runtimellm.Provi
 			Headers:               config.EffectiveProviderHeaders(cfg.Providers.Headers, provider.Headers),
 			HeaderMappings:        cloneStringMap(provider.HeaderMappings),
 			HeaderMappingRules:    cloneHeaderMappingRules(provider.HeaderMappingRules),
+			ResponseMarkerRules:   cloneResponseMarkerRules(provider.ResponseMarkerRules),
 			Proxy:                 config.EffectiveProxyConfig(&cfg.Providers.Proxy, provider.Proxy),
 			RequestsPerMinute:     provider.RequestsPerMinute,
 			StreamReadTimeout:     runtimellm.ProviderStreamReadTimeoutFromAgentConfig(cfg),
@@ -1034,6 +1035,20 @@ func cloneProviderModelCapabilities(input map[string]config.ModelCapabilitySpec)
 			cloned.InputModalities = append([]string(nil), value.InputModalities...)
 		}
 		output[key] = cloned
+	}
+	return output
+}
+
+func cloneResponseMarkerRules(input []config.ResponseMarkerRule) []config.ResponseMarkerRule {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make([]config.ResponseMarkerRule, len(input))
+	for i, r := range input {
+		output[i] = config.ResponseMarkerRule{
+			Models:  append([]string(nil), r.Models...),
+			Markers: append([]string(nil), r.Markers...),
+		}
 	}
 	return output
 }

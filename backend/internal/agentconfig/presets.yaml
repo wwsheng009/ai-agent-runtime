@@ -39,3 +39,18 @@ presets:
               x-opencode-project: "{project_id}"
               x-opencode-request: "{user_id}"
               x-opencode-client: "{client}"
+  # Strips literal stream markers emitted by minimax-family models through the
+  # opencode.ai gateway (e.g. "]<]minimax[>[") from assistant content before
+  # tool-call parsing and history persistence. Set enabled: false to opt out,
+  # or extend response_marker_rules for other model families. Overriding
+  # response_marker_rules in config.yaml replaces this list wholesale (slice
+  # merge semantics).
+  - name: opencode-gateway-minimax-marker-cleanup
+    enabled: true
+    config:
+      providers:
+        items:
+          opencode.ai:
+            response_marker_rules:
+              - models: ["*minimax*"]
+                markers: ["]<]minimax[>["]

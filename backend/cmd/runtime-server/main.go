@@ -1326,6 +1326,7 @@ func buildSkillsProviderConfigs(cfg *config.Config) map[string]*runtimellm.Provi
 			Headers:               config.EffectiveProviderHeaders(cfg.Providers.Headers, provider.Headers),
 			HeaderMappings:        cloneStringMap(provider.HeaderMappings),
 			HeaderMappingRules:    cloneHeaderMappingRules(provider.HeaderMappingRules),
+			ResponseMarkerRules:   cloneResponseMarkerRules(provider.ResponseMarkerRules),
 			Proxy:                 config.EffectiveProxyConfig(&cfg.Providers.Proxy, provider.Proxy),
 			RequestsPerMinute:     provider.RequestsPerMinute,
 		}
@@ -1543,6 +1544,20 @@ func cloneStringMap(input map[string]string) map[string]string {
 	output := make(map[string]string, len(input))
 	for key, value := range input {
 		output[key] = value
+	}
+	return output
+}
+
+func cloneResponseMarkerRules(input []config.ResponseMarkerRule) []config.ResponseMarkerRule {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make([]config.ResponseMarkerRule, len(input))
+	for i, rule := range input {
+		output[i] = config.ResponseMarkerRule{
+			Models:  append([]string(nil), rule.Models...),
+			Markers: append([]string(nil), rule.Markers...),
+		}
 	}
 	return output
 }

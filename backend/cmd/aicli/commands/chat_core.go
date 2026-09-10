@@ -693,6 +693,7 @@ func buildSharedChatAutoCompactRuntime(session *ChatSession) (*runtimellm.LLMRun
 		Headers:                 effectiveChatProviderHeaders(session),
 		HeaderMappings:          cloneStringMap(session.Provider.HeaderMappings),
 		HeaderMappingRules:      cloneHeaderMappingRules(session.Provider.HeaderMappingRules),
+		ResponseMarkerRules:     cloneResponseMarkerRules(session.Provider.ResponseMarkerRules),
 		SupportsMaxOutputTokens: session.Provider.SupportsMaxOutputTokens,
 		Proxy:                   session.Provider.Proxy.Clone(),
 		RequestsPerMinute:       session.Provider.RequestsPerMinute,

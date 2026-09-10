@@ -18,6 +18,10 @@ type Context struct {
 	Model                   string
 	SupportsMaxOutputTokens *bool
 	ConfiguredCapabilities  map[string]agentconfig.ModelCapabilitySpec
+	// ResponseMarkers lists literal markers resolved for this request's
+	// effective model; they are stripped from streamed delta content and
+	// reasoning before the protocol adapter accumulates them.
+	ResponseMarkers []string
 }
 
 // Chain is a light-weight compatibility pipeline for one provider context.

@@ -200,6 +200,11 @@ type Provider struct {
 	SupportTypes       []string                       `yaml:"support_types" mapstructure:"support_types" json:"support_types"`
 	ModelMappings      map[string]string              `yaml:"model_mappings" mapstructure:"model_mappings" json:"model_mappings"`
 	ModelCapabilities  map[string]ModelCapabilitySpec `yaml:"model_capabilities" mapstructure:"model_capabilities" json:"model_capabilities"`
+	// ResponseMarkerRules lists provider-scoped response marker strip rules.
+	// Each rule matches a set of models (glob, case-insensitive) and strips
+	// the configured literal markers from streamed assistant content before
+	// tool-call parsing and history persistence.
+	ResponseMarkerRules []ResponseMarkerRule `yaml:"response_marker_rules" mapstructure:"response_marker_rules" json:"response_marker_rules"`
 	// EnableImageGeneration is the provider-level opt-in for Codex native
 	// image_generation tool injection. When nil or false, requests never
 	// auto-append image_generation even if a model capability advertises it.
@@ -221,6 +226,16 @@ type Provider struct {
 	SiteTypeScores     map[string]int           `yaml:"site_type_scores,omitempty" mapstructure:"site_type_scores" json:"site_type_scores,omitempty"`
 	AccountAuthRef     string                   `yaml:"account_auth_ref,omitempty" mapstructure:"account_auth_ref" json:"account_auth_ref,omitempty"`
 	Account            *ProviderAccountSnapshot `yaml:"account,omitempty" mapstructure:"account" json:"account,omitempty"`
+}
+
+// ResponseMarkerRule describes one response marker strip rule: Models are
+// model glob patterns (path.Match style, case-insensitive; empty matches all
+// models of the provider) and Markers are literal tokens to strip from
+// streamed assistant content (delta content and reasoning content) before
+// tool-call markup parsing and history persistence.
+type ResponseMarkerRule struct {
+	Models  []string `yaml:"models" mapstructure:"models" json:"models"`
+	Markers []string `yaml:"markers" mapstructure:"markers" json:"markers"`
 }
 
 // CompatibilityConfig selects a versioned, built-in wire dialect profile for a

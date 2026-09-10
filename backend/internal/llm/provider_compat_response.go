@@ -3,6 +3,7 @@ package llm
 import (
 	"io"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/providercompat"
 )
 
@@ -19,6 +20,7 @@ func (p *ProviderWrapper) providerCompatContext(model string) providercompat.Con
 		Model:                   model,
 		SupportsMaxOutputTokens: p.config.SupportsMaxOutputTokens,
 		ConfiguredCapabilities:  p.config.ModelCapabilities,
+		ResponseMarkers:         agentconfig.ResolveResponseMarkers(p.config.ResponseMarkerRules, model),
 	}
 }
 
@@ -75,6 +77,7 @@ func gatewayProviderCompatContext(selected *SelectedResource, protocol, model st
 		Model:                   model,
 		SupportsMaxOutputTokens: supportsMaxOutputTokens,
 		ConfiguredCapabilities:  selectedProviderModelCapabilities(selected),
+		ResponseMarkers:         agentconfig.ResolveResponseMarkers(responseMarkerRulesFromSelected(selected), model),
 	}
 }
 

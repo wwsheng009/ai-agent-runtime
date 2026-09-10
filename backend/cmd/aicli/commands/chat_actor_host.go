@@ -1815,6 +1815,7 @@ func ensureLocalRuntimeProvider(runtime *runtimellm.LLMRuntime, session *ChatSes
 			EnableImageGeneration: session.Provider.EnableImageGeneration,
 			Headers:               effectiveChatProviderHeaders(session),
 			HeaderMappings:        cloneStringMap(session.Provider.HeaderMappings),
+			ResponseMarkerRules:   cloneResponseMarkerRules(session.Provider.ResponseMarkerRules),
 			Proxy:                 session.Provider.Proxy.Clone(),
 			RequestsPerMinute:     session.Provider.RequestsPerMinute,
 			StreamReadTimeout:     runtimellm.ProviderStreamReadTimeoutFromAgentConfig(session.Config),

@@ -60,6 +60,7 @@ func BuildRuntimeProviderConfigs(cfg *agentconfig.Config) map[string]*runtimellm
 			Headers:                 agentconfig.EffectiveProviderHeaders(cfg.Providers.Headers, provider.Headers),
 			HeaderMappings:          cloneRuntimeStringMap(provider.HeaderMappings),
 			HeaderMappingRules:      cloneRuntimeHeaderMappingRules(provider.HeaderMappingRules),
+			ResponseMarkerRules:     cloneRuntimeResponseMarkerRules(provider.ResponseMarkerRules),
 			SupportsMaxOutputTokens: provider.SupportsMaxOutputTokens,
 			Proxy:                   agentconfig.EffectiveProxyConfig(&cfg.Providers.Proxy, provider.Proxy),
 		}
@@ -106,6 +107,20 @@ func cloneRuntimeModelCapabilities(input map[string]agentconfig.ModelCapabilityS
 			}
 		}
 		output[key] = cloned
+	}
+	return output
+}
+
+func cloneRuntimeResponseMarkerRules(input []agentconfig.ResponseMarkerRule) []agentconfig.ResponseMarkerRule {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make([]agentconfig.ResponseMarkerRule, len(input))
+	for i, rule := range input {
+		output[i] = agentconfig.ResponseMarkerRule{
+			Models:  append([]string(nil), rule.Models...),
+			Markers: append([]string(nil), rule.Markers...),
+		}
 	}
 	return output
 }

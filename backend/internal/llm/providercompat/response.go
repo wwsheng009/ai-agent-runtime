@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	llmadapter "github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -27,11 +28,48 @@ func (c Chain) NormalizeProcessResult(result *llmadapter.ProcessResult) *llmadap
 }
 
 // NormalizeStreamChunk applies provider-specific fixes to one streaming JSON
-// chunk before the protocol adapter accumulates it.
+// chunk before the protocol adapter accumulates it. Configured response
+// markers are stripped from delta content and reasoning first.
 func (c Chain) NormalizeStreamChunk(chunk map[string]interface{}) map[string]interface{} {
+	chunk = stripStreamChunkMarkers(c.ctx.ResponseMarkers, chunk)
 	for _, adapter := range c.adapters {
 		if normalized, ok := adapter.NormalizeStreamChunk(c.ctx, chunk); ok {
 			chunk = normalized
+		}
+	}
+	return chunk
+}
+
+// stripStreamChunkMarkers removes configured literal markers from the delta
+// content, reasoning_content and reasoning fields of every choice in an
+// OpenAI-style streaming chunk. The chunk is returned unchanged when markers
+// is empty or nothing matched. In-place mutation is safe: the chunk was
+// freshly decoded from a single SSE data line and is not shared.
+func stripStreamChunkMarkers(markers []string, chunk map[string]interface{}) map[string]interface{} {
+	if len(markers) == 0 || len(chunk) == 0 {
+		return chunk
+	}
+	choices, ok := chunk["choices"].([]interface{})
+	if !ok || len(choices) == 0 {
+		return chunk
+	}
+	for _, rawChoice := range choices {
+		choice, ok := rawChoice.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		delta, ok := choice["delta"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		for _, key := range []string{"content", "reasoning_content", "reasoning"} {
+			value, ok := delta[key].(string)
+			if !ok {
+				continue
+			}
+			if cleaned := agentconfig.StripMarkers(value, markers); cleaned != value {
+				delta[key] = cleaned
+			}
 		}
 	}
 	return chunk

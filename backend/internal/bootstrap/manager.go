@@ -483,6 +483,9 @@ func cloneProviderConfig(input *llm.ProviderConfig) *llm.ProviderConfig {
 	if len(input.HeaderMappingRules) > 0 {
 		cloned.HeaderMappingRules = cloneHeaderMappingRules(input.HeaderMappingRules)
 	}
+	if len(input.ResponseMarkerRules) > 0 {
+		cloned.ResponseMarkerRules = cloneResponseMarkerRules(input.ResponseMarkerRules)
+	}
 	if len(input.RetryRules) > 0 {
 		cloned.RetryRules = cloneRetryRules(input.RetryRules)
 	}
@@ -525,6 +528,20 @@ func cloneHeaderMappingRules(input []llm.HeaderMappingRule) []llm.HeaderMappingR
 	}
 	output := make([]llm.HeaderMappingRule, len(input))
 	copy(output, input)
+	return output
+}
+
+func cloneResponseMarkerRules(input []agentconfig.ResponseMarkerRule) []agentconfig.ResponseMarkerRule {
+	if len(input) == 0 {
+		return nil
+	}
+	output := make([]agentconfig.ResponseMarkerRule, len(input))
+	for i, rule := range input {
+		output[i] = agentconfig.ResponseMarkerRule{
+			Models:  append([]string(nil), rule.Models...),
+			Markers: append([]string(nil), rule.Markers...),
+		}
+	}
 	return output
 }
 
