@@ -323,7 +323,9 @@ func buildSessionUsageDetail(rollup SessionRollup, steps []StepUsage, turns []Tu
 		ErrorCategories: errorCategoryCounts(steps),
 		Coverage:        coverageFor([]SessionRollup{rollup}),
 		Partial:         rollup.Partial,
-		PartialReasons:  append([]string(nil), rollup.PartialReasons...),
+		// 空切片必须保持非 nil：Go nil 切片会序列化为 JSON null，
+		// 前端对 partial_reasons 直接取 .length 会崩溃（白屏）。
+		PartialReasons: append([]string{}, rollup.PartialReasons...),
 	}
 }
 

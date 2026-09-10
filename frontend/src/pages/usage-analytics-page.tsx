@@ -711,7 +711,17 @@ function SessionDetail() {
     setLoading(true);
     setError(null);
     try {
-      setDetail(await getAnalyticsSessionUsage(sessionId, { adminToken }));
+      const raw = await getAnalyticsSessionUsage(sessionId, { adminToken });
+      // 后端（Go）空切片可能序列化为 null，统一归一化为空数组，
+      // 避免 QualityNotice/Diagnostics/TurnTable 取 .length 时崩溃白屏。
+      setDetail({
+        ...raw,
+        partial_reasons: raw.partial_reasons ?? [],
+        steps: raw.steps ?? [],
+        turns: raw.turns ?? [],
+        diagnostics: raw.diagnostics ?? [],
+        error_categories: raw.error_categories ?? {},
+      });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
