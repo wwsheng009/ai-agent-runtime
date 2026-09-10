@@ -231,11 +231,14 @@ type RequestListResponse struct {
 
 // Capabilities 能力发现（§4.4 / §7.1：前端启动探测，不支持时优雅降级）。
 type Capabilities struct {
-	SchemaVersion         string   `json:"schema_version"`
-	DataSource            string   `json:"data_source"`
-	MaxRequestsPerSession int      `json:"max_requests_per_session"`
-	SupportsSSE           bool     `json:"supports_sse"`
-	SupportedEvents       []string `json:"supported_events,omitempty"`
+	SchemaVersion         string `json:"schema_version"`
+	DataSource            string `json:"data_source"`
+	MaxRequestsPerSession int    `json:"max_requests_per_session"`
+	SupportsSSE           bool   `json:"supports_sse"`
+	// Persisted 表示已挂载持久化镜像表（Phase 3）：记录可跨进程回放，
+	// MaxRequestsPerSession 不再是硬上限（纯内存模式下仍生效）。
+	Persisted       bool     `json:"persisted"`
+	SupportedEvents []string `json:"supported_events,omitempty"`
 }
 
 // MessageContext 会话历史中消息的定位信息（HistoryLookup 返回）。

@@ -61,6 +61,8 @@ type Collector struct {
 	unsubs      []runtimeevents.Unsubscribe
 	now         func() time.Time
 	closed      bool
+	// store 终态记录持久化镜像（Phase 3）；nil 时纯内存（v1 行为不变）。
+	store RequestStore
 }
 
 // Options Collector 构建选项。
@@ -72,6 +74,12 @@ type Options struct {
 	// SupportsSSE 覆盖能力发现的是否支持 SSE 增量（§4.4）。nil 时默认
 	// true（两种挂载形态的事件流均承载 cache_request_finished）。
 	SupportsSSE *bool
+	// Store 终态记录持久化镜像（Phase 3：session_runtime.sqlite 镜像表
+	// cache_requests）；nil 时纯内存（v1 行为不变）。非 nil 时：
+	//   - 终态记录同步落库（best-effort，失败不影响在线投影）；
+	//   - 查询期按会话惰性回放镜像记录（重启/恢复会话后明细不丢）；
+	//   - Projector 不再淘汰（消除环形上限 partial 降级，§710）。
+	Store RequestStore
 }
 
 // Attach 把 Collector 挂到事件总线上并返回服务实例。
@@ -87,6 +95,7 @@ func Attach(bus *runtimeevents.Bus, opts Options, history HistoryLookup) *Servic
 		opts.Now = time.Now
 	}
 	projector := newProjector(opts.MaxRequestsPerSession)
+	projector.setPersisted(opts.Store != nil)
 	correlation := newCorrelationTable()
 	collector := &Collector{
 		bus:         bus,
@@ -94,6 +103,7 @@ func Attach(bus *runtimeevents.Bus, opts Options, history HistoryLookup) *Servic
 		correlation: correlation,
 		inflight:    make(map[string]*inflightRequest),
 		now:         opts.Now,
+		store:       opts.Store,
 	}
 	for _, eventType := range []string{
 		eventLLMRequestStarted, eventLLMRequestFinished,
@@ -107,7 +117,7 @@ func Attach(bus *runtimeevents.Bus, opts Options, history HistoryLookup) *Servic
 	supportsSSE := opts.SupportsSSE == nil || *opts.SupportsSSE
 	return &Service{
 		collector: collector,
-		source:    newLiveSource(projector, correlation, history, opts.MaxRequestsPerSession, supportsSSE),
+		source:    newLiveSource(projector, correlation, history, opts.MaxRequestsPerSession, supportsSSE, opts.Store),
 	}
 }
 
@@ -271,6 +281,7 @@ func (c *Collector) onRequestFinished(event runtimeevents.Event) {
 		record.CacheStatus = CacheStatusError
 		c.projector.append(record)
 		c.publishRecordFinished(record)
+		c.persistRecord(record)
 		return
 	}
 	record.Status = RequestStatusSuccess
@@ -294,6 +305,18 @@ func (c *Collector) onRequestFinished(event runtimeevents.Event) {
 	}
 	c.projector.append(record)
 	c.publishRecordFinished(record)
+	c.persistRecord(record)
+}
+
+// persistRecord 终态记录落库（Phase 3 镜像表，best-effort）：
+// 在线投影与 SSE 发布已先行完成（慢写不拖慢增量推送，§9 采集开销约束）；
+// 写入失败静默忽略——仅丢失镜像行，不影响本次进程内的查询与 SSE 增量，
+// 镜像行可由该请求下次终态事件或下次会话回放修复。
+func (c *Collector) persistRecord(record *CacheRequestRecord) {
+	if c == nil || c.store == nil || record == nil {
+		return
+	}
+	_ = c.store.SaveRequest(*record)
 }
 
 // publishRecordFinished 向总线发布 cache_request_finished（§6.3）：
@@ -422,6 +445,7 @@ func (c *Collector) onSessionTerminal(event runtimeevents.Event) {
 			PromptFingerprint: inflight.promptFingerprint,
 		}
 		c.projector.append(record)
+		c.persistRecord(record)
 	}
 }
 

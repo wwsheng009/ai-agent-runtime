@@ -135,7 +135,11 @@ type sessionState struct {
 type Projector struct {
 	mu            sync.RWMutex
 	maxPerSession int
-	sessions      map[string]*sessionState
+	// persisted 表示已挂载持久化镜像表（Phase 3）：记录可随时从镜像表
+	// 回放，内存投影不再淘汰，消除环形上限的 ring_overflow partial 降级
+	//（方案 §710：Phase 3 sqlite 持久化后消除）。
+	persisted bool
+	sessions  map[string]*sessionState
 }
 
 func newProjector(maxPerSession int) *Projector {
@@ -157,7 +161,14 @@ func (p *Projector) state(sessionID string) *sessionState {
 	return state
 }
 
-// append 追加终态记录；溢出时淘汰最旧并标记 partial。
+// setPersisted 切换持久化模式（Attach 时按是否注入 RequestStore 设置）。
+func (p *Projector) setPersisted(v bool) {
+	p.mu.Lock()
+	p.persisted = v
+	p.mu.Unlock()
+}
+
+// append 追加终态记录；溢出时淘汰最旧并标记 partial（持久化模式下不淘汰）。
 func (p *Projector) append(record *CacheRequestRecord) {
 	if record == nil || record.LLMRequestID == "" || record.SessionID == "" {
 		return
@@ -172,16 +183,18 @@ func (p *Projector) append(record *CacheRequestRecord) {
 	state.records = append(state.records, record)
 	state.index[record.LLMRequestID] = record
 	state.agg.add(record)
-	for len(state.records) > p.maxPerSession {
-		oldest := state.records[0]
-		state.records = state.records[1:]
-		delete(state.index, oldest.LLMRequestID)
-		state.agg.remove(oldest)
-		state.evicted++
-	}
-	if state.evicted == 1 {
-		// 原因字符串与方案 §4.2/§5.3 对齐：ring_overflow。
-		state.partialReasons = append(state.partialReasons, "ring_overflow")
+	if !p.persisted {
+		for len(state.records) > p.maxPerSession {
+			oldest := state.records[0]
+			state.records = state.records[1:]
+			delete(state.index, oldest.LLMRequestID)
+			state.agg.remove(oldest)
+			state.evicted++
+		}
+		if state.evicted == 1 {
+			// 原因字符串与方案 §4.2/§5.3 对齐：ring_overflow。
+			state.partialReasons = append(state.partialReasons, "ring_overflow")
+		}
 	}
 }
 
@@ -243,8 +256,19 @@ func (p *Projector) overview(sessionID string) CacheOverview {
 	overview.CacheStatusDistribution = agg.dist
 	overview.Coverage = buildCoverage(agg, state)
 	if len(state.records) > 0 {
+		// 窗口取 min/max 而非 records[0]/last：镜像回放与在线事件交错时
+		// 追加序可能短暂非时间序，min/max 扫描使窗口与顺序无关（O(n)，
+		// 与 requests 查询同量级）。
 		from := state.records[0].StartedAt
-		to := state.records[len(state.records)-1].StartedAt
+		to := from
+		for _, record := range state.records {
+			if record.StartedAt.Before(from) {
+				from = record.StartedAt
+			}
+			if record.StartedAt.After(to) {
+				to = record.StartedAt
+			}
+		}
 		overview.WindowFrom = &from
 		overview.WindowTo = &to
 	}
@@ -406,4 +430,19 @@ func (p *Projector) sessionRecordCount(sessionID string) int {
 		return 0
 	}
 	return len(state.records)
+}
+
+// sortSessionRecords 按 StartedAt 升序重排会话记录：镜像回放与在线事件
+// 交错后恢复时间序（overview 窗口已改为 min/max 扫描，此排序主要保障
+// requestsAfter/trace 的顺序语义；幂等，重复调用无副作用）。
+func (p *Projector) sortSessionRecords(sessionID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	state := p.sessions[sessionID]
+	if state == nil {
+		return
+	}
+	sort.SliceStable(state.records, func(i, j int) bool {
+		return state.records[i].StartedAt.Before(state.records[j].StartedAt)
+	})
 }

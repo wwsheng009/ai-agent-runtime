@@ -2120,6 +2120,9 @@ func (s *SQLiteRuntimeStore) DeleteState(ctx context.Context, sessionID string) 
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM session_tool_receipts WHERE session_id = ?`, sessionID); err != nil {
 		return fmt.Errorf("delete tool receipts: %w", err)
 	}
+	if err := s.deleteSessionCacheRequests(ctx, sessionID); err != nil {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx, `DELETE FROM session_runtime_state WHERE session_id = ?`, sessionID)
 	if err != nil {
 		return fmt.Errorf("delete runtime state: %w", err)
@@ -4304,6 +4307,21 @@ func (s *SQLiteRuntimeStore) init(ctx context.Context) error {
 				CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_control_mailbox_records_session_message
 				ON agent_control_mailbox_records(scope, session_id, message_id)
 				WHERE scope = 'session' AND message_id <> '';
+			`,
+		},
+		{
+			Version: 20,
+			Name:    "cache_requests",
+			UpSQL: `
+				CREATE TABLE IF NOT EXISTS cache_requests (
+					llm_request_id TEXT PRIMARY KEY,
+					session_id TEXT NOT NULL,
+					started_at_unix_nano INTEGER NOT NULL DEFAULT 0,
+					record_json BLOB NOT NULL,
+					created_at TEXT NOT NULL
+				);
+				CREATE INDEX IF NOT EXISTS idx_cache_requests_session_started
+				ON cache_requests(session_id, started_at_unix_nano ASC, llm_request_id ASC);
 			`,
 		},
 	}

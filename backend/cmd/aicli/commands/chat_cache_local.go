@@ -137,7 +137,14 @@ func buildLocalCacheService(host *localChatRuntimeHost) *cacheanalytics.Service 
 	if host.SessionStore != nil {
 		history = &localCacheHistoryLookup{store: host.SessionStore}
 	}
-	service := cacheanalytics.Attach(host.EventBus, cacheanalytics.Options{}, history)
+	// Phase 3：终态记录持久化镜像（session_runtime.sqlite cache_requests，
+	// 方案 §375）。SQLiteRuntimeStore 实现 cacheanalytics.RequestStore；
+	// InMemoryRuntimeStore 不实现，断言失败时保持纯内存行为（v1 不变）。
+	var store cacheanalytics.RequestStore
+	if runtimeStore, ok := host.RuntimeStore.(cacheanalytics.RequestStore); ok {
+		store = runtimeStore
+	}
+	service := cacheanalytics.Attach(host.EventBus, cacheanalytics.Options{Store: store}, history)
 	if service == nil {
 		return nil
 	}

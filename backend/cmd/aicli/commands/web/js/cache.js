@@ -133,8 +133,11 @@ function refreshCacheCapabilities() {
       return;
     }
     cacheAvailable = true;
+    var detail = result.body.persisted
+      ? "已持久化（重启/恢复会话后可回放，无上限）"
+      : "每会话上限 " + (result.body.max_requests_per_session || 0) + " 条";
     el.textContent = "契约 " + result.body.schema_version + " · 数据源 " + (result.body.data_source || "live")
-      + " · 每会话上限 " + (result.body.max_requests_per_session || 0) + " 条";
+      + " · " + detail;
     el.className = "cache-capabilities";
   }).catch(function () {
     cacheAvailable = false;

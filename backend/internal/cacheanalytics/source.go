@@ -1,26 +1,69 @@
 package cacheanalytics
 
+import "sync"
+
 // LiveSource 在线投影查询视图：内存 Projector + 关联表 + 会话历史兜底。
 // 实现 Source 接口，HTTP（httpapi.Mount）与 TUI（/usage）共用。
+// 挂载持久化镜像表（Phase 3）时，首次查询某会话前先从镜像表惰性回放，
+// 进程重启/会话恢复后 per-request 明细不丢（方案 §375/§711）。
 type LiveSource struct {
 	projector   *Projector
 	correlation *correlationTable
 	history     HistoryLookup
 	maxRequests int
 	supportsSSE bool
+	// store 持久化镜像（nil 时纯内存）；loadedSessions 记录已回放
+	//（或确认无镜像行）的会话，避免重复查库。
+	store          RequestStore
+	loadedMu       sync.Mutex
+	loadedSessions map[string]bool
 }
 
-func newLiveSource(projector *Projector, correlation *correlationTable, history HistoryLookup, maxRequests int, supportsSSE bool) *LiveSource {
+func newLiveSource(projector *Projector, correlation *correlationTable, history HistoryLookup, maxRequests int, supportsSSE bool, store RequestStore) *LiveSource {
 	if maxRequests <= 0 {
 		maxRequests = DefaultMaxRequestsPerSession
 	}
 	return &LiveSource{
-		projector:   projector,
-		correlation: correlation,
-		history:     history,
-		maxRequests: maxRequests,
-		supportsSSE: supportsSSE,
+		projector:      projector,
+		correlation:    correlation,
+		history:        history,
+		maxRequests:    maxRequests,
+		supportsSSE:    supportsSSE,
+		store:          store,
+		loadedSessions: make(map[string]bool),
 	}
+}
+
+// ensureSessionLoaded 查询前把该会话的镜像记录回放进 Projector（幂等：
+// projector.append 按 llm_request_id 去重，与在线事件并发安全）。
+// 加载失败降级为纯内存视图，不重试（下次进程重启再回放）。
+//
+// 持锁加载：前端打开页签时会并行拉取 overview+requests（SSE 刷新亦然），
+// 若"先标记后加载"，并发查询会读到回放中途的部分投影，且前端按会话缓存
+// 不会自动重拉 → 持 loadedMu 贯穿加载+回放，让并发查询阻塞到回放完成。
+// 锁序固定为 loadedMu → projector.mu（无反向路径），无死锁风险。
+func (s *LiveSource) ensureSessionLoaded(sessionID string) {
+	if s == nil || s.store == nil || sessionID == "" {
+		return
+	}
+	s.loadedMu.Lock()
+	defer s.loadedMu.Unlock()
+	if s.loadedSessions[sessionID] {
+		return
+	}
+	// 先标记再加载：同一会话只回放一次；失败视为已回放（降级）。
+	s.loadedSessions[sessionID] = true
+	records, err := s.store.LoadSessionRequests(sessionID)
+	if err != nil {
+		return
+	}
+	for i := range records {
+		s.projector.append(&records[i])
+	}
+	// 回放期间在线事件可能交错落位（collector 独立取 projector.mu）：
+	// 恢复该会话记录的时间序，保证 overview 窗口（records[0]/last）与
+	// requestsAfter 的顺序语义。
+	s.projector.sortSessionRecords(sessionID)
 }
 
 // Capabilities 能力发现（§7.1：前端启动探测，不支持时优雅降级）。
@@ -30,6 +73,7 @@ func (s *LiveSource) Capabilities() Capabilities {
 		DataSource:            DataSourceLive,
 		MaxRequestsPerSession: s.maxRequests,
 		SupportsSSE:           s.supportsSSE,
+		Persisted:             s.store != nil,
 	}
 	if s.supportsSSE {
 		capabilities.SupportedEvents = []string{EventCacheRequestFinished}
@@ -42,6 +86,7 @@ func (s *LiveSource) Overview(sessionID string) (CacheOverview, error) {
 	if sessionID == "" {
 		return CacheOverview{}, ErrInvalidRequest
 	}
+	s.ensureSessionLoaded(sessionID)
 	if s.sessionMissing(sessionID) {
 		return CacheOverview{}, ErrSessionNotFound
 	}
@@ -53,6 +98,7 @@ func (s *LiveSource) Requests(sessionID string, q RequestQuery) (RequestListResp
 	if sessionID == "" {
 		return RequestListResponse{}, ErrInvalidRequest
 	}
+	s.ensureSessionLoaded(sessionID)
 	if s.sessionMissing(sessionID) {
 		return RequestListResponse{}, ErrSessionNotFound
 	}
@@ -67,6 +113,7 @@ func (s *LiveSource) Request(sessionID, llmRequestID string) (CacheRequestRecord
 	if sessionID == "" || llmRequestID == "" {
 		return CacheRequestRecord{}, ErrInvalidRequest
 	}
+	s.ensureSessionLoaded(sessionID)
 	record, ok := s.projector.request(sessionID, llmRequestID)
 	if !ok {
 		return CacheRequestRecord{}, ErrNotFound
@@ -84,6 +131,7 @@ func (s *LiveSource) MessageTrace(sessionID, messageID string) (MessageTrace, er
 	}
 	// 与 Overview/Requests 一致：会话确认不存在（历史存储无此会话且无记录）
 	// 返回 ErrSessionNotFound，与未知消息 id 的 ErrNotFound 区分（§4.3）。
+	s.ensureSessionLoaded(sessionID)
 	if s.sessionMissing(sessionID) {
 		return MessageTrace{}, ErrSessionNotFound
 	}

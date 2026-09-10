@@ -738,3 +738,59 @@ sqlite 持久化回放、离线 `LogFileSource`（chataloganalytics 集成）、
 
 - **问题①**：✅ 能。started/finished 双事件覆盖成功与失败请求，usage 缺失以 `not_reported` 显式呈现且 overview 自报覆盖率；边界为环形缓冲窗口、重启后粒度降级、in-flight 悬挂（三者均有 UI 可见的降级标记）。
 - **问题②**：✅ 能。`cache_status` 过滤 → turn/epoch 归因 → MessageTrace 双向链（produced_by/consumed_by）→ 会话历史原文 + observe 元数据 + prompt_fingerprint 比对，四级反查路径在 v1 契约内闭环；provider 报文本体除外（经 provider_request_id 外部核对）。
+
+## 11. 持久化实施记录（Phase 3 镜像表，2026-09-10）
+
+按方案 §375 的"方案 1（推荐）"落地：SQLite 持久化镜像表 `cache_requests`（复用 session_runtime.sqlite），Collector 终态同步落盘，查询期惰性回放。per-request 粒度完整保留，重启/恢复/换进程无损，并消除 1000 条环形上限的 `ring_overflow` partial 降级。
+
+### 11.1 变更清单
+
+| 文件 | 变更 |
+|------|------|
+| `internal/cacheanalytics/store.go`（新增） | `RequestStore` 接口（`SaveRequest` / `LoadSessionRequests`），结构化类型注入，包零 cmd/api 依赖不变 |
+| `internal/chat/session_runtime_store_cache.go`（新增） | `SQLiteRuntimeStore` 实现接口：`INSERT OR REPLACE` 幂等写、`started_at` 升序读、单行损坏跳过不拖垮回放 |
+| `internal/chat/session_runtime_store.go` | v20 迁移新增 `cache_requests` 表（`llm_request_id` 主键 + `session_id`/`started_at_unix_nano` 索引列，记录整体 JSON 存储）；`DeleteState` 级联清理镜像行 |
+| `internal/cacheanalytics/projector.go` | persisted 模式：挂载持久化 store 时不淘汰、不标 partial（内存模式行为不变） |
+| `internal/cacheanalytics/collector.go` | 终态（success/error/interrupted）同步 `SaveRequest`，best-effort：写失败仅告警，不影响在线投影与 SSE 增量 |
+| `internal/cacheanalytics/source.go` | `LiveSource` 查询期惰性回放：每会话首次查询时从镜像表加载一次，与在线事件经 `projector.append` 幂等去重 |
+| `internal/api/skills/cache_analytics_handlers.go`、`cmd/aicli/commands/chat_cache_local.go` | 挂载点接口断言注入 store（`RequestStore`），未实现时降级纯内存 |
+
+### 11.2 语义决策
+
+1. **终态落盘，同步 best-effort**：与既有"Collector 纯内存"约束的偏差仅限镜像写这一步；写失败不阻塞事件流（测试 `TestPersistSaveFailureDoesNotBlockFlow`）。
+2. **幂等**：`INSERT OR REPLACE` 按 `llm_request_id` 主键去重，重复终态事件/回放不产生重复行；回放记录与在线事件在 projector 层再次去重（`TestReplayDeduplicatesLiveRecords`）。
+3. **记录不可变**：终态后镜像行不再更新；message id 回填仍发生在查询期（HistoryLookup），重启后由同一查询期路径再次回填，不落库。
+4. **惰性回放**：不做启动全量回放，查询哪个会话才加载哪个（`loadCalls` 每会话恰好一次，`TestLiveSourceReplaysPersistedRecords`）；未查询会话零开销。
+5. **容量语义**：持久化模式无环形淘汰 → `coverage.partial` 不再因 `ring_overflow` 置位（`TestPersistedProjectorDoesNotEvict`）；纯内存模式保持原行为（1000 条上限 + partial 提示）。
+6. **级联清理**：`DeleteState` 删除会话时同步清理镜像行，避免孤儿数据。
+
+### 11.3 测试与验证
+
+- `internal/cacheanalytics/persist_test.go`：终态三类落盘（success/error/interrupted）、回放恢复总览与明细、回放去重、不淘汰、写失败不阻塞。
+- `internal/chat/session_runtime_store_cache_test.go`：字段保真回环（含纳秒时间戳、usage/比率指针）、幂等写、损坏行跳过、跨进程重开（迁移幂等）、`DeleteState` 级联、入参校验。
+- `go vet` + `go test ./...`（backend 全量）通过；`TestProviderCommand_ListAndShow` 为存量环境依赖失败（干净树可复现，隔离运行读取到真实用户配置中的 provider，与本次改动无关，已用 `-skip` 排除后全量绿）。
+
+---
+
+## 12. 实施审查记录（2026-09-10）
+
+对 §11 持久化实施做逐文件自审，发现 6 处问题并已全部修正；修正后 `go build ./...`、`gofmt`、`go test ./internal/cacheanalytics/... ./internal/chat/... ./cmd/aicli/commands/...`（`-count=1`）全部通过。
+
+### 12.1 审查发现与修正清单
+
+| # | 问题 | 影响 | 修正 | 位置 |
+|---|------|------|------|------|
+| R1 | error 终态路径先 `persistRecord` 后 `publishRecordFinished` | 慢 SQLite 写会拖慢 SSE 增量推送，违反 §9"采集开销不侵入请求路径"约束 | 调整为 append → publish → persist；persist 失败仍静默（仅丢镜像行） | `collector.go` error 分支 |
+| R2 | success/interrupted 终态路径同样的顺序问题 | 同上 | 同上顺序调整 | `collector.go` 正常终态分支 |
+| R3 | `persistRecord` 注释仍描述"投影先行、落库随后"的旧顺序，且未说明与 SSE 的次序关系 | 文档与实现不一致，误导后续维护 | 注释更新：明确在线投影与 SSE 发布先行、落库随后、失败静默且可由下次终态事件/回放修复 | `collector.go` |
+| R4 | `Capabilities` 缺少持久化标识：前端只能展示"每会话上限 N 条"，持久化模式下该上限已不生效，文案误导 | 能力发现口径失真（§4.4） | 加法演进：新增 `persisted bool` 字段，纯内存模式为 false（向后兼容） | `types.go` |
+| R5 | `SQLiteRuntimeStore` 满足 `RequestStore` 仅靠挂载点运行时类型断言保证，接口演进（如新增方法）时编译期无保护 | 接口漂移要到挂载点断言失败才暴露 | 新增编译期断言 `var _ cacheanalytics.RequestStore = (*SQLiteRuntimeStore)(nil)` | `session_runtime_store_cache.go` |
+| R6 | 前端 capabilities 文案未区分持久化/内存模式 | 用户看到"每会话上限 N 条"但持久化模式实际无上限 | `persisted=true` 时展示"已持久化（重启/恢复会话后可回放，无上限）"，否则展示原上限文案 | `web/js/cache.js` |
+
+**保留项**：会话终态悬挂路径（site 3）维持 append → persist 顺序不变——该路径不发布 SSE 事件，无推送延迟问题；`MaxRequestsPerSession` 字段保留，纯内存模式仍生效（语义由 `persisted` 区分）。
+
+### 12.2 语义影响评估
+
+- **无契约破坏**：`persisted` 为新增可选字段，旧前端忽略之；事件、查询、SSE 契约（§4）均未变更。
+- **次序调整无行为差异**：publish 与 persist 之间无数据依赖（publish 只读 record，persist 序列化同一 record），仅时序变化；投影（projector.append）仍在最前，查询可见性不受影响。
+- **锁序不变**：仍为 `loadedMu → projector.mu` 单向，persist 在锁外执行（SaveRequest 自带 store 内部锁）。

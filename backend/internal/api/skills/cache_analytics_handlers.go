@@ -145,7 +145,14 @@ func (h *Handler) attachCacheAnalyticsService() cacheanalytics.Source {
 	if h.sessionManager != nil {
 		history = &managerCacheHistoryLookup{store: h.sessionManager.GetStorage()}
 	}
-	service := cacheanalytics.Attach(bus, cacheanalytics.Options{}, history)
+	// Phase 3：终态记录持久化镜像（session_runtime.sqlite cache_requests，
+	// 方案 §375）。SQLiteRuntimeStore 实现 cacheanalytics.RequestStore；
+	// 未配置持久化 runtime store 时保持纯内存行为（v1 不变）。
+	var store cacheanalytics.RequestStore
+	if runtimeStore, ok := h.sessionRuntimeStore.(cacheanalytics.RequestStore); ok {
+		store = runtimeStore
+	}
+	service := cacheanalytics.Attach(bus, cacheanalytics.Options{Store: store}, history)
 	if service == nil {
 		return nil
 	}
