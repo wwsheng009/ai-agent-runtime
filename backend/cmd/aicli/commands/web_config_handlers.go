@@ -28,6 +28,10 @@ const (
 	ChatWebAPIConfigProvidersDeletePath  = "/web/api/config/providers/delete"
 	ChatWebAPIConfigProvidersEnabledPath = "/web/api/config/providers/enabled"
 	ChatWebAPIConfigProvidersModelsPath  = "/web/api/config/providers/fetch-models"
+	// probe-models 对 assumed（无 model card 数据）的模型用各协议最小补全
+	// 请求实测网关支持情况（provider_model_probe.go），结果可写回用户级
+	// model_cards.yaml 沉淀为探测卡片，让后续分类把 assumed 升级为 verified。
+	ChatWebAPIConfigProvidersProbeModelsPath = "/web/api/config/providers/probe-models"
 	// auto-import 参照 aicli login 的自动生成逻辑（provider_login.go
 	// runProviderLogin）：由 name + base_url + api_key 探测协议、拉取模型
 	// 列表并生成完整 provider 配置（protocol / api_path / forward_url /
@@ -168,6 +172,22 @@ type chatWebProviderFetchModelsRequest struct {
 	BaseURL    string  `json:"base_url"`
 	APIKey     *string `json:"api_key,omitempty"`
 	ModelsPath string  `json:"models_path,omitempty"`
+}
+
+// chatWebProviderProbeModelsRequest 是 POST
+// /web/api/config/providers/probe-models 的请求体。连接参数解析与
+// fetch-models 完全一致（Name 指向已保存 provider 时以磁盘配置为基底，
+// 内联 api_key / base_url / protocol 优先）；Models 是待探测模型清单，
+// Protocols 缺省时探测 [当前协议, openai, anthropic, codex]。WriteBack
+// 默认 true：把 supported 结论写回用户级 model_cards.yaml。
+type chatWebProviderProbeModelsRequest struct {
+	Name      string   `json:"name"`
+	Protocol  string   `json:"protocol"`
+	BaseURL   string   `json:"base_url"`
+	APIKey    *string  `json:"api_key,omitempty"`
+	Models    []string `json:"models"`
+	Protocols []string `json:"protocols,omitempty"`
+	WriteBack *bool    `json:"write_back,omitempty"`
 }
 
 // chatWebProviderAutoImportRequest 是 POST
@@ -761,6 +781,12 @@ func HandleChatWebAPIConfigProvidersEnabled(w http.ResponseWriter, r *http.Reque
 // （含 api key / proxy / headers）；否则用请求中的 protocol / base_url /
 // api_key 临时构造，支持新增 provider 前先探测。api_key 只用于本次请求，
 // 不会写进磁盘配置。
+//
+// 拉取结果会按 aicli login 同源的 model card 分类链路按协议分组：响应中
+// models 只包含与 provider 协议一致的主组模型；其他协议模型归入 groups
+// （含各自协议与模型列表），other_models_count 为被过滤的模型总数，
+// models_total 为归一化后的全量模型数。分类不可用时 models 退化为原始
+// 全量列表。
 func HandleChatWebAPIConfigProvidersFetchModels(w http.ResponseWriter, r *http.Request) {
 	if !chatWebRequireMethod(w, r, http.MethodPost) {
 		return
@@ -824,12 +850,177 @@ func HandleChatWebAPIConfigProvidersFetchModels(w http.ResponseWriter, r *http.R
 	if modelsEndpointAllowsAnonymous(probeClient, result.Endpoint, normalizeLoginProtocol(req.Protocol, provider.AuthMode)) {
 		authNotice = "该模型列表端点未校验 API key（匿名可访问），获取模型列表成功不代表 key 有效；key 是否有效请以聊天/补全请求为准。"
 	}
-	writeWebAPIJSON(w, http.StatusOK, map[string]interface{}{
+	response := map[string]interface{}{
 		"status":      "ok",
 		"endpoint":    result.Endpoint,
 		"models":      providerModelIDs(result.Models),
 		"auth_notice": authNotice,
+	}
+	// 与 aicli login 同源的按协议分类：聚合网关（如 new-api）的 /models 会
+	// 同时列出 gpt-*/claude-*/gemini-* 等多协议模型，provider 只绑定一种
+	// 协议，直接把全量 ID 合并进 supported_models 会污染配置。这里按
+	// model card 推荐分组后只把与 provider 协议一致的主组作为 models 返回，
+	// 其他协议组放入 groups 供前端提示（需要时走「自动导入」生成独立
+	// provider）。分类不可用时退化为原始全量列表（旧行为）。
+	//
+	// 主组内部再区分 verified / assumed：assumed 是“未匹配任何 model card、
+	// 仅跟随当前协议 fallback”的模型。/v1/models 是 OpenAI 风格端点，列出
+	// 的模型几乎必然支持 chat/completions，因此 openai 协议下照旧合并
+	// （旧行为）；codex/anthropic 等协议下无证据假定会得到错误列表——实测
+	// opencode.ai 网关对 minimax/kimi 走 /v1/responses 会明确拒绝——这些
+	// 模型单独放入 assumed_models 供前端提示，不并入 supported_models。
+	groupingProtocol := resolveProviderFetchModelsLoginProtocol(req.Protocol, provider)
+	requestedProtocol := strings.TrimSpace(req.Protocol)
+	if requestedProtocol == "" {
+		requestedProtocol = groupingProtocol
+	}
+	if classification := classifyProviderFetchedModels(req.Name, provider, requestedProtocol, groupingProtocol, result.Models, configPtrOrNil(session)); classification != nil {
+		primaryCount := len(classification.PrimaryModels)
+		models := classification.PrimaryModels
+		if !strings.EqualFold(classification.RuntimeProtocol, "openai") && len(classification.AssumedModels) > 0 {
+			models = classification.VerifiedModels
+			response["assumed_models"] = providerModelIDs(classification.AssumedModels)
+		}
+		response["models"] = providerModelIDs(models)
+		response["models_total"] = classification.TotalModels
+		response["verified_models_count"] = len(classification.VerifiedModels)
+		response["assumed_models_count"] = len(classification.AssumedModels)
+		response["protocol"] = classification.RuntimeProtocol
+		response["login_protocol"] = classification.LoginProtocol
+		response["groups"] = classification.Groups
+		response["other_models_count"] = classification.TotalModels - primaryCount
+	}
+	writeWebAPIJSON(w, http.StatusOK, response)
+}
+
+// ---------------------------------------------------------------------------
+// POST /web/api/config/providers/probe-models — 探测模型协议支持
+// ---------------------------------------------------------------------------
+
+// providerProbeMaxModels 单次探测的模型数上限：防止误传全量列表把网关打挂。
+const providerProbeMaxModels = 200
+
+// HandleChatWebAPIConfigProvidersProbeModels 对请求中的模型清单做跨协议
+// 最小补全探测（provider_model_probe.go），返回模型 × 协议结论矩阵。
+// 连接参数解析与 fetch-models 一致：已保存 provider 以磁盘配置为基底
+// （含 key / proxy / headers），内联 api_key / base_url / protocol 优先；
+// api_key 只用于本次请求，不写磁盘。write_back（默认 true）把 supported
+// 结论写回用户级 model_cards.yaml，后续分类自动把对应模型升级为 verified。
+func HandleChatWebAPIConfigProvidersProbeModels(w http.ResponseWriter, r *http.Request) {
+	if !chatWebRequireMethod(w, r, http.MethodPost) {
+		return
+	}
+	var req chatWebProviderProbeModelsRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		chatWebWriteError(w, http.StatusBadRequest, err)
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	models := chatWebTrimNames(req.Models)
+	if len(models) == 0 {
+		chatWebWriteError(w, http.StatusBadRequest, errRequiredField("models"))
+		return
+	}
+	if len(models) > providerProbeMaxModels {
+		chatWebWriteError(w, http.StatusBadRequest, &webConfigError{msg: fmt.Sprintf("一次最多探测 %d 个模型（收到 %d 个）", providerProbeMaxModels, len(models))})
+		return
+	}
+	path, err := chatWebConfigPath()
+	if err != nil {
+		chatWebWriteError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if path == "" {
+		chatWebWriteError(w, http.StatusBadRequest, errNoConfigPath())
+		return
+	}
+
+	var provider agentconfig.Provider
+	session := chatWebSession()
+	if session != nil && session.Config != nil {
+		if saved, ok := session.Config.Providers.Items[req.Name]; ok {
+			provider = saved
+		}
+	}
+	if req.Name == "" && strings.TrimSpace(req.BaseURL) == "" {
+		chatWebWriteError(w, http.StatusBadRequest, errRequiredField("provider name 或 base_url"))
+		return
+	}
+	if strings.TrimSpace(provider.BaseURL) == "" && strings.TrimSpace(req.BaseURL) == "" {
+		chatWebWriteError(w, http.StatusBadRequest, errRequiredField("base_url（provider 未保存时需要）"))
+		return
+	}
+	if provider.BaseURL == "" {
+		provider.Protocol = strings.TrimSpace(req.Protocol)
+		provider.BaseURL = strings.TrimSpace(req.BaseURL)
+	}
+	if req.APIKey != nil && strings.TrimSpace(*req.APIKey) != "" {
+		provider.APIKey = strings.TrimSpace(*req.APIKey)
+	}
+	if strings.EqualFold(strings.TrimSpace(provider.AuthMode), agentconfig.AuthKeyTypeOAuth) {
+		chatWebWriteError(w, http.StatusBadRequest, &webConfigError{msg: "OAuth provider 不支持 API key 自动探测"})
+		return
+	}
+	if strings.TrimSpace(providerModelsAPIKey(provider)) == "" {
+		chatWebWriteError(w, http.StatusBadRequest, errRequiredField("api key"))
+		return
+	}
+
+	currentLoginProtocol := resolveProviderFetchModelsLoginProtocol(req.Protocol, provider)
+	currentRuntimeProtocol := runtimeProtocolForLoginProtocol(currentLoginProtocol)
+	protocols := req.Protocols
+	if len(protocols) == 0 {
+		// 缺省探测矩阵：当前协议 + 三大通用协议（gemini 仅显式指定时探测，
+		// 其 URL 结构差异大、且聚合网关较少托管）。
+		protocols = []string{currentRuntimeProtocol, "openai", "anthropic", "codex"}
+	}
+
+	results := runProviderModelProbes(providerModelProbeRequest{
+		Config:    configPtrOrNil(session),
+		Provider:  provider,
+		Models:    models,
+		Protocols: protocols,
+		Timeout:   15 * time.Second,
 	})
+
+	// 当前协议下实测支持的模型：可直接合并进 supported_models。
+	supported := make([]string, 0, len(results))
+	for _, result := range results {
+		for _, probe := range result.Probes {
+			if strings.EqualFold(probe.Protocol, currentRuntimeProtocol) && probe.Verdict == string(probeVerdictSupported) {
+				supported = append(supported, result.Model)
+				break
+			}
+		}
+	}
+
+	writeBack := true
+	if req.WriteBack != nil {
+		writeBack = *req.WriteBack
+	}
+	writtenCards := []string(nil)
+	cardsPath := ""
+	writeBackError := ""
+	if writeBack {
+		cards, resolvedPath, writeErr := appendProviderModelProbeCards(configPtrOrNil(session), req.Name, provider, results)
+		writtenCards = cards
+		cardsPath = resolvedPath
+		if writeErr != nil {
+			writeBackError = writeErr.Error()
+		}
+	}
+
+	response := map[string]interface{}{
+		"status":             "ok",
+		"protocol":           currentRuntimeProtocol,
+		"results":            results,
+		"supported_models":   supported,
+		"written_cards":      writtenCards,
+		"user_cards_path":    cardsPath,
+		"write_back_error":   writeBackError,
+		"write_back_enabled": writeBack,
+	}
+	writeWebAPIJSON(w, http.StatusOK, response)
 }
 
 // ---------------------------------------------------------------------------

@@ -9,9 +9,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
-	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/modelcard"
+	"gopkg.in/yaml.v3"
 )
 
 // ---------------------------------------------------------------------------
@@ -1116,6 +1118,319 @@ func TestHandleChatWebAPIConfigProviders_MethodNotAllowed(t *testing.T) {
 	}
 }
 
+// fetchModelsMixedProtocolsServer 返回混合协议模型列表的 mock：模拟
+// new-api 类聚合网关的 /models 同时列出 openai（gpt-4o/gpt-4o-mini/o3、
+// 未匹配卡片的 gpt-5.6 视为当前协议）、codex 卡片模型（gpt-5.6）、
+// anthropic（claude-sonnet-4-5）与 gemini（gemini-2.5-pro）模型。
+func fetchModelsMixedProtocolsServer(t *testing.T, authHeader *string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		if v := r.Header.Get("Authorization"); v != "" {
+			*authHeader = v
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[` +
+			`{"id":"gpt-4o"},{"id":"gpt-4o-mini"},{"id":"o3"},` +
+			`{"id":"gpt-5.6"},{"id":"claude-sonnet-4-5"},{"id":"gemini-2.5-pro"}]}`))
+	})
+	return httptest.NewServer(mux)
+}
+
+type fetchModelsGroupResponse struct {
+	Protocol         string   `json:"protocol"`
+	LoginProtocol    string   `json:"login_protocol"`
+	ProviderTemplate string   `json:"provider_template"`
+	HasTemplate      bool     `json:"has_template"`
+	Primary          bool     `json:"primary"`
+	Models           []string `json:"models"`
+	// OtherModels 是该组中不属于主组的模型（跨组去重）：多协议卡模型可能
+	// 同时出现在主组和其他组，不应重复计入“被过滤”数量。
+	OtherModels []string `json:"other_models"`
+}
+
+type fetchModelsClassifiedResponse struct {
+	Status         string                     `json:"status"`
+	Endpoint       string                     `json:"endpoint"`
+	Models         []string                   `json:"models"`
+	ModelsTotal    int                        `json:"models_total"`
+	Protocol       string                     `json:"protocol"`
+	LoginProtocol  string                     `json:"login_protocol"`
+	OtherModelsCnt int                        `json:"other_models_count"`
+	VerifiedCnt    int                        `json:"verified_models_count"`
+	AssumedCnt     int                        `json:"assumed_models_count"`
+	AssumedModels  []string                   `json:"assumed_models"`
+	Groups         []fetchModelsGroupResponse `json:"groups"`
+	AuthNotice     string                     `json:"auth_notice"`
+}
+
+func fetchModelsGroupByProtocol(t *testing.T, groups []fetchModelsGroupResponse, protocol string) *fetchModelsGroupResponse {
+	t.Helper()
+	for i := range groups {
+		if strings.EqualFold(groups[i].Protocol, protocol) {
+			return &groups[i]
+		}
+	}
+	return nil
+}
+
+func fetchModelsContains(list []string, want string) bool {
+	for _, item := range list {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestHandleChatWebAPIConfigProvidersFetchModels_FiltersOtherProtocols 验证
+// 聚合网关混合协议列表的按协议过滤：openai provider 的 fetch-models 只返回
+// openai 组模型，claude-*/gemini-*/codex 卡片模型归入其他协议组。
+func TestHandleChatWebAPIConfigProvidersFetchModels_FiltersOtherProtocols(t *testing.T) {
+	var authHeader string
+	srv := fetchModelsMixedProtocolsServer(t, &authHeader)
+	defer srv.Close()
+
+	yaml := strings.Replace(webConfigTestYAML, "https://api.example.com", srv.URL, 1)
+	withWebConfigTestSession(t, yaml)
+
+	rec := postConfigJSON(t, HandleChatWebAPIConfigProvidersFetchModels, map[string]interface{}{
+		"name":     "alpha",
+		"protocol": "openai",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp fetchModelsClassifiedResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "ok" {
+		t.Fatalf("status = %q, want ok", resp.Status)
+	}
+	// 主组：openai 组模型（含未匹配卡片的 gpt-4o/gpt-4o-mini/o3，与 login
+	// 语义一致：未匹配模型跟随当前 provider 协议）。
+	for _, want := range []string{"gpt-4o", "gpt-4o-mini", "o3"} {
+		if !fetchModelsContains(resp.Models, want) {
+			t.Errorf("models 缺少 openai 组模型 %q: %v", want, resp.Models)
+		}
+	}
+	// 其他协议模型不得混入 openai provider 的 supported models。
+	for _, leak := range []string{"claude-sonnet-4-5", "gemini-2.5-pro", "gpt-5.6"} {
+		if fetchModelsContains(resp.Models, leak) {
+			t.Errorf("models 混入了其他协议模型 %q: %v", leak, resp.Models)
+		}
+	}
+	if resp.Protocol != "openai" {
+		t.Errorf("protocol = %q, want openai", resp.Protocol)
+	}
+	if resp.ModelsTotal != 6 {
+		t.Errorf("models_total = %d, want 6", resp.ModelsTotal)
+	}
+	if resp.OtherModelsCnt != 3 {
+		t.Errorf("other_models_count = %d, want 3 (gpt-5.6/claude/gemini)", resp.OtherModelsCnt)
+	}
+	anthropicGroup := fetchModelsGroupByProtocol(t, resp.Groups, "anthropic")
+	if anthropicGroup == nil || !fetchModelsContains(anthropicGroup.Models, "claude-sonnet-4-5") {
+		t.Errorf("groups 缺少 anthropic 组的 claude-sonnet-4-5: %+v", resp.Groups)
+	}
+	geminiGroup := fetchModelsGroupByProtocol(t, resp.Groups, "gemini")
+	if geminiGroup == nil || !fetchModelsContains(geminiGroup.Models, "gemini-2.5-pro") {
+		t.Errorf("groups 缺少 gemini 组的 gemini-2.5-pro: %+v", resp.Groups)
+	}
+	codexGroup := fetchModelsGroupByProtocol(t, resp.Groups, "codex")
+	if codexGroup == nil || !fetchModelsContains(codexGroup.Models, "gpt-5.6") {
+		t.Errorf("groups 缺少 codex 组的 gpt-5.6: %+v", resp.Groups)
+	}
+	primaryCount := 0
+	for _, group := range resp.Groups {
+		if group.Primary {
+			primaryCount++
+			if !strings.EqualFold(group.Protocol, "openai") {
+				t.Errorf("primary 组协议 = %q, want openai", group.Protocol)
+			}
+		}
+	}
+	if primaryCount != 1 {
+		t.Errorf("primary 组数量 = %d, want 1; groups: %+v", primaryCount, resp.Groups)
+	}
+	// openai 协议下未匹配卡片的模型按当前协议假定可用（/v1/models 是
+	// OpenAI 风格端点），照旧合并进 models：verified=0、assumed=3。
+	if resp.VerifiedCnt != 0 || resp.AssumedCnt != 3 {
+		t.Errorf("verified/assumed = %d/%d, want 0/3", resp.VerifiedCnt, resp.AssumedCnt)
+	}
+	if len(resp.AssumedModels) != 0 {
+		t.Errorf("openai 协议不应剔除 assumed 模型, got %v", resp.AssumedModels)
+	}
+	// 各组 other_models 之和必须等于 other_models_count（跨组去重口径）。
+	otherSum := 0
+	for _, group := range resp.Groups {
+		otherSum += len(group.OtherModels)
+	}
+	if otherSum != resp.OtherModelsCnt {
+		t.Errorf("groups other_models 之和 = %d, want other_models_count %d", otherSum, resp.OtherModelsCnt)
+	}
+}
+
+// TestHandleChatWebAPIConfigProvidersFetchModels_FiltersForAnthropicProvider
+// 反向验证：anthropic provider 拉取同一混合列表时，gemini/codex 卡片模型被
+// 过滤到其他协议组，anthropic 卡片模型保留。
+func TestHandleChatWebAPIConfigProvidersFetchModels_FiltersForAnthropicProvider(t *testing.T) {
+	var authHeader string
+	srv := fetchModelsMixedProtocolsServer(t, &authHeader)
+	defer srv.Close()
+
+	yaml := strings.Replace(webConfigTestYAML, "https://api.example.com", srv.URL, 1)
+	yaml = strings.Replace(yaml, "protocol: openai", "protocol: anthropic", 1)
+	yaml = strings.Replace(yaml, "api_path: /v1/chat/completions", "api_path: /v1/messages", 1)
+	withWebConfigTestSession(t, yaml)
+
+	rec := postConfigJSON(t, HandleChatWebAPIConfigProvidersFetchModels, map[string]interface{}{
+		"name":     "alpha",
+		"protocol": "anthropic",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp fetchModelsClassifiedResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "ok" {
+		t.Fatalf("status = %q, want ok", resp.Status)
+	}
+	if !fetchModelsContains(resp.Models, "claude-sonnet-4-5") {
+		t.Errorf("models 缺少 anthropic 组模型 claude-sonnet-4-5: %v", resp.Models)
+	}
+	for _, leak := range []string{"gemini-2.5-pro", "gpt-5.6"} {
+		if fetchModelsContains(resp.Models, leak) {
+			t.Errorf("models 混入了其他协议模型 %q: %v", leak, resp.Models)
+		}
+	}
+	// anthropic 协议不做“无卡数据即假定可用”的合并：未匹配卡片的
+	// gpt-4o/gpt-4o-mini/o3 仅因 fallback 归入 anthropic 组（assumed），
+	// 不得并入 supported_models，应单独放入 assumed_models。
+	if len(resp.Models) != 1 || resp.Models[0] != "claude-sonnet-4-5" {
+		t.Errorf("models = %v, want 仅 claude-sonnet-4-5", resp.Models)
+	}
+	if resp.VerifiedCnt != 1 || resp.AssumedCnt != 3 {
+		t.Errorf("verified/assumed = %d/%d, want 1/3", resp.VerifiedCnt, resp.AssumedCnt)
+	}
+	for _, want := range []string{"gpt-4o", "gpt-4o-mini", "o3"} {
+		if !fetchModelsContains(resp.AssumedModels, want) {
+			t.Errorf("assumed_models 缺少 %q: %v", want, resp.AssumedModels)
+		}
+	}
+	if resp.Protocol != "anthropic" {
+		t.Errorf("protocol = %q, want anthropic", resp.Protocol)
+	}
+	if resp.OtherModelsCnt < 2 {
+		t.Errorf("other_models_count = %d, want >= 2 (gemini/codex 组)", resp.OtherModelsCnt)
+	}
+}
+
+// TestHandleChatWebAPIConfigProvidersFetchModels_NewProviderClassified 验证
+// 新增前探测流程同样按协议过滤：显式 openai 协议探测混合列表只返回 openai
+// 组模型。
+func TestHandleChatWebAPIConfigProvidersFetchModels_NewProviderClassified(t *testing.T) {
+	var authHeader string
+	srv := fetchModelsMixedProtocolsServer(t, &authHeader)
+	defer srv.Close()
+
+	withWebConfigTestSession(t, webConfigTestYAML)
+
+	rec := postConfigJSON(t, HandleChatWebAPIConfigProvidersFetchModels, map[string]interface{}{
+		"protocol": "openai",
+		"base_url": srv.URL,
+		"api_key":  "sk-temp-probe-777",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp fetchModelsClassifiedResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "ok" || len(resp.Models) == 0 {
+		t.Fatalf("resp = %+v, want openai 组模型", resp)
+	}
+	for _, leak := range []string{"claude-sonnet-4-5", "gemini-2.5-pro", "gpt-5.6"} {
+		if fetchModelsContains(resp.Models, leak) {
+			t.Errorf("models 混入了其他协议模型 %q: %v", leak, resp.Models)
+		}
+	}
+	if !fetchModelsContains(resp.Models, "gpt-4o") {
+		t.Errorf("models 缺少 openai 组模型 gpt-4o: %v", resp.Models)
+	}
+	if authHeader != "Bearer sk-temp-probe-777" {
+		t.Errorf("Authorization = %q, want 请求内联 key", authHeader)
+	}
+}
+
+// TestHandleChatWebAPIConfigProvidersFetchModels_CodexProviderExcludesAssumed
+// 复刻 opencode.ai 网关实测场景：codex provider 拉取混合列表时，未匹配
+// 卡片的模型（gpt-4o 等）仅因“跟随当前协议 fallback”归入 codex 组，但
+// 网关会明确拒绝它们走 /v1/responses（“Model X is not supported for
+// format openai”）。这些 assumed 模型不得并入 supported_models，应单独
+// 放入 assumed_models；只有有卡数据支持的 codex 模型（gpt-5.6）保留。
+func TestHandleChatWebAPIConfigProvidersFetchModels_CodexProviderExcludesAssumed(t *testing.T) {
+	var authHeader string
+	srv := fetchModelsMixedProtocolsServer(t, &authHeader)
+	defer srv.Close()
+
+	withWebConfigTestSession(t, webConfigTestYAML)
+
+	rec := postConfigJSON(t, HandleChatWebAPIConfigProvidersFetchModels, map[string]interface{}{
+		"protocol": "codex",
+		"base_url": srv.URL,
+		"api_key":  "sk-temp-probe-778",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp fetchModelsClassifiedResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "ok" {
+		t.Fatalf("status = %q, want ok", resp.Status)
+	}
+	if resp.Protocol != "codex" {
+		t.Errorf("protocol = %q, want codex", resp.Protocol)
+	}
+	if resp.ModelsTotal != 6 {
+		t.Errorf("models_total = %d, want 6", resp.ModelsTotal)
+	}
+	if len(resp.Models) != 1 || resp.Models[0] != "gpt-5.6" {
+		t.Errorf("models = %v, want 仅卡数据支持的 gpt-5.6", resp.Models)
+	}
+	if resp.VerifiedCnt != 1 || resp.AssumedCnt != 3 {
+		t.Errorf("verified/assumed = %d/%d, want 1/3", resp.VerifiedCnt, resp.AssumedCnt)
+	}
+	for _, want := range []string{"gpt-4o", "gpt-4o-mini", "o3"} {
+		if !fetchModelsContains(resp.AssumedModels, want) {
+			t.Errorf("assumed_models 缺少 %q: %v", want, resp.AssumedModels)
+		}
+	}
+	if resp.OtherModelsCnt != 2 {
+		t.Errorf("other_models_count = %d, want 2 (claude/gemini)", resp.OtherModelsCnt)
+	}
+	otherSum := 0
+	for _, group := range resp.Groups {
+		otherSum += len(group.OtherModels)
+		if group.Primary && !strings.EqualFold(group.Protocol, "codex") {
+			t.Errorf("primary 组协议 = %q, want codex", group.Protocol)
+		}
+	}
+	if otherSum != resp.OtherModelsCnt {
+		t.Errorf("groups other_models 之和 = %d, want other_models_count %d", otherSum, resp.OtherModelsCnt)
+	}
+	anthropicGroup := fetchModelsGroupByProtocol(t, resp.Groups, "anthropic")
+	if anthropicGroup == nil || !fetchModelsContains(anthropicGroup.OtherModels, "claude-sonnet-4-5") {
+		t.Errorf("anthropic 组 other_models 缺少 claude-sonnet-4-5: %+v", resp.Groups)
+	}
+}
+
 // fetchModelsTestServer 起一个 mock 的 OpenAI 风格 /v1/models 端点，
 // 记录收到的 Authorization 头以便断言内联/已保存 key 的传递。
 func fetchModelsTestServer(t *testing.T, authHeader *string) *httptest.Server {
@@ -1228,6 +1543,260 @@ func TestHandleChatWebAPIConfigProvidersFetchModels_NewProvider(t *testing.T) {
 	}
 	if authHeader != "Bearer sk-temp-probe-777" {
 		t.Errorf("Authorization = %q, want 请求内联 key", authHeader)
+	}
+}
+
+// TestHandleChatWebAPIConfigProvidersProbeModels_WriteBack 验证 probe-models
+// 端到端：supported 结论写回用户级 model_cards.yaml（路径隔离到临时目录），
+// unknown / unsupported 不落卡；重复探测幂等，不重复写卡、不改写文件。
+func TestHandleChatWebAPIConfigProvidersProbeModels_WriteBack(t *testing.T) {
+	probeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"message":"no such endpoint"}}`))
+			return
+		}
+		var body struct {
+			Model string `json:"model"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "application/json")
+		switch body.Model {
+		case "m-good":
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+		case "m-bad":
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"Model m-bad is not supported for protocol openai"}}`))
+		default:
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"message":"invalid api key"}}`))
+		}
+	}))
+	defer probeSrv.Close()
+
+	cardsPath := filepath.Join(t.TempDir(), "model_cards.yaml")
+	// model_cards.user_path 必须写进磁盘 YAML：probe-models 经
+	// chatWebConfigPath → reloadChatConfigForModelCommand 会用磁盘配置整体
+	// 替换 session.Config，内存里手工设置的 AICLI 段会被冲掉。
+	yamlContent := strings.Replace(
+		webConfigTestYAML,
+		"aicli:\n",
+		"aicli:\n  model_cards:\n    user_path: "+filepath.ToSlash(cardsPath)+"\n",
+		1,
+	)
+	withWebConfigTestSession(t, yamlContent)
+
+	post := func() *httptest.ResponseRecorder {
+		return postConfigJSON(t, HandleChatWebAPIConfigProvidersProbeModels, map[string]interface{}{
+			"base_url":  probeSrv.URL,
+			"api_key":   "sk-probe-test",
+			"models":    []string{"m-good", "m-bad", "m-auth"},
+			"protocols": []string{"openai"},
+		})
+	}
+
+	rec := post()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Status           string                     `json:"status"`
+		Results          []providerModelProbeResult `json:"results"`
+		SupportedModels  []string                   `json:"supported_models"`
+		WrittenCards     []string                   `json:"written_cards"`
+		UserCardsPath    string                     `json:"user_cards_path"`
+		WriteBackError   string                     `json:"write_back_error"`
+		WriteBackEnabled bool                       `json:"write_back_enabled"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "ok" || !resp.WriteBackEnabled {
+		t.Fatalf("status/write_back = %q/%v, want ok/true", resp.Status, resp.WriteBackEnabled)
+	}
+	verdictOf := func(model string) providerModelSingleProbe {
+		for _, result := range resp.Results {
+			if result.Model != model || len(result.Probes) == 0 {
+				continue
+			}
+			return result.Probes[0]
+		}
+		t.Fatalf("results 缺少模型 %q: %+v", model, resp.Results)
+		return providerModelSingleProbe{}
+	}
+	if probe := verdictOf("m-good"); probe.Verdict != string(probeVerdictSupported) || probe.Protocol != "openai" {
+		t.Errorf("m-good probe = %+v, want openai/supported", probe)
+	}
+	if probe := verdictOf("m-bad"); probe.Verdict != string(probeVerdictUnsupported) {
+		t.Errorf("m-bad probe = %+v, want unsupported", probe)
+	}
+	if probe := verdictOf("m-auth"); probe.Verdict != string(probeVerdictUnknown) {
+		t.Errorf("m-auth probe = %+v, want unknown（鉴权错误不下负向结论）", probe)
+	}
+	if len(resp.SupportedModels) != 1 || resp.SupportedModels[0] != "m-good" {
+		t.Errorf("supported_models = %v, want [m-good]", resp.SupportedModels)
+	}
+	if len(resp.WrittenCards) != 1 || resp.WriteBackError != "" {
+		t.Fatalf("written_cards/error = %v/%q, want 恰好 1 张卡且无错误", resp.WrittenCards, resp.WriteBackError)
+	}
+	if resp.UserCardsPath == "" {
+		t.Fatal("user_cards_path 不应为空")
+	}
+	if filepath.Clean(resp.UserCardsPath) != filepath.Clean(cardsPath) {
+		t.Errorf("user_cards_path = %q, want %q（配置的 user_path 未生效）", resp.UserCardsPath, cardsPath)
+	}
+
+	data, err := os.ReadFile(cardsPath)
+	if err != nil {
+		t.Fatalf("read written cards: %v", err)
+	}
+	catalog := &modelcard.Catalog{}
+	if err := yaml.Unmarshal(data, catalog); err != nil {
+		t.Fatalf("parse written cards: %v", err)
+	}
+	if len(catalog.Cards) != 1 {
+		t.Fatalf("cards = %d 张, want 仅 supported 的 1 张: %+v", len(catalog.Cards), catalog.Cards)
+	}
+	card := catalog.Cards[0]
+	if !fetchModelsContains(card.Match.ModelIDs, "m-good") || card.ProviderTemplate != "openai.chat" || card.Fallback {
+		t.Errorf("card = %+v, want 匹配 m-good、模板 openai.chat、非 fallback", card)
+	}
+
+	// 幂等：重复探测不再写卡，文件内容保持不变，也不产生 .bak 备份。
+	before := string(data)
+	rec2 := post()
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second status = %d; body: %s", rec2.Code, rec2.Body.String())
+	}
+	var resp2 struct {
+		WrittenCards   []string `json:"written_cards"`
+		WriteBackError string   `json:"write_back_error"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &resp2); err != nil {
+		t.Fatalf("decode second response: %v", err)
+	}
+	if len(resp2.WrittenCards) != 0 || resp2.WriteBackError != "" {
+		t.Errorf("second written_cards/error = %v/%q, want 空/空（幂等）", resp2.WrittenCards, resp2.WriteBackError)
+	}
+	after, err := os.ReadFile(cardsPath)
+	if err != nil {
+		t.Fatalf("re-read cards: %v", err)
+	}
+	if string(after) != before {
+		t.Error("重复探测不应改写 model_cards.yaml")
+	}
+	if _, err := os.Stat(cardsPath + ".bak"); !os.IsNotExist(err) {
+		t.Errorf("不应产生 .bak 备份: %v", err)
+	}
+}
+
+// TestHandleChatWebAPIConfigProvidersProbeModels_PreservesExistingCards
+// 验证写回对已有用户卡片文件的安全语义：重写前先备份 .bak、手工卡原样
+// 保留；现有文件解析失败时拒绝写入并保持原文件与既有 .bak 不动。
+func TestHandleChatWebAPIConfigProvidersProbeModels_PreservesExistingCards(t *testing.T) {
+	probeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer probeSrv.Close()
+
+	original := "version: 1\ncards:\n  - id: manual.test\n    title: Manual\n    priority: 100\n    provider_template: openai.chat\n    match:\n      model_ids:\n        - m-manual\n"
+	cardsPath := filepath.Join(t.TempDir(), "model_cards.yaml")
+	if err := os.WriteFile(cardsPath, []byte(original), 0o644); err != nil {
+		t.Fatalf("seed cards file: %v", err)
+	}
+	yamlContent := strings.Replace(
+		webConfigTestYAML,
+		"aicli:\n",
+		"aicli:\n  model_cards:\n    user_path: "+filepath.ToSlash(cardsPath)+"\n",
+		1,
+	)
+	withWebConfigTestSession(t, yamlContent)
+
+	post := func() *httptest.ResponseRecorder {
+		return postConfigJSON(t, HandleChatWebAPIConfigProvidersProbeModels, map[string]interface{}{
+			"base_url":  probeSrv.URL,
+			"api_key":   "sk-probe-test",
+			"models":    []string{"m-good"},
+			"protocols": []string{"openai"},
+		})
+	}
+
+	rec := post()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		WrittenCards   []string `json:"written_cards"`
+		WriteBackError string   `json:"write_back_error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.WrittenCards) != 1 || resp.WriteBackError != "" {
+		t.Fatalf("written_cards/error = %v/%q, want 1/空", resp.WrittenCards, resp.WriteBackError)
+	}
+
+	bak, err := os.ReadFile(cardsPath + ".bak")
+	if err != nil {
+		t.Fatalf("read .bak: %v", err)
+	}
+	if string(bak) != original {
+		t.Error(".bak 应完整保留重写前的原始内容")
+	}
+	data, err := os.ReadFile(cardsPath)
+	if err != nil {
+		t.Fatalf("read rewritten cards: %v", err)
+	}
+	catalog := &modelcard.Catalog{}
+	if err := yaml.Unmarshal(data, catalog); err != nil {
+		t.Fatalf("parse rewritten cards: %v", err)
+	}
+	foundManual, foundProbe := false, false
+	for _, card := range catalog.Cards {
+		switch {
+		case card.ID == "manual.test":
+			foundManual = fetchModelsContains(card.Match.ModelIDs, "m-manual")
+		case fetchModelsContains(card.Match.ModelIDs, "m-good"):
+			foundProbe = true
+		}
+	}
+	if !foundManual || !foundProbe {
+		t.Errorf("cards = %+v, want 手工卡 manual.test 与探测卡并存", catalog.Cards)
+	}
+
+	// 现有文件解析失败：拒绝写入，原文件与既有 .bak 都不得被改动。
+	corrupt := "a: b: c: [unclosed\n\tbad"
+	if err := os.WriteFile(cardsPath, []byte(corrupt), 0o644); err != nil {
+		t.Fatalf("seed corrupt cards file: %v", err)
+	}
+	rec2 := post()
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("corrupt-case status = %d; body: %s", rec2.Code, rec2.Body.String())
+	}
+	var resp2 struct {
+		WrittenCards   []string `json:"written_cards"`
+		WriteBackError string   `json:"write_back_error"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &resp2); err != nil {
+		t.Fatalf("decode corrupt-case response: %v", err)
+	}
+	if resp2.WriteBackError == "" {
+		t.Error("解析失败时 write_back_error 不应为空")
+	}
+	data2, err := os.ReadFile(cardsPath)
+	if err != nil {
+		t.Fatalf("re-read corrupt cards: %v", err)
+	}
+	if string(data2) != corrupt {
+		t.Error("解析失败时不得改动原文件")
+	}
+	bak2, err := os.ReadFile(cardsPath + ".bak")
+	if err != nil {
+		t.Fatalf("re-read .bak: %v", err)
+	}
+	if string(bak2) != original {
+		t.Error("解析失败时不得改动既有 .bak")
 	}
 }
 
