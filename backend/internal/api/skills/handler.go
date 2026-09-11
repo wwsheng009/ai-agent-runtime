@@ -401,11 +401,27 @@ func (h *Handler) aicliConfigSnapshot() *agentconfig.Config {
 	return config
 }
 
+// defaultReasoningEffort 返回 config.yaml 中 aicli.chat.reasoning_effort 的默认档位，
+// 供前端在会话未显式选择时展示/回退。
+func (h *Handler) defaultReasoningEffort() string {
+	config := h.aicliConfigSnapshot()
+	if config == nil || config.AICLI == nil || config.AICLI.Chat == nil {
+		return ""
+	}
+	return strings.TrimSpace(config.AICLI.Chat.ReasoningEffort)
+}
+
 func cloneAICLIRoutingConfig(config *agentconfig.Config) *agentconfig.Config {
 	if config == nil || config.AICLI == nil {
 		return nil
 	}
 	cloned := &agentconfig.Config{AICLI: &agentconfig.AICLIConfig{}}
+	if config.AICLI.Chat != nil {
+		// Chat 默认值（default_provider/default_model/reasoning_effort）需要随
+		// 快照一起保留，供 /api/runtime/models 向前端暴露配置默认值。
+		chatConfig := *config.AICLI.Chat
+		cloned.AICLI.Chat = &chatConfig
+	}
 	if config.AICLI.Subagents != nil {
 		cloned.AICLI.Subagents = &agentconfig.AICLISubagentsConfig{
 			Routing: cloneAgentRoutingConfig(config.AICLI.Subagents.Routing),
@@ -1355,6 +1371,7 @@ func (h *Handler) ListCapabilities(w http.ResponseWriter, r *http.Request) {
 // GetRuntimeModels 列出前端可用的聊天 provider / model 目录。
 func (h *Handler) GetRuntimeModels(w http.ResponseWriter, r *http.Request) {
 	payload := runtimeModelsSnapshot(h.llmRuntime)
+	payload["default_reasoning_effort"] = h.defaultReasoningEffort()
 	if err := h.attachProfileMetadata(r, payload); err != nil {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
 		return

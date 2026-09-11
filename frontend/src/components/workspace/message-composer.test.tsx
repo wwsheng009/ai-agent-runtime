@@ -43,14 +43,19 @@ describe("MessageComposer", () => {
       onDraftChange: vi.fn(),
       onModelChange: vi.fn(),
       onProviderChange: vi.fn(),
+      onReasoningEffortChange: vi.fn(),
       onStop: vi.fn(),
       onSubmit: vi.fn(),
       providerOptions: ["provider-a"],
+      reasoningEffortDefault: "",
+      reasoningEffortError: null,
+      reasoningEffortOptions: [],
       runtimeModelsError: null,
       runtimeModelsLoading: false,
       selectedArtifactCount: 0,
       selectedModel: "model-a",
       selectedProvider: "provider-a",
+      selectedReasoningEffort: "",
       ...overrides,
     };
 
@@ -117,5 +122,27 @@ describe("MessageComposer", () => {
       stopButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders the reasoning effort picker with the config default label", () => {
+    const onReasoningEffortChange = vi.fn();
+    renderComposer({
+      onReasoningEffortChange,
+      reasoningEffortDefault: "medium",
+      reasoningEffortOptions: ["low", "high"],
+    });
+
+    const trigger = container.querySelector(
+      'button[aria-label="推理强度"]',
+    ) as HTMLButtonElement | null;
+    expect(trigger).not.toBeNull();
+    expect(trigger?.textContent).toContain("默认（medium）");
+    expect(trigger?.disabled).toBe(false);
+  });
+
+  it("hides the reasoning effort picker when the model declares none", () => {
+    renderComposer({ reasoningEffortOptions: [] });
+
+    expect(container.querySelector('button[aria-label="推理强度"]')).toBeNull();
   });
 });

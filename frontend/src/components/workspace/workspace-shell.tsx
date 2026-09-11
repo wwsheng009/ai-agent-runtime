@@ -103,10 +103,14 @@ type WorkspaceShellProps = {
   isResponding: boolean;
   modelOptions: string[];
   phase?: ChatStreamPhase | null;
+  reasoningEffortDefault: string;
+  reasoningEffortError: string | null;
+  reasoningEffortOptions: string[];
   trajectoryStore?: import("@/hooks/workspace/use-trajectory-snapshot").TrajectoryStore | null;
   onDraftChange: (value: string) => void;
   onModelChange: (value: string) => void;
   onProviderChange: (value: string) => void;
+  onReasoningEffortChange: (value: string) => void;
   onSelectArtifact: (artifactId: string) => void;
   onSelectThread: (threadId: string) => void;
   onRefreshRuntimeTeams?: () => void;
@@ -137,6 +141,7 @@ type WorkspaceShellProps = {
   runtimeModelsLoading: boolean;
   selectedModel: string;
   selectedProvider: string;
+  selectedReasoningEffort: string;
 };
 
 export function WorkspaceShell({
@@ -173,9 +178,13 @@ export function WorkspaceShell({
   isResponding,
   modelOptions,
   phase,
+  reasoningEffortDefault,
+  reasoningEffortError,
+  reasoningEffortOptions,
   onDraftChange,
   onModelChange,
   onProviderChange,
+  onReasoningEffortChange,
   onSelectArtifact,
   onSelectThread,
   onRefreshRuntimeTeams,
@@ -202,6 +211,7 @@ export function WorkspaceShell({
   runtimeModelsLoading,
   selectedModel,
   selectedProvider,
+  selectedReasoningEffort,
   trajectoryStore = null,
 }: WorkspaceShellProps) {
   const { settings } = useAppSettings();
@@ -567,14 +577,19 @@ export function WorkspaceShell({
                       isNewThread={isNewThread}
                       isResponding={isResponding}
                       modelOptions={modelOptions}
+                      reasoningEffortDefault={reasoningEffortDefault}
+                      reasoningEffortError={reasoningEffortError}
+                      reasoningEffortOptions={reasoningEffortOptions}
                       selectedArtifactCount={selectedThread.artifacts.length}
                       onModelChange={onModelChange}
                       onProviderChange={onProviderChange}
+                      onReasoningEffortChange={onReasoningEffortChange}
                       providerOptions={providerOptions}
                       runtimeModelsError={runtimeModelsError}
                       runtimeModelsLoading={runtimeModelsLoading}
                       selectedModel={selectedModel}
                       selectedProvider={selectedProvider}
+                      selectedReasoningEffort={selectedReasoningEffort}
                       transport={selectedThread.transport}
                       onDraftChange={onDraftChange}
                       onStop={onStopResponding}

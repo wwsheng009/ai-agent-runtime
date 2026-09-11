@@ -4161,6 +4161,52 @@ func TestGetRuntimeModels_PreservesProviderModelCatalogWhenAliasesOverlap(t *tes
 	assert.Equal(t, []interface{}{"provider-b-only", "shared-model"}, providerB["models"])
 }
 
+func TestGetRuntimeModels_ExposesDefaultReasoningEffortFromConfig(t *testing.T) {
+	registry := skill.NewRegistry(nil)
+	handler := NewHandler(registry, nil, nil)
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "openai",
+		DefaultModel:    "gpt-4o",
+		MaxRetries:      0,
+	})
+	require.NoError(t, runtime.RegisterProvider("openai", &testLLMProvider{
+		name:    "openai",
+		content: "openai response",
+	}))
+	handler.SetLLMRuntime(runtime)
+	handler.SetAICLIConfig(&agentconfig.Config{
+		AICLI: &agentconfig.AICLIConfig{
+			Chat: &agentconfig.AICLIChatConfig{ReasoningEffort: "medium"},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/models", nil)
+	rec := httptest.NewRecorder()
+
+	handler.GetRuntimeModels(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	payload := map[string]interface{}{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	assert.Equal(t, "medium", payload["default_reasoning_effort"])
+}
+
+func TestGetRuntimeModels_DefaultReasoningEffortEmptyWithoutChatConfig(t *testing.T) {
+	registry := skill.NewRegistry(nil)
+	handler := NewHandler(registry, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/models", nil)
+	rec := httptest.NewRecorder()
+
+	handler.GetRuntimeModels(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	payload := map[string]interface{}{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	assert.Equal(t, "", payload["default_reasoning_effort"])
+}
+
 func TestGetRuntimeStatus_IncludesProfileMetadata(t *testing.T) {
 	profileRoot := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(profileRoot, "profile.yaml"), []byte(`profile:

@@ -103,6 +103,8 @@ export type Thread = {
   runtimeEventCount?: number;
   lastRuntimeEventType?: string;
   lastError?: string | null;
+  /** 会话级 reasoning effort 覆盖；空值表示跟随 config.yaml 默认档位。 */
+  reasoningEffort?: string;
   tags: string[];
   prompts: string[];
   messages: ChatMessage[];

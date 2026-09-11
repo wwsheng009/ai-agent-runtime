@@ -102,11 +102,16 @@ export function WorkspacePage() {
     modelOptions,
     phase,
     providerOptions,
+    reasoningEffortDefault,
+    reasoningEffortError,
+    reasoningEffortOptions,
     runtimeModelsError,
     runtimeModelsLoading,
     selectedModel,
     selectedProvider,
+    selectedReasoningEffort,
     setDraft,
+    setReasoningEffort,
     setSelectedModel,
     setSelectedProvider,
     stopResponding,
@@ -282,10 +287,14 @@ export function WorkspacePage() {
       isResponding={isResponding}
       modelOptions={modelOptions}
       phase={phase}
+      reasoningEffortDefault={reasoningEffortDefault}
+      reasoningEffortError={reasoningEffortError}
+      reasoningEffortOptions={reasoningEffortOptions}
       trajectoryStore={trajectoryStore}
       onDraftChange={setDraft}
       onModelChange={setSelectedModel}
       onProviderChange={setSelectedProvider}
+      onReasoningEffortChange={setReasoningEffort}
       onSelectArtifact={handleSelectArtifact}
       onSelectThread={handleSelectThreadWithTrajectoryReset}
       onRefreshRuntimeTeams={handleRefreshRuntimeTeams}
@@ -312,6 +321,7 @@ export function WorkspacePage() {
       runtimeModelsLoading={runtimeModelsLoading}
       selectedModel={selectedModel}
       selectedProvider={selectedProvider}
+      selectedReasoningEffort={selectedReasoningEffort}
     />
   );
 }

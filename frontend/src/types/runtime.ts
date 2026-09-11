@@ -49,11 +49,20 @@ export type AgentChatResponse = {
   result: AgentChatResult;
 };
 
+export type RuntimeModelCapabilitySpec = {
+  reasoning_model?: boolean;
+  reasoning_efforts?: string[];
+  reasoning_effort_budgets?: Record<string, number>;
+  default_reasoning_effort?: string;
+  [key: string]: unknown;
+};
+
 export type RuntimeModelProviderRecord = {
   name: string;
   default_model?: string;
   models: string[];
   model_count?: number;
+  model_capabilities?: Record<string, RuntimeModelCapabilitySpec>;
   supports_tools?: boolean;
   supports_streaming?: boolean;
   max_context_tokens?: number;
@@ -63,6 +72,7 @@ export type RuntimeModelProviderRecord = {
 export type RuntimeModelsResponse = {
   default_provider?: string;
   default_model?: string;
+  default_reasoning_effort?: string;
   providers: RuntimeModelProviderRecord[];
   count: number;
 };

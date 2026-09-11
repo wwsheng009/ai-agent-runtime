@@ -15,12 +15,17 @@ type MessageComposerProps = {
   modelOptions: string[];
   onModelChange: (value: string) => void;
   onProviderChange: (value: string) => void;
+  onReasoningEffortChange: (value: string) => void;
   providerOptions: string[];
+  reasoningEffortDefault: string;
+  reasoningEffortError: string | null;
+  reasoningEffortOptions: string[];
   runtimeModelsError: string | null;
   runtimeModelsLoading: boolean;
   selectedArtifactCount: number;
   selectedModel: string;
   selectedProvider: string;
+  selectedReasoningEffort: string;
   transport?: Thread["transport"];
   onDraftChange: (value: string) => void;
   onStop: () => void;
@@ -36,12 +41,17 @@ export function MessageComposer({
   modelOptions,
   onModelChange,
   onProviderChange,
+  onReasoningEffortChange,
   providerOptions,
+  reasoningEffortDefault,
+  reasoningEffortError,
+  reasoningEffortOptions,
   runtimeModelsError,
   runtimeModelsLoading,
   selectedArtifactCount,
   selectedModel,
   selectedProvider,
+  selectedReasoningEffort,
   transport,
   onDraftChange,
   onStop,
@@ -61,6 +71,7 @@ export function MessageComposer({
         : t("composer.submit.startThread");
   const showProviderPicker = providerOptions.length > 1;
   const showModelPicker = modelOptions.length > 0;
+  const showReasoningEffortPicker = reasoningEffortOptions.length > 0;
   const providerSelectOptions = providerOptions.map((provider) => ({
     value: provider,
     label: provider,
@@ -69,6 +80,20 @@ export function MessageComposer({
     value: model,
     label: model,
   }));
+  const reasoningEffortSelectOptions = [
+    {
+      value: "",
+      label: reasoningEffortDefault
+        ? t("composer.reasoningDefaultWithValue", {
+            effort: reasoningEffortDefault,
+          })
+        : t("composer.reasoningDefault"),
+    },
+    ...reasoningEffortOptions.map((effort) => ({
+      value: effort,
+      label: effort,
+    })),
+  ];
   const runtimeModelStatusLabel = runtimeModelsLoading
     ? t("composer.loadingModels")
     : !showModelPicker && !runtimeModelsError
@@ -163,6 +188,22 @@ export function MessageComposer({
                 />
               </label>
             ) : null}
+            {showReasoningEffortPicker ? (
+              <label className="inline-flex items-center gap-1.5">
+                <span>{t("composer.reasoning")}</span>
+                <Select
+                  ariaLabel={t("composer.reasoning")}
+                  value={selectedReasoningEffort}
+                  onChange={onReasoningEffortChange}
+                  options={reasoningEffortSelectOptions}
+                  disabled={runtimeModelsLoading || isResponding}
+                  side="top"
+                  triggerClassName="min-w-[6rem] max-w-[11rem] rounded-[0.6rem] px-2 py-1 text-base leading-none"
+                  menuClassName="max-w-[12rem]"
+                  optionClassName="text-base"
+                />
+              </label>
+            ) : null}
             {runtimeModelStatusLabel ? (
               <span className="truncate">{runtimeModelStatusLabel}</span>
             ) : null}
@@ -170,6 +211,14 @@ export function MessageComposer({
               <>
                 <span className="size-1 shrink-0 rounded-full bg-[#d8a66d]/40" />
                 <span className="truncate text-[#d8a66d]">{runtimeModelsError}</span>
+              </>
+            ) : null}
+            {reasoningEffortError ? (
+              <>
+                <span className="size-1 shrink-0 rounded-full bg-[#d8a66d]/40" />
+                <span className="truncate text-[#d8a66d]">
+                  {reasoningEffortError}
+                </span>
               </>
             ) : null}
           </div>

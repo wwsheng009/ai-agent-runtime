@@ -13,6 +13,7 @@ import {
   type SessionRuntimeEvent,
 } from "@/types/runtime";
 import { normalizeSessionId } from "@/lib/session-id";
+import { readSessionReasoningEffort } from "@/lib/reasoning-effort";
 
 const MAX_RUNTIME_EVENTS = 100;
 const STREAM_PLACEHOLDER_TEXT = "...";
@@ -1222,6 +1223,9 @@ export function mergeRuntimeSessionsIntoThreads(
       session.metadata?.summary?.trim() ||
       "Restored runtime session from /api/runtime/sessions.";
     const updatedAt = session.updatedAt || session.createdAt || new Date().toISOString();
+    const reasoningEffort = readSessionReasoningEffort(
+      session.metadata?.context,
+    );
     const tags = mergeUniqueStrings(
       "runtime-session",
       session.state ? `state:${session.state}` : null,
@@ -1242,6 +1246,7 @@ export function mergeRuntimeSessionsIntoThreads(
         transport: "live",
         runtimeSource: session.metadata?.lastAgent || session.metadata?.lastSkill || "runtime",
         lastError: null,
+        reasoningEffort,
         tags,
         prompts: [
           "Sync the latest authoritative session history",
@@ -1269,6 +1274,7 @@ export function mergeRuntimeSessionsIntoThreads(
         session.metadata?.lastAgent ||
         session.metadata?.lastSkill ||
         "runtime",
+      reasoningEffort,
       tags,
     } satisfies Thread;
 
@@ -1280,6 +1286,7 @@ export function mergeRuntimeSessionsIntoThreads(
       merged.sessionId !== current.sessionId ||
       merged.transport !== current.transport ||
       merged.runtimeSource !== current.runtimeSource ||
+      merged.reasoningEffort !== current.reasoningEffort ||
       merged.tags.join("|") !== current.tags.join("|")
     ) {
       changed = true;
