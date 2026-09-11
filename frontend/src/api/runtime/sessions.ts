@@ -127,6 +127,42 @@ export async function getRuntimeSession(
   );
 }
 
+export type RuntimeUpdateSessionRequest = {
+  title?: string;
+  context?: Record<string, unknown>;
+};
+
+export async function updateRuntimeSession(
+  sessionId: string,
+  request: RuntimeUpdateSessionRequest,
+): Promise<{ session: RuntimeSessionRecord }> {
+  return fetchRuntimeJson<{ session: RuntimeSessionRecord }>(
+    buildRuntimeUrl(`/api/runtime/sessions/${encodeURIComponent(sessionId)}`),
+    {
+      method: "PATCH",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
+    },
+  );
+}
+
+export async function deleteRuntimeSession(
+  sessionId: string,
+): Promise<{ deleted: boolean; id: string }> {
+  return fetchRuntimeJson<{ deleted: boolean; id: string }>(
+    buildRuntimeUrl(`/api/runtime/sessions/${encodeURIComponent(sessionId)}`),
+    {
+      method: "DELETE",
+      headers: {
+        Accept: "application/json",
+      },
+    },
+  );
+}
+
 export async function listSessionCheckpoints(
   sessionId: string,
   query: RuntimeSessionCheckpointsQuery = {},

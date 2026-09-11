@@ -1,5 +1,8 @@
 import { type Thread } from "@/data/mock";
-import { type RuntimeSessionRecord } from "@/types/runtime";
+import {
+  type RuntimeSessionRecord,
+  type RuntimeWorkspaceDirectory,
+} from "@/types/runtime";
 
 export type ThreadSessionDescriptor = {
   detail: string;
@@ -26,6 +29,18 @@ export type RuntimeSessionDirectoryGroup = {
   key: string;
   label: string;
   fullPath: string;
+  sessions: RuntimeSessionRecord[];
+  latestUpdatedAt?: string;
+};
+
+export type MergedDirectoryGroup = {
+  /** Registered groups use directory.id; derived groups use the path key. */
+  key: string;
+  directoryId?: string;
+  label: string;
+  fullPath: string;
+  registered: boolean;
+  exists?: boolean;
   sessions: RuntimeSessionRecord[];
   latestUpdatedAt?: string;
 };
@@ -122,20 +137,7 @@ export function groupRuntimeSessionsByDirectory(
       ...group,
       sessions: [...group.sessions].sort(compareRuntimeSessionsByUpdated),
     }))
-    .sort((left, right) => {
-      const leftTime = Date.parse(left.latestUpdatedAt ?? "");
-      const rightTime = Date.parse(right.latestUpdatedAt ?? "");
-      if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
-        return rightTime - leftTime;
-      }
-      if (Number.isFinite(leftTime) && !Number.isFinite(rightTime)) {
-        return -1;
-      }
-      if (!Number.isFinite(leftTime) && Number.isFinite(rightTime)) {
-        return 1;
-      }
-      return left.label.localeCompare(right.label);
-    });
+    .sort(compareGroupsByLatestUpdated);
 }
 
 export function resolveRuntimeSessionDirectory(session: RuntimeSessionRecord) {
@@ -210,4 +212,118 @@ function compareRuntimeSessionsByUpdated(
     return rightTime - leftTime;
   }
   return left.id.localeCompare(right.id);
+}
+
+function compareGroupsByLatestUpdated(
+  left: { label: string; latestUpdatedAt?: string },
+  right: { label: string; latestUpdatedAt?: string },
+) {
+  const leftTime = Date.parse(left.latestUpdatedAt ?? "");
+  const rightTime = Date.parse(right.latestUpdatedAt ?? "");
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+    return rightTime - leftTime;
+  }
+  if (Number.isFinite(leftTime) && !Number.isFinite(rightTime)) {
+    return -1;
+  }
+  if (!Number.isFinite(leftTime) && Number.isFinite(rightTime)) {
+    return 1;
+  }
+  return left.label.localeCompare(right.label);
+}
+
+/**
+ * Merges registered workspace directories with session-derived groups.
+ *
+ * Matching is exact on the normalized path key (case-folded, mirroring the
+ * backend registry): sessions created in sub-directories stay in their own
+ * derived groups instead of being swallowed by a registered parent.
+ * Registered groups always appear (even with zero sessions); pathless
+ * sessions keep the "Unscoped sessions" bucket.
+ */
+export function mergeDirectoryGroups(
+  directories: RuntimeWorkspaceDirectory[],
+  sessions: RuntimeSessionRecord[],
+): MergedDirectoryGroup[] {
+  const registeredByKey = new Map<string, MergedDirectoryGroup>();
+  const registeredOrder = new Map<string, number>();
+
+  for (const directory of directories) {
+    const id = directory.id?.trim();
+    const fullPath = normalizeRuntimeDirectoryPath(directory.path || "");
+    if (!id || !fullPath) {
+      continue;
+    }
+    const pathKey = fullPath.toLowerCase();
+    if (registeredByKey.has(pathKey)) {
+      continue;
+    }
+    registeredByKey.set(pathKey, {
+      key: id,
+      directoryId: id,
+      label: directory.name?.trim() || runtimeDirectoryBaseName(fullPath),
+      fullPath,
+      registered: true,
+      exists: directory.exists,
+      sessions: [],
+      latestUpdatedAt: undefined,
+    });
+    registeredOrder.set(
+      id,
+      directory.last_used_at ?? directory.created_at ?? 0,
+    );
+  }
+
+  const derivedGroups = new Map<string, MergedDirectoryGroup>();
+
+  for (const session of sessions) {
+    const resolved = resolveRuntimeSessionDirectory(session);
+    let group = registeredByKey.get(resolved.key);
+    if (!group) {
+      group = derivedGroups.get(resolved.key);
+      if (!group) {
+        group = {
+          key: resolved.key,
+          label: resolved.label,
+          fullPath: resolved.fullPath,
+          registered: false,
+          sessions: [],
+          latestUpdatedAt: undefined,
+        };
+        derivedGroups.set(resolved.key, group);
+      }
+    }
+    group.sessions.push(session);
+    const updatedAt = session.updatedAt || session.createdAt;
+    if (
+      updatedAt &&
+      (!group.latestUpdatedAt ||
+        Date.parse(updatedAt) > Date.parse(group.latestUpdatedAt))
+    ) {
+      group.latestUpdatedAt = updatedAt;
+    }
+  }
+
+  const registeredGroups = [...registeredByKey.values()]
+    .map((group) => ({
+      ...group,
+      sessions: [...group.sessions].sort(compareRuntimeSessionsByUpdated),
+    }))
+    .sort((left, right) => {
+      const leftOrder = registeredOrder.get(left.key) ?? 0;
+      const rightOrder = registeredOrder.get(right.key) ?? 0;
+      if (leftOrder !== rightOrder) {
+        return rightOrder - leftOrder;
+      }
+      return left.label.localeCompare(right.label);
+    });
+
+  const derived = [...derivedGroups.values()]
+    .map((group) => ({
+      ...group,
+      sessions: [...group.sessions].sort(compareRuntimeSessionsByUpdated),
+    }))
+    .sort(compareGroupsByLatestUpdated);
+
+  return [...registeredGroups, ...derived];
 }

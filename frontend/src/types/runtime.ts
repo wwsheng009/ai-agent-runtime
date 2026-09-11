@@ -392,6 +392,10 @@ export type RuntimeSessionPlanModeUpdateRequest = {
 export type RuntimeCreateSessionRequest = {
   title?: string;
   user_id?: string;
+  /** Bind the new session to a registered workspace directory path. */
+  workspace_path?: string;
+  /** Alternative to workspace_path: resolved server-side via the registry. */
+  directory_id?: string;
 };
 
 export type RuntimeCreateSessionResponse = {
@@ -406,6 +410,40 @@ export type RuntimeSessionsResponse = {
 
 export type RuntimeSessionsQuery = {
   userId?: string;
+};
+
+export type RuntimeWorkspaceDirectory = {
+  id: string;
+  path: string;
+  name?: string;
+  /** Unix seconds. */
+  created_at?: number;
+  /** Unix seconds. */
+  last_used_at?: number;
+  /** Computed live by the server; false when the path is missing on disk. */
+  exists?: boolean;
+  /** Best-effort server-side count; the workspace UI aggregates locally. */
+  session_count?: number;
+};
+
+export type RuntimeWorkspaceDirectoriesResponse = {
+  directories: RuntimeWorkspaceDirectory[];
+  count: number;
+};
+
+export type RuntimeCreateWorkspaceDirectoryRequest = {
+  path: string;
+  name?: string;
+};
+
+export type RuntimeUpdateWorkspaceDirectoryRequest = {
+  name?: string;
+};
+
+export type RuntimeDeleteWorkspaceDirectoryResponse = {
+  deleted: boolean;
+  id: string;
+  sessions_affected?: number;
 };
 
 export type RuntimeSessionUserSummary = {

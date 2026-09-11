@@ -38,6 +38,7 @@ import {
   type RuntimeSessionUserSummary,
   type RuntimeTeamRecord,
   type RuntimeTeamSummaryEntry,
+  type RuntimeWorkspaceDirectory,
 } from "@/lib/runtime-api";
 import { cn } from "@/lib/utils";
 import { type ChatStreamPhase } from "@/types/runtime";
@@ -80,6 +81,19 @@ type WorkspaceShellProps = {
   runtimeSessionUsers: RuntimeSessionUserSummary[];
   runtimeSessionUsersError: string | null;
   runtimeSessionUsersLoading: boolean;
+  workspaceDirectories: RuntimeWorkspaceDirectory[];
+  workspaceDirectoriesError: string | null;
+  workspaceDirectoriesLoading: boolean;
+  workspaceDirectoriesRefreshing?: boolean;
+  onAddWorkspaceDirectory: (path: string, name?: string) => Promise<unknown>;
+  onRenameWorkspaceDirectory: (id: string, name: string) => Promise<void>;
+  onRemoveWorkspaceDirectory: (id: string) => Promise<void>;
+  onCreateSessionInDirectory: (request: {
+    path: string;
+    directoryId?: string;
+    label: string;
+  }) => Promise<void>;
+  onRenameRuntimeSession: (sessionId: string, title: string) => Promise<void>;
   runtimeClient: RuntimeClientIdentity;
   selectedRuntimeSessionUserId: string;
   selectedThread: Thread;
@@ -141,6 +155,15 @@ export function WorkspaceShell({
   runtimeSessionUsers,
   runtimeSessionUsersError,
   runtimeSessionUsersLoading,
+  workspaceDirectories,
+  workspaceDirectoriesError,
+  workspaceDirectoriesLoading,
+  workspaceDirectoriesRefreshing,
+  onAddWorkspaceDirectory,
+  onRenameWorkspaceDirectory,
+  onRemoveWorkspaceDirectory,
+  onCreateSessionInDirectory,
+  onRenameRuntimeSession,
   runtimeClient,
   selectedRuntimeSessionUserId,
   selectedThread,
@@ -349,6 +372,15 @@ export function WorkspaceShell({
           selectedRuntimeSessionUserId={selectedRuntimeSessionUserId}
           onSelectRuntimeSessionUser={onSelectRuntimeSessionUser}
           onRefreshRuntimeTeams={onRefreshRuntimeTeams}
+          workspaceDirectories={workspaceDirectories}
+          workspaceDirectoriesError={workspaceDirectoriesError}
+          workspaceDirectoriesLoading={workspaceDirectoriesLoading}
+          workspaceDirectoriesRefreshing={workspaceDirectoriesRefreshing}
+          onAddWorkspaceDirectory={onAddWorkspaceDirectory}
+          onRenameWorkspaceDirectory={onRenameWorkspaceDirectory}
+          onRemoveWorkspaceDirectory={onRemoveWorkspaceDirectory}
+          onCreateSessionInDirectory={onCreateSessionInDirectory}
+          onRenameRuntimeSession={onRenameRuntimeSession}
           threads={threads}
           selectedThreadId={selectedThread.id}
           onSelectThread={(threadId) => {

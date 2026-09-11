@@ -346,6 +346,7 @@ export const enUS = {
       searchPlaceholder: "Search threads",
       sections: {
         chats: "Local chats",
+        directories: "Directories",
         sessions: "Sessions",
         runtime: "Runtime overview",
       },
@@ -355,6 +356,31 @@ export const enUS = {
       sessionUserDefault: "default",
       sessionUsersLoading: "loading users",
       sessionDirectoryUnscoped: "Unscoped sessions",
+      session: {
+        rename: "Rename session",
+        renamePlaceholder: "New session title",
+      },
+      directories: {
+        add: "Add directory",
+        addTitle: "Add workspace directory",
+        addHint:
+          "Register an existing folder so its sessions can be grouped. The directory must already exist on the runtime host.",
+        pathLabel: "Directory path",
+        pathPlaceholder: "e.g. E:\\projects\\demo",
+        nameLabel: "Display name (optional)",
+        namePlaceholder: "Defaults to the folder name",
+        cancel: "Cancel",
+        existsWarning: "Directory is missing on the runtime host",
+        newChat: "New chat in this directory",
+        rename: "Rename directory",
+        deleteTitle: "Remove directory",
+        deleteConfirm:
+          "This ungroups {{count}} sessions from this directory in the sidebar.",
+        deleteHint:
+          "Only the registry entry is removed; files on disk stay untouched.",
+        deleteConfirmButton: "Remove",
+        empty: "Registered workspace directories will appear here.",
+      },
       threadStatuses: {
         review: "Waiting for review",
         draft: "Draft thread",

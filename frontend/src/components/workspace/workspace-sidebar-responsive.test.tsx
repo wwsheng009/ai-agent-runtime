@@ -78,6 +78,15 @@ describe("WorkspaceSidebar responsive navigation", () => {
       selectedRuntimeSessionUserId: "anonymous",
       selectedThreadId: "new",
       threads: [],
+      workspaceDirectories: [],
+      workspaceDirectoriesError: null,
+      workspaceDirectoriesLoading: false,
+      workspaceDirectoriesRefreshing: false,
+      onAddWorkspaceDirectory: vi.fn(),
+      onRenameWorkspaceDirectory: vi.fn(),
+      onRemoveWorkspaceDirectory: vi.fn(),
+      onCreateSessionInDirectory: vi.fn(),
+      onRenameRuntimeSession: vi.fn(),
       ...overrides,
     };
 

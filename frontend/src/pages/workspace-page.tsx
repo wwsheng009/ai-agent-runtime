@@ -3,6 +3,7 @@ import { useMemo } from "react";
 import { WorkspaceShell } from "@/components/workspace/workspace-shell";
 import { useRuntimeTeamsData } from "@/hooks/workspace/use-runtime-teams-data";
 import { useRuntimeSessionsData } from "@/hooks/workspace/use-runtime-sessions-data";
+import { useRuntimeWorkspaceDirectories } from "@/hooks/workspace/use-runtime-workspace-directories";
 import { useSessionBacktrack } from "@/hooks/workspace/use-session-backtrack";
 import { useSessionHistorySync } from "@/hooks/workspace/use-session-history-sync";
 import { useSessionRuntimeStream } from "@/hooks/workspace/use-session-runtime-stream";
@@ -26,10 +27,12 @@ import {
   createRuntimeDeltaCoordinator,
 } from "@/lib/workspace-thread-state";
 import { trajectoryEventAction } from "@/lib/trajectory/recovery";
-import { useParams } from "react-router-dom";
+import { createRuntimeSession, updateRuntimeSession } from "@/lib/runtime-api";
+import { useNavigate, useParams } from "react-router-dom";
 
 export function WorkspacePage() {
   const runtimeClient = useRuntimeClientIdentity();
+  const navigate = useNavigate();
   const { sessionId: routeSessionId } = useParams<{ sessionId?: string }>();
   const runtimeDeltaCoordinator = useMemo(
     () => createRuntimeDeltaCoordinator(),
@@ -70,6 +73,15 @@ export function WorkspacePage() {
     pinnedSessionId: routeSessionId,
     userId: runtimeClient.userId,
   });
+  const {
+    directories: workspaceDirectories,
+    loading: workspaceDirectoriesLoading,
+    refreshing: workspaceDirectoriesRefreshing,
+    error: workspaceDirectoriesError,
+    addDirectory: addWorkspaceDirectory,
+    renameDirectory: renameWorkspaceDirectory,
+    removeDirectory: removeWorkspaceDirectory,
+  } = useRuntimeWorkspaceDirectories();
   const {
     onSelectArtifact: handleSelectArtifact,
     onSelectThread: handleSelectThread,
@@ -117,6 +129,39 @@ export function WorkspacePage() {
     // 由 useTrajectoryRecovery 按新会话从 seq=1 重新回放。
     trajectoryStore.reset({ hard: true });
     handleSelectThread(threadId);
+  }
+
+  async function handleRenameRuntimeSession(sessionId: string, title: string) {
+    await updateRuntimeSession(sessionId, { title });
+    handleRefreshRuntimeSessions();
+    setThreads((current) =>
+      current.map((thread) =>
+        normalizeSessionId(thread.sessionId || thread.id) === sessionId
+          ? { ...thread, title }
+          : thread,
+      ),
+    );
+  }
+
+  async function handleCreateSessionInDirectory(request: {
+    path: string;
+    directoryId?: string;
+    label: string;
+  }) {
+    const response = await createRuntimeSession({
+      title: request.label,
+      user_id: selectedRuntimeSessionUserId || runtimeClient.userId,
+      workspace_path: request.path || undefined,
+      directory_id: request.directoryId,
+    });
+    handleRefreshRuntimeSessions();
+    const createdSessionId = normalizeSessionId(response.session?.id ?? "");
+    if (createdSessionId) {
+      // 会话已绑定目录；直接跳转到 canonical 会话路由，等待 sessions
+      // 刷新后由 mergeRuntimeSessionsIntoThreads 生成对应线程。
+      trajectoryStore.reset({ hard: true });
+      navigate(`/workspace/sessions/${encodeURIComponent(createdSessionId)}`);
+    }
   }
 
   useSessionHistorySync({
@@ -219,6 +264,15 @@ export function WorkspacePage() {
       runtimeSessionUsers={runtimeSessionUsers}
       runtimeSessionUsersError={runtimeSessionUsersError}
       runtimeSessionUsersLoading={runtimeSessionUsersLoading}
+      workspaceDirectories={workspaceDirectories}
+      workspaceDirectoriesError={workspaceDirectoriesError}
+      workspaceDirectoriesLoading={workspaceDirectoriesLoading}
+      workspaceDirectoriesRefreshing={workspaceDirectoriesRefreshing}
+      onAddWorkspaceDirectory={addWorkspaceDirectory}
+      onRenameWorkspaceDirectory={renameWorkspaceDirectory}
+      onRemoveWorkspaceDirectory={removeWorkspaceDirectory}
+      onCreateSessionInDirectory={handleCreateSessionInDirectory}
+      onRenameRuntimeSession={handleRenameRuntimeSession}
       runtimeClient={runtimeClient}
       selectedRuntimeSessionUserId={selectedRuntimeSessionUserId}
       selectedThread={selectedThread}

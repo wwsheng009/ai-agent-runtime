@@ -76,6 +76,17 @@ export function shouldIgnoreTerminalStreamError(options: {
 /** 连接 runtime 的软超时：超过该时长仍未收到任何 SSE 事件即判定为连接失败。 */
 const RUNTIME_CONNECT_TIMEOUT_MS = 15_000;
 
+/** 已物化会话不逐轮携带 workspace_path（绑定不漂移）；仅新草稿线程首轮携带身份级路径。 */
+export function resolveChatTurnWorkspacePath(
+  sessionId: string | null | undefined,
+  identityWorkspacePath: string | undefined,
+): string | undefined {
+  if (sessionId && sessionId.trim() !== "") {
+    return undefined;
+  }
+  return identityWorkspacePath?.trim() || undefined;
+}
+
 export function useWorkspaceAgentChatTurn({
   deltaCoordinator,
   onSessionTouched,
@@ -143,7 +154,10 @@ export function useWorkspaceAgentChatTurn({
       session_id: threadSnapshot.sessionId,
       turn_id: turnId,
       user_id: userId || undefined,
-      workspace_path: workspacePath || undefined,
+      workspace_path: resolveChatTurnWorkspacePath(
+        threadSnapshot.sessionId,
+        workspacePath,
+      ),
       provider: selectedProvider || undefined,
       model: selectedModel || undefined,
       reasoning_effort: settings.chat.reasoningEffort || undefined,

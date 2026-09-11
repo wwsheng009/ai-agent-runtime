@@ -4,13 +4,16 @@ import {
   Clock3Icon,
   CompassIcon,
   FolderIcon,
+  FolderPlusIcon,
   HistoryIcon,
   LoaderCircleIcon,
   MessageSquarePlusIcon,
   MessagesSquareIcon,
+  PencilIcon,
   SearchIcon,
   Settings2Icon,
   SparklesIcon,
+  TrashIcon,
   TriangleAlertIcon,
   UserIcon,
   XIcon,
@@ -22,6 +25,7 @@ import {
   useDeferredValue,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -29,10 +33,13 @@ import { Link } from "react-router-dom";
 
 import {
   describeThreadSession,
-  groupRuntimeSessionsByDirectory,
+  mergeDirectoryGroups,
   summarizeSidebarSessions,
+  type MergedDirectoryGroup,
   type ThreadSessionDescriptor,
 } from "@/components/workspace/workspace-sidebar-shared";
+import { WorkspaceDirectoryAddDialog } from "@/components/workspace/workspace-directory-add-dialog";
+import { WorkspaceDirectoryDeleteDialog } from "@/components/workspace/workspace-directory-delete-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { buttonVariants } from "@/components/ui/button-variants";
@@ -44,6 +51,7 @@ import {
   type RuntimeSessionUserSummary,
   type RuntimeTeamRecord,
   type RuntimeTeamSummaryEntry,
+  type RuntimeWorkspaceDirectory,
 } from "@/lib/runtime-api";
 import { cn } from "@/lib/utils";
 import { useTranslation } from "react-i18next";
@@ -53,6 +61,12 @@ const RuntimeTeamsDialog = lazy(() =>
     default: module.RuntimeTeamsDialog,
   })),
 );
+
+type WorkspaceDirectoryCreateRequest = {
+  path: string;
+  directoryId?: string;
+  label: string;
+};
 
 type WorkspaceSidebarProps = {
   density: "comfortable" | "compact";
@@ -76,12 +90,23 @@ type WorkspaceSidebarProps = {
   selectedRuntimeSessionUserId: string;
   onRefreshRuntimeTeams?: () => void;
   onSelectRuntimeSessionUser: (userId: string) => void;
+  workspaceDirectories: RuntimeWorkspaceDirectory[];
+  workspaceDirectoriesError: string | null;
+  workspaceDirectoriesLoading: boolean;
+  workspaceDirectoriesRefreshing?: boolean;
+  onAddWorkspaceDirectory: (path: string, name?: string) => Promise<unknown>;
+  onRenameWorkspaceDirectory: (id: string, name: string) => Promise<void>;
+  onRemoveWorkspaceDirectory: (id: string) => Promise<void>;
+  onCreateSessionInDirectory: (
+    directory: WorkspaceDirectoryCreateRequest,
+  ) => Promise<void>;
+  onRenameRuntimeSession: (sessionId: string, title: string) => Promise<void>;
   threads: Thread[];
   selectedThreadId: string;
   onSelectThread: (threadId: string) => void;
 };
 
-type SidebarSectionId = "chats" | "sessions" | "runtime";
+type SidebarSectionId = "directories" | "chats" | "sessions" | "runtime";
 
 type SidebarSectionState = Record<SidebarSectionId, boolean>;
 
@@ -197,6 +222,8 @@ type SidebarSectionProps = {
   iconClassName: string;
   id: SidebarSectionId;
   isOpen: boolean;
+  /** Optional header action (e.g. "add directory") outside the toggle button. */
+  action?: ReactNode;
   onToggle: (id: SidebarSectionId) => void;
   title: string;
 };
@@ -208,32 +235,36 @@ function SidebarSection({
   iconClassName,
   id,
   isOpen,
+  action,
   onToggle,
   title,
 }: SidebarSectionProps) {
   return (
     <section>
-      <button
-        type="button"
-        onClick={() => onToggle(id)}
-        aria-expanded={isOpen}
-        className="mb-2 flex w-full items-center justify-between gap-3 rounded-[0.7rem] px-1.5 py-1 text-left transition hover:bg-[var(--surface-softer)]"
-      >
-        <span className="inline-flex items-center gap-2 text-base uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
-          <Icon size={14} className={iconClassName} />
-          {title}
-        </span>
-        <span className="inline-flex items-center gap-2">
-          {count}
-          <ChevronDownIcon
-            size={14}
-            className={cn(
-              "text-[var(--muted-foreground)] transition-transform duration-200",
-              isOpen ? "rotate-0" : "-rotate-90",
-            )}
-          />
-        </span>
-      </button>
+      <div className="mb-2 flex w-full items-center justify-between gap-3 rounded-[0.7rem] px-1.5 py-1 transition hover:bg-[var(--surface-softer)]">
+        <button
+          type="button"
+          onClick={() => onToggle(id)}
+          aria-expanded={isOpen}
+          className="flex min-w-0 flex-1 items-center justify-between gap-3 text-left"
+        >
+          <span className="inline-flex items-center gap-2 text-base uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+            <Icon size={14} className={iconClassName} />
+            {title}
+          </span>
+          <span className="inline-flex items-center gap-2">
+            {count}
+            <ChevronDownIcon
+              size={14}
+              className={cn(
+                "text-[var(--muted-foreground)] transition-transform duration-200",
+                isOpen ? "rotate-0" : "-rotate-90",
+              )}
+            />
+          </span>
+        </button>
+        {action}
+      </div>
 
       {isOpen ? children : null}
     </section>
@@ -262,6 +293,15 @@ export function WorkspaceSidebar({
   selectedRuntimeSessionUserId,
   onRefreshRuntimeTeams,
   onSelectRuntimeSessionUser,
+  workspaceDirectories,
+  workspaceDirectoriesError,
+  workspaceDirectoriesLoading,
+  workspaceDirectoriesRefreshing,
+  onAddWorkspaceDirectory,
+  onRenameWorkspaceDirectory,
+  onRemoveWorkspaceDirectory,
+  onCreateSessionInDirectory,
+  onRenameRuntimeSession,
   threads,
   selectedThreadId,
   onSelectThread,
@@ -271,6 +311,7 @@ export function WorkspaceSidebar({
   const [query, setQuery] = useState("");
   const [runtimeTeamsDialogOpen, setRuntimeTeamsDialogOpen] = useState(false);
   const [openSections, setOpenSections] = useState<SidebarSectionState>({
+    directories: true,
     chats: true,
     sessions: true,
     runtime: false,
@@ -278,6 +319,25 @@ export function WorkspaceSidebar({
   const [openSessionDirectories, setOpenSessionDirectories] = useState<
     Record<string, boolean>
   >({});
+  const [directoryAddOpen, setDirectoryAddOpen] = useState(false);
+  const [directoryDeleteTarget, setDirectoryDeleteTarget] = useState<{
+    id: string;
+    label: string;
+    fullPath: string;
+    sessionCount: number;
+  } | null>(null);
+  const [renamingDirectoryId, setRenamingDirectoryId] = useState<string | null>(
+    null,
+  );
+  const [submittingDirectoryRename, setSubmittingDirectoryRename] =
+    useState(false);
+  const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
+  const [creatingSessionKey, setCreatingSessionKey] = useState<string | null>(
+    null,
+  );
+  const [sidebarActionError, setSidebarActionError] = useState<string | null>(
+    null,
+  );
   const deferredQuery = useDeferredValue(query.trim().toLowerCase());
   const filteredThreads = deferredQuery
     ? threads.filter((thread) => {
@@ -354,9 +414,15 @@ export function WorkspaceSidebar({
     runtimeSessionsSummary.totalCount,
     selectedRuntimeSessionUserId,
   ]);
+  const mergedDirectoryGroups = useMemo(
+    () => mergeDirectoryGroups(workspaceDirectories, runtimeSessions),
+    [runtimeSessions, workspaceDirectories],
+  );
+  // Per-user session browser: skip registered directories without sessions
+  // so the friendly empty state survives directory-only registrations.
   const sessionDirectoryGroups = useMemo(
-    () => groupRuntimeSessionsByDirectory(runtimeSessions),
-    [runtimeSessions],
+    () => mergedDirectoryGroups.filter((group) => group.sessions.length > 0),
+    [mergedDirectoryGroups],
   );
   const sessionThreadById = useMemo(() => {
     const byId = new Map<string, Thread>();
@@ -378,6 +444,12 @@ export function WorkspaceSidebar({
     Boolean(runtimeSessionUsersError) ||
     sessionUserMenuItems.length > 0 ||
     Boolean(deferredQuery);
+  const showDirectoriesSection =
+    workspaceDirectories.length > 0 ||
+    mergedDirectoryGroups.length > 0 ||
+    workspaceDirectoriesLoading ||
+    workspaceDirectoriesRefreshing ||
+    Boolean(workspaceDirectoriesError);
   const showChatsSection = chatThreads.length > 0 || Boolean(deferredQuery);
   const showSearch = threads.length > 0 || runtimeSessions.length > 0;
   const liveTeamCount = runtimeTeams.filter(
@@ -447,7 +519,7 @@ export function WorkspaceSidebar({
 
   useEffect(() => {
     setOpenSessionDirectories((current) => {
-      const knownKeys = new Set(sessionDirectoryGroups.map((group) => group.key));
+      const knownKeys = new Set(mergedDirectoryGroups.map((group) => group.key));
       const next: Record<string, boolean> = {};
       let changed = false;
 
@@ -459,7 +531,7 @@ export function WorkspaceSidebar({
         }
       }
 
-      sessionDirectoryGroups.forEach((group, index) => {
+      mergedDirectoryGroups.forEach((group, index) => {
         if (typeof next[group.key] === "boolean") {
           return;
         }
@@ -473,7 +545,7 @@ export function WorkspaceSidebar({
 
       return changed ? next : current;
     });
-  }, [selectedThreadId, sessionDirectoryGroups, sessionThreadById]);
+  }, [mergedDirectoryGroups, selectedThreadId, sessionThreadById]);
 
   function toggleSection(section: SidebarSectionId) {
     setOpenSections((current) => ({
@@ -487,6 +559,78 @@ export function WorkspaceSidebar({
       ...current,
       [directoryKey]: !current[directoryKey],
     }));
+  }
+
+  function startDirectoryRename(group: MergedDirectoryGroup) {
+    if (!group.directoryId) {
+      return;
+    }
+    setSidebarActionError(null);
+    setRenamingDirectoryId(group.directoryId);
+  }
+
+  function cancelDirectoryRename() {
+    setRenamingDirectoryId(null);
+  }
+
+  async function commitDirectoryRename(nextName: string) {
+    const directoryId = renamingDirectoryId;
+    const trimmedName = nextName.trim();
+    if (!directoryId || submittingDirectoryRename) {
+      return;
+    }
+    if (!trimmedName) {
+      cancelDirectoryRename();
+      return;
+    }
+    setSubmittingDirectoryRename(true);
+    try {
+      await onRenameWorkspaceDirectory(directoryId, trimmedName);
+      cancelDirectoryRename();
+    } catch (renameError) {
+      setSidebarActionError(
+        renameError instanceof Error ? renameError.message : String(renameError),
+      );
+    } finally {
+      setSubmittingDirectoryRename(false);
+    }
+  }
+
+  async function handleCreateSessionInDirectory(group: MergedDirectoryGroup) {
+    if (!group.fullPath || creatingSessionKey) {
+      return;
+    }
+    setSidebarActionError(null);
+    setCreatingSessionKey(group.key);
+    try {
+      await onCreateSessionInDirectory({
+        path: group.fullPath,
+        directoryId: group.directoryId,
+        label: group.label,
+      });
+    } catch (createError) {
+      setSidebarActionError(
+        createError instanceof Error ? createError.message : String(createError),
+      );
+    } finally {
+      setCreatingSessionKey(null);
+    }
+  }
+
+  async function handleRenameSession(sessionId: string, title: string) {
+    setRenamingSessionId(null);
+    try {
+      await onRenameRuntimeSession(sessionId, title);
+    } catch (renameError) {
+      setSidebarActionError(
+        renameError instanceof Error ? renameError.message : String(renameError),
+      );
+    }
+  }
+
+  function startSessionRename(sessionId: string) {
+    setSidebarActionError(null);
+    setRenamingSessionId(sessionId);
   }
 
   return (
@@ -670,6 +814,252 @@ export function WorkspaceSidebar({
             </SidebarSection>
           ) : null}
 
+          {showDirectoriesSection ? (
+            <SidebarSection
+              id="directories"
+              icon={FolderIcon}
+              iconClassName="text-[var(--accent-primary)]"
+              title={t("sidebar.sections.directories")}
+              count={<Badge>{workspaceDirectories.length}</Badge>}
+              isOpen={openSections.directories}
+              onToggle={toggleSection}
+              action={
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => {
+                    setSidebarActionError(null);
+                    setDirectoryAddOpen(true);
+                  }}
+                  aria-label={t("sidebar.directories.add")}
+                  title={t("sidebar.directories.add")}
+                >
+                  <FolderPlusIcon size={14} />
+                </Button>
+              }
+            >
+              <div className="space-y-2">
+                {workspaceDirectoriesLoading || workspaceDirectoriesRefreshing ? (
+                  <div className="inline-flex items-center gap-1.5 rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-1 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                    <LoaderCircleIcon size={12} className="animate-spin" />
+                    {t("sidebar.runtimeStats.syncing")}
+                  </div>
+                ) : null}
+                {workspaceDirectoriesError ? (
+                  <div className="rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-2.5 py-2 text-xs leading-5 text-[var(--muted-foreground)]">
+                    {workspaceDirectoriesError}
+                  </div>
+                ) : null}
+                {sidebarActionError ? (
+                  <div className="rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-2.5 py-2 text-xs leading-5 text-[var(--muted-foreground)]">
+                    {sidebarActionError}
+                  </div>
+                ) : null}
+                {mergedDirectoryGroups.length > 0 ? (
+                  <div className="space-y-1">
+                    {mergedDirectoryGroups.map((group) => {
+                      const isDirectoryOpen =
+                        openSessionDirectories[group.key] ?? false;
+                      const isCreating = creatingSessionKey === group.key;
+                      const isRenamingDirectory =
+                        Boolean(group.directoryId) &&
+                        renamingDirectoryId === group.directoryId;
+                      const displayLabel = group.fullPath
+                        ? group.label
+                        : t("sidebar.sessionDirectoryUnscoped");
+
+                      return (
+                        <div key={group.key} className="space-y-1">
+                          <div
+                            className={cn(
+                              "group/directory-row flex w-full items-center gap-1 rounded-[0.72rem] px-1.5 py-1 transition",
+                              group.registered
+                                ? "border border-[var(--border)] bg-[var(--surface-softer)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)]"
+                                : "hover:bg-[var(--surface-softer)]",
+                            )}
+                          >
+                            <button
+                              type="button"
+                              title={group.fullPath || displayLabel}
+                              onClick={() => toggleSessionDirectory(group.key)}
+                              className="flex min-w-0 flex-1 items-center gap-2 py-0.5 text-left"
+                            >
+                              <FolderIcon
+                                size={13}
+                                className={cn(
+                                  "shrink-0",
+                                  group.registered
+                                    ? "text-[var(--accent-primary)]"
+                                    : "text-[var(--muted-foreground)]",
+                                )}
+                              />
+                              <span
+                                className={cn(
+                                  "min-w-0 flex-1 truncate text-xs font-medium",
+                                  group.registered
+                                    ? "text-[var(--foreground)]"
+                                    : "text-[var(--muted-foreground)]",
+                                )}
+                              >
+                                {displayLabel}
+                              </span>
+                              {group.registered && group.exists === false ? (
+                                <span
+                                  title={t("sidebar.directories.existsWarning")}
+                                  aria-label={t(
+                                    "sidebar.directories.existsWarning",
+                                  )}
+                                  className="shrink-0 text-[#f59e7d]"
+                                >
+                                  <TriangleAlertIcon size={12} />
+                                </span>
+                              ) : null}
+                              <span className="shrink-0 app-text-10 text-[var(--muted-foreground)]">
+                                {group.sessions.length}
+                              </span>
+                              <ChevronDownIcon
+                                size={13}
+                                className={cn(
+                                  "shrink-0 text-[var(--muted-foreground)] transition-transform duration-200",
+                                  isDirectoryOpen ? "rotate-0" : "-rotate-90",
+                                )}
+                              />
+                            </button>
+                            {group.registered ? (
+                              <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition group-hover/directory-row:opacity-100 focus-within:opacity-100">
+                                <button
+                                  type="button"
+                                  title={t("sidebar.directories.newChat")}
+                                  aria-label={t("sidebar.directories.newChat")}
+                                  disabled={isCreating}
+                                  onClick={() =>
+                                    void handleCreateSessionInDirectory(group)
+                                  }
+                                  className="rounded-[0.5rem] p-1 text-[var(--muted-foreground)] transition hover:bg-[var(--surface-soft)] hover:text-[var(--foreground)] disabled:opacity-50"
+                                >
+                                  {isCreating ? (
+                                    <LoaderCircleIcon
+                                      size={12}
+                                      className="animate-spin"
+                                    />
+                                  ) : (
+                                    <MessageSquarePlusIcon size={12} />
+                                  )}
+                                </button>
+                                <button
+                                  type="button"
+                                  title={t("sidebar.directories.rename")}
+                                  aria-label={t("sidebar.directories.rename")}
+                                  onClick={() => startDirectoryRename(group)}
+                                  className="rounded-[0.5rem] p-1 text-[var(--muted-foreground)] transition hover:bg-[var(--surface-soft)] hover:text-[var(--foreground)]"
+                                >
+                                  <PencilIcon size={12} />
+                                </button>
+                                <button
+                                  type="button"
+                                  title={t("sidebar.directories.deleteTitle")}
+                                  aria-label={t("sidebar.directories.deleteTitle")}
+                                  onClick={() =>
+                                    setDirectoryDeleteTarget({
+                                      id: group.directoryId ?? "",
+                                      label: displayLabel,
+                                      fullPath: group.fullPath,
+                                      sessionCount: group.sessions.length,
+                                    })
+                                  }
+                                  className="rounded-[0.5rem] p-1 text-[var(--muted-foreground)] transition hover:bg-[var(--surface-soft)] hover:text-[#f59e7d]"
+                                >
+                                  <TrashIcon size={12} />
+                                </button>
+                              </div>
+                            ) : null}
+                          </div>
+                          {isRenamingDirectory ? (
+                            <div className="px-1.5">
+                              <InlineRenameInput
+                                ariaLabel={t("sidebar.directories.rename")}
+                                initial={group.label}
+                                placeholder={t(
+                                  "sidebar.session.renamePlaceholder",
+                                )}
+                                onCancel={cancelDirectoryRename}
+                                onSubmit={(value) =>
+                                  void commitDirectoryRename(value)
+                                }
+                              />
+                            </div>
+                          ) : null}
+                          {isDirectoryOpen ? (
+                            <div className="ml-3 space-y-1 border-l border-[var(--border)] pl-2">
+                              {group.sessions.map((session) => {
+                                const thread =
+                                  sessionThreadById.get(session.id);
+                                const title =
+                                  thread?.title ||
+                                  session.metadata?.title?.trim() ||
+                                  session.id;
+                                const isActive =
+                                  thread?.id === selectedThreadId ||
+                                  thread?.sessionId === selectedThreadId;
+                                const sessionStatusIcon = getSessionStatusIcon(
+                                  describeThreadSession(
+                                    thread ??
+                                      buildSessionDescriptorThread(
+                                        session,
+                                        title,
+                                      ),
+                                    threadSessionDetails,
+                                  ).label,
+                                  sidebarLabels,
+                                );
+
+                                return (
+                                  <SidebarSessionItem
+                                    key={`directory-${group.key}-${session.id}`}
+                                    isActive={isActive}
+                                    onCancelRename={() =>
+                                      setRenamingSessionId(null)
+                                    }
+                                    onRenameSubmit={(sessionId, value) =>
+                                      void handleRenameSession(sessionId, value)
+                                    }
+                                    onSelect={() =>
+                                      onSelectThread(thread?.id ?? session.id)
+                                    }
+                                    onStartRename={startSessionRename}
+                                    renameLabels={{
+                                      placeholder: t(
+                                        "sidebar.session.renamePlaceholder",
+                                      ),
+                                      rename: t("sidebar.session.rename"),
+                                    }}
+                                    renaming={renamingSessionId === session.id}
+                                    session={session}
+                                    statusIcon={sessionStatusIcon}
+                                    title={title}
+                                  />
+                                );
+                              })}
+                              {group.sessions.length === 0 ? (
+                                <div className="rounded-[0.8rem] border border-dashed border-[var(--border)] px-3 py-2 text-sm leading-6 text-[var(--muted-foreground)]">
+                                  {t("sidebar.emptySessions.default")}
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="rounded-[0.8rem] border border-dashed border-[var(--border)] px-3 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
+                    {t("sidebar.directories.empty")}
+                  </div>
+                )}
+              </div>
+            </SidebarSection>
+          ) : null}
+
           {showSessionsSection ? (
             <SidebarSection
               id="sessions"
@@ -807,23 +1197,43 @@ export function WorkspaceSidebar({
                                             );
 
                                             return (
-                                              <button
+                                              <SidebarSessionItem
                                                 key={`recoverable-${session.id}`}
-                                                type="button"
-                                                title={`${title} · ${sessionStatusIcon.label}`}
-                                                onClick={() => onSelectThread(thread?.id ?? session.id)}
-                                                className={cn(
-                                                  "flex w-full items-center gap-2 rounded-[0.72rem] border px-2 py-1.5 text-left transition",
-                                                  isActive
-                                                    ? "border-[var(--accent-secondary-border)] bg-[var(--accent-secondary-soft)]"
-                                                    : "border-[var(--border)] bg-[var(--surface-softer)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)]",
-                                                )}
-                                              >
-                                                <div className="min-w-0 flex-1 truncate text-sm font-medium text-[var(--foreground)]">
-                                                  {title}
-                                                </div>
-                                                <SidebarStateIcon spec={sessionStatusIcon} />
-                                              </button>
+                                                isActive={isActive}
+                                                onCancelRename={() =>
+                                                  setRenamingSessionId(null)
+                                                }
+                                                onRenameSubmit={
+                                                  (sessionId, value) =>
+                                                    void handleRenameSession(
+                                                      sessionId,
+                                                      value,
+                                                    )
+                                                }
+                                                onSelect={() =>
+                                                  onSelectThread(
+                                                    thread?.id ?? session.id,
+                                                  )
+                                                }
+                                                onStartRename={
+                                                  startSessionRename
+                                                }
+                                                renameLabels={{
+                                                  placeholder: t(
+                                                    "sidebar.session.renamePlaceholder",
+                                                  ),
+                                                  rename: t(
+                                                    "sidebar.session.rename",
+                                                  ),
+                                                }}
+                                                renaming={
+                                                  renamingSessionId ===
+                                                  session.id
+                                                }
+                                                session={session}
+                                                statusIcon={sessionStatusIcon}
+                                                title={title}
+                                              />
                                             );
                                           })}
                                         </div>
@@ -967,6 +1377,18 @@ export function WorkspaceSidebar({
           />
         </Suspense>
       ) : null}
+      <WorkspaceDirectoryAddDialog
+        open={directoryAddOpen}
+        onClose={() => setDirectoryAddOpen(false)}
+        onAdd={onAddWorkspaceDirectory}
+      />
+      <WorkspaceDirectoryDeleteDialog
+        open={Boolean(directoryDeleteTarget)}
+        directory={directoryDeleteTarget}
+        sessionCount={directoryDeleteTarget?.sessionCount ?? 0}
+        onClose={() => setDirectoryDeleteTarget(null)}
+        onConfirm={onRemoveWorkspaceDirectory}
+      />
       </aside>
     </>
   );
@@ -978,6 +1400,161 @@ function RuntimeTeamsDialogFallback() {
       <div className="rounded-[0.9rem] border border-[var(--border)] [background:var(--dialog-bg)] px-3.5 py-2.5 text-sm text-[var(--muted-foreground)] shadow-[0_12px_36px_rgba(0,0,0,0.22)]">
         Loading runtime teams panel...
       </div>
+    </div>
+  );
+}
+
+function buildSessionDescriptorThread(
+  session: RuntimeSessionRecord,
+  title: string,
+): Thread {
+  return {
+    id: session.id,
+    title,
+    summary: session.metadata?.summary ?? "",
+    updatedAt: session.updatedAt || session.createdAt || "",
+    status: "active",
+    sessionId: session.id,
+    tags: ["runtime-session"],
+    prompts: [],
+    messages: [],
+    artifacts: [],
+  };
+}
+
+type InlineRenameInputProps = {
+  ariaLabel: string;
+  initial: string;
+  onCancel: () => void;
+  onSubmit: (value: string) => void;
+  placeholder: string;
+};
+
+function InlineRenameInput({
+  ariaLabel,
+  initial,
+  onCancel,
+  onSubmit,
+  placeholder,
+}: InlineRenameInputProps) {
+  const [value, setValue] = useState(initial);
+  const settledRef = useRef(false);
+
+  return (
+    <input
+      autoFocus
+      value={value}
+      aria-label={ariaLabel}
+      onChange={(event) => setValue(event.target.value)}
+      onClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          const trimmed = value.trim();
+          if (!trimmed) {
+            settledRef.current = true;
+            onCancel();
+            return;
+          }
+          settledRef.current = true;
+          onSubmit(trimmed);
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          settledRef.current = true;
+          onCancel();
+        }
+      }}
+      onBlur={() => {
+        if (!settledRef.current) {
+          onCancel();
+        }
+      }}
+      placeholder={placeholder}
+      spellCheck={false}
+      className="w-full min-w-0 rounded-[0.55rem] border border-[var(--accent-primary-border)] bg-[var(--surface-solid)] px-2 py-1 text-sm text-[var(--foreground)] outline-none"
+    />
+  );
+}
+
+type SidebarSessionItemProps = {
+  isActive: boolean;
+  onCancelRename: () => void;
+  onRenameSubmit: (sessionId: string, title: string) => void;
+  onSelect: () => void;
+  onStartRename: (sessionId: string, currentTitle: string) => void;
+  renameLabels: {
+    placeholder: string;
+    rename: string;
+  };
+  renaming: boolean;
+  session: RuntimeSessionRecord;
+  statusIcon: SidebarStateIconSpec;
+  title: string;
+};
+
+function SidebarSessionItem({
+  isActive,
+  onCancelRename,
+  onRenameSubmit,
+  onSelect,
+  onStartRename,
+  renameLabels,
+  renaming,
+  session,
+  statusIcon,
+  title,
+}: SidebarSessionItemProps) {
+  if (renaming) {
+    return (
+      <div
+        className={cn(
+          "flex w-full items-center gap-2 rounded-[0.72rem] border px-2 py-1 text-left transition",
+          isActive
+            ? "border-[var(--accent-secondary-border)] bg-[var(--accent-secondary-soft)]"
+            : "border-[var(--border)] bg-[var(--surface-softer)]",
+        )}
+      >
+        <InlineRenameInput
+          ariaLabel={renameLabels.rename}
+          initial={title}
+          placeholder={renameLabels.placeholder}
+          onCancel={onCancelRename}
+          onSubmit={(value) => onRenameSubmit(session.id, value)}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="group/session relative">
+      <button
+        type="button"
+        title={`${title} · ${statusIcon.label}`}
+        onClick={onSelect}
+        className={cn(
+          "flex w-full items-center gap-2 rounded-[0.72rem] border py-1.5 pl-2 pr-7 text-left transition",
+          isActive
+            ? "border-[var(--accent-secondary-border)] bg-[var(--accent-secondary-soft)]"
+            : "border-[var(--border)] bg-[var(--surface-softer)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)]",
+        )}
+      >
+        <div className="min-w-0 flex-1 truncate text-sm font-medium text-[var(--foreground)]">
+          {title}
+        </div>
+        <SidebarStateIcon spec={statusIcon} />
+      </button>
+      <button
+        type="button"
+        aria-label={renameLabels.rename}
+        title={renameLabels.rename}
+        onClick={(event) => {
+          event.stopPropagation();
+          onStartRename(session.id, title);
+        }}
+        className="absolute right-1 top-1/2 -translate-y-1/2 rounded-[0.5rem] p-1 text-[var(--muted-foreground)] opacity-0 transition hover:bg-[var(--surface-soft)] hover:text-[var(--foreground)] focus-visible:opacity-100 group-hover/session:opacity-100"
+      >
+        <PencilIcon size={12} />
+      </button>
     </div>
   );
 }

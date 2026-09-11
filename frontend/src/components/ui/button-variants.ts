@@ -11,6 +11,8 @@ export const buttonVariants = cva(
           "border-[var(--border)] bg-[var(--surface-soft)] text-[var(--foreground)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft-hover)]",
         ghost:
           "border-transparent bg-transparent text-[var(--muted-foreground)] hover:bg-[var(--surface-soft)] hover:text-[var(--foreground)]",
+        destructive:
+          "border-[#f59e7d]/30 bg-[#f59e7d]/12 text-[#f59e7d] hover:bg-[#f59e7d]/20",
       },
       size: {
         sm: "h-8 px-3",

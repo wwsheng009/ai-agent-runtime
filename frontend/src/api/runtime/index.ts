@@ -48,6 +48,7 @@ export {
 export {
   applySessionBacktrack,
   createRuntimeSession,
+  deleteRuntimeSession,
   getRuntimeSession,
   getSessionHistory,
   getSessionCheckpointFiles,
@@ -60,8 +61,15 @@ export {
   previewSessionBacktrack,
   previewSessionCheckpoint,
   restoreSessionCheckpoint,
+  updateRuntimeSession,
   updateSessionPlanMode,
 } from "./sessions";
+export {
+  createWorkspaceDirectory,
+  deleteWorkspaceDirectory,
+  listWorkspaceDirectories,
+  updateWorkspaceDirectory,
+} from "./workspace-directories";
 export {
   ackRuntimeTeamMailboxMessage,
   checkRuntimeTeamPathClaims,

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { shouldIgnoreTerminalStreamError } from "@/hooks/workspace/use-workspace-agent-chat-turn";
+import {
+  resolveChatTurnWorkspacePath,
+  shouldIgnoreTerminalStreamError,
+} from "@/hooks/workspace/use-workspace-agent-chat-turn";
 
 describe("workspace agent chat turn terminal stream guards", () => {
   it("ignores trailing stream errors after the turn has already finalized", () => {
@@ -28,5 +31,19 @@ describe("workspace agent chat turn terminal stream guards", () => {
         aborted: false,
       }),
     ).toBe(false);
+  });
+});
+
+describe("workspace agent chat turn workspace_path resolution", () => {
+  it("omits workspace_path for materialized sessions so the backend binding applies", () => {
+    expect(resolveChatTurnWorkspacePath("session-1", "E:\\temp")).toBeUndefined();
+  });
+
+  it("sends the identity workspace path for draft threads to bind on first turn", () => {
+    expect(resolveChatTurnWorkspacePath(undefined, "E:\\projects\\demo")).toBe(
+      "E:\\projects\\demo",
+    );
+    expect(resolveChatTurnWorkspacePath(undefined, "   ")).toBeUndefined();
+    expect(resolveChatTurnWorkspacePath(null, undefined)).toBeUndefined();
   });
 });
