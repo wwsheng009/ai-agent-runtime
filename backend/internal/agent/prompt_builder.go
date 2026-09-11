@@ -71,8 +71,14 @@ func (b *PromptBuilder) BuildSubagentPrompt(parent *Config, task SubagentTask) s
 		lines = append(lines, "This subagent may act as the single writer only if the scheduler permits it.")
 	}
 
-	if len(task.ToolsWhitelist) > 0 {
-		lines = append(lines, fmt.Sprintf("Allowed tools: %s.", strings.Join(task.ToolsWhitelist, ", ")))
+	if task.ToolsWhitelist != nil {
+		if len(task.ToolsWhitelist) > 0 {
+			lines = append(lines, fmt.Sprintf("Allowed tools: %s.", strings.Join(task.ToolsWhitelist, ", ")))
+		} else {
+			// An explicitly empty allowlist means "no tools at all"; saying so
+			// keeps the child from probing a tool surface it does not have.
+			lines = append(lines, "No tools are available for this task: answer from the context you were given.")
+		}
 	}
 	if len(task.DependsOn) > 0 {
 		lines = append(lines, fmt.Sprintf("Depends on completed subagents: %s.", strings.Join(task.DependsOn, ", ")))

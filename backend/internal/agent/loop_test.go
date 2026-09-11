@@ -5535,10 +5535,19 @@ func TestSubagentScheduler_RunChildren_DependencyInjectsWriterPatchesIntoVerifie
 }
 
 func TestDefaultToolsForRole(t *testing.T) {
-	assert.Contains(t, DefaultToolsForRole("researcher"), "read_logs")
-	assert.Contains(t, DefaultToolsForRole("tester"), "run_tests")
-	assert.Contains(t, DefaultToolsForRole("writer"), "write_file")
-	assert.Contains(t, DefaultToolsForRole("verifier"), "git_log")
+	assert.Contains(t, DefaultToolsForRole("researcher"), "view")
+	assert.Contains(t, DefaultToolsForRole("researcher"), "grep")
+	assert.Contains(t, DefaultToolsForRole("tester"), "shell")
+	assert.Contains(t, DefaultToolsForRole("verifier"), "shell")
+	assert.Contains(t, DefaultToolsForRole("writer"), "write")
+	assert.Contains(t, DefaultToolsForRole("writer"), "apply_patch")
+	assert.Contains(t, DefaultToolsForRole("implementer"), "edit")
+	assert.Nil(t, DefaultToolsForRole(""))
+
+	// Role spelling variants resolve to the same defaults.
+	assert.Equal(t, DefaultToolsForRole("researcher"), DefaultToolsForRole("web-researcher"))
+	assert.Equal(t, DefaultToolsForRole("researcher"), DefaultToolsForRole("web_researcher"))
+	assert.Equal(t, DefaultToolsForRole("verifier"), DefaultToolsForRole("tester"))
 }
 
 func TestSubagentScheduler_EnforcesSingleWriterPolicy(t *testing.T) {

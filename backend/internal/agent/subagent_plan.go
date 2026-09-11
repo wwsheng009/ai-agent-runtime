@@ -98,7 +98,7 @@ func stepToolWhitelist(step PlanStep) []string {
 	if strings.TrimSpace(step.Tool) == "" {
 		return nil
 	}
-	return []string{strings.TrimSpace(step.Tool)}
+	return normalizeToolWhitelist([]string{step.Tool})
 }
 
 func difficultyMetadataForPlanStep(step PlanStep) (string, string) {

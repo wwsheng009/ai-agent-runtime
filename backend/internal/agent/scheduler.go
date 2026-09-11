@@ -1083,9 +1083,13 @@ func derivePatchApplyStatus(tool string, metadata map[string]interface{}, output
 
 func (s *SubagentScheduler) prepareTasks(tasks []SubagentTask) ([]SubagentTask, error) {
 	prepared := make([]SubagentTask, 0, len(tasks))
+	parentAgent := (*Agent)(nil)
+	if s != nil {
+		parentAgent = s.parent
+	}
 	parentPolicy := (*ToolExecutionPolicy)(nil)
-	if s != nil && s.parent != nil {
-		parentPolicy = s.parent.GetToolExecutionPolicy()
+	if parentAgent != nil {
+		parentPolicy = parentAgent.GetToolExecutionPolicy()
 	}
 	knownIDs := make(map[string]bool, len(tasks))
 
@@ -1094,27 +1098,26 @@ func (s *SubagentScheduler) prepareTasks(tasks []SubagentTask) ([]SubagentTask, 
 		if effective.ID == "" {
 			effective.ID = fmt.Sprintf("subagent_%d", index+1)
 		}
-		if effective.ToolsWhitelist == nil {
-			effective.ToolsWhitelist = DefaultToolsForRole(effective.Role)
-		}
 		if knownIDs[effective.ID] {
 			return nil, fmt.Errorf("duplicate subagent task id %q", effective.ID)
 		}
-		if parentPolicy != nil {
-			if parentPolicy.ReadOnly && !effective.ReadOnly {
-				// A child cannot widen a read-only parent boundary. Narrow the
-				// request instead of rejecting the whole batch; the requested
-				// write-like tools are removed below and the child remains
-				// subject to the execution-side hard deny.
-				effective.ReadOnly = true
-				effective.ReadOnlySource = "parent_tool_execution_policy"
-			}
-			childPolicy := parentPolicy.DeriveChildForTask(effective.ToolsWhitelist, effective.ReadOnly, effective.Role, subagentWritePaths(effective))
-			effective.ReadOnly = childPolicy.ReadOnly
-			if childPolicy.AllowlistEnabled {
-				effective.ToolsWhitelist = childPolicy.AllowedToolNames()
-			}
+		if parentPolicy != nil && parentPolicy.ReadOnly && !effective.ReadOnly {
+			// A child cannot widen a read-only parent boundary. Narrow the
+			// request instead of rejecting the whole batch; the requested
+			// write-like tools are removed below and the child remains subject
+			// to the execution-side hard deny.
+			effective.ReadOnly = true
+			effective.ReadOnlySource = "parent_tool_execution_policy"
 		}
+		// Resolve the child tool surface through the shared helper: it
+		// normalizes the requested allowlist, rejects requests that could only
+		// produce a tool-less child (retired vocabulary / parent intersection)
+		// and narrows the task to what the derived child policy grants.
+		resolved, _, err := resolveChildToolSurface(parentAgent, effective)
+		if err != nil {
+			return nil, err
+		}
+		effective = resolved
 		if effective.ReadOnly {
 			if effective.ReadOnlySource == "" {
 				effective.ReadOnlySource = "spawn_subagents.read_only"
@@ -1170,16 +1173,11 @@ func validateHighRiskWriterVerifierTasks(tasks []SubagentTask) error {
 }
 
 func (s *SubagentScheduler) childPolicy(task SubagentTask) *ToolExecutionPolicy {
-	parentPolicy := (*ToolExecutionPolicy)(nil)
-	if s != nil && s.parent != nil {
-		parentPolicy = s.parent.GetToolExecutionPolicy()
+	parent := (*Agent)(nil)
+	if s != nil {
+		parent = s.parent
 	}
-	if parentPolicy != nil {
-		return parentPolicy.DeriveChildForTask(task.ToolsWhitelist, task.ReadOnly, task.Role, subagentWritePaths(task))
-	}
-	child := NewToolExecutionPolicy(task.ToolsWhitelist, task.ReadOnly)
-	child.SetCapabilityScope(CapabilitiesForTask(task.Role, task.ReadOnly, task.ToolsWhitelist, subagentWritePaths(task)))
-	return child
+	return agentChildPolicy(parent, task)
 }
 
 func subagentWritePaths(task SubagentTask) []string {
@@ -1362,6 +1360,8 @@ func classifySubagentDeniedPolicy(reason string) string {
 		return "read_only"
 	case strings.Contains(lower, "write-like tools"):
 		return "read_only"
+	case strings.Contains(lower, "no longer serves"):
+		return "tool_vocabulary"
 	default:
 		return "subagent_scheduler"
 	}
