@@ -1,0 +1,143 @@
+// 由 hooks/workspace/use-workspace-agent-chat-turn.ts 机械拆分而来（P0-2），仅搬迁不改语义。
+//
+// 流式写入层：把 SSE 事件映射为线程消息段/阶段状态与运行时元数据的写入闭包
+// （工具段 upsert、工具结束、阶段切换、流式错误落盘）。本模块不持有 React 状态。
+
+import { type Artifact, type Thread } from "@/data/mock";
+import {
+  buildAssistantMessageSegments,
+  buildToolSegmentFromPayload,
+  buildTurnJsonArtifact,
+  getToolName,
+  getToolErrorMessage,
+  updateThreadMessage,
+  upsertToolSegment,
+  type ToolMessageSegment,
+} from "@/lib/workspace-thread-state";
+import type {
+  AgentChatStreamChunkPayload,
+  ChatStreamPhase,
+} from "@/types/runtime";
+
+import { type ChatTurnRuntimeState } from "./turn-state";
+
+export type StreamingWriterDeps = {
+  assistantMessageId: string;
+  attachTurnArtifact: (artifact: Artifact) => void;
+  frameScheduler: { cancel: () => void };
+  phaseRef: { current: ChatStreamPhase | null };
+  setPhase: (phase: ChatStreamPhase | null) => void;
+  turnId: string;
+  turnState: ChatTurnRuntimeState;
+  updateCurrentThread: (updater: (thread: Thread) => Thread) => void;
+};
+
+export type StreamingWriters = {
+  handleToolEnd: (payload: AgentChatStreamChunkPayload) => void;
+  setPhaseAndRef: (nextPhase: ChatStreamPhase | null) => void;
+  updateStreamingError: (message: string, heading?: string) => void;
+  upsertLiveToolSegment: (
+    payload: AgentChatStreamChunkPayload,
+    status: ToolMessageSegment["status"],
+    eventType: string,
+  ) => void;
+};
+
+export function createStreamingWriters(
+  deps: StreamingWriterDeps,
+): StreamingWriters {
+  const {
+    assistantMessageId,
+    attachTurnArtifact,
+    frameScheduler,
+    phaseRef,
+    setPhase,
+    turnId,
+    turnState,
+    updateCurrentThread,
+  } = deps;
+
+  const upsertLiveToolSegment = (
+    payload: AgentChatStreamChunkPayload,
+    status: ToolMessageSegment["status"],
+    eventType: string,
+  ) => {
+    turnState.toolPayloads.push(payload);
+    setPhaseAndRef("tool");
+    attachTurnArtifact(
+      buildTurnJsonArtifact(
+        turnId,
+        "tool-events",
+        "Tool events observed during agent chat SSE.",
+        turnState.toolPayloads,
+      ),
+    );
+    updateCurrentThread((thread) =>
+      updateThreadMessage(thread, assistantMessageId, (message) => ({
+        ...message,
+        segments: upsertToolSegment(
+          message.segments,
+          buildToolSegmentFromPayload(payload, status),
+        ),
+      })),
+    );
+    updateCurrentThread((thread) => ({
+      ...thread,
+      lastRuntimeEventType: `${eventType}:${getToolName(payload)}`,
+    }));
+  };
+
+  const handleToolEnd = (payload: AgentChatStreamChunkPayload) => {
+    const hasError = Boolean(getToolErrorMessage(payload));
+    upsertLiveToolSegment(payload, hasError ? "error" : "finished", "tool_end");
+    if (hasError) {
+      setPhaseAndRef("tool");
+    }
+  };
+
+  const setPhaseAndRef = (nextPhase: ChatStreamPhase | null) => {
+    phaseRef.current = nextPhase;
+    setPhase(nextPhase);
+  };
+
+  const updateStreamingError = (
+    message: string,
+    heading = "Runtime stream failed.",
+  ) => {
+    frameScheduler.cancel();
+    const hasStreamedText = turnState.streamedText.trim().length > 0;
+    updateCurrentThread((thread) =>
+      updateThreadMessage(thread, assistantMessageId, (currentMessage) => {
+        const segments = buildAssistantMessageSegments(
+          hasStreamedText ? turnState.streamedText : `${heading}\n\n${message}`,
+          turnState.currentSource,
+          turnState.reasoningText,
+          {
+            existingSegments: currentMessage.segments,
+          },
+        );
+        if (hasStreamedText) {
+          segments.push({
+            type: "callout",
+            title: heading,
+            tone: "warning",
+            content: message,
+          });
+        }
+        return {
+          ...currentMessage,
+          author: "Runtime error",
+          label: "error",
+          streaming: false,
+          segments,
+        };
+      }),
+    );
+  };
+  return {
+    handleToolEnd,
+    setPhaseAndRef,
+    updateStreamingError,
+    upsertLiveToolSegment,
+  };
+}

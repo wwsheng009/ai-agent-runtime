@@ -1,0 +1,394 @@
+// P0-2 随源拆分：由 workspace-thread-state.test.ts 按关注点切分，断言未改动。
+import { describe, expect, it } from "vitest";
+
+import {
+  applySessionHistoryToThread,
+} from "@/lib/workspace-thread-state";
+import type { SessionHistoryResponse } from "@/types/runtime";
+import { createThread } from "./test-fixtures";
+
+describe("applySessionHistoryToThread", () => {
+  it("preserves existing code segments when authoritative history matches a message", () => {
+    const response: SessionHistoryResponse = {
+      session_id: "session-1",
+      count: 1,
+      history: [
+        {
+          role: "assistant",
+          content: "Merged answer",
+        },
+      ],
+    };
+
+    const nextThread = applySessionHistoryToThread(createThread(), response);
+
+    expect(nextThread.sessionId).toBe("session-1");
+    expect(nextThread.messages).toHaveLength(1);
+    expect(nextThread.messages[0].segments).toEqual([
+      {
+        type: "text",
+        content: "Merged answer",
+      },
+      {
+        type: "code",
+        language: "json",
+        title: "Reasoning snapshot",
+        code: '{"ok":true}',
+      },
+    ]);
+    expect(nextThread.artifacts[0]?.id).toBe("session-history-session-1");
+  });
+
+  it("uses durable message_id from history metadata as ChatMessage.id", () => {
+    const response: SessionHistoryResponse = {
+      session_id: "session-1",
+      count: 2,
+      history: [
+        {
+          role: "user",
+          content: "rewrite this",
+          metadata: {
+            message_id: "msg_user_1",
+            turn_id: "turn_1",
+          },
+        },
+        {
+          role: "assistant",
+          content: "done",
+          metadata: {
+            message_id: "msg_assistant_1",
+            turn_id: "turn_1",
+          },
+        },
+      ],
+    };
+
+    const nextThread = applySessionHistoryToThread(createThread(), response);
+
+    expect(nextThread.messages).toHaveLength(2);
+    expect(nextThread.messages[0].id).toBe("msg_user_1");
+    expect(nextThread.messages[0].role).toBe("user");
+    expect(nextThread.messages[1].id).toBe("msg_assistant_1");
+  });
+
+  it("keeps existing streaming messages when session history is null", () => {
+    const response = {
+      session_id: "session-1",
+      count: 0,
+      history: null,
+    } as unknown as SessionHistoryResponse;
+
+    const nextThread = applySessionHistoryToThread(createThread(), response);
+
+    expect(nextThread.sessionId).toBe("session-1");
+    // null history = 无权威历史：保留当前流式消息（与 history 匹配时的
+    // 合并语义一致，避免恢复流程清掉正在渲染的内容）。
+    expect(nextThread.messages).toHaveLength(1);
+    expect(nextThread.messages[0]?.id).toBe("assistant-existing");
+    expect(nextThread.artifacts[0]?.id).toBe("session-history-session-1");
+  });
+
+  it("hides fact ledger and other internal prompt-context messages", () => {
+    const response: SessionHistoryResponse = {
+      session_id: "session-1",
+      count: 4,
+      history: [
+        {
+          role: "user",
+          content: "continue",
+        },
+        {
+          role: "developer",
+          content:
+            "Verified fact ledger (authoritative over compacted prose):\n- [execution] shell succeeded",
+          metadata: {
+            context_stage: "fact_ledger",
+            context_snapshot: true,
+          },
+        },
+        {
+          role: "assistant",
+          content:
+            "Verified fact ledger (authoritative over compacted prose):\n- legacy assistant leak",
+        },
+        {
+          role: "assistant",
+          content: "real answer",
+        },
+      ],
+    };
+
+    const nextThread = applySessionHistoryToThread(createThread(), response);
+
+    expect(nextThread.messages).toHaveLength(2);
+    expect(nextThread.messages[0].role).toBe("user");
+    expect(nextThread.messages[0].segments).toEqual([
+      { type: "text", content: "continue" },
+    ]);
+    expect(nextThread.messages[1].role).toBe("assistant");
+    expect(nextThread.messages[1].segments).toEqual([
+      { type: "text", content: "real answer" },
+    ]);
+  });
+
+  it("restores persisted related evidence artifacts from session history metadata", () => {
+    const response: SessionHistoryResponse = {
+      session_id: "session-1",
+      count: 1,
+      history: [
+        {
+          role: "assistant",
+          content: "Recovered answer",
+          metadata: {
+            workspace_related_artifacts: [
+              {
+                id: "persisted-agent-chat-response",
+                name: "agent-chat-response-agent-route.json",
+                path: "runtime/agent-chat-response-agent-route.json",
+                summary: "Final response payload persisted with the assistant history.",
+                kind: "json",
+                language: "json",
+                content: {
+                  source: "agent_route",
+                  kind: "agent",
+                  status: "completed",
+                },
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    const nextThread = applySessionHistoryToThread(
+      {
+        ...createThread(),
+        messages: [],
+        artifacts: [],
+      },
+      response,
+    );
+
+    expect(nextThread.messages).toHaveLength(1);
+    expect(nextThread.messages[0].relatedArtifactIds).toEqual([
+      "persisted-history:session-1:0:0:agent-chat-response-agent-route-json",
+    ]);
+    expect(nextThread.artifacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "persisted-history:session-1:0:0:agent-chat-response-agent-route-json",
+          name: "agent-chat-response-agent-route.json",
+          path: "runtime/agent-chat-response-agent-route.json",
+          summary: "Final response payload persisted with the assistant history.",
+          kind: "json",
+          language: "json",
+          content: JSON.stringify(
+            {
+              source: "agent_route",
+              kind: "agent",
+              status: "completed",
+            },
+            null,
+            2,
+          ),
+        }),
+      ]),
+    );
+  });
+
+  it("restores generated images from assistant metadata into inline segments and artifacts", () => {
+    const response: SessionHistoryResponse = {
+      session_id: "session-1",
+      count: 1,
+      history: [
+        {
+          role: "assistant",
+          content: "Generated image",
+          metadata: {
+            generated_images: [
+              {
+                id: "image:1",
+                status: "completed",
+                revised_prompt: "a tiny robot",
+                mime_type: "image/png",
+                saved_path: "C:/temp/image_1.png",
+                sha256: "abc123",
+                byte_count: 42,
+              },
+            ],
+            generated_images_error: "image save warning",
+          },
+        },
+      ],
+    };
+
+    const nextThread = applySessionHistoryToThread(
+      {
+        ...createThread(),
+        messages: [],
+        artifacts: [],
+      },
+      response,
+    );
+
+    expect(nextThread.messages).toHaveLength(1);
+    expect(nextThread.messages[0].relatedArtifactIds).toEqual([
+      "generated-image:session-1:image_1",
+    ]);
+    expect(nextThread.messages[0].segments).toEqual([
+      {
+        type: "text",
+        content: "Generated image",
+      },
+      {
+        type: "image",
+        src: expect.stringContaining(
+          "/api/runtime/sessions/session-1/generated-images/image_1",
+        ),
+        alt: "a tiny robot",
+        caption: "a tiny robot",
+        artifactId: "generated-image:session-1:image_1",
+        imageId: "image_1",
+      },
+      {
+        type: "callout",
+        title: "图片保存失败",
+        tone: "warning",
+        content: "image save warning",
+      },
+    ]);
+
+    expect(nextThread.artifacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "generated-image:session-1:image_1",
+          kind: "image",
+          name: "image_1.png",
+          path: "runtime/generated-images/image_1.png",
+          content: expect.stringContaining(
+            "/api/runtime/sessions/session-1/generated-images/image_1",
+          ),
+          mimeType: "image/png",
+          sha256: "abc123",
+          byteCount: 42,
+          revisedPrompt: "a tiny robot",
+        }),
+      ]),
+    );
+  });
+
+  it("restores reasoning from assistant metadata into the history segment", () => {
+    const response: SessionHistoryResponse = {
+      session_id: "session-1",
+      count: 1,
+      history: [
+        {
+          role: "assistant",
+          content: "Final answer",
+          metadata: {
+            reasoning_details: {
+              provider: "deepseek",
+              visibility: "summary",
+              summary: "Because the flag was unset",
+            },
+          },
+        },
+      ],
+    };
+
+    const nextThread = applySessionHistoryToThread(
+      {
+        ...createThread(),
+        messages: [],
+        artifacts: [],
+      },
+      response,
+    );
+
+    expect(nextThread.messages).toHaveLength(1);
+    expect(nextThread.messages[0].segments).toEqual([
+      {
+        type: "text",
+        content: "Final answer",
+      },
+      {
+        type: "reasoning",
+        content: "Because the flag was unset",
+      },
+    ]);
+  });
+
+  it("prefers summary over full content when both exist (backend DisplayText parity)", () => {
+    const response: SessionHistoryResponse = {
+      session_id: "session-1",
+      count: 1,
+      history: [
+        {
+          role: "assistant",
+          content: "Final answer",
+          metadata: {
+            reasoning_details: {
+              provider: "openai",
+              visibility: "full",
+              summary: "Short summary",
+              content: "Longer detailed reasoning body",
+            },
+          },
+        },
+      ],
+    };
+
+    const nextThread = applySessionHistoryToThread(
+      {
+        ...createThread(),
+        messages: [],
+        artifacts: [],
+      },
+      response,
+    );
+
+    const segments = nextThread.messages[0].segments;
+    expect(segments).toHaveLength(2);
+    expect(segments[1]).toEqual({
+      type: "reasoning",
+      content: "Short summary",
+    });
+  });
+
+  it("does not restore reasoning when visibility is none or opaque", () => {
+    const response: SessionHistoryResponse = {
+      session_id: "session-1",
+      count: 1,
+      history: [
+        {
+          role: "assistant",
+          content: "Final answer",
+          metadata: {
+            reasoning_details: {
+              provider: "openai",
+              visibility: "none",
+              content: "hidden reasoning",
+            },
+          },
+        },
+      ],
+    };
+
+    const nextThread = applySessionHistoryToThread(
+      {
+        ...createThread(),
+        messages: [],
+        artifacts: [],
+      },
+      response,
+    );
+
+    expect(nextThread.messages[0].segments).toEqual([
+      {
+        type: "text",
+        content: "Final answer",
+      },
+    ]);
+  });
+
+});
