@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:manual": "playwright test --config playwright.manual.config.ts"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",

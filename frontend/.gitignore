@@ -26,3 +26,7 @@ dist-ssr
 # playwright artifacts
 test-results/
 playwright-report/
+
+# local backups / scratch
+*.bak
+.backups/
