@@ -112,7 +112,7 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 			Error:      err,
 		}, nil
 	}
-	resolvedPath := w.resolvePath(p.FilePath)
+	resolvedPath := w.resolvePathWithContext(ctx, p.FilePath)
 
 	if err := w.checkPath(runtimeexecutor.OpWrite, resolvedPath); err != nil {
 		return &toolkit.ToolResult{
@@ -143,7 +143,7 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 			return &toolkit.ToolResult{
 				Success:    false,
 				OutputKind: toolresult.KindText,
-				Error:      w.buildPathKindMismatchError("路径是目录，不是文件", p.FilePath),
+				Error:      w.buildPathKindMismatchError(ctx, "路径是目录，不是文件", p.FilePath),
 			}, nil
 		}
 		if !fileInfo.Mode().IsRegular() {

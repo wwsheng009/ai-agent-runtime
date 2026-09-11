@@ -1,12 +1,14 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
 
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 )
 
 type sandboxPolicy struct {
@@ -31,43 +33,67 @@ func (p *sandboxPolicy) SetBasePath(basePath string) {
 	p.basePath = basePath
 }
 
-func (p *sandboxPolicy) resolvePath(targetPath string) string {
-	targetPath = strings.TrimSpace(targetPath)
-	if targetPath == "" {
-		return targetPath
+// effectiveBasePath returns the filesystem root relative tool paths should be
+// resolved against for the current invocation: the session-bound workspace
+// root carried in ctx (toolctx.WorkspaceRoot) when present, otherwise the
+// tool-registered basePath (SetBasePath). This keeps file tools consistent
+// with shell CWD resolution and preflight read-path checks for
+// directory-bound sessions.
+func (p *sandboxPolicy) effectiveBasePath(ctx context.Context) string {
+	if root := strings.TrimSpace(toolctx.WorkspaceRoot(ctx)); root != "" {
+		if !filepath.IsAbs(root) {
+			if absPath, err := filepath.Abs(root); err == nil {
+				return filepath.Clean(absPath)
+			}
+		}
+		return filepath.Clean(root)
 	}
-	if filepath.IsAbs(targetPath) {
-		return targetPath
-	}
-	if p == nil || strings.TrimSpace(p.basePath) == "" {
-		return targetPath
-	}
-	return filepath.Clean(filepath.Join(p.basePath, targetPath))
-}
-
-func (p *sandboxPolicy) buildPathNotFoundHint(targetPath string) string {
 	if p == nil {
-		return runtimeexecutor.BuildPathNotFoundHintForPath(targetPath, "")
+		return ""
 	}
-	return runtimeexecutor.BuildPathNotFoundHintForPath(targetPath, p.basePath)
+	return p.basePath
 }
 
-func (p *sandboxPolicy) buildPathNotFoundError(prefix, targetPath string) error {
-	if hint := p.buildPathNotFoundHint(targetPath); hint != "" {
+// resolvePathWithContext resolves a tool path argument like resolvePath, but
+// anchors relative targets to the session-bound workspace root from ctx
+// (falling back to the registered basePath). Absolute targets are returned
+// unchanged. Callers inside Execute should prefer this variant so relative
+// paths follow the session workspace instead of the global registration.
+func (p *sandboxPolicy) resolvePathWithContext(ctx context.Context, targetPath string) string {
+	trimmed := strings.TrimSpace(targetPath)
+	if trimmed == "" || filepath.IsAbs(trimmed) {
+		return trimmed
+	}
+	base := p.effectiveBasePath(ctx)
+	if base == "" {
+		return trimmed
+	}
+	return filepath.Clean(filepath.Join(base, trimmed))
+}
+
+// buildPathNotFoundHint builds the "path not found" hint against the effective
+// base path for the current invocation (session-bound workspace root when
+// present, otherwise the registered basePath) so the suggested search root
+// matches where relative paths were actually resolved.
+func (p *sandboxPolicy) buildPathNotFoundHint(ctx context.Context, targetPath string) string {
+	return runtimeexecutor.BuildPathNotFoundHintForPath(targetPath, p.effectiveBasePath(ctx))
+}
+
+func (p *sandboxPolicy) buildPathNotFoundError(ctx context.Context, prefix, targetPath string) error {
+	if hint := p.buildPathNotFoundHint(ctx, targetPath); hint != "" {
 		return fmt.Errorf("%s: %s\n%s", prefix, targetPath, hint)
 	}
 	return fmt.Errorf("%s: %s", prefix, targetPath)
 }
 
-func (p *sandboxPolicy) buildPathKindMismatchHint(targetPath string) string {
-	if p == nil {
-		return runtimeexecutor.BuildPathKindMismatchHintForPath(targetPath, "")
-	}
-	return runtimeexecutor.BuildPathKindMismatchHintForPath(targetPath, p.basePath)
+// buildPathKindMismatchHint mirrors buildPathNotFoundHint for kind mismatches
+// (path exists but is not the expected kind).
+func (p *sandboxPolicy) buildPathKindMismatchHint(ctx context.Context, targetPath string) string {
+	return runtimeexecutor.BuildPathKindMismatchHintForPath(targetPath, p.effectiveBasePath(ctx))
 }
 
-func (p *sandboxPolicy) buildPathKindMismatchError(prefix, targetPath string) error {
-	if hint := p.buildPathKindMismatchHint(targetPath); hint != "" {
+func (p *sandboxPolicy) buildPathKindMismatchError(ctx context.Context, prefix, targetPath string) error {
+	if hint := p.buildPathKindMismatchHint(ctx, targetPath); hint != "" {
 		return fmt.Errorf("%s: %s\n%s", prefix, targetPath, hint)
 	}
 	return fmt.Errorf("%s: %s", prefix, targetPath)

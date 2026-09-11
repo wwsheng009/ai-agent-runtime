@@ -144,7 +144,7 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 	if p.Limit <= 0 {
 		p.Limit = viewDefaultLimit
 	}
-	resolvedPath := v.resolvePath(p.FilePath)
+	resolvedPath := v.resolvePathWithContext(ctx, p.FilePath)
 
 	// 检查文件是否存在
 	if err := v.checkPath(runtimeexecutor.OpRead, resolvedPath); err != nil {
@@ -160,7 +160,7 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 			return &toolkit.ToolResult{
 				Success:    false,
 				OutputKind: toolresult.KindText,
-				Error:      v.buildPathNotFoundError("路径不存在", p.FilePath),
+				Error:      v.buildPathNotFoundError(ctx, "路径不存在", p.FilePath),
 			}, nil
 		}
 		return &toolkit.ToolResult{
@@ -205,7 +205,7 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 			return &toolkit.ToolResult{
 				Success:    false,
 				OutputKind: toolresult.KindText,
-				Error:      v.buildPathNotFoundError("读取文件失败", p.FilePath),
+				Error:      v.buildPathNotFoundError(ctx, "读取文件失败", p.FilePath),
 			}, nil
 		}
 		return &toolkit.ToolResult{

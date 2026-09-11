@@ -103,7 +103,7 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 	if path, ok := params["path"].(string); ok && path != "" {
 		searchPath = path
 	}
-	resolvedSearchPath := g.resolvePath(searchPath)
+	resolvedSearchPath := g.resolvePathWithContext(ctx, searchPath)
 	if err := g.checkPath(runtimeexecutor.OpRead, resolvedSearchPath); err != nil {
 		return &toolkit.ToolResult{
 			Success:    false,
@@ -117,7 +117,7 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 			return &toolkit.ToolResult{
 				Success:    false,
 				OutputKind: toolresult.KindText,
-				Error:      g.buildPathNotFoundError("搜索路径不可用", searchPath),
+				Error:      g.buildPathNotFoundError(ctx, "搜索路径不可用", searchPath),
 			}, nil
 		}
 		return &toolkit.ToolResult{

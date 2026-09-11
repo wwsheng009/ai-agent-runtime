@@ -120,7 +120,7 @@ func (d *DownloadTool) Execute(ctx context.Context, params map[string]interface{
 			Error:      err,
 		}, nil
 	}
-	resolvedPath := d.resolvePath(filePath)
+	resolvedPath := d.resolvePathWithContext(ctx, filePath)
 
 	// 转换为绝对路径
 	absPath, err := filepath.Abs(resolvedPath)
@@ -144,7 +144,7 @@ func (d *DownloadTool) Execute(ctx context.Context, params map[string]interface{
 			return &toolkit.ToolResult{
 				Success:    false,
 				OutputKind: toolresult.KindText,
-				Error:      d.buildPathKindMismatchError("目标路径是目录，不是文件", filePath),
+				Error:      d.buildPathKindMismatchError(ctx, "目标路径是目录，不是文件", filePath),
 			}, nil
 		}
 		if !fileInfo.Mode().IsRegular() {

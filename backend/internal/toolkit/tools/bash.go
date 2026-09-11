@@ -678,7 +678,7 @@ func bashBatchCommandParams(parent, item map[string]interface{}) map[string]inte
 
 func (b *BashTool) executeCommand(ctx context.Context, command string, workdir string, timeout time.Duration, captureSettings outputCaptureSettings) (CommandExecutionResult, error) {
 	// 解析工作目录
-	resolvedWorkdir, err := resolveWorkdir(workdir)
+	resolvedWorkdir, err := resolveWorkdirWithBase(ctx, workdir)
 	if err != nil {
 		return CommandExecutionResult{}, err
 	}
@@ -1094,6 +1094,26 @@ func resolveWorkdir(workdir string) (string, error) {
 		return "", fmt.Errorf("获取当前工作目录失败: %w", err)
 	}
 	return filepath.Clean(filepath.Join(cwd, workdir)), nil
+}
+
+// resolveWorkdirWithBase resolves the working directory with an explicit base
+// root (the session-bound workspace carried in toolctx). Precedence:
+//   1. explicit workdir param (absolute wins as-is; relative joins the base)
+//   2. session workspace root from ctx (directory-bound sessions execute here)
+//   3. process working directory (legacy fallback when no base is bound)
+func resolveWorkdirWithBase(ctx context.Context, workdir string) (string, error) {
+	base := strings.TrimSpace(toolctx.WorkspaceRoot(ctx))
+	if base == "" {
+		return resolveWorkdir(workdir)
+	}
+	workdir = strings.TrimSpace(workdir)
+	if workdir == "" {
+		return filepath.Clean(base), nil
+	}
+	if filepath.IsAbs(workdir) {
+		return filepath.Clean(workdir), nil
+	}
+	return filepath.Clean(filepath.Join(base, workdir)), nil
 }
 
 // prefixPowershellUTF8 prepends a UTF-8 encoding command for PowerShell

@@ -130,7 +130,7 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 	if replaceAll, ok := params["replace_all"].(bool); ok {
 		p.ReplaceAll = replaceAll
 	}
-	resolvedPath := e.resolvePath(p.FilePath)
+	resolvedPath := e.resolvePathWithContext(ctx, p.FilePath)
 
 	if err := e.checkPath(runtimeexecutor.OpWrite, resolvedPath); err != nil {
 		return &toolkit.ToolResult{
@@ -156,7 +156,7 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 			return &toolkit.ToolResult{
 				Success:    false,
 				OutputKind: toolresult.KindText,
-				Error:      e.buildPathNotFoundError("读取文件失败", p.FilePath),
+				Error:      e.buildPathNotFoundError(ctx, "读取文件失败", p.FilePath),
 			}, nil
 		}
 		return &toolkit.ToolResult{
@@ -169,7 +169,7 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
-			Error:      e.buildPathKindMismatchError("路径是目录，不是文件", p.FilePath),
+			Error:      e.buildPathKindMismatchError(ctx, "路径是目录，不是文件", p.FilePath),
 		}, nil
 	}
 
@@ -179,7 +179,7 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 			return &toolkit.ToolResult{
 				Success:    false,
 				OutputKind: toolresult.KindText,
-				Error:      e.buildPathNotFoundError("读取文件失败", p.FilePath),
+				Error:      e.buildPathNotFoundError(ctx, "读取文件失败", p.FilePath),
 			}, nil
 		}
 		return &toolkit.ToolResult{

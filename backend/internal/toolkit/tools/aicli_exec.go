@@ -207,7 +207,9 @@ func (t *AICLIExecTool) Execute(ctx context.Context, params map[string]interface
 	if err != nil {
 		return &toolkit.ToolResult{Success: false, OutputKind: toolresult.KindText, Error: err}, nil
 	}
-	cwd, err := resolveAICLIExecWorkdir(req.CWD)
+	// Resolve like the shell tools: anchor to the session-bound workspace
+	// root when present so aicli runs inside the bound project directory.
+	cwd, err := resolveWorkdirWithBase(ctx, req.CWD)
 	if err != nil {
 		return &toolkit.ToolResult{Success: false, OutputKind: toolresult.KindText, Error: err}, nil
 	}
@@ -472,21 +474,6 @@ func resolveAICLIExecutable(explicit string) (string, error) {
 		return path, nil
 	}
 	return "", fmt.Errorf("未找到 aicli 可执行文件；请确认 aicli 在 PATH 中，或传入 executable_path")
-}
-
-func resolveAICLIExecWorkdir(cwd string) (string, error) {
-	cwd = strings.TrimSpace(cwd)
-	if cwd == "" {
-		return os.Getwd()
-	}
-	if filepath.IsAbs(cwd) {
-		return filepath.Clean(cwd), nil
-	}
-	base, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("获取当前工作目录失败: %w", err)
-	}
-	return filepath.Clean(filepath.Join(base, cwd)), nil
 }
 
 func buildAICLIExecMetadata(command []string, cwd string, req aicliExecRequest, capture runtimeexecutor.CombinedOutputCapture, artifactPath string, artifactErr error, duration time.Duration, timedOut bool) map[string]interface{} {

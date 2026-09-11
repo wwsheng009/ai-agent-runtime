@@ -15,6 +15,7 @@ const (
 	agentDepthKey              contextKey = "tool_agent_depth"
 	generatedImageOutputDirKey contextKey = "generated_image_output_dir"
 	shellOutputArtifactDirKey  contextKey = "shell_output_artifact_dir"
+	workspaceRootKey           contextKey = "tool_workspace_root"
 )
 
 // WithSessionID stores the active session ID in ctx.
@@ -118,6 +119,30 @@ func ShellOutputArtifactDir(ctx context.Context) string {
 		return ""
 	}
 	if value, ok := ctx.Value(shellOutputArtifactDirKey).(string); ok {
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
+// WithWorkspaceRoot stores the session-bound filesystem root in ctx. Tools use
+// it to anchor process execution (shell CWD) and relative path resolution so a
+// directory-bound session operates inside its bound project directory instead
+// of the server process working directory.
+func WithWorkspaceRoot(ctx context.Context, root string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, workspaceRootKey, strings.TrimSpace(root))
+}
+
+// WorkspaceRoot retrieves the session-bound filesystem root from ctx. Empty
+// means the caller did not bind a workspace and tools fall back to the
+// process working directory.
+func WorkspaceRoot(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if value, ok := ctx.Value(workspaceRootKey).(string); ok {
 		return strings.TrimSpace(value)
 	}
 	return ""

@@ -64,13 +64,20 @@ func (loop *ReActLoop) prepareToolExecution(metadata map[string]interface{}, too
 // Preflight must resolve relative paths against this same root so process CWD
 // mismatches do not false-deny.
 func (loop *ReActLoop) toolWorkspaceRoot() string {
-	if loop == nil || loop.agent == nil || loop.agent.config == nil {
+	return toolWorkspaceRootForAgent(loop.agent)
+}
+
+// toolWorkspaceRootForAgent is the agent-level variant of toolWorkspaceRoot so
+// context builders that only carry the *Agent (e.g. toolCallContext) resolve
+// the same session filesystem root.
+func toolWorkspaceRootForAgent(agent *Agent) string {
+	if agent == nil || agent.config == nil {
 		return ""
 	}
-	if root := optionString(loop.agent.config.Options, "tool_base_path"); root != "" {
+	if root := optionString(agent.config.Options, "tool_base_path"); root != "" {
 		return root
 	}
-	if root := optionString(loop.agent.config.Options, "workspace_path"); root != "" {
+	if root := optionString(agent.config.Options, "workspace_path"); root != "" {
 		return root
 	}
 	return ""

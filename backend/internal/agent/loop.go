@@ -3818,6 +3818,12 @@ func toolCallContext(ctx context.Context, toolCalls []types.ToolCall, currentToo
 		ctx = toolctx.WithSessionID(ctx, sessionID)
 	}
 	ctx = toolctx.WithAgentDepth(ctx, depth)
+	// Anchor tool execution to the session-bound workspace so shell commands
+	// and relative path resolution run inside the bound project directory
+	// instead of the server process working directory.
+	if workspaceRoot := toolWorkspaceRootForAgent(agent); strings.TrimSpace(workspaceRoot) != "" {
+		ctx = toolctx.WithWorkspaceRoot(ctx, workspaceRoot)
+	}
 	if outputDir := generatedImageOutputDirForAgentSession(agent, sessionID); strings.TrimSpace(outputDir) != "" {
 		ctx = toolctx.WithGeneratedImageOutputDir(ctx, outputDir)
 	}

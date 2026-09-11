@@ -132,6 +132,7 @@ func (t *ApplyPatchTool) Execute(ctx context.Context, params map[string]interfac
 	applier := &patchApplier{
 		tool:  t,
 		files: make(map[string]*stagedFile, len(operations)*2),
+		ctx:   ctx,
 	}
 	summary := patchSummary{}
 
@@ -655,6 +656,7 @@ func isPatchSectionHeader(line string) bool {
 type patchApplier struct {
 	tool  *ApplyPatchTool
 	files map[string]*stagedFile
+	ctx   context.Context
 }
 
 type stagedFile struct {
@@ -726,7 +728,7 @@ func (a *patchApplier) applyDelete(operation patchOperation) error {
 		return err
 	}
 	if !file.Exists {
-		return a.tool.buildPathNotFoundError("文件不存在，无法删除", operation.Path)
+		return a.tool.buildPathNotFoundError(a.ctx, "文件不存在，无法删除", operation.Path)
 	}
 
 	file.Exists = false
@@ -745,7 +747,7 @@ func (a *patchApplier) applyUpdate(operation patchOperation) (bool, error) {
 		return false, err
 	}
 	if !source.Exists {
-		return false, a.tool.buildPathNotFoundError("文件不存在，无法更新", operation.Path)
+		return false, a.tool.buildPathNotFoundError(a.ctx, "文件不存在，无法更新", operation.Path)
 	}
 
 	content := source.Content
@@ -799,7 +801,7 @@ func (a *patchApplier) applyUpdate(operation patchOperation) (bool, error) {
 }
 
 func (a *patchApplier) resolvePath(targetPath string, op runtimeexecutor.PermissionOp) (string, error) {
-	resolved := a.tool.resolvePath(targetPath)
+	resolved := a.tool.resolvePathWithContext(a.ctx, targetPath)
 	absPath, err := filepath.Abs(resolved)
 	if err != nil {
 		return "", fmt.Errorf("解析补丁路径失败 %q: %w", targetPath, err)
@@ -852,7 +854,7 @@ func (a *patchApplier) load(path string) (*stagedFile, error) {
 	switch {
 	case err == nil:
 		if info.IsDir() {
-			return nil, a.tool.buildPathKindMismatchError("路径是目录，不支持补丁操作", path)
+			return nil, a.tool.buildPathKindMismatchError(a.ctx, "路径是目录，不支持补丁操作", path)
 		}
 		content, readErr := os.ReadFile(path)
 		if readErr != nil {

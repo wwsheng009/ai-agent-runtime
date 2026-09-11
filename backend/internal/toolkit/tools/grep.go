@@ -69,6 +69,7 @@ type grepOptions struct {
 	ignoreFileCaseInsensitiveSet bool
 	noIgnoreFiles                bool
 	noIgnoreFilesSet             bool
+	basePath                     string
 	noIgnore                     bool
 	noIgnoreSet                  bool
 	unrestrictedLevel            int
@@ -686,7 +687,7 @@ func (g *GrepTool) Execute(ctx context.Context, params map[string]interface{}) (
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	opts, err := g.parseOptions(params)
+	opts, err := g.parseOptions(ctx, params)
 	if err != nil {
 		return &toolkit.ToolResult{
 			Success:    false,
@@ -694,7 +695,8 @@ func (g *GrepTool) Execute(ctx context.Context, params map[string]interface{}) (
 			Error:      err,
 		}, nil
 	}
-
+	// Anchor relative search paths to the session-bound workspace root when
+	// present so grep behaves like the other file tools (view/edit/write).
 	for _, resolvedPath := range opts.resolvedPaths {
 		if err := g.checkPath(runtimeexecutor.OpRead, resolvedPath); err != nil {
 			return &toolkit.ToolResult{
@@ -714,7 +716,7 @@ func (g *GrepTool) Execute(ctx context.Context, params map[string]interface{}) (
 		}
 	}
 
-	searchScopes, err := resolveSearchScopes(opts.searchPaths, opts.resolvedPaths, g.basePath)
+	searchScopes, err := resolveSearchScopes(opts.searchPaths, opts.resolvedPaths, opts.basePath)
 	if err != nil {
 		return &toolkit.ToolResult{
 			Success:    false,
@@ -906,7 +908,10 @@ type rgCompatArgs struct {
 }
 
 // parseOptions extracts and validates all search parameters.
-func (g *GrepTool) parseOptions(params map[string]interface{}) (*grepOptions, error) {
+func (g *GrepTool) parseOptions(ctx context.Context, params map[string]interface{}) (*grepOptions, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	compat, err := parseRGCompatArgs(params)
 	if err != nil {
 		return nil, err
@@ -958,12 +963,12 @@ func (g *GrepTool) parseOptions(params map[string]interface{}) (*grepOptions, er
 	searchPath := searchPaths[0]
 	resolvedPaths := make([]string, 0, len(searchPaths))
 	for _, path := range searchPaths {
-		resolvedPaths = append(resolvedPaths, g.resolvePath(path))
+		resolvedPaths = append(resolvedPaths, g.resolvePathWithContext(ctx, path))
 	}
 	resolvedPath := resolvedPaths[0]
 	resolvedPatternFiles := make([]string, 0, len(patternFiles))
 	for _, path := range patternFiles {
-		resolvedPatternFiles = append(resolvedPatternFiles, g.resolvePath(path))
+		resolvedPatternFiles = append(resolvedPatternFiles, g.resolvePathWithContext(ctx, path))
 	}
 
 	globCaseInsensitive := compat.globCaseInsensitive
@@ -1548,8 +1553,12 @@ func (g *GrepTool) parseOptions(params map[string]interface{}) (*grepOptions, er
 		requiresRipgrep = true
 	}
 	ignoredPresentation := collectIgnoredPresentationParams(params)
+	// Anchor relative paths to the session-bound workspace root when present;
+	// fall back to the registered basePath otherwise (legacy behavior).
+	effectiveBasePath := g.effectiveBasePath(ctx)
 
 	return &grepOptions{
+		basePath:                     effectiveBasePath,
 		pattern:                      pattern,
 		directPatterns:               append([]string(nil), patternList...),
 		patterns:                     patternList,
@@ -1768,7 +1777,7 @@ func (g *GrepTool) loadPatternFiles(opts *grepOptions) error {
 				if i < len(opts.patternFiles) && strings.TrimSpace(opts.patternFiles[i]) != "" {
 					originalPath = opts.patternFiles[i]
 				}
-				if hint := runtimeexecutor.BuildPathNotFoundHintForPath(originalPath, g.basePath); hint != "" {
+				if hint := runtimeexecutor.BuildPathNotFoundHintForPath(originalPath, opts.basePath); hint != "" {
 					return fmt.Errorf("读取 pattern_file 失败 %s\n%s", originalPath, hint)
 				}
 				return fmt.Errorf("读取 pattern_file 失败 %s", originalPath)

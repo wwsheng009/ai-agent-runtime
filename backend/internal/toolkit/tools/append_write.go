@@ -125,7 +125,7 @@ func (w *AppendWriteTool) Execute(ctx context.Context, params map[string]interfa
 		content += "\n"
 	}
 
-	resolvedPath := w.resolvePath(filePath)
+	resolvedPath := w.resolvePathWithContext(ctx, filePath)
 	if err := w.checkPath(runtimeexecutor.OpWrite, resolvedPath); err != nil {
 		return &toolkit.ToolResult{
 			Success:    false,

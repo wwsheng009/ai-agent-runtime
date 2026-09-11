@@ -56,6 +56,7 @@ import (
 	toolbrokersessionctx "github.com/wwsheng009/ai-agent-runtime/internal/toolbroker/sessionctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/workspace"
+	"github.com/wwsheng009/ai-agent-runtime/internal/workspaceregistry"
 	"go.uber.org/zap/zapcore"
 )
 
@@ -190,6 +191,9 @@ type Handler struct {
 	codexSkillsListMu           sync.RWMutex
 	codexSkillsListCache        map[string]codexSkillsListResponse
 	codexSkillsListCacheVersion uint64
+
+	workspaceDirectoriesOnce sync.Once
+	workspaceDirectories     *workspaceregistry.Store
 }
 
 type searchTelemetry struct {
@@ -746,6 +750,9 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/sessions/{id}/cache", h.HandleSessionCache).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/cache/{rest:.*}", h.HandleSessionCache).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/history", h.ClearSessionHistory).Methods(http.MethodDelete)
+
+	// Workspace directories（工作目录注册表，§4.2）
+	h.RegisterWorkspaceDirectoryRoutes(runtimeRouter)
 
 	// Harness control plane (project permissions / grants / memory / plugins)
 	runtimeRouter.HandleFunc("/harness/permissions", h.GetHarnessPermissions).Methods(http.MethodGet)
@@ -1419,6 +1426,23 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx = agent.WithTurnID(ctx, turnID)
 	usageScope := h.resolveUsageScope(r, req.TenantID, req.ProjectID, req.UserID)
+	// 会话获取/创建会写共享 session_history.sqlite，被并发 aicli 进程锁定时
+	// 会阻塞在 sqlite busy_timeout 上（驱动不响应 Go context 取消），
+	// 必须用短超时 context 包裹并在超时后快速返回 503，而不是无限等待。
+	// （§4.3.2：会话解析前移到 profile 解析之前——目录绑定会话的首轮
+	// profile 回退需要读到创建时绑定的 workspace_path。）
+	storeCtx, storeCancel := sessionStoreQueryContext(r)
+	session, err := h.getOrCreateSession(storeCtx, usageScope.UserID, req.SessionID)
+	storeCancel()
+	if err != nil {
+		writeSessionStoreError(w, err)
+		return
+	}
+
+	// 目录回退（§4.3.2）：请求未显式指定 workspace_path 时，采用会话创建时
+	// 绑定的目录。会话上下文已有值时不覆盖（目录一经绑定不随单轮请求漂移）。
+	workspacePath := agentChatEffectiveWorkspacePath(session, req.WorkspacePath)
+
 	effectiveProfile := strings.TrimSpace(req.Profile)
 	if effectiveProfile == "" && isAutoProfileRef(h.profileDefaultRef) {
 		effectiveProfile = h.profileDefaultRef
@@ -1427,7 +1451,6 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		prompt := extractLastUserPrompt(req.Messages)
 		effectiveProfile = routeProfileForPrompt(prompt)
 	}
-	workspacePath := strings.TrimSpace(req.WorkspacePath)
 	profileState, profileCleanup, err := h.resolveProfileRuntimeState(ctx, effectiveProfile, req.Agent, usageScope, workspacePath)
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
@@ -1435,16 +1458,6 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	}
 	if profileCleanup != nil {
 		defer profileCleanup()
-	}
-	// 会话获取/创建会写共享 session_history.sqlite，被并发 aicli 进程锁定时
-	// 会阻塞在 sqlite busy_timeout 上（驱动不响应 Go context 取消），
-	// 必须用短超时 context 包裹并在超时后快速返回 503，而不是无限等待。
-	storeCtx, storeCancel := sessionStoreQueryContext(r)
-	session, err := h.getOrCreateSession(storeCtx, usageScope.UserID, req.SessionID)
-	storeCancel()
-	if err != nil {
-		writeSessionStoreError(w, err)
-		return
 	}
 	if session != nil {
 		leaseScope := requestID
@@ -1485,16 +1498,6 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		if h.applyProfileSessionContext(session, profileState) {
 			sessionUpdated = true
 		}
-		// Persist the workspace directory on the durable session metadata so the
-		// frontend can group sessions by working directory. It is intentionally
-		// stored alongside the profile context (both freeze at first durable turn).
-		if workspacePath != "" && sessionmeta.String(session.Metadata.Context, sessionmeta.WorkspacePath) != workspacePath {
-			if session.Metadata.Context == nil {
-				session.Metadata.Context = make(map[string]interface{})
-			}
-			sessionmeta.Set(session.Metadata.Context, sessionmeta.WorkspacePath, workspacePath)
-			sessionUpdated = true
-		}
 		if sessionUpdated && h.sessionManager != nil {
 			updateCtx, updateCancel := sessionStoreQueryContext(r)
 			_ = h.sessionManager.Update(updateCtx, session)
@@ -1513,6 +1516,24 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	if workspaceErr != nil {
 		h.writeError(w, http.StatusBadRequest, workspaceErr)
 		return
+	}
+	// Persist the workspace directory on the durable session metadata so the
+	// frontend can group sessions by working directory. Only materialized after
+	// the workspace scan succeeded: binding a path that fails validation would
+	// strand the session on an invalid directory (every later turn without an
+	// explicit workspace_path would reuse it and fail again). A bound path is
+	// never overwritten — directory binding must not drift with per-turn
+	// explicit request paths (§4.3 一经绑定不漂移).
+	if sessionNeedsWorkspacePathMaterialization(session, workspacePath) && h.sessionManager != nil {
+		if session.Metadata.Context == nil {
+			session.Metadata.Context = make(map[string]interface{})
+		}
+		sessionmeta.Set(session.Metadata.Context, sessionmeta.WorkspacePath, workspacePath)
+		updateCtx, updateCancel := sessionStoreQueryContext(r)
+		if updateErr := h.sessionManager.Update(updateCtx, session); updateErr != nil {
+			logger.Warnf("agent chat: materialize session workspace_path failed: %s", updateErr)
+		}
+		updateCancel()
 	}
 	requestTraceID := ""
 	if !req.EnableReAct {
@@ -2255,8 +2276,10 @@ func (h *Handler) CreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		UserID string `json:"user_id,omitempty"`
-		Title  string `json:"title,omitempty"`
+		UserID        string `json:"user_id,omitempty"`
+		Title         string `json:"title,omitempty"`
+		WorkspacePath string `json:"workspace_path,omitempty"` // 目录绑定：直接给路径
+		DirectoryID   string `json:"directory_id,omitempty"`   // 目录绑定：注册表 id（优先于路径）
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
@@ -2279,14 +2302,98 @@ func (h *Handler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		writeSessionStoreError(w, err)
 		return
 	}
+
+	// 目录绑定（§4.3.1）：directory_id 优先，否则校验并规范化 workspace_path。
+	// 绑定写入 metadata.context.workspace_path，一经绑定不随单轮请求漂移。
+	boundPath, boundDirectoryID, bindErr := h.resolveSessionDirectoryBinding(req.WorkspacePath, req.DirectoryID)
+	if bindErr != nil {
+		h.writeWorkspaceDirectoryError(w, bindErr)
+		return
+	}
+	needsUpdate := false
 	if req.Title != "" {
 		session.UpdateTitle(req.Title)
-		_ = h.sessionManager.Update(ctx, session)
+		needsUpdate = true
+	}
+	if boundPath != "" {
+		session.SetContext(sessionmeta.WorkspacePath, boundPath)
+		needsUpdate = true // 绑定后必须落库，否则 GET /sessions 看不到 workspace_path
+	}
+	if needsUpdate {
+		if err := h.sessionManager.Update(ctx, session); err != nil {
+			writeSessionStoreError(w, err)
+			return
+		}
+	}
+	if boundDirectoryID != "" {
+		// last_used_at 尽力而为刷新：失败不影响会话创建结果。
+		if err := h.workspaceDirectoryRegistry().Touch(boundDirectoryID); err != nil {
+			logger.Warnf("workspace directory touch failed: %s", err)
+		}
 	}
 
 	h.writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"session": session,
 	})
+}
+
+// resolveSessionDirectoryBinding resolves the workspace path a new session
+// binds to (§4.3.1). directory_id wins over workspace_path; raw paths are
+// validated (absolute + existing directory) and normalized. Returns the
+// normalized path plus the matched registry id (empty when unbound or when
+// the path is not registered).
+func (h *Handler) resolveSessionDirectoryBinding(workspacePath, directoryID string) (string, string, error) {
+	registry := h.workspaceDirectoryRegistry()
+	directoryID = strings.TrimSpace(directoryID)
+	if directoryID != "" {
+		record, ok := registry.Get(directoryID)
+		if !ok {
+			return "", "", fmt.Errorf("%w: unknown directory id %s",
+				workspaceregistry.ErrNotFound, directoryID)
+		}
+		return record.Path, record.ID, nil
+	}
+	workspacePath = strings.TrimSpace(workspacePath)
+	if workspacePath == "" {
+		return "", "", nil
+	}
+	normalized, err := workspaceregistry.NormalizePath(workspacePath)
+	if err != nil {
+		return "", "", err
+	}
+	if record, ok := registry.FindByPath(normalized); ok {
+		return normalized, record.ID, nil
+	}
+	return normalized, "", nil
+}
+
+// agentChatEffectiveWorkspacePath resolves the workspace path for an agent
+// chat turn (§4.3.2): an explicit request value wins; otherwise the path
+// bound at session creation is used. Sessions without a bound path keep the
+// legacy behavior (empty path → server cwd).
+func agentChatEffectiveWorkspacePath(session *chat.Session, requested string) string {
+	requested = strings.TrimSpace(requested)
+	if requested != "" {
+		return requested
+	}
+	if session != nil {
+		if v, ok := session.Metadata.Context[sessionmeta.WorkspacePath].(string); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// sessionNeedsWorkspacePathMaterialization reports whether the resolved
+// workspace path should be written back onto the session context once
+// (legacy GetOrCreate flow: context empty + explicit request path). A bound
+// path is never overwritten — directory binding does not drift per turn.
+func sessionNeedsWorkspacePathMaterialization(session *chat.Session, workspacePath string) bool {
+	if session == nil || workspacePath == "" {
+		return false
+	}
+	current, _ := session.Metadata.Context[sessionmeta.WorkspacePath].(string)
+	return current == ""
 }
 
 // ListSessions 列出会话

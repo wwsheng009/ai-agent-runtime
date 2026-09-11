@@ -76,7 +76,7 @@ func (l *LsTool) Execute(ctx context.Context, params map[string]interface{}) (*t
 	if p, ok := params["path"].(string); ok && p != "" {
 		path = p
 	}
-	resolvedPath := l.resolvePath(path)
+	resolvedPath := l.resolvePathWithContext(ctx, path)
 	if err := l.checkPath(runtimeexecutor.OpRead, resolvedPath); err != nil {
 		return &toolkit.ToolResult{
 			Success:    false,
@@ -107,7 +107,7 @@ func (l *LsTool) Execute(ctx context.Context, params map[string]interface{}) (*t
 			return &toolkit.ToolResult{
 				Success:    false,
 				OutputKind: toolresult.KindText,
-				Error:      l.buildPathNotFoundError("路径不存在", path),
+				Error:      l.buildPathNotFoundError(ctx, "路径不存在", path),
 			}, nil
 		}
 		return &toolkit.ToolResult{

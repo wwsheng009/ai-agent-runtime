@@ -160,7 +160,7 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 			Error:      err,
 		}, nil
 	}
-	resolvedPath := m.resolvePath(filePath)
+	resolvedPath := m.resolvePathWithContext(ctx, filePath)
 
 	if err := m.checkPath(runtimeexecutor.OpWrite, resolvedPath); err != nil {
 		return &toolkit.ToolResult{
@@ -186,7 +186,7 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 			return &toolkit.ToolResult{
 				Success:    false,
 				OutputKind: toolresult.KindText,
-				Error:      m.buildPathNotFoundError("读取文件失败", filePath),
+				Error:      m.buildPathNotFoundError(ctx, "读取文件失败", filePath),
 			}, nil
 		}
 		return &toolkit.ToolResult{
@@ -199,7 +199,7 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
-			Error:      m.buildPathKindMismatchError("路径是目录，不是文件", filePath),
+			Error:      m.buildPathKindMismatchError(ctx, "路径是目录，不是文件", filePath),
 		}, nil
 	}
 
@@ -209,7 +209,7 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 			return &toolkit.ToolResult{
 				Success:    false,
 				OutputKind: toolresult.KindText,
-				Error:      m.buildPathNotFoundError("读取文件失败", filePath),
+				Error:      m.buildPathNotFoundError(ctx, "读取文件失败", filePath),
 			}, nil
 		}
 		return &toolkit.ToolResult{
