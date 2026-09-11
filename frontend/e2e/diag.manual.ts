@@ -1,3 +1,6 @@
+// Manual debug spec — excluded from the default e2e run (see
+// `playwright.manual.config.ts`). Run on demand:
+//   npm run test:manual -- e2e/diag.manual.ts
 import { test } from "@playwright/test";
 
 test("diag2: submit flow", async ({ page }) => {

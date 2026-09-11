@@ -139,7 +139,8 @@ type localChatRuntimeHost struct {
 	observeSvc  *runtimeobserve.Service
 
 	// cacheOnce / cacheSvc 缓存本地 LLM 缓存分析服务（cache.analytics.v1）：
-	// ensureLocalCacheService 惰性构建一次，host.Close() 时释放；
+	// initializeLocalChatRuntimeHost 在启动期即构建一次（避免丢失挂载前的
+	// llm.request.* 事件），host.Close() 时释放；
 	// /web/api/cache/* 与 TUI /usage 命令共用同一 Source。
 	cacheOnce sync.Once
 	cacheSvc  *cacheanalytics.Service
@@ -805,6 +806,13 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 			host.shutdownSubagentCoordinators()
 		},
 	}
+
+	// 缓存分析 collector：本地 runtime host 初始化完成即挂载（对齐
+	// runtime-server 路由注册即挂载，§3.2）。EventBus 订阅不具备回溯能力：
+	// 若延迟到首次 /web/api/cache/* 查询才构建 service，会丢失此前的
+	// llm.request.* 事件，表现为"打开缓存页只有 live 记录、没有历史请求"。
+	// EventBus 缺失时内部静默降级为纯内存懒构建（v1 行为）。
+	ensureLocalCacheService(host)
 
 	return host, nil
 }

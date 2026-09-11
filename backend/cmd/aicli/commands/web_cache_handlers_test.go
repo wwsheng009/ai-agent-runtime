@@ -105,8 +105,9 @@ func newCacheTestSession(t *testing.T) (*ChatSession, *runtimeevents.Bus, *runti
 		SessionStore: storage,
 	}
 	withWebTestSession(t, session)
-	// 生产环境在会话启动时即挂载 collector（chat_cache_local.go）；
-	// 测试必须先构建 service 再发布事件，否则事件发布时无订阅者。
+	// 生产环境在本地 runtime host 初始化时即挂载 collector
+	// （initializeLocalChatRuntimeHost → ensureLocalCacheService）；
+	// 测试需先构建 service 再发布事件，否则事件发布时无订阅者。
 	if ensureLocalCacheService(session.LocalRuntimeHost) == nil {
 		t.Fatal("expected local cache service to attach")
 	}
