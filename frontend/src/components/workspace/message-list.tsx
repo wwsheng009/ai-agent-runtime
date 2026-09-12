@@ -1,44 +1,19 @@
-import {
-  BotIcon,
-  ChevronDownIcon,
-  HistoryIcon,
-  LoaderCircleIcon,
-  PencilLineIcon,
-  ScrollTextIcon,
-  User2Icon,
-} from "lucide-react";
-import {
-  lazy,
-  Suspense,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-  type CSSProperties,
-} from "react";
+// 由 components/workspace/message-list.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { useTypewriter } from "@/hooks/workspace/use-typewriter";
-import { MessageMarkdown } from "@/components/workspace/message-markdown";
-import { MessageReasoningRow } from "@/components/workspace/message-reasoning-row";
-import { MessageToolRow } from "@/components/workspace/message-tool-row";
-import { type Artifact, type ChatMessage, type MessageSegment } from "@/data/mock";
+import { ScrollTextIcon } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+
+import { type Artifact } from "@/data/mock";
 import { isArtifactEvidence } from "@/lib/workspace-artifacts";
 import { cn } from "@/lib/utils";
-import { getToolSegmentKey } from "@/lib/workspace-thread-state";
 import { type ChatStreamPhase } from "@/types/runtime";
 
-const MessageRichSegment = lazy(() =>
-  import("@/components/workspace/message-rich-content").then((module) => ({
-    default: module.MessageRichSegment,
-  })),
-);
-const MessageRelatedArtifacts = lazy(() =>
-  import("@/components/workspace/message-rich-content").then((module) => ({
-    default: module.MessageRelatedArtifacts,
-  })),
-);
+import { AssistantMessageCard } from "./message-list/assistant-message-card";
+import { HistoryContextMessageCard } from "./message-list/history-context-message-card";
+import type { MessageListProps } from "./message-list/types";
+import { UserMessageBubble } from "./message-list/user-message-bubble";
+
+export type { MessageBacktrackOptions } from "./message-list/types";
 
 const SCROLL_FOLLOW_THRESHOLD = 120;
 
@@ -49,44 +24,6 @@ const PHASE_LABELS: Record<ChatStreamPhase, string> = {
   tool: "Calling tools…",
   finalizing: "Finalizing turn…",
 };
-
-export type MessageBacktrackOptions = {
-  editPrompt?: string;
-};
-
-type MessageListProps = {
-  artifacts: Artifact[];
-  backtrackError?: string | null;
-  backtrackNotice?: string | null;
-  backtrackPendingMessageId?: string | null;
-  backtrackNavigationActive?: boolean;
-  backtrackSelectedMessageId?: string | null;
-  canBacktrack?: boolean;
-  className?: string;
-  contentClassName?: string;
-  isResponding: boolean;
-  messages: ChatMessage[];
-  onBacktrackToMessage?: (
-    messageId: string,
-    mode?: "conversation" | "both",
-    options?: MessageBacktrackOptions,
-  ) => void;
-  onSelectBacktrackNavigationMessage?: (messageId: string) => void;
-  onSelectArtifact: (artifactId: string) => void;
-  phase?: ChatStreamPhase | null;
-  style?: CSSProperties;
-};
-
-function extractUserBubbleText(message: ChatMessage): string {
-  return message.segments
-    .filter(
-      (segment): segment is Extract<MessageSegment, { type: "text" }> =>
-        segment.type === "text",
-    )
-    .map((segment) => segment.content)
-    .join("\n")
-    .replace(/\r\n/g, "\n");
-}
 
 export function MessageList({
   artifacts,
@@ -148,6 +85,8 @@ export function MessageList({
       return;
     }
     if (!messages.some((message) => message.id === editingMessageId)) {
+      // P0-2 机械搬迁：保留原「编辑目标不在列表时同步复位编辑态」语义。
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setEditingMessageId(null);
       setInlineEditDraft("");
     }
@@ -155,6 +94,8 @@ export function MessageList({
 
   useEffect(() => {
     if ((isResponding || backtrackNavigationActive) && editingMessageId) {
+      // P0-2 机械搬迁：保留原「流式响应/回溯导航期间同步退出内联编辑」语义。
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setEditingMessageId(null);
       setInlineEditDraft("");
     }
@@ -263,157 +204,24 @@ export function MessageList({
               className={cn("flex w-full", isUser ? "justify-end" : "justify-start")}
             >
               {isUser ? (
-                <div
-                  className={cn(
-                    "relative w-full max-w-[42rem] overflow-hidden rounded-[1rem] border px-4 py-3.5 shadow-[0_16px_40px_rgba(0,0,0,0.12)] transition",
-                    isNavigationSelected
-                      ? "border-[#f0c77b]/55 bg-[linear-gradient(180deg,rgba(240,199,123,0.16),rgba(240,199,123,0.06))] ring-2 ring-[#f0c77b]/25"
-                      : "border-[#f0c77b]/16 bg-[linear-gradient(180deg,rgba(240,199,123,0.08),rgba(240,199,123,0.03))]",
-                    backtrackNavigationActive ? "cursor-pointer hover:border-[#f0c77b]/40" : null,
-                  )}
-                  onClick={() => {
-                    if (
-                      backtrackNavigationActive &&
-                      typeof onSelectBacktrackNavigationMessage === "function"
-                    ) {
-                      onSelectBacktrackNavigationMessage(message.id);
-                    }
-                  }}
-                  onDoubleClick={(event) => {
-                    if (!showBacktrack) {
-                      return;
-                    }
-                    event.stopPropagation();
-                    // Double-click confirms the anchor both in normal and Esc-nav mode.
-                    onBacktrackToMessage?.(message.id, "conversation");
-                  }}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-center gap-2.5">
-                      <div className="inline-flex size-7 items-center justify-center rounded-[0.7rem] border border-[#f0c77b]/20 bg-[#f0c77b]/10 text-[#f0c77b]">
-                        <User2Icon size={14} />
-                      </div>
-                      <div>
-                        <div
-                          className="app-text-13 font-semibold text-[var(--foreground)]"
-                          id={labelId}
-                        >
-                          {message.author}
-                        </div>
-                        <div
-                          className="mt-0.5 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]"
-                          id={metaId}
-                        >
-                          {message.label}
-                          {isNavigationSelected ? " · selected" : ""}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="flex flex-wrap items-center justify-end gap-2">
-                      {showBacktrack ? (
-                        <>
-                          <Button
-                            aria-label="Edit this user turn before backtrack"
-                            disabled={actionsDisabled}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              setEditingMessageId(message.id);
-                              setInlineEditDraft(extractUserBubbleText(message));
-                            }}
-                            size="sm"
-                            type="button"
-                            variant="ghost"
-                            className="h-7 gap-1.5 px-2 text-[11px] uppercase tracking-[0.12em]"
-                          >
-                            <PencilLineIcon size={12} />
-                            Edit
-                          </Button>
-                          <Button
-                            aria-label="Backtrack to this user turn"
-                            disabled={actionsDisabled}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              onBacktrackToMessage?.(message.id, "conversation");
-                            }}
-                            size="sm"
-                            type="button"
-                            variant="ghost"
-                            className="h-7 gap-1.5 px-2 text-[11px] uppercase tracking-[0.12em]"
-                          >
-                            {backtrackPending ? (
-                              <LoaderCircleIcon size={12} className="animate-spin" />
-                            ) : (
-                              <HistoryIcon size={12} />
-                            )}
-                            Backtrack
-                          </Button>
-                        </>
-                      ) : null}
-                      <Badge className="border-transparent bg-[var(--surface-soft)] text-[var(--foreground)]">
-                        {message.role}
-                      </Badge>
-                    </div>
-                  </div>
-
-                  <div className="mt-3 space-y-3" id={statusId}>
-                    {isEditing ? (
-                      <div className="space-y-3">
-                        <textarea
-                          aria-label="Edit user turn prompt"
-                          className="min-h-[7rem] w-full resize-y rounded-[0.85rem] border border-[#f0c77b]/25 bg-black/10 px-3 py-2.5 text-sm leading-6 text-[var(--foreground)] outline-none transition placeholder:text-[var(--muted-foreground)] focus:border-[#f0c77b]/45 focus:bg-black/15"
-                          onChange={(event) => setInlineEditDraft(event.target.value)}
-                          onClick={(event) => event.stopPropagation()}
-                          placeholder="Edit this user prompt, then continue to backtrack…"
-                          value={inlineEditDraft}
-                        />
-                        <div className="flex flex-wrap items-center justify-end gap-2">
-                          <Button
-                            disabled={actionsDisabled}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              setEditingMessageId(null);
-                              setInlineEditDraft("");
-                            }}
-                            size="sm"
-                            type="button"
-                            variant="ghost"
-                          >
-                            Cancel
-                          </Button>
-                          <Button
-                            disabled={actionsDisabled}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              onBacktrackToMessage?.(message.id, "conversation", {
-                                editPrompt: inlineEditDraft,
-                              });
-                              setEditingMessageId(null);
-                              setInlineEditDraft("");
-                            }}
-                            size="sm"
-                            type="button"
-                          >
-                            Continue to backtrack
-                          </Button>
-                        </div>
-                        <p className="text-xs leading-5 text-[var(--muted-foreground)]">
-                          Inline edit seeds the backtrack dialog. Confirm there to
-                          truncate later turns and prefill the composer.
-                        </p>
-                      </div>
-                    ) : (
-                      message.segments.map((segment, index) => (
-                        <div key={`${message.id}-${segment.type}-${index}`}>
-                          {renderMessageSegment(segment, {
-                            interrupted: message.interrupted === true,
-                            streaming: false,
-                            onSelectArtifact,
-                          })}
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
+                <UserMessageBubble
+                  actionsDisabled={actionsDisabled}
+                  backtrackNavigationActive={backtrackNavigationActive}
+                  backtrackPending={backtrackPending}
+                  inlineEditDraft={inlineEditDraft}
+                  isEditing={isEditing}
+                  isNavigationSelected={isNavigationSelected}
+                  labelId={labelId}
+                  message={message}
+                  metaId={metaId}
+                  onBacktrackToMessage={onBacktrackToMessage}
+                  onSelectArtifact={onSelectArtifact}
+                  onSelectBacktrackNavigationMessage={onSelectBacktrackNavigationMessage}
+                  setEditingMessageId={setEditingMessageId}
+                  setInlineEditDraft={setInlineEditDraft}
+                  showBacktrack={showBacktrack}
+                  statusId={statusId}
+                />
               ) : isHistoryContextMessage ? (
                 <HistoryContextMessageCard
                   labelId={labelId}
@@ -425,63 +233,15 @@ export function MessageList({
                   streamingMessageId={streamingMessageId}
                 />
               ) : (
-                <div className="relative w-full max-w-[48rem]">
-                  <div className="overflow-hidden rounded-[1rem] border border-[#8fd0c6]/14 bg-[linear-gradient(180deg,rgba(143,208,198,0.08),rgba(143,208,198,0.02))] px-4 py-3.5 shadow-[0_16px_40px_rgba(0,0,0,0.12)]">
-                    <div className="flex items-start gap-3">
-                      <div className="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-[0.7rem] border border-[#8fd0c6]/20 bg-[#8fd0c6]/10 text-[#8fd0c6]">
-                        <BotIcon size={14} />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <div
-                            className="app-text-13 font-semibold text-[var(--foreground)]"
-                            id={labelId}
-                          >
-                            {message.author}
-                          </div>
-                          <div
-                            className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]"
-                            id={metaId}
-                          >
-                            {message.label}
-                          </div>
-                          {message.id === streamingMessageId ? (
-                            <Badge className="border-transparent bg-[#8fd0c6]/12 text-[#8fd0c6]">
-                              Streaming response in progress
-                            </Badge>
-                          ) : null}
-                        </div>
-
-                        <div className="relative mt-3" id={statusId}>
-                          <div className="pointer-events-none absolute left-0 top-4 bottom-4 w-px bg-gradient-to-b from-[#8fd0c6]/0 via-[#8fd0c6]/18 to-[#8fd0c6]/0" />
-
-                          <div className="relative space-y-4">
-                            {message.segments.map((segment, index) => (
-                              <div
-                                key={
-                                  segment.type === "tool"
-                                    ? `${message.id}-tool-${getToolSegmentKey(segment)}`
-                                    : `${message.id}-${segment.type}-${index}`
-                                }
-                              >
-                                {renderMessageSegment(segment, {
-                                  interrupted: message.interrupted === true,
-                                  streaming: message.id === streamingMessageId,
-                                  onSelectArtifact,
-                                })}
-                              </div>
-                            ))}
-                          </div>
-
-                          {renderRelatedArtifactSection(
-                            relatedEvidence,
-                            onSelectArtifact,
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
+                <AssistantMessageCard
+                  labelId={labelId}
+                  message={message}
+                  metaId={metaId}
+                  onSelectArtifact={onSelectArtifact}
+                  relatedEvidence={relatedEvidence}
+                  statusId={statusId}
+                  streamingMessageId={streamingMessageId}
+                />
               )}
             </article>
           );
@@ -498,221 +258,6 @@ export function MessageList({
             {phase ? PHASE_LABELS[phase] : "Runtime stream active"}
           </div>
         ) : null}
-      </div>
-    </div>
-  );
-}
-
-function renderMessageSegment(
-  segment: MessageSegment,
-  options?: {
-    interrupted?: boolean;
-    streaming?: boolean;
-    onSelectArtifact?: (artifactId: string) => void;
-  },
-) {
-  if (segment.type === "text") {
-    return (
-      <StreamingMarkdown
-        content={segment.content}
-        interrupted={options?.interrupted}
-        streaming={options?.streaming}
-      />
-    );
-  }
-
-  if (segment.type === "reasoning") {
-    return (
-      <MessageReasoningRow
-        segment={segment}
-        streaming={options?.streaming}
-      />
-    );
-  }
-
-  if (segment.type === "tool") {
-    return <MessageToolRow segment={segment} />;
-  }
-
-  return (
-    <Suspense fallback={<MessageSegmentFallback segment={segment} />}>
-      <MessageRichSegment
-        onSelectArtifact={options?.onSelectArtifact}
-        segment={segment}
-      />
-    </Suspense>
-  );
-}
-
-function StreamingMarkdown({
-  content,
-  interrupted,
-  streaming,
-}: {
-  content: string;
-  interrupted?: boolean;
-  streaming?: boolean;
-}) {
-  const typedContent = useTypewriter(content, streaming === true);
-  return (
-    <MessageMarkdown
-      content={typedContent}
-      interrupted={interrupted}
-      streaming={streaming}
-    />
-  );
-}
-
-function renderRelatedArtifactSection(
-  relatedEvidence: Artifact[],
-  onSelectArtifact: (artifactId: string) => void,
-) {
-  if (relatedEvidence.length === 0) {
-    return null;
-  }
-
-  return (
-    <Suspense fallback={<RelatedArtifactsFallback count={relatedEvidence.length} />}>
-      <MessageRelatedArtifacts
-        onSelectArtifact={onSelectArtifact}
-        relatedArtifacts={relatedEvidence}
-      />
-    </Suspense>
-  );
-}
-
-function MessageSegmentFallback({
-  segment,
-}: {
-  segment: Exclude<MessageSegment, { type: "text" }>;
-}) {
-  const label =
-    segment.type === "code"
-      ? "代码块"
-      : segment.type === "image"
-        ? "图片"
-        : segment.type === "image-placeholder"
-          ? "图片生成占位"
-          : segment.type === "reasoning"
-            ? "推理过程"
-            : segment.type === "tool"
-              ? "工具调用"
-              : segment.title;
-  return (
-    <div
-      aria-atomic="true"
-      aria-live="polite"
-      className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] px-3 py-3 text-sm text-[var(--muted-foreground)]"
-      role="status"
-    >
-      正在加载 {label}…
-    </div>
-  );
-}
-
-function RelatedArtifactsFallback({ count }: { count: number }) {
-  return (
-    <div
-      aria-atomic="true"
-      aria-live="polite"
-      className="mt-3 rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] px-3 py-3 text-sm text-[var(--muted-foreground)]"
-      role="status"
-    >
-      正在加载 {count} 条相关证据…
-    </div>
-  );
-}
-
-function HistoryContextMessageCard({
-  labelId,
-  message,
-  metaId,
-  onSelectArtifact,
-  relatedEvidence,
-  statusId,
-  streamingMessageId,
-}: {
-  labelId: string;
-  message: ChatMessage;
-  metaId: string;
-  onSelectArtifact: (artifactId: string) => void;
-  relatedEvidence: Artifact[];
-  statusId: string;
-  streamingMessageId: string | null;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const panelId = `${message.id}-context-panel`;
-
-  return (
-    <div className="relative w-full max-w-[48rem]">
-      <div className="overflow-hidden rounded-[1rem] border border-[#8fd0c6]/14 bg-[linear-gradient(180deg,rgba(143,208,198,0.08),rgba(143,208,198,0.02))] px-4 py-3.5 shadow-[0_16px_40px_rgba(0,0,0,0.12)]">
-        <button
-          type="button"
-          aria-expanded={expanded}
-          aria-controls={panelId}
-          onClick={() => setExpanded((v) => !v)}
-          className="flex w-full items-start gap-3 text-left"
-        >
-          <div className="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-[0.7rem] border border-[#8fd0c6]/20 bg-[#8fd0c6]/10 text-[#8fd0c6]">
-            <BotIcon size={14} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <div
-                className="app-text-13 font-semibold text-[var(--foreground)]"
-                id={labelId}
-              >
-                {message.author}
-              </div>
-              <div
-                className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]"
-                id={metaId}
-              >
-                {message.label}
-              </div>
-              {message.id === streamingMessageId ? (
-                <Badge className="border-transparent bg-[#8fd0c6]/12 text-[#8fd0c6]">
-                  Streaming response in progress
-                </Badge>
-              ) : null}
-            </div>
-            <div className="mt-0.5 app-text-11 text-[var(--muted-foreground)]">
-              {expanded
-                ? "Content visible — click to collapse"
-                : "Content hidden — click to expand"}
-            </div>
-          </div>
-          <ChevronDownIcon
-            size={16}
-            className={cn(
-              "mt-2 shrink-0 text-[var(--muted-foreground)] transition-transform duration-200",
-              expanded ? "rotate-0" : "-rotate-90",
-            )}
-          />
-        </button>
-        <div className="relative mt-3" hidden={!expanded} id={panelId}>
-          <div className="pointer-events-none absolute left-0 top-4 bottom-4 w-px bg-gradient-to-b from-[#8fd0c6]/0 via-[#8fd0c6]/18 to-[#8fd0c6]/0" />
-
-          <div className="relative space-y-4" id={statusId}>
-            {message.segments.map((segment, index) => (
-              <div
-                key={
-                  segment.type === "tool"
-                    ? `${message.id}-tool-${getToolSegmentKey(segment)}`
-                    : `${message.id}-${segment.type}-${index}`
-                }
-              >
-                {renderMessageSegment(segment, {
-                  interrupted: message.interrupted === true,
-                  streaming: message.id === streamingMessageId,
-                  onSelectArtifact,
-                })}
-              </div>
-            ))}
-          </div>
-
-          {renderRelatedArtifactSection(relatedEvidence, onSelectArtifact)}
-        </div>
       </div>
     </div>
   );
