@@ -1,287 +1,43 @@
+// 由 components/workspace/runtime-teams/use-runtime-team-dispatch.ts 机械拆分而来（P0-2），仅搬迁不改语义。
+
 import { useEffect, useEffectEvent, useMemo, useState } from "react";
 
 import {
   createRuntimeSession,
   createRuntimeTeam,
   createRuntimeTeamTask,
-  listRuntimeTeamEvents,
-  listRuntimeTeamMailbox,
-  listRuntimeTeamTasks,
-  listRuntimeTeamTeammates,
   upsertRuntimeTeammate,
   type RuntimeCreateSessionResponse,
   type RuntimeCreateTeamResponse,
   type RuntimeCreateTeamTaskResponse,
-  type RuntimeTeamMailboxMessage,
-  type RuntimeTeamRecord,
 } from "@/lib/runtime-api";
 import {
   countDispatchMonitorStatuses,
-  type DispatchMonitorEntry,
-  type DispatchTeamReadiness,
-  type DispatchTemplateMode,
-  type MultiTeamDispatchResult,
-  normalizeTaskTitle,
-  parsePathLines,
-  resolveDispatchRolePlan,
   shouldPollDispatchMonitor,
   sortDispatchMonitor,
   uniqueStrings,
+  type DispatchMonitorEntry,
+  type DispatchTemplateMode,
+  type MultiTeamDispatchResult,
 } from "@/components/workspace/runtime-teams/shared";
+import {
+  buildDispatchTaskRequest,
+  buildRoleAwareDispatchRequest,
+  resolveSelectedDispatchTeamIds,
+} from "@/components/workspace/runtime-teams/use-runtime-team-dispatch/dispatch-requests";
+import { buildDispatchMonitorEntries } from "@/components/workspace/runtime-teams/use-runtime-team-dispatch/dispatch-monitor";
+import type {
+  UseRuntimeTeamDispatchOptions,
+  UseRuntimeTeamDispatchReturn,
+} from "@/components/workspace/runtime-teams/use-runtime-team-dispatch/types";
+import { useDispatchTeamReadiness } from "@/components/workspace/runtime-teams/use-runtime-team-dispatch/use-dispatch-team-readiness";
 
-type UseRuntimeTeamDispatchOptions = {
-  onRefresh?: () => void;
-  onRefreshSelectedTeamTasksAndEvents?: (teamId: string) => Promise<void>;
-  selectedTeamId: string;
-  selectedTeamWorkspaceId?: string;
-  teams: RuntimeTeamRecord[];
-};
-
-type DispatchTaskRequest = {
-  deliverables: string[];
-  goal: string;
-  inputs: string[];
-  priority: number;
-  status: "ready";
-  title: string;
-};
-
-type DispatchTaskDraftState = {
-  deliverablesDraft: string;
-  goalDraft: string;
-  inputsDraft: string;
-  priorityDraft: string;
-  titleDraft: string;
-};
-
-type DispatchTeamIdentifier = Pick<RuntimeTeamRecord, "id">;
-
-export type UseRuntimeTeamDispatchReturn = {
-  dispatchMonitor: DispatchMonitorEntry[];
-  dispatchMonitorCounts: Record<string, number>;
-  dispatchMonitorError: string | null;
-  dispatchTaskDeliverablesDraft: string;
-  dispatchTaskError: string | null;
-  dispatchTaskGoalDraft: string;
-  dispatchTaskInputsDraft: string;
-  dispatchTaskPriorityDraft: string;
-  dispatchTaskResults: MultiTeamDispatchResult[];
-  dispatchTaskTitleDraft: string;
-  dispatchTeamReadiness: Record<string, DispatchTeamReadiness>;
-  dispatchTemplateMode: DispatchTemplateMode;
-  isDispatchMonitorLoading: boolean;
-  isDispatchReadinessLoading: boolean;
-  isDispatchingTask: boolean;
-  isProvisioningDispatch: boolean;
-  onDispatchTaskDeliverablesDraftChange: (value: string) => void;
-  onDispatchTaskGoalDraftChange: (value: string) => void;
-  onDispatchTaskInputsDraftChange: (value: string) => void;
-  onDispatchTaskPriorityDraftChange: (value: string) => void;
-  onDispatchTaskTitleDraftChange: (value: string) => void;
-  onDispatchTaskToTeams: () => Promise<void>;
-  onDispatchTemplateModeChange: (mode: DispatchTemplateMode) => void;
-  onProvisionStrategyDraftChange: (value: string) => void;
-  onProvisionTeamCountDraftChange: (value: string) => void;
-  onProvisionTeammateNamePrefixDraftChange: (value: string) => void;
-  onProvisionTeammateProfileDraftChange: (value: string) => void;
-  onProvisionTeamsAndDispatch: () => Promise<void>;
-  onProvisionUserPrefixDraftChange: (value: string) => void;
-  onProvisionWorkspaceDraftChange: (value: string) => void;
-  onRefreshDispatchMonitor: () => Promise<void>;
-  onToggleDispatchTeam: (teamId: string) => void;
-  provisionStrategyDraft: string;
-  provisionTeamCountDraft: string;
-  provisionTeammateNamePrefixDraft: string;
-  provisionTeammateProfileDraft: string;
-  provisionUserPrefixDraft: string;
-  provisionWorkspaceDraft: string;
-  selectedDispatchTeamIds: string[];
-};
-
-export function buildDispatchTaskRequest(
-  drafts: DispatchTaskDraftState,
-): { error: string | null; request: DispatchTaskRequest | null } {
-  const goal = drafts.goalDraft.trim();
-  const title = normalizeTaskTitle(drafts.titleDraft, goal);
-  if (!goal && !title) {
-    return {
-      error: "enter a task title or goal before dispatching",
-      request: null,
-    };
-  }
-
-  const priority = Number.parseInt(drafts.priorityDraft, 10);
-  return {
-    error: null,
-    request: {
-      deliverables: parsePathLines(drafts.deliverablesDraft),
-      goal: goal || title,
-      inputs: parsePathLines(drafts.inputsDraft),
-      priority: Number.isNaN(priority) ? 50 : priority,
-      status: "ready",
-      title,
-    },
-  };
-}
-
-export function resolveSelectedDispatchTeamIds(
-  current: string[],
-  teams: DispatchTeamIdentifier[],
-): string[] {
-  const availableIds = new Set(teams.map((team) => team.id));
-  const filtered = current.filter((id) => availableIds.has(id));
-  if (filtered.length > 0) {
-    return filtered;
-  }
-
-  return teams.map((team) => team.id);
-}
-
-function buildRoleAwareDispatchRequest(
-  baseRequest: DispatchTaskRequest,
-  mode: DispatchTemplateMode,
-  index: number,
-) {
-  const role = resolveDispatchRolePlan(mode, index);
-  if (mode === "mirror") {
-    return {
-      request: baseRequest,
-      role,
-    };
-  }
-
-  return {
-    request: {
-      ...baseRequest,
-      deliverables: uniqueStrings([
-        ...(baseRequest.deliverables ?? []),
-        ...role.deliverables,
-      ]),
-      goal: uniqueStrings([baseRequest.goal, role.goalInstruction || ""]).join("\n\n"),
-      inputs: uniqueStrings([...(baseRequest.inputs ?? []), ...role.inputHints]),
-      title: `${role.label}: ${baseRequest.title}`,
-    },
-    role,
-  };
-}
-
-async function loadDispatchTeamReadiness(
-  teams: RuntimeTeamRecord[],
-): Promise<Record<string, DispatchTeamReadiness>> {
-  const settled = await Promise.allSettled(
-    teams.map(async (team) => {
-      const teammatesResponse = await listRuntimeTeamTeammates(team.id, { limit: 24 });
-      const runnableTeammates = teammatesResponse.teammates.filter((mate) => {
-        const state = (mate.state || "").trim().toLowerCase();
-        return Boolean(mate.session_id?.trim()) && state !== "offline";
-      });
-      const readiness: DispatchTeamReadiness = {
-        executable:
-          (team.status || "").trim().toLowerCase() === "active" &&
-          runnableTeammates.length > 0,
-        reason:
-          (team.status || "").trim().toLowerCase() !== "active"
-            ? "team is not active"
-            : runnableTeammates.length === 0
-              ? "no runnable teammate session"
-              : `${runnableTeammates.length} runnable teammates`,
-        runnableTeammates: runnableTeammates.length,
-        totalTeammates: teammatesResponse.teammates.length,
-      };
-      return { readiness, teamId: team.id };
-    }),
-  );
-
-  const nextMap: Record<string, DispatchTeamReadiness> = {};
-  settled.forEach((item, index) => {
-    const teamId = teams[index].id;
-    if (item.status === "fulfilled") {
-      nextMap[teamId] = item.value.readiness;
-      return;
-    }
-    nextMap[teamId] = {
-      executable: false,
-      reason:
-        item.reason instanceof Error
-          ? item.reason.message
-          : "failed to inspect team readiness",
-      runnableTeammates: 0,
-      totalTeammates: 0,
-    };
-  });
-
-  return nextMap;
-}
-
-export function buildDispatchMailboxPreview(
-  messages: Pick<RuntimeTeamMailboxMessage, "body" | "kind">[],
-) {
-  return messages
-    .slice(0, 2)
-    .map((message) => message.body.trim() || message.kind || "message");
-}
-
-async function buildDispatchMonitorEntries(
-  results: MultiTeamDispatchResult[],
-): Promise<DispatchMonitorEntry[]> {
-  const createdResults = results.filter(
-    (item): item is MultiTeamDispatchResult & { status: "created"; taskId: string } =>
-      item.status === "created" && Boolean(item.taskId),
-  );
-  if (createdResults.length === 0) {
-    return [];
-  }
-
-  const settled = await Promise.allSettled(
-    createdResults.map(async (item) => {
-      const [tasksResponse, eventsResponse, mailboxResponse] = await Promise.all([
-        listRuntimeTeamTasks(item.teamId, {
-          includeDependencies: true,
-          includeDependents: true,
-          taskIds: [item.taskId],
-        }),
-        listRuntimeTeamEvents(item.teamId, { limit: 12 }),
-        listRuntimeTeamMailbox(item.teamId, {
-          includeBroadcast: true,
-          limit: 8,
-          taskId: item.taskId,
-        }),
-      ]);
-      const task = tasksResponse.tasks.find((entry) => entry.id === item.taskId);
-      const relatedEvent = eventsResponse.events.find((event) => {
-        const payloadTaskID = event.payload?.task_id;
-        return typeof payloadTaskID === "string" && payloadTaskID === item.taskId;
-      });
-      return {
-        assignee: task?.assignee,
-        lastEventType: relatedEvent?.type,
-        mailboxPreview: buildDispatchMailboxPreview(mailboxResponse.messages),
-        status: task?.status || "unknown",
-        summary: task?.summary,
-        taskId: item.taskId,
-        teamId: item.teamId,
-        updatedAt: task?.updated_at || relatedEvent?.timestamp,
-      } satisfies DispatchMonitorEntry;
-    }),
-  );
-
-  return settled.map((item, index) => {
-    const fallback = createdResults[index];
-    if (item.status === "fulfilled") {
-      return item.value;
-    }
-    return {
-      error:
-        item.reason instanceof Error
-          ? item.reason.message
-          : "failed to load dispatch monitor entry",
-      mailboxPreview: [],
-      status: "unknown",
-      taskId: fallback.taskId,
-      teamId: fallback.teamId,
-    } satisfies DispatchMonitorEntry;
-  });
-}
+export type { UseRuntimeTeamDispatchReturn } from "@/components/workspace/runtime-teams/use-runtime-team-dispatch/types";
+export {
+  buildDispatchTaskRequest,
+  resolveSelectedDispatchTeamIds,
+} from "@/components/workspace/runtime-teams/use-runtime-team-dispatch/dispatch-requests";
+export { buildDispatchMailboxPreview } from "@/components/workspace/runtime-teams/use-runtime-team-dispatch/dispatch-monitor";
 
 export function useRuntimeTeamDispatch({
   onRefresh,
@@ -291,10 +47,8 @@ export function useRuntimeTeamDispatch({
   teams,
 }: UseRuntimeTeamDispatchOptions): UseRuntimeTeamDispatchReturn {
   const [selectedDispatchTeamIds, setSelectedDispatchTeamIds] = useState<string[]>([]);
-  const [dispatchTeamReadiness, setDispatchTeamReadiness] = useState<
-    Record<string, DispatchTeamReadiness>
-  >({});
-  const [isDispatchReadinessLoading, setIsDispatchReadinessLoading] = useState(false);
+  const { dispatchTeamReadiness, isDispatchReadinessLoading } =
+    useDispatchTeamReadiness(teams);
   const [dispatchTemplateMode, setDispatchTemplateMode] =
     useState<DispatchTemplateMode>("review_implement_verify");
   const [dispatchTaskTitleDraft, setDispatchTaskTitleDraft] = useState("");
@@ -324,33 +78,6 @@ export function useRuntimeTeamDispatch({
     });
   }, [teams]);
 
-  useEffect(() => {
-    if (teams.length === 0) {
-      setDispatchTeamReadiness({});
-      setIsDispatchReadinessLoading(false);
-      return;
-    }
-
-    let cancelled = false;
-    setIsDispatchReadinessLoading(true);
-
-    void loadDispatchTeamReadiness(teams)
-      .then((nextMap) => {
-        if (cancelled) {
-          return;
-        }
-        setDispatchTeamReadiness(nextMap);
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setIsDispatchReadinessLoading(false);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [teams]);
 
   useEffect(() => {
     if (
