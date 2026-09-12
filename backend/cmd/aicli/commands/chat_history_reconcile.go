@@ -58,7 +58,14 @@ func (b *chatRuntimeEventBridge) seedPersistedHistory(messages []runtimetypes.Me
 	if seeded {
 		// 仅在本次实际新增了 header/unit 时发布 snapshot；否则 Scene 未变，
 		// 全量 ReplaceTranscriptAction 会触发历史重放动画且无任何内容更新。
-		b.sessionInteractionSnapshot()
+		//
+		// 会话加载（/resume、/load、启动恢复，以及首次装配 canonical 历史的
+		// /history）也只有在这里才请求一次 scrollback 替换：canonical 历史刚
+		// 装配进 Scene，这个 replacement snapshot 本身就是授权的携带者
+		// （ArmScrollbackReplay 字段），与它授权的 Scene 在同一 action 内原子
+		// 进入 reducer。正常交互（resize/流式增量/主题切换/写入恢复）不会进入
+		// “实际新增 unit” 分支，因此永远拿不到重放授权。
+		b.sessionInteractionReplacementSnapshot()
 	}
 }
 
@@ -165,7 +172,11 @@ func (b *chatRuntimeEventBridge) replaceCanonicalHistoryProjection(messages []ru
 	b.seedPersistedHistoryLocked(units, header)
 	b.appendHistoryResetLog(messages, header)
 	b.renderMu.Unlock()
-	b.sessionInteractionSnapshot()
+	// 显式 canonical 历史重写（/backtrack、截断、会话加载回放）同样只授权一次
+	// 全量重放：旧 Scene 的物理行必须先被替换，再按新 canonical 顺序重建。
+	// 授权随 replacement snapshot 一起发布，执行器不可能再用替换前的 Scene
+	// 组合出破坏性事务。
+	b.sessionInteractionReplacementSnapshot()
 	return true
 }
 

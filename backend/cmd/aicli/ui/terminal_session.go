@@ -104,6 +104,13 @@ type TerminalTransactionPlan struct {
 	// ResetScrollback requests a source-backed replacement of an uncertain
 	// native-scrollback projection in the current layout generation.
 	ResetScrollback bool
+	// SettleHistoryProjection is the non-destructive recovery counterpart of
+	// ResetScrollback. The frame proves the visible viewport without replacing
+	// native scrollback, so an unprovable resident range is quarantined in
+	// place: the rows stay physically resident, are never re-emitted, and the
+	// incremental handoff resumes immediately after the last proven row. It
+	// never clears scrollback and never leaves a hole in the delivered stream.
+	SettleHistoryProjection bool
 	// TerminalEpoch is the reducer-confirmed scrollback generation. A replaced
 	// TerminalSession advances from this value instead of restarting at one.
 	TerminalEpoch uint64
@@ -251,10 +258,11 @@ type TerminalFrameResult struct {
 // delivery. A history Deferred result proves no history bytes were attempted;
 // the frame may still have completed a recovery repaint in that transaction.
 type TerminalTransactionResult struct {
-	Frame           TerminalFrameResult
-	History         *HistoryCommitResult
-	ScrollbackReset bool
-	TerminalEpoch   uint64
+	Frame                    TerminalFrameResult
+	History                  *HistoryCommitResult
+	ScrollbackReset          bool
+	SettledHistoryProjection bool
+	TerminalEpoch            uint64
 }
 
 // terminalPreparedTransaction contains pure presentation work derived from one
@@ -322,6 +330,13 @@ type TerminalSession struct {
 	// critically, excludes unused blank headroom. This is display-only cache:
 	// semantic recovery still comes from AppState/Scene.
 	historyTailRows []string
+	// historyTailCells records which semantic cells already own at least one
+	// row of the resident history region. It is the provenance half of the
+	// resident-tail proof: a payload may only drop leading rows that re-cover
+	// the tail when its leading commit belongs to a cell this region already
+	// holds. Bare text equality would also drop genuinely new rows whenever a
+	// different cell renders identical lines.
+	historyTailCells map[uint64]struct{}
 	// historyTopAligned becomes sticky after this session has moved a semantic
 	// row into native scrollback. From that point the resident tail must begin
 	// at physical row one, otherwise later viewport contraction would insert
@@ -532,6 +547,7 @@ func (s *TerminalSession) EnterAlternateScreen(leaseID uint64) error {
 			}
 			s.viewportBoundaryKnown = false
 			s.historyTailRows = nil
+			s.historyTailCells = nil
 			s.historyTopAligned = false
 			s.historyProjectionKnown = false
 			s.historyProjectionStarted = true
@@ -613,6 +629,7 @@ func (s *TerminalSession) ExitAlternateScreen(leaseID uint64) error {
 	if write.Err != nil {
 		s.viewportBoundaryKnown = false
 		s.historyTailRows = nil
+		s.historyTailCells = nil
 		s.historyTopAligned = false
 		s.historyProjectionKnown = false
 		s.historyProjectionStarted = true
@@ -859,7 +876,11 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 	resizeRebuild := s.frame > 0 && s.geometry.Width > 0 && s.geometry.Height > 0 &&
 		(s.geometry.Width != frame.Geometry.Width || s.geometry.Height != frame.Geometry.Height)
 	forceScrollbackReset := plan.ResetScrollback
-	scrollbackResetReason := terminalScrollbackResetReason(resizeRebuild, forceScrollbackReset)
+	// Settling is only meaningful when no authorized replay owns this
+	// transaction: a reset replaces the projection outright and re-anchors
+	// implicitly.
+	settleHistoryProjection := plan.SettleHistoryProjection && !forceScrollbackReset
+	scrollbackResetReason := terminalScrollbackResetReason(forceScrollbackReset)
 	historyProjectionWritable := (s.historyProjectionKnown || initializeHistoryProjection) && !resizeRebuild && !forceScrollbackReset
 	hadKnownProjection := s.screen.ProjectionValidity() == renderengine.ProjectionKnown && !s.lease.Active
 	projectionKnown := hadKnownProjection
@@ -938,14 +959,17 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 	// never become history.
 	transitionBytes := ""
 	nextHistoryTopAligned := s.historyTopAligned
-	// A terminal-height resize has already changed the host's physical row
-	// mapping and native scrollback. Old absolute viewport coordinates are no
-	// longer a valid scroll-region boundary; replaying that transition can
-	// include the new prompt/status rows and leak them into history. Trust the
-	// host resize, then source-repaint only the new bottom viewport.
-	if resizeRebuild || forceScrollbackReset {
+	// Only an explicit replay authorization may replace native scrollback. A
+	// terminal resize has already changed the host's physical row mapping, but
+	// it is not a reason to replay history: trust the host reflow, keep the
+	// delivered rows, and source-repaint only the new bottom viewport. The
+	// viewport band that used to be reserved is cleared locally so prompt or
+	// status rows can never masquerade as history when the reserve shrinks.
+	if forceScrollbackReset {
 		transitionBytes = terminalResetScrollbackANSI()
 		nextHistoryTopAligned = false
+	} else if resizeRebuild {
+		transitionBytes = terminalViewportBandClearANSI(s.viewport, area, frame.Geometry.Height, s.viewportBoundaryKnown)
 	} else if initializeHistoryProjection {
 		transitionBytes = terminalClearHistoryRegionANSI(frame.OutputBottomRow)
 		nextHistoryTopAligned = false
@@ -959,8 +983,23 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 	// occupancy-aware: an underfilled region is repainted without scrolling;
 	// overflow uses HandoffPlan only for rows that must actually cross row one.
 	baseHistoryTail := terminalRetainHistoryTailRows(s.historyTailRows, frame.OutputBottomRow)
-	if resizeRebuild || forceScrollbackReset {
+	if forceScrollbackReset {
 		baseHistoryTail = nil
+	}
+	if historyInsertedRows > 0 {
+		// A replay-free settlement re-delivers a range whose bytes are still
+		// resident when an in-flight delivery lost its ledger proof. The
+		// retained tail is the session's proof of what the region already holds,
+		// so a payload that re-covers it resumes after the tail instead of
+		// writing delivered rows a second time. The provenance gate inside
+		// terminalHistoryPayloadToWrite keeps that proof honest: only a batch
+		// that continues a cell this region already owns may be trimmed, so
+		// identical text rendered by a new cell is written in full instead of
+		// being mistaken for a re-delivery.
+		historyInsertedPayload = terminalHistoryPayloadToWrite(
+			baseHistoryTail, s.historyTailCells, delivered, historyInsertedPayload,
+		)
+		historyInsertedRows = len(historyInsertedPayload)
 	}
 	if historyInsertedRows > 0 {
 		historyBytes, nextHistoryTopAligned = terminalHistoryInsertionANSI(
@@ -992,6 +1031,7 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 			}
 			if geometryChanged || transitionBytes != "" || historyBytes != "" {
 				s.historyTailRows = nil
+				s.historyTailCells = nil
 				s.historyTopAligned = false
 				s.historyProjectionKnown = false
 				s.historyProjectionStarted = true
@@ -1026,17 +1066,32 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 	s.viewport = area
 	s.viewportBoundaryKnown = true
 	s.viewportTerminalHeight = frame.Geometry.Height
-	if resizeRebuild || forceScrollbackReset {
+	switch {
+	case resizeRebuild:
+		// The resize frame only repaints the bottom viewport band. Already
+		// delivered history rows stay untouched; incremental handoff resumes on
+		// the next stable frame.
+	case forceScrollbackReset:
 		s.historyProjectionStarted = true
 		s.historyProjectionKnown = true
 		s.historyTailRows = nil
+		s.historyTailCells = nil
 		if plan.TerminalEpoch > s.terminalEpoch {
 			s.terminalEpoch = plan.TerminalEpoch
 		}
 		s.terminalEpoch++
 		s.scrollbackResetCount++
 		s.lastScrollbackResetReason = scrollbackResetReason
-	} else if initializeHistoryProjection {
+	case settleHistoryProjection:
+		// A source-backed viewport repaint without a scrollback replacement.
+		// The unprovable resident range stays quarantined in place: its rows
+		// remain physically resident and are never re-emitted, while the
+		// retained tail keeps the handoff anchored immediately after the last
+		// proven row. Discarding the anchor would resume bottom-aligned and
+		// leave a blank row between two delivered rows.
+		s.historyProjectionStarted = true
+		s.historyProjectionKnown = true
+	case initializeHistoryProjection:
 		s.historyProjectionStarted = true
 		s.historyProjectionKnown = true
 	}
@@ -1045,6 +1100,7 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		s.historyTopAligned = nextHistoryTopAligned
 		if historyInsertedRows > 0 {
 			s.historyTailRows = terminalAppendHistoryTailRows(s.historyTailRows, historyInsertedPayload, frame.OutputBottomRow)
+			s.historyTailCells = terminalAppendHistoryTailCells(s.historyTailCells, delivered)
 		}
 	}
 	s.cursor = cloneTerminalCursor(frame.Cursor)
@@ -1055,24 +1111,19 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		s.preparedHistory = nil
 	}
 	return TerminalTransactionResult{
-		Frame:           frameResult,
-		History:         historyResult,
-		ScrollbackReset: resizeRebuild || forceScrollbackReset,
-		TerminalEpoch:   s.terminalEpoch,
+		Frame:                    frameResult,
+		History:                  historyResult,
+		ScrollbackReset:          forceScrollbackReset,
+		SettledHistoryProjection: settleHistoryProjection,
+		TerminalEpoch:            s.terminalEpoch,
 	}
 }
 
-func terminalScrollbackResetReason(resize, reconciliation bool) string {
-	switch {
-	case resize && reconciliation:
-		return "resize+reconciliation"
-	case resize:
-		return "resize"
-	case reconciliation:
+func terminalScrollbackResetReason(reconciliation bool) string {
+	if reconciliation {
 		return "reconciliation"
-	default:
-		return ""
 	}
+	return ""
 }
 
 func terminalTransactionWithHistory(frame TerminalFrameResult, history *HistoryCommit, result HistoryCommitResult) TerminalTransactionResult {
@@ -1148,7 +1199,7 @@ func (s *TerminalSession) CommitHistory(commit HistoryCommit) HistoryCommitResul
 			s.mu.Unlock()
 			return result
 		}
-		result := s.commitHistoryRowsLocked(rows)
+		result := s.commitHistoryRowsLocked(commit, rows)
 		s.mu.Unlock()
 		return result
 	}
@@ -1169,7 +1220,7 @@ func (s *TerminalSession) commitHistoryEarlyResultLocked(commit HistoryCommit) (
 	return HistoryCommitResult{}, false
 }
 
-func (s *TerminalSession) commitHistoryRowsLocked(rows []string) HistoryCommitResult {
+func (s *TerminalSession) commitHistoryRowsLocked(commit HistoryCommit, rows []string) HistoryCommitResult {
 	// The top-anchored region ends immediately above the inline viewport. Since
 	// its top margin is physical row one, overflow becomes native scrollback;
 	// prompt/status rows below outputBottom never participate in the scroll.
@@ -1186,6 +1237,7 @@ func (s *TerminalSession) commitHistoryRowsLocked(rows []string) HistoryCommitRe
 		if write.MayHavePartiallyWritten {
 			s.viewportBoundaryKnown = false
 			s.historyTailRows = nil
+			s.historyTailCells = nil
 			s.historyTopAligned = false
 			s.historyProjectionKnown = false
 			s.historyProjectionStarted = true
@@ -1199,6 +1251,7 @@ func (s *TerminalSession) commitHistoryRowsLocked(rows []string) HistoryCommitRe
 
 	s.frame++
 	s.historyTailRows = terminalAppendHistoryTailRows(s.historyTailRows, rows, s.outputBottom)
+	s.historyTailCells = terminalAppendHistoryTailCells(s.historyTailCells, []HistoryCommit{commit})
 	s.historyTopAligned = nextHistoryTopAligned
 	s.preparedHistory = nil
 	return HistoryCommitResult{Frame: s.frame}
@@ -1409,6 +1462,75 @@ func terminalAppendHistoryTailRows(current, inserted []string, capacity int) []s
 	return terminalRetainHistoryTailRows(combined, capacity)
 }
 
+// terminalHistoryPayloadAfterResident trims the leading rows of a planned
+// payload that the history region already holds. A replay-free settlement
+// re-mints a range whose bytes are still resident when an in-flight delivery
+// lost its ledger proof; emitting them again would duplicate text inside the
+// scroll region and inside native scrollback.
+//
+// Only a payload that re-covers the complete retained tail is trimmed, and the
+// caller must additionally prove provenance: the trimming call sites gate on
+// terminalHistoryPayloadReclaimsResidentRows, which requires the payload's
+// leading commit to belong to a cell that already owns rows of this region.
+// Text equality alone is not a proof of re-delivery - two different cells can
+// render identical lines - so without that gate this helper would drop new
+// rows that happen to repeat resident text.
+func terminalHistoryPayloadAfterResident(resident, inserted []string) []string {
+	if len(resident) == 0 || len(inserted) <= len(resident) {
+		return inserted
+	}
+	for index, row := range resident {
+		if inserted[index] != row {
+			return inserted
+		}
+	}
+	return inserted[len(resident):]
+}
+
+// terminalHistoryPayloadToWrite is the only entry point for trimming a planned
+// history payload against the resident tail. It couples the textual overlap
+// proof to the provenance proof so no call site can apply the trim without
+// proving that the payload continues a cell the region already holds.
+func terminalHistoryPayloadToWrite(resident []string, residentCells map[uint64]struct{}, delivered []HistoryCommit, inserted []string) []string {
+	if !terminalHistoryPayloadReclaimsResidentRows(delivered, residentCells) {
+		return inserted
+	}
+	return terminalHistoryPayloadAfterResident(resident, inserted)
+}
+
+// terminalHistoryPayloadReclaimsResidentRows reports whether the first commit
+// of a planned payload belongs to a cell that already owns at least one row of
+// the resident history region. Only such a payload can be a re-delivery of
+// resident rows (a settlement that lost its ledger proof mid-flight); a batch
+// that starts with a cell this region has never displayed must be written in
+// full even when its leading bytes equal the retained tail.
+func terminalHistoryPayloadReclaimsResidentRows(delivered []HistoryCommit, residentCells map[uint64]struct{}) bool {
+	if len(delivered) == 0 || len(residentCells) == 0 {
+		return false
+	}
+	_, ok := residentCells[uint64(delivered[0].CellID)]
+	return ok
+}
+
+// terminalAppendHistoryTailCells records the semantic owners of rows that were
+// just appended to the resident tail. The recorded set over-approximates exact
+// per-row ownership because rows retired by capacity are not pruned
+// individually; that direction is safe here, since membership only widens for
+// cells whose rows this region has already held, and the set is reset whenever
+// the physical region itself is cleared or invalidated.
+func terminalAppendHistoryTailCells(current map[uint64]struct{}, delivered []HistoryCommit) map[uint64]struct{} {
+	if len(delivered) == 0 {
+		return current
+	}
+	if current == nil {
+		current = make(map[uint64]struct{}, len(delivered))
+	}
+	for _, commit := range delivered {
+		current[uint64(commit.CellID)] = struct{}{}
+	}
+	return current
+}
+
 // terminalHistoryInsertionANSI appends semantic history without placing blank
 // headroom inside one continuous native-history stream. Before the first
 // overflow, a short resident tail stays bottom-aligned near the composer. Once
@@ -1478,6 +1600,42 @@ func terminalClearHistoryRegionANSI(capacity int) string {
 
 func terminalResetScrollbackANSI() string {
 	return "\x1b[r\x1b[0m\x1b[H\x1b[2J\x1b[3J\x1b[H"
+}
+
+// terminalViewportBandClearANSI blanks only the rows that the previous viewport
+// band reserved above the current one. A taller terminal moves the bottom block
+// down, so the former viewport rows become part of the history region; the host
+// reflow keeps their physical content, and stale prompt/status rows must never
+// be mistaken for delivered history. This is a local row erase: native
+// scrollback is untouched and no history row is re-emitted.
+//
+// The erase deliberately uses absolute addressing only. A resize transaction
+// must never emit DECSC/DECRC, DECSTBM or any other cursor/scroll-region state
+// change: save/restore pairs share one terminal-global register with the input
+// editor and history handoff, and programming a region is what used to reflow
+// (i.e. replay) already delivered rows. `\x1b[K` cannot scroll, and the
+// following viewport writes address their rows absolutely, so no cursor state
+// has to be preserved across the clear.
+func terminalViewportBandClearANSI(previous, next ViewportArea, capacity int, boundaryKnown bool) string {
+	if !boundaryKnown || capacity < 1 || previous.Height < 1 {
+		return ""
+	}
+	first := previous.Top
+	last := next.Top - 1
+	if first < 1 {
+		first = 1
+	}
+	if last > capacity {
+		last = capacity
+	}
+	if first > last {
+		return ""
+	}
+	var output strings.Builder
+	for row := first; row <= last; row++ {
+		fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", row)
+	}
+	return output.String()
 }
 
 func terminalHistoryInsertLinesANSI(capacity, row, count int) string {

@@ -1011,12 +1011,6 @@ func rebasePendingHistoryEffects(state *UIControllerState) {
 				if _, exists := valid[historyCommitSourceIdentity(entry.Commit)]; !exists {
 					_ = state.HistoryEffects.invalidate(entry.Commit.Token)
 				}
-			case HistoryCommitInFlight:
-				// A terminal transaction is bound to the viewport generation it
-				// started with. A resize can race the write after Begin; preserve
-				// its token as invalidated and force projection recovery rather than
-				// accepting a stale acknowledgement or repainting around it.
-				_ = state.HistoryEffects.invalidate(entry.Commit.Token)
 			}
 		}
 	}

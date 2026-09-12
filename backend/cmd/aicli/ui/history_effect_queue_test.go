@@ -562,7 +562,7 @@ func TestHistoryEffectsReducer_TranscriptBoundaryChangeInvalidatesInFlightHandof
 	}
 }
 
-func TestHistoryEffectsReducer_ResizeInvalidatesInFlightAndRequiresRecovery(t *testing.T) {
+func TestHistoryEffectsReducer_ResizeKeepsInFlightDeliveryAndAcceptsRacedAck(t *testing.T) {
 	state := historyEffectTestState(t, 2)
 	entries := state.HistoryEffects.Entries()
 	token := entries[0].Commit.Token
@@ -572,20 +572,29 @@ func TestHistoryEffectsReducer_ResizeInvalidatesInFlightAndRequiresRecovery(t *t
 	}
 	count, nextToken := len(entries), state.HistoryEffects.NextToken
 	state = reduceUIControllerState(state, Resize{Width: 100, Height: 10, Generation: 3}, 4)
+	// A resize must not invalidate a delivery that is already in flight: the
+	// layout generation advanced while its bytes were crossing the writer, and
+	// invalidating a raced, in-fact-completed write would make the range
+	// permanently un-mintable. Only a refused proof may raise an obligation.
 	entry := historyCommitEntry(t, state, token)
-	if entry.State != HistoryCommitInvalidated || !entry.MayHavePartiallyWritten || !state.HistoryEffects.ProjectionUnknown {
-		t.Fatalf("resize did not invalidate in-flight projection: entry=%#v unknown=%t", entry, state.HistoryEffects.ProjectionUnknown)
+	if entry.State != HistoryCommitInFlight || entry.MayHavePartiallyWritten {
+		t.Fatalf("resize invalidated an in-flight projection: entry=%#v", entry)
+	}
+	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.ReconciliationRequired {
+		t.Fatalf("resize raised a recovery obligation: %#v", state.HistoryEffects)
 	}
 	if len(state.HistoryEffects.Entries()) != count || state.HistoryEffects.NextToken != nextToken {
 		t.Fatalf("resize changed history token inventory: entries=%d/%d token=%d/%d", len(state.HistoryEffects.Entries()), count, state.HistoryEffects.NextToken, nextToken)
 	}
+	// The write completed before the resize arrived, so its proof is accepted
+	// for the exact generation the writer took. Refusing it would demand a
+	// replay, which normal interaction must never perform.
 	state = reduceUIControllerState(state, HistoryCommitAcknowledged{Token: token, Frame: 8, LayoutGeneration: 2}, 5)
-	if entry := historyCommitEntry(t, state, token); entry.State != HistoryCommitInvalidated {
-		t.Fatalf("stale ack advanced invalidated token: %#v", entry)
+	if entry := historyCommitEntry(t, state, token); entry.State != HistoryCommitAcked {
+		t.Fatalf("raced acknowledgement was refused: %#v", entry)
 	}
-	state = reduceUIControllerState(state, HistoryProjectionRecovered{LayoutGeneration: 3}, 6)
 	if state.HistoryEffects.ProjectionUnknown {
-		t.Fatal("matching recovery did not restore known projection")
+		t.Fatal("raced acknowledgement raised the recovery obligation")
 	}
 }
 

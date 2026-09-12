@@ -851,6 +851,23 @@ func finalizedSceneCellRevision(snapshot *scene.Snapshot, id scene.CellID, kind 
 // snapshot then enters the same UIController reducer boundary as a runtime
 // event; it is never reconstructed from terminal/history-window state.
 func (c *chatInteractionCoordinator) postTranscriptSnapshotFromBridge(bridge *chatRuntimeEventBridge) {
+	c.postTranscriptSnapshotFromBridgeWithReplayAuthorization(bridge, false)
+}
+
+// postReplacementTranscriptSnapshotFromBridge publishes a canonical-history
+// replacement snapshot and requests the one-shot scrollback-replay
+// authorization inside the same action. Session load (/resume, /load, startup
+// restore), canonical history seed and /backtrack use it instead of
+// postTranscriptSnapshotFromBridge so the grant and the Scene it authorizes
+// reach the reducer together: the executor can never compose a destructive
+// replay plan from the pre-replacement Scene.
+func (c *chatInteractionCoordinator) postReplacementTranscriptSnapshotFromBridge(bridge *chatRuntimeEventBridge) {
+	c.postTranscriptSnapshotFromBridgeWithReplayAuthorization(bridge, true)
+}
+
+func (c *chatInteractionCoordinator) postTranscriptSnapshotFromBridgeWithReplayAuthorization(
+	bridge *chatRuntimeEventBridge, armReplay bool,
+) {
 	if c == nil || bridge == nil {
 		return
 	}
@@ -858,7 +875,7 @@ func (c *chatInteractionCoordinator) postTranscriptSnapshotFromBridge(bridge *ch
 	if snapshot == nil {
 		return
 	}
-	_ = c.postUIAction(ui.ReplaceTranscriptAction{Snapshot: snapshot})
+	_ = c.postUIAction(ui.ReplaceTranscriptAction{Snapshot: snapshot, ArmScrollbackReplay: armReplay})
 }
 
 // closeUIActor 关闭 UI actor：停止接受新 action，Run 排空剩余队列后退出。

@@ -22,7 +22,14 @@ type HistoryEffectQueueState struct {
 	Frozen                 bool
 	ProjectionUnknown      bool
 	ReconciliationRequired bool
-	ledger                 *HistoryCommitLedger
+	// ScrollbackReplayArmed authorizes exactly one physical scrollback
+	// replacement as part of a session load (/resume, /load, startup restore).
+	// Normal interaction (resize, theme, streaming, writer recovery) must
+	// converge without clearing native scrollback, so the executor only selects
+	// the destructive reconciliation plan while this authorization is set; the
+	// reducer clears it after the replay or when the load reconciled cleanly.
+	ScrollbackReplayArmed bool
+	ledger                *HistoryCommitLedger
 	// lastPlanned* memoize the active-cell inputs from the most recent
 	// syncHistoryEffectsForActiveCell pass. Append-only stream updates that
 	// do not move any source boundary (Stable/Enqueued/Acked), resize, or
@@ -50,8 +57,8 @@ type HistoryEffectQueueState struct {
 	// planner reads Active — the active-cell planner inputs. Ledger-dependent
 	// plan input (the acked Active-origin prefix) is tracked by the ledger's
 	// activeAckPlanVersion plus TerminalEpoch instead of a per-call scan.
-	lastPlannedTranscriptValid    bool
-	lastPlannedTranscriptSceneID  uint64
+	lastPlannedTranscriptValid   bool
+	lastPlannedTranscriptSceneID uint64
 	// lastPlannedTranscriptFence fingerprints every finalized transcript cell
 	// (ID/Revision/Phase/Kind/blocked/boundary/source length). The scene-wide
 	// Revision/ContentVersion counters are NOT used: they advance on every
@@ -61,14 +68,14 @@ type HistoryEffectQueueState struct {
 	// avoid). Cell Revision is the scene's own per-cell mutation fence
 	// (update/finalize require a strictly greater revision), so the
 	// fingerprint has the same trust level as transcriptCellVersionEqual.
-	lastPlannedTranscriptFence  uint64
-	lastPlannedTranscriptCells    int
+	lastPlannedTranscriptFence     uint64
+	lastPlannedTranscriptCells     int
 	lastPlannedTranscriptLayoutGen uint64
-	lastPlannedWidth              int
-	lastPlannedHeight             int
-	lastPlannedProjection         bool
-	lastPlannedThemeKey           string
-	lastPlannedTerminalEpoch      uint64
+	lastPlannedWidth               int
+	lastPlannedHeight              int
+	lastPlannedProjection          bool
+	lastPlannedThemeKey            string
+	lastPlannedTerminalEpoch       uint64
 }
 
 func (s HistoryEffectQueueState) Clone() HistoryEffectQueueState {
@@ -226,13 +233,33 @@ func (s *HistoryEffectQueueState) ackBatch(commits []HistoryCommit, frame, gener
 	// terminal wrote this batch atomically, so a concurrent semantic rebase of
 	// a later Pending token must not leave an Acked prefix and a retryable tail.
 	previousToken := uint64(0)
+	ackGenerations := make([]uint64, len(commits))
 	for index, commit := range commits {
 		if commit.LayoutGeneration != generation || commit.Token == 0 || (previousToken != 0 && commit.Token <= previousToken) {
 			return ErrStaleLayoutGeneration
 		}
 		entry, ok := s.ledger.Entry(commit.Token)
-		if !ok || !historyCommitPresentationEqual(entry.Commit, commit) {
+		if !ok || historyCommitSourceIdentity(entry.Commit) != historyCommitSourceIdentity(commit) {
 			return ErrCommitSourceChanged
+		}
+		ackGenerations[index] = generation
+		if !historyCommitPresentationEqual(entry.Commit, commit) {
+			// The batch bytes are already proven written, but a resize that
+			// raced this same write rebases the still-Pending tail onto the
+			// new layout generation (new wrap width, new display ranges). That
+			// supersession is not a source change: identity is unchanged and
+			// the newer generation only re-presents the same delivered range.
+			// Failing the batch closed here would turn a proven handoff into an
+			// unprovable resident range and re-raise a recovery obligation that
+			// the no-replay policy can never repay. Acknowledge the entry for
+			// its own (newer) generation instead; anything else - a source
+			// replacement, a same-generation content change, or a rebased
+			// first/in-flight token - still fails closed.
+			if index == 0 || entry.State != HistoryCommitPending ||
+				entry.Commit.LayoutGeneration <= commit.LayoutGeneration {
+				return ErrCommitSourceChanged
+			}
+			ackGenerations[index] = entry.Commit.LayoutGeneration
 		}
 		if (index == 0 && entry.State != HistoryCommitInFlight) ||
 			(index > 0 && entry.State != HistoryCommitPending) {
@@ -247,7 +274,7 @@ func (s *HistoryEffectQueueState) ackBatch(commits []HistoryCommit, frame, gener
 				return err
 			}
 		}
-		if err := s.ack(commit.Token, frame, generation); err != nil {
+		if err := s.ack(commit.Token, frame, ackGenerations[index]); err != nil {
 			return err
 		}
 	}
@@ -330,6 +357,42 @@ func (s *HistoryEffectQueueState) markProjectionKnown() {
 	if s != nil {
 		s.ProjectionUnknown = false
 	}
+}
+
+// armScrollbackReplay grants the one-shot authorization that lets the executor
+// replace native scrollback from semantic source. The reducer sets it while it
+// installs the replacement snapshot that carries the authorization, so the grant
+// and the Scene it authorizes are one state transition; it is consumed by a
+// single ScrollbackReset transaction and cleared by the reducer afterwards so
+// no later interaction can replay history.
+func (s *HistoryEffectQueueState) armScrollbackReplay() {
+	if s != nil {
+		s.ScrollbackReplayArmed = true
+	}
+}
+
+// clearScrollbackReplayAuthorization drops an authorization that has just been
+// consumed by a proven scrollback replacement. This is its only release: the
+// authorization grants exactly one replay, so nothing else may discard it
+// before that replay happened.
+func (s *HistoryEffectQueueState) clearScrollbackReplayAuthorization() {
+	if s != nil {
+		s.ScrollbackReplayArmed = false
+	}
+}
+
+// settleUnresolvedWithoutReplay is the normal-interaction recovery policy: a
+// writer failure or invalidated in-flight token must not trigger a scrollback
+// replay, so the unproven range is quarantined in the ledger and the queue
+// resumes ordered delivery after a source-backed viewport repaint.
+func (s *HistoryEffectQueueState) settleUnresolvedWithoutReplay() bool {
+	if s == nil {
+		return false
+	}
+	settled := s.ledger.SettleUnresolvedWithoutReplay()
+	s.ProjectionUnknown = false
+	s.ReconciliationRequired = false
+	return settled
 }
 
 // reconcileScrollback starts a new, explicitly proven native-scrollback

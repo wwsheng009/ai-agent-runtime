@@ -679,22 +679,12 @@ func (e *TerminalSessionExecutor) runOne() bool {
 				if terminalSessionSnapshotRecoveryActionable(snapshot) {
 					plan := composeTerminalViewportTransactionPlan(snapshot.appState, nil)
 					// A known-projection viewport flush must not silently keep
-					// an outstanding scrollback reconciliation obligation alive
-					// forever. The non-backoff recovery path below switches to
-					// the scrollback reconciliation plan whenever
-					// ReconciliationRequired is set; the success-mode backoff
-					// flush branch must do the same, otherwise the obligation
-					// can only be cleared by reconcileScrollback (a fresh
-					// terminal epoch via HistoryScrollbackReconciled), which
-					// never runs here. Result: the unified renderer's
-					// scrollback freezes (only the bottom viewport keeps
-					// repainting) exactly like the reported post-resume stall
-					// (observed: reconciliationRequired=true,
-					// projectionUnknown=false, 256/256 diag entries
-					// flushedWhileBackoff with scrollbackResetsInWindow=0).
-					if snapshot.reconciliationRequired {
-						plan = composeTerminalViewportScrollbackReconciliationPlan(snapshot.appState)
-					}
+					// an outstanding history obligation alive forever. This
+					// branch uses the same recovery selector as the non-backoff
+					// paths: an armed session-load replay may replace scrollback,
+					// while every other obligation settles non-destructively and
+					// lets HistoryReconciliationSettled clear it.
+					plan = terminalHistoryRecoveryPlan(snapshot)
 					result := e.session.FlushTransaction(plan)
 					e.publishResult(plan.Frame.LayoutGeneration, nil, result)
 					armed := e.armRecoveryBackoff(result, schedule.stateGeneration)
@@ -741,14 +731,10 @@ func (e *TerminalSessionExecutor) runOne() bool {
 			return latest.recoveryActionable || latest.pendingToken != 0 ||
 				e.controller.terminalSessionHasActionableWork()
 		}
-		// A possibly written history range cannot be repaired by repainting only
-		// the bottom viewport. Replace scrollback from semantic source first;
-		// zero-byte viewport failures still use the cheaper repaint-only path.
-		plan := composeTerminalViewportTransactionPlan(snapshot.appState, nil)
-		reconciliation := snapshot.reconciliationRequired
-		if reconciliation {
-			plan = composeTerminalViewportScrollbackReconciliationPlan(snapshot.appState)
-		}
+		// An outstanding history obligation is recovered by the same selector as
+		// every other entry point: replay only when a load authorized it,
+		// otherwise repaint the viewport from source and quarantine in place.
+		plan := terminalHistoryRecoveryPlan(snapshot)
 		result := e.session.FlushTransaction(plan)
 		continued := e.publishResult(plan.Frame.LayoutGeneration, nil, result)
 		armed := e.armRecoveryBackoff(result, schedule.stateGeneration)
@@ -782,11 +768,7 @@ func (e *TerminalSessionExecutor) runOne() bool {
 
 	snapshot := e.controller.terminalSessionSnapshot(claimedToken)
 	if claimedToken == 0 && terminalSessionSnapshotRecoveryActionable(snapshot) {
-		plan := composeTerminalViewportTransactionPlan(snapshot.appState, nil)
-		reconciliation := snapshot.reconciliationRequired
-		if reconciliation {
-			plan = composeTerminalViewportScrollbackReconciliationPlan(snapshot.appState)
-		}
+		plan := terminalHistoryRecoveryPlan(snapshot)
 		result := e.session.FlushTransaction(plan)
 		continued := e.publishResult(plan.Frame.LayoutGeneration, nil, result)
 		armed := e.armRecoveryBackoff(result, schedule.stateGeneration)
@@ -836,6 +818,28 @@ func terminalSessionClaimMissRequiresRetry(claimed, latest terminalSessionSchedu
 func terminalSessionSnapshotRecoveryActionable(snapshot terminalSessionControllerSnapshot) bool {
 	return !snapshot.appState.Lease.Active && !snapshot.appState.HistoryEffects.Frozen &&
 		(snapshot.projectionUnknown || snapshot.reconciliationRequired)
+}
+
+// terminalHistoryRecoveryPlan selects the physical transaction that resolves an
+// outstanding history obligation (projectionUnknown or reconciliationRequired).
+//
+// Only an explicit reducer-armed authorization may replace native scrollback and
+// replay history: a session load (/resume, /load, startup restore) requests it
+// inside the replacement snapshot it publishes, so the grant is installed by the
+// same reduction that installs the Scene it authorizes and is consumed by
+// exactly one reset+reconcile. Every other
+// obligation — a failed or partially written handoff, an invalidated in-flight
+// token, a resize or theme change that raced a claim — is settled
+// non-destructively: the visible frame is repainted from semantic source and the
+// unprovable resident range is quarantined in place. Already delivered rows are
+// never re-emitted, and no normal interaction clears native scrollback.
+func terminalHistoryRecoveryPlan(snapshot terminalSessionControllerSnapshot) TerminalTransactionPlan {
+	if snapshot.scrollbackReplayArmed {
+		return composeTerminalViewportScrollbackReconciliationPlan(snapshot.appState)
+	}
+	plan := composeTerminalViewportTransactionPlan(snapshot.appState, nil)
+	plan.SettleHistoryProjection = true
+	return plan
 }
 
 func (e *TerminalSessionExecutor) publishResult(generation uint64, claimed *HistoryCommit, result TerminalTransactionResult) bool {
@@ -895,6 +899,14 @@ func (e *TerminalSessionExecutor) publishResult(generation uint64, claimed *Hist
 	// fail-closed until an explicit scrollback reconciliation.
 	if result.Frame.FullRepaint && e.session.ProjectionState().HistoryKnown {
 		_ = e.controller.Post(HistoryProjectionRecovered{LayoutGeneration: generation})
+	}
+	// A non-destructive recovery proves the visible frame without replacing
+	// scrollback. Publish the settle barrier so the reducer quarantines the
+	// unprovable resident range and resumes ordered handoff; it is skipped while
+	// an authorized replay is still pending, because that replay owns the
+	// obligation and a settle must never race it.
+	if result.SettledHistoryProjection && result.Frame.Err == nil && !result.Frame.Deferred {
+		_ = e.controller.Post(HistoryReconciliationSettled{LayoutGeneration: generation})
 	}
 	if result.ScrollbackReset && result.TerminalEpoch != 0 {
 		_ = e.controller.Post(HistoryScrollbackReconciled{

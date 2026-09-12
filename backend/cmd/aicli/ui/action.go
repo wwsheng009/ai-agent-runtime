@@ -434,6 +434,19 @@ func (HistoryProjectionInvalidated) isUIAction()         {}
 func (HistoryProjectionInvalidated) Class() ActionClass  { return ClassBarrier }
 func (HistoryProjectionInvalidated) CoalesceKey() string { return "" }
 
+// HistoryReconciliationSettled is the non-destructive counterpart of
+// HistoryScrollbackReconciled: the terminal owner proved a fresh source-backed
+// viewport projection without replacing native scrollback, so unproven
+// deliveries are quarantined in place and ordered handoff resumes. It must
+// never be used to reinterpret a possibly partial scrollback handoff as Acked.
+type HistoryReconciliationSettled struct {
+	LayoutGeneration uint64
+}
+
+func (HistoryReconciliationSettled) isUIAction()         {}
+func (HistoryReconciliationSettled) Class() ActionClass  { return ClassBarrier }
+func (HistoryReconciliationSettled) CoalesceKey() string { return "" }
+
 // HistoryScrollbackReconciled is the explicit terminal-epoch boundary for an
 // unresolved native-scrollback delivery. It may be posted only after the
 // terminal session has been replaced or its scrollback has been reset, and a
@@ -505,6 +518,16 @@ func (RuntimeEvent) CoalesceKey() string { return "" }
 // is migrated. Callers must not synthesize it from ScreenModel/historyWindow.
 type ReplaceTranscriptAction struct {
 	Snapshot *scene.Snapshot
+	// ArmScrollbackReplay requests the one-shot authorization to replace native
+	// scrollback from semantic source as part of a session load (/resume,
+	// /load, startup restore) or an explicit canonical-history rewrite
+	// (/backtrack). It travels inside this action instead of as a separate
+	// action so the reducer installs the authorizing Scene and the
+	// authorization in one transition: an executor can never observe an armed
+	// grant against the pre-replacement Scene, which would spend the one shot on
+	// stale content and leave the loaded generation unreplayed. Resize, theme
+	// changes, stream deltas and writer recovery must never set it.
+	ArmScrollbackReplay bool
 }
 
 func (ReplaceTranscriptAction) isUIAction()         {}

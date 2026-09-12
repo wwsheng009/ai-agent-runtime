@@ -67,7 +67,10 @@ func assertPhysicalMarkersExactlyOnce(t *testing.T, raw string, width, height in
 	}
 }
 
-func TestTerminalResizeRebuildsCanonicalHistoryIntoFreshScrollbackEpoch(t *testing.T) {
+// 需求：除 /resume 的首次全量重放外，正常交互（此处为终端 resize）不得重放历史。
+// resize 只允许重绘可见视口带；native scrollback 中已交付的行必须原样保留，
+// terminal epoch 不得递增，也不得清除 scrollback。
+func TestTerminalResizePreservesNativeScrollbackWithoutHistoryReplay(t *testing.T) {
 	const initialWidth, initialHeight = 52, 10
 	const resizedWidth, resizedHeight = 38, 12
 	markers := make([]string, 36)
@@ -87,31 +90,50 @@ func TestTerminalResizeRebuildsCanonicalHistoryIntoFreshScrollbackEpoch(t *testi
 		ReplaceTranscriptAction{Snapshot: regressionCommittedSnapshot(1, cell)},
 	)
 	h.flush()
-	for _, entry := range h.controller.State().HistoryEffects.Entries() {
+	initial := h.controller.State()
+	entries := initial.HistoryEffects.Entries()
+	if len(entries) == 0 {
+		t.Fatal("initial handoff planned no history commit")
+	}
+	for _, entry := range entries {
 		if entry.State != HistoryCommitAcked {
 			t.Fatalf("initial history entry not acked: %#v", entry)
 		}
 	}
+	initialEpoch := initial.HistoryEffects.TerminalEpoch
+	initialBytes := h.physical.Len()
 
 	h.post(t, Resize{Width: resizedWidth, Height: resizedHeight, Generation: 2})
 	h.flush()
 	state := h.controller.State()
-	if state.HistoryEffects.TerminalEpoch != 1 || state.HistoryEffects.ProjectionUnknown {
-		t.Fatalf("resize did not establish a fresh history epoch: %+v", state.HistoryEffects)
+	if state.HistoryEffects.TerminalEpoch != initialEpoch {
+		t.Fatalf("resize replayed history into a fresh scrollback epoch: %+v", state.HistoryEffects)
 	}
-	entries := state.HistoryEffects.Entries()
-	if len(entries) == 0 {
-		t.Fatal("resize reconciliation did not replan canonical transcript")
+	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.ReconciliationRequired {
+		t.Fatalf("resize left the history projection unsettled: %+v", state.HistoryEffects)
 	}
-	for _, entry := range entries {
-		if entry.State != HistoryCommitAcked {
-			t.Fatalf("resize replay left history unresolved: %#v", entry)
+	if state.HistoryEffects.HasPending() {
+		t.Fatalf("resize replanned pending history work: %+v", state.HistoryEffects)
+	}
+	raw := h.physical.String()
+	if strings.Contains(raw, "\x1b[3J") {
+		t.Fatalf("resize purged native scrollback: %q", raw)
+	}
+	if h.physical.Len() <= initialBytes {
+		t.Fatalf("resize produced no viewport repaint: %q", raw)
+	}
+	// 已交付的规范行必须保持单次物理交付：resize 只重绘视口，绝不重发历史。
+	for _, marker := range markers {
+		if count := strings.Count(raw, marker); count != 1 {
+			t.Fatalf("resize re-emitted history marker %q %d times, want exactly one", marker, count)
 		}
 	}
-	if !strings.Contains(h.physical.String(), "\x1b[3J") {
-		t.Fatalf("resize transaction did not purge the stale scrollback epoch: %q", h.physical.String())
+	// 账本不得因 resize 回退已确认的交付身份。
+	for _, entry := range state.HistoryEffects.Entries() {
+		if entry.State != HistoryCommitAcked {
+			t.Fatalf("resize disturbed the acked history ledger: %#v", entry)
+		}
 	}
-	assertPhysicalMarkersExactlyOnce(t, h.physical.String(), resizedWidth, resizedHeight, markers)
 }
 
 // A stable mutable prefix and the finalized transcript describe the same
@@ -163,7 +185,10 @@ func TestMutableActiveFinalizePreservesExactlyOncePhysicalFlow(t *testing.T) {
 	assertPhysicalMarkersExactlyOnce(t, h.physical.String(), width, height, markers)
 }
 
-func TestAuthoritativeFinalCorrectionReplacesAckedNativePrefixExactlyOnce(t *testing.T) {
+// 需求：正常交互中的权威修正（finalize 覆盖已 handoff 的可变前缀）同样不得重放历史。
+// 已交付的旧行只能被隔离（quarantine），不能被 \x1b[3J 清屏后重发；修正后的内容
+// 必须作为新行恰好交付一次，且投影义务必须收敛。
+func TestAuthoritativeFinalCorrectionSettlesWithoutScrollbackReplay(t *testing.T) {
 	const width, height = 72, 12
 	oldMarkers := make([]string, 30)
 	finalMarkers := make([]string, 30)
@@ -188,6 +213,7 @@ func TestAuthoritativeFinalCorrectionReplacesAckedNativePrefixExactlyOnce(t *tes
 	if h.controller.State().Active.Acked.End == 0 {
 		t.Fatal("fixture did not hand off the stale mutable prefix")
 	}
+	handoffEpoch := h.controller.State().HistoryEffects.TerminalEpoch
 
 	finalCell := &scene.TranscriptCell{
 		ID: 72, Revision: 5, Kind: scene.KindAssistant,
@@ -199,19 +225,50 @@ func TestAuthoritativeFinalCorrectionReplacesAckedNativePrefixExactlyOnce(t *tes
 		ExpectedSceneRevision: 5,
 		ExpectedActiveKind:    scene.KindAssistant, ExpectedActiveKindKnown: true,
 	})
+	// 非破坏性收敛可能需要 settle 之后再交付修正内容，按收敛条件排空。
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		settled := h.controller.State()
+		if !settled.HistoryEffects.ProjectionUnknown &&
+			!settled.HistoryEffects.ReconciliationRequired &&
+			!settled.HistoryEffects.HasPending() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("authoritative correction never settled: %#v", settled.HistoryEffects)
+		}
+		h.flush()
+	}
 	h.flush()
 
-	raw := h.physical.String()
-	if !strings.Contains(raw, "\x1b[3J") {
-		t.Fatalf("authoritative correction did not reset stale scrollback: %q", raw)
+	state := h.controller.State()
+	if state.Active != (ActiveCellState{}) {
+		t.Fatalf("finalization left mutable ownership mounted: %+v", state.Active)
 	}
-	assertPhysicalMarkersExactlyOnce(t, raw, width, height, finalMarkers)
-	screen := vt.NewScreen(width, height)
-	screen.Feed(raw)
-	physical := strings.Join(append(screen.ScrollbackLines(), screen.Lines(0, height)...), "\n")
+	if state.HistoryEffects.TerminalEpoch != handoffEpoch {
+		t.Fatalf("authoritative correction opened a fresh scrollback epoch: %#v", state.HistoryEffects)
+	}
+	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.ReconciliationRequired {
+		t.Fatalf("authoritative correction left the projection unresolved: %#v", state.HistoryEffects)
+	}
+	for _, entry := range state.HistoryEffects.Entries() {
+		if entry.State == HistoryCommitPending || entry.State == HistoryCommitInFlight {
+			t.Fatalf("authoritative correction left an in-flight delivery: %#v", entry)
+		}
+	}
+	raw := h.physical.String()
+	if strings.Contains(raw, "\x1b[3J") {
+		t.Fatalf("authoritative correction replayed (purged) native scrollback: %q", raw)
+	}
+	// 修正后的内容必须作为新行恰好交付一次；旧行只允许保留既有的一次交付。
+	for _, marker := range finalMarkers {
+		if count := strings.Count(raw, marker); count != 1 {
+			t.Fatalf("corrected marker %q delivered %d times, want exactly one", marker, count)
+		}
+	}
 	for _, marker := range oldMarkers {
-		if strings.Contains(physical, marker) {
-			t.Fatalf("stale mutable marker survived authoritative reset: %q", marker)
+		if count := strings.Count(raw, marker); count > 1 {
+			t.Fatalf("stale mutable marker %q re-emitted %d times without a replay", marker, count)
 		}
 	}
 }

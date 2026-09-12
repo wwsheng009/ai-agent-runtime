@@ -14,6 +14,7 @@ const (
 type terminalSessionScheduleSnapshot struct {
 	projectionUnknown      bool
 	reconciliationRequired bool
+	scrollbackReplayArmed  bool
 	recoveryActionable     bool
 	pendingToken           uint64
 	pendingGeneration      uint64
@@ -25,6 +26,7 @@ type terminalSessionControllerSnapshot struct {
 	appState               AppState
 	projectionUnknown      bool
 	reconciliationRequired bool
+	scrollbackReplayArmed  bool
 	claimed                *HistoryCommit
 	bootstrap              []HistoryCommit
 }
@@ -42,6 +44,7 @@ func (c *UIController) terminalSessionSchedule() terminalSessionScheduleSnapshot
 	snapshot := terminalSessionScheduleSnapshot{
 		projectionUnknown:      effects.ProjectionUnknown,
 		reconciliationRequired: effects.ReconciliationRequired,
+		scrollbackReplayArmed:  effects.ScrollbackReplayArmed,
 		recoveryActionable:     terminalHistoryRecoveryActionable(c.state),
 		stateRevision:          c.revision,
 		stateGeneration:        c.state.LayoutGeneration,
@@ -78,6 +81,7 @@ func (c *UIController) terminalSessionSnapshot(claimedToken uint64) terminalSess
 		appState:               terminalViewportAppState(c.state.AppState),
 		projectionUnknown:      c.state.HistoryEffects.ProjectionUnknown,
 		reconciliationRequired: c.state.HistoryEffects.ReconciliationRequired,
+		scrollbackReplayArmed:  c.state.HistoryEffects.ScrollbackReplayArmed,
 	}
 	if claimedToken != 0 {
 		snapshot.claimed, snapshot.bootstrap = terminalSessionClaimedBatchLocked(c.state, claimedToken)
@@ -101,6 +105,7 @@ func terminalViewportAppState(state AppState) AppState {
 			Frozen:                 effects.Frozen,
 			ProjectionUnknown:      effects.ProjectionUnknown,
 			ReconciliationRequired: effects.ReconciliationRequired,
+			ScrollbackReplayArmed:  effects.ScrollbackReplayArmed,
 		},
 		LayoutGeneration: state.LayoutGeneration,
 	}

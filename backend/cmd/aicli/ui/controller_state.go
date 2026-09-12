@@ -2,6 +2,8 @@ package ui
 
 import (
 	"errors"
+	"fmt"
+	"os"
 	"reflect"
 	"strings"
 
@@ -9,6 +11,22 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
+
+// traceHistoryReduction is the env-gated diagnostic for history-effect
+// reduction: AIR_TRACE_HISTORY=1 prints one line per claim/ack/fail decision so
+// a live session can be diffed against the ledger invariants. It is inert
+// (one getenv per decision) unless explicitly enabled, in the same spirit as
+// the other AIR_* debugging hooks.
+func traceHistoryReduction(state UIControllerState, format string, args ...any) {
+	if os.Getenv("AIR_TRACE_HISTORY") == "" {
+		return
+	}
+	prefix := fmt.Sprintf("[hist] gen=%d next=%d unknown=%t recon=%t pending=%d | ",
+		state.LayoutGeneration, state.HistoryEffects.NextToken,
+		state.HistoryEffects.ProjectionUnknown, state.HistoryEffects.ReconciliationRequired,
+		state.HistoryEffects.ledger.pendingCount)
+	fmt.Fprintf(os.Stderr, prefix+format+"\n", args...)
+}
 
 // UIControllerState is the actor-owned state published by UIController. AppState
 // is embedded rather than copied into a coordinator-local ledger, so geometry
@@ -219,24 +237,26 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			}
 		}
 	case HistoryCommitAcknowledged:
-		if a.LayoutGeneration != state.LayoutGeneration {
+		// A terminal success is proof for the exact token generation the writer
+		// accepted, even when a resize/theme change advanced the reducer's
+		// layout generation while the flush was in flight. The bytes are then
+		// already in native scrollback; rejecting the proof would demand a
+		// replay, which normal interaction must not perform. Tokens that were
+		// invalidated or never claimed are still refused by the ledger.
+		ackErr := state.HistoryEffects.ack(a.Token, a.Frame, a.LayoutGeneration)
+		if errors.Is(ackErr, ErrStaleLayoutGeneration) {
 			state.HistoryEffects.ProjectionUnknown = true
-			break
-		}
-		if err := state.HistoryEffects.ack(a.Token, a.Frame, a.LayoutGeneration); errors.Is(err, ErrStaleLayoutGeneration) {
-			state.HistoryEffects.ProjectionUnknown = true
-		} else if err == nil {
+		} else if ackErr == nil {
 			if entry, ok := state.HistoryEffects.ledger.Entry(a.Token); ok {
 				advanceActiveCellLedgerOnAck(&state, []HistoryCommit{entry.Commit})
 			}
 		}
+		traceHistoryReduction(state, "ack token=%d tokenGen=%d frame=%d err=%v", a.Token, a.LayoutGeneration, a.Frame, ackErr)
 	case HistoryCommitsAcknowledged:
-		var ackErr error
-		if a.LayoutGeneration != state.LayoutGeneration {
-			ackErr = ErrStaleLayoutGeneration
-		} else {
-			ackErr = state.HistoryEffects.ackBatch(a.Commits, a.Frame, a.LayoutGeneration)
-		}
+		// Batch proof follows the same rule as a single ack: the terminal wrote
+		// this exact ordered snapshot, so a superseded reducer generation must
+		// not turn delivered rows into an unresolved delivery.
+		ackErr := state.HistoryEffects.ackBatch(a.Commits, a.Frame, a.LayoutGeneration)
 		if ackErr != nil {
 			// A batch that no longer matches the reducer snapshot may have
 			// reached native scrollback in full. Quarantine every delivered
@@ -246,20 +266,41 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		} else if len(a.Commits) > 0 {
 			advanceActiveCellLedgerOnAck(&state, a.Commits)
 		}
+		firstToken, lastToken := uint64(0), uint64(0)
+		if len(a.Commits) > 0 {
+			firstToken = a.Commits[0].Token
+			lastToken = a.Commits[len(a.Commits)-1].Token
+		}
+		traceHistoryReduction(state, "ackBatch n=%d first=%d last=%d batchGen=%d frame=%d err=%v",
+			len(a.Commits), firstToken, lastToken, a.LayoutGeneration, a.Frame, ackErr)
 	case HistoryCommitFailed:
 		if a.LayoutGeneration != state.LayoutGeneration {
 			state.HistoryEffects.ProjectionUnknown = true
 			break
 		}
-		if err := state.HistoryEffects.fail(a.Token, a.LayoutGeneration, a.Err, a.MayHavePartiallyWritten); errors.Is(err, ErrStaleLayoutGeneration) {
+		failErr := state.HistoryEffects.fail(a.Token, a.LayoutGeneration, a.Err, a.MayHavePartiallyWritten)
+		if errors.Is(failErr, ErrStaleLayoutGeneration) {
 			state.HistoryEffects.ProjectionUnknown = true
 		}
+		traceHistoryReduction(state, "fail token=%d tokenGen=%d partial=%t err=%v -> %v",
+			a.Token, a.LayoutGeneration, a.MayHavePartiallyWritten, a.Err, failErr)
 	case HistoryCommitDeferred:
 		// Deferred explicitly means that the terminal transaction did not
-		// start. A stale deferred callback is harmless and must not clear or
-		// overwrite a newer Unknown/recovery state.
-		if a.LayoutGeneration == state.LayoutGeneration {
-			_ = state.HistoryEffects.deferInFlight(a.Token, a.LayoutGeneration)
+		// start, so no bytes are at risk. Return the token to Pending even when
+		// a resize/theme change advanced the layout generation while the claim
+		// was queued, then rebase its payload onto the current generation so it
+		// stays claimable instead of freezing the queue behind a stale token.
+		if err := state.HistoryEffects.deferInFlight(a.Token, a.LayoutGeneration); err == nil &&
+			a.LayoutGeneration != state.LayoutGeneration {
+			rebasePendingHistoryEffects(&state)
+		}
+	case HistoryReconciliationSettled:
+		// The terminal owner proved a source-backed viewport without replacing
+		// scrollback. Quarantine unproven deliveries in place and resume
+		// ordered handoff; an authorized replay must never be short-circuited
+		// by a settle that raced it.
+		if a.LayoutGeneration == state.LayoutGeneration && !state.HistoryEffects.ScrollbackReplayArmed {
+			state.HistoryEffects.settleUnresolvedWithoutReplay()
 		}
 	case HistoryProjectionRecovered:
 		if !state.Lease.Active && !state.HistoryEffects.Frozen && a.LayoutGeneration == state.LayoutGeneration {
@@ -277,6 +318,9 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		// under fresh tokens; never reinterpret old delivery as Acked.
 		if !state.Lease.Active && !state.HistoryEffects.Frozen && !state.HistoryEffects.ProjectionUnknown &&
 			a.LayoutGeneration == state.LayoutGeneration && state.HistoryEffects.reconcileScrollback(a.TerminalEpoch) {
+			// The authorization is one-shot: the replay it allowed just
+			// happened, so no later interaction may repeat it.
+			state.HistoryEffects.clearScrollbackReplayAuthorization()
 			resetActiveHistoryProgressForTerminalEpoch(&state)
 			syncHistoryEffectsForTranscript(&state)
 		}
@@ -295,6 +339,22 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			refreshTranscriptOverlayPager(&state)
 		}
 	case ReplaceTranscriptAction:
+		// A session load authorizes exactly one replay and is itself the reason
+		// the obligation exists: the loaded Scene is a fresh semantic source
+		// that must replace whatever the terminal shows. The authorization is
+		// granted here, in the same reduction that installs the Scene it
+		// authorizes, and deliberately before the no-op check below: a
+		// replacement snapshot that is already installed still requests the
+		// replay. An executor can therefore never observe an armed grant against
+		// the pre-replacement Scene, which would spend the one shot on stale
+		// content and leave the loaded generation unreplayed. Raising the
+		// obligation here (instead of waiting for an invalidating replacement)
+		// makes the one-shot replay happen even when the loaded session had no
+		// previously acknowledged range to invalidate.
+		if a.ArmScrollbackReplay {
+			state.HistoryEffects.armScrollbackReplay()
+			state.HistoryEffects.ReconciliationRequired = true
+		}
 		// RuntimeEvent currently publishes the authoritative Scene snapshot even
 		// when its ChangeSet is empty. Trust the Scene's exact provenance/version
 		// fence before cloning cells or replanning native history. SceneID prevents

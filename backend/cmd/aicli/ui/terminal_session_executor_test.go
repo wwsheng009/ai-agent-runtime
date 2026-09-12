@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -66,6 +67,20 @@ func (w *terminalSessionBlockingWriter) writeCount() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return len(w.writes)
+}
+
+// contains reports whether any physical transaction written so far contains
+// needle. Tests use it to prove that no destructive scrollback reset was ever
+// emitted into the blocked writer's byte stream.
+func (w *terminalSessionBlockingWriter) contains(needle []byte) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, data := range w.writes {
+		if bytes.Contains(data, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func drainTerminalSessionExecutor(t *testing.T, writer *terminalSessionBlockingWriter, presenter *TerminalSessionPresenter) {
@@ -263,6 +278,18 @@ func TestTerminalSessionExecutorDrainsFinalResidentTailQueuedDuringBlockedFrameW
 		physical = append(physical, write...)
 	}
 	writer.mu.Unlock()
+	if path := os.Getenv("AIR_DUMP_PHYSICAL"); path != "" {
+		_ = os.WriteFile(path, physical, 0o644)
+		var ledger strings.Builder
+		for _, entry := range state.HistoryEffects.Entries() {
+			fmt.Fprintf(&ledger, "token=%d origin=%d state=%s gen=%d src=[%d,%d) disp=[%d,%d) lines=%d ack=%d partial=%t failure=%v\n",
+				entry.Commit.Token, entry.Commit.Origin, entry.State, entry.Commit.LayoutGeneration,
+				entry.Commit.SourceRange.Start, entry.Commit.SourceRange.End,
+				entry.Commit.DisplayRange.Start, entry.Commit.DisplayRange.End,
+				len(entry.Commit.Lines), entry.AckFrame, entry.MayHavePartiallyWritten, entry.Failure)
+		}
+		_ = os.WriteFile(path+".ledger.txt", []byte(ledger.String()), 0o644)
+	}
 	assertPhysicalMarkersExactlyOnce(t, string(physical), width, height, markers)
 	if strings.Contains(string(physical), markers[30]+"\r\n\r\n"+markers[31]) {
 		t.Fatal("final resident-tail transition inserted an extra blank row")
@@ -435,7 +462,7 @@ func TestTerminalSessionExecutorConsumesControllerWakeWithoutExtraFrame(t *testi
 	}
 }
 
-func TestTerminalSessionExecutorResizeRacingInFlightHistoryReconcilesAndDrains(t *testing.T) {
+func TestTerminalSessionExecutorResizeRacingInFlightHistoryDrainsWithoutReplay(t *testing.T) {
 	var executor *TerminalSessionExecutor
 	controller := newHistoryExecutorController(t, func(effect Effect) {
 		if executor != nil {
@@ -467,34 +494,37 @@ func TestTerminalSessionExecutorResizeRacingInFlightHistoryReconcilesAndDrains(t
 	}
 	controller.WaitIdle()
 	resized := controller.State()
-	if entry := historyCommitEntry(t, resized, oldToken); entry.State != HistoryCommitInvalidated || !entry.MayHavePartiallyWritten {
-		t.Fatalf("resize did not quarantine in-flight history: %#v", entry)
+	// The resize changes the layout generation while those bytes are crossing
+	// the writer, but it must neither invalidate the in-flight delivery nor
+	// demand a scrollback replay: the write is already committed to the host,
+	// and invalidating it would make the range permanently un-mintable.
+	if entry := historyCommitEntry(t, resized, oldToken); entry.State != HistoryCommitInFlight || entry.MayHavePartiallyWritten {
+		t.Fatalf("resize quarantined in-flight history: %#v", entry)
 	}
-	if !resized.HistoryEffects.ProjectionUnknown {
-		t.Fatal("resize race did not invalidate history projection")
-	}
-	writer.allow()
-	resetWrite := writer.waitStarted(t, 2)
-	if !bytes.Contains(resetWrite, []byte("\x1b[3J")) {
-		t.Fatalf("current-generation recovery did not reset scrollback: %q", resetWrite)
-	}
-	writer.allow()
-	freshWrite := writer.waitStarted(t, 3)
-	if bytes.Contains(freshWrite, []byte("\x1b[3J")) {
-		t.Fatalf("fresh history drain repeated scrollback reset: %q", freshWrite)
+	if resized.HistoryEffects.ProjectionUnknown || resized.HistoryEffects.ReconciliationRequired {
+		t.Fatalf("resize race raised a recovery obligation: %#v", resized.HistoryEffects)
 	}
 	writer.allow()
-	executor.WaitIdle()
-	controller.WaitIdle()
+	drainExecutorAllowingWrites(t, executor, controller, writer)
 
 	state := controller.State()
-	assertTerminalSessionExecutorRecoveredHistory(t, state, oldToken, oldNextToken)
-	if state.LayoutGeneration != 5 || state.HistoryEffects.TerminalEpoch == 0 || writer.writeCount() != 3 {
-		t.Fatalf("resize recovery state = generation %d epoch %d writes %d", state.LayoutGeneration, state.HistoryEffects.TerminalEpoch, writer.writeCount())
+	assertTerminalSessionExecutorDrainedHistory(t, state)
+	if state.LayoutGeneration != 5 {
+		t.Fatalf("resize recovery state = generation %d", state.LayoutGeneration)
+	}
+	if entry := historyCommitEntry(t, state, oldToken); entry.State != HistoryCommitAcked || entry.AckFrame == 0 {
+		t.Fatalf("raced delivery was not acknowledged: state=%s gen=%d ack=%d partial=%t failure=%v",
+			entry.State, entry.Commit.LayoutGeneration, entry.AckFrame, entry.MayHavePartiallyWritten, entry.Failure)
+	}
+	if state.HistoryEffects.NextToken < oldNextToken {
+		t.Fatalf("resize race lost history tokens: next=%d old=%d", state.HistoryEffects.NextToken, oldNextToken)
+	}
+	if writer.contains([]byte("\x1b[3J")) {
+		t.Fatal("resize race replaced native scrollback")
 	}
 }
 
-func TestTerminalSessionExecutorSecondResizeRacingScrollbackResetStillRecovers(t *testing.T) {
+func TestTerminalSessionExecutorSecondResizeRaceStillDrainsWithoutReplay(t *testing.T) {
 	var executor *TerminalSessionExecutor
 	controller := newHistoryExecutorController(t, func(effect Effect) {
 		if executor != nil {
@@ -509,58 +539,98 @@ func TestTerminalSessionExecutorSecondResizeRacingScrollbackResetStillRecovers(t
 	})
 
 	postHistoryEffectFixture(t, controller, 20)
-	writer.waitStarted(t, 1)
+	firstWrite := writer.waitStarted(t, 1)
 	controller.WaitIdle()
+	if bytes.Contains(firstWrite, []byte("\x1b[3J")) {
+		t.Fatalf("initial history transaction unexpectedly reset scrollback: %q", firstWrite)
+	}
 	beforeResize := controller.State()
-	oldNextToken := beforeResize.HistoryEffects.NextToken
 	oldToken := beforeResize.HistoryEffects.Entries()[0].Commit.Token
 
+	// Two consecutive resize races must converge without replacing scrollback:
+	// the first changes the generation while the handoff is in flight, the
+	// second arrives while the resumed stream is still draining.
 	if !controller.Post(Resize{Width: 80, Height: 12, Generation: 5}) {
 		t.Fatal("post first racing Resize")
 	}
 	controller.WaitIdle()
 	writer.allow()
-	firstReset := writer.waitStarted(t, 2)
-	if !bytes.Contains(firstReset, []byte("\x1b[3J")) {
-		t.Fatalf("first recovery omitted scrollback reset: %q", firstReset)
-	}
-
 	if !controller.Post(Resize{Width: 80, Height: 14, Generation: 6}) {
 		t.Fatal("post second racing Resize")
 	}
 	controller.WaitIdle()
-	writer.allow()
-	secondReset := writer.waitStarted(t, 3)
-	if !bytes.Contains(secondReset, []byte("\x1b[3J")) {
-		t.Fatalf("second current-generation recovery omitted scrollback reset: %q", secondReset)
-	}
-	writer.allow()
-	writer.waitStarted(t, 4)
-	writer.allow()
-	executor.WaitIdle()
-	controller.WaitIdle()
+	drainExecutorAllowingWrites(t, executor, controller, writer)
 
 	state := controller.State()
-	assertTerminalSessionExecutorRecoveredHistory(t, state, oldToken, oldNextToken)
-	if state.LayoutGeneration != 6 || state.HistoryEffects.TerminalEpoch < 2 || writer.writeCount() != 4 {
-		t.Fatalf("second resize recovery state = generation %d epoch %d writes %d", state.LayoutGeneration, state.HistoryEffects.TerminalEpoch, writer.writeCount())
+	assertTerminalSessionExecutorDrainedHistory(t, state)
+	if state.LayoutGeneration != 6 {
+		t.Fatalf("second resize recovery state = generation %d", state.LayoutGeneration)
+	}
+	if entry := historyCommitEntry(t, state, oldToken); entry.State != HistoryCommitAcked || entry.MayHavePartiallyWritten {
+		t.Fatalf("raced delivery did not settle as acked: state=%s gen=%d ack=%d partial=%t failure=%v",
+			entry.State, entry.Commit.LayoutGeneration, entry.AckFrame, entry.MayHavePartiallyWritten, entry.Failure)
+	}
+	if writer.contains([]byte("\x1b[3J")) {
+		t.Fatal("resize races replaced native scrollback")
 	}
 }
 
-func assertTerminalSessionExecutorRecoveredHistory(t *testing.T, state UIControllerState, oldToken, oldNextToken uint64) {
+// assertTerminalSessionExecutorDrainedHistory proves a normal-interaction
+// history drain settled without replacing native scrollback: no obligation or
+// pending delivery remains, every token is terminal, nothing is partially
+// written, and no terminal epoch was minted.
+func assertTerminalSessionExecutorDrainedHistory(t *testing.T, state UIControllerState) {
 	t.Helper()
-	if state.HistoryEffects.ProjectionUnknown {
-		t.Fatal("history projection remained unknown after scrollback reconciliation")
+	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.ReconciliationRequired {
+		t.Fatalf("history obligation survived the drain: %#v", state.HistoryEffects)
 	}
-	if state.HistoryEffects.NextToken <= oldNextToken {
-		t.Fatalf("fresh epoch did not advance tokens: next=%d old=%d", state.HistoryEffects.NextToken, oldNextToken)
+	if state.HistoryEffects.TerminalEpoch != 0 {
+		t.Fatalf("normal-interaction drain minted a terminal epoch: %d", state.HistoryEffects.TerminalEpoch)
+	}
+	if pending := state.HistoryEffects.Pending(); len(pending) != 0 {
+		t.Fatalf("history drain left pending deliveries: %#v", pending)
 	}
 	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.Commit.Token == oldToken {
-			t.Fatalf("retired token survived reconciliation: %#v", entry)
+		if entry.MayHavePartiallyWritten {
+			t.Fatalf("history drain left a partially written delivery: %#v", entry)
 		}
-		if entry.Commit.Token <= oldNextToken || entry.State != HistoryCommitAcked || entry.AckFrame == 0 || entry.MayHavePartiallyWritten {
-			t.Fatalf("fresh history entry unresolved after drain: %#v", entry)
+		if entry.State != HistoryCommitAcked && entry.State != HistoryCommitAbandoned {
+			t.Fatalf("history drain left a non-terminal delivery: %#v", entry)
+		}
+	}
+}
+
+// drainExecutorAllowingWrites releases the blocking writer for the rest of the
+// test and keeps requesting the executor until its ledger is quiescent.
+func drainExecutorAllowingWrites(t *testing.T, executor *TerminalSessionExecutor, controller *UIController, writer *terminalSessionBlockingWriter) {
+	t.Helper()
+	// Closing the release channel lets every later write complete without a
+	// per-write handshake; the drain goroutine keeps the writer's buffered
+	// started channel empty so a long drain can never block on the handshake.
+	writer.unblock()
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-writer.started:
+			case <-done:
+				return
+			}
+		}
+	}()
+	defer close(done)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		executor.Request()
+		executor.WaitIdle()
+		controller.WaitIdle()
+		schedule := controller.terminalSessionSchedule()
+		if !schedule.recoveryActionable && schedule.pendingToken == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out draining executor: %#v", controller.State().HistoryEffects)
 		}
 	}
 }
@@ -587,20 +657,40 @@ func TestTerminalSessionExecutorFrameFailureReconcilesWithoutBlindHandoff(t *tes
 	executor.Request()
 	executor.WaitIdle()
 	state = controller.State()
-	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.TerminalEpoch == 0 {
-		t.Fatalf("partial native history did not establish a fresh terminal epoch: %#v", state.HistoryEffects)
+	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.ReconciliationRequired {
+		t.Fatalf("partial native history did not settle: %#v", state.HistoryEffects)
 	}
+	// Normal interaction must never replace native scrollback: the recovery
+	// proves the viewport from source and quarantines the unproven range in
+	// place, so no terminal epoch is minted and no reset reaches the writer.
+	if state.HistoryEffects.TerminalEpoch != 0 {
+		t.Fatalf("settle minted a terminal epoch without an authorized replay: %d", state.HistoryEffects.TerminalEpoch)
+	}
+	if bytes.Contains(writer.bytes.Bytes(), []byte("\x1b[3J")) {
+		t.Fatalf("settle replaced uncertain scrollback: %q", writer.bytes.String())
+	}
+	quarantined := false
 	for _, current := range state.HistoryEffects.Entries() {
-		if current.Commit.Token == firstToken || current.State != HistoryCommitAcked || current.MayHavePartiallyWritten {
-			t.Fatalf("scrollback reconciliation left stale delivery: %#v", current)
+		if current.MayHavePartiallyWritten {
+			t.Fatalf("settle left a partially written delivery: %#v", current)
+		}
+		if current.Commit.Token == firstToken {
+			if current.State != HistoryCommitAbandoned {
+				t.Fatalf("unproven delivery was not quarantined in place: %#v", current)
+			}
+			quarantined = true
+			continue
+		}
+		if current.State != HistoryCommitAcked {
+			t.Fatalf("settled history left an unresolved delivery: %#v", current)
 		}
 	}
-	if !bytes.Contains(writer.bytes.Bytes(), []byte("\x1b[3J")) {
-		t.Fatalf("recovery did not replace uncertain scrollback: %q", writer.bytes.String())
+	if !quarantined {
+		t.Fatalf("quarantined delivery disappeared from the ledger: %#v", state.HistoryEffects.Entries())
 	}
 }
 
-func TestTerminalSessionExecutorSuccessBackoffReconcilesRequiredScrollback(t *testing.T) {
+func TestTerminalSessionExecutorSuccessBackoffReconcilesRequiredProjection(t *testing.T) {
 	controller := newHistoryExecutorController(t, nil)
 	postHistoryEffectFixture(t, controller, 20)
 	controller.WaitIdle()
@@ -639,8 +729,13 @@ func TestTerminalSessionExecutorSuccessBackoffReconcilesRequiredScrollback(t *te
 	executor.WaitIdle()
 	controller.WaitIdle()
 
-	if !bytes.Contains(writer.bytes.Bytes(), []byte("\x1b[3J")) {
-		t.Fatalf("success-mode backoff flush branch did not reconcile required scrollback (no reset): %q", writer.bytes.String())
+	// Discharging the obligation must prove the viewport from source.
+	// Replacing native scrollback is reserved for an authorized resume/load
+	// replay, so this cycle must not reset. A settle may legitimately need no
+	// bytes at all when the cached viewport already equals the semantic source,
+	// so the proof is the cleared obligation below rather than a write volume.
+	if bytes.Contains(writer.bytes.Bytes(), []byte("\x1b[3J")) {
+		t.Fatalf("success-mode backoff flush branch replaced scrollback: %q", writer.bytes.String())
 	}
 
 	// Drain the re-enqueued pending tokens that the reconciliation replan
@@ -662,6 +757,14 @@ func TestTerminalSessionExecutorSuccessBackoffReconcilesRequiredScrollback(t *te
 	state = controller.State()
 	if state.HistoryEffects.ReconciliationRequired {
 		t.Fatalf("scrollback reconciliation obligation survived the backoff cycle: %#v", state.HistoryEffects)
+	}
+	if state.HistoryEffects.TerminalEpoch != 0 {
+		t.Fatalf("normal-interaction recovery minted a terminal epoch: %d", state.HistoryEffects.TerminalEpoch)
+	}
+	for _, entry := range executor.RecoveryDiag().Entries {
+		if entry.ScrollbackReset {
+			t.Fatal("success-mode backoff recovery replaced scrollback")
+		}
 	}
 }
 
@@ -694,16 +797,22 @@ func TestTerminalSessionExecutorPartialHistoryWriteReconcilesWithoutResize(t *te
 	controller.WaitIdle()
 
 	state := controller.State()
-	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.TerminalEpoch == 0 {
-		t.Fatalf("partial history did not reconcile without resize: effects=%#v writes=%d", state.HistoryEffects, writer.writes)
+	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.ReconciliationRequired {
+		t.Fatalf("partial history did not settle without resize: effects=%#v writes=%d", state.HistoryEffects, writer.writes)
+	}
+	if state.HistoryEffects.TerminalEpoch != 0 {
+		t.Fatalf("partial-write recovery minted a terminal epoch without an authorized replay: %d", state.HistoryEffects.TerminalEpoch)
 	}
 	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.State != HistoryCommitAcked || entry.MayHavePartiallyWritten {
+		if entry.MayHavePartiallyWritten {
 			t.Fatalf("replanned history remained unresolved: %#v", entry)
 		}
+		if entry.State != HistoryCommitAcked && entry.State != HistoryCommitAbandoned {
+			t.Fatalf("replanned history left a non-terminal delivery: %#v", entry)
+		}
 	}
-	if !bytes.Contains(writer.bytes.Bytes(), []byte("\x1b[3J")) {
-		t.Fatalf("recovery never reset uncertain native scrollback: %q", writer.bytes.String())
+	if bytes.Contains(writer.bytes.Bytes(), []byte("\x1b[3J")) {
+		t.Fatalf("settle replaced uncertain native scrollback: %q", writer.bytes.String())
 	}
 }
 
@@ -918,8 +1027,8 @@ func TestTerminalSessionExecutorScrollbackResetBackoffIsGenerationBased(t *testi
 	// After the budget is exhausted (>= terminalScrollbackResetMaxRetries),
 	// the guard parks permanently at the same generation until a real
 	// geometry/theme change.
-	executor.recordScrollbackReset(7, 8, false)  // retries = 2
-	executor.recordScrollbackReset(8, 8, false)  // retries = 3 ≥ maxRetries
+	executor.recordScrollbackReset(7, 8, false) // retries = 2
+	executor.recordScrollbackReset(8, 8, false) // retries = 3 ≥ maxRetries
 	if !executor.scrollbackResetBackoff(8) {
 		t.Fatal("same-generation retry was not parked after budget exhausted")
 	}
@@ -1013,9 +1122,9 @@ func TestTerminalSessionExecutorReconciliationRetryAfterDeadlock(t *testing.T) {
 
 	// Second cycle: the executor sees recoveryActionable (ReconciliationRequired
 	// is still true) and the backoff is released, so it performs a full
-	// scrollback reconciliation reset. This time ProjectionUnknown is false,
-	// so the reducer accepts HistoryScrollbackReconciled → reconcileScrollback
-	// → ReconciliationRequired cleared.
+	// source-backed recovery. This time ProjectionUnknown is false, so the
+	// reducer accepts the settle barrier and ReconciliationRequired clears
+	// without replacing native scrollback.
 	executor.Request()
 	executor.WaitIdle()
 	controller.WaitIdle()
@@ -1025,25 +1134,28 @@ func TestTerminalSessionExecutorReconciliationRetryAfterDeadlock(t *testing.T) {
 		t.Fatal("second reconciliation reset did not converge: ReconciliationRequired still set")
 	}
 	if state.HistoryEffects.ProjectionUnknown {
-		t.Fatal("second reconciliation reset left ProjectionUnknown set")
+		t.Fatal("second recovery retry left ProjectionUnknown set")
 	}
-	if got := state.HistoryEffects.TerminalEpoch; got == 0 {
-		t.Fatalf("terminal epoch after retry = 0 (no fresh epoch barrier was accepted)")
+	if got := state.HistoryEffects.TerminalEpoch; got != 0 {
+		t.Fatalf("normal-interaction recovery minted a terminal epoch: %d", got)
 	}
-	// The executor must have actually performed the retry scrollback reset
-	// (not just a plain viewport flush): verify a reset landed after the
-	// backoff released, and the reconciled scrollback content was committed.
-	foundReset := false
+	// The executor must have actually proved the viewport from source on the
+	// retry (not just a plain no-op flush), and must never replace native
+	// scrollback: only an authorized resume/load replay may do that.
+	foundRepaint := false
 	for _, entry := range executor.RecoveryDiag().Entries {
 		if entry.ScrollbackReset {
-			foundReset = true
+			t.Fatal("retry cycle replaced native scrollback")
+		}
+		if entry.FullRepaint {
+			foundRepaint = true
 		}
 	}
-	if !foundReset {
-		t.Fatal("retry cycle did not perform a scrollback reset (plain flush only)")
+	if !foundRepaint {
+		t.Fatal("retry cycle did not perform a source-backed recovery repaint")
 	}
 	if !strings.Contains(writer.bytes.String(), "final") {
-		t.Fatalf("reconciled scrollback missing cell content: %q", writer.bytes.String())
+		t.Fatalf("recovered scrollback missing cell content: %q", writer.bytes.String())
 	}
 }
 
@@ -1389,12 +1501,18 @@ func TestTerminalSessionExecutorHandsOffPendingHistoryWhileSuccessBackoff(t *tes
 	if diag.HandoffsWhileBackoff < 1 {
 		t.Fatalf("backoff handoff was not recorded: %+v", diag)
 	}
-	// The second turn's projection was invalidated by the transcript change,
-	// so its claim fails while ProjectionUnknown is set and the executor must
-	// run the scrollback reconciliation plan under the engaged backoff instead
-	// of a viewport-only flush (which would keep the obligation forever).
-	if diag.ScrollbackResetsInWindow < 1 {
-		t.Fatalf("reconciliation under success-mode backoff was not recorded: %+v", diag)
+	// A later turn still requires the executor to discharge the recovery
+	// obligation under the engaged backoff instead of a viewport-only flush
+	// (which would keep the obligation forever), but it must do so by proving
+	// the viewport from source: normal interaction never replaces scrollback.
+	if diag.ScrollbackResetsInWindow != 0 {
+		t.Fatalf("recovery under success-mode backoff replaced scrollback: %+v", diag)
+	}
+	if bytes.Contains(writer.bytes.Bytes(), []byte("\x1b[3J")) {
+		t.Fatalf("success-mode backoff recovery reset scrollback: %q", writer.bytes.String())
+	}
+	if epoch := controller.State().HistoryEffects.TerminalEpoch; epoch != 0 {
+		t.Fatalf("normal-interaction recovery minted a terminal epoch: %d", epoch)
 	}
 	found := false
 	for _, entry := range diag.Entries {

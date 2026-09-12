@@ -94,6 +94,12 @@ const (
 	HistoryCommitAcked
 	HistoryCommitStateFailed
 	HistoryCommitInvalidated
+	// HistoryCommitAbandoned is the terminal state for a delivery whose
+	// physical outcome is unknown (failed or partially written) and which the
+	// no-replay policy refuses to repair by replacing native scrollback. The
+	// entry keeps its source identity so the range is never minted a second
+	// time, but it no longer blocks ordered delivery.
+	HistoryCommitAbandoned
 )
 
 func (s HistoryCommitState) String() string {
@@ -108,6 +114,8 @@ func (s HistoryCommitState) String() string {
 		return "failed"
 	case HistoryCommitInvalidated:
 		return "invalidated"
+	case HistoryCommitAbandoned:
+		return "abandoned"
 	default:
 		return "unknown"
 	}
@@ -464,6 +472,40 @@ func (l *HistoryCommitLedger) Fail(token uint64, err error, mayHavePartiallyWrit
 	return nil
 }
 
+// SettleUnresolvedWithoutReplay retires unresolved terminal deliveries in
+// place instead of replacing native scrollback. Normal interaction must never
+// replay history, so a range whose bytes cannot be proven (failed write, or an
+// invalidated in-flight token that may have partially landed) is quarantined:
+// it stops counting as an unresolved delivery so ordered handoff can resume,
+// while its source identity stays terminal so the same range is never minted
+// twice. The trade-off is deliberate and visible: an unproven range is not
+// re-emitted, and a partially written range may leave visible rows incomplete.
+// Only an explicit resume/load replay authorization may rebuild scrollback
+// instead.
+func (l *HistoryCommitLedger) SettleUnresolvedWithoutReplay() bool {
+	if l == nil || l.unresolvedCount == 0 {
+		return false
+	}
+	settled := false
+	for token, entry := range l.byToken {
+		unresolved := entry.State == HistoryCommitStateFailed ||
+			(entry.State == HistoryCommitInvalidated && entry.MayHavePartiallyWritten)
+		if !unresolved {
+			continue
+		}
+		entry.State = HistoryCommitAbandoned
+		entry.MayHavePartiallyWritten = false
+		l.byToken[token] = entry
+		settled = true
+	}
+	if settled {
+		// The counter only ever counted the exact states retired above, so it
+		// is safe to clear instead of rescanning the whole ledger.
+		l.unresolvedCount = 0
+	}
+	return settled
+}
+
 func (l *HistoryCommitLedger) Entry(token uint64) (HistoryCommitEntry, bool) {
 	entry, ok := l.entry(token)
 	return entry.Clone(), ok
@@ -502,7 +544,8 @@ func (l *HistoryCommitLedger) hasTerminalRecordForSource(key historyCommitSource
 			continue
 		}
 		switch entry.State {
-		case HistoryCommitPending, HistoryCommitInFlight, HistoryCommitAcked, HistoryCommitStateFailed:
+		case HistoryCommitPending, HistoryCommitInFlight, HistoryCommitAcked,
+			HistoryCommitStateFailed, HistoryCommitAbandoned:
 			return true
 		case HistoryCommitInvalidated:
 			if entry.MayHavePartiallyWritten {

@@ -806,10 +806,9 @@ func TestTerminalSessionHeightResizeDoesNotReplayOldViewportBoundary(t *testing.
 		initialOutput int
 		nextHeight    int
 		nextOutput    int
-		forbiddenCUP  string
 	}{
 		{name: "shrink", initialHeight: 6, initialOutput: 4, nextHeight: 4, nextOutput: 2},
-		{name: "grow", initialHeight: 4, initialOutput: 2, nextHeight: 6, nextOutput: 4, forbiddenCUP: "\x1b[3;1H"},
+		{name: "grow", initialHeight: 4, initialOutput: 2, nextHeight: 6, nextOutput: 4},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -826,18 +825,55 @@ func TestTerminalSessionHeightResizeDoesNotReplayOldViewportBoundary(t *testing.
 				t.Fatalf("height resize frame = %#v", result)
 			}
 			raw := output.String()
-			if strings.Contains(raw, "\x1b[s") || strings.Contains(raw, fmt.Sprintf("\x1b[1;%dr", test.nextHeight)) {
+			// 需求：resize 不得重放历史。DECSC/DECRC 与输入框、历史 handoff 共享
+			// 终端全局保存寄存器；整屏 DECSTBM 边界正是旧实现重排/重放历史的手段。
+			if strings.Contains(raw, "\x1b[s") || strings.Contains(raw, "\x1b[u") ||
+				strings.Contains(raw, fmt.Sprintf("\x1b[1;%dr", test.nextHeight)) {
 				t.Fatalf("height resize replayed an old DECSTBM boundary: %q", raw)
-			}
-			if test.forbiddenCUP != "" && strings.Contains(raw, test.forbiddenCUP) {
-				t.Fatalf("height resize addressed an old viewport row: %q", raw)
 			}
 			want := ViewportArea{Top: test.nextOutput + 1, Height: test.nextHeight - test.nextOutput, Width: 28}
 			if state := session.ProjectionState(); state.Viewport != want || state.Validity != renderengine.ProjectionKnown {
 				t.Fatalf("height resize projection = %#v, want viewport=%#v", state, want)
 			}
+			// 新视口带之外的行只允许被本地擦除（\x1b[<row>;1H\x1b[0m\x1b[K），
+			// 不得写入任何内容：旧视口残留行不能伪装成历史行或提示行。
+			for _, address := range terminalRowAddresses(raw) {
+				row, contentStart := address[0], address[1]
+				if row >= want.Top && row < want.Top+want.Height {
+					continue
+				}
+				if row > test.nextHeight {
+					t.Fatalf("height resize addressed row %d beyond the terminal capacity: %q", row, raw)
+				}
+				if !strings.HasPrefix(raw[contentStart:], "\x1b[0m\x1b[K") {
+					t.Fatalf("height resize wrote content to out-of-band row %d: %q", row, raw)
+				}
+			}
 		})
 	}
+}
+
+// terminalRowAddresses 返回 raw 中每个绝对行定位（\x1b[<row>;1H）的行号与
+// 该序列之后的内容偏移，供“允许擦除、禁止写入”的断言使用。
+func terminalRowAddresses(raw string) [][2]int {
+	var found [][2]int
+	for index := 0; index+2 < len(raw); index++ {
+		if raw[index] != 0x1b || raw[index+1] != '[' {
+			continue
+		}
+		end := index + 2
+		row := 0
+		for end < len(raw) && raw[end] >= '0' && raw[end] <= '9' {
+			row = row*10 + int(raw[end]-'0')
+			end++
+		}
+		if end == index+2 || !strings.HasPrefix(raw[end:], ";1H") {
+			continue
+		}
+		found = append(found, [2]int{row, end + 3})
+		index = end + 2
+	}
+	return found
 }
 
 func TestTerminalOffsetViewportANSIFencesRelativeCoordinates(t *testing.T) {
@@ -914,14 +950,16 @@ func TestComposeTerminalTransactionPlanRetainsCompleteFrameContract(t *testing.T
 	t.Fatal("exported transaction composer omitted finalized transcript rows")
 }
 
-func TestTerminalSessionProjectionTracksCompletedScrollbackResets(t *testing.T) {
+// 需求：只有 /resume 首次全量重放（显式 ResetScrollback 计划）才允许重建
+// native scrollback。resize 属于正常交互，必须保持投影内容与诊断计数不变。
+func TestTerminalSessionOnlyExplicitReplayResetsScrollbackDiagnostics(t *testing.T) {
 	var output bytes.Buffer
 	session := NewTerminalSession(&output)
 	initial := terminalSessionPlan(1, 24, 6, 4, LeaseState{})
 	if result := session.Flush(initial); result.Err != nil {
 		t.Fatalf("initial flush = %#v", result)
 	}
-	if state := session.ProjectionState(); state.ScrollbackResetCount != 0 || state.LastScrollbackResetReason != "" {
+	if state := session.ProjectionState(); state.ScrollbackResetCount != 0 || state.LastScrollbackResetReason != "" || state.TerminalEpoch != 0 {
 		t.Fatalf("initial projection reported a reset: %#v", state)
 	}
 
@@ -930,19 +968,23 @@ func TestTerminalSessionProjectionTracksCompletedScrollbackResets(t *testing.T) 
 		t.Fatalf("resize flush = %#v", result)
 	}
 	state := session.ProjectionState()
-	if state.ScrollbackResetCount != 1 || state.LastScrollbackResetReason != "resize" || state.TerminalEpoch != 1 {
-		t.Fatalf("resize reset diagnostics = %#v", state)
+	if state.ScrollbackResetCount != 0 || state.LastScrollbackResetReason != "" || state.TerminalEpoch != 0 {
+		t.Fatalf("resize reset the scrollback diagnostics instead of repainting locally: %#v", state)
+	}
+	if state.Validity != renderengine.ProjectionKnown {
+		t.Fatalf("resize did not keep the projection known: %#v", state)
 	}
 
+	// 显式授权的重放（/resume 首次全量重放）仍然重建 scrollback 并推进 epoch。
 	result := session.FlushTransaction(TerminalTransactionPlan{
 		Frame: resized, ResetScrollback: true, TerminalEpoch: state.TerminalEpoch,
 	})
 	if result.Frame.Err != nil || !result.ScrollbackReset {
-		t.Fatalf("reconciliation reset = %#v", result)
+		t.Fatalf("authorized replay reset = %#v", result)
 	}
 	state = session.ProjectionState()
-	if state.ScrollbackResetCount != 2 || state.LastScrollbackResetReason != "reconciliation" || state.TerminalEpoch != 2 {
-		t.Fatalf("reconciliation reset diagnostics = %#v", state)
+	if state.ScrollbackResetCount != 1 || state.LastScrollbackResetReason != "reconciliation" || state.TerminalEpoch != 1 {
+		t.Fatalf("authorized replay diagnostics = %#v", state)
 	}
 }
 

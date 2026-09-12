@@ -89,33 +89,33 @@ type chatRuntimeEventBridge struct {
 	// the event stream (session_start opens / session_end closes) because the
 	// submitting side (sidecar/background auto-recovery wake turns) never
 	// called BeginRun. Empty means no adopted run is open.
-	adoptedTurnID   string
-	adoptedRunEpoch uint64 // runEpoch captured at adopt time
-	executorTurnID  string
-	activeAssistantStreamID         string
-	assistantStreams                map[string]*chatAssistantStreamState
-	retiredAssistantStreams         map[string]struct{}
-	retiredTurnIDs                  map[string]struct{}
-	retiredTurnOrder                []string
-	acceptedAssistantFinalTurns     map[string]struct{}
-	finalAssistantTurns             map[string]struct{}
-	nextRunPrompt                   string
-	activeRunPrompt                 string
-	requestLogState                 map[string]*chatRuntimeRequestLogState
-	traceLatestRequestKey           map[string]string
-	latestRequestKey                string
-	loggedToolCalls                 map[string]struct{}
-	loggedToolResults               map[string]struct{}
-	toolCallStartedAt               map[string]time.Time
-	toolExecutionCalls              []aicliToolExecutionCallSummary
-	toolSummaryLogged               bool
-	enqueuedEvents                  uint64
-	processedEvents                 uint64
-	criticalPending                 uint64
-	askApproval                     func(*runtimechat.ApprovalRequest, []string) (chatApprovalAnswer, error)
-	askQuestion                     func(prompt string, suggestions []string, required bool) (string, error)
-	approveTool                     func(ctx context.Context, sessionID, requestID string, allow bool) error
-	answerQuestion                  func(ctx context.Context, sessionID, questionID, answer string) error
+	adoptedTurnID               string
+	adoptedRunEpoch             uint64 // runEpoch captured at adopt time
+	executorTurnID              string
+	activeAssistantStreamID     string
+	assistantStreams            map[string]*chatAssistantStreamState
+	retiredAssistantStreams     map[string]struct{}
+	retiredTurnIDs              map[string]struct{}
+	retiredTurnOrder            []string
+	acceptedAssistantFinalTurns map[string]struct{}
+	finalAssistantTurns         map[string]struct{}
+	nextRunPrompt               string
+	activeRunPrompt             string
+	requestLogState             map[string]*chatRuntimeRequestLogState
+	traceLatestRequestKey       map[string]string
+	latestRequestKey            string
+	loggedToolCalls             map[string]struct{}
+	loggedToolResults           map[string]struct{}
+	toolCallStartedAt           map[string]time.Time
+	toolExecutionCalls          []aicliToolExecutionCallSummary
+	toolSummaryLogged           bool
+	enqueuedEvents              uint64
+	processedEvents             uint64
+	criticalPending             uint64
+	askApproval                 func(*runtimechat.ApprovalRequest, []string) (chatApprovalAnswer, error)
+	askQuestion                 func(prompt string, suggestions []string, required bool) (string, error)
+	approveTool                 func(ctx context.Context, sessionID, requestID string, allow bool) error
+	answerQuestion              func(ctx context.Context, sessionID, questionID, answer string) error
 	// preferInteractiveApprovals keeps NoInteractive headless hosts (ACP stdio)
 	// from auto-denying tools so askApproval can RPC to an external client.
 	preferInteractiveApprovals bool
@@ -541,9 +541,13 @@ func (b *chatRuntimeEventBridge) start() {
 		return
 	}
 	b.startOnce.Do(func() {
-		// 事件日志重放：恢复同会话上次运行进入编码器的全部事件，幂等重建渲染模型。
-		// 失败不阻塞启动：计入 failures 供 /debug 审计，进程静默降级为无重放。
-		_, _ = b.replayEventLog()
+		// 会话加载（/resume、--session、启动恢复）是唯一允许全量重放历史的入口：
+		// 事件日志重放重建 canonical Scene，并在发布 replacement snapshot 的
+		// 同一个 action 内请求一次性的 scrollback 替换授权。正常交互
+		// （resize/流式增量/主题切换/写入恢复）没有该授权，只能走非破坏性的
+		// 视口恢复，绝不重放历史。
+		// 重放失败不阻塞启动：计入 failures 供 /debug 审计，进程静默降级为无重放。
+		_, _ = b.replaySessionLoadEventLog()
 		b.startProcessor()
 		b.session.LocalRuntimeHost.EventBus.Subscribe("", b.Handle)
 	})
@@ -1629,6 +1633,17 @@ func (b *chatRuntimeEventBridge) sessionInteractionSnapshot() {
 	}
 }
 
+// sessionInteractionReplacementSnapshot publishes the current Scene as a
+// canonical-history replacement and requests the one-shot scrollback-replay
+// authorization in the same action. Session load (/resume, /load, startup
+// restore), canonical history seed and /backtrack use it; regular Scene updates
+// keep using sessionInteractionSnapshot, which never authorizes a replay.
+func (b *chatRuntimeEventBridge) sessionInteractionReplacementSnapshot() {
+	if b != nil && b.session != nil && b.session.Interaction != nil {
+		b.session.Interaction.postReplacementTranscriptSnapshotFromBridge(b)
+	}
+}
+
 // submitPriorityTranscript finalizes the mutable Scene item created by the
 // matching approval/question runtime event. It returns false for a missing or
 // already-finalized target; callers must then use a generic local supplement
@@ -2050,17 +2065,35 @@ func (b *chatRuntimeEventBridge) appendEventLogLine(line []byte) {
 // 幂等重建渲染模型与 Scene 数据面（重放前模型必须为空，即新 bridge；
 // Scene 同样从空重建，保证恢复后的 Scene 与实时路径等价）。返回重放
 // 记录数；日志不存在时静默返回 0。
+//
+// 该入口不携带 scrollback 重放授权，供诊断与单测使用；会话加载必须走
+// replaySessionLoadEventLog。
 func (b *chatRuntimeEventBridge) replayEventLog() (uint64, error) {
+	return b.replayEventLogWithLoadAuthorization(false)
+}
+
+// replaySessionLoadEventLog 是会话加载（/resume、--session、启动恢复）的重放入口。
+// 重放重建的 Scene 就是本次加载的 canonical 投影，因此最后一次 replacement
+// snapshot 与一次性 scrollback 重放授权作为同一个 action 发布；日志缺失或为空时
+// 同样发布一个 replacement snapshot（空 Scene），使“加载空会话”依旧显式清空
+// 上一个会话的投影，而不是把授权留给旧 Scene。
+func (b *chatRuntimeEventBridge) replaySessionLoadEventLog() (uint64, error) {
+	return b.replayEventLogWithLoadAuthorization(true)
+}
+
+func (b *chatRuntimeEventBridge) replayEventLogWithLoadAuthorization(sessionLoad bool) (uint64, error) {
 	if b == nil || b.renderEncoder == nil {
 		return 0, nil
 	}
 	path := b.eventLogFilePath()
 	if path == "" {
+		b.publishReplayedScene(sessionLoad)
 		return 0, nil
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			b.publishReplayedScene(sessionLoad)
 			return 0, nil
 		}
 		b.eventLogMu.Lock()
@@ -2214,10 +2247,23 @@ func (b *chatRuntimeEventBridge) replayEventLog() (uint64, error) {
 	// the UI actor so AppState does not retain a pre-replay transcript. This is
 	// a data-plane bridge only: the legacy replay presenter remains unchanged
 	// until the later Compose/TerminalSession migration.
-	if b.session != nil && b.session.Interaction != nil {
-		b.session.Interaction.postTranscriptSnapshotFromBridge(b)
-	}
+	b.publishReplayedScene(sessionLoad)
 	return uint64(len(entries)), nil
+}
+
+// publishReplayedScene posts the replayed Scene as one immutable snapshot. The
+// session-load variant carries the one-shot scrollback-replay authorization
+// inside that same action, so the reducer installs the loaded Scene and its
+// replay grant in one transition.
+func (b *chatRuntimeEventBridge) publishReplayedScene(sessionLoad bool) {
+	if b == nil || b.session == nil || b.session.Interaction == nil {
+		return
+	}
+	if sessionLoad {
+		b.session.Interaction.postReplacementTranscriptSnapshotFromBridge(b)
+		return
+	}
+	b.session.Interaction.postTranscriptSnapshotFromBridge(b)
 }
 
 // eventLogStats 返回事件日志状态（/debug 诊断用）。
