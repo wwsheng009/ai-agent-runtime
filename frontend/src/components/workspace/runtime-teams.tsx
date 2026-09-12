@@ -1,66 +1,34 @@
-import {
-  RefreshCcwIcon,
-} from "lucide-react";
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+// 由 components/workspace/runtime-teams.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
-import { Badge } from "@/components/ui/badge";
+import { useEffect, useMemo, useState } from "react";
+
 import { useRuntimeTeamDispatch } from "@/components/workspace/runtime-teams/use-runtime-team-dispatch";
 import {
   ackRuntimeTeamMailboxMessage,
   checkRuntimeTeamPathClaims,
-  getRuntimeTeamFinalSummary,
   getRuntimeTeamTaskGraph,
   listRuntimeTeamEvents,
   listRuntimeTeamMailbox,
-  listRuntimeTeamPathClaims,
   listRuntimeTeamTasks,
-  listRuntimeTeamTeammates,
   sendRuntimeTeamMailboxMessage,
   type RuntimeCheckTeamPathClaimsResponse,
-  type RuntimeTeamRecord,
-  type RuntimeTeamSummaryEntry,
 } from "@/lib/runtime-api";
 import { cn } from "@/lib/utils";
 import {
-  type ClaimCheckState,
   createEmptyDetails,
   parsePathLines,
   sortEvents,
   sortMailbox,
-  sortPathClaims,
   sortTasks,
-  sortTeammates,
+  type ClaimCheckState,
   type TeamDetailsState,
-  truncateIdentifier,
 } from "@/components/workspace/runtime-teams/shared";
 
-const RuntimeTeamDetailsPanel = lazy(() =>
-  import("@/components/workspace/runtime-teams/runtime-team-details-panel").then(
-    (module) => ({
-      default: module.RuntimeTeamDetailsPanel,
-    }),
-  ),
-);
-const RuntimeTeamDispatchPanel = lazy(() =>
-  import("@/components/workspace/runtime-teams/runtime-team-dispatch-panel").then(
-    (module) => ({
-      default: module.RuntimeTeamDispatchPanel,
-    }),
-  ),
-);
-
-type RuntimeTeamsProps = {
-  className?: string;
-  error: string | null;
-  isLoading: boolean;
-  isRefreshing?: boolean;
-  onRefresh?: () => void;
-  showHeader?: boolean;
-  summaries: RuntimeTeamSummaryEntry[];
-  teams: RuntimeTeamRecord[];
-};
-
-type RuntimeTeamsView = "teams" | "dispatch";
+import { TeamsDirectoryView } from "./runtime-teams/directory-view";
+import { TeamsDispatchView } from "./runtime-teams/dispatch-view";
+import { TeamsSummarySection } from "./runtime-teams/summary-section";
+import { type RuntimeTeamsProps, type RuntimeTeamsView } from "./runtime-teams/types";
+import { useTeamDetailsLoader } from "./runtime-teams/use-team-details-loader";
 
 export function RuntimeTeams({
   className,
@@ -112,142 +80,23 @@ export function RuntimeTeams({
     }
   }, [teams.length]);
 
-  useEffect(() => {
-    if (!selectedTeamId) {
-      setDetails(createEmptyDetails());
-      setDetailsError(null);
-      setMailboxError(null);
-      setClaimCheckError(null);
-      setClaimCheckState(null);
-      setMailboxBodyDraft("");
-      setMailboxFromDraft("lead");
-      setMailboxToDraft("*");
-      setMailboxKindDraft("info");
-      setMailboxTaskDraft("");
-      return;
-    }
+  useTeamDetailsLoader({
+    selectedTeamId,
+    setClaimCheckError,
+    setClaimCheckState,
+    setDetails,
+    setDetailsError,
+    setIsDetailsLoading,
+    setMailboxBodyDraft,
+    setMailboxError,
+    setMailboxFromDraft,
+    setMailboxKindDraft,
+    setMailboxTaskDraft,
+    setMailboxToDraft,
+    setReadPathDraft,
+    setWritePathDraft,
+  });
 
-    setMailboxError(null);
-    setClaimCheckError(null);
-    setClaimCheckState(null);
-    setMailboxBodyDraft("");
-    setMailboxFromDraft("lead");
-    setMailboxToDraft("*");
-    setMailboxKindDraft("info");
-    setMailboxTaskDraft("");
-    setReadPathDraft("");
-    setWritePathDraft("");
-
-    let cancelled = false;
-    setIsDetailsLoading(true);
-    setDetailsError(null);
-
-    void (async () => {
-      try {
-        const [
-          summaryResult,
-          teammatesResult,
-          tasksResult,
-          graphResult,
-          eventsResult,
-          mailboxResult,
-          pathClaimsResult,
-        ] = await Promise.allSettled([
-            getRuntimeTeamFinalSummary(selectedTeamId),
-            listRuntimeTeamTeammates(selectedTeamId, { limit: 8 }),
-            listRuntimeTeamTasks(selectedTeamId, {
-              includeDependencies: true,
-              includeDependents: true,
-              limit: 12,
-            }),
-            getRuntimeTeamTaskGraph(selectedTeamId, { limit: 40 }),
-            listRuntimeTeamEvents(selectedTeamId, { limit: 12 }),
-            listRuntimeTeamMailbox(selectedTeamId, {
-              includeBroadcast: true,
-              limit: 10,
-            }),
-            listRuntimeTeamPathClaims(selectedTeamId, {
-              activeOnly: true,
-              limit: 10,
-            }),
-          ] as const);
-
-        if (cancelled) {
-          return;
-        }
-
-        const nextDetails = createEmptyDetails();
-        const partialFailures: string[] = [];
-
-        if (summaryResult.status === "fulfilled") {
-          nextDetails.finalSummary = summaryResult.value.summary?.trim() || "";
-        } else {
-          partialFailures.push("final summary");
-        }
-
-        if (teammatesResult.status === "fulfilled") {
-          nextDetails.teammates = sortTeammates(teammatesResult.value.teammates);
-        } else {
-          partialFailures.push("teammates");
-        }
-
-        if (tasksResult.status === "fulfilled") {
-          nextDetails.tasks = sortTasks(tasksResult.value.tasks);
-        } else {
-          partialFailures.push("tasks");
-        }
-
-        if (graphResult.status === "fulfilled") {
-          nextDetails.graph = graphResult.value;
-        } else {
-          partialFailures.push("task graph");
-        }
-
-        if (eventsResult.status === "fulfilled") {
-          nextDetails.events = sortEvents(eventsResult.value.events);
-        } else {
-          partialFailures.push("events");
-        }
-
-        if (mailboxResult.status === "fulfilled") {
-          nextDetails.mailbox = sortMailbox(mailboxResult.value.messages);
-        } else {
-          partialFailures.push("mailbox");
-        }
-
-        if (pathClaimsResult.status === "fulfilled") {
-          nextDetails.pathClaims = sortPathClaims(pathClaimsResult.value.claims);
-        } else {
-          partialFailures.push("path claims");
-        }
-
-        setDetails(nextDetails);
-        setDetailsError(
-          partialFailures.length > 0
-            ? `partially loaded team details: ${partialFailures.join(", ")}`
-            : null,
-        );
-      } catch (fetchError) {
-        if (cancelled) {
-          return;
-        }
-        const message =
-          fetchError instanceof Error
-            ? fetchError.message
-            : "failed to load runtime team details";
-        setDetails(createEmptyDetails());
-        setDetailsError(message);
-      } finally {
-        if (!cancelled) {
-          setIsDetailsLoading(false);
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedTeamId]);
 
   const selectedTeam = teams.find((team) => team.id === selectedTeamId) ?? null;
   const selectedSummary = selectedTeam ? summaryMap.get(selectedTeam.id) : undefined;
@@ -437,6 +286,7 @@ export function RuntimeTeams({
       setIsCheckingClaims(false);
     }
   }
+
   return (
     <section className={cn(showHeader ? "mt-4" : "mt-0", className)}>
       {showHeader ? (
@@ -447,247 +297,105 @@ export function RuntimeTeams({
         </div>
       ) : null}
 
-      <div className="mb-3 flex flex-col gap-3 rounded-[0.95rem] border border-[var(--border)] bg-[var(--surface-softer)] px-3.5 py-3 xl:flex-row xl:items-center xl:justify-between">
-        <div className="flex flex-wrap gap-2">
-          <Badge>{teams.length} teams</Badge>
-          <Badge>{activeTeamCount} active</Badge>
-          {selectedTeam ? (
-            <Badge>{truncateIdentifier(selectedTeam.id, 18)}</Badge>
-          ) : null}
-          {activeView === "dispatch" ? (
-            <Badge className="border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)] text-[var(--accent-primary)]">
-              dispatch view
-            </Badge>
-          ) : null}
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setActiveView("teams")}
-            className={cn(
-              "rounded-[0.65rem] border px-2.5 py-1.5 text-base uppercase tracking-[0.12em] transition",
-              activeView === "teams"
-                ? "border-[var(--accent-secondary-border)] bg-[var(--accent-secondary-soft)] text-[var(--accent-secondary)]"
-                : "border-[var(--border)] bg-[var(--surface-soft)] text-[var(--muted-foreground)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft-hover)] hover:text-[var(--foreground)]",
-            )}
-          >
-            Teams
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveView("dispatch")}
-            className={cn(
-              "rounded-[0.65rem] border px-2.5 py-1.5 text-base uppercase tracking-[0.12em] transition",
-              activeView === "dispatch"
-                ? "border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)] text-[var(--accent-primary)]"
-                : "border-[var(--border)] bg-[var(--surface-soft)] text-[var(--muted-foreground)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft-hover)] hover:text-[var(--foreground)]",
-            )}
-          >
-            Dispatch
-          </button>
-          {onRefresh ? (
-            <button
-              type="button"
-              onClick={onRefresh}
-              className="inline-flex items-center justify-center rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] p-1.5 text-[var(--muted-foreground)] transition hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft-hover)] hover:text-[var(--foreground)]"
-              aria-label="Refresh runtime teams"
-            >
-              <RefreshCcwIcon
-                size={14}
-                className={cn(isRefreshing ? "animate-spin" : "")}
-              />
-            </button>
-          ) : null}
-        </div>
-      </div>
-
-      {error ? (
-        <div className="rounded-[0.9rem] border border-[#f0c77b]/18 bg-[#f0c77b]/8 px-3.5 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
-          {error}
-        </div>
-      ) : null}
-
-      {isLoading && teams.length === 0 ? (
-        <div className="rounded-[0.9rem] border border-white/8 bg-white/4 px-3.5 py-3.5 text-sm text-[var(--muted-foreground)]">
-          Loading runtime teams...
-        </div>
-      ) : null}
-
-      {!isLoading && teams.length === 0 && !error ? (
-        <div className="rounded-[0.9rem] border border-dashed border-white/10 px-3.5 py-3.5 text-sm text-[var(--muted-foreground)]">
-          No runtime teams available.
-        </div>
-      ) : null}
+      <TeamsSummarySection
+        activeTeamCount={activeTeamCount}
+        activeView={activeView}
+        error={error}
+        isLoading={isLoading}
+        isRefreshing={isRefreshing}
+        onRefresh={onRefresh}
+        selectedTeam={selectedTeam}
+        setActiveView={setActiveView}
+        teams={teams}
+      />
 
       {activeView === "dispatch" ? (
-        <Suspense fallback={<RuntimeTeamsPanelFallback label="dispatch view" />}>
-          <RuntimeTeamDispatchPanel
-            dispatchMonitor={dispatchMonitor}
-            dispatchMonitorCounts={dispatchMonitorCounts}
-            dispatchMonitorError={dispatchMonitorError}
-            dispatchTaskDeliverablesDraft={dispatchTaskDeliverablesDraft}
-            dispatchTaskError={dispatchTaskError}
-            dispatchTaskGoalDraft={dispatchTaskGoalDraft}
-            dispatchTaskInputsDraft={dispatchTaskInputsDraft}
-            dispatchTaskPriorityDraft={dispatchTaskPriorityDraft}
-            dispatchTaskResults={dispatchTaskResults}
-            dispatchTaskTitleDraft={dispatchTaskTitleDraft}
-            dispatchTeamReadiness={dispatchTeamReadiness}
-            dispatchTemplateMode={dispatchTemplateMode}
-            isDispatchMonitorLoading={isDispatchMonitorLoading}
-            isDispatchReadinessLoading={isDispatchReadinessLoading}
-            isDispatchingTask={isDispatchingTask}
-            isProvisioningDispatch={isProvisioningDispatch}
-            onDispatchTaskDeliverablesDraftChange={setDispatchTaskDeliverablesDraft}
-            onDispatchTaskGoalDraftChange={setDispatchTaskGoalDraft}
-            onDispatchTaskInputsDraftChange={setDispatchTaskInputsDraft}
-            onDispatchTaskPriorityDraftChange={setDispatchTaskPriorityDraft}
-            onDispatchTaskTitleDraftChange={setDispatchTaskTitleDraft}
-            onDispatchTaskToTeams={() => void handleDispatchTaskToTeams()}
-            onDispatchTemplateModeChange={setDispatchTemplateMode}
-            onProvisionStrategyDraftChange={setProvisionStrategyDraft}
-            onProvisionTeamCountDraftChange={setProvisionTeamCountDraft}
-            onProvisionTeammateNamePrefixDraftChange={setProvisionTeammateNamePrefixDraft}
-            onProvisionTeammateProfileDraftChange={setProvisionTeammateProfileDraft}
-            onProvisionTeamsAndDispatch={() => void handleProvisionTeamsAndDispatch()}
-            onProvisionUserPrefixDraftChange={setProvisionUserPrefixDraft}
-            onProvisionWorkspaceDraftChange={setProvisionWorkspaceDraft}
-            onRefreshDispatchMonitor={() => void handleRefreshDispatchMonitor()}
-            onToggleDispatchTeam={toggleDispatchTeam}
-            provisionStrategyDraft={provisionStrategyDraft}
-            provisionTeamCountDraft={provisionTeamCountDraft}
-            provisionTeammateNamePrefixDraft={provisionTeammateNamePrefixDraft}
-            provisionTeammateProfileDraft={provisionTeammateProfileDraft}
-            provisionUserPrefixDraft={provisionUserPrefixDraft}
-            provisionWorkspaceDraft={provisionWorkspaceDraft}
-            selectedDispatchTeamIds={selectedDispatchTeamIds}
-            summaryMap={summaryMap}
-            teams={teams}
-          />
-        </Suspense>
+        <TeamsDispatchView
+          dispatchMonitor={dispatchMonitor}
+          dispatchMonitorCounts={dispatchMonitorCounts}
+          dispatchMonitorError={dispatchMonitorError}
+          dispatchTaskDeliverablesDraft={dispatchTaskDeliverablesDraft}
+          dispatchTaskError={dispatchTaskError}
+          dispatchTaskGoalDraft={dispatchTaskGoalDraft}
+          dispatchTaskInputsDraft={dispatchTaskInputsDraft}
+          dispatchTaskPriorityDraft={dispatchTaskPriorityDraft}
+          dispatchTaskResults={dispatchTaskResults}
+          dispatchTaskTitleDraft={dispatchTaskTitleDraft}
+          dispatchTeamReadiness={dispatchTeamReadiness}
+          dispatchTemplateMode={dispatchTemplateMode}
+          handleDispatchTaskToTeams={handleDispatchTaskToTeams}
+          handleProvisionTeamsAndDispatch={handleProvisionTeamsAndDispatch}
+          handleRefreshDispatchMonitor={handleRefreshDispatchMonitor}
+          isDispatchMonitorLoading={isDispatchMonitorLoading}
+          isDispatchReadinessLoading={isDispatchReadinessLoading}
+          isDispatchingTask={isDispatchingTask}
+          isProvisioningDispatch={isProvisioningDispatch}
+          provisionStrategyDraft={provisionStrategyDraft}
+          provisionTeamCountDraft={provisionTeamCountDraft}
+          provisionTeammateNamePrefixDraft={provisionTeammateNamePrefixDraft}
+          provisionTeammateProfileDraft={provisionTeammateProfileDraft}
+          provisionUserPrefixDraft={provisionUserPrefixDraft}
+          provisionWorkspaceDraft={provisionWorkspaceDraft}
+          selectedDispatchTeamIds={selectedDispatchTeamIds}
+          setDispatchTaskDeliverablesDraft={setDispatchTaskDeliverablesDraft}
+          setDispatchTaskGoalDraft={setDispatchTaskGoalDraft}
+          setDispatchTaskInputsDraft={setDispatchTaskInputsDraft}
+          setDispatchTaskPriorityDraft={setDispatchTaskPriorityDraft}
+          setDispatchTaskTitleDraft={setDispatchTaskTitleDraft}
+          setDispatchTemplateMode={setDispatchTemplateMode}
+          setProvisionStrategyDraft={setProvisionStrategyDraft}
+          setProvisionTeamCountDraft={setProvisionTeamCountDraft}
+          setProvisionTeammateNamePrefixDraft={setProvisionTeammateNamePrefixDraft}
+          setProvisionTeammateProfileDraft={setProvisionTeammateProfileDraft}
+          setProvisionUserPrefixDraft={setProvisionUserPrefixDraft}
+          setProvisionWorkspaceDraft={setProvisionWorkspaceDraft}
+          summaryMap={summaryMap}
+          teams={teams}
+          toggleDispatchTeam={toggleDispatchTeam}
+        />
       ) : (
-        <div className="grid gap-3 xl:grid-cols-[18rem_minmax(0,1fr)]">
-          <aside className="rounded-[0.95rem] border border-[var(--border)] bg-[var(--surface-softer)] p-2.5">
-            <div className="mb-2.5 flex items-center justify-between gap-3 px-0.5">
-              <div>
-                <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
-                  Team directory
-                </div>
-                <div className="mt-0.5 text-sm font-semibold text-[var(--foreground)]">
-                  Select a team
-                </div>
-              </div>
-              <Badge>{teams.length}</Badge>
-            </div>
-
-            {teams.length > 0 ? (
-              <div className="space-y-1.5 xl:max-h-[calc(100vh-18rem)] xl:overflow-y-auto xl:pr-1">
-                {teams.map((team) => {
-                  const summary = summaryMap.get(team.id);
-                  const isActive = team.id === selectedTeamId;
-                  return (
-                    <button
-                      key={team.id}
-                      type="button"
-                      onClick={() => setSelectedTeamId(team.id)}
-                      className={cn(
-                        "w-full rounded-[0.8rem] border px-3 py-2.5 text-left transition",
-                        isActive
-                          ? "border-[#8fd0c6]/30 bg-[#8fd0c6]/10 shadow-[0_0_0_1px_rgba(143,208,198,0.12)]"
-                          : "border-[var(--border)] bg-[var(--surface-soft)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft-hover)]",
-                      )}
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="truncate text-base font-semibold text-[var(--foreground)]">
-                          {truncateIdentifier(team.id, 16)}
-                        </div>
-                        <span className="shrink-0 app-text-11 uppercase tracking-[0.15em] text-[var(--muted-foreground)]">
-                          {team.status || "unknown"}
-                        </span>
-                      </div>
-                      <div className="mt-1.5 flex flex-wrap gap-1.5 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                        <span>{summary?.tasks.total ?? 0} tasks</span>
-                        <span>{summary?.teammates.total ?? 0} teammates</span>
-                        {team.strategy ? <span>{team.strategy}</span> : null}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="rounded-[0.8rem] border border-dashed border-[var(--border)] px-3 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
-                No teams available. Switch to `Dispatch` to provision runnable teams.
-              </div>
-            )}
-          </aside>
-
-          <div className="min-w-0">
-            {selectedTeam ? (
-              <Suspense fallback={<RuntimeTeamsPanelFallback label="team details" />}>
-                <RuntimeTeamDetailsPanel
-                  ackingMessageId={ackingMessageId}
-                  claimCheckError={claimCheckError}
-                  claimCheckState={claimCheckState}
-                  details={details}
-                  detailsError={detailsError}
-                  graphEdgeCount={graphEdgeCount}
-                  graphMissingCount={graphMissingCount}
-                  isCheckingClaims={isCheckingClaims}
-                  isDetailsLoading={isDetailsLoading}
-                  isSendingMailbox={isSendingMailbox}
-                  mailboxBodyDraft={mailboxBodyDraft}
-                  mailboxError={mailboxError}
-                  mailboxFromDraft={mailboxFromDraft}
-                  mailboxKindDraft={mailboxKindDraft}
-                  mailboxTaskDraft={mailboxTaskDraft}
-                  mailboxToDraft={mailboxToDraft}
-                  onAckMailboxMessage={(messageId) =>
-                    void handleAckMailboxMessage(messageId)
-                  }
-                  onCheckPathClaims={() => void handleCheckPathClaims()}
-                  onMailboxBodyDraftChange={setMailboxBodyDraft}
-                  onMailboxFromDraftChange={setMailboxFromDraft}
-                  onMailboxKindDraftChange={setMailboxKindDraft}
-                  onMailboxTaskDraftChange={setMailboxTaskDraft}
-                  onMailboxToDraftChange={setMailboxToDraft}
-                  onReadPathDraftChange={setReadPathDraft}
-                  onSendMailboxMessage={() => void handleSendMailboxMessage()}
-                  onWritePathDraftChange={setWritePathDraft}
-                  readPathDraft={readPathDraft}
-                  selectedSummary={selectedSummary}
-                  selectedTeam={selectedTeam}
-                  visibleEvents={visibleEvents}
-                  visibleMailbox={visibleMailbox}
-                  visiblePathClaims={visiblePathClaims}
-                  visibleTasks={visibleTasks}
-                  visibleTeammates={visibleTeammates}
-                  writePathDraft={writePathDraft}
-                />
-              </Suspense>
-            ) : (
-              <div className="rounded-[0.95rem] border border-dashed border-[var(--border)] bg-[var(--surface-softer)] px-5 py-8 text-center">
-                <div className="text-sm font-semibold text-[var(--foreground)]">
-                  No team selected
-                </div>
-                <p className="mt-2 text-sm leading-6 text-[var(--muted-foreground)]">
-                  Pick a team from the directory to inspect its snapshot, mailbox,
-                  path claims, timeline, and final summary.
-                </p>
-              </div>
-            )}
-          </div>
-        </div>
+        <TeamsDirectoryView
+          ackingMessageId={ackingMessageId}
+          claimCheckError={claimCheckError}
+          claimCheckState={claimCheckState}
+          details={details}
+          detailsError={detailsError}
+          graphEdgeCount={graphEdgeCount}
+          graphMissingCount={graphMissingCount}
+          handleAckMailboxMessage={handleAckMailboxMessage}
+          handleCheckPathClaims={handleCheckPathClaims}
+          handleSendMailboxMessage={handleSendMailboxMessage}
+          isCheckingClaims={isCheckingClaims}
+          isDetailsLoading={isDetailsLoading}
+          isSendingMailbox={isSendingMailbox}
+          mailboxBodyDraft={mailboxBodyDraft}
+          mailboxError={mailboxError}
+          mailboxFromDraft={mailboxFromDraft}
+          mailboxKindDraft={mailboxKindDraft}
+          mailboxTaskDraft={mailboxTaskDraft}
+          mailboxToDraft={mailboxToDraft}
+          readPathDraft={readPathDraft}
+          selectedSummary={selectedSummary}
+          selectedTeam={selectedTeam}
+          selectedTeamId={selectedTeamId}
+          setMailboxBodyDraft={setMailboxBodyDraft}
+          setMailboxFromDraft={setMailboxFromDraft}
+          setMailboxKindDraft={setMailboxKindDraft}
+          setMailboxTaskDraft={setMailboxTaskDraft}
+          setMailboxToDraft={setMailboxToDraft}
+          setReadPathDraft={setReadPathDraft}
+          setSelectedTeamId={setSelectedTeamId}
+          setWritePathDraft={setWritePathDraft}
+          summaryMap={summaryMap}
+          teams={teams}
+          visibleEvents={visibleEvents}
+          visibleMailbox={visibleMailbox}
+          visiblePathClaims={visiblePathClaims}
+          visibleTasks={visibleTasks}
+          visibleTeammates={visibleTeammates}
+          writePathDraft={writePathDraft}
+        />
       )}
     </section>
   );
 }
-
-function RuntimeTeamsPanelFallback({ label }: { label: string }) {
-  return (
-    <div className="rounded-[0.95rem] border border-[var(--border)] bg-[var(--surface-softer)] px-4 py-3 text-sm text-[var(--muted-foreground)]">
-      正在加载 {label}…
-    </div>
-  );
-}
-
