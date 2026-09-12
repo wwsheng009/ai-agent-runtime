@@ -1,9 +1,10 @@
+// 由 hooks/workspace/use-runtime-checkpoints.ts 机械拆分而来（P0-2），仅搬迁不改语义。
+// 对外导出面保持不变，消费方 import 路径零改动；实现见 ./runtime-checkpoints/ 各模块。
+
 import { useEffect, useMemo, useState } from "react";
 
 import {
   buildCheckpointConversationSummary,
-  buildCheckpointFileCode,
-  formatCheckpointProvenance,
   formatCheckpointProvenanceSummary,
   pickInitialCheckpointFilePath,
 } from "@/components/workspace/artifact-panel-shared";
@@ -20,138 +21,20 @@ import {
   type RuntimeSessionCheckpointSummary,
 } from "@/lib/runtime-api";
 
-type UseRuntimeCheckpointsOptions = {
-  lastRuntimeEventType?: string;
-  runtimeEventCount?: number;
-  sessionId?: string;
-};
+import { resolveCheckpointDetailState } from "./runtime-checkpoints/detail-state";
+import {
+  buildRuntimeEventReloadKey,
+  shouldReloadBacktrackAudit,
+  shouldReloadRuntimeCheckpoints,
+} from "./runtime-checkpoints/reload-keys";
+import { type UseRuntimeCheckpointsOptions } from "./runtime-checkpoints/types";
 
-type ShouldReloadRuntimeCheckpointsOptions = {
-  lastHandledEventKey?: string;
-  lastRuntimeEventKey?: string;
-  lastRuntimeEventType?: string;
-  loadedCheckpointSessionId: string;
-  sessionId?: string;
-};
-
-type ShouldReloadBacktrackAuditOptions = {
-  lastHandledEventKey?: string;
-  lastRuntimeEventKey?: string;
-  lastRuntimeEventType?: string;
-  loadedAuditSessionId: string;
-  sessionId?: string;
-};
-
-type ResolveCheckpointDetailStateOptions = {
-  checkpointFiles: RuntimeSessionCheckpointFile[];
-  checkpointPreview?: RuntimeSessionCheckpointPreviewResult;
-  selectedCheckpoint?: RuntimeSessionCheckpointSummary | null;
-  selectedCheckpointFilePath: string | null;
-};
-
-export function buildRuntimeEventReloadKey(
-  lastRuntimeEventType?: string,
-  runtimeEventCount?: number,
-) {
-  if (!lastRuntimeEventType) {
-    return "";
-  }
-
-  return `${lastRuntimeEventType}:${runtimeEventCount ?? 0}`;
-}
-
-export function shouldReloadRuntimeCheckpoints({
-  lastHandledEventKey,
-  lastRuntimeEventKey,
-  lastRuntimeEventType,
-  loadedCheckpointSessionId,
-  sessionId,
-}: ShouldReloadRuntimeCheckpointsOptions) {
-  if (!sessionId) {
-    return false;
-  }
-
-  if (loadedCheckpointSessionId !== sessionId) {
-    return true;
-  }
-
-  if (
-    lastRuntimeEventType !== "checkpoint_created" &&
-    lastRuntimeEventType !== "backtrack_finished" &&
-    lastRuntimeEventType !== "rewind_finished"
-  ) {
-    return false;
-  }
-
-  if (!lastRuntimeEventKey) {
-    return false;
-  }
-
-  return lastRuntimeEventKey !== lastHandledEventKey;
-}
-
-export function shouldReloadBacktrackAudit({
-  lastHandledEventKey,
-  lastRuntimeEventKey,
-  lastRuntimeEventType,
-  loadedAuditSessionId,
-  sessionId,
-}: ShouldReloadBacktrackAuditOptions) {
-  if (!sessionId) {
-    return false;
-  }
-
-  if (loadedAuditSessionId !== sessionId) {
-    return true;
-  }
-
-  if (
-    lastRuntimeEventType !== "backtrack_finished" &&
-    lastRuntimeEventType !== "rewind_finished"
-  ) {
-    return false;
-  }
-
-  if (!lastRuntimeEventKey) {
-    return false;
-  }
-
-  return lastRuntimeEventKey !== lastHandledEventKey;
-}
-
-export function resolveCheckpointDetailState({
-  checkpointFiles,
-  checkpointPreview,
-  selectedCheckpoint,
-  selectedCheckpointFilePath,
-}: ResolveCheckpointDetailStateOptions) {
-  const checkpointPreviewFiles = checkpointPreview?.preview_files ?? [];
-  const resolvedSelectedCheckpointFilePath =
-    selectedCheckpointFilePath ??
-    pickInitialCheckpointFilePath(checkpointFiles, checkpointPreviewFiles);
-  const selectedCheckpointFile =
-    checkpointFiles.find((file) => file.path === resolvedSelectedCheckpointFilePath) ??
-    checkpointFiles[0];
-  const selectedCheckpointPreviewFile =
-    checkpointPreviewFiles.find(
-      (file) => file.path === resolvedSelectedCheckpointFilePath,
-    ) ??
-    checkpointPreviewFiles[0];
-
-  return {
-    checkpointFileCode: buildCheckpointFileCode(
-      selectedCheckpointFile,
-      selectedCheckpointPreviewFile,
-    ),
-    checkpointProvenance: formatCheckpointProvenance(
-      checkpointPreview?.provenance ?? selectedCheckpoint?.provenance,
-    ),
-    checkpointPreviewFiles,
-    selectedCheckpointFilePath: resolvedSelectedCheckpointFilePath,
-    selectedCheckpointFile,
-    selectedCheckpointPreviewFile,
-  };
-}
+export {
+  buildRuntimeEventReloadKey,
+  shouldReloadBacktrackAudit,
+  shouldReloadRuntimeCheckpoints,
+} from "./runtime-checkpoints/reload-keys";
+export { resolveCheckpointDetailState } from "./runtime-checkpoints/detail-state";
 
 export function useRuntimeCheckpoints({
   lastRuntimeEventType,
