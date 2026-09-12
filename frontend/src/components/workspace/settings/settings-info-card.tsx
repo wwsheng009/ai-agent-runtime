@@ -1,6 +1,11 @@
 import { type ReactNode } from "react";
 
-import { cn } from "@/lib/utils";
+import {
+  SectionBody,
+  SectionDescriptionText,
+  SectionTitleRow,
+} from "@/components/ui/section-header";
+import { SurfaceCard } from "@/components/ui/surface-card";
 
 type SettingsInfoCardProps = {
   children?: ReactNode;
@@ -29,43 +34,34 @@ export function SettingsInfoCard({
   const hasDescription = description !== undefined;
 
   return (
-    <div
-      className={cn(
-        "border border-[var(--border)]",
-        tone === "softer"
-          ? "rounded-[0.9rem] bg-[var(--surface-softer)]"
-          : "rounded-[0.85rem] bg-[var(--surface-solid)]",
-        size === "compact" ? "px-3 py-2.5" : "p-3.5",
-        className,
-      )}
+    <SurfaceCard
+      surface={tone}
+      radius={tone === "softer" ? "xl" : "lg"}
+      density={size === "compact" ? "compact" : "default"}
+      className={className}
     >
       {hasHeader ? (
-        <div className="flex items-center gap-3 text-sm font-semibold text-[var(--foreground)]">
+        <SectionTitleRow>
           {icon}
           {title}
-        </div>
+        </SectionTitleRow>
       ) : null}
       {hasDescription ? (
-        <div
-          className={cn(
-            hasHeader ? "mt-3" : null,
-            "text-sm leading-6 text-[var(--muted-foreground)]",
-            descriptionClassName,
-          )}
+        <SectionDescriptionText
+          gapClassName={hasHeader ? "mt-3" : undefined}
+          className={descriptionClassName}
         >
           {description}
-        </div>
+        </SectionDescriptionText>
       ) : null}
       {children ? (
-        <div
-          className={cn(
-            hasHeader || hasDescription ? "mt-3" : null,
-            contentClassName,
-          )}
+        <SectionBody
+          spaced={hasHeader || hasDescription}
+          className={contentClassName}
         >
           {children}
-        </div>
+        </SectionBody>
       ) : null}
-    </div>
+    </SurfaceCard>
   );
 }

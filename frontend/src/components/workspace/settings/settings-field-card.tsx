@@ -1,5 +1,7 @@
 import { type ReactNode } from "react";
 
+import { SectionTitleRow } from "@/components/ui/section-header";
+import { SurfaceCard } from "@/components/ui/surface-card";
 import { cn } from "@/lib/utils";
 
 type SettingsFieldCardProps = {
@@ -20,22 +22,12 @@ export function SettingsFieldCard({
   titleClassName,
 }: SettingsFieldCardProps) {
   return (
-    <div
-      className={cn(
-        "rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3.5",
-        className,
-      )}
-    >
-      <div
-        className={cn(
-          "flex items-center gap-3 text-sm font-semibold text-[var(--foreground)]",
-          titleClassName,
-        )}
-      >
+    <SurfaceCard className={className}>
+      <SectionTitleRow className={titleClassName}>
         {icon}
         {title}
-      </div>
+      </SectionTitleRow>
       <div className={cn("mt-2.5", bodyClassName)}>{children}</div>
-    </div>
+    </SurfaceCard>
   );
 }

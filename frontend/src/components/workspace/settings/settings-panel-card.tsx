@@ -1,5 +1,14 @@
 import { type ReactNode } from "react";
 
+import {
+  SectionAside,
+  SectionBody,
+  SectionDescriptionText,
+  SectionHeaderMain,
+  SectionHeaderRow,
+  SectionTitleRow,
+} from "@/components/ui/section-header";
+import { SurfaceCard } from "@/components/ui/surface-card";
 import { cn } from "@/lib/utils";
 
 type SettingsPanelCardProps = {
@@ -30,51 +39,38 @@ export function SettingsPanelCard({
   tone = "softer",
 }: SettingsPanelCardProps) {
   const hasHeader = title !== undefined || icon !== undefined || description !== undefined;
+  const hasTitleRow = title !== undefined || icon !== undefined;
 
   return (
-    <div
-      className={cn(
-        "rounded-[0.9rem] border border-[var(--border)] p-3.5",
-        tone === "softer"
-          ? "bg-[var(--surface-softer)]"
-          : "bg-[var(--surface-solid)]",
-        className,
-      )}
-    >
+    <SurfaceCard surface={tone} className={className}>
       {hasHeader ? (
-        <div
-          className={cn(
-            "flex items-start justify-between gap-3",
-            headerClassName,
-          )}
-        >
-          <div className="min-w-0">
-            {title !== undefined || icon !== undefined ? (
-              <div className="flex items-center gap-3 text-sm font-semibold text-[var(--foreground)]">
+        <SectionHeaderRow className={headerClassName}>
+          <SectionHeaderMain>
+            {hasTitleRow ? (
+              <SectionTitleRow>
                 {icon}
                 {title}
-              </div>
+              </SectionTitleRow>
             ) : null}
             {description !== undefined ? (
-              <div
-                className={cn(
-                  title !== undefined || icon !== undefined ? "mt-2" : null,
-                  "text-sm leading-6 text-[var(--muted-foreground)]",
-                  descriptionClassName,
-                )}
+              <SectionDescriptionText
+                gapClassName={hasTitleRow ? "mt-2" : undefined}
+                className={descriptionClassName}
               >
                 {description}
-              </div>
+              </SectionDescriptionText>
             ) : null}
-          </div>
+          </SectionHeaderMain>
           {headerAside ? (
-            <div className={cn("shrink-0", asideClassName)}>{headerAside}</div>
+            <SectionAside className={asideClassName}>{headerAside}</SectionAside>
           ) : null}
-        </div>
+        </SectionHeaderRow>
       ) : null}
       {children ? (
-        <div className={cn(hasHeader ? "mt-3" : null, bodyClassName)}>{children}</div>
+        <SectionBody spaced={hasHeader} className={cn(bodyClassName)}>
+          {children}
+        </SectionBody>
       ) : null}
-    </div>
+    </SurfaceCard>
   );
 }
