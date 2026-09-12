@@ -1,148 +1,24 @@
-import {
-  lazy,
-  Suspense,
-  useEffect,
-  useRef,
-  useState,
-  type CSSProperties,
-} from "react";
-import {
-  ArrowUpRightIcon,
-  BotIcon,
-  Code2Icon,
-  FileSearchIcon,
-  ListTodoIcon,
-  ShieldCheckIcon,
-} from "lucide-react";
+// 由 components/workspace/workspace-shell.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
-import { MessageBacktrackDialog } from "@/components/workspace/message-backtrack-dialog";
-import { MessageComposer } from "@/components/workspace/message-composer";
-import { MessageList } from "@/components/workspace/message-list";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { Code2Icon, FileSearchIcon, ListTodoIcon, ShieldCheckIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
+
 import { type SettingsSectionId } from "@/components/workspace/settings";
-import { NEW_THREAD_ID } from "@/hooks/workspace/use-workspace-thread-selection";
 import {
   getThreadStatusLabel,
   getThreadTopbarSubtitle,
   getThreadTransportLabel,
 } from "@/components/workspace/workspace-shell-shared";
-import { WorkspaceShellTopbar } from "@/components/workspace/workspace-shell-topbar";
-import { WorkspaceSidebar } from "@/components/workspace/workspace-sidebar";
 import { useAppSettings } from "@/core/settings";
-import { type Artifact, type Thread } from "@/data/mock";
-import { type RuntimeSessionsSummary } from "@/hooks/workspace/use-runtime-sessions-data";
-import type { SessionBacktrackDialogState } from "@/hooks/workspace/use-session-backtrack";
-import { type RuntimeClientIdentity } from "@/lib/runtime-client";
-import {
-  type RuntimeSessionBacktrackMode,
-  type RuntimeSessionRecord,
-  type RuntimeSessionUserSummary,
-  type RuntimeTeamRecord,
-  type RuntimeTeamSummaryEntry,
-  type RuntimeWorkspaceDirectory,
-} from "@/lib/runtime-api";
+import { NEW_THREAD_ID } from "@/hooks/workspace/use-workspace-thread-selection";
 import { cn } from "@/lib/utils";
-import { type ChatStreamPhase } from "@/types/runtime";
-import { useTranslation } from "react-i18next";
 
-const SettingsDialog = lazy(() =>
-  import("@/components/workspace/settings/settings-dialog").then((module) => ({
-    default: module.SettingsDialog,
-  })),
-);
-const ArtifactDetailDialog = lazy(() =>
-  import("@/components/workspace/artifact-detail-dialog").then((module) => ({
-    default: module.ArtifactDetailDialog,
-  })),
-);
-const ArtifactPanel = lazy(() =>
-  import("@/components/workspace/artifact-panel").then((module) => ({
-    default: module.ArtifactPanel,
-  })),
-);
-const TrajectoryView = lazy(() =>
-  import("@/components/workspace/trajectory/trajectory-view").then((module) => ({
-    default: module.TrajectoryView,
-  })),
-);
-
-type WorkspaceShellProps = {
-  threads: Thread[];
-  runtimeTeams: RuntimeTeamRecord[];
-  runtimeTeamsError: string | null;
-  runtimeTeamsLoading: boolean;
-  runtimeTeamsRefreshing?: boolean;
-  runtimeTeamSummaries: RuntimeTeamSummaryEntry[];
-  runtimeSessionsError: string | null;
-  runtimeSessions: RuntimeSessionRecord[];
-  runtimeSessionsLoading: boolean;
-  runtimeSessionsRefreshing?: boolean;
-  runtimeSessionsSummary: RuntimeSessionsSummary;
-  runtimeSessionDefaultUserId?: string;
-  runtimeSessionUsers: RuntimeSessionUserSummary[];
-  runtimeSessionUsersError: string | null;
-  runtimeSessionUsersLoading: boolean;
-  workspaceDirectories: RuntimeWorkspaceDirectory[];
-  workspaceDirectoriesError: string | null;
-  workspaceDirectoriesLoading: boolean;
-  workspaceDirectoriesRefreshing?: boolean;
-  onAddWorkspaceDirectory: (path: string, name?: string) => Promise<unknown>;
-  onRenameWorkspaceDirectory: (id: string, name: string) => Promise<void>;
-  onRemoveWorkspaceDirectory: (id: string) => Promise<void>;
-  onCreateSessionInDirectory: (request: {
-    path: string;
-    directoryId?: string;
-    label: string;
-  }) => Promise<void>;
-  onRenameRuntimeSession: (sessionId: string, title: string) => Promise<void>;
-  runtimeClient: RuntimeClientIdentity;
-  selectedRuntimeSessionUserId: string;
-  selectedThread: Thread;
-  selectedArtifact: Artifact | null;
-  selectedArtifactId: string | null;
-  draft: string;
-  isResponding: boolean;
-  modelOptions: string[];
-  phase?: ChatStreamPhase | null;
-  reasoningEffortDefault: string;
-  reasoningEffortError: string | null;
-  reasoningEffortOptions: string[];
-  trajectoryStore?: import("@/hooks/workspace/use-trajectory-snapshot").TrajectoryStore | null;
-  onDraftChange: (value: string) => void;
-  onModelChange: (value: string) => void;
-  onProviderChange: (value: string) => void;
-  onReasoningEffortChange: (value: string) => void;
-  onSelectArtifact: (artifactId: string) => void;
-  onSelectThread: (threadId: string) => void;
-  onRefreshRuntimeTeams?: () => void;
-  onSelectRuntimeSessionUser: (userId: string) => void;
-  onResetRuntimeClientIdentity: () => void;
-  onStopResponding: () => void;
-  onSubmit: () => void;
-  onBacktrackToMessage?: (
-    messageId: string,
-    mode?: "conversation" | "both",
-    options?: { editPrompt?: string },
-  ) => void;
-  backtrackDialog?: SessionBacktrackDialogState;
-  backtrackError?: string | null;
-  backtrackNotice?: string | null;
-  backtrackPendingMessageId?: string | null;
-  backtrackNavigationActive?: boolean;
-  backtrackSelectedMessageId?: string | null;
-  canBacktrack?: boolean;
-  onCloseBacktrackDialog?: () => void;
-  onConfirmBacktrack?: () => void;
-  onBacktrackEditPromptChange?: (value: string) => void;
-  onBacktrackModeChange?: (mode: RuntimeSessionBacktrackMode) => void;
-  onBacktrackPrefillChange?: (prefill: boolean) => void;
-  onSelectBacktrackNavigationMessage?: (messageId: string) => void;
-  providerOptions: string[];
-  runtimeModelsError: string | null;
-  runtimeModelsLoading: boolean;
-  selectedModel: string;
-  selectedProvider: string;
-  selectedReasoningEffort: string;
-};
+import { WorkspaceArtifactRailSection } from "./workspace-shell/artifact-rail-section";
+import { WorkspaceMainSection } from "./workspace-shell/main-section";
+import { WorkspaceOverlaysSection } from "./workspace-shell/overlays-section";
+import { WorkspaceSidebarSection } from "./workspace-shell/sidebar-section";
+import { type WorkspaceShellProps } from "./workspace-shell/types";
 
 export function WorkspaceShell({
   threads,
@@ -327,6 +203,8 @@ export function WorkspaceShell({
   }, []);
 
   useEffect(() => {
+    // P0-2 机械搬迁：保留原「autoOpenArtifacts 变化即同步刷新 artifact 栏开合」语义。
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setArtifactRailManualOpen(settings.workspace.autoOpenArtifacts);
   }, [settings.workspace.autoOpenArtifacts]);
 
@@ -357,339 +235,126 @@ export function WorkspaceShell({
             : "xl:grid-cols-[16rem_minmax(0,1fr)]",
         )}
       >
-        <WorkspaceSidebar
+        <WorkspaceSidebarSection
           density={settings.workspace.density}
           mobileOpen={mobileSidebarOpen}
-          onCloseMobile={() => setMobileSidebarOpen(false)}
-          onOpenSettings={() => {
-            setMobileSidebarOpen(false);
-            openSettings("workspace");
-          }}
-          runtimeTeams={runtimeTeams}
-          runtimeTeamsError={runtimeTeamsError}
-          runtimeTeamsLoading={runtimeTeamsLoading}
-          runtimeTeamsRefreshing={runtimeTeamsRefreshing}
-          runtimeTeamSummaries={runtimeTeamSummaries}
-          runtimeSessionsError={runtimeSessionsError}
-          runtimeSessions={runtimeSessions}
-          runtimeSessionsLoading={runtimeSessionsLoading}
-          runtimeSessionsRefreshing={runtimeSessionsRefreshing}
-          runtimeSessionsSummary={runtimeSessionsSummary}
+          onAddWorkspaceDirectory={onAddWorkspaceDirectory}
+          onCreateSessionInDirectory={onCreateSessionInDirectory}
+          onRefreshRuntimeTeams={onRefreshRuntimeTeams}
+          onRemoveWorkspaceDirectory={onRemoveWorkspaceDirectory}
+          onRenameRuntimeSession={onRenameRuntimeSession}
+          onRenameWorkspaceDirectory={onRenameWorkspaceDirectory}
+          onSelectRuntimeSessionUser={onSelectRuntimeSessionUser}
+          onSelectThread={onSelectThread}
+          openSettings={openSettings}
           runtimeSessionDefaultUserId={runtimeSessionDefaultUserId}
           runtimeSessionUsers={runtimeSessionUsers}
           runtimeSessionUsersError={runtimeSessionUsersError}
           runtimeSessionUsersLoading={runtimeSessionUsersLoading}
+          runtimeSessions={runtimeSessions}
+          runtimeSessionsError={runtimeSessionsError}
+          runtimeSessionsLoading={runtimeSessionsLoading}
+          runtimeSessionsRefreshing={runtimeSessionsRefreshing}
+          runtimeSessionsSummary={runtimeSessionsSummary}
+          runtimeTeamSummaries={runtimeTeamSummaries}
+          runtimeTeams={runtimeTeams}
+          runtimeTeamsError={runtimeTeamsError}
+          runtimeTeamsLoading={runtimeTeamsLoading}
+          runtimeTeamsRefreshing={runtimeTeamsRefreshing}
           selectedRuntimeSessionUserId={selectedRuntimeSessionUserId}
-          onSelectRuntimeSessionUser={onSelectRuntimeSessionUser}
-          onRefreshRuntimeTeams={onRefreshRuntimeTeams}
+          selectedThread={selectedThread}
+          setMobileSidebarOpen={setMobileSidebarOpen}
+          threads={threads}
           workspaceDirectories={workspaceDirectories}
           workspaceDirectoriesError={workspaceDirectoriesError}
           workspaceDirectoriesLoading={workspaceDirectoriesLoading}
           workspaceDirectoriesRefreshing={workspaceDirectoriesRefreshing}
-          onAddWorkspaceDirectory={onAddWorkspaceDirectory}
-          onRenameWorkspaceDirectory={onRenameWorkspaceDirectory}
-          onRemoveWorkspaceDirectory={onRemoveWorkspaceDirectory}
-          onCreateSessionInDirectory={onCreateSessionInDirectory}
-          onRenameRuntimeSession={onRenameRuntimeSession}
-          threads={threads}
-          selectedThreadId={selectedThread.id}
-          onSelectThread={(threadId) => {
-            setMobileSidebarOpen(false);
-            onSelectThread(threadId);
-          }}
         />
-
-        <section
-          id="workspace-preview"
-          className="relative flex h-full min-h-0 flex-col overflow-hidden [background:var(--workspace-main-bg)]"
-        >
-          <WorkspaceShellTopbar
-            artifactRailOpen={artifactRailOpen}
-            density={settings.workspace.density}
-            isNewThread={isNewThread}
-            liveTeamCount={liveTeamCount}
-            onOpenSidebar={() => setMobileSidebarOpen(true)}
-            onOpenSettings={() => openSettings("appearance")}
-            onToggleArtifactRail={() => setArtifactRailManualOpen((current) => !current)}
-            selectedThread={selectedThread}
-            threadSubtitle={threadSubtitle}
-            threadStatusLabel={threadStatusLabel}
-            transportLabel={transportLabel}
-          />
-
-          <div
-            className={cn(
-              "flex min-h-0 flex-1 justify-center overflow-hidden",
-              isNewThread
-                ? "items-center px-3 pb-4 pt-14 sm:px-4"
-                : isCompact
-                  ? "pt-[2.95rem]"
-                  : "pt-[3.2rem]",
-            )}
-          >
-            <div
-              className={cn(
-                "relative flex h-full min-h-0 w-full flex-col",
-                isNewThread ? "max-w-[48rem]" : null,
-              )}
-            >
-              {!isNewThread ? (
-                <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-                  {trajectoryStore ? (
-                    <div
-                      aria-label="Workspace view tabs"
-                      className="flex items-center gap-1 border-b border-[var(--border)] px-3 pt-2"
-                      role="tablist"
-                    >
-                      <button
-                        aria-selected={viewMode === "chat"}
-                        className={cn(
-                          "rounded-t-md border border-b-0 px-3 py-1.5 app-text-12 transition",
-                          viewMode === "chat"
-                            ? "border-[var(--border)] bg-[var(--surface-softer)] text-[var(--foreground)]"
-                            : "border-transparent text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
-                        )}
-                        onClick={() => setViewMode("chat")}
-                        role="tab"
-                        type="button"
-                      >
-                        Chat
-                      </button>
-                      <button
-                        aria-selected={viewMode === "trajectory"}
-                        className={cn(
-                          "rounded-t-md border border-b-0 px-3 py-1.5 app-text-12 transition",
-                          viewMode === "trajectory"
-                            ? "border-[var(--border)] bg-[var(--surface-softer)] text-[var(--foreground)]"
-                            : "border-transparent text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
-                        )}
-                        onClick={() => setViewMode("trajectory")}
-                        role="tab"
-                        type="button"
-                      >
-                        Trajectory
-                      </button>
-                    </div>
-                  ) : null}
-                  {viewMode === "chat" || !trajectoryStore ? (
-                    <MessageList
-                      artifacts={selectedThread.artifacts}
-                      backtrackError={backtrackError}
-                      backtrackNotice={backtrackNotice}
-                      backtrackPendingMessageId={backtrackPendingMessageId}
-                      backtrackNavigationActive={backtrackNavigationActive}
-                      backtrackSelectedMessageId={backtrackSelectedMessageId}
-                      canBacktrack={canBacktrack}
-                      className={cn(
-                        "h-full px-3 sm:px-4 lg:px-5",
-                        isCompact ? "pt-3" : "pt-4",
-                      )}
-                      contentClassName={cn(
-                        "max-w-[50rem]",
-                        isCompact ? "gap-4" : "gap-6",
-                      )}
-                      isResponding={isResponding}
-                      messages={selectedThread.messages}
-                      onBacktrackToMessage={onBacktrackToMessage}
-                      onSelectBacktrackNavigationMessage={onSelectBacktrackNavigationMessage}
-                      onSelectArtifact={handleOpenArtifact}
-                      phase={phase}
-                      style={messageListStyle}
-                    />
-                  ) : (
-                    <Suspense fallback={null}>
-                      <TrajectoryView
-                        className="h-full"
-                        isLive={isResponding}
-                        sessionId={selectedThread.sessionId}
-                        store={trajectoryStore}
-                      />
-                    </Suspense>
-                  )}
-                </div>
-              ) : (
-                <div className="mx-auto flex w-full max-w-[46rem] flex-1 flex-col justify-center pb-4">
-                  <div className="text-center">
-                    <div className="mx-auto grid size-11 place-items-center rounded-[1rem] border border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] shadow-[0_8px_24px_var(--accent-primary-shadow)]">
-                      <BotIcon size={20} />
-                    </div>
-                    <h1 className="mt-3 text-[1.45rem] font-semibold tracking-[-0.03em] text-[var(--foreground)] sm:text-[1.7rem]">
-                      {t("shell.newChatTitle")}
-                    </h1>
-                  </div>
-                  <div className="mt-5 grid grid-cols-2 gap-2 sm:gap-3">
-                    {newThreadSuggestions.map((suggestion) => {
-                      const SuggestionIcon = suggestion.icon;
-
-                      return (
-                        <button
-                          key={suggestion.key}
-                          type="button"
-                          onClick={() => onDraftChange(suggestion.prompt)}
-                          className="group flex min-h-[5.5rem] items-start gap-3 rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] px-3 py-3 text-left transition hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] sm:px-3.5"
-                        >
-                          <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-[0.7rem] border border-[var(--border)] bg-[var(--surface-solid)] text-[var(--accent-secondary)]">
-                            <SuggestionIcon size={15} />
-                          </span>
-                          <span className="min-w-0 flex-1">
-                            <span className="flex items-center justify-between gap-2 text-sm font-semibold text-[var(--foreground)]">
-                              {suggestion.title}
-                              <ArrowUpRightIcon
-                                size={13}
-                                className="shrink-0 text-[var(--muted-foreground)] transition group-hover:-translate-y-0.5 group-hover:translate-x-0.5 group-hover:text-[var(--foreground)]"
-                              />
-                            </span>
-                            <span className="mt-1 block text-xs leading-5 text-[var(--muted-foreground)]">
-                              {suggestion.description}
-                            </span>
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {!isNewThread ? (
-                <div
-                  aria-hidden="true"
-                  className="pointer-events-none absolute inset-x-0 bottom-0 z-20 px-3 sm:px-4 lg:px-5"
-                >
-                  <div className="mx-auto h-16 w-full max-w-[54rem] [background:var(--workspace-fade-overlay)] blur-lg" />
-                </div>
-              ) : null}
-
-              <div
-                ref={composerOverlayRef}
-                className={cn(
-                  "pointer-events-none z-30 px-3 sm:px-4 lg:px-5",
-                  isNewThread
-                    ? "relative inset-auto mx-auto w-full max-w-[50rem] pb-0"
-                    : "absolute inset-x-0 bottom-0 pb-3",
-                )}
-              >
-                {isNewThread || viewMode === "chat" || !trajectoryStore ? (
-                  <div className="pointer-events-auto mx-auto w-full max-w-[50rem]">
-                    <MessageComposer
-                      density={settings.workspace.density}
-                      draft={draft}
-                      hasSession={Boolean(selectedThread.sessionId)}
-                      isNewThread={isNewThread}
-                      isResponding={isResponding}
-                      modelOptions={modelOptions}
-                      reasoningEffortDefault={reasoningEffortDefault}
-                      reasoningEffortError={reasoningEffortError}
-                      reasoningEffortOptions={reasoningEffortOptions}
-                      selectedArtifactCount={selectedThread.artifacts.length}
-                      onModelChange={onModelChange}
-                      onProviderChange={onProviderChange}
-                      onReasoningEffortChange={onReasoningEffortChange}
-                      providerOptions={providerOptions}
-                      runtimeModelsError={runtimeModelsError}
-                      runtimeModelsLoading={runtimeModelsLoading}
-                      selectedModel={selectedModel}
-                      selectedProvider={selectedProvider}
-                      selectedReasoningEffort={selectedReasoningEffort}
-                      transport={selectedThread.transport}
-                      onDraftChange={onDraftChange}
-                      onStop={onStopResponding}
-                      onSubmit={onSubmit}
-                    />
-                  </div>
-                ) : null}
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {artifactRailOpen && !isNewThread ? (
-          <Suspense fallback={<ArtifactPanelFallback message={t("shell.loadingArtifactPanel")} />}>
-            <ArtifactPanel
-              artifacts={selectedThread.artifacts}
-              lastRuntimeEventType={selectedThread.lastRuntimeEventType}
-              runtimeEventCount={selectedThread.runtimeEventCount}
-              selectedArtifactId={selectedArtifactId}
-              sessionId={selectedThread.sessionId}
-              onOpenArtifact={handleOpenArtifact}
-            />
-          </Suspense>
-        ) : null}
-      </div>
-      {artifactDialogOpen && selectedArtifact ? (
-        <Suspense fallback={<ArtifactDialogFallback message={t("shell.loadingArtifactDetails")} />}>
-          <ArtifactDetailDialog
-            artifact={selectedArtifact}
-            onClose={() => setArtifactDialogOpen(false)}
-            open={artifactDialogOpen}
-          />
-        </Suspense>
-      ) : null}
-      {settingsDialogOpen ? (
-        <Suspense fallback={<SettingsDialogFallback message={t("shell.loadingSettingsPanel")} />}>
-          <SettingsDialog
-            defaultSection={settingsSection}
-            modelOptions={modelOptions}
-            onClose={() => setSettingsDialogOpen(false)}
-            onModelChange={onModelChange}
-            onProviderChange={onProviderChange}
-            open={settingsDialogOpen}
-            providerOptions={providerOptions}
-            runtimeModelsError={runtimeModelsError}
-            runtimeModelsLoading={runtimeModelsLoading}
-            runtimeSessionsSummary={runtimeSessionsSummary}
-            runtimeClient={runtimeClient}
-            runtimeTeams={runtimeTeams}
-            onResetRuntimeClientIdentity={onResetRuntimeClientIdentity}
-            selectedModel={selectedModel}
-            selectedProvider={selectedProvider}
-          />
-        </Suspense>
-      ) : null}
-      {backtrackDialog?.open &&
-      onCloseBacktrackDialog &&
-      onConfirmBacktrack &&
-      onBacktrackEditPromptChange &&
-      onBacktrackModeChange &&
-      onBacktrackPrefillChange ? (
-        <MessageBacktrackDialog
-          onApply={onConfirmBacktrack}
-          onClose={onCloseBacktrackDialog}
-          onEditPromptChange={onBacktrackEditPromptChange}
-          onModeChange={onBacktrackModeChange}
-          onPrefillChange={onBacktrackPrefillChange}
-          state={backtrackDialog}
+        <WorkspaceMainSection
+          artifactRailOpen={artifactRailOpen}
+          backtrackError={backtrackError}
+          backtrackNavigationActive={backtrackNavigationActive}
+          backtrackNotice={backtrackNotice}
+          backtrackPendingMessageId={backtrackPendingMessageId}
+          backtrackSelectedMessageId={backtrackSelectedMessageId}
+          canBacktrack={canBacktrack}
+          composerOverlayRef={composerOverlayRef}
+          density={settings.workspace.density}
+          draft={draft}
+          handleOpenArtifact={handleOpenArtifact}
+          isCompact={isCompact}
+          isNewThread={isNewThread}
+          isResponding={isResponding}
+          liveTeamCount={liveTeamCount}
+          messageListStyle={messageListStyle}
+          modelOptions={modelOptions}
+          newThreadSuggestions={newThreadSuggestions}
+          onBacktrackToMessage={onBacktrackToMessage}
+          onDraftChange={onDraftChange}
+          onModelChange={onModelChange}
+          onProviderChange={onProviderChange}
+          onReasoningEffortChange={onReasoningEffortChange}
+          onSelectBacktrackNavigationMessage={onSelectBacktrackNavigationMessage}
+          onStopResponding={onStopResponding}
+          onSubmit={onSubmit}
+          openSettings={openSettings}
+          phase={phase}
+          providerOptions={providerOptions}
+          reasoningEffortDefault={reasoningEffortDefault}
+          reasoningEffortError={reasoningEffortError}
+          reasoningEffortOptions={reasoningEffortOptions}
+          runtimeModelsError={runtimeModelsError}
+          runtimeModelsLoading={runtimeModelsLoading}
+          selectedModel={selectedModel}
+          selectedProvider={selectedProvider}
+          selectedReasoningEffort={selectedReasoningEffort}
+          selectedThread={selectedThread}
+          setArtifactRailManualOpen={setArtifactRailManualOpen}
+          setMobileSidebarOpen={setMobileSidebarOpen}
+          setViewMode={setViewMode}
+          t={t}
+          threadStatusLabel={threadStatusLabel}
+          threadSubtitle={threadSubtitle}
+          trajectoryStore={trajectoryStore}
+          transportLabel={transportLabel}
+          viewMode={viewMode}
         />
-      ) : null}
-    </div>
-  );
-}
-
-function SettingsDialogFallback({ message }: { message: string }) {
-  return (
-    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-[var(--dialog-backdrop)] px-3 py-4 backdrop-blur-sm">
-      <div className="rounded-[0.9rem] border border-[var(--border)] [background:var(--dialog-bg)] px-3.5 py-2.5 text-sm text-[var(--muted-foreground)] shadow-[0_12px_36px_rgba(0,0,0,0.22)]">
-        {message}
+        <WorkspaceArtifactRailSection
+          artifactRailOpen={artifactRailOpen}
+          handleOpenArtifact={handleOpenArtifact}
+          isNewThread={isNewThread}
+          selectedArtifactId={selectedArtifactId}
+          selectedThread={selectedThread}
+          t={t}
+        />
       </div>
-    </div>
-  );
-}
-
-function ArtifactPanelFallback({ message }: { message: string }) {
-  return (
-    <aside className="hidden h-full min-h-0 flex-col overflow-hidden border-l border-white/8 [background:var(--workspace-sidebar-bg)] xl:flex">
-      <div className="flex h-full items-center justify-center px-4 text-sm text-[var(--muted-foreground)]">
-        {message}
-      </div>
-    </aside>
-  );
-}
-
-function ArtifactDialogFallback({ message }: { message: string }) {
-  return (
-    <div className="fixed inset-0 z-[130] flex items-center justify-center bg-[var(--dialog-backdrop)] px-3 py-4 backdrop-blur-sm">
-      <div className="rounded-[0.9rem] border border-[var(--border)] [background:var(--dialog-bg)] px-3.5 py-2.5 text-sm text-[var(--muted-foreground)] shadow-[0_12px_36px_rgba(0,0,0,0.22)]">
-        {message}
-      </div>
+      <WorkspaceOverlaysSection
+        artifactDialogOpen={artifactDialogOpen}
+        backtrackDialog={backtrackDialog}
+        modelOptions={modelOptions}
+        onBacktrackEditPromptChange={onBacktrackEditPromptChange}
+        onBacktrackModeChange={onBacktrackModeChange}
+        onBacktrackPrefillChange={onBacktrackPrefillChange}
+        onCloseBacktrackDialog={onCloseBacktrackDialog}
+        onConfirmBacktrack={onConfirmBacktrack}
+        onModelChange={onModelChange}
+        onProviderChange={onProviderChange}
+        onResetRuntimeClientIdentity={onResetRuntimeClientIdentity}
+        providerOptions={providerOptions}
+        runtimeClient={runtimeClient}
+        runtimeModelsError={runtimeModelsError}
+        runtimeModelsLoading={runtimeModelsLoading}
+        runtimeSessionsSummary={runtimeSessionsSummary}
+        runtimeTeams={runtimeTeams}
+        selectedArtifact={selectedArtifact}
+        selectedModel={selectedModel}
+        selectedProvider={selectedProvider}
+        setArtifactDialogOpen={setArtifactDialogOpen}
+        setSettingsDialogOpen={setSettingsDialogOpen}
+        settingsDialogOpen={settingsDialogOpen}
+        settingsSection={settingsSection}
+        t={t}
+      />
     </div>
   );
 }
