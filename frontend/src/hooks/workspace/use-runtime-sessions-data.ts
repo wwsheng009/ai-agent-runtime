@@ -1,302 +1,46 @@
+// 由 hooks/workspace/use-runtime-sessions-data.ts 机械拆分而来（P0-2），仅搬迁不改语义。
+// 对外导出面保持不变，消费方 import 路径零改动；实现见 ./runtime-sessions-data/ 各模块。
+
 import { useEffect, useRef, useState } from "react";
 
 import {
-  getRuntimeSession,
   listRuntimeSessionUsers,
-  listRuntimeSessions,
   type RuntimeSessionRecord,
   type RuntimeSessionUserSummary,
 } from "@/lib/runtime-api";
 import { getRuntimeClientIdentity } from "@/lib/runtime-client";
 import { normalizeSessionId } from "@/lib/session-id";
 
-type RuntimeSessionsDataOptions = {
-  pinnedSessionId?: string;
-  userId?: string;
-};
+import { loadRuntimeSessions } from "./runtime-sessions-data/loading";
+import { normalizeRuntimeSessionUsers } from "./runtime-sessions-data/normalize";
+import { resolveRuntimeSessionsRetryDelay } from "./runtime-sessions-data/retry";
+import { summarizeRuntimeSessions } from "./runtime-sessions-data/sorting";
+import {
+  getBrowserStorage,
+  readStoredRuntimeSessionUserId,
+  readStoredRuntimeSessions,
+  writeStoredRuntimeSessionUserId,
+  writeStoredRuntimeSessions,
+} from "./runtime-sessions-data/storage";
+import { type RuntimeSessionsDataOptions } from "./runtime-sessions-data/types";
+import { chooseRuntimeSessionUserId } from "./runtime-sessions-data/user-selection";
 
-export type RuntimeSessionsSummary = {
-  activeCount: number;
-  archivedCount: number;
-  latestSessionId?: string;
-  latestUpdatedAt?: string;
-  recoverableCount: number;
-  totalCount: number;
-};
-
-type StoredRuntimeSessionsPayload = {
-  sessions: RuntimeSessionRecord[];
-  storedAt: string;
-  userId: string;
-};
-
-const runtimeSessionsStorageKeyPrefix = "workspace.runtime.sessions";
-const runtimeSessionsSelectedUserStorageKey =
-  "workspace.runtime.sessions.selectedUser";
-const runtimeSessionsRetryDelaysMs = [1200, 2500, 5000, 8000];
-
-function getBrowserStorage() {
-  if (typeof window === "undefined") {
-    return null;
-  }
-
-  return window.localStorage;
-}
-
-export function buildStoredRuntimeSessionsKey(userId: string) {
-  const resolvedUserId = userId.trim();
-  if (!resolvedUserId) {
-    return runtimeSessionsStorageKeyPrefix;
-  }
-
-  return `${runtimeSessionsStorageKeyPrefix}:${encodeURIComponent(resolvedUserId)}`;
-}
-
-export function readStoredRuntimeSessionUserId(
-  storage: Storage | null | undefined,
-) {
-  if (!storage) {
-    return "";
-  }
-
-  try {
-    return storage.getItem(runtimeSessionsSelectedUserStorageKey)?.trim() ?? "";
-  } catch {
-    return "";
-  }
-}
-
-export function writeStoredRuntimeSessionUserId(
-  storage: Storage | null | undefined,
-  userId: string,
-) {
-  const resolvedUserId = userId.trim();
-  if (!storage || !resolvedUserId) {
-    return;
-  }
-
-  storage.setItem(runtimeSessionsSelectedUserStorageKey, resolvedUserId);
-}
-
-export function readStoredRuntimeSessions(
-  storage: Storage | null | undefined,
-  userId: string,
-) {
-  const resolvedUserId = userId.trim();
-  if (!storage || !resolvedUserId) {
-    return [] as RuntimeSessionRecord[];
-  }
-
-  try {
-    const raw = storage.getItem(buildStoredRuntimeSessionsKey(resolvedUserId));
-    if (!raw) {
-      return [];
-    }
-
-    const parsed = JSON.parse(raw) as Partial<StoredRuntimeSessionsPayload>;
-    return normalizeRuntimeSessions(parsed.sessions);
-  } catch {
-    return [];
-  }
-}
-
-export function writeStoredRuntimeSessions(
-  storage: Storage | null | undefined,
-  userId: string,
-  sessions: RuntimeSessionRecord[],
-) {
-  const resolvedUserId = userId.trim();
-  if (!storage || !resolvedUserId) {
-    return;
-  }
-
-  const payload: StoredRuntimeSessionsPayload = {
-    sessions: sortRuntimeSessions(normalizeRuntimeSessions(sessions)),
-    storedAt: new Date().toISOString(),
-    userId: resolvedUserId,
-  };
-  storage.setItem(
-    buildStoredRuntimeSessionsKey(resolvedUserId),
-    JSON.stringify(payload),
-  );
-}
-
-export function resolveRuntimeSessionsRetryDelay(attempt: number) {
-  if (attempt <= 0) {
-    return runtimeSessionsRetryDelaysMs[0];
-  }
-
-  return runtimeSessionsRetryDelaysMs[
-    Math.min(attempt, runtimeSessionsRetryDelaysMs.length - 1)
-  ];
-}
-
-export function sortRuntimeSessions(sessions: RuntimeSessionRecord[]) {
-  return [...sessions].sort((left, right) => {
-    const leftTime = Date.parse(left.updatedAt || left.createdAt || "");
-    const rightTime = Date.parse(right.updatedAt || right.createdAt || "");
-
-    if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
-      return rightTime - leftTime;
-    }
-
-    return left.id.localeCompare(right.id);
-  });
-}
-
-export function summarizeRuntimeSessions(
-  sessions: RuntimeSessionRecord[],
-): RuntimeSessionsSummary {
-  const sorted = sortRuntimeSessions(sessions);
-  const activeCount = sorted.filter((session) => {
-    const state = (session.state || "").trim().toLowerCase();
-    return state === "" || state === "active" || state === "running" || state === "idle";
-  }).length;
-  const archivedCount = sorted.filter((session) => {
-    const state = (session.state || "").trim().toLowerCase();
-    return state === "archived" || state === "closed";
-  }).length;
-
-  return {
-    activeCount,
-    archivedCount,
-    latestSessionId: sorted[0]?.id,
-    latestUpdatedAt: sorted[0]?.updatedAt || sorted[0]?.createdAt,
-    recoverableCount: activeCount,
-    totalCount: sorted.length,
-  };
-}
-
-export function normalizeRuntimeSessions(
-  sessions:
-    | Array<RuntimeSessionRecord | null | undefined>
-    | null
-    | undefined,
-) {
-  if (!Array.isArray(sessions)) {
-    return [];
-  }
-  const normalized: RuntimeSessionRecord[] = [];
-  const seen = new Set<string>();
-  for (const session of sessions) {
-    const id = normalizeSessionId(session?.id);
-    if (!session || !id || seen.has(id)) {
-      continue;
-    }
-    seen.add(id);
-    normalized.push(session.id === id ? session : { ...session, id });
-  }
-  return normalized;
-}
-
-export function normalizeRuntimeSessionUsers(
-  users: RuntimeSessionUserSummary[] | null | undefined,
-) {
-  return Array.isArray(users)
-    ? users.filter((user) => user.user_id?.trim())
-    : [];
-}
-
-export function chooseRuntimeSessionUserId(
-  users: RuntimeSessionUserSummary[],
-  defaultUserId: string | null | undefined,
-  currentUserId: string | null | undefined,
-  fallbackUserId: string,
-) {
-  const normalizedUsers = normalizeRuntimeSessionUsers(users);
-  const userIds = new Set(normalizedUsers.map((user) => user.user_id.trim()));
-  const current = currentUserId?.trim() ?? "";
-  if (current && userIds.has(current)) {
-    return current;
-  }
-
-  const defaultUser = defaultUserId?.trim() ?? "";
-  if (
-    defaultUser &&
-    normalizedUsers.some(
-      (user) => user.user_id.trim() === defaultUser && (user.session_count ?? 0) > 0,
-    )
-  ) {
-    return defaultUser;
-  }
-
-  const withSessions = normalizedUsers.filter((user) => (user.session_count ?? 0) > 0);
-  if (withSessions.length > 0) {
-    return [...withSessions].sort((left, right) => {
-      const leftTime = Date.parse(left.latest_updated_at ?? "");
-      const rightTime = Date.parse(right.latest_updated_at ?? "");
-      if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
-        return rightTime - leftTime;
-      }
-      if (Number.isFinite(leftTime) && !Number.isFinite(rightTime)) {
-        return -1;
-      }
-      if (!Number.isFinite(leftTime) && Number.isFinite(rightTime)) {
-        return 1;
-      }
-      if ((left.session_count ?? 0) !== (right.session_count ?? 0)) {
-        return (right.session_count ?? 0) - (left.session_count ?? 0);
-      }
-      return left.user_id.localeCompare(right.user_id);
-    })[0]?.user_id.trim() ?? fallbackUserId;
-  }
-
-  if (defaultUser) {
-    return defaultUser;
-  }
-
-  return fallbackUserId.trim();
-}
-
-export function mergePinnedRuntimeSession(
-  sessions: RuntimeSessionRecord[],
-  pinnedSession: RuntimeSessionRecord | null | undefined,
-) {
-  const pinnedSessionId = normalizeSessionId(pinnedSession?.id);
-  if (!pinnedSession || !pinnedSessionId) {
-    return sessions;
-  }
-
-  if (
-    sessions.some(
-      (session) => normalizeSessionId(session.id) === pinnedSessionId,
-    )
-  ) {
-    return sessions;
-  }
-
-  return [
-    ...sessions,
-    pinnedSession.id === pinnedSessionId
-      ? pinnedSession
-      : { ...pinnedSession, id: pinnedSessionId },
-  ];
-}
-
-export async function loadRuntimeSessions(
-  userId: string,
-  pinnedSessionId?: string,
-) {
-  const response = await listRuntimeSessions({ userId });
-  const listedSessions = normalizeRuntimeSessions(response.sessions);
-  const resolvedPinnedSessionId = normalizeSessionId(pinnedSessionId);
-
-  if (
-    !resolvedPinnedSessionId ||
-    listedSessions.some((session) => session.id === resolvedPinnedSessionId)
-  ) {
-    return sortRuntimeSessions(listedSessions);
-  }
-
-  try {
-    const response = await getRuntimeSession(resolvedPinnedSessionId);
-    return sortRuntimeSessions(
-      mergePinnedRuntimeSession(listedSessions, response.session),
-    );
-  } catch {
-    return sortRuntimeSessions(listedSessions);
-  }
-}
+export type { RuntimeSessionsSummary } from "./runtime-sessions-data/types";
+export { normalizeRuntimeSessions, normalizeRuntimeSessionUsers } from "./runtime-sessions-data/normalize";
+export { sortRuntimeSessions, summarizeRuntimeSessions } from "./runtime-sessions-data/sorting";
+export {
+  buildStoredRuntimeSessionsKey,
+  readStoredRuntimeSessionUserId,
+  readStoredRuntimeSessions,
+  writeStoredRuntimeSessionUserId,
+  writeStoredRuntimeSessions,
+} from "./runtime-sessions-data/storage";
+export { resolveRuntimeSessionsRetryDelay } from "./runtime-sessions-data/retry";
+export { chooseRuntimeSessionUserId } from "./runtime-sessions-data/user-selection";
+export {
+  loadRuntimeSessions,
+  mergePinnedRuntimeSession,
+} from "./runtime-sessions-data/loading";
 
 export function useRuntimeSessionsData({
   pinnedSessionId,
