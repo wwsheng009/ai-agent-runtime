@@ -1,5 +1,6 @@
 import { type ReactNode } from "react";
 
+import { surfaceCardVariants } from "@/components/ui/surface-card";
 import { cn } from "@/lib/utils";
 
 type SettingsChoiceCardProps = {
@@ -24,11 +25,10 @@ export function SettingsChoiceCard({
       disabled={disabled}
       onClick={onClick}
       className={cn(
-        "rounded-[0.9rem] border p-3.5 text-left transition",
-        active
-          ? "border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)] shadow-[0_0_0_1px_var(--accent-primary-border)]"
-          : "border-[var(--border)] bg-[var(--surface-softer)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)]",
-        disabled ? "cursor-not-allowed opacity-60" : null,
+        "text-left transition",
+        surfaceCardVariants({ surface: active ? "accent" : "softer" }),
+        active ? null : surfaceCardVariants({ state: "hoverable" }),
+        disabled ? surfaceCardVariants({ state: "disabled" }) : null,
         className,
       )}
     >

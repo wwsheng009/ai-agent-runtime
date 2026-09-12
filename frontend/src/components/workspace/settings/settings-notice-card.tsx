@@ -1,11 +1,46 @@
 import { type ReactNode } from "react";
 
+import {
+  surfaceCardVariants,
+  type SurfaceCardVariantProps,
+} from "@/components/ui/surface-card";
 import { cn } from "@/lib/utils";
+
+type SettingsNoticeTone = "warning" | "warning-soft" | "neutral" | "muted";
 
 type SettingsNoticeCardProps = {
   children: ReactNode;
   className?: string;
-  tone?: "warning" | "warning-soft" | "neutral" | "muted";
+  tone?: SettingsNoticeTone;
+};
+
+type NoticeStyle = {
+  surface: NonNullable<SurfaceCardVariantProps["surface"]>;
+  density: NonNullable<SurfaceCardVariantProps["density"]>;
+  text: string;
+};
+
+const noticeStyles: Record<SettingsNoticeTone, NoticeStyle> = {
+  "warning-soft": {
+    surface: "warning-soft",
+    density: "compact",
+    text: "text-sm text-[var(--foreground)]",
+  },
+  warning: {
+    surface: "warning",
+    density: "compact",
+    text: "text-sm text-[#f59e7d]",
+  },
+  muted: {
+    surface: "solid",
+    density: "tight",
+    text: "text-xs leading-6 text-[var(--muted-foreground)]",
+  },
+  neutral: {
+    surface: "solid",
+    density: "compact",
+    text: "text-sm text-[var(--foreground)]",
+  },
 };
 
 export function SettingsNoticeCard({
@@ -13,17 +48,17 @@ export function SettingsNoticeCard({
   className,
   tone = "neutral",
 }: SettingsNoticeCardProps) {
+  const style = noticeStyles[tone];
+
   return (
     <div
       className={cn(
-        "rounded-[0.75rem] border",
-        tone === "warning-soft"
-          ? "border-[#f59e7d]/24 bg-[#f59e7d]/10 px-3 py-2.5 text-sm text-[var(--foreground)]"
-          : tone === "warning"
-            ? "border-[#f59e7d]/20 bg-[#f59e7d]/8 px-3 py-2.5 text-sm text-[#f59e7d]"
-            : tone === "muted"
-              ? "border-[var(--border)] bg-[var(--surface-solid)] px-3 py-2 text-xs leading-6 text-[var(--muted-foreground)]"
-              : "border-[var(--border)] bg-[var(--surface-solid)] px-3 py-2.5 text-sm text-[var(--foreground)]",
+        surfaceCardVariants({
+          radius: "sm",
+          surface: style.surface,
+          density: style.density,
+        }),
+        style.text,
         className,
       )}
     >

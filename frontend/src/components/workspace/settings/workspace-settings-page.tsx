@@ -3,6 +3,8 @@ import { useTranslation } from "react-i18next";
 
 import { useAppSettings } from "@/core/settings";
 
+import { PanelIcon } from "@/components/ui/panel-icon";
+
 import { SettingsChoiceCard } from "./settings-choice-card";
 import { SettingsSection } from "./settings-section";
 import { SettingsToggleCard } from "./settings-toggle-card";
@@ -42,9 +44,9 @@ export function WorkspaceSettingsPage() {
                 }
               >
                 <div className="flex items-center gap-3">
-                  <span className="inline-flex size-8 items-center justify-center rounded-[0.7rem] border border-[var(--border)] bg-[var(--surface-solid)] text-[var(--accent-primary)]">
+                  <PanelIcon>
                     <Rows4Icon size={16} />
-                  </span>
+                  </PanelIcon>
                   <div className="text-base font-semibold text-[var(--foreground)]">
                     {option.label}
                   </div>

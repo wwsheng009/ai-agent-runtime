@@ -1,5 +1,8 @@
 import { type ReactNode } from "react";
 
+import { CheckboxInput } from "@/components/ui/checkbox";
+import { PanelIcon } from "@/components/ui/panel-icon";
+import { surfaceCardVariants } from "@/components/ui/surface-card";
 import { cn } from "@/lib/utils";
 
 type SettingsToggleCardProps = {
@@ -28,34 +31,30 @@ export function SettingsToggleCard({
   return (
     <label
       className={cn(
-        "flex items-start gap-3 rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3.5 transition",
-        disabled
-          ? "cursor-not-allowed opacity-60"
-          : "cursor-pointer hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)]",
+        "flex items-start gap-3 transition",
+        surfaceCardVariants({
+          surface: "softer",
+          state: disabled ? "disabled" : "hoverable",
+        }),
+        disabled ? null : "cursor-pointer",
         className,
       )}
     >
       {icon ? (
-        <span
-          className={cn(
-            "mt-0.5 inline-flex size-8 shrink-0 items-center justify-center rounded-[0.7rem] border border-[var(--border)] bg-[var(--surface-solid)] text-[var(--accent-primary)]",
-            iconWrapperClassName,
-          )}
-        >
+        <PanelIcon className={cn("mt-0.5 shrink-0", iconWrapperClassName)}>
           {icon}
-        </span>
+        </PanelIcon>
       ) : null}
       <span className={cn("min-w-0 flex-1", contentClassName)}>
         <span className="flex items-center justify-between gap-3">
           <span className="text-sm font-semibold text-[var(--foreground)]">
             {title}
           </span>
-          <input
-            type="checkbox"
+          <CheckboxInput
+            shrink
             checked={checked}
             disabled={disabled}
             onChange={(event) => onChange(event.target.checked)}
-            className="h-4 w-4 shrink-0 accent-[var(--accent-primary)]"
           />
         </span>
         <span className="mt-2 block text-sm leading-6 text-[var(--muted-foreground)]">

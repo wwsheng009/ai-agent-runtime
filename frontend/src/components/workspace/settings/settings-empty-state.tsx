@@ -1,5 +1,6 @@
 import { type ReactNode } from "react";
 
+import { surfaceCardVariants } from "@/components/ui/surface-card";
 import { cn } from "@/lib/utils";
 
 type SettingsEmptyStateProps = {
@@ -18,7 +19,12 @@ export function SettingsEmptyState({
       className={cn(
         "text-sm leading-6 text-[var(--muted-foreground)]",
         variant === "dashed"
-          ? "rounded-[0.75rem] border border-dashed border-[var(--border)] px-3 py-3"
+          ? surfaceCardVariants({
+              frame: "dashed",
+              surface: "none",
+              radius: "sm",
+              density: "roomy",
+            })
           : "px-3 py-6",
         className,
       )}

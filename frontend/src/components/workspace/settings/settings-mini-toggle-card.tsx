@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next";
 
+import { CheckboxInput } from "@/components/ui/checkbox";
 import { editorToggleRowClassName } from "./editor-control-class";
 import { SettingsMiniCard } from "./settings-mini-card";
 
@@ -28,9 +29,7 @@ export function SettingsMiniToggleCard({
     <SettingsMiniCard title={label} description={description}>
       <label className={`mt-3 ${editorToggleRowClassName}`}>
         <span>{checked ? resolvedCheckedLabel : resolvedUncheckedLabel}</span>
-        <input
-          type="checkbox"
-          className="h-4 w-4 accent-[var(--accent-primary)]"
+        <CheckboxInput
           checked={checked}
           onChange={(event) => onCheckedChange(event.target.checked)}
         />

@@ -1,11 +1,20 @@
 import type { ComponentProps } from "react";
 
+import { surfaceCardVariants } from "@/components/ui/surface-card";
 import { cn } from "@/lib/utils";
 
 export function Card({ className, ...props }: ComponentProps<"section">) {
   return (
     <section
-      className={cn("surface-panel rounded-[1rem] p-4", className)}
+      className={cn(
+        surfaceCardVariants({
+          frame: "none",
+          surface: "panel",
+          radius: "panel",
+          density: "panel",
+        }),
+        className,
+      )}
       {...props}
     />
   );
