@@ -1,0 +1,164 @@
+// 由 components/workspace/message-markdown.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
+// 流式尾块子组件（引用块段落 / 列表项 / 表头单元格 / 表格行 / 纯文本片段）
+
+import { memo } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkBreaks from "remark-breaks";
+import remarkGfm from "remark-gfm";
+import { cn } from "@/lib/utils";
+import { inlineMarkdownComponents } from "./markdown-components";
+
+function areStringArraysEqual(left: string[], right: string[]) {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
+}
+
+const InlineMarkdown = memo(function InlineMarkdown({
+  content,
+}: {
+  content: string;
+}) {
+  return (
+    <ReactMarkdown
+      components={inlineMarkdownComponents}
+      remarkPlugins={[remarkGfm, remarkBreaks]}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+});
+
+function alignmentToClassName(alignment: "left" | "center" | "right" | null) {
+  if (alignment === "center") {
+    return "text-center";
+  }
+  if (alignment === "right") {
+    return "text-right";
+  }
+  return "text-left";
+}
+
+export const StreamingBlockquoteParagraph = memo(function StreamingBlockquoteParagraph({
+  active,
+  className,
+  content,
+}: {
+  active: boolean;
+  className?: string;
+  content: string;
+}) {
+  return (
+    <p
+      className={cn(
+        "whitespace-pre-wrap break-words text-[var(--muted-foreground)]",
+        className,
+      )}
+      aria-atomic={active ? "true" : undefined}
+      aria-live={active ? "polite" : "off"}
+      data-streaming-active={active ? "true" : undefined}
+    >
+      <InlineMarkdown content={content} />
+    </p>
+  );
+});
+
+export const StreamingListItem = memo(function StreamingListItem({
+  active,
+  content,
+}: {
+  active: boolean;
+  content: string;
+}) {
+  return (
+    <li
+      aria-atomic={active ? "true" : undefined}
+      aria-live={active ? "polite" : "off"}
+      className="break-words pl-1"
+      data-streaming-active={active ? "true" : undefined}
+    >
+      <InlineMarkdown content={content} />
+    </li>
+  );
+});
+
+export const StreamingTableHeaderCell = memo(function StreamingTableHeaderCell({
+  alignment,
+  content,
+}: {
+  alignment: "left" | "center" | "right" | null;
+  content: string;
+}) {
+  return (
+    <th
+      className={cn(
+        "bg-[var(--surface-softer)] px-3 py-2.5 font-semibold text-[var(--foreground)]",
+        alignmentToClassName(alignment),
+      )}
+    >
+      <InlineMarkdown content={content} />
+    </th>
+  );
+});
+
+export const StreamingTableRow = memo(
+  function StreamingTableRow({
+    active,
+    alignments,
+    cells,
+  }: {
+    active: boolean;
+    alignments: Array<"left" | "center" | "right" | null>;
+    cells: string[];
+  }) {
+    return (
+      <tr
+        aria-atomic={active ? "true" : undefined}
+        aria-live={active ? "polite" : "off"}
+        data-streaming-active={active ? "true" : undefined}
+      >
+        {cells.map((cell, cellIndex) => (
+          <td
+            key={`streaming-table-cell-${cellIndex}-${cell}`}
+            className={cn(
+              "border-t border-[var(--border)] px-3 py-2.5 align-top text-[var(--foreground)]",
+              alignmentToClassName(alignments[cellIndex] ?? null),
+            )}
+          >
+            <InlineMarkdown content={cell} />
+          </td>
+        ))}
+      </tr>
+    );
+  },
+  (previousProps, nextProps) =>
+    previousProps.active === nextProps.active &&
+    areStringArraysEqual(previousProps.cells, nextProps.cells) &&
+    previousProps.alignments.length === nextProps.alignments.length &&
+    previousProps.alignments.every(
+      (value, index) => value === nextProps.alignments[index],
+    ),
+);
+
+export const StreamingPlainFragment = memo(function StreamingPlainFragment({
+  active,
+  content,
+}: {
+  active: boolean;
+  content: string;
+}) {
+  if (!content) {
+    return null;
+  }
+
+  return (
+    <span
+      aria-atomic={active ? "true" : undefined}
+      aria-live={active ? "polite" : "off"}
+      data-streaming-active={active ? "true" : undefined}
+    >
+      {content}
+    </span>
+  );
+});
