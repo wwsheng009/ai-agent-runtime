@@ -1,8 +1,10 @@
 import { XIcon } from "lucide-react";
-import { useEffect, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 import { Button } from "@/components/ui/button";
+import { DialogOverlay, DialogPanel } from "@/components/ui/dialog-shell";
+import { useDialogLifecycle } from "@/components/ui/use-dialog-lifecycle";
 
 type ConfigDomainDialogProps = {
   children: ReactNode;
@@ -23,53 +25,15 @@ export function ConfigDomainDialog({
   title,
   widthClassName = "max-w-5xl",
 }: ConfigDomainDialogProps) {
-  useEffect(() => {
-    if (!open || typeof document === "undefined") {
-      return;
-    }
-
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-
-    return () => {
-      document.body.style.overflow = previousOverflow;
-    };
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onClose();
-      }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [onClose, open]);
+  useDialogLifecycle(open, onClose);
 
   if (!open || typeof document === "undefined") {
     return null;
   }
 
   return createPortal(
-    <div
-      className="fixed inset-0 z-[140] flex items-center justify-center bg-[var(--dialog-backdrop)] px-3 py-4"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          onClose();
-        }
-      }}
-    >
-      <div
-        className={`flex max-h-[calc(100vh-1.5rem)] w-full flex-col overflow-hidden rounded-[0.9rem] border border-[var(--border)] [background:var(--dialog-bg)] shadow-[0_14px_36px_rgba(0,0,0,0.2)] ${widthClassName}`}
-      >
+    <DialogOverlay className="z-[140]" onDismiss={onClose}>
+      <DialogPanel elevation="lg" className={widthClassName}>
         <div className="flex items-start justify-between gap-4 border-b border-[var(--border)] px-3 py-3 sm:px-4">
           <div>
             <div className="app-text-11 uppercase tracking-[0.14em] text-[var(--accent-secondary)]">
@@ -94,8 +58,8 @@ export function ConfigDomainDialog({
         {footer ? (
           <div className="border-t border-[var(--border)] px-3 py-3 sm:px-4">{footer}</div>
         ) : null}
-      </div>
-    </div>,
+      </DialogPanel>
+    </DialogOverlay>,
     document.body,
   );
 }

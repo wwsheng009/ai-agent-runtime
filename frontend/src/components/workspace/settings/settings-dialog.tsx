@@ -13,6 +13,8 @@ import { Link } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 import { buttonVariants } from "@/components/ui/button-variants";
+import { DialogOverlay, DialogPanel } from "@/components/ui/dialog-shell";
+import { useDialogLifecycle } from "@/components/ui/use-dialog-lifecycle";
 import { useAppSettings } from "@/core/settings";
 import { type RuntimeSessionsSummary } from "@/hooks/workspace/use-runtime-sessions-data";
 import { type RuntimeClientIdentity } from "@/lib/runtime-client";
@@ -100,36 +102,7 @@ export function SettingsDialog({
     };
   }, [defaultSection, open]);
 
-  useEffect(() => {
-    if (!open || typeof document === "undefined") {
-      return;
-    }
-
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-
-    return () => {
-      document.body.style.overflow = previousOverflow;
-    };
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onClose();
-      }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [onClose, open]);
+  useDialogLifecycle(open, onClose);
 
   const sections = useMemo<SettingsNavItem[]>(
     () => [
@@ -178,15 +151,8 @@ export function SettingsDialog({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-[120] flex items-center justify-center bg-[var(--dialog-backdrop)] px-3 py-4 backdrop-blur-sm"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          onClose();
-        }
-      }}
-    >
-      <div className="flex max-h-[calc(100vh-1.5rem)] w-full max-w-6xl flex-col overflow-hidden rounded-[0.9rem] border border-[var(--border)] [background:var(--dialog-bg)] shadow-[0_12px_36px_rgba(0,0,0,0.22)]">
+    <DialogOverlay className="z-[120] backdrop-blur-sm" onDismiss={onClose}>
+      <DialogPanel className="max-w-6xl">
         <div className="flex items-start justify-between gap-3 px-3.5 py-3 sm:px-4">
           <div>
             <div className="app-text-11 uppercase tracking-[0.16em] text-[var(--accent-primary)]">
@@ -303,7 +269,7 @@ export function SettingsDialog({
         <div className="border-t border-[var(--border)] px-3.5 py-2.5 text-xs leading-5 text-[var(--muted-foreground)] sm:px-4">
           {t("dialog.localStorageFooter")}
         </div>
-      </div>
-    </div>
+      </DialogPanel>
+    </DialogOverlay>
   );
 }
