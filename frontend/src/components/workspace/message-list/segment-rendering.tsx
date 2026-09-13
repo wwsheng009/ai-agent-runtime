@@ -21,6 +21,7 @@ export function renderMessageSegment(
     interrupted?: boolean;
     streaming?: boolean;
     onSelectArtifact?: (artifactId: string) => void;
+    resolveFilePathLink?: (path: string) => (() => void) | null;
   },
 ) {
   if (segment.type === "text") {
@@ -43,7 +44,12 @@ export function renderMessageSegment(
   }
 
   if (segment.type === "tool") {
-    return <MessageToolRow segment={segment} />;
+    return (
+      <MessageToolRow
+        resolveFilePathLink={options?.resolveFilePathLink}
+        segment={segment}
+      />
+    );
   }
 
   return (

@@ -60,6 +60,19 @@ export const zhWorkspacePanelsMessages = {
   toolRow: {
     inputLabel: "输入",
     outputLabel: "输出",
+    status: {
+      started: "已开始",
+      running: "执行中",
+      finished: "已完成",
+      failed: "失败",
+    },
+    announcement: "工具 {{name}} 状态：{{status}}",
+    expandLabel: "展开工具输入",
+    collapseLabel: "折叠工具输入",
+    exitCode: "退出码 {{code}}",
+    diffAdditions: "+{{value}}",
+    diffRemovals: "−{{value}}",
+    openFile: "打开 {{path}}",
   },
   richContent: {
     relatedEvidence: "相关证据",

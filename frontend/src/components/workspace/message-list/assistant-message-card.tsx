@@ -7,6 +7,7 @@ import { useTranslation } from "react-i18next";
 import { Badge } from "@/components/ui/badge";
 import { type Artifact, type ChatMessage } from "@/data/mock";
 import { projectChatView } from "@/lib/chat-view";
+import { createArtifactFilePathLinkResolver } from "@/lib/tool-row/artifact-links";
 
 import { ProcessCollapseRow } from "./process-collapse-row";
 import {
@@ -35,6 +36,10 @@ export function AssistantMessageCard({
 }: AssistantMessageCardProps) {
   const { t } = useTranslation("workspace");
   const [processExpanded, setProcessExpanded] = useState(false);
+  const resolveFilePathLink = createArtifactFilePathLinkResolver(
+    relatedEvidence,
+    onSelectArtifact,
+  );
   const view = projectChatView(message, {
     streaming: message.id === streamingMessageId,
   });
@@ -87,6 +92,7 @@ export function AssistantMessageCard({
                                       interrupted: message.interrupted === true,
                                       streaming: false,
                                       onSelectArtifact,
+                                      resolveFilePathLink,
                                     })}
                                   </div>
                                 ))
@@ -98,6 +104,7 @@ export function AssistantMessageCard({
                                   interrupted: message.interrupted === true,
                                   streaming: message.id === streamingMessageId,
                                   onSelectArtifact,
+                                  resolveFilePathLink,
                                 })}
                               </div>
                             ))}

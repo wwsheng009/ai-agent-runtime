@@ -60,6 +60,19 @@ export const enWorkspacePanelsMessages = {
   toolRow: {
     inputLabel: "Input",
     outputLabel: "Output",
+    status: {
+      started: "Started",
+      running: "Running",
+      finished: "Finished",
+      failed: "Failed",
+    },
+    announcement: "Tool {{name}} status: {{status}}",
+    expandLabel: "Expand tool input",
+    collapseLabel: "Collapse tool input",
+    exitCode: "Exit code {{code}}",
+    diffAdditions: "+{{value}}",
+    diffRemovals: "−{{value}}",
+    openFile: "Open {{path}}",
   },
   richContent: {
     relatedEvidence: "Related evidence",

@@ -1,5 +1,6 @@
 // 由 data/mock.ts 机械拆分而来（P0-2），仅搬迁不改语义。
 
+import type { ToolSegmentDetails } from "@/lib/tool-row/details";
 import type { TurnUsage } from "@/lib/turn-usage";
 
 export type MessageSegment =
@@ -20,6 +21,8 @@ export type MessageSegment =
       argsSummary?: string;
       resultSummary?: string;
       errorMessage?: string;
+      /** P1-6：工具事件结构化明细（文件路径 / 命令 / 查询 / URL / diff 行数 / 退出码），缺失即不渲染。 */
+      details?: ToolSegmentDetails;
     }
   | {
       type: "code";

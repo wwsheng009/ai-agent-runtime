@@ -1,6 +1,7 @@
 // 由 lib/workspace-thread-state.ts 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { type MessageSegment } from "@/data/mock";
+import { extractToolDetails } from "@/lib/tool-row/details";
 import { type AgentChatStreamChunkPayload } from "@/types/runtime";
 
 import { readFirstTextValue, readFirstValue } from "./history-mapping";
@@ -131,10 +132,11 @@ export function buildToolSegmentFromPayload(
   payload: AgentChatStreamChunkPayload,
   status: ToolMessageSegment["status"],
 ): ToolMessageSegment {
+  const name = getToolName(payload);
   return {
     type: "tool",
     toolCallId: getToolCallId(payload) || undefined,
-    name: getToolName(payload),
+    name,
     status,
     argsSummary: getToolArgumentsSummary(payload) || undefined,
     resultSummary:
@@ -143,6 +145,8 @@ export function buildToolSegmentFromPayload(
       status === "error"
         ? getToolErrorMessage(payload) || "Tool execution failed."
         : undefined,
+    // P1-6：在截断 argsSummary 之前从原始入参/事件字段提取结构化明细（真实缺失即 undefined）。
+    details: extractToolDetails(payload, name),
   };
 }
 

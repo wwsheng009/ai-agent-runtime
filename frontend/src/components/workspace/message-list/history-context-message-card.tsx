@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { projectChatView } from "@/lib/chat-view";
+import { createArtifactFilePathLinkResolver } from "@/lib/tool-row/artifact-links";
 import { cn } from "@/lib/utils";
 import { type Artifact, type ChatMessage } from "@/data/mock";
 
@@ -33,6 +34,10 @@ export function HistoryContextMessageCard({
 }) {
   const { t } = useTranslation("workspace");
   const [expanded, setExpanded] = useState(false);
+  const resolveFilePathLink = createArtifactFilePathLinkResolver(
+    relatedEvidence,
+    onSelectArtifact,
+  );
   const panelId = `${message.id}-context-panel`;
   const view = projectChatView(message, { expanded });
   const toggleHint = expanded
@@ -104,6 +109,7 @@ export function HistoryContextMessageCard({
                   interrupted: message.interrupted === true,
                   streaming: message.id === streamingMessageId,
                   onSelectArtifact,
+                  resolveFilePathLink,
                 })}
               </div>
             ))}

@@ -130,8 +130,8 @@ test("G2: tool card walks Started -> Running -> Finished with visible result", a
   // phase strip reports the tool phase
   await expect(page.getByText("Calling tools…")).toBeVisible({ timeout: 15_000 });
 
-  // tool identity is shown
-  await expect(page.getByText("web_search")).toBeVisible();
+  // tool identity is shown (exact match: the sr-only status live region also contains the name)
+  await expect(page.getByText("web_search", { exact: true })).toBeVisible();
 
   // badge lifecycle
   const startedBadge = page.getByText("Started", { exact: true }).first();
@@ -261,7 +261,7 @@ test("P1-3c: bottom ownership holds while a tool card streams in", async ({ page
   expect(metrics.max - metrics.top).toBeLessThanOrEqual(32); // ±32px 底部归属
 
   await sendPrompt(page, "use the tool to look it up");
-  await expect(page.getByText("web_search")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("web_search", { exact: true })).toBeVisible({ timeout: 15_000 });
   await expect(page.getByText("Running", { exact: true }).first()).toBeVisible({
     timeout: 10_000,
   });
