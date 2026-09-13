@@ -2018,6 +2018,8 @@ func classifyToolErrorCode(message string) string {
 		return string(runtimeerrors.ErrAgentThreadLimit)
 	case strings.Contains(lower, "session is busy"):
 		return string(runtimeerrors.ErrAgentBusy)
+	case strings.Contains(lower, "session run was superseded"):
+		return string(runtimeerrors.ErrAgentRunSuperseded)
 	// Durable registry wiring failures (store not initialized/closed) are host
 	// problems, not model-retryable agent errors.
 	case strings.Contains(lower, "agent registry store is not initialized"),
@@ -2097,6 +2099,7 @@ func knownRuntimeErrorCode(code string) bool {
 		runtimeerrors.ErrProcessStartFailed, runtimeerrors.ErrProcessHealthcheck,
 		runtimeerrors.ErrAgentMaxSteps, runtimeerrors.ErrAgentPermission, runtimeerrors.ErrAgentReadOnly,
 		runtimeerrors.ErrAgentAlreadyExists, runtimeerrors.ErrAgentBusy,
+		runtimeerrors.ErrAgentRunSuperseded,
 		runtimeerrors.ErrAgentThreadLimit, runtimeerrors.ErrAgentRegistryUnavailable,
 		runtimeerrors.ErrAgentSessionNotFound, runtimeerrors.ErrContextBudget,
 		runtimeerrors.ErrStreamInterrupted, runtimeerrors.ErrUpstreamUnavailable,
@@ -2193,6 +2196,8 @@ func nextActionForToolError(code string, message string) string {
 		return "The requested child id already exists. Reuse the existing child with send_input/followup_task, close it if replacement is intended, or spawn with a different id. Do not retry the same spawn_agent unchanged."
 	case runtimeerrors.ErrAgentBusy:
 		return "The child already has an active run. Use wait_agent/read_agent_events to observe it, send_input with interrupt=true only when replacing that run is intentional, or use followup_task to queue follow-up work. Do not retry the same send_input unchanged."
+	case runtimeerrors.ErrAgentRunSuperseded:
+		return "The child run that owned this approval/question is gone (interrupted, superseded by a newer turn, or its session already terminal). Read the child with list_agents/wait_agent/read_agent_events, then re-dispatch the work with send_input or followup_task. Do not replay the same approval request unchanged."
 	case runtimeerrors.ErrAgentThreadLimit:
 		return "agents.maxThreads is fully used by active children (active_children is reported in the error). Free capacity first: close finished/idle children with close_agent, reuse an existing child via send_input/followup_task, or reduce the spawn batch. Do not retry the same spawn_agent unchanged."
 	case runtimeerrors.ErrAgentRegistryUnavailable:

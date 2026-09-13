@@ -58,6 +58,10 @@ func TestBrokerBackgroundTaskPersistsStableJobAliasAcrossBrokerInstances(t *test
 	manager := background.NewManager(background.Config{
 		LogDir: filepath.Join(t.TempDir(), "logs"),
 	})
+	// Close first so the detached launcher stops touching the temp log dir
+	// before t.TempDir cleanup removes it (Windows RemoveAll otherwise races
+	// with the async runner/status file writes).
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 
 	brokerOne := &Broker{
 		Background:          manager,

@@ -1049,6 +1049,12 @@ func classifyBrokerExecutionError(toolName string, err error) error {
 		code = runtimeerrors.ErrAgentAlreadyExists
 	case strings.Contains(lower, "session is busy"):
 		code = runtimeerrors.ErrAgentBusy
+	case strings.Contains(lower, "session run was superseded"):
+		// The approval/question target run is gone (interrupted, replaced by a
+		// newer turn, or its session already terminal). This is a lifecycle
+		// conflict, not a broker malfunction: keep the generic
+		// TOOL_BROKER_FAILURE bucket for real broker failures only.
+		code = runtimeerrors.ErrAgentRunSuperseded
 	case strings.Contains(lower, "agent session reference not found"),
 		strings.Contains(lower, "unknown agent session reference"),
 		strings.Contains(lower, "agent session not found"):

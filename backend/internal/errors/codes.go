@@ -23,6 +23,12 @@ const (
 	ErrJobNotFound          ErrorCode = "JOB_NOT_FOUND"
 	ErrTurnDeadlineExceeded ErrorCode = "TURN_DEADLINE_EXCEEDED"
 	ErrAgentRunCanceled     ErrorCode = "AGENT_RUN_CANCELED"
+	// ErrAgentRunSuperseded marks control-plane calls (resolve_agent_approval /
+	// answer question) whose target run ownership token is no longer current:
+	// the child run was interrupted, replaced by a newer turn, or its session
+	// already reached a terminal state. Replaying the same request_id cannot
+	// succeed; read the child status/events and re-dispatch the work.
+	ErrAgentRunSuperseded   ErrorCode = "AGENT_RUN_SUPERSEDED"
 	ErrApprovalExpired      ErrorCode = "APPROVAL_EXPIRED"
 	ErrSessionLeaseConflict ErrorCode = "SESSION_LEASE_CONFLICT"
 	ErrToolInvalidArgs      ErrorCode = "TOOL_INVALID_ARGS"

@@ -18,6 +18,10 @@ func TestBrokerExecuteBackgroundTaskReturnsRestartPolicy(t *testing.T) {
 	manager := background.NewManager(background.Config{
 		LogDir: filepath.Join(t.TempDir(), "logs"),
 	})
+	// Close must run before t.TempDir cleanup: the detached launcher keeps
+	// writing its runner/status/log files asynchronously, and on Windows a
+	// non-empty log directory makes RemoveAll fail the test.
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 
 	broker := &Broker{Background: manager}
 	raw, _, err := broker.Execute(ctx, "session-1", ToolBackgroundTask, map[string]interface{}{
