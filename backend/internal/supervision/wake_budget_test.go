@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -401,4 +402,35 @@ func TestWakeClaims_RetentionStaysBoundedUnderRepeatedClaims(t *testing.T) {
 	pruned, err = store.PruneWakeClaims(ctx, lastCutoff.Add(time.Minute))
 	require.NoError(t, err)
 	require.EqualValues(t, 1, pruned, "retention advances one row per minute of claims")
+}
+
+// TestFormatWakeBudgetLine_RendersLedgerForModel covers the P1-6 follow-up that
+// moves the budget out of host-only diagnostics: the model-visible line must
+// show used/limit per class, mark uncapped classes, keep the caller's class
+// order, and render nothing when no scheduler is wired (unwired hosts keep the
+// previous digest bytes).
+func TestFormatWakeBudgetLine_RendersLedgerForModel(t *testing.T) {
+	require.Empty(t, FormatWakeBudgetLine(nil))
+	require.Empty(t, FormatWakeBudgetLine([]WakeBudgetState{}))
+
+	line := FormatWakeBudgetLine([]WakeBudgetState{
+		{RootScopeID: "root-1", BudgetClass: WakeBudgetClassApproval, Used: 1, Unlimited: true},
+		{RootScopeID: "root-1", BudgetClass: WakeBudgetClassFailure, Used: 5, Limit: 5, Window: time.Hour},
+		{RootScopeID: "root-1", BudgetClass: WakeBudgetClassOther, Used: 0, Limit: 5, Window: time.Hour},
+	})
+	require.Contains(t, line, "wake_budget:")
+	require.Contains(t, line, "approval=1/unlimited")
+	require.Contains(t, line, "failure=5/5")
+	require.Contains(t, line, "other=0/5")
+	require.Contains(t, line, "defer", "the line must say an exhausted class defers rather than drops")
+
+	approval := strings.Index(line, "approval=")
+	failure := strings.Index(line, "failure=")
+	other := strings.Index(line, "other=")
+	require.Less(t, approval, failure, "rows keep the caller's class order")
+	require.Less(t, failure, other, "rows keep the caller's class order")
+
+	// A blank class is still rendered under a stable name instead of an empty
+	// token, so a partially populated ledger stays readable.
+	require.Contains(t, FormatWakeBudgetLine([]WakeBudgetState{{Used: 2, Limit: 5}}), "other=2/5")
 }

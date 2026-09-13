@@ -304,7 +304,17 @@ func (h *Handler) injectSupervisionPreflight(ctx context.Context, sessionID, pro
 			return "", fmt.Errorf("mark supervision notification seen: %w", err)
 		}
 	}
-	return strings.TrimSpace(digest.Text) + "\n\n" + prompt, nil
+	text := strings.TrimSpace(digest.Text)
+	// P1-6 follow-up: carry the auto-wake ledger into the model-visible text, so
+	// a rate-limited wake (deferred, never dropped) is observable inside the
+	// parent turn instead of only through host diagnostics. A team lead
+	// projects both its own session scope and the team scope, matching the HTTP
+	// snapshot projection; the helper collapses duplicates and returns nil when
+	// no scheduler is wired, keeping unwired hosts byte-identical.
+	if budgetLine := supervision.FormatWakeBudgetLine(h.supervisionWakeBudgetStates(ctx, sessionID, targetTeamID)); budgetLine != "" {
+		text = strings.TrimSpace(text + "\n" + budgetLine)
+	}
+	return text + "\n\n" + prompt, nil
 }
 
 // InjectSupervisionPreflight exposes the parent/lead turn hook to local hosts

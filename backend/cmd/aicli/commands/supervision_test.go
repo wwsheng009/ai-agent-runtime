@@ -194,6 +194,44 @@ func TestInjectLocalSupervisionPreflight(t *testing.T) {
 	require.Equal(t, supervision.DecisionUnacknowledged, updated.DecisionState)
 }
 
+// TestInjectLocalSupervisionPreflight_IncludesWakeBudgetLine covers the P1-6
+// follow-up on the CLI path: local turns render the same auto-wake ledger as
+// the API preflight, so a deferral (rate-limited wake) stays observable inside
+// the turn. A host with a store but no wake scheduler keeps the previous text
+// instead of advertising an invented 0/limit budget.
+func TestInjectLocalSupervisionPreflight_IncludesWakeBudgetLine(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	ctx := context.Background()
+	// The default local ledger is the in-process one, so usage is consumed by
+	// actually delivering a wake (not by writing a durable claim row).
+	_, err := supervision.ProjectLifecycle(ctx, host.Supervision.Store, host.Supervision.Wakes, supervision.LifecycleProjection{
+		RootScopeID:           "parent-session",
+		TargetParentSessionID: "parent-session",
+		SubjectKind:           supervision.SubjectAgentRun,
+		SubjectID:             "child-agent",
+		EventType:             supervision.WakeReasonExecutionFailed,
+		Severity:              supervision.SeverityCritical,
+		SupervisionState:      supervision.SupervisionTimedOut,
+	})
+	require.NoError(t, err)
+	claimed, _, err := host.Supervision.Wakes.DrainRunnable(ctx, "parent-session", "", "parent-session", nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, claimed, "the failure wake must be delivered before the ledger shows usage")
+
+	prompt, err := injectLocalSupervisionPreflight(ctx, host, "parent-session", "continue work", nil)
+	require.NoError(t, err)
+	require.Contains(t, prompt, "wake_budget:")
+	require.Contains(t, prompt, "failure=1/5")
+	require.Contains(t, prompt, "approval=0/unlimited")
+	require.Contains(t, prompt, "continue work")
+
+	noLedger := &localChatRuntimeHost{Supervision: &runtimeserver.SupervisionControlPlane{Store: host.Supervision.Store}}
+	noLedgerPrompt, err := injectLocalSupervisionPreflight(ctx, noLedger, "parent-session", "continue work", nil)
+	require.NoError(t, err)
+	require.NotContains(t, noLedgerPrompt, "wake_budget:")
+	require.Contains(t, noLedgerPrompt, "[Child lifecycle preflight]")
+}
+
 func TestInjectLocalSupervisionPreflight_DoesNotRepeatAcknowledgedNotification(t *testing.T) {
 	host := newLocalSupervisionTestHost(t)
 	ctx := context.Background()

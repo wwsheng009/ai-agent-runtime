@@ -1,7 +1,7 @@
 # Multi-Agent 执行协作优化方案（wait / wake / 审批 / 配额 / 可观测）
 
 更新时间: 2026-09-13
-状态: implementing（P0-1/P0-2/P0-3/P0-4/P1-6/P1-7/P2-8/P2-9/P2-11/P2-12 已实施，其中 P2-9 手动清理入口 `/agents cleanup` 与「终态/空闲自动 close」（周期对账 observe 只报候选、enforce 才落库）已落地（TTL 删除按方案建议走对账兜底、不做直接回调）；P0-4 仅剩真实终端 probe；P1-6 wake 预算已补 API 宿主侧可见性（`/supervision/digest` 与 `/supervision/snapshot` 的 `wake_budget` 投影，与 CLI `/debug supervision list` 同源同序；仅剩可选的「父 turn 结束自检 turn」未做）；P2-8 产品事件流 `agent.reclaimed` 已接前端轨迹（仅剩真机长跑 probe）；P1-7 最后一项待补已补齐（相同 `after_seq` 的重复读返回 `unchanged` / `repeat_count` 显式信号，不再只靠 `next_action` 间接引导）；P1-5 四个方案全部实施——前端下钻、`read_agent_events` 过滤视图（`view=tool_progress`）、父流节流镜像（`subagent.progress` 后端镜像 + 前端 `runtime-0` 折叠行）与本轮补齐的**方案 4「前端 inline 审批」**（下钻对话框内直接批准/拒绝，动作走 actor `approve_tool` 命令），仅剩真机 probe；P2-10 单测与并发压测已补（真实终端 probe 未做）。实施记录见 §10）
+状态: implementing（P0-1/P0-2/P0-3/P0-4/P1-6/P1-7/P2-8/P2-9/P2-11/P2-12 已实施，其中 P2-9 手动清理入口 `/agents cleanup` 与「终态/空闲自动 close」（周期对账 observe 只报候选、enforce 才落库）已落地（TTL 删除按方案建议走对账兜底、不做直接回调）；P0-4 仅剩真实终端 probe；P1-6 wake 预算已补齐三处同源同序的可见性（`/supervision/digest` 与 `/supervision/snapshot` 的 `wake_budget` 投影、CLI `/debug supervision list`、以及模型可见的 preflight digest 文本行；仅剩可选的「父 turn 结束自检 turn」未做）；P2-8 产品事件流 `agent.reclaimed` 已接前端轨迹（仅剩真机长跑 probe）；P1-7 最后一项待补已补齐（相同 `after_seq` 的重复读返回 `unchanged` / `repeat_count` 显式信号，不再只靠 `next_action` 间接引导）；P1-5 四个方案全部实施——前端下钻、`read_agent_events` 过滤视图（`view=tool_progress`）、父流节流镜像（`subagent.progress` 后端镜像 + 前端 `runtime-0` 折叠行）与本轮补齐的**方案 4「前端 inline 审批」**（下钻对话框内直接批准/拒绝，动作走 actor `approve_tool` 命令），仅剩真机 probe；P2-10 单测与并发压测已补（真实终端 probe 未做）。实施记录见 §10）
 适用仓库: `E:\projects\ai\ai-agent-runtime`
 参照仓库: `E:\projects\ai\codex`（codex-rs，只读对照，不修改）
 证据基线: 2026-09-13 工作树（含未提交改动）。引用行号会随代码漂移，实施前需按符号名复核。
@@ -790,7 +790,8 @@ go test ./internal/agent -run "Parallel|Doom" -count=1
 - **claim id 抗碰撞**：`wakeclaim-<class>-<unixnano>-<seq>`，同一纳秒（注入时钟 / 并发 drain）下也不会因唯一索引幂等吞掉记账；`RecordWakeClaim` 用 `INSERT OR IGNORE`，重复 claim 不重复计数。
 - **可观测**：`/debug supervision list` 追加 `wake 预算` 段，按 scope × class 输出 `used/limit` 或 `used/unlimited`（`backend/cmd/aicli/commands/chat_debug_supervision.go:352-388`）。
 - **可见性（API 宿主，已实施）**：`GET /api/runtime/supervision/digest`（`root_scope_id`）与 `GET /api/runtime/supervision/snapshot`（`root_session_id` / `root_team_id`，同名 scope 去重）新增 `wake_budget` 字段——按 scope × class（approval → failure → other，与 CLI 同序）投影 `supervision.WakeBudgetState`（`used` / `limit` / `window` / `window_start` / `unlimited`），来源是同一 `WakeScheduler.BudgetState`，`wake_budget_mode=durable` 时即共享账本（`backend/internal/api/skills/supervision_handlers.go` 的 `supervisionWakeBudgetStates`）。scheduler 未接线、或未传任何非空 scope 时**整体省略该字段**（不渲染成误导性的 0/limit）；store 未接线仍是 503。CLI 侧 `/debug supervision list` 的「wake 预算」段与它同源同序。
-- **待补（不阻塞主体）**：方案 4「父 turn 结束自检 turn」未做（计划本身建议默认关闭）；模型可见的 digest 文本仍不含预算（模型侧靠 `ErrWakeRateLimited` 的延后语义 + 人工 `/debug` 排查）。
+- **模型可见（已实施，补上最后一处静默盲区）**：API 与 CLI 两条独立实现的 preflight 注入路径都把预算行追加到 `digest.Text` 之后、用户 prompt 之前，文案由共享的 `supervision.FormatWakeBudgetLine` 渲染（`backend/internal/supervision/wake_budget.go`），形如 `wake_budget: approval=0/unlimited failure=5/5 other=0/5 (exhausted classes defer wakes, not drop them)`；类顺序与 HTTP `wake_budget` 字段、CLI `/debug supervision list` 一致。两宿主的 scope 口径相同——目标会话 + 所属 team（去重后逐 scope × class 取 `WakeScheduler.BudgetState`，team lead 因此能同时看到自身与 team 两条 scope）。`FormatWakeBudgetLine` 对空切片返回空串，宿主未接线 `Wakes` 或 scope 全空时不追加，digest 文本字节级保持原样（两条路径各有「无 scheduler 不含该行」的用例）。语义上该行与 `ErrWakeRateLimited` 的「只延后不丢弃」对齐，模型无需等父回合结束或人工 `/debug` 就能发现巡查被推迟。
+- **待补（不阻塞主体）**：仅剩方案 4「父 turn 结束自检 turn」未做（计划本身建议默认关闭）。
 
 **P2-9 行为口径**
 

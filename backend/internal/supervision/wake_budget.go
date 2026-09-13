@@ -1,6 +1,8 @@
 package supervision
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -90,4 +92,34 @@ type WakeBudgetState struct {
 	WindowStart time.Time       `json:"window_start,omitempty"`
 	// Unlimited is true when the class has no hard cap.
 	Unlimited bool `json:"unlimited,omitempty"`
+}
+
+// FormatWakeBudgetLine renders the per-class auto-wake ledger as one compact
+// line for the model-visible preflight digest (plan P1-6 follow-up). The line
+// closes the last silent-deferral gap of the wake path: a class at its limit
+// keeps the next wake durable instead of delivering it, and before this line
+// the parent model could only discover that through host diagnostics
+// (`/debug supervision list`) after wondering why a child stopped reporting.
+//
+// Rows keep the caller's class order so the API preflight, the HTTP projection
+// and the CLI `/debug` view render the same ledger. An empty slice renders
+// nothing, which keeps the digest byte-identical for hosts without a wired
+// scheduler.
+func FormatWakeBudgetLine(states []WakeBudgetState) string {
+	if len(states) == 0 {
+		return ""
+	}
+	rows := make([]string, 0, len(states))
+	for _, state := range states {
+		class := strings.TrimSpace(string(state.BudgetClass))
+		if class == "" {
+			class = string(WakeBudgetClassOther)
+		}
+		limit := strconv.Itoa(state.Limit)
+		if state.Unlimited {
+			limit = "unlimited"
+		}
+		rows = append(rows, fmt.Sprintf("%s=%d/%s", class, state.Used, limit))
+	}
+	return "wake_budget: " + strings.Join(rows, " ") + " (exhausted classes defer wakes, not drop them)"
 }

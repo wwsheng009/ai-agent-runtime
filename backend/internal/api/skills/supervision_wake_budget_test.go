@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -165,4 +166,43 @@ func hasWakeBudgetField(t *testing.T, body []byte) bool {
 	require.NoError(t, json.Unmarshal(body, &raw))
 	_, ok := raw["wake_budget"]
 	return ok
+}
+
+// TestSupervisionPreflight_IncludesWakeBudgetLine covers the P1-6 follow-up: the
+// parent turn's model-visible digest text carries the auto-wake ledger, so a
+// wake that was deferred (rate-limited) instead of delivered is observable
+// inside the turn rather than only through host diagnostics. Hosts without a
+// wired scheduler keep the previous text.
+func TestSupervisionPreflight_IncludesWakeBudgetLine(t *testing.T) {
+	handler, store := newAPISupervisionBudgetTestHandler(t, "api-preflight-wake-budget")
+	ctx := context.Background()
+	_, err := supervision.ProjectLifecycle(ctx, store, handler.getSupervisionWakeScheduler(), supervision.LifecycleProjection{
+		RootScopeID:           "root-1",
+		TargetParentSessionID: "root-1",
+		SubjectKind:           supervision.SubjectAgentRun,
+		SubjectID:             "child-1",
+		EventType:             supervision.WakeReasonExecutionFailed,
+		Severity:              supervision.SeverityCritical,
+		SupervisionState:      supervision.SupervisionBlocked,
+	})
+	require.NoError(t, err)
+	recordBudgetClaim(t, store, "claim-1", "root-1", supervision.WakeBudgetClassFailure, supervision.WakeReasonExecutionFailed)
+
+	prompt, err := handler.InjectSupervisionPreflight(ctx, "root-1", "continue the parent turn", nil)
+	require.NoError(t, err)
+	require.Contains(t, prompt, "wake_budget:")
+	require.Contains(t, prompt, "failure=1/5")
+	require.Contains(t, prompt, "approval=0/unlimited")
+	require.Contains(t, prompt, "continue the parent turn")
+	require.True(t, strings.HasPrefix(prompt, "[Child lifecycle preflight]"), "the ledger rides with the digest, ahead of the user prompt")
+
+	// The notification stays in the digest after being marked delivered/seen
+	// (seen is not acknowledged), so an unwired host still renders the digest
+	// without inventing a budget line.
+	bare := NewHandler(skill.NewRegistry(nil), nil, nil)
+	bare.SetSupervisionStore(store)
+	barePrompt, err := bare.InjectSupervisionPreflight(ctx, "root-1", "continue the parent turn", nil)
+	require.NoError(t, err)
+	require.NotContains(t, barePrompt, "wake_budget:")
+	require.Contains(t, barePrompt, "[Child lifecycle preflight]")
 }

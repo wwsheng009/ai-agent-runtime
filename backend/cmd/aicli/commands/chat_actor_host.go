@@ -2150,6 +2150,39 @@ func localSupervisionSubjectPresence(host *localChatRuntimeHost) supervision.Sub
 	}
 }
 
+// localWakeBudgetStates projects the auto-wake ledger for the CLI preflight
+// line: one row per scope × class, in the class order the API host and the
+// `/debug supervision list` view already use. Returning nil (no scheduler, or
+// no scope requested) keeps the preflight text byte-identical to the behavior
+// before the budget line existed. Repeated scopes collapse, matching the API
+// projection.
+func localWakeBudgetStates(ctx context.Context, host *localChatRuntimeHost, scopes ...string) []supervision.WakeBudgetState {
+	if host == nil || host.Supervision == nil || host.Supervision.Wakes == nil {
+		return nil
+	}
+	classes := []supervision.WakeBudgetClass{
+		supervision.WakeBudgetClassApproval,
+		supervision.WakeBudgetClassFailure,
+		supervision.WakeBudgetClassOther,
+	}
+	seen := make(map[string]bool, len(scopes))
+	states := make([]supervision.WakeBudgetState, 0, len(scopes)*len(classes))
+	for _, raw := range scopes {
+		scope := strings.TrimSpace(raw)
+		if scope == "" || seen[scope] {
+			continue
+		}
+		seen[scope] = true
+		for _, class := range classes {
+			states = append(states, host.Supervision.Wakes.BudgetState(ctx, scope, class))
+		}
+	}
+	if len(states) == 0 {
+		return nil
+	}
+	return states
+}
+
 // injectLocalSupervisionPreflight is the CLI-equivalent parent/lead turn hook.
 // It deliberately marks a visible digest delivered+seen, never acknowledged.
 // Child worker turns are excluded: only the registered Team lead consumes a
@@ -2197,7 +2230,15 @@ func injectLocalSupervisionPreflight(ctx context.Context, host *localChatRuntime
 			return "", fmt.Errorf("mark supervision notification seen: %w", err)
 		}
 	}
-	return strings.TrimSpace(digest.Text) + "\n\n" + prompt, nil
+	text := strings.TrimSpace(digest.Text)
+	// P1-6 follow-up: carry the same model-visible ledger as the API preflight,
+	// so a deferred (rate-limited) wake is observable inside local CLI turns
+	// too. These two preflight paths are separate implementations, so the line
+	// is asserted in both packages against the same formatter.
+	if budgetLine := supervision.FormatWakeBudgetLine(localWakeBudgetStates(ctx, host, sessionID, targetTeamID)); budgetLine != "" {
+		text = strings.TrimSpace(text + "\n" + budgetLine)
+	}
+	return text + "\n\n" + prompt, nil
 }
 
 func resolveLocalChatTeamStorePath(session *ChatSession) string {
