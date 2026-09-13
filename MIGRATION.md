@@ -370,3 +370,34 @@ ai-agent-runtime/
 4. 在上述工作稳定后，再评估是否继续选择性吸收 Deer Flow 的高级浏览器组件。
 
 不建议再回到“先搭空目录、以后再接后端”的思路，因为当前项目已经明显越过这个阶段。
+
+---
+
+## 9. 配置语义变更（multi-agent 执行优化，2026-09）
+
+本节记录 multi-agent 执行优化（wait / wake / 审批 / 配额 / 可观测）落地后，**会改变既有配置文件行为**的键。未列出的键语义不变。
+
+### 9.1 `agents.maxThreads`：`0` 不再表示「无限」
+
+- 旧行为：`0` / 未设置被当作「不限制并发子 agent」，用于隐式关闭配额。
+- 新行为三态（`backend/internal/agentcontrol/reclaim.go` 的 `ResolveMaxThreads`）：
+  - `0` / 未设置 → 回退内置默认 `6`；
+  - `-1` → 显式不限；
+  - 正整数 → 该值即配额；
+  - 其它负数 → 配置校验失败（`agents.maxThreads must be -1 (unlimited), 0 (default), or a positive integer`）。
+- 迁移动作：原本靠 `maxThreads: 0` 表示不限的部署，请改为 `maxThreads: -1`。
+
+### 9.2 新增键（默认值保持历史行为）
+
+| 键 | 默认值 | 语义 |
+| --- | --- | --- |
+| `agents.reclaimIdleMs` | `0`（关闭） | `> 0` 才开启「空闲子会话驱逐」：spawn 触顶后允许回收空闲超过该毫秒数、且容器可安全关闭的子 agent，然后重试一次；负数校验失败。关闭时只回收容器已消失（`session_missing`）或已终态（`session_terminal`）的行。 |
+| `agents.registryReconcileInterval` | `10m` | registry 一致性对账周期；`< 1m` 被下限夹紧（`MinReconcileInterval`），非法 duration 回退下一优先级。进程级覆盖：`AICLI_REGISTRY_RECONCILE_INTERVAL`。 |
+| `agents.registryReconcileMode` | `observe` | `observe` 只报告漂移；`enforce` 才关闭「会话已缺失/已终态」的 active 行并把 stale 行标记为 stale。进程级覆盖：`AICLI_REGISTRY_RECONCILE_MODE`。 |
+| `agent.maxRepeatedPollCalls` | `0`（用内置默认 3） | 同一批轮询/控制调用连续重复多少次后注入 `polling_backoff` 软提醒（只提示不拦截）；负数关闭该护栏。 |
+
+### 9.3 行为增强（无需改配置）
+
+- 回收动作在事件流中写 `reclaimed:<reason>`（`idle_timeout` / `session_missing` / `session_terminal`，空 reason 兜底 `quota`），与人工 `close_agent` 可区分。
+- 线程上限报错现在是 `AGENT_THREAD_LIMIT`，文案含 `next_action` 与 `occupants=[path=… status=… idle=…]`，可由模型直接按指引复用/关闭子会话。
+- `/agents cleanup [--dry-run] [--idle <时长>]` 提供手动一次性回收（与 spawn 闸门共用同一决策链），用于不等对账周期就释放配额。

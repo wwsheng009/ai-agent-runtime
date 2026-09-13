@@ -1382,6 +1382,16 @@ interactive TTY 已直接选择 unified pipeline，不再支持 `AICLI_TUI=legac
 
 ---
 
+### 15.10 问答 prompt 合并与草稿保真（2026-09-13）
+
+modal 提问（`ask_user_question`）的回答输入不再自绘输入行，改为复用底部 prompt：`chatMergedPromptComposer`（`backend/cmd/aicli/commands/chat_composer.go:468`）在 `ReadLine` 中先调用 `ShowAnswerPrompt()`（`backend/cmd/aicli/commands/chat_interaction.go:794`）把底部 prompt 行切成回答输入行，再复用 `LineEditor` 读入；popup 只渲染题干与选项（`showPriorityPromptBody`，`backend/cmd/aicli/commands/chat_surface_output.go:274`），不再拥有底部输入行。读取入口在 `backend/cmd/aicli/commands/chat_runtime_events.go:4197-4201`。
+
+草稿保真：回答结束的归还顺序是 composer 先 `DiscardPrompt()`、再把暂存的未提交草稿 `SetPromptInputSnapshot(draft)` 写回（`chat_composer.go:558`），而只渲染正文的 popup 清理路径原先调用 `clearPopupHandle` → `resetPromptState()`，会把刚归还的草稿再次清空。该路径现改为 `clearPopupHandlePreservePromptInput`（`chat_surface_output.go:162`）：只 `ClearPopupHandlePreserveCursor`，不触碰 prompt/草稿；仍然拥有 composer line 的旧路径 `showPriorityPrompt`（`chat_surface_output.go:208`）继续走 `clearPopupHandle`。
+
+回归由 `backend/cmd/aicli/commands/chat_question_merged_prompt_test.go` 固化：`TestChatQuestionAnswerMergedIntoBottomPromptReadsThroughPromptRow`（含「回答结束后归还用户未提交草稿」断言）、`TestChatMergedAnswerPromptFallsBackWithoutSurface`、`TestAnswerPromptBodyLinesKeepsHintWithoutDedicatedInputRow`。本轮验证：三个用例 `-count=1` 通过，`MergedAnswer|MergedIntoBottomPrompt|AnswerPromptBodyLines|Reclaim|Reconcile` 组合 `-count=2` 通过，`gofmt -l` 无输出、`go build ./...` 与 `go vet ./...` exit 0。
+
+---
+
 ## 16. 测试策略与矩阵
 
 ### 16.1 测试分层

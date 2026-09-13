@@ -178,6 +178,25 @@ aicli plugin trust <name>        # 信任某插件
 aicli image "一只在月球上散步的猫"  # 图片生成
 ```
 
+### 4.8 子 Agent 执行看门狗与监督通知（本地模式）
+
+本地 Chat 会话 spawn 出来的子 agent 受轻量执行看门狗巡检：执行 deadline、进度停滞、审批超时都会投影为监督通知，并进入父会话的 preflight 摘要与唤醒提醒。
+
+- **默认 `observe`**：只提醒，不打断仍在运行的子 agent（与 runtime-server 的 `enforce` 默认值不同，避免本地长跑任务被误杀）。
+- **切到 `enforce`**：设置 `AICLI_EXECUTION_SUPERVISOR_MODE=enforce`，行为与 API 一致——到期先 interrupt，超过 cancel grace（15s）仍未结束则标记 orphaned。
+- **阈值与 API 同源**：执行 deadline 30m、进度停滞 5m、审批超时 1h、扫描周期 5s、store 故障退避 2m。
+- **前提**：本地会话启用了 durable supervision control plane（SQLite store）；未启用时不构建看门狗，`spawn` 行为与未接入时完全一致。
+
+查看与收敛（`/debug supervision ...`）：
+
+```text
+/debug supervision watchdog                     # 看门狗状态：接线/循环/mode/阈值/最近决策/未终态 run
+/debug supervision list [--all]                 # 未决监督通知（含版本号与 action_required）
+/debug supervision ack <id> --note <text>       # 确认通知（必带审计说明）
+/debug supervision defer <id> --until 30m       # 延后注入 preflight
+/debug supervision resolve <id> --state closed  # 收敛 resolution 状态
+```
+
 ---
 
 ## 5. 全局参数与主题
@@ -204,6 +223,7 @@ aicli image "一只在月球上散步的猫"  # 图片生成
 | `AICLI_THEME_MODE` | 明暗模式（auto/dark/light） |
 | `AICLI_THEME_SYNTAX` | 语法主题 |
 | `AICLI_PPROF` | pprof 监听地址（需同时启用 --pprof） |
+| `AICLI_EXECUTION_SUPERVISOR_MODE` | 本地子 Agent 看门狗模式：`observe`（默认，仅提醒）或 `enforce`（interrupt + cancel grace，见 §4.8） |
 
 ---
 

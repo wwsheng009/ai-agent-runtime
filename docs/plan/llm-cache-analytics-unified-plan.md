@@ -773,6 +773,61 @@ sqlite 持久化回放、离线 `LogFileSource`（chataloganalytics 集成）、
 - `internal/chat/session_runtime_store_cache_test.go`：字段保真回环（含纳秒时间戳、usage/比率指针）、幂等写、损坏行跳过、跨进程重开（迁移幂等）、`DeleteState` 级联、入参校验。
 - `go vet` + `go test ./...`（backend 全量）通过；`TestProviderCommand_ListAndShow` 为存量环境依赖失败（干净树可复现，隔离运行读取到真实用户配置中的 provider，与本次改动无关，已用 `-skip` 排除后全量绿）。
 
+### 11.4 会话恢复后历史缺失修复（2026-09-13）
+
+**现象**：进程重启/恢复会话后，缓存分析读不到该会话的历史请求；TUI 只有 live 记录，微型 Web 缓存页整页无明细，且日志没有任何线索。
+
+**根因（两层，均可复现）**：
+
+1. **数据源选择只判断"服务是否存在"，不判断"有没有该会话的数据"**：微型 Web 缓存页优先读统一用量库（`usage_analytics.sqlite` `usage_requests`），仅当用量服务为 nil 才回退 runtime 镜像。实测存在"用量服务可用、库中却没有该会话行"的常态（未挂载用量采集、升级前写入的会话、只有镜像行的会话），此时 primary 的空结果被直接当作"没有历史"，镜像里的完整明细永远不会被查询。
+2. **镜像加载失败被永久化且静默**：`LiveSource.ensureSessionLoaded` 先标记"已回放"再加载，加载失败直接 `return`——镜像表缺失（旧库未迁移到 v20）或数据库被锁时，历史在该进程内永久为空，既无诊断也不重试，与"确实没有历史"现象完全一致；写入侧 `_ = store.SaveRequest(...)` 同样静默丢弃镜像行。
+
+**修复**：
+
+| 文件 | 变更 |
+|------|------|
+| `internal/cacheanalytics/source.go` | 加载失败不再标记已回放：下次查询重试（迁移/解锁后无需重启进程即恢复），首次失败输出一次性诊断 |
+| `internal/cacheanalytics/collector.go` | 镜像写失败首次提示一次（此前完全静默），仍不阻塞在线投影与 SSE 增量 |
+| `internal/cacheanalytics/degrade.go`（新增） | `degradeWarn` 降级诊断出口（默认 stderr，测试可替换以断言"不再静默"） |
+| `internal/cacheanalytics/fallback.go`（新增） | `NewSessionFallbackSource(primary, secondary)`：按会话判定，primary 报错或该会话 0 条记录时回退 secondary；`Capabilities.Persisted` 取两者并集 |
+| `cmd/aicli/commands/web_cache_handlers.go` | 缓存端点改用组合源（统一用量库 → runtime 镜像），不再以"服务存在"代替"有数据" |
+
+**已知边界**：primary 已有部分行（非空但不完整）时不跨源合并明细，只返回 primary；跨源补齐/合并留待后续按需实现。
+
+**测试**：`TestSessionLoadFailureIsRetriedAndWarned`、`TestPersistFailureWarnsOnce`（`persist_test.go`）、`TestSessionFallbackSource*` / `TestNewSessionFallbackSourceNilHandling`（`fallback_test.go`）、`TestHandleChatWebAPICache_FallsBackToMirrorWhenUsageEmpty`（HTTP 端到端：清空用量库该会话行后仍返回镜像历史）。
+
+### 11.5 多进程锁竞争导致用量分析静默丢采集修复（2026-09-13）
+
+**现象**：`usage_analytics.sqlite` 的 `usage_requests` 长期只有零星几行（分析/缓存页数据缺失、会话恢复后历史为空），而 `session_runtime.sqlite` 的镜像缓存表有完整明细；进程日志没有任何线索，只能翻数据库取证。
+
+**根因（三层，均可复现）**：
+
+1. **打开期锁竞争失败即放弃**：同机多进程（常驻 aicli + runtime-server）各自启动时 migrate 同一个分析库，落败者拿到 `sqlite3: database is locked`；`Open` 直接抛错（并发 Open 复现：8 路并发 1/3 概率失败）。
+2. **失败被静默吞掉并永久化**：`buildLocalUsageService` 把 `Attach` 错误丢弃（返回 nil 且不记日志），`localChatRuntimeHost` 又用 `sync.Once` 缓存结果——一次瞬时失败等于该进程整个生命周期一行用量都不写；写入侧 `_, _ = store.exec(...)` 同样静默丢行。
+3. **单连接池暴露既有"结果集未关闭"缺陷**：`ListSessions` 与 `CacheSource.Requests` 读完 COUNT 行（未读空结果集、未显式关闭）就发起分页查询，占住 `SetMaxOpenConns(1)` 的唯一连接 → 查询永久阻塞（4 连接池只是更晚耗尽）。
+
+**修复**：
+
+| 文件 | 变更 |
+|------|------|
+| `internal/usageanalytics/store.go` | `Open` 对瞬时锁错误退避重试（10 次，50ms→500ms 指数退避，仅锁错误重试）；可写连接改单连接池（`SetMaxOpenConns(1)`，PRAGMA 逐连接生效，与 `internal/chat.SQLiteRuntimeStore` 同策略）；只读连接同样设置 `busy_timeout`；新增 `execWithLockRetry`（瞬时锁冲突重试一次） |
+| `internal/usageanalytics/degrade.go`（新增） | 降级诊断出口 `degradeWarn`（默认 stderr，测试可替换以断言"降级不再静默"） |
+| `internal/usageanalytics/ingest.go` | 写入失败留痕：首次 + 每 100 次（含表名与累计次数），不再静默丢行 |
+| `internal/usageanalytics/query.go`、`cachesource.go` | COUNT 结果集在分页查询前显式关闭（单连接池下未关闭的 Rows 会永久占住唯一连接） |
+| `cmd/aicli/commands/chat_cache_local.go` | attach 失败输出一次性诊断（此前完全静默）；`sync.Once` → 互斥锁，**失败不缓存**：后续调用可重试，成功仍复用同一实例（避免重复 attach 同一 EventBus） |
+| `cmd/aicli/commands/chat_actor_host.go` | `usageOnce sync.Once` → `usageMu sync.Mutex`（配合失败重试语义） |
+
+**语义影响**：分析库写入路径不变（仍为事件驱动短事务）；重试与单连接只影响"瞬时锁竞争"这一失败模式，确定性失败（路径不可写、schema 损坏）仍立即返回并留痕。成功路径无行为变化。
+
+**测试**：
+
+- `store_lock_retry_test.go`（新增）：锁错误分类、退避序列与封顶、**持锁期间 Open 退避重试后成功并留痕**（真锁，非 mock）、**6 路并发打开 + 各写一行全部落库**（回归"并发启动丢采集"）、写失败留痕与节流（第 1/100/200 次）、`ListSessions` / `CacheSource.Requests` 查询后连接已归还（30s 超时守护，修复前该用例即复现整包 Hang）。
+- `usage_attach_retry_test.go`（新增）：分析库路径先是不可用 → attach 失败留痕且返回 nil；解除阻塞后重试成功并缓存同一实例。
+
+**验证**：`go test ./internal/usageanalytics/ -count=2`（2.4s，修复前整包 5 分钟超时）通过；`go test ./cmd/aicli/commands/ -run 'TestEnsureLocalUsageServiceRetriesAfterAttachFailure|.*Cache.*'`、`go test ./internal/api/skills/`（14s）通过；`go vet`、`go build ./...` 干净。
+
+**存量无关失败**（不在本次改动范围，另有在途改动）：`TestProviderCommand_ListAndShow`（环境依赖，见 §11.3）、`TestChatInteractiveDirectWriterInventory`（`chat_debug.go` 直接写入清单与基线不一致）。
+
 ---
 
 ## 12. 实施审查记录（2026-09-10）
