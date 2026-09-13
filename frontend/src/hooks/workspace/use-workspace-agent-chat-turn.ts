@@ -18,6 +18,7 @@ import {
   shouldIgnoreTerminalStreamError,
 } from "@/hooks/workspace/agent-chat-turn/shared";
 import { createThreadFromPrompt } from "@/hooks/workspace/agent-chat-turn/thread-factory";
+import { useComposerDraft } from "@/hooks/workspace/composer/use-composer-draft";
 import { createAgentChatStreamHandlers } from "@/hooks/workspace/agent-chat-turn/stream-handlers";
 import { createStreamingFrameScheduler } from "@/hooks/workspace/agent-chat-turn/streaming-frame";
 import { createStreamingWriters } from "@/hooks/workspace/agent-chat-turn/streaming-writers";
@@ -75,7 +76,8 @@ export function useWorkspaceAgentChatTurn({
 }: WorkspaceAgentChatTurnOptions) {
   const { settings } = useAppSettings();
   const navigate = useNavigate();
-  const [draft, setDraft] = useState("");
+  // P1-4：草稿按会话持久化（sessionId 优先、线程 id 兜底），提交/清空即删除条目。
+  const { draft, setDraft } = useComposerDraft({ thread: selectedThread });
   const [isResponding, setIsResponding] = useState(false);
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
   const activeTurnIdRef = useRef<string | null>(null);

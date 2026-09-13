@@ -1,14 +1,18 @@
 import { ArrowUpIcon, SquareIcon } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { type Thread } from "@/data/mock";
+import { applyComposerTextareaLayout } from "@/lib/composer-textarea";
 import { cn } from "@/lib/utils";
 import { useTranslation } from "react-i18next";
 
 type MessageComposerProps = {
   density: "comfortable" | "compact";
   draft: string;
+  /** 会话身份；变化（切换会话/新建线程落地）时输入框回焦。 */
+  focusKey?: string;
   hasSession: boolean;
   isNewThread?: boolean;
   isResponding: boolean;
@@ -35,6 +39,7 @@ type MessageComposerProps = {
 export function MessageComposer({
   density,
   draft,
+  focusKey,
   hasSession,
   isNewThread = false,
   isResponding,
@@ -102,6 +107,47 @@ export function MessageComposer({
   const showStatusRow =
     transport === "error" || selectedArtifactCount > 0 || isResponding;
 
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // P1-4：草稿超过 14 行时封顶并在输入框内滚动（页面布局不被撑高）。
+  useLayoutEffect(() => {
+    const element = textareaRef.current;
+    if (element) {
+      applyComposerTextareaLayout(element);
+    }
+  }, [draft, density, isNewThread]);
+
+  // 宽度变化会改变换行位置，需要按新排版重新度量高度。
+  useEffect(() => {
+    function handleResize() {
+      const element = textareaRef.current;
+      if (element) {
+        applyComposerTextareaLayout(element);
+      }
+    }
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  // P1-4：会话切换（focusKey 变化）与挂载后输入框回焦，保证切会话即可直接输入。
+  useEffect(() => {
+    textareaRef.current?.focus();
+  }, [focusKey]);
+
+  function focusInput() {
+    textareaRef.current?.focus();
+  }
+
+  function handleSubmit() {
+    onSubmit();
+    focusInput();
+  }
+
+  function handleStop() {
+    onStop();
+    focusInput();
+  }
+
   return (
     <div className="rounded-panel-lg border border-border [background:var(--workspace-composer-bg)] shadow-[0_8px_24px_rgba(0,0,0,0.18)]">
       {showStatusRow ? (
@@ -127,16 +173,17 @@ export function MessageComposer({
 
       <div>
         <textarea
+          ref={textareaRef}
           value={draft}
           onChange={(event) => onDraftChange(event.target.value)}
           onKeyDown={(event) => {
             if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
               event.preventDefault();
               if (isResponding) {
-                onStop();
+                handleStop();
                 return;
               }
-              onSubmit();
+              handleSubmit();
             }
           }}
           placeholder={placeholder}
@@ -232,7 +279,7 @@ export function MessageComposer({
                 ? "size-8 shrink-0 border-accent-secondary-border bg-accent-secondary-soft p-0 text-foreground shadow-none hover:border-accent-secondary-border hover:bg-accent-secondary-soft"
                 : "size-8 shrink-0 border-border bg-surface-soft p-0 text-foreground shadow-none hover:border-border-strong hover:bg-surface-soft-hover"
             }
-            onClick={isResponding ? onStop : onSubmit}
+            onClick={isResponding ? handleStop : handleSubmit}
             disabled={isResponding ? false : !draft.trim()}
           >
             {isResponding ? <SquareIcon size={14} /> : <ArrowUpIcon size={14} />}

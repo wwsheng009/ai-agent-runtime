@@ -302,6 +302,7 @@ export function WorkspaceMainSection({
                 <MessageComposer
                   density={density}
                   draft={draft}
+                  focusKey={selectedThread.sessionId ?? selectedThread.id}
                   hasSession={Boolean(selectedThread.sessionId)}
                   isNewThread={isNewThread}
                   isResponding={isResponding}

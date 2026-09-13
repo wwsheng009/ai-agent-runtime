@@ -5,6 +5,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MessageComposer } from "./message-composer";
+import {
+  readComposerTextareaMetrics,
+  resolveComposerTextareaLayout,
+} from "@/lib/composer-textarea";
 
 type ReactActEnvironmentGlobal = typeof globalThis & {
   IS_REACT_ACT_ENVIRONMENT?: boolean;
@@ -27,8 +31,17 @@ describe("MessageComposer", () => {
     }
     container.remove();
     document.body.innerHTML = "";
+    Reflect.deleteProperty(HTMLTextAreaElement.prototype, "scrollHeight");
     delete (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT;
   });
+
+  // jsdom 无排版：直接桩住 scrollHeight，验证组件的「度量 → 布局 → 样式」接线。
+  function stubTextareaScrollHeight(value: number) {
+    Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", {
+      configurable: true,
+      get: () => value,
+    });
+  }
 
   function renderComposer(
     overrides: Partial<React.ComponentProps<typeof MessageComposer>> = {},
@@ -144,5 +157,59 @@ describe("MessageComposer", () => {
     renderComposer({ reasoningEffortOptions: [] });
 
     expect(container.querySelector('button[aria-label="推理强度"]')).toBeNull();
+  });
+
+  it("caps the textarea at 14 lines and scrolls inside when the draft overflows", () => {
+    stubTextareaScrollHeight(900);
+    renderComposer({
+      draft: Array.from({ length: 30 }, (_, index) => `line ${index + 1}`).join(
+        "\n",
+      ),
+    });
+
+    const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
+    const expected = resolveComposerTextareaLayout(
+      readComposerTextareaMetrics(textarea),
+    );
+
+    expect(expected.capped).toBe(true);
+    expect(textarea.style.height).toBe(`${expected.height}px`);
+    expect(textarea.style.overflowY).toBe("auto");
+  });
+
+  it("grows with the draft while it stays under the cap", () => {
+    stubTextareaScrollHeight(60);
+    renderComposer({ draft: "one line" });
+
+    const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
+
+    expect(textarea.style.height).toBe("60px");
+    expect(textarea.style.overflowY).toBe("hidden");
+  });
+
+  it("focuses the input on mount, on session switch and after submit", () => {
+    renderComposer({ draft: "ready to send" });
+    const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
+
+    expect(document.activeElement).toBe(textarea);
+
+    act(() => textarea.blur());
+    expect(document.activeElement).not.toBe(textarea);
+
+    const { onSubmit } = renderComposer({
+      draft: "ready to send",
+      focusKey: "session-b",
+    });
+    expect(document.activeElement).toBe(textarea);
+
+    act(() => textarea.blur());
+    const submitButton = container.querySelector(
+      'button[aria-label="开始新线程"]',
+    );
+    act(() => {
+      submitButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(textarea);
   });
 });
