@@ -26,6 +26,8 @@ dist-ssr
 # playwright artifacts
 test-results/
 playwright-report/
+# P0-7：e2e 失败产物（全页截图 / trace）统一落这里
+.artifacts/
 
 # local backups / scratch
 *.bak

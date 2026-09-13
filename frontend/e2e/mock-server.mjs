@@ -142,7 +142,9 @@ const toolScript = [
   },
   {
     event: "tool_end",
-    delay: 400,
+    // 400ms 的 Running 窗口在负载下会被 React 批处理合并，G2 断言
+    // Started→Running→Finished 会间歇性看不到中间态；给足可观测窗口。
+    delay: 900,
     payload: {
       type: "tool_end",
       index: 2,
@@ -418,19 +420,26 @@ async function handleRequest(req, res) {
   }
 
   // 测试注入（Q4）：POST /api/_test/runtime-events
-  // body: { session_id, type, payload } → 与 chat.sse.* 共用同一 seq 序列。
+  // body: { session_id, type, payload }（单条，兼容旧调用）
+  //     或 { session_id, events: [{ type, payload }] }（批量，seedRuntimeEvents）→
+  // 与 chat.sse.* 共用同一 seq 序列；返回最后一条的 seq 与全部 seqs。
   if (path === "/api/_test/runtime-events" && req.method === "POST") {
     const body = await readBody(req);
     const sessionId =
       typeof body?.session_id === "string" && body.session_id
         ? body.session_id
         : "e2e-session-1";
-    const seq = recordRuntimeTestEvent(
-      sessionId,
-      typeof body?.type === "string" ? body.type : "approval_requested",
-      typeof body?.payload === "object" && body.payload ? body.payload : {},
+    const events = Array.isArray(body?.events)
+      ? body.events
+      : [{ type: body?.type, payload: body?.payload }];
+    const seqs = events.map((event) =>
+      recordRuntimeTestEvent(
+        sessionId,
+        typeof event?.type === "string" ? event.type : "approval_requested",
+        typeof event?.payload === "object" && event.payload ? event.payload : {},
+      ),
     );
-    writeJson(res, 200, { seq });
+    writeJson(res, 200, { seq: seqs[seqs.length - 1] ?? 0, seqs });
     return;
   }
 
@@ -480,16 +489,25 @@ async function handleRequest(req, res) {
     return;
   }
   if (path === "/api/runtime/sessions" && req.method === "POST") {
-    ensureMockSession("e2e-session-1");
+    const body = await readBody(req);
+    const requestedId =
+      typeof body?.session_id === "string" && body.session_id
+        ? body.session_id
+        : typeof body?.id === "string" && body.id
+          ? body.id
+          : "e2e-session-1";
+    const session = ensureMockSession(requestedId);
+    if (session && typeof body?.title === "string" && body.title) {
+      session.title = body.title;
+    }
+    const now = new Date().toISOString();
     writeJson(res, 200, {
       session: {
-        session_id: "e2e-session-1",
-        id: "e2e-session-1",
-        title: "e2e session",
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        ...session,
+        updated_at: now,
       },
-      session_id: "e2e-session-1",
+      session_id: requestedId,
+      id: requestedId,
     });
     return;
   }

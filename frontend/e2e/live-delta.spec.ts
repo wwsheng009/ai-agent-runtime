@@ -1,4 +1,7 @@
-import { expect, type Page, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
+
+import { expect, test } from "./fixtures";
+import { resetMockState, seedSession } from "./support";
 
 // 方案B e2e：runtime/stream 增量在请求中被实时渲染（打字机），最终 agent/chat
 // result 定型（替换而非叠加，文本不翻倍）。
@@ -16,15 +19,14 @@ const composer = (page: Page) => page.locator(".app-chat-input");
 
 test.beforeEach(async ({ page }) => {
   // mock server 跨 spec 共享：清空上一个用例残留的会话历史/事件。
-  await page.request.post("/api/_test/reset");
+  await resetMockState(page.request);
 });
 
 test("打字机：请求期间 assistant_delta 实时渲染，result 定型且不翻倍", async ({
   page,
 }) => {
   // 会话（mock 存储初始为空，前端不自动创建）。
-  const resp = await page.request.post("/api/runtime/sessions");
-  expect(resp.status()).toBe(200);
+  await seedSession(page.request);
 
   let allowStream = false;
   await page.route("**/api/runtime/sessions/e2e-session-1/runtime/stream*", async (route) => {

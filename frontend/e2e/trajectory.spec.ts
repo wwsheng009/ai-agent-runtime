@@ -1,4 +1,7 @@
-import { expect, type Page, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
+
+import { expect, test } from "./fixtures";
+import { resetMockState, seedRuntimeEvents } from "./support";
 
 // Phase 2 acceptance coverage for the trajectory view:
 // - P2-1: events appear row by row during/after streaming; filters apply;
@@ -28,7 +31,7 @@ const list = (page: Page) => page.locator("[data-trajectory-list]");
 test.beforeEach(async ({ page }) => {
   // mock server 跨 spec 共享：每个用例前清空会话历史/事件/故障开关，
   // 否则 e2e-session-1 的轨迹会混入上一个用例的事件。
-  await page.request.post("/api/_test/reset");
+  await resetMockState(page.request);
   await page.goto("/workspace");
   await waitForPromptVisible(page);
 });
@@ -108,8 +111,10 @@ test("P2-3: 1000+ event session virtualizes rows and scrolls to the tail", async
   page,
 }) => {
   await sendPrompt(page, "burst events please");
-  // wait for the stream to finish (streaming strip disappears)
-  await expect(page.getByText("Streaming")).toBeHidden({ timeout: 60_000 });
+  // wait for the stream to finish：以最终回复文本为准（确定性信号），
+  // 不用 "Streaming" 这类同时命中消息元数据与流式徽标的模糊文案。
+  await expect(page.getByText("burst complete")).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText("Streaming response in progress")).not.toBeVisible();
 
   await trajectoryTab(page).click();
   await expect(rows(page).first()).toBeVisible({ timeout: 10_000 });
@@ -140,16 +145,13 @@ test("P3-1: trajectory recovers from EventStore after page reload", async ({
 
   // Q4：注入一条 runtime 生命周期事件（approval_requested）进入 EventStore，
   // 验证恢复路径把它映射为轨迹 system 行（与 chat.sse.* 共用 seq 序列）。
-  const inject = await page.request.post("/api/_test/runtime-events", {
-    data: {
-      session_id: "e2e-session-1",
+  const seq = await seedRuntimeEvents(page.request, "e2e-session-1", [
+    {
       type: "approval_requested",
       payload: { tool_name: "shell", request_id: "req-e2e" },
     },
-  });
-  expect(inject.ok()).toBe(true);
-  const injected = await inject.json();
-  expect(typeof injected.seq).toBe("number");
+  ]);
+  expect(seq).toBeGreaterThan(0);
 
   // 刷新页面：chat 消息经 history sync 恢复，轨迹经 EventStore 增量拉取恢复。
   await page.reload();

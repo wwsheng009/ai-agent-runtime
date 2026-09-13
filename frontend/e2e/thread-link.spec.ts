@@ -1,4 +1,7 @@
-import { expect, type Page, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
+
+import { expect, test } from "./fixtures";
+import { resetMockState, seedSession } from "./support";
 
 // 后台连接链路 e2e（thread 页面 → runtime 事件增量接口）：
 // - 断言事件增量走 /runtime/events 正确路径且 200（防前端路径回退回归：
@@ -21,22 +24,17 @@ async function waitForPromptVisible(page: Page) {
   await expect(composer(page)).toBeVisible({ timeout: 30_000 });
 }
 
-// mock 的会话存储初始为空；前端不会自动建会话，打开 thread URL 前
-// 先创建一个（与真实后端的"最新会话兜底"行为对齐）。
-async function ensureMockSession(page: Page) {
-  const resp = await page.request.post("/api/runtime/sessions");
-  expect(resp.status()).toBe(200);
-}
-
 test.beforeEach(async ({ page }) => {
   // mock server 跨 spec 共享：清空上一个用例残留的会话历史/事件。
-  await page.request.post("/api/_test/reset");
+  await resetMockState(page.request);
 });
 
 test("thread 链接：事件增量请求 /runtime/events 且 200，无旧路径请求", async ({
   page,
 }) => {
-  await ensureMockSession(page);
+  // mock 的会话存储初始为空；前端不会自动建会话，打开 thread URL 前
+  // 先创建一个（与真实后端的"最新会话兜底"行为对齐）。
+  await seedSession(page.request);
   const goodPath: string[] = [];
   const legacyPath: string[] = [];
   page.on("request", (req) => {
@@ -83,7 +81,7 @@ test.afterEach(async ({ page }) => {
 });
 
 test("后端连接失败（events 500）时页面显示可见错误提示", async ({ page }) => {
-  await ensureMockSession(page);
+  await seedSession(page.request);
   await page.goto("/workspace/chats/e2e-session-1");
   await waitForPromptVisible(page);
 

@@ -1,4 +1,7 @@
-import { expect, type Page, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
+
+import { expect, test } from "./fixtures";
+import { resetMockState } from "./support";
 
 // e2e acceptance coverage for the workspace streaming chat surface
 // (Phase 1: G1 reasoning-first, G2 tool card lifecycle, G5 scroll-follow,
@@ -52,7 +55,7 @@ async function scrollMetrics(page: Page) {
 test.beforeEach(async ({ page }) => {
   // mock server 跨 spec 共享：每个用例前清空会话历史/事件/故障开关，
   // 否则 e2e-session-1 会累积上一次用例的问答。
-  await page.request.post("/api/_test/reset");
+  await resetMockState(page.request);
   await page.goto("/workspace");
   await waitForPromptVisible(page);
 });

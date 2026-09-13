@@ -1,4 +1,12 @@
-import { expect, type Page, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
+
+import { expect, test } from "./fixtures";
+import {
+  applyAppearance,
+  clearStoredSettings,
+  resetMockState,
+  seedSettings,
+} from "./support";
 
 // P0-4 三层设计 token 验收：主题（亮 / 暗 / 跟随系统）× 强调色（cyan / violet）
 // 的运行时装配，断言链路为「L2 语义变量 → L3 工具类 → 真实元素计算样式」，
@@ -10,8 +18,6 @@ import { expect, type Page, test } from "@playwright/test";
 //  - 同一主题下切换强调色不得改变中性色（background/foreground/border/...）；
 //  - 同一强调色不得随主题变化（强调色板主题无关）；
 //  - 字号设置驱动角色 token（app-text / app-chat / app-code）缩放。
-
-const SETTINGS_KEY = "ai-agent-runtime.workspace.settings";
 
 const composer = (page: Page) => page.locator(".app-chat-input");
 
@@ -37,33 +43,6 @@ const MATRIX: Combo[] = [
   { accentTone: "violet", colorScheme: "dark", expectTheme: "dark", themeMode: "system" },
 ];
 
-async function seedAppearance(
-  page: Page,
-  appearance: Record<string, unknown>,
-) {
-  await page.evaluate(
-    ({ key, patch }) => {
-      const raw = window.localStorage.getItem(key);
-      const current = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
-      const merged = {
-        ...current,
-        appearance: {
-          ...((current.appearance as Record<string, unknown> | undefined) ?? {}),
-          ...patch,
-        },
-      };
-      window.localStorage.setItem(key, JSON.stringify(merged));
-    },
-    { key: SETTINGS_KEY, patch: appearance },
-  );
-}
-
-async function resetAppearance(page: Page) {
-  await page.evaluate((key) => {
-    window.localStorage.removeItem(key);
-  }, SETTINGS_KEY);
-}
-
 async function loadWithSettings(
   page: Page,
   {
@@ -73,9 +52,9 @@ async function loadWithSettings(
 ) {
   await page.emulateMedia({ colorScheme: colorScheme ?? null });
   if (appearance) {
-    await seedAppearance(page, appearance);
+    await applyAppearance(page, appearance);
   } else {
-    await resetAppearance(page);
+    await clearStoredSettings(page);
   }
   await page.reload();
   await expect(composer(page)).toBeVisible({ timeout: 30_000 });
@@ -203,7 +182,7 @@ async function expectTokenWiring(page: Page, snap: Snapshot) {
 
 test.describe("P0-4 三层设计 token：主题 × 强调色 × 字号", () => {
   test.beforeEach(async ({ page }) => {
-    await page.request.post("/api/_test/reset");
+    await resetMockState(page.request);
     await page.goto("/workspace");
     await expect(composer(page)).toBeVisible({ timeout: 30_000 });
   });
@@ -453,23 +432,15 @@ async function loadWithBlockedBundle(page: Page) {
 
 test.describe("P0-5 首屏主题启动脚本", () => {
   test("启动脚本在应用 bundle 运行前落地主题与字号", async ({ page }) => {
-    await page.addInitScript(
-      ({ key, value }: { key: string; value: string }) => {
-        window.localStorage.setItem(key, value);
+    await seedSettings(page, {
+      appearance: {
+        accentTone: "violet",
+        textSize: 18,
+        themeMode: "dark",
       },
-      {
-        key: SETTINGS_KEY,
-        value: JSON.stringify({
-          appearance: {
-            accentTone: "violet",
-            textSize: 18,
-            themeMode: "dark",
-          },
-          localization: { locale: "zh-CN" },
-          workspace: { density: "comfortable" },
-        }),
-      },
-    );
+      localization: { locale: "zh-CN" },
+      workspace: { density: "comfortable" },
+    });
     await page.emulateMedia({ colorScheme: "light" });
 
     await loadWithBlockedBundle(page);
@@ -487,15 +458,7 @@ test.describe("P0-5 首屏主题启动脚本", () => {
   });
 
   test("启动脚本按 prefers-color-scheme 解析 system 档", async ({ page }) => {
-    await page.addInitScript(
-      ({ key, value }: { key: string; value: string }) => {
-        window.localStorage.setItem(key, value);
-      },
-      {
-        key: SETTINGS_KEY,
-        value: JSON.stringify({ appearance: { themeMode: "system" } }),
-      },
-    );
+    await seedSettings(page, { appearance: { themeMode: "system" } });
     await page.route("**/src/main.tsx*", (route) => route.abort());
 
     for (const [colorScheme, expectedTheme] of [
