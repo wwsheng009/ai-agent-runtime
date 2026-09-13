@@ -46,6 +46,7 @@ export {
   refreshRuntimeProviderAccount,
 } from "./siteaccount";
 export {
+  answerSessionQuestion,
   applySessionBacktrack,
   createRuntimeSession,
   deleteRuntimeSession,
@@ -61,6 +62,7 @@ export {
   previewSessionBacktrack,
   previewSessionCheckpoint,
   restoreSessionCheckpoint,
+  resolveSessionToolApproval,
   updateRuntimeSession,
   updateSessionPlanMode,
 } from "./sessions";

@@ -4,9 +4,11 @@ import { type Artifact, type Thread } from "@/data/mock";
 import type { ComposerAttachmentsController } from "@/hooks/workspace/composer/use-composer-attachments";
 import { type RuntimeSessionsSummary } from "@/hooks/workspace/use-runtime-sessions-data";
 import type { SessionBacktrackDialogState } from "@/hooks/workspace/use-session-backtrack";
+import type { PendingInteraction } from "@/lib/pending-interaction";
 import { type RuntimeClientIdentity } from "@/lib/runtime-client";
 import {
   type RuntimeSessionBacktrackMode,
+  type RuntimeSessionPlanModeExitDecision,
   type RuntimeSessionRecord,
   type RuntimeSessionUserSummary,
   type RuntimeTeamRecord,
@@ -69,6 +71,17 @@ export type WorkspaceShellProps = {
   onResetRuntimeClientIdentity: () => void;
   onStopResponding: () => void;
   onSubmit: () => void;
+  /** P1-7：待交互统一呈现位（审批 / 提问 / 计划评审），null 时不渲染。 */
+  pendingInteraction?: PendingInteraction | null;
+  onResolvePendingApproval?: (requestId: string, allow: boolean) => void;
+  onAnswerPendingQuestion?: (questionId: string, answer: string) => void;
+  /** P1-7：计划评审与既有 artifact 面板决策入口共用同一状态（notes / 提交中）。 */
+  planActionPending?: boolean;
+  planNotesDraft?: string;
+  onPlanNotesChange?: (value: string) => void;
+  onPlanDecision?: (
+    decision: Exclude<RuntimeSessionPlanModeExitDecision, "">,
+  ) => void;
   onBacktrackToMessage?: (
     messageId: string,
     mode?: "conversation" | "both",

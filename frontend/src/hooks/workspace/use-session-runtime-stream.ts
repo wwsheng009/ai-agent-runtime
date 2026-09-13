@@ -30,6 +30,8 @@ type SessionRuntimeStreamOptions = {
   ) => SessionRuntimeEvent[];
   /** Q4：可选轨迹投递——运行时生命周期事件到达时通知（由调用方转成轨迹 push）。 */
   onTrajectoryEvent?: (event: SessionRuntimeEvent) => void;
+  /** P1-7：可选待交互投递——每条运行时事件到达时通知（待交互生命周期归约）。 */
+  onRuntimeEvent?: (event: SessionRuntimeEvent) => void;
   /** 方案B：请求进行中才渲染增量文本（历史回放/reload 不渲染）。 */
   renderLiveDeltas?: boolean;
   /** 当前活动 turn（外部调用方透传；预留用于按 turn 维度对齐 delta）。 */
@@ -53,6 +55,7 @@ export function useSessionRuntimeStream({
   getRuntimeEventSeq,
   mergeRuntimeEvent,
   onTrajectoryEvent,
+  onRuntimeEvent,
   renderLiveDeltas = false,
   activeTurnId,
   deltaCoordinator,
@@ -76,6 +79,10 @@ export function useSessionRuntimeStream({
   useEffect(() => {
     onTrajectoryEventRef.current = onTrajectoryEvent;
   }, [onTrajectoryEvent]);
+  const onRuntimeEventRef = useRef(onRuntimeEvent);
+  useEffect(() => {
+    onRuntimeEventRef.current = onRuntimeEvent;
+  }, [onRuntimeEvent]);
   const renderLiveDeltasRef = useRef(renderLiveDeltas);
   useEffect(() => {
     renderLiveDeltasRef.current = renderLiveDeltas;
@@ -124,6 +131,7 @@ export function useSessionRuntimeStream({
               // 收到事件 = 通道已恢复；重置连续失败计数。
               consecutiveFailures = 0;
               onTrajectoryEventRef.current?.(event);
+              onRuntimeEventRef.current?.(event);
 
               const nextSeq = getRuntimeEventSeq(event);
               if (

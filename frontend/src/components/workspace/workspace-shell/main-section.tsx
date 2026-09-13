@@ -13,6 +13,7 @@ import { ArrowUpRightIcon, BotIcon, type LucideIcon } from "lucide-react";
 
 import { MessageComposer } from "@/components/workspace/message-composer";
 import { MessageList } from "@/components/workspace/message-list";
+import { PendingInteractionBar } from "@/components/workspace/pending-interaction-bar";
 import { type SettingsSectionId } from "@/components/workspace/settings";
 import { TrajectoryView } from "@/components/workspace/workspace-shell/lazy-surfaces";
 import { type WorkspaceShellProps } from "@/components/workspace/workspace-shell/types";
@@ -34,15 +35,22 @@ type WorkspaceMainSectionProps = Pick<
   | "draft"
   | "isResponding"
   | "modelOptions"
+  | "onAnswerPendingQuestion"
   | "onBacktrackToMessage"
   | "onDraftChange"
   | "onModelChange"
   | "onProviderChange"
   | "onReasoningEffortChange"
+  | "onResolvePendingApproval"
+  | "onPlanDecision"
+  | "onPlanNotesChange"
   | "onSelectBacktrackNavigationMessage"
   | "onStopResponding"
   | "onSubmit"
+  | "pendingInteraction"
   | "phase"
+  | "planActionPending"
+  | "planNotesDraft"
   | "providerOptions"
   | "reasoningEffortDefault"
   | "reasoningEffortError"
@@ -100,6 +108,13 @@ export function WorkspaceMainSection({
   onSelectBacktrackNavigationMessage,
   onStopResponding,
   onSubmit,
+  pendingInteraction,
+  onResolvePendingApproval,
+  onAnswerPendingQuestion,
+  onPlanDecision,
+  onPlanNotesChange,
+  planActionPending,
+  planNotesDraft,
   phase,
   providerOptions,
   reasoningEffortDefault,
@@ -313,6 +328,19 @@ export function WorkspaceMainSection({
           >
             {isNewThread || viewMode === "chat" || !trajectoryStore ? (
               <div className="pointer-events-auto mx-auto w-full max-w-[50rem]">
+                <PendingInteractionBar
+                  interaction={pendingInteraction ?? null}
+                  onAnswerQuestion={(questionId, answer) =>
+                    onAnswerPendingQuestion?.(questionId, answer)
+                  }
+                  onResolveApproval={(requestId, allow) =>
+                    onResolvePendingApproval?.(requestId, allow)
+                  }
+                  onPlanDecision={onPlanDecision}
+                  onPlanNotesChange={onPlanNotesChange}
+                  planActionPending={planActionPending}
+                  planNotesDraft={planNotesDraft}
+                />
                 <MessageComposer
                   attachments={composerAttachments}
                   density={density}

@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { resolveSessionToolApproval } from "@/api/runtime/sessions";
+import {
+  answerSessionQuestion,
+  resolveSessionToolApproval,
+} from "@/api/runtime/sessions";
 
 describe("resolveSessionToolApproval", () => {
   const originalFetch = globalThis.fetch;
@@ -81,5 +84,67 @@ describe("resolveSessionToolApproval", () => {
         allow: true,
       }),
     ).rejects.toThrow(/approval expired \(request_id: trace_9\)/);
+  });
+});
+
+describe("answerSessionQuestion", () => {
+  const originalFetch = globalThis.fetch;
+  let calls: Array<{ url: string; init?: RequestInit }> = [];
+
+  beforeEach(() => {
+    calls = [];
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("把回答投递到 answer_question 命令并携带 question_id/answer", async () => {
+    await answerSessionQuestion("child/1", {
+      questionId: "question-42",
+      answer: "继续",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toContain(
+      "/api/runtime/sessions/child%2F1/runtime/commands",
+    );
+    expect(calls[0].init?.method).toBe("POST");
+    expect(calls[0].init?.headers).toMatchObject({
+      "Content-Type": "application/json",
+    });
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      type: "answer_question",
+      question_id: "question-42",
+      answer: "继续",
+    });
+  });
+
+  it("允许空回答（与后端 answer_question 放行空串对齐）", async () => {
+    await answerSessionQuestion("child-1", { questionId: "q-1", answer: "" });
+
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      type: "answer_question",
+      question_id: "q-1",
+      answer: "",
+    });
+  });
+
+  it("signal 透传到 fetch（P1-7 取消路径）", async () => {
+    const controller = new AbortController();
+    await answerSessionQuestion(
+      "child-1",
+      { questionId: "q-1", answer: "ok" },
+      { signal: controller.signal },
+    );
+
+    expect(calls[0].init?.signal).toBe(controller.signal);
   });
 });

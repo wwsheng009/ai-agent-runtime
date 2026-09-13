@@ -7,6 +7,8 @@ import { useRuntimeSessionsData } from "@/hooks/workspace/use-runtime-sessions-d
 import { useRuntimeWorkspaceDirectories } from "@/hooks/workspace/use-runtime-workspace-directories";
 import { useSessionBacktrack } from "@/hooks/workspace/use-session-backtrack";
 import { useSessionHistorySync } from "@/hooks/workspace/use-session-history-sync";
+import { usePendingInteractions } from "@/hooks/workspace/use-pending-interactions";
+import { useRuntimePlanMode } from "@/hooks/workspace/use-runtime-plan-mode";
 import { useSessionRuntimeStream } from "@/hooks/workspace/use-session-runtime-stream";
 import { useTrajectoryRecovery } from "@/hooks/workspace/use-trajectory-recovery";
 import { useWorkspaceAgentChatTurn } from "@/hooks/workspace/use-workspace-agent-chat-turn";
@@ -220,6 +222,37 @@ export function WorkspacePage() {
     selectedThread,
     setThreads,
   });
+  // P1-7：计划评审与 artifact 面板现有决策入口同源（同一 hook / 同一重载规则），
+  // 仅把呈现位收敛到 composer 上沿，避免出现第二套 pending 判定。
+  const {
+    notesDraft: planNotesDraft,
+    onNotesDraftChange: onPlanNotesChange,
+    plan: runtimePlanMode,
+    planActionPending,
+    submitDecision: submitPlanDecision,
+  } = useRuntimePlanMode({
+    lastRuntimeEventType: selectedThread?.lastRuntimeEventType,
+    runtimeEventCount: selectedThread?.runtimeEventCount,
+    sessionId: selectedThread?.sessionId,
+  });
+  // P1-7：审批 / 提问 / 计划评审统一生命周期（事件流归约 → 决定投递 → 结果回填）。
+  const {
+    answerQuestion: answerPendingQuestion,
+    applyRuntimeEvent: applyPendingInteractionEvent,
+    converge: convergePendingInteractions,
+    pending: pendingInteraction,
+    resolveApproval: resolvePendingApproval,
+  } = usePendingInteractions({
+    sessionId: selectedThread?.sessionId,
+    plan: runtimePlanMode,
+    getErrorMessage,
+  });
+  // P1-7：用户主动停止 → 未决审批 / 提问立即收敛，不等待（可能缺席的）中断事件，
+  // 避免停止后卡片仍挂在 composer 上沿。
+  function handleStopResponding() {
+    convergePendingInteractions("session_interrupted");
+    stopResponding();
+  }
   useSessionRuntimeStream({
     applyRuntimeEventToThread,
     applyRuntimeDeltaToThread,
@@ -238,6 +271,7 @@ export function WorkspacePage() {
         trajectoryStore.advanceCursor(action.seq);
       }
     },
+    onRuntimeEvent: applyPendingInteractionEvent,
     // 方案B：请求进行中才渲染 runtime/stream 的打字机增量（delta/reasoning/
     // image_progress）；回放/reload 只进事件快照，不误渲染历史增量。
     activeTurnId,
@@ -346,7 +380,7 @@ export function WorkspacePage() {
       onRefreshRuntimeTeams={handleRefreshRuntimeTeams}
       onSelectRuntimeSessionUser={selectRuntimeSessionUserId}
       onResetRuntimeClientIdentity={handleResetRuntimeClientIdentity}
-      onStopResponding={stopResponding}
+      onStopResponding={handleStopResponding}
       onSubmit={submitPrompt}
       onBacktrackToMessage={backtrackToMessage}
       backtrackDialog={backtrackDialog}
@@ -368,6 +402,13 @@ export function WorkspacePage() {
       selectedModel={selectedModel}
       selectedProvider={selectedProvider}
       selectedReasoningEffort={selectedReasoningEffort}
+      pendingInteraction={pendingInteraction}
+      onResolvePendingApproval={resolvePendingApproval}
+      onAnswerPendingQuestion={answerPendingQuestion}
+      planActionPending={planActionPending}
+      planNotesDraft={planNotesDraft}
+      onPlanNotesChange={onPlanNotesChange}
+      onPlanDecision={submitPlanDecision}
     />
   );
 

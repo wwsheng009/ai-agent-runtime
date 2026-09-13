@@ -348,6 +348,12 @@ export type ResolveSessionToolApprovalRequest = {
   patchedArgs?: Record<string, unknown>;
 };
 
+/** 运行时命令（审批 / 提问）的公共调用选项。 */
+export type SessionRuntimeCommandOptions = {
+  /** 取消信号（P1-7）：中止投递后由调用方按 `cancelled` 收敛待交互条目。 */
+  signal?: AbortSignal;
+};
+
 /**
  * 审批联动（P1-5 方案 4）：对指定会话的 pending 工具审批给出决定。
  *
@@ -360,6 +366,7 @@ export type ResolveSessionToolApprovalRequest = {
 export async function resolveSessionToolApproval(
   sessionId: string,
   request: ResolveSessionToolApprovalRequest,
+  options: SessionRuntimeCommandOptions = {},
 ): Promise<Record<string, unknown>> {
   return fetchRuntimeJson<Record<string, unknown>>(
     buildRuntimeUrl(
@@ -377,6 +384,46 @@ export async function resolveSessionToolApproval(
         allow: request.allow,
         ...(request.patchedArgs ? { patched_args: request.patchedArgs } : {}),
       }),
+      ...(options.signal ? { signal: options.signal } : {}),
+    },
+  );
+}
+
+export type AnswerSessionQuestionRequest = {
+  /** `question_asked` 事件里的 `question_id`（actor 侧 pending 提问主键）。 */
+  questionId: string;
+  /** 回答内容；允许空串（后端 `answer_question` 分支显式放行）。 */
+  answer: string;
+};
+
+/**
+ * 提问联动（P1-7）：对指定会话的 pending 提问提交回答。
+ *
+ * 复用既有 `POST /runtime/sessions/{id}/runtime/commands` 的 `answer_question`
+ * 分支（`backend/internal/api/skills/session_runtime_handlers.go:785-795` →
+ * `actor.AnswerQuestion`），唤醒阻塞中的提问并落 `question_answered`。
+ */
+export async function answerSessionQuestion(
+  sessionId: string,
+  request: AnswerSessionQuestionRequest,
+  options: SessionRuntimeCommandOptions = {},
+): Promise<Record<string, unknown>> {
+  return fetchRuntimeJson<Record<string, unknown>>(
+    buildRuntimeUrl(
+      `/api/runtime/sessions/${encodeURIComponent(sessionId)}/runtime/commands`,
+    ),
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        type: "answer_question",
+        question_id: request.questionId,
+        answer: request.answer,
+      }),
+      ...(options.signal ? { signal: options.signal } : {}),
     },
   );
 }

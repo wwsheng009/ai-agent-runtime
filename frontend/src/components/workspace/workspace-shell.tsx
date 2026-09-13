@@ -69,6 +69,13 @@ export function WorkspaceShell({
   onResetRuntimeClientIdentity,
   onStopResponding,
   onSubmit,
+  pendingInteraction = null,
+  onResolvePendingApproval,
+  onAnswerPendingQuestion,
+  planActionPending,
+  planNotesDraft,
+  onPlanNotesChange,
+  onPlanDecision,
   onBacktrackToMessage,
   backtrackDialog,
   backtrackError = null,
@@ -295,15 +302,22 @@ export function WorkspaceShell({
           messageListStyle={messageListStyle}
           modelOptions={modelOptions}
           newThreadSuggestions={newThreadSuggestions}
+          onAnswerPendingQuestion={onAnswerPendingQuestion}
+          onPlanDecision={onPlanDecision}
+          onPlanNotesChange={onPlanNotesChange}
           onBacktrackToMessage={onBacktrackToMessage}
           onDraftChange={onDraftChange}
           onModelChange={onModelChange}
           onProviderChange={onProviderChange}
           onReasoningEffortChange={onReasoningEffortChange}
+          onResolvePendingApproval={onResolvePendingApproval}
           onSelectBacktrackNavigationMessage={onSelectBacktrackNavigationMessage}
           onStopResponding={onStopResponding}
           onSubmit={onSubmit}
           openSettings={openSettings}
+          pendingInteraction={pendingInteraction}
+          planActionPending={planActionPending}
+          planNotesDraft={planNotesDraft}
           phase={phase}
           providerOptions={providerOptions}
           reasoningEffortDefault={reasoningEffortDefault}
