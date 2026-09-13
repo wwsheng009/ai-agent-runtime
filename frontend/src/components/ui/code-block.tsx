@@ -1,5 +1,5 @@
 import { CheckIcon, CopyIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -7,7 +7,10 @@ import {
   codeHighlightingReady,
   highlightCode,
   isCodeHighlightingReady,
+  plainCodeLines,
+  supportsHighlighting,
 } from "@/components/ui/code-highlighting";
+import { useViewportActivation } from "@/components/ui/use-viewport-activation";
 import { cn } from "@/lib/utils";
 
 type CodeBlockProps = {
@@ -66,8 +69,18 @@ function CodeBlockSurface({
   const { t } = useTranslation("common");
   const [copied, setCopied] = useState(false);
   const [expanded, setExpanded] = useState(false);
-  const [highlightedLines, setHighlightedLines] = useState(() =>
-    highlightCode(code, language),
+  const [prismReady, setPrismReady] = useState(() => isCodeHighlightingReady());
+  const highlightable = supportsHighlighting(language);
+  // 语言可高亮时延迟到代码块进入视口再激活（激活后一次性停止观察）；
+  // 环境不支持 IntersectionObserver 时立即激活，保持纯静态渲染可用。
+  const { activated, targetRef } =
+    useViewportActivation<HTMLDivElement>(highlightable);
+  const highlightedLines = useMemo(
+    () =>
+      activated && prismReady && highlightable
+        ? highlightCode(code, language)
+        : plainCodeLines(code, language),
+    [activated, code, highlightable, language, prismReady],
   );
   const resolvedCollapseLineCount =
     collapseLineCount ?? DEFAULT_COLLAPSE_LINE_COUNT;
@@ -81,21 +94,21 @@ function CodeBlockSurface({
   const hiddenLineCount = highlightedLines.length - visibleLines.length;
 
   useEffect(() => {
-    if (isCodeHighlightingReady()) {
+    if (prismReady) {
       return;
     }
 
     let active = true;
     void codeHighlightingReady.then(() => {
       if (active) {
-        setHighlightedLines(highlightCode(code, language));
+        setPrismReady(true);
       }
     });
 
     return () => {
       active = false;
     };
-  }, [code, language]);
+  }, [prismReady]);
 
   async function handleCopy() {
     try {
@@ -109,6 +122,7 @@ function CodeBlockSurface({
 
   return (
     <div
+      ref={targetRef}
       className={cn(
         "app-code-surface overflow-hidden rounded-panel border border-border bg-code-block-bg",
         className,

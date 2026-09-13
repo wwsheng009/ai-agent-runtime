@@ -100,6 +100,17 @@ function normalizeLanguage(language: string) {
   return LANGUAGE_ALIASES[normalized] ?? normalized;
 }
 
+// 语言是否具备高亮能力：text/未知语言直接走纯文本，无需注册视口观察。
+// 语法表可能仍在懒加载，因此优先看别名表，Prism 核心语法表作为补充。
+export function supportsHighlighting(language: string) {
+  const normalized = normalizeLanguage(language);
+
+  return (
+    normalized !== "text" &&
+    Boolean(LANGUAGE_ALIASES[normalized] ?? Prism.languages[normalized])
+  );
+}
+
 function normalizeTypes(types: string[]) {
   return [...new Set(types.map((type) => type.trim()).filter(Boolean))];
 }
@@ -195,6 +206,26 @@ function applyDiffLineKinds(
   }));
 }
 
+// 纯文本行：与 highlightCode 的行结构保持一致，并保留 diff 的行种类标记。
+function buildPlainLines(code: string, normalizedLanguage: string) {
+  return applyDiffLineKinds(
+    buildPlainTextLines(code),
+    code,
+    normalizedLanguage,
+  );
+}
+
+/** 语言不支持高亮或高亮尚未激活时使用的纯文本行。 */
+export function plainCodeLines(
+  code: string,
+  language: string,
+): CodeHighlightLine[] {
+  return buildPlainLines(
+    code.replace(/\r\n?/g, "\n"),
+    normalizeLanguage(language),
+  );
+}
+
 export function highlightCode(code: string, language: string): CodeHighlightLine[] {
   const normalizedCode = code.replace(/\r\n?/g, "\n");
   const normalizedLanguage = normalizeLanguage(language);
@@ -202,11 +233,7 @@ export function highlightCode(code: string, language: string): CodeHighlightLine
     normalizedLanguage === "text" ? null : Prism.languages[normalizedLanguage];
 
   if (!grammar) {
-    return applyDiffLineKinds(
-      buildPlainTextLines(normalizedCode),
-      normalizedCode,
-      normalizedLanguage,
-    );
+    return buildPlainLines(normalizedCode, normalizedLanguage);
   }
 
   const lines: CodeHighlightLine[] = [
