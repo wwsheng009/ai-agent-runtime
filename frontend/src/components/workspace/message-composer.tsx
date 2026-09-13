@@ -1,14 +1,21 @@
-import { ArrowUpIcon, SquareIcon } from "lucide-react";
+import { ArrowUpIcon, PaperclipIcon, SquareIcon } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef } from "react";
 
+import {
+  ComposerAttachmentRail,
+  ComposerDropInvitation,
+} from "@/components/workspace/composer-attachment-rail";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { type Thread } from "@/data/mock";
+import { type ComposerAttachmentsController } from "@/hooks/workspace/composer/use-composer-attachments";
 import { applyComposerTextareaLayout } from "@/lib/composer-textarea";
 import { cn } from "@/lib/utils";
 import { useTranslation } from "react-i18next";
 
 type MessageComposerProps = {
+  /** P1-4 子片 2：附件草稿轨（数据与上传状态由 owner hook 持有）。 */
+  attachments: ComposerAttachmentsController;
   density: "comfortable" | "compact";
   draft: string;
   /** 会话身份；变化（切换会话/新建线程落地）时输入框回焦。 */
@@ -37,6 +44,7 @@ type MessageComposerProps = {
 };
 
 export function MessageComposer({
+  attachments,
   density,
   draft,
   focusKey,
@@ -104,10 +112,18 @@ export function MessageComposer({
     : !showModelPicker && !runtimeModelsError
       ? t("composer.runtimeDefaultModel")
       : null;
+  // 上传接口未就绪（§6.3 P2-1C）：附件只能停留在「待发送」，此时禁止提交，
+  // 避免附件被静默丢弃。
+  const hasPendingAttachments = attachments.attachments.length > 0;
   const showStatusRow =
-    transport === "error" || selectedArtifactCount > 0 || isResponding;
+    transport === "error" ||
+    selectedArtifactCount > 0 ||
+    isResponding ||
+    hasPendingAttachments ||
+    attachments.rejectedCount > 0;
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // P1-4：草稿超过 14 行时封顶并在输入框内滚动（页面布局不被撑高）。
   useLayoutEffect(() => {
@@ -139,6 +155,10 @@ export function MessageComposer({
   }
 
   function handleSubmit() {
+    if (attachments.attachments.length > 0) {
+      focusInput();
+      return;
+    }
     onSubmit();
     focusInput();
   }
@@ -168,14 +188,70 @@ export function MessageComposer({
               {t("composer.responseActive")}
             </span>
           ) : null}
+          {hasPendingAttachments ? (
+            <>
+              <span data-composer-attachments-pending role="status">
+                {t("composer.attachments.pendingCount", {
+                  count: attachments.attachments.length,
+                })}
+              </span>
+              <span
+                data-composer-attachments-blocked
+                className="text-[#d8a66d]"
+              >
+                {t("composer.attachments.uploadUnavailable")}
+              </span>
+            </>
+          ) : null}
+          {attachments.rejectedCount > 0 ? (
+            <button
+              type="button"
+              data-composer-attachments-rejected
+              onClick={attachments.acknowledgeRejections}
+              className="text-left text-[#d8a66d] underline-offset-2 hover:underline"
+            >
+              {t("composer.attachments.rejected", {
+                count: attachments.rejectedCount,
+              })}
+            </button>
+          ) : null}
         </div>
       ) : null}
 
       <div>
+        <ComposerAttachmentRail
+          attachments={attachments.attachments}
+          isCompact={isCompact}
+          onRemove={attachments.removeAttachment}
+        />
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          tabIndex={-1}
+          aria-hidden="true"
+          data-composer-file-input
+          className="hidden"
+          onChange={(event) => {
+            const files = event.target.files;
+            if (files && files.length > 0) {
+              attachments.addFiles(files);
+            }
+            // 允许同一次选择被再次触发（值不清空则 change 不重发）。
+            event.target.value = "";
+          }}
+        />
         <textarea
           ref={textareaRef}
           value={draft}
           onChange={(event) => onDraftChange(event.target.value)}
+          onPaste={(event) => {
+            const files = event.clipboardData?.files;
+            if (files && files.length > 0) {
+              event.preventDefault();
+              attachments.addFiles(files);
+            }
+          }}
           onKeyDown={(event) => {
             if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
               event.preventDefault();
@@ -203,6 +279,19 @@ export function MessageComposer({
           )}
         >
           <div className="min-w-0 flex flex-wrap items-center gap-2 app-text-9 uppercase tracking-[0.12em] text-muted-foreground">
+            <button
+              type="button"
+              data-composer-attach
+              aria-label={t("composer.attachments.attach")}
+              title={t("composer.attachments.attach")}
+              onClick={() => fileInputRef.current?.click()}
+              className="inline-flex shrink-0 items-center rounded-[0.6rem] border border-border bg-surface-soft px-2 py-1 text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground"
+            >
+              <PaperclipIcon size={14} aria-hidden="true" />
+              <span className="sr-only">
+                {t("composer.attachments.attach")}
+              </span>
+            </button>
             {showProviderPicker ? (
               <label className="inline-flex items-center gap-1.5">
                 <span>{t("composer.provider")}</span>
@@ -280,13 +369,16 @@ export function MessageComposer({
                 : "size-8 shrink-0 border-border bg-surface-soft p-0 text-foreground shadow-none hover:border-border-strong hover:bg-surface-soft-hover"
             }
             onClick={isResponding ? handleStop : handleSubmit}
-            disabled={isResponding ? false : !draft.trim()}
+            disabled={
+              isResponding ? false : !draft.trim() || hasPendingAttachments
+            }
           >
             {isResponding ? <SquareIcon size={14} /> : <ArrowUpIcon size={14} />}
             <span className="sr-only">{submitButtonLabel}</span>
           </Button>
         </div>
       </div>
+      <ComposerDropInvitation visible={attachments.isDragOver} />
     </div>
   );
 }

@@ -50,6 +50,7 @@ export function WorkspaceShell({
   selectedThread,
   selectedArtifact,
   selectedArtifactId,
+  composerAttachments,
   draft,
   isResponding,
   modelOptions,
@@ -282,6 +283,7 @@ export function WorkspaceShell({
           backtrackPendingMessageId={backtrackPendingMessageId}
           backtrackSelectedMessageId={backtrackSelectedMessageId}
           canBacktrack={canBacktrack}
+          composerAttachments={composerAttachments}
           composerOverlayRef={composerOverlayRef}
           density={settings.workspace.density}
           draft={draft}

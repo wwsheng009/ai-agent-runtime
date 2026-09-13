@@ -102,6 +102,7 @@ export function WorkspacePage() {
   });
   const {
     activeTurnId,
+    composerAttachments,
     draft,
     isResponding,
     modelOptions,
@@ -327,6 +328,7 @@ export function WorkspacePage() {
       selectedThread={selectedThread}
       selectedArtifact={selectedArtifact}
       selectedArtifactId={selectedArtifactId}
+      composerAttachments={composerAttachments}
       draft={draft}
       isResponding={isResponding}
       modelOptions={modelOptions}

@@ -219,5 +219,16 @@ export const enWorkspaceBase = {
     stop: "stop",
     submitShort: "submit",
     filesCount: "{{count}} files",
+    attachments: {
+      attach: "add attachments",
+      remove: "remove {{name}}",
+      previewAlt: "{{name}} preview",
+      pending: "pending",
+      pendingCount: "{{count}} attachments pending",
+      uploadUnavailable:
+        "attachment upload isn't available yet — remove them to send",
+      rejected: "ignored {{count}} file(s) (duplicate, too large, or over limit)",
+      dropInvitation: "drop to attach files",
+    },
   },
 } satisfies DeepStringShape<typeof zhWorkspaceBase>;

@@ -202,5 +202,15 @@ export const zhWorkspaceBase = {
     stop: "停止",
     submitShort: "提交",
     filesCount: "{{count}} 个文件",
+    attachments: {
+      attach: "添加附件",
+      remove: "移除 {{name}}",
+      previewAlt: "{{name}} 预览",
+      pending: "待发送",
+      pendingCount: "{{count}} 个附件待发送",
+      uploadUnavailable: "附件上传接口未就绪，暂不能随消息发送",
+      rejected: "已忽略 {{count}} 个文件（重复、超大或超出数量上限）",
+      dropInvitation: "松开以添加附件",
+    },
   },
 } as const;

@@ -27,6 +27,7 @@ type WorkspaceMainSectionProps = Pick<
   | "backtrackPendingMessageId"
   | "backtrackSelectedMessageId"
   | "canBacktrack"
+  | "composerAttachments"
   | "draft"
   | "isResponding"
   | "modelOptions"
@@ -84,6 +85,7 @@ export function WorkspaceMainSection({
   backtrackPendingMessageId,
   backtrackSelectedMessageId,
   canBacktrack,
+  composerAttachments,
   draft,
   isResponding,
   modelOptions,
@@ -300,6 +302,7 @@ export function WorkspaceMainSection({
             {isNewThread || viewMode === "chat" || !trajectoryStore ? (
               <div className="pointer-events-auto mx-auto w-full max-w-[50rem]">
                 <MessageComposer
+                  attachments={composerAttachments}
                   density={density}
                   draft={draft}
                   focusKey={selectedThread.sessionId ?? selectedThread.id}

@@ -1,6 +1,7 @@
 // 由 components/workspace/workspace-shell.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { type Artifact, type Thread } from "@/data/mock";
+import type { ComposerAttachmentsController } from "@/hooks/workspace/composer/use-composer-attachments";
 import { type RuntimeSessionsSummary } from "@/hooks/workspace/use-runtime-sessions-data";
 import type { SessionBacktrackDialogState } from "@/hooks/workspace/use-session-backtrack";
 import { type RuntimeClientIdentity } from "@/lib/runtime-client";
@@ -48,6 +49,7 @@ export type WorkspaceShellProps = {
   selectedThread: Thread;
   selectedArtifact: Artifact | null;
   selectedArtifactId: string | null;
+  composerAttachments: ComposerAttachmentsController;
   draft: string;
   isResponding: boolean;
   modelOptions: string[];

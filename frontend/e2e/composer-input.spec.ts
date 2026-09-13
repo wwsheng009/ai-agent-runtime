@@ -3,11 +3,13 @@ import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures";
 import { resetMockState, seedSession } from "./support";
 
-// P1-4 子片 1（Composer 输入面）：草稿按会话持久化、14 行封顶内部滚动、输入回焦。
+// P1-4（Composer 输入面）：
+//   子片 1：草稿按会话持久化、14 行封顶内部滚动、输入回焦；
+//   子片 2：附件三段式（选择 / 粘贴 / 拖放）、待发送轨、提交闸门与拒收提示。
 //
 // 断言口径：
-// - 只依赖 `.app-chat-input` 这一既有稳定钩子与真实 localStorage，不绑定内部
-//   DOM 结构或组件状态；
+// - 只依赖 `.app-chat-input` 与 `data-composer-*` 稳定钩子及真实 localStorage，
+//   不绑定内部 DOM 结构或组件状态；
 // - 封顶值在浏览器内用实测 line-height / padding 计算（14 行），因此跟随字号
 //   与密度设置漂移，不做魔法数字。
 //
@@ -19,6 +21,8 @@ const composer = (page: Page) => page.locator(".app-chat-input");
 const DRAFT_STORAGE_PREFIX = "aicli.workspace.composer-draft.v1:";
 
 const DRAFT_SESSION_ID = "e2e-composer-draft";
+
+type WindowWithDragData = Window & { __e2eDragData?: DataTransfer };
 
 async function readComposerMetrics(page: Page) {
   return page.evaluate(() => {
@@ -130,4 +134,119 @@ test("P1-4c: the composer refocuses on load, session switch and submit", async (
 
   await expect(composer(page)).toBeFocused();
   await expect(composer(page)).toHaveValue("");
+});
+
+test("P1-4d: picked attachments stay pending and block submit until removed", async ({
+  page,
+}) => {
+  await composer(page).fill("ship the attachment");
+  const submit = page.locator('button[aria-label="Start new thread"]');
+
+  await page.locator("input[data-composer-file-input]").setInputFiles({
+    name: "notes.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("hello"),
+  });
+
+  await expect(page.locator("[data-composer-attachment]")).toHaveCount(1);
+  await expect(
+    page.locator('[data-composer-attachment][data-attachment-status="pending"]'),
+  ).toHaveCount(1);
+  await expect(page.locator("[data-composer-attachments-pending]")).toContainText(
+    "attachments pending",
+  );
+  await expect(page.locator("[data-composer-attachments-blocked]")).toContainText(
+    "attachment upload",
+  );
+  await expect(submit).toBeDisabled();
+
+  // Ctrl/Cmd+Enter 也不能绕过闸门：附件不会被静默丢弃。
+  await composer(page).press("Control+Enter");
+  await expect(composer(page)).toHaveValue("ship the attachment");
+
+  await page.locator("[data-composer-attachment-remove]").click();
+  await expect(page.locator("[data-composer-attachment-rail]")).toHaveCount(0);
+  await expect(submit).toBeEnabled();
+});
+
+test("P1-4e: pasting a file attaches it to the draft rail", async ({ page }) => {
+  await page.evaluate(() => {
+    const textarea = document.querySelector(".app-chat-input");
+    if (!(textarea instanceof HTMLTextAreaElement)) {
+      throw new Error("composer textarea missing");
+    }
+    const dataTransfer = new DataTransfer();
+    dataTransfer.items.add(
+      new File(["pasted"], "pasted.txt", { type: "text/plain" }),
+    );
+    textarea.dispatchEvent(
+      new ClipboardEvent("paste", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: dataTransfer,
+      }),
+    );
+  });
+
+  await expect(page.locator("[data-composer-attachment]")).toHaveCount(1);
+  await expect(page.locator("[data-composer-attachment]")).toContainText(
+    "pasted.txt",
+  );
+});
+
+test("P1-4f: dropping files anywhere invites, then attaches them", async ({
+  page,
+}) => {
+  await page.evaluate(() => {
+    const dragWindow = window as WindowWithDragData;
+    const dataTransfer = new DataTransfer();
+    dataTransfer.items.add(
+      new File(["dropped"], "dropped.txt", { type: "text/plain" }),
+    );
+    dragWindow.__e2eDragData = dataTransfer;
+    window.dispatchEvent(
+      new DragEvent("dragenter", { bubbles: true, dataTransfer }),
+    );
+  });
+
+  const invitation = page.locator("[data-composer-drop-invitation]");
+  await expect(invitation).toBeVisible();
+  await expect(invitation).toContainText("drop to attach files");
+
+  await page.evaluate(() => {
+    const dragWindow = window as WindowWithDragData;
+    window.dispatchEvent(
+      new DragEvent("drop", {
+        bubbles: true,
+        dataTransfer: dragWindow.__e2eDragData,
+      }),
+    );
+    delete dragWindow.__e2eDragData;
+  });
+
+  await expect(page.locator("[data-composer-drop-invitation]")).toHaveCount(0);
+  await expect(page.locator("[data-composer-attachment]")).toContainText(
+    "dropped.txt",
+  );
+});
+
+test("P1-4g: duplicate picks are ignored with an acknowledging notice", async ({
+  page,
+}) => {
+  const fileInput = page.locator("input[data-composer-file-input]");
+  const payload = {
+    name: "dup.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("dup"),
+  };
+
+  await fileInput.setInputFiles(payload);
+  await fileInput.setInputFiles(payload);
+
+  await expect(page.locator("[data-composer-attachment]")).toHaveCount(1);
+  const rejected = page.locator("[data-composer-attachments-rejected]");
+  await expect(rejected).toContainText("ignored 1");
+
+  await rejected.click();
+  await expect(rejected).toHaveCount(0);
 });
