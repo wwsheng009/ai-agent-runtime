@@ -70,7 +70,7 @@ describe("trajectory reducer 基本序列（对齐 TestEncodeBasicSequence）", 
 
 describe("乱序缓冲（对齐 TestEncodeOutOfOrder：1,3,2 → ABC）", () => {
   it("乱序事件按 seq 缓冲并按序应用", () => {
-    let snapshot = createEmptyTrajectory();
+    const snapshot = createEmptyTrajectory();
     const first = applyEvent(snapshot, chunk(1, "text", "A"));
     expect(first.snapshot.lastEventSeq).toBe(1);
 

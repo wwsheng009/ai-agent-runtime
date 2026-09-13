@@ -73,6 +73,7 @@ export function useChatTurnReasoningEffort(options: {
     }
     // 会话记录已带回该档位：清空乐观覆盖，避免长期遮蔽服务端真值。
     if (sessionReasoningEffort === pendingReasoningEffort.effort) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- 一次性收敛：服务端真值回填后立即撤销乐观覆盖，不会再触发级联更新。
       setPendingReasoningEffort(null);
     }
   }, [activeSessionId, pendingReasoningEffort, sessionReasoningEffort]);
