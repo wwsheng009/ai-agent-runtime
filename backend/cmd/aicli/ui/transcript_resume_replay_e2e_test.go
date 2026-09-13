@@ -2,7 +2,9 @@ package ui
 
 import (
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
@@ -220,12 +222,20 @@ func TestResumeSceneRebuildNewSceneIDNoScrollbackResetReplayE2E(t *testing.T) {
 		h.assertNoReplay(t, baselineEpoch, baselineResetCount, baselineBytes, index)
 	}
 }
+
 // TestResumeFailingWriterReconciliationStopsWithinBoundE2E reproduces the
 // "persistently failing writer" flicker loop described in the executor.go
 // comment (lines 256-259). A writer that returns short writes on every
 // scrollback-reset flush causes the reconciliation to fail. The backoff guard
 // must stop the executor after the first failed reset, yielding the worker
 // instead of resetting+replaying the full transcript on every external wake.
+//
+// The retry count is asserted against a frozen executor clock: the guard is
+// wall-clock gated, so driving 20 external wakes with the real clock makes the
+// number of retries a function of machine speed (each engaged wake yields for
+// 10ms while the failed-mode window is 100ms). Freezing the clock asserts the
+// guard's contract — zero replays inside the window, exactly one bounded retry
+// after it expires — and stays stable under a loaded CI host.
 //
 // The existing unit test (TestTerminalSessionExecutorFailedReconciliationArmsBackoff)
 // uses postHistoryEffectFixture (only committed cells). This test exercises
@@ -281,23 +291,42 @@ func TestResumeFailingWriterReconciliationStopsWithinBoundE2E(t *testing.T) {
 		},
 	}})
 
-	// First Request: the executor runs one reconciliation attempt. With a short
-	// writer this fails; the backoff is armed.
+	// First Request: the executor reacts to the delta and the short write fails,
+	// leaving the projection unknown. A second same-generation wake runs the
+	// scheduled recovery attempt, fails again and arms the backoff guard.
+	h.executor.Request()
+	h.executor.WaitIdle()
+	h.controller.WaitIdle()
 	h.executor.Request()
 	h.executor.WaitIdle()
 	h.controller.WaitIdle()
 
-	// Record the settled revision after the executor's own failure posts.
-	writesAfterFirst := h.writer.writes
-	if writesAfterFirst == 0 {
+	// Record the settled state after the executor's own failure posts.
+	writesArmed := h.writer.writes
+	if writesArmed == 0 {
 		t.Fatal("short writer never wrote; the reconciliation was not attempted")
+	}
+	if armed := h.executor.RecoveryDiag().ArmedBackoff; armed == 0 {
+		t.Fatal("failed reconciliation did not arm the scrollback-reset backoff")
 	}
 	if st := h.controller.State(); !st.HistoryEffects.ProjectionUnknown {
 		t.Fatalf("short writer did not leave an unknown projection: %#v", st.HistoryEffects)
 	}
 
-	// Issue many external requests within the backoff window. The backoff must
-	// yield before any new write, keeping the writer count in check.
+	// Freeze the executor's backoff clock before the external-wake loop: the
+	// failed-mode window is wall-clock gated (100ms) and every engaged wake
+	// yields for 10ms, so on a loaded host a 20-iteration loop consumes 200ms+
+	// and legitimately expires the window mid-loop. With a frozen clock the
+	// observed retry count is a property of the guard, not of machine speed.
+	var frozenNanos atomic.Int64
+	frozenNanos.Store(time.Now().UnixNano())
+	h.executor.setNowFunc(func() time.Time { return time.Unix(0, frozenNanos.Load()) })
+
+	armedFrozen := h.executor.RecoveryDiag().ArmedBackoff
+	engagedBefore := h.executor.RecoveryDiag().BackoffEngaged
+
+	// Issue many external requests within the backoff window. Every one of them
+	// must yield instead of resetting and replaying the transcript.
 	for i := 0; i < 20; i++ {
 		// Simulate an external wake: the controller itself may not post a new
 		// action, so we drive the executor directly.
@@ -306,17 +335,45 @@ func TestResumeFailingWriterReconciliationStopsWithinBoundE2E(t *testing.T) {
 		h.controller.WaitIdle()
 	}
 
-	if writes := h.writer.writes; writes > writesAfterFirst+2 {
-		// Allow at most 2 extra writes: one for the initial failed attempt
-		// and possibly one more if the backoff window expired and the
-		// revision advanced (the executor's own failure posts advance the
-		// actor revision, so the guard checks lastResetRevision == stateRevision;
-		// if no external action arrived, the revision matches and backoff
-		// engages. A single extra write is acceptable as a race; anything
-		// more is an unbounded loop.
-		t.Fatalf("short writer wrote %d times after the first reconciliation "+
-			"failure (initial %d); the backoff should have blocked most writes, "+
-			"allowing at most 2 extra = %d total",
-			writes, writesAfterFirst, writesAfterFirst+2)
+	// Inside the window not one extra reset+replay may reach the writer: an
+	// unguarded executor replays the transcript on every external wake.
+	if writes := h.writer.writes; writes != writesArmed {
+		t.Fatalf("short writer wrote %d times after the guard was armed (initial %d) "+
+			"inside an unexpired backoff window; every same-generation wake must yield",
+			writes, writesArmed)
+	}
+	if armed := h.executor.RecoveryDiag().ArmedBackoff; armed != armedFrozen {
+		t.Fatalf("backoff arms advanced %d -> %d across 20 external wakes inside an "+
+			"unexpired window; no new reconciliation may run", armedFrozen, armed)
+	}
+	// Positive control: the guard — not some unrelated short-circuit — held the
+	// writes back, so the loop above really did exercise the engaged path.
+	if engaged := h.executor.RecoveryDiag().BackoffEngaged; engaged <= engagedBefore {
+		t.Fatalf("backoff never engaged across 20 external wakes (%d -> %d); "+
+			"the suppressed writes above prove nothing",
+			engagedBefore, engaged)
+	}
+
+	// Expiring the window must still allow exactly one bounded retry: the guard
+	// is a rate limit for a writer that may heal, not a permanent dead end.
+	frozenNanos.Add(int64(terminalScrollbackResetBackoff + 50*time.Millisecond))
+	h.executor.Request()
+	h.executor.WaitIdle()
+	h.controller.WaitIdle()
+	if writes := h.writer.writes; writes != writesArmed+1 {
+		t.Fatalf("expired backoff window produced %d writes since the guard was armed "+
+			"(initial %d); want exactly one bounded same-generation retry",
+			writes, writesArmed)
+	}
+
+	// The retry re-armed the guard at the frozen instant; further wakes must be
+	// rate-limited again instead of draining the retry budget at once.
+	h.executor.Request()
+	h.executor.WaitIdle()
+	h.controller.WaitIdle()
+	if writes := h.writer.writes; writes != writesArmed+1 {
+		t.Fatalf("short writer wrote %d times after the single bounded retry "+
+			"(initial %d); the re-armed backoff must yield again",
+			writes, writesArmed)
 	}
 }

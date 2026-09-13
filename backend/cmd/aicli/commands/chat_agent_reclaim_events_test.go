@@ -101,3 +101,52 @@ func localReclaimEvents(events []runtimeevents.Event) []runtimeevents.Event {
 	}
 	return out
 }
+
+// TestLocalActorRegistry_ReclaimReportIsPublishedOnce fixes the duplicated
+// reclaim line: the spawn gate, the projection sweep and the periodic reconcile
+// can all observe the same eviction pass, but only the first observation may
+// reach the bus and the durable session stream. A genuinely different pass
+// (other children, other reason) still publishes.
+func TestLocalActorRegistry_ReclaimReportIsPublishedOnce(t *testing.T) {
+	host, rootSession, _ := newLocalQuotaHarness(t, 1, 0)
+	registry := host.ActorRegistry
+	registry.recordLocalAgentReclaim(context.Background(), "", "", agentcontrol.ReclaimSourceReconcile, agentcontrol.ReclaimOutcome{})
+	require.Empty(t, localReclaimEvents(host.EventBus.Recent(64)), "an empty pass never publishes")
+
+	pass := agentcontrol.ReclaimOutcome{
+		Rows: 3,
+		Decisions: []agentcontrol.ReclaimDecision{
+			{AgentPath: "/root/a", SessionID: "sess-a", Reason: agentcontrol.ReclaimReasonSessionTerminal},
+			{AgentPath: "/root/b", SessionID: "sess-b", Reason: agentcontrol.ReclaimReasonSessionTerminal},
+			{AgentPath: "/root/c", SessionID: "sess-c", Reason: agentcontrol.ReclaimReasonSessionTerminal},
+		},
+	}
+	registry.recordLocalAgentReclaim(context.Background(), rootSession.ID, rootSession.ID, agentcontrol.ReclaimSourceReconcile, pass)
+	// Same pass observed again by another caller: dropped instead of replayed.
+	registry.recordLocalAgentReclaim(context.Background(), rootSession.ID, rootSession.ID, agentcontrol.ReclaimSourceReconcile, pass)
+	// A different observer (spawn gate) reporting the very same closed rows is
+	// still the same eviction: the source says who noticed, not what happened.
+	registry.recordLocalAgentReclaim(context.Background(), rootSession.ID, rootSession.ID, agentcontrol.ReclaimSourceSpawnGate, pass)
+
+	events := localReclaimEvents(host.EventBus.Recent(64))
+	require.Len(t, events, 1, "one eviction pass must reach the bus exactly once")
+	require.Equal(t, agentcontrol.ReclaimSourceReconcile, events[0].Payload["source"], "the first observer keeps the attribution")
+	require.Equal(t,
+		"reclaimed=3 reclaimed_rows=3 reclaim_reasons=session_terminal,session_terminal,session_terminal",
+		events[0].Payload["summary"],
+	)
+
+	persisted, err := host.EventStore.ListEvents(context.Background(), rootSession.ID, 0, 64)
+	require.NoError(t, err)
+	require.Len(t, localReclaimEvents(persisted), 1, "the durable mirror must not duplicate the pass either")
+	require.Contains(t, host.localAgentReclaimSummary(), "reclaim events=1")
+
+	// A different eviction set is not suppressed by the guard.
+	registry.recordLocalAgentReclaim(context.Background(), rootSession.ID, rootSession.ID, agentcontrol.ReclaimSourceReconcile, agentcontrol.ReclaimOutcome{
+		Rows: 1,
+		Decisions: []agentcontrol.ReclaimDecision{
+			{AgentPath: "/root/next", SessionID: "sess-next", Reason: agentcontrol.ReclaimReasonIdleTimeout},
+		},
+	})
+	require.Len(t, localReclaimEvents(host.EventBus.Recent(64)), 2)
+}

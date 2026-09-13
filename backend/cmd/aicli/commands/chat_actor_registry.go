@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
@@ -31,6 +32,11 @@ import (
 
 type localActorRegistry struct {
 	Host *localChatRuntimeHost
+	// reclaimReportMu guards reclaimReportKeys: one eviction pass must be
+	// advertised to the event stream exactly once, even when several callers
+	// (spawn gate, projection sweep, periodic reconcile) observe the same pass.
+	reclaimReportMu   sync.Mutex
+	reclaimReportKeys map[string]time.Time
 }
 
 func newLocalActorRegistry(host *localChatRuntimeHost) *localActorRegistry {

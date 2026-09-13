@@ -207,6 +207,15 @@ type TerminalSessionExecutor struct {
 	// success-mode resets, consumed from the retry budget. Reset to 0 on
 	// generation change (new LayoutGeneration) or on a writer-failure record.
 	lastResetSuccessRetries int
+	// now is the wall clock behind the reset-backoff windows above. It exists as
+	// a seam because those windows are wall-clock gated: an end-to-end driver
+	// that loops external wakes observes a host-speed-dependent number of
+	// retries (each engaged wake yields for 10ms, so a loaded host expires the
+	// 100ms failed-mode window mid-loop and the same test flips between 2 and 3
+	// extra writes). Tests freeze it to assert the guard's retry count instead
+	// of the scheduler's speed. Production leaves it nil and nowTime falls back
+	// to time.Now; the field is guarded by mu and only read with mu held.
+	now func() time.Time
 }
 
 // NewTerminalSessionExecutor creates the bounded physical worker.
@@ -216,6 +225,29 @@ func NewTerminalSessionExecutor(controller *UIController, session *TerminalSessi
 		session:    session,
 		diagRing:   make([]ExecutorRecoveryDiagEntry, 0, diagRecoveryRingSize),
 	}
+}
+
+// nowTime returns the executor wall clock. Callers MUST hold e.mu: every
+// production read happens inside scrollbackResetBackoff / recordScrollbackReset,
+// and setNowFunc writes the field under the same mutex.
+func (e *TerminalSessionExecutor) nowTime() time.Time {
+	if e.now != nil {
+		return e.now()
+	}
+	return time.Now()
+}
+
+// setNowFunc overrides the wall clock used by the scrollback-reset backoff
+// windows. Tests use it to keep the retry count deterministic instead of
+// racing real time; nil restores time.Now. It must be called while the worker
+// is idle (the mutex serializes the field, not the surrounding test logic).
+func (e *TerminalSessionExecutor) setNowFunc(now func() time.Time) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.now = now
 }
 
 // RecoveryDiag returns a snapshot of the executor's recovery-loop ring buffer.
@@ -358,14 +390,14 @@ func (e *TerminalSessionExecutor) scrollbackResetBackoff(stateGeneration uint64)
 		return false
 	}
 	if e.lastResetFailed {
-		return time.Since(e.lastResetAt) < terminalScrollbackResetBackoff
+		return e.nowTime().Sub(e.lastResetAt) < terminalScrollbackResetBackoff
 	}
 	// Success mode: engage for the retry window, park permanently once the
 	// same-generation retry budget is exhausted.
 	if e.lastResetSuccessRetries >= terminalScrollbackResetMaxRetries {
 		return true
 	}
-	return time.Since(e.lastResetAt) < terminalScrollbackResetRetryWindow
+	return e.nowTime().Sub(e.lastResetAt) < terminalScrollbackResetRetryWindow
 }
 
 // scrollbackResetSuccessMode reports whether the engaged backoff came from a
@@ -388,7 +420,7 @@ func (e *TerminalSessionExecutor) scrollbackResetSuccessMode() bool {
 // next cycle observes when no external geometry/theme change intervened.
 func (e *TerminalSessionExecutor) recordScrollbackReset(epoch, stateGeneration uint64, failed bool) {
 	e.mu.Lock()
-	e.lastResetAt = time.Now()
+	e.lastResetAt = e.nowTime()
 	e.lastResetEpoch = epoch
 	if e.lastResetGeneration != stateGeneration || failed {
 		// New generation (first attempt or a real geometry/theme change) or a

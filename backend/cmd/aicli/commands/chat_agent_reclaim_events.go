@@ -16,6 +16,13 @@ import (
 // session event stream remain the source of truth.
 const localAgentReclaimEventLimit = 512
 
+// localAgentReclaimReportWindow bounds how long one eviction pass is remembered
+// by the publication guard. One pass can be observed by several callers in the
+// same host (spawn gate, projection sweep, periodic reconcile); only the first
+// observation may reach the bus and the durable session stream, otherwise the
+// identical summary is replayed to the operator once per observer.
+const localAgentReclaimReportWindow = 5 * time.Minute
+
 // recordLocalAgentReclaim mirrors one quota eviction pass onto the CLI runtime
 // event bus and, best effort, into the durable parent session event stream
 // (plan §P2-8 方案 4). It is a no-op when nothing was reclaimed, so a gate that
@@ -29,11 +36,17 @@ func (r *localActorRegistry) recordLocalAgentReclaim(ctx context.Context, parent
 		payload["root_session_id"] = root
 	}
 	sessionID := strings.TrimSpace(parentSessionID)
+	now := time.Now().UTC()
+	if !r.claimLocalAgentReclaimReport(localAgentReclaimReportKey(sessionID, payload), now) {
+		// The same pass was already advertised: a second identical line would
+		// make /runtime/events and the transcript show one eviction twice.
+		return
+	}
 	event := runtimeevents.Event{
 		Type:      agentcontrol.EventAgentReclaimed,
 		SessionID: sessionID,
 		Payload:   payload,
-		Timestamp: time.Now().UTC(),
+		Timestamp: now,
 	}
 	if bus := r.Host.EventBus; bus != nil {
 		bus.Publish(event)
@@ -44,6 +57,49 @@ func (r *localActorRegistry) recordLocalAgentReclaim(ctx context.Context, parent
 		// stay silent (the registry wake stream is the authoritative channel).
 		_, _ = store.AppendEvent(ctx, event)
 	}
+}
+
+// localAgentReclaimReportKey identifies one eviction report by the eviction it
+// describes — the parent stream plus the closed children — not by the observer
+// that happened to notice it (source is deliberately excluded). Reclaiming rows
+// leaves them terminal, so the same row set can only be reported again when a
+// second observer of the *same* pass re-derives the same outcome; a genuinely
+// later pass closes different rows (or the same rows re-created) and therefore
+// produces a different key.
+func localAgentReclaimReportKey(sessionID string, payload map[string]interface{}) string {
+	return strings.Join([]string{
+		strings.TrimSpace(sessionID),
+		localAgentReclaimStringPayload(payload, "root_session_id"),
+		localAgentReclaimStringPayload(payload, "summary"),
+		strings.Join(localAgentReclaimStringsPayload(payload, "agent_paths"), ","),
+		fmt.Sprintf("%d", localAgentReclaimIntPayload(payload, "reclaimed")),
+	}, "|")
+}
+
+// claimLocalAgentReclaimReport reports whether this observer may publish the
+// pass. The first caller for key wins and a repeat inside
+// localAgentReclaimReportWindow is dropped, so one eviction is advertised once
+// even when the spawn gate, the projection sweep and the periodic reconcile all
+// observe the same outcome.
+func (r *localActorRegistry) claimLocalAgentReclaimReport(key string, now time.Time) bool {
+	if r == nil || strings.TrimSpace(key) == "" {
+		return true
+	}
+	r.reclaimReportMu.Lock()
+	defer r.reclaimReportMu.Unlock()
+	if r.reclaimReportKeys == nil {
+		r.reclaimReportKeys = make(map[string]time.Time, 4)
+	}
+	for existing, seen := range r.reclaimReportKeys {
+		if now.Sub(seen) > localAgentReclaimReportWindow {
+			delete(r.reclaimReportKeys, existing)
+		}
+	}
+	if seen, ok := r.reclaimReportKeys[key]; ok && now.Sub(seen) <= localAgentReclaimReportWindow {
+		return false
+	}
+	r.reclaimReportKeys[key] = now
+	return true
 }
 
 // localAgentReclaimSummary renders the P2-8 reclaim tally for `/debug` and
