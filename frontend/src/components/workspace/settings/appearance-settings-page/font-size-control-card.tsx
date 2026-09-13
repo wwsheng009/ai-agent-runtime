@@ -46,7 +46,7 @@ export function FontSizeControlCard({
       description={description}
       descriptionClassName="text-base"
       headerAside={
-        <div className="rounded-[0.65rem] border border-[var(--border)] bg-black/10 px-2 py-0.5 font-mono app-text-11 text-[var(--foreground)]">
+        <div className="rounded-[0.65rem] border border-border bg-black/10 px-2 py-0.5 font-mono app-text-11 text-foreground">
           {formatFontSizePx(value)}
         </div>
       }
@@ -60,8 +60,8 @@ export function FontSizeControlCard({
           className={cn(
             "inline-flex h-9 w-9 items-center justify-center rounded-[0.7rem] border transition",
             decrementDisabled
-              ? "cursor-not-allowed border-[var(--border)] bg-[var(--surface-solid)] text-[var(--muted-foreground)] opacity-50"
-              : "border-[var(--border)] bg-[var(--surface-solid)] text-[var(--foreground)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)]",
+              ? "cursor-not-allowed border-border bg-surface-solid text-muted-foreground opacity-50"
+              : "border-border bg-surface-solid text-foreground hover:border-border-strong hover:bg-surface-soft",
           )}
         >
           <MinusIcon size={16} />
@@ -73,7 +73,7 @@ export function FontSizeControlCard({
           step={FONT_SIZE_LIMITS.step}
           value={value}
           onChange={(event) => updateValue(Number(event.target.value))}
-          className="h-2 w-full accent-[var(--accent-primary)]"
+          className="h-2 w-full accent-accent-primary"
         />
         <button
           type="button"
@@ -82,8 +82,8 @@ export function FontSizeControlCard({
           className={cn(
             "inline-flex h-9 w-9 items-center justify-center rounded-[0.7rem] border transition",
             incrementDisabled
-              ? "cursor-not-allowed border-[var(--border)] bg-[var(--surface-solid)] text-[var(--muted-foreground)] opacity-50"
-              : "border-[var(--border)] bg-[var(--surface-solid)] text-[var(--foreground)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)]",
+              ? "cursor-not-allowed border-border bg-surface-solid text-muted-foreground opacity-50"
+              : "border-border bg-surface-solid text-foreground hover:border-border-strong hover:bg-surface-soft",
           )}
         >
           <PlusIcon size={16} />
@@ -92,7 +92,7 @@ export function FontSizeControlCard({
 
       <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
         <label className="block">
-          <span className="text-xs uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+          <span className="text-xs uppercase tracking-[0.16em] text-muted-foreground">
             {t("appearance.customPixels")}
           </span>
           <span className="mt-2 flex items-center gap-3">
@@ -110,7 +110,7 @@ export function FontSizeControlCard({
               }}
               className={editorControlClassName}
             />
-            <span className="shrink-0 text-base text-[var(--muted-foreground)]">
+            <span className="shrink-0 text-base text-muted-foreground">
               px
             </span>
           </span>
@@ -123,15 +123,15 @@ export function FontSizeControlCard({
           className={cn(
             "rounded-[0.7rem] border px-3 py-2 text-base transition",
             value === defaultValue
-              ? "cursor-not-allowed border-[var(--border)] bg-[var(--surface-solid)] text-[var(--muted-foreground)] opacity-50"
-              : "border-[var(--border)] bg-[var(--surface-solid)] text-[var(--foreground)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)]",
+              ? "cursor-not-allowed border-border bg-surface-solid text-muted-foreground opacity-50"
+              : "border-border bg-surface-solid text-foreground hover:border-border-strong hover:bg-surface-soft",
           )}
         >
           {tCommon("actions.reset")} {formatFontSizePx(defaultValue)}
         </button>
       </div>
 
-      <div className="text-xs leading-5 text-[var(--muted-foreground)]">
+      <div className="text-xs leading-5 text-muted-foreground">
         {t("appearance.sizeHint", {
           min: String(FONT_SIZE_LIMITS.min),
           max: String(FONT_SIZE_LIMITS.max),

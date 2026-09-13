@@ -29,7 +29,7 @@ export function RuntimeTeamFinalSummarySection({
           content={details.finalSummary}
         />
       ) : (
-        <p className="text-sm leading-6 text-[var(--muted-foreground)]">
+        <p className="text-sm leading-6 text-muted-foreground">
           No final summary available yet.
         </p>
       )}

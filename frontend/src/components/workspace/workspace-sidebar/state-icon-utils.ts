@@ -20,7 +20,7 @@ export function getThreadWorkflowIcon(
       icon: SearchIcon,
       label: labels.threadReview,
       toneClassName:
-        "border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)] text-[var(--accent-primary)]",
+        "border-accent-primary-border bg-accent-primary-soft text-accent-primary",
     };
   }
 
@@ -29,7 +29,7 @@ export function getThreadWorkflowIcon(
       icon: Clock3Icon,
       label: labels.threadDraft,
       toneClassName:
-        "border-[var(--border)] bg-[var(--surface-soft)] text-[var(--muted-foreground)]",
+        "border-border bg-surface-soft text-muted-foreground",
     };
   }
 
@@ -37,7 +37,7 @@ export function getThreadWorkflowIcon(
     icon: SparklesIcon,
     label: labels.threadActive,
     toneClassName:
-      "border-[var(--accent-secondary-border)] bg-[var(--accent-secondary-soft)] text-[var(--accent-secondary)]",
+      "border-accent-secondary-border bg-accent-secondary-soft text-accent-secondary",
   };
 }
 
@@ -76,6 +76,6 @@ export function getSessionStatusIcon(
     icon: LoaderCircleIcon,
     label: labels.sessionPending,
     toneClassName:
-      "border-[var(--border)] bg-[var(--surface-soft)] text-[var(--muted-foreground)]",
+      "border-border bg-surface-soft text-muted-foreground",
   };
 }

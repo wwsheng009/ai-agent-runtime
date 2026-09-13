@@ -52,7 +52,7 @@ export const StreamingBlockquoteParagraph = memo(function StreamingBlockquotePar
   return (
     <p
       className={cn(
-        "whitespace-pre-wrap break-words text-[var(--muted-foreground)]",
+        "whitespace-pre-wrap break-words text-muted-foreground",
         className,
       )}
       aria-atomic={active ? "true" : undefined}
@@ -93,7 +93,7 @@ export const StreamingTableHeaderCell = memo(function StreamingTableHeaderCell({
   return (
     <th
       className={cn(
-        "bg-[var(--surface-softer)] px-3 py-2.5 font-semibold text-[var(--foreground)]",
+        "bg-surface-softer px-3 py-2.5 font-semibold text-foreground",
         alignmentToClassName(alignment),
       )}
     >
@@ -122,7 +122,7 @@ export const StreamingTableRow = memo(
           <td
             key={`streaming-table-cell-${cellIndex}-${cell}`}
             className={cn(
-              "border-t border-[var(--border)] px-3 py-2.5 align-top text-[var(--foreground)]",
+              "border-t border-border px-3 py-2.5 align-top text-foreground",
               alignmentToClassName(alignments[cellIndex] ?? null),
             )}
           >

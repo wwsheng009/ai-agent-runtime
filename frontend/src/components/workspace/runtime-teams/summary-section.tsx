@@ -35,7 +35,7 @@ export function TeamsSummarySection({
 }: TeamsSummarySectionProps) {
   return (
     <>
-      <div className="mb-3 flex flex-col gap-3 rounded-[0.95rem] border border-[var(--border)] bg-[var(--surface-softer)] px-3.5 py-3 xl:flex-row xl:items-center xl:justify-between">
+      <div className="mb-3 flex flex-col gap-3 rounded-[0.95rem] border border-border bg-surface-softer px-3.5 py-3 xl:flex-row xl:items-center xl:justify-between">
         <div className="flex flex-wrap gap-2">
           <Badge>{teams.length} teams</Badge>
           <Badge>{activeTeamCount} active</Badge>
@@ -43,7 +43,7 @@ export function TeamsSummarySection({
             <Badge>{truncateIdentifier(selectedTeam.id, 18)}</Badge>
           ) : null}
           {activeView === "dispatch" ? (
-            <Badge className="border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)] text-[var(--accent-primary)]">
+            <Badge className="border-accent-primary-border bg-accent-primary-soft text-accent-primary">
               dispatch view
             </Badge>
           ) : null}
@@ -56,8 +56,8 @@ export function TeamsSummarySection({
             className={cn(
               "rounded-[0.65rem] border px-2.5 py-1.5 text-base uppercase tracking-[0.12em] transition",
               activeView === "teams"
-                ? "border-[var(--accent-secondary-border)] bg-[var(--accent-secondary-soft)] text-[var(--accent-secondary)]"
-                : "border-[var(--border)] bg-[var(--surface-soft)] text-[var(--muted-foreground)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft-hover)] hover:text-[var(--foreground)]",
+                ? "border-accent-secondary-border bg-accent-secondary-soft text-accent-secondary"
+                : "border-border bg-surface-soft text-muted-foreground hover:border-border-strong hover:bg-surface-soft-hover hover:text-foreground",
             )}
           >
             Teams
@@ -68,8 +68,8 @@ export function TeamsSummarySection({
             className={cn(
               "rounded-[0.65rem] border px-2.5 py-1.5 text-base uppercase tracking-[0.12em] transition",
               activeView === "dispatch"
-                ? "border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)] text-[var(--accent-primary)]"
-                : "border-[var(--border)] bg-[var(--surface-soft)] text-[var(--muted-foreground)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft-hover)] hover:text-[var(--foreground)]",
+                ? "border-accent-primary-border bg-accent-primary-soft text-accent-primary"
+                : "border-border bg-surface-soft text-muted-foreground hover:border-border-strong hover:bg-surface-soft-hover hover:text-foreground",
             )}
           >
             Dispatch
@@ -78,7 +78,7 @@ export function TeamsSummarySection({
             <button
               type="button"
               onClick={onRefresh}
-              className="inline-flex items-center justify-center rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] p-1.5 text-[var(--muted-foreground)] transition hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft-hover)] hover:text-[var(--foreground)]"
+              className="inline-flex items-center justify-center rounded-[0.65rem] border border-border bg-surface-soft p-1.5 text-muted-foreground transition hover:border-border-strong hover:bg-surface-soft-hover hover:text-foreground"
               aria-label="Refresh runtime teams"
             >
               <RefreshCcwIcon
@@ -91,19 +91,19 @@ export function TeamsSummarySection({
       </div>
 
       {error ? (
-        <div className="rounded-[0.9rem] border border-[#f0c77b]/18 bg-[#f0c77b]/8 px-3.5 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
+        <div className="rounded-[0.9rem] border border-[#f0c77b]/18 bg-[#f0c77b]/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
           {error}
         </div>
       ) : null}
 
       {isLoading && teams.length === 0 ? (
-        <div className="rounded-[0.9rem] border border-white/8 bg-white/4 px-3.5 py-3.5 text-sm text-[var(--muted-foreground)]">
+        <div className="rounded-[0.9rem] border border-white/8 bg-white/4 px-3.5 py-3.5 text-sm text-muted-foreground">
           Loading runtime teams...
         </div>
       ) : null}
 
       {!isLoading && teams.length === 0 && !error ? (
-        <div className="rounded-[0.9rem] border border-dashed border-white/10 px-3.5 py-3.5 text-sm text-[var(--muted-foreground)]">
+        <div className="rounded-[0.9rem] border border-dashed border-white/10 px-3.5 py-3.5 text-sm text-muted-foreground">
           No runtime teams available.
         </div>
       ) : null}

@@ -41,7 +41,7 @@ export function connectionTone(
       };
     default:
       return {
-        badgeClassName: "border-[var(--border)] bg-[var(--surface-soft)] text-[var(--muted-foreground)]",
+        badgeClassName: "border-border bg-surface-soft text-muted-foreground",
         icon: <WifiOffIcon size={14} />,
         label: labels.idle,
       };

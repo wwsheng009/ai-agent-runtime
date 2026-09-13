@@ -76,7 +76,7 @@ export function WorkspaceDirectoryAddDialog({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[120] flex items-center justify-center bg-[var(--dialog-backdrop)] px-3 py-4 backdrop-blur-sm"
+      className="fixed inset-0 z-[120] flex items-center justify-center bg-dialog-backdrop px-3 py-4 backdrop-blur-sm"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) {
           onClose();
@@ -87,18 +87,18 @@ export function WorkspaceDirectoryAddDialog({
         role="dialog"
         aria-modal="true"
         aria-label={t("sidebar.directories.addTitle")}
-        className="w-full max-w-md overflow-hidden rounded-[0.9rem] border border-[var(--border)] [background:var(--dialog-bg)] shadow-[0_12px_36px_rgba(0,0,0,0.22)]"
+        className="w-full max-w-md overflow-hidden rounded-[0.9rem] border border-border [background:var(--dialog-bg)] shadow-[0_12px_36px_rgba(0,0,0,0.22)]"
       >
         <form onSubmit={handleSubmit} className="px-4 py-4">
-          <h2 className="text-lg font-semibold tracking-[-0.03em] text-[var(--foreground)]">
+          <h2 className="text-lg font-semibold tracking-[-0.03em] text-foreground">
             {t("sidebar.directories.addTitle")}
           </h2>
-          <p className="mt-1 text-sm leading-6 text-[var(--muted-foreground)]">
+          <p className="mt-1 text-sm leading-6 text-muted-foreground">
             {t("sidebar.directories.addHint")}
           </p>
 
           <label className="mt-4 block">
-            <span className="app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <span className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
               {t("sidebar.directories.pathLabel")}
             </span>
             <input
@@ -108,19 +108,19 @@ export function WorkspaceDirectoryAddDialog({
               onChange={(event) => setPath(event.target.value)}
               placeholder={t("sidebar.directories.pathPlaceholder")}
               spellCheck={false}
-              className="mt-1.5 w-full rounded-[0.7rem] border border-[var(--border)] bg-[var(--surface-solid)] px-3 py-2 text-sm text-[var(--foreground)] outline-none transition focus:border-[var(--accent-primary-border)]"
+              className="mt-1.5 w-full rounded-[0.7rem] border border-border bg-surface-solid px-3 py-2 text-sm text-foreground outline-none transition focus:border-accent-primary-border"
             />
           </label>
 
           <label className="mt-3 block">
-            <span className="app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <span className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
               {t("sidebar.directories.nameLabel")}
             </span>
             <input
               value={name}
               onChange={(event) => setName(event.target.value)}
               placeholder={t("sidebar.directories.namePlaceholder")}
-              className="mt-1.5 w-full rounded-[0.7rem] border border-[var(--border)] bg-[var(--surface-solid)] px-3 py-2 text-sm text-[var(--foreground)] outline-none transition focus:border-[var(--accent-primary-border)]"
+              className="mt-1.5 w-full rounded-[0.7rem] border border-border bg-surface-solid px-3 py-2 text-sm text-foreground outline-none transition focus:border-accent-primary-border"
             />
           </label>
 

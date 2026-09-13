@@ -34,10 +34,10 @@ export function AppearanceFontFamilySection({
         <div className="grid gap-4 xl:grid-cols-2">
           <div className="space-y-4">
             <div>
-              <div className="text-sm font-semibold text-[var(--foreground)]">
+              <div className="text-sm font-semibold text-foreground">
                 {t("appearance.bodyFont")}
               </div>
-              <div className="mt-1 text-sm leading-6 text-[var(--muted-foreground)]">
+              <div className="mt-1 text-sm leading-6 text-muted-foreground">
                 {t("appearance.bodyFontDescription")}
               </div>
             </div>
@@ -60,10 +60,10 @@ export function AppearanceFontFamilySection({
 
           <div className="space-y-4">
             <div>
-              <div className="text-sm font-semibold text-[var(--foreground)]">
+              <div className="text-sm font-semibold text-foreground">
                 {t("appearance.codeFont")}
               </div>
-              <div className="mt-1 text-sm leading-6 text-[var(--muted-foreground)]">
+              <div className="mt-1 text-sm leading-6 text-muted-foreground">
                 {t("appearance.codeFontDescription")}
               </div>
             </div>

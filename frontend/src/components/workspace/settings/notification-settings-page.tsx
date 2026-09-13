@@ -74,7 +74,7 @@ export function NotificationSettingsPage() {
           icon={
             <MonitorSmartphoneIcon
               size={16}
-              className="text-[var(--accent-secondary)]"
+              className="text-accent-secondary"
             />
           }
           description={
@@ -122,14 +122,14 @@ export function NotificationSettingsPage() {
             description={
               <>
                 {t("notifications.currentConfigMasterSwitch")}:{" "}
-                <span className="text-[var(--foreground)]">
+                <span className="text-foreground">
                   {settings.notification.enabled
                     ? t("notifications.enabled")
                     : t("notifications.disabled")}
                 </span>
                 <br />
                 {t("notifications.currentConfigDesktopSwitch")}:{" "}
-                <span className="text-[var(--foreground)]">
+                <span className="text-foreground">
                   {settings.notification.desktop
                     ? t("notifications.enabled")
                     : t("notifications.disabled")}

@@ -77,7 +77,7 @@ const KIND_TEXT_COLORS: Record<TrajectoryItem["kind"], string> = {
   observation: "text-[#a78bfa]",
   subagent: "text-[#a78bfa]",
   result: "text-[#a78bfa]",
-  system: "text-[var(--muted-foreground)]",
+  system: "text-muted-foreground",
 };
 
 const ESTIMATE_ROW_HEIGHT = 34;
@@ -101,24 +101,24 @@ const TrajectoryRow = memo(function TrajectoryRow({
       ref={measure}
       aria-selected={selected}
       className={cn(
-        "flex h-full w-full items-center gap-2.5 border-l-2 px-3 text-left transition hover:bg-[var(--surface-soft)]",
+        "flex h-full w-full items-center gap-2.5 border-l-2 px-3 text-left transition hover:bg-surface-soft",
         selected
-          ? "border-[#8fd0c6] bg-[var(--surface-soft)]"
+          ? "border-[#8fd0c6] bg-surface-soft"
           : "border-transparent",
       )}
       onClick={() => onSelect(item.id)}
       type="button"
     >
       <Icon size={13} className={cn("shrink-0", KIND_TEXT_COLORS[item.kind])} />
-      <span className="shrink-0 font-mono app-text-10 text-[var(--muted-foreground)]">
+      <span className="shrink-0 font-mono app-text-10 text-muted-foreground">
         #{item.seq}
       </span>
-      <span className="w-20 shrink-0 app-text-10 uppercase tracking-[0.1em] text-[var(--muted-foreground)]">
+      <span className="w-20 shrink-0 app-text-10 uppercase tracking-[0.1em] text-muted-foreground">
         {trajectoryItemKindLabel(item.kind)}
       </span>
       <span
         className={cn(
-          "min-w-0 flex-1 truncate app-text-12 text-[var(--foreground)]",
+          "min-w-0 flex-1 truncate app-text-12 text-foreground",
           item.status === "running" && "text-[#8fd0c6]",
         )}
       >
@@ -230,15 +230,15 @@ export function TrajectoryView({
 
   return (
     <div className={cn("flex h-full min-h-0 flex-col", className)}>
-      <div className="flex flex-wrap items-center gap-2 border-b border-[var(--border)] bg-[var(--surface-softer)] px-3 py-2">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface-softer px-3 py-2">
         <div className="relative min-w-0 flex-1 basis-48">
           <SearchIcon
             size={13}
-            className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--muted-foreground)]"
+            className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
           />
           <input
             aria-label="Search trajectory"
-            className="w-full rounded-md border border-[var(--border)] bg-[var(--surface-solid)] py-1.5 pl-7 pr-2.5 app-text-12 text-[var(--foreground)] outline-none transition placeholder:text-[var(--muted-foreground)] focus:border-[#8fd0c6]/45"
+            className="w-full rounded-md border border-border bg-surface-solid py-1.5 pl-7 pr-2.5 app-text-12 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-[#8fd0c6]/45"
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search trajectory…"
             value={query}
@@ -253,7 +253,7 @@ export function TrajectoryView({
                 "rounded-md border px-2.5 py-1 app-text-11 transition",
                 filter === option.id
                   ? "border-[#8fd0c6]/30 bg-[#8fd0c6]/10 text-[#8fd0c6]"
-                  : "border-[var(--border)] bg-[var(--surface-solid)] text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
+                  : "border-border bg-surface-solid text-muted-foreground hover:text-foreground",
               )}
               onClick={() => setFilter(option.id)}
               type="button"
@@ -269,7 +269,7 @@ export function TrajectoryView({
             "rounded-md border p-1.5 transition",
             timelineOpen
               ? "border-[#8fd0c6]/30 bg-[#8fd0c6]/10 text-[#8fd0c6]"
-              : "border-[var(--border)] bg-[var(--surface-solid)] text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
+              : "border-border bg-surface-solid text-muted-foreground hover:text-foreground",
           )}
           onClick={() => setTimelineOpen((current) => !current)}
           title={timelineOpen ? "Hide timeline" : "Show timeline"}
@@ -284,7 +284,7 @@ export function TrajectoryView({
             "rounded-md border p-1.5 transition",
             redactExport
               ? "border-[#8fd0c6]/30 bg-[#8fd0c6]/10 text-[#8fd0c6]"
-              : "border-[var(--border)] bg-[var(--surface-solid)] text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
+              : "border-border bg-surface-solid text-muted-foreground hover:text-foreground",
           )}
           onClick={() => setRedactExport((current) => !current)}
           title={
@@ -301,8 +301,8 @@ export function TrajectoryView({
           className={cn(
             "rounded-md border p-1.5 transition",
             sessionId && !exporting
-              ? "border-[var(--border)] bg-[var(--surface-solid)] text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
-              : "cursor-not-allowed border-[var(--border)] bg-[var(--surface-solid)] text-[var(--muted-foreground)]",
+              ? "border-border bg-surface-solid text-muted-foreground hover:text-foreground"
+              : "cursor-not-allowed border-border bg-surface-solid text-muted-foreground",
           )}
           disabled={!sessionId || exporting}
           onClick={handleExport}
@@ -333,7 +333,7 @@ export function TrajectoryView({
       <div className="flex min-h-0 flex-1">
         <div className="relative min-w-0 flex-1 overflow-hidden">
           {items.length === 0 ? (
-            <div className="flex h-full items-center justify-center px-4 text-center app-text-12 text-[var(--muted-foreground)]">
+            <div className="flex h-full items-center justify-center px-4 text-center app-text-12 text-muted-foreground">
               {snapshot.items.length === 0
                 ? "No trajectory events yet — start a conversation to see the agent run trail."
                 : "No rows match the current filter."}
@@ -375,7 +375,7 @@ export function TrajectoryView({
       </div>
 
       {isLive ? (
-        <div className="flex items-center gap-1.5 border-t border-[var(--border)] bg-[var(--surface-softer)] px-3 py-1 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+        <div className="flex items-center gap-1.5 border-t border-border bg-surface-softer px-3 py-1 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
           <span className="size-1.5 animate-pulse rounded-full bg-[#8fd0c6]" />
           Streaming
         </div>

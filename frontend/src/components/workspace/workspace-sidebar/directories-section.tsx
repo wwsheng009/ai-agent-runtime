@@ -98,7 +98,7 @@ export function WorkspaceSidebarDirectoriesSection({
       <SidebarSection
         id="directories"
         icon={FolderIcon}
-        iconClassName="text-[var(--accent-primary)]"
+        iconClassName="text-accent-primary"
         title={t("sidebar.sections.directories")}
         count={<Badge>{workspaceDirectories.length}</Badge>}
         isOpen={openSections.directories}
@@ -120,18 +120,18 @@ export function WorkspaceSidebarDirectoriesSection({
       >
         <div className="space-y-2">
           {workspaceDirectoriesLoading || workspaceDirectoriesRefreshing ? (
-            <div className="inline-flex items-center gap-1.5 rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-1 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <div className="inline-flex items-center gap-1.5 rounded-[0.65rem] border border-border bg-surface-soft px-2 py-1 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
               <LoaderCircleIcon size={12} className="animate-spin" />
               {t("sidebar.runtimeStats.syncing")}
             </div>
           ) : null}
           {workspaceDirectoriesError ? (
-            <div className="rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-2.5 py-2 text-xs leading-5 text-[var(--muted-foreground)]">
+            <div className="rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-2.5 py-2 text-xs leading-5 text-muted-foreground">
               {workspaceDirectoriesError}
             </div>
           ) : null}
           {sidebarActionError ? (
-            <div className="rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-2.5 py-2 text-xs leading-5 text-[var(--muted-foreground)]">
+            <div className="rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-2.5 py-2 text-xs leading-5 text-muted-foreground">
               {sidebarActionError}
             </div>
           ) : null}
@@ -154,8 +154,8 @@ export function WorkspaceSidebarDirectoriesSection({
                       className={cn(
                         "group/directory-row flex w-full items-center gap-1 rounded-[0.72rem] px-1.5 py-1 transition",
                         group.registered
-                          ? "border border-[var(--border)] bg-[var(--surface-softer)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)]"
-                          : "hover:bg-[var(--surface-softer)]",
+                          ? "border border-border bg-surface-softer hover:border-border-strong hover:bg-surface-soft"
+                          : "hover:bg-surface-softer",
                       )}
                     >
                       <button
@@ -169,16 +169,16 @@ export function WorkspaceSidebarDirectoriesSection({
                           className={cn(
                             "shrink-0",
                             group.registered
-                              ? "text-[var(--accent-primary)]"
-                              : "text-[var(--muted-foreground)]",
+                              ? "text-accent-primary"
+                              : "text-muted-foreground",
                           )}
                         />
                         <span
                           className={cn(
                             "min-w-0 flex-1 truncate text-xs font-medium",
                             group.registered
-                              ? "text-[var(--foreground)]"
-                              : "text-[var(--muted-foreground)]",
+                              ? "text-foreground"
+                              : "text-muted-foreground",
                           )}
                         >
                           {displayLabel}
@@ -194,13 +194,13 @@ export function WorkspaceSidebarDirectoriesSection({
                             <TriangleAlertIcon size={12} />
                           </span>
                         ) : null}
-                        <span className="shrink-0 app-text-10 text-[var(--muted-foreground)]">
+                        <span className="shrink-0 app-text-10 text-muted-foreground">
                           {group.sessions.length}
                         </span>
                         <ChevronDownIcon
                           size={13}
                           className={cn(
-                            "shrink-0 text-[var(--muted-foreground)] transition-transform duration-200",
+                            "shrink-0 text-muted-foreground transition-transform duration-200",
                             isDirectoryOpen ? "rotate-0" : "-rotate-90",
                           )}
                         />
@@ -215,7 +215,7 @@ export function WorkspaceSidebarDirectoriesSection({
                             onClick={() =>
                               void handleCreateSessionInDirectory(group)
                             }
-                            className="rounded-[0.5rem] p-1 text-[var(--muted-foreground)] transition hover:bg-[var(--surface-soft)] hover:text-[var(--foreground)] disabled:opacity-50"
+                            className="rounded-[0.5rem] p-1 text-muted-foreground transition hover:bg-surface-soft hover:text-foreground disabled:opacity-50"
                           >
                             {isCreating ? (
                               <LoaderCircleIcon
@@ -231,7 +231,7 @@ export function WorkspaceSidebarDirectoriesSection({
                             title={t("sidebar.directories.rename")}
                             aria-label={t("sidebar.directories.rename")}
                             onClick={() => startDirectoryRename(group)}
-                            className="rounded-[0.5rem] p-1 text-[var(--muted-foreground)] transition hover:bg-[var(--surface-soft)] hover:text-[var(--foreground)]"
+                            className="rounded-[0.5rem] p-1 text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
                           >
                             <PencilIcon size={12} />
                           </button>
@@ -247,7 +247,7 @@ export function WorkspaceSidebarDirectoriesSection({
                                 sessionCount: group.sessions.length,
                               })
                             }
-                            className="rounded-[0.5rem] p-1 text-[var(--muted-foreground)] transition hover:bg-[var(--surface-soft)] hover:text-[#f59e7d]"
+                            className="rounded-[0.5rem] p-1 text-muted-foreground transition hover:bg-surface-soft hover:text-[#f59e7d]"
                           >
                             <TrashIcon size={12} />
                           </button>
@@ -270,7 +270,7 @@ export function WorkspaceSidebarDirectoriesSection({
                       </div>
                     ) : null}
                     {isDirectoryOpen ? (
-                      <div className="ml-3 space-y-1 border-l border-[var(--border)] pl-2">
+                      <div className="ml-3 space-y-1 border-l border-border pl-2">
                         {group.sessions.map((session) => {
                           const thread =
                             sessionThreadById.get(session.id);
@@ -321,7 +321,7 @@ export function WorkspaceSidebarDirectoriesSection({
                           );
                         })}
                         {group.sessions.length === 0 ? (
-                          <div className="rounded-[0.8rem] border border-dashed border-[var(--border)] px-3 py-2 text-sm leading-6 text-[var(--muted-foreground)]">
+                          <div className="rounded-[0.8rem] border border-dashed border-border px-3 py-2 text-sm leading-6 text-muted-foreground">
                             {t("sidebar.emptySessions.default")}
                           </div>
                         ) : null}
@@ -332,7 +332,7 @@ export function WorkspaceSidebarDirectoriesSection({
               })}
             </div>
           ) : (
-            <div className="rounded-[0.8rem] border border-dashed border-[var(--border)] px-3 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
+            <div className="rounded-[0.8rem] border border-dashed border-border px-3 py-3 text-sm leading-6 text-muted-foreground">
               {t("sidebar.directories.empty")}
             </div>
           )}

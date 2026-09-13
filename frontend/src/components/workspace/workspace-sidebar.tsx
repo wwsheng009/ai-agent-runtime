@@ -315,7 +315,7 @@ export function WorkspaceSidebar({
         aria-modal={mobileOpen ? "true" : undefined}
         aria-label={t("sidebar.navigation")}
         className={cn(
-          "fixed inset-y-0 left-0 z-50 flex h-full w-[min(20rem,calc(100vw-3rem))] min-h-0 flex-col overflow-hidden border-r border-[var(--border)] [background:var(--workspace-sidebar-bg)] shadow-[0_18px_48px_rgba(0,0,0,0.35)] transition-[transform,visibility] duration-200 xl:visible xl:static xl:z-auto xl:w-auto xl:translate-x-0 xl:shadow-none",
+          "fixed inset-y-0 left-0 z-50 flex h-full w-[min(20rem,calc(100vw-3rem))] min-h-0 flex-col overflow-hidden border-r border-border [background:var(--workspace-sidebar-bg)] shadow-[0_18px_48px_rgba(0,0,0,0.35)] transition-[transform,visibility] duration-200 xl:visible xl:static xl:z-auto xl:w-auto xl:translate-x-0 xl:shadow-none",
           mobileOpen
             ? "visible translate-x-0"
             : "invisible -translate-x-full",

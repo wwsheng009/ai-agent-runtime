@@ -44,7 +44,7 @@ export function levelTone(level?: string) {
     case "info":
       return "border-emerald-500/30 bg-emerald-500/10 text-emerald-200";
     default:
-      return "border-[var(--border)] bg-[var(--surface-soft)] text-[var(--muted-foreground)]";
+      return "border-border bg-surface-soft text-muted-foreground";
   }
 }
 
@@ -65,7 +65,7 @@ export function levelShortLabel(level?: string) {
 
 export function levelStatTone(level: RuntimeLogLevelKey) {
   if (level === "other") {
-    return "border-[var(--border)] bg-black/10 text-[var(--muted-foreground)]";
+    return "border-border bg-black/10 text-muted-foreground";
   }
   return levelTone(level);
 }

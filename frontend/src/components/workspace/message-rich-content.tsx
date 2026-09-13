@@ -67,7 +67,7 @@ export function MessageRichSegment({
           "mt-2 overflow-hidden rounded-[0.85rem] border p-3",
           isFailed
             ? "border-[#f0c77b]/16 bg-[linear-gradient(180deg,rgba(240,199,123,0.08),rgba(240,199,123,0.03))]"
-            : "border-[var(--border)] bg-[var(--surface-softer)]",
+            : "border-border bg-surface-softer",
         )}
         role="status"
       >
@@ -88,19 +88,19 @@ export function MessageRichSegment({
           </div>
           <div className="min-w-0 flex-1">
             <div
-              className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]"
+              className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground"
               id={titleId}
             >
               {phaseLabel}
             </div>
             <div
-              className="mt-1.5 app-text-13 font-semibold text-[var(--foreground)]"
+              className="mt-1.5 app-text-13 font-semibold text-foreground"
               id={descriptionId}
             >
               {segment.caption || "等待生成结果写入会话。"}
             </div>
             {progress !== null ? (
-              <div className="mt-2.5 h-2 overflow-hidden rounded-full bg-[var(--surface-soft)]">
+              <div className="mt-2.5 h-2 overflow-hidden rounded-full bg-surface-soft">
                 <div
                   className={cn(
                     "h-full rounded-full transition-[width] duration-300",
@@ -112,7 +112,7 @@ export function MessageRichSegment({
                 />
               </div>
             ) : (
-              <div className="mt-2.5 h-2 overflow-hidden rounded-full bg-[var(--surface-soft)]">
+              <div className="mt-2.5 h-2 overflow-hidden rounded-full bg-surface-soft">
                 <div className="h-full w-1/3 animate-pulse rounded-full bg-[linear-gradient(90deg,rgba(143,208,198,0.15),rgba(240,199,123,0.35),rgba(143,208,198,0.15))]" />
               </div>
             )}
@@ -131,7 +131,7 @@ export function MessageRichSegment({
     const isClickable = Boolean(segment.artifactId && onSelectArtifact);
 
     return (
-      <figure className="mt-2 overflow-hidden rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)]">
+      <figure className="mt-2 overflow-hidden rounded-[0.8rem] border border-border bg-surface-softer">
         <button
           type="button"
           onClick={() => {
@@ -150,7 +150,7 @@ export function MessageRichSegment({
           />
         </button>
         {segment.caption ? (
-          <figcaption className="px-3 py-2 app-text-11 text-[var(--muted-foreground)]">
+          <figcaption className="px-3 py-2 app-text-11 text-muted-foreground">
             {segment.caption}
           </figcaption>
         ) : null}
@@ -173,10 +173,10 @@ export function MessageRichSegment({
     return (
       <section
         aria-labelledby={titleId}
-        className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3"
+        className="rounded-[0.8rem] border border-border bg-surface-softer p-3"
       >
         <div
-          className="mb-2 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]"
+          className="mb-2 app-text-10 uppercase tracking-[0.14em] text-muted-foreground"
           id={titleId}
         >
           {segment.title}
@@ -185,17 +185,17 @@ export function MessageRichSegment({
           {segment.items.map((item) => (
             <div
               key={`${segment.title}-${item.label}`}
-              className="rounded-[0.7rem] border border-[var(--border)] bg-[var(--surface-solid)] px-3 py-2.5"
+              className="rounded-[0.7rem] border border-border bg-surface-solid px-3 py-2.5"
             >
-              <dt className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+              <dt className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                 {item.label}
               </dt>
               <dd
                 className={cn(
-                  "app-chat-copy mt-1.5 font-semibold text-[var(--foreground)]",
+                  "app-chat-copy mt-1.5 font-semibold text-foreground",
                   item.tone === "accent" && "text-[#8fd0c6]",
                   item.tone === "warning" && "text-[#f0c77b]",
-                  item.tone === "muted" && "text-[var(--muted-foreground)]",
+                  item.tone === "muted" && "text-muted-foreground",
                 )}
               >
                 {item.value}
@@ -211,10 +211,10 @@ export function MessageRichSegment({
     return (
       <section
         aria-labelledby={titleId}
-        className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3"
+        className="rounded-[0.8rem] border border-border bg-surface-softer p-3"
       >
         <div
-          className="mb-2 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]"
+          className="mb-2 app-text-10 uppercase tracking-[0.14em] text-muted-foreground"
           id={titleId}
         >
           {segment.title}
@@ -223,7 +223,7 @@ export function MessageRichSegment({
           {segment.items.map((item) => (
             <li
               key={`${segment.title}-${item}`}
-              className="app-chat-copy flex items-start gap-3 text-[var(--foreground)]"
+              className="app-chat-copy flex items-start gap-3 text-foreground"
             >
               <span className="mt-0.5 inline-flex size-[1.125rem] shrink-0 items-center justify-center rounded-[0.65rem] border border-[#8fd0c6]/20 bg-[#8fd0c6]/10 text-[#8fd0c6]">
                 <CheckIcon size={12} />
@@ -252,9 +252,9 @@ export function MessageRichSegment({
             Icon: CheckIcon,
           }
         : {
-            wrapper: "border-[var(--border)] bg-[var(--surface-softer)]",
+            wrapper: "border-border bg-surface-softer",
             iconClass:
-              "border-[var(--border)] bg-[var(--surface-soft)] text-[var(--foreground)]",
+              "border-border bg-surface-soft text-foreground",
             Icon: InfoIcon,
           };
 
@@ -278,7 +278,7 @@ export function MessageRichSegment({
       </div>
       <div className="min-w-0">
         <div
-          className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]"
+          className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground"
           id={titleId}
         >
           {segment.title}
@@ -309,7 +309,7 @@ export function MessageRelatedArtifacts({
     <section
       aria-describedby={descriptionId}
       aria-labelledby={titleId}
-      className="mt-3 rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3"
+      className="mt-3 rounded-[0.8rem] border border-border bg-surface-softer p-3"
     >
       <button
         type="button"
@@ -321,20 +321,20 @@ export function MessageRelatedArtifacts({
       >
         <div className="min-w-0">
           <div
-            className="flex items-center gap-2 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]"
+            className="flex items-center gap-2 app-text-10 uppercase tracking-[0.14em] text-muted-foreground"
             id={titleId}
           >
             <PaperclipIcon size={14} />
             Related evidence
           </div>
-          <div className="mt-1 app-text-11 text-[var(--muted-foreground)]">
+          <div className="mt-1 app-text-11 text-muted-foreground">
             {summary}
           </div>
         </div>
         <ChevronDownIcon
           size={16}
           className={cn(
-            "shrink-0 text-[var(--muted-foreground)] transition-transform duration-200",
+            "shrink-0 text-muted-foreground transition-transform duration-200",
             open ? "rotate-0" : "-rotate-90",
           )}
         />
@@ -351,14 +351,14 @@ export function MessageRelatedArtifacts({
                   aria-describedby={`${baseId}-${artifact.id}-summary`}
                   type="button"
                   onClick={() => onSelectArtifact(artifact.id)}
-                  className="flex w-full items-center justify-between gap-3 rounded-[0.7rem] border border-[var(--border)] bg-transparent px-3 py-2.5 text-left transition hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)]"
+                  className="flex w-full items-center justify-between gap-3 rounded-[0.7rem] border border-border bg-transparent px-3 py-2.5 text-left transition hover:border-border-strong hover:bg-surface-soft"
                 >
                   <div className="min-w-0">
-                    <div className="truncate app-text-13 font-semibold text-[var(--foreground)]">
+                    <div className="truncate app-text-13 font-semibold text-foreground">
                       {artifact.name}
                     </div>
                     <div
-                      className="truncate app-text-11 text-[var(--muted-foreground)]"
+                      className="truncate app-text-11 text-muted-foreground"
                       id={`${baseId}-${artifact.id}-summary`}
                     >
                       {artifact.summary}
@@ -366,7 +366,7 @@ export function MessageRelatedArtifacts({
                   </div>
                   <ArrowUpRightIcon
                     size={14}
-                    className="shrink-0 text-[var(--muted-foreground)]"
+                    className="shrink-0 text-muted-foreground"
                   />
                 </button>
               </li>

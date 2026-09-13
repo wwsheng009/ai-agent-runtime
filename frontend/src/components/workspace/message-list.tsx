@@ -155,14 +155,14 @@ export function MessageList({
         role="log"
       >
         {messages.length === 0 ? (
-          <div className="rounded-[0.95rem] border border-dashed border-[var(--border)] bg-[var(--surface-softer)] px-4 py-8 text-center">
+          <div className="rounded-[0.95rem] border border-dashed border-border bg-surface-softer px-4 py-8 text-center">
             <div className="mx-auto inline-flex size-10 items-center justify-center rounded-[0.8rem] border border-[#8fd0c6]/18 bg-[#8fd0c6]/10 text-[#8fd0c6]">
               <ScrollTextIcon size={18} />
             </div>
-            <div className="mt-3 text-sm font-semibold text-[var(--foreground)]">
+            <div className="mt-3 text-sm font-semibold text-foreground">
               The thread timeline is empty
             </div>
-            <p className="mt-2 text-sm leading-6 text-[var(--muted-foreground)]">
+            <p className="mt-2 text-sm leading-6 text-muted-foreground">
               Start a turn to populate the workspace timeline. Runtime evidence,
               related items, and streamed output will attach back to the
               messages that produced them.
@@ -171,20 +171,20 @@ export function MessageList({
         ) : null}
 
         {backtrackNavigationActive ? (
-          <div className="rounded-[0.85rem] border border-[#f0c77b]/20 bg-[#f0c77b]/8 px-3.5 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
+          <div className="rounded-[0.85rem] border border-[#f0c77b]/20 bg-[#f0c77b]/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
             Backtrack navigation active — use ↑/↓ (or j/k) to choose a user turn,
             Enter to open the confirm dialog, Esc to exit.
           </div>
         ) : null}
 
         {backtrackError ? (
-          <div className="rounded-[0.85rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3.5 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
+          <div className="rounded-[0.85rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
             {backtrackError}
           </div>
         ) : null}
 
         {backtrackNotice ? (
-          <div className="rounded-[0.85rem] border border-[#8fd0c6]/18 bg-[#8fd0c6]/10 px-3.5 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
+          <div className="rounded-[0.85rem] border border-[#8fd0c6]/18 bg-[#8fd0c6]/10 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
             {backtrackNotice}
           </div>
         ) : null}
@@ -278,7 +278,7 @@ export function MessageList({
           <div
             aria-atomic="true"
             aria-live="polite"
-            className="inline-flex items-center gap-2 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]"
+            className="inline-flex items-center gap-2 app-text-10 uppercase tracking-[0.14em] text-muted-foreground"
             role="status"
           >
             <span className="size-2 rounded-full animate-pulse bg-[#8fd0c6]" />

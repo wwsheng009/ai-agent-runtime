@@ -52,13 +52,13 @@ export function Hero() {
           </div>
           <h1 className="section-title mt-7 max-w-4xl">
             {t("hero.titlePrefix")}{" "}
-            <span className="text-[var(--accent-primary)]">
+            <span className="text-accent-primary">
               {rotatingWords[index]}
             </span>
             <br />
             {t("hero.titleSuffix")}
           </h1>
-          <p className="mt-6 max-w-3xl text-lg leading-8 text-[var(--muted-foreground)] md:text-xl">
+          <p className="mt-6 max-w-3xl text-lg leading-8 text-muted-foreground md:text-xl">
             {t("hero.body")}
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-3">
@@ -77,39 +77,39 @@ export function Hero() {
             </a>
           </div>
           <div className="mt-10 grid max-w-4xl gap-4 sm:grid-cols-3">
-            <div className="rounded-[1.5rem] border border-[var(--border)] bg-[var(--surface-soft)] p-4">
-              <div className="flex items-center gap-2 text-sm font-semibold text-[var(--accent-primary)]">
+            <div className="rounded-[1.5rem] border border-border bg-surface-soft p-4">
+              <div className="flex items-center gap-2 text-sm font-semibold text-accent-primary">
                 <CompassIcon size={16} />
                 {t("hero.unifiedFlowTitle")}
               </div>
-              <p className="mt-3 text-sm leading-7 text-[var(--muted-foreground)]">
+              <p className="mt-3 text-sm leading-7 text-muted-foreground">
                 {t("hero.unifiedFlowBody")}
               </p>
             </div>
-            <div className="rounded-[1.5rem] border border-[var(--border)] bg-[var(--surface-soft)] p-4">
-              <div className="flex items-center gap-2 text-sm font-semibold text-[var(--accent-secondary)]">
+            <div className="rounded-[1.5rem] border border-border bg-surface-soft p-4">
+              <div className="flex items-center gap-2 text-sm font-semibold text-accent-secondary">
                 <GitBranchPlusIcon size={16} />
                 {t("hero.teamReadyTitle")}
               </div>
-              <p className="mt-3 text-sm leading-7 text-[var(--muted-foreground)]">
+              <p className="mt-3 text-sm leading-7 text-muted-foreground">
                 {t("hero.teamReadyBody")}
               </p>
             </div>
-            <div className="rounded-[1.5rem] border border-[var(--border)] bg-[var(--surface-soft)] p-4">
-              <div className="flex items-center gap-2 text-sm font-semibold text-[var(--accent-primary)]">
+            <div className="rounded-[1.5rem] border border-border bg-surface-soft p-4">
+              <div className="flex items-center gap-2 text-sm font-semibold text-accent-primary">
                 <ArrowRightIcon size={16} />
                 {t("hero.verifiableOutputTitle")}
               </div>
-              <p className="mt-3 text-sm leading-7 text-[var(--muted-foreground)]">
+              <p className="mt-3 text-sm leading-7 text-muted-foreground">
                 {t("hero.verifiableOutputBody")}
               </p>
             </div>
           </div>
         </div>
 
-        <Card className="relative overflow-hidden rounded-[2rem] border-[var(--border)] bg-[var(--panel-strong-bg)] p-0">
-          <div className="border-b border-[var(--border)] px-6 py-5">
-            <div className="eyebrow border-[var(--border)] bg-[var(--surface-soft)] text-[var(--foreground)]">
+        <Card className="relative overflow-hidden rounded-[2rem] border-border bg-panel-strong-bg p-0">
+          <div className="border-b border-border px-6 py-5">
+            <div className="eyebrow border-border bg-surface-soft text-foreground">
               {t("hero.snapshotEyebrow")}
             </div>
             <CardTitle className="mt-4 text-2xl">{t("hero.snapshotTitle")}</CardTitle>
@@ -118,30 +118,30 @@ export function Hero() {
             </CardDescription>
           </div>
           <div className="grid gap-4 p-6">
-            <div className="rounded-[1.5rem] border border-[var(--border)] bg-[var(--panel-strong-bg)] p-4">
+            <div className="rounded-[1.5rem] border border-border bg-panel-strong-bg p-4">
               <div className="flex items-center gap-3">
-                <SparklesIcon className="text-[var(--accent-primary)]" size={18} />
+                <SparklesIcon className="text-accent-primary" size={18} />
                 <div className="text-sm font-semibold">{t("hero.productSiteTitle")}</div>
               </div>
-              <p className="mt-3 text-sm leading-7 text-[var(--muted-foreground)]">
+              <p className="mt-3 text-sm leading-7 text-muted-foreground">
                 {t("hero.productSiteBody")}
               </p>
             </div>
-            <div className="rounded-[1.5rem] border border-[var(--border)] bg-[var(--panel-strong-bg)] p-4">
+            <div className="rounded-[1.5rem] border border-border bg-panel-strong-bg p-4">
               <div className="flex items-center gap-3">
-                <CompassIcon className="text-[var(--accent-secondary)]" size={18} />
+                <CompassIcon className="text-accent-secondary" size={18} />
                 <div className="text-sm font-semibold">{t("hero.workspaceEntryTitle")}</div>
               </div>
-              <p className="mt-3 text-sm leading-7 text-[var(--muted-foreground)]">
+              <p className="mt-3 text-sm leading-7 text-muted-foreground">
                 {t("hero.workspaceEntryBody")}
               </p>
             </div>
-            <div className="rounded-[1.5rem] border border-[var(--border)] bg-[var(--panel-strong-bg)] p-4">
+            <div className="rounded-[1.5rem] border border-border bg-panel-strong-bg p-4">
               <div className="flex items-center gap-3">
-                <GitBranchPlusIcon className="text-[var(--accent-primary)]" size={18} />
+                <GitBranchPlusIcon className="text-accent-primary" size={18} />
                 <div className="text-sm font-semibold">{t("hero.runtimeEvidenceTitle")}</div>
               </div>
-              <div className="app-terminal-copy mt-3 space-y-2 text-[var(--muted-foreground)]">
+              <div className="app-terminal-copy mt-3 space-y-2 text-muted-foreground">
                 <div>{t("hero.runtimeEvidenceBody1")}</div>
                 <div>{t("hero.runtimeEvidenceBody2")}</div>
                 <div>{t("hero.runtimeEvidenceBody3")}</div>

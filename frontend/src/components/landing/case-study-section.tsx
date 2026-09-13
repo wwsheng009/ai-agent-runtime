@@ -74,7 +74,7 @@ export function CaseStudySection() {
           <Link
             key={title}
             to="/workspace"
-            className="group relative overflow-hidden rounded-[1.8rem] border border-[var(--border)] bg-[var(--panel-solid-bg)] p-6 transition hover:-translate-y-1 hover:border-[var(--border-strong)] hover:bg-[var(--panel-solid-hover-bg)]"
+            className="group relative overflow-hidden rounded-[1.8rem] border border-border bg-[var(--panel-solid-bg)] p-6 transition hover:-translate-y-1 hover:border-border-strong hover:bg-[var(--panel-solid-hover-bg)]"
           >
             <div
               className={cn(
@@ -84,20 +84,20 @@ export function CaseStudySection() {
             />
             <div className="relative z-10 flex h-full min-h-64 flex-col justify-between">
               <div className="flex items-center justify-between gap-3">
-                <span className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--panel-strong-bg)] px-3 py-1 app-text-11 uppercase tracking-[0.18em] text-[var(--accent-secondary)]">
+                <span className="inline-flex items-center gap-2 rounded-full border border-border bg-panel-strong-bg px-3 py-1 app-text-11 uppercase tracking-[0.18em] text-accent-secondary">
                   <Icon size={14} />
                   {label}
                 </span>
                 <ArrowUpRightIcon
                   size={16}
-                  className="text-[var(--muted-foreground)] transition group-hover:text-[var(--foreground)]"
+                  className="text-muted-foreground transition group-hover:text-foreground"
                 />
               </div>
               <div className="mt-12">
                 <CardTitle className="text-2xl leading-tight sm:text-[1.75rem]">
                   {title}
                 </CardTitle>
-                <p className="mt-4 text-sm leading-7 text-[var(--muted-foreground)]">
+                <p className="mt-4 text-sm leading-7 text-muted-foreground">
                   {description}
                 </p>
               </div>
@@ -105,7 +105,7 @@ export function CaseStudySection() {
                 <span
                   className={cn(
                     buttonVariants({ variant: "secondary", size: "sm" }),
-                    "border-[var(--border)] bg-[var(--panel-strong-bg)] hover:bg-[var(--surface-soft-hover)]",
+                    "border-border bg-panel-strong-bg hover:bg-surface-soft-hover",
                   )}
                 >
                   {t("caseStudy.exploreInWorkspace")}

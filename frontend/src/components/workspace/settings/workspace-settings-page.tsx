@@ -47,11 +47,11 @@ export function WorkspaceSettingsPage() {
                   <PanelIcon>
                     <Rows4Icon size={16} />
                   </PanelIcon>
-                  <div className="text-base font-semibold text-[var(--foreground)]">
+                  <div className="text-base font-semibold text-foreground">
                     {option.label}
                   </div>
                 </div>
-                <p className="mt-2 text-base leading-6 text-[var(--muted-foreground)]">
+                <p className="mt-2 text-base leading-6 text-muted-foreground">
                   {option.description}
                 </p>
               </SettingsChoiceCard>
@@ -74,7 +74,7 @@ export function WorkspaceSettingsPage() {
           title={t("workspace.autoOpenArtifacts")}
           description={t("workspace.autoOpenArtifactsDescription")}
           icon={<PanelRightOpenIcon size={16} />}
-          iconWrapperClassName="text-[var(--accent-secondary)]"
+          iconWrapperClassName="text-accent-secondary"
         />
       </SettingsSection>
     </div>

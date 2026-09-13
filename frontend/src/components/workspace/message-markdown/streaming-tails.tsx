@@ -19,7 +19,7 @@ export function renderStreamingStructuredTail(
     return (
       <blockquote
         className={cn(
-          "rounded-r-[0.8rem] border-l-2 border-[var(--accent-secondary)]/45 bg-[var(--surface-solid)] px-4 py-2.5 text-[var(--muted-foreground)]",
+          "rounded-r-[0.8rem] border-l-2 border-accent-secondary/45 bg-surface-solid px-4 py-2.5 text-muted-foreground",
           className,
         )}
       >
@@ -41,8 +41,8 @@ export function renderStreamingStructuredTail(
       <ListTag
         className={cn(
           tail.ordered
-            ? "list-decimal space-y-2 pl-6 marker:text-[var(--muted-foreground)]"
-            : "list-disc space-y-2 pl-6 marker:text-[var(--accent-secondary)]",
+            ? "list-decimal space-y-2 pl-6 marker:text-muted-foreground"
+            : "list-disc space-y-2 pl-6 marker:text-accent-secondary",
           className,
         )}
         start={tail.ordered && tail.start ? tail.start : undefined}
@@ -61,7 +61,7 @@ export function renderStreamingStructuredTail(
   return (
     <div
       className={cn(
-        "overflow-x-auto rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-solid)]",
+        "overflow-x-auto rounded-[0.8rem] border border-border bg-surface-solid",
         className,
       )}
     >
@@ -99,7 +99,7 @@ export function renderStreamingPlainTail(
   return (
     <p
       className={cn(
-        "whitespace-pre-wrap break-words text-[var(--foreground)]",
+        "whitespace-pre-wrap break-words text-foreground",
         className,
       )}
       data-streaming-mode={tail.mode}

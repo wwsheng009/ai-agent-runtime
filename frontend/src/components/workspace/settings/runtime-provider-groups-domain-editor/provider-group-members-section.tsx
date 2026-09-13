@@ -122,13 +122,13 @@ export function ProviderGroupMembersSection({
 
   return (
     <>
-          <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+          <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <div className="text-[13px] font-semibold text-[var(--foreground)]">
+                <div className="text-[13px] font-semibold text-foreground">
                   {t("editor.providerGroups.sections.members")}
                 </div>
-                <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-1 text-xs text-muted-foreground">
                   {t("editor.providerGroups.sections.membersHelp")}
                 </div>
               </div>
@@ -264,20 +264,20 @@ export function ProviderGroupMembersSection({
             <div className="mt-3 overflow-auto">
               <table className="min-w-full border-collapse">
                 <thead>
-                  <tr className="border-b border-[var(--border)] bg-[var(--surface-solid)] text-left">
-                    <th className="px-3 py-2 app-text-11 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
+                  <tr className="border-b border-border bg-surface-solid text-left">
+                    <th className="px-3 py-2 app-text-11 uppercase tracking-[0.12em] text-muted-foreground">
                       Provider
                     </th>
-                    <th className="px-3 py-2 app-text-11 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
+                    <th className="px-3 py-2 app-text-11 uppercase tracking-[0.12em] text-muted-foreground">
                       Role
                     </th>
-                    <th className="px-3 py-2 app-text-11 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
+                    <th className="px-3 py-2 app-text-11 uppercase tracking-[0.12em] text-muted-foreground">
                       Weight
                     </th>
-                    <th className="px-3 py-2 app-text-11 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
+                    <th className="px-3 py-2 app-text-11 uppercase tracking-[0.12em] text-muted-foreground">
                       Enabled
                     </th>
-                    <th className="px-3 py-2 text-right app-text-11 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
+                    <th className="px-3 py-2 text-right app-text-11 uppercase tracking-[0.12em] text-muted-foreground">
                       {t("editor.providerGroups.columns.actions")}
                     </th>
                   </tr>
@@ -286,7 +286,7 @@ export function ProviderGroupMembersSection({
                   {draft.members.map((member, index) => (
                     <tr
                       key={`${member.name || "member"}-${index}`}
-                      className="border-b border-[var(--border)]/70 align-top last:border-b-0"
+                      className="border-b border-border/70 align-top last:border-b-0"
                     >
                       <td className="px-3 py-2.5">
                         <Select
@@ -323,7 +323,7 @@ export function ProviderGroupMembersSection({
                           className={`mt-1 text-xs ${
                             member.name.trim() && !providerLookup.get(member.name)
                               ? "text-[#f5c7b8]"
-                              : "text-[var(--muted-foreground)]"
+                              : "text-muted-foreground"
                           }`}
                         >
                           {describeMemberProviderHint(
@@ -377,10 +377,10 @@ export function ProviderGroupMembersSection({
                         />
                       </td>
                       <td className="px-3 py-2.5">
-                        <label className="inline-flex items-center gap-2 text-sm text-[var(--foreground)]">
+                        <label className="inline-flex items-center gap-2 text-sm text-foreground">
                           <input
                             type="checkbox"
-                            className="h-4 w-4 accent-[var(--accent-primary)]"
+                            className="h-4 w-4 accent-accent-primary"
                             checked={member.enabled}
                             onChange={(event) =>
                               updateDraftMember(index, { enabled: event.target.checked })

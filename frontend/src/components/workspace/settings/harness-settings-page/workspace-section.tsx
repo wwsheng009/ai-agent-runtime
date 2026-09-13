@@ -39,7 +39,7 @@ export function HarnessWorkspaceSection({
           icon={
             <FolderLockIcon
               size={16}
-              className="text-[var(--accent-primary)]"
+              className="text-accent-primary"
             />
           }
           description={workspacePath || t("harness.workspaceMissing")}
@@ -64,7 +64,7 @@ export function HarnessWorkspaceSection({
           }
         >
           {displayError ? (
-            <div className="rounded-[0.75rem] border border-[var(--danger-border,var(--border))] bg-[var(--surface-solid)] px-3 py-2 text-sm leading-6 text-[var(--danger,var(--foreground))]">
+            <div className="rounded-[0.75rem] border border-[var(--danger-border,var(--border))] bg-surface-solid px-3 py-2 text-sm leading-6 text-[var(--danger,var(--foreground))]">
               {displayError}
             </div>
           ) : null}

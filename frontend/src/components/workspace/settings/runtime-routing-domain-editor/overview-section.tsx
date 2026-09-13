@@ -32,17 +32,17 @@ export function RuntimeRoutingOverviewSection({
   t: TFunction<"runtimeConfig">;
 }) {
   return (
-      <div className="rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+      <div className="rounded-[0.9rem] border border-border bg-surface-softer p-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             <SettingsPanelIcon>
               <GitBranchPlusIcon size={15} />
             </SettingsPanelIcon>
             <div>
-              <div className="text-base font-semibold text-[var(--foreground)]">
+              <div className="text-base font-semibold text-foreground">
                 {t("editor.routing.title")}
               </div>
-              <div className="mt-1 text-sm text-[var(--muted-foreground)]">
+              <div className="mt-1 text-sm text-muted-foreground">
                 {t("editor.routing.description")}
               </div>
             </div>
@@ -80,9 +80,9 @@ export function RuntimeRoutingOverviewSection({
             />
           </ConfigFormField>
 
-          <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
-            <div className="text-[13px] font-semibold text-[var(--foreground)]">routing.failover</div>
-            <div className="mt-1 text-xs leading-5 text-[var(--muted-foreground)]">
+          <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
+            <div className="text-[13px] font-semibold text-foreground">routing.failover</div>
+            <div className="mt-1 text-xs leading-5 text-muted-foreground">
               {t("editor.routing.failoverHelp")}
             </div>
             <label className={`mt-3 ${editorToggleRowClassName}`}>
@@ -93,7 +93,7 @@ export function RuntimeRoutingOverviewSection({
               </span>
               <input
                 type="checkbox"
-                className="h-4 w-4 accent-[var(--accent-primary)]"
+                className="h-4 w-4 accent-accent-primary"
                 checked={routeConfig.failover}
                 onChange={(event) =>
                   onChangeConfig({

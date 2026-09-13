@@ -89,7 +89,7 @@ function ArtifactList({
                       ? "border-[#8fd0c6]/18 bg-[#8fd0c6]/10 text-[#8fd0c6]"
                       : isActive
                         ? "border-[#f0c77b]/25 bg-[#f0c77b]/12 text-[#f0c77b]"
-                        : "border-white/10 bg-black/20 text-[var(--muted-foreground)]",
+                        : "border-white/10 bg-black/20 text-muted-foreground",
                   )}
                 >
                   <Icon size={16} />
@@ -101,25 +101,25 @@ function ArtifactList({
                     <div className="truncate app-text-12 font-semibold leading-5">
                       {artifact.name}
                     </div>
-                    <div className="mt-0.5 truncate app-text-11 text-[var(--muted-foreground)]">
+                    <div className="mt-0.5 truncate app-text-11 text-muted-foreground">
                       {artifact.kind === "image" && artifact.byteCount != null
                         ? formatBytes(artifact.byteCount)
                         : artifact.summary}
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
-                    <span className="rounded-[0.5rem] border border-white/10 bg-black/20 px-1 py-0.5 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                    <span className="rounded-[0.5rem] border border-white/10 bg-black/20 px-1 py-0.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                       {category === "evidence" ? "ev" : "file"}
                     </span>
-                    <span className="rounded-[0.5rem] border border-white/10 bg-black/20 px-1 py-0.5 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                    <span className="rounded-[0.5rem] border border-white/10 bg-black/20 px-1 py-0.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                       {artifact.kind}
                     </span>
                     {artifact.kind === "image" && artifact.byteCount != null ? (
-                      <span className="rounded-[0.5rem] border border-white/10 bg-black/20 px-1 py-0.5 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                      <span className="rounded-[0.5rem] border border-white/10 bg-black/20 px-1 py-0.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                         {formatBytes(artifact.byteCount)}
                       </span>
                     ) : artifact.previewHtml ? (
-                      <span className="inline-flex h-4 w-4 items-center justify-center rounded-[0.45rem] border border-white/10 bg-black/20 text-[var(--muted-foreground)]">
+                      <span className="inline-flex h-4 w-4 items-center justify-center rounded-[0.45rem] border border-white/10 bg-black/20 text-muted-foreground">
                         <SparklesIcon size={8} />
                       </span>
                     ) : null}
@@ -156,7 +156,7 @@ export function ArtifactPanelArtifactSurface({
               selectedArtifactId={selectedArtifactId}
             />
           ) : (
-            <div className="flex h-full items-center justify-center rounded-[0.8rem] border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-[var(--muted-foreground)]">
+            <div className="flex h-full items-center justify-center rounded-[0.8rem] border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-muted-foreground">
               Artifacts appear here as the thread runs.
             </div>
           )}

@@ -73,11 +73,11 @@ export function RuntimeRoutingRoutesTable({
               <div className="min-w-[14rem]">
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge>{`#${route.index + 1}`}</Badge>
-                  <div className="font-semibold text-[var(--foreground)]">
+                  <div className="font-semibold text-foreground">
                     {route.matchPath || "--"}
                   </div>
                 </div>
-                <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-1 text-xs text-muted-foreground">
                   {route.matchType || "prefix"}
                 </div>
               </div>
@@ -88,7 +88,7 @@ export function RuntimeRoutingRoutesTable({
             cell: (route) => (
               <div className="min-w-[12rem]">
                 <div>{route.group || "--"}</div>
-                <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-1 text-xs text-muted-foreground">
                   {route.pipeline
                     ? `pipeline ${route.pipeline}`
                     : route.protocol || t("editor.routing.routes.noProtocol")}
@@ -101,7 +101,7 @@ export function RuntimeRoutingRoutesTable({
             cell: (route) => (
               <div className="min-w-[14rem]">
                 <div>{route.matchModels.length > 0 ? route.matchModels.join(", ") : "--"}</div>
-                <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-1 text-xs text-muted-foreground">
                   {route.excludeModels.length > 0
                     ? `exclude ${route.excludeModels.join(", ")}`
                     : t("editor.routing.routes.noExclusions")}
@@ -114,7 +114,7 @@ export function RuntimeRoutingRoutesTable({
             cell: (route) => (
               <div className="min-w-[12rem]">
                 <div>{route.priority ? `priority ${route.priority}` : "--"}</div>
-                <div className="mt-1 flex flex-wrap gap-2 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-1 flex flex-wrap gap-2 text-xs text-muted-foreground">
                   {route.pipeline ? <span>{`pipeline ${route.pipeline}`}</span> : null}
                   {route.extraFieldCount > 0 ? (
                     <span>

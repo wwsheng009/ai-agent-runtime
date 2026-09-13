@@ -58,7 +58,7 @@ export function MessageSegmentFallback({
     <div
       aria-atomic="true"
       aria-live="polite"
-      className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] px-3 py-3 text-sm text-[var(--muted-foreground)]"
+      className="rounded-[0.8rem] border border-border bg-surface-softer px-3 py-3 text-sm text-muted-foreground"
       role="status"
     >
       正在加载 {label}…
@@ -71,7 +71,7 @@ export function RelatedArtifactsFallback({ count }: { count: number }) {
     <div
       aria-atomic="true"
       aria-live="polite"
-      className="mt-3 rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] px-3 py-3 text-sm text-[var(--muted-foreground)]"
+      className="mt-3 rounded-[0.8rem] border border-border bg-surface-softer px-3 py-3 text-sm text-muted-foreground"
       role="status"
     >
       正在加载 {count} 条相关证据…

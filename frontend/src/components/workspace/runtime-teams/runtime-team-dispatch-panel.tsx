@@ -106,10 +106,10 @@ export function RuntimeTeamDispatchPanel({
     <div className="rounded-[0.95rem] border border-white/8 bg-white/[0.035] p-3.5">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="text-sm font-semibold text-[var(--foreground)]">
+          <div className="text-sm font-semibold text-foreground">
             Multi-team next task
           </div>
-          <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+          <div className="mt-1 text-xs text-muted-foreground">
             Create one ready task across multiple active teams so their orchestrators can
             run in parallel.
           </div>

@@ -40,9 +40,9 @@ export function RoutingPreviewSection({
 }) {
   return (
     <>
-      <div className="border-t border-[var(--border)] pt-3">
-        <div className="flex items-center gap-2 font-semibold text-[var(--foreground)]">
-          <RouteIcon size={16} className="text-[var(--accent-primary)]" />
+      <div className="border-t border-border pt-3">
+        <div className="flex items-center gap-2 font-semibold text-foreground">
+          <RouteIcon size={16} className="text-accent-primary" />
           {t("editor.agentRouting.preview.title")}
         </div>
         <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-[10rem_minmax(10rem,0.8fr)_minmax(16rem,1.4fr)_auto] xl:items-end">

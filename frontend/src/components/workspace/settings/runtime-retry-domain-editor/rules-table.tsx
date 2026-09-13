@@ -75,7 +75,7 @@ export function RuntimeRetryRulesTable({
               <div className="min-w-[14rem]">
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge>{`#${rule.index + 1}`}</Badge>
-                  <div className="font-semibold text-[var(--foreground)]">
+                  <div className="font-semibold text-foreground">
                     {rule.name || "--"}
                   </div>
                   <Badge>
@@ -84,7 +84,7 @@ export function RuntimeRetryRulesTable({
                       : t("editor.retry.rules.disabled")}
                   </Badge>
                 </div>
-                <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-1 text-xs text-muted-foreground">
                   {rule.description || t("editor.retry.rules.noDescription")}
                 </div>
               </div>
@@ -93,7 +93,7 @@ export function RuntimeRetryRulesTable({
           {
             header: t("editor.retry.rules.columns.matchers"),
             cell: (rule) => (
-              <div className="min-w-[15rem] text-xs leading-5 text-[var(--muted-foreground)]">
+              <div className="min-w-[15rem] text-xs leading-5 text-muted-foreground">
                 {summarizeMatcher(rule, t).map((line) => (
                   <div key={line}>{line}</div>
                 ))}
@@ -105,7 +105,7 @@ export function RuntimeRetryRulesTable({
             cell: (rule) => (
               <div className="min-w-[12rem]">
                 <div>{`max ${rule.maxRetries || "--"} · delay ${rule.retryDelayMs || "--"}ms`}</div>
-                <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-1 text-xs text-muted-foreground">
                   {`backoff ${rule.backoffMultiplier || "--"}`}
                   {rule.extraFieldCount > 0
                     ? ` · ${t("editor.retry.extraFields.count", {

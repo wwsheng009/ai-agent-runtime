@@ -32,18 +32,18 @@ export function MessageReasoningRow({
   return (
     <section
       aria-labelledby={titleId}
-      className="mt-2 overflow-hidden rounded-[0.85rem] border border-[var(--border)] bg-[var(--surface-softer)]"
+      className="mt-2 overflow-hidden rounded-[0.85rem] border border-border bg-surface-softer"
     >
       <button
         type="button"
         aria-controls={panelId}
         aria-expanded={open}
         onClick={() => setOpen((current) => !current)}
-        className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition hover:bg-[var(--surface-soft)]"
+        className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition hover:bg-surface-soft"
       >
         <BrainCircuitIcon size={14} className="shrink-0 text-[#8fd0c6]" />
         <span
-          className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]"
+          className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground"
           id={titleId}
         >
           Reasoning{running ? "…" : ""}
@@ -51,28 +51,28 @@ export function MessageReasoningRow({
         {running ? (
           <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-[#8fd0c6]" />
         ) : null}
-        <span className="min-w-0 flex-1 truncate app-text-11 text-[var(--muted-foreground)]">
+        <span className="min-w-0 flex-1 truncate app-text-11 text-muted-foreground">
           {hasContent ? summary : "Waiting for reasoning output…"}
         </span>
         <ChevronDownIcon
           size={14}
           className={cn(
-            "shrink-0 text-[var(--muted-foreground)] transition-transform duration-200",
+            "shrink-0 text-muted-foreground transition-transform duration-200",
             open ? "rotate-0" : "-rotate-90",
           )}
         />
       </button>
       <div
-        className={cn("border-t border-[var(--border)]", !open && "hidden")}
+        className={cn("border-t border-border", !open && "hidden")}
         hidden={!open}
         id={panelId}
       >
         {trimmed ? (
-          <div className="border-b border-[var(--border)] px-3 py-1.5 app-text-10 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
+          <div className="border-b border-border px-3 py-1.5 app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
             {reasoningDisplay.droppedChars.toLocaleString()} leading chars trimmed
           </div>
         ) : null}
-        <pre className="max-h-72 overflow-y-auto whitespace-pre-wrap break-words px-3 py-3 app-text-12 app-chat-copy text-[var(--muted-foreground)]">
+        <pre className="max-h-72 overflow-y-auto whitespace-pre-wrap break-words px-3 py-3 app-text-12 app-chat-copy text-muted-foreground">
           {reasoningDisplay.visible}
         </pre>
       </div>

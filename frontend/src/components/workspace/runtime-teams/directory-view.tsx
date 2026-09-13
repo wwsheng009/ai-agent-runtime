@@ -100,13 +100,13 @@ export function TeamsDirectoryView({
 }: TeamsDirectoryViewProps) {
   return (
     <div className="grid gap-3 xl:grid-cols-[18rem_minmax(0,1fr)]">
-      <aside className="rounded-[0.95rem] border border-[var(--border)] bg-[var(--surface-softer)] p-2.5">
+      <aside className="rounded-[0.95rem] border border-border bg-surface-softer p-2.5">
         <div className="mb-2.5 flex items-center justify-between gap-3 px-0.5">
           <div>
-            <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+            <div className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
               Team directory
             </div>
-            <div className="mt-0.5 text-sm font-semibold text-[var(--foreground)]">
+            <div className="mt-0.5 text-sm font-semibold text-foreground">
               Select a team
             </div>
           </div>
@@ -127,18 +127,18 @@ export function TeamsDirectoryView({
                     "w-full rounded-[0.8rem] border px-3 py-2.5 text-left transition",
                     isActive
                       ? "border-[#8fd0c6]/30 bg-[#8fd0c6]/10 shadow-[0_0_0_1px_rgba(143,208,198,0.12)]"
-                      : "border-[var(--border)] bg-[var(--surface-soft)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft-hover)]",
+                      : "border-border bg-surface-soft hover:border-border-strong hover:bg-surface-soft-hover",
                   )}
                 >
                   <div className="flex items-center justify-between gap-3">
-                    <div className="truncate text-base font-semibold text-[var(--foreground)]">
+                    <div className="truncate text-base font-semibold text-foreground">
                       {truncateIdentifier(team.id, 16)}
                     </div>
-                    <span className="shrink-0 app-text-11 uppercase tracking-[0.15em] text-[var(--muted-foreground)]">
+                    <span className="shrink-0 app-text-11 uppercase tracking-[0.15em] text-muted-foreground">
                       {team.status || "unknown"}
                     </span>
                   </div>
-                  <div className="mt-1.5 flex flex-wrap gap-1.5 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                  <div className="mt-1.5 flex flex-wrap gap-1.5 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
                     <span>{summary?.tasks.total ?? 0} tasks</span>
                     <span>{summary?.teammates.total ?? 0} teammates</span>
                     {team.strategy ? <span>{team.strategy}</span> : null}
@@ -148,7 +148,7 @@ export function TeamsDirectoryView({
             })}
           </div>
         ) : (
-          <div className="rounded-[0.8rem] border border-dashed border-[var(--border)] px-3 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
+          <div className="rounded-[0.8rem] border border-dashed border-border px-3 py-3 text-sm leading-6 text-muted-foreground">
             No teams available. Switch to `Dispatch` to provision runnable teams.
           </div>
         )}
@@ -198,11 +198,11 @@ export function TeamsDirectoryView({
             />
           </Suspense>
         ) : (
-          <div className="rounded-[0.95rem] border border-dashed border-[var(--border)] bg-[var(--surface-softer)] px-5 py-8 text-center">
-            <div className="text-sm font-semibold text-[var(--foreground)]">
+          <div className="rounded-[0.95rem] border border-dashed border-border bg-surface-softer px-5 py-8 text-center">
+            <div className="text-sm font-semibold text-foreground">
               No team selected
             </div>
-            <p className="mt-2 text-sm leading-6 text-[var(--muted-foreground)]">
+            <p className="mt-2 text-sm leading-6 text-muted-foreground">
               Pick a team from the directory to inspect its snapshot, mailbox,
               path claims, timeline, and final summary.
             </p>

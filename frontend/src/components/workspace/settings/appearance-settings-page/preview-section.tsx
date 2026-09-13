@@ -31,10 +31,10 @@ export function AppearancePreviewSection({
             contentClassName="space-y-3"
           >
             <div
-              className="rounded-[0.75rem] border border-[var(--border)] bg-[var(--surface-solid)] p-3"
+              className="rounded-[0.75rem] border border-border bg-surface-solid p-3"
               style={{ fontSize: `${settings.appearance.textSize}px` }}
             >
-              <div className="text-sm leading-7 text-[var(--foreground)]">
+              <div className="text-sm leading-7 text-foreground">
                 {t("appearance.previewWorkspaceBody")}
               </div>
             </div>
@@ -45,14 +45,14 @@ export function AppearancePreviewSection({
             contentClassName="space-y-3"
           >
             <div
-              className="rounded-[0.75rem] border border-[var(--border)] bg-[var(--surface-solid)] p-3 font-mono"
+              className="rounded-[0.75rem] border border-border bg-surface-solid p-3 font-mono"
               style={{ fontSize: `${settings.appearance.codeTextSize}px` }}
             >
-              <div className="whitespace-pre-wrap leading-6 text-[var(--foreground)]">
+              <div className="whitespace-pre-wrap leading-6 text-foreground">
                 {`const workspace = await runtime.openThread("new");\nawait workspace.ask("Summarize the failing trace and propose a fix.");\nreturn workspace.receipts.latest();`}
               </div>
             </div>
-            <div className="grid gap-2 text-sm leading-6 text-[var(--muted-foreground)]">
+            <div className="grid gap-2 text-sm leading-6 text-muted-foreground">
               <div>
                 {t("appearance.currentUIStack")} {currentFontStack.sans}
               </div>

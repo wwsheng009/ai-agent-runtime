@@ -31,14 +31,14 @@ export function SidebarSection({
 }: SidebarSectionProps) {
   return (
     <section>
-      <div className="mb-2 flex w-full items-center justify-between gap-3 rounded-[0.7rem] px-1.5 py-1 transition hover:bg-[var(--surface-softer)]">
+      <div className="mb-2 flex w-full items-center justify-between gap-3 rounded-[0.7rem] px-1.5 py-1 transition hover:bg-surface-softer">
         <button
           type="button"
           onClick={() => onToggle(id)}
           aria-expanded={isOpen}
           className="flex min-w-0 flex-1 items-center justify-between gap-3 text-left"
         >
-          <span className="inline-flex items-center gap-2 text-base uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+          <span className="inline-flex items-center gap-2 text-base uppercase tracking-[0.16em] text-muted-foreground">
             <Icon size={14} className={iconClassName} />
             {title}
           </span>
@@ -47,7 +47,7 @@ export function SidebarSection({
             <ChevronDownIcon
               size={14}
               className={cn(
-                "text-[var(--muted-foreground)] transition-transform duration-200",
+                "text-muted-foreground transition-transform duration-200",
                 isOpen ? "rotate-0" : "-rotate-90",
               )}
             />

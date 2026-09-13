@@ -39,11 +39,11 @@ export function ConfigEditorMenuPanel({ core }: { core: ConfigEditorCore }) {
 
   return (
     <div className="min-w-0 space-y-2.5 lg:sticky lg:top-[8.5rem] lg:self-start">
-      <label className="block rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3 lg:hidden">
-        <span className="block text-sm font-semibold text-[var(--foreground)]">
+      <label className="block rounded-[0.9rem] border border-border bg-surface-softer p-3 lg:hidden">
+        <span className="block text-sm font-semibold text-foreground">
           {t("editor.panels.modeTitle")}
         </span>
-        <span className="mt-1 block text-xs leading-5 text-[var(--muted-foreground)]">
+        <span className="mt-1 block text-xs leading-5 text-muted-foreground">
           {t("editor.panels.modeDescription")}
         </span>
         <select
@@ -53,7 +53,7 @@ export function ConfigEditorMenuPanel({ core }: { core: ConfigEditorCore }) {
           onChange={(event) => {
             void switchMode(event.target.value as EditorMode);
           }}
-          className="mt-3 h-10 w-full rounded-[0.7rem] border border-[var(--border)] bg-[var(--surface-solid)] px-3 text-sm text-[var(--foreground)] outline-none transition focus:border-[var(--accent-primary-border)] focus:ring-2 focus:ring-[var(--ring)] disabled:cursor-not-allowed disabled:opacity-60"
+          className="mt-3 h-10 w-full rounded-[0.7rem] border border-border bg-surface-solid px-3 text-sm text-foreground outline-none transition focus:border-accent-primary-border focus:ring-2 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
         >
           {translatedModeMenuEntries.map((entry) => (
             <option key={entry.mode} value={entry.mode}>
@@ -181,7 +181,7 @@ export function ConfigEditorMenuPanel({ core }: { core: ConfigEditorCore }) {
             }
           />
         </div>
-        <div className="mt-2.5 rounded-[0.75rem] border border-[var(--border)] bg-[var(--surface-solid)] px-3 py-2.5 text-sm leading-6 text-[var(--muted-foreground)]">
+        <div className="mt-2.5 rounded-[0.75rem] border border-border bg-surface-solid px-3 py-2.5 text-sm leading-6 text-muted-foreground">
           {getModeSummary(mode)}
         </div>
       </ControlPanel>

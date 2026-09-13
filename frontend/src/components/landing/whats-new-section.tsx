@@ -76,7 +76,7 @@ export function WhatsNewSection() {
             <h3 className="mt-5 text-2xl font-semibold tracking-[-0.03em]">
               {card.title}
             </h3>
-            <p className="mt-4 text-sm leading-7 text-[var(--muted-foreground)]">
+            <p className="mt-4 text-sm leading-7 text-muted-foreground">
               {card.description}
             </p>
           </div>

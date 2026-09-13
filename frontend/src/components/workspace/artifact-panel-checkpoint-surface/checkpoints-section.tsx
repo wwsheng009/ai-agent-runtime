@@ -35,7 +35,7 @@ export function ArtifactPanelCheckpointsSection({
   return (
     <section className="flex min-h-0 flex-col overflow-hidden rounded-[0.95rem] border border-white/8 bg-white/[0.035]">
       <div className="flex items-center justify-between gap-3 border-b border-white/8 px-3 py-2.5">
-        <div className="inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+        <div className="inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
           <HistoryIcon size={14} />
           Restore points
         </div>
@@ -43,18 +43,18 @@ export function ArtifactPanelCheckpointsSection({
       </div>
       <div className="min-h-0 flex-1 overflow-auto px-2.5 py-2.5">
         {checkpointsLoading ? (
-          <div className="mb-2 inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+          <div className="mb-2 inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
             <LoaderCircleIcon size={14} className="animate-spin" />
             Loading
           </div>
         ) : null}
         {!sessionId ? (
-          <div className="flex h-full items-center justify-center rounded-[0.8rem] border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-[var(--muted-foreground)]">
+          <div className="flex h-full items-center justify-center rounded-[0.8rem] border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-muted-foreground">
             Restore points become available after the thread attaches to a live
             session.
           </div>
         ) : checkpointsError ? (
-          <div className="rounded-[0.85rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3.5 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
+          <div className="rounded-[0.85rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
             {checkpointsError}
           </div>
         ) : checkpoints.length > 0 ? (
@@ -86,20 +86,20 @@ export function ArtifactPanelCheckpointsSection({
                         <div className="truncate text-[13px] font-semibold">
                           {formatCheckpointTitle(checkpoint)}
                         </div>
-                        <div className="mt-0.5 text-[11px] text-[var(--muted-foreground)]">
+                        <div className="mt-0.5 text-[11px] text-muted-foreground">
                           {formatCheckpointMeta(checkpoint)}
                         </div>
                       </div>
-                    <span className="shrink-0 rounded-[0.65rem] border border-white/10 bg-black/20 px-2 py-0.5 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                    <span className="shrink-0 rounded-[0.65rem] border border-white/10 bg-black/20 px-2 py-0.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                       {formatRelativeTimestamp(checkpoint.created_at)}
                     </span>
                   </div>
 
-                  <div className="mt-1.5 line-clamp-1 text-sm leading-6 text-[var(--muted-foreground)]">
+                  <div className="mt-1.5 line-clamp-1 text-sm leading-6 text-muted-foreground">
                     {formatCheckpointReason(checkpoint)}
                   </div>
 
-                  <div className="mt-1.5 flex flex-wrap gap-1.5 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                  <div className="mt-1.5 flex flex-wrap gap-1.5 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
                     {provenanceLabels.slice(0, 2).map((item) => (
                       <span
                         key={`${checkpoint.id}-${item}`}
@@ -114,7 +114,7 @@ export function ArtifactPanelCheckpointsSection({
             })}
           </div>
         ) : (
-          <div className="flex h-full items-center justify-center rounded-[0.8rem] border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-[var(--muted-foreground)]">
+          <div className="flex h-full items-center justify-center rounded-[0.8rem] border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-muted-foreground">
             No restore points available for this session yet.
           </div>
         )}

@@ -22,16 +22,16 @@ export function ImpactStat({
   value: string;
 }) {
   return (
-    <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-solid)] px-3 py-2.5">
+    <div className="rounded-[0.8rem] border border-border bg-surface-solid px-3 py-2.5">
       <div className="flex items-center justify-between gap-3">
-        <div className="app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+        <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
           {label}
         </div>
         <span className={cn("text-sm font-semibold", accentClassName)}>
           {value}
         </span>
       </div>
-      <div className="mt-1.5 text-xs leading-5 text-[var(--muted-foreground)]">
+      <div className="mt-1.5 text-xs leading-5 text-muted-foreground">
         {detail}
       </div>
     </div>
@@ -57,9 +57,9 @@ export function ImpactPathList({
   );
 
   return (
-    <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-solid)] p-3">
+    <div className="rounded-[0.8rem] border border-border bg-surface-solid p-3">
         <div className="flex items-center justify-between gap-3">
-        <div className="text-sm font-semibold text-[var(--foreground)]">
+        <div className="text-sm font-semibold text-foreground">
           {title}
         </div>
         <Badge className={toneClassName}>
@@ -71,19 +71,19 @@ export function ImpactPathList({
           {visiblePaths.map((path) => (
             <div
               key={path}
-              className="rounded-[0.7rem] border border-[var(--border)] bg-[var(--surface-softer)] px-2.5 py-1.5 font-mono app-text-12 text-[var(--foreground)]"
+              className="rounded-[0.7rem] border border-border bg-surface-softer px-2.5 py-1.5 font-mono app-text-12 text-foreground"
             >
               {path}
             </div>
           ))}
           {hiddenCount > 0 ? (
-            <div className="text-xs text-[var(--muted-foreground)]">
+            <div className="text-xs text-muted-foreground">
               {t("editor.counts.hiddenCount", { count: hiddenCount })}
             </div>
           ) : null}
         </div>
       ) : (
-        <div className="mt-2 text-sm leading-6 text-[var(--muted-foreground)]">
+        <div className="mt-2 text-sm leading-6 text-muted-foreground">
           {emptyText}
         </div>
       )}
@@ -129,7 +129,7 @@ export function RuntimeImpactPanel({
           : t("editor.impact.runtimeDescription")
       }
     >
-      <div className="rounded-[0.95rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+      <div className="rounded-[0.95rem] border border-border bg-surface-softer p-3">
         <div className="flex flex-wrap items-center justify-between gap-2.5">
           <div className="flex flex-wrap items-center gap-2">
             <Badge>{isPreview ? t("editor.impact.previewBadge") : t("editor.impact.savedBadge")}</Badge>
@@ -160,7 +160,7 @@ export function RuntimeImpactPanel({
             label={t("editor.impact.stats.changed")}
             value={`${changedCount}`}
             detail={t("editor.impact.details.changed")}
-            accentClassName="text-[var(--foreground)]"
+            accentClassName="text-foreground"
           />
           <ImpactStat
             label={t("editor.impact.stats.hotReload")}
@@ -214,15 +214,15 @@ export function RuntimeImpactPanel({
         </div>
 
         {warnings.length > 0 ? (
-          <div className="mt-3 rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-solid)] p-3">
-            <div className="text-sm font-semibold text-[var(--foreground)]">
+          <div className="mt-3 rounded-[0.8rem] border border-border bg-surface-solid p-3">
+            <div className="text-sm font-semibold text-foreground">
               {t("editor.impact.warningsTitle")}
             </div>
             <div className="mt-2 grid gap-2">
               {warnings.map((warning, index) => (
                 <div
                   key={`${warning}-${index}`}
-                  className="rounded-[0.7rem] border border-[var(--border)] bg-[var(--surface-softer)] px-2.5 py-2 text-sm leading-6 text-[var(--muted-foreground)]"
+                  className="rounded-[0.7rem] border border-border bg-surface-softer px-2.5 py-2 text-sm leading-6 text-muted-foreground"
                 >
                   {warning}
                 </div>

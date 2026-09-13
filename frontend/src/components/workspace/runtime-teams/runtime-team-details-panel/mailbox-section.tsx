@@ -70,12 +70,12 @@ export function RuntimeTeamMailboxSection({
       onToggle={onToggle}
     >
       <div className={detailCardClass}>
-        <div className="app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+        <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
           Compose mailbox message
         </div>
         <div className="mt-2.5 grid gap-2.5 sm:grid-cols-2">
           <div>
-            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
               From agent
             </div>
             <input
@@ -86,7 +86,7 @@ export function RuntimeTeamMailboxSection({
             />
           </div>
           <div>
-            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
               To agent
             </div>
             <input
@@ -97,7 +97,7 @@ export function RuntimeTeamMailboxSection({
             />
           </div>
           <div>
-            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
               Kind
             </div>
             <input
@@ -108,7 +108,7 @@ export function RuntimeTeamMailboxSection({
             />
           </div>
           <div>
-            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
               Task id
             </div>
             <input
@@ -120,7 +120,7 @@ export function RuntimeTeamMailboxSection({
           </div>
         </div>
         <div className="mt-2.5">
-          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
             Body
           </div>
           <textarea
@@ -131,7 +131,7 @@ export function RuntimeTeamMailboxSection({
           />
         </div>
         <div className="mt-2.5 flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between">
-          <div className="text-xs text-[var(--muted-foreground)]">
+          <div className="text-xs text-muted-foreground">
             Use `*` in `to agent` for broadcast delivery.
           </div>
           <Button
@@ -148,7 +148,7 @@ export function RuntimeTeamMailboxSection({
         </div>
       </div>
       {mailboxError ? (
-        <div className="mt-2.5 rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-[var(--muted-foreground)]">
+        <div className="mt-2.5 rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
           {mailboxError}
         </div>
       ) : null}
@@ -161,10 +161,10 @@ export function RuntimeTeamMailboxSection({
             >
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="truncate text-[13px] font-semibold text-[var(--foreground)]">
+                  <div className="truncate text-[13px] font-semibold text-foreground">
                     {message.kind || "message"}
                   </div>
-                  <div className="mt-0.5 truncate text-xs text-[var(--muted-foreground)]">
+                  <div className="mt-0.5 truncate text-xs text-muted-foreground">
                     {describeMailboxRoute(message)}
                   </div>
                 </div>
@@ -177,7 +177,7 @@ export function RuntimeTeamMailboxSection({
                       detailStatusPillClass,
                       message.acked_at
                         ? "border-[#8fd0c6]/24 bg-[#8fd0c6]/10 text-[#8fd0c6]"
-                        : "border-white/10 bg-white/6 text-[var(--muted-foreground)]",
+                        : "border-white/10 bg-white/6 text-muted-foreground",
                     )}
                   >
                     {message.acked_at ? "acked" : "pending"}
@@ -185,14 +185,14 @@ export function RuntimeTeamMailboxSection({
                 </div>
               </div>
               {message.body.trim() ? (
-                <div className="mt-2 rounded-[0.75rem] border border-[var(--border)] bg-[var(--surface-solid)] px-3 py-2.5">
+                <div className="mt-2 rounded-[0.75rem] border border-border bg-surface-solid px-3 py-2.5">
                   <MessageMarkdown
                     className="app-text-13"
                     content={message.body}
                   />
                 </div>
               ) : null}
-              <div className="mt-1.5 flex flex-wrap gap-2.5 text-xs text-[var(--muted-foreground)]">
+              <div className="mt-1.5 flex flex-wrap gap-2.5 text-xs text-muted-foreground">
                 {message.created_at ? (
                   <span>created {formatRelativeTimestamp(message.created_at)}</span>
                 ) : null}
@@ -219,7 +219,7 @@ export function RuntimeTeamMailboxSection({
             </div>
           ))
         ) : (
-          <div className="text-sm text-[var(--muted-foreground)]">
+          <div className="text-sm text-muted-foreground">
             No mailbox activity available.
           </div>
         )}

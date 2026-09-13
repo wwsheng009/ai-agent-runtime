@@ -24,10 +24,10 @@ export function DispatchMonitorEntries({ dispatchMonitor }: DispatchMonitorEntri
           >
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <div className="truncate text-[13px] font-semibold text-[var(--foreground)]">
+                <div className="truncate text-[13px] font-semibold text-foreground">
                   {truncateIdentifier(entry.teamId, 18)}
                 </div>
-                <div className="mt-0.5 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-0.5 text-xs text-muted-foreground">
                   task {truncateIdentifier(entry.taskId, 18)}
                 </div>
               </div>
@@ -41,7 +41,7 @@ export function DispatchMonitorEntries({ dispatchMonitor }: DispatchMonitorEntri
               </span>
             </div>
 
-            <div className="mt-2 flex flex-wrap gap-2.5 text-xs text-[var(--muted-foreground)]">
+            <div className="mt-2 flex flex-wrap gap-2.5 text-xs text-muted-foreground">
               {entry.assignee ? <span>assignee {entry.assignee}</span> : null}
               {entry.lastEventType ? (
                 <span>event {prettyEventType(entry.lastEventType)}</span>
@@ -75,14 +75,14 @@ export function DispatchMonitorEntries({ dispatchMonitor }: DispatchMonitorEntri
             ) : null}
 
             {entry.error ? (
-              <div className="mt-2 rounded-[0.7rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2 text-sm leading-6 text-[var(--muted-foreground)]">
+              <div className="mt-2 rounded-[0.7rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2 text-sm leading-6 text-muted-foreground">
                 {entry.error}
               </div>
             ) : null}
           </div>
         ))
       ) : (
-        <div className="text-sm text-[var(--muted-foreground)]">
+        <div className="text-sm text-muted-foreground">
           No dispatch monitor data available yet.
         </div>
       )}

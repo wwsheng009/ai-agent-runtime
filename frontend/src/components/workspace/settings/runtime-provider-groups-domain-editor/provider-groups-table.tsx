@@ -95,8 +95,8 @@ export function ProviderGroupsTable({
             header: t("editor.providerGroups.columns.name"),
             cell: (group) => (
               <div className="min-w-[11rem]">
-                <div className="font-semibold text-[var(--foreground)]">{group.name}</div>
-                <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                <div className="font-semibold text-foreground">{group.name}</div>
+                <div className="mt-1 text-xs text-muted-foreground">
                   {group.strategy || t("editor.providerGroups.row.noStrategy")}
                 </div>
               </div>
@@ -113,7 +113,7 @@ export function ProviderGroupsTable({
                       })
                     : "--"}
                 </div>
-                <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-1 text-xs text-muted-foreground">
                   {group.retryDelay
                     ? t("editor.providerGroups.row.retryDelay", {
                         delay: group.retryDelay,
@@ -205,7 +205,7 @@ export function ProviderGroupsTable({
                       </Badge>
                     ) : null}
                   </div>
-                  <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                  <div className="mt-1 text-xs text-muted-foreground">
                     {missingCount > 0
                       ? t("editor.providerGroups.row.membersMissing", {
                           count: missingCount,

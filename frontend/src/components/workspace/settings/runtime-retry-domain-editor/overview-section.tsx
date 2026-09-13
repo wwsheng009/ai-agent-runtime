@@ -62,11 +62,11 @@ export function RuntimeRetryOverviewSection({
         }
       >
         <div className="grid gap-3 xl:grid-cols-[11rem_minmax(0,1fr)_minmax(0,1fr)]">
-          <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
-            <div className="text-sm font-semibold text-[var(--foreground)]">
+          <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
+            <div className="text-sm font-semibold text-foreground">
               retry.enabled
             </div>
-            <div className="mt-1 text-xs leading-5 text-[var(--muted-foreground)]">
+            <div className="mt-1 text-xs leading-5 text-muted-foreground">
               {t("editor.retry.enabledHelp")}
             </div>
             <label className={`mt-3 ${editorToggleRowClassName}`}>
@@ -77,7 +77,7 @@ export function RuntimeRetryOverviewSection({
               </span>
               <input
                 type="checkbox"
-                className="h-4 w-4 accent-[var(--accent-primary)]"
+                className="h-4 w-4 accent-accent-primary"
                 checked={config.enabled}
                 onChange={(event) =>
                   onChangeConfig({ ...config, enabled: event.target.checked })
@@ -146,7 +146,7 @@ export function RuntimeRetryOverviewSection({
             headerAside={
               <input
                 type="checkbox"
-                className="h-4 w-4 accent-[var(--accent-primary)]"
+                className="h-4 w-4 accent-accent-primary"
                 checked={config.invalidEncryptedContentStripClientStateOnce}
                 onChange={(event) =>
                   onChangeConfig({
@@ -171,7 +171,7 @@ export function RuntimeRetryOverviewSection({
             headerAside={
               <input
                 type="checkbox"
-                className="h-4 w-4 accent-[var(--accent-primary)]"
+                className="h-4 w-4 accent-accent-primary"
                 checked={config.enhancedStrategyEnabled}
                 onChange={(event) =>
                   onChangeConfig({

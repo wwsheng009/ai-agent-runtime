@@ -24,8 +24,8 @@ const STATUS_META: Record<ToolStatus, StatusMeta> = {
   started: {
     label: "Started",
     icon: CircleIcon,
-    iconClassName: "text-[var(--muted-foreground)]",
-    badgeClassName: "border-[var(--border)] bg-[var(--surface-soft)] text-[var(--muted-foreground)]",
+    iconClassName: "text-muted-foreground",
+    badgeClassName: "border-border bg-surface-soft text-muted-foreground",
   },
   running: {
     label: "Running",
@@ -63,12 +63,12 @@ export function MessageToolRow({ segment }: MessageToolRowProps) {
   return (
     <section
       aria-labelledby={titleId}
-      className="mt-2 overflow-hidden rounded-[0.85rem] border border-[var(--border)] bg-[var(--surface-softer)]"
+      className="mt-2 overflow-hidden rounded-[0.85rem] border border-border bg-surface-softer"
     >
       <div className="flex items-center gap-2.5 px-3 py-2.5">
-        <WrenchIcon size={14} className="shrink-0 text-[var(--muted-foreground)]" />
+        <WrenchIcon size={14} className="shrink-0 text-muted-foreground" />
         <span
-          className="min-w-0 flex-1 truncate app-text-13 font-semibold text-[var(--foreground)]"
+          className="min-w-0 flex-1 truncate app-text-13 font-semibold text-foreground"
           id={titleId}
         >
           {segment.name}
@@ -88,7 +88,7 @@ export function MessageToolRow({ segment }: MessageToolRowProps) {
             aria-controls={panelId}
             aria-expanded={open}
             onClick={() => setOpen((current) => !current)}
-            className="shrink-0 rounded-[0.5rem] p-1 text-[var(--muted-foreground)] transition hover:bg-[var(--surface-soft)] hover:text-[var(--foreground)]"
+            className="shrink-0 rounded-[0.5rem] p-1 text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
           >
             <ChevronDownIcon
               size={14}
@@ -102,12 +102,12 @@ export function MessageToolRow({ segment }: MessageToolRowProps) {
       </div>
 
       {hasArgs ? (
-        <div className={cn("border-t border-[var(--border)]", !open && "hidden")} hidden={!open} id={panelId}>
+        <div className={cn("border-t border-border", !open && "hidden")} hidden={!open} id={panelId}>
           <div className="px-3 py-2.5">
-            <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
               Input
             </div>
-            <pre className="mt-1.5 max-h-48 overflow-y-auto whitespace-pre-wrap break-words app-text-12 app-chat-copy text-[var(--muted-foreground)]">
+            <pre className="mt-1.5 max-h-48 overflow-y-auto whitespace-pre-wrap break-words app-text-12 app-chat-copy text-muted-foreground">
               {segment.argsSummary}
             </pre>
           </div>
@@ -115,11 +115,11 @@ export function MessageToolRow({ segment }: MessageToolRowProps) {
       ) : null}
 
       {segment.resultSummary?.trim() ? (
-        <div className="border-t border-[var(--border)] px-3 py-2.5">
-          <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+        <div className="border-t border-border px-3 py-2.5">
+          <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
             Output
           </div>
-          <pre className="mt-1.5 max-h-48 overflow-y-auto whitespace-pre-wrap break-words app-text-12 app-chat-copy text-[var(--foreground)]">
+          <pre className="mt-1.5 max-h-48 overflow-y-auto whitespace-pre-wrap break-words app-text-12 app-chat-copy text-foreground">
             {segment.resultSummary}
           </pre>
         </div>

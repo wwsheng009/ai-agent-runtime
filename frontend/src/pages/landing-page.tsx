@@ -70,11 +70,11 @@ export function LandingPage() {
 function LandingDeferredSectionsFallback() {
   return (
     <section aria-hidden="true" className="container-shell py-10 sm:py-14">
-      <div className="rounded-[2.25rem] border border-[var(--border)] bg-[var(--section-panel-bg)] px-6 py-10 shadow-[0_24px_90px_rgba(0,0,0,0.16)] backdrop-blur-xl sm:px-10 sm:py-12">
+      <div className="rounded-[2.25rem] border border-border bg-[var(--section-panel-bg)] px-6 py-10 shadow-[0_24px_90px_rgba(0,0,0,0.16)] backdrop-blur-xl sm:px-10 sm:py-12">
         <div className="grid gap-4 md:grid-cols-3">
-          <div className="h-40 rounded-[1.7rem] border border-[var(--border)] bg-[var(--surface-soft)]" />
-          <div className="h-40 rounded-[1.7rem] border border-[var(--border)] bg-[var(--surface-soft)]" />
-          <div className="h-40 rounded-[1.7rem] border border-[var(--border)] bg-[var(--surface-soft)]" />
+          <div className="h-40 rounded-[1.7rem] border border-border bg-surface-soft" />
+          <div className="h-40 rounded-[1.7rem] border border-border bg-surface-soft" />
+          <div className="h-40 rounded-[1.7rem] border border-border bg-surface-soft" />
         </div>
       </div>
     </section>

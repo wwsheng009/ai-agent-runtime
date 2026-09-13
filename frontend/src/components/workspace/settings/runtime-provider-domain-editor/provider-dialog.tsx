@@ -107,11 +107,11 @@ export function ProviderDialog({
             />
           </ConfigFormField>
 
-          <div className="flex flex-wrap gap-3 rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] px-3 py-2.5">
-            <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
+          <div className="flex flex-wrap gap-3 rounded-[0.8rem] border border-border bg-surface-softer px-3 py-2.5">
+            <label className="flex items-center gap-2 text-sm text-foreground">
               <input
                 type="checkbox"
-                className="h-4 w-4 accent-[var(--accent-primary)]"
+                className="h-4 w-4 accent-accent-primary"
                 checked={draft.enabled}
                 onChange={(event) =>
                   setDraft((current) => ({ ...current, enabled: event.target.checked }))
@@ -119,10 +119,10 @@ export function ProviderDialog({
               />
               {t("editor.providers.fields.enableProvider")}
             </label>
-            <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
+            <label className="flex items-center gap-2 text-sm text-foreground">
               <input
                 type="checkbox"
-                className="h-4 w-4 accent-[var(--accent-primary)]"
+                className="h-4 w-4 accent-accent-primary"
                 checked={draft.setAsDefault}
                 onChange={(event) =>
                   setDraft((current) => ({

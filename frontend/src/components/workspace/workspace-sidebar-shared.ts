@@ -62,7 +62,7 @@ export function describeThreadSession(
     return {
       detail: labels.pending,
       label: "pending",
-      tone: "border-white/10 bg-white/6 text-[var(--muted-foreground)]",
+      tone: "border-white/10 bg-white/6 text-muted-foreground",
     };
   }
 

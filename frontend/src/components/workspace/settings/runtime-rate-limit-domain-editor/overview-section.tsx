@@ -30,17 +30,17 @@ export function RuntimeRateLimitOverviewSection({
   totalPathBurst: number;
 }) {
   return (
-    <div className="rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+    <div className="rounded-[0.9rem] border border-border bg-surface-softer p-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
           <SettingsPanelIcon>
             <GaugeIcon size={15} />
           </SettingsPanelIcon>
           <div>
-            <div className="text-base font-semibold text-[var(--foreground)]">
+            <div className="text-base font-semibold text-foreground">
               {t("editor.rateLimit.title")}
             </div>
-            <div className="mt-1 text-sm text-[var(--muted-foreground)]">
+            <div className="mt-1 text-sm text-muted-foreground">
               {t("editor.rateLimit.description")}
             </div>
           </div>
@@ -65,9 +65,9 @@ export function RuntimeRateLimitOverviewSection({
       </div>
 
       <div className="mt-3 grid gap-3 xl:grid-cols-[12rem_minmax(0,1fr)_minmax(0,1fr)]">
-        <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
-          <div className="text-[13px] font-semibold text-[var(--foreground)]">rate_limit.enabled</div>
-          <div className="mt-1 text-xs leading-5 text-[var(--muted-foreground)]">
+        <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
+          <div className="text-[13px] font-semibold text-foreground">rate_limit.enabled</div>
+          <div className="mt-1 text-xs leading-5 text-muted-foreground">
             {t("editor.rateLimit.enabledHelp")}
           </div>
           <label className={`mt-3 ${editorToggleRowClassName}`}>
@@ -78,7 +78,7 @@ export function RuntimeRateLimitOverviewSection({
             </span>
             <input
               type="checkbox"
-              className="h-4 w-4 accent-[var(--accent-primary)]"
+              className="h-4 w-4 accent-accent-primary"
               checked={rateLimitConfig.enabled}
               onChange={(event) =>
                 onChangeConfig({
@@ -90,8 +90,8 @@ export function RuntimeRateLimitOverviewSection({
           </label>
         </div>
 
-        <div className="space-y-3 rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
-          <div className="text-[13px] font-semibold text-[var(--foreground)]">
+        <div className="space-y-3 rounded-[0.8rem] border border-border bg-surface-softer p-3">
+          <div className="text-[13px] font-semibold text-foreground">
             {t("editor.rateLimit.basicConfig")}
           </div>
           <div className="grid gap-3 xl:grid-cols-2">
@@ -124,8 +124,8 @@ export function RuntimeRateLimitOverviewSection({
           </div>
         </div>
 
-        <div className="space-y-3 rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
-          <div className="text-[13px] font-semibold text-[var(--foreground)]">
+        <div className="space-y-3 rounded-[0.8rem] border border-border bg-surface-softer p-3">
+          <div className="text-[13px] font-semibold text-foreground">
             {t("editor.rateLimit.summaryTitle")}
           </div>
           <SettingsBadgeList>
@@ -141,8 +141,8 @@ export function RuntimeRateLimitOverviewSection({
       </div>
 
       <div className="mt-3 grid gap-3 xl:grid-cols-2">
-        <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
-          <div className="mb-3 text-[13px] font-semibold text-[var(--foreground)]">
+        <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
+          <div className="mb-3 text-[13px] font-semibold text-foreground">
             default_limits
           </div>
           <div className="grid gap-3 xl:grid-cols-2">
@@ -197,8 +197,8 @@ export function RuntimeRateLimitOverviewSection({
           </div>
         </div>
 
-        <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
-          <div className="mb-3 text-[13px] font-semibold text-[var(--foreground)]">
+        <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
+          <div className="mb-3 text-[13px] font-semibold text-foreground">
             global_limits
           </div>
           <div className="grid gap-3 xl:grid-cols-2">

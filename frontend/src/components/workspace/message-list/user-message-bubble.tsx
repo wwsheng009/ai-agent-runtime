@@ -91,13 +91,13 @@ export function UserMessageBubble({
                       </div>
                       <div>
                         <div
-                          className="app-text-13 font-semibold text-[var(--foreground)]"
+                          className="app-text-13 font-semibold text-foreground"
                           id={labelId}
                         >
                           {message.author}
                         </div>
                         <div
-                          className="mt-0.5 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]"
+                          className="mt-0.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground"
                           id={metaId}
                         >
                           {message.label}
@@ -145,7 +145,7 @@ export function UserMessageBubble({
                           </Button>
                         </>
                       ) : null}
-                      <Badge className="border-transparent bg-[var(--surface-soft)] text-[var(--foreground)]">
+                      <Badge className="border-transparent bg-surface-soft text-foreground">
                         {message.role}
                       </Badge>
                     </div>
@@ -156,7 +156,7 @@ export function UserMessageBubble({
                       <div className="space-y-3">
                         <textarea
                           aria-label="Edit user turn prompt"
-                          className="min-h-[7rem] w-full resize-y rounded-[0.85rem] border border-[#f0c77b]/25 bg-black/10 px-3 py-2.5 text-sm leading-6 text-[var(--foreground)] outline-none transition placeholder:text-[var(--muted-foreground)] focus:border-[#f0c77b]/45 focus:bg-black/15"
+                          className="min-h-[7rem] w-full resize-y rounded-[0.85rem] border border-[#f0c77b]/25 bg-black/10 px-3 py-2.5 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-[#f0c77b]/45 focus:bg-black/15"
                           onChange={(event) => setInlineEditDraft(event.target.value)}
                           onClick={(event) => event.stopPropagation()}
                           placeholder="Edit this user prompt, then continue to backtrack…"
@@ -192,7 +192,7 @@ export function UserMessageBubble({
                             Continue to backtrack
                           </Button>
                         </div>
-                        <p className="text-xs leading-5 text-[var(--muted-foreground)]">
+                        <p className="text-xs leading-5 text-muted-foreground">
                           Inline edit seeds the backtrack dialog. Confirm there to
                           truncate later turns and prefill the composer.
                         </p>

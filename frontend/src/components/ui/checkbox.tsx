@@ -16,7 +16,7 @@ export function CheckboxInput({
     <input
       type="checkbox"
       className={cn(
-        "h-4 w-4 accent-[var(--accent-primary)]",
+        "h-4 w-4 accent-accent-primary",
         shrink ? "shrink-0" : null,
         className,
       )}

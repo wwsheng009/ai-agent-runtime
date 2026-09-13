@@ -47,7 +47,7 @@ export function SettingsToggleCard({
       ) : null}
       <span className={cn("min-w-0 flex-1", contentClassName)}>
         <span className="flex items-center justify-between gap-3">
-          <span className="text-sm font-semibold text-[var(--foreground)]">
+          <span className="text-sm font-semibold text-foreground">
             {title}
           </span>
           <CheckboxInput
@@ -57,7 +57,7 @@ export function SettingsToggleCard({
             onChange={(event) => onChange(event.target.checked)}
           />
         </span>
-        <span className="mt-2 block text-sm leading-6 text-[var(--muted-foreground)]">
+        <span className="mt-2 block text-sm leading-6 text-muted-foreground">
           {description}
         </span>
       </span>

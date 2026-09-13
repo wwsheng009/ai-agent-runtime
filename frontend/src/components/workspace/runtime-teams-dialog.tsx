@@ -76,23 +76,23 @@ export function RuntimeTeamsDialog({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[120] flex items-center justify-center bg-[var(--dialog-backdrop)] px-3 py-4 backdrop-blur-sm"
+      className="fixed inset-0 z-[120] flex items-center justify-center bg-dialog-backdrop px-3 py-4 backdrop-blur-sm"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) {
           onClose();
         }
       }}
     >
-      <div className="flex max-h-[calc(100vh-1.5rem)] w-full max-w-7xl flex-col overflow-hidden rounded-[0.9rem] border border-[var(--border)] [background:var(--dialog-bg)] shadow-[0_12px_36px_rgba(0,0,0,0.22)]">
-        <div className="flex items-start justify-between gap-3 border-b border-[var(--border)] px-3.5 py-3 sm:px-4">
+      <div className="flex max-h-[calc(100vh-1.5rem)] w-full max-w-7xl flex-col overflow-hidden rounded-[0.9rem] border border-border [background:var(--dialog-bg)] shadow-[0_12px_36px_rgba(0,0,0,0.22)]">
+        <div className="flex items-start justify-between gap-3 border-b border-border px-3.5 py-3 sm:px-4">
           <div>
-            <div className="app-text-11 uppercase tracking-[0.16em] text-[var(--accent-secondary)]">
+            <div className="app-text-11 uppercase tracking-[0.16em] text-accent-secondary">
               Runtime teams
             </div>
-            <h2 className="mt-1 text-lg font-semibold tracking-[-0.03em] text-[var(--foreground)]">
+            <h2 className="mt-1 text-lg font-semibold tracking-[-0.03em] text-foreground">
               团队详情
             </h2>
-            <p className="mt-1 max-w-2xl text-sm leading-6 text-[var(--muted-foreground)]">
+            <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
               这里集中显示调度、团队状态、任务、事件、邮箱和路径声明，避免把左侧栏变成长表单。
             </p>
           </div>
@@ -128,7 +128,7 @@ export function RuntimeTeamsDialog({
 
 function RuntimeTeamsDialogContentFallback() {
   return (
-    <div className="rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] px-3.5 py-2.5 text-sm text-[var(--muted-foreground)]">
+    <div className="rounded-[0.9rem] border border-border bg-surface-softer px-3.5 py-2.5 text-sm text-muted-foreground">
       正在加载 runtime teams 内容…
     </div>
   );

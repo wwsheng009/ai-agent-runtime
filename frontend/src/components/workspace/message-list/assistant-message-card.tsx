@@ -40,13 +40,13 @@ export function AssistantMessageCard({
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
                           <div
-                            className="app-text-13 font-semibold text-[var(--foreground)]"
+                            className="app-text-13 font-semibold text-foreground"
                             id={labelId}
                           >
                             {message.author}
                           </div>
                           <div
-                            className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]"
+                            className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground"
                             id={metaId}
                           >
                             {message.label}

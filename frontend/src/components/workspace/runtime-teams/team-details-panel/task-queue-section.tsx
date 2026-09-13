@@ -15,7 +15,7 @@ export function TeamDetailsPanelTaskQueue({
 }: TeamDetailsPanelTaskQueueProps) {
   return (
     <div className={detailsPanelClass}>
-      <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+      <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-muted-foreground">
         Task queue
       </div>
       <div className="mt-3 space-y-2">
@@ -24,10 +24,10 @@ export function TeamDetailsPanelTaskQueue({
             <div key={task.id} className={detailsCardClass}>
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="truncate text-sm font-semibold text-[var(--foreground)]">
+                  <div className="truncate text-sm font-semibold text-foreground">
                     {task.title || truncateIdentifier(task.id, 18)}
                   </div>
-                  <div className="truncate text-xs text-[var(--muted-foreground)]">
+                  <div className="truncate text-xs text-muted-foreground">
                     {task.goal || task.id}
                   </div>
                 </div>
@@ -40,7 +40,7 @@ export function TeamDetailsPanelTaskQueue({
                   {task.status || "unknown"}
                 </span>
               </div>
-              <div className="mt-2 flex flex-wrap gap-3 text-xs text-[var(--muted-foreground)]">
+              <div className="mt-2 flex flex-wrap gap-3 text-xs text-muted-foreground">
                 <span>priority {task.priority ?? 0}</span>
                 {task.assignee ? <span>assignee {task.assignee}</span> : null}
                 {task.parent_task_id ? (
@@ -52,7 +52,7 @@ export function TeamDetailsPanelTaskQueue({
             </div>
           ))
         ) : (
-          <div className="text-sm text-[var(--muted-foreground)]">
+          <div className="text-sm text-muted-foreground">
             No tasks available.
           </div>
         )}

@@ -30,17 +30,17 @@ export function RuntimeWebsocketDomainEditor({
 
   return (
     <div className="space-y-3">
-      <div className="rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+      <div className="rounded-[0.9rem] border border-border bg-surface-softer p-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             <SettingsPanelIcon>
               <WifiIcon size={15} />
             </SettingsPanelIcon>
             <div>
-              <div className="text-base font-semibold text-[var(--foreground)]">
+              <div className="text-base font-semibold text-foreground">
                 {t("editor.websocket.title")}
               </div>
-              <div className="mt-1 text-sm text-[var(--muted-foreground)]">
+              <div className="mt-1 text-sm text-muted-foreground">
                 {t("editor.websocket.description")}
               </div>
             </div>
@@ -65,20 +65,20 @@ export function RuntimeWebsocketDomainEditor({
         </div>
       </div>
 
-      <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+      <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
         <div className="mb-3 flex items-center justify-between gap-3">
           <div>
-            <div className="text-[13px] font-semibold text-[var(--foreground)]">
+            <div className="text-[13px] font-semibold text-foreground">
               {t("editor.websocket.master.title")}
             </div>
-            <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+            <div className="mt-1 text-xs text-muted-foreground">
               {t("editor.websocket.master.description")}
             </div>
           </div>
-          <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
+          <label className="flex items-center gap-2 text-sm text-foreground">
             <input
               type="checkbox"
-              className="h-4 w-4 accent-[var(--accent-primary)]"
+              className="h-4 w-4 accent-accent-primary"
               checked={config.enabled}
               onChange={(event) => update({ enabled: event.target.checked })}
             />
@@ -88,20 +88,20 @@ export function RuntimeWebsocketDomainEditor({
       </div>
 
       <div className="grid gap-3 xl:grid-cols-2">
-        <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+        <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
-              <div className="text-[13px] font-semibold text-[var(--foreground)]">
+              <div className="text-[13px] font-semibold text-foreground">
                 {t("editor.websocket.responses.title")}
               </div>
-              <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+              <div className="mt-1 text-xs text-muted-foreground">
                 {t("editor.websocket.responses.description")}
               </div>
             </div>
-            <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
+            <label className="flex items-center gap-2 text-sm text-foreground">
               <input
                 type="checkbox"
-                className="h-4 w-4 accent-[var(--accent-primary)]"
+                className="h-4 w-4 accent-accent-primary"
                 checked={config.responsesIngressEnabled}
                 onChange={(event) =>
                   update({ responsesIngressEnabled: event.target.checked })
@@ -224,20 +224,20 @@ export function RuntimeWebsocketDomainEditor({
           </div>
         </div>
 
-        <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+        <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
-              <div className="text-[13px] font-semibold text-[var(--foreground)]">
+              <div className="text-[13px] font-semibold text-foreground">
                 {t("editor.websocket.realtime.title")}
               </div>
-              <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+              <div className="mt-1 text-xs text-muted-foreground">
                 {t("editor.websocket.realtime.description")}
               </div>
             </div>
-            <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
+            <label className="flex items-center gap-2 text-sm text-foreground">
               <input
                 type="checkbox"
-                className="h-4 w-4 accent-[var(--accent-primary)]"
+                className="h-4 w-4 accent-accent-primary"
                 checked={config.realtimeIngressEnabled}
                 onChange={(event) =>
                   update({ realtimeIngressEnabled: event.target.checked })

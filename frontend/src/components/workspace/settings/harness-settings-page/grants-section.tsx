@@ -89,7 +89,7 @@ export function HarnessGrantsSection({
                 {t("harness.remember")}
               </Button>
             </div>
-            <p className="mt-2 text-xs leading-5 text-[var(--muted-foreground)]">
+            <p className="mt-2 text-xs leading-5 text-muted-foreground">
               {t("harness.grantHint")}
             </p>
           </SettingsPanelCard>
@@ -99,16 +99,16 @@ export function HarnessGrantsSection({
               {grants.map((grant) => (
                 <div
                   key={`${grant.tool}:${grant.pattern || ""}:${grant.scope || ""}`}
-                  className="flex items-start justify-between gap-3 rounded-[0.85rem] border border-[var(--border)] bg-[var(--surface-softer)] px-3 py-2.5"
+                  className="flex items-start justify-between gap-3 rounded-[0.85rem] border border-border bg-surface-softer px-3 py-2.5"
                 >
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-sm font-semibold text-[var(--foreground)]">
+                      <span className="text-sm font-semibold text-foreground">
                         {grant.tool}
                       </span>
                       {grant.scope ? <Badge>{grant.scope}</Badge> : null}
                     </div>
-                    <p className="mt-1 app-inline-mono break-all text-sm text-[var(--muted-foreground)]">
+                    <p className="mt-1 app-inline-mono break-all text-sm text-muted-foreground">
                       {grant.pattern || t("harness.toolWideGrant")}
                     </p>
                   </div>

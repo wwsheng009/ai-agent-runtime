@@ -39,10 +39,10 @@ export function DispatchMonitorPanel({
     <div className="rounded-[0.8rem] border border-white/8 bg-white/[0.03] px-3 py-2.5">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <div className="text-sm font-semibold text-[var(--foreground)]">
+          <div className="text-sm font-semibold text-foreground">
             Dispatch monitor
           </div>
-          <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+          <div className="mt-1 text-xs text-muted-foreground">
             Follow task execution across the most recent fan-out batch.
           </div>
         </div>
@@ -60,7 +60,7 @@ export function DispatchMonitorPanel({
       </div>
 
       {dispatchMonitorError ? (
-        <div className="mt-2.5 rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-[var(--muted-foreground)]">
+        <div className="mt-2.5 rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
           {dispatchMonitorError}
         </div>
       ) : null}

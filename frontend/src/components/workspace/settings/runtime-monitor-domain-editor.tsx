@@ -32,17 +32,17 @@ export function RuntimeMonitorDomainEditor({
 
   return (
     <div className="space-y-3">
-      <div className="rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+      <div className="rounded-[0.9rem] border border-border bg-surface-softer p-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             <SettingsPanelIcon>
               <ActivityIcon size={15} />
             </SettingsPanelIcon>
             <div>
-              <div className="text-base font-semibold text-[var(--foreground)]">
+              <div className="text-base font-semibold text-foreground">
                 {t("editor.monitor.title")}
               </div>
-              <div className="mt-1 text-sm text-[var(--muted-foreground)]">
+              <div className="mt-1 text-sm text-muted-foreground">
                 {t("editor.monitor.description")}
               </div>
             </div>
@@ -72,20 +72,20 @@ export function RuntimeMonitorDomainEditor({
         </div>
       </div>
 
-      <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+      <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
         <div className="mb-3 flex items-center justify-between gap-3">
           <div>
-            <div className="text-[13px] font-semibold text-[var(--foreground)]">
+            <div className="text-[13px] font-semibold text-foreground">
               {t("editor.monitor.master.title")}
             </div>
-            <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+            <div className="mt-1 text-xs text-muted-foreground">
               {t("editor.monitor.master.description")}
             </div>
           </div>
-          <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
+          <label className="flex items-center gap-2 text-sm text-foreground">
             <input
               type="checkbox"
-              className="h-4 w-4 accent-[var(--accent-primary)]"
+              className="h-4 w-4 accent-accent-primary"
               checked={config.enabled}
               onChange={(event) => update({ enabled: event.target.checked })}
             />
@@ -95,20 +95,20 @@ export function RuntimeMonitorDomainEditor({
       </div>
 
       <div className="grid gap-3 xl:grid-cols-2">
-        <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+        <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
-              <div className="text-[13px] font-semibold text-[var(--foreground)]">
+              <div className="text-[13px] font-semibold text-foreground">
                 {t("editor.monitor.metrics.title")}
               </div>
-              <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+              <div className="mt-1 text-xs text-muted-foreground">
                 {t("editor.monitor.metrics.description")}
               </div>
             </div>
-            <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
+            <label className="flex items-center gap-2 text-sm text-foreground">
               <input
                 type="checkbox"
-                className="h-4 w-4 accent-[var(--accent-primary)]"
+                className="h-4 w-4 accent-accent-primary"
                 checked={config.metricsEnabled}
                 onChange={(event) =>
                   update({ metricsEnabled: event.target.checked })
@@ -136,20 +136,20 @@ export function RuntimeMonitorDomainEditor({
           </div>
         </div>
 
-        <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+        <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
-              <div className="text-[13px] font-semibold text-[var(--foreground)]">
+              <div className="text-[13px] font-semibold text-foreground">
                 {t("editor.monitor.tracing.title")}
               </div>
-              <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+              <div className="mt-1 text-xs text-muted-foreground">
                 {t("editor.monitor.tracing.description")}
               </div>
             </div>
-            <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
+            <label className="flex items-center gap-2 text-sm text-foreground">
               <input
                 type="checkbox"
-                className="h-4 w-4 accent-[var(--accent-primary)]"
+                className="h-4 w-4 accent-accent-primary"
                 checked={config.tracingEnabled}
                 onChange={(event) =>
                   update({ tracingEnabled: event.target.checked })
@@ -189,20 +189,20 @@ export function RuntimeMonitorDomainEditor({
       </div>
 
       <div className="grid gap-3 xl:grid-cols-2">
-        <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+        <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
-              <div className="text-[13px] font-semibold text-[var(--foreground)]">
+              <div className="text-[13px] font-semibold text-foreground">
                 {t("editor.monitor.alert.title")}
               </div>
-              <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+              <div className="mt-1 text-xs text-muted-foreground">
                 {t("editor.monitor.alert.description")}
               </div>
             </div>
-            <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
+            <label className="flex items-center gap-2 text-sm text-foreground">
               <input
                 type="checkbox"
-                className="h-4 w-4 accent-[var(--accent-primary)]"
+                className="h-4 w-4 accent-accent-primary"
                 checked={config.alertEnabled}
                 onChange={(event) => update({ alertEnabled: event.target.checked })}
               />
@@ -253,20 +253,20 @@ export function RuntimeMonitorDomainEditor({
         </div>
 
         <div className="space-y-3">
-          <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+          <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
             <div className="mb-3 flex items-center justify-between gap-3">
               <div>
-                <div className="text-[13px] font-semibold text-[var(--foreground)]">
+                <div className="text-[13px] font-semibold text-foreground">
                   {t("editor.monitor.pprof.title")}
                 </div>
-                <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-1 text-xs text-muted-foreground">
                   {t("editor.monitor.pprof.description")}
                 </div>
               </div>
-              <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
+              <label className="flex items-center gap-2 text-sm text-foreground">
                 <input
                   type="checkbox"
-                  className="h-4 w-4 accent-[var(--accent-primary)]"
+                  className="h-4 w-4 accent-accent-primary"
                   checked={config.pprofEnabled}
                   onChange={(event) => update({ pprofEnabled: event.target.checked })}
                 />
@@ -295,20 +295,20 @@ export function RuntimeMonitorDomainEditor({
             </div>
           </div>
 
-          <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+          <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
             <div className="mb-3 flex items-center justify-between gap-3">
               <div>
-                <div className="text-[13px] font-semibold text-[var(--foreground)]">
+                <div className="text-[13px] font-semibold text-foreground">
                   {t("editor.monitor.memory.title")}
                 </div>
-                <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-1 text-xs text-muted-foreground">
                   {t("editor.monitor.memory.description")}
                 </div>
               </div>
-              <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
+              <label className="flex items-center gap-2 text-sm text-foreground">
                 <input
                   type="checkbox"
-                  className="h-4 w-4 accent-[var(--accent-primary)]"
+                  className="h-4 w-4 accent-accent-primary"
                   checked={config.memoryEnabled}
                   onChange={(event) => update({ memoryEnabled: event.target.checked })}
                 />

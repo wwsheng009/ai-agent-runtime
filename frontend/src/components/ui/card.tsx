@@ -27,7 +27,7 @@ export function CardTitle({
   return (
     <h3
       className={cn(
-        "text-lg font-semibold tracking-[-0.02em] text-[var(--foreground)]",
+        "text-lg font-semibold tracking-[-0.02em] text-foreground",
         className,
       )}
       {...props}
@@ -41,7 +41,7 @@ export function CardDescription({
 }: ComponentProps<"p">) {
   return (
     <p
-      className={cn("text-sm leading-6 text-[var(--muted-foreground)]", className)}
+      className={cn("text-sm leading-6 text-muted-foreground", className)}
       {...props}
     />
   );

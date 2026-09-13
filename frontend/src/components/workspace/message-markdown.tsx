@@ -103,7 +103,7 @@ export const MessageMarkdown = memo(function MessageMarkdown({
     <div
       aria-busy={streaming ? "true" : undefined}
       className={cn(
-        "app-chat-copy min-w-0 text-[var(--foreground)]",
+        "app-chat-copy min-w-0 text-foreground",
         className,
       )}
     >
@@ -172,7 +172,7 @@ export const MessageMarkdown = memo(function MessageMarkdown({
       {!streaming && interrupted ? (
         <div
           aria-label="Response stopped"
-          className="mt-4 inline-flex items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--surface-solid)] px-2.5 py-1 app-text-10 font-medium uppercase tracking-[0.12em] text-[var(--muted-foreground)]"
+          className="mt-4 inline-flex items-center gap-1.5 rounded-full border border-border bg-surface-solid px-2.5 py-1 app-text-10 font-medium uppercase tracking-[0.12em] text-muted-foreground"
           role="status"
         >
           <SquareIcon aria-hidden="true" size={11} />

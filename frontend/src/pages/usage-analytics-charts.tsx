@@ -175,7 +175,7 @@ function ChartHeading({
     <div className="mb-2 flex min-h-10 items-start justify-between gap-3">
       <div className="min-w-0">
         <h2 className="text-sm font-semibold">{title}</h2>
-        <p className="truncate text-xs text-[var(--muted-foreground)]">
+        <p className="truncate text-xs text-muted-foreground">
           {subtitle}
         </p>
       </div>
@@ -187,7 +187,7 @@ function ChartHeading({
 function ChartEmpty() {
   const { t } = useTranslation("usageAnalytics");
   return (
-    <div className="flex h-[280px] items-center justify-center text-sm text-[var(--muted-foreground)]">
+    <div className="flex h-[280px] items-center justify-center text-sm text-muted-foreground">
       {t("groups.empty")}
     </div>
   );
@@ -213,7 +213,7 @@ function TokenCompositionChart({
     <div data-testid="analytics-token-chart">
       <div className="relative mx-auto h-[190px] w-full max-w-[320px]">
         {visibleData.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-sm text-[var(--muted-foreground)]">
+          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
             {t("charts.tokens.empty")}
           </div>
         ) : (
@@ -240,7 +240,7 @@ function TokenCompositionChart({
               </PieChart>
             </ResponsiveContainer>
             <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
-              <span className="text-[11px] text-[var(--muted-foreground)]">
+              <span className="text-[11px] text-muted-foreground">
                 {t("charts.tokens.centerLabel")}
               </span>
               <strong className="text-base tabular-nums">
@@ -260,7 +260,7 @@ function TokenCompositionChart({
                 style={{ backgroundColor: item.color }}
               />
               <span
-                className="truncate text-[var(--muted-foreground)]"
+                className="truncate text-muted-foreground"
                 title={item.name}
               >
                 {item.name}
@@ -268,7 +268,7 @@ function TokenCompositionChart({
             </div>
             <div className="ml-[18px] text-xs font-medium tabular-nums">
               {formatNumber(item.value)}{" "}
-              <span className="text-[var(--muted-foreground)]">
+              <span className="text-muted-foreground">
                 {total > 0 ? formatPercent(item.value / total) : "0.0%"}
               </span>
             </div>
@@ -296,19 +296,19 @@ function AnalyticsChartTooltip({
   const bucket = payload[0]?.payload;
 
   return (
-    <div className="max-w-[min(82vw,360px)] border border-[var(--border-strong)] bg-[var(--surface-overlay)] px-3 py-2 text-xs shadow-xl">
+    <div className="max-w-[min(82vw,360px)] border border-border-strong bg-surface-overlay px-3 py-2 text-xs shadow-xl">
       <div className="break-all font-medium">
         {String(label ?? bucket?.key ?? "-")}
       </div>
-      <div className="mt-1 flex justify-between gap-5 text-[var(--muted-foreground)]">
+      <div className="mt-1 flex justify-between gap-5 text-muted-foreground">
         <span>{t("groups.columns.tokens")}</span>
-        <span className="tabular-nums text-[var(--foreground)]">
+        <span className="tabular-nums text-foreground">
           {formatNumber(Number(payload[0]?.value ?? 0))}
         </span>
       </div>
-      <div className="flex justify-between gap-5 text-[var(--muted-foreground)]">
+      <div className="flex justify-between gap-5 text-muted-foreground">
         <span>{t("groups.columns.sessions")}</span>
-        <span className="tabular-nums text-[var(--foreground)]">
+        <span className="tabular-nums text-foreground">
           {formatNumber(bucket?.sessions)}
         </span>
       </div>
@@ -329,9 +329,9 @@ function TokenChartTooltip({
   const value = Number(payload[0]?.value ?? 0);
 
   return (
-    <div className="border border-[var(--border-strong)] bg-[var(--surface-overlay)] px-3 py-2 text-xs shadow-xl">
+    <div className="border border-border-strong bg-surface-overlay px-3 py-2 text-xs shadow-xl">
       <div className="font-medium">{payload[0]?.name}</div>
-      <div className="mt-1 tabular-nums text-[var(--muted-foreground)]">
+      <div className="mt-1 tabular-nums text-muted-foreground">
         {formatNumber(value)} · {total > 0 ? formatPercent(value / total) : "0.0%"}
       </div>
     </div>

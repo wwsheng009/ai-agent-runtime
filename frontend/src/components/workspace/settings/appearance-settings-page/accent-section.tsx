@@ -40,10 +40,10 @@ export function AppearanceAccentSection({
               >
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <div className="text-base font-semibold text-[var(--foreground)]">
+                    <div className="text-base font-semibold text-foreground">
                       {option.label}
                     </div>
-                    <p className="mt-2 text-sm leading-6 text-[var(--muted-foreground)]">
+                    <p className="mt-2 text-sm leading-6 text-muted-foreground">
                       {option.description}
                     </p>
                   </div>
@@ -51,14 +51,14 @@ export function AppearanceAccentSection({
                     size={16}
                     className={cn(
                       active
-                        ? "text-[var(--accent-primary)]"
-                        : "text-[var(--muted-foreground)]",
+                        ? "text-accent-primary"
+                        : "text-muted-foreground",
                     )}
                   />
                 </div>
                 <div
                   className={cn(
-                    "mt-3 h-14 rounded-[0.75rem] border border-[var(--border)] bg-gradient-to-r",
+                    "mt-3 h-14 rounded-[0.75rem] border border-border bg-gradient-to-r",
                     option.previewClassName,
                   )}
                 />

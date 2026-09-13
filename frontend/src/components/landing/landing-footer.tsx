@@ -10,11 +10,11 @@ export function LandingFooter() {
 
   return (
     <footer className="container-shell mt-10 pb-10">
-      <div className="rounded-[2rem] border border-[var(--border)] bg-[var(--panel-strong-bg)] px-6 py-10 text-center shadow-[0_20px_80px_rgba(0,0,0,0.18)]">
-        <p className="font-serif text-2xl text-[var(--foreground)] sm:text-3xl">
+      <div className="rounded-[2rem] border border-border bg-panel-strong-bg px-6 py-10 text-center shadow-[0_20px_80px_rgba(0,0,0,0.18)]">
+        <p className="font-serif text-2xl text-foreground sm:text-3xl">
           {t("footer.quote")}
         </p>
-        <p className="mt-4 text-sm leading-7 text-[var(--muted-foreground)]">
+        <p className="mt-4 text-sm leading-7 text-muted-foreground">
           {t("footer.body")}
         </p>
         <div className="mt-6 flex flex-wrap items-center justify-center gap-3">

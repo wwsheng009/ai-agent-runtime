@@ -37,18 +37,18 @@ export function RuntimeTeamTimelineSection({
             >
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="truncate text-[13px] font-semibold text-[var(--foreground)]">
+                  <div className="truncate text-[13px] font-semibold text-foreground">
                     {event.type.replaceAll(".", " / ")}
                   </div>
-                  <div className="mt-0.5 truncate text-xs text-[var(--muted-foreground)]">
+                  <div className="mt-0.5 truncate text-xs text-muted-foreground">
                     {describeEventPayload(event)}
                   </div>
                 </div>
                 <div className="shrink-0 text-right">
-                  <div className="app-text-10 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
+                  <div className="app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
                     seq {event.seq}
                   </div>
-                  <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                  <div className="mt-1 text-xs text-muted-foreground">
                     {formatRelativeTimestamp(event.timestamp)}
                   </div>
                 </div>
@@ -56,7 +56,7 @@ export function RuntimeTeamTimelineSection({
             </div>
           ))
         ) : (
-          <div className="text-sm text-[var(--muted-foreground)]">
+          <div className="text-sm text-muted-foreground">
             No team events available.
           </div>
         )}

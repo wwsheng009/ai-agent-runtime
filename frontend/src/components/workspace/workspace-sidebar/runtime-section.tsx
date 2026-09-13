@@ -65,7 +65,7 @@ export function WorkspaceSidebarRuntimeSection({
       <SidebarSection
         id="runtime"
         icon={CompassIcon}
-        iconClassName="text-[var(--accent-secondary)]"
+        iconClassName="text-accent-secondary"
         title={t("sidebar.sections.runtime")}
         count={
           liveTeamCount > 0 ? (
@@ -81,32 +81,32 @@ export function WorkspaceSidebarRuntimeSection({
         isOpen={openSections.runtime}
         onToggle={toggleSection}
       >
-        <section className="rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+        <section className="rounded-[0.9rem] border border-border bg-surface-softer p-3">
           {hasRuntimeStats ? (
-            <div className="flex flex-wrap gap-1.5 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <div className="flex flex-wrap gap-1.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
               {runtimeSessionsSummary.totalCount > 0 ? (
-                <span className="rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-0.5">
+                <span className="rounded-[0.65rem] border border-border bg-surface-soft px-2 py-0.5">
                   {t("sidebar.runtimeStats.sessions", {
                     count: runtimeSessionsSummary.totalCount,
                   })}
                 </span>
               ) : null}
               {runtimeSessionsSummary.recoverableCount > 0 ? (
-                <span className="rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-0.5">
+                <span className="rounded-[0.65rem] border border-border bg-surface-soft px-2 py-0.5">
                   {t("sidebar.runtimeStats.recoverable", {
                     count: runtimeSessionsSummary.recoverableCount,
                   })}
                 </span>
               ) : null}
               {sessionRailSummary.pendingCount > 0 ? (
-                <span className="rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-0.5">
+                <span className="rounded-[0.65rem] border border-border bg-surface-soft px-2 py-0.5">
                   {t("sidebar.runtimeStats.pending", {
                     count: sessionRailSummary.pendingCount,
                   })}
                 </span>
               ) : null}
             {runtimeSessionsLoading || runtimeSessionsRefreshing ? (
-              <span className="inline-flex items-center gap-1.5 rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-0.5">
+              <span className="inline-flex items-center gap-1.5 rounded-[0.65rem] border border-border bg-surface-soft px-2 py-0.5">
                 <LoaderCircleIcon size={12} className="animate-spin" />
                 {t("sidebar.runtimeStats.syncing")}
               </span>
@@ -115,7 +115,7 @@ export function WorkspaceSidebarRuntimeSection({
           ) : null}
 
         {runtimeSessionsError ? (
-          <div className="mt-3 rounded-[0.8rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-[var(--muted-foreground)]">
+          <div className="mt-3 rounded-[0.8rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
             {runtimeSessionsError}
           </div>
         ) : null}
@@ -125,12 +125,12 @@ export function WorkspaceSidebarRuntimeSection({
             {runtimeTeams.slice(0, 4).map((team) => (
               <div
                 key={team.id}
-                className="flex items-center justify-between rounded-[0.75rem] border border-[var(--border)] bg-[var(--surface-solid)] px-2.5 py-2"
+                className="flex items-center justify-between rounded-[0.75rem] border border-border bg-surface-solid px-2.5 py-2"
               >
-                <div className="truncate app-text-13 text-[var(--foreground)]">
+                <div className="truncate app-text-13 text-foreground">
                   {team.id}
                 </div>
-                <span className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                <span className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                   {team.status || t("sidebar.unknown")}
                 </span>
               </div>

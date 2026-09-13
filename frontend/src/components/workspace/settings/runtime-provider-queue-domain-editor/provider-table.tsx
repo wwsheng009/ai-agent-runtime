@@ -69,7 +69,7 @@ export function RuntimeProviderQueueProviderTable({
             cell: (item) => (
               <div className="min-w-[12rem]">
                 <div className="font-semibold">{item.provider}</div>
-                <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-1 text-xs text-muted-foreground">
                   {item.extraFieldCount > 0
                     ? t("editor.providerQueue.table.extraFields", {
                         count: item.extraFieldCount,
@@ -84,7 +84,7 @@ export function RuntimeProviderQueueProviderTable({
             cell: (item) => (
               <div className="min-w-[14rem]">
                 <div>{`max ${item.maxConcurrency || "--"} · queue ${item.queueSize || "--"}`}</div>
-                <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-1 text-xs text-muted-foreground">
                   {item.queueTimeout ||
                     t("editor.providerQueue.table.noQueueTimeout")}
                 </div>

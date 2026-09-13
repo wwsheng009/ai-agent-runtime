@@ -63,7 +63,7 @@ function RuntimeTeamDetailsPanelBody({
   }
 
   return (
-    <div className="rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-solid)] p-3">
+    <div className="rounded-[0.9rem] border border-border bg-surface-solid p-3">
       <RuntimeTeamSnapshot
         details={details}
         detailsError={detailsError}

@@ -31,7 +31,7 @@ export function RequestsTable({ requests, total, offset, pageSize, loading, onPa
     <section aria-label={t("cache.requestsTitle")} className="surface-panel rounded-[0.95rem] p-3 sm:p-4">
       <div className="flex items-center justify-between gap-2">
         <h2 className="text-sm font-semibold">{t("cache.requestsTitle")}</h2>
-        <div className="flex items-center gap-1 text-xs text-[var(--muted-foreground)]">
+        <div className="flex items-center gap-1 text-xs text-muted-foreground">
           <Button variant="ghost" size="sm" disabled={!canPrev || loading} onClick={() => onPage(Math.max(0, offset - pageSize))}>
             {t("sessions.previous")}
           </Button>
@@ -44,8 +44,8 @@ export function RequestsTable({ requests, total, offset, pageSize, loading, onPa
 
       <div className="mt-2 w-full max-w-full overflow-x-auto">
         <table className="w-full min-w-[1080px] border-collapse text-left text-sm">
-          <thead className="text-xs text-[var(--muted-foreground)]">
-            <tr className="border-b border-[var(--border)]">
+          <thead className="text-xs text-muted-foreground">
+            <tr className="border-b border-border">
               <th className="px-2 py-2 font-medium">{t("cache.columns.time")}</th>
               <th className="px-2 py-2 font-medium">{t("cache.columns.providerModel")}</th>
               <th className="px-2 py-2 font-medium">{t("cache.columns.message")}</th>
@@ -59,7 +59,7 @@ export function RequestsTable({ requests, total, offset, pageSize, loading, onPa
           <tbody>
             {requests.length === 0 && !loading ? (
               <tr>
-                <td colSpan={8} className="px-2 py-8 text-center text-sm text-[var(--muted-foreground)]">
+                <td colSpan={8} className="px-2 py-8 text-center text-sm text-muted-foreground">
                   {t("cache.emptyRequests")}
                 </td>
               </tr>
@@ -71,8 +71,8 @@ export function RequestsTable({ requests, total, offset, pageSize, loading, onPa
                 <tr
                   key={record.llm_request_id}
                   className={cn(
-                    "border-b border-[var(--border)] last:border-b-0",
-                    traceable && "cursor-pointer hover:bg-[var(--surface-soft)]",
+                    "border-b border-border last:border-b-0",
+                    traceable && "cursor-pointer hover:bg-surface-soft",
                   )}
                   title={traceable ? t("cache.traceHint") : undefined}
                   onClick={traceable ? () => onTrace(record) : undefined}
@@ -80,16 +80,16 @@ export function RequestsTable({ requests, total, offset, pageSize, loading, onPa
                   <td className="whitespace-nowrap px-2 py-2.5 tabular-nums">{formatCacheTime(record.started_at)}</td>
                   <td className="max-w-52 px-2 py-2.5">
                     <div className="truncate">{record.provider || "-"}</div>
-                    <div className="truncate text-xs text-[var(--muted-foreground)]">{record.model || "-"}</div>
+                    <div className="truncate text-xs text-muted-foreground">{record.model || "-"}</div>
                   </td>
                   <td className="max-w-56 px-2 py-2.5">
                     {messageId ? (
                       <div className="truncate font-mono text-xs" title={messageId}>{messageId}</div>
                     ) : (
-                      <span className="text-xs text-[var(--muted-foreground)]">-</span>
+                      <span className="text-xs text-muted-foreground">-</span>
                     )}
                     {record.correlation_source === "history_inferred" ? (
-                      <Badge className="ml-1 border-[var(--analytics-info-border)] bg-[var(--analytics-info-soft)] text-[var(--analytics-info)]">{t("cache.inferredBadge")}</Badge>
+                      <Badge className="ml-1 border-analytics-info-border bg-analytics-info-soft text-analytics-info">{t("cache.inferredBadge")}</Badge>
                     ) : null}
                   </td>
                   <td className="whitespace-nowrap px-2 py-2.5 text-right tabular-nums">

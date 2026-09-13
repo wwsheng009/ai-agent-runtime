@@ -155,13 +155,13 @@ export function SettingsDialog({
       <DialogPanel className="max-w-6xl">
         <div className="flex items-start justify-between gap-3 px-3.5 py-3 sm:px-4">
           <div>
-            <div className="app-text-11 uppercase tracking-[0.16em] text-[var(--accent-primary)]">
+            <div className="app-text-11 uppercase tracking-[0.16em] text-accent-primary">
               {t("dialog.eyebrow")}
             </div>
-            <h2 className="mt-1 text-lg font-semibold tracking-[-0.03em] text-[var(--foreground)]">
+            <h2 className="mt-1 text-lg font-semibold tracking-[-0.03em] text-foreground">
               {t("dialog.title")}
             </h2>
-            <p className="mt-1 max-w-2xl text-sm leading-6 text-[var(--muted-foreground)]">
+            <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
               {t("dialog.description")}
             </p>
           </div>
@@ -187,8 +187,8 @@ export function SettingsDialog({
           </div>
         </div>
 
-        <div className="grid min-h-0 flex-1 gap-0 border-t border-[var(--border)] md:grid-cols-[208px_minmax(0,1fr)]">
-          <nav className="min-h-0 overflow-y-auto border-b border-[var(--border)] p-2 md:border-b-0 md:border-r">
+        <div className="grid min-h-0 flex-1 gap-0 border-t border-border md:grid-cols-[208px_minmax(0,1fr)]">
+          <nav className="min-h-0 overflow-y-auto border-b border-border p-2 md:border-b-0 md:border-r">
             <div className="space-y-1">
               {sections.map((section) => {
                 const active = activeSection === section.id;
@@ -202,8 +202,8 @@ export function SettingsDialog({
                     className={cn(
                       "w-full rounded-[0.8rem] border px-3 py-2.5 text-left transition",
                       active
-                        ? "border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)]"
-                        : "border-transparent bg-transparent hover:border-[var(--border)] hover:bg-[var(--surface-softer)]",
+                        ? "border-accent-primary-border bg-accent-primary-soft"
+                        : "border-transparent bg-transparent hover:border-border hover:bg-surface-softer",
                     )}
                   >
                     <div className="flex items-center gap-3">
@@ -211,17 +211,17 @@ export function SettingsDialog({
                         className={cn(
                           "inline-flex size-7 items-center justify-center rounded-[0.65rem] border",
                           active
-                            ? "border-[var(--accent-primary-border)] bg-[var(--surface-solid)] text-[var(--accent-primary)]"
-                            : "border-[var(--border)] bg-[var(--surface-solid)] text-[var(--muted-foreground)]",
+                            ? "border-accent-primary-border bg-surface-solid text-accent-primary"
+                            : "border-border bg-surface-solid text-muted-foreground",
                         )}
                       >
                         <Icon size={15} />
                       </span>
                       <div className="min-w-0">
-                        <div className="text-base font-semibold text-[var(--foreground)]">
+                        <div className="text-base font-semibold text-foreground">
                           {section.label}
                         </div>
-                        <div className="mt-0.5 text-xs leading-5 text-[var(--muted-foreground)]">
+                        <div className="mt-0.5 text-xs leading-5 text-muted-foreground">
                           {section.description}
                         </div>
                       </div>
@@ -266,7 +266,7 @@ export function SettingsDialog({
           </div>
         </div>
 
-        <div className="border-t border-[var(--border)] px-3.5 py-2.5 text-xs leading-5 text-[var(--muted-foreground)] sm:px-4">
+        <div className="border-t border-border px-3.5 py-2.5 text-xs leading-5 text-muted-foreground sm:px-4">
           {t("dialog.localStorageFooter")}
         </div>
       </DialogPanel>

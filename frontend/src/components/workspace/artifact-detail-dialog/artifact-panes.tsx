@@ -16,12 +16,12 @@ export function ImageArtifactPane({
   imageDetails,
 }: ImageArtifactPaneProps) {
   return (
-    <div className="overflow-hidden rounded-[0.95rem] border border-[var(--border)] bg-black/20">
-      <div className="border-b border-[var(--border)] px-3.5 py-3">
-        <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+    <div className="overflow-hidden rounded-[0.95rem] border border-border bg-black/20">
+      <div className="border-b border-border px-3.5 py-3">
+        <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
           Rendered image
         </div>
-        <div className="mt-1 text-sm text-[var(--muted-foreground)]">
+        <div className="mt-1 text-sm text-muted-foreground">
           Inspect the generated image at full width. Use the metadata below for prompt and integrity details.
         </div>
       </div>
@@ -37,12 +37,12 @@ export function ImageArtifactPane({
           {imageDetails.map((item) => (
             <div
               key={`${artifact.id}-${item.label}`}
-              className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] px-3 py-2.5"
+              className="rounded-[0.8rem] border border-border bg-surface-softer px-3 py-2.5"
             >
-              <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+              <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                 {item.label}
               </div>
-              <div className="mt-1.5 break-all text-sm text-[var(--foreground)]">
+              <div className="mt-1.5 break-all text-sm text-foreground">
                 {item.value}
               </div>
             </div>
@@ -59,24 +59,24 @@ type ImageUnavailablePaneProps = {
 
 export function ImageUnavailablePane({ artifact }: ImageUnavailablePaneProps) {
   return (
-    <div className="overflow-hidden rounded-[0.95rem] border border-[var(--border)] bg-black/20">
-      <div className="border-b border-[var(--border)] px-3.5 py-3">
-        <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+    <div className="overflow-hidden rounded-[0.95rem] border border-border bg-black/20">
+      <div className="border-b border-border px-3.5 py-3">
+        <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
           Image unavailable
         </div>
-        <div className="mt-1 text-sm text-[var(--muted-foreground)]">
+        <div className="mt-1 text-sm text-muted-foreground">
           This artifact was recorded as an image, but the MIME type is not renderable inline.
         </div>
       </div>
       <div className="p-4">
-        <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] px-3.5 py-3">
-          <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+        <div className="rounded-[0.8rem] border border-border bg-surface-softer px-3.5 py-3">
+          <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
             File name
           </div>
-          <div className="mt-1.5 break-all text-sm text-[var(--foreground)]">
+          <div className="mt-1.5 break-all text-sm text-foreground">
             {artifact.name}
           </div>
-          <div className="mt-3 app-text-11 text-[var(--muted-foreground)]">
+          <div className="mt-3 app-text-11 text-muted-foreground">
             MIME type {artifact.mimeType?.trim() || "unknown"} cannot be rendered inline.
           </div>
           <div className="mt-4">
@@ -113,17 +113,17 @@ export function ArtifactPreviewPane({
   return (
     <div
       aria-labelledby={previewTabId}
-      className="min-h-full overflow-hidden rounded-[0.95rem] border border-[var(--border)] bg-black/20"
+      className="min-h-full overflow-hidden rounded-[0.95rem] border border-border bg-black/20"
       hidden={view !== "preview"}
       id={previewPanelId}
       role="tabpanel"
       tabIndex={0}
     >
-      <div className="border-b border-[var(--border)] px-3.5 py-3">
-        <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+      <div className="border-b border-border px-3.5 py-3">
+        <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
           Rendered preview
         </div>
-        <div className="mt-1 text-sm text-[var(--muted-foreground)]">
+        <div className="mt-1 text-sm text-muted-foreground">
           Use the full dialog width to inspect the rendered output.
         </div>
       </div>
@@ -157,17 +157,17 @@ export function ArtifactSourcePane({
   return (
     <div
       aria-labelledby={sourceTabId}
-      className="overflow-hidden rounded-[0.95rem] border border-[var(--border)] bg-black/20"
+      className="overflow-hidden rounded-[0.95rem] border border-border bg-black/20"
       hidden={view !== "source"}
       id={sourcePanelId}
       role="tabpanel"
       tabIndex={0}
     >
-      <div className="border-b border-[var(--border)] px-3.5 py-3">
-        <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+      <div className="border-b border-border px-3.5 py-3">
+        <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
           Source reader
         </div>
-        <div className="mt-1 text-sm text-[var(--muted-foreground)]">
+        <div className="mt-1 text-sm text-muted-foreground">
           Inspect the exact file contents without squeezing them into the rail.
         </div>
       </div>
@@ -190,12 +190,12 @@ export function ArtifactSourceReaderCard({
   artifact,
 }: ArtifactSourceReaderCardProps) {
   return (
-    <div className="overflow-hidden rounded-[0.95rem] border border-[var(--border)] bg-black/20">
-      <div className="border-b border-[var(--border)] px-3.5 py-3">
-        <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+    <div className="overflow-hidden rounded-[0.95rem] border border-border bg-black/20">
+      <div className="border-b border-border px-3.5 py-3">
+        <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
           Source reader
         </div>
-        <div className="mt-1 text-sm text-[var(--muted-foreground)]">
+        <div className="mt-1 text-sm text-muted-foreground">
           Inspect the exact structured payload or file contents in a full-width dialog.
         </div>
       </div>

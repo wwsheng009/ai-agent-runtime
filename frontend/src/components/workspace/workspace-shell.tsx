@@ -226,7 +226,7 @@ export function WorkspaceShell({
   }
 
   return (
-    <div className="h-screen overflow-hidden [background:var(--workspace-shell-bg)] text-[var(--foreground)]">
+    <div className="h-screen overflow-hidden [background:var(--workspace-shell-bg)] text-foreground">
       <div
         className={cn(
           "grid h-full min-h-0 grid-cols-1 gap-0",

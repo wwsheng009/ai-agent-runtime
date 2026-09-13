@@ -61,7 +61,7 @@ export function ArtifactPanelCheckpointDetailSection({
       {selectedCheckpoint ? (
         <div className="flex h-full min-h-0 flex-col">
           <div className="border-b border-white/8 px-3.5 py-3.5">
-            <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+            <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
               Checkpoint detail
             </div>
             <div className="mt-2.5 flex items-start justify-between gap-4">
@@ -69,10 +69,10 @@ export function ArtifactPanelCheckpointDetailSection({
                 <div className="text-base font-semibold tracking-[-0.02em]">
                   {formatCheckpointTitle(selectedCheckpoint)}
                 </div>
-                <div className="mt-1.5 text-sm text-[var(--muted-foreground)]">
+                <div className="mt-1.5 text-sm text-muted-foreground">
                   {formatRelativeTimestamp(selectedCheckpoint.created_at)}
                 </div>
-                <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--muted-foreground)]">
+                <p className="mt-3 max-w-3xl text-sm leading-6 text-muted-foreground">
                   {formatCheckpointReason(selectedCheckpoint)}
                 </p>
               </div>
@@ -131,12 +131,12 @@ export function ArtifactPanelCheckpointDetailSection({
             ) : null}
 
             {checkpointRestoreError ? (
-              <div className="mt-3 rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2 text-sm text-[var(--muted-foreground)]">
+              <div className="mt-3 rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2 text-sm text-muted-foreground">
                 {checkpointRestoreError}
               </div>
             ) : null}
             {checkpointRestoreNotice ? (
-              <div className="mt-3 rounded-[0.75rem] border border-[#8fd0c6]/18 bg-[#8fd0c6]/10 px-3 py-2 text-sm text-[var(--muted-foreground)]">
+              <div className="mt-3 rounded-[0.75rem] border border-[#8fd0c6]/18 bg-[#8fd0c6]/10 px-3 py-2 text-sm text-muted-foreground">
                 {checkpointRestoreNotice}
               </div>
             ) : null}
@@ -146,14 +146,14 @@ export function ArtifactPanelCheckpointDetailSection({
             <div className="grid min-h-full gap-3">
               <div className="space-y-3">
                 {checkpointDetailsError ? (
-                  <div className="rounded-[0.85rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3.5 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
+                  <div className="rounded-[0.85rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
                     {checkpointDetailsError}
                   </div>
                 ) : null}
 
                 {checkpointConversationSummary.length > 0 ? (
                   <div className="rounded-[0.9rem] border border-white/8 bg-white/4 p-3.5">
-                    <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+                    <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-muted-foreground">
                       <ScrollTextIcon size={14} />
                       Conversation snapshot
                     </div>
@@ -178,7 +178,7 @@ export function ArtifactPanelCheckpointDetailSection({
 
                 {checkpointPreview?.preview && checkpointPreview.preview.length > 0 ? (
                   <div className="rounded-[0.9rem] border border-white/8 bg-white/4 p-3.5">
-                    <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+                    <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-muted-foreground">
                       <HistoryIcon size={14} />
                       Preview summary
                     </div>
@@ -201,17 +201,17 @@ export function ArtifactPanelCheckpointDetailSection({
                 <div className="overflow-hidden rounded-[0.9rem] border border-white/8 bg-black/20">
                   <div className="flex items-center justify-between gap-3 border-b border-white/8 px-3 py-2.5">
                     <div>
-                      <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+                      <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
                         File diff reader
                       </div>
-                      <div className="mt-1 text-sm text-[var(--muted-foreground)]">
+                      <div className="mt-1 text-sm text-muted-foreground">
                         Review captured file changes from the selected checkpoint.
                       </div>
                     </div>
                     {checkpointDetailLoading ? (
                       <LoaderCircleIcon
                         size={14}
-                        className="animate-spin text-[var(--muted-foreground)]"
+                        className="animate-spin text-muted-foreground"
                       />
                     ) : null}
                   </div>
@@ -227,23 +227,23 @@ export function ArtifactPanelCheckpointDetailSection({
 
               <div className="space-y-3">
                 <div className="rounded-[0.9rem] border border-white/8 bg-white/4 p-3.5">
-                  <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+                  <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
                     Snapshot metadata
                   </div>
                   <div className="mt-2.5 space-y-2.5">
                     <div className="rounded-[0.75rem] border border-white/8 bg-black/20 px-3 py-2.5">
-                      <div className="app-text-11 uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+                      <div className="app-text-11 uppercase tracking-[0.16em] text-muted-foreground">
                         Summary
                       </div>
-                      <div className="mt-2 text-sm leading-6 text-[var(--foreground)]">
+                      <div className="mt-2 text-sm leading-6 text-foreground">
                         {formatCheckpointMeta(selectedCheckpoint)}
                       </div>
                     </div>
                     <div className="rounded-[0.75rem] border border-white/8 bg-black/20 px-3 py-2.5">
-                      <div className="app-text-11 uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+                      <div className="app-text-11 uppercase tracking-[0.16em] text-muted-foreground">
                         Reading state
                       </div>
-                      <div className="mt-2 text-sm leading-6 text-[var(--foreground)]">
+                      <div className="mt-2 text-sm leading-6 text-foreground">
                         {checkpointFilesForSelection.length > 0
                           ? `${checkpointFilesForSelection.length} captured files available`
                           : "Waiting for file details from runtime"}
@@ -254,13 +254,13 @@ export function ArtifactPanelCheckpointDetailSection({
 
                 <div className="rounded-[0.9rem] border border-white/8 bg-white/4 p-3.5">
                   <div className="flex items-center justify-between gap-3">
-                    <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+                    <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
                       Changed files
                     </div>
                     {checkpointDetailLoading ? (
                       <LoaderCircleIcon
                         size={14}
-                        className="animate-spin text-[var(--muted-foreground)]"
+                        className="animate-spin text-muted-foreground"
                       />
                     ) : null}
                   </div>
@@ -283,10 +283,10 @@ export function ArtifactPanelCheckpointDetailSection({
                           >
                             <div className="flex items-start justify-between gap-3">
                               <div className="min-w-0 flex-1">
-                                <div className="truncate text-[13px] font-medium text-[var(--foreground)]">
+                                <div className="truncate text-[13px] font-medium text-foreground">
                                   {file.path}
                                 </div>
-                                <div className="mt-0.5 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                                <div className="mt-0.5 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
                                   {formatCheckpointFileChangeLabel(file)}
                                 </div>
                               </div>
@@ -295,7 +295,7 @@ export function ArtifactPanelCheckpointDetailSection({
                                   "rounded-[0.65rem] border px-2 py-0.5 app-text-10 uppercase tracking-[0.14em]",
                                   isActive
                                     ? "border-[#8fd0c6]/25 bg-[#8fd0c6]/10 text-[#8fd0c6]"
-                                    : "border-white/10 bg-black/20 text-[var(--muted-foreground)]",
+                                    : "border-white/10 bg-black/20 text-muted-foreground",
                                 )}
                               >
                                 file
@@ -305,7 +305,7 @@ export function ArtifactPanelCheckpointDetailSection({
                         );
                       })
                     ) : (
-                      <div className="rounded-[0.75rem] border border-dashed border-white/10 px-3 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
+                      <div className="rounded-[0.75rem] border border-dashed border-white/10 px-3 py-3 text-sm leading-6 text-muted-foreground">
                         No checkpoint file diffs available yet.
                       </div>
                     )}
@@ -318,11 +318,11 @@ export function ArtifactPanelCheckpointDetailSection({
       ) : (
         <div className="flex h-full items-center justify-center px-5 py-8">
           <div className="max-w-sm text-center">
-            <div className="mx-auto inline-flex size-10 items-center justify-center rounded-[0.8rem] border border-white/8 bg-white/[0.04] text-[var(--muted-foreground)]">
+            <div className="mx-auto inline-flex size-10 items-center justify-center rounded-[0.8rem] border border-white/8 bg-white/[0.04] text-muted-foreground">
               <HistoryIcon size={18} />
             </div>
             <div className="mt-3 text-sm font-semibold">No checkpoint selected</div>
-            <div className="mt-2 text-sm leading-6 text-[var(--muted-foreground)]">
+            <div className="mt-2 text-sm leading-6 text-muted-foreground">
               Select a runtime checkpoint from the timeline to inspect the
               conversation snapshot, preview summary, and captured file diffs.
             </div>

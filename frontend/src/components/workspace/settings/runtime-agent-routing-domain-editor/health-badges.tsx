@@ -71,7 +71,7 @@ export function RouteHealthIssueText({
         "flex items-start gap-1.5 text-xs leading-5",
         issue.severity === "error"
           ? "text-[#f5c7b8]"
-          : "text-[var(--muted-foreground)]",
+          : "text-muted-foreground",
       )}
     >
       <TriangleAlertIcon size={13} className="mt-1 shrink-0" />

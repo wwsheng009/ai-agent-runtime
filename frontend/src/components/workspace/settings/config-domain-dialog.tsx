@@ -34,16 +34,16 @@ export function ConfigDomainDialog({
   return createPortal(
     <DialogOverlay className="z-[140]" onDismiss={onClose}>
       <DialogPanel elevation="lg" className={widthClassName}>
-        <div className="flex items-start justify-between gap-4 border-b border-[var(--border)] px-3 py-3 sm:px-4">
+        <div className="flex items-start justify-between gap-4 border-b border-border px-3 py-3 sm:px-4">
           <div>
-            <div className="app-text-11 uppercase tracking-[0.14em] text-[var(--accent-secondary)]">
+            <div className="app-text-11 uppercase tracking-[0.14em] text-accent-secondary">
               Config editor
             </div>
-            <h2 className="mt-1 text-base font-semibold tracking-[-0.02em] text-[var(--foreground)]">
+            <h2 className="mt-1 text-base font-semibold tracking-[-0.02em] text-foreground">
               {title}
             </h2>
             {description ? (
-              <p className="mt-1 max-w-3xl text-sm leading-6 text-[var(--muted-foreground)]">
+              <p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">
                 {description}
               </p>
             ) : null}
@@ -56,7 +56,7 @@ export function ConfigDomainDialog({
         <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 sm:px-4">{children}</div>
 
         {footer ? (
-          <div className="border-t border-[var(--border)] px-3 py-3 sm:px-4">{footer}</div>
+          <div className="border-t border-border px-3 py-3 sm:px-4">{footer}</div>
         ) : null}
       </DialogPanel>
     </DialogOverlay>,

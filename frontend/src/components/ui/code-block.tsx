@@ -108,16 +108,16 @@ function CodeBlockSurface({
   return (
     <div
       className={cn(
-        "app-code-surface overflow-hidden rounded-[0.9rem] border border-[var(--border)] bg-[var(--code-block-bg)]",
+        "app-code-surface overflow-hidden rounded-[0.9rem] border border-border bg-code-block-bg",
         className,
       )}
     >
-      <div className="flex items-center justify-between border-b border-[var(--border)] bg-[var(--code-block-header-bg)] px-3 py-2">
+      <div className="flex items-center justify-between border-b border-border bg-code-block-header-bg px-3 py-2">
         <div className="min-w-0">
-          <div className="truncate app-text-13 font-semibold text-[var(--code-block-foreground)]">
+          <div className="truncate app-text-13 font-semibold text-code-block-foreground">
             {title ?? "Code snippet"}
           </div>
-          <div className="mt-0.5 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+          <div className="mt-0.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
             {language}
           </div>
         </div>
@@ -130,10 +130,10 @@ function CodeBlockSurface({
           {visibleLines.map((line, index) => (
             <div
               key={`${index}-${line.kind}-${line.segments.map((segment) => segment.content).join("")}`}
-              className="app-code-line grid grid-cols-[2.5rem_minmax(0,1fr)] gap-3 px-3 text-[var(--code-block-foreground)]"
+              className="app-code-line grid grid-cols-[2.5rem_minmax(0,1fr)] gap-3 px-3 text-code-block-foreground"
               data-line-kind={line.kind === "normal" ? undefined : line.kind}
             >
-              <span className="app-code-line-number select-none text-right font-mono text-[var(--code-line-number)]">
+              <span className="app-code-line-number select-none text-right font-mono text-code-line-number">
                 {index + 1}
               </span>
               <code className="font-mono whitespace-pre">
@@ -159,9 +159,9 @@ function CodeBlockSurface({
         </pre>
       </div>
       {canCollapse ? (
-        <div className="border-t border-[var(--border)] bg-[linear-gradient(180deg,rgba(255,255,255,0.01),rgba(255,255,255,0.03))] px-3 py-2.5">
+        <div className="border-t border-border bg-[linear-gradient(180deg,rgba(255,255,255,0.01),rgba(255,255,255,0.03))] px-3 py-2.5">
           <div className="flex items-center justify-between gap-3">
-            <div className="app-text-11 text-[var(--muted-foreground)]">
+            <div className="app-text-11 text-muted-foreground">
               {expanded
                 ? `Showing all ${highlightedLines.length} lines.`
                 : `${hiddenLineCount} more lines hidden for readability.`}

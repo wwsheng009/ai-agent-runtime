@@ -41,21 +41,21 @@ export function TeamDetailsPanelPathClaims({
   return (
     <div className={detailsPanelClass}>
       <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+        <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-muted-foreground">
           Path claims
         </div>
         <Badge>{details.pathClaims.length}</Badge>
       </div>
-      <div className="mt-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+      <div className="mt-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
         Active filesystem leases for runtime writers and readers
       </div>
       <div className="mt-3 rounded-[0.75rem] border border-white/8 bg-white/4 px-3 py-2.5">
-        <div className="app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+        <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
           Conflict check
         </div>
         <div className="mt-3 grid gap-3">
           <div>
-            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
               Read paths
             </div>
             <textarea
@@ -66,7 +66,7 @@ export function TeamDetailsPanelPathClaims({
             />
           </div>
           <div>
-            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
               Write paths
             </div>
             <textarea
@@ -78,7 +78,7 @@ export function TeamDetailsPanelPathClaims({
           </div>
         </div>
         <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="text-xs text-[var(--muted-foreground)]">
+          <div className="text-xs text-muted-foreground">
             Separate multiple paths with new lines or commas.
           </div>
           <Button
@@ -94,14 +94,14 @@ export function TeamDetailsPanelPathClaims({
           </Button>
         </div>
         {claimCheckError ? (
-          <div className="mt-3 rounded-[0.8rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-[var(--muted-foreground)]">
+          <div className="mt-3 rounded-[0.8rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
             {claimCheckError}
           </div>
         ) : null}
         {claimCheckState ? (
           <div className="mt-3 rounded-[0.8rem] border border-white/8 bg-black/20 px-3 py-2.5">
             <div className="flex items-center justify-between gap-3">
-              <div className="text-sm font-semibold text-[var(--foreground)]">
+              <div className="text-sm font-semibold text-foreground">
                 {claimCheckState.ok ? "No conflicts detected" : "Conflicts detected"}
               </div>
               <span
@@ -120,14 +120,14 @@ export function TeamDetailsPanelPathClaims({
                 {claimCheckState.conflicts.map((conflict, index) => (
                   <div
                     key={`${conflict.path}-${conflict.existing_path}-${index}`}
-                    className="rounded-[0.75rem] border border-white/8 bg-white/4 px-3 py-2.5 text-sm leading-6 text-[var(--muted-foreground)]"
+                    className="rounded-[0.75rem] border border-white/8 bg-white/4 px-3 py-2.5 text-sm leading-6 text-muted-foreground"
                   >
                     {summarizeConflict(conflict)}
                   </div>
                 ))}
               </div>
             ) : (
-              <div className="mt-2 text-sm text-[var(--muted-foreground)]">
+              <div className="mt-2 text-sm text-muted-foreground">
                 Requested reads and writes can be acquired at the current runtime snapshot.
               </div>
             )}
@@ -142,16 +142,16 @@ export function TeamDetailsPanelPathClaims({
               <div key={claim.id} className={detailsCardClass}>
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="break-all text-sm font-semibold text-[var(--foreground)]">
+                    <div className="break-all text-sm font-semibold text-foreground">
                       {claim.path}
                     </div>
-                    <div className="mt-1 flex flex-wrap gap-3 text-xs text-[var(--muted-foreground)]">
+                    <div className="mt-1 flex flex-wrap gap-3 text-xs text-muted-foreground">
                       <span>owner {truncateIdentifier(claim.owner_agent_id, 14)}</span>
                       <span>task {truncateIdentifier(claim.task_id, 14)}</span>
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
-                    <span className="rounded-[0.65rem] border border-white/10 bg-white/6 px-2 py-0.5 app-text-10 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
+                    <span className="rounded-[0.65rem] border border-white/10 bg-white/6 px-2 py-0.5 app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
                       {claim.mode || "claim"}
                     </span>
                     <span
@@ -166,7 +166,7 @@ export function TeamDetailsPanelPathClaims({
                     </span>
                   </div>
                 </div>
-                <div className="mt-2 flex flex-wrap gap-3 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-2 flex flex-wrap gap-3 text-xs text-muted-foreground">
                   {claim.lease_until ? (
                     <span>lease {formatRelativeTimestamp(claim.lease_until)}</span>
                   ) : (
@@ -178,7 +178,7 @@ export function TeamDetailsPanelPathClaims({
             );
           })
         ) : (
-          <div className="text-sm text-[var(--muted-foreground)]">
+          <div className="text-sm text-muted-foreground">
             No active path claims available.
           </div>
         )}

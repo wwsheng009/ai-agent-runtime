@@ -16,18 +16,18 @@ export function TeamDetailsPanelFinalSummary({
 }: TeamDetailsPanelFinalSummaryProps) {
   return (
     <div className={detailsPanelClass}>
-      <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+      <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-muted-foreground">
         Final Summary
         {isDetailsLoading ? (
           <LoaderCircleIcon size={14} className="animate-spin" />
         ) : null}
       </div>
       {details.finalSummary ? (
-        <p className="mt-2.5 text-sm leading-6 text-[var(--foreground)]">
+        <p className="mt-2.5 text-sm leading-6 text-foreground">
           {details.finalSummary}
         </p>
       ) : (
-        <p className="mt-2.5 text-sm leading-6 text-[var(--muted-foreground)]">
+        <p className="mt-2.5 text-sm leading-6 text-muted-foreground">
           No final summary available yet.
         </p>
       )}

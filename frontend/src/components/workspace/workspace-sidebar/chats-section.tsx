@@ -45,7 +45,7 @@ export function WorkspaceSidebarChatsSection({
     <SidebarSection
         id="chats"
         icon={MessagesSquareIcon}
-        iconClassName="text-[var(--accent-primary)]"
+        iconClassName="text-accent-primary"
         title={t("sidebar.sections.chats")}
         count={<Badge>{chatThreads.length}</Badge>}
         isOpen={openSections.chats}
@@ -77,11 +77,11 @@ export function WorkspaceSidebarChatsSection({
                 className={cn(
                   "flex w-full items-center gap-2.5 rounded-[0.8rem] border px-2.5 py-2 text-left transition",
                   isActive
-                    ? "border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)]"
-                    : "border-[var(--border)] bg-[var(--surface-softer)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)]",
+                    ? "border-accent-primary-border bg-accent-primary-soft"
+                    : "border-border bg-surface-softer hover:border-border-strong hover:bg-surface-soft",
                 )}
               >
-                <div className="min-w-0 flex-1 truncate text-base font-medium text-[var(--foreground)]">
+                <div className="min-w-0 flex-1 truncate text-base font-medium text-foreground">
                   {thread.title}
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
@@ -96,7 +96,7 @@ export function WorkspaceSidebarChatsSection({
             );
           })
         ) : (
-          <div className="rounded-[0.8rem] border border-dashed border-[var(--border)] px-3 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
+          <div className="rounded-[0.8rem] border border-dashed border-border px-3 py-3 text-sm leading-6 text-muted-foreground">
             {deferredQuery
               ? t("sidebar.emptyChats.search")
               : t("sidebar.emptyChats.default")}

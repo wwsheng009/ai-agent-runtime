@@ -49,13 +49,13 @@ export function HistoryContextMessageCard({
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <div
-                className="app-text-13 font-semibold text-[var(--foreground)]"
+                className="app-text-13 font-semibold text-foreground"
                 id={labelId}
               >
                 {message.author}
               </div>
               <div
-                className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]"
+                className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground"
                 id={metaId}
               >
                 {message.label}
@@ -66,7 +66,7 @@ export function HistoryContextMessageCard({
                 </Badge>
               ) : null}
             </div>
-            <div className="mt-0.5 app-text-11 text-[var(--muted-foreground)]">
+            <div className="mt-0.5 app-text-11 text-muted-foreground">
               {expanded
                 ? "Content visible — click to collapse"
                 : "Content hidden — click to expand"}
@@ -75,7 +75,7 @@ export function HistoryContextMessageCard({
           <ChevronDownIcon
             size={16}
             className={cn(
-              "mt-2 shrink-0 text-[var(--muted-foreground)] transition-transform duration-200",
+              "mt-2 shrink-0 text-muted-foreground transition-transform duration-200",
               expanded ? "rotate-0" : "-rotate-90",
             )}
           />

@@ -32,7 +32,7 @@ export function ArtifactReadingTabs({
     <div
       aria-label="Artifact reading modes"
       aria-orientation="horizontal"
-      className="flex flex-wrap gap-2 border-b border-[var(--border)] px-4 py-3"
+      className="flex flex-wrap gap-2 border-b border-border px-4 py-3"
       role="tablist"
     >
       <button

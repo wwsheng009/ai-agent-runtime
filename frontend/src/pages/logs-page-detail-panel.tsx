@@ -66,7 +66,7 @@ export function LogsPageDetailPanel({
 
   return (
     <div className="flex-1 space-y-2.5 overflow-y-auto px-3 py-3">
-      <div className="rounded-[0.85rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+      <div className="rounded-[0.85rem] border border-border bg-surface-softer p-3">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div className="flex flex-wrap items-center gap-2">
             <span
@@ -77,7 +77,7 @@ export function LogsPageDetailPanel({
             >
               {selectedEntry.level || labels.levelFallback}
             </span>
-            <span className="app-text-12 text-[var(--muted-foreground)]">
+            <span className="app-text-12 text-muted-foreground">
               {labels.cursorLabel} {selectedEntry.cursor}
             </span>
           </div>
@@ -94,19 +94,19 @@ export function LogsPageDetailPanel({
         >
           {selectedEntry.message || selectedEntry.raw_text}
         </h2>
-        <p className="mt-2 app-text-13 leading-5 text-[var(--muted-foreground)]">
+        <p className="mt-2 app-text-13 leading-5 text-muted-foreground">
           {selectedEntrySubtitle}
         </p>
       </div>
 
       {insightRows.length > 0 ? (
-        <div className="rounded-[0.85rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+        <div className="rounded-[0.85rem] border border-border bg-surface-softer p-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+              <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                 {labels.insights}
               </div>
-              <div className="mt-1 app-text-11 text-[var(--muted-foreground)]">
+              <div className="mt-1 app-text-11 text-muted-foreground">
                 {labels.insightsHelp}
               </div>
             </div>
@@ -116,9 +116,9 @@ export function LogsPageDetailPanel({
             {insightRows.map((row) => (
               <div
                 key={row.key}
-                className="min-w-0 border-t border-[var(--border)]/60 pt-2.5 first:border-t-0 first:pt-0"
+                className="min-w-0 border-t border-border/60 pt-2.5 first:border-t-0 first:pt-0"
               >
-                <dt className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                <dt className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                   {row.label}
                 </dt>
                 <dd className="mt-1.5 break-all app-text-13 leading-5">
@@ -135,13 +135,13 @@ export function LogsPageDetailPanel({
       ) : null}
 
       {identifierRows.length > 0 ? (
-        <div className="rounded-[0.85rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+        <div className="rounded-[0.85rem] border border-border bg-surface-softer p-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+              <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                 {labels.identifiers}
               </div>
-              <div className="mt-1 app-text-11 text-[var(--muted-foreground)]">
+              <div className="mt-1 app-text-11 text-muted-foreground">
                 {labels.identifiersHelp}
               </div>
             </div>
@@ -149,7 +149,7 @@ export function LogsPageDetailPanel({
               <Button
                 variant="ghost"
                 size="sm"
-                className="h-7 rounded-[0.65rem] border border-[var(--border)] bg-black/10 px-2.5 text-[var(--muted-foreground)] hover:bg-black/20 hover:text-[var(--foreground)]"
+                className="h-7 rounded-[0.65rem] border border-border bg-black/10 px-2.5 text-muted-foreground hover:bg-black/20 hover:text-foreground"
                 onClick={onClearQuery}
               >
                 {labels.clearSearch}
@@ -166,15 +166,15 @@ export function LogsPageDetailPanel({
                   className={cn(
                     "flex flex-col gap-3 rounded-[0.75rem] border px-3 py-2.5 sm:flex-row sm:items-start sm:justify-between",
                     active
-                      ? "border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)]"
-                      : "border-[var(--border)] bg-black/10",
+                      ? "border-accent-primary-border bg-accent-primary-soft"
+                      : "border-border bg-black/10",
                   )}
                 >
                   <div className="min-w-0">
-                    <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                    <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                       {row.label}
                     </div>
-                    <div className="mt-1.5 break-all font-mono app-text-12-5 leading-5 text-[var(--foreground)]">
+                    <div className="mt-1.5 break-all font-mono app-text-12-5 leading-5 text-foreground">
                       {row.value}
                     </div>
                   </div>
@@ -191,8 +191,8 @@ export function LogsPageDetailPanel({
                       className={cn(
                         "h-7 rounded-[0.65rem] border px-2.5 app-text-11",
                         active
-                          ? "border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)] text-[var(--accent-primary)]"
-                          : "border-[var(--border)] bg-black/10 text-[var(--muted-foreground)] hover:bg-black/20 hover:text-[var(--foreground)]",
+                          ? "border-accent-primary-border bg-accent-primary-soft text-accent-primary"
+                          : "border-border bg-black/10 text-muted-foreground hover:bg-black/20 hover:text-foreground",
                       )}
                       onClick={() => onToggleIdentifierQuery(row.value)}
                     >
@@ -206,9 +206,9 @@ export function LogsPageDetailPanel({
         </div>
       ) : null}
 
-      <div className="rounded-[0.85rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+      <div className="rounded-[0.85rem] border border-border bg-surface-softer p-3">
         <div className="flex items-center justify-between gap-3">
-          <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+          <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
             {labels.metadata}
           </div>
           <CopyActionButton
@@ -222,9 +222,9 @@ export function LogsPageDetailPanel({
           {metadataRows.map((row) => (
             <div
               key={row.label}
-              className="min-w-0 border-t border-[var(--border)]/60 pt-2.5 first:border-t-0 first:pt-0"
+              className="min-w-0 border-t border-border/60 pt-2.5 first:border-t-0 first:pt-0"
             >
-              <dt className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+              <dt className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                 {row.label}
               </dt>
               <dd className="mt-1.5 break-all app-text-13 leading-5">
@@ -236,9 +236,9 @@ export function LogsPageDetailPanel({
       </div>
 
       {selectedEntry.response_body_preview ? (
-        <div className="rounded-[0.85rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+        <div className="rounded-[0.85rem] border border-border bg-surface-softer p-3">
           <div className="flex items-center justify-between gap-3">
-            <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
               {labels.responsePreview}
             </div>
             <CopyActionButton
@@ -248,16 +248,16 @@ export function LogsPageDetailPanel({
               onClick={() => onCopy("response_preview", responsePreviewText)}
             />
           </div>
-          <pre className="app-code-surface mt-2 overflow-x-auto whitespace-pre-wrap break-words rounded-[0.75rem] border border-[var(--border)] bg-black/25 p-3 font-mono text-[var(--foreground)]">
+          <pre className="app-code-surface mt-2 overflow-x-auto whitespace-pre-wrap break-words rounded-[0.75rem] border border-border bg-black/25 p-3 font-mono text-foreground">
             {selectedEntry.response_body_preview}
           </pre>
         </div>
       ) : null}
 
       {selectedEntry.fields && Object.keys(selectedEntry.fields).length > 0 ? (
-        <div className="rounded-[0.85rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+        <div className="rounded-[0.85rem] border border-border bg-surface-softer p-3">
           <div className="flex items-center justify-between gap-3">
-            <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
               {labels.extraFields}
             </div>
             <CopyActionButton
@@ -267,15 +267,15 @@ export function LogsPageDetailPanel({
               onClick={() => onCopy("extra_fields", extraFieldsText)}
             />
           </div>
-          <pre className="app-code-surface mt-2 overflow-x-auto whitespace-pre-wrap break-words rounded-[0.75rem] border border-[var(--border)] bg-black/25 p-3 font-mono text-[var(--foreground)]">
+          <pre className="app-code-surface mt-2 overflow-x-auto whitespace-pre-wrap break-words rounded-[0.75rem] border border-border bg-black/25 p-3 font-mono text-foreground">
             {JSON.stringify(selectedEntry.fields, null, 2)}
           </pre>
         </div>
       ) : null}
 
-      <div className="rounded-[0.85rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+      <div className="rounded-[0.85rem] border border-border bg-surface-softer p-3">
         <div className="flex items-center justify-between gap-3">
-          <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+          <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
             {labels.rawJson}
           </div>
           <CopyActionButton
@@ -285,7 +285,7 @@ export function LogsPageDetailPanel({
             onClick={() => onCopy("raw_json", rawJsonText)}
           />
         </div>
-        <pre className="app-code-surface mt-2 overflow-x-auto whitespace-pre-wrap break-words rounded-[0.75rem] border border-[var(--border)] bg-black/25 p-3 font-mono text-[var(--foreground)]">
+        <pre className="app-code-surface mt-2 overflow-x-auto whitespace-pre-wrap break-words rounded-[0.75rem] border border-border bg-black/25 p-3 font-mono text-foreground">
           {selectedEntry.raw
             ? JSON.stringify(selectedEntry.raw, null, 2)
             : selectedEntry.raw_text}
@@ -305,7 +305,7 @@ function CopyActionButton({
     <Button
       variant="ghost"
       size="sm"
-      className="h-7 rounded-[0.65rem] border border-[var(--border)] bg-black/10 px-2.5 text-[var(--muted-foreground)] hover:bg-black/20 hover:text-[var(--foreground)]"
+      className="h-7 rounded-[0.65rem] border border-border bg-black/10 px-2.5 text-muted-foreground hover:bg-black/20 hover:text-foreground"
       onClick={onClick}
     >
       {copied ? <CheckIcon size={13} /> : <CopyIcon size={13} />}

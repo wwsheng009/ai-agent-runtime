@@ -13,7 +13,7 @@ export function PanelIcon({ children, className }: PanelIconProps) {
   return (
     <span
       className={cn(
-        "inline-flex size-8 items-center justify-center rounded-[0.7rem] border border-[var(--border)] bg-[var(--surface-solid)] text-[var(--accent-primary)]",
+        "inline-flex size-8 items-center justify-center rounded-[0.7rem] border border-border bg-surface-solid text-accent-primary",
         className,
       )}
     >

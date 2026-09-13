@@ -57,7 +57,7 @@ export function InlineRenameInput({
       }}
       placeholder={placeholder}
       spellCheck={false}
-      className="w-full min-w-0 rounded-[0.55rem] border border-[var(--accent-primary-border)] bg-[var(--surface-solid)] px-2 py-1 text-sm text-[var(--foreground)] outline-none"
+      className="w-full min-w-0 rounded-[0.55rem] border border-accent-primary-border bg-surface-solid px-2 py-1 text-sm text-foreground outline-none"
     />
   );
 }
@@ -96,8 +96,8 @@ export function SidebarSessionItem({
         className={cn(
           "flex w-full items-center gap-2 rounded-[0.72rem] border px-2 py-1 text-left transition",
           isActive
-            ? "border-[var(--accent-secondary-border)] bg-[var(--accent-secondary-soft)]"
-            : "border-[var(--border)] bg-[var(--surface-softer)]",
+            ? "border-accent-secondary-border bg-accent-secondary-soft"
+            : "border-border bg-surface-softer",
         )}
       >
         <InlineRenameInput
@@ -120,11 +120,11 @@ export function SidebarSessionItem({
         className={cn(
           "flex w-full items-center gap-2 rounded-[0.72rem] border py-1.5 pl-2 pr-7 text-left transition",
           isActive
-            ? "border-[var(--accent-secondary-border)] bg-[var(--accent-secondary-soft)]"
-            : "border-[var(--border)] bg-[var(--surface-softer)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)]",
+            ? "border-accent-secondary-border bg-accent-secondary-soft"
+            : "border-border bg-surface-softer hover:border-border-strong hover:bg-surface-soft",
         )}
       >
-        <div className="min-w-0 flex-1 truncate text-sm font-medium text-[var(--foreground)]">
+        <div className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
           {title}
         </div>
         <SidebarStateIcon spec={statusIcon} />
@@ -137,7 +137,7 @@ export function SidebarSessionItem({
           event.stopPropagation();
           onStartRename(session.id, title);
         }}
-        className="absolute right-1 top-1/2 -translate-y-1/2 rounded-[0.5rem] p-1 text-[var(--muted-foreground)] opacity-0 transition hover:bg-[var(--surface-soft)] hover:text-[var(--foreground)] focus-visible:opacity-100 group-hover/session:opacity-100"
+        className="absolute right-1 top-1/2 -translate-y-1/2 rounded-[0.5rem] p-1 text-muted-foreground opacity-0 transition hover:bg-surface-soft hover:text-foreground focus-visible:opacity-100 group-hover/session:opacity-100"
       >
         <PencilIcon size={12} />
       </button>

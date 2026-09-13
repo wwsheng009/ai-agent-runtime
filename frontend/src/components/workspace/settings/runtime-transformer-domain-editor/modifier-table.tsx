@@ -80,7 +80,7 @@ export function RuntimeTransformerModifierTable({
               <div className="min-w-[14rem]">
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge>{`#${item.index + 1}`}</Badge>
-                  <div className="font-semibold text-[var(--foreground)]">
+                  <div className="font-semibold text-foreground">
                     {item.type || "--"}
                   </div>
                   <Badge>
@@ -89,7 +89,7 @@ export function RuntimeTransformerModifierTable({
                       : t("editor.transformer.badges.disabled")}
                   </Badge>
                 </div>
-                <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-1 text-xs text-muted-foreground">
                   {scope === "request"
                     ? t("editor.transformer.scope.requestHint")
                     : t("editor.transformer.scope.responseHint")}
@@ -104,7 +104,7 @@ export function RuntimeTransformerModifierTable({
                 <div>
                   {item.models.length > 0 ? item.models.slice(0, 2).join(", ") : "--"}
                 </div>
-                <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-1 text-xs text-muted-foreground">
                   {item.models.length > 2
                     ? t("editor.transformer.models.totalMatch", {
                         count: item.models.length,
@@ -127,7 +127,7 @@ export function RuntimeTransformerModifierTable({
                     count: item.paramsKeyCount,
                   })}
                 </div>
-                <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-1 text-xs text-muted-foreground">
                   {item.extraFieldCount > 0
                     ? t("editor.transformer.extraFields.count", {
                         count: item.extraFieldCount,

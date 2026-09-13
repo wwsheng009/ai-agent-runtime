@@ -118,7 +118,7 @@ function formatRuntimeCacheHitTone(value: unknown) {
         return "border-amber-500/25 bg-amber-500/10 text-amber-100";
     }
   }
-  return "border-[var(--border)] bg-black/10 text-[var(--foreground)]";
+  return "border-border bg-black/10 text-foreground";
 }
 
 export function buildRuntimeInsightRows(

@@ -36,17 +36,17 @@ export function WorkspaceSidebarHeader({
   return (
     <div
       className={cn(
-        "border-b border-[var(--border)]",
+        "border-b border-border",
         isCompact ? "px-2.5 py-2.5" : "px-3 py-3",
       )}
     >
       <div className="flex items-center justify-between gap-3">
         <Link to="/" className="flex items-center gap-3" onClick={onCloseMobile}>
-          <span className="grid size-8 place-items-center rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-soft)] text-xs font-semibold text-[var(--accent-primary)]">
+          <span className="grid size-8 place-items-center rounded-[0.8rem] border border-border bg-surface-soft text-xs font-semibold text-accent-primary">
             AR
           </span>
           <div>
-            <div className="app-text-10 uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+            <div className="app-text-10 uppercase tracking-[0.16em] text-muted-foreground">
               {t("sidebar.workspaceLabel")}
             </div>
             <div className="mt-0.5 text-sm font-semibold">{t("sidebar.appName")}</div>
@@ -90,13 +90,13 @@ export function WorkspaceSidebarHeader({
           "mt-3 flex w-full items-center justify-center gap-2 rounded-[0.85rem] border px-3 text-base font-medium transition",
           isCompact ? "py-2" : "py-2.5",
           selectedThreadId === NEW_THREAD_ID
-            ? "border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)] text-[var(--foreground)]"
-            : "border-[var(--border)] bg-[var(--surface-softer)] text-[var(--foreground)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)]",
+            ? "border-accent-primary-border bg-accent-primary-soft text-foreground"
+            : "border-border bg-surface-softer text-foreground hover:border-border-strong hover:bg-surface-soft",
         )}
       >
         <MessageSquarePlusIcon
           size={16}
-          className="text-[var(--accent-primary)]"
+          className="text-accent-primary"
         />
         {t("sidebar.startNewChat")}
       </button>
@@ -104,11 +104,11 @@ export function WorkspaceSidebarHeader({
       {showSearch ? (
         <div
           className={cn(
-            "mt-2.5 rounded-[0.85rem] border border-[var(--border)] bg-[var(--surface-solid)] px-3",
+            "mt-2.5 rounded-[0.85rem] border border-border bg-surface-solid px-3",
             isCompact ? "py-2" : "py-2.5",
           )}
         >
-          <div className="flex items-center gap-2.5 text-sm text-[var(--muted-foreground)]">
+          <div className="flex items-center gap-2.5 text-sm text-muted-foreground">
             <SearchIcon size={15} />
             <input
               value={query}

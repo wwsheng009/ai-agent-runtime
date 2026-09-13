@@ -66,12 +66,12 @@ export function MessageBacktrackDialog({
             </div>
             <div>
               <h2
-                className="text-sm font-semibold tracking-[-0.01em] text-[var(--foreground)]"
+                className="text-sm font-semibold tracking-[-0.01em] text-foreground"
                 id={titleId}
               >
                 Backtrack to this user message
               </h2>
-              <p className="mt-1 text-sm leading-6 text-[var(--muted-foreground)]">
+              <p className="mt-1 text-sm leading-6 text-muted-foreground">
                 Truncate the conversation after this turn and optionally restore
                 later file mutations.
               </p>
@@ -80,7 +80,7 @@ export function MessageBacktrackDialog({
           <button
             ref={closeRef}
             aria-label="Close backtrack dialog"
-            className="inline-flex size-8 items-center justify-center rounded-[0.7rem] border border-white/10 text-[var(--muted-foreground)] transition hover:bg-white/6 hover:text-[var(--foreground)]"
+            className="inline-flex size-8 items-center justify-center rounded-[0.7rem] border border-white/10 text-muted-foreground transition hover:bg-white/6 hover:text-foreground"
             disabled={state.busy}
             onClick={onClose}
             type="button"
@@ -91,38 +91,38 @@ export function MessageBacktrackDialog({
 
         <div className="space-y-4 px-4 py-4">
           <div className="rounded-[0.85rem] border border-white/8 bg-white/[0.03] px-3.5 py-3">
-            <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
               Anchor
               {target ? ` · turn ${target.userTurnIndex}` : null}
             </div>
-            <p className="mt-2 text-sm leading-6 text-[var(--foreground)]">
+            <p className="mt-2 text-sm leading-6 text-foreground">
               {target?.preview?.trim() || preview?.anchor_preview || "(empty)"}
             </p>
           </div>
 
           {state.busy && !preview ? (
-            <div className="inline-flex items-center gap-2 text-sm text-[var(--muted-foreground)]">
+            <div className="inline-flex items-center gap-2 text-sm text-muted-foreground">
               <LoaderCircleIcon className="animate-spin" size={14} />
               Planning backtrack…
             </div>
           ) : null}
 
           {preview ? (
-            <div className="grid gap-2 rounded-[0.85rem] border border-white/8 bg-white/[0.03] px-3.5 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
+            <div className="grid gap-2 rounded-[0.85rem] border border-white/8 bg-white/[0.03] px-3.5 py-3 text-sm leading-6 text-muted-foreground">
               <div>
                 Will remove{" "}
-                <span className="text-[var(--foreground)]">
+                <span className="text-foreground">
                   {removedMessages ?? "?"} messages
                 </span>
                 {" / "}
-                <span className="text-[var(--foreground)]">
+                <span className="text-foreground">
                   {removedTurns ?? "?"} later user turns
                 </span>
                 .
               </div>
               <div>
                 History keeps the first{" "}
-                <span className="text-[var(--foreground)]">
+                <span className="text-foreground">
                   {preview.truncated_to_message_count}
                 </span>{" "}
                 messages.
@@ -130,7 +130,7 @@ export function MessageBacktrackDialog({
               {preview.base_checkpoint_id ? (
                 <div>
                   Code restore can use base checkpoint{" "}
-                  <span className="text-[var(--foreground)]">
+                  <span className="text-foreground">
                     {preview.base_checkpoint_id.slice(0, 12)}
                   </span>
                   {preview.later_checkpoint_ids?.length
@@ -152,7 +152,7 @@ export function MessageBacktrackDialog({
           ) : null}
 
           <fieldset className="space-y-2">
-            <legend className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <legend className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
               Restore mode
             </legend>
             {(
@@ -167,8 +167,8 @@ export function MessageBacktrackDialog({
                 className={cn(
                   "flex cursor-pointer items-center gap-2 rounded-[0.75rem] border px-3 py-2 text-sm transition",
                   state.mode === value
-                    ? "border-[#f0c77b]/30 bg-[#f0c77b]/8 text-[var(--foreground)]"
-                    : "border-white/8 bg-white/[0.02] text-[var(--muted-foreground)] hover:border-white/14",
+                    ? "border-[#f0c77b]/30 bg-[#f0c77b]/8 text-foreground"
+                    : "border-white/8 bg-white/[0.02] text-muted-foreground hover:border-white/14",
                 )}
               >
                 <input
@@ -186,24 +186,24 @@ export function MessageBacktrackDialog({
           </fieldset>
 
           <label className="grid gap-2">
-            <span className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <span className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
               Edit prompt before prefill
             </span>
             <textarea
               aria-label="Edit backtrack prompt"
-              className="min-h-[7.5rem] w-full resize-y rounded-[0.85rem] border border-white/10 bg-white/[0.03] px-3 py-2.5 text-sm leading-6 text-[var(--foreground)] outline-none transition placeholder:text-[var(--muted-foreground)] focus:border-[#f0c77b]/35 focus:bg-white/[0.05]"
+              className="min-h-[7.5rem] w-full resize-y rounded-[0.85rem] border border-white/10 bg-white/[0.03] px-3 py-2.5 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-[#f0c77b]/35 focus:bg-white/[0.05]"
               disabled={state.busy}
               onChange={(event) => onEditPromptChange(event.target.value)}
               placeholder="Edit the original user prompt…"
               value={state.editPrompt}
             />
-            <span className="text-xs leading-5 text-[var(--muted-foreground)]">
+            <span className="text-xs leading-5 text-muted-foreground">
               Leave unchanged to keep the original text. Edits are sent as
               edit_prompt and prefilled into the composer after apply.
             </span>
           </label>
 
-          <label className="flex items-center gap-2 text-sm text-[var(--muted-foreground)]">
+          <label className="flex items-center gap-2 text-sm text-muted-foreground">
             <input
               checked={state.prefillComposer}
               className="accent-[#f0c77b]"
@@ -215,7 +215,7 @@ export function MessageBacktrackDialog({
           </label>
 
           {state.error ? (
-            <div className="rounded-[0.85rem] border border-[#f59e7d]/20 bg-[#f59e7d]/10 px-3 py-2.5 text-sm leading-6 text-[var(--foreground)]">
+            <div className="rounded-[0.85rem] border border-[#f59e7d]/20 bg-[#f59e7d]/10 px-3 py-2.5 text-sm leading-6 text-foreground">
               {state.error}
             </div>
           ) : null}

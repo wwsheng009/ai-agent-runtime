@@ -39,7 +39,7 @@ export function CommunitySection() {
         <div className="rounded-[1.7rem] border border-white/8 bg-black/20 p-5">
           <div className="flex flex-wrap items-center gap-2">
             <Badge>{t("community.pillarsBadge")}</Badge>
-            <Badge className="border-transparent bg-white/10 text-[var(--foreground)]">
+            <Badge className="border-transparent bg-white/10 text-foreground">
               {t("community.layersBadge")}
             </Badge>
           </div>
@@ -49,10 +49,10 @@ export function CommunitySection() {
                 key={item.title}
                 className="rounded-[1.15rem] border border-white/8 bg-white/4 px-4 py-4"
               >
-                <div className="text-sm font-semibold text-[var(--foreground)]">
+                <div className="text-sm font-semibold text-foreground">
                   {item.title}
                 </div>
-                <p className="mt-2 text-sm leading-7 text-[var(--muted-foreground)]">
+                <p className="mt-2 text-sm leading-7 text-muted-foreground">
                   {item.summary}
                 </p>
               </div>
@@ -68,7 +68,7 @@ export function CommunitySection() {
           <h3 className="mt-5 font-serif text-3xl tracking-[-0.03em]">
             {t("community.readyTitle")}
           </h3>
-          <div className="mt-6 space-y-3 text-sm leading-7 text-[var(--muted-foreground)]">
+          <div className="mt-6 space-y-3 text-sm leading-7 text-muted-foreground">
             <div className="flex gap-3">
               <LayoutPanelLeftIcon size={18} className="mt-1 shrink-0 text-[#f0c77b]" />
               <span>{t("community.readyPoint1")}</span>

@@ -80,7 +80,7 @@ export function WorkspaceSidebarSessionsSection({
       <SidebarSection
         id="sessions"
         icon={HistoryIcon}
-        iconClassName="text-[var(--accent-secondary)]"
+        iconClassName="text-accent-secondary"
         title={t("sidebar.sections.sessions")}
         count={<Badge>{sessionThreads.length}</Badge>}
         isOpen={openSections.sessions}
@@ -88,13 +88,13 @@ export function WorkspaceSidebarSessionsSection({
       >
         <div className="space-y-2">
           {runtimeSessionUsersLoading && sessionUserMenuItems.length === 0 ? (
-            <div className="inline-flex items-center gap-1.5 rounded-[0.65rem] border border-[var(--border)] bg-[var(--surface-soft)] px-2 py-1 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <div className="inline-flex items-center gap-1.5 rounded-[0.65rem] border border-border bg-surface-soft px-2 py-1 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
               <LoaderCircleIcon size={12} className="animate-spin" />
               {t("sidebar.sessionUsersLoading")}
             </div>
           ) : null}
           {runtimeSessionUsersError ? (
-            <div className="rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-2.5 py-2 text-xs leading-5 text-[var(--muted-foreground)]">
+            <div className="rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-2.5 py-2 text-xs leading-5 text-muted-foreground">
               {runtimeSessionUsersError}
             </div>
           ) : null}
@@ -113,19 +113,19 @@ export function WorkspaceSidebarSessionsSection({
                       className={cn(
                         "flex w-full items-center gap-2 rounded-[0.8rem] border px-2.5 py-2 text-left transition",
                         isSelectedUser
-                          ? "border-[var(--accent-secondary-border)] bg-[var(--accent-secondary-soft)]"
-                          : "border-[var(--border)] bg-[var(--surface-softer)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)]",
+                          ? "border-accent-secondary-border bg-accent-secondary-soft"
+                          : "border-border bg-surface-softer hover:border-border-strong hover:bg-surface-soft",
                       )}
                     >
                       <UserIcon
                         size={14}
-                        className="shrink-0 text-[var(--accent-secondary)]"
+                        className="shrink-0 text-accent-secondary"
                       />
-                      <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--foreground)]">
+                      <span className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
                         {user.displayName}
                       </span>
                       {user.isDefaultUser ? (
-                        <span className="shrink-0 rounded-[0.55rem] border border-[var(--border)] bg-[var(--surface-soft)] px-1.5 py-0.5 app-text-10 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
+                        <span className="shrink-0 rounded-[0.55rem] border border-border bg-surface-soft px-1.5 py-0.5 app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
                           {t("sidebar.sessionUserDefault")}
                         </span>
                       ) : null}
@@ -133,14 +133,14 @@ export function WorkspaceSidebarSessionsSection({
                       <ChevronDownIcon
                         size={14}
                         className={cn(
-                          "shrink-0 text-[var(--muted-foreground)] transition-transform duration-200",
+                          "shrink-0 text-muted-foreground transition-transform duration-200",
                           isSelectedUser ? "rotate-0" : "-rotate-90",
                         )}
                       />
                     </button>
 
                     {isSelectedUser ? (
-                      <div className="ml-3 space-y-1 border-l border-[var(--border)] pl-2">
+                      <div className="ml-3 space-y-1 border-l border-border pl-2">
                         {sessionDirectoryGroups.length > 0 ? (
                           sessionDirectoryGroups.map((group) => {
                             const isDirectoryOpen =
@@ -152,18 +152,18 @@ export function WorkspaceSidebarSessionsSection({
                                   type="button"
                                   title={group.fullPath || group.label}
                                   onClick={() => toggleSessionDirectory(group.key)}
-                                  className="flex w-full items-center gap-2 rounded-[0.72rem] px-2 py-1.5 text-left text-[var(--muted-foreground)] transition hover:bg-[var(--surface-softer)] hover:text-[var(--foreground)]"
+                                  className="flex w-full items-center gap-2 rounded-[0.72rem] px-2 py-1.5 text-left text-muted-foreground transition hover:bg-surface-softer hover:text-foreground"
                                 >
                                   <FolderIcon
                                     size={13}
-                                    className="shrink-0 text-[var(--accent-primary)]"
+                                    className="shrink-0 text-accent-primary"
                                   />
                                   <span className="min-w-0 flex-1 truncate text-xs font-medium">
                                     {group.fullPath
                                       ? group.label
                                       : t("sidebar.sessionDirectoryUnscoped")}
                                   </span>
-                                  <span className="shrink-0 app-text-10 text-[var(--muted-foreground)]">
+                                  <span className="shrink-0 app-text-10 text-muted-foreground">
                                     {group.sessions.length}
                                   </span>
                                   <ChevronDownIcon
@@ -258,7 +258,7 @@ export function WorkspaceSidebarSessionsSection({
                             );
                           })
                         ) : (
-                          <div className="rounded-[0.8rem] border border-dashed border-[var(--border)] px-3 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
+                          <div className="rounded-[0.8rem] border border-dashed border-border px-3 py-3 text-sm leading-6 text-muted-foreground">
                             {deferredQuery
                               ? t("sidebar.emptySessions.search")
                               : t("sidebar.emptySessions.default")}
@@ -270,7 +270,7 @@ export function WorkspaceSidebarSessionsSection({
                 );
               })
             ) : !runtimeSessionUsersLoading ? (
-              <div className="rounded-[0.8rem] border border-dashed border-[var(--border)] px-3 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
+              <div className="rounded-[0.8rem] border border-dashed border-border px-3 py-3 text-sm leading-6 text-muted-foreground">
                 {deferredQuery
                   ? t("sidebar.emptySessions.search")
                   : t("sidebar.emptySessions.default")}

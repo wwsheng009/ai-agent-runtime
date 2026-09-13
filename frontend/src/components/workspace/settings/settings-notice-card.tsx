@@ -24,7 +24,7 @@ const noticeStyles: Record<SettingsNoticeTone, NoticeStyle> = {
   "warning-soft": {
     surface: "warning-soft",
     density: "compact",
-    text: "text-sm text-[var(--foreground)]",
+    text: "text-sm text-foreground",
   },
   warning: {
     surface: "warning",
@@ -34,12 +34,12 @@ const noticeStyles: Record<SettingsNoticeTone, NoticeStyle> = {
   muted: {
     surface: "solid",
     density: "tight",
-    text: "text-xs leading-6 text-[var(--muted-foreground)]",
+    text: "text-xs leading-6 text-muted-foreground",
   },
   neutral: {
     surface: "solid",
     density: "compact",
-    text: "text-sm text-[var(--foreground)]",
+    text: "text-sm text-foreground",
   },
 };
 

@@ -103,11 +103,11 @@ export function MessageComposer({
     transport === "error" || selectedArtifactCount > 0 || isResponding;
 
   return (
-    <div className="rounded-[0.95rem] border border-[var(--border)] [background:var(--workspace-composer-bg)] shadow-[0_8px_24px_rgba(0,0,0,0.18)]">
+    <div className="rounded-[0.95rem] border border-border [background:var(--workspace-composer-bg)] shadow-[0_8px_24px_rgba(0,0,0,0.18)]">
       {showStatusRow ? (
         <div
           className={cn(
-            "flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-[var(--border)] px-3 app-text-10 uppercase tracking-[0.12em] text-[var(--muted-foreground)]",
+            "flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 app-text-10 uppercase tracking-[0.12em] text-muted-foreground",
             isCompact ? "py-1" : "py-1.5",
           )}
         >
@@ -118,7 +118,7 @@ export function MessageComposer({
             <span>{t("composer.filesCount", { count: selectedArtifactCount })}</span>
           ) : null}
           {isResponding ? (
-            <span className="text-[var(--accent-secondary)]">
+            <span className="text-accent-secondary">
               {t("composer.responseActive")}
             </span>
           ) : null}
@@ -141,7 +141,7 @@ export function MessageComposer({
           }}
           placeholder={placeholder}
           className={cn(
-            "app-chat-input w-full resize-none bg-transparent text-[var(--foreground)] outline-none",
+            "app-chat-input w-full resize-none bg-transparent text-foreground outline-none",
             isNewThread
               ? "min-h-[7rem] px-3.5 py-3.5"
               : isCompact
@@ -151,11 +151,11 @@ export function MessageComposer({
         />
         <div
           className={cn(
-            "flex items-center justify-between gap-2 border-t border-[var(--border)] px-3",
+            "flex items-center justify-between gap-2 border-t border-border px-3",
             isCompact ? "py-1.5" : "py-2",
           )}
         >
-          <div className="min-w-0 flex flex-wrap items-center gap-2 app-text-9 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
+          <div className="min-w-0 flex flex-wrap items-center gap-2 app-text-9 uppercase tracking-[0.12em] text-muted-foreground">
             {showProviderPicker ? (
               <label className="inline-flex items-center gap-1.5">
                 <span>{t("composer.provider")}</span>
@@ -229,8 +229,8 @@ export function MessageComposer({
             title={`${submitButtonLabel} (${t("composer.shortcuts")})`}
             className={
               isResponding
-                ? "size-8 shrink-0 border-[var(--accent-secondary-border)] bg-[var(--accent-secondary-soft)] p-0 text-[var(--foreground)] shadow-none hover:border-[var(--accent-secondary-border)] hover:bg-[var(--accent-secondary-soft)]"
-                : "size-8 shrink-0 border-[var(--border)] bg-[var(--surface-soft)] p-0 text-[var(--foreground)] shadow-none hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft-hover)]"
+                ? "size-8 shrink-0 border-accent-secondary-border bg-accent-secondary-soft p-0 text-foreground shadow-none hover:border-accent-secondary-border hover:bg-accent-secondary-soft"
+                : "size-8 shrink-0 border-border bg-surface-soft p-0 text-foreground shadow-none hover:border-border-strong hover:bg-surface-soft-hover"
             }
             onClick={isResponding ? onStop : onSubmit}
             disabled={isResponding ? false : !draft.trim()}

@@ -166,7 +166,7 @@ export function WorkspaceMainSection({
               {trajectoryStore ? (
                 <div
                   aria-label="Workspace view tabs"
-                  className="flex items-center gap-1 border-b border-[var(--border)] px-3 pt-2"
+                  className="flex items-center gap-1 border-b border-border px-3 pt-2"
                   role="tablist"
                 >
                   <button
@@ -174,8 +174,8 @@ export function WorkspaceMainSection({
                     className={cn(
                       "rounded-t-md border border-b-0 px-3 py-1.5 app-text-12 transition",
                       viewMode === "chat"
-                        ? "border-[var(--border)] bg-[var(--surface-softer)] text-[var(--foreground)]"
-                        : "border-transparent text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
+                        ? "border-border bg-surface-softer text-foreground"
+                        : "border-transparent text-muted-foreground hover:text-foreground",
                     )}
                     onClick={() => setViewMode("chat")}
                     role="tab"
@@ -188,8 +188,8 @@ export function WorkspaceMainSection({
                     className={cn(
                       "rounded-t-md border border-b-0 px-3 py-1.5 app-text-12 transition",
                       viewMode === "trajectory"
-                        ? "border-[var(--border)] bg-[var(--surface-softer)] text-[var(--foreground)]"
-                        : "border-transparent text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
+                        ? "border-border bg-surface-softer text-foreground"
+                        : "border-transparent text-muted-foreground hover:text-foreground",
                     )}
                     onClick={() => setViewMode("trajectory")}
                     role="tab"
@@ -238,10 +238,10 @@ export function WorkspaceMainSection({
           ) : (
             <div className="mx-auto flex w-full max-w-[46rem] flex-1 flex-col justify-center pb-4">
               <div className="text-center">
-                <div className="mx-auto grid size-11 place-items-center rounded-[1rem] border border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)] text-[var(--accent-primary)] shadow-[0_8px_24px_var(--accent-primary-shadow)]">
+                <div className="mx-auto grid size-11 place-items-center rounded-[1rem] border border-accent-primary-border bg-accent-primary-soft text-accent-primary shadow-[0_8px_24px_var(--accent-primary-shadow)]">
                   <BotIcon size={20} />
                 </div>
-                <h1 className="mt-3 text-[1.45rem] font-semibold tracking-[-0.03em] text-[var(--foreground)] sm:text-[1.7rem]">
+                <h1 className="mt-3 text-[1.45rem] font-semibold tracking-[-0.03em] text-foreground sm:text-[1.7rem]">
                   {t("shell.newChatTitle")}
                 </h1>
               </div>
@@ -254,20 +254,20 @@ export function WorkspaceMainSection({
                       key={suggestion.key}
                       type="button"
                       onClick={() => onDraftChange(suggestion.prompt)}
-                      className="group flex min-h-[5.5rem] items-start gap-3 rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] px-3 py-3 text-left transition hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] sm:px-3.5"
+                      className="group flex min-h-[5.5rem] items-start gap-3 rounded-[0.9rem] border border-border bg-surface-softer px-3 py-3 text-left transition hover:border-border-strong hover:bg-surface-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:px-3.5"
                     >
-                      <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-[0.7rem] border border-[var(--border)] bg-[var(--surface-solid)] text-[var(--accent-secondary)]">
+                      <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-[0.7rem] border border-border bg-surface-solid text-accent-secondary">
                         <SuggestionIcon size={15} />
                       </span>
                       <span className="min-w-0 flex-1">
-                        <span className="flex items-center justify-between gap-2 text-sm font-semibold text-[var(--foreground)]">
+                        <span className="flex items-center justify-between gap-2 text-sm font-semibold text-foreground">
                           {suggestion.title}
                           <ArrowUpRightIcon
                             size={13}
-                            className="shrink-0 text-[var(--muted-foreground)] transition group-hover:-translate-y-0.5 group-hover:translate-x-0.5 group-hover:text-[var(--foreground)]"
+                            className="shrink-0 text-muted-foreground transition group-hover:-translate-y-0.5 group-hover:translate-x-0.5 group-hover:text-foreground"
                           />
                         </span>
-                        <span className="mt-1 block text-xs leading-5 text-[var(--muted-foreground)]">
+                        <span className="mt-1 block text-xs leading-5 text-muted-foreground">
                           {suggestion.description}
                         </span>
                       </span>

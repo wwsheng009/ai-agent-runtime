@@ -391,7 +391,7 @@ export function Select({
           : undefined
       }
       className={cn(
-        "z-[160] w-max max-w-[min(22rem,calc(100vw-1rem))] overflow-hidden rounded-[0.85rem] border border-[var(--border)] bg-[var(--surface-overlay)] p-1.5 shadow-[0_10px_24px_rgba(0,0,0,0.24)] outline-none",
+        "z-[160] w-max max-w-[min(22rem,calc(100vw-1rem))] overflow-hidden rounded-[0.85rem] border border-border bg-surface-overlay p-1.5 shadow-[0_10px_24px_rgba(0,0,0,0.24)] outline-none",
         menuClassName,
       )}
     >
@@ -418,12 +418,12 @@ export function Select({
               }}
               onClick={() => commitSelection(index)}
               className={cn(
-                "flex cursor-pointer items-center gap-2 rounded-[0.65rem] px-2.5 py-2 leading-5 text-[var(--muted-foreground)] transition",
+                "flex cursor-pointer items-center gap-2 rounded-[0.65rem] px-2.5 py-2 leading-5 text-muted-foreground transition",
                 option.disabled
                   ? "cursor-not-allowed opacity-45"
                   : active
-                    ? "bg-[var(--surface-soft)] text-[var(--foreground)]"
-                    : "hover:bg-[var(--surface-soft)] hover:text-[var(--foreground)]",
+                    ? "bg-surface-soft text-foreground"
+                    : "hover:bg-surface-soft hover:text-foreground",
                 optionClassName,
               )}
             >
@@ -463,7 +463,7 @@ export function Select({
             handleTriggerKeyDown(event);
           }}
           className={cn(
-            "inline-flex w-full items-center justify-between gap-2 rounded-[0.7rem] border border-[var(--border)] bg-[var(--surface-solid)] px-3 py-2 text-left text-[var(--foreground)] outline-none transition hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)] focus-visible:ring-2 focus-visible:ring-[var(--ring)] disabled:cursor-not-allowed disabled:opacity-60",
+            "inline-flex w-full items-center justify-between gap-2 rounded-[0.7rem] border border-border bg-surface-solid px-3 py-2 text-left text-foreground outline-none transition hover:border-border-strong hover:bg-surface-soft focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60",
             triggerClassName,
           )}
         >
@@ -471,7 +471,7 @@ export function Select({
           <ChevronDownIcon
             size={14}
             className={cn(
-              "shrink-0 text-[var(--muted-foreground)] transition-transform duration-150",
+              "shrink-0 text-muted-foreground transition-transform duration-150",
               open ? "rotate-180" : "rotate-0",
             )}
           />

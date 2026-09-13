@@ -38,7 +38,7 @@ export function ArtifactPanelBacktrackAuditSection({
   return (
     <section className="flex min-h-0 flex-col overflow-hidden rounded-[0.95rem] border border-white/8 bg-white/[0.035]">
       <div className="flex items-center justify-between gap-3 border-b border-white/8 px-3 py-2.5">
-        <div className="inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+        <div className="inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
           <Undo2Icon size={14} />
           Backtrack audit
         </div>
@@ -46,18 +46,18 @@ export function ArtifactPanelBacktrackAuditSection({
       </div>
       <div className="min-h-0 flex-1 overflow-auto px-2.5 py-2.5">
         {backtrackAuditLoading ? (
-          <div className="mb-2 inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+          <div className="mb-2 inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
             <LoaderCircleIcon size={14} className="animate-spin" />
             Loading
           </div>
         ) : null}
         {!sessionId ? (
-          <div className="flex h-full items-center justify-center rounded-[0.8rem] border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-[var(--muted-foreground)]">
+          <div className="flex h-full items-center justify-center rounded-[0.8rem] border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-muted-foreground">
             Backtrack tombstones appear after the thread attaches to a live
             session and a user-turn rewind is applied.
           </div>
         ) : backtrackAuditError ? (
-          <div className="rounded-[0.85rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3.5 py-3 text-sm leading-6 text-[var(--muted-foreground)]">
+          <div className="rounded-[0.85rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
             {backtrackAuditError}
           </div>
         ) : backtrackAuditEntries.length > 0 ? (
@@ -81,15 +81,15 @@ export function ArtifactPanelBacktrackAuditSection({
                       <div className="truncate text-[13px] font-semibold">
                         {formatBacktrackAuditTitle(entry)}
                       </div>
-                      <div className="mt-0.5 text-[11px] text-[var(--muted-foreground)]">
+                      <div className="mt-0.5 text-[11px] text-muted-foreground">
                         {formatBacktrackAuditMeta(entry)}
                       </div>
                     </div>
-                    <span className="shrink-0 rounded-[0.65rem] border border-white/10 bg-black/20 px-2 py-0.5 app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                    <span className="shrink-0 rounded-[0.65rem] border border-white/10 bg-black/20 px-2 py-0.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                       {formatRelativeTimestamp(entry.created_at)}
                     </span>
                   </div>
-                  <div className="mt-1.5 line-clamp-2 text-sm leading-6 text-[var(--muted-foreground)]">
+                  <div className="mt-1.5 line-clamp-2 text-sm leading-6 text-muted-foreground">
                     {formatBacktrackAuditSummary(entry)}
                   </div>
                 </button>
@@ -97,7 +97,7 @@ export function ArtifactPanelBacktrackAuditSection({
             })}
           </div>
         ) : (
-          <div className="flex h-full items-center justify-center rounded-[0.8rem] border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-[var(--muted-foreground)]">
+          <div className="flex h-full items-center justify-center rounded-[0.8rem] border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-muted-foreground">
             No backtrack tombstones yet. Apply a user-turn rewind to record an
             audit summary here.
           </div>
@@ -105,7 +105,7 @@ export function ArtifactPanelBacktrackAuditSection({
       </div>
       {selectedAudit ? (
         <div className="border-t border-white/8 px-3 py-3">
-          <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+          <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
             Tombstone detail
           </div>
           <div className="mt-2 flex flex-wrap gap-1.5">
@@ -117,32 +117,32 @@ export function ArtifactPanelBacktrackAuditSection({
             <Badge>−{selectedAudit.removed_user_turns} turns</Badge>
             <Badge>kept {selectedAudit.truncated_to_message_count}</Badge>
           </div>
-          <div className="mt-2.5 space-y-1.5 text-sm leading-6 text-[var(--muted-foreground)]">
+          <div className="mt-2.5 space-y-1.5 text-sm leading-6 text-muted-foreground">
             <div>
-              <span className="text-[var(--foreground)]">Identity:</span>{" "}
+              <span className="text-foreground">Identity:</span>{" "}
               {formatBacktrackAuditIdentity(selectedAudit)}
             </div>
             {selectedAudit.message_id ? (
               <div>
-                <span className="text-[var(--foreground)]">Message:</span>{" "}
+                <span className="text-foreground">Message:</span>{" "}
                 {selectedAudit.message_id}
               </div>
             ) : null}
             {selectedAudit.base_checkpoint_id ? (
               <div>
-                <span className="text-[var(--foreground)]">Base checkpoint:</span>{" "}
+                <span className="text-foreground">Base checkpoint:</span>{" "}
                 {selectedAudit.base_checkpoint_id}
               </div>
             ) : null}
             {(selectedAudit.later_checkpoint_ids?.length ?? 0) > 0 ? (
               <div>
-                <span className="text-[var(--foreground)]">Later checkpoints:</span>{" "}
+                <span className="text-foreground">Later checkpoints:</span>{" "}
                 {selectedAudit.later_checkpoint_ids?.join(", ")}
               </div>
             ) : null}
             {(selectedAudit.removed_message_ids?.length ?? 0) > 0 ? (
               <div>
-                <span className="text-[var(--foreground)]">Removed message ids:</span>{" "}
+                <span className="text-foreground">Removed message ids:</span>{" "}
                 {selectedAudit.removed_message_ids?.slice(0, 6).join(", ")}
                 {(selectedAudit.removed_message_ids?.length ?? 0) > 6
                   ? ` (+${(selectedAudit.removed_message_ids?.length ?? 0) - 6})`
@@ -151,7 +151,7 @@ export function ArtifactPanelBacktrackAuditSection({
             ) : null}
             {(selectedAudit.removed_turn_ids?.length ?? 0) > 0 ? (
               <div>
-                <span className="text-[var(--foreground)]">Removed turn ids:</span>{" "}
+                <span className="text-foreground">Removed turn ids:</span>{" "}
                 {selectedAudit.removed_turn_ids?.slice(0, 6).join(", ")}
                 {(selectedAudit.removed_turn_ids?.length ?? 0) > 6
                   ? ` (+${(selectedAudit.removed_turn_ids?.length ?? 0) - 6})`
@@ -159,7 +159,7 @@ export function ArtifactPanelBacktrackAuditSection({
               </div>
             ) : null}
           </div>
-          <p className="mt-2 text-[11px] leading-5 text-[var(--muted-foreground)]">
+          <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
             Tombstones are durable audit summaries only. Truncated transcript
             text is not recoverable from this panel.
           </p>

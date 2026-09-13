@@ -65,7 +65,7 @@ export function AboutSettingsPage({
           <SettingsInfoCard
             tone="softer"
             title={t("about.apiBase")}
-            icon={<RouteIcon size={16} className="text-[var(--accent-primary)]" />}
+            icon={<RouteIcon size={16} className="text-accent-primary" />}
             description={apiBaseLabel}
             descriptionClassName="break-all"
           />
@@ -76,7 +76,7 @@ export function AboutSettingsPage({
             icon={
               <PanelsTopLeftIcon
                 size={16}
-                className="text-[var(--accent-secondary)]"
+                className="text-accent-secondary"
               />
             }
             description={location.pathname}
@@ -96,14 +96,14 @@ export function AboutSettingsPage({
             icon={
               <FingerprintIcon
                 size={16}
-                className="text-[var(--accent-primary)]"
+                className="text-accent-primary"
               />
             }
           >
-            <p className="app-inline-mono break-all text-[var(--muted-foreground)]">
+            <p className="app-inline-mono break-all text-muted-foreground">
               {runtimeClient.userId}
             </p>
-            <div className="mt-3 text-xs leading-6 text-[var(--muted-foreground)]">
+            <div className="mt-3 text-xs leading-6 text-muted-foreground">
               {t("about.scopeLabel")}: {runtimeClient.workspaceScope}
             </div>
           </SettingsInfoCard>
@@ -111,9 +111,9 @@ export function AboutSettingsPage({
           <SettingsInfoCard
             tone="softer"
             title={t("about.workspacePath")}
-            icon={<RouteIcon size={16} className="text-[var(--accent-secondary)]" />}
+            icon={<RouteIcon size={16} className="text-accent-secondary" />}
           >
-            <p className="app-inline-mono break-all text-[var(--muted-foreground)]">
+            <p className="app-inline-mono break-all text-muted-foreground">
               {runtimeClient.workspacePath || t("about.notSet")}
             </p>
             <Button
@@ -135,13 +135,13 @@ export function AboutSettingsPage({
       >
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <StatCard
-            icon={<DatabaseIcon size={16} className="text-[var(--accent-primary)]" />}
+            icon={<DatabaseIcon size={16} className="text-accent-primary" />}
             label={t("about.selectedProvider")}
             value={`${providerOptions.length}`}
             detail={`${selectedProvider || t("about.runtimeDefault")} / ${selectedModel || t("about.runtimeDefault")}`}
           />
           <StatCard
-            icon={<HardDriveDownloadIcon size={16} className="text-[var(--accent-secondary)]" />}
+            icon={<HardDriveDownloadIcon size={16} className="text-accent-secondary" />}
             label={t("about.sessionCount")}
             value={`${runtimeSessionsSummary.totalCount}`}
             detail={
@@ -156,7 +156,7 @@ export function AboutSettingsPage({
             }
           />
           <StatCard
-            icon={<PanelsTopLeftIcon size={16} className="text-[var(--accent-primary)]" />}
+            icon={<PanelsTopLeftIcon size={16} className="text-accent-primary" />}
             label={t("about.recoverableSessions")}
             value={`${runtimeSessionsSummary.recoverableCount}`}
             detail={t("about.sessionBreakdown", {
@@ -165,7 +165,7 @@ export function AboutSettingsPage({
             })}
           />
           <StatCard
-            icon={<RouteIcon size={16} className="text-[var(--accent-secondary)]" />}
+            icon={<RouteIcon size={16} className="text-accent-secondary" />}
             label={t("about.activeTeams")}
             value={`${liveTeamCount}`}
             detail={t("about.activeTeamsSummary", { count: runtimeTeams.length })}
@@ -182,7 +182,7 @@ export function AboutSettingsPage({
             title={t("about.settingsKey")}
             className="rounded-[0.9rem]"
           >
-            <p className="app-inline-mono break-all text-[var(--muted-foreground)]">
+            <p className="app-inline-mono break-all text-muted-foreground">
               {APP_SETTINGS_STORAGE_KEY}
             </p>
           </SettingsInfoCard>
@@ -191,7 +191,7 @@ export function AboutSettingsPage({
             title={t("about.runtimeClientKey")}
             className="rounded-[0.9rem]"
           >
-            <p className="app-inline-mono break-all text-[var(--muted-foreground)]">
+            <p className="app-inline-mono break-all text-muted-foreground">
               {RUNTIME_CLIENT_STORAGE_KEY}
             </p>
           </SettingsInfoCard>
@@ -214,10 +214,10 @@ function StatCard({
 }) {
   return (
     <SettingsInfoCard tone="softer" title={label} icon={icon}>
-      <div className="text-xl font-semibold tracking-[-0.03em] text-[var(--foreground)]">
+      <div className="text-xl font-semibold tracking-[-0.03em] text-foreground">
         {value}
       </div>
-      <p className="mt-2 text-sm leading-6 text-[var(--muted-foreground)]">
+      <p className="mt-2 text-sm leading-6 text-muted-foreground">
         {detail}
       </p>
     </SettingsInfoCard>

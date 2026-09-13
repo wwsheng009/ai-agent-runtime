@@ -15,16 +15,16 @@ export function LocalizationSettings() {
   return (
     <div className="mb-6 grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.55fr)]">
       <div>
-        <div className="text-[13px] font-semibold text-[var(--foreground)]">
+        <div className="text-[13px] font-semibold text-foreground">
           {t("localization.title")}
         </div>
-        <p className="mt-1 text-sm leading-6 text-[var(--muted-foreground)]">
+        <p className="mt-1 text-sm leading-6 text-muted-foreground">
           {t("localization.description")}
         </p>
       </div>
       <div className="flex items-end gap-3">
         <div className="min-w-0 flex-1">
-          <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+          <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
             {t("localization.title")}
           </div>
           <div className="mt-2">

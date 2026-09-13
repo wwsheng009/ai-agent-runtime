@@ -125,14 +125,14 @@ export function ArtifactDetailDialog({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[130] flex items-center justify-center bg-[var(--dialog-backdrop)] px-3 py-4 backdrop-blur-sm"
+      className="fixed inset-0 z-[130] flex items-center justify-center bg-dialog-backdrop px-3 py-4 backdrop-blur-sm"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) {
           onClose();
         }
       }}
     >
-      <div className="flex max-h-[calc(100vh-1.5rem)] w-full max-w-[min(90rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-[0.95rem] border border-[var(--border)] [background:var(--dialog-bg)] shadow-[0_18px_48px_rgba(0,0,0,0.28)]">
+      <div className="flex max-h-[calc(100vh-1.5rem)] w-full max-w-[min(90rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-[0.95rem] border border-border [background:var(--dialog-bg)] shadow-[0_18px_48px_rgba(0,0,0,0.28)]">
 
         <ArtifactDetailHeader
           artifact={artifact}

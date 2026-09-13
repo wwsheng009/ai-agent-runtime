@@ -31,10 +31,10 @@ export function TeamDetailsPanelSnapshot({
     <>
       <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="text-sm font-semibold text-[var(--foreground)]">
+          <div className="text-sm font-semibold text-foreground">
             Team snapshot
           </div>
-          <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+          <div className="mt-1 text-xs text-muted-foreground">
             {selectedTeam.id}
           </div>
         </div>
@@ -43,32 +43,32 @@ export function TeamDetailsPanelSnapshot({
 
       <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
         <div className={detailsCardClass}>
-          <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+          <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-muted-foreground">
             <ActivityIcon size={14} />
             Tasks
           </div>
-          <div className="mt-3 grid grid-cols-4 gap-2 text-xs text-[var(--muted-foreground)]">
+          <div className="mt-3 grid grid-cols-4 gap-2 text-xs text-muted-foreground">
             <div>
               <div className="app-text-10 uppercase tracking-[0.14em]">Ready</div>
-              <div className="mt-1 text-sm font-semibold text-[var(--foreground)]">
+              <div className="mt-1 text-sm font-semibold text-foreground">
                 {getSummaryCount(selectedSummary, "tasks", "ready")}
               </div>
             </div>
             <div>
               <div className="app-text-10 uppercase tracking-[0.14em]">Running</div>
-              <div className="mt-1 text-sm font-semibold text-[var(--foreground)]">
+              <div className="mt-1 text-sm font-semibold text-foreground">
                 {getSummaryCount(selectedSummary, "tasks", "running")}
               </div>
             </div>
             <div>
               <div className="app-text-10 uppercase tracking-[0.14em]">Done</div>
-              <div className="mt-1 text-sm font-semibold text-[var(--foreground)]">
+              <div className="mt-1 text-sm font-semibold text-foreground">
                 {getSummaryCount(selectedSummary, "tasks", "done")}
               </div>
             </div>
             <div>
               <div className="app-text-10 uppercase tracking-[0.14em]">Failed</div>
-              <div className="mt-1 text-sm font-semibold text-[var(--foreground)]">
+              <div className="mt-1 text-sm font-semibold text-foreground">
                 {getSummaryCount(selectedSummary, "tasks", "failed")}
               </div>
             </div>
@@ -76,21 +76,21 @@ export function TeamDetailsPanelSnapshot({
         </div>
 
         <div className={detailsCardClass}>
-          <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+          <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-muted-foreground">
             <UsersRoundIcon size={14} />
             Teammates
           </div>
           <div className="mt-3 flex items-end justify-between gap-3">
             <div>
-              <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+              <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                 Total
               </div>
-              <div className="mt-1 text-sm font-semibold text-[var(--foreground)]">
+              <div className="mt-1 text-sm font-semibold text-foreground">
                 {selectedSummary?.teammates.total ?? 0}
               </div>
             </div>
             {selectedTeam.max_teammates ? (
-              <div className="text-xs text-[var(--muted-foreground)]">
+              <div className="text-xs text-muted-foreground">
                 cap {selectedTeam.max_teammates}
               </div>
             ) : null}
@@ -99,36 +99,36 @@ export function TeamDetailsPanelSnapshot({
       </div>
 
       <div className={cn("mt-3", detailsCardClass)}>
-        <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+        <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-muted-foreground">
           <GitBranchPlusIcon size={14} />
           Task Graph
           {isDetailsLoading ? (
             <LoaderCircleIcon size={14} className="animate-spin" />
           ) : null}
         </div>
-        <div className="mt-3 grid grid-cols-3 gap-2 text-xs text-[var(--muted-foreground)]">
+        <div className="mt-3 grid grid-cols-3 gap-2 text-xs text-muted-foreground">
           <div>
             <div className="app-text-10 uppercase tracking-[0.14em]">Nodes</div>
-            <div className="mt-1 text-sm font-semibold text-[var(--foreground)]">
+            <div className="mt-1 text-sm font-semibold text-foreground">
               {details.graph?.count ?? 0}
             </div>
           </div>
           <div>
             <div className="app-text-10 uppercase tracking-[0.14em]">Edges</div>
-            <div className="mt-1 text-sm font-semibold text-[var(--foreground)]">
+            <div className="mt-1 text-sm font-semibold text-foreground">
               {graphEdgeCount}
             </div>
           </div>
           <div>
             <div className="app-text-10 uppercase tracking-[0.14em]">Missing</div>
-            <div className="mt-1 text-sm font-semibold text-[var(--foreground)]">
+            <div className="mt-1 text-sm font-semibold text-foreground">
               {graphMissingCount}
             </div>
           </div>
         </div>
       </div>
 
-      <div className="mt-3 space-y-1.5 text-sm text-[var(--muted-foreground)]">
+      <div className="mt-3 space-y-1.5 text-sm text-muted-foreground">
         {selectedTeam.workspace_id ? (
           <div>workspace: {selectedTeam.workspace_id}</div>
         ) : null}
@@ -139,7 +139,7 @@ export function TeamDetailsPanelSnapshot({
       </div>
 
       {detailsError ? (
-        <div className="mt-3 rounded-[0.8rem] border border-[#f0c77b]/18 bg-[#f0c77b]/8 px-3 py-2.5 text-sm leading-6 text-[var(--muted-foreground)]">
+        <div className="mt-3 rounded-[0.8rem] border border-[#f0c77b]/18 bg-[#f0c77b]/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
           {detailsError}
         </div>
       ) : null}

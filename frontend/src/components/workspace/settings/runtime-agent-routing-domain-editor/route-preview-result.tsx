@@ -16,7 +16,7 @@ export function RoutePreviewResult({
   const decision = result.decision;
   const warnings = decision.warnings ?? [];
   return (
-    <div className="mt-3 border-t border-[var(--border)] pt-3">
+    <div className="mt-3 border-t border-border pt-3">
       <div className="flex flex-wrap items-center gap-1.5">
         <HealthBadge tone={result.routing_enabled ? "ready" : "neutral"}>
           {result.routing_enabled
@@ -65,7 +65,7 @@ export function RoutePreviewResult({
         />
       </div>
 
-      <div className="mt-3 text-xs leading-5 text-[var(--muted-foreground)]">
+      <div className="mt-3 text-xs leading-5 text-muted-foreground">
         {t("editor.agentRouting.preview.parent")}: {result.parent.provider || "-"}
         {" / "}
         {result.parent.model || "-"}
@@ -75,11 +75,11 @@ export function RoutePreviewResult({
       </div>
 
       {warnings.length > 0 ? (
-        <div className="mt-3 space-y-1 border-t border-[var(--border)] pt-2.5">
+        <div className="mt-3 space-y-1 border-t border-border pt-2.5">
           {warnings.map((warning) => (
             <div
               key={warning}
-              className="flex items-start gap-1.5 text-xs leading-5 text-[var(--muted-foreground)]"
+              className="flex items-start gap-1.5 text-xs leading-5 text-muted-foreground"
             >
               <TriangleAlertIcon size={13} className="mt-1 shrink-0" />
               <span>{previewTranslation(t, "warnings", warning)}</span>

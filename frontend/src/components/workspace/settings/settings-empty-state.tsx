@@ -17,7 +17,7 @@ export function SettingsEmptyState({
   return (
     <div
       className={cn(
-        "text-sm leading-6 text-[var(--muted-foreground)]",
+        "text-sm leading-6 text-muted-foreground",
         variant === "dashed"
           ? surfaceCardVariants({
               frame: "dashed",

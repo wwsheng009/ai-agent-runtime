@@ -39,10 +39,10 @@ export function DispatchMonitor({
         <div className="rounded-[0.85rem] border border-white/8 bg-white/4 px-3 py-2.5">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <div className="text-sm font-semibold text-[var(--foreground)]">
+              <div className="text-sm font-semibold text-foreground">
                 Dispatch monitor
               </div>
-              <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+              <div className="mt-1 text-xs text-muted-foreground">
                 Follow task execution across the most recent fan-out batch.
               </div>
             </div>
@@ -60,13 +60,13 @@ export function DispatchMonitor({
           </div>
 
           {dispatchMonitorError ? (
-            <div className="mt-2.5 rounded-[0.8rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-[var(--muted-foreground)]">
+            <div className="mt-2.5 rounded-[0.8rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
               {dispatchMonitorError}
             </div>
           ) : null}
 
           {dispatchMonitor.length > 0 ? (
-            <div className="mt-2.5 flex flex-wrap gap-1.5 text-xs uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <div className="mt-2.5 flex flex-wrap gap-1.5 text-xs uppercase tracking-[0.14em] text-muted-foreground">
               {Object.entries(dispatchMonitorCounts).map(([status, count]) => (
                 <span
                   key={`dispatch-count-${status}`}
@@ -93,10 +93,10 @@ export function DispatchMonitor({
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <div className="truncate text-sm font-semibold text-[var(--foreground)]">
+                      <div className="truncate text-sm font-semibold text-foreground">
                         {truncateIdentifier(entry.teamId, 18)}
                       </div>
-                      <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                      <div className="mt-1 text-xs text-muted-foreground">
                         task {truncateIdentifier(entry.taskId, 18)}
                       </div>
                     </div>
@@ -110,7 +110,7 @@ export function DispatchMonitor({
                     </span>
                   </div>
 
-                  <div className="mt-2.5 flex flex-wrap gap-3 text-xs text-[var(--muted-foreground)]">
+                  <div className="mt-2.5 flex flex-wrap gap-3 text-xs text-muted-foreground">
                     {entry.assignee ? <span>assignee {entry.assignee}</span> : null}
                     {entry.lastEventType ? (
                       <span>event {prettyEventType(entry.lastEventType)}</span>
@@ -121,7 +121,7 @@ export function DispatchMonitor({
                   </div>
 
                   {entry.summary ? (
-                    <div className="mt-2.5 text-sm leading-6 text-[var(--foreground)]">
+                    <div className="mt-2.5 text-sm leading-6 text-foreground">
                       {entry.summary}
                     </div>
                   ) : null}
@@ -131,7 +131,7 @@ export function DispatchMonitor({
                       {entry.mailboxPreview.map((line, index) => (
                         <div
                           key={`dispatch-mailbox-${entry.teamId}-${entry.taskId}-${index}`}
-                          className="rounded-[0.75rem] border border-white/8 bg-white/4 px-3 py-2 text-sm leading-6 text-[var(--muted-foreground)]"
+                          className="rounded-[0.75rem] border border-white/8 bg-white/4 px-3 py-2 text-sm leading-6 text-muted-foreground"
                         >
                           {line}
                         </div>
@@ -140,14 +140,14 @@ export function DispatchMonitor({
                   ) : null}
 
                   {entry.error ? (
-                    <div className="mt-2.5 rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2 text-sm leading-6 text-[var(--muted-foreground)]">
+                    <div className="mt-2.5 rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2 text-sm leading-6 text-muted-foreground">
                       {entry.error}
                     </div>
                   ) : null}
                 </div>
               ))
             ) : (
-              <div className="text-sm text-[var(--muted-foreground)]">
+              <div className="text-sm text-muted-foreground">
                 No dispatch monitor data available yet.
               </div>
             )}

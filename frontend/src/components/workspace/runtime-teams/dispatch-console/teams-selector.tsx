@@ -28,7 +28,7 @@ export function DispatchTeamSelector({
   return (
     <div className="mt-3 space-y-1.5">
       {teams.length === 0 ? (
-        <div className="rounded-[0.8rem] border border-dashed border-white/10 px-3 py-2.5 text-sm text-[var(--muted-foreground)]">
+        <div className="rounded-[0.8rem] border border-dashed border-white/10 px-3 py-2.5 text-sm text-muted-foreground">
           No existing teams yet. Use the provision action above to create runnable teams and fan out the next task.
         </div>
       ) : null}
@@ -54,13 +54,13 @@ export function DispatchTeamSelector({
                 className="size-4 rounded border-white/14 bg-transparent"
               />
               <span className="min-w-0">
-                <span className="block truncate text-sm font-semibold text-[var(--foreground)]">
+                <span className="block truncate text-sm font-semibold text-foreground">
                   {truncateIdentifier(team.id, 18)}
                 </span>
-                <span className="block truncate text-xs text-[var(--muted-foreground)]">
+                <span className="block truncate text-xs text-muted-foreground">
                   {summary?.tasks.total ?? 0} tasks · {summary?.teammates.total ?? 0} teammates
                 </span>
-                <span className="mt-1 block truncate app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+                <span className="mt-1 block truncate app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
                   {isDispatchReadinessLoading && !readiness
                     ? "checking executability..."
                     : readiness
@@ -70,7 +70,7 @@ export function DispatchTeamSelector({
               </span>
             </span>
             <span className="flex shrink-0 flex-col items-end gap-2">
-              <span className="app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+              <span className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
                 {team.status || "unknown"}
               </span>
               <span
@@ -78,7 +78,7 @@ export function DispatchTeamSelector({
                   consolePillClass,
                   readiness?.executable
                     ? "border-[#8fd0c6]/24 bg-[#8fd0c6]/10 text-[#8fd0c6]"
-                    : "border-white/10 bg-white/6 text-[var(--muted-foreground)]",
+                    : "border-white/10 bg-white/6 text-muted-foreground",
                 )}
               >
                 {readiness?.executable ? "executable" : "not ready"}

@@ -34,7 +34,7 @@ export function ConfigEditorControlBar({ core }: { core: ConfigEditorCore }) {
   } = core;
 
   return (
-    <div className="sticky top-2 z-20 mt-2.5 rounded-[0.95rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+    <div className="sticky top-2 z-20 mt-2.5 rounded-[0.95rem] border border-border bg-surface-softer p-3">
       <div className="flex flex-wrap items-center justify-between gap-2.5">
         <div className="flex flex-wrap items-center gap-2">
           <Badge>
@@ -127,7 +127,7 @@ export function ConfigEditorControlBar({ core }: { core: ConfigEditorCore }) {
           </Button>
         </div>
       </div>
-      <div className="mt-2.5 text-xs text-[var(--muted-foreground)]">
+      <div className="mt-2.5 text-xs text-muted-foreground">
         {t("editor.currentFocusPrefix")}
         {mode === "source"
           ? t("editor.sourceFocus")

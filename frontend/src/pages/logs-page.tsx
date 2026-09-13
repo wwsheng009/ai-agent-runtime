@@ -286,7 +286,7 @@ export function LogsPage() {
   }
 
   return (
-    <div className="min-h-screen [background:var(--workspace-shell-bg)] text-[var(--foreground)] lg:h-dvh lg:overflow-hidden">
+    <div className="min-h-screen [background:var(--workspace-shell-bg)] text-foreground lg:h-dvh lg:overflow-hidden">
       <div className="mx-auto flex min-h-screen w-full max-w-[1760px] flex-col gap-2 px-2.5 py-2.5 sm:px-3 lg:h-full lg:min-h-0 lg:px-3">
         <LogsHeaderSection
           activeChips={activeChips}
@@ -325,15 +325,15 @@ export function LogsPage() {
           />
 
           <div className="surface-panel flex min-h-[22rem] flex-col overflow-hidden rounded-[0.95rem] lg:min-h-0">
-            <div className="border-b border-[var(--border)] px-3.5 py-2">
+            <div className="border-b border-border px-3.5 py-2">
               <div className="app-text-13 font-semibold tracking-[-0.02em]">{t("detailsTitle")}</div>
-              <div className="mt-1 app-text-11 text-[var(--muted-foreground)]">
+              <div className="mt-1 app-text-11 text-muted-foreground">
                 {t("detailsDescription")}
               </div>
             </div>
 
             {!selectedEntry ? (
-              <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-[var(--muted-foreground)]">
+              <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground">
                 {t("selectPrompt")}
               </div>
             ) : (

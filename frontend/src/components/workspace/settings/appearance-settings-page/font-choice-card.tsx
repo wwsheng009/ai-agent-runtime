@@ -23,13 +23,13 @@ export function FontChoiceCard({
 }: FontChoiceCardProps) {
   return (
     <SettingsChoiceCard active={active} onClick={onClick}>
-      <div className="text-base font-semibold text-[var(--foreground)]">{label}</div>
-      <p className="mt-1.5 text-base leading-6 text-[var(--muted-foreground)]">
+      <div className="text-base font-semibold text-foreground">{label}</div>
+      <p className="mt-1.5 text-base leading-6 text-muted-foreground">
         {description}
       </p>
       <div
         style={style}
-        className="mt-3 rounded-[0.75rem] border border-[var(--border)] bg-[var(--surface-solid)] px-3 py-2.5 text-base leading-6 text-[var(--foreground)]"
+        className="mt-3 rounded-[0.75rem] border border-border bg-surface-solid px-3 py-2.5 text-base leading-6 text-foreground"
       >
         {sample}
       </div>

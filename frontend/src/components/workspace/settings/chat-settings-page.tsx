@@ -97,7 +97,7 @@ export function ChatSettingsPage({
         <div className="grid gap-3 md:grid-cols-2">
           <SettingsFieldCard
             title={t("chat.defaultProvider")}
-            icon={<BotIcon size={16} className="text-[var(--accent-primary)]" />}
+            icon={<BotIcon size={16} className="text-accent-primary" />}
           >
             <Select
               ariaLabel={t("chat.defaultProvider")}
@@ -118,7 +118,7 @@ export function ChatSettingsPage({
 
           <SettingsFieldCard
             title={t("chat.defaultModel")}
-            icon={<RouteIcon size={16} className="text-[var(--accent-secondary)]" />}
+            icon={<RouteIcon size={16} className="text-accent-secondary" />}
           >
             <Select
               ariaLabel={t("chat.defaultModel")}
@@ -195,7 +195,7 @@ export function ChatSettingsPage({
           description={
             <>
               {t("chat.currentMode")}:{" "}
-              <span className="text-[var(--foreground)]">
+              <span className="text-foreground">
                 {settings.chat.enableReact
                   ? t("chat.reactMode")
                   : t("chat.routeDirectMode")}
@@ -222,10 +222,10 @@ export function ChatSettingsPage({
                   updateSection("chat", { reasoningEffort: option.value })
                 }
               >
-                <div className="text-base font-semibold text-[var(--foreground)]">
+                <div className="text-base font-semibold text-foreground">
                   {option.label}
                 </div>
-                <p className="mt-1.5 text-base leading-6 text-[var(--muted-foreground)]">
+                <p className="mt-1.5 text-base leading-6 text-muted-foreground">
                   {option.description}
                 </p>
               </SettingsChoiceCard>
@@ -253,7 +253,7 @@ export function ChatSettingsPage({
               }
               className={cn(editorControlClassName, "sm:max-w-[10rem]")}
             />
-            <p className="text-sm leading-6 text-[var(--muted-foreground)]">
+            <p className="text-sm leading-6 text-muted-foreground">
               {t("chat.currentMaxSteps", { count: settings.chat.maxSteps })}{" "}
               {t("chat.maxStepsAdvice")}
             </p>

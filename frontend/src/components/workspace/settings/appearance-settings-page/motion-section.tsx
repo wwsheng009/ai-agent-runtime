@@ -32,7 +32,7 @@ export function AppearanceMotionSection({
           title={t("appearance.reducedMotion")}
           description={t("appearance.reducedMotionDescription")}
           icon={<WavesIcon size={16} />}
-          iconWrapperClassName="text-[var(--accent-secondary)]"
+          iconWrapperClassName="text-accent-secondary"
         />
       </SettingsSection>
   );

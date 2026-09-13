@@ -54,21 +54,21 @@ export function TeamDetailsPanelMailbox({
   return (
     <div className={detailsPanelClass}>
       <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+        <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-muted-foreground">
           Mailbox
         </div>
         <Badge>{details.mailbox.length}</Badge>
       </div>
-      <div className="mt-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+      <div className="mt-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
         Recent team messages with broadcast included
       </div>
       <div className="mt-3 rounded-[0.75rem] border border-white/8 bg-white/4 px-3 py-2.5">
-        <div className="app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+        <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
           Compose mailbox message
         </div>
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
           <div>
-            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
               From agent
             </div>
             <input
@@ -79,7 +79,7 @@ export function TeamDetailsPanelMailbox({
             />
           </div>
           <div>
-            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
               To agent
             </div>
             <input
@@ -90,7 +90,7 @@ export function TeamDetailsPanelMailbox({
             />
           </div>
           <div>
-            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
               Kind
             </div>
             <input
@@ -101,7 +101,7 @@ export function TeamDetailsPanelMailbox({
             />
           </div>
           <div>
-            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
               Task id
             </div>
             <input
@@ -113,7 +113,7 @@ export function TeamDetailsPanelMailbox({
           </div>
         </div>
         <div className="mt-3">
-          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
             Body
           </div>
           <textarea
@@ -124,7 +124,7 @@ export function TeamDetailsPanelMailbox({
           />
         </div>
         <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="text-xs text-[var(--muted-foreground)]">
+          <div className="text-xs text-muted-foreground">
             Use `*` in `to agent` for broadcast delivery.
           </div>
           <Button
@@ -141,7 +141,7 @@ export function TeamDetailsPanelMailbox({
         </div>
       </div>
       {mailboxError ? (
-        <div className="mt-3 rounded-[0.8rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-[var(--muted-foreground)]">
+        <div className="mt-3 rounded-[0.8rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
           {mailboxError}
         </div>
       ) : null}
@@ -151,15 +151,15 @@ export function TeamDetailsPanelMailbox({
             <div key={message.id} className={detailsCardClass}>
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="truncate text-sm font-semibold text-[var(--foreground)]">
+                  <div className="truncate text-sm font-semibold text-foreground">
                     {message.body || message.kind}
                   </div>
-                  <div className="mt-1 truncate text-xs text-[var(--muted-foreground)]">
+                  <div className="mt-1 truncate text-xs text-muted-foreground">
                     {describeMailboxRoute(message)}
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
-                  <span className="rounded-[0.65rem] border border-white/10 bg-white/6 px-2 py-0.5 app-text-10 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
+                  <span className="rounded-[0.65rem] border border-white/10 bg-white/6 px-2 py-0.5 app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
                     {message.kind || "message"}
                   </span>
                   <span
@@ -167,14 +167,14 @@ export function TeamDetailsPanelMailbox({
                       detailsPillClass,
                       message.acked_at
                         ? "border-[#8fd0c6]/24 bg-[#8fd0c6]/10 text-[#8fd0c6]"
-                        : "border-white/10 bg-white/6 text-[var(--muted-foreground)]",
+                        : "border-white/10 bg-white/6 text-muted-foreground",
                     )}
                   >
                     {message.acked_at ? "acked" : "pending"}
                   </span>
                 </div>
               </div>
-              <div className="mt-2 flex flex-wrap gap-3 text-xs text-[var(--muted-foreground)]">
+              <div className="mt-2 flex flex-wrap gap-3 text-xs text-muted-foreground">
                 {message.created_at ? (
                   <span>created {formatRelativeTimestamp(message.created_at)}</span>
                 ) : null}
@@ -201,7 +201,7 @@ export function TeamDetailsPanelMailbox({
             </div>
           ))
         ) : (
-          <div className="text-sm text-[var(--muted-foreground)]">
+          <div className="text-sm text-muted-foreground">
             No mailbox activity available.
           </div>
         )}

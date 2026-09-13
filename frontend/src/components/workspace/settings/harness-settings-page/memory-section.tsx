@@ -51,7 +51,7 @@ export function HarnessMemorySection({
           <SettingsPanelCard
             title={t("harness.memorySearch")}
             icon={
-              <BrainIcon size={16} className="text-[var(--accent-primary)]" />
+              <BrainIcon size={16} className="text-accent-primary" />
             }
           >
             <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
@@ -118,12 +118,12 @@ export function HarnessMemorySection({
               {memoryNotes.map((note) => (
                 <div
                   key={note.id}
-                  className="rounded-[0.85rem] border border-[var(--border)] bg-[var(--surface-softer)] px-3 py-2.5"
+                  className="rounded-[0.85rem] border border-border bg-surface-softer px-3 py-2.5"
                 >
-                  <p className="text-sm leading-6 text-[var(--foreground)]">
+                  <p className="text-sm leading-6 text-foreground">
                     {note.text}
                   </p>
-                  <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--muted-foreground)]">
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                     {note.source ? <Badge>{note.source}</Badge> : null}
                     {note.created_at ? <span>{note.created_at}</span> : null}
                     {(note.tags ?? []).map((tag) => (

@@ -67,8 +67,8 @@ export function RuntimeRetryRuleDialog({
                 placeholder="rate_limit_retry"
               />
             </ConfigFormField>
-            <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
-              <div className="text-sm font-semibold text-[var(--foreground)]">enabled</div>
+            <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
+              <div className="text-sm font-semibold text-foreground">enabled</div>
               <label className={`mt-3 ${editorToggleRowClassName}`}>
                 <span>
                   {draft.enabled
@@ -77,7 +77,7 @@ export function RuntimeRetryRuleDialog({
                 </span>
                 <input
                   type="checkbox"
-                  className="h-4 w-4 accent-[var(--accent-primary)]"
+                  className="h-4 w-4 accent-accent-primary"
                   checked={draft.enabled}
                   onChange={(event) =>
                     setDraft((current) => ({
@@ -223,8 +223,8 @@ export function RuntimeRetryRuleDialog({
                 }
               />
             </ConfigFormField>
-            <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
-              <div className="text-sm font-semibold text-[var(--foreground)]">
+            <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
+              <div className="text-sm font-semibold text-foreground">
                 keyword.case_sensitive
               </div>
               <label className={`mt-3 ${editorToggleRowClassName}`}>
@@ -235,7 +235,7 @@ export function RuntimeRetryRuleDialog({
                 </span>
                 <input
                   type="checkbox"
-                  className="h-4 w-4 accent-[var(--accent-primary)]"
+                  className="h-4 w-4 accent-accent-primary"
                   checked={draft.keywordCaseSensitive}
                   onChange={(event) =>
                     setDraft((current) => ({

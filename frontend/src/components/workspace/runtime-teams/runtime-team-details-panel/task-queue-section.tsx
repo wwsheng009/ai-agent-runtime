@@ -39,10 +39,10 @@ export function RuntimeTeamTaskQueueSection({
             >
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="truncate text-[13px] font-semibold text-[var(--foreground)]">
+                  <div className="truncate text-[13px] font-semibold text-foreground">
                     {task.title || truncateIdentifier(task.id, 18)}
                   </div>
-                  <div className="truncate text-xs text-[var(--muted-foreground)]">
+                  <div className="truncate text-xs text-muted-foreground">
                     {task.goal || task.id}
                   </div>
                 </div>
@@ -55,7 +55,7 @@ export function RuntimeTeamTaskQueueSection({
                   {task.status || "unknown"}
                 </span>
               </div>
-              <div className="mt-1.5 flex flex-wrap gap-2.5 text-xs text-[var(--muted-foreground)]">
+              <div className="mt-1.5 flex flex-wrap gap-2.5 text-xs text-muted-foreground">
                 <span>priority {task.priority ?? 0}</span>
                 {task.assignee ? <span>assignee {task.assignee}</span> : null}
                 {task.parent_task_id ? (
@@ -67,7 +67,7 @@ export function RuntimeTeamTaskQueueSection({
             </div>
           ))
         ) : (
-          <div className="text-sm text-[var(--muted-foreground)]">No tasks available.</div>
+          <div className="text-sm text-muted-foreground">No tasks available.</div>
         )}
       </div>
     </TeamDetailsSection>

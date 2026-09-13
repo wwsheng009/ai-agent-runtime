@@ -45,7 +45,7 @@ export function HarnessPluginsSection({
                 icon={
                   <PlugIcon
                     size={16}
-                    className="text-[var(--accent-secondary)]"
+                    className="text-accent-secondary"
                   />
                 }
                 description={
@@ -63,7 +63,7 @@ export function HarnessPluginsSection({
                   </div>
                 }
               >
-                <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--muted-foreground)]">
+                <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                   <span className="app-inline-mono">{plugin.id}</span>
                   {plugin.version ? <span>v{plugin.version}</span> : null}
                   {plugin.root ? (
@@ -73,7 +73,7 @@ export function HarnessPluginsSection({
                   ) : null}
                 </div>
                 {(plugin.warnings?.length ?? 0) > 0 ? (
-                  <div className="mt-2 space-y-1 text-sm text-[var(--muted-foreground)]">
+                  <div className="mt-2 space-y-1 text-sm text-muted-foreground">
                     {plugin.warnings?.map((warning) => (
                       <div key={`${plugin.id}-${warning}`}>{warning}</div>
                     ))}

@@ -131,7 +131,7 @@ export function RuntimeAuthDomainEditor({
             <label className={editorSectionToggleClassName}>
               <input
                 type="checkbox"
-                className="h-4 w-4 accent-[var(--accent-primary)]"
+                className="h-4 w-4 accent-accent-primary"
                 checked={authConfig.adminAuthEnabled}
                 onChange={(event) =>
                   update({ adminAuthEnabled: event.target.checked })
@@ -160,7 +160,7 @@ export function RuntimeAuthDomainEditor({
             <label className={editorSectionToggleClassName}>
               <input
                 type="checkbox"
-                className="h-4 w-4 accent-[var(--accent-primary)]"
+                className="h-4 w-4 accent-accent-primary"
                 checked={authConfig.accessAuthEnabled}
                 onChange={(event) =>
                   update({ accessAuthEnabled: event.target.checked })

@@ -37,14 +37,14 @@ export function TeamSelectorList({
             )}
           >
             <div className="flex items-center justify-between gap-3">
-              <div className="truncate text-base font-semibold text-[var(--foreground)]">
+              <div className="truncate text-base font-semibold text-foreground">
                 {truncateIdentifier(team.id, 16)}
               </div>
-              <span className="shrink-0 app-text-11 uppercase tracking-[0.15em] text-[var(--muted-foreground)]">
+              <span className="shrink-0 app-text-11 uppercase tracking-[0.15em] text-muted-foreground">
                 {team.status || "unknown"}
               </span>
             </div>
-            <div className="mt-1.5 flex flex-wrap gap-1.5 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <div className="mt-1.5 flex flex-wrap gap-1.5 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
               <span>{summary?.tasks.total ?? 0} tasks</span>
               <span>{summary?.teammates.total ?? 0} teammates</span>
               {team.strategy ? <span>{team.strategy}</span> : null}

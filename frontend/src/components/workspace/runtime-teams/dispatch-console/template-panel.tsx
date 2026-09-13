@@ -17,7 +17,7 @@ export function DispatchTemplatePanel({
 }: DispatchTemplatePanelProps) {
   return (
     <div className={cn("mt-3", consolePanelClass)}>
-      <div className="app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+      <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
         Fan-out template
       </div>
       <div className="mt-3 flex flex-wrap gap-2">
@@ -28,7 +28,7 @@ export function DispatchTemplatePanel({
             consoleModeButtonClass,
             dispatchTemplateMode === "review_implement_verify"
               ? "border-[#f0c77b]/24 bg-[#f0c77b]/10 text-[#f0c77b]"
-              : "border-white/10 bg-white/4 text-[var(--muted-foreground)] hover:border-white/14 hover:bg-white/7 hover:text-[var(--foreground)]",
+              : "border-white/10 bg-white/4 text-muted-foreground hover:border-white/14 hover:bg-white/7 hover:text-foreground",
           )}
         >
           Review / Implement / Verify
@@ -40,13 +40,13 @@ export function DispatchTemplatePanel({
             consoleModeButtonClass,
             dispatchTemplateMode === "mirror"
               ? "border-[#f0c77b]/24 bg-[#f0c77b]/10 text-[#f0c77b]"
-              : "border-white/10 bg-white/4 text-[var(--muted-foreground)] hover:border-white/14 hover:bg-white/7 hover:text-[var(--foreground)]",
+              : "border-white/10 bg-white/4 text-muted-foreground hover:border-white/14 hover:bg-white/7 hover:text-foreground",
           )}
         >
           Mirror Same Task
         </button>
       </div>
-      <div className="mt-3 text-sm leading-6 text-[var(--muted-foreground)]">
+      <div className="mt-3 text-sm leading-6 text-muted-foreground">
         {dispatchTemplateMode === "mirror"
           ? "Every selected team receives the same task payload."
           : "Teams receive role-specific variants of the same next task so they execute from different angles."}

@@ -60,7 +60,7 @@ export function RuntimeRateLimitApiKeyLimitsTable({
         {
           header: "Pattern",
           cell: (item) => (
-            <div className="min-w-[12rem] font-semibold text-[var(--foreground)]">
+            <div className="min-w-[12rem] font-semibold text-foreground">
               {item.apiKeyPattern}
             </div>
           ),
@@ -70,7 +70,7 @@ export function RuntimeRateLimitApiKeyLimitsTable({
           cell: (item) => (
             <div className="min-w-[12rem] text-sm">
               <div>{`qps ${item.qps || "--"} / qpm ${item.qpm || "--"}`}</div>
-              <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+              <div className="mt-1 text-xs text-muted-foreground">
                 {`qpd ${item.qpd || "--"}`}
               </div>
             </div>
@@ -81,7 +81,7 @@ export function RuntimeRateLimitApiKeyLimitsTable({
           cell: (item) => (
             <div className="min-w-[10rem]">
               <div>{item.blockDuration || "--"}</div>
-              <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+              <div className="mt-1 text-xs text-muted-foreground">
                 {item.extraFieldCount > 0
                   ? t("editor.rateLimit.extraFields.count", {
                       count: item.extraFieldCount,

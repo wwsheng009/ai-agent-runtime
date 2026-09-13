@@ -34,17 +34,17 @@ export function RuntimeProxyDomainEditor({
 
   return (
     <div className="space-y-3">
-      <div className="rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+      <div className="rounded-[0.9rem] border border-border bg-surface-softer p-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             <SettingsPanelIcon>
               <RouteIcon size={15} />
             </SettingsPanelIcon>
             <div>
-              <div className="text-base font-semibold text-[var(--foreground)]">
+              <div className="text-base font-semibold text-foreground">
                 {t("editor.proxy.title")}
               </div>
-              <div className="mt-1 text-sm text-[var(--muted-foreground)]">
+              <div className="mt-1 text-sm text-muted-foreground">
                 {t("editor.proxy.description")}
               </div>
             </div>

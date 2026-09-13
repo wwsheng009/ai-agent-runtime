@@ -27,7 +27,7 @@ export function WorkspaceShellThreadStrip({
 }: WorkspaceShellThreadStripProps) {
   return (
     <div className="shrink-0 px-3.5 pb-2.5 pt-1.5 sm:px-4 lg:px-6">
-      <div className="mx-auto flex max-w-[42rem] flex-wrap items-center gap-2 app-text-11 uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+      <div className="mx-auto flex max-w-[42rem] flex-wrap items-center gap-2 app-text-11 uppercase tracking-[0.16em] text-muted-foreground">
         <span className={cn(stripPillClass, "border-white/10 bg-white/5 text-[#8fd0c6]")}>
           <SparklesIcon size={14} />
           Active thread
@@ -49,11 +49,11 @@ export function WorkspaceShellThreadStrip({
         ) : null}
       </div>
 
-      <p className="mx-auto mt-2.5 max-w-[42rem] text-sm leading-6 text-[var(--muted-foreground)]">
+      <p className="mx-auto mt-2.5 max-w-[42rem] text-sm leading-6 text-muted-foreground">
         {selectedThread.summary}
       </p>
 
-      <div className="mx-auto mt-2 flex max-w-[42rem] flex-wrap items-center gap-x-4 gap-y-1 app-text-11 uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+      <div className="mx-auto mt-2 flex max-w-[42rem] flex-wrap items-center gap-x-4 gap-y-1 app-text-11 uppercase tracking-[0.16em] text-muted-foreground">
         <span className="inline-flex items-center gap-2">
           <OrbitIcon size={13} className="text-[#f0c77b]" />
           {selectedThread.messages.length} entries
@@ -68,9 +68,9 @@ export function WorkspaceShellThreadStrip({
       </div>
 
       {selectedThread.lastError ? (
-        <div className="mx-auto mt-2.5 max-w-[42rem] rounded-[0.8rem] border border-[#f0c77b]/22 bg-[#f0c77b]/8 px-3 py-2.5 text-sm leading-6 text-[var(--foreground)]">
+        <div className="mx-auto mt-2.5 max-w-[42rem] rounded-[0.8rem] border border-[#f0c77b]/22 bg-[#f0c77b]/8 px-3 py-2.5 text-sm leading-6 text-foreground">
           Runtime sync failed.
-          <span className="ml-2 text-[var(--muted-foreground)]">
+          <span className="ml-2 text-muted-foreground">
             {selectedThread.lastError}
           </span>
         </div>

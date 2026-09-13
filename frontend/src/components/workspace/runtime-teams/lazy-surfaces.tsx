@@ -19,7 +19,7 @@ export const RuntimeTeamDispatchPanel = lazy(() =>
 
 export function RuntimeTeamsPanelFallback({ label }: { label: string }) {
   return (
-    <div className="rounded-[0.95rem] border border-[var(--border)] bg-[var(--surface-softer)] px-4 py-3 text-sm text-[var(--muted-foreground)]">
+    <div className="rounded-[0.95rem] border border-border bg-surface-softer px-4 py-3 text-sm text-muted-foreground">
       正在加载 {label}…
     </div>
   );

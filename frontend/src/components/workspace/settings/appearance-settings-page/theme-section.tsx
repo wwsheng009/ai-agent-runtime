@@ -49,10 +49,10 @@ export function AppearanceThemeSection({
               >
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <div className="text-base font-semibold text-[var(--foreground)]">
+                    <div className="text-base font-semibold text-foreground">
                       {option.label}
                     </div>
-                    <p className="mt-2 text-sm leading-6 text-[var(--muted-foreground)]">
+                    <p className="mt-2 text-sm leading-6 text-muted-foreground">
                       {option.description}
                     </p>
                   </div>
@@ -60,15 +60,15 @@ export function AppearanceThemeSection({
                     size={16}
                     className={cn(
                       active
-                        ? "text-[var(--accent-primary)]"
-                        : "text-[var(--muted-foreground)]",
+                        ? "text-accent-primary"
+                        : "text-muted-foreground",
                     )}
                   />
                 </div>
-                <div className="mt-3 rounded-[0.75rem] border border-[var(--border)] bg-[var(--surface-soft)] p-2.5">
-                  <div className="flex items-center justify-between gap-3 text-xs uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+                <div className="mt-3 rounded-[0.75rem] border border-border bg-surface-soft p-2.5">
+                  <div className="flex items-center justify-between gap-3 text-xs uppercase tracking-[0.16em] text-muted-foreground">
                     <span>{t("appearance.themeApplied")}</span>
-                    <span className="text-[var(--foreground)]">
+                    <span className="text-foreground">
                       {option.id === "system"
                         ? t("appearance.themeSystemResolved", {
                             resolved:
@@ -99,7 +99,7 @@ export function AppearanceThemeSection({
         description={
           <>
               {t("appearance.currentlySetTo")}{" "}
-              <span className="text-[var(--foreground)]">
+              <span className="text-foreground">
                 {themeValueLabel}
               </span>
               。

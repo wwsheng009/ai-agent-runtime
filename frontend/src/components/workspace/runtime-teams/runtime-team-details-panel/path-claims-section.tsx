@@ -57,12 +57,12 @@ export function RuntimeTeamPathClaimsSection({
       onToggle={onToggle}
     >
       <div className={detailCardClass}>
-        <div className="app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+        <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
           Conflict check
         </div>
         <div className="mt-2.5 grid gap-2.5">
           <div>
-            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
               Read paths
             </div>
             <textarea
@@ -73,7 +73,7 @@ export function RuntimeTeamPathClaimsSection({
             />
           </div>
           <div>
-            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
               Write paths
             </div>
             <textarea
@@ -85,7 +85,7 @@ export function RuntimeTeamPathClaimsSection({
           </div>
         </div>
         <div className="mt-2.5 flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between">
-          <div className="text-xs text-[var(--muted-foreground)]">
+          <div className="text-xs text-muted-foreground">
             Separate multiple paths with new lines or commas.
           </div>
           <Button
@@ -101,14 +101,14 @@ export function RuntimeTeamPathClaimsSection({
           </Button>
         </div>
         {claimCheckError ? (
-          <div className="mt-2.5 rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-[var(--muted-foreground)]">
+          <div className="mt-2.5 rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
             {claimCheckError}
           </div>
         ) : null}
         {claimCheckState ? (
-          <div className="mt-2.5 rounded-[0.75rem] border border-[var(--border)] bg-[var(--surface-solid)] px-3 py-2.5">
+          <div className="mt-2.5 rounded-[0.75rem] border border-border bg-surface-solid px-3 py-2.5">
             <div className="flex items-center justify-between gap-3">
-              <div className="text-[13px] font-semibold text-[var(--foreground)]">
+              <div className="text-[13px] font-semibold text-foreground">
                 {claimCheckState.ok ? "No conflicts detected" : "Conflicts detected"}
               </div>
               <span
@@ -129,7 +129,7 @@ export function RuntimeTeamPathClaimsSection({
                     key={`${conflict.path}-${conflict.existing_path}-${index}`}
                     className={cn(
                       detailCardClass,
-                      "text-sm leading-6 text-[var(--muted-foreground)]",
+                      "text-sm leading-6 text-muted-foreground",
                     )}
                   >
                     {summarizeConflict(conflict)}
@@ -137,7 +137,7 @@ export function RuntimeTeamPathClaimsSection({
                 ))}
               </div>
             ) : (
-              <div className="mt-2 text-sm text-[var(--muted-foreground)]">
+              <div className="mt-2 text-sm text-muted-foreground">
                 Requested reads and writes can be acquired at the current runtime
                 snapshot.
               </div>
@@ -157,10 +157,10 @@ export function RuntimeTeamPathClaimsSection({
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="break-all text-[13px] font-semibold text-[var(--foreground)]">
+                    <div className="break-all text-[13px] font-semibold text-foreground">
                       {claim.path}
                     </div>
-                    <div className="mt-0.5 flex flex-wrap gap-2.5 text-xs text-[var(--muted-foreground)]">
+                    <div className="mt-0.5 flex flex-wrap gap-2.5 text-xs text-muted-foreground">
                       <span>owner {truncateIdentifier(claim.owner_agent_id, 14)}</span>
                       <span>task {truncateIdentifier(claim.task_id, 14)}</span>
                     </div>
@@ -181,7 +181,7 @@ export function RuntimeTeamPathClaimsSection({
                     </span>
                   </div>
                 </div>
-                <div className="mt-1.5 flex flex-wrap gap-2.5 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-1.5 flex flex-wrap gap-2.5 text-xs text-muted-foreground">
                   {claim.lease_until ? (
                     <span>lease {formatRelativeTimestamp(claim.lease_until)}</span>
                   ) : (
@@ -193,7 +193,7 @@ export function RuntimeTeamPathClaimsSection({
             );
           })
         ) : (
-          <div className="text-sm text-[var(--muted-foreground)]">
+          <div className="text-sm text-muted-foreground">
             No active path claims available.
           </div>
         )}

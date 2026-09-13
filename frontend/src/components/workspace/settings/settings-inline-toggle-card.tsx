@@ -37,14 +37,14 @@ export function SettingsInlineToggleCard({
     >
       <label
         className={cn(
-          "flex items-center justify-between gap-4 text-sm text-[var(--foreground)]",
+          "flex items-center justify-between gap-4 text-sm text-foreground",
           labelClassName,
         )}
       >
         <div>
           <div className="font-medium">{label}</div>
           {description ? (
-            <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+            <div className="mt-1 text-xs text-muted-foreground">
               {description}
             </div>
           ) : null}

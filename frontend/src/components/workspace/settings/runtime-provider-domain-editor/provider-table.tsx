@@ -91,14 +91,14 @@ export function ProviderTable({
             cell: (provider) => (
               <div className="min-w-[11rem]">
                 <div className="flex flex-wrap items-center gap-2">
-                  <div className="font-semibold text-[var(--foreground)]">
+                  <div className="font-semibold text-foreground">
                     {provider.name}
                   </div>
                   {provider.name === defaultProvider ? (
                     <Badge>{t("editor.providers.row.defaultBadge")}</Badge>
                   ) : null}
                 </div>
-                <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-1 text-xs text-muted-foreground">
                   {provider.baseUrl || t("editor.providers.row.noBaseUrl")}
                 </div>
               </div>
@@ -109,7 +109,7 @@ export function ProviderTable({
             cell: (provider) => (
               <div className="min-w-[7rem]">
                 <div>{provider.protocol || "--"}</div>
-                <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-1 text-xs text-muted-foreground">
                   {provider.supportTypes.join(", ") || t("editor.providers.row.noSupportTypes")}
                 </div>
               </div>
@@ -120,7 +120,7 @@ export function ProviderTable({
             cell: (provider) => (
               <div className="min-w-[10rem]">
                 <div>{provider.defaultModel || "--"}</div>
-                <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-1 text-xs text-muted-foreground">
                   {t("editor.providers.row.modelCount", {
                     count: provider.supportedModels.length,
                   })}
@@ -144,7 +144,7 @@ export function ProviderTable({
                     <Badge>{t("editor.providers.row.siteUndetected")}</Badge>
                   )}
                 </div>
-                <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                <div className="mt-1 text-xs text-muted-foreground">
                   {provider.accountSummary ||
                     (provider.accountAuthRef
                       ? t("editor.providers.row.authRef", {

@@ -24,7 +24,7 @@ export function ConfigPreviewSection({ core }: { core: ConfigEditorCore }) {
         title={t("editor.preview.title")}
         description={t("editor.preview.description")}
       >
-        <div className="rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+        <div className="rounded-[0.9rem] border border-border bg-surface-softer p-3">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2.5">
             <div className="flex flex-wrap items-center gap-2">
               <SummaryPill
@@ -44,22 +44,22 @@ export function ConfigPreviewSection({ core }: { core: ConfigEditorCore }) {
                 <Badge>{t("editor.preview.needsRestart")}</Badge>
               ) : null}
             </div>
-            <details className="rounded-[0.75rem] border border-[var(--border)] bg-[var(--surface-solid)] px-2.5 py-1.5">
-              <summary className="flex cursor-pointer list-none items-center gap-2 text-xs text-[var(--muted-foreground)]">
+            <details className="rounded-[0.75rem] border border-border bg-surface-solid px-2.5 py-1.5">
+              <summary className="flex cursor-pointer list-none items-center gap-2 text-xs text-muted-foreground">
                 <InfoIcon
                   size={14}
-                  className="text-[var(--accent-primary)]"
+                  className="text-accent-primary"
                 />
                 {t("editor.preview.helpTitle")}
               </summary>
-              <div className="mt-2.5 max-w-[30rem] text-sm leading-6 text-[var(--muted-foreground)]">
+              <div className="mt-2.5 max-w-[30rem] text-sm leading-6 text-muted-foreground">
                 {isPreviewFresh
                   ? t("editor.preview.helpFresh")
                   : t("editor.preview.helpStale")}
               </div>
             </details>
           </div>
-          <div className="max-h-[27rem] overflow-auto rounded-[0.75rem] border border-[var(--border)] bg-black/15">
+          <div className="max-h-[27rem] overflow-auto rounded-[0.75rem] border border-border bg-black/15">
             {previewDiff.map((line, index) => (
               <div
                 key={`${line.type}-${index}`}
@@ -69,13 +69,13 @@ export function ConfigPreviewSection({ core }: { core: ConfigEditorCore }) {
                     ? "bg-[#8fd0c6]/10 text-[#d6fff6]"
                     : line.type === "remove"
                       ? "bg-[#f59e7d]/10 text-[#ffd9ce]"
-                      : "text-[var(--foreground)]",
+                      : "text-foreground",
                 )}
               >
-                <div className="text-[var(--muted-foreground)]">
+                <div className="text-muted-foreground">
                   {line.beforeLine ?? ""}
                 </div>
-                <div className="text-[var(--muted-foreground)]">
+                <div className="text-muted-foreground">
                   {line.afterLine ?? ""}
                 </div>
                 <div>

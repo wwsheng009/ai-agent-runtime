@@ -84,27 +84,27 @@ export function ConfigDomainTable<T>({
   const hasPagination = Boolean(pageSize) && pageCount > 1;
 
   const pageButtonClass =
-    "inline-flex size-7 items-center justify-center rounded-[0.6rem] border border-[var(--border)] bg-[var(--surface-solid)] text-[var(--muted-foreground)] transition hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-40";
+    "inline-flex size-7 items-center justify-center rounded-[0.6rem] border border-border bg-surface-solid text-muted-foreground transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40";
 
   return (
-    <div className="rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)]">
-      <div className="flex flex-col gap-2.5 border-b border-[var(--border)] px-3 py-3">
+    <div className="rounded-[0.9rem] border border-border bg-surface-softer">
+      <div className="flex flex-col gap-2.5 border-b border-border px-3 py-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             {TitleIcon ? (
-              <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-[0.7rem] border border-[var(--border)] bg-[var(--surface-solid)] text-[var(--accent-primary)]">
+              <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-[0.7rem] border border-border bg-surface-solid text-accent-primary">
                 <TitleIcon size={15} />
               </span>
             ) : null}
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
-                <div className="truncate text-base font-semibold text-[var(--foreground)]">
+                <div className="truncate text-base font-semibold text-foreground">
                   {title}
                 </div>
                 {description ? (
                   <span
                     title={description}
-                    className="inline-flex size-5 items-center justify-center rounded-[0.6rem] border border-[var(--border)] bg-[var(--surface-solid)] text-[var(--muted-foreground)]"
+                    className="inline-flex size-5 items-center justify-center rounded-[0.6rem] border border-border bg-surface-solid text-muted-foreground"
                   >
                     <InfoIcon size={12} />
                   </span>
@@ -119,7 +119,7 @@ export function ConfigDomainTable<T>({
           <div className="relative w-full max-w-[19rem]">
             <SearchIcon
               size={14}
-              className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--muted-foreground)]"
+              className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
             />
             <input
               type="search"
@@ -130,7 +130,7 @@ export function ConfigDomainTable<T>({
               }}
               placeholder={t("editor.table.searchPlaceholder")}
               aria-label={t("editor.table.searchPlaceholder")}
-              className="h-9 w-full rounded-[0.7rem] border border-[var(--border)] bg-[var(--surface-solid)] pl-8 pr-3 text-sm text-[var(--foreground)] outline-none transition placeholder:text-[var(--muted-foreground)] focus:border-[var(--accent-primary-border)] focus:ring-2 focus:ring-[var(--ring)]"
+              className="h-9 w-full rounded-[0.7rem] border border-border bg-surface-solid pl-8 pr-3 text-sm text-foreground outline-none transition placeholder:text-muted-foreground focus:border-accent-primary-border focus:ring-2 focus:ring-ring"
             />
           </div>
         ) : null}
@@ -146,11 +146,11 @@ export function ConfigDomainTable<T>({
         <div className="overflow-auto">
           <table className="min-w-full border-collapse">
             <thead>
-              <tr className="border-b border-[var(--border)] bg-[var(--surface-solid)] text-left">
+              <tr className="border-b border-border bg-surface-solid text-left">
                 {columns.map((column) => (
                   <th
                     key={column.header}
-                    className={`px-3 py-2.5 app-text-11 uppercase tracking-[0.12em] text-[var(--muted-foreground)] ${
+                    className={`px-3 py-2.5 app-text-11 uppercase tracking-[0.12em] text-muted-foreground ${
                       column.align === "right" ? "text-right" : "text-left"
                     } ${column.className ?? ""}`}
                   >
@@ -163,12 +163,12 @@ export function ConfigDomainTable<T>({
               {visibleItems.map((item) => (
                 <tr
                   key={getRowKey(item)}
-                  className="border-b border-[var(--border)]/70 align-top last:border-b-0"
+                  className="border-b border-border/70 align-top last:border-b-0"
                 >
                   {columns.map((column) => (
                     <td
                       key={column.header}
-                      className={`px-3 py-2.5 text-sm text-[var(--foreground)] ${
+                      className={`px-3 py-2.5 text-sm text-foreground ${
                         column.align === "right" ? "text-right" : "text-left"
                       } ${column.className ?? ""}`}
                     >
@@ -183,8 +183,8 @@ export function ConfigDomainTable<T>({
       )}
 
       {hasPagination ? (
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border)] px-3 py-2.5">
-          <span className="app-text-11 text-[var(--muted-foreground)]">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-2.5">
+          <span className="app-text-11 text-muted-foreground">
             {t("editor.table.pagination.showing", {
               start: String(startIndex + 1),
               end: String(
@@ -204,7 +204,7 @@ export function ConfigDomainTable<T>({
             >
               <ChevronLeftIcon size={14} />
             </button>
-            <span className="app-text-11 min-w-[4.5rem] text-center text-[var(--muted-foreground)]">
+            <span className="app-text-11 min-w-[4.5rem] text-center text-muted-foreground">
               {currentPage} / {pageCount}
             </span>
             <button

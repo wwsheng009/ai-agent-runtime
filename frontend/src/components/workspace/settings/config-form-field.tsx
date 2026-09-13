@@ -56,19 +56,19 @@ export function ConfigFormField({
       : children;
 
   return (
-    <div className="rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+    <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
       <div className="flex items-center gap-2">
         {fieldId ? (
-          <label htmlFor={fieldId} className="text-sm font-semibold text-[var(--foreground)]">
+          <label htmlFor={fieldId} className="text-sm font-semibold text-foreground">
             {label}
           </label>
         ) : (
-          <div className="text-sm font-semibold text-[var(--foreground)]">{label}</div>
+          <div className="text-sm font-semibold text-foreground">{label}</div>
         )}
         {description ? (
           <span
             title={description}
-            className="inline-flex size-5 items-center justify-center rounded-[0.6rem] border border-[var(--border)] bg-[var(--surface-solid)] text-[var(--muted-foreground)]"
+            className="inline-flex size-5 items-center justify-center rounded-[0.6rem] border border-border bg-surface-solid text-muted-foreground"
           >
             <InfoIcon size={12} />
           </span>

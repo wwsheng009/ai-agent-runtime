@@ -15,7 +15,7 @@ export function TeamDetailsPanelRoster({
 }: TeamDetailsPanelRosterProps) {
   return (
     <div className={detailsPanelClass}>
-      <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-[var(--muted-foreground)]">
+      <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-muted-foreground">
         Teammate roster
       </div>
       <div className="mt-3 space-y-2">
@@ -24,10 +24,10 @@ export function TeamDetailsPanelRoster({
             <div key={teammate.id} className={detailsCardClass}>
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="truncate text-sm font-semibold text-[var(--foreground)]">
+                  <div className="truncate text-sm font-semibold text-foreground">
                     {teammate.name || truncateIdentifier(teammate.id, 18)}
                   </div>
-                  <div className="truncate text-xs text-[var(--muted-foreground)]">
+                  <div className="truncate text-xs text-muted-foreground">
                     {teammate.profile || teammate.id}
                   </div>
                 </div>
@@ -45,7 +45,7 @@ export function TeamDetailsPanelRoster({
                   {teammate.capabilities.slice(0, 3).map((capability) => (
                     <span
                       key={capability}
-                      className="rounded-[0.65rem] bg-white/7 px-2 py-0.5 app-text-10 uppercase tracking-[0.12em] text-[var(--muted-foreground)]"
+                      className="rounded-[0.65rem] bg-white/7 px-2 py-0.5 app-text-10 uppercase tracking-[0.12em] text-muted-foreground"
                     >
                       {capability}
                     </span>
@@ -55,7 +55,7 @@ export function TeamDetailsPanelRoster({
             </div>
           ))
         ) : (
-          <div className="text-sm text-[var(--muted-foreground)]">
+          <div className="text-sm text-muted-foreground">
             No teammates registered.
           </div>
         )}

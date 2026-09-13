@@ -44,12 +44,12 @@ export function DispatchProvisionPanel({
 }: DispatchProvisionPanelProps) {
   return (
     <div className={cn("mt-3", consolePanelClass)}>
-      <div className="app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+      <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
         Provision runnable teams and dispatch
       </div>
       <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
         <div>
-          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
             Team count
           </div>
           <input
@@ -60,7 +60,7 @@ export function DispatchProvisionPanel({
           />
         </div>
         <div>
-          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
             Workspace id
           </div>
           <input
@@ -71,7 +71,7 @@ export function DispatchProvisionPanel({
           />
         </div>
         <div>
-          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
             Strategy
           </div>
           <input
@@ -82,7 +82,7 @@ export function DispatchProvisionPanel({
           />
         </div>
         <div>
-          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
             User prefix
           </div>
           <input
@@ -93,7 +93,7 @@ export function DispatchProvisionPanel({
           />
         </div>
         <div>
-          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
             Teammate name prefix
           </div>
           <input
@@ -106,7 +106,7 @@ export function DispatchProvisionPanel({
           />
         </div>
         <div>
-          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
             Teammate profile
           </div>
           <input
@@ -118,7 +118,7 @@ export function DispatchProvisionPanel({
         </div>
       </div>
       <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="text-xs text-[var(--muted-foreground)]">
+        <div className="text-xs text-muted-foreground">
           Each provisioned team gets a lead session, a worker session, one idle teammate, and the current next task.
         </div>
         <Button

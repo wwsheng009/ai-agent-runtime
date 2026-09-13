@@ -67,7 +67,7 @@ export function TrajectoryTimeline({
     <div className={cn("flex flex-col gap-1.5", className)}>
       <div
         aria-label="Trajectory timeline"
-        className="relative h-7 w-full overflow-hidden rounded-md border border-[var(--border)] bg-[var(--surface-solid)]"
+        className="relative h-7 w-full overflow-hidden rounded-md border border-border bg-surface-solid"
         role="img"
       >
         {segments.map(({ item, left, width }) => (
@@ -88,7 +88,7 @@ export function TrajectoryTimeline({
       {toolItems.length > 0 ? (
         <div
           aria-label="Tool lane"
-          className="relative h-2.5 w-full overflow-hidden rounded-sm bg-[var(--surface-solid)]"
+          className="relative h-2.5 w-full overflow-hidden rounded-sm bg-surface-solid"
           role="img"
         >
           {toolItems.map((item) => {

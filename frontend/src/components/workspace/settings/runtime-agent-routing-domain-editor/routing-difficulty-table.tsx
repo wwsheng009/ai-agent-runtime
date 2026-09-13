@@ -41,14 +41,14 @@ export function RoutingDifficultyTable({
 }) {
   return (
     <>
-      <div className="overflow-hidden rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)]">
-        <div className="hidden grid-cols-[10rem_minmax(10rem,1fr)_minmax(12rem,1.2fr)_10rem] gap-3 border-b border-[var(--border)] bg-[var(--surface-solid)] px-3 py-2 text-xs font-semibold text-[var(--muted-foreground)] lg:grid">
+      <div className="overflow-hidden rounded-[0.8rem] border border-border bg-surface-softer">
+        <div className="hidden grid-cols-[10rem_minmax(10rem,1fr)_minmax(12rem,1.2fr)_10rem] gap-3 border-b border-border bg-surface-solid px-3 py-2 text-xs font-semibold text-muted-foreground lg:grid">
           <div>{t("editor.agentRouting.columns.difficulty")}</div>
           <div>{t("editor.agentRouting.columns.provider")}</div>
           <div>{t("editor.agentRouting.columns.model")}</div>
           <div>{t("editor.agentRouting.columns.reasoning")}</div>
         </div>
-        <div className="divide-y divide-[var(--border)]">
+        <div className="divide-y divide-border">
           {agentRoutingDifficulties.map((difficulty) => {
             const profile = config.levels[difficulty];
             const routeHealth = health.routes[difficulty];
@@ -69,7 +69,7 @@ export function RoutingDifficultyTable({
                 className="grid gap-3 px-3 py-3 lg:grid-cols-[10rem_minmax(10rem,1fr)_minmax(12rem,1.2fr)_10rem] lg:items-center"
               >
                 <div className="flex flex-wrap items-center gap-1.5">
-                  <span className="font-semibold text-[var(--foreground)]">
+                  <span className="font-semibold text-foreground">
                     {difficultyLabel(t, difficulty)}
                   </span>
                   {difficulty === config.defaultDifficulty ? (

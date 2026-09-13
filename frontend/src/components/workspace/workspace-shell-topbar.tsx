@@ -51,7 +51,7 @@ export function WorkspaceShellTopbar({
     <header className="absolute inset-x-0 top-0 z-30 flex justify-center px-3 pt-1.5 sm:px-4">
       <div
         className={cn(
-          "flex w-full max-w-[72rem] items-center gap-1 rounded-[0.9rem] border border-[var(--border)] bg-[var(--workspace-topbar-bg)] shadow-[0_8px_24px_rgba(0,0,0,0.14)] backdrop-blur-lg sm:gap-2",
+          "flex w-full max-w-[72rem] items-center gap-1 rounded-[0.9rem] border border-border bg-workspace-topbar-bg shadow-[0_8px_24px_rgba(0,0,0,0.14)] backdrop-blur-lg sm:gap-2",
           isCompact ? "h-10 px-3" : "h-11 px-3.5",
         )}
       >
@@ -83,7 +83,7 @@ export function WorkspaceShellTopbar({
             {isNewThread ? t("topbar.newThreadTitle") : selectedThread.title}
           </div>
           {!isNewThread ? (
-            <div className="hidden truncate app-text-10 text-[var(--muted-foreground)] sm:block">
+            <div className="hidden truncate app-text-10 text-muted-foreground sm:block">
               {threadSubtitle}
             </div>
           ) : null}
@@ -91,11 +91,11 @@ export function WorkspaceShellTopbar({
         {!isNewThread ? (
           <div className="hidden items-center gap-2.5 md:flex">
             <Badge>{threadStatusLabel}</Badge>
-          <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+          <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
             {transportLabel}
           </div>
           {liveTeamCount > 0 ? (
-            <div className="app-text-10 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+            <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
               {t("sidebar.active", { count: liveTeamCount })}
             </div>
           ) : null}

@@ -47,7 +47,7 @@ export function DispatchTaskComposer({
   return (
     <>
       <div>
-        <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+        <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
           Task title
         </div>
         <input
@@ -59,7 +59,7 @@ export function DispatchTaskComposer({
       </div>
 
       <div>
-        <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+        <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
           Goal
         </div>
         <textarea
@@ -72,7 +72,7 @@ export function DispatchTaskComposer({
 
       <div className="grid gap-3 sm:grid-cols-2">
         <div>
-          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
             Inputs
           </div>
           <textarea
@@ -83,7 +83,7 @@ export function DispatchTaskComposer({
           />
         </div>
         <div>
-          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
             Deliverables
           </div>
           <textarea
@@ -99,7 +99,7 @@ export function DispatchTaskComposer({
 
       <div className="grid gap-3 sm:grid-cols-[160px_1fr]">
         <div>
-          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+          <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
             Priority
           </div>
           <input
@@ -110,7 +110,7 @@ export function DispatchTaskComposer({
           />
         </div>
         <div className="flex items-end">
-          <div className="text-xs text-[var(--muted-foreground)]">
+          <div className="text-xs text-muted-foreground">
             Tasks are created with `status=ready`, so active team orchestrators can
             claim and execute them.
           </div>
@@ -118,7 +118,7 @@ export function DispatchTaskComposer({
       </div>
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="text-xs text-[var(--muted-foreground)]">
+        <div className="text-xs text-muted-foreground">
           Use this to fan out the same next task across multiple executable teams
           for parallel execution.
         </div>
@@ -136,7 +136,7 @@ export function DispatchTaskComposer({
       </div>
 
       {dispatchTaskError ? (
-        <div className="rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-[var(--muted-foreground)]">
+        <div className="rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
           {dispatchTaskError}
         </div>
       ) : null}
@@ -149,7 +149,7 @@ export function DispatchTaskComposer({
               className="rounded-[0.8rem] border border-white/8 bg-white/4 px-3 py-2.5"
             >
               <div className="flex items-center justify-between gap-3">
-                <div className="text-[13px] font-semibold text-[var(--foreground)]">
+                <div className="text-[13px] font-semibold text-foreground">
                   {truncateIdentifier(result.teamId, 18)}
                 </div>
                 <span
@@ -163,7 +163,7 @@ export function DispatchTaskComposer({
                   {result.status}
                 </span>
               </div>
-              <div className="mt-2 text-sm text-[var(--muted-foreground)]">
+              <div className="mt-2 text-sm text-muted-foreground">
                 {result.status === "created"
                   ? `task ${truncateIdentifier(result.taskId, 18)} created`
                   : result.error || "dispatch failed"}

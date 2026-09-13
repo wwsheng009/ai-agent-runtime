@@ -53,7 +53,7 @@ export function SkillsSection() {
                     {t("skills.stageLabel", { index: String(index + 1) })}
                   </div>
                   <div className="mt-2 text-xl font-semibold">{column.title}</div>
-                  <p className="mt-3 text-sm leading-7 text-[var(--muted-foreground)]">
+                  <p className="mt-3 text-sm leading-7 text-muted-foreground">
                     {column.description}
                   </p>
                 </div>
@@ -78,7 +78,7 @@ export function SkillsSection() {
                 )}
                 <div className="text-lg font-semibold">{column.title}</div>
               </div>
-              <ul className="mt-5 space-y-3 text-sm leading-7 text-[var(--muted-foreground)]">
+              <ul className="mt-5 space-y-3 text-sm leading-7 text-muted-foreground">
                 {column.items.map((item) => (
                   <li key={item} className="flex gap-3">
                     <span className="mt-2 size-1.5 shrink-0 rounded-full bg-[#f0c77b]" />

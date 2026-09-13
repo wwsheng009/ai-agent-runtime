@@ -130,7 +130,7 @@ export function RuntimeResourceManagerDomainEditor({
           <label className={editorSectionToggleClassName}>
             <input
               type="checkbox"
-              className="h-4 w-4 accent-[var(--accent-primary)]"
+              className="h-4 w-4 accent-accent-primary"
               checked={config.healthCheckEnabled}
               onChange={(event) =>
                 update({ healthCheckEnabled: event.target.checked })

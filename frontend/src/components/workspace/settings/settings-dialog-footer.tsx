@@ -41,7 +41,7 @@ export function SettingsDialogFooter({
       )}
     >
       {note ? (
-        <div className={cn("text-sm text-[var(--muted-foreground)]", noteClassName)}>
+        <div className={cn("text-sm text-muted-foreground", noteClassName)}>
           {note}
         </div>
       ) : null}

@@ -29,15 +29,15 @@ export function DispatchMonitorOutcomeCompare({
 
   return (
     <div className="rounded-[0.8rem] border border-white/8 bg-black/15 px-3 py-2.5">
-      <div className="app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+      <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
         Outcome compare
       </div>
-      <div className="mt-2.5 grid gap-1.5 text-xs text-[var(--muted-foreground)]">
+      <div className="mt-2.5 grid gap-1.5 text-xs text-muted-foreground">
         <div className="rounded-[0.7rem] border border-white/8 bg-white/4 px-3 py-2">
           <div className="app-text-10 uppercase tracking-[0.14em]">
             Final summary coverage
           </div>
-          <div className="mt-1 text-sm font-semibold text-[var(--foreground)]">
+          <div className="mt-1 text-sm font-semibold text-foreground">
             {batchSummary.finalSummaryCount}/
             {batchSummary.summaryEligibleTerminalCount}
           </div>
@@ -46,7 +46,7 @@ export function DispatchMonitorOutcomeCompare({
           <div className="app-text-10 uppercase tracking-[0.14em]">
             Waiting for summary
           </div>
-          <div className="mt-1 text-sm font-semibold text-[var(--foreground)]">
+          <div className="mt-1 text-sm font-semibold text-foreground">
             {batchSummary.terminalWithoutSummaryCount}
           </div>
         </div>
@@ -61,7 +61,7 @@ export function DispatchMonitorOutcomeCompare({
               className="rounded-[0.75rem] border border-white/8 bg-white/4 px-3 py-2"
             >
               <div className="flex items-center justify-between gap-3">
-                <div className="truncate text-[13px] font-semibold text-[var(--foreground)]">
+                <div className="truncate text-[13px] font-semibold text-foreground">
                   {truncateIdentifier(row.teamId, 18)}
                 </div>
                 <span
@@ -73,12 +73,12 @@ export function DispatchMonitorOutcomeCompare({
                   {row.outcomeLabel}
                 </span>
               </div>
-              <div className="mt-1.5 flex flex-wrap gap-1.5 app-text-11 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
+              <div className="mt-1.5 flex flex-wrap gap-1.5 app-text-11 uppercase tracking-[0.12em] text-muted-foreground">
                 <span>{row.detailLabel}</span>
                 <span>{row.detailText}</span>
               </div>
               <div className="mt-1.5">
-                <div className="app-text-11 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
+                <div className="app-text-11 uppercase tracking-[0.12em] text-muted-foreground">
                   {narrative.label}
                 </div>
                 <MessageMarkdown
@@ -86,13 +86,13 @@ export function DispatchMonitorOutcomeCompare({
                   content={narrative.text}
                 />
               </div>
-              <div className="mt-1.5 flex flex-wrap gap-1.5 app-text-11 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
+              <div className="mt-1.5 flex flex-wrap gap-1.5 app-text-11 uppercase tracking-[0.12em] text-muted-foreground">
                 <span>{row.isTerminal ? "terminal" : "active"}</span>
                 {row.taskId ? <span>task {truncateIdentifier(row.taskId, 16)}</span> : null}
                 {row.assignee ? <span>assignee {row.assignee}</span> : null}
               </div>
               {row.updatedAt ? (
-                <div className="mt-1.5 app-text-11 uppercase tracking-[0.12em] text-[var(--muted-foreground)]">
+                <div className="mt-1.5 app-text-11 uppercase tracking-[0.12em] text-muted-foreground">
                   updated {formatRelativeTimestamp(row.updatedAt)}
                 </div>
               ) : null}
@@ -102,7 +102,7 @@ export function DispatchMonitorOutcomeCompare({
       </div>
       {terminalRowsWithSummary.length > 0 ? (
         <div className="mt-3 rounded-[0.75rem] border border-white/8 bg-white/4 px-3 py-2.5">
-          <div className="app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+          <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
             Terminal outcomes with summary
           </div>
           <div className="mt-2.5 space-y-1.5">
@@ -112,7 +112,7 @@ export function DispatchMonitorOutcomeCompare({
                 className="rounded-[0.7rem] border border-white/8 bg-black/15 px-3 py-2"
               >
                 <div className="flex items-center justify-between gap-3">
-                  <div className="text-[11px] font-semibold text-[var(--foreground)]">
+                  <div className="text-[11px] font-semibold text-foreground">
                     {truncateIdentifier(row.teamId, 18)}
                   </div>
                   <span
@@ -137,7 +137,7 @@ export function DispatchMonitorOutcomeCompare({
       ) : null}
       {terminalRowsMissingSummary.length > 0 ? (
         <div className="mt-3 rounded-[0.75rem] border border-white/8 bg-white/4 px-3 py-2.5">
-          <div className="app-text-11 uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
+          <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
             Terminal outcomes missing final summary
           </div>
           <div className="mt-2.5 space-y-1.5">
@@ -150,7 +150,7 @@ export function DispatchMonitorOutcomeCompare({
                   className="rounded-[0.7rem] border border-white/8 bg-black/15 px-3 py-2"
                 >
                   <div className="flex items-center justify-between gap-3">
-                    <div className="text-[11px] font-semibold text-[var(--foreground)]">
+                    <div className="text-[11px] font-semibold text-foreground">
                       {truncateIdentifier(row.teamId, 18)}
                     </div>
                     <span

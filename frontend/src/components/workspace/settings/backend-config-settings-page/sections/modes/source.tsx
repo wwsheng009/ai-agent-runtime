@@ -18,10 +18,10 @@ export function SourceModeSection({ core }: { core: ConfigEditorCore }) {
 
   return (
     <>
-      <div className="rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+      <div className="rounded-[0.9rem] border border-border bg-surface-softer p-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-2">
-            <div className="text-base font-semibold text-[var(--foreground)]">
+            <div className="text-base font-semibold text-foreground">
               {t("editor.source.title")}
             </div>
             <SummaryPill
@@ -34,22 +34,22 @@ export function SourceModeSection({ core }: { core: ConfigEditorCore }) {
             />
             <Badge>{t("editor.source.preserveComments")}</Badge>
           </div>
-          <details className="rounded-[0.75rem] border border-[var(--border)] bg-[var(--surface-solid)] px-2.5 py-1.5">
-            <summary className="flex cursor-pointer list-none items-center gap-2 text-xs text-[var(--muted-foreground)]">
+          <details className="rounded-[0.75rem] border border-border bg-surface-solid px-2.5 py-1.5">
+            <summary className="flex cursor-pointer list-none items-center gap-2 text-xs text-muted-foreground">
               <InfoIcon
                 size={14}
-                className="text-[var(--accent-primary)]"
+                className="text-accent-primary"
               />
               {t("editor.source.helpTitle")}
             </summary>
-            <div className="mt-2.5 max-w-[30rem] text-sm leading-6 text-[var(--muted-foreground)]">
+            <div className="mt-2.5 max-w-[30rem] text-sm leading-6 text-muted-foreground">
               {t("editor.source.helpBody")}
             </div>
           </details>
         </div>
       </div>
 
-      <div className="rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+      <div className="rounded-[0.9rem] border border-border bg-surface-softer p-3">
         <textarea
           className={cn(
             editorControlClassName,

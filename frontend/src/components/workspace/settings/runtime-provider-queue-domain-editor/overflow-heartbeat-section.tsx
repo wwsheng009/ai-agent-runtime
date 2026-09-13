@@ -36,7 +36,7 @@ export function RuntimeProviderQueueOverflowHeartbeatSection({
             <label className={editorSectionToggleClassName}>
               <input
                 type="checkbox"
-                className="h-4 w-4 accent-[var(--accent-primary)]"
+                className="h-4 w-4 accent-accent-primary"
                 checked={config.overflowEnabled}
                 onChange={(event) =>
                   onChangeConfig({ ...config, overflowEnabled: event.target.checked })
@@ -87,7 +87,7 @@ export function RuntimeProviderQueueOverflowHeartbeatSection({
             <label className={editorSectionToggleClassName}>
               <input
                 type="checkbox"
-                className="h-4 w-4 accent-[var(--accent-primary)]"
+                className="h-4 w-4 accent-accent-primary"
                 checked={config.waitHeartbeatEnabled}
                 onChange={(event) =>
                   onChangeConfig({

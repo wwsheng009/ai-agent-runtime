@@ -101,20 +101,20 @@ export function ProviderGroupBasicFields({
           </div>
 
           <div className="grid gap-3 xl:grid-cols-2">
-            <div className="space-y-3 rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+            <div className="space-y-3 rounded-[0.8rem] border border-border bg-surface-softer p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <div className="text-[13px] font-semibold text-[var(--foreground)]">
+                  <div className="text-[13px] font-semibold text-foreground">
                     {t("editor.providerGroups.sections.failover")}
                   </div>
-                  <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                  <div className="mt-1 text-xs text-muted-foreground">
                     {t("editor.providerGroups.sections.failoverHelp")}
                   </div>
                 </div>
-                <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
+                <label className="flex items-center gap-2 text-sm text-foreground">
                   <input
                     type="checkbox"
-                    className="h-4 w-4 accent-[var(--accent-primary)]"
+                    className="h-4 w-4 accent-accent-primary"
                     checked={draft.failoverEnabled}
                     onChange={(event) =>
                       setDraft((current) => ({
@@ -173,20 +173,20 @@ export function ProviderGroupBasicFields({
               </div>
             </div>
 
-            <div className="space-y-3 rounded-[0.8rem] border border-[var(--border)] bg-[var(--surface-softer)] p-3">
+            <div className="space-y-3 rounded-[0.8rem] border border-border bg-surface-softer p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <div className="text-[13px] font-semibold text-[var(--foreground)]">
+                  <div className="text-[13px] font-semibold text-foreground">
                     {t("editor.providerGroups.sections.truncation")}
                   </div>
-                  <div className="mt-1 text-xs text-[var(--muted-foreground)]">
+                  <div className="mt-1 text-xs text-muted-foreground">
                     {t("editor.providerGroups.sections.truncationHelp")}
                   </div>
                 </div>
-                <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
+                <label className="flex items-center gap-2 text-sm text-foreground">
                   <input
                     type="checkbox"
-                    className="h-4 w-4 accent-[var(--accent-primary)]"
+                    className="h-4 w-4 accent-accent-primary"
                     checked={draft.truncationEnabled}
                     onChange={(event) =>
                       setDraft((current) => ({

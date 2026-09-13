@@ -2,11 +2,11 @@
 
 export function cacheStatusTone(status: string) {
   switch (status) {
-    case "hit": return "border-[var(--analytics-success-border)] bg-[var(--analytics-success-soft)] text-[var(--analytics-success)]";
-    case "write": return "border-[var(--analytics-info-border)] bg-[var(--analytics-info-soft)] text-[var(--analytics-info)]";
-    case "reported_zero": return "border-[var(--analytics-warning-border)] bg-[var(--analytics-warning-soft)] text-[var(--analytics-warning)]";
-    case "error": return "border-[var(--analytics-danger-border)] bg-[var(--analytics-danger-soft)] text-[var(--analytics-danger)]";
-    default: return "border-[var(--border)] bg-[var(--surface-softer)] text-[var(--muted-foreground)]";
+    case "hit": return "border-analytics-success-border bg-analytics-success-soft text-analytics-success";
+    case "write": return "border-analytics-info-border bg-analytics-info-soft text-analytics-info";
+    case "reported_zero": return "border-analytics-warning-border bg-analytics-warning-soft text-analytics-warning";
+    case "error": return "border-analytics-danger-border bg-analytics-danger-soft text-analytics-danger";
+    default: return "border-border bg-surface-softer text-muted-foreground";
   }
 }
 

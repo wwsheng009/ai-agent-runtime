@@ -30,7 +30,7 @@ export function statusTone(value: string | undefined) {
     case "offline":
       return "border-[#f59e7d]/24 bg-[#f59e7d]/10 text-[#f59e7d]";
     default:
-      return "border-white/10 bg-white/6 text-[var(--muted-foreground)]";
+      return "border-white/10 bg-white/6 text-muted-foreground";
   }
 }
 

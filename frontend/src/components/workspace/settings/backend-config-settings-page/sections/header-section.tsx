@@ -22,19 +22,19 @@ export function ConfigEditorHeaderSection({ core }: { core: ConfigEditorCore }) 
       title={t("editor.title")}
       description={t("editor.description")}
     >
-      <div className="rounded-[0.9rem] border border-[var(--border)] bg-[var(--surface-softer)] px-3 py-2.5">
+      <div className="rounded-[0.9rem] border border-border bg-surface-softer px-3 py-2.5">
         <div className="flex flex-wrap items-center justify-between gap-2.5">
           <div className="flex flex-wrap items-center gap-2">
             <Badge>{t("editor.independentBadge")}</Badge>
             <Badge>{getModeLabel(mode, translatedModeMenuEntries)}</Badge>
             {hasUnsavedChanges ? <Badge>{t("editor.unsavedBadge")}</Badge> : null}
           </div>
-          <details className="rounded-[0.75rem] border border-[var(--border)] bg-[var(--surface-solid)] px-2.5 py-1.5">
-            <summary className="flex cursor-pointer list-none items-center gap-2 text-xs text-[var(--muted-foreground)]">
-              <InfoIcon size={14} className="text-[var(--accent-primary)]" />
+          <details className="rounded-[0.75rem] border border-border bg-surface-solid px-2.5 py-1.5">
+            <summary className="flex cursor-pointer list-none items-center gap-2 text-xs text-muted-foreground">
+              <InfoIcon size={14} className="text-accent-primary" />
               {t("editor.usage.title")}
             </summary>
-            <div className="mt-2.5 max-w-[32rem] text-sm leading-6 text-[var(--muted-foreground)]">
+            <div className="mt-2.5 max-w-[32rem] text-sm leading-6 text-muted-foreground">
               {t("editor.usage.body")}
             </div>
           </details>

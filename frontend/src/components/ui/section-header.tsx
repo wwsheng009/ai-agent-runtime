@@ -25,7 +25,7 @@ export function SectionTitleRow({ className, ...props }: ComponentProps<"div">) 
   return (
     <div
       className={cn(
-        "flex items-center gap-3 text-sm font-semibold text-[var(--foreground)]",
+        "flex items-center gap-3 text-sm font-semibold text-foreground",
         className,
       )}
       {...props}
@@ -42,7 +42,7 @@ export function SectionDescriptionText({
     <div
       className={cn(
         gapClassName,
-        "text-sm leading-6 text-[var(--muted-foreground)]",
+        "text-sm leading-6 text-muted-foreground",
         className,
       )}
       {...props}

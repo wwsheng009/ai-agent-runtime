@@ -13,16 +13,16 @@ export const surfaceCardVariants = cva("", {
   variants: {
     frame: {
       none: "",
-      outlined: "border border-[var(--border)]",
-      dashed: "border border-dashed border-[var(--border)]",
+      outlined: "border border-border",
+      dashed: "border border-dashed border-border",
     },
     surface: {
       none: "",
-      solid: "bg-[var(--surface-solid)]",
-      softer: "bg-[var(--surface-softer)]",
+      solid: "bg-surface-solid",
+      softer: "bg-surface-softer",
       panel: "surface-panel",
       accent:
-        "border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)] shadow-[0_0_0_1px_var(--accent-primary-border)]",
+        "border-accent-primary-border bg-accent-primary-soft shadow-[0_0_0_1px_var(--accent-primary-border)]",
       warning: "border-[#f59e7d]/20 bg-[#f59e7d]/8",
       "warning-soft": "border-[#f59e7d]/24 bg-[#f59e7d]/10",
     },
@@ -48,7 +48,7 @@ export const surfaceCardVariants = cva("", {
       none: "",
       disabled: "cursor-not-allowed opacity-60",
       hoverable:
-        "hover:border-[var(--border-strong)] hover:bg-[var(--surface-soft)]",
+        "hover:border-border-strong hover:bg-surface-soft",
     },
   },
   defaultVariants: {

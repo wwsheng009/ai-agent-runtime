@@ -38,17 +38,17 @@ export function HarnessPermissionsSection({
             icon={
               <ShieldCheckIcon
                 size={16}
-                className="text-[var(--accent-secondary)]"
+                className="text-accent-secondary"
               />
             }
           >
-            <p className="app-inline-mono break-all text-sm text-[var(--muted-foreground)]">
+            <p className="app-inline-mono break-all text-sm text-muted-foreground">
               {permissions?.source_path ||
                 (workspacePath
                   ? `${workspacePath}/.aicli/permissions.yaml`
                   : t("harness.notAvailable"))}
             </p>
-            <p className="mt-2 text-sm text-[var(--muted-foreground)]">
+            <p className="mt-2 text-sm text-muted-foreground">
               {permissions?.exists
                 ? t("harness.permissionsExists", {
                     version: String(permissions.version ?? 1),
@@ -92,16 +92,16 @@ export function HarnessPermissionsSection({
                 {rules.map((rule, index) => (
                   <div
                     key={`${rule.name || "rule"}-${index}`}
-                    className="rounded-[0.75rem] border border-[var(--border)] bg-[var(--surface-solid)] px-3 py-2.5"
+                    className="rounded-[0.75rem] border border-border bg-surface-solid px-3 py-2.5"
                   >
                     <div className="flex flex-wrap items-center gap-2">
-                      <div className="text-sm font-semibold text-[var(--foreground)]">
+                      <div className="text-sm font-semibold text-foreground">
                         {rule.name || t("harness.unnamedRule", { index: String(index + 1) })}
                       </div>
                       <Badge>{rule.decision}</Badge>
                     </div>
                     {rule.reason ? (
-                      <p className="mt-1 text-sm text-[var(--muted-foreground)]">
+                      <p className="mt-1 text-sm text-muted-foreground">
                         {rule.reason}
                       </p>
                     ) : null}
