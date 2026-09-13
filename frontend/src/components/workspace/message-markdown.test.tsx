@@ -125,21 +125,28 @@ describe("MessageMarkdown", () => {
     const markup = renderToStaticMarkup(
       <MessageMarkdown
         content={[
+          "[web](https://example.com/docs)",
+          "",
+          "[anchor](#section-1)",
+          "",
+          "[mail](mailto:team@example.com)",
+          "",
           "[site](/docs/guide)",
           "",
           "[rel](docs/guide.md)",
           "",
           "[proto](//evil.example.com/x)",
-          "",
-          "[mail](mailto:team@example.com)",
         ].join("\n")}
       />,
     );
 
-    expect(markup).toContain('href="/docs/guide"');
-    expect(markup).toContain('href="docs/guide.md"');
+    // 绝对 http(s) / mailto / 页内锚点放行。
+    expect(markup).toContain('href="https://example.com/docs"');
     expect(markup).toContain('href="mailto:team@example.com"');
-    // 协议相对地址的 scheme 由宿主页面决定，不在渲染层放行。
+    expect(markup).toContain('href="#section-1"');
+    // 相对链接与协议相对地址（方案 §2②「禁用相对链接」）不进入可导航链接。
+    expect(markup).not.toContain("/docs/guide");
+    expect(markup).not.toContain("docs/guide.md");
     expect(markup).not.toContain("evil.example.com");
   });
 

@@ -47,25 +47,17 @@ function isInternalHref(href: string) {
   return /^(#|\/(?!\/)|\.\.?\/)/.test(href);
 }
 
-// 链接协议白名单：无 scheme 的引用（锚点 `#…` / 站内 `/…` / `./` `../` / 裸相对
-// 路径）与绝对 http(s) / mailto / tel；协议相对 `//host`（scheme 由页面决定、
-// 无法在此校验）与 javascript:、data:、file: 等一律不进入可导航链接。
+// 链接白名单（方案 §2②「安全默认」）：仅绝对 http(s) / mailto / tel 与页内锚点
+// `#…` 可导航；相对路径（`/…`、`./` `../`、裸相对路径）与协议相对 `//host`、
+// `javascript:` / `data:` / `file:` 等一律不进入可导航链接。
 // react-markdown 自带的 urlTransform 是前置防线，这里是渲染层兜底。
-const URL_SCHEME_PATTERN = /^[a-z][a-z0-9+.-]*:/i;
-const ALLOWED_URL_SCHEME_PATTERN = /^(?:https?|mailto|tel):/i;
+const ALLOWED_HREF_PATTERN = /^(?:https?:\/\/|mailto:|tel:|#)/i;
 
 // 图片仅放行绝对 http(s)，避免正文里的相对路径被上游文本注入成任意资源探测。
 const ABSOLUTE_HTTP_URL_PATTERN = /^https?:\/\//i;
 
 function isAllowedHref(href: string) {
-  const trimmed = href.trim();
-  if (trimmed.startsWith("//")) {
-    return false;
-  }
-  if (!URL_SCHEME_PATTERN.test(trimmed)) {
-    return true;
-  }
-  return ALLOWED_URL_SCHEME_PATTERN.test(trimmed);
+  return ALLOWED_HREF_PATTERN.test(href.trim());
 }
 
 // 流式期文本仍可能被追加/改写，`href` 一旦烘焙进 DOM 就可能指向已过期的目标，
