@@ -14,6 +14,11 @@ import { expect, type Page, test } from "@playwright/test";
 
 const composer = (page: Page) => page.locator(".app-chat-input");
 
+test.beforeEach(async ({ page }) => {
+  // mock server 跨 spec 共享：清空上一个用例残留的会话历史/事件。
+  await page.request.post("/api/_test/reset");
+});
+
 test("打字机：请求期间 assistant_delta 实时渲染，result 定型且不翻倍", async ({
   page,
 }) => {

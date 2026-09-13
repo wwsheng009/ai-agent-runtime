@@ -25,9 +25,19 @@ export function applySessionHistoryToThread(
     response.history,
     thread.messages,
   );
+  const mappedMessages = mappedHistory.map((item) => item.message);
+  // 历史是权威投影，但在途/被中断的本地消息尚未（或不会）落盘：用户按 Ctrl+Enter
+  // 中止流式回合时后端只持久化了用户消息，若此时用历史整体覆盖，刚渲染出的部分
+  // 回答会连同“已停止”标记一起消失。这里保留历史未覆盖到的 live-only 消息，
+  // 追加在权威历史之后（它们必然是最新的回合）。
+  const liveOnlyMessages = thread.messages.filter(
+    (message) =>
+      (message.streaming === true || message.interrupted === true) &&
+      !mappedMessages.some((mapped) => mapped.id === message.id),
+  );
   const resolvedMessages =
     mappedHistory.length > 0
-      ? mappedHistory.map((item) => item.message)
+      ? [...mappedMessages, ...liveOnlyMessages]
       : thread.messages;
   return {
     ...thread,

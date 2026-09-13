@@ -172,6 +172,42 @@ describe("workspace thread selection helpers", () => {
       ],
     });
   });
+
+  it("keeps the local live thread when a restored session placeholder claims the same session id", () => {
+    const liveThread: Thread = {
+      ...createThread("thread-live", []),
+      sessionId: "session-42",
+      messages: [
+        {
+          id: "live-1",
+          role: "assistant" as const,
+          author: "Runtime",
+          label: "streaming",
+          segments: [{ type: "text" as const, content: "Streaming reply" }],
+        },
+      ],
+    };
+    // The runtime sessions list materializes the session under its own id first;
+    // the streamed turn lives on the local thread. Both must not survive as
+    // separate threads, otherwise the selection can land on the empty placeholder.
+    const restoredPlaceholder: Thread = {
+      ...createThread("session-42", []),
+      sessionId: "session-42",
+      updatedAt: "2026-03-31T10:00:00Z",
+    };
+
+    const merged = mergeRuntimeSessionsIntoThreads(
+      [restoredPlaceholder, liveThread],
+      [{ id: "session-42", state: "active", metadata: { title: "Restored" } }],
+    );
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      id: "thread-live",
+      sessionId: "session-42",
+      messages: [{ id: "live-1" }],
+    });
+  });
 });
 
 describe("workspace thread selection session id variants", () => {

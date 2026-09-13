@@ -50,6 +50,9 @@ async function scrollMetrics(page: Page) {
 }
 
 test.beforeEach(async ({ page }) => {
+  // mock server 跨 spec 共享：每个用例前清空会话历史/事件/故障开关，
+  // 否则 e2e-session-1 会累积上一次用例的问答。
+  await page.request.post("/api/_test/reset");
   await page.goto("/workspace");
   await waitForPromptVisible(page);
 });
@@ -60,7 +63,11 @@ test("G1: reasoning renders live before the answer chunk, then completes", async
   await sendPrompt(page, "capital of france (reasoning)");
 
   // reasoning row appears while the answer is still pending
-  const reasoningButton = page.getByRole("button", { name: /Reasoning/ });
+  // 限定在消息时间线内：composer 的推理强度选择器（disabled 的 “Reasoning”
+  // listbox 按钮）与消息内的推理面板开关同名，全局查询会命中两个元素。
+  const reasoningButton = page
+    .getByRole("log")
+    .getByRole("button", { name: /Reasoning/ });
   await expect(reasoningButton).toBeVisible({ timeout: 15_000 });
   await expect(
     page.getByText("Checking whether the user request needs a tool").first(),

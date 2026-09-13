@@ -88,6 +88,79 @@ describe("applySessionHistoryToThread", () => {
     expect(nextThread.artifacts[0]?.id).toBe("session-history-session-1");
   });
 
+  it("keeps live-only tool segments when authoritative history matches the message", () => {
+    const response: SessionHistoryResponse = {
+      session_id: "session-1",
+      count: 1,
+      history: [{ role: "assistant", content: "Merged answer" }],
+    };
+    const thread = createThread();
+    thread.messages[0].segments = [
+      ...thread.messages[0].segments,
+      {
+        type: "tool",
+        toolCallId: "call-1",
+        name: "read_file",
+        status: "finished",
+        resultSummary: "src",
+      },
+    ];
+
+    const nextThread = applySessionHistoryToThread(thread, response);
+
+    // History has no expression for tool evidence; the rendered card must survive
+    // the authoritative projection instead of vanishing from the timeline.
+    expect(nextThread.messages).toHaveLength(1);
+    expect(
+      nextThread.messages[0].segments.filter((segment) => segment.type === "tool"),
+    ).toEqual([
+      {
+        type: "tool",
+        toolCallId: "call-1",
+        name: "read_file",
+        status: "finished",
+        resultSummary: "src",
+      },
+    ]);
+  });
+
+  it("keeps interrupted live messages that history has not persisted", () => {
+    const response: SessionHistoryResponse = {
+      session_id: "session-1",
+      count: 1,
+      history: [{ role: "user", content: "interrupt this stream" }],
+    };
+    const thread = createThread();
+    thread.messages = [
+      {
+        id: "user-1",
+        role: "user",
+        author: "You",
+        label: "draft",
+        segments: [{ type: "text", content: "interrupt this stream" }],
+      },
+      {
+        id: "assistant-stopped",
+        role: "assistant",
+        author: "Runtime stream",
+        label: "runtime",
+        interrupted: true,
+        streaming: false,
+        segments: [{ type: "text", content: "Interruptible chunk 1." }],
+      },
+    ];
+
+    const nextThread = applySessionHistoryToThread(thread, response);
+
+    // The aborted partial answer is not persisted yet; dropping it would make the
+    // "Stopped" marker disappear right after the user hits Ctrl+Enter.
+    expect(nextThread.messages.map((message) => message.id)).toEqual([
+      "user-1",
+      "assistant-stopped",
+    ]);
+    expect(nextThread.messages[1].interrupted).toBe(true);
+  });
+
   it("hides fact ledger and other internal prompt-context messages", () => {
     const response: SessionHistoryResponse = {
       session_id: "session-1",

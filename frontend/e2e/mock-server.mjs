@@ -404,6 +404,19 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // 测试隔离：POST /api/_test/reset
+  // mock server 由 playwright webServer 跨整个 run 共享（workers=1），会话历史、
+  // 事件存储与故障开关都会残留到后续 spec。每个用例开始前显式清空，避免
+  // e2e-session-1 的历史逐轮累积（例如工作区时间线出现多份同一条回答）。
+  if (path === "/api/_test/reset" && req.method === "POST") {
+    mockSessions.clear();
+    chatSseEventsBySession.clear();
+    brokenEventsSessions.clear();
+    mockChatSeq = 0;
+    writeJson(res, 200, { ok: true });
+    return;
+  }
+
   // 测试注入（Q4）：POST /api/_test/runtime-events
   // body: { session_id, type, payload } → 与 chat.sse.* 共用同一 seq 序列。
   if (path === "/api/_test/runtime-events" && req.method === "POST") {

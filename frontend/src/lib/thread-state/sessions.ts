@@ -12,6 +12,7 @@ export function mergeRuntimeSessionsIntoThreads(
   sessions: RuntimeSessionRecord[],
 ) {
   const nextThreads = [...threads];
+  const droppedThreadIds = new Set<string>();
   let changed = false;
 
   for (const session of sessions) {
@@ -19,11 +20,29 @@ export function mergeRuntimeSessionsIntoThreads(
     if (!sessionId) {
       continue;
     }
-    const existingIndex = nextThreads.findIndex(
-      (thread) =>
-        normalizeSessionId(thread.sessionId) === sessionId ||
-        normalizeSessionId(thread.id) === sessionId,
-    );
+    const matches = nextThreads
+      .map((thread, index) => ({ index, thread }))
+      .filter(
+        ({ thread }) =>
+          normalizeSessionId(thread.sessionId) === sessionId ||
+          normalizeSessionId(thread.id) === sessionId,
+      );
+    // 一个 runtime session 只能对应一个 thread：本地在途会话（id !== sessionId，
+    // 例如刚提交、已由 SSE meta 认领 sessionId 的新会话）优先于列表中物化出来的
+    // “restored session” 占位线程，否则选中态会落到空占位上，把正在流式的消息
+    // 挡在渲染之外（e2e G2/G8a/G8b 回归）。
+    const existingIndex =
+      matches.length > 0
+        ? matches.reduce((best, candidate) =>
+            compareSessionThreadCandidates(candidate, best, sessionId),
+          ).index
+        : -1;
+    for (const match of matches) {
+      if (match.index !== existingIndex) {
+        droppedThreadIds.add(match.thread.id);
+        changed = true;
+      }
+    }
     const title =
       session.metadata?.title?.trim() || `Runtime session ${sessionId.slice(0, 10)}`;
     const summary =
@@ -105,11 +124,37 @@ export function mergeRuntimeSessionsIntoThreads(
     return threads;
   }
 
-  return [...nextThreads].sort((left, right) => {
+  const dedupedThreads =
+    droppedThreadIds.size > 0
+      ? nextThreads.filter((thread) => !droppedThreadIds.has(thread.id))
+      : nextThreads;
+
+  return [...dedupedThreads].sort((left, right) => {
     const leftTime = Date.parse(left.updatedAt);
     const rightTime = Date.parse(right.updatedAt);
     return rightTime - leftTime;
   });
+}
+
+/**
+ * 同一 session 出现多个线程时挑选“真身”：
+ * 1. 优先本地线程（id !== sessionId，即用户自己创建/正在流式的那条）；
+ * 2. 其次消息更多的线程（已有历史投影/流式内容）；
+ * 3. 最后保持原有顺序（reduce 稳定性）。
+ */
+function compareSessionThreadCandidates(
+  candidate: { index: number; thread: Thread },
+  best: { index: number; thread: Thread },
+  sessionId: string,
+) {
+  const candidateIsAlias = normalizeSessionId(candidate.thread.id) !== sessionId;
+  const bestIsAlias = normalizeSessionId(best.thread.id) !== sessionId;
+  if (candidateIsAlias !== bestIsAlias) {
+    return candidateIsAlias ? candidate : best;
+  }
+  return candidate.thread.messages.length > best.thread.messages.length
+    ? candidate
+    : best;
 }
 
 export function getRuntimeEventSeq(event: SessionRuntimeEvent) {

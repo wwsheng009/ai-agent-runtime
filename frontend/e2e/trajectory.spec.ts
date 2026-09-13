@@ -26,6 +26,9 @@ const rows = (page: Page) => page.locator("[data-trajectory-row]");
 const list = (page: Page) => page.locator("[data-trajectory-list]");
 
 test.beforeEach(async ({ page }) => {
+  // mock server 跨 spec 共享：每个用例前清空会话历史/事件/故障开关，
+  // 否则 e2e-session-1 的轨迹会混入上一个用例的事件。
+  await page.request.post("/api/_test/reset");
   await page.goto("/workspace");
   await waitForPromptVisible(page);
 });

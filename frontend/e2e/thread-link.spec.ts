@@ -28,6 +28,11 @@ async function ensureMockSession(page: Page) {
   expect(resp.status()).toBe(200);
 }
 
+test.beforeEach(async ({ page }) => {
+  // mock server 跨 spec 共享：清空上一个用例残留的会话历史/事件。
+  await page.request.post("/api/_test/reset");
+});
+
 test("thread 链接：事件增量请求 /runtime/events 且 200，无旧路径请求", async ({
   page,
 }) => {

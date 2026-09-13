@@ -58,6 +58,13 @@ export function MessageList({
   // content flush must not be mistaken for leaving the bottom), and resumes
   // as soon as they scroll back down.
   const [userScrolledAway, setUserScrolledAway] = useState(false);
+  // Mirror of the state above for layout/frame callbacks, which must observe
+  // the latest scroll intent without waiting for a re-render.
+  const userScrolledAwayRef = useRef(false);
+  // Tracks the previous "responding" flag so the turn's final content flush
+  // (which often arrives in the same commit that clears isResponding) still
+  // follows, without hijacking history restore / backtrack navigation.
+  const wasRespondingRef = useRef(isResponding);
 
   const handleScroll = () => {
     const container = scrollContainerRef.current;
@@ -66,11 +73,22 @@ export function MessageList({
     }
     const distanceFromBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight;
-    setUserScrolledAway(distanceFromBottom > SCROLL_FOLLOW_THRESHOLD);
+    const next = distanceFromBottom > SCROLL_FOLLOW_THRESHOLD;
+    userScrolledAwayRef.current = next;
+    setUserScrolledAway(next);
   };
 
   useLayoutEffect(() => {
-    if (!isResponding || userScrolledAway) {
+    // 流式期间保持贴底；收尾那一帧（isResponding 刚翻 false、内容与 done
+    // 同批提交）也要贴底，否则列表会停在顶部。历史回放/回溯定位由
+    // backtrackNavigationActive 分支单独接管滚动位置。
+    const wasResponding = wasRespondingRef.current;
+    wasRespondingRef.current = isResponding;
+    if (
+      (!isResponding && !wasResponding) ||
+      userScrolledAway ||
+      backtrackNavigationActive
+    ) {
       return;
     }
     const container = scrollContainerRef.current;
@@ -78,7 +96,16 @@ export function MessageList({
       return;
     }
     container.scrollTop = container.scrollHeight;
-  }, [isResponding, messages, userScrolledAway]);
+    // 提交后内容仍可能再长高一帧（markdown/代码高亮/字体回流），补一次贴底。
+    const frame = requestAnimationFrame(() => {
+      const next = scrollContainerRef.current;
+      if (!next || userScrolledAwayRef.current) {
+        return;
+      }
+      next.scrollTop = next.scrollHeight;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [backtrackNavigationActive, isResponding, messages, userScrolledAway]);
 
   useEffect(() => {
     if (!editingMessageId) {

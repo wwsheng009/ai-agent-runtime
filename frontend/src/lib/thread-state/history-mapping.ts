@@ -208,9 +208,11 @@ export function mapSessionHistoryToMessages(
     if (stableId) {
       usedMessageIds.add(stableId);
     }
-    const codeSegments = matched.segments.filter(
-      (segment): segment is Extract<MessageSegment, { type: "code" }> =>
-        segment.type === "code",
+    // 权威历史只投影 text/reasoning/image/callout（以及代码段透传）：工具卡是
+    // live-only 表面，history 里没有对应表达。合并时丢弃会把已经渲染出来的工具
+    // 证据从时间线上抹掉（工具卡 + 结果随之消失），因此这里继续保留其实例。
+    const preservedSegments = matched.segments.filter(
+      (segment) => segment.type === "code" || segment.type === "tool",
     );
     const relatedArtifactIds = mergeUniqueStrings(
       ...(matched.relatedArtifactIds ?? []),
@@ -228,7 +230,7 @@ export function mapSessionHistoryToMessages(
         label: matched.label || fallback.label,
         relatedArtifactIds:
           relatedArtifactIds.length > 0 ? relatedArtifactIds : undefined,
-        segments: [...fallback.segments, ...codeSegments],
+        segments: [...fallback.segments, ...preservedSegments],
       },
     } satisfies HistoryMessageMapping;
   });
