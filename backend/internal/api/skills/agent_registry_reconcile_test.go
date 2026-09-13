@@ -8,9 +8,12 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 // P2-9 API 宿主：对账循环的配置口径必须与 CLI 宿主一致（env > runtime config > 默认），
@@ -151,4 +154,70 @@ func TestAgentRegistryReconcilerConvergesMissingAgentSession(t *testing.T) {
 	handler.SetAgentControlAgentStore(nil)
 	require.Nil(t, handler.ensureAgentRegistryReconciler())
 	require.Equal(t, "reconcile=not_run", handler.agentRegistryReconcileSummary())
+}
+
+// P2-9 API 宿主：物化投影（HTTP list 与对账循环的 List 回调共用同一步骤）必须以
+// 会话上下文回填路由元数据。漏做这一步时，一次 materialize 就会把 spawn 预留写入
+// durable registry 的 provider/model/reasoning_effort/difficulty/route_source 清空，
+// 表现为「刚 spawn 成功的子代理路由字段随机变空」（CLI 宿主 chat_actor_registry.go
+// 已有同等处理，此处补齐 API 宿主口径）。
+func TestAgentControlProjectionKeepsSpawnRouteMetadata(t *testing.T) {
+	ctx := context.Background()
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	defer sessionManager.Stop()
+	defer handler.getSessionHub().StopAll()
+	handler.SetSessionManager(sessionManager)
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.Agents.MaxDepth = 2
+	handler.SetRuntimeConfig(cfg, "")
+	enabled := true
+	handler.SetAICLIConfig(&agentconfig.Config{
+		AICLI: &agentconfig.AICLIConfig{
+			Subagents: &agentconfig.AICLISubagentsConfig{
+				Routing: &agentconfig.AICLISubagentRoutingConfig{
+					Enabled:           &enabled,
+					DefaultDifficulty: "normal",
+					Levels: map[string]agentconfig.AICLISubagentRouteProfile{
+						"hard": {
+							Provider:        "remote",
+							Model:           "strong-model",
+							ReasoningEffort: "high",
+						},
+					},
+				},
+			},
+		},
+	})
+	store, err := agentcontrol.NewSQLiteGlobalAgentRegistryStore(&agentcontrol.GlobalAgentStoreConfig{
+		Path: filepath.Join(t.TempDir(), "agents.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	handler.SetAgentControlAgentStore(store)
+
+	rootSession, err := sessionManager.Create(ctx, "user-session-projection-route")
+	require.NoError(t, err)
+	controller := handler.getAgentSessionController()
+	require.NotNil(t, controller)
+	_, err = controller.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{
+		ID:         "projection-route-child",
+		AgentType:  "worker",
+		Difficulty: "hard",
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, handler.materializeAgentControlAgentProjections(ctx, store, agentcontrol.AgentFilter{IncludeClosed: true}))
+
+	records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+		AgentID:       "projection-route-child",
+		IncludeClosed: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, "remote", records[0].Provider)
+	require.Equal(t, "strong-model", records[0].Model)
+	require.Equal(t, "high", records[0].ReasoningEffort)
+	require.Equal(t, "hard", records[0].Difficulty)
+	require.Equal(t, "difficulty_level", records[0].RouteSource)
 }

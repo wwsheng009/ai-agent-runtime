@@ -287,6 +287,11 @@ func (h *Handler) projectAgentControlSessionAgents(ctx context.Context, filter a
 			UpdatedAt:       session.UpdatedAt,
 			ClosedAt:        closedAt,
 		}
+		// Parity with the CLI host projection (chat_actor_registry.go): the
+		// session context is the projection source of truth for route metadata.
+		// Leaving these fields empty would let the next materialize pass upsert
+		// an empty route over the durable row written by the spawn reservation.
+		toolbroker.ApplySpawnAgentRouteRecordContext(&record, session)
 		if record.TeamID != "" {
 			record.Workflow = agentcontrol.WorkflowSpawnTeam
 			record.AgentID = "team:" + record.TeamID + ":" + firstNonEmptyString(record.TeammateID, sessionID)
