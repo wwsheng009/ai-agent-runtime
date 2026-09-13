@@ -20,6 +20,12 @@ type CodeBlockProps = {
   className?: string;
   collapsible?: boolean;
   collapseLineCount?: number;
+  /**
+   * 流式第二前沿：仍在增长的 partial 行（`code` 保持 `\n` 结尾的整行前缀）。
+   * partial 行按纯文本渲染，不进入 Prism 输入——半行代码会得到错误 token
+   * （例如未闭合字符串把后续内容整体染色），也避免整块随每个 chunk 重tokenize。
+   */
+  partialLine?: string;
   streaming?: boolean;
 };
 
@@ -41,6 +47,7 @@ export function CodeBlock({
   className,
   collapsible = false,
   collapseLineCount = DEFAULT_COLLAPSE_LINE_COUNT,
+  partialLine,
   streaming = false,
 }: CodeBlockProps) {
   return (
@@ -51,6 +58,7 @@ export function CodeBlock({
       collapsible={collapsible}
       collapseLineCount={collapseLineCount}
       language={language}
+      partialLine={partialLine}
       streaming={streaming}
       title={title}
     />
@@ -64,6 +72,7 @@ function CodeBlockSurface({
   className,
   collapsible,
   collapseLineCount,
+  partialLine,
   streaming,
 }: CodeBlockSurfaceProps) {
   const { t } = useTranslation("common");
@@ -84,14 +93,25 @@ function CodeBlockSurface({
   );
   const resolvedCollapseLineCount =
     collapseLineCount ?? DEFAULT_COLLAPSE_LINE_COUNT;
+  // `code`（= stableCode）保持 `\n` 结尾，最后一行切出来必然是空行；有 partial 行时
+  // 这行是切分产物而不是真实内容，去掉它再补 partial 行，行号与内容才对得上。
+  const stableLines =
+    partialLine &&
+    highlightedLines.length > 0 &&
+    highlightedLines[highlightedLines.length - 1].segments.length === 0
+      ? highlightedLines.slice(0, -1)
+      : highlightedLines;
+  const partialLineCount = partialLine ? 1 : 0;
+  const totalLineCount = stableLines.length + partialLineCount;
   const canCollapse =
     collapsible &&
     !streaming &&
-    highlightedLines.length > resolvedCollapseLineCount;
+    totalLineCount > resolvedCollapseLineCount;
   const visibleLines = canCollapse && !expanded
-    ? highlightedLines.slice(0, resolvedCollapseLineCount)
-    : highlightedLines;
-  const hiddenLineCount = highlightedLines.length - visibleLines.length;
+    ? stableLines.slice(0, resolvedCollapseLineCount)
+    : stableLines;
+  const hiddenLineCount = totalLineCount - visibleLines.length - partialLineCount;
+  const showPartialLine = Boolean(partialLine) && !canCollapse;
 
   useEffect(() => {
     if (prismReady) {
@@ -112,7 +132,9 @@ function CodeBlockSurface({
 
   async function handleCopy() {
     try {
-      await navigator.clipboard.writeText(code);
+      await navigator.clipboard.writeText(
+        partialLine ? `${code}${partialLine}` : code,
+      );
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
     } catch {
@@ -177,6 +199,17 @@ function CodeBlockSurface({
               </code>
             </div>
           ))}
+          {showPartialLine ? (
+            <div
+              className="app-code-line grid grid-cols-[2.5rem_minmax(0,1fr)] gap-3 px-3 text-code-block-foreground"
+              data-line-kind="partial"
+            >
+              <span className="app-code-line-number select-none text-right font-mono text-code-line-number">
+                {stableLines.length + 1}
+              </span>
+              <code className="font-mono whitespace-pre">{partialLine}</code>
+            </div>
+          ) : null}
         </pre>
       </div>
       {canCollapse ? (
@@ -184,7 +217,7 @@ function CodeBlockSurface({
           <div className="flex items-center justify-between gap-3">
             <div className="app-text-11 text-muted-foreground">
               {expanded
-                ? t("codeBlock.showingAll", { count: highlightedLines.length })
+                ? t("codeBlock.showingAll", { count: totalLineCount })
                 : t("codeBlock.hiddenNote", { count: hiddenLineCount })}
             </div>
             <Button

@@ -35,11 +35,14 @@ export const MessageMarkdown = memo(function MessageMarkdown({
   const { t } = useTranslation("workspace");
   const deferredContent = useDeferredValue(content);
   const renderContent = streaming ? deferredContent : content;
-  // 稳定区前缀缓存：新 stableContent 以已渲染内容为前缀时（追加场景），
-  // 复用冻结片段并只渲染增量（delta），避免每帧重解析全部稳定文本。
-  // 使用 render 期间 state 调整（官方 "storing information from previous
-  // renders" 模式）而非 ref，以满足 react-hooks/refs 规则。
-  const [frozenStableContent, setFrozenStableContent] = useState("");
+  // generation：追加输入保持不变，非追加输入（重新生成 / 内容被改写）递增，
+  // 让下游按代丢弃冻结缓存（渲染 key 里带 generation，React 因此 remount 而不是
+  // 复用上一代的块）。使用 render 期间 state 调整（官方 "storing information from
+  // previous renders" 模式）而非 ref，以满足 react-hooks/refs 规则。
+  const [freezeState, setFreezeState] = useState({
+    content: "",
+    generation: 0,
+  });
   const markdownComponents = useMemo(
     () => createMarkdownComponents(streaming),
     [streaming],
@@ -50,53 +53,75 @@ export const MessageMarkdown = memo(function MessageMarkdown({
         ? splitStreamingMarkdown(renderContent)
         : {
             stableContent: renderContent,
+            stableBlocks: [],
+            stableEndOffset: 0,
             tailContent: "",
             tailMode: null,
+            tailBlocks: [],
+            totalOffset: renderContent.length,
           },
     [renderContent, streaming],
   );
-  let renderedStableContent: string;
-  let stableDeltaContent = "";
-  if (
-    streaming &&
-    frozenStableContent &&
-    streamingParts.stableContent.startsWith(frozenStableContent)
-  ) {
-    renderedStableContent = frozenStableContent;
-    stableDeltaContent = streamingParts.stableContent.slice(
-      frozenStableContent.length,
+  if (!streaming && freezeState.content) {
+    // 结算后清账：下一次流式 / 重新生成从 generation 0 重新起算。
+    setFreezeState({ content: "", generation: 0 });
+  } else if (streaming && freezeState.content !== streamingParts.stableContent) {
+    const appended = streamingParts.stableContent.startsWith(
+      freezeState.content,
     );
-  } else {
-    renderedStableContent = streamingParts.stableContent;
-    if (frozenStableContent !== streamingParts.stableContent) {
-      setFrozenStableContent(streamingParts.stableContent);
-    }
+    setFreezeState({
+      content: streamingParts.stableContent,
+      generation: appended ? freezeState.generation : freezeState.generation + 1,
+    });
   }
+  const generation = freezeState.generation;
+  const renderedStableContent = streamingParts.stableContent;
+  // 不稳定区可能含多个块（尾块 + 它可能继续吞并的空行续块）。前面的块内容已定稿，
+  // 按绝对 offset 各自成片（key 与冻结块同源，跨边界移动时不 remount）；只有尾块
+  // 需要走流式路径（code fence / 结构块 / plain）。
+  const leadingTailBlocks = streamingParts.tailBlocks.slice(0, -1);
+  const lastTailBlock =
+    streamingParts.tailBlocks[streamingParts.tailBlocks.length - 1];
+  const tailBaseOffset = streamingParts.stableEndOffset;
+  const lastTailContent = lastTailBlock
+    ? streamingParts.tailContent.slice(lastTailBlock.start - tailBaseOffset)
+    : "";
+  // 冻结块与不稳定区首块拼成同一个 keyed 列表：块从「尾块前块」滑进「冻结前缀」时
+  // key 与元素类型都不变，React 因此复用 fiber（memo 直接跳过重渲染），不会重解析。
+  const settledBlocks = [...streamingParts.stableBlocks, ...leadingTailBlocks];
+  const tailSpacing = settledBlocks.length > 0 ? "mt-3" : undefined;
+  const settledBlockContent = (block: { start: number; end: number }) =>
+    block.end <= tailBaseOffset
+      ? renderedStableContent.slice(block.start, block.end)
+      : streamingParts.tailContent.slice(
+          block.start - tailBaseOffset,
+          block.end - tailBaseOffset,
+        );
   const activeStreamingCodeFence = useMemo(
     () =>
       streaming && streamingParts.tailMode === "markdown"
-        ? parseStreamingCodeFence(streamingParts.tailContent)
+        ? parseStreamingCodeFence(lastTailContent)
         : null,
-    [streaming, streamingParts.tailContent, streamingParts.tailMode],
+    [lastTailContent, streaming, streamingParts.tailMode],
   );
   const activeStreamingPlainTail = useMemo(
     () =>
       streaming && streamingParts.tailMode === "plain"
-        ? parseStreamingPlainTail(streamingParts.tailContent)
+        ? parseStreamingPlainTail(lastTailContent)
         : null,
-    [streaming, streamingParts.tailContent, streamingParts.tailMode],
+    [lastTailContent, streaming, streamingParts.tailMode],
   );
   const activeStreamingStructuredTail = useMemo(
     () =>
       streaming &&
       streamingParts.tailMode === "markdown" &&
       !activeStreamingCodeFence
-        ? parseStreamingStructuredTail(streamingParts.tailContent)
+        ? parseStreamingStructuredTail(lastTailContent)
         : null,
     [
       activeStreamingCodeFence,
+      lastTailContent,
       streaming,
-      streamingParts.tailContent,
       streamingParts.tailMode,
     ],
   );
@@ -109,30 +134,31 @@ export const MessageMarkdown = memo(function MessageMarkdown({
         className,
       )}
     >
-      {renderedStableContent ? (
+      {streaming ? (
+        // 前缀按块渲染：key = 块在全文中的绝对起始 offset（跨冻结边界稳定），
+        // 块内容本身逐字不变，因此 memo 让每块只解析一次，而不是随每个 chunk
+        // 重解析整段前缀。
+        settledBlocks.map((block) => (
+          <StableMarkdownFragment
+            key={`${generation}:${block.start}`}
+            components={markdownComponents}
+            content={settledBlockContent(block)}
+          />
+        ))
+      ) : renderedStableContent ? (
         <StableMarkdownFragment
           components={markdownComponents}
           content={renderedStableContent}
         />
       ) : null}
 
-      {stableDeltaContent ? (
-        <div className={renderedStableContent ? "mt-3" : undefined}>
-          <ReactMarkdown
-            components={markdownComponents}
-            remarkPlugins={[remarkGfm, remarkBreaks]}
-          >
-            {normalizeMarkdown(stableDeltaContent, false)}
-          </ReactMarkdown>
-        </div>
-      ) : null}
-
-      {streamingParts.tailContent ? (
+      {lastTailContent ? (
         activeStreamingCodeFence ? (
           <CodeBlock
-            className={streamingParts.stableContent ? "mt-3" : undefined}
-            code={activeStreamingCodeFence.code}
+            className={tailSpacing}
+            code={activeStreamingCodeFence.stableCode}
             language={activeStreamingCodeFence.language}
+            partialLine={activeStreamingCodeFence.partialLine || undefined}
             streaming
             title={
               activeStreamingCodeFence.info
@@ -143,30 +169,27 @@ export const MessageMarkdown = memo(function MessageMarkdown({
         ) : activeStreamingStructuredTail ? (
           renderStreamingStructuredTail(
             activeStreamingStructuredTail,
-            streamingParts.stableContent ? "mt-3" : undefined,
+            tailSpacing,
           )
         ) : activeStreamingPlainTail ? (
-          renderStreamingPlainTail(
-            activeStreamingPlainTail,
-            streamingParts.stableContent ? "mt-3" : undefined,
-          )
+          renderStreamingPlainTail(activeStreamingPlainTail, tailSpacing)
         ) : streamingParts.tailMode === "markdown" ? (
-          <div className={streamingParts.stableContent ? "mt-3" : undefined}>
+          <div className={tailSpacing}>
             <ReactMarkdown
               components={markdownComponents}
               remarkPlugins={[remarkGfm, remarkBreaks]}
             >
-              {normalizeMarkdown(streamingParts.tailContent, streaming)}
+              {normalizeMarkdown(lastTailContent, streaming)}
             </ReactMarkdown>
           </div>
         ) : (
           renderStreamingPlainTail(
             {
-              activeText: streamingParts.tailContent,
+              activeText: lastTailContent,
               mode: "sentence",
               stableText: "",
             },
-            streamingParts.stableContent ? "mt-3" : undefined,
+            tailSpacing,
           )
         )
       ) : null}
