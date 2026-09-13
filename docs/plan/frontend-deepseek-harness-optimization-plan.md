@@ -1,6 +1,6 @@
 # frontend 前端功能与样式优化方案（参考 deepseek-harness）
 
-状态：**草案（待评审）**；实施记录见 §9.3。
+状态：**执行中**（P0 已完成，其中 P0-1/P0-2 验收在 2026-09-13 复核中发现回退，已复检登记；P1 进行中：6/10 完成、4 项未开始；P2 未启动）；实施记录见 §9.3，复核与缺口登记见 §9.4，缺口清单见 `docs/plan/frontend-deepseek-harness-gap-list.md`。
 
 日期：2026-09-11
 
@@ -296,7 +296,7 @@
 | # | 资产 | 证据（当前项目） | 对方案任务的约束 |
 |---|---|---|---|
 | A1 | 会话运行时流常驻重连 + seq 游标续传 + 退避阈值 | `hooks/workspace/use-session-runtime-stream.ts:91-242` | P1-8 仅做状态 UI/手动重试/直连 chat 流恢复；禁止另写退避循环（幂等断言：恢复不重复渲染已消费 delta） |
-| A2 | 日志流重连状态机 + 连接状态标签 | `hooks/use-runtime-logs.ts`、`pages/logs-page.tsx:132-166,301-303` | P1-8 复用同一状态呈现与文案规范 |
+| A2 | 日志流重连状态机 + 连接状态标签 | `hooks/use-runtime-logs.ts`、`pages/logs-page/connection.tsx` / `logs-header.tsx`（P0-2 拆分后；原 `logs-page.tsx:132-166,301-303` 引用已失效） | P1-8 复用同一状态呈现与文案规范 |
 | A3 | 轨迹搜索：增量倒排索引、AND 语义、节流重建、与筛选叠加 | `lib/trajectory/trajectory-search-index.ts`、`trajectory-view*.tsx` | P2-1「会话搜索」限定为**侧栏会话级 + 服务端内容检索**；不重写轨迹搜索 |
 | A4 | 轨迹导出 / golden 对拍基建 | `lib/trajectory/{export,golden}.ts` 及测试 | P2-5 视觉 golden 前先盘点既有往返测试，避免重复建设 |
 | A5 | 会话级 reasoning effort 选择（composer + 会话 context 投影） | `lib/reasoning-effort.ts`、composer 选择器（HEAD commit 即此功能） | P2-2 采样参数草稿模型不得回退该交互 |
@@ -358,7 +358,7 @@
 - **涉及**：`frontend/src/.backups/`、`frontend/src/{api/runtime,components/ui,components/workspace,hooks/workspace,i18n/resources,pages,styles}/.backups/`（20 个 `.bak`：pages 6、components/workspace 5、i18n/resources 3、api/runtime 2，其余 4 个目录各 1）、`frontend/.gitignore`、`frontend/e2e/`。
 - **验收**：`git status` 无 `.bak` 新增；`frontend/src` 下 `*.bak` 计数为 0（`Get-ChildItem -Recurse -Force -File frontend/src -Include *.bak | Measure-Object` = 0）；CI/本地 `npm run build`、`npm run test` 全绿。
 
-> **状态**：已完成（2026-09-11）；清理与验证证据见 §9.3。复核：`.backups` 目录 0 / `.bak` 文件 0（清理前实测 7 / 11，且从未被 git 跟踪），`.gitignore` 已含 `*.bak`、`.backups/`，调试用 e2e 已由 `diag.spec.ts` 改名为 `diag.manual.ts`（`playwright.manual.config.ts` 承接）。
+> **状态**：已完成（2026-09-11）；清理与验证证据见 §9.3。复核：`.backups` 目录 0 / `.bak` 文件 0（清理前实测 7 / 11，且从未被 git 跟踪），`.gitignore` 已含 `*.bak`、`.backups/`，调试用 e2e 已由 `diag.spec.ts` 改名为 `diag.manual.ts`（`playwright.manual.config.ts` 承接）。 **2026-09-13 复检：** 该验收在复核时已被回退——`frontend/src` 下实有 52 个 `.bak` 与 17 个 `.backups/`（全部为 2026-09-13 生成；`.gitignore` 使其对 `git status` 隐形），`frontend/` 全域共 72 个 `.bak` / 19 个 `.backups/`。本次已全部清理（清理后实测 0 / 0），并新增 `frontend/scripts/verify-no-backups.mjs`（并入 `npm run lint`）把该约束变成可执行门禁；详见缺口清单 A1。
 
 #### P0-2 超长文件拆分（按域注册表化）
 
@@ -378,7 +378,7 @@
   - **测试随源（2 项）**：`workspace-thread-state.test.ts`(800)、`trajectory-reducer.test.ts`(537) 随对应源拆分同步切分，禁止只拆源不拆测试。
 - **验收**：拆分后对外 API 不变（`tsc -b` 通过）；**首批 15 项内**每个新文件 < 500 行；相关既有测试不改断言即通过；41 项总量在 M4 前降至 ≤ 10（且余项均有排期与责任批次）。
 
-> **状态**：已完成（2026-09-11）；分批落地与复核证据见 §9.3。复核：`frontend/src` 内 > 500 行文件仅剩 i18n 双语字典 2 个（按方案归 P0-6 承担），41 项总量 **41 → 2**（≤ 10 达标），首批 15 项均在 < 500 行。**（2026-09-11 更新）** P0-6 已将双语字典按 namespace 拆分，> 500 行文件数降至 0（见 §9.3 P0-6 行）。
+> **状态**：已完成（2026-09-11）；分批落地与复核证据见 §9.3。复核：`frontend/src` 内 > 500 行文件仅剩 i18n 双语字典 2 个（按方案归 P0-6 承担），41 项总量 **41 → 2**（≤ 10 达标），首批 15 项均在 < 500 行。**（2026-09-11 更新）** P0-6 已将双语字典按 namespace 拆分，> 500 行文件数降至 0（见 §9.3 P0-6 行）。 **2026-09-13 复检：** 该全局指标当前不成立——> 500 行文件为 3 个：`styles/globals.css`=1043、`components/workspace/message-markdown-streaming.ts`=525（P1-2 `c12e0cf4` 引入）、`components/workspace/trajectory/subagent-session-dialog.test.tsx`=516（`8c55411d`）；按计划 ts/tsx 口径为 2 个，M4 阈值（≤ 10）仍满足。§9.3 另有若干模块行数陈旧漂移（均在阈值内）。详见缺口清单 A2。
 
 #### P0-3 卡片/面板组件收敛
 
@@ -398,7 +398,7 @@
 - **落地要点**：暗色仍可作为默认（保持现有 `applyDocumentSettings` 行为），但变量声明改为「亮色在 `:root`、暗色在 `html[data-theme="dark"]`」或反向保持一致；新增规则：feature 层禁止出现 `#hex`、`rgb()`、主题选择器。
 - **验收**：`grep -c "var(--"` 的任意值用法下降 ≥ 70%；`landing.css` 变量数为 0；主题/强调色/字号切换后无颜色回归（e2e 覆盖三档主题 × 两种强调色）。
 
-> **状态**：已完成（2026-09-11）；三层落地口径、收敛批次与验证证据见 §9.3。验收复核：`[var(--…)]` 任意值 **2008 → 20（-99%）**；`landing.css` 88 行内变量声明 0 / `:root` 0 / 颜色字面量 0；主题 × 强调色 × 字号的 e2e 覆盖见 §9.3 末行（提交 `7d42b79b`）。有意保留项：未命中阶梯的硬编码圆角/字号、mock 产物 iframe 内的颜色字面量、无对应 `@theme` 工具类的渐变/阴影 token，均逐条记录在 §9.3。
+> **状态**：已完成（2026-09-11）；三层落地口径、收敛批次与验证证据见 §9.3。验收复核：`[var(--…)]` 任意值 **2008 → 20（-99%）**；`landing.css` 88 行内变量声明 0 / `:root` 0 / 颜色字面量 0；主题 × 强调色 × 字号的 e2e 覆盖见 §9.3 末行（提交 `7d42b79b`）。有意保留项：未命中阶梯的硬编码圆角/字号、mock 产物 iframe 内的颜色字面量、无对应 `@theme` 工具类的渐变/阴影 token，均逐条记录在 §9.3。 **2026-09-13 复检：** `@theme` 映射 89 条（原记 87）、残留 `[var(--…)]` 任意值 22 行/14 文件（原记 20），方向未变；详见缺口清单 A3。
 
 #### P0-5 主题解析/应用分离与首屏防闪烁
 
@@ -469,6 +469,8 @@
 - **依赖**：需要运行时队列 API 与 `updateQueue` 能力（当前无，列入后端依赖）。
 - **验收**：busy 状态下 Enter 行为可配置且持久化；队列项可删除/立即发送；断线重连后队列状态与权威一致。
 
+> **状态**：未开始（2026-09-13 复核；依赖后端队列/steering API，当前未就绪）。注意：`frontend/src` 中形如「P1-5 方案 1/2/4」的注释指 `docs/plan/multi-agent-execution-optimization-plan.md` 的 P1-5（子代理下钻），与本任务无关。
+
 #### P1-6 工具行状态机与工具专属视图
 
 - **内容**：`message-tool-row.tsx` 重构为状态机：`expandable` 谓词、失败态替换摘要（不追加）、diff 折叠行携带 `+A -R`、失败禁用文件链接、嵌套链接处理点击与键盘冒泡、行根 `data-*` 属性 + visually-hidden 状态播报；注册表支持「工具名 → 专属卡」（read/diff/terminal/search/web/image/JSON），未注册走 generic 卡。
@@ -483,10 +485,12 @@
 
 #### P1-8 连接状态统一与断线恢复收口（复用既有重连）
 
-- **背景修正**：会话运行时流**已有**常驻重连 + `seq` 游标续传 + 阈值退避（`use-session-runtime-stream.ts:91-242`），日志流已有重连状态机与状态标签（`use-runtime-logs.ts`、`logs-page.tsx:132-166,301-303`）。原「从零实现退避」的表述作废。
+- **背景修正**：会话运行时流**已有**常驻重连 + `seq` 游标续传 + 阈值退避（`use-session-runtime-stream.ts:91-242`），日志流已有重连状态机与状态标签（`use-runtime-logs.ts`、`pages/logs-page/connection.tsx` / `logs-header.tsx`）。原「从零实现退避」的表述作废。
 - **内容**：① 抽取统一「连接状态」呈现件（connecting/reconnecting/online/offline + 手动重试），会话流与日志流共用；② 状态条接入工作台顶栏与消息流尾；③ 补齐**直连 `/api/agent/chat` 流**的失败恢复路径（本轮只核验了 thread 运行时流与日志流）；④ 手动重试与自动重连共用入口，重试前以本地 last seq 拉齐。
 - **约束**：不得新增第二套退避循环；复用现有 `settings.notification` 与错误文案映射（§5.5 A1/A2）。
 - **验收**：e2e/单测模拟断流 → 自动恢复；恢复期间不重复渲染已消费 delta（幂等断言）；手动重试不产生重复请求；直连 chat 流断线后可见状态并可恢复。
+
+> **状态**：未开始（2026-09-13 复核；会话流重连与日志连接标签为 §5.5 预登记既有资产，本任务的统一连接呈现件/顶栏状态条/直连 chat 恢复均未落地）。
 
 #### P1-9 会话列表状态与整理能力
 
@@ -495,13 +499,19 @@
 - **依赖**：状态数据源为会话快照 + 本地流状态合并；后端 `/sessions/{id}/archive|activate|close` 与 `/sessions/stats` 已就绪但未消费（§6.3）。
 - **验收**：多会话并发时「哪个在等我」可一眼识别；归档后列表不出现且可恢复；Fork 后新会话命名与分组归属可预期。
 
+> **状态**：未开始（2026-09-13 复核；后端 `archive`/`activate`/`close` 与 `/sessions/stats` 已就绪但前端零消费）。
+
 #### P1-10 全局错误边界与加载失败面
 
 - **内容**：全局 ErrorBoundary（当前 `frontend/src` 内无 ErrorBoundary/componentDidCatch，已核验）；lazy 路由 chunk 加载失败的重试面（**有次数上限与退避**）；`#root` 缺失/启动失败的可见提示（非白屏）；**启动完整性检查**——React 挂载后确认关键 provider/路由就绪，未就绪进入可见错误面而非「半加载」状态（目标项目 `boot-client.ts:54-60` 的单应用等价物）；错误统一走向 logger 出口。
 - **依据**：目标项目 `web/src/boot-page.ts:68-70`（启动失败报告）、`web/src/boot-client.ts:54-60`（启动完整性审计）、`ui-renderer/src/client/scoped-slots.tsx:325-333`（槽位级错误边界）；当前项目为单应用，等价物是「全局 + 路由级 + 面板级」三层边界。
 - **验收**：人为抛错不白屏且可恢复；chunk 404 显示重试而非死循环；错误边界有测试覆盖。
 
+> **状态**：未开始（2026-09-13 复核；实现批次已启动，见缺口清单 B4）。
+
 ### 6.3 P2：功能补齐与工程化
+
+> **状态**：P2 全量未启动（2026-09-13 复核）；P2-1 与 P2-7 仅有前序任务（P1-7/P1-8/P1-4）遗留的部分能力。逐项状态登记随 P2 启动建立，缺口清单见 `docs/plan/frontend-deepseek-harness-gap-list.md` B5/C2/C3。
 
 #### P2-1 后端能力对接（就绪度驱动）
 
@@ -803,6 +813,22 @@
 | P1-6 工具行状态机与工具专属视图 | 已完成（2026-09-11，`1806c003`；20 文件 +1529/−85） | **新增 `lib/tool-row/` 数据层**：`state.ts`（状态机：kind → 图标/色调、失败态（error/cancelled）判定与输出块替换、`expandable` 折叠谓词（有输入/输出/错误才可展开）、摘要分段、`data-*` 语义属性）、`details.ts`（展示白名单键提取 + 截断 `argsSummary` 的补丁目标回退 `PATCH_TARGET_EMBEDDED_PATTERN`/`PATCH_FILE_KEYS`）、`kind.ts`（工具名 → 卡片类型 `read`/`diff`/`terminal`/`search`/`web`/`image`/`json`/`generic`，兼容 `mcp__*` 前缀）、`link.ts`（`FilePathLink` 契约 + `isExternalUrl`）、`artifact-links.ts`（`createArtifactFilePathLinkResolver`：无宿主目标时不渲染死链接，路径降级纯文本）、`index.ts` barrel。**新增 `components/workspace/tool-row/` 视图层**：`tool-row-summary.tsx`（状态徽标 + 工具专属图标 + 分段摘要 + 文件路径链接）、`tool-row-panels.tsx`（输入/输出/错误分块面板）。**重构 `message-tool-row.tsx`**：状态徽标 + 专属图标 + 折叠输入面板 + sr-only 状态播报（`aria-live`；i18n 双语）；**失败态错误块替换输出块**、路径保留禁用态链接（`data-tool-row-link-disabled="true"`）。**接线**：`message-list/{assistant-message-card,history-context-message-card,segment-rendering}.tsx`、`lib/thread-state/tools.ts`、`data/mock/types.ts`、i18n `zh-CN`/`en-US` `workspace/panels-messages.ts`。 | `npx tsc -b --force` **exit 0**；`npm test` **118 文件 / 727 用例全绿**（74.1s；较 P1-4 子片 3 的 115/701 新增 3 文件 / 26 例：`state.test.ts` 7 + `details.test.ts` 12 + `message-tool-row.test.tsx` 7——覆盖失败态替换、`expandable` 谓词、白名单键提取、截断 argsSummary 回退、无目标不渲染链接、sr-only 播报）；`npm run lint` **0 error / 3 warning**（3 条均为基线既有：`artifact-detail-dialog.tsx:50`、`use-sidebar-effects.ts:53/100`）+ `node scripts/verify-frontend-i18n.ts` → `i18n lint OK（scanned=534, violations=0）`；`npm run build` exit 0；`npm run test:e2e` **32 passed**（`workspace-chat.spec.ts` G2 与 P1-3c 因 sr-only 播报新增同名文本，查询收窄为 `getByText("web_search", { exact: true })`）。 |
 
 | P1-7 审批与提问交互（统一 pending 生命周期） | 已完成（2026-09-13，`bff7de9c`；22 文件 +2314/−2） | **新增 `lib/pending-interaction/` 数据层**：`types.ts`（kind `approval` / `question` / `plan_review`；status `pending` → `resolving` → `resolved` / `cancelled` / `expired`；身份口径审批=`request_id`、提问=`question_id`、计划评审=`plan-review:<sessionId>`；`selectPendingInteraction` 本会话 pending 优先、回落 resolving，`isActionablePendingInteraction` 决定是否留在呈现位）、`events.ts`（纯函数事件归约：`approval_requested` / `approval_resolved`（`resolution="expired"` 为后端 30min 超时终态）/ `question_asked` / `question_answered` 及点号变体；`session_end` / `session_interrupted` / `session_closed` / `session_deleted` → 未决条目收敛 `cancelled`；`registerPendingInteraction` 同 id 幂等且保留注册序、缺 id 不建入口（不伪造身份）；`markPendingInteractionResolving` 防重复提交、`settlePendingInteraction` 回填、`failPendingInteractionResolve` 回退 `pending` 保留原因、`expirePendingInteractions` 按 `expires_at` 置 `expired`、`pendingInteractionsFromRuntimeEvents` 支持回放重建）、`plan-review.ts`（`pendingPlanReviewFromPlan`：计划模式 active 即条目、退出即消失，透出 `plan_path` / `notes`）、`index.ts` barrel。**新增 `hooks/workspace/use-pending-interactions.ts`**（owner hook）：事件归约全局累积、呈现按会话过滤（切换会话不误杀旧会话条目）；审批与提问各自 `AbortController`（可取消，卸载时全部 abort），提交成功**乐观收敛**（随后 `approval_resolved` / `question_answered` 按 id 幂等覆盖），网络失败回退 `pending` 且错误文案可重试；呈现优先级 = 真实交互 > 计划评审投影（计划激活期内的工具审批不被恒存投影遮蔽）；`converge(reason)` 供停止 / 取消主动收敛。**新增 `components/workspace/pending-interaction-bar.tsx`**（composer 上沿单卡片）：审批（工具名徽标 + 理由 + approve/deny）、提问（建议按钮 + 输入框 + 提交；子表单以 `key={interaction.id}` 挂载，身份切换即重挂载、草稿不串条目）、计划评审（备注 textarea + approve / request_changes / quit，与 artifact 面板共用 `planNotesDraft` / `planActionPending`）；暴露 `data-kind` / `data-status` / `data-interaction-id` 与 `aria-live="polite"`，resolving 期禁用重复提交并显示「提交中」。**接线**：`use-session-runtime-stream.ts` 新增 `onRuntimeEvent` 逐条投递；`workspace-page.tsx` 组合 `usePendingInteractions` + `useRuntimePlanMode`（计划评审与 artifact 面板同源，不建第二套 pending 判定），停止会话先 `converge("session_interrupted")` 再 stop；`workspace-shell/{types,workspace-shell,main-section}` 透传呈现位；`api/runtime/sessions.ts` 新增 `answerSessionQuestion` 与 `SessionRuntimeCommandOptions.signal`（`resolveSessionToolApproval` 支持取消），`api/runtime/index.ts` 补齐两条命令导出。**i18n**：`zh-CN` / `en-US` 新增 `workspace/panels-interactions.ts`（approval / question / planReview / submitting），由各自 `workspace/index.ts` 汇总。 | `npx tsc -b --pretty false` **exit 0**；`npm test` **121 文件 / 758 用例全绿**（63.8s；较 P1-6 的 118/727 新增 3 文件 / 31 例：`events.test.ts` 15 + `use-pending-interactions.test.tsx` 8 + `pending-interaction-bar.test.tsx` 5 + `sessions.test.ts` 3——覆盖缺 `request_id` 不建入口、同 id 重复注册幂等、`expired` 超时终态、`approval_resolved` 缺 id 时按会话保守清除（不误清其他会话）、resolving 失败回退 `pending`、`session_end` 收敛且不动已完成条目、会话过滤、计划 active 投影）；`npm run lint` **0 error / 3 warning**（3 条均为基线既有：`artifact-detail-dialog.tsx:50`、`use-sidebar-effects.ts:53/100`）+ `node scripts/verify-frontend-i18n.ts` → `i18n lint OK（scanned=540, violations=0）`；`npm run build`（`tsc -b` + vite build）exit 0；`npm run test:e2e` **35 passed**（32 既有 + 新增 `e2e/pending-interaction.spec.ts` 3 例：审批卡出现 → Deny → 断言投递 `approve_tool`（`request_id` / `allow:false`）且卡片离开呈现位；提问卡 → 输入答案提交 → 断言投递 `answer_question`；`session_interrupted` 把未决审批收敛、卡片不悬挂）。 |
+
+---
+
+### 9.4 2026-09-13 复核与缺口登记
+
+- **基线**：HEAD `41471f24`；复核时前端工作区无未提交改动；方法=计划文本逐条对拍 + 12 个声称 commit 校验 + 静态代码取证 + 本地重跑门禁。缺口明细、证据与处置进展见 `docs/plan/frontend-deepseek-harness-gap-list.md`。
+- **门禁实测**：`npm run build` exit 0；`npm run test` 121 文件 / 758 用例通过；`npm run test:e2e` 35 通过；`npm run lint:i18n` scanned=540 / violations=0（§9.3 旧记录 534）。
+- **台账补记**：§6.2 已为 P1-5 / P1-8 / P1-9 / P1-10 增补「未开始」状态行；P1-6 / P1-7 以 §9.3 行为准。
+- **验收回退与漂移**：
+  1. P0-1「`src` 下 `.bak`=0」在执行期被回退（复核时 `src` 下 52 个 `.bak` / 17 个 `.backups/`，`frontend/` 全域 72 / 19，全部为 2026-09-13 生成且被 `.gitignore` 隐形）。2026-09-13 已再次清理为 0 / 0，并新增 `frontend/scripts/verify-no-backups.mjs` 门禁（并入 `npm run lint`）。
+  2. P0-2「> 500 行 = 0」当前不成立：3 个文件超长（`styles/globals.css`=1043、`components/workspace/message-markdown-streaming.ts`=525、`components/workspace/trajectory/subagent-session-dialog.test.tsx`=516）；按 ts/tsx 口径 2 个，M4 阈值（≤ 10）仍满足。
+  3. P0-4 数值口径漂移：`@theme` 映射 89（原记 87）、残留 `[var(--…)]` 任意值 22 行（原记 20）。
+  4. 文档引用漂移：§5.5 A2 的 `logs-page.tsx:132-166,301-303` 在 P0-2 拆分（`76c2f5be`）后失效，连接 UI 现位于 `pages/logs-page/connection.tsx` / `logs-header.tsx`。
+  5. 跨计划编号冲突：前端注释中的「P1-5 方案 1/2/4」指 `multi-agent-execution-optimization-plan.md` 的 P1-5，与本计划 P1-5（队列与 Steering）无关。
+- **未开始任务**：P1-5 / P1-8 / P1-9 / P1-10；P2 全量（P2-1、P2-7 仅部分，其余 9 项零实施）。
+- **范围外观察**：仓库内仍有 607 个前端域外 `.bak`（`backend/**/.backups`、`docs/**/.backups` 等，均未被 git 跟踪、被根 `.gitignore` 覆盖），建议各域自清。
 
 ---
 
