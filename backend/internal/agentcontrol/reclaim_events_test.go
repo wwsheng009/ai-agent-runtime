@@ -29,9 +29,9 @@ func TestReclaimEventPayloadSummarizesEviction(t *testing.T) {
 	require.Equal(t, "/root/a", payload["agent_path"], "single-child consumers read agent_path")
 	require.Equal(t, []string{"sess-a", "sess-b", "sess-c"}, payload["session_ids"])
 	require.Equal(t, "sess-a", payload["session_id"])
-	// summary 复用闸门诊断文案（ReclaimOutcome.Summary 不去重），结构化 reasons
-	// 才是去重后的集合——两者口径不同是刻意的：文案保持与超限错误一致。
-	require.Equal(t, "reclaimed=3 reclaimed_rows=3 reclaim_reasons=session_terminal,idle_timeout,session_terminal", payload["summary"])
+	// summary 复用闸门诊断文案，并与结构化 reasons 同口径：两处都折叠重复原因，
+	// 否则 3 个同因驱逐会渲染成 session_terminal,session_terminal,session_terminal。
+	require.Equal(t, "reclaimed=3 reclaimed_rows=3 reclaim_reasons=session_terminal,idle_timeout", payload["summary"])
 	_, truncated := payload["truncated"]
 	require.False(t, truncated, "a small pass must not advertise truncation")
 	_, failed := payload["failed"]
@@ -103,4 +103,53 @@ func agentTestPath(i int) string {
 
 func agentTestSession(i int) string {
 	return "sess-" + string(rune('a'+i%26)) + string(rune('0'+i/26))
+}
+
+// TestHumanReclaimSummaryForPayload pins the human projection of the
+// `agent.reclaimed` payload: consumers that only see the event stream (CLI
+// timeline note, logs) get the same one-liner as `/agents cleanup`, led by who
+// triggered the pass, while the payload keeps its machine-readable counters.
+func TestHumanReclaimSummaryForPayload(t *testing.T) {
+	payload := ReclaimEventPayload(ReclaimSourceReconcile, ReclaimOutcome{
+		Rows: 3,
+		Decisions: []ReclaimDecision{
+			{AgentPath: "/root/a", Reason: ReclaimReasonSessionTerminal},
+			{AgentPath: "/root/b", Reason: ReclaimReasonSessionTerminal},
+			{AgentPath: "/root/c", Reason: ReclaimReasonSessionTerminal},
+		},
+	})
+	require.Equal(t, "reclaimed=3 reclaimed_rows=3 reclaim_reasons=session_terminal", payload["summary"],
+		"the machine contract is unchanged")
+	require.Equal(t,
+		"周期对账：已自动回收 3 个已结束的子会话；释放 3 个线程槽位",
+		HumanReclaimSummaryForPayload(payload))
+
+	// A durable-stream round trip hands over float64 counters and []interface{}
+	// reasons; the projection must survive it (hosts and CLI read the same event).
+	require.Equal(t,
+		"手动清理：已自动回收 1 个长期空闲的子会话；释放 1 个线程槽位",
+		HumanReclaimSummaryForPayload(map[string]interface{}{
+			"source":    ReclaimSourceManualCleanup,
+			"reclaimed": float64(1),
+			"reasons":   []interface{}{ReclaimReasonIdleTimeout},
+		}))
+
+	// Failure-only pass: still a sentence, and it says the reader has to look.
+	require.Equal(t,
+		"spawn 配额回收：未能回收任何子 agent；1 个未能回收：store closed（需要关注）",
+		HumanReclaimSummaryForPayload(map[string]interface{}{
+			"source":    ReclaimSourceSpawnGate,
+			"reclaimed": 0,
+			"failed":    1,
+			"error":     "store closed",
+		}))
+
+	// Unknown sources fall through verbatim instead of being dropped.
+	require.Equal(t,
+		"future_source：已自动回收 1 个子 agent；释放 1 个线程槽位",
+		HumanReclaimSummaryForPayload(map[string]interface{}{"source": "future_source", "reclaimed": 1}))
+
+	// No counters → no line (callers omit the note instead of printing noise).
+	require.Empty(t, HumanReclaimSummaryForPayload(nil))
+	require.Empty(t, HumanReclaimSummaryForPayload(map[string]interface{}{"source": ReclaimSourceSpawnGate}))
 }

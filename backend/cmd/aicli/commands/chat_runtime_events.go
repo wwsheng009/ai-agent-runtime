@@ -24,6 +24,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render/encoding"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
@@ -6467,6 +6468,20 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 			Status: cell.StatusDenied,
 			Tag:    "[subagent]",
 			Title:  fmt.Sprintf("denied %s", payloadStringValue(event.Payload["reason"])),
+		}, "")
+	case agentcontrol.EventAgentReclaimed:
+		// P2-8 方案 4 的人读面：配额驱逐在时间线上留一行中文说明，操作者不必自己
+		// 翻译 `session_terminal` 之类的契约值；机器可读计数仍在 payload 的
+		// summary/reclaimed 字段与 durable registry 行里（`/debug` 可查）。
+		title := agentcontrol.HumanReclaimSummaryForPayload(event.Payload)
+		if title == "" {
+			return chatRuntimeTimelineEvent{}
+		}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind:   cell.TimelineTeam,
+			Status: cell.StatusInfo,
+			Tag:    "[subagents]",
+			Title:  title,
 		}, "")
 	case "tool.requested", runtimechat.EventToolStarted:
 		payload := runtimeToolTimelinePayload(event)

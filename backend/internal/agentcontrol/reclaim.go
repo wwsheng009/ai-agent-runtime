@@ -77,6 +77,24 @@ const (
 	ReclaimReasonIdleTimeout     = "idle_timeout"
 )
 
+// ReclaimReasonLabel renders the user-facing zh-CN noun phrase for one eviction
+// reason, so every human surface (`/agents cleanup` output, the CLI timeline
+// note, spawn-gate diagnostics) explains the eviction in the same words instead
+// of leaking the snake_case contract value. Unknown reasons fall through
+// verbatim: a label must never hide what the store actually reported.
+func ReclaimReasonLabel(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case ReclaimReasonSessionMissing:
+		return "已不存在的子会话"
+	case ReclaimReasonSessionTerminal:
+		return "已结束的子会话"
+	case ReclaimReasonIdleTimeout:
+		return "长期空闲的子会话"
+	default:
+		return strings.TrimSpace(reason)
+	}
+}
+
 // ReclaimObservation is the host-observed liveness of one quota-holding child.
 // Hosts fill the session-side facts (container lookup, actor state, last
 // activity); the registry facts come straight from the durable record.
@@ -317,7 +335,9 @@ func (o ReclaimOutcome) Reclaimed() int {
 // Summary renders the one-line diagnostic ("reclaimed=1 reclaimed_rows=2
 // reclaim_reasons=session_terminal"), the evaluate-only form
 // ("reclaim_candidates=2 reclaim_reasons=session_terminal"), or "" when nothing
-// was even attempted.
+// was even attempted. Repeated reasons fold into one label, so the line never
+// grows with the number of evicted children (a 3-child terminal sweep used to
+// print "reclaim_reasons=session_terminal,session_terminal,session_terminal").
 func (o ReclaimOutcome) Summary() string {
 	if len(o.Decisions) == 0 && o.Failed == 0 && o.Candidates == 0 {
 		return ""
@@ -335,12 +355,17 @@ func (o ReclaimOutcome) Summary() string {
 	if o.Failed > 0 {
 		parts = append(parts, fmt.Sprintf("reclaim_failed=%d", o.Failed))
 	}
-	reasons := o.Reasons
+	// Fold duplicates here, at the single choke point shared by every consumer
+	// (spawn-gate extras, `/agents cleanup` and the `agent.reclaimed` payload
+	// `summary`), so all three report the same deduplicated reason set as the
+	// structured `reasons` field.
+	reasons := make([]string, 0, len(o.Reasons)+len(o.Decisions))
+	for _, reason := range o.Reasons {
+		reasons = AppendReclaimReason(reasons, reason)
+	}
 	if len(reasons) == 0 {
 		for _, decision := range o.Decisions {
-			if reason := strings.TrimSpace(decision.Reason); reason != "" {
-				reasons = append(reasons, reason)
-			}
+			reasons = AppendReclaimReason(reasons, decision.Reason)
 		}
 	}
 	if len(reasons) > 0 {
@@ -352,10 +377,108 @@ func (o ReclaimOutcome) Summary() string {
 	return strings.Join(parts, " ")
 }
 
+// HumanSummary renders the operator-facing counterpart of Summary: one zh-CN
+// sentence that says what happened and whether the reader has to care, e.g.
+//
+//	已自动回收 3 个已结束的子会话；释放 3 个线程槽位
+//	已自动回收 1 个长期空闲的子会话；释放 1 个线程槽位；1 个未能回收：...（需要关注）
+//
+// Counters stay in Summary: the spawn gate, `/debug` and the `agent.reclaimed`
+// payload keep the `reclaimed=`/`reclaim_reasons=` contract, while this line is
+// what a human reads in `/agents cleanup` output or the CLI timeline note.
+func (o ReclaimOutcome) HumanSummary() string {
+	reasons := make([]string, 0, len(o.Reasons)+len(o.Decisions))
+	for _, reason := range o.Reasons {
+		reasons = AppendReclaimReason(reasons, reason)
+	}
+	if len(reasons) == 0 {
+		for _, decision := range o.Decisions {
+			reasons = AppendReclaimReason(reasons, decision.Reason)
+		}
+	}
+	return humanReclaimLine(o.Reclaimed(), o.Candidates, o.Failed, reasons, o.FirstError)
+}
+
+// humanReclaimLine is the single composer shared by the outcome-facing and the
+// payload-facing human summaries, so both surfaces can never drift apart.
+func humanReclaimLine(reclaimed, candidates, failed int, reasons []string, firstError string) string {
+	if reclaimed == 0 && failed == 0 && candidates == 0 {
+		return ""
+	}
+	subject := humanReclaimSubject(reasons)
+	if reclaimed == 0 && failed == 0 {
+		return fmt.Sprintf("可回收 %d 个%s（仅评估，未执行回收）", candidates, subject)
+	}
+	parts := make([]string, 0, 3)
+	if reclaimed > 0 {
+		parts = append(parts, fmt.Sprintf("已自动回收 %d 个%s", reclaimed, subject))
+		parts = append(parts, fmt.Sprintf("释放 %d 个线程槽位", reclaimed))
+	} else {
+		parts = append(parts, "未能回收任何子 agent")
+	}
+	if failed > 0 {
+		if first := strings.TrimSpace(firstError); first != "" {
+			parts = append(parts, fmt.Sprintf("%d 个未能回收：%s（需要关注）", failed, first))
+		} else {
+			parts = append(parts, fmt.Sprintf("%d 个未能回收（需要关注）", failed))
+		}
+	}
+	return strings.Join(parts, "；")
+}
+
+// humanReclaimSubject names the evicted children: a single reason keeps its
+// label, mixed reasons degrade to a parenthesised list instead of growing the
+// line with one clause per reason.
+func humanReclaimSubject(reasons []string) string {
+	labels := make([]string, 0, len(reasons))
+	single := ""
+	for _, reason := range reasons {
+		label, known := knownReclaimReasonLabel(reason)
+		if label == "" {
+			continue
+		}
+		if !known {
+			// A reason the label table does not know yet keeps its raw contract
+			// value visible, but never glued onto the classifier ("1 个new_reason"
+			// reads as a typo).
+			label = "reason=" + label
+		} else if len(labels) == 0 {
+			single = label
+		}
+		if containsAgentString(labels, label) {
+			continue
+		}
+		labels = append(labels, label)
+	}
+	switch len(labels) {
+	case 0:
+		return "子 agent"
+	case 1:
+		if single != "" {
+			return single
+		}
+		return "子 agent（" + labels[0] + "）"
+	default:
+		return "子 agent（" + strings.Join(labels, "、") + "）"
+	}
+}
+
+// knownReclaimReasonLabel reports whether the reason has a curated zh-CN label.
+func knownReclaimReasonLabel(reason string) (string, bool) {
+	switch strings.TrimSpace(reason) {
+	case ReclaimReasonSessionMissing, ReclaimReasonSessionTerminal, ReclaimReasonIdleTimeout:
+		return ReclaimReasonLabel(reason), true
+	default:
+		return strings.TrimSpace(reason), false
+	}
+}
+
 // EvaluateReclaimOutcome runs the selection half of the eviction pass without a
 // store: the returned outcome carries Candidates only, which is what an
 // observe-mode sweep reports (plan §P2-9: automatic close stays opt-in, the
-// default mode still shows what the next enforce pass would release).
+// default mode still shows what the next enforce pass would release). Reasons
+// fold duplicates (AppendReclaimReason) so the observe-mode one-liner matches
+// the enforce-mode one and never grows with the number of candidates.
 func EvaluateReclaimOutcome(observations []ReclaimObservation, policy ReclaimPolicy) ReclaimOutcome {
 	decisions := SelectReclaimable(observations, policy)
 	if len(decisions) == 0 {
@@ -363,9 +486,7 @@ func EvaluateReclaimOutcome(observations []ReclaimObservation, policy ReclaimPol
 	}
 	outcome := ReclaimOutcome{Candidates: len(decisions), Reasons: make([]string, 0, len(decisions))}
 	for _, decision := range decisions {
-		if reason := strings.TrimSpace(decision.Reason); reason != "" {
-			outcome.Reasons = append(outcome.Reasons, reason)
-		}
+		outcome.Reasons = AppendReclaimReason(outcome.Reasons, decision.Reason)
 	}
 	return outcome
 }
@@ -400,6 +521,10 @@ func ReclaimAgentQuota(ctx context.Context, store AgentReclaimStore, rootSession
 		}
 		outcome.Rows += rows
 		outcome.Decisions = append(outcome.Decisions, decision)
+		// Mirror SweepAgentQuotaReclaim: the reasons describe the executed
+		// decisions and collapse duplicates, so `/agents cleanup` and the
+		// spawn-gate extras print the same label as a multi-root sweep.
+		outcome.Reasons = AppendReclaimReason(outcome.Reasons, decision.Reason)
 	}
 	return outcome, nil
 }

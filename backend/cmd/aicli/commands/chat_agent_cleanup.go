@@ -158,7 +158,13 @@ func runChatAgentCleanupCommand(session *ChatSession, argument string) (string, 
 	if summary == "" {
 		summary = "reclaimed=0"
 	}
-	lines = append(lines, "  "+summary)
+	// 人读面在前（一句话说明发生了什么、是否需要关注），机器可读计数保留在
+	// 紧随其后的 `详情:` 行里：脚本/测试仍按 `reclaimed=`/`reclaim_reasons=`
+	// 契约断言，而操作者不必自己翻译 snake_case 的 reason。
+	if human := outcome.HumanSummary(); human != "" {
+		lines = append(lines, "  "+human)
+	}
+	lines = append(lines, "  详情: "+summary)
 	reclaimed := make(map[string]string, len(outcome.Decisions))
 	for _, decision := range outcome.Decisions {
 		reclaimed[decision.AgentPath] = decision.Reason

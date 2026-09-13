@@ -68,6 +68,9 @@ func TestChatAgentCleanup_PublishesManualReclaimEvent(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, text, "reclaimed=1")
 	require.Contains(t, text, "reclaim_reasons="+agentcontrol.ReclaimReasonIdleTimeout)
+	// 人读面在前、机器可读计数在后：操作者读到一句话，脚本仍按契约断言。
+	require.Contains(t, text, "已自动回收 1 个长期空闲的子会话；释放 1 个线程槽位")
+	require.Contains(t, text, "详情: reclaimed=1")
 
 	reclaimEvents := localReclaimEvents(host.EventBus.Recent(64))
 	require.Len(t, reclaimEvents, 1)
@@ -132,8 +135,9 @@ func TestLocalActorRegistry_ReclaimReportIsPublishedOnce(t *testing.T) {
 	require.Len(t, events, 1, "one eviction pass must reach the bus exactly once")
 	require.Equal(t, agentcontrol.ReclaimSourceReconcile, events[0].Payload["source"], "the first observer keeps the attribution")
 	require.Equal(t,
-		"reclaimed=3 reclaimed_rows=3 reclaim_reasons=session_terminal,session_terminal,session_terminal",
+		"reclaimed=3 reclaimed_rows=3 reclaim_reasons=session_terminal",
 		events[0].Payload["summary"],
+		"三条同因驱逐折叠成一个 reclaim_reasons 标签",
 	)
 
 	persisted, err := host.EventStore.ListEvents(context.Background(), rootSession.ID, 0, 64)
@@ -149,4 +153,33 @@ func TestLocalActorRegistry_ReclaimReportIsPublishedOnce(t *testing.T) {
 		},
 	})
 	require.Len(t, localReclaimEvents(host.EventBus.Recent(64)), 2)
+}
+
+// TestChatRuntimeTimelineRendersAgentReclaimedNote pins the CLI human surface of
+// P2-8 方案 4: an eviction pass shows up as one zh-CN sentence (what happened +
+// who triggered it) instead of the raw `reclaimed=`/`reclaim_reasons=` contract,
+// and an event without counters adds no empty note to the timeline.
+func TestChatRuntimeTimelineRendersAgentReclaimedNote(t *testing.T) {
+	line := renderChatRuntimeEvent(runtimeevents.Event{
+		Type: agentcontrol.EventAgentReclaimed,
+		Payload: map[string]interface{}{
+			"source":    agentcontrol.ReclaimSourceSpawnGate,
+			"reclaimed": 1,
+			"reasons":   []interface{}{agentcontrol.ReclaimReasonSessionTerminal},
+		},
+	})
+	require.Equal(t,
+		"[subagents] spawn 配额回收：已自动回收 1 个已结束的子会话；释放 1 个线程槽位",
+		line)
+	require.NotContains(t, line, "reclaim_reasons=", "the timeline is the human surface")
+
+	used := renderChatRuntimeEvent(runtimeevents.Event{
+		Type: agentcontrol.EventAgentReclaimed,
+		Payload: agentcontrol.ReclaimEventPayload(agentcontrol.ReclaimSourceReconcile, agentcontrol.ReclaimOutcome{
+			Decisions: []agentcontrol.ReclaimDecision{{AgentPath: "/root/a", Reason: agentcontrol.ReclaimReasonIdleTimeout}},
+		}),
+	})
+	require.Equal(t, "[subagents] 周期对账：已自动回收 1 个长期空闲的子会话；释放 1 个线程槽位", used)
+
+	require.Empty(t, renderChatRuntimeEvent(runtimeevents.Event{Type: agentcontrol.EventAgentReclaimed}))
 }

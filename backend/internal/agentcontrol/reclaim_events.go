@@ -1,6 +1,7 @@
 package agentcontrol
 
 import (
+	"encoding/json"
 	"strings"
 )
 
@@ -105,4 +106,95 @@ func containsAgentString(values []string, wanted string) bool {
 		}
 	}
 	return false
+}
+
+// HumanReclaimSummaryForPayload renders the zh-CN one-liner for an
+// `agent.reclaimed` payload (see ReclaimEventPayload). Consumers that only see
+// the event stream — the CLI timeline note, logs, a future UI — can therefore
+// explain the eviction in user language without re-deriving the counters, while
+// the payload keeps its machine-readable `summary`/`reclaimed` contract.
+func HumanReclaimSummaryForPayload(payload map[string]interface{}) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	reasons := make([]string, 0, 2)
+	for _, reason := range reclaimPayloadStrings(payload["reasons"]) {
+		reasons = AppendReclaimReason(reasons, reason)
+	}
+	line := humanReclaimLine(
+		reclaimPayloadInt(payload["reclaimed"]),
+		0,
+		reclaimPayloadInt(payload["failed"]),
+		reasons,
+		reclaimPayloadString(payload["error"]),
+	)
+	if line == "" {
+		return ""
+	}
+	// Who triggered the pass is the reader's first question ("是我的 spawn 挤掉了它？"),
+	// so the source leads the sentence (a trailing "（来源：…）" would collide with
+	// the failure marker's own parentheses).
+	if source := reclaimSourceLabel(reclaimPayloadString(payload["source"])); source != "" {
+		line = source + "：" + line
+	}
+	return line
+}
+
+// reclaimSourceLabel names the eviction trigger in user language; unknown
+// sources fall through verbatim.
+func reclaimSourceLabel(source string) string {
+	switch strings.TrimSpace(source) {
+	case "":
+		return ""
+	case ReclaimSourceSpawnGate:
+		return "spawn 配额回收"
+	case ReclaimSourceManualCleanup:
+		return "手动清理"
+	case ReclaimSourceReconcile:
+		return "周期对账"
+	default:
+		return strings.TrimSpace(source)
+	}
+}
+
+// reclaimPayloadInt tolerates the encodings a payload picks up on its way to a
+// consumer (in-process int, JSON round-trip float64/json.Number).
+func reclaimPayloadInt(value interface{}) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case json.Number:
+		if parsed, err := typed.Int64(); err == nil {
+			return int(parsed)
+		}
+	}
+	return 0
+}
+
+func reclaimPayloadString(value interface{}) string {
+	if text, ok := value.(string); ok {
+		return strings.TrimSpace(text)
+	}
+	return ""
+}
+
+func reclaimPayloadStrings(value interface{}) []string {
+	switch typed := value.(type) {
+	case []string:
+		return append([]string(nil), typed...)
+	case []interface{}:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := reclaimPayloadString(item); text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }

@@ -160,6 +160,51 @@ func TestReclaimAgentQuotaClosesSelectedChildrenAndReportsFailures(t *testing.T)
 	require.Contains(t, summary, "reclaim_error=boom")
 }
 
+// TestReclaimSummaryFoldsDuplicateReasons pins the fixed one-liner: a pass over
+// N children that all hit the same reason prints one label, not one label per
+// child (live residual: "reclaim_reasons=session_terminal,session_terminal,
+// session_terminal" was repeated on every spawn attempt the gate refused).
+func TestReclaimSummaryFoldsDuplicateReasons(t *testing.T) {
+	now := time.Now().UTC()
+	store := &fakeReclaimStore{rows: 1}
+	observations := []ReclaimObservation{
+		{AgentID: "a", AgentPath: "/root/a", Status: AgentStatusActive, SessionTerminal: true},
+		{AgentID: "b", AgentPath: "/root/b", Status: AgentStatusActive, SessionTerminal: true},
+		{AgentID: "c", AgentPath: "/root/c", Status: AgentStatusActive, SessionTerminal: true},
+	}
+
+	outcome, err := ReclaimAgentQuota(context.Background(), store, "root-session", observations, ReclaimPolicy{Now: now})
+	require.NoError(t, err)
+	require.Equal(t, 3, outcome.Reclaimed())
+	require.Equal(t, []string{ReclaimReasonSessionTerminal}, outcome.Reasons)
+	require.Equal(t, "reclaimed=3 reclaimed_rows=3 reclaim_reasons=session_terminal", outcome.Summary())
+
+	// Observe mode shares the label, so `/debug` reads the same either way.
+	evaluated := EvaluateReclaimOutcome(observations, ReclaimPolicy{Now: now})
+	require.Equal(t, []string{ReclaimReasonSessionTerminal}, evaluated.Reasons)
+	require.Equal(t, "reclaim_candidates=3 reclaim_reasons=session_terminal", evaluated.Summary())
+
+	// Hand-built outcomes (hosts that never fill Reasons) are folded by Summary.
+	handBuilt := ReclaimOutcome{
+		Rows: 3,
+		Decisions: []ReclaimDecision{
+			{AgentPath: "/root/a", Reason: ReclaimReasonSessionTerminal},
+			{AgentPath: "/root/b", Reason: ReclaimReasonSessionTerminal},
+		},
+	}
+	require.Equal(t, "reclaimed=2 reclaimed_rows=3 reclaim_reasons=session_terminal", handBuilt.Summary())
+
+	// Mixed reasons keep their first-seen order so the label stays stable.
+	mixed := ReclaimOutcome{
+		Decisions: []ReclaimDecision{
+			{AgentPath: "/root/a", Reason: ReclaimReasonSessionMissing},
+			{AgentPath: "/root/b", Reason: ReclaimReasonSessionTerminal},
+			{AgentPath: "/root/c", Reason: ReclaimReasonSessionMissing},
+		},
+	}
+	require.Equal(t, "reclaimed=3 reclaim_reasons=session_missing,session_terminal", mixed.Summary())
+}
+
 func TestReclaimAgentQuotaRequiresStoreAndRootSession(t *testing.T) {
 	_, err := ReclaimAgentQuota(context.Background(), nil, "root-session", nil, ReclaimPolicy{})
 	require.Error(t, err)
@@ -225,4 +270,66 @@ func TestSQLiteReclaimAgentControlAgentSubtreeEmitsReclaimWake(t *testing.T) {
 			require.Equal(t, AgentStatusClosed, record.Status)
 		}
 	}
+}
+
+// TestReclaimHumanSummary pins the operator-facing one-liner added for the
+// "reclaimed=3 reclaimed_rows=3 reclaim_reasons=session_terminal" legibility
+// report: the very same outcome that renders counters through Summary() must
+// also render one zh-CN sentence saying what happened and whether the reader
+// has to care. Counters stay untouched (spawn gate, /debug, event payload).
+func TestReclaimHumanSummary(t *testing.T) {
+	terminal := ReclaimOutcome{
+		Rows: 3,
+		Decisions: []ReclaimDecision{
+			{Reason: ReclaimReasonSessionTerminal},
+			{Reason: ReclaimReasonSessionTerminal},
+			{Reason: ReclaimReasonSessionTerminal},
+		},
+	}
+	require.Equal(t, "reclaimed=3 reclaimed_rows=3 reclaim_reasons=session_terminal", terminal.Summary())
+	require.Equal(t, "已自动回收 3 个已结束的子会话；释放 3 个线程槽位", terminal.HumanSummary())
+
+	// Mixed reasons keep Summary()'s first-seen order, folded into one
+	// parenthesised list so the sentence cannot grow with the child count.
+	mixed := ReclaimOutcome{
+		Decisions: []ReclaimDecision{
+			{Reason: ReclaimReasonSessionMissing},
+			{Reason: ReclaimReasonIdleTimeout},
+			{Reason: ReclaimReasonSessionMissing},
+		},
+	}
+	require.Equal(t, "reclaimed=3 reclaim_reasons=session_missing,idle_timeout", mixed.Summary())
+	require.Equal(t,
+		"已自动回收 3 个子 agent（已不存在的子会话、长期空闲的子会话）；释放 3 个线程槽位",
+		mixed.HumanSummary())
+
+	// Observe mode (candidates only) must not claim an eviction happened.
+	require.Equal(t, "可回收 2 个已结束的子会话（仅评估，未执行回收）",
+		ReclaimOutcome{Candidates: 2, Reasons: []string{ReclaimReasonSessionTerminal}}.HumanSummary())
+
+	// Failures are the only part an operator must act on, so they carry the
+	// marker and the first error verbatim.
+	require.Equal(t,
+		"未能回收任何子 agent；1 个未能回收：registry row is locked（需要关注）",
+		ReclaimOutcome{Failed: 1, FirstError: "registry row is locked"}.HumanSummary())
+
+	// A reason the label table does not know yet stays visible in contract form
+	// instead of being glued onto the classifier.
+	require.Equal(t, "已自动回收 1 个子 agent（reason=new_reason）；释放 1 个线程槽位",
+		ReclaimOutcome{Decisions: []ReclaimDecision{{Reason: "new_reason"}}}.HumanSummary())
+
+	// Nothing attempted → no line at all (callers omit it rather than print noise).
+	require.Empty(t, ReclaimOutcome{}.HumanSummary())
+}
+
+// TestReclaimReasonLabel pins the shared wording table so every surface
+// (`/agents cleanup`, the CLI timeline note, spawn-gate diagnostics) explains an
+// eviction with the same words; unknown values fall through unchanged rather
+// than being hidden behind a generic label.
+func TestReclaimReasonLabel(t *testing.T) {
+	require.Equal(t, "已结束的子会话", ReclaimReasonLabel(ReclaimReasonSessionTerminal))
+	require.Equal(t, "已不存在的子会话", ReclaimReasonLabel(ReclaimReasonSessionMissing))
+	require.Equal(t, "长期空闲的子会话", ReclaimReasonLabel(ReclaimReasonIdleTimeout))
+	require.Equal(t, "future_reason", ReclaimReasonLabel(" future_reason "))
+	require.Empty(t, ReclaimReasonLabel("   "))
 }
