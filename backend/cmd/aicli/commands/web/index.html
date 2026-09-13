@@ -59,6 +59,24 @@
       </div>
     </div>
 
+    <!-- 会话切换确认模态框：点击非当前会话时先确认，再注入 /resume -->
+    <div id="session-switch-overlay">
+      <div id="session-switch-modal">
+        <div id="session-switch-header">
+          <span>切换会话</span>
+          <button id="session-switch-close" class="modal-close" type="button" title="取消">✕</button>
+        </div>
+        <div id="session-switch-body">
+          <p id="session-switch-text"></p>
+          <p id="session-switch-hint" class="session-switch-hint" style="display:none"></p>
+        </div>
+        <div id="session-switch-footer">
+          <button id="session-switch-cancel-btn" type="button">取消</button>
+          <button id="session-switch-confirm-btn" type="button">切换</button>
+        </div>
+      </div>
+    </div>
+
     <div class="tabs">
       <button class="tab-btn active" id="tab-main-btn" type="button">对话</button>
       <button class="tab-btn" id="tab-log-btn" type="button">日志</button>

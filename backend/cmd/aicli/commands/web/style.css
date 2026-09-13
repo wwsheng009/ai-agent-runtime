@@ -333,6 +333,42 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
 }
 #question-suggestions .suggestion-btn:hover { background: var(--hoverBg); }
 
+/* ---- 会话切换确认模态框（点击非当前会话时先确认） ---- */
+#session-switch-overlay {
+  display: none; position: fixed; z-index: 1200;
+  inset: 0; background: var(--overlayBg);
+  justify-content: center; align-items: center;
+}
+#session-switch-overlay.active { display: flex; }
+#session-switch-modal {
+  background: var(--modalBg); border: 1px solid var(--border2);
+  border-radius: 10px; max-width: 420px; width: 90%;
+  display: flex; flex-direction: column; box-shadow: 0 8px 32px var(--shadow);
+}
+#session-switch-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px; border-bottom: 1px solid var(--border);
+  font-weight: 600; font-size: 13px;
+}
+#session-switch-header .modal-close {
+  margin-left: auto; cursor: pointer; padding: 2px 8px;
+  font-size: 16px; line-height: 1; background: none; border: none;
+  color: var(--fg3);
+}
+#session-switch-header .modal-close:hover { color: var(--fg); }
+#session-switch-body { padding: 12px 14px; font-size: 13px; line-height: 1.5; }
+#session-switch-text { margin: 0; word-break: break-all; }
+#session-switch-hint {
+  margin: 8px 0 0; padding: 6px 8px;
+  background: var(--reasoningBg); border: 1px solid var(--reasoningBorder);
+  border-radius: 6px; color: var(--reasoningFg); font-size: 12px;
+}
+#session-switch-footer {
+  display: flex; gap: 8px; justify-content: flex-end;
+  padding: 10px 14px; border-top: 1px solid var(--border);
+}
+#session-switch-footer button { min-width: 72px; }
+
 /* ---- 动态状态栏（与 aicli chat 底部活动状态行同步显示） ---- */
 #dynamic-status {
   display: flex; align-items: center; gap: 6px;
@@ -763,6 +799,7 @@ body.sidebar-collapsed #sidebar {
   #send-status { flex-basis: 100%; order: 4; text-align: right; }
   .tab-btn { flex: 1; }
   #approval-modal { max-width: 96%; max-height: 90vh; }
+  #session-switch-modal { max-width: 96%; }
 }
 
 /* ---- 配置页签：provider / model / reasoning effort 管理 ---- */

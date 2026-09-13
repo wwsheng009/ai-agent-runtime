@@ -15,6 +15,13 @@ var sessionListEl = document.getElementById("session-list");
 var sessionSearchEl = document.getElementById("session-search");
 var headerSessionTitleEl = document.getElementById("header-session-title");
 var headerSessionIDEl = document.getElementById("header-session-id");
+var sessionSwitchOverlay = document.getElementById("session-switch-overlay");
+var sessionSwitchTextEl = document.getElementById("session-switch-text");
+var sessionSwitchHintEl = document.getElementById("session-switch-hint");
+var sessionSwitchConfirmBtn = document.getElementById("session-switch-confirm-btn");
+var sessionSwitchCancelBtn = document.getElementById("session-switch-cancel-btn");
+var sessionSwitchCloseBtn = document.getElementById("session-switch-close");
+var pendingSwitchSessionId = null; // 切换确认弹窗当前待确认的目标会话 id
 var sessions = [];               // 会话列表缓存（GET /web/api/sessions）
 var sessionsQuery = "";          // 会话列表搜索词（纯前端过滤）
 var sidebarCollapsed = false;    // 侧边栏折叠状态（localStorage 记忆）
@@ -365,8 +372,46 @@ export function loadSessions() {
     .catch(function (err) { console.error("sessions fetch failed:", err); });
 }
 
-// 切换会话（POST /web/api/sessions/resume → 注入 /resume <id>）
+// 切换会话入口：点击非当前会话时先弹确认框（防误切丢上下文），
+// 点击当前会话（already_current 刷新路径）不弹窗直接执行。
 function resumeSession(id) {
+  if (!id) { return; }
+  var target = null;
+  for (var i = 0; i < sessions.length; i++) {
+    if (sessions[i].id === id) { target = sessions[i]; break; }
+  }
+  if (target && target.current) { proceedResumeSession(id); return; }
+  showSessionSwitchConfirm(target, id);
+}
+
+// ---- 切换确认弹窗 ----
+function hideSessionSwitchConfirm() {
+  if (sessionSwitchOverlay) { sessionSwitchOverlay.classList.remove("active"); }
+  pendingSwitchSessionId = null;
+}
+
+function showSessionSwitchConfirm(target, id) {
+  if (!sessionSwitchOverlay || !sessionSwitchTextEl) { // DOM 缺失时退化为直接切换
+    proceedResumeSession(id);
+    return;
+  }
+  pendingSwitchSessionId = id;
+  var shown = target && target.title && target.title !== "(untitled)" ? target.title : "(未命名会话)";
+  sessionSwitchTextEl.textContent = "确定切换到会话「" + shown + "」？";
+  sessionSwitchTextEl.title = "会话 ID：" + id;
+  if (sessionSwitchHintEl) {
+    // /resume 注入输入队列（FIFO）：忙碌时切换在当前任务与排队输入之后生效，
+    // 不会打断进行中的 turn；排队输入仍在原会话执行。
+    var busy = getUiState() !== "idle";
+    sessionSwitchHintEl.textContent = busy ? "当前会话有任务进行中，切换将在当前任务与排队输入完成后生效。" : "";
+    sessionSwitchHintEl.style.display = busy ? "" : "none";
+  }
+  sessionSwitchOverlay.classList.add("active");
+  if (sessionSwitchConfirmBtn) { sessionSwitchConfirmBtn.focus(); }
+}
+
+// 确认后的实际切换逻辑（POST /web/api/sessions/resume → 注入 /resume <id>）
+function proceedResumeSession(id) {
   if (!id) { return; }
   // 点击项进入 resuming 状态，避免重复提交
   var all = sessionListEl.querySelectorAll(".session-item");
@@ -513,5 +558,34 @@ export function initSessions() {
       renderSessionList();
     });
   }
+
+  // ---- 切换确认弹窗：确认 / 取消 / 关闭按钮 / 遮罩空白处 ----
+  if (sessionSwitchConfirmBtn) {
+    sessionSwitchConfirmBtn.addEventListener("click", function () {
+      var id = pendingSwitchSessionId;
+      hideSessionSwitchConfirm();
+      if (id) { proceedResumeSession(id); }
+    });
+  }
+  if (sessionSwitchCancelBtn) {
+    sessionSwitchCancelBtn.addEventListener("click", function () { hideSessionSwitchConfirm(); });
+  }
+  if (sessionSwitchCloseBtn) {
+    sessionSwitchCloseBtn.addEventListener("click", function () { hideSessionSwitchConfirm(); });
+  }
+  if (sessionSwitchOverlay) {
+    sessionSwitchOverlay.addEventListener("click", function (e) {
+      if (e.target === sessionSwitchOverlay) { hideSessionSwitchConfirm(); }
+    });
+  }
+  // 弹窗打开期间 Esc 仅关闭弹窗：document capture 阶段短路后续监听，
+  // 避免焦点仍落在输入框时同时触发全局 Esc=中断（promptEl keydown）。
+  document.addEventListener("keydown", function (e) {
+    if (!sessionSwitchOverlay || !sessionSwitchOverlay.classList.contains("active")) { return; }
+    if (e.key !== "Escape") { return; }
+    e.preventDefault();
+    e.stopPropagation();
+    hideSessionSwitchConfirm();
+  }, true);
 
 }
