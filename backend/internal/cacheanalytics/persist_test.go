@@ -2,6 +2,7 @@ package cacheanalytics
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"testing"
@@ -293,5 +294,134 @@ func TestPersistSaveFailureDoesNotBlockFlow(t *testing.T) {
 	}
 	if overview.RequestsTotal != 1 {
 		t.Fatalf("requests_total = %d, want 1", overview.RequestsTotal)
+	}
+}
+
+// degradeWarningLog 捕获持久化降级诊断输出（替换包级出口，测试结束恢复）。
+type degradeWarningLog struct {
+	mu       sync.Mutex
+	messages []string
+}
+
+func (l *degradeWarningLog) append(message string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.messages = append(l.messages, message)
+}
+
+func (l *degradeWarningLog) count() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.messages)
+}
+
+func (l *degradeWarningLog) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.messages...)
+}
+
+func captureDegradeWarnings(t *testing.T) *degradeWarningLog {
+	t.Helper()
+	log := &degradeWarningLog{}
+	original := degradeWarn
+	degradeWarn = func(format string, args ...any) {
+		log.append(fmt.Sprintf(format, args...))
+	}
+	t.Cleanup(func() { degradeWarn = original })
+	return log
+}
+
+// seedMirrorRecord 直接写入 fakeRequestStore 的镜像行（模拟历史已落库）。
+func seedMirrorRecord(store *fakeRequestStore, id string, startedAt time.Time) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.saved[id] = CacheRequestRecord{
+		SchemaVersion: SchemaVersion,
+		LLMRequestID:  id,
+		SessionID:     "s1",
+		Status:        RequestStatusSuccess,
+		CacheStatus:   CacheStatusHit,
+		StartedAt:     startedAt,
+		Usage: &CacheUsage{
+			PromptTokens: 1000, CompletionTokens: 10, TotalTokens: 1010,
+			CacheReadTokens: 800, CacheReadReported: true,
+		},
+	}
+}
+
+// TestSessionLoadFailureIsRetriedAndWarned 镜像加载失败（旧库未迁移出
+// cache_requests / 数据库被锁）不得把会话永久标记为"已回放"：
+//   - 失败只降级当前查询，首次失败输出一次性诊断（不再静默）；
+//   - 镜像恢复后同一进程内下一次查询即回放历史（无需重启）；
+//   - 回放成功后不再重复查库，也不重复提示。
+func TestSessionLoadFailureIsRetriedAndWarned(t *testing.T) {
+	store := newFakeRequestStore()
+	store.loadErr = errors.New("no such table: cache_requests")
+	warnings := captureDegradeWarnings(t)
+	_, service := attachWithStore(t, 100, store)
+	src := service.Source()
+
+	overview, err := src.Overview("s1")
+	if err != nil {
+		t.Fatalf("overview (degraded): %v", err)
+	}
+	if overview.RequestsTotal != 0 {
+		t.Fatalf("requests_total = %d, want 0 while mirror unavailable", overview.RequestsTotal)
+	}
+	if got := store.loadCount("s1"); got != 1 {
+		t.Fatalf("load calls = %d, want 1", got)
+	}
+	if got := warnings.count(); got != 1 {
+		t.Fatalf("warnings = %d, want 1 (%v)", got, warnings.snapshot())
+	}
+
+	// 镜像恢复（迁移完成 / 解锁）：同一进程内下一次查询即恢复历史。
+	seedMirrorRecord(store, "req-a", time.Date(2026, 3, 15, 8, 0, 0, 0, time.UTC))
+	store.mu.Lock()
+	store.loadErr = nil
+	store.mu.Unlock()
+
+	overview, err = src.Overview("s1")
+	if err != nil {
+		t.Fatalf("overview (recovered): %v", err)
+	}
+	if overview.RequestsTotal != 1 {
+		t.Fatalf("requests_total = %d, want 1 after mirror recovery", overview.RequestsTotal)
+	}
+	if got := store.loadCount("s1"); got != 2 {
+		t.Fatalf("load calls = %d, want 2 (retried after failure)", got)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := src.Overview("s1"); err != nil {
+			t.Fatalf("overview repeat: %v", err)
+		}
+	}
+	if got := store.loadCount("s1"); got != 2 {
+		t.Fatalf("load calls = %d, want 2 (replayed once)", got)
+	}
+	if got := warnings.count(); got != 1 {
+		t.Fatalf("warnings = %d, want 1 (no repeat) (%v)", got, warnings.snapshot())
+	}
+}
+
+// TestPersistFailureWarnsOnce 镜像写入失败提示一次：写失败意味着这些请求的
+// 历史在进程结束后不可回放，必须可见（此前完全静默）。
+func TestPersistFailureWarnsOnce(t *testing.T) {
+	store := newFakeRequestStore()
+	store.saveErr = errors.New("no such table: cache_requests")
+	warnings := captureDegradeWarnings(t)
+	bus, _ := attachWithStore(t, 100, store)
+
+	publishStarted(bus, "s1", "req-1", nil)
+	publishFinished(bus, "s1", "req-1", true, nil)
+	publishStarted(bus, "s1", "req-2", nil)
+	publishFinished(bus, "s1", "req-2", true, nil)
+
+	if got := store.saveCount(); got != 0 {
+		t.Fatalf("saved = %d, want 0", got)
+	}
+	if got := warnings.count(); got != 1 {
+		t.Fatalf("warnings = %d, want 1 (%v)", got, warnings.snapshot())
 	}
 }

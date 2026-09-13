@@ -375,6 +375,13 @@ func (s *Store) ListSessions(q Query) (ListResult, error) {
 		if err := rows.Err(); err != nil {
 			return ListResult{}, fmt.Errorf("count analytics sessions: %w", err)
 		}
+		// 必须在下一个查询前显式关闭：上面只读了一行、没有读空结果集，
+		// database/sql 不会自动归还连接；分析库是单连接池
+		// （SetMaxOpenConns(1)），未关闭的 Rows 会占住唯一连接，使下面的
+		// 分页查询永久阻塞（此前 4 连接池只是让问题更晚暴露）。
+		if err := rows.Close(); err != nil {
+			return ListResult{}, fmt.Errorf("close analytics session count: %w", err)
+		}
 	}
 	result.Total = total
 	result.Scanned = total

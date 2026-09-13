@@ -17,6 +17,8 @@ type LiveSource struct {
 	store          RequestStore
 	loadedMu       sync.Mutex
 	loadedSessions map[string]bool
+	// loadFailureWarned 镜像加载失败只提示一次（避免每查询刷屏）。
+	loadFailureWarned bool
 }
 
 func newLiveSource(projector *Projector, correlation *correlationTable, history HistoryLookup, maxRequests int, supportsSSE bool, store RequestStore) *LiveSource {
@@ -36,7 +38,11 @@ func newLiveSource(projector *Projector, correlation *correlationTable, history 
 
 // ensureSessionLoaded 查询前把该会话的镜像记录回放进 Projector（幂等：
 // projector.append 按 llm_request_id 去重，与在线事件并发安全）。
-// 加载失败降级为纯内存视图，不重试（下次进程重启再回放）。
+//
+// 加载失败**不**标记为已回放：镜像表缺失（旧库未迁移到 cache_requests）或
+// 数据库暂时不可用时，历史只是暂时不可见，下次查询会重试——迁移/解锁完成后
+// 无需重启进程即可恢复，并输出一次性诊断。此前"失败即标记已回放 + 静默
+// return"会让缓存历史在该进程内永久为空，且与"确实没有历史"无法区分。
 //
 // 持锁加载：前端打开页签时会并行拉取 overview+requests（SSE 刷新亦然），
 // 若"先标记后加载"，并发查询会读到回放中途的部分投影，且前端按会话缓存
@@ -51,12 +57,16 @@ func (s *LiveSource) ensureSessionLoaded(sessionID string) {
 	if s.loadedSessions[sessionID] {
 		return
 	}
-	// 先标记再加载：同一会话只回放一次；失败视为已回放（降级）。
-	s.loadedSessions[sessionID] = true
 	records, err := s.store.LoadSessionRequests(sessionID)
 	if err != nil {
+		if !s.loadFailureWarned {
+			s.loadFailureWarned = true
+			degradeWarn("加载会话 %s 的持久化镜像失败（该会话历史明细暂不可见，后续查询会重试）: %v", sessionID, err)
+		}
 		return
 	}
+	// 加载成功才标记：同一会话只回放一次，失败保持可重试。
+	s.loadedSessions[sessionID] = true
 	for i := range records {
 		s.projector.append(&records[i])
 	}

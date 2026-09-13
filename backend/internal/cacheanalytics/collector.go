@@ -63,6 +63,8 @@ type Collector struct {
 	closed      bool
 	// store 终态记录持久化镜像（Phase 3）；nil 时纯内存（v1 行为不变）。
 	store RequestStore
+	// persistFailureWarned 镜像写入失败只提示一次（避免每请求刷屏）。
+	persistFailureWarned bool
 }
 
 // Options Collector 构建选项。
@@ -277,13 +279,28 @@ func (c *Collector) onRequestFinished(event runtimeevents.Event) {
 
 // persistRecord 终态记录落库（Phase 3 镜像表，best-effort）：
 // 在线投影与 SSE 发布已先行完成（慢写不拖慢增量推送，§9 采集开销约束）；
-// 写入失败静默忽略——仅丢失镜像行，不影响本次进程内的查询与 SSE 增量，
-// 镜像行可由该请求下次终态事件或下次会话回放修复。
+// 写入失败不影响本次进程内的查询与 SSE 增量，但镜像行会丢失（该请求历史
+// 在进程结束后不可回放，且与"当时没有请求"无法区分），因此首次失败输出
+// 一次性诊断，而不是静默忽略。
 func (c *Collector) persistRecord(record *CacheRequestRecord) {
 	if c == nil || c.store == nil || record == nil {
 		return
 	}
-	_ = c.store.SaveRequest(*record)
+	if err := c.store.SaveRequest(*record); err != nil {
+		c.warnPersistFailure(err)
+	}
+}
+
+// warnPersistFailure 镜像写入失败提示一次（首次失败即足以定位：缺表、
+// 未迁移、数据库锁或磁盘异常），后续失败静默以避免每请求刷屏。
+func (c *Collector) warnPersistFailure(err error) {
+	c.mu.Lock()
+	first := !c.persistFailureWarned
+	c.persistFailureWarned = true
+	c.mu.Unlock()
+	if first {
+		degradeWarn("持久化镜像写入失败（该请求历史在进程结束后不可回放）: %v", err)
+	}
 }
 
 // publishRecordFinished 向总线发布 cache_request_finished（§6.3）：

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	cacheanalytics "github.com/wwsheng009/ai-agent-runtime/internal/cacheanalytics"
@@ -72,6 +73,10 @@ type collector struct {
 	mu       sync.Mutex
 	inflight map[string]*inflightRequest
 	unsubs   []func()
+
+	// writeFailureCount：分析库写入失败此前被完全静默（行丢失且无痕迹）。
+	// 首次失败提示一次，之后每 100 次再提示一次，既留痕又不刷屏。
+	writeFailureCount atomic.Int64
 }
 
 func newCollector(store *Store, lookup SessionMetaLookup, now func() time.Time) *collector {
@@ -340,7 +345,7 @@ func (c *collector) upsertRequest(record cacheanalytics.CacheRequestRecord) {
 	if record.Usage != nil {
 		usageAvailable = 1
 	}
-	_, _ = c.store.exec(`
+	if err := c.store.execWithLockRetry(`
 INSERT INTO usage_requests (
   llm_request_id, session_id, trace_id, turn_id, step, provider, model, status, cache_status,
   success, error_category, started_at_unix_nano, duration_ms, prompt_tokens, completion_tokens,
@@ -388,7 +393,20 @@ ON CONFLICT(llm_request_id) DO UPDATE SET
 		totalTokens,
 		usageAvailable,
 		string(payload),
-	)
+	); err != nil {
+		c.reportWriteFailure("usage_requests", err)
+	}
+}
+
+// reportWriteFailure 记录一次分析库写入失败（此前完全静默：行丢失且无痕迹）。
+func (c *collector) reportWriteFailure(table string, err error) {
+	if c == nil || err == nil {
+		return
+	}
+	failures := c.writeFailureCount.Add(1)
+	if failures == 1 || failures%100 == 0 {
+		degradeWarn("写入 %s 失败（累计 %d 次，本行已丢失）：%v", table, failures, err)
+	}
 }
 
 // upsertSession 幂等合并会话元数据：空值不覆盖已有值；查找成功时补齐
@@ -410,7 +428,7 @@ func (c *collector) upsertSession(sessionID string, meta SessionMeta, startedAt,
 	if !endedAt.IsZero() {
 		ended = endedAt.UnixNano()
 	}
-	_, _ = c.store.exec(`
+	if err := c.store.execWithLockRetry(`
 INSERT INTO usage_sessions (
   session_id, title, project_path, working_directory, provider, model, protocol, status,
   started_at_unix_nano, ended_at_unix_nano, updated_at_unix_nano, meta_json
@@ -440,7 +458,9 @@ ON CONFLICT(session_id) DO UPDATE SET
 		started,
 		ended,
 		now.UnixNano(),
-	)
+	); err != nil {
+		c.reportWriteFailure("usage_sessions", err)
+	}
 }
 
 // mergeSessionMeta 事件元数据 + 查找元数据（查找值补齐事件缺失字段）。

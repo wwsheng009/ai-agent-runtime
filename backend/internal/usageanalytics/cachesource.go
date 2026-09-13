@@ -37,7 +37,7 @@ func NewCacheSource(store *Store, history cacheanalytics.HistoryLookup, supports
 		supportsSSE: supportsSSE,
 	}
 	source.capabilities = cacheanalytics.Capabilities{
-		SchemaVersion:         cacheanalytics.SchemaVersion,
+		SchemaVersion: cacheanalytics.SchemaVersion,
 		// 能力发现的 data_source 语义保持 cache.analytics.v1 契约不变：分析库
 		// 由 runtime EventBus 实时写入，仍是"在线投影"；持久化属性由 Persisted
 		// 字段表达（跨进程可回放，MaxRequestsPerSession 不再是硬上限）。
@@ -234,6 +234,11 @@ func (s *CacheSource) Requests(sessionID string, q cacheanalytics.RequestQuery) 
 			}
 		}
 		if err := totalRows.Err(); err != nil {
+			return response, cacheanalytics.ErrInternal
+		}
+		// 单连接池（SetMaxOpenConns(1)）：COUNT 只读一行、结果集未读空，
+		// 不显式关闭就会占住唯一连接，下面分页查询会永久阻塞。
+		if err := totalRows.Close(); err != nil {
 			return response, cacheanalytics.ErrInternal
 		}
 	}
