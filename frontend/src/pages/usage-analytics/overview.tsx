@@ -115,7 +115,7 @@ export function UsageOverview() {
   }, [groupBy, setSearchParams]);
 
   return (
-    <div className="min-h-screen min-w-0 overflow-x-hidden bg-[var(--workspace-shell-bg)] text-[var(--foreground)]">
+    <div className="min-h-screen min-w-0 overflow-x-hidden bg-[var(--workspace-shell-bg)] text-foreground">
       <div className="mx-auto flex min-h-screen w-full max-w-[1760px] flex-col gap-2 px-2.5 py-2.5 sm:px-3">
         <AnalyticsHeader onRefresh={() => void load()} refreshing={loading} />
         <main className="flex min-w-0 flex-1 flex-col gap-2">
@@ -127,7 +127,7 @@ export function UsageOverview() {
             <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <h2 className="text-sm font-semibold">{t("filters.title")}</h2>
-                <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">
+                <p className="mt-0.5 text-xs text-muted-foreground">
                   {t("meta.scannedMatched", { scanned: String(scanned), matched: String(matched) })}
                 </p>
               </div>
@@ -157,18 +157,18 @@ export function UsageOverview() {
 
             <div className="mt-3 grid gap-2 md:grid-cols-[11rem_minmax(0,20rem)]">
               <label className="min-w-0">
-                <span className="mb-1 block text-xs text-[var(--muted-foreground)]">{t("filters.groupBy")}</span>
+                <span className="mb-1 block text-xs text-muted-foreground">{t("filters.groupBy")}</span>
                 <Select ariaLabel={t("filters.groupBy")} value={groupBy} options={groupOptions} onChange={(value) => updateFilter("group_by", value)} triggerClassName="h-9 rounded-[0.7rem]" />
               </label>
               <label className="min-w-0">
-                <span className="mb-1 flex items-center gap-1 text-xs text-[var(--muted-foreground)]"><ShieldIcon size={12} />{t("filters.token")}</span>
-                <input type="password" autoComplete="off" value={adminToken} onChange={(event) => setAdminToken(event.target.value)} placeholder={t("filters.tokenPlaceholder")} className="h-9 w-full rounded-[0.7rem] border border-[var(--border)] bg-[var(--surface-softer)] px-3 text-sm outline-none transition focus:border-[var(--accent-primary-border)] focus:ring-2 focus:ring-[var(--ring)]" />
+                <span className="mb-1 flex items-center gap-1 text-xs text-muted-foreground"><ShieldIcon size={12} />{t("filters.token")}</span>
+                <input type="password" autoComplete="off" value={adminToken} onChange={(event) => setAdminToken(event.target.value)} placeholder={t("filters.tokenPlaceholder")} className="h-9 w-full rounded-[0.7rem] border border-border bg-surface-softer px-3 text-sm outline-none transition focus:border-accent-primary-border focus:ring-2 focus:ring-ring" />
               </label>
             </div>
           </form>
 
           {error ? (
-            <div role="alert" className="rounded-[0.9rem] border border-[var(--analytics-danger-border)] bg-[var(--analytics-danger-soft)] px-3 py-2.5 text-sm text-[var(--analytics-danger)]">
+            <div role="alert" className="rounded-[0.9rem] border border-analytics-danger-border bg-analytics-danger-soft px-3 py-2.5 text-sm text-analytics-danger">
               {t("loadError")}: {error}
             </div>
           ) : (

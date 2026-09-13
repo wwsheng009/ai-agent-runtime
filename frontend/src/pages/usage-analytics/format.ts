@@ -107,9 +107,9 @@ export function titleSourceKey(source?: string): "sessions.titleSources.chatLog"
 
 export function statusTone(status?: string) {
   switch ((status ?? "").toLowerCase()) {
-    case "completed": return "border-[var(--analytics-success-border)] bg-[var(--analytics-success-soft)] text-[var(--analytics-success)]";
-    case "failed": return "border-[var(--analytics-danger-border)] bg-[var(--analytics-danger-soft)] text-[var(--analytics-danger)]";
-    case "interrupted": return "border-[var(--analytics-warning-border)] bg-[var(--analytics-warning-soft)] text-[var(--analytics-warning)]";
+    case "completed": return "border-analytics-success-border bg-analytics-success-soft text-analytics-success";
+    case "failed": return "border-analytics-danger-border bg-analytics-danger-soft text-analytics-danger";
+    case "interrupted": return "border-analytics-warning-border bg-analytics-warning-soft text-analytics-warning";
     default: return "";
   }
 }
@@ -175,10 +175,10 @@ export function outcomeKey(outcome: string): "outcomes.success" | "outcomes.reco
 
 export function outcomeTone(outcome: string) {
   switch (outcome) {
-    case "success": return "border-[var(--analytics-success-border)] bg-[var(--analytics-success-soft)] text-[var(--analytics-success)]";
-    case "recovered": return "border-[var(--analytics-warning-border)] bg-[var(--analytics-warning-soft)] text-[var(--analytics-warning)]";
-    case "failed": return "border-[var(--analytics-danger-border)] bg-[var(--analytics-danger-soft)] text-[var(--analytics-danger)]";
-    case "cancelled": return "border-[var(--analytics-info-border)] bg-[var(--analytics-info-soft)] text-[var(--analytics-info)]";
+    case "success": return "border-analytics-success-border bg-analytics-success-soft text-analytics-success";
+    case "recovered": return "border-analytics-warning-border bg-analytics-warning-soft text-analytics-warning";
+    case "failed": return "border-analytics-danger-border bg-analytics-danger-soft text-analytics-danger";
+    case "cancelled": return "border-analytics-info-border bg-analytics-info-soft text-analytics-info";
     default: return "";
   }
 }

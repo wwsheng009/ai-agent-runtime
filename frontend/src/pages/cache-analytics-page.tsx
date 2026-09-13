@@ -109,7 +109,7 @@ export function CacheAnalyticsPanel({ sessionId }: { sessionId: string }) {
       <section aria-label={t("cache.title")} className="surface-panel flex flex-wrap items-center justify-between gap-2 rounded-[0.95rem] px-3 py-2.5 sm:px-4">
         <div className="min-w-0">
           <h2 className="text-sm font-semibold">{t("cache.title")}</h2>
-          <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">{t("cache.description")}</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">{t("cache.description")}</p>
         </div>
         <Button
           variant="secondary"
@@ -125,13 +125,13 @@ export function CacheAnalyticsPanel({ sessionId }: { sessionId: string }) {
       </section>
 
       {error ? (
-        <div role="alert" className="rounded-[0.9rem] border border-[var(--analytics-danger-border)] bg-[var(--analytics-danger-soft)] px-3 py-2.5 text-sm text-[var(--analytics-danger)]">
+        <div role="alert" className="rounded-[0.9rem] border border-analytics-danger-border bg-analytics-danger-soft px-3 py-2.5 text-sm text-analytics-danger">
           {t("loadError")}: {error}
         </div>
       ) : (
         <>
           {partial ? (
-            <div className="flex items-start gap-2 rounded-[0.9rem] border border-[var(--analytics-warning-border)] bg-[var(--analytics-warning-soft)] px-3 py-2.5 text-sm text-[var(--analytics-warning)]">
+            <div className="flex items-start gap-2 rounded-[0.9rem] border border-analytics-warning-border bg-analytics-warning-soft px-3 py-2.5 text-sm text-analytics-warning">
               <AlertTriangleIcon size={16} className="mt-0.5 shrink-0" />
               <span>{t("cache.partialBanner", { max: String(maxRequests) })}</span>
             </div>
