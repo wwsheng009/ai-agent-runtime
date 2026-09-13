@@ -380,7 +380,10 @@ func resolveSupervisionDSN(cfg *StoreConfig) (string, string, error) {
 	if dsn := strings.TrimSpace(cfg.DSN); dsn != "" {
 		return supervisionDSNOptions(dsn), "", nil
 	}
-	return supervisionDSNOptions(fmt.Sprintf("file:supervision-%d?mode=memory&cache=shared", time.Now().UnixNano())), "", nil
+	// The in-memory database name must be unique per store instance: two
+	// stores created inside the same clock tick would otherwise share one
+	// database through cache=shared and observe each other's rows.
+	return supervisionDSNOptions("file:supervision-" + uniqueSupervisionID("") + "?mode=memory&cache=shared"), "", nil
 }
 
 func supervisionDSNOptions(dsn string) string {
@@ -927,7 +930,7 @@ func (s *SQLiteSupervisionStore) CreateAction(ctx context.Context, a ActionRecor
 	}
 	a.ActionID = strings.TrimSpace(a.ActionID)
 	if a.ActionID == "" {
-		a.ActionID = fmt.Sprintf("act-%d", time.Now().UnixNano())
+		a.ActionID = uniqueSupervisionID("act-")
 	}
 	a.CreatedAt = time.Now().UTC()
 	if a.Status == "" {
@@ -1095,7 +1098,7 @@ func (s *SQLiteSupervisionStore) InsertWakePending(ctx context.Context, w WakePe
 	}
 	w.WakeID = strings.TrimSpace(w.WakeID)
 	if w.WakeID == "" {
-		w.WakeID = fmt.Sprintf("wake-%d", time.Now().UnixNano())
+		w.WakeID = uniqueSupervisionID("wake-")
 	}
 	if strings.TrimSpace(w.DedupKey) == "" {
 		w.DedupKey = strings.Join([]string{
@@ -1105,11 +1108,15 @@ func (s *SQLiteSupervisionStore) InsertWakePending(ctx context.Context, w WakePe
 		}, "|")
 	}
 	w.CreatedAt = time.Now().UTC()
+	// Coalescing is keyed by dedup_key only. Targeting the conflict explicitly
+	// (instead of a blanket OR IGNORE) keeps a duplicate primary key loud: a
+	// dropped wake would silently starve the parent session.
 	_, err = db.ExecContext(ctx, `
-		INSERT OR IGNORE INTO supervision_wake_pending (
+		INSERT INTO supervision_wake_pending (
 			wake_id, root_scope_id, target_parent_session_id, target_parent_team_id,
 			wake_reason, notification_seq, dedup_key, created_at, claimed_at, claimed_by
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(dedup_key) DO NOTHING
 	`,
 		w.WakeID,
 		w.RootScopeID,
@@ -1216,16 +1223,19 @@ func (s *SQLiteSupervisionStore) RecordWakeClaim(ctx context.Context, claim Wake
 	}
 	claim.ClaimID = strings.TrimSpace(claim.ClaimID)
 	if claim.ClaimID == "" {
-		claim.ClaimID = fmt.Sprintf("wakeclaim-%d", time.Now().UnixNano())
+		claim.ClaimID = uniqueSupervisionID("wakeclaim-")
 	}
 	if claim.ClaimedAt.IsZero() {
 		claim.ClaimedAt = time.Now().UTC()
 	}
+	// Only a replayed claim id is an idempotent no-op; every other constraint
+	// violation must surface so the budget ledger cannot silently under-count.
 	_, err = db.ExecContext(ctx, `
-		INSERT OR IGNORE INTO supervision_wake_claims (
+		INSERT INTO supervision_wake_claims (
 			claim_id, root_scope_id, budget_class, wake_reason,
 			target_parent_session_id, claimed_at, claimed_by
 		) VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(claim_id) DO NOTHING
 	`,
 		claim.ClaimID,
 		strings.TrimSpace(claim.RootScopeID),

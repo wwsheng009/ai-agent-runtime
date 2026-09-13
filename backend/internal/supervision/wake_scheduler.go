@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -98,11 +97,6 @@ type WakeScheduler struct {
 
 	rateMu sync.Mutex
 	claims map[string][]time.Time // rootScopeID|budgetClass -> claim timestamps
-	// claimSeq keeps durable claim ids unique when several claims are booked
-	// inside the same nanosecond (stubbed clocks or concurrent drains). A
-	// duplicate id would be swallowed by the unique index and silently
-	// under-count the window.
-	claimSeq atomic.Uint64
 
 	rateWindow      time.Duration
 	maxAutoWake     int // 0 => unlimited (failure / other classes)
@@ -165,7 +159,7 @@ func (s *WakeScheduler) ScheduleWake(ctx context.Context, req WakeRequest) (Wake
 		strings.TrimSpace(req.WakeReason),
 	}, "|")
 	w := WakePending{
-		WakeID:                "wake_" + newWakeID(),
+		WakeID:                newWakeID(),
 		RootScopeID:           strings.TrimSpace(req.RootScopeID),
 		TargetParentSessionID: strings.TrimSpace(req.TargetParentSessionID),
 		TargetParentTeamID:    strings.TrimSpace(req.TargetParentTeamID),
@@ -414,7 +408,7 @@ func (s *WakeScheduler) recordClaim(ctx context.Context, rootScopeID, parentSess
 		return
 	}
 	claim := WakeClaim{
-		ClaimID:               fmt.Sprintf("wakeclaim-%s-%d-%d", string(class), now.UnixNano(), s.claimSeq.Add(1)),
+		ClaimID:               uniqueSupervisionID("wakeclaim-" + string(class) + "-"),
 		RootScopeID:           rootScopeID,
 		BudgetClass:           class,
 		WakeReason:            reason,
@@ -437,6 +431,10 @@ func wakeBudgetKey(rootScopeID string, class WakeBudgetClass) string {
 	return strings.TrimSpace(rootScopeID) + "|" + string(class)
 }
 
+// newWakeID builds a durable wake identifier. It must not depend on the clock
+// alone: two critical lifecycle events projected inside the same clock tick
+// would otherwise share a primary key and one of the wakes would be dropped
+// silently by the INSERT (see ids.go).
 func newWakeID() string {
-	return fmt.Sprintf("%d", time.Now().UnixNano())
+	return uniqueSupervisionID("wake_")
 }
