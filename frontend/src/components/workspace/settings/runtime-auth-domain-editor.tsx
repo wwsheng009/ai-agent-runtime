@@ -71,7 +71,7 @@ export function RuntimeAuthDomainEditor({
       >
         <div className="grid gap-3 xl:grid-cols-2">
           <ConfigFormField
-            label="jwt_secret"
+            label={t("editor.auth.fields.jwtSecret")}
             description={t("editor.auth.fields.jwtSecretDescription")}
           >
             <textarea
@@ -81,7 +81,7 @@ export function RuntimeAuthDomainEditor({
             />
           </ConfigFormField>
           <ConfigFormField
-            label="access_key_secret"
+            label={t("editor.auth.fields.accessKeySecret")}
             description={t("editor.auth.fields.accessKeySecretDescription")}
           >
             <textarea
@@ -92,25 +92,25 @@ export function RuntimeAuthDomainEditor({
               }
             />
           </ConfigFormField>
-          <ConfigFormField label="jwt_expire">
+          <ConfigFormField label={t("editor.auth.fields.jwtExpire")}>
             <input
               className={editorControlClassName}
               value={authConfig.jwtExpire}
               onChange={(event) => update({ jwtExpire: event.target.value })}
-              placeholder="24h"
+              placeholder={t("editor.auth.placeholders.jwtExpire")}
             />
           </ConfigFormField>
-          <ConfigFormField label="session_timeout">
+          <ConfigFormField label={t("editor.auth.fields.sessionTimeout")}>
             <input
               className={editorControlClassName}
               value={authConfig.sessionTimeout}
               onChange={(event) =>
                 update({ sessionTimeout: event.target.value })
               }
-              placeholder="30m"
+              placeholder={t("editor.auth.placeholders.sessionTimeout")}
             />
           </ConfigFormField>
-          <ConfigFormField label="max_api_create_times">
+          <ConfigFormField label={t("editor.auth.fields.maxApiCreateTimes")}>
             <input
               className={editorControlClassName}
               value={authConfig.maxApiCreateTimes}
@@ -142,7 +142,7 @@ export function RuntimeAuthDomainEditor({
           }
         >
           <ConfigFormField
-            label="admin_token"
+            label={t("editor.auth.fields.adminToken")}
             description={t("editor.auth.admin.tokenDescription")}
           >
             <textarea
@@ -172,7 +172,7 @@ export function RuntimeAuthDomainEditor({
         >
           <SettingsInlineToggleCard
             checked={authConfig.accessAuthAllowAnonymous}
-            label="allow_anonymous"
+            label={t("editor.auth.fields.allowAnonymous")}
             description={t("editor.auth.access.allowAnonymousDescription")}
             labelClassName="items-start"
             onCheckedChange={(checked) =>

@@ -113,7 +113,9 @@ export function RuntimeWebsocketDomainEditor({
 
           <div className="grid gap-3">
             <div className="grid gap-3 xl:grid-cols-2">
-              <ConfigFormField label="responses.capacity.max_active_connections">
+              <ConfigFormField
+                label={t("editor.websocket.fields.maxActiveConnections")}
+              >
                 <input
                   className={editorControlClassName}
                   value={config.responsesMaxActiveConnections}
@@ -124,7 +126,7 @@ export function RuntimeWebsocketDomainEditor({
                   }
                 />
               </ConfigFormField>
-              <ConfigFormField label="responses.affinity_ttl">
+              <ConfigFormField label={t("editor.websocket.fields.affinityTtl")}>
                 <input
                   className={editorControlClassName}
                   value={config.responsesAffinityTtl}
@@ -133,7 +135,9 @@ export function RuntimeWebsocketDomainEditor({
                   }
                 />
               </ConfigFormField>
-              <ConfigFormField label="responses.handshake_max_retries">
+              <ConfigFormField
+                label={t("editor.websocket.fields.handshakeMaxRetries")}
+              >
                 <input
                   className={editorControlClassName}
                   value={config.responsesHandshakeMaxRetries}
@@ -147,7 +151,7 @@ export function RuntimeWebsocketDomainEditor({
             </div>
 
             <ConfigFormField
-              label="responses.compat_bridge_source_protocols"
+              label={t("editor.websocket.fields.compatBridgeSourceProtocols")}
               description={t(
                 "editor.websocket.responses.compatProtocolsDescription",
               )}
@@ -165,56 +169,56 @@ export function RuntimeWebsocketDomainEditor({
 
             <div className="grid gap-3 xl:grid-cols-2">
               <ToggleCard
-                label="responses.http_bridge_enabled"
+                label={t("editor.websocket.fields.httpBridgeEnabled")}
                 checked={config.responsesHttpBridgeEnabled}
                 onChange={(checked) =>
                   update({ responsesHttpBridgeEnabled: checked })
                 }
               />
               <ToggleCard
-                label="responses.compat_bridge_enabled"
+                label={t("editor.websocket.fields.compatBridgeEnabled")}
                 checked={config.responsesCompatBridgeEnabled}
                 onChange={(checked) =>
                   update({ responsesCompatBridgeEnabled: checked })
                 }
               />
               <ToggleCard
-                label="responses.allow_passthrough_only"
+                label={t("editor.websocket.fields.allowPassthroughOnly")}
                 checked={config.responsesAllowPassthroughOnly}
                 onChange={(checked) =>
                   update({ responsesAllowPassthroughOnly: checked })
                 }
               />
               <ToggleCard
-                label="responses.metrics.enabled"
+                label={t("editor.websocket.fields.metricsEnabled")}
                 checked={config.responsesMetricsEnabled}
                 onChange={(checked) =>
                   update({ responsesMetricsEnabled: checked })
                 }
               />
               <ToggleCard
-                label="responses.metrics.close_code_labels_enabled"
+                label={t("editor.websocket.fields.closeCodeLabelsEnabled")}
                 checked={config.responsesCloseCodeLabelsEnabled}
                 onChange={(checked) =>
                   update({ responsesCloseCodeLabelsEnabled: checked })
                 }
               />
               <ToggleCard
-                label="responses.connection_pooling_enabled"
+                label={t("editor.websocket.fields.connectionPoolingEnabled")}
                 checked={config.responsesConnectionPoolingEnabled}
                 onChange={(checked) =>
                   update({ responsesConnectionPoolingEnabled: checked })
                 }
               />
               <ToggleCard
-                label="responses.pre_first_event_retry_once"
+                label={t("editor.websocket.fields.preFirstEventRetryOnce")}
                 checked={config.responsesPreFirstEventRetryOnce}
                 onChange={(checked) =>
                   update({ responsesPreFirstEventRetryOnce: checked })
                 }
               />
               <ToggleCard
-                label="responses.failover_on_handshake_error"
+                label={t("editor.websocket.fields.failoverOnHandshakeError")}
                 checked={config.responsesFailoverOnHandshakeError}
                 onChange={(checked) =>
                   update({ responsesFailoverOnHandshakeError: checked })
@@ -249,7 +253,9 @@ export function RuntimeWebsocketDomainEditor({
 
           <div className="grid gap-3">
             <div className="grid gap-3 xl:grid-cols-2">
-              <ConfigFormField label="realtime.capacity.max_active_connections">
+              <ConfigFormField
+                label={t("editor.websocket.fields.maxActiveConnections")}
+              >
                 <input
                   className={editorControlClassName}
                   value={config.realtimeMaxActiveConnections}
@@ -260,7 +266,9 @@ export function RuntimeWebsocketDomainEditor({
                   }
                 />
               </ConfigFormField>
-              <ConfigFormField label="realtime.handshake_max_retries">
+              <ConfigFormField
+                label={t("editor.websocket.fields.handshakeMaxRetries")}
+              >
                 <input
                   className={editorControlClassName}
                   value={config.realtimeHandshakeMaxRetries}
@@ -275,21 +283,21 @@ export function RuntimeWebsocketDomainEditor({
 
             <div className="grid gap-3 xl:grid-cols-2">
               <ToggleCard
-                label="realtime.metrics.enabled"
+                label={t("editor.websocket.fields.metricsEnabled")}
                 checked={config.realtimeMetricsEnabled}
                 onChange={(checked) =>
                   update({ realtimeMetricsEnabled: checked })
                 }
               />
               <ToggleCard
-                label="realtime.metrics.close_code_labels_enabled"
+                label={t("editor.websocket.fields.closeCodeLabelsEnabled")}
                 checked={config.realtimeCloseCodeLabelsEnabled}
                 onChange={(checked) =>
                   update({ realtimeCloseCodeLabelsEnabled: checked })
                 }
               />
               <ToggleCard
-                label="realtime.failover_on_handshake_error"
+                label={t("editor.websocket.fields.failoverOnHandshakeError")}
                 checked={config.realtimeFailoverOnHandshakeError}
                 onChange={(checked) =>
                   update({ realtimeFailoverOnHandshakeError: checked })

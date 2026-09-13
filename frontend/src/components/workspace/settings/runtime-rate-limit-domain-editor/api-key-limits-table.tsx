@@ -27,7 +27,7 @@ export function RuntimeRateLimitApiKeyLimitsTable({
 }) {
   return (
     <ConfigDomainTable
-      title="API Key Limits"
+      title={t("editor.rateLimit.apiKey.tableTitle")}
       titleIcon={ShieldEllipsisIcon}
       description={t("editor.rateLimit.apiKey.tableDescription")}
       items={apiKeyLimits}

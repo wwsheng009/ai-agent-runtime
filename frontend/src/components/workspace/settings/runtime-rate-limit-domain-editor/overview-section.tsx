@@ -66,7 +66,9 @@ export function RuntimeRateLimitOverviewSection({
 
       <div className="mt-3 grid gap-3 xl:grid-cols-[12rem_minmax(0,1fr)_minmax(0,1fr)]">
         <div className="rounded-card border border-border bg-surface-softer p-3">
-          <div className="text-[13px] font-semibold text-foreground">rate_limit.enabled</div>
+          <div className="text-[13px] font-semibold text-foreground">
+            {t("editor.rateLimit.fields.enabled")}
+          </div>
           <div className="mt-1 text-xs leading-5 text-muted-foreground">
             {t("editor.rateLimit.enabledHelp")}
           </div>
@@ -95,7 +97,7 @@ export function RuntimeRateLimitOverviewSection({
             {t("editor.rateLimit.basicConfig")}
           </div>
           <div className="grid gap-3 xl:grid-cols-2">
-            <ConfigFormField label="storage">
+            <ConfigFormField label={t("editor.rateLimit.fields.storage")}>
               <input
                 className={editorControlClassName}
                 value={rateLimitConfig.storage}
@@ -105,10 +107,10 @@ export function RuntimeRateLimitOverviewSection({
                     storage: event.target.value,
                   })
                 }
-                placeholder="memory"
+                placeholder={t("editor.rateLimit.fields.storagePlaceholder")}
               />
             </ConfigFormField>
-            <ConfigFormField label="algorithm">
+            <ConfigFormField label={t("editor.rateLimit.fields.algorithm")}>
               <input
                 className={editorControlClassName}
                 value={rateLimitConfig.algorithm}
@@ -118,7 +120,7 @@ export function RuntimeRateLimitOverviewSection({
                     algorithm: event.target.value,
                   })
                 }
-                placeholder="token_bucket"
+                placeholder={t("editor.rateLimit.fields.algorithmPlaceholder")}
               />
             </ConfigFormField>
           </div>
@@ -143,10 +145,10 @@ export function RuntimeRateLimitOverviewSection({
       <div className="mt-3 grid gap-3 xl:grid-cols-2">
         <div className="rounded-card border border-border bg-surface-softer p-3">
           <div className="mb-3 text-[13px] font-semibold text-foreground">
-            default_limits
+            {t("editor.rateLimit.fields.defaultLimits")}
           </div>
           <div className="grid gap-3 xl:grid-cols-2">
-            <ConfigFormField label="qps">
+            <ConfigFormField label={t("editor.rateLimit.fields.qps")}>
               <input
                 className={editorControlClassName}
                 value={rateLimitConfig.defaultQps}
@@ -158,7 +160,7 @@ export function RuntimeRateLimitOverviewSection({
                 }
               />
             </ConfigFormField>
-            <ConfigFormField label="tpm">
+            <ConfigFormField label={t("editor.rateLimit.fields.tpm")}>
               <input
                 className={editorControlClassName}
                 value={rateLimitConfig.defaultTpm}
@@ -170,7 +172,7 @@ export function RuntimeRateLimitOverviewSection({
                 }
               />
             </ConfigFormField>
-            <ConfigFormField label="daily_tokens">
+            <ConfigFormField label={t("editor.rateLimit.fields.dailyTokens")}>
               <input
                 className={editorControlClassName}
                 value={rateLimitConfig.defaultDailyTokens}
@@ -182,7 +184,7 @@ export function RuntimeRateLimitOverviewSection({
                 }
               />
             </ConfigFormField>
-            <ConfigFormField label="monthly_tokens">
+            <ConfigFormField label={t("editor.rateLimit.fields.monthlyTokens")}>
               <input
                 className={editorControlClassName}
                 value={rateLimitConfig.defaultMonthlyTokens}
@@ -199,10 +201,10 @@ export function RuntimeRateLimitOverviewSection({
 
         <div className="rounded-card border border-border bg-surface-softer p-3">
           <div className="mb-3 text-[13px] font-semibold text-foreground">
-            global_limits
+            {t("editor.rateLimit.fields.globalLimits")}
           </div>
           <div className="grid gap-3 xl:grid-cols-2">
-            <ConfigFormField label="global_qps">
+            <ConfigFormField label={t("editor.rateLimit.fields.globalQps")}>
               <input
                 className={editorControlClassName}
                 value={rateLimitConfig.globalQps}
@@ -214,7 +216,7 @@ export function RuntimeRateLimitOverviewSection({
                 }
               />
             </ConfigFormField>
-            <ConfigFormField label="global_tpm">
+            <ConfigFormField label={t("editor.rateLimit.fields.globalTpm")}>
               <input
                 className={editorControlClassName}
                 value={rateLimitConfig.globalTpm}
@@ -226,7 +228,7 @@ export function RuntimeRateLimitOverviewSection({
                 }
               />
             </ConfigFormField>
-            <ConfigFormField label="global_daily_tokens">
+            <ConfigFormField label={t("editor.rateLimit.fields.globalDailyTokens")}>
               <input
                 className={editorControlClassName}
                 value={rateLimitConfig.globalDailyTokens}
@@ -238,7 +240,7 @@ export function RuntimeRateLimitOverviewSection({
                 }
               />
             </ConfigFormField>
-            <ConfigFormField label="global_monthly_tokens">
+            <ConfigFormField label={t("editor.rateLimit.fields.globalMonthlyTokens")}>
               <input
                 className={editorControlClassName}
                 value={rateLimitConfig.globalMonthlyTokens}

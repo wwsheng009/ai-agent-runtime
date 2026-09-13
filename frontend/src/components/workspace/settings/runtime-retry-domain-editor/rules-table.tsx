@@ -40,7 +40,7 @@ export function RuntimeRetryRulesTable({
 }) {
   return (
       <ConfigDomainTable
-        title="Retry Rules"
+        title={t("editor.retry.rules.tableTitle")}
         titleIcon={RefreshCcwIcon}
         description={t("editor.retry.rules.tableDescription")}
         items={rules}

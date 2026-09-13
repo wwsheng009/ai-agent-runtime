@@ -162,7 +162,7 @@ describe("MessageMarkdown", () => {
 
     expect(markup).toContain('data-line-kind="inserted"');
     expect(markup).toContain('data-line-kind="deleted"');
-    expect(markup).toContain("Show 1 more lines");
+    expect(markup).toContain("展开剩余 1 行");
   });
 
   it("renders a stopped tail when interrupted and not streaming", () => {
@@ -170,7 +170,7 @@ describe("MessageMarkdown", () => {
       <MessageMarkdown content="Partial answer" interrupted />,
     );
 
-    expect(markup).toContain("Stopped");
+    expect(markup).toContain("已停止");
     expect(markup).toContain('role="status"');
   });
 
@@ -179,7 +179,7 @@ describe("MessageMarkdown", () => {
       <MessageMarkdown content="Partial answer" interrupted streaming />,
     );
 
-    expect(markup).not.toContain("Stopped");
+    expect(markup).not.toContain("已停止");
   });
 
   it("keeps frozen stable content rendered across streaming appends", async () => {

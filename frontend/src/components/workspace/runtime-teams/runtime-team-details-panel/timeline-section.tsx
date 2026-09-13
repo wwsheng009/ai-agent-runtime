@@ -4,6 +4,7 @@ import {
   type TeamDetailsState,
 } from "@/components/workspace/runtime-teams/shared";
 import { formatRelativeTimestamp } from "@/lib/utils";
+import { useTranslation } from "react-i18next";
 
 import { detailCardClass } from "./format";
 import { TeamDetailsSection } from "./primitives";
@@ -21,9 +22,11 @@ export function RuntimeTeamTimelineSection({
   open,
   visibleEvents,
 }: RuntimeTeamTimelineSectionProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <TeamDetailsSection
-      title="Team timeline"
+      title={t("panels.teamsPanels.details.timeline.title")}
       badge={<Badge>{details.events.length}</Badge>}
       open={open}
       onToggle={onToggle}
@@ -46,7 +49,9 @@ export function RuntimeTeamTimelineSection({
                 </div>
                 <div className="shrink-0 text-right">
                   <div className="app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
-                    seq {event.seq}
+                    {t("panels.teamsPanels.details.timeline.seq", {
+                      seq: event.seq,
+                    })}
                   </div>
                   <div className="mt-1 text-xs text-muted-foreground">
                     {formatRelativeTimestamp(event.timestamp)}
@@ -57,7 +62,7 @@ export function RuntimeTeamTimelineSection({
           ))
         ) : (
           <div className="text-sm text-muted-foreground">
-            No team events available.
+            {t("panels.teamsPanels.details.timeline.empty")}
           </div>
         )}
       </div>

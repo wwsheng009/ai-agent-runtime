@@ -1,6 +1,7 @@
 // 由 components/workspace/runtime-teams.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { Suspense } from "react";
+import { useTranslation } from "react-i18next";
 
 import { type RuntimeTeamRecord, type RuntimeTeamSummaryEntry } from "@/lib/runtime-api";
 import { type UseRuntimeTeamDispatchReturn } from "@/components/workspace/runtime-teams/use-runtime-team-dispatch";
@@ -96,8 +97,16 @@ export function TeamsDispatchView({
   teams,
   toggleDispatchTeam,
 }: TeamsDispatchViewProps) {
+  const { t } = useTranslation("workspace");
+
   return (
-    <Suspense fallback={<RuntimeTeamsPanelFallback label="dispatch view" />}>
+    <Suspense
+      fallback={
+        <RuntimeTeamsPanelFallback
+          label={t("panels.teamsDispatch.dispatchView.fallbackLabel")}
+        />
+      }
+    >
       <RuntimeTeamDispatchPanel
         dispatchMonitor={dispatchMonitor}
         dispatchMonitorCounts={dispatchMonitorCounts}

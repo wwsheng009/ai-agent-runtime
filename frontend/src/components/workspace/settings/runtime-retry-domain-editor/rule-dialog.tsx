@@ -57,18 +57,20 @@ export function RuntimeRetryRuleDialog({
             </SettingsNoticeCard>
           ) : null}
           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_11rem]">
-            <ConfigFormField label="name">
+            <ConfigFormField label={t("editor.retry.fields.name")}>
               <input
                 className={editorControlClassName}
                 value={draft.name}
                 onChange={(event) =>
                   setDraft((current) => ({ ...current, name: event.target.value }))
                 }
-                placeholder="rate_limit_retry"
+                placeholder={t("editor.retry.fields.namePlaceholder")}
               />
             </ConfigFormField>
             <div className="rounded-card border border-border bg-surface-softer p-3">
-              <div className="text-sm font-semibold text-foreground">enabled</div>
+              <div className="text-sm font-semibold text-foreground">
+                {t("editor.retry.fields.ruleEnabled")}
+              </div>
               <label className={`mt-3 ${editorToggleRowClassName}`}>
                 <span>
                   {draft.enabled
@@ -90,7 +92,7 @@ export function RuntimeRetryRuleDialog({
             </div>
           </div>
 
-          <ConfigFormField label="description">
+          <ConfigFormField label={t("editor.retry.fields.description")}>
             <textarea
               className={`${editorControlClassName} min-h-24 resize-y`}
               value={draft.description}
@@ -104,7 +106,7 @@ export function RuntimeRetryRuleDialog({
           </ConfigFormField>
 
           <div className="grid gap-3 md:grid-cols-3">
-            <ConfigFormField label="max_retries">
+            <ConfigFormField label={t("editor.retry.fields.maxRetries")}>
               <input
                 className={editorControlClassName}
                 value={draft.maxRetries}
@@ -117,7 +119,7 @@ export function RuntimeRetryRuleDialog({
                 placeholder="3"
               />
             </ConfigFormField>
-            <ConfigFormField label="retry_delay_ms">
+            <ConfigFormField label={t("editor.retry.fields.retryDelayMs")}>
               <input
                 className={editorControlClassName}
                 value={draft.retryDelayMs}
@@ -130,7 +132,7 @@ export function RuntimeRetryRuleDialog({
                 placeholder="1000"
               />
             </ConfigFormField>
-            <ConfigFormField label="backoff_multiplier">
+            <ConfigFormField label={t("editor.retry.fields.backoffMultiplier")}>
               <input
                 className={editorControlClassName}
                 value={draft.backoffMultiplier}
@@ -146,7 +148,7 @@ export function RuntimeRetryRuleDialog({
           </div>
 
           <div className="grid gap-3 md:grid-cols-2">
-            <ConfigFormField label="status_code.range">
+            <ConfigFormField label={t("editor.retry.fields.statusCodeRange")}>
               <input
                 className={editorControlClassName}
                 value={draft.statusCodeRange}
@@ -159,7 +161,7 @@ export function RuntimeRetryRuleDialog({
                 placeholder="500-504"
               />
             </ConfigFormField>
-            <ConfigFormField label="error_code.pattern">
+            <ConfigFormField label={t("editor.retry.fields.errorCodePattern")}>
               <input
                 className={editorControlClassName}
                 value={draft.errorCodePattern}
@@ -176,7 +178,7 @@ export function RuntimeRetryRuleDialog({
 
           <div className="grid gap-3 md:grid-cols-2">
             <ConfigFormField
-              label="error_code.codes"
+              label={t("editor.retry.fields.errorCodeCodes")}
               description={t("editor.retry.fields.listHint")}
             >
               <textarea
@@ -191,7 +193,7 @@ export function RuntimeRetryRuleDialog({
               />
             </ConfigFormField>
             <ConfigFormField
-              label="keyword.values"
+              label={t("editor.retry.fields.keywordValues")}
               description={t("editor.retry.fields.listHint")}
             >
               <textarea
@@ -209,7 +211,7 @@ export function RuntimeRetryRuleDialog({
 
           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_11rem]">
             <ConfigFormField
-              label="keyword.patterns"
+              label={t("editor.retry.fields.keywordPatterns")}
               description={t("editor.retry.fields.listHint")}
             >
               <textarea
@@ -225,7 +227,7 @@ export function RuntimeRetryRuleDialog({
             </ConfigFormField>
             <div className="rounded-card border border-border bg-surface-softer p-3">
               <div className="text-sm font-semibold text-foreground">
-                keyword.case_sensitive
+                {t("editor.retry.fields.keywordCaseSensitive")}
               </div>
               <label className={`mt-3 ${editorToggleRowClassName}`}>
                 <span>

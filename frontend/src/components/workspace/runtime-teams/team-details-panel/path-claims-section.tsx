@@ -8,6 +8,7 @@ import {
 } from "@/components/workspace/runtime-teams/shared";
 import { cn, formatRelativeTimestamp } from "@/lib/utils";
 import { LoaderCircleIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { detailsCardClass, detailsInputClass, detailsPanelClass, detailsPillClass } from "./format";
 import { type TeamDetailsPanelProps } from "./types";
@@ -38,48 +39,50 @@ export function TeamDetailsPanelPathClaims({
   visiblePathClaims,
   writePathDraft,
 }: TeamDetailsPanelPathClaimsProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <div className={detailsPanelClass}>
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-muted-foreground">
-          Path claims
+          {t("panels.teamsPanels.details.pathClaims.title")}
         </div>
         <Badge>{details.pathClaims.length}</Badge>
       </div>
       <div className="mt-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-        Active filesystem leases for runtime writers and readers
+        {t("panels.teamsPanels.details.pathClaims.subtitle")}
       </div>
       <div className="mt-3 rounded-[0.75rem] border border-white/8 bg-white/4 px-3 py-2.5">
         <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-          Conflict check
+          {t("panels.teamsPanels.details.pathClaims.conflictCheck")}
         </div>
         <div className="mt-3 grid gap-3">
           <div>
             <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-              Read paths
+              {t("panels.teamsPanels.details.pathClaims.readPaths")}
             </div>
             <textarea
               value={readPathDraft}
               onChange={(event) => onReadPathDraftChange(event.target.value)}
-              placeholder="src/components/workspace/runtime-teams.tsx"
+              placeholder={t("panels.teamsPanels.details.pathClaims.readPlaceholder")}
               className={cn(detailsInputClass, "min-h-20 resize-y leading-6")}
             />
           </div>
           <div>
             <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-              Write paths
+              {t("panels.teamsPanels.details.pathClaims.writePaths")}
             </div>
             <textarea
               value={writePathDraft}
               onChange={(event) => onWritePathDraftChange(event.target.value)}
-              placeholder="frontend/src/lib/runtime-api.ts"
+              placeholder={t("panels.teamsPanels.details.pathClaims.writePlaceholder")}
               className={cn(detailsInputClass, "min-h-20 resize-y leading-6")}
             />
           </div>
         </div>
         <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="text-xs text-muted-foreground">
-            Separate multiple paths with new lines or commas.
+            {t("panels.teamsPanels.details.pathClaims.pathsHint")}
           </div>
           <Button
             variant="secondary"
@@ -90,7 +93,7 @@ export function TeamDetailsPanelPathClaims({
             {isCheckingClaims ? (
               <LoaderCircleIcon size={14} className="animate-spin" />
             ) : null}
-            Check conflicts
+            {t("panels.teamsPanels.details.pathClaims.check")}
           </Button>
         </div>
         {claimCheckError ? (
@@ -102,7 +105,9 @@ export function TeamDetailsPanelPathClaims({
           <div className="mt-3 rounded-card border border-white/8 bg-black/20 px-3 py-2.5">
             <div className="flex items-center justify-between gap-3">
               <div className="text-sm font-semibold text-foreground">
-                {claimCheckState.ok ? "No conflicts detected" : "Conflicts detected"}
+                {claimCheckState.ok
+                  ? t("panels.teamsPanels.details.pathClaims.noConflicts")
+                  : t("panels.teamsPanels.details.pathClaims.conflictsDetected")}
               </div>
               <span
                 className={cn(
@@ -112,7 +117,9 @@ export function TeamDetailsPanelPathClaims({
                     : "border-accent-orange/24 bg-accent-orange/10 text-accent-orange",
                 )}
               >
-                {claimCheckState.conflicts.length} conflicts
+                {t("panels.teamsPanels.details.pathClaims.conflictsCount", {
+                  count: claimCheckState.conflicts.length,
+                })}
               </span>
             </div>
             {!claimCheckState.ok && claimCheckState.conflicts.length > 0 ? (
@@ -128,7 +135,7 @@ export function TeamDetailsPanelPathClaims({
               </div>
             ) : (
               <div className="mt-2 text-sm text-muted-foreground">
-                Requested reads and writes can be acquired at the current runtime snapshot.
+                {t("panels.teamsPanels.details.pathClaims.canAcquire")}
               </div>
             )}
           </div>
@@ -146,13 +153,22 @@ export function TeamDetailsPanelPathClaims({
                       {claim.path}
                     </div>
                     <div className="mt-1 flex flex-wrap gap-3 text-xs text-muted-foreground">
-                      <span>owner {truncateIdentifier(claim.owner_agent_id, 14)}</span>
-                      <span>task {truncateIdentifier(claim.task_id, 14)}</span>
+                      <span>
+                        {t("panels.teamsPanels.details.pathClaims.owner", {
+                          id: truncateIdentifier(claim.owner_agent_id, 14),
+                        })}
+                      </span>
+                      <span>
+                        {t("panels.teamsPanels.details.pathClaims.task", {
+                          id: truncateIdentifier(claim.task_id, 14),
+                        })}
+                      </span>
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
                     <span className="rounded-control border border-white/10 bg-white/6 px-2 py-0.5 app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
-                      {claim.mode || "claim"}
+                      {claim.mode ||
+                        t("panels.teamsPanels.details.pathClaims.fallbackMode")}
                     </span>
                     <span
                       className={cn(
@@ -162,15 +178,23 @@ export function TeamDetailsPanelPathClaims({
                           : "border-accent-orange/24 bg-accent-orange/10 text-accent-orange",
                       )}
                     >
-                      {active ? "active" : "expired"}
+                      {active
+                        ? t("panels.teamsPanels.details.pathClaims.active")
+                        : t("panels.teamsPanels.details.pathClaims.expired")}
                     </span>
                   </div>
                 </div>
                 <div className="mt-2 flex flex-wrap gap-3 text-xs text-muted-foreground">
                   {claim.lease_until ? (
-                    <span>lease {formatRelativeTimestamp(claim.lease_until)}</span>
+                    <span>
+                      {t("panels.teamsPanels.details.pathClaims.lease", {
+                        time: formatRelativeTimestamp(claim.lease_until),
+                      })}
+                    </span>
                   ) : (
-                    <span>lease open-ended</span>
+                    <span>
+                      {t("panels.teamsPanels.details.pathClaims.leaseOpenEnded")}
+                    </span>
                   )}
                   <span>{truncateIdentifier(claim.id, 14)}</span>
                 </div>
@@ -179,7 +203,7 @@ export function TeamDetailsPanelPathClaims({
           })
         ) : (
           <div className="text-sm text-muted-foreground">
-            No active path claims available.
+            {t("panels.teamsPanels.details.pathClaims.empty")}
           </div>
         )}
       </div>

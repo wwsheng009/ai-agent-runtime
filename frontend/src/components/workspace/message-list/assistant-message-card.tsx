@@ -1,6 +1,7 @@
 // 由 components/workspace/message-list.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { BotIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { type Artifact, type ChatMessage } from "@/data/mock";
@@ -30,6 +31,7 @@ export function AssistantMessageCard({
   statusId,
   streamingMessageId,
 }: AssistantMessageCardProps) {
+  const { t } = useTranslation("workspace");
   return (
                 <div className="relative w-full max-w-[48rem]">
                   <div className="overflow-hidden rounded-[1rem] border border-accent-teal/14 bg-[linear-gradient(180deg,rgba(143,208,198,0.08),rgba(143,208,198,0.02))] px-4 py-3.5 shadow-[0_16px_40px_rgba(0,0,0,0.12)]">
@@ -53,7 +55,7 @@ export function AssistantMessageCard({
                           </div>
                           {message.id === streamingMessageId ? (
                             <Badge className="border-transparent bg-accent-teal/12 text-accent-teal">
-                              Streaming response in progress
+                              {t("panels.messages.messageCard.streamingBadge")}
                             </Badge>
                           ) : null}
                         </div>

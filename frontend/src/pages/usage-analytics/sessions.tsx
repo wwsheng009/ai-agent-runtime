@@ -116,7 +116,7 @@ export function SessionTable({ sessions, total, loading, search, offset, pageSiz
                   <td className="max-w-56 px-3 py-2.5"><div className="truncate" title={session.project}>{session.project ? formatDimensionTick(session.project, "project") : t("status.unknown")}</div><div className="truncate text-xs text-muted-foreground" title={session.project}>{session.project || "-"}</div></td>
                   <td className="px-3 py-2.5 tabular-nums">{formatNumber(session.total_tokens)}</td>
                   <td className="px-3 py-2.5 tabular-nums">{formatNumber(session.turn_count)}</td>
-                  <td className="px-3 py-2.5"><span className={cn("tabular-nums", session.failed_turns > 0 && "text-analytics-danger")}>{formatNumber(session.failed_turns)}</span><div className="text-xs text-muted-foreground">LLM {formatNumber(session.llm_errors)}</div></td>
+                  <td className="px-3 py-2.5"><span className={cn("tabular-nums", session.failed_turns > 0 && "text-analytics-danger")}>{formatNumber(session.failed_turns)}</span><div className="text-xs text-muted-foreground">{t("sessions.llmErrors", { count: session.llm_errors ?? 0 })}</div></td>
                   <td className="px-3 py-2.5"><QualityBadge quality={session.usage_quality} coverage={session.usage_coverage} partial={session.partial} /></td>
                   <td className="px-3 py-2.5"><Badge className={statusTone(session.status)}>{session.status || t("status.unknown")}</Badge></td>
                   <td className="px-2 py-2.5"><Link to={href} className={cn(buttonVariants({ variant: "ghost", size: "sm" }), "h-8 w-8 px-0")} aria-label={t("sessions.open", { id: session.session_id })}><ChevronRightIcon size={15} /></Link></td>

@@ -67,11 +67,11 @@ export function AnalyticsHeader({ onRefresh, refreshing }: { onRefresh: () => vo
           <Link
             to="/runtime/config"
             className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
-            aria-label="Runtime"
-            title="Runtime"
+            aria-label={t("runtime")}
+            title={t("runtime")}
           >
             <DatabaseIcon size={14} />
-            <span className="hidden sm:inline">Runtime</span>
+            <span className="hidden sm:inline">{t("runtime")}</span>
           </Link>
           <Button
             variant="secondary"

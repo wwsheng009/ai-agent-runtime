@@ -1,5 +1,6 @@
 import { CheckIcon, CopyIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -62,6 +63,7 @@ function CodeBlockSurface({
   collapseLineCount,
   streaming,
 }: CodeBlockSurfaceProps) {
+  const { t } = useTranslation("common");
   const [copied, setCopied] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [highlightedLines, setHighlightedLines] = useState(() =>
@@ -115,13 +117,18 @@ function CodeBlockSurface({
       <div className="flex items-center justify-between border-b border-border bg-code-block-header-bg px-3 py-2">
         <div className="min-w-0">
           <div className="truncate app-text-13 font-semibold text-code-block-foreground">
-            {title ?? "Code snippet"}
+            {title ?? t("codeBlock.fallbackTitle")}
           </div>
           <div className="mt-0.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
             {language}
           </div>
         </div>
-        <Button variant="ghost" size="icon" aria-label="Copy code" onClick={handleCopy}>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label={t("codeBlock.copy")}
+          onClick={handleCopy}
+        >
           {copied ? <CheckIcon size={16} /> : <CopyIcon size={16} />}
         </Button>
       </div>
@@ -163,8 +170,8 @@ function CodeBlockSurface({
           <div className="flex items-center justify-between gap-3">
             <div className="app-text-11 text-muted-foreground">
               {expanded
-                ? `Showing all ${highlightedLines.length} lines.`
-                : `${hiddenLineCount} more lines hidden for readability.`}
+                ? t("codeBlock.showingAll", { count: highlightedLines.length })
+                : t("codeBlock.hiddenNote", { count: hiddenLineCount })}
             </div>
             <Button
               aria-expanded={expanded}
@@ -173,7 +180,9 @@ function CodeBlockSurface({
               variant="secondary"
               onClick={() => setExpanded((current) => !current)}
             >
-              {expanded ? "Collapse code" : `Show ${hiddenLineCount} more lines`}
+              {expanded
+                ? t("codeBlock.collapse")
+                : t("codeBlock.showMoreLines", { count: hiddenLineCount })}
             </Button>
           </div>
         </div>

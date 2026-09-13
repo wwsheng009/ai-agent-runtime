@@ -54,7 +54,7 @@ describe("MessageList", () => {
     expect(markup).toContain('id="assistant-1-label"');
     expect(markup).toContain('id="assistant-1-meta"');
     expect(markup).toContain('id="assistant-1-status"');
-    expect(markup).toContain("Streaming response in progress");
+    expect(markup).toContain("响应流式输出中");
     expect(markup).toContain('role="status"');
     expect(markup).toContain("Runtime stream active");
   });
@@ -86,10 +86,10 @@ describe("MessageList", () => {
       />,
     );
 
-    expect(markup).toContain("Backtrack");
-    expect(markup).toContain("Edit");
-    expect(markup).toContain('aria-label="Backtrack to this user turn"');
-    expect(markup).toContain('aria-label="Edit this user turn before backtrack"');
+    expect(markup).toContain("回溯");
+    expect(markup).toContain("编辑");
+    expect(markup).toContain('aria-label="回溯到该用户轮次"');
+    expect(markup).toContain('aria-label="在回溯前编辑该用户轮次"');
   });
 
   it("highlights the selected user turn during keyboard backtrack navigation", () => {
@@ -124,7 +124,7 @@ describe("MessageList", () => {
       />,
     );
 
-    expect(markup).toContain("Backtrack navigation active");
+    expect(markup).toContain("回溯导航已激活");
     expect(markup).toContain('aria-current="true"');
     expect(markup).toContain('data-backtrack-selected="true"');
     expect(markup).toContain(" · selected");

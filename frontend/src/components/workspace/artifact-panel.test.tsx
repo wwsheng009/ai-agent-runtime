@@ -71,7 +71,7 @@ describe("ArtifactPanel", () => {
       selectedArtifactId: "artifact-1",
     });
 
-    expect(container.textContent).toContain("Artifacts");
+    expect(container.textContent).toContain("文件产物");
     expect(container.textContent).toContain("runtime-summary.json");
     expect(container.textContent).not.toContain("Thin artifact rail");
     expect(container.textContent).not.toContain("打开详情对话框");
@@ -131,13 +131,13 @@ describe("ArtifactPanel", () => {
     });
 
     const evidenceTab = Array.from(container.querySelectorAll('[role="tab"]')).find(
-      (button) => button.textContent?.includes("Items"),
+      (button) => button.textContent?.includes("条目"),
     );
     const planTab = Array.from(container.querySelectorAll('[role="tab"]')).find(
-      (button) => button.textContent?.includes("Plan"),
+      (button) => button.textContent?.includes("计划"),
     );
     const restorePointsTab = Array.from(container.querySelectorAll('[role="tab"]')).find(
-      (button) => button.textContent?.includes("Restore"),
+      (button) => button.textContent?.includes("还原"),
     );
 
     expect(container.querySelector('[role="tablist"]')).toBeInstanceOf(HTMLElement);

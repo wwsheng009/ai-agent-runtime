@@ -58,7 +58,7 @@ export function RuntimeTransformerOverviewSection({
       >
         <div className="grid gap-3 xl:grid-cols-4">
           <TransformerToggleCard
-            label="high_perf"
+            label={t("editor.transformer.fields.highPerfLabel")}
             description={t("editor.transformer.toggles.highPerf")}
             checked={config.highPerf}
             onCheckedChange={(checked) =>
@@ -66,7 +66,7 @@ export function RuntimeTransformerOverviewSection({
             }
           />
           <TransformerToggleCard
-            label="http_transform_stage_enabled"
+            label={t("editor.transformer.fields.httpTransformStageLabel")}
             description={t("editor.transformer.toggles.httpTransformStage")}
             checked={config.httpTransformStageEnabled}
             onCheckedChange={(checked) =>
@@ -77,7 +77,7 @@ export function RuntimeTransformerOverviewSection({
             }
           />
           <TransformerToggleCard
-            label="cache_adapters"
+            label={t("editor.transformer.fields.cacheAdaptersLabel")}
             description={t("editor.transformer.toggles.cacheAdapters")}
             checked={config.cacheAdapters}
             onCheckedChange={(checked) =>
@@ -85,7 +85,7 @@ export function RuntimeTransformerOverviewSection({
             }
           />
           <TransformerToggleCard
-            label="stream_null_filter"
+            label={t("editor.transformer.fields.streamNullFilterLabel")}
             description={t("editor.transformer.toggles.streamNullFilter")}
             checked={config.streamNullFilter}
             onCheckedChange={(checked) =>

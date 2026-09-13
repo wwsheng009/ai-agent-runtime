@@ -2,6 +2,7 @@
 // 组件专用模块：本文件只导出组件，满足 react-refresh/only-export-components。
 
 import { lazy } from "react";
+import { useTranslation } from "react-i18next";
 
 import { MessageMarkdown } from "@/components/workspace/message-markdown";
 import { useTypewriter } from "@/hooks/workspace/use-typewriter";
@@ -42,6 +43,7 @@ export function MessageSegmentFallback({
 }: {
   segment: Exclude<MessageSegment, { type: "text" }>;
 }) {
+  const { t } = useTranslation("workspace");
   const label =
     segment.type === "code"
       ? "代码块"
@@ -61,12 +63,13 @@ export function MessageSegmentFallback({
       className="rounded-card border border-border bg-surface-softer px-3 py-3 text-sm text-muted-foreground"
       role="status"
     >
-      正在加载 {label}…
+      {t("panels.messages.segmentFallback.loading", { label })}
     </div>
   );
 }
 
 export function RelatedArtifactsFallback({ count }: { count: number }) {
+  const { t } = useTranslation("workspace");
   return (
     <div
       aria-atomic="true"
@@ -74,7 +77,7 @@ export function RelatedArtifactsFallback({ count }: { count: number }) {
       className="mt-3 rounded-card border border-border bg-surface-softer px-3 py-3 text-sm text-muted-foreground"
       role="status"
     >
-      正在加载 {count} 条相关证据…
+      {t("panels.messages.relatedArtifactsFallback.loading", { count })}
     </div>
   );
 }

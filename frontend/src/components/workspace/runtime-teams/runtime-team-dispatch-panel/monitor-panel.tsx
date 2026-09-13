@@ -1,4 +1,5 @@
 import { LoaderCircleIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -30,6 +31,8 @@ export function DispatchMonitorPanel({
   isDispatchMonitorLoading,
   onRefreshDispatchMonitor,
 }: DispatchMonitorPanelProps) {
+  const { t } = useTranslation("workspace");
+
   const comparisonRows = sortDispatchComparisonRows(
     buildDispatchComparisonRows(dispatchTaskResults, dispatchMonitor),
   );
@@ -40,10 +43,10 @@ export function DispatchMonitorPanel({
       <div className="flex items-center justify-between gap-3">
         <div>
           <div className="text-sm font-semibold text-foreground">
-            Dispatch monitor
+            {t("panels.teamsDispatch.monitor.title")}
           </div>
           <div className="mt-1 text-xs text-muted-foreground">
-            Follow task execution across the most recent fan-out batch.
+            {t("panels.teamsDispatch.monitor.description")}
           </div>
         </div>
         <Button
@@ -55,7 +58,7 @@ export function DispatchMonitorPanel({
           {isDispatchMonitorLoading ? (
             <LoaderCircleIcon size={14} className="animate-spin" />
           ) : null}
-          Refresh monitor
+          {t("panels.teamsDispatch.monitor.refresh")}
         </Button>
       </div>
 

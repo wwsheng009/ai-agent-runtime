@@ -112,7 +112,7 @@ export function HarnessPermissionsSection({
                         ))}
                         {(rule.capabilities ?? []).map((capability) => (
                           <Badge key={`${rule.name}-cap-${capability}`}>
-                            cap:{capability}
+                            {t("harness.capabilityBadge", { capability })}
                           </Badge>
                         ))}
                       </SettingsBadgeList>

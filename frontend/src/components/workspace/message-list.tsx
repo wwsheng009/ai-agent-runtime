@@ -2,6 +2,7 @@
 
 import { ScrollTextIcon } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { type Artifact } from "@/data/mock";
 import { isArtifactEvidence } from "@/lib/workspace-artifacts";
@@ -43,6 +44,7 @@ export function MessageList({
   phase,
   style,
 }: MessageListProps) {
+  const { t } = useTranslation("workspace");
   const artifactMap = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
   const lastMessage = messages[messages.length - 1];
   const streamingMessageId =
@@ -160,20 +162,17 @@ export function MessageList({
               <ScrollTextIcon size={18} />
             </div>
             <div className="mt-3 text-sm font-semibold text-foreground">
-              The thread timeline is empty
+              {t("panels.messages.messageList.emptyTitle")}
             </div>
             <p className="mt-2 text-sm leading-6 text-muted-foreground">
-              Start a turn to populate the workspace timeline. Runtime evidence,
-              related items, and streamed output will attach back to the
-              messages that produced them.
+              {t("panels.messages.messageList.emptyHint")}
             </p>
           </div>
         ) : null}
 
         {backtrackNavigationActive ? (
           <div className="rounded-card-lg border border-accent-gold/20 bg-accent-gold/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
-            Backtrack navigation active — use ↑/↓ (or j/k) to choose a user turn,
-            Enter to open the confirm dialog, Esc to exit.
+            {t("panels.messages.messageList.backtrackNavHint")}
           </div>
         ) : null}
 

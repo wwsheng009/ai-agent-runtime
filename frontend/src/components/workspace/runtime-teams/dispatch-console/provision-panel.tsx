@@ -1,6 +1,7 @@
 // 由 components/workspace/runtime-teams/dispatch-console.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { LoaderCircleIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -42,15 +43,17 @@ export function DispatchProvisionPanel({
   provisionUserPrefixDraft,
   provisionWorkspaceDraft,
 }: DispatchProvisionPanelProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <div className={cn("mt-3", consolePanelClass)}>
       <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-        Provision runnable teams and dispatch
+        {t("panels.teamsDispatch.provision.heading")}
       </div>
       <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
         <div>
           <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-            Team count
+            {t("panels.teamsDispatch.provision.teamCount")}
           </div>
           <input
             value={provisionTeamCountDraft}
@@ -61,65 +64,65 @@ export function DispatchProvisionPanel({
         </div>
         <div>
           <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-            Workspace id
+            {t("panels.teamsDispatch.provision.workspaceId")}
           </div>
           <input
             value={provisionWorkspaceDraft}
             onChange={(event) => onProvisionWorkspaceDraftChange(event.target.value)}
-            placeholder="fanout-workspace"
+            placeholder={t("panels.teamsDispatch.provision.workspaceIdPlaceholder")}
             className={consoleInputClass}
           />
         </div>
         <div>
           <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-            Strategy
+            {t("panels.teamsDispatch.provision.strategy")}
           </div>
           <input
             value={provisionStrategyDraft}
             onChange={(event) => onProvisionStrategyDraftChange(event.target.value)}
-            placeholder="parallel-fanout"
+            placeholder={t("panels.teamsDispatch.provision.strategyPlaceholder")}
             className={consoleInputClass}
           />
         </div>
         <div>
           <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-            User prefix
+            {t("panels.teamsDispatch.provision.userPrefix")}
           </div>
           <input
             value={provisionUserPrefixDraft}
             onChange={(event) => onProvisionTaskUserPrefixDraftChange(event.target.value)}
-            placeholder="fanout-user"
+            placeholder={t("panels.teamsDispatch.provision.userPrefixPlaceholder")}
             className={consoleInputClass}
           />
         </div>
         <div>
           <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-            Teammate name prefix
+            {t("panels.teamsDispatch.provision.teammateNamePrefix")}
           </div>
           <input
             value={provisionTeammateNamePrefixDraft}
             onChange={(event) =>
               onProvisionTeammateNamePrefixDraftChange(event.target.value)
             }
-            placeholder="Fanout Worker"
+            placeholder={t("panels.teamsDispatch.provision.teammateNamePrefixPlaceholder")}
             className={consoleInputClass}
           />
         </div>
         <div>
           <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-            Teammate profile
+            {t("panels.teamsDispatch.provision.teammateProfile")}
           </div>
           <input
             value={provisionTeammateProfileDraft}
             onChange={(event) => onProvisionTaskProfileDraftChange(event.target.value)}
-            placeholder="parallel execution worker"
+            placeholder={t("panels.teamsDispatch.provision.teammateProfilePlaceholder")}
             className={consoleInputClass}
           />
         </div>
       </div>
       <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="text-xs text-muted-foreground">
-          Each provisioned team gets a lead session, a worker session, one idle teammate, and the current next task.
+          {t("panels.teamsDispatch.provision.hint")}
         </div>
         <Button
           variant="secondary"
@@ -130,7 +133,7 @@ export function DispatchProvisionPanel({
           {isProvisioningDispatch ? (
             <LoaderCircleIcon size={14} className="animate-spin" />
           ) : null}
-          Provision runnable teams and dispatch
+          {t("panels.teamsDispatch.provision.submit")}
         </Button>
       </div>
     </div>

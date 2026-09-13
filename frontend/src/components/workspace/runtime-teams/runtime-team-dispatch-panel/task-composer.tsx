@@ -1,4 +1,5 @@
 import { LoaderCircleIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -44,28 +45,30 @@ export function DispatchTaskComposer({
   onDispatchTaskToTeams,
   selectedTeamCount,
 }: DispatchTaskComposerProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <>
       <div>
         <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-          Task title
+          {t("panels.teamsDispatch.taskComposer.title")}
         </div>
         <input
           value={dispatchTaskTitleDraft}
           onChange={(event) => onDispatchTaskTitleDraftChange(event.target.value)}
-          placeholder="Parallel review of runtime stream stability"
+          placeholder={t("panels.teamsDispatch.taskComposer.titlePlaceholder")}
           className={dispatchControlClass}
         />
       </div>
 
       <div>
         <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-          Goal
+          {t("panels.teamsDispatch.taskComposer.goal")}
         </div>
         <textarea
           value={dispatchTaskGoalDraft}
           onChange={(event) => onDispatchTaskGoalDraftChange(event.target.value)}
-          placeholder="Have each selected team tackle the same next task from a different angle and report outcomes independently."
+          placeholder={t("panels.teamsDispatch.taskComposer.goalPlaceholder")}
           className={`min-h-24 ${dispatchControlClass} resize-y leading-6`}
         />
       </div>
@@ -73,25 +76,25 @@ export function DispatchTaskComposer({
       <div className="grid gap-3 sm:grid-cols-2">
         <div>
           <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-            Inputs
+            {t("panels.teamsDispatch.taskComposer.inputs")}
           </div>
           <textarea
             value={dispatchTaskInputsDraft}
             onChange={(event) => onDispatchTaskInputsDraftChange(event.target.value)}
-            placeholder={"spec.md\nopen questions\nexpected risks"}
+            placeholder={t("panels.teamsDispatch.taskComposer.inputsPlaceholder")}
             className={`min-h-20 ${dispatchControlClass} resize-y leading-6`}
           />
         </div>
         <div>
           <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-            Deliverables
+            {t("panels.teamsDispatch.taskComposer.deliverables")}
           </div>
           <textarea
             value={dispatchTaskDeliverablesDraft}
             onChange={(event) =>
               onDispatchTaskDeliverablesDraftChange(event.target.value)
             }
-            placeholder={"summary.md\npatch.diff\nvalidation notes"}
+            placeholder={t("panels.teamsDispatch.taskComposer.deliverablesPlaceholder")}
             className={`min-h-20 ${dispatchControlClass} resize-y leading-6`}
           />
         </div>
@@ -100,7 +103,7 @@ export function DispatchTaskComposer({
       <div className="grid gap-3 sm:grid-cols-[160px_1fr]">
         <div>
           <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-            Priority
+            {t("panels.teamsDispatch.taskComposer.priority")}
           </div>
           <input
             value={dispatchTaskPriorityDraft}
@@ -111,16 +114,14 @@ export function DispatchTaskComposer({
         </div>
         <div className="flex items-end">
           <div className="text-xs text-muted-foreground">
-            Tasks are created with `status=ready`, so active team orchestrators can
-            claim and execute them.
+            {t("panels.teamsDispatch.taskComposer.statusHint")}
           </div>
         </div>
       </div>
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="text-xs text-muted-foreground">
-          Use this to fan out the same next task across multiple executable teams
-          for parallel execution.
+          {t("panels.teamsDispatch.taskComposer.submitHint")}
         </div>
         <Button
           variant="primary"
@@ -131,7 +132,7 @@ export function DispatchTaskComposer({
           {isDispatchingTask ? (
             <LoaderCircleIcon size={14} className="animate-spin" />
           ) : null}
-          Dispatch next task
+          {t("panels.teamsDispatch.taskComposer.submit")}
         </Button>
       </div>
 
@@ -165,8 +166,10 @@ export function DispatchTaskComposer({
               </div>
               <div className="mt-2 text-sm text-muted-foreground">
                 {result.status === "created"
-                  ? `task ${truncateIdentifier(result.taskId, 18)} created`
-                  : result.error || "dispatch failed"}
+                  ? t("panels.teamsDispatch.taskComposer.resultCreated", {
+                      taskId: truncateIdentifier(result.taskId, 18),
+                    })
+                  : result.error || t("panels.teamsDispatch.taskComposer.resultFailed")}
               </div>
             </div>
           ))}

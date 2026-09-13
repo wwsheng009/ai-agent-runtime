@@ -6,6 +6,7 @@ import {
   truncateIdentifier,
 } from "@/components/workspace/runtime-teams/shared";
 import { cn, formatRelativeTimestamp } from "@/lib/utils";
+import { useTranslation } from "react-i18next";
 
 import { compactMarkdownClass, dispatchStatusPillClass } from "./format";
 
@@ -14,6 +15,8 @@ type DispatchMonitorEntriesProps = {
 };
 
 export function DispatchMonitorEntries({ dispatchMonitor }: DispatchMonitorEntriesProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <div className="mt-2.5 space-y-1.5">
       {dispatchMonitor.length > 0 ? (
@@ -28,7 +31,9 @@ export function DispatchMonitorEntries({ dispatchMonitor }: DispatchMonitorEntri
                   {truncateIdentifier(entry.teamId, 18)}
                 </div>
                 <div className="mt-0.5 text-xs text-muted-foreground">
-                  task {truncateIdentifier(entry.taskId, 18)}
+                  {t("panels.teamsDispatch.monitor.taskEntry", {
+                    taskId: truncateIdentifier(entry.taskId, 18),
+                  })}
                 </div>
               </div>
               <span
@@ -42,12 +47,26 @@ export function DispatchMonitorEntries({ dispatchMonitor }: DispatchMonitorEntri
             </div>
 
             <div className="mt-2 flex flex-wrap gap-2.5 text-xs text-muted-foreground">
-              {entry.assignee ? <span>assignee {entry.assignee}</span> : null}
+              {entry.assignee ? (
+                <span>
+                  {t("panels.teamsDispatch.monitor.assigneeEntry", {
+                    assignee: entry.assignee,
+                  })}
+                </span>
+              ) : null}
               {entry.lastEventType ? (
-                <span>event {prettyEventType(entry.lastEventType)}</span>
+                <span>
+                  {t("panels.teamsDispatch.monitor.eventEntry", {
+                    event: prettyEventType(entry.lastEventType),
+                  })}
+                </span>
               ) : null}
               {entry.updatedAt ? (
-                <span>updated {formatRelativeTimestamp(entry.updatedAt)}</span>
+                <span>
+                  {t("panels.teamsDispatch.monitor.updatedEntry", {
+                    time: formatRelativeTimestamp(entry.updatedAt),
+                  })}
+                </span>
               ) : null}
             </div>
 
@@ -83,7 +102,7 @@ export function DispatchMonitorEntries({ dispatchMonitor }: DispatchMonitorEntri
         ))
       ) : (
         <div className="text-sm text-muted-foreground">
-          No dispatch monitor data available yet.
+          {t("panels.teamsDispatch.monitor.empty")}
         </div>
       )}
     </div>

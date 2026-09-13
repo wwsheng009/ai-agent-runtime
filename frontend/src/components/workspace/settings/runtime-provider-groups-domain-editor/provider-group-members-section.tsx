@@ -266,16 +266,16 @@ export function ProviderGroupMembersSection({
                 <thead>
                   <tr className="border-b border-border bg-surface-solid text-left">
                     <th className="px-3 py-2 app-text-11 uppercase tracking-[0.12em] text-muted-foreground">
-                      Provider
+                      {t("editor.providerGroups.members.columns.provider")}
                     </th>
                     <th className="px-3 py-2 app-text-11 uppercase tracking-[0.12em] text-muted-foreground">
-                      Role
+                      {t("editor.providerGroups.members.columns.role")}
                     </th>
                     <th className="px-3 py-2 app-text-11 uppercase tracking-[0.12em] text-muted-foreground">
-                      Weight
+                      {t("editor.providerGroups.members.columns.weight")}
                     </th>
                     <th className="px-3 py-2 app-text-11 uppercase tracking-[0.12em] text-muted-foreground">
-                      Enabled
+                      {t("editor.providerGroups.members.columns.enabled")}
                     </th>
                     <th className="px-3 py-2 text-right app-text-11 uppercase tracking-[0.12em] text-muted-foreground">
                       {t("editor.providerGroups.columns.actions")}

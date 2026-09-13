@@ -5,6 +5,7 @@ import {
   truncateIdentifier,
 } from "@/components/workspace/runtime-teams/shared";
 import { cn } from "@/lib/utils";
+import { useTranslation } from "react-i18next";
 
 import {
   detailCardClass,
@@ -26,9 +27,11 @@ export function RuntimeTeamRosterSection({
   open,
   visibleTeammates,
 }: RuntimeTeamRosterSectionProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <TeamDetailsSection
-      title="Teammate roster"
+      title={t("panels.teamsPanels.details.roster.title")}
       badge={<Badge>{details.teammates.length}</Badge>}
       open={open}
       onToggle={onToggle}
@@ -55,7 +58,8 @@ export function RuntimeTeamRosterSection({
                     statusTone(teammate.state),
                   )}
                 >
-                  {teammate.state || "unknown"}
+                  {teammate.state ||
+                    t("panels.teamsPanels.details.statusUnknown")}
                 </span>
               </div>
               {teammate.capabilities && teammate.capabilities.length > 0 ? (
@@ -74,7 +78,7 @@ export function RuntimeTeamRosterSection({
           ))
         ) : (
           <div className="text-sm text-muted-foreground">
-            No teammates registered.
+            {t("panels.teamsPanels.details.roster.empty")}
           </div>
         )}
       </div>

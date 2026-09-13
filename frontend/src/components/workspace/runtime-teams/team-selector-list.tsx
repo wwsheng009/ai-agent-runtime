@@ -3,6 +3,7 @@ import {
   type RuntimeTeamSummaryEntry,
 } from "@/lib/runtime-api";
 import { cn } from "@/lib/utils";
+import { useTranslation } from "react-i18next";
 
 import { truncateIdentifier } from "./shared";
 
@@ -19,6 +20,8 @@ export function TeamSelectorList({
   summaryMap,
   teams,
 }: TeamSelectorListProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <div className="space-y-1.5">
       {teams.map((team) => {
@@ -41,12 +44,20 @@ export function TeamSelectorList({
                 {truncateIdentifier(team.id, 16)}
               </div>
               <span className="shrink-0 app-text-11 uppercase tracking-[0.15em] text-muted-foreground">
-                {team.status || "unknown"}
+                {team.status || t("panels.teamsPanels.details.statusUnknown")}
               </span>
             </div>
             <div className="mt-1.5 flex flex-wrap gap-1.5 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-              <span>{summary?.tasks.total ?? 0} tasks</span>
-              <span>{summary?.teammates.total ?? 0} teammates</span>
+              <span>
+                {t("panels.teamsPanels.teams.tasksCount", {
+                  count: summary?.tasks.total ?? 0,
+                })}
+              </span>
+              <span>
+                {t("panels.teamsPanels.teams.teammatesCount", {
+                  count: summary?.teammates.total ?? 0,
+                })}
+              </span>
               {team.strategy ? <span>{team.strategy}</span> : null}
             </div>
           </button>

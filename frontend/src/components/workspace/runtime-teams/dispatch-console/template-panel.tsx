@@ -1,6 +1,7 @@
 // 由 components/workspace/runtime-teams/dispatch-console.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { cn } from "@/lib/utils";
+import { useTranslation } from "react-i18next";
 
 import { consoleModeButtonClass, consolePanelClass } from "./console-styles";
 import type { DispatchConsoleProps } from "./types";
@@ -15,10 +16,12 @@ export function DispatchTemplatePanel({
   dispatchTemplateMode,
   onDispatchTemplateModeChange,
 }: DispatchTemplatePanelProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <div className={cn("mt-3", consolePanelClass)}>
       <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-        Fan-out template
+        {t("panels.teamsDispatch.template.heading")}
       </div>
       <div className="mt-3 flex flex-wrap gap-2">
         <button
@@ -31,7 +34,7 @@ export function DispatchTemplatePanel({
               : "border-white/10 bg-white/4 text-muted-foreground hover:border-white/14 hover:bg-white/7 hover:text-foreground",
           )}
         >
-          Review / Implement / Verify
+          {t("panels.teamsDispatch.template.reviewImplementVerify")}
         </button>
         <button
           type="button"
@@ -43,13 +46,13 @@ export function DispatchTemplatePanel({
               : "border-white/10 bg-white/4 text-muted-foreground hover:border-white/14 hover:bg-white/7 hover:text-foreground",
           )}
         >
-          Mirror Same Task
+          {t("panels.teamsDispatch.template.mirrorSameTask")}
         </button>
       </div>
       <div className="mt-3 text-sm leading-6 text-muted-foreground">
         {dispatchTemplateMode === "mirror"
-          ? "Every selected team receives the same task payload."
-          : "Teams receive role-specific variants of the same next task so they execute from different angles."}
+          ? t("panels.teamsDispatch.template.mirrorDescription")
+          : t("panels.teamsDispatch.template.roleVariantsDescription")}
       </div>
     </div>
   );

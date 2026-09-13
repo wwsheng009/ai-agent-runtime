@@ -1,6 +1,7 @@
 // 由 components/workspace/runtime-teams/dispatch-console.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { LoaderCircleIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { cn, formatRelativeTimestamp } from "@/lib/utils";
@@ -33,6 +34,8 @@ export function DispatchMonitor({
   isDispatchMonitorLoading,
   onRefreshDispatchMonitor,
 }: DispatchMonitorProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <>
       {dispatchTaskResults.length > 0 ? (
@@ -40,10 +43,10 @@ export function DispatchMonitor({
           <div className="flex items-center justify-between gap-3">
             <div>
               <div className="text-sm font-semibold text-foreground">
-                Dispatch monitor
+                {t("panels.teamsDispatch.monitor.title")}
               </div>
               <div className="mt-1 text-xs text-muted-foreground">
-                Follow task execution across the most recent fan-out batch.
+                {t("panels.teamsDispatch.monitor.description")}
               </div>
             </div>
             <Button
@@ -55,7 +58,7 @@ export function DispatchMonitor({
               {isDispatchMonitorLoading ? (
                 <LoaderCircleIcon size={14} className="animate-spin" />
               ) : null}
-              Refresh monitor
+              {t("panels.teamsDispatch.monitor.refresh")}
             </Button>
           </div>
 
@@ -76,10 +79,14 @@ export function DispatchMonitor({
                 </span>
               ))}
               <span className="rounded-control border border-white/10 bg-white/4 px-2 py-0.5">
-                auto refresh:{" "}
-                {dispatchMonitor.some((entry) => !isTerminalDispatchStatus(entry.status))
-                  ? "active"
-                  : "idle"}
+                {t("panels.teamsDispatch.monitor.autoRefreshLabel")}{" "}
+                {t(
+                  dispatchMonitor.some(
+                    (entry) => !isTerminalDispatchStatus(entry.status),
+                  )
+                    ? "panels.teamsDispatch.monitor.autoRefreshActive"
+                    : "panels.teamsDispatch.monitor.autoRefreshIdle",
+                )}
               </span>
             </div>
           ) : null}
@@ -97,7 +104,9 @@ export function DispatchMonitor({
                         {truncateIdentifier(entry.teamId, 18)}
                       </div>
                       <div className="mt-1 text-xs text-muted-foreground">
-                        task {truncateIdentifier(entry.taskId, 18)}
+                        {t("panels.teamsDispatch.monitor.taskEntry", {
+                          taskId: truncateIdentifier(entry.taskId, 18),
+                        })}
                       </div>
                     </div>
                     <span
@@ -111,12 +120,26 @@ export function DispatchMonitor({
                   </div>
 
                   <div className="mt-2.5 flex flex-wrap gap-3 text-xs text-muted-foreground">
-                    {entry.assignee ? <span>assignee {entry.assignee}</span> : null}
+                    {entry.assignee ? (
+                      <span>
+                        {t("panels.teamsDispatch.monitor.assigneeEntry", {
+                          assignee: entry.assignee,
+                        })}
+                      </span>
+                    ) : null}
                     {entry.lastEventType ? (
-                      <span>event {prettyEventType(entry.lastEventType)}</span>
+                      <span>
+                        {t("panels.teamsDispatch.monitor.eventEntry", {
+                          event: prettyEventType(entry.lastEventType),
+                        })}
+                      </span>
                     ) : null}
                     {entry.updatedAt ? (
-                      <span>updated {formatRelativeTimestamp(entry.updatedAt)}</span>
+                      <span>
+                        {t("panels.teamsDispatch.monitor.updatedEntry", {
+                          time: formatRelativeTimestamp(entry.updatedAt),
+                        })}
+                      </span>
                     ) : null}
                   </div>
 
@@ -148,7 +171,7 @@ export function DispatchMonitor({
               ))
             ) : (
               <div className="text-sm text-muted-foreground">
-                No dispatch monitor data available yet.
+                {t("panels.teamsDispatch.monitor.empty")}
               </div>
             )}
           </div>

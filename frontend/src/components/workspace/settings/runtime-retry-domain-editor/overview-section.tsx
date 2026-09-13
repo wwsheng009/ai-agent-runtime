@@ -64,7 +64,7 @@ export function RuntimeRetryOverviewSection({
         <div className="grid gap-3 xl:grid-cols-[11rem_minmax(0,1fr)_minmax(0,1fr)]">
           <div className="rounded-card border border-border bg-surface-softer p-3">
             <div className="text-sm font-semibold text-foreground">
-              retry.enabled
+              {t("editor.retry.fields.enabled")}
             </div>
             <div className="mt-1 text-xs leading-5 text-muted-foreground">
               {t("editor.retry.enabledHelp")}
@@ -88,7 +88,7 @@ export function RuntimeRetryOverviewSection({
 
           <SettingsSubsectionCard title={t("editor.retry.defaultStrategy")}>
             <div className="grid gap-3 xl:grid-cols-3">
-              <ConfigFormField label="default_max_retries">
+              <ConfigFormField label={t("editor.retry.fields.defaultMaxRetries")}>
                 <input
                   className={editorControlClassName}
                   value={config.defaultMaxRetries}
@@ -101,7 +101,7 @@ export function RuntimeRetryOverviewSection({
                   placeholder="3"
                 />
               </ConfigFormField>
-              <ConfigFormField label="default_retry_delay_ms">
+              <ConfigFormField label={t("editor.retry.fields.defaultRetryDelayMs")}>
                 <input
                   className={editorControlClassName}
                   value={config.defaultRetryDelayMs}
@@ -114,7 +114,9 @@ export function RuntimeRetryOverviewSection({
                   placeholder="1000"
                 />
               </ConfigFormField>
-              <ConfigFormField label="default_backoff_multiplier">
+              <ConfigFormField
+                label={t("editor.retry.fields.defaultBackoffMultiplier")}
+              >
                 <input
                   className={editorControlClassName}
                   value={config.defaultBackoffMultiplier}
@@ -141,7 +143,7 @@ export function RuntimeRetryOverviewSection({
 
         <div className="mt-3 grid gap-3 xl:grid-cols-2">
           <SettingsSubsectionCard
-            title="invalid_encrypted_content_recovery"
+            title={t("editor.retry.invalidEncrypted.title")}
             description={t("editor.retry.invalidEncrypted.description")}
             headerAside={
               <input
@@ -166,7 +168,7 @@ export function RuntimeRetryOverviewSection({
           </SettingsSubsectionCard>
 
           <SettingsSubsectionCard
-            title="enhanced_strategy"
+            title={t("editor.retry.enhancedStrategy.title")}
             description={t("editor.retry.enhancedStrategy.description")}
             headerAside={
               <input
@@ -183,7 +185,7 @@ export function RuntimeRetryOverviewSection({
             }
           >
             <div className="grid gap-3 xl:grid-cols-2">
-              <ConfigFormField label="secondary_threshold">
+              <ConfigFormField label={t("editor.retry.fields.secondaryThreshold")}>
                 <input
                   className={editorControlClassName}
                   value={config.enhancedStrategySecondaryThreshold}
@@ -195,7 +197,7 @@ export function RuntimeRetryOverviewSection({
                   }
                 />
               </ConfigFormField>
-              <ConfigFormField label="fallback_threshold">
+              <ConfigFormField label={t("editor.retry.fields.fallbackThreshold")}>
                 <input
                   className={editorControlClassName}
                   value={config.enhancedStrategyFallbackThreshold}
@@ -207,7 +209,7 @@ export function RuntimeRetryOverviewSection({
                   }
                 />
               </ConfigFormField>
-              <ConfigFormField label="primary_min_score">
+              <ConfigFormField label={t("editor.retry.fields.primaryMinScore")}>
                 <input
                   className={editorControlClassName}
                   value={config.enhancedStrategyPrimaryMinScore}
@@ -219,7 +221,9 @@ export function RuntimeRetryOverviewSection({
                   }
                 />
               </ConfigFormField>
-              <ConfigFormField label="secondary_excluded_score">
+              <ConfigFormField
+                label={t("editor.retry.fields.secondaryExcludedScore")}
+              >
                 <input
                   className={editorControlClassName}
                   value={config.enhancedStrategySecondaryExcludedScore}

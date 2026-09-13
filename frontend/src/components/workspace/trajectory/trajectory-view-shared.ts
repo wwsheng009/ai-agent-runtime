@@ -8,31 +8,47 @@ import type { TrajectoryItem } from "@/lib/trajectory/types";
 
 export type TrajectoryViewFilter = "all" | "tools" | "messages" | "structured";
 
-export const TRAJECTORY_VIEW_FILTERS: ReadonlyArray<{
-  id: TrajectoryViewFilter;
-  label: string;
-}> = [
-  { id: "all", label: "All" },
-  { id: "tools", label: "Tools" },
-  { id: "messages", label: "Messages" },
-  { id: "structured", label: "Structure" },
-];
+/** 筛选标签的 i18n key（由调用方用 workspace ns 的 t 翻译）。 */
+export const TRAJECTORY_VIEW_FILTERS = [
+  { id: "all", labelKey: "panels.shell.trajectory.filters.all" },
+  { id: "tools", labelKey: "panels.shell.trajectory.filters.tools" },
+  { id: "messages", labelKey: "panels.shell.trajectory.filters.messages" },
+  { id: "structured", labelKey: "panels.shell.trajectory.filters.structured" },
+] as const satisfies ReadonlyArray<{ id: TrajectoryViewFilter; labelKey: string }>;
 
-const KIND_LABELS: Record<TrajectoryItem["kind"], string> = {
-  assistant: "message",
-  reasoning: "reasoning",
-  tool: "tool",
-  planning: "planning",
-  orchestration: "orchestration",
-  route: "route",
-  observation: "observation",
-  subagent: "subagent",
-  result: "result",
-  system: "system",
-};
+/** 轨迹 item kind 的 i18n key（由调用方用 workspace ns 的 t 翻译）。 */
+export const TRAJECTORY_ITEM_KIND_KEYS = {
+  assistant: "panels.shell.trajectory.kinds.message",
+  reasoning: "panels.shell.trajectory.kinds.reasoning",
+  tool: "panels.shell.trajectory.kinds.tool",
+  planning: "panels.shell.trajectory.kinds.planning",
+  orchestration: "panels.shell.trajectory.kinds.orchestration",
+  route: "panels.shell.trajectory.kinds.route",
+  observation: "panels.shell.trajectory.kinds.observation",
+  subagent: "panels.shell.trajectory.kinds.subagent",
+  result: "panels.shell.trajectory.kinds.result",
+  system: "panels.shell.trajectory.kinds.system",
+} as const satisfies Record<TrajectoryItem["kind"], string>;
 
-export function trajectoryItemKindLabel(kind: TrajectoryItem["kind"]): string {
-  return KIND_LABELS[kind];
+export function trajectoryItemKindKey(
+  kind: TrajectoryItem["kind"],
+): (typeof TRAJECTORY_ITEM_KIND_KEYS)[TrajectoryItem["kind"]] {
+  return TRAJECTORY_ITEM_KIND_KEYS[kind];
+}
+
+/** 轨迹 item 状态文案的 i18n key（由调用方用 workspace ns 的 t 翻译）。 */
+export const TRAJECTORY_ITEM_STATUS_KEYS = {
+  pending: "panels.shell.trajectory.statuses.pending",
+  running: "panels.shell.trajectory.statuses.running",
+  completed: "panels.shell.trajectory.statuses.completed",
+  failed: "panels.shell.trajectory.statuses.failed",
+  canceled: "panels.shell.trajectory.statuses.canceled",
+} as const satisfies Record<TrajectoryItem["status"], string>;
+
+export function trajectoryItemStatusKey(
+  status: TrajectoryItem["status"],
+): (typeof TRAJECTORY_ITEM_STATUS_KEYS)[TrajectoryItem["status"]] {
+  return TRAJECTORY_ITEM_STATUS_KEYS[status];
 }
 
 /** 渲染语义文本（搜索与详情共用）：text/reasoning → 内容；tool → name + 摘要；structured → JSON。 */

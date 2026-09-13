@@ -65,7 +65,13 @@ export function HarnessPluginsSection({
               >
                 <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                   <span className="app-inline-mono">{plugin.id}</span>
-                  {plugin.version ? <span>v{plugin.version}</span> : null}
+                  {plugin.version ? (
+                    <span>
+                      {t("harness.pluginVersion", {
+                        version: plugin.version,
+                      })}
+                    </span>
+                  ) : null}
                   {plugin.root ? (
                     <span className="app-inline-mono break-all">
                       {plugin.root}

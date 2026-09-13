@@ -7,6 +7,7 @@ import {
 } from "@/components/workspace/runtime-teams/shared";
 import { cn, formatRelativeTimestamp } from "@/lib/utils";
 import { LoaderCircleIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { detailsCardClass, detailsInputClass, detailsPanelClass, detailsPillClass } from "./format";
 import { type TeamDetailsPanelProps } from "./types";
@@ -51,36 +52,38 @@ export function TeamDetailsPanelMailbox({
   onSendMailboxMessage,
   visibleMailbox,
 }: TeamDetailsPanelMailboxProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <div className={detailsPanelClass}>
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-muted-foreground">
-          Mailbox
+          {t("panels.teamsPanels.details.mailbox.title")}
         </div>
         <Badge>{details.mailbox.length}</Badge>
       </div>
       <div className="mt-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-        Recent team messages with broadcast included
+        {t("panels.teamsPanels.details.mailbox.subtitle")}
       </div>
       <div className="mt-3 rounded-[0.75rem] border border-white/8 bg-white/4 px-3 py-2.5">
         <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-          Compose mailbox message
+          {t("panels.teamsPanels.details.mailbox.compose")}
         </div>
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
           <div>
             <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-              From agent
+              {t("panels.teamsPanels.details.mailbox.fromAgent")}
             </div>
             <input
               value={mailboxFromDraft}
               onChange={(event) => onMailboxFromDraftChange(event.target.value)}
-              placeholder="lead"
+              placeholder={t("panels.teamsPanels.details.mailbox.fromPlaceholder")}
               className={detailsInputClass}
             />
           </div>
           <div>
             <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-              To agent
+              {t("panels.teamsPanels.details.mailbox.toAgent")}
             </div>
             <input
               value={mailboxToDraft}
@@ -91,41 +94,41 @@ export function TeamDetailsPanelMailbox({
           </div>
           <div>
             <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-              Kind
+              {t("panels.teamsPanels.details.mailbox.kind")}
             </div>
             <input
               value={mailboxKindDraft}
               onChange={(event) => onMailboxKindDraftChange(event.target.value)}
-              placeholder="info"
+              placeholder={t("panels.teamsPanels.details.mailbox.kindPlaceholder")}
               className={detailsInputClass}
             />
           </div>
           <div>
             <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-              Task id
+              {t("panels.teamsPanels.details.mailbox.taskId")}
             </div>
             <input
               value={mailboxTaskDraft}
               onChange={(event) => onMailboxTaskDraftChange(event.target.value)}
-              placeholder="optional task id"
+              placeholder={t("panels.teamsPanels.details.mailbox.taskIdPlaceholder")}
               className={detailsInputClass}
             />
           </div>
         </div>
         <div className="mt-3">
           <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-            Body
+            {t("panels.teamsPanels.details.mailbox.body")}
           </div>
           <textarea
             value={mailboxBodyDraft}
             onChange={(event) => onMailboxBodyDraftChange(event.target.value)}
-            placeholder="Ask a teammate to confirm scope, deliver an artifact, or acknowledge a task boundary..."
+            placeholder={t("panels.teamsPanels.details.mailbox.bodyPlaceholder")}
             className={cn(detailsInputClass, "min-h-24 resize-y leading-6")}
           />
         </div>
         <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="text-xs text-muted-foreground">
-            Use `*` in `to agent` for broadcast delivery.
+            {t("panels.teamsPanels.details.mailbox.broadcastHint")}
           </div>
           <Button
             variant="secondary"
@@ -136,7 +139,7 @@ export function TeamDetailsPanelMailbox({
             {isSendingMailbox ? (
               <LoaderCircleIcon size={14} className="animate-spin" />
             ) : null}
-            Send mailbox message
+            {t("panels.teamsPanels.details.mailbox.send")}
           </Button>
         </div>
       </div>
@@ -160,7 +163,8 @@ export function TeamDetailsPanelMailbox({
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   <span className="rounded-control border border-white/10 bg-white/6 px-2 py-0.5 app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
-                    {message.kind || "message"}
+                    {message.kind ||
+                      t("panels.teamsPanels.details.mailbox.fallbackKind")}
                   </span>
                   <span
                     className={cn(
@@ -170,16 +174,26 @@ export function TeamDetailsPanelMailbox({
                         : "border-white/10 bg-white/6 text-muted-foreground",
                     )}
                   >
-                    {message.acked_at ? "acked" : "pending"}
+                    {message.acked_at
+                      ? t("panels.teamsPanels.details.mailbox.acked")
+                      : t("panels.teamsPanels.details.mailbox.pending")}
                   </span>
                 </div>
               </div>
               <div className="mt-2 flex flex-wrap gap-3 text-xs text-muted-foreground">
                 {message.created_at ? (
-                  <span>created {formatRelativeTimestamp(message.created_at)}</span>
+                  <span>
+                    {t("panels.teamsPanels.details.mailbox.createdAt", {
+                      time: formatRelativeTimestamp(message.created_at),
+                    })}
+                  </span>
                 ) : null}
                 {message.acked_at ? (
-                  <span>acked {formatRelativeTimestamp(message.acked_at)}</span>
+                  <span>
+                    {t("panels.teamsPanels.details.mailbox.ackedAt", {
+                      time: formatRelativeTimestamp(message.acked_at),
+                    })}
+                  </span>
                 ) : null}
                 <span>{truncateIdentifier(message.id, 14)}</span>
               </div>
@@ -194,7 +208,7 @@ export function TeamDetailsPanelMailbox({
                     {ackingMessageId === message.id ? (
                       <LoaderCircleIcon size={14} className="animate-spin" />
                     ) : null}
-                    Ack message
+                    {t("panels.teamsPanels.details.mailbox.ack")}
                   </Button>
                 </div>
               ) : null}
@@ -202,7 +216,7 @@ export function TeamDetailsPanelMailbox({
           ))
         ) : (
           <div className="text-sm text-muted-foreground">
-            No mailbox activity available.
+            {t("panels.teamsPanels.details.mailbox.empty")}
           </div>
         )}
       </div>

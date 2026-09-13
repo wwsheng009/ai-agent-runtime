@@ -7,6 +7,7 @@ import {
   ImageIcon,
   SparklesIcon,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { type Artifact } from "@/data/mock";
 import { cn } from "@/lib/utils";
@@ -145,6 +146,8 @@ export function ArtifactPanelArtifactSurface({
   onOpenArtifact: (artifactId: string) => void;
   selectedArtifactId: string | null;
 }) {
+  const { t } = useTranslation("workspace");
+
   return (
     <div className="h-full min-h-0 p-2.5">
       <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-panel-lg border border-white/8 bg-white/[0.035]">
@@ -157,7 +160,7 @@ export function ArtifactPanelArtifactSurface({
             />
           ) : (
             <div className="flex h-full items-center justify-center rounded-card border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-muted-foreground">
-              Artifacts appear here as the thread runs.
+              {t("panels.artifacts.list.empty")}
             </div>
           )}
         </div>

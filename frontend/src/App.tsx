@@ -1,5 +1,6 @@
 import { lazy, Suspense } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 
 const LandingPage = lazy(() =>
   import("@/pages/landing-page").then((module) => ({
@@ -67,10 +68,12 @@ export default function App() {
 }
 
 function AppRouteFallback() {
+  const { t } = useTranslation("common");
+
   return (
     <div className="flex min-h-screen items-center justify-center [background:var(--workspace-shell-bg)] px-4 text-foreground">
       <div className="rounded-panel border border-border bg-surface-softer px-4 py-3 text-sm text-muted-foreground">
-        正在加载页面…
+        {t("loading.page")}
       </div>
     </div>
   );

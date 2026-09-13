@@ -57,12 +57,12 @@ describe("TrajectoryDetailPanel reasoning window (P2-6)", () => {
     // 尾部窗口保留原始结尾。
     expect(pre?.textContent?.endsWith("z".repeat(100))).toBe(true);
     // 裁剪提示可见。
-    expect(container.textContent).toContain("leading chars trimmed");
+    expect(container.textContent).toContain("已裁剪前 4,100 个字符");
   });
 
   it("短推理不裁剪（无提示、全文渲染）", () => {
     render(reasoningItem("short reasoning"));
-    expect(container.textContent).not.toContain("trimmed");
+    expect(container.textContent).not.toContain("已裁剪");
     expect(container.querySelector("pre")?.textContent).toBe(
       "short reasoning",
     );

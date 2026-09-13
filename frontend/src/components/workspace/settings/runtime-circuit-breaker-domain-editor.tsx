@@ -56,7 +56,7 @@ export function RuntimeCircuitBreakerDomainEditor({
         description={t("editor.circuitBreaker.failure.description")}
       >
         <div className="grid gap-3 xl:grid-cols-3">
-          <ConfigFormField label="failure_threshold">
+          <ConfigFormField label={t("editor.circuitBreaker.fields.failureThreshold")}>
             <input
               className={editorControlClassName}
               value={config.failureThreshold}
@@ -65,14 +65,14 @@ export function RuntimeCircuitBreakerDomainEditor({
               }
             />
           </ConfigFormField>
-          <ConfigFormField label="failure_rate">
+          <ConfigFormField label={t("editor.circuitBreaker.fields.failureRate")}>
             <input
               className={editorControlClassName}
               value={config.failureRate}
               onChange={(event) => update({ failureRate: event.target.value })}
             />
           </ConfigFormField>
-          <ConfigFormField label="sample_threshold">
+          <ConfigFormField label={t("editor.circuitBreaker.fields.sampleThreshold")}>
             <input
               className={editorControlClassName}
               value={config.sampleThreshold}
@@ -89,7 +89,7 @@ export function RuntimeCircuitBreakerDomainEditor({
         description={t("editor.circuitBreaker.recovery.description")}
       >
         <div className="grid gap-3 xl:grid-cols-3">
-          <ConfigFormField label="window_duration">
+          <ConfigFormField label={t("editor.circuitBreaker.fields.windowDuration")}>
             <input
               className={editorControlClassName}
               value={config.windowDuration}
@@ -98,14 +98,14 @@ export function RuntimeCircuitBreakerDomainEditor({
               }
             />
           </ConfigFormField>
-          <ConfigFormField label="open_timeout">
+          <ConfigFormField label={t("editor.circuitBreaker.fields.openTimeout")}>
             <input
               className={editorControlClassName}
               value={config.openTimeout}
               onChange={(event) => update({ openTimeout: event.target.value })}
             />
           </ConfigFormField>
-          <ConfigFormField label="half_open_max_calls">
+          <ConfigFormField label={t("editor.circuitBreaker.fields.halfOpenMaxCalls")}>
             <input
               className={editorControlClassName}
               value={config.halfOpenMaxCalls}

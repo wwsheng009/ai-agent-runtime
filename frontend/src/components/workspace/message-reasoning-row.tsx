@@ -1,5 +1,6 @@
 import { BrainCircuitIcon, ChevronDownIcon } from "lucide-react";
 import { useId, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { displayReasoningText } from "@/lib/trajectory/reasoning-window";
 import { type ReasoningMessageSegment } from "@/lib/workspace-thread-state";
@@ -19,6 +20,7 @@ export function MessageReasoningRow({
   segment,
   streaming = false,
 }: MessageReasoningRowProps) {
+  const { t } = useTranslation("workspace");
   const [open, setOpen] = useState(false);
   const baseId = useId();
   const titleId = `${baseId}-title`;
@@ -46,7 +48,8 @@ export function MessageReasoningRow({
           className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground"
           id={titleId}
         >
-          Reasoning{running ? "…" : ""}
+          {t("panels.messages.reasoningRow.title")}
+          {running ? "…" : ""}
         </span>
         {running ? (
           <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-accent-teal" />
@@ -69,7 +72,9 @@ export function MessageReasoningRow({
       >
         {trimmed ? (
           <div className="border-b border-border px-3 py-1.5 app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
-            {reasoningDisplay.droppedChars.toLocaleString()} leading chars trimmed
+            {t("panels.messages.reasoningRow.trimmed", {
+              chars: reasoningDisplay.droppedChars.toLocaleString(),
+            })}
           </div>
         ) : null}
         <pre className="max-h-72 overflow-y-auto whitespace-pre-wrap break-words px-3 py-3 app-text-12 app-chat-copy text-muted-foreground">

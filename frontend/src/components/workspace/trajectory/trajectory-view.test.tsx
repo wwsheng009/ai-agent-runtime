@@ -60,7 +60,7 @@ describe("TrajectoryView", () => {
 
   it("空快照显示空状态提示", () => {
     renderView();
-    expect(container.textContent).toContain("No trajectory events yet");
+    expect(container.textContent).toContain("暂无轨迹事件");
   });
 
   it("流式事件逐条出现在明细列表（seq + 摘要）", () => {
@@ -98,7 +98,7 @@ describe("TrajectoryView", () => {
     pushEvent(store, "chunk", 1, { type: "text", content: "implement parser" });
     pushEvent(store, "reasoning", 2, { content: "unrelated note" });
 
-    const input = container.querySelector('input[aria-label="Search trajectory"]');
+    const input = container.querySelector('input[aria-label="搜索轨迹"]');
     expect(input).toBeInstanceOf(HTMLInputElement);
     expect(container.textContent).toContain("#1");
     expect(container.textContent).toContain("#2");
@@ -112,10 +112,10 @@ describe("TrajectoryView", () => {
       button.textContent?.includes("detail body"),
     );
     click(rows[0]);
-    expect(container.querySelector('[aria-label="Close trajectory detail"]')).toBeInstanceOf(
+    expect(container.querySelector('[aria-label="关闭轨迹详情"]')).toBeInstanceOf(
       HTMLButtonElement,
     );
-    expect(container.textContent).toContain("running");
+    expect(container.textContent).toContain("运行中");
   });
 
   it("时间线色块点击选中对应行", () => {
@@ -126,12 +126,10 @@ describe("TrajectoryView", () => {
       tool_call: { id: "c1", name: "read_file" },
     });
 
-    const timelineBlock = container.querySelector(
-      'button[aria-label*="tool 2"], button[aria-label^="tool "]',
-    );
+    const timelineBlock = container.querySelector('button[aria-label="工具 2"]');
     click(timelineBlock);
     expect(container.textContent).toContain("read_file");
-    expect(container.querySelector('[aria-label="Close trajectory detail"]')).toBeInstanceOf(
+    expect(container.querySelector('[aria-label="关闭轨迹详情"]')).toBeInstanceOf(
       HTMLButtonElement,
     );
   });
@@ -143,7 +141,7 @@ describe("TrajectoryView", () => {
 
     act(() => store.reset());
     expect(container.textContent).not.toContain("#1");
-    expect(container.textContent).toContain("No trajectory events yet");
+    expect(container.textContent).toContain("暂无轨迹事件");
   });
 
   it("软重置保留续传游标：下一个 turn 从 session 全局 seq 续传可渲染（回归：只有 system 行的问题）", () => {
@@ -180,7 +178,7 @@ describe("TrajectoryView", () => {
     pushEvent(store, "chunk", 2, { type: "text", content: "session a 2" });
 
     act(() => store.reset({ hard: true }));
-    expect(container.textContent).toContain("No trajectory events yet");
+    expect(container.textContent).toContain("暂无轨迹事件");
 
     // 切换到会话 B：恢复路径从 seq=1 重新推送。
     pushEvent(store, "chunk", 1, { type: "text", content: "session b" });
@@ -193,10 +191,10 @@ describe("TrajectoryView", () => {
     pushEvent(store, "chunk", 1, { type: "text", content: "answer" });
 
     const toolsButton = [...container.querySelectorAll("button")].find((button) =>
-      button.textContent?.trim().startsWith("Tools"),
+      button.textContent?.trim().startsWith("工具"),
     );
     click(toolsButton);
-    expect(container.textContent).toContain("No rows match");
+    expect(container.textContent).toContain("没有匹配当前筛选条件的行。");
   });
 
   it("恢复路径跳过被过滤事件空洞后，后续事件可渲染（回归：tool_started/tool_finished 占 seq 导致只剩 system 行）", () => {

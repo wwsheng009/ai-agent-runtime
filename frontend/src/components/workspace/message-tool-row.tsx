@@ -7,6 +7,7 @@ import {
   XCircleIcon,
 } from "lucide-react";
 import { useId, useState, type ComponentType } from "react";
+import { useTranslation } from "react-i18next";
 
 import { type ToolMessageSegment } from "@/lib/workspace-thread-state";
 import { cn } from "@/lib/utils";
@@ -52,6 +53,7 @@ type MessageToolRowProps = {
 };
 
 export function MessageToolRow({ segment }: MessageToolRowProps) {
+  const { t } = useTranslation("workspace");
   const [open, setOpen] = useState(false);
   const baseId = useId();
   const titleId = `${baseId}-title`;
@@ -105,7 +107,7 @@ export function MessageToolRow({ segment }: MessageToolRowProps) {
         <div className={cn("border-t border-border", !open && "hidden")} hidden={!open} id={panelId}>
           <div className="px-3 py-2.5">
             <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
-              Input
+              {t("panels.messages.toolRow.inputLabel")}
             </div>
             <pre className="mt-1.5 max-h-48 overflow-y-auto whitespace-pre-wrap break-words app-text-12 app-chat-copy text-muted-foreground">
               {segment.argsSummary}
@@ -117,7 +119,7 @@ export function MessageToolRow({ segment }: MessageToolRowProps) {
       {segment.resultSummary?.trim() ? (
         <div className="border-t border-border px-3 py-2.5">
           <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
-            Output
+            {t("panels.messages.toolRow.outputLabel")}
           </div>
           <pre className="mt-1.5 max-h-48 overflow-y-auto whitespace-pre-wrap break-words app-text-12 app-chat-copy text-foreground">
             {segment.resultSummary}

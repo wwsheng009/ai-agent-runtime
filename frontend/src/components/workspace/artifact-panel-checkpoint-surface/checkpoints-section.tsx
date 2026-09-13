@@ -1,6 +1,7 @@
 // 由 components/workspace/artifact-panel-checkpoint-surface.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { HistoryIcon, LoaderCircleIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import {
@@ -32,12 +33,14 @@ export function ArtifactPanelCheckpointsSection({
   selectedCheckpointId,
   sessionId,
 }: ArtifactPanelCheckpointsSectionProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <section className="flex min-h-0 flex-col overflow-hidden rounded-panel-lg border border-white/8 bg-white/[0.035]">
       <div className="flex items-center justify-between gap-3 border-b border-white/8 px-3 py-2.5">
         <div className="inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
           <HistoryIcon size={14} />
-          Restore points
+          {t("panels.artifacts.checkpoints.title")}
         </div>
         <Badge>{checkpoints.length}</Badge>
       </div>
@@ -45,13 +48,12 @@ export function ArtifactPanelCheckpointsSection({
         {checkpointsLoading ? (
           <div className="mb-2 inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
             <LoaderCircleIcon size={14} className="animate-spin" />
-            Loading
+            {t("panels.artifacts.checkpoints.loading")}
           </div>
         ) : null}
         {!sessionId ? (
           <div className="flex h-full items-center justify-center rounded-card border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-muted-foreground">
-            Restore points become available after the thread attaches to a live
-            session.
+            {t("panels.artifacts.checkpoints.noSession")}
           </div>
         ) : checkpointsError ? (
           <div className="rounded-card-lg border border-accent-orange/18 bg-accent-orange/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
@@ -115,7 +117,7 @@ export function ArtifactPanelCheckpointsSection({
           </div>
         ) : (
           <div className="flex h-full items-center justify-center rounded-card border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-muted-foreground">
-            No restore points available for this session yet.
+            {t("panels.artifacts.checkpoints.empty")}
           </div>
         )}
       </div>

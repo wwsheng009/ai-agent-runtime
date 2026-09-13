@@ -4,7 +4,7 @@ import type { TrajectoryItem } from "@/lib/trajectory/types";
 
 import {
   filterTrajectoryItems,
-  trajectoryItemKindLabel,
+  trajectoryItemKindKey,
   trajectoryItemMatches,
   trajectoryItemSummary,
   trajectoryItemText,
@@ -24,13 +24,21 @@ function makeItem(overrides: Partial<TrajectoryItem> & { id: string }): Trajecto
 }
 
 describe("trajectory-view-shared", () => {
-  describe("trajectoryItemKindLabel", () => {
-    it("映射全部 kind", () => {
-      expect(trajectoryItemKindLabel("assistant")).toBe("message");
-      expect(trajectoryItemKindLabel("reasoning")).toBe("reasoning");
-      expect(trajectoryItemKindLabel("tool")).toBe("tool");
-      expect(trajectoryItemKindLabel("subagent")).toBe("subagent");
-      expect(trajectoryItemKindLabel("result")).toBe("result");
+  describe("trajectoryItemKindKey", () => {
+    it("映射全部 kind 到 i18n key", () => {
+      expect(trajectoryItemKindKey("assistant")).toBe(
+        "panels.shell.trajectory.kinds.message",
+      );
+      expect(trajectoryItemKindKey("reasoning")).toBe(
+        "panels.shell.trajectory.kinds.reasoning",
+      );
+      expect(trajectoryItemKindKey("tool")).toBe("panels.shell.trajectory.kinds.tool");
+      expect(trajectoryItemKindKey("subagent")).toBe(
+        "panels.shell.trajectory.kinds.subagent",
+      );
+      expect(trajectoryItemKindKey("result")).toBe(
+        "panels.shell.trajectory.kinds.result",
+      );
     });
   });
 

@@ -1,6 +1,7 @@
 // 由 components/workspace/workspace-sidebar.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { lazy, Suspense } from "react";
+import { useTranslation } from "react-i18next";
 
 import { type RuntimeTeamRecord, type RuntimeTeamSummaryEntry } from "@/lib/runtime-api";
 
@@ -50,10 +51,12 @@ export function WorkspaceSidebarRuntimeTeamsSurface({
 }
 
 function RuntimeTeamsDialogFallback() {
+  const { t } = useTranslation("workspace");
+
   return (
     <div className="fixed inset-0 z-[120] flex items-center justify-center bg-dialog-backdrop px-3 py-4 backdrop-blur-sm">
       <div className="rounded-panel border border-border [background:var(--dialog-bg)] px-3.5 py-2.5 text-sm text-muted-foreground shadow-[0_12px_36px_rgba(0,0,0,0.22)]">
-        Loading runtime teams panel...
+        {t("panels.teamsPanels.summary.loading")}
       </div>
     </div>
   );

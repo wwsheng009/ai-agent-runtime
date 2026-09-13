@@ -1,6 +1,7 @@
 // 由 components/workspace/runtime-teams/dispatch-console.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { Badge } from "@/components/ui/badge";
+import { useTranslation } from "react-i18next";
 
 import { DispatchMonitor } from "./dispatch-console/dispatch-monitor";
 import { DispatchProvisionPanel } from "./dispatch-console/provision-panel";
@@ -53,18 +54,24 @@ export function DispatchConsole({
   summaryMap,
   teams,
 }: DispatchConsoleProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <div className="rounded-panel-lg border border-white/8 bg-black/20 p-3.5">
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="text-sm font-semibold text-foreground">
-            Multi-team next task
+            {t("panels.teamsDispatch.dispatchConsole.title")}
           </div>
           <div className="mt-1 text-xs text-muted-foreground">
-            Create one ready task across multiple active teams so their orchestrators can run in parallel.
+            {t("panels.teamsDispatch.dispatchConsole.description")}
           </div>
         </div>
-        <Badge>{selectedDispatchTeamIds.length} selected</Badge>
+        <Badge>
+          {t("panels.teamsDispatch.dispatchConsole.selectedCount", {
+            count: selectedDispatchTeamIds.length,
+          })}
+        </Badge>
       </div>
 
       <DispatchProvisionPanel

@@ -70,7 +70,7 @@ export function RuntimeRoutingRouteDialog({
 
           <div className="grid gap-3 xl:grid-cols-2">
             <ConfigFormField
-              label="match_path"
+              label={t("editor.routing.fields.matchPath")}
               description={t("editor.routing.fields.matchPathHelp")}
             >
               <input
@@ -82,7 +82,7 @@ export function RuntimeRoutingRouteDialog({
               />
             </ConfigFormField>
             <ConfigFormField
-              label="match_type"
+              label={t("editor.routing.fields.matchType")}
               description={t("editor.routing.fields.matchTypeHelp")}
             >
               <Select
@@ -98,7 +98,7 @@ export function RuntimeRoutingRouteDialog({
               />
             </ConfigFormField>
             <ConfigFormField
-              label="group"
+              label={t("editor.routing.fields.group")}
               description={t("editor.routing.fields.groupHelp")}
             >
               <div className="space-y-2">
@@ -130,7 +130,7 @@ export function RuntimeRoutingRouteDialog({
               </div>
             </ConfigFormField>
             <ConfigFormField
-              label="protocol"
+              label={t("editor.routing.fields.protocol")}
               description={t("editor.routing.fields.protocolHelp")}
             >
               <input
@@ -142,7 +142,7 @@ export function RuntimeRoutingRouteDialog({
               />
             </ConfigFormField>
             <ConfigFormField
-              label="pipeline"
+              label={t("editor.routing.fields.pipeline")}
               description={t("editor.routing.fields.pipelineHelp")}
             >
               <input
@@ -151,10 +151,10 @@ export function RuntimeRoutingRouteDialog({
                 onChange={(event) =>
                   setDraft((current) => ({ ...current, pipeline: event.target.value }))
                 }
-                placeholder="chat-completions"
+                placeholder={t("editor.routing.fields.pipelinePlaceholder")}
               />
             </ConfigFormField>
-            <ConfigFormField label="priority">
+            <ConfigFormField label={t("editor.routing.fields.priority")}>
               <input
                 className={editorControlClassName}
                 value={draft.priority}
@@ -168,7 +168,7 @@ export function RuntimeRoutingRouteDialog({
 
           <div className="grid gap-3 xl:grid-cols-2">
             <ConfigFormField
-              label="match_models"
+              label={t("editor.routing.fields.matchModels")}
               description={t("editor.routing.fields.matchModelsHelp")}
             >
               <textarea
@@ -183,7 +183,7 @@ export function RuntimeRoutingRouteDialog({
               />
             </ConfigFormField>
             <ConfigFormField
-              label="exclude_models"
+              label={t("editor.routing.fields.excludeModels")}
               description={t("editor.routing.fields.excludeModelsHelp")}
             >
               <textarea
@@ -198,7 +198,7 @@ export function RuntimeRoutingRouteDialog({
               />
             </ConfigFormField>
             <ConfigFormField
-              label="match_model_regexes"
+              label={t("editor.routing.fields.matchModelRegexes")}
               description={t("editor.routing.fields.matchModelRegexesHelp")}
             >
               <textarea
@@ -213,7 +213,7 @@ export function RuntimeRoutingRouteDialog({
               />
             </ConfigFormField>
             <ConfigFormField
-              label="exclude_model_regexes"
+              label={t("editor.routing.fields.excludeModelRegexes")}
               description={t("editor.routing.fields.excludeModelRegexesHelp")}
             >
               <textarea

@@ -1,6 +1,7 @@
 // 由 components/workspace/runtime-teams/team-details-panel.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 import { statusTone, truncateIdentifier } from "@/components/workspace/runtime-teams/shared";
 import { cn } from "@/lib/utils";
+import { useTranslation } from "react-i18next";
 
 import { detailsCardClass, detailsPanelClass, detailsPillClass } from "./format";
 import { type TeamDetailsPanelProps } from "./types";
@@ -13,10 +14,12 @@ type TeamDetailsPanelTaskQueueProps = Pick<
 export function TeamDetailsPanelTaskQueue({
   visibleTasks,
 }: TeamDetailsPanelTaskQueueProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <div className={detailsPanelClass}>
       <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-muted-foreground">
-        Task queue
+        {t("panels.teamsPanels.details.taskQueue.title")}
       </div>
       <div className="mt-3 space-y-2">
         {visibleTasks.length > 0 ? (
@@ -37,23 +40,37 @@ export function TeamDetailsPanelTaskQueue({
                     statusTone(task.status),
                   )}
                 >
-                  {task.status || "unknown"}
+                  {task.status || t("panels.teamsPanels.details.statusUnknown")}
                 </span>
               </div>
               <div className="mt-2 flex flex-wrap gap-3 text-xs text-muted-foreground">
-                <span>priority {task.priority ?? 0}</span>
-                {task.assignee ? <span>assignee {task.assignee}</span> : null}
+                <span>
+                  {t("panels.teamsPanels.details.taskQueue.priority", {
+                    count: task.priority ?? 0,
+                  })}
+                </span>
+                {task.assignee ? (
+                  <span>
+                    {t("panels.teamsPanels.details.taskQueue.assignee", {
+                      name: task.assignee,
+                    })}
+                  </span>
+                ) : null}
                 {task.parent_task_id ? (
-                  <span>parent {truncateIdentifier(task.parent_task_id, 12)}</span>
+                  <span>
+                    {t("panels.teamsPanels.details.taskQueue.parent", {
+                      id: truncateIdentifier(task.parent_task_id, 12),
+                    })}
+                  </span>
                 ) : (
-                  <span>root</span>
+                  <span>{t("panels.teamsPanels.details.taskQueue.root")}</span>
                 )}
               </div>
             </div>
           ))
         ) : (
           <div className="text-sm text-muted-foreground">
-            No tasks available.
+            {t("panels.teamsPanels.details.taskQueue.empty")}
           </div>
         )}
       </div>

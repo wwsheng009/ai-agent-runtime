@@ -40,7 +40,7 @@ export function RuntimeRoutingRoutesTable({
 }) {
   return (
       <ConfigDomainTable
-        title="Routes"
+        title={t("editor.routing.routes.tableTitle")}
         titleIcon={GitBranchPlusIcon}
         description={t("editor.routing.routes.tableDescription")}
         items={routes}

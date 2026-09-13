@@ -35,7 +35,7 @@ export function SettingsDialogFallback({ message }: { message: string }) {
 
 export function ArtifactPanelFallback({ message }: { message: string }) {
   return (
-    <aside className="hidden h-full min-h-0 flex-col overflow-hidden border-l border-white/8 [background:var(--workspace-sidebar-bg)] xl:flex">
+    <aside className="flex min-h-0 flex-1 flex-col overflow-hidden [background:var(--workspace-sidebar-bg)]">
       <div className="flex h-full items-center justify-center px-4 text-sm text-muted-foreground">
         {message}
       </div>

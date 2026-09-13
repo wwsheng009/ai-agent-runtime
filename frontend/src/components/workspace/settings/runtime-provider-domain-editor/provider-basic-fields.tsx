@@ -46,57 +46,57 @@ export function ProviderBasicFields({ draft, setDraft }: ProviderBasicFieldsProp
                 optionClassName="text-sm"
               />
             </ConfigFormField>
-            <ConfigFormField label="base_url">
+            <ConfigFormField label={t("editor.providers.fields.baseUrl")}>
               <input
                 className={editorControlClassName}
                 value={draft.baseUrl}
                 onChange={(event) =>
                   setDraft((current) => ({ ...current, baseUrl: event.target.value }))
                 }
-                placeholder="https://api.example.com"
+                placeholder={t("editor.providers.fields.baseUrlPlaceholder")}
               />
             </ConfigFormField>
-            <ConfigFormField label="default_model">
+            <ConfigFormField label={t("editor.providers.fields.defaultModel")}>
               <input
                 className={editorControlClassName}
                 value={draft.defaultModel}
                 onChange={(event) =>
                   setDraft((current) => ({ ...current, defaultModel: event.target.value }))
                 }
-                placeholder="gpt-5.4"
+                placeholder={t("editor.providers.fields.defaultModelPlaceholder")}
               />
             </ConfigFormField>
-            <ConfigFormField label="api_path">
+            <ConfigFormField label={t("editor.providers.fields.apiPath")}>
               <input
                 className={editorControlClassName}
                 value={draft.apiPath}
                 onChange={(event) =>
                   setDraft((current) => ({ ...current, apiPath: event.target.value }))
                 }
-                placeholder="/v1/chat/completions"
+                placeholder={t("editor.providers.fields.apiPathPlaceholder")}
               />
             </ConfigFormField>
-            <ConfigFormField label="forward_url">
+            <ConfigFormField label={t("editor.providers.fields.forwardUrl")}>
               <input
                 className={editorControlClassName}
                 value={draft.forwardUrl}
                 onChange={(event) =>
                   setDraft((current) => ({ ...current, forwardUrl: event.target.value }))
                 }
-                placeholder="/v1/chat/completions"
+                placeholder={t("editor.providers.fields.forwardUrlPlaceholder")}
               />
             </ConfigFormField>
-            <ConfigFormField label="timeout">
+            <ConfigFormField label={t("editor.providers.fields.timeout")}>
               <input
                 className={editorControlClassName}
                 value={draft.timeout}
                 onChange={(event) =>
                   setDraft((current) => ({ ...current, timeout: event.target.value }))
                 }
-                placeholder="300s"
+                placeholder={t("editor.providers.fields.timeoutPlaceholder")}
               />
             </ConfigFormField>
-            <ConfigFormField label="truncation_adapter">
+            <ConfigFormField label={t("editor.providers.fields.truncationAdapter")}>
               <input
                 className={editorControlClassName}
                 value={draft.truncationAdapter}
@@ -106,14 +106,14 @@ export function ProviderBasicFields({ draft, setDraft }: ProviderBasicFieldsProp
                     truncationAdapter: event.target.value,
                   }))
                 }
-                placeholder="openai_local"
+                placeholder={t("editor.providers.fields.truncationAdapterPlaceholder")}
               />
             </ConfigFormField>
           </div>
 
           <div className="grid gap-3 xl:grid-cols-2">
             <ConfigFormField
-              label="supported_models"
+              label={t("editor.providers.fields.supportedModels")}
               description={t("editor.providers.fields.supportedModelsDescription")}
             >
               <textarea
@@ -128,7 +128,7 @@ export function ProviderBasicFields({ draft, setDraft }: ProviderBasicFieldsProp
               />
             </ConfigFormField>
             <ConfigFormField
-              label="support_types"
+              label={t("editor.providers.fields.supportTypes")}
               description={t("editor.providers.fields.supportTypesDescription")}
             >
               <textarea
@@ -145,7 +145,7 @@ export function ProviderBasicFields({ draft, setDraft }: ProviderBasicFieldsProp
           </div>
 
           <ConfigFormField
-            label="api_key"
+            label={t("editor.providers.fields.apiKey")}
             description={t("editor.providers.fields.apiKeyDescription")}
           >
             <textarea

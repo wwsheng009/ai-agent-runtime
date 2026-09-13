@@ -1,6 +1,7 @@
 import { HistoryIcon, LoaderCircleIcon, XIcon } from "lucide-react";
 import { useEffect, useId, useRef } from "react";
 import { createPortal } from "react-dom";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import type { SessionBacktrackDialogState } from "@/hooks/workspace/use-session-backtrack";
@@ -24,6 +25,7 @@ export function MessageBacktrackDialog({
   onPrefillChange,
   state,
 }: MessageBacktrackDialogProps) {
+  const { t } = useTranslation("workspace");
   const titleId = useId();
   const closeRef = useRef<HTMLButtonElement | null>(null);
 
@@ -69,17 +71,16 @@ export function MessageBacktrackDialog({
                 className="text-sm font-semibold tracking-[-0.01em] text-foreground"
                 id={titleId}
               >
-                Backtrack to this user message
+                {t("panels.messages.backtrackDialog.title")}
               </h2>
               <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                Truncate the conversation after this turn and optionally restore
-                later file mutations.
+                {t("panels.messages.backtrackDialog.description")}
               </p>
             </div>
           </div>
           <button
             ref={closeRef}
-            aria-label="Close backtrack dialog"
+            aria-label={t("panels.messages.backtrackDialog.closeLabel")}
             className="inline-flex size-8 items-center justify-center rounded-field border border-white/10 text-muted-foreground transition hover:bg-white/6 hover:text-foreground"
             disabled={state.busy}
             onClick={onClose}
@@ -92,7 +93,7 @@ export function MessageBacktrackDialog({
         <div className="space-y-4 px-4 py-4">
           <div className="rounded-card-lg border border-white/8 bg-white/[0.03] px-3.5 py-3">
             <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
-              Anchor
+              {t("panels.messages.backtrackDialog.anchor")}
               {target ? ` · turn ${target.userTurnIndex}` : null}
             </div>
             <p className="mt-2 text-sm leading-6 text-foreground">
@@ -103,33 +104,35 @@ export function MessageBacktrackDialog({
           {state.busy && !preview ? (
             <div className="inline-flex items-center gap-2 text-sm text-muted-foreground">
               <LoaderCircleIcon className="animate-spin" size={14} />
-              Planning backtrack…
+              {t("panels.messages.backtrackDialog.planning")}
             </div>
           ) : null}
 
           {preview ? (
             <div className="grid gap-2 rounded-card-lg border border-white/8 bg-white/[0.03] px-3.5 py-3 text-sm leading-6 text-muted-foreground">
               <div>
-                Will remove{" "}
+                {t("panels.messages.backtrackDialog.willRemove")}{" "}
                 <span className="text-foreground">
-                  {removedMessages ?? "?"} messages
+                  {removedMessages ?? "?"}{" "}
+                  {t("panels.messages.backtrackDialog.removedMessagesSuffix")}
                 </span>
                 {" / "}
                 <span className="text-foreground">
-                  {removedTurns ?? "?"} later user turns
+                  {removedTurns ?? "?"}{" "}
+                  {t("panels.messages.backtrackDialog.laterUserTurnsSuffix")}
                 </span>
                 .
               </div>
               <div>
-                History keeps the first{" "}
+                {t("panels.messages.backtrackDialog.historyKeepsFirst")}{" "}
                 <span className="text-foreground">
                   {preview.truncated_to_message_count}
                 </span>{" "}
-                messages.
+                {t("panels.messages.backtrackDialog.historyKeepsMessagesSuffix")}
               </div>
               {preview.base_checkpoint_id ? (
                 <div>
-                  Code restore can use base checkpoint{" "}
+                  {t("panels.messages.backtrackDialog.codeRestoreBaseCheckpoint")}{" "}
                   <span className="text-foreground">
                     {preview.base_checkpoint_id.slice(0, 12)}
                   </span>
@@ -139,7 +142,7 @@ export function MessageBacktrackDialog({
                   .
                 </div>
               ) : (
-                <div>No mutation checkpoint is mapped to this turn yet.</div>
+                <div>{t("panels.messages.backtrackDialog.noCheckpoint")}</div>
               )}
               {preview.warnings?.length
                 ? preview.warnings.map((warning) => (
@@ -153,7 +156,7 @@ export function MessageBacktrackDialog({
 
           <fieldset className="space-y-2">
             <legend className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
-              Restore mode
+              {t("panels.messages.backtrackDialog.restoreMode")}
             </legend>
             {(
               [
@@ -187,19 +190,18 @@ export function MessageBacktrackDialog({
 
           <label className="grid gap-2">
             <span className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
-              Edit prompt before prefill
+              {t("panels.messages.backtrackDialog.editPromptLabel")}
             </span>
             <textarea
-              aria-label="Edit backtrack prompt"
+              aria-label={t("panels.messages.backtrackDialog.editPromptAriaLabel")}
               className="min-h-[7.5rem] w-full resize-y rounded-card-lg border border-white/10 bg-white/[0.03] px-3 py-2.5 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-accent-gold/35 focus:bg-white/[0.05]"
               disabled={state.busy}
               onChange={(event) => onEditPromptChange(event.target.value)}
-              placeholder="Edit the original user prompt…"
+              placeholder={t("panels.messages.backtrackDialog.editPromptPlaceholder")}
               value={state.editPrompt}
             />
             <span className="text-xs leading-5 text-muted-foreground">
-              Leave unchanged to keep the original text. Edits are sent as
-              edit_prompt and prefilled into the composer after apply.
+              {t("panels.messages.backtrackDialog.editPromptHint")}
             </span>
           </label>
 
@@ -211,7 +213,7 @@ export function MessageBacktrackDialog({
               onChange={(event) => onPrefillChange(event.target.checked)}
               type="checkbox"
             />
-            Prefill composer with the original (or edited) prompt
+            {t("panels.messages.backtrackDialog.prefillToggle")}
           </label>
 
           {state.error ? (
@@ -223,13 +225,13 @@ export function MessageBacktrackDialog({
 
         <div className="flex items-center justify-end gap-2 border-t border-white/8 px-4 py-3">
           <Button disabled={state.busy} onClick={onClose} variant="ghost">
-            Cancel
+            {t("panels.messages.backtrackDialog.cancel")}
           </Button>
           <Button disabled={!canApply} onClick={onApply}>
             {state.busy ? (
               <span className="inline-flex items-center gap-2">
                 <LoaderCircleIcon className="animate-spin" size={14} />
-                Working…
+                {t("panels.messages.backtrackDialog.working")}
               </span>
             ) : (
               "Confirm backtrack"

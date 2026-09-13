@@ -118,7 +118,7 @@ export function RuntimeMonitorDomainEditor({
             </label>
           </div>
           <div className="grid gap-3">
-            <ConfigFormField label="metrics.path">
+            <ConfigFormField label={t("editor.monitor.fields.metricsPath")}>
               <input
                 className={editorControlClassName}
                 value={config.metricsPath}
@@ -127,7 +127,7 @@ export function RuntimeMonitorDomainEditor({
             </ConfigFormField>
             <SettingsInlineToggleCard
               checked={config.metricsAggregation}
-              label="metrics.aggregation"
+              label={t("editor.monitor.fields.metricsAggregation")}
               description={t("editor.monitor.metrics.aggregationDescription")}
               onCheckedChange={(checked) =>
                 update({ metricsAggregation: checked })
@@ -159,14 +159,14 @@ export function RuntimeMonitorDomainEditor({
             </label>
           </div>
           <div className="grid gap-3 xl:grid-cols-2">
-            <ConfigFormField label="tracing.sampler">
+            <ConfigFormField label={t("editor.monitor.fields.tracingSampler")}>
               <input
                 className={editorControlClassName}
                 value={config.tracingSampler}
                 onChange={(event) => update({ tracingSampler: event.target.value })}
               />
             </ConfigFormField>
-            <ConfigFormField label="tracing.exporter">
+            <ConfigFormField label={t("editor.monitor.fields.tracingExporter")}>
               <input
                 className={editorControlClassName}
                 value={config.tracingExporter}
@@ -175,7 +175,9 @@ export function RuntimeMonitorDomainEditor({
                 }
               />
             </ConfigFormField>
-            <ConfigFormField label="tracing.server_addr">
+            <ConfigFormField
+              label={t("editor.monitor.fields.tracingServerAddr")}
+            >
               <input
                 className={editorControlClassName}
                 value={config.tracingServerAddr}
@@ -210,7 +212,7 @@ export function RuntimeMonitorDomainEditor({
             </label>
           </div>
           <div className="grid gap-3">
-            <ConfigFormField label="alert.webhook_url">
+            <ConfigFormField label={t("editor.monitor.fields.alertWebhookUrl")}>
               <textarea
                 className={`${editorControlClassName} min-h-24 resize-y font-mono`}
                 value={config.alertWebhookUrl}
@@ -220,7 +222,7 @@ export function RuntimeMonitorDomainEditor({
               />
             </ConfigFormField>
             <ConfigFormField
-              label="alert.channels"
+              label={t("editor.monitor.fields.alertChannels")}
               description={t("editor.monitor.alert.channelsDescription")}
             >
               <textarea
@@ -232,7 +234,9 @@ export function RuntimeMonitorDomainEditor({
               />
             </ConfigFormField>
             <div className="grid gap-3 xl:grid-cols-2">
-              <ConfigFormField label="alert.min_threshold">
+              <ConfigFormField
+                label={t("editor.monitor.fields.alertMinThreshold")}
+              >
                 <input
                   className={editorControlClassName}
                   value={config.alertMinThreshold}
@@ -241,7 +245,7 @@ export function RuntimeMonitorDomainEditor({
                   }
                 />
               </ConfigFormField>
-              <ConfigFormField label="alert.severity">
+              <ConfigFormField label={t("editor.monitor.fields.alertSeverity")}>
                 <input
                   className={editorControlClassName}
                   value={config.alertSeverity}
@@ -274,7 +278,9 @@ export function RuntimeMonitorDomainEditor({
               </label>
             </div>
             <div className="grid gap-3 xl:grid-cols-2">
-              <ConfigFormField label="pprof.listen_addr">
+              <ConfigFormField
+                label={t("editor.monitor.fields.pprofListenAddr")}
+              >
                 <input
                   className={editorControlClassName}
                   value={config.pprofListenAddr}
@@ -283,7 +289,9 @@ export function RuntimeMonitorDomainEditor({
                   }
                 />
               </ConfigFormField>
-              <ConfigFormField label="pprof.gc_interval">
+              <ConfigFormField
+                label={t("editor.monitor.fields.pprofGcInterval")}
+              >
                 <input
                   className={editorControlClassName}
                   value={config.pprofGcInterval}
@@ -316,7 +324,9 @@ export function RuntimeMonitorDomainEditor({
               </label>
             </div>
             <div className="grid gap-3 xl:grid-cols-2">
-              <ConfigFormField label="memory.sample_interval">
+              <ConfigFormField
+                label={t("editor.monitor.fields.memorySampleInterval")}
+              >
                 <input
                   className={editorControlClassName}
                   value={config.memorySampleInterval}
@@ -325,7 +335,9 @@ export function RuntimeMonitorDomainEditor({
                   }
                 />
               </ConfigFormField>
-              <ConfigFormField label="memory.alert_threshold_mb">
+              <ConfigFormField
+                label={t("editor.monitor.fields.memoryAlertThresholdMb")}
+              >
                 <input
                   className={editorControlClassName}
                   value={config.memoryAlertThresholdMb}
@@ -334,7 +346,9 @@ export function RuntimeMonitorDomainEditor({
                   }
                 />
               </ConfigFormField>
-              <ConfigFormField label="memory.leak_threshold_percent">
+              <ConfigFormField
+                label={t("editor.monitor.fields.memoryLeakThresholdPercent")}
+              >
                 <input
                   className={editorControlClassName}
                   value={config.memoryLeakThresholdPercent}

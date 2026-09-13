@@ -2,6 +2,7 @@
 
 import { BotIcon, ChevronDownIcon } from "lucide-react";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { getToolSegmentKey } from "@/lib/workspace-thread-state";
@@ -30,6 +31,7 @@ export function HistoryContextMessageCard({
   statusId: string;
   streamingMessageId: string | null;
 }) {
+  const { t } = useTranslation("workspace");
   const [expanded, setExpanded] = useState(false);
   const panelId = `${message.id}-context-panel`;
 
@@ -62,7 +64,7 @@ export function HistoryContextMessageCard({
               </div>
               {message.id === streamingMessageId ? (
                 <Badge className="border-transparent bg-accent-teal/12 text-accent-teal">
-                  Streaming response in progress
+                  {t("panels.messages.messageCard.streamingBadge")}
                 </Badge>
               ) : null}
             </div>

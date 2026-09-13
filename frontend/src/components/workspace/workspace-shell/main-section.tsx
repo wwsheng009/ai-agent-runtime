@@ -165,7 +165,7 @@ export function WorkspaceMainSection({
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
               {trajectoryStore ? (
                 <div
-                  aria-label="Workspace view tabs"
+                  aria-label={t("panels.shell.viewTabs.ariaLabel")}
                   className="flex items-center gap-1 border-b border-border px-3 pt-2"
                   role="tablist"
                 >
@@ -181,7 +181,7 @@ export function WorkspaceMainSection({
                     role="tab"
                     type="button"
                   >
-                    Chat
+                    {t("panels.shell.viewTabs.chat")}
                   </button>
                   <button
                     aria-selected={viewMode === "trajectory"}
@@ -195,7 +195,7 @@ export function WorkspaceMainSection({
                     role="tab"
                     type="button"
                   >
-                    Trajectory
+                    {t("panels.shell.viewTabs.trajectory")}
                   </button>
                 </div>
               ) : null}

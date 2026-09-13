@@ -6,6 +6,7 @@ import {
   truncateIdentifier,
 } from "@/components/workspace/runtime-teams/shared";
 import { cn } from "@/lib/utils";
+import { useTranslation } from "react-i18next";
 
 import { detailCardClass, detailStatusPillClass } from "./format";
 import { TeamDetailsSection } from "./primitives";
@@ -23,9 +24,11 @@ export function RuntimeTeamTaskQueueSection({
   open,
   visibleTasks,
 }: RuntimeTeamTaskQueueSectionProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <TeamDetailsSection
-      title="Task queue"
+      title={t("panels.teamsPanels.details.taskQueue.title")}
       badge={<Badge>{details.tasks.length}</Badge>}
       open={open}
       onToggle={onToggle}
@@ -52,22 +55,38 @@ export function RuntimeTeamTaskQueueSection({
                     statusTone(task.status),
                   )}
                 >
-                  {task.status || "unknown"}
+                  {task.status || t("panels.teamsPanels.details.statusUnknown")}
                 </span>
               </div>
               <div className="mt-1.5 flex flex-wrap gap-2.5 text-xs text-muted-foreground">
-                <span>priority {task.priority ?? 0}</span>
-                {task.assignee ? <span>assignee {task.assignee}</span> : null}
+                <span>
+                  {t("panels.teamsPanels.details.taskQueue.priority", {
+                    count: task.priority ?? 0,
+                  })}
+                </span>
+                {task.assignee ? (
+                  <span>
+                    {t("panels.teamsPanels.details.taskQueue.assignee", {
+                      name: task.assignee,
+                    })}
+                  </span>
+                ) : null}
                 {task.parent_task_id ? (
-                  <span>parent {truncateIdentifier(task.parent_task_id, 12)}</span>
+                  <span>
+                    {t("panels.teamsPanels.details.taskQueue.parent", {
+                      id: truncateIdentifier(task.parent_task_id, 12),
+                    })}
+                  </span>
                 ) : (
-                  <span>root</span>
+                  <span>{t("panels.teamsPanels.details.taskQueue.root")}</span>
                 )}
               </div>
             </div>
           ))
         ) : (
-          <div className="text-sm text-muted-foreground">No tasks available.</div>
+          <div className="text-sm text-muted-foreground">
+            {t("panels.teamsPanels.details.taskQueue.empty")}
+          </div>
         )}
       </div>
     </TeamDetailsSection>

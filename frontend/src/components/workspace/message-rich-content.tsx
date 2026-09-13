@@ -8,6 +8,7 @@ import {
   TriangleAlertIcon,
 } from "lucide-react";
 import { useId, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { CodeBlock } from "@/components/ui/code-block";
 import { MessageMarkdown } from "@/components/workspace/message-markdown";
@@ -295,6 +296,7 @@ export function MessageRelatedArtifacts({
   onSelectArtifact,
   relatedArtifacts,
 }: MessageRelatedArtifactsProps) {
+  const { t } = useTranslation("workspace");
   const [open, setOpen] = useState(false);
   const baseId = useId();
   const titleId = `${baseId}-title`;
@@ -325,7 +327,7 @@ export function MessageRelatedArtifacts({
             id={titleId}
           >
             <PaperclipIcon size={14} />
-            Related evidence
+            {t("panels.messages.richContent.relatedEvidence")}
           </div>
           <div className="mt-1 app-text-11 text-muted-foreground">
             {summary}

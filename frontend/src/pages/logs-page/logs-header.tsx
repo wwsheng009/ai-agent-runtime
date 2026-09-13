@@ -142,7 +142,7 @@ export function LogsHeaderSection({
               className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
             >
               <DatabaseIcon size={14} />
-              Runtime
+              {t("runtime")}
             </Link>
             <Link
               to="/"

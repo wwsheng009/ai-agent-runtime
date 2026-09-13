@@ -1,5 +1,7 @@
 // 由 components/workspace/artifact-detail-dialog.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
+import { useTranslation } from "react-i18next";
+
 import { Button } from "@/components/ui/button";
 import { CodeBlock } from "@/components/ui/code-block";
 import { type Artifact } from "@/data/mock";
@@ -15,14 +17,16 @@ export function ImageArtifactPane({
   artifact,
   imageDetails,
 }: ImageArtifactPaneProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <div className="overflow-hidden rounded-panel-lg border border-border bg-black/20">
       <div className="border-b border-border px-3.5 py-3">
         <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-          Rendered image
+          {t("panels.artifacts.detail.imageTitle")}
         </div>
         <div className="mt-1 text-sm text-muted-foreground">
-          Inspect the generated image at full width. Use the metadata below for prompt and integrity details.
+          {t("panels.artifacts.detail.imageHint")}
         </div>
       </div>
       <div className="p-4">
@@ -58,26 +62,30 @@ type ImageUnavailablePaneProps = {
 };
 
 export function ImageUnavailablePane({ artifact }: ImageUnavailablePaneProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <div className="overflow-hidden rounded-panel-lg border border-border bg-black/20">
       <div className="border-b border-border px-3.5 py-3">
         <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-          Image unavailable
+          {t("panels.artifacts.detail.imageUnavailableTitle")}
         </div>
         <div className="mt-1 text-sm text-muted-foreground">
-          This artifact was recorded as an image, but the MIME type is not renderable inline.
+          {t("panels.artifacts.detail.imageUnavailableHint")}
         </div>
       </div>
       <div className="p-4">
         <div className="rounded-card border border-border bg-surface-softer px-3.5 py-3">
           <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
-            File name
+            {t("panels.artifacts.detail.fileName")}
           </div>
           <div className="mt-1.5 break-all text-sm text-foreground">
             {artifact.name}
           </div>
           <div className="mt-3 app-text-11 text-muted-foreground">
-            MIME type {artifact.mimeType?.trim() || "unknown"} cannot be rendered inline.
+            {t("panels.artifacts.detail.mimeRenderHint", {
+              mime: artifact.mimeType?.trim() || "unknown",
+            })}
           </div>
           <div className="mt-4">
             <Button
@@ -86,7 +94,7 @@ export function ImageUnavailablePane({ artifact }: ImageUnavailablePaneProps) {
               }}
               variant="secondary"
             >
-              Open raw file
+              {t("panels.artifacts.detail.openRawFile")}
             </Button>
           </div>
         </div>
@@ -110,6 +118,8 @@ export function ArtifactPreviewPane({
   previewTabId,
   view,
 }: ArtifactPreviewPaneProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <div
       aria-labelledby={previewTabId}
@@ -121,10 +131,10 @@ export function ArtifactPreviewPane({
     >
       <div className="border-b border-border px-3.5 py-3">
         <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-          Rendered preview
+          {t("panels.artifacts.detail.previewTitle")}
         </div>
         <div className="mt-1 text-sm text-muted-foreground">
-          Use the full dialog width to inspect the rendered output.
+          {t("panels.artifacts.detail.previewHint")}
         </div>
       </div>
       <div className="p-4">
@@ -154,6 +164,8 @@ export function ArtifactSourcePane({
   sourceTabId,
   view,
 }: ArtifactSourcePaneProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <div
       aria-labelledby={sourceTabId}
@@ -165,10 +177,10 @@ export function ArtifactSourcePane({
     >
       <div className="border-b border-border px-3.5 py-3">
         <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-          Source reader
+          {t("panels.artifacts.detail.sourceTitle")}
         </div>
         <div className="mt-1 text-sm text-muted-foreground">
-          Inspect the exact file contents without squeezing them into the rail.
+          {t("panels.artifacts.detail.sourceHint")}
         </div>
       </div>
       <div className="p-4">
@@ -189,14 +201,16 @@ type ArtifactSourceReaderCardProps = {
 export function ArtifactSourceReaderCard({
   artifact,
 }: ArtifactSourceReaderCardProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <div className="overflow-hidden rounded-panel-lg border border-border bg-black/20">
       <div className="border-b border-border px-3.5 py-3">
         <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-          Source reader
+          {t("panels.artifacts.detail.sourceTitle")}
         </div>
         <div className="mt-1 text-sm text-muted-foreground">
-          Inspect the exact structured payload or file contents in a full-width dialog.
+          {t("panels.artifacts.detail.sourceFullHint")}
         </div>
       </div>
       <div className="p-4">

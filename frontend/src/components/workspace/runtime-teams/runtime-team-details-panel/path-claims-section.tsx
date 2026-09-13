@@ -1,4 +1,5 @@
 import { LoaderCircleIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -48,45 +49,47 @@ export function RuntimeTeamPathClaimsSection({
   visiblePathClaims,
   writePathDraft,
 }: RuntimeTeamPathClaimsSectionProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <TeamDetailsSection
-      title="Path claims"
-      subtitle="Active filesystem leases for runtime writers and readers"
+      title={t("panels.teamsPanels.details.pathClaims.title")}
+      subtitle={t("panels.teamsPanels.details.pathClaims.subtitle")}
       badge={<Badge>{details.pathClaims.length}</Badge>}
       open={open}
       onToggle={onToggle}
     >
       <div className={detailCardClass}>
         <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-          Conflict check
+          {t("panels.teamsPanels.details.pathClaims.conflictCheck")}
         </div>
         <div className="mt-2.5 grid gap-2.5">
           <div>
             <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-              Read paths
+              {t("panels.teamsPanels.details.pathClaims.readPaths")}
             </div>
             <textarea
               value={readPathDraft}
               onChange={(event) => onReadPathDraftChange(event.target.value)}
-              placeholder="src/components/workspace/runtime-teams.tsx"
+              placeholder={t("panels.teamsPanels.details.pathClaims.readPlaceholder")}
               className={`min-h-20 ${detailControlClass} resize-y leading-6`}
             />
           </div>
           <div>
             <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-              Write paths
+              {t("panels.teamsPanels.details.pathClaims.writePaths")}
             </div>
             <textarea
               value={writePathDraft}
               onChange={(event) => onWritePathDraftChange(event.target.value)}
-              placeholder="frontend/src/lib/runtime-api.ts"
+              placeholder={t("panels.teamsPanels.details.pathClaims.writePlaceholder")}
               className={`min-h-20 ${detailControlClass} resize-y leading-6`}
             />
           </div>
         </div>
         <div className="mt-2.5 flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between">
           <div className="text-xs text-muted-foreground">
-            Separate multiple paths with new lines or commas.
+            {t("panels.teamsPanels.details.pathClaims.pathsHint")}
           </div>
           <Button
             variant="secondary"
@@ -97,7 +100,7 @@ export function RuntimeTeamPathClaimsSection({
             {isCheckingClaims ? (
               <LoaderCircleIcon size={14} className="animate-spin" />
             ) : null}
-            Check conflicts
+            {t("panels.teamsPanels.details.pathClaims.check")}
           </Button>
         </div>
         {claimCheckError ? (
@@ -109,7 +112,9 @@ export function RuntimeTeamPathClaimsSection({
           <div className="mt-2.5 rounded-[0.75rem] border border-border bg-surface-solid px-3 py-2.5">
             <div className="flex items-center justify-between gap-3">
               <div className="text-[13px] font-semibold text-foreground">
-                {claimCheckState.ok ? "No conflicts detected" : "Conflicts detected"}
+                {claimCheckState.ok
+                  ? t("panels.teamsPanels.details.pathClaims.noConflicts")
+                  : t("panels.teamsPanels.details.pathClaims.conflictsDetected")}
               </div>
               <span
                 className={cn(
@@ -119,7 +124,9 @@ export function RuntimeTeamPathClaimsSection({
                     : "border-accent-orange/24 bg-accent-orange/10 text-accent-orange",
                 )}
               >
-                {claimCheckState.conflicts.length} conflicts
+                {t("panels.teamsPanels.details.pathClaims.conflictsCount", {
+                  count: claimCheckState.conflicts.length,
+                })}
               </span>
             </div>
             {!claimCheckState.ok && claimCheckState.conflicts.length > 0 ? (
@@ -138,8 +145,7 @@ export function RuntimeTeamPathClaimsSection({
               </div>
             ) : (
               <div className="mt-2 text-sm text-muted-foreground">
-                Requested reads and writes can be acquired at the current runtime
-                snapshot.
+                {t("panels.teamsPanels.details.pathClaims.canAcquire")}
               </div>
             )}
           </div>
@@ -161,13 +167,22 @@ export function RuntimeTeamPathClaimsSection({
                       {claim.path}
                     </div>
                     <div className="mt-0.5 flex flex-wrap gap-2.5 text-xs text-muted-foreground">
-                      <span>owner {truncateIdentifier(claim.owner_agent_id, 14)}</span>
-                      <span>task {truncateIdentifier(claim.task_id, 14)}</span>
+                      <span>
+                        {t("panels.teamsPanels.details.pathClaims.owner", {
+                          id: truncateIdentifier(claim.owner_agent_id, 14),
+                        })}
+                      </span>
+                      <span>
+                        {t("panels.teamsPanels.details.pathClaims.task", {
+                          id: truncateIdentifier(claim.task_id, 14),
+                        })}
+                      </span>
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
                     <span className={detailMetaPillClass}>
-                      {claim.mode || "claim"}
+                      {claim.mode ||
+                        t("panels.teamsPanels.details.pathClaims.fallbackMode")}
                     </span>
                     <span
                       className={cn(
@@ -177,15 +192,23 @@ export function RuntimeTeamPathClaimsSection({
                           : "border-accent-orange/24 bg-accent-orange/10 text-accent-orange",
                       )}
                     >
-                      {active ? "active" : "expired"}
+                      {active
+                        ? t("panels.teamsPanels.details.pathClaims.active")
+                        : t("panels.teamsPanels.details.pathClaims.expired")}
                     </span>
                   </div>
                 </div>
                 <div className="mt-1.5 flex flex-wrap gap-2.5 text-xs text-muted-foreground">
                   {claim.lease_until ? (
-                    <span>lease {formatRelativeTimestamp(claim.lease_until)}</span>
+                    <span>
+                      {t("panels.teamsPanels.details.pathClaims.lease", {
+                        time: formatRelativeTimestamp(claim.lease_until),
+                      })}
+                    </span>
                   ) : (
-                    <span>lease open-ended</span>
+                    <span>
+                      {t("panels.teamsPanels.details.pathClaims.leaseOpenEnded")}
+                    </span>
                   )}
                   <span>{truncateIdentifier(claim.id, 14)}</span>
                 </div>
@@ -194,7 +217,7 @@ export function RuntimeTeamPathClaimsSection({
           })
         ) : (
           <div className="text-sm text-muted-foreground">
-            No active path claims available.
+            {t("panels.teamsPanels.details.pathClaims.empty")}
           </div>
         )}
       </div>

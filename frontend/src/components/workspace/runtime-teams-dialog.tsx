@@ -1,6 +1,7 @@
 import { XIcon } from "lucide-react";
 import { lazy, Suspense, useEffect } from "react";
 import { createPortal } from "react-dom";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -35,6 +36,8 @@ export function RuntimeTeamsDialog({
   summaries,
   teams,
 }: RuntimeTeamsDialogProps) {
+  const { t } = useTranslation("workspace");
+
   useEffect(() => {
     if (!open || typeof document === "undefined") {
       return;
@@ -87,20 +90,20 @@ export function RuntimeTeamsDialog({
         <div className="flex items-start justify-between gap-3 border-b border-border px-3.5 py-3 sm:px-4">
           <div>
             <div className="app-text-11 uppercase tracking-[0.16em] text-accent-secondary">
-              Runtime teams
+              {t("panels.teamsDispatch.dialog.eyebrow")}
             </div>
             <h2 className="mt-1 text-lg font-semibold tracking-[-0.03em] text-foreground">
-              团队详情
+              {t("panels.teamsDispatch.dialog.title")}
             </h2>
             <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
-              这里集中显示调度、团队状态、任务、事件、邮箱和路径声明，避免把左侧栏变成长表单。
+              {t("panels.teamsDispatch.dialog.description")}
             </p>
           </div>
           <Button
             variant="ghost"
             size="icon"
             onClick={onClose}
-            aria-label="关闭运行团队详情"
+            aria-label={t("panels.teamsDispatch.dialog.closeAriaLabel")}
           >
             <XIcon size={16} />
           </Button>
@@ -127,9 +130,11 @@ export function RuntimeTeamsDialog({
 }
 
 function RuntimeTeamsDialogContentFallback() {
+  const { t } = useTranslation("workspace");
+
   return (
     <div className="rounded-panel border border-border bg-surface-softer px-3.5 py-2.5 text-sm text-muted-foreground">
-      正在加载 runtime teams 内容…
+      {t("panels.teamsDispatch.dialog.loading")}
     </div>
   );
 }

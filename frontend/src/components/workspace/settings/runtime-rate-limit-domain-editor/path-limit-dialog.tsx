@@ -56,17 +56,17 @@ export function RuntimeRateLimitPathLimitDialog({
         ) : null}
 
         <div className="grid gap-3 xl:grid-cols-2">
-          <ConfigFormField label="path">
+          <ConfigFormField label={t("editor.rateLimit.fields.path")}>
             <input
               className={editorControlClassName}
               value={pathDraft.path}
               onChange={(event) =>
                 setPathDraft((current) => ({ ...current, path: event.target.value }))
               }
-              placeholder="/v1/responses"
+              placeholder={t("editor.rateLimit.fields.pathPlaceholder")}
             />
           </ConfigFormField>
-          <ConfigFormField label="requests_per_minute">
+          <ConfigFormField label={t("editor.rateLimit.fields.requestsPerMinute")}>
             <input
               className={editorControlClassName}
               value={pathDraft.requestsPerMinute}
@@ -78,7 +78,7 @@ export function RuntimeRateLimitPathLimitDialog({
               }
             />
           </ConfigFormField>
-          <ConfigFormField label="burst">
+          <ConfigFormField label={t("editor.rateLimit.fields.burst")}>
             <input
               className={editorControlClassName}
               value={pathDraft.burst}

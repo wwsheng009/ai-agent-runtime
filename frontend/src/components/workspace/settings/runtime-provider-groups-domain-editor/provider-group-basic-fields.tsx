@@ -47,11 +47,11 @@ export function ProviderGroupBasicFields({
                 onChange={(event) =>
                   setDraft((current) => ({ ...current, name: event.target.value }))
                 }
-                placeholder="openai_group"
+                placeholder={t("editor.providerGroups.fields.namePlaceholder")}
               />
             </ConfigFormField>
             <ConfigFormField
-              label="strategy"
+              label={t("editor.providerGroups.fields.strategy")}
               description={t("editor.providerGroups.fields.strategyHelp")}
             >
               <Select
@@ -71,7 +71,7 @@ export function ProviderGroupBasicFields({
                 optionClassName="text-sm"
               />
             </ConfigFormField>
-            <ConfigFormField label="max_retries">
+            <ConfigFormField label={t("editor.providerGroups.fields.maxRetries")}>
               <input
                 className={getDraftFieldClassName(
                   findDraftIssue(draftValidationIssues, "maxRetries") != null,
@@ -85,7 +85,7 @@ export function ProviderGroupBasicFields({
               />
               <FieldIssueText issue={findDraftIssue(draftValidationIssues, "maxRetries")} />
             </ConfigFormField>
-            <ConfigFormField label="retry_delay">
+            <ConfigFormField label={t("editor.providerGroups.fields.retryDelay")}>
               <input
                 className={getDraftFieldClassName(
                   findDraftIssue(draftValidationIssues, "retryDelay") != null,
@@ -94,7 +94,7 @@ export function ProviderGroupBasicFields({
                 onChange={(event) =>
                   setDraft((current) => ({ ...current, retryDelay: event.target.value }))
                 }
-                placeholder="1s"
+                placeholder={t("editor.providerGroups.fields.retryDelayPlaceholder")}
               />
               <FieldIssueText issue={findDraftIssue(draftValidationIssues, "retryDelay")} />
             </ConfigFormField>
@@ -128,7 +128,7 @@ export function ProviderGroupBasicFields({
               </div>
 
               <div className="grid gap-3">
-                <ConfigFormField label="failover.mode">
+                <ConfigFormField label={t("editor.providerGroups.fields.failoverMode")}>
                   <Select
                     ariaLabel={t("editor.providerGroups.fields.failoverModeAria")}
                     value={draft.failoverMode}
@@ -149,7 +149,7 @@ export function ProviderGroupBasicFields({
                     optionClassName="text-sm"
                   />
                 </ConfigFormField>
-                <ConfigFormField label="failover.scope">
+                <ConfigFormField label={t("editor.providerGroups.fields.failoverScope")}>
                   <Select
                     ariaLabel={t("editor.providerGroups.fields.failoverScopeAria")}
                     value={draft.failoverScope}
@@ -200,7 +200,7 @@ export function ProviderGroupBasicFields({
               </div>
 
               <div className="grid gap-3">
-                <ConfigFormField label="truncation.max_retries">
+                <ConfigFormField label={t("editor.providerGroups.fields.truncationMaxRetries")}>
                   <input
                     className={getDraftFieldClassName(
                       findDraftIssue(draftValidationIssues, "truncationMaxRetries") != null,
@@ -220,7 +220,7 @@ export function ProviderGroupBasicFields({
                   />
                 </ConfigFormField>
                 <div className="grid gap-3 xl:grid-cols-2">
-                  <ConfigFormField label="truncation.strategy">
+                  <ConfigFormField label={t("editor.providerGroups.fields.truncationStrategy")}>
                     <Select
                       ariaLabel={t("editor.providerGroups.fields.truncationStrategyAria")}
                       value={draft.truncationStrategy}
@@ -243,7 +243,7 @@ export function ProviderGroupBasicFields({
                       optionClassName="text-sm"
                     />
                   </ConfigFormField>
-                  <ConfigFormField label="truncation.step">
+                  <ConfigFormField label={t("editor.providerGroups.fields.truncationStep")}>
                     <input
                       className={getDraftFieldClassName(
                         findDraftIssue(draftValidationIssues, "truncationStep") != null,

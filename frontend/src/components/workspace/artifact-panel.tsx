@@ -1,6 +1,7 @@
 // 由 components/workspace/artifact-panel.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { Suspense, useId, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { ArtifactPanelArtifactSurface } from "@/components/workspace/artifact-panel/artifact-list";
 import {
@@ -30,6 +31,7 @@ export function ArtifactPanel({
   selectedArtifactId,
   sessionId,
 }: ArtifactPanelProps) {
+  const { t } = useTranslation("workspace");
   const asideTitleId = useId();
   const asideDescriptionId = useId();
   const artifactSurfaceTabId = useId();
@@ -128,7 +130,7 @@ export function ArtifactPanel({
     <aside
       aria-describedby={asideDescriptionId}
       aria-labelledby={asideTitleId}
-      className="hidden h-full min-h-0 flex-col overflow-hidden border-l border-white/8 [background:var(--workspace-sidebar-bg)] xl:flex"
+      className="flex min-h-0 flex-1 flex-col overflow-hidden [background:var(--workspace-sidebar-bg)]"
     >
       <div
         key={selectedArtifactId ?? "none"}
@@ -140,8 +142,7 @@ export function ArtifactPanel({
         {artifactSelectionAnnouncement}
       </div>
       <div className="sr-only" id={asideDescriptionId}>
-        Workspace artifacts, plan preview, restore points, and backtrack audit for
-        the current thread.
+        {t("panels.artifacts.panel.description")}
       </div>
 
     <ArtifactPanelSurfaceTabs

@@ -179,7 +179,7 @@ describe("MessageRelatedArtifacts", () => {
     expect(markup).toContain(`id="${descriptionId}"`);
     expect(markup).toContain('aria-expanded="false"');
     expect(markup).toContain('hidden=""');
-    expect(markup).toContain("Related evidence");
+    expect(markup).toContain("相关证据");
     expect(markup).toContain("1 related evidence item hidden");
     expect(markup).not.toContain("runtime-summary.md");
     expect(markup).not.toContain("Streaming summary snapshot");

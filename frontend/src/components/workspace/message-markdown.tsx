@@ -7,6 +7,7 @@ import {
   useMemo,
   useState,
 } from "react";
+import { useTranslation } from "react-i18next";
 import { SquareIcon } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
@@ -31,6 +32,7 @@ export const MessageMarkdown = memo(function MessageMarkdown({
   interrupted = false,
   streaming = false,
 }: MessageMarkdownProps) {
+  const { t } = useTranslation("workspace");
   const deferredContent = useDeferredValue(content);
   const renderContent = streaming ? deferredContent : content;
   // 稳定区前缀缓存：新 stableContent 以已渲染内容为前缀时（追加场景），
@@ -171,12 +173,12 @@ export const MessageMarkdown = memo(function MessageMarkdown({
 
       {!streaming && interrupted ? (
         <div
-          aria-label="Response stopped"
+          aria-label={t("panels.messages.markdown.stoppedAriaLabel")}
           className="mt-4 inline-flex items-center gap-1.5 rounded-full border border-border bg-surface-solid px-2.5 py-1 app-text-10 font-medium uppercase tracking-[0.12em] text-muted-foreground"
           role="status"
         >
           <SquareIcon aria-hidden="true" size={11} />
-          Stopped
+          {t("panels.messages.markdown.stopped")}
         </div>
       ) : null}
     </div>

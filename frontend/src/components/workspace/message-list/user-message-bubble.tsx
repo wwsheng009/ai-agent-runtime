@@ -1,6 +1,7 @@
 // 由 components/workspace/message-list.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { HistoryIcon, LoaderCircleIcon, PencilLineIcon, User2Icon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -58,6 +59,7 @@ export function UserMessageBubble({
   showBacktrack,
   statusId,
 }: UserMessageBubbleProps) {
+  const { t } = useTranslation("workspace");
   return (
                 <div
                   className={cn(
@@ -109,7 +111,7 @@ export function UserMessageBubble({
                       {showBacktrack ? (
                         <>
                           <Button
-                            aria-label="Edit this user turn before backtrack"
+                            aria-label={t("panels.messages.userBubble.editAriaLabel")}
                             disabled={actionsDisabled}
                             onClick={(event) => {
                               event.stopPropagation();
@@ -122,10 +124,10 @@ export function UserMessageBubble({
                             className="h-7 gap-1.5 px-2 text-[11px] uppercase tracking-[0.12em]"
                           >
                             <PencilLineIcon size={12} />
-                            Edit
+                            {t("panels.messages.userBubble.edit")}
                           </Button>
                           <Button
-                            aria-label="Backtrack to this user turn"
+                            aria-label={t("panels.messages.userBubble.backtrackAriaLabel")}
                             disabled={actionsDisabled}
                             onClick={(event) => {
                               event.stopPropagation();
@@ -141,7 +143,7 @@ export function UserMessageBubble({
                             ) : (
                               <HistoryIcon size={12} />
                             )}
-                            Backtrack
+                            {t("panels.messages.userBubble.backtrack")}
                           </Button>
                         </>
                       ) : null}
@@ -155,11 +157,13 @@ export function UserMessageBubble({
                     {isEditing ? (
                       <div className="space-y-3">
                         <textarea
-                          aria-label="Edit user turn prompt"
+                          aria-label={t("panels.messages.userBubble.editPromptAriaLabel")}
                           className="min-h-[7rem] w-full resize-y rounded-card-lg border border-accent-gold/25 bg-black/10 px-3 py-2.5 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-accent-gold/45 focus:bg-black/15"
                           onChange={(event) => setInlineEditDraft(event.target.value)}
                           onClick={(event) => event.stopPropagation()}
-                          placeholder="Edit this user prompt, then continue to backtrack…"
+                          placeholder={t(
+                            "panels.messages.userBubble.editPromptPlaceholder",
+                          )}
                           value={inlineEditDraft}
                         />
                         <div className="flex flex-wrap items-center justify-end gap-2">
@@ -174,7 +178,7 @@ export function UserMessageBubble({
                             type="button"
                             variant="ghost"
                           >
-                            Cancel
+                            {t("panels.messages.userBubble.cancel")}
                           </Button>
                           <Button
                             disabled={actionsDisabled}
@@ -189,12 +193,11 @@ export function UserMessageBubble({
                             size="sm"
                             type="button"
                           >
-                            Continue to backtrack
+                            {t("panels.messages.userBubble.continue")}
                           </Button>
                         </div>
                         <p className="text-xs leading-5 text-muted-foreground">
-                          Inline edit seeds the backtrack dialog. Confirm there to
-                          truncate later turns and prefill the composer.
+                          {t("panels.messages.userBubble.editHint")}
                         </p>
                       </div>
                     ) : (

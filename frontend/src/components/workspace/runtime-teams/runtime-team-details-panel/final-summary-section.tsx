@@ -1,5 +1,6 @@
 import { MessageMarkdown } from "@/components/workspace/message-markdown";
 import type { TeamDetailsState } from "@/components/workspace/runtime-teams/shared";
+import { useTranslation } from "react-i18next";
 
 import { TeamDetailsSection } from "./primitives";
 
@@ -16,9 +17,11 @@ export function RuntimeTeamFinalSummarySection({
   onToggle,
   open,
 }: RuntimeTeamFinalSummarySectionProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <TeamDetailsSection
-      title="Final summary"
+      title={t("panels.teamsPanels.details.finalSummary.title")}
       loading={isDetailsLoading}
       open={open}
       onToggle={onToggle}
@@ -30,7 +33,7 @@ export function RuntimeTeamFinalSummarySection({
         />
       ) : (
         <p className="text-sm leading-6 text-muted-foreground">
-          No final summary available yet.
+          {t("panels.teamsPanels.details.finalSummary.empty")}
         </p>
       )}
     </TeamDetailsSection>

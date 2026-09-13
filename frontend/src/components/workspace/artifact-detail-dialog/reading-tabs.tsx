@@ -2,6 +2,7 @@
 
 import { EyeIcon, FileCode2Icon } from "lucide-react";
 import { useRef } from "react";
+import { useTranslation } from "react-i18next";
 
 import {
   handleHorizontalTabKeyDown,
@@ -26,11 +27,12 @@ export function ArtifactReadingTabs({
   sourceTabId,
   view,
 }: ArtifactReadingTabsProps) {
+  const { t } = useTranslation("workspace");
   const viewTabRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   return (
     <div
-      aria-label="Artifact reading modes"
+      aria-label={t("panels.artifacts.detail.tabsLabel")}
       aria-orientation="horizontal"
       className="flex flex-wrap gap-2 border-b border-border px-4 py-3"
       role="tablist"
@@ -58,7 +60,7 @@ export function ArtifactReadingTabs({
         className={surfaceButtonClass(view === "preview")}
       >
         <EyeIcon size={14} />
-        Preview
+        {t("panels.artifacts.detail.tabPreview")}
       </button>
       <button
         aria-controls={sourcePanelId}
@@ -83,7 +85,7 @@ export function ArtifactReadingTabs({
         className={surfaceButtonClass(view === "source")}
       >
         <FileCode2Icon size={14} />
-        Source
+        {t("panels.artifacts.detail.tabSource")}
       </button>
     </div>
   );

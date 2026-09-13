@@ -64,15 +64,15 @@ export function RuntimeProviderQueueDefaultsSection({
           <SettingsMiniToggleCard
             checked={config.enabled}
             description={t("editor.providerQueue.enabledDescription")}
-            label="provider_queue.enabled"
+            label={t("editor.providerQueue.fields.enabled")}
             onCheckedChange={(checked) =>
               onChangeConfig({ ...config, enabled: checked })
             }
           />
 
-          <SettingsSubsectionCard title="default_slot">
+          <SettingsSubsectionCard title={t("editor.providerQueue.fields.defaultSlot")}>
             <div className="grid gap-3 xl:grid-cols-4">
-              <ConfigFormField label="max_concurrency">
+              <ConfigFormField label={t("editor.providerQueue.fields.maxConcurrency")}>
                 <input
                   className={editorControlClassName}
                   value={config.defaultMaxConcurrency}
@@ -84,7 +84,7 @@ export function RuntimeProviderQueueDefaultsSection({
                   }
                 />
               </ConfigFormField>
-              <ConfigFormField label="queue_size">
+              <ConfigFormField label={t("editor.providerQueue.fields.queueSize")}>
                 <input
                   className={editorControlClassName}
                   value={config.defaultQueueSize}
@@ -96,7 +96,7 @@ export function RuntimeProviderQueueDefaultsSection({
                   }
                 />
               </ConfigFormField>
-              <ConfigFormField label="queue_timeout">
+              <ConfigFormField label={t("editor.providerQueue.fields.queueTimeout")}>
                 <input
                   className={editorControlClassName}
                   value={config.defaultQueueTimeout}
@@ -108,7 +108,7 @@ export function RuntimeProviderQueueDefaultsSection({
                   }
                 />
               </ConfigFormField>
-              <ConfigFormField label="overflow_strategy">
+              <ConfigFormField label={t("editor.providerQueue.fields.overflowStrategy")}>
                 <input
                   className={editorControlClassName}
                   value={config.defaultOverflowStrategy}

@@ -1,6 +1,7 @@
 import { XIcon } from "lucide-react";
 import { type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { DialogOverlay, DialogPanel } from "@/components/ui/dialog-shell";
@@ -25,6 +26,7 @@ export function ConfigDomainDialog({
   title,
   widthClassName = "max-w-5xl",
 }: ConfigDomainDialogProps) {
+  const { t } = useTranslation("runtimeConfig");
   useDialogLifecycle(open, onClose);
 
   if (!open || typeof document === "undefined") {
@@ -37,7 +39,7 @@ export function ConfigDomainDialog({
         <div className="flex items-start justify-between gap-4 border-b border-border px-3 py-3 sm:px-4">
           <div>
             <div className="app-text-11 uppercase tracking-[0.14em] text-accent-secondary">
-              Config editor
+              {t("editor.configDialog.eyebrow")}
             </div>
             <h2 className="mt-1 text-base font-semibold tracking-[-0.02em] text-foreground">
               {title}
@@ -48,7 +50,12 @@ export function ConfigDomainDialog({
               </p>
             ) : null}
           </div>
-          <Button variant="ghost" size="icon" onClick={onClose} aria-label={`关闭${title}`}>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onClose}
+            aria-label={t("editor.configDialog.close", { title })}
+          >
             <XIcon size={16} />
           </Button>
         </div>

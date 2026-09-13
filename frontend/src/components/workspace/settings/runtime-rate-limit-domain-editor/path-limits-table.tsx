@@ -29,7 +29,7 @@ export function RuntimeRateLimitPathLimitsTable({
 }) {
   return (
     <ConfigDomainTable
-      title="Path Limits"
+      title={t("editor.rateLimit.path.tableTitle")}
       titleIcon={GaugeIcon}
       description={t("editor.rateLimit.path.tableDescription")}
       items={pathLimits}

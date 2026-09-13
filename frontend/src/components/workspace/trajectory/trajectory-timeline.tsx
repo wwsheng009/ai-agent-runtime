@@ -6,11 +6,12 @@
  * - 点击色块 → 明细列表滚动到对应行（联动）。
  */
 import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { TrajectoryItem } from "@/lib/trajectory/types";
 import { cn } from "@/lib/utils";
 
-import { trajectoryItemKindLabel, trajectoryItemSummary } from "./trajectory-view-shared";
+import { trajectoryItemKindKey, trajectoryItemSummary } from "./trajectory-view-shared";
 
 const KIND_COLORS: Record<TrajectoryItem["kind"], string> = {
   assistant: "bg-[#6ea8fe]",
@@ -40,6 +41,8 @@ export function TrajectoryTimeline({
   onJumpToItem,
   className,
 }: TrajectoryTimelineProps) {
+  const { t } = useTranslation("workspace");
+
   const segments = useMemo(() => {
     if (items.length === 0) {
       return [];
@@ -66,28 +69,35 @@ export function TrajectoryTimeline({
   return (
     <div className={cn("flex flex-col gap-1.5", className)}>
       <div
-        aria-label="Trajectory timeline"
+        aria-label={t("panels.shell.trajectory.timeline.ariaLabel")}
         className="relative h-7 w-full overflow-hidden rounded-md border border-border bg-surface-solid"
         role="img"
       >
         {segments.map(({ item, left, width }) => (
           <button
             key={item.id}
-            aria-label={`${trajectoryItemKindLabel(item.kind)} ${item.seq}`}
+            aria-label={t("panels.shell.trajectory.timeline.pointAriaLabel", {
+              kind: t(trajectoryItemKindKey(item.kind)),
+              seq: item.seq,
+            })}
             className={cn(
               "absolute top-0.5 h-5 cursor-pointer rounded-[3px] opacity-80 transition hover:opacity-100",
               itemColor(item),
             )}
             onClick={() => onJumpToItem(item.id)}
             style={{ left: `${left}%`, width: `${width}%` }}
-            title={`#${item.seq} ${trajectoryItemKindLabel(item.kind)} — ${trajectoryItemSummary(item, 80)}`}
+            title={t("panels.shell.trajectory.timeline.pointTitle", {
+              seq: item.seq,
+              kind: t(trajectoryItemKindKey(item.kind)),
+              summary: trajectoryItemSummary(item, 80),
+            })}
             type="button"
           />
         ))}
       </div>
       {toolItems.length > 0 ? (
         <div
-          aria-label="Tool lane"
+          aria-label={t("panels.shell.trajectory.timeline.toolLane")}
           className="relative h-2.5 w-full overflow-hidden rounded-sm bg-surface-solid"
           role="img"
         >
@@ -99,11 +109,16 @@ export function TrajectoryTimeline({
             return (
               <button
                 key={item.id}
-                aria-label={`tool ${item.head.kind === "tool" ? item.head.name : item.seq}`}
+                aria-label={t("panels.shell.trajectory.timeline.toolAriaLabel", {
+                  name: item.head.kind === "tool" ? item.head.name : item.seq,
+                })}
                 className="absolute top-0 h-2.5 min-w-1 cursor-pointer rounded-[2px] bg-accent-gold transition hover:opacity-90"
                 onClick={() => onJumpToItem(item.id)}
                 style={{ left: `${left}%` }}
-                title={`tool ${item.head.kind === "tool" ? item.head.name : ""} (#${item.seq})`}
+                title={t("panels.shell.trajectory.timeline.toolTitle", {
+                  name: item.head.kind === "tool" ? item.head.name : "",
+                  seq: item.seq,
+                })}
                 type="button"
               />
             );

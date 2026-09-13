@@ -2,6 +2,7 @@
 
 import { MessageSquarePlusIcon, SearchIcon, Settings2Icon, SparklesIcon, XIcon } from "lucide-react";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { NEW_THREAD_ID } from "@/hooks/workspace/use-workspace-thread-selection";
 import { cn } from "@/lib/utils";
@@ -33,6 +34,8 @@ export function WorkspaceSidebarHeader({
   showSearch,
   t,
 }: WorkspaceSidebarHeaderProps) {
+  const { t: tCommon } = useTranslation("common");
+
   return (
     <div
       className={cn(
@@ -43,7 +46,7 @@ export function WorkspaceSidebarHeader({
       <div className="flex items-center justify-between gap-3">
         <Link to="/" className="flex items-center gap-3" onClick={onCloseMobile}>
           <span className="grid size-8 place-items-center rounded-card border border-border bg-surface-soft text-xs font-semibold text-accent-primary">
-            AR
+            {tCommon("brand.shortName")}
           </span>
           <div>
             <div className="app-text-10 uppercase tracking-[0.16em] text-muted-foreground">

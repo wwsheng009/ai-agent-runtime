@@ -1,6 +1,7 @@
 // 由 components/workspace/artifact-panel.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { useRef, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useTranslation } from "react-i18next";
 import { FileCode2Icon, HistoryIcon, ScrollTextIcon } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -127,16 +128,17 @@ export function ArtifactPanelSurfaceTabs({
   tabIds,
   titleId,
 }: ArtifactPanelSurfaceTabsProps) {
+  const { t } = useTranslation("workspace");
   const surfaceTabRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   return (
     <div className="border-b border-white/8 px-3 py-2.5">
       <div className="flex items-center justify-between gap-3">
         <div className="sr-only" id={titleId}>
-          Artifacts
+          {t("panels.artifacts.tabs.panelTitle")}
         </div>
         <div
-          aria-label="Artifact panel surfaces"
+          aria-label={t("panels.artifacts.tabs.tabListLabel")}
           aria-orientation="horizontal"
           className="flex flex-wrap gap-1.5"
           role="tablist"
@@ -166,7 +168,7 @@ export function ArtifactPanelSurfaceTabs({
             )}
           >
             <FileCode2Icon size={14} />
-            Items
+            {t("panels.artifacts.tabs.items")}
           </button>
           <button
             aria-controls={tabIds.planPanelId}
@@ -195,10 +197,10 @@ export function ArtifactPanelSurfaceTabs({
             disabled={!sessionId}
           >
             <ScrollTextIcon size={14} />
-            Plan
+            {t("panels.artifacts.tabs.plan")}
             {planIsActive ? (
               <span className="rounded-full bg-[#9db7ff]/20 px-1.5 py-0.5 text-[10px] tracking-[0.08em] text-[#9db7ff]">
-                live
+                {t("panels.artifacts.tabs.planLive")}
               </span>
             ) : null}
           </button>
@@ -229,7 +231,7 @@ export function ArtifactPanelSurfaceTabs({
             disabled={!sessionId}
           >
             <HistoryIcon size={14} />
-            Restore
+            {t("panels.artifacts.tabs.restore")}
             {backtrackCount > 0 ? (
               <span className="rounded-full bg-accent-gold/20 px-1.5 py-0.5 text-[10px] tracking-[0.08em] text-accent-gold">
                 {backtrackCount}

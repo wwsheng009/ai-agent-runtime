@@ -64,7 +64,7 @@ export function RuntimeRoutingOverviewSection({
 
         <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_13rem]">
           <ConfigFormField
-            label="routing.strategy"
+            label={t("editor.routing.fields.strategy")}
             description={t("editor.routing.strategyHelp")}
           >
             <input
@@ -76,12 +76,14 @@ export function RuntimeRoutingOverviewSection({
                   strategy: event.target.value,
                 })
               }
-              placeholder="health"
+              placeholder={t("editor.routing.fields.strategyPlaceholder")}
             />
           </ConfigFormField>
 
           <div className="rounded-card border border-border bg-surface-softer p-3">
-            <div className="text-[13px] font-semibold text-foreground">routing.failover</div>
+            <div className="text-[13px] font-semibold text-foreground">
+              {t("editor.routing.fields.failover")}
+            </div>
             <div className="mt-1 text-xs leading-5 text-muted-foreground">
               {t("editor.routing.failoverHelp")}
             </div>

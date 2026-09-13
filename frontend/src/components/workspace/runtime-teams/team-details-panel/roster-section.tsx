@@ -1,6 +1,7 @@
 // 由 components/workspace/runtime-teams/team-details-panel.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 import { statusTone, truncateIdentifier } from "@/components/workspace/runtime-teams/shared";
 import { cn } from "@/lib/utils";
+import { useTranslation } from "react-i18next";
 
 import { detailsCardClass, detailsPanelClass, detailsPillClass } from "./format";
 import { type TeamDetailsPanelProps } from "./types";
@@ -13,10 +14,12 @@ type TeamDetailsPanelRosterProps = Pick<
 export function TeamDetailsPanelRoster({
   visibleTeammates,
 }: TeamDetailsPanelRosterProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <div className={detailsPanelClass}>
       <div className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-muted-foreground">
-        Teammate roster
+        {t("panels.teamsPanels.details.roster.title")}
       </div>
       <div className="mt-3 space-y-2">
         {visibleTeammates.length > 0 ? (
@@ -37,7 +40,7 @@ export function TeamDetailsPanelRoster({
                     statusTone(teammate.state),
                   )}
                 >
-                  {teammate.state || "unknown"}
+                  {teammate.state || t("panels.teamsPanels.details.statusUnknown")}
                 </span>
               </div>
               {teammate.capabilities && teammate.capabilities.length > 0 ? (
@@ -56,7 +59,7 @@ export function TeamDetailsPanelRoster({
           ))
         ) : (
           <div className="text-sm text-muted-foreground">
-            No teammates registered.
+            {t("panels.teamsPanels.details.roster.empty")}
           </div>
         )}
       </div>

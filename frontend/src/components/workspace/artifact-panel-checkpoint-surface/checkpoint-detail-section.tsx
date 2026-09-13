@@ -1,6 +1,7 @@
 // 由 components/workspace/artifact-panel-checkpoint-surface.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { HistoryIcon, LoaderCircleIcon, ScrollTextIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -56,13 +57,15 @@ export function ArtifactPanelCheckpointDetailSection({
   selectedCheckpoint,
   selectedCheckpointFilePath,
 }: ArtifactPanelCheckpointDetailSectionProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <section className="min-h-0 overflow-hidden rounded-panel-lg border border-white/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(255,255,255,0.02))]">
       {selectedCheckpoint ? (
         <div className="flex h-full min-h-0 flex-col">
           <div className="border-b border-white/8 px-3.5 py-3.5">
             <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-              Checkpoint detail
+              {t("panels.artifacts.checkpointDetail.title")}
             </div>
             <div className="mt-2.5 flex items-start justify-between gap-4">
               <div className="min-w-0">
@@ -76,13 +79,19 @@ export function ArtifactPanelCheckpointDetailSection({
                   {formatCheckpointReason(selectedCheckpoint)}
                 </p>
               </div>
-              <Badge>checkpoint</Badge>
+              <Badge>{t("panels.artifacts.checkpointDetail.badgeCheckpoint")}</Badge>
             </div>
 
             <div className="mt-3 flex flex-wrap gap-1.5">
-              <Badge>{selectedCheckpoint.message_count} messages</Badge>
+              <Badge>
+                {t("panels.artifacts.checkpointDetail.messageCount", {
+                  count: selectedCheckpoint.message_count,
+                })}
+              </Badge>
               {selectedCheckpoint.conversation_exact ? (
-                <Badge>exact conversation</Badge>
+                <Badge>
+                  {t("panels.artifacts.checkpointDetail.exactConversation")}
+                </Badge>
               ) : null}
               {selectedCheckpoint.task_id ? (
                 <Badge>{selectedCheckpoint.task_id.slice(0, 12)}</Badge>
@@ -107,7 +116,7 @@ export function ArtifactPanelCheckpointDetailSection({
                   {checkpointRestorePendingId === selectedCheckpoint.id ? (
                     <LoaderCircleIcon size={14} className="animate-spin" />
                   ) : null}
-                  Restore conversation
+                  {t("panels.artifacts.checkpointDetail.restoreConversation")}
                 </Button>
                 <Button
                   disabled={Boolean(checkpointRestorePendingId)}
@@ -116,7 +125,7 @@ export function ArtifactPanelCheckpointDetailSection({
                   type="button"
                   variant="secondary"
                 >
-                  Restore files
+                  {t("panels.artifacts.checkpointDetail.restoreFiles")}
                 </Button>
                 <Button
                   disabled={Boolean(checkpointRestorePendingId)}
@@ -125,7 +134,7 @@ export function ArtifactPanelCheckpointDetailSection({
                   type="button"
                   variant="primary"
                 >
-                  Restore both
+                  {t("panels.artifacts.checkpointDetail.restoreBoth")}
                 </Button>
               </div>
             ) : null}
@@ -155,7 +164,7 @@ export function ArtifactPanelCheckpointDetailSection({
                   <div className="rounded-panel border border-white/8 bg-white/4 p-3.5">
                     <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-muted-foreground">
                       <ScrollTextIcon size={14} />
-                      Conversation snapshot
+                      {t("panels.artifacts.checkpointDetail.conversationSnapshot")}
                     </div>
                     <div className="mt-2.5 space-y-2.5">
                       {checkpointConversationSummary.map((message, index) => (
@@ -180,7 +189,7 @@ export function ArtifactPanelCheckpointDetailSection({
                   <div className="rounded-panel border border-white/8 bg-white/4 p-3.5">
                     <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-muted-foreground">
                       <HistoryIcon size={14} />
-                      Preview summary
+                      {t("panels.artifacts.checkpointDetail.previewSummary")}
                     </div>
                     <div className="mt-2.5 space-y-1.5">
                       {checkpointPreview.preview.map((line, index) => (
@@ -202,10 +211,10 @@ export function ArtifactPanelCheckpointDetailSection({
                   <div className="flex items-center justify-between gap-3 border-b border-white/8 px-3 py-2.5">
                     <div>
                       <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-                        File diff reader
+                        {t("panels.artifacts.checkpointDetail.fileDiffReader")}
                       </div>
                       <div className="mt-1 text-sm text-muted-foreground">
-                        Review captured file changes from the selected checkpoint.
+                        {t("panels.artifacts.checkpointDetail.fileDiffReaderHint")}
                       </div>
                     </div>
                     {checkpointDetailLoading ? (
@@ -228,12 +237,12 @@ export function ArtifactPanelCheckpointDetailSection({
               <div className="space-y-3">
                 <div className="rounded-panel border border-white/8 bg-white/4 p-3.5">
                   <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-                    Snapshot metadata
+                    {t("panels.artifacts.checkpointDetail.snapshotMetadata")}
                   </div>
                   <div className="mt-2.5 space-y-2.5">
                     <div className="rounded-[0.75rem] border border-white/8 bg-black/20 px-3 py-2.5">
                       <div className="app-text-11 uppercase tracking-[0.16em] text-muted-foreground">
-                        Summary
+                        {t("panels.artifacts.checkpointDetail.summary")}
                       </div>
                       <div className="mt-2 text-sm leading-6 text-foreground">
                         {formatCheckpointMeta(selectedCheckpoint)}
@@ -241,7 +250,7 @@ export function ArtifactPanelCheckpointDetailSection({
                     </div>
                     <div className="rounded-[0.75rem] border border-white/8 bg-black/20 px-3 py-2.5">
                       <div className="app-text-11 uppercase tracking-[0.16em] text-muted-foreground">
-                        Reading state
+                        {t("panels.artifacts.checkpointDetail.readingState")}
                       </div>
                       <div className="mt-2 text-sm leading-6 text-foreground">
                         {checkpointFilesForSelection.length > 0
@@ -255,7 +264,7 @@ export function ArtifactPanelCheckpointDetailSection({
                 <div className="rounded-panel border border-white/8 bg-white/4 p-3.5">
                   <div className="flex items-center justify-between gap-3">
                     <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-                      Changed files
+                      {t("panels.artifacts.checkpointDetail.changedFiles")}
                     </div>
                     {checkpointDetailLoading ? (
                       <LoaderCircleIcon
@@ -298,7 +307,7 @@ export function ArtifactPanelCheckpointDetailSection({
                                     : "border-white/10 bg-black/20 text-muted-foreground",
                                 )}
                               >
-                                file
+                                {t("panels.artifacts.checkpointDetail.fileBadge")}
                               </span>
                             </div>
                           </button>
@@ -306,7 +315,7 @@ export function ArtifactPanelCheckpointDetailSection({
                       })
                     ) : (
                       <div className="rounded-[0.75rem] border border-dashed border-white/10 px-3 py-3 text-sm leading-6 text-muted-foreground">
-                        No checkpoint file diffs available yet.
+                        {t("panels.artifacts.checkpointDetail.noFileDiffs")}
                       </div>
                     )}
                   </div>
@@ -321,10 +330,11 @@ export function ArtifactPanelCheckpointDetailSection({
             <div className="mx-auto inline-flex size-10 items-center justify-center rounded-card border border-white/8 bg-white/[0.04] text-muted-foreground">
               <HistoryIcon size={18} />
             </div>
-            <div className="mt-3 text-sm font-semibold">No checkpoint selected</div>
+            <div className="mt-3 text-sm font-semibold">
+              {t("panels.artifacts.checkpointDetail.empty")}
+            </div>
             <div className="mt-2 text-sm leading-6 text-muted-foreground">
-              Select a runtime checkpoint from the timeline to inspect the
-              conversation snapshot, preview summary, and captured file diffs.
+              {t("panels.artifacts.checkpointDetail.emptyHint")}
             </div>
           </div>
         </div>

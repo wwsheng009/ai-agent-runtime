@@ -55,17 +55,17 @@ export function RuntimeProviderQueueProviderDialog({
             <SettingsNoticeCard tone="warning">{dialogError}</SettingsNoticeCard>
           ) : null}
           <div className="grid gap-3 md:grid-cols-2">
-            <ConfigFormField label="provider">
+            <ConfigFormField label={t("editor.providerQueue.fields.provider")}>
               <input
                 className={editorControlClassName}
                 value={draft.provider}
                 onChange={(event) =>
                   setDraft((current) => ({ ...current, provider: event.target.value }))
                 }
-                placeholder="nvidia"
+                placeholder={t("editor.providerQueue.fields.providerPlaceholder")}
               />
             </ConfigFormField>
-            <ConfigFormField label="max_concurrency">
+            <ConfigFormField label={t("editor.providerQueue.fields.maxConcurrency")}>
               <input
                 className={editorControlClassName}
                 value={draft.maxConcurrency}
@@ -78,7 +78,7 @@ export function RuntimeProviderQueueProviderDialog({
                 placeholder="5"
               />
             </ConfigFormField>
-            <ConfigFormField label="queue_size">
+            <ConfigFormField label={t("editor.providerQueue.fields.queueSize")}>
               <input
                 className={editorControlClassName}
                 value={draft.queueSize}
@@ -91,7 +91,7 @@ export function RuntimeProviderQueueProviderDialog({
                 placeholder="20"
               />
             </ConfigFormField>
-            <ConfigFormField label="queue_timeout">
+            <ConfigFormField label={t("editor.providerQueue.fields.queueTimeout")}>
               <input
                 className={editorControlClassName}
                 value={draft.queueTimeout}
@@ -101,7 +101,7 @@ export function RuntimeProviderQueueProviderDialog({
                     queueTimeout: event.target.value,
                   }))
                 }
-                placeholder="60s"
+                placeholder={t("editor.providerQueue.fields.queueTimeoutPlaceholder")}
               />
             </ConfigFormField>
           </div>

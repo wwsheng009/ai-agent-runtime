@@ -68,7 +68,7 @@ export function RuntimeTransformerModifierDialog({
           ) : null}
           <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_11rem]">
             <ConfigFormField
-              label="type"
+              label={t("editor.transformer.fields.typeLabel")}
               description={t("editor.transformer.fields.typeHelp")}
             >
               <input
@@ -77,11 +77,11 @@ export function RuntimeTransformerModifierDialog({
                 onChange={(event) =>
                   setDraft((current) => ({ ...current, type: event.target.value }))
                 }
-                placeholder="disable_params"
+                placeholder={t("editor.transformer.fields.typePlaceholder")}
               />
             </ConfigFormField>
             <TransformerToggleCard
-              label="enabled"
+              label={t("editor.transformer.fields.enabledLabel")}
               description={t("editor.transformer.fields.enabledHelp")}
               checked={draft.enabled}
               onCheckedChange={(checked) =>
@@ -91,7 +91,7 @@ export function RuntimeTransformerModifierDialog({
           </div>
 
           <ConfigFormField
-            label="models"
+            label={t("editor.transformer.fields.modelsLabel")}
             description={t("editor.transformer.fields.modelsHelp")}
           >
             <textarea
@@ -103,13 +103,13 @@ export function RuntimeTransformerModifierDialog({
                   modelsText: event.target.value,
                 }))
               }
-              placeholder="gpt-*\nclaude-*"
+              placeholder={t("editor.transformer.fields.modelsPlaceholder")}
             />
           </ConfigFormField>
 
           <div className="grid gap-3 xl:grid-cols-2">
             <ConfigFormField
-              label="params JSON"
+              label={t("editor.transformer.fields.paramsJsonLabel")}
               description={t("editor.transformer.fields.paramsJsonHelp")}
             >
               <textarea
@@ -122,7 +122,7 @@ export function RuntimeTransformerModifierDialog({
                     paramsJson: event.target.value,
                   }))
                 }
-                placeholder={'{\n  "params": ["temperature"]\n}'}
+                placeholder={t("editor.transformer.fields.paramsJsonPlaceholder")}
               />
             </ConfigFormField>
             <ConfigFormField
@@ -139,7 +139,7 @@ export function RuntimeTransformerModifierDialog({
                     extraJson: event.target.value,
                   }))
                 }
-                placeholder={'{\n  "owner": "platform"\n}'}
+                placeholder={t("editor.transformer.fields.extraJsonPlaceholder")}
               />
             </ConfigFormField>
           </div>

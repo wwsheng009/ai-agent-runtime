@@ -111,7 +111,7 @@ export function FontSizeControlCard({
               className={editorControlClassName}
             />
             <span className="shrink-0 text-base text-muted-foreground">
-              px
+              {t("appearance.customPixelsUnit")}
             </span>
           </span>
         </label>

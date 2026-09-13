@@ -1,4 +1,5 @@
 import { LoaderCircleIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -61,33 +62,35 @@ export function RuntimeTeamMailboxSection({
   open,
   visibleMailbox,
 }: RuntimeTeamMailboxSectionProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <TeamDetailsSection
-      title="Mailbox"
-      subtitle="Recent team messages with broadcast included"
+      title={t("panels.teamsPanels.details.mailbox.title")}
+      subtitle={t("panels.teamsPanels.details.mailbox.subtitle")}
       badge={<Badge>{details.mailbox.length}</Badge>}
       open={open}
       onToggle={onToggle}
     >
       <div className={detailCardClass}>
         <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-          Compose mailbox message
+          {t("panels.teamsPanels.details.mailbox.compose")}
         </div>
         <div className="mt-2.5 grid gap-2.5 sm:grid-cols-2">
           <div>
             <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-              From agent
+              {t("panels.teamsPanels.details.mailbox.fromAgent")}
             </div>
             <input
               value={mailboxFromDraft}
               onChange={(event) => onMailboxFromDraftChange(event.target.value)}
-              placeholder="lead"
+              placeholder={t("panels.teamsPanels.details.mailbox.fromPlaceholder")}
               className={detailControlClass}
             />
           </div>
           <div>
             <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-              To agent
+              {t("panels.teamsPanels.details.mailbox.toAgent")}
             </div>
             <input
               value={mailboxToDraft}
@@ -98,41 +101,41 @@ export function RuntimeTeamMailboxSection({
           </div>
           <div>
             <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-              Kind
+              {t("panels.teamsPanels.details.mailbox.kind")}
             </div>
             <input
               value={mailboxKindDraft}
               onChange={(event) => onMailboxKindDraftChange(event.target.value)}
-              placeholder="info"
+              placeholder={t("panels.teamsPanels.details.mailbox.kindPlaceholder")}
               className={detailControlClass}
             />
           </div>
           <div>
             <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-              Task id
+              {t("panels.teamsPanels.details.mailbox.taskId")}
             </div>
             <input
               value={mailboxTaskDraft}
               onChange={(event) => onMailboxTaskDraftChange(event.target.value)}
-              placeholder="optional task id"
+              placeholder={t("panels.teamsPanels.details.mailbox.taskIdPlaceholder")}
               className={detailControlClass}
             />
           </div>
         </div>
         <div className="mt-2.5">
           <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-            Body
+            {t("panels.teamsPanels.details.mailbox.body")}
           </div>
           <textarea
             value={mailboxBodyDraft}
             onChange={(event) => onMailboxBodyDraftChange(event.target.value)}
-            placeholder="Ask a teammate to confirm scope, deliver an artifact, or acknowledge a task boundary..."
+            placeholder={t("panels.teamsPanels.details.mailbox.bodyPlaceholder")}
             className={`min-h-24 ${detailControlClass} resize-y leading-6`}
           />
         </div>
         <div className="mt-2.5 flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between">
           <div className="text-xs text-muted-foreground">
-            Use `*` in `to agent` for broadcast delivery.
+            {t("panels.teamsPanels.details.mailbox.broadcastHint")}
           </div>
           <Button
             variant="secondary"
@@ -143,7 +146,7 @@ export function RuntimeTeamMailboxSection({
             {isSendingMailbox ? (
               <LoaderCircleIcon size={14} className="animate-spin" />
             ) : null}
-            Send mailbox message
+            {t("panels.teamsPanels.details.mailbox.send")}
           </Button>
         </div>
       </div>
@@ -162,7 +165,8 @@ export function RuntimeTeamMailboxSection({
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="truncate text-[13px] font-semibold text-foreground">
-                    {message.kind || "message"}
+                    {message.kind ||
+                      t("panels.teamsPanels.details.mailbox.fallbackKind")}
                   </div>
                   <div className="mt-0.5 truncate text-xs text-muted-foreground">
                     {describeMailboxRoute(message)}
@@ -170,7 +174,8 @@ export function RuntimeTeamMailboxSection({
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   <span className={detailMetaPillClass}>
-                    {message.kind || "message"}
+                    {message.kind ||
+                      t("panels.teamsPanels.details.mailbox.fallbackKind")}
                   </span>
                   <span
                     className={cn(
@@ -180,7 +185,9 @@ export function RuntimeTeamMailboxSection({
                         : "border-white/10 bg-white/6 text-muted-foreground",
                     )}
                   >
-                    {message.acked_at ? "acked" : "pending"}
+                    {message.acked_at
+                      ? t("panels.teamsPanels.details.mailbox.acked")
+                      : t("panels.teamsPanels.details.mailbox.pending")}
                   </span>
                 </div>
               </div>
@@ -194,10 +201,18 @@ export function RuntimeTeamMailboxSection({
               ) : null}
               <div className="mt-1.5 flex flex-wrap gap-2.5 text-xs text-muted-foreground">
                 {message.created_at ? (
-                  <span>created {formatRelativeTimestamp(message.created_at)}</span>
+                  <span>
+                    {t("panels.teamsPanels.details.mailbox.createdAt", {
+                      time: formatRelativeTimestamp(message.created_at),
+                    })}
+                  </span>
                 ) : null}
                 {message.acked_at ? (
-                  <span>acked {formatRelativeTimestamp(message.acked_at)}</span>
+                  <span>
+                    {t("panels.teamsPanels.details.mailbox.ackedAt", {
+                      time: formatRelativeTimestamp(message.acked_at),
+                    })}
+                  </span>
                 ) : null}
                 <span>{truncateIdentifier(message.id, 14)}</span>
               </div>
@@ -212,7 +227,7 @@ export function RuntimeTeamMailboxSection({
                     {ackingMessageId === message.id ? (
                       <LoaderCircleIcon size={14} className="animate-spin" />
                     ) : null}
-                    Ack message
+                    {t("panels.teamsPanels.details.mailbox.ack")}
                   </Button>
                 </div>
               ) : null}
@@ -220,7 +235,7 @@ export function RuntimeTeamMailboxSection({
           ))
         ) : (
           <div className="text-sm text-muted-foreground">
-            No mailbox activity available.
+            {t("panels.teamsPanels.details.mailbox.empty")}
           </div>
         )}
       </div>

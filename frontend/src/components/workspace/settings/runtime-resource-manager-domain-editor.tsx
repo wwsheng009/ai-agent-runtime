@@ -69,40 +69,52 @@ export function RuntimeResourceManagerDomainEditor({
         <SettingsMiniToggleCard
           checked={config.enabled}
           description={t("editor.resourceManager.enabledDescription")}
-          label="resource_manager.enabled"
+          label={t("editor.resourceManager.fields.enabled")}
           onCheckedChange={(checked) => update({ enabled: checked })}
         />
 
         <SettingsSubsectionCard title={t("editor.resourceManager.defaultAlgorithm")}>
           <div className="grid gap-3 xl:grid-cols-3">
-            <ConfigFormField label="default_group_algorithm">
+            <ConfigFormField
+              label={t("editor.resourceManager.fields.defaultGroupAlgorithm")}
+            >
               <input
                 className={editorControlClassName}
                 value={config.defaultGroupAlgorithm}
                 onChange={(event) =>
                   update({ defaultGroupAlgorithm: event.target.value })
                 }
-                placeholder="tiered"
+                placeholder={t(
+                  "editor.resourceManager.placeholders.groupAlgorithm",
+                )}
               />
             </ConfigFormField>
-            <ConfigFormField label="default_provider_algorithm">
+            <ConfigFormField
+              label={t("editor.resourceManager.fields.defaultProviderAlgorithm")}
+            >
               <input
                 className={editorControlClassName}
                 value={config.defaultProviderAlgorithm}
                 onChange={(event) =>
                   update({ defaultProviderAlgorithm: event.target.value })
                 }
-                placeholder="round_robin"
+                placeholder={t(
+                  "editor.resourceManager.placeholders.providerAlgorithm",
+                )}
               />
             </ConfigFormField>
-            <ConfigFormField label="default_key_algorithm">
+            <ConfigFormField
+              label={t("editor.resourceManager.fields.defaultKeyAlgorithm")}
+            >
               <input
                 className={editorControlClassName}
                 value={config.defaultKeyAlgorithm}
                 onChange={(event) =>
                   update({ defaultKeyAlgorithm: event.target.value })
                 }
-                placeholder="health_based"
+                placeholder={t(
+                  "editor.resourceManager.placeholders.keyAlgorithm",
+                )}
               />
             </ConfigFormField>
           </div>
@@ -111,7 +123,7 @@ export function RuntimeResourceManagerDomainEditor({
         <SettingsMiniToggleCard
           checked={config.crossProviderKeySelection}
           description={t("editor.resourceManager.crossProviderDescription")}
-          label="cross_provider_key_selection"
+          label={t("editor.resourceManager.fields.crossProviderKeySelection")}
           onCheckedChange={(checked) =>
             update({ crossProviderKeySelection: checked })
           }
@@ -119,7 +131,7 @@ export function RuntimeResourceManagerDomainEditor({
       </div>
 
       <SettingsSubsectionCard
-        title="health_check"
+        title={t("editor.resourceManager.fields.healthCheck")}
         icon={
           <SettingsPanelIcon>
             <ActivityIcon size={16} />
@@ -141,17 +153,17 @@ export function RuntimeResourceManagerDomainEditor({
         }
       >
         <div className="grid gap-3 xl:grid-cols-3">
-          <ConfigFormField label="health_check.interval">
+          <ConfigFormField label={t("editor.resourceManager.fields.healthCheckInterval")}>
             <input
               className={editorControlClassName}
               value={config.healthCheckInterval}
               onChange={(event) =>
                 update({ healthCheckInterval: event.target.value })
               }
-              placeholder="60s"
+              placeholder={t("editor.resourceManager.placeholders.healthCheckInterval")}
             />
           </ConfigFormField>
-          <ConfigFormField label="health_check.recovery_threshold">
+          <ConfigFormField label={t("editor.resourceManager.fields.healthCheckRecoveryThreshold")}>
             <input
               className={editorControlClassName}
               value={config.healthCheckRecoveryThreshold}
@@ -166,7 +178,7 @@ export function RuntimeResourceManagerDomainEditor({
             description={t(
               "editor.resourceManager.healthCheck.autoRecoveryDescription",
             )}
-            label="health_check.auto_recovery"
+            label={t("editor.resourceManager.fields.healthCheckAutoRecovery")}
             onCheckedChange={(checked) =>
               update({ healthCheckAutoRecovery: checked })
             }
@@ -178,15 +190,15 @@ export function RuntimeResourceManagerDomainEditor({
         <SettingsMiniToggleCard
           checked={config.enableStats}
           description={t("editor.resourceManager.statsDescription")}
-          label="enable_stats"
+          label={t("editor.resourceManager.fields.enableStats")}
           onCheckedChange={(checked) => update({ enableStats: checked })}
         />
-        <ConfigFormField label="stats_retention">
+        <ConfigFormField label={t("editor.resourceManager.fields.statsRetention")}>
           <input
             className={editorControlClassName}
             value={config.statsRetention}
             onChange={(event) => update({ statsRetention: event.target.value })}
-            placeholder="24h"
+            placeholder={t("editor.resourceManager.placeholders.statsRetention")}
           />
         </ConfigFormField>
       </div>

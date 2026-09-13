@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import type { Thread } from "@/data/mock";
+import type { ChatMessage, Thread } from "@/data/mock";
 import {
   NEW_THREAD_ID,
   buildWorkspaceThreadPath,
+  isThreadResponding,
   resolveArtifactSelection,
   resolveSelectedThread,
+  shouldConfirmThreadSwitch,
 } from "@/hooks/workspace/use-workspace-thread-selection";
 import { mergeRuntimeSessionsIntoThreads } from "@/lib/workspace-thread-state";
 import type { RuntimeSessionRecord } from "@/types/runtime";
@@ -29,6 +31,16 @@ function createThread(id: string, artifactIds: string[]): Thread {
       language: "json",
       content: "{}",
     })),
+  };
+}
+
+function createMessage(overrides: Partial<ChatMessage> & { id: string }): ChatMessage {
+  return {
+    author: "Runtime stream",
+    label: "streaming",
+    role: "assistant",
+    segments: [],
+    ...overrides,
   };
 }
 
@@ -254,5 +266,71 @@ describe("workspace thread selection session id variants", () => {
       id: "thread-aliased",
       sessionId: "session-2",
     });
+  });
+});
+
+describe("shouldConfirmThreadSwitch", () => {
+  it("confirms switching away while the current session is still responding", () => {
+    expect(shouldConfirmThreadSwitch("thread-1", "thread-2", true)).toBe(true);
+  });
+
+  it("switches immediately when the current session is idle", () => {
+    expect(shouldConfirmThreadSwitch("thread-1", "thread-2", false)).toBe(false);
+  });
+
+  it("skips the confirmation when re-selecting the current session", () => {
+    expect(shouldConfirmThreadSwitch("thread-1", "thread-1", true)).toBe(false);
+  });
+
+  it("skips the confirmation for the new-chat entry and before any selection", () => {
+    expect(shouldConfirmThreadSwitch("thread-1", NEW_THREAD_ID, true)).toBe(false);
+    expect(shouldConfirmThreadSwitch(undefined, "thread-2", true)).toBe(false);
+  });
+});
+
+describe("isThreadResponding", () => {
+  it("detects the streaming message owned by the live turn", () => {
+    const thread: Thread = {
+      ...createThread("thread-1", []),
+      messages: [
+        createMessage({ id: "message-user", role: "user", label: "user" }),
+        createMessage({
+          id: "message-assistant",
+          runtimeTurnId: "turn-1",
+          streaming: true,
+        }),
+      ],
+    };
+
+    expect(isThreadResponding(thread, "turn-1")).toBe(true);
+  });
+
+  it("ignores finished messages, other turns and missing threads", () => {
+    const finished: Thread = {
+      ...createThread("thread-1", []),
+      messages: [
+        createMessage({
+          id: "message-1",
+          runtimeTurnId: "turn-1",
+          streaming: false,
+        }),
+      ],
+    };
+    const otherTurn: Thread = {
+      ...createThread("thread-1", []),
+      messages: [
+        createMessage({
+          id: "message-1",
+          runtimeTurnId: "turn-2",
+          streaming: true,
+        }),
+      ],
+    };
+
+    expect(isThreadResponding(finished, "turn-1")).toBe(false);
+    expect(isThreadResponding(otherTurn, "turn-1")).toBe(false);
+    expect(isThreadResponding(createThread("thread-1", []), "turn-1")).toBe(false);
+    expect(isThreadResponding(undefined, "turn-1")).toBe(false);
+    expect(isThreadResponding(otherTurn, null)).toBe(false);
   });
 });

@@ -56,7 +56,7 @@ export function RuntimeRateLimitApiKeyLimitDialog({
         ) : null}
 
         <div className="grid gap-3 xl:grid-cols-2">
-          <ConfigFormField label="api_key_pattern">
+          <ConfigFormField label={t("editor.rateLimit.fields.apiKeyPattern")}>
             <input
               className={editorControlClassName}
               value={apiDraft.apiKeyPattern}
@@ -66,10 +66,10 @@ export function RuntimeRateLimitApiKeyLimitDialog({
                   apiKeyPattern: event.target.value,
                 }))
               }
-              placeholder="sk-"
+              placeholder={t("editor.rateLimit.fields.apiKeyPatternPlaceholder")}
             />
           </ConfigFormField>
-          <ConfigFormField label="block_duration">
+          <ConfigFormField label={t("editor.rateLimit.fields.blockDuration")}>
             <input
               className={editorControlClassName}
               value={apiDraft.blockDuration}
@@ -79,10 +79,10 @@ export function RuntimeRateLimitApiKeyLimitDialog({
                   blockDuration: event.target.value,
                 }))
               }
-              placeholder="60s"
+              placeholder={t("editor.rateLimit.fields.blockDurationPlaceholder")}
             />
           </ConfigFormField>
-          <ConfigFormField label="qps">
+          <ConfigFormField label={t("editor.rateLimit.fields.qps")}>
             <input
               className={editorControlClassName}
               value={apiDraft.qps}
@@ -91,7 +91,7 @@ export function RuntimeRateLimitApiKeyLimitDialog({
               }
             />
           </ConfigFormField>
-          <ConfigFormField label="qpm">
+          <ConfigFormField label={t("editor.rateLimit.fields.qpm")}>
             <input
               className={editorControlClassName}
               value={apiDraft.qpm}
@@ -100,7 +100,7 @@ export function RuntimeRateLimitApiKeyLimitDialog({
               }
             />
           </ConfigFormField>
-          <ConfigFormField label="qpd">
+          <ConfigFormField label={t("editor.rateLimit.fields.qpd")}>
             <input
               className={editorControlClassName}
               value={apiDraft.qpd}

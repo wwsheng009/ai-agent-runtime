@@ -1,6 +1,7 @@
 // 由 components/workspace/runtime-teams.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useRuntimeTeamDispatch } from "@/components/workspace/runtime-teams/use-runtime-team-dispatch";
 import {
@@ -40,6 +41,7 @@ export function RuntimeTeams({
   summaries,
   teams,
 }: RuntimeTeamsProps) {
+  const { t } = useTranslation("workspace");
   const [activeView, setActiveView] = useState<RuntimeTeamsView>("teams");
   const [selectedTeamId, setSelectedTeamId] = useState("");
   const [details, setDetails] = useState<TeamDetailsState>(createEmptyDetails);
@@ -292,7 +294,7 @@ export function RuntimeTeams({
       {showHeader ? (
         <div className="mb-2 flex items-center justify-between">
           <div className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
-            Runtime Teams
+            {t("panels.teamsDispatch.summary.header")}
           </div>
         </div>
       ) : null}

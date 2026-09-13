@@ -67,46 +67,46 @@ export function RuntimeProxyDomainEditor({
 
       <SettingsInlineToggleCard
         checked={config.enabled}
-        label="providers.proxy.enabled"
+        label={t("editor.proxy.fields.enabled")}
         description={t("editor.proxy.enabledDescription")}
         onCheckedChange={(checked) => update({ enabled: checked })}
       />
 
       <div className="grid gap-3 xl:grid-cols-2">
         <ConfigFormField
-          label="providers.proxy.http"
+          label={t("editor.proxy.fields.http")}
           description={t("editor.proxy.httpDescription")}
         >
           <input
             className={editorControlClassName}
             value={config.http}
             onChange={(event) => update({ http: event.target.value })}
-            placeholder="http://127.0.0.1:10810 / socks5://127.0.0.1:10810"
+            placeholder={t("editor.proxy.placeholders.proxyUrl")}
           />
         </ConfigFormField>
 
         <ConfigFormField
-          label="providers.proxy.https"
+          label={t("editor.proxy.fields.https")}
           description={t("editor.proxy.httpsDescription")}
         >
           <input
             className={editorControlClassName}
             value={config.https}
             onChange={(event) => update({ https: event.target.value })}
-            placeholder="http://127.0.0.1:10810 / socks5://127.0.0.1:10810"
+            placeholder={t("editor.proxy.placeholders.proxyUrl")}
           />
         </ConfigFormField>
       </div>
 
       <ConfigFormField
-        label="providers.proxy.no_proxy"
+        label={t("editor.proxy.fields.noProxy")}
         description={t("editor.proxy.noProxyDescription")}
       >
         <textarea
           className={`${editorControlClassName} min-h-28 resize-y font-mono`}
           value={config.noProxy}
           onChange={(event) => update({ noProxy: event.target.value })}
-          placeholder="localhost,127.0.0.1,.internal.example.com"
+          placeholder={t("editor.proxy.placeholders.noProxy")}
         />
       </ConfigFormField>
     </div>

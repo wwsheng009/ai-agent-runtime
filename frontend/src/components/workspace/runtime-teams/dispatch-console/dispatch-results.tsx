@@ -1,6 +1,7 @@
 // 由 components/workspace/runtime-teams/dispatch-console.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { cn } from "@/lib/utils";
+import { useTranslation } from "react-i18next";
 
 import { truncateIdentifier } from "../shared";
 
@@ -15,6 +16,8 @@ type DispatchResultsProps = Pick<
 export function DispatchResults({
   dispatchTaskResults,
 }: DispatchResultsProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <>
       {dispatchTaskResults.length > 0 ? (
@@ -41,8 +44,10 @@ export function DispatchResults({
               </div>
               <div className="mt-2 text-sm text-muted-foreground">
                 {result.status === "created"
-                  ? `task ${truncateIdentifier(result.taskId, 18)} created`
-                  : result.error || "dispatch failed"}
+                  ? t("panels.teamsDispatch.taskComposer.resultCreated", {
+                      taskId: truncateIdentifier(result.taskId, 18),
+                    })
+                  : result.error || t("panels.teamsDispatch.taskComposer.resultFailed")}
               </div>
             </div>
           ))}

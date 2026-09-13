@@ -1,6 +1,7 @@
 // 由 components/workspace/artifact-detail-dialog.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { XIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -26,6 +27,8 @@ export function ArtifactDetailHeader({
   onClose,
   titleId,
 }: ArtifactDetailHeaderProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <div className="flex items-start justify-between gap-3 border-b border-border px-4 py-3.5">
       <div className="min-w-0">
@@ -37,7 +40,9 @@ export function ArtifactDetailHeader({
               : "text-accent-primary",
           )}
         >
-          {category === "evidence" ? "Runtime evidence" : "Output file"}
+          {category === "evidence"
+            ? t("panels.artifacts.detail.categoryEvidence")
+            : t("panels.artifacts.detail.categoryOutput")}
         </div>
         <h2
           className="mt-1 truncate text-lg font-semibold tracking-[-0.03em] text-foreground"
@@ -60,7 +65,7 @@ export function ArtifactDetailHeader({
           variant="ghost"
           size="icon"
           onClick={onClose}
-          aria-label="关闭 artifact 详情"
+          aria-label={t("panels.artifacts.detail.closeLabel")}
         >
           <XIcon size={16} />
         </Button>

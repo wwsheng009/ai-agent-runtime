@@ -1,4 +1,5 @@
 import { LoaderCircleIcon } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { type DispatchTemplateMode } from "@/components/workspace/runtime-teams/shared";
@@ -43,16 +44,18 @@ export function DispatchProvisionSection({
   provisionUserPrefixDraft,
   provisionWorkspaceDraft,
 }: DispatchProvisionSectionProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <>
       <div className="mt-3 rounded-card border border-white/8 bg-white/[0.03] px-3 py-2.5">
         <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-          Provision runnable teams and dispatch
+          {t("panels.teamsDispatch.provision.heading")}
         </div>
         <div className="mt-2.5 grid gap-2.5 sm:grid-cols-2 xl:grid-cols-3">
           <div>
             <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-              Team count
+              {t("panels.teamsDispatch.provision.teamCount")}
             </div>
             <input
               value={provisionTeamCountDraft}
@@ -63,68 +66,67 @@ export function DispatchProvisionSection({
           </div>
           <div>
             <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-              Workspace id
+              {t("panels.teamsDispatch.provision.workspaceId")}
             </div>
             <input
               value={provisionWorkspaceDraft}
               onChange={(event) => onProvisionWorkspaceDraftChange(event.target.value)}
-              placeholder="fanout-workspace"
+              placeholder={t("panels.teamsDispatch.provision.workspaceIdPlaceholder")}
               className={dispatchControlClass}
             />
           </div>
           <div>
             <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-              Strategy
+              {t("panels.teamsDispatch.provision.strategy")}
             </div>
             <input
               value={provisionStrategyDraft}
               onChange={(event) => onProvisionStrategyDraftChange(event.target.value)}
-              placeholder="parallel-fanout"
+              placeholder={t("panels.teamsDispatch.provision.strategyPlaceholder")}
               className={dispatchControlClass}
             />
           </div>
           <div>
             <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-              User prefix
+              {t("panels.teamsDispatch.provision.userPrefix")}
             </div>
             <input
               value={provisionUserPrefixDraft}
               onChange={(event) => onProvisionUserPrefixDraftChange(event.target.value)}
-              placeholder="fanout-user"
+              placeholder={t("panels.teamsDispatch.provision.userPrefixPlaceholder")}
               className={dispatchControlClass}
             />
           </div>
           <div>
             <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-              Teammate name prefix
+              {t("panels.teamsDispatch.provision.teammateNamePrefix")}
             </div>
             <input
               value={provisionTeammateNamePrefixDraft}
               onChange={(event) =>
                 onProvisionTeammateNamePrefixDraftChange(event.target.value)
               }
-              placeholder="Fanout Worker"
+              placeholder={t("panels.teamsDispatch.provision.teammateNamePrefixPlaceholder")}
               className={dispatchControlClass}
             />
           </div>
           <div>
             <div className="mb-2 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-              Teammate profile
+              {t("panels.teamsDispatch.provision.teammateProfile")}
             </div>
             <input
               value={provisionTeammateProfileDraft}
               onChange={(event) =>
                 onProvisionTeammateProfileDraftChange(event.target.value)
               }
-              placeholder="parallel execution worker"
+              placeholder={t("panels.teamsDispatch.provision.teammateProfilePlaceholder")}
               className={dispatchControlClass}
             />
           </div>
         </div>
         <div className="mt-2.5 flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between">
           <div className="text-xs text-muted-foreground">
-            Each provisioned team gets a lead session, a worker session, one idle
-            teammate, and the current next task.
+            {t("panels.teamsDispatch.provision.hint")}
           </div>
           <Button
             variant="secondary"
@@ -135,14 +137,14 @@ export function DispatchProvisionSection({
             {isProvisioningDispatch ? (
               <LoaderCircleIcon size={14} className="animate-spin" />
             ) : null}
-            Provision runnable teams and dispatch
+            {t("panels.teamsDispatch.provision.submit")}
           </Button>
         </div>
       </div>
 
       <div className="mt-3 rounded-card border border-white/8 bg-white/[0.03] px-3 py-2.5">
         <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-          Fan-out template
+          {t("panels.teamsDispatch.template.heading")}
         </div>
         <div className="mt-2.5 flex flex-wrap gap-1.5">
           <button
@@ -155,7 +157,7 @@ export function DispatchProvisionSection({
                 : "border-white/10 bg-white/4 text-muted-foreground hover:border-white/14 hover:bg-white/7 hover:text-foreground",
             )}
           >
-            Review / Implement / Verify
+            {t("panels.teamsDispatch.template.reviewImplementVerify")}
           </button>
           <button
             type="button"
@@ -167,13 +169,13 @@ export function DispatchProvisionSection({
                 : "border-white/10 bg-white/4 text-muted-foreground hover:border-white/14 hover:bg-white/7 hover:text-foreground",
             )}
           >
-            Mirror Same Task
+            {t("panels.teamsDispatch.template.mirrorSameTask")}
           </button>
         </div>
         <div className="mt-2.5 text-sm leading-6 text-muted-foreground">
           {dispatchTemplateMode === "mirror"
-            ? "Every selected team receives the same task payload."
-            : "Teams receive role-specific variants of the same next task so they execute from different angles."}
+            ? t("panels.teamsDispatch.template.mirrorDescription")
+            : t("panels.teamsDispatch.template.roleVariantsDescription")}
         </div>
       </div>
     </>

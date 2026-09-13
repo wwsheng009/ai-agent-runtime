@@ -8,6 +8,7 @@ import {
   truncateIdentifier,
 } from "@/components/workspace/runtime-teams/shared";
 import { cn, formatRelativeTimestamp } from "@/lib/utils";
+import { useTranslation } from "react-i18next";
 
 import { compactMarkdownClass, dispatchStatusPillClass } from "./format";
 
@@ -20,6 +21,8 @@ export function DispatchMonitorOutcomeCompare({
   batchSummary,
   comparisonRows,
 }: DispatchMonitorOutcomeCompareProps) {
+  const { t } = useTranslation("workspace");
+
   const terminalRowsWithSummary = batchSummary.terminalRows.filter(
     (row) => shouldExpectDispatchOutcomeSummary(row) && Boolean(row.summary?.trim()),
   );
@@ -30,12 +33,12 @@ export function DispatchMonitorOutcomeCompare({
   return (
     <div className="rounded-card border border-white/8 bg-black/15 px-3 py-2.5">
       <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-        Outcome compare
+        {t("panels.teamsDispatch.outcomeCompare.title")}
       </div>
       <div className="mt-2.5 grid gap-1.5 text-xs text-muted-foreground">
         <div className="rounded-field border border-white/8 bg-white/4 px-3 py-2">
           <div className="app-text-10 uppercase tracking-[0.14em]">
-            Final summary coverage
+            {t("panels.teamsDispatch.outcomeCompare.finalSummaryCoverage")}
           </div>
           <div className="mt-1 text-sm font-semibold text-foreground">
             {batchSummary.finalSummaryCount}/
@@ -44,7 +47,7 @@ export function DispatchMonitorOutcomeCompare({
         </div>
         <div className="rounded-field border border-white/8 bg-white/4 px-3 py-2">
           <div className="app-text-10 uppercase tracking-[0.14em]">
-            Waiting for summary
+            {t("panels.teamsDispatch.outcomeCompare.waitingForSummary")}
           </div>
           <div className="mt-1 text-sm font-semibold text-foreground">
             {batchSummary.terminalWithoutSummaryCount}
@@ -87,13 +90,31 @@ export function DispatchMonitorOutcomeCompare({
                 />
               </div>
               <div className="mt-1.5 flex flex-wrap gap-1.5 app-text-11 uppercase tracking-[0.12em] text-muted-foreground">
-                <span>{row.isTerminal ? "terminal" : "active"}</span>
-                {row.taskId ? <span>task {truncateIdentifier(row.taskId, 16)}</span> : null}
-                {row.assignee ? <span>assignee {row.assignee}</span> : null}
+                <span>
+                  {row.isTerminal
+                    ? t("panels.teamsDispatch.outcomeCompare.terminal")
+                    : t("panels.teamsDispatch.outcomeCompare.active")}
+                </span>
+                {row.taskId ? (
+                  <span>
+                    {t("panels.teamsDispatch.monitor.taskEntry", {
+                      taskId: truncateIdentifier(row.taskId, 16),
+                    })}
+                  </span>
+                ) : null}
+                {row.assignee ? (
+                  <span>
+                    {t("panels.teamsDispatch.monitor.assigneeEntry", {
+                      assignee: row.assignee,
+                    })}
+                  </span>
+                ) : null}
               </div>
               {row.updatedAt ? (
                 <div className="mt-1.5 app-text-11 uppercase tracking-[0.12em] text-muted-foreground">
-                  updated {formatRelativeTimestamp(row.updatedAt)}
+                  {t("panels.teamsDispatch.monitor.updatedEntry", {
+                    time: formatRelativeTimestamp(row.updatedAt),
+                  })}
                 </div>
               ) : null}
             </div>
@@ -103,7 +124,7 @@ export function DispatchMonitorOutcomeCompare({
       {terminalRowsWithSummary.length > 0 ? (
         <div className="mt-3 rounded-[0.75rem] border border-white/8 bg-white/4 px-3 py-2.5">
           <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-            Terminal outcomes with summary
+            {t("panels.teamsDispatch.outcomeCompare.terminalWithSummary")}
           </div>
           <div className="mt-2.5 space-y-1.5">
             {terminalRowsWithSummary.slice(0, 3).map((row) => (
@@ -138,7 +159,7 @@ export function DispatchMonitorOutcomeCompare({
       {terminalRowsMissingSummary.length > 0 ? (
         <div className="mt-3 rounded-[0.75rem] border border-white/8 bg-white/4 px-3 py-2.5">
           <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-            Terminal outcomes missing final summary
+            {t("panels.teamsDispatch.outcomeCompare.terminalMissingSummary")}
           </div>
           <div className="mt-2.5 space-y-1.5">
             {terminalRowsMissingSummary.slice(0, 3).map((row) => {

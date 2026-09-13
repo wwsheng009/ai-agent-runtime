@@ -34,6 +34,43 @@ type WorkspaceRouteSelection = {
 
 export const NEW_THREAD_ID = "new";
 
+// 左侧会话列表点击是否需要弹「切换确认」对话框：只有当前会话仍在生成回复
+// （isCurrentThreadResponding）时才确认——空闲状态下的切换不应打断用户；
+// 重复点击当前会话、「新建会话」入口同理。
+export function shouldConfirmThreadSwitch(
+  currentThreadId: string | undefined,
+  nextThreadId: string,
+  isCurrentThreadResponding: boolean,
+): boolean {
+  if (
+    !isCurrentThreadResponding ||
+    !currentThreadId ||
+    nextThreadId === NEW_THREAD_ID
+  ) {
+    return false;
+  }
+
+  return nextThreadId !== currentThreadId;
+}
+
+// 当前会话是否正在生成回复：本地 turn（activeTurnId）在跑，且这条 turn 的
+// 流式占位消息挂在所选线程上。切到别的会话后 turn 仍在后台继续
+// （isResponding 依旧为 true），但当前会话已经空闲——只按全局 isResponding
+// 判断会把后台会话的生成算到当前会话头上，重复弹确认框。
+export function isThreadResponding(
+  thread: Thread | undefined,
+  activeTurnId: string | null,
+): boolean {
+  if (!thread || !activeTurnId) {
+    return false;
+  }
+
+  return thread.messages.some(
+    (message) =>
+      message.streaming === true && message.runtimeTurnId === activeTurnId,
+  );
+}
+
 const NEW_THREAD_PROMPTS = [
   "Summarize the repo state before we change anything.",
   "Review the current page for style regressions against DeerFlow.",

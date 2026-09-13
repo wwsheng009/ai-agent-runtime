@@ -7,13 +7,14 @@ import { cn } from "@/lib/utils";
 
 export function LandingHeader() {
   const { t } = useTranslation("landing");
+  const { t: tCommon } = useTranslation("common");
 
   return (
     <header className="fixed top-0 right-0 left-0 z-40 border-b border-border bg-[var(--landing-header-bg)] backdrop-blur-xl">
       <div className="container-shell flex h-16 items-center justify-between gap-2 sm:gap-4">
         <Link to="/" className="flex min-w-0 items-center gap-2 sm:gap-3" aria-label={t("header.productName")}>
           <span className="grid size-9 shrink-0 place-items-center rounded-xl border border-border bg-surface-soft text-sm font-semibold text-accent-primary sm:size-10 sm:rounded-2xl">
-            AR
+            {tCommon("brand.shortName")}
           </span>
           <div className="min-w-0">
             <div className="hidden text-sm uppercase tracking-[0.2em] text-muted-foreground sm:block">

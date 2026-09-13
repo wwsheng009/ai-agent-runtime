@@ -24,7 +24,7 @@ export function RuntimeProviderQueueOverflowHeartbeatSection({
   return (
       <div className="grid gap-3 xl:grid-cols-2">
         <SettingsPanelCard
-          title="overflow"
+          title={t("editor.providerQueue.overflow.title")}
           icon={
             <SettingsPanelIcon>
               <GaugeIcon size={16} />
@@ -47,7 +47,9 @@ export function RuntimeProviderQueueOverflowHeartbeatSection({
           }
         >
           <div className="grid gap-3 xl:grid-cols-2">
-            <ConfigFormField label="overflow.max_attempts">
+            <ConfigFormField
+              label={t("editor.providerQueue.overflow.maxAttempts")}
+            >
               <input
                 className={editorControlClassName}
                 value={config.overflowMaxAttempts}
@@ -59,7 +61,7 @@ export function RuntimeProviderQueueOverflowHeartbeatSection({
                 }
               />
             </ConfigFormField>
-            <ConfigFormField label="overflow.strategy">
+            <ConfigFormField label={t("editor.providerQueue.overflow.strategy")}>
               <input
                 className={editorControlClassName}
                 value={config.overflowStrategy}
@@ -75,7 +77,7 @@ export function RuntimeProviderQueueOverflowHeartbeatSection({
         </SettingsPanelCard>
 
         <SettingsPanelCard
-          title="wait_heartbeat"
+          title={t("editor.providerQueue.waitHeartbeat.title")}
           icon={
             <SettingsPanelIcon>
               <TimerIcon size={16} />
@@ -101,7 +103,9 @@ export function RuntimeProviderQueueOverflowHeartbeatSection({
           }
         >
           <div className="grid gap-3 xl:grid-cols-3">
-            <ConfigFormField label="wait_heartbeat.interval">
+            <ConfigFormField
+              label={t("editor.providerQueue.waitHeartbeat.interval")}
+            >
               <input
                 className={editorControlClassName}
                 value={config.waitHeartbeatInterval}
@@ -113,7 +117,9 @@ export function RuntimeProviderQueueOverflowHeartbeatSection({
                 }
               />
             </ConfigFormField>
-            <ConfigFormField label="wait_heartbeat.comment">
+            <ConfigFormField
+              label={t("editor.providerQueue.waitHeartbeat.comment")}
+            >
               <input
                 className={editorControlClassName}
                 value={config.waitHeartbeatComment}
@@ -125,7 +131,9 @@ export function RuntimeProviderQueueOverflowHeartbeatSection({
                 }
               />
             </ConfigFormField>
-            <ConfigFormField label="wait_heartbeat.max_wait_time">
+            <ConfigFormField
+              label={t("editor.providerQueue.waitHeartbeat.maxWaitTime")}
+            >
               <input
                 className={editorControlClassName}
                 value={config.waitHeartbeatMaxWaitTime}

@@ -1,6 +1,7 @@
 // 由 components/workspace/runtime-teams/dispatch-console.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { cn } from "@/lib/utils";
+import { useTranslation } from "react-i18next";
 
 import { truncateIdentifier } from "../shared";
 
@@ -25,11 +26,13 @@ export function DispatchTeamSelector({
   summaryMap,
   teams,
 }: DispatchTeamSelectorProps) {
+  const { t } = useTranslation("workspace");
+
   return (
     <div className="mt-3 space-y-1.5">
       {teams.length === 0 ? (
         <div className="rounded-card border border-dashed border-white/10 px-3 py-2.5 text-sm text-muted-foreground">
-          No existing teams yet. Use the provision action above to create runnable teams and fan out the next task.
+          {t("panels.teamsDispatch.teamSelect.empty")}
         </div>
       ) : null}
       {teams.map((team) => {
@@ -58,20 +61,23 @@ export function DispatchTeamSelector({
                   {truncateIdentifier(team.id, 18)}
                 </span>
                 <span className="block truncate text-xs text-muted-foreground">
-                  {summary?.tasks.total ?? 0} tasks · {summary?.teammates.total ?? 0} teammates
+                  {t("panels.teamsDispatch.teamSelect.counts", {
+                    tasks: String(summary?.tasks.total ?? 0),
+                    teammates: String(summary?.teammates.total ?? 0),
+                  })}
                 </span>
                 <span className="mt-1 block truncate app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
                   {isDispatchReadinessLoading && !readiness
-                    ? "checking executability..."
+                    ? t("panels.teamsDispatch.teamSelect.checkingReadiness")
                     : readiness
                       ? readiness.reason
-                      : "readiness unavailable"}
+                      : t("panels.teamsDispatch.teamSelect.readinessUnavailable")}
                 </span>
               </span>
             </span>
             <span className="flex shrink-0 flex-col items-end gap-2">
               <span className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
-                {team.status || "unknown"}
+                {team.status || t("panels.teamsDispatch.teamSelect.unknownStatus")}
               </span>
               <span
                 className={cn(
@@ -81,7 +87,9 @@ export function DispatchTeamSelector({
                     : "border-white/10 bg-white/6 text-muted-foreground",
                 )}
               >
-                {readiness?.executable ? "executable" : "not ready"}
+                {readiness?.executable
+                  ? t("panels.teamsDispatch.teamSelect.executable")
+                  : t("panels.teamsDispatch.teamSelect.notReady")}
               </span>
             </span>
           </label>

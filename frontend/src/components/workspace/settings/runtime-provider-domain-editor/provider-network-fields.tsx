@@ -19,7 +19,7 @@ export function ProviderNetworkFields({
     <>
           <div className="grid gap-3 xl:grid-cols-2">
             <ConfigFormField
-              label="headers JSON"
+              label={t("editor.providers.fields.headersJson")}
               description={t("editor.providers.fields.headersDescription")}
             >
               <textarea
@@ -31,7 +31,7 @@ export function ProviderNetworkFields({
               />
             </ConfigFormField>
             <ConfigFormField
-              label="model_mappings JSON"
+              label={t("editor.providers.fields.modelMappingsJson")}
               description={t("editor.providers.fields.modelMappingsDescription")}
             >
               <textarea
@@ -75,7 +75,7 @@ export function ProviderNetworkFields({
 
             <div className="grid gap-3 xl:grid-cols-2">
               <ConfigFormField
-                label="proxy.http"
+                label={t("editor.providers.proxy.http")}
                 description={t("editor.providers.proxy.httpDescription")}
               >
                 <input
@@ -91,7 +91,7 @@ export function ProviderNetworkFields({
                 />
               </ConfigFormField>
               <ConfigFormField
-                label="proxy.https"
+                label={t("editor.providers.proxy.https")}
                 description={t("editor.providers.proxy.httpsDescription")}
               >
                 <input
@@ -110,7 +110,7 @@ export function ProviderNetworkFields({
 
             <div className="mt-3">
               <ConfigFormField
-                label="proxy.no_proxy"
+                label={t("editor.providers.proxy.noProxy")}
                 description={t("editor.providers.proxy.noProxyDescription")}
               >
                 <textarea
@@ -122,7 +122,7 @@ export function ProviderNetworkFields({
                       proxyNoProxy: event.target.value,
                     }))
                   }
-                  placeholder="localhost,127.0.0.1,.internal.example.com"
+                  placeholder={t("editor.providers.proxy.noProxyPlaceholder")}
                 />
               </ConfigFormField>
             </div>

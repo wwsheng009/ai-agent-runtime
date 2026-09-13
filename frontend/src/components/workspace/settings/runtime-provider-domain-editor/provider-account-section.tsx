@@ -71,7 +71,7 @@ export function ProviderAccountSection({
 
             <div className="grid gap-3 xl:grid-cols-2">
               <ConfigFormField
-                label="site_type"
+                label={t("editor.providers.account.siteType")}
                 description={t("editor.providers.account.siteTypeDescription")}
               >
                 <input
@@ -83,11 +83,11 @@ export function ProviderAccountSection({
                       siteType: event.target.value,
                     }))
                   }
-                  placeholder="sub2api / newapi / unknown"
+                  placeholder={t("editor.providers.account.siteTypePlaceholder")}
                 />
               </ConfigFormField>
               <ConfigFormField
-                label="account_auth_ref"
+                label={t("editor.providers.account.accountAuthRef")}
                 description={t("editor.providers.account.accountAuthRefDescription")}
               >
                 <input
@@ -99,13 +99,13 @@ export function ProviderAccountSection({
                       accountAuthRef: event.target.value,
                     }))
                   }
-                  placeholder="providers/<name>/account"
+                  placeholder={t("editor.providers.account.accountAuthRefPlaceholder")}
                 />
               </ConfigFormField>
             </div>
 
             <div className="mt-3 grid gap-3 xl:grid-cols-2">
-              <ConfigFormField label="site_type_confidence">
+              <ConfigFormField label={t("editor.providers.account.siteTypeConfidence")}>
                 <input
                   className={editorControlClassName}
                   value={draft.siteTypeConfidence}
@@ -115,10 +115,10 @@ export function ProviderAccountSection({
                       siteTypeConfidence: event.target.value,
                     }))
                   }
-                  placeholder="high / medium / low"
+                  placeholder={t("editor.providers.account.siteTypeConfidencePlaceholder")}
                 />
               </ConfigFormField>
-              <ConfigFormField label="site_type_detected_at">
+              <ConfigFormField label={t("editor.providers.account.siteTypeDetectedAt")}>
                 <input
                   className={editorControlClassName}
                   value={draft.siteTypeDetectedAt}
@@ -128,14 +128,14 @@ export function ProviderAccountSection({
                       siteTypeDetectedAt: event.target.value,
                     }))
                   }
-                  placeholder="ISO timestamp"
+                  placeholder={t("editor.providers.account.siteTypeDetectedAtPlaceholder")}
                 />
               </ConfigFormField>
             </div>
 
             <div className="mt-3 grid gap-3 xl:grid-cols-2">
               <ConfigFormField
-                label="system_access_token"
+                label={t("editor.providers.account.systemAccessToken")}
                 description={t("editor.providers.account.systemAccessTokenDescription")}
               >
                 <input
@@ -149,11 +149,11 @@ export function ProviderAccountSection({
                       systemAccessToken: event.target.value,
                     }))
                   }
-                  placeholder="NewAPI system access token"
+                  placeholder={t("editor.providers.account.systemAccessTokenPlaceholder")}
                 />
               </ConfigFormField>
               <ConfigFormField
-                label="subject_user_id"
+                label={t("editor.providers.account.subjectUserId")}
                 description={t("editor.providers.account.subjectUserIdDescription")}
               >
                 <input

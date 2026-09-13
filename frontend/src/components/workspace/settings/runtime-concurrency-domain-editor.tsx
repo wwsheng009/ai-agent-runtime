@@ -127,7 +127,7 @@ export function RuntimeConcurrencyDomainEditor({
         <div className="grid gap-3 xl:grid-cols-[11rem_minmax(0,1fr)_minmax(0,1fr)]">
           <div className="rounded-card border border-border bg-surface-softer p-3">
             <div className="text-sm font-semibold text-foreground">
-              concurrency.enabled
+              {t("editor.concurrency.fields.enabled")}
             </div>
             <div className="mt-1 text-xs leading-5 text-muted-foreground">
               {t("editor.concurrency.enabledHint")}
@@ -149,7 +149,9 @@ export function RuntimeConcurrencyDomainEditor({
             </label>
           </div>
 
-          <ConfigFormField label="max_concurrent_requests">
+          <ConfigFormField
+            label={t("editor.concurrency.fields.maxConcurrentRequests")}
+          >
             <input
               className={editorControlClassName}
               value={config.maxConcurrentRequests}
@@ -164,7 +166,7 @@ export function RuntimeConcurrencyDomainEditor({
           </ConfigFormField>
 
           <div className="grid gap-3 xl:grid-cols-2">
-            <ConfigFormField label="queue_size">
+            <ConfigFormField label={t("editor.concurrency.fields.queueSize")}>
               <input
                 className={editorControlClassName}
                 value={config.queueSize}
@@ -177,7 +179,7 @@ export function RuntimeConcurrencyDomainEditor({
                 placeholder="500"
               />
             </ConfigFormField>
-            <ConfigFormField label="queue_timeout">
+            <ConfigFormField label={t("editor.concurrency.fields.queueTimeout")}>
               <input
                 className={editorControlClassName}
                 value={config.queueTimeout}
@@ -187,7 +189,7 @@ export function RuntimeConcurrencyDomainEditor({
                     queueTimeout: event.target.value,
                   })
                 }
-                placeholder="5s"
+                placeholder={t("editor.concurrency.placeholders.queueTimeout")}
               />
             </ConfigFormField>
           </div>
@@ -279,7 +281,7 @@ export function RuntimeConcurrencyDomainEditor({
             <SettingsNoticeCard tone="warning">{dialogError}</SettingsNoticeCard>
           ) : null}
           <div className="grid gap-3 md:grid-cols-2">
-            <ConfigFormField label="provider">
+            <ConfigFormField label={t("editor.concurrency.fields.provider")}>
               <input
                 className={editorControlClassName}
                 value={draft.provider}
@@ -289,10 +291,10 @@ export function RuntimeConcurrencyDomainEditor({
                     provider: event.target.value,
                   }))
                 }
-                placeholder="nvidia"
+                placeholder={t("editor.concurrency.placeholders.provider")}
               />
             </ConfigFormField>
-            <ConfigFormField label="limit">
+            <ConfigFormField label={t("editor.concurrency.fields.limit")}>
               <input
                 className={editorControlClassName}
                 value={draft.limit}

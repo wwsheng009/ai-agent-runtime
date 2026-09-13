@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "lint": "eslint .",
+    "lint": "eslint . && node scripts/verify-frontend-i18n.ts",
+    "lint:i18n": "node scripts/verify-frontend-i18n.ts",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",

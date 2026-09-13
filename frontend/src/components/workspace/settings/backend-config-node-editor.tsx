@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -45,6 +46,7 @@ export function BackendConfigNodeEditor({
   path,
   value,
 }: ConfigNodeEditorProps) {
+  const { t } = useTranslation("runtimeConfig");
   const kind = inferConfigValueKind(value);
   const [newFieldKey, setNewFieldKey] = useState("");
   const [newFieldKind, setNewFieldKind] = useState<ConfigValueKind>("string");
@@ -76,7 +78,11 @@ export function BackendConfigNodeEditor({
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <Badge>{entries.length} fields</Badge>
+              <Badge>
+                {t("editor.configNode.fieldsBadge", {
+                  count: entries.length,
+                })}
+              </Badge>
               <Select
                 ariaLabel={`${label} value kind`}
                 value={kind}
@@ -97,7 +103,7 @@ export function BackendConfigNodeEditor({
               />
               {canDelete ? (
                 <Button variant="ghost" size="sm" onClick={() => onDelete(path)}>
-                  删除
+                  {t("editor.configNode.delete")}
                 </Button>
               ) : null}
             </div>
@@ -119,23 +125,23 @@ export function BackendConfigNodeEditor({
             ))
           ) : (
             <SettingsEmptyState variant="dashed">
-              当前对象为空，可以直接添加字段。
+              {t("editor.configNode.emptyObject")}
             </SettingsEmptyState>
           )}
 
           <div className="rounded-[0.75rem] border border-border bg-surface-solid px-3 py-2.5">
             <div className="app-text-11 uppercase tracking-[0.12em] text-muted-foreground">
-              Add field
+              {t("editor.configNode.addField")}
             </div>
             <div className="mt-2.5 grid gap-2.5 md:grid-cols-[minmax(0,1fr)_8rem_auto]">
               <input
                 className={editorControlClassName}
-                placeholder="new_key"
+                placeholder={t("editor.configNode.newFieldPlaceholder")}
                 value={newFieldKey}
                 onChange={(event) => setNewFieldKey(event.target.value)}
               />
               <Select
-                ariaLabel="新字段类型"
+                ariaLabel={t("editor.configNode.newFieldKindAriaLabel")}
                 value={newFieldKind}
                 onChange={(nextKind) => setNewFieldKind(nextKind as ConfigValueKind)}
                 options={configValueKindOptions}
@@ -157,7 +163,7 @@ export function BackendConfigNodeEditor({
                   setNewFieldKey("");
                 }}
               >
-                添加字段
+                {t("editor.configNode.addField")}
               </Button>
             </div>
           </div>
@@ -185,7 +191,11 @@ export function BackendConfigNodeEditor({
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <Badge>{arrayValue.length} items</Badge>
+              <Badge>
+                {t("editor.configNode.itemsBadge", {
+                  count: arrayValue.length,
+                })}
+              </Badge>
               <Select
                 ariaLabel={`${label} value kind`}
                 value={kind}
@@ -206,7 +216,7 @@ export function BackendConfigNodeEditor({
               />
               {canDelete ? (
                 <Button variant="ghost" size="sm" onClick={() => onDelete(path)}>
-                  删除
+                  {t("editor.configNode.delete")}
                 </Button>
               ) : null}
             </div>
@@ -228,17 +238,17 @@ export function BackendConfigNodeEditor({
             ))
           ) : (
             <SettingsEmptyState variant="dashed">
-              当前数组为空，可以先插入一个项目。
+              {t("editor.configNode.emptyArray")}
             </SettingsEmptyState>
           )}
 
           <div className="rounded-[0.75rem] border border-border bg-surface-solid px-3 py-2.5">
             <div className="app-text-11 uppercase tracking-[0.12em] text-muted-foreground">
-              Add item
+              {t("editor.configNode.addItem")}
             </div>
             <div className="mt-2.5 flex flex-wrap items-center gap-2.5">
               <Select
-                ariaLabel="新数组项类型"
+                ariaLabel={t("editor.configNode.newArrayItemKindAriaLabel")}
                 value={newArrayItemKind}
                 onChange={(nextKind) =>
                   setNewArrayItemKind(nextKind as ConfigValueKind)
@@ -258,7 +268,7 @@ export function BackendConfigNodeEditor({
                   ])
                 }
               >
-                追加项目
+                {t("editor.configNode.addItem")}
               </Button>
             </div>
           </div>
@@ -294,7 +304,7 @@ export function BackendConfigNodeEditor({
           />
           {canDelete ? (
             <Button variant="ghost" size="sm" onClick={() => onDelete(path)}>
-              删除
+              {t("editor.configNode.delete")}
             </Button>
           ) : null}
         </div>
@@ -306,7 +316,7 @@ export function BackendConfigNodeEditor({
             variant="secondary"
             onClick={() => onChange(path, value !== true)}
           >
-            当前值: {String(value === true)}
+            {t("editor.configNode.currentValue")} {String(value === true)}
           </Button>
         ) : null}
 

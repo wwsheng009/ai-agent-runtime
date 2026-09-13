@@ -6,6 +6,7 @@ import {
   ScrollTextIcon,
   XIcon,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -48,6 +49,8 @@ export function ArtifactPanelPlanSurface({
   planStatusLabel,
   sessionId,
 }: ArtifactPanelPlanSurfaceProps) {
+  const { t } = useTranslation("workspace");
+  const { t: tCommon } = useTranslation("common");
   const writeAllowPaths = plan?.write_allow_paths ?? [];
   const showDecisionActions = canSubmitDecision;
 
@@ -58,7 +61,7 @@ export function ArtifactPanelPlanSurface({
           <div className="min-w-0 space-y-1">
             <div className="inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
               <ScrollTextIcon size={14} />
-              Plan preview
+              {t("panels.artifacts.plan.title")}
             </div>
             <div className="truncate text-sm text-foreground">
               {plan?.plan_path?.trim() || "plan.md"}
@@ -81,7 +84,7 @@ export function ArtifactPanelPlanSurface({
               type="button"
               variant="ghost"
             >
-              Refresh
+              {tCommon("actions.refresh")}
             </Button>
           </div>
         </div>
@@ -90,14 +93,13 @@ export function ArtifactPanelPlanSurface({
           {planLoading ? (
             <div className="mb-2 inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
               <LoaderCircleIcon size={14} className="animate-spin" />
-              Loading
+              {t("panels.artifacts.plan.loading")}
             </div>
           ) : null}
 
           {!sessionId ? (
             <div className="flex h-full items-center justify-center rounded-card border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-muted-foreground">
-              Plan preview becomes available after the thread attaches to a live
-              session.
+              {t("panels.artifacts.plan.noSession")}
             </div>
           ) : planError ? (
             <div className="rounded-card-lg border border-accent-orange/18 bg-accent-orange/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
@@ -108,20 +110,20 @@ export function ArtifactPanelPlanSurface({
               <div className="grid gap-2 rounded-card-lg border border-white/8 bg-black/10 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
                 <div className="flex flex-wrap gap-x-4 gap-y-1">
                   <span>
-                    Permission:{" "}
+                    {t("panels.artifacts.plan.permission")}{" "}
                     <span className="text-foreground">
                       {formatModeLabel(plan?.permission_mode)}
                     </span>
                   </span>
                   <span>
-                    Previous:{" "}
+                    {t("panels.artifacts.plan.previous")}{" "}
                     <span className="text-foreground">
                       {formatModeLabel(plan?.previous_mode)}
                     </span>
                   </span>
                   {plan?.exit_decision ? (
                     <span>
-                      Last decision:{" "}
+                      {t("panels.artifacts.plan.lastDecision")}{" "}
                       <span className="text-foreground">
                         {plan.exit_decision}
                       </span>
@@ -130,20 +132,30 @@ export function ArtifactPanelPlanSurface({
                 </div>
                 <div className="flex flex-wrap gap-x-4 gap-y-1">
                   {plan?.entered_at ? (
-                    <span>Entered {formatRelativeTimestamp(plan.entered_at)}</span>
+                    <span>
+                      {t("panels.artifacts.plan.entered", {
+                        time: formatRelativeTimestamp(plan.entered_at),
+                      })}
+                    </span>
                   ) : null}
                   {plan?.exited_at ? (
-                    <span>Exited {formatRelativeTimestamp(plan.exited_at)}</span>
+                    <span>
+                      {t("panels.artifacts.plan.exited", {
+                        time: formatRelativeTimestamp(plan.exited_at),
+                      })}
+                    </span>
                   ) : null}
                   {plan?.workspace_path ? (
                     <span className="truncate" title={plan.workspace_path}>
-                      Workspace: {plan.workspace_path}
+                      {t("panels.artifacts.plan.workspacePath", {
+                        path: plan.workspace_path,
+                      })}
                     </span>
                   ) : null}
                 </div>
                 {writeAllowPaths.length > 0 ? (
                   <div className="flex flex-wrap items-center gap-1.5">
-                    <span>Write allow:</span>
+                    <span>{t("panels.artifacts.plan.writeAllow")}</span>
                     {writeAllowPaths.map((path) => (
                       <Badge key={path}>{path}</Badge>
                     ))}
@@ -151,7 +163,7 @@ export function ArtifactPanelPlanSurface({
                 ) : null}
                 {plan?.notes ? (
                   <div>
-                    Notes:{" "}
+                    {t("panels.artifacts.plan.notes")}{" "}
                     <span className="text-foreground">{plan.notes}</span>
                   </div>
                 ) : null}
@@ -168,9 +180,11 @@ export function ArtifactPanelPlanSurface({
                   <div className="flex items-center justify-between gap-2 border-b border-white/8 px-3 py-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
                     <span className="inline-flex items-center gap-1.5">
                       <FileTextIcon size={13} />
-                      Plan content
+                      {t("panels.artifacts.plan.contentTitle")}
                     </span>
-                    {plan.plan_content_truncated ? <Badge>Truncated</Badge> : null}
+                    {plan.plan_content_truncated ? (
+                      <Badge>{t("panels.artifacts.plan.truncated")}</Badge>
+                    ) : null}
                   </div>
                   <div className="max-h-[28rem] overflow-auto px-3 py-3">
                     <MessageMarkdown content={plan.plan_content} />
@@ -189,14 +203,14 @@ export function ArtifactPanelPlanSurface({
                   className="block text-[10px] uppercase tracking-[0.16em] text-muted-foreground"
                   htmlFor="artifact-panel-plan-notes"
                 >
-                  Review notes
+                  {t("panels.artifacts.plan.reviewNotes")}
                 </label>
                 <textarea
                   className="min-h-[4.5rem] w-full resize-y rounded-field border border-white/10 bg-black/20 px-3 py-2 text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
                   disabled={!sessionId || planActionPending}
                   id="artifact-panel-plan-notes"
                   onChange={(event) => onNotesDraftChange(event.target.value)}
-                  placeholder="Optional notes for approve / request changes / quit"
+                  placeholder={t("panels.artifacts.plan.notesPlaceholder")}
                   value={notesDraft}
                 />
                 <div className="flex flex-wrap gap-1.5">
@@ -208,7 +222,7 @@ export function ArtifactPanelPlanSurface({
                     variant="primary"
                   >
                     <CheckIcon size={14} />
-                    Approve
+                    {t("panels.artifacts.plan.approve")}
                   </Button>
                   <Button
                     disabled={!showDecisionActions || planActionPending}
@@ -218,7 +232,7 @@ export function ArtifactPanelPlanSurface({
                     variant="secondary"
                   >
                     <PencilLineIcon size={14} />
-                    Request changes
+                    {t("panels.artifacts.plan.requestChanges")}
                   </Button>
                   <Button
                     disabled={!showDecisionActions || planActionPending}
@@ -228,12 +242,12 @@ export function ArtifactPanelPlanSurface({
                     variant="ghost"
                   >
                     <XIcon size={14} />
-                    Quit
+                    {t("panels.artifacts.plan.quit")}
                   </Button>
                 </div>
                 {!showDecisionActions ? (
                   <div className="text-xs leading-5 text-muted-foreground">
-                    Decision actions unlock while plan mode is active.
+                    {t("panels.artifacts.plan.decisionLocked")}
                   </div>
                 ) : null}
               </div>

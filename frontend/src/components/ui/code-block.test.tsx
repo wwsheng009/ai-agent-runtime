@@ -88,7 +88,7 @@ describe("CodeBlock", () => {
       title: "long.txt",
     });
 
-    expect(container.textContent).toContain("Show 2 more lines");
+    expect(container.textContent).toContain("展开剩余 2 行");
     expect(container.textContent).toContain("line 16");
     expect(container.textContent).not.toContain("line 18");
 
@@ -97,7 +97,7 @@ describe("CodeBlock", () => {
 
     dispatchClick(toggle as HTMLButtonElement);
 
-    expect(container.textContent).toContain("Collapse code");
+    expect(container.textContent).toContain("收起代码");
     expect(container.textContent).toContain("line 18");
   });
 
