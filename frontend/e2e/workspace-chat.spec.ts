@@ -52,6 +52,37 @@ async function scrollMetrics(page: Page) {
   });
 }
 
+/**
+ * P1-3：reading-line（视口顶部往下 1/3）命中的语义行 + 行内 active Turn 标记。
+ *
+ * 断言只看「消息 id / 行相对偏移 / data-active-turn」，不看 DOM 结构或行数，
+ * 因此对虚拟化与渲染实现保持中立（±2px 偏移容差）。
+ */
+async function readingState(page: Page) {
+  return page.evaluate(() => {
+    const log = document.querySelector('[role="log"]');
+    const host = log?.parentElement ?? null;
+    if (!log || !host) {
+      return null;
+    }
+    const hostTop = host.getBoundingClientRect().top;
+    const line = hostTop + host.clientHeight / 3;
+    const rows = Array.from(log.querySelectorAll<HTMLElement>("[data-message-id]"));
+    let picked: HTMLElement | null = null;
+    for (const row of rows) {
+      if (row.getBoundingClientRect().top <= line) {
+        picked = row;
+      }
+    }
+    const active = log.querySelector<HTMLElement>('[data-active-turn="true"]');
+    return {
+      activeId: active?.dataset.messageId ?? null,
+      id: picked?.dataset.messageId ?? null,
+      top: picked ? Math.round(picked.getBoundingClientRect().top - hostTop) : null,
+    };
+  });
+}
+
 test.beforeEach(async ({ page }) => {
   // mock server 跨 spec 共享：每个用例前清空会话历史/事件/故障开关，
   // 否则 e2e-session-1 会累积上一次用例的问答。
@@ -155,6 +186,94 @@ test("G5: list auto-follows the stream, pauses while scrolled up, resumes at bot
   await expect(page.getByText(/part 24/)).toBeVisible({ timeout: 15_000 });
   metrics = await scrollMetrics(page);
   expect(Math.abs(metrics.max - metrics.top)).toBeLessThanOrEqual(120); // following again
+});
+
+test("P1-3a: reading position holds while the answer keeps streaming", async ({
+  page,
+}) => {
+  await sendPrompt(page, "scroll long answer");
+  await expect(page.getByText(/part 4/)).toBeVisible({ timeout: 15_000 });
+
+  // 上滚离开底部：语义锚点定在 reading-line 命中的那一行。
+  const list = page.locator('[role="log"]').locator("..");
+  await list.hover();
+  await page.mouse.wheel(0, -2400);
+  await page.waitForTimeout(300);
+  const before = await readingState(page);
+  expect(before?.id).toBeTruthy();
+  expect(before?.top).not.toBeNull();
+  // active Turn 是几何命中：reading-line 命中的行就是 active 行。
+  expect(before?.activeId).toBe(before?.id);
+
+  // 后续 chunk 只在视口下方增长：锚点行的视口偏移必须原地不动（±2px）。
+  await expect(page.getByText(/part 24/)).toBeVisible({ timeout: 15_000 });
+  const after = await readingState(page);
+  expect(after?.id).toBe(before?.id);
+  expect(Math.abs((after?.top ?? 0) - (before?.top ?? 0))).toBeLessThanOrEqual(2);
+  expect(after?.activeId).toBe(before?.id);
+});
+
+test("P1-3b: prepending older history keeps the viewport anchored", async ({ page }) => {
+  await sendPrompt(page, "scroll long answer");
+  await expect(page.getByText(/part 36/)).toBeVisible({ timeout: 20_000 });
+  await page.waitForTimeout(600); // 等 done/finalize 落地，注入期间不再有流式提交
+
+  const list = page.locator('[role="log"]').locator("..");
+  await list.hover();
+  await page.mouse.wheel(0, -4000);
+  await page.waitForTimeout(300);
+  const before = await readingState(page);
+  const metricsBefore = await scrollMetrics(page);
+  expect(before?.id).toBeTruthy();
+  expect(metricsBefore.max - metricsBefore.top).toBeGreaterThan(150); // 已离开底部
+
+  // 在语义行容器顶部插入一条「更早的历史」行：等价于历史前插（虚拟化中立）。
+  await page.evaluate(() => {
+    const log = document.querySelector('[role="log"]');
+    if (!log) {
+      return;
+    }
+    const row = document.createElement("article");
+    row.dataset.messageId = "history-prepended-0";
+    row.style.display = "block";
+    row.style.height = "900px";
+    log.prepend(row);
+  });
+  await page.waitForTimeout(400);
+
+  const after = await readingState(page);
+  const metricsAfter = await scrollMetrics(page);
+  // 阅读保顶：语义行位置不变（±2px），scrollTop 增大以抵消前插。
+  expect(after?.id).toBe(before?.id);
+  expect(Math.abs((after?.top ?? 0) - (before?.top ?? 0))).toBeLessThanOrEqual(2);
+  expect(metricsAfter.top).toBeGreaterThan(metricsBefore.top);
+  // 保顶期间不抢贴底：仍然是离开底部的状态。
+  expect(metricsAfter.max - metricsAfter.top).toBeGreaterThan(150);
+});
+
+test("P1-3c: bottom ownership holds while a tool card streams in", async ({ page }) => {
+  // 先制造一屏以上的内容，再在底部叠加工具回合：工具卡出现/增长期间必须保持贴底。
+  await sendPrompt(page, "scroll long answer");
+  await expect(page.getByText(/part 36/)).toBeVisible({ timeout: 20_000 });
+  await page.waitForTimeout(400);
+  let metrics = await scrollMetrics(page);
+  expect(metrics.max).toBeGreaterThan(200);
+  expect(metrics.max - metrics.top).toBeLessThanOrEqual(32); // ±32px 底部归属
+
+  await sendPrompt(page, "use the tool to look it up");
+  await expect(page.getByText("web_search")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("Running", { exact: true }).first()).toBeVisible({
+    timeout: 10_000,
+  });
+  metrics = await scrollMetrics(page);
+  expect(metrics.max - metrics.top).toBeLessThanOrEqual(32); // 工具卡增长时仍贴底
+
+  await expect(page.getByText("Paris is the capital of France.")).toBeVisible({
+    timeout: 15_000,
+  });
+  await page.waitForTimeout(200);
+  metrics = await scrollMetrics(page);
+  expect(metrics.max - metrics.top).toBeLessThanOrEqual(32); // 正文收尾后仍贴底
 });
 
 test("G6: phase strip reflects the stream lifecycle", async ({ page }) => {

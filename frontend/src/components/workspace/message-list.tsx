@@ -1,10 +1,11 @@
 // 由 components/workspace/message-list.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { ScrollTextIcon } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { type Artifact } from "@/data/mock";
+import { useConversationScroll } from "@/hooks/workspace/use-conversation-scroll";
 import { isArtifactEvidence } from "@/lib/workspace-artifacts";
 import { cn } from "@/lib/utils";
 import { type ChatStreamPhase } from "@/types/runtime";
@@ -15,8 +16,6 @@ import type { MessageListProps } from "./message-list/types";
 import { UserMessageBubble } from "./message-list/user-message-bubble";
 
 export type { MessageBacktrackOptions } from "./message-list/types";
-
-const SCROLL_FOLLOW_THRESHOLD = 120;
 
 const PHASE_LABELS: Record<ChatStreamPhase, string> = {
   connecting: "Connecting to runtime…",
@@ -42,6 +41,7 @@ export function MessageList({
   onSelectBacktrackNavigationMessage,
   onSelectArtifact,
   phase,
+  scrollMemoryKey = null,
   style,
 }: MessageListProps) {
   const { t } = useTranslation("workspace");
@@ -55,59 +55,16 @@ export function MessageList({
   const [inlineEditDraft, setInlineEditDraft] = useState("");
   const selectedMessageRef = useRef<HTMLElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
-  // Tracks whether the user has scrolled away from the bottom. Streaming
-  // follow stays active until the user actively scrolls up (a single large
-  // content flush must not be mistaken for leaving the bottom), and resumes
-  // as soon as they scroll back down.
-  const [userScrolledAway, setUserScrolledAway] = useState(false);
-  // Mirror of the state above for layout/frame callbacks, which must observe
-  // the latest scroll intent without waiting for a re-render.
-  const userScrolledAwayRef = useRef(false);
-  // Tracks the previous "responding" flag so the turn's final content flush
-  // (which often arrives in the same commit that clears isResponding) still
-  // follows, without hijacking history restore / backtrack navigation.
-  const wasRespondingRef = useRef(isResponding);
-
-  const handleScroll = () => {
-    const container = scrollContainerRef.current;
-    if (!container) {
-      return;
-    }
-    const distanceFromBottom =
-      container.scrollHeight - container.scrollTop - container.clientHeight;
-    const next = distanceFromBottom > SCROLL_FOLLOW_THRESHOLD;
-    userScrolledAwayRef.current = next;
-    setUserScrolledAway(next);
-  };
-
-  useLayoutEffect(() => {
-    // 流式期间保持贴底；收尾那一帧（isResponding 刚翻 false、内容与 done
-    // 同批提交）也要贴底，否则列表会停在顶部。历史回放/回溯定位由
-    // backtrackNavigationActive 分支单独接管滚动位置。
-    const wasResponding = wasRespondingRef.current;
-    wasRespondingRef.current = isResponding;
-    if (
-      (!isResponding && !wasResponding) ||
-      userScrolledAway ||
-      backtrackNavigationActive
-    ) {
-      return;
-    }
-    const container = scrollContainerRef.current;
-    if (!container) {
-      return;
-    }
-    container.scrollTop = container.scrollHeight;
-    // 提交后内容仍可能再长高一帧（markdown/代码高亮/字体回流），补一次贴底。
-    const frame = requestAnimationFrame(() => {
-      const next = scrollContainerRef.current;
-      if (!next || userScrolledAwayRef.current) {
-        return;
-      }
-      next.scrollTop = next.scrollHeight;
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [backtrackNavigationActive, isResponding, messages, userScrolledAway]);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  // P1-3：滚动所有权收口到 useConversationScroll（贴底跟随 / 阅读保顶 /
+  // 跨挂载语义锚点），组件只消费 reading-line 命中的 active 消息。
+  const { activeMessageId } = useConversationScroll({
+    containerRef: scrollContainerRef,
+    contentRef,
+    revision: messages,
+    suspended: backtrackNavigationActive,
+    memoryKey: scrollMemoryKey,
+  });
 
   useEffect(() => {
     if (!editingMessageId) {
@@ -140,14 +97,16 @@ export function MessageList({
     });
   }, [backtrackNavigationActive, backtrackSelectedMessageId]);
 
+  // P1-3：宿主禁用原生 scroll anchoring —— 它是另一套滚动所有权，会和语义
+  // 锚点抢位置；贴底/保顶由 useConversationScroll 统一决定。
   return (
     <div
       ref={scrollContainerRef}
-      onScroll={handleScroll}
       className={cn("flex-1 overflow-y-auto px-3 py-4 sm:px-4", className)}
-      style={style}
+      style={{ overflowAnchor: "none", ...style }}
     >
       <div
+        ref={contentRef}
         aria-atomic="false"
         aria-busy={isResponding ? "true" : undefined}
         aria-label={logLabel}
@@ -224,7 +183,9 @@ export function MessageList({
               aria-labelledby={labelId}
               aria-setsize={messages.length}
               aria-posinset={messageIndex + 1}
+              data-active-turn={activeMessageId === message.id ? "true" : undefined}
               data-backtrack-selected={isNavigationSelected ? "true" : undefined}
+              data-message-id={message.id}
               key={message.id}
               ref={isNavigationSelected ? selectedMessageRef : undefined}
               className={cn("flex w-full", isUser ? "justify-end" : "justify-start")}

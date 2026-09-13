@@ -29,5 +29,7 @@ export type MessageListProps = {
   onSelectBacktrackNavigationMessage?: (messageId: string) => void;
   onSelectArtifact: (artifactId: string) => void;
   phase?: ChatStreamPhase | null;
+  /** P1-3：跨挂载滚动记忆键（线程 id）；缺省时滚动锚点只在本次挂载内有效。 */
+  scrollMemoryKey?: string | null;
   style?: CSSProperties;
 };

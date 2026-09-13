@@ -222,6 +222,7 @@ export function WorkspaceMainSection({
                   onSelectBacktrackNavigationMessage={onSelectBacktrackNavigationMessage}
                   onSelectArtifact={handleOpenArtifact}
                   phase={phase}
+                  scrollMemoryKey={selectedThread.sessionId ?? selectedThread.id}
                   style={messageListStyle}
                 />
               ) : (
