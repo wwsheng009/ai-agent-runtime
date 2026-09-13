@@ -6,8 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "lint": "eslint . && node scripts/verify-frontend-i18n.ts",
+    "lint": "eslint . && node scripts/verify-frontend-i18n.ts && node scripts/verify-no-backups.mjs",
     "lint:i18n": "node scripts/verify-frontend-i18n.ts",
+    "verify:clean": "node scripts/verify-no-backups.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
