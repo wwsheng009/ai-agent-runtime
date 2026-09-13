@@ -221,27 +221,53 @@ func (h *localChatRuntimeHost) markRuntimeSessionStopped(ctx context.Context, se
 }
 
 func (h *localChatRuntimeHost) markTeamInterrupted(ctx context.Context, teamID string) {
+	h.suspendAmbientTeam(ctx, teamID, "user_interrupt", "cancelled by user interrupt")
+}
+
+// suspendAmbientTeam durably parks a team so it stops driving foreground
+// execution without destroying its durable shell: non-terminal tasks are
+// cancelled, busy teammate rows are idled, the team status becomes paused and
+// the lifecycle event records why. Callers that run while the session is
+// interactive (user interrupt, interactive resume) must use this instead of
+// cancelling the team, so the durable team remains available for an explicit
+// later resume.
+func (h *localChatRuntimeHost) suspendAmbientTeam(ctx context.Context, teamID, reason, taskSummary string) {
 	if h == nil || h.TeamStore == nil || strings.TrimSpace(teamID) == "" {
 		return
 	}
 	teamID = strings.TrimSpace(teamID)
-	_ = h.cancelActiveTeamTasks(ctx, teamID)
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "suspended"
+	}
+	taskSummary = strings.TrimSpace(taskSummary)
+	if taskSummary == "" {
+		taskSummary = "cancelled by team suspend"
+	}
+	// Stop the in-process loop first: a live loop would otherwise keep the
+	// paused team unsettled (RunSettled reports paused-with-loop as pending).
+	h.stopTeamLifecycleLoop(teamID)
+	_ = h.cancelActiveTeamTasks(ctx, teamID, taskSummary)
 	_ = h.idleTeamMates(ctx, teamID)
 	_ = h.TeamStore.UpdateTeamStatus(ctx, teamID, team.TeamStatusPaused)
 	h.dispatchTeamLifecycleEvent(team.TeamEvent{
 		Type:   "team.interrupted",
 		TeamID: teamID,
 		Payload: map[string]interface{}{
-			"reason": "user_interrupt",
+			"reason": reason,
 			"status": string(team.TeamStatusPaused),
 		},
 		Timestamp: time.Now().UTC(),
 	}, true)
 }
 
-func (h *localChatRuntimeHost) cancelActiveTeamTasks(ctx context.Context, teamID string) error {
+func (h *localChatRuntimeHost) cancelActiveTeamTasks(ctx context.Context, teamID, summary string) error {
 	if h == nil || h.TeamStore == nil || strings.TrimSpace(teamID) == "" {
 		return nil
+	}
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		summary = "cancelled"
 	}
 	tasks, err := h.TeamStore.ListTasks(ctx, team.TaskFilter{
 		TeamID: strings.TrimSpace(teamID),
@@ -258,7 +284,6 @@ func (h *localChatRuntimeHost) cancelActiveTeamTasks(ctx context.Context, teamID
 	taskRegistry := team.NewAgentControlTaskRegistry(h.TeamStore).WithClaims(h.TeamClaims)
 	for _, item := range tasks {
 		assignee := taskAssignee(item)
-		summary := "cancelled by user interrupt"
 		if _, err := taskRegistry.ReleaseAgentControlTask(ctx, agentcontrol.TaskReleaseRequest{
 			ID:       item.ID,
 			Workflow: agentcontrol.WorkflowSpawnTeam,

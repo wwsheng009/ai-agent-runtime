@@ -8,6 +8,7 @@ import (
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/teamsupervisor"
 )
@@ -370,6 +371,92 @@ func reconcileStaleAmbientTeams(session *ChatSession) {
 	}
 	// Best-effort：探测失败不阻断启动，既有等待路径按原逻辑继续。
 	_, _ = team.ReconcileTerminalTeamState(ctx, lifecycle.terminalTeamServices(), teamID)
+}
+
+// suspendRestoredAmbientTeamForInteractiveResume parks a team that a previous
+// process left active so that an interactive resume returns to the
+// waiting-for-input state instead of immediately re-driving the old execution.
+//
+// Resume restores the ambient team binding and then restarts the team
+// lifecycle loop (restoreLocalRuntimeHostTeamState -> syncTeamLifecycleLoops).
+// With an active team the lifecycle keeps reporting Pending()==true, so
+// waitForInteractivePromptReady blocks in waitForTeamTerminal and
+// shouldDisplayInteractivePrompt never renders the ">" composer: the UI shows
+// an execution state while the user cannot type anything. Parking the restored
+// team before the loop sync keeps the session idle until the user sends the
+// next prompt, which is the documented contract of `aicli resume`
+// ("restore the conversation, then wait for input"). Headless/JSON runs
+// deliberately keep the previous behaviour: restored teams keep running to
+// terminal and are drained with a timeout by awaitNoInteractiveLocalTeamDrain.
+//
+// The team is paused, never cancelled: the durable shell, its tasks and its
+// lifecycle history remain available for an explicit later resume.
+func suspendRestoredAmbientTeamForInteractiveResume(session *ChatSession) (string, bool) {
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.TeamStore == nil {
+		return "", false
+	}
+	if !chatHostSessionInteractive(session) {
+		return "", false
+	}
+	binding := resolvedInteractiveTeamBinding(session)
+	if binding == nil {
+		return "", false
+	}
+	teamID := strings.TrimSpace(binding.TeamID)
+	if teamID == "" {
+		return "", false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), chatInterruptCleanupTimeout)
+	defer cancel()
+	record, err := session.LocalRuntimeHost.TeamStore.GetTeam(ctx, teamID)
+	if err != nil || record == nil || record.Status != team.TeamStatusActive {
+		return "", false
+	}
+	session.LocalRuntimeHost.suspendAmbientTeam(ctx, teamID, "resume_waiting_input",
+		"cancelled by interactive resume (session parked in waiting-input state)")
+	if active := chatSessionActiveTeam(session); active != nil && strings.EqualFold(strings.TrimSpace(active.TeamID), teamID) {
+		setChatActiveTeam(session, nil)
+	}
+	// The parked team is settled now, so this clears the ambient run metadata
+	// that would otherwise re-bind it from the durable runtime state.
+	_ = syncAmbientTeamLifecycleState(session)
+	// 双保险：只要 AmbientRunMeta 还在，syncAmbientTeamLifecycleState 就可能用旧
+	// metadata 把 binding 写回运行上下文（chat_team_drain.go 的 binding 归一路径）。
+	// 团队已 paused，这里再清一次，保证恢复后不会残留"仍在执行的团队"。
+	if active := chatSessionActiveTeam(session); active != nil && strings.EqualFold(strings.TrimSpace(active.TeamID), teamID) {
+		setChatActiveTeam(session, nil)
+	}
+	logpkg.Infof("AICLI resume parked restored ambient team %s: waiting for user input", teamID)
+	return teamID, true
+}
+
+// resumeTeamSuspendedNotice is the user-visible explanation for a team parked
+// by an interactive resume. It is one-shot: /resume renders it through the
+// resume confirmation document (or printResumeSuccess in the legacy path).
+func resumeTeamSuspendedNotice(teamID string) string {
+	teamID = strings.TrimSpace(teamID)
+	if teamID == "" {
+		return ""
+	}
+	return fmt.Sprintf("[resume] 检测到上次未完成的团队执行（team %s），已暂停并回到等待输入状态；发送新消息即可继续对话。", teamID)
+}
+
+func setChatResumeTeamNotice(session *ChatSession, notice string) {
+	if session == nil {
+		return
+	}
+	session.runtimeCtxMu.Lock()
+	session.resumeTeamNotice = strings.TrimSpace(notice)
+	session.runtimeCtxMu.Unlock()
+}
+
+func chatResumeTeamNotice(session *ChatSession) string {
+	if session == nil {
+		return ""
+	}
+	session.runtimeCtxMu.Lock()
+	defer session.runtimeCtxMu.Unlock()
+	return session.resumeTeamNotice
 }
 
 func (c *localTeamLifecycleService) waitForTerminalCleanupReady(ctx context.Context, teamID string) error {

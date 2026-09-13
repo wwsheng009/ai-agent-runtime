@@ -55,6 +55,11 @@ func buildChatResumeDocument(session *ChatSession) render.Document {
 	var builder chatDebugDocumentBuilder
 	builder.heading(heading)
 	appendChatLoadSessionMeta(&builder, session)
+	// 交互式 resume 会把上一进程遗留的 active team 停放到 paused，
+	// 让会话回到等待输入状态；该提示必须随恢复确认一起可见。
+	if notice := chatResumeTeamNotice(session); notice != "" {
+		builder.plain(notice)
+	}
 	return builder.document()
 }
 

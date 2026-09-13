@@ -617,7 +617,15 @@ func restoreLocalRuntimeHostTeamState(session *ChatSession) {
 	// UI 却显示执行状态。必须赶在 syncTeamLifecycleLoops 之前：已被判定终止的
 	// 团队不会被重新拉起 loop；真在执行的团队保持 active，正常恢复运行。
 	reconcileStaleAmbientTeams(session)
-	if activeTeam := chatSessionActiveTeam(session); activeTeam != nil && strings.TrimSpace(activeTeam.TeamID) != "" {
+	if teamID, suspended := suspendRestoredAmbientTeamForInteractiveResume(session); suspended {
+		// 交互式 resume 的契约是"恢复会话后等待用户输入"：把上一进程遗留的
+		// 团队执行停放到 paused，而不是在启动阶段重新拉起 loop 继续执行。
+		// 否则 interactiveTeamPending 恒为 true，主循环阻塞在
+		// waitForTeamTerminal，composer 永不渲染（UI 却显示执行状态）。
+		// 复用 preamble 的信息行渲染，避免在 chat_setup.go 引入新的直接写入者
+		// （chat direct-writer inventory 是不允许扩张的回归围栏）。
+		printChatSessionInfoRow(os.Stderr, "Resume:", resumeTeamSuspendedNotice(teamID), chatSessionMetaLabelWidth)
+	} else if activeTeam := chatSessionActiveTeam(session); activeTeam != nil && strings.TrimSpace(activeTeam.TeamID) != "" {
 		session.LocalRuntimeHost.replayStoredTerminalTeamLifecycleEvents(activeTeam.TeamID)
 	}
 	warnIfChatSessionSyncFails(session, "sync ambient team lifecycle state", syncAmbientTeamLifecycleState(session))

@@ -638,6 +638,7 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 - `/resume latest` 直接恢复最近的其他可恢复会话。全屏选择器显示最后更新时间（绝对时间与相对时间）、会话轮次、消息数、清理后的标题和选中会话摘要；session id、protocol、provider 和 model 只进入搜索索引，不占用候选行。轮次按持久化的 user 消息数统计，消息数包含 system、user、assistant 和 tool 消息。
 - chat 内的 `/sessions` 不显示当前会话和启动占位会话；`aicli chat --list-sessions` / `aicli resume --list-sessions` 的独立完整列表显示最后更新时间、轮次和消息数，并保留 session id、状态、protocol、provider、model 等诊断信息。会话列表和最近会话恢复默认按当前工作目录过滤，传入 `--cwd=false` 才会查看全部目录。CLI 入口上，`aicli resume` 默认恢复当前工作目录最近的可恢复会话，`aicli resume <session-id>` 仍可直接加载指定会话；`aicli --resume` 会经默认 chat 参数改写为 `aicli chat --resume`。
 - 退出交互式 TUI 后，终端会显示 `aicli resume <session-id>`，便于下次继续当前会话；临时会话以及尚未落盘的空会话不会显示无效的恢复命令。
+- 交互式 `aicli resume` / `aicli chat --resume` / 会话内 `/resume` 恢复后**停在等待输入状态**：上一进程遗留的团队执行会被停放为 `paused`（保留可恢复的团队壳，任务标记 cancelled），不会在启动阶段重新拉起 team lifecycle loop 继续执行，也不会在首屏渲染前 drain supervision auto-wake；启动信息行会提示 `Resume:` 停放说明。headless / `--output json` 语义不变，遗留团队仍跑到终态。
 - `/export` 无参数时会弹出选择器；`--full` 生成完整 JSON，`--body` 只导出用户/助手正文；可用 `--output <path>` 或 `--dir <dir>` 指定输出位置。
 - `/debug export` / `/debug zip` 会把 `/debug display` 中“会话文件与目录”部分的 session file、chat/debug log、runtime-http/local-shell/generated-images artifacts 打包为 zip，并附带 `manifest.json`。SQLite 模式在同一读事务中生成只含当前 session 的一致性快照，包含已提交 WAL 内容但不会泄露其他会话，并同时打包当前会话引用的 canonical artifacts。
 - `spawn_team auto_start=true` 之后应使用 `wait_team` 等待持久 `team.completed` / `team.summary`；`wait_agent` / `read_agent_events` 面向 `spawn_agent` child session，不应拿 team member id 当 child session id。

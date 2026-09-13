@@ -16,6 +16,8 @@ const ResumeCommandLongHelp = `恢复历史 chat 会话并进入交互式对话�
   - aicli resume --cwd=false     跨工作目录恢复最近一次可恢复会话
   - aicli resume <session-id>    加载指定会话（等价 aicli chat --session <id>）
   - aicli resume --list-sessions 列出可筛选的会话后退出
+  - 恢复后停在等待输入状态：上一进程遗留的团队执行会停放为 paused（保留可恢复的
+    团队壳），不会在启动阶段自动继续执行；发送下一条消息即可继续对话
 
 可继续使用 chat 的 provider/model/profile/permission 等 flags。
 chat 内也可用 /resume、/sessions、/load 继续切换会话。

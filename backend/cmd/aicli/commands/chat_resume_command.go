@@ -663,6 +663,12 @@ func printResumeSuccess(session *ChatSession) {
 				messageCount,
 			)
 		}
+		// 交互式 resume 停放上一进程遗留团队时，明确告知用户当前是等待输入状态。
+		// 提示并入同一次直写：printResumeSuccess 的直接写入者是 inventory
+		// 基线的一部分，不允许在这里新增第二个输出调用。
+		if notice := chatResumeTeamNotice(session); notice != "" {
+			line += notice + "\n"
+		}
 		// Prefer surface WriteOutput so ClearPrompt shrink debt flushes here
 		// instead of attaching to the first history content block.
 		if !writeDirectInteractiveOutput(session, line) {

@@ -157,8 +157,14 @@ type ChatSession struct {
 	ActorFirstReady     bool                    // actor-first executor established for this session
 	ChatExecutor        aicliChatExecutor       // 当前会话的统一 turn executor
 	LocalRuntimeHost    *localChatRuntimeHost   // actor-first local runtime host
-	actorWarmupMu       sync.Mutex
-	actorWarmup         *chatActorWarmup
+	// resumeTeamNotice is the one-shot user notice produced when resume parks a
+	// team that a previous process left running (see
+	// suspendRestoredAmbientTeamForInteractiveResume). It is rendered by the
+	// resume confirmation (/resume document or legacy printResumeSuccess) and
+	// never participates in the model context.
+	resumeTeamNotice string
+	actorWarmupMu    sync.Mutex
+	actorWarmup      *chatActorWarmup
 	// runtimeCtxMu guards the runtime-context fields that the event bridge
 	// reads while the actor/executor restores them from a runtime session:
 	// DebugMode, PermissionMode, ApprovalReuseMode, SelectedAgentTarget,

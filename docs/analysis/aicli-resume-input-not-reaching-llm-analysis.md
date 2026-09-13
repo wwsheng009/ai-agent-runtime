@@ -162,3 +162,45 @@ resume 恢复了历史消息（`loadResumeCanonicalHistory`）与 ChatSession，
 - 复现：`aicli resume <id> --yolo --debug`，输入 prompt，观察是否出现 LLM 请求（`--debug` 下的请求日志 / pprof 端点 `/debug/pprof/goroutine` 确认 goroutine 卡在 `waitForAICLIActorReady` 轮询）。
 - 回归：正常 resume 后首次 prompt 应在阈值内发出请求；期间按 Ctrl+C 可中断并回到输入循环。
 - 单测：为 `waitForAICLIActorReady` 增加"busy 超时返回错误"用例；为 resume 收敛路径增加"遗留 busy actor 被复位"用例。
+
+## 7. 修复记录（2026-09-13）：resume 收敛到"等待用户输入"
+
+第 5 节的建议 1（有界等待）与建议 2 的 actor 侧收敛（`RecoverStale: true` + `reconcileRecoveredRuntimeState`，
+`internal/chat/actor.go`）已在先前提交落地。本次补齐剩余的**启动即重新进入执行状态**的根因：交互式 resume 会把
+上一进程遗留的 active 团队重新拉起。
+
+### 7.1 根因（revised 拦截点 A）
+
+- `restoreLocalRuntimeHostTeamState` 在恢复 `ActiveTeam` 绑定后调用 `syncTeamLifecycleLoops()`，会为 active 团队重建 team lifecycle loop；
+- `localTeamLifecycleService.Pending()` → `RunSettled()` 对 `TeamStatusActive` 恒为 false，于是 `interactiveTeamPending()` 恒为 true；
+- 主循环 `prepareInteractiveRead` → `waitForInteractivePromptReady` → `waitForTeamTerminal` 阻塞，`shouldDisplayInteractivePrompt` 永不渲染 `>` composer，而 UI 处于执行态。
+
+与"stale 空团队"（先前已修：`reconcileStaleAmbientTeams` 把无任务进展的 active 团队判定终止）不同，这里团队
+确实有未终态任务，因此需要的是一个显式的产品决策：**交互式 resume 不接管上一进程的团队执行**。
+
+### 7.2 修复
+
+- `suspendAmbientTeam(ctx, teamID, reason, taskSummary)`（`chat_interrupt.go`）：停 loop → 取消非终态任务 → idle teammates →
+  `UpdateTeamStatus(paused)` → 派发 `team.interrupted`；`markTeamInterrupted` 改为其调用方（用户中断语义不变）。
+- `suspendRestoredAmbientTeamForInteractiveResume`（`chat_team_lifecycle.go`）：仅当会话交互式（`!NoInteractive && !JSONOutput`）
+  且 TeamStore 中确为 `TeamStatusActive` 时停放；随后清空 `ActiveTeam` 绑定与 `AmbientRunMeta`（避免从持久状态再次绑定）。
+- 启动路径（`chat_setup.go` 的 `restoreLocalRuntimeHostTeamState`）在 `reconcileStaleAmbientTeams` 之后、
+  `syncTeamLifecycleLoops` 之前停放；in-session `/resume`（`chat_session.go` 的 `loadRuntimeConversation` /
+  `resumeLatestRuntimeConversation`）调用同一函数。
+- 团队 **paused 而非 cancel**：durable team 壳、任务与生命周期历史保留，可显式恢复；`RunSettled` 对 paused 团队按
+  "无 live loop 即 settled" 判定，停放后 composer 立即可用。
+- 用户可见提示：启动期走既有 preamble 信息行（`printChatSessionInfoRow`），会话内 `/resume` 并入恢复确认
+  （`buildChatResumeDocument` / `printResumeSuccess` 的既有单次直写），不新增 direct writer（维持 inventory 围栏）。
+- 非交互语义不变：headless/JSON 仍让遗留团队跑到终态（`awaitNoInteractiveLocalTeamDrain` 有界排空）；
+  交互式启动期本就不 drain supervision auto-wake（`chat_actor_host.go`，wake 保持 durable 到首次 turn-end）。
+
+### 7.3 验证
+
+- `go build ./cmd/aicli/...`
+- `go test ./cmd/aicli/commands/ -run 'Resume|Team|Interrupt|Prompt' -count=1`
+- 回归用例（`cmd/aicli/commands/chat_resume_team_park_test.go`）：
+  - `TestResumeInteractiveParksUnfinishedAmbientTeam`：停放为 paused、无 live loop、`Pending()==false`、
+    绑定与 `AmbientRunMeta` 清空、`prepareInteractiveRead` 返回 `showPrompt=true`、任务 cancelled；
+  - `TestResumeHeadlessKeepsUnfinishedAmbientTeamActive`：headless 对照，团队保持 active 且仍 pending；
+  - `TestInSessionResumeParksUnfinishedAmbientTeam`：会话内 `/resume` 同样停放并给出含 team id 的提示；
+  - `TestInSessionResumeClearsStaleParkedTeamNotice`：连续 `/resume` 不重复显示上一次的停放提示。

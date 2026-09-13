@@ -372,6 +372,7 @@ func loadRuntimeConversation(session *ChatSession, sessionID string) error {
 	// 压缩/截断后的热上下文投影（session_prompt_messages）。best-effort：
 	// 后端不支持分页或加载失败时保持投影展示，不阻塞恢复流程。
 	loadResumeCanonicalHistory(session, sessionID)
+	parkRestoredTeamAfterInteractiveResume(session)
 	return nil
 }
 
@@ -440,7 +441,32 @@ func resumeLatestRuntimeConversation(session *ChatSession) error {
 		return err
 	}
 	ensureChatSystemPromptMessage(session)
-	return syncRuntimeSessionFromChatPreservingUpdatedAt(session)
+	if err := syncRuntimeSessionFromChatPreservingUpdatedAt(session); err != nil {
+		return err
+	}
+	parkRestoredTeamAfterInteractiveResume(session)
+	return nil
+}
+
+// parkRestoredTeamAfterInteractiveResume applies the interactive-resume
+// contract to in-session /resume: the target conversation must come back in
+// the waiting-for-input state, never by re-driving a team that the previous
+// process left active. Without this, /resume into such a session leaves
+// interactiveTeamPending() true with no live loop in this process, so
+// waitForInteractivePromptReady blocks in waitForTeamTerminal forever and the
+// ">" composer never renders.
+func parkRestoredTeamAfterInteractiveResume(session *ChatSession) {
+	teamID, suspended := suspendRestoredAmbientTeamForInteractiveResume(session)
+	if !suspended {
+		// 同一 ChatSession 可以连续 /resume 多个会话：本次没有停放任何团队时
+		// 必须清掉上一次的提示，否则恢复确认里会重复出现已经不成立的停放说明。
+		setChatResumeTeamNotice(session, "")
+		return
+	}
+	setChatResumeTeamNotice(session, resumeTeamSuspendedNotice(teamID))
+	// 恢复目标会话后 CLI 侧上下文已切换：把停放的团队从会话元数据中移除，
+	// 避免下一个用户 turn 仍带着已暂停团队的 run meta。
+	warnIfChatSessionSyncFails(session, "sync parked ambient team state", syncRuntimeSessionFromChatPreservingUpdatedAt(session))
 }
 
 // loadLatestResumableRuntimeSession returns the newest session that actually contains
