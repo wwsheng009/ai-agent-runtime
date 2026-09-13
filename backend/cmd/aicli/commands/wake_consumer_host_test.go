@@ -17,13 +17,21 @@ import (
 // durable supervision store and a wake consumer whose Deliver records calls.
 func newWakeConsumerTestHost(t *testing.T, name string) (*localChatRuntimeHost, *supervision.SQLiteSupervisionStore, *syncWaitDeliveries) {
 	t.Helper()
+	return newWakeConsumerTestHostWithConfig(t, name, supervision.WakeSchedulerConfig{})
+}
+
+// newWakeConsumerTestHostWithConfig is the same harness with explicit wake
+// scheduler tuning. The turn-end self-check (plan P1-6 方案 4) needs a
+// one-unit class budget plus its own allowance to be observable.
+func newWakeConsumerTestHostWithConfig(t *testing.T, name string, schedulerConfig supervision.WakeSchedulerConfig) (*localChatRuntimeHost, *supervision.SQLiteSupervisionStore, *syncWaitDeliveries) {
+	t.Helper()
 	store, err := supervision.NewSQLiteSupervisionStore(&supervision.StoreConfig{
 		DSN: "file:" + name + "?mode=memory&cache=shared",
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 
-	scheduler := supervision.NewWakeScheduler(store, supervision.WakeSchedulerConfig{})
+	scheduler := supervision.NewWakeScheduler(store, schedulerConfig)
 	deliveries := &syncWaitDeliveries{}
 
 	var host *localChatRuntimeHost
@@ -236,4 +244,67 @@ func TestLocalHostWakeConsumer_WakeTurnAppliesRunEpochProtocol(t *testing.T) {
 	endRun()
 	require.Equal(t, uint64(1), bridge.currentRunEpoch())
 	require.True(t, bridge.isRunEpochCurrent(1))
+}
+
+// projectCriticalWake writes one critical lifecycle notification plus its
+// durable wake under an explicit subject id.
+func projectCriticalWake(t *testing.T, store *supervision.SQLiteSupervisionStore, scheduler *supervision.WakeScheduler, subjectID string) {
+	t.Helper()
+	_, err := supervision.ProjectLifecycle(context.Background(), store, scheduler, supervision.LifecycleProjection{
+		RootScopeID:           "root-session",
+		TargetParentSessionID: "root-session",
+		SubjectKind:           supervision.SubjectAgentRun,
+		SubjectID:             subjectID,
+		EventType:             "exception",
+		Severity:              supervision.SeverityCritical,
+		SupervisionState:      supervision.SupervisionBlocked,
+	})
+	require.NoError(t, err)
+}
+
+// TestLocalHostTurnEndSelfCheck_DeliversDeferredWake verifies plan P1-6 方案 4
+// on the aicli host: when the class budget defers a wake, the parent turn end
+// still starts one bounded digest-only turn, and the allowance stops a second
+// one inside the same window.
+func TestLocalHostTurnEndSelfCheck_DeliversDeferredWake(t *testing.T) {
+	host, store, deliveries := newWakeConsumerTestHostWithConfig(t, "aicli-self-check", supervision.WakeSchedulerConfig{
+		RateWindow:           time.Hour,
+		MaxAutoWakePerWindow: 1,
+		SelfCheckPerWindow:   1,
+	})
+	ctx := context.Background()
+	require.NoError(t, host.RuntimeStore.SaveState(ctx, &runtimechat.RuntimeState{
+		SessionID: "root-session",
+		Status:    runtimechat.SessionIdle,
+		UpdatedAt: time.Now().UTC(),
+	}))
+
+	// The first critical event spends the whole bounded class budget.
+	projectCriticalWake(t, store, host.supervisionWake.Wakes, "child-1")
+	require.NoError(t, host.wakeSupervisedParent(ctx, "root-session", "root-session"))
+	deliveries.wait(t, 5*time.Second)
+	require.Equal(t, 1, deliveries.count())
+
+	// The second event is deferred: the natural drain keeps it durable.
+	projectCriticalWake(t, store, host.supervisionWake.Wakes, "child-2")
+	require.ErrorIs(t, host.wakeSupervisedParent(ctx, "root-session", "root-session"), supervision.ErrWakeRateLimited)
+	require.Equal(t, 1, deliveries.count())
+
+	// The parent turn ends: the self-check starts one digest-only turn.
+	host.EventBus.Publish(runtimeevents.Event{
+		Type:      runtimechat.EventSessionEnd,
+		SessionID: "root-session",
+		Payload:   map[string]interface{}{"success": true},
+	})
+	deliveries.wait(t, 5*time.Second)
+	require.Equal(t, 2, deliveries.count(), "the deferred wake must get one self-check turn")
+
+	// A second turn end in the same window must not start another one.
+	host.EventBus.Publish(runtimeevents.Event{
+		Type:      runtimechat.EventSessionEnd,
+		SessionID: "root-session",
+		Payload:   map[string]interface{}{"success": true},
+	})
+	time.Sleep(200 * time.Millisecond)
+	require.Equal(t, 2, deliveries.count(), "the self-check allowance is per window")
 }

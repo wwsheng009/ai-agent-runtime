@@ -1185,7 +1185,15 @@ func (c *sessionAgentController) wakeSupervisedParent(ctx context.Context, rootS
 	if scheduler == nil {
 		return nil
 	}
-	consumer := &supervision.WakeConsumer{
+	return c.supervisionWakeConsumer(scheduler).MaybeWakeParent(ctx, parentSessionID, "", rootScopeID)
+}
+
+// supervisionWakeConsumer builds the consumer shared by the auto-wake and the
+// turn-end self-check paths: both must use the same runnable gate and the same
+// delivery path, otherwise a self-check turn could start while the parent is
+// busy or bypass the digest injection.
+func (c *sessionAgentController) supervisionWakeConsumer(scheduler *supervision.WakeScheduler) *supervision.WakeConsumer {
+	return &supervision.WakeConsumer{
 		Wakes: scheduler,
 		Runnable: func(ctx context.Context, rootScopeID, parentSessionID, parentTeamID string) bool {
 			actor := c.apiAgentActor(ctx, parentSessionID)
@@ -1205,7 +1213,24 @@ func (c *sessionAgentController) wakeSupervisedParent(ctx context.Context, rootS
 			return actor.SubmitPromptAsync(ctx, supervision.AutoWakePrompt, c.apiAgentRunMeta(ctx, parentSessionID))
 		},
 	}
-	return consumer.MaybeWakeParent(ctx, parentSessionID, "", rootScopeID)
+}
+
+// selfCheckSupervisedParent is the turn-end self-check (plan P1-6 方案 4). It
+// is called only after the auto-wake path reported ErrWakeRateLimited: the
+// class budget deferred the wake, so without the self-check the parent goes
+// idle with an undelivered digest until the next natural turn. The scheduler
+// owns the per-window allowance, so a self-check turn that ends again cannot
+// recurse, and the default (0) disables the whole path.
+func (c *sessionAgentController) selfCheckSupervisedParent(ctx context.Context, rootScopeID, parentSessionID string) error {
+	if c == nil || c.handler == nil {
+		return nil
+	}
+	scheduler := c.handler.getSupervisionWakeScheduler()
+	if scheduler == nil {
+		return nil
+	}
+	_, err := c.supervisionWakeConsumer(scheduler).MaybeSelfCheckParent(ctx, parentSessionID, "", rootScopeID)
+	return err
 }
 
 func (c *sessionAgentController) dispatchAgentHook(event runtimehooks.Event, payload map[string]interface{}) {

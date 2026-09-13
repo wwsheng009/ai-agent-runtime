@@ -15,12 +15,20 @@ import (
 
 func newAPIWakeTestHandler(t *testing.T, name string) (*Handler, *supervision.SQLiteSupervisionStore, *supervision.WakeScheduler) {
 	t.Helper()
+	return newAPIWakeTestHandlerWithConfig(t, name, supervision.WakeSchedulerConfig{})
+}
+
+// newAPIWakeTestHandlerWithConfig is the same harness with explicit wake
+// scheduler tuning (the P1-6 方案 4 turn-end self-check needs its own window
+// allowance to be exercised).
+func newAPIWakeTestHandlerWithConfig(t *testing.T, name string, schedulerConfig supervision.WakeSchedulerConfig) (*Handler, *supervision.SQLiteSupervisionStore, *supervision.WakeScheduler) {
+	t.Helper()
 	store, err := supervision.NewSQLiteSupervisionStore(&supervision.StoreConfig{
 		DSN: "file:" + name + "?mode=memory&cache=shared",
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
-	scheduler := supervision.NewWakeScheduler(store, supervision.WakeSchedulerConfig{})
+	scheduler := supervision.NewWakeScheduler(store, schedulerConfig)
 
 	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
 	handler.SetSupervisionStore(store)

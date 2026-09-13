@@ -595,7 +595,13 @@ func (h *localChatRuntimeHost) bindSupervisionWakeConsumer() {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_ = h.wakeSupervisedParent(ctx, rootSessionID, rootSessionID)
+		if err := h.wakeSupervisedParent(ctx, rootSessionID, rootSessionID); errors.Is(err, supervision.ErrWakeRateLimited) {
+			// P1-6 方案 4: the class budget deferred the wake; give the parent
+			// one bounded digest-only turn instead of leaving it idle with an
+			// undelivered digest (opt-in via
+			// supervision.wake_self_check_per_window).
+			_ = h.selfCheckSupervisedParent(ctx, rootSessionID, rootSessionID)
+		}
 	})
 }
 
@@ -607,6 +613,19 @@ func (h *localChatRuntimeHost) wakeSupervisedParent(ctx context.Context, parentS
 		return nil
 	}
 	return h.supervisionWake.MaybeWakeParent(ctx, parentSessionID, "", rootScopeID)
+}
+
+// selfCheckSupervisedParent is the CLI turn-end self-check (plan P1-6 方案 4).
+// It runs only after the auto-wake path was deferred by an exhausted class
+// budget and shares the scheduler-owned per-window allowance, so it can start
+// at most one extra digest-only parent turn per scope and window. Disabled by
+// default (allowance 0).
+func (h *localChatRuntimeHost) selfCheckSupervisedParent(ctx context.Context, parentSessionID, rootScopeID string) error {
+	if h == nil || h.supervisionWake == nil {
+		return nil
+	}
+	_, err := h.supervisionWake.MaybeSelfCheckParent(ctx, parentSessionID, "", rootScopeID)
+	return err
 }
 
 func (h *localChatRuntimeHost) waitForWarmup() {

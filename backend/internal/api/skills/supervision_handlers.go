@@ -86,7 +86,14 @@ func (h *Handler) bindSupervisionTurnEndConsumer() {
 			}
 			rootScopeID := apiAgentRootSessionID(session, sessionID)
 			controller := &sessionAgentController{handler: h}
-			_ = controller.wakeSupervisedParent(ctx, rootScopeID, sessionID)
+			err = controller.wakeSupervisedParent(ctx, rootScopeID, sessionID)
+			if errors.Is(err, supervision.ErrWakeRateLimited) {
+				// P1-6 方案 4: the class budget deferred the wake, so the
+				// parent would go idle with an undelivered digest. Give it one
+				// bounded digest-only turn (opt-in via
+				// supervision.wake_self_check_per_window).
+				_ = controller.selfCheckSupervisedParent(ctx, rootScopeID, sessionID)
+			}
 		})
 	})
 }

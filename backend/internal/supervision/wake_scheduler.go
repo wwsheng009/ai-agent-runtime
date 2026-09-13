@@ -87,6 +87,11 @@ type WakeSchedulerConfig struct {
 	// BudgetMode selects the budget ledger (see WakeBudgetMode). The empty
 	// value means WakeBudgetModeMemory.
 	BudgetMode WakeBudgetMode
+	// SelfCheckPerWindow is the turn-end self-check allowance (plan P1-6
+	// 方案 4): how many digest-only parent turns a root scope may start per
+	// rate window when its wake was deferred by an exhausted class budget.
+	// 0 (the default) disables the self-check.
+	SelfCheckPerWindow int
 }
 
 // WakeScheduler subscribes the lifecycle inbox to the parent turn start
@@ -97,10 +102,13 @@ type WakeScheduler struct {
 
 	rateMu sync.Mutex
 	claims map[string][]time.Time // rootScopeID|budgetClass -> claim timestamps
+	// selfChecks maps rootScopeID -> turn-end self-check timestamps.
+	selfChecks map[string][]time.Time
 
 	rateWindow      time.Duration
 	maxAutoWake     int // 0 => unlimited (failure / other classes)
 	maxApprovalWake int // 0 => unlimited (approval class)
+	maxSelfCheck    int // 0 => self-check disabled
 	budgetMode      WakeBudgetMode
 	now             func() time.Time
 }
@@ -132,9 +140,11 @@ func NewWakeScheduler(store Store, config WakeSchedulerConfig) *WakeScheduler {
 	return &WakeScheduler{
 		store:           store,
 		claims:          map[string][]time.Time{},
+		selfChecks:      map[string][]time.Time{},
 		rateWindow:      rateWindow,
 		maxAutoWake:     maxAutoWake,
 		maxApprovalWake: maxApprovalWake,
+		maxSelfCheck:    config.SelfCheckPerWindow,
 		budgetMode:      budgetMode,
 		now:             timeNow,
 	}

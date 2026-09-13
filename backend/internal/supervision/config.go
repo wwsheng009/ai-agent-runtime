@@ -36,6 +36,11 @@ type Config struct {
 	// "memory"（默认）为进程内计数；"durable" 把每次投递记为 supervision
 	// store 的 claim 行，多进程共享数据库时预算一致且重启不清零。
 	WakeBudgetMode string `json:"wake_budget_mode,omitempty" yaml:"wake_budget_mode,omitempty"`
+	// WakeSelfCheckPerWindow 是父 turn 结束自检的窗口配额（P1-6 方案 4）：
+	// 当某类预算已耗尽、wake 只被延后时，父回合结束仍可再起一个只消费
+	// mailbox/digest 的父 turn，避免父会话在子 agent 仍异常时静默空闲。
+	// 0（默认）关闭该行为，保持历史语义；正数即该 scope 每窗口的自检次数上限。
+	WakeSelfCheckPerWindow int `json:"wake_self_check_per_window,omitempty" yaml:"wake_self_check_per_window,omitempty"`
 }
 
 // DefaultConfig 返回默认调参。
@@ -93,5 +98,6 @@ func (c Config) WakeSchedulerConfig() WakeSchedulerConfig {
 		MaxAutoWakePerWindow:     cfg.WakeMaxAutoWake,
 		MaxApprovalWakePerWindow: cfg.WakeMaxApprovalWake,
 		BudgetMode:               WakeBudgetMode(cfg.WakeBudgetMode),
+		SelfCheckPerWindow:       cfg.WakeSelfCheckPerWindow,
 	}
 }
