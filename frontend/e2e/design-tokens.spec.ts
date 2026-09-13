@@ -423,3 +423,95 @@ test.describe("P0-4 三层设计 token：主题 × 强调色 × 字号", () => {
     expect(base.computed.chatInputColor).toBe(base.tokens.foreground);
   });
 });
+
+// P0-5：首屏防闪烁验收。拦截入口模块（React 永不挂载），只让 index.html <head> 里
+// 由 vite 注入的内联启动脚本执行，从而在「HTML 解析完成、应用 bundle 未运行」的
+// 窗口内断言主题已被落地——这正是硬刷新时白闪/黑闪会出现的时刻。
+async function readPreBundleState(page: Page) {
+  return page.evaluate(() => {
+    const root = document.documentElement;
+    return {
+      accentTone: root.dataset.accentTone ?? null,
+      colorScheme: getComputedStyle(root).colorScheme,
+      density: root.dataset.workspaceDensity ?? null,
+      inlineRootFontSize: root.style
+        .getPropertyValue("--app-root-font-size")
+        .trim(),
+      lang: root.lang,
+      reactMounted: (document.getElementById("root")?.childElementCount ?? 0) > 0,
+      theme: root.dataset.theme ?? null,
+      themeMode: root.dataset.themeMode ?? null,
+    };
+  });
+}
+
+async function loadWithBlockedBundle(page: Page) {
+  await page.route("**/src/main.tsx*", (route) => route.abort());
+  await page.goto("/workspace", { waitUntil: "commit" });
+  await page.waitForFunction(() => document.readyState !== "loading");
+}
+
+test.describe("P0-5 首屏主题启动脚本", () => {
+  test("启动脚本在应用 bundle 运行前落地主题与字号", async ({ page }) => {
+    await page.addInitScript(
+      ({ key, value }: { key: string; value: string }) => {
+        window.localStorage.setItem(key, value);
+      },
+      {
+        key: SETTINGS_KEY,
+        value: JSON.stringify({
+          appearance: {
+            accentTone: "violet",
+            textSize: 18,
+            themeMode: "dark",
+          },
+          localization: { locale: "zh-CN" },
+          workspace: { density: "comfortable" },
+        }),
+      },
+    );
+    await page.emulateMedia({ colorScheme: "light" });
+
+    await loadWithBlockedBundle(page);
+    const state = await readPreBundleState(page);
+
+    expect(state.theme).toBe("dark");
+    expect(state.themeMode).toBe("dark");
+    expect(state.accentTone).toBe("violet");
+    expect(state.density).toBe("comfortable");
+    expect(state.lang).toBe("zh-CN");
+    expect(state.inlineRootFontSize).toBe("18px");
+    expect(state.colorScheme).toBe("dark");
+    // 应用 bundle 未运行即已正确：证明不存在「先按默认主题绘制」的窗口。
+    expect(state.reactMounted).toBe(false);
+  });
+
+  test("启动脚本按 prefers-color-scheme 解析 system 档", async ({ page }) => {
+    await page.addInitScript(
+      ({ key, value }: { key: string; value: string }) => {
+        window.localStorage.setItem(key, value);
+      },
+      {
+        key: SETTINGS_KEY,
+        value: JSON.stringify({ appearance: { themeMode: "system" } }),
+      },
+    );
+    await page.route("**/src/main.tsx*", (route) => route.abort());
+
+    for (const [colorScheme, expectedTheme] of [
+      ["dark", "dark"],
+      ["light", "light"],
+    ] as const) {
+      await page.emulateMedia({ colorScheme });
+      await page.goto("/workspace", { waitUntil: "commit" });
+      await page.waitForFunction(() => document.readyState !== "loading");
+
+      const state = await readPreBundleState(page);
+      expect(state.theme, `prefers-color-scheme: ${colorScheme}`).toBe(
+        expectedTheme,
+      );
+      expect(state.themeMode).toBe("system");
+      expect(state.colorScheme).toBe(expectedTheme);
+    }
+  });
+});
