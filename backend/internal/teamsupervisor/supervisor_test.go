@@ -503,3 +503,17 @@ func TestSupervisorDesiredTeamScanFailureEmitsEventAndRecovers(t *testing.T) {
 		t.Fatal("supervisor did not recover after desired-team scan failure")
 	}
 }
+
+// jitterSeed 曾经直接取 time.Now().UnixNano()：粗粒度时钟下同一 tick 内创建的
+// 两个 supervisor 会得到完全相同的 jitter 序列，重启退避的抖动退化为同步重启。
+func TestJitterSeedsStayDistinctWithinOneClockTick(t *testing.T) {
+	const supervisors = 64
+	seen := make(map[int64]struct{}, supervisors)
+	for i := 0; i < supervisors; i++ {
+		seed := jitterSeed()
+		if _, duplicate := seen[seed]; duplicate {
+			t.Fatalf("jitterSeed() returned %d twice after %d calls", seed, i)
+		}
+		seen[seed] = struct{}{}
+	}
+}

@@ -28,6 +28,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/uniqid"
 )
 
 const chatUIRuntimeEventActionKind = "chat.runtime-event"
@@ -84,7 +85,9 @@ func (c *chatInteractionCoordinator) sessionRenderIDLocked() string {
 		c.renderGatewayID = "render-" + c.session.RuntimeSession.ID
 		return c.renderGatewayID
 	}
-	c.renderGatewayID = "render-" + fmt.Sprintf("%d", time.Now().UnixNano())
+	// 兜底 id：粗粒度时钟下 UnixNano 会在同一 tick 重复，两个会话共享
+	// render session id 会让 gateway 的 receipt/journal 互相污染。
+	c.renderGatewayID = "render-" + uniqid.Token()
 	return c.renderGatewayID
 }
 

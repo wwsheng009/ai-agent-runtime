@@ -11,7 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/uniqid"
 )
 
 // SavedImage stores local metadata for one saved generated image result.
@@ -61,12 +62,18 @@ func SaveBase64Image(outputDir, idHint, b64, format string) (SavedImage, error) 
 		return SavedImage{}, fmt.Errorf("create generated image directory: %w", err)
 	}
 
-	path, err := chooseGeneratedImagePath(outputDir, fileID, outputFormat)
+	file, path, err := createGeneratedImageFile(outputDir, fileID, outputFormat)
 	if err != nil {
 		return SavedImage{}, err
 	}
-	if err := os.WriteFile(path, decoded, 0o644); err != nil {
+	if _, err := file.Write(decoded); err != nil {
+		file.Close()
+		os.Remove(path)
 		return SavedImage{}, fmt.Errorf("write generated image %s: %w", rawID, err)
+	}
+	if err := file.Close(); err != nil {
+		os.Remove(path)
+		return SavedImage{}, fmt.Errorf("close generated image %s: %w", rawID, err)
 	}
 
 	sum := sha256.Sum256(decoded)
@@ -137,10 +144,20 @@ func SaveURLImage(ctx context.Context, outputDir, idHint, imageURL, format strin
 	}
 
 	mimeType := mimeTypeForFormat(outputFormat)
-	path, err := chooseGeneratedImagePath(outputDir, fileID, outputFormat)
+	// Reserve the final path before downloading: the reservation is what keeps
+	// two concurrent saves with the same id hint from renaming over each other.
+	reserved, path, err := createGeneratedImageFile(outputDir, fileID, outputFormat)
 	if err != nil {
 		return SavedImage{}, err
 	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		_ = reserved.Close()
+		_ = os.Remove(path)
+	}()
 
 	// Download to temp file first, then rename atomically.
 	tmpFile, err := os.CreateTemp(outputDir, fileID+"_*.tmp")
@@ -161,10 +178,19 @@ func SaveURLImage(ctx context.Context, outputDir, idHint, imageURL, format strin
 		return SavedImage{}, fmt.Errorf("close temp file for %s: %w", rawID, closeErr)
 	}
 
+	// Windows refuses to replace a path that still has an open handle, so close
+	// the reservation first; the empty placeholder keeps other writers from
+	// claiming the name until the rename below publishes the downloaded bytes.
+	if err := reserved.Close(); err != nil {
+		os.Remove(tmpPath)
+		return SavedImage{}, fmt.Errorf("close reserved image file %s: %w", rawID, err)
+	}
+
 	if err := os.Rename(tmpPath, path); err != nil {
 		os.Remove(tmpPath)
 		return SavedImage{}, fmt.Errorf("rename temp file for %s: %w", rawID, err)
 	}
+	committed = true
 
 	return SavedImage{
 		ID:        rawID,
@@ -193,24 +219,53 @@ func formatFromContentType(contentType string) string {
 	}
 }
 
-func chooseGeneratedImagePath(outputDir, idHint, format string) (string, error) {
+// createGeneratedImageFile reserves a not-yet-existing file for a generated
+// image and returns the open handle together with its final path.
+//
+// The reservation must be atomic (O_CREATE|O_EXCL) rather than a Stat followed
+// by WriteFile: when the host clock is coarse, two saves with the same id hint
+// inside one clock tick both observe the base name as missing, both write it,
+// and the earlier image is silently overwritten while both callers report the
+// same SavedPath. With O_EXCL the loser of that race falls through to the next
+// candidate name, so every returned path is owned by exactly one writer.
+func createGeneratedImageFile(outputDir, idHint, format string) (*os.File, string, error) {
 	base := filepath.Join(outputDir, idHint+"."+format)
-	if _, err := os.Stat(base); os.IsNotExist(err) {
-		return base, nil
-	} else if err != nil {
-		return "", err
+	file, err := reserveGeneratedImagePath(base)
+	if err != nil {
+		return nil, "", err
+	}
+	if file != nil {
+		return file, base, nil
 	}
 
-	stamp := time.Now().UTC().UnixNano()
+	// Disambiguate with uniqid rather than another timestamp: the token adds a
+	// process-local sequence, so even a stalled clock cannot re-propose a name
+	// that this process already handed out.
+	stamp := uniqid.Token()
 	for attempt := 0; attempt < 1000; attempt++ {
-		candidate := filepath.Join(outputDir, fmt.Sprintf("%s_%d_%d.%s", idHint, stamp, attempt, format))
-		if _, err := os.Stat(candidate); os.IsNotExist(err) {
-			return candidate, nil
-		} else if err != nil {
-			return "", err
+		candidate := filepath.Join(outputDir, fmt.Sprintf("%s_%s_%d.%s", idHint, stamp, attempt, format))
+		file, err := reserveGeneratedImagePath(candidate)
+		if err != nil {
+			return nil, "", err
+		}
+		if file != nil {
+			return file, candidate, nil
 		}
 	}
-	return "", fmt.Errorf("unable to allocate unique generated image file name for %s", idHint)
+	return nil, "", fmt.Errorf("unable to allocate unique generated image file name for %s", idHint)
+}
+
+// reserveGeneratedImagePath exclusively creates path. It returns (nil, nil)
+// when the path is already taken so the caller can try the next candidate.
+func reserveGeneratedImagePath(path string) (*os.File, error) {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err == nil {
+		return file, nil
+	}
+	if os.IsExist(err) {
+		return nil, nil
+	}
+	return nil, err
 }
 
 func normalizeOutputFormatForPersist(format string) (string, error) {

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/wwsheng009/ai-agent-runtime/internal/migrate"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 
@@ -928,7 +929,10 @@ func resolveBatchDSN(cfg *StoreConfig) (string, string, error) {
 		}
 		return batchDSNOptions(dsn), "", nil
 	}
-	return batchDSNOptions(fmt.Sprintf("file:subagentbatch-%d?mode=memory&cache=shared", time.Now().UnixNano())), "", nil
+	// DSN 必须唯一：粗粒度时钟下同一 tick 内建的两个 store 会解析到同一个
+	// cache=shared 内存库，批量任务行会互相可见（artifact/background/chat
+	// 的默认内存 DSN 同样使用 uuid）。
+	return batchDSNOptions(fmt.Sprintf("file:subagentbatch-%s?mode=memory&cache=shared", uuid.NewString())), "", nil
 }
 
 func batchDSNOptions(dsn string) string {

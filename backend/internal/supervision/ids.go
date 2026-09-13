@@ -1,13 +1,6 @@
 package supervision
 
-import (
-	"crypto/rand"
-	"encoding/hex"
-	"fmt"
-	"os"
-	"sync/atomic"
-	"time"
-)
+import "github.com/wwsheng009/ai-agent-runtime/internal/pkg/uniqid"
 
 // Identifiers in this package are primary keys, so they must stay unique even
 // when the host clock is coarse. Go reads time.Now() from the operating system
@@ -17,26 +10,8 @@ import (
 // scheduled wake (including a blocking approval) disappears without any error,
 // so the parent is never woken.
 //
-// A process-local sequence disambiguates ids generated inside one clock tick,
-// and a per-process random suffix keeps ids unique across processes that share
-// a durable database. The format stays opaque and ordered by creation time.
-var (
-	uniqueIDSeq     atomic.Uint64
-	uniqueIDProcess = randomIDProcessSuffix()
-)
-
-// uniqueSupervisionID builds a collision-resistant identifier with the given
-// prefix, for example "wake_" or "act-".
+// uniqid（internal/pkg/uniqid）在时间戳后追加进程内序号与进程随机后缀，
+// 使 id 在同一时钟 tick 内、以及共享同一数据库的多个进程之间都保持唯一。
 func uniqueSupervisionID(prefix string) string {
-	return fmt.Sprintf("%s%d-%d-%s", prefix, time.Now().UnixNano(), uniqueIDSeq.Add(1), uniqueIDProcess)
-}
-
-// randomIDProcessSuffix returns a short random string that distinguishes
-// identifiers created by different processes in the same clock tick.
-func randomIDProcessSuffix() string {
-	var buf [4]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return fmt.Sprintf("%d", os.Getpid())
-	}
-	return hex.EncodeToString(buf[:])
+	return uniqid.New(prefix)
 }

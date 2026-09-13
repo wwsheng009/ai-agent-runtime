@@ -561,3 +561,25 @@ func TestCollectorStopIdempotent(t *testing.T) {
 	c.Stop()
 	c.Stop()
 }
+
+// InstanceEpoch 是游标的一部分：epoch 不同即视为「另一个实例」，其游标必须
+// 被拒绝。粗粒度时钟下若两个 collector 在同一 tick/同一秒内启动并得到相同
+// epoch，对方的游标会被接受，续读时按 seq 恢复会静默跳过事件。
+func TestInstanceEpochsStayDistinctWithinOneClockTick(t *testing.T) {
+	const collectors = 64
+	seen := make(map[string]struct{}, collectors)
+	for i := 0; i < collectors; i++ {
+		epoch := newInstanceEpoch()
+		if _, duplicate := seen[epoch]; duplicate {
+			t.Fatalf("newInstanceEpoch() returned %q twice after %d calls", epoch, i)
+		}
+		seen[epoch] = struct{}{}
+	}
+
+	// epoch 也是 instanceID 的种子；两个 collector 的 instanceID 必须可区分。
+	collectorA := NewCollector(testConfig(), runtimeevents.NewBusWithRetention(64), nil)
+	collectorB := NewCollector(testConfig(), runtimeevents.NewBusWithRetention(64), nil)
+	if collectorA.instanceID == collectorB.instanceID {
+		t.Fatalf("two collectors share instanceID %q", collectorA.instanceID)
+	}
+}

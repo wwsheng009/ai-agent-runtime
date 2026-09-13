@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/uniqid"
 )
 
 const (
@@ -124,7 +126,9 @@ func Create(ctx context.Context, opts Options) (*Handle, error) {
 	if err := runGit(ctx, repoRoot, args...); err != nil {
 		// Branch may already exist from a previous crashed session: force unique branch.
 		if strings.Contains(err.Error(), "already exists") {
-			branch = fmt.Sprintf("%s-%d", branch, time.Now().UnixNano())
+			// 分支名必须唯一：粗粒度时钟下同一 tick 的两次重试会拿到
+			// 相同后缀，第二次 worktree add 仍然失败。
+			branch = fmt.Sprintf("%s-%s", branch, uniqid.Token())
 			args = []string{"worktree", "add", "-b", branch, worktreePath, startPoint}
 			if err2 := runGit(ctx, repoRoot, args...); err2 != nil {
 				_ = os.RemoveAll(worktreePath)

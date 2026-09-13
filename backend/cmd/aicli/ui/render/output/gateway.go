@@ -9,6 +9,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/uniqid"
 )
 
 // ============================================================================
@@ -527,7 +529,9 @@ func (g *RenderOutputGateway) Run() {
 func randomID(prefix string) string {
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+		// 熵源失败时的兜底：粗粒度时钟下 UnixNano 会在同一 tick 重复，
+		// 事件 id 撞键会让 gateway 判重逻辑误吞事件。
+		return prefix + "-" + uniqid.Token()
 	}
 	return prefix + "-" + hex.EncodeToString(b)
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
+	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/uniqid"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
 )
@@ -926,7 +927,9 @@ func beginDirectFunctionExecutionLog(session *ChatSession, requestedName, functi
 	if session == nil || session.Logger == nil {
 		return aicliLogScope{}, "", startedAt, false
 	}
-	requestID := fmt.Sprintf("direct-%d", startedAt.UnixNano())
+	// requestID 同时是 tool call id：同一 tick 内的两次 /call 若撞 id，
+	// 日志与产物会把两个调用合并成一次。
+	requestID := "direct-" + uniqid.Token()
 	scope := aicliLogScope{
 		TurnID:    "direct",
 		RequestID: requestID,

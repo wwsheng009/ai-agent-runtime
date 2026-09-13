@@ -2,12 +2,12 @@ package team
 
 import (
 	"context"
-	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
@@ -15,7 +15,9 @@ import (
 
 func newTestStore(t *testing.T) *SQLiteStore {
 	t.Helper()
-	dsn := fmt.Sprintf("file:team_test_%d?mode=memory&cache=shared", time.Now().UnixNano())
+	// 内存 DSN 必须唯一：粗粒度时钟下同一 tick 内建的两个 store 会共享
+	// cache=shared 库，测试之间互相看到对方的 team/task 行。
+	dsn := "file:team_test_" + uuid.NewString() + "?mode=memory&cache=shared"
 	store, err := NewSQLiteStore(&StoreConfig{DSN: dsn})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })

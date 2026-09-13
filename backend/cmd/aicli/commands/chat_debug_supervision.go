@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/uniqid"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 )
 
@@ -471,7 +472,9 @@ func runChatDebugSupervisionAck(ctx context.Context, store supervision.Store, sc
 // lifecycle event is the source of truth), so the audit trail lives in the
 // actions table where ListActions can read it back.
 func recordChatDebugSupervisionAckAudit(ctx context.Context, store supervision.Store, rootScopeID string, record *supervision.Notification, note string, version int64, now time.Time) (string, error) {
-	actionID := fmt.Sprintf("act_local_ack_%d", now.UnixNano())
+	// action_id 是 durable 主键：同一 tick 内两次 ack 撞键会被 INSERT OR IGNORE
+	// 静默丢弃（与该包 wake id 的历史故障同源）。
+	actionID := "act_local_ack_" + uniqid.Token()
 	_, err := store.CreateAction(ctx, supervision.ActionRecord{
 		ActionID:        actionID,
 		RootScopeID:     strings.TrimSpace(rootScopeID),

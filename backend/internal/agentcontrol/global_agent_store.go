@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
 )
 
@@ -1270,7 +1271,10 @@ func resolveLazyGlobalAgentDSN(cfg *GlobalAgentStoreConfig) (string, string, err
 	if dsn := strings.TrimSpace(cfg.DSN); dsn != "" {
 		return ensureGlobalMailboxDSNOptions(dsn), "", nil
 	}
-	return ensureGlobalMailboxDSNOptions(fmt.Sprintf("file:agent-control-agent-registry-%d?mode=memory&cache=shared", time.Now().UnixNano())), "", nil
+	// DSN 必须唯一：粗粒度时钟下同一 tick 内建的两个 store 会解析到同一个
+	// cache=shared 内存库，互相看到对方的行（artifact/background/chat 的
+	// 默认内存 DSN 同样使用 uuid）。
+	return ensureGlobalMailboxDSNOptions(fmt.Sprintf("file:agent-control-agent-registry-%s?mode=memory&cache=shared", uuid.NewString())), "", nil
 }
 
 // resolveGlobalAgentDSN keeps the historical helper for callers/tests that only

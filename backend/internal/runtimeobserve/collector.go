@@ -11,6 +11,7 @@ import (
 
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/uniqid"
 )
 
 // LLMAggregates 是 LLM 维度的内存聚合（只增计数 + 活跃计数）。
@@ -730,8 +731,13 @@ func matchCorrelation(evt Event, q EventQuery) bool {
 	return true
 }
 
+// newInstanceEpoch 返回本 collector 实例的 epoch。游标携带 epoch，用于拒绝
+// 其它实例（或重启前实例）发出的游标；两个实例若共享 epoch，对方的游标会被
+// 接受，随后按 seq 续读并静默跳过本实例的事件。旧实现把毫秒时间戳与「时间
+// 字符串派生的后缀」拼在一起，熵源失败时同一秒内启动的两个实例会得到相同
+// epoch；现在后缀固定走 uniqid（时间戳 + 进程序号 + 进程随机后缀）。
 func newInstanceEpoch() string {
-	return fmt.Sprintf("%d-%s", time.Now().UTC().UnixMilli(), shortIdentifier(time.Now().UTC().String()))
+	return fmt.Sprintf("%d-%s", time.Now().UTC().UnixMilli(), uniqid.Token())
 }
 
 func shortIdentifier(seed string) string {

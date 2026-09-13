@@ -3,11 +3,14 @@ package teamsupervisor
 import (
 	"context"
 	"errors"
+	"hash/fnv"
 	"math/rand"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/uniqid"
 )
 
 const DefaultScanInterval = 5 * time.Second
@@ -125,7 +128,10 @@ func normalizeConfig(config Config) Config {
 	}
 	if config.Jitter == nil {
 		var jitterMu sync.Mutex
-		random := rand.New(rand.NewSource(time.Now().UnixNano()))
+		// 种子取自 uniqid 而不是 time.Now().UnixNano()：粗粒度时钟下同一
+		// tick 创建的两个 supervisor 会拿到完全相同的 jitter 序列，重启
+		// 退避的抖动退化为同步重启。
+		random := rand.New(rand.NewSource(jitterSeed()))
 		config.Jitter = func(delay time.Duration) time.Duration {
 			if delay <= 0 {
 				return 0
@@ -137,6 +143,15 @@ func normalizeConfig(config Config) Config {
 		}
 	}
 	return config
+}
+
+// jitterSeed derives a per-supervisor seed from uniqid (timestamp + sequence +
+// process random suffix) so two supervisors built inside one coarse clock tick
+// still jitter independently.
+func jitterSeed() int64 {
+	hasher := fnv.New64a()
+	_, _ = hasher.Write([]byte(uniqid.Token()))
+	return int64(hasher.Sum64())
 }
 
 func (s *Supervisor) Start() {

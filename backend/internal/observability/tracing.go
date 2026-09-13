@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/uniqid"
 )
 
 // Span 追踪跨度
@@ -271,14 +273,15 @@ func StartSpan(name, traceID, parentID string) *Span {
 	return NewSpan(name, traceID, parentID)
 }
 
-// createSpanID 生成 Span ID
+// generateSpanID 生成 Span ID。id 是 tracer 内部的 map key，粗粒度时钟下
+// UnixNano 会让同一 tick 内的两个 span 撞键互相覆盖，因此统一走 uniqid。
 func generateSpanID() string {
-	return fmt.Sprintf("span_%d", time.Now().UnixNano())
+	return uniqid.New("span_")
 }
 
-// generateTraceID 生成追踪 ID
+// generateTraceID 生成追踪 ID（同上，必须避免同一 tick 内撞键）。
 func generateTraceID() string {
-	return fmt.Sprintf("trace_%d", time.Now().UnixNano())
+	return uniqid.New("trace_")
 }
 
 // Timing 计时辅助结构

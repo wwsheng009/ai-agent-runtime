@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/uniqid"
 )
 
 // SchemaVersion is the lifecycle event schema version emitted by this package.
@@ -190,7 +192,10 @@ type SubagentBatch struct {
 func NewID(prefix string) string {
 	nonce := make([]byte, 8)
 	if _, err := rand.Read(nonce); err != nil {
-		sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%d", prefix, time.Now().UnixNano())))
+		// 熵源不可用时退化为 uniqid（时间戳+进程内序号+进程随机后缀）：
+		// 纯 UnixNano 在同一时钟 tick 内会生成相同 batch id，durable 主键
+		// 撞键后第二个批次会被静默丢弃。
+		sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%s", prefix, uniqid.Token())))
 		return prefix + "_" + hex.EncodeToString(sum[:8])
 	}
 	return prefix + "_" + hex.EncodeToString(nonce)

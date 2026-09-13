@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
-	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
@@ -19,7 +19,9 @@ import (
 func TestGetBackgroundJobIncludesRestartPolicy(t *testing.T) {
 	tempDir := t.TempDir()
 	logDir := filepath.Join(tempDir, "logs")
-	storeDSN := "file:background-handler-test-" + time.Now().UTC().Format("150405.000000000") + "?mode=memory&cache=shared"
+	// 同一 tick 内的两次测试曾得到同一个 DSN（时间格式化的小数位不代表
+	// 真实时钟分辨率），改用 uuid 保证每个 handler 独占一个内存库。
+	storeDSN := "file:background-handler-test-" + uuid.NewString() + "?mode=memory&cache=shared"
 
 	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
 	config := runtimecfg.DefaultRuntimeConfig()

@@ -18,6 +18,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelcard"
 	httpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
+	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/uniqid"
 	"gopkg.in/yaml.v3"
 )
 
@@ -293,7 +294,7 @@ func providerProbeHeaders(provider config.Provider, modelID string) map[string]s
 // providerProbeSessionID 生成探测请求专用的合成会话 ID：每次探测运行
 // 唯一，让网关把整轮探测视为一个独立会话，不污染真实会话的亲和路由。
 func providerProbeSessionID() string {
-	return fmt.Sprintf("aicli-probe-%d", time.Now().UnixNano())
+	return "aicli-probe-" + uniqid.Token()
 }
 
 // probeProviderModelOnce 发送一次探测请求并给出结论。网络错误 / 超时一律

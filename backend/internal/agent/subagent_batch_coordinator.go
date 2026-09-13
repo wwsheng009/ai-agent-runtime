@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/uniqid"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 )
 
@@ -963,6 +964,16 @@ func (c *SubagentBatchCoordinator) RecoverStaleBatches(ctx context.Context, stal
 	return changed, nil
 }
 
+// subagentBatchFencingToken mints the token that pins one durable claim of a
+// batch to its worker. Stale workers compare it by equality (see
+// heartbeatBatch/finalize paths), so every claim must rotate the token even
+// when the host clock is coarse: two claims inside one clock tick used to mint
+// the same owner/nanosecond token, which let a superseded worker keep
+// heartbeating a batch it no longer owned.
+func subagentBatchFencingToken(ownerID string) string {
+	return strings.TrimSpace(ownerID) + "/" + uniqid.Token()
+}
+
 // runBatch is the detached worker goroutine for one batch.
 func (c *SubagentBatchCoordinator) runBatch(ctx context.Context, batchID string, opts BatchStartOptions, tasks []SubagentTask) {
 	defer c.forgetCancel(batchID)
@@ -1008,7 +1019,7 @@ func (c *SubagentBatchCoordinator) runBatch(ctx context.Context, batchID string,
 		}
 		b.HeartbeatAt = now
 		b.OwnerID = ownerID
-		b.FencingToken = fmt.Sprintf("%s/%d", ownerID, now.UnixNano())
+		b.FencingToken = subagentBatchFencingToken(ownerID)
 	})
 	unlockWrite()
 	if err != nil {
