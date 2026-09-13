@@ -7,6 +7,7 @@
  * - system/message 的 System prompt 行语义。
  */
 import type { ChatMessage } from "@/data/mock";
+import { isCompleteTurnUsage } from "@/lib/turn-usage";
 
 import { findFinalAnswerStart, summarizeCollapsedEvidence } from "./collapse";
 import { buildNodes } from "./nodes";
@@ -27,6 +28,8 @@ export function projectChatView(
   options: ProjectChatViewOptions = {},
 ): ChatViewProjection {
   const allNodes = buildNodes(message.id, message.segments);
+  // 用量不完整（缺输入/输出）时整行隐藏：投影只暴露完整用量。
+  const usage = isCompleteTurnUsage(message.usage) ? message.usage : null;
 
   if (isSystemPromptMessage(message)) {
     const collapsed = options.expanded !== true;
@@ -37,6 +40,7 @@ export function projectChatView(
       summary: null,
       finalAnswerStart: -1,
       systemPrompt: true,
+      usage,
     };
   }
 
@@ -54,6 +58,7 @@ export function projectChatView(
       summary: null,
       finalAnswerStart,
       systemPrompt: false,
+      usage,
     };
   }
 
@@ -67,5 +72,6 @@ export function projectChatView(
     }),
     finalAnswerStart,
     systemPrompt: false,
+    usage,
   };
 }

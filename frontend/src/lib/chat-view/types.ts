@@ -5,6 +5,7 @@
  * 只给出稳定 node key 与折叠语义，供 Chat（message-list）与 Trajectory 渲染层消费。
  */
 import type { MessageSegment } from "@/data/mock";
+import type { TurnUsage } from "@/lib/turn-usage";
 
 /** 节点类别：与 MessageSegment 的渲染分组一一对应。 */
 export type ChatViewNodeKind = "text" | "reasoning" | "tool" | "rich" | "system";
@@ -52,6 +53,8 @@ export type ChatViewProjection = {
   finalAnswerStart: number;
   /** 是否为 system/message：渲染为请求前折叠的 System prompt 行。 */
   systemPrompt: boolean;
+  /** Turn token 用量：不完整时为 null（渲染层整行隐藏）。 */
+  usage: TurnUsage | null;
 };
 
 /** 投影输入：只需要消息渲染所需的最小面。 */

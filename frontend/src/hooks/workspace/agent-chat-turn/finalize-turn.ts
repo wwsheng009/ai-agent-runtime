@@ -13,6 +13,7 @@ import {
 } from "@/hooks/workspace/agent-chat-turn/notifications";
 import { type TrajectoryStore } from "@/hooks/workspace/use-trajectory-snapshot";
 import { debugTrajectoryConsistency } from "@/lib/trajectory/projection";
+import { readTurnUsage } from "@/lib/turn-usage";
 import {
   buildAssistantMessageSegments,
   buildGeneratedImageAttachments,
@@ -212,6 +213,10 @@ export function createTurnFinalizer(deps: TurnFinalizerDeps): TurnFinalizer {
           ...message,
           interrupted: stopped ? true : undefined,
           streaming: false,
+          usage:
+            readTurnUsage(turnState.finalResult ?? payload.result) ??
+            message.usage ??
+            null,
           author:
             turnState.finalResult?.kind === "agent" || turnState.currentKind === "agent"
               ? "Runtime agent"

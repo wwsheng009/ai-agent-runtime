@@ -119,6 +119,9 @@ test("G2: tool card walks Started -> Running -> Finished with visible result", a
   await expect(page.getByText("Paris is the capital of France.")).toBeVisible({
     timeout: 15_000,
   });
+
+  // P1-1: 完整 Turn token 用量在完成后显示（输入 1234 + 输出 567 = 合计 1801）
+  await expect(page.getByText("1,801")).toBeVisible({ timeout: 5_000 });
 });
 
 test("G5: list auto-follows the stream, pauses while scrolled up, resumes at bottom", async ({

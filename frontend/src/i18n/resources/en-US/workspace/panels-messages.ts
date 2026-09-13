@@ -22,6 +22,27 @@ export const enWorkspacePanelsMessages = {
   messageCard: {
     streamingBadge: "Streaming response in progress",
   },
+  collapsedSummary: {
+    tools: "{{count}} tool calls",
+    replies: "{{count}} with replies",
+    subagents: "{{count}} subagents",
+    empty: "Thought for a while",
+    expand: "Expand process details",
+    collapse: "Collapse process details",
+  },
+  systemPrompt: {
+    title: "System prompt",
+    expand: "Expand system prompt",
+    collapse: "Collapse system prompt",
+  },
+  contextRow: {
+    expand: "Expand context",
+    collapse: "Collapse context",
+  },
+  turnUsage: {
+    summary:
+      "Token usage: prompt {{prompt}} · completion {{completion}} · total {{total}}",
+  },
   segmentFallback: {
     loading: "Loading {{label}}…",
   },

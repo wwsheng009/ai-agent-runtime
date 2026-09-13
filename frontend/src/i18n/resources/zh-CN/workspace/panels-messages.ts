@@ -23,6 +23,26 @@ export const zhWorkspacePanelsMessages = {
   messageCard: {
     streamingBadge: "响应流式输出中",
   },
+  collapsedSummary: {
+    tools: "{{count}} 个工具调用",
+    replies: "{{count}} 条带回复",
+    subagents: "{{count}} 个子代理",
+    empty: "思考了一会儿",
+    expand: "展开过程证据",
+    collapse: "折叠过程证据",
+  },
+  systemPrompt: {
+    title: "系统提示词",
+    expand: "展开系统提示词",
+    collapse: "折叠系统提示词",
+  },
+  contextRow: {
+    expand: "展开上下文",
+    collapse: "折叠上下文",
+  },
+  turnUsage: {
+    summary: "Token 用量：输入 {{prompt}} · 输出 {{completion}} · 合计 {{total}}",
+  },
   segmentFallback: {
     loading: "正在加载 {{label}}…",
   },

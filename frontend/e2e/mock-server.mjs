@@ -46,6 +46,10 @@ const DONE = {
   agent_id: "e2e-agent",
   status: "completed",
   content: "The capital of France is Paris.",
+  // P1-1：Turn token 用量（完整：输入/输出/合计）——渲染层显示用量行。
+  result: {
+    usage: { prompt_tokens: 1234, completion_tokens: 567, total_tokens: 1801 },
+  },
 };
 
 // --- 会话事件存储（模拟后端 EventStore 的 chat.sse.* 记录；P3-1/P3-2）---

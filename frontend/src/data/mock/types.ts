@@ -1,5 +1,7 @@
 // 由 data/mock.ts 机械拆分而来（P0-2），仅搬迁不改语义。
 
+import type { TurnUsage } from "@/lib/turn-usage";
+
 export type MessageSegment =
   | {
       type: "text";
@@ -76,6 +78,8 @@ export type ChatMessage = {
   runtimeTurnId?: string;
   /** True only while the assistant message is receiving process events. */
   streaming?: boolean;
+  /** P1-1：Turn token 用量；不完整或未知时为 null/undefined（渲染层隐藏整行）。 */
+  usage?: TurnUsage | null;
 };
 
 export type Artifact = {

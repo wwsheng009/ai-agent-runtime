@@ -165,4 +165,29 @@ describe("projectChatView", () => {
     expect(expanded.collapsed).toBe(false);
     expect(expanded.nodes).toHaveLength(1);
   });
+
+  it("完整用量随投影暴露，供渲染层显示 Turn 用量行", () => {
+    const view = projectChatView(
+      assistantMessage([{ type: "text", content: "Answer" }], {
+        usage: { promptTokens: 1200, completionTokens: 300, totalTokens: 1500 },
+      }),
+    );
+
+    expect(view.usage).toEqual({
+      promptTokens: 1200,
+      completionTokens: 300,
+      totalTokens: 1500,
+    });
+  });
+
+  it("用量不完整或缺失：投影不暴露用量（渲染层整行隐藏）", () => {
+    const incomplete = assistantMessage([{ type: "text", content: "Answer" }]);
+    Object.assign(incomplete, { usage: { promptTokens: 1200 } });
+
+    expect(projectChatView(incomplete).usage).toBeNull();
+    expect(
+      projectChatView(assistantMessage([{ type: "text", content: "Answer" }]))
+        .usage,
+    ).toBeNull();
+  });
 });

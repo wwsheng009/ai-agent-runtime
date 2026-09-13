@@ -5,7 +5,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
-import { getToolSegmentKey } from "@/lib/workspace-thread-state";
+import { projectChatView } from "@/lib/chat-view";
 import { cn } from "@/lib/utils";
 import { type Artifact, type ChatMessage } from "@/data/mock";
 
@@ -34,6 +34,18 @@ export function HistoryContextMessageCard({
   const { t } = useTranslation("workspace");
   const [expanded, setExpanded] = useState(false);
   const panelId = `${message.id}-context-panel`;
+  const view = projectChatView(message, { expanded });
+  const toggleHint = expanded
+    ? t(
+        view.systemPrompt
+          ? "panels.messages.systemPrompt.collapse"
+          : "panels.messages.contextRow.collapse",
+      )
+    : t(
+        view.systemPrompt
+          ? "panels.messages.systemPrompt.expand"
+          : "panels.messages.contextRow.expand",
+      );
 
   return (
     <div className="relative w-full max-w-[48rem]">
@@ -54,7 +66,9 @@ export function HistoryContextMessageCard({
                 className="app-text-13 font-semibold text-foreground"
                 id={labelId}
               >
-                {message.author}
+                {view.systemPrompt
+                  ? t("panels.messages.systemPrompt.title")
+                  : message.author}
               </div>
               <div
                 className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground"
@@ -69,9 +83,7 @@ export function HistoryContextMessageCard({
               ) : null}
             </div>
             <div className="mt-0.5 app-text-11 text-muted-foreground">
-              {expanded
-                ? "Content visible — click to collapse"
-                : "Content hidden — click to expand"}
+              {toggleHint}
             </div>
           </div>
           <ChevronDownIcon
@@ -86,15 +98,9 @@ export function HistoryContextMessageCard({
           <div className="pointer-events-none absolute left-0 top-4 bottom-4 w-px bg-gradient-to-b from-accent-teal/0 via-accent-teal/18 to-accent-teal/0" />
 
           <div className="relative space-y-4" id={statusId}>
-            {message.segments.map((segment, index) => (
-              <div
-                key={
-                  segment.type === "tool"
-                    ? `${message.id}-tool-${getToolSegmentKey(segment)}`
-                    : `${message.id}-${segment.type}-${index}`
-                }
-              >
-                {renderMessageSegment(segment, {
+            {view.nodes.map((node) => (
+              <div key={node.key}>
+                {renderMessageSegment(node.segment, {
                   interrupted: message.interrupted === true,
                   streaming: message.id === streamingMessageId,
                   onSelectArtifact,
