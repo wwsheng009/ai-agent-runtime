@@ -394,6 +394,8 @@
 - **落地要点**：暗色仍可作为默认（保持现有 `applyDocumentSettings` 行为），但变量声明改为「亮色在 `:root`、暗色在 `html[data-theme="dark"]`」或反向保持一致；新增规则：feature 层禁止出现 `#hex`、`rgb()`、主题选择器。
 - **验收**：`grep -c "var(--"` 的任意值用法下降 ≥ 70%；`landing.css` 变量数为 0；主题/强调色/字号切换后无颜色回归（e2e 覆盖三档主题 × 两种强调色）。
 
+> **状态**：已完成（2026-09-11）；三层落地口径、收敛批次与验证证据见 §9.3。验收复核：`[var(--…)]` 任意值 **2008 → 20（-99%）**；`landing.css` 88 行内变量声明 0 / `:root` 0 / 颜色字面量 0；主题 × 强调色 × 字号的 e2e 覆盖见 §9.3 末行（提交 `7d42b79b`）。有意保留项：未命中阶梯的硬编码圆角/字号、mock 产物 iframe 内的颜色字面量、无对应 `@theme` 工具类的渐变/阴影 token，均逐条记录在 §9.3。
+
 #### P0-5 主题解析/应用分离与首屏防闪烁
 
 - **内容**：抽 `theme/{resolve.ts,present.ts}`：`resolve` 负责 light/dark/system + accentTone + 字体 + reduced-motion → 不可变 snapshot；`present` 只做 DOM 写入（`documentElement.style.colorScheme`、`html[data-theme]`、`html[data-accent-tone]`、CSS 变量内联覆盖），维护 retraction set，`dispose()` 逆操作；`index.html` 内联一段与 present 同源的启动脚本，消除首屏闪白/闪黑；`main.tsx` 改为调用 resolve+present。
