@@ -480,9 +480,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			promptLine := approvalDecisionPromptWithReuse(reuseScope)
 			detailsShown := false
 			for {
-				readPrompt, cleanupPrompt, transientPrompt := showChatRuntimePriorityPrompt(session, lines, promptLine)
-				text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), readPrompt)
-				cleanupPrompt()
+				text, transientPrompt, err := readChatRuntimeApprovalAnswer(session, lines, promptLine)
 				if err != nil {
 					return chatApprovalAnswer{}, err
 				}
@@ -4520,6 +4518,45 @@ func showChatRuntimePriorityPromptBody(session *ChatSession, lines []string) (fu
 	return newChatPromptOverlay(session).showPriorityPromptBody(lines)
 }
 
+// readChatRuntimeMergedAnswer reads one interactive answer (ask_user_question or
+// approval decision) through the bottom prompt row: the popup keeps only its body
+// (question text, suggestions, decision hint), so it can neither cover nor
+// replace the user's input row, and the typed answer is painted by the regular
+// prompt state so the cursor follows the text.
+//
+// While the agent runs, the busy queued-input capture owns stdin for the whole
+// turn; the answer is then routed through the queue (which the capture feeds)
+// and the capture paints it into the prompt row because the reader asked for
+// the merged answer row. Outside a running turn the reader reads stdin itself.
+//
+// ok=false reports that the merged channel is unavailable (non fixed-surface
+// terminal, or the popup body could not be painted) and the caller must fall
+// back to the dedicated popup input row.
+func readChatRuntimeMergedAnswer(session *ChatSession, lines []string, promptLine string) (string, bool, error) {
+	if !chatMergedAnswerPromptRenderable(session) {
+		return "", false, nil
+	}
+	body := append(append([]string(nil), lines...), answerPromptBodyLines(promptLine)...)
+	cleanup, ok := showChatRuntimePriorityPromptBody(session, body)
+	if !ok {
+		return "", false, nil
+	}
+	defer cleanup()
+	if session.InputQueue != nil && session.InputQueue.hasExternalInputCaptureActive() {
+		session.InputQueue.setPriorityAnswerMerged(true)
+		defer session.InputQueue.setPriorityAnswerMerged(false)
+		// The capture owns the prompt row and the editor prompt, so the answer
+		// row uses the regular user prompt.
+		text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), formatSessionUserPrompt(session))
+		return text, true, err
+	}
+	text, merged, err := newChatMergedPromptComposer(session).ReadLine()
+	if merged {
+		return text, true, err
+	}
+	return "", false, nil
+}
+
 // answerPromptBodyLines turns the answer hint (previously the label of the
 // dedicated input row) into popup body lines. Once the answer input is merged
 // into the bottom prompt, the hint must stay visible next to the question.
@@ -4553,20 +4590,33 @@ func answerPromptBodyLines(promptLine string) []string {
 // stays at the end of the answer instead of the first column after the label.
 // Terminals without the merged channel keep the dedicated popup input row.
 func readChatRuntimeQuestionAnswer(session *ChatSession, lines []string, promptLine string) (string, bool, error) {
-	if chatMergedAnswerPromptSupported(session) {
-		body := append(append([]string(nil), lines...), answerPromptBodyLines(promptLine)...)
-		cleanup, ok := showChatRuntimePriorityPromptBody(session, body)
-		if ok {
-			text, merged, err := newChatMergedPromptComposer(session).ReadLine()
-			cleanup()
-			if merged {
-				return text, true, err
-			}
-			// Merged input was unavailable (the prompt row could not be
-			// painted): the popup body is already released, fall through to
-			// the dedicated input row.
-		}
+	if text, merged, err := readChatRuntimeMergedAnswer(session, lines, promptLine); merged {
+		return text, true, err
 	}
+	// The merged input was unavailable: the popup body is already released,
+	// fall back to the dedicated input row.
+	readPrompt, cleanupPrompt, transientPrompt := showChatRuntimePriorityPrompt(session, lines, promptLine)
+	defer cleanupPrompt()
+	text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), readPrompt)
+	return text, transientPrompt, err
+}
+
+// readChatRuntimeApprovalAnswer reads one approval decision. It mirrors the
+// merged answer path of ask_user_question: the approval panel is rendered as a
+// body-only popup and the decision is typed into the regular bottom prompt, so
+// the panel can never replace or cover the user's input row. The decision hint
+// that used to be the popup input label moves into the popup body.
+//
+// transient=true reports that the panel/answer pair is not part of the
+// transcript yet and the caller must echo it.
+//
+// Terminals without the merged channel keep the dedicated popup input row.
+func readChatRuntimeApprovalAnswer(session *ChatSession, lines []string, promptLine string) (string, bool, error) {
+	if text, merged, err := readChatRuntimeMergedAnswer(session, lines, promptLine); merged {
+		return text, true, err
+	}
+	// The merged input was unavailable: the popup body is already released,
+	// fall back to the dedicated input row.
 	readPrompt, cleanupPrompt, transientPrompt := showChatRuntimePriorityPrompt(session, lines, promptLine)
 	defer cleanupPrompt()
 	text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), readPrompt)

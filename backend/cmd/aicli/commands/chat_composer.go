@@ -18,11 +18,17 @@ type chatComposerController struct {
 }
 
 type chatBusyComposerCapture struct {
-	session     *ChatSession
-	prompt      string
-	trackPrompt bool
-	cancelled   bool
-	initial     ui.LineEditorSnapshot
+	session      *ChatSession
+	prompt       string
+	trackPrompt  bool
+	answerPrompt bool
+	cancelled    bool
+	initial      ui.LineEditorSnapshot
+	// answerDraft parks the draft that lived in the prompt row so the merged
+	// answer can never be mistaken for it (see beginAnswerPrompt).
+	answerDraft    ui.LineEditorSnapshot
+	answerBegan    bool
+	answerReleased bool
 }
 
 type chatModalComposerPrompt struct {
@@ -280,16 +286,24 @@ func resetChatComposerPrompt(session *ChatSession) {
 	}
 }
 
-func newChatBusyComposerCapture(session *ChatSession, prompt string, priorityPrompt bool) *chatBusyComposerCapture {
+// newChatBusyComposerCapture builds one busy-capture read. mergeAnswerPrompt
+// marks a priority prompt (approval/question) whose input is merged into the
+// bottom prompt row instead of the popup input row: the capture then publishes
+// the answer through the regular prompt state, exactly like
+// chatMergedPromptComposer does when it owns stdin itself.
+func newChatBusyComposerCapture(session *ChatSession, prompt string, priorityPrompt bool, mergeAnswerPrompt bool) *chatBusyComposerCapture {
 	capture := &chatBusyComposerCapture{
-		session:     session,
-		prompt:      prompt,
-		trackPrompt: !priorityPrompt,
+		session:      session,
+		prompt:       prompt,
+		trackPrompt:  !priorityPrompt || mergeAnswerPrompt,
+		answerPrompt: mergeAnswerPrompt,
 	}
 	// Busy captures are restarted whenever the turn switches prompts (approval,
 	// agent input). Seed the editor with the draft that is already on screen so
-	// a restart never wipes text the user is still typing.
-	if capture.trackPrompt && session != nil && session.Interaction != nil {
+	// a restart never wipes text the user is still typing. A merged answer
+	// shares that row but must start empty; the parked draft is handed back when
+	// the answer is done.
+	if !priorityPrompt && session != nil && session.Interaction != nil {
 		capture.initial = session.Interaction.PromptInputSnapshot()
 	}
 	return capture
@@ -299,7 +313,45 @@ func (c *chatBusyComposerCapture) ReadLine(ctx context.Context) (string, error) 
 	if c == nil || c.session == nil || c.session.InputBox == nil {
 		return "", io.EOF
 	}
+	if c.answerPrompt {
+		c.beginAnswerPrompt()
+		defer c.releaseAnswerPrompt()
+	}
 	return c.session.InputBox.ReadTransientPromptWithHooksContext(ctx, c.prompt, c.hooks())
+}
+
+// beginAnswerPrompt turns the bottom prompt row into the input row of a merged
+// approval/question answer. The draft that was parked there is kept aside so the
+// answer can never overwrite it, mirroring chatMergedPromptComposer.
+func (c *chatBusyComposerCapture) beginAnswerPrompt() {
+	if c == nil || !c.answerPrompt || c.session == nil || c.session.Interaction == nil {
+		return
+	}
+	c.answerDraft = c.session.Interaction.PromptInputSnapshot()
+	c.answerBegan = true
+	c.answerReleased = false
+	c.session.Interaction.SetPromptInput("")
+	c.session.Interaction.ShowAnswerPrompt()
+}
+
+// releaseAnswerPrompt drops the answer text and hands the parked draft back. The
+// prompt row itself stays painted: the answer is answered during a running turn,
+// and nothing repaints the row there (PrintPrompt only paints in Ready state, see
+// chat.go), so releasing it with DiscardPrompt would leave the user without the
+// "> " input row for the rest of the turn.
+//
+// It is idempotent: the busy loop clears the capture after routing the answer
+// while the read itself releases the row on every exit path.
+func (c *chatBusyComposerCapture) releaseAnswerPrompt() {
+	if c == nil || !c.answerPrompt || !c.answerBegan || c.answerReleased || c.session == nil || c.session.Interaction == nil {
+		return
+	}
+	c.answerReleased = true
+	// Replace the answer text with the parked draft instead of clearing the row:
+	// an empty draft restores the plain "> " row, a parked draft restores the
+	// text the user was still typing. When the row could not be taken over
+	// (non fixed-surface terminal) this only republishes the semantic draft.
+	c.session.Interaction.RenderPromptInputSnapshot(c.answerDraft)
 }
 
 func (c *chatBusyComposerCapture) hooks() ui.LineEditorHooks {
@@ -322,7 +374,15 @@ func (c *chatBusyComposerCapture) Cancelled() bool {
 }
 
 func (c *chatBusyComposerCapture) ClearPrompt() {
-	if c == nil || !c.trackPrompt || c.session == nil || c.session.Interaction == nil {
+	if c == nil || c.session == nil || c.session.Interaction == nil {
+		return
+	}
+	if c.answerPrompt {
+		// The answer is done: drop it and hand the parked draft back.
+		c.releaseAnswerPrompt()
+		return
+	}
+	if !c.trackPrompt {
 		return
 	}
 	c.session.Interaction.RenderPromptInputSnapshot(ui.LineEditorSnapshot{})
@@ -332,28 +392,44 @@ func (c *chatBusyComposerCapture) ClearPrompt() {
 // draft, so restarting the capture (or ending the turn) re-renders the same
 // text instead of dropping it.
 func (c *chatBusyComposerCapture) PreserveDraft() {
-	if c == nil || !c.trackPrompt || c.session == nil || c.session.Interaction == nil {
+	if c == nil || c.session == nil || c.session.Interaction == nil {
+		return
+	}
+	if c.answerPrompt {
+		c.releaseAnswerPrompt()
+		return
+	}
+	if !c.trackPrompt {
 		return
 	}
 	c.session.Interaction.ClearPrompt()
 }
 
 func (c *chatBusyComposerCapture) onChange(snapshot ui.LineEditorSnapshot) {
-	if c == nil || !c.trackPrompt || c.session == nil || c.session.Interaction == nil {
+	if c == nil || c.session == nil {
 		return
 	}
-	c.session.Interaction.SetPromptInputSnapshot(snapshot)
+	if c.trackPrompt || c.answerPrompt {
+		if c.session.Interaction != nil {
+			c.session.Interaction.SetPromptInputSnapshot(snapshot)
+		}
+		return
+	}
+	// priority prompt（审批/提问）在运行期由本 capture 独占 stdin，底部 prompt 行
+	// 已被 park；输入必须并进 popup 输入行，否则固定 surface 不重绘输入文本，用户
+	// 看到的只有每秒刷新的状态时钟（「Waiting for approval」），表现为无法输入。
+	foldChatPriorityPromptPopupInput(c.session, c.prompt, snapshot.Text)
 }
 
 func (c *chatBusyComposerCapture) onBeforeTerminalWrite(_ ui.LineEditorSnapshot, render ui.LineEditorRenderSnapshot) string {
-	if c == nil || !c.trackPrompt || c.session == nil || c.session.Interaction == nil {
+	if c == nil || !(c.trackPrompt || c.answerPrompt) || c.session == nil || c.session.Interaction == nil {
 		return ""
 	}
 	return c.session.Interaction.PromptCursorPrefix(render.LastCursorRow, render.LastCursorCol)
 }
 
 func (c *chatBusyComposerCapture) onTerminalWrite(_ ui.LineEditorSnapshot, render ui.LineEditorRenderSnapshot, writer io.Writer, text string) bool {
-	if c == nil || !c.trackPrompt || c.session == nil || c.session.Interaction == nil {
+	if c == nil || !(c.trackPrompt || c.answerPrompt) || c.session == nil || c.session.Interaction == nil {
 		return false
 	}
 	return c.session.Interaction.WritePromptEditorText(writer, render.LastCursorRow, render.LastCursorCol, text)
@@ -415,25 +491,32 @@ func (c *chatModalComposerPrompt) onChange(snapshot ui.LineEditorSnapshot) {
 		}
 		return
 	}
-	c.updateSurfacePopupInput(snapshot.Text)
+	foldChatPriorityPromptPopupInput(c.session, c.prompt, snapshot.Text)
 }
 
-// updateSurfacePopupInput 在 fixed-surface 模式下把 modal 输入文本并入 priority
-// prompt popup 的输入行（ComposerLine = 提示 + 输入）。popup 输入行的静态部分
-// （ComposerLine=提示）不含用户输入，而 compose/legacy 光标列都取该行的显示
-// 宽度，导致光标被钉在提示之后的第一列；把输入并进该行后光标自然跟随输入末尾。
-func (c *chatModalComposerPrompt) updateSurfacePopupInput(text string) {
-	if c == nil || c.session == nil || c.session.Surface == nil || !c.session.Surface.Enabled() {
+// foldChatPriorityPromptPopupInput 在 fixed-surface 模式下把 priority prompt
+// 的输入文本并入 popup 输入行（ComposerLine = 提示 + 输入）。popup 输入行的
+// 静态部分（ComposerLine=提示）不含用户输入，而 compose/legacy 光标列都取该行
+// 的显示宽度，导致光标被钉在提示之后的第一列；把输入并进该行后光标自然跟随
+// 输入末尾。
+//
+// 所有可能接管 priority prompt 的读取者都必须调用它：modal composer
+// （无外部输入捕获）与 busy composer capture（agent 运行期由它独占 stdin）。
+// 后者曾经漏掉这一步，导致审批提示出现后用户敲的键既不在 popup 输入行、也不
+// 在底部 prompt 行显示（固定 surface 每秒重绘状态时钟还会擦掉编辑器的直写），
+// 表现为「Waiting for approval」下输入无反应。
+func foldChatPriorityPromptPopupInput(session *ChatSession, prompt string, text string) {
+	if session == nil || session.Surface == nil || !session.Surface.Enabled() {
 		return
 	}
-	handle := c.session.priorityPopupHandle
+	handle := session.priorityPopupHandle
 	if !handle.Valid() {
 		return
 	}
-	lines := append([]string(nil), c.session.priorityPopupLines...)
+	lines := append([]string(nil), session.priorityPopupLines...)
 	// 输入行是单行渲染；多行输入只取首行，光标跟随首行输入末尾。
 	inputLine := strings.SplitN(text, "\n", 2)[0]
-	c.session.Surface.UpdatePopupInputForHandle(handle, lines, c.prompt+inputLine, true)
+	session.Surface.UpdatePopupInputForHandle(handle, lines, prompt+inputLine, true)
 }
 
 func (c *chatModalComposerPrompt) onCancel(ui.LineEditorSnapshot) bool {
@@ -485,6 +568,30 @@ func chatMergedAnswerPromptSupported(session *ChatSession) bool {
 	}
 	if !chatComposerUsesFixedSurface(session) {
 		return false
+	}
+	return !shouldRoutePriorityPromptThroughQueue(session)
+}
+
+// chatMergedAnswerPromptRenderable reports whether an interactive answer can be
+// typed into the bottom prompt row right now.
+//
+// While the agent runs, the busy queued-input capture owns stdin for the whole
+// turn (chat_send.go -> startBusyQueuedInputCapture), so the answer cannot be
+// read here; that capture paints the answer into the prompt row itself (see
+// newChatBusyComposerCapture's mergeAnswerPrompt). Outside a running turn the
+// reader takes the prompt row over directly (chatMergedPromptComposer).
+//
+// Terminals without the fixed bottom surface keep the dedicated popup input row
+// in both cases.
+func chatMergedAnswerPromptRenderable(session *ChatSession) bool {
+	if session == nil || session.Interaction == nil || session.InputBox == nil {
+		return false
+	}
+	if !chatComposerUsesFixedSurface(session) {
+		return false
+	}
+	if session.InputQueue != nil && session.InputQueue.hasExternalInputCaptureActive() {
+		return true
 	}
 	return !shouldRoutePriorityPromptThroughQueue(session)
 }

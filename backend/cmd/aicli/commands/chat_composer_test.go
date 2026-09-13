@@ -273,7 +273,7 @@ func TestChatBusyComposerCaptureTracksAndClearsNonPriorityPrompt(t *testing.T) {
 	session := &ChatSession{}
 	coord := newChatInteractionCoordinator(session)
 	session.Interaction = coord
-	capture := newChatBusyComposerCapture(session, "> ", false)
+	capture := newChatBusyComposerCapture(session, "> ", false, false)
 	hooks := capture.hooks()
 	if hooks.ResolveMaxVisibleRows == nil {
 		t.Fatal("expected busy composer viewport budget to be resolved dynamically")
@@ -304,7 +304,7 @@ func TestChatBusyComposerCaptureSeedsAndPreservesDraftAcrossRestarts(t *testing.
 	session.Interaction = coord
 	coord.SetPromptInput("half typed follow-up")
 
-	capture := newChatBusyComposerCapture(session, "> ", false)
+	capture := newChatBusyComposerCapture(session, "> ", false, false)
 	hooks := capture.hooks()
 	if hooks.InitialText != "half typed follow-up" || hooks.InitialCursor != len([]rune("half typed follow-up")) {
 		t.Fatalf("expected busy capture to seed the existing draft, got text=%q cursor=%d", hooks.InitialText, hooks.InitialCursor)
@@ -316,7 +316,7 @@ func TestChatBusyComposerCaptureSeedsAndPreservesDraftAcrossRestarts(t *testing.
 	if snapshot := coord.PromptInputSnapshot(); snapshot.Text != "half typed follow-up" {
 		t.Fatalf("expected preserved busy draft, got %#v", snapshot)
 	}
-	if next := newChatBusyComposerCapture(session, "> ", false).hooks(); next.InitialText != "half typed follow-up" {
+	if next := newChatBusyComposerCapture(session, "> ", false, false).hooks(); next.InitialText != "half typed follow-up" {
 		t.Fatalf("expected restarted busy capture to re-seed the draft, got %q", next.InitialText)
 	}
 }
@@ -327,7 +327,7 @@ func TestBusyDraftSurvivesTurnEndOutputAndFeedsNextComposer(t *testing.T) {
 	session.Interaction = coord
 
 	// The user types a follow-up while the previous turn is still streaming.
-	busyHooks := newChatBusyComposerCapture(session, "> ", false).hooks()
+	busyHooks := newChatBusyComposerCapture(session, "> ", false, false).hooks()
 	busyHooks.OnChange(ui.LineEditorSnapshot{Text: "下一轮再说这件事", Cursor: 4})
 
 	// Turn end: the streamed answer and the status refresh take over the prompt
@@ -346,11 +346,63 @@ func TestChatBusyComposerCaptureDoesNotTrackPriorityPrompt(t *testing.T) {
 	coord := newChatInteractionCoordinator(session)
 	session.Interaction = coord
 	coord.SetPromptInput("main draft")
-	capture := newChatBusyComposerCapture(session, "approval> ", true)
+	capture := newChatBusyComposerCapture(session, "approval> ", true, false)
 	hooks := capture.hooks()
 
 	hooks.OnChange(ui.LineEditorSnapshot{Text: "yes", Cursor: 3})
 	capture.ClearPrompt()
+	if snapshot := coord.PromptInputSnapshot(); snapshot.Text != "main draft" {
+		t.Fatalf("expected priority capture not to mutate main prompt, got %#v", snapshot)
+	}
+}
+
+// 回归：运行期遇到审批/提问时，priority prompt 由 busy composer capture 独占
+// stdin（底部 prompt 行已被 park）。它必须像 modal composer 一样把输入并进
+// popup 输入行，否则固定 surface 从不重绘输入文本，用户敲键后屏幕上只剩每秒
+// 刷新的状态时钟（「Waiting for approval」），表现就是审批提示下无法输入答案。
+func TestChatBusyComposerCaptureFoldsPriorityInputIntoSurfacePopup(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+	surface.SetPhysicalWritesEnabled(false)
+
+	session := &ChatSession{Surface: surface}
+	coord := newChatInteractionCoordinator(session)
+	session.Interaction = coord
+	coord.SetPromptInput("main draft")
+
+	lines := []string{
+		"⚑ 需要授权执行 shell 命令",
+		"tool=shell | reason=policy | risk=high",
+	}
+	readPrompt, cleanup, transient := showChatRuntimePriorityPrompt(session, lines, "批准执行？[y/N]: ")
+	if !transient {
+		t.Fatal("expected surface priority prompt to run in transient popup mode")
+	}
+	defer cleanup()
+	if !session.priorityPopupHandle.Valid() {
+		t.Fatal("expected surface priority prompt to retain its popup handle")
+	}
+
+	capture := newChatBusyComposerCapture(session, readPrompt, true, false)
+	hooks := capture.hooks()
+	hooks.OnChange(ui.LineEditorSnapshot{Text: "y", Cursor: 1})
+
+	frameText := commandResultFrameText(surface)
+	if !strings.Contains(frameText, readPrompt+"y") {
+		t.Fatalf("expected popup input line %q to include typed text, frame:\n%s", readPrompt+"y", frameText)
+	}
+
+	// 继续输入：输入行继续增长并保留提示前缀。
+	hooks.OnChange(ui.LineEditorSnapshot{Text: "yes, 仅这一次", Cursor: 12})
+	frameText = commandResultFrameText(surface)
+	if !strings.Contains(frameText, readPrompt+"yes, 仅这一次") {
+		t.Fatalf("expected popup input line %q after second change, frame:\n%s", readPrompt+"yes, 仅这一次", frameText)
+	}
+
+	// 主 prompt 行已 park，priority capture 不得把审批答案写进用户原有草稿。
 	if snapshot := coord.PromptInputSnapshot(); snapshot.Text != "main draft" {
 		t.Fatalf("expected priority capture not to mutate main prompt, got %#v", snapshot)
 	}

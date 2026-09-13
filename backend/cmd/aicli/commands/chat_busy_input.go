@@ -65,7 +65,10 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 					}
 				}(revision)
 			}
-			capture := newChatBusyComposerCapture(session, prompt, priorityPrompt)
+			// A priority prompt (approval/question) whose reader asked for the
+			// merged answer row must not use the popup input row: this capture
+			// owns stdin, so it paints the answer into the bottom prompt row.
+			capture := newChatBusyComposerCapture(session, prompt, priorityPrompt, priorityPrompt && queue.priorityAnswerMergedPrompt())
 			line, err := capture.ReadLine(readCtx)
 			cancelRead()
 			select {

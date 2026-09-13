@@ -230,6 +230,7 @@ type chatInputQueue struct {
 	priorityPrompt        string
 	priorityRevision      uint64
 	externalCaptureActive bool
+	priorityAnswerMerged  bool
 	terminalMu            sync.RWMutex
 	terminalErr           error
 	routeMu               sync.Mutex
@@ -1509,6 +1510,29 @@ func (q *chatInputQueue) setExternalInputCaptureActive(active bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.externalCaptureActive = active
+}
+
+// setPriorityAnswerMerged 标记当前优先提示（审批/提问）的输入由底部 prompt 行
+// 呈现。运行期 stdin 由 busy capture 独占，读取方无法自己调用行编辑器，因此
+// 只能通过该标记告诉 busy capture：本次优先提示不要使用 popup 输入行，而应把
+// 输入并入底部 prompt 行。
+func (q *chatInputQueue) setPriorityAnswerMerged(merged bool) {
+	if q == nil {
+		return
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.priorityAnswerMerged = merged
+}
+
+// priorityAnswerMergedPrompt 报告当前优先提示是否要求把输入并入底部 prompt 行。
+func (q *chatInputQueue) priorityAnswerMergedPrompt() bool {
+	if q == nil {
+		return false
+	}
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return q.priorityMode && q.priorityAnswerMerged
 }
 
 func (q *chatInputQueue) hasExternalInputCaptureActive() bool {
