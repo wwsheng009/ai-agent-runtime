@@ -701,11 +701,9 @@ func (s *SQLiteSessionStorage) updateSessionTx(ctx context.Context, tx *sql.Tx, 
 		}
 		currentPromptCount := len(promptRows)
 		appendOnly := prefixMatches && len(session.History) > currentPromptCount
-		appendFrom := len(session.History)
-		if appendOnly {
-			appendFrom = currentPromptCount
-		} else if declaredDelta := session.CanonicalMessageCount - count; declaredDelta > 0 && declaredDelta <= len(session.History) {
-			appendFrom = len(session.History) - declaredDelta
+		appendFrom, err := s.canonicalAppendStartTx(ctx, tx, session, promptRows, prefixMatches, count)
+		if err != nil {
+			return err
 		}
 		if appendFrom < len(session.History) {
 			incoming, err := encodeMessages(session.History[appendFrom:])
@@ -721,7 +719,9 @@ func (s *SQLiteSessionStorage) updateSessionTx(ctx context.Context, tx *sql.Tx, 
 		}
 		switch {
 		case appendOnly:
-			for index := appendFrom; index < len(session.History); index++ {
+			// The projection grows from its own end: prefixMatches already proved
+			// that promptRows is the stored prefix of the caller's history.
+			for index := currentPromptCount; index < len(session.History); index++ {
 				promptRows, err = s.appendPromptMessageTx(ctx, tx, session.ID, promptRows, session.History[index])
 				if err != nil {
 					return err
@@ -764,6 +764,233 @@ func (s *SQLiteSessionStorage) updateSessionTx(ctx context.Context, tx *sql.Tx, 
 		session.UpdatedAt = time.Now()
 	}
 	return s.upsertSessionMetadataTx(ctx, tx, session, count)
+}
+
+// canonicalAppendStartTx decides where the canonical append of the caller's
+// history begins.
+//
+// Length arithmetic alone is not trustworthy here: callers may hand over a
+// history that is not a byte-exact view of the canonical transcript. The agent
+// loop strips transient system messages before persisting a run, the CLI can
+// mirror a prompt projection that is one message ahead of session_messages, and
+// an exit sync may race an actor persist. "Append the last N messages" then
+// re-inserts rows that are already stored — which resumes as duplicated
+// assistant turns — or skips rows that are still missing.
+//
+// The canonical transcript is therefore aligned by message identity: only the
+// trailing run of history messages that are not stored yet is appended. When no
+// stored message anchors the alignment (compaction replacement, rewritten
+// history, ...) the legacy delta heuristics are kept.
+func (s *SQLiteSessionStorage) canonicalAppendStartTx(ctx context.Context, tx *sql.Tx, session *Session, promptRows []promptProjectionRow, prefixMatches bool, canonicalCount int) (int, error) {
+	history := session.History
+	if len(history) == 0 {
+		return 0, nil
+	}
+	legacyStart := legacyCanonicalAppendStart(session, promptRows, prefixMatches, canonicalCount)
+	// One extra row keeps a truncated read detectable: a tail that is exhausted
+	// without an anchor is not trustworthy enough to override the legacy path.
+	tail, err := s.loadCanonicalTailMessagesTx(ctx, tx, session.ID, len(history)+1)
+	if err != nil {
+		return 0, err
+	}
+	if len(tail) == 0 {
+		// No canonical rows yet: every message of the caller's history is new.
+		return 0, nil
+	}
+	start, anchored := identityAlignedAppendStart(history, tail)
+	if !anchored {
+		return legacyStart, nil
+	}
+	return start, nil
+}
+
+// legacyCanonicalAppendStart preserves the pre-alignment heuristics for the
+// cases where the canonical transcript cannot anchor the incoming history.
+func legacyCanonicalAppendStart(session *Session, promptRows []promptProjectionRow, prefixMatches bool, canonicalCount int) int {
+	history := session.History
+	if len(history) == 0 {
+		return 0
+	}
+	if prefixMatches && len(history) > len(promptRows) {
+		return len(promptRows)
+	}
+	if declaredDelta := session.CanonicalMessageCount - canonicalCount; declaredDelta > 0 && declaredDelta <= len(history) {
+		return len(history) - declaredDelta
+	}
+	return len(history)
+}
+
+// identityAlignedAppendStart walks the history from its newest message
+// backwards and stops at the first message that already exists in the canonical
+// tail. Everything after that anchor is new and must be appended; everything at
+// or before it is already stored, so appending it again would duplicate a turn.
+//
+// anchored is false when no message of the history exists in the canonical
+// tail: the history is then a replacement/compaction view rather than an append
+// and the caller must fall back to the legacy heuristics.
+func identityAlignedAppendStart(history, canonicalTail []types.Message) (int, bool) {
+	if len(history) == 0 || len(canonicalTail) == 0 {
+		return 0, false
+	}
+	storedIDs := make(map[string]struct{}, len(canonicalTail))
+	storedContent := make(map[string]struct{}, len(canonicalTail))
+	for index := range canonicalTail {
+		if id := canonicalMessageID(canonicalTail[index]); id != "" {
+			storedIDs[canonicalMessageIdentityKey(canonicalTail[index])] = struct{}{}
+		}
+		storedContent[canonicalMessageSubstanceKey(canonicalTail[index])] = struct{}{}
+	}
+	for index := len(history) - 1; index >= 0; index-- {
+		if messageStoredInCanonical(history[index], storedIDs, storedContent) {
+			return index + 1, true
+		}
+	}
+	return len(history), false
+}
+
+func messageStoredInCanonical(message types.Message, storedIDs, storedContent map[string]struct{}) bool {
+	if id := canonicalMessageID(message); id != "" {
+		_, ok := storedIDs[canonicalMessageIdentityKey(message)]
+		return ok
+	}
+	_, ok := storedContent[canonicalMessageSubstanceKey(message)]
+	return ok
+}
+
+func canonicalMessageID(message types.Message) string {
+	return strings.TrimSpace(types.MessageID(message))
+}
+
+// canonicalMessageIdentityKey matches a message only against the stored row
+// with the same id *and* the same substance: a caller that rewrote a message in
+// place (retry) keeps its id but must still be appended rather than dropped.
+func canonicalMessageIdentityKey(message types.Message) string {
+	return "id\x00" + canonicalMessageID(message) + "\x00" + canonicalMessageSubstanceKey(message)
+}
+
+// canonicalMessageSubstanceKey identifies a message by its renderable content,
+// used for rows and histories that predate message identities.
+func canonicalMessageSubstanceKey(message types.Message) string {
+	return strings.ToLower(strings.TrimSpace(message.Role)) + "\x00" + message.Content + "\x00" + toolCallSignature(message)
+}
+
+func toolCallSignature(message types.Message) string {
+	if len(message.ToolCalls) == 0 {
+		return ""
+	}
+	var builder strings.Builder
+	for index := range message.ToolCalls {
+		builder.WriteString(strings.TrimSpace(message.ToolCalls[index].ID))
+		builder.WriteByte('\x1f')
+		builder.WriteString(strings.TrimSpace(message.ToolCalls[index].Name))
+		builder.WriteByte('\n')
+	}
+	return builder.String()
+}
+
+// loadCanonicalTailMessagesTx reads the newest limit canonical messages and
+// returns them in transcript order. The bounded read keeps identity alignment
+// proportional to the caller's history window instead of the whole transcript.
+func (s *SQLiteSessionStorage) loadCanonicalTailMessagesTx(ctx context.Context, tx *sql.Tx, sessionID string, limit int) ([]types.Message, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT seq, payload_json, artifact_path, preview_json, byte_count, sha256
+		FROM session_messages
+		WHERE session_id = ?
+		ORDER BY seq DESC
+		LIMIT ?
+	`, sessionID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query canonical message tail: %w", err)
+	}
+	defer rows.Close()
+	messages := make([]types.Message, 0, limit)
+	for rows.Next() {
+		var sequence int
+		var inline []byte
+		var artifact sql.NullString
+		var preview []byte
+		var byteCount int
+		var digest string
+		if err := rows.Scan(&sequence, &inline, &artifact, &preview, &byteCount, &digest); err != nil {
+			return nil, fmt.Errorf("scan canonical message tail: %w", err)
+		}
+		payload, err := s.readCanonicalPayload(inline, artifact, byteCount, digest)
+		if err != nil {
+			return nil, err
+		}
+		var message types.Message
+		if err := json.Unmarshal(payload, &message); err != nil {
+			return nil, fmt.Errorf("decode canonical message tail: %w", err)
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for left, right := 0, len(messages)-1; left < right; left, right = left+1, right-1 {
+		messages[left], messages[right] = messages[right], messages[left]
+	}
+	return messages, nil
+}
+
+// collapseDuplicateTranscriptRows removes transcript rows that repeat the
+// message identity of the row directly before them.
+//
+// Sessions written before canonicalAppendStartTx aligned appends by identity
+// can contain the same message twice (same message id, adjacent seq): the
+// caller history was appended by length arithmetic, so an already stored
+// assistant reply was inserted again and every resume replayed it — the
+// duplicated turns reported for `aicli resume`. Message ids are unique per
+// logical message, so collapsing the repeats restores the transcript view
+// without touching the stored rows; the next write persists the repaired prompt
+// projection.
+//
+// Only rows that are indistinguishable are collapsed (same id and same
+// substance): a rewritten retry keeps its identity but must stay visible, and
+// rows without a message id are never collapsed at all because identical
+// content can be a legitimate repetition.
+func collapseDuplicateTranscriptRows(messages []types.Message, sequences []int) ([]types.Message, []int) {
+	if len(messages) < 2 {
+		return messages, sequences
+	}
+	kept := 0
+	collapsed := false
+	for index := range messages {
+		if index > 0 && duplicateMessageIdentity(messages[index-1], messages[index]) {
+			collapsed = true
+			continue
+		}
+		messages[kept] = messages[index]
+		if sequences != nil {
+			sequences[kept] = sequences[index]
+		}
+		kept++
+	}
+	if !collapsed {
+		return messages, sequences
+	}
+	messages = messages[:kept]
+	if sequences != nil {
+		sequences = sequences[:kept]
+	}
+	return messages, sequences
+}
+
+// collapseDuplicateMessages is collapseDuplicateTranscriptRows for callers that
+// do not track sequence numbers.
+func collapseDuplicateMessages(messages []types.Message) []types.Message {
+	collapsed, _ := collapseDuplicateTranscriptRows(messages, nil)
+	return collapsed
+}
+
+func duplicateMessageIdentity(previous, current types.Message) bool {
+	id := canonicalMessageID(current)
+	return id != "" &&
+		id == canonicalMessageID(previous) &&
+		canonicalMessageSubstanceKey(previous) == canonicalMessageSubstanceKey(current)
 }
 
 func sessionExistsTx(ctx context.Context, tx *sql.Tx, sessionID string) (bool, error) {
@@ -929,7 +1156,12 @@ func (s *SQLiteSessionStorage) loadPromptMessages(ctx context.Context, sessionID
 		}
 		history = append(history, message)
 	}
-	return history, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Load is the resume render path: repeats written by the pre-fix append
+	// arithmetic must not be replayed to the user (or to the model).
+	return collapseDuplicateMessages(history), nil
 }
 
 // loadCanonicalMessagesTx reads the full canonical transcript (session_messages)
@@ -972,7 +1204,9 @@ func (s *SQLiteSessionStorage) loadCanonicalMessagesTx(ctx context.Context, tx *
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return messages, nil
+	// The rebuild input is normalized as well so the repaired projection is
+	// persisted on the next write of the same transaction.
+	return collapseDuplicateMessages(messages), nil
 }
 
 // incomingHistoryReachesNewest reports whether the caller-supplied history ends
@@ -1615,6 +1849,10 @@ func (s *SQLiteSessionStorage) GetMessagePage(ctx context.Context, sessionID str
 		messages[left], messages[right] = messages[right], messages[left]
 		sequences[left], sequences[right] = sequences[right], sequences[left]
 	}
+	// History pages are a render path too: repeats of the same message identity
+	// must not be shown twice. The stored rows stay untouched, so paging keeps
+	// its seq cursors.
+	messages, sequences = collapseDuplicateTranscriptRows(messages, sequences)
 	page := &SessionHistoryPage{Messages: messages, Total: total}
 	if len(sequences) > 0 {
 		page.FirstSeq = sequences[0]
@@ -1659,6 +1897,8 @@ func (s *SQLiteSessionStorage) StreamMessages(ctx context.Context, sessionID str
 		return fmt.Errorf("stream canonical messages: %w", err)
 	}
 	defer rows.Close()
+	var previous types.Message
+	havePrevious := false
 	for rows.Next() {
 		var sequence, byteCount int
 		var inline []byte
@@ -1675,6 +1915,14 @@ func (s *SQLiteSessionStorage) StreamMessages(ctx context.Context, sessionID str
 		if err := json.Unmarshal(payload, &message); err != nil {
 			return fmt.Errorf("decode streamed canonical message %d: %w", sequence, err)
 		}
+		// Visitors consume the transcript (exports, rebuilds): skip the repeats
+		// written by the pre-fix append arithmetic exactly like the readers
+		// above, and only when the rows are indistinguishable — a rewritten
+		// retry keeps its id but must still reach the visitor.
+		if havePrevious && duplicateMessageIdentity(previous, message) {
+			continue
+		}
+		previous, havePrevious = message, true
 		if err := visit(sequence, message); err != nil {
 			return err
 		}
