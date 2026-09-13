@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // LifecycleProjection is the host-neutral input for a child lifecycle
@@ -133,7 +134,14 @@ func ProjectAgentCompletion(ctx context.Context, store Store, wakes *WakeSchedul
 	default:
 		eventType = "agent_completed"
 	}
-	return ProjectLifecycle(ctx, store, wakes, LifecycleProjection{
+	// A terminal child must also terminalize its execution-run registration.
+	// A spawn_agent run left in a live status keeps firing progress_stalled /
+	// execution_timed_out notifications at the parent for work that already
+	// finished, so the durable run has to follow the child to a terminal
+	// state here. Best-effort: the lifecycle notification is still projected
+	// when the store does not persist runs or the run write fails.
+	finalizeErr := finalizeChildExecutionRuns(ctx, store, childSessionID, status, time.Now().UTC())
+	notification, err := ProjectLifecycle(ctx, store, wakes, LifecycleProjection{
 		RootScopeID:           rootScopeID,
 		TargetParentSessionID: parentSessionID,
 		SubjectKind:           SubjectAgentSession,
@@ -146,6 +154,59 @@ func ProjectAgentCompletion(ctx context.Context, store Store, wakes *WakeSchedul
 		RecommendedAction:     recommended,
 		ResolutionState:       resolution,
 	})
+	if err != nil {
+		return notification, err
+	}
+	if finalizeErr != nil {
+		return notification, finalizeErr
+	}
+	return notification, nil
+}
+
+// finalizeChildExecutionRuns closes the execution-run registrations a host
+// opened for a child session (workflow spawn_agent). The store is optional for
+// hosts that only use the notification plane, mirroring the alerts/snapshot
+// degrading pattern.
+func finalizeChildExecutionRuns(ctx context.Context, store Store, childSessionID, childStatus string, now time.Time) error {
+	runStore, ok := store.(ExecutionRunStore)
+	if !ok {
+		return nil
+	}
+	childSessionID = strings.TrimSpace(childSessionID)
+	if childSessionID == "" {
+		return nil
+	}
+	runs, err := runStore.ListExecutionRunsBySession(ctx, childSessionID, childRunFinalizeLimit)
+	if err != nil {
+		return fmt.Errorf("supervision: list child execution runs: %w", err)
+	}
+	status := childRunTerminalStatus(childStatus)
+	for _, run := range runs {
+		if !run.Active() {
+			continue
+		}
+		if _, err := runStore.MarkExecutionRunTerminal(ctx, run.RunID, status, "", "", now); err != nil {
+			return fmt.Errorf("supervision: finalize child execution run %s: %w", run.RunID, err)
+		}
+	}
+	return nil
+}
+
+// childRunFinalizeLimit bounds the per-child run lookup; a child session
+// normally owns exactly one registration run plus retries.
+const childRunFinalizeLimit = 16
+
+// childRunTerminalStatus maps a terminal child session status onto the
+// execution-run status vocabulary (doc 5.3).
+func childRunTerminalStatus(childStatus string) string {
+	switch strings.ToLower(strings.TrimSpace(childStatus)) {
+	case "failed", "error":
+		return RunStatusFailed
+	case "stopped", "interrupted", "canceled", "cancelled":
+		return RunStatusCanceled
+	default:
+		return RunStatusSucceeded
+	}
 }
 
 func lifecycleVersion(status string) int64 {
