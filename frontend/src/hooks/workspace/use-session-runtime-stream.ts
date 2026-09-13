@@ -114,6 +114,10 @@ export function useSessionRuntimeStream({
         try {
           await streamSessionRuntime(sessionId, {
             after: runtimeSeqRef.current[sessionId] ?? 0,
+            // P1-5 方案 2：父流订阅 live-only 事件——子会话 `subagent.progress`
+            // 节流镜像与父会话自身 `tool.progress` 只在 `live=1` 时随 SSE 投递
+            // （不落库、无持久化 seq，`trajectoryEventAction` 按 seq=0 即时应用）。
+            live: true,
             pollMs: 500,
             signal: controller.signal,
             onEvent: (event) => {

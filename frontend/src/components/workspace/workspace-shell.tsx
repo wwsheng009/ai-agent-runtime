@@ -14,9 +14,9 @@ import { useAppSettings } from "@/core/settings";
 import { NEW_THREAD_ID } from "@/hooks/workspace/use-workspace-thread-selection";
 import { cn } from "@/lib/utils";
 
-import { WorkspaceArtifactRailSection } from "./workspace-shell/artifact-rail-section";
 import { WorkspaceMainSection } from "./workspace-shell/main-section";
 import { WorkspaceOverlaysSection } from "./workspace-shell/overlays-section";
+import { WorkspaceRightRailSection } from "./workspace-shell/right-rail-section";
 import { WorkspaceSidebarSection } from "./workspace-shell/sidebar-section";
 import { type WorkspaceShellProps } from "./workspace-shell/types";
 
@@ -135,6 +135,10 @@ export function WorkspaceShell({
     Boolean(settings.workspace.autoOpenArtifacts),
   );
   const artifactRailOpen = !isNewThread && artifactRailManualOpen;
+  // 右侧栏只要「会话用量」或 artifact 面板其一可见就占位，避免空列留白。
+  const rightRailVisible =
+    !isNewThread &&
+    (artifactRailOpen || Boolean(selectedThread.sessionId?.trim()));
 
   const transportLabel = getThreadTransportLabel(selectedThread, {
     live: t("topbar.threadTransport.live"),
@@ -230,7 +234,7 @@ export function WorkspaceShell({
       <div
         className={cn(
           "grid h-full min-h-0 grid-cols-1 gap-0",
-          artifactRailOpen
+          rightRailVisible
             ? "xl:grid-cols-[16rem_minmax(0,1fr)_18rem]"
             : "xl:grid-cols-[16rem_minmax(0,1fr)]",
         )}
@@ -319,10 +323,11 @@ export function WorkspaceShell({
           transportLabel={transportLabel}
           viewMode={viewMode}
         />
-        <WorkspaceArtifactRailSection
+        <WorkspaceRightRailSection
           artifactRailOpen={artifactRailOpen}
           handleOpenArtifact={handleOpenArtifact}
           isNewThread={isNewThread}
+          isResponding={isResponding}
           selectedArtifactId={selectedArtifactId}
           selectedThread={selectedThread}
           t={t}

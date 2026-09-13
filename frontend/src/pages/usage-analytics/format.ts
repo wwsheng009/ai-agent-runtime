@@ -2,15 +2,10 @@
 
 import type { AnalyticsDimensionsResponse, AnalyticsGroupBy } from "@/types/runtime";
 
-export const adminTokenStorageKey = "runtime.logs.adminToken";
-
 export const analyticsFilterKeys = ["from", "to", "q", "provider", "model", "directory", "project", "status"] as const;
 
-export function readAdminToken() {
-  return typeof window === "undefined"
-    ? ""
-    : window.localStorage.getItem(adminTokenStorageKey)?.trim() ?? "";
-}
+// 存储键与读取实现由 @/lib/admin-token 提供，页面继续从此处导入以保持既有调用方零改动。
+export { adminTokenStorageKey, readAdminToken } from "@/lib/admin-token";
 
 export function formatNumber(value?: number | null) {
   return new Intl.NumberFormat().format(

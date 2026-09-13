@@ -53,6 +53,72 @@ export function describeRuntimeEvent(
       return reason
         ? `context compaction failed: ${reason}`
         : "context compaction failed";
+    case "agent.reclaimed": {
+      // P2-8 方案 4：一次驱逐 pass 的汇总行。payload 契约见后端
+      // agentcontrol.ReclaimEventPayload（source/reclaimed/reasons/agent_paths/
+      // truncated/failed）。单个子节点直接给出路径，多个只报数量（完整名单在
+      // 子会话下钻与 durable registry 行里）。
+      const count = readNumber(payload["reclaimed"]);
+      const paths = readStringArray(payload["agent_paths"]);
+      const reasons = readStringArray(payload["reasons"]);
+      const source = readString(payload["source"]);
+      const truncated = readNumber(payload["truncated"]);
+      const failed = readNumber(payload["failed"]);
+      const firstPath = readFirstString(payload, ["agent_path"]) || paths[0] || "";
+      let scope: string;
+      if (firstPath && (count === undefined || count <= 1)) {
+        scope = firstPath;
+      } else if (count !== undefined && count > 1) {
+        scope = `${count} agents`;
+      } else if (count === 1) {
+        scope = "1 agent";
+      } else {
+        scope = "agent";
+      }
+      if (truncated !== undefined && truncated > 0) {
+        scope = `${scope} +${truncated} more`;
+      }
+      const details: string[] = [];
+      if (reasons.length > 0) {
+        details.push(reasons.join(", "));
+      }
+      if (source) {
+        details.push(`via ${source}`);
+      }
+      let note = `agent reclaimed: ${scope}`;
+      if (details.length > 0) {
+        note += ` (${details.join(" ")})`;
+      }
+      if (failed !== undefined && failed > 0) {
+        note += ` ${failed} failed`;
+      }
+      return note;
+    }
+    case "subagent.progress": {
+      // P1-5 方案 2：父流节流镜像的子会话工具进度（live-only，服务端按窗口
+      // 合并、状态变化穿透）。payload 契约见后端
+      // supervision.SubagentProgressMirror.Observe：agent_id/session_id 为子
+      // 会话，path 为 agent 路径，state 为工具状态，partial 为最新输出片段。
+      const agent =
+        readFirstString(payload, ["agent_path", "path"]) ||
+        readFirstString(payload, ["agent_id", "session_id"]) ||
+        "subagent";
+      const state = readString(payload["state"]) || "running";
+      const output = readFirstString(payload, ["partial", "message"]);
+      const percent = readNumber(payload["percent"]);
+      let note = `agent progress: ${agent}`;
+      if (toolName) {
+        note += ` ${toolName}`;
+      }
+      note += ` ${state}`;
+      if (percent !== undefined) {
+        note += ` ${percent}%`;
+      }
+      if (output) {
+        note += ` — ${output}`;
+      }
+      return note;
+    }
     case "session_start":
       return "session started";
     case "session_end":
@@ -111,6 +177,21 @@ export function readNumber(value: unknown): number | undefined {
     return value;
   }
   return undefined;
+}
+
+/** 读取字符串数组载荷（非字符串项与空白项丢弃；缺失时返回空数组）。 */
+export function readStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const values: string[] = [];
+  for (const item of value) {
+    const text = readString(item).trim();
+    if (text) {
+      values.push(text);
+    }
+  }
+  return values;
 }
 
 /** 从 chunk 载荷中提取文本 delta（对齐 workspace-thread-state.getStreamTextDelta）。 */

@@ -101,9 +101,127 @@ describe("describeRuntimeEvent（Q4）", () => {
     expect(describeRuntimeEvent({})).toBe("runtime event");
     expect(describeRuntimeEvent({ runtime_type: "job_output" })).toBe("job_output");
   });
+
+  it("配额驱逐（agent.reclaimed）带路径/原因/来源", () => {
+    expect(
+      describeRuntimeEvent({
+        runtime_type: "agent.reclaimed",
+        source: "spawn_gate",
+        reclaimed: 1,
+        rows: 1,
+        reasons: ["idle_timeout"],
+        agent_paths: ["/root/held-child"],
+        agent_path: "/root/held-child",
+      }),
+    ).toBe("agent reclaimed: /root/held-child (idle_timeout via spawn_gate)");
+
+    // 多子节点只报数量；被截断时补 +N more；失败计数保留。
+    expect(
+      describeRuntimeEvent({
+        runtime_type: "agent.reclaimed",
+        source: "manual_cleanup",
+        reclaimed: 3,
+        rows: 4,
+        failed: 1,
+        truncated: 2,
+        reasons: ["session_missing", "session_terminal"],
+        agent_paths: ["/root/a", "/root/b", "/root/c"],
+      }),
+    ).toBe(
+      "agent reclaimed: 3 agents +2 more (session_missing, session_terminal via manual_cleanup) 1 failed",
+    );
+
+    // 载荷退化（无 paths/reasons/source）时不产生空括号。
+    expect(
+      describeRuntimeEvent({ runtime_type: "agent.reclaimed", reclaimed: 1 }),
+    ).toBe("agent reclaimed: 1 agent");
+    expect(describeRuntimeEvent({ runtime_type: "agent.reclaimed" })).toBe(
+      "agent reclaimed: agent",
+    );
+  });
+
+  it("子会话进度镜像（subagent.progress）带路径/工具/状态/百分比/片段", () => {
+    expect(
+      describeRuntimeEvent({
+        runtime_type: "subagent.progress",
+        agent_id: "child-1",
+        agent_path: "/root/child-1",
+        state: "running",
+        tool_name: "bash",
+        partial: "compiling module 3/7",
+        percent: 42,
+      }),
+    ).toBe("agent progress: /root/child-1 bash running 42% — compiling module 3/7");
+
+    // 状态变化穿透（无 percent/partial）时只报最小事实。
+    expect(
+      describeRuntimeEvent({
+        runtime_type: "subagent.progress",
+        agent_id: "child-1",
+        path: "/root/child-1",
+        state: "completed",
+        tool_name: "bash",
+      }),
+    ).toBe("agent progress: /root/child-1 bash completed");
+
+    // 载荷退化：无 path 用子会话 ID，无 tool/state 时给默认值。
+    expect(
+      describeRuntimeEvent({ runtime_type: "subagent.progress", agent_id: "child-1" }),
+    ).toBe("agent progress: child-1 running");
+    expect(describeRuntimeEvent({ runtime_type: "subagent.progress" })).toBe(
+      "agent progress: subagent running",
+    );
+  });
 });
 
 describe("runtime 事件（Q4）", () => {
+  it("子会话进度镜像（seq=0）折叠为单一 runtime-0 行并就地更新", () => {
+    const first = applyEvents(createEmptyTrajectory(), [
+      makeTrajectoryEvent("runtime", 0, {
+        runtime_type: "subagent.progress",
+        agent_id: "child-1",
+        session_id: "child-1",
+        parent_session_id: "parent-1",
+        agent_path: "/root/child-1",
+        state: "running",
+        tool_name: "bash",
+        partial: "compiling module 3/7",
+        live: true,
+        _event: { sequence: 0 },
+      }),
+    ]);
+    expect(first.snapshot.items).toHaveLength(1);
+    expect(first.snapshot.items[0].id).toBe("runtime-0");
+    expect(first.snapshot.items[0].kind).toBe("system");
+    if (first.snapshot.items[0].head.kind === "system") {
+      expect(first.snapshot.items[0].head.note).toBe(
+        "agent progress: /root/child-1 bash running — compiling module 3/7",
+      );
+    }
+
+    // 后续镜像复用同一 live 槽位：不新增行，只更新摘要（父轨迹只留最新一行）。
+    const second = applyEvents(first.snapshot, [
+      makeTrajectoryEvent("runtime", 0, {
+        runtime_type: "subagent.progress",
+        agent_id: "child-1",
+        agent_path: "/root/child-1",
+        state: "completed",
+        tool_name: "bash",
+        live: true,
+        _event: { sequence: 0 },
+      }),
+    ]);
+    expect(second.snapshot.items).toHaveLength(1);
+    expect(second.snapshot.items[0].id).toBe("runtime-0");
+    // live 行保持非终态：终态会被 upsertItem 冻结，后续镜像将被丢弃。
+    expect(second.snapshot.items[0].status).toBe("running");
+    if (second.snapshot.items[0].head.kind === "system") {
+      expect(second.snapshot.items[0].head.note).toBe(
+        "agent progress: /root/child-1 bash completed",
+      );
+    }
+  });
+
   it("映射为 system 行（note 可读摘要，status completed）", () => {
     const result = applyEvents(createEmptyTrajectory(), [
       makeTrajectoryEvent("runtime", 1, {
@@ -119,6 +237,29 @@ describe("runtime 事件（Q4）", () => {
     expect(item.status).toBe("completed");
     if (item.head.kind === "system") {
       expect(item.head.note).toBe("approval requested: shell");
+    }
+  });
+
+  it("配额驱逐映射为 system 行（subagent 被自动回收可见）", () => {
+    const result = applyEvents(createEmptyTrajectory(), [
+      makeTrajectoryEvent("runtime", 1, {
+        runtime_type: "agent.reclaimed",
+        source: "spawn_gate",
+        reclaimed: 1,
+        reasons: ["idle_timeout"],
+        agent_path: "/root/held-child",
+        _event: { sequence: 1 },
+      }),
+    ]);
+    expect(result.snapshot.items).toHaveLength(1);
+    const item = result.snapshot.items[0];
+    expect(item.id).toBe("runtime-1");
+    expect(item.kind).toBe("system");
+    expect(item.status).toBe("completed");
+    if (item.head.kind === "system") {
+      expect(item.head.note).toBe(
+        "agent reclaimed: /root/held-child (idle_timeout via spawn_gate)",
+      );
     }
   });
 

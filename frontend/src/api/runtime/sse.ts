@@ -22,6 +22,11 @@ type SseConsumeHandlers = {
 
 type SessionRuntimeStreamHandlers = {
   after?: number;
+  /**
+   * 订阅宿主进程内的 live-only 事件（如 `tool.progress`）；这些事件不落
+   * EventStore，只在 `live=1` 时随 SSE 投递（payload.live=true）。
+   */
+  live?: boolean;
   onClose?: () => void;
   onErrorEvent?: (payload: Record<string, unknown>) => void;
   onEvent?: (event: SessionRuntimeEvent) => void;
@@ -157,6 +162,7 @@ export async function streamSessionRuntime(
       `/api/runtime/sessions/${encodeURIComponent(sessionId)}/runtime/stream`,
       {
         after: handlers.after,
+        live: handlers.live ? 1 : undefined,
         poll_ms: handlers.pollMs,
       },
     ),

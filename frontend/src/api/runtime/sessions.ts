@@ -339,3 +339,44 @@ export async function updateSessionPlanMode(
     },
   );
 }
+
+export type ResolveSessionToolApprovalRequest = {
+  /** `approval_requested` 事件里的 `request_id`（actor 侧 pending 审批主键）。 */
+  requestId: string;
+  allow: boolean;
+  /** 可选：批准时替换工具参数（对齐 `approve_tool` 命令的 `patched_args`）。 */
+  patchedArgs?: Record<string, unknown>;
+};
+
+/**
+ * 审批联动（P1-5 方案 4）：对指定会话的 pending 工具审批给出决定。
+ *
+ * 复用既有 `POST /runtime/sessions/{id}/runtime/commands` 的 `approve_tool`
+ * 分支（`backend/internal/api/skills/session_runtime_handlers.go:770-784`），
+ * 因此父会话自身的审批与子会话下钻的 inline 审批走同一条 actor 路径：
+ * `actor.ApproveToolWithArgs` 会唤醒阻塞中的工具调用并落 `approval_resolved`。
+ * 会话 ID 由调用方给定（前端下钻传子会话 ID），服务端不做父子改写。
+ */
+export async function resolveSessionToolApproval(
+  sessionId: string,
+  request: ResolveSessionToolApprovalRequest,
+): Promise<Record<string, unknown>> {
+  return fetchRuntimeJson<Record<string, unknown>>(
+    buildRuntimeUrl(
+      `/api/runtime/sessions/${encodeURIComponent(sessionId)}/runtime/commands`,
+    ),
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        type: "approve_tool",
+        request_id: request.requestId,
+        allow: request.allow,
+        ...(request.patchedArgs ? { patched_args: request.patchedArgs } : {}),
+      }),
+    },
+  );
+}

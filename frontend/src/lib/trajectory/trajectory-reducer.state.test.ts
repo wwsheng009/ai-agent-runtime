@@ -101,6 +101,51 @@ describe("工具状态机（对齐 TestEncodeLegacyToolLifecycleUsesCallIdentity
     }
   });
 
+  it("live tool.progress（seq=0，tool_call）折叠进既有工具行；终态后到达则被冻结忽略", () => {
+    let snapshot = createEmptyTrajectory();
+    snapshot = applyEvent(
+      snapshot,
+      toolEvent("tool_start", 1, "c-9", "bash"),
+    ).snapshot;
+
+    // 进行中进度（P1-5 子会话下钻：kind=tool_call、tool_call.id 同一 call）。
+    snapshot = applyEvent(
+      snapshot,
+      toolEvent("tool_call", 0, "c-9", "bash", {
+        tool: { output_summary: "partial output" },
+      }),
+    ).snapshot;
+    const running = snapshot.items.find((item) => item.id === "tool:c-9");
+    expect(snapshot.items).toHaveLength(1);
+    if (running?.head.kind === "tool") {
+      expect(running.head.phase).toBe("running");
+      expect(running.head.resultSummary).toBe("partial output");
+    }
+
+    snapshot = applyEvent(
+      snapshot,
+      toolEvent("tool_end", 2, "c-9", "bash", {
+        tool: { output_summary: "final output" },
+      }),
+    ).snapshot;
+
+    // 迟到的进度事件（live 流与终态的竞态）：终态冻结 → 不覆盖已定稿的摘要，
+    // 也不把 phase 打回 running（upsertItem 对终态 Item 拒绝 upsert）。
+    snapshot = applyEvent(
+      snapshot,
+      toolEvent("tool_call", 0, "c-9", "bash", {
+        tool: { output_summary: "late progress" },
+      }),
+    ).snapshot;
+    const done = snapshot.items.find((item) => item.id === "tool:c-9");
+    expect(snapshot.items).toHaveLength(1);
+    expect(done?.status).toBe("completed");
+    if (done?.head.kind === "tool") {
+      expect(done.head.phase).toBe("finished");
+      expect(done.head.resultSummary).toBe("final output");
+    }
+  });
+
   it("tool_end 带错误 → failed/error（对齐 TestEncodeToolCallDisplayHeadRestoresLegacyDetails failed 分支）", () => {
     let snapshot = createEmptyTrajectory();
     snapshot = applyEvent(

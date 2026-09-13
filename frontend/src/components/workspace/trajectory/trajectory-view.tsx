@@ -24,6 +24,7 @@ import {
   useState,
   type ComponentType,
 } from "react";
+import { useTranslation } from "react-i18next";
 
 import { fetchSessionRuntimeEvents } from "@/api/runtime/sessions";
 import type { TrajectoryStore } from "@/hooks/workspace/use-trajectory-snapshot";
@@ -38,10 +39,12 @@ import type { TrajectoryItem } from "@/lib/trajectory/types";
 import { cn } from "@/lib/utils";
 
 import { TrajectoryDetailPanel } from "./trajectory-detail-panel";
+import { SubagentSessionDialog } from "./subagent-session-dialog";
+import type { SubagentSessionTarget } from "./subagent-session-target";
 import { TrajectoryTimeline } from "./trajectory-timeline";
 import {
   TRAJECTORY_VIEW_FILTERS,
-  trajectoryItemKindLabel,
+  trajectoryItemKindKey,
   trajectoryItemMatches,
   trajectoryItemPassesFilter,
   trajectoryItemSummary,
@@ -94,6 +97,7 @@ const TrajectoryRow = memo(function TrajectoryRow({
   measure: (element: HTMLButtonElement | null) => void;
   onSelect: (itemId: string) => void;
 }) {
+  const { t } = useTranslation("workspace");
   const Icon = KIND_ICONS[item.kind];
   return (
     <button
@@ -114,7 +118,7 @@ const TrajectoryRow = memo(function TrajectoryRow({
         #{item.seq}
       </span>
       <span className="w-20 shrink-0 app-text-10 uppercase tracking-[0.1em] text-muted-foreground">
-        {trajectoryItemKindLabel(item.kind)}
+        {t(trajectoryItemKindKey(item.kind))}
       </span>
       <span
         className={cn(
@@ -144,10 +148,12 @@ export function TrajectoryView({
   className?: string;
 }) {
   const snapshot = useTrajectorySnapshot(store);
+  const { t } = useTranslation("workspace");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<TrajectoryViewFilter>("all");
   const [timelineOpen, setTimelineOpen] = useState(true);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  const [subagentTarget, setSubagentTarget] = useState<SubagentSessionTarget | null>(null);
   const [exporting, setExporting] = useState(false);
   const [redactExport, setRedactExport] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -237,10 +243,10 @@ export function TrajectoryView({
             className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
           />
           <input
-            aria-label="Search trajectory"
+            aria-label={t("panels.shell.trajectory.search")}
             className="w-full rounded-md border border-border bg-surface-solid py-1.5 pl-7 pr-2.5 app-text-12 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-accent-teal/45"
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search trajectory…"
+            placeholder={t("panels.shell.trajectory.searchPlaceholder")}
             value={query}
           />
         </div>
@@ -258,12 +264,12 @@ export function TrajectoryView({
               onClick={() => setFilter(option.id)}
               type="button"
             >
-              {option.label}
+              {t(option.labelKey)}
             </button>
           ))}
         </div>
         <button
-          aria-label="Toggle timeline"
+          aria-label={t("panels.shell.trajectory.toggleTimeline")}
           aria-pressed={timelineOpen}
           className={cn(
             "rounded-md border p-1.5 transition",
@@ -272,13 +278,17 @@ export function TrajectoryView({
               : "border-border bg-surface-solid text-muted-foreground hover:text-foreground",
           )}
           onClick={() => setTimelineOpen((current) => !current)}
-          title={timelineOpen ? "Hide timeline" : "Show timeline"}
+          title={
+            timelineOpen
+              ? t("panels.shell.trajectory.hideTimeline")
+              : t("panels.shell.trajectory.showTimeline")
+          }
           type="button"
         >
           <TimerIcon size={13} />
         </button>
         <button
-          aria-label="Toggle export redaction"
+          aria-label={t("panels.shell.trajectory.toggleRedaction")}
           aria-pressed={redactExport}
           className={cn(
             "rounded-md border p-1.5 transition",
@@ -289,15 +299,15 @@ export function TrajectoryView({
           onClick={() => setRedactExport((current) => !current)}
           title={
             redactExport
-              ? "Redaction on: tool args/outputs are masked in the export"
-              : "Redaction off: export includes raw tool args/outputs"
+              ? t("panels.shell.trajectory.redactionOn")
+              : t("panels.shell.trajectory.redactionOff")
           }
           type="button"
         >
           <ShieldCheckIcon size={13} />
         </button>
         <button
-          aria-label="Export trajectory"
+          aria-label={t("panels.shell.trajectory.export")}
           className={cn(
             "rounded-md border p-1.5 transition",
             sessionId && !exporting
@@ -309,9 +319,9 @@ export function TrajectoryView({
           title={
             sessionId
               ? exporting
-                ? "Exporting…"
-                : "Export trajectory as JSONL"
-              : "No session to export"
+                ? t("panels.shell.trajectory.exporting")
+                : t("panels.shell.trajectory.exportJsonl")
+              : t("panels.shell.trajectory.noSessionToExport")
           }
           type="button"
         >
@@ -335,8 +345,8 @@ export function TrajectoryView({
           {items.length === 0 ? (
             <div className="flex h-full items-center justify-center px-4 text-center app-text-12 text-muted-foreground">
               {snapshot.items.length === 0
-                ? "No trajectory events yet — start a conversation to see the agent run trail."
-                : "No rows match the current filter."}
+                ? t("panels.shell.trajectory.empty")
+                : t("panels.shell.trajectory.noMatches")}
             </div>
           ) : (
             <div
@@ -371,15 +381,21 @@ export function TrajectoryView({
         <TrajectoryDetailPanel
           item={selectedItem}
           onClose={() => setSelectedItemId(null)}
+          onOpenSubagentSession={setSubagentTarget}
         />
       </div>
 
       {isLive ? (
         <div className="flex items-center gap-1.5 border-t border-border bg-surface-softer px-3 py-1 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
           <span className="size-1.5 animate-pulse rounded-full bg-accent-teal" />
-          Streaming
+          {t("panels.shell.trajectory.streaming")}
         </div>
       ) : null}
+
+      <SubagentSessionDialog
+        target={subagentTarget}
+        onClose={() => setSubagentTarget(null)}
+      />
     </div>
   );
 }

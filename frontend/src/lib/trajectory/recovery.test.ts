@@ -9,6 +9,10 @@ import {
   isRuntimeTrajectoryEvent,
   nextRecoveryAfter,
   runtimeEventToTrajectoryPush,
+  SUBAGENT_PROGRESS_EVENT_TYPE,
+  subagentProgressEventToTrajectoryPush,
+  TOOL_PROGRESS_EVENT_TYPE,
+  toolProgressEventToTrajectoryPush,
   trajectoryEventAction,
   trajectoryRecoveryPushes,
 } from "./recovery";
@@ -74,6 +78,111 @@ describe("trajectoryEventAction：可渲染 push / 过滤事件 skip 空洞 / �
       payload: {},
     } as SessionRuntimeEvent);
     expect(ephemeral).toEqual({ kind: "ignore" });
+  });
+
+  it("live-only tool.progress → 折叠进既有工具行的进行中更新（seq=0）", () => {
+    const action = trajectoryEventAction({
+      type: TOOL_PROGRESS_EVENT_TYPE,
+      timestamp: "t",
+      tool_name: "bash",
+      payload: {
+        tool_call_id: "call-1",
+        kind: "progress",
+        partial: "compiling module 3/7",
+        percent: 42,
+        live: true,
+      },
+    } as SessionRuntimeEvent);
+
+    expect(action.kind).toBe("push");
+    if (action.kind !== "push") {
+      return;
+    }
+    expect(action.push.kind).toBe("tool_call");
+    expect(action.push.payload.tool_call).toEqual({ id: "call-1", name: "bash" });
+    expect(action.push.payload.tool).toEqual({
+      output_summary: "compiling module 3/7",
+      percent: 42,
+    });
+    // live-only 无持久化 seq：即时应用，不参与空洞判定。
+    expect((action.push.payload._event as { sequence: number }).sequence).toBe(0);
+  });
+
+  it("live-only subagent.progress（父流节流镜像）→ runtime 折叠行（seq=0）", () => {
+    const action = trajectoryEventAction({
+      type: SUBAGENT_PROGRESS_EVENT_TYPE,
+      timestamp: "t",
+      payload: {
+        agent_id: "child-1",
+        session_id: "child-1",
+        parent_session_id: "parent-1",
+        source_event_type: "tool.progress",
+        path: "/root/child-1",
+        state: "running",
+        tool_name: "bash",
+        partial: "compiling module 3/7",
+        percent: 42,
+        live: true,
+      },
+    } as SessionRuntimeEvent);
+
+    expect(action.kind).toBe("push");
+    if (action.kind !== "push") {
+      return;
+    }
+    expect(action.push.kind).toBe("runtime");
+    expect(action.push.payload.runtime_type).toBe(SUBAGENT_PROGRESS_EVENT_TYPE);
+    // 子会话身份保留，供详情面板/子会话下钻识别来源。
+    expect(action.push.payload.agent_id).toBe("child-1");
+    expect(action.push.payload.session_id).toBe("child-1");
+    // 后端只给 `path`，前端规范化为 `agent_path`（note 摘要用）。
+    expect(action.push.payload.agent_path).toBe("/root/child-1");
+    expect(action.push.payload.live).toBe(true);
+    // live-only 无持久化 seq：应用到达序，不参与空洞判定。
+    expect((action.push.payload._event as { sequence: number }).sequence).toBe(0);
+  });
+
+  it("subagent.progress 仅有 session_id 时可映射；无子会话身份则不建无主行", () => {
+    const sessionOnly = subagentProgressEventToTrajectoryPush({
+      type: SUBAGENT_PROGRESS_EVENT_TYPE,
+      timestamp: "t",
+      payload: { session_id: "child-2", state: "completed", tool_name: "bash" },
+    } as SessionRuntimeEvent);
+    expect(sessionOnly?.payload.agent_id).toBe("child-2");
+
+    expect(
+      subagentProgressEventToTrajectoryPush({
+        type: SUBAGENT_PROGRESS_EVENT_TYPE,
+        timestamp: "t",
+        payload: { state: "running", tool_name: "bash" },
+      } as SessionRuntimeEvent),
+    ).toBeNull();
+    expect(
+      trajectoryEventAction({
+        type: SUBAGENT_PROGRESS_EVENT_TYPE,
+        timestamp: "t",
+        payload: { state: "running" },
+      } as SessionRuntimeEvent),
+    ).toEqual({ kind: "ignore" });
+  });
+
+  it("tool.progress 无 tool_call_id / 无文本时不建无主行", () => {
+    expect(
+      toolProgressEventToTrajectoryPush({
+        type: TOOL_PROGRESS_EVENT_TYPE,
+        timestamp: "t",
+        payload: { message: "starting" },
+      } as SessionRuntimeEvent),
+    ).toBeNull();
+
+    const withoutText = toolProgressEventToTrajectoryPush({
+      type: TOOL_PROGRESS_EVENT_TYPE,
+      timestamp: "t",
+      payload: { tool_call_id: "call-2", live: true },
+    } as SessionRuntimeEvent);
+    expect(withoutText?.kind).toBe("tool_call");
+    expect(withoutText?.payload.tool).toBeUndefined();
+    expect(withoutText?.payload.tool_call).toEqual({ id: "call-2", name: "tool" });
   });
 });
 
@@ -149,6 +258,8 @@ describe("isRuntimeTrajectoryEvent / runtimeEventToTrajectoryPush（Q4）", () =
       isRuntimeTrajectoryEvent(runtimeEvent("session_compact_completed", 6)),
     ).toBe(true);
     expect(isRuntimeTrajectoryEvent(runtimeEvent("checkpoint_created", 7))).toBe(true);
+    // P2-8 方案 4：配额驱逐事件也走轨迹，父会话流能看到“子会话为何消失”。
+    expect(isRuntimeTrajectoryEvent(runtimeEvent("agent.reclaimed", 8))).toBe(true);
   });
 
   it("白名单外事件不命中（job_output/team 编排等高频内部事件）", () => {
@@ -182,6 +293,28 @@ describe("isRuntimeTrajectoryEvent / runtimeEventToTrajectoryPush（Q4）", () =
     expect(
       runtimeEventToTrajectoryPush(runtimeEvent("chat.sse.chunk", 13)),
     ).toBeNull();
+  });
+
+  it("配额驱逐事件转换为 runtime push：payload 原样保留（含 seq 剥离）", () => {
+    const push = runtimeEventToTrajectoryPush(
+      runtimeEvent("agent.reclaimed", 14, {
+        source: "spawn_gate",
+        reclaimed: 1,
+        reasons: ["idle_timeout"],
+        agent_path: "/root/held-child",
+      }),
+    );
+    expect(push).toEqual({
+      kind: "runtime",
+      payload: {
+        runtime_type: "agent.reclaimed",
+        source: "spawn_gate",
+        reclaimed: 1,
+        reasons: ["idle_timeout"],
+        agent_path: "/root/held-child",
+        _event: { sequence: 14 },
+      },
+    });
   });
 });
 

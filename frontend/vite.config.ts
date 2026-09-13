@@ -183,6 +183,14 @@ export default defineConfig(({ mode }) => {
         "/healthz": createProxy(proxyTarget),
       },
     },
+    // P0-7：e2e 跑 `vite preview`（构建产物）。preview 的代理默认继承 server，
+    // 这里显式声明一份，避免 Vite 版本差异导致 /api 直落到静态目录。
+    preview: {
+      proxy: {
+        "/api": createProxy(proxyTarget),
+        "/healthz": createProxy(proxyTarget),
+      },
+    },
     build: {
       rolldownOptions: {
         output: {

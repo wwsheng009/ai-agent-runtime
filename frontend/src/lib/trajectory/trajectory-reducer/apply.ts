@@ -153,13 +153,16 @@ export function applySequencedEvent(
       break;
 
     case "runtime":
+      // P1-5 方案 2：live-only 进度镜像（`subagent.progress`，seq=0）需要就地
+      // 更新，故保持非终态（`upsertItem` 会冻结终态行，后续镜像将被丢弃）；
+      // 持久化生命周期事件仍是一次性 completed 行。
       upsertItem(
         snapshot,
         changes,
         `runtime-${seq}`,
         "system",
         { kind: "system", note: describeRuntimeEvent(event.payload) },
-        "completed",
+        event.payload["live"] === true ? "running" : "completed",
         seq,
       );
       break;

@@ -329,4 +329,29 @@ describe("useSessionRuntimeStream delta gate", () => {
     );
     expect(textSegment?.type === "text" ? textSegment.content : "").toBe("...");
   });
+
+  it("subscribes with live=true and keeps live-only subagent progress", async () => {
+    const { handlers, getThreads } = await renderWith(false, createThread());
+
+    // P1-5 方案 2：`subagent.progress` 是无持久化 seq 的 live-only 事件，
+    // 服务端仅在 live=1 时订阅总线并投递；父流漏传该开关会让镜像静默丢失。
+    expect(mockStream.mock.calls[0][1].live).toBe(true);
+
+    act(() => {
+      handlers.onEvent?.({
+        type: "subagent.progress",
+        timestamp: "2026-09-13T00:00:01Z",
+        payload: {
+          agent_id: "child-1",
+          session_id: "child-session",
+          live: true,
+          state: "running",
+        },
+      });
+    });
+
+    const nextThread = getThreads()[0];
+    expect(nextThread.lastRuntimeEventType).toBe("subagent.progress");
+    expect(nextThread.runtimeEventCount).toBe(1);
+  });
 });

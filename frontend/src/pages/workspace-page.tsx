@@ -1,5 +1,6 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
+import { SessionSwitchConfirmDialog } from "@/components/workspace/session-switch-confirm-dialog";
 import { WorkspaceShell } from "@/components/workspace/workspace-shell";
 import { useRuntimeTeamsData } from "@/hooks/workspace/use-runtime-teams-data";
 import { useRuntimeSessionsData } from "@/hooks/workspace/use-runtime-sessions-data";
@@ -9,7 +10,11 @@ import { useSessionHistorySync } from "@/hooks/workspace/use-session-history-syn
 import { useSessionRuntimeStream } from "@/hooks/workspace/use-session-runtime-stream";
 import { useTrajectoryRecovery } from "@/hooks/workspace/use-trajectory-recovery";
 import { useWorkspaceAgentChatTurn } from "@/hooks/workspace/use-workspace-agent-chat-turn";
-import { useWorkspaceThreadSelection } from "@/hooks/workspace/use-workspace-thread-selection";
+import {
+  isThreadResponding,
+  shouldConfirmThreadSwitch,
+  useWorkspaceThreadSelection,
+} from "@/hooks/workspace/use-workspace-thread-selection";
 import {
   applyRuntimeDeltaToThread,
   applyRuntimeEventToThread,
@@ -127,13 +132,52 @@ export function WorkspacePage() {
     workspacePath: runtimeClient.workspacePath,
   });
 
+  const [pendingSessionSwitch, setPendingSessionSwitch] = useState<{
+    threadId: string;
+    title: string;
+  } | null>(null);
+
+  // 只有「当前会话正在生成回复」时才需要二次确认：后台会话的 turn 会让全局
+  // isResponding 保持 true，因此按会话归属（流式消息挂在哪个线程上）判断。
+  const currentSessionResponding = isThreadResponding(selectedThread, activeTurnId);
+
   // 用户主动切换线程：轨迹快照 reset（同步于选择动作；新 turn 的 reset
   // 在提交 hook 内处理，避免导航渲染迟到的 effect reset 打断流事件收集）。
-  function handleSelectThreadWithTrajectoryReset(threadId: string) {
+  function performSelectThread(threadId: string) {
     // 线程/会话切换：硬重置游标——新会话的事件日志独立自增，
     // 由 useTrajectoryRecovery 按新会话从 seq=1 重新回放。
     trajectoryStore.reset({ hard: true });
     handleSelectThread(threadId);
+  }
+
+  // 左侧会话列表点击其它会话：当前会话仍在生成回复时先弹确认对话框，确认后
+  // 才真正切换（轨迹重置同样延后到确认之后，避免取消时已经丢掉当前会话的
+  // 轨迹游标）；当前会话空闲时直接切换，不打断用户。
+  function handleSelectThreadWithTrajectoryReset(threadId: string) {
+    if (
+      !shouldConfirmThreadSwitch(
+        selectedThread?.id,
+        threadId,
+        currentSessionResponding,
+      )
+    ) {
+      performSelectThread(threadId);
+      return;
+    }
+
+    const targetThread = threads.find((thread) => thread.id === threadId);
+    setPendingSessionSwitch({
+      threadId,
+      title: targetThread?.title ?? threadId,
+    });
+  }
+
+  function handleConfirmSessionSwitch() {
+    const pending = pendingSessionSwitch;
+    setPendingSessionSwitch(null);
+    if (pending) {
+      performSelectThread(pending.threadId);
+    }
   }
 
   async function handleRenameRuntimeSession(sessionId: string, title: string) {
@@ -252,7 +296,7 @@ export function WorkspacePage() {
     return null;
   }
 
-  return (
+  const shell = (
     <WorkspaceShell
       threads={threads}
       runtimeTeams={runtimeTeams}
@@ -323,5 +367,17 @@ export function WorkspacePage() {
       selectedProvider={selectedProvider}
       selectedReasoningEffort={selectedReasoningEffort}
     />
+  );
+
+  return (
+    <>
+      {shell}
+      <SessionSwitchConfirmDialog
+        open={pendingSessionSwitch !== null}
+        sessionTitle={pendingSessionSwitch?.title ?? ""}
+        onCancel={() => setPendingSessionSwitch(null)}
+        onConfirm={handleConfirmSessionSwitch}
+      />
+    </>
   );
 }
