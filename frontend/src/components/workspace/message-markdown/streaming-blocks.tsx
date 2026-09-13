@@ -6,7 +6,12 @@ import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
-import { inlineMarkdownComponents } from "./markdown-components";
+import { createInlineMarkdownComponents } from "./markdown-components";
+
+// 流式尾块按定义来自未结算内容：链接只渲染占位 <a>（不烘焙 href）、图片只渲染
+// 占位 span（不发请求），settled 后由主路径 `createMarkdownComponents(false)`
+// 重新解析同一段落并补齐 href/src —— 占位即自愈路径的过渡态。
+const streamingInlineMarkdownComponents = createInlineMarkdownComponents(true);
 
 function areStringArraysEqual(left: string[], right: string[]) {
   return (
@@ -22,7 +27,7 @@ const InlineMarkdown = memo(function InlineMarkdown({
 }) {
   return (
     <ReactMarkdown
-      components={inlineMarkdownComponents}
+      components={streamingInlineMarkdownComponents}
       remarkPlugins={[remarkGfm, remarkBreaks]}
     >
       {content}

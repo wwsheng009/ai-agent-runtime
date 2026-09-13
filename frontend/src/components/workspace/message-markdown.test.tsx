@@ -76,9 +76,71 @@ describe("MessageMarkdown", () => {
 
     expect(markup).toContain("<ol");
     expect(markup).toContain('start="3"');
-    expect(markup).toContain('href="https://example.com"');
+    // 流式期尾块走 createInlineMarkdownComponents(true)：只渲染占位 <a>，
+    // href 待 settled 后由主路径补齐。
+    expect(markup).not.toContain('href="https://example.com"');
+    expect(markup).toContain('data-streaming-link="true"');
     expect(markup).toContain('data-streaming-active="true"');
     expect(markup).toContain('aria-live="polite"');
+  });
+
+  it("defers link href and image src until the message settles", () => {
+    const content = [
+      "Intro paragraph",
+      "",
+      "![shot](https://cdn.example.com/shot.png)",
+      "",
+      "3. first item",
+      "4. second item with [link](https://example.com)",
+      "",
+      "![local](./shot.png)",
+    ].join("\n");
+
+    const streamingMarkup = renderToStaticMarkup(
+      <MessageMarkdown content={content} streaming />,
+    );
+
+    // 流式期链接不烘焙 href、图片不发请求：引用/图片 handler 只出占位。
+    expect(streamingMarkup).not.toContain('href="https://example.com"');
+    expect(streamingMarkup).not.toContain(
+      'src="https://cdn.example.com/shot.png"',
+    );
+    expect(streamingMarkup).toContain('data-streaming-link="true"');
+    expect(streamingMarkup).toContain('data-streaming-image="true"');
+
+    const settledMarkup = renderToStaticMarkup(
+      <MessageMarkdown content={content} />,
+    );
+
+    // settled 自愈：同一份文本重解析后链接/绝对图片落地，相对图片保持拦截占位。
+    expect(settledMarkup).toContain('href="https://example.com"');
+    expect(settledMarkup).toContain('target="_blank"');
+    expect(settledMarkup).toContain('src="https://cdn.example.com/shot.png"');
+    expect(settledMarkup).toContain('data-image-blocked="true"');
+    expect(settledMarkup).not.toContain("data-streaming-link");
+    expect(settledMarkup).not.toContain("data-streaming-image");
+  });
+
+  it("keeps settled link targets scheme-restricted", () => {
+    const markup = renderToStaticMarkup(
+      <MessageMarkdown
+        content={[
+          "[site](/docs/guide)",
+          "",
+          "[rel](docs/guide.md)",
+          "",
+          "[proto](//evil.example.com/x)",
+          "",
+          "[mail](mailto:team@example.com)",
+        ].join("\n")}
+      />,
+    );
+
+    expect(markup).toContain('href="/docs/guide"');
+    expect(markup).toContain('href="docs/guide.md"');
+    expect(markup).toContain('href="mailto:team@example.com"');
+    // 协议相对地址的 scheme 由宿主页面决定，不在渲染层放行。
+    expect(markup).not.toContain("evil.example.com");
   });
 
   it("renders streaming tables through the structured tail path", () => {
