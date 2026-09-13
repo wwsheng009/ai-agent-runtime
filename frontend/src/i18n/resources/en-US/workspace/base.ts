@@ -230,5 +230,24 @@ export const enWorkspaceBase = {
       rejected: "ignored {{count}} file(s) (duplicate, too large, or over limit)",
       dropInvitation: "drop to attach files",
     },
+    menu: {
+      trigger: "input menu",
+      label: "input suggestions",
+      empty: "no matching suggestions",
+      hint: "↑/↓ select · Tab expand or complete · Enter confirm · Esc close",
+      count: "{{count}} item(s)",
+      commands: "commands",
+      actions: "actions",
+    },
+    commands: {
+      lineHint: "command line",
+      unknown: "unknown command /{{name}} — sending blocked",
+      incomplete: "incomplete command — sending blocked",
+      noExecutor: "command /{{name}} has no executor yet",
+      dismiss: "dismiss notice",
+    },
+    references: {
+      files: "files",
+    },
   },
 } satisfies DeepStringShape<typeof zhWorkspaceBase>;

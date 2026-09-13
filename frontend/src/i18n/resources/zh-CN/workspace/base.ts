@@ -212,5 +212,24 @@ export const zhWorkspaceBase = {
       rejected: "已忽略 {{count}} 个文件（重复、超大或超出数量上限）",
       dropInvitation: "松开以添加附件",
     },
+    menu: {
+      trigger: "输入菜单",
+      label: "输入候选",
+      empty: "无匹配候选",
+      hint: "↑/↓ 选择 · Tab 展开或补全 · Enter 确认 · Esc 关闭",
+      count: "{{count}} 项",
+      commands: "命令",
+      actions: "操作",
+    },
+    commands: {
+      lineHint: "命令行",
+      unknown: "未知命令 /{{name}}：已阻止发送",
+      incomplete: "命令不完整：已阻止发送",
+      noExecutor: "命令 /{{name}} 尚未接入执行器",
+      dismiss: "关闭提示",
+    },
+    references: {
+      files: "文件",
+    },
   },
 } as const;

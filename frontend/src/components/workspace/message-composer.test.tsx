@@ -241,9 +241,15 @@ describe("MessageComposer", () => {
     expect(input).not.toBeNull();
 
     const clickSpy = vi.spyOn(input, "click").mockImplementation(() => {});
+    // `+` 按钮与 `/`、`@` 同源：先开菜单，再从菜单里选「添加附件」。
     act(() => {
       container
-        .querySelector("button[data-composer-attach]")
+        .querySelector("button[data-composer-menu-trigger]")
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    act(() => {
+      container
+        .querySelector("[data-composer-attach]")
         ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(clickSpy).toHaveBeenCalledTimes(1);

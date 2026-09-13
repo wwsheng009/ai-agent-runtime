@@ -6,6 +6,7 @@ import {
   type RefObject,
   type SetStateAction,
   Suspense,
+  useMemo,
 } from "react";
 import { type TFunction } from "i18next";
 import { ArrowUpRightIcon, BotIcon, type LucideIcon } from "lucide-react";
@@ -17,6 +18,8 @@ import { TrajectoryView } from "@/components/workspace/workspace-shell/lazy-surf
 import { type WorkspaceShellProps } from "@/components/workspace/workspace-shell/types";
 import { WorkspaceShellTopbar } from "@/components/workspace/workspace-shell-topbar";
 import { type WorkspaceDensity } from "@/core/settings";
+import { type ComposerReferenceGroup } from "@/lib/composer-menu";
+import { artifactReferenceGroup } from "@/lib/composer-references";
 import { cn } from "@/lib/utils";
 
 type WorkspaceMainSectionProps = Pick<
@@ -128,6 +131,15 @@ export function WorkspaceMainSection({
   transportLabel,
   viewMode,
 }: WorkspaceMainSectionProps) {
+  // P1-4 子片 3：`@` 引用候选（当前线程交付物；会话/子代理分组待数据源就绪）。
+  const composerReferenceGroups = useMemo<ComposerReferenceGroup[]>(() => {
+    const files = artifactReferenceGroup(
+      selectedThread.artifacts,
+      t("composer.references.files"),
+    );
+    return files ? [files] : [];
+  }, [selectedThread.artifacts, t]);
+
   return (
     <section
       id="workspace-preview"
@@ -313,6 +325,7 @@ export function WorkspaceMainSection({
                   reasoningEffortDefault={reasoningEffortDefault}
                   reasoningEffortError={reasoningEffortError}
                   reasoningEffortOptions={reasoningEffortOptions}
+                  referenceGroups={composerReferenceGroups}
                   selectedArtifactCount={selectedThread.artifacts.length}
                   onModelChange={onModelChange}
                   onProviderChange={onProviderChange}

@@ -1,21 +1,31 @@
-import { ArrowUpIcon, PaperclipIcon, SquareIcon } from "lucide-react";
+import { ArrowUpIcon, PlusIcon, SquareIcon } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef } from "react";
 
 import {
   ComposerAttachmentRail,
   ComposerDropInvitation,
 } from "@/components/workspace/composer-attachment-rail";
+import { ComposerMenu } from "@/components/workspace/composer-menu";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { type Thread } from "@/data/mock";
 import { type ComposerAttachmentsController } from "@/hooks/workspace/composer/use-composer-attachments";
+import { useComposerMenu } from "@/hooks/workspace/composer/use-composer-menu";
+import { type ComposerCommand, type ComposerCommandDefinition } from "@/lib/composer-commands";
+import { type ComposerReferenceGroup } from "@/lib/composer-menu";
 import { applyComposerTextareaLayout } from "@/lib/composer-textarea";
 import { cn } from "@/lib/utils";
 import { useTranslation } from "react-i18next";
 
+// 稳定引用：默认空值不参与 memo 失效（否则每次渲染都重建菜单快照）。
+const NO_COMMANDS: readonly ComposerCommandDefinition[] = [];
+const NO_REFERENCE_GROUPS: readonly ComposerReferenceGroup[] = [];
+
 type MessageComposerProps = {
   /** P1-4 子片 2：附件草稿轨（数据与上传状态由 owner hook 持有）。 */
   attachments: ComposerAttachmentsController;
+  /** P1-4 子片 3：斜杠命令表（内置命令清单与执行器归 P2-7）。 */
+  commands?: readonly ComposerCommandDefinition[];
   density: "comfortable" | "compact";
   draft: string;
   /** 会话身份；变化（切换会话/新建线程落地）时输入框回焦。 */
@@ -25,6 +35,12 @@ type MessageComposerProps = {
   isResponding: boolean;
   modelOptions: string[];
   onModelChange: (value: string) => void;
+  /** P1-4 子片 3：`/` 命令派发；返回 true 表示已处理（否则给出未接入提示，不降级为 prompt）。 */
+  onCommand?: (
+    command: ComposerCommand,
+    args: string,
+    source: "pick" | "submit",
+  ) => boolean | void;
   onProviderChange: (value: string) => void;
   onReasoningEffortChange: (value: string) => void;
   providerOptions: string[];
@@ -33,6 +49,8 @@ type MessageComposerProps = {
   reasoningEffortOptions: string[];
   runtimeModelsError: string | null;
   runtimeModelsLoading: boolean;
+  /** P1-4 子片 3：`@` 引用候选分组（文件/会话/子代理）。 */
+  referenceGroups?: readonly ComposerReferenceGroup[];
   selectedArtifactCount: number;
   selectedModel: string;
   selectedProvider: string;
@@ -45,6 +63,7 @@ type MessageComposerProps = {
 
 export function MessageComposer({
   attachments,
+  commands = NO_COMMANDS,
   density,
   draft,
   focusKey,
@@ -52,6 +71,7 @@ export function MessageComposer({
   isNewThread = false,
   isResponding,
   modelOptions,
+  onCommand,
   onModelChange,
   onProviderChange,
   onReasoningEffortChange,
@@ -61,6 +81,7 @@ export function MessageComposer({
   reasoningEffortOptions,
   runtimeModelsError,
   runtimeModelsLoading,
+  referenceGroups = NO_REFERENCE_GROUPS,
   selectedArtifactCount,
   selectedModel,
   selectedProvider,
@@ -115,15 +136,37 @@ export function MessageComposer({
   // 上传接口未就绪（§6.3 P2-1C）：附件只能停留在「待发送」，此时禁止提交，
   // 避免附件被静默丢弃。
   const hasPendingAttachments = attachments.attachments.length > 0;
+
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // P1-4 子片 3：`/` 命令、`@` 引用与 `+` 按钮共用同一份触发菜单。
+  const menu = useComposerMenu({
+    value: draft,
+    commands,
+    referenceGroups,
+    hasAttachAction: true,
+    attachLabel: t("composer.attachments.attach"),
+    onValueChange: onDraftChange,
+    onAttachRequest: () => fileInputRef.current?.click(),
+    onCommand,
+  });
+
   const showStatusRow =
     transport === "error" ||
     selectedArtifactCount > 0 ||
     isResponding ||
     hasPendingAttachments ||
-    attachments.rejectedCount > 0;
-
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+    attachments.rejectedCount > 0 ||
+    menu.commandLine ||
+    menu.notice !== null;
+  const commandNoticeText = menu.notice
+    ? menu.notice.kind === "unknown-command"
+      ? t("composer.commands.unknown", { name: menu.notice.name })
+      : menu.notice.kind === "incomplete-command"
+        ? t("composer.commands.incomplete")
+        : t("composer.commands.noExecutor", { name: menu.notice.name })
+    : null;
 
   // P1-4：草稿超过 14 行时封顶并在输入框内滚动（页面布局不被撑高）。
   useLayoutEffect(() => {
@@ -159,6 +202,21 @@ export function MessageComposer({
       focusInput();
       return;
     }
+    // 命令行永不静默降级为普通 prompt：未知/不完整命令阻塞提交并给出可见原因。
+    const classification = menu.classifySubmit();
+    if (
+      classification.kind === "unknown-command" ||
+      classification.kind === "incomplete-command"
+    ) {
+      menu.reportBlocked(classification);
+      focusInput();
+      return;
+    }
+    if (classification.kind === "command") {
+      menu.dispatchCommand(classification.command, classification.args, "submit");
+      focusInput();
+      return;
+    }
     onSubmit();
     focusInput();
   }
@@ -169,7 +227,7 @@ export function MessageComposer({
   }
 
   return (
-    <div className="rounded-panel-lg border border-border [background:var(--workspace-composer-bg)] shadow-[0_8px_24px_rgba(0,0,0,0.18)]">
+    <div className="relative rounded-panel-lg border border-border [background:var(--workspace-composer-bg)] shadow-[0_8px_24px_rgba(0,0,0,0.18)]">
       {showStatusRow ? (
         <div
           className={cn(
@@ -215,6 +273,11 @@ export function MessageComposer({
               })}
             </button>
           ) : null}
+          {menu.commandLine ? (
+            <span data-composer-command-line className="text-accent-secondary">
+              {t("composer.commands.lineHint")}
+            </span>
+          ) : null}
         </div>
       ) : null}
 
@@ -224,6 +287,23 @@ export function MessageComposer({
           isCompact={isCompact}
           onRemove={attachments.removeAttachment}
         />
+        {menu.notice ? (
+          <div
+            role="alert"
+            data-composer-command-notice={menu.notice.kind}
+            className="flex items-start justify-between gap-2 px-3 pt-2 app-text-10 text-[#d8a66d]"
+          >
+            <span>{commandNoticeText}</span>
+            <button
+              type="button"
+              data-composer-command-notice-dismiss
+              onClick={menu.dismissNotice}
+              className="shrink-0 underline-offset-2 hover:underline"
+            >
+              {t("composer.commands.dismiss")}
+            </button>
+          </div>
+        ) : null}
         <input
           ref={fileInputRef}
           type="file"
@@ -244,7 +324,20 @@ export function MessageComposer({
         <textarea
           ref={textareaRef}
           value={draft}
-          onChange={(event) => onDraftChange(event.target.value)}
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={menu.open}
+          aria-controls={menu.open ? menu.listboxId : undefined}
+          aria-activedescendant={menu.activeDescendantId ?? undefined}
+          data-composer-command-line={menu.commandLine ? "true" : undefined}
+          onChange={(event) => {
+            const next = event.target.value;
+            menu.handleValueChange(next, event.target.selectionStart ?? next.length);
+          }}
+          onSelect={(event) => {
+            menu.handleCaretChange(event.currentTarget.selectionStart ?? 0);
+          }}
+          onBlur={() => menu.close()}
           onPaste={(event) => {
             const files = event.clipboardData?.files;
             if (files && files.length > 0) {
@@ -253,6 +346,10 @@ export function MessageComposer({
             }
           }}
           onKeyDown={(event) => {
+            // 菜单打开时键盘所有权归菜单（Esc/↑/↓/Tab/Enter），否则走原生编辑行为。
+            if (menu.handleKeyDown(event)) {
+              return;
+            }
             if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
               event.preventDefault();
               if (isResponding) {
@@ -281,15 +378,23 @@ export function MessageComposer({
           <div className="min-w-0 flex flex-wrap items-center gap-2 app-text-9 uppercase tracking-[0.12em] text-muted-foreground">
             <button
               type="button"
-              data-composer-attach
-              aria-label={t("composer.attachments.attach")}
-              title={t("composer.attachments.attach")}
-              onClick={() => fileInputRef.current?.click()}
+              data-composer-menu-trigger
+              aria-label={t("composer.menu.trigger")}
+              aria-haspopup="listbox"
+              aria-expanded={menu.open}
+              title={t("composer.menu.trigger")}
+              onClick={() => {
+                if (menu.open) {
+                  menu.close();
+                  return;
+                }
+                menu.openFromButton();
+              }}
               className="inline-flex shrink-0 items-center rounded-[0.6rem] border border-border bg-surface-soft px-2 py-1 text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground"
             >
-              <PaperclipIcon size={14} aria-hidden="true" />
+              <PlusIcon size={14} aria-hidden="true" />
               <span className="sr-only">
-                {t("composer.attachments.attach")}
+                {t("composer.menu.trigger")}
               </span>
             </button>
             {showProviderPicker ? (
@@ -378,6 +483,14 @@ export function MessageComposer({
           </Button>
         </div>
       </div>
+      {menu.open ? (
+        <ComposerMenu
+          activeId={menu.activeId}
+          onHover={menu.hoverItem}
+          onSelect={menu.selectItem}
+          snapshot={menu.snapshot}
+        />
+      ) : null}
       <ComposerDropInvitation visible={attachments.isDragOver} />
     </div>
   );

@@ -5,7 +5,8 @@ import { resetMockState, seedSession } from "./support";
 
 // P1-4（Composer 输入面）：
 //   子片 1：草稿按会话持久化、14 行封顶内部滚动、输入回焦；
-//   子片 2：附件三段式（选择 / 粘贴 / 拖放）、待发送轨、提交闸门与拒收提示。
+//   子片 2：附件三段式（选择 / 粘贴 / 拖放）、待发送轨、提交闸门与拒收提示；
+//   子片 3：`+` / `/` / `@` 同源触发菜单、键盘所有权、命令行不降级为 prompt。
 //
 // 断言口径：
 // - 只依赖 `.app-chat-input` 与 `data-composer-*` 稳定钩子及真实 localStorage，
@@ -249,4 +250,47 @@ test("P1-4g: duplicate picks are ignored with an acknowledging notice", async ({
 
   await rejected.click();
   await expect(rejected).toHaveCount(0);
+});
+
+test("P1-4h: the trigger menu owns the keyboard and slash lines never fall back to a prompt", async ({
+  page,
+}) => {
+  const trigger = page.locator("button[data-composer-menu-trigger]");
+  const menu = page.locator("[data-composer-menu]");
+  const submit = page.locator('button[aria-label="Start new thread"]');
+
+  // `+` 与 `/`、`@` 同源：按钮打开同一份菜单，textarea 暴露 combobox 语义。
+  await trigger.click();
+  await expect(menu).toBeVisible();
+  await expect(composer(page)).toHaveAttribute("aria-expanded", "true");
+  await expect(trigger).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator("[data-composer-attach]")).toHaveCount(1);
+
+  // Esc 关闭菜单并把键盘所有权还给输入框（原生焦点遍历不被劫持）。
+  await composer(page).press("Escape");
+  await expect(menu).toHaveCount(0);
+  await expect(composer(page)).toHaveAttribute("aria-expanded", "false");
+  await expect(composer(page)).toBeFocused();
+
+  // 行首 `/` 进入命令行：状态行显式提示，当前草稿不会作为普通消息发送。
+  await composer(page).fill("/nope");
+  await expect(composer(page)).toHaveAttribute("data-composer-command-line", "true");
+  await expect(page.locator("span[data-composer-command-line]")).toBeVisible();
+
+  await composer(page).press("Enter");
+  await expect(page.locator('[data-composer-command-notice="unknown-command"]')).toBeVisible();
+  await expect(composer(page)).toHaveValue("/nope");
+  await expect(composer(page)).toBeFocused();
+
+  // Ctrl/Cmd+Enter 同样不能绕开：命令行只有「被宿主执行」一种出口。
+  await composer(page).press("Control+Enter");
+  await expect(composer(page)).toHaveValue("/nope");
+
+  // 提示可关闭，草稿保留，用户可继续编辑或清空。
+  await page.locator("[data-composer-command-notice-dismiss]").click();
+  await expect(page.locator("[data-composer-command-notice]")).toHaveCount(0);
+
+  await composer(page).fill("plain prompt");
+  await expect(composer(page)).not.toHaveAttribute("data-composer-command-line", "true");
+  await expect(submit).toBeEnabled();
 });
