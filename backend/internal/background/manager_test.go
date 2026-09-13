@@ -651,7 +651,12 @@ func TestWatchdogReclaimsStuckScheduledJob(t *testing.T) {
 	manager := NewManager(Config{
 		MaxConcurrentJobs: 1,
 		MonitorInterval:   20 * time.Millisecond,
-		HeartbeatTimeout:  100 * time.Millisecond,
+		// The watchdog treats a scheduled-but-not-running job as stuck after
+		// HeartbeatTimeout. The blocked fake runner is reclaimed immediately,
+		// but the follow-up job uses the real runner and a cold shell spawn
+		// (several hundred milliseconds on Windows) must not be mistaken for
+		// a stuck scheduler.
+		HeartbeatTimeout: 2 * time.Second,
 	})
 	defer manager.Close()
 	ctx := context.Background()

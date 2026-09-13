@@ -12,6 +12,14 @@ import (
 
 func writeProviderCommandConfig(t *testing.T, raw string) (*config.Config, string) {
 	t.Helper()
+	// Isolate the preset layer: InitGlobalConfig merges the deployed system
+	// preset directory and ~/.aicli/presets.yaml below the user document, so a
+	// machine with presets installed would leak extra providers into these
+	// command assertions. Point both layers at empty temp directories.
+	t.Setenv(config.SystemPresetDirEnv, t.TempDir())
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(strings.TrimSpace(raw)+"\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
