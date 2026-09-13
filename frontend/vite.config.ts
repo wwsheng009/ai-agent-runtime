@@ -4,8 +4,32 @@ import path from "node:path";
 
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
-import type { HmrOptions, ProxyOptions } from "vite";
+import type { HmrOptions, Plugin, ProxyOptions } from "vite";
 import { defineConfig, loadEnv } from "vite";
+
+import {
+  buildThemeBootScript,
+  THEME_BOOT_ATTRIBUTE,
+  THEME_BOOT_PLACEHOLDER,
+} from "./src/core/theme/boot-script";
+
+// P0-5：把与 core/theme/present.ts 同源的主题启动脚本内联进 index.html <head>，
+// 在样式表/模块脚本之前执行，消除首屏闪白/闪黑。`order: "pre"` 保证占位注释
+// 在 Vite 自身的 HTML 处理之前被替换。
+function themeBootPlugin(): Plugin {
+  return {
+    name: "theme-boot-script",
+    transformIndexHtml: {
+      order: "pre",
+      handler(html) {
+        return html.replace(
+          THEME_BOOT_PLACEHOLDER,
+          `<script ${THEME_BOOT_ATTRIBUTE}="1">${buildThemeBootScript()}</script>`,
+        );
+      },
+    },
+  };
+}
 
 function readString(
   env: Record<string, string>,
@@ -141,7 +165,7 @@ export default defineConfig(({ mode }) => {
       : undefined;
 
   return {
-    plugins: [react(), tailwindcss()],
+    plugins: [themeBootPlugin(), react(), tailwindcss()],
     resolve: {
       alias: {
         "@": path.resolve(__dirname, "./src"),

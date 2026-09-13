@@ -11,10 +11,8 @@ import {
   AppSettingsContext,
   type UpdateSettingsSection,
 } from "@/core/settings/context-store";
-import {
-  applyDocumentSettings,
-  getSystemTheme,
-} from "@/core/settings/document";
+import { getSystemTheme } from "@/core/settings/document";
+import { presentThemeSnapshot, resolveThemeSnapshot } from "@/core/theme";
 import {
   APP_SETTINGS_STORAGE_KEY,
   DEFAULT_APP_SETTINGS,
@@ -64,7 +62,9 @@ export function SettingsProvider({ children }: PropsWithChildren) {
   }, []);
 
   useLayoutEffect(() => {
-    applyDocumentSettings(settings, resolvedTheme, resolvedLocale);
+    presentThemeSnapshot(
+      resolveThemeSnapshot(settings, resolvedTheme, resolvedLocale),
+    );
   }, [resolvedLocale, resolvedTheme, settings]);
 
   useEffect(() => {

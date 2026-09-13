@@ -68,6 +68,13 @@ const LEGACY_CODE_FONT_SIZE_PRESETS = {
   sm: 12,
 } as const;
 
+// P0-5：首屏启动脚本（core/theme/boot-script.ts）复用同一份历史预设表，避免常量漂移。
+export const LEGACY_FONT_SIZE_PRESETS = {
+  chat: LEGACY_CHAT_FONT_SIZE_PRESETS,
+  code: LEGACY_CODE_FONT_SIZE_PRESETS,
+  text: LEGACY_APP_FONT_SIZE_PRESETS,
+} as const;
+
 export interface AppSettings {
   localization: {
     locale: LocalePreference;
@@ -168,9 +175,10 @@ function normalizeFontSize(
 
   if (typeof value === "string") {
     const trimmed = value.trim().toLowerCase();
-    const legacyValue = legacyPresets[trimmed];
-    if (legacyValue !== undefined) {
-      return legacyValue;
+    // P0-5：与首屏启动脚本保持一致——只用自有键，避免原型链键（"constructor" 等）
+    // 被当成预设值返回非数值。
+    if (Object.prototype.hasOwnProperty.call(legacyPresets, trimmed)) {
+      return legacyPresets[trimmed];
     }
 
     const parsed = Number.parseFloat(trimmed);

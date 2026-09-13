@@ -1,11 +1,9 @@
 import {
-  CODE_FONT_FAMILY_STACKS,
-  FONT_FAMILY_STACKS,
-  formatFontSizePx,
-  getCodeLineNumberFontSize,
   type AppSettings,
   type ResolvedTheme,
 } from "@/core/settings/local";
+import { presentThemeSnapshot } from "@/core/theme/present";
+import { resolveThemeSnapshot } from "@/core/theme/resolve";
 import { type ResolvedLocale } from "@/i18n/locale";
 
 export function getSystemTheme(): ResolvedTheme {
@@ -27,42 +25,10 @@ export function applyDocumentSettings(
     return;
   }
 
-  const root = document.documentElement;
-  root.lang = resolvedLocale;
-  root.dataset.accentTone = settings.appearance.accentTone;
-  root.dataset.reducedMotion = settings.appearance.reducedMotion ? "true" : "false";
-  root.dataset.theme = resolvedTheme;
-  root.dataset.themeMode = settings.appearance.themeMode;
-  root.dataset.workspaceDensity = settings.workspace.density;
-  root.style.setProperty(
-    "--app-root-font-size",
-    formatFontSizePx(settings.appearance.textSize),
+  // P0-5：DOM 写入统一收敛到 core/theme（resolve → snapshot → present）。
+  // 保留本函数作为兼容入口；写入的属性集合与顺序不变，等价性见
+  // core/theme/present.test.ts 与 core/theme/boot-script.test.ts。
+  presentThemeSnapshot(
+    resolveThemeSnapshot(settings, resolvedTheme, resolvedLocale),
   );
-  root.style.setProperty(
-    "--app-chat-font-size",
-    formatFontSizePx(settings.appearance.chatTextSize),
-  );
-  root.style.setProperty(
-    "--app-code-font-size",
-    formatFontSizePx(settings.appearance.codeTextSize),
-  );
-  root.style.setProperty(
-    "--app-code-line-number-size",
-    formatFontSizePx(
-      getCodeLineNumberFontSize(settings.appearance.codeTextSize),
-    ),
-  );
-  root.style.setProperty(
-    "--font-sans",
-    FONT_FAMILY_STACKS[settings.appearance.fontFamily].sans,
-  );
-  root.style.setProperty(
-    "--font-serif",
-    FONT_FAMILY_STACKS[settings.appearance.fontFamily].serif,
-  );
-  root.style.setProperty(
-    "--font-mono",
-    CODE_FONT_FAMILY_STACKS[settings.appearance.codeFontFamily],
-  );
-  root.style.colorScheme = resolvedTheme;
 }
