@@ -170,7 +170,6 @@ export function debugTrajectoryConsistency(
   }
   const differences = compareTrajectoryVsSegments(snapshot, segments);
   if (differences.length > 0) {
-    // eslint-disable-next-line no-console
     console.warn(
       "[trajectory] consistency check failed:\n" + differences.join("\n"),
     );
