@@ -367,3 +367,37 @@ func containsString(values []string, expected string) bool {
 	}
 	return false
 }
+
+func TestUniqueChatArtifactPathAvoidsSameSecondOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session_20260913_101112_full.json")
+	if err := os.WriteFile(path, []byte("first"), 0o644); err != nil {
+		t.Fatalf("write first export: %v", err)
+	}
+
+	// 同秒内第二次导出必须换名，否则 rename/O_TRUNC 会静默顶掉上一份产物。
+	second := uniqueChatArtifactPath(path)
+	if want := filepath.Join(dir, "session_20260913_101112_full-2.json"); second != want {
+		t.Fatalf("second export path = %s, want %s", second, want)
+	}
+	if err := os.WriteFile(second, []byte("second"), 0o644); err != nil {
+		t.Fatalf("write second export: %v", err)
+	}
+	third := uniqueChatArtifactPath(path)
+	if want := filepath.Join(dir, "session_20260913_101112_full-3.json"); third != want {
+		t.Fatalf("third export path = %s, want %s", third, want)
+	}
+	first, err := os.ReadFile(path)
+	if err != nil || string(first) != "first" {
+		t.Fatalf("first export was overwritten: %q %v", first, err)
+	}
+
+	// 无冲突时保持默认命名原样，空路径直接透传。
+	fresh := filepath.Join(dir, "fresh.json")
+	if got := uniqueChatArtifactPath(fresh); got != fresh {
+		t.Fatalf("fresh path = %s, want %s", got, fresh)
+	}
+	if got := uniqueChatArtifactPath(""); got != "" {
+		t.Fatalf("empty path = %q", got)
+	}
+}

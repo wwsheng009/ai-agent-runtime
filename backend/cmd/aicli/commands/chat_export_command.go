@@ -829,7 +829,29 @@ func resolveChatExportOutputPath(session *ChatSession, runtimeSession *runtimech
 		sessionID = sanitizeChatExportFileComponent(runtimeSession.ID)
 	}
 	filename := fmt.Sprintf("%s_%s_%s%s", sessionID, time.Now().Format("20060102_150405"), opts.Format, extension)
-	return resolveAbsoluteChatPath(filepath.Join(outputDir, filename)), nil
+	return uniqueChatArtifactPath(resolveAbsoluteChatPath(filepath.Join(outputDir, filename))), nil
+}
+
+// uniqueChatArtifactPath 避免同秒内重复导出静默覆盖上一份产物：文件名的时间戳
+// 只到秒，两次导出会算出同一路径，而写盘路径是 O_TRUNC/rename（后者在 Windows
+// 上同样替换目标）。这里保留首个路径不变，仅在已存在时追加 -2/-3… 序号。
+// 仅用于默认命名；用户在 OutputPath 里显式指定的路径不做改名。
+func uniqueChatArtifactPath(path string) string {
+	if path == "" {
+		return path
+	}
+	if _, err := os.Stat(path); err != nil {
+		return path
+	}
+	ext := filepath.Ext(path)
+	base := strings.TrimSuffix(path, ext)
+	for attempt := 2; attempt < 1000; attempt++ {
+		candidate := fmt.Sprintf("%s-%d%s", base, attempt, ext)
+		if _, err := os.Stat(candidate); err != nil {
+			return candidate
+		}
+	}
+	return path
 }
 
 func defaultChatExportDir(session *ChatSession) string {

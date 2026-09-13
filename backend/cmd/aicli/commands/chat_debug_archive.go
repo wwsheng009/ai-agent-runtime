@@ -345,7 +345,7 @@ func resolveChatDebugArchiveOutputPath(session *ChatSession, opts chatDebugArchi
 		sessionID = "session"
 	}
 	name := fmt.Sprintf("%s_%s_debug.zip", sessionID, time.Now().Format("20060102_150405"))
-	return resolveAbsoluteChatPath(filepath.Join(outputDir, name)), nil
+	return uniqueChatArtifactPath(resolveAbsoluteChatPath(filepath.Join(outputDir, name))), nil
 }
 
 func collectChatDebugArchiveItems(session *ChatSession) []chatDebugArchiveItem {

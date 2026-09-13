@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -692,5 +693,38 @@ func TestEditTool_NotFoundIncludesStructuredNextAction(t *testing.T) {
 	next, _ := result.Metadata["next_action"].(string)
 	if next == "" {
 		t.Fatalf("expected next_action metadata, got %#v", result.Metadata)
+	}
+}
+
+func TestEditTool_BackupsInSameSecondAreNotOverwritten(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "sample.txt")
+	if err := os.WriteFile(target, []byte("v0"), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	tool := NewEditTool()
+
+	// 备份名时间戳只到秒：旧实现同秒内第二次备份会用同一路径 + O_TRUNC
+	// 静默覆盖上一份回滚点。连续取多份快照，断言每份都落在新文件且内容完好。
+	seen := make(map[string]string, 8)
+	for i := 0; i < 8; i++ {
+		content := []byte(fmt.Sprintf("snapshot-%d", i))
+		path, err := tool.createBackup(target, content)
+		if err != nil {
+			t.Fatalf("createBackup #%d: %v", i, err)
+		}
+		if _, dup := seen[path]; dup {
+			t.Fatalf("backup path reused at #%d: %s", i, path)
+		}
+		seen[path] = string(content)
+	}
+	for path, want := range seen {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read backup %s: %v", path, err)
+		}
+		if string(got) != want {
+			t.Fatalf("backup %s content = %q, want %q", path, got, want)
+		}
 	}
 }

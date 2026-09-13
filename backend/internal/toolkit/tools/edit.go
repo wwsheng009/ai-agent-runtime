@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -310,18 +311,36 @@ func (e *EditTool) createBackup(filePath string, content []byte) (string, error)
 		return "", err
 	}
 
-	// 生成备份文件名（带时间戳）
+	// 生成备份文件名（带时间戳）。时间戳只到秒：同一秒内对同一文件的第二次
+	// 备份会落到同一路径，若直接写入（O_TRUNC）会静默覆盖上一份回滚点。
+	// 这里用 O_EXCL 逐个尝试带序号后缀的名字，保证每次备份都写入新文件；
+	// 并发进程也只有一个能拿到同一个名字，不会互相覆盖。
 	timestamp := time.Now().Format("20060102-150405")
 	baseName := filepath.Base(absPath)
-	backupName := fmt.Sprintf("%s.%s.bak", baseName, timestamp)
-	backupPath := filepath.Join(backupDir, backupName)
-
-	// 写入备份
-	if err := os.WriteFile(backupPath, content, 0644); err != nil {
-		return "", err
+	for attempt := 0; attempt < 1000; attempt++ {
+		backupName := fmt.Sprintf("%s.%s.bak", baseName, timestamp)
+		if attempt > 0 {
+			backupName = fmt.Sprintf("%s.%s-%d.bak", baseName, timestamp, attempt)
+		}
+		backupPath := filepath.Join(backupDir, backupName)
+		file, err := os.OpenFile(backupPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+		if err != nil {
+			if errors.Is(err, os.ErrExist) {
+				continue
+			}
+			return "", err
+		}
+		if _, err := file.Write(content); err != nil {
+			_ = file.Close()
+			_ = os.Remove(backupPath)
+			return "", err
+		}
+		if err := file.Close(); err != nil {
+			return "", err
+		}
+		return backupPath, nil
 	}
-
-	return backupPath, nil
+	return "", fmt.Errorf("创建备份文件失败：%s 下同名备份过多", backupDir)
 }
 
 func buildEditOldStringNotFoundError(content string, oldString string) error {
