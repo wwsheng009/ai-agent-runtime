@@ -8,16 +8,21 @@
 </head>
 <body>
 <header>
-  <h1>aicli micro web client</h1>
-  <span id="header-session">
+  <!-- 左侧：会话列表折叠 / 主题切换图标 + 连接、轮次、发送状态 -->
+  <div class="header-left">
+    <button id="sidebar-toggle" type="button" title="折叠/展开会话列表">☰</button>
+    <button id="theme-toggle" type="button" title="切换深色/浅色主题（Ctrl+L）">☾</button>
+    <span id="connection-status">connecting</span>
+    <span id="turn-status">-</span>
+    <span id="send-status"></span>
+  </div>
+  <!-- 居中：当前会话标题 + 会话 ID（sessions.js updateHeaderSession 更新） -->
+  <div id="header-session">
     <span id="header-session-title">未选择会话</span>
     <span id="header-session-id"></span>
-  </span>
-  <button id="sidebar-toggle" type="button" title="折叠/展开会话列表">☰</button>
-  <button id="theme-toggle" type="button" title="切换深色/浅色主题（Ctrl+L）">☾</button>
-  <span id="connection-status">connecting</span>
-  <span id="turn-status">-</span>
-  <span id="send-status"></span>
+  </div>
+  <!-- 右侧占位：与左侧同宽，保证会话信息在整栏中精确居中 -->
+  <span class="header-right" aria-hidden="true"></span>
 </header>
 
 <div class="layout">
@@ -82,6 +87,8 @@
       <button class="tab-btn" id="tab-log-btn" type="button">日志</button>
       <button class="tab-btn" id="tab-config-btn" type="button" title="provider / model / reasoning effort 配置管理">配置</button>
       <button class="tab-btn" id="tab-cache-btn" type="button" title="LLM 请求与缓存分析（cache.analytics.v1）">缓存</button>
+      <button class="tab-btn" id="tab-debug-btn" type="button" title="与 aicli /debug 命令一致的状态文档快照">调试</button>
+      <button class="tab-btn" id="tab-about-btn" type="button" title="关于 aicli micro web client">关于</button>
     </div>
 
     <div id="tab-main" class="tab-panel active">
@@ -408,6 +415,31 @@
       </div>
       <div id="cache-overview" class="cache-overview"><div class="cache-empty">加载中…</div></div>
       <div id="cache-requests" class="cache-requests"><div class="cache-empty">加载中…</div></div>
+    </div>
+    <div id="tab-debug" class="tab-panel">
+      <div class="debug-toolbar">
+        <h2 class="debug-title">调试</h2>
+        <span class="debug-meta" id="debug-meta">未加载</span>
+        <span class="config-toolbar-spacer"></span>
+        <a class="debug-link" id="debug-json-link" href="/web/api/status" target="_blank" rel="noopener" title="打开原始 JSON 状态快照">JSON 快照</a>
+        <button id="debug-refresh-btn" type="button" title="重新拉取状态文档">⟳ 刷新</button>
+      </div>
+      <pre id="debug-output" class="debug-output">加载中…</pre>
+    </div>
+
+    <div id="tab-about" class="tab-panel">
+      <div class="about-panel">
+        <h2 class="about-name">aicli micro web client</h2>
+        <p class="about-desc">aicli 本地会话的浏览器端微型客户端：仅监听回环地址，与终端 TUI 共享同一会话与渲染器状态。</p>
+        <dl class="about-facts">
+          <dt>状态文档</dt>
+          <dd>「调试」页签展示的内容与 <code>aicli /debug</code> 命令一致（<code>GET /web/api/status?format=text</code>）。</dd>
+          <dt>页签</dt>
+          <dd>对话 / 日志 / 配置 / 缓存 / 调试 / 关于</dd>
+          <dt>端点索引</dt>
+          <dd><a href="/debug/endpoints" target="_blank" rel="noopener">/debug/endpoints</a></dd>
+        </dl>
+      </div>
     </div>
   </div>
 </div>

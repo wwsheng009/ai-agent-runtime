@@ -4,6 +4,7 @@
 import { refreshScreen } from "./chat.js";
 import { loadConfigAdmin } from "./config-admin.js";
 import { loadCacheAnalytics, refreshCacheAnalytics } from "./cache.js";
+import { loadDebugInfo, refreshDebugInfo } from "./debug.js";
 
 var tabMainBtn = document.getElementById("tab-main-btn");
 var tabLogBtn = document.getElementById("tab-log-btn");
@@ -42,25 +43,38 @@ var tabConfigBtn = document.getElementById("tab-config-btn");
 var tabConfigEl = document.getElementById("tab-config");
 var tabCacheBtn = document.getElementById("tab-cache-btn");
 var tabCacheEl = document.getElementById("tab-cache");
+var tabDebugBtn = document.getElementById("tab-debug-btn");
+var tabDebugEl = document.getElementById("tab-debug");
+var tabAboutBtn = document.getElementById("tab-about-btn");
+var tabAboutEl = document.getElementById("tab-about");
 
 function activateTab(tabName) {
   var isMain = tabName === "main";
   var isLog = tabName === "log";
   var isConfig = tabName === "config";
   var isCache = tabName === "cache";
+  var isDebug = tabName === "debug";
+  var isAbout = tabName === "about";
   tabMainBtn.classList.toggle("active", isMain);
   tabLogBtn.classList.toggle("active", isLog);
   if (tabConfigBtn) { tabConfigBtn.classList.toggle("active", isConfig); }
   if (tabCacheBtn) { tabCacheBtn.classList.toggle("active", isCache); }
+  if (tabDebugBtn) { tabDebugBtn.classList.toggle("active", isDebug); }
+  if (tabAboutBtn) { tabAboutBtn.classList.toggle("active", isAbout); }
   tabMainEl.classList.toggle("active", isMain);
   tabLogEl.classList.toggle("active", isLog);
   if (tabConfigEl) { tabConfigEl.classList.toggle("active", isConfig); }
   if (tabCacheEl) { tabCacheEl.classList.toggle("active", isCache); }
+  if (tabDebugEl) { tabDebugEl.classList.toggle("active", isDebug); }
+  if (tabAboutEl) { tabAboutEl.classList.toggle("active", isAbout); }
   if (isMain) { refreshScreen(); }
   if (isConfig) { loadConfigAdmin(); }
   // 会话感知按需拉取：cache.js 内部对比已渲染数据与当前会话 id，仅在首次进入、
   // 会话变化时重拉；同会话重复切页签不重复发请求（页内更新由 SSE 增量刷新兜底）。
   if (isCache) { loadCacheAnalytics(); }
+  // 调试页签的快照是拉取时刻的后端状态（无 SSE 增量），每次进入都重拉一次。
+  if (isDebug) { loadDebugInfo(); }
+  // 关于页签为静态内容，无需拉取。
 }
 
 // ---- 快捷键帮助面板切换 ----
@@ -84,8 +98,12 @@ export function initTabs() {
   tabLogBtn.addEventListener("click", function () { activateTab("log"); });
   if (tabConfigBtn) { tabConfigBtn.addEventListener("click", function () { activateTab("config"); }); }
   if (tabCacheBtn) { tabCacheBtn.addEventListener("click", function () { activateTab("cache"); }); }
+  if (tabDebugBtn) { tabDebugBtn.addEventListener("click", function () { activateTab("debug"); }); }
+  if (tabAboutBtn) { tabAboutBtn.addEventListener("click", function () { activateTab("about"); }); }
   var cacheRefreshBtn = document.getElementById("cache-refresh-btn");
   if (cacheRefreshBtn) { cacheRefreshBtn.addEventListener("click", function () { refreshCacheAnalytics(); }); }
+  var debugRefreshBtn = document.getElementById("debug-refresh-btn");
+  if (debugRefreshBtn) { debugRefreshBtn.addEventListener("click", function () { refreshDebugInfo(); }); }
 }
 
 export function initTheme() {

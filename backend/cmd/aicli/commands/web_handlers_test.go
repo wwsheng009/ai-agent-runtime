@@ -113,6 +113,94 @@ func TestHandleChatWebPage(t *testing.T) {
 	}
 }
 
+// TestHandleChatWebPage_HeaderLayout 锁定顶栏重排：左侧工具/状态簇（折叠会话列表、
+// 主题切换、连接/轮次/发送状态）在前，会话标题 + ID 居中块在后，右侧留等宽占位。
+func TestHandleChatWebPage_HeaderLayout(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, ChatWebPath, nil)
+	rec := httptest.NewRecorder()
+
+	HandleChatWebPage(rec, req)
+
+	body := rec.Body.String()
+	leftIdx := strings.Index(body, `class="header-left"`)
+	sessionIdx := strings.Index(body, `id="header-session"`)
+	rightIdx := strings.Index(body, `class="header-right"`)
+	if leftIdx < 0 || sessionIdx < 0 || rightIdx < 0 {
+		t.Fatalf("header layout elements missing: left=%d session=%d right=%d", leftIdx, sessionIdx, rightIdx)
+	}
+	if !(leftIdx < sessionIdx && sessionIdx < rightIdx) {
+		t.Fatalf("header order = left:%d session:%d right:%d, want left < session < right", leftIdx, sessionIdx, rightIdx)
+	}
+	for _, id := range []string{"sidebar-toggle", "theme-toggle", "connection-status", "turn-status", "send-status"} {
+		if !strings.Contains(body, `id="`+id+`"`) {
+			t.Fatalf("page body missing header element %q", id)
+		}
+	}
+}
+
+// TestHandleChatWebPage_Tabs 锁定页签集合：对话 / 日志 / 配置 / 缓存 / 调试 / 关于。
+// 「调试」页签承载与 aicli /debug 一致的「状态文档」，「关于」页签展示客户端标识。
+func TestHandleChatWebPage_Tabs(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, ChatWebPath, nil)
+	rec := httptest.NewRecorder()
+
+	HandleChatWebPage(rec, req)
+
+	body := rec.Body.String()
+	for _, id := range []string{"tab-main-btn", "tab-log-btn", "tab-config-btn", "tab-cache-btn", "tab-debug-btn", "tab-about-btn"} {
+		if !strings.Contains(body, `id="`+id+`"`) {
+			t.Fatalf("page body missing tab button %q", id)
+		}
+	}
+	for _, id := range []string{"tab-main", "tab-log", "tab-config", "tab-cache", "tab-debug", "tab-about"} {
+		if !strings.Contains(body, `id="`+id+`"`) {
+			t.Fatalf("page body missing tab panel %q", id)
+		}
+	}
+	// 按钮与面板同序：调试在缓存之后、关于在调试之后，避免新的页签插错位置。
+	debugBtnIdx := strings.Index(body, `id="tab-debug-btn"`)
+	aboutBtnIdx := strings.Index(body, `id="tab-about-btn"`)
+	cacheBtnIdx := strings.Index(body, `id="tab-cache-btn"`)
+	if !(cacheBtnIdx < debugBtnIdx && debugBtnIdx < aboutBtnIdx) {
+		t.Fatalf("tab button order = cache:%d debug:%d about:%d, want cache < debug < about", cacheBtnIdx, debugBtnIdx, aboutBtnIdx)
+	}
+	// 调试页签：文档容器 + 刷新入口（数据源由 debug.js 固定为 /web/api/status?format=text）。
+	for _, id := range []string{"debug-output", "debug-refresh-btn", "debug-meta"} {
+		if !strings.Contains(body, `id="`+id+`"`) {
+			t.Fatalf("debug tab missing element %q", id)
+		}
+	}
+	// 关于页签：客户端名必须出现在关于面板内（顶栏已在重排中移除该标题）。
+	aboutIdx := strings.Index(body, `id="tab-about"`)
+	nameIdx := strings.Index(body[aboutIdx:], "aicli micro web client")
+	if aboutIdx < 0 || nameIdx < 0 {
+		t.Fatalf("about tab missing client name: panel=%d name=%d", aboutIdx, nameIdx)
+	}
+	if debugBtnIdx > aboutIdx {
+		t.Fatalf("about panel must follow the debug panel: debug-btn=%d about=%d", debugBtnIdx, aboutIdx)
+	}
+}
+
+// TestHandleChatWebPage_DebugModule 验证调试页签的前端模块随 go:embed 发布，
+// 且数据源固定为 /debug 状态文档端点（?format=text）而非其它快照。
+func TestHandleChatWebPage_DebugModule(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, ChatWebPath+"js/debug.js", nil)
+	rec := httptest.NewRecorder()
+
+	HandleChatWebPage(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/javascript") {
+		t.Fatalf("Content-Type = %q, want text/javascript", ct)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "/web/api/status?format=text") {
+		t.Fatal("debug.js must fetch /web/api/status?format=text")
+	}
+}
+
 func TestHandleChatWebPage_MethodNotAllowed(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, ChatWebPath, nil)
 	rec := httptest.NewRecorder()
@@ -196,6 +284,24 @@ func TestHandleChatWebAPIStatus_Text(t *testing.T) {
 	}
 	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/plain") {
 		t.Fatalf("Content-Type = %q, want text/plain", ct)
+	}
+}
+
+// TestHandleChatWebAPIStatus_TextIsDebugDocument 锁定调试页签的数据源与 aicli /debug
+// 同源：?format=text 返回 buildChatDebugDisplayDocument 的纯文本（TUI 覆盖层渲染的
+// 同一份文档），而不是另造一份摘要。
+func TestHandleChatWebAPIStatus_TextIsDebugDocument(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, ChatWebAPIStatusPath+"?format=text", nil)
+	rec := httptest.NewRecorder()
+
+	HandleChatWebAPIStatus(rec, req)
+
+	got := rec.Body.String()
+	if want := BuildChatDebugDisplayText(); got != want {
+		t.Fatalf("status text = %q, want BuildChatDebugDisplayText() = %q", got, want)
+	}
+	if strings.TrimSpace(got) == "" {
+		t.Fatal("debug status text is empty, want the /debug document")
 	}
 }
 

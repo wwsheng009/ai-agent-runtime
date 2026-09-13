@@ -32,6 +32,7 @@ aicli chat --pprof
 | `GET /web/api/config` | `{ config_path, default_provider, chat: {}, providers: [...] }`，provider 对象需含 `name/protocol/base_url/enabled/api_key_set/api_key_source/api_key_masked/models/default_model` |
 | `GET /web/api/sessions` | `{ sessions: [] }` |
 | `GET /web/api/screen` | 任意 JSON |
+| `GET /web/api/status?format=text` | 纯文本（调试页签状态文档，与 `aicli /debug` 内容一致；桩可为任意多行文本） |
 | 其余 `/web/api/*` | 统一返回 `{ status: "ok" }`（POST 类操作直接成功） |
 
 注意事项：
@@ -45,7 +46,14 @@ aicli chat --pprof
 
 ### 2.1 全局
 
-- [ ] 三个页签（对话 / 日志 / 配置）切换正常，`«` 折叠侧栏、`◐` 主题切换生效。
+- [ ] 六个页签（对话 / 日志 / 配置 / 缓存 / 调试 / 关于）切换正常，`«` 折叠侧栏、`◐` 主题切换生效；窄屏下页签可换行且按钮不被压得过窄。
+- [ ] **调试页签**：进入时拉取 `GET /web/api/status?format=text` 并原样展示状态文档（与 `aicli /debug` 命令显示的内容一致），
+      等宽字体、可横向/纵向滚动；工具栏「⟳ 刷新」重新拉取，「JSON 快照」链接另开 `/web/api/status` 原始 JSON；
+      后端不可用时显示"加载失败：…"且不残留旧内容。
+- [ ] **关于页签**：显示客户端名 `aicli micro web client`、一行说明与页签清单/端点链接。
+- [ ] 顶栏布局：最左侧依次为 `☰`（折叠会话列表）、主题切换图标、连接状态、轮次状态、
+      发送瞬态提示；会话标题与会话 ID 居中显示（窗口缩放/侧栏折叠后仍保持居中，
+      超长文本按省略号截断且不撑破顶栏）。
 - [ ] SSE 断连时顶部显示"已断开，重连中…"，恢复后消失。
 - [ ] 顶栏显示当前会话标题与会话 ID：初始（无会话）显示"未选择会话"；切换会话、
       新建会话、重命名当前会话、刷新列表后均同步更新；长标题/长 ID 截断省略，
