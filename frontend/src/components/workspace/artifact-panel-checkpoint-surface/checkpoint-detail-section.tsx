@@ -57,7 +57,7 @@ export function ArtifactPanelCheckpointDetailSection({
   selectedCheckpointFilePath,
 }: ArtifactPanelCheckpointDetailSectionProps) {
   return (
-    <section className="min-h-0 overflow-hidden rounded-[0.95rem] border border-white/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(255,255,255,0.02))]">
+    <section className="min-h-0 overflow-hidden rounded-panel-lg border border-white/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(255,255,255,0.02))]">
       {selectedCheckpoint ? (
         <div className="flex h-full min-h-0 flex-col">
           <div className="border-b border-white/8 px-3.5 py-3.5">
@@ -146,13 +146,13 @@ export function ArtifactPanelCheckpointDetailSection({
             <div className="grid min-h-full gap-3">
               <div className="space-y-3">
                 {checkpointDetailsError ? (
-                  <div className="rounded-[0.85rem] border border-accent-orange/18 bg-accent-orange/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
+                  <div className="rounded-card-lg border border-accent-orange/18 bg-accent-orange/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
                     {checkpointDetailsError}
                   </div>
                 ) : null}
 
                 {checkpointConversationSummary.length > 0 ? (
-                  <div className="rounded-[0.9rem] border border-white/8 bg-white/4 p-3.5">
+                  <div className="rounded-panel border border-white/8 bg-white/4 p-3.5">
                     <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-muted-foreground">
                       <ScrollTextIcon size={14} />
                       Conversation snapshot
@@ -177,7 +177,7 @@ export function ArtifactPanelCheckpointDetailSection({
                 ) : null}
 
                 {checkpointPreview?.preview && checkpointPreview.preview.length > 0 ? (
-                  <div className="rounded-[0.9rem] border border-white/8 bg-white/4 p-3.5">
+                  <div className="rounded-panel border border-white/8 bg-white/4 p-3.5">
                     <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-muted-foreground">
                       <HistoryIcon size={14} />
                       Preview summary
@@ -198,7 +198,7 @@ export function ArtifactPanelCheckpointDetailSection({
                   </div>
                 ) : null}
 
-                <div className="overflow-hidden rounded-[0.9rem] border border-white/8 bg-black/20">
+                <div className="overflow-hidden rounded-panel border border-white/8 bg-black/20">
                   <div className="flex items-center justify-between gap-3 border-b border-white/8 px-3 py-2.5">
                     <div>
                       <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
@@ -226,7 +226,7 @@ export function ArtifactPanelCheckpointDetailSection({
               </div>
 
               <div className="space-y-3">
-                <div className="rounded-[0.9rem] border border-white/8 bg-white/4 p-3.5">
+                <div className="rounded-panel border border-white/8 bg-white/4 p-3.5">
                   <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
                     Snapshot metadata
                   </div>
@@ -252,7 +252,7 @@ export function ArtifactPanelCheckpointDetailSection({
                   </div>
                 </div>
 
-                <div className="rounded-[0.9rem] border border-white/8 bg-white/4 p-3.5">
+                <div className="rounded-panel border border-white/8 bg-white/4 p-3.5">
                   <div className="flex items-center justify-between gap-3">
                     <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
                       Changed files
@@ -292,7 +292,7 @@ export function ArtifactPanelCheckpointDetailSection({
                               </div>
                               <span
                                 className={cn(
-                                  "rounded-[0.65rem] border px-2 py-0.5 app-text-10 uppercase tracking-[0.14em]",
+                                  "rounded-control border px-2 py-0.5 app-text-10 uppercase tracking-[0.14em]",
                                   isActive
                                     ? "border-accent-teal/25 bg-accent-teal/10 text-accent-teal"
                                     : "border-white/10 bg-black/20 text-muted-foreground",
@@ -318,7 +318,7 @@ export function ArtifactPanelCheckpointDetailSection({
       ) : (
         <div className="flex h-full items-center justify-center px-5 py-8">
           <div className="max-w-sm text-center">
-            <div className="mx-auto inline-flex size-10 items-center justify-center rounded-[0.8rem] border border-white/8 bg-white/[0.04] text-muted-foreground">
+            <div className="mx-auto inline-flex size-10 items-center justify-center rounded-card border border-white/8 bg-white/[0.04] text-muted-foreground">
               <HistoryIcon size={18} />
             </div>
             <div className="mt-3 text-sm font-semibold">No checkpoint selected</div>

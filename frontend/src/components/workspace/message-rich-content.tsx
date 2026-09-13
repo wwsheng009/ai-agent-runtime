@@ -64,7 +64,7 @@ export function MessageRichSegment({
         aria-describedby={descriptionId}
         aria-labelledby={titleId}
         className={cn(
-          "mt-2 overflow-hidden rounded-[0.85rem] border p-3",
+          "mt-2 overflow-hidden rounded-card-lg border p-3",
           isFailed
             ? "border-accent-gold/16 bg-[linear-gradient(180deg,rgba(240,199,123,0.08),rgba(240,199,123,0.03))]"
             : "border-border bg-surface-softer",
@@ -74,7 +74,7 @@ export function MessageRichSegment({
         <div className="flex items-start gap-3">
           <div
             className={cn(
-              "inline-flex size-10 shrink-0 items-center justify-center rounded-[0.85rem] border",
+              "inline-flex size-10 shrink-0 items-center justify-center rounded-card-lg border",
               isFailed
                 ? "border-accent-gold/24 bg-accent-gold/12 text-accent-gold"
                 : "border-accent-teal/18 bg-accent-teal/10 text-accent-teal",
@@ -117,7 +117,7 @@ export function MessageRichSegment({
               </div>
             )}
             {segment.errorMessage ? (
-              <div className="mt-2.5 rounded-[0.7rem] border border-accent-gold/16 bg-accent-gold/8 px-3 py-2 app-text-11 text-accent-gold">
+              <div className="mt-2.5 rounded-field border border-accent-gold/16 bg-accent-gold/8 px-3 py-2 app-text-11 text-accent-gold">
                 {segment.errorMessage}
               </div>
             ) : null}
@@ -131,7 +131,7 @@ export function MessageRichSegment({
     const isClickable = Boolean(segment.artifactId && onSelectArtifact);
 
     return (
-      <figure className="mt-2 overflow-hidden rounded-[0.8rem] border border-border bg-surface-softer">
+      <figure className="mt-2 overflow-hidden rounded-card border border-border bg-surface-softer">
         <button
           type="button"
           onClick={() => {
@@ -173,7 +173,7 @@ export function MessageRichSegment({
     return (
       <section
         aria-labelledby={titleId}
-        className="rounded-[0.8rem] border border-border bg-surface-softer p-3"
+        className="rounded-card border border-border bg-surface-softer p-3"
       >
         <div
           className="mb-2 app-text-10 uppercase tracking-[0.14em] text-muted-foreground"
@@ -185,7 +185,7 @@ export function MessageRichSegment({
           {segment.items.map((item) => (
             <div
               key={`${segment.title}-${item.label}`}
-              className="rounded-[0.7rem] border border-border bg-surface-solid px-3 py-2.5"
+              className="rounded-field border border-border bg-surface-solid px-3 py-2.5"
             >
               <dt className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                 {item.label}
@@ -211,7 +211,7 @@ export function MessageRichSegment({
     return (
       <section
         aria-labelledby={titleId}
-        className="rounded-[0.8rem] border border-border bg-surface-softer p-3"
+        className="rounded-card border border-border bg-surface-softer p-3"
       >
         <div
           className="mb-2 app-text-10 uppercase tracking-[0.14em] text-muted-foreground"
@@ -225,7 +225,7 @@ export function MessageRichSegment({
               key={`${segment.title}-${item}`}
               className="app-chat-copy flex items-start gap-3 text-foreground"
             >
-              <span className="mt-0.5 inline-flex size-[1.125rem] shrink-0 items-center justify-center rounded-[0.65rem] border border-accent-teal/20 bg-accent-teal/10 text-accent-teal">
+              <span className="mt-0.5 inline-flex size-[1.125rem] shrink-0 items-center justify-center rounded-control border border-accent-teal/20 bg-accent-teal/10 text-accent-teal">
                 <CheckIcon size={12} />
               </span>
               <span>{item}</span>
@@ -263,14 +263,14 @@ export function MessageRichSegment({
       aria-describedby={descriptionId}
       aria-labelledby={titleId}
       className={cn(
-        "flex items-start gap-3 rounded-[0.8rem] border px-3 py-3",
+        "flex items-start gap-3 rounded-card border px-3 py-3",
         toneStyles.wrapper,
       )}
       role="note"
     >
       <div
         className={cn(
-          "inline-flex size-7 shrink-0 items-center justify-center rounded-[0.7rem] border",
+          "inline-flex size-7 shrink-0 items-center justify-center rounded-field border",
           toneStyles.iconClass,
         )}
       >
@@ -309,7 +309,7 @@ export function MessageRelatedArtifacts({
     <section
       aria-describedby={descriptionId}
       aria-labelledby={titleId}
-      className="mt-3 rounded-[0.8rem] border border-border bg-surface-softer p-3"
+      className="mt-3 rounded-card border border-border bg-surface-softer p-3"
     >
       <button
         type="button"
@@ -351,7 +351,7 @@ export function MessageRelatedArtifacts({
                   aria-describedby={`${baseId}-${artifact.id}-summary`}
                   type="button"
                   onClick={() => onSelectArtifact(artifact.id)}
-                  className="flex w-full items-center justify-between gap-3 rounded-[0.7rem] border border-border bg-transparent px-3 py-2.5 text-left transition hover:border-border-strong hover:bg-surface-soft"
+                  className="flex w-full items-center justify-between gap-3 rounded-field border border-border bg-transparent px-3 py-2.5 text-left transition hover:border-border-strong hover:bg-surface-soft"
                 >
                   <div className="min-w-0">
                     <div className="truncate app-text-13 font-semibold text-foreground">

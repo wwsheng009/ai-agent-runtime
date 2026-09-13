@@ -69,7 +69,7 @@ export default function App() {
 function AppRouteFallback() {
   return (
     <div className="flex min-h-screen items-center justify-center [background:var(--workspace-shell-bg)] px-4 text-foreground">
-      <div className="rounded-[0.9rem] border border-border bg-surface-softer px-4 py-3 text-sm text-muted-foreground">
+      <div className="rounded-panel border border-border bg-surface-softer px-4 py-3 text-sm text-muted-foreground">
         正在加载页面…
       </div>
     </div>

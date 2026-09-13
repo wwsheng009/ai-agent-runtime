@@ -44,7 +44,7 @@ export function DispatchTeamList({
           <label
             key={`dispatch-${team.id}`}
             className={cn(
-              "flex cursor-pointer items-center justify-between gap-3 rounded-[0.8rem] border px-3 py-2.5 transition",
+              "flex cursor-pointer items-center justify-between gap-3 rounded-card border px-3 py-2.5 transition",
               checked
                 ? "border-accent-gold/24 bg-accent-gold/8"
                 : "border-white/8 bg-white/4 hover:border-white/14 hover:bg-white/7",

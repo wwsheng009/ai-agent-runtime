@@ -37,7 +37,7 @@ export function DialogOverlay({
 
 // eslint-disable-next-line react-refresh/only-export-components
 export const dialogPanelVariants = cva(
-  "flex max-h-[calc(100vh-1.5rem)] w-full flex-col overflow-hidden rounded-[0.9rem] border border-border [background:var(--dialog-bg)]",
+  "flex max-h-[calc(100vh-1.5rem)] w-full flex-col overflow-hidden rounded-panel border border-border [background:var(--dialog-bg)]",
   {
     variants: {
       elevation: {

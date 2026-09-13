@@ -36,7 +36,7 @@ export function TraceSidebar({ trace, loading, error, onClose }: {
             {t("loading")}
           </div>
         ) : error ? (
-          <div role="alert" className="rounded-[0.9rem] border border-analytics-danger-border bg-analytics-danger-soft px-3 py-2.5 text-analytics-danger">
+          <div role="alert" className="rounded-panel border border-analytics-danger-border bg-analytics-danger-soft px-3 py-2.5 text-analytics-danger">
             {t("loadError")}: {error}
           </div>
         ) : trace ? (
@@ -54,7 +54,7 @@ export function TraceSidebar({ trace, loading, error, onClose }: {
             </div>
 
             {trace.produced_by ? (
-              <div className="rounded-[0.9rem] border border-border p-3">
+              <div className="rounded-panel border border-border p-3">
                 <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">{t("cache.trace.producedBy")}</div>
                 <div className="mt-1 break-all font-mono text-xs">{trace.produced_by.llm_request_id}</div>
                 <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
@@ -81,7 +81,7 @@ export function TraceSidebar({ trace, loading, error, onClose }: {
               ) : (
                 <ul className="mt-1 flex flex-col gap-1.5">
                   {(trace.consumed_by ?? []).map((consumer) => (
-                    <li key={`${consumer.llm_request_id}-${consumer.step ?? 0}`} className="flex items-center justify-between gap-2 rounded-[0.7rem] border border-border px-2.5 py-1.5 text-xs">
+                    <li key={`${consumer.llm_request_id}-${consumer.step ?? 0}`} className="flex items-center justify-between gap-2 rounded-field border border-border px-2.5 py-1.5 text-xs">
                       <span className="min-w-0 break-all font-mono">{consumer.llm_request_id}</span>
                       <span className="shrink-0 tabular-nums text-muted-foreground">
                         {consumer.cache_status ? t(cacheStatusKey(consumer.cache_status)) : ""}
@@ -93,7 +93,7 @@ export function TraceSidebar({ trace, loading, error, onClose }: {
               )}
             </div>
 
-            <div className="rounded-[0.9rem] border border-border p-3 text-xs">
+            <div className="rounded-panel border border-border p-3 text-xs">
               <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">{t("cache.trace.neighbors")}</div>
               <div className="mt-1.5 flex flex-col gap-1">
                 <div className="break-all"><span className="text-muted-foreground">{t("cache.trace.prev")}: </span><span className="font-mono">{trace.neighbors.prev_message_id || "-"}</span></div>

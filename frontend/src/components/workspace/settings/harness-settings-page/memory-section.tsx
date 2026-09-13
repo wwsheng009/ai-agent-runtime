@@ -118,7 +118,7 @@ export function HarnessMemorySection({
               {memoryNotes.map((note) => (
                 <div
                   key={note.id}
-                  className="rounded-[0.85rem] border border-border bg-surface-softer px-3 py-2.5"
+                  className="rounded-card-lg border border-border bg-surface-softer px-3 py-2.5"
                 >
                   <p className="text-sm leading-6 text-foreground">
                     {note.text}

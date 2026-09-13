@@ -66,7 +66,7 @@ export function SkillsSection() {
           {skillColumns.map((column, index) => (
             <div
               key={column.title}
-              className="rounded-[1.8rem] border border-white/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(255,255,255,0.02))] p-5"
+              className="rounded-hero border border-white/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(255,255,255,0.02))] p-5"
             >
               <div className="flex items-center gap-3">
                 {index === 0 ? (

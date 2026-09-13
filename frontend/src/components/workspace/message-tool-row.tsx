@@ -63,7 +63,7 @@ export function MessageToolRow({ segment }: MessageToolRowProps) {
   return (
     <section
       aria-labelledby={titleId}
-      className="mt-2 overflow-hidden rounded-[0.85rem] border border-border bg-surface-softer"
+      className="mt-2 overflow-hidden rounded-card-lg border border-border bg-surface-softer"
     >
       <div className="flex items-center gap-2.5 px-3 py-2.5">
         <WrenchIcon size={14} className="shrink-0 text-muted-foreground" />
@@ -88,7 +88,7 @@ export function MessageToolRow({ segment }: MessageToolRowProps) {
             aria-controls={panelId}
             aria-expanded={open}
             onClick={() => setOpen((current) => !current)}
-            className="shrink-0 rounded-[0.5rem] p-1 text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
+            className="shrink-0 rounded-chip p-1 text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
           >
             <ChevronDownIcon
               size={14}

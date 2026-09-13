@@ -28,12 +28,12 @@ export function DispatchMonitorOutcomeCompare({
   );
 
   return (
-    <div className="rounded-[0.8rem] border border-white/8 bg-black/15 px-3 py-2.5">
+    <div className="rounded-card border border-white/8 bg-black/15 px-3 py-2.5">
       <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
         Outcome compare
       </div>
       <div className="mt-2.5 grid gap-1.5 text-xs text-muted-foreground">
-        <div className="rounded-[0.7rem] border border-white/8 bg-white/4 px-3 py-2">
+        <div className="rounded-field border border-white/8 bg-white/4 px-3 py-2">
           <div className="app-text-10 uppercase tracking-[0.14em]">
             Final summary coverage
           </div>
@@ -42,7 +42,7 @@ export function DispatchMonitorOutcomeCompare({
             {batchSummary.summaryEligibleTerminalCount}
           </div>
         </div>
-        <div className="rounded-[0.7rem] border border-white/8 bg-white/4 px-3 py-2">
+        <div className="rounded-field border border-white/8 bg-white/4 px-3 py-2">
           <div className="app-text-10 uppercase tracking-[0.14em]">
             Waiting for summary
           </div>
@@ -109,7 +109,7 @@ export function DispatchMonitorOutcomeCompare({
             {terminalRowsWithSummary.slice(0, 3).map((row) => (
               <div
                 key={`dispatch-terminal-${row.teamId}-${row.taskId ?? row.outcomeKey}`}
-                className="rounded-[0.7rem] border border-white/8 bg-black/15 px-3 py-2"
+                className="rounded-field border border-white/8 bg-black/15 px-3 py-2"
               >
                 <div className="flex items-center justify-between gap-3">
                   <div className="text-[11px] font-semibold text-foreground">
@@ -147,7 +147,7 @@ export function DispatchMonitorOutcomeCompare({
               return (
                 <div
                   key={`dispatch-terminal-gap-${row.teamId}-${row.taskId ?? row.outcomeKey}`}
-                  className="rounded-[0.7rem] border border-white/8 bg-black/15 px-3 py-2"
+                  className="rounded-field border border-white/8 bg-black/15 px-3 py-2"
                 >
                   <div className="flex items-center justify-between gap-3">
                     <div className="text-[11px] font-semibold text-foreground">

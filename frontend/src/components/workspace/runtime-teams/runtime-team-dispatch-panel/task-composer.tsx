@@ -146,7 +146,7 @@ export function DispatchTaskComposer({
           {dispatchTaskResults.map((result) => (
             <div
               key={`dispatch-result-${result.teamId}`}
-              className="rounded-[0.8rem] border border-white/8 bg-white/4 px-3 py-2.5"
+              className="rounded-card border border-white/8 bg-white/4 px-3 py-2.5"
             >
               <div className="flex items-center justify-between gap-3">
                 <div className="text-[13px] font-semibold text-foreground">

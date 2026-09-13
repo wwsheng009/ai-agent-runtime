@@ -122,7 +122,7 @@ export function ProviderGroupMembersSection({
 
   return (
     <>
-          <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
+          <div className="rounded-card border border-border bg-surface-softer p-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <div className="text-[13px] font-semibold text-foreground">

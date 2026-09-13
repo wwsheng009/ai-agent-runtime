@@ -45,7 +45,7 @@ export function TeamDetailsPanelRoster({
                   {teammate.capabilities.slice(0, 3).map((capability) => (
                     <span
                       key={capability}
-                      className="rounded-[0.65rem] bg-white/7 px-2 py-0.5 app-text-10 uppercase tracking-[0.12em] text-muted-foreground"
+                      className="rounded-control bg-white/7 px-2 py-0.5 app-text-10 uppercase tracking-[0.12em] text-muted-foreground"
                     >
                       {capability}
                     </span>

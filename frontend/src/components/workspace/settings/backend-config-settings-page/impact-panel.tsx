@@ -22,7 +22,7 @@ export function ImpactStat({
   value: string;
 }) {
   return (
-    <div className="rounded-[0.8rem] border border-border bg-surface-solid px-3 py-2.5">
+    <div className="rounded-card border border-border bg-surface-solid px-3 py-2.5">
       <div className="flex items-center justify-between gap-3">
         <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
           {label}
@@ -57,7 +57,7 @@ export function ImpactPathList({
   );
 
   return (
-    <div className="rounded-[0.8rem] border border-border bg-surface-solid p-3">
+    <div className="rounded-card border border-border bg-surface-solid p-3">
         <div className="flex items-center justify-between gap-3">
         <div className="text-sm font-semibold text-foreground">
           {title}
@@ -71,7 +71,7 @@ export function ImpactPathList({
           {visiblePaths.map((path) => (
             <div
               key={path}
-              className="rounded-[0.7rem] border border-border bg-surface-softer px-2.5 py-1.5 font-mono app-text-12 text-foreground"
+              className="rounded-field border border-border bg-surface-softer px-2.5 py-1.5 font-mono app-text-12 text-foreground"
             >
               {path}
             </div>
@@ -129,7 +129,7 @@ export function RuntimeImpactPanel({
           : t("editor.impact.runtimeDescription")
       }
     >
-      <div className="rounded-[0.95rem] border border-border bg-surface-softer p-3">
+      <div className="rounded-panel-lg border border-border bg-surface-softer p-3">
         <div className="flex flex-wrap items-center justify-between gap-2.5">
           <div className="flex flex-wrap items-center gap-2">
             <Badge>{isPreview ? t("editor.impact.previewBadge") : t("editor.impact.savedBadge")}</Badge>
@@ -214,7 +214,7 @@ export function RuntimeImpactPanel({
         </div>
 
         {warnings.length > 0 ? (
-          <div className="mt-3 rounded-[0.8rem] border border-border bg-surface-solid p-3">
+          <div className="mt-3 rounded-card border border-border bg-surface-solid p-3">
             <div className="text-sm font-semibold text-foreground">
               {t("editor.impact.warningsTitle")}
             </div>
@@ -222,7 +222,7 @@ export function RuntimeImpactPanel({
               {warnings.map((warning, index) => (
                 <div
                   key={`${warning}-${index}`}
-                  className="rounded-[0.7rem] border border-border bg-surface-softer px-2.5 py-2 text-sm leading-6 text-muted-foreground"
+                  className="rounded-field border border-border bg-surface-softer px-2.5 py-2 text-sm leading-6 text-muted-foreground"
                 >
                   {warning}
                 </div>

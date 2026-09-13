@@ -25,7 +25,7 @@ export function SettingsSubsectionCard({
 }: SettingsSubsectionCardProps) {
   return (
     <SettingsPanelCard
-      className={className ?? "rounded-[0.8rem]"}
+      className={className ?? "rounded-card"}
       title={title}
       icon={icon}
       description={description}

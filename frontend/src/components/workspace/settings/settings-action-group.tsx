@@ -67,7 +67,7 @@ export function SettingsIconActionButton({
     <Button
       variant="ghost"
       size="icon"
-      className={cn("size-7 rounded-[0.5rem] p-0", className)}
+      className={cn("size-7 rounded-chip p-0", className)}
       title={label}
       aria-label={label}
       {...props}

@@ -43,7 +43,7 @@ export function HistoryContextMessageCard({
           onClick={() => setExpanded((v) => !v)}
           className="flex w-full items-start gap-3 text-left"
         >
-          <div className="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-[0.7rem] border border-accent-teal/20 bg-accent-teal/10 text-accent-teal">
+          <div className="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-field border border-accent-teal/20 bg-accent-teal/10 text-accent-teal">
             <BotIcon size={14} />
           </div>
           <div className="min-w-0 flex-1">

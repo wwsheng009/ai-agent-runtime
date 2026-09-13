@@ -120,7 +120,7 @@ export function WorkspaceSidebarDirectoriesSection({
       >
         <div className="space-y-2">
           {workspaceDirectoriesLoading || workspaceDirectoriesRefreshing ? (
-            <div className="inline-flex items-center gap-1.5 rounded-[0.65rem] border border-border bg-surface-soft px-2 py-1 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
+            <div className="inline-flex items-center gap-1.5 rounded-control border border-border bg-surface-soft px-2 py-1 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
               <LoaderCircleIcon size={12} className="animate-spin" />
               {t("sidebar.runtimeStats.syncing")}
             </div>
@@ -215,7 +215,7 @@ export function WorkspaceSidebarDirectoriesSection({
                             onClick={() =>
                               void handleCreateSessionInDirectory(group)
                             }
-                            className="rounded-[0.5rem] p-1 text-muted-foreground transition hover:bg-surface-soft hover:text-foreground disabled:opacity-50"
+                            className="rounded-chip p-1 text-muted-foreground transition hover:bg-surface-soft hover:text-foreground disabled:opacity-50"
                           >
                             {isCreating ? (
                               <LoaderCircleIcon
@@ -231,7 +231,7 @@ export function WorkspaceSidebarDirectoriesSection({
                             title={t("sidebar.directories.rename")}
                             aria-label={t("sidebar.directories.rename")}
                             onClick={() => startDirectoryRename(group)}
-                            className="rounded-[0.5rem] p-1 text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
+                            className="rounded-chip p-1 text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
                           >
                             <PencilIcon size={12} />
                           </button>
@@ -247,7 +247,7 @@ export function WorkspaceSidebarDirectoriesSection({
                                 sessionCount: group.sessions.length,
                               })
                             }
-                            className="rounded-[0.5rem] p-1 text-muted-foreground transition hover:bg-surface-soft hover:text-accent-orange"
+                            className="rounded-chip p-1 text-muted-foreground transition hover:bg-surface-soft hover:text-accent-orange"
                           >
                             <TrashIcon size={12} />
                           </button>
@@ -321,7 +321,7 @@ export function WorkspaceSidebarDirectoriesSection({
                           );
                         })}
                         {group.sessions.length === 0 ? (
-                          <div className="rounded-[0.8rem] border border-dashed border-border px-3 py-2 text-sm leading-6 text-muted-foreground">
+                          <div className="rounded-card border border-dashed border-border px-3 py-2 text-sm leading-6 text-muted-foreground">
                             {t("sidebar.emptySessions.default")}
                           </div>
                         ) : null}
@@ -332,7 +332,7 @@ export function WorkspaceSidebarDirectoriesSection({
               })}
             </div>
           ) : (
-            <div className="rounded-[0.8rem] border border-dashed border-border px-3 py-3 text-sm leading-6 text-muted-foreground">
+            <div className="rounded-card border border-dashed border-border px-3 py-3 text-sm leading-6 text-muted-foreground">
               {t("sidebar.directories.empty")}
             </div>
           )}

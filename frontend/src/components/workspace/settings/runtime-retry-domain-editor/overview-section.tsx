@@ -62,7 +62,7 @@ export function RuntimeRetryOverviewSection({
         }
       >
         <div className="grid gap-3 xl:grid-cols-[11rem_minmax(0,1fr)_minmax(0,1fr)]">
-          <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
+          <div className="rounded-card border border-border bg-surface-softer p-3">
             <div className="text-sm font-semibold text-foreground">
               retry.enabled
             </div>

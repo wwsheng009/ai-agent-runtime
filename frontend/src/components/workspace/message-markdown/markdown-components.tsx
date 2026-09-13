@@ -61,7 +61,7 @@ export function createMarkdownComponents(streaming: boolean): Components {
   return {
     a: ({ children, href }) => renderMarkdownLink(children, href),
     blockquote: ({ children }) => (
-      <blockquote className="my-4 rounded-r-[0.8rem] border-l-2 border-accent-secondary/45 bg-surface-solid px-4 py-2.5 text-muted-foreground">
+      <blockquote className="my-4 rounded-r-card border-l-2 border-accent-secondary/45 bg-surface-solid px-4 py-2.5 text-muted-foreground">
         {children}
       </blockquote>
     ),
@@ -104,7 +104,7 @@ export function createMarkdownComponents(streaming: boolean): Components {
     img: ({ alt, src }) => (
       <img
         alt={alt ?? ""}
-        className="my-4 max-h-[24rem] max-w-full rounded-[0.8rem] border border-border object-contain"
+        className="my-4 max-h-[24rem] max-w-full rounded-card border border-border object-contain"
         loading="lazy"
         src={src}
       />
@@ -133,7 +133,7 @@ export function createMarkdownComponents(streaming: boolean): Components {
     ),
     pre: ({ children }) => <>{children}</>,
     table: ({ children }) => (
-      <div className="my-4 overflow-x-auto rounded-[0.8rem] border border-border bg-surface-solid">
+      <div className="my-4 overflow-x-auto rounded-card border border-border bg-surface-solid">
         <table className="min-w-full border-collapse text-left app-text-13">
           {children}
         </table>

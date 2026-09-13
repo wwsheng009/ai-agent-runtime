@@ -56,7 +56,7 @@ function ArtifactList({
             onClick={() => onOpenArtifact(artifact.id)}
             title={`${artifact.path}\n${artifact.summary}`}
             className={cn(
-              "w-full rounded-[0.65rem] border px-1.5 py-1 text-left transition",
+              "w-full rounded-control border px-1.5 py-1 text-left transition",
               isActive
                 ? "border-accent-gold/30 bg-accent-gold/8 shadow-[inset_0_1px_0_rgba(240,199,123,0.08)]"
                 : "border-white/8 bg-white/4 hover:border-white/14 hover:bg-white/8",
@@ -66,7 +66,7 @@ function ArtifactList({
               {showImageThumbnail ? (
                 <span
                   className={cn(
-                    "inline-flex h-10 w-10 shrink-0 overflow-hidden rounded-[0.7rem] border",
+                    "inline-flex h-10 w-10 shrink-0 overflow-hidden rounded-field border",
                     category === "evidence"
                       ? "border-accent-teal/18 bg-accent-teal/10"
                       : isActive
@@ -84,7 +84,7 @@ function ArtifactList({
               ) : (
                 <span
                   className={cn(
-                    "inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-[0.7rem] border",
+                    "inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-field border",
                     category === "evidence"
                       ? "border-accent-teal/18 bg-accent-teal/10 text-accent-teal"
                       : isActive
@@ -108,14 +108,14 @@ function ArtifactList({
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
-                    <span className="rounded-[0.5rem] border border-white/10 bg-black/20 px-1 py-0.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
+                    <span className="rounded-chip border border-white/10 bg-black/20 px-1 py-0.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                       {category === "evidence" ? "ev" : "file"}
                     </span>
-                    <span className="rounded-[0.5rem] border border-white/10 bg-black/20 px-1 py-0.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
+                    <span className="rounded-chip border border-white/10 bg-black/20 px-1 py-0.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                       {artifact.kind}
                     </span>
                     {artifact.kind === "image" && artifact.byteCount != null ? (
-                      <span className="rounded-[0.5rem] border border-white/10 bg-black/20 px-1 py-0.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
+                      <span className="rounded-chip border border-white/10 bg-black/20 px-1 py-0.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                         {formatBytes(artifact.byteCount)}
                       </span>
                     ) : artifact.previewHtml ? (
@@ -147,7 +147,7 @@ export function ArtifactPanelArtifactSurface({
 }) {
   return (
     <div className="h-full min-h-0 p-2.5">
-      <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-[0.95rem] border border-white/8 bg-white/[0.035]">
+      <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-panel-lg border border-white/8 bg-white/[0.035]">
         <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-2 py-2">
           {artifacts.length > 0 ? (
             <ArtifactList
@@ -156,7 +156,7 @@ export function ArtifactPanelArtifactSurface({
               selectedArtifactId={selectedArtifactId}
             />
           ) : (
-            <div className="flex h-full items-center justify-center rounded-[0.8rem] border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-muted-foreground">
+            <div className="flex h-full items-center justify-center rounded-card border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-muted-foreground">
               Artifacts appear here as the thread runs.
             </div>
           )}

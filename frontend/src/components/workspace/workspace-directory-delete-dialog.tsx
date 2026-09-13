@@ -88,7 +88,7 @@ export function WorkspaceDirectoryDeleteDialog({
         role="dialog"
         aria-modal="true"
         aria-label={t("sidebar.directories.deleteTitle")}
-        className="w-full max-w-md overflow-hidden rounded-[0.9rem] border border-border [background:var(--dialog-bg)] shadow-[0_12px_36px_rgba(0,0,0,0.22)]"
+        className="w-full max-w-md overflow-hidden rounded-panel border border-border [background:var(--dialog-bg)] shadow-[0_12px_36px_rgba(0,0,0,0.22)]"
       >
         <div className="px-4 py-4">
           <h2 className="text-lg font-semibold tracking-[-0.03em] text-foreground">
@@ -100,7 +100,7 @@ export function WorkspaceDirectoryDeleteDialog({
           <p className="truncate text-xs leading-5 text-muted-foreground" title={directory.fullPath}>
             {directory.fullPath}
           </p>
-          <p className="mt-3 rounded-[0.7rem] border border-border bg-surface-softer px-3 py-2 text-sm leading-6 text-muted-foreground">
+          <p className="mt-3 rounded-field border border-border bg-surface-softer px-3 py-2 text-sm leading-6 text-muted-foreground">
             {t("sidebar.directories.deleteConfirm", { count: sessionCount })}
           </p>
           <p className="mt-2 inline-flex items-center gap-1.5 text-xs leading-5 text-muted-foreground">
@@ -109,7 +109,7 @@ export function WorkspaceDirectoryDeleteDialog({
           </p>
 
           {error ? (
-            <div className="mt-3 rounded-[0.7rem] border border-accent-orange/24 bg-accent-orange/10 px-3 py-2 text-sm leading-6 text-accent-orange">
+            <div className="mt-3 rounded-field border border-accent-orange/24 bg-accent-orange/10 px-3 py-2 text-sm leading-6 text-accent-orange">
               {error}
             </div>
           ) : null}

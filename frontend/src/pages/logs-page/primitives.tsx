@@ -10,7 +10,7 @@ export function LogHeaderBadge({ className, children }: ComponentProps<"span">) 
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-[0.65rem] border border-border bg-surface-soft px-2 py-0.5 app-text-9 font-semibold uppercase tracking-[0.12em] text-muted-foreground",
+        "inline-flex items-center gap-1 rounded-control border border-border bg-surface-soft px-2 py-0.5 app-text-9 font-semibold uppercase tracking-[0.12em] text-muted-foreground",
         className,
       )}
     >
@@ -36,7 +36,7 @@ export function CopyActionButton({
     <Button
       variant="ghost"
       size="sm"
-      className="h-7 rounded-[0.65rem] border border-border bg-black/10 px-2.5 text-muted-foreground hover:bg-black/20 hover:text-foreground"
+      className="h-7 rounded-control border border-border bg-black/10 px-2.5 text-muted-foreground hover:bg-black/20 hover:text-foreground"
       onClick={onClick}
     >
       {copied ? <CheckIcon size={13} /> : <CopyIcon size={13} />}

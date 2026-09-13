@@ -99,7 +99,7 @@ export function HarnessGrantsSection({
               {grants.map((grant) => (
                 <div
                   key={`${grant.tool}:${grant.pattern || ""}:${grant.scope || ""}`}
-                  className="flex items-start justify-between gap-3 rounded-[0.85rem] border border-border bg-surface-softer px-3 py-2.5"
+                  className="flex items-start justify-between gap-3 rounded-card-lg border border-border bg-surface-softer px-3 py-2.5"
                 >
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">

@@ -34,7 +34,7 @@ export function ConfigEditorControlBar({ core }: { core: ConfigEditorCore }) {
   } = core;
 
   return (
-    <div className="sticky top-2 z-20 mt-2.5 rounded-[0.95rem] border border-border bg-surface-softer p-3">
+    <div className="sticky top-2 z-20 mt-2.5 rounded-panel-lg border border-border bg-surface-softer p-3">
       <div className="flex flex-wrap items-center justify-between gap-2.5">
         <div className="flex flex-wrap items-center gap-2">
           <Badge>

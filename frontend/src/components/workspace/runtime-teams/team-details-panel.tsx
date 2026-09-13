@@ -46,7 +46,7 @@ export function TeamDetailsPanel({
   writePathDraft,
 }: TeamDetailsPanelProps) {
   return (
-    <div className="rounded-[0.95rem] border border-white/8 bg-black/20 p-3.5">
+    <div className="rounded-panel-lg border border-white/8 bg-black/20 p-3.5">
       <TeamDetailsPanelSnapshot
         details={details}
         detailsError={detailsError}

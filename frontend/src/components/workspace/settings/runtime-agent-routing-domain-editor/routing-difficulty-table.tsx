@@ -41,7 +41,7 @@ export function RoutingDifficultyTable({
 }) {
   return (
     <>
-      <div className="overflow-hidden rounded-[0.8rem] border border-border bg-surface-softer">
+      <div className="overflow-hidden rounded-card border border-border bg-surface-softer">
         <div className="hidden grid-cols-[10rem_minmax(10rem,1fr)_minmax(12rem,1.2fr)_10rem] gap-3 border-b border-border bg-surface-solid px-3 py-2 text-xs font-semibold text-muted-foreground lg:grid">
           <div>{t("editor.agentRouting.columns.difficulty")}</div>
           <div>{t("editor.agentRouting.columns.provider")}</div>

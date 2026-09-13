@@ -24,7 +24,7 @@ export function ConfigPreviewSection({ core }: { core: ConfigEditorCore }) {
         title={t("editor.preview.title")}
         description={t("editor.preview.description")}
       >
-        <div className="rounded-[0.9rem] border border-border bg-surface-softer p-3">
+        <div className="rounded-panel border border-border bg-surface-softer p-3">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2.5">
             <div className="flex flex-wrap items-center gap-2">
               <SummaryPill

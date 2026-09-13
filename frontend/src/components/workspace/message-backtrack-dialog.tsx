@@ -80,7 +80,7 @@ export function MessageBacktrackDialog({
           <button
             ref={closeRef}
             aria-label="Close backtrack dialog"
-            className="inline-flex size-8 items-center justify-center rounded-[0.7rem] border border-white/10 text-muted-foreground transition hover:bg-white/6 hover:text-foreground"
+            className="inline-flex size-8 items-center justify-center rounded-field border border-white/10 text-muted-foreground transition hover:bg-white/6 hover:text-foreground"
             disabled={state.busy}
             onClick={onClose}
             type="button"
@@ -90,7 +90,7 @@ export function MessageBacktrackDialog({
         </div>
 
         <div className="space-y-4 px-4 py-4">
-          <div className="rounded-[0.85rem] border border-white/8 bg-white/[0.03] px-3.5 py-3">
+          <div className="rounded-card-lg border border-white/8 bg-white/[0.03] px-3.5 py-3">
             <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
               Anchor
               {target ? ` · turn ${target.userTurnIndex}` : null}
@@ -108,7 +108,7 @@ export function MessageBacktrackDialog({
           ) : null}
 
           {preview ? (
-            <div className="grid gap-2 rounded-[0.85rem] border border-white/8 bg-white/[0.03] px-3.5 py-3 text-sm leading-6 text-muted-foreground">
+            <div className="grid gap-2 rounded-card-lg border border-white/8 bg-white/[0.03] px-3.5 py-3 text-sm leading-6 text-muted-foreground">
               <div>
                 Will remove{" "}
                 <span className="text-foreground">
@@ -191,7 +191,7 @@ export function MessageBacktrackDialog({
             </span>
             <textarea
               aria-label="Edit backtrack prompt"
-              className="min-h-[7.5rem] w-full resize-y rounded-[0.85rem] border border-white/10 bg-white/[0.03] px-3 py-2.5 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-accent-gold/35 focus:bg-white/[0.05]"
+              className="min-h-[7.5rem] w-full resize-y rounded-card-lg border border-white/10 bg-white/[0.03] px-3 py-2.5 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-accent-gold/35 focus:bg-white/[0.05]"
               disabled={state.busy}
               onChange={(event) => onEditPromptChange(event.target.value)}
               placeholder="Edit the original user prompt…"
@@ -215,7 +215,7 @@ export function MessageBacktrackDialog({
           </label>
 
           {state.error ? (
-            <div className="rounded-[0.85rem] border border-accent-orange/20 bg-accent-orange/10 px-3 py-2.5 text-sm leading-6 text-foreground">
+            <div className="rounded-card-lg border border-accent-orange/20 bg-accent-orange/10 px-3 py-2.5 text-sm leading-6 text-foreground">
               {state.error}
             </div>
           ) : null}

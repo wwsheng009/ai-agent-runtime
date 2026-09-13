@@ -39,7 +39,7 @@ export function ConfigEditorMenuPanel({ core }: { core: ConfigEditorCore }) {
 
   return (
     <div className="min-w-0 space-y-2.5 lg:sticky lg:top-[8.5rem] lg:self-start">
-      <label className="block rounded-[0.9rem] border border-border bg-surface-softer p-3 lg:hidden">
+      <label className="block rounded-panel border border-border bg-surface-softer p-3 lg:hidden">
         <span className="block text-sm font-semibold text-foreground">
           {t("editor.panels.modeTitle")}
         </span>
@@ -53,7 +53,7 @@ export function ConfigEditorMenuPanel({ core }: { core: ConfigEditorCore }) {
           onChange={(event) => {
             void switchMode(event.target.value as EditorMode);
           }}
-          className="mt-3 h-10 w-full rounded-[0.7rem] border border-border bg-surface-solid px-3 text-sm text-foreground outline-none transition focus:border-accent-primary-border focus:ring-2 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+          className="mt-3 h-10 w-full rounded-field border border-border bg-surface-solid px-3 text-sm text-foreground outline-none transition focus:border-accent-primary-border focus:ring-2 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
         >
           {translatedModeMenuEntries.map((entry) => (
             <option key={entry.mode} value={entry.mode}>

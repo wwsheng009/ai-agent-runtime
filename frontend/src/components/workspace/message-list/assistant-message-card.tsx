@@ -34,7 +34,7 @@ export function AssistantMessageCard({
                 <div className="relative w-full max-w-[48rem]">
                   <div className="overflow-hidden rounded-[1rem] border border-accent-teal/14 bg-[linear-gradient(180deg,rgba(143,208,198,0.08),rgba(143,208,198,0.02))] px-4 py-3.5 shadow-[0_16px_40px_rgba(0,0,0,0.12)]">
                     <div className="flex items-start gap-3">
-                      <div className="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-[0.7rem] border border-accent-teal/20 bg-accent-teal/10 text-accent-teal">
+                      <div className="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-field border border-accent-teal/20 bg-accent-teal/10 text-accent-teal">
                         <BotIcon size={14} />
                       </div>
                       <div className="min-w-0 flex-1">

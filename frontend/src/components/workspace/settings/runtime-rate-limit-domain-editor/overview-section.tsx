@@ -30,7 +30,7 @@ export function RuntimeRateLimitOverviewSection({
   totalPathBurst: number;
 }) {
   return (
-    <div className="rounded-[0.9rem] border border-border bg-surface-softer p-3">
+    <div className="rounded-panel border border-border bg-surface-softer p-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
           <SettingsPanelIcon>
@@ -65,7 +65,7 @@ export function RuntimeRateLimitOverviewSection({
       </div>
 
       <div className="mt-3 grid gap-3 xl:grid-cols-[12rem_minmax(0,1fr)_minmax(0,1fr)]">
-        <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
+        <div className="rounded-card border border-border bg-surface-softer p-3">
           <div className="text-[13px] font-semibold text-foreground">rate_limit.enabled</div>
           <div className="mt-1 text-xs leading-5 text-muted-foreground">
             {t("editor.rateLimit.enabledHelp")}
@@ -90,7 +90,7 @@ export function RuntimeRateLimitOverviewSection({
           </label>
         </div>
 
-        <div className="space-y-3 rounded-[0.8rem] border border-border bg-surface-softer p-3">
+        <div className="space-y-3 rounded-card border border-border bg-surface-softer p-3">
           <div className="text-[13px] font-semibold text-foreground">
             {t("editor.rateLimit.basicConfig")}
           </div>
@@ -124,7 +124,7 @@ export function RuntimeRateLimitOverviewSection({
           </div>
         </div>
 
-        <div className="space-y-3 rounded-[0.8rem] border border-border bg-surface-softer p-3">
+        <div className="space-y-3 rounded-card border border-border bg-surface-softer p-3">
           <div className="text-[13px] font-semibold text-foreground">
             {t("editor.rateLimit.summaryTitle")}
           </div>
@@ -141,7 +141,7 @@ export function RuntimeRateLimitOverviewSection({
       </div>
 
       <div className="mt-3 grid gap-3 xl:grid-cols-2">
-        <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
+        <div className="rounded-card border border-border bg-surface-softer p-3">
           <div className="mb-3 text-[13px] font-semibold text-foreground">
             default_limits
           </div>
@@ -197,7 +197,7 @@ export function RuntimeRateLimitOverviewSection({
           </div>
         </div>
 
-        <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
+        <div className="rounded-card border border-border bg-surface-softer p-3">
           <div className="mb-3 text-[13px] font-semibold text-foreground">
             global_limits
           </div>

@@ -103,7 +103,7 @@ export function MessageComposer({
     transport === "error" || selectedArtifactCount > 0 || isResponding;
 
   return (
-    <div className="rounded-[0.95rem] border border-border [background:var(--workspace-composer-bg)] shadow-[0_8px_24px_rgba(0,0,0,0.18)]">
+    <div className="rounded-panel-lg border border-border [background:var(--workspace-composer-bg)] shadow-[0_8px_24px_rgba(0,0,0,0.18)]">
       {showStatusRow ? (
         <div
           className={cn(

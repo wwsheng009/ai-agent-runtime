@@ -36,7 +36,7 @@ export function DispatchMonitor({
   return (
     <>
       {dispatchTaskResults.length > 0 ? (
-        <div className="rounded-[0.85rem] border border-white/8 bg-white/4 px-3 py-2.5">
+        <div className="rounded-card-lg border border-white/8 bg-white/4 px-3 py-2.5">
           <div className="flex items-center justify-between gap-3">
             <div>
               <div className="text-sm font-semibold text-foreground">
@@ -60,7 +60,7 @@ export function DispatchMonitor({
           </div>
 
           {dispatchMonitorError ? (
-            <div className="mt-2.5 rounded-[0.8rem] border border-accent-orange/18 bg-accent-orange/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
+            <div className="mt-2.5 rounded-card border border-accent-orange/18 bg-accent-orange/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
               {dispatchMonitorError}
             </div>
           ) : null}
@@ -70,12 +70,12 @@ export function DispatchMonitor({
               {Object.entries(dispatchMonitorCounts).map(([status, count]) => (
                 <span
                   key={`dispatch-count-${status}`}
-                  className={cn("rounded-[0.65rem] border px-2 py-0.5", statusTone(status))}
+                  className={cn("rounded-control border px-2 py-0.5", statusTone(status))}
                 >
                   {status}: {count}
                 </span>
               ))}
-              <span className="rounded-[0.65rem] border border-white/10 bg-white/4 px-2 py-0.5">
+              <span className="rounded-control border border-white/10 bg-white/4 px-2 py-0.5">
                 auto refresh:{" "}
                 {dispatchMonitor.some((entry) => !isTerminalDispatchStatus(entry.status))
                   ? "active"
@@ -89,7 +89,7 @@ export function DispatchMonitor({
               dispatchMonitor.map((entry) => (
                 <div
                   key={`dispatch-monitor-${entry.teamId}-${entry.taskId}`}
-                  className="rounded-[0.8rem] border border-white/8 bg-black/20 px-3 py-2.5"
+                  className="rounded-card border border-white/8 bg-black/20 px-3 py-2.5"
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">

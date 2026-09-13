@@ -46,7 +46,7 @@ export function FontSizeControlCard({
       description={description}
       descriptionClassName="text-base"
       headerAside={
-        <div className="rounded-[0.65rem] border border-border bg-black/10 px-2 py-0.5 font-mono app-text-11 text-foreground">
+        <div className="rounded-control border border-border bg-black/10 px-2 py-0.5 font-mono app-text-11 text-foreground">
           {formatFontSizePx(value)}
         </div>
       }
@@ -58,7 +58,7 @@ export function FontSizeControlCard({
           disabled={decrementDisabled}
           onClick={() => updateValue(value - FONT_SIZE_LIMITS.step)}
           className={cn(
-            "inline-flex h-9 w-9 items-center justify-center rounded-[0.7rem] border transition",
+            "inline-flex h-9 w-9 items-center justify-center rounded-field border transition",
             decrementDisabled
               ? "cursor-not-allowed border-border bg-surface-solid text-muted-foreground opacity-50"
               : "border-border bg-surface-solid text-foreground hover:border-border-strong hover:bg-surface-soft",
@@ -80,7 +80,7 @@ export function FontSizeControlCard({
           disabled={incrementDisabled}
           onClick={() => updateValue(value + FONT_SIZE_LIMITS.step)}
           className={cn(
-            "inline-flex h-9 w-9 items-center justify-center rounded-[0.7rem] border transition",
+            "inline-flex h-9 w-9 items-center justify-center rounded-field border transition",
             incrementDisabled
               ? "cursor-not-allowed border-border bg-surface-solid text-muted-foreground opacity-50"
               : "border-border bg-surface-solid text-foreground hover:border-border-strong hover:bg-surface-soft",
@@ -121,7 +121,7 @@ export function FontSizeControlCard({
           onClick={() => updateValue(defaultValue)}
           disabled={value === defaultValue}
           className={cn(
-            "rounded-[0.7rem] border px-3 py-2 text-base transition",
+            "rounded-field border px-3 py-2 text-base transition",
             value === defaultValue
               ? "cursor-not-allowed border-border bg-surface-solid text-muted-foreground opacity-50"
               : "border-border bg-surface-solid text-foreground hover:border-border-strong hover:bg-surface-soft",

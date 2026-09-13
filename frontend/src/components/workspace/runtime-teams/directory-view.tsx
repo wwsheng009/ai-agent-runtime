@@ -100,7 +100,7 @@ export function TeamsDirectoryView({
 }: TeamsDirectoryViewProps) {
   return (
     <div className="grid gap-3 xl:grid-cols-[18rem_minmax(0,1fr)]">
-      <aside className="rounded-[0.95rem] border border-border bg-surface-softer p-2.5">
+      <aside className="rounded-panel-lg border border-border bg-surface-softer p-2.5">
         <div className="mb-2.5 flex items-center justify-between gap-3 px-0.5">
           <div>
             <div className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
@@ -124,7 +124,7 @@ export function TeamsDirectoryView({
                   type="button"
                   onClick={() => setSelectedTeamId(team.id)}
                   className={cn(
-                    "w-full rounded-[0.8rem] border px-3 py-2.5 text-left transition",
+                    "w-full rounded-card border px-3 py-2.5 text-left transition",
                     isActive
                       ? "border-accent-teal/30 bg-accent-teal/10 shadow-[0_0_0_1px_rgba(143,208,198,0.12)]"
                       : "border-border bg-surface-soft hover:border-border-strong hover:bg-surface-soft-hover",
@@ -148,7 +148,7 @@ export function TeamsDirectoryView({
             })}
           </div>
         ) : (
-          <div className="rounded-[0.8rem] border border-dashed border-border px-3 py-3 text-sm leading-6 text-muted-foreground">
+          <div className="rounded-card border border-dashed border-border px-3 py-3 text-sm leading-6 text-muted-foreground">
             No teams available. Switch to `Dispatch` to provision runnable teams.
           </div>
         )}
@@ -198,7 +198,7 @@ export function TeamsDirectoryView({
             />
           </Suspense>
         ) : (
-          <div className="rounded-[0.95rem] border border-dashed border-border bg-surface-softer px-5 py-8 text-center">
+          <div className="rounded-panel-lg border border-dashed border-border bg-surface-softer px-5 py-8 text-center">
             <div className="text-sm font-semibold text-foreground">
               No team selected
             </div>

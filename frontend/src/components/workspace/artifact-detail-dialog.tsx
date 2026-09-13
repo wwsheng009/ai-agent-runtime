@@ -132,7 +132,7 @@ export function ArtifactDetailDialog({
         }
       }}
     >
-      <div className="flex max-h-[calc(100vh-1.5rem)] w-full max-w-[min(90rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-[0.95rem] border border-border [background:var(--dialog-bg)] shadow-[0_18px_48px_rgba(0,0,0,0.28)]">
+      <div className="flex max-h-[calc(100vh-1.5rem)] w-full max-w-[min(90rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-panel-lg border border-border [background:var(--dialog-bg)] shadow-[0_18px_48px_rgba(0,0,0,0.28)]">
 
         <ArtifactDetailHeader
           artifact={artifact}

@@ -23,7 +23,7 @@ export function AnalyticsHeader({ onRefresh, refreshing }: { onRefresh: () => vo
     ? `/usage${listSearch.size > 0 ? `?${listSearch.toString()}` : ""}`
     : "/workspace/chats/new";
   return (
-    <header className="surface-panel relative overflow-hidden rounded-[0.95rem] px-3 py-3 sm:px-4">
+    <header className="surface-panel relative overflow-hidden rounded-panel-lg px-3 py-3 sm:px-4">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(240,199,123,0.18),transparent_28%),radial-gradient(circle_at_right,rgba(103,215,230,0.12),transparent_24%)]" />
       <div className="relative flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="min-w-0 space-y-1.5">
@@ -98,7 +98,7 @@ export function Metric({ label, value, detail, tone }: {
 }) {
   return (
     <div className={cn(
-      "min-w-0 rounded-[0.9rem] border border-border bg-surface-softer px-3 py-3 shadow-[0_12px_34px_rgba(0,0,0,0.08)]",
+      "min-w-0 rounded-panel border border-border bg-surface-softer px-3 py-3 shadow-[0_12px_34px_rgba(0,0,0,0.08)]",
       tone === "warning" && "border-analytics-warning-border bg-analytics-warning-soft",
       tone === "danger" && "border-analytics-danger-border bg-analytics-danger-soft",
     )}>
@@ -123,7 +123,7 @@ export function QualityNotice({ coverage, partial, reasons }: {
   const { t } = useTranslation("usageAnalytics");
   return (
     <div className={cn(
-      "flex items-start gap-2 rounded-[0.9rem] border px-3 py-2.5 text-sm shadow-[0_12px_34px_rgba(0,0,0,0.08)]",
+      "flex items-start gap-2 rounded-panel border px-3 py-2.5 text-sm shadow-[0_12px_34px_rgba(0,0,0,0.08)]",
       partial
         ? "border-analytics-warning-border bg-analytics-warning-soft text-analytics-warning"
         : "border-analytics-success-border bg-analytics-success-soft text-analytics-success",
@@ -158,7 +158,7 @@ export function FilterInput({ label, value, placeholder, onChange, icon, type = 
       <span className="mb-1 block text-xs text-muted-foreground">{label}</span>
       <div className="relative">
         {icon ? <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground">{icon}</span> : null}
-        <input type={type} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} className={cn("h-9 w-full rounded-[0.7rem] border border-border bg-surface-softer px-3 text-sm outline-none transition focus:border-accent-primary-border focus:ring-2 focus:ring-ring", icon && "pl-8")} />
+        <input type={type} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} className={cn("h-9 w-full rounded-field border border-border bg-surface-softer px-3 text-sm outline-none transition focus:border-accent-primary-border focus:ring-2 focus:ring-ring", icon && "pl-8")} />
       </div>
     </label>
   );
@@ -179,7 +179,7 @@ export function FilterSelect({ label, value, options, onChange }: {
         options={options}
         onChange={onChange}
         className="w-full min-w-0 max-w-full"
-        triggerClassName="h-9 w-full min-w-0 max-w-full overflow-hidden rounded-[0.7rem]"
+        triggerClassName="h-9 w-full min-w-0 max-w-full overflow-hidden rounded-field"
         menuClassName="max-w-[min(92vw,560px)]"
         optionClassName="truncate"
       />
@@ -195,7 +195,7 @@ export function UsageAnalyticsChartsFallback() {
       className="grid min-w-0 gap-2 lg:grid-cols-[minmax(0,1.7fr)_minmax(280px,0.8fr)]"
     >
       {[t("charts.trend.title"), t("charts.tokens.title")].map((title) => (
-        <div key={title} className="surface-panel min-h-[260px] rounded-[0.95rem] p-3.5 sm:p-4">
+        <div key={title} className="surface-panel min-h-[260px] rounded-panel-lg p-3.5 sm:p-4">
           <h2 className="text-sm font-semibold">{title}</h2>
           <div className="flex min-h-52 items-center justify-center text-sm text-muted-foreground">
             <RefreshCwIcon size={15} className="mr-2 animate-spin" />

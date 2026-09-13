@@ -74,7 +74,7 @@ export function CaseStudySection() {
           <Link
             key={title}
             to="/workspace"
-            className="group relative overflow-hidden rounded-[1.8rem] border border-border bg-[var(--panel-solid-bg)] p-6 transition hover:-translate-y-1 hover:border-border-strong hover:bg-[var(--panel-solid-hover-bg)]"
+            className="group relative overflow-hidden rounded-hero border border-border bg-[var(--panel-solid-bg)] p-6 transition hover:-translate-y-1 hover:border-border-strong hover:bg-[var(--panel-solid-hover-bg)]"
           >
             <div
               className={cn(

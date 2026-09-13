@@ -30,7 +30,7 @@ export function TeamSelectorList({
             type="button"
             onClick={() => onSelectTeam(team.id)}
             className={cn(
-              "w-full rounded-[0.8rem] border px-3 py-2.5 text-left transition",
+              "w-full rounded-card border px-3 py-2.5 text-left transition",
               isActive
                 ? "border-accent-teal/30 bg-accent-teal/10 shadow-[0_0_0_1px_rgba(143,208,198,0.12)]"
                 : "border-white/8 bg-white/4 hover:border-white/14 hover:bg-white/7",

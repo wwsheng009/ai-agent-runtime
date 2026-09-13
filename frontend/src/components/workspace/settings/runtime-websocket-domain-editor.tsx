@@ -30,7 +30,7 @@ export function RuntimeWebsocketDomainEditor({
 
   return (
     <div className="space-y-3">
-      <div className="rounded-[0.9rem] border border-border bg-surface-softer p-3">
+      <div className="rounded-panel border border-border bg-surface-softer p-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             <SettingsPanelIcon>
@@ -65,7 +65,7 @@ export function RuntimeWebsocketDomainEditor({
         </div>
       </div>
 
-      <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
+      <div className="rounded-card border border-border bg-surface-softer p-3">
         <div className="mb-3 flex items-center justify-between gap-3">
           <div>
             <div className="text-[13px] font-semibold text-foreground">
@@ -88,7 +88,7 @@ export function RuntimeWebsocketDomainEditor({
       </div>
 
       <div className="grid gap-3 xl:grid-cols-2">
-        <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
+        <div className="rounded-card border border-border bg-surface-softer p-3">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
               <div className="text-[13px] font-semibold text-foreground">
@@ -224,7 +224,7 @@ export function RuntimeWebsocketDomainEditor({
           </div>
         </div>
 
-        <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
+        <div className="rounded-card border border-border bg-surface-softer p-3">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
               <div className="text-[13px] font-semibold text-foreground">

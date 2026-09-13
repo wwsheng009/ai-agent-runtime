@@ -141,7 +141,7 @@ export function TeamDetailsPanelMailbox({
         </div>
       </div>
       {mailboxError ? (
-        <div className="mt-3 rounded-[0.8rem] border border-accent-orange/18 bg-accent-orange/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
+        <div className="mt-3 rounded-card border border-accent-orange/18 bg-accent-orange/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
           {mailboxError}
         </div>
       ) : null}
@@ -159,7 +159,7 @@ export function TeamDetailsPanelMailbox({
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
-                  <span className="rounded-[0.65rem] border border-white/10 bg-white/6 px-2 py-0.5 app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
+                  <span className="rounded-control border border-white/10 bg-white/6 px-2 py-0.5 app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
                     {message.kind || "message"}
                   </span>
                   <span

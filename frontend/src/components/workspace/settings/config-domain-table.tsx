@@ -87,12 +87,12 @@ export function ConfigDomainTable<T>({
     "inline-flex size-7 items-center justify-center rounded-[0.6rem] border border-border bg-surface-solid text-muted-foreground transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40";
 
   return (
-    <div className="rounded-[0.9rem] border border-border bg-surface-softer">
+    <div className="rounded-panel border border-border bg-surface-softer">
       <div className="flex flex-col gap-2.5 border-b border-border px-3 py-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             {TitleIcon ? (
-              <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-[0.7rem] border border-border bg-surface-solid text-accent-primary">
+              <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-field border border-border bg-surface-solid text-accent-primary">
                 <TitleIcon size={15} />
               </span>
             ) : null}
@@ -130,7 +130,7 @@ export function ConfigDomainTable<T>({
               }}
               placeholder={t("editor.table.searchPlaceholder")}
               aria-label={t("editor.table.searchPlaceholder")}
-              className="h-9 w-full rounded-[0.7rem] border border-border bg-surface-solid pl-8 pr-3 text-sm text-foreground outline-none transition placeholder:text-muted-foreground focus:border-accent-primary-border focus:ring-2 focus:ring-ring"
+              className="h-9 w-full rounded-field border border-border bg-surface-solid pl-8 pr-3 text-sm text-foreground outline-none transition placeholder:text-muted-foreground focus:border-accent-primary-border focus:ring-2 focus:ring-ring"
             />
           </div>
         ) : null}

@@ -22,7 +22,7 @@ export function ConfigEditorHeaderSection({ core }: { core: ConfigEditorCore }) 
       title={t("editor.title")}
       description={t("editor.description")}
     >
-      <div className="rounded-[0.9rem] border border-border bg-surface-softer px-3 py-2.5">
+      <div className="rounded-panel border border-border bg-surface-softer px-3 py-2.5">
         <div className="flex flex-wrap items-center justify-between gap-2.5">
           <div className="flex flex-wrap items-center gap-2">
             <Badge>{t("editor.independentBadge")}</Badge>

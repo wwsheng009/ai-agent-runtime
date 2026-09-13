@@ -324,7 +324,7 @@ export function LogsPage() {
             selectedCursor={selectedCursor}
           />
 
-          <div className="surface-panel flex min-h-[22rem] flex-col overflow-hidden rounded-[0.95rem] lg:min-h-0">
+          <div className="surface-panel flex min-h-[22rem] flex-col overflow-hidden rounded-panel-lg lg:min-h-0">
             <div className="border-b border-border px-3.5 py-2">
               <div className="app-text-13 font-semibold tracking-[-0.02em]">{t("detailsTitle")}</div>
               <div className="mt-1 app-text-11 text-muted-foreground">

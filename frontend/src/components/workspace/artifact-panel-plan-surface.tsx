@@ -53,7 +53,7 @@ export function ArtifactPanelPlanSurface({
 
   return (
     <div className="grid min-h-0 flex-1 gap-2.5 overflow-auto p-2.5">
-      <section className="flex min-h-0 flex-col overflow-hidden rounded-[0.95rem] border border-white/8 bg-white/[0.035]">
+      <section className="flex min-h-0 flex-col overflow-hidden rounded-panel-lg border border-white/8 bg-white/[0.035]">
         <div className="flex items-start justify-between gap-3 border-b border-white/8 px-3 py-2.5">
           <div className="min-w-0 space-y-1">
             <div className="inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
@@ -95,17 +95,17 @@ export function ArtifactPanelPlanSurface({
           ) : null}
 
           {!sessionId ? (
-            <div className="flex h-full items-center justify-center rounded-[0.8rem] border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-muted-foreground">
+            <div className="flex h-full items-center justify-center rounded-card border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-muted-foreground">
               Plan preview becomes available after the thread attaches to a live
               session.
             </div>
           ) : planError ? (
-            <div className="rounded-[0.85rem] border border-accent-orange/18 bg-accent-orange/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
+            <div className="rounded-card-lg border border-accent-orange/18 bg-accent-orange/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
               {planError}
             </div>
           ) : (
             <div className="space-y-3">
-              <div className="grid gap-2 rounded-[0.85rem] border border-white/8 bg-black/10 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
+              <div className="grid gap-2 rounded-card-lg border border-white/8 bg-black/10 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
                 <div className="flex flex-wrap gap-x-4 gap-y-1">
                   <span>
                     Permission:{" "}
@@ -158,13 +158,13 @@ export function ArtifactPanelPlanSurface({
               </div>
 
               {plan?.plan_content_error ? (
-                <div className="rounded-[0.85rem] border border-accent-orange/18 bg-accent-orange/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
+                <div className="rounded-card-lg border border-accent-orange/18 bg-accent-orange/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
                   {plan.plan_content_error}
                 </div>
               ) : null}
 
               {plan?.plan_content_available ? (
-                <div className="overflow-hidden rounded-[0.85rem] border border-white/8 bg-black/15">
+                <div className="overflow-hidden rounded-card-lg border border-white/8 bg-black/15">
                   <div className="flex items-center justify-between gap-2 border-b border-white/8 px-3 py-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
                     <span className="inline-flex items-center gap-1.5">
                       <FileTextIcon size={13} />
@@ -177,14 +177,14 @@ export function ArtifactPanelPlanSurface({
                   </div>
                 </div>
               ) : (
-                <div className="rounded-[0.85rem] border border-dashed border-white/10 px-3.5 py-5 text-center text-sm leading-6 text-muted-foreground">
+                <div className="rounded-card-lg border border-dashed border-white/10 px-3.5 py-5 text-center text-sm leading-6 text-muted-foreground">
                   {plan?.active
                     ? "Plan mode is active, but the plan file is not available yet."
                     : "No plan content is available for this session."}
                 </div>
               )}
 
-              <div className="space-y-2 rounded-[0.85rem] border border-white/8 bg-black/10 px-3 py-2.5">
+              <div className="space-y-2 rounded-card-lg border border-white/8 bg-black/10 px-3 py-2.5">
                 <label
                   className="block text-[10px] uppercase tracking-[0.16em] text-muted-foreground"
                   htmlFor="artifact-panel-plan-notes"
@@ -192,7 +192,7 @@ export function ArtifactPanelPlanSurface({
                   Review notes
                 </label>
                 <textarea
-                  className="min-h-[4.5rem] w-full resize-y rounded-[0.7rem] border border-white/10 bg-black/20 px-3 py-2 text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                  className="min-h-[4.5rem] w-full resize-y rounded-field border border-white/10 bg-black/20 px-3 py-2 text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
                   disabled={!sessionId || planActionPending}
                   id="artifact-panel-plan-notes"
                   onChange={(event) => onNotesDraftChange(event.target.value)}

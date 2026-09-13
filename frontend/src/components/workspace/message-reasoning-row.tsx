@@ -32,7 +32,7 @@ export function MessageReasoningRow({
   return (
     <section
       aria-labelledby={titleId}
-      className="mt-2 overflow-hidden rounded-[0.85rem] border border-border bg-surface-softer"
+      className="mt-2 overflow-hidden rounded-card-lg border border-border bg-surface-softer"
     >
       <button
         type="button"

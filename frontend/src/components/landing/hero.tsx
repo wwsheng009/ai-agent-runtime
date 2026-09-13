@@ -77,7 +77,7 @@ export function Hero() {
             </a>
           </div>
           <div className="mt-10 grid max-w-4xl gap-4 sm:grid-cols-3">
-            <div className="rounded-[1.5rem] border border-border bg-surface-soft p-4">
+            <div className="rounded-shell border border-border bg-surface-soft p-4">
               <div className="flex items-center gap-2 text-sm font-semibold text-accent-primary">
                 <CompassIcon size={16} />
                 {t("hero.unifiedFlowTitle")}
@@ -86,7 +86,7 @@ export function Hero() {
                 {t("hero.unifiedFlowBody")}
               </p>
             </div>
-            <div className="rounded-[1.5rem] border border-border bg-surface-soft p-4">
+            <div className="rounded-shell border border-border bg-surface-soft p-4">
               <div className="flex items-center gap-2 text-sm font-semibold text-accent-secondary">
                 <GitBranchPlusIcon size={16} />
                 {t("hero.teamReadyTitle")}
@@ -95,7 +95,7 @@ export function Hero() {
                 {t("hero.teamReadyBody")}
               </p>
             </div>
-            <div className="rounded-[1.5rem] border border-border bg-surface-soft p-4">
+            <div className="rounded-shell border border-border bg-surface-soft p-4">
               <div className="flex items-center gap-2 text-sm font-semibold text-accent-primary">
                 <ArrowRightIcon size={16} />
                 {t("hero.verifiableOutputTitle")}
@@ -118,7 +118,7 @@ export function Hero() {
             </CardDescription>
           </div>
           <div className="grid gap-4 p-6">
-            <div className="rounded-[1.5rem] border border-border bg-panel-strong-bg p-4">
+            <div className="rounded-shell border border-border bg-panel-strong-bg p-4">
               <div className="flex items-center gap-3">
                 <SparklesIcon className="text-accent-primary" size={18} />
                 <div className="text-sm font-semibold">{t("hero.productSiteTitle")}</div>
@@ -127,7 +127,7 @@ export function Hero() {
                 {t("hero.productSiteBody")}
               </p>
             </div>
-            <div className="rounded-[1.5rem] border border-border bg-panel-strong-bg p-4">
+            <div className="rounded-shell border border-border bg-panel-strong-bg p-4">
               <div className="flex items-center gap-3">
                 <CompassIcon className="text-accent-secondary" size={18} />
                 <div className="text-sm font-semibold">{t("hero.workspaceEntryTitle")}</div>
@@ -136,7 +136,7 @@ export function Hero() {
                 {t("hero.workspaceEntryBody")}
               </p>
             </div>
-            <div className="rounded-[1.5rem] border border-border bg-panel-strong-bg p-4">
+            <div className="rounded-shell border border-border bg-panel-strong-bg p-4">
               <div className="flex items-center gap-3">
                 <GitBranchPlusIcon className="text-accent-primary" size={18} />
                 <div className="text-sm font-semibold">{t("hero.runtimeEvidenceTitle")}</div>

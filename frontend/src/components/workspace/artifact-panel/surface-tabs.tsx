@@ -17,12 +17,12 @@ function surfaceButtonClass(
   disabled = false,
 ) {
   if (disabled) {
-    return "inline-flex items-center gap-2 rounded-[0.65rem] border border-white/8 bg-white/4 px-2.5 py-1 text-base text-muted-foreground opacity-60";
+    return "inline-flex items-center gap-2 rounded-control border border-white/8 bg-white/4 px-2.5 py-1 text-base text-muted-foreground opacity-60";
   }
 
   if (tone === "artifact") {
     return cn(
-      "inline-flex items-center gap-2 rounded-[0.65rem] border px-2.5 py-1 text-base transition focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-sidebar-bg)]",
+      "inline-flex items-center gap-2 rounded-control border px-2.5 py-1 text-base transition focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-sidebar-bg)]",
       active
         ? "border-accent-gold/30 bg-accent-gold/8 text-accent-gold"
         : "border-white/10 bg-white/4 text-muted-foreground hover:border-white/16 hover:bg-white/8",
@@ -31,7 +31,7 @@ function surfaceButtonClass(
 
   if (tone === "plan") {
     return cn(
-      "inline-flex items-center gap-2 rounded-[0.65rem] border px-2.5 py-1 text-base transition focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-sidebar-bg)]",
+      "inline-flex items-center gap-2 rounded-control border px-2.5 py-1 text-base transition focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-sidebar-bg)]",
       active
         ? "border-[#9db7ff]/30 bg-[#9db7ff]/10 text-[#9db7ff]"
         : "border-white/10 bg-white/4 text-muted-foreground hover:border-white/16 hover:bg-white/8",
@@ -39,7 +39,7 @@ function surfaceButtonClass(
   }
 
   return cn(
-    "inline-flex items-center gap-2 rounded-[0.65rem] border px-2.5 py-1 text-base transition focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-sidebar-bg)]",
+    "inline-flex items-center gap-2 rounded-control border px-2.5 py-1 text-base transition focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-sidebar-bg)]",
     active
       ? "border-accent-teal/30 bg-accent-teal/10 text-accent-teal"
       : "border-white/10 bg-white/4 text-muted-foreground hover:border-white/16 hover:bg-white/8",

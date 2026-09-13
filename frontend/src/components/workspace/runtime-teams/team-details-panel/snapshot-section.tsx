@@ -139,7 +139,7 @@ export function TeamDetailsPanelSnapshot({
       </div>
 
       {detailsError ? (
-        <div className="mt-3 rounded-[0.8rem] border border-accent-gold/18 bg-accent-gold/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
+        <div className="mt-3 rounded-card border border-accent-gold/18 bg-accent-gold/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
           {detailsError}
         </div>
       ) : null}

@@ -16,7 +16,7 @@ export function ImageArtifactPane({
   imageDetails,
 }: ImageArtifactPaneProps) {
   return (
-    <div className="overflow-hidden rounded-[0.95rem] border border-border bg-black/20">
+    <div className="overflow-hidden rounded-panel-lg border border-border bg-black/20">
       <div className="border-b border-border px-3.5 py-3">
         <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
           Rendered image
@@ -26,7 +26,7 @@ export function ImageArtifactPane({
         </div>
       </div>
       <div className="p-4">
-        <div className="flex min-h-[18rem] items-center justify-center rounded-[0.9rem] border border-white/8 bg-black/40 p-4">
+        <div className="flex min-h-[18rem] items-center justify-center rounded-panel border border-white/8 bg-black/40 p-4">
           <img
             alt={artifact.revisedPrompt?.trim() || artifact.name}
             className="max-h-[70vh] max-w-full rounded-[0.75rem] border border-white/10 object-contain"
@@ -37,7 +37,7 @@ export function ImageArtifactPane({
           {imageDetails.map((item) => (
             <div
               key={`${artifact.id}-${item.label}`}
-              className="rounded-[0.8rem] border border-border bg-surface-softer px-3 py-2.5"
+              className="rounded-card border border-border bg-surface-softer px-3 py-2.5"
             >
               <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                 {item.label}
@@ -59,7 +59,7 @@ type ImageUnavailablePaneProps = {
 
 export function ImageUnavailablePane({ artifact }: ImageUnavailablePaneProps) {
   return (
-    <div className="overflow-hidden rounded-[0.95rem] border border-border bg-black/20">
+    <div className="overflow-hidden rounded-panel-lg border border-border bg-black/20">
       <div className="border-b border-border px-3.5 py-3">
         <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
           Image unavailable
@@ -69,7 +69,7 @@ export function ImageUnavailablePane({ artifact }: ImageUnavailablePaneProps) {
         </div>
       </div>
       <div className="p-4">
-        <div className="rounded-[0.8rem] border border-border bg-surface-softer px-3.5 py-3">
+        <div className="rounded-card border border-border bg-surface-softer px-3.5 py-3">
           <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
             File name
           </div>
@@ -113,7 +113,7 @@ export function ArtifactPreviewPane({
   return (
     <div
       aria-labelledby={previewTabId}
-      className="min-h-full overflow-hidden rounded-[0.95rem] border border-border bg-black/20"
+      className="min-h-full overflow-hidden rounded-panel-lg border border-border bg-black/20"
       hidden={view !== "preview"}
       id={previewPanelId}
       role="tabpanel"
@@ -128,7 +128,7 @@ export function ArtifactPreviewPane({
         </div>
       </div>
       <div className="p-4">
-        <div className="h-[min(70vh,56rem)] min-h-[28rem] rounded-[0.85rem] border border-white/8 bg-white p-3">
+        <div className="h-[min(70vh,56rem)] min-h-[28rem] rounded-card-lg border border-white/8 bg-white p-3">
           <iframe
             title={artifact.name}
             srcDoc={previewDocument ?? artifact.previewHtml}
@@ -157,7 +157,7 @@ export function ArtifactSourcePane({
   return (
     <div
       aria-labelledby={sourceTabId}
-      className="overflow-hidden rounded-[0.95rem] border border-border bg-black/20"
+      className="overflow-hidden rounded-panel-lg border border-border bg-black/20"
       hidden={view !== "source"}
       id={sourcePanelId}
       role="tabpanel"
@@ -190,7 +190,7 @@ export function ArtifactSourceReaderCard({
   artifact,
 }: ArtifactSourceReaderCardProps) {
   return (
-    <div className="overflow-hidden rounded-[0.95rem] border border-border bg-black/20">
+    <div className="overflow-hidden rounded-panel-lg border border-border bg-black/20">
       <div className="border-b border-border px-3.5 py-3">
         <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
           Source reader

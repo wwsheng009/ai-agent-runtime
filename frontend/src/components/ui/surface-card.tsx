@@ -29,9 +29,9 @@ export const surfaceCardVariants = cva("", {
     radius: {
       none: "",
       sm: "rounded-[0.75rem]",
-      md: "rounded-[0.8rem]",
-      lg: "rounded-[0.85rem]",
-      xl: "rounded-[0.9rem]",
+      md: "rounded-card",
+      lg: "rounded-card-lg",
+      xl: "rounded-panel",
       panel: "rounded-[1rem]",
     },
     density: {

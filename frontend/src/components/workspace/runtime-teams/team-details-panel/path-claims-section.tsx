@@ -94,12 +94,12 @@ export function TeamDetailsPanelPathClaims({
           </Button>
         </div>
         {claimCheckError ? (
-          <div className="mt-3 rounded-[0.8rem] border border-accent-orange/18 bg-accent-orange/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
+          <div className="mt-3 rounded-card border border-accent-orange/18 bg-accent-orange/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
             {claimCheckError}
           </div>
         ) : null}
         {claimCheckState ? (
-          <div className="mt-3 rounded-[0.8rem] border border-white/8 bg-black/20 px-3 py-2.5">
+          <div className="mt-3 rounded-card border border-white/8 bg-black/20 px-3 py-2.5">
             <div className="flex items-center justify-between gap-3">
               <div className="text-sm font-semibold text-foreground">
                 {claimCheckState.ok ? "No conflicts detected" : "Conflicts detected"}
@@ -151,7 +151,7 @@ export function TeamDetailsPanelPathClaims({
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
-                    <span className="rounded-[0.65rem] border border-white/10 bg-white/6 px-2 py-0.5 app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
+                    <span className="rounded-control border border-white/10 bg-white/6 px-2 py-0.5 app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
                       {claim.mode || "claim"}
                     </span>
                     <span

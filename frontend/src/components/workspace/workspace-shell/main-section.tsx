@@ -254,9 +254,9 @@ export function WorkspaceMainSection({
                       key={suggestion.key}
                       type="button"
                       onClick={() => onDraftChange(suggestion.prompt)}
-                      className="group flex min-h-[5.5rem] items-start gap-3 rounded-[0.9rem] border border-border bg-surface-softer px-3 py-3 text-left transition hover:border-border-strong hover:bg-surface-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:px-3.5"
+                      className="group flex min-h-[5.5rem] items-start gap-3 rounded-panel border border-border bg-surface-softer px-3 py-3 text-left transition hover:border-border-strong hover:bg-surface-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:px-3.5"
                     >
-                      <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-[0.7rem] border border-border bg-surface-solid text-accent-secondary">
+                      <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-field border border-border bg-surface-solid text-accent-secondary">
                         <SuggestionIcon size={15} />
                       </span>
                       <span className="min-w-0 flex-1">

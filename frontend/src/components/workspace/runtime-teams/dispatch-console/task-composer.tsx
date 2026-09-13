@@ -132,7 +132,7 @@ export function DispatchTaskComposer({
       </div>
 
       {dispatchTaskError ? (
-        <div className="rounded-[0.8rem] border border-accent-orange/18 bg-accent-orange/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
+        <div className="rounded-card border border-accent-orange/18 bg-accent-orange/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
           {dispatchTaskError}
         </div>
       ) : null}

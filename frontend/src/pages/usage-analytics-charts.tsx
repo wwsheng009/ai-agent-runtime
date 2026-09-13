@@ -83,7 +83,7 @@ export function UsageAnalyticsCharts({
       aria-label={t("charts.title")}
       className="grid min-w-0 gap-2 lg:grid-cols-[minmax(0,1.7fr)_minmax(280px,0.8fr)]"
     >
-      <div className="surface-panel min-w-0 rounded-[0.95rem] p-3.5 sm:p-4">
+      <div className="surface-panel min-w-0 rounded-panel-lg p-3.5 sm:p-4">
         <ChartHeading
           title={t("charts.trend.title")}
           subtitle={t("groups.subtitle", { groupBy: t(groupByKey(groupBy)) })}
@@ -151,7 +151,7 @@ export function UsageAnalyticsCharts({
         )}
       </div>
 
-      <div className="surface-panel min-w-0 rounded-[0.95rem] p-3.5 sm:p-4">
+      <div className="surface-panel min-w-0 rounded-panel-lg p-3.5 sm:p-4">
         <ChartHeading
           title={t("charts.tokens.title")}
           subtitle={t("charts.tokens.subtitle")}

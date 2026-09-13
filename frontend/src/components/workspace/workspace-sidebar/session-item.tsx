@@ -137,7 +137,7 @@ export function SidebarSessionItem({
           event.stopPropagation();
           onStartRename(session.id, title);
         }}
-        className="absolute right-1 top-1/2 -translate-y-1/2 rounded-[0.5rem] p-1 text-muted-foreground opacity-0 transition hover:bg-surface-soft hover:text-foreground focus-visible:opacity-100 group-hover/session:opacity-100"
+        className="absolute right-1 top-1/2 -translate-y-1/2 rounded-chip p-1 text-muted-foreground opacity-0 transition hover:bg-surface-soft hover:text-foreground focus-visible:opacity-100 group-hover/session:opacity-100"
       >
         <PencilIcon size={12} />
       </button>

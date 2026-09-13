@@ -51,24 +51,24 @@ export function RuntimeTeamSnapshot({
 
       <div className="mt-2.5 flex flex-wrap gap-1.5 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
         {selectedTeam.workspace_id ? (
-          <span className="rounded-[0.65rem] border border-border bg-surface-soft px-2 py-0.5">
+          <span className="rounded-control border border-border bg-surface-soft px-2 py-0.5">
             workspace {selectedTeam.workspace_id}
           </span>
         ) : null}
         {selectedTeam.lead_session_id ? (
-          <span className="rounded-[0.65rem] border border-border bg-surface-soft px-2 py-0.5">
+          <span className="rounded-control border border-border bg-surface-soft px-2 py-0.5">
             lead {truncateIdentifier(selectedTeam.lead_session_id, 18)}
           </span>
         ) : null}
         {selectedTeam.strategy ? (
-          <span className="rounded-[0.65rem] border border-border bg-surface-soft px-2 py-0.5">
+          <span className="rounded-control border border-border bg-surface-soft px-2 py-0.5">
             {selectedTeam.strategy}
           </span>
         ) : null}
       </div>
 
       <div className="mt-3 grid gap-2.5 lg:grid-cols-3">
-        <div className="rounded-[0.8rem] border border-border bg-surface-softer px-3 py-2.5">
+        <div className="rounded-card border border-border bg-surface-softer px-3 py-2.5">
           <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
             <ActivityIcon size={14} />
             Tasks
@@ -101,7 +101,7 @@ export function RuntimeTeamSnapshot({
           </div>
         </div>
 
-        <div className="rounded-[0.8rem] border border-border bg-surface-softer px-3 py-2.5">
+        <div className="rounded-card border border-border bg-surface-softer px-3 py-2.5">
           <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
             <UsersRoundIcon size={14} />
             Teammates
@@ -123,7 +123,7 @@ export function RuntimeTeamSnapshot({
           </div>
         </div>
 
-        <div className="rounded-[0.8rem] border border-border bg-surface-softer px-3 py-2.5">
+        <div className="rounded-card border border-border bg-surface-softer px-3 py-2.5">
           <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
             <GitBranchPlusIcon size={14} />
             Task Graph

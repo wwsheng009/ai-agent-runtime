@@ -101,7 +101,7 @@ export function ProviderGroupBasicFields({
           </div>
 
           <div className="grid gap-3 xl:grid-cols-2">
-            <div className="space-y-3 rounded-[0.8rem] border border-border bg-surface-softer p-3">
+            <div className="space-y-3 rounded-card border border-border bg-surface-softer p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <div className="text-[13px] font-semibold text-foreground">
@@ -173,7 +173,7 @@ export function ProviderGroupBasicFields({
               </div>
             </div>
 
-            <div className="space-y-3 rounded-[0.8rem] border border-border bg-surface-softer p-3">
+            <div className="space-y-3 rounded-card border border-border bg-surface-softer p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <div className="text-[13px] font-semibold text-foreground">

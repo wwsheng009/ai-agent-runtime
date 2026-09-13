@@ -56,7 +56,7 @@ export function ConfigFormField({
       : children;
 
   return (
-    <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
+    <div className="rounded-card border border-border bg-surface-softer p-3">
       <div className="flex items-center gap-2">
         {fieldId ? (
           <label htmlFor={fieldId} className="text-sm font-semibold text-foreground">

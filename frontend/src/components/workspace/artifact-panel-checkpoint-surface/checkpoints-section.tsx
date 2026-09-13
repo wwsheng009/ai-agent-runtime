@@ -33,7 +33,7 @@ export function ArtifactPanelCheckpointsSection({
   sessionId,
 }: ArtifactPanelCheckpointsSectionProps) {
   return (
-    <section className="flex min-h-0 flex-col overflow-hidden rounded-[0.95rem] border border-white/8 bg-white/[0.035]">
+    <section className="flex min-h-0 flex-col overflow-hidden rounded-panel-lg border border-white/8 bg-white/[0.035]">
       <div className="flex items-center justify-between gap-3 border-b border-white/8 px-3 py-2.5">
         <div className="inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
           <HistoryIcon size={14} />
@@ -49,12 +49,12 @@ export function ArtifactPanelCheckpointsSection({
           </div>
         ) : null}
         {!sessionId ? (
-          <div className="flex h-full items-center justify-center rounded-[0.8rem] border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-muted-foreground">
+          <div className="flex h-full items-center justify-center rounded-card border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-muted-foreground">
             Restore points become available after the thread attaches to a live
             session.
           </div>
         ) : checkpointsError ? (
-          <div className="rounded-[0.85rem] border border-accent-orange/18 bg-accent-orange/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
+          <div className="rounded-card-lg border border-accent-orange/18 bg-accent-orange/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
             {checkpointsError}
           </div>
         ) : checkpoints.length > 0 ? (
@@ -75,7 +75,7 @@ export function ArtifactPanelCheckpointsSection({
                   type="button"
                   onClick={() => onSelectCheckpoint(checkpoint.id)}
                   className={cn(
-                    "w-full rounded-[0.8rem] border px-2.5 py-2 text-left transition",
+                    "w-full rounded-card border px-2.5 py-2 text-left transition",
                     isActive
                       ? "border-accent-teal/30 bg-accent-teal/12 shadow-[inset_0_1px_0_rgba(143,208,198,0.08)]"
                       : "border-white/8 bg-white/4 hover:border-white/14 hover:bg-white/8",
@@ -90,7 +90,7 @@ export function ArtifactPanelCheckpointsSection({
                           {formatCheckpointMeta(checkpoint)}
                         </div>
                       </div>
-                    <span className="shrink-0 rounded-[0.65rem] border border-white/10 bg-black/20 px-2 py-0.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
+                    <span className="shrink-0 rounded-control border border-white/10 bg-black/20 px-2 py-0.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                       {formatRelativeTimestamp(checkpoint.created_at)}
                     </span>
                   </div>
@@ -103,7 +103,7 @@ export function ArtifactPanelCheckpointsSection({
                     {provenanceLabels.slice(0, 2).map((item) => (
                       <span
                         key={`${checkpoint.id}-${item}`}
-                        className="rounded-[0.65rem] border border-white/10 bg-black/20 px-2 py-0.5"
+                        className="rounded-control border border-white/10 bg-black/20 px-2 py-0.5"
                       >
                         {item}
                       </span>
@@ -114,7 +114,7 @@ export function ArtifactPanelCheckpointsSection({
             })}
           </div>
         ) : (
-          <div className="flex h-full items-center justify-center rounded-[0.8rem] border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-muted-foreground">
+          <div className="flex h-full items-center justify-center rounded-card border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-muted-foreground">
             No restore points available for this session yet.
           </div>
         )}

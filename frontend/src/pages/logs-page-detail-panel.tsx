@@ -66,12 +66,12 @@ export function LogsPageDetailPanel({
 
   return (
     <div className="flex-1 space-y-2.5 overflow-y-auto px-3 py-3">
-      <div className="rounded-[0.85rem] border border-border bg-surface-softer p-3">
+      <div className="rounded-card-lg border border-border bg-surface-softer p-3">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div className="flex flex-wrap items-center gap-2">
             <span
               className={cn(
-                "inline-flex items-center rounded-[0.65rem] border px-2 py-1 app-text-10 font-semibold uppercase tracking-[0.14em]",
+                "inline-flex items-center rounded-control border px-2 py-1 app-text-10 font-semibold uppercase tracking-[0.14em]",
                 selectedLevelTone,
               )}
             >
@@ -100,7 +100,7 @@ export function LogsPageDetailPanel({
       </div>
 
       {insightRows.length > 0 ? (
-        <div className="rounded-[0.85rem] border border-border bg-surface-softer p-3">
+        <div className="rounded-card-lg border border-border bg-surface-softer p-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
@@ -135,7 +135,7 @@ export function LogsPageDetailPanel({
       ) : null}
 
       {identifierRows.length > 0 ? (
-        <div className="rounded-[0.85rem] border border-border bg-surface-softer p-3">
+        <div className="rounded-card-lg border border-border bg-surface-softer p-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
@@ -149,7 +149,7 @@ export function LogsPageDetailPanel({
               <Button
                 variant="ghost"
                 size="sm"
-                className="h-7 rounded-[0.65rem] border border-border bg-black/10 px-2.5 text-muted-foreground hover:bg-black/20 hover:text-foreground"
+                className="h-7 rounded-control border border-border bg-black/10 px-2.5 text-muted-foreground hover:bg-black/20 hover:text-foreground"
                 onClick={onClearQuery}
               >
                 {labels.clearSearch}
@@ -189,7 +189,7 @@ export function LogsPageDetailPanel({
                       variant={active ? "secondary" : "ghost"}
                       size="sm"
                       className={cn(
-                        "h-7 rounded-[0.65rem] border px-2.5 app-text-11",
+                        "h-7 rounded-control border px-2.5 app-text-11",
                         active
                           ? "border-accent-primary-border bg-accent-primary-soft text-accent-primary"
                           : "border-border bg-black/10 text-muted-foreground hover:bg-black/20 hover:text-foreground",
@@ -206,7 +206,7 @@ export function LogsPageDetailPanel({
         </div>
       ) : null}
 
-      <div className="rounded-[0.85rem] border border-border bg-surface-softer p-3">
+      <div className="rounded-card-lg border border-border bg-surface-softer p-3">
         <div className="flex items-center justify-between gap-3">
           <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
             {labels.metadata}
@@ -236,7 +236,7 @@ export function LogsPageDetailPanel({
       </div>
 
       {selectedEntry.response_body_preview ? (
-        <div className="rounded-[0.85rem] border border-border bg-surface-softer p-3">
+        <div className="rounded-card-lg border border-border bg-surface-softer p-3">
           <div className="flex items-center justify-between gap-3">
             <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
               {labels.responsePreview}
@@ -255,7 +255,7 @@ export function LogsPageDetailPanel({
       ) : null}
 
       {selectedEntry.fields && Object.keys(selectedEntry.fields).length > 0 ? (
-        <div className="rounded-[0.85rem] border border-border bg-surface-softer p-3">
+        <div className="rounded-card-lg border border-border bg-surface-softer p-3">
           <div className="flex items-center justify-between gap-3">
             <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
               {labels.extraFields}
@@ -273,7 +273,7 @@ export function LogsPageDetailPanel({
         </div>
       ) : null}
 
-      <div className="rounded-[0.85rem] border border-border bg-surface-softer p-3">
+      <div className="rounded-card-lg border border-border bg-surface-softer p-3">
         <div className="flex items-center justify-between gap-3">
           <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
             {labels.rawJson}
@@ -305,7 +305,7 @@ function CopyActionButton({
     <Button
       variant="ghost"
       size="sm"
-      className="h-7 rounded-[0.65rem] border border-border bg-black/10 px-2.5 text-muted-foreground hover:bg-black/20 hover:text-foreground"
+      className="h-7 rounded-control border border-border bg-black/10 px-2.5 text-muted-foreground hover:bg-black/20 hover:text-foreground"
       onClick={onClick}
     >
       {copied ? <CheckIcon size={13} /> : <CopyIcon size={13} />}

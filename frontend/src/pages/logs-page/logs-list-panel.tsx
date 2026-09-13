@@ -51,7 +51,7 @@ export function LogsListPanel({
   } as const;
 
   return (
-    <div className="surface-panel flex min-h-[22rem] flex-col overflow-hidden rounded-[0.95rem] lg:min-h-0">
+    <div className="surface-panel flex min-h-[22rem] flex-col overflow-hidden rounded-panel-lg lg:min-h-0">
       <div className="flex items-center justify-between border-b border-border px-3 py-2">
         <div>
           <div className="app-text-12 font-semibold tracking-[-0.02em]">
@@ -84,7 +84,7 @@ export function LogsListPanel({
                       onSelectLevel(active ? "" : (stat.key as RuntimeLogLevelFilter));
                     }}
                     className={cn(
-                      "inline-flex items-center gap-1 rounded-[0.65rem] border px-2 py-1 font-mono app-text-9 font-medium uppercase tracking-[0.09em] transition",
+                      "inline-flex items-center gap-1 rounded-control border px-2 py-1 font-mono app-text-9 font-medium uppercase tracking-[0.09em] transition",
                       levelStatTone(stat.key),
                       stat.count === 0 ? "opacity-45" : "",
                       canFilter ? "hover:-translate-y-px" : "cursor-default",
@@ -112,7 +112,7 @@ export function LogsListPanel({
             {t("readingLogs")}
           </div>
         ) : error ? (
-          <div className="mx-2 rounded-[0.9rem] border border-red-500/20 bg-red-500/8 p-4 text-sm text-red-100">
+          <div className="mx-2 rounded-panel border border-red-500/20 bg-red-500/8 p-4 text-sm text-red-100">
             <div className="font-medium">{t("logLoadFailed")}</div>
             <div className="mt-2 break-words text-red-100/80">{error}</div>
           </div>
@@ -135,7 +135,7 @@ export function LogsListPanel({
                   type="button"
                   onClick={() => onSelectCursor(entry.cursor)}
                   className={cn(
-                    "group grid w-full grid-cols-[4.1rem_2.15rem_minmax(0,1fr)] gap-2 rounded-[0.65rem] border border-transparent px-2 py-1.5 text-left transition",
+                    "group grid w-full grid-cols-[4.1rem_2.15rem_minmax(0,1fr)] gap-2 rounded-control border border-transparent px-2 py-1.5 text-left transition",
                     active
                       ? "border-accent-primary-border bg-accent-primary-soft shadow-[0_6px_16px_rgba(0,0,0,0.1)]"
                       : "bg-transparent hover:bg-surface-soft",

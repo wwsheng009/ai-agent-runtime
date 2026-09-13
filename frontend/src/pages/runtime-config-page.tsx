@@ -18,7 +18,7 @@ export function RuntimeConfigPage() {
   return (
     <div className="min-h-screen [background:var(--workspace-shell-bg)] text-foreground lg:h-dvh lg:overflow-hidden">
       <div className="mx-auto flex min-h-screen w-full max-w-[1760px] flex-col gap-2 px-2.5 py-2.5 sm:px-3 lg:h-full lg:min-h-0">
-        <header className="surface-panel relative overflow-hidden rounded-[0.95rem] px-3.5 py-3">
+        <header className="surface-panel relative overflow-hidden rounded-panel-lg px-3.5 py-3">
           <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(240,199,123,0.18),transparent_28%),radial-gradient(circle_at_right,rgba(103,215,230,0.12),transparent_22%)]" />
           <div className="relative flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
             <div className="space-y-1.5">
@@ -65,7 +65,7 @@ export function RuntimeConfigPage() {
           </div>
         </header>
 
-        <section className="surface-panel min-h-0 rounded-[0.95rem] px-3 py-3.5 sm:px-4 lg:flex-1 lg:overflow-y-auto">
+        <section className="surface-panel min-h-0 rounded-panel-lg px-3 py-3.5 sm:px-4 lg:flex-1 lg:overflow-y-auto">
           <BackendConfigSettingsPage />
         </section>
       </div>

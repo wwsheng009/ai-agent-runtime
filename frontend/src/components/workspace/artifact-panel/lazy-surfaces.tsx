@@ -19,7 +19,7 @@ export const ArtifactPanelPlanSurface = lazy(() =>
 export function ArtifactPanelCheckpointFallback() {
   return (
     <div className="grid min-h-0 flex-1 gap-3 overflow-auto p-3">
-      <div className="flex min-h-[14rem] items-center justify-center rounded-[0.9rem] border border-white/8 bg-white/[0.035] px-3.5 py-2.5 text-sm text-muted-foreground">
+      <div className="flex min-h-[14rem] items-center justify-center rounded-panel border border-white/8 bg-white/[0.035] px-3.5 py-2.5 text-sm text-muted-foreground">
         正在加载 restore points…
       </div>
     </div>
@@ -29,7 +29,7 @@ export function ArtifactPanelCheckpointFallback() {
 export function ArtifactPanelPlanFallback() {
   return (
     <div className="grid min-h-0 flex-1 gap-3 overflow-auto p-3">
-      <div className="flex min-h-[14rem] items-center justify-center rounded-[0.9rem] border border-white/8 bg-white/[0.035] px-3.5 py-2.5 text-sm text-muted-foreground">
+      <div className="flex min-h-[14rem] items-center justify-center rounded-panel border border-white/8 bg-white/[0.035] px-3.5 py-2.5 text-sm text-muted-foreground">
         正在加载 plan preview…
       </div>
     </div>

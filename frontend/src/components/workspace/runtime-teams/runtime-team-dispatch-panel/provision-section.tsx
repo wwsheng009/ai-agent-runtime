@@ -45,7 +45,7 @@ export function DispatchProvisionSection({
 }: DispatchProvisionSectionProps) {
   return (
     <>
-      <div className="mt-3 rounded-[0.8rem] border border-white/8 bg-white/[0.03] px-3 py-2.5">
+      <div className="mt-3 rounded-card border border-white/8 bg-white/[0.03] px-3 py-2.5">
         <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
           Provision runnable teams and dispatch
         </div>
@@ -140,7 +140,7 @@ export function DispatchProvisionSection({
         </div>
       </div>
 
-      <div className="mt-3 rounded-[0.8rem] border border-white/8 bg-white/[0.03] px-3 py-2.5">
+      <div className="mt-3 rounded-card border border-white/8 bg-white/[0.03] px-3 py-2.5">
         <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
           Fan-out template
         </div>
@@ -149,7 +149,7 @@ export function DispatchProvisionSection({
             type="button"
             onClick={() => onDispatchTemplateModeChange("review_implement_verify")}
             className={cn(
-              "rounded-[0.65rem] border px-2.5 py-1.5 text-base uppercase tracking-[0.12em] transition",
+              "rounded-control border px-2.5 py-1.5 text-base uppercase tracking-[0.12em] transition",
               dispatchTemplateMode === "review_implement_verify"
                 ? "border-accent-gold/24 bg-accent-gold/10 text-accent-gold"
                 : "border-white/10 bg-white/4 text-muted-foreground hover:border-white/14 hover:bg-white/7 hover:text-foreground",
@@ -161,7 +161,7 @@ export function DispatchProvisionSection({
             type="button"
             onClick={() => onDispatchTemplateModeChange("mirror")}
             className={cn(
-              "rounded-[0.65rem] border px-2.5 py-1.5 text-base uppercase tracking-[0.12em] transition",
+              "rounded-control border px-2.5 py-1.5 text-base uppercase tracking-[0.12em] transition",
               dispatchTemplateMode === "mirror"
                 ? "border-accent-gold/24 bg-accent-gold/10 text-accent-gold"
                 : "border-white/10 bg-white/4 text-muted-foreground hover:border-white/14 hover:bg-white/7 hover:text-foreground",

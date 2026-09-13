@@ -36,7 +36,7 @@ export function ArtifactPanelBacktrackAuditSection({
     backtrackAuditEntries.find((entry) => entry.id === selectedAuditId) ?? null;
 
   return (
-    <section className="flex min-h-0 flex-col overflow-hidden rounded-[0.95rem] border border-white/8 bg-white/[0.035]">
+    <section className="flex min-h-0 flex-col overflow-hidden rounded-panel-lg border border-white/8 bg-white/[0.035]">
       <div className="flex items-center justify-between gap-3 border-b border-white/8 px-3 py-2.5">
         <div className="inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
           <Undo2Icon size={14} />
@@ -52,12 +52,12 @@ export function ArtifactPanelBacktrackAuditSection({
           </div>
         ) : null}
         {!sessionId ? (
-          <div className="flex h-full items-center justify-center rounded-[0.8rem] border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-muted-foreground">
+          <div className="flex h-full items-center justify-center rounded-card border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-muted-foreground">
             Backtrack tombstones appear after the thread attaches to a live
             session and a user-turn rewind is applied.
           </div>
         ) : backtrackAuditError ? (
-          <div className="rounded-[0.85rem] border border-accent-orange/18 bg-accent-orange/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
+          <div className="rounded-card-lg border border-accent-orange/18 bg-accent-orange/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
             {backtrackAuditError}
           </div>
         ) : backtrackAuditEntries.length > 0 ? (
@@ -70,7 +70,7 @@ export function ArtifactPanelBacktrackAuditSection({
                   type="button"
                   onClick={() => onSelectAuditId(entry.id)}
                   className={cn(
-                    "w-full rounded-[0.8rem] border px-2.5 py-2 text-left transition",
+                    "w-full rounded-card border px-2.5 py-2 text-left transition",
                     isActive
                       ? "border-accent-gold/30 bg-accent-gold/10 shadow-[inset_0_1px_0_rgba(240,199,123,0.08)]"
                       : "border-white/8 bg-white/4 hover:border-white/14 hover:bg-white/8",
@@ -85,7 +85,7 @@ export function ArtifactPanelBacktrackAuditSection({
                         {formatBacktrackAuditMeta(entry)}
                       </div>
                     </div>
-                    <span className="shrink-0 rounded-[0.65rem] border border-white/10 bg-black/20 px-2 py-0.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
+                    <span className="shrink-0 rounded-control border border-white/10 bg-black/20 px-2 py-0.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                       {formatRelativeTimestamp(entry.created_at)}
                     </span>
                   </div>
@@ -97,7 +97,7 @@ export function ArtifactPanelBacktrackAuditSection({
             })}
           </div>
         ) : (
-          <div className="flex h-full items-center justify-center rounded-[0.8rem] border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-muted-foreground">
+          <div className="flex h-full items-center justify-center rounded-card border border-dashed border-white/10 px-3 py-5 text-center text-sm leading-6 text-muted-foreground">
             No backtrack tombstones yet. Apply a user-turn rewind to record an
             audit summary here.
           </div>

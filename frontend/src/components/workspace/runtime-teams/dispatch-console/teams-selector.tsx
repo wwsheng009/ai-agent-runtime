@@ -28,7 +28,7 @@ export function DispatchTeamSelector({
   return (
     <div className="mt-3 space-y-1.5">
       {teams.length === 0 ? (
-        <div className="rounded-[0.8rem] border border-dashed border-white/10 px-3 py-2.5 text-sm text-muted-foreground">
+        <div className="rounded-card border border-dashed border-white/10 px-3 py-2.5 text-sm text-muted-foreground">
           No existing teams yet. Use the provision action above to create runnable teams and fan out the next task.
         </div>
       ) : null}
@@ -40,7 +40,7 @@ export function DispatchTeamSelector({
           <label
             key={`dispatch-${team.id}`}
             className={cn(
-              "flex cursor-pointer items-center justify-between gap-3 rounded-[0.8rem] border px-3 py-2.5 transition",
+              "flex cursor-pointer items-center justify-between gap-3 rounded-card border px-3 py-2.5 transition",
               checked
                 ? "border-accent-gold/24 bg-accent-gold/8"
                 : "border-white/8 bg-white/4 hover:border-white/14 hover:bg-white/7",

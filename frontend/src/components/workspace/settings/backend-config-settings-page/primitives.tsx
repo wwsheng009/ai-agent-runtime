@@ -21,10 +21,10 @@ export function StatCard({
   return (
     <div
       title={detail}
-      className="rounded-[0.85rem] border border-border bg-surface-softer px-3 py-2.5"
+      className="rounded-card-lg border border-border bg-surface-softer px-3 py-2.5"
     >
       <div className="flex items-center gap-3">
-        <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-[0.7rem] border border-border bg-surface-solid text-accent-primary">
+        <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-field border border-border bg-surface-solid text-accent-primary">
           <Icon size={14} />
         </span>
         <div className="min-w-0">
@@ -45,7 +45,7 @@ export function StatCard({
 
 export function SummaryPill({ label, value }: { label: string; value: string }) {
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-[0.65rem] border border-border bg-surface-solid px-2 py-0.5">
+    <span className="inline-flex items-center gap-1.5 rounded-control border border-border bg-surface-solid px-2 py-0.5">
       <span className="app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
         {label}
       </span>
@@ -65,7 +65,7 @@ export function ControlPanel({
   title: string;
 }) {
   return (
-    <div className="rounded-[0.9rem] border border-border bg-surface-softer p-3">
+    <div className="rounded-panel border border-border bg-surface-softer p-3">
       <div className="flex items-center gap-2">
         <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
           {title}
@@ -106,7 +106,7 @@ export function MenuButton({
       aria-pressed={active}
       onClick={onClick}
       className={cn(
-        "min-w-0 max-w-full w-full rounded-[0.8rem] border px-3 py-2 text-left transition disabled:cursor-not-allowed disabled:opacity-60",
+        "min-w-0 max-w-full w-full rounded-card border px-3 py-2 text-left transition disabled:cursor-not-allowed disabled:opacity-60",
         active
           ? "border-accent-primary-border bg-accent-primary-soft"
           : "border-border bg-surface-solid hover:border-border-strong hover:bg-surface-soft",
@@ -114,7 +114,7 @@ export function MenuButton({
     >
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
-          <span className="rounded-[0.65rem] border border-border bg-surface-softer p-1.5 text-accent-primary">
+          <span className="rounded-control border border-border bg-surface-softer p-1.5 text-accent-primary">
             <Icon size={14} />
           </span>
           <div className="min-w-0 truncate text-[13px] font-semibold text-foreground">
@@ -129,7 +129,7 @@ export function MenuButton({
 export function ConfigEditorLoadingCard({ label }: { label: string }) {
   const { t } = useTranslation("runtimeConfig");
   return (
-    <div className="rounded-[0.9rem] border border-border bg-surface-softer p-4">
+    <div className="rounded-panel border border-border bg-surface-softer p-4">
       <div className="text-sm font-semibold text-foreground">
         {t("editor.loadingCard.title", { label })}
       </div>

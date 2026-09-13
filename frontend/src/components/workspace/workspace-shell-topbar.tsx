@@ -51,7 +51,7 @@ export function WorkspaceShellTopbar({
     <header className="absolute inset-x-0 top-0 z-30 flex justify-center px-3 pt-1.5 sm:px-4">
       <div
         className={cn(
-          "flex w-full max-w-[72rem] items-center gap-1 rounded-[0.9rem] border border-border bg-workspace-topbar-bg shadow-[0_8px_24px_rgba(0,0,0,0.14)] backdrop-blur-lg sm:gap-2",
+          "flex w-full max-w-[72rem] items-center gap-1 rounded-panel border border-border bg-workspace-topbar-bg shadow-[0_8px_24px_rgba(0,0,0,0.14)] backdrop-blur-lg sm:gap-2",
           isCompact ? "h-10 px-3" : "h-11 px-3.5",
         )}
       >

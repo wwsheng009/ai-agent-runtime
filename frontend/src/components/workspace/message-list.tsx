@@ -155,8 +155,8 @@ export function MessageList({
         role="log"
       >
         {messages.length === 0 ? (
-          <div className="rounded-[0.95rem] border border-dashed border-border bg-surface-softer px-4 py-8 text-center">
-            <div className="mx-auto inline-flex size-10 items-center justify-center rounded-[0.8rem] border border-accent-teal/18 bg-accent-teal/10 text-accent-teal">
+          <div className="rounded-panel-lg border border-dashed border-border bg-surface-softer px-4 py-8 text-center">
+            <div className="mx-auto inline-flex size-10 items-center justify-center rounded-card border border-accent-teal/18 bg-accent-teal/10 text-accent-teal">
               <ScrollTextIcon size={18} />
             </div>
             <div className="mt-3 text-sm font-semibold text-foreground">
@@ -171,20 +171,20 @@ export function MessageList({
         ) : null}
 
         {backtrackNavigationActive ? (
-          <div className="rounded-[0.85rem] border border-accent-gold/20 bg-accent-gold/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
+          <div className="rounded-card-lg border border-accent-gold/20 bg-accent-gold/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
             Backtrack navigation active — use ↑/↓ (or j/k) to choose a user turn,
             Enter to open the confirm dialog, Esc to exit.
           </div>
         ) : null}
 
         {backtrackError ? (
-          <div className="rounded-[0.85rem] border border-accent-orange/18 bg-accent-orange/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
+          <div className="rounded-card-lg border border-accent-orange/18 bg-accent-orange/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
             {backtrackError}
           </div>
         ) : null}
 
         {backtrackNotice ? (
-          <div className="rounded-[0.85rem] border border-accent-teal/18 bg-accent-teal/10 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
+          <div className="rounded-card-lg border border-accent-teal/18 bg-accent-teal/10 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
             {backtrackNotice}
           </div>
         ) : null}

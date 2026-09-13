@@ -200,7 +200,7 @@ export function SettingsDialog({
                     type="button"
                     onClick={() => setActiveSection(section.id)}
                     className={cn(
-                      "w-full rounded-[0.8rem] border px-3 py-2.5 text-left transition",
+                      "w-full rounded-card border px-3 py-2.5 text-left transition",
                       active
                         ? "border-accent-primary-border bg-accent-primary-soft"
                         : "border-transparent bg-transparent hover:border-border hover:bg-surface-softer",
@@ -209,7 +209,7 @@ export function SettingsDialog({
                     <div className="flex items-center gap-3">
                       <span
                         className={cn(
-                          "inline-flex size-7 items-center justify-center rounded-[0.65rem] border",
+                          "inline-flex size-7 items-center justify-center rounded-control border",
                           active
                             ? "border-accent-primary-border bg-surface-solid text-accent-primary"
                             : "border-border bg-surface-solid text-muted-foreground",

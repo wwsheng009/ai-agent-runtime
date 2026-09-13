@@ -86,7 +86,7 @@ export function UserMessageBubble({
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex items-center gap-2.5">
-                      <div className="inline-flex size-7 items-center justify-center rounded-[0.7rem] border border-accent-gold/20 bg-accent-gold/10 text-accent-gold">
+                      <div className="inline-flex size-7 items-center justify-center rounded-field border border-accent-gold/20 bg-accent-gold/10 text-accent-gold">
                         <User2Icon size={14} />
                       </div>
                       <div>
@@ -156,7 +156,7 @@ export function UserMessageBubble({
                       <div className="space-y-3">
                         <textarea
                           aria-label="Edit user turn prompt"
-                          className="min-h-[7rem] w-full resize-y rounded-[0.85rem] border border-accent-gold/25 bg-black/10 px-3 py-2.5 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-accent-gold/45 focus:bg-black/15"
+                          className="min-h-[7rem] w-full resize-y rounded-card-lg border border-accent-gold/25 bg-black/10 px-3 py-2.5 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-accent-gold/45 focus:bg-black/15"
                           onChange={(event) => setInlineEditDraft(event.target.value)}
                           onClick={(event) => event.stopPropagation()}
                           placeholder="Edit this user prompt, then continue to backtrack…"

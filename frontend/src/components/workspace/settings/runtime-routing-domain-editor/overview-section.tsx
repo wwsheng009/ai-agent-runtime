@@ -32,7 +32,7 @@ export function RuntimeRoutingOverviewSection({
   t: TFunction<"runtimeConfig">;
 }) {
   return (
-      <div className="rounded-[0.9rem] border border-border bg-surface-softer p-3">
+      <div className="rounded-panel border border-border bg-surface-softer p-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             <SettingsPanelIcon>
@@ -80,7 +80,7 @@ export function RuntimeRoutingOverviewSection({
             />
           </ConfigFormField>
 
-          <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
+          <div className="rounded-card border border-border bg-surface-softer p-3">
             <div className="text-[13px] font-semibold text-foreground">routing.failover</div>
             <div className="mt-1 text-xs leading-5 text-muted-foreground">
               {t("editor.routing.failoverHelp")}

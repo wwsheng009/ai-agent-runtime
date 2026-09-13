@@ -42,7 +42,7 @@ export function ProviderAccountSection({
   const { t } = useTranslation("runtimeConfig");
   return (
     <>
-          <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
+          <div className="rounded-card border border-border bg-surface-softer p-3">
             <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
               <div className="min-w-0 flex-1">
                 <div className="text-[13px] font-semibold text-foreground">

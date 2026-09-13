@@ -16,7 +16,7 @@ export function ArtifactMetadataAside({
   return (
     <aside className="app-scrollbar min-h-0 overflow-y-auto border-b border-border px-4 py-4 xl:border-b-0 xl:border-r">
       <div className="space-y-4">
-        <section className="rounded-[0.9rem] border border-border bg-surface-softer px-3.5 py-3">
+        <section className="rounded-panel border border-border bg-surface-softer px-3.5 py-3">
           <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
             Artifact path
           </div>
@@ -29,7 +29,7 @@ export function ArtifactMetadataAside({
           {metaItems.map((item) => (
             <div
               key={`${artifact.id}-${item.label}`}
-              className="rounded-[0.8rem] border border-border bg-surface-softer px-3 py-2.5"
+              className="rounded-card border border-border bg-surface-softer px-3 py-2.5"
             >
               <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                 {item.label}

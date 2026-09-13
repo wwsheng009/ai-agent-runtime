@@ -106,7 +106,7 @@ export function CacheAnalyticsPanel({ sessionId }: { sessionId: string }) {
 
   return (
     <>
-      <section aria-label={t("cache.title")} className="surface-panel flex flex-wrap items-center justify-between gap-2 rounded-[0.95rem] px-3 py-2.5 sm:px-4">
+      <section aria-label={t("cache.title")} className="surface-panel flex flex-wrap items-center justify-between gap-2 rounded-panel-lg px-3 py-2.5 sm:px-4">
         <div className="min-w-0">
           <h2 className="text-sm font-semibold">{t("cache.title")}</h2>
           <p className="mt-0.5 text-xs text-muted-foreground">{t("cache.description")}</p>
@@ -125,13 +125,13 @@ export function CacheAnalyticsPanel({ sessionId }: { sessionId: string }) {
       </section>
 
       {error ? (
-        <div role="alert" className="rounded-[0.9rem] border border-analytics-danger-border bg-analytics-danger-soft px-3 py-2.5 text-sm text-analytics-danger">
+        <div role="alert" className="rounded-panel border border-analytics-danger-border bg-analytics-danger-soft px-3 py-2.5 text-sm text-analytics-danger">
           {t("loadError")}: {error}
         </div>
       ) : (
         <>
           {partial ? (
-            <div className="flex items-start gap-2 rounded-[0.9rem] border border-analytics-warning-border bg-analytics-warning-soft px-3 py-2.5 text-sm text-analytics-warning">
+            <div className="flex items-start gap-2 rounded-panel border border-analytics-warning-border bg-analytics-warning-soft px-3 py-2.5 text-sm text-analytics-warning">
               <AlertTriangleIcon size={16} className="mt-0.5 shrink-0" />
               <span>{t("cache.partialBanner", { max: String(maxRequests) })}</span>
             </div>
@@ -146,7 +146,7 @@ export function CacheAnalyticsPanel({ sessionId }: { sessionId: string }) {
             <CacheMetric label={t("cache.metrics.generatedAt")} value={formatCacheTime(overview?.generated_at)} detail={t("cache.metrics.dataSourceLive")} />
           </section>
 
-          <section aria-label={t("cache.distributionTitle")} className="surface-panel rounded-[0.95rem] p-3 sm:p-4">
+          <section aria-label={t("cache.distributionTitle")} className="surface-panel rounded-panel-lg p-3 sm:p-4">
             <h2 className="text-sm font-semibold">{t("cache.distributionTitle")}</h2>
             <div className="mt-2 flex flex-wrap gap-2">
               <DistributionChip tone="success" label={t("cache.status.hit")} count={distribution.hit} />

@@ -34,7 +34,7 @@ export function RuntimeProxyDomainEditor({
 
   return (
     <div className="space-y-3">
-      <div className="rounded-[0.9rem] border border-border bg-surface-softer p-3">
+      <div className="rounded-panel border border-border bg-surface-softer p-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             <SettingsPanelIcon>

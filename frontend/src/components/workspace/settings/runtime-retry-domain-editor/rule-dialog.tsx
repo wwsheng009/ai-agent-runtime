@@ -67,7 +67,7 @@ export function RuntimeRetryRuleDialog({
                 placeholder="rate_limit_retry"
               />
             </ConfigFormField>
-            <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
+            <div className="rounded-card border border-border bg-surface-softer p-3">
               <div className="text-sm font-semibold text-foreground">enabled</div>
               <label className={`mt-3 ${editorToggleRowClassName}`}>
                 <span>
@@ -223,7 +223,7 @@ export function RuntimeRetryRuleDialog({
                 }
               />
             </ConfigFormField>
-            <div className="rounded-[0.8rem] border border-border bg-surface-softer p-3">
+            <div className="rounded-card border border-border bg-surface-softer p-3">
               <div className="text-sm font-semibold text-foreground">
                 keyword.case_sensitive
               </div>

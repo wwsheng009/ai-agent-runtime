@@ -26,7 +26,7 @@ export function SessionTable({ sessions, total, loading, search, offset, pageSiz
 }) {
   const { t } = useTranslation("usageAnalytics");
   return (
-    <section aria-labelledby="usage-sessions-title" className="surface-panel min-w-0 rounded-[0.95rem] p-3.5 sm:p-4">
+    <section aria-labelledby="usage-sessions-title" className="surface-panel min-w-0 rounded-panel-lg p-3.5 sm:p-4">
       <div className="mb-3 flex items-end justify-between gap-3">
         <div>
           <h2 id="usage-sessions-title" className="text-sm font-semibold">{t("sessions.title")}</h2>
@@ -36,13 +36,13 @@ export function SessionTable({ sessions, total, loading, search, offset, pageSiz
       </div>
       <div className="grid gap-2 lg:hidden">
         {sessions.length === 0 ? (
-          <div className="rounded-[0.8rem] border border-border bg-surface-softer px-3 py-10 text-center text-sm text-muted-foreground">
+          <div className="rounded-card border border-border bg-surface-softer px-3 py-10 text-center text-sm text-muted-foreground">
             {loading ? t("loading") : t("sessions.empty")}
           </div>
         ) : sessions.map((session) => {
           const href = `/usage/sessions/${encodeURIComponent(session.session_id)}${search ? `?${search}` : ""}`;
           return (
-            <article key={session.session_id} className="rounded-[0.85rem] border border-border bg-surface-softer p-3">
+            <article key={session.session_id} className="rounded-card-lg border border-border bg-surface-softer p-3">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <Link to={href} className="block truncate font-medium hover:text-accent-primary">
@@ -84,7 +84,7 @@ export function SessionTable({ sessions, total, loading, search, offset, pageSiz
         })}
       </div>
 
-      <div className="hidden w-full max-w-full overflow-x-auto rounded-[0.8rem] border border-border lg:block">
+      <div className="hidden w-full max-w-full overflow-x-auto rounded-card border border-border lg:block">
         <table className="w-full min-w-[1240px] border-collapse text-left text-sm">
           <thead className="bg-surface-softer text-xs text-muted-foreground">
             <tr className="border-b border-border">
@@ -186,12 +186,12 @@ export function SessionDetail() {
         <AnalyticsHeader onRefresh={() => void load()} refreshing={loading} />
         <main className="flex min-w-0 flex-1 flex-col gap-2">
           {error ? (
-            <div role="alert" className="rounded-[0.9rem] border border-analytics-danger-border bg-analytics-danger-soft px-3 py-2.5 text-sm text-analytics-danger">{t("loadError")}: {error}</div>
+            <div role="alert" className="rounded-panel border border-analytics-danger-border bg-analytics-danger-soft px-3 py-2.5 text-sm text-analytics-danger">{t("loadError")}: {error}</div>
           ) : !detail ? (
-            <div className="surface-panel flex min-h-60 items-center justify-center rounded-[0.95rem] text-sm text-muted-foreground"><RefreshCwIcon size={16} className={cn("mr-2", loading && "animate-spin")} />{t("loading")}</div>
+            <div className="surface-panel flex min-h-60 items-center justify-center rounded-panel-lg text-sm text-muted-foreground"><RefreshCwIcon size={16} className={cn("mr-2", loading && "animate-spin")} />{t("loading")}</div>
           ) : (
             <>
-              <section className="surface-panel flex flex-col gap-3 rounded-[0.95rem] p-3.5 sm:p-4 lg:flex-row lg:items-end lg:justify-between">
+              <section className="surface-panel flex flex-col gap-3 rounded-panel-lg p-3.5 sm:p-4 lg:flex-row lg:items-end lg:justify-between">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <h2 className="break-all text-base font-semibold">{detail.session.title || detail.session.session_id}</h2>
@@ -238,7 +238,7 @@ function SessionOverview({ detail }: { detail: AnalyticsSessionUsageDetail }) {
 function Diagnostics({ diagnostics }: { diagnostics: AnalyticsDiagnostic[] }) {
   const { t } = useTranslation("usageAnalytics");
   return (
-    <section aria-labelledby="diagnostics-title" className="surface-panel rounded-[0.95rem] p-3.5 sm:p-4">
+    <section aria-labelledby="diagnostics-title" className="surface-panel rounded-panel-lg p-3.5 sm:p-4">
       <div className="mb-2 flex items-center justify-between gap-3">
         <div><h3 id="diagnostics-title" className="text-sm font-semibold">{t("diagnostics.title")}</h3><p className="text-xs text-muted-foreground">{t("diagnostics.subtitle")}</p></div>
         <Badge>{t("diagnostics.count", { count: diagnostics.length })}</Badge>
@@ -246,7 +246,7 @@ function Diagnostics({ diagnostics }: { diagnostics: AnalyticsDiagnostic[] }) {
       {diagnostics.length === 0 ? (
         <div className="flex items-center gap-2 py-3 text-sm text-analytics-success"><CheckCircle2Icon size={16} />{t("diagnostics.empty")}</div>
       ) : (
-        <div className="overflow-hidden rounded-[0.8rem] border border-border divide-y divide-border">
+        <div className="overflow-hidden rounded-card border border-border divide-y divide-border">
           {diagnostics.map((diagnostic, index) => (
             <div key={`${diagnostic.code}-${diagnostic.turn_id ?? index}`} className="flex items-start gap-3 px-3 py-2.5">
               <AlertTriangleIcon size={15} className={cn("mt-0.5 shrink-0", diagnostic.severity === "error" ? "text-analytics-danger" : diagnostic.severity === "warning" ? "text-analytics-warning" : "text-analytics-info")} />
@@ -265,9 +265,9 @@ function SessionTokens({ detail }: { detail: AnalyticsSessionUsageDetail }) {
   return (
     <>
       <TurnTable turns={detail.turns} />
-      <section aria-labelledby="requests-title" className="surface-panel rounded-[0.95rem] p-3.5 sm:p-4">
+      <section aria-labelledby="requests-title" className="surface-panel rounded-panel-lg p-3.5 sm:p-4">
         <div className="mb-2"><h3 id="requests-title" className="text-sm font-semibold">{t("requests.title")}</h3><p className="text-xs text-muted-foreground">{t("requests.subtitle", { count: detail.step_count })}</p></div>
-        <div className="w-full max-w-full overflow-x-auto rounded-[0.8rem] border border-border">
+        <div className="w-full max-w-full overflow-x-auto rounded-card border border-border">
           <table className="w-full min-w-[820px] border-collapse text-left text-sm">
             <thead className="bg-surface-softer text-xs text-muted-foreground"><tr className="border-b border-border"><th className="px-3 py-2 font-medium">{t("requests.columns.turn")}</th><th className="px-3 py-2 font-medium">{t("requests.columns.step")}</th><th className="px-3 py-2 font-medium">{t("requests.columns.tokens")}</th><th className="px-3 py-2 font-medium">{t("requests.columns.cache")}</th><th className="px-3 py-2 font-medium">{t("requests.columns.context")}</th><th className="px-3 py-2 font-medium">{t("requests.columns.duration")}</th><th className="px-3 py-2 font-medium">{t("requests.columns.outcome")}</th></tr></thead>
             <tbody>{detail.steps.slice(-250).map((step, index) => <tr key={`${step.trace_id}-${step.step}-${index}`} className="border-b border-border/70 last:border-b-0"><td className="max-w-52 truncate px-3 py-2 font-mono text-xs" title={step.trace_id}>{shortID(step.trace_id || "-")}</td><td className="px-3 py-2 tabular-nums">{step.step ?? index + 1}</td><td className="px-3 py-2 tabular-nums">{step.usage_available ? formatNumber(step.total_tokens) : t("unavailable")}</td><td className="px-3 py-2 tabular-nums">{formatNumber(step.cached_tokens)}</td><td className="px-3 py-2 tabular-nums">{formatPercent(step.context_utilization)}</td><td className="px-3 py-2 tabular-nums">{formatDuration(step.duration_ms)}</td><td className="px-3 py-2"><Badge className={step.success ? "border-analytics-success-border bg-analytics-success-soft text-analytics-success" : "border-analytics-danger-border bg-analytics-danger-soft text-analytics-danger"}>{step.success ? t("outcomes.success") : t(errorCategoryKey(step.error_category))}</Badge></td></tr>)}</tbody>
@@ -283,9 +283,9 @@ function TurnTable({ turns, compact = false }: { turns: AnalyticsTurnUsage[]; co
   const { t } = useTranslation("usageAnalytics");
   const visibleTurns = compact ? turns.slice(-20) : turns;
   return (
-    <section aria-labelledby={compact ? "recent-turns-title" : "turns-title"} className="surface-panel rounded-[0.95rem] p-3.5 sm:p-4">
+    <section aria-labelledby={compact ? "recent-turns-title" : "turns-title"} className="surface-panel rounded-panel-lg p-3.5 sm:p-4">
       <div className="mb-2"><h3 id={compact ? "recent-turns-title" : "turns-title"} className="text-sm font-semibold">{compact ? t("turns.recentTitle") : t("turns.title")}</h3><p className="text-xs text-muted-foreground">{t("turns.subtitle", { count: turns.length })}</p></div>
-      <div className="w-full max-w-full overflow-x-auto rounded-[0.8rem] border border-border">
+      <div className="w-full max-w-full overflow-x-auto rounded-card border border-border">
         <table className="w-full min-w-[860px] border-collapse text-left text-sm">
           <thead className="bg-surface-softer text-xs text-muted-foreground"><tr className="border-b border-border"><th className="px-3 py-2 font-medium">{t("turns.columns.turn")}</th><th className="px-3 py-2 font-medium">{t("turns.columns.time")}</th><th className="px-3 py-2 font-medium">{t("turns.columns.tokens")}</th><th className="px-3 py-2 font-medium">{t("turns.columns.requests")}</th><th className="px-3 py-2 font-medium">{t("turns.columns.errors")}</th><th className="px-3 py-2 font-medium">{t("turns.columns.context")}</th><th className="px-3 py-2 font-medium">{t("turns.columns.outcome")}</th></tr></thead>
           <tbody>{visibleTurns.length === 0 ? <tr><td colSpan={7} className="px-3 py-8 text-center text-muted-foreground">{t("turns.empty")}</td></tr> : visibleTurns.map((turn) => <tr key={`${turn.trace_id}-${turn.ordinal}`} className="border-b border-border/70 last:border-b-0"><td className="px-3 py-2"><div className="font-medium">#{turn.ordinal}</div><div className="max-w-44 truncate font-mono text-xs text-muted-foreground" title={turn.turn_id}>{shortID(turn.turn_id || turn.trace_id)}</div></td><td className="px-3 py-2"><div>{formatTimestamp(turn.started_at)}</div><div className="text-xs text-muted-foreground">{formatDuration(turn.duration_ms)}</div></td><td className="px-3 py-2 tabular-nums"><div>{formatNumber(turn.usage.total_tokens)}</div><div className="text-xs text-muted-foreground">{formatPercent(turn.usage_coverage)}</div></td><td className="px-3 py-2 tabular-nums">{formatNumber(turn.llm_requests)}</td><td className="px-3 py-2 tabular-nums">{formatNumber(turn.llm_errors)}</td><td className="px-3 py-2 tabular-nums">{formatPercent(turn.max_context_utilization)}</td><td className="px-3 py-2"><Badge className={outcomeTone(turn.outcome)}>{t(outcomeKey(turn.outcome))}</Badge></td></tr>)}</tbody>

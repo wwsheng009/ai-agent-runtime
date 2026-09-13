@@ -63,10 +63,10 @@ export function WhatsNewSection() {
             key={card.title}
             className={
               index === 0
-                ? "rounded-[1.8rem] border border-white/8 bg-[linear-gradient(180deg,rgba(240,199,123,0.12),rgba(255,255,255,0.03))] p-6 lg:col-span-2"
+                ? "rounded-hero border border-white/8 bg-[linear-gradient(180deg,rgba(240,199,123,0.12),rgba(255,255,255,0.03))] p-6 lg:col-span-2"
                 : index === 3
-                  ? "rounded-[1.8rem] border border-white/8 bg-[linear-gradient(180deg,rgba(143,208,198,0.12),rgba(255,255,255,0.03))] p-6 lg:col-span-2"
-                  : "rounded-[1.8rem] border border-white/8 bg-white/4 p-6"
+                  ? "rounded-hero border border-white/8 bg-[linear-gradient(180deg,rgba(143,208,198,0.12),rgba(255,255,255,0.03))] p-6 lg:col-span-2"
+                  : "rounded-hero border border-white/8 bg-white/4 p-6"
             }
           >
             <div className="flex items-center gap-3 text-sm font-semibold">

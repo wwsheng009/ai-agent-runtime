@@ -75,7 +75,7 @@ export function WorkspaceSidebarChatsSection({
                 title={title}
                 onClick={() => onSelectThread(thread.id)}
                 className={cn(
-                  "flex w-full items-center gap-2.5 rounded-[0.8rem] border px-2.5 py-2 text-left transition",
+                  "flex w-full items-center gap-2.5 rounded-card border px-2.5 py-2 text-left transition",
                   isActive
                     ? "border-accent-primary-border bg-accent-primary-soft"
                     : "border-border bg-surface-softer hover:border-border-strong hover:bg-surface-soft",
@@ -96,7 +96,7 @@ export function WorkspaceSidebarChatsSection({
             );
           })
         ) : (
-          <div className="rounded-[0.8rem] border border-dashed border-border px-3 py-3 text-sm leading-6 text-muted-foreground">
+          <div className="rounded-card border border-dashed border-border px-3 py-3 text-sm leading-6 text-muted-foreground">
             {deferredQuery
               ? t("sidebar.emptyChats.search")
               : t("sidebar.emptyChats.default")}

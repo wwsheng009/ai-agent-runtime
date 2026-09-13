@@ -81,7 +81,7 @@ export function AppearanceThemeSection({
                   </div>
                   <div
                     className={cn(
-                      "mt-2.5 h-14 rounded-[0.7rem] border",
+                      "mt-2.5 h-14 rounded-field border",
                       option.id === "dark" ||
                         (option.id === "system" && systemTheme === "dark")
                         ? "border-white/10 bg-[linear-gradient(180deg,#111318,#0c0d10)]"

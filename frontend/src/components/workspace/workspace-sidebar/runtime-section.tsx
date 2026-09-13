@@ -81,32 +81,32 @@ export function WorkspaceSidebarRuntimeSection({
         isOpen={openSections.runtime}
         onToggle={toggleSection}
       >
-        <section className="rounded-[0.9rem] border border-border bg-surface-softer p-3">
+        <section className="rounded-panel border border-border bg-surface-softer p-3">
           {hasRuntimeStats ? (
             <div className="flex flex-wrap gap-1.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
               {runtimeSessionsSummary.totalCount > 0 ? (
-                <span className="rounded-[0.65rem] border border-border bg-surface-soft px-2 py-0.5">
+                <span className="rounded-control border border-border bg-surface-soft px-2 py-0.5">
                   {t("sidebar.runtimeStats.sessions", {
                     count: runtimeSessionsSummary.totalCount,
                   })}
                 </span>
               ) : null}
               {runtimeSessionsSummary.recoverableCount > 0 ? (
-                <span className="rounded-[0.65rem] border border-border bg-surface-soft px-2 py-0.5">
+                <span className="rounded-control border border-border bg-surface-soft px-2 py-0.5">
                   {t("sidebar.runtimeStats.recoverable", {
                     count: runtimeSessionsSummary.recoverableCount,
                   })}
                 </span>
               ) : null}
               {sessionRailSummary.pendingCount > 0 ? (
-                <span className="rounded-[0.65rem] border border-border bg-surface-soft px-2 py-0.5">
+                <span className="rounded-control border border-border bg-surface-soft px-2 py-0.5">
                   {t("sidebar.runtimeStats.pending", {
                     count: sessionRailSummary.pendingCount,
                   })}
                 </span>
               ) : null}
             {runtimeSessionsLoading || runtimeSessionsRefreshing ? (
-              <span className="inline-flex items-center gap-1.5 rounded-[0.65rem] border border-border bg-surface-soft px-2 py-0.5">
+              <span className="inline-flex items-center gap-1.5 rounded-control border border-border bg-surface-soft px-2 py-0.5">
                 <LoaderCircleIcon size={12} className="animate-spin" />
                 {t("sidebar.runtimeStats.syncing")}
               </span>
@@ -115,7 +115,7 @@ export function WorkspaceSidebarRuntimeSection({
           ) : null}
 
         {runtimeSessionsError ? (
-          <div className="mt-3 rounded-[0.8rem] border border-accent-orange/18 bg-accent-orange/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
+          <div className="mt-3 rounded-card border border-accent-orange/18 bg-accent-orange/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
             {runtimeSessionsError}
           </div>
         ) : null}

@@ -18,7 +18,7 @@ export function SourceModeSection({ core }: { core: ConfigEditorCore }) {
 
   return (
     <>
-      <div className="rounded-[0.9rem] border border-border bg-surface-softer p-3">
+      <div className="rounded-panel border border-border bg-surface-softer p-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-2">
             <div className="text-base font-semibold text-foreground">
@@ -49,7 +49,7 @@ export function SourceModeSection({ core }: { core: ConfigEditorCore }) {
         </div>
       </div>
 
-      <div className="rounded-[0.9rem] border border-border bg-surface-softer p-3">
+      <div className="rounded-panel border border-border bg-surface-softer p-3">
         <textarea
           className={cn(
             editorControlClassName,

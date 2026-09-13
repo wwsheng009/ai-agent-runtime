@@ -83,7 +83,7 @@ export function RuntimeTeamsDialog({
         }
       }}
     >
-      <div className="flex max-h-[calc(100vh-1.5rem)] w-full max-w-7xl flex-col overflow-hidden rounded-[0.9rem] border border-border [background:var(--dialog-bg)] shadow-[0_12px_36px_rgba(0,0,0,0.22)]">
+      <div className="flex max-h-[calc(100vh-1.5rem)] w-full max-w-7xl flex-col overflow-hidden rounded-panel border border-border [background:var(--dialog-bg)] shadow-[0_12px_36px_rgba(0,0,0,0.22)]">
         <div className="flex items-start justify-between gap-3 border-b border-border px-3.5 py-3 sm:px-4">
           <div>
             <div className="app-text-11 uppercase tracking-[0.16em] text-accent-secondary">
@@ -128,7 +128,7 @@ export function RuntimeTeamsDialog({
 
 function RuntimeTeamsDialogContentFallback() {
   return (
-    <div className="rounded-[0.9rem] border border-border bg-surface-softer px-3.5 py-2.5 text-sm text-muted-foreground">
+    <div className="rounded-panel border border-border bg-surface-softer px-3.5 py-2.5 text-sm text-muted-foreground">
       正在加载 runtime teams 内容…
     </div>
   );

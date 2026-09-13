@@ -14,7 +14,7 @@ export function TeamDetailsSection({
   title,
 }: TeamDetailsSectionProps) {
   return (
-    <section className="mt-3 rounded-[0.8rem] border border-border bg-surface-softer px-3 py-2.5">
+    <section className="mt-3 rounded-card border border-border bg-surface-softer px-3 py-2.5">
       <button
         type="button"
         onClick={onToggle}

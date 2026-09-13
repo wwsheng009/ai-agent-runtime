@@ -88,7 +88,7 @@ export function LogsHeaderSection({
   ] as const;
 
   return (
-    <header className="surface-panel relative overflow-hidden rounded-[0.95rem] px-3 py-2 sm:px-3.5">
+    <header className="surface-panel relative overflow-hidden rounded-panel-lg px-3 py-2 sm:px-3.5">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(240,199,123,0.18),transparent_28%),radial-gradient(circle_at_right,rgba(103,215,230,0.12),transparent_22%)]" />
       <div className="relative flex flex-col gap-2">
         <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
@@ -153,7 +153,7 @@ export function LogsHeaderSection({
           </nav>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 rounded-[0.85rem] border border-border bg-surface-softer p-2">
+        <div className="flex flex-wrap items-center gap-2 rounded-card-lg border border-border bg-surface-softer p-2">
           <label className="relative min-w-[16rem] flex-1">
             <SearchIcon
               size={14}
@@ -164,11 +164,11 @@ export function LogsHeaderSection({
               onChange={(event) => onQueryChange(event.target.value)}
               placeholder={t("searchPlaceholder")}
               aria-label={t("searchPlaceholder")}
-              className="h-8 w-full rounded-[0.7rem] border border-border bg-black/15 pl-10 pr-4 app-text-11 text-foreground outline-none transition focus:border-accent-primary-border focus:ring-2 focus:ring-ring"
+              className="h-8 w-full rounded-field border border-border bg-black/15 pl-10 pr-4 app-text-11 text-foreground outline-none transition focus:border-accent-primary-border focus:ring-2 focus:ring-ring"
             />
           </label>
 
-          <label className="flex h-8 min-w-[8.5rem] items-center gap-2 rounded-[0.7rem] border border-border bg-black/10 px-3">
+          <label className="flex h-8 min-w-[8.5rem] items-center gap-2 rounded-field border border-border bg-black/10 px-3">
             <span className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
               {t("levelLabel")}
             </span>
@@ -183,7 +183,7 @@ export function LogsHeaderSection({
             />
           </label>
 
-          <label className="flex h-8 min-w-[11rem] flex-1 items-center gap-2 rounded-[0.7rem] border border-border bg-black/10 px-3 sm:flex-none">
+          <label className="flex h-8 min-w-[11rem] flex-1 items-center gap-2 rounded-field border border-border bg-black/10 px-3 sm:flex-none">
             <span className="flex items-center gap-1.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
               <ShieldIcon size={12} />
               {t("tokenLabel")}
@@ -218,7 +218,7 @@ export function LogsHeaderSection({
             />
           </div>
 
-          <label className="flex h-8 items-center gap-2.5 rounded-[0.7rem] border border-border bg-black/10 px-3 whitespace-nowrap">
+          <label className="flex h-8 items-center gap-2.5 rounded-field border border-border bg-black/10 px-3 whitespace-nowrap">
             <span className="app-text-11 font-medium">{t("followLatest")}</span>
             <input
               type="checkbox"
@@ -242,7 +242,7 @@ export function LogsHeaderSection({
         </div>
 
         {activeChips.length > 0 ? (
-          <div className="flex flex-wrap items-center gap-2 rounded-[0.8rem] border border-border/70 bg-black/8 px-2.5 py-1.5">
+          <div className="flex flex-wrap items-center gap-2 rounded-card border border-border/70 bg-black/8 px-2.5 py-1.5">
             <span className="app-text-9 uppercase tracking-[0.16em] text-muted-foreground">
               {t("currentView")}
             </span>
@@ -251,7 +251,7 @@ export function LogsHeaderSection({
                 key={`${chip.key}:${chip.value}`}
                 type="button"
                 onClick={() => onClearChip(chip.key)}
-                className="inline-flex items-center gap-2 rounded-[0.65rem] border border-border bg-surface-soft px-2.5 py-1 app-text-10 text-foreground transition hover:border-accent-primary-border hover:bg-accent-primary-soft"
+                className="inline-flex items-center gap-2 rounded-control border border-border bg-surface-soft px-2.5 py-1 app-text-10 text-foreground transition hover:border-accent-primary-border hover:bg-accent-primary-soft"
                 title={`${t("clearSearch")} ${chip.label}`}
               >
                 <span className="uppercase tracking-[0.14em] text-muted-foreground">
@@ -264,7 +264,7 @@ export function LogsHeaderSection({
             <Button
               variant="ghost"
               size="sm"
-              className="h-7 rounded-[0.65rem] border border-border bg-black/10 px-2.5 text-muted-foreground hover:bg-black/20 hover:text-foreground"
+              className="h-7 rounded-control border border-border bg-black/10 px-2.5 text-muted-foreground hover:bg-black/20 hover:text-foreground"
               onClick={onClearAll}
             >
               {t("clearAll")}

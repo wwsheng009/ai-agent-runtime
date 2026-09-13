@@ -36,7 +36,7 @@ export function DispatchMonitorPanel({
   const batchSummary = summarizeDispatchBatch(comparisonRows);
 
   return (
-    <div className="rounded-[0.8rem] border border-white/8 bg-white/[0.03] px-3 py-2.5">
+    <div className="rounded-card border border-white/8 bg-white/[0.03] px-3 py-2.5">
       <div className="flex items-center justify-between gap-3">
         <div>
           <div className="text-sm font-semibold text-foreground">

@@ -108,7 +108,7 @@ function CodeBlockSurface({
   return (
     <div
       className={cn(
-        "app-code-surface overflow-hidden rounded-[0.9rem] border border-border bg-code-block-bg",
+        "app-code-surface overflow-hidden rounded-panel border border-border bg-code-block-bg",
         className,
       )}
     >

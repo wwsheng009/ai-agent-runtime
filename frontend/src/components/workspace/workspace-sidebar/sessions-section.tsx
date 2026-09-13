@@ -88,7 +88,7 @@ export function WorkspaceSidebarSessionsSection({
       >
         <div className="space-y-2">
           {runtimeSessionUsersLoading && sessionUserMenuItems.length === 0 ? (
-            <div className="inline-flex items-center gap-1.5 rounded-[0.65rem] border border-border bg-surface-soft px-2 py-1 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
+            <div className="inline-flex items-center gap-1.5 rounded-control border border-border bg-surface-soft px-2 py-1 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
               <LoaderCircleIcon size={12} className="animate-spin" />
               {t("sidebar.sessionUsersLoading")}
             </div>
@@ -111,7 +111,7 @@ export function WorkspaceSidebarSessionsSection({
                       title={user.userId}
                       onClick={() => onSelectRuntimeSessionUser(user.userId)}
                       className={cn(
-                        "flex w-full items-center gap-2 rounded-[0.8rem] border px-2.5 py-2 text-left transition",
+                        "flex w-full items-center gap-2 rounded-card border px-2.5 py-2 text-left transition",
                         isSelectedUser
                           ? "border-accent-secondary-border bg-accent-secondary-soft"
                           : "border-border bg-surface-softer hover:border-border-strong hover:bg-surface-soft",
@@ -258,7 +258,7 @@ export function WorkspaceSidebarSessionsSection({
                             );
                           })
                         ) : (
-                          <div className="rounded-[0.8rem] border border-dashed border-border px-3 py-3 text-sm leading-6 text-muted-foreground">
+                          <div className="rounded-card border border-dashed border-border px-3 py-3 text-sm leading-6 text-muted-foreground">
                             {deferredQuery
                               ? t("sidebar.emptySessions.search")
                               : t("sidebar.emptySessions.default")}
@@ -270,7 +270,7 @@ export function WorkspaceSidebarSessionsSection({
                 );
               })
             ) : !runtimeSessionUsersLoading ? (
-              <div className="rounded-[0.8rem] border border-dashed border-border px-3 py-3 text-sm leading-6 text-muted-foreground">
+              <div className="rounded-card border border-dashed border-border px-3 py-3 text-sm leading-6 text-muted-foreground">
                 {deferredQuery
                   ? t("sidebar.emptySessions.search")
                   : t("sidebar.emptySessions.default")}

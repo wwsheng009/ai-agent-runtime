@@ -28,7 +28,7 @@ export function RequestsTable({ requests, total, offset, pageSize, loading, onPa
   const canPrev = offset > 0;
   const canNext = offset + pageSize < total;
   return (
-    <section aria-label={t("cache.requestsTitle")} className="surface-panel rounded-[0.95rem] p-3 sm:p-4">
+    <section aria-label={t("cache.requestsTitle")} className="surface-panel rounded-panel-lg p-3 sm:p-4">
       <div className="flex items-center justify-between gap-2">
         <h2 className="text-sm font-semibold">{t("cache.requestsTitle")}</h2>
         <div className="flex items-center gap-1 text-xs text-muted-foreground">

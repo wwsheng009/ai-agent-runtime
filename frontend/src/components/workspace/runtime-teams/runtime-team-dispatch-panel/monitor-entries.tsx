@@ -20,7 +20,7 @@ export function DispatchMonitorEntries({ dispatchMonitor }: DispatchMonitorEntri
         dispatchMonitor.map((entry) => (
           <div
             key={`dispatch-monitor-${entry.teamId}-${entry.taskId}`}
-            className="rounded-[0.8rem] border border-white/8 bg-black/15 px-3 py-2.5"
+            className="rounded-card border border-white/8 bg-black/15 px-3 py-2.5"
           >
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
@@ -63,7 +63,7 @@ export function DispatchMonitorEntries({ dispatchMonitor }: DispatchMonitorEntri
                 {entry.mailboxPreview.map((line, index) => (
                   <div
                     key={`dispatch-mailbox-${entry.teamId}-${entry.taskId}-${index}`}
-                    className="rounded-[0.7rem] border border-white/8 bg-white/4 px-3 py-2"
+                    className="rounded-field border border-white/8 bg-white/4 px-3 py-2"
                   >
                     <MessageMarkdown
                       className={compactMarkdownClass}
@@ -75,7 +75,7 @@ export function DispatchMonitorEntries({ dispatchMonitor }: DispatchMonitorEntri
             ) : null}
 
             {entry.error ? (
-              <div className="mt-2 rounded-[0.7rem] border border-accent-orange/18 bg-accent-orange/8 px-3 py-2 text-sm leading-6 text-muted-foreground">
+              <div className="mt-2 rounded-field border border-accent-orange/18 bg-accent-orange/8 px-3 py-2 text-sm leading-6 text-muted-foreground">
                 {entry.error}
               </div>
             ) : null}

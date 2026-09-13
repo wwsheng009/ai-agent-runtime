@@ -23,7 +23,7 @@ export function ConfigUnsavedBar({ core }: { core: ConfigEditorCore }) {
   return (
     hasUnsavedChanges ? (
       <div className="mt-3">
-        <div className="rounded-[0.9rem] border border-accent-primary-border bg-accent-primary-soft px-3 py-2.5">
+        <div className="rounded-panel border border-accent-primary-border bg-accent-primary-soft px-3 py-2.5">
           <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
             <div className="flex flex-wrap items-center gap-2">
               <Badge>{t("editor.sticky.unsaved")}</Badge>

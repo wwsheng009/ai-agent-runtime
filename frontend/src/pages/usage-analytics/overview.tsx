@@ -121,7 +121,7 @@ export function UsageOverview() {
         <main className="flex min-w-0 flex-1 flex-col gap-2">
           <form
             aria-label={t("filters.title")}
-            className="surface-panel rounded-[0.95rem] p-3 sm:p-4"
+            className="surface-panel rounded-panel-lg p-3 sm:p-4"
             onSubmit={(event) => event.preventDefault()}
           >
             <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -158,17 +158,17 @@ export function UsageOverview() {
             <div className="mt-3 grid gap-2 md:grid-cols-[11rem_minmax(0,20rem)]">
               <label className="min-w-0">
                 <span className="mb-1 block text-xs text-muted-foreground">{t("filters.groupBy")}</span>
-                <Select ariaLabel={t("filters.groupBy")} value={groupBy} options={groupOptions} onChange={(value) => updateFilter("group_by", value)} triggerClassName="h-9 rounded-[0.7rem]" />
+                <Select ariaLabel={t("filters.groupBy")} value={groupBy} options={groupOptions} onChange={(value) => updateFilter("group_by", value)} triggerClassName="h-9 rounded-field" />
               </label>
               <label className="min-w-0">
                 <span className="mb-1 flex items-center gap-1 text-xs text-muted-foreground"><ShieldIcon size={12} />{t("filters.token")}</span>
-                <input type="password" autoComplete="off" value={adminToken} onChange={(event) => setAdminToken(event.target.value)} placeholder={t("filters.tokenPlaceholder")} className="h-9 w-full rounded-[0.7rem] border border-border bg-surface-softer px-3 text-sm outline-none transition focus:border-accent-primary-border focus:ring-2 focus:ring-ring" />
+                <input type="password" autoComplete="off" value={adminToken} onChange={(event) => setAdminToken(event.target.value)} placeholder={t("filters.tokenPlaceholder")} className="h-9 w-full rounded-field border border-border bg-surface-softer px-3 text-sm outline-none transition focus:border-accent-primary-border focus:ring-2 focus:ring-ring" />
               </label>
             </div>
           </form>
 
           {error ? (
-            <div role="alert" className="rounded-[0.9rem] border border-analytics-danger-border bg-analytics-danger-soft px-3 py-2.5 text-sm text-analytics-danger">
+            <div role="alert" className="rounded-panel border border-analytics-danger-border bg-analytics-danger-soft px-3 py-2.5 text-sm text-analytics-danger">
               {t("loadError")}: {error}
             </div>
           ) : (

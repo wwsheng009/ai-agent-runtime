@@ -11,7 +11,7 @@ export function SidebarStateIcon({ spec }: { spec: SidebarStateIconSpec }) {
       title={spec.label}
       aria-label={spec.label}
       className={cn(
-        "inline-flex size-[1.375rem] items-center justify-center rounded-[0.65rem] border",
+        "inline-flex size-[1.375rem] items-center justify-center rounded-control border",
         spec.toneClassName,
       )}
     >

@@ -180,7 +180,7 @@ export function AboutSettingsPage({
         <div className="grid gap-3 lg:grid-cols-2">
           <SettingsInfoCard
             title={t("about.settingsKey")}
-            className="rounded-[0.9rem]"
+            className="rounded-panel"
           >
             <p className="app-inline-mono break-all text-muted-foreground">
               {APP_SETTINGS_STORAGE_KEY}
@@ -189,7 +189,7 @@ export function AboutSettingsPage({
 
           <SettingsInfoCard
             title={t("about.runtimeClientKey")}
-            className="rounded-[0.9rem]"
+            className="rounded-panel"
           >
             <p className="app-inline-mono break-all text-muted-foreground">
               {RUNTIME_CLIENT_STORAGE_KEY}

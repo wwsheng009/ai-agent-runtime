@@ -31,7 +31,7 @@ export function SidebarSection({
 }: SidebarSectionProps) {
   return (
     <section>
-      <div className="mb-2 flex w-full items-center justify-between gap-3 rounded-[0.7rem] px-1.5 py-1 transition hover:bg-surface-softer">
+      <div className="mb-2 flex w-full items-center justify-between gap-3 rounded-field px-1.5 py-1 transition hover:bg-surface-softer">
         <button
           type="button"
           onClick={() => onToggle(id)}

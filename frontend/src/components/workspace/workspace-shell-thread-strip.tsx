@@ -12,7 +12,7 @@ import { type Thread } from "@/data/mock";
 import { cn } from "@/lib/utils";
 
 const stripPillClass =
-  "inline-flex items-center gap-2 rounded-[0.65rem] border px-2.5 py-1 app-text-11 uppercase tracking-[0.14em]";
+  "inline-flex items-center gap-2 rounded-control border px-2.5 py-1 app-text-11 uppercase tracking-[0.14em]";
 
 type WorkspaceShellThreadStripProps = {
   commandStateLabel: string;
@@ -68,7 +68,7 @@ export function WorkspaceShellThreadStrip({
       </div>
 
       {selectedThread.lastError ? (
-        <div className="mx-auto mt-2.5 max-w-[42rem] rounded-[0.8rem] border border-accent-gold/22 bg-accent-gold/8 px-3 py-2.5 text-sm leading-6 text-foreground">
+        <div className="mx-auto mt-2.5 max-w-[42rem] rounded-card border border-accent-gold/22 bg-accent-gold/8 px-3 py-2.5 text-sm leading-6 text-foreground">
           Runtime sync failed.
           <span className="ml-2 text-muted-foreground">
             {selectedThread.lastError}
