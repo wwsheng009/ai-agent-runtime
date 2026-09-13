@@ -58,6 +58,10 @@ type sessionRunControlContextKey struct{}
 // bookkeeping is guarded by runWaitMu; the remaining shared flags are atomic
 // because the watchdog, command loop, and run tail use them concurrently.
 type sessionRunControl struct {
+	// sessionID records which actor minted this token. Broker tools forward the
+	// caller's run context into another session's actor, so a persist path that
+	// receives a foreign token must not judge it against its own active run.
+	sessionID             string
 	generation            uint64
 	turnID                string
 	stripMetadataKeys     []string
@@ -880,6 +884,10 @@ func (a *SessionActor) handleApproveTool(cmd ApproveTool) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// The approval arrives through the broker carrying the *calling* session's
+	// run token. It must not be judged against this session's active run, or
+	// every external approval would fail as "session run was superseded".
+	ctx = a.detachForeignSessionRunControl(ctx)
 	state := a.stateWithoutToolSurfaces()
 	if state == nil {
 		cmd.Reply <- fmt.Errorf("approval request not found")
@@ -966,6 +974,9 @@ func (a *SessionActor) handleAnswerQuestion(cmd AnswerQuestion) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Same foreign-token rule as handleApproveTool: answering a child's question
+	// from another session's run must not be refused as a superseded run.
+	ctx = a.detachForeignSessionRunControl(ctx)
 	state := a.StateForInspection()
 	if state == nil {
 		cmd.Reply <- fmt.Errorf("question request not found")
@@ -3419,6 +3430,53 @@ func sessionRunControlFromContext(ctx context.Context) (*sessionRunControl, bool
 	return run, ok && run != nil
 }
 
+// foreignSessionRunControl reports whether ctx carries a run-ownership token
+// minted by a different session actor. Tokens without a recorded owner (legacy
+// or hand-built) are treated as local so the superseded-run guard stays intact.
+func foreignSessionRunControl(ctx context.Context, sessionID string) (*sessionRunControl, bool) {
+	run, ok := sessionRunControlFromContext(ctx)
+	if !ok {
+		return nil, false
+	}
+	owner := strings.TrimSpace(run.sessionID)
+	if owner == "" || owner == strings.TrimSpace(sessionID) {
+		return nil, false
+	}
+	return run, true
+}
+
+// detachForeignSessionRunControl drops a run token that belongs to another
+// session actor. Control-plane callers (resolve_agent_approval, answer
+// question, …) reach this actor through the broker with the caller's run
+// context, and judgeOwnership would otherwise reject every write with
+// errSessionRunSuperseded. This actor's own token — including a stale
+// generation — is kept so a genuinely superseded local run is still refused.
+func (a *SessionActor) detachForeignSessionRunControl(ctx context.Context) context.Context {
+	if a == nil || ctx == nil {
+		return ctx
+	}
+	if _, foreign := foreignSessionRunControl(ctx, a.id); !foreign {
+		return ctx
+	}
+	return sessionRunControlDetachedContext{Context: ctx}
+}
+
+// sessionRunControlDetachedContext hides the run-ownership token carried by the
+// wrapped context while leaving cancellation, deadlines and every other value
+// untouched. context.WithoutValue is newer than the toolchain floor of this
+// repository (Go 1.21 for the Win7 target), so the detach uses a shadowing
+// wrapper instead of the upstream helper.
+type sessionRunControlDetachedContext struct {
+	context.Context
+}
+
+func (c sessionRunControlDetachedContext) Value(key any) any {
+	if _, ok := key.(sessionRunControlContextKey); ok {
+		return nil
+	}
+	return c.Context.Value(key)
+}
+
 func sessionRunTurnID(run *sessionRunControl) string {
 	if run == nil {
 		return ""
@@ -3548,6 +3606,7 @@ func (a *SessionActor) claimSessionRun(turnID string, stripMetadataKeys []string
 	defer a.runLifecycleMu.Unlock()
 
 	run := &sessionRunControl{
+		sessionID:         a.id,
 		generation:        a.runSequence.Add(1),
 		turnID:            strings.TrimSpace(turnID),
 		stripMetadataKeys: normalizedMetadataKeys(stripMetadataKeys),

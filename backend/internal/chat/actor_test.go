@@ -3655,7 +3655,16 @@ func TestSessionActorApproveToolResumesWithoutInMemoryWaiter(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, actor2.ApproveTool(context.Background(), requestID, true))
+	// The broker reaches this actor with the *calling* session's run context, so
+	// the approval must go through with that foreign token attached: judging it
+	// against this actor's own active run is what used to fail the call with
+	// "session run was superseded" and left the child blocked on its approval.
+	foreignCtx := withSessionRunControl(context.Background(), &sessionRunControl{
+		sessionID:  "parent-session",
+		generation: 2,
+		turnID:     "turn-parent",
+	})
+	require.NoError(t, actor2.ApproveTool(foreignCtx, requestID, true))
 
 	require.Eventually(t, func() bool {
 		state := actor2.State()
@@ -4906,5 +4915,42 @@ func TestSessionActorOnRunFinishedFiresOncePerCompletedRun(t *testing.T) {
 			t.Fatalf("OnRunFinished fired more than once after run %d", i+1)
 		default:
 		}
+	}
+}
+
+// TestSessionActor_ForeignRunTokenIsDetached pins the fix for the
+// resolve_agent_approval / answer-question failures: the broker forwards the
+// *caller's* run token into the target session's actor, and that foreign token
+// must be dropped before any state write. A token this actor minted (even a
+// stale generation) or a legacy token without an owner stays attached so the
+// superseded-run guard keeps working for local runs.
+func TestSessionActor_ForeignRunTokenIsDetached(t *testing.T) {
+	actor := &SessionActor{id: "child-session"}
+
+	foreign := &sessionRunControl{sessionID: "parent-session", generation: 4, turnID: "turn-parent"}
+	foreignCtx := withSessionRunControl(context.Background(), foreign)
+	detached := actor.detachForeignSessionRunControl(foreignCtx)
+	if run, ok := sessionRunControlFromContext(detached); ok {
+		t.Fatalf("foreign run token must be detached, got %#v", run)
+	}
+
+	own := &sessionRunControl{sessionID: "child-session", generation: 1, turnID: "turn-child"}
+	ownCtx := withSessionRunControl(context.Background(), own)
+	if got := actor.detachForeignSessionRunControl(ownCtx); got != ownCtx {
+		t.Fatal("this actor's own run token must stay attached")
+	}
+
+	legacy := &sessionRunControl{generation: 3}
+	legacyCtx := withSessionRunControl(context.Background(), legacy)
+	if got := actor.detachForeignSessionRunControl(legacyCtx); got != legacyCtx {
+		t.Fatal("an owner-less legacy token must stay attached")
+	}
+
+	plain := context.Background()
+	if got := actor.detachForeignSessionRunControl(plain); got != plain {
+		t.Fatal("a token-less context must be returned unchanged")
+	}
+	if got := (*SessionActor)(nil).detachForeignSessionRunControl(plain); got != plain {
+		t.Fatal("a nil actor must not rewrite the context")
 	}
 }
