@@ -136,7 +136,7 @@ export function DispatchTaskComposer({
       </div>
 
       {dispatchTaskError ? (
-        <div className="rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
+        <div className="rounded-[0.75rem] border border-accent-orange/18 bg-accent-orange/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
           {dispatchTaskError}
         </div>
       ) : null}
@@ -156,8 +156,8 @@ export function DispatchTaskComposer({
                   className={cn(
                     dispatchStatusPillClass,
                     result.status === "created"
-                      ? "border-[#8fd0c6]/24 bg-[#8fd0c6]/10 text-[#8fd0c6]"
-                      : "border-[#f59e7d]/24 bg-[#f59e7d]/10 text-[#f59e7d]",
+                      ? "border-accent-teal/24 bg-accent-teal/10 text-accent-teal"
+                      : "border-accent-orange/24 bg-accent-orange/10 text-accent-orange",
                   )}
                 >
                   {result.status}

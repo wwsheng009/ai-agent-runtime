@@ -12,9 +12,9 @@ import { trajectoryItemKindLabel } from "./trajectory-view-shared";
 
 const STATUS_BADGE: Record<TrajectoryItem["status"], string> = {
   pending: "border-border bg-surface-soft text-muted-foreground",
-  running: "border-[#8fd0c6]/20 bg-[#8fd0c6]/10 text-[#8fd0c6]",
-  completed: "border-[#8fd0c6]/20 bg-[#8fd0c6]/10 text-[#8fd0c6]",
-  failed: "border-[#f0c77b]/24 bg-[#f0c77b]/12 text-[#f0c77b]",
+  running: "border-accent-teal/20 bg-accent-teal/10 text-accent-teal",
+  completed: "border-accent-teal/20 bg-accent-teal/10 text-accent-teal",
+  failed: "border-accent-gold/24 bg-accent-gold/12 text-accent-gold",
   canceled: "border-border bg-surface-soft text-muted-foreground",
 };
 
@@ -155,7 +155,7 @@ export function TrajectoryDetailPanel({
                 <div className="mb-1 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                   Result
                 </div>
-                <pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words rounded-md border border-[#8fd0c6]/20 bg-[#8fd0c6]/8 px-3 py-2 app-text-12 app-chat-copy text-foreground">
+                <pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words rounded-md border border-accent-teal/20 bg-accent-teal/8 px-3 py-2 app-text-12 app-chat-copy text-foreground">
                   {item.head.resultSummary}
                 </pre>
               </div>
@@ -165,7 +165,7 @@ export function TrajectoryDetailPanel({
                 <div className="mb-1 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                   Error
                 </div>
-                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border border-[#f0c77b]/24 bg-[#f0c77b]/12 px-3 py-2 app-text-12 app-chat-copy text-[#f0c77b]">
+                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border border-accent-gold/24 bg-accent-gold/12 px-3 py-2 app-text-12 app-chat-copy text-accent-gold">
                   {item.head.errorMessage}
                 </pre>
               </div>

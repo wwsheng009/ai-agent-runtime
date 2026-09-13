@@ -60,8 +60,8 @@ export function CommunitySection() {
           </div>
         </div>
 
-        <div className="rounded-[1.7rem] border border-[#8fd0c6]/14 bg-[linear-gradient(180deg,rgba(143,208,198,0.09),rgba(255,255,255,0.03))] p-5">
-          <div className="inline-flex items-center gap-2 rounded-full border border-[#8fd0c6]/20 bg-[#8fd0c6]/10 px-3 py-1 app-text-11 uppercase tracking-[0.2em] text-[#8fd0c6]">
+        <div className="rounded-[1.7rem] border border-accent-teal/14 bg-[linear-gradient(180deg,rgba(143,208,198,0.09),rgba(255,255,255,0.03))] p-5">
+          <div className="inline-flex items-center gap-2 rounded-full border border-accent-teal/20 bg-accent-teal/10 px-3 py-1 app-text-11 uppercase tracking-[0.2em] text-accent-teal">
             <GitBranchPlusIcon size={14} />
             {t("community.readyBadge")}
           </div>
@@ -70,11 +70,11 @@ export function CommunitySection() {
           </h3>
           <div className="mt-6 space-y-3 text-sm leading-7 text-muted-foreground">
             <div className="flex gap-3">
-              <LayoutPanelLeftIcon size={18} className="mt-1 shrink-0 text-[#f0c77b]" />
+              <LayoutPanelLeftIcon size={18} className="mt-1 shrink-0 text-accent-gold" />
               <span>{t("community.readyPoint1")}</span>
             </div>
             <div className="flex gap-3">
-              <BookOpenIcon size={18} className="mt-1 shrink-0 text-[#f0c77b]" />
+              <BookOpenIcon size={18} className="mt-1 shrink-0 text-accent-gold" />
               <span>{t("community.readyPoint2")}</span>
             </div>
           </div>

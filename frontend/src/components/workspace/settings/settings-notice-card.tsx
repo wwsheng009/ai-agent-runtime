@@ -29,7 +29,7 @@ const noticeStyles: Record<SettingsNoticeTone, NoticeStyle> = {
   warning: {
     surface: "warning",
     density: "compact",
-    text: "text-sm text-[#f59e7d]",
+    text: "text-sm text-accent-orange",
   },
   muted: {
     surface: "solid",

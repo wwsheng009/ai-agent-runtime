@@ -155,7 +155,7 @@ export function RuntimeTeamSnapshot({
       </div>
 
       {detailsError ? (
-        <div className="mt-3 rounded-[0.75rem] border border-[#f0c77b]/18 bg-[#f0c77b]/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
+        <div className="mt-3 rounded-[0.75rem] border border-accent-gold/18 bg-accent-gold/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
           {detailsError}
         </div>
       ) : null}

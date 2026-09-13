@@ -126,7 +126,7 @@ export function TeamsDirectoryView({
                   className={cn(
                     "w-full rounded-[0.8rem] border px-3 py-2.5 text-left transition",
                     isActive
-                      ? "border-[#8fd0c6]/30 bg-[#8fd0c6]/10 shadow-[0_0_0_1px_rgba(143,208,198,0.12)]"
+                      ? "border-accent-teal/30 bg-accent-teal/10 shadow-[0_0_0_1px_rgba(143,208,198,0.12)]"
                       : "border-border bg-surface-soft hover:border-border-strong hover:bg-surface-soft-hover",
                   )}
                 >

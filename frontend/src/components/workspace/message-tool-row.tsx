@@ -30,20 +30,20 @@ const STATUS_META: Record<ToolStatus, StatusMeta> = {
   running: {
     label: "Running",
     icon: LoaderCircleIcon,
-    iconClassName: "animate-spin text-[#8fd0c6]",
-    badgeClassName: "border-[#8fd0c6]/20 bg-[#8fd0c6]/10 text-[#8fd0c6]",
+    iconClassName: "animate-spin text-accent-teal",
+    badgeClassName: "border-accent-teal/20 bg-accent-teal/10 text-accent-teal",
   },
   finished: {
     label: "Finished",
     icon: CheckCircle2Icon,
-    iconClassName: "text-[#8fd0c6]",
-    badgeClassName: "border-[#8fd0c6]/20 bg-[#8fd0c6]/10 text-[#8fd0c6]",
+    iconClassName: "text-accent-teal",
+    badgeClassName: "border-accent-teal/20 bg-accent-teal/10 text-accent-teal",
   },
   error: {
     label: "Failed",
     icon: XCircleIcon,
-    iconClassName: "text-[#f0c77b]",
-    badgeClassName: "border-[#f0c77b]/24 bg-[#f0c77b]/12 text-[#f0c77b]",
+    iconClassName: "text-accent-gold",
+    badgeClassName: "border-accent-gold/24 bg-accent-gold/12 text-accent-gold",
   },
 };
 
@@ -126,7 +126,7 @@ export function MessageToolRow({ segment }: MessageToolRowProps) {
       ) : null}
 
       {segment.errorMessage ? (
-        <div className="border-t border-[#f0c77b]/16 bg-[#f0c77b]/8 px-3 py-2.5 app-text-11 text-[#f0c77b]">
+        <div className="border-t border-accent-gold/16 bg-accent-gold/8 px-3 py-2.5 app-text-11 text-accent-gold">
           {segment.errorMessage}
         </div>
       ) : null}

@@ -21,14 +21,14 @@ export function statusTone(value: string | undefined) {
   switch ((value || "").toLowerCase()) {
     case "running":
     case "busy":
-      return "border-[#8fd0c6]/24 bg-[#8fd0c6]/10 text-[#8fd0c6]";
+      return "border-accent-teal/24 bg-accent-teal/10 text-accent-teal";
     case "done":
     case "idle":
-      return "border-[#f0c77b]/24 bg-[#f0c77b]/10 text-[#f0c77b]";
+      return "border-accent-gold/24 bg-accent-gold/10 text-accent-gold";
     case "failed":
     case "blocked":
     case "offline":
-      return "border-[#f59e7d]/24 bg-[#f59e7d]/10 text-[#f59e7d]";
+      return "border-accent-orange/24 bg-accent-orange/10 text-accent-orange";
     default:
       return "border-white/10 bg-white/6 text-muted-foreground";
   }

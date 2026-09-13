@@ -46,7 +46,7 @@ export function DispatchTeamList({
             className={cn(
               "flex cursor-pointer items-center justify-between gap-3 rounded-[0.8rem] border px-3 py-2.5 transition",
               checked
-                ? "border-[#f0c77b]/24 bg-[#f0c77b]/8"
+                ? "border-accent-gold/24 bg-accent-gold/8"
                 : "border-white/8 bg-white/4 hover:border-white/14 hover:bg-white/7",
             )}
           >
@@ -81,7 +81,7 @@ export function DispatchTeamList({
                 className={cn(
                   dispatchStatusPillClass,
                   readiness?.executable
-                    ? "border-[#8fd0c6]/24 bg-[#8fd0c6]/10 text-[#8fd0c6]"
+                    ? "border-accent-teal/24 bg-accent-teal/10 text-accent-teal"
                     : "border-white/10 bg-white/6 text-muted-foreground",
                 )}
               >

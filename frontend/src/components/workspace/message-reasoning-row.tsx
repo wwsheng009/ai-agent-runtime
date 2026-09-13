@@ -41,7 +41,7 @@ export function MessageReasoningRow({
         onClick={() => setOpen((current) => !current)}
         className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition hover:bg-surface-soft"
       >
-        <BrainCircuitIcon size={14} className="shrink-0 text-[#8fd0c6]" />
+        <BrainCircuitIcon size={14} className="shrink-0 text-accent-teal" />
         <span
           className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground"
           id={titleId}
@@ -49,7 +49,7 @@ export function MessageReasoningRow({
           Reasoning{running ? "…" : ""}
         </span>
         {running ? (
-          <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-[#8fd0c6]" />
+          <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-accent-teal" />
         ) : null}
         <span className="min-w-0 flex-1 truncate app-text-11 text-muted-foreground">
           {hasContent ? summary : "Waiting for reasoning output…"}

@@ -115,7 +115,7 @@ export function WorkspaceSidebarRuntimeSection({
           ) : null}
 
         {runtimeSessionsError ? (
-          <div className="mt-3 rounded-[0.8rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
+          <div className="mt-3 rounded-[0.8rem] border border-accent-orange/18 bg-accent-orange/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
             {runtimeSessionsError}
           </div>
         ) : null}

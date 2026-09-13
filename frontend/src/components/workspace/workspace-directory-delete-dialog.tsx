@@ -104,12 +104,12 @@ export function WorkspaceDirectoryDeleteDialog({
             {t("sidebar.directories.deleteConfirm", { count: sessionCount })}
           </p>
           <p className="mt-2 inline-flex items-center gap-1.5 text-xs leading-5 text-muted-foreground">
-            <TriangleAlertIcon size={13} className="text-[#f0c77b]" />
+            <TriangleAlertIcon size={13} className="text-accent-gold" />
             {t("sidebar.directories.deleteHint")}
           </p>
 
           {error ? (
-            <div className="mt-3 rounded-[0.7rem] border border-[#f59e7d]/24 bg-[#f59e7d]/10 px-3 py-2 text-sm leading-6 text-[#f59e7d]">
+            <div className="mt-3 rounded-[0.7rem] border border-accent-orange/24 bg-accent-orange/10 px-3 py-2 text-sm leading-6 text-accent-orange">
               {error}
             </div>
           ) : null}

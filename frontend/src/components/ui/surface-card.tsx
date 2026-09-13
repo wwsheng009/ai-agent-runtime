@@ -23,8 +23,8 @@ export const surfaceCardVariants = cva("", {
       panel: "surface-panel",
       accent:
         "border-accent-primary-border bg-accent-primary-soft shadow-[0_0_0_1px_var(--accent-primary-border)]",
-      warning: "border-[#f59e7d]/20 bg-[#f59e7d]/8",
-      "warning-soft": "border-[#f59e7d]/24 bg-[#f59e7d]/10",
+      warning: "border-accent-orange/20 bg-accent-orange/8",
+      "warning-soft": "border-accent-orange/24 bg-accent-orange/10",
     },
     radius: {
       none: "",

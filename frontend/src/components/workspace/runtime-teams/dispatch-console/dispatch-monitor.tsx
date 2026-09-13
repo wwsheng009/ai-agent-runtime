@@ -60,7 +60,7 @@ export function DispatchMonitor({
           </div>
 
           {dispatchMonitorError ? (
-            <div className="mt-2.5 rounded-[0.8rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
+            <div className="mt-2.5 rounded-[0.8rem] border border-accent-orange/18 bg-accent-orange/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
               {dispatchMonitorError}
             </div>
           ) : null}
@@ -140,7 +140,7 @@ export function DispatchMonitor({
                   ) : null}
 
                   {entry.error ? (
-                    <div className="mt-2.5 rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2 text-sm leading-6 text-muted-foreground">
+                    <div className="mt-2.5 rounded-[0.75rem] border border-accent-orange/18 bg-accent-orange/8 px-3 py-2 text-sm leading-6 text-muted-foreground">
                       {entry.error}
                     </div>
                   ) : null}

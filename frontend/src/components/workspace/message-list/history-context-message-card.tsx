@@ -35,7 +35,7 @@ export function HistoryContextMessageCard({
 
   return (
     <div className="relative w-full max-w-[48rem]">
-      <div className="overflow-hidden rounded-[1rem] border border-[#8fd0c6]/14 bg-[linear-gradient(180deg,rgba(143,208,198,0.08),rgba(143,208,198,0.02))] px-4 py-3.5 shadow-[0_16px_40px_rgba(0,0,0,0.12)]">
+      <div className="overflow-hidden rounded-[1rem] border border-accent-teal/14 bg-[linear-gradient(180deg,rgba(143,208,198,0.08),rgba(143,208,198,0.02))] px-4 py-3.5 shadow-[0_16px_40px_rgba(0,0,0,0.12)]">
         <button
           type="button"
           aria-expanded={expanded}
@@ -43,7 +43,7 @@ export function HistoryContextMessageCard({
           onClick={() => setExpanded((v) => !v)}
           className="flex w-full items-start gap-3 text-left"
         >
-          <div className="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-[0.7rem] border border-[#8fd0c6]/20 bg-[#8fd0c6]/10 text-[#8fd0c6]">
+          <div className="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-[0.7rem] border border-accent-teal/20 bg-accent-teal/10 text-accent-teal">
             <BotIcon size={14} />
           </div>
           <div className="min-w-0 flex-1">
@@ -61,7 +61,7 @@ export function HistoryContextMessageCard({
                 {message.label}
               </div>
               {message.id === streamingMessageId ? (
-                <Badge className="border-transparent bg-[#8fd0c6]/12 text-[#8fd0c6]">
+                <Badge className="border-transparent bg-accent-teal/12 text-accent-teal">
                   Streaming response in progress
                 </Badge>
               ) : null}
@@ -81,7 +81,7 @@ export function HistoryContextMessageCard({
           />
         </button>
         <div className="relative mt-3" hidden={!expanded} id={panelId}>
-          <div className="pointer-events-none absolute left-0 top-4 bottom-4 w-px bg-gradient-to-b from-[#8fd0c6]/0 via-[#8fd0c6]/18 to-[#8fd0c6]/0" />
+          <div className="pointer-events-none absolute left-0 top-4 bottom-4 w-px bg-gradient-to-b from-accent-teal/0 via-accent-teal/18 to-accent-teal/0" />
 
           <div className="relative space-y-4" id={statusId}>
             {message.segments.map((segment, index) => (

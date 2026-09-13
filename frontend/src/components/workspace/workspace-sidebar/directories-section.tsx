@@ -126,12 +126,12 @@ export function WorkspaceSidebarDirectoriesSection({
             </div>
           ) : null}
           {workspaceDirectoriesError ? (
-            <div className="rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-2.5 py-2 text-xs leading-5 text-muted-foreground">
+            <div className="rounded-[0.75rem] border border-accent-orange/18 bg-accent-orange/8 px-2.5 py-2 text-xs leading-5 text-muted-foreground">
               {workspaceDirectoriesError}
             </div>
           ) : null}
           {sidebarActionError ? (
-            <div className="rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-2.5 py-2 text-xs leading-5 text-muted-foreground">
+            <div className="rounded-[0.75rem] border border-accent-orange/18 bg-accent-orange/8 px-2.5 py-2 text-xs leading-5 text-muted-foreground">
               {sidebarActionError}
             </div>
           ) : null}
@@ -189,7 +189,7 @@ export function WorkspaceSidebarDirectoriesSection({
                             aria-label={t(
                               "sidebar.directories.existsWarning",
                             )}
-                            className="shrink-0 text-[#f59e7d]"
+                            className="shrink-0 text-accent-orange"
                           >
                             <TriangleAlertIcon size={12} />
                           </span>
@@ -247,7 +247,7 @@ export function WorkspaceSidebarDirectoriesSection({
                                 sessionCount: group.sessions.length,
                               })
                             }
-                            className="rounded-[0.5rem] p-1 text-muted-foreground transition hover:bg-surface-soft hover:text-[#f59e7d]"
+                            className="rounded-[0.5rem] p-1 text-muted-foreground transition hover:bg-surface-soft hover:text-accent-orange"
                           >
                             <TrashIcon size={12} />
                           </button>

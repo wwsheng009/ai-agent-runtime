@@ -125,7 +125,7 @@ export function WorkspaceDirectoryAddDialog({
           </label>
 
           {error ? (
-            <div className="mt-3 rounded-[0.7rem] border border-[#f59e7d]/24 bg-[#f59e7d]/10 px-3 py-2 text-sm leading-6 text-[#f59e7d]">
+            <div className="mt-3 rounded-[0.7rem] border border-accent-orange/24 bg-accent-orange/10 px-3 py-2 text-sm leading-6 text-accent-orange">
               {error}
             </div>
           ) : null}

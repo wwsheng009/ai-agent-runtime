@@ -70,7 +70,7 @@ export function describeThreadSession(
     return {
       detail: labels.error,
       label: "error",
-      tone: "border-[#f59e7d]/24 bg-[#f59e7d]/10 text-[#f59e7d]",
+      tone: "border-accent-orange/24 bg-accent-orange/10 text-accent-orange",
     };
   }
 
@@ -78,14 +78,14 @@ export function describeThreadSession(
     return {
       detail: labels.restored,
       label: "restored",
-      tone: "border-[#8fd0c6]/24 bg-[#8fd0c6]/10 text-[#8fd0c6]",
+      tone: "border-accent-teal/24 bg-accent-teal/10 text-accent-teal",
     };
   }
 
   return {
     detail: labels.attached,
     label: "attached",
-    tone: "border-[#f0c77b]/24 bg-[#f0c77b]/10 text-[#f0c77b]",
+    tone: "border-accent-gold/24 bg-accent-gold/10 text-accent-gold",
   };
 }
 

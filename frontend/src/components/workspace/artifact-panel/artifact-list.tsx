@@ -58,7 +58,7 @@ function ArtifactList({
             className={cn(
               "w-full rounded-[0.65rem] border px-1.5 py-1 text-left transition",
               isActive
-                ? "border-[#f0c77b]/30 bg-[#f0c77b]/8 shadow-[inset_0_1px_0_rgba(240,199,123,0.08)]"
+                ? "border-accent-gold/30 bg-accent-gold/8 shadow-[inset_0_1px_0_rgba(240,199,123,0.08)]"
                 : "border-white/8 bg-white/4 hover:border-white/14 hover:bg-white/8",
             )}
           >
@@ -68,9 +68,9 @@ function ArtifactList({
                   className={cn(
                     "inline-flex h-10 w-10 shrink-0 overflow-hidden rounded-[0.7rem] border",
                     category === "evidence"
-                      ? "border-[#8fd0c6]/18 bg-[#8fd0c6]/10"
+                      ? "border-accent-teal/18 bg-accent-teal/10"
                       : isActive
-                        ? "border-[#f0c77b]/25 bg-[#f0c77b]/12"
+                        ? "border-accent-gold/25 bg-accent-gold/12"
                         : "border-white/10 bg-black/20",
                   )}
                 >
@@ -86,9 +86,9 @@ function ArtifactList({
                   className={cn(
                     "inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-[0.7rem] border",
                     category === "evidence"
-                      ? "border-[#8fd0c6]/18 bg-[#8fd0c6]/10 text-[#8fd0c6]"
+                      ? "border-accent-teal/18 bg-accent-teal/10 text-accent-teal"
                       : isActive
-                        ? "border-[#f0c77b]/25 bg-[#f0c77b]/12 text-[#f0c77b]"
+                        ? "border-accent-gold/25 bg-accent-gold/12 text-accent-gold"
                         : "border-white/10 bg-black/20 text-muted-foreground",
                   )}
                 >

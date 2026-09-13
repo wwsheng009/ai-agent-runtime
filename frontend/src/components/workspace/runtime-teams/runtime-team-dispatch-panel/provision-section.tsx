@@ -151,7 +151,7 @@ export function DispatchProvisionSection({
             className={cn(
               "rounded-[0.65rem] border px-2.5 py-1.5 text-base uppercase tracking-[0.12em] transition",
               dispatchTemplateMode === "review_implement_verify"
-                ? "border-[#f0c77b]/24 bg-[#f0c77b]/10 text-[#f0c77b]"
+                ? "border-accent-gold/24 bg-accent-gold/10 text-accent-gold"
                 : "border-white/10 bg-white/4 text-muted-foreground hover:border-white/14 hover:bg-white/7 hover:text-foreground",
             )}
           >
@@ -163,7 +163,7 @@ export function DispatchProvisionSection({
             className={cn(
               "rounded-[0.65rem] border px-2.5 py-1.5 text-base uppercase tracking-[0.12em] transition",
               dispatchTemplateMode === "mirror"
-                ? "border-[#f0c77b]/24 bg-[#f0c77b]/10 text-[#f0c77b]"
+                ? "border-accent-gold/24 bg-accent-gold/10 text-accent-gold"
                 : "border-white/10 bg-white/4 text-muted-foreground hover:border-white/14 hover:bg-white/7 hover:text-foreground",
             )}
           >

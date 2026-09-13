@@ -24,7 +24,7 @@ function surfaceButtonClass(
     return cn(
       "inline-flex items-center gap-2 rounded-[0.65rem] border px-2.5 py-1 text-base transition focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-sidebar-bg)]",
       active
-        ? "border-[#f0c77b]/30 bg-[#f0c77b]/8 text-[#f0c77b]"
+        ? "border-accent-gold/30 bg-accent-gold/8 text-accent-gold"
         : "border-white/10 bg-white/4 text-muted-foreground hover:border-white/16 hover:bg-white/8",
     );
   }
@@ -41,7 +41,7 @@ function surfaceButtonClass(
   return cn(
     "inline-flex items-center gap-2 rounded-[0.65rem] border px-2.5 py-1 text-base transition focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-sidebar-bg)]",
     active
-      ? "border-[#8fd0c6]/30 bg-[#8fd0c6]/10 text-[#8fd0c6]"
+      ? "border-accent-teal/30 bg-accent-teal/10 text-accent-teal"
       : "border-white/10 bg-white/4 text-muted-foreground hover:border-white/16 hover:bg-white/8",
   );
 }
@@ -231,7 +231,7 @@ export function ArtifactPanelSurfaceTabs({
             <HistoryIcon size={14} />
             Restore
             {backtrackCount > 0 ? (
-              <span className="rounded-full bg-[#f0c77b]/20 px-1.5 py-0.5 text-[10px] tracking-[0.08em] text-[#f0c77b]">
+              <span className="rounded-full bg-accent-gold/20 px-1.5 py-0.5 text-[10px] tracking-[0.08em] text-accent-gold">
                 {backtrackCount}
               </span>
             ) : null}

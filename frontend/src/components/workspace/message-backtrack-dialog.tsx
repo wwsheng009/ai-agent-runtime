@@ -61,7 +61,7 @@ export function MessageBacktrackDialog({
       <div className="w-full max-w-[32rem] overflow-hidden rounded-[1rem] border border-white/10 bg-[var(--dialog-bg,var(--background))] shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
         <div className="flex items-start justify-between gap-3 border-b border-white/8 px-4 py-3.5">
           <div className="flex items-start gap-2.5">
-            <div className="mt-0.5 inline-flex size-8 items-center justify-center rounded-[0.75rem] border border-[#f0c77b]/20 bg-[#f0c77b]/10 text-[#f0c77b]">
+            <div className="mt-0.5 inline-flex size-8 items-center justify-center rounded-[0.75rem] border border-accent-gold/20 bg-accent-gold/10 text-accent-gold">
               <HistoryIcon size={16} />
             </div>
             <div>
@@ -143,7 +143,7 @@ export function MessageBacktrackDialog({
               )}
               {preview.warnings?.length
                 ? preview.warnings.map((warning) => (
-                    <div key={warning} className="text-[#f0c77b]">
+                    <div key={warning} className="text-accent-gold">
                       {warning}
                     </div>
                   ))
@@ -167,13 +167,13 @@ export function MessageBacktrackDialog({
                 className={cn(
                   "flex cursor-pointer items-center gap-2 rounded-[0.75rem] border px-3 py-2 text-sm transition",
                   state.mode === value
-                    ? "border-[#f0c77b]/30 bg-[#f0c77b]/8 text-foreground"
+                    ? "border-accent-gold/30 bg-accent-gold/8 text-foreground"
                     : "border-white/8 bg-white/[0.02] text-muted-foreground hover:border-white/14",
                 )}
               >
                 <input
                   checked={state.mode === value}
-                  className="accent-[#f0c77b]"
+                  className="accent-accent-gold"
                   disabled={state.busy}
                   name="backtrack-mode"
                   onChange={() => onModeChange(value)}
@@ -191,7 +191,7 @@ export function MessageBacktrackDialog({
             </span>
             <textarea
               aria-label="Edit backtrack prompt"
-              className="min-h-[7.5rem] w-full resize-y rounded-[0.85rem] border border-white/10 bg-white/[0.03] px-3 py-2.5 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-[#f0c77b]/35 focus:bg-white/[0.05]"
+              className="min-h-[7.5rem] w-full resize-y rounded-[0.85rem] border border-white/10 bg-white/[0.03] px-3 py-2.5 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-accent-gold/35 focus:bg-white/[0.05]"
               disabled={state.busy}
               onChange={(event) => onEditPromptChange(event.target.value)}
               placeholder="Edit the original user prompt…"
@@ -206,7 +206,7 @@ export function MessageBacktrackDialog({
           <label className="flex items-center gap-2 text-sm text-muted-foreground">
             <input
               checked={state.prefillComposer}
-              className="accent-[#f0c77b]"
+              className="accent-accent-gold"
               disabled={state.busy}
               onChange={(event) => onPrefillChange(event.target.checked)}
               type="checkbox"
@@ -215,7 +215,7 @@ export function MessageBacktrackDialog({
           </label>
 
           {state.error ? (
-            <div className="rounded-[0.85rem] border border-[#f59e7d]/20 bg-[#f59e7d]/10 px-3 py-2.5 text-sm leading-6 text-foreground">
+            <div className="rounded-[0.85rem] border border-accent-orange/20 bg-accent-orange/10 px-3 py-2.5 text-sm leading-6 text-foreground">
               {state.error}
             </div>
           ) : null}

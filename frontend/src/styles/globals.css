@@ -40,6 +40,8 @@
   --color-accent-gold: var(--accent-gold);
   --color-accent-violet: var(--accent-violet);
   --color-accent-cyan: var(--accent-cyan);
+  --color-accent-teal: var(--accent-teal);
+  --color-accent-orange: var(--accent-orange);
   --color-accent-primary: var(--accent-primary);
   --color-accent-primary-strong: var(--accent-primary-strong);
   --color-accent-primary-soft: var(--accent-primary-soft);
@@ -313,6 +315,8 @@
   --accent-gold: var(--primitive-gold-200);
   --accent-violet: var(--primitive-violet-200);
   --accent-cyan: var(--primitive-cyan-150);
+  --accent-teal: var(--primitive-teal-300);
+  --accent-orange: var(--primitive-orange-150);
   --accent-primary: var(--primitive-gold-200);
   --accent-primary-strong: var(--primitive-gold-100);
   --accent-primary-soft: var(--primitive-gold-200-a100);

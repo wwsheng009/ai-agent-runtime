@@ -63,9 +63,9 @@ export function UserMessageBubble({
                   className={cn(
                     "relative w-full max-w-[42rem] overflow-hidden rounded-[1rem] border px-4 py-3.5 shadow-[0_16px_40px_rgba(0,0,0,0.12)] transition",
                     isNavigationSelected
-                      ? "border-[#f0c77b]/55 bg-[linear-gradient(180deg,rgba(240,199,123,0.16),rgba(240,199,123,0.06))] ring-2 ring-[#f0c77b]/25"
-                      : "border-[#f0c77b]/16 bg-[linear-gradient(180deg,rgba(240,199,123,0.08),rgba(240,199,123,0.03))]",
-                    backtrackNavigationActive ? "cursor-pointer hover:border-[#f0c77b]/40" : null,
+                      ? "border-accent-gold/55 bg-[linear-gradient(180deg,rgba(240,199,123,0.16),rgba(240,199,123,0.06))] ring-2 ring-accent-gold/25"
+                      : "border-accent-gold/16 bg-[linear-gradient(180deg,rgba(240,199,123,0.08),rgba(240,199,123,0.03))]",
+                    backtrackNavigationActive ? "cursor-pointer hover:border-accent-gold/40" : null,
                   )}
                   onClick={() => {
                     if (
@@ -86,7 +86,7 @@ export function UserMessageBubble({
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex items-center gap-2.5">
-                      <div className="inline-flex size-7 items-center justify-center rounded-[0.7rem] border border-[#f0c77b]/20 bg-[#f0c77b]/10 text-[#f0c77b]">
+                      <div className="inline-flex size-7 items-center justify-center rounded-[0.7rem] border border-accent-gold/20 bg-accent-gold/10 text-accent-gold">
                         <User2Icon size={14} />
                       </div>
                       <div>
@@ -156,7 +156,7 @@ export function UserMessageBubble({
                       <div className="space-y-3">
                         <textarea
                           aria-label="Edit user turn prompt"
-                          className="min-h-[7rem] w-full resize-y rounded-[0.85rem] border border-[#f0c77b]/25 bg-black/10 px-3 py-2.5 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-[#f0c77b]/45 focus:bg-black/15"
+                          className="min-h-[7rem] w-full resize-y rounded-[0.85rem] border border-accent-gold/25 bg-black/10 px-3 py-2.5 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-accent-gold/45 focus:bg-black/15"
                           onChange={(event) => setInlineEditDraft(event.target.value)}
                           onClick={(event) => event.stopPropagation()}
                           placeholder="Edit this user prompt, then continue to backtrack…"

@@ -61,7 +61,7 @@ export function findDraftIssue(
 
 export function getDraftFieldClassName(invalid: boolean) {
   return invalid
-    ? `${editorControlClassName} border-[#f59e7d]/45 bg-[#f59e7d]/8`
+    ? `${editorControlClassName} border-accent-orange/45 bg-accent-orange/8`
     : editorControlClassName;
 }
 

@@ -94,7 +94,7 @@ export function WorkspaceSidebarSessionsSection({
             </div>
           ) : null}
           {runtimeSessionUsersError ? (
-            <div className="rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-2.5 py-2 text-xs leading-5 text-muted-foreground">
+            <div className="rounded-[0.75rem] border border-accent-orange/18 bg-accent-orange/8 px-2.5 py-2 text-xs leading-5 text-muted-foreground">
               {runtimeSessionUsersError}
             </div>
           ) : null}

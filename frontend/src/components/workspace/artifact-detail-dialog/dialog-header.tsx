@@ -33,7 +33,7 @@ export function ArtifactDetailHeader({
           className={cn(
             "app-text-11 uppercase tracking-[0.16em]",
             category === "evidence"
-              ? "text-[#8fd0c6]"
+              ? "text-accent-teal"
               : "text-accent-primary",
           )}
         >

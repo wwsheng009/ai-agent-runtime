@@ -131,12 +131,12 @@ export function ArtifactPanelCheckpointDetailSection({
             ) : null}
 
             {checkpointRestoreError ? (
-              <div className="mt-3 rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2 text-sm text-muted-foreground">
+              <div className="mt-3 rounded-[0.75rem] border border-accent-orange/18 bg-accent-orange/8 px-3 py-2 text-sm text-muted-foreground">
                 {checkpointRestoreError}
               </div>
             ) : null}
             {checkpointRestoreNotice ? (
-              <div className="mt-3 rounded-[0.75rem] border border-[#8fd0c6]/18 bg-[#8fd0c6]/10 px-3 py-2 text-sm text-muted-foreground">
+              <div className="mt-3 rounded-[0.75rem] border border-accent-teal/18 bg-accent-teal/10 px-3 py-2 text-sm text-muted-foreground">
                 {checkpointRestoreNotice}
               </div>
             ) : null}
@@ -146,7 +146,7 @@ export function ArtifactPanelCheckpointDetailSection({
             <div className="grid min-h-full gap-3">
               <div className="space-y-3">
                 {checkpointDetailsError ? (
-                  <div className="rounded-[0.85rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
+                  <div className="rounded-[0.85rem] border border-accent-orange/18 bg-accent-orange/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
                     {checkpointDetailsError}
                   </div>
                 ) : null}
@@ -163,7 +163,7 @@ export function ArtifactPanelCheckpointDetailSection({
                           key={`${selectedCheckpoint.id}-conversation-${index}`}
                           className="rounded-[0.75rem] border border-white/8 bg-black/20 px-3.5 py-3"
                         >
-                          <div className="app-text-11 uppercase tracking-[0.18em] text-[#8fd0c6]">
+                          <div className="app-text-11 uppercase tracking-[0.18em] text-accent-teal">
                             {message.role}
                           </div>
                           <MessageMarkdown
@@ -277,7 +277,7 @@ export function ArtifactPanelCheckpointDetailSection({
                             className={cn(
                               "w-full rounded-[0.75rem] border px-3 py-2.5 text-left transition",
                               isActive
-                                ? "border-[#8fd0c6]/30 bg-[#8fd0c6]/10"
+                                ? "border-accent-teal/30 bg-accent-teal/10"
                                 : "border-white/8 bg-black/20 hover:border-white/14 hover:bg-white/8",
                             )}
                           >
@@ -294,7 +294,7 @@ export function ArtifactPanelCheckpointDetailSection({
                                 className={cn(
                                   "rounded-[0.65rem] border px-2 py-0.5 app-text-10 uppercase tracking-[0.14em]",
                                   isActive
-                                    ? "border-[#8fd0c6]/25 bg-[#8fd0c6]/10 text-[#8fd0c6]"
+                                    ? "border-accent-teal/25 bg-accent-teal/10 text-accent-teal"
                                     : "border-white/10 bg-black/20 text-muted-foreground",
                                 )}
                               >

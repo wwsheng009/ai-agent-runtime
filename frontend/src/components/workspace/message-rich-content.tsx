@@ -66,7 +66,7 @@ export function MessageRichSegment({
         className={cn(
           "mt-2 overflow-hidden rounded-[0.85rem] border p-3",
           isFailed
-            ? "border-[#f0c77b]/16 bg-[linear-gradient(180deg,rgba(240,199,123,0.08),rgba(240,199,123,0.03))]"
+            ? "border-accent-gold/16 bg-[linear-gradient(180deg,rgba(240,199,123,0.08),rgba(240,199,123,0.03))]"
             : "border-border bg-surface-softer",
         )}
         role="status"
@@ -76,8 +76,8 @@ export function MessageRichSegment({
             className={cn(
               "inline-flex size-10 shrink-0 items-center justify-center rounded-[0.85rem] border",
               isFailed
-                ? "border-[#f0c77b]/24 bg-[#f0c77b]/12 text-[#f0c77b]"
-                : "border-[#8fd0c6]/18 bg-[#8fd0c6]/10 text-[#8fd0c6]",
+                ? "border-accent-gold/24 bg-accent-gold/12 text-accent-gold"
+                : "border-accent-teal/18 bg-accent-teal/10 text-accent-teal",
             )}
           >
             {isFailed ? (
@@ -105,8 +105,8 @@ export function MessageRichSegment({
                   className={cn(
                     "h-full rounded-full transition-[width] duration-300",
                     isFailed
-                      ? "bg-[#f0c77b]"
-                      : "bg-[linear-gradient(90deg,#8fd0c6,#f0c77b)]",
+                      ? "bg-accent-gold"
+                      : "bg-[linear-gradient(90deg,var(--accent-teal),var(--accent-gold))]",
                   )}
                   style={{ width: `${Math.max(progress, 0.04) * 100}%` }}
                 />
@@ -117,7 +117,7 @@ export function MessageRichSegment({
               </div>
             )}
             {segment.errorMessage ? (
-              <div className="mt-2.5 rounded-[0.7rem] border border-[#f0c77b]/16 bg-[#f0c77b]/8 px-3 py-2 app-text-11 text-[#f0c77b]">
+              <div className="mt-2.5 rounded-[0.7rem] border border-accent-gold/16 bg-accent-gold/8 px-3 py-2 app-text-11 text-accent-gold">
                 {segment.errorMessage}
               </div>
             ) : null}
@@ -193,8 +193,8 @@ export function MessageRichSegment({
               <dd
                 className={cn(
                   "app-chat-copy mt-1.5 font-semibold text-foreground",
-                  item.tone === "accent" && "text-[#8fd0c6]",
-                  item.tone === "warning" && "text-[#f0c77b]",
+                  item.tone === "accent" && "text-accent-teal",
+                  item.tone === "warning" && "text-accent-gold",
                   item.tone === "muted" && "text-muted-foreground",
                 )}
               >
@@ -225,7 +225,7 @@ export function MessageRichSegment({
               key={`${segment.title}-${item}`}
               className="app-chat-copy flex items-start gap-3 text-foreground"
             >
-              <span className="mt-0.5 inline-flex size-[1.125rem] shrink-0 items-center justify-center rounded-[0.65rem] border border-[#8fd0c6]/20 bg-[#8fd0c6]/10 text-[#8fd0c6]">
+              <span className="mt-0.5 inline-flex size-[1.125rem] shrink-0 items-center justify-center rounded-[0.65rem] border border-accent-teal/20 bg-accent-teal/10 text-accent-teal">
                 <CheckIcon size={12} />
               </span>
               <span>{item}</span>
@@ -240,15 +240,15 @@ export function MessageRichSegment({
     segment.tone === "warning"
       ? {
           wrapper:
-            "border-[#f0c77b]/16 bg-[linear-gradient(180deg,rgba(240,199,123,0.08),rgba(240,199,123,0.03))]",
-          iconClass: "border-[#f0c77b]/24 bg-[#f0c77b]/12 text-[#f0c77b]",
+            "border-accent-gold/16 bg-[linear-gradient(180deg,rgba(240,199,123,0.08),rgba(240,199,123,0.03))]",
+          iconClass: "border-accent-gold/24 bg-accent-gold/12 text-accent-gold",
           Icon: TriangleAlertIcon,
         }
       : segment.tone === "success"
         ? {
             wrapper:
-              "border-[#8fd0c6]/16 bg-[linear-gradient(180deg,rgba(143,208,198,0.08),rgba(143,208,198,0.03))]",
-            iconClass: "border-[#8fd0c6]/24 bg-[#8fd0c6]/12 text-[#8fd0c6]",
+              "border-accent-teal/16 bg-[linear-gradient(180deg,rgba(143,208,198,0.08),rgba(143,208,198,0.03))]",
+            iconClass: "border-accent-teal/24 bg-accent-teal/12 text-accent-teal",
             Icon: CheckIcon,
           }
         : {

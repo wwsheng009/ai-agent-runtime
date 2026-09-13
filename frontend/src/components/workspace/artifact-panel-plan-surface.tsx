@@ -68,7 +68,7 @@ export function ArtifactPanelPlanSurface({
             <Badge
               className={cn(
                 plan?.active
-                  ? "border-[#8fd0c6]/30 bg-[#8fd0c6]/10 text-[#8fd0c6]"
+                  ? "border-accent-teal/30 bg-accent-teal/10 text-accent-teal"
                   : undefined,
               )}
             >
@@ -100,7 +100,7 @@ export function ArtifactPanelPlanSurface({
               session.
             </div>
           ) : planError ? (
-            <div className="rounded-[0.85rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
+            <div className="rounded-[0.85rem] border border-accent-orange/18 bg-accent-orange/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
               {planError}
             </div>
           ) : (
@@ -158,7 +158,7 @@ export function ArtifactPanelPlanSurface({
               </div>
 
               {plan?.plan_content_error ? (
-                <div className="rounded-[0.85rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
+                <div className="rounded-[0.85rem] border border-accent-orange/18 bg-accent-orange/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
                   {plan.plan_content_error}
                 </div>
               ) : null}

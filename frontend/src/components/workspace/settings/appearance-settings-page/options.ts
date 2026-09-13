@@ -11,13 +11,13 @@ export function buildAccentOptions(t: TFunction<"settings">) {
       id: "gold",
       label: t("appearance.accentOptions.gold.label"),
       description: t("appearance.accentOptions.gold.description"),
-      previewClassName: "from-[#f0c77b] to-[#d59645]",
+      previewClassName: "from-accent-gold to-[#d59645]",
     },
     {
       id: "cyan",
       label: t("appearance.accentOptions.cyan.label"),
       description: t("appearance.accentOptions.cyan.description"),
-      previewClassName: "from-[#8fd0c6] to-[#51b7c2]",
+      previewClassName: "from-accent-teal to-[#51b7c2]",
     },
     {
       id: "violet",

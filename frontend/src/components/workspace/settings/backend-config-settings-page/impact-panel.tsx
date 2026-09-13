@@ -170,13 +170,13 @@ export function RuntimeImpactPanel({
                 ? t("editor.impact.details.hotReloadApplied")
                 : t("editor.impact.details.hotReload")
             }
-            accentClassName="text-[#8fd0c6]"
+            accentClassName="text-accent-teal"
           />
           <ImpactStat
             label={t("editor.impact.stats.restart")}
             value={`${restartCount}`}
             detail={t("editor.impact.details.restart")}
-            accentClassName="text-[#f59e7d]"
+            accentClassName="text-accent-orange"
           />
           <ImpactStat
             label={t("editor.impact.stats.inactive")}
@@ -191,19 +191,19 @@ export function RuntimeImpactPanel({
             title={t("editor.impact.paths.applied")}
             paths={impact.applied_paths}
             emptyText={t("editor.impact.paths.emptyApplied")}
-            toneClassName="border-[#8fd0c6]/24 bg-[#8fd0c6]/10 text-[#d6fff6]"
+            toneClassName="border-accent-teal/24 bg-accent-teal/10 text-[#d6fff6]"
           />
           <ImpactPathList
             title={t("editor.impact.paths.restart")}
             paths={impact.restart_required_paths}
             emptyText={t("editor.impact.paths.emptyRestart")}
-            toneClassName="border-[#f59e7d]/24 bg-[#f59e7d]/10 text-[#ffd9ce]"
+            toneClassName="border-accent-orange/24 bg-accent-orange/10 text-[#ffd9ce]"
           />
           <ImpactPathList
             title={t("editor.impact.paths.hotReload")}
             paths={impact.hot_reload_paths}
             emptyText={t("editor.impact.paths.emptyHotReload")}
-            toneClassName="border-[#8fd0c6]/24 bg-[#8fd0c6]/10 text-[#d6fff6]"
+            toneClassName="border-accent-teal/24 bg-accent-teal/10 text-[#d6fff6]"
           />
           <ImpactPathList
             title={t("editor.impact.paths.inactive")}

@@ -54,7 +54,7 @@ export function ArtifactPanelCheckpointsSection({
             session.
           </div>
         ) : checkpointsError ? (
-          <div className="rounded-[0.85rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
+          <div className="rounded-[0.85rem] border border-accent-orange/18 bg-accent-orange/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
             {checkpointsError}
           </div>
         ) : checkpoints.length > 0 ? (
@@ -77,7 +77,7 @@ export function ArtifactPanelCheckpointsSection({
                   className={cn(
                     "w-full rounded-[0.8rem] border px-2.5 py-2 text-left transition",
                     isActive
-                      ? "border-[#8fd0c6]/30 bg-[#8fd0c6]/12 shadow-[inset_0_1px_0_rgba(143,208,198,0.08)]"
+                      ? "border-accent-teal/30 bg-accent-teal/12 shadow-[inset_0_1px_0_rgba(143,208,198,0.08)]"
                       : "border-white/8 bg-white/4 hover:border-white/14 hover:bg-white/8",
                   )}
                   >

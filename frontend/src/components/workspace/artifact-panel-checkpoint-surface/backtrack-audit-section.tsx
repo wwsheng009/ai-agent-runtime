@@ -57,7 +57,7 @@ export function ArtifactPanelBacktrackAuditSection({
             session and a user-turn rewind is applied.
           </div>
         ) : backtrackAuditError ? (
-          <div className="rounded-[0.85rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
+          <div className="rounded-[0.85rem] border border-accent-orange/18 bg-accent-orange/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
             {backtrackAuditError}
           </div>
         ) : backtrackAuditEntries.length > 0 ? (
@@ -72,7 +72,7 @@ export function ArtifactPanelBacktrackAuditSection({
                   className={cn(
                     "w-full rounded-[0.8rem] border px-2.5 py-2 text-left transition",
                     isActive
-                      ? "border-[#f0c77b]/30 bg-[#f0c77b]/10 shadow-[inset_0_1px_0_rgba(240,199,123,0.08)]"
+                      ? "border-accent-gold/30 bg-accent-gold/10 shadow-[inset_0_1px_0_rgba(240,199,123,0.08)]"
                       : "border-white/8 bg-white/4 hover:border-white/14 hover:bg-white/8",
                   )}
                 >

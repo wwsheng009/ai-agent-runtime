@@ -27,9 +27,9 @@ export function HealthBadge({
       className={cn(
         "normal-case tracking-normal",
         tone === "ready"
-          ? "border-[#8fd0c6]/24 bg-[#8fd0c6]/10 text-foreground"
+          ? "border-accent-teal/24 bg-accent-teal/10 text-foreground"
           : tone === "error"
-            ? "border-[#f59e7d]/38 bg-[#f59e7d]/12 text-[#f5c7b8]"
+            ? "border-accent-orange/38 bg-accent-orange/12 text-[#f5c7b8]"
             : tone === "warning"
               ? "border-[#e7d58c]/28 bg-[#e7d58c]/10 text-foreground"
               : undefined,

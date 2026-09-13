@@ -12,7 +12,7 @@ export const buttonVariants = cva(
         ghost:
           "border-transparent bg-transparent text-muted-foreground hover:bg-surface-soft hover:text-foreground",
         destructive:
-          "border-[#f59e7d]/30 bg-[#f59e7d]/12 text-[#f59e7d] hover:bg-[#f59e7d]/20",
+          "border-accent-orange/30 bg-accent-orange/12 text-accent-orange hover:bg-accent-orange/20",
       },
       size: {
         sm: "h-8 px-3",

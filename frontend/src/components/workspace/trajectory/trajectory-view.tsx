@@ -69,8 +69,8 @@ const KIND_ICONS: Record<TrajectoryItem["kind"], ComponentType<{ size?: number; 
 
 const KIND_TEXT_COLORS: Record<TrajectoryItem["kind"], string> = {
   assistant: "text-[#6ea8fe]",
-  reasoning: "text-[#8fd0c6]",
-  tool: "text-[#f0c77b]",
+  reasoning: "text-accent-teal",
+  tool: "text-accent-gold",
   planning: "text-[#a78bfa]",
   orchestration: "text-[#a78bfa]",
   route: "text-[#a78bfa]",
@@ -103,7 +103,7 @@ const TrajectoryRow = memo(function TrajectoryRow({
       className={cn(
         "flex h-full w-full items-center gap-2.5 border-l-2 px-3 text-left transition hover:bg-surface-soft",
         selected
-          ? "border-[#8fd0c6] bg-surface-soft"
+          ? "border-accent-teal bg-surface-soft"
           : "border-transparent",
       )}
       onClick={() => onSelect(item.id)}
@@ -119,13 +119,13 @@ const TrajectoryRow = memo(function TrajectoryRow({
       <span
         className={cn(
           "min-w-0 flex-1 truncate app-text-12 text-foreground",
-          item.status === "running" && "text-[#8fd0c6]",
+          item.status === "running" && "text-accent-teal",
         )}
       >
         {trajectoryItemSummary(item)}
       </span>
       {item.status === "running" ? (
-        <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-[#8fd0c6]" />
+        <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-accent-teal" />
       ) : null}
     </button>
   );
@@ -238,7 +238,7 @@ export function TrajectoryView({
           />
           <input
             aria-label="Search trajectory"
-            className="w-full rounded-md border border-border bg-surface-solid py-1.5 pl-7 pr-2.5 app-text-12 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-[#8fd0c6]/45"
+            className="w-full rounded-md border border-border bg-surface-solid py-1.5 pl-7 pr-2.5 app-text-12 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-accent-teal/45"
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search trajectory…"
             value={query}
@@ -252,7 +252,7 @@ export function TrajectoryView({
               className={cn(
                 "rounded-md border px-2.5 py-1 app-text-11 transition",
                 filter === option.id
-                  ? "border-[#8fd0c6]/30 bg-[#8fd0c6]/10 text-[#8fd0c6]"
+                  ? "border-accent-teal/30 bg-accent-teal/10 text-accent-teal"
                   : "border-border bg-surface-solid text-muted-foreground hover:text-foreground",
               )}
               onClick={() => setFilter(option.id)}
@@ -268,7 +268,7 @@ export function TrajectoryView({
           className={cn(
             "rounded-md border p-1.5 transition",
             timelineOpen
-              ? "border-[#8fd0c6]/30 bg-[#8fd0c6]/10 text-[#8fd0c6]"
+              ? "border-accent-teal/30 bg-accent-teal/10 text-accent-teal"
               : "border-border bg-surface-solid text-muted-foreground hover:text-foreground",
           )}
           onClick={() => setTimelineOpen((current) => !current)}
@@ -283,7 +283,7 @@ export function TrajectoryView({
           className={cn(
             "rounded-md border p-1.5 transition",
             redactExport
-              ? "border-[#8fd0c6]/30 bg-[#8fd0c6]/10 text-[#8fd0c6]"
+              ? "border-accent-teal/30 bg-accent-teal/10 text-accent-teal"
               : "border-border bg-surface-solid text-muted-foreground hover:text-foreground",
           )}
           onClick={() => setRedactExport((current) => !current)}
@@ -376,7 +376,7 @@ export function TrajectoryView({
 
       {isLive ? (
         <div className="flex items-center gap-1.5 border-t border-border bg-surface-softer px-3 py-1 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
-          <span className="size-1.5 animate-pulse rounded-full bg-[#8fd0c6]" />
+          <span className="size-1.5 animate-pulse rounded-full bg-accent-teal" />
           Streaming
         </div>
       ) : null}

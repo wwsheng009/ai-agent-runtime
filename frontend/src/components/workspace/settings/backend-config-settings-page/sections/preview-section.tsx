@@ -66,9 +66,9 @@ export function ConfigPreviewSection({ core }: { core: ConfigEditorCore }) {
                 className={cn(
                   "grid grid-cols-[3.5rem_3.5rem_1.5rem_minmax(0,1fr)] px-3 py-1.5 font-mono app-text-12",
                   line.type === "add"
-                    ? "bg-[#8fd0c6]/10 text-[#d6fff6]"
+                    ? "bg-accent-teal/10 text-[#d6fff6]"
                     : line.type === "remove"
-                      ? "bg-[#f59e7d]/10 text-[#ffd9ce]"
+                      ? "bg-accent-orange/10 text-[#ffd9ce]"
                       : "text-foreground",
                 )}
               >

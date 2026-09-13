@@ -70,7 +70,7 @@ export function WhatsNewSection() {
             }
           >
             <div className="flex items-center gap-3 text-sm font-semibold">
-              <card.icon size={18} className="text-[#f0c77b]" />
+              <card.icon size={18} className="text-accent-gold" />
               {card.label}
             </div>
             <h3 className="mt-5 text-2xl font-semibold tracking-[-0.03em]">

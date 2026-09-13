@@ -27,7 +27,7 @@ export function DispatchTemplatePanel({
           className={cn(
             consoleModeButtonClass,
             dispatchTemplateMode === "review_implement_verify"
-              ? "border-[#f0c77b]/24 bg-[#f0c77b]/10 text-[#f0c77b]"
+              ? "border-accent-gold/24 bg-accent-gold/10 text-accent-gold"
               : "border-white/10 bg-white/4 text-muted-foreground hover:border-white/14 hover:bg-white/7 hover:text-foreground",
           )}
         >
@@ -39,7 +39,7 @@ export function DispatchTemplatePanel({
           className={cn(
             consoleModeButtonClass,
             dispatchTemplateMode === "mirror"
-              ? "border-[#f0c77b]/24 bg-[#f0c77b]/10 text-[#f0c77b]"
+              ? "border-accent-gold/24 bg-accent-gold/10 text-accent-gold"
               : "border-white/10 bg-white/4 text-muted-foreground hover:border-white/14 hover:bg-white/7 hover:text-foreground",
           )}
         >

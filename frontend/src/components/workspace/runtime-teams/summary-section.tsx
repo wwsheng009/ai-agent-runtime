@@ -91,7 +91,7 @@ export function TeamsSummarySection({
       </div>
 
       {error ? (
-        <div className="rounded-[0.9rem] border border-[#f0c77b]/18 bg-[#f0c77b]/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
+        <div className="rounded-[0.9rem] border border-accent-gold/18 bg-accent-gold/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
           {error}
         </div>
       ) : null}

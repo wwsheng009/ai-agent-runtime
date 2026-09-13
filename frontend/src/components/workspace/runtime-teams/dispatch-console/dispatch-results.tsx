@@ -32,8 +32,8 @@ export function DispatchResults({
                   className={cn(
                     consolePillClass,
                     result.status === "created"
-                      ? "border-[#8fd0c6]/24 bg-[#8fd0c6]/10 text-[#8fd0c6]"
-                      : "border-[#f59e7d]/24 bg-[#f59e7d]/10 text-[#f59e7d]",
+                      ? "border-accent-teal/24 bg-accent-teal/10 text-accent-teal"
+                      : "border-accent-orange/24 bg-accent-orange/10 text-accent-orange",
                   )}
                 >
                   {result.status}

@@ -25,7 +25,7 @@ export function ProviderReferenceBadge({
       className={`inline-flex max-w-full items-center rounded-[0.6rem] border px-2 py-0.5 text-[11px] ${
         provider
           ? "border-border bg-surface-solid text-muted-foreground"
-          : "border-[#f59e7d]/30 bg-[#f59e7d]/10 text-[#f5c7b8]"
+          : "border-accent-orange/30 bg-accent-orange/10 text-[#f5c7b8]"
       }`}
     >
       <span className="truncate">

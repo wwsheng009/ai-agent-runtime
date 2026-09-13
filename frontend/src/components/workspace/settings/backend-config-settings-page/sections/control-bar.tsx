@@ -134,12 +134,12 @@ export function ConfigEditorControlBar({ core }: { core: ConfigEditorCore }) {
           : getModeLabel(mode, translatedModeMenuEntries)}
       </div>
       {statusMessage ? (
-        <div className="mt-2.5 rounded-[0.75rem] border border-[#8fd0c6]/24 bg-[#8fd0c6]/10 px-3 py-2.5 text-sm">
+        <div className="mt-2.5 rounded-[0.75rem] border border-accent-teal/24 bg-accent-teal/10 px-3 py-2.5 text-sm">
           {statusMessage}
         </div>
       ) : null}
       {error ? (
-        <div className="mt-2.5 rounded-[0.75rem] border border-[#f59e7d]/24 bg-[#f59e7d]/10 px-3 py-2.5 text-sm">
+        <div className="mt-2.5 rounded-[0.75rem] border border-accent-orange/24 bg-accent-orange/10 px-3 py-2.5 text-sm">
           {error}
         </div>
       ) : null}

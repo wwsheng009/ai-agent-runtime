@@ -28,16 +28,16 @@ export function WorkspaceShellThreadStrip({
   return (
     <div className="shrink-0 px-3.5 pb-2.5 pt-1.5 sm:px-4 lg:px-6">
       <div className="mx-auto flex max-w-[42rem] flex-wrap items-center gap-2 app-text-11 uppercase tracking-[0.16em] text-muted-foreground">
-        <span className={cn(stripPillClass, "border-white/10 bg-white/5 text-[#8fd0c6]")}>
+        <span className={cn(stripPillClass, "border-white/10 bg-white/5 text-accent-teal")}>
           <SparklesIcon size={14} />
           Active thread
         </span>
         <span className={cn(stripPillClass, "border-white/10 bg-black/18")}>
-          <RadioTowerIcon size={14} className="text-[#8fd0c6]" />
+          <RadioTowerIcon size={14} className="text-accent-teal" />
           {transportLabel}
         </span>
         <span className={cn(stripPillClass, "border-white/10 bg-black/18")}>
-          <CommandIcon size={14} className="text-[#8fd0c6]" />
+          <CommandIcon size={14} className="text-accent-teal" />
           {commandStateLabel}
         </span>
         <span className={cn(stripPillClass, "border-white/10 bg-black/18")}>
@@ -55,11 +55,11 @@ export function WorkspaceShellThreadStrip({
 
       <div className="mx-auto mt-2 flex max-w-[42rem] flex-wrap items-center gap-x-4 gap-y-1 app-text-11 uppercase tracking-[0.16em] text-muted-foreground">
         <span className="inline-flex items-center gap-2">
-          <OrbitIcon size={13} className="text-[#f0c77b]" />
+          <OrbitIcon size={13} className="text-accent-gold" />
           {selectedThread.messages.length} entries
         </span>
         <span className="inline-flex items-center gap-2">
-          <FolderKanbanIcon size={13} className="text-[#8fd0c6]" />
+          <FolderKanbanIcon size={13} className="text-accent-teal" />
           {selectedThread.artifacts.length} artifacts
         </span>
         {selectedThread.tags.slice(0, 3).map((tag) => (
@@ -68,7 +68,7 @@ export function WorkspaceShellThreadStrip({
       </div>
 
       {selectedThread.lastError ? (
-        <div className="mx-auto mt-2.5 max-w-[42rem] rounded-[0.8rem] border border-[#f0c77b]/22 bg-[#f0c77b]/8 px-3 py-2.5 text-sm leading-6 text-foreground">
+        <div className="mx-auto mt-2.5 max-w-[42rem] rounded-[0.8rem] border border-accent-gold/22 bg-accent-gold/8 px-3 py-2.5 text-sm leading-6 text-foreground">
           Runtime sync failed.
           <span className="ml-2 text-muted-foreground">
             {selectedThread.lastError}

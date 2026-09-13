@@ -14,8 +14,8 @@ import { trajectoryItemKindLabel, trajectoryItemSummary } from "./trajectory-vie
 
 const KIND_COLORS: Record<TrajectoryItem["kind"], string> = {
   assistant: "bg-[#6ea8fe]",
-  reasoning: "bg-[#8fd0c6]",
-  tool: "bg-[#f0c77b]",
+  reasoning: "bg-accent-teal",
+  tool: "bg-accent-gold",
   planning: "bg-[#a78bfa]",
   orchestration: "bg-[#a78bfa]",
   route: "bg-[#a78bfa]",
@@ -100,7 +100,7 @@ export function TrajectoryTimeline({
               <button
                 key={item.id}
                 aria-label={`tool ${item.head.kind === "tool" ? item.head.name : item.seq}`}
-                className="absolute top-0 h-2.5 min-w-1 cursor-pointer rounded-[2px] bg-[#f0c77b] transition hover:opacity-90"
+                className="absolute top-0 h-2.5 min-w-1 cursor-pointer rounded-[2px] bg-accent-gold transition hover:opacity-90"
                 onClick={() => onJumpToItem(item.id)}
                 style={{ left: `${left}%` }}
                 title={`tool ${item.head.kind === "tool" ? item.head.name : ""} (#${item.seq})`}

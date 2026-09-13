@@ -101,7 +101,7 @@ export function RuntimeTeamPathClaimsSection({
           </Button>
         </div>
         {claimCheckError ? (
-          <div className="mt-2.5 rounded-[0.75rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
+          <div className="mt-2.5 rounded-[0.75rem] border border-accent-orange/18 bg-accent-orange/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
             {claimCheckError}
           </div>
         ) : null}
@@ -115,8 +115,8 @@ export function RuntimeTeamPathClaimsSection({
                 className={cn(
                   detailStatusPillClass,
                   claimCheckState.ok
-                    ? "border-[#8fd0c6]/24 bg-[#8fd0c6]/10 text-[#8fd0c6]"
-                    : "border-[#f59e7d]/24 bg-[#f59e7d]/10 text-[#f59e7d]",
+                    ? "border-accent-teal/24 bg-accent-teal/10 text-accent-teal"
+                    : "border-accent-orange/24 bg-accent-orange/10 text-accent-orange",
                 )}
               >
                 {claimCheckState.conflicts.length} conflicts
@@ -173,8 +173,8 @@ export function RuntimeTeamPathClaimsSection({
                       className={cn(
                         detailStatusPillClass,
                         active
-                          ? "border-[#8fd0c6]/24 bg-[#8fd0c6]/10 text-[#8fd0c6]"
-                          : "border-[#f59e7d]/24 bg-[#f59e7d]/10 text-[#f59e7d]",
+                          ? "border-accent-teal/24 bg-accent-teal/10 text-accent-teal"
+                          : "border-accent-orange/24 bg-accent-orange/10 text-accent-orange",
                       )}
                     >
                       {active ? "active" : "expired"}

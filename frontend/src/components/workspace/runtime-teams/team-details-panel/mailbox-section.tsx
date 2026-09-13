@@ -141,7 +141,7 @@ export function TeamDetailsPanelMailbox({
         </div>
       </div>
       {mailboxError ? (
-        <div className="mt-3 rounded-[0.8rem] border border-[#f59e7d]/18 bg-[#f59e7d]/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
+        <div className="mt-3 rounded-[0.8rem] border border-accent-orange/18 bg-accent-orange/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground">
           {mailboxError}
         </div>
       ) : null}
@@ -166,7 +166,7 @@ export function TeamDetailsPanelMailbox({
                     className={cn(
                       detailsPillClass,
                       message.acked_at
-                        ? "border-[#8fd0c6]/24 bg-[#8fd0c6]/10 text-[#8fd0c6]"
+                        ? "border-accent-teal/24 bg-accent-teal/10 text-accent-teal"
                         : "border-white/10 bg-white/6 text-muted-foreground",
                     )}
                   >
