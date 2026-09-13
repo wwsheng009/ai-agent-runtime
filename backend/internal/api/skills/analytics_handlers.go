@@ -2,52 +2,40 @@ package skills
 
 import (
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
-	"github.com/wwsheng009/ai-agent-runtime/internal/chataloganalytics"
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/usageanalytics"
 )
 
-// SetChatLogsDir overrides the chat-log root used by usage analytics endpoints.
-func (h *Handler) SetChatLogsDir(path string) {
-	path = aiclipaths.ExpandUserPath(path)
-	if path != "" {
-		if absolutePath, err := filepath.Abs(path); err == nil {
-			path = absolutePath
-		}
-	}
-	h.chatLogsDir = path
-}
+// ============================================================================
+// 用量分析端点（runtime.analytics.v1）——DB-only。
+//
+// 数据源唯一：usageanalytics.Service（~/.aicli/sessions/runtime/usage_analytics.sqlite，
+// 由 runtime EventBus 事件实时写入）。不再扫描 chat-logs 目录。
+// 认证与错误码保持原行为（authorizeUsageAdmin，Bearer admin token）。
+// ============================================================================
 
-func (h *Handler) resolveChatLogsDir() string {
-	if h != nil {
-		if path := strings.TrimSpace(h.chatLogsDir); path != "" {
-			return path
-		}
-	}
-	return aiclipaths.DefaultChatLogsDir()
-}
-
-// ListAnalyticsSessions returns per-session usage rollups from chat logs.
+// ListAnalyticsSessions returns per-session usage rollups from the analytics DB.
 func (h *Handler) ListAnalyticsSessions(w http.ResponseWriter, r *http.Request) {
 	if err := h.authorizeUsageAdmin(r); err != nil {
 		h.writeError(w, http.StatusForbidden, err)
 		return
 	}
-
 	query, err := parseAnalyticsQuery(r)
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-
-	result, err := chataloganalytics.ListSessions(h.resolveChatLogsDir(), query)
+	service := h.ensureUsageAnalyticsService(w)
+	if service == nil {
+		return
+	}
+	result, err := service.ListSessions(query)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
@@ -61,14 +49,16 @@ func (h *Handler) GetAnalyticsSummary(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusForbidden, err)
 		return
 	}
-
 	query, err := parseAnalyticsQuery(r)
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, err)
 		return
 	}
-
-	result, err := chataloganalytics.Summarize(h.resolveChatLogsDir(), query)
+	service := h.ensureUsageAnalyticsService(w)
+	if service == nil {
+		return
+	}
+	result, err := service.Summarize(query)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
@@ -82,19 +72,16 @@ func (h *Handler) GetAnalyticsDimensions(w http.ResponseWriter, r *http.Request)
 		h.writeError(w, http.StatusForbidden, err)
 		return
 	}
-	maxScan := 0
-	if r != nil && r.URL != nil {
-		raw := strings.TrimSpace(r.URL.Query().Get("max_scan"))
-		if raw != "" {
-			parsed, err := strconv.Atoi(raw)
-			if err != nil || parsed < 0 {
-				h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid max_scan value"))
-				return
-			}
-			maxScan = parsed
-		}
+	query, err := parseAnalyticsQuery(r)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err)
+		return
 	}
-	result, err := chataloganalytics.Dimensions(h.resolveChatLogsDir(), maxScan)
+	service := h.ensureUsageAnalyticsService(w)
+	if service == nil {
+		return
+	}
+	result, err := service.Dimensions(query)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
@@ -108,16 +95,18 @@ func (h *Handler) GetAnalyticsSessionUsage(w http.ResponseWriter, r *http.Reques
 		h.writeError(w, http.StatusForbidden, err)
 		return
 	}
-
 	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
 	if sessionID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
 		return
 	}
-
-	result, err := chataloganalytics.SessionUsage(h.resolveChatLogsDir(), sessionID)
+	service := h.ensureUsageAnalyticsService(w)
+	if service == nil {
+		return
+	}
+	result, err := service.SessionUsage(sessionID)
 	if err != nil {
-		if chataloganalytics.IsNotFound(err) {
+		if usageanalytics.IsNotFound(err) {
 			h.writeError(w, http.StatusNotFound, errors.New(errors.ErrAPINotFound, err.Error()))
 			return
 		}
@@ -138,9 +127,13 @@ func (h *Handler) ListAnalyticsSessionTurns(w http.ResponseWriter, r *http.Reque
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
 		return
 	}
-	result, err := chataloganalytics.SessionUsage(h.resolveChatLogsDir(), sessionID)
+	service := h.ensureUsageAnalyticsService(w)
+	if service == nil {
+		return
+	}
+	result, err := service.SessionUsage(sessionID)
 	if err != nil {
-		if chataloganalytics.IsNotFound(err) {
+		if usageanalytics.IsNotFound(err) {
 			h.writeError(w, http.StatusNotFound, errors.New(errors.ErrAPINotFound, err.Error()))
 			return
 		}
@@ -159,8 +152,8 @@ func (h *Handler) ListAnalyticsSessionTurns(w http.ResponseWriter, r *http.Reque
 	})
 }
 
-func parseAnalyticsQuery(r *http.Request) (chataloganalytics.Query, error) {
-	q := chataloganalytics.Query{}
+func parseAnalyticsQuery(r *http.Request) (usageanalytics.Query, error) {
+	q := usageanalytics.Query{}
 	if r == nil || r.URL == nil {
 		return q, nil
 	}

@@ -12,10 +12,10 @@ import (
 )
 
 type stubHistory struct {
-	exists     bool
-	contexts   map[string]MessageContext
-	assistant  map[string]string
-	user       map[string]string
+	exists    bool
+	contexts  map[string]MessageContext
+	assistant map[string]string
+	user      map[string]string
 }
 
 func (h *stubHistory) MessageContext(sessionID, messageID string) (MessageContext, bool) {

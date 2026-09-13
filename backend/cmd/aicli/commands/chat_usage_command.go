@@ -251,6 +251,19 @@ func usagePercent(ratio *float64) string {
 	return fmt.Sprintf("%.1f%%", *ratio*100)
 }
 
+// formatUsageTokenSummary 单条请求的 token 用量摘要（明细列表与消息追溯
+// 共用，保证两处口径一致）。Usage 缺失（provider 未上报）时返回 "-"。
+func formatUsageTokenSummary(usage *cacheanalytics.CacheUsage) string {
+	if usage == nil {
+		return "-"
+	}
+	return fmt.Sprintf("prompt=%s 输出=%s 读=%s 写=%s",
+		formatTokenCount(usage.PromptTokens),
+		formatTokenCount(usage.CompletionTokens),
+		formatTokenCount(usage.CacheReadTokens),
+		formatTokenCount(usage.CacheCreationTokens))
+}
+
 func usageCacheStatusLabel(status string) string {
 	switch status {
 	case cacheanalytics.CacheStatusHit:
@@ -292,6 +305,9 @@ func renderUsageCacheOverview(src cacheanalytics.Source, sessionID string) []str
 		formatTokenCount(overview.Tokens.CacheReadTokens),
 		formatTokenCount(overview.Tokens.CacheCreationTokens)))
 	lines = append(lines, fmt.Sprintf("  输出 token: %s", formatTokenCount(overview.Tokens.CompletionTokens)))
+	lines = append(lines, fmt.Sprintf("  合计 token: %s   推理 token: %s",
+		formatTokenCount(overview.Tokens.TotalTokens),
+		formatTokenCount(overview.Tokens.ReasoningTokens)))
 	lines = append(lines, fmt.Sprintf("  缓存读取率: %s   缓存写入率: %s",
 		usagePercent(overview.CacheHitRatio), usagePercent(overview.CacheWriteRatio)))
 	return lines
@@ -309,15 +325,8 @@ func renderUsageCacheRequests(src cacheanalytics.Source, sessionID string, limit
 	lines := []string{fmt.Sprintf("最近 %d 条 LLM 请求（共 %d 条，新→旧）", len(resp.Requests), resp.Total)}
 	for i, r := range resp.Requests {
 		hit := "--"
-		tokens := "-"
-		if r.Usage != nil {
-			tokens = fmt.Sprintf("prompt=%s 读=%s 写=%s",
-				formatTokenCount(r.Usage.PromptTokens),
-				formatTokenCount(r.Usage.CacheReadTokens),
-				formatTokenCount(r.Usage.CacheCreationTokens))
-			if r.CacheHitRatio != nil {
-				hit = usagePercent(r.CacheHitRatio)
-			}
+		if r.Usage != nil && r.CacheHitRatio != nil {
+			hit = usagePercent(r.CacheHitRatio)
 		}
 		lines = append(lines, fmt.Sprintf("  #%d %s %s %s/%s step=%d %s %s %s",
 			i+1,
@@ -327,7 +336,7 @@ func renderUsageCacheRequests(src cacheanalytics.Source, sessionID string, limit
 			r.Step,
 			orDash(r.Status),
 			usageCacheStatusLabel(r.CacheStatus),
-			hit+" "+tokens))
+			hit+" "+formatUsageTokenSummary(r.Usage)))
 	}
 	return lines
 }
@@ -354,6 +363,8 @@ func renderUsageCacheTrace(src cacheanalytics.Source, sessionID, messageID strin
 			produced.LLMRequestID,
 			usageCacheStatusLabel(produced.CacheStatus),
 			usagePercent(produced.CacheHitRatio)))
+		// 产出用量与明细列表同口径（§6.4：trace 展示 produced_by 的 token 明细）。
+		lines = append(lines, "  产出用量: "+formatUsageTokenSummary(produced.Usage))
 	} else {
 		lines = append(lines, "  产出请求: （无关联请求）")
 	}

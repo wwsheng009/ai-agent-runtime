@@ -45,13 +45,13 @@ func TestParseUsageCommandArgs(t *testing.T) {
 // fakeUsageSource 实现 cacheanalytics.Source，用于精准驱动渲染降级分支
 // （partial 窗口标注、稳定错误码映射）。
 type fakeUsageSource struct {
-	caps       cacheanalytics.Capabilities
-	overview   cacheanalytics.CacheOverview
+	caps        cacheanalytics.Capabilities
+	overview    cacheanalytics.CacheOverview
 	overviewErr error
-	requests   cacheanalytics.RequestListResponse
+	requests    cacheanalytics.RequestListResponse
 	requestsErr error
-	trace      cacheanalytics.MessageTrace
-	traceErr   error
+	trace       cacheanalytics.MessageTrace
+	traceErr    error
 }
 
 func (f *fakeUsageSource) Capabilities() cacheanalytics.Capabilities { return f.caps }
@@ -77,8 +77,10 @@ func TestRenderUsageCacheOverview_PartialHeader(t *testing.T) {
 		Tokens: cacheanalytics.CacheOverviewTokens{
 			PromptTokens:        128400,
 			CompletionTokens:    3200,
+			TotalTokens:         131600,
 			CacheReadTokens:     64200,
 			CacheCreationTokens: 1200,
+			ReasoningTokens:     900,
 		},
 		CacheHitRatio:   ratioPtr(0.5),
 		CacheWriteRatio: ratioPtr(0.0093),
@@ -102,6 +104,14 @@ func TestRenderUsageCacheOverview_PartialHeader(t *testing.T) {
 	// 千分位（§6.4 示例 128,400）。
 	if !strings.Contains(joined, "128,400") {
 		t.Fatalf("thousands separator missing:\n%s", joined)
+	}
+	// 输出 token（completion_tokens）必须在总览中可见。
+	if !strings.Contains(joined, "输出 token: 3,200") {
+		t.Fatalf("completion token line missing:\n%s", joined)
+	}
+	// 聚合字段：合计（total_tokens）与推理（reasoning_tokens）。
+	if !strings.Contains(joined, "合计 token: 131,600") || !strings.Contains(joined, "推理 token: 900") {
+		t.Fatalf("aggregate token line missing:\n%s", joined)
 	}
 	if !strings.Contains(joined, "缓存读取率: 50.0%") {
 		t.Fatalf("hit ratio missing:\n%s", joined)
@@ -151,6 +161,7 @@ func TestRenderUsageCacheRequests_Live(t *testing.T) {
 	publishCacheStarted(t, bus, sessionID, "req-1", nil)
 	publishCacheFinished(t, bus, sessionID, "req-1", map[string]interface{}{
 		"usage_cache_read_tokens": 100,
+		"usage_completion_tokens": 50,
 	})
 	publishCacheStarted(t, bus, sessionID, "req-2", nil)
 	publishCacheFinished(t, bus, sessionID, "req-2", map[string]interface{}{
@@ -179,7 +190,8 @@ func TestRenderUsageCacheRequests_Live(t *testing.T) {
 	}
 	// req-1 命中率 50.0%；req-3/req-4 命中率 --。
 	req1Line := lines[4]
-	if !strings.Contains(req1Line, "50.0%") || !strings.Contains(req1Line, "prompt=200") {
+	if !strings.Contains(req1Line, "50.0%") || !strings.Contains(req1Line, "prompt=200") ||
+		!strings.Contains(req1Line, "输出=50") {
 		t.Fatalf("req-1 line mismatch: %q", req1Line)
 	}
 	req3Line := lines[2]
@@ -236,6 +248,7 @@ func TestRenderUsageCacheTrace_Live(t *testing.T) {
 	publishCacheFinished(t, bus, sessionID, "req-1", map[string]interface{}{
 		"logical_turn_id":         "turn-t1",
 		"usage_cache_read_tokens": 100,
+		"usage_completion_tokens": 40,
 	})
 
 	lines := renderUsageCacheTrace(src, sessionID, "msg-a1")
@@ -249,6 +262,10 @@ func TestRenderUsageCacheTrace_Live(t *testing.T) {
 	}
 	if !strings.Contains(joined, "产出请求: req-1（命中，命中率 50.0%）") {
 		t.Fatalf("produced_by line missing:\n%s", joined)
+	}
+	// 产出用量与明细同口径：prompt/输出/读/写。
+	if !strings.Contains(joined, "产出用量: prompt=200 输出=40 读=100 写=0") {
+		t.Fatalf("produced_by usage line missing:\n%s", joined)
 	}
 	if !strings.Contains(joined, "相邻消息: msg-u1") {
 		t.Fatalf("neighbors missing:\n%s", joined)

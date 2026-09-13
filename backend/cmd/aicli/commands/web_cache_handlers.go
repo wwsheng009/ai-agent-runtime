@@ -11,7 +11,8 @@ import (
 const ChatWebAPICachePath = "/web/api/cache"
 
 // HandleChatWebAPICache 缓存分析 HTTP 入口：复用 cacheanalytics.Handler
-//（同一契约单点定义），数据源为当前会话的本地 cacheanalytics.Service。
+//（同一契约单点定义），数据源优先为 usageanalytics 的数据库 Source
+//（usage_analytics.sqlite，与 TUI /usage、runtime server 同库同源）。
 // session_id 缺省为当前 runtime session id；服务不可用时返回稳定错误码
 // cache_analytics_disabled（503）。
 func HandleChatWebAPICache(w http.ResponseWriter, r *http.Request) {
@@ -20,14 +21,19 @@ func HandleChatWebAPICache(w http.ResponseWriter, r *http.Request) {
 		writeWebAPIJSON(w, http.StatusServiceUnavailable, cacheErrorBody(cacheanalytics.ErrDisabled, "chat session not ready"))
 		return
 	}
-	service := ensureLocalCacheService(session.LocalRuntimeHost)
-	if service == nil {
-		writeWebAPIJSON(w, http.StatusServiceUnavailable, cacheErrorBody(cacheanalytics.ErrDisabled, "cache analytics service unavailable"))
-		return
+	var src cacheanalytics.Source
+	if service := ensureLocalUsageService(session.LocalRuntimeHost); service != nil {
+		src = service.Source()
 	}
-	src := service.Source()
 	if src == nil {
-		writeWebAPIJSON(w, http.StatusServiceUnavailable, cacheErrorBody(cacheanalytics.ErrDisabled, "cache analytics source unavailable"))
+		// 数据库不可用（例如 EventBus/宿主缺失）时回退到进程内实时投影，
+		// 保证端点始终可用；契约与错误码不变。
+		if service := ensureLocalCacheService(session.LocalRuntimeHost); service != nil {
+			src = service.Source()
+		}
+	}
+	if src == nil {
+		writeWebAPIJSON(w, http.StatusServiceUnavailable, cacheErrorBody(cacheanalytics.ErrDisabled, "cache analytics service unavailable"))
 		return
 	}
 	if r.URL.Query().Get("session_id") == "" {

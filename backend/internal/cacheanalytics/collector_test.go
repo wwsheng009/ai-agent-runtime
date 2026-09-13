@@ -11,7 +11,7 @@ import (
 func newTestBus() *runtimeevents.Bus { return runtimeevents.NewBus() }
 
 // testClockNsec 包级递增计数器：bus.Publish 会自动填充真实 time.Now()
-//（bus.go:312-314），Windows 时钟精度下同刻事件会破坏排序断言，
+// （bus.go:312-314），Windows 时钟精度下同刻事件会破坏排序断言，
 // 故测试事件显式传递增 Timestamp。
 var testClockNsec int64
 

@@ -46,9 +46,9 @@ func TestCorrelationMultiStepTurnTrace(t *testing.T) {
 	publishFinished(bus, "s1", "req-2", false, map[string]interface{}{"logical_turn_id": "turn-7"})
 	publishStarted(bus, "s1", "req-3", map[string]interface{}{"logical_turn_id": "turn-7", "step": 3})
 	publishFinished(bus, "s1", "req-3", true, map[string]interface{}{
-		"logical_turn_id":              "turn-7",
-		"usage_prompt_tokens":          1000,
-		"usage_cache_creation_tokens":  300,
+		"logical_turn_id":             "turn-7",
+		"usage_prompt_tokens":         1000,
+		"usage_cache_creation_tokens": 300,
 	})
 
 	// assistant 消息事件（载荷携带 message_id 时走事件流主路径，§5.2 path 1）。
@@ -130,7 +130,7 @@ func TestOverviewIncrementalMatchesFullRecompute(t *testing.T) {
 		}
 		if rng.Intn(4) != 0 { // 3/4 带 usage
 			usage := &CacheUsage{
-				PromptTokens:    int64(100 + rng.Intn(900)),
+				PromptTokens:     int64(100 + rng.Intn(900)),
 				CompletionTokens: int64(rng.Intn(200)),
 			}
 			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens

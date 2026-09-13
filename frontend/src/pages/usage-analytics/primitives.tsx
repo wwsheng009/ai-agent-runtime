@@ -5,55 +5,13 @@ import { Button } from "@/components/ui/button";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { Select } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import type { AnalyticsCoverage, AnalyticsDimensionsResponse, AnalyticsGlobalTotals } from "@/types/runtime";
+import type { AnalyticsCoverage } from "@/types/runtime";
 import { AlertTriangleIcon, ArrowLeftIcon, BarChart3Icon, CheckCircle2Icon, DatabaseIcon, RefreshCwIcon, TerminalSquareIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { formatPercent, partialReasonKey, qualityKey, shortID } from "./format";
-
-export const emptyTotals: AnalyticsGlobalTotals = {
-  sessions: 0,
-  total_requests: 0,
-  total_responses: 0,
-  total_tool_calls: 0,
-  llm_requests: 0,
-  llm_successes: 0,
-  llm_errors: 0,
-  turns: 0,
-  failed_turns: 0,
-  recovered_turns: 0,
-  tool_results_observed: 0,
-  tool_errors: 0,
-  total_duration_ms: 0,
-  total_tokens: 0,
-  prompt_tokens: 0,
-  completion_tokens: 0,
-  cached_tokens: 0,
-  reasoning_tokens: 0,
-};
-
-export const emptyCoverage: AnalyticsCoverage = {
-  sessions: 0,
-  sessions_with_usage: 0,
-  usage_session_rate: 0,
-  llm_requests: 0,
-  llm_requests_with_usage: 0,
-  usage_request_rate: 0,
-  tool_results_observed: 0,
-  dropped_messages: 0,
-};
-
-export const emptyDimensions: AnalyticsDimensionsResponse = {
-  schema_version: "runtime.analytics.v1",
-  generated_at: "",
-  providers: [],
-  models: [],
-  directories: [],
-  projects: [],
-  statuses: [],
-};
 
 export function AnalyticsHeader({ onRefresh, refreshing }: { onRefresh: () => void; refreshing: boolean }) {
   const { t } = useTranslation("usageAnalytics");
@@ -263,25 +221,4 @@ export function QualityBadge({ quality, coverage, partial }: { quality: string; 
 
 export function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
   return <button type="button" role="tab" aria-selected={active} onClick={onClick} className={cn("rounded-[0.6rem] border px-3 py-1.5 text-sm transition", active ? "border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)] text-[var(--foreground)]" : "border-transparent text-[var(--muted-foreground)] hover:bg-[var(--surface-soft)] hover:text-[var(--foreground)]")}>{children}</button>;
-}
-
-/** 用量 / 缓存 页内 tab 切换（§6.2：同属消耗观测心智，复用页面骨架）。 */
-export function UsageViewTabs({ active }: { active: "usage" | "cache" }) {
-  const { t } = useTranslation("usageAnalytics");
-  const tabClass = (isActive: boolean) => cn(
-    "rounded-[0.6rem] border px-3 py-1.5 text-sm transition",
-    isActive
-      ? "border-[var(--accent-primary-border)] bg-[var(--accent-primary-soft)] text-[var(--foreground)]"
-      : "border-transparent text-[var(--muted-foreground)] hover:bg-[var(--surface-soft)] hover:text-[var(--foreground)]",
-  );
-  return (
-    <div className="surface-panel flex items-center gap-1 rounded-[0.75rem] p-1" role="tablist" aria-label={t("cache.tabsLabel")}>
-      <Link to="/usage" role="tab" aria-selected={active === "usage"} className={tabClass(active === "usage")}>
-        {t("cache.tabUsage")}
-      </Link>
-      <Link to="/usage/cache" role="tab" aria-selected={active === "cache"} className={tabClass(active === "cache")}>
-        {t("cache.tabCache")}
-      </Link>
-    </div>
-  );
 }

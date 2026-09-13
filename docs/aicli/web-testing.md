@@ -79,6 +79,14 @@ aicli chat --pprof
 - [ ] Reasoning 编辑器：保存模型列表后按模型逐行生成，编辑不丢草稿。
 - [ ] 保存后 payload 中各字段值与表单一致（可在 DevTools Network 面板检查 `POST /web/api/config/providers`）。
 
+### 2.5 缓存分析页
+
+- [ ] 总览卡片：请求总数 / 缓存命中率 / 缓存写入率 / 缓存读取 tokens / 缓存写入 tokens / prompt tokens / **输出 tokens** / **合计 tokens** / **推理 tokens** 均有值；与同会话 `aicli chat` 的 `/usage cache` 总览逐项一致（同一 `cacheanalytics` Source，前端只做展示）。
+- [ ] 请求明细表格（共 10 列）：时间 / provider/model / step / 状态 / 缓存 / 命中率 / prompt / **输出** / 读缓存 / 写缓存；`not_reported` 行的缓存列显示 `--`。
+- [ ] 点击明细行：详情面板 token 段含 `prompt tokens` / `completion tokens` / `total tokens` / `缓存读取` / `缓存写入` / `reasoning tokens`。
+- [ ] 消息追溯：`产出请求` 下方的 `产出用量` 行显示 `prompt … · 输出 … · 读缓存 … · 写缓存 …`；无产出请求时显示 `-`。
+- [ ] 边界：空会话显示"暂无 LLM 请求记录（发送一条消息后刷新）"；旧记录缺 usage 时显示 `-`，不得出现 `NaN`/`undefined`。
+
 ## 3. 协议下拉框专项用例（combo popup）
 
 Provider 编辑弹窗的协议字段曾用原生 `<input list=datalist>`，存在**有值与无值显示不一致**的缺陷：浏览器会按 input 当前值过滤 datalist 选项，编辑 `openai` 协议的 provider 时下拉只剩匹配项，新增（空值）时才显示全部。已改为 ▼ 按钮 + 自定义 popup（与底部 Model 字段同方案）。以下用例为该组件的回归重点：

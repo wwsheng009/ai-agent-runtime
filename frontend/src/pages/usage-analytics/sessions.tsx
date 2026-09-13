@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { getAnalyticsSessionUsage } from "@/lib/runtime-api";
 import { cn } from "@/lib/utils";
+import { CacheAnalyticsPanel } from "@/pages/cache-analytics-page";
 import type { AnalyticsDiagnostic, AnalyticsSessionRollup, AnalyticsSessionUsageDetail, AnalyticsTurnUsage } from "@/types/runtime";
 import { AlertTriangleIcon, CheckCircle2Icon, ChevronLeftIcon, ChevronRightIcon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
@@ -206,6 +207,7 @@ export function SessionDetail() {
               </section>
               <QualityNotice coverage={detail.coverage} partial={detail.partial} reasons={detail.partial_reasons} />
               {tab === "overview" ? <SessionOverview detail={detail} /> : <SessionTokens detail={detail} />}
+              {sessionId ? <CacheAnalyticsPanel key={sessionId} sessionId={sessionId} /> : null}
             </>
           )}
         </main>

@@ -1,19 +1,33 @@
-package chataloganalytics
+// Package usageanalytics 统一 /usage（用量分析）与 /usage/cache（缓存分析）的
+// 数据源：运行时 EventBus 事件实时写入单一 SQLite 分析库
+// （~/.aicli/sessions/runtime/usage_analytics.sqlite），查询全部走 SQL
+// （LIMIT/OFFSET/GROUP BY/DISTINCT），不再扫描 chat-logs 磁盘目录。
+//
+// 分层：
+//   - store.go    SQLite 打开/迁移（WAL、busy_timeout，路径可注入）
+//   - ingest.go   EventBus 订阅与幂等写入（usage_requests / usage_sessions）
+//   - query.go    SQL 分页与聚合（ListSessions/Summarize/Dimensions/SessionUsage）
+//   - cachesource.go  cacheanalytics.Source 的数据库实现（缓存端点同库读取）
+//   - service.go  Attach/Close 生命周期与路径解析
+package usageanalytics
 
 import "time"
 
-// Query filters chat-log analytics scans.
+// SchemaVersion 分析契约版本（与旧 chataloganalytics 保持一致，前端无需感知换库）。
+const SchemaVersion = "runtime.analytics.v1"
+
+// Query filters analytics queries against the runtime usage database.
 type Query struct {
-	// From/To filter by session start time (inclusive/exclusive).
+	// From/To filter by request start time (inclusive/exclusive).
 	From time.Time
 	To   time.Time
 
 	Provider  string
 	Model     string
-	Directory string // date partition or relative path prefix, e.g. "2026/07/27" or "2026/07"
-	Project   string // normalized engineering project root, independent from the log date partition
+	Directory string // 会话工作目录/项目路径前缀
+	Project   string // 归一化工程根
 	Status    string
-	Query     string // free-text match against session_id/provider/model/directory/project
+	Query     string // free-text match against session_id/title/provider/model/directory/project
 
 	// GroupBy controls summary breakdown: day | provider | model | directory | project | status
 	GroupBy string
@@ -21,8 +35,7 @@ type Query struct {
 	Limit  int
 	Offset int
 
-	// MaxScan caps how many session directories are considered before filtering/sorting.
-	// Zero uses the package default.
+	// MaxScan 仅为兼容旧查询参数保留：数据库查询无扫描上限。
 	MaxScan int
 }
 
@@ -64,7 +77,7 @@ type SessionRollup struct {
 	AverageResponseTimeMs int64     `json:"average_response_time_ms,omitempty"`
 	TotalDurationMs       int64     `json:"total_duration_ms,omitempty"`
 	HasDebugUsage         bool      `json:"has_debug_usage,omitempty"`
-	Source                string    `json:"source,omitempty"` // summary | debug | mixed
+	Source                string    `json:"source,omitempty"` // live（数据库实时写入）
 	UsageQuality          string    `json:"usage_quality"`
 	UsageComplete         bool      `json:"usage_complete"`
 	UsageCoverage         float64   `json:"usage_coverage"`
@@ -123,8 +136,6 @@ type GroupBucket struct {
 	TokenTotals
 }
 
-const SchemaVersion = "runtime.analytics.v1"
-
 // Coverage reports whether the aggregate can be interpreted as a complete
 // lifetime total or only as the currently retained diagnostic window.
 type Coverage struct {
@@ -138,6 +149,7 @@ type Coverage struct {
 	DroppedMessages      int     `json:"dropped_messages"`
 }
 
+// DataWindow is the observed time window of the matched data.
 type DataWindow struct {
 	From time.Time `json:"from,omitempty"`
 	To   time.Time `json:"to,omitempty"`
@@ -186,7 +198,7 @@ type DimensionsResult struct {
 	Statuses      []string  `json:"statuses"`
 }
 
-// StepUsage is one LLM request_finished step from debug.log.
+// StepUsage is one LLM request step (derived from usage_requests).
 type StepUsage struct {
 	StartedAt           time.Time `json:"started_at,omitempty"`
 	Timestamp           time.Time `json:"timestamp,omitempty"`
@@ -212,6 +224,8 @@ type StepUsage struct {
 	ContextUtilization  float64   `json:"context_utilization,omitempty"`
 }
 
+// TurnUsage is a turn-level fact derived by grouping usage_requests on
+// (session_id, trace_id, turn_id) — no separate turns table exists.
 type TurnUsage struct {
 	TurnID                string      `json:"turn_id"`
 	TraceID               string      `json:"trace_id"`
@@ -232,6 +246,7 @@ type TurnUsage struct {
 	MaxContextUtilization float64     `json:"max_context_utilization"`
 }
 
+// Diagnostic is one derived health signal for a session.
 type Diagnostic struct {
 	Code          string  `json:"code"`
 	Severity      string  `json:"severity"`

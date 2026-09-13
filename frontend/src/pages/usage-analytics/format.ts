@@ -1,6 +1,6 @@
 // 由 pages/usage-analytics-page.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
-import type { AnalyticsGroupBy } from "@/types/runtime";
+import type { AnalyticsDimensionsResponse, AnalyticsGroupBy } from "@/types/runtime";
 
 export const adminTokenStorageKey = "runtime.logs.adminToken";
 
@@ -45,10 +45,34 @@ export function errorRate(errors: number, total: number) {
   return total > 0 ? errors / total : 0;
 }
 
-export function dimensionOptions(values: string[], current: string, allLabel: string) {
-  const available = current && !values.some((value) => value === current)
-    ? [current, ...values]
-    : values;
+function dimensionValues(values: unknown): string[] {
+  return Array.isArray(values)
+    ? values.filter((value): value is string => typeof value === "string")
+    : [];
+}
+
+// normalizeDimensions 兜底后端字段缺失/类型异常（例如代理指向未实现 analytics 路由的
+// 桩服务时返回 `200 {}`），保证过滤控件永远拿到数组，避免渲染期崩溃。
+export function normalizeDimensions(raw: unknown): AnalyticsDimensionsResponse {
+  const source = (raw ?? {}) as Partial<AnalyticsDimensionsResponse>;
+  return {
+    schema_version: typeof source.schema_version === "string"
+      ? source.schema_version
+      : "runtime.analytics.v1",
+    generated_at: typeof source.generated_at === "string" ? source.generated_at : "",
+    providers: dimensionValues(source.providers),
+    models: dimensionValues(source.models),
+    directories: dimensionValues(source.directories),
+    projects: dimensionValues(source.projects),
+    statuses: dimensionValues(source.statuses),
+  };
+}
+
+export function dimensionOptions(values: readonly string[] | null | undefined, current: string, allLabel: string) {
+  const list = dimensionValues(values);
+  const available = current && !list.some((value) => value === current)
+    ? [current, ...list]
+    : list;
   return [
     { value: "", label: allLabel },
     ...available.map((value) => ({ value, label: value })),

@@ -10,8 +10,9 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react
 import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
 
-import { adminTokenStorageKey, analyticsFilterKeys, dimensionOptions, errorRate, formatNumber, formatPercent, readAdminToken } from "./format";
-import { AnalyticsHeader, emptyCoverage, emptyDimensions, emptyTotals, FilterInput, FilterSelect, Metric, QualityNotice, UsageAnalyticsChartsFallback, UsageViewTabs } from "./primitives";
+import { adminTokenStorageKey, analyticsFilterKeys, dimensionOptions, errorRate, formatNumber, formatPercent, normalizeDimensions, readAdminToken } from "./format";
+import { emptyCoverage, emptyDimensions, emptyTotals } from "./defaults";
+import { AnalyticsHeader, FilterInput, FilterSelect, Metric, QualityNotice, UsageAnalyticsChartsFallback } from "./primitives";
 import { SessionTable } from "./sessions";
 
 const UsageAnalyticsCharts = lazy(() =>
@@ -78,7 +79,7 @@ export function UsageOverview() {
       ]);
       setSessions(list.sessions ?? []);
       setGroups(summary.groups ?? []);
-      setDimensions(availableDimensions ?? emptyDimensions);
+      setDimensions(normalizeDimensions(availableDimensions));
       setTotals(list.totals ?? summary.totals ?? emptyTotals);
       setCoverage(list.coverage ?? emptyCoverage);
       setPartial(Boolean(list.partial));
@@ -117,7 +118,6 @@ export function UsageOverview() {
     <div className="min-h-screen min-w-0 overflow-x-hidden bg-[var(--workspace-shell-bg)] text-[var(--foreground)]">
       <div className="mx-auto flex min-h-screen w-full max-w-[1760px] flex-col gap-2 px-2.5 py-2.5 sm:px-3">
         <AnalyticsHeader onRefresh={() => void load()} refreshing={loading} />
-        <UsageViewTabs active="usage" />
         <main className="flex min-w-0 flex-1 flex-col gap-2">
           <form
             aria-label={t("filters.title")}

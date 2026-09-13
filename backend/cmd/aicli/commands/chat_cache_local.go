@@ -7,6 +7,7 @@ import (
 	cacheanalytics "github.com/wwsheng009/ai-agent-runtime/internal/cacheanalytics"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
+	"github.com/wwsheng009/ai-agent-runtime/internal/usageanalytics"
 )
 
 // ============================================================================
@@ -159,4 +160,108 @@ func chatLocalCacheService() *cacheanalytics.Service {
 		return nil
 	}
 	return ensureLocalCacheService(session.LocalRuntimeHost)
+}
+
+// ============================================================================
+// 统一用量分析（usage_analytics.sqlite）：与 runtime server 同一形态，
+// EventBus 事件实时写入，缓存端点与 TUI 分析读同一数据库。
+// ============================================================================
+
+// localSessionMetaLookup 把 host.SessionStore 适配为
+// usageanalytics.SessionMetaLookup（best-effort 补齐 title/项目/模型）。
+type localSessionMetaLookup struct {
+	store runtimechat.SessionStorage
+}
+
+// SessionMeta 返回会话元数据；ok=false 表示未知（保留库中已有值）。
+func (l *localSessionMetaLookup) SessionMeta(sessionID string) (usageanalytics.SessionMeta, bool) {
+	if l == nil || l.store == nil || strings.TrimSpace(sessionID) == "" {
+		return usageanalytics.SessionMeta{}, false
+	}
+	session, err := l.store.Load(context.Background(), sessionID)
+	if err != nil || session == nil {
+		return usageanalytics.SessionMeta{}, false
+	}
+	meta := usageanalytics.SessionMeta{
+		Title:    strings.TrimSpace(session.Metadata.Title),
+		Model:    strings.TrimSpace(session.Metadata.LastModel),
+		Provider: localContextString(session.Metadata.Context, "provider"),
+		Protocol: localContextString(session.Metadata.Context, "protocol"),
+	}
+	workspace := localContextString(session.Metadata.Context, "workspace_path", "working_directory", "project_path", "cwd")
+	meta.WorkingDirectory = workspace
+	meta.ProjectPath = workspace
+	if meta.Model == "" {
+		meta.Model = localContextString(session.Metadata.Context, "model")
+	}
+	if session.State != "" {
+		meta.Status = string(session.State)
+	}
+	return meta, true
+}
+
+func localContextString(values map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		if values == nil {
+			return ""
+		}
+		raw, ok := values[key]
+		if !ok {
+			continue
+		}
+		if typed, ok := raw.(string); ok {
+			if trimmed := strings.TrimSpace(typed); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
+// ensureLocalUsageService 启动期构建本地统一分析服务并缓存到 host。
+func ensureLocalUsageService(host *localChatRuntimeHost) *usageanalytics.Service {
+	if host == nil {
+		return nil
+	}
+	host.usageOnce.Do(func() {
+		host.usageSvc = buildLocalUsageService(host)
+	})
+	return host.usageSvc
+}
+
+func buildLocalUsageService(host *localChatRuntimeHost) *usageanalytics.Service {
+	if host == nil || host.EventBus == nil {
+		return nil
+	}
+	var lookup usageanalytics.SessionMetaLookup
+	var history cacheanalytics.HistoryLookup
+	if host.SessionStore != nil {
+		lookup = &localSessionMetaLookup{store: host.SessionStore}
+		history = &localCacheHistoryLookup{store: host.SessionStore}
+	}
+	path := usageanalytics.DefaultDBPath()
+	if withPath, ok := host.RuntimeStore.(interface{ Path() string }); ok && withPath != nil {
+		if derived := usageanalytics.PathFromRuntimeStore(withPath.Path()); derived != "" {
+			path = derived
+		}
+	}
+	service, err := usageanalytics.Attach(host.EventBus, usageanalytics.Options{
+		Config:  usageanalytics.Config{Path: path},
+		Lookup:  lookup,
+		History: history,
+	})
+	if err != nil || service == nil {
+		return nil
+	}
+	host.cleanupFns = append(host.cleanupFns, service.Close)
+	return service
+}
+
+// chatLocalUsageService 返回当前活动会话的统一分析服务；无会话时返回 nil。
+func chatLocalUsageService() *usageanalytics.Service {
+	session := chatDebugDisplaySession()
+	if session == nil {
+		return nil
+	}
+	return ensureLocalUsageService(session.LocalRuntimeHost)
 }

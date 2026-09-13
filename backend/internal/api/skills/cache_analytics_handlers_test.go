@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -25,15 +26,13 @@ import (
 // ============================================================================
 
 // resetCacheAnalyticsSingleton 重置进程内单例，保证每个测试拿到独立
-// collector（绑定各自 handler 的 EventBus）。
+// collector（绑定各自 handler 的 EventBus，写各自 t.TempDir() 的库）。
 func resetCacheAnalyticsSingleton() {
+	detachUsageAnalyticsService()
 	cacheAnalyticsMu.Lock()
 	defer cacheAnalyticsMu.Unlock()
-	if cacheAnalyticsClose != nil {
-		cacheAnalyticsClose()
-	}
 	cacheAnalyticsSource = nil
-	cacheAnalyticsClose = nil
+	cacheAnalyticsOwner = nil
 }
 
 // newCacheRuntimeHandler 构造带 SessionManager + 路由的测试 handler。
@@ -46,6 +45,11 @@ func newCacheRuntimeHandler(t *testing.T) (*Handler, *mux.Router, *runtimechat.S
 	sessionManager := runtimechat.NewSessionManager(storage, nil)
 	t.Cleanup(sessionManager.Stop)
 	handler.SetSessionManager(sessionManager)
+	// 每个用例独立分析库，避免用例间数据串扰。
+	handler.SetUsageAnalyticsDBPath(filepath.Join(t.TempDir(), "usage_analytics.sqlite"))
+	// 先于 TempDir 清理关闭单例（LIFO：此处注册晚于 t.TempDir()，先执行），
+	// 否则 Windows 上 sqlite 文件句柄会阻塞临时目录删除。
+	t.Cleanup(detachUsageAnalyticsService)
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 

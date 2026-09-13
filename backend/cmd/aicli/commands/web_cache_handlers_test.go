@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -98,19 +99,40 @@ func newCacheTestSession(t *testing.T) (*ChatSession, *runtimeevents.Bus, *runti
 	}
 
 	bus := runtimeevents.NewBus()
+	// 每个用例独立 runtime store（临时目录）：统一分析库由 store 同目录派生，
+	// 保证测试绝不写入用户数据目录 ~/.aicli。
+	runtimeStore, err := runtimechat.NewSQLiteRuntimeStore(&runtimechat.RuntimeStoreConfig{
+		Path: filepath.Join(t.TempDir(), "session_runtime.sqlite"),
+	})
+	if err != nil {
+		t.Fatalf("NewSQLiteRuntimeStore: %v", err)
+	}
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
 	session := newWebTestSession()
 	session.RuntimeSession = runtimeSession
 	session.LocalRuntimeHost = &localChatRuntimeHost{
 		EventBus:     bus,
+		RuntimeStore: runtimeStore,
 		SessionStore: storage,
 	}
 	withWebTestSession(t, session)
 	// 生产环境在本地 runtime host 初始化时即挂载 collector
-	// （initializeLocalChatRuntimeHost → ensureLocalCacheService）；
+	// （initializeLocalChatRuntimeHost → ensureLocalCacheService / ensureLocalUsageService）；
 	// 测试需先构建 service 再发布事件，否则事件发布时无订阅者。
 	if ensureLocalCacheService(session.LocalRuntimeHost) == nil {
 		t.Fatal("expected local cache service to attach")
 	}
+	if ensureLocalUsageService(session.LocalRuntimeHost) == nil {
+		t.Fatal("expected local usage analytics service to attach")
+	}
+	// 先于 t.TempDir() 清理关闭分析库（LIFO：注册晚于 TempDir，先执行），
+	// 否则 Windows 上 sqlite 句柄会阻塞临时目录删除。
+	t.Cleanup(func() {
+		if service := session.LocalRuntimeHost.usageSvc; service != nil {
+			service.Close()
+		}
+	})
 	return session, bus, storage
 }
 

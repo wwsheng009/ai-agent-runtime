@@ -178,6 +178,9 @@ function renderOverviewCards(overview) {
   cards.push(card("缓存读取 tokens", fmtInt(tokens.cache_read_tokens)));
   cards.push(card("缓存写入 tokens", fmtInt(tokens.cache_creation_tokens)));
   cards.push(card("prompt tokens", fmtInt(tokens.prompt_tokens)));
+  cards.push(card("输出 tokens", fmtInt(tokens.completion_tokens)));
+  cards.push(card("合计 tokens", fmtInt(tokens.total_tokens)));
+  cards.push(card("推理 tokens", fmtInt(tokens.reasoning_tokens)));
   var distParts = [];
   distParts.push("命中 " + fmtInt(dist.hit));
   distParts.push("写入 " + fmtInt(dist.write));
@@ -230,12 +233,13 @@ function renderRequestsTable(requests) {
       + '<td><span class="cache-badge ' + statusBadgeClass(r.cache_status) + '">' + esc(statusLabel(r.cache_status)) + "</span></td>"
       + "<td>" + esc(fmtPct(r.cache_hit_ratio)) + "</td>"
       + "<td>" + esc(fmtInt(usage.prompt_tokens)) + "</td>"
+      + "<td>" + esc(fmtInt(usage.completion_tokens)) + "</td>"
       + "<td>" + esc(fmtInt(usage.cache_read_tokens)) + "</td>"
       + "<td>" + esc(fmtInt(usage.cache_creation_tokens)) + "</td>"
       + "</tr>";
   }
   return '<table class="cache-table"><thead><tr>'
-    + "<th>时间</th><th>provider/model</th><th>step</th><th>状态</th><th>缓存</th><th>命中率</th><th>prompt</th><th>读缓存</th><th>写缓存</th>"
+    + "<th>时间</th><th>provider/model</th><th>step</th><th>状态</th><th>缓存</th><th>命中率</th><th>prompt</th><th>输出</th><th>读缓存</th><th>写缓存</th>"
     + "</tr></thead><tbody>" + rows + "</tbody></table>"
     + '<div class="cache-hint">点击行查看请求详情与消息追溯（trace_id / turn_id / 关联消息）</div>'
     + '<div id="cache-request-detail"></div>';
@@ -278,6 +282,7 @@ function renderRequestDetail(record) {
   lines.push(kv("写入率", fmtPct(record.cache_write_ratio)));
   lines.push(kv("prompt tokens", fmtInt(usage.prompt_tokens)));
   lines.push(kv("completion tokens", fmtInt(usage.completion_tokens)));
+  lines.push(kv("total tokens", fmtInt(usage.total_tokens)));
   lines.push(kv("缓存读取", fmtInt(usage.cache_read_tokens) + (usage.cache_read_reported ? " (已上报)" : " (未上报，未知)")));
   lines.push(kv("缓存写入", fmtInt(usage.cache_creation_tokens)));
   lines.push(kv("reasoning tokens", fmtInt(usage.reasoning_tokens)));
@@ -336,6 +341,7 @@ function renderMessageTrace(trace) {
   if (trace.produced_by) {
     var produced = trace.produced_by;
     lines.push(kv("产出请求", produced.llm_request_id + " · " + statusLabel(produced.cache_status) + " · 命中率 " + fmtPct(produced.cache_hit_ratio)));
+    lines.push(kv("产出用量", usageSummary(produced.usage)));
   }
   var consumers = trace.consumed_by || [];
   if (consumers.length) {
@@ -346,4 +352,13 @@ function renderMessageTrace(trace) {
     lines.push(kv("消费请求", items.join("；")));
   }
   return '<div class="cache-detail"><div class="cache-detail-title">消息追溯</div>' + lines.join("") + "</div>";
+}
+
+// usageSummary 单条请求用量的紧凑摘要（追溯的产出请求用；字段与请求详情一致）。
+function usageSummary(usage) {
+  if (!usage) { return "-"; }
+  return "prompt " + fmtInt(usage.prompt_tokens)
+    + " · 输出 " + fmtInt(usage.completion_tokens)
+    + " · 读缓存 " + fmtInt(usage.cache_read_tokens)
+    + " · 写缓存 " + fmtInt(usage.cache_creation_tokens);
 }

@@ -12,6 +12,7 @@ import (
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
+	"github.com/wwsheng009/ai-agent-runtime/internal/usageanalytics"
 )
 
 // ============================================================================
@@ -122,43 +123,31 @@ func (l *managerCacheHistoryLookup) SessionExists(sessionID string) bool {
 	return ok
 }
 
-// cacheAnalyticsMu 保护惰性构建的缓存分析服务（进程内单例）。
+// cacheAnalyticsMu 保护惰性构建的缓存分析 Source（进程内单例，
+// 由 usageanalytics 服务提供，读同一个 usage_analytics.sqlite）。
 var (
 	cacheAnalyticsMu     sync.Mutex
 	cacheAnalyticsSource cacheanalytics.Source
-	cacheAnalyticsClose  func()
+	cacheAnalyticsOwner  *usageanalytics.Service
 )
 
-// attachCacheAnalyticsService 在 server 启动（路由注册）时挂载 collector：
-// 服务端 EventBus + SessionManager 兜底历史。重复调用返回同一实例。
+// attachCacheAnalyticsService 在 server 启动（路由注册）时挂载缓存分析：
+// Source 来自 usageanalytics（数据库查询实现），与 /analytics/* 同库同源。
+// 重复调用返回同一实例；分析服务重建（路径变化）时重新取 Source。
 func (h *Handler) attachCacheAnalyticsService() cacheanalytics.Source {
-	cacheAnalyticsMu.Lock()
-	defer cacheAnalyticsMu.Unlock()
-	if cacheAnalyticsSource != nil {
-		return cacheAnalyticsSource
-	}
-	bus := h.getRuntimeEventBus()
-	if bus == nil {
-		return nil
-	}
-	var history cacheanalytics.HistoryLookup
-	if h.sessionManager != nil {
-		history = &managerCacheHistoryLookup{store: h.sessionManager.GetStorage()}
-	}
-	// Phase 3：终态记录持久化镜像（session_runtime.sqlite cache_requests，
-	// 方案 §375）。SQLiteRuntimeStore 实现 cacheanalytics.RequestStore；
-	// 未配置持久化 runtime store 时保持纯内存行为（v1 不变）。
-	var store cacheanalytics.RequestStore
-	if runtimeStore, ok := h.sessionRuntimeStore.(cacheanalytics.RequestStore); ok {
-		store = runtimeStore
-	}
-	service := cacheanalytics.Attach(bus, cacheanalytics.Options{Store: store}, history)
+	service := h.attachUsageAnalyticsService()
 	if service == nil {
 		return nil
 	}
-	cacheAnalyticsSource = service.Source()
-	cacheAnalyticsClose = service.Close
-	return cacheAnalyticsSource
+	cacheAnalyticsMu.Lock()
+	defer cacheAnalyticsMu.Unlock()
+	if cacheAnalyticsOwner == service && cacheAnalyticsSource != nil {
+		return cacheAnalyticsSource
+	}
+	src := service.Source()
+	cacheAnalyticsSource = src
+	cacheAnalyticsOwner = service
+	return src
 }
 
 // ensureCacheAnalyticsSource 返回缓存分析数据源；未配置时写 503 错误信封。

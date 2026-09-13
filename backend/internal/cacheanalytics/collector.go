@@ -252,9 +252,8 @@ func (c *Collector) onRequestFinished(event runtimeevents.Event) {
 		inflight.startedAt = now
 	}
 
-	success := payloadBool(payload, "success")
-	record := &CacheRequestRecord{
-		SchemaVersion:     SchemaVersion,
+	finishedAt := now
+	record := BuildTerminalRecord(TerminalRecordInput{
 		LLMRequestID:      llmRequestID,
 		SessionID:         inflight.sessionID,
 		TraceID:           inflight.traceID,
@@ -265,47 +264,15 @@ func (c *Collector) onRequestFinished(event runtimeevents.Event) {
 		Stream:            inflight.stream,
 		Attempt:           1,
 		StartedAt:         inflight.startedAt,
+		FinishedAt:        finishedAt,
 		CacheEpoch:        inflight.cacheEpoch,
 		PromptCacheKey:    inflight.promptCacheKey,
 		PromptFingerprint: inflight.promptFingerprint,
-	}
-	finishedAt := now
-	record.FinishedAt = &finishedAt
-	record.DurationMS = finishedAt.Sub(inflight.startedAt).Milliseconds()
-	if !success {
-		record.Status = RequestStatusError
-		record.ErrorCategory = payloadString(payload, "error_code")
-		if record.ErrorCategory == "" {
-			record.ErrorCategory = "error"
-		}
-		record.CacheStatus = CacheStatusError
-		c.projector.append(record)
-		c.publishRecordFinished(record)
-		c.persistRecord(record)
-		return
-	}
-	record.Status = RequestStatusSuccess
-
-	usage := buildUsage(payload)
-	if usage != nil {
-		record.Usage = usage
-		record.CacheStatus = classifyCacheStatus(usage, payloadString(payload, "usage_source"))
-		if ratio, ok := payloadFloat(payload, "usage_cache_hit_ratio"); ok && usage.CacheReadReported && usage.PromptTokens > 0 {
-			record.CacheHitRatio = &ratio
-		} else if usage.CacheReadReported && usage.PromptTokens > 0 {
-			ratio := float64(usage.CacheReadTokens) / float64(usage.PromptTokens)
-			record.CacheHitRatio = &ratio
-		}
-		if usage.CacheCreationReported && usage.PromptTokens > 0 {
-			ratio := float64(usage.CacheCreationTokens) / float64(usage.PromptTokens)
-			record.CacheWriteRatio = &ratio
-		}
-	} else {
-		record.CacheStatus = CacheStatusNotReported
-	}
-	c.projector.append(record)
-	c.publishRecordFinished(record)
-	c.persistRecord(record)
+		Payload:           payload,
+	})
+	c.projector.append(&record)
+	c.publishRecordFinished(&record)
+	c.persistRecord(&record)
 }
 
 // persistRecord 终态记录落库（Phase 3 镜像表，best-effort）：

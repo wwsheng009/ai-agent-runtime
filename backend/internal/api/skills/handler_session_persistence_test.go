@@ -491,4 +491,8 @@ func closeHandlerPersistenceStoresForTest(handler *Handler) {
 	if backgroundManager != nil {
 		_ = backgroundManager.Close()
 	}
+
+	// 分析库单例同样在 RegisterRoutes 时打开（runtime server 形态），
+	// 测试结束必须关闭，否则 Windows 上 sqlite 句柄会阻塞 t.TempDir() 清理。
+	detachUsageAnalyticsService()
 }

@@ -498,8 +498,8 @@ type CacheAnalyticsSource interface {
 ```
 /usage                          → 当前会话缓存总览（默认视图）
 /usage cache                    → 同上（显式子命令）
-/usage cache requests [N]       → 最近 N 条请求明细（默认 20，上限 100）
-/usage cache trace <message_id> → 按消息 id 追溯（produced_by/consumed_by + 上下文摘要）
+/usage cache requests [N]       → 最近 N 条请求明细（默认 20，上限 100；token 列含 prompt/输出/读/写）
+/usage cache trace <message_id> → 按消息 id 追溯（produced_by/consumed_by + 产出用量 + 上下文摘要）
 ```
 
 **总览输出示例**：
@@ -509,8 +509,11 @@ type CacheAnalyticsSource interface {
   请求总数: 42   命中: 31   未命中: 8   未上报（未知）: 3
   输入 token: 128,400（缓存读取 96,200 / 缓存写入 12,800）
   输出 token: 18,900
+  合计 token: 147,300   推理 token: 3,600
   缓存读取率: 74.9%   缓存写入率: 10.0%
 ```
+
+**token 口径**：总览 `输出 token` = `completion_tokens`，`合计 token` = `total_tokens`，`推理 token` = `reasoning_tokens`；明细/追溯一律复用统一的 `prompt=… 输出=… 读=… 写=…` 摘要格式，与 micro web 缓存页卡片、请求详情（`completion tokens`/`total tokens`/`reasoning tokens`）逐字段对齐，同源于 `cacheanalytics.CacheUsage`。
 
 **数据源**：进程内直调 `CacheAnalyticsSource`（aicli chat 形态的 `LiveSource`，session 隐含当前会话）。TUI **不 import `httpapi`、不构造 HTTP 请求**——这是 Source 接口"同一后端，不同前端"的第二个落点（第一个是两种 HTTP 挂载前缀）。
 

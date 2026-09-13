@@ -5,114 +5,146 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/require"
+
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/usageanalytics"
 )
 
-func TestAnalyticsHandlersListSummaryAndDetail(t *testing.T) {
-	root := t.TempDir()
-	sessionID := "20260727_080000.000_analytics1"
-	day := time.Date(2026, 7, 27, 8, 0, 0, 0, time.Local)
-	sessionDir := filepath.Join(root, "2026", "07", "27", sessionID)
-	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
-	project := filepath.Join(root, "workspace")
-	require.NoError(t, os.MkdirAll(project, 0o755))
+// staticSessionMeta 是测试用会话元数据来源（best-effort 补齐 title/project）。
+type staticSessionMeta struct {
+	meta map[string]usageanalytics.SessionMeta
+}
 
-	chatBody := `{
-  "session_id": "` + sessionID + `",
-	"runtime_session_id": "runtime-session-analytics",
-	"title": "Analyze runtime usage",
-	"project_path": "` + filepath.ToSlash(project) + `",
-  "start_time": "` + day.Format(time.RFC3339) + `",
-  "status": "completed",
-  "provider": "openai",
-  "model": "gpt-5",
-  "summary": {
-    "total_requests": 2,
-    "total_responses": 2,
-    "total_tool_calls": 1,
-    "total_tokens": 42,
-    "total_duration_ms": 900
-  }
-}`
-	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "chat_"+sessionID+".json"), []byte(chatBody), 0o644))
-	debugBody := `[2026-07-27 08:00:01.000] [llm-debug] request_finished trace_id=t1 step=1 success=true usage_prompt_tokens=20 usage_completion_tokens=10 usage_total_tokens=30
-`
-	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "debug.log"), []byte(debugBody), 0o644))
+func (s staticSessionMeta) SessionMeta(sessionID string) (usageanalytics.SessionMeta, bool) {
+	meta, ok := s.meta[sessionID]
+	return meta, ok
+}
+
+// TestAnalyticsHandlersReadFromUsageDB 验证 /api/runtime/analytics/* 全部读
+// usage_analytics.sqlite（由 runtime EventBus 实时写入），不再扫描 chat-logs。
+func TestAnalyticsHandlersReadFromUsageDB(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage_analytics.sqlite")
+	sessionID := "20260727_080000.000_analytics1"
+	project := filepath.ToSlash(filepath.Join(t.TempDir(), "workspace"))
+	started := time.Date(2026, 7, 27, 8, 0, 0, 0, time.UTC)
 
 	handler := newRuntimeLogTestHandler()
-	handler.SetChatLogsDir(root)
+	handler.SetUsageAnalyticsDBPath(dbPath)
+	t.Cleanup(detachUsageAnalyticsService)
+
+	bus := handler.getRuntimeEventBus()
+	service := attachUsageAnalyticsSingleton(dbPath, bus, staticSessionMeta{meta: map[string]usageanalytics.SessionMeta{
+		sessionID: {Title: "Analyze runtime usage", ProjectPath: project, WorkingDirectory: project},
+	}}, nil)
+	require.NotNil(t, service)
+
+	// 事件实时写入（等价于 runtime 主链上的 llm.request.* / session_end）。
+	bus.Publish(runtimeevents.Event{
+		Type:      usageanalytics.EventLLMRequestStarted,
+		TraceID:   "trace-analytics",
+		SessionID: sessionID,
+		Timestamp: started,
+		Payload: map[string]interface{}{
+			"llm_request_id": "req-analytics",
+			"trace_id":       "trace-analytics",
+			"turn_id":        "turn-analytics",
+			"step":           1,
+			"provider":       "openai",
+			"model":          "gpt-5",
+		},
+	})
+	bus.Publish(runtimeevents.Event{
+		Type:      usageanalytics.EventLLMRequestFinished,
+		SessionID: sessionID,
+		Payload: map[string]interface{}{
+			"llm_request_id":          "req-analytics",
+			"success":                 true,
+			"usage_prompt_tokens":     20,
+			"usage_completion_tokens": 10,
+			"usage_total_tokens":      30,
+		},
+	})
+	bus.Publish(runtimeevents.Event{Type: usageanalytics.EventSessionEnd, SessionID: sessionID})
+
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	listReq := httptest.NewRequest(http.MethodGet, "/api/runtime/analytics/sessions?limit=10", nil)
-	listReq.RemoteAddr = "127.0.0.1:4321"
-	listRec := httptest.NewRecorder()
-	router.ServeHTTP(listRec, listReq)
-	require.Equal(t, http.StatusOK, listRec.Code)
+	get := func(target string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.RemoteAddr = "127.0.0.1:4321"
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
 
+	listRec := get("/api/runtime/analytics/sessions?limit=10")
+	require.Equal(t, http.StatusOK, listRec.Code)
 	var listPayload map[string]interface{}
 	require.NoError(t, json.Unmarshal(listRec.Body.Bytes(), &listPayload))
-	require.EqualValues(t, 1, listPayload["total"])
 	require.Equal(t, "runtime.analytics.v1", listPayload["schema_version"])
+	require.EqualValues(t, 1, listPayload["total"])
+	require.EqualValues(t, 1, listPayload["scanned"], "scanned = 命中总数（不再扫盘）")
 	require.NotNil(t, listPayload["coverage"])
 	sessions := listPayload["sessions"].([]interface{})
-	require.Equal(t, filepath.Clean(project), sessions[0].(map[string]interface{})["project"])
+	require.Len(t, sessions, 1)
+	require.Equal(t, project, sessions[0].(map[string]interface{})["project"])
 	require.Equal(t, "Analyze runtime usage", sessions[0].(map[string]interface{})["title"])
 
-	summaryReq := httptest.NewRequest(http.MethodGet, "/api/runtime/analytics/summary?group_by=provider", nil)
-	summaryReq.RemoteAddr = "127.0.0.1:4321"
-	summaryRec := httptest.NewRecorder()
-	router.ServeHTTP(summaryRec, summaryReq)
+	summaryRec := get("/api/runtime/analytics/summary?group_by=provider")
 	require.Equal(t, http.StatusOK, summaryRec.Code)
-
 	var summaryPayload map[string]interface{}
 	require.NoError(t, json.Unmarshal(summaryRec.Body.Bytes(), &summaryPayload))
 	require.Equal(t, "provider", summaryPayload["group_by"])
 	require.EqualValues(t, 1, summaryPayload["matched"])
+	require.EqualValues(t, 1, summaryPayload["scanned"])
 
-	projectReq := httptest.NewRequest(http.MethodGet, "/api/runtime/analytics/summary?group_by=project&project="+url.QueryEscape(project), nil)
-	projectReq.RemoteAddr = "127.0.0.1:4321"
-	projectRec := httptest.NewRecorder()
-	router.ServeHTTP(projectRec, projectReq)
+	projectRec := get("/api/runtime/analytics/summary?group_by=project&project=" + url.QueryEscape(project))
 	require.Equal(t, http.StatusOK, projectRec.Code)
 	var projectPayload map[string]interface{}
 	require.NoError(t, json.Unmarshal(projectRec.Body.Bytes(), &projectPayload))
 	require.Equal(t, "project", projectPayload["group_by"])
 	require.EqualValues(t, 1, projectPayload["matched"])
 
-	dimensionsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/analytics/dimensions", nil)
-	dimensionsReq.RemoteAddr = "127.0.0.1:4321"
-	dimensionsRec := httptest.NewRecorder()
-	router.ServeHTTP(dimensionsRec, dimensionsReq)
+	dimensionsRec := get("/api/runtime/analytics/dimensions")
 	require.Equal(t, http.StatusOK, dimensionsRec.Code)
 	var dimensionsPayload map[string]interface{}
 	require.NoError(t, json.Unmarshal(dimensionsRec.Body.Bytes(), &dimensionsPayload))
-	require.Contains(t, dimensionsPayload["projects"], filepath.Clean(project))
+	require.Contains(t, dimensionsPayload["projects"], project)
+	require.Contains(t, dimensionsPayload["providers"], "openai")
+	require.Contains(t, dimensionsPayload["models"], "gpt-5")
 
-	detailReq := httptest.NewRequest(http.MethodGet, "/api/runtime/analytics/sessions/"+sessionID+"/usage", nil)
-	detailReq.RemoteAddr = "127.0.0.1:4321"
-	detailRec := httptest.NewRecorder()
-	router.ServeHTTP(detailRec, detailReq)
+	detailRec := get("/api/runtime/analytics/sessions/" + sessionID + "/usage")
 	require.Equal(t, http.StatusOK, detailRec.Code)
-
 	var detailPayload map[string]interface{}
 	require.NoError(t, json.Unmarshal(detailRec.Body.Bytes(), &detailPayload))
 	require.EqualValues(t, 1, detailPayload["step_count"])
 	require.Len(t, detailPayload["turns"], 1)
 
-	turnsReq := httptest.NewRequest(http.MethodGet, "/api/runtime/analytics/sessions/"+sessionID+"/turns", nil)
-	turnsReq.RemoteAddr = "127.0.0.1:4321"
-	turnsRec := httptest.NewRecorder()
-	router.ServeHTTP(turnsRec, turnsReq)
+	turnsRec := get("/api/runtime/analytics/sessions/" + sessionID + "/turns")
 	require.Equal(t, http.StatusOK, turnsRec.Code)
+	var turnsPayload map[string]interface{}
+	require.NoError(t, json.Unmarshal(turnsRec.Body.Bytes(), &turnsPayload))
+	require.EqualValues(t, 1, turnsPayload["count"])
+
+	missingRec := get("/api/runtime/analytics/sessions/20260727_080000.000_missing/usage")
+	require.Equal(t, http.StatusNotFound, missingRec.Code)
+
+	// /overview 与 /summary 同源（同一 DB 查询）。
+	overviewRec := get("/api/runtime/analytics/overview")
+	require.Equal(t, http.StatusOK, overviewRec.Code)
+	var overviewPayload map[string]interface{}
+	require.NoError(t, json.Unmarshal(overviewRec.Body.Bytes(), &overviewPayload))
+	require.EqualValues(t, 1, overviewPayload["matched"])
 }
 
+// TestParseAnalyticsQueryTreatsDateEndAsInclusiveDay 验证查询参数解析
+// （日期 to 按整天包含），DB-only 之后语义不变。
 func TestParseAnalyticsQueryTreatsDateEndAsInclusiveDay(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/?from=2026-07-26&to=2026-07-27&project=C%3A%5Cwork", nil)
 	query, err := parseAnalyticsQuery(req)

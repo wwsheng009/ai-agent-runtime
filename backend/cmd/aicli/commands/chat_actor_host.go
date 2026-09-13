@@ -28,6 +28,7 @@ import (
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/usageanalytics"
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	runtimeserver "github.com/wwsheng009/ai-agent-runtime/internal/runtimeserver"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
@@ -144,6 +145,12 @@ type localChatRuntimeHost struct {
 	// /web/api/cache/* 与 TUI /usage 命令共用同一 Source。
 	cacheOnce sync.Once
 	cacheSvc  *cacheanalytics.Service
+
+	// usageOnce / usageSvc 缓存本地统一用量分析服务
+	// （usage_analytics.sqlite，EventBus 实时写入；/web/api/cache/* 优先读它）：
+	// 与 runtime server 同处形态，启动期挂载一次，host.Close() 时释放。
+	usageOnce sync.Once
+	usageSvc  *usageanalytics.Service
 }
 
 // acquireActorTurnGate serializes internally-triggered and foreground turns
@@ -813,6 +820,9 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	// llm.request.* 事件，表现为"打开缓存页只有 live 记录、没有历史请求"。
 	// EventBus 缺失时内部静默降级为纯内存懒构建（v1 行为）。
 	ensureLocalCacheService(host)
+	// 统一用量分析：同一 EventBus 实时写入本地 usage_analytics.sqlite，
+	// /web/api/usage/* 与 /web/api/cache/* 读同一数据库（DB 单一数据源）。
+	ensureLocalUsageService(host)
 
 	return host, nil
 }

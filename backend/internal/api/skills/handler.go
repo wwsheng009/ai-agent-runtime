@@ -140,7 +140,7 @@ type Handler struct {
 	serviceControlService          RuntimeServiceControlService
 	fileTransferService            FileTransferService
 	logFilePath                    string
-	chatLogsDir                    string
+	usageAnalyticsDBPath           string
 	profileRegistry                *profilesys.Registry
 	profileDefaultRef              string
 	profileGlobalRuntimePath       string
@@ -760,8 +760,10 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/sessions/{id}/backtrack", h.ApplySessionBacktrack).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/plan", h.GetSessionPlanMode).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/plan", h.UpdateSessionPlanMode).Methods(http.MethodPost)
-	// 缓存分析 collector：server 启动（路由注册）即挂载（§3.2），
-	// 避免启动初期到首个缓存请求之间的 LLM 事件丢失。
+	// 用量分析 + 缓存分析：server 启动（路由注册）即挂载（§3.2），
+	// 二者写/读同一个 usage_analytics.sqlite；避免启动初期到首个请求
+	// 之间的 LLM 事件丢失。
+	h.attachUsageAnalyticsService()
 	h.attachCacheAnalyticsService()
 	runtimeRouter.HandleFunc("/sessions/{id}/cache", h.HandleSessionCache).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/cache/{rest:.*}", h.HandleSessionCache).Methods(http.MethodGet)
