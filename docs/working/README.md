@@ -13,3 +13,4 @@ Current notes:
 - `multi-agent-current-state-2026-03-16.md`
 - `light-agent-control-plane-2026-03-18.md`
 - `codex-vs-ai-gateway-skill-lazy-loading-2026-03-17.md`
+- `multi-agent-real-provider-probe-20260913.md` - 2026-09-13 真实 provider 端到端探针与整轮验证记录（同批 10 份运行报告为 `multi-agent-real-terminal-validation-20260913-*.md`）
