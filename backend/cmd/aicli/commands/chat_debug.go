@@ -236,6 +236,8 @@ func handleChatAgentsCommand(session *ChatSession, command string) {
 		if err := handleChatAgentRoutingCommand(session, arg); err != nil {
 			fmt.Printf("错误: %v\n", err)
 		}
+	case "cleanup", "prune", "gc":
+		handleChatAgentCleanupCommand(session, arg)
 	default:
 		printChatAgents(session)
 	}
@@ -270,8 +272,10 @@ func executeStructuredAgentsCommand(session *ChatSession, command string) Comman
 		return executeStructuredAgentPanelCommand(session, arg)
 	case "routing", "route":
 		return executeStructuredAgentRoutingCommand(session, arg)
+	case "cleanup", "prune", "gc":
+		return executeStructuredAgentCleanupCommand(session, arg)
 	default:
-		return commandTextResult("用法: /agents [pick|select|send|followup|target|panel|routing]")
+		return commandTextResult("用法: /agents [pick|select|send|followup|target|panel|routing|cleanup]")
 	}
 }
 
@@ -1297,6 +1301,18 @@ func chatAgentControlConsistencyLines(session *ChatSession) []string {
 	for _, issue := range report.Issues {
 		lines = append(lines, fmt.Sprintf("  issue=%s agent=%s session=%s detail=%s", issue.Code, chatDebugValueOrNone(issue.AgentID), chatDebugValueOrNone(issue.SessionID), issue.Detail))
 	}
+	// P2-9 可见性：最近一次周期对账的缓存结果（不触发新的 pass）。
+	lines = append(lines, "  "+session.LocalRuntimeHost.localRegistryReconcileSummary())
+	// P2-8 方案 4 可见性：本进程观察到的配额回收产品事件汇总（agent.reclaimed）。
+	lines = append(lines, "  "+session.LocalRuntimeHost.localAgentReclaimSummary())
+	if reconciler := session.LocalRuntimeHost.localRegistryReconcile(); reconciler != nil {
+		if cached, _, ok := reconciler.LastReport(); ok {
+			for _, action := range cached.Actions {
+				lines = append(lines, fmt.Sprintf("  reconcile_action=%s agent=%s action=%s rows=%d reason=%s",
+					action.IssueCode, chatDebugValueOrNone(action.AgentID), action.Action, action.Rows, chatDebugValueOrNone(action.Reason)))
+			}
+		}
+	}
 	return lines
 }
 
@@ -2023,6 +2039,7 @@ func chatAgentPanelSummaryLines(session *ChatSession, limit int) []string {
 	lines = append(lines,
 		"  详情: /agents panel full；实时跟随: /agents panel follow",
 		"  关闭: /agents panel close",
+		"  清理: /agents cleanup [--dry-run] [--idle 30m]",
 	)
 	return lines
 }
@@ -2136,6 +2153,16 @@ func chatAgentPanelRegistryLine(session *ChatSession) string {
 			parts = append(parts, "consistency=error")
 		} else {
 			parts = append(parts, fmt.Sprintf("consistency_issues=%d", report.IssueCount))
+		}
+	}
+	// P2-9 可见性：缓存的对账摘要（含最近一次对账时间与收敛行数）。
+	if summary := session.LocalRuntimeHost.localRegistryReconcileSummary(); strings.TrimSpace(summary) != "" {
+		parts = append(parts, summary)
+	}
+	// P2-8 方案 4 可见性：配额回收产品事件汇总（无事件总线时保持现状，不占位）。
+	if session.LocalRuntimeHost.EventBus != nil {
+		if summary := session.LocalRuntimeHost.localAgentReclaimSummary(); strings.TrimSpace(summary) != "" {
+			parts = append(parts, summary)
 		}
 	}
 	if projection := chatMailboxProjectionStatusPart("runtime_projection", session.LocalRuntimeHost.EventStore); projection != "" {

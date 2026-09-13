@@ -168,24 +168,75 @@ func TestParallelToolBatch_UsesConcurrentExecution(t *testing.T) {
 	require.True(t, seen["call-2"])
 }
 
+// TestParallelToolBatchPlan_RejectsBrokerTools 固化 N6/P2-10 的语义：同一 assistant turn 内只要
+// 出现任一 broker 工具，整批就回退串行执行。多个 `spawn_agent` 因此逐个预留配额，不会并发抢额；
+// 只读 broker 工具（`read_agent_events` 等）同样不参与并行批次。
 func TestParallelToolBatchPlan_RejectsBrokerTools(t *testing.T) {
-	agent := NewAgentWithLLM(&Config{Name: "test-agent", Model: "test-model"}, &parallelSchedulerMCPManager{
-		maxParallelCalls: 2,
-	}, nil)
-	agent.SetPermissionEngine(NewPermissionEngine())
-	agent.SetToolBroker(&toolbroker.Broker{})
+	cases := []struct {
+		name  string
+		calls []types.ToolCall
+	}{
+		{
+			name: "spawn_team_with_read_only_tool",
+			calls: []types.ToolCall{
+				{ID: "call-1", Name: toolbroker.ToolSpawnTeam, Args: map[string]interface{}{}},
+				{ID: "call-2", Name: "read_a", Args: map[string]interface{}{}},
+			},
+		},
+		{
+			name: "spawn_agent_with_read_only_tool",
+			calls: []types.ToolCall{
+				{ID: "call-1", Name: toolbroker.ToolSpawnAgent, Args: map[string]interface{}{}},
+				{ID: "call-2", Name: "read_a", Args: map[string]interface{}{}},
+			},
+		},
+		{
+			name: "two_spawn_agent_calls_stay_serial",
+			calls: []types.ToolCall{
+				{ID: "call-1", Name: toolbroker.ToolSpawnAgent, Args: map[string]interface{}{}},
+				{ID: "call-2", Name: toolbroker.ToolSpawnAgent, Args: map[string]interface{}{}},
+			},
+		},
+		{
+			name: "wait_agent_with_read_only_tool",
+			calls: []types.ToolCall{
+				{ID: "call-1", Name: toolbroker.ToolWaitAgent, Args: map[string]interface{}{}},
+				{ID: "call-2", Name: "read_a", Args: map[string]interface{}{}},
+			},
+		},
+		{
+			name: "close_agent_with_read_only_tool",
+			calls: []types.ToolCall{
+				{ID: "call-1", Name: toolbroker.ToolCloseAgent, Args: map[string]interface{}{}},
+				{ID: "call-2", Name: "read_a", Args: map[string]interface{}{}},
+			},
+		},
+		{
+			name: "read_agent_events_with_read_only_tool",
+			calls: []types.ToolCall{
+				{ID: "call-1", Name: toolbroker.ToolReadAgentEvents, Args: map[string]interface{}{}},
+				{ID: "call-2", Name: "read_a", Args: map[string]interface{}{}},
+			},
+		},
+	}
 
-	loop := NewReActLoop(agent, nil, &LoopReActConfig{
-		EnableToolCalls:      true,
-		EnableParallelTools:  true,
-		MaxParallelToolCalls: 2,
-	})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := NewAgentWithLLM(&Config{Name: "test-agent", Model: "test-model"}, &parallelSchedulerMCPManager{
+				maxParallelCalls: 2,
+			}, nil)
+			agent.SetPermissionEngine(NewPermissionEngine())
+			agent.SetToolBroker(&toolbroker.Broker{})
 
-	plan := loop.buildParallelToolBatchPlan([]types.ToolCall{
-		{ID: "call-1", Name: toolbroker.ToolSpawnTeam, Args: map[string]interface{}{}},
-		{ID: "call-2", Name: "read_a", Args: map[string]interface{}{}},
-	}, nil)
-	require.Nil(t, plan)
+			loop := NewReActLoop(agent, nil, &LoopReActConfig{
+				EnableToolCalls:      true,
+				EnableParallelTools:  true,
+				MaxParallelToolCalls: 2,
+			})
+
+			require.Nil(t, loop.buildParallelToolBatchPlan(tc.calls, nil))
+		})
+	}
 }
 
 func TestParallelToolBatchPlan_RejectsCustomPermissionEngineBehavior(t *testing.T) {

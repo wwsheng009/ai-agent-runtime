@@ -17,19 +17,18 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentdef"
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
+	cacheanalytics "github.com/wwsheng009/ai-agent-runtime/internal/cacheanalytics"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
-	runtimeobserve "github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
-	cacheanalytics "github.com/wwsheng009/ai-agent-runtime/internal/cacheanalytics"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
-	"github.com/wwsheng009/ai-agent-runtime/internal/usageanalytics"
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
+	runtimeobserve "github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
 	runtimeserver "github.com/wwsheng009/ai-agent-runtime/internal/runtimeserver"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
@@ -41,6 +40,7 @@ import (
 	toolbrokersessionctx "github.com/wwsheng009/ai-agent-runtime/internal/toolbroker/sessionctx"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
+	"github.com/wwsheng009/ai-agent-runtime/internal/usageanalytics"
 )
 
 const (
@@ -98,41 +98,57 @@ func runLocalSubagentStartupRecovery(
 }
 
 type localChatRuntimeHost struct {
-	Bootstrap            *runtimebootstrap.Manager
-	RuntimeConfig        *runtimecfg.RuntimeConfig
-	SessionHub           *runtimechat.SessionHub
-	RuntimeStore         runtimechat.RuntimeStateStore
-	EventStore           runtimechat.EventStore
-	ReceiptStore         runtimechat.ToolReceiptStore
-	TeamStore            team.Store
-	AgentControl         *agentcontrol.RegistryService
-	AgentRegistryStore   agentcontrol.AgentRegistryStore
-	Background           *background.Manager
-	TeamClaims           *team.PathClaimManager
-	Orchestrator         *team.Orchestrator
-	ToolSurface          runtimeskill.MCPManager
-	EventBus             *runtimeevents.Bus
-	SessionStore         runtimechat.SessionStorage
-	SessionUser          string
-	BaseSession          *ChatSession
-	TeamLifecycle        teamLifecycleService
-	ActorRegistry        *localActorRegistry
-	Supervision          *runtimeserver.SupervisionControlPlane
-	SubagentBatches      subagentbatch.BatchStore
-	supervisionWake      *supervision.WakeConsumer
-	supervisionConfig    supervision.Config
-	cleanupFns           []func()
-	closeOnce            sync.Once
-	subagentMu           sync.Mutex
-	subagentCoordinators map[*agent.SubagentBatchCoordinator]struct{}
-	subagentOps          int
-	subagentIdle         chan struct{}
-	closing              bool
-	actorTurnGateMu      sync.Mutex
-	actorTurnGates       map[string]chan struct{}
-	lifecycleCtx         context.Context
-	lifecycleCancel      context.CancelFunc
-	asyncWG              sync.WaitGroup
+	Bootstrap          *runtimebootstrap.Manager
+	RuntimeConfig      *runtimecfg.RuntimeConfig
+	SessionHub         *runtimechat.SessionHub
+	RuntimeStore       runtimechat.RuntimeStateStore
+	EventStore         runtimechat.EventStore
+	ReceiptStore       runtimechat.ToolReceiptStore
+	TeamStore          team.Store
+	AgentControl       *agentcontrol.RegistryService
+	AgentRegistryStore agentcontrol.AgentRegistryStore
+	Background         *background.Manager
+	TeamClaims         *team.PathClaimManager
+	Orchestrator       *team.Orchestrator
+	ToolSurface        runtimeskill.MCPManager
+	EventBus           *runtimeevents.Bus
+	SessionStore       runtimechat.SessionStorage
+	SessionUser        string
+	BaseSession        *ChatSession
+	TeamLifecycle      teamLifecycleService
+	ActorRegistry      *localActorRegistry
+	Supervision        *runtimeserver.SupervisionControlPlane
+	SubagentBatches    subagentbatch.BatchStore
+	supervisionWake    *supervision.WakeConsumer
+	supervisionConfig  supervision.Config
+	// executionSupervisor / executionSupervisorStop 是 P0-4 的 CLI 本地
+	// child-run 看门狗：与 API 侧共用 supervision.ExecutionRunStore，惰性构建，
+	// 关闭 host 时随 lifecycleCtx 一起停止。
+	executionSupervisorOnce sync.Once
+	// executionSupervisorMu 保护 executionSupervisor 指针本身：/debug 需要在
+	// 不触发惰性构建（不启动后台巡检）的前提下读取它。
+	executionSupervisorMu   sync.Mutex
+	executionSupervisor     *supervision.ExecutionSupervisor
+	executionSupervisorCtx  context.Context
+	executionSupervisorStop context.CancelFunc
+	// registryReconciler / registryReconcilerStop 是 P2-9 的周期一致性对账：
+	// 低频审计 durable registry 与实际会话的漂移，并按 observe/enforce 决定
+	// 是否收敛；同样随 lifecycleCtx 停止（见 chat_actor_reconcile.go）。
+	registryReconcilerOnce sync.Once
+	registryReconciler     *agentcontrol.Reconciler
+	registryReconcilerStop context.CancelFunc
+	cleanupFns             []func()
+	closeOnce              sync.Once
+	subagentMu             sync.Mutex
+	subagentCoordinators   map[*agent.SubagentBatchCoordinator]struct{}
+	subagentOps            int
+	subagentIdle           chan struct{}
+	closing                bool
+	actorTurnGateMu        sync.Mutex
+	actorTurnGates         map[string]chan struct{}
+	lifecycleCtx           context.Context
+	lifecycleCancel        context.CancelFunc
+	asyncWG                sync.WaitGroup
 
 	// observeOnce / observeSvc 缓存本地 Runtime Observation Plane 服务：
 	// ensureLocalObserveService 惰性构建一次，host.Close() 时释放。
@@ -146,11 +162,12 @@ type localChatRuntimeHost struct {
 	cacheOnce sync.Once
 	cacheSvc  *cacheanalytics.Service
 
-	// usageOnce / usageSvc 缓存本地统一用量分析服务
+	// usageMu / usageSvc 缓存本地统一用量分析服务
 	// （usage_analytics.sqlite，EventBus 实时写入；/web/api/cache/* 优先读它）：
 	// 与 runtime server 同处形态，启动期挂载一次，host.Close() 时释放。
-	usageOnce sync.Once
-	usageSvc  *usageanalytics.Service
+	// 用互斥锁而非 sync.Once：构建失败不缓存，后续调用可重试。
+	usageMu  sync.Mutex
+	usageSvc *usageanalytics.Service
 }
 
 // acquireActorTurnGate serializes internally-triggered and foreground turns
@@ -744,6 +761,9 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	}
 	host.ActorRegistry = newLocalActorRegistry(host)
 	host.wireLocalSupervisionExecutor()
+	// P2-9：宿主启动时即开启低频一致性对账（默认 observe，10 分钟），
+	// 让上一次进程崩溃/TTL 清理留下的 active 漂移在首个 pass 就被发现。
+	host.startLocalRegistryReconcile()
 	if host.Orchestrator != nil {
 		mailbox := team.NewMailboxService(host.TeamStore)
 		host.Orchestrator.Mailbox = mailbox
@@ -1186,6 +1206,7 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 		agentConfig.MaxRunDuration = runtimeConfig.Agent.Timeout
 		agentConfig.MaxExplorationSteps = runtimeConfig.Agent.MaxExplorationSteps
 		agentConfig.MaxRepeatedToolCalls = runtimeConfig.Agent.MaxRepeatedToolCalls
+		agentConfig.MaxRepeatedPollCalls = runtimeConfig.Agent.MaxRepeatedPollCalls
 	}
 	workspaceMode := resolveLocalChatWorkspaceMode(runtimeConfig)
 	workspaceContextEnabled := workspaceMode != "" && !strings.EqualFold(workspaceMode, contextmgr.WorkspaceModeDisabled)
@@ -1314,6 +1335,7 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 			broker.SessionContextStore = toolbrokersessionctx.New(host.SessionStore)
 		}
 		broker.AgentSessions = host.ActorRegistry
+		broker.ExecutionSupervisor = host.getLocalExecutionSupervisor()
 		broker.TeamStore = host.TeamStore
 		broker.TeamClaims = host.TeamClaims
 		broker.TeamDispatcher = host.ActorRegistry
@@ -1327,9 +1349,11 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 		apiAgent.SetToolBroker(&toolbroker.Broker{
 			AgentSessions:       host.ActorRegistry,
 			SessionContextStore: toolbrokersessionctx.New(host.SessionStore),
+			ExecutionSupervisor: host.getLocalExecutionSupervisor(),
 		})
 	} else if broker := apiAgent.GetToolBroker(); broker != nil && broker.AgentSessions == nil && host.ActorRegistry != nil {
 		broker.AgentSessions = host.ActorRegistry
+		broker.ExecutionSupervisor = host.getLocalExecutionSupervisor()
 	}
 	if broker := apiAgent.GetToolBroker(); broker != nil && broker.SessionContextStore == nil {
 		broker.SessionContextStore = toolbrokersessionctx.New(host.SessionStore)
@@ -1344,6 +1368,14 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 			broker.SessionContextStore = toolbrokersessionctx.New(host.SessionStore)
 		}
 		broker.Background = host.Background
+	}
+	// P2-12 方案 3: expose the durable supervision control plane to the model
+	// when the local host has one. A host without a store leaves the field nil
+	// and the three tools stay out of the tool list entirely.
+	if broker := apiAgent.GetToolBroker(); broker != nil && broker.Supervision == nil {
+		if controller := newLocalSupervisionToolController(host, session); controller != nil {
+			broker.Supervision = controller
+		}
 	}
 	if toolPolicy := buildLocalChatToolPolicy(session, host.ToolSurface, apiAgent.GetToolBroker()); toolPolicy != nil {
 		apiAgent.SetToolExecutionPolicy(toolPolicy)
@@ -1579,6 +1611,7 @@ func buildLocalChatLoopConfig(runtimeConfig *runtimecfg.RuntimeConfig, session *
 		config.MaxRunDuration = runtimeConfig.Agent.Timeout
 		config.MaxExplorationSteps = runtimeConfig.Agent.MaxExplorationSteps
 		config.MaxRepeatedToolCalls = runtimeConfig.Agent.MaxRepeatedToolCalls
+		config.MaxRepeatedPollCalls = runtimeConfig.Agent.MaxRepeatedPollCalls
 		config.EnableParallelTools = runtimeConfig.Agent.EnableParallelTools
 		if runtimeConfig.Agent.MaxParallelToolCalls > 0 {
 			config.MaxParallelToolCalls = runtimeConfig.Agent.MaxParallelToolCalls
@@ -2069,6 +2102,54 @@ func resolveLocalChatSupervisionDataDir(session *ChatSession, runtimeConfig *run
 	return filepath.Join(os.TempDir(), "ai-agent-runtime", "supervision")
 }
 
+// localSupervisionSubjectPresence mirrors the API host checks: notifications
+// whose execution-run rows or team records disappeared are stale, so they stop
+// counting as critical (P2-12). Subjects the local host cannot verify (for
+// example agent sessions without a durable existence probe) stay critical.
+func localSupervisionSubjectPresence(host *localChatRuntimeHost) supervision.SubjectPresenceFunc {
+	if host == nil {
+		return nil
+	}
+	var runStore supervision.ExecutionRunStore
+	if host.Supervision != nil && host.Supervision.Store != nil {
+		runStore, _ = host.Supervision.Store.(supervision.ExecutionRunStore)
+	}
+	teamStore := host.TeamStore
+	if runStore == nil && teamStore == nil {
+		return nil
+	}
+	return func(ctx context.Context, n supervision.Notification) (bool, bool) {
+		subjectID := strings.TrimSpace(n.SubjectID)
+		if subjectID == "" {
+			return false, false
+		}
+		switch n.SubjectKind {
+		case supervision.SubjectAgentRun:
+			if runStore == nil {
+				return false, false
+			}
+			if _, err := runStore.GetExecutionRun(ctx, subjectID); err != nil {
+				if errors.Is(err, supervision.ErrRunNotFound) {
+					return false, true
+				}
+				return false, false
+			}
+			return true, true
+		case supervision.SubjectTeam:
+			if teamStore == nil {
+				return false, false
+			}
+			record, err := teamStore.GetTeam(ctx, subjectID)
+			if err != nil {
+				return false, false
+			}
+			return record != nil, true
+		default:
+			return false, false
+		}
+	}
+}
+
 // injectLocalSupervisionPreflight is the CLI-equivalent parent/lead turn hook.
 // It deliberately marks a visible digest delivered+seen, never acknowledged.
 // Child worker turns are excluded: only the registered Team lead consumes a
@@ -2096,6 +2177,7 @@ func injectLocalSupervisionPreflight(ctx context.Context, host *localChatRuntime
 		TargetParentTeamID:    targetTeamID,
 		Limit:                 host.supervisionConfig.WithDefaults().DigestMaxItems,
 		IncludeResolvedSince:  true,
+		SubjectPresence:       localSupervisionSubjectPresence(host),
 	})
 	if err != nil {
 		return "", fmt.Errorf("build supervision preflight digest: %w", err)

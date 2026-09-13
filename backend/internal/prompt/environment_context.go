@@ -233,6 +233,26 @@ func RenderTaskDifficultyGuidance() string {
 	return strings.Join(lines, "\n")
 }
 
+// RenderMultiAgentCollaborationGuidance renders the collaboration policy for
+// the parent agent: how to keep children independent, keep the parent busy
+// while they run, read progress incrementally, and respect the thread quota.
+// It complements the delegation policy (RenderTaskDifficultyGuidance) and the
+// spawn/wait tool descriptions.
+func RenderMultiAgentCollaborationGuidance() string {
+	lines := []string{
+		"Multi-agent collaboration guidance:",
+		"",
+		"- Delegate only bounded, independent subtasks whose result you need, with a non-overlapping scope and the exact deliverable you expect back.",
+		"- After spawn_agent returns, continue meaningful non-overlapping work in the same turn; do not block immediately on wait_agent while the child runs in the background.",
+		"- Consume progress incrementally with read_agent_events using after_seq; never re-read a window you already consumed. When only progress is needed, pass view=tool_progress so the window carries tool events plus terminal/approval events and stays token-cheap.",
+		"- When you must wait, wait for all children you still need in one call and prefer the longest timeout you can afford; if the wait times out, follow next_action, use any ready outputs, and only wait again after the remaining independent work is done.",
+		"- Before spawning, check list_agents for the slots in use; when the thread limit is reached, reuse an existing child, close an idle one, or finish the work locally instead of retrying the same spawn_agent unchanged.",
+		"- A child that is waiting_approval or waiting_input needs your decision: use resolve_agent_approval, send_input, or followup_task instead of waiting on it again.",
+		"- Close children you no longer need with close_agent so their slots are freed; spawn_team teammates follow the separate wait_team lifecycle.",
+	}
+	return strings.Join(lines, "\n")
+}
+
 func detectedShellName(shell runtimeexecutor.Shell) string {
 	if text := strings.TrimSpace(string(shell.Type)); text != "" {
 		return text

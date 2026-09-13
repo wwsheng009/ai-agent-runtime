@@ -42,23 +42,23 @@ func chatDebugDisplaySession() *ChatSession {
 
 // chatDebugDisplaySnapshot 是 /debug/chat/status 的 JSON 响应体。
 type chatDebugDisplaySnapshot struct {
-	Available    bool                          `json:"available"`
-	Reason       string                        `json:"reason,omitempty"`
-	CapturedAt   time.Time                     `json:"captured_at"`
-	Session      *chatDebugDisplaySessionInfo  `json:"session,omitempty"`
-	Files        *chatDebugDisplayFilesInfo    `json:"files,omitempty"`
-	Runtime      *chatDebugDisplayRuntimeInfo  `json:"runtime,omitempty"`
-	Routing      *chatDebugDisplayRoutingInfo  `json:"routing,omitempty"`
+	Available    bool                            `json:"available"`
+	Reason       string                          `json:"reason,omitempty"`
+	CapturedAt   time.Time                       `json:"captured_at"`
+	Session      *chatDebugDisplaySessionInfo    `json:"session,omitempty"`
+	Files        *chatDebugDisplayFilesInfo      `json:"files,omitempty"`
+	Runtime      *chatDebugDisplayRuntimeInfo    `json:"runtime,omitempty"`
+	Routing      *chatDebugDisplayRoutingInfo    `json:"routing,omitempty"`
 	Components   *chatDebugDisplayComponentsInfo `json:"components,omitempty"`
-	Agents       *chatDebugDisplayAgentsInfo   `json:"agents,omitempty"`
-	Encoder      *chatDebugDisplayEncoderInfo  `json:"render_encoder,omitempty"`
-	Scene        *chatDebugDisplaySceneInfo    `json:"scene,omitempty"`
-	RenderOutput *chatDebugDisplayOutputInfo   `json:"render_output,omitempty"`
-	AppState     *chatDebugDisplayAppStateInfo `json:"app_state,omitempty"`
-	Executor     *chatDebugDisplayExecutorInfo `json:"executor,omitempty"`
+	Agents       *chatDebugDisplayAgentsInfo     `json:"agents,omitempty"`
+	Encoder      *chatDebugDisplayEncoderInfo    `json:"render_encoder,omitempty"`
+	Scene        *chatDebugDisplaySceneInfo      `json:"scene,omitempty"`
+	RenderOutput *chatDebugDisplayOutputInfo     `json:"render_output,omitempty"`
+	AppState     *chatDebugDisplayAppStateInfo   `json:"app_state,omitempty"`
+	Executor     *chatDebugDisplayExecutorInfo   `json:"executor,omitempty"`
 	Projection   *chatDebugDisplayProjectionInfo `json:"projection,omitempty"`
-	PaintTrace   string                        `json:"paint_trace,omitempty"`
-	PprofURL     string                        `json:"pprof_url,omitempty"`
+	PaintTrace   string                          `json:"paint_trace,omitempty"`
+	PprofURL     string                          `json:"pprof_url,omitempty"`
 }
 
 type chatDebugDisplaySessionInfo struct {
@@ -86,17 +86,17 @@ type chatDebugDisplaySessionInfo struct {
 }
 
 type chatDebugDisplayEncoderInfo struct {
-	EncodeCount       uint64                         `json:"encode_count"`
-	AppendCount       uint64                         `json:"append_count"`
-	UpsertCount       uint64                         `json:"upsert_count"`
-	RemoveCount       uint64                         `json:"remove_count"`
-	OutOfOrderCount   uint64                         `json:"out_of_order_count"`
-	DuplicateCount    uint64                         `json:"duplicate_count"`
-	UnknownCount      uint64                         `json:"unknown_count"`
-	Tail              *chatDebugDisplayTailInfo      `json:"tail,omitempty"`
-	InteractionAnchor *chatDebugDisplayAnchorInfo    `json:"interaction_anchor,omitempty"`
-	EventLog          *chatDebugDisplayEventLogInfo  `json:"event_log,omitempty"`
-	ModelItems        int                            `json:"model_items_count"`
+	EncodeCount       uint64                          `json:"encode_count"`
+	AppendCount       uint64                          `json:"append_count"`
+	UpsertCount       uint64                          `json:"upsert_count"`
+	RemoveCount       uint64                          `json:"remove_count"`
+	OutOfOrderCount   uint64                          `json:"out_of_order_count"`
+	DuplicateCount    uint64                          `json:"duplicate_count"`
+	UnknownCount      uint64                          `json:"unknown_count"`
+	Tail              *chatDebugDisplayTailInfo       `json:"tail,omitempty"`
+	InteractionAnchor *chatDebugDisplayAnchorInfo     `json:"interaction_anchor,omitempty"`
+	EventLog          *chatDebugDisplayEventLogInfo   `json:"event_log,omitempty"`
+	ModelItems        int                             `json:"model_items_count"`
 	ModelItemsTail    []chatDebugDisplayModelItemInfo `json:"model_items_tail,omitempty"`
 }
 
@@ -136,6 +136,7 @@ type chatDebugDisplaySceneInfo struct {
 	LayoutGaps    int                             `json:"layout_gaps,omitempty"`
 	TextRows      int                             `json:"text_rows,omitempty"`
 	TextParity    *chatDebugDisplayTextParityInfo `json:"text_parity,omitempty"`
+	DeferredQueue *chatDebugDisplayDeferredInfo   `json:"deferred_queue,omitempty"`
 	CellsTail     []chatDebugDisplayCellInfo      `json:"cells_tail,omitempty"`
 }
 
@@ -143,7 +144,18 @@ type chatDebugDisplayTextParityInfo struct {
 	Blocks  uint64 `json:"blocks"`
 	Matched uint64 `json:"matched"`
 	Missed  uint64 `json:"missed"`
+	Resyncs uint64 `json:"resyncs,omitempty"`
+	Skips   uint64 `json:"skips,omitempty"`
 	LastErr string `json:"last_error,omitempty"`
+}
+
+// chatDebugDisplayDeferredInfo mirrors the non-streaming event overflow queue
+// (Fix 2): pending/bytes describe the current backlog, dropped counts events
+// discarded because a stalled consumer exceeded the backlog caps.
+type chatDebugDisplayDeferredInfo struct {
+	Pending int    `json:"pending"`
+	Bytes   int64  `json:"bytes,omitempty"`
+	Dropped uint64 `json:"dropped,omitempty"`
 }
 
 type chatDebugDisplayCellInfo struct {
@@ -202,13 +214,19 @@ type chatDebugDisplayAppStateInfo struct {
 }
 
 type chatDebugDisplayHistoryGateInfo struct {
-	Frozen                   bool   `json:"frozen"`
-	ProjectionUnknown        bool   `json:"projection_unknown"`
-	ReconciliationRequired   bool   `json:"reconciliation_required"`
-	RecoveryActionable       bool   `json:"recovery_actionable"`
-	PendingCount             int    `json:"pending_count"`
-	OldestPendingToken       uint64 `json:"oldest_pending_token,omitempty"`
-	OldestPendingGeneration  uint64 `json:"oldest_pending_generation,omitempty"`
+	Frozen                 bool `json:"frozen"`
+	ProjectionUnknown      bool `json:"projection_unknown"`
+	ReconciliationRequired bool `json:"reconciliation_required"`
+	// ScrollbackReplayArmed is the reducer-installed one-shot authorization for
+	// the session-load replay, and the only state that lets the executor replace
+	// native scrollback. Armed=true while RecoveryActionable=false means the
+	// authorized replay has not been composed yet; armed=false with an
+	// outstanding obligation means the recovery will settle in place instead.
+	ScrollbackReplayArmed   bool   `json:"scrollback_replay_armed"`
+	RecoveryActionable      bool   `json:"recovery_actionable"`
+	PendingCount            int    `json:"pending_count"`
+	OldestPendingToken      uint64 `json:"oldest_pending_token,omitempty"`
+	OldestPendingGeneration uint64 `json:"oldest_pending_generation,omitempty"`
 }
 
 type chatDebugDisplayActiveCellInfo struct {
@@ -234,39 +252,39 @@ type chatDebugDisplayActiveCellInfo struct {
 // recoveries/frame-errors under an unchanged generation is direct evidence
 // that the executor is spinning on recovery instead of committing.
 type chatDebugDisplayExecutorInfo struct {
-	Diagnosis                string  `json:"diagnosis"`
-	TotalRecoveries          uint64  `json:"total_recoveries"`
-	BackoffEngaged           uint64  `json:"backoff_engaged"`
-	ArmedBackoff             uint64  `json:"armed_backoff"`
-	FlushesWhileBackoff      uint64  `json:"flushes_while_backoff"`
-	HandoffsWhileBackoff     uint64  `json:"handoffs_while_backoff"`
-	GeneratedAtUnixMs        int64   `json:"generated_at_unix_ms"`
-	WindowRecoveriesPerSec   float64 `json:"window_recoveries_per_sec"`
-	GenerationAdvancesWindow int     `json:"generation_advances_in_window"`
-	FrameErrorsWindow        int     `json:"frame_errors_in_window"`
-	ScrollbackResetsWindow   int     `json:"scrollback_resets_in_window"`
-	LastGeneration           uint64  `json:"last_generation"`
+	Diagnosis                string                             `json:"diagnosis"`
+	TotalRecoveries          uint64                             `json:"total_recoveries"`
+	BackoffEngaged           uint64                             `json:"backoff_engaged"`
+	ArmedBackoff             uint64                             `json:"armed_backoff"`
+	FlushesWhileBackoff      uint64                             `json:"flushes_while_backoff"`
+	HandoffsWhileBackoff     uint64                             `json:"handoffs_while_backoff"`
+	GeneratedAtUnixMs        int64                              `json:"generated_at_unix_ms"`
+	WindowRecoveriesPerSec   float64                            `json:"window_recoveries_per_sec"`
+	GenerationAdvancesWindow int                                `json:"generation_advances_in_window"`
+	FrameErrorsWindow        int                                `json:"frame_errors_in_window"`
+	ScrollbackResetsWindow   int                                `json:"scrollback_resets_in_window"`
+	LastGeneration           uint64                             `json:"last_generation"`
 	LastEntry                *chatDebugDisplayExecutorEntryInfo `json:"last_entry,omitempty"`
 }
 
 // chatDebugDisplayExecutorEntryInfo is the most recent recovery-loop ring entry.
 type chatDebugDisplayExecutorEntryInfo struct {
-	Seq                uint64 `json:"seq"`
-	Branch             string `json:"branch"`
-	Generation         uint64 `json:"generation"`
-	Revision           uint64 `json:"revision"`
-	RevisionAfter      uint64 `json:"revision_after"`
-	TerminalEpoch      uint64 `json:"terminal_epoch"`
-	ProjectionUnknown  bool   `json:"projection_unknown"`
-	ReconciliationReq  bool   `json:"reconciliation_required"`
-	BackoffEngaged     bool   `json:"backoff_engaged"`
-	ArmedBackoff       bool   `json:"armed_backoff"`
-	FullRepaint        bool   `json:"full_repaint"`
-	ScrollbackReset    bool   `json:"scrollback_reset"`
-	FrameErr           string `json:"frame_error,omitempty"`
-	FlushedWhileBackoff bool  `json:"flushed_while_backoff"`
-	HandoffWhileBackoff bool  `json:"handoff_while_backoff"`
-	Continued          bool   `json:"continued"`
+	Seq                 uint64 `json:"seq"`
+	Branch              string `json:"branch"`
+	Generation          uint64 `json:"generation"`
+	Revision            uint64 `json:"revision"`
+	RevisionAfter       uint64 `json:"revision_after"`
+	TerminalEpoch       uint64 `json:"terminal_epoch"`
+	ProjectionUnknown   bool   `json:"projection_unknown"`
+	ReconciliationReq   bool   `json:"reconciliation_required"`
+	BackoffEngaged      bool   `json:"backoff_engaged"`
+	ArmedBackoff        bool   `json:"armed_backoff"`
+	FullRepaint         bool   `json:"full_repaint"`
+	ScrollbackReset     bool   `json:"scrollback_reset"`
+	FrameErr            string `json:"frame_error,omitempty"`
+	FlushedWhileBackoff bool   `json:"flushed_while_backoff"`
+	HandoffWhileBackoff bool   `json:"handoff_while_backoff"`
+	Continued           bool   `json:"continued"`
 }
 
 // chatDebugDisplayProjectionInfo mirrors TerminalSession.ProjectionState(): the
@@ -376,6 +394,13 @@ func BuildChatDebugDisplaySnapshot() *chatDebugDisplaySnapshot {
 			ApplyFailures: failures,
 			LastError:     lastErr,
 		}
+		if pending, queuedBytes, dropped := bridge.deferredQueueStats(); pending > 0 || dropped > 0 {
+			sc.DeferredQueue = &chatDebugDisplayDeferredInfo{
+				Pending: pending,
+				Bytes:   queuedBytes,
+				Dropped: dropped,
+			}
+		}
 		if scn := bridge.sceneSnapshot(); scn != nil {
 			if len(scn.Cells) > 0 {
 				rows := scene.LayoutTranscript(scn.Cells, scn.Revision)
@@ -390,10 +415,13 @@ func BuildChatDebugDisplaySnapshot() *chatDebugDisplaySnapshot {
 				sc.TextRows = len(scene.RenderText(scn.Cells, scn.Revision))
 			}
 			if blocks, matched, missed, lastErr := bridge.textParityStats(); blocks > 0 || matched > 0 || missed > 0 {
+				resyncs, skips := bridge.textParityAlignmentStats()
 				sc.TextParity = &chatDebugDisplayTextParityInfo{
 					Blocks:  blocks,
 					Matched: matched,
 					Missed:  missed,
+					Resyncs: resyncs,
+					Skips:   skips,
 					LastErr: lastErr,
 				}
 			}
@@ -474,7 +502,8 @@ func BuildChatDebugDisplaySnapshot() *chatDebugDisplaySnapshot {
 			Frozen:                 effects.Frozen,
 			ProjectionUnknown:      effects.ProjectionUnknown,
 			ReconciliationRequired: effects.ReconciliationRequired,
-			RecoveryActionable:     !state.Lease.Active && !effects.Frozen &&
+			ScrollbackReplayArmed:  effects.ScrollbackReplayArmed,
+			RecoveryActionable: !state.Lease.Active && !effects.Frozen &&
 				(effects.ProjectionUnknown || effects.ReconciliationRequired),
 		}
 		for _, entry := range effects.Entries() {
@@ -524,22 +553,22 @@ func BuildChatDebugDisplaySnapshot() *chatDebugDisplaySnapshot {
 		if len(diag.Entries) > 0 {
 			last := diag.Entries[len(diag.Entries)-1]
 			exec.LastEntry = &chatDebugDisplayExecutorEntryInfo{
-				Seq:                last.Seq,
-				Branch:             last.Branch,
-				Generation:         last.Generation,
-				Revision:           last.Revision,
-				RevisionAfter:      last.RevisionAfter,
-				TerminalEpoch:      last.TerminalEpoch,
-				ProjectionUnknown:  last.ProjectionUnknown,
-				ReconciliationReq:  last.ReconciliationReq,
-				BackoffEngaged:     last.BackoffEngaged,
-				ArmedBackoff:       last.ArmedBackoff,
-				FullRepaint:        last.FullRepaint,
-				ScrollbackReset:    last.ScrollbackReset,
-				FrameErr:           last.FrameErr,
+				Seq:                 last.Seq,
+				Branch:              last.Branch,
+				Generation:          last.Generation,
+				Revision:            last.Revision,
+				RevisionAfter:       last.RevisionAfter,
+				TerminalEpoch:       last.TerminalEpoch,
+				ProjectionUnknown:   last.ProjectionUnknown,
+				ReconciliationReq:   last.ReconciliationReq,
+				BackoffEngaged:      last.BackoffEngaged,
+				ArmedBackoff:        last.ArmedBackoff,
+				FullRepaint:         last.FullRepaint,
+				ScrollbackReset:     last.ScrollbackReset,
+				FrameErr:            last.FrameErr,
 				FlushedWhileBackoff: last.FlushedWhileBackoff,
 				HandoffWhileBackoff: last.HandoffWhileBackoff,
-				Continued:          last.Continued,
+				Continued:           last.Continued,
 			}
 		}
 		snap.Executor = exec

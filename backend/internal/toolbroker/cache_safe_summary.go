@@ -368,6 +368,9 @@ func agentEventsCacheSafeSummary(result *AgentEventsResult) string {
 	if result.TimedOut {
 		lines = append(lines, "Read timed out while waiting for new events.")
 	}
+	if result.Unchanged {
+		lines = append(lines, fmt.Sprintf("Unchanged window: identical read #%d with the same after_seq returned no new events.", result.RepeatCount))
+	}
 	if nextAction := strings.TrimSpace(result.NextAction); nextAction != "" {
 		lines = append(lines, "Next action: "+nextAction+".")
 	}

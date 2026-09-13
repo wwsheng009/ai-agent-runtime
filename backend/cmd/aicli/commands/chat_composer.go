@@ -454,6 +454,136 @@ func (c *chatModalComposerPrompt) normalizeReadError(err error) error {
 	return normalizeChatComposerReadError(c.session, err)
 }
 
+// chatMergedPromptComposer reads an interactive answer (ask_user_question)
+// through the user's bottom prompt instead of a dedicated answer input row.
+// The answer text and the cursor go through the regular composer channel
+// (SetPromptInputSnapshot -> InputEvent -> PromptInput/PromptCursor), so the
+// cursor follows the typed answer. The separate popup input row (ComposerLine)
+// is no longer rendered for questions: its cursor column is derived from the
+// static line width and stayed pinned to the first column after the label.
+//
+// An unsent draft that the user typed before the question arrived is parked for
+// the duration of the answer and handed back afterwards, so the answer can
+// never be mistaken for the draft and the answer can never overwrite it.
+type chatMergedPromptComposer struct {
+	session   *ChatSession
+	cancelled bool
+}
+
+func newChatMergedPromptComposer(session *ChatSession) *chatMergedPromptComposer {
+	return &chatMergedPromptComposer{session: session}
+}
+
+// chatMergedAnswerPromptSupported reports whether interactive answers can be
+// merged into the bottom prompt on this terminal. It requires the fixed bottom
+// surface (the presenter derives the physical cursor from AppState) plus a
+// directly reading line editor; queued/external input capture keeps the
+// dedicated popup input row.
+func chatMergedAnswerPromptSupported(session *ChatSession) bool {
+	if session == nil || session.Interaction == nil || session.InputBox == nil {
+		return false
+	}
+	if !chatComposerUsesFixedSurface(session) {
+		return false
+	}
+	return !shouldRoutePriorityPromptThroughQueue(session)
+}
+
+// ReadLine reads one answer line merged into the bottom prompt. ok=false means
+// the merged channel is unavailable (for example the prompt row could not be
+// painted) and the caller must fall back to the dedicated popup input row.
+func (c *chatMergedPromptComposer) ReadLine() (line string, ok bool, err error) {
+	if c == nil || !chatMergedAnswerPromptSupported(c.session) {
+		return "", false, nil
+	}
+	interaction := c.session.Interaction
+	draft := interaction.PromptInputSnapshot()
+	// The answer shares the prompt row with the regular draft: clear it first so
+	// the answer starts empty and the parked draft cannot leak into it.
+	interaction.SetPromptInput("")
+	if !interaction.ShowAnswerPrompt() {
+		c.restoreDraft(draft)
+		return "", false, nil
+	}
+	defer c.finish(draft)
+	ctx, done := c.session.newComposerReadContext()
+	defer done()
+	line, err = c.session.InputBox.ReadWithHistoryPromptWithHooksContext(ctx, formatSessionUserPrompt(c.session), c.hooks())
+	return line, true, c.normalizeReadError(err)
+}
+
+func (c *chatMergedPromptComposer) hooks() ui.LineEditorHooks {
+	return ui.LineEditorHooks{
+		OnChange:              c.onChange,
+		OnBeforeTerminalWrite: c.onBeforeTerminalWrite,
+		OnTerminalWrite:       c.onTerminalWrite,
+		OnCancel:              c.onCancel,
+		MaxVisibleRows:        chatComposerMaxVisibleRows(c.session),
+		ResolveMaxVisibleRows: func() int { return chatComposerMaxVisibleRows(c.session) },
+		SuppressSubmitEcho:    chatComposerUsesFixedSurface(c.session),
+	}
+}
+
+func (c *chatMergedPromptComposer) onChange(snapshot ui.LineEditorSnapshot) {
+	if c == nil || c.session == nil || c.session.Interaction == nil {
+		return
+	}
+	c.session.Interaction.SetPromptInputSnapshot(snapshot)
+}
+
+func (c *chatMergedPromptComposer) onBeforeTerminalWrite(_ ui.LineEditorSnapshot, render ui.LineEditorRenderSnapshot) string {
+	if c == nil || c.session == nil || c.session.Interaction == nil {
+		return ""
+	}
+	return c.session.Interaction.PromptCursorPrefix(render.LastCursorRow, render.LastCursorCol)
+}
+
+func (c *chatMergedPromptComposer) onTerminalWrite(_ ui.LineEditorSnapshot, render ui.LineEditorRenderSnapshot, writer io.Writer, text string) bool {
+	if c == nil || c.session == nil || c.session.Interaction == nil {
+		return false
+	}
+	return c.session.Interaction.WritePromptEditorText(writer, render.LastCursorRow, render.LastCursorCol, text)
+}
+
+func (c *chatMergedPromptComposer) onCancel(ui.LineEditorSnapshot) bool {
+	if c != nil {
+		c.cancelled = true
+	}
+	return true
+}
+
+// finish releases the answer prompt row and hands the parked draft back. The
+// question/answer pair itself is recorded by the caller's transcript echo, so
+// dropping the answer draft here cannot lose user-visible content.
+func (c *chatMergedPromptComposer) finish(draft ui.LineEditorSnapshot) {
+	if c == nil || c.session == nil || c.session.Interaction == nil {
+		return
+	}
+	c.session.Interaction.DiscardPrompt()
+	c.restoreDraft(draft)
+}
+
+func (c *chatMergedPromptComposer) restoreDraft(draft ui.LineEditorSnapshot) {
+	if c == nil || c.session == nil || c.session.Interaction == nil {
+		return
+	}
+	if draft.Text == "" {
+		return
+	}
+	c.session.Interaction.SetPromptInputSnapshot(draft)
+}
+
+func (c *chatMergedPromptComposer) normalizeReadError(err error) error {
+	if c == nil {
+		return err
+	}
+	if c.cancelled && err == nil {
+		resetChatComposerPrompt(c.session)
+		return errChatInteractivePromptCancelled
+	}
+	return normalizeChatComposerReadError(c.session, err)
+}
+
 func newChatTransientLineComposer(session *ChatSession) *chatTransientLineComposer {
 	return &chatTransientLineComposer{session: session}
 }

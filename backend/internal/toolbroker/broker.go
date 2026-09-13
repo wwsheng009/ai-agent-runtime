@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
@@ -52,6 +53,9 @@ const (
 	ToolReadTaskContext      = "read_task_context"
 	ToolReportTaskOutcome    = "report_task_outcome"
 	ToolBlockCurrentTask     = "block_current_task"
+	ToolSupervisionSnapshot  = "supervision_snapshot"
+	ToolAckLifecycle         = "ack_lifecycle"
+	ToolControlDescendant    = "control_descendant"
 )
 
 // Broker provides synthetic tools backed by runtime services.
@@ -70,6 +74,31 @@ type Broker struct {
 	// ExecutionSupervisor registers durable execution runs for spawned child
 	// sessions (P3). Optional: nil keeps spawn behavior unchanged.
 	ExecutionSupervisor *supervision.ExecutionSupervisor
+	// Supervision is the host-side control-plane capability behind
+	// supervision_snapshot / ack_lifecycle / control_descendant (P2-12 方案 3).
+	// Optional: nil keeps those tools out of Definitions() entirely, so a host
+	// without durable supervision never advertises a tool it cannot serve.
+	Supervision AgentSupervisionController
+	// agentEventsReads remembers the last read_agent_events window per
+	// caller/target cursor so an identical repeated read can answer with an
+	// explicit unchanged/repeat_count signal (plan P1-7 待补) instead of a
+	// silently identical payload. Lazily created; see agentEventsReadsMemo.
+	agentEventsReads *agentEventsReadMemo
+}
+
+// agentEventsReadsMemoInit guards lazy creation of Broker.agentEventsReads.
+// Hosts build Brokers as values (often &Broker{...}) and share them across
+// goroutines, so the memo is created under a package lock and reached through a
+// pointer: copying a Broker never copies the memo itself.
+var agentEventsReadsMemoInit sync.Mutex
+
+func (b *Broker) agentEventsReadsMemo() *agentEventsReadMemo {
+	agentEventsReadsMemoInit.Lock()
+	defer agentEventsReadsMemoInit.Unlock()
+	if b.agentEventsReads == nil {
+		b.agentEventsReads = newAgentEventsReadMemo(agentEventsReadMemoLimit)
+	}
+	return b.agentEventsReads
 }
 
 func withBrokerSourceMetadata(metadata map[string]interface{}) map[string]interface{} {
@@ -109,7 +138,7 @@ func withBrokerSourceDefinitions(definitions []types.ToolDefinition) []types.Too
 
 func isVolatileEmptyReplayTool(name string) bool {
 	switch normalizeToolName(name) {
-	case ToolTaskOutput, ToolListAgents, ToolWaitAgent, ToolReadAgentEvents, ToolWaitTeam, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext:
+	case ToolTaskOutput, ToolListAgents, ToolWaitAgent, ToolReadAgentEvents, ToolWaitTeam, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolSupervisionSnapshot:
 		return true
 	default:
 		return false
@@ -119,7 +148,7 @@ func isVolatileEmptyReplayTool(name string) bool {
 // IsBrokerTool returns true if the tool is handled by the broker.
 func (b *Broker) IsBrokerTool(name string) bool {
 	switch normalizeToolName(name) {
-	case ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolBackgroundTask, ToolTaskOutput, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask:
+	case ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolBackgroundTask, ToolTaskOutput, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask, ToolSupervisionSnapshot, ToolAckLifecycle, ToolControlDescendant:
 		return true
 	default:
 		return false
@@ -187,6 +216,9 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 		)
+	}
+	if b != nil && b.Supervision != nil {
+		definitions = append(definitions, supervisionToolDefinitions()...)
 	}
 	definitions = append(definitions,
 		types.ToolDefinition{
@@ -388,7 +420,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolReadAgentEvents,
-				Description: "Read collaboration events. With id, reads recent runtime events for a spawn_agent child session and optionally waits for new events. If the child is waiting_approval, inspect the returned approval_requested event/status instead of polling repeatedly. When count=0 or timed_out, follow next_action and do not immediately re-call with the same id/after_seq; prefer wait_agent for readiness. Without id, reads the current parent session mailbox/collab events after after_seq. Do not use this for spawn_team teammate ids such as member-1.",
+				Description: "Read collaboration events. With id, reads recent runtime events for a spawn_agent child session and optionally waits for new events. If the child is waiting_approval, inspect the returned approval_requested event/status instead of polling repeatedly. When count=0 or timed_out, follow next_action and do not immediately re-call with the same id/after_seq; prefer wait_agent for readiness. Results report latest_seq/has_more/unread_count: when has_more=true, consume the returned events first and only then re-call with after_seq=latest_seq. A repeated read with the same after_seq on a window that did not move returns unchanged=true plus repeat_count — treat it as \"no new events\" and do not re-read that window. Pass view=tool_progress for a token-cheap progress window (tool events plus terminal/approval events; filtered reports how many were dropped). Without id, reads the current parent session mailbox/collab events after after_seq. Do not use this for spawn_team teammate ids such as member-1.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -397,6 +429,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"after_seq":  map[string]interface{}{"type": "integer", "description": "Only return events after this sequence number."},
 						"limit":      map[string]interface{}{"type": "integer", "description": "Maximum number of events to return."},
 						"wait_ms":    map[string]interface{}{"type": "integer", "description": "Optional wait timeout while waiting for new events to arrive."},
+						"view":       map[string]interface{}{"type": "string", "enum": []string{AgentEventsViewAll, AgentEventsViewToolProgress}, "description": "Projection of the window: all (default) or tool_progress (tool events plus terminal/approval events)."},
 					},
 				},
 			},
@@ -561,7 +594,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolReadAgentEvents,
-				Description: "Read collaboration events. With id, reads recent runtime events for a spawn_agent child session and optionally waits for new events. If the child is waiting_approval, inspect the returned approval_requested event/status instead of polling repeatedly. When count=0 or timed_out, follow next_action and do not immediately re-call with the same id/after_seq; prefer wait_agent for readiness. Without id, reads the current parent session mailbox/collab events after after_seq. Do not use this for spawn_team teammate ids such as member-1; call wait_team with the spawn_team team_id for team lifecycle events.",
+				Description: "Read collaboration events. With id, reads recent runtime events for a spawn_agent child session and optionally waits for new events. If the child is waiting_approval, inspect the returned approval_requested event/status instead of polling repeatedly. When count=0 or timed_out, follow next_action and do not immediately re-call with the same id/after_seq; prefer wait_agent for readiness. Results report latest_seq/has_more/unread_count: when has_more=true, consume the returned events first and only then re-call with after_seq=latest_seq. A repeated read with the same after_seq on a window that did not move returns unchanged=true plus repeat_count — treat it as \"no new events\" and do not re-read that window. Pass view=tool_progress for a token-cheap progress window (tool events plus terminal/approval events; filtered reports how many were dropped). Without id, reads the current parent session mailbox/collab events after after_seq. Do not use this for spawn_team teammate ids such as member-1; call wait_team with the spawn_team team_id for team lifecycle events.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -570,6 +603,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"after_seq":  map[string]interface{}{"type": "integer", "description": "Only return events after this sequence number."},
 						"limit":      map[string]interface{}{"type": "integer", "description": "Maximum number of events to return."},
 						"wait_ms":    map[string]interface{}{"type": "integer", "description": "Optional wait timeout while waiting for new events to arrive."},
+						"view":       map[string]interface{}{"type": "string", "enum": []string{AgentEventsViewAll, AgentEventsViewToolProgress}, "description": "Projection of the window: all (default) or tool_progress (tool events plus terminal/approval events)."},
 					},
 				},
 			},
@@ -1692,6 +1726,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"queued":        result != nil && result.Queued,
 		}, agentStatusCacheSafeSummary(aliasedResult)), nil
 
+	case ToolSupervisionSnapshot, ToolAckLifecycle, ToolControlDescendant:
+		return b.executeSupervisionTool(ctx, toolName, sessionID, args)
+
 	case ToolResolveAgentApproval:
 		if b.AgentSessions == nil {
 			return nil, nil, fmt.Errorf("agent session controller is not configured")
@@ -1864,6 +1901,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		} else if value, ok := args["wait_ms"].(int); ok {
 			request.WaitMs = value
 		}
+		if value, ok := args["view"].(string); ok {
+			request.View = strings.TrimSpace(value)
+		}
 		noTarget := strings.TrimSpace(request.ID) == "" && strings.TrimSpace(request.SessionID) == ""
 		if noTarget {
 			request.SessionID = strings.TrimSpace(sessionID)
@@ -1894,20 +1934,38 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if err != nil {
 			return nil, nil, err
 		}
+		result = ApplyAgentEventsView(result, request.View)
 		result = FinalizeAgentEventsResult(result)
+		if caller := strings.TrimSpace(sessionID); caller != "" {
+			repeatCount, unchanged := b.agentEventsReadsMemo().observe(agentEventsReadKey{
+				callerSessionID: caller,
+				targetSessionID: actualSessionID,
+				view:            NormalizeAgentEventsView(request.View),
+				afterSeq:        request.AfterSeq,
+				limit:           request.Limit,
+			}, valueOrZeroEventsSeq(result))
+			if unchanged {
+				result = MarkAgentEventsRepeatedRead(result, request.AfterSeq, repeatCount)
+			}
+		}
 		aliasedResult := aliasAgentEventsResult(result, handleAliases)
 		aliasedSessionID := actualSessionID
 		if aliasedResult != nil {
 			aliasedSessionID = strings.TrimSpace(aliasedResult.SessionID)
 		}
-		return aliasedResult, attachCacheSafeSummary(map[string]interface{}{
+		summary := map[string]interface{}{
 			"session_id":    valueOrEmptyEventsSession(result),
 			"session_alias": aliasedSessionID,
 			"count":         valueOrZeroEventsCount(result),
 			"latest_seq":    valueOrZeroEventsSeq(result),
 			"timed_out":     result != nil && result.TimedOut,
 			"next_action":   valueOrEmptyEventsNextAction(result),
-		}, agentEventsCacheSafeSummary(aliasedResult)), nil
+		}
+		if aliasedResult != nil && aliasedResult.Unchanged {
+			summary["unchanged"] = true
+			summary["repeat_count"] = aliasedResult.RepeatCount
+		}
+		return aliasedResult, attachCacheSafeSummary(summary, agentEventsCacheSafeSummary(aliasedResult)), nil
 
 	case ToolCloseAgent:
 		if b.AgentSessions == nil {
@@ -1931,6 +1989,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if err != nil {
 			return nil, nil, err
 		}
+		// A closed child may have its id reused later; drop the read-window memo
+		// so the next caller cannot inherit a stale repeat streak.
+		b.agentEventsReadsMemo().forgetTarget(actualSessionID)
 		aliasedResult := aliasAgentStatusResult(result, handleAliases)
 		aliasedSessionID := actualSessionID
 		if aliasedResult != nil {
@@ -3082,6 +3143,12 @@ func normalizeToolName(name string) string {
 		return ToolReportTaskOutcome
 	case "blockcurrenttask":
 		return ToolBlockCurrentTask
+	case "supervisionsnapshot":
+		return ToolSupervisionSnapshot
+	case "acklifecycle":
+		return ToolAckLifecycle
+	case "controldescendant":
+		return ToolControlDescendant
 	default:
 		return name
 	}

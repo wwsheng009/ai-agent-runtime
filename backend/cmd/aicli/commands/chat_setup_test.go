@@ -1719,6 +1719,8 @@ func TestComposeLocalChatSystemPrompt_IncludesWorkspaceGuidance(t *testing.T) {
 		"File editing guidance:",
 		"Task difficulty rating and subagent delegation policy:",
 		"Before decomposing or delegating work, rate the overall user request difficulty as one of: easy, normal, hard, expert.",
+		"Multi-agent collaboration guidance:",
+		"continue meaningful non-overlapping work in the same turn",
 		"Prefer the dedicated file tools for workspace mutations.",
 		"Current workspace root: E:\\projects\\ai\\ai-gateway",
 		`Interpret "当前目录", ".", and relative paths as relative to the current workspace root unless the user explicitly says otherwise.`,

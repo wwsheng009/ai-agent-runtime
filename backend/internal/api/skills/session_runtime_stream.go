@@ -11,6 +11,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
 )
 
@@ -134,8 +135,9 @@ func (h *Handler) StreamSessionRuntimeEvents(w http.ResponseWriter, r *http.Requ
 
 // subscribeSessionLiveRuntimeEvents fans out bus events for one session onto a
 // buffered channel. Non-blocking send drops when the consumer is slow so Publish
-// never stalls tool execution. Only live-only types are forwarded (currently
-// tool.progress); durable types continue via the store path.
+// never stalls tool execution. Only live-only types are forwarded (tool.progress
+// and the parent-side subagent.progress mirror); durable types continue via the
+// store path.
 func (h *Handler) subscribeSessionLiveRuntimeEvents(sessionID string) (<-chan runtimeevents.Event, func()) {
 	sessionID = strings.TrimSpace(sessionID)
 	if h == nil || sessionID == "" {
@@ -147,22 +149,28 @@ func (h *Handler) subscribeSessionLiveRuntimeEvents(sessionID string) (<-chan ru
 	}
 
 	ch := make(chan runtimeevents.Event, 64)
-	unsub := bus.SubscribeCancelable(toolprotocol.EventTypeProgress, func(event runtimeevents.Event) {
-		if strings.TrimSpace(event.SessionID) != sessionID {
-			return
+	unsubscribes := make([]func(), 0, len(sessionLiveOnlyRuntimeEventTypes))
+	for _, eventType := range sessionLiveOnlyRuntimeEventTypes {
+		unsub := bus.SubscribeCancelable(eventType, func(event runtimeevents.Event) {
+			if strings.TrimSpace(event.SessionID) != sessionID {
+				return
+			}
+			if !isSessionLiveOnlyRuntimeEvent(event) {
+				return
+			}
+			select {
+			case ch <- event:
+			default:
+				// Drop when the SSE consumer lags; progress is best-effort.
+			}
+		})
+		if unsub != nil {
+			unsubscribes = append(unsubscribes, unsub)
 		}
-		if !isSessionLiveOnlyRuntimeEvent(event) {
-			return
-		}
-		select {
-		case ch <- event:
-		default:
-			// Drop when the SSE consumer lags; progress is best-effort.
-		}
-	})
+	}
 
 	return ch, func() {
-		if unsub != nil {
+		for _, unsub := range unsubscribes {
 			unsub()
 		}
 		// Do not close ch: handlers may still race after unsubscribe until Publish
@@ -170,9 +178,16 @@ func (h *Handler) subscribeSessionLiveRuntimeEvents(sessionID string) (<-chan ru
 	}
 }
 
+// sessionLiveOnlyRuntimeEventTypes are the bus types that are delivered straight
+// to live (live=1) SSE subscribers and are never persisted by that path.
+var sessionLiveOnlyRuntimeEventTypes = []string{
+	toolprotocol.EventTypeProgress,
+	supervision.EventTypeSubagentProgress,
+}
+
 func isSessionLiveOnlyRuntimeEvent(event runtimeevents.Event) bool {
 	switch strings.TrimSpace(event.Type) {
-	case toolprotocol.EventTypeProgress:
+	case toolprotocol.EventTypeProgress, supervision.EventTypeSubagentProgress:
 		return true
 	default:
 		return false

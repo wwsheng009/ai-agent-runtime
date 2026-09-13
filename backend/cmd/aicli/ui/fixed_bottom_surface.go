@@ -4768,11 +4768,14 @@ func (s *FixedBottomSurface) bottomPaneStateLocked() BottomPaneState {
 			})
 		}
 	}
-	if len(state.PopupLines) > 0 || strings.TrimSpace(state.ComposerLine) != "" {
-		state.Focus = BottomFocusPopup
-	} else if state.PromptVisible {
-		state.Focus = BottomFocusPrompt
-	}
+	// 与 controller/BottomPaneState 用同一条归属规则：只有拥有输入行的 popup
+	// 才接管光标；仅渲染正文的 popup（提问正文）让底部 prompt 持有光标。
+	state.Focus = bottomFocusForPopup(PopupLayer{
+		Lines:        state.PopupLines,
+		Owner:        state.PopupOwner,
+		Instance:     state.PopupInstance,
+		ComposerLine: state.ComposerLine,
+	}, state.PromptVisible)
 	return state
 }
 

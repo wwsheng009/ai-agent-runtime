@@ -104,7 +104,8 @@ func IsRuntimeOwnedEssentialTool(toolName string) bool {
 		"resolve_agent_approval",
 		"wait_team", "send_team_message",
 		"read_mailbox_digest", "read_task_spec", "read_task_context",
-		"report_task_outcome", "block_current_task":
+		"report_task_outcome", "block_current_task",
+		"supervision_snapshot", "ack_lifecycle", "control_descendant":
 		return true
 	default:
 		return false

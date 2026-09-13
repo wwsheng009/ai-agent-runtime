@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
@@ -247,6 +248,9 @@ func TestShouldPersistRuntimeSessionEvent(t *testing.T) {
 	for _, eventType := range []string{
 		"tool.requested", "tool.completed", "checkpoint_created",
 		chat.EventApprovalRequested, chat.EventApprovalResolved,
+		// P2-8 方案 4：配额驱逐产品事件落库，父会话 /runtime/events 与
+		// /runtime/stream 才能把“子会话被谁回收”渲染成一行。
+		agentcontrol.EventAgentReclaimed,
 		chat.EventSessionCompactStarted, chat.EventSessionCompactCompleted,
 		chat.EventSessionCompactSkipped, chat.EventSessionCompactFailed,
 		chat.EventSessionStart, chat.EventSessionEnd, chat.EventSessionInterrupted,

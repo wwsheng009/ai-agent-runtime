@@ -238,9 +238,27 @@ func completeAgentsSlashArgs(session *ChatSession, argsText string, cursor int) 
 		return completeAgentsMessageTargetSlashArgs(session, ctx, query)
 	case "routing", "route":
 		return completeAgentsRoutingSlashArgs(session, ctx, query)
+	case "cleanup", "prune", "gc":
+		return completeAgentsCleanupSlashArgs(ctx, query)
 	default:
 		return matchSlashArgumentCandidates(agentTopLevelArgumentCandidates(), query)
 	}
+}
+
+func completeAgentsCleanupSlashArgs(ctx slashArgumentContext, query string) []chatSlashCompletionCandidate {
+	if slashArgumentTokenText(ctx, 1) == "" || slashArgumentCursorInToken(ctx, 1) {
+		return matchSlashArgumentCandidates([]chatSlashCompletionCandidate{
+			{Command: "--dry-run", Summary: "只预览可回收对象，不执行回收", Group: string(chatSlashCommandGroupSession)},
+			{Command: "--idle", Summary: "额外回收空闲超过给定时长的子 agent", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+		}, query)
+	}
+	if strings.EqualFold(slashArgumentTokenText(ctx, 1), "--idle") {
+		return matchSlashArgumentCandidates([]chatSlashCompletionCandidate{
+			{Command: "30m", Summary: "回收空闲 30 分钟以上的子 agent", Group: string(chatSlashCommandGroupSession)},
+			{Command: "1h", Summary: "回收空闲 1 小时以上的子 agent", Group: string(chatSlashCommandGroupSession)},
+		}, query)
+	}
+	return nil
 }
 
 func completeAgentsPanelSlashArgs(session *ChatSession, ctx slashArgumentContext, query string) []chatSlashCompletionCandidate {
@@ -277,6 +295,7 @@ func agentTopLevelArgumentCandidates() []chatSlashCompletionCandidate {
 		{Command: "select", Summary: "pick 的别名", Group: string(chatSlashCommandGroupSession)},
 		{Command: "task", Summary: "followup 的别名", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
 		{Command: "routing", Summary: "预览子 Agent / Team difficulty route", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+		{Command: "cleanup", Summary: "回收可安全关闭的子 agent，释放配额", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
 	}
 }
 

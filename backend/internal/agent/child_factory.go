@@ -137,6 +137,7 @@ func (f ChildAgentFactory) Build(ctx context.Context, req ChildBuildRequest) (Ch
 		MaxRunDuration:        childConfig.MaxRunDuration,
 		MaxExplorationSteps:   childConfig.MaxExplorationSteps,
 		MaxRepeatedToolCalls:  childConfig.MaxRepeatedToolCalls,
+		MaxRepeatedPollCalls:  childConfig.MaxRepeatedPollCalls,
 		EnableThought:         true,
 		EnableToolCalls:       true,
 		Temperature:           childConfig.Temperature,

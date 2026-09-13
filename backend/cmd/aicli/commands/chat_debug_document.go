@@ -409,8 +409,12 @@ func chatDebugHistoryEffectSummary(effects ui.HistoryEffectQueueState) string {
 			invalidated++
 		}
 	}
-	return fmt.Sprintf("pending=%d in-flight=%d acked=%d failed=%d invalidated=%d frozen=%t",
-		pending, inFlight, acked, failed, invalidated, effects.Frozen)
+	// scrollback-replay-armed is the reducer-installed one-shot authorization
+	// that lets the executor replace native scrollback and replay history. It is
+	// the state that explains why a history obligation will (or will not) reset
+	// the physical projection, so it belongs next to the commit gates.
+	return fmt.Sprintf("pending=%d in-flight=%d acked=%d failed=%d invalidated=%d frozen=%t scrollback-replay-armed=%t",
+		pending, inFlight, acked, failed, invalidated, effects.Frozen, effects.ScrollbackReplayArmed)
 }
 
 // appendChatDebugRenderEncoderLines 输出统一渲染编码器（双跑模式数据面）
@@ -506,8 +510,24 @@ func appendChatDebugRenderEncoderLines(builder *chatDebugDocumentBuilder, sessio
 		builder.meta("Text Parity Blocks:", strconv.FormatUint(blocks, 10))
 		builder.meta("Text Parity Matched:", strconv.FormatUint(matched, 10))
 		builder.meta("Text Parity Missed:", strconv.FormatUint(missed, 10))
+		if resyncs, skips := bridge.textParityAlignmentStats(); resyncs > 0 || skips > 0 {
+			// 错位自愈计数（>0 表示 legacy/Scene 块序列曾错位并被探针修复）：
+			// 排查投影覆盖缺口用，正常会话应保持为 0。
+			builder.meta("Text Parity Resyncs:", strconv.FormatUint(resyncs, 10))
+			builder.meta("Text Parity Skips:", strconv.FormatUint(skips, 10))
+		}
 		if lastErr != "" {
 			builder.meta("Text Parity Last Error:", chatDebugValueOrNone(lastErr))
+		}
+	}
+	if pending, queuedBytes, dropped := bridge.deferredQueueStats(); pending > 0 || dropped > 0 {
+		// 非流式事件溢出队列（发布端不再阻塞上游后的有界缓冲）：pending>0
+		// 表示消费者落后、事件仍在投递中；dropped>0 表示积压超过上限后渲染
+		// 数据面事件已被丢弃（事件日志/会话日志仍完整）。
+		builder.meta("Deferred Queue Pending:", strconv.Itoa(pending))
+		builder.meta("Deferred Queue Bytes:", strconv.FormatInt(queuedBytes, 10))
+		if dropped > 0 {
+			builder.meta("Deferred Queue Dropped:", strconv.FormatUint(dropped, 10))
 		}
 	}
 	startCell := 0

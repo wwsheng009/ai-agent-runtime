@@ -34,7 +34,7 @@ func TestReplaceTranscriptActionCarriesScrollbackReplayGrant(t *testing.T) {
 	if plain.HistoryEffects.ScrollbackReplayArmed {
 		t.Fatal("a regular replacement authorized a scrollback replay")
 	}
-	if plan := scrollbackGrantRecoveryPlan(plain); plan.ResetScrollback || !plan.SettleHistoryProjection {
+	if plan := scrollbackGrantRecoveryPlan(plain); plan.resetScrollback || !plan.SettleHistoryProjection {
 		t.Fatalf("regular replacement recovery plan = %+v, want non-destructive settle", plan)
 	}
 
@@ -49,7 +49,7 @@ func TestReplaceTranscriptActionCarriesScrollbackReplayGrant(t *testing.T) {
 	if len(armed.Transcript.Cells) != 1 || armed.Transcript.Cells[0].Source != "loaded session" {
 		t.Fatalf("armed transcript = %+v, want the replacement snapshot installed by the same reduction", armed.Transcript)
 	}
-	if plan := scrollbackGrantRecoveryPlan(armed); !plan.ResetScrollback || plan.SettleHistoryProjection {
+	if plan := scrollbackGrantRecoveryPlan(armed); !plan.resetScrollback || plan.SettleHistoryProjection {
 		t.Fatalf("load replacement recovery plan = %+v, want destructive scrollback replay", plan)
 	}
 }
@@ -112,7 +112,7 @@ func TestScrollbackReplayGrantIsConsumedExactlyOnce(t *testing.T) {
 	state = reduceUIControllerState(state, HistoryProjectionInvalidated{
 		LayoutGeneration: state.LayoutGeneration,
 	}, 3)
-	if plan := scrollbackGrantRecoveryPlan(state); plan.ResetScrollback {
+	if plan := scrollbackGrantRecoveryPlan(state); plan.resetScrollback {
 		t.Fatalf("spent grant replayed again: %+v", plan)
 	}
 }

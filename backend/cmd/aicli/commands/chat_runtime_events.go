@@ -112,10 +112,21 @@ type chatRuntimeEventBridge struct {
 	enqueuedEvents              uint64
 	processedEvents             uint64
 	criticalPending             uint64
-	askApproval                 func(*runtimechat.ApprovalRequest, []string) (chatApprovalAnswer, error)
-	askQuestion                 func(prompt string, suggestions []string, required bool) (string, error)
-	approveTool                 func(ctx context.Context, sessionID, requestID string, allow bool) error
-	answerQuestion              func(ctx context.Context, sessionID, questionID, answer string) error
+	// deferredMu guards the ordered overflow queue used when the bounded
+	// eventQueue did not admit a non-streaming event within its caller budget.
+	// A single worker drains it FIFO as the consumer catches up, so ordering is
+	// preserved without ever blocking the publisher (provider stream callback,
+	// tool loop, agent act) beyond chatRuntimeNonStreamEnqueueBudget.
+	deferredMu            sync.Mutex
+	deferredQueue         []chatRuntimeQueuedEvent
+	deferredBytes         int64
+	deferredPending       uint64
+	deferredDropped       uint64
+	deferredWorkerRunning bool
+	askApproval           func(*runtimechat.ApprovalRequest, []string) (chatApprovalAnswer, error)
+	askQuestion           func(prompt string, suggestions []string, required bool) (string, error)
+	approveTool           func(ctx context.Context, sessionID, requestID string, allow bool) error
+	answerQuestion        func(ctx context.Context, sessionID, questionID, answer string) error
 	// preferInteractiveApprovals keeps NoInteractive headless hosts (ACP stdio)
 	// from auto-denying tools so askApproval can RPC to an external client.
 	preferInteractiveApprovals bool
@@ -163,6 +174,14 @@ type chatRuntimeEventBridge struct {
 	textParityMissed  uint64 // 不一致/无法对照的块数
 	textParityLastErr string // 最近一次不一致详情
 	textParityCell    int    // 已对照的 Scene cell 数（每完整块对应一个 cell）
+	// 错位自愈状态：游标停在原 cell 时，后续每个块都会与同一 cell 重复对照，
+	// 既不推进也不产生新信息（生产会话中表现为"永久错位 + 每块一次整快照
+	// 分组"）。连续同一 cell mismatch 达 chatTextParityStuckTolerance 后按
+	// chatTextParityResyncLookahead 窗口前向重对齐或跳过，保证游标前进。
+	textParityStuckCell  int    // 最近连续 mismatch 的 cell 索引
+	textParityStuckCount uint64 // 该 cell 上连续 mismatch 的块数
+	textParityResyncs    uint64 // 窗口内前向重对齐成功的次数
+	textParitySkips      uint64 // 窗口内无匹配、跳过 cell 保前进的次数
 }
 
 type chatRuntimeQueuedEvent struct {
@@ -247,6 +266,28 @@ const streamCoalescedFromKey = encoding.StreamCoalescedFromKey
 // chatStreamFlushBudget bounds how long a non-streaming event waits for the
 // coalesced stream backlog before the remainder is dropped for liveness.
 const chatStreamFlushBudget = 100 * time.Millisecond
+
+// chatRuntimeNonStreamEnqueueBudget bounds how long a non-streaming runtime
+// event may stall its publisher (provider stream callback, tool loop, agent
+// act) waiting for room in the bounded event queue. That caller path is
+// latency-critical: waiting uiActionPostBudget (5s) per event while the UI
+// actor was behind on a large transcript stretched a child-agent LLM call to
+// ~112s and made a live turn look stuck for tens of minutes. Events that miss
+// this budget are handed to the ordered deferred queue (deferRuntimeEvent)
+// instead of blocking the publisher.
+const chatRuntimeNonStreamEnqueueBudget = 200 * time.Millisecond
+
+// chatRuntimeDeferred* bound the ordered deferred backlog. A deferred event is
+// delivered as soon as the consumer catches up; past the caps the event is
+// dropped (and logged) so a permanently stalled UI cannot grow memory without
+// bound.
+const chatRuntimeDeferredEventLimit = 512
+const chatRuntimeDeferredEventByteLimit int64 = 2 << 20
+const chatRuntimeDeferredRetryInterval = 5 * time.Millisecond
+
+// chatRuntimeDeferredDrainBudget bounds how long EndRun waits for the deferred
+// backlog to reach the bounded queue before the ordinary drain barrier runs.
+const chatRuntimeDeferredDrainBudget = 1500 * time.Millisecond
 const chatRetiredTurnLimit = 64
 
 func ensureChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
@@ -489,9 +530,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			lines = append(lines, questionPriorityPromptLines(prompt, normalizedSuggestions)...)
 			promptLine := questionAnswerPrompt(required, len(normalizedSuggestions) > 0)
 			for {
-				readPrompt, cleanupPrompt, transientPrompt := showChatRuntimePriorityPrompt(session, lines, promptLine)
-				text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), readPrompt)
-				cleanupPrompt()
+				text, transientPrompt, err := readChatRuntimeQuestionAnswer(session, lines, promptLine)
 				if err != nil {
 					return "", err
 				}
@@ -637,6 +676,17 @@ func (b *chatRuntimeEventBridge) EndRun() {
 		return
 	}
 	b.flushPendingStreamEventBounded(chatStreamFlushBudget)
+	// Events that overflowed the bounded queue are delivered by the deferred
+	// worker. Give it a bounded window to reach the queue before the drain
+	// barrier runs; otherwise the turn's terminal events would land after the
+	// barrier and could be dropped as stale while the UI is behind.
+	if !b.waitDeferredDrain(b.deferredDrainTimeout()) && b.session != nil {
+		writeSessionDebugInfo(
+			b.session,
+			"[runtime-event] deferred queue did not drain before run end; remaining events will be delivered asynchronously",
+			false,
+		)
+	}
 	if !b.WaitForCurrentEvents(b.endRunDrainTimeout()) {
 		b.markEndRunDrainTimeout()
 	}
@@ -842,15 +892,20 @@ func (b *chatRuntimeEventBridge) Handle(event runtimeevents.Event) {
 	if isAssistantStreamTerminalEvent(event) {
 		b.dropPendingStreamsForTerminal(event)
 	} else {
-		// The non-streaming event itself is allowed a 5s bounded wait below,
-		// so flushing the coalesced tail with the same budget keeps ordering
-		// and content intact whenever the consumer is merely slow. A truly
-		// stalled UI still degrades to a bounded drop instead of wedging the
-		// LLM callback forever.
-		b.flushPendingStreamEventBounded(uiActionPostBudget)
+		// Flush the coalesced tail with the same short budget EndRun uses. The
+		// pending stream backlog is separately byte-bounded, so a slow consumer
+		// keeps ordering without letting one non-streaming event stall this
+		// callback for seconds.
+		b.flushPendingStreamEventBounded(chatStreamFlushBudget)
 	}
-	if !b.enqueueNonStreamEvent(event, size, uiActionPostBudget) {
-		b.logLateRuntimeEvent(event, "runtime event queue stalled; event dropped")
+	if b.deferredBacklogPending() || !b.enqueueNonStreamEvent(event, size, chatRuntimeNonStreamEnqueueBudget) {
+		// The queue is full (or something is already waiting): hand the event to
+		// the ordered deferred worker so this publisher (provider stream
+		// callback) returns immediately instead of waiting up to
+		// uiActionPostBudget for UI capacity. Joining the FIFO whenever it is
+		// non-empty keeps the non-streaming event family in order even when a
+		// slow consumer lets some events overtake others.
+		b.deferRuntimeEvent(event, size)
 	}
 }
 
@@ -893,6 +948,168 @@ func (b *chatRuntimeEventBridge) enqueueCriticalRuntimeEventEventually(event run
 			time.Sleep(5 * time.Millisecond)
 		}
 	}()
+}
+
+// chatRuntimeDeferredDropLogInterval collapses the per-drop debug lines emitted
+// while the deferred backlog is full into one line per interval. The first drop
+// is always logged so the degraded state is never silent.
+const chatRuntimeDeferredDropLogInterval = 64
+
+func shouldLogDeferredDrop(dropped uint64) bool {
+	return dropped == 1 || dropped%chatRuntimeDeferredDropLogInterval == 0
+}
+
+// deferRuntimeEvent appends a non-streaming event to the ordered overflow
+// queue. It is used when the bounded queue did not accept the event within
+// chatRuntimeNonStreamEnqueueBudget: the publisher returns immediately and
+// delivery is completed by runDeferredQueue as soon as the consumer frees
+// capacity. Ordering is preserved (one FIFO, one worker) and the backlog is
+// bounded, so a permanently stalled UI degrades to logged drops instead of
+// unbounded memory or a wedged LLM callback. The ordering guarantee covers the
+// non-streaming family: coalesced streaming deltas may still overtake a deferred
+// event, but they are merged per turn and superseded by that turn's terminal
+// message.
+//
+// Dropping runs on the publisher's goroutine, so the per-drop debug write is
+// throttled (one line per chatRuntimeDeferredDropLogInterval drops; the first
+// drop is always logged). Every drop is still forwarded to the exec event
+// bridge.
+func (b *chatRuntimeEventBridge) deferRuntimeEvent(event runtimeevents.Event, size int64) bool {
+	if b == nil {
+		return false
+	}
+	if size < 1 {
+		size = 1
+	}
+	b.deferredMu.Lock()
+	if len(b.deferredQueue) >= chatRuntimeDeferredEventLimit ||
+		b.deferredBytes+size > chatRuntimeDeferredEventByteLimit {
+		b.deferredDropped++
+		dropped := b.deferredDropped
+		b.deferredMu.Unlock()
+		if shouldLogDeferredDrop(dropped) {
+			b.logLateRuntimeEvent(event, fmt.Sprintf("runtime event deferred queue full; event dropped (dropped_total=%d)", dropped))
+		} else {
+			b.forwardLateRuntimeEvent(event)
+		}
+		return false
+	}
+	b.deferredQueue = append(b.deferredQueue, chatRuntimeQueuedEvent{event: event, size: size})
+	b.deferredBytes += size
+	b.deferredPending++
+	startWorker := !b.deferredWorkerRunning
+	if startWorker {
+		b.deferredWorkerRunning = true
+	}
+	b.deferredMu.Unlock()
+	if startWorker {
+		go b.runDeferredQueue()
+	}
+	return true
+}
+
+// runDeferredQueue delivers deferred events in FIFO order, retrying the head
+// until the bounded queue has room. The run epoch is stamped when the event
+// actually enters the queue (same policy as
+// enqueueCriticalRuntimeEventEventually), so a deferred terminal event is still
+// delivered across a run boundary instead of being dropped as stale.
+func (b *chatRuntimeEventBridge) runDeferredQueue() {
+	for {
+		b.deferredMu.Lock()
+		if len(b.deferredQueue) == 0 {
+			b.deferredWorkerRunning = false
+			b.deferredMu.Unlock()
+			return
+		}
+		head := b.deferredQueue[0]
+		b.deferredMu.Unlock()
+
+		if !b.enqueueNonStreamEvent(head.event, head.size, chatRuntimeDeferredRetryInterval) {
+			// The consumer is still behind. Keep the head in place: dropping it
+			// here would silently lose a tool boundary or final message, and the
+			// backlog is already bounded by deferRuntimeEvent.
+			time.Sleep(chatRuntimeDeferredRetryInterval)
+			continue
+		}
+
+		b.deferredMu.Lock()
+		if len(b.deferredQueue) > 0 {
+			b.deferredQueue = b.deferredQueue[1:]
+			b.deferredBytes -= head.size
+			if b.deferredBytes < 0 {
+				b.deferredBytes = 0
+			}
+			if b.deferredPending > 0 {
+				b.deferredPending--
+			}
+		}
+		b.deferredMu.Unlock()
+	}
+}
+
+// waitDeferredDrain waits (bounded) until the deferred backlog has been handed
+// to the bounded queue. EndRun calls it before the ordinary drain barrier so
+// end-of-run events that overflowed the queue are not lost.
+func (b *chatRuntimeEventBridge) waitDeferredDrain(timeout time.Duration) bool {
+	if b == nil || timeout <= 0 {
+		return true
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		b.deferredMu.Lock()
+		pending := len(b.deferredQueue)
+		b.deferredMu.Unlock()
+		if pending == 0 {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// deferredBacklogSize reports how many non-streaming events are still waiting in
+// the ordered overflow queue. They were accepted by the bridge but have not
+// reached the bounded render queue, so the enqueued/processed counters cannot
+// account for them.
+func (b *chatRuntimeEventBridge) deferredBacklogSize() int {
+	if b == nil {
+		return 0
+	}
+	b.deferredMu.Lock()
+	defer b.deferredMu.Unlock()
+	return len(b.deferredQueue)
+}
+
+// deferredBacklogPending reports whether the ordered overflow queue is
+// non-empty. Handle consults it before a direct enqueue so the non-streaming
+// event family keeps strict FIFO order once anything has been deferred.
+func (b *chatRuntimeEventBridge) deferredBacklogPending() bool {
+	return b.deferredBacklogSize() > 0
+}
+
+// deferredQueueStats reports the ordered overflow queue for diagnostics:
+// pending/bytes are the current backlog, dropped counts non-streaming events
+// discarded after a stalled consumer exceeded the backlog caps (/debug).
+func (b *chatRuntimeEventBridge) deferredQueueStats() (pending int, queuedBytes int64, dropped uint64) {
+	if b == nil {
+		return 0, 0, 0
+	}
+	b.deferredMu.Lock()
+	defer b.deferredMu.Unlock()
+	return len(b.deferredQueue), b.deferredBytes, b.deferredDropped
+}
+
+// deferredDrainTimeout bounds the EndRun wait for the deferred backlog. The
+// interrupted path keeps its much shorter budget so an aborted turn cannot
+// stall on deferred delivery.
+func (b *chatRuntimeEventBridge) deferredDrainTimeout() time.Duration {
+	budget := chatRuntimeDeferredDrainBudget
+	if timeout := b.endRunDrainTimeout(); timeout > 0 && timeout < budget {
+		return timeout
+	}
+	return budget
 }
 
 // isMergeableStreamEvent reports whether the event carries monotonic streaming
@@ -2328,6 +2545,9 @@ func (b *chatRuntimeEventBridge) sceneStats() (cells, revision, failures uint64,
 //   - 已对照 cell 数越界（Scene 落后或旧路径超前）→ mismatch；
 //   - 行数不等或逐行不相等 → mismatch；
 //   - 全部相等 → 推进到下一 cell，matched++。
+//   - 行内容与当前 cell 不一致 → 在前向窗口内重对齐（详见
+//     realignTextParityAfterMismatch）；窗口内无匹配且同一 cell 连续 mismatch
+//     达到 chatTextParityStuckTolerance → 跳过该 cell，保证对照游标最终前进。
 //
 // user cell 的 legacy 行先剥离样式前缀 "> "（RenderText 只投影语义内容，
 // 样式属于 presenter 层，见 scene.RenderText 约束）；错误块以 KindSystem
@@ -2341,6 +2561,15 @@ func (b *chatRuntimeEventBridge) sceneStats() (cells, revision, failures uint64,
 // 现在由 Scene 独占语义正文，divider 与 terminal chrome 由 presentation
 // 派生，不再对应一个 legacy writeRowsLocked 完整块，因此在对照游标中跳过；
 // 它由 reasoning 专用的 source/projection/physical-terminal 测试覆盖。
+// chatTextParityStuckTolerance / chatTextParityResyncLookahead 定义错位自愈
+// 边界：每次 mismatch 都在有界窗口内尝试前向重对齐（避免把探针变成全量扫描）；
+// 重对齐失败且同一 cell 连续 mismatch 达到容忍度（容忍一次瞬时滞后，如 Scene
+// 镜像事件尚未被消费完）才强制跳过一个 cell，保证对照游标最终前进。
+const (
+	chatTextParityStuckTolerance  = 2
+	chatTextParityResyncLookahead = 4
+)
+
 func (b *chatRuntimeEventBridge) checkTextParity(blockRows []string) {
 	if b == nil || len(blockRows) == 0 {
 		return
@@ -2350,27 +2579,75 @@ func (b *chatRuntimeEventBridge) checkTextParity(blockRows []string) {
 	b.textParityBlocks++
 	snap := b.sceneSnapshot()
 	if snap == nil || len(snap.Cells) == 0 {
-		b.textParityMissed++
-		b.textParityLastErr = fmt.Sprintf("block %d: scene snapshot empty", b.textParityBlocks)
+		b.recordTextParityMiss("block %d: scene snapshot empty", b.textParityBlocks)
 		return
 	}
 	groups := sceneBlockGroups(snap)
-	skippedReasoningGapRows := 0
-	for b.textParityCell < len(groups) && groups[b.textParityCell].kind == scene.KindReasoning {
-		skippedReasoningGapRows += groups[b.textParityCell].leadingGapRows
-		b.textParityCell++
-	}
+	skippedReasoningGapRows := b.skipTextParityReasoningGaps(groups)
 	if b.textParityCell >= len(groups) {
-		b.textParityMissed++
-		b.textParityLastErr = fmt.Sprintf("block %d: scene cells=%d consumed=%d block=%d (overflow)",
+		b.recordTextParityMiss("block %d: scene cells=%d consumed=%d block=%d (overflow)",
 			b.textParityBlocks, len(groups), b.textParityCell, len(blockRows))
 		return
 	}
-	g := groups[b.textParityCell]
+	ok, detail := parityCompleteBlockCompare(groups[b.textParityCell], blockRows, skippedReasoningGapRows)
+	if ok {
+		b.textParityCell++
+		b.textParityMatched++
+		b.textParityStuckCount = 0
+		return
+	}
+	b.recordTextParityMiss("block %d: %s", b.textParityBlocks, detail)
+	if b.realignTextParityAfterMismatch(groups, blockRows) {
+		return
+	}
+	if b.noteTextParityMismatch() {
+		b.skipStuckTextParityCell(len(groups))
+	}
+}
+
+// skipTextParityReasoningGaps 跳过 Scene 独占的 reasoning 分组（其正文不再
+// 经过 legacy writeRowsLocked 完整块），返回这些分组在 legacy 侧前置的 gap
+// 空行数（gap 行归属后继 cell，见 sceneBlockGroups）。
+func (b *chatRuntimeEventBridge) skipTextParityReasoningGaps(groups []sceneBlockGroup) int {
+	skipped := 0
+	for b.textParityCell < len(groups) && groups[b.textParityCell].kind == scene.KindReasoning {
+		skipped += groups[b.textParityCell].leadingGapRows
+		b.textParityCell++
+	}
+	return skipped
+}
+
+// recordTextParityMiss 记录一次不一致，并把详情写入 /debug 审计段；详情与
+// 上一次相同时不重复覆盖（同一错位不反复刷新调试面，也不改变任何输出行为）。
+func (b *chatRuntimeEventBridge) recordTextParityMiss(format string, args ...any) {
+	b.textParityMissed++
+	if msg := fmt.Sprintf(format, args...); msg != b.textParityLastErr {
+		b.textParityLastErr = msg
+	}
+}
+
+// noteTextParityMismatch 累计同一 cell 上连续 mismatch 的块数；达到
+// chatTextParityStuckTolerance 即返回 true，由调用方强制跳过一个 cell。
+func (b *chatRuntimeEventBridge) noteTextParityMismatch() bool {
+	if b.textParityStuckCell == b.textParityCell {
+		b.textParityStuckCount++
+	} else {
+		b.textParityStuckCell = b.textParityCell
+		b.textParityStuckCount = 1
+	}
+	return b.textParityStuckCount >= chatTextParityStuckTolerance
+}
+
+// parityCompleteBlockCompare 比较一个 Scene 分组与本次 legacy 完整块行序列
+// （口径与 checkTextParity 注释一致）：reasoning 跳过后遗留的前导 gap 行按
+// legacy 口径补在分组行前；user 块剥离 "> " 前缀并忽略块前导 gap 行（prompt
+// 重绘单独输出），system 块剥离 ErrorIcon 前缀。不一致时返回可读详情
+// （行数/行号与两侧文本），供 /debug 审计段定位。
+func parityCompleteBlockCompare(g sceneBlockGroup, blockRows []string, leadingGapRows int) (bool, string) {
 	wantLines := g.lines
-	if skippedReasoningGapRows > 0 {
-		withGap := make([]string, 0, skippedReasoningGapRows+len(wantLines))
-		withGap = append(withGap, make([]string, skippedReasoningGapRows)...)
+	if leadingGapRows > 0 {
+		withGap := make([]string, 0, leadingGapRows+len(wantLines))
+		withGap = append(withGap, make([]string, leadingGapRows)...)
 		wantLines = append(withGap, wantLines...)
 	}
 	if g.kind == scene.KindUser {
@@ -2382,10 +2659,7 @@ func (b *chatRuntimeEventBridge) checkTextParity(blockRows []string) {
 		}
 	}
 	if len(wantLines) != len(blockRows) {
-		b.textParityMissed++
-		b.textParityLastErr = fmt.Sprintf("block %d: cell rows=%d block=%d (row count mismatch)",
-			b.textParityBlocks, len(wantLines), len(blockRows))
-		return
+		return false, fmt.Sprintf("cell rows=%d block=%d (row count mismatch)", len(wantLines), len(blockRows))
 	}
 	for i, r := range blockRows {
 		if g.kind == scene.KindUser {
@@ -2395,14 +2669,55 @@ func (b *chatRuntimeEventBridge) checkTextParity(blockRows []string) {
 			r = strings.TrimPrefix(r, ui.GetTheme(ui.ThemeAuto).ErrorIcon+"  ")
 		}
 		if wantLines[i] != r {
-			b.textParityMissed++
-			b.textParityLastErr = fmt.Sprintf("block %d row %d: legacy=%q scene=%q",
-				b.textParityBlocks, i, r, wantLines[i])
-			return
+			return false, fmt.Sprintf("row %d: legacy=%q scene=%q", i, r, wantLines[i])
 		}
 	}
+	return true, ""
+}
+
+// realignTextParityAfterMismatch 在前向窗口内寻找与本次块行一致的 Scene 分组
+// （Scene 多出 legacy 无对应块的 cell，或两侧提交顺序错位造成的偏移）：找到则
+// 对齐到该分组之后（textParityResyncs++）并返回 true。
+//
+// 窗口内没有一致分组时返回 false 且不推进游标：典型场景是 Scene 镜像事件尚未
+// 被消费完（瞬时滞后），此时该块的内容确实还不在 Scene 中，跳过分组会造成真
+// 正的对齐丢失；这类情况交由 noteTextParityMismatch 的容忍度逻辑兜底。
+func (b *chatRuntimeEventBridge) realignTextParityAfterMismatch(groups []sceneBlockGroup, blockRows []string) bool {
+	if b.textParityCell >= len(groups) {
+		return false
+	}
+	limit := b.textParityCell + 1 + chatTextParityResyncLookahead
+	if limit > len(groups) {
+		limit = len(groups)
+	}
+	gapRows := 0
+	for idx := b.textParityCell + 1; idx < limit; idx++ {
+		if groups[idx].kind == scene.KindReasoning {
+			gapRows += groups[idx].leadingGapRows
+			continue
+		}
+		if ok, _ := parityCompleteBlockCompare(groups[idx], blockRows, gapRows); ok {
+			b.textParityCell = idx + 1
+			b.textParityResyncs++
+			b.textParityStuckCount = 0
+			return true
+		}
+	}
+	return false
+}
+
+// skipStuckTextParityCell 在同一 cell 上连续 mismatch 超过容忍度时强制前进
+// 一个 cell（textParitySkips++）：占位 cell（Scene 有 legacy 无对应完整块）
+// 或真实内容缺口不会永久拖住对照游标——旧行为下游标停留会让后续每个完整块
+// 都与同一 cell 重复对照，直到会话结束（每块追加一次 missed 并重建整快照
+// 分组）。
+func (b *chatRuntimeEventBridge) skipStuckTextParityCell(groupCount int) {
+	if b.textParityCell >= groupCount {
+		return
+	}
 	b.textParityCell++
-	b.textParityMatched++
+	b.textParitySkips++
+	b.textParityStuckCount = 0
 }
 
 // sceneBlockGroup 是 Scene 投影按 cell 分组后的一个完整块行序列
@@ -2423,11 +2738,18 @@ func sceneBlockGroups(snap *scene.Snapshot) []sceneBlockGroup {
 	rows := scene.LayoutTranscript(snap.Cells, snap.Revision)
 	var groups []sceneBlockGroup
 	groupByID := make(map[scene.CellID]int)
+	// 一次建 kind 索引：旧实现按行线性扫描 snap.Cells，长历史（15K 行级）下
+	// 为 O(cells²)；而本函数被对照探针与 Scene presenter 源在每个完整块提交
+	// 时各调用一次，属提交热路径。
+	kindByID := make(map[scene.CellID]scene.CellKind, len(snap.Cells))
+	for _, c := range snap.Cells {
+		if c != nil {
+			kindByID[c.ID] = c.Kind
+		}
+	}
 	cellKindOf := func(id scene.CellID) scene.CellKind {
-		for _, c := range snap.Cells {
-			if c != nil && c.ID == id {
-				return c.Kind
-			}
+		if kind, ok := kindByID[id]; ok {
+			return kind
 		}
 		return scene.KindSystem
 	}
@@ -2561,6 +2883,19 @@ func (b *chatRuntimeEventBridge) textParityStats() (blocks, matched, missed uint
 	return b.textParityBlocks, b.textParityMatched, b.textParityMissed, b.textParityLastErr
 }
 
+// textParityAlignmentStats 返回错位自愈统计（/debug 审计段展示用）：
+// resyncs 为窗口内前向重对齐成功次数，skips 为窗口内无匹配、跳过 cell 的
+// 次数。两者持续增长说明 legacy/Scene 块序列存在系统性错位，需要排查投影
+// 覆盖缺口（而非探针本身）。
+func (b *chatRuntimeEventBridge) textParityAlignmentStats() (resyncs, skips uint64) {
+	if b == nil {
+		return 0, 0
+	}
+	b.textParityMu.Lock()
+	defer b.textParityMu.Unlock()
+	return b.textParityResyncs, b.textParitySkips
+}
+
 // renderModelTail 返回编码器当前尾部锚点（ItemID/Seq）。
 // /debug、/model 等用户交互输出以触发时刻的该锚点为界参与渲染总序
 // （不进入编码器因果链，见统一编码器方案 §5.5）。
@@ -2632,13 +2967,21 @@ func (b *chatRuntimeEventBridge) lastInteractionAnchor() (tail *encoding.Tail, a
 	return b.interactionAnchor, b.interactionAnchorAt, b.interactionAnchorSource, b.interactionAnchorCount
 }
 
+// forwardLateRuntimeEvent hands an event that never entered the render queue to
+// the exec event bridge so control-plane consumers keep observing it even when
+// the debug line for it is throttled or skipped.
+func (b *chatRuntimeEventBridge) forwardLateRuntimeEvent(event runtimeevents.Event) {
+	if b == nil || b.session == nil || b.session.ExecEventBridge == nil {
+		return
+	}
+	b.session.ExecEventBridge.HandleRuntimeEvent(event)
+}
+
 func (b *chatRuntimeEventBridge) logLateRuntimeEvent(event runtimeevents.Event, reason string) {
 	if b == nil || b.session == nil {
 		return
 	}
-	if b.session.ExecEventBridge != nil {
-		b.session.ExecEventBridge.HandleRuntimeEvent(event)
-	}
+	b.forwardLateRuntimeEvent(event)
 	payload, _ := json.Marshal(event.Payload)
 	writeSessionDebugInfo(
 		b.session,
@@ -2695,8 +3038,13 @@ func (b *chatRuntimeEventBridge) WaitForCurrentEvents(timeout time.Duration) boo
 		processed := b.processedEvents
 		criticalPending := b.criticalPending
 		b.progressMu.Unlock()
+		// Deferred events are accepted by the bridge but not yet in the bounded
+		// queue, so the counters above cannot see them. Reporting "settled"
+		// while a backlog is pending would let callers read (and return) a
+		// half-delivered timeline.
+		deferredPending := b.deferredBacklogSize()
 		now := time.Now()
-		if processed >= enqueued && criticalPending == 0 {
+		if processed >= enqueued && criticalPending == 0 && deferredPending == 0 {
 			if stableSince.IsZero() || enqueued != lastSeenEnqueued {
 				stableSince = now
 				lastSeenEnqueued = enqueued
@@ -3295,6 +3643,17 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	b.handleStructuredLogEvent(event)
 	b.updateComposerAgentStageForAmbientPrimaryRunEvent(event)
 	if b.shouldSuppressMismatchedPrimaryTurnEvent(event) {
+		if isChatRenderDataPlaneSuppressedEvent(event.Type) {
+			// Mirror/diagnostic events (aicli.chat.dynamic_status, input.queue.*,
+			// aicli.chat.user_submitted) never reach the render data plane: their
+			// consumers are the SSE mirror and the TUI timeline. The ownership
+			// guard exists to protect the viewport/transcript from foreign-turn
+			// mutation, so an identity-less status tick being suppressed here is
+			// the expected steady state. Logging each tick flooded the session
+			// log (one payload marshal + debug write per status update) without
+			// adding any signal.
+			return
+		}
 		payload, _ := json.Marshal(event.Payload)
 		writeSessionDebugInfo(
 			b.session,
@@ -4152,6 +4511,66 @@ func mapQuestionSuggestionAnswer(input string, suggestions []string) string {
 		return normalized[choice-1]
 	}
 	return answer
+}
+
+// showChatRuntimePriorityPromptBody renders the priority prompt body without a
+// dedicated input row. The answer input is merged into the bottom prompt, see
+// chatMergedPromptComposer.
+func showChatRuntimePriorityPromptBody(session *ChatSession, lines []string) (func(), bool) {
+	return newChatPromptOverlay(session).showPriorityPromptBody(lines)
+}
+
+// answerPromptBodyLines turns the answer hint (previously the label of the
+// dedicated input row) into popup body lines. Once the answer input is merged
+// into the bottom prompt, the hint must stay visible next to the question.
+func answerPromptBodyLines(promptLine string) []string {
+	promptLine = strings.ReplaceAll(promptLine, "\r\n", "\n")
+	promptLine = strings.ReplaceAll(promptLine, "\r", "\n")
+	promptLine = strings.TrimRight(promptLine, "\n")
+	if strings.TrimSpace(promptLine) == "" {
+		return nil
+	}
+	raw := strings.Split(promptLine, "\n")
+	body := make([]string, 0, len(raw))
+	for _, line := range raw {
+		line = strings.TrimRight(line, " \t")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		body = append(body, line)
+	}
+	return body
+}
+
+// readChatRuntimeQuestionAnswer reads the answer to an ask_user_question
+// prompt. transient=true reports that the question/answer pair is not part of
+// the transcript yet and the caller must echo it.
+//
+// On a fixed surface the answer input is merged into the user's bottom prompt:
+// the question body (question text, suggestions and the answer hint) is still
+// rendered as a popup, but no dedicated answer input row is created. The typed
+// answer and its cursor travel through the regular prompt state, so the cursor
+// stays at the end of the answer instead of the first column after the label.
+// Terminals without the merged channel keep the dedicated popup input row.
+func readChatRuntimeQuestionAnswer(session *ChatSession, lines []string, promptLine string) (string, bool, error) {
+	if chatMergedAnswerPromptSupported(session) {
+		body := append(append([]string(nil), lines...), answerPromptBodyLines(promptLine)...)
+		cleanup, ok := showChatRuntimePriorityPromptBody(session, body)
+		if ok {
+			text, merged, err := newChatMergedPromptComposer(session).ReadLine()
+			cleanup()
+			if merged {
+				return text, true, err
+			}
+			// Merged input was unavailable (the prompt row could not be
+			// painted): the popup body is already released, fall through to
+			// the dedicated input row.
+		}
+	}
+	readPrompt, cleanupPrompt, transientPrompt := showChatRuntimePriorityPrompt(session, lines, promptLine)
+	defer cleanupPrompt()
+	text, err := chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), readPrompt)
+	return text, transientPrompt, err
 }
 
 func showChatRuntimePriorityPrompt(session *ChatSession, lines []string, prompt string) (string, func(), bool) {

@@ -2010,8 +2010,21 @@ func classifyToolErrorCode(message string) string {
 		return string(runtimeerrors.ErrAgentSpawnDepthLimit)
 	case strings.Contains(lower, "session already exists"):
 		return string(runtimeerrors.ErrAgentAlreadyExists)
+	// Thread-limit before the generic paths: spawn bodies carry
+	// "agent spawn thread limit reached: max_threads=… active_children=…".
+	case (strings.Contains(lower, "thread limit") && strings.Contains(lower, "spawn")),
+		strings.Contains(lower, "spawn thread limit"),
+		strings.Contains(lower, "max_threads"):
+		return string(runtimeerrors.ErrAgentThreadLimit)
 	case strings.Contains(lower, "session is busy"):
 		return string(runtimeerrors.ErrAgentBusy)
+	// Durable registry wiring failures (store not initialized/closed) are host
+	// problems, not model-retryable agent errors.
+	case strings.Contains(lower, "agent registry store is not initialized"),
+		strings.Contains(lower, "agent registry store is closed"),
+		strings.Contains(lower, "global agent registry store unavailable"),
+		strings.Contains(lower, "storage unavailable"):
+		return string(runtimeerrors.ErrAgentRegistryUnavailable)
 	case strings.Contains(lower, "agent session reference not found"),
 		strings.Contains(lower, "unknown agent session reference"):
 		return string(runtimeerrors.ErrAgentSessionNotFound)
@@ -2084,6 +2097,7 @@ func knownRuntimeErrorCode(code string) bool {
 		runtimeerrors.ErrProcessStartFailed, runtimeerrors.ErrProcessHealthcheck,
 		runtimeerrors.ErrAgentMaxSteps, runtimeerrors.ErrAgentPermission, runtimeerrors.ErrAgentReadOnly,
 		runtimeerrors.ErrAgentAlreadyExists, runtimeerrors.ErrAgentBusy,
+		runtimeerrors.ErrAgentThreadLimit, runtimeerrors.ErrAgentRegistryUnavailable,
 		runtimeerrors.ErrAgentSessionNotFound, runtimeerrors.ErrContextBudget,
 		runtimeerrors.ErrStreamInterrupted, runtimeerrors.ErrUpstreamUnavailable,
 		runtimeerrors.ErrMemoryFull, runtimeerrors.ErrWorkflowCycle, runtimeerrors.ErrWorkflowStep,
@@ -2179,6 +2193,10 @@ func nextActionForToolError(code string, message string) string {
 		return "The requested child id already exists. Reuse the existing child with send_input/followup_task, close it if replacement is intended, or spawn with a different id. Do not retry the same spawn_agent unchanged."
 	case runtimeerrors.ErrAgentBusy:
 		return "The child already has an active run. Use wait_agent/read_agent_events to observe it, send_input with interrupt=true only when replacing that run is intentional, or use followup_task to queue follow-up work. Do not retry the same send_input unchanged."
+	case runtimeerrors.ErrAgentThreadLimit:
+		return "agents.maxThreads is fully used by active children (active_children is reported in the error). Free capacity first: close finished/idle children with close_agent, reuse an existing child via send_input/followup_task, or reduce the spawn batch. Do not retry the same spawn_agent unchanged."
+	case runtimeerrors.ErrAgentRegistryUnavailable:
+		return "The durable agent registry/store is not initialized or already closed, so spawn/query cannot be served. Do not retry the same call unchanged; report the host-side wiring failure, or continue without durable agent tracking when the host supports it."
 	case runtimeerrors.ErrAgentSessionNotFound:
 		return "Use list_agents for the current root session, then retry with an existing child id, session_id, or path. Do not retry the same unknown session reference unchanged."
 	case runtimeerrors.ErrContextBudget:

@@ -171,6 +171,7 @@ func NewSessionActor(sessionID string, cfg SessionActorConfig) (*SessionActor, e
 				MaxRunDuration:       agentConfig.MaxRunDuration,
 				MaxExplorationSteps:  agentConfig.MaxExplorationSteps,
 				MaxRepeatedToolCalls: agentConfig.MaxRepeatedToolCalls,
+				MaxRepeatedPollCalls: agentConfig.MaxRepeatedPollCalls,
 				EnableThought:        true,
 				EnableToolCalls:      true,
 				EnableParallelTools:  true,

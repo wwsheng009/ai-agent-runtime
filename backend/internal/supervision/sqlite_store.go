@@ -248,6 +248,17 @@ func (s *SQLiteSupervisionStore) init(ctx context.Context) error {
 				);
 				CREATE INDEX IF NOT EXISTS idx_supervision_wake_scope
 					ON supervision_wake_pending(root_scope_id, target_parent_session_id);
+				CREATE TABLE IF NOT EXISTS supervision_wake_claims (
+					claim_id TEXT PRIMARY KEY,
+					root_scope_id TEXT NOT NULL,
+					budget_class TEXT NOT NULL DEFAULT '',
+					wake_reason TEXT NOT NULL DEFAULT '',
+					target_parent_session_id TEXT,
+					claimed_at TEXT NOT NULL,
+					claimed_by TEXT NOT NULL DEFAULT ''
+				);
+				CREATE INDEX IF NOT EXISTS idx_supervision_wake_claims_budget
+					ON supervision_wake_claims(root_scope_id, budget_class, claimed_at);
 				CREATE TABLE IF NOT EXISTS supervision_team_edges (
 					edge_id TEXT PRIMARY KEY,
 					root_scope_id TEXT NOT NULL,
@@ -1194,6 +1205,72 @@ func (s *SQLiteSupervisionStore) ResolveWakePending(ctx context.Context, wakeID 
 		return fmt.Errorf("resolve wake pending: %w", err)
 	}
 	return nil
+}
+
+// --- Wake budget claims ---
+
+func (s *SQLiteSupervisionStore) RecordWakeClaim(ctx context.Context, claim WakeClaim) error {
+	db, err := s.dbOrErr()
+	if err != nil {
+		return err
+	}
+	claim.ClaimID = strings.TrimSpace(claim.ClaimID)
+	if claim.ClaimID == "" {
+		claim.ClaimID = fmt.Sprintf("wakeclaim-%d", time.Now().UnixNano())
+	}
+	if claim.ClaimedAt.IsZero() {
+		claim.ClaimedAt = time.Now().UTC()
+	}
+	_, err = db.ExecContext(ctx, `
+		INSERT OR IGNORE INTO supervision_wake_claims (
+			claim_id, root_scope_id, budget_class, wake_reason,
+			target_parent_session_id, claimed_at, claimed_by
+		) VALUES (?, ?, ?, ?, ?, ?, ?)
+	`,
+		claim.ClaimID,
+		strings.TrimSpace(claim.RootScopeID),
+		string(claim.BudgetClass),
+		claim.WakeReason,
+		nullSupervisionString(claim.TargetParentSessionID),
+		formatSupervisionTime(claim.ClaimedAt),
+		claim.ClaimedBy,
+	)
+	if err != nil {
+		return fmt.Errorf("record wake claim: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteSupervisionStore) CountWakeClaims(ctx context.Context, rootScopeID string, class WakeBudgetClass, since time.Time) (int, error) {
+	db, err := s.dbOrErr()
+	if err != nil {
+		return 0, err
+	}
+	var count int
+	err = db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM supervision_wake_claims
+		WHERE root_scope_id = ? AND budget_class = ? AND claimed_at >= ?
+	`, strings.TrimSpace(rootScopeID), string(class), formatSupervisionTime(since)).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count wake claims: %w", err)
+	}
+	return count, nil
+}
+
+func (s *SQLiteSupervisionStore) PruneWakeClaims(ctx context.Context, before time.Time) (int64, error) {
+	db, err := s.dbOrErr()
+	if err != nil {
+		return 0, err
+	}
+	result, err := db.ExecContext(ctx, `DELETE FROM supervision_wake_claims WHERE claimed_at < ?`, formatSupervisionTime(before))
+	if err != nil {
+		return 0, fmt.Errorf("prune wake claims: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return affected, nil
 }
 
 // --- Team parent edges ---

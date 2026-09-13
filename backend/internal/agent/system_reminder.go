@@ -35,6 +35,7 @@ const (
 	ReminderKindDoomLoop              = "doom_loop"
 	ReminderKindDispositionReplay     = "disposition_replay"
 	ReminderKindExplorationStall      = "exploration_stall"
+	ReminderKindPollingBackoff        = "polling_backoff"
 	ReminderKindPlanMode              = "plan_mode"
 	ReminderKindRuntimeAdvisory       = "runtime_advisory"
 
@@ -64,6 +65,7 @@ func NormalizeReminderKind(kind string) string {
 		ReminderKindDoomLoop,
 		ReminderKindDispositionReplay,
 		ReminderKindExplorationStall,
+		ReminderKindPollingBackoff,
 		ReminderKindPlanMode,
 		ReminderKindRuntimeAdvisory:
 		return kind

@@ -125,3 +125,27 @@ func TestRenderTaskDifficultyGuidance_IncludesSubagentRoutingMetadata(t *testing
 		}
 	}
 }
+
+func TestRenderMultiAgentCollaborationGuidance_KeepsParentWorkingAndReadsIncrementally(t *testing.T) {
+	got := RenderMultiAgentCollaborationGuidance()
+
+	for _, expected := range []string{
+		"Multi-agent collaboration guidance:",
+		"continue meaningful non-overlapping work in the same turn",
+		"read_agent_events using after_seq",
+		"prefer the longest timeout you can afford",
+		"follow next_action",
+		"check list_agents for the slots in use",
+		"instead of retrying the same spawn_agent unchanged",
+		"resolve_agent_approval",
+		"close_agent",
+		"wait_team lifecycle",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("expected %q in guidance, got:\n%s", expected, got)
+		}
+	}
+	if strings.Count(got, "Multi-agent collaboration guidance:") != 1 {
+		t.Fatalf("expected a single guidance header, got:\n%s", got)
+	}
+}

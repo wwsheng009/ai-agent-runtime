@@ -127,11 +127,29 @@ func TestValidateAgentsConfig_DefaultsAndValidation(t *testing.T) {
 	require.Equal(t, 6, cfg.Agents.MaxThreads)
 	require.Equal(t, 1, cfg.Agents.MaxDepth)
 	require.Equal(t, int((30 * time.Second).Milliseconds()), cfg.Agents.DefaultWaitTimeoutMs)
+	require.Equal(t, int((10 * time.Second).Milliseconds()), cfg.Agents.MinWaitTimeoutMs)
+	require.Equal(t, int(time.Hour.Milliseconds()), cfg.Agents.MaxWaitTimeoutMs)
+	require.Equal(t, "clamp", cfg.Agents.WaitTimeoutMode)
 	require.Equal(t, "none", cfg.Agents.DefaultForkTurns)
 	require.NoError(t, ValidateRuntimeConfig(cfg))
 
+	// P2-8：0 = 未设置（回退默认），-1 = 显式不限，仅 < -1 非法。
 	cfg.Agents.MaxThreads = -1
+	require.NoError(t, ValidateRuntimeConfig(cfg))
+
+	cfg.Agents.MaxThreads = 0
+	require.NoError(t, ValidateRuntimeConfig(cfg))
+
+	cfg.Agents.MaxThreads = -2
 	require.Error(t, ValidateRuntimeConfig(cfg))
+
+	cfg = DefaultRuntimeConfig()
+	cfg.Agents.ReclaimIdleMs = -1
+	require.Error(t, ValidateRuntimeConfig(cfg))
+
+	cfg = DefaultRuntimeConfig()
+	cfg.Agents.ReclaimIdleMs = int((5 * time.Minute).Milliseconds())
+	require.NoError(t, ValidateRuntimeConfig(cfg))
 
 	cfg = DefaultRuntimeConfig()
 	cfg.Agents.MaxDepth = -1
@@ -140,6 +158,26 @@ func TestValidateAgentsConfig_DefaultsAndValidation(t *testing.T) {
 	cfg = DefaultRuntimeConfig()
 	cfg.Agents.DefaultWaitTimeoutMs = -1
 	require.Error(t, ValidateRuntimeConfig(cfg))
+
+	cfg = DefaultRuntimeConfig()
+	cfg.Agents.MinWaitTimeoutMs = -1
+	require.Error(t, ValidateRuntimeConfig(cfg))
+
+	cfg = DefaultRuntimeConfig()
+	cfg.Agents.MaxWaitTimeoutMs = -1
+	require.Error(t, ValidateRuntimeConfig(cfg))
+
+	cfg = DefaultRuntimeConfig()
+	cfg.Agents.MinWaitTimeoutMs = int((2 * time.Hour).Milliseconds())
+	require.Error(t, ValidateRuntimeConfig(cfg))
+
+	cfg = DefaultRuntimeConfig()
+	cfg.Agents.WaitTimeoutMode = "strict"
+	require.Error(t, ValidateRuntimeConfig(cfg))
+
+	cfg = DefaultRuntimeConfig()
+	cfg.Agents.WaitTimeoutMode = "error"
+	require.NoError(t, ValidateRuntimeConfig(cfg))
 
 	cfg = DefaultRuntimeConfig()
 	cfg.Agents.DefaultForkTurns = "2"

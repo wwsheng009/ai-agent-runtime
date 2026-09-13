@@ -101,11 +101,15 @@ type TerminalTransactionPlan struct {
 	Frame            TerminalFramePlan
 	History          *HistoryCommit
 	BootstrapHistory []HistoryCommit
-	// ResetScrollback requests a source-backed replacement of an uncertain
-	// native-scrollback projection in the current layout generation.
-	ResetScrollback bool
+	// resetScrollback requests a source-backed replacement of an uncertain
+	// native-scrollback projection in the current layout generation. It is
+	// unexported on purpose: no package outside ui may fabricate a destructive
+	// plan, and the only production path that sets it is the executor's
+	// reducer-armed replay branch. Debug and test projections use
+	// ComposeScrollbackReconciliationPlanForDebug.
+	resetScrollback bool
 	// SettleHistoryProjection is the non-destructive recovery counterpart of
-	// ResetScrollback. The frame proves the visible viewport without replacing
+	// resetScrollback. The frame proves the visible viewport without replacing
 	// native scrollback, so an unprovable resident range is quarantined in
 	// place: the rows stay physically resident, are never re-emitted, and the
 	// incremental handoff resumes immediately after the last proven row. It
@@ -157,15 +161,23 @@ func composeTerminalViewportFramePlan(state AppState) TerminalFramePlan {
 	return ComposeTerminalFramePlan(state)
 }
 
-func ComposeScrollbackReconciliationPlan(state AppState) TerminalTransactionPlan {
+// ComposeScrollbackReconciliationPlanForDebug builds a full-frame destructive
+// reconciliation. Production callers must never reach it directly: replacing
+// native scrollback requires a reducer-armed replay authorization, and
+// terminalHistoryRecoveryPlan is the only path that holds one (it selects
+// composeTerminalViewportScrollbackReconciliationPlan). This exported form
+// exists for debug and test projections, which deliberately exercise the
+// reset path without a live grant; the production-file inventory test pins
+// that no non-test file under cmd/aicli names it.
+func ComposeScrollbackReconciliationPlanForDebug(state AppState) TerminalTransactionPlan {
 	plan := ComposeTerminalTransactionPlan(state, nil)
-	plan.ResetScrollback = true
+	plan.resetScrollback = true
 	return plan
 }
 
 func composeTerminalViewportScrollbackReconciliationPlan(state AppState) TerminalTransactionPlan {
 	plan := composeTerminalViewportTransactionPlan(state, nil)
-	plan.ResetScrollback = true
+	plan.resetScrollback = true
 	return plan
 }
 
@@ -875,7 +887,7 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		!s.viewportBoundaryKnown && s.viewport.Top == 0
 	resizeRebuild := s.frame > 0 && s.geometry.Width > 0 && s.geometry.Height > 0 &&
 		(s.geometry.Width != frame.Geometry.Width || s.geometry.Height != frame.Geometry.Height)
-	forceScrollbackReset := plan.ResetScrollback
+	forceScrollbackReset := plan.resetScrollback
 	// Settling is only meaningful when no authorized replay owns this
 	// transaction: a reset replaces the projection outright and re-anchors
 	// implicitly.

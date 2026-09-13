@@ -437,6 +437,8 @@ func TestDiagnoseClassifiesCommonRecoveryModes(t *testing.T) {
 		{name: "spawn depth", message: "[SPAWN_DEPTH_LIMIT] agent spawn depth limit reached: max_depth=1 requested_depth=2", code: runtimeerrors.ErrAgentSpawnDepthLimit},
 		{name: "agent already exists", message: "session already exists: child-1", code: runtimeerrors.ErrAgentAlreadyExists},
 		{name: "agent busy", message: "session is busy (running)", code: runtimeerrors.ErrAgentBusy},
+		{name: "agent thread limit", message: "agent spawn thread limit reached: max_threads=4 active_children=4", code: runtimeerrors.ErrAgentThreadLimit},
+		{name: "agent registry unavailable", message: "agent control agent registry store is not initialized", code: runtimeerrors.ErrAgentRegistryUnavailable},
 		{name: "agent alias missing", message: "unknown agent session reference: session_ref_missing", code: runtimeerrors.ErrAgentSessionNotFound},
 		{name: "sqlite interrupted", message: "sqlite3: interrupted", code: runtimeerrors.ErrStreamInterrupted, retryable: true},
 	}
@@ -464,6 +466,8 @@ func TestDiagnoseAgentLifecycleConflictNextActions(t *testing.T) {
 		{name: "already exists", message: "session already exists: child-1", code: runtimeerrors.ErrAgentAlreadyExists, wantNextSubstr: "Do not retry the same spawn_agent unchanged"},
 		{name: "busy", message: "session is busy (running)", code: runtimeerrors.ErrAgentBusy, wantNextSubstr: "Do not retry the same send_input unchanged"},
 		{name: "session not found", message: "[AGENT_SESSION_NOT_FOUND] agent session reference not found: session_ref_missing", code: runtimeerrors.ErrAgentSessionNotFound, wantNextSubstr: "Use list_agents"},
+		{name: "thread limit", message: "agent spawn thread limit reached: max_threads=4 active_children=4", code: runtimeerrors.ErrAgentThreadLimit, wantNextSubstr: "Free capacity first"},
+		{name: "registry unavailable", message: "agent control agent registry store is not initialized", code: runtimeerrors.ErrAgentRegistryUnavailable, wantNextSubstr: "Do not retry the same call unchanged"},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {

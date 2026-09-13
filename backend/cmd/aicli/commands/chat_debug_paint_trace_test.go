@@ -128,7 +128,7 @@ func TestDebugDisplayIncludesAppStatePresenterDiagnostics(t *testing.T) {
 	if result := session.TerminalSession.FlushTransaction(ui.ComposeTerminalTransactionPlan(appState, nil)); result.Frame.Err != nil {
 		t.Fatalf("initial terminal projection: %v", result.Frame.Err)
 	}
-	if result := session.TerminalSession.FlushTransaction(ui.ComposeScrollbackReconciliationPlan(appState)); result.Frame.Err != nil {
+	if result := session.TerminalSession.FlushTransaction(ui.ComposeScrollbackReconciliationPlanForDebug(appState)); result.Frame.Err != nil {
 		t.Fatalf("terminal reconciliation projection: %v", result.Frame.Err)
 	}
 

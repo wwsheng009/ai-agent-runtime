@@ -1,0 +1,229 @@
+package agentcontrol
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+)
+
+// DefaultReconcileInterval is the low-frequency cadence recommended by plan
+// §P2-9: drift is measured in abandoned sessions, so a pass every ten minutes
+// keeps the durable active set honest without competing with live traffic.
+const DefaultReconcileInterval = 10 * time.Minute
+
+// MinReconcileInterval floors host configuration so a typo cannot turn the
+// audit into a hot loop.
+const MinReconcileInterval = time.Minute
+
+// ParseReconcileMode normalizes a host-provided mode string. Unknown values
+// fall back to observe, which is the safe default from plan §P2-9 兼容与风险.
+func ParseReconcileMode(raw string) ReconcileMode {
+	if strings.EqualFold(strings.TrimSpace(raw), string(ReconcileModeEnforce)) {
+		return ReconcileModeEnforce
+	}
+	return ReconcileModeObserve
+}
+
+// NormalizeReconcileInterval applies the default and the floor.
+func NormalizeReconcileInterval(interval time.Duration) time.Duration {
+	if interval <= 0 {
+		return DefaultReconcileInterval
+	}
+	if interval < MinReconcileInterval {
+		return MinReconcileInterval
+	}
+	return interval
+}
+
+// Reconciler owns the periodic audit + convergence loop shared by the API
+// runtime and the CLI local runtime, plus the last-report cache both hosts
+// surface through `/debug` and the supervision HTTP API.
+//
+// List is a host callback instead of a bare store read because hosts refresh
+// their projections first (CLI: materializeLocalAgentRegistry, API:
+// materializeAgentControlAgentProjections) so a pass never audits a stale
+// snapshot.
+type Reconciler struct {
+	Store    AgentRegistryStore
+	List     func(ctx context.Context) ([]AgentRecord, error)
+	Lookup   SessionBindingLookup
+	Mode     ReconcileMode
+	Interval time.Duration
+	// Reclaim is the host-side half of the P2-8 eviction sweep (plan §P2-9
+	// 方案 3): the host projects the audited rows into observations and closes
+	// whatever the shared ReclaimPolicy selects. enforce=false means "evaluate
+	// only" — the host must report Candidates without closing anything. A nil
+	// hook keeps the pass audit-only, so hosts without a reclaim store behave
+	// exactly as before.
+	Reclaim func(ctx context.Context, records []AgentRecord, enforce bool, now time.Time) (ReclaimOutcome, error)
+
+	mu      sync.Mutex
+	running bool
+	last    ReconcileReport
+	lastErr string
+}
+
+// IntervalOrDefault returns the effective cadence.
+func (r *Reconciler) IntervalOrDefault() time.Duration {
+	if r == nil {
+		return DefaultReconcileInterval
+	}
+	return NormalizeReconcileInterval(r.Interval)
+}
+
+// ModeOrDefault returns the effective mode (observe unless enforce is set).
+func (r *Reconciler) ModeOrDefault() ReconcileMode {
+	if r == nil {
+		return ReconcileModeObserve
+	}
+	if r.Mode == ReconcileModeEnforce {
+		return ReconcileModeEnforce
+	}
+	return ReconcileModeObserve
+}
+
+// RunOnce performs a single audit + convergence pass and caches the outcome.
+// Overlapping passes are rejected so a slow audit cannot stack up behind a
+// short interval.
+func (r *Reconciler) RunOnce(ctx context.Context) (ReconcileReport, error) {
+	if r == nil {
+		return ReconcileReport{Mode: string(ReconcileModeObserve)}, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	r.mu.Lock()
+	if r.running {
+		last, lastErr := r.last, r.lastErr
+		r.mu.Unlock()
+		return last, fmt.Errorf("reconcile pass already running: %s", lastErr)
+	}
+	r.running = true
+	r.mu.Unlock()
+
+	report, err := r.runPass(ctx)
+
+	r.mu.Lock()
+	r.running = false
+	r.last = report
+	if err != nil {
+		r.lastErr = err.Error()
+	} else {
+		r.lastErr = ""
+	}
+	r.mu.Unlock()
+	return report, err
+}
+
+func (r *Reconciler) runPass(ctx context.Context) (ReconcileReport, error) {
+	// Placeholder: ReconcileAgentSessionConsistency stamps the report itself on
+	// the success path (including ReconciledAt). The zero timestamp left by an
+	// early List failure is what makes LastReport report "no completed pass".
+	report := ReconcileReport{
+		Mode: string(r.ModeOrDefault()),
+	}
+	store := r.Store
+	var records []AgentRecord
+	if r.List != nil {
+		listed, err := r.List(ctx)
+		if err != nil {
+			return report, err
+		}
+		records = listed
+	} else if store != nil {
+		listed, err := store.ListAgentControlAgents(ctx, AgentFilter{IncludeClosed: true})
+		if err != nil {
+			return report, err
+		}
+		records = listed
+	}
+	report, err := ReconcileAgentSessionConsistency(ctx, store, records, r.Lookup, r.ModeOrDefault())
+	if err != nil {
+		return report, err
+	}
+	r.runReclaimPass(ctx, &report, records)
+	return report, nil
+}
+
+// runReclaimPass folds one host eviction sweep into the report. Its failure is
+// recorded instead of returned: the audit result is what the hosts surface
+// through `/debug`, and a store that refuses one eviction must not blank the
+// drift report the operator is looking at.
+func (r *Reconciler) runReclaimPass(ctx context.Context, report *ReconcileReport, records []AgentRecord) {
+	if r == nil || r.Reclaim == nil || report == nil {
+		return
+	}
+	enforce := r.ModeOrDefault() == ReconcileModeEnforce
+	outcome, err := r.Reclaim(ctx, records, enforce, time.Now().UTC())
+	report.ReclaimCandidates = outcome.Candidates
+	report.Reclaimed = outcome.Reclaimed()
+	report.ReclaimedRows = outcome.Rows
+	report.ReclaimFailed = outcome.Failed
+	report.ReclaimReasons = outcome.Reasons
+	switch {
+	case err != nil:
+		report.ReclaimError = err.Error()
+	case strings.TrimSpace(outcome.FirstError) != "":
+		report.ReclaimError = strings.TrimSpace(outcome.FirstError)
+	}
+}
+
+// RunLoop blocks until ctx is done: one immediate pass (so drift left by an
+// unclean shutdown converges without waiting a full interval) followed by the
+// configured cadence. Errors are cached in the report so hosts can surface the
+// last failure without an extra log sink.
+func (r *Reconciler) RunLoop(ctx context.Context) {
+	if r == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	interval := r.IntervalOrDefault()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	_, _ = r.RunOnce(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_, _ = r.RunOnce(ctx)
+		}
+	}
+}
+
+// LastReport returns the cached report, the last error text and whether any
+// pass has completed. Hosts use it for `/debug`, `/agents panel` and the
+// supervision HTTP status payload.
+func (r *Reconciler) LastReport() (ReconcileReport, string, bool) {
+	if r == nil {
+		return ReconcileReport{}, "", false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.last.ReconciledAt.IsZero() {
+		return r.last, r.lastErr, false
+	}
+	return r.last, r.lastErr, true
+}
+
+// ReconcileSummary renders the host-facing line for the cached report, folding
+// in the last error so an operator sees failures instead of a silent
+// `reconcile=not_run`.
+func (r *Reconciler) ReconcileSummary() string {
+	report, lastErr, ok := r.LastReport()
+	if !ok {
+		if strings.TrimSpace(lastErr) != "" {
+			return "reconcile=error detail=" + lastErr
+		}
+		return "reconcile=not_run"
+	}
+	summary := report.Summary()
+	if strings.TrimSpace(lastErr) != "" {
+		return summary + " last_error=" + lastErr
+	}
+	return summary
+}

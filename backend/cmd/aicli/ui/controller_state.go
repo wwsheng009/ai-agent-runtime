@@ -2,8 +2,6 @@ package ui
 
 import (
 	"errors"
-	"fmt"
-	"os"
 	"reflect"
 	"strings"
 
@@ -11,22 +9,6 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
-
-// traceHistoryReduction is the env-gated diagnostic for history-effect
-// reduction: AIR_TRACE_HISTORY=1 prints one line per claim/ack/fail decision so
-// a live session can be diffed against the ledger invariants. It is inert
-// (one getenv per decision) unless explicitly enabled, in the same spirit as
-// the other AIR_* debugging hooks.
-func traceHistoryReduction(state UIControllerState, format string, args ...any) {
-	if os.Getenv("AIR_TRACE_HISTORY") == "" {
-		return
-	}
-	prefix := fmt.Sprintf("[hist] gen=%d next=%d unknown=%t recon=%t pending=%d | ",
-		state.LayoutGeneration, state.HistoryEffects.NextToken,
-		state.HistoryEffects.ProjectionUnknown, state.HistoryEffects.ReconciliationRequired,
-		state.HistoryEffects.ledger.pendingCount)
-	fmt.Fprintf(os.Stderr, prefix+format+"\n", args...)
-}
 
 // UIControllerState is the actor-owned state published by UIController. AppState
 // is embedded rather than copied into a coordinator-local ledger, so geometry

@@ -693,6 +693,15 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 // variants owns a prompt or a background stream; /debug display is the sole
 // alternate-screen variant and commits no Scene cell (see OpenDebugOverlay).
 func tryExecuteStructuredDebugCommand(session *ChatSession, command string) (CommandResult, bool) {
+	// P2-12: the local supervision control entry is dispatched before the
+	// generic /debug parser, which only knows the original diagnostics verbs.
+	if isChatDebugSupervisionArgument(extractCommandArgument(command)) {
+		text, err := handleChatDebugSupervisionCommand(session, extractCommandArgument(command))
+		if err != nil {
+			return commandTextResult("错误: " + err.Error()), true
+		}
+		return commandTextResult(text), true
+	}
 	action, opts, err := parseChatDebugCommand(extractCommandArgument(command))
 	if err != nil {
 		if unifiedDirectInteractiveOutput(session) {

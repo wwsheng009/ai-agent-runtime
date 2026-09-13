@@ -53,6 +53,21 @@ type Store interface {
 	ClaimWakePending(ctx context.Context, wakeID, claimedBy string, at time.Time) (bool, error)
 	ResolveWakePending(ctx context.Context, wakeID string) error
 
+	// --- Wake budget claims (doc 6.5 rule 4, plan P1-6) ---
+
+	// RecordWakeClaim appends one delivered auto-wake for budget accounting.
+	// ClaimID is the idempotency key: recording the same claim twice must
+	// not double count.
+	RecordWakeClaim(ctx context.Context, claim WakeClaim) error
+	// CountWakeClaims returns how many claims a root scope recorded for one
+	// budget class since the given instant (inclusive).
+	CountWakeClaims(ctx context.Context, rootScopeID string, class WakeBudgetClass, since time.Time) (int, error)
+	// PruneWakeClaims deletes claims older than the cutoff and reports how
+	// many rows were removed. Schedulers call it opportunistically after a
+	// durable claim write; a no-op implementation is acceptable for stores
+	// without retention pressure.
+	PruneWakeClaims(ctx context.Context, before time.Time) (int64, error)
+
 	// --- Team parent edges (doc 6.1/6.7) ---
 
 	UpsertTeamEdge(ctx context.Context, edge TeamEdge) (TeamEdge, error)

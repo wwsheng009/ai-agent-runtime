@@ -33,6 +33,9 @@ type Config struct {
 	MaxRunDuration       time.Duration          `yaml:"maxRunDuration" json:"maxRunDuration"`
 	MaxExplorationSteps  int                    `yaml:"maxExplorationSteps" json:"maxExplorationSteps"`
 	MaxRepeatedToolCalls int                    `yaml:"maxRepeatedToolCalls" json:"maxRepeatedToolCalls"`
+	// MaxRepeatedPollCalls bounds consecutive identical polling/control calls
+	// (P1-7). 0 uses the built-in default; negative disables the soft advisory.
+	MaxRepeatedPollCalls int                    `yaml:"maxRepeatedPollCalls" json:"maxRepeatedPollCalls"`
 	DefaultMaxTokens     int                    `yaml:"defaultMaxTokens" json:"defaultMaxTokens"`
 	Temperature          float64                `yaml:"temperature" json:"temperature"`
 	SystemPrompt         string                 `yaml:"systemPrompt" json:"systemPrompt"`
@@ -929,6 +932,7 @@ func (a *Agent) RunReAct(ctx context.Context, llmRuntime *llm.LLMRuntime, prompt
 		MaxRunDuration:       a.config.MaxRunDuration,
 		MaxExplorationSteps:  a.config.MaxExplorationSteps,
 		MaxRepeatedToolCalls: a.config.MaxRepeatedToolCalls,
+		MaxRepeatedPollCalls: a.config.MaxRepeatedPollCalls,
 		EnableThought:        true,
 		EnableToolCalls:      true,
 		EnableParallelTools:  true,
@@ -952,6 +956,7 @@ func (a *Agent) RunReActWithConfig(ctx context.Context, llmRuntime *llm.LLMRunti
 			MaxRunDuration:       a.config.MaxRunDuration,
 			MaxExplorationSteps:  a.config.MaxExplorationSteps,
 			MaxRepeatedToolCalls: a.config.MaxRepeatedToolCalls,
+		MaxRepeatedPollCalls: a.config.MaxRepeatedPollCalls,
 			EnableThought:        true,
 			EnableToolCalls:      true,
 			EnableParallelTools:  true,
@@ -973,6 +978,7 @@ func (a *Agent) RunReActWithSession(ctx context.Context, llmRuntime *llm.LLMRunt
 			MaxRunDuration:       a.config.MaxRunDuration,
 			MaxExplorationSteps:  a.config.MaxExplorationSteps,
 			MaxRepeatedToolCalls: a.config.MaxRepeatedToolCalls,
+		MaxRepeatedPollCalls: a.config.MaxRepeatedPollCalls,
 			EnableThought:        true,
 			EnableToolCalls:      true,
 			EnableParallelTools:  true,

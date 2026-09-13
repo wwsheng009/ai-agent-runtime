@@ -333,10 +333,10 @@ type SpawnAgentArgs struct {
 	CompletionRequirement string `json:"completion_requirement,omitempty"`
 	// Isolation is none|worktree. Empty normalizes to none. worktree fails closed
 	// (no silent main-tree fallback) when git worktree creation is unavailable.
-	Isolation                string   `json:"isolation,omitempty"`
-	ReadOnly                 bool     `json:"read_only,omitempty"`
-	ForkContext              *bool    `json:"fork_context,omitempty"`
-	ForkTurns                string   `json:"fork_turns,omitempty"`
+	Isolation   string `json:"isolation,omitempty"`
+	ReadOnly    bool   `json:"read_only,omitempty"`
+	ForkContext *bool  `json:"fork_context,omitempty"`
+	ForkTurns   string `json:"fork_turns,omitempty"`
 	// Execution supervision timeouts (doc 7.2). Zero means "use operator
 	// default"; a negative value is rejected by the broker.
 	TimeoutSec               int64    `json:"timeout_sec,omitempty"`
@@ -443,20 +443,20 @@ type AgentStatusResult struct {
 	TimedOut                 bool     `json:"timed_out,omitempty"`
 	// RunID is the durable execution run identity assigned by the execution
 	// supervisor at spawn time (doc 7.1). Empty when supervision is disabled.
-	RunID                string `json:"run_id,omitempty"`
-	ExecutionDeadlineAt  string `json:"execution_deadline_at,omitempty"`
-	SupervisionPolicy    string `json:"supervision_policy,omitempty"`
+	RunID               string `json:"run_id,omitempty"`
+	ExecutionDeadlineAt string `json:"execution_deadline_at,omitempty"`
+	SupervisionPolicy   string `json:"supervision_policy,omitempty"`
 	// RunStatus is the supervision execution run status (running,
 	// waiting_approval, timed_out, orphaned, ...). More precise than the
 	// session-level Status for diagnosing stalled children.
-	RunStatus           string `json:"run_status,omitempty"`
-	Attempt             int    `json:"attempt,omitempty"`
-	MaxAttempts         int    `json:"max_attempts,omitempty"`
-	RunOwnerID          string `json:"run_owner_id,omitempty"`
-	LastHeartbeatAt     string `json:"last_heartbeat_at,omitempty"`
-	LastProgressAt      string `json:"last_progress_at,omitempty"`
-	ProgressDeadlineAt  string `json:"progress_deadline_at,omitempty"`
-	CancelDeadlineAt    string `json:"cancel_deadline_at,omitempty"`
+	RunStatus                string   `json:"run_status,omitempty"`
+	Attempt                  int      `json:"attempt,omitempty"`
+	MaxAttempts              int      `json:"max_attempts,omitempty"`
+	RunOwnerID               string   `json:"run_owner_id,omitempty"`
+	LastHeartbeatAt          string   `json:"last_heartbeat_at,omitempty"`
+	LastProgressAt           string   `json:"last_progress_at,omitempty"`
+	ProgressDeadlineAt       string   `json:"progress_deadline_at,omitempty"`
+	CancelDeadlineAt         string   `json:"cancel_deadline_at,omitempty"`
 	PendingApproval          bool     `json:"pending_approval,omitempty"`
 	PendingApprovalID        string   `json:"pending_approval_id,omitempty"`
 	PendingApprovalReason    string   `json:"pending_approval_reason,omitempty"`
@@ -477,22 +477,27 @@ type AgentStatusResult struct {
 
 // AgentWaitResult reports the outcome of child-status or mailbox-event wait.
 type AgentWaitResult struct {
-	Agent              *AgentStatusResult  `json:"agent,omitempty"`
-	Agents             []AgentStatusResult `json:"agents,omitempty"`
-	Event              *AgentEventItem     `json:"event,omitempty"`
-	Events             []AgentEventItem    `json:"events,omitempty"`
-	MatchedID          string              `json:"matched_id,omitempty"`
-	MatchedSessionID   string              `json:"matched_session_id,omitempty"`
-	LatestSeq          int64               `json:"latest_seq,omitempty"`
-	TimedOut           bool                `json:"timed_out,omitempty"`
-	WaitTimeoutMs      int                 `json:"wait_timeout_ms,omitempty"`
-	ExecutionContinues bool                `json:"execution_continues,omitempty"`
-	ReadyCount         int                 `json:"ready_count,omitempty"`
-	PendingCount       int                 `json:"pending_count,omitempty"`
-	ReadyIDs           []string            `json:"ready_ids,omitempty"`
-	PendingIDs         []string            `json:"pending_ids,omitempty"`
-	WaitedMs           int64               `json:"waited_ms,omitempty"`
-	NextAction         string              `json:"next_action,omitempty"`
+	Agent            *AgentStatusResult  `json:"agent,omitempty"`
+	Agents           []AgentStatusResult `json:"agents,omitempty"`
+	Event            *AgentEventItem     `json:"event,omitempty"`
+	Events           []AgentEventItem    `json:"events,omitempty"`
+	MatchedID        string              `json:"matched_id,omitempty"`
+	MatchedSessionID string              `json:"matched_session_id,omitempty"`
+	LatestSeq        int64               `json:"latest_seq,omitempty"`
+	TimedOut         bool                `json:"timed_out,omitempty"`
+	WaitTimeoutMs    int                 `json:"wait_timeout_ms,omitempty"`
+	// WaitTimeoutRequestedMs / WaitTimeoutClamped echo how the requested
+	// observation window was normalized against agents.minWaitTimeoutMs /
+	// agents.maxWaitTimeoutMs so a clamped wait is never silent.
+	WaitTimeoutRequestedMs int      `json:"wait_timeout_requested_ms,omitempty"`
+	WaitTimeoutClamped     bool     `json:"wait_timeout_clamped,omitempty"`
+	ExecutionContinues     bool     `json:"execution_continues,omitempty"`
+	ReadyCount             int      `json:"ready_count,omitempty"`
+	PendingCount           int      `json:"pending_count,omitempty"`
+	ReadyIDs               []string `json:"ready_ids,omitempty"`
+	PendingIDs             []string `json:"pending_ids,omitempty"`
+	WaitedMs               int64    `json:"waited_ms,omitempty"`
+	NextAction             string   `json:"next_action,omitempty"`
 }
 
 // MarshalJSON keeps the legacy matched-agent view without serializing the same
@@ -567,6 +572,22 @@ func FinalizeAgentEventsResult(result *AgentEventsResult) *AgentEventsResult {
 		// from tight unchanged polling loops that doom-loop exempts.
 		result.NextAction = "stop_empty_event_poll: 0 events returned; do not immediately re-call read_agent_events with the same id/after_seq. Prefer wait_agent for readiness, or use wait_ms>0 once if waiting for a specific new event"
 	}
+	return result
+}
+
+// ApplyAgentWaitTimeout records the normalized observation window on a wait
+// result. requestedMs is echoed verbatim (0 means "host default"), effectiveMs
+// is the window the host actually used, and clamped reports whether the request
+// was pinned to agents.minWaitTimeoutMs / agents.maxWaitTimeoutMs.
+func ApplyAgentWaitTimeout(result *AgentWaitResult, requestedMs, effectiveMs int, clamped bool) *AgentWaitResult {
+	if result == nil {
+		return nil
+	}
+	result.WaitTimeoutRequestedMs = requestedMs
+	if effectiveMs > 0 {
+		result.WaitTimeoutMs = effectiveMs
+	}
+	result.WaitTimeoutClamped = clamped
 	return result
 }
 
@@ -685,6 +706,10 @@ type ReadAgentEventsArgs struct {
 	Limit       int    `json:"limit,omitempty"`
 	WaitMs      int    `json:"wait_ms,omitempty"`
 	MailboxOnly bool   `json:"mailbox_only,omitempty"`
+	// View optionally projects the returned window (plan P1-5 方案 3). "" or
+	// "all" keeps every event; "tool_progress" keeps tool events plus the
+	// lifecycle events a parent must not miss (terminal states, approvals).
+	View string `json:"view,omitempty"`
 }
 
 // AgentEventItem is a lightweight runtime event view for child-agent sessions.
@@ -706,7 +731,166 @@ type AgentEventsResult struct {
 	Count     int              `json:"count"`
 	LatestSeq int64            `json:"latest_seq,omitempty"`
 	TimedOut  bool             `json:"timed_out,omitempty"`
-	NextAction string           `json:"next_action,omitempty"`
+	// HasMore reports that the event store held at least one more event than the
+	// returned window (the read over-fetches one row to detect it).
+	HasMore bool `json:"has_more,omitempty"`
+	// UnreadCount is how many events remain beyond the returned window. It is
+	// capped at AgentEventsUnreadProbeLimit, so a value at the cap means
+	// "at least this many".
+	UnreadCount int `json:"unread_count,omitempty"`
+	// View is the canonical projection that produced Events (plan P1-5 方案 3).
+	// It is only set when the caller asked for a projection, so a default
+	// `view=all` read keeps its historical JSON shape.
+	View string `json:"view,omitempty"`
+	// Filtered counts events the projection dropped from the raw read window.
+	Filtered int `json:"filtered,omitempty"`
+	// Unchanged reports that this read returned the same window as the previous
+	// read of the same caller/target/after_seq: the event high-water mark did not
+	// advance, so the payload repeats the previous answer (and would otherwise hit
+	// the provider prompt cache byte-for-byte). It is the explicit signal behind
+	// plan P1-7's repeated-after_seq guidance.
+	Unchanged bool `json:"unchanged,omitempty"`
+	// RepeatCount counts consecutive identical reads of that unchanged window. It
+	// is >= 1 whenever Unchanged is set, so a caller can tell "same answer again"
+	// from "the window did not move the first time".
+	RepeatCount int    `json:"repeat_count,omitempty"`
+	NextAction  string `json:"next_action,omitempty"`
+}
+
+// AgentEventsUnreadProbeLimit bounds the follow-up store probe that counts how
+// many events remain beyond a returned read window.
+const AgentEventsUnreadProbeLimit = 200
+
+// CapAgentEventsUnread bounds an unread probe count to AgentEventsUnreadProbeLimit.
+func CapAgentEventsUnread(count int) int {
+	if count <= 0 {
+		return 0
+	}
+	if count > AgentEventsUnreadProbeLimit {
+		return AgentEventsUnreadProbeLimit
+	}
+	return count
+}
+
+// Agent events views (plan P1-5 方案 3): a parent that only needs progress can
+// ask for the tool projection instead of paying tokens for every assistant and
+// reasoning chunk in the window.
+const (
+	AgentEventsViewAll          = "all"
+	AgentEventsViewToolProgress = "tool_progress"
+)
+
+// agentEventsToolProgressSticky lists the non-tool event types the
+// tool_progress view keeps. Losing a terminal state or an approval request
+// would be worse than the tokens the projection saves, so they always survive
+// it (P1-5 测试与验收: 不丢终态).
+var agentEventsToolProgressSticky = map[string]bool{
+	"session_end":        true,
+	"agent.completed":    true,
+	"agent.failed":       true,
+	"agent.cancelled":    true,
+	"agent.reclaimed":    true,
+	"approval_requested": true,
+	"approval_resolved":  true,
+}
+
+// NormalizeAgentEventsView canonicalizes a requested view. Unknown values
+// degrade to AgentEventsViewAll so a typo can never silently hide events.
+func NormalizeAgentEventsView(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case AgentEventsViewToolProgress:
+		return AgentEventsViewToolProgress
+	default:
+		return AgentEventsViewAll
+	}
+}
+
+// KeepsAgentEventForView reports whether one event survives the view. The
+// "all" view (and any unknown value) keeps everything.
+func KeepsAgentEventForView(view, eventType string) bool {
+	if NormalizeAgentEventsView(view) != AgentEventsViewToolProgress {
+		return true
+	}
+	normalized := strings.ToLower(strings.TrimSpace(eventType))
+	if normalized == "" {
+		return false
+	}
+	if strings.HasPrefix(normalized, "tool.") {
+		return true
+	}
+	return agentEventsToolProgressSticky[normalized]
+}
+
+// ApplyAgentEventsView projects result.Events for the requested view and records
+// the canonical view plus how many events it dropped. `view=all`, unknown views
+// and nil results are no-ops, so callers that do not opt in see no shape change.
+//
+// Pagination metadata (has_more/unread_count/next_action) is intentionally left
+// alone: it describes the raw window, and after_seq=latest_seq still advances
+// past the filtered events, so the parent's cursor contract does not change.
+func ApplyAgentEventsView(result *AgentEventsResult, view string) *AgentEventsResult {
+	if result == nil {
+		return nil
+	}
+	canonical := NormalizeAgentEventsView(view)
+	if canonical == AgentEventsViewAll {
+		return result
+	}
+	result.View = canonical
+	if len(result.Events) == 0 {
+		return result
+	}
+	kept := make([]AgentEventItem, 0, len(result.Events))
+	for _, event := range result.Events {
+		if KeepsAgentEventForView(canonical, event.Type) {
+			kept = append(kept, event)
+			continue
+		}
+		result.Filtered++
+	}
+	result.Events = kept
+	result.Count = len(kept)
+	return result
+}
+
+// ApplyAgentEventsPagination annotates a read window with has_more/unread_count
+// and refreshes next_action so a parent consumes the current page before
+// re-reading with a higher after_seq. hasMore=false leaves the result untouched
+// (including the polling guidance set by FinalizeAgentEventsResult).
+func ApplyAgentEventsPagination(result *AgentEventsResult, hasMore bool, unread int) *AgentEventsResult {
+	if result == nil || !hasMore {
+		return result
+	}
+	result.HasMore = true
+	unread = CapAgentEventsUnread(unread)
+	result.UnreadCount = unread
+	detail := "more event(s) remain"
+	switch {
+	case unread >= AgentEventsUnreadProbeLimit:
+		detail = fmt.Sprintf("at least %d more event(s) remain", unread)
+	case unread > 0:
+		detail = fmt.Sprintf("%d more event(s) remain", unread)
+	}
+	result.NextAction = fmt.Sprintf("consume_events_then_advance: %d event(s) returned (latest_seq=%d); %s — consume these first, then re-call read_agent_events with after_seq=%d", result.Count, result.LatestSeq, detail, result.LatestSeq)
+	return result
+}
+
+// MarkAgentEventsRepeatedRead records an explicit "you already read this exact
+// window" signal on a read that repeats the previous caller/target/after_seq
+// window without new events. Without it the second answer is byte-identical to
+// the first (a prompt-cache hit), which leaves the model without in-band
+// evidence that its cursor did not move (plan P1-7 待补).
+func MarkAgentEventsRepeatedRead(result *AgentEventsResult, afterSeq int64, repeatCount int) *AgentEventsResult {
+	if result == nil {
+		return nil
+	}
+	if repeatCount < 1 {
+		repeatCount = 1
+	}
+	result.Unchanged = true
+	result.RepeatCount = repeatCount
+	result.NextAction = fmt.Sprintf("unchanged_window: identical read #%d with after_seq=%d returned the same window (no new events); the payload adds no information — do other work, use wait_agent for readiness or a longer wait, and advance after_seq only once new events exist", repeatCount, afterSeq)
+	return result
 }
 
 // ApplyAgentWorktreeArgs applies a child's worktree isolation changes into the main repo.

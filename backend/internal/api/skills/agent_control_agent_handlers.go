@@ -453,6 +453,8 @@ func (h *Handler) SetAgentControlAgentStore(store agentcontrol.AgentRegistryStor
 	if oldService != nil {
 		h.configureMailboxWriteThrough(nil)
 	}
+	// P2-9：宿主直接注入 store 时也让对账循环跟上（store 为 nil 时停止循环）。
+	h.ensureAgentRegistryReconciler()
 }
 
 func (h *Handler) getAgentControlAgentStore() agentcontrol.AgentRegistryStore {

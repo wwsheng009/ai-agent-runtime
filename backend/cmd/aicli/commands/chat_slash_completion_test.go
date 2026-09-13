@@ -860,7 +860,7 @@ func TestChatSlashArgumentCompletionAgents(t *testing.T) {
 	if !controller.state.Active || !controller.state.Context.InArguments {
 		t.Fatalf("expected agents args popup to be active, got %#v", controller.state)
 	}
-	for _, command := range []string{"panel", "dashboard", "pick", "target", "send", "followup"} {
+	for _, command := range []string{"panel", "dashboard", "pick", "target", "send", "followup", "cleanup"} {
 		if !containsSlashCandidate(controller.state.Candidates, command) {
 			t.Fatalf("expected /agents candidates to include %q, got %#v", command, controller.state.Candidates)
 		}
@@ -899,6 +899,20 @@ func TestChatSlashArgumentCompletionAgents(t *testing.T) {
 	for _, command := range []string{"test", "dry-run", "dryrun", "preview", "summary", "status", "config"} {
 		if !containsSlashCandidate(controller.state.Candidates, command) {
 			t.Fatalf("expected /agents routing candidates to include %q, got %#v", command, controller.state.Candidates)
+		}
+	}
+
+	controller.UpdateAt("/agents cleanup ", len([]rune("/agents cleanup ")))
+	for _, command := range []string{"--dry-run", "--idle"} {
+		if !containsSlashCandidate(controller.state.Candidates, command) {
+			t.Fatalf("expected /agents cleanup candidates to include %q, got %#v", command, controller.state.Candidates)
+		}
+	}
+
+	controller.UpdateAt("/agents cleanup --idle ", len([]rune("/agents cleanup --idle ")))
+	for _, command := range []string{"30m", "1h"} {
+		if !containsSlashCandidate(controller.state.Candidates, command) {
+			t.Fatalf("expected /agents cleanup --idle candidates to include %q, got %#v", command, controller.state.Candidates)
 		}
 	}
 

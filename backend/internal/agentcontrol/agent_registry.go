@@ -249,6 +249,15 @@ type AgentSpawnReservationStore interface {
 	ReserveAgentControlAgentSpawn(ctx context.Context, root AgentRecord, child AgentRecord, maxThreads int) (AgentRecord, error)
 }
 
+// AgentSpawnReservationReleaser optionally compensates a spawn reservation
+// that never became a runnable child (actor creation or first-prompt submit
+// failed). Releases move the reserved row to the stale terminal state so it
+// stops counting against max_threads while retaining diagnostics. Releasing an
+// unknown or already terminal row is a no-op so callers can retry safely.
+type AgentSpawnReservationReleaser interface {
+	ReleaseAgentControlAgentSpawn(ctx context.Context, agentID string, reason string) (AgentRecord, error)
+}
+
 // AgentWakeWatcher exposes AgentControl identity graph wake notifications.
 type AgentWakeWatcher interface {
 	WatchAgentControlAgentWake(ctx context.Context, filter AgentWakeFilter) (<-chan AgentWakeEvent, func())

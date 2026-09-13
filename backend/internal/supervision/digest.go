@@ -20,7 +20,19 @@ type DigestRequest struct {
 	// IncludeResolvedSince injects a compact list of items resolved after
 	// AfterSeq when true.
 	IncludeResolvedSince bool
+	// SubjectPresence optionally reports whether a notification subject still
+	// exists in its control-plane store. Subjects known to be gone are stale:
+	// they stop counting as critical/action-required and are downgraded to an
+	// informational digest line instead of asking the parent to act on a row
+	// that no longer exists (P2-12). checked=false keeps the original severity
+	// so missing wiring never hides a real critical.
+	SubjectPresence SubjectPresenceFunc
 }
+
+// SubjectPresenceFunc reports whether the notification subject still exists in
+// the control-plane store that owns it. checked=false means existence could not
+// be verified and the notification must keep its severity.
+type SubjectPresenceFunc func(ctx context.Context, n Notification) (exists bool, checked bool)
 
 // DigestItem is one row of the preflight lifecycle digest (doc 6.4).
 type DigestItem struct {
@@ -36,6 +48,9 @@ type DigestItem struct {
 	EventSeq          int64
 	Resolved          bool
 	ResolutionState   ResolutionState
+	// Stale marks a critical row whose subject no longer exists in the control
+	// plane. Stale rows are informational only: no recommended or allowed action.
+	Stale bool
 }
 
 // Digest is the deterministic, budget-limited preflight payload (doc 6.4).
@@ -45,6 +60,7 @@ type Digest struct {
 	ActionRequired        int          `json:"action_required,omitempty"`
 	AutoActionsInProgress int          `json:"auto_actions_in_progress,omitempty"`
 	ResolvedSinceLastTurn int          `json:"resolved_since_last_turn,omitempty"`
+	StaleSubjects         int          `json:"stale_subjects,omitempty"`
 	Truncated             bool         `json:"truncated,omitempty"`
 	Items                 []DigestItem `json:"items,omitempty"`
 	// NextSeq is the cursor for supervision_snapshot(after_seq=...).
@@ -101,19 +117,31 @@ func BuildDigest(ctx context.Context, store Store, req DigestRequest) (*Digest, 
 			Resolved:          n.ResolutionState != "" && n.ResolutionState != ResolutionUnresolved,
 			ResolutionState:   n.ResolutionState,
 		}
+		// Stale subjects are resolved in the control plane but still carry an
+		// unresolved notification row. Downgrade them before counting so a dead
+		// subject never re-inflates critical_unresolved/action_required.
+		if !item.Resolved && req.SubjectPresence != nil {
+			if exists, checked := req.SubjectPresence(ctx, n); checked && !exists {
+				item.Stale = true
+				item.ActionRequired = false
+				item.RecommendedAction = "none"
+				item.AllowedActions = nil
+				digest.StaleSubjects++
+			}
+		}
 		if item.EventSeq > digest.SnapshotSeq {
 			digest.SnapshotSeq = item.EventSeq
 		}
 		if item.EventSeq > digest.NextSeq {
 			digest.NextSeq = item.EventSeq
 		}
-		if n.Unresolved() && (n.Severity == SeverityCritical || n.Severity == SeverityWarning) {
+		if n.Unresolved() && (n.Severity == SeverityCritical || n.Severity == SeverityWarning) && !item.Stale {
 			digest.CriticalUnresolved++
 		}
-		if item.ActionRequired {
+		if item.ActionRequired && !item.Stale {
 			digest.ActionRequired++
 		}
-		if n.AutoActionID != "" && (n.DecisionState == DecisionUnacknowledged || n.DecisionState == DecisionDeferred) && n.ResolutionState == ResolutionUnresolved {
+		if n.AutoActionID != "" && (n.DecisionState == DecisionUnacknowledged || n.DecisionState == DecisionDeferred) && n.ResolutionState == ResolutionUnresolved && !item.Stale {
 			digest.AutoActionsInProgress++
 		}
 		if item.Resolved && req.IncludeResolvedSince {
@@ -160,6 +188,8 @@ func itemPriority(item DigestItem) int {
 	switch {
 	case item.Resolved:
 		return 3
+	case item.Stale:
+		return 2
 	case item.ActionRequired:
 		return 0
 	default:
@@ -177,6 +207,9 @@ func formatDigestText(digest *Digest) string {
 	fmt.Fprintf(&b, "action_required: %d\n", digest.ActionRequired)
 	fmt.Fprintf(&b, "auto_actions_in_progress: %d\n", digest.AutoActionsInProgress)
 	fmt.Fprintf(&b, "resolved_since_last_turn: %d\n", digest.ResolvedSinceLastTurn)
+	if digest.StaleSubjects > 0 {
+		fmt.Fprintf(&b, "stale_subjects: %d (subject absent from control plane; no action required)\n", digest.StaleSubjects)
+	}
 	if digest.Truncated {
 		fmt.Fprintf(&b, "truncated: true (use supervision_snapshot(after_seq=%d) for full details)\n", digest.NextSeq)
 	}
@@ -188,9 +221,19 @@ func formatDigestText(digest *Digest) string {
 			fmt.Fprintf(&b, "- %s %s: %s; resolved (%s)\n", item.SubjectKind, item.SubjectID, item.ResolutionState, item.Reason)
 			continue
 		}
+		if item.Stale {
+			fmt.Fprintf(&b, "- %s %s: stale (subject absent from control plane; no action required)\n", item.SubjectKind, item.SubjectID)
+			continue
+		}
 		status := string(item.SupervisionState)
 		line := fmt.Sprintf("- %s %s: %s; recommended=%s; allowed=[%s]",
 			item.SubjectKind, item.SubjectID, status, item.RecommendedAction, strings.Join(item.AllowedActions, ","))
+		// Action-required items carry their parent-facing detail (for child
+		// approvals that is session/path/tool/request_id/waiting) so a single
+		// preflight line is enough to act without an extra snapshot round.
+		if item.ActionRequired && strings.TrimSpace(item.Reason) != "" {
+			line += "; " + strings.TrimSpace(item.Reason)
+		}
 		if item.AutoActionID != "" {
 			line += "; runtime action in progress (no duplicate required)"
 		}

@@ -405,6 +405,65 @@ func TestSQLiteGlobalAgentRegistryStoreAgentWakeSequenceAndClose(t *testing.T) {
 	require.Equal(t, seq+1, closedSeq)
 }
 
+// TestSQLiteGlobalAgentRegistryStoreReleaseSpawnFreesThreadSlot covers the P0-3
+// compensation path: a reservation that never became runnable must not keep
+// counting against max_threads.
+func TestSQLiteGlobalAgentRegistryStoreReleaseSpawnFreesThreadSlot(t *testing.T) {
+	ctx := context.Background()
+	store := newTestGlobalAgentRegistryStore(t)
+
+	root := AgentRecord{
+		AgentID:       "root",
+		RootSessionID: "root-session",
+		SessionID:     "root-session",
+		AgentPath:     "/root",
+		AgentType:     AgentTypeRoot,
+	}
+	child := AgentRecord{
+		AgentID:         "child-1",
+		RootSessionID:   "root-session",
+		ParentAgentID:   "root",
+		ParentSessionID: "root-session",
+		SessionID:       "child-session-1",
+		AgentPath:       "/root/child-1",
+		Depth:           1,
+		AgentType:       AgentTypeChild,
+		Workflow:        WorkflowSpawnAgent,
+	}
+	reserved, err := store.ReserveAgentControlAgentSpawn(ctx, root, child, 1)
+	require.NoError(t, err)
+	require.Equal(t, AgentStatusActive, reserved.Status)
+
+	blocked := child
+	blocked.AgentID = "child-2"
+	blocked.SessionID = "child-session-2"
+	blocked.AgentPath = "/root/child-2"
+	_, err = store.ReserveAgentControlAgentSpawn(ctx, root, blocked, 1)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "agent spawn thread limit reached")
+
+	released, err := store.ReleaseAgentControlAgentSpawn(ctx, child.AgentID, "queue child prompt: actor refused")
+	require.NoError(t, err)
+	require.Equal(t, AgentStatusStale, released.Status)
+	require.True(t, released.Closed())
+
+	// The slot must be available again once the reservation is released.
+	retry := child
+	retry.AgentID = "child-3"
+	retry.SessionID = "child-session-3"
+	retry.AgentPath = "/root/child-3"
+	_, err = store.ReserveAgentControlAgentSpawn(ctx, root, retry, 1)
+	require.NoError(t, err)
+
+	// Releasing an already terminal row stays a no-op, and unknown ids are
+	// tolerated so the caller never fails while rolling back.
+	again, err := store.ReleaseAgentControlAgentSpawn(ctx, child.AgentID, "second release")
+	require.NoError(t, err)
+	require.Equal(t, AgentStatusStale, again.Status)
+	_, err = store.ReleaseAgentControlAgentSpawn(ctx, "missing-agent", "noop")
+	require.NoError(t, err)
+}
+
 func newTestGlobalAgentRegistryStore(t *testing.T) *SQLiteGlobalAgentRegistryStore {
 	t.Helper()
 	store, err := NewSQLiteGlobalAgentRegistryStore(&GlobalAgentStoreConfig{

@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	cacheanalytics "github.com/wwsheng009/ai-agent-runtime/internal/cacheanalytics"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -438,5 +440,77 @@ func TestHandleChatWebAPICache_UnknownSession(t *testing.T) {
 	}
 	if got := cacheErrorCode(t, body); got != "cache_session_not_found" {
 		t.Fatalf("error code = %q, want cache_session_not_found", got)
+	}
+}
+
+// purgeUsageSessionRows 删除统一用量库中该会话的行（模拟 primary 可用但
+// 没有这个会话的历史：升级前/未挂载用量采集）。
+func purgeUsageSessionRows(t *testing.T, path, sessionID string) {
+	t.Helper()
+	if path == "" {
+		t.Fatal("usage analytics db path is empty")
+	}
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatalf("open usage analytics db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	for _, statement := range []string{
+		"DELETE FROM usage_requests WHERE session_id = ?",
+		"DELETE FROM usage_sessions WHERE session_id = ?",
+	} {
+		if _, err := db.Exec(statement, sessionID); err != nil {
+			t.Fatalf("purge usage rows: %v", err)
+		}
+	}
+}
+
+// TestHandleChatWebAPICache_FallsBackToMirrorWhenUsageEmpty 回归用户可见症状
+// "会话恢复后缓存历史信息没有加载"：统一用量库存在但没有该会话的行时，
+// 端点必须回退到 runtime 镜像（session_runtime.sqlite cache_requests），
+// 而不是把 primary 的空结果当作"没有历史"。此前端点只判断"用量服务是否
+// 存在"，于是 primary 空结果直接透出为 0 条明细。
+func TestHandleChatWebAPICache_FallsBackToMirrorWhenUsageEmpty(t *testing.T) {
+	session, bus, _ := newCacheTestSession(t)
+	sessionID := session.RuntimeSession.ID
+	publishCacheStarted(t, bus, sessionID, "req-hist", nil)
+	publishCacheFinished(t, bus, sessionID, "req-hist", map[string]interface{}{
+		"usage_cache_read_tokens": 100,
+	})
+
+	usageService := ensureLocalUsageService(session.LocalRuntimeHost)
+	if usageService == nil {
+		t.Fatal("expected usage analytics service")
+	}
+	purgeUsageSessionRows(t, usageService.DBPath(), sessionID)
+
+	code, body := cacheGetJSON(t, ChatWebAPICachePath+"/overview")
+	if code != http.StatusOK {
+		t.Fatalf("overview status = %d, want 200; body: %v", code, body)
+	}
+	if body["requests_total"] != float64(1) {
+		t.Fatalf("requests_total = %v, want 1 (mirror fallback)", body["requests_total"])
+	}
+	code, body = cacheGetJSON(t, ChatWebAPICachePath+"/requests")
+	if code != http.StatusOK {
+		t.Fatalf("requests status = %d, want 200; body: %v", code, body)
+	}
+	if body["total"] != float64(1) {
+		t.Fatalf("requests total = %v, want 1 (mirror fallback)", body["total"])
+	}
+	if requests, ok := body["requests"].([]interface{}); !ok || len(requests) != 1 {
+		t.Fatalf("requests = %v, want 1 record from mirror", body["requests"])
+	}
+
+	// 边界（已知且有意）：用量库重新有该会话的部分行时以 primary 为准，
+	// 不跨源合并明细（避免两套计数叠加）。
+	publishCacheStarted(t, bus, sessionID, "req-new", nil)
+	publishCacheFinished(t, bus, sessionID, "req-new", nil)
+	code, body = cacheGetJSON(t, ChatWebAPICachePath+"/overview")
+	if code != http.StatusOK {
+		t.Fatalf("overview after ingest status = %d, want 200", code)
+	}
+	if body["requests_total"] != float64(1) {
+		t.Fatalf("requests_total = %v, want 1 (primary wins once it has rows)", body["requests_total"])
 	}
 }

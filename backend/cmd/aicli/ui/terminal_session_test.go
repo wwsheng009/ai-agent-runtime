@@ -950,7 +950,7 @@ func TestComposeTerminalTransactionPlanRetainsCompleteFrameContract(t *testing.T
 	t.Fatal("exported transaction composer omitted finalized transcript rows")
 }
 
-// 需求：只有 /resume 首次全量重放（显式 ResetScrollback 计划）才允许重建
+// 需求：只有 /resume 首次全量重放（显式 resetScrollback 计划）才允许重建
 // native scrollback。resize 属于正常交互，必须保持投影内容与诊断计数不变。
 func TestTerminalSessionOnlyExplicitReplayResetsScrollbackDiagnostics(t *testing.T) {
 	var output bytes.Buffer
@@ -977,7 +977,7 @@ func TestTerminalSessionOnlyExplicitReplayResetsScrollbackDiagnostics(t *testing
 
 	// 显式授权的重放（/resume 首次全量重放）仍然重建 scrollback 并推进 epoch。
 	result := session.FlushTransaction(TerminalTransactionPlan{
-		Frame: resized, ResetScrollback: true, TerminalEpoch: state.TerminalEpoch,
+		Frame: resized, resetScrollback: true, TerminalEpoch: state.TerminalEpoch,
 	})
 	if result.Frame.Err != nil || !result.ScrollbackReset {
 		t.Fatalf("authorized replay reset = %#v", result)

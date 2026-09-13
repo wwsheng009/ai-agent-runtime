@@ -60,10 +60,14 @@ type RuntimeConfig struct {
 
 // AgentConfig Agent 配置
 type AgentConfig struct {
-	MaxMaxSteps          int           `yaml:"maxSteps" json:"maxSteps"`
-	MaxToolCalls         int           `yaml:"maxToolCalls" json:"maxToolCalls"`
-	MaxExplorationSteps  int           `yaml:"maxExplorationSteps" json:"maxExplorationSteps"`
-	MaxRepeatedToolCalls int           `yaml:"maxRepeatedToolCalls" json:"maxRepeatedToolCalls"`
+	MaxMaxSteps          int `yaml:"maxSteps" json:"maxSteps"`
+	MaxToolCalls         int `yaml:"maxToolCalls" json:"maxToolCalls"`
+	MaxExplorationSteps  int `yaml:"maxExplorationSteps" json:"maxExplorationSteps"`
+	MaxRepeatedToolCalls int `yaml:"maxRepeatedToolCalls" json:"maxRepeatedToolCalls"`
+	// MaxRepeatedPollCalls is the consecutive identical polling/control call
+	// count that triggers the soft polling-backoff advisory (P1-7). 0 uses the
+	// built-in default (3); negative disables the guard.
+	MaxRepeatedPollCalls int           `yaml:"maxRepeatedPollCalls,omitempty" json:"maxRepeatedPollCalls,omitempty"`
 	DefaultProvider      string        `yaml:"defaultProvider,omitempty" json:"defaultProvider,omitempty"`
 	DefaultModel         string        `yaml:"defaultModel" json:"defaultModel"`
 	EnableMemory         bool          `yaml:"enableMemory" json:"enableMemory"`
@@ -78,10 +82,34 @@ type AgentConfig struct {
 
 // AgentsConfig controls lightweight multi-agent collaboration limits.
 type AgentsConfig struct {
-	MaxThreads           int    `yaml:"maxThreads" json:"maxThreads"`
-	MaxDepth             int    `yaml:"maxDepth" json:"maxDepth"`
-	DefaultWaitTimeoutMs int    `yaml:"defaultWaitTimeoutMs,omitempty" json:"defaultWaitTimeoutMs,omitempty"`
-	DefaultForkTurns     string `yaml:"defaultForkTurns,omitempty" json:"defaultForkTurns,omitempty"`
+	MaxThreads           int `yaml:"maxThreads" json:"maxThreads"`
+	MaxDepth             int `yaml:"maxDepth" json:"maxDepth"`
+	DefaultWaitTimeoutMs int `yaml:"defaultWaitTimeoutMs,omitempty" json:"defaultWaitTimeoutMs,omitempty"`
+	// MinWaitTimeoutMs / MaxWaitTimeoutMs bound every wait_agent and
+	// read_agent_events observation window. Timeouts outside the bounds are
+	// clamped or rejected depending on WaitTimeoutMode.
+	MinWaitTimeoutMs int `yaml:"minWaitTimeoutMs,omitempty" json:"minWaitTimeoutMs,omitempty"`
+	MaxWaitTimeoutMs int `yaml:"maxWaitTimeoutMs,omitempty" json:"maxWaitTimeoutMs,omitempty"`
+	// WaitTimeoutMode selects the out-of-range behavior: "clamp" (default)
+	// pins the request to the nearest bound, "error" rejects it with an
+	// actionable message.
+	WaitTimeoutMode  string `yaml:"waitTimeoutMode,omitempty" json:"waitTimeoutMode,omitempty"`
+	DefaultForkTurns string `yaml:"defaultForkTurns,omitempty" json:"defaultForkTurns,omitempty"`
+	// RegistryReconcileInterval is the P2-9 low-frequency consistency sweep
+	// cadence for the durable agent registry. 0 uses the shared default (10m);
+	// values below 1m are floored by the reconciler so a typo cannot turn the
+	// audit into a hot loop.
+	RegistryReconcileInterval time.Duration `yaml:"registryReconcileInterval,omitempty" json:"registryReconcileInterval,omitempty"`
+	// RegistryReconcileMode selects what the sweep is allowed to do:
+	// "observe" (default) only reports drift, "enforce" closes rows whose
+	// session is already missing/terminal and marks stale rows stale.
+	RegistryReconcileMode string `yaml:"registryReconcileMode,omitempty" json:"registryReconcileMode,omitempty"`
+	// ReclaimIdleMs enables idle-child eviction (plan P2-8 方案 3) when > 0:
+	// a spawn that already hit maxThreads may close a child whose execution
+	// container has been idle for at least this long and then retries once.
+	// 0 (default) keeps eviction conservative: only children whose container is
+	// provably missing or terminal are reclaimed.
+	ReclaimIdleMs int `yaml:"reclaimIdleMs,omitempty" json:"reclaimIdleMs,omitempty"`
 }
 
 // RouterConfig 路由器配置
@@ -327,7 +355,14 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 			MaxThreads:           6,
 			MaxDepth:             1,
 			DefaultWaitTimeoutMs: int((30 * time.Second).Milliseconds()),
+			MinWaitTimeoutMs:     int((10 * time.Second).Milliseconds()),
+			MaxWaitTimeoutMs:     int(time.Hour.Milliseconds()),
+			WaitTimeoutMode:      "clamp",
 			DefaultForkTurns:     "none",
+			// P2-9: report-only by default; enforce is opt-in once the audit
+			// has proven clean on a real deployment.
+			RegistryReconcileInterval: 10 * time.Minute,
+			RegistryReconcileMode:     "observe",
 		},
 		Router: RouterConfig{
 			MinScore:        0.0,
@@ -1062,14 +1097,32 @@ func ValidateAgentsConfig(config *AgentsConfig) error {
 	if config == nil {
 		return nil
 	}
-	if config.MaxThreads < 0 {
-		return errors.New(errors.ErrValidationFailed, "agents.maxThreads cannot be negative")
+	// P2-8 语义收敛：0 = 未设置（回退默认 6），-1 = 显式不限，正数 = 配额。
+	if config.MaxThreads < 0 && config.MaxThreads != -1 {
+		return errors.New(errors.ErrValidationFailed, "agents.maxThreads must be -1 (unlimited), 0 (default), or a positive integer")
+	}
+	if config.ReclaimIdleMs < 0 {
+		return errors.New(errors.ErrValidationFailed, "agents.reclaimIdleMs cannot be negative")
 	}
 	if config.MaxDepth < 0 {
 		return errors.New(errors.ErrValidationFailed, "agents.maxDepth cannot be negative")
 	}
 	if config.DefaultWaitTimeoutMs < 0 {
 		return errors.New(errors.ErrValidationFailed, "agents.defaultWaitTimeoutMs cannot be negative")
+	}
+	if config.MinWaitTimeoutMs < 0 {
+		return errors.New(errors.ErrValidationFailed, "agents.minWaitTimeoutMs cannot be negative")
+	}
+	if config.MaxWaitTimeoutMs < 0 {
+		return errors.New(errors.ErrValidationFailed, "agents.maxWaitTimeoutMs cannot be negative")
+	}
+	if config.MinWaitTimeoutMs > 0 && config.MaxWaitTimeoutMs > 0 && config.MinWaitTimeoutMs > config.MaxWaitTimeoutMs {
+		return errors.New(errors.ErrValidationFailed, "agents.minWaitTimeoutMs cannot exceed agents.maxWaitTimeoutMs")
+	}
+	switch strings.ToLower(strings.TrimSpace(config.WaitTimeoutMode)) {
+	case "", "clamp", "error":
+	default:
+		return errors.New(errors.ErrValidationFailed, "agents.waitTimeoutMode must be clamp or error")
 	}
 	forkTurns := strings.ToLower(strings.TrimSpace(config.DefaultForkTurns))
 	if forkTurns == "" || forkTurns == "none" || forkTurns == "all" {

@@ -61,6 +61,13 @@ const (
 	// ErrAgentBusy marks send_input attempts that require the caller to wait for
 	// the active run or explicitly request interruption before resubmitting.
 	ErrAgentBusy ErrorCode = "AGENT_BUSY"
+	// ErrAgentThreadLimit marks spawn_agent attempts rejected by
+	// agents.maxThreads. The quota is a live count of active children, so the
+	// caller must free capacity (close/reuse) instead of replaying the spawn.
+	ErrAgentThreadLimit ErrorCode = "AGENT_THREAD_LIMIT"
+	// ErrAgentRegistryUnavailable marks durable agent-registry failures (store
+	// not initialized/closed). Not model-retryable: the host must fix wiring.
+	ErrAgentRegistryUnavailable ErrorCode = "AGENT_REGISTRY_UNAVAILABLE"
 	// ErrAgentSessionNotFound marks an opaque session_ref_* that is not present
 	// in the current parent session's durable handle registry.
 	ErrAgentSessionNotFound ErrorCode = "AGENT_SESSION_NOT_FOUND"

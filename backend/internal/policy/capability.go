@@ -54,8 +54,12 @@ func (r DefaultCapabilityResolver) Resolve(req EvalRequest) []Capability {
 		return []Capability{CapReadOnly}
 	case "spawn_agent", "send_message", "followup_task", "send_input", "close_agent", "resume_agent", "resolve_agent_approval", "spawn_team", "send_team_message":
 		return []Capability{CapReadOnly, CapAgentManagement}
-	case "list_agents", "wait_agent", "read_agent_events", "wait_team", "read_mailbox_digest", "read_task_spec", "read_task_context", "report_task_outcome", "block_current_task":
+	case "list_agents", "wait_agent", "read_agent_events", "wait_team", "read_mailbox_digest", "read_task_spec", "read_task_context", "report_task_outcome", "block_current_task", "supervision_snapshot":
 		return []Capability{CapReadOnly}
+	case "ack_lifecycle", "control_descendant":
+		// Writes to the durable supervision control plane: audit + CAS still
+		// apply, and they are never satisfied by a read-only session.
+		return []Capability{CapReadOnly, CapAgentManagement}
 	}
 
 	caps := make([]Capability, 0, 3)
@@ -142,6 +146,12 @@ func normalizeToolName(name string) string {
 		return "report_task_outcome"
 	case "blockcurrenttask":
 		return "block_current_task"
+	case "supervisionsnapshot":
+		return "supervision_snapshot"
+	case "acklifecycle":
+		return "ack_lifecycle"
+	case "controldescendant":
+		return "control_descendant"
 	default:
 		return name
 	}

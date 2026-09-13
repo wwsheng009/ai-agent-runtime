@@ -1587,6 +1587,9 @@ func composeDurableChatSystemPromptWithGuidanceForCWD(session *ChatSession, cwd 
 	if guidance := strings.TrimSpace(runtimeprompt.RenderTaskDifficultyGuidance()); guidance != "" {
 		lines = append(lines, guidance)
 	}
+	if guidance := strings.TrimSpace(runtimeprompt.RenderMultiAgentCollaborationGuidance()); guidance != "" {
+		lines = append(lines, guidance)
+	}
 	return strings.Join(lines, "\n\n")
 }
 

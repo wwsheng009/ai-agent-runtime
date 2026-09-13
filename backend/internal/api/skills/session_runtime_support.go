@@ -29,6 +29,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -581,15 +582,32 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 	}
 	c.subscribeAgentCompletion(parentSessionID, childSession)
 
+	// The durable reservation exists from this point on. Any failure that
+	// leaves the child unusable must compensate it, otherwise the row stays
+	// active and keeps counting against agents.maxThreads until a manual
+	// consistency audit (N1).
+	rollbackSpawnFailure := func(cause error) error {
+		c.cleanupAPISpawnIsolation(ctx, childSession)
+		if releaseErr := c.releaseAgentSpawnReservation(ctx, childSession, cause.Error()); releaseErr != nil {
+			cause = fmt.Errorf("%w (spawn reservation release failed: %v)", cause, releaseErr)
+		}
+		if hub := c.handler.getSessionHub(); hub != nil {
+			hub.Stop(sessionID)
+		}
+		if deleteErr := storage.Delete(ctx, childSession.ID); deleteErr != nil && !stderrors.Is(deleteErr, chat.ErrSessionNotFound) {
+			cause = fmt.Errorf("%w (spawn session cleanup failed: %v)", cause, deleteErr)
+		}
+		return cause
+	}
+
 	actor, err := c.handler.getSessionHub().GetOrCreate(sessionID)
 	if err != nil {
-		c.cleanupAPISpawnIsolation(ctx, childSession)
-		return nil, err
+		return nil, rollbackSpawnFailure(fmt.Errorf("create child session actor: %w", err))
 	}
 	queued := false
 	if message := strings.TrimSpace(args.Message); message != "" {
 		if err := actor.SubmitPromptAsync(ctx, message, toolbroker.SpawnAgentRunMetaFromContext(childSession)); err != nil {
-			return nil, err
+			return nil, rollbackSpawnFailure(fmt.Errorf("queue child prompt: %w", err))
 		}
 		queued = true
 	}
@@ -915,14 +933,44 @@ func (c *sessionAgentController) subscribeAgentCompletion(parentSessionID string
 	}
 
 	var unsubscribe func()
+	// P1-5 方案 2: mirror throttled child tool progress onto the parent stream as
+	// the live-only subagent.progress event. The mirror is per child (dropped
+	// together with the subscription) and never writes to the event store, so
+	// the parent transcript/replay cannot be polluted by child progress.
+	progressTarget := supervision.SubagentProgressTarget{
+		ParentSessionID: parentSessionID,
+		ChildSessionID:  childSessionID,
+		Path:            childPath,
+		Depth:           childDepth,
+		AgentType:       childType,
+	}
+	progressMirror := supervision.NewSubagentProgressMirror(supervision.DefaultSubagentProgressWindow)
 	handler := func(event runtimeevents.Event) {
 		if !strings.EqualFold(strings.TrimSpace(event.SessionID), childSessionID) {
 			return
 		}
 		eventType := strings.TrimSpace(event.Type)
+		// P0-2: a child blocked on an approval/question must reach the parent
+		// even when the parent already ended its turn. Both edges are projected
+		// into the durable inbox and the request edge doubles as a controlled
+		// wake request.
+		switch eventType {
+		case chat.EventApprovalRequested, chat.EventQuestionAsked:
+			c.projectAgentApproval(context.Background(), parentSessionID, childSessionID, childPath, eventType, event.Payload)
+			return
+		case chat.EventApprovalResolved, chat.EventQuestionAnswered:
+			c.resolveAgentApproval(context.Background(), parentSessionID, childSessionID, childPath, eventType, event.Payload)
+			return
+		case toolprotocol.EventTypeProgress:
+			if mirrored, ok := progressMirror.Observe(progressTarget, event, time.Now().UTC()); ok {
+				bus.Publish(mirrored)
+			}
+			return
+		}
 		if eventType != chat.EventSessionEnd && eventType != chat.EventSessionInterrupted {
 			return
 		}
+		progressMirror.Forget(childSessionID)
 		if unsubscribe != nil {
 			unsubscribe()
 		}
@@ -1054,6 +1102,77 @@ func (c *sessionAgentController) projectAgentCompletion(ctx context.Context, par
 	_ = c.wakeSupervisedParent(ctx, rootScopeID, parentSessionID)
 }
 
+// projectAgentApproval bridges a child approval/question edge into the durable
+// P0-2 parent inbox. Best-effort: a supervision outage must never block the
+// child's own runtime path, and the parent's wait path is unchanged.
+func (c *sessionAgentController) projectAgentApproval(ctx context.Context, parentSessionID, childSessionID, childPath, eventType string, payload map[string]interface{}) {
+	if c == nil || c.handler == nil {
+		return
+	}
+	store := c.handler.getSupervisionStore()
+	if store == nil {
+		return
+	}
+	rootScopeID := strings.TrimSpace(parentSessionID)
+	if session, err := c.handler.sessionManager.Get(ctx, childSessionID); err == nil && session != nil {
+		rootScopeID = apiAgentRootSessionID(session, parentSessionID)
+	}
+	if rootScopeID == "" {
+		return
+	}
+	notice, ok := supervision.ApprovalNoticeFromEvent(
+		rootScopeID,
+		parentSessionID,
+		"",
+		childSessionID,
+		childPath,
+		eventType,
+		payload,
+		time.Now().UTC(),
+	)
+	if !ok {
+		return
+	}
+	_, _ = supervision.ProjectApprovalRequest(ctx, store, c.handler.getSupervisionWakeScheduler(), notice)
+	// The parent may already be idle: start one bounded turn now. Busy parents
+	// keep the durable wake for the next runnable transition, and every parent
+	// turn additionally sees the pending approval in its preflight digest.
+	_ = c.wakeSupervisedParent(ctx, rootScopeID, parentSessionID)
+}
+
+// resolveAgentApproval closes the inbox entry once the child received its
+// decision, so the parent's preflight stops showing a stale pending item.
+func (c *sessionAgentController) resolveAgentApproval(ctx context.Context, parentSessionID, childSessionID, childPath, eventType string, payload map[string]interface{}) {
+	if c == nil || c.handler == nil {
+		return
+	}
+	store := c.handler.getSupervisionStore()
+	if store == nil {
+		return
+	}
+	rootScopeID := strings.TrimSpace(parentSessionID)
+	if session, err := c.handler.sessionManager.Get(ctx, childSessionID); err == nil && session != nil {
+		rootScopeID = apiAgentRootSessionID(session, parentSessionID)
+	}
+	if rootScopeID == "" {
+		return
+	}
+	notice, ok := supervision.ApprovalNoticeFromEvent(
+		rootScopeID,
+		parentSessionID,
+		"",
+		childSessionID,
+		childPath,
+		supervision.ApprovalRequestEventType(eventType),
+		payload,
+		time.Now().UTC(),
+	)
+	if !ok {
+		return
+	}
+	_, _ = supervision.ResolveApprovalRequest(ctx, store, notice, supervision.ApprovalResolutionFromPayload(payload))
+}
+
 // wakeSupervisedParent drains pending critical-lifecycle wakes for the
 // parent session and starts one parent turn when the parent is runnable.
 // Busy parents keep the wake durable for the next runnable transition; the
@@ -1161,6 +1280,15 @@ func (c *sessionAgentController) reserveOrRegisterAgentSpawn(ctx context.Context
 	}
 	rootRecord := apiRootAgentRecord(parentSession, parentSessionID)
 	childRecord := apiChildAgentRecord(parentSession, parentSessionID, childSession, args, childDepth)
+	// API/CLI parity: a session id can be re-bound inside the same root after a
+	// restart. Close stale rows for the same session id first, otherwise the
+	// reserve transaction would count two active rows for one container.
+	if err := agentcontrol.CloseStaleAgentSessionBindings(ctx, store, rootRecord); err != nil {
+		return err
+	}
+	if err := agentcontrol.CloseStaleAgentSessionBindings(ctx, store, childRecord); err != nil {
+		return err
+	}
 	if reserver, ok := store.(agentcontrol.AgentSpawnReservationStore); ok && reserver != nil {
 		_, err := reserver.ReserveAgentControlAgentSpawn(ctx, rootRecord, childRecord, c.agentsConfig().MaxThreads)
 		return err
@@ -1172,6 +1300,47 @@ func (c *sessionAgentController) reserveOrRegisterAgentSpawn(ctx context.Context
 		return err
 	}
 	return nil
+}
+
+// releaseAgentSpawnReservation compensates a durable spawn reservation whose
+// child never became runnable. Stores implementing
+// agentcontrol.AgentSpawnReservationReleaser move the row to stale in one
+// step; older stores degrade to the stale-marker/close path.
+func (c *sessionAgentController) releaseAgentSpawnReservation(ctx context.Context, childSession *chat.Session, reason string) error {
+	if c == nil || c.handler == nil || childSession == nil {
+		return nil
+	}
+	store := c.handler.getAgentControlAgentStore()
+	if store == nil {
+		return nil
+	}
+	agentID := strings.TrimSpace(childSession.ID)
+	if agentID == "" {
+		return nil
+	}
+	if releaser, ok := store.(agentcontrol.AgentSpawnReservationReleaser); ok && releaser != nil {
+		_, err := releaser.ReleaseAgentControlAgentSpawn(ctx, agentID, reason)
+		return err
+	}
+	records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+		AgentID:       agentID,
+		IncludeClosed: true,
+		Limit:         1,
+	})
+	if err != nil || len(records) == 0 {
+		return err
+	}
+	record := records[0].Normalize()
+	if record.Closed() || record.RootSessionID == "" || record.AgentPath == "" {
+		return nil
+	}
+	staleAt := time.Now().UTC()
+	if marker, ok := store.(agentcontrol.AgentStaleMarker); ok && marker != nil {
+		_, err := marker.MarkAgentControlAgentSubtreeStale(ctx, record.RootSessionID, record.AgentPath, staleAt)
+		return err
+	}
+	_, err = store.CloseAgentControlAgentSubtree(ctx, record.RootSessionID, record.AgentPath, staleAt)
+	return err
 }
 
 func apiRootAgentRecord(parentSession *chat.Session, parentSessionID string) agentcontrol.AgentRecord {
@@ -1646,14 +1815,11 @@ func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitA
 		}
 		sessionIDs[index] = resolvedSessionID
 	}
-	timeout := time.Duration(args.TimeoutMs) * time.Millisecond
-	if timeout <= 0 {
-		defaultWaitMs := c.agentsConfig().DefaultWaitTimeoutMs
-		if defaultWaitMs <= 0 {
-			defaultWaitMs = int((30 * time.Second).Milliseconds())
-		}
-		timeout = time.Duration(defaultWaitMs) * time.Millisecond
+	resolution, err := agentcontrol.ResolveWaitTimeout(args.TimeoutMs, c.waitTimeoutPolicy())
+	if err != nil {
+		return nil, err
 	}
+	timeout := time.Duration(resolution.EffectiveMs) * time.Millisecond
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	wakeCh, unsubscribe := c.subscribeWaitEvents(waitCtx, sessionIDs)
@@ -1685,12 +1851,14 @@ func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitA
 			}
 		}
 		waitResult := &toolbroker.AgentWaitResult{
-			Agents:        snapshots,
-			ReadyCount:    readyCount,
-			PendingCount:  len(snapshots) - readyCount,
-			ReadyIDs:      readyIDs,
-			PendingIDs:    pendingIDs,
-			WaitTimeoutMs: int(timeout.Milliseconds()),
+			Agents:                 snapshots,
+			ReadyCount:             readyCount,
+			PendingCount:           len(snapshots) - readyCount,
+			ReadyIDs:               readyIDs,
+			PendingIDs:             pendingIDs,
+			WaitTimeoutMs:          int(timeout.Milliseconds()),
+			WaitTimeoutRequestedMs: resolution.RequestedMs,
+			WaitTimeoutClamped:     resolution.Clamped,
 		}
 		if matched != nil {
 			waitResult.Agent = matched
@@ -1708,7 +1876,22 @@ func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitA
 	}
 }
 
+// waitForMailboxEvent bounds the mailbox observation window, then delegates to
+// the resolved implementation so the effective window is echoed back.
 func (c *sessionAgentController) waitForMailboxEvent(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
+	resolution, err := agentcontrol.ResolveWaitTimeout(args.TimeoutMs, c.waitTimeoutPolicy())
+	if err != nil {
+		return nil, err
+	}
+	args.TimeoutMs = resolution.EffectiveMs
+	result, err := c.waitForMailboxEventResolved(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	return toolbroker.ApplyAgentWaitTimeout(result, resolution.RequestedMs, resolution.EffectiveMs, resolution.Clamped), nil
+}
+
+func (c *sessionAgentController) waitForMailboxEventResolved(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
 	if c == nil || c.handler == nil {
 		return nil, fmt.Errorf("handler not configured")
 	}
@@ -1843,7 +2026,20 @@ func (c *sessionAgentController) subscribeWaitEvents(ctx context.Context, sessio
 	}
 }
 
+// ReadEvents bounds wait_ms before delegating to the resolved implementation.
+// wait_ms=0 keeps the non-blocking read semantics (it is not a default request).
 func (c *sessionAgentController) ReadEvents(ctx context.Context, args toolbroker.ReadAgentEventsArgs) (*toolbroker.AgentEventsResult, error) {
+	if args.WaitMs > 0 {
+		resolution, err := agentcontrol.ResolveWaitTimeout(args.WaitMs, c.waitTimeoutPolicy())
+		if err != nil {
+			return nil, err
+		}
+		args.WaitMs = resolution.EffectiveMs
+	}
+	return c.readEventsResolved(ctx, args)
+}
+
+func (c *sessionAgentController) readEventsResolved(ctx context.Context, args toolbroker.ReadAgentEventsArgs) (*toolbroker.AgentEventsResult, error) {
 	sessionID := firstNonEmptyString(strings.TrimSpace(args.ID), strings.TrimSpace(args.SessionID))
 	if sessionID == "" {
 		return nil, fmt.Errorf("id is required")
@@ -1881,11 +2077,18 @@ func (c *sessionAgentController) ReadEvents(ctx context.Context, args toolbroker
 	defer unsubscribe()
 	for {
 		if args.MailboxOnly {
-			if events, ok, hasMailboxRows, err := listAPIMailboxEvents(readCtx, store, sessionID, args.AfterSeq, limit); err != nil {
+			if events, ok, hasMailboxRows, err := listAPIMailboxEvents(readCtx, store, sessionID, args.AfterSeq, limit+1); err != nil {
 				return nil, err
 			} else if ok {
+				// The extra row only signals that more events are queued; mailbox
+				// unread counts stay unset because presentation seq and
+				// session-mailbox seq are distinct sequences.
+				hasMore := len(events) > limit
+				if hasMore {
+					events = events[:limit]
+				}
 				if len(events) > 0 || (hasMailboxRows && waitMs == 0) {
-					return buildAgentEventsResult(sessionID, events), nil
+					return toolbroker.ApplyAgentEventsPagination(buildAgentEventsResult(sessionID, events), hasMore, 0), nil
 				}
 				if hasMailboxRows {
 					select {
@@ -1901,15 +2104,23 @@ func (c *sessionAgentController) ReadEvents(ctx context.Context, args toolbroker
 				}
 			}
 		}
-		events, err := store.ListEvents(readCtx, sessionID, args.AfterSeq, limit)
+		events, err := store.ListEvents(readCtx, sessionID, args.AfterSeq, limit+1)
 		if err != nil {
 			return nil, err
 		}
 		if args.MailboxOnly {
 			events = filterAPIMailboxWaitEvents(events)
 		}
+		hasMore := len(events) > limit
+		if hasMore {
+			events = events[:limit]
+		}
 		if len(events) > 0 || waitMs == 0 {
-			return buildAgentEventsResult(sessionID, events), nil
+			result := buildAgentEventsResult(sessionID, events)
+			if hasMore {
+				return toolbroker.ApplyAgentEventsPagination(result, true, apiAgentEventsUnreadCount(ctx, store, sessionID, result.LatestSeq)), nil
+			}
+			return result, nil
 		}
 		select {
 		case <-readCtx.Done():
@@ -2560,6 +2771,31 @@ func normalizeAgentWaitIDs(args toolbroker.WaitAgentArgs) []string {
 	return ordered
 }
 
+// publishAgentReclaimEvent mirrors one quota eviction pass onto the runtime
+// event bus (plan §P2-8 方案 4). The event is scoped to the parent session so it
+// travels the stream the parent already observes; durable persistence into the
+// parent session event stream is done by the handler event bridge
+// (shouldPersistRuntimeSessionEvent), which keeps this call synchronous and
+// side-effect free for callers that own no session event store.
+func (c *sessionAgentController) publishAgentReclaimEvent(parentSessionID, rootSessionID, source string, outcome agentcontrol.ReclaimOutcome) {
+	if c == nil || c.handler == nil || outcome.Reclaimed() == 0 {
+		return
+	}
+	bus := c.handler.getRuntimeEventBus()
+	if bus == nil {
+		return
+	}
+	payload := agentcontrol.ReclaimEventPayload(source, outcome)
+	if root := strings.TrimSpace(rootSessionID); root != "" {
+		payload["root_session_id"] = root
+	}
+	bus.Publish(runtimeevents.Event{
+		Type:      agentcontrol.EventAgentReclaimed,
+		SessionID: strings.TrimSpace(parentSessionID),
+		Payload:   payload,
+	})
+}
+
 func (c *sessionAgentController) enforceSpawnLimits(ctx context.Context, parentSession *chat.Session, parentSessionID string, childDepth int) error {
 	limits := c.agentsConfig()
 	if limits.MaxDepth > 0 && childDepth > limits.MaxDepth {
@@ -2569,38 +2805,121 @@ func (c *sessionAgentController) enforceSpawnLimits(ctx context.Context, parentS
 			limits.MaxDepth, childDepth,
 		)
 	}
-	if limits.MaxThreads <= 0 {
+	// P2-8 语义收敛：agents.maxThreads=0 表示“未设置”（回退内置默认 6），
+	// 仅 -1 是显式不限；超限文案统一附带 next_action 与 active 子会话摘要。
+	maxThreads, unlimited := agentcontrol.ResolveMaxThreads(limits.MaxThreads, runtimecfg.DefaultRuntimeConfig().Agents.MaxThreads)
+	if unlimited {
 		return nil
 	}
+	rootSessionID := apiAgentRootSessionID(parentSession, parentSessionID)
 	if store := c.handler.getAgentControlAgentStore(); store != nil {
-		rootSessionID := apiAgentRootSessionID(parentSession, parentSessionID)
 		records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
 			RootSessionID: rootSessionID,
 		})
 		if err != nil {
 			return err
 		}
-		count := 0
-		for _, record := range records {
-			if record.AgentPath == "/root" || strings.EqualFold(record.AgentType, agentcontrol.AgentTypeRoot) {
-				continue
+		children := agentcontrol.QuotaChildren(records)
+		if len(children) < maxThreads {
+			return nil
+		}
+		now := time.Now().UTC()
+		observations := c.observeQuotaChildren(ctx, children)
+		extras := make([]string, 0, 2)
+		if reclaimStore, ok := store.(agentcontrol.AgentReclaimStore); ok && reclaimStore != nil {
+			policy := agentcontrol.ReclaimPolicy{
+				IdleTimeout: time.Duration(limits.ReclaimIdleMs) * time.Millisecond,
+				Now:         now,
 			}
-			count++
+			outcome, reclaimErr := agentcontrol.ReclaimAgentQuota(ctx, reclaimStore, rootSessionID, observations, policy)
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if summary := outcome.Summary(); summary != "" {
+				extras = append(extras, summary)
+			}
+			if reclaimErr != nil {
+				extras = append(extras, "reclaim_error="+reclaimErr.Error())
+			}
+			if outcome.Reclaimed() > 0 {
+				// P2-8 方案 4：回收动作进入产品事件流（父会话 runtime events），
+				// 前端下钻与 /debug 据此解释“子会话为何消失、是谁回收的”。
+				c.publishAgentReclaimEvent(parentSessionID, rootSessionID, agentcontrol.ReclaimSourceSpawnGate, outcome)
+				records, err = store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+					RootSessionID: rootSessionID,
+				})
+				if err != nil {
+					return err
+				}
+				if children = agentcontrol.QuotaChildren(records); len(children) < maxThreads {
+					return nil
+				}
+			}
+		} else {
+			extras = append(extras, "reclaim=unavailable")
 		}
-		if count >= limits.MaxThreads {
-			return fmt.Errorf("agent spawn thread limit reached: max_threads=%d active_children=%d", limits.MaxThreads, count)
-		}
-		return nil
+		return runtimeerrors.New(runtimeerrors.ErrAgentThreadLimit, agentcontrol.ThreadLimitMessage(
+			maxThreads, len(children), agentcontrol.ThreadOccupants(observations, now), extras...,
+		))
 	}
-	rootSessionID := apiAgentRootSessionID(parentSession, parentSessionID)
 	count, err := c.countAgentTree(ctx, rootSessionID)
 	if err != nil {
 		return err
 	}
-	if count >= limits.MaxThreads {
-		return fmt.Errorf("agent spawn thread limit reached: max_threads=%d active_children=%d", limits.MaxThreads, count)
+	if count >= maxThreads {
+		return runtimeerrors.New(runtimeerrors.ErrAgentThreadLimit, agentcontrol.ThreadLimitMessage(maxThreads, count, nil))
 	}
 	return nil
+}
+
+// observeQuotaChildren projects the durable child rows plus the host-observed
+// session/actor liveness into the P2-8 eviction input. Only children whose
+// container is provably gone/terminal (default) or idle beyond the opt-in
+// timeout become reclaimable — running, waiting-approval and waiting-input
+// children are explicitly protected.
+func (c *sessionAgentController) observeQuotaChildren(ctx context.Context, records []agentcontrol.AgentRecord) []agentcontrol.ReclaimObservation {
+	observations := make([]agentcontrol.ReclaimObservation, 0, len(records))
+	var hub *chat.SessionHub
+	if c != nil && c.handler != nil {
+		hub = c.handler.getSessionHub()
+	}
+	for _, record := range records {
+		observation := agentcontrol.ReclaimObservation{
+			AgentID:           record.AgentID,
+			AgentPath:         record.AgentPath,
+			SessionID:         record.SessionID,
+			Status:            record.Status,
+			RegistryUpdatedAt: record.UpdatedAt,
+		}
+		sessionID := strings.TrimSpace(record.SessionID)
+		if sessionID != "" && c != nil && c.handler != nil && c.handler.sessionManager != nil {
+			session, err := c.handler.sessionManager.Get(ctx, sessionID)
+			switch {
+			case err != nil:
+				if stderrors.Is(err, chat.ErrSessionNotFound) || strings.Contains(strings.ToLower(err.Error()), "not found") {
+					observation.SessionMissing = true
+				}
+			case session == nil:
+				observation.SessionMissing = true
+			default:
+				if session.State == chat.StateClosed || session.State == chat.StateArchived {
+					observation.SessionTerminal = true
+				}
+				observation.SessionIdleSince = session.UpdatedAt
+			}
+		}
+		if hub != nil && sessionID != "" {
+			if actor, ok := hub.Get(sessionID); ok && actor != nil {
+				if state, exists := actor.StateSummary(); exists {
+					if state.Busy() || state.PendingTool || state.ActiveJobCount > 0 {
+						observation.SessionBusy = true
+					}
+				}
+			}
+		}
+		observations = append(observations, observation)
+	}
+	return observations
 }
 
 func (c *sessionAgentController) agentsConfig() runtimecfg.AgentsConfig {
@@ -2609,10 +2928,25 @@ func (c *sessionAgentController) agentsConfig() runtimecfg.AgentsConfig {
 		return defaults
 	}
 	cfg := c.handler.runtimeConfig.Agents
-	if cfg.MaxThreads == 0 && cfg.MaxDepth == 0 && cfg.DefaultWaitTimeoutMs == 0 && strings.TrimSpace(cfg.DefaultForkTurns) == "" {
+	if cfg.MaxThreads == 0 && cfg.MaxDepth == 0 && cfg.DefaultWaitTimeoutMs == 0 &&
+		cfg.MinWaitTimeoutMs == 0 && cfg.MaxWaitTimeoutMs == 0 && strings.TrimSpace(cfg.WaitTimeoutMode) == "" &&
+		strings.TrimSpace(cfg.DefaultForkTurns) == "" && cfg.RegistryReconcileInterval == 0 &&
+		strings.TrimSpace(cfg.RegistryReconcileMode) == "" && cfg.ReclaimIdleMs == 0 {
 		return defaults
 	}
 	return cfg
+}
+
+// waitTimeoutPolicy maps the agents config onto the shared wait-window bounds
+// resolver used by wait_agent and read_agent_events.
+func (c *sessionAgentController) waitTimeoutPolicy() agentcontrol.WaitTimeoutPolicy {
+	cfg := c.agentsConfig()
+	return agentcontrol.WaitTimeoutPolicy{
+		DefaultMs: cfg.DefaultWaitTimeoutMs,
+		MinMs:     cfg.MinWaitTimeoutMs,
+		MaxMs:     cfg.MaxWaitTimeoutMs,
+		Mode:      cfg.WaitTimeoutMode,
+	}
 }
 
 func (c *sessionAgentController) countAgentTree(ctx context.Context, rootSessionID string) (int, error) {
@@ -3010,6 +3344,20 @@ func truncateAgentStatusPreview(content string) string {
 	return content[:157] + "..."
 }
 
+// apiAgentEventsUnreadCount probes how many events remain beyond a returned
+// read window. Probe failures degrade to 0: has_more still tells the parent to
+// advance after_seq, so a missing count never hides the pagination signal.
+func apiAgentEventsUnreadCount(ctx context.Context, store chat.EventStore, sessionID string, afterSeq int64) int {
+	if store == nil || afterSeq <= 0 {
+		return 0
+	}
+	remaining, err := store.ListEvents(ctx, sessionID, afterSeq, toolbroker.AgentEventsUnreadProbeLimit+1)
+	if err != nil {
+		return 0
+	}
+	return toolbroker.CapAgentEventsUnread(len(remaining))
+}
+
 func buildAgentEventsResult(sessionID string, events []runtimeevents.Event) *toolbroker.AgentEventsResult {
 	result := &toolbroker.AgentEventsResult{
 		SessionID: strings.TrimSpace(sessionID),
@@ -3217,6 +3565,7 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		agentConfig.MaxRunDuration = selectedConfig.Agent.Timeout
 		agentConfig.MaxExplorationSteps = selectedConfig.Agent.MaxExplorationSteps
 		agentConfig.MaxRepeatedToolCalls = selectedConfig.Agent.MaxRepeatedToolCalls
+		agentConfig.MaxRepeatedPollCalls = selectedConfig.Agent.MaxRepeatedPollCalls
 		agentConfig.Options = contextOptionsFromRuntimeConfig(selectedConfig)
 	}
 	if streamRequested || strings.TrimSpace(requestedReasoningEffort) != "" {
@@ -3468,6 +3817,7 @@ func buildSessionLoopConfig(selectedConfig *runtimecfg.RuntimeConfig, requestedR
 		config.MaxRunDuration = selectedConfig.Agent.Timeout
 		config.MaxExplorationSteps = selectedConfig.Agent.MaxExplorationSteps
 		config.MaxRepeatedToolCalls = selectedConfig.Agent.MaxRepeatedToolCalls
+		config.MaxRepeatedPollCalls = selectedConfig.Agent.MaxRepeatedPollCalls
 		config.EnableParallelTools = selectedConfig.Agent.EnableParallelTools
 		if selectedConfig.Agent.MaxParallelToolCalls > 0 {
 			config.MaxParallelToolCalls = selectedConfig.Agent.MaxParallelToolCalls

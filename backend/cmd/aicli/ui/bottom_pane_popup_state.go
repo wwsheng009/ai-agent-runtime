@@ -9,6 +9,30 @@ func popupLayerPresent(layer PopupLayer) bool {
 	return layer.Owner != "" || len(layer.Lines) > 0 || strings.TrimSpace(layer.ComposerLine) != ""
 }
 
+// bottomFocusForPopup 派生当前 popup 与底部 prompt 之间的输入（光标）归属。
+//
+// 只有真正拥有输入行（ComposerLine）的 popup 才接管光标：此时 popup 的最后
+// 一行就是输入行，compose 阶段取“该行显示宽度 + 1”能得到正确的输入光标。
+// 仅渲染正文的 popup（例如提问正文 + 建议列表，回答输入已并入底部 prompt）
+// 不得接管光标，否则光标会被钉在最后一条 popup 正文行的末尾——用户实际在
+// 底部 prompt 上输入，光标必须跟随 bottom prompt（见 ComposeAppTextLayout
+// 的 Prompt 焦点分支）。
+//
+// prompt 不可见且没有任何 popup 内容时保持 None；prompt 不可见但存在信息型
+// popup 时保留旧的“光标驻留在 popup 末尾”语义，避免改变既有终端行为。
+func bottomFocusForPopup(layer PopupLayer, promptVisible bool) BottomFocus {
+	if strings.TrimSpace(layer.ComposerLine) != "" {
+		return BottomFocusPopup
+	}
+	if promptVisible {
+		return BottomFocusPrompt
+	}
+	if popupLayerPresent(layer) {
+		return BottomFocusPopup
+	}
+	return BottomFocusNone
+}
+
 func (s BottomPaneState) activePopupLayer() PopupLayer {
 	return PopupLayer{
 		Lines:        append([]string(nil), s.PopupLines...),
@@ -32,15 +56,7 @@ func (s *BottomPaneState) setActivePopupLayer(layer PopupLayer) {
 	s.ComposerLine = layer.ComposerLine
 	s.PopupBelowPrompt = layer.BelowPrompt
 	s.PopupReservedRows = layer.ReservedRows
-	if popupLayerPresent(layer) {
-		s.Focus = BottomFocusPopup
-		return
-	}
-	if s.PromptVisible {
-		s.Focus = BottomFocusPrompt
-	} else {
-		s.Focus = BottomFocusNone
-	}
+	s.Focus = bottomFocusForPopup(layer, s.PromptVisible)
 }
 
 func (s *BottomPaneState) clearActivePopupLayer() {
@@ -218,7 +234,14 @@ func (s *BottomPaneState) applyPopupUpdate(action UpdatePopupAction) {
 		s.PopupBelowPrompt = false
 		s.PopupReservedRows = 0
 		s.ComposerLine = prompt
-		s.Focus = BottomFocusPopup
+		// 与 begin/set 路径共用同一条归属规则：正文型 popup（ComposerLine 为空）
+		// 更新后仍不得抢走底部 prompt 的光标归属。
+		s.Focus = bottomFocusForPopup(PopupLayer{
+			Owner:        s.PopupOwner,
+			Instance:     s.PopupInstance,
+			Lines:        lines,
+			ComposerLine: prompt,
+		}, s.PromptVisible)
 		return
 	}
 	for index := len(s.PopupStack) - 1; index >= 0; index-- {

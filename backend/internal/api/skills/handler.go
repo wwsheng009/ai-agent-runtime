@@ -178,6 +178,13 @@ type Handler struct {
 	agentControlAgentStoreKey    string
 	agentControlAgentStoreAuto   bool
 
+	// P2-9：周期性一致性对账循环绑定当前 durable agent store，配置热加载
+	// 换 store 时会重建，store 被清空时停止（见 agent_registry_reconcile.go）。
+	agentControlReconcileMu     sync.Mutex
+	agentControlReconciler      *agentcontrol.Reconciler
+	agentControlReconcilerStore agentcontrol.AgentRegistryStore
+	agentControlReconcilerStop  context.CancelFunc
+
 	sessionRuntimeMu       sync.RWMutex
 	sessionHub             *chat.SessionHub
 	sessionRuntimeStore    chat.RuntimeStateStore
@@ -1648,6 +1655,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		agentConfig.MaxRunDuration = selectedConfig.Agent.Timeout
 		agentConfig.MaxExplorationSteps = selectedConfig.Agent.MaxExplorationSteps
 		agentConfig.MaxRepeatedToolCalls = selectedConfig.Agent.MaxRepeatedToolCalls
+		agentConfig.MaxRepeatedPollCalls = selectedConfig.Agent.MaxRepeatedPollCalls
 		agentConfig.Options = contextOptionsFromRuntimeConfig(selectedConfig)
 	}
 	if agentConfig.Options == nil {
@@ -1792,6 +1800,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 				MaxRunDuration:       agentConfig.MaxRunDuration,
 				MaxExplorationSteps:  agentConfig.MaxExplorationSteps,
 				MaxRepeatedToolCalls: agentConfig.MaxRepeatedToolCalls,
+				MaxRepeatedPollCalls: agentConfig.MaxRepeatedPollCalls,
 				EnableThought:        true,
 				EnableToolCalls:      true,
 				EnableParallelTools:  selectedConfig != nil && selectedConfig.Agent.EnableParallelTools,
@@ -3749,6 +3758,9 @@ func shouldPersistRuntimeSessionEvent(event runtimeevents.Event) bool {
 	switch strings.TrimSpace(event.Type) {
 	case "tool.requested", "tool.completed", "context.profile.injected", "recall.performed", "checkpoint_created",
 		chat.EventApprovalRequested, chat.EventApprovalResolved,
+		// P2-8 方案 4：自动回收（agent.reclaimed）与手工清理落进父会话事件流，
+		// 前端 /runtime/events 与子会话下钻因此能看到“子会话被谁回收”。
+		agentcontrol.EventAgentReclaimed,
 		chat.EventSessionCompactStarted, chat.EventSessionCompactCompleted, chat.EventSessionCompactSkipped, chat.EventSessionCompactFailed,
 		chat.EventSessionStart, chat.EventSessionEnd, chat.EventSessionInterrupted,
 		chat.EventContextReconciled,
@@ -4131,6 +4143,8 @@ func (h *Handler) refreshAgentControlRegistryService(config *runtimecfg.RuntimeC
 			}
 			h.agentControlMu.Unlock()
 			h.configureMailboxWriteThrough(nil)
+			// P2-9：store 已被清空，对账循环必须同步停止。
+			h.ensureAgentRegistryReconciler()
 			_ = currentService.Close()
 			return true, nil
 		}
@@ -4167,6 +4181,8 @@ func (h *Handler) refreshAgentControlRegistryService(config *runtimecfg.RuntimeC
 	h.agentControlAgentStoreAuto = true
 	h.agentControlMu.Unlock()
 	h.configureMailboxWriteThrough(service.MailboxStore)
+	// P2-9：绑定新的 durable agent store（旧循环在此被取消，避免审计已关闭的 store）。
+	h.ensureAgentRegistryReconciler()
 
 	if oldService != nil {
 		_ = oldService.Close()
@@ -4204,6 +4220,8 @@ func (h *Handler) refreshAgentControlAgentStore(config *runtimecfg.RuntimeConfig
 				h.agentControlAgentStoreAuto = false
 			}
 			h.agentControlMu.Unlock()
+			// P2-9：store 已被清空，对账循环必须同步停止。
+			h.ensureAgentRegistryReconciler()
 			_ = currentStore.Close()
 			return true, nil
 		}
@@ -4236,6 +4254,8 @@ func (h *Handler) refreshAgentControlAgentStore(config *runtimecfg.RuntimeConfig
 	h.agentControlAgentStoreKey = configKey
 	h.agentControlAgentStoreAuto = true
 	h.agentControlMu.Unlock()
+	// P2-9：绑定新的 durable agent store（旧循环在此被取消，避免审计已关闭的 store）。
+	h.ensureAgentRegistryReconciler()
 
 	if oldStore != nil && oldAutoManaged {
 		_ = oldStore.Close()

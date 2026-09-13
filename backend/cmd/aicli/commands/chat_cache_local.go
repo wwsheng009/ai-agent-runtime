@@ -2,6 +2,8 @@ package commands
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"strings"
 
 	cacheanalytics "github.com/wwsheng009/ai-agent-runtime/internal/cacheanalytics"
@@ -68,7 +70,7 @@ func (h *localCacheHistoryLookup) MessageContext(sessionID, messageID string) (c
 }
 
 // AssistantMessageIDByTurn 返回该 turn 最后一条 assistant 消息的 message_id
-//（assistant 消息 turn_id 继承自触发 user 消息，直接匹配）。
+// （assistant 消息 turn_id 继承自触发 user 消息，直接匹配）。
 func (h *localCacheHistoryLookup) AssistantMessageIDByTurn(sessionID, turnID string) (string, bool) {
 	session, ok := h.load(sessionID)
 	if !ok {
@@ -218,15 +220,40 @@ func localContextString(values map[string]interface{}, keys ...string) string {
 	return ""
 }
 
+// usageAttachWarn 记录一次本地统一用量分析服务挂载失败。此前失败完全静默：
+// 一旦启动期 attach 失败（例如多进程竞争 sqlite 写锁），该进程整个生命周期
+// 都不会写入 usage_requests，缓存视图静默为空且没有任何线索。
+var usageAttachWarn = func(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "Warning: usage analytics "+format+"\n", args...)
+}
+
 // ensureLocalUsageService 启动期构建本地统一分析服务并缓存到 host。
+//
+// 与 cacheOnce 不同：构建失败不缓存（返回 nil 且不置位缓存），后续调用
+// 会重试，避免一次瞬时失败（锁竞争、磁盘短暂不可用）导致整个进程生命周期
+// 内用量分析始终不可用。
 func ensureLocalUsageService(host *localChatRuntimeHost) *usageanalytics.Service {
 	if host == nil {
 		return nil
 	}
-	host.usageOnce.Do(func() {
-		host.usageSvc = buildLocalUsageService(host)
-	})
-	return host.usageSvc
+	return host.ensureUsageService()
+}
+
+// ensureUsageService 惰性构建并缓存本地统一用量分析服务；构建失败不缓存，
+// 后续调用可重试（并发调用者共享同一次构建，避免重复 attach 同一 EventBus）。
+func (h *localChatRuntimeHost) ensureUsageService() *usageanalytics.Service {
+	if h == nil {
+		return nil
+	}
+	h.usageMu.Lock()
+	defer h.usageMu.Unlock()
+	if h.usageSvc != nil {
+		return h.usageSvc
+	}
+	if service := buildLocalUsageService(h); service != nil {
+		h.usageSvc = service
+	}
+	return h.usageSvc
 }
 
 func buildLocalUsageService(host *localChatRuntimeHost) *usageanalytics.Service {
@@ -251,6 +278,10 @@ func buildLocalUsageService(host *localChatRuntimeHost) *usageanalytics.Service 
 		History: history,
 	})
 	if err != nil || service == nil {
+		if err == nil {
+			err = fmt.Errorf("attach 返回空服务")
+		}
+		usageAttachWarn("本地用量分析服务挂载失败（path=%s），本次运行的分析视图可能为空：%v", path, err)
 		return nil
 	}
 	host.cleanupFns = append(host.cleanupFns, service.Close)

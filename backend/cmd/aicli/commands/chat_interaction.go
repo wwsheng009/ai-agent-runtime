@@ -781,6 +781,40 @@ func (c *chatInteractionCoordinator) PrintPrompt() {
 	c.promptVisible = true
 }
 
+// ShowAnswerPrompt repaints the bottom prompt row as the input row for an
+// interactive answer (ask_user_question). The answer is deliberately merged
+// into the regular user prompt instead of a dedicated popup input row: the
+// text and the cursor are published through PromptInput/PromptCursor
+// (InputEvent), so the terminal cursor always follows the end of the typed
+// answer instead of being pinned to the first column after a static label.
+//
+// Unlike PrintPrompt it does not require a Ready session: questions can arrive
+// in the middle of a running turn and must be able to take over the bottom
+// prompt immediately.
+func (c *chatInteractionCoordinator) ShowAnswerPrompt() bool {
+	if c == nil || c.session == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.shutdown || c.session.NoInteractive || c.session.JSONOutput {
+		return false
+	}
+	if c.writer != os.Stdout || c.surface == nil || !c.surface.Enabled() {
+		return false
+	}
+	prompt := formatSessionUserPrompt(c.session)
+	if !c.surface.ShowPrompt(prompt) {
+		return false
+	}
+	c.promptSeq++
+	c.promptVisible = true
+	c.promptRenderedOnSurface = true
+	c.setPromptPasteActive(false)
+	c.preparePromptGapLocked(false)
+	return true
+}
+
 func formatSessionUserPrompt(session *ChatSession) string {
 	attachmentCount := 0
 	if session != nil {

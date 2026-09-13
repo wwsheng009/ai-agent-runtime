@@ -16,20 +16,20 @@ import (
 )
 
 type fakeAgentSessionController struct {
-	lastParent     string
-	lastSpawn      SpawnAgentArgs
-	lastList       ListAgentsArgs
-	lastMsg        AgentMessageArgs
-	lastFollow     AgentMessageArgs
-	lastInput      SendAgentInputArgs
-	lastApprove    ResolveAgentApprovalArgs
-	lastWait       WaitAgentArgs
-	lastRead       ReadAgentEventsArgs
-	lastClose      string
-	lastResume     string
-	lastApply      ApplyAgentWorktreeArgs
-	lastDiscard    DiscardAgentWorktreeArgs
-	agents         []AgentStatusResult
+	lastParent  string
+	lastSpawn   SpawnAgentArgs
+	lastList    ListAgentsArgs
+	lastMsg     AgentMessageArgs
+	lastFollow  AgentMessageArgs
+	lastInput   SendAgentInputArgs
+	lastApprove ResolveAgentApprovalArgs
+	lastWait    WaitAgentArgs
+	lastRead    ReadAgentEventsArgs
+	lastClose   string
+	lastResume  string
+	lastApply   ApplyAgentWorktreeArgs
+	lastDiscard DiscardAgentWorktreeArgs
+	agents      []AgentStatusResult
 }
 
 type testAgentContext map[string]interface{}
@@ -1231,6 +1231,26 @@ func TestBroker_Execute_ReadAgentEventsDelegatesToController(t *testing.T) {
 	}
 	if meta["latest_seq"] != int64(7) && meta["latest_seq"] != 7 {
 		t.Fatalf("unexpected read_agent_events meta: %#v", meta)
+	}
+}
+
+func TestBroker_Execute_ReadAgentEventsAppliesToolProgressView(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+
+	rawResult, _, err := broker.Execute(context.Background(), "parent-session", ToolReadAgentEvents, map[string]interface{}{
+		"id":   "child-1",
+		"view": "tool_progress",
+	})
+	if err != nil {
+		t.Fatalf("read_agent_events failed: %v", err)
+	}
+	if controller.lastRead.View != AgentEventsViewToolProgress {
+		t.Fatalf("expected view to reach the controller, got %#v", controller.lastRead)
+	}
+	result, ok := rawResult.(*AgentEventsResult)
+	if !ok || result == nil || result.View != AgentEventsViewToolProgress {
+		t.Fatalf("expected tool_progress projection, got %#v", rawResult)
 	}
 }
 

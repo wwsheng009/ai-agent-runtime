@@ -51,11 +51,15 @@ var errReActRunTimeout = stderrors.New("ReAct run duration limit reached")
 
 // LoopReActConfig ReAct 循环配置
 type LoopReActConfig struct {
-	MaxSteps             int                   `yaml:"maxSteps"`
-	MaxToolCalls         int                   `yaml:"maxToolCalls"`
-	MaxRunDuration       time.Duration         `yaml:"maxRunDuration"`
-	MaxExplorationSteps  int                   `yaml:"maxExplorationSteps"`
-	MaxRepeatedToolCalls int                   `yaml:"maxRepeatedToolCalls"`
+	MaxSteps             int           `yaml:"maxSteps"`
+	MaxToolCalls         int           `yaml:"maxToolCalls"`
+	MaxRunDuration       time.Duration `yaml:"maxRunDuration"`
+	MaxExplorationSteps  int           `yaml:"maxExplorationSteps"`
+	MaxRepeatedToolCalls int           `yaml:"maxRepeatedToolCalls"`
+	// MaxRepeatedPollCalls is the consecutive identical polling/control call
+	// count that triggers the soft polling-backoff advisory (P1-7). Zero uses
+	// PollingBackoffNoticeThreshold; negative disables the guard.
+	MaxRepeatedPollCalls int                   `yaml:"maxRepeatedPollCalls"`
 	EnableThought        bool                  `yaml:"enableThought"`
 	EnableToolCalls      bool                  `yaml:"enableToolCalls"`
 	EnableParallelTools  bool                  `yaml:"enableParallelTools"`
@@ -497,6 +501,9 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	repeatedToolPromptFingerprint := 0
 	// Doom-loop tracker: soft advisories always-on; hard stop via MaxRepeatedToolCalls.
 	doomLoop := NewDoomLoopTracker(loop.config.MaxRepeatedToolCalls)
+	// Polling guard: doom-loop exempt wait/read loops still get a soft backoff
+	// advisory once the same polling batch repeats (P1-7).
+	pollingBackoff := NewPollingBackoffTracker(loop.config.MaxRepeatedPollCalls)
 	// lastDispositionFingerprint tracks the last non-success disposition
 	// (partial/empty/failed, including STALE_CONTEXT) so identical full-batch
 	// replays get a stronger advisory instead of blind unchanged retries.
@@ -865,6 +872,19 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			}
 		}
 		consecutiveExplorationSteps = nextExplorationStallCount(consecutiveExplorationSteps, action.ToolCalls)
+		if pollObs := pollingBackoff.ObserveToolBatch(action.ToolCalls); pollObs.Advisory != "" {
+			repeatedSemanticAdvisory = joinRuntimeAdvisories(repeatedSemanticAdvisory, pollObs.Advisory)
+			if pollObs.EmitNotice {
+				loop.emitRuntimeEvent(EventPollingBackoffObserved, sessionID, "", map[string]interface{}{
+					"trace_id":         traceID,
+					"step":             step,
+					"tools":            pollObs.Tools,
+					"repeat_count":     pollObs.RepeatCount,
+					"notice_threshold": pollingBackoff.Threshold(),
+					"fingerprint":      pollObs.Fingerprint,
+				})
+			}
+		}
 		if consecutiveExplorationSteps == explorationStallNoticeThreshold {
 			loop.emitRuntimeEvent("tool_loop.exploration_stall_observed", sessionID, "", map[string]interface{}{
 				"trace_id":                   traceID,
@@ -3574,6 +3594,8 @@ func inferAdvisoryReminderKind(advisory string) string {
 		return ReminderKindDispositionReplay
 	case strings.Contains(text, "only inspected") || strings.Contains(text, "exploration"):
 		return ReminderKindExplorationStall
+	case strings.Contains(text, "polling/control request"):
+		return ReminderKindPollingBackoff
 	default:
 		return ReminderKindRuntimeAdvisory
 	}

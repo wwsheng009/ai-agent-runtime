@@ -1355,3 +1355,56 @@ func TestAPIControllerCompleteSupervisedRunNoopWithoutRun(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, entries)
 }
+
+func TestSessionAgentController_ReadEventsReportsPagination(t *testing.T) {
+	ctx := context.Background()
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	defer sessionManager.Stop()
+	defer handler.getSessionHub().StopAll()
+	handler.SetSessionManager(sessionManager)
+	handler.SetRuntimeConfig(runtimecfg.DefaultRuntimeConfig(), "")
+
+	rootSession, err := sessionManager.Create(ctx, "user-session-agent-controller-read-page")
+	require.NoError(t, err)
+	controller := handler.getAgentSessionController()
+	require.NotNil(t, controller)
+
+	_, err = controller.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{ID: "api-read-page-child"})
+	require.NoError(t, err)
+
+	store := handler.getSessionEventStore()
+	require.NotNil(t, store)
+	for _, content := range []string{"page event 1", "page event 2", "page event 3", "page event 4", "page event 5"} {
+		_, err = store.AppendEvent(ctx, runtimeevents.Event{
+			Type:      chat.EventAssistantMessage,
+			SessionID: "api-read-page-child",
+			Payload:   map[string]interface{}{"content": content},
+		})
+		require.NoError(t, err)
+	}
+
+	result, err := controller.ReadEvents(ctx, toolbroker.ReadAgentEventsArgs{
+		ID:       "/root/api-read-page-child",
+		AfterSeq: 0,
+		Limit:    2,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 2, result.Count)
+	require.True(t, result.HasMore)
+	require.Equal(t, 3, result.UnreadCount)
+	require.Contains(t, result.NextAction, "after_seq=2")
+
+	// The follow-up page drains the remaining events and stops advertising more.
+	next, err := controller.ReadEvents(ctx, toolbroker.ReadAgentEventsArgs{
+		ID:       "/root/api-read-page-child",
+		AfterSeq: result.LatestSeq,
+		Limit:    10,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, next)
+	require.Equal(t, 3, next.Count)
+	require.False(t, next.HasMore)
+	require.Zero(t, next.UnreadCount)
+}

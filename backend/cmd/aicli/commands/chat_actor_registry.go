@@ -693,15 +693,31 @@ func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, 
 	}
 	r.subscribeLocalAgentCompletion(parentSessionID, childSession)
 
+	// The durable reservation exists from this point on. Any failure that
+	// leaves the child unusable must compensate it, otherwise the row stays
+	// active and keeps counting against agents.maxThreads until a manual audit.
+	rollbackSpawnFailure := func(cause error) error {
+		r.cleanupLocalSpawnIsolation(ctx, childSession)
+		if releaseErr := r.releaseLocalAgentSpawnReservation(ctx, childSession, cause.Error()); releaseErr != nil {
+			cause = fmt.Errorf("%w (spawn reservation release failed: %v)", cause, releaseErr)
+		}
+		if r.Host.SessionHub != nil {
+			r.Host.SessionHub.Stop(sessionID)
+		}
+		if deleteErr := r.Host.SessionStore.Delete(ctx, childSession.ID); deleteErr != nil && !stderrors.Is(deleteErr, runtimechat.ErrSessionNotFound) {
+			cause = fmt.Errorf("%w (spawn session cleanup failed: %v)", cause, deleteErr)
+		}
+		return cause
+	}
+
 	actor, err := r.Host.SessionHub.GetOrCreate(sessionID)
 	if err != nil {
-		r.cleanupLocalSpawnIsolation(ctx, childSession)
-		return nil, err
+		return nil, rollbackSpawnFailure(fmt.Errorf("create child session actor: %w", err))
 	}
 	queued := false
 	if message := strings.TrimSpace(args.Message); message != "" {
 		if err := actor.SubmitPromptAsync(ctx, message, toolbroker.SpawnAgentRunMetaFromContext(childSession)); err != nil {
-			return nil, err
+			return nil, rollbackSpawnFailure(fmt.Errorf("queue child prompt: %w", err))
 		}
 		queued = true
 	}
@@ -1013,6 +1029,16 @@ func (r *localActorRegistry) subscribeLocalAgentCompletion(parentSessionID strin
 			return
 		}
 		eventType := strings.TrimSpace(event.Type)
+		// P0-2: mirror the API host projection so a child blocked on an
+		// approval/question reaches the parent inbox on both hosts.
+		switch eventType {
+		case runtimechat.EventApprovalRequested, runtimechat.EventQuestionAsked:
+			r.projectLocalAgentApproval(context.Background(), parentSessionID, childSessionID, childPath, eventType, event.Payload)
+			return
+		case runtimechat.EventApprovalResolved, runtimechat.EventQuestionAnswered:
+			r.resolveLocalAgentApproval(context.Background(), parentSessionID, childSessionID, childPath, eventType, event.Payload)
+			return
+		}
 		if eventType != runtimechat.EventSessionEnd && eventType != runtimechat.EventSessionInterrupted {
 			return
 		}
@@ -1106,6 +1132,70 @@ func (r *localActorRegistry) projectLocalAgentCompletion(ctx context.Context, pa
 	_ = r.Host.wakeSupervisedParent(ctx, parentSessionID, rootScopeID)
 }
 
+// projectLocalAgentApproval mirrors the API host P0-2 bridge: a child
+// approval/question edge becomes a durable parent inbox item, and an approval
+// requests one bounded parent wake.
+func (r *localActorRegistry) projectLocalAgentApproval(ctx context.Context, parentSessionID, childSessionID, childPath, eventType string, payload map[string]interface{}) {
+	if r == nil || r.Host == nil || r.Host.Supervision == nil || r.Host.Supervision.Store == nil {
+		return
+	}
+	rootScopeID := strings.TrimSpace(parentSessionID)
+	if r.Host.SessionStore != nil {
+		if session, err := r.Host.SessionStore.Load(ctx, childSessionID); err == nil && session != nil {
+			rootScopeID = localAgentRootSessionID(session, parentSessionID)
+		}
+	}
+	if rootScopeID == "" {
+		return
+	}
+	notice, ok := supervision.ApprovalNoticeFromEvent(
+		rootScopeID,
+		parentSessionID,
+		"",
+		childSessionID,
+		childPath,
+		eventType,
+		payload,
+		time.Now().UTC(),
+	)
+	if !ok {
+		return
+	}
+	_, _ = supervision.ProjectApprovalRequest(ctx, r.Host.Supervision.Store, r.Host.Supervision.Wakes, notice)
+	_ = r.Host.wakeSupervisedParent(ctx, parentSessionID, rootScopeID)
+}
+
+// resolveLocalAgentApproval closes the inbox entry once the child received
+// its decision.
+func (r *localActorRegistry) resolveLocalAgentApproval(ctx context.Context, parentSessionID, childSessionID, childPath, eventType string, payload map[string]interface{}) {
+	if r == nil || r.Host == nil || r.Host.Supervision == nil || r.Host.Supervision.Store == nil {
+		return
+	}
+	rootScopeID := strings.TrimSpace(parentSessionID)
+	if r.Host.SessionStore != nil {
+		if session, err := r.Host.SessionStore.Load(ctx, childSessionID); err == nil && session != nil {
+			rootScopeID = localAgentRootSessionID(session, parentSessionID)
+		}
+	}
+	if rootScopeID == "" {
+		return
+	}
+	notice, ok := supervision.ApprovalNoticeFromEvent(
+		rootScopeID,
+		parentSessionID,
+		"",
+		childSessionID,
+		childPath,
+		supervision.ApprovalRequestEventType(eventType),
+		payload,
+		time.Now().UTC(),
+	)
+	if !ok {
+		return
+	}
+	_, _ = supervision.ResolveApprovalRequest(ctx, r.Host.Supervision.Store, notice, supervision.ApprovalResolutionFromPayload(payload))
+}
+
 func (r *localActorRegistry) dispatchLocalAgentHook(event runtimehooks.Event, payload map[string]interface{}) {
 	if r == nil || r.Host == nil || r.Host.RuntimeConfig == nil || len(r.Host.RuntimeConfig.Hooks) == 0 || len(payload) == 0 {
 		return
@@ -1191,6 +1281,47 @@ func (r *localActorRegistry) reserveOrRegisterLocalAgentSpawn(ctx context.Contex
 		return err
 	}
 	_, err := store.UpsertAgentControlAgent(ctx, childRecord)
+	return err
+}
+
+// releaseLocalAgentSpawnReservation compensates a durable spawn reservation
+// whose child never became runnable. Stores implementing
+// agentcontrol.AgentSpawnReservationReleaser move the row to stale in one
+// step; older stores degrade to the stale-marker/close path.
+func (r *localActorRegistry) releaseLocalAgentSpawnReservation(ctx context.Context, childSession *runtimechat.Session, reason string) error {
+	if r == nil || r.Host == nil || childSession == nil {
+		return nil
+	}
+	store := r.localAgentRegistryStore()
+	if store == nil {
+		return nil
+	}
+	agentID := strings.TrimSpace(childSession.ID)
+	if agentID == "" {
+		return nil
+	}
+	if releaser, ok := store.(agentcontrol.AgentSpawnReservationReleaser); ok && releaser != nil {
+		_, err := releaser.ReleaseAgentControlAgentSpawn(ctx, agentID, reason)
+		return err
+	}
+	records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+		AgentID:       agentID,
+		IncludeClosed: true,
+		Limit:         1,
+	})
+	if err != nil || len(records) == 0 {
+		return err
+	}
+	record := records[0].Normalize()
+	if record.Closed() || record.RootSessionID == "" || record.AgentPath == "" {
+		return nil
+	}
+	staleAt := time.Now().UTC()
+	if marker, ok := store.(agentcontrol.AgentStaleMarker); ok && marker != nil {
+		_, err := marker.MarkAgentControlAgentSubtreeStale(ctx, record.RootSessionID, record.AgentPath, staleAt)
+		return err
+	}
+	_, err = store.CloseAgentControlAgentSubtree(ctx, record.RootSessionID, record.AgentPath, staleAt)
 	return err
 }
 
@@ -1416,7 +1547,16 @@ func (r *localActorRegistry) auditLocalAgentRegistry(ctx context.Context) (agent
 	if err != nil {
 		return agentcontrol.ConsistencyAuditReport{}, err
 	}
-	return agentcontrol.AuditAgentSessionConsistency(ctx, records, func(ctx context.Context, sessionID string) (agentcontrol.SessionBindingSnapshot, error) {
+	return agentcontrol.AuditAgentSessionConsistency(ctx, records, r.localAgentSessionBindingLookup())
+}
+
+// localAgentSessionBindingLookup resolves one durable registry row's session
+// into the minimal snapshot shared by the read-only audit and the P2-9
+// reconcile pass. The session store plus the runtime state store are the same
+// sources the agent panel uses, so drift surfaced by `/debug` and drift
+// converged by the periodic pass cannot disagree.
+func (r *localActorRegistry) localAgentSessionBindingLookup() agentcontrol.SessionBindingLookup {
+	return func(ctx context.Context, sessionID string) (agentcontrol.SessionBindingSnapshot, error) {
 		result := agentcontrol.SessionBindingSnapshot{SessionID: strings.TrimSpace(sessionID)}
 		if r == nil || r.Host == nil || r.Host.SessionStore == nil {
 			return result, nil
@@ -1447,7 +1587,7 @@ func (r *localActorRegistry) auditLocalAgentRegistry(ctx context.Context) (agent
 			result.Stale = true
 		}
 		return result, nil
-	})
+	}
 }
 
 func (r *localActorRegistry) sweepStaleLocalAgentRegistry(ctx context.Context, store agentcontrol.AgentRegistryStore) error {
@@ -1459,6 +1599,7 @@ func (r *localActorRegistry) sweepStaleLocalAgentRegistry(ctx context.Context, s
 		return err
 	}
 	markedRoots := map[string]bool{}
+	terminalChildren := make([]agentcontrol.AgentRecord, 0, len(existing))
 	for _, record := range existing {
 		record = record.Normalize()
 		if record.Closed() || record.RootSessionID == "" || record.AgentPath == "" || record.SessionID == "" {
@@ -1479,10 +1620,60 @@ func (r *localActorRegistry) sweepStaleLocalAgentRegistry(ctx context.Context, s
 			if err := markLocalAgentSubtreeStale(ctx, store, record, time.Now().UTC()); err != nil {
 				return err
 			}
-		} else if _, err := store.CloseAgentControlAgentSubtree(ctx, record.RootSessionID, record.AgentPath, time.Now().UTC()); err != nil {
-			return err
+			markedRoots[rootKey] = true
+			continue
 		}
+		// 终态容器不再静默 close：改走 P2-8 驱逐口径（reclaimed:session_terminal
+		// + agent.reclaimed 产品事件），与 spawn 闸门、/agents cleanup 及周期
+		// 对账一致，父流/前端下钻因此能解释"子会话为何消失"。
+		terminalChildren = append(terminalChildren, record)
 		markedRoots[rootKey] = true
+	}
+	if len(terminalChildren) == 0 {
+		return nil
+	}
+	reclaimStore, ok := store.(agentcontrol.AgentReclaimStore)
+	if !ok || reclaimStore == nil {
+		// store 不支持按回收原因关闭：保持旧行为，直接收敛终态行。
+		now := time.Now().UTC()
+		for _, record := range terminalChildren {
+			if _, err := store.CloseAgentControlAgentSubtree(ctx, record.RootSessionID, record.AgentPath, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	outcome, err := agentcontrol.SweepAgentQuotaReclaim(
+		ctx,
+		reclaimStore,
+		terminalChildren,
+		func(_ context.Context, children []agentcontrol.AgentRecord) []agentcontrol.ReclaimObservation {
+			// 这些行是 sweep 刚判定为"容器终态"的对象：直接以 SessionTerminal
+			// 交给共享策略判定，不重复做一次容器查询（同一轮内状态不会变）。
+			observations := make([]agentcontrol.ReclaimObservation, 0, len(children))
+			for _, child := range children {
+				observations = append(observations, agentcontrol.ReclaimObservation{
+					AgentID:           child.AgentID,
+					AgentPath:         child.AgentPath,
+					SessionID:         child.SessionID,
+					Status:            child.Status,
+					RegistryUpdatedAt: child.UpdatedAt,
+					SessionTerminal:   true,
+				})
+			}
+			return observations
+		},
+		agentcontrol.ReclaimPolicy{Now: time.Now().UTC()},
+		true,
+		func(ctx context.Context, rootSessionID string, pass agentcontrol.ReclaimOutcome) {
+			r.recordLocalAgentReclaim(ctx, rootSessionID, rootSessionID, agentcontrol.ReclaimSourceReconcile, pass)
+		},
+	)
+	if err != nil {
+		return err
+	}
+	if first := strings.TrimSpace(outcome.FirstError); first != "" {
+		return fmt.Errorf("sweep terminal agent rows: %s", first)
 	}
 	return nil
 }
@@ -1545,46 +1736,13 @@ func markLocalAgentSubtreeStale(ctx context.Context, store agentcontrol.AgentReg
 }
 
 func (r *localActorRegistry) closeStaleLocalAgentSessionBinding(ctx context.Context, store agentcontrol.AgentRegistryStore, record agentcontrol.AgentRecord) error {
-	if store == nil {
-		return nil
-	}
-	record = record.Normalize()
-	if record.SessionID == "" {
-		return nil
-	}
-	records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
-		SessionID: record.SessionID,
-	})
-	if err != nil {
-		return err
-	}
-	for _, existing := range records {
-		existing = existing.Normalize()
-		if sameLocalAgentBinding(existing, record) {
-			continue
-		}
-		if existing.RootSessionID == "" || existing.AgentPath == "" {
-			continue
-		}
-		if _, err := store.CloseAgentControlAgentSubtree(ctx, existing.RootSessionID, existing.AgentPath, time.Now().UTC()); err != nil {
-			return err
-		}
-	}
-	return nil
+	// Shared with the API runtime so both hosts resolve stale session bindings
+	// identically (N2).
+	return agentcontrol.CloseStaleAgentSessionBindings(ctx, store, record)
 }
 
 func sameLocalAgentBinding(left, right agentcontrol.AgentRecord) bool {
-	left = left.Normalize()
-	right = right.Normalize()
-	if left.AgentID != "" && right.AgentID != "" && strings.EqualFold(left.AgentID, right.AgentID) {
-		return true
-	}
-	return left.RootSessionID != "" &&
-		right.RootSessionID != "" &&
-		left.AgentPath != "" &&
-		right.AgentPath != "" &&
-		strings.EqualFold(left.RootSessionID, right.RootSessionID) &&
-		strings.EqualFold(left.AgentPath, right.AgentPath)
+	return agentcontrol.SameAgentBinding(left, right)
 }
 
 func (r *localActorRegistry) existingLocalAgentRecord(ctx context.Context, store agentcontrol.AgentRegistryStore, record agentcontrol.AgentRecord) (agentcontrol.AgentRecord, bool, error) {
@@ -2133,14 +2291,11 @@ func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgent
 		}
 		sessionIDs[index] = resolvedSessionID
 	}
-	timeout := time.Duration(args.TimeoutMs) * time.Millisecond
-	if timeout <= 0 {
-		defaultWaitMs := r.localAgentsConfig().DefaultWaitTimeoutMs
-		if defaultWaitMs <= 0 {
-			defaultWaitMs = int((30 * time.Second).Milliseconds())
-		}
-		timeout = time.Duration(defaultWaitMs) * time.Millisecond
+	resolution, err := agentcontrol.ResolveWaitTimeout(args.TimeoutMs, r.localWaitTimeoutPolicy())
+	if err != nil {
+		return nil, err
 	}
+	timeout := time.Duration(resolution.EffectiveMs) * time.Millisecond
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	wakeCh, unsubscribe := r.subscribeLocalAgentWaitEvents(waitCtx, sessionIDs)
@@ -2172,12 +2327,14 @@ func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgent
 			}
 		}
 		waitResult := &toolbroker.AgentWaitResult{
-			Agents:        snapshots,
-			ReadyCount:    readyCount,
-			PendingCount:  len(snapshots) - readyCount,
-			ReadyIDs:      readyIDs,
-			PendingIDs:    pendingIDs,
-			WaitTimeoutMs: int(timeout.Milliseconds()),
+			Agents:                 snapshots,
+			ReadyCount:             readyCount,
+			PendingCount:           len(snapshots) - readyCount,
+			ReadyIDs:               readyIDs,
+			PendingIDs:             pendingIDs,
+			WaitTimeoutMs:          int(timeout.Milliseconds()),
+			WaitTimeoutRequestedMs: resolution.RequestedMs,
+			WaitTimeoutClamped:     resolution.Clamped,
 		}
 		if matched != nil {
 			waitResult.Agent = matched
@@ -2195,7 +2352,22 @@ func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgent
 	}
 }
 
+// waitForLocalAgentMailbox bounds the mailbox observation window, then delegates
+// to the resolved implementation so the effective window is echoed back.
 func (r *localActorRegistry) waitForLocalAgentMailbox(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
+	resolution, err := agentcontrol.ResolveWaitTimeout(args.TimeoutMs, r.localWaitTimeoutPolicy())
+	if err != nil {
+		return nil, err
+	}
+	args.TimeoutMs = resolution.EffectiveMs
+	result, err := r.waitForLocalAgentMailboxResolved(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	return toolbroker.ApplyAgentWaitTimeout(result, resolution.RequestedMs, resolution.EffectiveMs, resolution.Clamped), nil
+}
+
+func (r *localActorRegistry) waitForLocalAgentMailboxResolved(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
 	if r == nil || r.Host == nil || r.Host.EventStore == nil {
 		return nil, fmt.Errorf("event store not configured")
 	}
@@ -2323,7 +2495,20 @@ func (r *localActorRegistry) subscribeLocalAgentWaitEvents(ctx context.Context, 
 	}
 }
 
+// ReadEvents bounds wait_ms before delegating to the resolved implementation.
+// wait_ms=0 keeps the non-blocking read semantics (it is not a default request).
 func (r *localActorRegistry) ReadEvents(ctx context.Context, args toolbroker.ReadAgentEventsArgs) (*toolbroker.AgentEventsResult, error) {
+	if args.WaitMs > 0 {
+		resolution, err := agentcontrol.ResolveWaitTimeout(args.WaitMs, r.localWaitTimeoutPolicy())
+		if err != nil {
+			return nil, err
+		}
+		args.WaitMs = resolution.EffectiveMs
+	}
+	return r.readEventsResolved(ctx, args)
+}
+
+func (r *localActorRegistry) readEventsResolved(ctx context.Context, args toolbroker.ReadAgentEventsArgs) (*toolbroker.AgentEventsResult, error) {
 	if r == nil || r.Host == nil || r.Host.EventStore == nil {
 		return nil, fmt.Errorf("event store not configured")
 	}
@@ -2363,14 +2548,21 @@ func (r *localActorRegistry) ReadEvents(ctx context.Context, args toolbroker.Rea
 	defer unsubscribe()
 	for {
 		if args.MailboxOnly {
-			if events, ok, hasMailboxRows, err := r.listLocalAgentMailboxEvents(readCtx, sessionID, args.AfterSeq, limit); err != nil {
+			if events, ok, hasMailboxRows, err := r.listLocalAgentMailboxEvents(readCtx, sessionID, args.AfterSeq, limit+1); err != nil {
 				if waitMs > 0 && isLocalAgentReadWaitInterrupted(readCtx, err) {
 					return r.softTimeoutLocalAgentEvents(ctx, sessionID, args.AfterSeq, limit, true)
 				}
 				return nil, err
 			} else if ok {
+				// The extra row only signals that more events are queued; mailbox
+				// unread counts stay unset because presentation seq and
+				// session-mailbox seq are distinct sequences.
+				hasMore := len(events) > limit
+				if hasMore {
+					events = events[:limit]
+				}
 				if len(events) > 0 || (hasMailboxRows && waitMs == 0) {
-					return buildLocalAgentEventsResult(sessionID, events), nil
+					return toolbroker.ApplyAgentEventsPagination(buildLocalAgentEventsResult(sessionID, events), hasMore, 0), nil
 				}
 				if hasMailboxRows {
 					select {
@@ -2383,7 +2575,7 @@ func (r *localActorRegistry) ReadEvents(ctx context.Context, args toolbroker.Rea
 				}
 			}
 		}
-		events, err := r.Host.EventStore.ListEvents(readCtx, sessionID, args.AfterSeq, limit)
+		events, err := r.Host.EventStore.ListEvents(readCtx, sessionID, args.AfterSeq, limit+1)
 		if err != nil {
 			if waitMs > 0 && isLocalAgentReadWaitInterrupted(readCtx, err) {
 				return r.softTimeoutLocalAgentEvents(ctx, sessionID, args.AfterSeq, limit, args.MailboxOnly)
@@ -2393,8 +2585,16 @@ func (r *localActorRegistry) ReadEvents(ctx context.Context, args toolbroker.Rea
 		if args.MailboxOnly {
 			events = filterLocalAgentMailboxWaitEvents(events)
 		}
+		hasMore := len(events) > limit
+		if hasMore {
+			events = events[:limit]
+		}
 		if len(events) > 0 || waitMs == 0 {
-			return buildLocalAgentEventsResult(sessionID, events), nil
+			result := buildLocalAgentEventsResult(sessionID, events)
+			if hasMore {
+				return toolbroker.ApplyAgentEventsPagination(result, true, r.localAgentEventsUnreadCount(ctx, sessionID, result.LatestSeq)), nil
+			}
+			return result, nil
 		}
 		select {
 		case <-readCtx.Done():
@@ -3062,7 +3262,10 @@ func (r *localActorRegistry) enforceLocalAgentSpawnLimits(ctx context.Context, p
 			strings.TrimSpace(parentSessionID), parentDepth, childDepth, limits.MaxDepth,
 		)
 	}
-	if limits.MaxThreads <= 0 {
+	// P2-8 语义收敛：agents.maxThreads=0 表示“未设置”（回退内置默认 6），
+	// 仅 -1 是显式不限；超限文案统一附带 next_action 与 active 子会话摘要。
+	maxThreads, unlimited := agentcontrol.ResolveMaxThreads(limits.MaxThreads, runtimecfg.DefaultRuntimeConfig().Agents.MaxThreads)
+	if unlimited {
 		return nil
 	}
 	rootSessionID := localAgentRootSessionID(parentSession, parentSessionID)
@@ -3076,26 +3279,112 @@ func (r *localActorRegistry) enforceLocalAgentSpawnLimits(ctx context.Context, p
 		if err != nil {
 			return err
 		}
-		count := 0
-		for _, record := range records {
-			if record.AgentPath == "/root" || strings.EqualFold(record.AgentType, agentcontrol.AgentTypeRoot) {
-				continue
+		children := agentcontrol.QuotaChildren(records)
+		if len(children) < maxThreads {
+			return nil
+		}
+		now := time.Now().UTC()
+		observations := r.observeLocalQuotaChildren(ctx, children)
+		extras := make([]string, 0, 2)
+		if reclaimStore, ok := store.(agentcontrol.AgentReclaimStore); ok && reclaimStore != nil {
+			policy := agentcontrol.ReclaimPolicy{
+				IdleTimeout: time.Duration(limits.ReclaimIdleMs) * time.Millisecond,
+				Now:         now,
 			}
-			count++
+			outcome, reclaimErr := agentcontrol.ReclaimAgentQuota(ctx, reclaimStore, rootSessionID, observations, policy)
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if summary := outcome.Summary(); summary != "" {
+				extras = append(extras, summary)
+			}
+			if reclaimErr != nil {
+				extras = append(extras, "reclaim_error="+reclaimErr.Error())
+			}
+			if outcome.Reclaimed() > 0 {
+				// P2-8 方案 4：回收动作进入产品事件流（父会话），/debug 与
+				// 前端下钻据此解释“子会话为何消失、是谁回收的”。
+				r.recordLocalAgentReclaim(ctx, parentSessionID, rootSessionID, agentcontrol.ReclaimSourceSpawnGate, outcome)
+				records, err = store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+					RootSessionID: rootSessionID,
+				})
+				if err != nil {
+					return err
+				}
+				if children = agentcontrol.QuotaChildren(records); len(children) < maxThreads {
+					return nil
+				}
+			}
+		} else {
+			extras = append(extras, "reclaim=unavailable")
 		}
-		if count >= limits.MaxThreads {
-			return fmt.Errorf("agent spawn thread limit reached: max_threads=%d active_children=%d", limits.MaxThreads, count)
-		}
-		return nil
+		return runtimeerrors.New(runtimeerrors.ErrAgentThreadLimit, agentcontrol.ThreadLimitMessage(
+			maxThreads, len(children), agentcontrol.ThreadOccupants(observations, now), extras...,
+		))
 	}
 	count, err := r.countLocalAgentTree(ctx, rootSessionID)
 	if err != nil {
 		return err
 	}
-	if count >= limits.MaxThreads {
-		return fmt.Errorf("agent spawn thread limit reached: max_threads=%d active_children=%d", limits.MaxThreads, count)
+	if count >= maxThreads {
+		return runtimeerrors.New(runtimeerrors.ErrAgentThreadLimit, agentcontrol.ThreadLimitMessage(maxThreads, count, nil))
 	}
 	return nil
+}
+
+// observeLocalQuotaChildren mirrors the API host projection: durable child rows
+// plus this host's session/actor liveness. Children parked on approval, input
+// or background jobs are protected; only provably gone/terminal containers (or,
+// with the opt-in policy, long-idle ones) become reclaimable.
+func (r *localActorRegistry) observeLocalQuotaChildren(ctx context.Context, records []agentcontrol.AgentRecord) []agentcontrol.ReclaimObservation {
+	observations := make([]agentcontrol.ReclaimObservation, 0, len(records))
+	for _, record := range records {
+		observation := agentcontrol.ReclaimObservation{
+			AgentID:           record.AgentID,
+			AgentPath:         record.AgentPath,
+			SessionID:         record.SessionID,
+			Status:            record.Status,
+			RegistryUpdatedAt: record.UpdatedAt,
+		}
+		sessionID := strings.TrimSpace(record.SessionID)
+		if sessionID != "" && r != nil && r.Host != nil && r.Host.SessionStore != nil {
+			session, err := r.Host.SessionStore.Load(ctx, sessionID)
+			switch {
+			case err != nil:
+				if stderrors.Is(err, runtimechat.ErrSessionNotFound) || strings.Contains(strings.ToLower(err.Error()), "not found") {
+					observation.SessionMissing = true
+				}
+			case session == nil:
+				observation.SessionMissing = true
+			default:
+				if session.State == runtimechat.StateClosed || session.State == runtimechat.StateArchived {
+					observation.SessionTerminal = true
+				}
+				observation.SessionIdleSince = session.UpdatedAt
+			}
+		}
+		if sessionID != "" {
+			if r.Host != nil && r.Host.SessionHub != nil {
+				if actor, ok := r.Host.SessionHub.Get(sessionID); ok && actor != nil {
+					if state, exists := actor.StateSummary(); exists {
+						if state.Busy() || state.PendingTool || state.ActiveJobCount > 0 {
+							observation.SessionBusy = true
+						}
+					}
+				}
+			}
+			if !observation.SessionBusy && r.Host != nil && r.Host.RuntimeStore != nil {
+				if state, err := runtimechat.LoadRuntimeStateForInspection(ctx, r.Host.RuntimeStore, sessionID); err == nil && state != nil {
+					summary := state.Summary()
+					if summary.Busy() || summary.PendingTool || summary.ActiveJobCount > 0 {
+						observation.SessionBusy = true
+					}
+				}
+			}
+		}
+		observations = append(observations, observation)
+	}
+	return observations
 }
 
 func (r *localActorRegistry) localAgentsConfig() runtimecfg.AgentsConfig {
@@ -3111,10 +3400,25 @@ func (r *localActorRegistry) localAgentsConfig() runtimecfg.AgentsConfig {
 		return defaults
 	}
 	cfg := runtimeConfig.Agents
-	if cfg.MaxThreads == 0 && cfg.MaxDepth == 0 && cfg.DefaultWaitTimeoutMs == 0 && strings.TrimSpace(cfg.DefaultForkTurns) == "" {
+	if cfg.MaxThreads == 0 && cfg.MaxDepth == 0 && cfg.DefaultWaitTimeoutMs == 0 &&
+		cfg.MinWaitTimeoutMs == 0 && cfg.MaxWaitTimeoutMs == 0 && strings.TrimSpace(cfg.WaitTimeoutMode) == "" &&
+		strings.TrimSpace(cfg.DefaultForkTurns) == "" && cfg.RegistryReconcileInterval == 0 &&
+		strings.TrimSpace(cfg.RegistryReconcileMode) == "" && cfg.ReclaimIdleMs == 0 {
 		return defaults
 	}
 	return cfg
+}
+
+// localWaitTimeoutPolicy maps the agents config onto the shared wait-window
+// bounds resolver used by the local wait_agent / read_agent_events paths.
+func (r *localActorRegistry) localWaitTimeoutPolicy() agentcontrol.WaitTimeoutPolicy {
+	cfg := r.localAgentsConfig()
+	return agentcontrol.WaitTimeoutPolicy{
+		DefaultMs: cfg.DefaultWaitTimeoutMs,
+		MinMs:     cfg.MinWaitTimeoutMs,
+		MaxMs:     cfg.MaxWaitTimeoutMs,
+		Mode:      cfg.WaitTimeoutMode,
+	}
 }
 
 func (r *localActorRegistry) countLocalAgentTree(ctx context.Context, rootSessionID string) (int, error) {
@@ -3528,6 +3832,20 @@ func (r *localActorRegistry) softTimeoutLocalAgentEvents(ctx context.Context, se
 	// after marking TimedOut so timeout-specific next_action wins.
 	result.NextAction = ""
 	return toolbroker.FinalizeAgentEventsResult(result), nil
+}
+
+// localAgentEventsUnreadCount probes how many events remain beyond a returned
+// read window. Probe failures degrade to 0: has_more still tells the parent to
+// advance after_seq, so a missing count never hides the pagination signal.
+func (r *localActorRegistry) localAgentEventsUnreadCount(ctx context.Context, sessionID string, afterSeq int64) int {
+	if r == nil || r.Host == nil || r.Host.EventStore == nil || afterSeq <= 0 {
+		return 0
+	}
+	remaining, err := r.Host.EventStore.ListEvents(ctx, sessionID, afterSeq, toolbroker.AgentEventsUnreadProbeLimit+1)
+	if err != nil {
+		return 0
+	}
+	return toolbroker.CapAgentEventsUnread(len(remaining))
 }
 
 func buildLocalAgentEventsResult(sessionID string, events []runtimeevents.Event) *toolbroker.AgentEventsResult {

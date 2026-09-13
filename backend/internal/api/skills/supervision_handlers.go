@@ -3,6 +3,7 @@ package skills
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -146,6 +147,40 @@ func (h *Handler) getSupervisionWakeScheduler() *supervision.WakeScheduler {
 	return scheduler
 }
 
+// supervisionWakeBudgetStates projects the auto-wake budget (plan P1-6) of the
+// requested root scopes as one read-only row per scope × budget class, in the
+// class order used by the CLI `/debug supervision list` view so both hosts
+// render the same ledger. Returning nil (scheduler not wired, or no non-empty
+// scope requested) keeps the field out of HTTP responses entirely: a host
+// without the wake ledger must not advertise a misleading 0/limit budget.
+func (h *Handler) supervisionWakeBudgetStates(ctx context.Context, scopes ...string) []supervision.WakeBudgetState {
+	scheduler := h.getSupervisionWakeScheduler()
+	if scheduler == nil {
+		return nil
+	}
+	classes := []supervision.WakeBudgetClass{
+		supervision.WakeBudgetClassApproval,
+		supervision.WakeBudgetClassFailure,
+		supervision.WakeBudgetClassOther,
+	}
+	seen := make(map[string]bool, len(scopes))
+	states := make([]supervision.WakeBudgetState, 0, len(scopes)*len(classes))
+	for _, raw := range scopes {
+		scope := strings.TrimSpace(raw)
+		if scope == "" || seen[scope] {
+			continue
+		}
+		seen[scope] = true
+		for _, class := range classes {
+			states = append(states, scheduler.BudgetState(ctx, scope, class))
+		}
+	}
+	if len(states) == 0 {
+		return nil
+	}
+	return states
+}
+
 func (h *Handler) getSupervisionDescendantProvider() supervision.DescendantProvider {
 	if h == nil {
 		return nil
@@ -162,6 +197,55 @@ func (h *Handler) supervisionUnavailable(w http.ResponseWriter) bool {
 		return true
 	}
 	return false
+}
+
+// supervisionSubjectPresence wires control-plane existence checks so that
+// notifications whose subject rows disappeared (P2-12 stale notifications) stop
+// counting as critical. Unverifiable subjects keep their severity, so partial
+// wiring can never hide a real critical.
+func (h *Handler) supervisionSubjectPresence() supervision.SubjectPresenceFunc {
+	if h == nil {
+		return nil
+	}
+	var runStore supervision.ExecutionRunStore
+	if store := h.getSupervisionStore(); store != nil {
+		runStore, _ = store.(supervision.ExecutionRunStore)
+	}
+	teamStore := h.getTeamStore()
+	if runStore == nil && teamStore == nil {
+		return nil
+	}
+	return func(ctx context.Context, n supervision.Notification) (bool, bool) {
+		subjectID := strings.TrimSpace(n.SubjectID)
+		if subjectID == "" {
+			return false, false
+		}
+		switch n.SubjectKind {
+		case supervision.SubjectAgentRun:
+			if runStore == nil {
+				return false, false
+			}
+			if _, err := runStore.GetExecutionRun(ctx, subjectID); err != nil {
+				if errors.Is(err, supervision.ErrRunNotFound) {
+					return false, true
+				}
+				// Store errors stay inconclusive: keep the row critical.
+				return false, false
+			}
+			return true, true
+		case supervision.SubjectTeam:
+			if teamStore == nil {
+				return false, false
+			}
+			record, err := teamStore.GetTeam(ctx, subjectID)
+			if err != nil {
+				return false, false
+			}
+			return record != nil, true
+		default:
+			return false, false
+		}
+	}
 }
 
 // injectSupervisionPreflight builds the unresolved lifecycle digest immediately
@@ -200,6 +284,7 @@ func (h *Handler) injectSupervisionPreflight(ctx context.Context, sessionID, pro
 		TargetParentTeamID:    targetTeamID,
 		Limit:                 20,
 		IncludeResolvedSince:  true,
+		SubjectPresence:       h.supervisionSubjectPresence(),
 	})
 	if err != nil {
 		return "", fmt.Errorf("build supervision preflight digest: %w", err)
@@ -244,14 +329,23 @@ func (h *Handler) GetSupervisionDigest(w http.ResponseWriter, r *http.Request) {
 		AfterSeq:              int64Query(q.Get("after_seq")),
 		Limit:                 intQuery(q.Get("limit")),
 		IncludeResolvedSince:  boolQuery(q.Get("include_resolved_since")),
+		SubjectPresence:       h.supervisionSubjectPresence(),
 	})
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+	payload := map[string]interface{}{
 		"digest": digest,
-	})
+		// P2-9 可见性：最近一次 registry 一致性对账的缓存摘要。
+		"agent_registry_reconcile": h.agentRegistryReconcileSummary(),
+	}
+	// P1-6 可见性：API 宿主侧的 auto-wake 预算投影，与 CLI
+	// `/debug supervision list` 同源（同一 scheduler、同一账本）。
+	if budget := h.supervisionWakeBudgetStates(r.Context(), q.Get("root_scope_id")); budget != nil {
+		payload["wake_budget"] = budget
+	}
+	h.writeJSON(w, http.StatusOK, payload)
 }
 
 // GetSupervisionSnapshot returns the unified supervision read model
@@ -278,9 +372,17 @@ func (h *Handler) GetSupervisionSnapshot(w http.ResponseWriter, r *http.Request)
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+	payload := map[string]interface{}{
 		"snapshot": snapshot,
-	})
+		// P2-9 可见性：最近一次 registry 一致性对账的缓存摘要。
+		"agent_registry_reconcile": h.agentRegistryReconcileSummary(),
+	}
+	// P1-6 可见性：与 digest 同一投影；snapshot 的 root scope 可能是会话
+	// （普通会话）或团队（Team lead），两者都算，重复时由 helper 去重。
+	if budget := h.supervisionWakeBudgetStates(r.Context(), q.Get("root_session_id"), q.Get("root_team_id")); budget != nil {
+		payload["wake_budget"] = budget
+	}
+	h.writeJSON(w, http.StatusOK, payload)
 }
 
 // RequestSupervisionAction persists a durable control action request

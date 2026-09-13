@@ -1,0 +1,164 @@
+package agent
+
+import (
+	"crypto/sha256"
+	"fmt"
+	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolexec"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
+)
+
+// Polling/control tools are doom-loop exempt (see semanticToolCallRepeatExempt),
+// so identical wait/read polling never trips the semantic repeat advisory. This
+// guard adds the missing soft brake for those calls (P1-7):
+//   - It only annotates results; execution is never blocked.
+//   - A streak is counted per identical polling batch (tool + normalized args
+//     digest, which covers target ids, after_seq and timeout_ms).
+//   - Any non-exempt tool in the batch (real work) resets the streak.
+//   - Threshold, advisory and product event fire once per streak.
+const (
+	// PollingBackoffNoticeThreshold is the consecutive identical polling count
+	// at which the loop starts injecting the backoff advisory (default; see
+	// LoopReActConfig.MaxRepeatedPollCalls for the override).
+	PollingBackoffNoticeThreshold = 3
+
+	// EventPollingBackoffObserved is emitted once per polling streak when the
+	// threshold is crossed.
+	EventPollingBackoffObserved = "tool_loop.polling_backoff_observed"
+)
+
+// PollingBackoffObservation is the per-turn result of ObserveToolBatch.
+type PollingBackoffObservation struct {
+	Fingerprint string
+	// Tools lists the polling tool names participating in the streak.
+	Tools       []string
+	RepeatCount int
+	// EmitNotice is true exactly once per streak (crossing the threshold).
+	EmitNotice bool
+	// Advisory is the model-facing guidance; non-empty from the threshold on.
+	Advisory string
+}
+
+// PollingBackoffTracker tracks consecutive identical polling/control batches.
+// A nil tracker is valid and behaves as disabled.
+type PollingBackoffTracker struct {
+	// threshold <= 0 disables the guard.
+	threshold       int
+	lastFingerprint string
+	repeatCount     int
+	noticeEmitted   bool
+}
+
+// NewPollingBackoffTracker constructs a tracker. threshold <= 0 falls back to
+// PollingBackoffNoticeThreshold; a negative threshold disables the guard.
+func NewPollingBackoffTracker(threshold int) *PollingBackoffTracker {
+	if threshold == 0 {
+		threshold = PollingBackoffNoticeThreshold
+	}
+	return &PollingBackoffTracker{threshold: threshold}
+}
+
+// Threshold reports the active notice threshold (0 when disabled).
+func (t *PollingBackoffTracker) Threshold() int {
+	if t == nil || t.threshold < 0 {
+		return 0
+	}
+	return t.threshold
+}
+
+// RepeatCount reports the current consecutive polling repeat count.
+func (t *PollingBackoffTracker) RepeatCount() int {
+	if t == nil {
+		return 0
+	}
+	return t.repeatCount
+}
+
+// ObserveToolBatch updates consecutive-polling state for the model tool batch.
+// Batches without polling tools, or mixing polling with real work, reset the
+// streak so genuine progress is never nagged.
+func (t *PollingBackoffTracker) ObserveToolBatch(calls []types.ToolCall) PollingBackoffObservation {
+	obs := PollingBackoffObservation{}
+	if t == nil || t.threshold <= 0 || len(calls) == 0 {
+		return obs
+	}
+	fingerprint, tools := pollingBatchFingerprint(calls)
+	if fingerprint == "" {
+		t.reset()
+		return obs
+	}
+	if fingerprint == t.lastFingerprint {
+		t.repeatCount++
+	} else {
+		t.lastFingerprint = fingerprint
+		t.repeatCount = 1
+		t.noticeEmitted = false
+	}
+	obs.Fingerprint = fingerprint
+	obs.Tools = tools
+	obs.RepeatCount = t.repeatCount
+	if t.repeatCount < t.threshold {
+		return obs
+	}
+	obs.Advisory = pollingBackoffAdvisory(tools, t.repeatCount)
+	if !t.noticeEmitted {
+		obs.EmitNotice = true
+		t.noticeEmitted = true
+	}
+	return obs
+}
+
+func (t *PollingBackoffTracker) reset() {
+	t.lastFingerprint = ""
+	t.repeatCount = 0
+	t.noticeEmitted = false
+}
+
+// pollingBatchFingerprint hashes an all-polling batch. It returns an empty
+// fingerprint when the batch contains real work or no polling call at all, so
+// mixed batches reset the streak instead of being counted as polling loops.
+func pollingBatchFingerprint(calls []types.ToolCall) (string, []string) {
+	batch := strings.Builder{}
+	tools := make([]string, 0, len(calls))
+	for _, call := range calls {
+		name := strings.ToLower(strings.TrimSpace(call.Name))
+		if name == "" || !semanticToolCallRepeatExempt(name) {
+			return "", nil
+		}
+		digest := toolexec.ArgsDigest(name, call.Args)
+		fmt.Fprintf(&batch, "%d:%s", len(digest), digest)
+		tools = append(tools, name)
+	}
+	if batch.Len() == 0 {
+		return "", nil
+	}
+	sum := sha256.Sum256([]byte(batch.String()))
+	return fmt.Sprintf("%x", sum[:]), tools
+}
+
+// pollingBackoffAdvisory names the repeated polling request and points at the
+// result-level next_action instead of another unchanged poll.
+func pollingBackoffAdvisory(tools []string, repeatCount int) string {
+	names := strings.Join(dedupeToolNames(tools), "/")
+	if names == "" {
+		names = "polling tool"
+	}
+	return fmt.Sprintf(
+		"Runtime advisory: the same polling/control request (%s) has run %d consecutive times with identical arguments (target ids / after_seq / timeout_ms). Execution was not blocked. Follow next_action instead of re-polling unchanged: use wait_agent once with a larger timeout_ms when a specific child must finish, do other independent work first, or proceed and let the parent preflight digest surface new events.",
+		names, repeatCount,
+	)
+}
+
+func dedupeToolNames(tools []string) []string {
+	seen := make(map[string]struct{}, len(tools))
+	out := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		if _, ok := seen[tool]; ok {
+			continue
+		}
+		seen[tool] = struct{}{}
+		out = append(out, tool)
+	}
+	return out
+}

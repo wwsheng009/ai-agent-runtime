@@ -115,7 +115,7 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/agents",
-			Usage:       "/agents [panel [full|follow|target <target>|next|prev|close]|pick|target <target>|send [target] <message>|followup [target] <message>|routing test [--scope auto|subagent|team] --role <role> --difficulty <level>]",
+			Usage:       "/agents [panel [full|follow|target <target>|next|prev|close]|pick|target <target>|send [target] <message>|followup [target] <message>|routing test [--scope auto|subagent|team] --role <role> --difficulty <level>|cleanup [--dry-run] [--idle <duration>]]",
 			Summary:     "显示、选择或发送 agent 协作消息",
 			Group:       string(chatSlashCommandGroupSession),
 			AcceptsArgs: true,
@@ -145,6 +145,11 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 				{Token: "routing", Summary: "预览子 Agent / Team difficulty route"},
 				{Token: "test", Summary: "routing test 子命令"},
 				{Token: "--scope", Summary: "选择 auto、subagent 或 team 路由范围"},
+				{Token: "cleanup", Summary: "回收 root scope 内可安全关闭的子 agent，释放 agents.maxThreads 配额"},
+				{Token: "prune", Summary: "cleanup 的别名"},
+				{Token: "gc", Summary: "cleanup 的别名"},
+				{Token: "--dry-run", Summary: "只预览可回收对象，不执行回收"},
+				{Token: "--idle", Summary: "额外回收空闲超过给定时长的子 agent（如 30m）"},
 			},
 		},
 		{

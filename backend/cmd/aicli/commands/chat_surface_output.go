@@ -152,6 +152,19 @@ func (o chatPromptOverlay) clearPopupHandle(handle ui.PopupHandle) {
 	o.resetPromptState()
 }
 
+// clearPopupHandlePreservePromptInput closes a popup that never owned the bottom
+// prompt input row (the merged question body, whose answer is typed on the
+// regular prompt). It deliberately skips resetPromptState: ResetPromptState
+// drops the coordinator draft, and by the time the question popup is closed the
+// merged answer composer has already handed the user's parked draft back. The
+// answer prompt row itself is released by the composer (DiscardPrompt), so no
+// surface state is left behind here.
+func (o chatPromptOverlay) clearPopupHandlePreservePromptInput(handle ui.PopupHandle) {
+	if o.session != nil && o.session.Surface != nil && handle.Valid() {
+		o.session.Surface.ClearPopupHandlePreserveCursor(handle)
+	}
+}
+
 func (o chatPromptOverlay) clearOwnedModalPopup(owner string) {
 	if o.session != nil && o.session.Surface != nil {
 		o.session.Surface.ClearPopupForOwnerPreserveCursor(owner)
@@ -247,6 +260,54 @@ func (o chatPromptOverlay) showPriorityPrompt(lines []string, prompt string) (st
 	}
 	fmt.Print(renderedPrompt)
 	return renderedPrompt, cleanup, false
+}
+
+// showPriorityPromptBody renders only the priority prompt body (question text
+// plus suggestions) and deliberately opens the popup without a composer line.
+// Interactive answers are merged into the bottom prompt instead (see
+// chatMergedPromptComposer), so the answer input row is no longer part of the
+// popup: the popup keeps the body rows and the bottom prompt row keeps
+// ownership of the cursor through PromptInput/PromptCursor.
+//
+// ok=false means the fixed surface is unavailable and the caller must use
+// showPriorityPrompt (dedicated popup input row) instead.
+func (o chatPromptOverlay) showPriorityPromptBody(lines []string) (func(), bool) {
+	if !o.surfaceEnabled() {
+		return func() {}, false
+	}
+	locked := o.session != nil
+	if locked {
+		o.session.priorityPromptMu.Lock()
+	}
+	var (
+		handle ui.PopupHandle
+		once   sync.Once
+	)
+	cleanup := func() {
+		once.Do(func() {
+			if o.session != nil {
+				o.session.priorityPopupHandle = ui.PopupHandle{}
+				o.session.priorityPopupLines = nil
+			}
+			if handle.Valid() {
+				// The merged answer path owns the bottom prompt (and the user's
+				// parked draft), so closing the body-only popup must not reset
+				// the coordinator prompt state.
+				o.clearPopupHandlePreservePromptInput(handle)
+			}
+			if locked {
+				o.session.priorityPromptMu.Unlock()
+			}
+		})
+	}
+	o.beginDirectOutput()
+	handle = o.session.Surface.BeginPopupInputForOwnerWithViewport(
+		lines,
+		"",
+		chatPriorityPromptPopupOwner,
+		priorityPromptViewport(lines),
+	)
+	return cleanup, true
 }
 
 func priorityPromptViewport(lines []string) ui.PopupViewportSpec {

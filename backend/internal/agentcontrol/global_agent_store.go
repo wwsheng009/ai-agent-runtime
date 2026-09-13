@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -418,7 +419,10 @@ func (s *SQLiteGlobalAgentRegistryStore) ReserveAgentControlAgentSpawn(ctx conte
 			return AgentRecord{}, fmt.Errorf("count active agent registry children: %w", err)
 		}
 		if activeCount >= maxThreads {
-			return AgentRecord{}, fmt.Errorf("agent spawn thread limit reached: max_threads=%d active_children=%d", maxThreads, activeCount)
+			// P2-8: the transactional guard cannot inspect session liveness, so
+			// it reports the counters plus the shared next_action guidance and
+			// leaves the eviction pass to the hosts.
+			return AgentRecord{}, fmt.Errorf("%s", ThreadLimitMessage(maxThreads, activeCount, nil))
 		}
 	}
 	if _, err := upsertAgentControlAgentTx(ctx, tx, child); err != nil {
@@ -437,6 +441,65 @@ func (s *SQLiteGlobalAgentRegistryStore) ReserveAgentControlAgentSpawn(ctx conte
 	}
 	s.notifyAgentWake(wake)
 	return stored, nil
+}
+
+// ReleaseAgentControlAgentSpawn compensates a spawn reservation that never
+// became a runnable child. The reserved row is moved to the stale terminal
+// state (retaining diagnostics) so it no longer counts against max_threads.
+// Releasing an unknown or already terminal row is a no-op, and the release
+// reason is preserved on the wake event kind for audits.
+func (s *SQLiteGlobalAgentRegistryStore) ReleaseAgentControlAgentSpawn(ctx context.Context, agentID string, reason string) (AgentRecord, error) {
+	if s == nil {
+		return AgentRecord{}, fmt.Errorf("agent control agent registry store is not initialized")
+	}
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return AgentRecord{}, fmt.Errorf("agent id is required")
+	}
+	if err := s.ensure(); err != nil {
+		return AgentRecord{}, err
+	}
+	record, err := s.getAgentControlAgentByID(ctx, agentID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return AgentRecord{}, nil
+		}
+		return AgentRecord{}, err
+	}
+	record = record.Normalize()
+	if record.AgentID == "" || record.Closed() {
+		return record, nil
+	}
+	if record.RootSessionID == "" || record.AgentPath == "" {
+		return AgentRecord{}, fmt.Errorf("release agent spawn: reservation row %s is missing root session id or agent path", agentID)
+	}
+	eventKind := "spawn_released"
+	if reason = normalizeAgentWakeReason(reason); reason != "" {
+		eventKind += ":" + reason
+	}
+	if _, err := s.markAgentControlAgentSubtreeTerminal(ctx, record.RootSessionID, record.AgentPath, AgentStatusStale, eventKind, time.Now().UTC()); err != nil {
+		return AgentRecord{}, err
+	}
+	released, err := s.getAgentControlAgentByID(ctx, agentID)
+	if err != nil {
+		return AgentRecord{}, err
+	}
+	return released.Normalize(), nil
+}
+
+// normalizeAgentWakeReason keeps release reasons short and single-token so the
+// existing wake event kind remains filterable.
+func normalizeAgentWakeReason(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return ""
+	}
+	reason = strings.NewReplacer(":", " ", "\n", " ", "\r", " ", "\t", " ").Replace(reason)
+	reason = strings.Join(strings.Fields(reason), "-")
+	if len(reason) > 80 {
+		reason = reason[:80]
+	}
+	return reason
 }
 
 // ListAgentControlAgents returns durable AgentControl identity rows matching
@@ -669,6 +732,19 @@ func upsertAgentControlAgentTx(ctx context.Context, tx *sql.Tx, record AgentReco
 // CloseAgentControlAgentSubtree marks one path and all descendants closed.
 func (s *SQLiteGlobalAgentRegistryStore) CloseAgentControlAgentSubtree(ctx context.Context, rootSessionID string, agentPath string, closedAt time.Time) (int64, error) {
 	return s.markAgentControlAgentSubtreeTerminal(ctx, rootSessionID, agentPath, AgentStatusClosed, "closed", closedAt)
+}
+
+// ReclaimAgentControlAgentSubtree closes one path and all descendants as a
+// quota eviction (plan P2-8 方案 3). Rows end in the same terminal closed state
+// as an orderly close_agent, but the emitted wake event carries
+// "reclaimed:<reason>" so parents, /debug and read_agent_events can tell an
+// automatic eviction from an operator action.
+func (s *SQLiteGlobalAgentRegistryStore) ReclaimAgentControlAgentSubtree(ctx context.Context, rootSessionID string, agentPath string, reason string, reclaimedAt time.Time) (int64, error) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "quota"
+	}
+	return s.markAgentControlAgentSubtreeTerminal(ctx, rootSessionID, agentPath, AgentStatusClosed, "reclaimed:"+reason, reclaimedAt)
 }
 
 func (s *SQLiteGlobalAgentRegistryStore) markAgentControlAgentSubtreeTerminal(ctx context.Context, rootSessionID string, agentPath, status, eventKind string, terminalAt time.Time) (int64, error) {

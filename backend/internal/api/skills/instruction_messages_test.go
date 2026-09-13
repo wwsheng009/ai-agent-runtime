@@ -53,3 +53,26 @@ func TestBuildRuntimeInstructionMessages_AddsTaskDifficultyGuidanceToStructuredL
 		t.Fatalf("expected developer instruction to be preserved, got: %#v", messages)
 	}
 }
+
+func TestBuildRuntimeInstructionMessages_IncludesMultiAgentCollaborationGuidanceOnce(t *testing.T) {
+	messages := buildRuntimeInstructionMessages(&profileRuntimeState{
+		PromptText: "Profile system prompt.",
+	}, "", "codex")
+	content := primarySystemInstructionContent(messages)
+	if !strings.Contains(content, "Multi-agent collaboration guidance:") {
+		t.Fatalf("expected collaboration guidance, got:\n%s", content)
+	}
+	if !strings.Contains(content, "continue meaningful non-overlapping work in the same turn") {
+		t.Fatalf("expected spawn-then-work guidance, got:\n%s", content)
+	}
+	if strings.Count(content, "Multi-agent collaboration guidance:") != 1 {
+		t.Fatalf("expected collaboration guidance once, got:\n%s", content)
+	}
+
+	again := withDelegationGuidance(messages)
+	againContent := primarySystemInstructionContent(again)
+	if strings.Count(againContent, "Multi-agent collaboration guidance:") != 1 ||
+		strings.Count(againContent, "Task difficulty rating and subagent delegation policy:") != 1 {
+		t.Fatalf("expected idempotent guidance composition, got:\n%s", againContent)
+	}
+}

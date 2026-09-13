@@ -72,6 +72,18 @@ func handleDebugCommand(session *ChatSession, command string) bool {
 		printChatDebugModeStatus(session)
 		return false
 	}
+	// P2-12: /debug supervision is the local acknowledge/defer/resolve entry
+	// for the durable supervision inbox. It is dispatched before the generic
+	// parser, which rejects unknown top-level tokens.
+	if isChatDebugSupervisionArgument(arg) {
+		text, err := handleChatDebugSupervisionCommand(session, arg)
+		if err != nil {
+			printfChatCommandOutput(session, "错误: %v\n", err)
+			return false
+		}
+		printChatCommandOutput(session, text)
+		return false
+	}
 	action, opts, err := parseChatDebugCommand(arg)
 	if err != nil {
 		fmt.Printf("错误: %v\n", err)
@@ -219,7 +231,7 @@ func printChatDebugUsage() {
 }
 
 func chatDebugUsageText() string {
-	return "用法: /debug on | /debug off | /debug status | /debug display | /debug routing | /debug export [--output <zip>|--dir <dir>]"
+	return "用法: /debug on | /debug off | /debug status | /debug display | /debug routing | /debug export [--output <zip>|--dir <dir>] | /debug supervision list|ack|defer|resolve"
 }
 
 func exportChatDebugArchive(session *ChatSession, opts chatDebugArchiveOptions) (*chatDebugArchiveResult, error) {

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -99,6 +100,50 @@ type RunDecision struct {
 	Reason      string
 }
 
+// ExecutionSupervisorStats is a read-only operator snapshot (plan §P0-4 可见性).
+// It exposes the effective config plus cheap in-process counters so that a host
+// debug surface can report "is the watchdog running, how often did it scan,
+// what did it decide last" without touching the store.
+type ExecutionSupervisorStats struct {
+	Enabled          bool
+	Mode             string
+	ScanInterval     time.Duration
+	ExecutionTimeout time.Duration
+	ProgressTimeout  time.Duration
+	ApprovalTimeout  time.Duration
+	CancelGrace      time.Duration
+	StoreOutageGrace time.Duration
+	// LoopRunning reports whether RunLoop is currently executing; a supervisor
+	// that is only used for synchronous ScanOnce calls stays false.
+	LoopRunning bool
+	// Scans / Decisions / Enforced are cumulative since process start.
+	Scans     int64
+	Decisions int64
+	Enforced  int64
+	// LastScan* describe the most recent ScanOnce call, including failures.
+	LastScanAt        time.Time
+	LastScanError     string
+	LastScanDecisions []RunDecision
+	// LastDispatch* describe the most recent completion-outbox flush.
+	LastDispatchAt        time.Time
+	LastDispatchDelivered int
+	LastDispatchFailed    int
+}
+
+// executionSupervisorState is the mutex-guarded counter block behind Stats.
+type executionSupervisorState struct {
+	loopRunning    bool
+	scans          int64
+	decisions      int64
+	enforced       int64
+	lastScanAt     time.Time
+	lastScanError  string
+	lastDecisions  []RunDecision
+	lastDispatchAt time.Time
+	delivered      int
+	failed         int
+}
+
 // ExecutionSupervisor is the P3 child run watchdog: durable run records,
 // deadline tracking, observe/enforce decision scan, interrupt + cancel grace,
 // and the terminal completion outbox (doc 5.2 Durable Execution Supervisor).
@@ -111,6 +156,9 @@ type ExecutionSupervisor struct {
 	Dispatcher  CompletionDispatcher
 	// Now is injectable for tests. Nil uses time.Now().UTC().
 	Now func() time.Time
+
+	statsMu sync.Mutex
+	stats   executionSupervisorState
 }
 
 // StartRun creates a durable run record and returns it. run_id is generated
@@ -243,6 +291,7 @@ func (s *ExecutionSupervisor) ScanOnce(ctx context.Context) ([]RunDecision, erro
 	now := s.now()
 	runs, err := s.Store.ListActiveExecutionRuns(ctx, 200)
 	if err != nil {
+		s.recordScan(now, nil, err)
 		return nil, err
 	}
 	var decisions []RunDecision
@@ -253,12 +302,14 @@ func (s *ExecutionSupervisor) ScanOnce(ctx context.Context) ([]RunDecision, erro
 			decisions = append(decisions, *decision)
 		}
 	}
+	var dispatchErr error
 	if s.Dispatcher != nil {
 		if err := s.DispatchPendingOutbox(ctx); err != nil {
-			return decisions, err
+			dispatchErr = err
 		}
 	}
-	return decisions, nil
+	s.recordScan(now, decisions, dispatchErr)
+	return decisions, dispatchErr
 }
 
 // RunLoop runs ScanOnce on the configured interval until ctx is canceled.
@@ -267,6 +318,8 @@ func (s *ExecutionSupervisor) RunLoop(ctx context.Context) {
 	if s == nil {
 		return
 	}
+	s.setLoopRunning(true)
+	defer s.setLoopRunning(false)
 	cfg := s.effectiveConfig()
 	interval := cfg.ScanInterval
 	if interval <= 0 {
@@ -305,16 +358,107 @@ func (s *ExecutionSupervisor) DispatchPendingOutbox(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if len(entries) == 0 {
+		return nil
+	}
 	now := s.now()
+	delivered, failed := 0, 0
 	for _, entry := range entries {
 		seq, err := s.Dispatcher.DispatchCompletion(ctx, entry)
 		if err != nil {
 			_, _ = s.Store.MarkOutboxFailed(ctx, entry.OutboxID, err.Error(), now)
+			failed++
 			continue
 		}
 		_, _ = s.Store.MarkOutboxDelivered(ctx, entry.OutboxID, seq, now)
+		delivered++
 	}
+	s.recordDispatch(now, delivered, failed)
 	return nil
+}
+
+// Stats returns a point-in-time snapshot of the watchdog configuration and
+// counters for operator surfaces (/debug). A nil receiver yields the zero
+// snapshot instead of panicking so callers can render "not wired" directly.
+func (s *ExecutionSupervisor) Stats() ExecutionSupervisorStats {
+	if s == nil {
+		return ExecutionSupervisorStats{}
+	}
+	cfg := s.effectiveConfig()
+	s.statsMu.Lock()
+	state := s.stats
+	s.statsMu.Unlock()
+	decisions := make([]RunDecision, len(state.lastDecisions))
+	copy(decisions, state.lastDecisions)
+	return ExecutionSupervisorStats{
+		Enabled:               cfg.Enabled,
+		Mode:                  cfg.Mode,
+		ScanInterval:          cfg.ScanInterval,
+		ExecutionTimeout:      cfg.DefaultExecutionTimeout,
+		ProgressTimeout:       cfg.DefaultProgressTimeout,
+		ApprovalTimeout:       cfg.DefaultApprovalTimeout,
+		CancelGrace:           cfg.DefaultCancelGrace,
+		StoreOutageGrace:      cfg.StoreOutageGrace,
+		LoopRunning:           state.loopRunning,
+		Scans:                 state.scans,
+		Decisions:             state.decisions,
+		Enforced:              state.enforced,
+		LastScanAt:            state.lastScanAt,
+		LastScanError:         state.lastScanError,
+		LastScanDecisions:     decisions,
+		LastDispatchAt:        state.lastDispatchAt,
+		LastDispatchDelivered: state.delivered,
+		LastDispatchFailed:    state.failed,
+	}
+}
+
+// maxSupervisorStatsDecisions bounds the retained last-scan decisions so a
+// stalled population of runs cannot grow the debug snapshot without limit.
+const maxSupervisorStatsDecisions = 5
+
+func (s *ExecutionSupervisor) recordScan(at time.Time, decisions []RunDecision, err error) {
+	if s == nil {
+		return
+	}
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	s.stats.scans++
+	s.stats.lastScanAt = at
+	s.stats.lastScanError = ""
+	if err != nil {
+		s.stats.lastScanError = err.Error()
+	}
+	s.stats.decisions += int64(len(decisions))
+	kept := decisions
+	if len(kept) > maxSupervisorStatsDecisions {
+		kept = kept[:maxSupervisorStatsDecisions]
+	}
+	s.stats.lastDecisions = append([]RunDecision(nil), kept...)
+	for _, decision := range decisions {
+		if strings.TrimSpace(decision.ActionTaken) != "" && decision.ActionTaken != "none_observe" {
+			s.stats.enforced++
+		}
+	}
+}
+
+func (s *ExecutionSupervisor) recordDispatch(at time.Time, delivered, failed int) {
+	if s == nil {
+		return
+	}
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	s.stats.lastDispatchAt = at
+	s.stats.delivered = delivered
+	s.stats.failed = failed
+}
+
+func (s *ExecutionSupervisor) setLoopRunning(running bool) {
+	if s == nil {
+		return
+	}
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	s.stats.loopRunning = running
 }
 
 // evaluateRun applies the health matrix to a single active run.

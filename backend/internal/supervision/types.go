@@ -267,6 +267,22 @@ type WakeFilter struct {
 	Limit                int
 }
 
+// WakeClaim records one delivered auto-wake for budget accounting (doc 6.5
+// rule 4, plan P1-6 方案 2). Rows are append-only and pruned once the rate
+// window elapses. With WakeBudgetModeDurable the scheduler counts these rows
+// instead of an in-process map, so the budget stays consistent across
+// processes and survives a restart.
+type WakeClaim struct {
+	// ClaimID is the idempotency key: a retried drain must not double count.
+	ClaimID               string          `json:"claim_id,omitempty"`
+	RootScopeID           string          `json:"root_scope_id,omitempty"`
+	BudgetClass           WakeBudgetClass `json:"budget_class,omitempty"`
+	WakeReason            string          `json:"wake_reason,omitempty"`
+	TargetParentSessionID string          `json:"target_parent_session_id,omitempty"`
+	ClaimedAt             time.Time       `json:"claimed_at,omitempty"`
+	ClaimedBy             string          `json:"claimed_by,omitempty"`
+}
+
 // TeamEdge records a durable parent/child Team relationship (doc 6.1/6.7).
 // Agent-side edges already exist in agentcontrol.agent_control_agents; this
 // record covers Team -> Team nesting which is not expressible there.

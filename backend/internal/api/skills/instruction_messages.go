@@ -11,12 +11,12 @@ import (
 func buildRuntimeInstructionMessages(profileState *profileRuntimeState, workspacePath, provider string) []types.Message {
 	layers := buildRuntimeInstructionLayers(profileState, workspacePath)
 	if layers.HasAny() {
-		return withTaskDifficultyGuidance(layers.CompileInstructionMessages(provider))
+		return withDelegationGuidance(layers.CompileInstructionMessages(provider))
 	}
 	if profileState != nil && strings.TrimSpace(profileState.PromptText) != "" {
-		return withTaskDifficultyGuidance([]types.Message{*types.NewSystemMessage(strings.TrimSpace(profileState.PromptText))})
+		return withDelegationGuidance([]types.Message{*types.NewSystemMessage(strings.TrimSpace(profileState.PromptText))})
 	}
-	return withTaskDifficultyGuidance(nil)
+	return withDelegationGuidance(nil)
 }
 
 func buildRuntimeInstructionLayers(profileState *profileRuntimeState, workspacePath string) *runtimeprompt.Layers {
@@ -115,8 +115,33 @@ func cloneInstructionMessages(messages []types.Message) []types.Message {
 	return cloned
 }
 
+const (
+	taskDifficultyGuidanceHeader        = "Task difficulty rating and subagent delegation policy:"
+	multiAgentCollaborationGuidanceHead = "Multi-agent collaboration guidance:"
+)
+
+// withDelegationGuidance appends the multi-agent instruction blocks that the
+// runtime relies on: the delegation policy (difficulty routing) followed by the
+// collaboration policy (spawn -> keep working, incremental reads, quota, wait
+// discipline). Both blocks are idempotent.
+func withDelegationGuidance(messages []types.Message) []types.Message {
+	return withMultiAgentCollaborationGuidance(withTaskDifficultyGuidance(messages))
+}
+
 func withTaskDifficultyGuidance(messages []types.Message) []types.Message {
-	guidance := strings.TrimSpace(runtimeprompt.RenderTaskDifficultyGuidance())
+	return withInstructionGuidance(messages, taskDifficultyGuidanceHeader, runtimeprompt.RenderTaskDifficultyGuidance())
+}
+
+func withMultiAgentCollaborationGuidance(messages []types.Message) []types.Message {
+	return withInstructionGuidance(messages, multiAgentCollaborationGuidanceHead, runtimeprompt.RenderMultiAgentCollaborationGuidance())
+}
+
+// withInstructionGuidance appends one guidance block to the primary system
+// instruction message, creating one when the profile has none. A message that
+// already carries the block header is left untouched so repeated composition
+// (handler + subagent paths) never duplicates the text.
+func withInstructionGuidance(messages []types.Message, header, rawGuidance string) []types.Message {
+	guidance := strings.TrimSpace(rawGuidance)
 	if guidance == "" {
 		return cloneInstructionMessages(messages)
 	}
@@ -126,7 +151,7 @@ func withTaskDifficultyGuidance(messages []types.Message) []types.Message {
 			continue
 		}
 		content := strings.TrimSpace(cloned[index].Content)
-		if strings.Contains(content, "Task difficulty rating and subagent delegation policy:") {
+		if strings.Contains(content, header) {
 			return cloned
 		}
 		if content == "" {
