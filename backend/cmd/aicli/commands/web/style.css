@@ -135,6 +135,19 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
 #turn-status { margin-left: auto; font-size: 12px; color: var(--fg3); }
 #theme-toggle { padding: 2px 8px; font-size: 12px; cursor: pointer; background: var(--bg3); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; }
 #theme-toggle:hover { background: var(--hoverBg); }
+/* ---- 顶栏当前会话信息（标题 + 会话 ID）：由 sessions.js 在会话列表/切换/新建后更新 ---- */
+#header-session {
+  display: flex; align-items: baseline; gap: 8px;
+  min-width: 0; max-width: 46%; overflow: hidden;
+}
+#header-session-title {
+  font-size: 13px; font-weight: 600; color: var(--fg2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#header-session-id {
+  font-size: 11px; color: var(--fg3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 #conversation {
   flex: 1; min-height: 0; overflow: auto;
   margin: 8px 0;
@@ -735,6 +748,7 @@ body.sidebar-collapsed #sidebar {
 @media (max-width: 767px) {
   body { padding: 8px; }
   header { flex-wrap: wrap; gap: 8px; }
+  #header-session { flex-basis: 100%; max-width: none; order: 2; }
   #turn-status { margin-left: 0; flex-basis: 100%; order: 3; }
   #sidebar {
     width: 200px;

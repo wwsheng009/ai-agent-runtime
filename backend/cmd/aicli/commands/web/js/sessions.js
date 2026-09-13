@@ -13,6 +13,8 @@ var sessionsRefreshBtn = document.getElementById("sessions-refresh-btn");
 var sessionsSortEl = document.getElementById("sessions-sort");
 var sessionListEl = document.getElementById("session-list");
 var sessionSearchEl = document.getElementById("session-search");
+var headerSessionTitleEl = document.getElementById("header-session-title");
+var headerSessionIDEl = document.getElementById("header-session-id");
 var sessions = [];               // 会话列表缓存（GET /web/api/sessions）
 var sessionsQuery = "";          // 会话列表搜索词（纯前端过滤）
 var sidebarCollapsed = false;    // 侧边栏折叠状态（localStorage 记忆）
@@ -316,6 +318,34 @@ function confirmDeleteSession(s) {
     .catch(function (err) { showToast("删除失败: " + err, "error"); });
 }
 
+// 顶栏当前会话信息（标题 + 会话 ID）。currentId 为 /web/api/sessions 响应的
+// current_session_id；标题从 sessions 缓存按 id 匹配（调用点都保证缓存已随
+// 响应同步更新：loadSessions / 切换轮询 / 新建轮询），与侧栏列表同一数据时机。
+// "(untitled)"（后端占位标题）归一为中文占位；长标题/ID 由 CSS 截断，悬停看全值。
+function updateHeaderSession(currentId) {
+  if (!headerSessionTitleEl) { return; }
+  if (!currentId) {
+    headerSessionTitleEl.textContent = "未选择会话";
+    headerSessionTitleEl.removeAttribute("title");
+    if (headerSessionIDEl) {
+      headerSessionIDEl.textContent = "";
+      headerSessionIDEl.removeAttribute("title");
+    }
+    return;
+  }
+  var title = "";
+  for (var i = 0; i < sessions.length; i++) {
+    if (sessions[i].id === currentId) { title = sessions[i].title || ""; break; }
+  }
+  var shown = title && title !== "(untitled)" ? title : "(未命名会话)";
+  headerSessionTitleEl.textContent = shown;
+  headerSessionTitleEl.title = shown;
+  if (headerSessionIDEl) {
+    headerSessionIDEl.textContent = currentId;
+    headerSessionIDEl.title = "会话 ID：" + currentId;
+  }
+}
+
 // 拉取会话列表（GET /web/api/sessions）
 export function loadSessions() {
   var seq = ++sessionsReqSeq;
@@ -328,6 +358,8 @@ export function loadSessions() {
       // 同步当前会话 id：会话变化时缓存页签按需重拉（可见立即刷，后台则记录，
       // 下次进入页签时由 loadCacheAnalytics 按会话不一致强制刷新）。
       syncCacheSession(data.current_session_id);
+      // 顶栏同步当前会话标题与 ID
+      updateHeaderSession(data.current_session_id);
       renderSessionList();
     })
     .catch(function (err) { console.error("sessions fetch failed:", err); });
@@ -380,6 +412,8 @@ function resumeSession(id) {
                   // 当前会话已切换：同步会话 id，缓存页签可见则立即重拉，
                   // 不可见则下次进入页签时按会话不一致强制刷新。
                   syncCacheSession(cur);
+                  // 顶栏同步当前会话标题与 ID（轮询超时兜底：回退目标会话 id）
+                  updateHeaderSession(cur || id);
                   sendStatusEl.textContent = cur === id ? "已切换" : "已切换(状态未同步)";
                 } else {
                   setTimeout(pollResumed, 300);
@@ -427,7 +461,7 @@ function createNewSession() {
                 renderSessionList();
                 refreshScreen(true);
                 // 新会话就绪：同步会话 id，缓存页签按需重拉（同上）。
-                if (cur) { syncCacheSession(cur); }
+                if (cur) { syncCacheSession(cur); updateHeaderSession(cur); }
                 if (sessionsNewBtn) { sessionsNewBtn.disabled = false; }
                 sendStatusEl.textContent = (cur !== "" && cur !== oldID) ? "已新建会话" : "已新建(状态未同步)";
               } else {
