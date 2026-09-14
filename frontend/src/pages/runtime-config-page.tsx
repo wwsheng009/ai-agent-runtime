@@ -2,6 +2,7 @@ import {
   ArrowLeftIcon,
   BarChart3Icon,
   DatabaseIcon,
+  SparklesIcon,
   TerminalSquareIcon,
 } from "lucide-react";
 import { Link } from "react-router-dom";
@@ -60,6 +61,13 @@ export function RuntimeConfigPage() {
               >
                 <BarChart3Icon size={14} />
                 {t("page.usage")}
+              </Link>
+              <Link
+                to="/runtime/skills"
+                className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
+              >
+                <SparklesIcon size={14} />
+                {t("page.skills")}
               </Link>
             </nav>
           </div>

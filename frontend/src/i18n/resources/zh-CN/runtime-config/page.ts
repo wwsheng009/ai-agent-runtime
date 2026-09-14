@@ -8,4 +8,5 @@ export const zhRuntimeConfigPage = {
     backToWorkspace: "返回工作台",
     logs: "日志",
     usage: "用量",
+    skills: "技能市场",
   } as const;

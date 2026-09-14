@@ -1,0 +1,40 @@
+// P2-1A：workspace.panels.jobs 文案模块（并行批次独占，勿跨模块写入）。
+// 新增键请在本对象内按 feature 嵌套；en-US 同名模块需同步补齐（编译期对齐）。
+export const zhWorkspacePanelsJobs = {
+  ariaLabel: "后台任务面板",
+  eyebrow: "Runtime · 后台任务",
+  title: "后台任务",
+  description:
+    "当前会话的后台作业：运行中任务本地走秒，终态任务显示耗时与退出码；输出按需增量读取。",
+  refresh: "刷新后台任务",
+  close: "关闭后台任务面板",
+  loading: "正在加载后台任务…",
+  errorTitle: "后台任务加载失败",
+  empty: "当前会话没有后台任务",
+  emptyHint: "后台命令与长任务会出现在这里，供查看进度与输出。",
+  live: "进行中（{{count}}）",
+  settled: "已结束（{{count}}）",
+  elapsed: "已运行 {{duration}}",
+  duration: "耗时 {{duration}}",
+  exitCode: "退出码 {{code}}",
+  finishedAt: "结束于 {{time}}",
+  cancel: "取消",
+  cancelling: "取消中…",
+  output: {
+    toggle: "查看 {{command}} 的输出",
+    show: "查看输出",
+    hide: "收起输出",
+    loading: "正在读取输出…",
+    empty: "暂无输出",
+    loadMore: "加载更多",
+  },
+  status: {
+    pending: "排队中",
+    running: "运行中",
+    completed: "已完成",
+    failed: "失败",
+    timed_out: "超时",
+    cancelled: "已取消",
+    orphaned: "已失联",
+  },
+} as const;

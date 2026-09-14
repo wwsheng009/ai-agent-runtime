@@ -13,6 +13,7 @@ import { useSearchParams } from "react-router-dom";
 import { adminTokenStorageKey, analyticsFilterKeys, dimensionOptions, errorRate, formatNumber, formatPercent, normalizeDimensions, readAdminToken } from "./format";
 import { emptyCoverage, emptyDimensions, emptyTotals } from "./defaults";
 import { AnalyticsHeader, FilterInput, FilterSelect, Metric, QualityNotice, UsageAnalyticsChartsFallback } from "./primitives";
+import { UsageQuotaPanel } from "./quota";
 import { SessionTable } from "./sessions";
 
 const UsageAnalyticsCharts = lazy(() =>
@@ -183,6 +184,8 @@ export function UsageOverview() {
             <Metric label={t("metrics.failedTurns")} value={formatNumber(totals.failed_turns)} detail={t("metrics.recoveredTurns", { count: totals.recovered_turns })} tone={totals.failed_turns > 0 ? "danger" : "default"} />
             <Metric label={t("metrics.toolErrorRate")} value={formatPercent(errorRate(totals.tool_errors, totals.tool_results_observed))} detail={t("metrics.observedTools", { count: totals.tool_results_observed })} tone={totals.tool_errors > 0 ? "warning" : "default"} />
           </section>
+
+          <UsageQuotaPanel adminToken={adminToken} />
 
           <Suspense fallback={<UsageAnalyticsChartsFallback />}>
             <UsageAnalyticsCharts

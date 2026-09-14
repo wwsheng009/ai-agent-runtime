@@ -8,6 +8,7 @@ import { enSettings } from "./settings";
 import { enLogs } from "./logs";
 import { enUsageAnalytics } from "./usage-analytics";
 import { enRuntimeConfig } from "./runtime-config";
+import { enSkills } from "./skills";
 
 export const enUS = {
   common: enCommon,
@@ -17,4 +18,5 @@ export const enUS = {
   settings: enSettings,
   logs: enLogs,
   usageAnalytics: enUsageAnalytics,
+  skills: enSkills,
 } satisfies DeepStringShape<typeof zhCN>;

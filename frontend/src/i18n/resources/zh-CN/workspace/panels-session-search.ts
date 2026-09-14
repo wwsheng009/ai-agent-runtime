@@ -1,0 +1,51 @@
+// P2-1A：workspace.panels.sessionSearch 文案模块（会话元数据检索弹层）。
+// 新增键请在本对象内按 feature 嵌套；en-US 同名模块需同步补齐（编译期对齐）。
+export const zhWorkspaceSessionSearch = {
+  trigger: "打开会话检索",
+  triggerHint: "按用户 / 标签 / 状态检索服务端会话元数据",
+  ariaLabel: "会话元数据检索",
+  eyebrow: "Runtime · 会话检索",
+  title: "会话元数据检索",
+  description:
+    "按用户、标签与状态检索服务端会话元数据；结果是服务端过滤，非本地标题匹配。",
+  close: "关闭会话检索",
+  form: {
+    legend: "筛选条件",
+    userId: "用户",
+    userIdAny: "任意用户",
+    tags: "标签",
+    tagsPlaceholder: "逗号分隔，如 support,billing",
+    tagsHint: "多标签为 AND 语义：会话需同时包含全部标签。",
+    state: "状态",
+    stateAny: "任意状态",
+    submit: "检索",
+    searching: "检索中…",
+    reset: "清空条件",
+  },
+  state: {
+    active: "进行中",
+    idle: "空闲",
+    closed: "已关闭",
+    archived: "已归档",
+    unknown: "未知状态",
+  },
+  result: {
+    title: "检索结果",
+    count: "命中 {{count}} 条会话",
+    loading: "正在检索会话…",
+    idle: "设置筛选条件后点击「检索」。",
+    empty: "没有匹配的会话",
+    emptyHint: "尝试放宽标签或状态条件后重试。",
+    limitHint: "已达单页上限 {{limit}} 条，请细化条件后重试。",
+    tags: "标签：{{tags}}",
+    updatedAt: "更新于 {{time}}",
+    timeUnknown: "时间未知",
+    open: "打开会话 {{title}}",
+  },
+  error: {
+    title: "会话检索失败",
+    retry: "重试",
+    unavailable: "服务端元数据检索不可用（HTTP {{status}}）；本地标题搜索仍可用。",
+    unavailableUnknown: "服务端元数据检索不可用；本地标题搜索仍可用。",
+  },
+} as const;

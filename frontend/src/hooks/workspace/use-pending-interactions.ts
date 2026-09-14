@@ -5,6 +5,7 @@ import {
   convergePendingInteractions,
   emptyPendingInteractionState,
   failPendingInteractionResolve,
+  hydratePendingInteractions,
   markPendingInteractionResolving,
   pendingPlanReviewFromPlan,
   settlePendingInteraction,
@@ -17,6 +18,7 @@ import {
   answerSessionQuestion as answerSessionQuestionApi,
   resolveSessionToolApproval,
   type RuntimeSessionPlanMode,
+  type RuntimeSessionState,
   type SessionRuntimeEvent,
 } from "@/lib/runtime-api";
 
@@ -25,6 +27,11 @@ type UsePendingInteractionsOptions = {
   sessionId?: string;
   /** 计划模式投影（active 即 plan_review 条目，退出即消失）。 */
   plan?: RuntimeSessionPlanMode | null;
+  /**
+   * P2-1A：运行时状态快照（`GET /sessions/{id}/runtime`）。到达即做幂等重建：
+   * 重载 / 重连后恢复未决审批与提问；陈旧快照不回退 `resolving` / 终态条目。
+   */
+  runtimeState?: RuntimeSessionState | null;
   getErrorMessage?: (error: unknown, fallback: string) => string;
 };
 
@@ -49,6 +56,7 @@ function defaultGetErrorMessage(error: unknown, fallback: string): string {
 export function usePendingInteractions({
   sessionId,
   plan,
+  runtimeState,
   getErrorMessage = defaultGetErrorMessage,
 }: UsePendingInteractionsOptions = {}) {
   const [state, setState] = useState<PendingInteractionState>(
@@ -59,6 +67,14 @@ export function usePendingInteractions({
   const applyRuntimeEvent = useCallback((event: SessionRuntimeEvent) => {
     setState((current) => applyPendingInteractionEvent(current, event));
   }, []);
+
+  // P2-1A：快照重建（幂等）。事件流仍是主数据源，快照只补齐「不在线期间」的缺口。
+  useEffect(() => {
+    if (!runtimeState) {
+      return;
+    }
+    setState((current) => hydratePendingInteractions(current, runtimeState));
+  }, [runtimeState]);
 
   const converge = useCallback(
     (reason: PendingInteractionConvergeReason, targetSessionId?: string) => {

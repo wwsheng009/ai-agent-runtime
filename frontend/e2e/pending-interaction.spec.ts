@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 
 import { expect, test } from "./fixtures";
-import { resetMockState, seedSession } from "./support";
+import { resetMockState, seedRuntimeEvents, seedSession } from "./support";
 
 // P1-7 e2e：审批 / 提问 / 计划评审共用的「待交互」呈现位（composer 上沿单卡片）。
 //
@@ -185,4 +185,39 @@ test("P1-7c：会话终止事件把未决审批收敛，卡片不悬挂", async 
   // 会话终止（停止/断开）→ 未决条目收敛，无需用户点击。
   events.push({ type: "session_interrupted", payload: { reason: "stopped" } });
   await expect(bar).toHaveCount(0, { timeout: 15_000 });
+});
+
+test("P1-7d：页面重载后由运行时状态快照恢复未决审批（事件流为空）", async ({
+  page,
+}) => {
+  await seedSession(page.request);
+  // 事件流保持为空：卡片只可能来自 `GET /sessions/{id}/runtime` 的快照水合。
+  const events: ScriptedEvent[] = [];
+  await installScriptedRuntimeStream(page, events);
+  await seedRuntimeEvents(page.request, SESSION_ID, [
+    {
+      type: "approval_requested",
+      payload: {
+        request_id: "req-e2e-reload",
+        tool_name: "shell",
+        reason: "restored from snapshot",
+        risk_level: "high",
+      },
+    },
+  ]);
+
+  await page.goto(`/workspace/chats/${SESSION_ID}`);
+  await expect(composer(page)).toBeVisible({ timeout: 30_000 });
+
+  const bar = pendingBar(page);
+  await expect(bar).toBeVisible({ timeout: 15_000 });
+  await expect(bar).toHaveAttribute("data-kind", "approval");
+  await expect(bar).toHaveAttribute("data-status", "pending");
+  await expect(bar.getByText("restored from snapshot")).toBeVisible();
+
+  // 重载：事件流仍为空，未决审批仍应从快照恢复（P1-7 的断线/重载缺口）。
+  await page.reload();
+  await expect(composer(page)).toBeVisible({ timeout: 30_000 });
+  await expect(bar).toBeVisible({ timeout: 15_000 });
+  await expect(bar.getByText("restored from snapshot")).toBeVisible();
 });
