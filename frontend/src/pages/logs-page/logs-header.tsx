@@ -14,6 +14,7 @@ import { Link } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 import { buttonVariants } from "@/components/ui/button-variants";
+import { ConnectionStatusBadge } from "@/components/ui/connection-status-badge";
 import { Select } from "@/components/ui/select";
 import type { RuntimeLogsConnectionState } from "@/hooks/use-runtime-logs";
 import { cn } from "@/lib/utils";
@@ -21,7 +22,7 @@ import type {
   RuntimeLogLevelFilter,
   RuntimeLogsActiveChip,
 } from "@/pages/logs-page-shared";
-import { connectionTone } from "@/pages/logs-page/connection";
+import { logsConnectionStatus } from "@/pages/logs-page/connection";
 import { CopyActionButton, LogHeaderBadge } from "@/pages/logs-page/primitives";
 
 type LogsHeaderSectionProps = {
@@ -72,13 +73,6 @@ export function LogsHeaderSection({
   const { t } = useTranslation("logs");
   const { t: tCommon } = useTranslation("common");
 
-  const connection = connectionTone(connectionState, {
-    connecting: t("connectionConnecting"),
-    error: t("connectionError"),
-    idle: t("connectionIdle"),
-    live: t("connectionLive"),
-    reconnecting: t("connectionReconnecting"),
-  });
   const levelFilterOptions = [
     { value: "", label: t("allLevels") },
     { value: "error", label: t("levelError") },
@@ -98,10 +92,17 @@ export function LogsHeaderSection({
                 <TerminalSquareIcon size={13} />
                 {t("title")}
               </LogHeaderBadge>
-              <LogHeaderBadge className={connection.badgeClassName}>
-                {connection.icon}
-                {connection.label}
-              </LogHeaderBadge>
+              <ConnectionStatusBadge
+                variant="header"
+                status={logsConnectionStatus(connectionState)}
+                labels={{
+                  connecting: t("connectionConnecting"),
+                  idle: t("connectionIdle"),
+                  offline: t("connectionError"),
+                  online: t("connectionLive"),
+                  reconnecting: t("connectionReconnecting"),
+                }}
+              />
               <LogHeaderBadge
                 className={cn(
                   logFileExists

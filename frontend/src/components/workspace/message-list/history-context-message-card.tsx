@@ -19,6 +19,7 @@ export function HistoryContextMessageCard({
   labelId,
   message,
   metaId,
+  onPreviewFilePath,
   onSelectArtifact,
   relatedEvidence,
   statusId,
@@ -27,6 +28,8 @@ export function HistoryContextMessageCard({
   labelId: string;
   message: ChatMessage;
   metaId: string;
+  /** P2-1A：关联产物未命中时的运行时文件预览兜底。 */
+  onPreviewFilePath?: (path: string) => void;
   onSelectArtifact: (artifactId: string) => void;
   relatedEvidence: Artifact[];
   statusId: string;
@@ -37,6 +40,7 @@ export function HistoryContextMessageCard({
   const resolveFilePathLink = createArtifactFilePathLinkResolver(
     relatedEvidence,
     onSelectArtifact,
+    onPreviewFilePath,
   );
   const panelId = `${message.id}-context-panel`;
   const view = projectChatView(message, { expanded });

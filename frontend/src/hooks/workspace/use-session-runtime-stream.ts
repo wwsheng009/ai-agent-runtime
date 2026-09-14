@@ -1,6 +1,14 @@
-import { type Dispatch, type SetStateAction, useEffect, useRef } from "react";
+import {
+  type Dispatch,
+  type SetStateAction,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 import { type Thread } from "@/data/mock";
+import { type ConnectionStatus } from "@/lib/connection-status";
 import {
   streamSessionRuntime,
   type SessionRuntimeEvent,
@@ -62,6 +70,20 @@ export function useSessionRuntimeStream({
   selectedThread,
   setThreads,
 }: SessionRuntimeStreamOptions) {
+  // P1-8：对外暴露连接状态与手动重试入口；手动重试复用同一重连循环
+  // （retryNonce 触发 effect 重跑，旧连接先 abort，不新增第二套退避）。
+  // 状态按「连接键（thread:session:retryNonce）」存储：无会话时在渲染期派生为
+  // idle，重试时自然回落 connecting；effect 同步段不写状态
+  // （react-hooks/set-state-in-effect），状态推进只来自流回调与重连循环（异步）。
+  const [statusState, setStatusState] = useState<{
+    key: string;
+    status: ConnectionStatus;
+  } | null>(null);
+  const [retryNonce, setRetryNonce] = useState(0);
+  const retryConnection = useCallback(() => {
+    setRetryNonce((current) => current + 1);
+  }, []);
+
   const runtimeEventsRef = useRef<Record<string, SessionRuntimeEvent[]>>({});
   const runtimeSeqRef = useRef<Record<string, number>>({});
   const activeTurnIdRef = useRef(activeTurnId);
@@ -89,9 +111,17 @@ export function useSessionRuntimeStream({
   }, [renderLiveDeltas]);
   const threadId = selectedThread?.id;
   const sessionId = selectedThread?.sessionId;
+  const sessionKey =
+    threadId && sessionId ? `${threadId}:${sessionId}:${retryNonce}` : null;
+  const connectionStatus: ConnectionStatus =
+    sessionKey === null
+      ? "idle"
+      : statusState?.key === sessionKey
+        ? statusState.status
+        : "connecting";
 
   useEffect(() => {
-    if (!threadId || !sessionId) {
+    if (!threadId || !sessionId || !sessionKey) {
       return;
     }
 
@@ -118,8 +148,11 @@ export function useSessionRuntimeStream({
       let consecutiveFailures = 0;
       while (!controller.signal.aborted) {
         let streamFailed = false;
+        let receivedEvent = false;
         try {
           await streamSessionRuntime(sessionId, {
+            // 重试前以本地 last seq 拉齐：游标即本地已消费的最大 seq，
+            // 手动重试与自动重连共用同一 after 语义（不重复消费 delta）。
             after: runtimeSeqRef.current[sessionId] ?? 0,
             // P1-5 方案 2：父流订阅 live-only 事件——子会话 `subagent.progress`
             // 节流镜像与父会话自身 `tool.progress` 只在 `live=1` 时随 SSE 投递
@@ -130,6 +163,12 @@ export function useSessionRuntimeStream({
             onEvent: (event) => {
               // 收到事件 = 通道已恢复；重置连续失败计数。
               consecutiveFailures = 0;
+              receivedEvent = true;
+              setStatusState((current) =>
+                current?.key === sessionKey && current.status === "online"
+                  ? current
+                  : { key: sessionKey, status: "online" },
+              );
               onTrajectoryEventRef.current?.(event);
               onRuntimeEventRef.current?.(event);
 
@@ -204,6 +243,15 @@ export function useSessionRuntimeStream({
               streamFailed = true;
               // 方案B 防抖：SSE error 事件同样计入连续失败，达到阈值才标记降级。
               consecutiveFailures += 1;
+              const nextStatus: ConnectionStatus =
+                consecutiveFailures >= STREAM_FAILURE_THRESHOLD
+                  ? "offline"
+                  : "reconnecting";
+              setStatusState((current) =>
+                current?.key === sessionKey && current.status === nextStatus
+                  ? current
+                  : { key: sessionKey, status: nextStatus },
+              );
               const message =
                 typeof payload.error === "string" && payload.error.trim()
                   ? payload.error.trim()
@@ -231,6 +279,15 @@ export function useSessionRuntimeStream({
           streamFailed = true;
           const message = getErrorMessage(error, "failed to connect runtime stream");
           consecutiveFailures += 1;
+          const nextStatus: ConnectionStatus =
+            consecutiveFailures >= STREAM_FAILURE_THRESHOLD
+              ? "offline"
+              : "reconnecting";
+          setStatusState((current) =>
+            current?.key === sessionKey && current.status === nextStatus
+              ? current
+              : { key: sessionKey, status: nextStatus },
+          );
           if (consecutiveFailures >= STREAM_FAILURE_THRESHOLD) {
             setThreads((current) =>
               current.map((thread) =>
@@ -251,6 +308,16 @@ export function useSessionRuntimeStream({
         }
         // 退避重连：错误 1s；正常空流 2s（长轮询后端无空流——事件到达即返回；
         // mock/空后端下降低轮询频率，避免共享测试服务被高频请求拖慢）。
+        if (!controller.signal.aborted && !streamFailed) {
+          const nextStatus: ConnectionStatus = receivedEvent
+            ? "online"
+            : "connecting";
+          setStatusState((current) =>
+            current?.key === sessionKey && current.status === nextStatus
+              ? current
+              : { key: sessionKey, status: nextStatus },
+          );
+        }
         await sleep(streamFailed ? 1000 : 2000);
       }
     })();
@@ -265,7 +332,11 @@ export function useSessionRuntimeStream({
     getRuntimeEventSeq,
     mergeRuntimeEvent,
     setThreads,
+    retryNonce,
     sessionId,
+    sessionKey,
     threadId,
   ]);
+
+  return { connectionStatus, retryConnection };
 }

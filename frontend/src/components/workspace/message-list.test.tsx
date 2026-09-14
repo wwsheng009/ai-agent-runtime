@@ -173,4 +173,39 @@ describe("MessageList", () => {
     expect(markup).toContain("正在加载 代码块");
     expect(markup).toContain("正在加载 1 条相关证据");
   });
+
+  it("surfaces a non-online connection status at the stream tail with manual retry", () => {
+    const markup = renderToStaticMarkup(
+      <MessageList
+        artifacts={[]}
+        connectionStatus="offline"
+        isResponding={false}
+        messages={[]}
+        onRetryConnection={() => {}}
+        onSelectArtifact={() => {}}
+      />,
+    );
+
+    expect(markup).toContain('data-connection-status="offline"');
+    expect(markup).toContain("连接中断");
+    expect(markup).toContain("重试");
+  });
+
+  it("keeps the online and idle connection states out of the stream tail", () => {
+    for (const status of ["online", "idle"] as const) {
+      const markup = renderToStaticMarkup(
+        <MessageList
+          artifacts={[]}
+          connectionStatus={status}
+          isResponding={false}
+          messages={[]}
+          onRetryConnection={() => {}}
+          onSelectArtifact={() => {}}
+        />,
+      );
+
+      expect(markup).not.toContain("data-connection-status");
+      expect(markup).not.toContain("重试");
+    }
+  });
 });

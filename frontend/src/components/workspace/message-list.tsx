@@ -4,7 +4,9 @@ import { ScrollTextIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { ConnectionStatusBadge } from "@/components/ui/connection-status-badge";
 import { type Artifact } from "@/data/mock";
+import { useConnectionStatusLabels } from "@/hooks/workspace/use-connection-status-labels";
 import { useConversationScroll } from "@/hooks/workspace/use-conversation-scroll";
 import { isArtifactEvidence } from "@/lib/workspace-artifacts";
 import { cn } from "@/lib/utils";
@@ -34,10 +36,13 @@ export function MessageList({
   backtrackSelectedMessageId = null,
   canBacktrack = false,
   className,
+  connectionStatus = null,
   contentClassName,
   isResponding,
   messages,
   onBacktrackToMessage,
+  onPreviewFilePath,
+  onRetryConnection,
   onSelectBacktrackNavigationMessage,
   onSelectArtifact,
   phase,
@@ -45,12 +50,18 @@ export function MessageList({
   style,
 }: MessageListProps) {
   const { t } = useTranslation("workspace");
+  const { labels: connectionLabels, retryLabel } = useConnectionStatusLabels();
   const artifactMap = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
   const lastMessage = messages[messages.length - 1];
   const streamingMessageId =
     isResponding && lastMessage?.role === "assistant" ? lastMessage.id : null;
   const logLabel =
     messages.length > 0 ? "Workspace conversation timeline" : "Empty workspace conversation timeline";
+  // P1-8：只有非在线态才在流尾提示，避免在线时增加噪声。
+  const showConnectionNotice =
+    connectionStatus === "connecting" ||
+    connectionStatus === "reconnecting" ||
+    connectionStatus === "offline";
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [inlineEditDraft, setInlineEditDraft] = useState("");
   const selectedMessageRef = useRef<HTMLElement | null>(null);
@@ -214,6 +225,7 @@ export function MessageList({
                   labelId={labelId}
                   message={message}
                   metaId={metaId}
+                  onPreviewFilePath={onPreviewFilePath}
                   onSelectArtifact={onSelectArtifact}
                   relatedEvidence={relatedEvidence}
                   statusId={statusId}
@@ -224,6 +236,7 @@ export function MessageList({
                   labelId={labelId}
                   message={message}
                   metaId={metaId}
+                  onPreviewFilePath={onPreviewFilePath}
                   onSelectArtifact={onSelectArtifact}
                   relatedEvidence={relatedEvidence}
                   statusId={statusId}
@@ -243,6 +256,17 @@ export function MessageList({
           >
             <span className="size-2 rounded-full animate-pulse bg-accent-teal" />
             {phase ? PHASE_LABELS[phase] : "Runtime stream active"}
+          </div>
+        ) : null}
+
+        {showConnectionNotice && connectionStatus ? (
+          <div className="pt-1">
+            <ConnectionStatusBadge
+              onRetry={onRetryConnection}
+              retryLabel={retryLabel}
+              status={connectionStatus}
+              labels={connectionLabels}
+            />
           </div>
         ) : null}
       </div>

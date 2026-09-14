@@ -19,6 +19,8 @@ type AssistantMessageCardProps = {
   labelId: string;
   message: ChatMessage;
   metaId: string;
+  /** P2-1A：关联产物未命中时的运行时文件预览兜底。 */
+  onPreviewFilePath?: (path: string) => void;
   onSelectArtifact: (artifactId: string) => void;
   relatedEvidence: Artifact[];
   statusId: string;
@@ -29,6 +31,7 @@ export function AssistantMessageCard({
   labelId,
   message,
   metaId,
+  onPreviewFilePath,
   onSelectArtifact,
   relatedEvidence,
   statusId,
@@ -39,6 +42,7 @@ export function AssistantMessageCard({
   const resolveFilePathLink = createArtifactFilePathLinkResolver(
     relatedEvidence,
     onSelectArtifact,
+    onPreviewFilePath,
   );
   const view = projectChatView(message, {
     streaming: message.id === streamingMessageId,

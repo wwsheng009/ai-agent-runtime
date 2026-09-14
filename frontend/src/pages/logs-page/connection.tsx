@@ -1,49 +1,17 @@
 // 由 pages/logs-page.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
-
-import { RefreshCwIcon, WifiIcon, WifiOffIcon } from "lucide-react";
+// P1-8：状态口径与配色下沉到 lib/connection-status.ts；日志页头改用共享
+// ConnectionStatusBadge（variant="header"），与会话流/直连 chat 流同一套
+// 状态词汇、同一套配色与同一份文案键位。
 
 import type { RuntimeLogsConnectionState } from "@/hooks/use-runtime-logs";
+import {
+  connectionStatusFromLogsState,
+  type ConnectionStatus,
+} from "@/lib/connection-status";
 
-export function connectionTone(
+/** 日志流状态 → 统一连接状态（供日志页头共享呈现件使用）。 */
+export function logsConnectionStatus(
   state: RuntimeLogsConnectionState,
-  labels: {
-    connecting: string;
-    error: string;
-    idle: string;
-    live: string;
-    reconnecting: string;
-  },
-) {
-  switch (state) {
-    case "open":
-      return {
-        badgeClassName: "border-emerald-500/30 bg-emerald-500/12 text-emerald-200",
-        icon: <WifiIcon size={14} />,
-        label: labels.live,
-      };
-    case "connecting":
-      return {
-        badgeClassName: "border-sky-500/30 bg-sky-500/12 text-sky-200",
-        icon: <RefreshCwIcon size={14} className="animate-spin" />,
-        label: labels.connecting,
-      };
-    case "reconnecting":
-      return {
-        badgeClassName: "border-amber-500/30 bg-amber-500/12 text-amber-200",
-        icon: <RefreshCwIcon size={14} className="animate-spin" />,
-        label: labels.reconnecting,
-      };
-    case "error":
-      return {
-        badgeClassName: "border-red-500/30 bg-red-500/12 text-red-200",
-        icon: <WifiOffIcon size={14} />,
-        label: labels.error,
-      };
-    default:
-      return {
-        badgeClassName: "border-border bg-surface-soft text-muted-foreground",
-        icon: <WifiOffIcon size={14} />,
-        label: labels.idle,
-      };
-  }
+): ConnectionStatus {
+  return connectionStatusFromLogsState(state);
 }
