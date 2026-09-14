@@ -14,6 +14,8 @@ import { type SessionOrderMode } from "@/lib/workspace/session-order";
 import { resolveSidebarSessionRowViewModel } from "./session-row-view-model";
 import { WorkspaceSidebarSessionGroupingControl } from "./session-grouping-control";
 import { WorkspaceSidebarSessionOrderControl } from "./session-order-control";
+import { WorkspaceSidebarSessionGroupToggle } from "./session-group-toggle";
+import { useSessionGroupVisibility } from "./use-session-group-visibility";
 import { SidebarSection } from "./section-shell";
 import { WorkspaceSidebarSessionStatsSummary } from "./session-stats-summary";
 import {
@@ -168,6 +170,10 @@ export function WorkspaceSidebarSessionsSection({
         }),
     });
 
+  // P2-6 子片 3：组内展开 / 折叠（Show N more）——只影响呈现，不改排序账目。
+  const { toggle: toggleSessionGroup, visibilityFor } =
+    useSessionGroupVisibility();
+
   return (
     showSessionsSection ? (
       <SidebarSection
@@ -290,6 +296,17 @@ export function WorkspaceSidebarSessionsSection({
                           sessionDirectoryGroups.map((group) => {
                             const isDirectoryOpen =
                               openSessionDirectories[group.key] ?? false;
+                            const pinnedSessionId =
+                              group.sessions.find(
+                                (session) =>
+                                  (sessionThreadById.get(session.id)?.id ??
+                                    session.id) === selectedThreadId,
+                              )?.id ?? null;
+                            const groupVisibility = visibilityFor(
+                              group.key,
+                              group.sessions,
+                              pinnedSessionId,
+                            );
                             // `dropActive` 只用于样式/测试钩子，必须与事件处理器分开：
                             // 整体展开会把非 DOM 属性透传到 <button>（React 会告警）。
                             const { dropActive, ...groupDragHandlers } =
@@ -347,7 +364,7 @@ export function WorkspaceSidebarSessionsSection({
                                         "ml-4",
                                     )}
                                   >
-                                    {group.sessions.map((session) => {
+                                    {groupVisibility.visible.map((session) => {
                                       const row = resolveSidebarSessionRowViewModel(
                                         {
                                           activity:
@@ -436,6 +453,18 @@ export function WorkspaceSidebarSessionsSection({
                                         />
                                       );
                                     })}
+                                    {groupVisibility.collapsible ? (
+                                      <WorkspaceSidebarSessionGroupToggle
+                                        expanded={groupVisibility.expanded}
+                                        hiddenCount={
+                                          groupVisibility.hiddenCount
+                                        }
+                                        onToggle={() =>
+                                          toggleSessionGroup(group.key)
+                                        }
+                                        t={t}
+                                      />
+                                    ) : null}
                                   </div>
                                 ) : null}
                               </div>

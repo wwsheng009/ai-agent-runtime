@@ -3,10 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
   compareSessionsByRecency,
   insertSessionInOrder,
+  isBlankSession,
   isSameSessionOrder,
   isSessionOrderMode,
   moveSessionInOrder,
   orderSessionsForMode,
+  promoteBlankSessions,
   reconcileSessionOrder,
   sessionRecencyTime,
 } from "./session-order";
@@ -234,6 +236,101 @@ describe("session-order", () => {
       expect(isSessionOrderMode("manual")).toBe(true);
       expect(isSessionOrderMode("recency")).toBe(false);
       expect(isSessionOrderMode(undefined)).toBe(false);
+    });
+  });
+
+  describe("isBlankSession（P2-6 子片 3：空白新会话提升）", () => {
+    it("只有权威计数明确为 0 才算空白", () => {
+      expect(isBlankSession({ id: "s1", metadata: { totalTurns: 0 } })).toBe(
+        true,
+      );
+      expect(isBlankSession({ id: "s1", metadata: { totalTurns: 1 } })).toBe(
+        false,
+      );
+    });
+
+    it("字段缺失或不可判定一律按非空白（宁可不提升也不猜）", () => {
+      expect(isBlankSession({ id: "s1" })).toBe(false);
+      expect(isBlankSession({ id: "s1", metadata: {} })).toBe(false);
+      expect(
+        isBlankSession({
+          id: "s1",
+          metadata: { totalTurns: "0" },
+        } as unknown as { id: string; metadata?: { totalTurns?: number } }),
+      ).toBe(false);
+    });
+  });
+
+  describe("promoteBlankSessions", () => {
+    type BlankCandidate = { id: string; metadata?: { totalTurns?: number } };
+
+    function withTurns(id: string, totalTurns?: number): BlankCandidate {
+      return totalTurns === undefined ? { id } : { id, metadata: { totalTurns } };
+    }
+
+    it("空白会话置顶，空白之间与其余会话都保持传入顺序", () => {
+      const sessions = [
+        withTurns("a", 2),
+        withTurns("blank-1", 0),
+        withTurns("b", 5),
+        withTurns("blank-2", 0),
+      ];
+
+      expect(promoteBlankSessions(sessions).map((item) => item.id)).toEqual([
+        "blank-1",
+        "blank-2",
+        "a",
+        "b",
+      ]);
+    });
+
+    it("没有空白会话时返回入参同一引用", () => {
+      const sessions = [withTurns("a", 1), withTurns("b")];
+
+      expect(promoteBlankSessions(sessions)).toBe(sessions);
+    });
+
+    it("手动账目锚定过的空白会话不提升（显式摆放优先于呈现层）", () => {
+      const sessions = [withTurns("a", 1), withTurns("blank", 0)];
+
+      expect(
+        promoteBlankSessions(sessions, { anchoredIds: ["a", "blank"] }).map(
+          (item) => item.id,
+        ),
+      ).toEqual(["a", "blank"]);
+      expect(
+        promoteBlankSessions(sessions, { anchoredIds: ["a", "blank"] }),
+      ).toBe(sessions);
+    });
+
+    it("获得首条消息后提升失效，按当前排序模式（手动账目）归位", () => {
+      const blank = {
+        id: "blank",
+        metadata: { totalTurns: 0 },
+        updatedAt: "2026-01-01T00:00:00Z",
+      };
+      const existing = {
+        id: "a",
+        metadata: { totalTurns: 2 },
+        updatedAt: "2026-01-03T00:00:00Z",
+      };
+      const account = ["a", "blank"];
+
+      expect(
+        promoteBlankSessions(
+          orderSessionsForMode([blank, existing], "manual", account),
+        ).map((item) => item.id),
+      ).toEqual(["blank", "a"]);
+
+      const firstMessage = {
+        ...blank,
+        metadata: { totalTurns: 1 },
+      };
+      expect(
+        promoteBlankSessions(
+          orderSessionsForMode([firstMessage, existing], "manual", account),
+        ).map((item) => item.id),
+      ).toEqual(["a", "blank"]);
     });
   });
 });

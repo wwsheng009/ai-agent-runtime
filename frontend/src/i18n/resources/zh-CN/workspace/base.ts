@@ -167,6 +167,8 @@ export const zhWorkspaceBase = {
       flat: "平铺",
       directoryHint: "按工作目录分组，可拖拽会话跨组移动",
       flatHint: "单列平铺，不显示目录分组；跨组移动请切回按目录",
+      collapse: "收起",
+      showMore: "展开其余 {{count}} 个会话",
     },
     sessionMove: {
       moved: "已移动「{{title}}」到「{{directory}}」",

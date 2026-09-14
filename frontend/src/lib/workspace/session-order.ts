@@ -174,3 +174,41 @@ export function insertSessionInOrder(
   next.splice(edge === "before" ? anchorIndex : anchorIndex + 1, 0, sourceId);
   return isSameSessionOrder(next, order) ? order : next;
 }
+
+/** 空白判定只读会话元数据（后端 `chat.Session.Metadata.TotalTurns`，恒下发）。 */
+export type SessionBlankCandidate = {
+  id: string;
+  metadata?: { totalTurns?: number };
+};
+
+/**
+ * 「空白会话」判定：**只有**权威消息计数明确为 0 才算空白。
+ * 字段缺失 / 非数字 / 其他值一律按非空白处理——宁可不提升，也不猜。
+ */
+export function isBlankSession(session: SessionBlankCandidate): boolean {
+  return session.metadata?.totalTurns === 0;
+}
+
+/**
+ * 空白会话提升：把尚无任何消息的新会话钉在分组顶部（彼此保持传入顺序），
+ * 其余会话相对顺序不变。`anchoredIds` 里的会话不参与提升——手动账目里出现过
+ * 即代表用户显式摆放，呈现层不得改写该意图。无空白会话时返回入参同一引用。
+ */
+export function promoteBlankSessions<T extends SessionBlankCandidate>(
+  sessions: readonly T[],
+  options: { anchoredIds?: readonly string[] } = {},
+): readonly T[] {
+  const anchored = new Set(options.anchoredIds ?? []);
+  const promoted = sessions.filter(
+    (session) => isBlankSession(session) && !anchored.has(session.id),
+  );
+  if (promoted.length === 0) {
+    return sessions;
+  }
+
+  const promotedIds = new Set(promoted.map((session) => session.id));
+  return [
+    ...promoted,
+    ...sessions.filter((session) => !promotedIds.has(session.id)),
+  ];
+}

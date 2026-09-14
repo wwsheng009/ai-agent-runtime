@@ -176,6 +176,8 @@ export const enWorkspaceBase = {
       flat: "Flat",
       directoryHint: "Group by workspace directory; drag sessions across groups to move",
       flatHint: "Single flat list without directory groups; switch to By directory to move sessions across groups",
+      collapse: "Collapse",
+      showMore: "Show {{count}} more sessions",
     },
     sessionMove: {
       moved: "Moved “{{title}}” to “{{directory}}”",

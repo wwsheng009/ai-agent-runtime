@@ -21,7 +21,11 @@ import {
 import { useSessionGrouping } from "@/hooks/workspace/use-session-grouping";
 import { useSessionOrder } from "@/hooks/workspace/use-session-order";
 import { type SessionGroupingMode } from "@/lib/workspace/session-grouping";
-import { type SessionOrderAccount, type SessionOrderMode } from "@/lib/workspace/session-order";
+import {
+  promoteBlankSessions,
+  type SessionOrderAccount,
+  type SessionOrderMode,
+} from "@/lib/workspace/session-order";
 import {
   type RuntimeSessionRecord,
   type RuntimeWorkspaceDirectory,
@@ -68,6 +72,7 @@ export function useSessionGroupView({
 }: UseSessionGroupViewArgs): SessionGroupViewController {
   const { mode: groupingMode, setMode: setGroupingMode } = useSessionGrouping();
   const {
+    accounts: orderAccounts,
     commitOrder,
     mode: orderMode,
     orderFor,
@@ -98,13 +103,19 @@ export function useSessionGroupView({
     [mergedDirectoryGroups],
   );
   // 排序模式（设置域）+ 手动顺序账目（浏览器本地）：只重排分组内会话，不改分组口径。
+  // 空白新会话（尚无任何消息）钉在组顶，获得首条消息后自然落入下面的排序结果；
+  // 用户已在手动账目里显式摆放过的不提升（显式意图优先于呈现层）。
   const orderedSessionGroups = useMemo(
     () =>
       sessionGroups.map((group) => ({
         ...group,
-        sessions: orderFor(group.key, group.sessions),
+        sessions: [
+          ...promoteBlankSessions(orderFor(group.key, group.sessions), {
+            anchoredIds: orderAccounts[group.key],
+          }),
+        ],
       })),
-    [orderFor, sessionGroups],
+    [orderAccounts, orderFor, sessionGroups],
   );
 
   const resolveTarget = useCallback(
