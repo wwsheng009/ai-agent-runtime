@@ -79,11 +79,26 @@ export type SidebarSessionItemTime = {
   title: string;
 };
 
+/**
+ * 批次 3（§5.5）谱系呈现：分支子行的缩进层级与来源徽标（文案已本地化）。
+ * 缺省（无谱系）时行外观与 aria 保持原样。
+ */
+export type SidebarSessionItemLineage = {
+  /** 0 = 无同批可见父行（含跨组 / 被过滤）；1 = 紧随父行的分支子行。 */
+  depth: 0 | 1;
+  /** 徽标文案（已本地化）。 */
+  badgeLabel: string;
+  /** 徽标悬浮提示（来源标题不可得时缺省，不伪造标题）。 */
+  badgeTitle?: string;
+};
+
 export type SidebarSessionItemProps = {
   /** 归档/关闭等快照状态（P1-9）；缺省视为 active。 */
   rowState?: SidebarSessionRowState;
   /** 行内相对时间（P1-9）；缺省不渲染时间行。 */
   time?: SidebarSessionItemTime;
+  /** 批次 3：分支谱系（缩进 + 来源徽标）；缺省保持既有无谱系外观。 */
+  lineage?: SidebarSessionItemLineage;
   actionLabels?: SidebarSessionItemActionLabels;
   onArchive?: (sessionId: string) => void;
   onDelete?: (sessionId: string) => void;
@@ -314,6 +329,7 @@ export function SidebarSessionItem({
   onDragStart,
   onDrop,
   isActive,
+  lineage,
   onArchive,
   onCancelRename,
   onDelete,
@@ -331,6 +347,8 @@ export function SidebarSessionItem({
   title,
 }: SidebarSessionItemProps) {
   const archived = rowState === "archived";
+  // 批次 3（§5.5）：深度 0/1 只影响缩进与 aria-level，不改变行结构。
+  const depth = lineage?.depth ?? 0;
   const showMenu =
     Boolean(actionLabels) &&
     (archived
@@ -360,13 +378,17 @@ export function SidebarSessionItem({
 
   return (
     <div
+      aria-level={depth + 1}
       className={cn("group/session relative", dragging && "opacity-60")}
+      data-depth={depth}
       draggable={dragEnabled}
       onDragStart={onDragStart}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
       onDragEnd={onDragEnd}
+      role="treeitem"
+      style={depth > 0 ? { paddingLeft: depth * 12 } : undefined}
     >
       {dropEdge ? (
         <span
@@ -405,6 +427,15 @@ export function SidebarSessionItem({
             </div>
           ) : null}
         </div>
+        {lineage ? (
+          <span
+            className="shrink-0 rounded-[0.55rem] border border-border bg-surface-soft px-1.5 py-0.5 app-text-10 text-muted-foreground"
+            data-testid="session-fork-badge"
+            title={lineage.badgeTitle}
+          >
+            {lineage.badgeLabel}
+          </span>
+        ) : null}
         {archived && actionLabels ? (
           <span className="shrink-0 rounded-[0.55rem] border border-border bg-surface-soft px-1.5 py-0.5 app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
             {actionLabels.archivedBadge}

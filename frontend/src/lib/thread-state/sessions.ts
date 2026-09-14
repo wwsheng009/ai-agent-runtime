@@ -3,6 +3,10 @@
 import { type Thread } from "@/data/mock";
 import { readSessionReasoningEffort } from "@/lib/reasoning-effort";
 import { normalizeSessionId } from "@/lib/session-id";
+import {
+  isSameSessionLineage,
+  readSessionLineage,
+} from "@/lib/workspace/session-lineage";
 import { type RuntimeSessionRecord, type SessionRuntimeEvent } from "@/types/runtime";
 
 import { mergeUniqueStrings } from "./shared";
@@ -52,6 +56,9 @@ export function mergeRuntimeSessionsIntoThreads(
     const reasoningEffort = readSessionReasoningEffort(
       session.metadata?.context,
     );
+    // 批次 3（§5.5）：快照 metadata.context 的谱系键 → Thread.forkedFrom
+    // （纯前端视图字段，不入后端请求；缺键 = 非分支会话）。
+    const forkedFrom = readSessionLineage(session.metadata?.context);
     const tags = mergeUniqueStrings(
       "runtime-session",
       session.state ? `state:${session.state}` : null,
@@ -73,6 +80,7 @@ export function mergeRuntimeSessionsIntoThreads(
         runtimeSource: session.metadata?.lastAgent || session.metadata?.lastSkill || "runtime",
         lastError: null,
         reasoningEffort,
+        forkedFrom,
         tags,
         prompts: [
           "Sync the latest authoritative session history",
@@ -101,6 +109,7 @@ export function mergeRuntimeSessionsIntoThreads(
         session.metadata?.lastSkill ||
         "runtime",
       reasoningEffort,
+      forkedFrom,
       tags,
     } satisfies Thread;
 
@@ -113,6 +122,7 @@ export function mergeRuntimeSessionsIntoThreads(
       merged.transport !== current.transport ||
       merged.runtimeSource !== current.runtimeSource ||
       merged.reasoningEffort !== current.reasoningEffort ||
+      !isSameSessionLineage(merged.forkedFrom, current.forkedFrom) ||
       merged.tags.join("|") !== current.tags.join("|")
     ) {
       changed = true;

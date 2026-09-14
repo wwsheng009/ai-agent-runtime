@@ -1,4 +1,4 @@
-// P1-9：会话行动作（重命名 / 归档 / 归档恢复 / Fork / 删除 / 目录内新建）自
+// P1-9：会话行动作（重命名 / 归档 / 归档恢复 / 删除 / 目录内新建）自
 // pages/workspace-page.tsx 机械拆分而来（P0-2 A2 复检处置），仅搬迁不改语义。
 
 import type { Dispatch, SetStateAction } from "react";
@@ -9,15 +9,12 @@ import {
   deleteRuntimeSession,
 } from "@/api/runtime/sessions";
 import {
-  buildForkSessionRequest,
   resolveSelectionAfterSessionDelete,
 } from "@/components/workspace/workspace-sidebar/session-row-actions";
 import type { Thread } from "@/data/mock";
 import { createRuntimeSession, updateRuntimeSession } from "@/lib/runtime-api";
 import { normalizeSessionId } from "@/lib/session-id";
-import type { RuntimeSessionRecord } from "@/types/runtime";
 import { useNavigate } from "react-router-dom";
-import { useTranslation } from "react-i18next";
 
 type UseWorkspaceSessionActionsOptions = {
   /** 当前选中会话（线程 sessionId / id / 路由参数的归一值）：删除它时回到工作台首页。 */
@@ -26,9 +23,8 @@ type UseWorkspaceSessionActionsOptions = {
   clientUserId: string;
   /** 轨迹硬重置（会话切换后事件日志独立自增，必须显式清游标）。 */
   onResetTrajectory: () => void;
-  /** 会话列表刷新（重命名 / 归档 / Fork / 删除后统一走快照刷新）。 */
+  /** 会话列表刷新（重命名 / 归档 / 删除后统一走快照刷新）。 */
   refreshSessions: () => void;
-  runtimeSessions: RuntimeSessionRecord[];
   /** 多用户视图下选中的用户 id（优先于 clientUserId）。 */
   selectedUserId: string;
   setThreads: Dispatch<SetStateAction<Thread[]>>;
@@ -39,12 +35,10 @@ export function useWorkspaceSessionActions({
   clientUserId,
   onResetTrajectory,
   refreshSessions,
-  runtimeSessions,
   selectedUserId,
   setThreads,
 }: UseWorkspaceSessionActionsOptions) {
   const navigate = useNavigate();
-  const { t } = useTranslation("workspace");
 
   async function handleRenameRuntimeSession(sessionId: string, title: string) {
     await updateRuntimeSession(sessionId, { title });
@@ -79,32 +73,6 @@ export function useWorkspaceSessionActions({
   async function handleRestoreRuntimeSession(sessionId: string) {
     await activateRuntimeSession(sessionId);
     refreshSessions();
-  }
-
-  // P1-9：后端无克隆 API，Fork = 继承标题后缀与工作目录的新独立会话（不复制历史）。
-  async function handleForkRuntimeSession(
-    sessionId: string,
-    sourceTitle: string,
-  ) {
-    const source = runtimeSessions.find((session) => session.id === sessionId);
-    if (!source) {
-      return;
-    }
-    const response = await createRuntimeSession(
-      buildForkSessionRequest({
-        session: source,
-        sourceTitle,
-        userId: selectedUserId || clientUserId,
-        branchSuffix: t("sidebar.session.forkSuffix"),
-      }),
-    );
-    refreshSessions();
-    const createdSessionId = normalizeSessionId(response.session?.id ?? "");
-    if (createdSessionId) {
-      // 新会话为独立历史；跳转到 canonical 会话路由，避免陈旧 trajectory 串台。
-      onResetTrajectory();
-      navigate(`/workspace/sessions/${encodeURIComponent(createdSessionId)}`);
-    }
   }
 
   // P1-9：非破坏删除——仅移除会话记录（不连带目录与磁盘数据）。
@@ -149,7 +117,6 @@ export function useWorkspaceSessionActions({
     archiveSession: handleArchiveRuntimeSession,
     createSessionInDirectory: handleCreateSessionInDirectory,
     deleteSession: handleDeleteRuntimeSession,
-    forkSession: handleForkRuntimeSession,
     moveSession: handleMoveRuntimeSession,
     renameSession: handleRenameRuntimeSession,
     restoreSession: handleRestoreRuntimeSession,

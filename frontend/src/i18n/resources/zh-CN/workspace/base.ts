@@ -138,6 +138,8 @@ export const zhWorkspaceBase = {
       createdAt: "创建于 {{time}}",
       delete: "删除会话",
       fork: "Fork 会话",
+      forkBadge: "分支",
+      forkBadgeTitle: "分支自「{{title}}」",
       forkSuffix: "（分支）",
       hideArchived: "隐藏归档",
       menu: "会话操作",

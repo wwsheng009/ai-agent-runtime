@@ -57,6 +57,13 @@ export const zhWorkspacePanelsMessages = {
     retryAriaLabel: "重试这一回合",
     statsLabel: "回合统计",
   },
+  // 文案口径对齐参照实现（deepseek-harness locale.ts:71-72），不自创说法。
+  branch: {
+    label: "在新对话中分支",
+    unavailable: "仅可从已完成轮次的最后一条消息分支",
+    failed: "分支失败，请稍后重试",
+    pending: "正在创建分支会话…",
+  },
   flowFallback: {
     title: "未知事件类型",
     hint: "已保留原始载荷，只读展示。",

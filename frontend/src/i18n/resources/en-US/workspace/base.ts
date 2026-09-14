@@ -146,6 +146,8 @@ export const enWorkspaceBase = {
       createdAt: "Created {{time}}",
       delete: "Delete session",
       fork: "Fork session",
+      forkBadge: "Branch",
+      forkBadgeTitle: "Branched from {{title}}",
       forkSuffix: " (branch)",
       hideArchived: "Hide archived",
       menu: "Session actions",

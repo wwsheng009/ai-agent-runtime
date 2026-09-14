@@ -46,6 +46,8 @@ type WorkspaceMainSectionProps = Pick<
   | "backtrackNotice"
   | "backtrackPendingMessageId"
   | "backtrackSelectedMessageId"
+  | "branchError"
+  | "branchPendingMessageId"
   | "canBacktrack"
   | "composerAttachments"
   | "connectionStatus"
@@ -54,6 +56,7 @@ type WorkspaceMainSectionProps = Pick<
   | "modelOptions"
   | "onAnswerPendingQuestion"
   | "onBacktrackToMessage"
+  | "onBranchFromMessage"
   | "onDraftChange"
   | "onModelChange"
   | "onProviderChange"
@@ -115,6 +118,8 @@ export function WorkspaceMainSection({
   backtrackNotice,
   backtrackPendingMessageId,
   backtrackSelectedMessageId,
+  branchError,
+  branchPendingMessageId,
   canBacktrack,
   composerAttachments,
   connectionStatus,
@@ -122,6 +127,7 @@ export function WorkspaceMainSection({
   isResponding,
   modelOptions,
   onBacktrackToMessage,
+  onBranchFromMessage,
   onDraftChange,
   onModelChange,
   onProviderChange,
@@ -345,6 +351,8 @@ export function WorkspaceMainSection({
                   backtrackPendingMessageId={backtrackPendingMessageId}
                   backtrackNavigationActive={backtrackNavigationActive}
                   backtrackSelectedMessageId={backtrackSelectedMessageId}
+                  branchError={branchError}
+                  branchPendingMessageId={branchPendingMessageId}
                   canBacktrack={canBacktrack}
                   className={cn(
                     "h-full px-3 sm:px-4 lg:px-5",
@@ -358,6 +366,7 @@ export function WorkspaceMainSection({
                   isResponding={isResponding}
                   messages={selectedThread.messages}
                   onBacktrackToMessage={onBacktrackToMessage}
+                  onBranchFromMessage={onBranchFromMessage}
                   onPreviewFilePath={filePreview.open}
                   onRetryConnection={onRetryConnection}
                   onSelectBacktrackNavigationMessage={onSelectBacktrackNavigationMessage}

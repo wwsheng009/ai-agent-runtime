@@ -1,7 +1,7 @@
 // 由 components/workspace/message-list.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { ScrollTextIcon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ConnectionStatusBadge } from "@/components/ui/connection-status-badge";
@@ -13,7 +13,12 @@ import {
   isContextMessage,
   isSystemPromptMessage,
   isToolReceiptMessage,
+  projectChatFlow,
 } from "@/lib/chat-view";
+import {
+  BRANCH_UNAVAILABLE_REASON_KEY,
+  resolveBranchAnchor,
+} from "@/lib/chat-view/branch-availability";
 import { isArtifactEvidence } from "@/lib/workspace-artifacts";
 import { cn } from "@/lib/utils";
 import { type ChatStreamPhase } from "@/types/runtime";
@@ -42,6 +47,8 @@ export function MessageList({
   backtrackPendingMessageId = null,
   backtrackNavigationActive = false,
   backtrackSelectedMessageId = null,
+  branchError = null,
+  branchPendingMessageId = null,
   canBacktrack = false,
   className,
   connectionStatus = null,
@@ -49,6 +56,7 @@ export function MessageList({
   isResponding,
   messages,
   onBacktrackToMessage,
+  onBranchFromMessage,
   onPreviewFilePath,
   onRetryConnection,
   onSelectBacktrackNavigationMessage,
@@ -63,6 +71,20 @@ export function MessageList({
   const lastMessage = messages[messages.length - 1];
   const streamingMessageId =
     isResponding && lastMessage?.role === "assistant" ? lastMessage.id : null;
+  // 批次 2（§5.4）：分支锚点在**整条 flow** 上求一次（O(n)），再按消息 id 下发给各行；
+  // 行组件不做「我是不是最后一条」的自判（live-only 消息是追加在历史之后的，
+  // 逐行判断会退化成 O(n²) 且漏判实时边界）。
+  const flowItems = useMemo(
+    () => projectChatFlow(messages, { streamingMessageId }),
+    [messages, streamingMessageId],
+  );
+  const branchAnchor = resolveBranchAnchor(flowItems, { isResponding });
+  const branchAnchorMessageId =
+    branchAnchor.kind === "available" ? branchAnchor.messageId : null;
+  const branchDisabledReason =
+    branchAnchor.kind === "unavailable"
+      ? branchAnchor.reasonKey
+      : BRANCH_UNAVAILABLE_REASON_KEY;
   const logLabel =
     messages.length > 0 ? "Workspace conversation timeline" : "Empty workspace conversation timeline";
   // P1-8：只有非在线态才在流尾提示，避免在线时增加噪声。
@@ -173,6 +195,8 @@ export function MessageList({
           <NoticeRow tone="error">{backtrackError}</NoticeRow>
         ) : null}
 
+        {branchError ? <NoticeRow tone="error">{branchError}</NoticeRow> : null}
+
         {backtrackNotice ? (
           <NoticeRow>{backtrackNotice}</NoticeRow>
         ) : null}
@@ -199,8 +223,16 @@ export function MessageList({
             isUser &&
             backtrackNavigationActive &&
             backtrackSelectedMessageId === message.id;
+          // 批次 2（§5.4）：只有锚点行可用；其余行按钮「可见但不可用」，原因同口径下发。
+          const canBranch = branchAnchorMessageId === message.id;
+          const branchPending = branchPendingMessageId === message.id;
+          const onBranch =
+            typeof onBranchFromMessage === "function"
+              ? () => onBranchFromMessage(message.id)
+              : undefined;
           const actionsDisabled =
             Boolean(backtrackPendingMessageId) ||
+            Boolean(branchPendingMessageId) ||
             isResponding ||
             backtrackNavigationActive;
 
@@ -262,9 +294,13 @@ export function MessageList({
                 />
               ) : (
                 <AssistantMessageCard
+                  branchDisabledReason={branchDisabledReason}
+                  branchPending={branchPending}
+                  canBranch={canBranch}
                   labelId={labelId}
                   message={message}
                   metaId={metaId}
+                  onBranch={onBranch}
                   onPreviewFilePath={onPreviewFilePath}
                   onSelectArtifact={onSelectArtifact}
                   relatedEvidence={relatedEvidence}

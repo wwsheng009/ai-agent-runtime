@@ -96,6 +96,9 @@ export function WorkspaceShell({
   backtrackNavigationActive = false,
   backtrackSelectedMessageId = null,
   canBacktrack = false,
+  branchError = null,
+  branchPendingMessageId = null,
+  onBranchFromMessage,
   onCloseBacktrackDialog,
   onConfirmBacktrack,
   onBacktrackEditPromptChange,
@@ -305,6 +308,8 @@ export function WorkspaceShell({
           backtrackPendingMessageId={backtrackPendingMessageId}
           backtrackSelectedMessageId={backtrackSelectedMessageId}
           canBacktrack={canBacktrack}
+          branchError={branchError}
+          branchPendingMessageId={branchPendingMessageId}
           composerAttachments={composerAttachments}
           composerOverlayRef={composerOverlayRef}
           connectionStatus={connectionStatus}
@@ -323,6 +328,7 @@ export function WorkspaceShell({
           onPlanDecision={onPlanDecision}
           onPlanNotesChange={onPlanNotesChange}
           onBacktrackToMessage={onBacktrackToMessage}
+          onBranchFromMessage={onBranchFromMessage}
           onDraftChange={onDraftChange}
           onModelChange={onModelChange}
           onProviderChange={onProviderChange}

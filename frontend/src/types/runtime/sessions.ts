@@ -33,6 +33,30 @@ export type RuntimeCreateSessionResponse = {
   session: RuntimeSessionRecord;
 };
 
+/**
+ * 会话分支请求（`POST /api/runtime/sessions/{id}/branch`）：把源会话在锚点处的
+ * 历史前缀复制进新会话；缺省锚点 = 会话末尾（整会话分支，供侧栏入口使用）。
+ */
+export type RuntimeSessionBranchRequest = {
+  anchor_message_id?: string;
+  /** 锚点消息本身是否计入前缀（缺省 true：新会话末尾即锚点，可直接接着提问）。 */
+  include_anchor?: boolean;
+  /** 覆盖默认标题（缺省由服务端按源标题 + 后缀生成并去重）。 */
+  title?: string;
+  user_id?: string;
+};
+
+export type RuntimeSessionBranchAnchor = {
+  /** 服务端归一化后的锚点消息 id（历史重写可能重铸 id，跨会话不得假设相等）。 */
+  source_message_id?: string;
+  turn_index?: number;
+  included?: boolean;
+};
+
+export type RuntimeSessionBranchResponse = {
+  session: RuntimeSessionRecord;
+  anchor?: RuntimeSessionBranchAnchor;
+};
 export type RuntimeSessionsResponse = {
   sessions: RuntimeSessionRecord[];
   count: number;

@@ -74,6 +74,15 @@ type Session struct {
 	// HistoryLoaded distinguishes a metadata-only listing result from an
 	// intentionally empty prompt projection. It is never serialized.
 	HistoryLoaded bool `json:"-" yaml:"-"`
+
+	// HistoryTruncated is a transient flag (never persisted) declaring that the
+	// in-memory history was *deliberately* shortened by a rewind path
+	// (backtrack, checkpoint restore). Storage may then physically delete the
+	// canonical rows behind the new history. Without it a shorter history is
+	// indistinguishable from a stale window that raced a concurrent persist, and
+	// the removed messages stay in session_messages — resurrecting on the next
+	// GET /history or Load. It only applies to the next successful Update.
+	HistoryTruncated bool `json:"-" yaml:"-"`
 }
 
 // SessionPreview 会话预览信息
@@ -199,6 +208,18 @@ func (s *Session) ReplaceHistory(messages []types.Message) {
 		s.UpdatedAt = time.Now()
 	}
 	s.refreshDerivedMetadata()
+}
+
+// MarkHistoryTruncated declares that the current in-memory history supersedes
+// the stored transcript and that the canonical rows behind it were deliberately
+// removed. Only rewind paths (backtrack, checkpoint restore) may call this: the
+// storage layer deletes rows only when the shorter history is an exact prefix
+// of the stored transcript, so an accidental call cannot drop unrelated turns.
+func (s *Session) MarkHistoryTruncated() {
+	if s == nil {
+		return
+	}
+	s.HistoryTruncated = true
 }
 
 // EnsureMessageIdentities backfills stable message_id / turn_id on loaded history.
@@ -710,6 +731,7 @@ func (s *Session) CloneWithoutHistory() *Session {
 		UpdatedAt:             s.UpdatedAt,
 		ExpiresAt:             expiresAt,
 		PreserveUpdatedAt:     s.PreserveUpdatedAt,
+		HistoryTruncated:      s.HistoryTruncated,
 		HistoryLoaded:         false,
 	}
 

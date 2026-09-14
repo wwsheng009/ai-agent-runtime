@@ -114,6 +114,17 @@ export type Thread = {
   lastError?: string | null;
   /** 会话级 reasoning effort 覆盖；空值表示跟随 config.yaml 默认档位。 */
   reasoningEffort?: string;
+  /**
+   * 批次 3（§5.5）：会话分支来源（由快照 `metadata.context` 的谱系键映射）。
+   * 纯前端视图字段，不入后端请求；缺省 = 非分支会话。
+   */
+  forkedFrom?: {
+    sessionId: string;
+    /** 分支锚点消息 id（整会话分支缺省）。 */
+    anchorMessageId?: string;
+    /** 分支时的来源会话标题快照（父会话改名后不回溯）。 */
+    originTitle?: string;
+  };
   tags: string[];
   prompts: string[];
   messages: ChatMessage[];

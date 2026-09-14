@@ -1363,6 +1363,7 @@ func (a *SessionActor) applyConversationSnapshot(ctx context.Context, messages [
 		return err
 	}
 	replaceSessionHistoryAndAdvancePromptCacheEpoch(session, messages)
+	session.MarkHistoryTruncated()
 	session.SetHeadOffset(0)
 	if err := a.persistSession(ctx, session); err != nil {
 		return err
@@ -1397,6 +1398,7 @@ func (a *SessionActor) applyConversationPrefix(ctx context.Context, targetCount 
 		cloned[i] = *session.History[i].Clone()
 	}
 	replaceSessionHistoryAndAdvancePromptCacheEpoch(session, cloned)
+	session.MarkHistoryTruncated()
 	session.SetHeadOffset(0)
 	if err := a.persistSession(ctx, session); err != nil {
 		return err

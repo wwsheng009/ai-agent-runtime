@@ -256,6 +256,7 @@ func (a *SessionActor) applyBacktrackHistory(ctx context.Context, session *Sessi
 
 	// Physical truncate: ReplaceHistory + clear head offset.
 	session.ReplaceHistory(prefix)
+	session.MarkHistoryTruncated()
 	session.SetHeadOffset(0)
 	// Drop stale observed context token counts after history rewrite.
 	if session.Metadata.Context != nil {

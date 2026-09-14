@@ -695,6 +695,15 @@ func (s *SQLiteSessionStorage) updateSessionTx(ctx context.Context, tx *sql.Tx, 
 		return err
 	}
 	if session.HistoryLoaded {
+		// A deliberate rewind (backtrack / checkpoint restore) hands over a
+		// shorter history and marks it as truncated. Delete the canonical rows
+		// it removed *before* the projection logic below: otherwise the
+		// stale-window guard treats the shorter history as an outdated view,
+		// keeps the rows in session_messages, and the next GET /history or
+		// Load() resurrects the removed messages on screen.
+		if _, err := s.truncateCanonicalToHistoryTx(ctx, tx, session, &count); err != nil {
+			return err
+		}
 		promptRows, prefixMatches, err := loadMatchingPromptRowsTx(ctx, tx, session.ID, session.History)
 		if err != nil {
 			return err
@@ -763,7 +772,99 @@ func (s *SQLiteSessionStorage) updateSessionTx(ctx context.Context, tx *sql.Tx, 
 	if !session.PreserveUpdatedAt {
 		session.UpdatedAt = time.Now()
 	}
-	return s.upsertSessionMetadataTx(ctx, tx, session, count)
+	if err := s.upsertSessionMetadataTx(ctx, tx, session, count); err != nil {
+		return err
+	}
+	// The rewind has been persisted: keep the flag one-shot so a later write of
+	// the same in-memory session (e.g. an exit sync holding a stale window) can
+	// never truncate canonical rows again.
+	session.HistoryTruncated = false
+	return nil
+}
+
+// truncateCanonicalToHistoryTx physically removes the canonical rows (and the
+// message_count that tracks them) behind a deliberate history rewind.
+//
+// A shorter in-memory history alone is ambiguous: it is either a stale window
+// that raced a concurrent persist (see incomingHistoryReachesNewest, e.g. a CLI
+// exit sync) or an intentional truncation. Only the latter sets
+// Session.HistoryTruncated, and the deletion is applied only when the
+// caller-supplied history is an exact prefix of the stored transcript. Anything
+// else — a compaction summary, a rewritten middle, a message swapped in place —
+// leaves the canonical transcript untouched.
+func (s *SQLiteSessionStorage) truncateCanonicalToHistoryTx(ctx context.Context, tx *sql.Tx, session *Session, count *int) (bool, error) {
+	if session == nil || count == nil || !session.HistoryTruncated || !session.HistoryLoaded {
+		return false, nil
+	}
+	if *count <= len(session.History) {
+		return false, nil
+	}
+	prefix, cutoff, err := s.canonicalPrefixTx(ctx, tx, session.ID, len(session.History))
+	if err != nil {
+		return false, err
+	}
+	if len(prefix) != len(session.History) {
+		return false, nil
+	}
+	for index := range prefix {
+		if !messageIdentityEqual(session.History[index], prefix[index]) {
+			return false, nil
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM session_messages WHERE session_id = ? AND seq > ?
+	`, session.ID, cutoff); err != nil {
+		return false, fmt.Errorf("truncate canonical transcript: %w", err)
+	}
+	*count = len(session.History)
+	return true, nil
+}
+
+// canonicalPrefixTx loads the leading canonical rows (up to limit, in transcript
+// order) and reports the sequence number of the last loaded row so callers can
+// cut the transcript exactly behind it. Rows are returned raw: the duplicate
+// collapsing applied by the projection rebuild path would hide mismatches in a
+// prefix comparison.
+func (s *SQLiteSessionStorage) canonicalPrefixTx(ctx context.Context, tx *sql.Tx, sessionID string, limit int) ([]types.Message, int, error) {
+	if limit < 0 {
+		return nil, 0, nil
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT seq, payload_json, artifact_path, byte_count, sha256
+		FROM session_messages
+		WHERE session_id = ?
+		ORDER BY seq ASC
+		LIMIT ?
+	`, sessionID, limit)
+	if err != nil {
+		return nil, 0, fmt.Errorf("query canonical prefix: %w", err)
+	}
+	defer rows.Close()
+	messages := make([]types.Message, 0, limit)
+	cutoff := 0
+	for rows.Next() {
+		var sequence, byteCount int
+		var inline []byte
+		var artifact sql.NullString
+		var digest string
+		if err := rows.Scan(&sequence, &inline, &artifact, &byteCount, &digest); err != nil {
+			return nil, 0, fmt.Errorf("scan canonical prefix: %w", err)
+		}
+		payload, err := s.readCanonicalPayload(inline, artifact, byteCount, digest)
+		if err != nil {
+			return nil, 0, err
+		}
+		var message types.Message
+		if err := json.Unmarshal(payload, &message); err != nil {
+			return nil, 0, fmt.Errorf("decode canonical prefix: %w", err)
+		}
+		messages = append(messages, message)
+		cutoff = sequence
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return messages, cutoff, nil
 }
 
 // canonicalAppendStartTx decides where the canonical append of the caller's

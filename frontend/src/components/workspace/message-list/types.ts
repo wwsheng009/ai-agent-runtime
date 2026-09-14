@@ -17,6 +17,10 @@ export type MessageListProps = {
   backtrackPendingMessageId?: string | null;
   backtrackNavigationActive?: boolean;
   backtrackSelectedMessageId?: string | null;
+  /** 批次 2（§5.4）：分支失败提示（§6.1 错误表：失败不改路由，只在消息流顶部提示原因）。 */
+  branchError?: string | null;
+  /** 批次 2（§5.4）：在途的分支锚点消息 id（消息级）；与 `onBranchFromMessage` 配套驱动 pending。 */
+  branchPendingMessageId?: string | null;
   canBacktrack?: boolean;
   className?: string;
   /** P1-8：会话运行时流连接状态（非在线态在消息流尾可见并附手动重试）。 */
@@ -29,6 +33,11 @@ export type MessageListProps = {
     mode?: "conversation" | "both",
     options?: MessageBacktrackOptions,
   ) => void;
+  /**
+   * 批次 2（§5.4）：消息级分支入口（「在新对话中分支」）。
+   * 宿主只传入回调即可；可用性由 `resolveBranchAnchor` 在整条 flow 上求解后下发到各行。
+   */
+  onBranchFromMessage?: (messageId: string) => void;
   /** P2-1A：工具行文件路径的运行时预览入口（未命中关联产物时兜底）。 */
   onPreviewFilePath?: (path: string) => void;
   onSelectBacktrackNavigationMessage?: (messageId: string) => void;

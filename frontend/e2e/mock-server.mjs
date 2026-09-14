@@ -1480,6 +1480,95 @@ async function handleRequest(req, res) {
     });
     return;
   }
+  // 会话分支（方案 §6.1）：POST /api/runtime/sessions/{id}/branch。
+  // 与后端同语义：把源会话在锚点处的**历史前缀**复制进新会话，源会话零改动；
+  // 锚点缺省 = 整会话（`include_anchor` 对缺省锚点无效）；`include_anchor:false`
+  // 时前缀停在锚点之前。新会话走既有的确定性 `e2e-branch-N` 序列，lineage 写进
+  // `metadata.context` 的 `fork_*` 键（不复用 `agent_parent_session_id`，避免被
+  // agent-control 面板展示成子代理）；`workspace_path` 由「服务端」继承。
+  if (/^\/api\/runtime\/sessions\/[^/]+\/branch$/.test(path) && req.method === "POST") {
+    const sourceId = decodeURIComponent(path.split("/")[4]);
+    const source = mockSessions.get(sourceId);
+    if (!source) {
+      writeJson(res, 404, { error: "session not found", session_id: sourceId });
+      return;
+    }
+    const body = await readBody(req);
+    const anchorId =
+      typeof body?.anchor_message_id === "string"
+        ? body.anchor_message_id.trim()
+        : "";
+    const includeAnchor = body?.include_anchor !== false;
+    const history = Array.isArray(source.history) ? source.history : [];
+    let anchorIndex = -1;
+    if (anchorId) {
+      anchorIndex = history.findIndex(
+        (message) => message?.metadata?.message_id === anchorId,
+      );
+      if (anchorIndex < 0) {
+        writeJson(res, 400, { error: "branch anchor message not found" });
+        return;
+      }
+    }
+    const sourceTitle =
+      typeof source.title === "string" && source.title ? source.title : sourceId;
+    const createdId = `e2e-branch-${++mockCreatedSessionSeq}`;
+    const title =
+      typeof body?.title === "string" && body.title
+        ? body.title
+        : `${sourceTitle} (branch)`;
+    const now = new Date().toISOString();
+    const sourceContext =
+      source.metadata && typeof source.metadata.context === "object"
+        ? source.metadata.context
+        : {};
+    const branchSession = {
+      session_id: createdId,
+      id: createdId,
+      title,
+      created_at: now,
+      updated_at: now,
+      user_id:
+        typeof body?.user_id === "string" && body.user_id
+          ? body.user_id
+          : source.user_id,
+      state: "active",
+      // 深拷贝前缀：源会话历史零改动（断言「源历史条数不变」的用例依赖这一点）。
+      history: (anchorId
+        ? history.slice(0, includeAnchor ? anchorIndex + 1 : anchorIndex)
+        : history
+      ).map((message) => structuredClone(message)),
+      metadata: {
+        title,
+        context: {
+          ...(sourceContext &&
+          typeof sourceContext.workspace_path === "string" &&
+          sourceContext.workspace_path
+            ? { workspace_path: sourceContext.workspace_path }
+            : {}),
+          fork_parent_session_id: sourceId,
+          fork_root_session_id:
+            typeof sourceContext.fork_root_session_id === "string" &&
+            sourceContext.fork_root_session_id
+              ? sourceContext.fork_root_session_id
+              : sourceId,
+          ...(anchorId ? { fork_source_message_id: anchorId } : {}),
+          fork_origin_title: sourceTitle,
+        },
+      },
+    };
+    mockSessions.set(createdId, branchSession);
+    writeJson(res, 201, {
+      session: branchSession,
+      anchor: {
+        source_message_id: anchorId,
+        turn_index: 0,
+        included: anchorId ? includeAnchor : true,
+      },
+    });
+    return;
+  }
+
   // P1-9 e2e：归档/恢复与非破坏删除需要可变状态，否则侧栏刷新后行不消失。
   if (
     /^\/api\/runtime\/sessions\/[^/]+\/(?:archive|activate)$/.test(path) &&

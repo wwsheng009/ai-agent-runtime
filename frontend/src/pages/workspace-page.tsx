@@ -6,6 +6,7 @@ import { useRuntimeTeamsData } from "@/hooks/workspace/use-runtime-teams-data";
 import { useRuntimeSessionsData } from "@/hooks/workspace/use-runtime-sessions-data";
 import { useRuntimeWorkspaceDirectories } from "@/hooks/workspace/use-runtime-workspace-directories";
 import { useSessionBacktrack } from "@/hooks/workspace/use-session-backtrack";
+import { useSessionBranch } from "@/hooks/workspace/use-session-branch";
 import { useSessionHistorySync } from "@/hooks/workspace/use-session-history-sync";
 import { usePendingInteractions } from "@/hooks/workspace/use-pending-interactions";
 import { useRuntimePlanMode } from "@/hooks/workspace/use-runtime-plan-mode";
@@ -195,7 +196,6 @@ export function WorkspacePage() {
     archiveSession: handleArchiveRuntimeSession,
     createSessionInDirectory: handleCreateSessionInDirectory,
     deleteSession: handleDeleteRuntimeSession,
-    forkSession: handleForkRuntimeSession,
     moveSession: handleMoveRuntimeSession,
     renameSession: handleRenameRuntimeSession,
     restoreSession: handleRestoreRuntimeSession,
@@ -204,10 +204,31 @@ export function WorkspacePage() {
     clientUserId: runtimeClient.userId,
     onResetTrajectory: () => trajectoryStore.reset({ hard: true }),
     refreshSessions: handleRefreshRuntimeSessions,
-    runtimeSessions,
     selectedUserId: selectedRuntimeSessionUserId,
     setThreads,
   });
+
+  // 批次 1（会话分支方案 §5.3）：分支编排 hook —— 侧栏整会话分支与消息级锚点分支同源
+  // （同一个 POST /sessions/{id}/branch），pending / 失败提示也共用一套状态。
+  const {
+    branchError,
+    branchFromMessage: requestSessionBranch,
+    branchPendingMessageId,
+    forkSession: handleForkRuntimeSession,
+  } = useSessionBranch({
+    clientUserId: runtimeClient.userId,
+    onResetTrajectory: () => trajectoryStore.reset({ hard: true }),
+    refreshSessions: handleRefreshRuntimeSessions,
+    selectedUserId: selectedRuntimeSessionUserId,
+  });
+
+  function handleBranchFromMessage(messageId: string) {
+    void requestSessionBranch(
+      activeSessionId,
+      selectedThread?.title ?? "",
+      messageId,
+    );
+  }
 
   useSessionHistorySync({
     applySessionHistoryToThread,
@@ -387,6 +408,9 @@ export function WorkspacePage() {
       onDeleteRuntimeSession={handleDeleteRuntimeSession}
       sessionActivity={sessionActivity}
       runtimeClient={runtimeClient}
+      onBranchFromMessage={handleBranchFromMessage}
+      branchPendingMessageId={branchPendingMessageId}
+      branchError={branchError}
       selectedRuntimeSessionUserId={selectedRuntimeSessionUserId}
       selectedThread={selectedThread}
       selectedArtifact={selectedArtifact}

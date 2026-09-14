@@ -745,6 +745,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/sessions/{id}/archive", h.ArchiveSession).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/activate", h.ActivateSession).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/close", h.CloseSession).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/branch", h.BranchSession).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/history", h.GetSessionHistory).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime", h.GetSessionRuntimeState).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/events", h.ListSessionRuntimeEvents).Methods(http.MethodGet)

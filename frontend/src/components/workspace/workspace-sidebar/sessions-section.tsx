@@ -369,6 +369,8 @@ export function WorkspaceSidebarSessionsSection({
                                         {
                                           activity:
                                             sessionActivity?.[session.id],
+                                          lineageRows:
+                                            groupVisibility.visible,
                                           selectedThreadId,
                                           session,
                                           sessionThread: sessionThreadById.get(
@@ -403,6 +405,7 @@ export function WorkspaceSidebarSessionsSection({
                                             session.id,
                                           )}
                                           isActive={row.isActive}
+                                          lineage={row.lineage}
                                           onArchive={onArchiveSession}
                                           onCancelRename={() =>
                                             setRenamingSessionId(null)

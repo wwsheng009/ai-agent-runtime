@@ -57,6 +57,13 @@ export const enWorkspacePanelsMessages = {
     retryAriaLabel: "Retry this turn",
     statsLabel: "Turn stats",
   },
+  // Wording mirrors the reference implementation (deepseek-harness locale.ts:71-72).
+  branch: {
+    label: "Branch into a new conversation",
+    unavailable: "Available only on the last message of a completed turn",
+    failed: "Branch failed. Please try again.",
+    pending: "Creating branch session…",
+  },
   flowFallback: {
     title: "Unknown event type",
     hint: "Raw payload preserved in a read-only view.",

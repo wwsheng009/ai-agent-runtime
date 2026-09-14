@@ -22,6 +22,10 @@ import { useSessionGrouping } from "@/hooks/workspace/use-session-grouping";
 import { useSessionOrder } from "@/hooks/workspace/use-session-order";
 import { type SessionGroupingMode } from "@/lib/workspace/session-grouping";
 import {
+  buildLineageIndex,
+  stabilizeLineageOrder,
+} from "@/lib/workspace/session-lineage";
+import {
   promoteBlankSessions,
   type SessionOrderAccount,
   type SessionOrderMode,
@@ -105,17 +109,33 @@ export function useSessionGroupView({
   // 排序模式（设置域）+ 手动顺序账目（浏览器本地）：只重排分组内会话，不改分组口径。
   // 空白新会话（尚无任何消息）钉在组顶，获得首条消息后自然落入下面的排序结果；
   // 用户已在手动账目里显式摆放过的不提升（显式意图优先于呈现层）。
+  //
+  // 批次 3（§5.5）层级稳定化：排序结果上再做「子行紧随父行」；只移动子行，父行与
+  // 其余行的相对顺序（含手动账目顺序）不被改写——父行被手动移动时子簇自然跟随。
+  // 索引按**本组已排序行**构建：父行跨组 / 被过滤 / 已消失时子行保持原位。
+  //
+  // §5.5 约束 3（手动排序优先）：手动模式下账目里显式摆过的行是用户锚定的位置，
+  // 层级稳定化不得移动它们；自动模式（`updated`）不读账目，因此不传锚点。
   const orderedSessionGroups = useMemo(
     () =>
-      sessionGroups.map((group) => ({
-        ...group,
-        sessions: [
-          ...promoteBlankSessions(orderFor(group.key, group.sessions), {
-            anchoredIds: orderAccounts[group.key],
-          }),
-        ],
-      })),
-    [orderAccounts, orderFor, sessionGroups],
+      sessionGroups.map((group) => {
+        const ordered = promoteBlankSessions(orderFor(group.key, group.sessions), {
+          anchoredIds: orderAccounts[group.key],
+        });
+        const anchoredIds =
+          orderMode === "manual"
+            ? new Set(orderAccounts[group.key] ?? [])
+            : undefined;
+        return {
+          ...group,
+          sessions: [
+            ...stabilizeLineageOrder(ordered, buildLineageIndex(ordered), {
+              anchoredIds,
+            }),
+          ],
+        };
+      }),
+    [orderAccounts, orderFor, orderMode, sessionGroups],
   );
 
   const resolveTarget = useCallback(

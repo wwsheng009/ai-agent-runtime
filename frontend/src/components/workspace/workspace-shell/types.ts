@@ -60,11 +60,18 @@ export type WorkspaceShellProps = {
   /** P1-9 归档/恢复：可选，缺省时侧栏行内不渲染操作菜单。 */
   onArchiveRuntimeSession?: (sessionId: string) => Promise<void> | void;
   onRestoreRuntimeSession?: (sessionId: string) => Promise<void> | void;
-  /** P1-9 Fork：同标题后缀 + 继承工作目录的新独立会话（不复制历史）。 */
+  /** P1-9 Fork（2026-09 升级）：以会话末尾为锚点的**整会话分支**——服务端把源会话
+   *  历史前缀复制进新会话，源会话零改动；目录归属由服务端继承，前端不传工作目录。 */
   onForkRuntimeSession?: (
     sessionId: string,
     sourceTitle: string,
   ) => Promise<void> | void;
+  /** 批次 2（分支方案 §5.4）：消息级「在新对话中分支」；缺省时轮尾行不渲染分支按钮。 */
+  onBranchFromMessage?: (messageId: string) => void;
+  /** 在途的分支锚点消息 id（消息级）；与 `onBranchFromMessage` 配套驱动按钮 pending。 */
+  branchPendingMessageId?: string | null;
+  /** 分支失败提示（§6.1 错误表：失败不改路由，只在消息流顶部提示原因）。 */
+  branchError?: string | null;
   /** P1-9 非破坏删除：仅移除会话记录，不连带目录与磁盘数据。 */
   onDeleteRuntimeSession?: (sessionId: string) => Promise<void> | void;
   /** P1-9 本地已知的会话活动（等待/运行类）；键为 sessionId。 */

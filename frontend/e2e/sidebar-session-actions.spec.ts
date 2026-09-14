@@ -4,8 +4,10 @@ import { expect, test } from "./fixtures";
 import { resetMockState, seedSession } from "./support";
 
 // P1-9 e2e：侧栏会话行的 Fork 与非破坏删除。
-// Fork = 同标题（本地化后缀）+ 继承工作目录的新独立会话；删除仅移除会话引用，
-// 列表随快照刷新回落，不连带目录数据。
+// Fork 语义（2026-09 分支能力升级，方案 §5.1 入口 2 / §5.3）：侧栏入口 =
+// **整会话分支** —— `POST /sessions/{id}/branch` 且不带锚点（锚点缺省 = 会话末尾），
+// 历史前缀由服务端复制进新会话、源会话零改动；标题带本地化后缀 + 继承工作目录。
+// 删除仅移除会话引用，列表随快照刷新回落，不连带目录数据。
 
 const SOURCE_ID = "e2e-p1-9-src";
 
@@ -44,10 +46,11 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("Fork 生成带分支后缀的独立新会话", async ({ page }) => {
-  const forkBodies: Array<Record<string, unknown>> = [];
-  await page.route("**/api/runtime/sessions*", async (route) => {
+  const branchBodies: Array<Record<string, unknown>> = [];
+  // Playwright glob 的 `*` 不跨 `/`：必须显式写到 `/branch` 段，否则拦不到请求。
+  await page.route("**/api/runtime/sessions/*/branch", async (route) => {
     if (route.request().method() === "POST") {
-      forkBodies.push(
+      branchBodies.push(
         (route.request().postDataJSON() ?? {}) as Record<string, unknown>,
       );
     }
@@ -58,10 +61,21 @@ test("Fork 生成带分支后缀的独立新会话", async ({ page }) => {
   await openSessionRowMenu(page, SOURCE_ID);
   await page.getByRole("menuitem", { name: "Fork session" }).click();
 
-  await expect.poll(() => forkBodies.length).toBe(1);
-  expect(String(forkBodies[0].title)).toContain("(branch)");
-  // mock 为无 id 的建会话请求分配确定性的 e2e-fork-1，并跳转到 canonical 路由。
-  await expect(page).toHaveURL(/\/workspace\/sessions\/e2e-fork-1/);
+  await expect.poll(() => branchBodies.length).toBe(1);
+  expect(String(branchBodies[0].title)).toContain("(branch)");
+  // 侧栏入口是整会话分支：不带锚点（锚点缺省 = 会话末尾，前缀即整会话）。
+  expect(branchBodies[0]).not.toHaveProperty("anchor_message_id");
+  // mock 的 /branch 为每个分支分配确定性的 e2e-branch-N，并跳转到 canonical 路由。
+  await expect(page).toHaveURL(/\/workspace\/sessions\/e2e-branch-\d+$/);
+
+  // 分支不消耗源会话：侧栏同时保留源行与新子行（深度 1）。
+  const sessionsSection = page.locator("section").filter({
+    has: page.getByRole("button", { name: /^Sessions \d+$/ }),
+  });
+  await expect(sessionsSection.locator('[role="treeitem"]')).toHaveCount(2);
+  await expect(
+    sessionsSection.locator('[role="treeitem"][data-depth="1"]'),
+  ).toHaveCount(1);
 });
 
 test("删除会话后该行从侧栏列表消失", async ({ page }) => {

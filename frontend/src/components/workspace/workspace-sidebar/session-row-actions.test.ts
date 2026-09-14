@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  buildForkSessionRequest,
+  buildBranchSessionRequest,
   buildForkSessionTitle,
   resolveSelectionAfterSessionDelete,
 } from "./session-row-actions";
@@ -14,33 +14,35 @@ describe("sidebar session row actions", () => {
     expect(buildForkSessionTitle("   ", "s-2", "（分支）")).toBe("s-2（分支）");
   });
 
-  it("inherits title, user and workspace path for forks", () => {
-    const request = buildForkSessionRequest({
-      session: {
-        id: "s-9",
-        metadata: { context: { workspace_path: "E:\\projects\\demo\\" } },
-      },
+  it("builds a whole-session branch when no anchor is given", () => {
+    const request = buildBranchSessionRequest({
+      sessionId: "s-9",
       sourceTitle: "主线",
       userId: " user-a ",
       branchSuffix: "（分支）",
     });
 
+    // 锚点缺省 = 会话末尾：请求里不出现 anchor 字段，目录归属由服务端继承。
     expect(request).toEqual({
       title: "主线（分支）",
       user_id: "user-a",
-      workspace_path: "E:/projects/demo",
     });
   });
 
-  it("omits user and workspace when unknown so forks stay ungrouped", () => {
-    const request = buildForkSessionRequest({
-      session: { id: "s-9" },
+  it("passes the anchor and includes it for message-level branches", () => {
+    const request = buildBranchSessionRequest({
+      sessionId: "s-9",
       sourceTitle: "",
       userId: "   ",
       branchSuffix: " (branch)",
+      anchorMessageId: " msg_1 ",
     });
 
-    expect(request).toEqual({ title: "s-9 (branch)" });
+    expect(request).toEqual({
+      anchor_message_id: "msg_1",
+      include_anchor: true,
+      title: "s-9 (branch)",
+    });
   });
 
   it("routes selection away only when the deleted session is selected", () => {

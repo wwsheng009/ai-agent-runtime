@@ -110,6 +110,7 @@ export {
   updateRuntimeSession,
   updateSessionPlanMode,
 } from "./sessions";
+export { branchRuntimeSession } from "./session-branch";
 export {
   createWorkspaceDirectory,
   deleteWorkspaceDirectory,

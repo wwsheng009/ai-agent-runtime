@@ -6,6 +6,13 @@ import { type TFunction } from "i18next";
 
 import { type Thread } from "@/data/mock";
 import { formatRelativeTimestamp } from "@/lib/utils";
+import {
+  buildLineageIndex,
+  readRowLineage,
+  resolveLineageOriginTitle,
+  resolveRowDepth,
+  type SessionLineageRow,
+} from "@/lib/workspace/session-lineage";
 import { type RuntimeSessionRecord } from "@/types/runtime";
 
 import { buildSidebarIconLabels, buildThreadSessionDetails } from "./labels";
@@ -15,7 +22,10 @@ import {
   type SidebarSessionActivity,
   type SidebarSessionRowState,
 } from "./session-row-status";
-import { type SidebarSessionItemTime } from "./session-item";
+import {
+  type SidebarSessionItemLineage,
+  type SidebarSessionItemTime,
+} from "./session-item";
 import { describeThreadSession } from "@/components/workspace/workspace-sidebar-shared";
 import {
   getRuntimeSessionActivityIcon,
@@ -27,6 +37,8 @@ export type SidebarSessionRowViewModel = {
   isActive: boolean;
   /** 行内时间；时间戳缺失或不可解析时不渲染（undefined）。 */
   itemTime: SidebarSessionItemTime | undefined;
+  /** 批次 3（§5.5）分支谱系：缩进层级 + 来源徽标；非分支会话为 undefined。 */
+  lineage: SidebarSessionItemLineage | undefined;
   rowState: SidebarSessionRowState;
   statusIcon: SidebarStateIconSpec;
   thread: SidebarThread | undefined;
@@ -37,9 +49,51 @@ type ResolveSidebarSessionRowViewModelArgs = {
   session: RuntimeSessionRecord;
   sessionThread: SidebarThread | undefined;
   activity: SidebarSessionActivity | undefined;
+  /**
+   * 当前行所在分组的可见行集合（与列表渲染同源）。
+   * 用于判定「父行是否也在本组可见」——跨组 / 被过滤的父行不产生缩进。
+   */
+  lineageRows?: readonly SessionLineageRow[] | undefined;
   selectedThreadId: string;
   t: TFunction<"workspace">;
 };
+
+/**
+ * 批次 3（§5.5）：行级谱系呈现的结算。
+ * - `depth` 与 `stabilizeLineageOrder` 同口径：父行在同批可见行里才缩进一级，
+ *   否则子行按顶层呈现（父行跨组 / 被过滤时保持原位）；
+ * - 徽标文案在此本地化，组件不做翻译；来源标题优先后端谱系键，缺失回落父行标题。
+ */
+function resolveSidebarSessionLineage({
+  lineageRows,
+  session,
+  sessionThread,
+  t,
+}: {
+  lineageRows: readonly SessionLineageRow[] | undefined;
+  session: RuntimeSessionRecord;
+  sessionThread: SidebarThread | undefined;
+  t: TFunction<"workspace">;
+}): SidebarSessionItemLineage | undefined {
+  const row: SessionLineageRow = {
+    id: session.id,
+    sessionId: session.id,
+    forkedFrom: sessionThread?.forkedFrom,
+    metadata: session.metadata,
+  };
+  if (!readRowLineage(row)) {
+    return undefined;
+  }
+  const rows = lineageRows ?? [];
+  const originTitle = resolveLineageOriginTitle(row, rows);
+  return {
+    depth: resolveRowDepth(row, buildLineageIndex(rows)),
+    badgeLabel: t("sidebar.session.forkBadge"),
+    ...(originTitle
+      ? { badgeTitle: t("sidebar.session.forkBadgeTitle", { title: originTitle }) }
+      : {}),
+  };
+}
 
 /** 会话尚无对应聊天线程时的占位线程（只为状态图标取标签，不进入列表渲染）。 */
 function buildPlaceholderThread(
@@ -62,6 +116,7 @@ function buildPlaceholderThread(
 
 export function resolveSidebarSessionRowViewModel({
   activity,
+  lineageRows,
   selectedThreadId,
   session,
   sessionThread,
@@ -102,6 +157,12 @@ export function resolveSidebarSessionRowViewModel({
     isActive:
       thread?.id === selectedThreadId || thread?.sessionId === selectedThreadId,
     itemTime,
+    lineage: resolveSidebarSessionLineage({
+      lineageRows,
+      session,
+      sessionThread: thread,
+      t,
+    }),
     rowState,
     statusIcon,
     thread,
