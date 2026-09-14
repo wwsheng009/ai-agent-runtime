@@ -58,6 +58,9 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 		return "", err
 	}
 	resetChatTurnTokenUsage(session)
+	// turn 级自动重跑的前置条件依赖该计数：本 turn 一旦真正执行过工具，重放整轮
+	// 就会重复副作用，因此计数在 turn 开始时清零、重跑期间只增不减。
+	resetChatTurnToolExecutions(session)
 
 	if !session.NoInteractive && shouldShowInitialThinkingIndicator(session, executor) {
 		if session.Interaction != nil {

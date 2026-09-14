@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -149,4 +150,104 @@ func TestTurnAutoRetryDelayIsExponentialAndCapped(t *testing.T) {
 	require.Equal(t, 5*time.Second, turnAutoRetryDelay(4))
 	require.Equal(t, 5*time.Second, turnAutoRetryDelay(9))
 	require.Equal(t, 800*time.Millisecond, turnAutoRetryDelay(0))
+}
+
+// TestTurnAutoRetryReasonCoversEmptyReplyOnly 固化错误类别判据：empty_reply 是
+// 唯一「既没有渲染过输出、又不在输出预算升级集合里」的退化类别，因此纳入自动
+// 重跑；可能已渲染半截输出的类别（truncated_tool_call、reasoning_only_empty_reply）
+// 必须保持排除（分类器先判 reasoning/truncated，再判 empty_reply）。
+func TestTurnAutoRetryReasonCoversEmptyReplyOnly(t *testing.T) {
+	emptyReply := errors.New("empty_reply: stream ended without substantive output")
+
+	require.Equal(t, "invalid_tool_arguments", turnAutoRetryReason(newMalformedTurnError()))
+	require.Equal(t, "empty_reply", turnAutoRetryReason(emptyReply))
+	require.Equal(t, "empty_reply", turnAutoRetryReason(fmt.Errorf("LLM call failed after retries: %w", emptyReply)))
+
+	require.Empty(t, turnAutoRetryReason(errors.New("truncated_tool_call: incomplete tool call markup in aggregated assistant response")))
+	require.Empty(t, turnAutoRetryReason(errors.New("reasoning_only_empty_reply: stream ended with reasoning only and no substantive output")))
+	require.Empty(t, turnAutoRetryReason(errors.New("provider http error: 429 too many requests")))
+	require.Empty(t, turnAutoRetryReason(nil))
+}
+
+// TestChatTurnToolExecutionsCountsAndResets 固化计数的 turn 语义：只增不减，
+// 仅在新 turn 开始时清零（自动重跑不经过 reset 入口）。
+func TestChatTurnToolExecutionsCountsAndResets(t *testing.T) {
+	var nilSession *ChatSession
+	require.Equal(t, 0, chatTurnToolExecutions(nilSession))
+	resetChatTurnToolExecutions(nilSession)
+	recordChatTurnToolExecution(nilSession)
+
+	session := &ChatSession{}
+	require.Equal(t, 0, chatTurnToolExecutions(session))
+	recordChatTurnToolExecution(session)
+	recordChatTurnToolExecution(session)
+	require.Equal(t, 2, chatTurnToolExecutions(session))
+	resetChatTurnToolExecutions(session)
+	require.Equal(t, 0, chatTurnToolExecutions(session))
+}
+
+// TestMaybeAutoRetryDegenerateTurnSkipsWhenToolAlreadyExecuted 固化新增的前置
+// 条件：本轮已真正执行过工具时，整轮重放会重复副作用，必须放弃自动重跑。
+func TestMaybeAutoRetryDegenerateTurnSkipsWhenToolAlreadyExecuted(t *testing.T) {
+	fastTurnAutoRetryDelays(t)
+	t.Setenv(turnAutoRetryLimitEnv, "2")
+
+	session := &ChatSession{NoInteractive: true}
+	recordChatTurnToolExecution(session)
+	executor := &fakeChatExecutor{}
+
+	_, err, attempted := maybeAutoRetryDegenerateTurn(context.Background(), session, executor, "跑构建", newMalformedTurnError())
+
+	require.False(t, attempted)
+	require.Error(t, err)
+	require.Empty(t, executor.prompts, "已执行过工具的轮次不允许整轮重放")
+}
+
+// TestMaybeAutoRetryDegenerateTurnStopsAfterAttemptExecutedTool 固化重跑期间的
+// 工具执行：第 1 次重跑已经碰过工具，就不再安排下一次重放。
+func TestMaybeAutoRetryDegenerateTurnStopsAfterAttemptExecutedTool(t *testing.T) {
+	fastTurnAutoRetryDelays(t)
+	t.Setenv(turnAutoRetryLimitEnv, "2")
+
+	emptyReply := errors.New("empty_reply: stream ended without substantive output")
+	session := &ChatSession{NoInteractive: true}
+	executor := &fakeChatExecutor{}
+	calls := 0
+	executor.onCall = func(ctx context.Context, session *ChatSession, prompt string) (string, error) {
+		calls++
+		recordChatTurnToolExecution(session)
+		return "", emptyReply
+	}
+
+	_, err, attempted := maybeAutoRetryDegenerateTurn(context.Background(), session, executor, "跑构建", emptyReply)
+
+	require.True(t, attempted)
+	require.Error(t, err)
+	require.Equal(t, 1, calls, "重跑期间执行过工具后必须停止继续重放")
+}
+
+// TestMaybeAutoRetryDegenerateTurnRecoversEmptyReply 固化 empty_reply 的恢复：
+// 空回复（未渲染内容、未执行工具）自动重跑一次后成功，用户不必手动重发。
+func TestMaybeAutoRetryDegenerateTurnRecoversEmptyReply(t *testing.T) {
+	fastTurnAutoRetryDelays(t)
+	t.Setenv(turnAutoRetryLimitEnv, "2")
+
+	emptyReply := errors.New("empty_reply: stream ended without substantive output")
+	session := &ChatSession{NoInteractive: true}
+	executor := &fakeChatExecutor{}
+	calls := 0
+	executor.onCall = func(ctx context.Context, session *ChatSession, prompt string) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", emptyReply
+		}
+		return "recovered output", nil
+	}
+
+	response, err, attempted := maybeAutoRetryDegenerateTurn(context.Background(), session, executor, "继续处理", emptyReply)
+
+	require.True(t, attempted)
+	require.NoError(t, err)
+	require.Equal(t, "recovered output", response)
+	require.Equal(t, 2, calls)
 }

@@ -53,6 +53,9 @@ func (e *aicliToolExecutor) ExecuteTool(ctx context.Context, call runtimetypes.T
 
 	ctx = generatedImageToolContext(ctx, session)
 	ctx = withLiveChatToolOutput(ctx, session, call.ID, call.Name)
+	// 参数截断预检已经通过，工具即将真正执行（可能产生副作用）：先记账，turn 级
+	// 自动重跑据此拒绝重放「本轮已执行过工具」的失败轮，避免重复副作用。
+	recordChatTurnToolExecution(session)
 	catalog := ensureFunctionCatalog(session)
 	output, meta, err := catalog.ExecuteFunctionWithMeta(ctx, call.Name, call.Args)
 	if err != nil {

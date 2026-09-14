@@ -1061,3 +1061,19 @@ func TestDegenerateOutputRetryDelayIsCapped(t *testing.T) {
 	require.Equal(t, 60*time.Second,
 		policy.delayForDecision(2, retryDecision{Retryable: true, Reason: "http_503"}))
 }
+
+// TestIsEmptyReplyError 固化 empty_reply 判定：必须穿透 runtime 的终态包装，且
+// 不能把先分流的 reasoning_only_empty_reply / truncated_tool_call 误判进来
+// （CLI 只对 empty_reply 做 turn 级整轮重放，误判会重放已渲染过半截输出的轮次）。
+func TestIsEmptyReplyError(t *testing.T) {
+	emptyReply := fmt.Errorf("empty_reply: stream ended without substantive output")
+	require.True(t, IsEmptyReplyError(emptyReply))
+	require.True(t, IsEmptyReplyError(fmt.Errorf("LLM call aborted after repeated degenerate replies: %w", emptyReply)))
+	require.True(t, IsEmptyReplyError(fmt.Errorf("failed to handle stream response: %w", emptyReply)))
+
+	require.False(t, IsEmptyReplyError(nil))
+	require.False(t, IsEmptyReplyError(fmt.Errorf("truncated_tool_call: incomplete tool call markup in aggregated assistant response")))
+	require.False(t, IsEmptyReplyError(fmt.Errorf("reasoning_only_empty_reply: stream ended with reasoning only and no substantive output")))
+	require.False(t, IsEmptyReplyError(fmt.Errorf("stream_interrupted: stream disconnected before completion")))
+	require.False(t, IsEmptyReplyError(fmt.Errorf("provider http error: 429 too many requests")))
+}

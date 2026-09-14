@@ -794,6 +794,24 @@ func IsTruncatedToolCallError(err error) bool {
 	return false
 }
 
+// IsEmptyReplyError reports whether err belongs to the empty_reply class: the
+// aggregate validator discarded a response that carried no content, no tool
+// calls and no reasoning at all. reasoning_only_empty_reply and
+// truncated_tool_call are classified before it, so reaching this class implies
+// the failed attempt rendered nothing user-visible. Unlike the other degenerate
+// classes it is not budget-bound (isOutputBudgetEscalationReason excludes it),
+// so widening max_tokens is not a recovery lever and a fresh bounded replay is
+// what remains. The wrap chain is walked because the runtime's terminal
+// retryExhaustedError swallows the inner classification.
+func IsEmptyReplyError(err error) bool {
+	for candidate := err; candidate != nil; candidate = stderrs.Unwrap(candidate) {
+		if classifyRetryableLLMError(candidate).Reason == "empty_reply" {
+			return true
+		}
+	}
+	return false
+}
+
 // DiagnoseFailure classifies an LLM failure and explains the safe recovery
 // action. Retryable describes whether a fresh bounded attempt can help; it is
 // false after retry exhaustion and for account, permission, and request errors.

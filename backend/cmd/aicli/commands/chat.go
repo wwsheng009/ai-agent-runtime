@@ -188,6 +188,11 @@ type ChatSession struct {
 	lastLocalShellArtifactPath string
 	turnRecoveryMu             sync.Mutex
 	turnRecovery               *chatTurnRecovery
+	// turnToolExecutionMu guards turnToolExecutions, the number of tool calls
+	// actually dispatched during the current user turn. Turn-level auto retry
+	// replays the whole user message, so it is only allowed while this stays 0.
+	turnToolExecutionMu sync.Mutex
+	turnToolExecutions  int
 	// goalStatusMu guards live goal-status turn timing used by the status line.
 	// Codex accrues active-goal elapsed only while an agent turn is running.
 	goalStatusMu                  sync.Mutex

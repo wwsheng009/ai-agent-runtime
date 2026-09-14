@@ -10,6 +10,7 @@ import (
 	"time"
 
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
+	llm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	llmadapter "github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 )
 
@@ -31,14 +32,29 @@ var (
 )
 
 // turnAutoRetryReason 判定本轮错误是否属于「无副作用、可自动重跑」的退化采样，
-// 返回非空 reason 表示允许自动重跑。目前只认 invalid_tool_arguments：模型返回的
-// 工具参数不是 JSON 对象，工具从未执行，重跑不会重复任何工具副作用。
-// 其它退化类别（reasoning_only_empty_reply、truncated_tool_call）可能已经渲染过
-// 部分流式输出，仍交给内层重采样与 /retry 处理，避免自动重跑重复展示半截输出。
+// 返回非空 reason 表示允许自动重跑。两类：
+//
+//   - invalid_tool_arguments（*MalformedToolCallError）：模型返回的工具参数不是
+//     JSON 对象，该次调用从未执行。
+//   - empty_reply：聚合校验层在确认「无 content、无 tool_calls、无 reasoning」后
+//     才丢弃响应（reasoning_only_empty_reply 与 truncated_tool_call 都在它之前
+//     分流），所以既没有渲染过任何内容、也没有可执行的调用；它又不在输出预算
+//     升级集合里（isOutputBudgetEscalationReason），重采样没有可用的杠杆，
+//     turn 级有界重跑是唯一的恢复通道。
+//
+// 其它退化类别（reasoning_only_empty_reply、truncated_tool_call、
+// stream_interrupted）可能已经渲染过部分流式输出，仍交给内层重采样与 /retry
+// 处理，避免自动重跑重复展示半截输出。
+//
+// 注意：本判据只回答「这类错误是否无副作用」，是否真的可以重放还要看
+// shouldAutoRetryTurnError 里的工具执行计数——整轮重放会重放已执行过的工具。
 func turnAutoRetryReason(err error) string {
 	var malformed *llmadapter.MalformedToolCallError
 	if errors.As(err, &malformed) {
 		return "invalid_tool_arguments"
+	}
+	if llm.IsEmptyReplyError(err) {
+		return "empty_reply"
 	}
 	return ""
 }
@@ -68,6 +84,12 @@ func shouldAutoRetryTurnError(session *ChatSession, err error) bool {
 	if session.IsInterrupted() {
 		return false
 	}
+	// 本轮已经真正执行过工具：重放整条用户消息会重复执行这些调用，与 /retry
+	// 「可能已部分执行工具时不自动执行」的既有规则一致，这里必须放弃自动重跑，
+	// 交回错误路径让用户检查后再手动恢复。
+	if chatTurnToolExecutions(session) > 0 {
+		return false
+	}
 	return turnAutoRetryLimit() > 0
 }
 
@@ -89,9 +111,15 @@ func maybeAutoRetryDegenerateTurn(ctx context.Context, session *ChatSession, exe
 			writeSessionDebugInfo(session, fmt.Sprintf("[turn] auto retry aborted reason=interrupted attempt=%d", attempt), false)
 			return lastResponse, lastErr, true
 		}
+		// 上一次尝试可能已经执行过工具（重跑期间错误类别仍属退化）：再重放只会
+		// 重复副作用，立即停在这里，保留最后一条错误交回既有错误路径。
+		if chatTurnToolExecutions(session) > 0 {
+			writeSessionDebugInfo(session, fmt.Sprintf("[turn] auto retry aborted reason=tool_executed attempt=%d", attempt), false)
+			return lastResponse, lastErr, true
+		}
 		delay := turnAutoRetryDelay(attempt)
 		writeSessionDebugInfo(session, fmt.Sprintf("[turn] auto retry scheduled attempt=%d limit=%d reason=%s backoff=%s", attempt, limit, reason, delay), false)
-		renderTurnAutoRetryNotice(session, attempt, limit, delay)
+		renderTurnAutoRetryNotice(session, reason, attempt, limit, delay)
 		if waitErr := waitTurnAutoRetryDelay(ctx, session, delay); waitErr != nil {
 			writeSessionDebugInfo(session, fmt.Sprintf("[turn] auto retry aborted reason=%s attempt=%d", waitErr.Error(), attempt), false)
 			return lastResponse, lastErr, true
@@ -183,8 +211,12 @@ func turnAutoRetryAttemptContext(ctx context.Context, session *ChatSession) (con
 	return base, func() {}
 }
 
-func renderTurnAutoRetryNotice(session *ChatSession, attempt, limit int, delay time.Duration) {
-	message := fmt.Sprintf("[turn] 模型本轮工具参数非法（工具未执行，无副作用），自动重跑 %d/%d（退避 %.1fs；Esc 可取消）", attempt, limit, delay.Seconds())
+func renderTurnAutoRetryNotice(session *ChatSession, reason string, attempt, limit int, delay time.Duration) {
+	detail := "模型本轮工具参数非法（工具未执行，无副作用）"
+	if reason == "empty_reply" {
+		detail = "模型本轮回复为空（未渲染内容、未执行工具）"
+	}
+	message := fmt.Sprintf("[turn] %s，自动重跑 %d/%d（退避 %.1fs；Esc 可取消）", detail, attempt, limit, delay.Seconds())
 	renderTurnAutoRetryMessage(session, message)
 }
 
