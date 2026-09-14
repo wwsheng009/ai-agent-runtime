@@ -1,9 +1,18 @@
 // 由 lib/trajectory/trajectory-reducer.ts 机械拆分而来（P0-2），仅搬迁不改语义。
 
-import { type TrajectoryChange, type TrajectoryEvent, type TrajectoryHead, type TrajectoryItemStatus, type TrajectorySnapshot, type TrajectoryToolPhase } from "../types";
+import { TRAJECTORY_ITEM_ID_KEY, type TrajectoryChange, type TrajectoryEvent, type TrajectoryHead, type TrajectoryItemStatus, type TrajectorySnapshot, type TrajectoryToolPhase } from "../types";
 
-import { describeRuntimeEvent, readFirstString, readNumber, readString, textDeltaOf, toolArgsSummaryOf, toolCallIdOf, toolErrorOf, toolNameOf, toolResultSummaryOf } from "./event-readers";
+import { describeRuntimeEvent, eventTimestampOf, readFirstString, readNumber, readString, textDeltaOf, toolArgsSummaryOf, toolCallIdOf, toolErrorOf, toolNameOf, toolResultSummaryOf } from "./event-readers";
 import { appendChange, cloneItem, findItem, upsertItem } from "./snapshot-ops";
+
+/**
+ * 显式 item 身份（P4 历史兜底）：降级帧（seq=0）没有 EventStore 游标可依赖，
+ * 因此必须由投影方给出稳定 id，否则多条历史消息会按种类合并成一行。
+ * live/恢复帧不带该键 → 保持既有固定 id 语义（`assistant` / `reasoning`）。
+ */
+function itemIdOf(payload: Record<string, unknown>): string {
+  return readString(payload[TRAJECTORY_ITEM_ID_KEY]).trim();
+}
 
 /** 应用单条事件（事件序已由调用方保证：seq 单调或经缓冲对齐）。 */
 export function applySequencedEvent(
@@ -12,6 +21,8 @@ export function applySequencedEvent(
 ): TrajectoryChange[] {
   const changes: TrajectoryChange[] = [];
   const seq = event.seq;
+  // 墙钟时间（`_event.timestamp`）供时间线做时间轴/缩放；缺失时退化到序号轴。
+  const at = eventTimestampOf(event.payload);
 
   // A transport duplicate may have a different durable EventStore sequence
   // from the original provider delta. It still has to advance the global
@@ -29,6 +40,28 @@ export function applySequencedEvent(
       }
       break;
 
+    case "user": {
+      // P4 历史兜底：无 chat.sse.* 帧的会话由会话历史投影出用户消息行。
+      // 降级帧必须带显式身份——否则多轮用户消息会互相覆盖成一行。
+      const content = readString(event.payload["content"]);
+      const itemId = itemIdOf(event.payload);
+      if (!content || !itemId) {
+        break;
+      }
+      upsertItem(
+        snapshot,
+        changes,
+        itemId,
+        "user",
+        { kind: "text", content },
+        "completed",
+        seq,
+        "",
+        at,
+      );
+      break;
+    }
+
     case "chunk": {
       const type = readString(event.payload["type"]);
       if (type === "reasoning") {
@@ -45,10 +78,13 @@ export function applySequencedEvent(
           { kind: "system", note: "image progress" },
           "completed",
           seq,
+          "",
+          at,
         );
       } else {
         const delta = textDeltaOf(event.payload);
-        const existing = findItem(snapshot, "assistant");
+        const itemId = itemIdOf(event.payload) || "assistant";
+        const existing = findItem(snapshot, itemId);
         const nextHead: TrajectoryHead = {
           kind: "text",
           content: (existing?.head.kind === "text"
@@ -60,11 +96,14 @@ export function applySequencedEvent(
         upsertItem(
           snapshot,
           changes,
-          "assistant",
+          itemId,
           "assistant",
           nextHead,
-          "running",
+          // 历史兜底行是「已完成的整条消息」，live 增量帧才是 running。
+          itemId === "assistant" ? "running" : "completed",
           seq,
+          "",
+          at,
         );
       }
       break;
@@ -89,6 +128,8 @@ export function applySequencedEvent(
         { kind: "structured", payload: event.payload },
         "running",
         seq,
+        "",
+        at,
       );
       break;
 
@@ -101,6 +142,8 @@ export function applySequencedEvent(
         { kind: "structured", payload: event.payload },
         "running",
         seq,
+        "",
+        at,
       );
       break;
 
@@ -113,6 +156,8 @@ export function applySequencedEvent(
         { kind: "structured", payload: event.payload },
         "running",
         seq,
+        "",
+        at,
       );
       break;
 
@@ -125,6 +170,8 @@ export function applySequencedEvent(
         { kind: "structured", payload: event.payload },
         "completed",
         seq,
+        "",
+        at,
       );
       break;
 
@@ -137,6 +184,8 @@ export function applySequencedEvent(
         { kind: "structured", payload: event.payload },
         "running",
         seq,
+        "",
+        at,
       );
       break;
 
@@ -149,6 +198,8 @@ export function applySequencedEvent(
         { kind: "structured", payload: event.payload },
         "completed",
         seq,
+        "",
+        at,
       );
       break;
 
@@ -164,13 +215,15 @@ export function applySequencedEvent(
         { kind: "system", note: describeRuntimeEvent(event.payload) },
         event.payload["live"] === true ? "running" : "completed",
         seq,
+        "",
+        at,
       );
       break;
 
     case "error": {
       const message = readFirstString(event.payload, ["message", "error"]);
       // 失败时冻结仍在运行中的块（保留部分内容，对齐 TUI failed 语义）。
-      freezeOpenItems(snapshot, changes, "failed");
+      freezeOpenItems(snapshot, changes, "failed", at);
       upsertItem(
         snapshot,
         changes,
@@ -179,6 +232,8 @@ export function applySequencedEvent(
         { kind: "system", note: message || "runtime stream error" },
         "failed",
         seq,
+        "",
+        at,
       );
       break;
     }
@@ -192,6 +247,8 @@ export function applySequencedEvent(
         { kind: "system", note: `unknown event kind: ${event.kind}` },
         "completed",
         seq,
+        "",
+        at,
       );
   }
 
@@ -203,7 +260,8 @@ function applyReasoningEvent(
   changes: TrajectoryChange[],
   event: TrajectoryEvent,
 ) {
-  const existing = findItem(snapshot, "reasoning");
+  const itemId = itemIdOf(event.payload) || "reasoning";
+  const existing = findItem(snapshot, itemId);
   let delta = readString(event.payload["content"]);
   if (!delta && event.payload["reasoning"] && typeof event.payload["reasoning"] === "object") {
     delta = readString((event.payload["reasoning"] as Record<string, unknown>)["content"]);
@@ -221,11 +279,13 @@ function applyReasoningEvent(
   upsertItem(
     snapshot,
     changes,
-    "reasoning",
+    itemId,
     "reasoning",
     nextHead,
-    "running",
+    itemId === "reasoning" ? "running" : "completed",
     event.seq,
+    "",
+    eventTimestampOf(event.payload),
   );
 }
 
@@ -288,6 +348,7 @@ function applyToolEvent(
     nextStatus,
     event.seq,
     toolCallId,
+    eventTimestampOf(event.payload),
   );
 }
 
@@ -297,6 +358,7 @@ function finalizeOpenItems(
   changes: TrajectoryChange[],
   event: TrajectoryEvent,
 ) {
+  const at = eventTimestampOf(event.payload);
   for (const item of snapshot.items) {
     if (item.status === "running" || item.status === "pending") {
       const revision = (snapshot.revisions[item.id] ?? 0) + 1;
@@ -304,6 +366,9 @@ function finalizeOpenItems(
       const next = cloneItem(item);
       next.status = "completed";
       next.updatedAt = event.seq;
+      if (at !== undefined) {
+        next.endAt = at;
+      }
       snapshot.items = snapshot.items.map((entry) =>
         entry.id === item.id ? next : entry,
       );
@@ -317,6 +382,7 @@ function freezeOpenItems(
   snapshot: TrajectorySnapshot,
   changes: TrajectoryChange[],
   status: "failed",
+  at?: number,
 ) {
   for (const item of snapshot.items) {
     if (item.status === "running" || item.status === "pending") {
@@ -324,6 +390,9 @@ function freezeOpenItems(
       snapshot.revisions[item.id] = revision;
       const next = cloneItem(item);
       next.status = status;
+      if (at !== undefined) {
+        next.endAt = at;
+      }
       snapshot.items = snapshot.items.map((entry) =>
         entry.id === item.id ? next : entry,
       );

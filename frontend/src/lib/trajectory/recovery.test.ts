@@ -216,13 +216,16 @@ describe("chatSseEventSeq", () => {
 });
 
 describe("chatSseEventToTrajectoryPush", () => {
-  it("转换 kind 并注入 _event.sequence，剥离游标 seq", () => {
+  it("转换 kind 并注入 _event.sequence/timestamp，剥离游标 seq", () => {
     const push = chatSseEventToTrajectoryPush(
       chatSseEvent("tool_start", 7, { name: "web_search" }),
     );
     expect(push).toEqual({
       kind: "tool_start",
-      payload: { name: "web_search", _event: { sequence: 7 } },
+      payload: {
+        name: "web_search",
+        _event: { sequence: 7, timestamp: "2026-08-16T00:00:00Z" },
+      },
     });
   });
 
@@ -283,7 +286,7 @@ describe("isRuntimeTrajectoryEvent / runtimeEventToTrajectoryPush（Q4）", () =
         runtime_type: "approval_requested",
         tool_name: "shell",
         request_id: "req-1",
-        _event: { sequence: 11 },
+        _event: { sequence: 11, timestamp: "2026-08-16T00:00:00Z" },
       },
     });
   });
@@ -312,7 +315,7 @@ describe("isRuntimeTrajectoryEvent / runtimeEventToTrajectoryPush（Q4）", () =
         reclaimed: 1,
         reasons: ["idle_timeout"],
         agent_path: "/root/held-child",
-        _event: { sequence: 14 },
+        _event: { sequence: 14, timestamp: "2026-08-16T00:00:00Z" },
       },
     });
   });
@@ -368,7 +371,10 @@ describe("trajectoryRecoveryPushes", () => {
       "chunk",
       "done",
     ]);
-    expect(pushes[1]?.payload).toEqual({ text: "hi", _event: { sequence: 6 } });
+    expect(pushes[1]?.payload).toEqual({
+      text: "hi",
+      _event: { sequence: 6, timestamp: "2026-08-16T00:00:00Z" },
+    });
   });
 
   it("seq=0 事件排末尾（降级事件）", () => {

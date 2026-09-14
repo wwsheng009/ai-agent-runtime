@@ -152,6 +152,43 @@ export function eventSeqOf(payload: Record<string, unknown>): number {
   return 0;
 }
 
+/**
+ * 从 SSE payload 提取墙钟时间（epoch ms）。
+ *
+ * 优先 `_event.timestamp`（后端 SSE envelope，RFC3339/RFC3339Nano），兼容载荷
+ * 顶层 `timestamp`（runtime/events 视图字段）与数字毫秒。缺失/不可解析 → undefined，
+ * 时间线据此退化到序号轴。
+ */
+export function eventTimestampOf(
+  payload: Record<string, unknown>,
+): number | undefined {
+  const envelope = payload["_event"];
+  if (envelope && typeof envelope === "object") {
+    const parsed = parseTimestamp(
+      (envelope as Record<string, unknown>)["timestamp"],
+    );
+    if (parsed !== undefined) {
+      return parsed;
+    }
+  }
+  return parseTimestamp(payload["timestamp"]);
+}
+
+function parseTimestamp(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const text = value.trim();
+  if (!text) {
+    return undefined;
+  }
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 export function readString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }

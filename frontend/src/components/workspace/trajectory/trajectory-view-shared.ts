@@ -18,6 +18,7 @@ export const TRAJECTORY_VIEW_FILTERS = [
 
 /** 轨迹 item kind 的 i18n key（由调用方用 workspace ns 的 t 翻译）。 */
 export const TRAJECTORY_ITEM_KIND_KEYS = {
+  user: "panels.shell.trajectory.kinds.user",
   assistant: "panels.shell.trajectory.kinds.message",
   reasoning: "panels.shell.trajectory.kinds.reasoning",
   tool: "panels.shell.trajectory.kinds.tool",
@@ -100,7 +101,11 @@ export function trajectoryItemPassesFilter(
     case "tools":
       return item.kind === "tool";
     case "messages":
-      return item.kind === "assistant" || item.kind === "reasoning";
+      return (
+        item.kind === "user" ||
+        item.kind === "assistant" ||
+        item.kind === "reasoning"
+      );
     case "structured":
       return (
         item.kind === "planning" ||

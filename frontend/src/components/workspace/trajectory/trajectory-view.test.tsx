@@ -134,6 +134,77 @@ describe("TrajectoryView", () => {
     );
   });
 
+  it("时间线缩放后明细列表同步过滤，清除区间筛选后恢复", () => {
+    renderView();
+    pushEvent(store, "chunk", 1, { type: "text", content: "opening" });
+    // 每次工具调用是独立条目（相邻流式分片会并成一行，这里需要足够的条目跨度）。
+    for (let index = 2; index <= 9; index += 1) {
+      pushEvent(store, "tool_start", index, {
+        type: "tool_call",
+        tool_call: { id: `call-${index}`, name: `tool-${index}` },
+      });
+    }
+    const rowCount = () =>
+      Number(
+        container.querySelector<HTMLElement>('[data-trajectory-list="true"]')?.dataset
+          .rowCount,
+      );
+    const before = rowCount();
+    expect(before).toBeGreaterThanOrEqual(8);
+    expect(container.querySelector('[data-testid="trajectory-timeline-filter"]')).toBeNull();
+
+    click(container.querySelector('[data-testid="trajectory-timeline-zoom-in"]'));
+
+    // 图上缩放 → 列表只剩窗口内的条目，并显示筛选摘要 + 清除入口。
+    const zoomed = rowCount();
+    expect(zoomed).toBeGreaterThan(0);
+    expect(zoomed).toBeLessThan(before);
+    expect(
+      container.querySelector('[data-testid="trajectory-timeline-filter-summary"]')
+        ?.textContent,
+    ).toContain(`${zoomed}/${before}`);
+
+    click(container.querySelector('[data-testid="trajectory-timeline-filter-window"]'));
+
+    expect(rowCount()).toBe(before);
+    expect(container.querySelector('[data-testid="trajectory-timeline-filter"]')).toBeNull();
+  });
+
+  it("图例类型筛选与列表联动，清除后恢复全部条目", () => {
+    renderView();
+    pushEvent(store, "chunk", 1, { type: "text", content: "answer" });
+    pushEvent(store, "tool_start", 2, {
+      type: "tool_call",
+      tool_call: { id: "call-1", name: "bash" },
+    });
+    const rowCount = () =>
+      Number(
+        container.querySelector<HTMLElement>('[data-trajectory-list="true"]')?.dataset
+          .rowCount,
+      );
+    expect(rowCount()).toBe(2);
+
+    click(
+      [...container.querySelectorAll<HTMLElement>(
+        '[data-testid="trajectory-timeline-kind-legend-item"]',
+      )].find((entry) => entry.dataset.kind === "tool"),
+    );
+
+    expect(rowCount()).toBe(1);
+    expect(container.textContent).toContain("bash");
+    expect(container.textContent).not.toContain("answer");
+    expect(
+      container.querySelector('[data-testid="trajectory-timeline-filter-kind"]')
+        ?.textContent,
+    ).toContain("工具");
+
+    click(container.querySelector('[data-testid="trajectory-timeline-filter-kind"]'));
+
+    expect(rowCount()).toBe(2);
+    expect(container.textContent).toContain("answer");
+    expect(container.querySelector('[data-testid="trajectory-timeline-filter"]')).toBeNull();
+  });
+
   it("store.reset() 后回到空状态", () => {
     renderView();
     pushEvent(store, "chunk", 1, { type: "text", content: "hello" });
@@ -195,6 +266,35 @@ describe("TrajectoryView", () => {
     );
     click(toolsButton);
     expect(container.textContent).toContain("没有匹配当前筛选条件的行。");
+  });
+
+  it("时间轴区域与消息列表分区：时间轴有高度上限且自身滚动，列表独占剩余高度", () => {
+    renderView();
+    pushEvent(store, "chunk", 1, { type: "text", content: "answer" });
+
+    const region = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-timeline-region"]',
+    );
+    const timeline = container.querySelector('[data-testid="trajectory-timeline"]');
+    const listRegion = container.querySelector<HTMLElement>(
+      '[data-testid="trajectory-list-region"]',
+    );
+    const list = container.querySelector("[data-trajectory-list]");
+
+    expect(region).toBeInstanceOf(HTMLElement);
+    expect(listRegion).toBeInstanceOf(HTMLElement);
+    // 时间轴被包进独立区域（可与列表分栏/滚动隔离），不再是列表的兄弟节点。
+    expect(region?.contains(timeline)).toBe(true);
+    expect(region?.contains(list)).toBe(false);
+    expect(listRegion?.contains(list)).toBe(true);
+    // 关键不变量：时间轴区域不许长高到挤占列表 —— 高度封顶 + 自身滚动 + 不参与收缩。
+    expect(region?.className).toContain("max-h-[40%]");
+    expect(region?.className).toContain("shrink-0");
+    expect(region?.className).toContain("overflow-y-auto");
+    expect(region?.className).toContain("overscroll-contain");
+    // 列表区域保持 flex-1 + min-h-0：唯一随窗口长高的滚动区。
+    expect(listRegion?.className).toContain("flex-1");
+    expect(listRegion?.className).toContain("min-h-0");
   });
 
   it("恢复路径跳过被过滤事件空洞后，后续事件可渲染（回归：tool_started/tool_finished 占 seq 导致只剩 system 行）", () => {

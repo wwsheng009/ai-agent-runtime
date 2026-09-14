@@ -80,6 +80,7 @@ export function upsertItem(
   status: TrajectoryItemStatus,
   eventSeq: number,
   causeId = "",
+  at?: number,
 ) {
   const existing = findItem(snapshot, itemId);
   if (existing) {
@@ -93,6 +94,10 @@ export function upsertItem(
     next.head = head;
     next.status = status;
     next.updatedAt = eventSeq;
+    if (at !== undefined) {
+      next.at = next.at ?? at;
+      next.endAt = at;
+    }
     const revision = (snapshot.revisions[itemId] ?? 0) + 1;
     snapshot.revisions[itemId] = revision;
     snapshot.items = snapshot.items.map((item) =>
@@ -111,6 +116,7 @@ export function upsertItem(
     head,
     createdAt: eventSeq,
     updatedAt: eventSeq,
+    ...(at !== undefined ? { at, endAt: at } : {}),
   };
   snapshot.items = [...snapshot.items, item];
   snapshot.nextId += 1;

@@ -117,6 +117,18 @@ export function isAssistantRuntimeEvent(event: SessionRuntimeEvent): boolean {
   return ASSISTANT_RUNTIME_EVENT_TYPES.has(event.type);
 }
 
+/**
+ * 是否为「内容帧」：轨迹消息行（user/assistant/tool/reasoning）的正常来源，
+ * 即 `chat.sse.*` 与 assistant reporter 事件。
+ *
+ * 恢复链路用它判定会话是否真的有可渲染内容：一条内容帧都没有的会话
+ * （例如由 aicli 进程内 chat 运行时执行、只落生命周期事件的会话）必须回退到
+ * 会话历史投影（P4，见 session-history.ts），否则轨迹只剩 system 行。
+ */
+export function isTrajectoryContentEvent(event: SessionRuntimeEvent): boolean {
+  return isChatSseEvent(event) || isAssistantRuntimeEvent(event);
+}
+
 /** 读取事件持久化 seq（后端 ListEvents 注入 payload.seq）。 */
 export function chatSseEventSeq(event: SessionRuntimeEvent): number {
   const rawSeq = event.payload?.seq;
@@ -130,6 +142,25 @@ export function chatSseEventSeq(event: SessionRuntimeEvent): number {
     }
   }
   return 0;
+}
+
+/**
+ * 恢复帧的 `_event` envelope：与后端 SSE 帧同形（sequence + timestamp）。
+ *
+ * `timestamp` 是轨迹时间线的墙钟时间来源（live 帧由后端 `wrapSSEData` 写入，
+ * 恢复帧由 EventStore 的 `SessionRuntimeEvent.timestamp` 回填），缺失时时间线
+ * 自动退化为序号轴。
+ */
+function eventEnvelope(
+  seq: number,
+  timestamp?: string,
+): Record<string, unknown> {
+  const envelope: Record<string, unknown> = { sequence: seq };
+  const text = typeof timestamp === "string" ? timestamp.trim() : "";
+  if (text) {
+    envelope.timestamp = text;
+  }
+  return envelope;
 }
 
 /** 把一条 chat SSE 事件转为轨迹 push；非轨迹/未知 kind 返回 null。 */
@@ -146,7 +177,7 @@ export function chatSseEventToTrajectoryPush(
   const payload: Record<string, unknown> = { ...(event.payload ?? {}) };
   const seq = chatSseEventSeq(event);
   delete payload.seq;
-  payload._event = { sequence: seq };
+  payload._event = eventEnvelope(seq, event.timestamp);
   return { kind, payload };
 }
 
@@ -166,7 +197,7 @@ export function runtimeEventToTrajectoryPush(
   };
   const seq = chatSseEventSeq(event);
   delete payload.seq;
-  payload._event = { sequence: seq };
+  payload._event = eventEnvelope(seq, event.timestamp);
   return { kind: "runtime", payload };
 }
 
@@ -186,7 +217,7 @@ export function assistantRuntimeEventToTrajectoryPush(
   const source = { ...(event.payload ?? {}) };
   const seq = chatSseEventSeq(event);
   delete source.seq;
-  source._event = { sequence: seq };
+  source._event = eventEnvelope(seq, event.timestamp);
 
   if (event.type === "assistant_delta") {
     source.type = "text";

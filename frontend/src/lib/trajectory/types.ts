@@ -13,6 +13,8 @@
 export type TrajectoryEventKind =
   | "meta"
   | "chunk"
+  /** 用户消息行（P4 历史兜底：无 chat.sse.* 帧的会话由会话历史投影而来）。 */
+  | "user"
   | "reasoning"
   | "tool_start"
   | "tool_call"
@@ -38,6 +40,8 @@ export type TrajectoryItemStatus =
 
 /** Item 信息块类型。 */
 export type TrajectoryItemKind =
+  /** 用户消息（历史兜底投影；健康会话的 SSE 帧不含用户行）。 */
+  | "user"
   | "assistant"
   | "reasoning"
   | "tool"
@@ -99,6 +103,15 @@ export interface TrajectoryItem {
   /** 创建/最近更新的事件 seq（单调，审计与重放诊断）。 */
   createdAt: number;
   updatedAt: number;
+  /**
+   * 创建事件的墙钟时间（epoch ms）。
+   *
+   * 来源：SSE 帧 `_event.timestamp`（后端 `wrapSSEData`，RFC3339Nano）。
+   * 会话历史投影（P4 兜底）没有时间戳 → 缺省，时间线自动退化为序号轴。
+   */
+  at?: number;
+  /** 最近一次更新事件的墙钟时间（epoch ms；与 `at` 同源）。 */
+  endAt?: number;
 }
 
 /** reducer 输入：一条轨迹事件。 */
@@ -108,6 +121,15 @@ export interface TrajectoryEvent {
   seq: number;
   payload: Record<string, unknown>;
 }
+
+/**
+ * 降级帧（seq=0）的显式 item 身份键（P4 历史兜底）。
+ *
+ * reducer 默认按种类复用固定 item id（assistant/reasoning 各一行）——这是
+ * 单轮流式增量的正确语义；会话历史兜底需要「一条消息一行」，因此在 payload
+ * 上携带稳定身份（由 message_id 派生），reducer 优先采用。
+ */
+export const TRAJECTORY_ITEM_ID_KEY = "_trajectory_item_id";
 
 export interface TrajectorySnapshot {
   items: TrajectoryItem[];

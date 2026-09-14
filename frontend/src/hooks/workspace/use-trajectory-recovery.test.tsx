@@ -4,7 +4,10 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fetchSessionRuntimeEvents } from "@/api/runtime/sessions";
+import {
+  fetchSessionRuntimeEvents,
+  getSessionHistory,
+} from "@/api/runtime/sessions";
 import {
   createTrajectoryStore,
   type TrajectoryStore,
@@ -14,9 +17,23 @@ import { useTrajectoryRecovery } from "./use-trajectory-recovery";
 
 vi.mock("@/api/runtime/sessions", () => ({
   fetchSessionRuntimeEvents: vi.fn(),
+  getSessionHistory: vi.fn(),
 }));
 
 const mockFetch = vi.mocked(fetchSessionRuntimeEvents);
+const mockHistory = vi.mocked(getSessionHistory);
+
+function runtimeEvent(
+  type: string,
+  seq: number,
+  extra: Record<string, unknown> = {},
+) {
+  return {
+    type,
+    timestamp: "2026-09-14T00:00:00Z",
+    payload: { seq, ...extra },
+  };
+}
 
 function chatSseEvent(kind: string, seq: number, extra: Record<string, unknown> = {}) {
   return {
@@ -58,6 +75,13 @@ describe("useTrajectoryRecovery", () => {
     root = createRoot(container);
     store = createTrajectoryStore();
     mockFetch.mockReset();
+    mockHistory.mockReset();
+    // 默认：会话历史为空（健康会话不走兜底；需要兜底的用例各自注入历史）。
+    mockHistory.mockResolvedValue({
+      session_id: "session-1",
+      count: 0,
+      history: [],
+    });
   });
 
   afterEach(() => {
@@ -236,5 +260,136 @@ describe("useTrajectoryRecovery", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(errors).toHaveLength(0);
+  });
+
+  it("无内容帧的会话回退到会话历史：用户/助手/工具消息都能看到", async () => {
+    // 这类会话（aicli 进程内 chat 运行时）只落生命周期事件，消息本体在持久化历史里。
+    mockFetch.mockResolvedValue({
+      events: [
+        runtimeEvent("session_start", 1, { turn_id: "turn-1" }),
+        runtimeEvent("session_end", 2, { turn_id: "turn-1" }),
+      ],
+      count: 2,
+      latest_seq: 2,
+    });
+    mockHistory.mockResolvedValue({
+      session_id: "session-history-only",
+      count: 3,
+      history: [
+        {
+          role: "user",
+          content: "用户问题",
+          metadata: { turn_id: "turn-1", message_id: "u1" },
+        },
+        {
+          role: "assistant",
+          content: "助手回答",
+          metadata: { turn_id: "turn-1", message_id: "a1" },
+          tool_calls: [{ id: "call-1", name: "web_search" }],
+        },
+        {
+          role: "tool",
+          content: "工具结果",
+          tool_call_id: "call-1",
+          metadata: { turn_id: "turn-1", tool_name: "web_search" },
+        },
+      ],
+    });
+
+    render("session-history-only");
+
+    await vi.waitFor(() => {
+      expect(store.getSnapshot().items.some((item) => item.kind === "user")).toBe(
+        true,
+      );
+    });
+    const items = store.getSnapshot().items;
+    expect(
+      items.some(
+        (item) => item.kind === "user" && item.head.kind === "text" && item.head.content === "用户问题",
+      ),
+    ).toBe(true);
+    expect(
+      items.some(
+        (item) =>
+          item.kind === "assistant" &&
+          item.head.kind === "text" &&
+          item.head.content === "助手回答",
+      ),
+    ).toBe(true);
+    expect(
+      items.some((item) => item.kind === "tool" && item.id.includes("call-1")),
+    ).toBe(true);
+    expect(mockHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it("重启后仍能再次查看：消息来自持久化历史，不依赖内存态", async () => {
+    mockFetch.mockResolvedValue({
+      events: [runtimeEvent("session_start", 1, { turn_id: "turn-1" })],
+      count: 1,
+      latest_seq: 1,
+    });
+    mockHistory.mockResolvedValue({
+      session_id: "session-restart",
+      count: 2,
+      history: [
+        {
+          role: "user",
+          content: "重启前的问题",
+          metadata: { turn_id: "turn-1", message_id: "u1" },
+        },
+        {
+          role: "assistant",
+          content: "重启前的回答",
+          metadata: { turn_id: "turn-1", message_id: "a1" },
+        },
+      ],
+    });
+
+    render("session-restart");
+    await vi.waitFor(() => {
+      expect(store.getSnapshot().items.some((item) => item.kind === "user")).toBe(
+        true,
+      );
+    });
+
+    // 模拟重启：丢弃内存 store 与页面，仅保留持久化数据（mock 仍返回同一份历史）。
+    act(() => {
+      root.unmount();
+      store.dispose();
+    });
+    store = createTrajectoryStore();
+    root = createRoot(container);
+    render("session-restart");
+
+    await vi.waitFor(() => {
+      expect(store.getSnapshot().items.some((item) => item.kind === "user")).toBe(
+        true,
+      );
+    });
+    const contents = store
+      .getSnapshot()
+      .items.filter((item) => item.head.kind === "text")
+      .map((item) => (item.head.kind === "text" ? item.head.content : ""));
+    expect(contents).toContain("重启前的问题");
+    expect(contents).toContain("重启前的回答");
+  });
+
+  it("有内容帧的会话不回退到历史（单一事实源仍是 EventStore）", async () => {
+    mockFetch.mockResolvedValue({
+      events: [
+        chatSseEvent("meta", 1, { kind: "chat", status: "started" }),
+        chatSseEvent("chunk", 2, { type: "text", content: "实时回答" }),
+      ],
+      count: 2,
+      latest_seq: 2,
+    });
+
+    render("session-healthy");
+
+    await vi.waitFor(() => {
+      expect(store.getSnapshot().items.length).toBeGreaterThan(0);
+    });
+    expect(mockHistory).not.toHaveBeenCalled();
   });
 });

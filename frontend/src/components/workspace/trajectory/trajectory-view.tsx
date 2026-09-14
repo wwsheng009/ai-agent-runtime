@@ -15,6 +15,7 @@ import {
   SearchIcon,
   ShieldCheckIcon,
   TimerIcon,
+  UserIcon,
   WrenchIcon,
 } from "lucide-react";
 import {
@@ -29,13 +30,17 @@ import { useTranslation } from "react-i18next";
 import type { TrajectoryStore } from "@/hooks/workspace/use-trajectory-snapshot";
 import { useTrajectorySnapshot } from "@/hooks/workspace/use-trajectory-snapshot";
 import { exportSessionTrajectoryJsonl } from "@/lib/trajectory/export-session";
-import type { TrajectoryItem } from "@/lib/trajectory/types";
+import { isFullTrajectoryWindow, trajectoryItemsInWindow } from "@/lib/trajectory/timeline-window";
+import type { TrajectoryItem, TrajectoryItemKind } from "@/lib/trajectory/types";
 import { cn } from "@/lib/utils";
 
 import { TrajectoryDetailPanel } from "./trajectory-detail-panel";
 import { SubagentSessionDialog } from "./subagent-session-dialog";
 import type { SubagentSessionTarget } from "./subagent-session-target";
-import { TrajectoryTimeline } from "./trajectory-timeline";
+import {
+  TrajectoryTimeline,
+  type TrajectoryTimelineViewport,
+} from "./trajectory-timeline";
 import {
   TRAJECTORY_VIEW_FILTERS,
   trajectoryItemKindKey,
@@ -52,6 +57,7 @@ import {
 import { useVirtualRows } from "./trajectory-virtual-rows";
 
 const KIND_ICONS: Record<TrajectoryItem["kind"], ComponentType<{ size?: number; className?: string }>> = {
+  user: UserIcon,
   assistant: MessageSquareTextIcon,
   reasoning: BrainCircuitIcon,
   tool: WrenchIcon,
@@ -65,6 +71,7 @@ const KIND_ICONS: Record<TrajectoryItem["kind"], ComponentType<{ size?: number; 
 };
 
 const KIND_TEXT_COLORS: Record<TrajectoryItem["kind"], string> = {
+  user: "text-[#4ade80]",
   assistant: "text-[#6ea8fe]",
   reasoning: "text-accent-teal",
   tool: "text-accent-gold",
@@ -150,10 +157,14 @@ export function TrajectoryView({
   const [subagentTarget, setSubagentTarget] = useState<SubagentSessionTarget | null>(null);
   const [exporting, setExporting] = useState(false);
   const [redactExport, setRedactExport] = useState(false);
+  // 图表 → 列表联动：时间线窗口（缩放/框选/预设）与消息类型筛选都在图表上操作。
+  const [chartKind, setChartKind] = useState<TrajectoryItemKind | null>(null);
+  const [chartViewport, setChartViewport] = useState<TrajectoryTimelineViewport | null>(null);
+  const [timelineResetToken, setTimelineResetToken] = useState(0);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const searchIndex = useTrajectorySearchIndex(snapshot.items);
 
-  const items = useMemo(
+  const searchedItems = useMemo(
     () => {
       const filtered = snapshot.items.filter((item) =>
         trajectoryItemPassesFilter(item, filter),
@@ -174,6 +185,31 @@ export function TrajectoryView({
     },
     [snapshot.items, filter, query, searchIndex],
   );
+
+  // 与图表内部同源的数据集（工具栏筛选 + 搜索 + 图表类型筛选）；
+  // 时间线收到的是未按类型过滤的 searchedItems，由它用 activeKind 自行收敛。
+  const kindFilteredItems = useMemo(
+    () => (chartKind ? searchedItems.filter((item) => item.kind === chartKind) : searchedItems),
+    [chartKind, searchedItems],
+  );
+  // 时间线隐藏 / 列表已空时组件会回调 null 清空视窗，避免残留过期区间。
+  const viewport = timelineOpen ? chartViewport : null;
+  // 视窗轴必须与当前数据集同长才可用（类型/筛选切换的过渡帧跳过过滤，避免错位）。
+  const viewportMatchesItems =
+    viewport !== null && viewport.axis.positions.length === kindFilteredItems.length;
+  const windowFiltered =
+    viewportMatchesItems && !isFullTrajectoryWindow(viewport.axis, viewport.window);
+  const items = useMemo(
+    () =>
+      viewport && viewportMatchesItems && windowFiltered
+        ? trajectoryItemsInWindow(kindFilteredItems, viewport.axis, viewport.window)
+        : kindFilteredItems,
+    [kindFilteredItems, viewport, viewportMatchesItems, windowFiltered],
+  );
+
+  const handleToggleChartKind = (kind: TrajectoryItemKind) => {
+    setChartKind((current) => (current === kind ? null : kind));
+  };
 
   const getKey = useMemo(() => (item: TrajectoryItem) => item.id, []);
 
@@ -304,27 +340,85 @@ export function TrajectoryView({
       </div>
 
       {timelineOpen && snapshot.items.length > 0 ? (
-        <TrajectoryTimeline
-          className="px-3 pt-2"
-          items={snapshot.items}
-          onJumpToItem={(itemId) => {
-            virtual.scrollToKey(itemId);
-            setSelectedItemId(itemId);
-          }}
-        />
+        /* 时间轴区域独立成块：`shrink-0` + 高度上限 + 自身滚动（`overscroll-contain`
+           防止滚轮串到列表），底边框与浅底把「三条泳道」和下方消息列表分开；
+           窗口变矮时被压缩的是本区域的滚动视口，而不是列表可视高度。 */
+        <section
+          aria-label={t("panels.shell.trajectory.timeline.regionLabel")}
+          className="max-h-[40%] shrink-0 overflow-y-auto overscroll-contain border-b border-border bg-surface-softer px-3 pt-2 pb-2"
+          data-testid="trajectory-timeline-region"
+        >
+          <TrajectoryTimeline
+            activeKind={chartKind}
+            items={searchedItems}
+            /* 「清除区间筛选」用重挂载复位窗口：避免在 effect 里 setState。 */
+            key={timelineResetToken}
+            onJumpToItem={(itemId) => {
+              virtual.scrollToKey(itemId);
+              setSelectedItemId(itemId);
+            }}
+            onToggleKind={handleToggleChartKind}
+            onViewportChange={setChartViewport}
+          />
+        </section>
       ) : null}
 
-      <div className="flex min-h-0 flex-1">
-        <div className="relative min-w-0 flex-1 overflow-hidden">
+      {chartKind || windowFiltered ? (
+        <div
+          className="flex flex-wrap items-center gap-1.5 border-b border-border bg-surface-softer px-3 py-1 text-[10px] text-muted-foreground"
+          data-testid="trajectory-timeline-filter"
+        >
+          <span data-testid="trajectory-timeline-filter-summary">
+            {t("panels.shell.trajectory.timelineFilter.summary", {
+              visible: items.length,
+              total: snapshot.items.length,
+            })}
+          </span>
+          {chartKind ? (
+            <button
+              className="cursor-pointer rounded-[3px] border border-border px-1.5 py-0.5 transition hover:text-foreground"
+              data-testid="trajectory-timeline-filter-kind"
+              onClick={() => setChartKind(null)}
+              title={t("panels.shell.trajectory.timelineFilter.clearKind")}
+              type="button"
+            >
+              {t("panels.shell.trajectory.timelineFilter.kind", {
+                kind: t(trajectoryItemKindKey(chartKind)),
+              })}{" "}
+              ✕
+            </button>
+          ) : null}
+          {windowFiltered ? (
+            <button
+              className="cursor-pointer rounded-[3px] border border-border px-1.5 py-0.5 transition hover:text-foreground"
+              data-testid="trajectory-timeline-filter-window"
+              onClick={() => setTimelineResetToken((token) => token + 1)}
+              title={t("panels.shell.trajectory.timelineFilter.clearWindow")}
+              type="button"
+            >
+              {t("panels.shell.trajectory.timelineFilter.clearWindow")}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
+      <div className="flex min-h-0 flex-1" data-testid="trajectory-body-region">
+        <div
+          className="relative min-h-0 min-w-0 flex-1 overflow-hidden"
+          data-testid="trajectory-list-region"
+        >
           {items.length === 0 ? (
             <div className="flex h-full items-center justify-center px-4 text-center app-text-12 text-muted-foreground">
               {snapshot.items.length === 0
                 ? t("panels.shell.trajectory.empty")
-                : t("panels.shell.trajectory.noMatches")}
+                : windowFiltered
+                  ? t("panels.shell.trajectory.timelineFilter.noWindowMatches")
+                  : t("panels.shell.trajectory.noMatches")}
             </div>
           ) : (
             <div
               data-trajectory-list="true"
+              data-row-count={items.length}
               ref={containerRef}
               className="h-full overflow-y-auto"
               onScroll={virtual.handleScroll}

@@ -136,9 +136,23 @@ export type AgentChatStreamDonePayload = {
   turn_id?: string;
 };
 
+/** 会话历史里的工具调用（后端 `types.ToolCall`，P4 轨迹兜底取 id/name/arguments）。 */
+export type SessionHistoryToolCall = {
+  id?: string;
+  type?: string;
+  name?: string;
+  arguments?: Record<string, unknown>;
+  /** 部分写入方只落原始入参 JSON 串（`types.ToolCall.RawInput`）。 */
+  input?: string;
+};
+
 export type SessionHistoryMessage = {
   role: string;
   content: string;
+  /** 多模态内容（文本/图片分片）；轨迹兜底只取文本分片以外的正文。 */
+  content_parts?: Array<{ type?: string; text?: string }>;
+  tool_calls?: SessionHistoryToolCall[];
+  tool_call_id?: string;
   metadata?: Record<string, unknown>;
 };
 
@@ -146,4 +160,12 @@ export type SessionHistoryResponse = {
   session_id: string;
   history: SessionHistoryMessage[];
   count: number;
+  /** 分页元信息（后端 GetSessionHistory；旧响应可能缺省）。 */
+  total?: number;
+  has_more?: boolean;
+  limit?: number;
+  first_seq?: number;
+  last_seq?: number;
+  /** 下一页游标（`before_seq`，向前翻页，仅 has_more=true 时可用）。 */
+  next_before_seq?: number;
 };

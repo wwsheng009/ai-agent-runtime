@@ -93,7 +93,9 @@ test("P2-2: timeline jumps to the tool row and opens the detail panel", async ({
   });
 
   await trajectoryTab(page).click();
-  const timeline = page.getByRole("img", { name: "Trajectory timeline" });
+  // 时间线泳道是可聚焦的交互区域（滚轮缩放 / 拖拽框选 / 键盘平移），
+  // 因此角色是 group 而不是 img；aria-label 与无障碍提示保持不变。
+  const timeline = page.getByRole("group", { name: "Trajectory timeline" });
   await expect(timeline).toBeVisible();
 
   // timeline blocks are labelled "<kind> <seq>"

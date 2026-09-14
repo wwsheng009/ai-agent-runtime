@@ -29,11 +29,22 @@ import {
   fetchRuntimeJson,
 } from "./shared";
 
+export type SessionHistoryQuery = {
+  /** 每页条数（后端默认 100、上限 1000）。 */
+  limit?: number;
+  /** 向前翻页游标（后端 `before_seq`；缺省取最新一页）。 */
+  beforeSeq?: number;
+};
+
 export async function getSessionHistory(
   sessionId: string,
+  query: SessionHistoryQuery = {},
 ): Promise<SessionHistoryResponse> {
   return fetchRuntimeJson<SessionHistoryResponse>(
-    buildRuntimeUrl(`/api/runtime/sessions/${encodeURIComponent(sessionId)}/history`),
+    buildRuntimeUrlWithQuery(
+      `/api/runtime/sessions/${encodeURIComponent(sessionId)}/history`,
+      { limit: query.limit, before_seq: query.beforeSeq },
+    ),
     {
       headers: {
         Accept: "application/json",

@@ -11,15 +11,23 @@ import {
   buildTrajectoryExportFilename,
   downloadTrajectoryJsonl,
   eventsToTrajectoryJsonl,
+  redactExportPayload,
 } from "@/lib/trajectory/export";
+import {
+  fetchSessionHistoryMessages,
+  hasTrajectoryContentFrames,
+} from "@/lib/trajectory/history-fallback";
 import {
   nextRecoveryAfter,
   TRAJECTORY_RECOVERY_PAGE_SIZE,
 } from "@/lib/trajectory/recovery";
+import { sessionHistoryToTrajectoryPushes } from "@/lib/trajectory/session-history";
 
 export type SessionTrajectoryExportResult = {
   /** 实际写入 JSONL 的原始事件条数（未过滤前的拉取总量）。 */
   eventCount: number;
+  /** 历史兜底行数（无内容帧的会话把历史消息投影成导出行的条数）。 */
+  historyRowCount: number;
   filename: string;
   redacted: boolean;
 };
@@ -52,8 +60,31 @@ export async function exportSessionTrajectoryJsonl(
     }
     after = nextRecoveryAfter(page.events, after);
   }
-  const jsonl = eventsToTrajectoryJsonl(events, { redact });
+
+  const lines: string[] = [];
+  const eventsJsonl = eventsToTrajectoryJsonl(events, { redact });
+  if (eventsJsonl) {
+    lines.push(eventsJsonl);
+  }
+
+  // 与轨迹恢复同一口径：没有任何内容帧的会话（消息只落在持久化会话历史里）
+  // 若只导出 EventStore 事件，导出文件会只有生命周期行——因此同样回退到
+  // 「会话历史 → 导出行」投影，保证导出的就是轨迹视图里看到的内容。
+  let historyRowCount = 0;
+  if (!hasTrajectoryContentFrames(events)) {
+    const history = await fetchSessionHistoryMessages(sessionId);
+    const ts = new Date().toISOString();
+    for (const push of sessionHistoryToTrajectoryPushes(history)) {
+      const payload = redact
+        ? redactExportPayload({ ...push.payload })
+        : push.payload;
+      lines.push(JSON.stringify({ seq: 0, ts, kind: push.kind, payload }));
+      historyRowCount += 1;
+    }
+  }
+
+  const jsonl = lines.join("\n");
   const filename = buildTrajectoryExportFilename(sessionId, undefined, redact);
   downloadTrajectoryJsonl(jsonl, filename);
-  return { eventCount: events.length, filename, redacted: redact };
+  return { eventCount: events.length, historyRowCount, filename, redacted: redact };
 }
