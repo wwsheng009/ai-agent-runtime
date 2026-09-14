@@ -1631,7 +1631,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		if route := optionMap(loop.agent.config.Options, "route"); len(route) > 0 {
 			req.Metadata["route"] = cloneInterfaceMap(route)
 		}
-		if boolValue(optionValue(loop.agent.config.Options, llm.MetadataKeyDisableTools)) {
+		if loop.disableToolsRequested() {
 			// Execution can be disabled without changing the frozen definitions
 			// that form the provider prompt-cache prefix.
 			req.Metadata[llm.MetadataKeyDisableTools] = true
@@ -3344,7 +3344,15 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 	// tools) are dropped before the request is built: a model that sees a tool
 	// in its schema will call it, then fail at execution, burning turns on a
 	// boundary it cannot cross.
-	tools, surfaceFilteredTools := filterPolicyBlockedToolDefinitions(tools, loop.agent.GetToolExecutionPolicy())
+	// disable_tools 是例外：它只关闭执行与工具选择（metadata + tool_choice=none），
+	// 请求目录必须保持冻结，否则空 allowlist 会把 prompt cache 前缀清空。执行侧
+	// 仍由同一份策略拦截，不受这里影响。
+	var surfaceFilteredTools []string
+	if loop.disableToolsRequested() {
+		surfaceFilteredTools = nil
+	} else {
+		tools, surfaceFilteredTools = filterPolicyBlockedToolDefinitions(tools, loop.agent.GetToolExecutionPolicy())
+	}
 
 	listCtx := listToolsContextForAgent(ctx, loop.agent, len(tools))
 	tools = filterToolDefinitionsByShouldList(tools, listCtx)
@@ -3542,6 +3550,15 @@ func optimizeModelToolSurface(tools []types.ToolDefinition) []types.ToolDefiniti
 		optimized = append(optimized, item)
 	}
 	return optimized
+}
+
+// disableToolsRequested 报告当前 agent 是否用 metadata 关闭了工具执行。
+// 该开关只影响执行与工具选择，不参与请求工具面的裁剪。
+func (loop *ReActLoop) disableToolsRequested() bool {
+	if loop == nil || loop.agent == nil || loop.agent.config == nil {
+		return false
+	}
+	return boolValue(optionValue(loop.agent.config.Options, llm.MetadataKeyDisableTools))
 }
 
 // filterPolicyBlockedToolDefinitions drops definitions the execution policy

@@ -473,3 +473,55 @@ func newTestGlobalAgentRegistryStore(t *testing.T) *SQLiteGlobalAgentRegistrySto
 	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
+
+// 终态行不可被宿主投影复活：投影按会话存储重写 registry，若一次扫描读到释放前的
+// 旧快照，就会把刚释放的 spawn 预约写回 active，继续占用 agents.maxThreads。
+// 守卫在 upsert SQL 内判定；重新绑定仍走预约事务，不受影响。
+func TestUpsertAgentControlAgentKeepsTerminalStateAgainstProjection(t *testing.T) {
+	ctx := context.Background()
+	store := newTestGlobalAgentRegistryStore(t)
+
+	record := AgentRecord{
+		AgentID:       "resurrect-child",
+		RootSessionID: "session-resurrect",
+		SessionID:     "resurrect-child",
+		AgentPath:     "/root/resurrect-child",
+		AgentType:     AgentTypeChild,
+		Status:        AgentStatusActive,
+	}
+	_, err := store.UpsertAgentControlAgent(ctx, record)
+	require.NoError(t, err)
+
+	_, err = store.MarkAgentControlAgentSubtreeStale(ctx, record.RootSessionID, record.AgentPath, time.Now().UTC())
+	require.NoError(t, err)
+
+	projected := record
+	projected.Status = AgentStatusActive
+	projected.Model = "projection-model"
+	_, err = store.UpsertAgentControlAgent(ctx, projected)
+	require.NoError(t, err)
+
+	rows, err := store.ListAgentControlAgents(ctx, AgentFilter{AgentID: record.AgentID, IncludeClosed: true})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.True(t, rows[0].Closed(), "active 投影不得把终态行写回 active")
+	require.Equal(t, AgentStatusStale, rows[0].Status)
+	require.NotNil(t, rows[0].ClosedAt)
+	require.Empty(t, rows[0].Model, "被守卫挡下的投影不应改写终态行")
+
+	// 预约路径（事务 upsert）仍可重新绑定同一身份：守卫只约束非事务投影写入。
+	_, err = store.ReserveAgentControlAgentSpawn(ctx, AgentRecord{
+		AgentID:       "root:session-resurrect",
+		RootSessionID: record.RootSessionID,
+		SessionID:     record.RootSessionID,
+		AgentPath:     "/root",
+		AgentType:     AgentTypeRoot,
+		Status:        AgentStatusActive,
+	}, projected, 8)
+	require.NoError(t, err)
+
+	rows, err = store.ListAgentControlAgents(ctx, AgentFilter{AgentID: record.AgentID, IncludeClosed: true})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.False(t, rows[0].Closed(), "预约重新绑定必须仍能激活同一身份")
+}

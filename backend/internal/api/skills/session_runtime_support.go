@@ -588,14 +588,17 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 	// consistency audit (N1).
 	rollbackSpawnFailure := func(cause error) error {
 		c.cleanupAPISpawnIsolation(ctx, childSession)
-		if releaseErr := c.releaseAgentSpawnReservation(ctx, childSession, cause.Error()); releaseErr != nil {
-			cause = fmt.Errorf("%w (spawn reservation release failed: %v)", cause, releaseErr)
-		}
 		if hub := c.handler.getSessionHub(); hub != nil {
 			hub.Stop(sessionID)
 		}
 		if deleteErr := storage.Delete(ctx, childSession.ID); deleteErr != nil && !stderrors.Is(deleteErr, chat.ErrSessionNotFound) {
 			cause = fmt.Errorf("%w (spawn session cleanup failed: %v)", cause, deleteErr)
+		}
+		// 释放预约必须是回滚的最后一次写入：投影刷新（materialize）按会话存储重写
+		// registry，若先释放、后删容器，并发投影会按“仍在存储里的 active 子会话”
+		// 把刚释放的行重新写回 active，预约就不再被回收（flaky：N1 回滚用例）。
+		if releaseErr := c.releaseAgentSpawnReservation(ctx, childSession, cause.Error()); releaseErr != nil {
+			cause = fmt.Errorf("%w (spawn reservation release failed: %v)", cause, releaseErr)
 		}
 		return cause
 	}

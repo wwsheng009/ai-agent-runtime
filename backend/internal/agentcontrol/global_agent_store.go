@@ -270,6 +270,10 @@ func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Con
 	if err != nil {
 		return AgentRecord{}, err
 	}
+	// 终态行不可被投影复活：宿主投影（materialize）是按会话存储重写的，若一次
+	// 扫描在 spawn 回滚释放预约之前读到旧快照，就会把刚释放的 stale 行写回
+	// active，导致被释放的预约继续占用 agents.maxThreads。守卫必须在 SQL 内
+	// 判定，索引快照的 Go 侧判空挡不住并发窗口。重新绑定走预约事务，不受影响。
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO agent_control_agents (
 			agent_id, root_session_id, parent_agent_id, parent_session_id, session_id, agent_path, depth,
@@ -312,6 +316,9 @@ func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Con
 			status = excluded.status,
 			updated_at = excluded.updated_at,
 			closed_at = excluded.closed_at
+		WHERE (agent_control_agents.closed_at IS NULL AND agent_control_agents.status NOT IN ('closed', 'stale'))
+			OR excluded.closed_at IS NOT NULL
+			OR excluded.status IN ('closed', 'stale')
 		ON CONFLICT(root_session_id, agent_path) DO UPDATE SET
 			agent_id = excluded.agent_id,
 			parent_agent_id = excluded.parent_agent_id,
@@ -344,6 +351,9 @@ func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Con
 			status = excluded.status,
 			updated_at = excluded.updated_at,
 			closed_at = excluded.closed_at
+		WHERE (agent_control_agents.closed_at IS NULL AND agent_control_agents.status NOT IN ('closed', 'stale'))
+			OR excluded.closed_at IS NOT NULL
+			OR excluded.status IN ('closed', 'stale')
 	`, record.AgentID, record.RootSessionID, nullAgentString(record.ParentAgentID), nullAgentString(record.ParentSessionID),
 		nullAgentString(record.SessionID), record.AgentPath, record.Depth, nullAgentString(record.AgentType),
 		nullAgentString(record.Nickname), nullAgentString(record.Workflow), nullAgentString(record.TeamID),
