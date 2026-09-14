@@ -37,6 +37,32 @@ export function composerModelCatalogGroups(
 }
 
 /**
+ * P2-7 子片 4：候选面的本地检索（与目标项目 `PopupSelectView` 的 `filterOptions` 同口径）。
+ * - 空 query 原样返回（不排序、不裁剪）；
+ * - 大小写不敏感的**子串**命中：模型名或所属 provider 名任一命中即保留该行；
+ * - 全部落空的 provider 分组不保留空壳（不渲染空分组标题）。
+ */
+export function filterComposerModelGroups(
+  groups: readonly ComposerModelCatalogGroup[],
+  query: string,
+): ComposerModelCatalogGroup[] {
+  const needle = query.trim().toLowerCase();
+  if (needle.length === 0) {
+    return [...groups];
+  }
+  return groups
+    .map((group) => ({
+      provider: group.provider,
+      models: group.models.filter(
+        (model) =>
+          model.toLowerCase().includes(needle) ||
+          group.provider.toLowerCase().includes(needle),
+      ),
+    }))
+    .filter((group) => group.models.length > 0);
+}
+
+/**
  * 目录 → `/model` 的第二级候选（扁平）。
  * `value` 是模型 id（选中后作为命令参数回填执行器），`description` 是所属 provider。
  */

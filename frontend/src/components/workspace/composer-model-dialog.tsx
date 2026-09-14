@@ -1,15 +1,28 @@
 // P2-7 子片 3：`/model` 弹窗（与 composer 常驻座位同一目录、同一处理器）。
+// P2-7 子片 4：候选面按目标项目 `PopupSelectView` 语义补齐——弹层自持焦点（检索框）、
+//   本地检索过滤、方向键虚拟高亮（Enter 应用、←/→ 交给检索框原生光标）、高亮行滚动入视口。
 //
 // 边界：
 // - 只渲染宿主持有的目录投影（按 provider 分组），不做任何拉取 / 缓存 / 推断；
 // - 选中即调用宿主同一 `onModelChange`（provider 归属由运行时目录解析，弹窗不猜）；
-// - 加载中 / 失败 / 目录为空各自如实呈现，**不补占位模型、不伪造默认选中**。
+// - 加载中 / 失败 / 目录为空 / 检索无匹配各自如实呈现，**不补占位模型、不伪造默认选中**。
 
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 import { useTranslation } from "react-i18next";
 
 import { DialogOverlay, DialogPanel } from "@/components/ui/dialog-shell";
 import { useDialogLifecycle } from "@/components/ui/use-dialog-lifecycle";
-import type { ComposerModelCatalogGroup } from "@/lib/composer-model-options";
+import {
+  filterComposerModelGroups,
+  type ComposerModelCatalogGroup,
+} from "@/lib/composer-model-options";
 import { cn } from "@/lib/utils";
 
 /** 分组视图与 `lib/composer-model-options` 同源（此处仅保留组件侧的名字）。 */
@@ -27,22 +40,123 @@ export type ComposerModelDialogProps = {
   selectedProvider: string;
 };
 
-export function ComposerModelDialog({
+/** 扁平行：高亮 / 键盘应用都以 (provider, model) 为身份，不合并同名模型。 */
+type ComposerModelRow = { provider: string; model: string };
+
+function rowKey(provider: string, model: string): string {
+  return `${provider}\u0000${model}`;
+}
+
+/**
+ * 关闭即卸载：候选面的检索词与高亮随重开归零（不靠 effect 里同步 setState 复位）。
+ * 外壳只持有对话框生命周期，其余状态都落在随 `open` 挂载的 `ComposerModelDialogBody`。
+ */
+export function ComposerModelDialog(props: ComposerModelDialogProps) {
+  useDialogLifecycle(props.open, props.onClose);
+  if (!props.open) {
+    return null;
+  }
+  return (
+    <ComposerModelDialogBody
+      error={props.error}
+      groups={props.groups}
+      loading={props.loading}
+      onClose={props.onClose}
+      onSelect={props.onSelect}
+      selectedModel={props.selectedModel}
+      selectedProvider={props.selectedProvider}
+    />
+  );
+}
+
+function ComposerModelDialogBody({
   error,
   groups,
   loading,
   onClose,
   onSelect,
-  open,
   selectedModel,
   selectedProvider,
-}: ComposerModelDialogProps) {
+}: Omit<ComposerModelDialogProps, "open">) {
   const { t } = useTranslation("workspace");
-  useDialogLifecycle(open, onClose);
 
-  if (!open) {
-    return null;
-  }
+  const [search, setSearch] = useState("");
+  // `null` = 尚未人工导航：高亮跟住当前座位（目录晚到时自动落到当前座位 / 首行）。
+  const [activeOverride, setActiveOverride] = useState<number | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const focusPendingRef = useRef(true);
+
+  const filteredGroups = useMemo(
+    () => filterComposerModelGroups(groups, search),
+    [groups, search],
+  );
+  const rows = useMemo<ComposerModelRow[]>(
+    () =>
+      filteredGroups.flatMap((group) =>
+        group.models.map((model) => ({ provider: group.provider, model })),
+      ),
+    [filteredGroups],
+  );
+  const rowIndex = useMemo(
+    () => new Map(rows.map((row, index) => [rowKey(row.provider, row.model), index])),
+    [rows],
+  );
+  const currentIndex = useMemo(
+    () =>
+      rows.findIndex(
+        (row) => row.model === selectedModel && row.provider === selectedProvider,
+      ),
+    [rows, selectedModel, selectedProvider],
+  );
+  // 当前座位解析不到时预高亮首行（与打开时一致），解析得到即跟住座位。
+  const requestedIndex = activeOverride ?? (currentIndex >= 0 ? currentIndex : 0);
+  const activeIndex =
+    rows.length === 0 ? -1 : Math.max(0, Math.min(requestedIndex, rows.length - 1));
+  const activeRow = activeIndex >= 0 ? rows[activeIndex] : undefined;
+
+  // 与目标项目 PopupSelectView 一致：弹层持有焦点，打开即可直接打字检索。
+  // 目录晚到时检索框更晚挂载：把「待聚焦」保持到输入框真正出现，不把焦点丢在遮罩上。
+  useEffect(() => {
+    if (focusPendingRef.current && searchRef.current) {
+      focusPendingRef.current = false;
+      searchRef.current.focus();
+    }
+  }, [error, loading, rows]);
+
+  // 虚拟高亮不触发浏览器默认滚动，这里把高亮行滚入视口。
+  useEffect(() => {
+    const node = listRef.current?.querySelector(
+      '[data-composer-model-option-active="true"]',
+    );
+    if (node && typeof node.scrollIntoView === "function") {
+      node.scrollIntoView({ block: "nearest" });
+    }
+  }, [activeIndex, search]);
+
+  const handleKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLDivElement>) => {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        if (rows.length === 0) {
+          return;
+        }
+        event.preventDefault();
+        const step = event.key === "ArrowDown" ? 1 : -1;
+        const base = activeIndex >= 0 ? activeIndex : 0;
+        setActiveOverride(Math.max(0, Math.min(base + step, rows.length - 1)));
+        return;
+      }
+      if (event.key === "Enter") {
+        if (!activeRow) {
+          return;
+        }
+        // 阻止 Enter 触发行按钮的默认激活，避免同一次按键应用两次。
+        event.preventDefault();
+        onSelect(activeRow.model);
+      }
+    },
+    [activeIndex, activeRow, onSelect, rows.length],
+  );
 
   const hasModels = groups.some((group) => group.models.length > 0);
 
@@ -54,6 +168,7 @@ export function ComposerModelDialog({
         className="max-w-[34rem]"
         data-composer-model-dialog
         elevation="lg"
+        onKeyDown={handleKeyDown}
         role="dialog"
       >
         <header className="flex items-start gap-3 border-b border-border px-4 py-3">
@@ -79,7 +194,25 @@ export function ComposerModelDialog({
           </button>
         </header>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+        {hasModels ? (
+          <div className="border-b border-border px-3 py-2">
+            <input
+              aria-label={t("composer.modelDialog.search.aria")}
+              className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 app-text-11 text-foreground outline-none placeholder:text-muted-foreground"
+              data-composer-model-search
+              onChange={(event) => {
+                setSearch(event.currentTarget.value);
+                setActiveOverride(null);
+              }}
+              placeholder={t("composer.modelDialog.search.placeholder")}
+              ref={searchRef}
+              type="text"
+              value={search}
+            />
+          </div>
+        ) : null}
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2" ref={listRef}>
           {loading && !hasModels ? (
             <div
               className="px-2 py-3 app-text-11 text-muted-foreground"
@@ -108,7 +241,16 @@ export function ComposerModelDialog({
             </div>
           ) : null}
 
-          {groups.map((group) => (
+          {!loading && !error && hasModels && rows.length === 0 ? (
+            <div
+              className="px-2 py-3 app-text-11 text-muted-foreground"
+              data-composer-model-dialog-no-match
+            >
+              {t("composer.modelDialog.noMatch")}
+            </div>
+          ) : null}
+
+          {filteredGroups.map((group) => (
             <section
               className="mb-1"
               data-composer-model-provider={group.provider}
@@ -123,6 +265,9 @@ export function ComposerModelDialog({
                 </span>
               </div>
               {group.models.map((model) => {
+                const index = rowIndex.get(rowKey(group.provider, model));
+                const highlighted =
+                  activeRow?.model === model && activeRow?.provider === group.provider;
                 const current =
                   model === selectedModel && group.provider === selectedProvider;
                 return (
@@ -133,11 +278,18 @@ export function ComposerModelDialog({
                       current
                         ? "bg-surface-soft text-foreground"
                         : "text-muted-foreground hover:bg-surface-soft",
+                      highlighted && !current ? "bg-surface-soft/60 text-foreground" : null,
                     )}
                     data-composer-model-option={model}
+                    data-composer-model-option-active={highlighted ? "true" : undefined}
                     data-composer-model-option-current={current ? "true" : undefined}
                     key={`${group.provider}:${model}`}
                     onClick={() => onSelect(model)}
+                    onMouseEnter={() => {
+                      if (index !== undefined) {
+                        setActiveOverride(index);
+                      }
+                    }}
                     type="button"
                   >
                     <span className="truncate">{model}</span>

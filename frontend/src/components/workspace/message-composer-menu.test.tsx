@@ -194,6 +194,57 @@ describe("MessageComposer trigger menu", () => {
     ]);
   });
 
+  it("drills into a popupSelect command's own options and dispatches the picked value", () => {
+    const onCommand = vi.fn(
+      (command: { name: string; kind: string }, args: string, source: "pick" | "submit") => {
+        void command;
+        void args;
+        void source;
+        return true;
+      },
+    );
+    const onDraftChange = vi.fn();
+    renderComposer({
+      commands: [
+        {
+          name: "model",
+          kind: "popupSelect",
+          options: [
+            { value: "deepseek-chat", label: "deepseek-chat", description: "deepseek" },
+            { value: "gpt-5", label: "gpt-5", description: "openai" },
+          ],
+        },
+      ],
+      onCommand,
+      onDraftChange,
+    });
+
+    type("/model");
+    // 真实打字每次按键都会带着 keydown/keyup，React 的选区追踪据此对齐；
+    // 这里的 `type()` 用原生 setter 伪造输入，补一次无副作用按键等价对齐，
+    // 否则 Enter 会额外触发一次 onSelect（选区陈旧）把候选层打回根层。
+    press("Shift");
+    // 第一层只有命令本身：Enter 先补全命令名并展开专属候选，而不是直接执行。
+    press("Enter");
+    expect(onCommand).not.toHaveBeenCalled();
+    expect(
+      container.querySelectorAll("[data-composer-command-option-value]"),
+    ).toHaveLength(2);
+
+    // 候选层：方向键虚拟高亮 + Enter 点选即派发（source=pick），命令行清空。
+    press("ArrowDown");
+    press("Enter");
+    expect(onCommand).toHaveBeenCalledTimes(1);
+    expect(onCommand.mock.calls[0][0]).toMatchObject({
+      name: "model",
+      kind: "popupSelect",
+    });
+    expect(onCommand.mock.calls[0][1]).toBe("gpt-5");
+    expect(onCommand.mock.calls[0][2]).toBe("pick");
+    expect(onDraftChange).toHaveBeenLastCalledWith("");
+    expect(menu()).toBeNull();
+  });
+
   it("blocks sending an unknown command line and surfaces the reason", () => {
     const onSubmit = vi.fn();
     renderComposer({ draft: "/nope", onSubmit });

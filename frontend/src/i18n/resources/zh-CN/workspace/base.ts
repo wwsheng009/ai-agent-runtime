@@ -270,6 +270,11 @@ export const zhWorkspaceBase = {
       empty: "运行时模型目录为空，暂无可选模型",
       groupCount: "{{count}} 个模型",
       currentBadge: "当前",
+      noMatch: "没有匹配的模型",
+      search: {
+        aria: "检索模型",
+        placeholder: "检索模型或 provider…",
+      },
     },
     shortcuts: "Ctrl/Cmd + Enter",
     stop: "停止",

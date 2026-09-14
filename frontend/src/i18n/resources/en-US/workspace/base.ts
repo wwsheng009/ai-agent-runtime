@@ -287,6 +287,11 @@ export const enWorkspaceBase = {
       empty: "the runtime model catalog is empty — no models to pick",
       groupCount: "{{count}} models",
       currentBadge: "current",
+      noMatch: "no models match",
+      search: {
+        aria: "search models",
+        placeholder: "search models or providers…",
+      },
     },
     shortcuts: "Ctrl/Cmd + Enter",
     stop: "stop",

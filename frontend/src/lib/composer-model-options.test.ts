@@ -1,10 +1,13 @@
 // P2-7 子片 3：`/model` 候选组装单测（纯函数，无 DOM / 无网络）。
+// P2-7 子片 4：补候选面本地检索（`filterComposerModelGroups`）口径。
 //
 // 覆盖口径：
 // - 目录未就绪（null / 无 provider / 无模型 / 空模型名）→ 空集合，不补占位项；
 // - 顺序与原文：provider 与模型名保持目录顺序与原文（不翻译、不排序、不截断）；
 // - 去重口径：组内去重；命令候选按模型 id 跨 provider 去重（保留首条），
-//   校验集合与候选同口径。
+//   校验集合与候选同口径；
+// - 检索口径：空查询原样返回、大小写不敏感子串命中（模型名或 provider 名），
+//   落空分组不留空壳。
 
 import { describe, expect, it } from "vitest";
 
@@ -14,6 +17,7 @@ import {
   composerModelCatalogGroups,
   composerModelCommandOptions,
   composerModelIds,
+  filterComposerModelGroups,
 } from "./composer-model-options";
 
 function catalog(
@@ -119,5 +123,34 @@ describe("composerModelIds", () => {
   it("目录未就绪时为空（调用方据此走「目录未就绪」而非「模型不存在」）", () => {
     expect(composerModelIds(null)).toEqual([]);
     expect(composerModelIds(catalog([{ name: "p", models: [] }]))).toEqual([]);
+  });
+});
+
+describe("filterComposerModelGroups", () => {
+  const groups = composerModelCatalogGroups(twoProviders);
+
+  it("空查询原样返回（不排序、不裁剪、不丢分组）", () => {
+    expect(filterComposerModelGroups(groups, "")).toEqual(groups);
+    expect(filterComposerModelGroups(groups, "   ")).toEqual(groups);
+  });
+
+  it("大小写不敏感的子串命中模型名，并保持目录顺序", () => {
+    expect(filterComposerModelGroups(groups, "REASON")).toEqual([
+      { provider: "deepseek", models: ["deepseek-reasoner"] },
+    ]);
+    expect(filterComposerModelGroups(groups, "-5")).toEqual([
+      { provider: "openai", models: ["gpt-5", "gpt-5-mini"] },
+    ]);
+  });
+
+  it("provider 名命中时保留该 provider 的全部模型", () => {
+    expect(filterComposerModelGroups(groups, "openai")).toEqual([
+      { provider: "openai", models: ["gpt-5", "gpt-5-mini"] },
+    ]);
+  });
+
+  it("全部落空时为空数组（调用方据此区分「无匹配」与「目录为空」）", () => {
+    expect(filterComposerModelGroups(groups, "zzz")).toEqual([]);
+    expect(filterComposerModelGroups([], "gpt")).toEqual([]);
   });
 });

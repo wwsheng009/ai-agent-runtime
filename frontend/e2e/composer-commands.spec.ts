@@ -157,6 +157,117 @@ test("P2-7: /model opens the runtime catalog dialog and applies the picked model
   await resetMockState(page.request);
 });
 
+test("P2-7: /model candidate surface searches locally and keeps no-match apart from an empty catalog", async ({
+  page,
+}) => {
+  await resetMockState(page.request);
+  await seedRuntimeModels(page.request, {
+    providers: [
+      {
+        name: "deepseek",
+        default_model: "deepseek-chat",
+        models: ["deepseek-chat", "deepseek-reasoner"],
+      },
+      { name: "openai", models: ["gpt-5", "gpt-5-mini"] },
+    ],
+    default_provider: "deepseek",
+    default_model: "deepseek-chat",
+  });
+  await page.reload();
+  await expect(composer(page)).toBeVisible({ timeout: 30_000 });
+
+  await composer(page).fill("/model");
+  await composer(page).press("Control+Enter");
+
+  const dialog = page.locator("[data-composer-model-dialog]");
+  const search = page.locator("[data-composer-model-search]");
+  await expect(dialog).toBeVisible();
+  // 弹层自持焦点：打开即可直接打字检索，不必先点输入框。
+  await expect(search).toBeFocused();
+
+  // 本地检索：按 provider 名命中该组全部模型，落空分组不留空壳。
+  await search.fill("openai");
+  await expect(page.locator('[data-composer-model-provider="deepseek"]')).toHaveCount(0);
+  await expect(page.locator("[data-composer-model-option]")).toHaveCount(2);
+
+  // 「检索无匹配」与「目录为空」是两种状态，各说各话。
+  await search.fill("zzz");
+  await expect(page.locator("[data-composer-model-dialog-no-match]")).toBeVisible();
+  await expect(page.locator("[data-composer-model-dialog-empty]")).toHaveCount(0);
+  await expect(page.locator("[data-composer-model-option]")).toHaveCount(0);
+
+  // 方向键虚拟高亮（焦点仍在检索框）+ Enter 应用，随后重开可见 current 已移动。
+  await search.fill("gpt");
+  await search.press("ArrowDown");
+  await expect(page.locator("[data-composer-model-option-active]")).toHaveAttribute(
+    "data-composer-model-option",
+    "gpt-5-mini",
+  );
+  await search.press("Enter");
+  await expect(dialog).toBeHidden();
+
+  await composer(page).fill("/model");
+  await composer(page).press("Control+Enter");
+  await expect(page.locator("[data-composer-model-option-current]")).toHaveAttribute(
+    "data-composer-model-option",
+    "gpt-5-mini",
+  );
+  await page.locator("[data-composer-model-dialog-close]").click();
+  await expect(dialog).toBeHidden();
+
+  await resetMockState(page.request);
+});
+
+test("P2-7: /model candidates drill down inside the slash menu and dispatch the picked model", async ({
+  page,
+}) => {
+  await resetMockState(page.request);
+  await seedRuntimeModels(page.request, {
+    providers: [
+      {
+        name: "deepseek",
+        default_model: "deepseek-chat",
+        models: ["deepseek-chat", "deepseek-reasoner"],
+      },
+      { name: "openai", models: ["gpt-5"] },
+    ],
+    default_provider: "deepseek",
+    default_model: "deepseek-chat",
+  });
+  await page.reload();
+  await expect(composer(page)).toBeVisible({ timeout: 30_000 });
+
+  // 真实键盘输入（不用 fill）：候选层键盘路径与真实打字同源。
+  await composer(page).click();
+  await page.keyboard.type("/model");
+  const menu = page.locator("[data-composer-menu]");
+  await expect(menu).toBeVisible();
+
+  // 第一层只有命令本身：Enter 下钻到该命令的专属候选（候选来自运行时目录，命令清单不内置模型名）。
+  await page.keyboard.press("Enter");
+  await expect(page.locator("[data-composer-command-option-value]")).toHaveCount(3);
+  await expect(
+    page.locator('[data-composer-command-option-value="deepseek-reasoner"]'),
+  ).toBeVisible();
+
+  // 方向键移动虚拟高亮，Enter 点选即派发（与命令行提交同语义）：命令行清空、菜单关闭。
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  await expect(menu).toHaveCount(0);
+  await expect(composer(page)).toHaveValue("");
+
+  // 座位确实移动：重开目录弹窗可见 current 落在所选模型上。
+  await composer(page).fill("/model");
+  await composer(page).press("Control+Enter");
+  await expect(page.locator("[data-composer-model-option-current]")).toHaveAttribute(
+    "data-composer-model-option",
+    "deepseek-reasoner",
+  );
+  await page.locator("[data-composer-model-dialog-close]").click();
+
+  await resetMockState(page.request);
+});
+
 test("P2-7: /model without a catalog reports not-ready and never fabricates models", async ({
   page,
 }) => {
