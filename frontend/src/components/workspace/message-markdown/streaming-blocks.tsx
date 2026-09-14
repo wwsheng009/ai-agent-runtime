@@ -7,6 +7,7 @@ import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
 import { createInlineMarkdownComponents } from "./markdown-components";
+import { rehypeCollapseBreakNewlines } from "./rehype-collapse-break-newlines";
 
 // 流式尾块按定义来自未结算内容：链接只渲染占位 <a>（不烘焙 href）、图片只渲染
 // 占位 span（不发请求），settled 后由主路径 `createMarkdownComponents(false)`
@@ -28,6 +29,7 @@ const InlineMarkdown = memo(function InlineMarkdown({
   return (
     <ReactMarkdown
       components={streamingInlineMarkdownComponents}
+      rehypePlugins={[rehypeCollapseBreakNewlines]}
       remarkPlugins={[remarkGfm, remarkBreaks]}
     >
       {content}

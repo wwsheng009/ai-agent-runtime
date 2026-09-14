@@ -426,4 +426,24 @@ describe("MessageMarkdown", () => {
     // 增量渲染是纯优化：settled 后与一次性全量解析逐字节一致（无残留占位 / 无丢块）。
     expect(incrementalMarkup).toBe(oneShotMarkup);
   });
+
+  it("renders one line break per source line in pre-wrap paragraphs", () => {
+    // Tool receipt 回归：mdast-util-to-hast 的 hardBreak 会输出 `<br>` + 一个纯换行文本
+    // 节点；`whitespace-pre-wrap` 段落会把该换行再渲染成一次强制换行，于是每个换行都
+    // 多出一个空行。这里锁住「`<br>` 之后不再保留换行文本」的收敛形态。
+    const content = [
+      "{",
+      '  "tool_call_id": "call_00_vnGp5jYxQ8mXg9g4IJ2i7846",',
+      '  "ok": true',
+      "}",
+      "",
+      "Full raw output artifact_id: art_325227a5aeb54277b9e39b834d216e76",
+    ].join("\n");
+    const markup = renderToStaticMarkup(<MessageMarkdown content={content} />);
+
+    expect(markup).toContain("whitespace-pre-wrap");
+    expect(markup).toContain("&quot;tool_call_id&quot;");
+    expect(markup).not.toMatch(/<br\s*\/?>\n/);
+    expect(markup.split("<br").length - 1).toBe(3);
+  });
 });

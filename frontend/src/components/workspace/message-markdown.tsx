@@ -24,6 +24,7 @@ import { cn } from "@/lib/utils";
 import { type MessageMarkdownProps } from "./message-markdown/types";
 import { createMarkdownComponents } from "./message-markdown/markdown-components";
 import { renderStreamingStructuredTail, renderStreamingPlainTail } from "./message-markdown/streaming-tails";
+import { rehypeCollapseBreakNewlines } from "./message-markdown/rehype-collapse-break-newlines";
 import { StableMarkdownFragment } from "./message-markdown/stable-fragment";
 
 export const MessageMarkdown = memo(function MessageMarkdown({
@@ -177,6 +178,7 @@ export const MessageMarkdown = memo(function MessageMarkdown({
           <div className={tailSpacing}>
             <ReactMarkdown
               components={markdownComponents}
+              rehypePlugins={[rehypeCollapseBreakNewlines]}
               remarkPlugins={[remarkGfm, remarkBreaks]}
             >
               {normalizeMarkdown(lastTailContent, streaming)}
