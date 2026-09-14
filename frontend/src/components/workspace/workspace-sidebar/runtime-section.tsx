@@ -156,6 +156,16 @@ export function WorkspaceSidebarRuntimeSection({
         >
           {t("sidebar.backendConfigPage")}
         </Link>
+        <Link
+          to="/runtime/skills"
+          onClick={onCloseMobile}
+          className={cn(
+            buttonVariants({ variant: "secondary", size: "sm" }),
+            "mt-2 w-full",
+          )}
+        >
+          {t("sidebar.skillsPage")}
+        </Link>
       </section>
     </SidebarSection>
   );

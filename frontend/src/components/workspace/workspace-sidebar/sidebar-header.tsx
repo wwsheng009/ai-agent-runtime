@@ -1,6 +1,6 @@
 // 由 components/workspace/workspace-sidebar.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
-import { MessageSquarePlusIcon, SearchIcon, Settings2Icon, SparklesIcon, XIcon } from "lucide-react";
+import { MessageSquarePlusIcon, SearchIcon, Settings2Icon, SlidersHorizontalIcon, SparklesIcon, XIcon } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,7 @@ import { type TFunction } from "i18next";
 type WorkspaceSidebarHeaderProps = {
   isCompact: boolean;
   onCloseMobile?: () => void;
+  onOpenSessionSearch?: () => void;
   onOpenSettings?: () => void;
   onRefreshRuntimeTeams?: () => void;
   onSelectThread: (threadId: string) => void;
@@ -25,6 +26,7 @@ type WorkspaceSidebarHeaderProps = {
 export function WorkspaceSidebarHeader({
   isCompact,
   onCloseMobile,
+  onOpenSessionSearch,
   onOpenSettings,
   onRefreshRuntimeTeams,
   onSelectThread,
@@ -107,11 +109,11 @@ export function WorkspaceSidebarHeader({
       {showSearch ? (
         <div
           className={cn(
-            "mt-2.5 rounded-card-lg border border-border bg-surface-solid px-3",
+            "mt-2.5 flex items-center gap-1.5 rounded-card-lg border border-border bg-surface-solid px-3",
             isCompact ? "py-2" : "py-2.5",
           )}
         >
-          <div className="flex items-center gap-2.5 text-sm text-muted-foreground">
+          <div className="flex min-w-0 flex-1 items-center gap-2.5 text-sm text-muted-foreground">
             <SearchIcon size={15} />
             <input
               value={query}
@@ -121,6 +123,19 @@ export function WorkspaceSidebarHeader({
               className="w-full bg-transparent outline-none"
             />
           </div>
+          {onOpenSessionSearch ? (
+            <Button
+              aria-label={t("panels.sessionSearch.trigger")}
+              className="shrink-0"
+              data-testid="session-search-trigger"
+              onClick={onOpenSessionSearch}
+              size="icon"
+              title={t("panels.sessionSearch.triggerHint")}
+              variant="ghost"
+            >
+              <SlidersHorizontalIcon size={15} />
+            </Button>
+          ) : null}
         </div>
       ) : null}
     </div>

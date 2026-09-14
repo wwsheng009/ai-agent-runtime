@@ -1,16 +1,28 @@
 // 由 components/workspace/workspace-sidebar.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
-import { ChevronDownIcon, FolderIcon, HistoryIcon, LoaderCircleIcon, UserIcon } from "lucide-react";
+import { ArchiveIcon, ChevronDownIcon, FolderIcon, HistoryIcon, LoaderCircleIcon, UserIcon } from "lucide-react";
 import { describeThreadSession } from "@/components/workspace/workspace-sidebar-shared";
 import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
+import { cn, formatRelativeTimestamp } from "@/lib/utils";
 import { type Dispatch, type SetStateAction } from "react";
 import { type TFunction } from "i18next";
 
+import type { SessionStatsStatus } from "@/hooks/workspace/use-session-stats";
+import type { RuntimeSessionStats } from "@/types/runtime";
+
 import { buildSidebarIconLabels, buildThreadSessionDetails } from "./labels";
 import { SidebarSection } from "./section-shell";
+import { WorkspaceSidebarSessionStatsSummary } from "./session-stats-summary";
 import { SidebarSessionItem } from "./session-item";
-import { getSessionStatusIcon } from "./state-icon-utils";
+import {
+  getRuntimeSessionActivityIcon,
+  getSessionStatusIcon,
+} from "./state-icon-utils";
+import {
+  resolveSidebarSessionRowState,
+  resolveSidebarSessionRowStatus,
+  type SidebarSessionActivity,
+} from "./session-row-status";
 import {
   type SidebarDirectoryGroup,
   type SidebarSectionId,
@@ -28,6 +40,13 @@ type WorkspaceSidebarSessionUserMenuItem = {
 type WorkspaceSidebarSessionsSectionProps = {
   deferredQuery: string;
   handleRenameSession: (sessionId: string, title: string) => Promise<void>;
+  hiddenArchivedCount: number;
+  onArchiveSession?: (sessionId: string) => void;
+  onDeleteSession?: (sessionId: string) => void;
+  onForkSession?: (sessionId: string, sourceTitle: string) => void;
+  onRefreshSessionStats: () => void;
+  onRestoreSession?: (sessionId: string) => void;
+  onToggleArchivedSessions: () => void;
   onSelectRuntimeSessionUser: (userId: string) => void;
   onSelectThread: (threadId: string) => void;
   openSections: SidebarSectionState;
@@ -38,10 +57,16 @@ type WorkspaceSidebarSessionsSectionProps = {
   selectedRuntimeSessionUserId: string;
   selectedThreadId: string;
   sessionDirectoryGroups: SidebarDirectoryGroup[];
+  sessionStats: RuntimeSessionStats | null;
+  sessionStatsError: unknown;
+  sessionStatsStatus: SessionStatsStatus;
+  sessionStatsUnavailable: boolean;
   sessionThreadById: Map<string, SidebarThread>;
   sessionThreads: SidebarThread[];
   sessionUserMenuItems: WorkspaceSidebarSessionUserMenuItem[];
   setRenamingSessionId: Dispatch<SetStateAction<string | null>>;
+  sessionActivity?: Record<string, SidebarSessionActivity>;
+  showArchivedSessions: boolean;
   showSessionsSection: boolean;
   startSessionRename: (sessionId: string) => void;
   t: TFunction<"workspace">;
@@ -52,6 +77,13 @@ type WorkspaceSidebarSessionsSectionProps = {
 export function WorkspaceSidebarSessionsSection({
   deferredQuery,
   handleRenameSession,
+  hiddenArchivedCount,
+  onArchiveSession,
+  onDeleteSession,
+  onForkSession,
+  onRefreshSessionStats,
+  onRestoreSession,
+  onToggleArchivedSessions,
   onSelectRuntimeSessionUser,
   onSelectThread,
   openSections,
@@ -62,10 +94,16 @@ export function WorkspaceSidebarSessionsSection({
   selectedRuntimeSessionUserId,
   selectedThreadId,
   sessionDirectoryGroups,
+  sessionStats,
+  sessionStatsError,
+  sessionStatsStatus,
+  sessionStatsUnavailable,
   sessionThreadById,
   sessionThreads,
   sessionUserMenuItems,
   setRenamingSessionId,
+  sessionActivity,
+  showArchivedSessions,
   showSessionsSection,
   startSessionRename,
   t,
@@ -99,6 +137,33 @@ export function WorkspaceSidebarSessionsSection({
             </div>
           ) : null}
           <div className="space-y-1.5">
+            <WorkspaceSidebarSessionStatsSummary
+              error={sessionStatsError}
+              onRefresh={onRefreshSessionStats}
+              stats={sessionStats}
+              status={sessionStatsStatus}
+              t={t}
+              unavailable={sessionStatsUnavailable}
+            />
+            {showArchivedSessions || hiddenArchivedCount > 0 ? (
+              <button
+                type="button"
+                onClick={onToggleArchivedSessions}
+                className={cn(
+                  "flex w-full items-center justify-center gap-1.5 rounded-control border px-2 py-1 app-text-10 uppercase tracking-[0.14em] transition",
+                  showArchivedSessions
+                    ? "border-accent-secondary-border bg-accent-secondary-soft text-accent-secondary"
+                    : "border-dashed border-border bg-surface-softer text-muted-foreground hover:text-foreground",
+                )}
+              >
+                <ArchiveIcon size={12} />
+                {showArchivedSessions
+                  ? t("sidebar.session.hideArchived")
+                  : t("sidebar.session.showArchived", {
+                      count: hiddenArchivedCount,
+                    })}
+              </button>
+            ) : null}
             {sessionUserMenuItems.length > 0 ? (
               sessionUserMenuItems.map((user) => {
                 const isSelectedUser =
@@ -189,35 +254,103 @@ export function WorkspaceSidebarSessionsSection({
                                       const isActive =
                                         thread?.id === selectedThreadId ||
                                         thread?.sessionId === selectedThreadId;
-                                      const sessionStatusIcon = getSessionStatusIcon(
-                                        describeThreadSession(
-                                          thread ?? {
-                                            id: session.id,
-                                            title,
-                                            summary:
-                                              session.metadata?.summary ?? "",
-                                            updatedAt:
-                                              session.updatedAt ||
-                                              session.createdAt ||
-                                              "",
-                                            status: "active",
-                                            sessionId: session.id,
-                                            tags: ["runtime-session"],
-                                            prompts: [],
-                                            messages: [],
-                                            artifacts: [],
-                                          },
-                                          threadSessionDetails,
-                                        ).label,
-                                        sidebarLabels,
-                                      );
+                                      const rowState =
+                                        resolveSidebarSessionRowState(session);
+                                      const rowStatus =
+                                        resolveSidebarSessionRowStatus(
+                                          session,
+                                          sessionActivity?.[session.id],
+                                        );
+                                      const sessionStatusIcon =
+                                        rowStatus.kind === "idle"
+                                          ? getSessionStatusIcon(
+                                              describeThreadSession(
+                                                thread ?? {
+                                                  id: session.id,
+                                                  title,
+                                                  summary:
+                                                    session.metadata?.summary ??
+                                                    "",
+                                                  updatedAt:
+                                                    session.updatedAt ||
+                                                    session.createdAt ||
+                                                    "",
+                                                  status: "active",
+                                                  sessionId: session.id,
+                                                  tags: ["runtime-session"],
+                                                  prompts: [],
+                                                  messages: [],
+                                                  artifacts: [],
+                                                },
+                                                threadSessionDetails,
+                                              ).label,
+                                              sidebarLabels,
+                                            )
+                                          : getRuntimeSessionActivityIcon(
+                                              rowStatus,
+                                              sidebarLabels,
+                                            );
+                                      const timestamp =
+                                        session.updatedAt ||
+                                        session.createdAt ||
+                                        "";
+                                      const createdAt =
+                                        session.createdAt || timestamp;
+                                      const itemTime =
+                                        timestamp &&
+                                        !Number.isNaN(Date.parse(timestamp))
+                                          ? {
+                                              relative:
+                                                formatRelativeTimestamp(
+                                                  timestamp,
+                                                ),
+                                              title: t(
+                                                "sidebar.session.createdAt",
+                                                {
+                                                  time: Number.isNaN(
+                                                    Date.parse(createdAt),
+                                                  )
+                                                    ? createdAt
+                                                    : new Date(
+                                                        createdAt,
+                                                      ).toLocaleString(),
+                                                },
+                                              ),
+                                            }
+                                          : undefined;
 
                                       return (
                                         <SidebarSessionItem
                                           key={`recoverable-${session.id}`}
+                                          actionLabels={{
+                                            archivedBadge: t(
+                                              "sidebar.session.archivedBadge",
+                                            ),
+                                            archive: t(
+                                              "sidebar.session.archive",
+                                            ),
+                                            delete: t(
+                                              "sidebar.session.delete",
+                                            ),
+                                            fork: t(
+                                              "sidebar.session.fork",
+                                            ),
+                                            menu: t("sidebar.session.menu"),
+                                            restore: t(
+                                              "sidebar.session.restore",
+                                            ),
+                                          }}
                                           isActive={isActive}
+                                          onArchive={onArchiveSession}
                                           onCancelRename={() =>
                                             setRenamingSessionId(null)
+                                          }
+                                          onDelete={onDeleteSession}
+                                          onFork={
+                                            onForkSession
+                                              ? (sessionId) =>
+                                                  onForkSession(sessionId, title)
+                                              : undefined
                                           }
                                           onRenameSubmit={
                                             (sessionId, value) =>
@@ -234,6 +367,7 @@ export function WorkspaceSidebarSessionsSection({
                                           onStartRename={
                                             startSessionRename
                                           }
+                                          onRestore={onRestoreSession}
                                           renameLabels={{
                                             placeholder: t(
                                               "sidebar.session.renamePlaceholder",
@@ -246,8 +380,10 @@ export function WorkspaceSidebarSessionsSection({
                                             renamingSessionId ===
                                             session.id
                                           }
+                                          rowState={rowState}
                                           session={session}
                                           statusIcon={sessionStatusIcon}
+                                          time={itemTime}
                                           title={title}
                                         />
                                       );
@@ -261,7 +397,9 @@ export function WorkspaceSidebarSessionsSection({
                           <div className="rounded-card border border-dashed border-border px-3 py-3 text-sm leading-6 text-muted-foreground">
                             {deferredQuery
                               ? t("sidebar.emptySessions.search")
-                              : t("sidebar.emptySessions.default")}
+                              : hiddenArchivedCount > 0
+                                ? t("sidebar.emptySessions.allArchived")
+                                : t("sidebar.emptySessions.default")}
                           </div>
                         )}
                       </div>
@@ -273,7 +411,9 @@ export function WorkspaceSidebarSessionsSection({
               <div className="rounded-card border border-dashed border-border px-3 py-3 text-sm leading-6 text-muted-foreground">
                 {deferredQuery
                   ? t("sidebar.emptySessions.search")
-                  : t("sidebar.emptySessions.default")}
+                  : hiddenArchivedCount > 0
+                    ? t("sidebar.emptySessions.allArchived")
+                    : t("sidebar.emptySessions.default")}
               </div>
             ) : null}
           </div>

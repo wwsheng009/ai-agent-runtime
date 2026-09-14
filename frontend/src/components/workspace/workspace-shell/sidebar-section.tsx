@@ -11,13 +11,18 @@ import { type WorkspaceShellProps } from "@/components/workspace/workspace-shell
 type WorkspaceSidebarSectionProps = Pick<
   WorkspaceShellProps,
   | "onAddWorkspaceDirectory"
+  | "onArchiveRuntimeSession"
   | "onCreateSessionInDirectory"
+  | "onDeleteRuntimeSession"
+  | "onForkRuntimeSession"
   | "onRefreshRuntimeTeams"
   | "onRemoveWorkspaceDirectory"
   | "onRenameRuntimeSession"
   | "onRenameWorkspaceDirectory"
+  | "onRestoreRuntimeSession"
   | "onSelectRuntimeSessionUser"
   | "onSelectThread"
+  | "sessionActivity"
   | "runtimeSessionDefaultUserId"
   | "runtimeSessionUsers"
   | "runtimeSessionUsersError"
@@ -48,13 +53,18 @@ type WorkspaceSidebarSectionProps = Pick<
 
 export function WorkspaceSidebarSection({
   onAddWorkspaceDirectory,
+  onArchiveRuntimeSession,
   onCreateSessionInDirectory,
+  onDeleteRuntimeSession,
+  onForkRuntimeSession,
   onRefreshRuntimeTeams,
   onRemoveWorkspaceDirectory,
   onRenameRuntimeSession,
   onRenameWorkspaceDirectory,
+  onRestoreRuntimeSession,
   onSelectRuntimeSessionUser,
   onSelectThread,
+  sessionActivity,
   runtimeSessionDefaultUserId,
   runtimeSessionUsers,
   runtimeSessionUsersError,
@@ -112,7 +122,11 @@ export function WorkspaceSidebarSection({
       workspaceDirectoriesLoading={workspaceDirectoriesLoading}
       workspaceDirectoriesRefreshing={workspaceDirectoriesRefreshing}
       onAddWorkspaceDirectory={onAddWorkspaceDirectory}
+      onArchiveRuntimeSession={onArchiveRuntimeSession}
+      onDeleteRuntimeSession={onDeleteRuntimeSession}
+      onForkRuntimeSession={onForkRuntimeSession}
       onRenameWorkspaceDirectory={onRenameWorkspaceDirectory}
+      onRestoreRuntimeSession={onRestoreRuntimeSession}
       onRemoveWorkspaceDirectory={onRemoveWorkspaceDirectory}
       onCreateSessionInDirectory={onCreateSessionInDirectory}
       onRenameRuntimeSession={onRenameRuntimeSession}
@@ -122,6 +136,7 @@ export function WorkspaceSidebarSection({
         setMobileSidebarOpen(false);
         onSelectThread(threadId);
       }}
+      sessionActivity={sessionActivity}
     />
   );
 }

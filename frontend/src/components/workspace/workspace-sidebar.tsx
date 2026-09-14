@@ -1,12 +1,14 @@
 // 由 P0-2 第 3 批第 29 项拆分：入口保留状态/派生/副作用与四段侧栏装配，渲染块下沉到 workspace-sidebar/。
 
 import { useDeferredValue, useMemo, useState } from "react";
+import { SessionSearchDialog } from "@/components/workspace/session-search-dialog";
 import { mergeDirectoryGroups, type MergedDirectoryGroup } from "@/components/workspace/workspace-sidebar-shared";
 import { WorkspaceDirectoryAddDialog } from "@/components/workspace/workspace-directory-add-dialog";
 import { WorkspaceDirectoryDeleteDialog } from "@/components/workspace/workspace-directory-delete-dialog";
 import { type Thread } from "@/data/mock";
 import { cn } from "@/lib/utils";
 import { useTranslation } from "react-i18next";
+import { useSessionStats } from "@/hooks/workspace/use-session-stats";
 import { WorkspaceSidebarChatsSection } from "@/components/workspace/workspace-sidebar/chats-section";
 import { WorkspaceSidebarDirectoriesSection } from "@/components/workspace/workspace-sidebar/directories-section";
 import { WorkspaceSidebarHeader } from "@/components/workspace/workspace-sidebar/sidebar-header";
@@ -14,6 +16,7 @@ import { WorkspaceSidebarRuntimeSection } from "@/components/workspace/workspace
 import { WorkspaceSidebarRuntimeTeamsSurface } from "@/components/workspace/workspace-sidebar/runtime-teams-surface";
 import { WorkspaceSidebarSessionsSection } from "@/components/workspace/workspace-sidebar/sessions-section";
 import { useSidebarEffects } from "@/components/workspace/workspace-sidebar/use-sidebar-effects";
+import { splitRuntimeSessionsByVisibility } from "@/components/workspace/workspace-sidebar/session-row-status";
 import {
   type SidebarSectionId,
   type SidebarSectionState,
@@ -52,6 +55,11 @@ export function WorkspaceSidebar({
   onRemoveWorkspaceDirectory,
   onCreateSessionInDirectory,
   onRenameRuntimeSession,
+  onArchiveRuntimeSession,
+  onRestoreRuntimeSession,
+  onForkRuntimeSession,
+  onDeleteRuntimeSession,
+  sessionActivity,
   threads,
   selectedThreadId,
   onSelectThread,
@@ -60,6 +68,8 @@ export function WorkspaceSidebar({
   const isCompact = density === "compact";
   const [query, setQuery] = useState("");
   const [runtimeTeamsDialogOpen, setRuntimeTeamsDialogOpen] = useState(false);
+  /** P2-1A：服务端会话元数据检索弹层（与本地标题过滤并存）。 */
+  const [sessionSearchOpen, setSessionSearchOpen] = useState(false);
   const [openSections, setOpenSections] = useState<SidebarSectionState>({
     directories: true,
     chats: true,
@@ -82,6 +92,8 @@ export function WorkspaceSidebar({
   const [submittingDirectoryRename, setSubmittingDirectoryRename] =
     useState(false);
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
+  /** P1-9：归档会话默认隐藏，可一键展开/收起（本次会话内有效）。 */
+  const [showArchivedSessions, setShowArchivedSessions] = useState(false);
   const [creatingSessionKey, setCreatingSessionKey] = useState<string | null>(
     null,
   );
@@ -164,9 +176,16 @@ export function WorkspaceSidebar({
     runtimeSessionsSummary.totalCount,
     selectedRuntimeSessionUserId,
   ]);
+  const sessionVisibility = useMemo(
+    () =>
+      splitRuntimeSessionsByVisibility(runtimeSessions, {
+        showArchived: showArchivedSessions,
+      }),
+    [runtimeSessions, showArchivedSessions],
+  );
   const mergedDirectoryGroups = useMemo(
-    () => mergeDirectoryGroups(workspaceDirectories, runtimeSessions),
-    [runtimeSessions, workspaceDirectories],
+    () => mergeDirectoryGroups(workspaceDirectories, sessionVisibility.visible),
+    [sessionVisibility.visible, workspaceDirectories],
   );
   // Per-user session browser: skip registered directories without sessions
   // so the friendly empty state survives directory-only registrations.
@@ -185,8 +204,12 @@ export function WorkspaceSidebar({
     return byId;
   }, [sessionThreads]);
 
+  // P2-1A：会话统计（`GET /sessions/stats`）与侧栏用户筛选同口径（同一 userId）。
+  const sessionStats = useSessionStats(selectedRuntimeSessionUserId);
+
   const showSessionsSection =
     sessionThreads.length > 0 ||
+    runtimeSessions.length > 0 ||
     runtimeSessionsLoading ||
     runtimeSessionsRefreshing ||
     Boolean(runtimeSessionsError) ||
@@ -324,6 +347,7 @@ export function WorkspaceSidebar({
         <WorkspaceSidebarHeader
             isCompact={isCompact}
             onCloseMobile={onCloseMobile}
+            onOpenSessionSearch={() => setSessionSearchOpen(true)}
             onOpenSettings={onOpenSettings}
             onRefreshRuntimeTeams={onRefreshRuntimeTeams}
             onSelectThread={onSelectThread}
@@ -384,6 +408,15 @@ export function WorkspaceSidebar({
           <WorkspaceSidebarSessionsSection
               deferredQuery={deferredQuery}
               handleRenameSession={handleRenameSession}
+              hiddenArchivedCount={sessionVisibility.hiddenArchivedCount}
+              onArchiveSession={onArchiveRuntimeSession}
+              onDeleteSession={onDeleteRuntimeSession}
+              onForkSession={onForkRuntimeSession}
+              onRefreshSessionStats={sessionStats.refresh}
+              onRestoreSession={onRestoreRuntimeSession}
+              onToggleArchivedSessions={() =>
+                setShowArchivedSessions((current) => !current)
+              }
               onSelectRuntimeSessionUser={onSelectRuntimeSessionUser}
               onSelectThread={onSelectThread}
               openSections={openSections}
@@ -394,10 +427,16 @@ export function WorkspaceSidebar({
               selectedRuntimeSessionUserId={selectedRuntimeSessionUserId}
               selectedThreadId={selectedThreadId}
               sessionDirectoryGroups={sessionDirectoryGroups}
+              sessionStats={sessionStats.stats}
+              sessionStatsError={sessionStats.error}
+              sessionStatsStatus={sessionStats.status}
+              sessionStatsUnavailable={sessionStats.unavailable}
               sessionThreadById={sessionThreadById}
               sessionThreads={sessionThreads}
               sessionUserMenuItems={sessionUserMenuItems}
+              sessionActivity={sessionActivity}
               setRenamingSessionId={setRenamingSessionId}
+              showArchivedSessions={showArchivedSessions}
               showSessionsSection={showSessionsSection}
               startSessionRename={startSessionRename}
               t={t}
@@ -442,6 +481,18 @@ export function WorkspaceSidebar({
         sessionCount={directoryDeleteTarget?.sessionCount ?? 0}
         onClose={() => setDirectoryDeleteTarget(null)}
         onConfirm={onRemoveWorkspaceDirectory}
+      />
+      <SessionSearchDialog
+        defaultUserId={selectedRuntimeSessionUserId}
+        // 打开状态变化即重挂载：每次打开都是全新的筛选与结果（不展示过期检索）。
+        key={sessionSearchOpen ? "open" : "closed"}
+        onClose={() => setSessionSearchOpen(false)}
+        onSelectSession={(sessionId) => {
+          setSessionSearchOpen(false);
+          onSelectThread(sessionId);
+        }}
+        open={sessionSearchOpen}
+        users={runtimeSessionUsers}
       />
       </aside>
     </>

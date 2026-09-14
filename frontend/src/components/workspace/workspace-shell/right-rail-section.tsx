@@ -4,6 +4,7 @@
 import { type TFunction } from "i18next";
 import { Suspense } from "react";
 
+import { PanelErrorBoundary } from "@/components/errors/boundaries";
 import { SessionUsagePanel } from "@/components/workspace/session-usage-panel";
 
 import { ArtifactPanel, ArtifactPanelFallback } from "./lazy-surfaces";
@@ -41,26 +42,37 @@ export function WorkspaceRightRailSection({
   return (
     <div className="hidden min-h-0 min-w-0 flex-col overflow-hidden border-l border-white/8 [background:var(--workspace-sidebar-bg)] xl:flex">
       {showUsagePanel ? (
-        <SessionUsagePanel
-          key={sessionId}
-          className="shrink-0"
-          isResponding={isResponding}
-          lastRuntimeEventType={selectedThread.lastRuntimeEventType}
-          runtimeEventCount={selectedThread.runtimeEventCount}
-          sessionId={sessionId}
-        />
-      ) : null}
-      {showArtifactPanel ? (
-        <Suspense fallback={<ArtifactPanelFallback message={t("shell.loadingArtifactPanel")} />}>
-          <ArtifactPanel
-            artifacts={selectedThread.artifacts}
+        <PanelErrorBoundary
+          key={`usage-panel-${sessionId}`}
+          title={t("usagePanel.title")}
+        >
+          <SessionUsagePanel
+            key={sessionId}
+            className="shrink-0"
+            isResponding={isResponding}
             lastRuntimeEventType={selectedThread.lastRuntimeEventType}
             runtimeEventCount={selectedThread.runtimeEventCount}
-            selectedArtifactId={selectedArtifactId}
-            sessionId={selectedThread.sessionId}
-            onOpenArtifact={handleOpenArtifact}
+            sessionId={sessionId}
           />
-        </Suspense>
+        </PanelErrorBoundary>
+      ) : null}
+      {showArtifactPanel ? (
+        <PanelErrorBoundary key={`artifact-panel-${sessionId}`}>
+          <Suspense
+            fallback={
+              <ArtifactPanelFallback message={t("shell.loadingArtifactPanel")} />
+            }
+          >
+            <ArtifactPanel
+              artifacts={selectedThread.artifacts}
+              lastRuntimeEventType={selectedThread.lastRuntimeEventType}
+              runtimeEventCount={selectedThread.runtimeEventCount}
+              selectedArtifactId={selectedArtifactId}
+              sessionId={selectedThread.sessionId}
+              onOpenArtifact={handleOpenArtifact}
+            />
+          </Suspense>
+        </PanelErrorBoundary>
       ) : null}
     </div>
   );

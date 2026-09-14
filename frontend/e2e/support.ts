@@ -104,12 +104,24 @@ export async function resetMockState(request: APIRequestContext): Promise<void> 
 /** seed 会话：返回 mock 生成的 session id。 */
 export async function seedSession(
   request: APIRequestContext,
-  input: { id?: string; title?: string } = {},
+  input: {
+    id?: string;
+    title?: string;
+    /** P2-1A：检索维度（`POST /api/runtime/sessions/search` 的服务端过滤）。 */
+    state?: string;
+    userId?: string;
+    tags?: string[];
+    metadata?: Record<string, unknown>;
+  } = {},
 ): Promise<string> {
   const response = await request.post("/api/runtime/sessions", {
     data: {
       ...(input.id ? { session_id: input.id, id: input.id } : {}),
       ...(input.title ? { title: input.title } : {}),
+      ...(input.state ? { state: input.state } : {}),
+      ...(input.userId ? { user_id: input.userId } : {}),
+      ...(input.tags ? { tags: input.tags } : {}),
+      ...(input.metadata ? { metadata: input.metadata } : {}),
     },
   });
   if (!response.ok()) {
@@ -144,6 +156,54 @@ export async function seedRuntimeEvents(
     throw new Error(`seedRuntimeEvents response has no seq: ${JSON.stringify(body)}`);
   }
   return body.seq;
+}
+
+/**
+ * seed 后台任务（P2-1A）：jobs 数组按后端 `background.Job` 的序列化字段名
+ * （`ID` / `Status` / `Command` / `StartedAt` / `FinishedAt` / `ExitCode`，可选 `Output`）
+ * 提供；mock 按会话保存，列表端点按 `session_id` 过滤。
+ */
+export async function seedJobs(
+  request: APIRequestContext,
+  sessionId: string,
+  jobs: Array<Record<string, unknown>>,
+): Promise<void> {
+  const response = await request.post("/api/_test/jobs", {
+    data: { session_id: sessionId, jobs },
+  });
+  if (!response.ok()) {
+    throw new Error(`seedJobs failed: ${response.status()} ${await response.text()}`);
+  }
+}
+
+/**
+ * seed 运行时文件（P2-1A）：`POST /api/runtime/fs/read-file` 的 mock 数据源。
+ *
+ * `content` 为 UTF-8 文本便捷写法；二进制/坏编码场景用 `dataBase64`；
+ * 未登记的路径 mock 返回 404，用于覆盖「读取失败如实呈现」。
+ */
+export async function seedRuntimeFiles(
+  request: APIRequestContext,
+  files: Array<{
+    path: string;
+    content?: string;
+    dataBase64?: string;
+    byteCount?: number;
+  }>,
+): Promise<void> {
+  const response = await request.post("/api/_test/files", {
+    data: {
+      files: files.map((file) => ({
+        path: file.path,
+        ...(file.content !== undefined ? { content: file.content } : {}),
+        ...(file.dataBase64 !== undefined ? { data_base64: file.dataBase64 } : {}),
+        ...(file.byteCount !== undefined ? { byte_count: file.byteCount } : {}),
+      })),
+    },
+  });
+  if (!response.ok()) {
+    throw new Error(`seedRuntimeFiles failed: ${response.status()} ${await response.text()}`);
+  }
 }
 
 /** seed 设置：顶层浅合并进 localStorage 记录（随首屏启动脚本生效）。 */

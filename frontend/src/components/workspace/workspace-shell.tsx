@@ -43,14 +43,21 @@ export function WorkspaceShell({
   onAddWorkspaceDirectory,
   onRenameWorkspaceDirectory,
   onRemoveWorkspaceDirectory,
+  onRetryConnection,
   onCreateSessionInDirectory,
   onRenameRuntimeSession,
+  onArchiveRuntimeSession,
+  onRestoreRuntimeSession,
+  onForkRuntimeSession,
+  onDeleteRuntimeSession,
+  sessionActivity,
   runtimeClient,
   selectedRuntimeSessionUserId,
   selectedThread,
   selectedArtifact,
   selectedArtifactId,
   composerAttachments,
+  connectionStatus = null,
   draft,
   isResponding,
   modelOptions,
@@ -253,8 +260,12 @@ export function WorkspaceShell({
           onAddWorkspaceDirectory={onAddWorkspaceDirectory}
           onCreateSessionInDirectory={onCreateSessionInDirectory}
           onRefreshRuntimeTeams={onRefreshRuntimeTeams}
+          onArchiveRuntimeSession={onArchiveRuntimeSession}
+          onDeleteRuntimeSession={onDeleteRuntimeSession}
+          onForkRuntimeSession={onForkRuntimeSession}
           onRemoveWorkspaceDirectory={onRemoveWorkspaceDirectory}
           onRenameRuntimeSession={onRenameRuntimeSession}
+          onRestoreRuntimeSession={onRestoreRuntimeSession}
           onRenameWorkspaceDirectory={onRenameWorkspaceDirectory}
           onSelectRuntimeSessionUser={onSelectRuntimeSessionUser}
           onSelectThread={onSelectThread}
@@ -275,6 +286,7 @@ export function WorkspaceShell({
           runtimeTeamsRefreshing={runtimeTeamsRefreshing}
           selectedRuntimeSessionUserId={selectedRuntimeSessionUserId}
           selectedThread={selectedThread}
+          sessionActivity={sessionActivity}
           setMobileSidebarOpen={setMobileSidebarOpen}
           threads={threads}
           workspaceDirectories={workspaceDirectories}
@@ -292,6 +304,7 @@ export function WorkspaceShell({
           canBacktrack={canBacktrack}
           composerAttachments={composerAttachments}
           composerOverlayRef={composerOverlayRef}
+          connectionStatus={connectionStatus}
           density={settings.workspace.density}
           draft={draft}
           handleOpenArtifact={handleOpenArtifact}
@@ -311,6 +324,7 @@ export function WorkspaceShell({
           onProviderChange={onProviderChange}
           onReasoningEffortChange={onReasoningEffortChange}
           onResolvePendingApproval={onResolvePendingApproval}
+          onRetryConnection={onRetryConnection}
           onSelectBacktrackNavigationMessage={onSelectBacktrackNavigationMessage}
           onStopResponding={onStopResponding}
           onSubmit={onSubmit}

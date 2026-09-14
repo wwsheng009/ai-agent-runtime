@@ -58,7 +58,24 @@ const DONE = {
 const chatSseEventsBySession = new Map(); // sessionId -> [{type, payload, seq, timestamp}]
 const mockSessions = new Map(); // sessionId -> {session_id, id, title, created_at, updated_at, history}
 const brokenEventsSessions = new Set(); // e2e 故障开关：事件增量接口 500
+const mockJobsBySession = new Map(); // sessionId -> [{...backend background.Job（PascalCase）}]
+// P2-1A：运行时文件读取（`POST /api/runtime/fs/read-file`）的 mock 文件表。
+// path -> { dataBase64, byteCount }；由 `/api/_test/files` 注入，未登记即 404。
+const mockFiles = new Map();
+// P2-1A：技能市场（`/api/runtime/skills/*`）状态。契约对齐
+// backend/internal/api/skills/handler.go：写操作要求管理令牌；热重载未配置时
+// stats 端点返回 503，前端如实呈现「未启用」而不是伪造 watching=false。
+const MOCK_SKILLS_ADMIN_TOKEN = "e2e-skills-token";
+let mockSkillsEmbeddingEnabled = false;
+let mockSkillsHotReload = {
+  configured: false,
+  watching: false,
+  skillCount: 0,
+  callbackCount: 0,
+  debounceTime: "",
+};
 let mockChatSeq = 0;
+let mockCreatedSessionSeq = 0; // POST 建会话（含 Fork）时生成确定性新 id
 
 function recordChatSseEvent(sessionId, eventName, payload) {
   if (!sessionId) return undefined;
@@ -112,6 +129,88 @@ function ensureMockSession(sessionId) {
     mockSessions.set(sessionId, session);
   }
   return session;
+}
+
+/**
+ * 由会话事件（+ 后台任务）推导 runtime 快照，供
+ * `GET /api/runtime/sessions/:id/runtime`（P2-1A 重载恢复）使用。
+ *
+ * 只在 mock 内维护「最后一个未决审批 / 提问」：与后端快照同语义（snake_case），
+ * 供前端 P1-7 待交互注册表在页面重载后重建。
+ */
+function deriveSessionRuntimeState(sessionId) {
+  const list = chatSseEventsBySession.get(sessionId) ?? [];
+  let approval = null;
+  let question = null;
+  let latestSeq = 0;
+  let updatedAt = "";
+
+  for (const entry of list) {
+    latestSeq = Math.max(latestSeq, entry.seq ?? 0);
+    if (entry.timestamp) updatedAt = entry.timestamp;
+    const payload = entry.payload ?? {};
+    const type = String(entry.type ?? "").toLowerCase();
+    if (type === "approval_requested" || type === "approval.requested") {
+      const requestId = payload.request_id ?? payload.requestId ?? payload.id;
+      if (typeof requestId === "string" && requestId) {
+        approval = {
+          request_id: requestId,
+          tool_name: payload.tool_name ?? payload.toolName ?? "",
+          reason: payload.reason ?? "",
+          risk_level: payload.risk_level ?? payload.riskLevel ?? "",
+          ...(typeof payload.expires_at === "string" && payload.expires_at
+            ? { expires_at: payload.expires_at }
+            : {}),
+        };
+      }
+      continue;
+    }
+    if (type === "approval_resolved" || type === "approval.resolved") {
+      const requestId = payload.request_id ?? payload.requestId;
+      if (!requestId || !approval || approval.request_id === requestId) {
+        approval = null;
+      }
+      continue;
+    }
+    if (type === "question_asked" || type === "question.asked") {
+      const questionId = payload.question_id ?? payload.questionId ?? payload.id;
+      if (typeof questionId === "string" && questionId) {
+        question = {
+          question_id: questionId,
+          prompt: payload.prompt ?? "",
+          required: payload.required === true,
+          suggestions: Array.isArray(payload.suggestions) ? payload.suggestions : [],
+          ...(typeof payload.expires_at === "string" && payload.expires_at
+            ? { expires_at: payload.expires_at }
+            : {}),
+        };
+      }
+      continue;
+    }
+    if (type === "question_answered" || type === "question.answered") {
+      const questionId = payload.question_id ?? payload.questionId;
+      if (!questionId || !question || question.question_id === questionId) {
+        question = null;
+      }
+    }
+  }
+
+  const activeJobIds = (mockJobsBySession.get(sessionId) ?? [])
+    .filter((job) =>
+      ["running", "pending", "queued"].includes(String(job.Status ?? "").toLowerCase()),
+    )
+    .map((job) => job.ID)
+    .filter((id) => typeof id === "string" && id);
+
+  return {
+    session_id: sessionId,
+    status: approval ? "waiting_approval" : question ? "waiting_question" : "idle",
+    head_offset: latestSeq,
+    active_job_ids: activeJobIds,
+    pending_approval: approval,
+    pending_question: question,
+    updated_at: updatedAt || new Date().toISOString(),
+  };
 }
 
 const TOOL_ARGS = { query: "capital of France" };
@@ -183,6 +282,53 @@ const toolScript = [
       ...DONE,
       content: "Searching the web gave us the answer: Paris is the capital of France.",
     },
+  },
+];
+
+// P2-1A：file 预览链路的最小会话（read_file 工具行 → 行内文件链接 → 文件预览弹层）。
+// 触发词：prompt 含 "read-file"。路径由 /api/_test/files 注入，未注入则弹层如实报 404。
+const READ_FILE_PATH = "/workspace/e2e/notes.txt";
+const READ_FILE_ARGS = { file_path: READ_FILE_PATH };
+
+const readFileScript = [
+  { event: "meta", payload: META },
+  {
+    event: "tool_start",
+    delay: 120,
+    payload: {
+      type: "tool_start",
+      index: 0,
+      status: "started",
+      tool: { id: "read-1", name: "read_file", args: READ_FILE_ARGS },
+      tool_call: { id: "read-1", name: "read_file", args: READ_FILE_ARGS },
+      delta: { id: "read-1" },
+      metadata: { name: "read_file" },
+    },
+  },
+  {
+    event: "tool_end",
+    delay: 200,
+    payload: {
+      type: "tool_end",
+      index: 1,
+      status: "completed",
+      tool: {
+        id: "read-1",
+        name: "read_file",
+        args: READ_FILE_ARGS,
+        result: "read 2 lines",
+        output: "read 2 lines",
+      },
+      tool_call: { id: "read-1", name: "read_file", args: READ_FILE_ARGS, result: "read 2 lines" },
+      delta: { id: "read-1" },
+      metadata: { name: "read_file", result: "read 2 lines" },
+    },
+  },
+  { event: "chunk", delay: 120, payload: makeChunk(2, "I read the file you pointed at.") },
+  {
+    event: "done",
+    delay: 120,
+    payload: { ...DONE, content: "I read the file you pointed at." },
   },
 ];
 
@@ -267,6 +413,7 @@ function pickScript(rawBody) {
   const haystack = strings.join("\n").toLowerCase();
 
   if (haystack.includes("tool")) return { name: "tool", script: toolScript };
+  if (haystack.includes("read-file")) return { name: "read-file", script: readFileScript };
   if (haystack.includes("burst")) return { name: "burst", script: burstScript };
   if (haystack.includes("scroll")) return { name: "scroll", script: scrollScript };
   if (haystack.includes("error")) return { name: "error", script: errorScript };
@@ -363,6 +510,210 @@ for (let i = 0; i < 10; i += 1) {
 }
 burstScript.push({ event: "done", delay: 1, payload: { ...DONE, content: "burst complete" } });
 
+// --- 用量 / 配额 mock 数据（P2-1A 用量面板）---
+// 键名与后端 handler 直接构造的 map 一致（snake_case）；
+// 全局视图给出 scope 列表，指定作用域后给出 quota（tenant-a 故意不配上限）。
+function mockUsagePolicySummary() {
+  return {
+    tracking_enabled: true,
+    ledger_enabled: true,
+    quota_enabled: true,
+    default_max_requests: 100,
+    default_max_tokens: 50000,
+    tenant_quota_count: 1,
+    project_quota_count: 0,
+    user_quota_count: 1,
+  };
+}
+
+function mockUsageScopes() {
+  return [
+    { tenant_id: "", project_id: "", user_id: "alice", scope_key: "alice" },
+    { tenant_id: "tenant-a", project_id: "", user_id: "", scope_key: "tenant-a" },
+  ];
+}
+
+function mockGlobalUsage() {
+  return {
+    scope_count: 2,
+    user_count: 1,
+    request_count: 9,
+    execute_count: 6,
+    agent_chat_count: 3,
+    success_count: 8,
+    failure_count: 1,
+    prompt_tokens: 7000,
+    completion_tokens: 3000,
+    total_tokens: 10000,
+    last_skill: "ledger-skill",
+    last_entrypoint: "execute",
+    last_request_at: "2026-09-13T10:00:00Z",
+  };
+}
+
+function mockScopedUsage() {
+  return {
+    ...mockGlobalUsage(),
+    scope_count: 0,
+    user_count: 0,
+    request_count: 3,
+    total_tokens: 1200,
+  };
+}
+
+function mockUsageQuota(scopeKey) {
+  if (scopeKey !== "alice") {
+    // 未配置上限：如实返回 null，由前端展示「不可用」，不伪造余量。
+    return null;
+  }
+  return {
+    scope_key: "alice",
+    enabled: true,
+    max_requests: 100,
+    max_tokens: 50000,
+    remaining_requests: 91,
+    remaining_tokens: 41500,
+    resolved_from: "user",
+  };
+}
+
+function mockUsageLedgerRecords() {
+  const nilUUID = "00000000-0000-0000-0000-000000000000";
+  return [
+    {
+      id: "e2e-usage-1",
+      request_id: "e2e-req-1",
+      model_id: nilUUID,
+      provider_id: nilUUID,
+      input_tokens: 900,
+      output_tokens: 300,
+      total_tokens: 1200,
+      message_count: 3,
+      max_tokens: 50000,
+      success: true,
+      status_code: 200,
+      metadata: { entrypoint: "execute", skill: "ledger-skill", scope_key: "alice" },
+      created_at: "2026-09-13T10:00:00Z",
+    },
+    {
+      id: "e2e-usage-2",
+      request_id: "e2e-req-2",
+      model_id: nilUUID,
+      provider_id: nilUUID,
+      input_tokens: 100,
+      output_tokens: 0,
+      total_tokens: 100,
+      message_count: 1,
+      max_tokens: 0,
+      success: false,
+      status_code: 500,
+      metadata: { entrypoint: "agent_chat" },
+      created_at: "2026-09-13T09:00:00Z",
+    },
+  ];
+}
+
+// --- 技能市场 mock 数据（P2-1A）---
+// 目录里刻意留一条「缺 name」的坏条目：后端可能这样上报，前端按约定丢弃该条，
+// 但 `count` 保留后端上报值（e2e 据此断言「不按数组长度改写」）。
+function mockSkillEntries() {
+  return [
+    {
+      name: "code-review",
+      description: "Review a diff and report correctness risks.",
+      version: "1.2.0",
+      category: "quality",
+      capabilities: ["static-analysis"],
+      tags: ["review", "quality"],
+      triggers: [{ type: "keyword", values: ["review", "diff"], weight: 0.9 }],
+      tools: ["read_file", "grep"],
+      systemPrompt: "You review code changes and report risks.",
+      userPrompt: "Review the diff and summarise risks.",
+      workflow: {
+        steps: [
+          {
+            id: "scan",
+            name: "Scan diff",
+            tool: "read_file",
+            args: { path: "diff.patch" },
+            dependsOn: [],
+            condition: "",
+          },
+          {
+            id: "report",
+            name: "Report findings",
+            tool: "grep",
+            args: {},
+            dependsOn: ["scan"],
+            condition: "scan.ok",
+          },
+        ],
+      },
+      context: { files: ["docs/review.md"], environment: [], symbols: [] },
+      permissions: ["read"],
+      source: {
+        path: "D:/skills/code-review/SKILL.md",
+        dir: "D:/skills",
+        layer: "project",
+        prompt_path: "D:/skills/code-review/prompt.md",
+      },
+    },
+    {
+      name: "docs-writer",
+      description: "Draft and update project documentation.",
+      version: "0.4.1",
+      category: "docs",
+      capabilities: [],
+      tags: ["docs"],
+      triggers: [{ type: "keyword", values: ["docs"], weight: null }],
+      tools: ["read_file"],
+      systemPrompt: "",
+      userPrompt: "Draft the requested documentation.",
+      workflow: { steps: [] },
+      context: { files: [], environment: [], symbols: [] },
+      permissions: [],
+      source: {
+        path: "D:/skills/docs-writer/SKILL.md",
+        dir: "D:/skills",
+        layer: "project",
+        prompt_path: "",
+      },
+    },
+    { description: "entry without a name" },
+  ];
+}
+
+/** 目录载荷：`{skills, count}`；count 故意上报 3（含坏条目），与数组长度不同。 */
+function mockSkillCatalogPayload() {
+  const entries = mockSkillEntries();
+  return { skills: entries, count: entries.length };
+}
+
+function mockHotReloadStatsPayload() {
+  return {
+    enabled: mockSkillsHotReload.configured,
+    watching: mockSkillsHotReload.watching,
+    skillDir: "D:/skills",
+    skillDirs: ["D:/skills", "E:/shared/skills"],
+    skillCount: mockSkillsHotReload.skillCount,
+    callbackCount: mockSkillsHotReload.callbackCount,
+    debounceTime: mockSkillsHotReload.debounceTime,
+  };
+}
+
+/** 写操作鉴权：与后端一致，接受 X-Skills-Admin-Token 或 Bearer admin token。 */
+function mockSkillsAuthorized(req) {
+  const header = String(req.headers["x-skills-admin-token"] ?? "").trim();
+  if (header && header === MOCK_SKILLS_ADMIN_TOKEN) {
+    return true;
+  }
+  const authorization = String(req.headers.authorization ?? "").trim();
+  const bearer = authorization.toLowerCase().startsWith("bearer ")
+    ? authorization.slice(7).trim()
+    : "";
+  return bearer === MOCK_SKILLS_ADMIN_TOKEN;
+}
+
 function writeJson(res, status, body) {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
@@ -418,7 +769,18 @@ async function handleRequest(req, res) {
     mockSessions.clear();
     chatSseEventsBySession.clear();
     brokenEventsSessions.clear();
+    mockJobsBySession.clear();
+    mockFiles.clear();
+    mockSkillsEmbeddingEnabled = false;
+    mockSkillsHotReload = {
+      configured: false,
+      watching: false,
+      skillCount: 0,
+      callbackCount: 0,
+      debounceTime: "",
+    };
     mockChatSeq = 0;
+    mockCreatedSessionSeq = 0;
     writeJson(res, 200, { ok: true });
     return;
   }
@@ -444,6 +806,68 @@ async function handleRequest(req, res) {
       ),
     );
     writeJson(res, 200, { seq: seqs[seqs.length - 1] ?? 0, seqs });
+    return;
+  }
+
+  // 测试注入：POST /api/_test/jobs
+  // body: { session_id, jobs: [{ ID, Status, Command, CreatedAt, StartedAt, ... }] }
+  // 按后端 `background.Job` 的序列化形态（Go 字段名，无 json tag）存放，
+  // 保证前端 normalize 层在 e2e 里也走真实键名路径。
+  if (path === "/api/_test/jobs" && req.method === "POST") {
+    const body = await readBody(req);
+    const sessionId =
+      typeof body?.session_id === "string" && body.session_id
+        ? body.session_id
+        : "e2e-session-1";
+    const jobs = Array.isArray(body?.jobs) ? body.jobs : [];
+    mockJobsBySession.set(
+      sessionId,
+      jobs.map((job, index) => {
+        const now = new Date().toISOString();
+        return {
+          ID: typeof job?.ID === "string" ? job.ID : `e2e-job-${index + 1}`,
+          SessionID: sessionId,
+          Kind: typeof job?.Kind === "string" ? job.Kind : "shell",
+          Command: typeof job?.Command === "string" ? job.Command : "echo e2e",
+          Cwd: typeof job?.Cwd === "string" ? job.Cwd : "E:/projects/e2e",
+          Priority: 0,
+          RestartPolicy: "never",
+          Status: typeof job?.Status === "string" ? job.Status : "running",
+          Message: typeof job?.Message === "string" ? job.Message : "",
+          CreatedAt: typeof job?.CreatedAt === "string" ? job.CreatedAt : now,
+          StartedAt: typeof job?.StartedAt === "string" ? job.StartedAt : now,
+          FinishedAt: typeof job?.FinishedAt === "string" ? job.FinishedAt : "",
+          ExitCode: typeof job?.ExitCode === "number" ? job.ExitCode : null,
+          LogPath: "",
+          _output: typeof job?.Output === "string" ? job.Output : "",
+        };
+      }),
+    );
+    writeJson(res, 200, { ok: true, count: jobs.length });
+    return;
+  }
+
+  // 测试注入（P2-1A）：POST /api/_test/files
+  // body: { files: [{ path, content?, data_base64?, byte_count? }] }
+  // content 为 UTF-8 文本的便捷写法；data_base64 用于二进制/坏编码等场景。
+  if (path === "/api/_test/files" && req.method === "POST") {
+    const body = await readBody(req);
+    const files = Array.isArray(body?.files) ? body.files : [];
+    for (const file of files) {
+      if (typeof file?.path !== "string" || !file.path) continue;
+      const dataBase64 =
+        typeof file.data_base64 === "string"
+          ? file.data_base64
+          : Buffer.from(typeof file.content === "string" ? file.content : "", "utf8").toString(
+              "base64",
+            );
+      const byteCount =
+        typeof file.byte_count === "number" && file.byte_count >= 0
+          ? file.byte_count
+          : Buffer.from(dataBase64, "base64").byteLength;
+      mockFiles.set(file.path, { dataBase64, byteCount });
+    }
+    writeJson(res, 200, { ok: true, count: files.length });
     return;
   }
 
@@ -488,6 +912,338 @@ async function handleRequest(req, res) {
     writeJson(res, 200, { ok: true });
     return;
   }
+  // --- 后台任务（/background/jobs 端点；P2-1A 面板消费）---
+  // 返回形态与后端一致：列表 `{jobs,count}`、详情/取消 `{job}`、输出 `{output}`；
+  // job 字段用 Go 字段名（PascalCase），驱动前端 normalize 层。
+  function findMockJob(jobId) {
+    for (const jobs of mockJobsBySession.values()) {
+      const match = jobs.find((entry) => entry.ID === jobId);
+      if (match) return match;
+    }
+    return null;
+  }
+  function stripMockJob(job) {
+    const { _output, ...rest } = job;
+    return rest;
+  }
+  if (path === "/api/runtime/background/jobs" && req.method === "GET") {
+    const sessionId = url.searchParams.get("session_id") ?? "";
+    const statusFilter = (url.searchParams.get("status") ?? "")
+      .split(",")
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean);
+    const all = [...mockJobsBySession.values()].flat();
+    const scoped = sessionId
+      ? all.filter((job) => job.SessionID === sessionId)
+      : all;
+    const jobs = statusFilter.length
+      ? scoped.filter((job) =>
+          statusFilter.includes(String(job.Status).toLowerCase()),
+        )
+      : scoped;
+    writeJson(res, 200, { jobs: jobs.map(stripMockJob), count: jobs.length });
+    return;
+  }
+  if (path.startsWith("/api/runtime/background/jobs/")) {
+    const rest = path.slice("/api/runtime/background/jobs/".length);
+    const [rawId, action] = rest.split("/");
+    const jobId = decodeURIComponent(rawId ?? "");
+    const job = findMockJob(jobId);
+    if (!job) {
+      writeJson(res, 404, { error: "job not found", job_id: jobId });
+      return;
+    }
+    if (action === "cancel" && req.method === "POST") {
+      job.Status = "cancelled";
+      job.FinishedAt = new Date().toISOString();
+      writeJson(res, 200, { job: stripMockJob(job) });
+      return;
+    }
+    if (action === "output" && req.method === "GET") {
+      const offset = Number(url.searchParams.get("offset") ?? 0) || 0;
+      const limit = Number(url.searchParams.get("limit") ?? 8192) || 8192;
+      const text = job._output ?? "";
+      const chunk = text.slice(offset, offset + limit);
+      writeJson(res, 200, {
+        output: {
+          JobID: job.ID,
+          Status: job.Status,
+          Output: chunk,
+          NextOffset: offset + chunk.length,
+          ExitCode: job.ExitCode ?? null,
+        },
+      });
+      return;
+    }
+    if (action === "events" && req.method === "GET") {
+      writeJson(res, 200, { events: [], count: 0 });
+      return;
+    }
+    if (!action && req.method === "GET") {
+      writeJson(res, 200, { job: stripMockJob(job) });
+      return;
+    }
+    writeJson(res, 405, { error: "method not allowed" });
+    return;
+  }
+
+  // --- 运行时文件读取（P2-1A：`POST /api/runtime/fs/read-file`）---
+  // 契约对齐后端 file_transfer_handlers.go：`{path}` → `{file:{path, data_base64, byte_count}}`；
+  // 未登记的路径与后端一致返回 500（读盘失败），前端如实呈现，不做本地兜底。
+  if (path === "/api/runtime/fs/read-file") {
+    if (req.method !== "POST") {
+      writeJson(res, 405, { error: "method not allowed" });
+      return;
+    }
+    const body = await readBody(req);
+    const requestedPath = typeof body?.path === "string" ? body.path : "";
+    if (!requestedPath) {
+      writeJson(res, 400, { error: "path is required" });
+      return;
+    }
+    const file = mockFiles.get(requestedPath);
+    if (!file) {
+      writeJson(res, 500, { error: `no such file: ${requestedPath}` });
+      return;
+    }
+    writeJson(res, 200, {
+      file: {
+        path: requestedPath,
+        data_base64: file.dataBase64,
+        byte_count: file.byteCount,
+      },
+    });
+    return;
+  }
+
+  // --- 用量与配额（/api/runtime/usage/*；P2-1A 用量面板消费）---
+  // 形态对齐后端 authorizeUsageAdmin 之后的 handler：全局 stats 带 scopes
+  // （scope/quota 为 null），指定 scope 时返回 scope + quota 且不再带 scopes。
+  if (path === "/api/runtime/usage/stats" && req.method === "GET") {
+    const tenantId = (url.searchParams.get("tenant_id") ?? "").trim();
+    const projectId = (url.searchParams.get("project_id") ?? "").trim();
+    const userId = (url.searchParams.get("user_id") ?? "").trim();
+    const scopeKey = userId || projectId || tenantId;
+    const payload = {
+      tracking_enabled: true,
+      policy: mockUsagePolicySummary(),
+      usage: scopeKey ? mockScopedUsage() : mockGlobalUsage(),
+    };
+    if (scopeKey) {
+      const quota = mockUsageQuota(scopeKey);
+      writeJson(res, 200, {
+        ...payload,
+        scope: {
+          tenant_id: tenantId,
+          project_id: projectId,
+          user_id: userId,
+          scope_key: scopeKey,
+        },
+        // tenant-a 未配置上限：如实返回 null，由前端显示「不可用」而不是伪造余量。
+        quota,
+      });
+      return;
+    }
+    writeJson(res, 200, { ...payload, scope: null, quota: null, scopes: mockUsageScopes() });
+    return;
+  }
+  if (path === "/api/runtime/usage/ledger" && req.method === "GET") {
+    const entrypoint = (url.searchParams.get("entrypoint") ?? "").trim();
+    const skill = (url.searchParams.get("skill") ?? "").trim();
+    const successParam = (url.searchParams.get("success") ?? "").trim();
+    const limit = Number(url.searchParams.get("limit") ?? "50") || 50;
+    let records = mockUsageLedgerRecords();
+    if (entrypoint) {
+      records = records.filter((record) => record.metadata.entrypoint === entrypoint);
+    }
+    if (skill) {
+      records = records.filter((record) => record.metadata.skill === skill);
+    }
+    if (successParam === "true" || successParam === "false") {
+      const expected = successParam === "true";
+      records = records.filter((record) => record.success === expected);
+    }
+    records = records.slice(0, limit);
+    writeJson(res, 200, {
+      records,
+      count: records.length,
+      filters: { limit },
+    });
+    return;
+  }
+  if (path === "/api/runtime/usage/policy" && req.method === "GET") {
+    writeJson(res, 200, {
+      policy: {
+        ...mockUsagePolicySummary(),
+        tenants: { "tenant-a": { max_requests: 500, max_tokens: 200000 } },
+        projects: {},
+        users: { alice: { max_requests: 100, max_tokens: 50000 } },
+      },
+    });
+    return;
+  }
+  // --- 技能市场（/api/runtime/skills/*；P2-1A）---
+  // 契约对齐 backend/internal/api/skills/handler.go：
+  //   GET  /skills                  → {skills, count}
+  //   GET  /skills/{name}           → Skill（未登记 404，前端区分「不存在」与其他失败）
+  //   GET  /skills/search           → {query, results, matches, count, limit, resolved_mode…}
+  //   GET  /skills/stats            → {stats, total_skills, skill_dirs, source_summary, …}
+  //   GET  /skills/hot-reload/stats → {stats}；未配置热重载时 503（与后端同形）
+  //   POST /skills/hot-reload/{start,stop,reload} → 需管理令牌，缺失/不匹配即 403
+  // 路由顺序要紧：search / stats / hot-reload 必须先于 `/skills/{name}` 前缀匹配。
+  if (path === "/api/runtime/skills/search" && req.method === "GET") {
+    const query = (url.searchParams.get("q") ?? "").trim();
+    const category = (url.searchParams.get("category") ?? "").trim();
+    const requestedMode = (url.searchParams.get("mode") ?? "auto").trim() || "auto";
+    const rawLimit = Number(url.searchParams.get("limit") ?? "");
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 200) : 20;
+    if (!query) {
+      writeJson(res, 400, { error: "query parameter `q` is required" });
+      return;
+    }
+    const needle = query.toLowerCase();
+    const matched = mockSkillEntries()
+      .filter((skill) => typeof skill.name === "string" && skill.name)
+      .filter((skill) => {
+        if (category && skill.category !== category) {
+          return false;
+        }
+        const haystack = [skill.name, skill.description, skill.category, ...(skill.tags ?? [])]
+          .join(" ")
+          .toLowerCase();
+        return haystack.includes(needle);
+      });
+    const slice = matched.slice(0, limit);
+    // 语义模式在 embedding 关闭时按后端行为降级为 lexical，并原样上报 resolved_mode；
+    // 前端据此显示真实模式，而不是把降级结果假装成语义命中。
+    const resolvedMode =
+      requestedMode === "semantic" && !mockSkillsEmbeddingEnabled
+        ? "lexical"
+        : requestedMode === "auto"
+          ? "lexical"
+          : requestedMode;
+    writeJson(res, 200, {
+      query,
+      results: slice,
+      matches: slice.map((skill) => ({
+        skill,
+        score: 1,
+        matched_by: resolvedMode === "semantic" ? "embedding" : "keyword",
+        details: `keyword: ${needle}`,
+      })),
+      count: slice.length,
+      limit,
+      requested_mode: requestedMode,
+      resolved_mode: resolvedMode,
+      used_embedding: resolvedMode === "semantic",
+    });
+    return;
+  }
+
+  if (path === "/api/runtime/skills/stats" && req.method === "GET") {
+    writeJson(res, 200, {
+      stats: [
+        {
+          name: "code-review",
+          category: "quality",
+          call_count: 12,
+          success_rate: 0.92,
+          avg_duration_ms: 1200,
+          source_dir: "D:/skills",
+          source_path: "D:/skills/code-review/SKILL.md",
+          source_layer: "project",
+        },
+        {
+          name: "docs-writer",
+          category: "docs",
+          call_count: 3,
+          success_rate: 1,
+          avg_duration_ms: 450,
+          source_dir: "D:/skills",
+          source_path: "D:/skills/docs-writer/SKILL.md",
+          source_layer: "project",
+        },
+      ],
+      total_skills: 3,
+      skill_dirs: ["D:/skills", "E:/shared/skills"],
+      source_summary: { project: 2, user: 1 },
+      mutation_policy: {
+        read_only: false,
+        disable_import: false,
+        disable_persist: false,
+        disable_reload_ops: false,
+        disable_hot_reload: false,
+      },
+      embedding: { enabled: mockSkillsEmbeddingEnabled },
+    });
+    return;
+  }
+
+  if (path === "/api/runtime/skills/hot-reload/stats" && req.method === "GET") {
+    if (!mockSkillsHotReload.configured) {
+      writeJson(res, 503, { error: "skill hot reload is not configured" });
+      return;
+    }
+    writeJson(res, 200, { stats: mockHotReloadStatsPayload() });
+    return;
+  }
+
+  if (path.startsWith("/api/runtime/skills/hot-reload/")) {
+    const action = path.slice("/api/runtime/skills/hot-reload/".length);
+    if (req.method !== "POST") {
+      writeJson(res, 405, { error: "method not allowed" });
+      return;
+    }
+    if (!["start", "stop", "reload"].includes(action)) {
+      writeJson(res, 404, { error: "unknown hot reload action" });
+      return;
+    }
+    if (!mockSkillsAuthorized(req)) {
+      writeJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    if (action === "start") {
+      const body = await readBody(req);
+      const dirs = Array.isArray(body?.dirs)
+        ? body.dirs.filter((dir) => typeof dir === "string" && dir.trim())
+        : [];
+      if (dirs.length === 0) {
+        writeJson(res, 400, { error: "`dirs` must contain at least one directory" });
+        return;
+      }
+      mockSkillsHotReload.configured = true;
+      mockSkillsHotReload.watching = true;
+      mockSkillsHotReload.skillCount = mockSkillEntries().filter((skill) => skill.name).length;
+      mockSkillsHotReload.debounceTime =
+        typeof body?.debounce_ms === "number" && Number.isFinite(body.debounce_ms)
+          ? `${Math.max(0, Math.floor(body.debounce_ms))}ms`
+          : "1s";
+    } else if (action === "stop") {
+      mockSkillsHotReload.watching = false;
+      mockSkillsHotReload.skillCount = 0;
+    } else {
+      mockSkillsHotReload.callbackCount += 1;
+    }
+    writeJson(res, 200, { stats: mockHotReloadStatsPayload() });
+    return;
+  }
+
+  if (path.startsWith("/api/runtime/skills/") && req.method === "GET") {
+    const requested = decodeURIComponent(path.slice("/api/runtime/skills/".length));
+    const skill = mockSkillEntries().find((entry) => entry.name === requested);
+    if (!skill) {
+      writeJson(res, 404, { error: `skill not found: ${requested}` });
+      return;
+    }
+    writeJson(res, 200, skill);
+    return;
+  }
+
+  if (path === "/api/runtime/skills" && req.method === "GET") {
+    writeJson(res, 200, mockSkillCatalogPayload());
+    return;
+  }
+
   if (path === "/api/runtime/sessions" && req.method === "GET") {
     writeJson(res, 200, { sessions: [...mockSessions.values()] });
     return;
@@ -499,10 +1255,36 @@ async function handleRequest(req, res) {
         ? body.session_id
         : typeof body?.id === "string" && body.id
           ? body.id
-          : "e2e-session-1";
+          : typeof body?.title === "string" && body.title
+            ? `e2e-fork-${++mockCreatedSessionSeq}`
+            : "e2e-session-1";
     const session = ensureMockSession(requestedId);
     if (session && typeof body?.title === "string" && body.title) {
       session.title = body.title;
+    }
+    // P2-1A：seed 时可携带检索维度（state/user_id/tags/metadata），供
+    // `POST /api/runtime/sessions/search` 的服务端过滤用例使用。
+    if (session) {
+      if (typeof body?.state === "string" && body.state) {
+        session.state = body.state;
+      }
+      if (typeof body?.user_id === "string" && body.user_id) {
+        session.user_id = body.user_id;
+      }
+      if (Array.isArray(body?.tags)) {
+        session.tags = body.tags.filter((tag) => typeof tag === "string" && tag.trim());
+      }
+      if (body?.metadata && typeof body.metadata === "object") {
+        session.metadata = { ...(session.metadata ?? {}), ...body.metadata };
+      }
+      // 检索结果行读取的是 metadata（与 chat.Session 同形），因此 seed 的标题/标签
+      // 需要同时落到 metadata，避免「过滤命中了但行里看不到标签」的假象。
+      if (session.title) {
+        session.metadata = { ...(session.metadata ?? {}), title: session.title };
+      }
+      if (Array.isArray(session.tags) && session.tags.length > 0) {
+        session.metadata = { ...(session.metadata ?? {}), tags: session.tags };
+      }
     }
     const now = new Date().toISOString();
     writeJson(res, 200, {
@@ -515,8 +1297,143 @@ async function handleRequest(req, res) {
     });
     return;
   }
+  // P2-1A：会话元数据检索（真实后端 backend/internal/api/skills/handler.go SearchSessions）。
+  // 过滤语义与后端一致：tags 为 AND，state 为全等，user_id 为空表示不限用户；
+  // 响应 filters 用 camelCase（与 chat.SessionSearchOptions 的 json tag 对齐）。
+  if (path === "/api/runtime/sessions/search" && req.method === "POST") {
+    const body = await readBody(req);
+    const userId =
+      typeof body?.user_id === "string" && body.user_id.trim()
+        ? body.user_id.trim()
+        : (url.searchParams.get("user_id") ?? "").trim();
+    const state =
+      typeof body?.state === "string" && body.state.trim()
+        ? body.state.trim()
+        : (url.searchParams.get("state") ?? "").trim();
+    const tags = Array.isArray(body?.tags)
+      ? body.tags.filter((tag) => typeof tag === "string" && tag.trim())
+      : [];
+    const limitRaw = Number(body?.limit);
+    const offsetRaw = Number(body?.offset);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : 50;
+    const offset = Number.isFinite(offsetRaw) && offsetRaw > 0 ? Math.floor(offsetRaw) : 0;
+
+    const matches = [...mockSessions.values()].filter((session) => {
+      if (userId && session.user_id !== userId) return false;
+      if (state && session.state !== state) return false;
+      const sessionTags = Array.isArray(session.tags) ? session.tags : [];
+      return tags.every((tag) => sessionTags.includes(tag));
+    });
+    writeJson(res, 200, {
+      sessions: matches.slice(offset, offset + limit),
+      count: matches.length,
+      filters: {
+        userId: userId || undefined,
+        state: state || undefined,
+        tags: tags.length > 0 ? tags : undefined,
+        limit,
+        offset,
+      },
+    });
+    return;
+  }
+  // P2-1A：会话统计（真实后端 GET /api/runtime/sessions/stats，见
+  // internal/api/skills/handler.go GetSessionStats）。mock 口径与后端一致：
+  //   * user_id 为空 → 全量聚合；否则只统计该用户的会话；
+  //   * totalMessages 由 mock 事件表推导（真实后端按持久化消息计），
+  //     仅用于验证 camelCase 字段接线，不改变前端归一化逻辑。
+  if (path === "/api/runtime/sessions/stats" && req.method === "GET") {
+    const statsUserId = (url.searchParams.get("user_id") ?? "").trim();
+    const statsSessions = [...mockSessions.values()].filter(
+      (session) => !statsUserId || session.user_id === statsUserId,
+    );
+    const sessionStats = {
+      total: statsSessions.length,
+      active: 0,
+      idle: 0,
+      closed: 0,
+      archived: 0,
+      totalMessages: 0,
+      tags: {},
+    };
+    for (const session of statsSessions) {
+      const state = typeof session.state === "string" ? session.state : "";
+      if (state === "active") sessionStats.active += 1;
+      if (state === "idle") sessionStats.idle += 1;
+      if (state === "closed") sessionStats.closed += 1;
+      if (state === "archived") sessionStats.archived += 1;
+      for (const tag of Array.isArray(session.tags) ? session.tags : []) {
+        if (typeof tag === "string" && tag.trim()) {
+          sessionStats.tags[tag] = (sessionStats.tags[tag] ?? 0) + 1;
+        }
+      }
+      sessionStats.totalMessages += (
+        chatSseEventsBySession.get(session.session_id) ?? []
+      ).length;
+    }
+    writeJson(res, 200, {
+      user_id: statsUserId || statsSessions[0]?.user_id || "default",
+      stats: sessionStats,
+    });
+    return;
+  }
   if (path === "/api/runtime/sessions/users") {
-    writeJson(res, 200, { users: [] });
+    // P2-1A：用户清单由 seed 的会话派生（reset 后为空），让侧栏用户切换与
+    // 会话检索弹层的用户筛选在 e2e 里有真实数据源，而不是硬编码空列表。
+    const grouped = new Map();
+    for (const session of mockSessions.values()) {
+      const userId = typeof session.user_id === "string" ? session.user_id.trim() : "";
+      if (!userId) continue;
+      const entry = grouped.get(userId) ?? {
+        user_id: userId,
+        session_count: 0,
+        active_count: 0,
+        idle_count: 0,
+        closed_count: 0,
+        archived_count: 0,
+        latest_updated_at: undefined,
+      };
+      entry.session_count += 1;
+      const state = typeof session.state === "string" ? session.state : "";
+      if (state === "active") entry.active_count += 1;
+      if (state === "idle") entry.idle_count += 1;
+      if (state === "closed") entry.closed_count += 1;
+      if (state === "archived") entry.archived_count += 1;
+      const updatedAt = typeof session.updated_at === "string" ? session.updated_at : "";
+      if (updatedAt && (!entry.latest_updated_at || updatedAt > entry.latest_updated_at)) {
+        entry.latest_updated_at = updatedAt;
+      }
+      grouped.set(userId, entry);
+    }
+    const users = [...grouped.values()].sort((left, right) =>
+      left.user_id.localeCompare(right.user_id),
+    );
+    writeJson(res, 200, {
+      users,
+      count: users.length,
+      total_count: users.length,
+      default_user_id: users[0]?.user_id,
+    });
+    return;
+  }
+  // P1-9 e2e：归档/恢复与非破坏删除需要可变状态，否则侧栏刷新后行不消失。
+  if (
+    /^\/api\/runtime\/sessions\/[^/]+\/(?:archive|activate)$/.test(path) &&
+    req.method === "POST"
+  ) {
+    const sessionId = decodeURIComponent(path.split("/")[4]);
+    const session = mockSessions.get(sessionId);
+    if (session) {
+      session.state = path.endsWith("/archive") ? "archived" : "active";
+      session.updated_at = new Date().toISOString();
+    }
+    writeJson(res, 200, { session_id: sessionId, id: sessionId, state: session?.state });
+    return;
+  }
+  if (/^\/api\/runtime\/sessions\/[^/]+$/.test(path) && req.method === "DELETE") {
+    const sessionId = decodeURIComponent(path.split("/")[4]);
+    const deleted = mockSessions.delete(sessionId);
+    writeJson(res, 200, { deleted, id: sessionId });
     return;
   }
   if (/^\/api\/runtime\/sessions\/[^/]+\/(?:runtime\/)?events$/.test(path) && req.method === "GET") {
@@ -551,6 +1468,19 @@ async function handleRequest(req, res) {
     const session = mockSessions.get(sessionId);
     const history = session?.history ?? [];
     writeJson(res, 200, { session_id: sessionId, count: history.length, history });
+    return;
+  }
+  // P2-1A：运行时状态快照（重载 / 重连后重建待交互卡片）。
+  if (/^\/api\/runtime\/sessions\/[^/]+\/runtime$/.test(path) && req.method === "GET") {
+    const sessionId = decodeURIComponent(path.split("/")[4]);
+    if (!mockSessions.has(sessionId)) {
+      writeJson(res, 404, { error: "session not found" });
+      return;
+    }
+    writeJson(res, 200, {
+      state: deriveSessionRuntimeState(sessionId),
+      execution_route: "e2e-mock",
+    });
     return;
   }
   if (/^\/api\/runtime\/sessions\/[^/]+$/.test(path)) {

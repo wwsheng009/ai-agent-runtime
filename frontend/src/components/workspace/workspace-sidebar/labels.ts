@@ -18,10 +18,17 @@ export function buildSidebarIconLabels(
       threadReview: t("sidebar.threadStatuses.review"),
       threadDraft: t("sidebar.threadStatuses.draft"),
       threadActive: t("sidebar.threadStatuses.active"),
+      sessionArchived: t("sidebar.sessionStatuses.archived"),
+      sessionClosed: t("sidebar.sessionStatuses.closed"),
       sessionError: t("sidebar.sessionStatuses.error"),
       sessionRestored: t("sidebar.sessionStatuses.restored"),
       sessionAttached: t("sidebar.sessionStatuses.attached"),
       sessionPending: t("sidebar.sessionStatuses.pending"),
+      sessionPlanPending: t("sidebar.sessionStatuses.planPending"),
+      sessionRunning: t("sidebar.sessionStatuses.running"),
+      sessionSubagents: t("sidebar.sessionStatuses.subagents"),
+      sessionWaitingAnswer: t("sidebar.sessionStatuses.waitingAnswer"),
+      sessionWaitingApproval: t("sidebar.sessionStatuses.waitingApproval"),
     };
   return sidebarLabels;
 }

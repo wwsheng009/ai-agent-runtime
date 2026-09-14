@@ -9,9 +9,11 @@ import { useSessionBacktrack } from "@/hooks/workspace/use-session-backtrack";
 import { useSessionHistorySync } from "@/hooks/workspace/use-session-history-sync";
 import { usePendingInteractions } from "@/hooks/workspace/use-pending-interactions";
 import { useRuntimePlanMode } from "@/hooks/workspace/use-runtime-plan-mode";
+import { useSessionRuntimeState } from "@/hooks/workspace/use-session-runtime-state";
 import { useSessionRuntimeStream } from "@/hooks/workspace/use-session-runtime-stream";
 import { useTrajectoryRecovery } from "@/hooks/workspace/use-trajectory-recovery";
 import { useWorkspaceAgentChatTurn } from "@/hooks/workspace/use-workspace-agent-chat-turn";
+import { useWorkspaceSessionActions } from "@/hooks/workspace/use-workspace-session-actions";
 import {
   isThreadResponding,
   shouldConfirmThreadSwitch,
@@ -24,6 +26,7 @@ import {
   getRuntimeEventSeq,
   mergeRuntimeEvent,
 } from "@/hooks/workspace/thread-runtime";
+import { withTransportDegradation } from "@/lib/connection-status";
 import {
   resetStoredRuntimeClientId,
   useRuntimeClientIdentity,
@@ -34,12 +37,11 @@ import {
   createRuntimeDeltaCoordinator,
 } from "@/lib/workspace-thread-state";
 import { trajectoryEventAction } from "@/lib/trajectory/recovery";
-import { createRuntimeSession, updateRuntimeSession } from "@/lib/runtime-api";
-import { useNavigate, useParams } from "react-router-dom";
+import { buildSidebarSessionActivity } from "@/components/workspace/workspace-sidebar/session-row-status";
+import { useParams } from "react-router-dom";
 
 export function WorkspacePage() {
   const runtimeClient = useRuntimeClientIdentity();
-  const navigate = useNavigate();
   const { sessionId: routeSessionId } = useParams<{ sessionId?: string }>();
   const runtimeDeltaCoordinator = useMemo(
     () => createRuntimeDeltaCoordinator(),
@@ -183,38 +185,27 @@ export function WorkspacePage() {
     }
   }
 
-  async function handleRenameRuntimeSession(sessionId: string, title: string) {
-    await updateRuntimeSession(sessionId, { title });
-    handleRefreshRuntimeSessions();
-    setThreads((current) =>
-      current.map((thread) =>
-        normalizeSessionId(thread.sessionId || thread.id) === sessionId
-          ? { ...thread, title }
-          : thread,
-      ),
-    );
-  }
-
-  async function handleCreateSessionInDirectory(request: {
-    path: string;
-    directoryId?: string;
-    label: string;
-  }) {
-    const response = await createRuntimeSession({
-      title: request.label,
-      user_id: selectedRuntimeSessionUserId || runtimeClient.userId,
-      workspace_path: request.path || undefined,
-      directory_id: request.directoryId,
-    });
-    handleRefreshRuntimeSessions();
-    const createdSessionId = normalizeSessionId(response.session?.id ?? "");
-    if (createdSessionId) {
-      // 会话已绑定目录；直接跳转到 canonical 会话路由，等待 sessions
-      // 刷新后由 mergeRuntimeSessionsIntoThreads 生成对应线程。
-      trajectoryStore.reset({ hard: true });
-      navigate(`/workspace/sessions/${encodeURIComponent(createdSessionId)}`);
-    }
-  }
+  // P1-9：会话行动作（重命名 / 归档 / 归档恢复 / Fork / 删除 / 目录内新建）由
+  // hooks/workspace/use-workspace-session-actions.ts 收口（P0-2 A2 复检拆分）。
+  const activeSessionId = normalizeSessionId(
+    selectedThread?.sessionId || selectedThread?.id || routeSessionId || "",
+  );
+  const {
+    archiveSession: handleArchiveRuntimeSession,
+    createSessionInDirectory: handleCreateSessionInDirectory,
+    deleteSession: handleDeleteRuntimeSession,
+    forkSession: handleForkRuntimeSession,
+    renameSession: handleRenameRuntimeSession,
+    restoreSession: handleRestoreRuntimeSession,
+  } = useWorkspaceSessionActions({
+    activeSessionId,
+    clientUserId: runtimeClient.userId,
+    onResetTrajectory: () => trajectoryStore.reset({ hard: true }),
+    refreshSessions: handleRefreshRuntimeSessions,
+    runtimeSessions,
+    selectedUserId: selectedRuntimeSessionUserId,
+    setThreads,
+  });
 
   useSessionHistorySync({
     applySessionHistoryToThread,
@@ -235,6 +226,10 @@ export function WorkspacePage() {
     runtimeEventCount: selectedThread?.runtimeEventCount,
     sessionId: selectedThread?.sessionId,
   });
+  // P2-1A：运行时状态快照（会话切换拉取一次）——重载 / 重连后重建未决审批与提问。
+  const { state: sessionRuntimeState } = useSessionRuntimeState(
+    selectedThread?.sessionId,
+  );
   // P1-7：审批 / 提问 / 计划评审统一生命周期（事件流归约 → 决定投递 → 结果回填）。
   const {
     answerQuestion: answerPendingQuestion,
@@ -245,6 +240,7 @@ export function WorkspacePage() {
   } = usePendingInteractions({
     sessionId: selectedThread?.sessionId,
     plan: runtimePlanMode,
+    runtimeState: sessionRuntimeState,
     getErrorMessage,
   });
   // P1-7：用户主动停止 → 未决审批 / 提问立即收敛，不等待（可能缺席的）中断事件，
@@ -253,7 +249,22 @@ export function WorkspacePage() {
     convergePendingInteractions("session_interrupted");
     stopResponding();
   }
-  useSessionRuntimeStream({
+  // P1-9：侧栏行状态只消费本地已知信号（当前会话的运行/待交互），
+  // 后台会话缺信号时回落为快照状态，不伪造「在等我」。
+  const sessionActivity = useMemo(
+    () =>
+      buildSidebarSessionActivity({
+        sessionId: selectedThread?.sessionId,
+        pendingInteractionKind: pendingInteraction?.kind ?? null,
+        responding: currentSessionResponding,
+      }),
+    [
+      currentSessionResponding,
+      pendingInteraction?.kind,
+      selectedThread?.sessionId,
+    ],
+  );
+  const { connectionStatus, retryConnection } = useSessionRuntimeStream({
     applyRuntimeEventToThread,
     applyRuntimeDeltaToThread,
     getErrorMessage,
@@ -280,6 +291,15 @@ export function WorkspacePage() {
     selectedThread,
     setThreads,
   });
+  // P1-8：连接状态统一收口。会话运行时流状态是主判据；直连 `/api/agent/chat`
+  // 流失败会把线程标记为 transport=error（见 use-workspace-agent-chat-turn），
+  // 此时会话流可能仍在线，但顶栏/流尾必须显示「断线 + 可手动重试」。手动重试
+  // 复用会话流入口（重试前按本地 last seq 拉齐），不重发 chat 请求，因此
+  // 不会产生重复回合请求。
+  const connectionStatusForUi = withTransportDegradation(
+    connectionStatus,
+    selectedThread?.transport,
+  );
   useTrajectoryRecovery({
     store: trajectoryStore,
     sessionId: selectedThread?.sessionId,
@@ -355,14 +375,21 @@ export function WorkspacePage() {
       onAddWorkspaceDirectory={addWorkspaceDirectory}
       onRenameWorkspaceDirectory={renameWorkspaceDirectory}
       onRemoveWorkspaceDirectory={removeWorkspaceDirectory}
+      onRetryConnection={retryConnection}
       onCreateSessionInDirectory={handleCreateSessionInDirectory}
       onRenameRuntimeSession={handleRenameRuntimeSession}
+      onArchiveRuntimeSession={handleArchiveRuntimeSession}
+      onRestoreRuntimeSession={handleRestoreRuntimeSession}
+      onForkRuntimeSession={handleForkRuntimeSession}
+      onDeleteRuntimeSession={handleDeleteRuntimeSession}
+      sessionActivity={sessionActivity}
       runtimeClient={runtimeClient}
       selectedRuntimeSessionUserId={selectedRuntimeSessionUserId}
       selectedThread={selectedThread}
       selectedArtifact={selectedArtifact}
       selectedArtifactId={selectedArtifactId}
       composerAttachments={composerAttachments}
+      connectionStatus={connectionStatusForUi}
       draft={draft}
       isResponding={isResponding}
       modelOptions={modelOptions}
