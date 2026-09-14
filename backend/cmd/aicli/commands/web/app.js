@@ -9,6 +9,7 @@ import { initProviderImport } from "./js/provider-import.js";
 import { initApprovals } from "./js/approvals.js";
 import { initRuntimeBar, loadRuntimeMeta } from "./js/runtime.js";
 import { initSessions, loadSessions } from "./js/sessions.js";
+import { initSkills } from "./js/skills.js";
 import { initSSE } from "./js/sse.js";
 import { initStream } from "./js/stream.js";
 import { initFooter, initShortcutHelp, initTabs, initTheme } from "./js/ui.js";
@@ -26,6 +27,7 @@ initApprovals();
 initConfigAdmin();
 initProviderEditor();
 initProviderImport();
+initSkills();
 
 // ---- 启动序列(原文件尾部) ----
 loadRuntimeMeta(); // 权威 provider/model/reasoning 值同步到底部选择器

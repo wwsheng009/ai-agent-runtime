@@ -84,6 +84,7 @@
 
     <div class="tabs">
       <button class="tab-btn active" id="tab-main-btn" type="button">对话</button>
+      <button class="tab-btn" id="tab-skills-btn" type="button" title="当前会话可用的 skills（与 /skills 命令同源）">技能</button>
       <button class="tab-btn" id="tab-log-btn" type="button">日志</button>
       <button class="tab-btn" id="tab-config-btn" type="button" title="provider / model / reasoning effort 配置管理">配置</button>
       <button class="tab-btn" id="tab-cache-btn" type="button" title="LLM 请求与缓存分析（cache.analytics.v1）">缓存</button>
@@ -139,6 +140,31 @@
         </label>
         <span id="cfg-current" class="cfg-current" title="当前生效配置"></span>
         <span id="cfg-status" class="cfg-status"></span>
+      </div>
+    </div>
+
+    <div id="tab-skills" class="tab-panel">
+      <div class="skills-toolbar">
+        <h2 class="skills-title">技能</h2>
+        <span class="skills-count" id="skills-count">未加载</span>
+        <span class="config-toolbar-spacer"></span>
+        <button id="skills-refresh-btn" type="button" title="重新拉取 /web/api/skills">⟳ 刷新</button>
+      </div>
+      <div id="skills-list" class="skills-list"><div class="skills-empty">加载中…</div></div>
+
+      <!-- 技能详情面板：点击列表条目打开（Esc / 遮罩 / ✕ 关闭）。
+           头部为 skill 名 + 后端摘要徽标；页签按钮与面板内容由 js/skills.js 按
+           「后端有值才显示」渲染（空分组不出现页签）。 -->
+      <div id="skill-detail-overlay">
+        <div id="skill-detail-modal" role="dialog" aria-modal="true" aria-labelledby="skill-detail-title">
+          <div id="skill-detail-header">
+            <span id="skill-detail-title">技能详情</span>
+            <span id="skill-detail-meta" class="skill-meta"></span>
+            <button id="skill-detail-close" class="modal-close" type="button" title="关闭">✕</button>
+          </div>
+          <div id="skill-detail-tabs" class="skill-tabs" role="tablist" aria-label="技能详情分组"></div>
+          <div id="skill-detail-body"></div>
+        </div>
       </div>
     </div>
 
@@ -435,7 +461,7 @@
           <dt>状态文档</dt>
           <dd>「调试」页签展示的内容与 <code>aicli /debug</code> 命令一致（<code>GET /web/api/status?format=text</code>）。</dd>
           <dt>页签</dt>
-          <dd>对话 / 日志 / 配置 / 缓存 / 调试 / 关于</dd>
+          <dd>对话 / 技能 / 日志 / 配置 / 缓存 / 调试 / 关于</dd>
           <dt>端点索引</dt>
           <dd><a href="/debug/endpoints" target="_blank" rel="noopener">/debug/endpoints</a></dd>
         </dl>

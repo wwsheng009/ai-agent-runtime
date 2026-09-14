@@ -243,6 +243,10 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	// cacheanalytics.Service（复用 host.EventBus，与 TUI /usage 共用）。
 	mux.HandleFunc(commands.ChatWebAPICachePath, commands.HandleChatWebAPICache)
 	mux.HandleFunc(commands.ChatWebAPICachePath+"/", commands.HandleChatWebAPICache)
+	// /web/api/skills[/{name}] 当前会话的 skill catalog（与 TUI /skills 同源：
+	// session.FunctionCatalog 的 skill 描述符），供「技能」页签的列表与详情面板。
+	mux.HandleFunc(commands.ChatWebAPISkillsPath, commands.HandleChatWebAPISkills)
+	mux.HandleFunc(commands.ChatWebAPISkillsPath+"/", commands.HandleChatWebAPISkills)
 	// style.css / app.js / js/*.js 等静态资源由 HandleChatWebPage 统一伺服
 	// （go:embed 嵌入 web/ 目录，按文件名 + 扩展名 Content-Type 返回）。
 

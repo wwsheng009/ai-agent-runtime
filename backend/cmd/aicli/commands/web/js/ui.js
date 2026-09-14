@@ -5,11 +5,14 @@ import { refreshScreen } from "./chat.js";
 import { loadConfigAdmin } from "./config-admin.js";
 import { loadCacheAnalytics, refreshCacheAnalytics } from "./cache.js";
 import { loadDebugInfo, refreshDebugInfo } from "./debug.js";
+import { loadSkills } from "./skills.js";
 
 var tabMainBtn = document.getElementById("tab-main-btn");
 var tabLogBtn = document.getElementById("tab-log-btn");
 var tabMainEl = document.getElementById("tab-main");
 var tabLogEl = document.getElementById("tab-log");
+var tabSkillsBtn = document.getElementById("tab-skills-btn");
+var tabSkillsEl = document.getElementById("tab-skills");
 var themeToggleBtn = document.getElementById("theme-toggle");
 var shortcutHelpEl = document.getElementById("shortcut-help");
 // ---- 主题：深色/浅色（localStorage 记忆，默认跟随系统） ----
@@ -50,24 +53,30 @@ var tabAboutEl = document.getElementById("tab-about");
 
 function activateTab(tabName) {
   var isMain = tabName === "main";
+  var isSkills = tabName === "skills";
   var isLog = tabName === "log";
   var isConfig = tabName === "config";
   var isCache = tabName === "cache";
   var isDebug = tabName === "debug";
   var isAbout = tabName === "about";
   tabMainBtn.classList.toggle("active", isMain);
+  if (tabSkillsBtn) { tabSkillsBtn.classList.toggle("active", isSkills); }
   tabLogBtn.classList.toggle("active", isLog);
   if (tabConfigBtn) { tabConfigBtn.classList.toggle("active", isConfig); }
   if (tabCacheBtn) { tabCacheBtn.classList.toggle("active", isCache); }
   if (tabDebugBtn) { tabDebugBtn.classList.toggle("active", isDebug); }
   if (tabAboutBtn) { tabAboutBtn.classList.toggle("active", isAbout); }
   tabMainEl.classList.toggle("active", isMain);
+  if (tabSkillsEl) { tabSkillsEl.classList.toggle("active", isSkills); }
   tabLogEl.classList.toggle("active", isLog);
   if (tabConfigEl) { tabConfigEl.classList.toggle("active", isConfig); }
   if (tabCacheEl) { tabCacheEl.classList.toggle("active", isCache); }
   if (tabDebugEl) { tabDebugEl.classList.toggle("active", isDebug); }
   if (tabAboutEl) { tabAboutEl.classList.toggle("active", isAbout); }
   if (isMain) { refreshScreen(); }
+  // 技能页签：目录来自当前会话的 Function Catalog（与 TUI /skills 同源），
+  // 首次进入或显式刷新才拉取，同会话重复切页签不重复发请求。
+  if (isSkills) { loadSkills(); }
   if (isConfig) { loadConfigAdmin(); }
   // 会话感知按需拉取：cache.js 内部对比已渲染数据与当前会话 id，仅在首次进入、
   // 会话变化时重拉；同会话重复切页签不重复发请求（页内更新由 SSE 增量刷新兜底）。
@@ -95,6 +104,7 @@ export function closeShortcutHelpIfOpen() {
 
 export function initTabs() {
   tabMainBtn.addEventListener("click", function () { activateTab("main"); });
+  if (tabSkillsBtn) { tabSkillsBtn.addEventListener("click", function () { activateTab("skills"); }); }
   tabLogBtn.addEventListener("click", function () { activateTab("log"); });
   if (tabConfigBtn) { tabConfigBtn.addEventListener("click", function () { activateTab("config"); }); }
   if (tabCacheBtn) { tabCacheBtn.addEventListener("click", function () { activateTab("cache"); }); }

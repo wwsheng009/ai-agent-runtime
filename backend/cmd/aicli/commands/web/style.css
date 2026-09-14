@@ -1181,3 +1181,147 @@ body.sidebar-collapsed #sidebar {
 }
 .about-facts a { color: var(--accent); text-decoration: none; }
 .about-facts a:hover { text-decoration: underline; }
+
+/* ---- 技能页签：当前会话 skill 目录 + 点击条目打开的详情面板 ----
+   详情面板层级与 provider 编辑弹窗一致（1100），启动时 reparent 到 <body>。 */
+#tab-skills { padding-top: 8px; overflow: auto; }
+.skills-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.skills-title { font-size: 13px; margin: 0; color: var(--fg2); }
+.skills-count { font-size: 11px; color: var(--fg4); }
+#tab-skills button {
+  cursor: pointer; font-family: inherit; font-size: 12px; padding: 4px 10px;
+  background: var(--bg3); color: var(--fg2); border: 1px solid var(--border); border-radius: 6px;
+}
+#tab-skills button:hover { background: var(--hoverBg); }
+.skills-list { display: flex; flex-direction: column; gap: 6px; padding-bottom: 12px; }
+.skills-empty { color: var(--fg4); font-size: 12px; padding: 8px 0; }
+.skills-empty.skills-error { color: var(--red, #e5534b); }
+.skill-row {
+  display: flex; flex-direction: column; gap: 4px; align-items: flex-start;
+  width: 100%; text-align: left; padding: 9px 11px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.skill-row:hover { border-color: var(--border2); background: var(--bg3); }
+.skill-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.skill-row-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.skill-name { font-size: 13px; font-weight: 600; color: var(--fg); }
+.skill-badge {
+  font-size: 10px; padding: 1px 6px; border-radius: 3px;
+  background: var(--bg4); color: var(--fg3); border: 1px solid var(--border);
+}
+.skill-badge-kind { color: var(--accent); border-color: var(--border2); }
+.skill-row-sub { display: flex; flex-direction: column; gap: 2px; }
+.skill-fn {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Courier New", monospace;
+  font-size: 11px; color: var(--accent);
+}
+.skill-desc { font-size: 12px; line-height: 1.6; color: var(--fg3); }
+
+/* ---- 技能详情弹层：头部摘要 + 页签 + 面板 ----
+   页签按钮与面板内容由 js/skills.js 按「后端有值才显示」渲染：
+   #skill-detail-tabs 内是 role="tablist"，内容区每次只渲染当前页签的
+   role="tabpanel"；空分组不生成页签，因此 tabs 为空时整条页签栏不占位。 */
+#skill-detail-overlay {
+  display: none; position: fixed; z-index: 1100;
+  inset: 0; background: var(--overlayBg); padding: 16px;
+  justify-content: center; align-items: center;
+}
+#skill-detail-overlay.active { display: flex; }
+#skill-detail-modal {
+  position: relative; width: min(680px, calc(100vw - 32px));
+  max-height: min(86vh, 760px); overflow: hidden;
+  background: var(--modalBg); border: 1px solid var(--border2);
+  border-radius: 12px; display: flex; flex-direction: column;
+  box-shadow: 0 12px 40px var(--shadow);
+}
+#skill-detail-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 11px 16px; border-bottom: 1px solid var(--border);
+  background: var(--bg3);
+  font-weight: 600; font-size: 13px; color: var(--fg);
+}
+#skill-detail-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.skill-meta:empty { display: none; }
+#skill-detail-header .modal-close {
+  margin-left: auto; cursor: pointer; padding: 2px 8px;
+  font-size: 16px; line-height: 1; background: none; border: none;
+  color: var(--fg3); border-radius: 6px;
+}
+#skill-detail-header .modal-close:hover { color: var(--fg); background: var(--hoverBg); }
+#skill-detail-header .modal-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.skill-tabs {
+  display: flex; align-items: stretch; gap: 2px;
+  padding: 6px 12px 0; border-bottom: 1px solid var(--border);
+  /* overflow-x:auto 会把 overflow-y:visible 计算成 auto（CSS overflow 规范），
+     页签栏因此变成纵向滚动容器：页签只要多出 1px 就会长出上下滚动条。
+     这里显式锁死纵向，横向仍可滚动。 */
+  overflow-x: auto; overflow-y: hidden; background: var(--bg2);
+}
+.skill-tabs:empty { display: none; }
+/* 页签按钮用 ID 前缀提权：详情弹层虽在启动时 reparent 到 <body>，
+   但样式不应依赖「已经 reparent」这个前提，也不该被全局 button 规则改写。 */
+#skill-detail-tabs .skill-tab {
+  position: relative; padding: 6px 12px 9px;
+  background: none; border: none;
+  border-radius: 6px 6px 0 0; /* 覆盖全局 button 的 6px 全圆角，贴合页签下边框 */
+  color: var(--fg4); font: inherit; font-size: 12px; cursor: pointer;
+  white-space: nowrap; transition: color 0.12s ease;
+}
+/* 选中下划线画在按钮内部（bottom:0 落在自身 padding box 内），
+   不再靠 margin-bottom:-1px 去压住页签栏的外边框——那种做法会让页签
+   溢出 1px，配合上面的 auto 纵向溢出就变成一条上下滚动条。 */
+#skill-detail-tabs .skill-tab::after {
+  content: ""; position: absolute; left: 8px; right: 8px; bottom: 0;
+  height: 2px; border-radius: 2px; background: transparent;
+  transition: background-color 0.12s ease;
+}
+#skill-detail-tabs .skill-tab:hover { color: var(--fg2); background: var(--hoverBg); }
+#skill-detail-tabs .skill-tab.active { color: var(--accent2); font-weight: 600; }
+#skill-detail-tabs .skill-tab.active::after { background: var(--accent); }
+#skill-detail-tabs .skill-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 4px; }
+#skill-detail-body {
+  flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px 16px;
+  font-size: 13px; line-height: 1.6; color: var(--fg2);
+}
+.skill-tabpanel { display: flex; flex-direction: column; gap: 10px; }
+.skill-tabpanel:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 6px; }
+.skill-text { margin: 0; color: var(--fg2); }
+.skill-section-title { font-size: 11px; letter-spacing: 0.04em; color: var(--fg4); }
+.skill-kv-grid { display: flex; flex-direction: column; gap: 6px; }
+.skill-kv { display: flex; gap: 12px; align-items: baseline; }
+.skill-kv-label { flex: 0 0 84px; color: var(--fg4); font-size: 11.5px; }
+.skill-kv-value {
+  flex: 1; min-width: 0; color: var(--fg2);
+  word-break: break-word; overflow-wrap: anywhere;
+}
+.skill-cards { display: flex; flex-direction: column; gap: 8px; }
+.skill-card {
+  padding: 9px 11px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg2);
+}
+.skill-card-title {
+  margin-bottom: 6px; font-size: 12px; color: var(--accent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Courier New", monospace;
+}
+.skill-card .skill-kv-label { flex-basis: 72px; }
+.skill-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.skill-chip {
+  padding: 2px 8px; border-radius: 999px; font-size: 11px;
+  background: var(--bg4); color: var(--fg3); border: 1px solid var(--border);
+}
+.skill-json {
+  margin: 0; padding: 9px 11px; max-height: 260px; overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Courier New", monospace;
+  font-size: 11.5px; line-height: 1.55;
+  background: var(--codeBg); color: var(--codeFg);
+  border: 1px solid var(--border); border-radius: 8px;
+  white-space: pre-wrap; word-break: break-word;
+}
+@media (max-width: 560px) {
+  #skill-detail-overlay { padding: 8px; }
+  #skill-detail-modal { width: calc(100vw - 16px); max-height: 92vh; }
+  .skill-kv { flex-direction: column; gap: 2px; }
+  .skill-kv-label { flex: none; }
+}

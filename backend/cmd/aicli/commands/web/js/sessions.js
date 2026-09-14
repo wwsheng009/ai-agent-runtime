@@ -3,6 +3,7 @@
 
 import { autoGrow, clearPendingPrompts, dropPendingUserPrompt, getUiState, promptEl, refreshScreen, sendStatusEl, setUI } from "./chat.js";
 import { refreshCacheAnalyticsIfActive, syncCacheSession } from "./cache.js";
+import { syncSkillsSession } from "./skills.js";
 import { showToast } from "./util.js";
 
 var sidebarEl = document.getElementById("sidebar");
@@ -365,6 +366,8 @@ export function loadSessions() {
       // 同步当前会话 id：会话变化时缓存页签按需重拉（可见立即刷，后台则记录，
       // 下次进入页签时由 loadCacheAnalytics 按会话不一致强制刷新）。
       syncCacheSession(data.current_session_id);
+      // 技能页签同约定：目录属于当前会话的 Function Catalog，会话变化即过期。
+      syncSkillsSession(data.current_session_id);
       // 顶栏同步当前会话标题与 ID
       updateHeaderSession(data.current_session_id);
       renderSessionList();
@@ -457,6 +460,7 @@ function proceedResumeSession(id) {
                   // 当前会话已切换：同步会话 id，缓存页签可见则立即重拉，
                   // 不可见则下次进入页签时按会话不一致强制刷新。
                   syncCacheSession(cur);
+                  syncSkillsSession(cur);
                   // 顶栏同步当前会话标题与 ID（轮询超时兜底：回退目标会话 id）
                   updateHeaderSession(cur || id);
                   sendStatusEl.textContent = cur === id ? "已切换" : "已切换(状态未同步)";
@@ -507,6 +511,7 @@ function createNewSession() {
                 refreshScreen(true);
                 // 新会话就绪：同步会话 id，缓存页签按需重拉（同上）。
                 if (cur) { syncCacheSession(cur); updateHeaderSession(cur); }
+                syncSkillsSession(cur);
                 if (sessionsNewBtn) { sessionsNewBtn.disabled = false; }
                 sendStatusEl.textContent = (cur !== "" && cur !== oldID) ? "已新建会话" : "已新建(状态未同步)";
               } else {

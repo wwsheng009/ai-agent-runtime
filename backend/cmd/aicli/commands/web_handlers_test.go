@@ -138,7 +138,8 @@ func TestHandleChatWebPage_HeaderLayout(t *testing.T) {
 	}
 }
 
-// TestHandleChatWebPage_Tabs 锁定页签集合：对话 / 日志 / 配置 / 缓存 / 调试 / 关于。
+// TestHandleChatWebPage_Tabs 锁定页签集合：对话 / 技能 / 日志 / 配置 / 缓存 / 调试 / 关于。
+// 「技能」紧邻「对话」（会话的第二页签），承载当前会话的 skill 目录与详情弹层。
 // 「调试」页签承载与 aicli /debug 一致的「状态文档」，「关于」页签展示客户端标识。
 func TestHandleChatWebPage_Tabs(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, ChatWebPath, nil)
@@ -147,14 +148,27 @@ func TestHandleChatWebPage_Tabs(t *testing.T) {
 	HandleChatWebPage(rec, req)
 
 	body := rec.Body.String()
-	for _, id := range []string{"tab-main-btn", "tab-log-btn", "tab-config-btn", "tab-cache-btn", "tab-debug-btn", "tab-about-btn"} {
+	for _, id := range []string{"tab-main-btn", "tab-skills-btn", "tab-log-btn", "tab-config-btn", "tab-cache-btn", "tab-debug-btn", "tab-about-btn"} {
 		if !strings.Contains(body, `id="`+id+`"`) {
 			t.Fatalf("page body missing tab button %q", id)
 		}
 	}
-	for _, id := range []string{"tab-main", "tab-log", "tab-config", "tab-cache", "tab-debug", "tab-about"} {
+	for _, id := range []string{"tab-main", "tab-skills", "tab-log", "tab-config", "tab-cache", "tab-debug", "tab-about"} {
 		if !strings.Contains(body, `id="`+id+`"`) {
 			t.Fatalf("page body missing tab panel %q", id)
+		}
+	}
+	// 技能页签紧跟对话：main < skills < log。
+	mainBtnIdx := strings.Index(body, `id="tab-main-btn"`)
+	skillsBtnIdx := strings.Index(body, `id="tab-skills-btn"`)
+	logBtnIdx := strings.Index(body, `id="tab-log-btn"`)
+	if !(mainBtnIdx < skillsBtnIdx && skillsBtnIdx < logBtnIdx) {
+		t.Fatalf("tab button order = main:%d skills:%d log:%d, want main < skills < log", mainBtnIdx, skillsBtnIdx, logBtnIdx)
+	}
+	// 技能页签：列表容器 + 刷新入口 + 点击条目打开的详情弹层外壳。
+	for _, id := range []string{"skills-list", "skills-count", "skills-refresh-btn", "skill-detail-overlay", "skill-detail-body", "skill-detail-close"} {
+		if !strings.Contains(body, `id="`+id+`"`) {
+			t.Fatalf("skills tab missing element %q", id)
 		}
 	}
 	// 按钮与面板同序：调试在缓存之后、关于在调试之后，避免新的页签插错位置。

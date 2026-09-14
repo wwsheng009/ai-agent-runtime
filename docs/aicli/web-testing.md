@@ -33,6 +33,8 @@ aicli chat --pprof
 | `GET /web/api/sessions` | `{ sessions: [] }` |
 | `GET /web/api/screen` | 任意 JSON |
 | `GET /web/api/status?format=text` | 纯文本（调试页签状态文档，与 `aicli /debug` 内容一致；桩可为任意多行文本） |
+| `GET /web/api/skills` | `{ count: N, skills: [{ name, function_name, kind, description, category, version, labels, capabilities }] }`（技能页签目录，与 `/skills` 同源） |
+| `GET /web/api/skills/{name}` | 单个 skill 详情（`name` 可用目录名或可调用名）；列表字段 + `triggers` / `dependencies` / `source` / `metadata`，无值字段可省略；未知名称返回 404 `{ error: { code: "skill_not_found", message } }` |
 | 其余 `/web/api/*` | 统一返回 `{ status: "ok" }`（POST 类操作直接成功） |
 
 注意事项：
@@ -46,7 +48,7 @@ aicli chat --pprof
 
 ### 2.1 全局
 
-- [ ] 六个页签（对话 / 日志 / 配置 / 缓存 / 调试 / 关于）切换正常，`«` 折叠侧栏、`◐` 主题切换生效；窄屏下页签可换行且按钮不被压得过窄。
+- [ ] 七个页签（对话 / **技能** / 日志 / 配置 / 缓存 / 调试 / 关于）切换正常，`«` 折叠侧栏、`◐` 主题切换生效；窄屏下页签可换行且按钮不被压得过窄。
 - [ ] **调试页签**：进入时拉取 `GET /web/api/status?format=text` 并原样展示状态文档（与 `aicli /debug` 命令显示的内容一致），
       等宽字体、可横向/纵向滚动；工具栏「⟳ 刷新」重新拉取，「JSON 快照」链接另开 `/web/api/status` 原始 JSON；
       后端不可用时显示"加载失败：…"且不残留旧内容。
@@ -103,6 +105,35 @@ aicli chat --pprof
 - [ ] 消息追溯：`产出请求` 下方的 `产出用量` 行显示 `prompt … · 输出 … · 读缓存 … · 写缓存 …`；无产出请求时显示 `-`。
 - [ ] 边界：空会话显示"暂无 LLM 请求记录（发送一条消息后刷新）"；旧记录缺 usage 时显示 `-`，不得出现 `NaN`/`undefined`。
 
+### 2.6 技能页签（会话的第二页签）
+
+数据源与 TUI `/skills` 同源：列表取 `GET /web/api/skills`（当前会话 `FunctionCatalog` 的 skill 描述符），
+点击条目现取 `GET /web/api/skills/{name}` 打开详情面板（不复用列表快照）。
+
+- [ ] 列表：进入页签拉取目录并显示「共 N 个」；每个条目显示 skill 名、可调用名（`skill__*`）与描述；
+      无 skill 时显示"当前会话没有可用的 skill"（不是空白）。
+- [ ] 会话感知：同一会话内重复切页签**不重复请求**；切换会话后（后台切换）再进页签**强制刷新**；
+      页签可见时切换会话立即重拉；快速切换会话时迟到的旧响应被丢弃，不覆盖当前目录。
+- [ ] 详情面板：点击条目打开面板（portal 挂在 `body` 上，层级在设置域弹窗之上），标题为 skill 名，
+      头部展示后端返回的 `kind` / `category` / `version` 徽标（**无值不出徽标**，不得回落到列表快照里的值）。
+- [ ] 详情分组页签：内容按「概览 / 触发 / 依赖 / 来源 / 元数据」分组显示，**只有后端有值的分组才生成页签**
+      （无内容时整条页签栏不占位）；默认选中第一个页签且**只渲染当前页签的内容**（其余分组不预先渲染）。
+      切换方式：点击页签，或焦点在页签上按 `←` / `→`（首尾环绕）、`Home` / `End`；打开面板时焦点落在选中页签，
+      关闭后焦点回到触发的列表条目。
+- [ ] 分字段渲染：目录名 / 可调用名 / 类型 / 分类 / 版本 / 描述 / 标签 / 能力渲染为字段行或标签徽标；
+      触发词 / 依赖 / 来源 / 元数据按「对象 → 键值行、对象数组 → 卡片、嵌套值 → JSON」展示；
+      后端未返回的字段**整行省略**（不出现占位默认值）。
+- [ ] 页签栏样式：只允许横向滚动，页签栏内**不出现上下滚动条**。两条硬约束 ——
+      ① 页签栏 `overflow-x: auto` 必须同时显式写 `overflow-y: hidden`（只有一个轴不是 `visible` 时，
+      另一轴的 `visible` 会按规范计算成 `auto`，页签栏会静默变成纵向滚动容器）；
+      ② 页签**不得溢出页签栏的 padding box**（选中下划线画在按钮内部，不能用 `margin-bottom: -1px`
+      去压页签栏外边框）。真机上只要页签多出 1px，①就会把它渲染成一条滚动条。
+- [ ] 关闭方式：`✕`、点遮罩、`Esc` 均关闭面板；面板打开时 `Esc` 只关面板，**不触发**会话中断；
+      关闭后迟到的详情响应不再写入面板。
+- [ ] 失败如实显示：无活动会话时列表显示 `加载失败: skills_unavailable`；未知 skill 详情显示 `加载失败: skill_not_found`；
+      网络异常显示 `加载失败: network_error`；失败时列表不残留旧条目、面板不静默关闭。
+- [ ] 刷新：工具栏「⟳ 刷新」重新拉取列表（不依赖会话是否变化）。
+
 ## 3. 协议下拉框专项用例（combo popup）
 
 Provider 编辑弹窗的协议字段曾用原生 `<input list=datalist>`，存在**有值与无值显示不一致**的缺陷：浏览器会按 input 当前值过滤 datalist 选项，编辑 `openai` 协议的 provider 时下拉只剩匹配项，新增（空值）时才显示全部。已改为 ▼ 按钮 + 自定义 popup（与底部 Model 字段同方案）。以下用例为该组件的回归重点：
@@ -131,9 +162,16 @@ node --check backend/cmd/aicli/commands/web/app.js
 
 # 3. 涉及 cfg-bar / 弹窗样式的改动，确认两个 popup 方向都正常：
 #    底部 Model（向上）与编辑弹窗协议（向下）共用 .cfg-model-popup / .cfg-combo-popup 外观规则
+
+# 4. 页签行为沙盒（Node，stub document/fetch，无需浏览器；在仓库根目录运行）：
+node scripts/verify-micro-web-skills-tab.mjs   # 技能页签：列表/会话感知/详情分组页签与键盘导航/错误/竞态/页签接线
 ```
 
 模块化后另有一层静态检查：用带 DOM stub 的 Node 脚本对 `app.js` 入口做动态 `import()`，可在不启浏览器的情况下抓出语法错误、缺失导出、模块求值期错误（拆分落地时即靠它在浏览器回归前拦截了两处问题）。检查思路：stub `document/window/localStorage/fetch/EventSource` 后 `await import("./app.js")`，任何模块图断裂都会在这里抛错。
+
+页签栏「上下滚动条」这类纯布局问题在沙盒里量不出来，本地改用真实 Chromium 量盒模型：`web/tmp/measure-skill-tabs-scroll.mjs`（同目录已 gitignore、不随仓库发布）把 `style.css` 内联进 `index.html`，注入页签后打印页签栏的 `clientHeight` / `scrollHeight` 与滚动条占位像素，并扫描整个详情弹层找出所有纵向滚动容器；脚本尾部还会把旧写法注入回来做对照，确认测量方法本身捕捉得到这条滚动条。
+
+`scripts/verify-micro-web-skills-tab.mjs` 即按此思路写成：它 stub `document`（含 `documentElement` / `body` / 元素 `classList` / `querySelector(All)`）与 `fetch`，先单测 `js/skills.js` 的行为（含详情分组页签：只生成非空分组、只渲染当前页签、点击与 `← → Home End` 导航、打开聚焦选中页签、关闭把焦点还给列表条目、缺字段不补默认值），最后 `import` `js/ui.js` 并点一次 `#tab-skills-btn`，验证按钮 → 激活面板 → 拉取目录的接线。缓存页签有同思路的本地沙盒脚本（`web/tmp/cache-session-aware.verify.cjs`，该目录已 gitignore、不随仓库发布）。
 
 ## 5. 已知问题（拆分时保持原行为，未修）
 
