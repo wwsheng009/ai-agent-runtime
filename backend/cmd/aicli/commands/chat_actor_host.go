@@ -55,6 +55,32 @@ const (
 	defaultLocalChatRunStallTimeout = 15 * time.Minute
 )
 
+// localChatSessionCheckpointIntervalFromEnv 解析长 turn 中途落库间隔的覆盖值。
+//
+// 未设置（或非法）返回 0，由 chat.DefaultSessionCheckpointInterval 兜底；
+// AICLI_SESSION_CHECKPOINT_INTERVAL 接受 Go duration（如 5s、30s），以及
+// off/disable/0（显式关闭中途落库 → actor 侧按负值处理，turn 收尾的 post-turn
+// sync 仍照常落库，用于排查落库相关问题时回滚）。
+func localChatSessionCheckpointIntervalFromEnv() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("AICLI_SESSION_CHECKPOINT_INTERVAL"))
+	if raw == "" {
+		return 0
+	}
+	switch strings.ToLower(raw) {
+	case "off", "0", "false", "no", "disable", "disabled":
+		return -1
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil {
+		// 非法值（如漏写单位 "15"）回退默认间隔，而不是静默关闭落库。
+		return 0
+	}
+	if value <= 0 {
+		return -1
+	}
+	return value
+}
+
 // runLocalSubagentStartupRecovery runs the bounded startup pass immediately
 // and once more after restartGrace. The delayed pass catches rows that were
 // still inside the stale-worker grace window when this process started.
@@ -969,6 +995,11 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		PrepareRun:   localChatPrepareRunHook(apiAgent, session, workspaceRoot, isBaseSession),
 		PersistHook:  localGoalPersistHook(sessionStore),
 		RecoverStale: true,
+		// 长 turn 中途增量落库：ReAct 循环每次提交 durable 历史后按该间隔把
+		// 已提交内容写回权威会话存储，避免长 turn 期间会话行长时间停在起始
+		// 状态（默认 15s，见 chat.DefaultSessionCheckpointInterval；可用
+		// AICLI_SESSION_CHECKPOINT_INTERVAL 覆盖或关闭）。
+		CheckpointInterval: localChatSessionCheckpointIntervalFromEnv(),
 		// 上游挂死/网络卡死时 run 可能长时间无任何进展（无 delta、无工具
 		// 事件、无状态更新），状态卡在 running，busy 锁让用户无法继续也无法
 		// 重启接管。watchdog 超时后强制中止并释放 lease，让会话可恢复。

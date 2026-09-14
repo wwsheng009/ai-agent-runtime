@@ -106,6 +106,11 @@ type SessionActorConfig struct {
 	// 不再长期占用 session 锁（配合 PrepareRun 在下一个 run 前重新获取）。
 	// 回调在 actor 的命令循环线程执行，不应阻塞或长时间运行。
 	OnRunFinished func()
+	// CheckpointInterval 控制长 turn 中途增量落库的最小间隔：ReAct 循环每次
+	// 提交 durable 历史（assistant 文本 / tool 结果 / 压缩改写）后都会请求一次
+	// checkpoint，实际写入按该间隔节流。0 使用 DefaultSessionCheckpointInterval；
+	// 负数禁用中途落库（turn 结束的 post-turn sync 仍照常落库）。
+	CheckpointInterval time.Duration
 }
 
 // SessionActor serializes session commands and manages execution state.
@@ -126,6 +131,10 @@ type SessionActor struct {
 	onRunStalled    func(turnID string)
 	onRunFinished   func()
 	runSequence     atomic.Uint64
+	// checkpointInterval / lastCheckpointAt 实现长 turn 中途落库的节流，
+	// 语义见 SessionActorConfig.CheckpointInterval。
+	checkpointInterval time.Duration
+	lastCheckpointAt   atomic.Int64
 
 	cmdCh chan Command
 	stop  chan struct{}
@@ -185,26 +194,27 @@ func NewSessionActor(sessionID string, cfg SessionActorConfig) (*SessionActor, e
 		}
 	}
 	actor := &SessionActor{
-		id:              sessionID,
-		agent:           cfg.Agent,
-		llmRuntime:      cfg.LLMRuntime,
-		loopConfig:      loopConfig,
-		sessionStore:    cfg.SessionStore,
-		stateStore:      cfg.StateStore,
-		eventStore:      cfg.EventStore,
-		eventBus:        bus,
-		prepareRun:      cfg.PrepareRun,
-		persistHook:     cfg.PersistHook,
-		recoverStale:    cfg.RecoverStale,
-		onStop:          cfg.OnStop,
-		runStallTimeout: cfg.RunStallTimeout,
-		onRunStalled:    cfg.OnRunStalled,
-		onRunFinished:   cfg.OnRunFinished,
-		cmdCh:           make(chan Command, 32),
-		stop:            make(chan struct{}),
-		done:            make(chan struct{}),
-		approvalWaiters: make(map[string]chan runtimepolicy.ApprovalResponse),
-		questionWaiters: make(map[string]chan string),
+		id:                 sessionID,
+		agent:              cfg.Agent,
+		llmRuntime:         cfg.LLMRuntime,
+		loopConfig:         loopConfig,
+		sessionStore:       cfg.SessionStore,
+		stateStore:         cfg.StateStore,
+		eventStore:         cfg.EventStore,
+		eventBus:           bus,
+		prepareRun:         cfg.PrepareRun,
+		persistHook:        cfg.PersistHook,
+		recoverStale:       cfg.RecoverStale,
+		onStop:             cfg.OnStop,
+		runStallTimeout:    cfg.RunStallTimeout,
+		onRunStalled:       cfg.OnRunStalled,
+		onRunFinished:      cfg.OnRunFinished,
+		checkpointInterval: resolveSessionCheckpointInterval(cfg.CheckpointInterval),
+		cmdCh:              make(chan Command, 32),
+		stop:               make(chan struct{}),
+		done:               make(chan struct{}),
+		approvalWaiters:    make(map[string]chan runtimepolicy.ApprovalResponse),
+		questionWaiters:    make(map[string]chan string),
 	}
 	if err := actor.loadState(context.Background()); err != nil {
 		return nil, err
@@ -616,7 +626,7 @@ func (a *SessionActor) GetCheckpointFiles(ctx context.Context, checkpointID stri
 }
 
 // EnableStreaming 在运行中开启此会话的流式输出，使 LLM 增量事件
-//（assistant_delta / reasoning_delta）实时推送到 EventBus。幂等。
+// （assistant_delta / reasoning_delta）实时推送到 EventBus。幂等。
 func (a *SessionActor) EnableStreaming() {
 	if a == nil {
 		return
@@ -1484,7 +1494,7 @@ func (a *SessionActor) runLoop(ctx context.Context, prompt string, session *Sess
 		return nil, fmt.Errorf("llm runtime is not configured")
 	}
 	runMeta, _ := team.GetRunMeta(ctx)
-	loop := agent.NewReActLoop(a.agent, a.llmRuntime, cloneLoopConfigForRun(a.loopConfig, routeOverride, runMeta))
+	loop := agent.NewReActLoop(a.agent, a.llmRuntime, a.historyCheckpointLoopConfig(routeOverride, runMeta, session))
 	return loop.RunWithSession(ctx, prompt, session)
 }
 
@@ -1496,7 +1506,7 @@ func (a *SessionActor) continueLoop(ctx context.Context, session *Session, route
 		return nil, fmt.Errorf("llm runtime is not configured")
 	}
 	runMeta, _ := team.GetRunMeta(ctx)
-	loop := agent.NewReActLoop(a.agent, a.llmRuntime, cloneLoopConfigForRun(a.loopConfig, routeOverride, runMeta))
+	loop := agent.NewReActLoop(a.agent, a.llmRuntime, a.historyCheckpointLoopConfig(routeOverride, runMeta, session))
 	return loop.ContinueWithSession(ctx, session)
 }
 
@@ -2739,6 +2749,89 @@ func (a *SessionActor) persistSession(ctx context.Context, session *Session) err
 		return errSessionRunSuperseded
 	}
 	return a.sessionStore.Update(ctx, session)
+}
+
+// DefaultSessionCheckpointInterval 是长 turn 中途落库的默认节流间隔：turn 内
+// 至多每 15s 把已提交的 durable 历史增量写回会话存储，使权威历史（SQLite /
+// 会话列表 / resume）在长 turn 运行期间持续前进，而不是等 turn 结束才落地。
+const DefaultSessionCheckpointInterval = 15 * time.Second
+
+func resolveSessionCheckpointInterval(configured time.Duration) time.Duration {
+	if configured == 0 {
+		return DefaultSessionCheckpointInterval
+	}
+	return configured
+}
+
+// checkpointSessionHistory 是 ReAct 循环 OnHistoryCheckpoint 的落点：把长 turn
+// 中已提交的 durable 历史增量写回会话存储。
+//
+// 与 persistSession 的区别只有时机与失败语义：这里是 turn 中途的尽力而为写入，
+// 按 checkpointInterval 节流（窗口内直接跳过），失败只上报事件、绝不冒泡成 turn
+// 失败；turn 结束的 post-turn sync 仍是最终一致性的保证。
+func (a *SessionActor) checkpointSessionHistory(ctx context.Context, session *Session) {
+	if a == nil || session == nil || a.sessionStore == nil {
+		return
+	}
+	interval := a.checkpointInterval
+	if interval <= 0 {
+		return
+	}
+	now := time.Now()
+	last := a.lastCheckpointAt.Load()
+	if last != 0 && now.Sub(time.Unix(0, last)) < interval {
+		return
+	}
+	if !a.lastCheckpointAt.CompareAndSwap(last, now.UnixNano()) {
+		// 另一个提交点已占用本窗口，跳过本次写入。
+		return
+	}
+	if err := a.persistSession(ctx, session); err != nil {
+		// 失败回退时间戳：让下一个提交点立刻重试，而不是再等一个节流窗口。
+		a.lastCheckpointAt.Store(last)
+		a.publishSessionCheckpointFailure(ctx, err)
+	}
+}
+
+// publishSessionCheckpointFailure 上报中途落库失败。中断/取消属于正常收尾路径
+// （turn 结束会统一落库），不为它们制造噪声事件。
+func (a *SessionActor) publishSessionCheckpointFailure(ctx context.Context, err error) {
+	if a == nil || err == nil || a.eventBus == nil {
+		return
+	}
+	if errors.Is(err, errSessionRunSuperseded) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) {
+		return
+	}
+	payload := map[string]interface{}{"error": err.Error(), "stage": "mid_turn_checkpoint"}
+	if run, ok := sessionRunControlFromContext(ctx); ok && run != nil {
+		payload["turn_id"] = run.turnID
+	}
+	a.eventBus.Publish(runtimeevents.Event{
+		Type:      "session.checkpoint_persist_error",
+		SessionID: a.id,
+		Payload:   payload,
+	})
+}
+
+// historyCheckpointLoopConfig 返回本轮 ReAct 配置，并在长 turn 中途落库启用时
+// 挂载 checkpoint 回调。
+func (a *SessionActor) historyCheckpointLoopConfig(routeOverride *RunRouteOverride, runMeta *team.RunMeta, session *Session) *agent.LoopReActConfig {
+	if a == nil {
+		return agent.DefaultLoopReActConfig()
+	}
+	cfg := cloneLoopConfigForRun(a.loopConfig, routeOverride, runMeta)
+	if cfg == nil {
+		cfg = agent.DefaultLoopReActConfig()
+	}
+	if session == nil || a.checkpointInterval <= 0 {
+		return cfg
+	}
+	cfg.OnHistoryCheckpoint = func(ctx context.Context, _ []runtimetypes.Message) {
+		a.checkpointSessionHistory(ctx, session)
+	}
+	return cfg
 }
 
 func cloneSessionContextValue(value interface{}) (interface{}, error) {

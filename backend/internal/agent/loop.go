@@ -88,6 +88,14 @@ type LoopReActConfig struct {
 	//
 	// The callback is optional and is never invoked for nil/empty chunks.
 	StreamSink func(llm.StreamChunk) `yaml:"-"`
+	// OnHistoryCheckpoint 在本轮每次提交 durable 历史后调用一次：assistant
+	// 文本、tool 结果、预算/压缩改写等所有历史变更点都会经过它。宿主用它把
+	// 长 turn 的历史增量中途落库，避免 turn 结束前权威会话长时间缺失。
+	//
+	// 契约：尽力而为。回调只读 messages（不得修改、不得长期持有）；其耗时
+	// 计入 step 尾部，实现必须自带节流；失败不得冒泡为 turn 失败，由实现方
+	// 自行记录/上报。
+	OnHistoryCheckpoint func(ctx context.Context, messages []types.Message) `yaml:"-"`
 }
 
 // ReActLoop ReAct 循环（Reasoning + Acting）
@@ -166,17 +174,7 @@ const PromptCacheEpochSessionContextKey = "aicli.prompt_cache_epoch"
 // NewReActLoop 创建 ReAct 循环
 func NewReActLoop(agent *Agent, llmRuntime *llm.LLMRuntime, config *LoopReActConfig) *ReActLoop {
 	if config == nil {
-		config = &LoopReActConfig{
-			MaxSteps:             0,
-			EnableThought:        true,
-			EnableToolCalls:      true,
-			EnableParallelTools:  true,
-			MaxParallelToolCalls: 4,
-			Verbose:              false,
-			Temperature:          0.7,
-			StopOnSuccess:        true,
-			MaxIterations:        10,
-		}
+		config = DefaultLoopReActConfig()
 	}
 	config.MaxSteps = NormalizeMaxSteps(config.MaxSteps)
 	config.CompletionRequirement = NormalizeCompletionRequirement(config.CompletionRequirement)
@@ -195,6 +193,23 @@ func NewReActLoop(agent *Agent, llmRuntime *llm.LLMRuntime, config *LoopReActCon
 		llmRuntime:     llmRuntime,
 		config:         config,
 		toolExecMemory: toolexec.NewMemory(toolexec.DefaultTerminalFailureThreshold),
+	}
+}
+
+// DefaultLoopReActConfig 返回 NewReActLoop(nil) 使用的默认循环配置。宿主若要在
+// 默认配置上附加旁路回调（例如长 turn 中途落库），必须显式取用它：传 nil 时
+// 默认配置生成在构造器内部，宿主无法再注入任何回调。
+func DefaultLoopReActConfig() *LoopReActConfig {
+	return &LoopReActConfig{
+		MaxSteps:             0,
+		EnableThought:        true,
+		EnableToolCalls:      true,
+		EnableParallelTools:  true,
+		MaxParallelToolCalls: 4,
+		Verbose:              false,
+		Temperature:          0.7,
+		StopOnSuccess:        true,
+		MaxIterations:        10,
 	}
 }
 
@@ -311,7 +326,9 @@ func (loop *ReActLoop) RunWithSession(ctx context.Context, prompt string, sessio
 		IncludePrompt:    includePrompt,
 		PromptCacheEpoch: sessionPromptCacheEpoch(session),
 		PersistHistory: func(messages []types.Message) error {
-			session.ReplaceHistory(stripSystemMessages(messages))
+			durable := stripSystemMessages(messages)
+			session.ReplaceHistory(durable)
+			loop.notifyHistoryCheckpoint(ctx, durable)
 			return nil
 		},
 		PersistPromptCacheEpoch: func(epoch int) error {
@@ -335,7 +352,9 @@ func (loop *ReActLoop) ContinueWithSession(ctx context.Context, session HistoryS
 		IncludePrompt:    false,
 		PromptCacheEpoch: sessionPromptCacheEpoch(session),
 		PersistHistory: func(messages []types.Message) error {
-			session.ReplaceHistory(stripSystemMessages(messages))
+			durable := stripSystemMessages(messages)
+			session.ReplaceHistory(durable)
+			loop.notifyHistoryCheckpoint(ctx, durable)
 			return nil
 		},
 		PersistPromptCacheEpoch: func(epoch int) error {
@@ -343,6 +362,16 @@ func (loop *ReActLoop) ContinueWithSession(ctx context.Context, session HistoryS
 			return nil
 		},
 	})
+}
+
+// notifyHistoryCheckpoint 把「durable 历史已提交」通知宿主，用于长 turn 的
+// 中途增量落库（见 LoopReActConfig.OnHistoryCheckpoint）。回调刻意不返回错误：
+// 中途落库失败不能改变 turn 结果，失败由实现方自行记录。
+func (loop *ReActLoop) notifyHistoryCheckpoint(ctx context.Context, messages []types.Message) {
+	if loop == nil || loop.config == nil || loop.config.OnHistoryCheckpoint == nil {
+		return
+	}
+	loop.config.OnHistoryCheckpoint(ctx, messages)
 }
 
 func sessionGoalID(session HistorySession) string {
