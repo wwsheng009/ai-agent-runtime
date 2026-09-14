@@ -1,6 +1,11 @@
 # UI 事件桥丢事件加固方案（deferred queue drop hardening）
 
-> 状态：**PR-0 + PR-1 已实施**（2026-09-14，代码已落地并通过单测）；PR-2/PR-3/PR-4 未开工。
+> 状态：**PR-0/PR-1/PR-2/PR-3 已实施；PR-4 落点 A（单轮预算与软着陆）+ 落点 B（TUI 可见进度）
+> + 落点 C（`/debug` turn 级指标与主 chat 预算接线）+ 第 5 条（prompt cache 熔断与
+> `UPSTREAM_INVALID_RESPONSE` 聚合）已实施**（2026-09-14，代码已落地并通过单测）。
+> **P0/P1 主链（PR-0..PR-4 与第 5 条）收敛**；§6.5 的 P2 残余项（web SSE 丢帧暴露、
+> 稳态 watchdog、投影失效归因分类、`PostDeferred` 高水位降级）不在本次范围，另行排期；
+> §10.1 待决策 4/5/6 与 §10.2 假设仍开放。提交边界与勘误见 §8.5。
 > 日期：2026-09-14（本地 +08:00）
 > 适用版本：当前仓库 `E:\projects\ai\ai-agent-runtime`（Go module：`backend`）
 > 关联文档：
@@ -13,7 +18,9 @@
 ## 0. 实施状态（2026-09-14）
 
 **已落地：PR-0（分类计数，只观测）+ PR-1（事件桥分级 + 就地合并 + 分类计数）
-+ PR-2（消费端批处理 + 成本指标 + 降级可见）+ PR-3 落点 B（observe 分类）**
++ PR-2（消费端批处理 + 成本指标 + 降级可见）+ PR-3 落点 A/B（executor 判决窗口化 + observe 分类）
++ PR-4 落点 A（单轮预算单一事实源 + 80% 软着陆 + token 硬边界优雅收尾）+ 落点 B（软着陆水位在 TUI 状态行可见）
++ 落点 C（turn 生命周期事件指标 + 主 chat `--budget-tokens` 贯通）**
 
 PR-0 / PR-1：
 
@@ -26,7 +33,7 @@ PR-0 / PR-1：
 | `backend/cmd/aicli/commands/chat_runtime_events_deferred_test.go`、`chat_runtime_events_critical_lifecycle_test.go` | 按分级后的投递契约更新既有用例的取样事件类型（见下"契约更新"） |
 | `docs/aicli/debug-chat-status.md` | `deferred_queue` 字段契约与判读、回滚开关 |
 
-PR-2 / PR-3 落点 B：
+PR-2 / PR-3：
 
 | 落点 | 内容 |
 |---|---|
@@ -38,6 +45,38 @@ PR-2 / PR-3 落点 B：
 | `backend/cmd/aicli/ui/history_hot_path_bench_test.go` | 新增 `BenchmarkUIControllerBurstBatching`（每轮突发 256 条，输出 `flush_per_event` / `batches_per_event` / `reducer_ns/event`） |
 | `backend/internal/runtimeobserve/`（PR-3 落点 B） | `recordRuntimeEventDrop` 区分 `filtered_by_type`（类型已知、仅因不在 v1 白名单被过滤）与 `unknown_events_dropped`（目录外真未知）；`known_types.go` 封闭目录、快照新增 `runtime.filtered_by_type`；回归 `TestObserveCollector_ClassifiesKnownNonAllowlistedAsFiltered` |
 | `backend/cmd/aicli/commands/chat_debug_document.go`（文本模式） | `UI Actor:` 小节（`Processed/Flushes`、`Batches`、`Reducer Total`、`Post Wait`、`Pending`），与 JSON 同源同判读 |
+| `backend/cmd/aicli/ui/terminal_session_executor.go`（PR-3 落点 A） | 新增窗口判决 `WindowDiagnosis`（保留窗口＝最近 64 次 iteration 且不早于最新一条 60s；`windowEntries`/`windowSpanMs`/`windowAgeMs` 给出窗口形状），`Diagnosis` 明确为 since_start 历史判决；空环/静默环返回 `idle`，不再把陈旧风暴当作 CURRENT |
+| `backend/cmd/aicli/ui/executor_diag_export.go` | pprof 文本摘要并列输出 `windowDiagnosis (CURRENT)` 与 `diagnosis (SINCE START)`，消除单读误判 |
+| `backend/cmd/aicli/commands/chat_debug_display_http.go` | `executor` 区块新增 `diagnosis_scope`/`window_diagnosis`/`window_entries`/`window_span_ms`/`window_age_ms`（只增字段） |
+| `backend/cmd/aicli/commands/chat_debug_document.go`（PR-3 落点 A） | `/debug/chat/status?format=text` 新增 `Executor Recovery Diag:` 小节（CURRENT / SINCE START / Window Shape / Last Iteration） |
+| `backend/cmd/aicli/ui/terminal_session_executor_test.go`、`commands/chat_debug_display_http_test.go` | 窗口判决 7 项新用例（idle/healthy/backoff/handoff/dead_guard/双边界/空环）+ "历史风暴、当前健康"回归 + 文本 scope 标注断言 |
+
+PR-4 落点 A（2026-09-14）：
+
+| 落点 | 内容 |
+|---|---|
+| `backend/internal/agent/turn_budget.go` | 单轮预算单一事实源：`TurnBudgetSpec/TurnBudgetUsage/TurnBudgetState` + `EvaluateTurnBudget`（`TurnBudgetSoftRatio=0.8` 收尾水位、100% 硬水位、按维度的 `HardReasons/SoftReasons`）+ `FormatTurnBudgetDuration`（`45s/32m/1h20m`）+ `TokensSpentFromBudget`（token 维度与 `remainingBudget` 同口径，透支保留真实值）+ `TurnBudgetSoftLandingMessage` / `TurnBudgetHardStopMessage`；进度行 `turn budget: step 240/300 · 32m/40m · tokens 62%` 只列已配置维度 |
+| `backend/internal/agent/system_reminder.go`、`lifecycle_hooks.go` | 新增 reminder kind `turn_budget`（`NormalizeReminderKind` 收编；**不进** `IsPureAdvisoryReminderKind`，故 durable 收尾提醒会随会话持久化）+ `newTurnBudgetReminderMessage` |
+| `backend/internal/agent/loop.go` | 每步开头用同一份 spec/usage 评估水位；达到 soft 时**恰好一次**注入 durable 收尾提醒并 emit `system_reminder.injected`（payload 增 `turn_budget_level/line/ratio/reasons`）；已是 hard 时不注入；token 硬边界从"静默失败"改为优雅收尾（`LimitReached=true` + `LimitReason="turn_budget"` + 用户可见续跑文案写回 assistant 历史 + `persistBuilderHistory` + stop-failure hook `turn_budget`）；步数上限退出补 `LimitReason="step_limit"`；预算判决在既有 defer 里对每条退出路径统一回填 |
+| `backend/internal/agent/agent.go` | `Result` 只增字段 `turn_budget_level` / `turn_budget` / `turn_budget_soft_cue_injected` |
+| `backend/internal/agent/turn_budget_test.go`、`turn_budget_loop_test.go` | 纯逻辑 8 项（水位边界 79/80/100%、行格式、缺省维度不输出、时长格式、文案、durable kind）+ 循环级 3 项（软着陆注入恰好一次且出现在第二次请求、token 硬边界不调用模型且写回历史、步数上限带 `step_limit` 与水位行） |
+
+PR-4 落点 B（2026-09-14，TUI 可见进度）：
+
+| 落点 | 内容 |
+|---|---|
+| `backend/internal/agent/loop.go` | 软着陆事件的 turn 归属**不再二次注入**：`emitRuntimeEvent`（`loop.go:1316-1329`）已按 `loop.turnID`（源自 run ctx，`loop.go:402`）对每个事件统一盖章，事件构造处保持裸 payload，避免双写同一字段；新增循环级回归 `TestReActLoop_Run_TurnBudgetReminderEventCarriesTurnIdentity` 走真实 `EventBus` 钉住"事件类型 + payload kind + turn_id + durable"四项宿主前置条件 |
+| `backend/cmd/aicli/commands/chat_runtime_events.go` | 新增 `chatRuntimeSystemReminderInjectedEvent` 常量（桥按事件类型字符串分派，不导入 `agent` 包）、`chatEventBridgeTurnBudget{Line,Level,Ratio}`、`turnBudget atomic.Pointer[...]` 字段、`TurnBudgetSnapshot()`（无锁读）、`observeTurnBudgetReminder(event)`（要求 `isPrimarySessionEvent` + `kind=turn_budget` + 非空 `turn_budget_line`；归属判定复用调用点的 `shouldSuppressMismatchedPrimaryTurnEvent`，与 `applyLLMRequestStatus`/`applySessionCompactStatus` 同源）；`handleEvent` 在 `applySessionCompactStatus` 之后接线；`BeginRunKind` 清空上一轮水位 |
+| `backend/cmd/aicli/commands/chat_interaction.go` | 状态行附加提示合并为 `appendStatusHintsLocked`（降级提示 + 预算水位）；新增 `appendTurnBudgetHintLocked`：`StateText` 非空时追加 `· turn budget: step N/M · …`（只取进度行，不重复输出 level/ratio），两个调用点（状态切换、秒级 tick）统一走合并入口 |
+| `backend/cmd/aicli/commands/chat_runtime_events_turn_budget_test.go` | 7 项：水位镜像、非 `turn_budget` kind 忽略、跨 turn 忽略、非主会话忽略、`BeginRunKind` 清空、状态行追加、降级提示与水位提示并存顺序 |
+
+PR-4 落点 C（2026-09-14，turn 级指标与主 chat 预算接线）：
+
+| 落点 | 内容 |
+|---|---|
+| `backend/internal/agent/loop.go` | `agent.turn.started`（`trace_id`/`step=0`/`max_steps`/`budget_level`）与 `agent.turn.finished`（`trace_id`/`step`/`elapsed_ms`/`budget_level`/`budget_ratio`）由 run 的启动段与 defer 发射，终局水位与 `Result.TurnBudgetLine` 同源；turn 归属仍由 `emitRuntimeEvent` 按 `loop.turnID` 统一盖章。新增 `LoopReActConfig.TurnBudgetTokens`，`loop.run` 在调用方未显式给出 `loopRunOptions.BudgetTokens` 时回落到它——显式值优先，子代理/团队任务预算不被宿主配置覆盖 |
+| `backend/cmd/aicli/commands/chat_command.go`、`chat_options.go`、`chat.go`、`chat_setup.go`、`chat_actor_host.go` | 主 chat 预算贯通：`--budget-tokens` → `chatCommandOptions.BudgetTokens` → `ChatSession.TurnBudgetTokens` → `buildLocalChatLoopConfig` → `LoopReActConfig.TurnBudgetTokens`；`internal/chat` 的 per-run 克隆（`cloneLoopConfigWithRouteOverride` 的结构体拷贝）原样保留该字段，`cloneLoopConfigForRun` 只在无 base 时使用不限额缺省 |
+| `backend/internal/agent/turn_budget_loop_test.go`、`backend/cmd/aicli/commands/chat_turn_budget_test.go`、`backend/internal/chat/actor_test.go` | 5 项新回归：缺省预算生效 + 显式覆盖优先（loop 级 2 项）、CLI 参数映射与 `ChatSession`→`LoopReActConfig` 映射（commands 2 项）、actor per-run 克隆保真（chat 1 项）；另有既有 turn 生命周期归属用例（`TestReActLoop_Run_EmitsTurnLifecycleEvents`）钉住事件字段 |
 
 **实施期发现并修复的两个缺口**：
 
@@ -87,6 +126,21 @@ go test -count=1 -run '^$' -bench 'BenchmarkUIControllerBurstBatching' -benchtim
 #   → 883833 ns/op（每轮 256 条，≈3.45µs/event）、flush_per_event=0.0158、batches_per_event=0.0158
 #     即约 63 条 action 合并为一帧；批处理前该比值恒为 1（每条 action 各交付一帧，
 #     对应 TestUIController_EffectsDeliveredInOrder 旧断言的 2 action → 2 帧）
+# PR-3 落点 A：
+go test -race -count=1 -timeout 300s ./cmd/aicli/ui/ -run 'ExecutorDiag'      # ok 1.3s（7 项窗口用例 + 既有 since_start 用例）
+go test -race -count=1 -timeout 600s ./cmd/aicli/ui/                         # 整包 ok 8.7s
+go test -race -count=1 -timeout 600s ./cmd/aicli/commands/ -run 'ChatDebugDisplay|Executor|SurfaceStatus|Docs'  # ok 39.1s
+# PR-4 落点 A/B：
+gofmt -l backend/internal/agent backend/cmd/aicli/commands                    # 空
+go test -race -count=1 -run 'TurnBudget|TokenBudget|StepLimit' ./internal/agent/   # ok 3.886s（含事件 turn 归属回归）
+go test -count=1 -run 'TurnBudget|StatusHints|IgnoresNonBudgetReminders' -v ./cmd/aicli/commands/  # 7/7 PASS，ok 0.196s
+# PR-4 落点 C：
+gofmt -l backend/internal/agent backend/internal/chat backend/cmd/aicli/commands     # 空
+go test -count=1 -run 'TurnBudget' ./internal/agent/                                 # ok
+go test -race -count=1 -timeout 600s -run 'TurnBudget|TurnLifecycle' ./internal/agent/   # ok 4.179s
+go test -count=1 -run 'BudgetTokens|TurnBudget' ./cmd/aicli/commands/                # ok 0.176s
+go test -count=1 -run 'CloneLoopConfig' ./internal/chat/                             # ok 0.113s
+go test -count=1 -timeout 600s ./cmd/aicli/commands/                                 # ok 77.124s（整包回归）
 ```
 
 **PR-2 实施期发现并修复的自有缺陷**：
@@ -97,8 +151,25 @@ go test -count=1 -run '^$' -bench 'BenchmarkUIControllerBurstBatching' -benchtim
 2. 批尾交付未置 `delivering`：`WaitIdle` 可能在"批已 apply 完但 flush 未交付"的窗口返回假空闲。
    改为批内只要有待交付输出就在锁内置位 `delivering`，批尾交付完成后再于锁内复位并 `Broadcast`。
 
-**尚未落地**：PR-3 落点 A（executor 判决窗口化 `WindowDiagnosis`）、PR-4（单轮预算与软着陆）。
-§8.3 的目标值可在 PR-2 落地后用 `flush_per_event` 与 `post_wait_*` 复核。
+**PR-3 落点 A 的判读契约（新增）**：`window_diagnosis` 是 CURRENT（最近 64 次 / 60s），
+`diagnosis` 是 SINCE START；`window_age_ms > 60000` 且 CURRENT=idle 表示执行器确实安静、
+不是观测盲区。排障只看 CURRENT，`diagnosis` 仅用于历史归因。
+
+**PR-4 落点 B 的判读契约（新增）**：状态行上的 `turn budget: …` 是**通告时刻**的水位
+（软着陆触发那一步的取样），`Result.TurnBudgetLine` 是**退出时刻**的终局水位；二者同源
+但取样点不同（实测：事件行 `step 1/10`，终局行 `step 2/10`），宿主不得把事件行当终值。
+水位是 per-run 状态：`BeginRunKind` 清空，跨 turn 不继承；行只在 `StateText` 非空
+（运行中/完成摘要）时追加，空闲行不会长出预算文案。
+
+**落点 C 已落地（2026-09-14）**：`agent.turn.started/finished` 由 Go 侧发射
+（`trace_id`/`step`/`elapsed_ms`/`budget_level`/`budget_ratio`；turn 归属由 `emitRuntimeEvent`
+按 `loop.turnID` 统一盖章），`/debug/chat/status` 的 turn 级指标区块由
+`appendChatDebugTurnMetricsLines` 渲染；主 chat 的 `--budget-tokens` 已贯通到
+`LoopReActConfig.TurnBudgetTokens`（显式子代理/团队任务预算优先）。
+
+**第 5 条已落地（2026-09-14）**：prompt cache 熔断与 `UPSTREAM_INVALID_RESPONSE` 聚合见
+`internal/agent/prompt_cache_breaker.go`（阈值触发 + 退避 + 聚合上报）。落点 A/B 的 recon
+结论与语义边界见 §6.4。§8.3 的目标值复核工具见 §8.5；现场窗口复测待有活动会话时执行。
 
 ---
 
@@ -578,8 +649,116 @@ deferredPeakBytes      int64
 
 ### 6.4 P1-2 单轮预算与软着陆（降低过载持续时间）
 
-> 说明：本条的确切接入点（agent 循环内的 step/token 计数位置）**未在本次取证中确认**，
-> 实施前需要一次最小 recon。以下为设计意图与验收口径。
+**最小 recon 结论（2026-09-14，已确认接入点）**：
+
+| 维度 | 计数/执行点 | 现状 |
+|---|---|---|
+| steps | `internal/agent/loop.go` 主循环 `for step := 1; !stepExceedsLimit(loop.config.MaxSteps, step); step++`；退出段置 `LimitReached/StepLimit` | 硬边界已存在；**原先不写 `LimitReason`**（只有 stop-failure hook 带 `step_limit`） |
+| wall clock | `loop.go` 把 `MaxRunDuration` 转成 `agentWithTimeoutCause(..., errReActRunTimeout)`；defer 内置 `LimitReason="run_timeout"` | 硬边界已存在，无水位提示 |
+| tokens | `loopRunOptions.BudgetTokens` + `remainingBudget`（`think()` 每次拿回 usage 后扣减，压缩旁路同样扣减） | 硬边界原先只置 `Success=false` + `Error`，**不置 `LimitReached/LimitReason`，也不写回历史** |
+| 时间源 | `types.Duration{Start,End}` / `GetDuration()`（`internal/types/common.go:5-17`） | 可直接复用 |
+| 注入通道 | `agent.SystemReminder`（`internal/agent/system_reminder.go`）+ `loop.emitRuntimeEvent(EventSystemReminderInjected, ...)` | 复用，新增 kind `turn_budget` |
+
+**预算三项的现有配置来源（无需新增配置）**：`maxSteps` = `agent.Config.MaxSteps`
+（主 chat 路径 `internal/chat/actor.go:173` 生效）；`max_wall_clock` = `agent.Config.MaxRunDuration`
+（同处 :175，CLI `--timeout`）；`max_tokens_per_turn` = `loopRunOptions.BudgetTokens`
+（子代理任务 `task.BudgetTokens` 已接线；主 chat 的 `--budget-tokens` 目前只写进 `ChatOptions`
+未下传，见下"待落地"）。
+
+**已落地（PR-4 落点 A）**：
+
+1. `backend/internal/agent/turn_budget.go`：单一事实源 `TurnBudgetSpec/TurnBudgetUsage/TurnBudgetState`
+   + `EvaluateTurnBudget`（80% 收尾水位、100% 硬水位、按维度给 `HardReasons/SoftReasons`）
+   + `FormatTurnBudgetDuration` + `TokensSpentFromBudget`（token 维度与执行路径同口径）
+   + `TurnBudgetSoftLandingMessage` / `TurnBudgetHardStopMessage`；
+   进度行格式与本节口径一致：`turn budget: step 240/300 · 32m/40m · tokens 62%`（只列已配置维度）。
+2. `loop.go`：每步开头用同一份 spec/usage 评估；**恰好一次**软着陆注入
+   （durable 的 `system_reminder.injected`，kind=`turn_budget`，payload 附带
+   `turn_budget_level/line/ratio/reasons`），并持久化到会话历史；token 硬边界改为
+   优雅收尾（`LimitReached=true`、`LimitReason="turn_budget"`、用户可见续跑文案写回 assistant
+   历史 + `persistBuilderHistory` + stop-failure hook），不再静默截断。
+   判决已是 hard 时**不再注入**收尾提示（模型读不到就只污染历史）。
+3. `Result` 只增字段：`turn_budget_level` / `turn_budget`（进度行）/ `turn_budget_soft_cue_injected`；
+   在既有 defer 里对**每条退出路径**（成功、步数上限、token 上限、超时、取消）统一回填，
+   宿主无需二次推导水位。步数上限退出补 `LimitReason="step_limit"`。
+
+**验证（2026-09-14，backend 模块）**：`gofmt -l` 对改动文件为空；`go build ./...` 退出码 0；
+`go test -count=1 ./internal/agent/` ok 1.769s（含纯逻辑 8 项 + 循环级 3 项）；
+`go test -race -count=1 -timeout 600s -run 'TurnBudget|TokenBudget|StepLimit' ./internal/agent/` ok 3.873s；
+回归 `internal/chat` ok 14.878s、`internal/runtimeobserve` ok 0.822s、`cmd/aicli/commands` ok 79.475s。
+
+**已落地（PR-4 落点 B：TUI 可见进度）**：
+
+4. `backend/cmd/aicli/commands/chat_runtime_events.go`：桥新增 `system_reminder.injected`
+   消费（字符串常量，不导入 `agent` 包以保持单向依赖），只镜像 `kind=turn_budget` 且带
+   非空 `turn_budget_line` 的**主会话当前 turn**事件，落到 `atomic.Pointer` 快照
+   （`TurnBudgetSnapshot()` 无锁读，与降级摘要同一并发手法）；`BeginRunKind` 清空。
+5. `backend/cmd/aicli/commands/chat_interaction.go`：`appendStatusHintsLocked` 统一追加
+   降级提示与预算水位；水位只在 `StateText` 非空时附在行尾
+   （`◦ Running … · turn budget: step 240/300 · 32m/40m · tokens 62%`），
+   状态切换与秒级 tick 两个渲染入口共用，空闲行不显示。
+6. `backend/internal/agent/loop.go`：事件构造处**不再**二次注入 `turn_id`——`emitRuntimeEvent`
+   已按 `loop.turnID` 统一盖章；新增循环级回归 `TestReActLoop_Run_TurnBudgetReminderEventCarriesTurnIdentity`
+   走真实 `EventBus` 验证 `kind`/`turn_id`/`durable` 与通告时刻行文本，
+   另钉住"事件行=通告时刻、`Result.TurnBudgetLine`=终局"这一取样差。
+
+**落点 B 验证（2026-09-14，backend 模块）**：
+`go test -race -count=1 -run 'TurnBudget|TokenBudget|StepLimit' ./internal/agent/` ok 3.886s；
+`go test -count=1 -run 'TurnBudget|StatusHints|IgnoresNonBudgetReminders' -v ./cmd/aicli/commands/`
+7/7 PASS、ok 0.196s（含"跨 turn 忽略""非主会话忽略""`BeginRunKind` 清空""空闲行不加水位"
+与"降级提示 + 水位顺序"）。
+
+**语义边界（有意为之）**：软着陆**不**派发 `EventCheckpointCreated`。该事件目前只由
+checkpoint 管理器在真实快照后派发（`approved_tool.go:255`、`loop.go:2621`），在无水印快照的
+情况下复用同名事件会让宿主误判"存在可回滚点"；可续跑性由 durable 收尾提醒 + 会话历史保证。
+
+**已落地（2026-09-14，落点 C）**：
+
+- `/debug/chat/status` 的 turn 级指标：`runtimeobserve` 白名单里的
+  `agent.turn.started/finished`（`internal/runtimeobserve/model.go:39-40`）现在有真实 emitter，
+  payload 带 `trace_id` / `step` / `elapsed_ms` / `budget_level` / `budget_ratio`；
+  `appendChatDebugTurnMetricsLines`（`chat_debug_document.go:255-257`）把预算水位与最近一轮
+  终局水位/耗时渲染进 `/debug` 区块。
+- 主 chat 路径的 token 预算接线：`--budget-tokens` → `chatCommandOptions.BudgetTokens` →
+  `ChatSession.TurnBudgetTokens` → `buildLocalChatLoopConfig` → `LoopReActConfig.TurnBudgetTokens`
+  → `loop.run` 的缺省回填（`loopRunOptions.BudgetTokens` 显式值优先）。`--budget-tokens` 之前
+  只存在于 `/agents routing test` 的路由测试路径，主 chat 一直是不限额。
+
+**已落地（2026-09-14，第 5 条：prompt cache 熔断 + `UPSTREAM_INVALID_RESPONSE` 聚合）**：
+
+1. `backend/internal/agent/prompt_cache_breaker.go`（新增）：run 级熔断器
+   `PromptCacheBreaker`。同一 `prompt_fingerprint` **连续失败**达到阈值
+   （缺省 3）→ 打开短期熔断窗口（缺省 2m），窗口内该指纹的下一次请求先退避
+   （指数退避 2s→4s→…，上限 30s）；成功即清零（`ObserveSuccess`），冷却到期
+   重新累积、再次跨阈值时退避升级（`trips` 递增）。`Tripped` 是**边沿**信号，
+   窗口内继续失败只升级退避、不重复通告。全部入口带锁且 nil 接收者安全
+   （未接线路径退化为观测空操作）。
+2. `loop.go` 接线三处，**不改变 llm 包既有的有界重试语义**：
+   `run()` 建实例并 `WithPromptCacheBreaker(currentCtx, …)` 下发（不落 loop 结构体，
+   run 之间不共享计数）；`think()` 在盖章 `prompt_fingerprint` 之后、`llm.request.started`
+   之前做"窗口内退避一次"（`llm.prompt_cache.backoff_applied`，退避可被 ctx 取消，
+   不做伪等待，符合 §8.1）；失败路径记录连续失败并在跨阈值时发一次
+   `llm.prompt_cache.breaker_tripped`，成功路径复位。
+3. `UPSTREAM_INVALID_RESPONSE` 聚合：`runtimeRetryEventReporter` 在**源头**抑制
+   第 2..N 条同类 `llm.retry`（首次仍外发，状态行还能看到"正在重试"），run 退出时
+   由 `emitAggregatedRetryReport` 一次性发 `llm.retry.aggregated`
+   （`severity=warn`、`error_code`、`count`、`prompt_fingerprints`、`prompt_fingerprint_count`）；
+   现场 6 次 → 1 条首次 + 1 条汇总。其他错误码保持逐次上报不变。
+   指纹随 `llm.retry` 一并外发，使"同一条 prompt 反复失败"在事件流里可归因。
+4. `Result` 只增字段：`prompt_cache_breaker_trips`、`upstream_invalid_response_events`
+   （同一次 run 的同一份状态，宿主/`/debug` 无需从事件流二次累加）。
+
+**第 5 条验证（2026-09-14，backend 模块）**：`gofmt -l` 对改动文件为空；
+`go build ./...` 退出码 0；`go vet ./internal/agent/` 退出码 0；
+`go test -count=1 -run 'PromptCacheBreaker|PromptFingerprint|RetryReporterSuppresses|EmitAggregatedRetryReport' ./internal/agent/`
+ok（8 项：阈值边沿/退避升级、每窗口至多一次退避 + 冷却重新武装、聚合只针对
+`UPSTREAM_INVALID_RESPONSE`、成功清零 + nil 接收者安全、退避可取消、
+指纹提取、6 次重试仅 1 条状态行、汇总上报只发一次）；
+`go test -race -count=1 -timeout 600s -run 'PromptCacheBreaker' ./internal/agent/` ok 1.258s；
+回归 `go test -count=1 ./internal/agent/` ok 1.947s、`./internal/llm/` ok 22.010s、
+`./internal/chat/` ok 15.352s、`./cmd/aicli/commands/` ok 83.793s。
+
+以下为原设计意图与验收口径，作为已落地条目的验收依据（第 1–5 条均已落地，按上文标注为准）：
 
 1. **预算**：`max_steps` / `max_wall_clock` / `max_tokens_per_turn` 三项可配置；
    默认值建议取当前现场长轮的 60–70% 水位（如 steps≈300、wall-clock≈40min）。
@@ -593,12 +772,22 @@ deferredPeakBytes      int64
    `UPSTREAM_INVALID_RESPONSE` 聚合为 WARN 计数上报，不逐条刷日志（现场 6 次）。
 6. **验收**：注入长任务脚本，断言 80% 提示出现、100% 软着陆、TUI 可见进度、
    session 状态与 transcript 完整。
+   **验收结果（2026-09-14）**：`scripts/test-aicli-turn-budget-e2e.ps1` 用
+   SequenceLLMProvider 注入脚本化长任务（无网络），3/3 组 41 项 PASS：
+   - 80% 提示只注入一次（`...InjectsTurnBudgetSoftLandingOnce`，并断言提示进入第二次模型请求）；
+   - 100% 硬边界优雅收尾：不再调用模型、收尾文案写入 `PersistHistory`（`...TokenBudgetHardStopIsGraceful`）；
+   - TUI 可见进度：状态行出现 `turn budget: …`，与降级提示顺序共存；
+   - `/debug` turn 区块与 `--budget-tokens` 全链路接线、observe turn 指标聚合；
+   - 第 5 条熔断/聚合（阈值、退避、`UPSTREAM_INVALID_RESPONSE` 只聚合该类错误）。
+   `session_end` 由 chat actor 在每个 turn 结束时统一发射（`internal/chat/actor.go`），
+   预算用例未单独断言该事件；transcript 完整性以持久化回写断言为准。
+   真实终端渲染由 §8.2 的两个 Windows Terminal E2E 覆盖（需交互桌面，本环境未复跑）。
 
 ### 6.5 P2 残余风险收敛（对齐既有加固文档 §8）
 
 | 条目 | 现状 | 本方案动作 |
 |---|---|---|
-| §8.2 `PostDeferred` 无硬上限 | 队列可暂时超过 mailbox 容量，仅有监控 | 复用 §6.1.4 的"低优先级腾挪"：达到高水位（如 80% cap）时，coalescable action 降级为合并/`TryPost`；`PeakPending` 暴露到 `/debug` |
+| §8.2 `PostDeferred` 无硬上限 | 队列可暂时超过 mailbox 容量，仅有监控 | **部分落地（2026-09-14）**：同 key 入队前合并 + `PeakPending` 暴露到 `/debug` 已实现；达到高水位（如 80% cap）时 coalescable 降级 `TryPost` **未实现**（P2，另行排期） |
 | §8.1 `io.Writer` 不可取消 | 超时后遗留废弃写 goroutine | **不在本次范围**；保持 watchdog 诊断（超时日志 + goroutine dump + `terminalWritesAbandoned`）。后续若要根治，走可取消写通道（Windows overlapped/CancelIoEx 或专用写线程 + 可关闭句柄），禁止伪取消 |
 | §8.3 无界 `WaitIdle` | 已有纪律，靠评审维持 | 新增代码一律 `WaitIdleTimeout` / 事件驱动；`Run` 批处理不得引入无界等待 |
 | §8.4 drain 超时后同 epoch 迟到事件 | 语义由测试固化 | 暂不改；若需更严格隔离，增加 `finalizedRunEpoch` 并显式放行 ambient（团队编排等）事件 |
@@ -720,6 +909,18 @@ pwsh -File scripts/test-aicli-opencode-windows-terminal-e2e.ps1   # 统一渲染
 pwsh -File scripts/test-aicli-windows-terminal-e2e.ps1            # 终端渲染基线
 ```
 
+**受控注入式验收（2026-09-14 实测，无网络）**：
+
+```powershell
+pwsh -File scripts/test-aicli-turn-budget-e2e.ps1
+# -> agent/turn-budget PASS(27) | commands/tui+bridge+debug PASS(11) | runtimeobserve/turn-metrics PASS(3)
+# -> RESULT: PASS (3/3 groups)；原始日志 artifacts/turn-budget-e2e-20260914-130126.log（artifacts/ 已 gitignore）
+```
+
+该脚本把"长任务"以脚本化 LLM 响应注入真实 ReActLoop / 事件桥 / 状态行 / `/debug` 渲染链，
+逐项覆盖 §6.4 第 6 条（见 §6.4 验收结果）。两个 Windows Terminal E2E 需要交互桌面与
+provider 凭据，本环境未复跑，保持为**待执行的手工门禁**，不作为本次收敛证据。
+
 ### 8.3 现场指标看板（改动前后对比）
 
 | 指标 | 现场基线（2026-09-14） | 目标 |
@@ -738,6 +939,19 @@ pwsh -File scripts/test-aicli-windows-terminal-e2e.ps1            # 终端渲染
 `WindowDiagnosis` 在健康期返回 `healthy`/`idle`。
 目标值在 PR-0 落地后按实测分类分布复核一次（见 §7 依赖与工作量估算）。
 
+**复核工具（2026-09-14 新增）**：
+
+```powershell
+pwsh -File scripts/measure-aicli-event-bridge-metrics.ps1 -Endpoint http://127.0.0.1:64751 -WindowSeconds 1800
+```
+
+脚本按上表目标计算 `dropped`/`unknown_events_dropped` 增速（首末采样差 / 窗口分钟）、
+`pending` 峰值，并校对 `executor.window_diagnosis`（CURRENT 口径）；达标 PASS、未达标 FAIL、
+无活动会话/端点不可达 exit 2（不产生假阴性结论）。已用 healthy / degraded / 不可达三类
+mock 端点自测三条路径（PASS / FAIL / exit 2 均正确）。
+**现场 30 分钟 ×2 窗口复测待有活动会话时执行**——2026-09-14 核查时 `127.0.0.1:64751`
+已关闭，故本次不回填该表。
+
 ### 8.4 关键负向用例（必须通过）
 
 - 持续灌入 5s 的溢出风暴中，`subagent.*` 终态 / `session.end` / `tool_finished` **零丢失**。
@@ -751,6 +965,34 @@ pwsh -File scripts/test-aicli-windows-terminal-e2e.ps1            # 终端渲染
 - 跨类顺序不是契约：critical 走保留位 + 重试通道，可以越过仍滞留在溢出队列中的 ordered 事件；
   渲染按事件时间戳处理，不依赖跨类到达顺序（`TestDeferredRuntimeEventsPreserveOrder` 只约束
   ordered 类内部 FIFO）。
+
+### 8.5 交付边界、提交勘误与工具自测（2026-09-14）
+
+**提交勘误**：`e8c72afc`（"丢事件加固 PR-0..PR-3"）只提交了消费方与 PR-0..PR-2 的契约；
+`chatRunKind`（PR-1 degraded 清空 / PR-3 落点 B 判读）与 executor 窗口化字段（PR-3 落点 A）
+留在工作区未提交，导致该提交与当时 HEAD（`f043487f`）均**无法编译**
+（`undefined: chatRunKind`、`diag.WindowDiagnosis undefined` 等）。补交提交 `591496d7`
+（2026-09-14）补齐落点 A + PR-4 + 第 5 条后，提交树恢复可构建：worktree 实测
+`go build ./cmd/aicli/... ./internal/agent/... ./internal/runtimeobserve/... ./internal/chat/...`
+EXIT 0（`go build ./...` 需 `internal/webui` 的 dist 产物，worktree 中缺该 gitignored 构建产物）。
+`e8c72afc` 的提交信息范围以 `591496d7` 的勘误说明为准；该提交位于 15 个提交的链中间，
+未做历史重写（改写会变更全部后代哈希）。
+
+**验收工具**：
+
+| 工具 | 用途 | 自测/实测结果 |
+|---|---|---|
+| `scripts/test-aicli-turn-budget-e2e.ps1` | §6.4 第 6 条受控注入式验收（stub provider，无网络） | 3/3 组 41 项 PASS（2026-09-14） |
+| `scripts/measure-aicli-event-bridge-metrics.ps1` | §8.3 现场指标复核（dropped/unknown 增速、pending 峰值、window_diagnosis） | mock 三类端点：healthy PASS、degraded FAIL、不可达 exit 2 |
+
+**本次未收敛/未复测项（如实标注，勿读作已完成）**：
+
+- §8.2 两个 Windows Terminal E2E：需要交互桌面与 provider 凭据，本环境未复跑；
+- §8.3 现场 30 分钟 ×2 观测窗口：核查时无活动会话（`127.0.0.1:64751` 已关闭），
+  工具已就绪，待现场有活动会话时执行并回填表格；
+- §6.5 P2 项（web SSE 丢帧暴露、稳态 watchdog、投影失效归因分类、`PostDeferred` 高水位降级）：
+  未实现，另行排期（§0 已按此口径标注）；
+- §10.1 待决策第 4/5/6 条与 §10.2 未验证假设：保持开放。
 
 ---
 
