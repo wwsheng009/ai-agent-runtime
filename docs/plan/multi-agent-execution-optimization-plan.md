@@ -182,6 +182,17 @@
 - 性质判断：这不是子代理能力缺陷，而是“只读命令分类器按 entry 粒度判定 + 子代理工具用法未对齐”造成的机械失败；错误文本虽说明了原因，但没有 next_action、没有拆分示例，批次协调器也没有针对该错误类型的重试/降级。
 - 影响：只读调查类批次在这种语境下成功率不可控；父代理只能靠 supervision 通知事后发现，或在下一批里自行改写成单命令。
 
+#### N11：只读子代的写型工具 schema 仍然下发，模型在不可越过的边界上空转
+
+- 证据：`session_20260914163320_jZ1q43Am`（父 `session_20260914161405_50YGPGov`）的请求快照 `111_request_provider_wrapper.json` 中，`effective_tool_surface.blocked` 已列出 `write`（`read_only: true`、`effective_tool_surface.read_only: true`），但同一请求的 `tools` 数组仍包含完整的 `write` / `spawn_agent` schema；模型随后调用写型工具，在 act 阶段被 read-only 策略拒绝，turn 被浪费在无法越过的边界上。
+- 同源漂移：`read_only` 参数文案在仓库内曾有三份互相矛盾的文本 —— toolbroker 的 “Restrict the child to read-only, non-shell tools” 与实际行为不符（read-only 子代仍然保留 shell，只是逐命令分类），`spawn_subagents` 又是另一份。
+- 修复（本批）：
+  1. `policy.ReadOnlyChildOptionDescription` 成为唯一文案来源，`spawn_agent` 的两个 schema 分支（team store / agent sessions）与 `spawn_subagents` 共用；文案明确“写型工具与 `background_task` 从模型可见工具面移除并在执行期拒绝；shell 保留但按命令级 read-only 分类；delegation 边界可再移除 spawn 工具；审批与 `bypass_permissions` 不能放宽”。
+  2. 工具面构建统一在 broker 收集之后调用 `filterPolicyBlockedToolDefinitions`（`agent/loop.go`、`agent/tool_list.go`、`agent/tool_surface_binding.go` 三条路径），模型可见面与 `AllowTool` 判定同源：既覆盖 read-only 的写型/背景工具，也覆盖 `BlockDelegation` 下的 `spawn_agent` / `spawn_subagents`。
+  3. 反馈闭环：`SubagentTask.ReadOnlyFilteredTools`（child factory 已记录被剥离的写型工具）现在会进入 `renderSubagentResults` 与父消息 metadata 投影（`read_only_filtered_tools`），父代理能直接看到“本次请求里哪些写型工具被剥离”，而不是只在执行期收到拒绝。
+  4. 可观测性不回退：过滤同时把被剥离的工具名回传（metadata `surface_filtered_tools`），`summarizeEffectiveToolSurface` 据此重建 `effective_tool_surface.blocked`，并把 `catalog_count` 记为“可见 + 被拦截”之和；因此快照里 `blocked` 依然能解释“为什么这个工具不在 `tools` 里”，与修复前的诊断信息等价。
+- 回归测试：`agent/read_only_tool_surface_test.go`（只读/委派边界过滤、文案一致性、报告回传）与 `toolbroker/spawn_agent_read_only_description_test.go`（两个 spawn_agent 分支共用文案）。
+
 ### 4.3 已核实为“设计取舍”而非缺陷的项
 
 1. **终态成功不触发 wake**：success → info/resolved 不排 wake（`supervision/projection.go:91-135`），依赖 mailbox + 下一个自然 turn 的 preflight digest 消费。与 codex 的 `trigger_turn=false` 行为一致，保留为默认；仅建议做限速分层与多进程一致性（P1-6）。
@@ -949,3 +960,10 @@ go test ./internal/agent -run "Parallel|Doom" -count=1
 - 语义边界：前两次退化保留翻倍重试（给采样一次改变结果的机会），第 3 次停止；返回终态 exhaustion 错误（`retryAtNextLayer=false`、`isHandoffEligibleError=false`），不再被外层循环接管；非退化失败不累计，既有退避与 provider/key 轮换不受影响。
 - 验证（backend 目录）：`go build ./...` exit 0；`go vet ./internal/llm/...` exit 0；新增单测 `TestTrackDegenerateOutputReplyBoundsConsecutiveStreak`（前两次 false、第三次 true、非退化重置、`nil` 重置）与端到端单测 `TestProviderWrapper_Call_StopsAfterConsecutiveDegenerateReplies`（服务端永远退化、`MaxRetries=9`，实测只发 3 次请求即终止，错误含 abort 消息且 `isHandoffEligibleError=false`）全绿；既有 `TestProviderWrapper_Call_RetriesAfterReasoningOnlyEmptyReplyWithoutContent`、`..._CallWithStream_RetriesAfterReasoningOnlyDeltaWithoutContent`、`TestGatewayClientCall_WithStream_RetriesAfterReasoningOnlyDeltaWithoutContent`、`TestEscalateOutputBudgetForReasoningOnlyReply`、`TestDegenerateOutputRetryDelayIsCapped` 回归全绿（1.345s）。
 - 未做/待定：本轮只收敛「单次调用内的重放放大」。会话级节流（例如同一 session 在 N 分钟内 K 次退化则降级 max_tokens 或换模型）未实现，留待真机 probe 再定阈值；改动需重建 runtime-server/CLI 二进制后才对新会话生效。
+
+- 第二轮扩展（2026-09-14，`invalid_tool_arguments` 并入 + runtime 层补齐 streak）：
+  - 归类：`MalformedToolCallError`（`code=invalid_tool_arguments`，聚合出的工具参数不是合法 JSON 对象、多由 `finish_reason=length` 截断）从「确定性零重试」改为可重试的退化采样（reason=`invalid_tool_arguments`）：`isDegenerateOutputRetryReason` 命中（退避封顶 `degenerateOutputRetryMaxDelay=2s`）、`isOutputBudgetEscalationReason` 命中（预算型截断翻倍 `max_tokens`）、`trackDegenerateOutputReply` 连续 3 次收敛、`isHandoffEligibleError` **不含**该 reason（不接力外层，避免三层各自放大）。
+  - runtime 层补齐：`runtime.go` 的 `Call` / `openStreamWithRetry` / `forwardStreamWithRetry` 三处循环新增 `degenerateReplies` streak（复用 `trackDegenerateOutputReply`），非 handoff 的退化 cause 连续 3 次即 `markRetryExhausted`（消息 `LLM call aborted after repeated degenerate replies` / `LLM stream aborted after repeated degenerate replies`）；handoff 判定抽出 `isNextLayerHandoffError(err)`，接力仍受 `maxConsecutiveFastFailHandoffs=3` 守卫。缺口原因：此前只有 provider/gateway 内层有 streak，runtime 层对本层 Provider 直返的退化错误会各自重放满 `MaxRetries`（生产默认 10 → 11 次）。
+  - 执行层与提示：agent loop 对 `*MalformedToolCallError`（`errors.As` 穿透 `retryExhaustedError`）按工具 schema 回注 re-prompt（`maxMalformedToolCallRecoveries=2`，附 `tool.malformed_arguments.recovered`/`.guardrail_hit` 事件）；CLI `renderChatTurnRecoveryHintForError` 对该错误给出「工具未执行（无副作用）」提示，不再复用"避免重复工具副作用"的通用 `/retry` 文案，消除误导。
+  - 验证（backend 目录）：`go build ./...` 与 `go vet ./internal/llm/ ./internal/agent/` 均 exit 0；新增 `TestLLMRuntime_Call_RetriesMalformedToolArguments`（第 2 次采样即恢复、对调用方透明）、`TestLLMRuntime_Call_BoundsConsecutiveMalformedToolArguments`（连续 3 次收敛、Unwrap 保留 `*MalformedToolCallError`、`classifyRetryableLLMError` 报 `retry_exhausted`）、`TestLLMRuntime_Stream_BoundsConsecutiveMalformedToolArguments`（流式开口路径同界）；`./internal/llm/...` 与 `./internal/agent`（379 tests）全绿；`internal/agent` 三个降级用例改为「runtime 先重采样 3 次 → loop 再降级」口径（callCount 4 / 9 / 4）。
+  - 已知无关失败：`cmd/aicli/commands` 的 `TestLateReasoningAfterSuccessfulRequestBoundaryPrecedesAssistantFinal` 在本轮改动前即失败（已 `git stash` 复核），属并行进行中的会话事件投影改动，与本改动无关。

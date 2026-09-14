@@ -1297,7 +1297,7 @@ func (loop *ReActLoop) tryRecoverMalformedToolCall(ctx context.Context, traceID,
 	}
 
 	// 解析当前工具 surface，为每个非法调用找 schema。
-	availableTools, _, toolErr := loop.resolveAvailableTools(ctx, goal, options.ToolWhitelist)
+	availableTools, _, _, toolErr := loop.resolveAvailableTools(ctx, goal, options.ToolWhitelist)
 	if toolErr != nil {
 		return false
 	}
@@ -1320,6 +1320,14 @@ func (loop *ReActLoop) tryRecoverMalformedToolCall(ctx context.Context, traceID,
 		schemaText := "(no schema available)"
 		if text, ok := schemaByTool[call.Name]; ok && text != "" {
 			schemaText = text
+		}
+		if malformed.Truncated {
+			// 预算截断不是 JSON 语法问题：让模型拆分 payload 重发，而不是
+			// 原样重发（同预算必然再次截断）。
+			feedbacks = append(feedbacks, fmt.Sprintf(
+				"Tool call %q was NOT executed because its arguments were cut off by the output budget (finish_reason=%s, received: %s). Re-emit the call with a smaller payload — split large writes into several calls — exactly per this schema:\n%s",
+				call.Name, malformed.FinishReason, call.Arguments, schemaText))
+			continue
 		}
 		feedbacks = append(feedbacks, fmt.Sprintf(
 			"Tool call %q was NOT executed because its arguments were not valid JSON (received: %s). Re-emit the call exactly per this schema:\n%s",
@@ -1488,6 +1496,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		}
 	}
 	var availableTools []types.ToolDefinition
+	var surfaceFilteredTools []string
 	if loop.config.EnableToolCalls {
 		// Freeze the tool surface once for the active turn. Re-compacting on later
 		// steps would rewrite the tools prefix mid-session and break provider
@@ -1495,7 +1504,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		// (not step remainingBudget / first-step message size) so the frozen
 		// surface remains budget-safe as active-turn history grows.
 		var toolsFrozen bool
-		availableTools, toolsFrozen, err = loop.resolveAvailableTools(ctx, goal, toolWhitelist)
+		availableTools, toolsFrozen, surfaceFilteredTools, err = loop.resolveAvailableTools(ctx, goal, toolWhitelist)
 		if err != nil {
 			return "", nil, nil, err
 		}
@@ -1582,6 +1591,12 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			"llm_request_id":  llmRequestID,
 			"session_id":      sessionID,
 		},
+	}
+	if len(surfaceFilteredTools) > 0 {
+		// Names the execution policy removed from the catalog. The provider only
+		// receives the filtered surface, so this preserves the auditable record of
+		// what was withheld (and feeds effective_tool_surface.blocked below).
+		req.Metadata["surface_filtered_tools"] = append([]string(nil), surfaceFilteredTools...)
 	}
 	if loop.agent != nil && loop.agent.config != nil {
 		if route := optionMap(loop.agent.config.Options, "route"); len(route) > 0 {
@@ -1844,7 +1859,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		req.Metadata["tool_surface"] = surface
 		requestPayload["tool_surface"] = surface
 	}
-	if effectiveSurface := loop.summarizeEffectiveToolSurface(req.Tools); len(effectiveSurface) > 0 {
+	if effectiveSurface := loop.summarizeEffectiveToolSurface(req.Tools, metadataStringSlice(req.Metadata, "surface_filtered_tools")); len(effectiveSurface) > 0 {
 		req.Metadata["effective_tool_surface"] = cloneInterfaceMap(effectiveSurface)
 		requestPayload["effective_tool_surface"] = effectiveSurface
 	}
@@ -1895,6 +1910,40 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			"parameter": parameter, "error": err.Error(),
 		})
 		response, err = loop.llmRuntime.Call(callCtx, req)
+	}
+	// 参数被输出预算截断（invalid_tool_arguments + finish_reason=length）走不到
+	// 下面那条成功路径：响应没有返回，finish_reason 只存在于错误对象里。同预算
+	// 重采样必然再次截断，所以这里复用同一套一次性 escalate，把 8k 槽位预留抬到
+	// 64k 后重试；只有这次仍然截断才会回到 re-prompt / 错误路径。
+	if err != nil && shouldEscalateTruncatedToolCallBudget(req, err) {
+		escalated := llm.EscalatedRequestMaxTokens(req.MaxTokens, 0)
+		if escalated > req.MaxTokens {
+			previous := req.MaxTokens
+			req.MaxTokens = escalated
+			if req.Metadata == nil {
+				req.Metadata = map[string]interface{}{}
+			}
+			req.Metadata["max_output_tokens_escalated"] = true
+			req.Metadata["max_output_tokens_previous"] = previous
+			truncatedFinishReason := ""
+			var malformed *llmadapter.MalformedToolCallError
+			if stderrors.As(err, &malformed) {
+				truncatedFinishReason = malformed.FinishReason
+			}
+			loop.emitRuntimeEvent("llm.max_output_tokens.escalated", sessionID, "", map[string]interface{}{
+				"trace_id":        traceID,
+				"logical_turn_id": logicalTurnID,
+				"llm_request_id":  llmRequestID,
+				"step":            step,
+				"provider":        req.Provider,
+				"model":           req.Model,
+				"from_max_tokens": previous,
+				"to_max_tokens":   escalated,
+				"finish_reason":   truncatedFinishReason,
+				"reason":          "truncated_tool_call",
+			})
+			response, err = loop.llmRuntime.Call(callCtx, req)
+		}
 	}
 	// Claude Code-style one-shot escalate: capped 8k default hit max_tokens → retry at 64k.
 	if err == nil && response != nil && shouldEscalateMaxOutputTokens(req, response) {
@@ -3169,39 +3218,39 @@ func (loop *ReActLoop) observe(ctx context.Context, toolResults []toolExecutionR
 
 // getAvailableTools 获取可用工具列表
 func (loop *ReActLoop) getAvailableTools(ctx context.Context, goal string, toolWhitelist []string) ([]types.ToolDefinition, error) {
-	tools, _, err := loop.resolveAvailableTools(ctx, goal, toolWhitelist)
+	tools, _, _, err := loop.resolveAvailableTools(ctx, goal, toolWhitelist)
 	return tools, err
 }
 
-func (loop *ReActLoop) resolveAvailableTools(ctx context.Context, goal string, toolWhitelist []string) ([]types.ToolDefinition, bool, error) {
+func (loop *ReActLoop) resolveAvailableTools(ctx context.Context, goal string, toolWhitelist []string) ([]types.ToolDefinition, bool, []string, error) {
 	if snapshot, ok := TurnToolSurfaceSnapshotFromContext(ctx); ok && snapshot != nil {
 		tools, cached, err := snapshot.LoadTurnToolSurface(ctx)
 		if err != nil {
-			return nil, false, err
+			return nil, false, nil, err
 		}
 		if cached {
 			stable, refreshable := sessionStableToolSurfaceState(snapshot)
 			if stable && refreshable && len(toolWhitelist) == 0 && isSimpleGoalProjectedToolSurface(tools) {
-				expanded, expandErr := loop.computeAvailableTools(ctx, goal, toolWhitelist, false)
+				expanded, _, expandErr := loop.computeAvailableTools(ctx, goal, toolWhitelist, false)
 				if expandErr != nil {
-					return nil, false, expandErr
+					return nil, false, nil, expandErr
 				}
 				if toolSurfaceAddsCapabilities(tools, expanded) {
-					return expanded, false, nil
+					return expanded, false, nil, nil
 				}
 			}
-			return cloneToolDefinitions(tools), true, nil
+			return cloneToolDefinitions(tools), true, nil, nil
 		}
 
 		stable, _ := sessionStableToolSurfaceState(snapshot)
-		tools, err = loop.computeAvailableTools(ctx, goal, toolWhitelist, !stable)
-		return tools, false, err
+		tools, filtered, err := loop.computeAvailableTools(ctx, goal, toolWhitelist, !stable)
+		return tools, false, filtered, err
 	}
-	tools, err := loop.computeAvailableTools(ctx, goal, toolWhitelist, true)
-	return tools, false, err
+	tools, filtered, err := loop.computeAvailableTools(ctx, goal, toolWhitelist, true)
+	return tools, false, filtered, err
 }
 
-func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, toolWhitelist []string, allowSimpleGoalProjection bool) ([]types.ToolDefinition, error) {
+func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, toolWhitelist []string, allowSimpleGoalProjection bool) ([]types.ToolDefinition, []string, error) {
 	allowed := whitelistSet(toolWhitelist)
 	tools := make([]types.ToolDefinition, 0, 8)
 	seen := make(map[string]bool)
@@ -3260,6 +3309,13 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 		}
 	}
 
+	// The model-visible surface must match the execution policy. Blocked tools
+	// (read-only write/background tools, denied names, delegation-blocked spawn
+	// tools) are dropped before the request is built: a model that sees a tool
+	// in its schema will call it, then fail at execution, burning turns on a
+	// boundary it cannot cross.
+	tools, surfaceFilteredTools := filterPolicyBlockedToolDefinitions(tools, loop.agent.GetToolExecutionPolicy())
+
 	listCtx := listToolsContextForAgent(ctx, loop.agent, len(tools))
 	tools = filterToolDefinitionsByShouldList(tools, listCtx)
 	tools = optimizeModelToolSurface(tools)
@@ -3273,7 +3329,7 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 	}
 	tools = loop.compactToolSurfaceToBudget(tools)
 	sortToolDefinitionsByName(tools)
-	return tools, nil
+	return tools, surfaceFilteredTools, nil
 }
 
 func projectSimpleGoalToolSurface(goal string, tools []types.ToolDefinition) []types.ToolDefinition {
@@ -3456,6 +3512,31 @@ func optimizeModelToolSurface(tools []types.ToolDefinition) []types.ToolDefiniti
 		optimized = append(optimized, item)
 	}
 	return optimized
+}
+
+// filterPolicyBlockedToolDefinitions drops definitions the execution policy
+// would deny so the provider request advertises exactly the executable surface.
+// The check is name-based (AllowTool), matching summarizeEffectiveToolSurface,
+// so the reported surface and the shipped surface are derived from one source.
+// The removed names are returned so callers can keep reporting them as blocked.
+func filterPolicyBlockedToolDefinitions(tools []types.ToolDefinition, policy *ToolExecutionPolicy) ([]types.ToolDefinition, []string) {
+	if len(tools) == 0 || policy == nil {
+		return tools, nil
+	}
+	filtered := make([]types.ToolDefinition, 0, len(tools))
+	blocked := make([]string, 0, 4)
+	for _, def := range tools {
+		name := strings.TrimSpace(def.Name)
+		if name == "" {
+			continue
+		}
+		if !policy.AllowsDefinition(name) {
+			blocked = append(blocked, name)
+			continue
+		}
+		filtered = append(filtered, def)
+	}
+	return filtered, blocked
 }
 
 // shellToolSurfaceRank ranks shell tool aliases for model surface compaction.
@@ -5490,6 +5571,34 @@ func shouldEscalateMaxOutputTokens(req *llm.LLMRequest, response *llm.LLMRespons
 	return llm.EscalatedRequestMaxTokens(req.MaxTokens, 0) > req.MaxTokens
 }
 
+// shouldEscalateTruncatedToolCallBudget reports whether a malformed-tool-call
+// error was caused by the output budget (finish_reason=length) rather than a
+// degenerate JSON literal. Replaying the same capped budget would truncate
+// again, so the request is eligible for the same one-shot 8k→64k escalation as
+// shouldEscalateMaxOutputTokens; the only difference is where the signal lives
+// (in the error object, because the truncated response never reached the
+// caller). Degenerate JSON literals stay on the sampling-retry + re-prompt path
+// and must not widen the budget.
+func shouldEscalateTruncatedToolCallBudget(req *llm.LLMRequest, err error) bool {
+	if req == nil || err == nil {
+		return false
+	}
+	var malformed *llmadapter.MalformedToolCallError
+	if !stderrors.As(err, &malformed) || !malformed.Truncated {
+		return false
+	}
+	if req.Metadata != nil {
+		if escalated, _ := req.Metadata["max_output_tokens_escalated"].(bool); escalated {
+			return false
+		}
+	}
+	// Only escalate the capped slot-reservation default, not explicit large budgets.
+	if req.MaxTokens <= 0 || req.MaxTokens > llm.CappedDefaultMaxTokens {
+		return false
+	}
+	return llm.EscalatedRequestMaxTokens(req.MaxTokens, 0) > req.MaxTokens
+}
+
 func generatedImageOutputDirForAgentSession(agent *Agent, sessionID string) string {
 	sessionID = sanitizeGeneratedImageSessionID(sessionID)
 	if sessionID == "" {
@@ -5804,6 +5913,10 @@ func renderSubagentResults(results []SubagentResult) string {
 		if result.Error != "" {
 			lines = append(lines, "  error: "+result.Error)
 		}
+		if len(result.ReadOnlyFilteredTools) > 0 {
+			lines = append(lines, "  read-only: the child was denied these requested write-like tools: "+
+				strings.Join(result.ReadOnlyFilteredTools, ", ")+"; do not delegate writes to it.")
+		}
 	}
 	return strings.Join(lines, "\n")
 }
@@ -5994,7 +6107,7 @@ func spawnSubagentsToolDefinition() types.ToolDefinition {
 							"timeout":       map[string]interface{}{"type": "integer"},
 							"read_only": map[string]interface{}{
 								"type":        "boolean",
-								"description": "Hard child execution boundary. Write-like requested tools are filtered from the child allowlist, while shell is allowed only for individually classified read-only commands. A read-only parent narrows writable child requests instead of widening the boundary. Independent of permission_mode; approval and bypass_permissions do not override it.",
+								"description": runtimepolicy.ReadOnlyChildOptionDescription,
 							},
 						},
 						"required": []string{"goal"},
@@ -6041,8 +6154,8 @@ func summarizeToolSurface(tools []types.ToolDefinition) map[string]interface{} {
 	return runtimeskill.BuildToolSurfaceSummary(tools)
 }
 
-func (loop *ReActLoop) summarizeEffectiveToolSurface(tools []types.ToolDefinition) map[string]interface{} {
-	if loop == nil || loop.agent == nil || len(tools) == 0 {
+func (loop *ReActLoop) summarizeEffectiveToolSurface(tools []types.ToolDefinition, filteredTools []string) map[string]interface{} {
+	if loop == nil || loop.agent == nil || (len(tools) == 0 && len(filteredTools) == 0) {
 		return nil
 	}
 	policy := loop.agent.GetToolExecutionPolicy()
@@ -6050,7 +6163,19 @@ func (loop *ReActLoop) summarizeEffectiveToolSurface(tools []types.ToolDefinitio
 		return nil
 	}
 	allowed := make([]string, 0, len(tools))
-	blocked := make([]string, 0, len(tools))
+	// The provider surface no longer contains policy-denied tools, so the blocked
+	// list is rebuilt from the names the surface filter removed plus any residual
+	// denials found in the shipped list.
+	blocked := make([]string, 0, len(tools)+len(filteredTools))
+	seenBlocked := make(map[string]bool, len(filteredTools))
+	for _, rawName := range filteredTools {
+		name := strings.TrimSpace(rawName)
+		if name == "" || seenBlocked[name] {
+			continue
+		}
+		seenBlocked[name] = true
+		blocked = append(blocked, name)
+	}
 	for _, tool := range tools {
 		name := strings.TrimSpace(tool.Name)
 		if name == "" {
@@ -6058,12 +6183,13 @@ func (loop *ReActLoop) summarizeEffectiveToolSurface(tools []types.ToolDefinitio
 		}
 		if policy.AllowsDefinition(name) {
 			allowed = append(allowed, name)
-		} else {
+		} else if !seenBlocked[name] {
+			seenBlocked[name] = true
 			blocked = append(blocked, name)
 		}
 	}
 	summary := map[string]interface{}{
-		"catalog_count": len(tools),
+		"catalog_count": len(tools) + len(blocked),
 		"count":         len(allowed),
 		"names":         allowed,
 		"read_only":     policy.ReadOnly,
@@ -6076,6 +6202,27 @@ func (loop *ReActLoop) summarizeEffectiveToolSurface(tools []types.ToolDefinitio
 		summary["overridable"] = false
 	}
 	return summary
+}
+
+// metadataStringSlice extracts a string list from request metadata.
+func metadataStringSlice(metadata map[string]interface{}, key string) []string {
+	if metadata == nil {
+		return nil
+	}
+	switch typed := metadata[key].(type) {
+	case []string:
+		return typed
+	case []interface{}:
+		values := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text, ok := item.(string); ok && text != "" {
+				values = append(values, text)
+			}
+		}
+		return values
+	default:
+		return nil
+	}
 }
 
 func stringValue(value interface{}) string {

@@ -204,7 +204,7 @@ func TestReActLoop_GetAvailableTools_SessionStableSurfaceIgnoresSimpleGoalProjec
 	snapshot := &testSessionStableToolSurfaceSnapshot{refreshable: true}
 	ctx := WithTurnToolSurfaceSnapshot(context.Background(), snapshot)
 
-	tools, frozen, err := loop.resolveAvailableTools(ctx, "ls files", nil)
+	tools, frozen, _, err := loop.resolveAvailableTools(ctx, "ls files", nil)
 	require.NoError(t, err)
 	require.False(t, frozen)
 	names := toolDefinitionNames(tools)
@@ -231,7 +231,7 @@ func TestReActLoop_GetAvailableTools_UpgradesLegacySimpleSessionSurfaceAtTurnBou
 	}
 	ctx := WithTurnToolSurfaceSnapshot(context.Background(), snapshot)
 
-	tools, frozen, err := loop.resolveAvailableTools(ctx, "analyze and fix the renderer", nil)
+	tools, frozen, _, err := loop.resolveAvailableTools(ctx, "analyze and fix the renderer", nil)
 	require.NoError(t, err)
 	require.False(t, frozen)
 	names := toolDefinitionNames(tools)
@@ -240,7 +240,7 @@ func TestReActLoop_GetAvailableTools_UpgradesLegacySimpleSessionSurfaceAtTurnBou
 	assert.Contains(t, names, toolkit.ToolSearchName)
 
 	snapshot.refreshable = false
-	tools, frozen, err = loop.resolveAvailableTools(ctx, "analyze and fix the renderer", nil)
+	tools, frozen, _, err = loop.resolveAvailableTools(ctx, "analyze and fix the renderer", nil)
 	require.NoError(t, err)
 	require.True(t, frozen)
 	require.ElementsMatch(t, []string{"glob", "ls"}, toolDefinitionNames(tools))

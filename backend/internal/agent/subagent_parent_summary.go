@@ -71,6 +71,9 @@ func projectSubagentReportForParent(report SubagentResult, budget int) (map[stri
 		"success":    report.Success,
 		"read_only":  report.ReadOnly,
 	}
+	if len(report.ReadOnlyFilteredTools) > 0 {
+		projection["read_only_filtered_tools"] = compactSubagentFilteredTools(report.ReadOnlyFilteredTools)
+	}
 	truncated := report.Contract != nil
 	if report.BudgetTokens > 0 {
 		projection["budget_tokens"] = report.BudgetTokens
@@ -158,6 +161,25 @@ func compactSubagentArtifactRefs(values []string) []string {
 		}
 	}
 	return refs
+}
+
+// compactSubagentFilteredTools bounds the requested tools that a read-only child
+// never received so the parent can see the narrowed allowlist without letting
+// the projection grow unbounded.
+func compactSubagentFilteredTools(values []string) []string {
+	const maxTools = 12
+	tools := make([]string, 0, minInt(len(values), maxTools))
+	for _, value := range values {
+		tool := truncateSubagentParentText(value, 64)
+		if tool == "" {
+			continue
+		}
+		tools = append(tools, tool)
+		if len(tools) >= maxTools {
+			break
+		}
+	}
+	return tools
 }
 
 func truncateSubagentParentText(value string, limit int) string {

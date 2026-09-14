@@ -74,7 +74,7 @@ CLI deny always wins over a project `allow` rule for the same tool.
 - Overlay is **not** a second pipeline: it feeds existing `policy.Engine.Rules` and `ToolExecutionPolicy`.
 - `bypass_permissions` still cannot bypass hard deny lists / hook deny (core A4 behavior).
 - Child agent denylists / read-only derive remain separate narrowing layers on top of the base policy.
-- **Read-only child sessions** use `ReadOnlyChildCapabilities` (`read_only` + `network` + `ask_user` + `agent_management`): control-plane tools (`spawn_agent`, plan mode, ask user, collab) stay usable, while write/shell/`background_task` stay blocked via ReadOnly + capability scope. Max-depth still hides spawn via `DeniedTools`.
+- **Read-only child sessions** use `ReadOnlyChildCapabilities`: control-plane tools (plan mode, ask user, collab) stay usable and `shell` stays visible (each command is validated against the read-only allow table), while write-like tools and `background_task` are removed from the model-visible surface and denied at execution. Max-depth / `BlockDelegation` still hides spawn tools.
 - **Runtime-owned agent essentials** (`enter_plan_mode`, `exit_plan_mode`, `ask_user_question`, collab/team control tools, `todos`/`get_goal`/`update_goal`, `search_tool`, …) bypass the hard **allowlist** gate so a narrow `--allow-tool` / `allow_tools` list cannot brick the agent control plane. They still honor:
   - explicit `deny_tools` / `--deny-tool`
   - capability scope (e.g. a narrowed child without `agent_management` still cannot `spawn_agent`)

@@ -4624,7 +4624,7 @@ func TestReActLoop_GetAvailableTools_PreservesMetaToolkitAndBrokerSourceMetadata
 	assert.Equal(t, toolresult.SourceBroker, brokerSource)
 }
 
-func TestReActLoop_EmptyAllowlistPreservesSurfaceAndRejectsExecution(t *testing.T) {
+func TestReActLoop_EmptyAllowlistKeepsSurfaceEmptyAndRejectsExecution(t *testing.T) {
 	agent := &Agent{
 		config: &Config{
 			Name:         "test-agent",
@@ -4641,8 +4641,9 @@ func TestReActLoop_EmptyAllowlistPreservesSurfaceAndRejectsExecution(t *testing.
 	loop := NewReActLoop(agent, llm.NewLLMRuntime(nil), &LoopReActConfig{EnableToolCalls: true})
 	tools, err := loop.getAvailableTools(context.Background(), "try every tool", nil)
 	require.NoError(t, err)
-	require.NotEmpty(t, tools, "execution policy must not remove request definitions")
-	assert.Contains(t, toolDefinitionNames(tools), "write_file")
+	// The request surface must match the execution policy: advertising tools a
+	// fully disabled policy can never allow only invites failed calls.
+	require.Empty(t, tools, "execution policy must not advertise tools it denies")
 
 	provider := &SequenceLLMProvider{
 		name: "test-provider",
@@ -5159,8 +5160,8 @@ func TestReActLoop_Run_ReadOnlyPolicyBlocksWriteLikeTools(t *testing.T) {
 
 	tools, err := loop.getAvailableTools(context.Background(), "write file", nil)
 	require.NoError(t, err)
-	assert.Contains(t, toolDefinitionNames(tools), "write_file",
-		"execution policy must not dynamically remove tools from the frozen request surface")
+	assert.NotContains(t, toolDefinitionNames(tools), "write_file",
+		"read-only policy must not advertise write-like tools in the request surface")
 }
 
 func TestReActLoop_Run_HooksCanBlockAndObserveTools(t *testing.T) {
@@ -5742,7 +5743,7 @@ func TestComputeAvailableToolsRespectsExplicitEmptyAllowlist(t *testing.T) {
 	}
 	loop := NewReActLoop(agent, nil, &LoopReActConfig{})
 
-	tools, err := loop.computeAvailableTools(context.Background(), "Inspect files", []string{}, false)
+	tools, _, err := loop.computeAvailableTools(context.Background(), "Inspect files", []string{}, false)
 	require.NoError(t, err)
 	assert.Empty(t, tools)
 }

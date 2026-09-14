@@ -58,20 +58,24 @@ type SubagentTask struct {
 
 // SubagentResult 是父代理可见的结构化回执。
 type SubagentResult struct {
-	ID               string              `json:"id,omitempty" yaml:"id,omitempty"`
-	Role             string              `json:"role,omitempty" yaml:"role,omitempty"`
-	SessionID        string              `json:"session_id,omitempty" yaml:"session_id,omitempty"`
-	ParentSessionID  string              `json:"parent_session_id,omitempty" yaml:"parent_session_id,omitempty"`
-	ParentToolCallID string              `json:"parent_tool_call_id,omitempty" yaml:"parent_tool_call_id,omitempty"`
-	ReadOnly         bool                `json:"read_only,omitempty" yaml:"read_only,omitempty"`
-	BudgetTokens     int                 `json:"budget_tokens,omitempty" yaml:"budget_tokens,omitempty"`
-	Success          bool                `json:"success" yaml:"success"`
-	Summary          string              `json:"summary" yaml:"summary"`
-	Patches          []FilePatch         `json:"patches,omitempty" yaml:"patches,omitempty"`
-	Findings         []string            `json:"findings,omitempty" yaml:"findings,omitempty"`
-	Usage            *types.TokenUsage   `json:"usage,omitempty" yaml:"usage,omitempty"`
-	Error            string              `json:"error,omitempty" yaml:"error,omitempty"`
-	Contract         *agentresult.Result `json:"result_contract,omitempty" yaml:"result_contract,omitempty"`
+	ID               string `json:"id,omitempty" yaml:"id,omitempty"`
+	Role             string `json:"role,omitempty" yaml:"role,omitempty"`
+	SessionID        string `json:"session_id,omitempty" yaml:"session_id,omitempty"`
+	ParentSessionID  string `json:"parent_session_id,omitempty" yaml:"parent_session_id,omitempty"`
+	ParentToolCallID string `json:"parent_tool_call_id,omitempty" yaml:"parent_tool_call_id,omitempty"`
+	ReadOnly         bool   `json:"read_only,omitempty" yaml:"read_only,omitempty"`
+	// ReadOnlyFilteredTools lists write-like tools dropped from the requested
+	// whitelist because the child ran read-only. It is surfaced to the parent so
+	// a silently narrowed allowlist is visible in the spawn report.
+	ReadOnlyFilteredTools []string            `json:"read_only_filtered_tools,omitempty" yaml:"read_only_filtered_tools,omitempty"`
+	BudgetTokens          int                 `json:"budget_tokens,omitempty" yaml:"budget_tokens,omitempty"`
+	Success               bool                `json:"success" yaml:"success"`
+	Summary               string              `json:"summary" yaml:"summary"`
+	Patches               []FilePatch         `json:"patches,omitempty" yaml:"patches,omitempty"`
+	Findings              []string            `json:"findings,omitempty" yaml:"findings,omitempty"`
+	Usage                 *types.TokenUsage   `json:"usage,omitempty" yaml:"usage,omitempty"`
+	Error                 string              `json:"error,omitempty" yaml:"error,omitempty"`
+	Contract              *agentresult.Result `json:"result_contract,omitempty" yaml:"result_contract,omitempty"`
 }
 
 // SubagentSchedulerConfig 控制子代理并发与递归深度。
@@ -323,14 +327,15 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			"subagent_id": task.ID,
 		})
 		return SubagentResult{
-			ID:               task.ID,
-			Role:             task.Role,
-			ParentSessionID:  options.ParentSessionID,
-			ParentToolCallID: options.ParentToolCallID,
-			ReadOnly:         task.ReadOnly,
-			BudgetTokens:     task.BudgetTokens,
-			Success:          false,
-			Error:            "subagent goal is required",
+			ID:                    task.ID,
+			Role:                  task.Role,
+			ParentSessionID:       options.ParentSessionID,
+			ParentToolCallID:      options.ParentToolCallID,
+			ReadOnly:              task.ReadOnly,
+			ReadOnlyFilteredTools: subagentReadOnlyFilteredTools(task),
+			BudgetTokens:          task.BudgetTokens,
+			Success:               false,
+			Error:                 "subagent goal is required",
 		}, nil
 	}
 
@@ -346,15 +351,16 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			"subagent_id": task.ID,
 		})
 		return SubagentResult{
-			ID:               task.ID,
-			Role:             task.Role,
-			ParentSessionID:  options.ParentSessionID,
-			ParentToolCallID: options.ParentToolCallID,
-			ReadOnly:         task.ReadOnly,
-			BudgetTokens:     task.BudgetTokens,
-			Success:          false,
-			Error:            err.Error(),
-			Summary:          err.Error(),
+			ID:                    task.ID,
+			Role:                  task.Role,
+			ParentSessionID:       options.ParentSessionID,
+			ParentToolCallID:      options.ParentToolCallID,
+			ReadOnly:              task.ReadOnly,
+			ReadOnlyFilteredTools: subagentReadOnlyFilteredTools(task),
+			BudgetTokens:          task.BudgetTokens,
+			Success:               false,
+			Error:                 err.Error(),
+			Summary:               err.Error(),
 		}, nil
 	}
 	releaseExpertSlot, err := s.acquireExpertSlot(ctx, spec.Decision.Difficulty)
@@ -364,15 +370,16 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			"difficulty":  spec.Decision.Difficulty,
 		})
 		return SubagentResult{
-			ID:               task.ID,
-			Role:             task.Role,
-			ParentSessionID:  options.ParentSessionID,
-			ParentToolCallID: options.ParentToolCallID,
-			ReadOnly:         task.ReadOnly,
-			BudgetTokens:     task.BudgetTokens,
-			Success:          false,
-			Error:            err.Error(),
-			Summary:          err.Error(),
+			ID:                    task.ID,
+			Role:                  task.Role,
+			ParentSessionID:       options.ParentSessionID,
+			ParentToolCallID:      options.ParentToolCallID,
+			ReadOnly:              task.ReadOnly,
+			ReadOnlyFilteredTools: subagentReadOnlyFilteredTools(task),
+			BudgetTokens:          task.BudgetTokens,
+			Success:               false,
+			Error:                 err.Error(),
+			Summary:               err.Error(),
 		}, nil
 	}
 	if releaseExpertSlot != nil {
@@ -432,16 +439,17 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 	})
 	if err != nil {
 		report := SubagentResult{
-			ID:               task.ID,
-			Role:             task.Role,
-			SessionID:        childSessionID,
-			ParentSessionID:  options.ParentSessionID,
-			ParentToolCallID: options.ParentToolCallID,
-			ReadOnly:         task.ReadOnly,
-			BudgetTokens:     task.BudgetTokens,
-			Success:          false,
-			Error:            err.Error(),
-			Summary:          err.Error(),
+			ID:                    task.ID,
+			Role:                  task.Role,
+			SessionID:             childSessionID,
+			ParentSessionID:       options.ParentSessionID,
+			ParentToolCallID:      options.ParentToolCallID,
+			ReadOnly:              task.ReadOnly,
+			ReadOnlyFilteredTools: subagentReadOnlyFilteredTools(task),
+			BudgetTokens:          task.BudgetTokens,
+			Success:               false,
+			Error:                 err.Error(),
+			Summary:               err.Error(),
 		}
 		s.parent.emitRuntimeEvent("subagent.completed", childSessionID, "", mergeRouteAuditPayload(map[string]interface{}{
 			"subagent_id":         task.ID,
@@ -475,17 +483,18 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 	}
 
 	report := SubagentResult{
-		ID:               task.ID,
-		Role:             task.Role,
-		SessionID:        childSessionID,
-		ParentSessionID:  options.ParentSessionID,
-		ParentToolCallID: options.ParentToolCallID,
-		ReadOnly:         task.ReadOnly,
-		BudgetTokens:     task.BudgetTokens,
-		Success:          result.Success,
-		Summary:          result.Output,
-		Usage:            result.Usage,
-		Contract:         result.Contract.Clone(),
+		ID:                    task.ID,
+		Role:                  task.Role,
+		SessionID:             childSessionID,
+		ParentSessionID:       options.ParentSessionID,
+		ParentToolCallID:      options.ParentToolCallID,
+		ReadOnly:              task.ReadOnly,
+		ReadOnlyFilteredTools: subagentReadOnlyFilteredTools(task),
+		BudgetTokens:          task.BudgetTokens,
+		Success:               result.Success,
+		Summary:               result.Output,
+		Usage:                 result.Usage,
+		Contract:              result.Contract.Clone(),
 	}
 	if task.ReadOnly {
 		report.Findings = collectFindings(result.Observations)
@@ -1188,6 +1197,16 @@ func subagentWritePaths(task SubagentTask) []string {
 		}
 	}
 	return paths
+}
+
+// subagentReadOnlyFilteredTools returns a copy of the write-like tools removed
+// from a read-only child's requested whitelist so the parent report can show
+// which requested capabilities the child never received.
+func subagentReadOnlyFilteredTools(task SubagentTask) []string {
+	if len(task.ReadOnlyFilteredTools) == 0 {
+		return nil
+	}
+	return append([]string(nil), task.ReadOnlyFilteredTools...)
 }
 
 type indexedSubagentTask struct {

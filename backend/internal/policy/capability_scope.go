@@ -30,6 +30,18 @@ func ReadOnlyChildCapabilities() []Capability {
 	}
 }
 
+// ReadOnlyChildOptionDescription is the single source of truth for the
+// read_only spawn option text shown to models. spawn_agent and
+// spawn_subagents must serve this same text so the description cannot drift
+// from the effective boundary or from each other.
+//
+// It documents the behavior the runtime actually enforces: write-like tools
+// and background tasks are removed from the child's model-visible tool surface
+// (and denied at execution), shell stays available but only for individually
+// classified read-only commands, the delegation boundary may remove extra
+// spawn tools, and no approval path can widen the boundary.
+const ReadOnlyChildOptionDescription = "Hard child execution boundary. Write-like tools (write, edit, apply_patch, append_write, multiedit, download) and background_task are removed from the child's model-visible tool surface and denied at execution, while shell stays available but only for individually classified read-only commands. The delegation boundary (BlockDelegation / max depth) may remove spawn_agent/spawn_team as well. Independent of permission_mode: approval and bypass_permissions cannot override it. Set read_only=true only when the child must not produce file changes or background jobs; leave it unset for implementer/writer tasks."
+
 func (p *ToolExecutionPolicy) SetCapabilityScope(capabilities []Capability) {
 	if p == nil {
 		return

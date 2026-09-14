@@ -148,6 +148,10 @@ func (a *Agent) CollectToolCatalogDefinitions(ctx context.Context) []types.ToolD
 		}
 	}
 
+	// Drop anything the execution policy would deny before the request is built,
+	// including an injected spawn_subagents the policy blocks via delegation.
+	tools, _ = filterPolicyBlockedToolDefinitions(tools, a.GetToolExecutionPolicy())
+
 	listCtx := listToolsContextForAgent(ctx, a, len(tools))
 	tools = filterToolDefinitionsByShouldList(tools, listCtx)
 	tools = optimizeModelToolSurface(tools)
