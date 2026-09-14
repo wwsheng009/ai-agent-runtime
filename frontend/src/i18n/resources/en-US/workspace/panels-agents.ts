@@ -1,0 +1,50 @@
+// P2-1A：workspace.panels.agents copy module (parallel batch exclusive).
+export const enWorkspacePanelsAgents = {
+  ariaLabel: "Subagent control panel",
+  eyebrow: "Runtime · Subagents",
+  title: "Subagent control",
+  description:
+    "Where this session sits in the AgentControl identity graph: the root → current lineage chain and every descendant below it, each stoppable or resumable on its own.",
+  refresh: "Refresh subagent directory",
+  close: "Close subagent control",
+  retry: "Retry",
+  loading: "Loading subagent identity graph…",
+  errorTitle: "Failed to load the subagent directory",
+  unavailableTitle: "Subagent control unavailable",
+  unavailableHint:
+    "The runtime has no agent session controller injected (or the route is not registered). No inferred data is shown here; it recovers automatically once wired.",
+  noIdentityTitle: "This session has no registered subagent identity",
+  noIdentityHint:
+    "The session is not part of the AgentControl identity graph (not started as a subagent, or the identity projection does not cover it yet).",
+  lineageTitle: "Lineage",
+  descendantsTitle: "Descendants",
+  descendantsCount: "Descendants ({{count}})",
+  truncated: "Directory truncated: backend reports {{count}} rows, only rows within the limit of {{limit}} were returned",
+  emptyDescendants: "This session has no subagents",
+  emptyDescendantsHint:
+    "Subagents started via spawn appear here with their status and path.",
+  running: "Running ({{count}})",
+  settled: "Finished ({{count}})",
+  stop: "Stop",
+  stopping: "Stopping…",
+  resume: "Resume",
+  resuming: "Resuming…",
+  stopLabel: "Stop subagent {{name}}",
+  resumeLabel: "Resume subagent {{name}}",
+  unknownAction: "Unknown status — no action offered",
+  actionErrorTitle: "Action failed",
+  updatedAt: "Updated {{time}}",
+  status: {
+    active: "Running",
+    stale: "Stale",
+    closed: "Stopped",
+    unknown: "Unknown status",
+  },
+  meta: {
+    model: "Model {{value}}",
+    provider: "Provider {{value}}",
+    workflow: "Workflow {{value}}",
+    team: "Team {{value}}",
+    warnings: "{{value}} route warnings",
+  },
+} as const;

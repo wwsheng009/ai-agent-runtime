@@ -7,6 +7,7 @@ import {
   type SetStateAction,
   Suspense,
   useMemo,
+  useState,
 } from "react";
 import { type TFunction } from "i18next";
 import { ArrowUpRightIcon, BotIcon, type LucideIcon } from "lucide-react";
@@ -14,11 +15,18 @@ import { ArrowUpRightIcon, BotIcon, type LucideIcon } from "lucide-react";
 import { MessageComposer } from "@/components/workspace/message-composer";
 import { MessageList } from "@/components/workspace/message-list";
 import { PendingInteractionBar } from "@/components/workspace/pending-interaction-bar";
+import { JobsPanel } from "@/components/workspace/jobs-panel";
+import { SessionAgentsPanel } from "@/components/workspace/session-agents-panel";
+import { agentDisplayName } from "@/components/workspace/session-agents-panel-shared";
 import { type SettingsSectionId } from "@/components/workspace/settings";
+import { FilePreviewDialog } from "@/components/workspace/file-preview-dialog";
 import { TrajectoryView } from "@/components/workspace/workspace-shell/lazy-surfaces";
 import { type WorkspaceShellProps } from "@/components/workspace/workspace-shell/types";
 import { WorkspaceShellTopbar } from "@/components/workspace/workspace-shell-topbar";
 import { type WorkspaceDensity } from "@/core/settings";
+import { useFilePreview } from "@/hooks/workspace/use-file-preview";
+import { useBackgroundJobs } from "@/hooks/workspace/use-background-jobs";
+import { useSessionAgents } from "@/hooks/use-session-agents";
 import { type ComposerReferenceGroup } from "@/lib/composer-menu";
 import { artifactReferenceGroup } from "@/lib/composer-references";
 import { cn } from "@/lib/utils";
@@ -32,6 +40,7 @@ type WorkspaceMainSectionProps = Pick<
   | "backtrackSelectedMessageId"
   | "canBacktrack"
   | "composerAttachments"
+  | "connectionStatus"
   | "draft"
   | "isResponding"
   | "modelOptions"
@@ -42,6 +51,7 @@ type WorkspaceMainSectionProps = Pick<
   | "onProviderChange"
   | "onReasoningEffortChange"
   | "onResolvePendingApproval"
+  | "onRetryConnection"
   | "onPlanDecision"
   | "onPlanNotesChange"
   | "onSelectBacktrackNavigationMessage"
@@ -97,6 +107,7 @@ export function WorkspaceMainSection({
   backtrackSelectedMessageId,
   canBacktrack,
   composerAttachments,
+  connectionStatus,
   draft,
   isResponding,
   modelOptions,
@@ -110,6 +121,7 @@ export function WorkspaceMainSection({
   onSubmit,
   pendingInteraction,
   onResolvePendingApproval,
+  onRetryConnection,
   onAnswerPendingQuestion,
   onPlanDecision,
   onPlanNotesChange,
@@ -155,24 +167,76 @@ export function WorkspaceMainSection({
     return files ? [files] : [];
   }, [selectedThread.artifacts, t]);
 
+  // P2-1A / P2-9：后台任务（Jobs）——shell owner 单例加载一次，
+  // 顶栏常驻状态条与弹层共用同一份数据（计数天然一致，不做第二次拉取）。
+  const jobsSessionId = selectedThread.sessionId?.trim() ?? "";
+  const [jobsPanelOpen, setJobsPanelOpen] = useState(false);
+  const jobs = useBackgroundJobs({
+    enabled: Boolean(jobsSessionId),
+    lastRuntimeEventType: selectedThread.lastRuntimeEventType,
+    runtimeEventCount: selectedThread.runtimeEventCount,
+    sessionId: jobsSessionId,
+  });
+
+  // P2-1A：子代理控制面（AgentControl 身份图）——顶栏 lineage 面包屑与弹层共用一次加载。
+  const agentsSessionId = selectedThread.sessionId?.trim() ?? "";
+  const sessionAgents = useSessionAgents({ sessionId: agentsSessionId });
+  const [agentsPanelOpen, setAgentsPanelOpen] = useState(false);
+  const agentBreadcrumb = useMemo(
+    () =>
+      sessionAgents.tree.lineage.map((agent) => ({
+        label: agentDisplayName(agent),
+        path: agent.agentPath,
+      })),
+    [sessionAgents.tree.lineage],
+  );
+
+  // P2-1A：工具行文件路径的运行时预览（fs/read-file，只读）；未命中关联产物时兜底。
+  const filePreview = useFilePreview();
+
   return (
     <section
       id="workspace-preview"
       className="relative flex h-full min-h-0 flex-col overflow-hidden [background:var(--workspace-main-bg)]"
     >
       <WorkspaceShellTopbar
+        agentBreadcrumb={agentBreadcrumb}
+        agentDescendantCount={sessionAgents.tree.descendants.length}
         artifactRailOpen={artifactRailOpen}
+        connectionStatus={connectionStatus}
         density={density}
         isNewThread={isNewThread}
+        liveJobsCount={jobs.liveCount}
         liveTeamCount={liveTeamCount}
+        onOpenAgents={agentsSessionId ? () => setAgentsPanelOpen(true) : undefined}
+        onOpenJobs={jobsSessionId ? () => setJobsPanelOpen(true) : undefined}
         onOpenSidebar={() => setMobileSidebarOpen(true)}
         onOpenSettings={() => openSettings("appearance")}
+        onRetryConnection={onRetryConnection}
         onToggleArtifactRail={() => setArtifactRailManualOpen((current) => !current)}
         selectedThread={selectedThread}
         threadSubtitle={threadSubtitle}
         threadStatusLabel={threadStatusLabel}
         transportLabel={transportLabel}
       />
+
+      {jobsPanelOpen && jobsSessionId ? (
+        <JobsPanel
+          controller={jobs}
+          onClose={() => setJobsPanelOpen(false)}
+          open={jobsPanelOpen}
+        />
+      ) : null}
+
+      {agentsPanelOpen && agentsSessionId ? (
+        <SessionAgentsPanel
+          agents={sessionAgents}
+          onClose={() => setAgentsPanelOpen(false)}
+          open={agentsPanelOpen}
+        />
+      ) : null}
+
+      <FilePreviewDialog preview={filePreview} />
 
       <div
         className={cn(
@@ -241,6 +305,7 @@ export function WorkspaceMainSection({
                     "h-full px-3 sm:px-4 lg:px-5",
                     isCompact ? "pt-3" : "pt-4",
                   )}
+                  connectionStatus={connectionStatus}
                   contentClassName={cn(
                     "max-w-[50rem]",
                     isCompact ? "gap-4" : "gap-6",
@@ -248,6 +313,8 @@ export function WorkspaceMainSection({
                   isResponding={isResponding}
                   messages={selectedThread.messages}
                   onBacktrackToMessage={onBacktrackToMessage}
+                  onPreviewFilePath={filePreview.open}
+                  onRetryConnection={onRetryConnection}
                   onSelectBacktrackNavigationMessage={onSelectBacktrackNavigationMessage}
                   onSelectArtifact={handleOpenArtifact}
                   phase={phase}

@@ -1,7 +1,9 @@
 import {
   ChartNoAxesCombinedIcon,
   DatabaseIcon,
+  ListChecksIcon,
   MessageSquarePlusIcon,
+  NetworkIcon,
   PanelLeftOpenIcon,
   PanelRightCloseIcon,
   PanelRightOpenIcon,
@@ -13,15 +15,31 @@ import { Link } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { Button } from "@/components/ui/button";
+import { ConnectionStatusBadge } from "@/components/ui/connection-status-badge";
 import { type Thread } from "@/data/mock";
+import { useConnectionStatusLabels } from "@/hooks/workspace/use-connection-status-labels";
+import { type ConnectionStatus } from "@/lib/connection-status";
 import { cn } from "@/lib/utils";
 import { useTranslation } from "react-i18next";
 
 type WorkspaceShellTopbarProps = {
+  /** P2-1A：root → 当前会话的 lineage 链（≤1 段时不渲染面包屑）。 */
+  agentBreadcrumb?: { label: string; path: string | null }[];
+  /** P2-1A：后代目录条数（>0 时在入口按钮上显示计数）。 */
+  agentDescendantCount?: number;
   artifactRailOpen: boolean;
+  /** P1-8：会话运行时流连接状态（未提供时不渲染状态条）。 */
+  connectionStatus?: ConnectionStatus | null;
   density: "comfortable" | "compact";
   isNewThread?: boolean;
+  /** P2-9：常驻状态条——当前 live（pending/running）后台任务数（0 时不渲染）。 */
+  liveJobsCount?: number;
   liveTeamCount: number;
+  onRetryConnection?: () => void;
+  /** P2-1A：打开后台任务面板（未提供时不渲染入口）。 */
+  onOpenJobs?: () => void;
+  /** P2-1A：打开子代理控制面（未提供时不渲染入口）。 */
+  onOpenAgents?: () => void;
   onOpenSidebar: () => void;
   onOpenSettings: () => void;
   onToggleArtifactRail: () => void;
@@ -32,10 +50,17 @@ type WorkspaceShellTopbarProps = {
 };
 
 export function WorkspaceShellTopbar({
+  agentBreadcrumb,
+  agentDescendantCount = 0,
   artifactRailOpen,
+  connectionStatus,
   density,
   isNewThread = false,
+  liveJobsCount = 0,
   liveTeamCount,
+  onOpenAgents,
+  onOpenJobs,
+  onRetryConnection,
   onOpenSidebar,
   onOpenSettings,
   onToggleArtifactRail,
@@ -46,6 +71,9 @@ export function WorkspaceShellTopbar({
 }: WorkspaceShellTopbarProps) {
   const isCompact = density === "compact";
   const { t } = useTranslation("workspace");
+  const { labels: connectionLabels, retryLabel } = useConnectionStatusLabels();
+  const lineage = agentBreadcrumb ?? [];
+  const showLineage = !isNewThread && lineage.length > 1;
 
   return (
     <header className="absolute inset-x-0 top-0 z-30 flex justify-center px-3 pt-1.5 sm:px-4">
@@ -88,8 +116,30 @@ export function WorkspaceShellTopbar({
             </div>
           ) : null}
         </div>
+        {showLineage ? (
+          <div
+            className="hidden shrink-0 items-center gap-1.5 rounded-card border border-border px-2 py-1 text-muted-foreground lg:flex"
+            data-testid="topbar-agent-breadcrumb"
+            title={t("topbar.agentsBreadcrumb", {
+              path: lineage.map((entry) => entry.label).join(" › "),
+            })}
+          >
+            <NetworkIcon size={13} className="shrink-0" />
+            <span className="max-w-[18rem] truncate app-text-10">
+              {lineage.map((entry) => entry.label).join(" › ")}
+            </span>
+          </div>
+        ) : null}
         {!isNewThread ? (
           <div className="hidden items-center gap-2.5 md:flex">
+            {connectionStatus && connectionStatus !== "idle" ? (
+              <ConnectionStatusBadge
+                status={connectionStatus}
+                labels={connectionLabels}
+                onRetry={onRetryConnection}
+                retryLabel={retryLabel}
+              />
+            ) : null}
             <Badge>{threadStatusLabel}</Badge>
           <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
             {transportLabel}
@@ -109,6 +159,45 @@ export function WorkspaceShellTopbar({
         >
           <TerminalSquareIcon size={16} />
         </Link>
+        {onOpenJobs && !isNewThread ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="shrink-0"
+            onClick={onOpenJobs}
+            aria-label={t("topbar.jobs")}
+            title={t("topbar.jobs")}
+          >
+            <ListChecksIcon size={16} />
+          </Button>
+        ) : null}
+        {onOpenJobs && !isNewThread && liveJobsCount > 0 ? (
+          <button
+            type="button"
+            className="hidden shrink-0 items-center rounded-card border border-border px-2 py-1 text-muted-foreground sm:flex"
+            data-testid="topbar-jobs-running"
+            onClick={onOpenJobs}
+            title={t("topbar.jobsRunning", { count: liveJobsCount })}
+          >
+            <span className="app-text-10">{t("topbar.jobsRunning", { count: liveJobsCount })}</span>
+          </button>
+        ) : null}
+        {onOpenAgents && !isNewThread ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="shrink-0 gap-1"
+            onClick={onOpenAgents}
+            aria-label={t("topbar.agents")}
+            data-testid="topbar-agents"
+            title={t("topbar.agents")}
+          >
+            <NetworkIcon size={16} />
+            {agentDescendantCount > 0 ? (
+              <span className="app-text-10">{agentDescendantCount}</span>
+            ) : null}
+          </Button>
+        ) : null}
         <Link
           to="/usage"
           className={cn(buttonVariants({ variant: "ghost", size: "icon" }), "shrink-0")}

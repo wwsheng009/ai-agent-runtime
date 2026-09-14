@@ -120,4 +120,34 @@ describe("WorkspaceShellTopbar", () => {
     });
     expect(props.onToggleArtifactRail).toHaveBeenCalledTimes(1);
   });
+
+  it("surfaces a non-online connection status with manual retry", () => {
+    const onRetryConnection = vi.fn();
+    renderTopbar({
+      connectionStatus: "offline",
+      isNewThread: false,
+      onRetryConnection,
+    });
+
+    const badge = container.querySelector('[data-connection-status="offline"]');
+    expect(badge).toBeInstanceOf(HTMLElement);
+    expect(container.textContent).toContain("连接中断");
+
+    const retryButton = badge?.querySelector("button");
+    expect(retryButton?.textContent).toBe("重试");
+    act(() => {
+      retryButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(onRetryConnection).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows an online marker without retry and hides the idle state", () => {
+    renderTopbar({ connectionStatus: "online", isNewThread: false });
+    const online = container.querySelector('[data-connection-status="online"]');
+    expect(online).toBeInstanceOf(HTMLElement);
+    expect(online?.querySelector("button")).toBeNull();
+
+    renderTopbar({ connectionStatus: "idle", isNewThread: false });
+    expect(container.querySelector("[data-connection-status]")).toBeNull();
+  });
 });

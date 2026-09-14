@@ -1,0 +1,50 @@
+// P2-1A：workspace.panels.agents 文案模块（并行批次独占，勿跨模块写入）。
+// 新增键请在本对象内按 feature 嵌套；en-US 同名模块需同步补齐（编译期对齐）。
+export const zhWorkspacePanelsAgents = {
+  ariaLabel: "子代理控制面面板",
+  eyebrow: "Runtime · 子代理控制面",
+  title: "子代理控制面",
+  description:
+    "当前会话在 AgentControl 身份图中的位置：root → 当前会话的 lineage 链，以及其下全部后代；可对单个子代理独立停止 / 恢复。",
+  refresh: "刷新子代理目录",
+  close: "关闭子代理控制面",
+  retry: "重试",
+  loading: "正在加载子代理身份图…",
+  errorTitle: "子代理目录加载失败",
+  unavailableTitle: "子代理控制面不可用",
+  unavailableHint:
+    "运行时未注入子代理控制器（或路由未注册）。此处不展示任何推测数据，接入后可自动恢复。",
+  noIdentityTitle: "当前会话未登记子代理身份",
+  noIdentityHint:
+    "该会话不在 AgentControl 身份图中（未以子代理方式启动，或身份投影尚未覆盖）。",
+  lineageTitle: "Lineage",
+  descendantsTitle: "后代目录",
+  descendantsCount: "后代目录（{{count}}）",
+  truncated: "目录触顶：后端共 {{count}} 条，本次仅返回 {{limit}} 条上限内的行",
+  emptyDescendants: "当前会话没有子代理",
+  emptyDescendantsHint: "通过 spawn 启动的子代理会出现在这里，并显示其状态与所属路径。",
+  running: "进行中（{{count}}）",
+  settled: "已结束（{{count}}）",
+  stop: "停止",
+  stopping: "停止中…",
+  resume: "恢复",
+  resuming: "恢复中…",
+  stopLabel: "停止子代理 {{name}}",
+  resumeLabel: "恢复子代理 {{name}}",
+  unknownAction: "状态未知，不提供操作",
+  actionErrorTitle: "操作失败",
+  updatedAt: "更新于 {{time}}",
+  status: {
+    active: "运行中",
+    stale: "已失联",
+    closed: "已停止",
+    unknown: "状态未知",
+  },
+  meta: {
+    model: "模型 {{value}}",
+    provider: "提供方 {{value}}",
+    workflow: "工作流 {{value}}",
+    team: "团队 {{value}}",
+    warnings: "{{value}} 条路由告警",
+  },
+} as const;
