@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.verify-scoped.tsbuildinfo"
+  },
+  "include": ["src"],
+  "exclude": ["src/**/__tmp-*", "src/**/*.tmp.*"]
+}
