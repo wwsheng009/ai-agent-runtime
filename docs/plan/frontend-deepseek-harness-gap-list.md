@@ -20,15 +20,15 @@
 | ID | 缺口 | 类别 | 严重度 | 处置状态 |
 |---|---|---|---|---|
 | A1 | P0-1 验收回退：`src` 下 `.bak`/`.backups` 复活 | 验收回退 | 高 | **已处置**（清理 + 门禁，批次 1） |
-| A2 | P0-2 全局指标失效：> 500 行文件现为 3 个 | 验收回退 | 高 | 已登记，**待排期**（拆分） |
+| A2 | P0-2 全局指标失效：> 500 行文件曾为 3 个 | 验收回退 | 高 | **已处置（批次 2 + 批次 8）**：批次 2 修复至 0；2026-09-13 P2-1A 交付后复检回退 2 个（`quota.tsx`=559、`workspace-page.tsx`=512），批次 8 二次拆分归零并新增 `scripts/verify-max-lines.mjs` 门禁（见 §3 复检记录） |
 | A3 | P0-4 数值口径偏差（89 vs 87、22 vs 20） | 验收漂移 | 低 | **已登记**（复检备注） |
 | B1 | P1-5 队列与 Steering 零实施 | 零交付 | 高 | 已登记（§6.2 状态行），**待排期** |
-| B2 | P1-8 连接状态统一零新增交付 | 零交付 | 高 | 已登记，**待排期** |
-| B3 | P1-9 会话列表状态与整理零实施 | 零交付 | 高 | 已登记，**待排期** |
-| B4 | P1-10 全局错误边界与加载失败面零实施 | 零交付 | 高 | **处置中**（批次 1 启动实现） |
-| B5 | P2 未启动 9 项（P2-2/3/4/5/6/8/9/10/11） | 零交付 | 中 | 已登记（§6.3 说明行），**待排期** |
+| B2 | P1-8 连接状态统一零新增交付 | 零交付 | 高 | **已修复**（批次 2 第二项，2026-09-13 合入主树，见 §3） |
+| B3 | P1-9 会话列表状态与整理零实施 | 零交付 | 高 | **已修复**（批次 3，2026-09-13 合入主树，见 §3） |
+| B4 | P1-10 全局错误边界与加载失败面零实施 | 零交付 | 高 | **已修复**（批次 2 首项，2026-09-13 合入主树，见 §3） |
+| B5 | P2 未启动 9 项（P2-2/3/4/5/6/8/9/10/11） | 零交付（P2-1A 已有 8 项子能力落地） | 中 | 已登记（§6.3 说明行），**待排期** |
 | C1 | P1-4 `@` 引用仅 file 组（session/subagent 延后） | 部分交付 | 低 | 计划已披露，保持 |
-| C2 | P2-1 后端能力接线：16 行未接、1 行部分 | 部分交付 | 中 | 已登记，**待排期** |
+| C2 | P2-1 后端能力接线：9 行未接、8 行已闭环（Jobs / 审批闭环 / usage / 会话搜索 / fs/read-file / skills 市场与热重载 / 子代理控制面 / 会话统计） | 部分交付 | 中 | 已登记，Jobs / 审批闭环 / usage / 会话搜索 / fs/read-file / skills 市场与热重载 / 子代理控制面 / 会话统计已关闭，**待排期**（余 9 行） |
 | C3 | P2-7 命令系统无内置执行器 | 部分交付 | 中 | 已登记，**待排期** |
 | D1 | §9.3 缺 P1-5/8/9/10 状态行 | 台账 | 中 | **已处置**（§6.2 增补，批次 1） |
 | D2 | §6.3 无 P2 状态登记机制 | 台账 | 中 | **部分处置**（加说明行；P2 启动时建登记） |
@@ -47,7 +47,7 @@
 | ID | 缺口与证据 | 处置 |
 |---|---|---|
 | A1 | 计划行 359/361 验收「`frontend/src` 下 `*.bak`=0」。复核实测：`src` 下 52 个 `.bak` + 17 个 `.backups/`，`frontend/` 全域 72 个 `.bak` + 19 个 `.backups/`（全部 2026-09-13 生成，含 `frontend/.backups`、`frontend/.tmp/.backups`）。`.gitignore` 的 `*.bak`/`.backups/` 规则使其对 `git status` 完全隐形，导致回退无法被发现。修复来源：P0-2/P1-x 批量重构持续用 `.backups` 做安全副本。 | **批次 1 已清理**（72 + 19 → 0 / 0）并新增门禁（见 E1）；计划 P0-1 状态行已加复检备注 |
-| A2 | 计划行 379/381 验收「> 500 行文件数降至 0」。复核实测 3 个：`styles/globals.css`=1043、`components/workspace/message-markdown-streaming.ts`=525（P1-2 `c12e0cf4` 引入）、`components/workspace/trajectory/subagent-session-dialog.test.tsx`=516（`8c55411d`）。按计划 ts/tsx 口径为 2 个；M4 阈值（≤ 10）仍满足。另 §9.3 有陈旧行数漂移：event-readers 311（记 230）、primitives 224（记 287）、sessions.ts 186（记 141）、history-artifacts 306（记 296）、apply 333（记 330）——仍全部 < 500。 | 已登记；拆分待排期（候选：先拆 `message-markdown-streaming.ts` 与测试文件，`globals.css` 需按 token/基础/组件层拆分并保序验证） |
+| A2 | 计划行 379/381 验收「> 500 行文件数降至 0」。复核实测 3 个：`styles/globals.css`=1043、`components/workspace/message-markdown-streaming.ts`=525（P1-2 `c12e0cf4` 引入）、`components/workspace/trajectory/subagent-session-dialog.test.tsx`=516（`8c55411d`）。按计划 ts/tsx 口径为 2 个；M4 阈值（≤ 10）仍满足。另 §9.3 有陈旧行数漂移：event-readers 311（记 230）、primitives 224（记 287）、sessions.ts 186（记 141）、history-artifacts 306（记 296）、apply 333（记 330）——仍全部 < 500。 | **批次 2 已修复（2026-09-13）**：① `message-markdown-streaming.ts`(525) → 目录 barrel `message-markdown-streaming/{types 59, blocks 102, fence 93, tails 276, index 19}`（14 个导出逐个对拍，原 .ts 删除）；② `subagent-session-dialog.test.tsx`(516) → 301 行主文件（12 个 it 标题 1:1）+ `subagent-session-dialog.test-helpers.ts`(133) + `subagent-session-target.test.ts`(51) + `subagent-session-dialog-trajectory.test.tsx`(102)；③ `styles/globals.css`(1043) → 入口 17 + `styles/globals/{theme 110, tokens 335, themes 150, base 435}`（切割脚本内置字节级重组校验，保序）。复测：`frontend/src` 内 > 500 行文件 **0 个**；构建产物 CSS 与拆分前同尺寸同 SHA256。**2026-09-13 复检（P2-1A 第八项交付后）回退**：> 500 行文件 2 个——`pages/usage-analytics/quota.tsx`=559、`pages/workspace-page.tsx`=512（随 P2-1A 接线增量引入，非拆分回退）；该口径无门禁看护（`scripts/` 仅 i18n 与 no-backups 两个脚本），所以未被拦截；处置已定（批次 8，2026-09-13）：`quota.tsx` 559 → 429 + `quota-shared.ts` 74 + `quota-atoms.tsx` 73；`workspace-page.tsx` 512 → 437 + `hooks/workspace/use-workspace-session-actions.ts` 133（重命名 / 归档 / 归档恢复 / Fork / 删除 / 目录内新建六个动作收口，仅搬迁不改语义）；新增 `scripts/verify-max-lines.mjs` 门禁（非空行 ≤ 500、i18n 词典整树豁免、501 行探针负路径 exit 1）并入 `npm run lint` 与 `npm run verify:lines`，该口径自此有门禁看护；复测 `frontend/src` 内 > 500 非空行文件 **0 个**（最大 `workspace-sidebar.tsx`=483），门禁四件套 lint 0 error / 3 基线 warning（i18n scanned=605 / violations=0、备份门禁 874 文件 0 残留）、test 156 文件 / 1026 用例、build exit 0、test:e2e 57 passed。 |
 | A3 | `@theme` 映射实测 89 条（计划记 87）；残留 `[var(--…)]` 任意值实测 22 行/14 文件（记 20）；`landing.css` 变量声明 0 成立。 | 已登记（P0-4 复检备注） |
 
 ### B. 零交付类（有任务定义、无代码）
@@ -55,17 +55,17 @@
 | ID | 计划位置 | 复核证据 | 处置 |
 |---|---|---|---|
 | B1 | §6.2 P1-5（行 466-470） | `resolveSubmitMode` / `busyEnter` / `updateQueue` / `steeringAvailable` 在 `frontend/src` 全零命中；"queue/队列" 命中均为无关的 provider 请求队列设置。依赖后端队列 API（未就绪）。 | §6.2 已补「未开始」状态行；待排期 |
-| B2 | §6.2 P1-8（行 484-489） | 统一连接呈现件 / 顶栏与消息流尾状态条 / 直连 `/api/agent/chat` 恢复 / 手动重试与 last seq 拉齐——四项新交付零落地；仅有 §5.5 A1/A2 预登记既有资产（`use-session-runtime-stream.ts` 重连、logs 连接标签）。 | 同上；待排期 |
-| B3 | §6.2 P1-9（行 491-496） | 侧栏行状态指示 / 归档与非破坏删除 / 归档恢复 / Fork / 行内时间浮层 / 空态区分均无；后端 `archive`/`activate`/`close`、`/sessions/stats` 已就绪但前端零消费。 | 同上；待排期 |
-| B4 | §6.2 P1-10（行 498-502） | `ErrorBoundary`/`componentDidCatch`/chunk 重试零命中；`main.tsx:37` 仍 `document.getElementById("root")!`，`bootstrapDocumentSettings()`（`:17-35`）在挂载前无捕获。 | **批次 1 启动实现**（worktree 子任务，验收含单测与全门禁） |
-| B5 | §6.3（行 504-611） | P2 共 11 项：0 项作为 P2 交付；P2-1、P2-7 部分（见 C2/C3）；P2-2/3/4/5/6/8/9/10/11 零实施（依据：a11y/axe 零命中、无视觉 golden、无虚拟化与基准、侧栏无归档/拖拽、无 Files changed 行、无 jobs/goal/子代理树面板、无 `fs/*` 消费、右栏硬编码两面板）。 | §6.3 已加「未开始」说明行；待 M3/M4 排期 |
+| B2 | §6.2 P1-8（行 486-493） | 统一连接呈现件 / 顶栏与消息流尾状态条 / 直连 `/api/agent/chat` 恢复 / 手动重试与 last seq 拉齐——四项新交付零落地；仅有 §5.5 A1/A2 预登记既有资产（`use-session-runtime-stream.ts` 重连、logs 连接标签）。 | **已修复**（2026-09-13）：新增 `lib/connection-status.ts`（统一词汇/配色/文案 + logs 状态映射 + `withTransportDegradation`）、`components/ui/connection-status-badge.tsx`（pill/header 双变体、非在线态手动重试）、`hooks/workspace/use-connection-status-labels.ts`；会话流暴露 `connectionStatus/retryConnection`（复用既有常驻重连，状态按会话键存储，effect 同步段零 setState）；顶栏 + 消息流尾接入；`workspace-page.tsx` 收口直连 chat 断线；日志页头改挂共享呈现件（`variant="header"`，视觉不变） |
+| B3 | §6.2 P1-9（行 491-496） | 侧栏行状态指示 / 归档与非破坏删除 / 归档恢复 / Fork / 行内时间浮层 / 空态区分均无；后端 `archive`/`activate`/`close`、`/sessions/stats` 已就绪但前端零消费。 | **已修复**（2026-09-13）：行状态指示（等待类优先级：等待审批 > 计划待审 > 等待回答 > 运行中 > 子代理 > 归档/关闭 > 空闲）、归档 + 归档恢复 + 非破坏删除（仅移除会话引用，删除当前会话时回落工作台首页）、Fork（后端无克隆 API，以「同标题后缀 + 继承工作目录」新开独立会话，不伪造分支历史）、操作菜单（Esc / ↑↓ / Home/End + `aria-haspopup`/`aria-expanded`）、行内相对时间 + 「创建于」浮层、空态三态（无会话 / 无匹配 / 全部归档）齐备；详见 §3 批次 3 |
+| B4 | §6.2 P1-10（行 498-502） | `ErrorBoundary`/`componentDidCatch`/chunk 重试零命中；`main.tsx:37` 仍 `document.getElementById("root")!`，`bootstrapDocumentSettings()`（`:17-35`）在挂载前无捕获。 | **已修复**（2026-09-13）：新增 `components/errors/*`（全局/路由/面板三层边界 + 统一错误面 + chunk 可重试路由壳）、`lib/lazy-retry.ts`（尝试上限 + 400/1200ms 递增退避 + `ChunkLoadError`）、`core/bootstrap/*`（`#root` 解析 / 启动失败可见面 / 启动完整性检查）、`core/logger.ts`；`main.tsx` 全启动路径转可见错误面，`App.tsx` 路由改 `RetryableLazyRoute`，右栏两面板挂 `PanelErrorBoundary`；双语 `errors.*` 10 键对齐 |
+| B5 | §6.3（行 504-611） | P2 共 11 项：0 项整包交付，P2-1A 已有八项子能力落地（后台任务 Jobs、运行时状态快照、用量 / 配额面板、会话元数据搜索、运行时文件读取与预览、技能市场与热重载、子代理控制面（AgentControl 身份图）、侧栏会话统计摘要（`/sessions/stats`），2026-09-13）；P2-1、P2-7 部分（见 C2/C3）；P2-2/3/4/5/6/8/9/10/11 零实施（依据：a11y/axe 零命中、无视觉 golden、无虚拟化与基准、侧栏无分组 / 排序 / 拖拽（归档 / 归档恢复已由批次 3 交付）、无 Files changed 行、无 goal 指示 / 任务状态条（子代理 lineage 与后代目录已由 P2-1A 控制面交付）、无 `fs/*` 写入消费（`fs/read-file` 已接入）、skills 市场 / 热重载已接入、右栏硬编码两面板）。 | §6.3 已启用「P2-1A 逐项」状态块（Jobs、运行时状态快照、用量 / 配额、会话元数据搜索、运行时文件读取与预览、技能市场与热重载、子代理控制面、会话统计已完成）；待 M3/M4 排期 |
 
 ### C. 部分交付类
 
 | ID | 已交付 | 缺口 | 处置 |
 |---|---|---|---|
 | C1 | P1-4 草稿/附件/命令机制/引用菜单/combobox 语义齐备 | `@` 候选仅 file 组；session/subagent 组待数据源（计划行 464 已披露） | 保持（依赖数据源） |
-| C2 | P2-1 A 层：approval `expired`（经 P1-7）、SSE replay（经 P1-8）已可用；usage 面板部分可用 | 其余 16 行未接：jobs、subagent 控制面、skills 市场/热重载、`/sessions/search\|stats`、`fs/read-file\|write-file`、deliverables 字段、plugin `config_schema`、`top_p`、goal 快照、`Last-Event-ID`、queue/steering、upload、MCP 目录、`/artifacts`、currency cost | 待排期 |
+| C2 | P2-1 A 层：approval `expired`（经 P1-7）、SSE replay（经 P1-8）已可用；**用量 / 配额面板已交付**（`/usage/stats|ledger|policy` 三端点 + token 口径，403 / 503 / 未配置上限均如实降级不伪造，2026-09-13）；**后台任务 Jobs 全链路已交付**（纯前端接线：五端点 API 归一化 + 面板 + runtime 事件联动 + 单测/e2e，2026-09-13）；**运行时状态快照已交付**（`GET /sessions/{id}/runtime` → `types/runtime/session-runtime.ts` + `api/runtime/session-runtime.ts` + `lib/pending-interaction/snapshot.ts` + `hooks/workspace/use-session-runtime-state.ts` + `use-pending-interactions` 水合 + `workspace-page` 接线，关闭「重载/重连后未决审批与提问丢失」，2026-09-13）；**会话元数据搜索已交付**（`POST /sessions/search` 服务端 user/tags AND/state 过滤 + 弹层（计数、触顶提示、空态与不可用降级）+ 竞态收口 hook，2026-09-13）；**运行时文件读取与预览已交付**（`POST /api/runtime/fs/read-file`：base64 解码分型（text / empty / binary / tooLarge）+ 预览弹层 + 工具行文件链接入口，空 / 二进制 / 超限 / 读失败均如实呈现、不落本地兜底，2026-09-13）；**技能市场与热重载已交付**（`GET /skills`、`/skills/{name}`、`/skills/search`、`/skills/stats`、`/skills/hot-reload/stats` 与 `POST /skills/hot-reload/{start,stop,reload}` 八端点 + 目录 / 检索 / 详情 / 统计 / 热重载五区页：目录结构异常不伪装空市场、坏条目只丢单行且保留后端 `count`、semantic 请求被降级时如实标注 `resolved_mode` / `used_embedding`、403 / 503 / policy 禁用均如实降级且不渲染伪 watching，2026-09-13）；**子代理控制面已交付**（`GET /agent-control/agents` + `POST /sessions/{id}/agents/{agent_id}/close|resume`：两段式身份图加载 + 会话头 lineage 面包屑 + 后代目录 + 独立 Stop / Resume、未知状态不提供动作、控制面未启用如实降级，2026-09-13）；**侧栏会话统计摘要已交付**（`GET /sessions/stats`：按 `user_id` 聚合、与侧栏用户筛选同一口径，计数只显非零 chip，不可用 / 失败如实降级且不伪造 0 计数，2026-09-13） | 其余 9 行未接：`fs/write-file\|append-file`（写入侧；读侧 `fs/read-file` 已接）、deliverables 字段、plugin `config_schema`、`top_p`、goal 快照、`Last-Event-ID`、queue/steering、upload、MCP 目录、`/artifacts`、currency cost | Jobs、「审批闭环」、usage / 配额、会话搜索、fs/read-file、skills 市场 / 热重载、子代理控制面与会话统计行已关闭，余 9 行待排期 |
 | C3 | P2-7 机制：registry/四分类/键盘 UI/dispatch/`no-executor` 提示 | 无内置命令与执行器（export/feedback/rename），宿主未接 `commands`/`onCommand` | 待排期（随后端/宿主接线） |
 
 ### D. 台账 / 文档类
@@ -100,25 +100,95 @@
 | D4 | §5.5 A2 与 P1-8 背景中的 `logs-page.tsx:132-166,301-303` 引用更新为拆分后的实际路径 | 计划文件行 299 / 488 |
 | D5 | 在 P1-5 状态行与 §9.4 标注跨计划编号冲突 | 计划文件 §6.2 / §9.4 |
 | D6 | 头部状态由「草案（待评审）」改为「执行中」并链接本清单；i18n 计数漂移入 §9.4 | 计划文件行 3 |
-| B4 | 启动 P1-10 实现（worktree 隔离子任务：三层错误边界、chunk 重试退避、`#root`/启动失败可见面、启动完整性检查、错误走 logger、zh/en 双语文案、单测；验收=lint/test/build 全绿） | 子任务运行中，合入前由本会话复核 |
+| B4 | P1-10 实现（worktree 隔离子任务，20 个文件）。子任务 79 步后被 `execution_context` 取消（`session_end.status=stopped`，非代码失败），产出经本会话逐文件复核后收编主树：三层错误边界、chunk 上限 + 递增退避重试、`#root`/启动失败可见面、启动完整性检查、统一 logger、zh/en 10 键、5 个测试文件 | 隔离树：lint 0 error / 3 基线 warning、i18n 550/0、**vitest 126 文件 / 778 用例**、build exit 0；主树复跑同结果 |
+
+### 批次 2（2026-09-13）
+
+| 项 | 动作 | 验证 |
+|---|---|---|
+| A2 | **三类超长文件拆分**（行为中性：公共 API 不变、既有断言零改动）：① `components/workspace/message-markdown-streaming.ts`(525) → 目录 barrel `message-markdown-streaming/{types 59, blocks 102, fence 93, tails 276, index 19}`；② `trajectory/subagent-session-dialog.test.tsx`(516) → 301 行主文件（12 个 it 标题 1:1）+ `subagent-session-dialog.test-helpers.ts`(133) + `subagent-session-target.test.ts`(51) + `subagent-session-dialog-trajectory.test.tsx`(102)；③ `styles/globals.css`(1043) → 入口 17 + `styles/globals/{theme 110, tokens 335, themes 150, base 435}`（切割脚本先做字节级重组校验再落盘，保序） | `frontend/src` 内 > 500 行文件 **3 → 0**（`Get-ChildItem -Recurse` 实测）；构建产物 `index-B1wjI4k5.css`(129938 B) / `landing-page-D_9RRpVY.css`(1407 B) 与拆分前**同尺寸同 SHA256**（逐字节一致）；主树复跑：`pnpm lint` 0 error / 3 基线 warning（i18n scanned=555 / violations=0、备份门禁 777 文件 0 残留）、`vitest` **128 文件 / 778 用例全绿**（73.3s）、`test:e2e` **35 passed**（1.5m）、build exit 0 |
+| B2 | **P1-8 连接状态统一与断线恢复收口**（复用既有重连，未新增第二套退避）：新增 `lib/connection-status.ts`（统一状态词汇/配色/文案 + `connectionStatusFromLogsState` + `withTransportDegradation`）、`components/ui/connection-status-badge.tsx`（pill/header 双变体，非在线态挂手动重试）、`hooks/workspace/use-connection-status-labels.ts`；`use-session-runtime-stream.ts` 暴露 `connectionStatus/retryConnection`（状态按「会话键」存储：无会话派生 idle、重试回落 connecting；effect 同步段零 setState + 守卫式状态更新避免逐事件重渲染）；顶栏与消息流尾接入状态条；`workspace-page.tsx` 收口直连 `/api/agent/chat` 断线；日志页头改挂共享呈现件（`variant="header"`，视觉不变）；新增 `e2e/connection-recovery.spec.ts` | `pnpm lint` 0 error / 3 基线 warning（i18n scanned=558 / violations=0、备份门禁 784 文件 0 残留）；**vitest 131 文件 / 793 用例**（65.8s）；`build` exit 0；`test:e2e` **36 passed**（1.5m，含新增用例：断线状态可见 + 手动重试不重发 chat、重放 delta 幂等） |
 
 ### 批次 2 建议（按优先级）
 
-1. **B4 验收与合入**（错误边界 + 单测 + 门禁复跑；改 `main.tsx` 属高风险入口，需人工复核 diff）。
-2. **A2 拆分**：先 `components/workspace/message-markdown-streaming.ts`（525）与 `trajectory/subagent-session-dialog.test.tsx`（516）；`styles/globals.css`（1043）单独排期（按 token/基础/组件层拆分，需 e2e 视觉校验保序）。
-3. **B2 → B1 → B3**：连接状态统一（复用既有重连，风险最低）→ 队列与 Steering（依赖后端 API，需先确认接口就绪度）→ 会话列表状态与整理（后端已就绪，纯前端接线）。
+1. ~~**B4 验收与合入**~~ ✅ 已完成（2026-09-13）：`main.tsx` 启动路径逐行复核（`bootstrapDocumentSettings` / `createRoot` / `render` 全部 try/catch，失败落可见错误面且不覆盖已有 `role="alert"`）；`App.tsx` 的 loader 提升为模块级稳定引用，手动重试经 generation 重建而非无界重载。下一项转 A2。
+2. ~~**A2 拆分**~~ ✅ 已完成（2026-09-13）：三个目标全部落地（5 + 4 + 3 个文件）；`globals.css` 保序拆分以「切割脚本字节级重组校验 + 构建产物 CSS SHA256 对拍」双重验证，拆分后 `pnpm test:e2e` **35 passed** 复跑。下一项转 B2。
+3. ~~**B2**~~ ✅ 已完成（2026-09-13）：统一连接呈现件（pill/header 双变体，日志页头与会话流共用）→ 顶栏/消息流尾状态条 → 直连 chat 断线收口 → 手动重试复用会话流入口（幂等：重试不重发 chat、重放 delta 不重复渲染）。下一项转 **B1 → B3**：队列与 Steering（依赖后端 API，需先确认接口就绪度）→ 会话列表状态与整理（后端已就绪，纯前端接线）。
 4. **D2/E3**：P2 启动时建立 §6.3 状态登记；视觉回归/性能基准随 P2-4/P2-5。
+5. ~~**B3**~~ ✅ 已完成（2026-09-13，批次 3）：会话行状态指示（等待类优先级合并）→ 操作菜单 Fork/归档/恢复/非破坏删除（键盘 + aria）→ 行内相对时间与「创建于」浮层 → 空态三态；Fork 以「同标题后缀 + 继承工作目录」新开独立会话（后端无克隆 API，不伪造分支历史）。
+
+### 批次 3（2026-09-13）
+
+| 项 | 动作 | 验证 |
+|---|---|---|
+| B3 | **P1-9 会话列表状态与整理能力**：新增 `workspace-sidebar/session-row-actions.ts`（`buildForkSessionTitle` / `buildForkSessionRequest` / `resolveSelectionAfterSessionDelete`）+ 单测 4 例；`session-row-status.ts` / `state-icon-utils.ts` / `labels.ts` 行状态指示（等待审批 > 计划待审 > 等待回答 > 运行中 > 子代理 > 归档/关闭 > 空闲）；`session-item.tsx` 菜单补齐 Fork / 归档 / 恢复 / 删除（Esc / ↑↓ / Home/End / Tab + `aria-haspopup`/`aria-expanded`）；`sessions-section.tsx` 空态三态与菜单接线；`workspace-page.tsx` 三个处理器（Fork 新会话、非破坏删除 + 当前会话回落 `/workspace/chats/new`、归档/恢复沿用）+ `workspace-shell{s,}` / `workspace-sidebar` 全链路传参；双语 `sidebar.session.{fork,forkSuffix,delete}` 对齐；`e2e/mock-server.mjs` 补 POST 建会话确定性 id（`e2e-fork-N`）与单会话 DELETE；新增 `e2e/sidebar-session-actions.spec.ts` 2 用例 | `pnpm lint` **0 error / 3 基线 warning**（i18n scanned=560 / violations=0、备份门禁 789 文件 0 残留；清理本次 mock 编辑产生的 `e2e/.backups/` 后 `verify:clean` 复跑 OK）；`pnpm test` **133 文件 / 803 用例全绿**（73.1s，B3 新增 1 文件 / 4 用例）；`pnpm build` exit 0；`pnpm test:e2e` **38 passed**（1.6m，含新增两用例） |
+
+### 批次 4（2026-09-13）
+
+| 项 | 动作 | 验证 |
+|---|---|---|
+| P2-1A-Jobs | **后台任务（Jobs）面板**（缺口 C2 首项，P2 起点；后端零改动，纯前端接线）：`types/runtime/jobs.ts` + `api/runtime/jobs.ts`（五端点归一化，兼容 `background.Job` 的 PascalCase 序列化键）；`hooks/workspace/use-background-jobs.ts`（打开拉取、`job_*` runtime 事件 800ms 合并刷新、live 任务 5s 轮询、取消后即时刷新）+ `use-elapsed-tick.ts`（仅 live 存在时计时）；`components/workspace/jobs-panel.tsx` + `jobs-panel-shared.ts`（会话头顶栏入口、live/settled 分区、耗时与退出码、输出分页展开、Esc/遮罩关闭 + 焦点恢复）；双语 `panels.jobs.*`；`e2e/mock-server.mjs` 新增 jobs 五端点与 `POST /api/_test/jobs` 注入（`/api/_test/reset` 清空） | `pnpm lint` **0 error / 3 基线 warning**（i18n scanned=567 / violations=0、备份门禁 802 文件 0 残留）；`pnpm test` **136 文件 / 837 用例全绿**（80.1s，新增 3 文件 / 34 例：`api/runtime/jobs.test.ts` 11、`components/workspace/jobs-panel-shared.test.ts` 15、`components/workspace/jobs-panel.test.tsx` 8）；`pnpm build` exit 0；`pnpm test:e2e` **40 passed**（1.6m，含新增 `e2e/jobs-panel.spec.ts` 2 例） |
+| P2-1A-Runtime 快照 | **运行时状态快照 → 待交互重建**（关闭 P1-7 遗留的「重载 / 重连后未决审批与提问丢失」，A 表「审批闭环」行整行闭环；后端零改动）：`types/runtime/session-runtime.ts`（+ barrel）；`api/runtime/session-runtime.ts`（`getSessionRuntimeState`：404 按空态、结构不满足抛错不伪造、snake_case/camelCase 双兼容、id 编码）；`lib/pending-interaction/snapshot.ts`（幂等重建 + 不回退 `resolving`/终态 + 缺席结算 `snapshot_absent` + `expires_at` 超时兜底）；`hooks/workspace/use-session-runtime-state.ts`（按会话键存、切换/卸载 abort、同步段零 setState、`refresh`）；`hooks/workspace/use-pending-interactions.ts` 水合 + `workspace-page.tsx` 接线；`e2e/mock-server.mjs` 新增由事件存储推导未决项的 `GET /sessions/{id}/runtime` | `pnpm lint` **0 error / 3 基线 warning**（i18n scanned=571 / violations=0、备份门禁 809 文件 0 残留）；`pnpm test` **139 文件 / 862 用例全绿**（78.1s，新增 3 文件 / 25 例：`api/runtime/session-runtime.test.ts` 9、`lib/pending-interaction/snapshot.test.ts` 10、`hooks/workspace/use-session-runtime-state.test.tsx` 6）；`pnpm build` exit 0；`pnpm test:e2e` **41 passed**（1.6m，含新增 `e2e/pending-interaction.spec.ts` P1-7d；反向对照：临时摘除 mock 端点后该用例失败，证明卡片由快照水合而非事件流） |
+| P2-1A-Usage | **用量 / 配额面板**（缺口 C2「usage / 配额」行；P2 第二项；后端零改动，纯前端接线，**严格 token 口径、不推算货币成本**）：`types/runtime/usage.ts` + `api/runtime/usage.ts`（`/usage/stats|ledger|policy` 三端点归一化；缺 `usage`/`policy`/`records` 判结构失败抛错不伪造空态；`scope` 缺席即全局、`quota` 缺席显式降级；403/503 保留 `status`）；`hooks/use-usage-quota.ts`（三段独立请求 / 独立错误、按作用域重取、筛选后重取账本、已知作用域保留供回选）；`pages/usage-analytics/quota.tsx`（`UsageQuotaPanel`：策略摘要、余量与生效来源、账本筛选与匹配计数、403 补 token 提示、503 账本未配置、未配置上限显示「无配额快照」）；`pages/usage-analytics/overview.tsx` 挂载 + 双语 `usageAnalytics.quota.*`；`e2e/mock-server.mjs` 新增 usage 三端点夹具（全局带 `scopes`、作用域带 `scope + quota`、`tenant-a` 无上限返回 `quota: null`、账本支持 entrypoint / skill / success / limit 过滤）、新增 `e2e/usage-quota.spec.ts` 2 例 | `pnpm lint` **0 error / 3 基线 warning**（i18n scanned=575 / violations=0、备份门禁 817 文件 0 残留）；`pnpm test` **142 文件 / 891 用例全绿**（84.7s，新增 3 文件 / 29 例：`api/runtime/usage.test.ts`、`hooks/use-usage-quota.test.tsx`、`pages/usage-analytics/quota.test.tsx`）；`pnpm build` exit 0；`pnpm test:e2e` **43 passed**（1.7m，含新增 `e2e/usage-quota.spec.ts` 2 例） |
+| P2-1A-SessionSearch | **会话元数据搜索**（缺口 C2「sessions/search」行；后端零改动，纯前端接线）：`types/runtime/sessions.ts` 增补 `RuntimeSessionRecord` / `RuntimeSessionSearchFilters`（入参 camelCase）/ `RuntimeSessionSearchEcho`（后端 filters 回显 camelCase，与请求体 snake_case 不同名）/ `RuntimeSessionSearchResponse`；`api/runtime/session-search.ts`（请求体 snake_case、空 user/tags/state 省略、`limit` 默认 50、offset 收口；`sessions` 非数组抛错不伪装空结果、单条缺 `id` 只丢该条；`isSessionSearchUnavailable` 归类 404/405/501/503 与 `STORE_UNAVAILABLE`）；`hooks/workspace/use-session-search.ts`（idle → loading → ready/error：序号丢弃过期响应、新检索与卸载 abort 在途请求、主动取消不落错误态）；`components/workspace/session-search-dialog.tsx` + `session-search-shared.ts`（用户 / 状态 / 标签 AND 三组筛选、结果行与相对时间、`N session(s) matched` 计数与触顶提示、空态与不可用降级分列、Esc/遮罩关闭 + 焦点回位）；侧栏入口接线（打开即重挂载）；双语 `panels.sessionSearch.*`；`e2e/mock-server.mjs` 新增 `POST /api/runtime/sessions/search` 与由 seed 派生的 `/sessions/users`、新增 `e2e/session-search.spec.ts` 3 例 | `pnpm lint` **0 error / 3 基线 warning**（i18n scanned=579 / violations=0、备份门禁 826 文件 0 残留）；`pnpm test` **144 文件 / 908 用例全绿**（98.4s，新增 2 文件 / 17 例：`api/runtime/session-search.test.ts` 12、`components/workspace/session-search-dialog.test.tsx` 5）；`pnpm build` exit 0；`pnpm test:e2e` **46 passed**（1.8m，含新增 `e2e/session-search.spec.ts` 3 例） |
+| P2-1A-FilePreview | **运行时文件读取与预览**（缺口 C2「fs/read-file」行；后端零改动，纯前端接线，**内容唯一来源为运行时进程返回的字节，不做本地兜底缓存或占位文本**）：`lib/file-preview/decode.ts`（base64 解码 → text / empty / binary（NUL 或 UTF-8 失败）、行数统计、`formatByteSize`）；`types/runtime/files.ts`（+ barrel）与 `api/runtime/files.ts`（`FILE_READ_PATH`、`FILE_PREVIEW_MAX_BYTES = 1_000_000`、`normalizeFileReadPayload`、`readRuntimeFile`、`isFileReadUnavailable`）；`hooks/workspace/use-file-preview.ts`（closed → loading → ready/error：序号丢弃过期响应、open / retry / close abort 在途请求、超限 `tooLarge` 且 `body=null`）+ `hooks/workspace/use-focus-restore.ts`；`components/workspace/file-preview-dialog.tsx`（`role="dialog"` + `aria-modal` + `tabIndex={-1}` + 打开即聚焦、`data-testid` 家族、错误分「端点不可用（带状态码）」与「真实失败（后端 error 文本）」）；工具行文件链接入口（`data-tool-row-file-link="true"`）；双语 `panels.filePreview.*`；`e2e/mock-server.mjs` 新增 `POST /api/runtime/fs/read-file`（未登记路径 **500 + `no such file`**，与后端口径一致、不伪装 404）+ `e2e/support.ts` 新增 `seedRuntimeFiles`、新增 `e2e/file-preview.spec.ts` 3 例 | `pnpm lint` **0 error / 3 基线 warning**（i18n scanned=584 / violations=0、备份门禁 837 文件 0 残留）；`pnpm test` **147 文件 / 934 用例全绿**（82.05s，新增 3 文件 / 26 例：`lib/file-preview/decode.test.ts` 8、`api/runtime/files.test.ts` 9、`components/workspace/file-preview-dialog.test.tsx` 9）；`pnpm build` exit 0；`pnpm test:e2e` **49 passed**（1.9m，含新增 `e2e/file-preview.spec.ts` 3 例） |
+
+### 批次 5（2026-09-13）
+
+| 项 | 动作 | 验证 |
+|---|---|---|
+| P2-1A-Skills（台账回填） | **技能市场与热重载**（缺口 C2「skills 市场 / 热重载」行；后端零改动、纯前端接线）：`types/runtime/skills.ts`（+ barrel）；`api/runtime/skills.ts`（八端点归一化：非数组抛错不伪装空市场、坏条目只丢单行且保留后端 `count`、`mutation_policy` / `embedding` 缺席置 `null` 显示未知、检索 `limit` 默认 20 / 上限 200、`isSkillsUnavailable` 与 `isSkillsForbidden` 分类不混用、写操作 `X-Skills-Admin-Token` 空串不发头）；`hooks/use-skills-market.ts`（三段独立请求 / 独立错误、检索一份在途 + 序号丢弃过期响应、写操作成功以响应 stats 覆盖本地快照）；`pages/skills-page.tsx` + `pages/skills/{catalog,detail,stats,hot-reload,shared}.tsx`（目录 / 检索：`resolved_mode` 与 `used_embedding` 原样展示；详情失败不回落本地缓存；policy 三态；热重载 503 不渲染伪 watching / 403 提示补令牌）；`App.tsx` 路由 + runtime-config 与侧栏入口；双语 `skills.*`；`e2e/mock-server.mjs` skills 全族夹具（含缺 `name` 坏条目且 `count` 上报 3）+ `e2e/skills-market.spec.ts` 4 例 | `pnpm lint` **0 error / 3 基线 warning**（i18n scanned=593 / violations=0、备份门禁 850 文件 0 残留）；`pnpm test` **148 文件 / 948 用例全绿**（101.94s，新增 1 文件 / 14 例：`api/runtime/skills.test.ts` 14）；`pnpm build` exit 0；`pnpm test:e2e` **53 passed**（2.2m，含新增 `e2e/skills-market.spec.ts` 4 例） |
+
+### 批次 6（2026-09-13）
+
+| 项 | 动作 | 验证 |
+|---|---|---|
+| P2-1A-AgentControl | **子代理控制面（AgentControl 身份图）**（缺口 C2「subagent 控制面」行；后端零改动、纯前端接线；动作面只做「看 + 停 + 恢复」）：`types/runtime/agents.ts`（`active` / `stale` / `closed` / `unknown` + `RuntimeAgentRecord` / `RuntimeAgentCatalog` / `RuntimeAgentMutation`）；`api/runtime/agents.ts`（`listRuntimeAgents` 三类过滤 + `include_closed`、前端收口 `limit` 默认 200 / 上限 500；`closeRuntimeAgent` / `resumeRuntimeAgent`；`normalizeRuntimeAgentStatus` 未知值一律 `unknown`；`isAgentControlUnavailable` 404/405/501/503）；`hooks/use-session-agents.ts`（两段式加载 + `pickCurrentAgent` / `buildAgentLineage` / `listAgentDescendants` / `deriveSessionAgentTree`；AbortController + 序号；身份行缺失不等于错误；`truncated` 按后端 `count` 比较；close / resume 只以响应身份行覆盖本地行）；`components/workspace/session-agents-panel.tsx` + `session-agents-panel-shared.ts`（portal `role=dialog` 弹层：lineage 链 + 后代目录（运行 / 已结算分区、元数据、触顶提示）、`active` / `stale` 可停止、`closed` 可恢复、`unknown` 不给动作）；`workspace-shell-topbar.tsx` lineage 面包屑 + 入口（含后代计数）、`main-section.tsx` 装载；双语 `panels.agents.*` + `topbar.agents` / `agentsBreadcrumb` | `pnpm exec vitest run src/components/workspace/session-agents-panel.test.tsx src/components/workspace/session-agents-panel-shared.test.ts` **20 passed**；`pnpm lint` **0 error / 3 基线 warning**（i18n scanned=598 / violations=0、备份门禁 861 文件 0 残留）；`pnpm test` **152 文件 / 997 用例全绿**（103.40s，新增 4 文件 / 49 例：`api/runtime/agents.test.ts` 17、`hooks/use-session-agents.test.tsx` 12、`session-agents-panel-shared.test.ts` 9、`session-agents-panel.test.tsx` 11）；`pnpm build` exit 0；`pnpm test:e2e` **53 passed**（2.2m，本批未新增 e2e 用例） |
+
+### 批次 7（2026-09-13）
+
+| 项 | 动作 | 验证 |
+|---|---|---|
+| P2-1A-SessionStats | **侧栏会话统计摘要**（缺口 C2「`/sessions/stats`」行；后端零改动、纯前端接线；口径硬约束：只呈现后端上报计数，不推算 / 不补零）：`types/runtime/sessions.ts` 增补 `RuntimeSessionStats` / `RuntimeSessionStatsResponse`；`api/runtime/session-stats.ts`（`fetchRuntimeSessionStats`：`user_id` 空串不发查询参数；`normalizeSessionStats`：`stats` 非对象即抛错、计数只收有限非负数取整、`tags` 只保留字符串键 → 有限数且不构造占位标签；`isSessionStatsUnavailable`：404/405/501/503 判不可用，与真实失败分列）；`hooks/workspace/use-session-stats.ts`（idle → loading → ready/error + `refresh()`；AbortController + 请求序号：userId 变化 / 重跑 / 卸载中止在途、过期响应丢弃；主动 abort 不落错误态；失败保留上次成功数据）；`components/workspace/workspace-sidebar/session-stats-summary.tsx` + `session-stats-summary-shared.ts`（total 恒显、其余计数非零才显 chip（`data-testid` 家族 `session-stats-summary` / `session-stats-chip-*` / `session-stats-loading` / `session-stats-unavailable` / `session-stats-error` / `session-stats-retry`）；加载中不渲染骨架数值；不可用 / 失败各有独立呈现且可重试，不回落成 0 计数）；接线：`workspace-sidebar.tsx` 与侧栏用户筛选用同一 `userId`、`sessions-section.tsx` 渲染并透传 `refresh`；双语 `workspace.base.sessionStats.*`；`e2e/mock-server.mjs` 新增 `GET /api/runtime/sessions/stats` 夹具（按 `user_id` 聚合、camelCase `totalMessages`）+ `e2e/support.ts` 的 `seedSession({ userId, state })` 维度 | `pnpm exec vitest run`（本批 4 文件）**29 passed**（`api/runtime/session-stats.test.ts`、`hooks/workspace/use-session-stats.test.tsx`、`session-stats-summary-shared.test.ts`、`session-stats-summary.test.tsx`）；全量门禁：`pnpm lint` **0 error / 3 基线 warning**（i18n scanned=602 / violations=0、备份门禁 870 文件 0 残留）；`pnpm test` **156 文件 / 1026 用例全绿**（107.02s，新增 4 文件 / 29 例）；`pnpm build` exit 0；`pnpm test:e2e` **57 passed**（2.2m，含新增 `e2e/session-stats.spec.ts` 4 例：默认用户聚合与 seed 一致、切侧栏用户重取、503 如实降级且不渲染任何 chip 并在恢复后重试可见真实计数、500 按真实失败呈现） |
+
+### 批次 8（2026-09-13）
+
+| 项 | 动作 | 验证 |
+|---|---|---|
+| A2-二次修复（P0-2 行数门禁） | **两个「随 P2-1A 接线增量引入」的超长文件拆分 + 行数门禁**（行为中性：公共 API 不变、既有断言零改动）：① `pages/usage-analytics/quota.tsx`(559 非空行) → `quota.tsx` 429 + `quota-shared.ts` 74（常量 / 负载形状辅助 / 纯格式函数）+ `quota-atoms.tsx` 73（`PolicyBadge` / `StatRow` / `QuotaBar`；组件与纯函数分文件以过 `react-refresh/only-export-components`）；② `pages/workspace-page.tsx`(512) → 437 + `hooks/workspace/use-workspace-session-actions.ts` 133（重命名 / 归档 / 归档恢复 / Fork / 删除 / 目录内新建六个动作收口为 hook，页面只保留组合与转发，页面内 `navigate` / `t` 随之下沉）；③ 新增 `scripts/verify-max-lines.mjs`：`frontend/src` 下 `.ts/.tsx` 非空行 > 500 即失败、`src/i18n/resources/**` 整树豁免，并入 `npm run lint` 并新增 `npm run verify:lines`（501 行探针负路径验证 exit 1 后清理） | `npm run verify:lines` **exit 0**（扫描 831 个 `.ts/.tsx`、61 个词典豁免、0 个 > 500，最大 `components/workspace/workspace-sidebar.tsx`=483）；`npx tsc -b --force` exit 0；`npx eslint`（5 个改动文件）exit 0；`npm run lint` **0 error / 3 基线 warning**（i18n scanned=605 / violations=0、备份门禁 874 文件 0 残留）；`npm test` **156 文件 / 1026 用例全绿**（94.7s）；`npm run build` exit 0；`npm run test:e2e` **57 passed**（2.2m，含 `usage-quota.spec.ts`） |
+
+### 复检记录（2026-09-13，P2-1A 第八项交付后）
+
+| 项 | 复检内容 | 结果 |
+|---|---|---|
+| A1 / E1 | `node scripts/verify-no-backups.mjs` | OK（扫描 870 文件，0 处残留） |
+| A2 | `frontend/src` 内 > 500 行文件 | 复检时回退 2 个（`pages/usage-analytics/quota.tsx`=559、`pages/workspace-page.tsx`=512）→ **已处置（批次 8）**：`quota.tsx` 559 → 429（+ `quota-shared.ts` 74 / `quota-atoms.tsx` 73）、`workspace-page.tsx` 512 → 437（+ `hooks/workspace/use-workspace-session-actions.ts` 133）；新增 `scripts/verify-max-lines.mjs` 门禁（非空行 ≤ 500、i18n 词典豁免、负路径已验证 exit 1）并入 `npm run lint`；复测 **0 个**（最大 `workspace-sidebar.tsx`=483） |
+| A3 | `[var(--…)]` 任意值 / `@theme` 映射 | 22 行 / 14 文件；映射 89 条（与登记值一致，无漂移） |
+| B1 | queue / steering 符号（`resolveSubmitMode` / `busyEnter` / `steeringAvailable` / `updateQueue`） | 全零命中，仍未实施（依赖后端） |
+| B5 | P2 零实施依据（axe / golden / 虚拟化 / Files changed / goal 指示 / fs 写入 / 右栏面板数） | 复核成立；**文字漂移**：依据句中「侧栏无归档/拖拽」应为「无分组 / 排序 / 拖拽」（归档 / 归档恢复已由批次 3 交付，已回填） |
+| C1 | `@` 引用分组 | 仅 `files` 组（`main-section.tsx:161-167`，注释已披露会话 / 子代理分组待数据源） |
+| C2 | 余 9 行仍未接 | 复核成立：`src/api/runtime` 无 upload / artifacts / goal / mcp / deliverables；无 `fs/write-file\|append-file` 消费；`top_p` 仅见于配置编辑器域；`currency` 仅见 `siteaccount` 展示单位（非用量货币成本） |
+| C3 | `/` 命令内置执行器 | 仍无（机制与 `no-executor` 提示在位，缺 export / feedback / rename 执行器） |
+| E2 | 动态导入告警 | 仍在（设计口径，非缺口） |
+| E3 | 视觉 golden / 性能基准 | `toHaveScreenshot` / axe 全零命中，仍未建 |
+
+> 上表除 A2 外的复检项均为「复核成立 / 保持开放」；A2 的复检回退已于当日处置完毕（批次 8），门禁四件套复测：`lint` 0 error / 3 基线 warning、`test` 156 文件 / 1026 用例全绿、`build` exit 0、`test:e2e` 57 passed。
 
 ## 4. 复现命令
 
 ```powershell
 cd frontend
-npm run verify:clean   # 新增：P0-1 备份卫生门禁
-npm run lint           # eslint + i18n 扫描 + 备份门禁
-npm run test           # vitest（121 文件 / 758 用例）
-npm run test:e2e       # playwright（35 用例）
-npm run build          # tsc -b + vite build
+pnpm install --frozen-lockfile   # 包管理器以 pnpm-lock.yaml 为准（见 docs/development-guidelines.md §前端）
+pnpm verify:clean      # P0-1 备份卫生门禁
+pnpm verify:lines      # 新增：P0-2 行数门禁（frontend/src 内非空行 > 500 即失败；i18n 词典豁免）
+pnpm lint              # eslint + i18n 扫描 + 备份门禁 + 行数门禁
+pnpm test              # vitest（156 文件 / 1026 用例，2026-09-13 批次 7 / 8 口径实测）
+pnpm test:e2e          # playwright（57 用例，含 B2 断线恢复、B3 会话 Fork/删除、P2-1A Jobs / usage / fs 预览 / 搜索 / stats / skills）
+pnpm build             # tsc -b + vite build
 ```
+
+> 2026-09-13 复核注记：本地若出现 `'vitest' 不是内部或外部命令` 或 `Cannot find module '@rolldown/binding-win32-x64-msvc'`，是 `frontend/node_modules` 安装不完整（缺 `.bin` 与平台原生包），
+> 执行 `pnpm install --frozen-lockfile` 修复后上述命令即可复跑；不要改用 `npm install`（会改写 lockfile 形态）。
 
 ## 5. 备注：仓库级备份残留（范围外）
 
