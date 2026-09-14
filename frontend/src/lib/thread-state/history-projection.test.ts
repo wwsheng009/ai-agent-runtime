@@ -88,6 +88,23 @@ describe("applySessionHistoryToThread", () => {
     expect(nextThread.artifacts[0]?.id).toBe("session-history-session-1");
   });
 
+  it("clears stale messages when authoritative history is an empty array (full backtrack)", () => {
+    // 回溯到首轮（或截断到 0 条）时后端返回 `{"count":0,"history":[]}`：
+    // 这是「服务端确认没有消息」，不是「本次没有权威历史」，消息列表必须清空，
+    // 否则界面停留在回滚前的内容，表现为「点了确认回溯没反应」。
+    const response: SessionHistoryResponse = {
+      session_id: "session-1",
+      count: 0,
+      history: [],
+    };
+
+    const nextThread = applySessionHistoryToThread(createThread(), response);
+
+    expect(nextThread.sessionId).toBe("session-1");
+    expect(nextThread.messages).toHaveLength(0);
+    expect(nextThread.artifacts[0]?.id).toBe("session-history-session-1");
+  });
+
   it("keeps live-only tool segments when authoritative history matches the message", () => {
     const response: SessionHistoryResponse = {
       session_id: "session-1",

@@ -35,10 +35,14 @@ export function applySessionHistoryToThread(
       (message.streaming === true || message.interrupted === true) &&
       !mappedMessages.some((mapped) => mapped.id === message.id),
   );
-  const resolvedMessages =
-    mappedHistory.length > 0
-      ? [...mappedMessages, ...liveOnlyMessages]
-      : thread.messages;
+  // `history: null` 与 `history: []` 是两种语义，不能都当成「没有权威历史」：
+  // - null：本次没有拿到权威历史（如恢复流程降级），保留本地消息；
+  // - [] ：服务端确认该会话**没有**任何消息——回溯/还原把历史截断到 0 条时正是
+  //   这个形态（后端返回 `{"count":0,"history":[]}`）。若沿用「保留本地消息」，
+  //   消息列表会停留在回滚前的内容，用户看到的就是「点了确认没反应」。
+  const resolvedMessages = Array.isArray(response.history)
+    ? [...mappedMessages, ...liveOnlyMessages]
+    : thread.messages;
   return {
     ...thread,
     updatedAt: new Date().toISOString(),
