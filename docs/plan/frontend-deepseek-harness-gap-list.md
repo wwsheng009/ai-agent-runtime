@@ -157,6 +157,18 @@
 |---|---|---|
 | A2-二次修复（P0-2 行数门禁） | **两个「随 P2-1A 接线增量引入」的超长文件拆分 + 行数门禁**（行为中性：公共 API 不变、既有断言零改动）：① `pages/usage-analytics/quota.tsx`(559 非空行) → `quota.tsx` 429 + `quota-shared.ts` 74（常量 / 负载形状辅助 / 纯格式函数）+ `quota-atoms.tsx` 73（`PolicyBadge` / `StatRow` / `QuotaBar`；组件与纯函数分文件以过 `react-refresh/only-export-components`）；② `pages/workspace-page.tsx`(512) → 437 + `hooks/workspace/use-workspace-session-actions.ts` 133（重命名 / 归档 / 归档恢复 / Fork / 删除 / 目录内新建六个动作收口为 hook，页面只保留组合与转发，页面内 `navigate` / `t` 随之下沉）；③ 新增 `scripts/verify-max-lines.mjs`：`frontend/src` 下 `.ts/.tsx` 非空行 > 500 即失败、`src/i18n/resources/**` 整树豁免，并入 `npm run lint` 并新增 `npm run verify:lines`（501 行探针负路径验证 exit 1 后清理） | `npm run verify:lines` **exit 0**（扫描 831 个 `.ts/.tsx`、61 个词典豁免、0 个 > 500，最大 `components/workspace/workspace-sidebar.tsx`=483）；`npx tsc -b --force` exit 0；`npx eslint`（5 个改动文件）exit 0；`npm run lint` **0 error / 3 基线 warning**（i18n scanned=605 / violations=0、备份门禁 874 文件 0 残留）；`npm test` **156 文件 / 1026 用例全绿**（94.7s）；`npm run build` exit 0；`npm run test:e2e` **57 passed**（2.2m，含 `usage-quota.spec.ts`） |
 
+### 批次 9（2026-09-13）
+
+| 项 | 动作 | 验证 |
+|---|---|---|
+| P2-9-子片1（后台任务常驻状态条） | **P2-9 首个子片：顶栏常驻状态条 + 数据源单一事实源重构**（后端零改动、纯前端）：① `hooks/workspace/use-background-jobs.ts` 新增 `liveCount` 派生（与弹层 live 分区同一 `isLiveJobStatus` 判据）并导出 `BackgroundJobsController`；② `components/workspace/jobs-panel.tsx` 从「自带 hook + `sessionId` / `lastRuntimeEventType` / `runtimeEventCount`」改为纯渲染 + `controller` 注入；③ `workspace-shell/main-section.tsx` 成为 shell owner（hook 只装载一次，顶栏与弹层共用一份数据）；④ `workspace-shell-topbar.tsx` 新增 `liveJobsCount` 与 `data-testid="topbar-jobs-running"` 常驻状态条（仅 live > 0 渲染、`hidden sm:flex`、点击打开弹层）；⑤ 双语 `topbar.jobsRunning`；**通知位按 §10 风险表约束只做计数与入口，完成 / 失败一次性提示仍归 toast / 桌面通知** | `npx tsc -b --force` exit 0；`npx eslint`（9 个改动文件）exit 0；定向单测 **16 passed**（`jobs-panel.test.tsx` 8、`jobs-status-bar.test.tsx` 2、`use-background-jobs.test.tsx` 6）+ 工作区回归 3 文件 / 9 用例；`npm run lint` **0 error / 3 基线 warning**（i18n scanned=605 / violations=0、备份门禁 876 文件 0 残留（含清理本轮 3 个 `.backups/` 目录）、行数门禁 0 个 > 500）；`npm test` **158 文件 / 1034 用例全绿**（121.6s）；`npm run build` exit 0；`npm run test:e2e` **57 passed**（2.0m，`e2e/jobs-panel.spec.ts` 首个用例改为先断言并点击状态条）。**口径修正**：e2e 只跑 `dist/` 产物，改源码后必须先 `build`（本轮首跑未 build，命中旧产物导致状态条断言假失败） |
+
+### 批次 10（2026-09-13）
+
+| 项 | 动作 | 验证 |
+|---|---|---|
+| P2-9-子片2（子代理树：可折叠到末级 + 只读原因 + 记录跨度） | **P2-9 第二个子片：后代目录升级为可折叠层级树，并补齐只读解释与记录跨度格式化**（后端零改动、纯前端；层级 / 折叠只影响渲染，不改数据）：① `components/workspace/session-agents-panel-shared.ts` 新增纯派生——`buildAgentForest`（`parentAgentId`（集合内）→ `agent_path` 最长前缀祖先回退；两者都解析不到的孤儿行**保留为顶层不丢弃**；环数据断开闭环边且不递归爆栈）、`flattenAgentTree`（折叠感知展开为行序列，附带 `depth` / `childCount` / `hiddenDescendantCount`）、`agentDurationSpan`（`createdAt` → `closedAt ?? updatedAt`，端点缺失 / 非法 / 终点早于起点一律 `null`）、`formatAgentDuration` + `formatAgentDurationExact`（判别联合：秒→分→时→天→天时→月→月天→年→年月；精确档不足一天与紧凑档一致、≥ 一天补零到秒）、`agentReadOnlyReason`（只回答数据能证实的「已关闭记录」/「父代理不在线」，其余 `null`）；② 新增 `components/workspace/session-agents-tree.tsx`（`SessionAgentsTree` + 行组件）：`<ul aria-label>` + `role="treeitem"` + `aria-level` + 分支行 `aria-expanded`、折叠按钮 `data-testid="agent-branch-toggle"`（文案带 `{{name}}` 与 `{{count}}` 隐藏后代数）、记录跨度 chip `data-testid="agent-duration"`（title 明说「记录跨度：from → to（创建 → 关闭/最后更新，**非活跃耗时**）」，不借用目标实现的耗时说辞）、只读原因行 `data-testid="agent-readonly"`；③ `session-agents-panel.tsx` 的行渲染整体下沉到树组件（面板只保留 lineage / 计数 / 截断 / 空态），后代目录由「运行 / 已结算两段平铺」改为**单棵层级树 + 运行 / 已结算计数摘要**（`agents-count-running` / `agents-count-settled`；状态仍在每行徽标上，运行 / 非运行语义不丢）；④ 双语 `panels.agents.*` 新增 `treeAria` / `branchExpand` / `branchCollapse` / `durationLabel` / `durationExactTitle` / `duration.*`（9 档）/ `readonly.*`（2 条），zh-CN 与 en-US 逐键对齐。**如实降级**：层级派生失败不臆造父子；端点缺失不补零、无依据的只读原因不渲染；`unknown` 不给动作。**遗留（后端字段缺口）**：`RuntimeAgentRecord` 无 token 字段，子代理 token 口径暂不渲染（不得用会话级 usage 均摊推算），待后端上报后接入 | `npx tsc -b --force` exit 0；`npx vitest run src/components/workspace/session-agents-tree.test.tsx` **4 passed**（乱序输入建树到末级 + 折叠只隐藏该节点后代 + 只读原因 / 无依据不渲染 + 跨度 chip 与缺端点不渲染）；`npm run lint` **0 error / 3 基线 warning**（i18n scanned=606 / violations=0、备份门禁 878 文件 0 残留（含清理本轮 1 个 `.backups/` 目录 / 2 个文件）、行数门禁 835 文件 0 个 > 500，最大 `workspace-sidebar.tsx`=483）；`npm test` **159 文件 / 1052 用例全绿**（98.7s；本批新增 1 文件 / 18 例：`session-agents-tree.test.tsx` 4 + `session-agents-panel-shared.test.ts` +14）；`npm run build` exit 0；`npm run test:e2e` **57 passed**（2.0m，未新增 e2e 用例——树交互 / 只读原因 / 跨度由组件与纯函数单测覆盖） |
+
 ### 复检记录（2026-09-13，P2-1A 第八项交付后）
 
 | 项 | 复检内容 | 结果 |
@@ -189,6 +201,8 @@ pnpm build             # tsc -b + vite build
 
 > 2026-09-13 复核注记：本地若出现 `'vitest' 不是内部或外部命令` 或 `Cannot find module '@rolldown/binding-win32-x64-msvc'`，是 `frontend/node_modules` 安装不完整（缺 `.bin` 与平台原生包），
 > 执行 `pnpm install --frozen-lockfile` 修复后上述命令即可复跑；不要改用 `npm install`（会改写 lockfile 形态）。
+>
+> **e2e 顺序约束（2026-09-13 批次 9 实测踩坑）**：`pnpm test:e2e` 只跑 `dist/` 构建产物（`playwright.config.ts` 的 `requireDist()` 仅校验 `dist/index.html` 存在，webServer 起 `vite preview`），因此**改了 `frontend/src` 后必须先 `pnpm build` 再 `pnpm test:e2e`**；否则用例静默跑在旧产物上（本轮 P2-9 状态条断言即因此首跑失败，`pnpm build` 后复跑通过）。
 
 ## 5. 备注：仓库级备份残留（范围外）
 
