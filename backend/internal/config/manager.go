@@ -104,6 +104,12 @@ type AgentsConfig struct {
 	// "observe" (default) only reports drift, "enforce" closes rows whose
 	// session is already missing/terminal and marks stale rows stale.
 	RegistryReconcileMode string `yaml:"registryReconcileMode,omitempty" json:"registryReconcileMode,omitempty"`
+	// RegistryTerminalRetention bounds how long terminal (closed/stale) registry
+	// rows and the wake events they produced are kept. 0 uses the shared default
+	// (30d), a negative value keeps them forever (opt-out), a positive value is
+	// the window. Only rows that are already terminal are pruned, so retention
+	// can never touch a child that still holds quota.
+	RegistryTerminalRetention time.Duration `yaml:"registryTerminalRetention,omitempty" json:"registryTerminalRetention,omitempty"`
 	// ReclaimIdleMs enables idle-child eviction (plan P2-8 方案 3) when > 0:
 	// a spawn that already hit maxThreads may close a child whose execution
 	// container has been idle for at least this long and then retries once.

@@ -113,3 +113,36 @@ func TestLocalRegistryReconcileWithoutStoreStaysInactive(t *testing.T) {
 	require.Nil(t, (&localChatRuntimeHost{}).startLocalRegistryReconcile())
 	require.Equal(t, "reconcile=not_run", (*localChatRuntimeHost)(nil).localRegistryReconcileSummary())
 }
+
+// TestLocalRegistryTerminalRetentionPrecedence locks the retention path with the
+// same precedence as the sweep settings: environment > runtime config > shared
+// default. AICLI_REGISTRY_RETENTION=off (or a negative config value) normalizes
+// to 0, which is the documented "keep terminal rows forever" opt-out.
+func TestLocalRegistryTerminalRetentionPrecedence(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	host.ActorRegistry = newLocalActorRegistry(host)
+
+	require.Equal(t, agentcontrol.DefaultTerminalRetention, host.localRegistryTerminalRetention())
+
+	host.RuntimeConfig = &runtimecfg.RuntimeConfig{
+		Agents: runtimecfg.AgentsConfig{RegistryTerminalRetention: 72 * time.Hour},
+	}
+	require.Equal(t, 72*time.Hour, host.localRegistryTerminalRetention())
+
+	t.Setenv(localRegistryRetentionEnv, "12h")
+	require.Equal(t, 12*time.Hour, host.localRegistryTerminalRetention(), "environment overrides config")
+
+	t.Setenv(localRegistryRetentionEnv, "off")
+	require.Zero(t, host.localRegistryTerminalRetention(), "off disables the purge")
+
+	// A malformed override must not silently disable the purge.
+	t.Setenv(localRegistryRetentionEnv, "not-a-duration")
+	require.Equal(t, 72*time.Hour, host.localRegistryTerminalRetention())
+
+	// A negative config value is the same opt-out as "off".
+	host.RuntimeConfig = &runtimecfg.RuntimeConfig{
+		Agents: runtimecfg.AgentsConfig{RegistryTerminalRetention: -time.Hour},
+	}
+	t.Setenv(localRegistryRetentionEnv, "")
+	require.Zero(t, host.localRegistryTerminalRetention())
+}

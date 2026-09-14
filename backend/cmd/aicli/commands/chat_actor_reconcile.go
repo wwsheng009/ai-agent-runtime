@@ -17,6 +17,7 @@ import (
 const (
 	localRegistryReconcileIntervalEnv = "AICLI_REGISTRY_RECONCILE_INTERVAL"
 	localRegistryReconcileModeEnv     = "AICLI_REGISTRY_RECONCILE_MODE"
+	localRegistryRetentionEnv         = "AICLI_REGISTRY_RETENTION"
 )
 
 // startLocalRegistryReconcile builds the periodic audit + convergence loop
@@ -86,7 +87,21 @@ func (h *localChatRuntimeHost) buildLocalRegistryReconciler() *agentcontrol.Reco
 		// P2-9 方案 3：审计之后跑同一套 P2-8 驱逐判定，让终态/空闲子会话在
 		// 周期里自动释放配额，而不是等到下一次 spawn 被拒（enforce 模式才
 		// 真正关闭；observe 只报 reclaim_candidates）。
-		Reclaim:  registry.reclaimLocalAgentRegistryQuota,
+		Reclaim: registry.reclaimLocalAgentRegistryQuota,
+		// P2-9 retention: prune terminal rows + their wake events once they fall
+		// outside the configured window (0 → shared default, negative → keep
+		// forever). Only rows that were already terminal can match, so the pass
+		// never touches a child that still holds quota.
+		Purge: func(ctx context.Context, now time.Time) (agentcontrol.TerminalPurgeOutcome, error) {
+			store := registry.localAgentRegistryStore()
+			if store == nil {
+				return agentcontrol.TerminalPurgeOutcome{}, nil
+			}
+			return agentcontrol.PurgeTerminalAgentRecords(ctx, store, agentcontrol.TerminalPurgePolicy{
+				Now:       now,
+				Retention: h.localRegistryTerminalRetention(),
+			})
+		},
 		Mode:     mode,
 		Interval: interval,
 	}
@@ -111,6 +126,21 @@ func (h *localChatRuntimeHost) localRegistryReconcileTuning() (agentcontrol.Reco
 		interval = parsed
 	}
 	return mode, agentcontrol.NormalizeReconcileInterval(interval)
+}
+
+// localRegistryTerminalRetention resolves registry retention with the same
+// precedence as the sweep settings (environment > runtime config > built-in
+// default). The normalized value is what the purge policy consumes: 0 disables
+// the purge, so an operator can opt out with AICLI_REGISTRY_RETENTION=off.
+func (h *localChatRuntimeHost) localRegistryTerminalRetention() time.Duration {
+	window := time.Duration(0)
+	if h != nil && h.ActorRegistry != nil {
+		window = h.ActorRegistry.localAgentsConfig().RegistryTerminalRetention
+	}
+	if parsed, ok := agentcontrol.ParseTerminalRetention(os.Getenv(localRegistryRetentionEnv)); ok {
+		window = parsed
+	}
+	return agentcontrol.NormalizeTerminalRetention(window)
 }
 
 // localRegistryReconcile returns the reconciler without starting the loop. Used

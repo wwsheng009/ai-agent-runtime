@@ -58,6 +58,11 @@ type Reconciler struct {
 	// hook keeps the pass audit-only, so hosts without a reclaim store behave
 	// exactly as before.
 	Reclaim func(ctx context.Context, records []AgentRecord, enforce bool, now time.Time) (ReclaimOutcome, error)
+	// Purge is the host-side half of registry retention (retention.go): hosts
+	// resolve the configured window and prune terminal rows plus their wake
+	// events. A nil hook keeps the pass from deleting anything, and a disabled
+	// window inside the hook is a no-op, so hosts can wire it unconditionally.
+	Purge func(ctx context.Context, now time.Time) (TerminalPurgeOutcome, error)
 
 	mu      sync.Mutex
 	running bool
@@ -144,6 +149,7 @@ func (r *Reconciler) runPass(ctx context.Context) (ReconcileReport, error) {
 		return report, err
 	}
 	r.runReclaimPass(ctx, &report, records)
+	r.runPurgePass(ctx, &report)
 	return report, nil
 }
 
@@ -167,6 +173,24 @@ func (r *Reconciler) runReclaimPass(ctx context.Context, report *ReconcileReport
 		report.ReclaimError = err.Error()
 	case strings.TrimSpace(outcome.FirstError) != "":
 		report.ReclaimError = strings.TrimSpace(outcome.FirstError)
+	}
+}
+
+// runPurgePass folds registry retention into the report. Like the reclaim
+// half, a failure is recorded instead of returned: the drift report the
+// operator is looking at must not blank out because housekeeping failed.
+func (r *Reconciler) runPurgePass(ctx context.Context, report *ReconcileReport) {
+	if r == nil || r.Purge == nil || report == nil {
+		return
+	}
+	outcome, err := r.Purge(ctx, time.Now().UTC())
+	report.PurgedRows = outcome.Rows
+	report.PurgedWakeEvents = outcome.WakeEvents
+	switch {
+	case err != nil:
+		report.PurgeError = err.Error()
+	case strings.TrimSpace(outcome.FirstError) != "":
+		report.PurgeError = strings.TrimSpace(outcome.FirstError)
 	}
 }
 

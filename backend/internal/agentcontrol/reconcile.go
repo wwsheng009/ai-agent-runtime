@@ -80,6 +80,12 @@ type ReconcileReport struct {
 	ReclaimFailed     int      `json:"reclaim_failed,omitempty"`
 	ReclaimReasons    []string `json:"reclaim_reasons,omitempty"`
 	ReclaimError      string   `json:"reclaim_error,omitempty"`
+	// Purge* fold registry retention (retention.go) into the same pass: counts
+	// are what the pass deleted, and stay 0 while retention is disabled or the
+	// store cannot prune.
+	PurgedRows       int64  `json:"purged_rows,omitempty"`
+	PurgedWakeEvents int64  `json:"purged_wake_events,omitempty"`
+	PurgeError       string `json:"purge_error,omitempty"`
 }
 
 // ReconcileAgentSessionConsistency audits the durable identity graph and, in
@@ -246,6 +252,15 @@ func (r ReconcileReport) Summary() string {
 	}
 	if errText := strings.TrimSpace(r.ReclaimError); errText != "" {
 		parts = append(parts, "reclaim_error="+errText)
+	}
+	if r.PurgedRows > 0 {
+		parts = append(parts, fmt.Sprintf("purged_rows=%d", r.PurgedRows))
+	}
+	if r.PurgedWakeEvents > 0 {
+		parts = append(parts, fmt.Sprintf("purged_wake_events=%d", r.PurgedWakeEvents))
+	}
+	if errText := strings.TrimSpace(r.PurgeError); errText != "" {
+		parts = append(parts, "purge_error="+errText)
 	}
 	if !r.ReconciledAt.IsZero() {
 		parts = append(parts, "last_reconcile="+r.ReconciledAt.UTC().Format(time.RFC3339))
