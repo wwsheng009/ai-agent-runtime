@@ -967,7 +967,9 @@ func validateCodexToolCalls(result map[string]interface{}) error {
 		}
 	}
 	if len(malformed) > 0 {
-		return newCodexMalformedToolCallError(malformed)
+		// codex 用 response.incomplete 表达截断；把 incomplete 原因带出来，
+		// 让上层能区分「预算截断」与「非法 JSON 字面量」。
+		return newCodexMalformedToolCallError(codexIncompleteReason(result), malformed)
 	}
 	return nil
 }

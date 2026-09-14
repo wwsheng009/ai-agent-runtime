@@ -81,7 +81,7 @@ func NewBashTool() *BashTool {
 						"command":     map[string]interface{}{"type": "string"},
 						"workdir":     map[string]interface{}{"type": "string"},
 						"timeout":     map[string]interface{}{"type": "string"},
-						"timeout_ms":  map[string]interface{}{"type": "integer", "minimum": 1, "description": "毫秒超时；小于 100 的数值会按模型占位噪声忽略。确需亚 100ms 时使用 timeout 字符串（如 30ms）。"},
+						"timeout_ms":  map[string]interface{}{"type": "integer", "minimum": 1, "description": "毫秒超时；小于 100 的数值会按模型占位噪声忽略。确需亚 100ms 时使用 timeout 字符串（如 \"30ms\"）。"},
 						"timeout_sec": map[string]interface{}{"type": "integer", "minimum": 1},
 					},
 					"required":             []string{"command"},
@@ -107,12 +107,12 @@ func NewBashTool() *BashTool {
 			},
 			"timeout": map[string]interface{}{
 				"type":        "string",
-				"description": "可选：命令超时，例如 30s、2m、5m。普通命令默认 30s；go test 未显式设置时自动使用至少 5m；shell 代码搜索（rg/grep/findstr）未显式设置时默认更短（约 12s）以促使改用 toolkit grep；环境变量和显式参数仍可覆盖。",
+				"description": "可选：命令超时，值必须是带引号的 JSON 字符串，例如 \"30s\"、\"2m\"、\"5m\"（裸写 30s 会让整个 arguments 变成非法 JSON）。普通命令默认 30s；go test 未显式设置时自动使用至少 5m；shell 代码搜索（rg/grep/findstr）未显式设置时默认更短（约 12s）以促使改用 toolkit grep；环境变量和显式参数仍可覆盖。",
 			},
 			"timeout_ms": map[string]interface{}{
 				"type":        "integer",
 				"minimum":     1,
-				"description": "可选：命令超时毫秒数。小于 100 的数值会视为模型单位混淆并忽略；确需亚 100ms 时使用 timeout 字符串（如 30ms）。秒级超时优先只设 timeout_sec 或 timeout。",
+				"description": "可选：命令超时毫秒数。小于 100 的数值会视为模型单位混淆并忽略；确需亚 100ms 时使用 timeout 字符串（如 \"30ms\"）。秒级超时优先只设 timeout_sec 或 timeout。",
 			},
 			"timeout_sec": map[string]interface{}{
 				"type":        "integer",

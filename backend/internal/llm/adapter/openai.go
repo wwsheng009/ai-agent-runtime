@@ -568,18 +568,23 @@ func (a *OpenAIAdapter) HandleResponse(isStream bool, respBody io.Reader, callba
 		return nil, streamErr
 	}
 	procResult := a.ProcessResponse(result)
-	if err := validateOpenAIRawToolCalls(procResult.ToolCalls); err != nil {
+	// finish_reason 必须在参数校验之前取出：参数被 completion 预算截断
+	// （finish_reason=length）时校验会直接返回错误并丢弃整条响应，上层若拿不到
+	// finish_reason，就只能把它误判成 JSON 语法退化（重采样必然再次截断）。
+	rawFinishReason := ""
+	if choice := firstOpenAIChoice(result); choice != nil {
+		rawFinishReason = strings.TrimSpace(firstOpenAIErrorString(choice["finish_reason"]))
+	}
+	if err := validateOpenAIRawToolCalls(rawFinishReason, procResult.ToolCalls); err != nil {
 		return nil, err
 	}
 	assistantMsg := a.buildAssistantMessageWithReasoningPresence(procResult.Content, procResult.ToolCalls, procResult.Reasoning, procResult.ReasoningPresent)
 	attachOpenAIRefusal(assistantMsg, procResult.Refusal)
-	if choice := firstOpenAIChoice(result); choice != nil {
-		if finishReason := strings.TrimSpace(firstOpenAIErrorString(choice["finish_reason"])); finishReason != "" {
-			if err := validateOpenAIFinishReason(finishReason); err != nil {
-				return nil, err
-			}
-			assistantMsg["finish_reason"] = finishReason
+	if rawFinishReason != "" {
+		if err := validateOpenAIFinishReason(rawFinishReason); err != nil {
+			return nil, err
 		}
+		assistantMsg["finish_reason"] = rawFinishReason
 	}
 	return attachReasoningBlock(assistantMsg, procResult.ReasoningBlock), nil
 }
@@ -708,7 +713,7 @@ func validateOpenAIStreamState(state *StreamState) error {
 		}
 	}
 	if len(malformed) > 0 {
-		return newOpenAIMalformedToolCallError(malformed)
+		return newOpenAIMalformedToolCallError(state.FinishReason, malformed)
 	}
 	return nil
 }
@@ -724,7 +729,7 @@ func validateOpenAIFinishReason(finishReason string) error {
 	}
 }
 
-func validateOpenAIRawToolCalls(toolCalls []map[string]interface{}) error {
+func validateOpenAIRawToolCalls(finishReason string, toolCalls []map[string]interface{}) error {
 	var malformed []MalformedToolCall
 	for index, call := range toolCalls {
 		function, _ := call["function"].(map[string]interface{})
@@ -754,7 +759,7 @@ func validateOpenAIRawToolCalls(toolCalls []map[string]interface{}) error {
 		}
 	}
 	if len(malformed) > 0 {
-		return newOpenAIMalformedToolCallError(malformed)
+		return newOpenAIMalformedToolCallError(finishReason, malformed)
 	}
 	return nil
 }

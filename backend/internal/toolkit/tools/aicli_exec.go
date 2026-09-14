@@ -118,7 +118,7 @@ func NewAICLIExecTool() *AICLIExecTool {
 			},
 			"timeout": map[string]interface{}{
 				"type":        "string",
-				"description": "可选：整次子 aicli exec 超时，如 30s、2m、5m。默认 2m。",
+				"description": "可选：整次子 aicli exec 超时，值必须是带引号的 JSON 字符串，如 \"30s\"、\"2m\"、\"5m\"。默认 2m。",
 			},
 			"timeout_ms": map[string]interface{}{
 				"type":        "integer",

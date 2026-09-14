@@ -19,9 +19,12 @@ import (
 type malformedToolCallProvider struct {
 	name          string
 	malformedRuns int
-	callCount     int
-	requests      []*llm.LLMRequest
-	responses     []*llm.LLMResponse
+	// truncated 为 true 时把非法参数标记为「被输出预算切断」
+	// （finish_reason=length），用于区分语法退化与预算截断两条处置路径。
+	truncated bool
+	callCount int
+	requests  []*llm.LLMRequest
+	responses []*llm.LLMResponse
 }
 
 func (p *malformedToolCallProvider) Name() string { return p.name }
@@ -32,10 +35,16 @@ func (p *malformedToolCallProvider) Call(ctx context.Context, req *llm.LLMReques
 	p.requests = append(p.requests, cloneLLMRequest(req))
 	p.callCount++
 	if p.callCount <= p.malformedRuns {
+		finishReason := "tool_calls"
+		if p.truncated {
+			finishReason = "length"
+		}
 		return nil, &llmadapter.MalformedToolCallError{
-			Kind:    "openai_stream_protocol_error",
-			Code:    "invalid_tool_arguments",
-			Message: "openai_stream_protocol_error: code=invalid_tool_arguments: tool call 0 (write_file) has incomplete or non-object JSON arguments",
+			Kind:         "openai_stream_protocol_error",
+			Code:         "invalid_tool_arguments",
+			Message:      "openai_stream_protocol_error: code=invalid_tool_arguments: tool call 0 (write_file) has incomplete or non-object JSON arguments",
+			FinishReason: finishReason,
+			Truncated:    p.truncated,
 			ToolCalls: []llmadapter.MalformedToolCall{{
 				Index:     0,
 				ID:        "call-bad",
@@ -367,4 +376,67 @@ func TestResetMalformedToolCallRecoveriesOnSuccessSemantics(t *testing.T) {
 
 	require.NotContains(t, loop.malformedToolCallRecoveries, "write_file")
 	require.Equal(t, 1, loop.malformedToolCallRecoveries["shell"], "执行失败的调用保留连续计数")
+}
+
+// TestReActLoop_TruncatedToolCallEscalatesBudgetThenReprompts 固化截断型
+// invalid_tool_arguments 的完整处置链：同预算重采样必然再截断，所以 loop 先做
+// 一次性 8k→64k 预算升级并重试；升级后仍截断才降级为 schema re-prompt，且反馈
+// 文案点明「被输出预算切断」而不是「非法 JSON 字面量」。
+func TestReActLoop_TruncatedToolCallEscalatesBudgetThenReprompts(t *testing.T) {
+	t.Setenv(llm.EnvDisableMaxTokensCap, "")
+	t.Setenv(llm.EnvMaxOutputTokens, "")
+	t.Setenv(llm.EnvAICLIMaxOutputTokens, "")
+
+	llmRuntime := llm.NewLLMRuntime(nil)
+	// 前 6 次非法：首次 think 的 3 次退化重采样 + 升级后重试的 3 次重采样；
+	// 第 7 次调用是降级 re-prompt 之后的成功回复。
+	provider := &malformedToolCallProvider{
+		name:          "test-provider",
+		malformedRuns: 6,
+		truncated:     true,
+		responses: []*llm.LLMResponse{
+			{Content: "The file was written successfully.", Model: "test-model"},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+	agent := NewAgentWithLLM(&Config{
+		Name: "truncated-escalation-agent", Provider: "test-provider", Model: "test-model",
+		MaxSteps: 5, DefaultMaxTokens: llm.CappedDefaultMaxTokens,
+	}, &RecoveringMCPManager{}, llmRuntime)
+	bus := runtimeevents.NewBus()
+	var escalated runtimeevents.Event
+	bus.Subscribe("llm.max_output_tokens.escalated", func(event runtimeevents.Event) { escalated = event })
+	agent.SetEventBus(bus)
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{MaxSteps: 5, EnableToolCalls: true})
+
+	result, err := loop.Run(context.Background(), "write the file")
+
+	require.NoError(t, err)
+	require.True(t, result.Success)
+	require.Equal(t, 7, provider.callCount)
+	require.Len(t, provider.requests, 7)
+
+	// 首次调用保持 8k 槽位预留；升级只发生一次（第 4~6 次调用），只作用于本次
+	// 请求对象——降级 re-prompt 之后的下一轮 think 重新按默认 8k 构造请求。
+	require.Equal(t, llm.CappedDefaultMaxTokens, provider.requests[0].MaxTokens)
+	for _, index := range []int{3, 4, 5} {
+		require.Equal(t, llm.EscalatedMaxTokens, provider.requests[index].MaxTokens)
+	}
+	require.Equal(t, true, provider.requests[3].Metadata["max_output_tokens_escalated"])
+	require.Equal(t, llm.CappedDefaultMaxTokens, provider.requests[6].MaxTokens)
+
+	// 事件载荷把「截断」与「语法退化」区分开，便于日志侧归因。
+	require.Equal(t, "llm.max_output_tokens.escalated", escalated.Type)
+	require.Equal(t, "truncated_tool_call", escalated.Payload["reason"])
+	require.Equal(t, "length", escalated.Payload["finish_reason"])
+	require.Equal(t, llm.CappedDefaultMaxTokens, escalated.Payload["from_max_tokens"])
+	require.Equal(t, llm.EscalatedMaxTokens, escalated.Payload["to_max_tokens"])
+
+	// 降级反馈点明预算截断，并给出「拆小 payload」的可执行建议。
+	contents := findToolResultMessages(provider.requests[6])
+	require.NotEmpty(t, contents, "升级后仍截断才应回到 schema re-prompt")
+	require.Contains(t, contents[0], "was NOT executed")
+	require.Contains(t, contents[0], "cut off by the output budget")
+	require.Contains(t, contents[0], "finish_reason=length")
+	require.NotContains(t, contents[0], "not valid JSON")
 }

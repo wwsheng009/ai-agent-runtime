@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -101,5 +102,59 @@ func TestMalformedToolCallError_CodexPath(t *testing.T) {
 	}
 	if len(malformed.ToolCalls) != 1 || malformed.ToolCalls[0].Name != "lookup" {
 		t.Fatalf("unexpected tool call info: %#v", malformed.ToolCalls)
+	}
+}
+
+// TestMalformedToolCallError_TruncatedFinishReason 验证 finish_reason=length
+// （预算截断）与非法 JSON 字面量被区分开：错误对象携带 FinishReason 且
+// Truncated=true，消息给出「扩大预算 / 拆分 payload」而不是 JSON 语法建议。
+func TestMalformedToolCallError_TruncatedFinishReason(t *testing.T) {
+	arguments := strconv.Quote(`{"path":"a.go","content":"half written`)
+	_, err := (&OpenAIAdapter{}).HandleResponse(true, strings.NewReader(strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"multiedit","arguments":` + arguments + `}}]},"finish_reason":"length"}]}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")), StreamCallbacks{})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	malformed, ok := err.(*MalformedToolCallError)
+	if !ok {
+		t.Fatalf("expected *MalformedToolCallError, got %T: %v", err, err)
+	}
+	if !malformed.Truncated || malformed.FinishReason != "length" {
+		t.Fatalf("expected truncated=true finish_reason=length, got %#v", malformed)
+	}
+	if !strings.Contains(err.Error(), "cut off by the completion budget") {
+		t.Fatalf("expected budget-truncation hint, got: %v", err)
+	}
+	// 归因仍落在 invalid_tool_arguments（retry policy 的分类键不变）。
+	if malformed.RetryErrorCode() != "invalid_tool_arguments" {
+		t.Fatalf("unexpected retry code: %q", malformed.RetryErrorCode())
+	}
+}
+
+// TestMalformedToolCallError_DegenerateLiteralNotTruncated 验证语法退化样本
+// （finish_reason=tool_calls）不被误标为截断：它靠重采样恢复，不能扩大预算。
+func TestMalformedToolCallError_DegenerateLiteralNotTruncated(t *testing.T) {
+	arguments := strconv.Quote(`{"command": "go test ./...", "timeout": 120s}`)
+	body := `{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_7","type":"function","function":{"name":"shell","arguments":` + arguments + `}}]},"finish_reason":"tool_calls"}]}`
+	_, err := (&OpenAIAdapter{}).HandleResponse(false, strings.NewReader(body), StreamCallbacks{})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	malformed, ok := err.(*MalformedToolCallError)
+	if !ok {
+		t.Fatalf("expected *MalformedToolCallError, got %T: %v", err, err)
+	}
+	if malformed.Truncated {
+		t.Fatalf("degenerate JSON literal must not be marked truncated: %#v", malformed)
+	}
+	if malformed.FinishReason != "tool_calls" {
+		t.Fatalf("expected finish_reason=tool_calls, got %q", malformed.FinishReason)
+	}
+	if strings.Contains(err.Error(), "cut off by the completion budget") {
+		t.Fatalf("degenerate literal must not get a budget hint: %v", err)
 	}
 }

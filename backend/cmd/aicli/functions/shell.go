@@ -664,11 +664,11 @@ func (f *ShellFunction) Parameters() map[string]interface{} {
 			},
 			"timeout": map[string]interface{}{
 				"type":        "string",
-				"description": "可选：命令超时，例如 30s、2m、5m。默认 30s，可用 AICLI_SHELL_COMMAND_TIMEOUT 或 AICLI_SHELL_COMMAND_TIMEOUT_MS 调整全局默认；运行测试、构建、类型检查等可能超过默认值的命令时，应由模型显式设置更长超时。",
+				"description": "可选：命令超时，值必须是带引号的 JSON 字符串，例如 \"30s\"、\"2m\"、\"5m\"（裸写 30s 会让整个 arguments 变成非法 JSON）。默认 30s，可用 AICLI_SHELL_COMMAND_TIMEOUT 或 AICLI_SHELL_COMMAND_TIMEOUT_MS 调整全局默认；运行测试、构建、类型检查等可能超过默认值的命令时，应由模型显式设置更长超时。",
 			},
 			"timeout_ms": map[string]interface{}{
 				"type":        "integer",
-				"description": "可选：命令超时毫秒数。小于 100 的数值会视为模型单位混淆并忽略；确需亚 100ms 时使用 timeout 字符串（如 30ms）。秒级超时优先只设 timeout_sec 或 timeout。",
+				"description": "可选：命令超时毫秒数。小于 100 的数值会视为模型单位混淆并忽略；确需亚 100ms 时使用 timeout 字符串（如 \"30ms\"）。秒级超时优先只设 timeout_sec 或 timeout。",
 			},
 			"timeout_sec": map[string]interface{}{
 				"type":        "integer",

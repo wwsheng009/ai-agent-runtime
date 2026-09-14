@@ -360,9 +360,11 @@ for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 - `invalid_tool_arguments` 自 2026-09-14 起**不**属于本场景（见场景 D2）
 
 ### 场景 D2：非法工具参数（`invalid_tool_arguments`，2026-09-14 起可重试）
-1. 适配器聚合 `tool_calls` 时发现参数不是合法 JSON 对象（多为 `finish_reason=length` 截断）→ `MalformedToolCallError`（`code=invalid_tool_arguments`）
+1. 适配器聚合 `tool_calls` 时发现参数不是合法 JSON 对象 → `MalformedToolCallError`（`code=invalid_tool_arguments`），并在丢弃响应前带上本响应的 `finish_reason`（`FinishReason` / `Truncated`），把两类成因分开处置：
+   - **A 预算截断**（`finish_reason=length`）：参数被 completion 预算切断，必须放宽预算或拆分 payload；
+   - **B 语法退化**（`finish_reason=tool_calls`）：模型写出了非法 JSON 字面量（如裸 token `120s`），靠重采样 + schema re-prompt 恢复。
 2. 分类为可重试的退化采样：`isDegenerateOutputRetryReason` 命中 → 退避封顶 `degenerateOutputRetryMaxDelay`（2s），且**不**参与 `isHandoffEligibleError` 接力（避免三层循环各自重放满预算）
-3. 预算型截断同时把下一次尝试的 `max_tokens` 翻倍（`isOutputBudgetEscalationReason`）
+3. 预算型截断同时把下一次尝试的 `max_tokens` 翻倍（`isOutputBudgetEscalationReason`）；runtime 层重试耗尽后，agent loop 仍会为 A 类补一次 8k→64k 的一次性升级（`shouldEscalateTruncatedToolCallBudget`），因为截断响应的 `finish_reason` 只存在于错误对象里、成功路径的 escalate 不可达
 4. 连续 `degenerateOutputReplyMaxStreak`（3）次仍是非法参数 → `markRetryExhausted` 终态；Unwrap 链保留 `*MalformedToolCallError`
 5. 执行层第二通道：agent loop 捕获该错误后把「工具未执行 + 参数原文 + 工具 schema」回注为 `tool_result` re-prompt（`maxMalformedToolCallRecoveries = 2`），turn 不因单次非法采样终止
 6. 工具从未执行 → CLI 恢复提示明确「无副作用」，不再复述通用的"避免重复工具副作用"告警
@@ -433,3 +435,35 @@ for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 9. **重试面审计补遗（2026-09-14）**：按"能重试就重试"复核全部终态分支后收敛出四类缺口并修复：①4xx 瞬时信号救援（`transientUpstreamTextHint` + `isRetryableTransportError`，400 与 404/405/422/499 等，401/402/403 除外）；②HTTP `425` Too Early 纳入可重试状态；③`empty_provider_choices`（200 + 空 choices）归入 `empty_reply`，获得 2s 短退避、3 次退化 streak 上限与 handoff 资格（旧分类落到 `default_retryable`，要等完整指数退避且不受 streak 保护）；④`isHandoffEligibleError` 改为 `http_5*` 前缀匹配，让 529/520-524/598 等 5xx 也能接力外层。同时 `classifyLLMFailureCode` 让"瞬态 reason 优先于裸状态码"，避免瞬时 400 被上报成 `UPSTREAM_INVALID_REQUEST` + "修正请求参数"的误导性 NextAction。仍保持终态：`retry_exhausted`/`retry_suppressed`/`context_canceled`/`quota_exhausted`/上下文窗口/`invalid_request`/api key/`content_filter`/内容检查。⑤`invalid_tool_arguments`（非法/截断的工具参数）从「确定性零重试」改为可重试的退化采样：`RetryErrorCode()` 驱动分类、短退避封顶 2s、预算型截断翻倍 `max_tokens`、连续 3 次 streak 收敛、不 handoff；收敛后由执行层按 schema re-prompt（agent loop，`maxMalformedToolCallRecoveries = 2`），CLI 恢复提示明确「工具未执行（无副作用）」而不是通用告警。
 10. **退化 streak 上限下沉到 runtime 层（2026-09-14）**：`LLMRuntime.Call` / `openStreamWithRetry` / `forwardStreamWithRetry` 三处循环此前对本层 Provider 直接返回的退化错误（测试/自定义 Provider、`ProviderWrapper` 之外的实现）没有 streak 保护，会各自重放满 runtime 预算（生产默认 `MaxRetries=10` → 11 次）。现三处复用 `trackDegenerateOutputReply`：非 handoff 的退化 cause 连续 `degenerateOutputReplyMaxStreak`（3）次即 `markRetryExhausted` 收敛（消息 `LLM call aborted after repeated degenerate replies` / `LLM stream aborted after repeated degenerate replies`），`retryAtNextLayer=true` 的接力（`isNextLayerHandoffError`）仍走既有的连续接力守卫（`maxConsecutiveFastFailHandoffs = 3` 轮）以保留 provider/key 轮换。
 11. **CLI turn 级有界自动重跑（2026-09-14，`chat_turn_auto_retry.go`）**：`invalid_tool_arguments` 收敛为 `MalformedToolCallError` 时工具未执行、无副作用，此前只能由用户手动重发或 `/retry`。现在 `sendMessage` 的错误分支先调用 `maybeAutoRetryDegenerateTurn`：命中即按 800ms 起、指数放大、封顶 5s 的退避重跑整轮（重建 `RequestTimeout` 预算、Esc/Ctrl+C 可取消、每次渲染 `[turn] 自动重跑 n/m` 本地提示），成功则直接进入既有的 goal 自动续跑与成功收尾；仍失败才提示 `自动重跑已达上限` 并落回错误渲染 + `/retry` 建议。次数由 `AICLI_TURN_AUTO_RETRY_LIMIT` 控制（默认 2，0 关闭），重跑期间错误类别变化（额度/传输/协议）立即停止，保证总调用次数有界。
+
+---
+
+## 11. `invalid_tool_arguments` 根因与取证（2026-09-14）
+
+### 11.1 症状
+`invalid_tool_arguments` 在 2026-09-13/14 两天集中出现：`~/.aicli/chat-logs` 下 31 个会话文件、264 行命中，折算约 110–150 次真实失败；同一会话同一工具在数十秒内反复失败（`max_attempts=10` 跑满），单个会话烧掉 45,044,921 tokens / 647 steps。provider 全为 `opencode.ai`、model 全为 `deepseek-v4.1-flash`，涉事工具以 `shell` 为主（另有 `grep` / `multiedit` / `edit`）。
+
+### 11.2 同一个错误码折叠了两类成因
+判定点只有一处：聚合完成后对 `arguments` 做 `json.Unmarshal(..., map[string]any)`，失败或为 `null` 即报错（`adapter/openai.go` 的 `validateOpenAIStreamState` / `validateOpenAIRawToolCalls`）。它**不看 `finish_reason`**，于是两类完全不同的故障被压成同一个错误：
+
+| 类别 | 成因 | 取证 |
+|---|---|---|
+| A 预算截断 | 参数在聚合前被 completion 预算切断，`finish_reason=length` | `20260914_083936_522_5d1a080c.http/456_response_provider_wrapper.json`：`multiedit` 把一整段 Go 测试代码当参数流到一半被切断，`body_bytes=2,136,062`（抓包按 262,144 字节截断，`body_truncated=true`） |
+| B 语法退化 | 模型写出非法 JSON 字面量，`finish_reason=tool_calls` | `20260914_075729_196_5a7e6021.http/1173`、`/1178`：SSE 增量复原后为 `{"command": "...", "timeout": 120s, "workdir": "..."}` —— 裸 token `120s` 未加引号，拼接后在 358/102 字符处解析失败；`completion_tokens` 仅 1724/212（reasoning 1392/111），**远低于 8000 预算**，同响应另一条 `edit` 调用是合法 JSON |
+
+### 11.3 机制链
+1. `provider.go` 先调 `HandleResponse`，拿到 `MalformedToolCallError` 直接 return；而 `truncated_tool_call` 判定（`assistantMessageHasTruncatedToolCall`，要求 `finish_reason=length`）在其之后，永不执行 → A 类被误贴"JSON 语法错"，`finish_reason` 未进错误对象，后续基于 `finish_reason` 的补救全部失效。
+2. 旧策略把 `invalid_tool_arguments` 判为不可重试（"重放无法修复非法 JSON"）：对 B 类不成立（裸 token 是采样随机性，重采样有机会拿到合法参数），对 A 类更不成立（同预算必然再次截断）→ 零重试、零预算扩展、终点报错。
+3. B 类的直接诱因是工具面：`timeout` 声明为 `type: string`，描述示例却写作裸 token（`例如 30s、2m、5m`）→ 模型照抄产出 `120s`。同一工具面还有 4 个重叠超时参数（`timeout` / `timeout_ms` / `timeout_sec`），描述里自己都写着"小于 100 的数值会视为模型单位混淆"。
+4. A 类的放大器是 8000 token 槽位预留（`CappedDefaultMaxTokens`）遇到"参数即正文"的 `write_file` / `multiedit`。
+
+### 11.4 修复映射
+- **错误对象携带 `FinishReason` / `Truncated`**：适配器在丢弃响应前把 `finish_reason` 带出来（流式取 `state.FinishReason`；非流式在参数校验**之前**取出 `choice.finish_reason`；codex 取 `incomplete_details.reason`），`Truncated` 由 `length` / `max_tokens` / `max_output_tokens` 命中；消息改为 "cut off by the completion budget"。归因码仍是 `invalid_tool_arguments`（分类键与重试语义不变，避免影响 retry policy 的消息匹配）。
+- **截断型可升级预算**：`shouldEscalateTruncatedToolCallBudget`（agent loop）在 error 路径复用成功路径的一次性 8k→64k escalate（`llm.max_output_tokens.escalated`，payload 带 `reason=truncated_tool_call` 与 `finish_reason`）。响应没有返回、`finish_reason` 只存在于错误对象里，这条通道此前不可达；语法退化型**不** widen 预算（扩大预算只会放大同类样本）。
+- **re-prompt 文案分型**：截断型提示"拆分 payload / 多次小写入"，语法型保持"按 schema 重发"。
+- **工具面文案**：4 处 `timeout` 描述改为带引号的 JSON 字面量示例（`例如 "30s"、"2m"、"5m"`），并显式标注"裸写 30s 会让整个 arguments 变成非法 JSON"。
+
+### 11.5 仍未闭环
+1. runtime 层 `outputBudgetEscalationCeiling`（32768）仍低于 loop 层 `EscalatedMaxTokens`（64000）；超大 `multiedit` 即使升级也可能再次截断。
+2. 原始 arguments 仍只落在 http 抓包里（按 262,144 字节截断），错误载荷只有 index + 工具名，排障依赖抓包。
+3. 4 个重叠 `timeout` 参数仍在；长期应收敛为单一的 `timeout_sec`（integer），从接口上消灭单位混淆与字符串引号问题。
