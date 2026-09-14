@@ -968,8 +968,11 @@ func TestUIController_EffectsDeliveredInOrder(t *testing.T) {
 	c.WaitIdle()
 
 	_, effects := rec.snapshot()
-	if len(effects) != 2 {
-		t.Fatalf("effects = %d, want 2", len(effects))
+	// 批处理（§6.2 第 1 条）：evt 的 flush 与紧随其后的因果 follow-up 落在同一批，
+	// 只交付一帧物理输出。逐 action 的 revision/顺序语义不变（见下方 applied 断言），
+	// 变的只是物理帧数量。
+	if len(effects) != 1 {
+		t.Fatalf("effects = %d, want 1 (single batched flush)", len(effects))
 	}
 	for i, effect := range effects {
 		if _, ok := effect.(FlushEffect); !ok {
@@ -985,6 +988,78 @@ func TestUIController_EffectsDeliveredInOrder(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("applied = %v, want %v", got, want)
 		}
+	}
+}
+
+// TestUIController_BatchesReadyActionsIntoOneFlush 验证批处理契约
+// （docs/plan/ui-event-bridge-drop-hardening.md §6.2 第 1 条）：
+//   - 一次唤醒内已就绪的 action 连续 apply，revision 仍逐条递增；
+//   - 批内所有 FlushEffect 合并为一帧，在批尾交付，Dirty 取并集；
+//   - 批取用严格非阻塞（队列空即收批，不等待新 action）。
+//
+// 为了让"批内多 action"成为确定性场景，第一条 action 的 reducer 在 apply 中
+// 等待放行；测试在此期间把其余 action 投递入队，放行后它们必然落在同一批。
+func TestUIController_BatchesReadyActionsIntoOneFlush(t *testing.T) {
+	rec := &p1Recorder{}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var firstApply sync.Once
+	reducer := ReducerFunc(func(rev uint64, a UIAction) []Effect {
+		rec.apply(rev, a)
+		firstApply.Do(func() {
+			close(entered)
+			<-release
+		})
+		if a.(RuntimeEvent).Kind == "b" {
+			return []Effect{FlushEffect{Dirty: renderengine.DirtyStatus}}
+		}
+		return []Effect{FlushEffect{Dirty: renderengine.DirtyContent}}
+	})
+	c := NewUIController(UIControllerConfig{}, reducer, rec.effect)
+	go c.Run()
+	defer c.Close()
+
+	if !c.Post(RuntimeEvent{Kind: "a"}) {
+		t.Fatal("failed to post a")
+	}
+	<-entered
+	for _, kind := range []string{"b", "c"} {
+		if !c.Post(RuntimeEvent{Kind: kind}) {
+			t.Fatalf("failed to post %s", kind)
+		}
+	}
+	close(release)
+	c.WaitIdle()
+
+	stats := c.Stats()
+	if stats.Processed != 3 || stats.Revision != 3 {
+		t.Fatalf("Processed/Revision = %d/%d, want 3/3", stats.Processed, stats.Revision)
+	}
+	if stats.Batches != 1 || stats.BatchSizeMax != 3 {
+		t.Fatalf("Batches/BatchSizeMax = %d/%d, want 1/3", stats.Batches, stats.BatchSizeMax)
+	}
+	if stats.FlushCount != 1 {
+		t.Fatalf("FlushCount = %d, want 1 (批内合并为一帧)", stats.FlushCount)
+	}
+	applied, effects := rec.snapshot()
+	if len(applied) != 3 {
+		t.Fatalf("applied = %v, want 3 actions", rec.appliedKinds())
+	}
+	// 批处理不改变 IR 不变式：每个 action 仍消耗一个连续 revision。
+	for i, want := range []uint64{0, 1, 2} {
+		if applied[i].revision != want {
+			t.Fatalf("applied[%d].revision = %d, want %d", i, applied[i].revision, want)
+		}
+	}
+	if len(effects) != 1 {
+		t.Fatalf("effects = %d, want 1 batched flush", len(effects))
+	}
+	flush, ok := effects[0].(FlushEffect)
+	if !ok {
+		t.Fatalf("effects[0] = %T, want FlushEffect", effects[0])
+	}
+	if want := renderengine.DirtyContent | renderengine.DirtyStatus; flush.Dirty != want {
+		t.Fatalf("flush.Dirty = %v, want %v (批内并集)", flush.Dirty, want)
 	}
 }
 

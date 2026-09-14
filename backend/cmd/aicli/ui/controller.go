@@ -2,6 +2,7 @@ package ui
 
 import (
 	"runtime"
+	"sort"
 	"sync"
 	"time"
 
@@ -140,6 +141,68 @@ type ControllerStats struct {
 	LastAction       string
 	ReducerPanics    uint64
 	Closed           bool
+	// 消费端成本指标（docs/plan/ui-event-bridge-drop-hardening.md §6.2 第 2 条）。
+	// 只增字段不改既有语义：用于回答"消费端是否为主瓶颈"，而不是调度决策输入。
+	ReducerNanos     uint64 // reducer 应用累计耗时
+	FlushCount       uint64 // 实际交付的物理帧数（批处理后应显著小于 Processed）
+	Batches          uint64 // 批次数（含单 action 批）
+	BatchSizeMax     int    // 历史最大批大小
+	BatchSizeP95     int    // 最近批大小的 P95（有界样本环）
+	PostWaitNanos    uint64 // 生产者等待 mailbox 容量的累计时长
+	PostWaitCount    uint64 // 发生过等待的投递次数
+	PostWaitMaxNanos uint64
+	PostWaitP95Nanos uint64 // 最近等待样本的 P95
+}
+
+// controllerBatchLimit 限制单批连续 apply 的 action 数。批处理只消费"当前
+// 已就绪"的 action，绝不等待新 action；上限保证在生产者持续洪泛时批不会
+// 无限延长（物理帧延迟有界）。
+const controllerBatchLimit = 64
+
+// sampleRing 是有界的最近样本环，供 P95 估算使用。所有读写都必须在
+// UIController.mu 下进行；排序只发生在 Stats() 的诊断路径，不参与调度。
+type sampleRing struct {
+	samples [256]uint64
+	next    int
+	total   uint64
+}
+
+func (r *sampleRing) add(v uint64) {
+	r.samples[r.next] = v
+	r.next = (r.next + 1) % len(r.samples)
+	r.total++
+}
+
+// snapshotLocked 返回最近样本的副本（最多 len(samples) 个，新样本在前）。
+// 调用方必须持有 UIController.mu。
+func (r *sampleRing) snapshotLocked() []uint64 {
+	n := int(r.total)
+	if n > len(r.samples) {
+		n = len(r.samples)
+	}
+	out := make([]uint64, 0, n)
+	for i := 0; i < n; i++ {
+		idx := (r.next - 1 - i + len(r.samples)) % len(r.samples)
+		out = append(out, r.samples[idx])
+	}
+	return out
+}
+
+// sampleRingP95 返回样本的 P95（向上取整的最近秩）。空样本返回 0。
+func sampleRingP95(samples []uint64) uint64 {
+	if len(samples) == 0 {
+		return 0
+	}
+	sorted := append([]uint64(nil), samples...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	rank := (len(sorted)*95 + 99) / 100
+	if rank < 1 {
+		rank = 1
+	}
+	if rank > len(sorted) {
+		rank = len(sorted)
+	}
+	return sorted[rank-1]
 }
 
 // UIController 是 UI actor：bounded mailbox + 单一 Run 循环。
@@ -187,6 +250,16 @@ type UIController struct {
 	delivering        bool
 	lastAction        string
 	state             UIControllerState
+	// 成本指标（§6.2 第 2 条）。全部在 c.mu 下更新。
+	reducerNanos     uint64
+	flushCount       uint64
+	batches          uint64
+	batchSizeMax     int
+	batchSizes       sampleRing
+	postWaitNanos    uint64
+	postWaitCount    uint64
+	postWaitMaxNanos uint64
+	postWaits        sampleRing
 }
 
 type reducerTransaction struct {
@@ -248,13 +321,19 @@ func (c *UIController) Post(action UIAction) bool {
 			}
 		}
 	}
+	var waitStart time.Time
 	for len(c.queue) >= c.cap {
 		if c.closed {
+			c.recordPostWaitLocked(waitStart)
 			c.mu.Unlock()
 			return false
 		}
+		if waitStart.IsZero() {
+			waitStart = time.Now()
+		}
 		c.cond.Wait()
 	}
+	c.recordPostWaitLocked(waitStart)
 	if c.closed {
 		c.mu.Unlock()
 		return false
@@ -420,6 +499,12 @@ func (c *UIController) postFollowupWithToken(token *reducerTransaction, action U
 // Run 消费 mailbox 并调用 reducer。阻塞直到 Close 且队列排空。
 // 必须在单一 goroutine 中运行。reducer panic 会被捕获：该 action 视为
 // 已消费（revision 照常推进），panic 计数入 Stats，循环继续。
+//
+// 批处理（docs/plan/ui-event-bridge-drop-hardening.md §6.2 第 1 条）：一次
+// 唤醒后连续 apply 当前已就绪的 action（严格非阻塞取用，上限
+// controllerBatchLimit），整批只交付一帧 FlushEffect（Dirty 取并集）。
+// 逐 action 的 revision/顺序/因果 follow-up 语义不变，改变的只是物理帧
+// 数量：批内 action 不再各自触发一次终端 flush。
 func (c *UIController) Run() {
 	if c == nil {
 		return
@@ -434,56 +519,106 @@ func (c *UIController) Run() {
 			c.mu.Unlock()
 			return
 		}
-		var action UIAction
-		if len(c.followups) > 0 {
-			action = c.followups[0]
-			c.followups = c.followups[1:]
-		} else {
-			action = c.queue[0]
-			c.queue = c.queue[1:]
-			c.reindexCoalesceLocked()
-		}
-		c.inFlight = true
-		transaction := &reducerTransaction{
-			goroutineID: currentGoroutineID(),
-		}
-		c.activeTransaction = transaction
-		c.legacyReducerGID = transaction.goroutineID
-		rev := c.revision
-		// Follow-ups already queued here belong to earlier causal siblings. A
-		// panicking reducer may only discard actions it emitted after this point.
-		followupStart := len(c.followups)
 		c.mu.Unlock()
-
-		effects, panicked := c.apply(action, rev, &ReducerContext{controller: c, token: transaction})
-
-		c.mu.Lock()
-		c.inFlight = false
-		c.activeTransaction = nil
-		c.legacyReducerGID = 0
-		c.processed++
-		c.revision++
-		if !panicked {
-			effects = c.collectPostActionEffectsLocked(effects)
-			c.state = reduceUIControllerState(c.state, action, c.revision)
-			if historyCommitWakeNeeded(action, c.state) {
-				effects = append(effects, HistoryCommitWakeEffect{})
+		batchActions := 0
+		var batchDirty renderengine.DirtyFlags
+		batchFlush := false
+		batchMarkedDelivering := false
+		for {
+			c.mu.Lock()
+			if batchActions >= controllerBatchLimit || (len(c.queue) == 0 && len(c.followups) == 0) {
+				// 批结束：登记批大小与物理帧计数（仍在锁内），随后统一解锁。
+				if batchActions > 0 {
+					c.batches++
+					if batchActions > c.batchSizeMax {
+						c.batchSizeMax = batchActions
+					}
+					c.batchSizes.add(uint64(batchActions))
+				}
+				if batchFlush {
+					c.flushCount++
+				}
+				c.mu.Unlock()
+				break
 			}
-		} else if len(c.followups) > followupStart {
-			// A reducer panic aborts the current action's causal continuation.
-			// Letting those follow-ups run would publish a partial transaction
-			// (for example a facade paint without its semantic parent action).
-			c.followups = c.followups[:followupStart]
+			var action UIAction
+			if len(c.followups) > 0 {
+				action = c.followups[0]
+				c.followups = c.followups[1:]
+			} else {
+				action = c.queue[0]
+				c.queue = c.queue[1:]
+				c.reindexCoalesceLocked()
+			}
+			c.inFlight = true
+			transaction := &reducerTransaction{
+				goroutineID: currentGoroutineID(),
+			}
+			c.activeTransaction = transaction
+			c.legacyReducerGID = transaction.goroutineID
+			rev := c.revision
+			// Follow-ups already queued here belong to earlier causal siblings. A
+			// panicking reducer may only discard actions it emitted after this point.
+			followupStart := len(c.followups)
+			c.mu.Unlock()
+
+			applyStart := time.Now()
+			effects, panicked := c.apply(action, rev, &ReducerContext{controller: c, token: transaction})
+			applyNanos := uint64(time.Since(applyStart))
+
+			c.mu.Lock()
+			c.inFlight = false
+			c.activeTransaction = nil
+			c.legacyReducerGID = 0
+			c.processed++
+			c.revision++
+			c.reducerNanos += applyNanos
+			if !panicked {
+				effects = c.collectPostActionEffectsLocked(effects)
+				c.state = reduceUIControllerState(c.state, action, c.revision)
+				if historyCommitWakeNeeded(action, c.state) {
+					effects = append(effects, HistoryCommitWakeEffect{})
+				}
+			} else if len(c.followups) > followupStart {
+				// A reducer panic aborts the current action's causal continuation.
+				// Letting those follow-ups run would publish a partial transaction
+				// (for example a facade paint without its semantic parent action).
+				c.followups = c.followups[:followupStart]
+			}
+			c.lastAction = actionClassString(action)
+			batchActions++
+			var immediate []Effect
+			for _, effect := range effects {
+				if flush, ok := effect.(FlushEffect); ok {
+					// 批内合并：Dirty 取并集，物理帧推迟到批结束统一交付。
+					batchDirty |= flush.Dirty
+					batchFlush = true
+					continue
+				}
+				immediate = append(immediate, effect)
+			}
+			// 批内只要有待交付的输出（含被推迟的 flush），delivering 就在锁内
+			// 保持置位：WaitIdle 不得在"批已 apply 完但尚未交付"的窗口观察到
+			// 假空闲。非 flush effect 仍按 action 顺序立即交付。
+			if len(immediate) > 0 || batchFlush {
+				c.delivering = true
+				batchMarkedDelivering = true
+			}
+			c.mu.Unlock()
+			c.cond.Broadcast()
+			if len(immediate) > 0 {
+				c.deliver(immediate)
+			}
 		}
-		c.lastAction = actionClassString(action)
-		c.delivering = true
-		c.mu.Unlock()
-		c.cond.Broadcast()
-		c.deliver(effects)
-		c.mu.Lock()
-		c.delivering = false
-		c.mu.Unlock()
-		c.cond.Broadcast()
+		if batchFlush {
+			c.deliver([]Effect{FlushEffect{Dirty: batchDirty}})
+		}
+		if batchMarkedDelivering {
+			c.mu.Lock()
+			c.delivering = false
+			c.mu.Unlock()
+			c.cond.Broadcast()
+		}
 	}
 }
 
@@ -622,6 +757,58 @@ func (c *UIController) deliver(effects []Effect) {
 	}
 }
 
+// deliverTracked 与 deliver 相同，但在派发期间置位 delivering，使
+// WaitIdle/WaitIdleTimeout 把"effect 正在派发"计为未空闲（与既有语义一致）。
+func (c *UIController) deliverTracked(effects []Effect) {
+	if c == nil || len(effects) == 0 {
+		return
+	}
+	c.mu.Lock()
+	c.delivering = true
+	c.mu.Unlock()
+	c.deliver(effects)
+	c.mu.Lock()
+	c.delivering = false
+	c.mu.Unlock()
+	c.cond.Broadcast()
+}
+
+// recordPostWaitNanosLocked 把一次生产者等待 mailbox 容量的时长并入成本
+// 指标。调用方必须持有 c.mu。
+func (c *UIController) recordPostWaitNanosLocked(ns uint64) {
+	c.postWaitNanos += ns
+	c.postWaitCount++
+	if ns > c.postWaitMaxNanos {
+		c.postWaitMaxNanos = ns
+	}
+	c.postWaits.add(ns)
+}
+
+// recordPostWaitLocked 是 recordPostWaitNanosLocked 的时长形态；zero 表示
+// 本次投递没有等待（不产生样本）。调用方必须持有 c.mu。
+func (c *UIController) recordPostWaitLocked(start time.Time) {
+	if start.IsZero() {
+		return
+	}
+	var ns uint64
+	if d := time.Since(start); d > 0 {
+		ns = uint64(d)
+	}
+	c.recordPostWaitNanosLocked(ns)
+}
+
+// ObservePostWaitNanos 记录一次外部投递等待 mailbox 容量的时长。事件桥用
+// TryPost + 轮询而非阻塞 Post，因此由桥自己测量等待并回填，保证 /debug 的
+// PostWait* 覆盖真实生产者背压。该方法只累加诊断计数，不做调度决策。
+func (c *UIController) ObservePostWaitNanos(d time.Duration) {
+	if c == nil || d <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.recordPostWaitNanosLocked(uint64(d))
+}
+
 // reindexCoalesceLocked 在队首出队后修正 coalesce 下标。
 // 调用方必须持有 c.mu。
 func (c *UIController) reindexCoalesceLocked() {
@@ -720,8 +907,9 @@ func (c *UIController) Stats() ControllerStats {
 		return ControllerStats{}
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	return ControllerStats{
+	batchSamples := c.batchSizes.snapshotLocked()
+	postWaitSamples := c.postWaits.snapshotLocked()
+	stats := ControllerStats{
 		Posted:           c.posted,
 		Processed:        c.processed,
 		Dropped:          c.dropped,
@@ -734,7 +922,19 @@ func (c *UIController) Stats() ControllerStats {
 		LastAction:       c.lastAction,
 		ReducerPanics:    c.reducerPanics,
 		Closed:           c.closed,
+		ReducerNanos:     c.reducerNanos,
+		FlushCount:       c.flushCount,
+		Batches:          c.batches,
+		BatchSizeMax:     c.batchSizeMax,
+		PostWaitNanos:    c.postWaitNanos,
+		PostWaitCount:    c.postWaitCount,
+		PostWaitMaxNanos: c.postWaitMaxNanos,
 	}
+	c.mu.Unlock()
+	// P95 需要排序：放在锁外计算，避免在 actor 互斥量上做 O(n log n) 工作。
+	stats.BatchSizeP95 = int(sampleRingP95(batchSamples))
+	stats.PostWaitP95Nanos = sampleRingP95(postWaitSamples)
+	return stats
 }
 
 // State returns an immutable copy of the controller-owned Phase 1 transition

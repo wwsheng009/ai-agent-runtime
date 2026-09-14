@@ -156,6 +156,20 @@ type chatDebugDisplayDeferredInfo struct {
 	Pending int    `json:"pending"`
 	Bytes   int64  `json:"bytes,omitempty"`
 	Dropped uint64 `json:"dropped,omitempty"`
+	// 事件分级（docs/plan/ui-event-bridge-drop-hardening.md §6.1.6）：新增字段
+	// 只增不改，旧客户端不受影响。
+	Merged              uint64            `json:"merged,omitempty"`
+	Evicted             uint64            `json:"evicted,omitempty"`
+	DroppedByClass      map[string]uint64 `json:"dropped_by_class,omitempty"`
+	DroppedByType       map[string]uint64 `json:"dropped_by_type,omitempty"`
+	EvictedByType       map[string]uint64 `json:"evicted_by_type,omitempty"`
+	PeakPending         int               `json:"peak_pending,omitempty"`
+	PeakBytes           int64             `json:"peak_bytes,omitempty"`
+	CriticalPending     uint64            `json:"critical_pending,omitempty"`
+	CriticalPeakPending uint64            `json:"critical_peak_pending,omitempty"`
+	CriticalAtShutdown  uint64            `json:"critical_at_shutdown,omitempty"`
+	Degraded            bool              `json:"degraded,omitempty"`
+	Mode                string            `json:"mode,omitempty"`
 }
 
 type chatDebugDisplayCellInfo struct {
@@ -211,6 +225,28 @@ type chatDebugDisplayAppStateInfo struct {
 	// "mutable" or "finalizing" while the poller keeps seeing a growing band
 	// is the signature of an active band that never commits.
 	ActiveCell *chatDebugDisplayActiveCellInfo `json:"active_cell,omitempty"`
+	// UIActor 是消费端成本指标（docs/plan/ui-event-bridge-drop-hardening.md
+	// §6.2 第 2 条）。它把"事件桥丢事件"与"消费端是否跟得上"区分开：
+	// FlushCount/Processed 的比值反映批处理收益，PostWait* 反映生产者被
+	// mailbox 背压的真实时长。采样只读取一次 actor 快照，不参与调度。
+	UIActor *chatDebugDisplayUIActorInfo `json:"ui_actor,omitempty"`
+}
+
+type chatDebugDisplayUIActorInfo struct {
+	Processed        uint64 `json:"processed"`
+	FlushCount       uint64 `json:"flush_count"`
+	Batches          uint64 `json:"batches"`
+	BatchSizeP95     int    `json:"batch_size_p95,omitempty"`
+	BatchSizeMax     int    `json:"batch_size_max,omitempty"`
+	ReducerNanos     uint64 `json:"reducer_nanos,omitempty"`
+	PostWaitNanos    uint64 `json:"post_wait_nanos,omitempty"`
+	PostWaitCount    uint64 `json:"post_wait_count,omitempty"`
+	PostWaitMaxNanos uint64 `json:"post_wait_max_nanos,omitempty"`
+	PostWaitP95Nanos uint64 `json:"post_wait_p95_nanos,omitempty"`
+	PeakPending      int    `json:"peak_pending,omitempty"`
+	Pending          int    `json:"pending"`
+	Dropped          uint64 `json:"dropped,omitempty"`
+	DeferredMerged   uint64 `json:"deferred_merged,omitempty"`
 }
 
 type chatDebugDisplayHistoryGateInfo struct {
@@ -248,11 +284,23 @@ type chatDebugDisplayActiveCellInfo struct {
 
 // chatDebugDisplayExecutorInfo mirrors the executor recovery-loop diagnostics
 // (see ui.ExecutorDiagSnapshot). It is the execution side of the commit gates:
-// a diagnosis of "dead_guard" or "backoff_engaged" plus rising
+// a window_diagnosis of "dead_guard" or "backoff_engaged" plus rising
 // recoveries/frame-errors under an unchanged generation is direct evidence
 // that the executor is spinning on recovery instead of committing.
 type chatDebugDisplayExecutorInfo struct {
+	// Diagnosis is the since-start verdict (lifetime counters); a past storm
+	// keeps it non-healthy forever. DiagnosisScope names that explicitly so a
+	// reader cannot mistake it for the current state.
 	Diagnosis                string                             `json:"diagnosis"`
+	DiagnosisScope           string                             `json:"diagnosis_scope"`
+	// WindowDiagnosis is the current-state verdict over the retained window
+	// (most recent 64 executor iterations, none older than 60s): the field to
+	// poll when asking "is the executor healthy right now?". The shape fields
+	// say what the verdict was computed over.
+	WindowDiagnosis          string                             `json:"window_diagnosis"`
+	WindowEntries            int                                `json:"window_entries"`
+	WindowSpanMs             int64                              `json:"window_span_ms"`
+	WindowAgeMs              int64                              `json:"window_age_ms"`
 	TotalRecoveries          uint64                             `json:"total_recoveries"`
 	BackoffEngaged           uint64                             `json:"backoff_engaged"`
 	ArmedBackoff             uint64                             `json:"armed_backoff"`
@@ -394,11 +442,27 @@ func BuildChatDebugDisplaySnapshot() *chatDebugDisplaySnapshot {
 			ApplyFailures: failures,
 			LastError:     lastErr,
 		}
-		if pending, queuedBytes, dropped := bridge.deferredQueueStats(); pending > 0 || dropped > 0 {
+		pending, queuedBytes, dropped := bridge.deferredQueueStats()
+		classStats := bridge.deferredQueueClassStats()
+		if pending > 0 || dropped > 0 || classStats.Merged > 0 || classStats.Evicted > 0 ||
+			classStats.CriticalPending > 0 || classStats.CriticalPeakPending > 0 ||
+			classStats.CriticalAtShutdown > 0 || classStats.Degraded {
 			sc.DeferredQueue = &chatDebugDisplayDeferredInfo{
-				Pending: pending,
-				Bytes:   queuedBytes,
-				Dropped: dropped,
+				Pending:             pending,
+				Bytes:               queuedBytes,
+				Dropped:             dropped,
+				Merged:              classStats.Merged,
+				Evicted:             classStats.Evicted,
+				DroppedByClass:      classStats.DroppedByClass,
+				DroppedByType:       classStats.DroppedByType,
+				EvictedByType:       classStats.EvictedByType,
+				PeakPending:         classStats.PeakPending,
+				PeakBytes:           classStats.PeakBytes,
+				CriticalPending:     classStats.CriticalPending,
+				CriticalPeakPending: classStats.CriticalPeakPending,
+				CriticalAtShutdown:  classStats.CriticalAtShutdown,
+				Degraded:            classStats.Degraded,
+				Mode:                classStats.Mode,
 			}
 		}
 		if scn := bridge.sceneSnapshot(); scn != nil {
@@ -517,6 +581,27 @@ func BuildChatDebugDisplaySnapshot() *chatDebugDisplaySnapshot {
 			}
 		}
 		app.HistoryGates = gates
+		// 消费端成本快照（§6.2 第 2 条）：只在有活动时输出，避免空会话的
+		// 噪声字段。Stats() 是 actor 互斥量下的定长快照，不阻塞 Run 循环。
+		if actorStats := session.Interaction.uiActor.Stats(); actorStats.Processed > 0 ||
+			actorStats.PostWaitCount > 0 || actorStats.Pending > 0 {
+			app.UIActor = &chatDebugDisplayUIActorInfo{
+				Processed:        actorStats.Processed,
+				FlushCount:       actorStats.FlushCount,
+				Batches:          actorStats.Batches,
+				BatchSizeP95:     actorStats.BatchSizeP95,
+				BatchSizeMax:     actorStats.BatchSizeMax,
+				ReducerNanos:     actorStats.ReducerNanos,
+				PostWaitNanos:    actorStats.PostWaitNanos,
+				PostWaitCount:    actorStats.PostWaitCount,
+				PostWaitMaxNanos: actorStats.PostWaitMaxNanos,
+				PostWaitP95Nanos: actorStats.PostWaitP95Nanos,
+				PeakPending:      actorStats.PeakPending,
+				Pending:          actorStats.Pending,
+				Dropped:          actorStats.Dropped,
+				DeferredMerged:   actorStats.DeferredMerged,
+			}
+		}
 		if state.Active.Phase != ui.ActiveCellInactive {
 			app.ActiveCell = &chatDebugDisplayActiveCellInfo{
 				ID:            uint64(state.Active.CellID),
@@ -535,9 +620,14 @@ func BuildChatDebugDisplaySnapshot() *chatDebugDisplaySnapshot {
 	}
 
 	// ====== Executor Recovery Diagnostics ======
-	if diag := ui.ExecutorDiagSnapshot(); diag.Diagnosis != "" || diag.TotalRecoveries > 0 {
+	if diag := ui.ExecutorDiagSnapshot(); diag.Diagnosis != "" || diag.WindowDiagnosis != "" || diag.TotalRecoveries > 0 {
 		exec := &chatDebugDisplayExecutorInfo{
 			Diagnosis:                diag.Diagnosis,
+			DiagnosisScope:           "since_start",
+			WindowDiagnosis:          diag.WindowDiagnosis,
+			WindowEntries:            diag.WindowEntries,
+			WindowSpanMs:             diag.WindowSpanMs,
+			WindowAgeMs:              diag.WindowAgeMs,
 			TotalRecoveries:          diag.TotalRecoveries,
 			BackoffEngaged:           diag.BackoffEngaged,
 			ArmedBackoff:             diag.ArmedBackoff,

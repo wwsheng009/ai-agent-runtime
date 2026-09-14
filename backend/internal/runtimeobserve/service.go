@@ -93,15 +93,15 @@ func (s *Service) Capabilities() Capabilities {
 			"retention_ttl_ns": int64(s.cfg.RetentionTTL),
 		},
 		Limits: map[string]int64{
-			"ingress_queue_events":   int64(s.cfg.IngressQueueEvents),
-			"ingress_queue_bytes":    s.cfg.IngressQueueBytes,
+			"ingress_queue_events":    int64(s.cfg.IngressQueueEvents),
+			"ingress_queue_bytes":     s.cfg.IngressQueueBytes,
 			"subscriber_queue_events": int64(s.cfg.SubscriberQueueEvents),
-			"subscriber_queue_bytes": s.cfg.SubscriberQueueBytes,
-			"max_clients":            int64(s.cfg.MaxClients),
-			"max_event_bytes":        int64(s.cfg.MaxEventBytes),
-			"max_snapshot_bytes":     int64(s.cfg.MaxSnapshotBytes),
-			"heartbeat_ms":           s.cfg.Heartbeat.Milliseconds(),
-			"query_timeout_ms":       s.cfg.QueryTimeout.Milliseconds(),
+			"subscriber_queue_bytes":  s.cfg.SubscriberQueueBytes,
+			"max_clients":             int64(s.cfg.MaxClients),
+			"max_event_bytes":         int64(s.cfg.MaxEventBytes),
+			"max_snapshot_bytes":      int64(s.cfg.MaxSnapshotBytes),
+			"heartbeat_ms":            s.cfg.Heartbeat.Milliseconds(),
+			"query_timeout_ms":        s.cfg.QueryTimeout.Milliseconds(),
 		},
 		Redaction: RedactionCapability{
 			Profile:       s.cfg.RedactionProfile,
@@ -180,17 +180,17 @@ func (s *Service) BuildSnapshot(ctx context.Context, includeSessions bool) (Snap
 	}
 
 	return Snapshot{
-		SchemaVersion:     SchemaVersionResponse,
-		SnapshotRevision:  int64(revision),
-		CapturedAt:        now,
-		FreshnessMS:       s.freshnessMS(meta),
-		Consistency:       consistency,
-		Process:           process,
-		Runtime:           runtimeSummary,
-		LLM:               llm,
-		Sessions:          SessionCollection{Items: items, Count: count, Partial: partial},
-		Cursor:            meta.Bounds,
-		Components:        components,
+		SchemaVersion:    SchemaVersionResponse,
+		SnapshotRevision: int64(revision),
+		CapturedAt:       now,
+		FreshnessMS:      s.freshnessMS(meta),
+		Consistency:      consistency,
+		Process:          process,
+		Runtime:          runtimeSummary,
+		LLM:              llm,
+		Sessions:         SessionCollection{Items: items, Count: count, Partial: partial},
+		Cursor:           meta.Bounds,
+		Components:       components,
 	}, nil
 }
 

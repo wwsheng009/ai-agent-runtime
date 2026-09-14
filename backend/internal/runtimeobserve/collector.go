@@ -34,8 +34,10 @@ type ProviderCounters struct {
 
 // RuntimeCounters 是 runtime 维度的自监控计数。
 type RuntimeCounters struct {
-	IngressDropped   uint64
-	UnknownDropped   uint64
+	IngressDropped uint64
+	UnknownDropped uint64
+	// FilteredByType 按类型累计"已知但不在 v1 白名单"的过滤计数（方案 §6.3 落点 B）。
+	FilteredByType   map[string]uint64
 	ProjectionErrors uint64
 	GapCount         uint64
 	LastGapAt        *time.Time
@@ -222,6 +224,26 @@ func (c *Collector) recordIngressDrop() {
 	}
 }
 
+// recordRuntimeEventDrop 记录一次 runtime 事件被投影拒绝：
+// 类型在产品已知目录内 → 仅因白名单裁剪被过滤，计入 filtered_by_type；
+// 目录之外 → 真未知类型，计入 unknown_events_dropped（方案 §6.3 落点 B）。
+func (c *Collector) recordRuntimeEventDrop(eventType string) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if isKnownEventType(eventType) {
+		c.recordFilteredByTypeLocked(eventType)
+		return
+	}
+	c.state.Runtime.UnknownDropped++
+}
+
+// recordUnknownDrop 记录一次无法归类的投影失败（非 runtime 来源）。
+func (c *Collector) recordUnknownDrop() {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	c.state.Runtime.UnknownDropped++
+}
+
 // consume 处理一条入队项：投影、去重、入 ring、更新聚合。
 func (c *Collector) consume(item ingressItem) {
 	var proj Event
@@ -231,9 +253,7 @@ func (c *Collector) consume(item ingressItem) {
 	case "runtime":
 		proj, ok = c.projector.ProjectRuntimeEvent(item.event)
 		if !ok {
-			c.stateMu.Lock()
-			c.state.Runtime.UnknownDropped++
-			c.stateMu.Unlock()
+			c.recordRuntimeEventDrop(item.event.Type)
 			return
 		}
 		dedupKey = dedupKeyFor(
@@ -253,9 +273,9 @@ func (c *Collector) consume(item ingressItem) {
 		return
 	}
 	if !ok {
-		c.stateMu.Lock()
-		c.state.Runtime.UnknownDropped++
-		c.stateMu.Unlock()
+		// debug/retry 来源的事件类型由 projector 内部合成（llm.attempt.* / llm.retry），
+		// 投影失败即异常，保持 unknown 语义。
+		c.recordUnknownDrop()
 		return
 	}
 	if proj.Payload != nil {
@@ -528,6 +548,7 @@ func (c *Collector) Stats() (RuntimeSummary, LLMSummary) {
 	runtimeSummary := RuntimeSummary{
 		EventIngressDropped:  c.stateDropped(),
 		UnknownEventsDropped: c.stateUnknown(),
+		FilteredByType:       c.stateFilteredByType(),
 		ProjectionErrors:     c.stateProjection(),
 		GapCount:             c.stateGap(),
 		LastGapAt:            c.stateLastGap(),
@@ -577,6 +598,20 @@ func (c *Collector) stateUnknown() uint64 {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	return c.state.Runtime.UnknownDropped
+}
+
+// stateFilteredByType 返回 filtered_by_type 的副本，调用方不持有内部 map。
+func (c *Collector) stateFilteredByType() map[string]uint64 {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if len(c.state.Runtime.FilteredByType) == 0 {
+		return nil
+	}
+	out := make(map[string]uint64, len(c.state.Runtime.FilteredByType))
+	for eventType, count := range c.state.Runtime.FilteredByType {
+		out[eventType] = count
+	}
+	return out
 }
 
 func (c *Collector) stateProjection() uint64 {

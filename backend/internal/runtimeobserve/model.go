@@ -11,10 +11,10 @@ import (
 
 // 版本化 schema 常量（Phase 0 契约）。
 const (
-	SchemaVersionResponse  = "runtime.observe.v1"
-	SchemaVersionEvent     = "runtime.observe.event.v1"
-	SchemaVersionSSE       = "runtime.observe.sse.v1"
-	SchemaVersionCursor    = "runtime.observe.cursor.v1"
+	SchemaVersionResponse       = "runtime.observe.v1"
+	SchemaVersionEvent          = "runtime.observe.event.v1"
+	SchemaVersionSSE            = "runtime.observe.sse.v1"
+	SchemaVersionCursor         = "runtime.observe.cursor.v1"
 	RedactionProfileSafeDefault = "safe_default"
 
 	// 错误码（错误 envelope 只使用稳定错误码，不回传原始 Go error）。
@@ -22,7 +22,7 @@ const (
 	ErrCodeUnauthorized     = "observe_unauthorized"
 	ErrCodeInvalidRequest   = "observe_invalid_request"
 	ErrCodeSessionNotFound  = "observe_session_not_found"
-	ErrCodeCursorExpired    = "observe_cursor_expired"   // 对应 HTTP 410 / resync_required
+	ErrCodeCursorExpired    = "observe_cursor_expired" // 对应 HTTP 410 / resync_required
 	ErrCodeCursorInvalid    = "observe_cursor_invalid"
 	ErrCodeTooManyClients   = "observe_too_many_clients"
 	ErrCodeInternal         = "observe_internal"
@@ -56,33 +56,33 @@ const (
 
 // Correlation 是所有观测事件的关联上下文（方案 §4.3/§6.1）。
 type Correlation struct {
-	SessionID      string `json:"session_id,omitempty"`
-	TraceID        string `json:"trace_id,omitempty"`
-	TurnID         string `json:"turn_id,omitempty"`
-	AgentID        string `json:"agent_id,omitempty"`
-	ToolCallID     string `json:"tool_call_id,omitempty"`
-	LLMRequestID   string `json:"llm_request_id,omitempty"`
-	RetryAttemptID string `json:"retry_attempt_id,omitempty"`
-	StreamID       string `json:"stream_id,omitempty"`
+	SessionID         string `json:"session_id,omitempty"`
+	TraceID           string `json:"trace_id,omitempty"`
+	TurnID            string `json:"turn_id,omitempty"`
+	AgentID           string `json:"agent_id,omitempty"`
+	ToolCallID        string `json:"tool_call_id,omitempty"`
+	LLMRequestID      string `json:"llm_request_id,omitempty"`
+	RetryAttemptID    string `json:"retry_attempt_id,omitempty"`
+	StreamID          string `json:"stream_id,omitempty"`
 	ProviderRequestID string `json:"provider_request_id,omitempty"`
 }
 
 // Event 是观测平面上一条已投影、已脱敏的事件记录。
 type Event struct {
-	ObservationSeq int64        `json:"observation_seq"`
-	Timestamp      time.Time    `json:"timestamp"`
-	Type           string       `json:"type"`
-	Source         string       `json:"source,omitempty"`
-	SchemaVersion  string       `json:"schema_version"`
-	Correlation    Correlation `json:"correlation,omitempty"`
+	ObservationSeq int64                  `json:"observation_seq"`
+	Timestamp      time.Time              `json:"timestamp"`
+	Type           string                 `json:"type"`
+	Source         string                 `json:"source,omitempty"`
+	SchemaVersion  string                 `json:"schema_version"`
+	Correlation    Correlation            `json:"correlation,omitempty"`
 	Payload        map[string]interface{} `json:"payload,omitempty"`
 }
 
 // CursorInfo 携带事件序列边界与实例 epoch。
 type CursorInfo struct {
-	ObservationSeq    int64  `json:"observation_seq"`
-	OldestAvailableSeq int64 `json:"oldest_available_seq,omitempty"`
-	InstanceEpoch     string `json:"instance_epoch,omitempty"`
+	ObservationSeq     int64  `json:"observation_seq"`
+	OldestAvailableSeq int64  `json:"oldest_available_seq,omitempty"`
+	InstanceEpoch      string `json:"instance_epoch,omitempty"`
 }
 
 // ComponentMeta 描述快照中单个数据域的 revision 与采集时间。
@@ -101,30 +101,34 @@ type Consistency struct {
 
 // ProcessSummary 是低成本的进程摘要，不能替代 pprof。
 type ProcessSummary struct {
-	InstanceID          string `json:"instance_id"`
-	PID                 int    `json:"pid"`
-	UptimeMS            int64  `json:"uptime_ms"`
-	Goroutines          int    `json:"goroutines"`
-	HeapBytes           uint64 `json:"heap_bytes"`
-	ObservationEnabled  bool   `json:"observation_enabled"`
+	InstanceID         string `json:"instance_id"`
+	PID                int    `json:"pid"`
+	UptimeMS           int64  `json:"uptime_ms"`
+	Goroutines         int    `json:"goroutines"`
+	HeapBytes          uint64 `json:"heap_bytes"`
+	ObservationEnabled bool   `json:"observation_enabled"`
 }
 
 // RuntimeSummary 是 runtime 维度的聚合计数。
 type RuntimeSummary struct {
-	ActiveSessions    int       `json:"active_sessions,omitempty"`
-	RunningTurns      int       `json:"running_turns,omitempty"`
-	ActiveLLMRequests int       `json:"active_llm_requests,omitempty"`
-	ActiveTools       int       `json:"active_tools,omitempty"`
-	PendingApprovals  int       `json:"pending_approvals,omitempty"`
-	EventIngressDropped uint64  `json:"event_ingress_dropped"`
+	ActiveSessions       int    `json:"active_sessions,omitempty"`
+	RunningTurns         int    `json:"running_turns,omitempty"`
+	ActiveLLMRequests    int    `json:"active_llm_requests,omitempty"`
+	ActiveTools          int    `json:"active_tools,omitempty"`
+	PendingApprovals     int    `json:"pending_approvals,omitempty"`
+	EventIngressDropped  uint64 `json:"event_ingress_dropped"`
 	UnknownEventsDropped uint64 `json:"unknown_events_dropped"`
-	ProjectionErrors  uint64    `json:"projection_errors"`
-	GapCount          uint64    `json:"gap_count"`
-	LastGapAt         *time.Time `json:"last_gap_at,omitempty"`
-	LastEventAt       *time.Time `json:"last_event_at,omitempty"`
-	RingCurrentBytes  int64     `json:"ring_current_bytes"`
-	RingOldestSeq     int64     `json:"ring_oldest_seq"`
-	RingLatestSeq     int64     `json:"ring_latest_seq"`
+	// FilteredByType 统计"类型已知、仅因不在 v1 白名单被过滤"的事件数，
+	// 按事件类型分桶（封闭目录，键数天然有上界 = top-N）。
+	// unknown_events_dropped 只统计目录之外的真未知类型（方案 §6.3 落点 B）。
+	FilteredByType   map[string]uint64 `json:"filtered_by_type,omitempty"`
+	ProjectionErrors uint64            `json:"projection_errors"`
+	GapCount         uint64            `json:"gap_count"`
+	LastGapAt        *time.Time        `json:"last_gap_at,omitempty"`
+	LastEventAt      *time.Time        `json:"last_event_at,omitempty"`
+	RingCurrentBytes int64             `json:"ring_current_bytes"`
+	RingOldestSeq    int64             `json:"ring_oldest_seq"`
+	RingLatestSeq    int64             `json:"ring_latest_seq"`
 }
 
 // UsageSummary 汇总 token usage（仅计数，不重复求和）。
@@ -138,9 +142,9 @@ type UsageSummary struct {
 
 // ProviderSummary 按 provider 聚合要求/错误数。
 type ProviderSummary struct {
-	Requests  int64 `json:"requests"`
-	Errors    int64 `json:"errors"`
-	Retries   int64 `json:"retries"`
+	Requests int64 `json:"requests"`
+	Errors   int64 `json:"errors"`
+	Retries  int64 `json:"retries"`
 }
 
 // LLMSummary 是 LLM 维度的聚合摘要。
@@ -151,7 +155,7 @@ type LLMSummary struct {
 	StreamCount      int64                      `json:"stream_count"`
 	Usage            UsageSummary               `json:"usage"`
 	ByProvider       map[string]ProviderSummary `json:"by_provider,omitempty"`
-	ByModel          map[string]int64            `json:"by_model,omitempty"`
+	ByModel          map[string]int64           `json:"by_model,omitempty"`
 }
 
 // RendererLink 是 renderer 语义快照的低敏 link（Phase 4 预留）。
@@ -177,38 +181,38 @@ type SessionSummary struct {
 
 // Snapshot 是观测平面的复合只读快照。
 type Snapshot struct {
-	SchemaVersion   string            `json:"schema_version"`
-	SnapshotRevision int64            `json:"snapshot_revision"`
-	CapturedAt      time.Time         `json:"captured_at"`
-	FreshnessMS     int64             `json:"freshness_ms"`
-	Consistency     Consistency       `json:"consistency"`
-	Process         ProcessSummary    `json:"process"`
-	Runtime         RuntimeSummary    `json:"runtime"`
-	LLM             LLMSummary        `json:"llm"`
-	Sessions        SessionCollection `json:"sessions"`
-	Cursor          CursorInfo        `json:"cursor"`
-	Components      map[string]ComponentMeta `json:"components,omitempty"`
+	SchemaVersion    string                   `json:"schema_version"`
+	SnapshotRevision int64                    `json:"snapshot_revision"`
+	CapturedAt       time.Time                `json:"captured_at"`
+	FreshnessMS      int64                    `json:"freshness_ms"`
+	Consistency      Consistency              `json:"consistency"`
+	Process          ProcessSummary           `json:"process"`
+	Runtime          RuntimeSummary           `json:"runtime"`
+	LLM              LLMSummary               `json:"llm"`
+	Sessions         SessionCollection        `json:"sessions"`
+	Cursor           CursorInfo               `json:"cursor"`
+	Components       map[string]ComponentMeta `json:"components,omitempty"`
 }
 
 // SessionCollection 是快照内的 session 摘要集合。
 type SessionCollection struct {
-	Items []SessionSummary `json:"items,omitempty"`
-	Count int              `json:"count"`
-	Partial bool           `json:"partial,omitempty"`
+	Items   []SessionSummary `json:"items,omitempty"`
+	Count   int              `json:"count"`
+	Partial bool             `json:"partial,omitempty"`
 }
 
 // Capabilities 描述观测平面的能力与生效限额。
 type Capabilities struct {
-	SchemaVersion  string            `json:"schema_version"`
-	Enabled        bool              `json:"enabled"`
-	InstanceEpoch  string            `json:"instance_epoch"`
-	Retention      map[string]int64  `json:"retention"`
-	Limits         map[string]int64  `json:"limits"`
+	SchemaVersion  string              `json:"schema_version"`
+	Enabled        bool                `json:"enabled"`
+	InstanceEpoch  string              `json:"instance_epoch"`
+	Retention      map[string]int64    `json:"retention"`
+	Limits         map[string]int64    `json:"limits"`
 	Redaction      RedactionCapability `json:"redaction"`
-	Query          QueryCapability   `json:"query"`
-	Stream         StreamCapability  `json:"stream"`
-	Renderer       RendererCapability `json:"renderer"`
-	EventAllowlist []string          `json:"event_allowlist"`
+	Query          QueryCapability     `json:"query"`
+	Stream         StreamCapability    `json:"stream"`
+	Renderer       RendererCapability  `json:"renderer"`
+	EventAllowlist []string            `json:"event_allowlist"`
 }
 
 // RedactionCapability 披露脱敏契约摘要。
@@ -231,9 +235,9 @@ type QueryCapability struct {
 
 // StreamCapability 披露 SSE 能力（Phase 3 前为不可用）。
 type StreamCapability struct {
-	Enabled   bool `json:"enabled"`
-	HeartbeatMS int `json:"heartbeat_ms"`
-	MaxClients  int  `json:"max_clients"`
+	Enabled     bool   `json:"enabled"`
+	HeartbeatMS int    `json:"heartbeat_ms"`
+	MaxClients  int    `json:"max_clients"`
 	Protocol    string `json:"protocol,omitempty"`
 }
 
@@ -246,13 +250,13 @@ type RendererCapability struct {
 
 // Envelope 是普通 JSON 响应的统一 envelope。
 type Envelope struct {
-	OK            bool          `json:"ok"`
-	SchemaVersion string        `json:"schema_version"`
-	RequestID     string        `json:"request_id"`
-	Data          interface{}   `json:"data,omitempty"`
-	Warnings      []string      `json:"warnings,omitempty"`
+	OK            bool                 `json:"ok"`
+	SchemaVersion string               `json:"schema_version"`
+	RequestID     string               `json:"request_id"`
+	Data          interface{}          `json:"data,omitempty"`
+	Warnings      []string             `json:"warnings,omitempty"`
 	Redaction     *RedactionCapability `json:"redaction,omitempty"`
-	Error         *ErrorBody    `json:"error,omitempty"`
+	Error         *ErrorBody           `json:"error,omitempty"`
 }
 
 // ErrorBody 是错误 envelope 的最小字段（不带原始 provider body / Go error）。
@@ -288,7 +292,7 @@ type QueryResult struct {
 	OldestAvailableSeq int64   `json:"oldest_available_seq"`
 	NextCursor         *string `json:"next_cursor"`
 	Partial            bool    `json:"partial"`
-	Count               int     `json:"count"`
+	Count              int     `json:"count"`
 }
 
 // Cursor 是客户端可恢复的观测位置（opaque，绑定 instance epoch/schema）。

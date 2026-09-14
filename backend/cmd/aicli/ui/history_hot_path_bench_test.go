@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
 
@@ -208,5 +209,50 @@ func BenchmarkResumeStreamChunkWithLargeHistory(b *testing.B) {
 		// non-activeOnly reducer paths (SetActiveCellAction, FinalizeActiveCellAction,
 		// ReplaceTranscriptAction when activeOnly fails) call per chunk in production.
 		syncHistoryEffectsForTranscript(&state)
+	}
+}
+
+// BenchmarkUIControllerBurstBatching 量化消费端批处理的收益
+// （docs/plan/ui-event-bridge-drop-hardening.md §6.2 第 1 条）。
+//
+// 生产者以 256 条为一轮突发投递（mailbox 容量足够，不靠背压截断），控制器在一次
+// 唤醒内连续 apply 所有就绪 action，并在批尾只交付一帧 FlushEffect。
+//
+// 指标：
+//   - flush_per_event：交付物理帧数 / apply 数。远小于 1 表示批内合并生效；
+//     ≈1 等价于批处理之前"每条 action 一帧"的行为。
+//   - reducer_ns/event、batches_per_event：瓶颈归因（reducer 内耗 vs 批调度）。
+//   - ns/op：含生产者投递与排水等待的端到端分摊成本。
+func BenchmarkUIControllerBurstBatching(b *testing.B) {
+	const burst = 256
+	reducer := ReducerFunc(func(uint64, UIAction) []Effect {
+		return []Effect{FlushEffect{Dirty: renderengine.DirtyContent}}
+	})
+	c := NewUIController(UIControllerConfig{MailboxSize: burst * 2}, reducer, func(Effect) {})
+	go c.Run()
+	defer c.Close()
+
+	before := c.Stats()
+	b.ReportAllocs()
+	for b.Loop() {
+		for i := 0; i < burst; i++ {
+			if !c.Post(RuntimeEvent{Kind: "chunk"}) {
+				b.Fatal("controller refused post")
+			}
+		}
+		c.WaitIdle()
+	}
+	after := c.Stats()
+
+	applied := after.Processed - before.Processed
+	frames := after.FlushCount - before.FlushCount
+	if applied == 0 {
+		b.Fatal("no actions applied")
+	}
+	b.ReportMetric(float64(frames)/float64(applied), "flush_per_event")
+	b.ReportMetric(float64(after.Batches-before.Batches)/float64(applied), "batches_per_event")
+	b.ReportMetric(float64(after.ReducerNanos-before.ReducerNanos)/float64(applied), "reducer_ns/event")
+	if after.Pending != 0 {
+		b.Fatalf("controller still has %d pending actions after drain", after.Pending)
 	}
 }

@@ -241,7 +241,7 @@ func TestChatDebugDisplayExecutorAndProjection(t *testing.T) {
 	// the package-global provider does not leak into other tests.
 	ui.SetExecutorDiagProvider(func() ui.ExecutorRecoveryDiag {
 		return ui.ExecutorRecoveryDiag{
-			Diagnosis:      "healthy",
+			Diagnosis:       "healthy",
 			TotalRecoveries: 12,
 			BackoffEngaged:  0,
 			ArmedBackoff:    1,
@@ -371,5 +371,75 @@ func TestChatDebugDisplayNewSections(t *testing.T) {
 	}
 	if _, ok := agents["mailbox"]; !ok {
 		t.Fatal("agents.mailbox should exist")
+	}
+}
+
+// TestChatDebugDisplayUIActorCostBlock 验证消费端成本区块
+// （docs/plan/ui-event-bridge-drop-hardening.md §6.2 第 2 条）在 JSON 与纯文本
+// 两条输出路径上都可见，且消费端无活动时不产生噪声字段。
+func TestChatDebugDisplayUIActorCostBlock(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	session := &ChatSession{}
+	coordinator := newChatInteractionCoordinator(session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+	coordinator.SetWriter(&bytes.Buffer{})
+
+	old := chatDebugDisplaySessionProvider
+	chatDebugDisplaySessionProvider = func() *ChatSession { return session }
+	defer func() { chatDebugDisplaySessionProvider = old }()
+
+	// 消费端尚无活动：不输出 ui_actor（避免空会话噪声）。
+	body, err := MarshalChatDebugDisplayJSON()
+	if err != nil {
+		t.Fatalf("MarshalChatDebugDisplayJSON failed: %v", err)
+	}
+	if strings.Contains(string(body), `"ui_actor"`) {
+		t.Fatalf("idle actor must not expose ui_actor: %s", body)
+	}
+
+	actor := coordinator.ensureUIActor()
+	if actor == nil {
+		t.Fatal("expected UI actor")
+	}
+	if !actor.Post(ui.SetActiveCellAction{Active: ui.ActiveCellState{
+		CellID:   42,
+		Revision: 3,
+		Kind:     scene.KindAssistant,
+		Phase:    ui.ActiveCellMutable,
+		Source:   "cost block probe",
+		Stable:   ui.SourceRange{Start: 0, End: 16},
+	}}) {
+		t.Fatal("post active cell mount")
+	}
+	actor.WaitIdle()
+
+	body, err = MarshalChatDebugDisplayJSON()
+	if err != nil {
+		t.Fatalf("MarshalChatDebugDisplayJSON failed: %v", err)
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("JSON unmarshal failed: %v", err)
+	}
+	appState, ok := parsed["app_state"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("app_state section missing: %s", body)
+	}
+	block, ok := appState["ui_actor"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("app_state.ui_actor missing: %s", body)
+	}
+	if got, _ := block["processed"].(float64); got < 1 {
+		t.Fatalf("app_state.ui_actor.processed = %v, want >= 1 (raw: %v)", block["processed"], block)
+	}
+	if _, ok := block["flush_count"]; !ok {
+		t.Fatalf("app_state.ui_actor.flush_count missing: %s", body)
+	}
+
+	text := BuildChatDebugDisplayText()
+	if !strings.Contains(text, "UI Actor:") || !strings.Contains(text, "Processed/Flushes:") {
+		t.Fatalf("text output should contain the UI Actor cost block")
 	}
 }

@@ -44,18 +44,21 @@ func TestCriticalSubagentTerminalBypassesTurnMismatch(t *testing.T) {
 	require.False(t, bridge.shouldSuppressMismatchedPrimaryTurnEvent(critical))
 
 	ordinary := critical
-	ordinary.Type = "tool.completed"
+	ordinary.Type = "checkpoint_created"
 	require.True(t, bridge.shouldSuppressMismatchedPrimaryTurnEvent(ordinary))
 }
 
 func TestCriticalLifecycleUsesReservedQueueCapacity(t *testing.T) {
 	bridge := newChatRuntimeEventBridge(&ChatSession{})
 	bridge.runEpoch = 1
+	// The filler must be a non-critical class: "tool.completed" is a critical
+	// tool boundary in enforce mode (§6.1.1), so it would use the reserve and
+	// never fill the normal capacity.
 	for i := 0; i < bridge.normalEventQueueCapacity(); i++ {
-		accepted := bridge.enqueueNonStreamEvent(runtimeevents.Event{Type: "tool.completed"}, 1, 0)
+		accepted := bridge.enqueueNonStreamEvent(runtimeevents.Event{Type: "checkpoint_created"}, 1, 0)
 		require.True(t, accepted, "ordinary event %d should fill normal capacity", i)
 	}
-	require.False(t, bridge.enqueueNonStreamEvent(runtimeevents.Event{Type: "tool.completed"}, 1, 0))
+	require.False(t, bridge.enqueueNonStreamEvent(runtimeevents.Event{Type: "checkpoint_created"}, 1, 0))
 	require.True(t, bridge.enqueueNonStreamEvent(runtimeevents.Event{Type: "subagent.batch.failed"}, 1, 0))
 }
 

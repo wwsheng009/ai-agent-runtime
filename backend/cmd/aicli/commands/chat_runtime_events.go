@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
@@ -25,11 +26,13 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/cacheanalytics"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -118,16 +121,38 @@ type chatRuntimeEventBridge struct {
 	// A single worker drains it FIFO as the consumer catches up, so ordering is
 	// preserved without ever blocking the publisher (provider stream callback,
 	// tool loop, agent act) beyond chatRuntimeNonStreamEnqueueBudget.
-	deferredMu            sync.Mutex
-	deferredQueue         []chatRuntimeQueuedEvent
-	deferredBytes         int64
-	deferredPending       uint64
-	deferredDropped       uint64
-	deferredWorkerRunning bool
-	askApproval           func(*runtimechat.ApprovalRequest, []string) (chatApprovalAnswer, error)
-	askQuestion           func(prompt string, suggestions []string, required bool) (string, error)
-	approveTool           func(ctx context.Context, sessionID, requestID string, allow bool) error
-	answerQuestion        func(ctx context.Context, sessionID, questionID, answer string) error
+	deferredMu             sync.Mutex
+	deferredQueue          []*chatRuntimeQueuedEvent
+	deferredIndex          map[string]*chatRuntimeQueuedEvent // 合并键 -> 槽位（O(1) latest-wins）
+	deferredBytes          int64
+	deferredPending        uint64
+	deferredDropped        uint64
+	deferredMerged         uint64
+	deferredEvicted        uint64
+	deferredDroppedByClass map[chatEventClass]uint64
+	deferredDroppedByType  map[string]uint64
+	deferredEvictedByType  map[string]uint64
+	deferredPeakPending    int
+	deferredPeakBytes      int64
+	deferredWorkerRunning  bool
+	// classifyMode selects the event-classification behaviour
+	// (AICLI_EVENT_BRIDGE_CLASSIFY=off|observe|enforce); see
+	// chatEventBridgeClassifyModeFromEnv.
+	classifyMode chatEventClassifyMode
+	// criticalPeakPending / criticalAtShutdown / eventBridgeDegraded are
+	// guarded by progressMu (the same lock as criticalPending).
+	criticalPeakPending uint64
+	criticalAtShutdown  uint64
+	eventBridgeDegraded bool
+	// degradation 是给 TUI 状态行读取的无锁降级摘要（§6.2 第 3 条">降级对用户
+	// 可见"）：写者持 deferredMu 发布，读者（动态状态行）只做 atomic.Load，
+	// 绝不触碰桥的互斥量，因此不会引入新的阻塞点或锁序反转。
+	degradation            atomic.Pointer[chatEventBridgeDegradation]
+	degradationPublishedAt atomic.Int64
+	askApproval            func(*runtimechat.ApprovalRequest, []string) (chatApprovalAnswer, error)
+	askQuestion            func(prompt string, suggestions []string, required bool) (string, error)
+	approveTool            func(ctx context.Context, sessionID, requestID string, allow bool) error
+	answerQuestion         func(ctx context.Context, sessionID, questionID, answer string) error
 	// preferInteractiveApprovals keeps NoInteractive headless hosts (ACP stdio)
 	// from auto-denying tools so askApproval can RPC to an external client.
 	preferInteractiveApprovals bool
@@ -189,6 +214,21 @@ type chatRuntimeQueuedEvent struct {
 	event runtimeevents.Event
 	size  int64
 	epoch uint64
+	// key is the latest-wins identity of a coalescible event (empty for
+	// events that must keep their own slot). Set when the event is deferred
+	// into the overflow queue; it is what makes in-place merging possible.
+	key string
+	// inFlight marks the head slot the deferred worker is currently trying to
+	// deliver: its event/size are read outside deferredMu and must therefore not
+	// be rewritten by publishers. A latest-wins update that lands in this window
+	// is parked in pending* (written under deferredMu) and promoted in place once
+	// the current value has been delivered, so one key still owns one slot.
+	inFlight bool
+	// pendingEvent/pendingSize/hasPending hold the newest value of a coalescible
+	// family that arrived while inFlight was set.
+	pendingEvent runtimeevents.Event
+	pendingSize  int64
+	hasPending   bool
 }
 
 type chatAssistantStreamState struct {
@@ -291,6 +331,179 @@ const chatRuntimeDeferredRetryInterval = 5 * time.Millisecond
 const chatRuntimeDeferredDrainBudget = 1500 * time.Millisecond
 const chatRetiredTurnLimit = 64
 
+// ---------------------------------------------------------------------------
+// 事件分级（docs/plan/ui-event-bridge-drop-hardening.md §6.1）
+//
+// 非流式事件过去只有两个极端：子代理终态走专用重试通道（不丢），其余全部
+// 挤在同一条 200ms 预算 + 512 条 FIFO 里，溢出即丢弃。长轮 + 并发子代理下，
+// 可合并的高频事件（tool.progress / dynamic_status / usage …）会以每秒数十条
+// 的速率吃光队列容量，把工具边界与终稿挤掉——而终稿（assistant_message）在
+// 入队前就已丢弃了它取代的合并增量（§4.1），一旦被丢就是整段内容消失。
+//
+// 分级把"入队路径"与"溢出裁决"从事件类型推导出来：
+//   - critical      → 保留位 + 重试通道，永不进入溢出队列；
+//   - coalescible   → 入队前 latest-wins 合并且可被驱逐（腾挪给更高优先级）；
+//   - ordered       → 保持 FIFO，仅在极端溢出时计数丢弃；
+//   - stream        → 既有流式合并路径（不变）。
+// ---------------------------------------------------------------------------
+
+type chatEventClass int
+
+const (
+	eventClassStream      chatEventClass = iota // 已有流式合并路径（不变）
+	eventClassCritical                          // 不丢：保留位 + 重试通道
+	eventClassOrdered                           // 有序：FIFO，极端溢出时计数丢弃
+	eventClassCoalescible                       // 可合并：入队前 latest-wins
+)
+
+func (c chatEventClass) String() string {
+	switch c {
+	case eventClassStream:
+		return "stream"
+	case eventClassCritical:
+		return "critical"
+	case eventClassCoalescible:
+		return "coalescible"
+	default:
+		return "ordered"
+	}
+}
+
+// chatEventClassifyMode selects the classification behaviour of the bridge.
+// AICLI_EVENT_BRIDGE_CLASSIFY=off|observe|enforce (大小写不敏感)：
+//   - off:     完全回到分级之前的行为（回滚开关）；
+//   - observe: 只分类计数，不改投递行为（PR-0 观测档）；
+//   - enforce: critical 路由 + 入队前合并 + coalescible 腾挪（默认，PR-1）。
+type chatEventClassifyMode int
+
+const (
+	chatEventClassifyOff chatEventClassifyMode = iota
+	chatEventClassifyObserve
+	chatEventClassifyEnforce
+)
+
+func (m chatEventClassifyMode) String() string {
+	switch m {
+	case chatEventClassifyOff:
+		return "off"
+	case chatEventClassifyObserve:
+		return "observe"
+	default:
+		return "enforce"
+	}
+}
+
+func chatEventBridgeClassifyModeFromEnv() chatEventClassifyMode {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("AICLI_EVENT_BRIDGE_CLASSIFY"))) {
+	case "off", "0", "false", "no", "disable", "disabled":
+		return chatEventClassifyOff
+	case "observe", "count", "dry-run", "dryrun":
+		return chatEventClassifyObserve
+	default:
+		// enforce 是 PR-1 的目标状态（§6.1.6）；异常值也按目标状态处理，
+		// 避免拼写错误静默关闭加固。回滚请显式设置 off。
+		return chatEventClassifyEnforce
+	}
+}
+
+// classifyChatRuntimeEvent maps an event type onto its delivery class
+// (§6.1.1). The mapping is intentionally conservative: an event that is not
+// known to be latest-wins stays ordered, and anything whose loss would break
+// the control plane or drop content that already superseded its stream deltas
+// is critical.
+func classifyChatRuntimeEvent(eventType string) chatEventClass {
+	typ := strings.ToLower(strings.TrimSpace(eventType))
+	if isMergeableStreamEvent(typ) {
+		return eventClassStream
+	}
+	if isCriticalSubagentLifecycleEvent(typ) {
+		return eventClassCritical
+	}
+	switch typ {
+	case runtimechat.EventAssistantMessage, // assistant_message
+		runtimechat.EventSessionEnd,
+		runtimechat.EventSessionInterrupted,
+		"run_end", "run.end",
+		runtimechat.EventToolFinished,
+		// "tool.completed" 是总线上的真实别名（exec_event_bridge.go、
+		// agent_stdio_bridge.go、events/bus.go 都在用它），漏了它会让工具边界
+		// 退回有序队列并被溢出丢弃。
+		"tool.completed",
+		"tool_failed",
+		runtimechat.EventApprovalRequested,
+		runtimechat.EventApprovalResolved,
+		runtimechat.EventQuestionAsked,
+		runtimechat.EventQuestionAnswered,
+		runtimechat.EventSessionCompactFailed:
+		return eventClassCritical
+	case runtimeobserve.EventUsageUpdated, // usage.updated
+		chatWebDynamicStatusBusEvent, // aicli.chat.dynamic_status
+		"dynamic_status",
+		"tool.progress",
+		cacheanalytics.EventCacheRequestFinished, // cache_request_finished
+		runtimechat.EventContextReconciled:       // context_reconciled
+		return eventClassCoalescible
+	default:
+		// 其余（reasoning、tool_started、compact_*、job_*、mailbox_received、
+		// checkpoint_created 等）保持有序语义；checkpoint_created 归 ordered
+		// 而非 coalescible：其时间线标记不应被同 turn 的后续值吞并。
+		return eventClassOrdered
+	}
+}
+
+// chatEventCoalesceKey returns the latest-wins identity of a coalescible
+// event, or "" when the event has no stable identity and must stay ordered
+// (§6.1.2: 宁可不合并，也不吞事件).
+func chatEventCoalesceKey(event runtimeevents.Event) string {
+	typ := strings.ToLower(strings.TrimSpace(event.Type))
+	sessionID := strings.TrimSpace(event.SessionID)
+	turnID := strings.TrimSpace(payloadStringValue(event.Payload["turn_id"]))
+	switch typ {
+	case runtimeobserve.EventUsageUpdated:
+		if sessionID == "" {
+			return ""
+		}
+		return chatEventCoalesceKeyFor("usage", sessionID, turnID)
+	case chatWebDynamicStatusBusEvent, "dynamic_status":
+		if sessionID == "" {
+			return ""
+		}
+		return chatEventCoalesceKeyFor("dynamic", sessionID)
+	case "tool.progress":
+		toolCallID := strings.TrimSpace(payloadStringValue(event.Payload["tool_call_id"]))
+		if toolCallID == "" {
+			return ""
+		}
+		return chatEventCoalesceKeyFor("toolprog", sessionID, toolCallID)
+	case cacheanalytics.EventCacheRequestFinished:
+		requestID := strings.TrimSpace(payloadStringValue(event.Payload["llm_request_id"]))
+		if requestID == "" {
+			requestID = strings.TrimSpace(payloadStringValue(event.Payload["request_id"]))
+		}
+		if requestID == "" {
+			return ""
+		}
+		return chatEventCoalesceKeyFor("cachefin", requestID)
+	case runtimechat.EventContextReconciled:
+		if sessionID == "" {
+			return ""
+		}
+		return chatEventCoalesceKeyFor("ctxrecon", sessionID, turnID)
+	default:
+		return ""
+	}
+}
+
+func chatEventCoalesceKeyFor(prefix string, parts ...string) string {
+	var builder strings.Builder
+	builder.WriteString(prefix)
+	for _, part := range parts {
+		builder.WriteByte('|')
+		builder.WriteString(part)
+	}
+	return builder.String()
+}
+
 func ensureChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 	if session == nil {
 		return nil
@@ -334,6 +547,8 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 		renderScene:         renderScene,
 		renderMapper:        scene.NewChangeSetMapper(renderScene),
 		scenePresenterMode:  scenePresenterModeFromEnv(),
+		classifyMode:        chatEventBridgeClassifyModeFromEnv(),
+		deferredIndex:       make(map[string]*chatRuntimeQueuedEvent),
 		writeLine: func(line string) {
 			if strings.TrimSpace(line) == "" {
 				return
@@ -601,12 +816,26 @@ func (b *chatRuntimeEventBridge) startProcessor() {
 }
 
 func (b *chatRuntimeEventBridge) BeginRun() {
+	b.BeginRunKind(chatRunKindForeground)
+}
+
+// BeginRunKind starts a run epoch whose composer-state ownership is kind.
+// Internal runs (supervision auto-wake) must not inherit the foreground
+// turn's frozen "Worked for" completion summary: they take over the same
+// actor and status line without going through the foreground
+// StartWaiting/CompleteWaiting protocol.
+func (b *chatRuntimeEventBridge) BeginRunKind(kind chatRunKind) {
 	if b == nil {
 		return
 	}
 	b.runMu.Lock()
 	b.runErr = nil
 	b.runMu.Unlock()
+	// Clear the previous run's degraded marker; it is recomputed by EndRun if
+	// critical events are still in flight when this run ends (§6.1.5).
+	b.progressMu.Lock()
+	b.eventBridgeDegraded = false
+	b.progressMu.Unlock()
 	// Drop any coalesced streaming events left over from the previous run
 	// epoch; their text was never enqueued and must not bleed into the new
 	// run. Taken BEFORE renderMu (streamMu → renderMu, the same order the
@@ -662,7 +891,7 @@ func (b *chatRuntimeEventBridge) BeginRun() {
 	b.toolSummaryLogged = false
 	b.logMu.Unlock()
 	if b.session != nil && b.session.Interaction != nil {
-		b.session.Interaction.ResetRunState()
+		b.session.Interaction.ResetRunStateKind(kind)
 		b.session.Interaction.SetAgentStage(chatAgentStagePlanning)
 	}
 	if b.session != nil && b.session.TitleNotifier != nil {
@@ -688,6 +917,10 @@ func (b *chatRuntimeEventBridge) EndRun() {
 	}
 	if !b.WaitForCurrentEvents(b.endRunDrainTimeout()) {
 		b.markEndRunDrainTimeout()
+		// The settle predicate above already waits for criticalPending to reach
+		// zero; if it timed out, account for the in-flight critical events
+		// instead of leaving the degradation invisible (§6.1.5).
+		b.recordCriticalShutdownIfPending()
 	}
 	// Stop the run-active log window before finalization so the run-end
 	// render/log work is not double-counted. The render epoch itself stays
@@ -872,12 +1105,28 @@ func (b *chatRuntimeEventBridge) Handle(event runtimeevents.Event) {
 		b.enqueueStreamEvent(event, size)
 		return
 	}
-	if isCriticalSubagentLifecycleEvent(event.Type) {
-		// Critical control-plane terminal events do not wait behind coalesced
-		// assistant deltas. The queue reserves capacity for them; if even that
-		// reserve is temporarily exhausted, retry asynchronously and include the
-		// pending handoff in EndRun's drain barrier rather than silently dropping
-		// the only parent-visible lifecycle notification.
+	if b.eventIsCritical(event.Type) {
+		// Critical events do not wait behind coalesced assistant deltas and are
+		// never handed to the overflow queue (§6.1.5): the bounded queue reserves
+		// capacity for them, and if even that reserve is temporarily exhausted
+		// they retry asynchronously until admitted, because losing one means
+		// losing control-plane state (or a final message whose coalesced deltas
+		// were already dropped). EndRun's drain barrier accounts for the
+		// in-flight retries.
+		if isAssistantStreamTerminalEvent(event) {
+			// The final message supersedes this turn's coalesced deltas; drop
+			// them only now that the terminal event is on the critical path
+			// instead of dropping them before a queue admission that may fail
+			// (§4.1).
+			b.dropPendingStreamsForTerminal(event)
+		} else if !isCriticalSubagentLifecycleEvent(event.Type) {
+			// Newly promoted critical events (tool boundaries, approval/question
+			// terminals) still flush the pending stream tail first so the
+			// "deltas before boundary" order is preserved; subagent lifecycle
+			// terminals keep their existing semantics (control-plane events may
+			// overtake a coalesced backlog).
+			b.flushPendingStreamEventBounded(chatStreamFlushBudget)
+		}
 		if !b.enqueueNonStreamEvent(event, size, 0) {
 			b.enqueueCriticalRuntimeEventEventually(event, size)
 		}
@@ -925,12 +1174,26 @@ func isCriticalSubagentLifecycleEvent(eventType string) bool {
 	}
 }
 
+// eventIsCritical reports whether an event must use the critical reserve and
+// the asynchronous retry channel. In `off`/`observe` mode this is exactly the
+// legacy subagent lifecycle set, so the previous delivery behaviour is
+// untouched; `enforce` widens it to the classified critical set (§6.1.1).
+func (b *chatRuntimeEventBridge) eventIsCritical(eventType string) bool {
+	if b != nil && b.classifyMode == chatEventClassifyEnforce {
+		return classifyChatRuntimeEvent(eventType) == eventClassCritical
+	}
+	return isCriticalSubagentLifecycleEvent(eventType)
+}
+
 func (b *chatRuntimeEventBridge) enqueueCriticalRuntimeEventEventually(event runtimeevents.Event, size int64) {
 	if b == nil {
 		return
 	}
 	b.progressMu.Lock()
 	b.criticalPending++
+	if b.criticalPending > b.criticalPeakPending {
+		b.criticalPeakPending = b.criticalPending
+	}
 	b.progressMu.Unlock()
 	go func() {
 		defer func() {
@@ -973,6 +1236,11 @@ func shouldLogDeferredDrop(dropped uint64) bool {
 // throttled (one line per chatRuntimeDeferredDropLogInterval drops; the first
 // drop is always logged). Every drop is still forwarded to the exec event
 // bridge.
+//
+// With classification enforced (§6.1.3/§6.1.4) the queue additionally performs
+// in-place latest-wins merging and may evict the oldest coalescible slot to
+// admit a newer event; only ordered/coalescible events reach this function,
+// because critical events are routed to the reserve + retry channel instead.
 func (b *chatRuntimeEventBridge) deferRuntimeEvent(event runtimeevents.Event, size int64) bool {
 	if b == nil {
 		return false
@@ -980,22 +1248,93 @@ func (b *chatRuntimeEventBridge) deferRuntimeEvent(event runtimeevents.Event, si
 	if size < 1 {
 		size = 1
 	}
+	class := classifyChatRuntimeEvent(event.Type)
+	if b.classifyMode == chatEventClassifyEnforce && class == eventClassCritical {
+		// Defensive: Handle already routes critical events, but the deferred
+		// worker and other callers must never leak one into the drop path.
+		b.enqueueCriticalRuntimeEventEventually(event, size)
+		return true
+	}
+	key := ""
+	if class == eventClassCoalescible {
+		key = chatEventCoalesceKey(event)
+		if key == "" {
+			// §6.1.2: no stable identity → degrade to ordered instead of
+			// merging unrelated events under one slot.
+			class = eventClassOrdered
+		}
+	}
 	b.deferredMu.Lock()
-	if len(b.deferredQueue) >= chatRuntimeDeferredEventLimit ||
-		b.deferredBytes+size > chatRuntimeDeferredEventByteLimit {
+	if b.classifyMode == chatEventClassifyEnforce && key != "" {
+		if slot, ok := b.deferredIndex[key]; ok {
+			if slot.inFlight {
+				// 在途槽位的 event/size 正被 worker 在锁外读取：最新值只能挂到
+				// pending（锁内写入），由 worker 在当前值投递成功后原位续投。
+				if slot.hasPending {
+					if delta := size - slot.pendingSize; delta != 0 {
+						b.deferredBytes += delta
+					}
+				} else {
+					b.deferredBytes += size
+				}
+				slot.pendingEvent = event
+				slot.pendingSize = size
+				slot.hasPending = true
+			} else {
+				// In-place latest-wins: the slot keeps its queue position but
+				// carries the newest value, so the queue does not grow while a
+				// high-frequency family (progress/status/usage) is bursting.
+				if delta := size - slot.size; delta != 0 {
+					b.deferredBytes += delta
+				}
+				slot.event = event
+				slot.size = size
+			}
+			if b.deferredBytes < 0 {
+				b.deferredBytes = 0
+			}
+			b.deferredMerged++
+			b.recordDeferredPeaksLocked()
+			b.publishEventDegradationLocked(false)
+			b.deferredMu.Unlock()
+			return true
+		}
+	}
+	if b.deferredQueueFullLocked(size) && b.classifyMode == chatEventClassifyEnforce {
+		// 腾挪：驱逐最旧的 coalescible 槽位，为更高优先级（或更新的
+		// latest-wins 值）腾出空间；ordered/critical 永不参与驱逐。
+		if evicted := b.evictOldestCoalescibleLocked(); evicted != nil {
+			b.deferredEvicted++
+			b.recordEvictedTypeLocked(evicted.event.Type)
+			b.publishEventDegradationLocked(true)
+		}
+	}
+	if b.deferredQueueFullLocked(size) {
 		b.deferredDropped++
+		if b.classifyMode != chatEventClassifyOff {
+			b.recordDeferredDropLocked(class, event.Type)
+		}
+		b.publishEventDegradationLocked(true)
 		dropped := b.deferredDropped
 		b.deferredMu.Unlock()
 		if shouldLogDeferredDrop(dropped) {
-			b.logLateRuntimeEvent(event, fmt.Sprintf("runtime event deferred queue full; event dropped (dropped_total=%d)", dropped))
+			b.logLateRuntimeEvent(event, fmt.Sprintf("runtime event deferred queue full; event dropped (dropped_total=%d class=%s type=%s)", dropped, class, event.Type))
 		} else {
 			b.forwardLateRuntimeEvent(event)
 		}
 		return false
 	}
-	b.deferredQueue = append(b.deferredQueue, chatRuntimeQueuedEvent{event: event, size: size})
+	slot := &chatRuntimeQueuedEvent{event: event, size: size, key: key}
+	b.deferredQueue = append(b.deferredQueue, slot)
+	if key != "" {
+		if b.deferredIndex == nil {
+			b.deferredIndex = make(map[string]*chatRuntimeQueuedEvent)
+		}
+		b.deferredIndex[key] = slot
+	}
 	b.deferredBytes += size
 	b.deferredPending++
+	b.recordDeferredPeaksLocked()
 	startWorker := !b.deferredWorkerRunning
 	if startWorker {
 		b.deferredWorkerRunning = true
@@ -1005,6 +1344,90 @@ func (b *chatRuntimeEventBridge) deferRuntimeEvent(event runtimeevents.Event, si
 		go b.runDeferredQueue()
 	}
 	return true
+}
+
+// deferredQueueFullLocked reports whether admitting size more bytes would
+// exceed either overflow-queue cap. Callers must hold deferredMu.
+func (b *chatRuntimeEventBridge) deferredQueueFullLocked(size int64) bool {
+	return len(b.deferredQueue) >= chatRuntimeDeferredEventLimit ||
+		b.deferredBytes+size > chatRuntimeDeferredEventByteLimit
+}
+
+// evictOldestCoalescibleLocked removes the oldest coalescible slot (scanning
+// from the head, i.e. oldest first) so a newer event can be admitted. Ordered
+// events are never evicted: they keep FIFO relative order and are only dropped
+// — with accounting — when nothing coalescible can make room.
+func (b *chatRuntimeEventBridge) evictOldestCoalescibleLocked() *chatRuntimeQueuedEvent {
+	for index, slot := range b.deferredQueue {
+		if slot == nil {
+			continue
+		}
+		if classifyChatRuntimeEvent(slot.event.Type) != eventClassCoalescible {
+			continue
+		}
+		// 在途槽位同样可以被驱逐：消费者停摆时队首往往正是唯一的 coalescible
+		// 槽位，若跳过它，腾挪将永不生效，ordered 事件只能被丢弃。worker 用
+		// "队首仍是自己"的判据放弃后续弹出，该槽位的 pending 最新值随之降级——
+		// 这正是 §6.1.4 允许的 "coalescible 丢弃优先于 ordered"。
+		b.deferredQueue = append(b.deferredQueue[:index], b.deferredQueue[index+1:]...)
+		b.deferredBytes -= slot.size
+		if slot.hasPending {
+			b.deferredBytes -= slot.pendingSize
+		}
+		if b.deferredBytes < 0 {
+			b.deferredBytes = 0
+		}
+		if b.deferredPending > 0 {
+			b.deferredPending--
+		}
+		if slot.key != "" {
+			delete(b.deferredIndex, slot.key)
+		}
+		return slot
+	}
+	return nil
+}
+
+func (b *chatRuntimeEventBridge) recordDeferredPeaksLocked() {
+	if len(b.deferredQueue) > b.deferredPeakPending {
+		b.deferredPeakPending = len(b.deferredQueue)
+	}
+	if b.deferredBytes > b.deferredPeakBytes {
+		b.deferredPeakBytes = b.deferredBytes
+	}
+}
+
+// chatRuntimeDroppedByTypeLimit bounds the per-type attribution maps so a
+// pathological stream of distinct event types cannot grow them without bound.
+const chatRuntimeDroppedByTypeLimit = 16
+
+func (b *chatRuntimeEventBridge) recordDeferredDropLocked(class chatEventClass, eventType string) {
+	if b.deferredDroppedByClass == nil {
+		b.deferredDroppedByClass = make(map[chatEventClass]uint64)
+	}
+	b.deferredDroppedByClass[class]++
+	b.deferredDroppedByType = recordChatEventTypeCount(b.deferredDroppedByType, eventType)
+}
+
+func (b *chatRuntimeEventBridge) recordEvictedTypeLocked(eventType string) {
+	b.deferredEvictedByType = recordChatEventTypeCount(b.deferredEvictedByType, eventType)
+}
+
+// recordChatEventTypeCount bumps the (bounded) per-type counter, folding new
+// types into "other" once the map is full.
+func recordChatEventTypeCount(counts map[string]uint64, eventType string) map[string]uint64 {
+	typ := strings.ToLower(strings.TrimSpace(eventType))
+	if typ == "" {
+		typ = "unknown"
+	}
+	if counts == nil {
+		counts = make(map[string]uint64)
+	}
+	if _, ok := counts[typ]; !ok && len(counts) >= chatRuntimeDroppedByTypeLimit {
+		typ = "other"
+	}
+	counts[typ]++
+	return counts
 }
 
 // runDeferredQueue delivers deferred events in FIFO order, retrying the head
@@ -1021,6 +1444,12 @@ func (b *chatRuntimeEventBridge) runDeferredQueue() {
 			return
 		}
 		head := b.deferredQueue[0]
+		if !head.inFlight {
+			// 进入在途态：worker 接下来在锁外读取 event/size，因此发布者的
+			// latest-wins 只能改写 pending（见 deferRuntimeEvent）。索引保留，
+			// 同一个键始终只占一个槽位。
+			head.inFlight = true
+		}
 		b.deferredMu.Unlock()
 
 		if !b.enqueueNonStreamEvent(head.event, head.size, chatRuntimeDeferredRetryInterval) {
@@ -1032,14 +1461,35 @@ func (b *chatRuntimeEventBridge) runDeferredQueue() {
 		}
 
 		b.deferredMu.Lock()
-		if len(b.deferredQueue) > 0 {
-			b.deferredQueue = b.deferredQueue[1:]
-			b.deferredBytes -= head.size
-			if b.deferredBytes < 0 {
-				b.deferredBytes = 0
-			}
-			if b.deferredPending > 0 {
-				b.deferredPending--
+		if len(b.deferredQueue) > 0 && b.deferredQueue[0] == head {
+			if head.hasPending {
+				// 原位续投最新值：槽位保持队首和索引不变，避免"投递中"窗口里
+				// 到达的最新值另开槽位或被丢弃。
+				delivered := head.size
+				head.event = head.pendingEvent
+				head.size = head.pendingSize
+				head.pendingEvent = runtimeevents.Event{}
+				head.pendingSize = 0
+				head.hasPending = false
+				b.deferredBytes -= delivered
+				if b.deferredBytes < 0 {
+					b.deferredBytes = 0
+				}
+			} else {
+				b.deferredQueue = b.deferredQueue[1:]
+				if head.key != "" && b.deferredIndex[head.key] == head {
+					// The slot left the queue: drop its merge index so a later
+					// event with the same key starts a fresh slot instead of
+					// merging into a detached one.
+					delete(b.deferredIndex, head.key)
+				}
+				b.deferredBytes -= head.size
+				if b.deferredBytes < 0 {
+					b.deferredBytes = 0
+				}
+				if b.deferredPending > 0 {
+					b.deferredPending--
+				}
 			}
 		}
 		b.deferredMu.Unlock()
@@ -1098,6 +1548,167 @@ func (b *chatRuntimeEventBridge) deferredQueueStats() (pending int, queuedBytes 
 	b.deferredMu.Lock()
 	defer b.deferredMu.Unlock()
 	return len(b.deferredQueue), b.deferredBytes, b.deferredDropped
+}
+
+// chatDeferredQueueClassStats is the classification-aware view of the event
+// bridge exposed to /debug/chat/status (§6.1.6). Maps use plain string keys so
+// the JSON encoder and the text renderer can both consume them directly.
+type chatDeferredQueueClassStats struct {
+	Mode                string
+	Merged              uint64
+	Evicted             uint64
+	DroppedByClass      map[string]uint64
+	DroppedByType       map[string]uint64
+	EvictedByType       map[string]uint64
+	PeakPending         int
+	PeakBytes           int64
+	CriticalPending     uint64
+	CriticalPeakPending uint64
+	CriticalAtShutdown  uint64
+	Degraded            bool
+}
+
+// chatEventBridgeDegradation 是给 TUI 状态行读取的无锁降级摘要
+// （docs/plan/ui-event-bridge-drop-hardening.md §6.2 第 3 条）。它只回答
+// "本 run 内是否发生过合并/驱逐/丢弃"，不替代 /debug 的完整真相。
+type chatEventBridgeDegradation struct {
+	Merged  uint64
+	Evicted uint64
+	Dropped uint64
+}
+
+// eventDegradationPublishInterval 限制热点路径（合并）的摘要发布频率，
+// 避免每个事件都分配一次快照；丢弃/驱逐路径强制立即发布。
+const eventDegradationPublishInterval = time.Second
+
+// publishEventDegradationLocked 在持有 deferredMu 时刷新无锁降级摘要。
+// force=true 用于丢弃/驱逐这种必须立刻可见的降级。
+func (b *chatRuntimeEventBridge) publishEventDegradationLocked(force bool) {
+	if b == nil {
+		return
+	}
+	if b.deferredDropped == 0 && b.deferredEvicted == 0 && b.deferredMerged == 0 {
+		return
+	}
+	if !force {
+		now := time.Now().UnixNano()
+		last := b.degradationPublishedAt.Load()
+		if last != 0 && now-last < int64(eventDegradationPublishInterval) {
+			return
+		}
+	}
+	b.degradationPublishedAt.Store(time.Now().UnixNano())
+	b.degradation.Store(&chatEventBridgeDegradation{
+		Merged:  b.deferredMerged,
+		Evicted: b.deferredEvicted,
+		Dropped: b.deferredDropped,
+	})
+}
+
+// DegradationSnapshot 返回当前 run 的降级摘要（无锁，可任意 goroutine 调用）。
+// 从未发生合并/驱逐/丢弃时返回 false。
+func (b *chatRuntimeEventBridge) DegradationSnapshot() (chatEventBridgeDegradation, bool) {
+	if b == nil {
+		return chatEventBridgeDegradation{}, false
+	}
+	snap := b.degradation.Load()
+	if snap == nil {
+		return chatEventBridgeDegradation{}, false
+	}
+	return *snap, true
+}
+
+// deferredQueueClassStats reports the classification counters. The legacy
+// deferredQueueStats accessor stays unchanged so existing callers and the
+// published /debug field names keep working (new fields only).
+func (b *chatRuntimeEventBridge) deferredQueueClassStats() chatDeferredQueueClassStats {
+	stats := chatDeferredQueueClassStats{}
+	if b == nil {
+		return stats
+	}
+	stats.Mode = b.classifyMode.String()
+	b.deferredMu.Lock()
+	stats.Merged = b.deferredMerged
+	stats.Evicted = b.deferredEvicted
+	stats.PeakPending = b.deferredPeakPending
+	stats.PeakBytes = b.deferredPeakBytes
+	stats.DroppedByClass = formatChatEventClassCounts(b.deferredDroppedByClass)
+	stats.DroppedByType = cloneChatEventTypeCounts(b.deferredDroppedByType)
+	stats.EvictedByType = cloneChatEventTypeCounts(b.deferredEvictedByType)
+	b.deferredMu.Unlock()
+	b.progressMu.Lock()
+	stats.CriticalPending = b.criticalPending
+	stats.CriticalPeakPending = b.criticalPeakPending
+	stats.CriticalAtShutdown = b.criticalAtShutdown
+	stats.Degraded = b.eventBridgeDegraded
+	b.progressMu.Unlock()
+	return stats
+}
+
+func formatChatEventClassCounts(counts map[chatEventClass]uint64) map[string]uint64 {
+	if len(counts) == 0 {
+		return nil
+	}
+	formatted := make(map[string]uint64, len(counts))
+	for class, count := range counts {
+		formatted[class.String()] = count
+	}
+	return formatted
+}
+
+// formatChatEventCountMap renders a counter map deterministically
+// ("coalescible=12 ordered=3") for the plain-text /debug output; an empty map
+// yields "" so callers can skip the whole line.
+func formatChatEventCountMap(counts map[string]uint64) string {
+	if len(counts) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%d", key, counts[key]))
+	}
+	return strings.Join(parts, " ")
+}
+
+func cloneChatEventTypeCounts(counts map[string]uint64) map[string]uint64 {
+	if len(counts) == 0 {
+		return nil
+	}
+	cloned := make(map[string]uint64, len(counts))
+	for typ, count := range counts {
+		cloned[typ] = count
+	}
+	return cloned
+}
+
+// recordCriticalShutdownIfPending marks a run that ended while critical events
+// were still waiting in the retry channel. It never blocks (the bounded drain
+// barrier already ran); the alternative to counting here is a silent loss
+// (§6.1.5 EndRun). Returns true when something was recorded.
+func (b *chatRuntimeEventBridge) recordCriticalShutdownIfPending() bool {
+	if b == nil || b.classifyMode != chatEventClassifyEnforce {
+		return false
+	}
+	b.progressMu.Lock()
+	pending := b.criticalPending
+	if pending > 0 {
+		b.criticalAtShutdown += pending
+		b.eventBridgeDegraded = true
+	}
+	b.progressMu.Unlock()
+	if pending > 0 && b.session != nil {
+		writeSessionDebugInfo(
+			b.session,
+			fmt.Sprintf("[runtime-event] EndRun left %d critical event(s) in the retry channel; recorded as critical_at_shutdown (degraded)", pending),
+			false,
+		)
+	}
+	return pending > 0
 }
 
 // deferredDrainTimeout bounds the EndRun wait for the deferred backlog. The
@@ -1379,7 +1990,7 @@ func (b *chatRuntimeEventBridge) enqueueNonStreamEvent(event runtimeevents.Event
 	}
 	deadline := time.Now().Add(wait)
 	for {
-		if b.tryReserveEventQueueBytes(size, isCriticalSubagentLifecycleEvent(event.Type)) {
+		if b.tryReserveEventQueueBytes(size, b.eventIsCritical(event.Type)) {
 			b.renderMu.Lock()
 			epoch := b.runEpoch
 			b.renderMu.Unlock()
@@ -1692,9 +2303,23 @@ func (b *chatRuntimeEventBridge) postRuntimeEventToUIActorWithEpoch(event runtim
 		timeout = uiActionPostBudget
 	}
 	waitDeadline := time.Now().Add(timeout)
+	// PostWait 成本指标（docs/plan/ui-event-bridge-drop-hardening.md §6.2 第 2 条）：
+	// 桥用 TryPost + 轮询而非阻塞 Post，因此由这里测量"等待 mailbox 容量"的
+	// 真实时长并回填给 UI actor 的诊断计数（成功、超时丢弃都计入，因为两者
+	// 消耗的都是同一段生产者等待）。首投即成功不产生样本。
+	var waitStart time.Time
+	defer func() {
+		if waitStart.IsZero() || coordinator.uiActor == nil {
+			return
+		}
+		coordinator.uiActor.ObservePostWaitNanos(time.Since(waitStart))
+	}()
 	for {
 		if coordinator.tryPostUIAction(action) {
 			return true, true
+		}
+		if waitStart.IsZero() {
+			waitStart = time.Now()
 		}
 		if coordinator.uiActionRejectedAfterShutdown() {
 			return false, false
@@ -3987,6 +4612,16 @@ func (b *chatRuntimeEventBridge) shouldSuppressMismatchedPrimaryTurnEvent(event 
 	// Team/task/mailbox events have their own durable team/task/message
 	// identities and may legitimately arrive after the initiating chat turn.
 	if isTeamLifecycleRuntimeEvent(event.Type) || event.Type == runtimechat.EventMailboxReceived || isCriticalSubagentLifecycleEvent(event.Type) {
+		return false
+	}
+	// 配额驱逐（agent.reclaimed）是会话级产品事件，身份是
+	// (root_session_id, 已关闭的 agent_paths) 而不是某一轮对话：周期对账 sweep 与
+	// spawn 闸门都在后台 goroutine 里发布它，payload 里没有 turn_id（真实运行日志
+	// trace_id="" / 无 turn_id 字段）。若按"无身份的事件不能证明归属"处理，运行期
+	// 发布的驱逐事件会被整批丢掉——2026-09-13 real-test 日志里 6/6 条都是
+	// reason="event turn does not match active run"，人读中文行（renderChatRuntimeTimeline
+	// Event 的 agent.reclaimed 分支）因此从未真正渲染过。
+	if event.Type == agentcontrol.EventAgentReclaimed {
 		return false
 	}
 	// Blocking interactive events (approval, question) must reach the user

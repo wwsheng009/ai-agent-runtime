@@ -12,9 +12,9 @@ import (
 
 // 指纹域名（domain separation），避免不同数据域可比对。
 const (
-	FingerprintDomainPrompt        = "prompt"
-	FingerprintDomainToolSurface   = "tool_surface"
-	FingerprintDomainContent       = "content"
+	FingerprintDomainPrompt         = "prompt"
+	FingerprintDomainToolSurface    = "tool_surface"
+	FingerprintDomainContent        = "content"
 	FingerprintDomainRendererSource = "renderer_source"
 )
 

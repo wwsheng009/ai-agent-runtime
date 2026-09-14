@@ -78,15 +78,20 @@ func TestNonStreamEventPublisherDoesNotBlockOnFullQueue(t *testing.T) {
 	}
 }
 
-// TestDeferredRuntimeEventsPreserveOrder verifies FIFO delivery order, which is
-// what lets the deferred path replace a blocking enqueue without reordering the
-// non-streaming event family.
+// TestDeferredRuntimeEventsPreserveOrder verifies FIFO delivery order for the
+// ordered class, which is what lets the deferred path replace a blocking enqueue
+// without reordering that family. Critical events intentionally bypass this
+// queue (§6.1.4: tool boundaries / terminals use the reserve + retry channel),
+// so this test only feeds events that classification keeps on the FIFO path.
 func TestDeferredRuntimeEventsPreserveOrder(t *testing.T) {
 	const sessionID = "defer-order"
 	bridge := newDeferredQueueTestBridge(t, sessionID)
 
-	types := []string{"tool.requested", "tool.completed", "assistant.message"}
+	types := []string{"tool.requested", runtimechat.EventCheckpointCreated, runtimechat.EventToolStarted}
 	for _, typ := range types {
+		if class := classifyChatRuntimeEvent(typ); class != eventClassOrdered {
+			t.Fatalf("%q is class %s; the deferred FIFO test must only use ordered events", typ, class)
+		}
 		if !bridge.deferRuntimeEvent(runtimeevents.Event{Type: typ, SessionID: sessionID}, 1) {
 			t.Fatalf("deferred %q was rejected before the backlog limit", typ)
 		}
@@ -108,7 +113,9 @@ func TestDeferredRuntimeEventsPreserveOrder(t *testing.T) {
 }
 
 // TestDeferredRuntimeEventBacklogIsBounded verifies that a permanently stalled
-// consumer degrades to logged drops instead of unbounded backlog growth.
+// consumer degrades to logged drops instead of unbounded backlog growth. The cap
+// only bounds the ordered class: coalescible events merge in place (§6.1.3) and
+// never grow the queue, so the fill uses ordered events.
 func TestDeferredRuntimeEventBacklogIsBounded(t *testing.T) {
 	const sessionID = "defer-bound"
 	// The fresh bridge keeps its consumer slot occupied, so the deferred worker
@@ -118,11 +125,11 @@ func TestDeferredRuntimeEventBacklogIsBounded(t *testing.T) {
 	// Refill the backlog past its cap: further events are dropped (and
 	// counted) rather than growing the queue without bound.
 	for i := 0; i < chatRuntimeDeferredEventLimit; i++ {
-		if !bridge.deferRuntimeEvent(runtimeevents.Event{Type: "tool.progress", SessionID: sessionID}, 1) {
+		if !bridge.deferRuntimeEvent(runtimeevents.Event{Type: runtimechat.EventCheckpointCreated, SessionID: sessionID}, 1) {
 			t.Fatalf("deferred event %d rejected before the backlog limit", i)
 		}
 	}
-	if bridge.deferRuntimeEvent(runtimeevents.Event{Type: "tool.progress", SessionID: sessionID}, 1) {
+	if bridge.deferRuntimeEvent(runtimeevents.Event{Type: runtimechat.EventCheckpointCreated, SessionID: sessionID}, 1) {
 		t.Fatal("deferred backlog accepted an event past its limit")
 	}
 	bridge.deferredMu.Lock()
@@ -141,9 +148,9 @@ func TestDeferredRuntimeEventBacklogIsBounded(t *testing.T) {
 	}
 }
 
-// TestDeferredBacklogKeepsHandleEventsInOrder verifies that a non-streaming
-// event published through Handle while the overflow queue is non-empty joins
-// that FIFO instead of overtaking it through a direct enqueue.
+// TestDeferredBacklogKeepsHandleEventsInOrder verifies that an ordered
+// non-streaming event published through Handle while the overflow queue is
+// non-empty joins that FIFO instead of overtaking it through a direct enqueue.
 func TestDeferredBacklogKeepsHandleEventsInOrder(t *testing.T) {
 	const sessionID = "defer-handle-order"
 	bridge := newDeferredQueueTestBridge(t, sessionID)
@@ -152,13 +159,13 @@ func TestDeferredBacklogKeepsHandleEventsInOrder(t *testing.T) {
 		t.Fatal("first deferred event was rejected")
 	}
 	bridge.Handle(runtimeevents.Event{
-		Type:      "tool.completed",
+		Type:      runtimechat.EventCheckpointCreated,
 		SessionID: sessionID,
 		Payload:   map[string]interface{}{"tool_call_id": "call-1", "tool_name": "read_file"},
 	})
 
 	<-bridge.eventQueue
-	for _, want := range []string{"tool.requested", "tool.completed"} {
+	for _, want := range []string{"tool.requested", runtimechat.EventCheckpointCreated} {
 		select {
 		case queued := <-bridge.eventQueue:
 			if queued.event.Type != want {
@@ -175,7 +182,7 @@ func TestDeferredBacklogKeepsHandleEventsInOrder(t *testing.T) {
 func TestWaitDeferredDrainReportsPendingBacklog(t *testing.T) {
 	const sessionID = "defer-drain"
 	bridge := newDeferredQueueTestBridge(t, sessionID)
-	if !bridge.deferRuntimeEvent(runtimeevents.Event{Type: "tool.completed", SessionID: sessionID}, 1) {
+	if !bridge.deferRuntimeEvent(runtimeevents.Event{Type: runtimechat.EventCheckpointCreated, SessionID: sessionID}, 1) {
 		t.Fatal("deferred event was rejected")
 	}
 	if bridge.waitDeferredDrain(60 * time.Millisecond) {
@@ -200,7 +207,7 @@ func TestWaitForCurrentEventsSeesDeferredBacklog(t *testing.T) {
 	}
 
 	bridge := newDeferredQueueTestBridge(t, sessionID)
-	if !bridge.deferRuntimeEvent(runtimeevents.Event{Type: "tool.completed", SessionID: sessionID}, 1) {
+	if !bridge.deferRuntimeEvent(runtimeevents.Event{Type: runtimechat.EventCheckpointCreated, SessionID: sessionID}, 1) {
 		t.Fatal("deferred event was rejected")
 	}
 	if bridge.WaitForCurrentEvents(200 * time.Millisecond) {

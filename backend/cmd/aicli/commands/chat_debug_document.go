@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
@@ -252,6 +253,7 @@ func buildChatDebugDisplayDocument(session *ChatSession) render.Document {
 		builder.meta("Surface:", "<none>")
 	}
 	appendChatDebugAppStatePresenterLines(&builder, session)
+	appendChatDebugExecutorLines(&builder)
 
 	appendChatDebugRoutingLines(&builder, session)
 	appendChatDebugPprofLines(&builder)
@@ -265,6 +267,7 @@ func buildChatDebugDisplayDocument(session *ChatSession) render.Document {
 	builder.plainLines(chatAgentGraphLines(session))
 	builder.heading("Mailbox Pending: (GET /debug/chat/status#agents)")
 	builder.plainLines(chatDebugMailboxLines(session))
+	appendChatDebugUIActorLines(&builder, session)
 	appendChatDebugRenderEncoderLines(&builder, session)
 	appendChatDebugRenderOutputLines(&builder, session)
 	return builder.document()
@@ -417,6 +420,72 @@ func chatDebugHistoryEffectSummary(effects ui.HistoryEffectQueueState) string {
 		pending, inFlight, acked, failed, invalidated, effects.Frozen, effects.ScrollbackReplayArmed)
 }
 
+// appendChatDebugUIActorLines 输出消费端成本快照（docs/plan/ui-event-bridge-drop-hardening.md
+// §6.2 第 2 条；与 /debug/chat/status#scene 的 ui_actor 同源）。只在消费端有活动时
+// 输出，避免空会话噪声：FlushCount 远小于 Processed 说明批处理生效，Post Wait 说明
+// 生产者曾被 mailbox 背压（此时才轮到按 §6.2 第 4 条评估调大 MailboxSize）。
+func appendChatDebugUIActorLines(builder *chatDebugDocumentBuilder, session *ChatSession) {
+	if builder == nil || session == nil || session.Interaction == nil || session.Interaction.uiActor == nil {
+		return
+	}
+	stats := session.Interaction.uiActor.Stats()
+	if stats.Processed == 0 && stats.PostWaitCount == 0 && stats.Pending == 0 {
+		return
+	}
+	builder.heading("UI Actor: (GET /debug/chat/status#app_state)")
+	builder.meta("Processed/Flushes:", fmt.Sprintf("%d / %d", stats.Processed, stats.FlushCount))
+	if stats.Batches > 0 {
+		builder.meta("Batches:", fmt.Sprintf("%d (max %d, p95 %d)", stats.Batches, stats.BatchSizeMax, stats.BatchSizeP95))
+	}
+	if stats.ReducerNanos > 0 {
+		builder.meta("Reducer Total:", time.Duration(stats.ReducerNanos).String())
+	}
+	if stats.PostWaitCount > 0 {
+		builder.meta("Post Wait:", fmt.Sprintf("count=%d total=%s max=%s p95=%s",
+			stats.PostWaitCount,
+			time.Duration(stats.PostWaitNanos),
+			time.Duration(stats.PostWaitMaxNanos),
+			time.Duration(stats.PostWaitP95Nanos)))
+	}
+	builder.meta("Pending:", fmt.Sprintf("%d (peak %d)", stats.Pending, stats.PeakPending))
+	if stats.Dropped > 0 || stats.DeferredMerged > 0 {
+		builder.meta("Dropped/Merged:", fmt.Sprintf("%d / %d", stats.Dropped, stats.DeferredMerged))
+	}
+}
+
+// appendChatDebugExecutorLines 输出 Executor recovery diag 小节（PR-3 落点 A）：
+// Window Diagnosis (CURRENT) 来自保留窗口（最近 64 次 / 60s），Diagnosis
+// (SINCE START) 来自生命周期计数器。两者并列是刻意的——历史风暴会让 SINCE START
+// 永远停在 backoff_engaged，判断"现在是否仍在自旋"必须看 CURRENT。
+func appendChatDebugExecutorLines(builder *chatDebugDocumentBuilder) {
+	if builder == nil {
+		return
+	}
+	diag := ui.ExecutorDiagSnapshot()
+	if diag.Diagnosis == "" && diag.WindowDiagnosis == "" && diag.TotalRecoveries == 0 {
+		return
+	}
+	builder.heading("Executor Recovery Diag: (GET /debug/chat/status#executor)")
+	builder.meta("Window Diagnosis (CURRENT):", chatDebugValueOrNone(diag.WindowDiagnosis))
+	builder.meta("Window Shape:", fmt.Sprintf("entries=%d span=%dms age=%dms",
+		diag.WindowEntries, diag.WindowSpanMs, diag.WindowAgeMs))
+	builder.meta("Diagnosis (SINCE START):", chatDebugValueOrNone(diag.Diagnosis))
+	builder.meta("Recoveries:", fmt.Sprintf("total=%d engaged=%d armed=%d",
+		diag.TotalRecoveries, diag.BackoffEngaged, diag.ArmedBackoff))
+	builder.meta("While Backoff:", fmt.Sprintf("flushes=%d handoffs=%d",
+		diag.FlushesWhileBackoff, diag.HandoffsWhileBackoff))
+	builder.meta("Retained Ring:", fmt.Sprintf("frameErrors=%d scrollbackResets=%d generationAdvances=%d recoveriesPerSec=%.1f",
+		diag.FrameErrorsInWindow, diag.ScrollbackResetsInWindow, diag.GenerationAdvancesInWindow, diag.WindowRecoveriesPerSec))
+	if len(diag.Entries) > 0 {
+		last := diag.Entries[len(diag.Entries)-1]
+		builder.meta("Last Iteration:", fmt.Sprintf(
+			"seq=%d branch=%s generation=%d revision=%d->%d epoch=%d backoffEngaged=%t flushWhileBackoff=%t handoffWhileBackoff=%t scrollbackReset=%t frameErr=%s",
+			last.Seq, last.Branch, last.Generation, last.Revision, last.RevisionAfter, last.TerminalEpoch,
+			last.BackoffEngaged, last.FlushedWhileBackoff, last.HandoffWhileBackoff, last.ScrollbackReset,
+			chatDebugValueOrNone(last.FrameErr)))
+	}
+}
+
 // appendChatDebugRenderEncoderLines 输出统一渲染编码器（双跑模式数据面）
 // 的运行统计与模型快照，用于审计事件→渲染顺序映射是否正确。
 func appendChatDebugRenderEncoderLines(builder *chatDebugDocumentBuilder, session *ChatSession) {
@@ -528,6 +597,40 @@ func appendChatDebugRenderEncoderLines(builder *chatDebugDocumentBuilder, sessio
 		builder.meta("Deferred Queue Bytes:", strconv.FormatInt(queuedBytes, 10))
 		if dropped > 0 {
 			builder.meta("Deferred Queue Dropped:", strconv.FormatUint(dropped, 10))
+		}
+	}
+	if classStats := bridge.deferredQueueClassStats(); classStats.Mode != "" && classStats.Mode != "off" {
+		// 事件分级（docs/plan/ui-event-bridge-drop-hardening.md §6.1.6）：
+		// merged/evicted 说明合并与腾挪生效；critical_* 说明关键事件在途或
+		// 曾被滞留到 run 结束（degraded，绝不静默丢失）。
+		if classStats.Merged > 0 || classStats.Evicted > 0 || len(classStats.DroppedByClass) > 0 ||
+			classStats.CriticalPending > 0 || classStats.CriticalPeakPending > 0 ||
+			classStats.CriticalAtShutdown > 0 || classStats.Degraded {
+			builder.meta("Event Bridge Classify Mode:", classStats.Mode)
+			if classStats.Merged > 0 {
+				builder.meta("Event Bridge Merged:", strconv.FormatUint(classStats.Merged, 10))
+			}
+			if classStats.Evicted > 0 {
+				builder.meta("Event Bridge Evicted:", strconv.FormatUint(classStats.Evicted, 10))
+			}
+			if counts := formatChatEventCountMap(classStats.DroppedByClass); counts != "" {
+				builder.meta("Event Bridge Dropped By Class:", counts)
+			}
+			if counts := formatChatEventCountMap(classStats.DroppedByType); counts != "" {
+				builder.meta("Event Bridge Dropped By Type:", counts)
+			}
+			if classStats.CriticalPending > 0 {
+				builder.meta("Event Bridge Critical Pending:", strconv.FormatUint(classStats.CriticalPending, 10))
+			}
+			if classStats.CriticalPeakPending > 0 {
+				builder.meta("Event Bridge Critical Peak Pending:", strconv.FormatUint(classStats.CriticalPeakPending, 10))
+			}
+			if classStats.CriticalAtShutdown > 0 {
+				builder.meta("Event Bridge Critical At Shutdown:", strconv.FormatUint(classStats.CriticalAtShutdown, 10))
+			}
+			if classStats.Degraded {
+				builder.meta("Event Bridge Degraded:", "true")
+			}
 		}
 	}
 	startCell := 0

@@ -35,11 +35,11 @@ type Config struct {
 	MaxClients            int   `yaml:"max_clients" json:"max_clients"`
 
 	// 单项/整包大小上限。projection 后再检查。
-	MaxEventBytes       int   `yaml:"max_event_bytes" json:"max_event_bytes"`
-	MaxSnapshotBytes    int   `yaml:"max_snapshot_bytes" json:"max_snapshot_bytes"`
-	DefaultQueryLimit   int   `yaml:"default_query_limit" json:"default_query_limit"`
-	MaxQueryLimit       int   `yaml:"max_query_limit" json:"max_query_limit"`
-	QueryTimeout        time.Duration `yaml:"query_timeout" json:"query_timeout"`
+	MaxEventBytes     int           `yaml:"max_event_bytes" json:"max_event_bytes"`
+	MaxSnapshotBytes  int           `yaml:"max_snapshot_bytes" json:"max_snapshot_bytes"`
+	DefaultQueryLimit int           `yaml:"default_query_limit" json:"default_query_limit"`
+	MaxQueryLimit     int           `yaml:"max_query_limit" json:"max_query_limit"`
+	QueryTimeout      time.Duration `yaml:"query_timeout" json:"query_timeout"`
 
 	// Heartbeat / 采样（Phase 3 SSE 用）。
 	Heartbeat time.Duration `yaml:"heartbeat" json:"heartbeat"`
@@ -55,24 +55,24 @@ type Config struct {
 // DefaultConfig 返回 v1 建议默认值（详见方案 §10.1）。
 func DefaultConfig() Config {
 	return Config{
-		Enabled:               false,
-		RoutePrefix:           "/api/runtime/observe/v1",
-		RedactionProfile:      RedactionProfileSafeDefault,
-		HMACKeyRef:            "runtime-observe-fingerprint-v1",
-		RetentionEvents:       4096,
-		RetentionBytes:        16 * 1024 * 1024,
-		RetentionTTL:          10 * time.Minute,
-		IngressQueueEvents:    1024,
-		IngressQueueBytes:     4 * 1024 * 1024,
-		SubscriberQueueEvents: 256,
-		SubscriberQueueBytes:  1 * 1024 * 1024,
-		MaxClients:            32,
-		MaxEventBytes:         64 * 1024,
-		MaxSnapshotBytes:      256 * 1024,
-		DefaultQueryLimit:     50,
-		MaxQueryLimit:         200,
-		QueryTimeout:          2 * time.Second,
-		Heartbeat:             15 * time.Second,
+		Enabled:                 false,
+		RoutePrefix:             "/api/runtime/observe/v1",
+		RedactionProfile:        RedactionProfileSafeDefault,
+		HMACKeyRef:              "runtime-observe-fingerprint-v1",
+		RetentionEvents:         4096,
+		RetentionBytes:          16 * 1024 * 1024,
+		RetentionTTL:            10 * time.Minute,
+		IngressQueueEvents:      1024,
+		IngressQueueBytes:       4 * 1024 * 1024,
+		SubscriberQueueEvents:   256,
+		SubscriberQueueBytes:    1 * 1024 * 1024,
+		MaxClients:              32,
+		MaxEventBytes:           64 * 1024,
+		MaxSnapshotBytes:        256 * 1024,
+		DefaultQueryLimit:       50,
+		MaxQueryLimit:           200,
+		QueryTimeout:            2 * time.Second,
+		Heartbeat:               15 * time.Second,
 		ExposeProviderRequestID: false,
 		IncludeRenderer:         true,
 		RendererPublishInterval: 100 * time.Millisecond,

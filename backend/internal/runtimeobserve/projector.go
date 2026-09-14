@@ -62,58 +62,58 @@ func IsAllowedType(eventType string) bool {
 
 // ContentFingerprintKeys 是需要计算内容存在性指纹的低敏字段（域名按字段区分）。
 var contentFingerprintKeys = map[string]string{
-	"content":  FingerprintDomainContent,
-	"text":     FingerprintDomainContent,
+	"content":   FingerprintDomainContent,
+	"text":      FingerprintDomainContent,
 	"reasoning": FingerprintDomainContent,
-	"prompt":   FingerprintDomainPrompt,
+	"prompt":    FingerprintDomainPrompt,
 }
 
 // payloadAllowKeys 是允许从任意 runtime payload 透传的扁平字段名。
 // 仅数值/布尔/短 enum 性质的字段；任何字符串内容类字段都不会出现在这里。
 var payloadAllowKeys = map[string]bool{
-	"provider":          true,
-	"model":             true,
-	"protocol":          true,
-	"status":            true,
-	"state":             true,
-	"phase":             true,
-	"kind":              true,
-	"attempt":           true,
-	"max_attempts":      true,
-	"retryable":         true,
-	"error_code":        true,
-	"error_category":    true,
-	"duration_ms":       true,
-	"ttfb_ms":           true,
-	"prompt_tokens":     true,
-	"completion_tokens": true,
-	"total_tokens":      true,
-	"cache_read_tokens": true,
-	"reasoning_tokens":  true,
-	"usage_source":      true,
-	"aggregation_level": true,
-	"tool_name":         true,
-	"tool_count":        true,
-	"tool_call_count":   true,
-	"stream_count":      true,
-	"chunk_count":       true,
-	"delta_bytes":       true,
-	"stream_id":         true,
-	"finish_reason":     true,
-	"prompt_chars":      true,
+	"provider":                true,
+	"model":                   true,
+	"protocol":                true,
+	"status":                  true,
+	"state":                   true,
+	"phase":                   true,
+	"kind":                    true,
+	"attempt":                 true,
+	"max_attempts":            true,
+	"retryable":               true,
+	"error_code":              true,
+	"error_category":          true,
+	"duration_ms":             true,
+	"ttfb_ms":                 true,
+	"prompt_tokens":           true,
+	"completion_tokens":       true,
+	"total_tokens":            true,
+	"cache_read_tokens":       true,
+	"reasoning_tokens":        true,
+	"usage_source":            true,
+	"aggregation_level":       true,
+	"tool_name":               true,
+	"tool_count":              true,
+	"tool_call_count":         true,
+	"stream_count":            true,
+	"chunk_count":             true,
+	"delta_bytes":             true,
+	"stream_id":               true,
+	"finish_reason":           true,
+	"prompt_chars":            true,
 	"prompt_tokens_estimated": true,
-	"context_window":    true,
-	"max_output_tokens": true,
-	"message_count":     true,
-	"reasoning_enabled": true,
-	"reasoning_visibility": true,
-	"scene_revision":    true,
-	"renderer_id":       true,
-	"publisher_epoch":   true,
-	"layout_generation": true,
-	"agent_count":       true,
-	"turn_id":           true,
-	"attempt_id":        true,
+	"context_window":          true,
+	"max_output_tokens":       true,
+	"message_count":           true,
+	"reasoning_enabled":       true,
+	"reasoning_visibility":    true,
+	"scene_revision":          true,
+	"renderer_id":             true,
+	"publisher_epoch":         true,
+	"layout_generation":       true,
+	"agent_count":             true,
+	"turn_id":                 true,
+	"attempt_id":              true,
 }
 
 // ProjectRuntimeEvent 把 bus 事件投影为观测事件。
@@ -127,9 +127,9 @@ func (p *Projector) ProjectRuntimeEvent(event runtimeevents.Event) (Event, bool)
 		return Event{}, false
 	}
 	corr := Correlation{
-		SessionID: event.SessionID,
-		TraceID:   event.TraceID,
-		AgentID:   event.AgentName,
+		SessionID:  event.SessionID,
+		TraceID:    event.TraceID,
+		AgentID:    event.AgentName,
 		ToolCallID: event.ToolName,
 	}
 	payload := p.projectPayload(eventType, event.Payload)
@@ -217,8 +217,8 @@ func (p *Projector) enforceEventSize(proj Event) Event {
 	}
 	// 收缩：只保留关联与最基本信息。
 	proj.Payload = map[string]interface{}{
-		"truncated":      true,
-		"payload_bytes":  size,
+		"truncated":     true,
+		"payload_bytes": size,
 		"original_type": proj.Type,
 	}
 	return proj
@@ -241,15 +241,15 @@ func (p *Projector) ProjectRetryEvent(event llm.RetryEvent) (Event, bool) {
 		corr.ProviderRequestID = event.ProviderRequestID
 	}
 	payload := map[string]interface{}{
-		"provider":    boundUTF8String(event.Provider, 512),
-		"protocol":    boundUTF8String(event.Protocol, 512),
-		"model":       boundUTF8String(event.Model, 512),
-		"attempt":     event.Attempt,
-		"max_attempts": event.MaxAttempts,
-		"retryable":   true,
+		"provider":              boundUTF8String(event.Provider, 512),
+		"protocol":              boundUTF8String(event.Protocol, 512),
+		"model":                 boundUTF8String(event.Model, 512),
+		"attempt":               event.Attempt,
+		"max_attempts":          event.MaxAttempts,
+		"retryable":             true,
 		"retry_reason_category": errorCategory(event.RetryReason),
-		"error_code":  boundUTF8String(event.ErrorCode, 512),
-		"delay_ms":    event.RetryDelayMS,
+		"error_code":            boundUTF8String(event.ErrorCode, 512),
+		"delay_ms":              event.RetryDelayMS,
 	}
 	proj := Event{
 		Timestamp:     time.Now().UTC(),
@@ -268,7 +268,7 @@ func (p *Projector) ProjectHTTPDebug(event llm.HTTPDebugEvent) (Event, uint64, b
 		return Event{}, 0, false
 	}
 	corr := Correlation{
-		LLMRequestID: event.LLMRequestID,
+		LLMRequestID:   event.LLMRequestID,
 		RetryAttemptID: event.RetryAttemptID,
 		StreamID:       event.StreamID,
 	}
@@ -305,10 +305,10 @@ func (p *Projector) ProjectHTTPDebug(event llm.HTTPDebugEvent) (Event, uint64, b
 // projectHTTPDebugPayload 只投影 provider/protocol/model/attempt/status/error 类别。
 func (p *Projector) projectHTTPDebugPayload(event llm.HTTPDebugEvent) map[string]interface{} {
 	payload := map[string]interface{}{
-		"provider":    boundUTF8String(event.Provider, 256),
-		"protocol":    boundUTF8String(event.Protocol, 256),
-		"model":       boundUTF8String(event.Model, 256),
-		"attempt":     event.Attempt,
+		"provider":     boundUTF8String(event.Provider, 256),
+		"protocol":     boundUTF8String(event.Protocol, 256),
+		"model":        boundUTF8String(event.Model, 256),
+		"attempt":      event.Attempt,
 		"max_attempts": event.MaxAttempts,
 	}
 	if event.ResponseStatusCode > 0 {

@@ -370,6 +370,21 @@ while ($true) {
   "layout_gaps": 0,
   "text_rows": 118,
   "text_parity": { "blocks": 12, "matched": 12, "missed": 0, "last_error": "" },
+  "deferred_queue": {
+    "pending": 3,
+    "bytes": 512,
+    "dropped": 0,
+    "merged": 12,
+    "evicted": 2,
+    "dropped_by_class": { "coalescible": 4 },
+    "dropped_by_type": { "tool.progress": 4 },
+    "evicted_by_type": { "usage.updated": 2 },
+    "peak_pending": 64,
+    "peak_bytes": 8192,
+    "critical_pending": 1,
+    "critical_peak_pending": 3,
+    "mode": "enforce"
+  },
   "cells_tail": [
     { "id": 10, "kind": "user", "source": "hello" },
     { "id": 11, "kind": "assistant", "source": "Hi! How can I help..." }
@@ -378,6 +393,34 @@ while ($true) {
 ```
 
 **诊断价值**：`apply_failures` 非零 → Scene 层有应用失败。`text_parity.missed` 非零 → 渲染层双跑对不齐。
+
+#### deferred_queue 字段（事件桥溢出队列，`docs/plan/ui-event-bridge-drop-hardening.md` §6.1.6）
+
+该对象**仅在非空或曾发生降级时出现**（否则整块省略），新增字段只增不改，旧客户端不受影响。
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `pending` / `bytes` | int / int64 | 当前积压在溢出队列（上限 512 条 / 2MiB）的事件数与字节数 |
+| `dropped` | uint64 | 溢出丢弃总数（自启动累计） |
+| `merged` | uint64 | 入队前就地合并的次数（latest-wins：被合并的事件不再占用独立槽位；命中"在途"槽位时挂起到 `pending` 并在投递成功后原位续投） |
+| `evicted` | uint64 | 为腾挪空间被驱逐的 coalescible 槽位数（含在途槽位；ordered/critical 永不参与驱逐） |
+| `dropped_by_class` | object | 按投递类别（`stream`/`critical`/`ordered`/`coalescible`）的丢弃计数 |
+| `dropped_by_type` / `evicted_by_type` | object | 按事件类型的归因（固定容量 top-N，超出折叠为 `other`） |
+| `peak_pending` / `peak_bytes` | int / int64 | 运行期积压水位峰值 |
+| `critical_pending` / `critical_peak_pending` | uint64 | 关键事件在途数（保留位 + 重试通道）与峰值 |
+| `critical_at_shutdown` | uint64 | `EndRun` 时仍在重试通道中的关键事件数（>0 即降级，绝不静默丢失） |
+| `degraded` | bool | 本次 run 是否发生过关键事件滞留（`critical_at_shutdown` > 0） |
+| `mode` | string | `off` / `observe` / `enforce`（见 `AICLI_EVENT_BRIDGE_CLASSIFY`） |
+
+**判读**：
+
+- `dropped_by_class.critical` **恒为 0**（设计保证：关键事件永不进入溢出队列）。若出现非零值，属实现缺陷，应连同日志上报。
+- `dropped_by_class.coalescible` 表示合并/驱逐仍不足；`ordered` 表示正常事件在极端溢出下丢失（伴随 `*.debug.log` 的 `deferred queue full` 行）。
+- `critical_pending` 长期贴高 + `critical_at_shutdown` 增长 → UI 消费端长期停摆，此时即使关键事件未丢，也应按 §6.2（消费端吞吐）处理。
+- 纯文本模式下同名信息以 `Deferred Queue *` 与 `Event Bridge *` 行输出，字段含义一致。
+
+**回滚开关**：`AICLI_EVENT_BRIDGE_CLASSIFY=off|observe|enforce`（大小写不敏感，未设置或未知值 = `enforce`）。
+`off` 完全回到分级之前的行为、`observe` 只计数不改投递行为，异常时降档即可，无需回滚代码。
 
 ### render_output
 
@@ -443,6 +486,19 @@ while ($true) {
     "stable_end": 22,
     "enqueued_end": 22,
     "acked_end": 8
+  },
+  "ui_actor": {
+    "processed": 35050,
+    "flush_count": 554,
+    "batches": 553,
+    "batch_size_max": 256,
+    "batch_size_p95": 208,
+    "reducer_nanos": 3194000,
+    "post_wait_nanos": 1284000,
+    "post_wait_count": 12,
+    "post_wait_max_nanos": 240000,
+    "post_wait_p95_nanos": 118000,
+    "pending": 0
   }
 }
 ```
@@ -476,6 +532,38 @@ while ($true) {
 | `acked_end` | int | **已确认范围**：终端已确认的字节偏移 |
 
 **诊断价值**：H1 停滞的经典签名——**`enqueued_end` 持续增长，`acked_end` 保持不动，`phase` 始终为 "mutable"**。这意味着 active band 的流更新持续渲染（enqueued 增长），但确认前缀（acked）从不推进，因此 HistoryCommit 无法完成。`commit_blocked=true` 提供额外确认。
+
+#### ui_actor 字段（消费端成本，`docs/plan/ui-event-bridge-drop-hardening.md` §6.2 第 2 条）
+
+`app_state.ui_actor` **仅在消费端有活动时出现**（`processed > 0 || post_wait_count > 0 || pending > 0`）。
+它把"事件桥丢事件"与"UI actor 跟不上"区分开：桥侧计数说明生产端发生了什么，这里的计数说明
+消费端是否已成为瓶颈。采样只读一次 actor 定长快照，不阻塞 `Run` 循环。
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `processed` | uint64 | 已 apply 的 action 数（含因果 follow-up；每个 action 仍消耗一个递增 revision） |
+| `flush_count` | uint64 | 实际交付的物理帧数。`processed/flush_count` 即批处理收益 |
+| `batches` | uint64 | 批次数（含单 action 批） |
+| `batch_size_max` / `batch_size_p95` | int | 历史最大批大小 / 最近批大小的 P95（有界样本环） |
+| `reducer_nanos` | uint64 | reducer 应用累计耗时（含 follow-up），用于归因"apply 慢"还是"投递慢" |
+| `post_wait_nanos` / `post_wait_count` | uint64 | bridge 投递因 mailbox 满而等待的累计真实时长与次数（首投即成功不产生样本） |
+| `post_wait_max_nanos` / `post_wait_p95_nanos` | uint64 | 上述等待的最大值 / P95 |
+| `pending` / `peak_pending` | int | actor 队列当前/峰值积压 |
+| `dropped` / `deferred_merged` | uint64 | actor 侧丢弃数与溢出队列合并次数（与 `deferred_queue` 同源快照） |
+
+**判读**：
+
+- `flush_count` 显著小于 `processed` 是**批处理生效的正常形态**，不是丢帧：同一批内多条 action
+  的 `FlushEffect` 合并为一帧（`DirtyFlags` 取并集），逐 action 的 revision 与顺序语义不变
+  （回归：`ui/controller_test.go` 的 `TestUIController_BatchesReadyActionsIntoOneFlush`）。
+- `post_wait_count` 增长且 `post_wait_p95_nanos` 显著 → 生产者被消费端背压。先看 `reducer_nanos`：
+  reducer 自身耗时高就优化 reducer；只有 reducer 很轻、`processed/flush_count` 已接近 1
+  （批处理失效）时，才按 §6.2 第 4 条评估调大 `MailboxSize`——禁止凭感觉放大队列。
+- 纯文本模式下以 `UI Actor:` 小节输出同样的计数（`BuildChatDebugDisplayText`）。
+
+**状态行提示（§6.2 第 3 条）**：当本次 run 内 `dropped + evicted > 0`（确有事件未按原样送达）时，
+动态状态行尾部追加 `· ⚠ events degraded: merged=N dropped=M`；纯 `merged`（就地合并）是设计内
+行为，不提示。`/debug` 的 `ui_actor` 与 `deferred_queue` 始终是完整真相。
 
 ### executor
 

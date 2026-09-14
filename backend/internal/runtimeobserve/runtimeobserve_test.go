@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 )
@@ -56,7 +57,7 @@ func TestRedactSensitiveFields(t *testing.T) {
 		"authorization": "Bearer sk-abc",
 		"api_key":       "sk-1234",
 		"nested": map[string]interface{}{
-			"prompt":       "hello secret world",
+			"prompt":         "hello secret world",
 			"tool_arguments": map[string]interface{}{"query": "SELECT * FROM users"},
 		},
 		"count": 7,
@@ -129,8 +130,8 @@ func TestScrubURL(t *testing.T) {
 	cases := map[string]string{
 		"https://api.example.com/v1/chat/completions?api_key=abc&x=1": "https://api.example.com",
 		"http://host:8080/path": "http://host:8080",
-		"  ": "",
-		"not a url": "",
+		"  ":                    "",
+		"not a url":             "",
 	}
 	for input, want := range cases {
 		if got := ScrubURL(input); got != want {
@@ -257,8 +258,8 @@ func publishLLMRequest(bus *runtimeevents.Bus, evtType, reqID string) {
 		TraceID:   "trace_1",
 		AgentName: "agent_1",
 		Payload: map[string]interface{}{
-			"provider":      "provider_a",
-			"model":         "model-x",
+			"provider":       "provider_a",
+			"model":          "model-x",
 			"llm_request_id": reqID,
 			"usage": map[string]interface{}{
 				"prompt_tokens":     10,
@@ -335,6 +336,100 @@ func TestCollectorIngestQueryAndAggregates(t *testing.T) {
 	if rt.LastEventAt == nil {
 		t.Fatal("last_event_at should be set")
 	}
+}
+
+// TestObserveCollector_ClassifiesKnownNonAllowlistedAsFiltered 是 §6.3 落点 B 的回归：
+// 已知类型（runtimechat 常量）仅因不在 v1 白名单被过滤 → filtered_by_type；
+// 目录之外的类型仍进 unknown_events_dropped（异常语义不变）。
+func TestObserveCollector_ClassifiesKnownNonAllowlistedAsFiltered(t *testing.T) {
+	bus := runtimeevents.NewBusWithRetention(2048)
+	c := NewCollector(testConfig(), bus, nil)
+	if c == nil {
+		t.Fatal("expected non-nil collector")
+	}
+	c.Start()
+	defer c.Stop()
+
+	// internal/chat/events.go:5 的会话事件常量：已知，但不在 v1 白名单。
+	knownType := runtimechat.EventSessionStart
+	if IsAllowedType(knownType) {
+		t.Fatalf("test precondition broken: %q must stay outside the v1 allowlist", knownType)
+	}
+	if !isKnownEventType(knownType) {
+		t.Fatalf("test precondition broken: %q must be in the known-type catalog", knownType)
+	}
+	const knownCount = 3
+	for i := 0; i < knownCount; i++ {
+		bus.Publish(runtimeevents.Event{
+			Type:      knownType,
+			SessionID: "session_filtered",
+			Payload:   map[string]interface{}{"turn_id": "turn_1", "prompt": "secret"},
+		})
+	}
+
+	// 真未知类型：不在任何已知目录内。
+	unknownType := "internal.secret.handler"
+	bus.Publish(runtimeevents.Event{
+		Type:      unknownType,
+		SessionID: "session_filtered",
+		Payload:   map[string]interface{}{"anything": "leak"},
+	})
+
+	rt := waitForRuntimeSummary(t, c, func(summary RuntimeSummary) bool {
+		return summary.FilteredByType[knownType] == knownCount && summary.UnknownEventsDropped == 1
+	})
+
+	if got := rt.FilteredByType[knownType]; got != knownCount {
+		t.Fatalf("filtered_by_type[%s]=%d want %d (all=%v)", knownType, got, knownCount, rt.FilteredByType)
+	}
+	if _, ok := rt.FilteredByType[unknownType]; ok {
+		t.Fatalf("unknown type must not be counted as filtered: %v", rt.FilteredByType)
+	}
+	if rt.UnknownEventsDropped != 1 {
+		t.Fatalf("unknown_events_dropped=%d want 1", rt.UnknownEventsDropped)
+	}
+
+	// 快照 JSON 契约：字段名必须是 runtime.filtered_by_type，且只含已知类型的桶。
+	blob, err := json.Marshal(rt)
+	if err != nil {
+		t.Fatalf("marshal runtime summary: %v", err)
+	}
+	if !strings.Contains(string(blob), `"filtered_by_type":{"`+knownType+`":`+strconv.Itoa(knownCount)+`}`) {
+		t.Fatalf("snapshot json missing filtered_by_type bucket: %s", blob)
+	}
+	if strings.Contains(string(blob), unknownType) {
+		t.Fatalf("unknown type leaked into filtered_by_type json: %s", blob)
+	}
+}
+
+// TestKnownEventTypeCatalogInvariants 守住分类目录的两条不变量：
+// v1 白名单必须全部在目录内（白名单收窄时仍按"已知"过滤），目录规模不得越界。
+func TestKnownEventTypeCatalogInvariants(t *testing.T) {
+	for allowedType := range eventAllowlist {
+		if !knownEventTypes[allowedType] {
+			t.Fatalf("allowlisted type %q missing from known-type catalog", allowedType)
+		}
+	}
+	if len(knownEventTypes) > maxFilteredByTypeEntries {
+		t.Fatalf("known-type catalog (%d) exceeds filtered_by_type cap (%d); raise the cap or trim the catalog",
+			len(knownEventTypes), maxFilteredByTypeEntries)
+	}
+}
+
+// waitForRuntimeSummary 轮询 Stats 直到 collector 异步消费完成（或超时）。
+func waitForRuntimeSummary(t *testing.T, c *Collector, ready func(RuntimeSummary) bool) RuntimeSummary {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if summary, _ := c.Stats(); ready(summary) {
+			return summary
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	summary, _ := c.Stats()
+	t.Fatalf("collector counters not ready: filtered_by_type=%v unknown_events_dropped=%d",
+		summary.FilteredByType, summary.UnknownEventsDropped)
+	return summary
 }
 
 func TestCollectorQueryFilters(t *testing.T) {
