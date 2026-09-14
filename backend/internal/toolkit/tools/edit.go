@@ -21,6 +21,8 @@ type EditTool struct {
 	*toolkit.BaseTool
 	sandboxPolicy
 	backupDir string
+	// insideGitWorkTree 探测目录是否位于 git 工作树内（测试可替换以固定判定）。
+	insideGitWorkTree func(dir string) bool
 }
 
 // NewEditTool 创建 Edit 工具
@@ -56,7 +58,8 @@ func NewEditTool() *EditTool {
 			parameters,
 			true,
 		),
-		backupDir: ".backups",
+		backupDir:         ".backups",
+		insideGitWorkTree: isInsideGitWorkTree,
 	}
 }
 
@@ -221,11 +224,15 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 		), nil
 	}
 
-	// 创建备份
-	backupPath, err := e.createBackup(absPath, content)
-	if err != nil {
-		// 备份失败不阻止编辑，只记录警告
-		backupPath = ""
+	// 创建备份：git 工程内改动前内容由版本库承担（git diff / git checkout
+	// 可取回），不再落 `.backups/` 目录；非 git 工程保持原行为。
+	backupPath := ""
+	if e.shouldCreateBackup(absPath) {
+		created, backupErr := e.createBackup(absPath, content)
+		if backupErr == nil {
+			backupPath = created
+		}
+		// 备份失败不阻止编辑，只记录警告（backupPath 保持为空）
 	}
 
 	// 执行替换
@@ -295,6 +302,17 @@ func formatEditSuccessContent(message string, patch string) string {
 		return message + "\n\n文件差异:\n无内容变化"
 	}
 	return message + "\n\n文件差异:\n```diff\n" + patch + "\n```"
+}
+
+// shouldCreateBackup 报告本次编辑是否还需要本地回滚点：git 工作树内由版本库
+// 承担回滚（git diff / git checkout 可取回改动前内容），不再落 `.backups/`
+// 目录；非 git 工程保持原有备份行为。
+func (e *EditTool) shouldCreateBackup(absPath string) bool {
+	probe := isInsideGitWorkTree
+	if e != nil && e.insideGitWorkTree != nil {
+		probe = e.insideGitWorkTree
+	}
+	return !probe(filepath.Dir(absPath))
 }
 
 // createBackup 创建文件备份

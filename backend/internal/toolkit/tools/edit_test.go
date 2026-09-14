@@ -728,3 +728,87 @@ func TestEditTool_BackupsInSameSecondAreNotOverwritten(t *testing.T) {
 		}
 	}
 }
+
+// git 工程内回滚点由版本库承担，edit 不应再落 .backups/ 目录。
+func TestEditTool_SkipsBackupInsideGitWorkTree(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	target := filepath.Join(root, "pkg", "sample.txt")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatalf("mkdir target dir: %v", err)
+	}
+	if err := os.WriteFile(target, []byte("old"), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+
+	tool := NewEditTool()
+	tool.SetBasePath(root)
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"file_path":  "pkg/sample.txt",
+		"old_string": "old",
+		"new_string": "new",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got %#v", result)
+	}
+	if got, ok := result.Metadata["backup_path"]; ok {
+		t.Fatalf("git 工作树内不应再写本地备份，backup_path=%v", got)
+	}
+	backupDir := filepath.Join(root, "pkg", ".backups")
+	if _, err := os.Stat(backupDir); !os.IsNotExist(err) {
+		t.Fatalf("git 工作树内不应创建 %s（err=%v）", backupDir, err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read edited file: %v", err)
+	}
+	if string(got) != "new" {
+		t.Fatalf("edited content = %q, want %q", got, "new")
+	}
+}
+
+// 非 git 工程保持原有本地备份行为（探针固定为 false，避免宿主临时目录是否在
+// 版本库内影响判定）。
+func TestEditTool_CreatesBackupOutsideGitWorkTree(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "sample.txt")
+	if err := os.WriteFile(target, []byte("old"), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+
+	tool := NewEditTool()
+	tool.SetBasePath(root)
+	tool.insideGitWorkTree = func(string) bool { return false }
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"file_path":  "sample.txt",
+		"old_string": "old",
+		"new_string": "new",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got %#v", result)
+	}
+	backupPath, _ := result.Metadata["backup_path"].(string)
+	if backupPath == "" {
+		t.Fatalf("非 git 工程应保留本地备份，metadata=%#v", result.Metadata)
+	}
+	wantDir := filepath.Join(root, ".backups")
+	if filepath.Dir(backupPath) != wantDir {
+		t.Fatalf("backup path = %q, want under %q", backupPath, wantDir)
+	}
+	got, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatalf("read backup %s: %v", backupPath, err)
+	}
+	if string(got) != "old" {
+		t.Fatalf("backup content = %q, want %q", got, "old")
+	}
+}
