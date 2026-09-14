@@ -11,6 +11,8 @@ export type WorkspaceDensity = "comfortable" | "compact";
 export type ReasoningEffort = "" | "minimal" | "low" | "medium" | "high";
 /** P2-6：侧栏会话排序模式偏好（与 `lib/workspace/session-order` 的模式集合对齐）。 */
 export type SessionOrderPreference = "updated" | "manual";
+/** P2-6 子片 2：侧栏会话分组视图偏好（工作区分组 / 平铺）。 */
+export type SessionGroupingPreference = "directory" | "flat";
 
 export const FONT_FAMILY_STACKS: Record<
   FontFamilyPreset,
@@ -95,6 +97,7 @@ export interface AppSettings {
     density: WorkspaceDensity;
     autoOpenArtifacts: boolean;
     sessionOrder: SessionOrderPreference;
+    sessionGrouping: SessionGroupingPreference;
   };
   notification: {
     enabled: boolean;
@@ -133,6 +136,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     density: "compact",
     autoOpenArtifacts: true,
     sessionOrder: "updated",
+    sessionGrouping: "directory",
   },
   notification: {
     enabled: true,
@@ -213,6 +217,15 @@ function normalizeSessionOrderPreference(
     : DEFAULT_APP_SETTINGS.workspace.sessionOrder;
 }
 
+/** 只认两种分组视图，未知值回落到默认（不做隐式映射）。 */
+function normalizeSessionGroupingPreference(
+  value: unknown,
+): SessionGroupingPreference {
+  return value === "flat" || value === "directory"
+    ? value
+    : DEFAULT_APP_SETTINGS.workspace.sessionGrouping;
+}
+
 function normalizeReasoningEffort(value: unknown): ReasoningEffort {
   return value === "minimal" ||
     value === "low" ||
@@ -281,6 +294,9 @@ export function mergeAppSettings(
       ),
       sessionOrder: normalizeSessionOrderPreference(
         value?.workspace?.sessionOrder,
+      ),
+      sessionGrouping: normalizeSessionGroupingPreference(
+        value?.workspace?.sessionGrouping,
       ),
     },
     notification: {

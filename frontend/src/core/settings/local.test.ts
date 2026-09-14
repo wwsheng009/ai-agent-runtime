@@ -81,6 +81,7 @@ describe("app settings storage helpers", () => {
         density: "compact",
         autoOpenArtifacts: true,
         sessionOrder: "updated",
+        sessionGrouping: "directory",
       },
       notification: {
         enabled: true,
@@ -108,6 +109,7 @@ describe("app settings storage helpers", () => {
         },
         workspace: {
           density: "dense" as never,
+          sessionGrouping: "grid" as never,
         },
         chat: {
           enableReact: "yes" as never,

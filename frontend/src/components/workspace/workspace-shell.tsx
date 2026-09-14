@@ -45,6 +45,7 @@ export function WorkspaceShell({
   onRemoveWorkspaceDirectory,
   onRetryConnection,
   onCreateSessionInDirectory,
+  onMoveRuntimeSession,
   onRenameRuntimeSession,
   onArchiveRuntimeSession,
   onRestoreRuntimeSession,
@@ -265,6 +266,7 @@ export function WorkspaceShell({
           onDeleteRuntimeSession={onDeleteRuntimeSession}
           onForkRuntimeSession={onForkRuntimeSession}
           onRemoveWorkspaceDirectory={onRemoveWorkspaceDirectory}
+          onMoveRuntimeSession={onMoveRuntimeSession}
           onRenameRuntimeSession={onRenameRuntimeSession}
           onRestoreRuntimeSession={onRestoreRuntimeSession}
           onRenameWorkspaceDirectory={onRenameWorkspaceDirectory}

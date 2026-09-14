@@ -1,29 +1,27 @@
 // 由 components/workspace/workspace-sidebar.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { ArchiveIcon, ChevronDownIcon, FolderIcon, HistoryIcon, LoaderCircleIcon, UserIcon } from "lucide-react";
-import { describeThreadSession } from "@/components/workspace/workspace-sidebar-shared";
 import { Badge } from "@/components/ui/badge";
-import { cn, formatRelativeTimestamp } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { type Dispatch, type SetStateAction } from "react";
 import { type TFunction } from "i18next";
 
 import type { SessionStatsStatus } from "@/hooks/workspace/use-session-stats";
 import type { RuntimeSessionStats } from "@/types/runtime";
+import { type SessionGroupingMode } from "@/lib/workspace/session-grouping";
 import { type SessionOrderMode } from "@/lib/workspace/session-order";
 
-import { buildSidebarIconLabels, buildThreadSessionDetails } from "./labels";
+import { resolveSidebarSessionRowViewModel } from "./session-row-view-model";
+import { WorkspaceSidebarSessionGroupingControl } from "./session-grouping-control";
 import { WorkspaceSidebarSessionOrderControl } from "./session-order-control";
 import { SidebarSection } from "./section-shell";
 import { WorkspaceSidebarSessionStatsSummary } from "./session-stats-summary";
+import {
+  type WorkspaceSidebarSessionUserMenuItem,
+} from "./session-user-menu";
 import { SidebarSessionItem } from "./session-item";
 import { useSidebarSessionDrag } from "./use-session-drag-reorder";
 import {
-  getRuntimeSessionActivityIcon,
-  getSessionStatusIcon,
-} from "./state-icon-utils";
-import {
-  resolveSidebarSessionRowState,
-  resolveSidebarSessionRowStatus,
   type SidebarSessionActivity,
 } from "./session-row-status";
 import {
@@ -32,13 +30,6 @@ import {
   type SidebarSectionState,
   type SidebarThread,
 } from "./types";
-
-type WorkspaceSidebarSessionUserMenuItem = {
-  displayName: string;
-  isDefaultUser: boolean;
-  sessionCount: number;
-  userId: string;
-};
 
 type WorkspaceSidebarSessionsSectionProps = {
   deferredQuery: string;
@@ -60,9 +51,17 @@ type WorkspaceSidebarSessionsSectionProps = {
   selectedRuntimeSessionUserId: string;
   selectedThreadId: string;
   sessionDirectoryGroups: SidebarDirectoryGroup[];
+  sessionGroupingMode: SessionGroupingMode;
+  /** 跨组移动失败的就地提示（失败即回滚，提示挂在会话段而不是目录段）。 */
+  sessionMoveError: string | null;
   sessionOrderMode: SessionOrderMode;
+  onSelectSessionGroupingMode: (mode: SessionGroupingMode) => void;
   onSelectSessionOrderMode: (mode: SessionOrderMode) => void;
   onReorderSessions: (accountKey: string, order: readonly string[]) => void;
+  /** 跨组移动：目标目录是否可归属（未登记 / 宿主缺位的目录不可作落点）。 */
+  canMoveSessionToGroup: (groupKey: string) => boolean;
+  /** 跨组移动意图（乐观归属 + Host 写回由接线层执行）。 */
+  onMoveSessionToGroup: (sessionId: string, groupKey: string) => void;
   sessionStats: RuntimeSessionStats | null;
   sessionStatsError: unknown;
   sessionStatsStatus: SessionStatsStatus;
@@ -81,15 +80,18 @@ type WorkspaceSidebarSessionsSectionProps = {
 };
 
 export function WorkspaceSidebarSessionsSection({
+  canMoveSessionToGroup,
   deferredQuery,
   handleRenameSession,
   hiddenArchivedCount,
   onArchiveSession,
   onDeleteSession,
   onForkSession,
+  onMoveSessionToGroup,
   onRefreshSessionStats,
   onReorderSessions,
   onRestoreSession,
+  onSelectSessionGroupingMode,
   onSelectSessionOrderMode,
   onToggleArchivedSessions,
   onSelectRuntimeSessionUser,
@@ -102,6 +104,8 @@ export function WorkspaceSidebarSessionsSection({
   selectedRuntimeSessionUserId,
   selectedThreadId,
   sessionDirectoryGroups,
+  sessionGroupingMode,
+  sessionMoveError,
   sessionOrderMode,
   sessionStats,
   sessionStatsError,
@@ -119,25 +123,49 @@ export function WorkspaceSidebarSessionsSection({
   toggleSection,
   toggleSessionDirectory,
 }: WorkspaceSidebarSessionsSectionProps) {
-  const sidebarLabels = buildSidebarIconLabels(t);
-  const threadSessionDetails = buildThreadSessionDetails(t);
-  // P2-6：组内拖拽重排。跨组拖拽本批不接收（不写假落点、不做假回滚）。
-  const { announcement: orderAnnouncement, dragPropsFor } =
+  function findSessionTitle(sessionId: string): string {
+    const session = sessionDirectoryGroups
+      .flatMap((group) => group.sessions)
+      .find((item) => item.id === sessionId);
+    return session
+      ? sessionThreadById.get(session.id)?.title ||
+          session.metadata?.title?.trim() ||
+          session.id
+      : sessionId;
+  }
+
+  function describeSessionDirectory(groupKey: string): string {
+    const group = sessionDirectoryGroups.find((item) => item.key === groupKey);
+    if (!group) {
+      return groupKey;
+    }
+    return group.fullPath ? group.label : t("sidebar.sessionDirectoryUnscoped");
+  }
+
+  // P2-6：组内拖拽重排 + （按目录视图下的）跨组移动。
+  // 跨组移动只在组边界可见时可表达：平铺视图与不可归属的目标目录都不接收落点。
+  const { announcement: orderAnnouncement, dragPropsFor, groupDropPropsFor } =
     useSidebarSessionDrag({
       enabled: sessionOrderMode === "manual",
       groups: sessionDirectoryGroups,
       onReorder: onReorderSessions,
+      crossGroupEnabled: sessionGroupingMode === "directory",
+      canMoveToGroup: canMoveSessionToGroup,
+      onMoveSession: (sessionId, target) =>
+        onMoveSessionToGroup(sessionId, target.groupKey),
       describeMoved: (accountKey, sessionId) => {
         const moved = sessionDirectoryGroups
           .find((group) => group.key === accountKey)
           ?.sessions.find((session) => session.id === sessionId);
-        const title = moved
-          ? sessionThreadById.get(moved.id)?.title ||
-            moved.metadata?.title?.trim() ||
-            moved.id
-          : sessionId;
-        return t("sidebar.sessionOrder.moved", { title });
+        return t("sidebar.sessionOrder.moved", {
+          title: findSessionTitle(moved?.id ?? sessionId),
+        });
       },
+      describeMovedToGroup: (sessionId, groupKey) =>
+        t("sidebar.sessionMove.moved", {
+          title: findSessionTitle(sessionId),
+          directory: describeSessionDirectory(groupKey),
+        }),
     });
 
   return (
@@ -178,6 +206,18 @@ export function WorkspaceSidebarSessionsSection({
                 onSelect={onSelectSessionOrderMode}
                 t={t}
               />
+            ) : null}
+            {sessionDirectoryGroups.length > 0 ? (
+              <WorkspaceSidebarSessionGroupingControl
+                mode={sessionGroupingMode}
+                onSelect={onSelectSessionGroupingMode}
+                t={t}
+              />
+            ) : null}
+            {sessionMoveError ? (
+              <div className="rounded-[0.75rem] border border-accent-orange/18 bg-accent-orange/8 px-2.5 py-2 text-xs leading-5 text-muted-foreground">
+                {sessionMoveError}
+              </div>
             ) : null}
             {showArchivedSessions || hiddenArchivedCount > 0 ? (
               <button
@@ -239,120 +279,87 @@ export function WorkspaceSidebarSessionsSection({
                     </button>
 
                     {isSelectedUser ? (
-                      <div className="ml-3 space-y-1 border-l border-border pl-2">
+                      <div
+                        className={cn(
+                          "ml-3 space-y-1",
+                          sessionGroupingMode === "directory" &&
+                            "border-l border-border pl-2",
+                        )}
+                      >
                         {sessionDirectoryGroups.length > 0 ? (
                           sessionDirectoryGroups.map((group) => {
                             const isDirectoryOpen =
                               openSessionDirectories[group.key] ?? false;
+                            // `dropActive` 只用于样式/测试钩子，必须与事件处理器分开：
+                            // 整体展开会把非 DOM 属性透传到 <button>（React 会告警）。
+                            const { dropActive, ...groupDragHandlers } =
+                              groupDropPropsFor(group.key);
 
                             return (
                               <div key={group.key} className="space-y-1">
-                                <button
-                                  type="button"
-                                  title={group.fullPath || group.label}
-                                  onClick={() => toggleSessionDirectory(group.key)}
-                                  className="flex w-full items-center gap-2 rounded-[0.72rem] px-2 py-1.5 text-left text-muted-foreground transition hover:bg-surface-softer hover:text-foreground"
-                                >
-                                  <FolderIcon
-                                    size={13}
-                                    className="shrink-0 text-accent-primary"
-                                  />
-                                  <span className="min-w-0 flex-1 truncate text-xs font-medium">
-                                    {group.fullPath
-                                      ? group.label
-                                      : t("sidebar.sessionDirectoryUnscoped")}
-                                  </span>
-                                  <span className="shrink-0 app-text-10 text-muted-foreground">
-                                    {group.sessions.length}
-                                  </span>
-                                  <ChevronDownIcon
-                                    size={13}
+                                {sessionGroupingMode === "directory" ? (
+                                  <button
+                                    type="button"
+                                    title={group.fullPath || group.label}
+                                    onClick={() =>
+                                      toggleSessionDirectory(group.key)
+                                    }
+                                    {...groupDragHandlers}
+                                    data-testid="sidebar-session-group-drop"
+                                    data-drop-active={dropActive}
                                     className={cn(
-                                      "shrink-0 transition-transform duration-200",
-                                      isDirectoryOpen
-                                        ? "rotate-0"
-                                        : "-rotate-90",
+                                      "flex w-full items-center gap-2 rounded-[0.72rem] border px-2 py-1.5 text-left transition",
+                                      dropActive
+                                        ? "border-accent-primary-border bg-accent-primary-soft text-foreground"
+                                        : "border-transparent text-muted-foreground hover:bg-surface-softer hover:text-foreground",
                                     )}
-                                  />
-                                </button>
+                                  >
+                                    <FolderIcon
+                                      size={13}
+                                      className="shrink-0 text-accent-primary"
+                                    />
+                                    <span className="min-w-0 flex-1 truncate text-xs font-medium">
+                                      {group.fullPath
+                                        ? group.label
+                                        : t("sidebar.sessionDirectoryUnscoped")}
+                                    </span>
+                                    <span className="shrink-0 app-text-10 text-muted-foreground">
+                                      {group.sessions.length}
+                                    </span>
+                                    <ChevronDownIcon
+                                      size={13}
+                                      className={cn(
+                                        "shrink-0 transition-transform duration-200",
+                                        isDirectoryOpen
+                                          ? "rotate-0"
+                                          : "-rotate-90",
+                                      )}
+                                    />
+                                  </button>
+                                ) : null}
 
-                                {isDirectoryOpen ? (
-                                  <div className="ml-4 space-y-1">
+                                {sessionGroupingMode === "flat" ||
+                                isDirectoryOpen ? (
+                                  <div
+                                    className={cn(
+                                      "space-y-1",
+                                      sessionGroupingMode === "directory" &&
+                                        "ml-4",
+                                    )}
+                                  >
                                     {group.sessions.map((session) => {
-                                      const thread =
-                                        sessionThreadById.get(session.id);
-                                      const title =
-                                        thread?.title ||
-                                        session.metadata?.title?.trim() ||
-                                        session.id;
-                                      const isActive =
-                                        thread?.id === selectedThreadId ||
-                                        thread?.sessionId === selectedThreadId;
-                                      const rowState =
-                                        resolveSidebarSessionRowState(session);
-                                      const rowStatus =
-                                        resolveSidebarSessionRowStatus(
+                                      const row = resolveSidebarSessionRowViewModel(
+                                        {
+                                          activity:
+                                            sessionActivity?.[session.id],
+                                          selectedThreadId,
                                           session,
-                                          sessionActivity?.[session.id],
-                                        );
-                                      const sessionStatusIcon =
-                                        rowStatus.kind === "idle"
-                                          ? getSessionStatusIcon(
-                                              describeThreadSession(
-                                                thread ?? {
-                                                  id: session.id,
-                                                  title,
-                                                  summary:
-                                                    session.metadata?.summary ??
-                                                    "",
-                                                  updatedAt:
-                                                    session.updatedAt ||
-                                                    session.createdAt ||
-                                                    "",
-                                                  status: "active",
-                                                  sessionId: session.id,
-                                                  tags: ["runtime-session"],
-                                                  prompts: [],
-                                                  messages: [],
-                                                  artifacts: [],
-                                                },
-                                                threadSessionDetails,
-                                              ).label,
-                                              sidebarLabels,
-                                            )
-                                          : getRuntimeSessionActivityIcon(
-                                              rowStatus,
-                                              sidebarLabels,
-                                            );
-                                      const timestamp =
-                                        session.updatedAt ||
-                                        session.createdAt ||
-                                        "";
-                                      const createdAt =
-                                        session.createdAt || timestamp;
-                                      const itemTime =
-                                        timestamp &&
-                                        !Number.isNaN(Date.parse(timestamp))
-                                          ? {
-                                              relative:
-                                                formatRelativeTimestamp(
-                                                  timestamp,
-                                                ),
-                                              title: t(
-                                                "sidebar.session.createdAt",
-                                                {
-                                                  time: Number.isNaN(
-                                                    Date.parse(createdAt),
-                                                  )
-                                                    ? createdAt
-                                                    : new Date(
-                                                        createdAt,
-                                                      ).toLocaleString(),
-                                                },
-                                              ),
-                                            }
-                                          : undefined;
-
+                                          sessionThread: sessionThreadById.get(
+                                            session.id,
+                                          ),
+                                          t,
+                                        },
+                                      );
                                       return (
                                         <SidebarSessionItem
                                           key={`recoverable-${session.id}`}
@@ -378,7 +385,7 @@ export function WorkspaceSidebarSessionsSection({
                                             group.key,
                                             session.id,
                                           )}
-                                          isActive={isActive}
+                                          isActive={row.isActive}
                                           onArchive={onArchiveSession}
                                           onCancelRename={() =>
                                             setRenamingSessionId(null)
@@ -387,7 +394,10 @@ export function WorkspaceSidebarSessionsSection({
                                           onFork={
                                             onForkSession
                                               ? (sessionId) =>
-                                                  onForkSession(sessionId, title)
+                                                  onForkSession(
+                                                    sessionId,
+                                                    row.title,
+                                                  )
                                               : undefined
                                           }
                                           onRenameSubmit={
@@ -399,7 +409,7 @@ export function WorkspaceSidebarSessionsSection({
                                           }
                                           onSelect={() =>
                                             onSelectThread(
-                                              thread?.id ?? session.id,
+                                              row.thread?.id ?? session.id,
                                             )
                                           }
                                           onStartRename={
@@ -418,11 +428,11 @@ export function WorkspaceSidebarSessionsSection({
                                             renamingSessionId ===
                                             session.id
                                           }
-                                          rowState={rowState}
+                                          rowState={row.rowState}
                                           session={session}
-                                          statusIcon={sessionStatusIcon}
-                                          time={itemTime}
-                                          title={title}
+                                          statusIcon={row.statusIcon}
+                                          time={row.itemTime}
+                                          title={row.title}
                                         />
                                       );
                                     })}

@@ -160,6 +160,18 @@ export const zhWorkspaceBase = {
       manualHint: "固定顺序：拖拽会话行调整位置",
       moved: "已调整「{{title}}」的顺序",
     },
+    sessionGrouping: {
+      label: "分组",
+      groupLabel: "会话分组视图",
+      directory: "按目录",
+      flat: "平铺",
+      directoryHint: "按工作目录分组，可拖拽会话跨组移动",
+      flatHint: "单列平铺，不显示目录分组；跨组移动请切回按目录",
+    },
+    sessionMove: {
+      moved: "已移动「{{title}}」到「{{directory}}」",
+      failed: "移动会话失败：{{message}}",
+    },
     sessionStats: {
       active: "活跃 {{count}}",
       archived: "归档 {{count}}",

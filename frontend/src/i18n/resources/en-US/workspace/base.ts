@@ -169,6 +169,18 @@ export const enWorkspaceBase = {
       manualHint: "Fixed order: drag session rows to rearrange",
       moved: "Reordered “{{title}}”",
     },
+    sessionGrouping: {
+      label: "Group",
+      groupLabel: "Session grouping view",
+      directory: "By directory",
+      flat: "Flat",
+      directoryHint: "Group by workspace directory; drag sessions across groups to move",
+      flatHint: "Single flat list without directory groups; switch to By directory to move sessions across groups",
+    },
+    sessionMove: {
+      moved: "Moved “{{title}}” to “{{directory}}”",
+      failed: "Failed to move session: {{message}}",
+    },
     sessionStats: {
       active: "Active {{count}}",
       archived: "Archived {{count}}",

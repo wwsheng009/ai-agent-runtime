@@ -148,3 +148,29 @@ export function moveSessionInOrder(
   next.splice(edge === "before" ? anchorIndex : anchorIndex + 1, 0, sourceId);
   return isSameSessionOrder(next, order) ? order : next;
 }
+
+/**
+ * 跨组落点：把**不在该组**的会话按落点插入目标组顺序。
+ * （`moveSessionInOrder` 对不在顺序里的 source 一律返回原引用，不能用于跨组。）
+ * 目标锚点不在顺序里时返回原数组引用；插入结果与现状等价时同样返回原引用。
+ */
+export function insertSessionInOrder(
+  order: readonly string[],
+  sourceId: string,
+  targetId: string,
+  edge: SessionDropEdge,
+): readonly string[] {
+  if (sourceId === targetId) {
+    return order;
+  }
+
+  const withoutSource = order.filter((id) => id !== sourceId);
+  const anchorIndex = withoutSource.indexOf(targetId);
+  if (anchorIndex === -1) {
+    return order;
+  }
+
+  const next = [...withoutSource];
+  next.splice(edge === "before" ? anchorIndex : anchorIndex + 1, 0, sourceId);
+  return isSameSessionOrder(next, order) ? order : next;
+}

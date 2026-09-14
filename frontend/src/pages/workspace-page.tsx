@@ -196,6 +196,7 @@ export function WorkspacePage() {
     createSessionInDirectory: handleCreateSessionInDirectory,
     deleteSession: handleDeleteRuntimeSession,
     forkSession: handleForkRuntimeSession,
+    moveSession: handleMoveRuntimeSession,
     renameSession: handleRenameRuntimeSession,
     restoreSession: handleRestoreRuntimeSession,
   } = useWorkspaceSessionActions({
@@ -379,6 +380,7 @@ export function WorkspacePage() {
       onRetryConnection={retryConnection}
       onCreateSessionInDirectory={handleCreateSessionInDirectory}
       onRenameRuntimeSession={handleRenameRuntimeSession}
+      onMoveRuntimeSession={handleMoveRuntimeSession}
       onArchiveRuntimeSession={handleArchiveRuntimeSession}
       onRestoreRuntimeSession={handleRestoreRuntimeSession}
       onForkRuntimeSession={handleForkRuntimeSession}

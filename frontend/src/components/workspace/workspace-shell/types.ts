@@ -52,6 +52,11 @@ export type WorkspaceShellProps = {
     label: string;
   }) => Promise<void>;
   onRenameRuntimeSession: (sessionId: string, title: string) => Promise<void>;
+  /** P2-6 子片 2：跨组拖拽移动（只写回 `metadata.context.workspace_path`）。 */
+  onMoveRuntimeSession?: (
+    sessionId: string,
+    workspacePath: string,
+  ) => Promise<void> | void;
   /** P1-9 归档/恢复：可选，缺省时侧栏行内不渲染操作菜单。 */
   onArchiveRuntimeSession?: (sessionId: string) => Promise<void> | void;
   onRestoreRuntimeSession?: (sessionId: string) => Promise<void> | void;

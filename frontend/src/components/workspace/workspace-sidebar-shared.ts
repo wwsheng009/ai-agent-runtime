@@ -45,6 +45,15 @@ export type MergedDirectoryGroup = {
   latestUpdatedAt?: string;
 };
 
+/** P2-6 子片 2：跨组移动的乐观覆盖（sessionId → 目标工作目录路径）。 */
+export type SessionMoveOverrides = Readonly<Record<string, string>>;
+
+export type SessionMoveTarget = {
+  key: string;
+  label: string;
+  path: string;
+};
+
 const unknownRuntimeSessionDirectory = "__runtime-session-directory-unknown__";
 
 const defaultThreadSessionDetailLabels: ThreadSessionDetailLabels = {
@@ -190,7 +199,7 @@ function readFirstContextText(
   return "";
 }
 
-function normalizeRuntimeDirectoryPath(value: string) {
+export function normalizeRuntimeDirectoryPath(value: string) {
   return value.trim().replace(/\\/g, "/").replace(/\/+$/, "") || value.trim();
 }
 
@@ -242,8 +251,8 @@ function compareGroupsByLatestUpdated(
  * sessions keep the "Unscoped sessions" bucket.
  */
 export function mergeDirectoryGroups(
-  directories: RuntimeWorkspaceDirectory[],
-  sessions: RuntimeSessionRecord[],
+  directories: readonly RuntimeWorkspaceDirectory[],
+  sessions: readonly RuntimeSessionRecord[],
 ): MergedDirectoryGroup[] {
   const registeredByKey = new Map<string, MergedDirectoryGroup>();
   const registeredOrder = new Map<string, number>();
@@ -326,4 +335,102 @@ export function mergeDirectoryGroups(
     .sort(compareGroupsByLatestUpdated);
 
   return [...registeredGroups, ...derived];
+}
+
+/**
+ * P2-6 子片 2：把跨组移动的**乐观覆盖**套用到会话集合上——只改写
+ * `metadata.context.workspace_path`，其余字段（metadata 其它键、context
+ * 其它键）原样保留。无覆盖时返回入参同一引用，避免无谓的重算与重渲染。
+ */
+export function applySessionWorkspaceOverrides(
+  sessions: readonly RuntimeSessionRecord[],
+  overrides: SessionMoveOverrides,
+): RuntimeSessionRecord[] {
+  const entries = Object.entries(overrides);
+  if (entries.length === 0) {
+    return sessions as RuntimeSessionRecord[];
+  }
+
+  const targets = new Map(entries);
+  return sessions.map((session) => {
+    const targetPath = targets.get(session.id);
+    if (targetPath === undefined) {
+      return session;
+    }
+    return {
+      ...session,
+      metadata: {
+        ...(session.metadata ?? {}),
+        context: {
+          ...(session.metadata?.context ?? {}),
+          workspace_path: targetPath,
+        },
+      },
+    };
+  });
+}
+
+/**
+ * 覆盖回收：Host 数据已经反映目标路径（或会话已消失）时清掉对应覆盖。
+ * 返回入参同一引用表示无需变更。
+ */
+export function pruneSessionMoveOverrides(
+  overrides: SessionMoveOverrides,
+  sessions: readonly RuntimeSessionRecord[],
+): SessionMoveOverrides {
+  const entries = Object.entries(overrides);
+  if (entries.length === 0) {
+    return overrides;
+  }
+
+  const byId = new Map(sessions.map((session) => [session.id, session]));
+  let changed = false;
+  const next: Record<string, string> = {};
+  for (const [sessionId, targetPath] of entries) {
+    const session = byId.get(sessionId);
+    if (!session) {
+      changed = true;
+      continue;
+    }
+    const applied =
+      resolveRuntimeSessionDirectory(session).fullPath ===
+      normalizeRuntimeDirectoryPath(targetPath);
+    if (applied) {
+      changed = true;
+      continue;
+    }
+    next[sessionId] = targetPath;
+  }
+
+  return changed ? next : overrides;
+}
+
+/**
+ * 解析某个分组能否作为跨组移动的落点：
+ * - 无归属路径（Unscoped）不可作落点——清空归属不在本批范围；
+ * - 注册目录在宿主机上已不存在（`exists === false`）时不可作落点，
+ *   避免把会话改绑到打不开的目录；
+ * - 注册目录优先写回注册表里的**原始路径**，不把展示用的规范化路径写回 Host。
+ */
+export function resolveSessionMoveTarget(
+  group: Pick<MergedDirectoryGroup, "key" | "label" | "fullPath" | "directoryId">,
+  directories: readonly RuntimeWorkspaceDirectory[],
+): SessionMoveTarget | null {
+  if (!group.fullPath.trim()) {
+    return null;
+  }
+
+  if (group.directoryId) {
+    const directory = directories.find((item) => item.id === group.directoryId);
+    if (directory?.exists === false) {
+      return null;
+    }
+    return {
+      key: group.key,
+      label: directory?.name?.trim() || group.label,
+      path: directory?.path?.trim() || group.fullPath,
+    };
+  }
+
+  return { key: group.key, label: group.label, path: group.fullPath };
 }

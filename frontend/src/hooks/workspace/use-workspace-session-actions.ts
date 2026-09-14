@@ -58,6 +58,18 @@ export function useWorkspaceSessionActions({
     );
   }
 
+  // P2-6 子片 2：跨组移动只改写归属路径（后端按 context 键逐键合并，其它键不受影响），
+  // 不触碰标题 / 状态；刷新快照让新归属进入同一排序/分组口径。
+  async function handleMoveRuntimeSession(
+    sessionId: string,
+    workspacePath: string,
+  ) {
+    await updateRuntimeSession(sessionId, {
+      context: { workspace_path: workspacePath },
+    });
+    refreshSessions();
+  }
+
   // P1-9：归档为可恢复的非破坏操作，完成后刷新列表（新的 state 由快照统一呈现）。
   async function handleArchiveRuntimeSession(sessionId: string) {
     await archiveRuntimeSession(sessionId);
@@ -138,6 +150,7 @@ export function useWorkspaceSessionActions({
     createSessionInDirectory: handleCreateSessionInDirectory,
     deleteSession: handleDeleteRuntimeSession,
     forkSession: handleForkRuntimeSession,
+    moveSession: handleMoveRuntimeSession,
     renameSession: handleRenameRuntimeSession,
     restoreSession: handleRestoreRuntimeSession,
   };

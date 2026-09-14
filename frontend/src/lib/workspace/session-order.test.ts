@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   compareSessionsByRecency,
+  insertSessionInOrder,
   isSameSessionOrder,
   isSessionOrderMode,
   moveSessionInOrder,
@@ -188,6 +189,36 @@ describe("session-order", () => {
     it("落点与现状等价时不产生新数组（调用方跳过写入）", () => {
       expect(moveSessionInOrder(order, "b", "c", "before")).toBe(order);
       expect(moveSessionInOrder(order, "b", "a", "after")).toBe(order);
+    });
+  });
+
+  describe("insertSessionInOrder（跨组落点）", () => {
+    const target = ["x", "y", "z"];
+
+    it("会话不在目标组顺序里也能按落点插入", () => {
+      expect(insertSessionInOrder(target, "new", "y", "before")).toEqual([
+        "x",
+        "new",
+        "y",
+        "z",
+      ]);
+      expect(insertSessionInOrder(target, "new", "z", "after")).toEqual([
+        "x",
+        "y",
+        "z",
+        "new",
+      ]);
+    });
+
+    it("锚点不在顺序里、或与源相同（同组口径）时返回原引用", () => {
+      expect(insertSessionInOrder(target, "new", "missing", "before")).toBe(
+        target,
+      );
+      expect(insertSessionInOrder(target, "x", "x", "after")).toBe(target);
+    });
+
+    it("插入结果与现状等价时返回原引用（不写空账目）", () => {
+      expect(insertSessionInOrder(target, "y", "x", "after")).toBe(target);
     });
   });
 

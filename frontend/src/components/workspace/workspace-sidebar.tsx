@@ -2,20 +2,21 @@
 
 import { useDeferredValue, useMemo, useState } from "react";
 import { SessionSearchDialog } from "@/components/workspace/session-search-dialog";
-import { mergeDirectoryGroups, type MergedDirectoryGroup } from "@/components/workspace/workspace-sidebar-shared";
+import { type MergedDirectoryGroup } from "@/components/workspace/workspace-sidebar-shared";
 import { WorkspaceDirectoryAddDialog } from "@/components/workspace/workspace-directory-add-dialog";
 import { WorkspaceDirectoryDeleteDialog } from "@/components/workspace/workspace-directory-delete-dialog";
 import { type Thread } from "@/data/mock";
 import { cn } from "@/lib/utils";
 import { useTranslation } from "react-i18next";
 import { useSessionStats } from "@/hooks/workspace/use-session-stats";
-import { useSessionOrder } from "@/hooks/workspace/use-session-order";
+import { useSessionGroupView } from "@/hooks/workspace/use-session-group-view";
 import { WorkspaceSidebarChatsSection } from "@/components/workspace/workspace-sidebar/chats-section";
 import { WorkspaceSidebarDirectoriesSection } from "@/components/workspace/workspace-sidebar/directories-section";
 import { WorkspaceSidebarHeader } from "@/components/workspace/workspace-sidebar/sidebar-header";
 import { WorkspaceSidebarRuntimeSection } from "@/components/workspace/workspace-sidebar/runtime-section";
 import { WorkspaceSidebarRuntimeTeamsSurface } from "@/components/workspace/workspace-sidebar/runtime-teams-surface";
 import { WorkspaceSidebarSessionsSection } from "@/components/workspace/workspace-sidebar/sessions-section";
+import { buildSessionUserMenuItems } from "@/components/workspace/workspace-sidebar/session-user-menu";
 import { useSidebarEffects } from "@/components/workspace/workspace-sidebar/use-sidebar-effects";
 import { splitRuntimeSessionsByVisibility } from "@/components/workspace/workspace-sidebar/session-row-status";
 import {
@@ -56,6 +57,7 @@ export function WorkspaceSidebar({
   onRemoveWorkspaceDirectory,
   onCreateSessionInDirectory,
   onRenameRuntimeSession,
+  onMoveRuntimeSession,
   onArchiveRuntimeSession,
   onRestoreRuntimeSession,
   onForkRuntimeSession,
@@ -131,52 +133,21 @@ export function WorkspaceSidebar({
         ),
     [filteredThreads],
   );
-  const sessionUserMenuItems = useMemo(() => {
-    const seen = new Set<string>();
-    const items = runtimeSessionUsers
-      .map((user) => {
-        const userId = user.user_id.trim();
-        if (!userId || seen.has(userId)) {
-          return null;
-        }
-        seen.add(userId);
-        const displayName = user.display_name?.trim() || userId;
-        const sessionCount = user.session_count ?? 0;
-        const isDefaultUser = runtimeSessionDefaultUserId?.trim() === userId;
-        return {
-          userId,
-          displayName,
-          isDefaultUser,
-          sessionCount,
-        };
-      })
-      .filter(Boolean) as Array<{
-        displayName: string;
-        isDefaultUser: boolean;
-        sessionCount: number;
-        userId: string;
-      }>;
-
-    const selectedUserId = selectedRuntimeSessionUserId.trim();
-    if (
-      selectedUserId &&
-      !seen.has(selectedUserId) &&
-      runtimeSessionsSummary.totalCount > 0
-    ) {
-      items.unshift({
-        userId: selectedUserId,
-        displayName: selectedUserId,
-        isDefaultUser: runtimeSessionDefaultUserId?.trim() === selectedUserId,
-        sessionCount: runtimeSessionsSummary.totalCount,
-      });
-    }
-    return items;
-  }, [
-    runtimeSessionDefaultUserId,
-    runtimeSessionUsers,
-    runtimeSessionsSummary.totalCount,
-    selectedRuntimeSessionUserId,
-  ]);
+  const sessionUserMenuItems = useMemo(
+    () =>
+      buildSessionUserMenuItems({
+        users: runtimeSessionUsers,
+        defaultUserId: runtimeSessionDefaultUserId,
+        selectedUserId: selectedRuntimeSessionUserId,
+        totalCount: runtimeSessionsSummary.totalCount,
+      }),
+    [
+      runtimeSessionDefaultUserId,
+      runtimeSessionUsers,
+      runtimeSessionsSummary.totalCount,
+      selectedRuntimeSessionUserId,
+    ],
+  );
   const sessionVisibility = useMemo(
     () =>
       splitRuntimeSessionsByVisibility(runtimeSessions, {
@@ -184,22 +155,25 @@ export function WorkspaceSidebar({
       }),
     [runtimeSessions, showArchivedSessions],
   );
-  const mergedDirectoryGroups = useMemo(
-    () => mergeDirectoryGroups(workspaceDirectories, sessionVisibility.visible),
-    [sessionVisibility.visible, workspaceDirectories],
-  );
-  // Per-user session browser: skip registered directories without sessions
-  // so the friendly empty state survives directory-only registrations.
-  const sessionDirectoryGroups = useMemo(
-    () => mergedDirectoryGroups.filter((group) => group.sessions.length > 0),
-    [mergedDirectoryGroups],
-  );
-  // P2-6：排序模式（设置域）+ 手动顺序账目（浏览器本地）；只重排分组内会话，不改分组口径。
-  const { commitOrder: commitSessionOrder, mode: sessionOrderMode, orderFor, setMode: setSessionOrderMode } = useSessionOrder();
-  const orderedSessionDirectoryGroups = useMemo(
-    () => sessionDirectoryGroups.map((group) => ({ ...group, sessions: orderFor(group.key, group.sessions) })),
-    [orderFor, sessionDirectoryGroups],
-  );
+  // P2-6：会话段视图（分组模式 + 排序账目 + 跨组移动的乐观归属/写回）整体下沉到 hook。
+  const {
+    canMoveSessionToGroup,
+    commitOrder: commitSessionOrder,
+    groupingMode: sessionGroupingMode,
+    mergedDirectoryGroups,
+    moveSessionToGroup,
+    orderMode: sessionOrderMode,
+    sessionGroups: orderedSessionDirectoryGroups,
+    sessionMoveError,
+    setGroupingMode: setSessionGroupingMode,
+    setOrderMode: setSessionOrderMode,
+  } = useSessionGroupView({
+    directories: workspaceDirectories,
+    onMoveRuntimeSession,
+    runtimeSessions,
+    t,
+    visibleSessions: sessionVisibility.visible,
+  });
   const sessionThreadById = useMemo(() => {
     const byId = new Map<string, Thread>();
     for (const thread of sessionThreads) {
@@ -413,15 +387,20 @@ export function WorkspaceSidebar({
               t={t}
             />
           <WorkspaceSidebarSessionsSection
+              canMoveSessionToGroup={canMoveSessionToGroup}
               deferredQuery={deferredQuery}
               handleRenameSession={handleRenameSession}
               hiddenArchivedCount={sessionVisibility.hiddenArchivedCount}
               onArchiveSession={onArchiveRuntimeSession}
               onDeleteSession={onDeleteRuntimeSession}
               onForkSession={onForkRuntimeSession}
+              onMoveSessionToGroup={(sessionId, groupKey) => {
+                void moveSessionToGroup(sessionId, groupKey);
+              }}
               onRefreshSessionStats={sessionStats.refresh}
               onReorderSessions={commitSessionOrder}
               onRestoreSession={onRestoreRuntimeSession}
+              onSelectSessionGroupingMode={setSessionGroupingMode}
               onSelectSessionOrderMode={setSessionOrderMode}
               onToggleArchivedSessions={() =>
                 setShowArchivedSessions((current) => !current)
@@ -436,6 +415,8 @@ export function WorkspaceSidebar({
               selectedRuntimeSessionUserId={selectedRuntimeSessionUserId}
               selectedThreadId={selectedThreadId}
               sessionDirectoryGroups={orderedSessionDirectoryGroups}
+              sessionGroupingMode={sessionGroupingMode}
+              sessionMoveError={sessionMoveError}
               sessionOrderMode={sessionOrderMode}
               sessionStats={sessionStats.stats}
               sessionStatsError={sessionStats.error}
