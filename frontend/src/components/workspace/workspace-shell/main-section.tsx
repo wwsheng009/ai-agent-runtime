@@ -26,7 +26,9 @@ import { WorkspaceShellTopbar } from "@/components/workspace/workspace-shell-top
 import { type WorkspaceDensity } from "@/core/settings";
 import { useFilePreview } from "@/hooks/workspace/use-file-preview";
 import { useBackgroundJobs } from "@/hooks/workspace/use-background-jobs";
+import { useComposerCommandExecutor } from "@/hooks/workspace/composer/use-composer-command-executor";
 import { useSessionAgents } from "@/hooks/use-session-agents";
+import { COMPOSER_BUILTIN_COMMANDS } from "@/lib/composer-builtin-commands";
 import { type ComposerReferenceGroup } from "@/lib/composer-menu";
 import { artifactReferenceGroup } from "@/lib/composer-references";
 import { cn } from "@/lib/utils";
@@ -50,6 +52,7 @@ type WorkspaceMainSectionProps = Pick<
   | "onModelChange"
   | "onProviderChange"
   | "onReasoningEffortChange"
+  | "onRenameRuntimeSession"
   | "onResolvePendingApproval"
   | "onRetryConnection"
   | "onPlanDecision"
@@ -116,6 +119,7 @@ export function WorkspaceMainSection({
   onModelChange,
   onProviderChange,
   onReasoningEffortChange,
+  onRenameRuntimeSession,
   onSelectBacktrackNavigationMessage,
   onStopResponding,
   onSubmit,
@@ -193,6 +197,22 @@ export function WorkspaceMainSection({
 
   // P2-1A：工具行文件路径的运行时预览（fs/read-file，只读）；未命中关联产物时兜底。
   const filePreview = useFilePreview();
+
+  // P2-7：composer `/` 命令执行器。命令清单是常量注册表，`/export` 与 `/rename`
+  // 分别复用轨迹导出与侧栏重命名的同一实现（结果只回填本地通知，不改会话状态）。
+  const commandExecutor = useComposerCommandExecutor({
+    onRenameSession: onRenameRuntimeSession,
+    sessionId: selectedThread.sessionId,
+  });
+  const commandResultNotice = commandExecutor.notice
+    ? {
+        text: t(
+          commandExecutor.notice.messageKey as never,
+          (commandExecutor.notice.values ?? {}) as never,
+        ) as unknown as string,
+        tone: commandExecutor.notice.tone,
+      }
+    : null;
 
   return (
     <section
@@ -410,6 +430,8 @@ export function WorkspaceMainSection({
                 />
                 <MessageComposer
                   attachments={composerAttachments}
+                  commands={COMPOSER_BUILTIN_COMMANDS}
+                  commandResultNotice={commandResultNotice}
                   density={density}
                   draft={draft}
                   focusKey={selectedThread.sessionId ?? selectedThread.id}
@@ -432,6 +454,8 @@ export function WorkspaceMainSection({
                   selectedProvider={selectedProvider}
                   selectedReasoningEffort={selectedReasoningEffort}
                   transport={selectedThread.transport}
+                  onCommand={commandExecutor.run}
+                  onDismissCommandResult={commandExecutor.dismissNotice}
                   onDraftChange={onDraftChange}
                   onStop={onStopResponding}
                   onSubmit={onSubmit}

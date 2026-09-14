@@ -308,6 +308,28 @@ export const enWorkspaceBase = {
       noExecutor: "command /{{name}} has no executor yet",
       dismiss: "dismiss notice",
     },
+    builtin: {
+      export: {
+        description: "export session trajectory as JSONL",
+        argumentHint: "[--redact]",
+        done: "exported {{count}} event(s) to {{filename}}",
+        doneRedacted: "exported {{count}} redacted event(s) to {{filename}}",
+        failed: "export failed: {{message}}",
+        noSession: "this session isn't registered yet — nothing to export",
+        unknownFlag: "unknown argument {{flag}} (only --redact is supported)",
+        unexpectedArgument:
+          "unexpected argument {{value}} (only --redact is supported)",
+        inProgress: "an export is already running",
+      },
+      rename: {
+        description: "rename the current session",
+        argumentHint: "<title>",
+        done: "session renamed to “{{title}}”",
+        failed: "rename failed: {{message}}",
+        needTitle: "provide a new title: /rename <title>",
+        unavailable: "there is no session to rename",
+      },
+    },
     references: {
       files: "files",
     },

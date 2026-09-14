@@ -259,6 +259,45 @@ describe("MessageComposer trigger menu", () => {
     ).not.toBeNull();
   });
 
+  it("clears the command line once the host claims the command", () => {
+    const onDraftChange = vi.fn();
+    const onCommand = vi.fn(() => true);
+    renderComposer({
+      commands: COMMANDS,
+      draft: "/export",
+      onCommand,
+      onDraftChange,
+    });
+
+    const submit = container.querySelector(
+      'button[title*="Ctrl/Cmd"]',
+    ) as HTMLButtonElement;
+    act(() => submit.click());
+
+    expect(onCommand).toHaveBeenCalledTimes(1);
+    expect(onDraftChange).toHaveBeenLastCalledWith("");
+  });
+
+  it("keeps the command line as a draft when the host does not claim it", () => {
+    const onDraftChange = vi.fn();
+    renderComposer({
+      commands: COMMANDS,
+      draft: "/export",
+      onCommand: () => false,
+      onDraftChange,
+    });
+
+    const submit = container.querySelector(
+      'button[title*="Ctrl/Cmd"]',
+    ) as HTMLButtonElement;
+    act(() => submit.click());
+
+    expect(onDraftChange).not.toHaveBeenCalled();
+    expect(
+      container.querySelector("[data-composer-command-notice='no-executor']"),
+    ).not.toBeNull();
+  });
+
   it("keeps plain prose flowing to the normal submit path", () => {
     const onSubmit = vi.fn();
     renderComposer({ draft: "hello world", onSubmit });

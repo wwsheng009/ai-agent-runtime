@@ -5,7 +5,12 @@ import {
   ComposerAttachmentRail,
   ComposerDropInvitation,
 } from "@/components/workspace/composer-attachment-rail";
+import {
+  ComposerCommandResultNoticeBar,
+  type ComposerCommandResultNotice,
+} from "@/components/workspace/composer-command-result-notice";
 import { ComposerMenu } from "@/components/workspace/composer-menu";
+import { ComposerStatusRow } from "@/components/workspace/composer-status-row";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { type Thread } from "@/data/mock";
@@ -26,6 +31,8 @@ type MessageComposerProps = {
   attachments: ComposerAttachmentsController;
   /** P1-4 子片 3：斜杠命令表（内置命令清单与执行器归 P2-7）。 */
   commands?: readonly ComposerCommandDefinition[];
+  /** P2-7：命令执行结果通知（宿主已本地化；错误 alert、成功 status）。 */
+  commandResultNotice?: ComposerCommandResultNotice | null;
   density: "comfortable" | "compact";
   draft: string;
   /** 会话身份；变化（切换会话/新建线程落地）时输入框回焦。 */
@@ -42,6 +49,7 @@ type MessageComposerProps = {
     source: "pick" | "submit",
   ) => boolean | void;
   onProviderChange: (value: string) => void;
+  onDismissCommandResult?: () => void;
   onReasoningEffortChange: (value: string) => void;
   providerOptions: string[];
   reasoningEffortDefault: string;
@@ -64,6 +72,7 @@ type MessageComposerProps = {
 export function MessageComposer({
   attachments,
   commands = NO_COMMANDS,
+  commandResultNotice = null,
   density,
   draft,
   focusKey,
@@ -72,6 +81,7 @@ export function MessageComposer({
   isResponding,
   modelOptions,
   onCommand,
+  onDismissCommandResult,
   onModelChange,
   onProviderChange,
   onReasoningEffortChange,
@@ -152,14 +162,6 @@ export function MessageComposer({
     onCommand,
   });
 
-  const showStatusRow =
-    transport === "error" ||
-    selectedArtifactCount > 0 ||
-    isResponding ||
-    hasPendingAttachments ||
-    attachments.rejectedCount > 0 ||
-    menu.commandLine ||
-    menu.notice !== null;
   const commandNoticeText = menu.notice
     ? menu.notice.kind === "unknown-command"
       ? t("composer.commands.unknown", { name: menu.notice.name })
@@ -213,7 +215,16 @@ export function MessageComposer({
       return;
     }
     if (classification.kind === "command") {
-      menu.dispatchCommand(classification.command, classification.args, "submit");
+      // P2-7：已认领的命令执行后清空命令行（结果回执由通知条承担，与菜单点选同语义）；
+      // 未认领的命令保留草稿，便于用户修正命令名后重试。
+      const handled = menu.dispatchCommand(
+        classification.command,
+        classification.args,
+        "submit",
+      );
+      if (handled) {
+        onDraftChange("");
+      }
       focusInput();
       return;
     }
@@ -228,58 +239,17 @@ export function MessageComposer({
 
   return (
     <div className="relative rounded-panel-lg border border-border [background:var(--workspace-composer-bg)] shadow-[0_8px_24px_rgba(0,0,0,0.18)]">
-      {showStatusRow ? (
-        <div
-          className={cn(
-            "flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 app-text-10 uppercase tracking-[0.12em] text-muted-foreground",
-            isCompact ? "py-1" : "py-1.5",
-          )}
-        >
-          {transport === "error" ? (
-            <span className="text-[#d8a66d]">{t("composer.transport.error")}</span>
-          ) : null}
-          {selectedArtifactCount > 0 ? (
-            <span>{t("composer.filesCount", { count: selectedArtifactCount })}</span>
-          ) : null}
-          {isResponding ? (
-            <span className="text-accent-secondary">
-              {t("composer.responseActive")}
-            </span>
-          ) : null}
-          {hasPendingAttachments ? (
-            <>
-              <span data-composer-attachments-pending role="status">
-                {t("composer.attachments.pendingCount", {
-                  count: attachments.attachments.length,
-                })}
-              </span>
-              <span
-                data-composer-attachments-blocked
-                className="text-[#d8a66d]"
-              >
-                {t("composer.attachments.uploadUnavailable")}
-              </span>
-            </>
-          ) : null}
-          {attachments.rejectedCount > 0 ? (
-            <button
-              type="button"
-              data-composer-attachments-rejected
-              onClick={attachments.acknowledgeRejections}
-              className="text-left text-[#d8a66d] underline-offset-2 hover:underline"
-            >
-              {t("composer.attachments.rejected", {
-                count: attachments.rejectedCount,
-              })}
-            </button>
-          ) : null}
-          {menu.commandLine ? (
-            <span data-composer-command-line className="text-accent-secondary">
-              {t("composer.commands.lineHint")}
-            </span>
-          ) : null}
-        </div>
-      ) : null}
+      <ComposerStatusRow
+        hasCommandNotice={menu.notice !== null}
+        isCommandLine={menu.commandLine}
+        isCompact={isCompact}
+        isResponding={isResponding}
+        onAcknowledgeRejections={attachments.acknowledgeRejections}
+        pendingAttachmentCount={attachments.attachments.length}
+        rejectedAttachmentCount={attachments.rejectedCount}
+        selectedArtifactCount={selectedArtifactCount}
+        transport={transport}
+      />
 
       <div>
         <ComposerAttachmentRail
@@ -287,6 +257,13 @@ export function MessageComposer({
           isCompact={isCompact}
           onRemove={attachments.removeAttachment}
         />
+        {commandResultNotice ? (
+          <ComposerCommandResultNoticeBar
+            dismissLabel={t("composer.commands.dismiss")}
+            notice={commandResultNotice}
+            onDismiss={onDismissCommandResult}
+          />
+        ) : null}
         {menu.notice ? (
           <div
             role="alert"

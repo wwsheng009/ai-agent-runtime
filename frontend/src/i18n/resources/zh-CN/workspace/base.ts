@@ -290,6 +290,27 @@ export const zhWorkspaceBase = {
       noExecutor: "命令 /{{name}} 尚未接入执行器",
       dismiss: "关闭提示",
     },
+    builtin: {
+      export: {
+        description: "导出会话轨迹为 JSONL",
+        argumentHint: "[--redact]",
+        done: "已导出 {{count}} 条事件（{{filename}}）",
+        doneRedacted: "已脱敏导出 {{count}} 条事件（{{filename}}）",
+        failed: "导出失败：{{message}}",
+        noSession: "当前会话尚未登记，暂无可导出的轨迹",
+        unknownFlag: "不认识参数 {{flag}}（仅支持 --redact）",
+        unexpectedArgument: "多余的参数 {{value}}（仅支持 --redact）",
+        inProgress: "导出已在进行中",
+      },
+      rename: {
+        description: "重命名当前会话",
+        argumentHint: "<标题>",
+        done: "会话已重命名为「{{title}}」",
+        failed: "重命名失败：{{message}}",
+        needTitle: "请给出新标题：/rename <标题>",
+        unavailable: "当前没有可重命名的会话",
+      },
+    },
     references: {
       files: "文件",
     },

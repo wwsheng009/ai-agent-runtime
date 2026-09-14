@@ -26,15 +26,9 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 
-import { fetchSessionRuntimeEvents } from "@/api/runtime/sessions";
 import type { TrajectoryStore } from "@/hooks/workspace/use-trajectory-snapshot";
 import { useTrajectorySnapshot } from "@/hooks/workspace/use-trajectory-snapshot";
-import {
-  buildTrajectoryExportFilename,
-  downloadTrajectoryJsonl,
-  eventsToTrajectoryJsonl,
-} from "@/lib/trajectory/export";
-import { nextRecoveryAfter, TRAJECTORY_RECOVERY_PAGE_SIZE } from "@/lib/trajectory/recovery";
+import { exportSessionTrajectoryJsonl } from "@/lib/trajectory/export-session";
 import type { TrajectoryItem } from "@/lib/trajectory/types";
 import { cn } from "@/lib/utils";
 
@@ -206,29 +200,9 @@ export function TrajectoryView({
     }
     setExporting(true);
     try {
-      const events: Awaited<
-        ReturnType<typeof fetchSessionRuntimeEvents>
-      >["events"] = [];
-      let after = 0;
-      for (;;) {
-        const page = await fetchSessionRuntimeEvents(sessionId, {
-          after,
-          limit: TRAJECTORY_RECOVERY_PAGE_SIZE,
-        });
-        events.push(...page.events);
-        if (
-          page.events.length === 0 ||
-          page.events.length < TRAJECTORY_RECOVERY_PAGE_SIZE
-        ) {
-          break;
-        }
-        after = nextRecoveryAfter(page.events, after);
-      }
-      const jsonl = eventsToTrajectoryJsonl(events, { redact: redactExport });
-      downloadTrajectoryJsonl(
-        jsonl,
-        buildTrajectoryExportFilename(sessionId, undefined, redactExport),
-      );
+      // P2-7：分页拉取 + JSONL + 下载抽到 `lib/trajectory/export-session`，
+      // 与 composer `/export` 命令共用同一实现（本函数只负责按钮的 busy 态）。
+      await exportSessionTrajectoryJsonl(sessionId, { redact: redactExport });
     } finally {
       setExporting(false);
     }

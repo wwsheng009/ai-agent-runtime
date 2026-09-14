@@ -323,6 +323,7 @@ export function WorkspaceShell({
           onModelChange={onModelChange}
           onProviderChange={onProviderChange}
           onReasoningEffortChange={onReasoningEffortChange}
+          onRenameRuntimeSession={onRenameRuntimeSession}
           onResolvePendingApproval={onResolvePendingApproval}
           onRetryConnection={onRetryConnection}
           onSelectBacktrackNavigationMessage={onSelectBacktrackNavigationMessage}
