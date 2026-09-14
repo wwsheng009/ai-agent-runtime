@@ -22,6 +22,11 @@
 + PR-4 落点 A（单轮预算单一事实源 + 80% 软着陆 + token 硬边界优雅收尾）+ 落点 B（软着陆水位在 TUI 状态行可见）
 + 落点 C（turn 生命周期事件指标 + 主 chat `--budget-tokens` 贯通）**
 
+**后续增补（2026-09-14，现场二次取证，见 §8.6）**：`assistant.reasoning`/`assistant.delta`
+总线别名归入流式合并（`assistantStreamAliasType`），终稿只取代文本增量、同 turn/stream 的
+reasoning 尾部有界先行冲刷（`flushStreamTailBoundedLocked`）；落点
+`chat_runtime_events.go` + `chat_runtime_events_stream_coalesce_test.go`。
+
 PR-0 / PR-1：
 
 | 落点 | 内容 |
@@ -462,8 +467,8 @@ func classifyChatRuntimeEvent(eventType string) chatEventClass
 |---|---|---|
 | critical | `subagent.*` 终态（沿用 `isCriticalSubagentLifecycleEvent`，:920-935）、**`assistant_message`（assistant 流终稿）**、`session.end`、`run.end`、`tool_finished`/`tool_failed`、`approval_requested`/`approval_resolved`、`question_asked`/`question_answered`、`compact_failed` | 丢失会造成控制面状态缺失或不可恢复的交互断链；`assistant_message` 一旦被丢，其已取代的增量也已丢弃（§4.1），形成内容真丢失 |
 | coalescible | `usage.updated`、`dynamic_status`、`tool.progress`、`cache_request_finished`、`context.reconciled`、`checkpoint` 类周期性指标 | 天然 latest-wins；高频且历史值无独立语义 |
-| ordered | `reasoning`、`tool_started`、`compact_started/completed/skipped`、`job.*`、`mailbox_received`、其它未分类 | 保留顺序语义，溢出时可丢但需计数 |
-| stream | `assistant_delta`、`reasoning_delta`（现有 `isMergeableStreamEvent`） | 不变 |
+| ordered | `tool_started`、`compact_started/completed/skipped`、`job.*`、`mailbox_received`、其它未分类 | 保留顺序语义，溢出时可丢但需计数 |
+| stream | `assistant_delta`、`reasoning_delta`（现有 `isMergeableStreamEvent`），含总线双拼写别名 `assistant.reasoning`/`assistant.delta`（§8.6） | 不变；别名漏归类会让高频流式事件降级 ordered |
 
 **兼容**：`isCriticalSubagentLifecycleEvent` 保留函数名与语义，仅在 `classifyChatRuntimeEvent`
 内部调用，避免大面积测试改写。
@@ -993,6 +998,54 @@ EXIT 0（`go build ./...` 需 `internal/webui` 的 dist 产物，worktree 中缺
 - §6.5 P2 项（web SSE 丢帧暴露、稳态 watchdog、投影失效归因分类、`PostDeferred` 高水位降级）：
   未实现，另行排期（§0 已按此口径标注）；
 - §10.1 待决策第 4/5/6 条与 §10.2 未验证假设：保持开放。
+
+### 8.6 现场二次取证：reasoning 别名归流与终态清理边界（2026-09-14）
+
+**取证对象**：活动会话 `session_20260913210527_7mj5o08M`（debug 平面 `http://127.0.0.1:58227`），
+按用户约束**未重启进程**，因此下表计数是该会话**修复前**二进制的累计值，只用于定位根因，
+不得当作修复后回归指标。
+
+| 指标 | 值（修复前二进制） | 判读 |
+|---|---|---|
+| `Dropped By Class` | `coalescible=228 ordered=52255` | 队列压力几乎全部来自 ordered 家族 |
+| `Dropped By Type` | `assistant.reasoning=52130`（占 ordered 丢弃 99.8%） | 本地 ReAct loop 的推理流在 ordered 家族被整批丢弃 |
+| `Event Log` | `recorded=665 → 3376`，`failures=14783` 不再增长 | `.events` 目录惰性创建修复生效，历史失败计数保留 |
+| `Event Journal Drops` / `Delivery Journal Drops` | 5912 / 1222 | 渲染侧账本丢弃，仍在 §6.5 P2 排期内 |
+
+**根因**：`internal/agent/loop.go:1711`（流式 append，`format=stream_delta`）与 `:2094`
+（步内 `mode=replace`）发出的是点分隔别名 `assistant.reasoning`，而
+`isMergeableStreamEvent`、`streamEventText`、`mergeStreamEvents` 只认下划线常量
+（`assistant_reasoning`/`assistant_delta`）。别名因此降级为 ordered，在 deferred 队列压力下
+被整体丢弃；而只把别名加进 `isMergeableStreamEvent` 而不补齐文本提取与合并分支，合并路径
+取不到文本会把增量整条吞掉（半修复态）。
+
+**修复（三处，均带回归测试）**：
+
+1. `assistantStreamAliasType` 统一归一化总线别名，`isMergeableStreamEvent`/`streamEventText`/
+   `mergeStreamEvents` 共用，消除"归了类但提不到文本"的半修复态；
+2. `dropPendingStreamsForTerminal` 只清理 assistant **文本**增量（`isAssistantTextStreamEvent`）：
+   终稿快照取代的是自己的文本流，reasoning 属于另一个内容块，不受终稿取代；
+3. 清理后只把**同一 turn/stream** 的 reasoning 尾部按 `chatStreamFlushBudget` 有界冲刷
+   （`flushStreamTailBoundedLocked`），保证推理单元格仍先于 assistant 单元格落盘；其它
+   turn/stream 的积压保持原语义留在 pending，不被本终态的预算代做时序决定
+   （回归守卫：`TestAssistantTerminalDropsStalePendingAndEnqueues`、
+   `TestChatRuntimeEvents_AssistantTerminalKeepsLateReasoningDeltas`）。
+
+**A/B 证据（本机 worktree）**：
+
+| 变体 | `TestLateReasoningAfterSuccessfulRequestBoundaryPrecedesAssistantFinal` |
+|---|---|
+| 原始（无别名归流） | `ok 0.314s` |
+| 仅加别名、不补清理边界（半修复） | `FAIL 0.368s`（推理单元格消失，`cells=[assistant]`） |
+| 完整修复（本批） | `ok`，并新增 `TestChatRuntimeEvents_AssistantTerminalKeepsLateReasoningDeltas` |
+
+**过程勘误（避免把半修复读成已完成）**：第一版修复把 pending 全量按预算冲刷，导致
+`TestAssistantTerminalDropsStalePendingAndEnqueues` 失败（终端替**别的 stream** 做了入队决定，
+`pending after terminal = count 0, want only stream-2`）；收窄为"同 turn/stream 的 reasoning 才冲刷"
+后全绿。该用例是这条边界的既有守卫，本次未改写其断言。
+
+**边界（勿读作已完成）**：活动进程未重启，修复后的现场 30 分钟观测窗口未复测（§8.3 表格保持待回填）；
+Web/TUI E2E 未复跑；`Event Journal Drops` 未收敛。
 
 ---
 

@@ -146,6 +146,7 @@ func TestChatLoggerRotateSessionStartsFreshArtifactLayout(t *testing.T) {
 		logger.DebugLogPath(),
 		logger.GeneratedImagesDir(),
 		logger.ExportsDir(),
+		logger.RuntimeEventsDir(),
 	} {
 		info, statErr := os.Stat(path)
 		require.NoError(t, statErr, path)

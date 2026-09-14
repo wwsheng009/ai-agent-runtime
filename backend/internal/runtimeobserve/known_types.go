@@ -25,7 +25,14 @@ import "strings"
 //  4. 总线上的真实别名（无具名常量，但有生产 emit 或等价分支证据）：
 //     tool.completed（internal/agent/loop.go:2136 等；cmd/aicli/commands/agent_stdio_bridge.go:224
 //     与 tool_finished 等价）、tool.requested（internal/agent/loop.go emitRuntimeEvent）、
-//     tool.reduced（internal/events/bus.go:1088 统计；agent emitRuntimeEvent）。
+//     tool.reduced（internal/events/bus.go:1088 统计；agent emitRuntimeEvent）、
+//     tool.denied（internal/agent/loop.go:2828）、
+//     tool.malformed_arguments.guardrail_hit / tool.malformed_arguments.recovered
+//     （internal/agent/loop.go:1285/:1354）、
+//     assistant.delta（internal/chat/events.go:8 的点分隔等价形；
+//     cmd/aicli/commands/agent_stdio_bridge.go:245 与 encoder.go:2466 均按等价分支处理）。
+//  5. 宿主侧持久化事件（internal/chat/actor.go 的中途落库上报）：
+//     session.checkpoint_persist_error（actor.go publishSessionCheckpointFailure）。
 //
 // 匹配规则与 Projector 保持一致：TrimSpace 后精确匹配；仅大小写不同按未知处理，
 // 以保留异常语义（见 normalizeEventType）。
@@ -112,9 +119,18 @@ func buildKnownEventTypes() map[string]bool {
 
 	// 来源 4：总线真实别名（见文件头说明）。
 	add(
-		"tool.completed", // internal/agent/loop.go:2136 等；agent_stdio_bridge.go:224 ≡ tool_finished
-		"tool.requested", // internal/agent/loop.go emitRuntimeEvent
-		"tool.reduced",   // internal/events/bus.go:1088；agent emitRuntimeEvent
+		"tool.completed",                         // internal/agent/loop.go:2136 等；agent_stdio_bridge.go:224 ≡ tool_finished
+		"tool.requested",                         // internal/agent/loop.go emitRuntimeEvent
+		"tool.reduced",                           // internal/events/bus.go:1088；agent emitRuntimeEvent
+		"tool.denied",                            // internal/agent/loop.go:2828
+		"tool.malformed_arguments.guardrail_hit", // internal/agent/loop.go:1285
+		"tool.malformed_arguments.recovered",     // internal/agent/loop.go:1354
+		"assistant.delta",                        // assistant_delta 的点分隔等价形（总线上两种都在用）
+	)
+
+	// 来源 5：宿主侧持久化事件（见文件头说明）。
+	add(
+		"session.checkpoint_persist_error", // internal/chat/actor.go publishSessionCheckpointFailure
 	)
 
 	return out
@@ -135,7 +151,7 @@ func isKnownEventType(eventType string) bool {
 }
 
 // maxFilteredByTypeEntries 是 filtered_by_type 的内部计数上界（top-N 兜底）。
-// 目录是封闭集合（本文来源，62 项），正常永远触发不到；此上限只作为
+// 目录是封闭集合（本文来源，67 项），正常永远触发不到；此上限只作为
 // "目录被误扩成通配/前缀匹配"时的内存与快照体积保险，超出部分记入溢出桶。
 // 不变量由 TestKnownEventTypeCatalogInvariants 断言。
 const maxFilteredByTypeEntries = 128

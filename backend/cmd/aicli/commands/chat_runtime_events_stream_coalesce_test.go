@@ -638,3 +638,95 @@ func TestStreamingRuntimeEventPostDropsAfterBoundedWaitWhenMailboxStalled(t *tes
 		t.Fatalf("streaming post waited %v; expected bounded drop", elapsed)
 	}
 }
+
+// TestChatRuntimeEvents_AssistantTerminalKeepsLateReasoningDeltas 锁定
+// late-reasoning 语义：assistant_message 只吞并自己的文本增量，reasoning 增量
+// 属于另一个内容块，必须在终态之前按序送达。否则把别名 reasoning 归入流式路径
+// 后，终态会把推理增量一并清空，推理单元格整块消失（现场报的
+// "late reasoning/final semantic order" 断言即为此语义）。
+func TestChatRuntimeEvents_AssistantTerminalKeepsLateReasoningDeltas(t *testing.T) {
+	const sessionID = "coalesce-terminal-reasoning"
+	const reasoningText = "late reasoning before final"
+	bridge := newClassifyTestBridge(t, sessionID, chatEventClassifyEnforce)
+	// 消费者停摆（队列已满）：文本增量与推理增量都进入合并积压。
+	bridge.Handle(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantDelta,
+		SessionID: sessionID,
+		Payload: map[string]interface{}{
+			"turn_id": "turn-1", "stream_id": "stream-1", "sequence": 1, "delta": "partial answer",
+		},
+	})
+	bridge.Handle(runtimeevents.Event{
+		Type:      "assistant.reasoning",
+		SessionID: sessionID,
+		Payload: map[string]interface{}{
+			"turn_id": "turn-1", "stream_id": "stream-1", "sequence": 2, "mode": "append", "step": 1,
+			"reasoning": map[string]interface{}{"format": "stream_delta", "summary": reasoningText, "streamable": true},
+		},
+	})
+	// 另一个 stream 的推理积压不属于本终态：既不能被终态吞掉，也不能被本终态的
+	// 冲刷预算强行入队（否则等于用一个 turn 的终稿替别的 turn 做时序决定）。
+	bridge.Handle(runtimeevents.Event{
+		Type:      "assistant.reasoning",
+		SessionID: sessionID,
+		Payload: map[string]interface{}{
+			"turn_id": "turn-1", "stream_id": "stream-2", "sequence": 1, "mode": "append", "step": 2,
+			"reasoning": map[string]interface{}{"format": "stream_delta", "summary": "other stream reasoning", "streamable": true},
+		},
+	})
+	bridge.streamMu.Lock()
+	pending := len(bridge.pendingStreams)
+	coalesced := ""
+	if pending == 3 {
+		coalesced = streamEventText(bridge.pendingStreams[1].event)
+	}
+	bridge.streamMu.Unlock()
+	if pending != 3 {
+		t.Fatalf("pending coalesced streams = %d, want 3 (text + own reasoning + other stream reasoning)", pending)
+	}
+	if coalesced != reasoningText {
+		t.Fatalf("coalesced reasoning text = %q, want %q (bus alias must be normalized)", coalesced, reasoningText)
+	}
+
+	// 终态前腾出一个槽位：队列仍满时保留的推理尾部会按既有的有界降级丢弃，
+	// 那是 stall 语义，不在本用例范围内。
+	<-bridge.eventQueue
+
+	bridge.Handle(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantMessage,
+		SessionID: sessionID,
+		Payload: map[string]interface{}{
+			"turn_id": "turn-1", "stream_id": "stream-1", "content": "full final answer",
+		},
+	})
+
+	bridge.streamMu.Lock()
+	remaining := len(bridge.pendingStreams)
+	otherStream := ""
+	if remaining == 1 {
+		otherStream = streamEventText(bridge.pendingStreams[0].event)
+	}
+	bridge.streamMu.Unlock()
+	if remaining != 1 || otherStream != "other stream reasoning" {
+		t.Fatalf("pending coalesced streams after terminal = %d (%q), want only the other stream's reasoning", remaining, otherStream)
+	}
+
+	order := make([]string, 0, 2)
+	texts := make(map[string]string)
+	drainRuntimeEvents(t, bridge, 10*time.Second, func() bool { return len(order) >= 2 }, func(queued chatRuntimeQueuedEvent) {
+		switch queued.event.Type {
+		case "assistant.reasoning", runtimechat.EventAssistantMessage:
+			order = append(order, queued.event.Type)
+			texts[queued.event.Type] = streamEventText(queued.event)
+		}
+	})
+	if len(order) != 2 || order[0] != "assistant.reasoning" || order[1] != runtimechat.EventAssistantMessage {
+		t.Fatalf("delivery order = %v, want [assistant.reasoning assistant_message]", order)
+	}
+	if got := texts["assistant.reasoning"]; got != reasoningText {
+		t.Fatalf("delivered reasoning text = %q, want %q", got, reasoningText)
+	}
+	if got := texts[runtimechat.EventAssistantMessage]; got != "" {
+		t.Fatalf("terminal assistant text = %q, want empty (not a stream event)", got)
+	}
+}

@@ -195,6 +195,7 @@ type chatRuntimeEventBridge struct {
 	eventLogCount            uint64 // 已写入事件数
 	eventLogReplayed         uint64 // 启动时重放事件数
 	eventLogFailures         uint64 // 写入/重放失败次数
+	eventLogDirEnsured       bool   // .events 目录已确保存在（惰性 MkdirAll）
 
 	// 渲染层双跑文本对照（切片 9）：coordinator 每个完整块提交后调用
 	// checkTextParity，把旧路径实际写出的行序列与 Scene 快照 RenderText
@@ -1792,13 +1793,47 @@ func (b *chatRuntimeEventBridge) deferredDrainTimeout() time.Duration {
 // isMergeableStreamEvent reports whether the event carries monotonic streaming
 // text that can be coalesced without loss: later deltas only extend (or, for
 // snapshot-style providers, replace) earlier ones.
+//
+// assistantStreamAliasType 先把总线别名归一化：本地 ReAct loop 实际发出的是
+// "assistant.reasoning"/"assistant.delta"（见 internal/agent/loop.go:1711 与
+// encoder 的别名分支），而 streamEventText/mergeStreamEvents 按常量分支。
+// 不归一化时别名事件即使进了流式路径也会取不到文本，合并时整条丢失。
+func assistantStreamAliasType(eventType string) string {
+	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	case "assistant.reasoning":
+		return runtimechat.EventAssistantReasoning
+	case "assistant.delta":
+		return runtimechat.EventAssistantDelta
+	default:
+		return strings.ToLower(strings.TrimSpace(eventType))
+	}
+}
+
 func isMergeableStreamEvent(eventType string) bool {
-	switch eventType {
+	switch assistantStreamAliasType(eventType) {
 	case runtimechat.EventAssistantReasoning, runtimechat.EventAssistantDelta:
+		// 点分隔别名同样按流式合并：漏掉别名会把高频流式事件降级为
+		// ordered，在 deferred 队列压力下被整体丢弃（实测单会话
+		// assistant.reasoning 丢弃 3.9 万条）。
 		return true
 	default:
 		return false
 	}
+}
+
+// isAssistantTextStreamEvent reports whether a stream event carries the
+// assistant's visible answer text. Only this family is superseded by the
+// terminal assistant_message snapshot: reasoning deltas belong to a separate
+// content block, so the snapshot must not purge them.
+func isAssistantTextStreamEvent(eventType string) bool {
+	return assistantStreamAliasType(eventType) == runtimechat.EventAssistantDelta
+}
+
+// isReasoningStreamEvent reports whether a stream event carries a reasoning
+// block. Reasoning renders as its own cell, so it is never purged by the
+// assistant terminal snapshot (see dropPendingStreamsForTerminal).
+func isReasoningStreamEvent(eventType string) bool {
+	return assistantStreamAliasType(eventType) == runtimechat.EventAssistantReasoning
 }
 
 // isAssistantStreamTerminalEvent reports whether the event is the authoritative
@@ -2003,33 +2038,67 @@ func (b *chatRuntimeEventBridge) tryFlushPendingLocked() {
 	}
 }
 
-// dropPendingStreamsForTerminal drops coalesced deltas superseded by an
-// assistant_message. The terminal snapshot carries the full content, so a
-// stalled UI must not wait behind deltas that would only be thrown away.
+// dropPendingStreamsForTerminal drops coalesced assistant *text* deltas
+// superseded by an assistant_message. The terminal snapshot carries the full
+// answer, so a stalled UI must not wait behind deltas that would only be
+// thrown away. Reasoning deltas of the same turn/stream are a separate content
+// block and are NOT superseded: they are flushed (bounded) ahead of the
+// terminal instead, so late reasoning (arriving after llm.request.finished)
+// still renders its cell before the assistant cell. Pending deltas of *other*
+// turns/streams keep their previous semantics: they stay queued for their own
+// terminal rather than being force-flushed by this one.
 func (b *chatRuntimeEventBridge) dropPendingStreamsForTerminal(event runtimeevents.Event) {
 	b.streamMu.Lock()
 	defer b.streamMu.Unlock()
 	turnID, streamID := assistantEventIdentity(event)
-	if turnID == "" && streamID == "" {
-		b.dropAllPendingStreamsLocked("assistant terminal supersedes coalesced stream")
-		return
-	}
+	unidentified := turnID == "" && streamID == ""
 	kept := b.pendingStreams[:0]
+	var reasoningTail []chatRuntimeQueuedEvent
 	dropped := int64(0)
 	for _, q := range b.pendingStreams {
 		pTurnID, pStreamID := assistantEventIdentity(q.event)
-		if pTurnID == turnID && (streamID == "" || pStreamID == streamID) {
+		sameStream := unidentified || (pTurnID == turnID && (streamID == "" || pStreamID == streamID))
+		switch {
+		case sameStream && isAssistantTextStreamEvent(q.event.Type):
 			b.logLateRuntimeEvent(q.event, "assistant terminal superseded stale coalesced stream")
 			dropped += q.size
-			continue
+		case sameStream && isReasoningStreamEvent(q.event.Type):
+			// 终稿快照取代的是自己的文本流；reasoning 属于另一个内容块，
+			// 必须先于终态送达渲染层（顺序断言见 late-reasoning 用例）。
+			reasoningTail = append(reasoningTail, q)
+		default:
+			kept = append(kept, q)
 		}
-		kept = append(kept, q)
 	}
 	b.pendingStreams = kept
 	if dropped > 0 {
 		b.pendingStreamsBytes -= dropped
 		if b.pendingStreamsBytes < 0 {
 			b.pendingStreamsBytes = 0
+		}
+	}
+	if len(reasoningTail) > 0 {
+		b.flushStreamTailBoundedLocked(reasoningTail, chatStreamFlushBudget)
+	}
+}
+
+// flushStreamTailBoundedLocked delivers the given coalesced entries in order,
+// waiting at most budget for bounded-queue capacity. Entries that do not fit
+// before the deadline are dropped (and logged): the caller keeps the rest of
+// pendingStreams untouched, so a stalled UI never loses another turn's backlog
+// to this flush. Caller holds streamMu.
+func (b *chatRuntimeEventBridge) flushStreamTailBoundedLocked(entries []chatRuntimeQueuedEvent, budget time.Duration) {
+	if budget <= 0 {
+		return
+	}
+	deadline := time.Now().Add(budget)
+	for i := range entries {
+		for !b.trySendStreamEvent(&entries[i]) {
+			if time.Now().After(deadline) {
+				b.logLateRuntimeEvent(entries[i].event, "coalesced stream tail flush budget exceeded; delta dropped")
+				return
+			}
+			time.Sleep(time.Millisecond)
 		}
 	}
 }
@@ -2146,7 +2215,7 @@ func mergeStreamEvents(a, b runtimeevents.Event) runtimeevents.Event {
 	if streamEventText(a) == "" {
 		return b
 	}
-	switch a.Type {
+	switch assistantStreamAliasType(a.Type) {
 	case runtimechat.EventAssistantReasoning:
 		aSeq, aHasSeq := assistantEventSequence(a)
 		bSeq, bHasSeq := assistantEventSequence(b)
@@ -2204,7 +2273,7 @@ func mergeStreamEvents(a, b runtimeevents.Event) runtimeevents.Event {
 // Unlike payloadStringValue it does NOT trim: leading whitespace is part of
 // the delta payload and must survive coalescing byte-for-byte.
 func streamEventText(event runtimeevents.Event) string {
-	switch event.Type {
+	switch assistantStreamAliasType(event.Type) {
 	case runtimechat.EventAssistantReasoning:
 		if s, ok := event.Payload["text"].(string); ok {
 			return s
@@ -2954,6 +3023,17 @@ func (b *chatRuntimeEventBridge) appendEventLogLine(line []byte) {
 	}
 	b.eventLogMu.Lock()
 	defer b.eventLogMu.Unlock()
+	// O_CREATE 只创建文件、不会创建 <session-id>.events 目录：目录缺失时
+	// 每次 append 都以 ENOENT 失败并被静默计入 eventLogFailures，导致
+	// runtime-events.jsonl 整会话缺失、/resume 无法重放重建渲染模型。
+	// 旧会话（启动早于 ensureSessionArtifactLayout 修复）也依赖这里的惰性创建。
+	if !b.eventLogDirEnsured {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			b.eventLogFailures++
+			return
+		}
+		b.eventLogDirEnsured = true
+	}
 	// 每次 open→append→close：不持有长生命周期句柄，避免文件占用
 	// （事件频率低，open/close 开销可忽略）。
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)

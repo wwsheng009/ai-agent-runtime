@@ -416,6 +416,42 @@ func TestKnownEventTypeCatalogInvariants(t *testing.T) {
 	}
 }
 
+// TestKnownEventTypeCatalogCoversLocalLoopEmits 回归：本地 ReAct loop 实际
+// emit 的事件名（含点分隔别名）必须命中目录，否则会被计入
+// unknown_events_dropped，把"目录缺口"伪装成异常语义（实测单会话 254 条）。
+func TestKnownEventTypeCatalogCoversLocalLoopEmits(t *testing.T) {
+	for _, eventType := range []string{
+		"assistant.reasoning",                    // internal/agent/loop.go:1711/:2094
+		"assistant_delta",                        // internal/agent/loop.go:1683
+		"assistant.delta",                        // 点分隔等价形（agent_stdio_bridge.go:245）
+		"tool.requested",                         // internal/agent/loop.go:2143
+		"tool.completed",                         // internal/agent/loop.go:2295 等
+		"tool.denied",                            // internal/agent/loop.go:2828
+		"tool.reduced",                           // internal/agent/loop.go:2904
+		"tool.malformed_arguments.guardrail_hit", // internal/agent/loop.go:1285
+		"tool.malformed_arguments.recovered",     // internal/agent/loop.go:1354
+		"llm.request.started",                    // internal/agent/loop.go:1858
+		"llm.request.finished",                   // internal/agent/loop.go:1964/:2056
+	} {
+		if !isKnownEventType(eventType) {
+			t.Fatalf("local loop emit %q missing from known-type catalog; it would be counted as unknown_events_dropped", eventType)
+		}
+	}
+}
+
+// TestKnownEventTypeCatalogCoversHostCheckpointEvents 回归：长 turn 中途落库的
+// 宿主上报事件必须命中目录，否则落库失败会被统计成 unknown_events_dropped，
+// 把真实故障伪装成"目录缺口"。
+func TestKnownEventTypeCatalogCoversHostCheckpointEvents(t *testing.T) {
+	for _, eventType := range []string{
+		"session.checkpoint_persist_error", // internal/chat/actor.go publishSessionCheckpointFailure
+	} {
+		if !isKnownEventType(eventType) {
+			t.Fatalf("host checkpoint emit %q missing from known-type catalog; it would be counted as unknown_events_dropped", eventType)
+		}
+	}
+}
+
 // waitForRuntimeSummary 轮询 Stats 直到 collector 异步消费完成（或超时）。
 func waitForRuntimeSummary(t *testing.T, c *Collector, ready func(RuntimeSummary) bool) RuntimeSummary {
 	t.Helper()

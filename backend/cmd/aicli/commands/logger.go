@@ -212,6 +212,7 @@ func (cl *ChatLogger) ensureSessionArtifactLayout() error {
 		cl.LocalShellArtifactDir(),
 		cl.GeneratedImagesDir(),
 		cl.ExportsDir(),
+		cl.RuntimeEventsDir(),
 	} {
 		if strings.TrimSpace(subDir) == "" {
 			continue

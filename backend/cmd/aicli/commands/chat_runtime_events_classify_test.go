@@ -100,7 +100,12 @@ func TestClassifyChatRuntimeEventMapsDeliveryClasses(t *testing.T) {
 		require.Equal(t, eventClassOrdered, classifyChatRuntimeEvent(eventType), eventType)
 	}
 
-	for _, eventType := range []string{runtimechat.EventAssistantDelta, runtimechat.EventAssistantReasoning} {
+	for _, eventType := range []string{
+		runtimechat.EventAssistantDelta, runtimechat.EventAssistantReasoning,
+		// 本地 ReAct loop 在总线上发的是点分隔别名，必须与下划线常量同类
+		// （否则降级 ordered，在高频流下被 deferred 队列整批丢弃）。
+		"assistant.delta", "assistant.reasoning",
+	} {
 		require.Equal(t, eventClassStream, classifyChatRuntimeEvent(eventType), eventType)
 	}
 	// 大小写与空白容错：总线上出现过大小写混用的类型。
