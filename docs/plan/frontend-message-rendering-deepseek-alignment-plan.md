@@ -680,12 +680,12 @@ npm run test:e2e      # playwright
 
 | 批次 | 提交 | 日期 | 门禁结果 | 实测对比（改造前 → 改造后） |
 |---|---|---|---|---|
-| A | 工作区（未提交） | 2026-09-14 | 四件套全绿（见下「门禁口径」） | 卡片外壳（渐变底 + `1px` 边框 + 5 槽阴影 + 头像 chip + 作者行）→ **扁平行容器**（无 bg / border / shadow）；内容列定宽 `832` → `max-w-[var(--app-chat-content-width)]` + `gap-4`（默认解析 `748`，clamp 见 C1）；用户消息 → 右对齐气泡 `min(内容宽×0.702, 82%)` / `rounded-[22px]` / `px-4 py-2.5` |
-| B（工具执行渲染部分） | 工作区（未提交） | 2026-09-14 | vitest 178 文件 / 1301 用例通过；`npm run lint` OK（eslint 0 error + i18n 644 文件 / 备份 / 行数 / 字面量四道脚本）；`tsc -b && vite build` OK；`e2e/workspace-chat.spec.ts` 9 通过（含 G2 折叠→展开） | 折叠态工具行：**卡片 + 结果常驻可见** → **24px 单行**（图标 + 工具名 + 分隔点 + 富摘要 + 状态词缀），结果/输入/错误收进展开面板；失败态：整行红底 → 图标 + 摘要尾缀表达，**行高不随错误内容增长** |
-| C | 工作区（未提交） | 2026-09-14 | 四件套全绿（见下「门禁口径」） | 卡内 `turnUsage.summary` 文本行 → 独立 `turn-tail-row`（28px 动作组 + hover 统计；无 usage 数据整行隐藏，不显示 0）；用户动作区（编辑/回溯/复制）收进气泡下方动作区，按钮 28×28 圆图标 + `aria-label`，时间戳 `group-hover` 显现（触屏 `@media (hover: none)` 默认可见，不改变布局） |
-| D | 工作区（未提交） | 2026-09-14 | 四件套全绿（见下「门禁口径」） | 打字机接线（`hooks/workspace/use-typewriter.ts` + 测试）→ **删除**，`StreamingMarkdown` 直连 Markdown 渲染：显示内容不再滞后截断，块不因前缀变化 remount；正文块间距 → 容器 flex `gap`（段落 margin 归零）；行内 code / 代码块按 D2 标定（去边框、底/条分色） |
-| E | 工作区（未提交） | 2026-09-14 | 四件套全绿 + `verify-message-tokens`（31 文件 / 0 命中）、`verify-max-lines`（892 文件，最大 499）、i18n（644 文件 / 0 违规） | `projectChatFlow` 与 `data-chat-flow-kind/-key/-anchor-key` 锚点落地（覆盖 §8.4 全部 kind，未知 kind → `fallback` 行可读降级）；消息组件字面色值 / 内联渐变**清零**（脚本门禁化）；发丝口径注释按 §13 C3 修正为「dpr=1 等价、F3 为唯一 0.5px 例外」 |
-| F | 工作区（未提交） | 2026-09-14 | 四件套全绿（含 e2e `design-tokens` / `G1` / `G2`） | F1 字号轴：`--app-chat-font-size: 15px` + delta，行高/行高盒一律 `calc(24px + delta)`（无硬编码 16/28）；F2 宽度轴 `clamp(680px, 64cqw, 920px)` + 三处派生（转录列 W / 停靠卡 W−32 / 输入卡 W+32）；F3 回合级统计折叠行（33px = 24 文本 + 8 下内距 + 0.5px 底边，收起时过程行不渲染、流式恒不折叠）；F4 `system-prompt` / `steering` / `fallback` 独立分支；F5 `notice` 单行收敛（turn-error / turn-max-tokens，行高不随内容增长）；F6 §13.3 补测与回填完成 |
+| A | `9bd162e8` | 2026-09-14 | 四件套全绿（见下「门禁口径」） | 卡片外壳（渐变底 + `1px` 边框 + 5 槽阴影 + 头像 chip + 作者行）→ **扁平行容器**（无 bg / border / shadow）；内容列定宽 `832` → `max-w-[var(--app-chat-content-width)]` + `gap-4`（默认解析 `748`，clamp 见 C1）；用户消息 → 右对齐气泡 `min(内容宽×0.702, 82%)` / `rounded-[22px]` / `px-4 py-2.5` |
+| B（工具执行渲染部分） | `9bd162e8` | 2026-09-14 | vitest 178 文件 / 1301 用例通过；`npm run lint` OK（eslint 0 error + i18n 644 文件 / 备份 / 行数 / 字面量四道脚本）；`tsc -b && vite build` OK；`e2e/workspace-chat.spec.ts` 9 通过（含 G2 折叠→展开） | 折叠态工具行：**卡片 + 结果常驻可见** → **24px 单行**（图标 + 工具名 + 分隔点 + 富摘要 + 状态词缀），结果/输入/错误收进展开面板；失败态：整行红底 → 图标 + 摘要尾缀表达，**行高不随错误内容增长** |
+| C | `9bd162e8` | 2026-09-14 | 四件套全绿（见下「门禁口径」） | 卡内 `turnUsage.summary` 文本行 → 独立 `turn-tail-row`（28px 动作组 + hover 统计；无 usage 数据整行隐藏，不显示 0）；用户动作区（编辑/回溯/复制）收进气泡下方动作区，按钮 28×28 圆图标 + `aria-label`，时间戳 `group-hover` 显现（触屏 `@media (hover: none)` 默认可见，不改变布局） |
+| D | `9bd162e8` | 2026-09-14 | 四件套全绿（见下「门禁口径」） | 打字机接线（`hooks/workspace/use-typewriter.ts` + 测试）→ **删除**，`StreamingMarkdown` 直连 Markdown 渲染：显示内容不再滞后截断，块不因前缀变化 remount；正文块间距 → 容器 flex `gap`（段落 margin 归零）；行内 code / 代码块按 D2 标定（去边框、底/条分色） |
+| E | `9bd162e8` | 2026-09-14 | 四件套全绿 + `verify-message-tokens`（31 文件 / 0 命中）、`verify-max-lines`（892 文件，最大 499）、i18n（644 文件 / 0 违规） | `projectChatFlow` 与 `data-chat-flow-kind/-key/-anchor-key` 锚点落地（覆盖 §8.4 全部 kind，未知 kind → `fallback` 行可读降级）；消息组件字面色值 / 内联渐变**清零**（脚本门禁化）；发丝口径注释按 §13 C3 修正为「dpr=1 等价、F3 为唯一 0.5px 例外」 |
+| F | `9bd162e8` | 2026-09-14 | 四件套全绿（含 e2e `design-tokens` / `G1` / `G2`） | F1 字号轴：`--app-chat-font-size: 15px` + delta，行高/行高盒一律 `calc(24px + delta)`（无硬编码 16/28）；F2 宽度轴 `clamp(680px, 64cqw, 920px)` + 三处派生（转录列 W / 停靠卡 W−32 / 输入卡 W+32）；F3 回合级统计折叠行（33px = 24 文本 + 8 下内距 + 0.5px 底边，收起时过程行不渲染、流式恒不折叠）；F4 `system-prompt` / `steering` / `fallback` 独立分支；F5 `notice` 单行收敛（turn-error / turn-max-tokens，行高不随内容增长）；F6 §13.3 补测与回填完成 |
 
 > **门禁口径（2026-09-14 收口轮，A–F 同一工作区）**：`npm run lint` → 0 error（3 条既有 `exhaustive-deps` warning 未增）+ `i18n lint OK(scanned=644, violations=0)` + 备份 / 行数 / 字面量三道脚本 OK；`npx vitest run` → **178 文件 / 1301 用例通过**（142.8s）；`npm run build` → OK（vite 1.47s，仅既有 `INEFFECTIVE_DYNAMIC_IMPORT` 警告）；`npm run test:e2e` → **70 passed**（2.8m，含 `workspace-chat.spec.ts` 的 G1 流式推理展开与 G2 工具行折叠→展开）。
 
@@ -774,6 +774,8 @@ npm run test:e2e      # playwright
 > **与参考站的差异（有意偏离，用户显式诉求）**：参考站的 `UserStyleBubble` 只对「空正文」隐藏气泡本体，动作区仍无条件渲染（`MessageItem.tsx:226` 的 `actions?.(text)` 不在文本判空之内），即空文本时复制图标会以「可点但无内容可写」的形态留在屏上。本地按要求收紧为**内容驱动**：没有可复制文本就整颗图标不渲染——同时删掉常驻的 `disabled` 态，避免「看得见按不动」的无效动作位。
 >
 > **门禁（2026-09-14，全链路串行一轮过，尾行 `GATE_OK`）**：`npm run lint` → eslint 0 error（3 条既有 react-hooks warning）+ i18n（651 键全命中）/ 备份（958 文件 0 处 `*.bak`·`.backups`）/ 行数（最大 499 行）/ 消息字面量四项校验 OK；`npx vitest run` → **186 文件 / 1373 用例全通过**（含本轮新增 `message-visibility.test.ts` 5 例、`message-list.test.tsx` 空壳不产 `article` 例、`turn-tail-row.test.tsx` 5 例、`user-message-bubble.test.tsx` 5 例、`history-mapping.test.ts` 空 `content` 不降级例）；`npm run build`（`tsc -b && vite build`，3280 模块）无错；`npm run test:e2e` → **73 passed**（全量，含 §12.1.3 收窄过选择器的 `tool-row-history` / `workspace-chat`）。
+>
+> **提交回填（2026-09-14）**：批次 A–F（含 §12.1 工具行 B4/B5、§12.1.1–§12.1.3 的代码与 e2e 选择器收窄）落在提交 **`9bd162e8`**（上表「提交」列已回填）；本轮收口（§12.1.4 全部改动 + §12.1.1–§12.1.3 的文档记录）落在提交 **`25e6c029`**（25 文件，`+1727/−977`）。**提交态独立核验**：在该提交的独立 worktree 上重跑四项脚本（备份 954 文件 0 残留 / 行数 903 文件最大 499 / i18n `scanned=649, violations=0` / 字面量 32 文件 0 命中）与目标 vitest（`src/lib/chat-view`、`src/lib/thread-state`、`message-list`、`message-reasoning-row`、`artifact-panel-shared` → **17 文件 / 113 用例通过**），未发生「工作区绿、提交态红」。
 
 ### 12.2 参考站 → 本地 token 映射（本方案实际采用项，2026-09-14）
 
