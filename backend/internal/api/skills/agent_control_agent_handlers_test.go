@@ -320,3 +320,71 @@ func TestListAgentControlAgentsMaterializesTeamSessionContextAsCanonicalTeammate
 	require.Equal(t, agentcontrol.WorkflowSpawnTeam, records[0].Workflow)
 	require.Equal(t, "member-1", records[0].TeammateID)
 }
+
+// G3: the API host must converge "session is gone" rows during the same
+// projection refresh the CLI host sweeps in, otherwise the same registry file
+// shows different active sets depending on which host reads it. A row whose
+// session exists must survive the sweep untouched.
+func TestListAgentControlAgentsSweepsMissingSessionRows(t *testing.T) {
+	ctx := context.Background()
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	defer sessionManager.Stop()
+	handler.SetSessionManager(sessionManager)
+	store, err := agentcontrol.NewSQLiteGlobalAgentRegistryStore(&agentcontrol.GlobalAgentStoreConfig{
+		Path: filepath.Join(t.TempDir(), "agent-registry-sweep.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	handler.SetAgentControlAgentStore(store)
+
+	root, err := sessionManager.Create(ctx, "user-agent-sweep")
+	require.NoError(t, err)
+	child := chat.NewSession(root.UserID)
+	child.ID = "sweep-child"
+	child.SetContext(toolbroker.AgentSessionContextParentSessionID, root.ID)
+	child.SetContext(toolbroker.AgentSessionContextRootSessionID, root.ID)
+	child.SetContext(toolbroker.AgentSessionContextPath, "/root/sweep-child")
+	child.SetContext(toolbroker.AgentSessionContextDepth, 1)
+	require.NoError(t, sessionManager.GetStorage().Save(ctx, child))
+
+	// A durable row whose session no longer exists anywhere: this is the row the
+	// API host used to keep active forever (only the CLI host converged it).
+	_, err = store.UpsertAgentControlAgent(ctx, agentcontrol.AgentRecord{
+		AgentID:       "ghost-agent",
+		RootSessionID: root.ID,
+		SessionID:     "ghost-session",
+		AgentPath:     "/root/ghost-agent",
+		Depth:         1,
+		AgentType:     agentcontrol.AgentTypeChild,
+		Workflow:      agentcontrol.WorkflowSpawnAgent,
+		Status:        agentcontrol.AgentStatusActive,
+	})
+	require.NoError(t, err)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/agent-control/agents?root_session_id="+root.ID+"&path_prefix=/root/sweep-child", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var payload struct {
+		Agents []agentcontrol.AgentRecord `json:"agents"`
+		Count  int                        `json:"count"`
+		Source string                     `json:"source"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	require.Equal(t, "agent_control_agents", payload.Source)
+	require.Equal(t, 1, payload.Count, "the sweep must not touch a row whose session is alive")
+	require.Equal(t, "sweep-child", payload.Agents[0].SessionID)
+
+	records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+		AgentID:       "ghost-agent",
+		IncludeClosed: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.True(t, records[0].Closed(), "an abandoned binding must not stay active")
+	require.Equal(t, agentcontrol.AgentStatusStale, records[0].Status, "missing containers are marked stale, not silently closed")
+}

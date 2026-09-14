@@ -221,3 +221,61 @@ func TestAgentControlProjectionKeepsSpawnRouteMetadata(t *testing.T) {
 	require.Equal(t, "hard", records[0].Difficulty)
 	require.Equal(t, "difficulty_level", records[0].RouteSource)
 }
+
+// P2-9 retention：API 宿主的保留窗口解析必须与 CLI 宿主同口径（env > runtime
+// config > 默认 30 天），"off" 是运维保留全部终态行的开关（归一化为 0）。
+func TestAgentRegistryTerminalRetentionPrecedence(t *testing.T) {
+	t.Run("no config falls back to the shared default", func(t *testing.T) {
+		t.Setenv(apiRegistryRetentionEnv, "")
+		handler := NewHandler(nil, nil, nil)
+		require.Equal(t, agentcontrol.DefaultTerminalRetention, handler.agentRegistryTerminalRetention())
+	})
+
+	t.Run("runtime config wins over the default", func(t *testing.T) {
+		t.Setenv(apiRegistryRetentionEnv, "")
+		handler := NewHandler(nil, nil, nil)
+		cfg := runtimecfg.DefaultRuntimeConfig()
+		cfg.Agents.RegistryTerminalRetention = 72 * time.Hour
+		handler.SetRuntimeConfig(cfg, "")
+
+		require.Equal(t, 72*time.Hour, handler.agentRegistryTerminalRetention())
+	})
+
+	t.Run("env overrides runtime config", func(t *testing.T) {
+		t.Setenv(apiRegistryRetentionEnv, "12h")
+		handler := NewHandler(nil, nil, nil)
+		cfg := runtimecfg.DefaultRuntimeConfig()
+		cfg.Agents.RegistryTerminalRetention = 72 * time.Hour
+		handler.SetRuntimeConfig(cfg, "")
+
+		require.Equal(t, 12*time.Hour, handler.agentRegistryTerminalRetention())
+	})
+
+	t.Run("off and negative config values disable the purge", func(t *testing.T) {
+		t.Setenv(apiRegistryRetentionEnv, "off")
+		handler := NewHandler(nil, nil, nil)
+		require.Zero(t, handler.agentRegistryTerminalRetention())
+
+		t.Setenv(apiRegistryRetentionEnv, "")
+		cfg := runtimecfg.DefaultRuntimeConfig()
+		cfg.Agents.RegistryTerminalRetention = -time.Hour
+		handler.SetRuntimeConfig(cfg, "")
+		require.Zero(t, handler.agentRegistryTerminalRetention())
+	})
+
+	t.Run("invalid env duration keeps runtime config", func(t *testing.T) {
+		t.Setenv(apiRegistryRetentionEnv, "not-a-duration")
+		handler := NewHandler(nil, nil, nil)
+		cfg := runtimecfg.DefaultRuntimeConfig()
+		cfg.Agents.RegistryTerminalRetention = 72 * time.Hour
+		handler.SetRuntimeConfig(cfg, "")
+
+		require.Equal(t, 72*time.Hour, handler.agentRegistryTerminalRetention(), "a typo must not silently disable the purge")
+	})
+
+	t.Run("nil handler is safe", func(t *testing.T) {
+		t.Setenv(apiRegistryRetentionEnv, "")
+		var handler *Handler
+		require.Equal(t, agentcontrol.DefaultTerminalRetention, handler.agentRegistryTerminalRetention())
+	})
+}

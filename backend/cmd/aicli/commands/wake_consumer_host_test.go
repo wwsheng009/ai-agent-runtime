@@ -246,6 +246,45 @@ func TestLocalHostWakeConsumer_WakeTurnAppliesRunEpochProtocol(t *testing.T) {
 	require.True(t, bridge.isRunEpochCurrent(1))
 }
 
+// TestLocalHostWakeConsumer_WakeTurnOwnsComposerStatus is the regression test
+// for the "Worked for 28m 41s but still running" report. The foreground
+// sendMessage releases the actor turn gate when its executor returns and only
+// then reaches its deferred CompleteWaiting, so a supervision auto-wake can
+// begin an internal run in between. The internal run owns the status line: the
+// late foreground completion must not freeze a "Worked for …" summary over
+// the wake turn, and the wake turn must keep the composer in a running state.
+func TestLocalHostWakeConsumer_WakeTurnOwnsComposerStatus(t *testing.T) {
+	host, _, _ := newWakeConsumerTestHost(t, "aicli-wake-composer-status")
+	session := host.BaseSession
+	require.NotNil(t, session)
+	interaction := newChatInteractionCoordinator(session)
+	t.Cleanup(interaction.Shutdown)
+	session.Interaction = interaction
+
+	// Foreground turn in flight: sendMessage already called StartWaiting and
+	// the executor has returned, releasing the actor turn gate.
+	interaction.StartWaiting()
+	interaction.mu.Lock()
+	interaction.dynamicStatusStarted = time.Now().Add(-5 * time.Second)
+	interaction.mu.Unlock()
+
+	// The wake wins the released gate and starts its internal run.
+	endRun := host.beginWakeTurnRun()
+
+	// sendMessage now reaches its deferred CompleteWaiting.
+	interaction.CompleteWaiting()
+	interaction.mu.Lock()
+	completed := interaction.dynamicStatusCompleted
+	waiting := interaction.waitingActive
+	interaction.mu.Unlock()
+	require.False(t, completed, "wake turn must not inherit the foreground Worked for summary")
+	require.False(t, waiting, "CompleteWaiting must still release the foreground waiting flag")
+	require.NotEqual(t, "Ready", interaction.currentSurfaceStateForTest(),
+		"wake turn must own a running composer state, not the foreground Ready state")
+
+	endRun()
+}
+
 // projectCriticalWake writes one critical lifecycle notification plus its
 // durable wake under an explicit subject id.
 func projectCriticalWake(t *testing.T, store *supervision.SQLiteSupervisionStore, scheduler *supervision.WakeScheduler, subjectID string) {

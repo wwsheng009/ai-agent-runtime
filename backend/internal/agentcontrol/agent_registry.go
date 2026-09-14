@@ -127,6 +127,84 @@ func (r AgentRecord) Closed() bool {
 		strings.EqualFold(status, AgentStatusStale)
 }
 
+// agentRecordsShareWakeState reports whether a write only refreshed bookkeeping
+// (updated_at) and changed nothing an AgentWakeEvent consumer could observe.
+//
+// Host projections materialize every identity on every pass, so the store is
+// asked to rewrite rows that did not change. The write itself must stay: reclaim
+// reads RegistryUpdatedAt as its idle fallback (reclaim.go idleSince), so
+// dropping it would freeze a heartbeat input. The wake event, however, exists to
+// announce a change, so a refresh that keeps the persisted shape identical must
+// not append one — otherwise the durable wake log and its in-process
+// notifications grow with the reconcile cadence instead of with the identity
+// graph. Compared fields are the persisted shape; updated_at, created_at and the
+// row sequence are excluded because they move on every write.
+func agentRecordsShareWakeState(before, after AgentRecord) bool {
+	before = before.Normalize()
+	after = after.Normalize()
+	if before.AgentID != after.AgentID ||
+		before.RootSessionID != after.RootSessionID ||
+		before.ParentAgentID != after.ParentAgentID ||
+		before.ParentSessionID != after.ParentSessionID ||
+		before.SessionID != after.SessionID ||
+		before.AgentPath != after.AgentPath ||
+		before.Depth != after.Depth ||
+		before.AgentType != after.AgentType ||
+		before.Nickname != after.Nickname ||
+		before.Workflow != after.Workflow ||
+		before.TeamID != after.TeamID ||
+		before.TeammateID != after.TeammateID ||
+		before.Provider != after.Provider ||
+		before.Model != after.Model ||
+		before.ReasoningEffort != after.ReasoningEffort ||
+		before.Difficulty != after.Difficulty ||
+		before.DifficultySource != after.DifficultySource ||
+		before.DifficultyRationale != after.DifficultyRationale ||
+		before.RouteSource != after.RouteSource ||
+		before.FallbackUsed != after.FallbackUsed ||
+		before.FallbackReason != after.FallbackReason ||
+		before.RequestedProvider != after.RequestedProvider ||
+		before.EffectiveProvider != after.EffectiveProvider ||
+		before.RequestedModel != after.RequestedModel ||
+		before.EffectiveModel != after.EffectiveModel ||
+		before.RequestedReasoningEffort != after.RequestedReasoningEffort ||
+		before.EffectiveReasoningEffort != after.EffectiveReasoningEffort ||
+		before.RequestedPermissionMode != after.RequestedPermissionMode ||
+		before.EffectivePermissionMode != after.EffectivePermissionMode ||
+		before.Status != after.Status {
+		return false
+	}
+	if !agentRecordStringsEqual(before.RouteWarnings, after.RouteWarnings) {
+		return false
+	}
+	return agentRecordClosedAtEqual(before.ClosedAt, after.ClosedAt)
+}
+
+// agentRecordStringsEqual compares two normalized string slices; nil and empty
+// are the same state and the separator cannot appear inside a trimmed value.
+func agentRecordStringsEqual(before, after []string) bool {
+	if len(before) != len(after) {
+		return false
+	}
+	for i := range before {
+		if before[i] != after[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// agentRecordClosedAtEqual treats a nil and a zero timestamp as the same state,
+// because the store persists a zero closed_at as NULL.
+func agentRecordClosedAtEqual(before, after *time.Time) bool {
+	beforeSet := before != nil && !before.IsZero()
+	afterSet := after != nil && !after.IsZero()
+	if !beforeSet || !afterSet {
+		return beforeSet == afterSet
+	}
+	return before.Equal(*after)
+}
+
 // AgentFilter describes reads from a durable AgentControl identity registry.
 type AgentFilter struct {
 	AgentID         string
@@ -170,8 +248,12 @@ func (f AgentWakeFilter) Normalize() AgentWakeFilter {
 }
 
 // AgentWakeEvent is emitted when durable AgentControl identity rows change.
-// Seq is the durable agent registry row id, so consumers can combine watch
-// notifications with ListAgentControlAgents(AfterSeq) for catch-up.
+// Seq is the wake log's own sequence (agent_control_agent_wake_events.id), which
+// is a different id space from AgentRecord.Seq (the agent_control_agents row id):
+// wake ordering/catch-up uses LastAgentControlAgentWakeSeq plus this stream,
+// while row catch-up uses ListAgentControlAgents(AfterSeq). The event carries the
+// identity fields of the row at the moment it changed, so a watcher can either
+// act on the snapshot or re-read the row by AgentID.
 type AgentWakeEvent struct {
 	Seq             int64     `json:"seq,omitempty"`
 	AgentID         string    `json:"agent_id,omitempty"`

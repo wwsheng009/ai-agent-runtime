@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
@@ -130,6 +131,12 @@ func TestLocalActorRegistry_ReclaimReportIsPublishedOnce(t *testing.T) {
 	// A different observer (spawn gate) reporting the very same closed rows is
 	// still the same eviction: the source says who noticed, not what happened.
 	registry.recordLocalAgentReclaim(context.Background(), rootSession.ID, rootSession.ID, agentcontrol.ReclaimSourceSpawnGate, pass)
+	// 真实故障回归：第二份观察来自"关闭前"的清单，同一批子会话带着漂移的计数
+	// 到达（rows 从 3 变 4，summary 也随之不同）。计数不是这次驱逐的身份，
+	// 只允许第一份报告上线，否则同一批子会话会按观察次数打印多行。
+	drifted := pass
+	drifted.Rows = 4
+	registry.recordLocalAgentReclaim(context.Background(), rootSession.ID, rootSession.ID, agentcontrol.ReclaimSourceReconcile, drifted)
 
 	events := localReclaimEvents(host.EventBus.Recent(64))
 	require.Len(t, events, 1, "one eviction pass must reach the bus exactly once")
@@ -182,4 +189,50 @@ func TestChatRuntimeTimelineRendersAgentReclaimedNote(t *testing.T) {
 	require.Equal(t, "[subagents] 周期对账：已自动回收 1 个长期空闲的子会话；释放 1 个线程槽位", used)
 
 	require.Empty(t, renderChatRuntimeEvent(runtimeevents.Event{Type: agentcontrol.EventAgentReclaimed}))
+}
+
+// TestChatRuntimeEventBridge_AgentReclaimedSurvivesActiveRun reproduces the
+// 2026-09-13 real-run drop (output/real-test/logs/…151801_971…:68-70): the
+// reconcile sweep and the spawn gate publish agent.reclaimed from background
+// goroutines, so the payload carries no turn_id. While a run was active with an
+// identified turn the mismatched-turn guard dropped all 6/6 such events with
+// reason="event turn does not match active run" — the zh-CN timeline note below
+// therefore never rendered in a real session, no matter how correct the
+// renderer was. The event has its own durable identity (root_session_id plus the
+// closed agent_paths) and must reach the timeline; ordinary identity-less
+// primary events must stay suppressed.
+func TestChatRuntimeEventBridge_AgentReclaimedSurvivesActiveRun(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{})
+	bridge.setPrimarySessionID("session-1")
+	bridge.renderMu.Lock()
+	bridge.runActive = true
+	bridge.activeTurnID = "turn-1"
+	bridge.retiredTurnIDs = map[string]struct{}{}
+	bridge.renderMu.Unlock()
+
+	reclaim := runtimeevents.Event{
+		Type:      agentcontrol.EventAgentReclaimed,
+		SessionID: "session-1",
+		Payload: agentcontrol.ReclaimEventPayload(agentcontrol.ReclaimSourceReconcile, agentcontrol.ReclaimOutcome{
+			Rows: 1,
+			Decisions: []agentcontrol.ReclaimDecision{{
+				AgentPath: "/root/teams/probe-team/member-1",
+				SessionID: "probe-team__member_1",
+				Reason:    agentcontrol.ReclaimReasonSessionTerminal,
+			}},
+		}),
+	}
+	require.False(t, bridge.shouldSuppressMismatchedPrimaryTurnEvent(reclaim),
+		"运行期发布的配额驱逐事件必须送达时间线，否则人读中文行永远不可达")
+	require.Equal(t,
+		"[subagents] 周期对账：已自动回收 1 个已结束的子会话；释放 1 个线程槽位",
+		renderChatRuntimeEvent(reclaim))
+
+	identityless := runtimeevents.Event{
+		Type:      runtimechat.EventToolFinished,
+		SessionID: "session-1",
+		Payload:   map[string]interface{}{"tool_call_id": "tool-1", "tool_name": "shell"},
+	}
+	require.True(t, bridge.shouldSuppressMismatchedPrimaryTurnEvent(identityless),
+		"守卫本身不能被放宽：无身份的普通主会话事件仍在运行期被丢弃")
 }

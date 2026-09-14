@@ -61,18 +61,26 @@ func (r *localActorRegistry) recordLocalAgentReclaim(ctx context.Context, parent
 
 // localAgentReclaimReportKey identifies one eviction report by the eviction it
 // describes — the parent stream plus the closed children — not by the observer
-// that happened to notice it (source is deliberately excluded). Reclaiming rows
-// leaves them terminal, so the same row set can only be reported again when a
-// second observer of the *same* pass re-derives the same outcome; a genuinely
-// later pass closes different rows (or the same rows re-created) and therefore
-// produces a different key.
+// that happened to notice it (source is deliberately excluded) and not by the
+// counters of that particular observation.
+//
+// Counters are volatile while several observers sweep concurrently: a second
+// observer holding a pre-close listing re-selects children the first one
+// already closed, so the very same eviction can arrive first as
+// `reclaimed=1 reclaimed_rows=1` and then as `reclaimed=2 reclaimed_rows=1`
+// (the extra decision is the 0-row no-op above). Keying on summary/reclaimed
+// therefore handed each re-observation its own key and the 5-minute guard let
+// the same cleanup through as several transcript lines.
+//
+// Reclaiming rows leaves them terminal, so a genuinely later pass closes
+// different children (or the same children re-created) and keeps its own key;
+// only a re-observation of the same child set collapses.
 func localAgentReclaimReportKey(sessionID string, payload map[string]interface{}) string {
 	return strings.Join([]string{
 		strings.TrimSpace(sessionID),
 		localAgentReclaimStringPayload(payload, "root_session_id"),
-		localAgentReclaimStringPayload(payload, "summary"),
 		strings.Join(localAgentReclaimStringsPayload(payload, "agent_paths"), ","),
-		fmt.Sprintf("%d", localAgentReclaimIntPayload(payload, "reclaimed")),
+		fmt.Sprintf("%d", localAgentReclaimIntPayload(payload, "truncated")),
 	}, "|")
 }
 

@@ -126,14 +126,54 @@ type fakeReclaimStore struct {
 	closed []string
 	rows   int64
 	failOn string
+	// noopOn 模拟并发 sweep 的过期清单：这一行/子树已被别人关掉，store 的
+	// UPDATE（closed_at IS NULL）没有匹配到任何行，所以返回 rows=0。
+	noopOn string
 }
 
 func (f *fakeReclaimStore) ReclaimAgentControlAgentSubtree(_ context.Context, rootSessionID string, agentPath string, reason string, _ time.Time) (int64, error) {
 	if f.failOn != "" && agentPath == f.failOn {
 		return 0, fmt.Errorf("boom: %s", agentPath)
 	}
+	if f.noopOn != "" && agentPath == f.noopOn {
+		return 0, nil
+	}
 	f.closed = append(f.closed, agentPath+"|"+reason+"|"+rootSessionID)
 	return f.rows, nil
+}
+
+// 真实故障回归（2026-09-13 real-test 日志）：并发的 sweep 各自持有一份"关闭前"
+// 的清单，后到的观察者会把别人刚关掉的子会话再选一遍。store 的 UPDATE 带
+// closed_at IS NULL，因此这次调用的 rows=0——它既不是一次回收，也不能进
+// reclaimed/reasons/agent_paths，否则同一批子会话会被重复打印（多行的直接来源）。
+func TestReclaimAgentQuotaIgnoresStaleListingNoOps(t *testing.T) {
+	now := time.Now().UTC()
+	store := &fakeReclaimStore{rows: 1, noopOn: "/root/already-closed"}
+	observations := []ReclaimObservation{
+		{AgentID: "a", AgentPath: "/root/already-closed", Status: AgentStatusActive, SessionTerminal: true},
+		{AgentID: "b", AgentPath: "/root/fresh", Status: AgentStatusActive, SessionTerminal: true},
+	}
+
+	outcome, err := ReclaimAgentQuota(context.Background(), store, "root-session", observations, ReclaimPolicy{Now: now})
+	require.NoError(t, err)
+	require.Equal(t, 1, outcome.Reclaimed(), "0 行的空动作不算一次回收")
+	require.Equal(t, int64(1), outcome.Rows)
+	require.Len(t, outcome.Decisions, 1)
+	require.Equal(t, "/root/fresh", outcome.Decisions[0].AgentPath)
+	require.Equal(t, []string{ReclaimReasonSessionTerminal}, outcome.Reasons)
+	require.Equal(t, "reclaimed=1 reclaimed_rows=1 reclaim_reasons=session_terminal", outcome.Summary())
+
+	payload := ReclaimEventPayload(ReclaimSourceReconcile, outcome)
+	require.Equal(t, []string{"/root/fresh"}, payload["agent_paths"], "已被别人关掉的子会话不再出现在事件里")
+	require.Equal(t, 1, payload["reclaimed"])
+
+	// 全部命中过期清单时不发布也不报错：没有真实改动就没有事件。
+	allStale, err := ReclaimAgentQuota(context.Background(), store, "root-session", []ReclaimObservation{
+		{AgentID: "a", AgentPath: "/root/already-closed", Status: AgentStatusActive, SessionTerminal: true},
+	}, ReclaimPolicy{Now: now})
+	require.NoError(t, err)
+	require.Zero(t, allStale.Reclaimed())
+	require.Empty(t, allStale.Summary())
 }
 
 func TestReclaimAgentQuotaClosesSelectedChildrenAndReportsFailures(t *testing.T) {

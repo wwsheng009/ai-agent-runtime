@@ -185,6 +185,11 @@ type Handler struct {
 	agentControlReconcilerStore agentcontrol.AgentRegistryStore
 	agentControlReconcilerStop  context.CancelFunc
 
+	// 投影物化是一次 O(sessions) 的全量扫描，spawn 门控、列表刷新与周期对账
+	// 都会触发；单飞锁保证同一时刻只有一次扫描 + 写入在进行（见
+	// materializeAgentControlAgentProjections）。
+	agentControlMaterializeMu sync.Mutex
+
 	sessionRuntimeMu       sync.RWMutex
 	sessionHub             *chat.SessionHub
 	sessionRuntimeStore    chat.RuntimeStateStore

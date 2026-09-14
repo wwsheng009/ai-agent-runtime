@@ -2860,8 +2860,12 @@ func (c *sessionAgentController) enforceSpawnLimits(ctx context.Context, parentS
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if summary := outcome.Summary(); summary != "" {
-				extras = append(extras, summary)
+			// 与 CLI 闸门一致：拒付文案给人读句（机器计数留在
+			// agent.reclaimed payload 与 /debug），否则每次被拦下的 spawn
+			// 都会把同一串 `reclaimed=3 reclaimed_rows=3
+			// reclaim_reasons=session_terminal` 复读进会话记录。
+			if human := outcome.HumanSummary(); human != "" {
+				extras = append(extras, human)
 			}
 			if reclaimErr != nil {
 				extras = append(extras, "reclaim_error="+reclaimErr.Error())
@@ -2901,7 +2905,10 @@ func (c *sessionAgentController) enforceSpawnLimits(ctx context.Context, parentS
 // session/actor liveness into the P2-8 eviction input. Only children whose
 // container is provably gone/terminal (default) or idle beyond the opt-in
 // timeout become reclaimable — running, waiting-approval and waiting-input
-// children are explicitly protected.
+// children are explicitly protected. A container whose execution lease expired
+// while its durable state still claims progress is marked stale (the crash
+// signature) so the shared policy can release its quota instead of leaving a
+// dead child occupying a thread slot forever.
 func (c *sessionAgentController) observeQuotaChildren(ctx context.Context, records []agentcontrol.AgentRecord) []agentcontrol.ReclaimObservation {
 	observations := make([]agentcontrol.ReclaimObservation, 0, len(records))
 	var hub *chat.SessionHub
@@ -2933,11 +2940,24 @@ func (c *sessionAgentController) observeQuotaChildren(ctx context.Context, recor
 				observation.SessionIdleSince = session.UpdatedAt
 			}
 		}
+		actorLive := false
 		if hub != nil && sessionID != "" {
 			if actor, ok := hub.Get(sessionID); ok && actor != nil {
+				// The actor owns the session inside this process and keeps its
+				// lease renewed, so the container is never stale in that case.
+				actorLive = true
 				if state, exists := actor.StateSummary(); exists {
 					if state.Busy() || state.PendingTool || state.ActiveJobCount > 0 {
 						observation.SessionBusy = true
+					}
+				}
+			}
+		}
+		if sessionID != "" && !actorLive && !observation.SessionMissing && !observation.SessionTerminal && c != nil && c.handler != nil {
+			if store := c.handler.getSessionRuntimeStore(); store != nil {
+				if state, err := chat.LoadRuntimeStateForInspection(ctx, store, sessionID); err == nil && state != nil && apiAgentRegistrySessionClaimsProgress(state.Status) {
+					if staleLease, leaseErr := apiAgentRegistryHasExpiredLease(ctx, store, sessionID); leaseErr == nil && staleLease {
+						observation.SessionStale = true
 					}
 				}
 			}
@@ -2956,7 +2976,8 @@ func (c *sessionAgentController) agentsConfig() runtimecfg.AgentsConfig {
 	if cfg.MaxThreads == 0 && cfg.MaxDepth == 0 && cfg.DefaultWaitTimeoutMs == 0 &&
 		cfg.MinWaitTimeoutMs == 0 && cfg.MaxWaitTimeoutMs == 0 && strings.TrimSpace(cfg.WaitTimeoutMode) == "" &&
 		strings.TrimSpace(cfg.DefaultForkTurns) == "" && cfg.RegistryReconcileInterval == 0 &&
-		strings.TrimSpace(cfg.RegistryReconcileMode) == "" && cfg.ReclaimIdleMs == 0 {
+		strings.TrimSpace(cfg.RegistryReconcileMode) == "" && cfg.RegistryTerminalRetention == 0 &&
+		cfg.ReclaimIdleMs == 0 {
 		return defaults
 	}
 	return cfg

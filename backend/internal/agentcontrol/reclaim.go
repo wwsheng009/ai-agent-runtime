@@ -70,10 +70,13 @@ func QuotaChildren(records []AgentRecord) []AgentRecord {
 }
 
 // Reclaim reasons. Missing/terminal containers are reclaimed by default because
-// the identity can no longer be routed to; idle eviction is opt-in.
+// the identity can no longer be routed to; lost containers (expired execution
+// lease) join them because the process that claimed the container is gone;
+// idle eviction stays opt-in.
 const (
 	ReclaimReasonSessionMissing  = "session_missing"
 	ReclaimReasonSessionTerminal = "session_terminal"
+	ReclaimReasonSessionStale    = "session_stale"
 	ReclaimReasonIdleTimeout     = "idle_timeout"
 )
 
@@ -88,6 +91,8 @@ func ReclaimReasonLabel(reason string) string {
 		return "已不存在的子会话"
 	case ReclaimReasonSessionTerminal:
 		return "已结束的子会话"
+	case ReclaimReasonSessionStale:
+		return "已失联的子会话"
 	case ReclaimReasonIdleTimeout:
 		return "长期空闲的子会话"
 	default:
@@ -110,6 +115,13 @@ type ReclaimObservation struct {
 	// SessionTerminal marks a container in a terminal lifecycle state
 	// (closed/archived). A stopped-but-resumable session is not terminal.
 	SessionTerminal bool `json:"session_terminal,omitempty"`
+	// SessionStale marks a container whose owner is provably gone: the host
+	// observed an expired execution lease (or an absent container record) while
+	// the runtime state still claims progress, and no live actor owns the
+	// session in this process. Hosts must only set it when the container can no
+	// longer be routed to; a live-but-slow turn keeps renewing its lease and is
+	// therefore never reported as stale.
+	SessionStale bool `json:"session_stale,omitempty"`
 	// SessionBusy marks a child that must never be interrupted: running turns,
 	// pending approvals/questions/tools, active background jobs, rewinding.
 	SessionBusy bool `json:"session_busy,omitempty"`
@@ -180,6 +192,14 @@ func Reclaimable(observation ReclaimObservation, policy ReclaimPolicy) string {
 	}
 	if observation.SessionTerminal {
 		return ReclaimReasonSessionTerminal
+	}
+	// Stale is evaluated before busy on purpose: a crashed owner leaves its last
+	// runtime state behind (status=running, pending tool), so the busy flags are
+	// artefacts of the dead run. Trusting them here is exactly what kept lost
+	// children occupying quota forever (G1). Hosts only set SessionStale after
+	// proving the owner is gone (expired lease and no live actor).
+	if observation.SessionStale {
+		return ReclaimReasonSessionStale
 	}
 	if observation.SessionBusy {
 		return ""
@@ -383,9 +403,12 @@ func (o ReclaimOutcome) Summary() string {
 //	已自动回收 3 个已结束的子会话；释放 3 个线程槽位
 //	已自动回收 1 个长期空闲的子会话；释放 1 个线程槽位；1 个未能回收：...（需要关注）
 //
-// Counters stay in Summary: the spawn gate, `/debug` and the `agent.reclaimed`
-// payload keep the `reclaimed=`/`reclaim_reasons=` contract, while this line is
-// what a human reads in `/agents cleanup` output or the CLI timeline note.
+// Counters stay in Summary/ReclaimEventPayload: `/debug`、`agent.reclaimed`
+// payload 的 summary 字段与 durable registry 行保留 `reclaimed=`/
+// `reclaim_reasons=` 机器口径；而操作者/模型读到的文本面——闸门拒付文案
+// （extras）、`/agents cleanup` 输出与 CLI 时间线——用本方法，避免同一串
+// `reclaimed=3 reclaimed_rows=3 reclaim_reasons=session_terminal` 被每个被拦下
+// 的 spawn 复读一遍。
 func (o ReclaimOutcome) HumanSummary() string {
 	reasons := make([]string, 0, len(o.Reasons)+len(o.Decisions))
 	for _, reason := range o.Reasons {
@@ -466,7 +489,7 @@ func humanReclaimSubject(reasons []string) string {
 // knownReclaimReasonLabel reports whether the reason has a curated zh-CN label.
 func knownReclaimReasonLabel(reason string) (string, bool) {
 	switch strings.TrimSpace(reason) {
-	case ReclaimReasonSessionMissing, ReclaimReasonSessionTerminal, ReclaimReasonIdleTimeout:
+	case ReclaimReasonSessionMissing, ReclaimReasonSessionTerminal, ReclaimReasonSessionStale, ReclaimReasonIdleTimeout:
 		return ReclaimReasonLabel(reason), true
 	default:
 		return strings.TrimSpace(reason), false
@@ -517,6 +540,14 @@ func ReclaimAgentQuota(ctx context.Context, store AgentReclaimStore, rootSession
 			if outcome.FirstError == "" {
 				outcome.FirstError = err.Error()
 			}
+			continue
+		}
+		if rows <= 0 {
+			// 快照已过期：这次 pass 用的清单是在别人关闭之前抓的，store 的
+			// UPDATE 带 closed_at IS NULL，rows=0 说明这一行/子树早就被另一个
+			// 观察者收走了，本次没有任何改动。把它计成一次回收会让计数虚高
+			// （真实运行里出现过 reclaimed=2 reclaimed_rows=1），并给同一次清理
+			// 换一个上报键，同一批子会话于是被重复打印——多行的直接来源。
 			continue
 		}
 		outcome.Rows += rows

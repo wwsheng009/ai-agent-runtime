@@ -103,7 +103,22 @@ func (h *Handler) materializeAgentControlAgentProjections(ctx context.Context, s
 	if h == nil || store == nil {
 		return nil
 	}
+	// G5：物化是一次 O(sessions) 的全量扫描，spawn 门控、列表刷新与周期对账都会
+	// 触发；单飞锁保证同一时刻只有一次扫描 + 写入在进行，避免重复扫描与重复写。
+	h.agentControlMaterializeMu.Lock()
+	defer h.agentControlMaterializeMu.Unlock()
+	// G3：先收敛已失联/已结束的绑定，再写投影。CLI 宿主的 materialize 一直
+	// 是"先 sweep 再 upsert"，API 宿主此前只在审计里发现问题、不收敛，导致同一
+	// 份 registry 在两个宿主下漂移（见 sweepStaleAgentControlAgentRegistry）。
+	if err := h.sweepStaleAgentControlAgentRegistry(ctx, store); err != nil {
+		return err
+	}
 	records, err := h.projectAgentControlAgents(ctx, projectionAgentFilter(filter))
+	if err != nil {
+		return err
+	}
+	// G4：一次列表建立内存索引，取代每条投影记录一次点查（N+1 → 1）。
+	index, err := newAgentControlRecordIndex(ctx, store)
 	if err != nil {
 		return err
 	}
@@ -112,18 +127,83 @@ func (h *Handler) materializeAgentControlAgentProjections(ctx context.Context, s
 		if record.AgentID == "" || record.RootSessionID == "" || record.AgentPath == "" {
 			continue
 		}
-		existing, exists, err := existingAgentControlAgentRecord(ctx, store, record)
-		if err != nil {
-			return err
-		}
+		existing, exists := index.lookup(record)
 		if exists && existing.Closed() && !record.Closed() {
 			continue
 		}
 		if _, err := store.UpsertAgentControlAgent(ctx, record); err != nil {
 			return err
 		}
+		index.store(record)
 	}
 	return nil
+}
+
+// agentControlRecordIndex answers "does this identity already exist?" from one
+// registry listing instead of one query per projected record. Identities are
+// keyed exactly like the previous point lookups: agent id first, then the
+// root-session + path binding, so the closed-row guard keeps its semantics.
+type agentControlRecordIndex struct {
+	byAgentID map[string]agentcontrol.AgentRecord
+	byPath    map[string]agentcontrol.AgentRecord
+}
+
+func newAgentControlRecordIndex(ctx context.Context, store agentcontrol.AgentRegistryStore) (*agentControlRecordIndex, error) {
+	index := &agentControlRecordIndex{
+		byAgentID: map[string]agentcontrol.AgentRecord{},
+		byPath:    map[string]agentcontrol.AgentRecord{},
+	}
+	if store == nil {
+		return index, nil
+	}
+	records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{IncludeClosed: true})
+	if err != nil {
+		return nil, err
+	}
+	for _, record := range records {
+		index.store(record)
+	}
+	return index, nil
+}
+
+func (i *agentControlRecordIndex) store(record agentcontrol.AgentRecord) {
+	if i == nil {
+		return
+	}
+	record = record.Normalize()
+	if agentID := strings.TrimSpace(record.AgentID); agentID != "" {
+		i.byAgentID[agentID] = record
+	}
+	if key := agentControlBindingKey(record.RootSessionID, record.AgentPath); key != "" {
+		i.byPath[key] = record
+	}
+}
+
+func (i *agentControlRecordIndex) lookup(record agentcontrol.AgentRecord) (agentcontrol.AgentRecord, bool) {
+	if i == nil {
+		return agentcontrol.AgentRecord{}, false
+	}
+	record = record.Normalize()
+	if agentID := strings.TrimSpace(record.AgentID); agentID != "" {
+		if existing, ok := i.byAgentID[agentID]; ok {
+			return existing, true
+		}
+	}
+	if key := agentControlBindingKey(record.RootSessionID, record.AgentPath); key != "" {
+		if existing, ok := i.byPath[key]; ok {
+			return existing, true
+		}
+	}
+	return agentcontrol.AgentRecord{}, false
+}
+
+func agentControlBindingKey(rootSessionID, agentPath string) string {
+	rootSessionID = strings.TrimSpace(rootSessionID)
+	agentPath = strings.TrimSpace(agentPath)
+	if rootSessionID == "" || agentPath == "" {
+		return ""
+	}
+	return rootSessionID + "\x00" + agentPath
 }
 
 func existingAgentControlAgentRecord(ctx context.Context, store agentcontrol.AgentRegistryStore, record agentcontrol.AgentRecord) (agentcontrol.AgentRecord, bool, error) {

@@ -37,6 +37,10 @@ type localActorRegistry struct {
 	// (spawn gate, projection sweep, periodic reconcile) observe the same pass.
 	reclaimReportMu   sync.Mutex
 	reclaimReportKeys map[string]time.Time
+	// materializeMu serializes projection refreshes: a pass scans every session,
+	// so the spawn gate, list reads and the periodic reconcile must not overlap
+	// (see materializeLocalAgentRegistry).
+	materializeMu sync.Mutex
 }
 
 func newLocalActorRegistry(host *localChatRuntimeHost) *localActorRegistry {
@@ -1515,6 +1519,10 @@ func (r *localActorRegistry) materializeLocalAgentRegistry(ctx context.Context) 
 	if store == nil {
 		return nil
 	}
+	// Materialization scans every session, and the spawn gate, list reads and the
+	// periodic reconcile all trigger it; keep one pass in flight at a time.
+	r.materializeMu.Lock()
+	defer r.materializeMu.Unlock()
 	records, err := r.projectLocalAgentRecords(ctx)
 	if err != nil {
 		return err
@@ -1522,15 +1530,18 @@ func (r *localActorRegistry) materializeLocalAgentRegistry(ctx context.Context) 
 	if err := r.sweepStaleLocalAgentRegistry(ctx, store); err != nil {
 		return err
 	}
+	// One listing answers every existence check below (was one point query per
+	// projected record).
+	index, err := newLocalAgentRecordIndex(ctx, store)
+	if err != nil {
+		return err
+	}
 	for _, record := range records {
 		record = record.Normalize()
 		if record.AgentID == "" || record.RootSessionID == "" || record.AgentPath == "" {
 			continue
 		}
-		existing, exists, err := r.existingLocalAgentRecord(ctx, store, record)
-		if err != nil {
-			return err
-		}
+		existing, exists := index.lookup(record)
 		if exists && existing.Closed() && !record.Closed() {
 			continue
 		}
@@ -1540,8 +1551,78 @@ func (r *localActorRegistry) materializeLocalAgentRegistry(ctx context.Context) 
 		if _, err := store.UpsertAgentControlAgent(ctx, record); err != nil {
 			return err
 		}
+		index.store(record)
 	}
 	return nil
+}
+
+// localAgentRecordIndex answers "does this identity already exist?" from one
+// registry listing instead of one query per projected record. The API host
+// keeps the same shape (internal/api/skills/agent_control_agent_handlers.go);
+// identities are keyed exactly like the previous point lookups: agent id first,
+// then the root-session + path binding, so the closed-row guard keeps its
+// semantics.
+type localAgentRecordIndex struct {
+	byAgentID map[string]agentcontrol.AgentRecord
+	byPath    map[string]agentcontrol.AgentRecord
+}
+
+func newLocalAgentRecordIndex(ctx context.Context, store agentcontrol.AgentRegistryStore) (*localAgentRecordIndex, error) {
+	index := &localAgentRecordIndex{
+		byAgentID: map[string]agentcontrol.AgentRecord{},
+		byPath:    map[string]agentcontrol.AgentRecord{},
+	}
+	if store == nil {
+		return index, nil
+	}
+	records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{IncludeClosed: true})
+	if err != nil {
+		return nil, err
+	}
+	for _, record := range records {
+		index.store(record)
+	}
+	return index, nil
+}
+
+func (i *localAgentRecordIndex) store(record agentcontrol.AgentRecord) {
+	if i == nil {
+		return
+	}
+	record = record.Normalize()
+	if agentID := strings.TrimSpace(record.AgentID); agentID != "" {
+		i.byAgentID[agentID] = record
+	}
+	if key := localAgentBindingKey(record.RootSessionID, record.AgentPath); key != "" {
+		i.byPath[key] = record
+	}
+}
+
+func (i *localAgentRecordIndex) lookup(record agentcontrol.AgentRecord) (agentcontrol.AgentRecord, bool) {
+	if i == nil {
+		return agentcontrol.AgentRecord{}, false
+	}
+	record = record.Normalize()
+	if agentID := strings.TrimSpace(record.AgentID); agentID != "" {
+		if existing, ok := i.byAgentID[agentID]; ok {
+			return existing, true
+		}
+	}
+	if key := localAgentBindingKey(record.RootSessionID, record.AgentPath); key != "" {
+		if existing, ok := i.byPath[key]; ok {
+			return existing, true
+		}
+	}
+	return agentcontrol.AgentRecord{}, false
+}
+
+func localAgentBindingKey(rootSessionID, agentPath string) string {
+	rootSessionID = strings.TrimSpace(rootSessionID)
+	agentPath = strings.TrimSpace(agentPath)
+	if rootSessionID == "" || agentPath == "" {
+		return ""
+	}
+	return rootSessionID + "\x00" + agentPath
 }
 
 func (r *localActorRegistry) auditLocalAgentRegistry(ctx context.Context) (agentcontrol.ConsistencyAuditReport, error) {
@@ -1730,6 +1811,20 @@ func localAgentRegistryHasExpiredLease(ctx context.Context, runtimeStore runtime
 		return false, err
 	}
 	return !lease.ExpiresAt.After(time.Now().UTC()), nil
+}
+
+// localAgentRuntimeStateClaimsProgress reports whether a durable runtime state
+// still claims a live owner. Only then does an expired execution lease prove the
+// owner is gone: an idle session legitimately holds no lease, so treating every
+// lease-less state as abandoned would evict healthy children (G1 keeps the
+// distinction).
+func localAgentRuntimeStateClaimsProgress(status runtimechat.SessionStatus) bool {
+	switch status {
+	case runtimechat.SessionRunning, runtimechat.SessionRewinding, runtimechat.SessionStopped:
+		return true
+	default:
+		return false
+	}
 }
 
 func markLocalAgentSubtreeStale(ctx context.Context, store agentcontrol.AgentRegistryStore, record agentcontrol.AgentRecord, staleAt time.Time) error {
@@ -3301,8 +3396,12 @@ func (r *localActorRegistry) enforceLocalAgentSpawnLimits(ctx context.Context, p
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if summary := outcome.Summary(); summary != "" {
-				extras = append(extras, summary)
+			// 释放口径的人读面：闸门拒付文案是操作者/模型直接读到的一行，
+			// 因此给中文结论而不是 `reclaimed=3 reclaimed_rows=3
+			// reclaim_reasons=session_terminal` 这样的机器计数；计数仍在
+			// agent.reclaimed payload 与 /debug 里（见 reclaim.go Summary）。
+			if human := outcome.HumanSummary(); human != "" {
+				extras = append(extras, human)
 			}
 			if reclaimErr != nil {
 				extras = append(extras, "reclaim_error="+reclaimErr.Error())
@@ -3341,7 +3440,10 @@ func (r *localActorRegistry) enforceLocalAgentSpawnLimits(ctx context.Context, p
 // observeLocalQuotaChildren mirrors the API host projection: durable child rows
 // plus this host's session/actor liveness. Children parked on approval, input
 // or background jobs are protected; only provably gone/terminal containers (or,
-// with the opt-in policy, long-idle ones) become reclaimable.
+// with the opt-in policy, long-idle ones) become reclaimable. A container whose
+// execution lease expired while its durable state still claims progress — the
+// crash signature — is marked stale so the shared policy can reclaim it instead
+// of leaving a dead child holding quota forever.
 func (r *localActorRegistry) observeLocalQuotaChildren(ctx context.Context, records []agentcontrol.AgentRecord) []agentcontrol.ReclaimObservation {
 	observations := make([]agentcontrol.ReclaimObservation, 0, len(records))
 	for _, record := range records {
@@ -3370,8 +3472,12 @@ func (r *localActorRegistry) observeLocalQuotaChildren(ctx context.Context, reco
 			}
 		}
 		if sessionID != "" {
+			actorLive := false
 			if r.Host != nil && r.Host.SessionHub != nil {
 				if actor, ok := r.Host.SessionHub.Get(sessionID); ok && actor != nil {
+					// An actor live in this process owns the session; its lease is
+					// renewed by the owner, so the container is never stale.
+					actorLive = true
 					if state, exists := actor.StateSummary(); exists {
 						if state.Busy() || state.PendingTool || state.ActiveJobCount > 0 {
 							observation.SessionBusy = true
@@ -3379,11 +3485,16 @@ func (r *localActorRegistry) observeLocalQuotaChildren(ctx context.Context, reco
 					}
 				}
 			}
-			if !observation.SessionBusy && r.Host != nil && r.Host.RuntimeStore != nil {
+			if r.Host != nil && r.Host.RuntimeStore != nil {
 				if state, err := runtimechat.LoadRuntimeStateForInspection(ctx, r.Host.RuntimeStore, sessionID); err == nil && state != nil {
 					summary := state.Summary()
 					if summary.Busy() || summary.PendingTool || summary.ActiveJobCount > 0 {
 						observation.SessionBusy = true
+					}
+					if !actorLive && !observation.SessionMissing && !observation.SessionTerminal && localAgentRuntimeStateClaimsProgress(state.Status) {
+						if staleLease, leaseErr := localAgentRegistryHasExpiredLease(ctx, r.Host.RuntimeStore, sessionID); leaseErr == nil && staleLease {
+							observation.SessionStale = true
+						}
 					}
 				}
 			}
@@ -3409,7 +3520,8 @@ func (r *localActorRegistry) localAgentsConfig() runtimecfg.AgentsConfig {
 	if cfg.MaxThreads == 0 && cfg.MaxDepth == 0 && cfg.DefaultWaitTimeoutMs == 0 &&
 		cfg.MinWaitTimeoutMs == 0 && cfg.MaxWaitTimeoutMs == 0 && strings.TrimSpace(cfg.WaitTimeoutMode) == "" &&
 		strings.TrimSpace(cfg.DefaultForkTurns) == "" && cfg.RegistryReconcileInterval == 0 &&
-		strings.TrimSpace(cfg.RegistryReconcileMode) == "" && cfg.ReclaimIdleMs == 0 {
+		strings.TrimSpace(cfg.RegistryReconcileMode) == "" && cfg.RegistryTerminalRetention == 0 &&
+		cfg.ReclaimIdleMs == 0 {
 		return defaults
 	}
 	return cfg

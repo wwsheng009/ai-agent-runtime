@@ -241,6 +241,9 @@ func (s *SQLiteGlobalAgentRegistryStore) closeAgentWakeWatchers() {
 // UpsertAgentControlAgent inserts or refreshes one durable AgentControl
 // identity row. The row is idempotent by AgentID; root/path uniqueness remains
 // enforced separately so conflicting identity projections are visible errors.
+// A refresh that only moves the updated_at heartbeat does not append a wake
+// event: host projections rewrite every identity on every pass, and the wake log
+// must track identity changes rather than the reconcile cadence.
 func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Context, record AgentRecord) (AgentRecord, error) {
 	if s == nil {
 		return AgentRecord{}, fmt.Errorf("agent control agent registry store is not initialized")
@@ -263,7 +266,11 @@ func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Con
 		record.CreatedAt = now
 	}
 	record.UpdatedAt = now
-	_, err := s.db.ExecContext(ctx, `
+	before, beforeExists, err := s.existingAgentControlAgentByID(ctx, record.AgentID)
+	if err != nil {
+		return AgentRecord{}, err
+	}
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO agent_control_agents (
 			agent_id, root_session_id, parent_agent_id, parent_session_id, session_id, agent_path, depth,
 			agent_type, nickname, workflow, team_id, teammate_id, provider, model, reasoning_effort,
@@ -356,6 +363,11 @@ func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Con
 	stored, err := s.getAgentControlAgentByID(ctx, record.AgentID)
 	if err != nil {
 		return AgentRecord{}, err
+	}
+	if beforeExists && agentRecordsShareWakeState(before, stored) {
+		// Same identity, same routing, same status: only the heartbeat moved, so
+		// there is nothing for a watcher to read.
+		return stored, nil
 	}
 	wake, err := s.appendAgentWakeEvent(ctx, stored, "upsert")
 	if err != nil {
@@ -803,6 +815,101 @@ func (s *SQLiteGlobalAgentRegistryStore) markAgentControlAgentSubtreeTerminal(ct
 	return count, nil
 }
 
+// purgeTerminalAgentsSQL and purgeAgentWakeEventsSQL are package constants
+// rather than inline literals so the retention query-plan guard
+// (retention_plan_test.go) can EXPLAIN the exact statements the purge executes: the
+// predicate has to stay index-usable, and only a test over the real SQL catches
+// a regression back to wrapping the column in datetime().
+//
+// Both statements order by the bare timestamp column instead of
+// datetime(column): retention keeps idx_agent_control_agents_closed_at and
+// idx_agent_control_agent_wake_created_at for exactly this job, and a sort over
+// an expression cannot be served from an index, so the aged order used to fall
+// back to a temp b-tree on every batch. Every writer stores UTC RFC3339, where
+// the lexical order matches the chronological one, so the bare comparison is
+// both sargable and enough to walk the index in age order. The datetime()
+// predicate stays as the authority on age: it keeps rows whose timestamp cannot
+// be parsed out of the purge, and it absorbs the single case where the two
+// orders disagree (RFC3339Nano drops trailing zeros, so "…:00Z" sorts after
+// "…:00.5Z") — a batch may then pick a row up to one second out of age order,
+// which cannot change the set an aged window eventually removes.
+const purgeTerminalAgentsSQL = `
+		DELETE FROM agent_control_agents
+		WHERE id IN (
+			SELECT id FROM agent_control_agents
+			WHERE closed_at IS NOT NULL
+				AND closed_at < ?
+				AND datetime(closed_at) IS NOT NULL
+				AND datetime(closed_at) < datetime(?)
+			ORDER BY closed_at ASC, id ASC
+			LIMIT ?
+		)
+	`
+
+const purgeAgentWakeEventsSQL = `
+		DELETE FROM agent_control_agent_wake_events
+		WHERE id IN (
+			SELECT id FROM agent_control_agent_wake_events
+			WHERE created_at < ?
+				AND datetime(created_at) IS NOT NULL
+				AND datetime(created_at) < datetime(?)
+			ORDER BY created_at ASC, id ASC
+			LIMIT ?
+		)
+	`
+
+// PurgeAgentControlTerminalAgents deletes up to limit terminal rows whose
+// closed_at is strictly older than closedBefore, oldest first. Live rows have
+// closed_at IS NULL and can never match, so retention cannot race a child that
+// is still holding quota. Rows with an unparsable timestamp are left alone
+// (conservative: retention only removes what it can date).
+func (s *SQLiteGlobalAgentRegistryStore) PurgeAgentControlTerminalAgents(ctx context.Context, closedBefore time.Time, limit int) (int64, error) {
+	if s == nil {
+		return 0, fmt.Errorf("agent control agent registry store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return 0, err
+	}
+	if limit <= 0 {
+		limit = terminalPurgeBatch
+	}
+	result, err := s.db.ExecContext(ctx, purgeTerminalAgentsSQL, formatAgentTime(closedBefore), formatAgentTime(closedBefore), limit)
+	if err != nil {
+		return 0, fmt.Errorf("purge terminal agent control agents: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("read purged agent control agent count: %w", err)
+	}
+	return count, nil
+}
+
+// PurgeAgentControlAgentWakeEvents deletes up to limit wake events older than
+// createdBefore, oldest first. The log is append-only and consumed by id
+// cursors, so dropping aged rows never rewinds a watcher: LastAgentControlAgentWakeSeq
+// still reports the maximum id (or 0 once every row is gone, which a watcher
+// treats as "no history").
+func (s *SQLiteGlobalAgentRegistryStore) PurgeAgentControlAgentWakeEvents(ctx context.Context, createdBefore time.Time, limit int) (int64, error) {
+	if s == nil {
+		return 0, fmt.Errorf("agent control agent registry store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return 0, err
+	}
+	if limit <= 0 {
+		limit = terminalPurgeBatch
+	}
+	result, err := s.db.ExecContext(ctx, purgeAgentWakeEventsSQL, formatAgentTime(createdBefore), formatAgentTime(createdBefore), limit)
+	if err != nil {
+		return 0, fmt.Errorf("purge agent control agent wake events: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("read purged agent control agent wake event count: %w", err)
+	}
+	return count, nil
+}
+
 func (s *SQLiteGlobalAgentRegistryStore) getAgentControlAgentByID(ctx context.Context, agentID string) (AgentRecord, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, agent_id, root_session_id, parent_agent_id, parent_session_id, session_id, agent_path, depth,
@@ -819,6 +926,20 @@ func (s *SQLiteGlobalAgentRegistryStore) getAgentControlAgentByID(ctx context.Co
 		return AgentRecord{}, fmt.Errorf("read agent control agent: %w", err)
 	}
 	return record.Normalize(), nil
+}
+
+// existingAgentControlAgentByID is the tolerant form of
+// getAgentControlAgentByID: a missing row reports ok=false instead of an error,
+// so a write can tell "insert" from "refresh of an unchanged identity".
+func (s *SQLiteGlobalAgentRegistryStore) existingAgentControlAgentByID(ctx context.Context, agentID string) (AgentRecord, bool, error) {
+	record, err := s.getAgentControlAgentByID(ctx, agentID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return AgentRecord{}, false, nil
+		}
+		return AgentRecord{}, false, err
+	}
+	return record, true, nil
 }
 
 // WatchAgentControlAgentWake subscribes to in-process notifications for newly
@@ -1084,6 +1205,9 @@ func (s *SQLiteGlobalAgentRegistryStore) init(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_agent_control_agents_root_path ON agent_control_agents(root_session_id, agent_path);`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_control_agents_parent ON agent_control_agents(parent_agent_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_control_agents_team ON agent_control_agents(workflow, team_id, teammate_id);`,
+		// Retention orders terminal rows by age, so the purge keeps its own index
+		// instead of scanning the whole registry on every reconcile pass.
+		`CREATE INDEX IF NOT EXISTS idx_agent_control_agents_closed_at ON agent_control_agents(closed_at);`,
 		`CREATE TABLE IF NOT EXISTS agent_control_agent_wake_events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			agent_row_id INTEGER,
@@ -1108,6 +1232,8 @@ func (s *SQLiteGlobalAgentRegistryStore) init(ctx context.Context) error {
 			ON agent_control_agent_wake_events(session_id, id);`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_control_agent_wake_team
 			ON agent_control_agent_wake_events(workflow, team_id, teammate_id, id);`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_control_agent_wake_created_at
+			ON agent_control_agent_wake_events(created_at);`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {

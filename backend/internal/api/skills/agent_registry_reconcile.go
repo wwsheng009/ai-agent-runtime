@@ -21,6 +21,7 @@ import (
 const (
 	apiRegistryReconcileIntervalEnv = "AICLI_REGISTRY_RECONCILE_INTERVAL"
 	apiRegistryReconcileModeEnv     = "AICLI_REGISTRY_RECONCILE_MODE"
+	apiRegistryRetentionEnv         = "AICLI_REGISTRY_RETENTION"
 )
 
 // ensureAgentRegistryReconciler lazily builds the P2-9 periodic reconcile loop
@@ -64,7 +65,17 @@ func (h *Handler) ensureAgentRegistryReconciler() *agentcontrol.Reconciler {
 		Lookup: h.agentRegistrySessionBindingLookup(),
 		// P2-9 方案 3：审计之后跑同一套 P2-8 驱逐判定，让终态/空闲子会话在
 		// 周期里自动释放配额（enforce 才真正关闭，observe 只报候选）。
-		Reclaim:  h.reclaimAgentControlAgentQuota,
+		Reclaim: h.reclaimAgentControlAgentQuota,
+		// P2-9 retention, same policy as the CLI host: prune terminal rows plus
+		// their wake events once they fall outside the configured window
+		// (0 → shared default, negative → keep forever). Only already-terminal
+		// rows can match, so a purge never races a quota-holding child.
+		Purge: func(ctx context.Context, now time.Time) (agentcontrol.TerminalPurgeOutcome, error) {
+			return agentcontrol.PurgeTerminalAgentRecords(ctx, store, agentcontrol.TerminalPurgePolicy{
+				Now:       now,
+				Retention: h.agentRegistryTerminalRetention(),
+			})
+		},
 		Mode:     mode,
 		Interval: interval,
 	}
@@ -164,6 +175,22 @@ func (h *Handler) agentRegistryReconcileTuning() (agentcontrol.ReconcileMode, ti
 	return mode, agentcontrol.NormalizeReconcileInterval(interval)
 }
 
+// agentRegistryTerminalRetention resolves registry retention for the API host
+// with the same precedence the sweep settings use (environment > runtime
+// config > built-in default), so one deployment cannot end up with two
+// retention windows. A normalized 0 disables the purge, which is the operator
+// opt-out (AICLI_REGISTRY_RETENTION=off / agents.registryTerminalRetention < 0).
+func (h *Handler) agentRegistryTerminalRetention() time.Duration {
+	window := time.Duration(0)
+	if h != nil && h.runtimeConfig != nil {
+		window = h.runtimeConfig.Agents.RegistryTerminalRetention
+	}
+	if parsed, ok := agentcontrol.ParseTerminalRetention(os.Getenv(apiRegistryRetentionEnv)); ok {
+		window = parsed
+	}
+	return agentcontrol.NormalizeTerminalRetention(window)
+}
+
 // agentRegistrySessionBindingLookup resolves one durable registry row's session
 // through the same sources the agent APIs use (session storage plus the runtime
 // state store), mirroring the CLI host so the read-only audit exposed over HTTP
@@ -204,6 +231,15 @@ func (h *Handler) agentRegistrySessionBindingLookup() agentcontrol.SessionBindin
 	}
 }
 
+// agentRegistryCanResolveSessionBindings reports whether the host can turn a
+// registry row's session id into a verdict at all. It mirrors the CLI host's
+// guard (localAgentRegistryTerminalState): without the session storage the
+// binding lookup can only answer "not found" for every row, and a sweep built
+// on that answer would mark a whole healthy registry stale.
+func (h *Handler) agentRegistryCanResolveSessionBindings() bool {
+	return h != nil && h.sessionManager != nil && h.sessionManager.GetStorage() != nil
+}
+
 // apiAgentRegistryHasExpiredLease reports whether the session's execution lease
 // has already expired while the runtime state still claims progress, which is
 // the crash signature the audit reports as STALE.
@@ -217,4 +253,146 @@ func apiAgentRegistryHasExpiredLease(ctx context.Context, store chat.RuntimeStat
 		return false, err
 	}
 	return !lease.ExpiresAt.After(time.Now().UTC()), nil
+}
+
+// apiAgentRegistrySessionClaimsProgress mirrors the CLI host's progress test:
+// only a state that still claims a live owner turns an expired lease into the
+// crash signature, so an idle session (which legitimately holds no lease) is
+// never marked stale.
+func apiAgentRegistrySessionClaimsProgress(status chat.SessionStatus) bool {
+	switch status {
+	case chat.SessionRunning, chat.SessionRewinding, chat.SessionStopped:
+		return true
+	default:
+		return false
+	}
+}
+
+// sweepStaleAgentControlAgentRegistry is the API-host twin of the CLI's
+// sweepStaleLocalAgentRegistry (cmd/aicli/commands/chat_actor_registry.go):
+// every projection refresh converges abandoned bindings before the roster is
+// upserted, so a deployment whose periodic pass stays in observe mode still
+// releases the quota of children whose container is provably gone. Absent and
+// lease-expired containers are marked stale — the diagnostics-preserving
+// terminal state the spawn-reservation release also uses — while provably
+// terminal ones go through the shared P2-8 eviction path, so the parent stream
+// sees the same agent.reclaimed event as the spawn gate and the manual cleanup
+// entry. Without this, only the CLI host converged during a refresh and the two
+// hosts disagreed about the same registry file (G3).
+func (h *Handler) sweepStaleAgentControlAgentRegistry(ctx context.Context, store agentcontrol.AgentRegistryStore) error {
+	if h == nil || store == nil {
+		return nil
+	}
+	// Same rule as the CLI host's localAgentRegistryTerminalState: a host that
+	// cannot consult a session source has no evidence that a row's container is
+	// gone, so "unverifiable" must not turn into "stale". The read-only audit
+	// still reports the drift for operators; only the convergence stays out of
+	// it.
+	if !h.agentRegistryCanResolveSessionBindings() {
+		return nil
+	}
+	existing, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{IncludeClosed: true})
+	if err != nil {
+		return err
+	}
+	if len(existing) == 0 {
+		return nil
+	}
+	lookup := h.agentRegistrySessionBindingLookup()
+	marked := make(map[string]bool, len(existing))
+	terminalChildren := make([]agentcontrol.AgentRecord, 0, len(existing))
+	for _, record := range existing {
+		record = record.Normalize()
+		if record.Closed() || record.RootSessionID == "" || record.AgentPath == "" || record.SessionID == "" {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(record.RootSessionID) + "|" + strings.TrimSpace(record.AgentPath))
+		if marked[key] {
+			continue
+		}
+		snapshot, lookupErr := lookup(ctx, record.SessionID)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		switch {
+		case !snapshot.Exists:
+			if err := h.markAgentControlSubtreeStale(ctx, store, record); err != nil {
+				return err
+			}
+			marked[key] = true
+		case snapshot.Closed:
+			terminalChildren = append(terminalChildren, record)
+			marked[key] = true
+		case snapshot.Stale:
+			if err := h.markAgentControlSubtreeStale(ctx, store, record); err != nil {
+				return err
+			}
+			marked[key] = true
+		case strings.EqualFold(strings.TrimSpace(snapshot.Status), string(chat.SessionStopped)):
+			terminalChildren = append(terminalChildren, record)
+			marked[key] = true
+		}
+	}
+	if len(terminalChildren) == 0 {
+		return nil
+	}
+	reclaimStore, ok := store.(agentcontrol.AgentReclaimStore)
+	if !ok || reclaimStore == nil {
+		// Store cannot distinguish reclaim reasons: keep the legacy behaviour
+		// and converge the terminal rows with a plain close.
+		now := time.Now().UTC()
+		for _, record := range terminalChildren {
+			if _, closeErr := store.CloseAgentControlAgentSubtree(ctx, record.RootSessionID, record.AgentPath, now); closeErr != nil {
+				return closeErr
+			}
+		}
+		return nil
+	}
+	controller := &sessionAgentController{handler: h}
+	outcome, err := agentcontrol.SweepAgentQuotaReclaim(
+		ctx,
+		reclaimStore,
+		terminalChildren,
+		func(_ context.Context, children []agentcontrol.AgentRecord) []agentcontrol.ReclaimObservation {
+			// These rows were just proven terminal by the binding lookup, so the
+			// shared policy can judge them without another container round-trip.
+			observations := make([]agentcontrol.ReclaimObservation, 0, len(children))
+			for _, child := range children {
+				observations = append(observations, agentcontrol.ReclaimObservation{
+					AgentID:           child.AgentID,
+					AgentPath:         child.AgentPath,
+					SessionID:         child.SessionID,
+					Status:            child.Status,
+					RegistryUpdatedAt: child.UpdatedAt,
+					SessionTerminal:   true,
+				})
+			}
+			return observations
+		},
+		agentcontrol.ReclaimPolicy{Now: time.Now().UTC()},
+		true,
+		func(ctx context.Context, rootSessionID string, pass agentcontrol.ReclaimOutcome) {
+			controller.publishAgentReclaimEvent(rootSessionID, rootSessionID, agentcontrol.ReclaimSourceReconcile, pass)
+		},
+	)
+	if err != nil {
+		return err
+	}
+	if first := strings.TrimSpace(outcome.FirstError); first != "" {
+		return fmt.Errorf("sweep terminal agent rows: %s", first)
+	}
+	return nil
+}
+
+// markAgentControlSubtreeStale records an abandoned binding without pretending
+// it was an orderly close, falling back to a plain close on stores that cannot
+// keep the distinction (same contract as the CLI host helper).
+func (h *Handler) markAgentControlSubtreeStale(ctx context.Context, store agentcontrol.AgentRegistryStore, record agentcontrol.AgentRecord) error {
+	staleAt := time.Now().UTC()
+	if marker, ok := store.(agentcontrol.AgentStaleMarker); ok && marker != nil {
+		_, err := marker.MarkAgentControlAgentSubtreeStale(ctx, record.RootSessionID, record.AgentPath, staleAt)
+		return err
+	}
+	_, err := store.CloseAgentControlAgentSubtree(ctx, record.RootSessionID, record.AgentPath, staleAt)
+	return err
 }
