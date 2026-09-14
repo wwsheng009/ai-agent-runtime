@@ -240,6 +240,9 @@ function buildHistoryMessage(
     typeof message.tool_call_id === "string" ? message.tool_call_id.trim() : "";
   // 工具回执：历史里 role="tool" 独立成条，按其配对调用还原 tool segment，
   // 由消息列表按 24px 工具行呈现（不再是通用「上下文注入」行）。
+  // 空消息不占位（§12.1.4）：工具回合 / 仅推理 / 仅附件的 assistant 消息 content
+  // 为空是正常协议形态，不能降级成 "[empty message]" 文本段顶到过程区上屏。
+  const contentText = message.content?.trim() ?? "";
   const segments: MessageSegment[] =
     message.role === "tool"
       ? [
@@ -249,10 +252,9 @@ function buildHistoryMessage(
           ),
         ]
       : [
-          {
-            type: "text",
-            content: message.content?.trim() || "[empty message]",
-          },
+          ...(contentText
+            ? [{ type: "text" as const, content: contentText }]
+            : []),
           ...(reasoningText
             ? [{ type: "reasoning" as const, content: reasoningText }]
             : []),

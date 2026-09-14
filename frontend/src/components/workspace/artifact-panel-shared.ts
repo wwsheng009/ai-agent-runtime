@@ -171,14 +171,19 @@ export function buildCheckpointConversationSummary(
     return [];
   }
 
-  return messages.slice(0, 4).map((message, index) => {
-    const role = message.role?.trim() || `message ${index + 1}`;
-    const content = message.content?.trim() || "[empty message]";
-    return {
-      content,
-      role,
-    };
-  });
+  // 空消息不占位（§12.1.4）：没有正文的检查点消息（工具回合 / 仅推理）直接跳过，
+  // 不再用 "[empty message]" 之类的占位文案顶上屏。
+  return messages
+    .map((message, index) => {
+      const role = message.role?.trim() || `message ${index + 1}`;
+      const content = message.content?.trim() ?? "";
+      return {
+        content,
+        role,
+      };
+    })
+    .filter((message) => message.content.length > 0)
+    .slice(0, 4);
 }
 
 export function formatBacktrackAuditTitle(entry: RuntimeSessionBacktrackTombstone) {

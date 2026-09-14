@@ -71,18 +71,18 @@ export function HistoryToolMessageRow({
         {message.label}
       </span>
       <div className="flex w-full min-w-0 flex-col gap-1" id={statusId}>
-        {nodes.map((node) => (
-          <div key={node.key}>
-            {renderMessageSegment(node.segment, {
-              anchorKey: message.id,
-              flowKey: `tool-call:${node.key}`,
-              interrupted: message.interrupted === true,
-              streaming: false,
-              onSelectArtifact,
-              resolveFilePathLink,
-            })}
-          </div>
-        ))}
+        {nodes.map((node) => {
+          const row = renderMessageSegment(node.segment, {
+            anchorKey: message.id,
+            flowKey: `tool-call:${node.key}`,
+            interrupted: message.interrupted === true,
+            streaming: false,
+            onSelectArtifact,
+            resolveFilePathLink,
+          });
+          // §12.1.4：空行节点不落 DOM——空包裹 div 会吃掉父级 gap，撑出空行。
+          return row ? <div key={node.key}>{row}</div> : null;
+        })}
       </div>
       {renderRelatedArtifactSection(relatedEvidence, onSelectArtifact)}
     </div>

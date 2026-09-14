@@ -9,6 +9,7 @@ import { type Artifact } from "@/data/mock";
 import { useConnectionStatusLabels } from "@/hooks/workspace/use-connection-status-labels";
 import { useConversationScroll } from "@/hooks/workspace/use-conversation-scroll";
 import {
+  hasVisibleMessageContent,
   isContextMessage,
   isSystemPromptMessage,
   isToolReceiptMessage,
@@ -72,6 +73,19 @@ export function MessageList({
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [inlineEditDraft, setInlineEditDraft] = useState("");
   const selectedMessageRef = useRef<HTMLElement | null>(null);
+  // §12.1.4：无可见内容的助手消息不产出 <article>。外层是 `flex flex-col gap-4`，
+  // 空壳 article 自身高度为 0 却仍是一个 flex item，会在相邻消息间撑出一条空白行
+  // （典型来源：回合开始到首块到达之间的流式空壳、纯工具回合）。
+  const visibleMessages = messages.filter((message) => {
+    if (message.role !== "assistant") {
+      return true;
+    }
+    const relatedCount = (message.relatedArtifactIds ?? []).filter((artifactId) => {
+      const artifact = artifactMap.get(artifactId);
+      return artifact !== undefined && isArtifactEvidence(artifact);
+    }).length;
+    return hasVisibleMessageContent(message, relatedCount);
+  });
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   // P1-3：滚动所有权收口到 useConversationScroll（贴底跟随 / 阅读保顶 /
@@ -163,7 +177,7 @@ export function MessageList({
           <NoticeRow>{backtrackNotice}</NoticeRow>
         ) : null}
 
-        {messages.map((message, messageIndex) => {
+        {visibleMessages.map((message, messageIndex) => {
           const relatedEvidence = (message.relatedArtifactIds ?? [])
             .map((artifactId) => artifactMap.get(artifactId))
             .filter((artifact): artifact is Artifact => artifact !== undefined)
@@ -196,7 +210,7 @@ export function MessageList({
               aria-current={isNavigationSelected ? "true" : undefined}
               aria-describedby={describedBy}
               aria-labelledby={labelId}
-              aria-setsize={messages.length}
+              aria-setsize={visibleMessages.length}
               aria-posinset={messageIndex + 1}
               data-active-turn={activeMessageId === message.id ? "true" : undefined}
               data-backtrack-selected={isNavigationSelected ? "true" : undefined}

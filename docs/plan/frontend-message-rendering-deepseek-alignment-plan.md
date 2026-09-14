@@ -742,6 +742,39 @@ npm run test:e2e      # playwright
 
 > **全量 e2e 波动记录**：全量 73 项在本轮先后跑三次，第 1 跑 1 例失败（`workspace-chat` P1-3a：读数锚点漂移 1084px）、第 2 跑 1 例失败（`workspace-chat` G5：`top` 距底 > 120px），失败项同属 **P1-3 滚动所有权家族**；同产物同命令重跑时 `G5` 失败率在 3/3 与 1/3 之间摆动（`P1-3a` 单独 `--repeat-each=3` → 3/3 通过），失败断言都落在「流式 chunk 到达后立即取几何」的窗口内，判定为**时序/负载抖动，非本次改动引入**——本次改动只在「摘要含交互元素的过程行」内新增按钮，而 `script=scroll` 流程（P1-3a / G5 的脚本）**不含任何工具行**，`interactiveSummary` 全仓仅由 `message-tool-row.tsx` 传入。处置：**不放宽既有容差、不改 P1-3 用例语义**，按已知抖动记录；若后续复现稳定，再单开一轮收口。
 
+### 12.1.4 空内容不占位：占位文案 / 复制图标 / 空行三合一收口（2026-09-14）
+
+> 触发（用户实测反馈）：① 界面出现 `[empty message]` 占位文案，且推理过程这类「本就没有正文」的行也被塞进占位；② 复制图标在每一行都常驻（无内容时只是置灰），用户要求「按具体内容显示」；③ 消息之间出现多余空行，挤压可视区。
+>
+> 参考站口径（源码实证）：`AssistantMarkdown` 对「只含工具调用头 / 没有任何可见块」的节点直接 `return null`，注释写明「a node that is only those heads (or empty) would paint an empty root between tool groups — skip the shell unless something visible remains」（`packages/client/ui-chat/src/client/chat/AssistantMarkdown.tsx:60-67`）；复制 / 分支入口只在**消息级 chrome** 出现一次（`MessageIconActions`，用户气泡与助手回合尾共用，`MessageItem.tsx:157-228` 的 `UserStyleBubble` 只有当 `text !== '' || rest.length > 0` 才画气泡），**过程行（推理 / 工具）不挂复制入口**。
+>
+> 本地实现原则：把「有没有可见内容」收口成**单一判定源**，渲染层据此决定「产不产行 / 产不产按钮」，而不是先渲染出来再用透明、`disabled`、占位文案去遮。
+
+| 落点 | 条款 | 改动 | 证据 |
+|---|---|---|---|
+| `lib/chat-view/visible-text.ts`（新增） | §5.5 / §8.5 | 新增 `hasVisibleText`（`trim().length > 0`）作为全仓唯一空内容判据；文件头记录三条使用场景（不产行、不占位、不出复制入口） | 各渲染层不再各写 `trim()`；`npm run lint` 的 i18n / 行数脚本通过 |
+| `lib/chat-view/message-visibility.ts`（新增）+ `lib/chat-view/index.ts` | §12.1.4 | `segmentHasVisibleContent`（段级：空文本 / 空推理 / 空 callout / 空代码块 → 不可见；工具行、图片占位行自带状态 → 恒可见）与 `hasVisibleMessageContent`（消息级：命中关联产物或回合用量时仍保留该行） | `message-visibility.test.ts`（5 用例：空壳 / 正文 / 推理 / 工具 / 产物 / 用量 / 空 callout / 空代码块） |
+| `lib/thread-state/history-mapping.ts` | §5.5 | 历史消息 `content` 为空不再降级成 `"[empty message]"` 文本段；空正文直接不产段（工具回合 / 仅推理 / 仅附件是正常协议形态） | `history-mapping.test.ts`「空 content 不得降级成 `[empty message]`」（含工具回合 / 仅推理两形态） |
+| `lib/thread-state/events.ts` | §9 流式 | `buildStreamingMessageSegments` / `createStreamingAssistantMessage` 不再注入 `...` 占位文本段：首块到达前段落序列为空，首个 `assistant_delta` 由 `appendTextToMessageSegments` 直接 push 新文本段（该函数保留「读到历史 `...` 段先清零再加」的兼容分支） | `runtime-events.test.ts`「没有正文时不产占位文本段」「流式助手消息初始无 segments」；`deltas.test.ts` 首块替换用例保持通过 |
+| `components/workspace/message-list/segment-rendering.tsx` | §8.4 / §12.1.4 | 空文本段 `return null`（连锚点包裹都不落 DOM）；这是「空行」的第一类来源：空行节点自身高度为 0，但仍会被父级 `gap` 计入 | `segment-rendering.test.tsx` |
+| `components/workspace/message-reasoning-row.tsx` | §5.5 / §12.1.4 | 无推理正文时整行不渲染；删除 `reasoningRow.empty` 占位摘要分支（推理行的摘要只由真实内容派生） | `message-reasoning-row.test.tsx`（4 用例） |
+| `components/workspace/message-list.tsx` | §4.1 / §12.1.4 | 消息级空壳门：无可见内容的**助手**消息不产出 `<article>`。根因——转录列是 `flex flex-col gap-4`，空壳 `article` 仍是 flex item，会在相邻消息间撑出一条 16px 空行（典型：回合开始到首块到达之间的流式空壳、纯工具回合）；`aria-setsize` / `aria-posinset` 改按**实际渲染集合**计数 | `message-list.test.tsx`「无可见内容的助手消息不产出 article（不占 gap 空行）」 |
+| `components/workspace/message-list/turn-tail-row.tsx` | §12.1.4 | 复制图标改为**按内容渲染**：该回合没有可见回答文本时整颗图标不渲染（不再「禁用但常驻」）；无文本、无用量、无重试入口时整行不渲染（去掉每条助手消息尾部 28px 空动作行） | `turn-tail-row.test.tsx`（5 用例） |
+| `components/workspace/message-list/user-message-bubble.tsx` | §12.1.4 | 空文本段在气泡内不渲染（含外层包裹 div）；动作区整行按条件产出（无复制文本且无回溯 / 选中态 → 不产 28px 行）；复制按钮同样只在有文本时渲染 | `user-message-bubble.test.tsx`（5 用例） |
+| `components/workspace/message-list/history-tool-message-row.tsx`、`history-context-message-card.tsx` | §12.1.1 / §12.1.4 | 行节点为 `null` 时不再套空包裹 `<div>`——空包裹会吃掉 `gap-1` / `space-y-2` 的间距，等价于一条空行 | 上述两卡片的既有单测 + `segment-rendering.test.tsx` |
+| `components/workspace/artifact-panel-shared.ts` | §12.1.4 | 检查点对话摘要跳过空正文消息，不再用 `"[empty message]"` 顶上屏；`slice(0, 4)` 改为**过滤后**截取（空消息不再占用预览名额） | `artifact-panel-shared.test.ts`「没有正文的检查点消息直接跳过」 |
+
+> **空行根因归纳（三类，全部落在「已渲染但无内容」上）**：
+> 1. **占位内容被当成真内容**：`"[empty message]"` 文本段、`...` 流式占位段都会渲染成**真实行**（有行高、有 markdown 段落间距）；
+> 2. **固定动作行**：`turn-tail` 与用户气泡动作区此前无条件产出 28px 行，空内容时留下一条只有背景悬停反馈的空行；
+> 3. **空 flex item 吃掉父级 gap**：转录列 `gap-4`、气泡 / 历史卡内 `gap-1` / `space-y-2` 都按「子节点个数」分配间距，空段落或空包裹 `div` 自身高度为 0 **但仍占一个 gap 槽**，视觉上就是一条空行。三类的共性处置是**在产出节点的那一层判空**，而不是靠 `hidden` / `opacity-0` / 空字符串兜底。
+>
+> 边界：本批次只改渲染与投影层，不动运行时事件协议；`STREAM_PLACEHOLDER_TEXT` 常量保留，仅用于**读**历史里可能残留的 `...` 段（`getAssistantMessageText` / `appendTextToMessageSegments` 的兼容分支），不再用于**写**新消息。
+>
+> **与参考站的差异（有意偏离，用户显式诉求）**：参考站的 `UserStyleBubble` 只对「空正文」隐藏气泡本体，动作区仍无条件渲染（`MessageItem.tsx:226` 的 `actions?.(text)` 不在文本判空之内），即空文本时复制图标会以「可点但无内容可写」的形态留在屏上。本地按要求收紧为**内容驱动**：没有可复制文本就整颗图标不渲染——同时删掉常驻的 `disabled` 态，避免「看得见按不动」的无效动作位。
+>
+> **门禁（2026-09-14，全链路串行一轮过，尾行 `GATE_OK`）**：`npm run lint` → eslint 0 error（3 条既有 react-hooks warning）+ i18n（651 键全命中）/ 备份（958 文件 0 处 `*.bak`·`.backups`）/ 行数（最大 499 行）/ 消息字面量四项校验 OK；`npx vitest run` → **186 文件 / 1373 用例全通过**（含本轮新增 `message-visibility.test.ts` 5 例、`message-list.test.tsx` 空壳不产 `article` 例、`turn-tail-row.test.tsx` 5 例、`user-message-bubble.test.tsx` 5 例、`history-mapping.test.ts` 空 `content` 不降级例）；`npm run build`（`tsc -b && vite build`，3280 模块）无错；`npm run test:e2e` → **73 passed**（全量，含 §12.1.3 收窄过选择器的 `tool-row-history` / `workspace-chat`）。
+
 ### 12.2 参考站 → 本地 token 映射（本方案实际采用项，2026-09-14）
 
 > 对应 §10.4(2) 的「逐条等价值」承诺：只登记**本方案实际采用**的项与证据来源；参考站 `--dsh-*` 字号轴未出现在浏览器快照（快照只含 `--dsw-*` 317 条），其值以 §13.4 源码标注为准，其余以实测报告行号为准。**本地一律走 primitive → semantic → `@theme` 三层，不搬参考站 CSS Modules / `--dsw-*` 命名，也不写字面色值。**

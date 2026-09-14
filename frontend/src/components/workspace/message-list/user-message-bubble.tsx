@@ -11,6 +11,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { type ChatMessage, type MessageSegment } from "@/data/mock";
 import { isSteeringMessage } from "@/lib/chat-view";
+import { hasVisibleText } from "@/lib/chat-view/visible-text";
 import { cn } from "@/lib/utils";
 
 import { renderMessageSegment } from "./segment-rendering";
@@ -74,7 +75,7 @@ export function UserMessageBubble({
   const flowKind = isSteeringMessage(message) ? "steering" : "user";
 
   const copy = async () => {
-    if (!text) {
+    if (!hasVisibleText(text)) {
       return;
     }
     try {
@@ -173,75 +174,89 @@ export function UserMessageBubble({
               </p>
             </div>
           ) : (
-            message.segments.map((segment, index) => (
-              <div key={`${message.id}-${segment.type}-${index}`}>
-                {renderMessageSegment(segment, {
-                  interrupted: message.interrupted === true,
-                  streaming: false,
-                  onSelectArtifact,
-                })}
-              </div>
-            ))
+            // §12.1.4：空文本段整段不渲染（含外层包裹 div）——空 flex item 会吃掉
+            // 气泡内的 gap，撑出一条空行。
+            message.segments
+              .filter(
+                (segment) =>
+                  segment.type !== "text" || hasVisibleText(segment.content),
+              )
+              .map((segment, index) => (
+                <div key={`${message.id}-${segment.type}-${index}`}>
+                  {renderMessageSegment(segment, {
+                    interrupted: message.interrupted === true,
+                    streaming: false,
+                    onSelectArtifact,
+                  })}
+                </div>
+              ))
           )}
         </div>
       </div>
 
-      <div className="flex h-7 items-center gap-1 pr-1 app-hover-reveal">
-        {/* 元数据不上屏（§5.2）：选中态只保留无障碍标记 + aria-current。 */}
-        {isNavigationSelected ? (
-          <span className="sr-only">
-            {t("panels.messages.userBubble.selected")}
+      {/* §12.1.4：动作区同样按内容产出——无复制文本且无回溯入口时整行不渲染，
+          避免每条用户消息下面吊着一条 28px 空行。 */}
+      {hasVisibleText(text) || showBacktrack || isNavigationSelected ? (
+        <div className="flex h-7 items-center gap-1 pr-1 app-hover-reveal">
+          {/* 元数据不上屏（§5.2）：选中态只保留无障碍标记 + aria-current。 */}
+          {isNavigationSelected ? (
+            <span className="sr-only">
+              {t("panels.messages.userBubble.selected")}
+            </span>
+          ) : null}
+          <span aria-live="polite" className="sr-only">
+            {copied ? t("panels.messages.turnTail.copied") : ""}
           </span>
-        ) : null}
-        <span aria-live="polite" className="sr-only">
-          {copied ? t("panels.messages.turnTail.copied") : ""}
-        </span>
-        <button
-          aria-label={t("panels.messages.userBubble.copyAriaLabel")}
-          className={ACTION_BUTTON_CLASS}
-          disabled={!text}
-          onClick={(event) => {
-            event.stopPropagation();
-            void copy();
-          }}
-          type="button"
-        >
-          <CopyIcon aria-hidden="true" size={15} />
-        </button>
-        {showBacktrack ? (
-          <>
+          {/* 复制图标按内容显示（§12.1.4）：纯附件 / 空正文的用户消息没有可复制文本，
+              不再渲染常驻的禁用图标。 */}
+          {hasVisibleText(text) ? (
             <button
-              aria-label={t("panels.messages.userBubble.editAriaLabel")}
+              aria-label={t("panels.messages.userBubble.copyAriaLabel")}
               className={ACTION_BUTTON_CLASS}
-              disabled={actionsDisabled}
               onClick={(event) => {
                 event.stopPropagation();
-                setEditingMessageId(message.id);
-                setInlineEditDraft(extractUserBubbleText(message));
+                void copy();
               }}
               type="button"
             >
-              <PencilLineIcon aria-hidden="true" size={15} />
+              <CopyIcon aria-hidden="true" size={15} />
             </button>
-            <button
-              aria-label={t("panels.messages.userBubble.backtrackAriaLabel")}
-              className={ACTION_BUTTON_CLASS}
-              disabled={actionsDisabled}
-              onClick={(event) => {
-                event.stopPropagation();
-                onBacktrackToMessage?.(message.id, "conversation");
-              }}
-              type="button"
-            >
-              {backtrackPending ? (
-                <LoaderCircleIcon aria-hidden="true" className="animate-spin" size={15} />
-              ) : (
-                <HistoryIcon aria-hidden="true" size={15} />
-              )}
-            </button>
-          </>
-        ) : null}
-      </div>
+          ) : null}
+          {showBacktrack ? (
+            <>
+              <button
+                aria-label={t("panels.messages.userBubble.editAriaLabel")}
+                className={ACTION_BUTTON_CLASS}
+                disabled={actionsDisabled}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setEditingMessageId(message.id);
+                  setInlineEditDraft(extractUserBubbleText(message));
+                }}
+                type="button"
+              >
+                <PencilLineIcon aria-hidden="true" size={15} />
+              </button>
+              <button
+                aria-label={t("panels.messages.userBubble.backtrackAriaLabel")}
+                className={ACTION_BUTTON_CLASS}
+                disabled={actionsDisabled}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onBacktrackToMessage?.(message.id, "conversation");
+                }}
+                type="button"
+              >
+                {backtrackPending ? (
+                  <LoaderCircleIcon aria-hidden="true" className="animate-spin" size={15} />
+                ) : (
+                  <HistoryIcon aria-hidden="true" size={15} />
+                )}
+              </button>
+            </>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

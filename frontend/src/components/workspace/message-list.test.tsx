@@ -168,6 +168,41 @@ describe("MessageList", () => {
     expect(markup).not.toContain("上下文注入");
   });
 
+  it("§12.1.4：无可见内容的助手消息不产出 article（不占 gap 空行）", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        author: "You",
+        label: "prompt",
+        segments: [{ type: "text", content: "跑一下测试" }],
+      },
+      {
+        // 流式首块到达前的空壳：没有段落，也没有用量 / 关联产物。
+        id: "assistant-1",
+        role: "assistant",
+        author: "Runtime stream",
+        label: "streaming",
+        segments: [],
+      },
+    ];
+
+    const markup = renderToStaticMarkup(
+      <MessageList
+        artifacts={[]}
+        isResponding
+        messages={messages}
+        onSelectArtifact={() => {}}
+      />,
+    );
+
+    expect(markup).toContain('data-message-id="user-1"');
+    expect(markup).not.toContain('data-message-id="assistant-1"');
+    // 行序号按实际渲染出的消息重新计数（跳过空壳后只剩 1 条）。
+    expect(markup).toContain('aria-posinset="1"');
+    expect(markup).toContain('aria-setsize="1"');
+  });
+
   it("falls back to the context row for legacy tool receipts without tool segments", () => {
     const messages: ChatMessage[] = [
       {

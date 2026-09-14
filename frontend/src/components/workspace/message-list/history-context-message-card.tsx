@@ -111,16 +111,16 @@ export function HistoryContextMessageCard({
             data-chat-panel="context"
           >
             <div className="space-y-2">
-              {view.nodes.map((node) => (
-                <div key={node.key}>
-                  {renderMessageSegment(node.segment, {
-                    interrupted: message.interrupted === true,
-                    streaming: false,
-                    onSelectArtifact,
-                    resolveFilePathLink,
-                  })}
-                </div>
-              ))}
+              {view.nodes.map((node) => {
+                const row = renderMessageSegment(node.segment, {
+                  interrupted: message.interrupted === true,
+                  streaming: false,
+                  onSelectArtifact,
+                  resolveFilePathLink,
+                });
+                // §12.1.4：空行节点不落 DOM——空包裹 div 会吃掉 `space-y-2` 的间距。
+                return row ? <div key={node.key}>{row}</div> : null;
+              })}
             </div>
             {renderRelatedArtifactSection(relatedEvidence, onSelectArtifact)}
           </div>

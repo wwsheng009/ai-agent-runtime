@@ -74,7 +74,6 @@ export const zhWorkspacePanelsMessages = {
   reasoningRow: {
     title: "推理过程",
     trimmed: "已截断 {{chars}} 个前导字符",
-    empty: "等待推理输出…",
     expandLabel: "展开推理过程",
     collapseLabel: "折叠推理过程",
   },

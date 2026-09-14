@@ -146,6 +146,20 @@ describe("artifact panel helpers", () => {
         content: "Keep this short",
       },
     ]);
+
+    // §12.1.4：没有正文的检查点消息直接跳过，不用 "[empty message]" 占位。
+    expect(
+      buildCheckpointConversationSummary([
+        { role: "assistant", content: "   " },
+        { role: "tool", content: "" },
+        { role: "user", content: "Keep this short" },
+      ]),
+    ).toEqual([
+      {
+        role: "user",
+        content: "Keep this short",
+      },
+    ]);
   });
 
   it("formats backtrack audit tombstone titles, meta, and selection", () => {

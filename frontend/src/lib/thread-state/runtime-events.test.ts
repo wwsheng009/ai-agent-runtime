@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildStreamingMessageSegments,
+  createStreamingAssistantMessage,
   mergeRuntimeSessionsIntoThreads,
   mergeRuntimeEvent,
 } from "@/lib/workspace-thread-state";
@@ -95,5 +96,28 @@ describe("runtime events and session merge", () => {
           "Generation was stopped locally. Partial output is preserved so the next turn can continue from this point.",
       },
     ]);
+  });
+
+  it("§12.1.4：没有正文时不产占位文本段（首块到达前正文区不出现「...」行）", () => {
+    expect(buildStreamingMessageSegments("", "runtime", "")).toEqual([]);
+
+    // 只有推理先行时，段落序列里也不带占位文本段。
+    expect(buildStreamingMessageSegments("", "runtime", "先看入口文件")).toEqual([
+      {
+        type: "reasoning",
+        content: "先看入口文件",
+        running: false,
+      },
+    ]);
+  });
+
+  it("§12.1.4：流式助手消息初始无 segments（占位不再落成文本行）", () => {
+    const message = createStreamingAssistantMessage(
+      "assistant-1",
+      ["artifact-1"],
+      "turn-1",
+    );
+
+    expect(message.segments).toEqual([]);
   });
 });

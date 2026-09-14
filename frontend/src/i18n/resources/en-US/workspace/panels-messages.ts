@@ -74,7 +74,6 @@ export const enWorkspacePanelsMessages = {
   reasoningRow: {
     title: "Reasoning",
     trimmed: "{{chars}} leading chars trimmed",
-    empty: "Waiting for reasoning output…",
     expandLabel: "Expand reasoning",
     collapseLabel: "Collapse reasoning",
   },

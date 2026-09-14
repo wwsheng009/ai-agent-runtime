@@ -6,6 +6,7 @@ import { Suspense } from "react";
 
 import { FlowFallbackRow } from "./flow-fallback-row";
 import { segmentFlowKind } from "@/lib/chat-view";
+import { hasVisibleText } from "@/lib/chat-view/visible-text";
 import { MessageReasoningRow } from "@/components/workspace/message-reasoning-row";
 import { MessageToolRow } from "@/components/workspace/message-tool-row";
 import { type Artifact, type MessageSegment } from "@/data/mock";
@@ -48,6 +49,11 @@ export function renderMessageSegment(
   };
 
   if (segment.type === "text") {
+    // §12.1.4：空文本段不生成行节点——空 flex item 高度为 0，但仍会吃掉父级 gap
+    // （相邻行各多一条 8px 空行），因此必须在渲染层直接不产出节点。
+    if (!hasVisibleText(segment.content)) {
+      return null;
+    }
     return (
       <div className="min-w-0" {...anchors}>
         <StreamingMarkdown

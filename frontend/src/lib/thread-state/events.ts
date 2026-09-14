@@ -277,12 +277,13 @@ export function buildStreamingMessageSegments(
     reasoningRunning?: boolean;
   },
 ) {
-  const segments: MessageSegment[] = [
-    {
-      type: "text",
-      content: text || STREAM_PLACEHOLDER_TEXT,
-    },
-  ];
+  // §12.1.4：没有正文就不产文本段——历史版本会塞一个 `...` 占位段，
+  // 首块到达前它会在正文区渲染出一条真实的「...」行（空行 / 噪声）。
+  const segments: MessageSegment[] = [];
+
+  if (text) {
+    segments.push({ type: "text", content: text });
+  }
 
   if (reasoning.trim()) {
     segments.push({
@@ -318,12 +319,9 @@ export function createStreamingAssistantMessage(
     runtimeTurnId,
     streaming: true,
     relatedArtifactIds: artifactIds,
-    segments: [
-      {
-        type: "text" as const,
-        content: STREAM_PLACEHOLDER_TEXT,
-      },
-    ],
+    // §12.1.4：流式占位不落成文本段；首个 text delta 到达时由
+    // `appendTextToMessageSegments` 直接追加（没有文本段时 push 新段）。
+    segments: [] as MessageSegment[],
   };
 }
 

@@ -147,3 +147,106 @@ describe("history tool receipts", () => {
     );
   });
 });
+
+// §12.1.4：空 content 不得降级成 "[empty message]" 占位文本——工具回合 / 仅推理 /
+// 仅附件的空正文是正常协议形态，占位文案会顶到过程区（含匹配到 live 消息的合并路径）。
+describe("历史空消息不占位", () => {
+  it("工具回合的空 content 不生成文本段", () => {
+    const history: SessionHistoryMessage[] = [
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "call-1", name: "read_file" }],
+      },
+      { role: "tool", content: "42 行", tool_call_id: "call-1" },
+    ];
+
+    const [assistant, receipt] = mapSessionHistoryToMessages("session-1", history, []);
+
+    // 空正文的 assistant 步不产出行段（工具段挂在回执条目上）。
+    expect(assistant.message.segments).toEqual([]);
+    expect(toolSegmentOf(receipt.message).name).toBe("read_file");
+    expect(
+      JSON.stringify([assistant, receipt].map((entry) => entry.message.segments)),
+    ).not.toContain("[empty message]");
+  });
+
+  it("仅推理消息只保留推理段", () => {
+    const history: SessionHistoryMessage[] = [
+      {
+        role: "assistant",
+        content: "",
+        metadata: {
+          reasoning_details: { visibility: "visible", content: "先盘点入口文件" },
+        },
+      },
+    ];
+
+    const [assistant] = mapSessionHistoryToMessages("session-1", history, []);
+
+    expect(assistant.message.segments.map((segment) => segment.type)).toEqual([
+      "reasoning",
+    ]);
+  });
+
+  it("匹配 live 消息时以历史正文为准，空正文不并进占位文本", () => {
+    const existing: ChatMessage[] = [
+      {
+        id: "msg-1",
+        role: "assistant",
+        author: "Runtime stream",
+        label: "streaming",
+        segments: [{ type: "text", content: "结论：入口文件共 42 行。" }],
+      },
+    ];
+    const history: SessionHistoryMessage[] = [
+      {
+        role: "assistant",
+        content: "",
+        metadata: { message_id: "msg-1" },
+        tool_calls: [{ id: "call-1", name: "read_file" }],
+      },
+      { role: "tool", content: "42 行", tool_call_id: "call-1" },
+    ];
+
+    const [merged] = mapSessionHistoryToMessages("session-1", history, existing);
+    const textSegments = merged.message.segments.filter(
+      (segment) => segment.type === "text",
+    );
+
+    // 历史是权威来源：持久化正文为空时消息不含文本段，也不补占位文案。
+    expect(textSegments).toEqual([]);
+    expect(JSON.stringify(merged.message.segments)).not.toContain("[empty message]");
+
+    const durableHistory: SessionHistoryMessage[] = [
+      {
+        role: "assistant",
+        content: "结论：入口文件共 42 行。",
+        metadata: { message_id: "msg-1" },
+        tool_calls: [{ id: "call-1", name: "read_file" }],
+      },
+      { role: "tool", content: "42 行", tool_call_id: "call-1" },
+    ];
+    const [mergedDurable] = mapSessionHistoryToMessages(
+      "session-1",
+      durableHistory,
+      existing,
+    );
+
+    expect(
+      mergedDurable.message.segments.filter((segment) => segment.type === "text"),
+    ).toEqual([{ type: "text", content: "结论：入口文件共 42 行。" }]);
+  });
+
+  it("有正文时文本段保持原样（回归）", () => {
+    const history: SessionHistoryMessage[] = [
+      { role: "assistant", content: "  结论：42 行。  " },
+    ];
+
+    const [assistant] = mapSessionHistoryToMessages("session-1", history, []);
+
+    expect(assistant.message.segments).toEqual([
+      { type: "text", content: "结论：42 行。" },
+    ]);
+  });
+});

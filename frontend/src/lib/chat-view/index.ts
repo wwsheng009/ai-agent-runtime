@@ -19,6 +19,10 @@ export type {
   TurnProcessStats,
 } from "./flow";
 export { buildNodes, isAnswerSegment, isEvidenceSegment } from "./nodes";
+export {
+  hasVisibleMessageContent,
+  segmentHasVisibleContent,
+} from "./message-visibility";
 export { isSystemPromptMessage, projectChatView } from "./project";
 export type {
   ChatViewNode,

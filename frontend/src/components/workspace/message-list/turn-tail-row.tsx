@@ -7,6 +7,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { type ChatMessage } from "@/data/mock";
+import { hasVisibleText } from "@/lib/chat-view/visible-text";
 import { type TurnUsage } from "@/lib/turn-usage";
 
 type TurnTailRowProps = {
@@ -40,9 +41,12 @@ export function TurnTailRow({
   const { t } = useTranslation("workspace");
   const [copied, setCopied] = useState(false);
   const text = answerText(message);
+  // §12.1.4：没有任何可呈现内容时不渲染整行——28px 动作行会给每个空回合留一条空行。
+  const hasActions =
+    hasVisibleText(text) || Boolean(onRetry) || Boolean(usage);
 
   const copy = async () => {
-    if (!text) return;
+    if (!hasVisibleText(text)) return;
     try {
       await navigator.clipboard?.writeText(text);
       setCopied(true);
@@ -52,6 +56,8 @@ export function TurnTailRow({
     }
   };
 
+  if (!hasActions) return null;
+
   return (
     <div
       className="group -ml-1.5 flex h-7 items-center gap-2.5"
@@ -59,21 +65,24 @@ export function TurnTailRow({
       data-chat-flow-key={flowKey}
       data-chat-flow-kind="turn-tail"
     >
-      <button
-        aria-label={t("panels.messages.turnTail.copyAriaLabel")}
-        className="inline-flex size-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition hover:bg-surface-soft hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:opacity-40"
-        disabled={!text}
-        onClick={() => {
-          void copy();
-        }}
-        type="button"
-      >
-        <CopyIcon aria-hidden="true" className="size-4" />
-      </button>
+      {/* 复制图标按内容显示（§12.1.4）：该回合没有可见回答文本（工具 / 仅推理）时
+          整颗图标不渲染，不留「禁用但常驻」的空动作位。 */}
+      {hasVisibleText(text) ? (
+        <button
+          aria-label={t("panels.messages.turnTail.copyAriaLabel")}
+          className="app-hover-reveal inline-flex size-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition hover:bg-surface-soft hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+          onClick={() => {
+            void copy();
+          }}
+          type="button"
+        >
+          <CopyIcon aria-hidden="true" className="size-4" />
+        </button>
+      ) : null}
       {onRetry ? (
         <button
           aria-label={t("panels.messages.turnTail.retryAriaLabel")}
-          className="inline-flex size-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition hover:bg-surface-soft hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+          className="app-hover-reveal inline-flex size-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition hover:bg-surface-soft hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
           onClick={onRetry}
           type="button"
         >
