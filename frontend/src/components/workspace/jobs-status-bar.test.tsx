@@ -105,14 +105,14 @@ describe("后台任务状态条与弹层计数一致性", () => {
     return (
       <>
         <WorkspaceShellTopbar
-          artifactRailOpen={false}
           density="comfortable"
           liveJobsCount={jobs.liveCount}
           liveTeamCount={0}
           onOpenJobs={open}
           onOpenSettings={() => {}}
           onOpenSidebar={() => {}}
-          onToggleArtifactRail={() => {}}
+          onToggleRightRail={() => {}}
+          rightRailOpen={false}
           selectedThread={thread}
           threadStatusLabel="进行中"
           threadSubtitle="session-jobs-1"

@@ -28,7 +28,6 @@ type WorkspaceShellTopbarProps = {
   agentBreadcrumb?: { label: string; path: string | null }[];
   /** P2-1A：后代目录条数（>0 时在入口按钮上显示计数）。 */
   agentDescendantCount?: number;
-  artifactRailOpen: boolean;
   /** P1-8：会话运行时流连接状态（未提供时不渲染状态条）。 */
   connectionStatus?: ConnectionStatus | null;
   density: "comfortable" | "compact";
@@ -43,7 +42,9 @@ type WorkspaceShellTopbarProps = {
   onOpenAgents?: () => void;
   onOpenSidebar: () => void;
   onOpenSettings: () => void;
-  onToggleArtifactRail: () => void;
+  /** 折叠/展开右侧栏（条目 / 计划 / 还原 / 会话用量 合并为同一面板）。 */
+  onToggleRightRail: () => void;
+  rightRailOpen: boolean;
   selectedThread: Thread;
   threadStatusLabel: string;
   transportLabel: string;
@@ -53,7 +54,6 @@ type WorkspaceShellTopbarProps = {
 export function WorkspaceShellTopbar({
   agentBreadcrumb,
   agentDescendantCount = 0,
-  artifactRailOpen,
   connectionStatus,
   density,
   isNewThread = false,
@@ -64,7 +64,8 @@ export function WorkspaceShellTopbar({
   onRetryConnection,
   onOpenSidebar,
   onOpenSettings,
-  onToggleArtifactRail,
+  onToggleRightRail,
+  rightRailOpen,
   selectedThread,
   threadSubtitle,
   threadStatusLabel,
@@ -232,11 +233,13 @@ export function WorkspaceShellTopbar({
             variant="ghost"
             size="sm"
             className="shrink-0"
-            onClick={onToggleArtifactRail}
-            aria-label={artifactRailOpen ? t("topbar.hideFiles") : t("topbar.showFiles")}
-            title={artifactRailOpen ? t("topbar.hideFiles") : t("topbar.showFiles")}
+            aria-pressed={rightRailOpen}
+            data-testid="topbar-toggle-right-rail"
+            onClick={onToggleRightRail}
+            aria-label={rightRailOpen ? t("topbar.hideRail") : t("topbar.showRail")}
+            title={rightRailOpen ? t("topbar.hideRail") : t("topbar.showRail")}
           >
-            {artifactRailOpen ? (
+            {rightRailOpen ? (
               <PanelRightCloseIcon size={16} />
             ) : (
               <PanelRightOpenIcon size={16} />

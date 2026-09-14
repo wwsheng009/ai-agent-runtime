@@ -134,3 +134,9 @@ export type WorkspaceShellProps = {
   selectedProvider: string;
   selectedReasoningEffort: string;
 };
+
+/**
+ * 工作台中部视图页签。`skills` 为 P2-1B 新增（对话页签之后的只读技能目录），
+ * 是否渲染对应按钮由各视图的数据可用性决定（如无轨迹 store 时不显示轨迹页签）。
+ */
+export type WorkspaceViewMode = "chat" | "skills" | "trajectory";

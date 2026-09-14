@@ -130,4 +130,12 @@ export const enSkills = {
     forbiddenHint: "Set the admin token on the logs page and retry.",
     setTokenLink: "Open logs page to set the token",
   },
+
+  // Workspace "Skills" tab (after the chat tab): catalog + detail dialog only;
+  // hot reload stays on the standalone page.
+  workspaceTab: {
+    description: "Skills loaded by the current runtime; select one to inspect its full definition.",
+    dialogAriaLabel: "Skill detail",
+    closeDialog: "Close skill detail",
+  },
 } satisfies DeepStringShape<typeof zhSkills>;

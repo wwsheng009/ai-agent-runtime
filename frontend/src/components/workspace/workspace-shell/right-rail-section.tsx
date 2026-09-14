@@ -1,11 +1,10 @@
-// 工作台右侧栏：会话用量面板（附着会话时随栏显示）+ artifact 面板（顶栏开关控制）。
-// 由 workspace-shell/artifact-rail-section.tsx 演进而来，保留原 artifact 面板语义。
+// 工作台右侧栏：单一可折叠面板，内含「条目 / 计划 / 还原 / 会话用量」页签。
+// 会话用量不再是独立面板，而是 ArtifactPanel 的 usage 页签（由顶栏右侧栏开关统一折叠/展开）。
 
 import { type TFunction } from "i18next";
 import { Suspense } from "react";
 
 import { PanelErrorBoundary } from "@/components/errors/boundaries";
-import { SessionUsagePanel } from "@/components/workspace/session-usage-panel";
 
 import { ArtifactPanel, ArtifactPanelFallback } from "./lazy-surfaces";
 import { type WorkspaceShellProps } from "./types";
@@ -16,64 +15,47 @@ type WorkspaceRightRailSectionProps = Pick<
   | "selectedArtifactId"
   | "selectedThread"
 > & {
-  artifactRailOpen: boolean;
   handleOpenArtifact: (artifactId: string) => void;
   isNewThread: boolean;
+  /** 合并面板的开合：由顶栏开关控制；关闭时整列不占位。 */
+  rightRailOpen: boolean;
   t: TFunction<"workspace">;
 };
 
 export function WorkspaceRightRailSection({
-  artifactRailOpen,
   handleOpenArtifact,
   isNewThread,
   isResponding,
+  rightRailOpen,
   selectedArtifactId,
   selectedThread,
   t,
 }: WorkspaceRightRailSectionProps) {
-  const sessionId = selectedThread.sessionId?.trim() ?? "";
-  const showUsagePanel = !isNewThread && Boolean(sessionId);
-  const showArtifactPanel = artifactRailOpen && !isNewThread;
-
-  if (!showUsagePanel && !showArtifactPanel) {
+  if (!rightRailOpen || isNewThread) {
     return null;
   }
 
+  const sessionId = selectedThread.sessionId?.trim() ?? "";
+
   return (
     <div className="hidden min-h-0 min-w-0 flex-col overflow-hidden border-l border-white/8 [background:var(--workspace-sidebar-bg)] xl:flex">
-      {showUsagePanel ? (
-        <PanelErrorBoundary
-          key={`usage-panel-${sessionId}`}
-          title={t("usagePanel.title")}
+      <PanelErrorBoundary key={`right-rail-${sessionId || "no-session"}`}>
+        <Suspense
+          fallback={
+            <ArtifactPanelFallback message={t("shell.loadingArtifactPanel")} />
+          }
         >
-          <SessionUsagePanel
-            key={sessionId}
-            className="shrink-0"
+          <ArtifactPanel
+            artifacts={selectedThread.artifacts}
             isResponding={isResponding}
             lastRuntimeEventType={selectedThread.lastRuntimeEventType}
             runtimeEventCount={selectedThread.runtimeEventCount}
-            sessionId={sessionId}
+            selectedArtifactId={selectedArtifactId}
+            sessionId={selectedThread.sessionId}
+            onOpenArtifact={handleOpenArtifact}
           />
-        </PanelErrorBoundary>
-      ) : null}
-      {showArtifactPanel ? (
-        <PanelErrorBoundary key={`artifact-panel-${sessionId}`}>
-          <Suspense
-            fallback={
-              <ArtifactPanelFallback message={t("shell.loadingArtifactPanel")} />
-            }
-          >
-            <ArtifactPanel
-              artifacts={selectedThread.artifacts}
-              lastRuntimeEventType={selectedThread.lastRuntimeEventType}
-              runtimeEventCount={selectedThread.runtimeEventCount}
-              selectedArtifactId={selectedArtifactId}
-              sessionId={selectedThread.sessionId}
-              onOpenArtifact={handleOpenArtifact}
-            />
-          </Suspense>
-        </PanelErrorBoundary>
-      ) : null}
+        </Suspense>
+      </PanelErrorBoundary>
     </div>
   );
 }

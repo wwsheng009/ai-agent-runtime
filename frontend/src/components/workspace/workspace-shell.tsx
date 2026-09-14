@@ -18,7 +18,10 @@ import { WorkspaceMainSection } from "./workspace-shell/main-section";
 import { WorkspaceOverlaysSection } from "./workspace-shell/overlays-section";
 import { WorkspaceRightRailSection } from "./workspace-shell/right-rail-section";
 import { WorkspaceSidebarSection } from "./workspace-shell/sidebar-section";
-import { type WorkspaceShellProps } from "./workspace-shell/types";
+import {
+  type WorkspaceShellProps,
+  type WorkspaceViewMode,
+} from "./workspace-shell/types";
 
 export function WorkspaceShell({
   threads,
@@ -145,17 +148,15 @@ export function WorkspaceShell({
   const [artifactDialogOpen, setArtifactDialogOpen] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
-  const [viewMode, setViewMode] = useState<"chat" | "trajectory">("chat");
+  const [viewMode, setViewMode] = useState<WorkspaceViewMode>("chat");
   const [settingsSection, setSettingsSection] =
     useState<SettingsSectionId>("appearance");
-  const [artifactRailManualOpen, setArtifactRailManualOpen] = useState(
+  const [rightRailManualOpen, setRightRailManualOpen] = useState(
     Boolean(settings.workspace.autoOpenArtifacts),
   );
-  const artifactRailOpen = !isNewThread && artifactRailManualOpen;
-  // 右侧栏只要「会话用量」或 artifact 面板其一可见就占位，避免空列留白。
-  const rightRailVisible =
-    !isNewThread &&
-    (artifactRailOpen || Boolean(selectedThread.sessionId?.trim()));
+  // 右侧栏是「条目 / 计划 / 还原 / 会话用量」合并后的单一可折叠面板。
+  const rightRailOpen = !isNewThread && rightRailManualOpen;
+  const rightRailVisible = rightRailOpen;
 
   const transportLabel = getThreadTransportLabel(selectedThread, {
     live: t("topbar.threadTransport.live"),
@@ -224,9 +225,9 @@ export function WorkspaceShell({
   }, []);
 
   useEffect(() => {
-    // P0-2 机械搬迁：保留原「autoOpenArtifacts 变化即同步刷新 artifact 栏开合」语义。
+    // P0-2 机械搬迁：保留原「autoOpenArtifacts 变化即同步刷新右侧栏开合」语义。
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setArtifactRailManualOpen(settings.workspace.autoOpenArtifacts);
+    setRightRailManualOpen(settings.workspace.autoOpenArtifacts);
   }, [settings.workspace.autoOpenArtifacts]);
 
   const messageListStyle: CSSProperties | undefined = isNewThread
@@ -298,7 +299,6 @@ export function WorkspaceShell({
           workspaceDirectoriesRefreshing={workspaceDirectoriesRefreshing}
         />
         <WorkspaceMainSection
-          artifactRailOpen={artifactRailOpen}
           backtrackError={backtrackError}
           backtrackNavigationActive={backtrackNavigationActive}
           backtrackNotice={backtrackNotice}
@@ -333,6 +333,7 @@ export function WorkspaceShell({
           onSelectBacktrackNavigationMessage={onSelectBacktrackNavigationMessage}
           onStopResponding={onStopResponding}
           onSubmit={onSubmit}
+          onToggleRightRail={() => setRightRailManualOpen((current) => !current)}
           openSettings={openSettings}
           pendingInteraction={pendingInteraction}
           planActionPending={planActionPending}
@@ -348,7 +349,7 @@ export function WorkspaceShell({
           selectedProvider={selectedProvider}
           selectedReasoningEffort={selectedReasoningEffort}
           selectedThread={selectedThread}
-          setArtifactRailManualOpen={setArtifactRailManualOpen}
+          rightRailOpen={rightRailOpen}
           setMobileSidebarOpen={setMobileSidebarOpen}
           setViewMode={setViewMode}
           t={t}
@@ -359,10 +360,10 @@ export function WorkspaceShell({
           viewMode={viewMode}
         />
         <WorkspaceRightRailSection
-          artifactRailOpen={artifactRailOpen}
           handleOpenArtifact={handleOpenArtifact}
           isNewThread={isNewThread}
           isResponding={isResponding}
+          rightRailOpen={rightRailOpen}
           selectedArtifactId={selectedArtifactId}
           selectedThread={selectedThread}
           t={t}

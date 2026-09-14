@@ -91,8 +91,8 @@ export const enWorkspaceBase = {
     runtime: "Runtime",
     settings: "Settings",
     openSidebar: "Open chat navigation",
-    showFiles: "Show files",
-    hideFiles: "Hide files",
+    showRail: "Expand right panel",
+    hideRail: "Collapse right panel",
     newThreadTitle: "New chat",
     threadTransport: {
       live: "Live runtime",

@@ -21,8 +21,14 @@ import { SessionAgentsPanel } from "@/components/workspace/session-agents-panel"
 import { agentDisplayName } from "@/components/workspace/session-agents-panel-shared";
 import { type SettingsSectionId } from "@/components/workspace/settings";
 import { FilePreviewDialog } from "@/components/workspace/file-preview-dialog";
-import { TrajectoryView } from "@/components/workspace/workspace-shell/lazy-surfaces";
-import { type WorkspaceShellProps } from "@/components/workspace/workspace-shell/types";
+import {
+  TrajectoryView,
+  WorkspaceSkillsSurface,
+} from "@/components/workspace/workspace-shell/lazy-surfaces";
+import {
+  type WorkspaceShellProps,
+  type WorkspaceViewMode,
+} from "@/components/workspace/workspace-shell/types";
 import { WorkspaceShellTopbar } from "@/components/workspace/workspace-shell-topbar";
 import { type WorkspaceDensity } from "@/core/settings";
 import { useFilePreview } from "@/hooks/workspace/use-file-preview";
@@ -77,7 +83,6 @@ type WorkspaceMainSectionProps = Pick<
   | "selectedThread"
   | "trajectoryStore"
 > & {
-  artifactRailOpen: boolean;
   composerOverlayRef: RefObject<HTMLDivElement | null>;
   density: WorkspaceDensity;
   handleOpenArtifact: (artifactId: string) => void;
@@ -93,14 +98,15 @@ type WorkspaceMainSectionProps = Pick<
     prompt: string;
   }[];
   openSettings: (section?: SettingsSectionId) => void;
-  setArtifactRailManualOpen: Dispatch<SetStateAction<boolean>>;
+  onToggleRightRail: () => void;
+  rightRailOpen: boolean;
   setMobileSidebarOpen: Dispatch<SetStateAction<boolean>>;
-  setViewMode: Dispatch<SetStateAction<"chat" | "trajectory">>;
+  setViewMode: Dispatch<SetStateAction<WorkspaceViewMode>>;
   t: TFunction<"workspace">;
   threadStatusLabel: string;
   threadSubtitle: string;
   transportLabel: string;
-  viewMode: "chat" | "trajectory";
+  viewMode: WorkspaceViewMode;
 };
 
 export function WorkspaceMainSection({
@@ -145,7 +151,6 @@ export function WorkspaceMainSection({
   selectedReasoningEffort,
   selectedThread,
   trajectoryStore,
-  artifactRailOpen,
   composerOverlayRef,
   density,
   handleOpenArtifact,
@@ -155,7 +160,8 @@ export function WorkspaceMainSection({
   messageListStyle,
   newThreadSuggestions,
   openSettings,
-  setArtifactRailManualOpen,
+  onToggleRightRail,
+  rightRailOpen,
   setMobileSidebarOpen,
   setViewMode,
   t,
@@ -211,6 +217,20 @@ export function WorkspaceMainSection({
     sessionId: selectedThread.sessionId,
   });
 
+  // P2-1B：中部视图页签（对话 / 技能 / 轨迹）。技能与轨迹页签都不承载输入框，
+  // 只有对话面（含新会话；以及无轨迹 store 时回落对话面的会话）保留 composer。
+  const skillsSurfaceVisible = !isNewThread && viewMode === "skills";
+  const chatSurfaceVisible =
+    !skillsSurfaceVisible &&
+    (isNewThread || viewMode === "chat" || !trajectoryStore);
+  const viewTabClass = (active: boolean) =>
+    cn(
+      "rounded-t-md border border-b-0 px-3 py-1.5 app-text-12 transition",
+      active
+        ? "border-border bg-surface-softer text-foreground"
+        : "border-transparent text-muted-foreground hover:text-foreground",
+    );
+
   return (
     <section
       id="workspace-preview"
@@ -219,7 +239,6 @@ export function WorkspaceMainSection({
       <WorkspaceShellTopbar
         agentBreadcrumb={agentBreadcrumb}
         agentDescendantCount={sessionAgents.tree.descendants.length}
-        artifactRailOpen={artifactRailOpen}
         connectionStatus={connectionStatus}
         density={density}
         isNewThread={isNewThread}
@@ -230,7 +249,8 @@ export function WorkspaceMainSection({
         onOpenSidebar={() => setMobileSidebarOpen(true)}
         onOpenSettings={() => openSettings("appearance")}
         onRetryConnection={onRetryConnection}
-        onToggleArtifactRail={() => setArtifactRailManualOpen((current) => !current)}
+        onToggleRightRail={onToggleRightRail}
+        rightRailOpen={rightRailOpen}
         selectedThread={selectedThread}
         threadSubtitle={threadSubtitle}
         threadStatusLabel={threadStatusLabel}
@@ -267,49 +287,57 @@ export function WorkspaceMainSection({
       >
         <div
           className={cn(
-            "relative flex h-full min-h-0 w-full flex-col",
+            // 批次 F2：本容器是宽度轴（--app-chat-content-width）的查询容器，
+            // 让转录列 / 停靠卡 / 输入卡共享同一 64cqw 基准（不受滚动条宽度影响）。
+            "relative flex h-full min-h-0 w-full flex-col [container-type:inline-size]",
             isNewThread ? "max-w-[48rem]" : null,
           )}
         >
           {!isNewThread ? (
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-              {trajectoryStore ? (
-                <div
-                  aria-label={t("panels.shell.viewTabs.ariaLabel")}
-                  className="flex items-center gap-1 border-b border-border px-3 pt-2"
-                  role="tablist"
+              <div
+                aria-label={t("panels.shell.viewTabs.ariaLabel")}
+                className="flex items-center gap-1 border-b border-border px-3 pt-2"
+                role="tablist"
+              >
+                <button
+                  aria-selected={viewMode === "chat"}
+                  className={viewTabClass(viewMode === "chat")}
+                  data-testid="workspace-view-tab-chat"
+                  onClick={() => setViewMode("chat")}
+                  role="tab"
+                  type="button"
                 >
-                  <button
-                    aria-selected={viewMode === "chat"}
-                    className={cn(
-                      "rounded-t-md border border-b-0 px-3 py-1.5 app-text-12 transition",
-                      viewMode === "chat"
-                        ? "border-border bg-surface-softer text-foreground"
-                        : "border-transparent text-muted-foreground hover:text-foreground",
-                    )}
-                    onClick={() => setViewMode("chat")}
-                    role="tab"
-                    type="button"
-                  >
-                    {t("panels.shell.viewTabs.chat")}
-                  </button>
+                  {t("panels.shell.viewTabs.chat")}
+                </button>
+                <button
+                  aria-selected={viewMode === "skills"}
+                  className={viewTabClass(viewMode === "skills")}
+                  data-testid="workspace-view-tab-skills"
+                  onClick={() => setViewMode("skills")}
+                  role="tab"
+                  type="button"
+                >
+                  {t("panels.shell.viewTabs.skills")}
+                </button>
+                {trajectoryStore ? (
                   <button
                     aria-selected={viewMode === "trajectory"}
-                    className={cn(
-                      "rounded-t-md border border-b-0 px-3 py-1.5 app-text-12 transition",
-                      viewMode === "trajectory"
-                        ? "border-border bg-surface-softer text-foreground"
-                        : "border-transparent text-muted-foreground hover:text-foreground",
-                    )}
+                    className={viewTabClass(viewMode === "trajectory")}
+                    data-testid="workspace-view-tab-trajectory"
                     onClick={() => setViewMode("trajectory")}
                     role="tab"
                     type="button"
                   >
                     {t("panels.shell.viewTabs.trajectory")}
                   </button>
-                </div>
-              ) : null}
-              {viewMode === "chat" || !trajectoryStore ? (
+                ) : null}
+              </div>
+              {skillsSurfaceVisible ? (
+                <Suspense fallback={null}>
+                  <WorkspaceSkillsSurface />
+                </Suspense>
+              ) : viewMode === "chat" || !trajectoryStore ? (
                 <MessageList
                   artifacts={selectedThread.artifacts}
                   backtrackError={backtrackError}
@@ -324,7 +352,7 @@ export function WorkspaceMainSection({
                   )}
                   connectionStatus={connectionStatus}
                   contentClassName={cn(
-                    "max-w-[50rem]",
+                    // 列宽由 message-list 的宽度轴（W）提供，此处只覆盖行间距。
                     isCompact ? "gap-4" : "gap-6",
                   )}
                   isResponding={isResponding}
@@ -397,7 +425,7 @@ export function WorkspaceMainSection({
               aria-hidden="true"
               className="pointer-events-none absolute inset-x-0 bottom-0 z-20 px-3 sm:px-4 lg:px-5"
             >
-              <div className="mx-auto h-16 w-full max-w-[54rem] [background:var(--workspace-fade-overlay)] blur-lg" />
+              <div className="mx-auto h-16 w-full max-w-[var(--app-chat-content-width-composer)] [background:var(--workspace-fade-overlay)] blur-lg" />
             </div>
           ) : null}
 
@@ -406,60 +434,66 @@ export function WorkspaceMainSection({
             className={cn(
               "pointer-events-none z-30 px-3 sm:px-4 lg:px-5",
               isNewThread
-                ? "relative inset-auto mx-auto w-full max-w-[50rem] pb-0"
+                ? "relative inset-auto mx-auto w-full pb-0"
                 : "absolute inset-x-0 bottom-0 pb-3",
             )}
           >
-            {isNewThread || viewMode === "chat" || !trajectoryStore ? (
-              <div className="pointer-events-auto mx-auto w-full max-w-[50rem]">
-                <PendingInteractionBar
-                  interaction={pendingInteraction ?? null}
-                  onAnswerQuestion={(questionId, answer) =>
-                    onAnswerPendingQuestion?.(questionId, answer)
-                  }
-                  onResolveApproval={(requestId, allow) =>
-                    onResolvePendingApproval?.(requestId, allow)
-                  }
-                  onPlanDecision={onPlanDecision}
-                  onPlanNotesChange={onPlanNotesChange}
-                  planActionPending={planActionPending}
-                  planNotesDraft={planNotesDraft}
-                />
-                <MessageComposer
-                  attachments={composerAttachments}
-                  commands={composerCommandSurface.commands}
-                  commandResultNotice={composerCommandSurface.commandResult}
-                  density={density}
-                  draft={draft}
-                  focusKey={selectedThread.sessionId ?? selectedThread.id}
-                  hasSession={Boolean(selectedThread.sessionId)}
-                  isNewThread={isNewThread}
-                  isResponding={isResponding}
-                  modelOptions={modelOptions}
-                  reasoningEffortDefault={reasoningEffortDefault}
-                  reasoningEffortError={reasoningEffortError}
-                  reasoningEffortOptions={reasoningEffortOptions}
-                  referenceGroups={composerReferenceGroups}
-                  selectedArtifactCount={selectedThread.artifacts.length}
-                  onModelChange={onModelChange}
-                  onProviderChange={onProviderChange}
-                  onReasoningEffortChange={onReasoningEffortChange}
-                  providerOptions={providerOptions}
-                  runtimeModelsError={runtimeModelsError}
-                  runtimeModelsLoading={runtimeModelsLoading}
-                  selectedModel={selectedModel}
-                  selectedProvider={selectedProvider}
-                  selectedReasoningEffort={selectedReasoningEffort}
-                  transport={selectedThread.transport}
-                  onCommand={composerCommandSurface.onCommand}
-                  onDismissCommandResult={
-                    composerCommandSurface.onDismissCommandResult
-                  }
-                  onDraftChange={onDraftChange}
-                  onStop={onStopResponding}
-                  onSubmit={onSubmit}
-                />
-              </div>
+            {chatSurfaceVisible ? (
+              <>
+                {/* 批次 F2：停靠卡 = W − 32px（与转录列同一宽度轴）。 */}
+                <div className="pointer-events-auto mx-auto w-full max-w-[var(--app-chat-content-width-dock)]">
+                  <PendingInteractionBar
+                    interaction={pendingInteraction ?? null}
+                    onAnswerQuestion={(questionId, answer) =>
+                      onAnswerPendingQuestion?.(questionId, answer)
+                    }
+                    onResolveApproval={(requestId, allow) =>
+                      onResolvePendingApproval?.(requestId, allow)
+                    }
+                    onPlanDecision={onPlanDecision}
+                    onPlanNotesChange={onPlanNotesChange}
+                    planActionPending={planActionPending}
+                    planNotesDraft={planNotesDraft}
+                  />
+                </div>
+                {/* 批次 F2：输入卡 = W + 32px（比转录列宽一档）。 */}
+                <div className="pointer-events-auto mx-auto w-full max-w-[var(--app-chat-content-width-composer)]">
+                  <MessageComposer
+                    attachments={composerAttachments}
+                    commands={composerCommandSurface.commands}
+                    commandResultNotice={composerCommandSurface.commandResult}
+                    density={density}
+                    draft={draft}
+                    focusKey={selectedThread.sessionId ?? selectedThread.id}
+                    hasSession={Boolean(selectedThread.sessionId)}
+                    isNewThread={isNewThread}
+                    isResponding={isResponding}
+                    modelOptions={modelOptions}
+                    reasoningEffortDefault={reasoningEffortDefault}
+                    reasoningEffortError={reasoningEffortError}
+                    reasoningEffortOptions={reasoningEffortOptions}
+                    referenceGroups={composerReferenceGroups}
+                    selectedArtifactCount={selectedThread.artifacts.length}
+                    onModelChange={onModelChange}
+                    onProviderChange={onProviderChange}
+                    onReasoningEffortChange={onReasoningEffortChange}
+                    providerOptions={providerOptions}
+                    runtimeModelsError={runtimeModelsError}
+                    runtimeModelsLoading={runtimeModelsLoading}
+                    selectedModel={selectedModel}
+                    selectedProvider={selectedProvider}
+                    selectedReasoningEffort={selectedReasoningEffort}
+                    transport={selectedThread.transport}
+                    onCommand={composerCommandSurface.onCommand}
+                    onDismissCommandResult={
+                      composerCommandSurface.onDismissCommandResult
+                    }
+                    onDraftChange={onDraftChange}
+                    onStop={onStopResponding}
+                    onSubmit={onSubmit}
+                  />
+                </div>
+              </>
             ) : null}
           </div>
         </div>

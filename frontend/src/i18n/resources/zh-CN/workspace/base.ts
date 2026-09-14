@@ -83,8 +83,8 @@ export const zhWorkspaceBase = {
     runtime: "Runtime",
     settings: "设置",
     openSidebar: "打开聊天导航",
-    showFiles: "显示文件",
-    hideFiles: "隐藏文件",
+    showRail: "展开右侧栏",
+    hideRail: "收起右侧栏",
     newThreadTitle: "新建聊天",
     threadTransport: {
       live: "在线运行时",

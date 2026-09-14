@@ -49,13 +49,13 @@ describe("WorkspaceShellTopbar", () => {
     overrides: Partial<React.ComponentProps<typeof WorkspaceShellTopbar>> = {},
   ) {
     const props: React.ComponentProps<typeof WorkspaceShellTopbar> = {
-      artifactRailOpen: false,
       density: "comfortable",
       isNewThread: true,
       liveTeamCount: 0,
       onOpenSettings: vi.fn(),
       onOpenSidebar: vi.fn(),
-      onToggleArtifactRail: vi.fn(),
+      onToggleRightRail: vi.fn(),
+      rightRailOpen: false,
       selectedThread: thread,
       threadStatusLabel: "新线程",
       threadSubtitle: "不应显示的副标题",
@@ -101,24 +101,41 @@ describe("WorkspaceShellTopbar", () => {
     expect(props.onOpenSidebar).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps existing-thread new-chat and artifact actions accessible", () => {
+  it("keeps existing-thread new-chat and right rail actions accessible", () => {
     const props = renderTopbar({ isNewThread: false });
 
     expect(container.textContent).toContain(thread.title);
     expect(container.querySelector('[aria-label="新建聊天"]')).toBeInstanceOf(
       HTMLAnchorElement,
     );
-    expect(container.querySelector('[aria-label="显示文件"]')).toBeInstanceOf(
-      HTMLButtonElement,
-    );
 
-    const artifactButton = container.querySelector(
-      'button[aria-label="显示文件"]',
+    const railToggle = container.querySelector(
+      '[data-testid="topbar-toggle-right-rail"]',
     );
+    expect(railToggle).toBeInstanceOf(HTMLButtonElement);
+    expect(railToggle?.getAttribute("aria-label")).toBe("展开右侧栏");
+    expect(railToggle?.getAttribute("aria-pressed")).toBe("false");
+
     act(() => {
-      artifactButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      railToggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-    expect(props.onToggleArtifactRail).toHaveBeenCalledTimes(1);
+    expect(props.onToggleRightRail).toHaveBeenCalledTimes(1);
+  });
+
+  it("reflects the right rail open state and hides the toggle on new threads", () => {
+    renderTopbar({ isNewThread: false, rightRailOpen: true });
+
+    const railToggle = container.querySelector(
+      '[data-testid="topbar-toggle-right-rail"]',
+    );
+    expect(railToggle).toBeInstanceOf(HTMLButtonElement);
+    expect(railToggle?.getAttribute("aria-label")).toBe("收起右侧栏");
+    expect(railToggle?.getAttribute("aria-pressed")).toBe("true");
+
+    renderTopbar();
+    expect(
+      container.querySelector('[data-testid="topbar-toggle-right-rail"]'),
+    ).toBeNull();
   });
 
   it("surfaces a non-online connection status with manual retry", () => {

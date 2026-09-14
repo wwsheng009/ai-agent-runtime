@@ -22,6 +22,11 @@ export const TrajectoryView = lazy(() =>
     default: module.TrajectoryView,
   })),
 );
+export const WorkspaceSkillsSurface = lazy(() =>
+  import("@/components/workspace/workspace-skills-surface").then((module) => ({
+    default: module.WorkspaceSkillsSurface,
+  })),
+);
 
 export function SettingsDialogFallback({ message }: { message: string }) {
   return (

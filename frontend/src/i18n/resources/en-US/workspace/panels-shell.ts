@@ -13,6 +13,7 @@ export const enWorkspacePanelsShell = {
   viewTabs: {
     ariaLabel: "Workspace view tabs",
     chat: "Chat",
+    skills: "Skills",
     trajectory: "Trajectory",
   },
   trajectory: {

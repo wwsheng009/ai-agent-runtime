@@ -132,4 +132,11 @@ export const zhSkills = {
     forbiddenHint: "请在日志页设置管理令牌后重试。",
     setTokenLink: "前往日志页设置令牌",
   },
+
+  // 工作台「技能」页签（对话页签之后）：只做目录 + 详情对话框，热重载仍在独立页面。
+  workspaceTab: {
+    description: "当前运行时已加载的技能；点击任意技能查看完整定义。",
+    dialogAriaLabel: "技能详情",
+    closeDialog: "关闭技能详情",
+  },
 } as const;

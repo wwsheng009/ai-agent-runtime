@@ -2,7 +2,12 @@
 
 import { useRef, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
-import { FileCode2Icon, HistoryIcon, ScrollTextIcon } from "lucide-react";
+import {
+  ChartNoAxesCombinedIcon,
+  FileCode2Icon,
+  HistoryIcon,
+  ScrollTextIcon,
+} from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -14,7 +19,7 @@ import {
 
 function surfaceButtonClass(
   active: boolean,
-  tone: "artifact" | "checkpoint" | "plan",
+  tone: "artifact" | "checkpoint" | "plan" | "usage",
   disabled = false,
 ) {
   if (disabled) {
@@ -39,6 +44,15 @@ function surfaceButtonClass(
     );
   }
 
+  if (tone === "usage") {
+    return cn(
+      "inline-flex items-center gap-2 rounded-control border px-2.5 py-1 text-base transition focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-sidebar-bg)]",
+      active
+        ? "border-accent-primary/30 bg-accent-primary/10 text-accent-primary"
+        : "border-white/10 bg-white/4 text-muted-foreground hover:border-white/16 hover:bg-white/8",
+    );
+  }
+
   return cn(
     "inline-flex items-center gap-2 rounded-control border px-2.5 py-1 text-base transition focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-sidebar-bg)]",
     active
@@ -53,6 +67,9 @@ function surfaceFromIndex(index: number): ArtifactPanelSurface {
   }
   if (index === 2) {
     return "checkpoints";
+  }
+  if (index === 3) {
+    return "usage";
   }
   return "artifacts";
 }
@@ -237,6 +254,36 @@ export function ArtifactPanelSurfaceTabs({
                 {backtrackCount}
               </span>
             ) : null}
+          </button>
+          <button
+            aria-controls={tabIds.usagePanelId}
+            aria-selected={activeSurface === "usage"}
+            id={tabIds.usageTabId}
+            ref={(node) => {
+              surfaceTabRefs.current[3] = node;
+            }}
+            role="tab"
+            tabIndex={activeSurface === "usage" ? 0 : -1}
+            type="button"
+            onClick={() => onSelectSurface("usage")}
+            onKeyDown={(event) =>
+              handleHorizontalTabKeyDown(event, {
+                currentIndex: 3,
+                disabledStates: surfaceTabDisabledStates,
+                onSelectIndex: (index) => onSelectSurface(surfaceFromIndex(index)),
+                refs: surfaceTabRefs.current,
+              })
+            }
+            className={surfaceButtonClass(
+              activeSurface === "usage",
+              "usage",
+              !sessionId,
+            )}
+            data-testid="artifact-panel-tab-usage"
+            disabled={!sessionId}
+          >
+            <ChartNoAxesCombinedIcon size={14} />
+            {t("panels.artifacts.tabs.usage")}
           </button>
         </div>
         <div className="flex items-center gap-2">

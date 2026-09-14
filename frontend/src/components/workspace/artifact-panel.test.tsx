@@ -8,6 +8,31 @@ import { type Artifact } from "@/data/mock";
 
 import { ArtifactPanel } from "./artifact-panel";
 
+// 会话用量页签只验证接线，面板本体由 session-usage-panel.test.tsx 覆盖。
+vi.mock("@/components/workspace/session-usage-panel", () => ({
+  SessionUsagePanel: ({ sessionId }: { sessionId: string }) => (
+    <div data-testid="session-usage-panel-stub">usage:{sessionId}</div>
+  ),
+}));
+
+// 附着会话后计划/还原/回溯审计会各自拉一次数据；这里静默返回空态，避免测试触发真实网络。
+vi.mock("@/lib/runtime-api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/runtime-api")>();
+  return {
+    ...actual,
+    getSessionPlanMode: vi.fn().mockResolvedValue({
+      session_id: "session-usage-1",
+      active: false,
+      status: "off",
+      permission_mode: "default",
+      plan_content: "",
+      plan_content_available: false,
+    }),
+    listSessionBacktrackAudit: vi.fn().mockResolvedValue({ entries: [] }),
+    listSessionCheckpoints: vi.fn().mockResolvedValue({ checkpoints: [] }),
+  };
+});
+
 type ReactActEnvironmentGlobal = typeof globalThis & {
   IS_REACT_ACT_ENVIRONMENT?: boolean;
 };
@@ -39,6 +64,7 @@ describe("ArtifactPanel", () => {
     options?: {
       onOpenArtifact?: (artifactId: string) => void;
       selectedArtifactId?: string | null;
+      sessionId?: string;
     },
   ) {
     root = createRoot(container);
@@ -49,6 +75,7 @@ describe("ArtifactPanel", () => {
           artifacts={artifacts}
           onOpenArtifact={options?.onOpenArtifact ?? (() => {})}
           selectedArtifactId={options?.selectedArtifactId ?? null}
+          sessionId={options?.sessionId}
         />,
       );
     });
@@ -139,6 +166,9 @@ describe("ArtifactPanel", () => {
     const restorePointsTab = Array.from(container.querySelectorAll('[role="tab"]')).find(
       (button) => button.textContent?.includes("还原"),
     );
+    const usageTab = Array.from(container.querySelectorAll('[role="tab"]')).find(
+      (button) => button.textContent?.includes("会话用量"),
+    );
 
     expect(container.querySelector('[role="tablist"]')).toBeInstanceOf(HTMLElement);
     expect(evidenceTab?.getAttribute("aria-selected")).toBe("true");
@@ -146,5 +176,37 @@ describe("ArtifactPanel", () => {
     expect((planTab as HTMLButtonElement).disabled).toBe(true);
     expect(restorePointsTab).toBeInstanceOf(HTMLButtonElement);
     expect((restorePointsTab as HTMLButtonElement).disabled).toBe(true);
+    expect(usageTab).toBeInstanceOf(HTMLButtonElement);
+    expect((usageTab as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("在合并面板内以页签呈现会话用量，而不是独立面板", async () => {
+    const artifacts: Artifact[] = [];
+
+    renderArtifactPanel(artifacts, { sessionId: "session-usage-1" });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const usageTab = container.querySelector<HTMLButtonElement>(
+      '[data-testid="artifact-panel-tab-usage"]',
+    );
+    expect(usageTab).toBeInstanceOf(HTMLButtonElement);
+    expect(usageTab?.disabled).toBe(false);
+    expect(usageTab?.getAttribute("aria-selected")).toBe("false");
+    // 未选中页签时不挂载用量面板，避免不必要的用量请求。
+    expect(
+      container.querySelector('[data-testid="session-usage-panel-stub"]'),
+    ).toBeNull();
+
+    act(() => {
+      usageTab?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(usageTab?.getAttribute("aria-selected")).toBe("true");
+    expect(
+      container.querySelector('[data-testid="session-usage-panel-stub"]')
+        ?.textContent,
+    ).toBe("usage:session-usage-1");
   });
 });

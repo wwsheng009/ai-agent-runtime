@@ -11,6 +11,7 @@ export const zhWorkspacePanelsShell = {
   viewTabs: {
     ariaLabel: "工作台视图标签",
     chat: "对话",
+    skills: "技能",
     trajectory: "轨迹",
   },
   trajectory: {

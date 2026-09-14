@@ -16,6 +16,7 @@ import {
   type ArtifactPanelSurface,
   type ArtifactPanelSurfaceTabIds,
 } from "@/components/workspace/artifact-panel/types";
+import { SessionUsagePanel } from "@/components/workspace/session-usage-panel";
 import { useRuntimeCheckpoints } from "@/hooks/workspace/use-runtime-checkpoints";
 import { useRuntimePlanMode } from "@/hooks/workspace/use-runtime-plan-mode";
 import {
@@ -25,6 +26,7 @@ import {
 
 export function ArtifactPanel({
   artifacts,
+  isResponding = false,
   lastRuntimeEventType,
   runtimeEventCount,
   onOpenArtifact,
@@ -40,9 +42,17 @@ export function ArtifactPanel({
   const artifactSurfacePanelId = useId();
   const planSurfacePanelId = useId();
   const checkpointSurfacePanelId = useId();
+  const usageSurfaceTabId = useId();
+  const usageSurfacePanelId = useId();
   const [activeSurface, setActiveSurface] = useState<ArtifactPanelSurface>(
     artifacts.length > 0 ? "artifacts" : "plan",
   );
+  // 用户显式点选页签后不再被自动回落覆盖，保证「会话用量」等页签可稳定停留。
+  const [surfacePinnedByUser, setSurfacePinnedByUser] = useState(false);
+  const selectSurface = (surface: ArtifactPanelSurface) => {
+    setSurfacePinnedByUser(true);
+    setActiveSurface(surface);
+  };
 
   const {
     backtrackAuditEntries,
@@ -92,8 +102,9 @@ export function ArtifactPanel({
     sessionId,
   });
 
-  const resolvedActiveSurface =
-    artifacts.length === 0 && plan?.active
+  const resolvedActiveSurface = surfacePinnedByUser
+    ? activeSurface
+    : artifacts.length === 0 && plan?.active
       ? "plan"
       : artifacts.length === 0 && checkpoints.length > 0 && !plan?.active
         ? "checkpoints"
@@ -110,7 +121,7 @@ export function ArtifactPanel({
   const selectedArtifactCategory = selectedArtifact
     ? classifyArtifactCategory(selectedArtifact)
     : null;
-  const surfaceTabDisabledStates = [false, !sessionId, !sessionId];
+  const surfaceTabDisabledStates = [false, !sessionId, !sessionId, !sessionId];
   const artifactSelectionAnnouncement = selectedArtifact
     ? `${formatArtifactCategory(selectedArtifactCategory ?? "file")} selected: ${
         selectedArtifact.name
@@ -124,6 +135,8 @@ export function ArtifactPanel({
     checkpointTabId: checkpointSurfaceTabId,
     planPanelId: planSurfacePanelId,
     planTabId: planSurfaceTabId,
+    usagePanelId: usageSurfacePanelId,
+    usageTabId: usageSurfaceTabId,
   };
 
   return (
@@ -149,7 +162,7 @@ export function ArtifactPanel({
       activeSurface={resolvedActiveSurface}
       artifactCount={artifacts.length}
       backtrackCount={backtrackAuditEntries.length}
-      onSelectSurface={setActiveSurface}
+      onSelectSurface={selectSurface}
       planIsActive={Boolean(plan?.active)}
       sessionId={sessionId}
       surfaceTabDisabledStates={surfaceTabDisabledStates}
@@ -237,6 +250,24 @@ export function ArtifactPanel({
               sessionId={sessionId}
             />
           </Suspense>
+        ) : null}
+      </div>
+      <div
+        aria-labelledby={usageSurfaceTabId}
+        className="min-h-0 flex-1 overflow-y-auto"
+        hidden={resolvedActiveSurface !== "usage"}
+        id={usageSurfacePanelId}
+        role="tabpanel"
+      >
+        {resolvedActiveSurface === "usage" && sessionId ? (
+          <SessionUsagePanel
+            key={sessionId}
+            className="border-b-0"
+            isResponding={isResponding}
+            lastRuntimeEventType={lastRuntimeEventType}
+            runtimeEventCount={runtimeEventCount}
+            sessionId={sessionId}
+          />
         ) : null}
       </div>
     </aside>
