@@ -1,5 +1,5 @@
 // 工作台右侧「会话用量」面板：展示当前会话的 token/请求/轮次/覆盖率摘要，
-// 并提供跳转到 /usage/sessions/:sessionId 完整用量明细的链接。
+// 并提供在新窗口打开 /usage/sessions/:sessionId 完整用量明细的链接。
 // 只读展示；数据获取与刷新语义见 hooks/workspace/use-session-usage.ts。
 
 import { AlertTriangleIcon, ArrowUpRightIcon, ChartNoAxesCombinedIcon, RefreshCwIcon } from "lucide-react";
@@ -120,6 +120,8 @@ export function SessionUsagePanel({
           <Link
             aria-label={t("usagePanel.openFullReportHint")}
             className={cn(buttonVariants({ size: "sm", variant: "ghost" }), "h-7 gap-1 px-2 text-xs")}
+            rel="noopener noreferrer"
+            target="_blank"
             title={t("usagePanel.openFullReportHint")}
             to={detailHref}
           >

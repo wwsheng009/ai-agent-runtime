@@ -137,6 +137,9 @@ describe("SessionUsagePanel", () => {
     );
     expect(detailLink).not.toBeNull();
     expect(detailLink?.textContent).toContain("完整用量");
+    // 新窗口打开：工作台会话页保持在当前窗口，不被明细页替换。
+    expect(detailLink?.getAttribute("target")).toBe("_blank");
+    expect(detailLink?.getAttribute("rel")).toBe("noopener noreferrer");
   });
 
   it("surfaces load failures with the backend message", async () => {

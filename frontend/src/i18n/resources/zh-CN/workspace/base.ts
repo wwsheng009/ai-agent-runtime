@@ -38,7 +38,7 @@ export const zhWorkspaceBase = {
     empty: "本会话暂无用量记录",
     emptyHint: "会话产生 LLM 调用后，这里会显示 token、请求与覆盖率统计。",
     openFullReport: "完整用量",
-    openFullReportHint: "在用量分析页面查看该会话的完整明细",
+    openFullReportHint: "在新窗口打开该会话的完整用量明细",
     unknownProvider: "未知提供方",
     qualityUnknown: "未知",
     metrics: {

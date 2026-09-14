@@ -46,7 +46,7 @@ export const enWorkspaceBase = {
     emptyHint:
       "Token, request, and coverage stats appear here once the session makes LLM calls.",
     openFullReport: "Full report",
-    openFullReportHint: "Open the full usage detail for this session",
+    openFullReportHint: "Open this session's full usage detail in a new window",
     unknownProvider: "Unknown provider",
     qualityUnknown: "unknown",
     metrics: {
