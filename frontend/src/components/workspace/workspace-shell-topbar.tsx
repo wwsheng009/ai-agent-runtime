@@ -13,6 +13,7 @@ import {
 import { Link } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
+import { SessionGoalIndicator } from "@/components/workspace/session-goal-indicator";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { Button } from "@/components/ui/button";
 import { ConnectionStatusBadge } from "@/components/ui/connection-status-badge";
@@ -132,6 +133,8 @@ export function WorkspaceShellTopbar({
         ) : null}
         {!isNewThread ? (
           <div className="hidden items-center gap-2.5 md:flex">
+            {/* P2-9：会话目标四相指示（只读投影；无数据不渲染）。 */}
+            <SessionGoalIndicator sessionId={selectedThread.sessionId} />
             {connectionStatus && connectionStatus !== "idle" ? (
               <ConnectionStatusBadge
                 status={connectionStatus}

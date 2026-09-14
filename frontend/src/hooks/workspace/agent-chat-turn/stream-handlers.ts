@@ -18,6 +18,7 @@ import {
   type RuntimeDeltaCoordinator,
   type ToolMessageSegment,
 } from "@/lib/workspace-thread-state";
+import { recordGoalToolEnd } from "@/lib/session-goal/store";
 import type { TrajectoryEventKind } from "@/lib/trajectory/types";
 import type {
   AgentChatResult,
@@ -51,6 +52,8 @@ export type AgentChatStreamHandlersDeps = {
     kind: TrajectoryEventKind,
     payload: Record<string, unknown> | null | undefined,
   ) => void;
+  /** P2-9：goal 只读投影的会话键（runtime session_id；新会话可能尚未登记）。 */
+  sessionId?: string;
   setPhaseAndRef: (nextPhase: ChatStreamPhase | null) => void;
   turnId: string;
   turnState: ChatTurnRuntimeState;
@@ -76,6 +79,7 @@ export function createAgentChatStreamHandlers(
     handleToolEnd,
     notifyFailure,
     pushTrajectory,
+    sessionId,
     setPhaseAndRef,
     turnId,
     turnState,
@@ -242,6 +246,9 @@ export function createAgentChatStreamHandlers(
     },
     onToolEnd: (payload: AgentChatStreamChunkPayload) => {
       pushTrajectory("tool_end", payload);
+      // P2-9：goal 工具结果只在这里是完整的（`tool.content` 全量）；线程层
+      // 截断到 240 字符、轨迹层不保留，故在 SSE 边界直接投影。
+      recordGoalToolEnd(sessionId, payload);
       turnState.receivedRuntimeActivity = true;
       handleToolEnd(payload);
     },

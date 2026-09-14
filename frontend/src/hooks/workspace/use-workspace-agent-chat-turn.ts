@@ -357,6 +357,7 @@ export function useWorkspaceAgentChatTurn({
               handleToolEnd,
               notifyFailure,
               pushTrajectory,
+              sessionId: threadSnapshot.sessionId,
               setPhaseAndRef,
               turnId,
               turnState,
