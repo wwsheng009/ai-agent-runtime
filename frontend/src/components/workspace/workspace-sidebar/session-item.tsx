@@ -2,7 +2,7 @@
 // P1-9 增量：行内相对时间、归档状态徽标与带键盘/aria 的操作菜单（新增 props 均可选）。
 
 import { MoreHorizontalIcon, PencilIcon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type DragEvent } from "react";
 import { type RuntimeSessionRecord } from "@/lib/runtime-api";
 import { cn } from "@/lib/utils";
 
@@ -102,6 +102,15 @@ export type SidebarSessionItemProps = {
   session: RuntimeSessionRecord;
   statusIcon: SidebarStateIconSpec;
   title: string;
+  /** P2-6：组内拖拽重排。缺省整行不可拖（不渲染拖拽相关属性）。 */
+  dragEnabled?: boolean;
+  dragging?: boolean;
+  dropEdge?: "before" | "after" | null;
+  onDragStart?: (event: DragEvent<HTMLDivElement>) => void;
+  onDragOver?: (event: DragEvent<HTMLDivElement>) => void;
+  onDragLeave?: (event: DragEvent<HTMLDivElement>) => void;
+  onDrop?: (event: DragEvent<HTMLDivElement>) => void;
+  onDragEnd?: (event: DragEvent<HTMLDivElement>) => void;
 };
 
 type SessionRowMenuProps = {
@@ -296,6 +305,14 @@ function SessionRowMenu({
 
 export function SidebarSessionItem({
   actionLabels,
+  dragEnabled = false,
+  dragging = false,
+  dropEdge = null,
+  onDragEnd,
+  onDragLeave,
+  onDragOver,
+  onDragStart,
+  onDrop,
   isActive,
   onArchive,
   onCancelRename,
@@ -342,7 +359,25 @@ export function SidebarSessionItem({
   }
 
   return (
-    <div className="group/session relative">
+    <div
+      className={cn("group/session relative", dragging && "opacity-60")}
+      draggable={dragEnabled}
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+      onDragEnd={onDragEnd}
+    >
+      {dropEdge ? (
+        <span
+          aria-hidden
+          data-testid={`session-drop-${dropEdge}`}
+          className={cn(
+            "pointer-events-none absolute inset-x-1 z-10 h-0.5 rounded-full bg-accent-primary",
+            dropEdge === "before" ? "-top-1" : "-bottom-1",
+          )}
+        />
+      ) : null}
       <button
         type="button"
         title={`${title} · ${statusIcon.label}`}

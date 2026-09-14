@@ -6,6 +6,8 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Thread } from "@/data/mock";
+import { SettingsProvider } from "@/core/settings";
+import { APP_SETTINGS_STORAGE_KEY } from "@/core/settings/local";
 
 import { WorkspaceSidebar } from "./workspace-sidebar";
 
@@ -30,6 +32,12 @@ describe("WorkspaceSidebar responsive navigation", () => {
   let root: Root | null;
 
   beforeEach(() => {
+    window.localStorage.clear();
+    // 显式选中文：本文件沿用既有 zh-CN 文案断言口径（不依赖 jsdom 语言探测）。
+    window.localStorage.setItem(
+      APP_SETTINGS_STORAGE_KEY,
+      JSON.stringify({ localization: { locale: "zh-CN" } }),
+    );
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -92,9 +100,11 @@ describe("WorkspaceSidebar responsive navigation", () => {
 
     act(() => {
       root?.render(
-        <MemoryRouter>
-          <WorkspaceSidebar {...props} />
-        </MemoryRouter>,
+        <SettingsProvider>
+          <MemoryRouter>
+            <WorkspaceSidebar {...props} />
+          </MemoryRouter>
+        </SettingsProvider>,
       );
     });
     return props;

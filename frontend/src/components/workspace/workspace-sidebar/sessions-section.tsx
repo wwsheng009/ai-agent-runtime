@@ -9,11 +9,14 @@ import { type TFunction } from "i18next";
 
 import type { SessionStatsStatus } from "@/hooks/workspace/use-session-stats";
 import type { RuntimeSessionStats } from "@/types/runtime";
+import { type SessionOrderMode } from "@/lib/workspace/session-order";
 
 import { buildSidebarIconLabels, buildThreadSessionDetails } from "./labels";
+import { WorkspaceSidebarSessionOrderControl } from "./session-order-control";
 import { SidebarSection } from "./section-shell";
 import { WorkspaceSidebarSessionStatsSummary } from "./session-stats-summary";
 import { SidebarSessionItem } from "./session-item";
+import { useSidebarSessionDrag } from "./use-session-drag-reorder";
 import {
   getRuntimeSessionActivityIcon,
   getSessionStatusIcon,
@@ -57,6 +60,9 @@ type WorkspaceSidebarSessionsSectionProps = {
   selectedRuntimeSessionUserId: string;
   selectedThreadId: string;
   sessionDirectoryGroups: SidebarDirectoryGroup[];
+  sessionOrderMode: SessionOrderMode;
+  onSelectSessionOrderMode: (mode: SessionOrderMode) => void;
+  onReorderSessions: (accountKey: string, order: readonly string[]) => void;
   sessionStats: RuntimeSessionStats | null;
   sessionStatsError: unknown;
   sessionStatsStatus: SessionStatsStatus;
@@ -82,7 +88,9 @@ export function WorkspaceSidebarSessionsSection({
   onDeleteSession,
   onForkSession,
   onRefreshSessionStats,
+  onReorderSessions,
   onRestoreSession,
+  onSelectSessionOrderMode,
   onToggleArchivedSessions,
   onSelectRuntimeSessionUser,
   onSelectThread,
@@ -94,6 +102,7 @@ export function WorkspaceSidebarSessionsSection({
   selectedRuntimeSessionUserId,
   selectedThreadId,
   sessionDirectoryGroups,
+  sessionOrderMode,
   sessionStats,
   sessionStatsError,
   sessionStatsStatus,
@@ -112,6 +121,24 @@ export function WorkspaceSidebarSessionsSection({
 }: WorkspaceSidebarSessionsSectionProps) {
   const sidebarLabels = buildSidebarIconLabels(t);
   const threadSessionDetails = buildThreadSessionDetails(t);
+  // P2-6：组内拖拽重排。跨组拖拽本批不接收（不写假落点、不做假回滚）。
+  const { announcement: orderAnnouncement, dragPropsFor } =
+    useSidebarSessionDrag({
+      enabled: sessionOrderMode === "manual",
+      groups: sessionDirectoryGroups,
+      onReorder: onReorderSessions,
+      describeMoved: (accountKey, sessionId) => {
+        const moved = sessionDirectoryGroups
+          .find((group) => group.key === accountKey)
+          ?.sessions.find((session) => session.id === sessionId);
+        const title = moved
+          ? sessionThreadById.get(moved.id)?.title ||
+            moved.metadata?.title?.trim() ||
+            moved.id
+          : sessionId;
+        return t("sidebar.sessionOrder.moved", { title });
+      },
+    });
 
   return (
     showSessionsSection ? (
@@ -145,6 +172,13 @@ export function WorkspaceSidebarSessionsSection({
               t={t}
               unavailable={sessionStatsUnavailable}
             />
+            {sessionDirectoryGroups.length > 0 ? (
+              <WorkspaceSidebarSessionOrderControl
+                mode={sessionOrderMode}
+                onSelect={onSelectSessionOrderMode}
+                t={t}
+              />
+            ) : null}
             {showArchivedSessions || hiddenArchivedCount > 0 ? (
               <button
                 type="button"
@@ -340,6 +374,10 @@ export function WorkspaceSidebarSessionsSection({
                                               "sidebar.session.restore",
                                             ),
                                           }}
+                                          {...dragPropsFor(
+                                            group.key,
+                                            session.id,
+                                          )}
                                           isActive={isActive}
                                           onArchive={onArchiveSession}
                                           onCancelRename={() =>
@@ -417,6 +455,15 @@ export function WorkspaceSidebarSessionsSection({
               </div>
             ) : null}
           </div>
+        </div>
+        {/* 拖拽重排的无障碍播报：只播报结果，不占用视觉空间。 */}
+        <div
+          role="status"
+          aria-live="polite"
+          className="sr-only"
+          data-testid="sidebar-session-order-announcement"
+        >
+          {orderAnnouncement}
         </div>
       </SidebarSection>
     ) : null

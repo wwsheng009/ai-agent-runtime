@@ -151,6 +151,15 @@ export const zhWorkspaceBase = {
       switchConfirmButton: "切换",
       switchCancel: "取消",
     },
+    sessionOrder: {
+      label: "排序",
+      groupLabel: "会话排序方式",
+      updated: "最近更新",
+      manual: "手动",
+      updatedHint: "按最近更新时间实时排序",
+      manualHint: "固定顺序：拖拽会话行调整位置",
+      moved: "已调整「{{title}}」的顺序",
+    },
     sessionStats: {
       active: "活跃 {{count}}",
       archived: "归档 {{count}}",

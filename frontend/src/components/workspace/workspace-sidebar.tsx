@@ -9,6 +9,7 @@ import { type Thread } from "@/data/mock";
 import { cn } from "@/lib/utils";
 import { useTranslation } from "react-i18next";
 import { useSessionStats } from "@/hooks/workspace/use-session-stats";
+import { useSessionOrder } from "@/hooks/workspace/use-session-order";
 import { WorkspaceSidebarChatsSection } from "@/components/workspace/workspace-sidebar/chats-section";
 import { WorkspaceSidebarDirectoriesSection } from "@/components/workspace/workspace-sidebar/directories-section";
 import { WorkspaceSidebarHeader } from "@/components/workspace/workspace-sidebar/sidebar-header";
@@ -192,6 +193,12 @@ export function WorkspaceSidebar({
   const sessionDirectoryGroups = useMemo(
     () => mergedDirectoryGroups.filter((group) => group.sessions.length > 0),
     [mergedDirectoryGroups],
+  );
+  // P2-6：排序模式（设置域）+ 手动顺序账目（浏览器本地）；只重排分组内会话，不改分组口径。
+  const { commitOrder: commitSessionOrder, mode: sessionOrderMode, orderFor, setMode: setSessionOrderMode } = useSessionOrder();
+  const orderedSessionDirectoryGroups = useMemo(
+    () => sessionDirectoryGroups.map((group) => ({ ...group, sessions: orderFor(group.key, group.sessions) })),
+    [orderFor, sessionDirectoryGroups],
   );
   const sessionThreadById = useMemo(() => {
     const byId = new Map<string, Thread>();
@@ -413,7 +420,9 @@ export function WorkspaceSidebar({
               onDeleteSession={onDeleteRuntimeSession}
               onForkSession={onForkRuntimeSession}
               onRefreshSessionStats={sessionStats.refresh}
+              onReorderSessions={commitSessionOrder}
               onRestoreSession={onRestoreRuntimeSession}
+              onSelectSessionOrderMode={setSessionOrderMode}
               onToggleArchivedSessions={() =>
                 setShowArchivedSessions((current) => !current)
               }
@@ -426,7 +435,8 @@ export function WorkspaceSidebar({
               runtimeSessionUsersLoading={runtimeSessionUsersLoading}
               selectedRuntimeSessionUserId={selectedRuntimeSessionUserId}
               selectedThreadId={selectedThreadId}
-              sessionDirectoryGroups={sessionDirectoryGroups}
+              sessionDirectoryGroups={orderedSessionDirectoryGroups}
+              sessionOrderMode={sessionOrderMode}
               sessionStats={sessionStats.stats}
               sessionStatsError={sessionStats.error}
               sessionStatsStatus={sessionStats.status}

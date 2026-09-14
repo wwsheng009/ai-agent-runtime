@@ -80,6 +80,7 @@ describe("app settings storage helpers", () => {
       workspace: {
         density: "compact",
         autoOpenArtifacts: true,
+        sessionOrder: "updated",
       },
       notification: {
         enabled: true,

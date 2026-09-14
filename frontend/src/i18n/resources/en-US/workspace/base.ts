@@ -160,6 +160,15 @@ export const enWorkspaceBase = {
       switchConfirmButton: "Switch",
       switchCancel: "Cancel",
     },
+    sessionOrder: {
+      label: "Order",
+      groupLabel: "Session ordering",
+      updated: "Last updated",
+      manual: "Manual",
+      updatedHint: "Sort by last update time",
+      manualHint: "Fixed order: drag session rows to rearrange",
+      moved: "Reordered “{{title}}”",
+    },
     sessionStats: {
       active: "Active {{count}}",
       archived: "Archived {{count}}",

@@ -9,6 +9,8 @@ export type ThemeMode = "system" | "light" | "dark";
 export type ResolvedTheme = "light" | "dark";
 export type WorkspaceDensity = "comfortable" | "compact";
 export type ReasoningEffort = "" | "minimal" | "low" | "medium" | "high";
+/** P2-6：侧栏会话排序模式偏好（与 `lib/workspace/session-order` 的模式集合对齐）。 */
+export type SessionOrderPreference = "updated" | "manual";
 
 export const FONT_FAMILY_STACKS: Record<
   FontFamilyPreset,
@@ -92,6 +94,7 @@ export interface AppSettings {
   workspace: {
     density: WorkspaceDensity;
     autoOpenArtifacts: boolean;
+    sessionOrder: SessionOrderPreference;
   };
   notification: {
     enabled: boolean;
@@ -129,6 +132,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   workspace: {
     density: "compact",
     autoOpenArtifacts: true,
+    sessionOrder: "updated",
   },
   notification: {
     enabled: true,
@@ -200,6 +204,15 @@ function normalizeWorkspaceDensity(value: unknown): WorkspaceDensity {
     : DEFAULT_APP_SETTINGS.workspace.density;
 }
 
+/** 只认两种排序模式，未知值回落到默认（不做隐式映射）。 */
+function normalizeSessionOrderPreference(
+  value: unknown,
+): SessionOrderPreference {
+  return value === "manual" || value === "updated"
+    ? value
+    : DEFAULT_APP_SETTINGS.workspace.sessionOrder;
+}
+
 function normalizeReasoningEffort(value: unknown): ReasoningEffort {
   return value === "minimal" ||
     value === "low" ||
@@ -265,6 +278,9 @@ export function mergeAppSettings(
       autoOpenArtifacts: toBoolean(
         value?.workspace?.autoOpenArtifacts,
         DEFAULT_APP_SETTINGS.workspace.autoOpenArtifacts,
+      ),
+      sessionOrder: normalizeSessionOrderPreference(
+        value?.workspace?.sessionOrder,
       ),
     },
     notification: {
