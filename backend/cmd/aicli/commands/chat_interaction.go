@@ -204,6 +204,14 @@ type chatInteractionCoordinator struct {
 	dynamicStatusCompletedElapsed time.Duration
 	dynamicStatusCompleted        bool
 	dynamicStatusTimerSeq         uint64
+	// internalRunSeq 记录内部轮次（supervision auto-wake 等不经过
+	// sendMessage/StartWaiting 协议的 run）的启动次数；waitingInternalRunSeq
+	// 在 StartWaiting 时快照。CompleteWaiting 只有在两者相等时才允许冻结
+	// "Worked for" 摘要：否则会把已结束的前台 turn 的完成摘要覆盖到正在运行
+	// 的内部轮次上（事故：状态行显示 "Worked for 28m 41s" 后 transcript 仍在
+	// 继续输出）。归属判定见 finishWaiting / ResetRunStateKind。
+	internalRunSeq        uint64
+	waitingInternalRunSeq uint64
 	// webStatusLane 把 aicli.chat.dynamic_status 的 EventBus 发布移出 c.mu
 	// 临界区（reducer 外发布）：updateSurfaceStatusLocked 只在锁内构建快照并
 	// 非阻塞入队（满时丢最旧帧、保序 latest-wins），专用 goroutine 锁外保序
@@ -843,13 +851,13 @@ func (c *chatInteractionCoordinator) updateSurfaceStatusLocked(s chatSurfaceStat
 	c.updateDynamicStatusClockLocked(s, now)
 	if c.surface != nil {
 		persistentModel := buildChatPersistentStatusModelForWidth(c.session, ui.GetTerminalWidth())
-		dynamicModel := buildChatDynamicStatusModelForWidthInputModeAndCompletion(
+		dynamicModel := c.appendEventDegradationHintLocked(buildChatDynamicStatusModelForWidthInputModeAndCompletion(
 			s,
 			ui.GetTerminalWidth(),
 			c.inputMode,
 			c.dynamicStatusElapsedLocked(now),
 			c.dynamicStatusCompleted,
-		)
+		))
 		c.persistentStatusModel = cloneChatStatusLineModel(persistentModel)
 		c.dynamicStatusModel = cloneChatStatusLineModelPointer(dynamicModel)
 		c.statusModelsCached = true
@@ -899,7 +907,9 @@ func (c *chatInteractionCoordinator) webDynamicStatusPayloadLocked(s chatSurface
 	payload := map[string]interface{}{
 		"active": false,
 	}
-	if c.dynamicStatusCompleted {
+	// 与 TUI 同一规则：完成摘要只属于非运行状态，运行中的内部轮次不能被
+	// 上一轮冻结的 "Worked for …" 覆盖（web 状态行与 TUI 保持一致）。
+	if c.dynamicStatusCompleted && !s.isRunning() {
 		payload["active"] = true
 		payload["text"] = "Worked for " + formatChatDynamicStatusElapsed(c.dynamicStatusElapsedLocked(now))
 		payload["role"] = string(style.RoleSuccess)
@@ -1145,9 +1155,36 @@ func (c *chatInteractionCoordinator) refreshDynamicStatusTick(sequence uint64) {
 		c.dynamicStatusElapsedLocked(now),
 		c.dynamicStatusCompleted,
 	)
+	model = c.appendEventDegradationHintLocked(model)
 	c.dynamicStatusModel = cloneChatStatusLineModelPointer(model)
 	c.surface.SetDynamicStatusModel(model)
 	c.scheduleDynamicStatusTickLocked(now)
+}
+
+// appendEventDegradationHintLocked 在动态状态行尾部追加事件桥降级提示
+// （docs/plan/ui-event-bridge-drop-hardening.md §6.2 第 3 条：降级必须对用户
+// 可见）。它只读桥发布的原子摘要，不获取桥的互斥量，也不改变状态行业务
+// 语义；/debug 的 deferred_queue 区块仍是完整真相。
+func (c *chatInteractionCoordinator) appendEventDegradationHintLocked(model *style.StatusLineModel) *style.StatusLineModel {
+	if c == nil || model == nil || c.session == nil {
+		return model
+	}
+	bridge := c.session.RuntimeEventBridge
+	if bridge == nil {
+		return model
+	}
+	snap, ok := bridge.DegradationSnapshot()
+	if !ok {
+		return model
+	}
+	// 只把"真的有事件没按原样送达"算作降级；纯 merged（就地合并）是设计内
+	// 行为，不打扰用户。
+	degraded := snap.Dropped + snap.Evicted
+	if degraded == 0 || model.StateText == "" {
+		return model
+	}
+	model.StateText += fmt.Sprintf(" · ⚠ events degraded: merged=%d dropped=%d", snap.Merged, degraded)
+	return model
 }
 
 func (c *chatInteractionCoordinator) stopDynamicStatusTickLocked() {
@@ -2052,6 +2089,10 @@ func (c *chatInteractionCoordinator) StartWaiting() {
 		c.surface.SetPromptInputStateVersioned(formatSessionUserPrompt(c.session), draft.text, rows, cursorRow, cursorCol, draft.sequence)
 	}
 	c.waitingActive = true
+	// 快照内部轮次计数：若本 turn 的 deferred CompleteWaiting 到达之前已有
+	// supervision auto-wake 接管 actor，完成摘要必须让位给内部轮次的实时
+	// 状态（见 finishWaiting）。
+	c.waitingInternalRunSeq = c.internalRunSeq
 	// Codex turn_lifecycle.start: begin live goal-time accrual for this turn.
 	// Keep the same start across auto-continuations inside sendMessage.
 	markChatGoalStatusActiveTurnStarted(c.session)
@@ -2081,6 +2122,15 @@ func (c *chatInteractionCoordinator) finishWaiting(completed bool) {
 	if c.shutdown || !c.waitingActive {
 		c.mu.Unlock()
 		return
+	}
+	if completed && c.internalRunSeq != c.waitingInternalRunSeq {
+		// 本 turn 的 CompleteWaiting 是 deferred 调用（sendMessage 在 executor
+		// 返回后才执行），而 actor turn gate 在 executor 返回时即释放：等待
+		// gate 的 supervision auto-wake 可以在这里之前启动内部轮次，并把
+		// agentStage 置为 Planning。此时冻结完成摘要会让状态行在整个内部
+		// 轮次期间显示 "Worked for …"（事故），因此降级为 ClearWaiting：
+		// 内部轮次的运行状态保持权威，不做任何完成冻结。
+		completed = false
 	}
 	if completed {
 		now := time.Now()
@@ -2286,7 +2336,11 @@ func buildChatDynamicStatusModelForWidthAndInputMode(s chatSurfaceStatus, width 
 
 func buildChatDynamicStatusModelForWidthInputModeAndCompletion(s chatSurfaceStatus, width int, inputMode chatInputMode, elapsed time.Duration, completed bool) *style.StatusLineModel {
 	s, width = normalizeChatSurfaceStatusInput(s, width)
-	if completed {
+	// 完成摘要只属于已结束（非运行）的状态：supervision auto-wake 可以在前台
+	// turn 的 deferred CompleteWaiting 之前接管状态行，此时 surface state 已经
+	// 是运行态，绝不能让上一轮的 "Worked for …" 覆盖正在进行的 run（事故：
+	// 状态栏显示 "Worked for 28m 41s" 后 transcript 仍在继续输出）。
+	if completed && !s.isRunning() {
 		text := "Worked for " + formatChatDynamicStatusElapsed(elapsed)
 		if ui.DisplayWidth(text) > width {
 			text = compactStatusValue(text, width)
@@ -4826,7 +4880,27 @@ func (c *chatInteractionCoordinator) DebugSummary() string {
 	return strings.Join(parts, " ")
 }
 
+// chatRunKind 区分驱动 composer 状态机的 run 归属：前台 run（用户发送、
+// goal 继续）由 sendMessage 的 StartWaiting/CompleteWaiting 协议驱动并发布
+// "Worked for" 完成摘要；内部 run（supervision auto-wake）直接经
+// ActorRegistry 提交，只在 bridge 的 BeginRun/EndRun 生命周期内运行，从不
+// 发布完成摘要。
+type chatRunKind int
+
+const (
+	chatRunKindForeground chatRunKind = iota
+	chatRunKindInternal
+)
+
 func (c *chatInteractionCoordinator) ResetRunState() {
+	c.ResetRunStateKind(chatRunKindForeground)
+}
+
+// ResetRunStateKind 重置 composer 的 run 级状态。内部轮次额外做两件事：
+// 推进 internalRunSeq（使前台迟到/已过期的 CompleteWaiting 无法再冻结完成
+// 摘要）并丢弃上一轮冻结的完成摘要——内部轮次开始即拥有状态行，绝不能让它
+// 继承 "Worked for …"。
+func (c *chatInteractionCoordinator) ResetRunStateKind(kind chatRunKind) {
 	if c == nil {
 		return
 	}
@@ -4834,6 +4908,11 @@ func (c *chatInteractionCoordinator) ResetRunState() {
 	defer c.mu.Unlock()
 	if c.shutdown {
 		return
+	}
+	if kind == chatRunKindInternal {
+		c.internalRunSeq++
+		c.dynamicStatusCompletedElapsed = 0
+		c.dynamicStatusCompleted = false
 	}
 	c.resetBlockBoundaryLocked()
 	c.agentStage = chatAgentStageIdle

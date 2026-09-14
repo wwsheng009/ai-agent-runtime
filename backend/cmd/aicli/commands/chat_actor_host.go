@@ -557,7 +557,11 @@ func (h *localChatRuntimeHost) beginWakeTurnRun() func() {
 	}
 	if bridge := ensureChatRuntimeEventBridge(h.BaseSession); bridge != nil {
 		bridge.PrepareRunPrompt(supervision.AutoWakePrompt)
-		bridge.BeginRun()
+		// 内部轮次：直接经 ActorRegistry 提交，不经过 sendMessage 的
+		// StartWaiting/CompleteWaiting 协议。必须按 internal 归属启动，
+		// 否则会继承前台 turn 冻结的 "Worked for" 完成摘要，状态行在整个
+		// wake turn 期间显示上一轮完成时间而 transcript 仍在继续输出。
+		bridge.BeginRunKind(chatRunKindInternal)
 		return bridge.EndRun
 	}
 	return func() {}

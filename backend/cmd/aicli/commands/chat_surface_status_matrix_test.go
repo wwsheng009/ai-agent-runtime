@@ -76,10 +76,10 @@ func TestChatSurfaceStatusStringMatrix(t *testing.T) {
 
 func TestChatDynamicStatusActionMatrix(t *testing.T) {
 	cases := []struct {
-		name         string
-		s            chatSurfaceStatus
-		wantAction   string
-		wantRole     style.Role
+		name          string
+		s             chatSurfaceStatus
+		wantAction    string
+		wantRole      style.Role
 		wantInterrupt bool
 	}{
 		{name: "idle produces no dynamic line", s: chatSurfaceStatus{kind: chatSurfaceStatusIdle}},
@@ -119,9 +119,9 @@ func TestChatDynamicStatusActionMatrix(t *testing.T) {
 
 func TestChatDynamicStatusActionInputModeOverrides(t *testing.T) {
 	cases := []struct {
-		mode         chatInputMode
-		wantAction   string
-		wantRole     style.Role
+		mode          chatInputMode
+		wantAction    string
+		wantRole      style.Role
 		wantInterrupt bool
 	}{
 		{mode: chatInputModeApproval, wantAction: "Waiting for approval", wantRole: style.RoleApproval, wantInterrupt: true},
@@ -165,10 +165,23 @@ func TestChatDynamicStatusModelElapsedRendering(t *testing.T) {
 		}
 	}
 
-	// 终态（completed）冻结为 "Worked for ..."，不再滚动。
-	done := buildChatDynamicStatusModelForWidthInputModeAndCompletion(s, 160, chatInputModeChat, 140*time.Second, true)
+	// 运行态优先于冻结的完成摘要：supervision auto-wake 可以在前台 turn 的
+	// deferred CompleteWaiting 之前接管状态行，此时绝不能让 "Worked for ..."
+	// 覆盖正在进行的 run（详见
+	// TestBuildChatDynamicStatusModelRunningStateBeatsStaleCompletion）。
+	running := buildChatDynamicStatusModelForWidthInputModeAndCompletion(s, 160, chatInputModeChat, 140*time.Second, true)
+	if running == nil {
+		t.Fatal("completed retry must still render a dynamic model")
+	}
+	if plain := style.StatusLineDocument(*running, 160).PlainText(); plain != "◦ Retrying step=1 attempt=2/3 (2m 20s • esc to interrupt)" {
+		t.Fatalf("running state must win over the frozen completion flag: %q", plain)
+	}
+
+	// 终态（completed）+ 非运行状态冻结为 "Worked for ..."，不再滚动。
+	done := buildChatDynamicStatusModelForWidthInputModeAndCompletion(
+		chatSurfaceStatus{kind: chatSurfaceStatusIdle}, 160, chatInputModeChat, 140*time.Second, true)
 	if done == nil {
-		t.Fatal("completed retry must still render a summary model")
+		t.Fatal("completed idle must still render a summary model")
 	}
 	if plain := style.StatusLineDocument(*done, 160).PlainText(); plain != "Worked for 2m 20s" {
 		t.Fatalf("completed render = %q, want %q", plain, "Worked for 2m 20s")

@@ -144,6 +144,8 @@ func handleBacktrackCommand(session *ChatSession, command string) bool {
 			// History already truncated; submit as a normal prompt.
 		}
 		_ = submitReq
+		endRun := beginBacktrackSubmitRun(session, composerPrompt)
+		defer endRun()
 		runResult, submitErr := actor.SubmitPrompt(ctx, composerPrompt, nil)
 		if submitErr != nil {
 			fmt.Printf("错误: 自动发送失败: %v\n", submitErr)
@@ -170,6 +172,26 @@ func handleBacktrackCommand(session *ChatSession, command string) bool {
 		}
 	}
 	return false
+}
+
+// beginBacktrackSubmitRun 为 /backtrack --submit 直接经 actor 重发的 turn 开启
+// bridge 的 run epoch，并返回匹配的 endRun（调用方必须 defer 执行）。
+//
+// 这条路径是一次真实的前台 turn，却不经过 sendMessage 的
+// StartWaiting/CompleteWaiting 协议，因此必须显式声明 run 归属；否则本次运行
+// 的事件会带着已关闭的 run epoch 到达并被渲染层当作过期事件丢弃，composer
+// 状态行也会在整个运行期间停留在上一轮冻结的 "Worked for …"。
+func beginBacktrackSubmitRun(session *ChatSession, prompt string) func() {
+	if session == nil {
+		return func() {}
+	}
+	bridge := ensureChatRuntimeEventBridge(session)
+	if bridge == nil {
+		return func() {}
+	}
+	bridge.PrepareRunPrompt(prompt)
+	bridge.BeginRun()
+	return bridge.EndRun
 }
 
 // executeStructuredBacktrackQueryCommand accepts finite read-only reports and

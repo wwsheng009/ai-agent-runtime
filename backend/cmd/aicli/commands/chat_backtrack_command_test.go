@@ -5,6 +5,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
@@ -286,4 +287,73 @@ func TestReplayVisibleChatHistoryAfterTruncationSkipsSystemOnly(t *testing.T) {
 	if strings.TrimSpace(output) != "" {
 		t.Fatalf("expected empty output for system-only history, got:\n%s", output)
 	}
+}
+
+// TestBacktrackSubmitRunOpensRunEpoch 复刻 /backtrack --submit 的归属缺口：直接经
+// actor 重发的 turn 不经过 sendMessage 的 StartWaiting/CompleteWaiting 协议。如果不
+// 显式开启 run epoch：(a) 本次运行的事件会带着已关闭的 epoch 到达并被渲染层丢弃；
+// (b) composer 状态行在整个运行期间仍显示上一轮冻结的 "Worked for …"。
+func TestBacktrackSubmitRunOpensRunEpoch(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ctx := context.Background()
+	storage := runtimechat.NewInMemoryStorage()
+	persisted := runtimechat.NewSession("backtrack-submit-user")
+	persisted.ID = "backtrack-submit-run-epoch"
+	persisted.AddMessage(*runtimetypes.NewUserMessage("prompt"))
+	persisted.AddMessage(*runtimetypes.NewAssistantMessage("answer"))
+	if err := storage.Save(ctx, persisted); err != nil {
+		t.Fatalf("save backtrack-submit fixture: %v", err)
+	}
+	manager := runtimechat.NewSessionManager(storage, nil)
+	t.Cleanup(manager.Stop)
+	hub := runtimechat.NewSessionHub(func(sessionID string) (*runtimechat.SessionActor, error) {
+		return runtimechat.NewSessionActor(sessionID, runtimechat.SessionActorConfig{
+			Agent:        runtimeagent.NewAgent(&runtimeagent.Config{Name: "backtrack-submit"}, nil),
+			SessionStore: storage,
+			StateStore:   runtimechat.NewInMemoryRuntimeStore(8),
+		})
+	})
+	t.Cleanup(hub.StopAll)
+
+	session := &ChatSession{
+		SessionManager:   manager,
+		RuntimeSession:   persisted,
+		LocalRuntimeHost: &localChatRuntimeHost{SessionHub: hub},
+	}
+	if err := replaceRuntimeMessages(session, persisted.GetMessages()); err != nil {
+		t.Fatalf("seed canonical messages: %v", err)
+	}
+	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
+	interaction := newChatInteractionCoordinator(session)
+	t.Cleanup(interaction.Shutdown)
+	session.Interaction = interaction
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(88, 30)
+	interaction.SetSurface(surface)
+
+	// 上一轮已冻结完成摘要：状态行停在 "Worked for …"。
+	interaction.StartWaiting()
+	interaction.CompleteWaiting()
+	if !interaction.dynamicStatusCompleted {
+		t.Fatal("fixture did not freeze a completion summary")
+	}
+	frozen := interaction.webDynamicStatusPayloadLocked(interaction.surfaceStatus, time.Now())
+	if text, _ := frozen["text"].(string); !strings.HasPrefix(text, "Worked for") {
+		t.Fatalf("fixture status line is not the frozen summary: %#v", frozen)
+	}
+
+	epochBefore := session.RuntimeEventBridge.runEpoch
+	endRun := beginBacktrackSubmitRun(session, "revised prompt")
+
+	if got := session.RuntimeEventBridge.runEpoch; got == epochBefore {
+		t.Fatal("backtrack --submit did not open a new run epoch")
+	}
+	if interaction.dynamicStatusCompleted {
+		t.Fatal("frozen completion summary survived the backtrack submit run start")
+	}
+	live := interaction.webDynamicStatusPayloadLocked(interaction.surfaceStatus, time.Now())
+	if text, _ := live["text"].(string); strings.HasPrefix(text, "Worked for") {
+		t.Fatalf("status line still shows the frozen summary while the run is in flight: %#v", live)
+	}
+	endRun()
 }

@@ -126,6 +126,31 @@ func TestBuildChatDynamicStatusModelOmitsSummaryForInitialReady(t *testing.T) {
 	}
 }
 
+// TestBuildChatDynamicStatusModelRunningStateBeatsStaleCompletion is the
+// render-level guard for the "Worked for 28m 41s but still running" report: a
+// supervision auto-wake can take over the composer state machine before the
+// foreground turn's deferred CompleteWaiting freezes its summary. A running
+// surface state must always win over the frozen completion flag.
+func TestBuildChatDynamicStatusModelRunningStateBeatsStaleCompletion(t *testing.T) {
+	model := buildChatDynamicStatusModelForWidthInputModeAndCompletion(
+		chatSurfaceStatus{kind: chatSurfaceStatusPlanning},
+		160,
+		chatInputModeChat,
+		28*time.Minute+41*time.Second,
+		true,
+	)
+	if model == nil {
+		t.Fatal("expected the running dynamic status model")
+	}
+	plain := style.StatusLineDocument(*model, 160).PlainText()
+	if strings.Contains(plain, "Worked for") {
+		t.Fatalf("frozen completion summary must not cover a running state: %q", plain)
+	}
+	if !strings.Contains(plain, "Analyzing") {
+		t.Fatalf("expected the live running status, got %q", plain)
+	}
+}
+
 func TestBuildChatPersistentStatusModelOmitsTransientState(t *testing.T) {
 	model := buildChatPersistentStatusModelForWidth(&ChatSession{Model: "gpt-5.6-sol"}, 160)
 	plain := strings.ToLower(style.StatusLineDocument(model, 160).PlainText())

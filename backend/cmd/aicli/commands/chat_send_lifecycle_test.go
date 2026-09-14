@@ -135,3 +135,94 @@ func TestFailedSendClearsDynamicStatusWithoutSuccessfulFinalizer(t *testing.T) {
 		t.Fatal("failed send must not publish a successful Worked for summary")
 	}
 }
+
+// TestLateCompleteWaitingDoesNotFreezeSummaryWhenInternalRunTookOver covers
+// the production interleaving behind the "Worked for 28m 41s but still
+// running" report: sendMessage's CompleteWaiting is deferred until after the
+// executor returns, while the actor turn gate is released at executor return.
+// A supervision auto-wake parked on that gate therefore begins its internal
+// run first, and the late CompleteWaiting must not freeze the foreground
+// completion summary over the running internal turn.
+func TestLateCompleteWaitingDoesNotFreezeSummaryWhenInternalRunTookOver(t *testing.T) {
+	coord := newChatInteractionCoordinator(&ChatSession{})
+	t.Cleanup(coord.Shutdown)
+	coord.StartWaiting()
+	coord.mu.Lock()
+	coord.dynamicStatusStarted = time.Now().Add(-5 * time.Second)
+	coord.mu.Unlock()
+
+	// The wake turn wins the gate and owns the composer state machine:
+	// bridge.BeginRunKind(chatRunKindInternal) resets the run state and marks
+	// the composer as planning.
+	coord.ResetRunStateKind(chatRunKindInternal)
+	coord.SetAgentStage(chatAgentStagePlanning)
+	// sendMessage now reaches its deferred CompleteWaiting.
+	coord.CompleteWaiting()
+
+	coord.mu.Lock()
+	completed := coord.dynamicStatusCompleted
+	waiting := coord.waitingActive
+	coord.mu.Unlock()
+	if completed {
+		t.Fatal("late CompleteWaiting must not freeze the foreground summary over a running internal turn")
+	}
+	if waiting {
+		t.Fatal("CompleteWaiting must still release the foreground waiting flag")
+	}
+	if state := coord.currentSurfaceStateForTest(); state == "Ready" {
+		t.Fatalf("internal run must keep the surface in a running state, got %q", state)
+	}
+}
+
+// TestInternalRunStartDropsFrozenForegroundSummary covers the mirrored
+// interleaving: the foreground turn froze its summary first, then the
+// supervision wake starts. The internal run must clear the summary instead of
+// painting it for the whole wake turn.
+func TestInternalRunStartDropsFrozenForegroundSummary(t *testing.T) {
+	coord := newChatInteractionCoordinator(&ChatSession{})
+	t.Cleanup(coord.Shutdown)
+	coord.StartWaiting()
+	coord.mu.Lock()
+	coord.dynamicStatusStarted = time.Now().Add(-5 * time.Second)
+	coord.mu.Unlock()
+	coord.CompleteWaiting()
+
+	coord.mu.Lock()
+	frozen := coord.dynamicStatusCompleted
+	coord.mu.Unlock()
+	if !frozen {
+		t.Fatal("precondition: foreground completion must freeze the Worked for summary")
+	}
+
+	coord.ResetRunStateKind(chatRunKindInternal)
+
+	coord.mu.Lock()
+	defer coord.mu.Unlock()
+	if coord.dynamicStatusCompleted {
+		t.Fatal("internal run must drop the inherited Worked for summary")
+	}
+}
+
+// TestForegroundSummaryFreezesAgainAfterInternalRunCompletes guards the
+// run-ownership snapshot against over-matching: once the internal run has
+// started and finished, the next foreground send must freeze its own summary
+// normally.
+func TestForegroundSummaryFreezesAgainAfterInternalRunCompletes(t *testing.T) {
+	coord := newChatInteractionCoordinator(&ChatSession{})
+	t.Cleanup(coord.Shutdown)
+	coord.StartWaiting()
+	coord.ResetRunStateKind(chatRunKindInternal)
+	coord.CompleteWaiting()
+
+	coord.StartWaiting()
+	coord.mu.Lock()
+	coord.dynamicStatusStarted = time.Now().Add(-5 * time.Second)
+	coord.mu.Unlock()
+	coord.CompleteWaiting()
+
+	coord.mu.Lock()
+	defer coord.mu.Unlock()
+	if !coord.dynamicStatusCompleted || coord.dynamicStatusCompletedElapsed < 5*time.Second {
+		t.Fatal("foreground turn after an internal run must still freeze its own Worked for summary")
+	}
+}
