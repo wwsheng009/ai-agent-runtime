@@ -43,6 +43,8 @@ type RuntimeCounters struct {
 	LastGapAt        *time.Time
 	LastEventAt      *time.Time
 	RunningTurns     int64
+	// LastTurn 是最近一轮 agent.turn.* 的水位（PR-4 落点 C）。
+	LastTurn *TurnSummary
 }
 
 // ingressItem 是 bus → collector 的单条入队项。
@@ -394,11 +396,44 @@ func (c *Collector) updateAggregatesLocked(proj Event) {
 		trackUsage(agg, payload)
 	case EventAgentTurnStarted:
 		agg.Runtime.RunningTurns++
+		recordTurnStarted(agg, proj)
 	case EventAgentTurnDone:
 		if agg.Runtime.RunningTurns > 0 {
 			agg.Runtime.RunningTurns--
 		}
+		recordTurnFinished(agg, proj)
 	}
+}
+
+// recordTurnStarted 记录最近一轮 turn 的起点。新一轮开始即替换旧轮的终局
+// 水位：observe 只保留"最近一轮"，否则上一轮的 duration/budget 会被误读成本轮。
+func recordTurnStarted(agg *collectorState, proj Event) {
+	agg.Runtime.LastTurn = &TurnSummary{
+		SessionID:   proj.Correlation.SessionID,
+		MaxSteps:    int(numberField(proj.Payload, "max_steps")),
+		BudgetLevel: stringField(proj.Payload, "budget_level"),
+		StartedAt:   proj.Timestamp.UTC(),
+	}
+}
+
+// recordTurnFinished 记录最近一轮 turn 的终局水位。即使 finished 先于 started
+// 到达（观测在轮次中途开启），也照常落库，避免把"有终局但无起点"的事件丢掉。
+func recordTurnFinished(agg *collectorState, proj Event) {
+	turn := agg.Runtime.LastTurn
+	if turn == nil {
+		turn = &TurnSummary{}
+		agg.Runtime.LastTurn = turn
+	}
+	if sessionID := proj.Correlation.SessionID; sessionID != "" {
+		turn.SessionID = sessionID
+	}
+	turn.Step = int(numberField(proj.Payload, "step"))
+	turn.ElapsedMS = numberField(proj.Payload, "elapsed_ms")
+	turn.BudgetRatio = floatField(proj.Payload, "budget_ratio")
+	if level := stringField(proj.Payload, "budget_level"); level != "" {
+		turn.BudgetLevel = level
+	}
+	turn.FinishedAt = proj.Timestamp.UTC()
 }
 
 func recordProviderCounting(agg *collectorState, payload map[string]interface{}) {
@@ -487,6 +522,29 @@ func stringField(m map[string]interface{}, key string) string {
 	return ""
 }
 
+// floatField 读取浮点标量（budget_ratio 等水位）；非数值一律按 0 处理，
+// 与 numberField 的"缺失即 0"口径一致。
+func floatField(m map[string]interface{}, key string) float64 {
+	if m == nil {
+		return 0
+	}
+	switch v := m[key].(type) {
+	case float64:
+		return v
+	case float32:
+		return float64(v)
+	case int:
+		return float64(v)
+	case int64:
+		return float64(v)
+	case json.Number:
+		f, _ := v.Float64()
+		return f
+	default:
+		return 0
+	}
+}
+
 func numberField(m map[string]interface{}, key string) int64 {
 	if m == nil {
 		return 0
@@ -557,6 +615,7 @@ func (c *Collector) Stats() (RuntimeSummary, LLMSummary) {
 		RingOldestSeq:        c.oldestSeq,
 		RingLatestSeq:        c.latestSeq,
 		RunningTurns:         int(c.stateRunningTurns()),
+		LastTurn:             c.stateLastTurn(),
 	}
 	c.mu.RUnlock()
 	return runtimeSummary, c.snapshotLLM()
@@ -642,6 +701,18 @@ func (c *Collector) stateRunningTurns() int64 {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	return c.state.Runtime.RunningTurns
+}
+
+// stateLastTurn 返回最近一轮 turn 水位的副本；调用方拿到的是快照，不受后续
+// 事件更新影响（与 RuntimeSummary 其它字段同口径）。
+func (c *Collector) stateLastTurn() *TurnSummary {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if c.state.Runtime.LastTurn == nil {
+		return nil
+	}
+	cloned := *c.state.Runtime.LastTurn
+	return &cloned
 }
 
 // Query 从 retention ring 查询低敏事件。

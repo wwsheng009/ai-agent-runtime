@@ -37,7 +37,12 @@ const (
 	ReminderKindExplorationStall      = "exploration_stall"
 	ReminderKindPollingBackoff        = "polling_backoff"
 	ReminderKindPlanMode              = "plan_mode"
-	ReminderKindRuntimeAdvisory       = "runtime_advisory"
+	// ReminderKindTurnBudget marks the PR-4 per-turn budget wrap-up cue
+	// (docs/plan/ui-event-bridge-drop-hardening.md §6.4). It stays durable on
+	// purpose: the handoff instruction must survive into the next turn so the
+	// model can resume instead of the turn being silently truncated.
+	ReminderKindTurnBudget      = "turn_budget"
+	ReminderKindRuntimeAdvisory = "runtime_advisory"
 
 	// Runtime events for hosts/telemetry.
 	EventSystemReminderInjected = "system_reminder.injected"
@@ -67,6 +72,7 @@ func NormalizeReminderKind(kind string) string {
 		ReminderKindExplorationStall,
 		ReminderKindPollingBackoff,
 		ReminderKindPlanMode,
+		ReminderKindTurnBudget,
 		ReminderKindRuntimeAdvisory:
 		return kind
 	case "":

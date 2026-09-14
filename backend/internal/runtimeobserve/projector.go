@@ -114,6 +114,13 @@ var payloadAllowKeys = map[string]bool{
 	"agent_count":             true,
 	"turn_id":                 true,
 	"attempt_id":              true,
+	// PR-4 落点 C：turn 级水位字段（agent.turn.started/finished）。全部是
+	// 数值或短枚举，不含正文；budget_level 见下方字符串分支。
+	"step":         true,
+	"max_steps":    true,
+	"elapsed_ms":   true,
+	"budget_level": true,
+	"budget_ratio": true,
 }
 
 // ProjectRuntimeEvent 把 bus 事件投影为观测事件。
@@ -170,7 +177,7 @@ func (p *Projector) projectPayload(eventType string, payload map[string]interfac
 			case "provider", "model", "protocol", "status", "state", "phase", "kind",
 				"error_code", "error_category", "usage_source", "aggregation_level",
 				"tool_name", "stream_id", "finish_reason", "reasoning_visibility",
-				"renderer_id", "attempt_id", "turn_id":
+				"renderer_id", "attempt_id", "turn_id", "budget_level":
 				out[key] = boundUTF8String(typed, 512)
 			default:
 				// 其他字符串（可能的 URL/路径/内容）一律丢弃。

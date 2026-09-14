@@ -291,8 +291,8 @@ type chatDebugDisplayExecutorInfo struct {
 	// Diagnosis is the since-start verdict (lifetime counters); a past storm
 	// keeps it non-healthy forever. DiagnosisScope names that explicitly so a
 	// reader cannot mistake it for the current state.
-	Diagnosis                string                             `json:"diagnosis"`
-	DiagnosisScope           string                             `json:"diagnosis_scope"`
+	Diagnosis      string `json:"diagnosis"`
+	DiagnosisScope string `json:"diagnosis_scope"`
 	// WindowDiagnosis is the current-state verdict over the retained window
 	// (most recent 64 executor iterations, none older than 60s): the field to
 	// poll when asking "is the executor healthy right now?". The shape fields

@@ -252,6 +252,8 @@ func buildChatDebugDisplayDocument(session *ChatSession) render.Document {
 	} else {
 		builder.meta("Surface:", "<none>")
 	}
+	// PR-4 落点 C：turn 级指标（预算水位 + 最近一轮终局水位/耗时）。
+	appendChatDebugTurnMetricsLines(&builder, session)
 	appendChatDebugAppStatePresenterLines(&builder, session)
 	appendChatDebugExecutorLines(&builder)
 

@@ -851,7 +851,7 @@ func (c *chatInteractionCoordinator) updateSurfaceStatusLocked(s chatSurfaceStat
 	c.updateDynamicStatusClockLocked(s, now)
 	if c.surface != nil {
 		persistentModel := buildChatPersistentStatusModelForWidth(c.session, ui.GetTerminalWidth())
-		dynamicModel := c.appendEventDegradationHintLocked(buildChatDynamicStatusModelForWidthInputModeAndCompletion(
+		dynamicModel := c.appendStatusHintsLocked(buildChatDynamicStatusModelForWidthInputModeAndCompletion(
 			s,
 			ui.GetTerminalWidth(),
 			c.inputMode,
@@ -1155,7 +1155,7 @@ func (c *chatInteractionCoordinator) refreshDynamicStatusTick(sequence uint64) {
 		c.dynamicStatusElapsedLocked(now),
 		c.dynamicStatusCompleted,
 	)
-	model = c.appendEventDegradationHintLocked(model)
+	model = c.appendStatusHintsLocked(model)
 	c.dynamicStatusModel = cloneChatStatusLineModelPointer(model)
 	c.surface.SetDynamicStatusModel(model)
 	c.scheduleDynamicStatusTickLocked(now)
@@ -1184,6 +1184,34 @@ func (c *chatInteractionCoordinator) appendEventDegradationHintLocked(model *sty
 		return model
 	}
 	model.StateText += fmt.Sprintf(" · ⚠ events degraded: merged=%d dropped=%d", snap.Merged, degraded)
+	return model
+}
+
+// appendStatusHintsLocked 依次追加状态行的附加提示（事件桥降级、turn 预算水位）。
+// 它们都只读桥发布的原子快照，不获取桥的互斥量，也不改变状态行业务语义。
+func (c *chatInteractionCoordinator) appendStatusHintsLocked(model *style.StatusLineModel) *style.StatusLineModel {
+	model = c.appendEventDegradationHintLocked(model)
+	return c.appendTurnBudgetHintLocked(model)
+}
+
+// appendTurnBudgetHintLocked 在动态状态行尾部追加 agent 循环的 turn 预算水位
+// （docs/plan/ui-event-bridge-drop-hardening.md §6.4 落点 B：软着陆必须对用户
+// 可见）。行内容由 agent 侧单一事实源格式化（如
+// "turn budget: step 240/300 · 32m/40m · tokens 62%"），这里只负责展示时机：
+// 仅在本次 run 有可见状态时追加，且水位随 BeginRun 清空，不会跨轮残留。
+func (c *chatInteractionCoordinator) appendTurnBudgetHintLocked(model *style.StatusLineModel) *style.StatusLineModel {
+	if c == nil || model == nil || c.session == nil || model.StateText == "" {
+		return model
+	}
+	bridge := c.session.RuntimeEventBridge
+	if bridge == nil {
+		return model
+	}
+	snap, ok := bridge.TurnBudgetSnapshot()
+	if !ok || strings.TrimSpace(snap.Line) == "" {
+		return model
+	}
+	model.StateText += " · " + snap.Line
 	return model
 }
 

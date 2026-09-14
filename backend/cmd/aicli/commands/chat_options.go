@@ -75,6 +75,8 @@ type chatCommandOptions struct {
 	SessionFilter            ChatSessionListFilter
 	SessionFeaturesRequested bool
 	RenderOutputFile         string // --render-output-file：交互聊天终端镜像落盘路径
+	// BudgetTokens 是 --budget-tokens 的单轮 token 预算（PR-4 §6.4）；0 表示不限制。
+	BudgetTokens int
 }
 
 func resolveChatInitialPrompt(cmd *cobra.Command) (string, error) {
@@ -150,6 +152,7 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 	logDir, _ := cmd.Flags().GetString("log-dir")
 	requestTimeoutFlag, _ := cmd.Flags().GetString("request-timeout")
 	reasoningEffortFlag, _ := cmd.Flags().GetString("reasoning-effort")
+	turnBudgetTokens, _ := cmd.Flags().GetInt("budget-tokens")
 	disableTools, _ := cmd.Flags().GetBool("disable-tools")
 	httpDebug, _ := cmd.Flags().GetBool("debug-http")
 	failFast, _ := cmd.Flags().GetBool("fail-fast")
@@ -245,6 +248,7 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		RequestTimeoutFlag:     requestTimeoutFlag,
 		ReasoningEffortFlag:    reasoningEffortFlag,
 		ReasoningEffortChanged: cmd.Flags().Changed("reasoning-effort"),
+		BudgetTokens:           turnBudgetTokens,
 		DisableTools:           disableTools,
 		HTTPDebug:              httpDebug,
 		FailFast:               failFast,

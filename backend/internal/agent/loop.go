@@ -51,11 +51,15 @@ var errReActRunTimeout = stderrors.New("ReAct run duration limit reached")
 
 // LoopReActConfig ReAct 循环配置
 type LoopReActConfig struct {
-	MaxSteps             int           `yaml:"maxSteps"`
-	MaxToolCalls         int           `yaml:"maxToolCalls"`
-	MaxRunDuration       time.Duration `yaml:"maxRunDuration"`
-	MaxExplorationSteps  int           `yaml:"maxExplorationSteps"`
-	MaxRepeatedToolCalls int           `yaml:"maxRepeatedToolCalls"`
+	MaxSteps       int           `yaml:"maxSteps"`
+	MaxToolCalls   int           `yaml:"maxToolCalls"`
+	MaxRunDuration time.Duration `yaml:"maxRunDuration"`
+	// TurnBudgetTokens 是单轮 token 预算的配置缺省值（PR-4 §6.4）。主 chat 路径
+	// 由 --budget-tokens → ChatSession → buildLocalChatLoopConfig 注入；
+	// loopRunOptions.BudgetTokens 显式值优先（子代理/团队按任务预算），0 表示不限。
+	TurnBudgetTokens     int `yaml:"turnBudgetTokens"`
+	MaxExplorationSteps  int `yaml:"maxExplorationSteps"`
+	MaxRepeatedToolCalls int `yaml:"maxRepeatedToolCalls"`
 	// MaxRepeatedPollCalls is the consecutive identical polling/control call
 	// count that triggers the soft polling-backoff advisory (P1-7). Zero uses
 	// PollingBackoffNoticeThreshold; negative disables the guard.
@@ -419,9 +423,42 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		defer runCancel()
 	}
 
+	// PR-4 §6.4 第 5 条：run 级 prompt cache 熔断器。经 ctx 下发而不落 loop
+	// 结构体，think() 的"请求前退避"与重试事件聚合读同一实例，串行/并发 run
+	// 之间不会互相污染计数。
+	promptBreaker := NewPromptCacheBreaker(PromptCacheBreakerSpec{})
+	currentCtx = WithPromptCacheBreaker(currentCtx, promptBreaker)
+
+	// PR-4 §6.4（主 chat 接线）：调用方未显式给出 loopRunOptions.BudgetTokens 时，
+	// 回落到 LoopReActConfig.TurnBudgetTokens（--budget-tokens 的配置缺省）。显式值
+	// 优先，保证子代理/团队任务的按任务预算不被宿主配置覆盖。
+	if options.BudgetTokens <= 0 && loop.config != nil && loop.config.TurnBudgetTokens > 0 {
+		options.BudgetTokens = loop.config.TurnBudgetTokens
+	}
+
+	// PR-4 §6.4: 单轮预算单一事实源。用量口径与各执行路径一致——已完成步数取循环
+	// 计数、耗时取 startTime、token 取 remainingBudget 的已花部分（含压缩旁路），
+	// 因此软着陆提示与实际停止条件不会出现双口径。
+	turnBudgetSpec := TurnBudgetSpec{
+		MaxSteps:     loop.config.MaxSteps,
+		MaxWallClock: loop.config.MaxRunDuration,
+		MaxTokens:    options.BudgetTokens,
+	}
+	turnBudgetUsage := TurnBudgetUsage{}
+	turnBudgetState := TurnBudgetState{Level: TurnBudgetLevelOK}
+	turnBudgetSoftAnnounced := false
+	// turnEventSessionID 承载 turn 生命周期事件的会话标识。它必须在 defer 注册
+	// 之前声明：defer 里的 finished 事件在每个退出路径上都要能找到会话 id，
+	// 而真正的 sessionID 要到下面（result 分配之后）才解析/生成。
+	turnEventSessionID := strings.TrimSpace(options.SessionID)
+
 	defer func() {
 		startTime.StopTimer()
 		loop.agent.SetRunning(false)
+		// UPSTREAM_INVALID_RESPONSE 聚合上报（PR-4 §6.4 第 5 条）：逐条 llm.retry
+		// 已在源头被抑制，这里把计数一次性外发（现场 6 次 → 1 条首次 + 1 条汇总）。
+		// 放在 result 判空之前：nil result 的退出路径同样不应该吞掉已发生的事实。
+		loop.emitAggregatedRetryReport(turnEventSessionID, strings.TrimSpace(options.TraceID), loop.agent.state.CurrentStep, promptBreaker)
 		if result == nil {
 			return
 		}
@@ -451,6 +488,35 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			result.Output = fmt.Sprintf("当前运行已停止；已保留 %d 条工具观察，可从现有会话继续。", len(result.Observations))
 		}
 		result.State = loop.agent.GetState()
+		// Final budget verdict for every exit path (success, step limit, token
+		// limit, timeout, cancel), so hosts never have to recompute the watermark.
+		turnBudgetUsage.Elapsed = startTime.GetDuration()
+		// result.Steps is the authoritative completed-step count on every exit
+		// path; the in-loop value is only "steps finished before the current one".
+		if result.Steps > 0 {
+			turnBudgetUsage.CompletedSteps = result.Steps
+		}
+		if !turnBudgetSpec.Empty() {
+			turnBudgetState = EvaluateTurnBudget(turnBudgetSpec, turnBudgetUsage)
+			result.TurnBudgetLevel = turnBudgetState.Level
+			result.TurnBudgetLine = turnBudgetState.Line
+		}
+		result.TurnBudgetSoftCueInjected = turnBudgetSoftAnnounced
+		// Prompt cache 熔断的终局计数与聚合计数（同一次 run 的同一份状态，
+		// 宿主读 Result 即可，无需从事件流里二次累加）。
+		result.PromptCacheBreakerTrips = promptBreaker.Trips()
+		result.UpstreamInvalidResponseEvents = promptBreaker.AggregatedTotal()
+		// PR-4 落点 C：turn 生命周期收尾事件。observe 侧的白名单与
+		// Runtime.RunningTurns 计数早已就绪，但此前没有 emitter，宿主与
+		// /debug 永远看不到 agent.turn.*。这里用与 result 同一份终局水位，
+		// 保证事件行与 Result.TurnBudgetLine 不会出现双口径。
+		loop.emitRuntimeEvent("agent.turn.finished", turnEventSessionID, "", map[string]interface{}{
+			"trace_id":     result.TraceID,
+			"step":         result.Steps,
+			"elapsed_ms":   turnBudgetUsage.Elapsed.Milliseconds(),
+			"budget_level": turnBudgetState.Level,
+			"budget_ratio": turnBudgetState.Ratio,
+		})
 	}()
 
 	result = &Result{
@@ -483,6 +549,15 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		traceID = "trace_" + uuid.NewString()
 	}
 	result.TraceID = traceID
+	turnEventSessionID = sessionID
+	// PR-4 落点 C：与上面的 finished 配对。started 只带"这轮的上限是多少"，
+	// 终局水位在 finished 里回填；step 0 表示尚未完成任何一步。
+	loop.emitRuntimeEvent("agent.turn.started", turnEventSessionID, "", map[string]interface{}{
+		"trace_id":     traceID,
+		"step":         0,
+		"max_steps":    NormalizeMaxSteps(loop.config.MaxSteps),
+		"budget_level": turnBudgetState.Level,
+	})
 	if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
 		return nil, err
 	}
@@ -538,13 +613,55 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	// ReAct 循环：Think - Act - Observe
 	for step := 1; !stepExceedsLimit(loop.config.MaxSteps, step); step++ {
 		loop.agent.state.CurrentStep = step
+		turnBudgetUsage.CompletedSteps = step - 1
+		turnBudgetUsage.TokensSpent = TokensSpentFromBudget(options.BudgetTokens, remainingBudget)
+		if !startTime.Start.IsZero() {
+			turnBudgetUsage.Elapsed = time.Since(startTime.Start)
+		}
+		turnBudgetState = EvaluateTurnBudget(turnBudgetSpec, turnBudgetUsage)
+		if turnBudgetState.Level == TurnBudgetLevelSoft && !turnBudgetSoftAnnounced {
+			// Soft landing (§6.4): inject exactly one durable wrap-up cue and make
+			// the watermark visible to hosts while the model still has room to act.
+			// A hard verdict skips the cue on purpose: the hard boundary stops the
+			// turn immediately, so an instruction the model never reads would only
+			// pollute history.
+			turnBudgetSoftAnnounced = true
+			reminderMsg := newTurnBudgetReminderMessage(turnBudgetState)
+			if reminderMsg != nil {
+				builder.Add(*reminderMsg)
+				promptBuilder.Add(*reminderMsg)
+				payload := SystemReminderEventPayload(traceID, step, SystemReminder{
+					Kind:    ReminderKindTurnBudget,
+					Body:    stripSystemReminderEnvelope(reminderMsg.Content),
+					Durable: true,
+				})
+				payload["turn_budget_level"] = turnBudgetState.Level
+				payload["turn_budget_line"] = turnBudgetState.Line
+				payload["turn_budget_ratio"] = turnBudgetState.Ratio
+				payload["turn_budget_reasons"] = turnBudgetState.Reasons
+				// turn 身份由 emitRuntimeEvent 统一盖章（本 loop 的 loop.turnID 取自 run ctx），
+				// 宿主（TUI 状态行）因此能按 turn 归属决定是否展示进度，与 tool/llm 事件同一口径。
+				loop.emitRuntimeEvent(EventSystemReminderInjected, sessionID, "", payload)
+			}
+			if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
+				return nil, err
+			}
+		}
 		if options.BudgetTokens > 0 && remainingBudget <= 0 {
 			result.Success = false
-			result.Error = fmt.Sprintf("token budget exceeded after %d step(s)", step-1)
+			result.LimitReached = true
+			result.LimitReason = "turn_budget"
+			result.Output = TurnBudgetHardStopMessage(turnBudgetState)
+			result.Error = result.Output
 			result.Usage = totalUsage.Clone()
 			result.Observations = observations
 			result.Steps = step - 1
 			result.Duration = *startTime
+			builder.AppendAssistantAction(result.Output, nil, nil, nil)
+			if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
+				return nil, err
+			}
+			loop.dispatchStopFailureHook(currentCtx, sessionID, traceID, result.Steps, result, "turn_budget")
 			return result, nil
 		}
 		if err := currentCtx.Err(); err != nil {
@@ -1082,6 +1199,10 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 
 	result.Success = false
 	result.LimitReached = true
+	// PR-4 §6.4 observability: the step-limit exit previously reported no reason
+	// (only the stop-failure hook carried "step_limit"), so /debug consumers could
+	// not distinguish it from an unclassified stop.
+	result.LimitReason = "step_limit"
 	result.StepLimit = NormalizeMaxSteps(loop.config.MaxSteps)
 	result.Output = stepLimitReachedMessage(result.StepLimit)
 	result.Steps = result.StepLimit
@@ -1609,7 +1730,10 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			}
 		})
 	}
-	callCtx = llm.WithRetryEventReporter(callCtx, loop.runtimeRetryEventReporter(traceID, sessionID, step, req))
+	// PR-4 §6.4 第 5 条：run 级熔断器（run() 经 ctx 注入）。上报器与下面的
+	// 请求前退避共用同一实例，因此"计数"和"抑制"看到的是同一份连续失败历史。
+	cacheBreaker := promptCacheBreakerFromContext(ctx)
+	callCtx = llm.WithRetryEventReporter(callCtx, loop.runtimeRetryEventReporter(traceID, sessionID, step, req, cacheBreaker))
 
 	// 调用 LLM
 	requestPayload := map[string]interface{}{
@@ -1713,6 +1837,24 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		}
 		action.Metadata["prompt_fingerprint"] = fingerprint
 	}
+	// 同一 prompt_fingerprint 连续失败触发熔断后，窗口内第一次重发要先退避
+	// （指数、有上限）。只对同指纹生效、每窗口至多一次，因此不会与 llm 包的
+	// 有界重试叠成双倍等待；退避可被 ctx 取消，不做伪等待。
+	if fingerprint := promptFingerprintFromRequest(req); fingerprint != "" {
+		if delay, ok := cacheBreaker.PendingBackoff(fingerprint, time.Now()); ok {
+			loop.emitRuntimeEvent("llm.prompt_cache.backoff_applied", sessionID, "", map[string]interface{}{
+				"trace_id":           traceID,
+				"logical_turn_id":    logicalTurnID,
+				"llm_request_id":     llmRequestID,
+				"step":               step,
+				"prompt_fingerprint": fingerprint,
+				"backoff_ms":         delay.Milliseconds(),
+			})
+			if waitErr := waitPromptCacheBackoff(callCtx, delay); waitErr != nil {
+				return "", nil, nil, waitErr
+			}
+		}
+	}
 	loop.emitRuntimeEvent("llm.request.started", sessionID, "", requestPayload)
 	response, err := loop.llmRuntime.Call(callCtx, req)
 	for err != nil {
@@ -1758,6 +1900,21 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	}
 	if err != nil {
 		failureDiagnostic := llm.DiagnoseFailure(err)
+		// 同指纹连续失败计数：跨过阈值的那一次对外通告一次熔断（边沿触发），
+		// 之后由 PendingBackoff 在请求前退避，而不是每步都重复通告。
+		if decision := cacheBreaker.ObserveFailure(promptFingerprintFromRequest(req), failureDiagnostic.ErrorCode, time.Now()); decision.Tripped {
+			loop.emitRuntimeEvent("llm.prompt_cache.breaker_tripped", sessionID, "", map[string]interface{}{
+				"trace_id":             traceID,
+				"logical_turn_id":      logicalTurnID,
+				"llm_request_id":       llmRequestID,
+				"step":                 step,
+				"prompt_fingerprint":   decision.Fingerprint,
+				"consecutive_failures": decision.Consecutive,
+				"error_code":           decision.ErrorCode,
+				"trips":                decision.Trips,
+				"backoff_ms":           decision.Backoff.Milliseconds(),
+			})
+		}
 		finishedPayload := map[string]interface{}{
 			"trace_id":        traceID,
 			"logical_turn_id": logicalTurnID,
@@ -1807,6 +1964,8 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		loop.emitRuntimeEvent("llm.request.finished", sessionID, "", finishedPayload)
 		return "", nil, nil, err
 	}
+	// 成功即恢复：该指纹的连续失败计数清零，历史抖动不会累积成熔断。
+	cacheBreaker.ObserveSuccess(promptFingerprintFromRequest(req))
 	finishedPayload := map[string]interface{}{
 		"trace_id":        traceID,
 		"logical_turn_id": logicalTurnID,
@@ -2745,7 +2904,31 @@ func (loop *ReActLoop) emitToolReduced(sessionID string, tc types.ToolCall, step
 	loop.emitRuntimeEvent("tool.reduced", sessionID, tc.Name, payload)
 }
 
-func (loop *ReActLoop) runtimeRetryEventReporter(traceID, sessionID string, step int, req *llm.LLMRequest) llm.RetryEventReporter {
+// emitAggregatedRetryReport 把本次 run 聚合的 UPSTREAM_INVALID_RESPONSE 计数
+// 一次性上报（PR-4 §6.4 第 5 条）。返回是否真的上报：没有聚合内容时保持静默，
+// 宿主因此不会看到空的 warn 行。提取成方法是为了让"run 退出即汇总"这条契约
+// 能被直接回归——defer 里的内联调用点无法单独构造。
+func (loop *ReActLoop) emitAggregatedRetryReport(sessionID, traceID string, step int, breaker *PromptCacheBreaker) bool {
+	aggregate, ok := breaker.FlushAggregated()
+	if !ok {
+		return false
+	}
+	payload := map[string]interface{}{
+		"trace_id":                 strings.TrimSpace(traceID),
+		"step":                     step,
+		"severity":                 "warn",
+		"error_code":               aggregate.ErrorCode,
+		"count":                    aggregate.Count,
+		"prompt_fingerprint_count": len(aggregate.Fingerprints),
+	}
+	if len(aggregate.Fingerprints) > 0 {
+		payload["prompt_fingerprints"] = aggregate.Fingerprints
+	}
+	loop.emitRuntimeEvent("llm.retry.aggregated", sessionID, "", payload)
+	return true
+}
+
+func (loop *ReActLoop) runtimeRetryEventReporter(traceID, sessionID string, step int, req *llm.LLMRequest, breaker *PromptCacheBreaker) llm.RetryEventReporter {
 	if loop == nil || loop.agent == nil {
 		return nil
 	}
@@ -2756,6 +2939,12 @@ func (loop *ReActLoop) runtimeRetryEventReporter(traceID, sessionID string, step
 		requestModel = strings.TrimSpace(req.Model)
 	}
 	return func(event llm.RetryEvent) {
+		// PR-4 §6.4 第 5 条：UPSTREAM_INVALID_RESPONSE 不逐条外发。首次保留一条
+		// （状态行仍能显示"正在重试"），其后同类只在熔断器里计数，run 结束由
+		// llm.retry.aggregated 一次性上报（现场 6 次刷屏 → 1 条首次 + 1 条汇总）。
+		if suppress, _ := breaker.AggregateRetryError(promptFingerprintFromRequest(req), event.ErrorCode); suppress {
+			return
+		}
 		payload := map[string]interface{}{
 			"trace_id": traceID,
 			"step":     step,
@@ -2787,6 +2976,10 @@ func (loop *ReActLoop) runtimeRetryEventReporter(traceID, sessionID string, step
 		}
 		if errorCode := strings.TrimSpace(event.ErrorCode); errorCode != "" {
 			payload["error_code"] = errorCode
+		}
+		// 指纹让"同一条 prompt 反复失败"在事件流里可归因；聚合上报用的是同一个键。
+		if fingerprint := promptFingerprintFromRequest(req); fingerprint != "" {
+			payload["prompt_fingerprint"] = fingerprint
 		}
 		// Partial-output replay: the failed streaming attempt already emitted
 		// user-visible content; the retry regenerates the full response.

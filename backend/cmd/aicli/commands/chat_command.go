@@ -99,6 +99,7 @@ func registerChatFlags(cmd *cobra.Command) {
 	cmd.Flags().StringP("log-dir", "", defaultChatLogDir, fmt.Sprintf("保存会话日志到指定目录（默认: %s）", defaultChatLogDir))
 	cmd.Flags().String("request-timeout", "", "单次请求超时（例如 60s、2m，留空使用配置）")
 	cmd.Flags().String("reasoning-effort", "", "当前模型配置显式支持的 reasoning_effort 值（留空则不注入，由配置和交互流程决定）")
+	cmd.Flags().Int("budget-tokens", 0, "单轮 token 预算（0=不限制；80% 触发软着陆收尾提示，100% 优雅收尾）")
 	cmd.Flags().String("runtime-mode", "", "执行宿主模式（local|server|auto；留空使用 aicli.runtime.mode 或 local）")
 	cmd.Flags().String("runtime-server", "", "runtime-server 地址或模式别名（server|auto|local|http://127.0.0.1:8101）")
 	cmd.Flags().String("session", "", "加载指定 chat 会话 ID")

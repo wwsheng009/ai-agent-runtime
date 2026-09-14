@@ -316,6 +316,20 @@ func TestCloneLoopConfigForRunRequiresBoundTeamTaskForCompleteTask(t *testing.T)
 	}
 }
 
+// TestCloneLoopConfigForRunPreservesTurnBudgetTokens 钉住 runtimechat actor 的 per-run
+// 克隆不会丢掉 PR-4 §6.4 的会话预算：cloneLoopConfigWithRouteOverride 走结构体拷贝，
+// routeOverride 只改 route 维度字段。若这里退化成逐字段构造，主 chat 的
+// --budget-tokens 会在每一轮静默失效。
+func TestCloneLoopConfigForRunPreservesTurnBudgetTokens(t *testing.T) {
+	base := &agent.LoopReActConfig{TurnBudgetTokens: 42000}
+	got := cloneLoopConfigForRun(base, &RunRouteOverride{Model: "route-model"}, nil)
+	require.NotNil(t, got)
+	require.Equal(t, 42000, got.TurnBudgetTokens)
+	require.Equal(t, "route-model", got.Model)
+
+	require.Nil(t, cloneLoopConfigForRun(nil, nil, nil))
+}
+
 func TestAppendSessionActorToolErrorPayloadDistinguishesRecoveredErrors(t *testing.T) {
 	payload := map[string]interface{}{}
 	appendSessionActorToolErrorPayload(payload, &agent.Result{

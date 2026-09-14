@@ -93,7 +93,7 @@ curl http://127.0.0.1:50679/debug/chat/status?format=text
 
 ```powershell
 while ($true) {
-  curl -s http://127.0.0.1:50679/debug/chat/status | python -c "import sys,json; d=json.load(sys.stdin); print(d.get('captured_at',''), d.get('app_state',{}).get('active_cell',{}).get('phase',''), d.get('render_output',{}).get('state',''), d.get('executor',{}).get('diagnosis',''))"
+  curl -s http://127.0.0.1:50679/debug/chat/status | python -c "import sys,json; d=json.load(sys.stdin); print(d.get('captured_at',''), d.get('app_state',{}).get('active_cell',{}).get('phase',''), d.get('render_output',{}).get('state',''), d.get('executor',{}).get('window_diagnosis',''))"
   Start-Sleep -Seconds 1
 }
 ```
@@ -569,7 +569,12 @@ while ($true) {
 
 ```json
 {
-  "diagnosis": "healthy",
+  "diagnosis": "backoff_engaged_handing_off",
+  "diagnosis_scope": "since_start",
+  "window_diagnosis": "healthy",
+  "window_entries": 37,
+  "window_span_ms": 18400,
+  "window_age_ms": 620,
   "total_recoveries": 12,
   "backoff_engaged": 0,
   "armed_backoff": 1,
@@ -602,16 +607,65 @@ while ($true) {
 }
 ```
 
-**诊断价值**：`diagnosis` 字段给出执行器恢复循环的健康状态：
+**诊断价值**：executor 区块给出**两个作用域不同的判决**（PR-3 落点 A）：
+
+- `diagnosis` + `diagnosis_scope: "since_start"`：基于**生命周期**计数器（进程启动至今）。它是历史判决——
+  一旦发生过 `backoff_engaged` + `handoff_while_backoff`，或 `armed_backoff > 0` 而从未 engage，
+  该字段永不回到 `healthy`。用于回答"这个 executor 历史上做过什么"。
+- `window_diagnosis`：基于**保留窗口**（最近 64 次 iteration、且不早于最新一条 60s）的**当前**判决。
+  判断"现在是否仍在自旋"必须看它。`window_entries` / `window_span_ms` / `window_age_ms` 给出
+  判决所依据的窗口形状；`window_age_ms > 60000` 且 `window_diagnosis == "idle"` 表示 executor
+  确实安静（不是观测盲区），-1 表示环形缓冲为空。
+
+两个字段共用同一组取值：
 
 | 诊断值 | 含义 |
 |--------|------|
-| `idle` | 无待恢复项，正常 |
+| `idle` | 窗口内无 iteration（`window_diagnosis`）/ 从未发生过恢复（`diagnosis`） |
 | `healthy` | 有恢复但进度正常 |
 | `backoff_engaged` | **恢复回退已启动**：executor 正在以 backoff 间隔重试 recovery flush |
-| `dead_guard` | **死循环保护**：recovery 在不变 generation 上反复失败，可能已死锁 |
+| `backoff_engaged_handing_off` | 回退仍处于 engaged，但 pending history 仍在提交（parked-but-progressing，不是停滞） |
+| `dead_guard` | **死循环保护**：armed 后从未 engage（或窗口内从未 engage），可能已死锁 |
 
 `frame_errors_in_window` 非零 → 布局帧持续出错。`backoff_engaged` > 0 且 `last_generation` 不变 → 执行器在相同 generation 上反复重试而未推进。
+
+**纯文本模式**（`/debug/chat/status?format=text` 的 `Executor Recovery Diag:` 小节与
+`/debug/pprof/executor?format=text`）标注两个作用域：`Window Diagnosis (CURRENT)` 与
+`Diagnosis (SINCE START)`，另有 `Window Shape`（entries/span/age）与 `Last Iteration` 摘要。
+排障时先看 CURRENT；只有 CURRENT 非 `idle`/`healthy` 才说明执行器此刻真的在自旋。
+
+### turn_budget_lifecycle（Turn Budget / Lifecycle，PR-4 落点 C）
+
+纯文本文档（`/debug/chat/status?format=text`）包含 `Turn Budget / Lifecycle:` 小节；
+JSON 投影不重复 bridge 水位，turn 生命周期事件经观察平面查询（见文末
+Runtime Observation Plane 的 `data.runtime.running_turns` / `data.runtime.last_turn`）。
+
+```text
+Turn Budget / Lifecycle: (GET /debug/chat/status#turn)
+Turn Budget Level: soft
+Turn Budget Line: turn budget: step 1/10 · tokens 84%
+Turn Budget Ratio: 0.840
+Turns Running: 0
+Last Turn: session=session_abc123 step=2/10 elapsed=1s level=soft ratio=0.84
+Last Turn Finished: 2026-09-14T03:20:11Z
+```
+
+| 字段 | 数据源 | 含义 |
+|---|---|---|
+| `Turn Budget Level` / `Turn Budget Line` / `Turn Budget Ratio` | 事件桥原子快照（`TurnBudgetSnapshot`） | **通告时刻**的水位（软着陆触发那一步的取样）；本轮未触发时输出 `<none this run>` |
+| `Turns Running` | observe `runtime.running_turns` | 已 started、尚未 finished 的轮数 |
+| `Last Turn` | observe `runtime.last_turn` | 最近一轮的**终局**水位：`session=` / `step=N/M`（`M` 可为 `unlimited`）/ `state=running` 或 `elapsed=…` / `level=` / `ratio=` |
+| `Last Turn Finished` | observe `finished_at` | 最近一轮结束时间（RFC3339 UTC） |
+
+**判读要点**：
+
+- **两个取样点不同源**：bridge 水位是**通告时刻**（软着陆触发那一步，实测事件行 `step 1/10`），
+  observe 的 `Last Turn` 是**退出时刻**终局水位（实测 `step 2/10`）；宿主不得把事件行当终值。
+- 水位是 **per-run** 状态：`BeginRunKind` 清空，跨 turn 不继承；空闲行不会长出预算文案。
+- 观察平面未启用时输出 `<observe disabled>` / `<none observed>` / `<none this run>` 占位，不报错。
+- 事件契约：`agent.turn.started` / `agent.turn.finished` 由 agent 循环发射，payload 含
+  `trace_id` / `turn_id` / `step` / `max_steps` / `elapsed_ms` / `budget_level` / `budget_ratio`；
+  事件类型在白名单内（`internal/runtimeobserve/model.go`），因此 observe 侧可直接聚合。
 
 ### projection
 
@@ -646,7 +700,7 @@ while ($true) {
 |---|------|------|---------|
 | 1 | **active_cell.acked_end 停滞 + enqueued_end 增长** | `app_state.active_cell` | 流更新渲染但确认前缀不推进 |
 | 2 | **history_gates 任一 true** | `app_state.history_gates` | 提交被阻塞的确切门控 |
-| 3 | **executor.diagnosis ≠ "healthy"/"idle"** | `executor.diagnosis` | 执行器陷入恢复循环 |
+| 3 | **executor.window_diagnosis ≠ "healthy"/"idle"** | `executor.window_diagnosis`（CURRENT；`diagnosis` 是 SINCE START，仅供历史归因） | 执行器陷入恢复循环 |
 | 4 | **render_output.primary_committed 停滞 + primary_in_flight > 0** | `render_output` | 输出管道有未密封的 in-flight |
 | 5 | **projection.history_known=false 或 validity≠"known"** | `projection` | 物理终端缓存不可信 |
 

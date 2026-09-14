@@ -149,10 +149,16 @@ type chatRuntimeEventBridge struct {
 	// 绝不触碰桥的互斥量，因此不会引入新的阻塞点或锁序反转。
 	degradation            atomic.Pointer[chatEventBridgeDegradation]
 	degradationPublishedAt atomic.Int64
-	askApproval            func(*runtimechat.ApprovalRequest, []string) (chatApprovalAnswer, error)
-	askQuestion            func(prompt string, suggestions []string, required bool) (string, error)
-	approveTool            func(ctx context.Context, sessionID, requestID string, allow bool) error
-	answerQuestion         func(ctx context.Context, sessionID, questionID, answer string) error
+	// turnBudget 是给 TUI 状态行读取的无锁 turn 预算水位快照
+	// （docs/plan/ui-event-bridge-drop-hardening.md §6.4 落点 B）：agent 循环在
+	// 80% 收尾水位注入 durable 提醒时携带 turn_budget_line，桥只把它镜像成
+	// "本 run 可见进度"，不参与任何业务判决。BeginRunKind 清空上一轮的值，
+	// 保证状态行不会把上一轮的收尾提示带进新一轮。
+	turnBudget     atomic.Pointer[chatEventBridgeTurnBudget]
+	askApproval    func(*runtimechat.ApprovalRequest, []string) (chatApprovalAnswer, error)
+	askQuestion    func(prompt string, suggestions []string, required bool) (string, error)
+	approveTool    func(ctx context.Context, sessionID, requestID string, allow bool) error
+	answerQuestion func(ctx context.Context, sessionID, questionID, answer string) error
 	// preferInteractiveApprovals keeps NoInteractive headless hosts (ACP stdio)
 	// from auto-denying tools so askApproval can RPC to an external client.
 	preferInteractiveApprovals bool
@@ -836,6 +842,10 @@ func (b *chatRuntimeEventBridge) BeginRunKind(kind chatRunKind) {
 	b.progressMu.Lock()
 	b.eventBridgeDegraded = false
 	b.progressMu.Unlock()
+	// The turn budget watermark is per-run state as well: drop the previous
+	// turn's soft-landing line so the status row cannot show a stale
+	// "wrapping up" hint before this run reaches its own watermark (§6.4).
+	b.turnBudget.Store(nil)
 	// Drop any coalesced streaming events left over from the previous run
 	// epoch; their text was never enqueued and must not bleed into the new
 	// run. Taken BEFORE renderMu (streamMu → renderMu, the same order the
@@ -1616,6 +1626,63 @@ func (b *chatRuntimeEventBridge) DegradationSnapshot() (chatEventBridgeDegradati
 		return chatEventBridgeDegradation{}, false
 	}
 	return *snap, true
+}
+
+// chatRuntimeSystemReminderInjectedEvent 是 agent 侧 system_reminder.injected 的
+// 类型字面量（internal/agent.EventSystemReminderInjected）。桥按事件类型字符串
+// 分派（与其它 runtimechat.* 常量一致），不导入 agent 包，避免 CLI 与 agent
+// 内部实现耦合。
+const chatRuntimeSystemReminderInjectedEvent = "system_reminder.injected"
+
+// chatEventBridgeTurnBudget 是给 TUI 状态行读取的 turn 预算水位
+// （§6.4 落点 B）。它只承载展示字段：进度行、水位等级与占比。
+type chatEventBridgeTurnBudget struct {
+	Line  string
+	Level string
+	Ratio float64
+}
+
+// TurnBudgetSnapshot 返回本 run 最近一次软着陆水位（无锁，可任意 goroutine
+// 调用）。从未注入过收尾提醒时返回 false。
+func (b *chatRuntimeEventBridge) TurnBudgetSnapshot() (chatEventBridgeTurnBudget, bool) {
+	if b == nil {
+		return chatEventBridgeTurnBudget{}, false
+	}
+	snap := b.turnBudget.Load()
+	if snap == nil {
+		return chatEventBridgeTurnBudget{}, false
+	}
+	return *snap, true
+}
+
+// observeTurnBudgetReminder 把 agent 循环的软着陆提醒镜像成状态行可读的预算水位
+// （§6.4 落点 B：TUI 可见进度）。只认 kind=turn_budget 且带非空进度行的
+// system_reminder.injected —— 其它 kind（doom_loop/stop_hook/plan_mode…）是
+// 模型侧提示，不属于用户可见进度。
+//
+// 归属判定与其它状态镜像（applyLLMRequestStatus/applySessionCompactStatus）同源：
+// 调用点已过 shouldSuppressMismatchedPrimaryTurnEvent，这里再要求主会话身份，
+// 避免把子代理的预算提示画到父会话状态行上。
+func (b *chatRuntimeEventBridge) observeTurnBudgetReminder(event runtimeevents.Event) {
+	if b == nil || event.Type != chatRuntimeSystemReminderInjectedEvent {
+		return
+	}
+	if !b.isPrimarySessionEvent(event) {
+		return
+	}
+	if payloadStringValue(event.Payload["kind"]) != "turn_budget" {
+		return
+	}
+	line := strings.TrimSpace(payloadStringValue(event.Payload["turn_budget_line"]))
+	if line == "" {
+		return
+	}
+	ratio, _ := payloadFloatValue(event.Payload, "turn_budget_ratio")
+	b.turnBudget.Store(&chatEventBridgeTurnBudget{
+		Line:  line,
+		Level: payloadStringValue(event.Payload["turn_budget_level"]),
+		Ratio: ratio,
+	})
 }
 
 // deferredQueueClassStats reports the classification counters. The legacy
@@ -4292,6 +4359,7 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	}
 	b.applyLLMRequestStatus(event)
 	b.applySessionCompactStatus(event)
+	b.observeTurnBudgetReminder(event)
 	if b.shouldSuppressLatePrimaryRunEvent(event) {
 		return
 	}

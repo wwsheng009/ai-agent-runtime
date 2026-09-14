@@ -63,7 +63,30 @@ type ExecutorRecoveryDiag struct {
 	// from the reported replay loop: a backoff that is armed but never engaged
 	// (ArmedBackoff>0, BackoffEngaged==0) is a dead guard, not a working one.
 	// Single-counter reads are misleading; the verdict compares both.
-	Diagnosis string `json:"diagnosis"` // "idle" | "healthy" | "backoff_engaged" | "backoff_engaged_handing_off" | "dead_guard"
+	//
+	// SCOPE: since start. It consumes the monotonic lifetime counters, so it is
+	// a historical verdict: an executor that stormed an hour ago and converged
+	// still reads "backoff_engaged" forever. Poll WindowDiagnosis for the
+	// current state; keep Diagnosis for "what has this executor ever done".
+	Diagnosis string `json:"diagnosis"` // "idle" | "healthy" | "backoff_engaged" | "backoff_engaged_handing_off" | "dead_guard"; since start
+	// WindowDiagnosis is the CURRENT-state verdict over the retained window
+	// only (the most recent executorDiagWindowEntries entries, none older than
+	// executorDiagWindowDuration before the newest). It answers "is the
+	// executor healthy right now?" without lifetime history contaminating the
+	// answer. "idle" means no entry landed inside the window (a quiet
+	// executor), which is distinct from "healthy" (recoveries are running and
+	// making progress).
+	WindowDiagnosis string `json:"windowDiagnosis"`
+	// WindowEntries is how many retained entries fell inside the window the
+	// verdict was computed over.
+	WindowEntries int `json:"windowEntries"`
+	// WindowSpanMs is the span covered by those entries (newest - oldest inside
+	// the window); 0 when fewer than two entries landed in the window.
+	WindowSpanMs int64 `json:"windowSpanMs"`
+	// WindowAgeMs is how long ago the newest retained entry happened; -1 when
+	// the ring is empty. A large value together with WindowDiagnosis=="idle" is
+	// a deliberately quiet executor, not a blind spot.
+	WindowAgeMs int64 `json:"windowAgeMs"`
 	// WindowRecoveriesPerSec is the recovery rate over the retained window
 	// (entries[0].AtUnixMs .. entries[last].AtUnixMs). A continuously growing
 	// rate under an unchanged generation is the loop signature.
@@ -86,6 +109,18 @@ type ExecutorRecoveryDiag struct {
 }
 
 const diagRecoveryRingSize = 256
+
+// The WindowDiagnosis window: the most recent executorDiagWindowEntries
+// iterations, further restricted to iterations no older than
+// executorDiagWindowDuration before the newest one (and before the snapshot
+// wall clock — a stale ring reports "idle", never a fossilized verdict). The
+// two bounds are deliberately generous relative to one recovery cycle
+// (~500ms in production): the window must cover a real burst, not a single
+// cycle.
+const (
+	executorDiagWindowEntries  = 64
+	executorDiagWindowDuration = 60 * time.Second
+)
 
 // ErrTerminalTransactionMissingResult guards the boundary between a claimed
 // reducer effect and the physical session. A transaction with a claimed token
@@ -260,6 +295,7 @@ func (e *TerminalSessionExecutor) RecoveryDiag() ExecutorRecoveryDiag {
 	defer e.diagMu.Unlock()
 	entries := make([]ExecutorRecoveryDiagEntry, len(e.diagRing))
 	copy(entries, e.diagRing)
+	nowUnixMs := time.Now().UnixMilli()
 	d := ExecutorRecoveryDiag{
 		Entries:                    entries,
 		BackoffEngaged:             e.diagBackoffEngaged,
@@ -267,7 +303,7 @@ func (e *TerminalSessionExecutor) RecoveryDiag() ExecutorRecoveryDiag {
 		FlushesWhileBackoff:        e.diagFlushedWhileBackoff,
 		HandoffsWhileBackoff:       e.diagHandoffWhileBackoff,
 		TotalRecoveries:            e.diagSeq,
-		GeneratedAtUnixMs:          time.Now().UnixMilli(),
+		GeneratedAtUnixMs:          nowUnixMs,
 		GenerationAdvancesInWindow: executorDiagGenerationAdvances(entries),
 	}
 	for _, en := range entries {
@@ -285,7 +321,111 @@ func (e *TerminalSessionExecutor) RecoveryDiag() ExecutorRecoveryDiag {
 		}
 	}
 	d.Diagnosis = executorDiagDiagnosis(d)
+	window := executorDiagWindowStateFor(entries, nowUnixMs)
+	d.WindowDiagnosis = window.Diagnosis
+	d.WindowEntries = window.Entries
+	d.WindowSpanMs = window.SpanMs
+	d.WindowAgeMs = window.AgeMs
 	return d
+}
+
+// executorDiagWindowState is the CURRENT-state verdict plus the shape of the
+// window it was computed over. Keeping the shape next to the verdict makes a
+// windowed verdict self-explaining: "idle" with WindowAgeMs=4m is a quiet
+// executor, "idle" with WindowAgeMs=0 is a blind spot worth investigating.
+type executorDiagWindowState struct {
+	Diagnosis string
+	Entries   int
+	SpanMs    int64
+	AgeMs     int64
+}
+
+// executorDiagWindowStateFor computes the windowed verdict for a snapshot taken
+// at nowUnixMs.
+func executorDiagWindowStateFor(entries []ExecutorRecoveryDiagEntry, nowUnixMs int64) executorDiagWindowState {
+	state := executorDiagWindowState{AgeMs: -1}
+	if len(entries) == 0 {
+		state.Diagnosis = executorDiagWindowDiagnosis(nil)
+		return state
+	}
+	newest := entries[len(entries)-1].AtUnixMs
+	age := nowUnixMs - newest
+	if age < 0 {
+		age = 0
+	}
+	state.AgeMs = age
+	window := executorDiagWindow(entries, nowUnixMs)
+	state.Entries = len(window)
+	state.Diagnosis = executorDiagWindowDiagnosis(window)
+	if n := len(window); n > 0 {
+		state.SpanMs = window[n-1].AtUnixMs - window[0].AtUnixMs
+	}
+	return state
+}
+
+// executorDiagWindow selects the retained entries that back WindowDiagnosis:
+// the most recent executorDiagWindowEntries iterations, further restricted to
+// iterations no older than executorDiagWindowDuration relative to BOTH the
+// newest entry and the snapshot wall clock. A ring whose newest iteration is
+// older than a whole window is quiet — it yields nil (and therefore the "idle"
+// verdict) rather than replaying a stale state as CURRENT.
+func executorDiagWindow(entries []ExecutorRecoveryDiagEntry, nowUnixMs int64) []ExecutorRecoveryDiagEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	windowMs := int64(executorDiagWindowDuration / time.Millisecond)
+	newest := entries[len(entries)-1].AtUnixMs
+	if nowUnixMs-newest > windowMs {
+		return nil
+	}
+	start := len(entries) - executorDiagWindowEntries
+	if start < 0 {
+		start = 0
+	}
+	cutoff := newest - windowMs
+	for start < len(entries) && entries[start].AtUnixMs < cutoff {
+		start++
+	}
+	return entries[start:]
+}
+
+// executorDiagWindowDiagnosis derives the current-state verdict from the
+// retained window only. It mirrors executorDiagDiagnosis — same five verdicts,
+// same production lesson (armed-but-never-engaged is a dead guard) — but
+// consumes counters accumulated INSIDE the window, so history cannot
+// masquerade as the present:
+//
+//	idle                          no entry landed inside the window
+//	dead_guard                    armed at least once, never engaged, in-window
+//	backoff_engaged_handing_off   engaged and still committing new messages
+//	backoff_engaged               the newest in-window iteration is throttled
+//	healthy                       recoveries are running and progressing
+func executorDiagWindowDiagnosis(window []ExecutorRecoveryDiagEntry) string {
+	if len(window) == 0 {
+		return "idle"
+	}
+	var armed, engaged, handoffs int
+	for _, en := range window {
+		if en.ArmedBackoff {
+			armed++
+		}
+		if en.BackoffEngaged {
+			engaged++
+		}
+		if en.HandoffWhileBackoff {
+			handoffs++
+		}
+	}
+	switch {
+	case armed > 0 && engaged == 0:
+		return "dead_guard"
+	case engaged > 0 && handoffs > 0:
+		return "backoff_engaged_handing_off"
+	case window[len(window)-1].BackoffEngaged:
+		return "backoff_engaged"
+	default:
+		return "healthy"
+	}
 }
 
 // executorDiagGenerationAdvances counts distinct layout generations observed in

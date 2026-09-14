@@ -1640,6 +1640,12 @@ func buildLocalChatLoopConfig(runtimeConfig *runtimecfg.RuntimeConfig, session *
 			config.MaxParallelToolCalls = runtimeConfig.Agent.MaxParallelToolCalls
 		}
 	}
+	// PR-4 §6.4（主 chat 接线）：--budget-tokens → ChatSession.TurnBudgetTokens →
+	// LoopReActConfig.TurnBudgetTokens；调用方显式的 loopRunOptions.BudgetTokens
+	// 仍优先（子代理/团队按任务预算），此值只作为缺省。
+	if session != nil && session.TurnBudgetTokens > 0 {
+		config.TurnBudgetTokens = session.TurnBudgetTokens
+	}
 	if len(requestedReasoningEffort) > 0 {
 		if reasoningEffort := runtimetypes.NormalizeReasoningEffort(requestedReasoningEffort[0]); reasoningEffort != "" {
 			config.ReasoningEffort = reasoningEffort

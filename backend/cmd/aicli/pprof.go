@@ -118,7 +118,8 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	// 它显示每次 recovery flush 的 revision 前后值、generation、epoch、
 	// ProjectionUnknown/ReconciliationRequired、FullRepaint/ScrollbackReset、
 	// frame 错误、backoff 是否 arm/触发，并给出派生的循环健康诊断
-	// （Diagnosis：idle / healthy / backoff_engaged / dead_guard）——
+	// （WindowDiagnosis 为当前窗口判决、Diagnosis 为 since_start 历史判决；
+	// 取值 idle / healthy / backoff_engaged / backoff_engaged_handing_off / dead_guard）——
 	// 精确回答"executor 在重放什么、为什么没有收敛、backoff 是否真的在工作"。
 	// ?format=text 时返回人类可读摘要（便于 curl 直接观测，无需解析 JSON）；
 	// 未设置 provider 时返回空快照。

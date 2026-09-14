@@ -140,6 +140,52 @@ func TestBuildChatDebugDisplayText(t *testing.T) {
 	}
 }
 
+// TestBuildChatDebugDisplayTextExecutorSection verifies the text-mode executor
+// section labels both verdicts by scope (PR-3 落点 A): CURRENT comes from the
+// retained window, SINCE START from the lifetime counters, and a stale lifetime
+// verdict must never be printed unlabeled.
+func TestBuildChatDebugDisplayTextExecutorSection(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	session := &ChatSession{}
+	coordinator := newChatInteractionCoordinator(session)
+	t.Cleanup(coordinator.Shutdown)
+	coordinator.SetWriter(&bytes.Buffer{})
+
+	ui.SetExecutorDiagProvider(func() ui.ExecutorRecoveryDiag {
+		return ui.ExecutorRecoveryDiag{
+			Diagnosis:       "backoff_engaged_handing_off",
+			WindowDiagnosis: "healthy",
+			WindowEntries:   3,
+			WindowSpanMs:    4000,
+			WindowAgeMs:     1200,
+			TotalRecoveries: 95,
+			BackoffEngaged:  3,
+			ArmedBackoff:    90,
+			LastGeneration:  2,
+			Entries: []ui.ExecutorRecoveryDiagEntry{{
+				Seq: 95, Branch: "scheduled", Generation: 2, Revision: 10, RevisionAfter: 11,
+			}},
+		}
+	})
+	t.Cleanup(func() { ui.SetExecutorDiagProvider(nil) })
+
+	old := chatDebugDisplaySessionProvider
+	chatDebugDisplaySessionProvider = func() *ChatSession { return session }
+	defer func() { chatDebugDisplaySessionProvider = old }()
+
+	text := BuildChatDebugDisplayText()
+	for _, want := range []string{
+		"Executor Recovery Diag:",
+		"Window Diagnosis (CURRENT): healthy",
+		"Diagnosis (SINCE START): backoff_engaged_handing_off",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("文本应包含 %q，实际输出:\n%s", want, text)
+		}
+	}
+}
+
 // TestChatDebugDisplaySnapshotWithBridgeText 验证有 bridge 时纯文本输出包含编码器统计。
 func TestChatDebugDisplaySnapshotWithBridgeText(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
@@ -241,7 +287,12 @@ func TestChatDebugDisplayExecutorAndProjection(t *testing.T) {
 	// the package-global provider does not leak into other tests.
 	ui.SetExecutorDiagProvider(func() ui.ExecutorRecoveryDiag {
 		return ui.ExecutorRecoveryDiag{
-			Diagnosis:       "healthy",
+			// 历史发生过风暴、当前窗口健康：两个判决必须都出现且带 scope 标注。
+			Diagnosis:       "backoff_engaged",
+			WindowDiagnosis: "healthy",
+			WindowEntries:   4,
+			WindowSpanMs:    900,
+			WindowAgeMs:     100,
 			TotalRecoveries: 12,
 			BackoffEngaged:  0,
 			ArmedBackoff:    1,
@@ -268,8 +319,18 @@ func TestChatDebugDisplayExecutorAndProjection(t *testing.T) {
 	if snap.Executor == nil {
 		t.Fatal("executor 应为非 nil（provider 已注册）")
 	}
-	if snap.Executor.Diagnosis != "healthy" {
-		t.Fatalf("executor.diagnosis 应为 healthy，实际为 %q", snap.Executor.Diagnosis)
+	if snap.Executor.Diagnosis != "backoff_engaged" {
+		t.Fatalf("executor.diagnosis（since_start）应为 backoff_engaged，实际为 %q", snap.Executor.Diagnosis)
+	}
+	if snap.Executor.DiagnosisScope != "since_start" {
+		t.Fatalf("executor.diagnosis_scope 应为 since_start，实际为 %q", snap.Executor.DiagnosisScope)
+	}
+	if snap.Executor.WindowDiagnosis != "healthy" {
+		t.Fatalf("executor.window_diagnosis（current）应为 healthy，实际为 %q", snap.Executor.WindowDiagnosis)
+	}
+	if snap.Executor.WindowEntries != 4 || snap.Executor.WindowAgeMs != 100 {
+		t.Fatalf("executor 窗口形状应为 entries=4 ageMs=100，实际为 entries=%d ageMs=%d",
+			snap.Executor.WindowEntries, snap.Executor.WindowAgeMs)
 	}
 	if snap.Executor.TotalRecoveries != 12 {
 		t.Fatalf("executor.total_recoveries 应为 12，实际为 %d", snap.Executor.TotalRecoveries)
@@ -291,6 +352,12 @@ func TestChatDebugDisplayExecutorAndProjection(t *testing.T) {
 	}
 	if _, ok := parsed["executor"]; !ok {
 		t.Fatal("JSON 应包含 executor 块")
+	}
+	execBlock, _ := parsed["executor"].(map[string]interface{})
+	for _, key := range []string{"diagnosis", "diagnosis_scope", "window_diagnosis", "window_entries", "window_age_ms"} {
+		if _, ok := execBlock[key]; !ok {
+			t.Fatalf("JSON executor 块缺少 %q", key)
+		}
 	}
 	if _, ok := parsed["projection"]; !ok {
 		t.Fatal("JSON 应包含 projection 块")

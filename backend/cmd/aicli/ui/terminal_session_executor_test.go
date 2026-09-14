@@ -1592,17 +1592,24 @@ func TestExecutorDiagDiagnosisBackoffEngaged(t *testing.T) {
 }
 
 func TestExecutorDiagDiagnosisBackoffEngagedHandingOff(t *testing.T) {
+	at := time.Now().UnixMilli()
+	entry := ExecutorRecoveryDiagEntry{
+		Seq: 5, AtUnixMs: at, BackoffEngaged: true, HandoffWhileBackoff: true, Generation: 1,
+	}
 	d := ExecutorRecoveryDiag{
 		TotalRecoveries:      5,
 		ArmedBackoff:         5,
 		BackoffEngaged:       3,
 		HandoffsWhileBackoff: 2,
-		Entries: []ExecutorRecoveryDiagEntry{
-			{Seq: 5, BackoffEngaged: true, HandoffWhileBackoff: true, Generation: 1},
-		},
+		Entries:              []ExecutorRecoveryDiagEntry{entry},
 	}
 	if got := executorDiagDiagnosis(d); got != "backoff_engaged_handing_off" {
 		t.Fatalf("handoff-under-backoff signature: diagnosis=%q, want backoff_engaged_handing_off", got)
+	}
+	// The windowed verdict for the SAME live iteration must agree; the window
+	// only diverges once the handoff becomes history (regression below).
+	if got := executorDiagWindowStateFor(d.Entries, at+1); got.Diagnosis != "backoff_engaged_handing_off" {
+		t.Fatalf("windowed handoff verdict: %+v, want backoff_engaged_handing_off", got)
 	}
 }
 
@@ -1619,6 +1626,170 @@ func TestExecutorDiagDiagnosisHealthy(t *testing.T) {
 	}
 	if got := executorDiagDiagnosis(d); got != "healthy" {
 		t.Fatalf("healthy signature: diagnosis=%q, want healthy", got)
+	}
+}
+
+// windowStateForTest computes the windowed verdict with the snapshot clock
+// pinned just after the newest entry, so the window bounds are deterministic
+// instead of racing the wall clock.
+func windowStateForTest(entries []ExecutorRecoveryDiagEntry) executorDiagWindowState {
+	now := time.Now().UnixMilli()
+	if len(entries) > 0 {
+		now = entries[len(entries)-1].AtUnixMs + 500
+	}
+	return executorDiagWindowStateFor(entries, now)
+}
+
+// TestExecutorDiagWindowDiagnosisDeadGuard verifies the dead-guard signature
+// detected from the WINDOW counters (armed at least once, never engaged).
+func TestExecutorDiagWindowDiagnosisDeadGuard(t *testing.T) {
+	base := time.Now().UnixMilli()
+	entries := []ExecutorRecoveryDiagEntry{
+		{Seq: 10, AtUnixMs: base - 3000, ArmedBackoff: true, Generation: 1},
+		{Seq: 11, AtUnixMs: base - 2000, ArmedBackoff: true, Generation: 1},
+		{Seq: 12, AtUnixMs: base, ArmedBackoff: true, Generation: 1},
+	}
+	if got := windowStateForTest(entries); got.Diagnosis != "dead_guard" {
+		t.Fatalf("windowed dead-guard signature: %+v, want dead_guard", got)
+	}
+}
+
+// TestExecutorDiagWindowDiagnosisBackoffEngaged verifies that a window whose
+// newest iteration is throttled reports "backoff_engaged".
+func TestExecutorDiagWindowDiagnosisBackoffEngaged(t *testing.T) {
+	base := time.Now().UnixMilli()
+	entries := []ExecutorRecoveryDiagEntry{
+		{Seq: 3, AtUnixMs: base - 4000, ArmedBackoff: true, BackoffEngaged: true, Generation: 1},
+		{Seq: 4, AtUnixMs: base - 1000, ArmedBackoff: true, BackoffEngaged: true, Generation: 1},
+	}
+	if got := windowStateForTest(entries); got.Diagnosis != "backoff_engaged" {
+		t.Fatalf("windowed backoff-engaged signature: %+v, want backoff_engaged", got)
+	}
+}
+
+// TestExecutorDiagWindowDiagnosisHealthy verifies that in-window recoveries
+// without backoff report "healthy" (progressing), not "idle".
+func TestExecutorDiagWindowDiagnosisHealthy(t *testing.T) {
+	base := time.Now().UnixMilli()
+	entries := []ExecutorRecoveryDiagEntry{
+		{Seq: 1, AtUnixMs: base - 3000, Generation: 1, FullRepaint: true},
+		{Seq: 2, AtUnixMs: base - 2000, Generation: 2, FullRepaint: true},
+		{Seq: 3, AtUnixMs: base, Generation: 3, FullRepaint: true},
+	}
+	state := windowStateForTest(entries)
+	if state.Diagnosis != "healthy" {
+		t.Fatalf("windowed healthy signature: %+v, want healthy", state)
+	}
+	if state.Entries != 3 {
+		t.Fatalf("window entries: got %d, want 3", state.Entries)
+	}
+}
+
+// TestExecutorDiagWindowDiagnosisIgnoresHistoricalStorm is the regression this
+// window was added for: the lifetime verdict still describes an old storm, but
+// the CURRENT window shows a healthy executor. BackoffEngaged>0 together with
+// HandoffsWhileBackoff>0 is a lifetime state — it can never return to healthy
+// once it happened — so before WindowDiagnosis a reader polling "diagnosis"
+// could not tell a healed executor from a live handoff-under-backoff spin.
+func TestExecutorDiagWindowDiagnosisIgnoresHistoricalStorm(t *testing.T) {
+	now := time.Now().UnixMilli()
+	storm := now - int64(2*time.Hour/time.Millisecond)
+	entries := []ExecutorRecoveryDiagEntry{
+		{Seq: 90, AtUnixMs: storm, ArmedBackoff: true, Generation: 1},
+		{Seq: 91, AtUnixMs: storm + 10, BackoffEngaged: true, HandoffWhileBackoff: true, Generation: 1},
+		{Seq: 92, AtUnixMs: storm + 20, BackoffEngaged: true, Generation: 1},
+		{Seq: 93, AtUnixMs: now - 4000, Generation: 2},
+		{Seq: 94, AtUnixMs: now - 2000, Generation: 2},
+		{Seq: 95, AtUnixMs: now, Generation: 2},
+	}
+	d := ExecutorRecoveryDiag{
+		TotalRecoveries:      95,
+		ArmedBackoff:         90,
+		BackoffEngaged:       3,
+		HandoffsWhileBackoff: 2,
+		Entries:              entries,
+	}
+	if got := executorDiagDiagnosis(d); got != "backoff_engaged_handing_off" {
+		t.Fatalf("since-start verdict: got %q, want backoff_engaged_handing_off (lifetime history must be preserved)", got)
+	}
+	state := executorDiagWindowStateFor(entries, now+1)
+	if state.Diagnosis != "healthy" {
+		t.Fatalf("window verdict: %+v, want healthy", state)
+	}
+	if state.Entries != 3 {
+		t.Fatalf("window entries: got %d, want 3 (only the last 60s count)", state.Entries)
+	}
+	if state.SpanMs != 4000 {
+		t.Fatalf("window span: got %d, want 4000", state.SpanMs)
+	}
+	if state.AgeMs != 1 {
+		t.Fatalf("window age: got %d, want 1", state.AgeMs)
+	}
+}
+
+// TestExecutorDiagWindowDiagnosisIdleWhenStormIsCold verifies the honest
+// "nothing is happening now" verdict: a storm older than the whole window
+// yields idle (with the age making that explicit), never a fossilized
+// backoff verdict.
+func TestExecutorDiagWindowDiagnosisIdleWhenStormIsCold(t *testing.T) {
+	now := time.Now().UnixMilli()
+	storm := now - int64(2*time.Hour/time.Millisecond)
+	entries := []ExecutorRecoveryDiagEntry{
+		{Seq: 1, AtUnixMs: storm, ArmedBackoff: true, Generation: 1},
+		{Seq: 2, AtUnixMs: storm + 10, BackoffEngaged: true, Generation: 1},
+	}
+	d := ExecutorRecoveryDiag{TotalRecoveries: 2, ArmedBackoff: 1, BackoffEngaged: 1, Entries: entries}
+	if got := executorDiagDiagnosis(d); got != "backoff_engaged" {
+		t.Fatalf("since-start verdict: got %q, want backoff_engaged", got)
+	}
+	state := executorDiagWindowStateFor(entries, now)
+	if state.Diagnosis != "idle" {
+		t.Fatalf("window verdict: %+v, want idle", state)
+	}
+	if state.Entries != 0 {
+		t.Fatalf("window entries: got %d, want 0", state.Entries)
+	}
+	if state.AgeMs <= int64(executorDiagWindowDuration/time.Millisecond) {
+		t.Fatalf("window age: got %d, want > the window duration", state.AgeMs)
+	}
+}
+
+// TestExecutorDiagWindowAppliesBothBounds pins the two window bounds: the
+// entry-count cap (64) and the duration cap (60s relative to the newest entry).
+func TestExecutorDiagWindowAppliesBothBounds(t *testing.T) {
+	now := time.Now().UnixMilli()
+
+	// 100 entries all inside the duration bound: the count cap keeps the newest
+	// 64.
+	head := make([]ExecutorRecoveryDiagEntry, 0, 100)
+	for i := 0; i < 100; i++ {
+		head = append(head, ExecutorRecoveryDiagEntry{
+			Seq: uint64(i + 1), AtUnixMs: now - int64(100-i)*100, Generation: 1,
+		})
+	}
+	if state := executorDiagWindowStateFor(head, now); state.Entries != executorDiagWindowEntries {
+		t.Fatalf("entry cap: got %d entries, want %d", state.Entries, executorDiagWindowEntries)
+	}
+
+	// A ring smaller than the count cap: only the duration bound applies.
+	tail := make([]ExecutorRecoveryDiagEntry, 0, 40)
+	for i := 0; i < 40; i++ {
+		tail = append(tail, ExecutorRecoveryDiagEntry{
+			Seq: uint64(i + 1), AtUnixMs: now - int64(40-i)*2000, Generation: 1,
+		})
+	}
+	state := executorDiagWindowStateFor(tail, now)
+	if state.Entries != 31 {
+		t.Fatalf("duration cap: got %d entries, want 31 (entries within 60s of the newest)", state.Entries)
+	}
+}
+
+// TestExecutorDiagWindowEmptyRing verifies the empty-ring shape: idle with an
+// explicit "no entry" age instead of a misleading zero.
+func TestExecutorDiagWindowEmptyRing(t *testing.T) {
+	state := executorDiagWindowStateFor(nil, time.Now().UnixMilli())
+	if state.Diagnosis != "idle" || state.Entries != 0 || state.AgeMs != -1 {
+		t.Fatalf("empty ring window state: %+v, want idle/0/-1", state)
 	}
 }
 
@@ -1649,6 +1820,10 @@ func TestExecutorDiagTextSummarySmoke(t *testing.T) {
 		ArmedBackoff:               3,
 		BackoffEngaged:             1,
 		Diagnosis:                  "backoff_engaged",
+		WindowDiagnosis:            "healthy",
+		WindowEntries:              4,
+		WindowSpanMs:               900,
+		WindowAgeMs:                100,
 		GeneratedAtUnixMs:          time.Now().UnixMilli(),
 		LastGeneration:             2,
 		GenerationAdvancesInWindow: 2,
@@ -1666,7 +1841,15 @@ func TestExecutorDiagTextSummarySmoke(t *testing.T) {
 		t.Fatal("text summary is empty")
 	}
 	if !strings.Contains(summary, "backoff_engaged") {
-		t.Fatal("text summary missing diagnosis")
+		t.Fatal("text summary missing since-start diagnosis")
+	}
+	// The two verdicts must be labeled by scope: an unlabeled pair would let a
+	// stale lifetime verdict be read as the current state.
+	if !strings.Contains(summary, "windowDiagnosis (CURRENT): healthy") {
+		t.Fatalf("text summary missing windowed verdict, got:\n%s", summary)
+	}
+	if !strings.Contains(summary, "diagnosis (SINCE START)  : backoff_engaged") {
+		t.Fatalf("text summary missing scoped since-start verdict, got:\n%s", summary)
 	}
 	if !strings.Contains(summary, "frameErrorsInWindow") {
 		t.Fatal("text summary missing frameErrorsInWindow")

@@ -167,3 +167,14 @@ func newStopHookReminderMessage(hookMessage string) *types.Message {
 		},
 	})
 }
+
+// newTurnBudgetReminderMessage builds the PR-4 §6.4 wrap-up cue. It is durable
+// on purpose: the handoff must survive into the next turn so a resumed session
+// can continue from recorded state instead of losing in-flight work.
+func newTurnBudgetReminderMessage(state TurnBudgetState) *types.Message {
+	return NewSystemReminderMessage(SystemReminder{
+		Kind:    ReminderKindTurnBudget,
+		Body:    TurnBudgetSoftLandingMessage(state),
+		Durable: true,
+	})
+}

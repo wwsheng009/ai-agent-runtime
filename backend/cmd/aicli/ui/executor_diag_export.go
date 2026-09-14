@@ -42,7 +42,13 @@ func ExecutorDiagTextSummary() string {
 func executorDiagTextSummary(d ExecutorRecoveryDiag) string {
 	var b strings.Builder
 	b.WriteString("executor recovery diag\n")
-	fmt.Fprintf(&b, "  diagnosis                : %s\n", d.Diagnosis)
+	// Two verdicts with different scopes. CURRENT is the one to watch while
+	// debugging a live stall; SINCE START never recovers from a past storm.
+	fmt.Fprintf(&b, "  windowDiagnosis (CURRENT): %s\n", d.WindowDiagnosis)
+	fmt.Fprintf(&b, "  windowEntries (CURRENT)  : %d\n", d.WindowEntries)
+	fmt.Fprintf(&b, "  windowSpanMs (CURRENT)   : %d\n", d.WindowSpanMs)
+	fmt.Fprintf(&b, "  windowAgeMs (CURRENT)    : %d\n", d.WindowAgeMs)
+	fmt.Fprintf(&b, "  diagnosis (SINCE START)  : %s\n", d.Diagnosis)
 	fmt.Fprintf(&b, "  totalRecoveries          : %d\n", d.TotalRecoveries)
 	fmt.Fprintf(&b, "  armedBackoff             : %d\n", d.ArmedBackoff)
 	fmt.Fprintf(&b, "  backoffEngaged           : %d\n", d.BackoffEngaged)

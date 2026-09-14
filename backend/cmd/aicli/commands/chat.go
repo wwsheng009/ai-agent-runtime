@@ -36,11 +36,14 @@ const chatSessionMetaLabelWidth = 18
 
 // ChatSession 聊天会话状态
 type ChatSession struct {
-	ProviderName             string
-	Provider                 config.Provider
-	Adapter                  adapter.ProtocolAdapter
-	Model                    string
-	ReasoningEffort          string
+	ProviderName    string
+	Provider        config.Provider
+	Adapter         adapter.ProtocolAdapter
+	Model           string
+	ReasoningEffort string
+	// TurnBudgetTokens 是 --budget-tokens 指定的单轮 token 预算（PR-4 §6.4）；
+	// 0 表示不限制，由 buildLocalChatLoopConfig 注入会话 actor 的 LoopReActConfig。
+	TurnBudgetTokens         int
 	RequestedProvider        string
 	EffectiveProvider        string
 	RequestedModel           string

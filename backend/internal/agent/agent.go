@@ -25,14 +25,14 @@ import (
 
 // Config Agent 配置
 type Config struct {
-	Name                 string                 `yaml:"name" json:"name"`
-	Provider             string                 `yaml:"provider,omitempty" json:"provider,omitempty"`
-	Model                string                 `yaml:"model" json:"model"`
-	MaxSteps             int                    `yaml:"maxSteps" json:"maxSteps"`
-	MaxToolCalls         int                    `yaml:"maxToolCalls" json:"maxToolCalls"`
-	MaxRunDuration       time.Duration          `yaml:"maxRunDuration" json:"maxRunDuration"`
-	MaxExplorationSteps  int                    `yaml:"maxExplorationSteps" json:"maxExplorationSteps"`
-	MaxRepeatedToolCalls int                    `yaml:"maxRepeatedToolCalls" json:"maxRepeatedToolCalls"`
+	Name                 string        `yaml:"name" json:"name"`
+	Provider             string        `yaml:"provider,omitempty" json:"provider,omitempty"`
+	Model                string        `yaml:"model" json:"model"`
+	MaxSteps             int           `yaml:"maxSteps" json:"maxSteps"`
+	MaxToolCalls         int           `yaml:"maxToolCalls" json:"maxToolCalls"`
+	MaxRunDuration       time.Duration `yaml:"maxRunDuration" json:"maxRunDuration"`
+	MaxExplorationSteps  int           `yaml:"maxExplorationSteps" json:"maxExplorationSteps"`
+	MaxRepeatedToolCalls int           `yaml:"maxRepeatedToolCalls" json:"maxRepeatedToolCalls"`
 	// MaxRepeatedPollCalls bounds consecutive identical polling/control calls
 	// (P1-7). 0 uses the built-in default; negative disables the soft advisory.
 	MaxRepeatedPollCalls int                    `yaml:"maxRepeatedPollCalls" json:"maxRepeatedPollCalls"`
@@ -89,28 +89,43 @@ type AgentState struct {
 
 // Result Agent 执行结果
 type Result struct {
-	Success                   bool                   `json:"success"`
-	Output                    string                 `json:"output"`
-	Steps                     int                    `json:"steps"`
-	LimitReached              bool                   `json:"limit_reached,omitempty"`
-	StepLimit                 int                    `json:"step_limit,omitempty"`
-	ToolCallLimit             int                    `json:"tool_call_limit,omitempty"`
-	LimitReason               string                 `json:"limit_reason,omitempty"`
-	Observations              []types.Observation    `json:"observations"`
-	Skill                     string                 `json:"skill,omitempty"`
-	TraceID                   string                 `json:"trace_id,omitempty"`
-	TurnID                    string                 `json:"turn_id,omitempty"`
-	AssistantStreamID         string                 `json:"assistant_stream_id,omitempty"`
-	AssistantStreamSequence   uint64                 `json:"assistant_stream_sequence,omitempty"`
-	State                     AgentState             `json:"state"`
-	Usage                     *types.TokenUsage      `json:"usage,omitempty"`
-	Reasoning                 *types.ReasoningBlock  `json:"reasoning,omitempty"`
-	Duration                  types.Duration         `json:"duration"`
-	Error                     string                 `json:"error,omitempty"`
-	Failure                   *llm.FailureDiagnostic `json:"failure,omitempty"`
-	ToolErrorCount            int                    `json:"tool_error_count,omitempty"`
-	RecoveredToolErrorCount   int                    `json:"recovered_tool_error_count,omitempty"`
-	UnrecoveredToolErrorCount int                    `json:"unrecovered_tool_error_count,omitempty"`
+	Success       bool   `json:"success"`
+	Output        string `json:"output"`
+	Steps         int    `json:"steps"`
+	LimitReached  bool   `json:"limit_reached,omitempty"`
+	StepLimit     int    `json:"step_limit,omitempty"`
+	ToolCallLimit int    `json:"tool_call_limit,omitempty"`
+	LimitReason   string `json:"limit_reason,omitempty"`
+	// Turn-budget observability (PR-4, plan §6.4). Level is ok / soft / hard;
+	// TurnBudgetLine is the same single-line progress text the model and host
+	// see, so logs, the debug surface and the TUI never re-derive the watermark.
+	// TurnBudgetSoftCueInjected records that the 80% wrap-up cue was actually
+	// delivered to the model at least once during this turn.
+	TurnBudgetLevel           string `json:"turn_budget_level,omitempty"`
+	TurnBudgetLine            string `json:"turn_budget,omitempty"`
+	TurnBudgetSoftCueInjected bool   `json:"turn_budget_soft_cue_injected,omitempty"`
+	// Prompt-cache breaker observability (PR-4, plan §6.4 item 5).
+	// PromptCacheBreakerTrips counts how often an identical prompt fingerprint
+	// tripped the short-term breaker; UpstreamInvalidResponseEvents is the
+	// aggregated total of UPSTREAM_INVALID_RESPONSE retry events (the per-attempt
+	// lines are suppressed, so this counter is the only complete tally).
+	PromptCacheBreakerTrips       int                    `json:"prompt_cache_breaker_trips,omitempty"`
+	UpstreamInvalidResponseEvents int                    `json:"upstream_invalid_response_events,omitempty"`
+	Observations                  []types.Observation    `json:"observations"`
+	Skill                         string                 `json:"skill,omitempty"`
+	TraceID                       string                 `json:"trace_id,omitempty"`
+	TurnID                        string                 `json:"turn_id,omitempty"`
+	AssistantStreamID             string                 `json:"assistant_stream_id,omitempty"`
+	AssistantStreamSequence       uint64                 `json:"assistant_stream_sequence,omitempty"`
+	State                         AgentState             `json:"state"`
+	Usage                         *types.TokenUsage      `json:"usage,omitempty"`
+	Reasoning                     *types.ReasoningBlock  `json:"reasoning,omitempty"`
+	Duration                      types.Duration         `json:"duration"`
+	Error                         string                 `json:"error,omitempty"`
+	Failure                       *llm.FailureDiagnostic `json:"failure,omitempty"`
+	ToolErrorCount                int                    `json:"tool_error_count,omitempty"`
+	RecoveredToolErrorCount       int                    `json:"recovered_tool_error_count,omitempty"`
+	UnrecoveredToolErrorCount     int                    `json:"unrecovered_tool_error_count,omitempty"`
 	// CompletionSatisfied is false when completionRequirement=complete_task was
 	// not met after recovery attempts (or recovery was disabled).
 	CompletionSatisfied *bool `json:"completion_satisfied,omitempty"`
@@ -956,7 +971,7 @@ func (a *Agent) RunReActWithConfig(ctx context.Context, llmRuntime *llm.LLMRunti
 			MaxRunDuration:       a.config.MaxRunDuration,
 			MaxExplorationSteps:  a.config.MaxExplorationSteps,
 			MaxRepeatedToolCalls: a.config.MaxRepeatedToolCalls,
-		MaxRepeatedPollCalls: a.config.MaxRepeatedPollCalls,
+			MaxRepeatedPollCalls: a.config.MaxRepeatedPollCalls,
 			EnableThought:        true,
 			EnableToolCalls:      true,
 			EnableParallelTools:  true,
@@ -978,7 +993,7 @@ func (a *Agent) RunReActWithSession(ctx context.Context, llmRuntime *llm.LLMRunt
 			MaxRunDuration:       a.config.MaxRunDuration,
 			MaxExplorationSteps:  a.config.MaxExplorationSteps,
 			MaxRepeatedToolCalls: a.config.MaxRepeatedToolCalls,
-		MaxRepeatedPollCalls: a.config.MaxRepeatedPollCalls,
+			MaxRepeatedPollCalls: a.config.MaxRepeatedPollCalls,
 			EnableThought:        true,
 			EnableToolCalls:      true,
 			EnableParallelTools:  true,

@@ -144,6 +144,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		Adapter:                  runtimeState.adapter,
 		Model:                    runtimeState.modelName,
 		ReasoningEffort:          runtimetypes.NormalizeReasoningEffort(runtimeState.reasoningEffort),
+		TurnBudgetTokens:         opts.BudgetTokens,
 		RequestedProvider:        strings.TrimSpace(runtimeState.requestedProvider),
 		EffectiveProvider:        strings.TrimSpace(runtimeState.providerName),
 		RequestedModel:           strings.TrimSpace(runtimeState.requestedModel),

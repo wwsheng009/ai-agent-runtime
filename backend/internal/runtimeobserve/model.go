@@ -109,15 +109,35 @@ type ProcessSummary struct {
 	ObservationEnabled bool   `json:"observation_enabled"`
 }
 
+// TurnSummary 是最近一轮 turn 的生命周期水位（PR-4 落点 C）。它回答的是
+// "这一轮上限多少、跑到哪、为什么收尾"，因此只保留最近一轮的标量字段；
+// 历史审计交给事件环（retention ring），避免这里成为第二个真相源。
+type TurnSummary struct {
+	SessionID string `json:"session_id,omitempty"`
+	// Step 是 finished 时的已完成步数（started 时为 0）。
+	Step int `json:"step"`
+	// MaxSteps 来自 started 事件；0 表示该轮未配置步数上限。
+	MaxSteps  int   `json:"max_steps,omitempty"`
+	ElapsedMS int64 `json:"elapsed_ms,omitempty"`
+	// BudgetLevel 是 ok|soft|hard；BudgetRatio 是已配置维度中的最大水位（0-1+）。
+	BudgetLevel string    `json:"budget_level,omitempty"`
+	BudgetRatio float64   `json:"budget_ratio,omitempty"`
+	StartedAt   time.Time `json:"started_at,omitempty"`
+	FinishedAt  time.Time `json:"finished_at,omitempty"`
+}
+
 // RuntimeSummary 是 runtime 维度的聚合计数。
 type RuntimeSummary struct {
-	ActiveSessions       int    `json:"active_sessions,omitempty"`
-	RunningTurns         int    `json:"running_turns,omitempty"`
-	ActiveLLMRequests    int    `json:"active_llm_requests,omitempty"`
-	ActiveTools          int    `json:"active_tools,omitempty"`
-	PendingApprovals     int    `json:"pending_approvals,omitempty"`
-	EventIngressDropped  uint64 `json:"event_ingress_dropped"`
-	UnknownEventsDropped uint64 `json:"unknown_events_dropped"`
+	ActiveSessions int `json:"active_sessions,omitempty"`
+	RunningTurns   int `json:"running_turns,omitempty"`
+	// LastTurn 是最近一轮 agent.turn.* 的水位（PR-4 落点 C）。nil 表示进程
+	// 启动以来没有观测到任何 turn 生命周期事件（不代表"没有在跑"）。
+	LastTurn             *TurnSummary `json:"last_turn,omitempty"`
+	ActiveLLMRequests    int          `json:"active_llm_requests,omitempty"`
+	ActiveTools          int          `json:"active_tools,omitempty"`
+	PendingApprovals     int          `json:"pending_approvals,omitempty"`
+	EventIngressDropped  uint64       `json:"event_ingress_dropped"`
+	UnknownEventsDropped uint64       `json:"unknown_events_dropped"`
 	// FilteredByType 统计"类型已知、仅因不在 v1 白名单被过滤"的事件数，
 	// 按事件类型分桶（封闭目录，键数天然有上界 = top-N）。
 	// unknown_events_dropped 只统计目录之外的真未知类型（方案 §6.3 落点 B）。
