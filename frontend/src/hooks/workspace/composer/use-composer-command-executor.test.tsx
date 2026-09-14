@@ -115,8 +115,8 @@ describe("useComposerCommandExecutor", () => {
   it("未认领的命令返回 false（交回 composer 显示未接入提示）", async () => {
     await render({ sessionId: "session-1" });
     const unknown = {
-      key: "feedback",
-      name: "feedback",
+      key: "not-a-builtin",
+      name: "not-a-builtin",
       kind: "execute",
     } as ComposerCommand;
 
@@ -127,6 +127,135 @@ describe("useComposerCommandExecutor", () => {
 
     expect(handled).toBe(false);
     expect(current().notice).toBeNull();
+  });
+
+  it("/feedback 空正文前置失败：不写日志、不产生回执", async () => {
+    await render({ sessionId: "session-1" });
+
+    const handled = await run("feedback", "   ");
+
+    expect(handled).toBe(true);
+    expect(current().notice).toEqual({
+      tone: "error",
+      messageKey: "composer.builtin.feedback.needText",
+    });
+  });
+
+  it("/feedback 为 log-only：回执如实说明已记录（不声称已上报）", async () => {
+    await render({ sessionId: "session-1" });
+
+    await run("feedback", "  the slash menu is handy  ");
+
+    expect(current().notice).toEqual({
+      tone: "success",
+      messageKey: "composer.builtin.feedback.recorded",
+    });
+  });
+
+  it("/model 无参数打开弹窗（不调用 applyModel、不留回执）", async () => {
+    const applyModel = vi.fn();
+    const openDialog = vi.fn();
+    await render({
+      modelSelection: { applyModel, modelIds: ["deepseek-chat"], openDialog },
+      sessionId: "session-1",
+    });
+
+    await run("model", "   ");
+
+    expect(openDialog).toHaveBeenCalledTimes(1);
+    expect(applyModel).not.toHaveBeenCalled();
+    expect(current().notice).toBeNull();
+  });
+
+  it("/model <id> 精确匹配走常驻座位的同一处理器并回填模型", async () => {
+    const applyModel = vi.fn();
+    await render({
+      modelSelection: {
+        applyModel,
+        modelIds: ["deepseek-chat", "deepseek-reasoner"],
+        openDialog: vi.fn(),
+      },
+      sessionId: "session-1",
+    });
+
+    await run("model", "deepseek-reasoner");
+
+    expect(applyModel).toHaveBeenCalledWith("deepseek-reasoner");
+    expect(current().notice).toEqual({
+      tone: "success",
+      messageKey: "composer.builtin.model.applied",
+      values: { model: "deepseek-reasoner" },
+    });
+  });
+
+  it("/model <id> 大小写不敏感且唯一命中时应用目录里的原文 id", async () => {
+    const applyModel = vi.fn();
+    await render({
+      modelSelection: {
+        applyModel,
+        modelIds: ["DeepSeek-Chat"],
+        openDialog: vi.fn(),
+      },
+      sessionId: "session-1",
+    });
+
+    await run("model", "deepseek-chat");
+
+    expect(applyModel).toHaveBeenCalledWith("DeepSeek-Chat");
+  });
+
+  it("/model <id> 歧义或未命中时报「不存在」且带原文，不改动选择", async () => {
+    const applyModel = vi.fn();
+    await render({
+      modelSelection: {
+        applyModel,
+        modelIds: ["model-a", "MODEL-A", "other"],
+        openDialog: vi.fn(),
+      },
+      sessionId: "session-1",
+    });
+
+    // 跨 provider 同名（大小写不同）按歧义处理：不猜、不取首条。
+    await run("model", "Model-A");
+    expect(applyModel).not.toHaveBeenCalled();
+    expect(current().notice).toEqual({
+      tone: "error",
+      messageKey: "composer.builtin.model.notFound",
+      values: { model: "Model-A" },
+    });
+
+    await run("model", "nope");
+    expect(current().notice).toEqual({
+      tone: "error",
+      messageKey: "composer.builtin.model.notFound",
+      values: { model: "nope" },
+    });
+  });
+
+  it("目录未就绪时报「不可用」而非「模型不存在」（不误导）", async () => {
+    const applyModel = vi.fn();
+    await render({
+      modelSelection: { applyModel, modelIds: [], openDialog: vi.fn() },
+      sessionId: "session-1",
+    });
+
+    await run("model", "deepseek-chat");
+
+    expect(applyModel).not.toHaveBeenCalled();
+    expect(current().notice).toEqual({
+      tone: "error",
+      messageKey: "composer.builtin.model.unavailable",
+    });
+  });
+
+  it("宿主未接线 /model 时如实报不可用（含无参数打开弹窗）", async () => {
+    await render({ sessionId: "session-1" });
+
+    await run("model", "");
+    expect(current().notice).toEqual({
+      tone: "error",
+      messageKey: "composer.builtin.model.unavailable",
+    });
   });
 
   it("/rename 缺标题时不调用重命名处理器，并给出可见错误", async () => {

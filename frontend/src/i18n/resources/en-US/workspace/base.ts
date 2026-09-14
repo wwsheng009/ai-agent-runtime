@@ -277,6 +277,17 @@ export const enWorkspaceBase = {
     modelCatalogUnavailable: "model catalog unavailable",
     runtimeDefaultModel: "runtime default model",
     modelWithName: "model {{model}}",
+    modelDialog: {
+      title: "Select a model",
+      current: "Current: {{model}} ({{provider}})",
+      noProvider: "no provider selected",
+      close: "close",
+      loading: "loading the model catalog…",
+      error: "model catalog unavailable: {{message}}",
+      empty: "the runtime model catalog is empty — no models to pick",
+      groupCount: "{{count}} models",
+      currentBadge: "current",
+    },
     shortcuts: "Ctrl/Cmd + Enter",
     stop: "stop",
     submitShort: "submit",
@@ -328,6 +339,20 @@ export const enWorkspaceBase = {
         failed: "rename failed: {{message}}",
         needTitle: "provide a new title: /rename <title>",
         unavailable: "there is no session to rename",
+      },
+      feedback: {
+        description: "record feedback (local log only, not sent in this build)",
+        argumentHint: "<feedback>",
+        needText: "provide feedback text: /feedback <text>",
+        recorded:
+          "feedback written to the local log (no submission channel in this build — nothing was sent)",
+      },
+      model: {
+        description: "switch the model for the current session",
+        argumentHint: "[model]",
+        applied: "model switched to {{model}}",
+        notFound: "the runtime model catalog has no {{model}}",
+        unavailable: "the runtime model catalog is not ready — cannot switch models",
       },
     },
     references: {

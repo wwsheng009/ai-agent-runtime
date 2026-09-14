@@ -15,6 +15,7 @@ import { ArrowUpRightIcon, BotIcon, type LucideIcon } from "lucide-react";
 import { MessageComposer } from "@/components/workspace/message-composer";
 import { MessageList } from "@/components/workspace/message-list";
 import { PendingInteractionBar } from "@/components/workspace/pending-interaction-bar";
+import { ComposerModelDialog } from "@/components/workspace/composer-model-dialog";
 import { JobsPanel } from "@/components/workspace/jobs-panel";
 import { SessionAgentsPanel } from "@/components/workspace/session-agents-panel";
 import { agentDisplayName } from "@/components/workspace/session-agents-panel-shared";
@@ -26,9 +27,8 @@ import { WorkspaceShellTopbar } from "@/components/workspace/workspace-shell-top
 import { type WorkspaceDensity } from "@/core/settings";
 import { useFilePreview } from "@/hooks/workspace/use-file-preview";
 import { useBackgroundJobs } from "@/hooks/workspace/use-background-jobs";
-import { useComposerCommandExecutor } from "@/hooks/workspace/composer/use-composer-command-executor";
+import { useComposerCommandSurface } from "@/hooks/workspace/composer/use-composer-command-surface";
 import { useSessionAgents } from "@/hooks/use-session-agents";
-import { COMPOSER_BUILTIN_COMMANDS } from "@/lib/composer-builtin-commands";
 import { type ComposerReferenceGroup } from "@/lib/composer-menu";
 import { artifactReferenceGroup } from "@/lib/composer-references";
 import { cn } from "@/lib/utils";
@@ -68,6 +68,7 @@ type WorkspaceMainSectionProps = Pick<
   | "reasoningEffortDefault"
   | "reasoningEffortError"
   | "reasoningEffortOptions"
+  | "runtimeModels"
   | "runtimeModelsError"
   | "runtimeModelsLoading"
   | "selectedModel"
@@ -136,6 +137,7 @@ export function WorkspaceMainSection({
   reasoningEffortDefault,
   reasoningEffortError,
   reasoningEffortOptions,
+  runtimeModels,
   runtimeModelsError,
   runtimeModelsLoading,
   selectedModel,
@@ -198,21 +200,16 @@ export function WorkspaceMainSection({
   // P2-1A：工具行文件路径的运行时预览（fs/read-file，只读）；未命中关联产物时兜底。
   const filePreview = useFilePreview();
 
-  // P2-7：composer `/` 命令执行器。命令清单是常量注册表，`/export` 与 `/rename`
-  // 分别复用轨迹导出与侧栏重命名的同一实现（结果只回填本地通知，不改会话状态）。
-  const commandExecutor = useComposerCommandExecutor({
+  // P2-7：composer `/` 命令面（清单 / `/model` 候选与弹窗 / 执行器 / 回执文案）。
+  // `/export`、`/rename`、`/model` 分别复用轨迹导出、侧栏重命名与常驻座位选择器的
+  // 同一实现；`/feedback` 写本地日志（log-only）。目录未就绪时菜单无候选、
+  // 弹窗如实显示空/失败态，不伪造模型名。
+  const composerCommandSurface = useComposerCommandSurface({
+    runtimeModels,
+    onModelChange,
     onRenameSession: onRenameRuntimeSession,
     sessionId: selectedThread.sessionId,
   });
-  const commandResultNotice = commandExecutor.notice
-    ? {
-        text: t(
-          commandExecutor.notice.messageKey as never,
-          (commandExecutor.notice.values ?? {}) as never,
-        ) as unknown as string,
-        tone: commandExecutor.notice.tone,
-      }
-    : null;
 
   return (
     <section
@@ -430,8 +427,8 @@ export function WorkspaceMainSection({
                 />
                 <MessageComposer
                   attachments={composerAttachments}
-                  commands={COMPOSER_BUILTIN_COMMANDS}
-                  commandResultNotice={commandResultNotice}
+                  commands={composerCommandSurface.commands}
+                  commandResultNotice={composerCommandSurface.commandResult}
                   density={density}
                   draft={draft}
                   focusKey={selectedThread.sessionId ?? selectedThread.id}
@@ -454,8 +451,10 @@ export function WorkspaceMainSection({
                   selectedProvider={selectedProvider}
                   selectedReasoningEffort={selectedReasoningEffort}
                   transport={selectedThread.transport}
-                  onCommand={commandExecutor.run}
-                  onDismissCommandResult={commandExecutor.dismissNotice}
+                  onCommand={composerCommandSurface.onCommand}
+                  onDismissCommandResult={
+                    composerCommandSurface.onDismissCommandResult
+                  }
                   onDraftChange={onDraftChange}
                   onStop={onStopResponding}
                   onSubmit={onSubmit}
@@ -465,6 +464,19 @@ export function WorkspaceMainSection({
           </div>
         </div>
       </div>
+      <ComposerModelDialog
+        error={runtimeModelsError}
+        groups={composerCommandSurface.modelGroups}
+        loading={runtimeModelsLoading}
+        onClose={composerCommandSurface.closeModelDialog}
+        onSelect={(model) => {
+          onModelChange(model);
+          composerCommandSurface.closeModelDialog();
+        }}
+        open={composerCommandSurface.modelDialogOpen}
+        selectedModel={selectedModel}
+        selectedProvider={selectedProvider}
+      />
     </section>
   );
 }

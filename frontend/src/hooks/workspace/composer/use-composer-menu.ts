@@ -18,6 +18,7 @@ import {
   findComposerMenuItem,
   moveComposerMenuActive,
   resolveComposerMenuTab,
+  type ComposerCommandOptionsSource,
   type ComposerMenuLevel,
   type ComposerMenuMode,
   type ComposerMenuSnapshot,
@@ -127,6 +128,24 @@ export function useComposerMenu({
     state.manual ||
     (state.trigger !== null && state.dismissedKey !== state.trigger.key);
 
+  // 命令专属候选（P2-7 子片 3）：候选来自命令定义（由宿主用真实目录组装），
+  // 菜单层只负责展示与派发，不自己编造选项。
+  const commandOptionsSource = useMemo<ComposerCommandOptionsSource | null>(() => {
+    if (state.level.kind !== "command-options") {
+      return null;
+    }
+    const command = registry.byKey.get(state.level.commandKey);
+    if (!command) {
+      return null;
+    }
+    return {
+      commandKey: command.key,
+      commandName: command.name,
+      label: `/${command.name}`,
+      options: command.options ?? [],
+    };
+  }, [registry, state.level]);
+
   const snapshot = useMemo(
     () =>
       buildComposerMenu({
@@ -135,6 +154,7 @@ export function useComposerMenu({
         query,
         commands: registry.commands,
         referenceGroups,
+        commandOptions: commandOptionsSource,
         hasAttachAction,
         attachLabel,
       }),
@@ -144,6 +164,7 @@ export function useComposerMenu({
       query,
       registry.commands,
       referenceGroups,
+      commandOptionsSource,
       hasAttachAction,
       attachLabel,
     ],
@@ -196,11 +217,18 @@ export function useComposerMenu({
     return handled;
   }, [onCommand]);
 
-  const completeWith = useCallback((inserted: string, keepMenu: boolean) => {
+  const completeWith = useCallback((
+    inserted: string,
+    keepMenu: boolean,
+    /** 无触发 token 时的整串替换（如第二级候选点选后清空命令行）。 */
+    fallbackValue?: string,
+  ) => {
     const trigger = state.trigger;
     if (trigger) {
       const next = applyComposerTriggerInsertion(value, trigger, inserted);
       onValueChange(next.value, next.caret);
+    } else if (fallbackValue !== undefined) {
+      onValueChange(fallbackValue, fallbackValue.length);
     }
     setState((previous) => ({
       ...previous,
@@ -236,6 +264,16 @@ export function useComposerMenu({
       completeWith(composerReferenceText(item.action.text), false);
       return;
     }
+    // 命令专属候选：补全为「命令 + 参数」并立即派发（点选即执行，与命令行提交同语义）。
+    if (item.action.kind === "command-option") {
+      const optionCommand = findComposerCommand(registry, item.action.name);
+      if (!optionCommand) {
+        return;
+      }
+      completeWith("", false, "");
+      dispatchCommand(optionCommand, item.action.value, "pick");
+      return;
+    }
     const command = findComposerCommand(registry, item.action.name);
     if (!command) {
       return;
@@ -245,7 +283,19 @@ export function useComposerMenu({
       dispatchCommand(command, "", "pick");
       return;
     }
-    // popupSelect：补全命令名后继续展示候选弹层（命令专属候选并入 P2-7）。
+    // popupSelect：有专属候选时补全命令名并下钻到第二级候选，否则只补全命令名。
+    if (command.kind === "popupSelect" && (command.options?.length ?? 0) > 0) {
+      completeWith(`/${command.name}`, true);
+      setState((previous) => ({
+        ...previous,
+        manual: true,
+        trigger: null,
+        dismissedKey: null,
+        level: { kind: "command-options", commandKey: command.key },
+        activeId: null,
+      }));
+      return;
+    }
     completeWith(`/${command.name}`, command.kind === "popupSelect");
   }, [activeId, close, completeWith, dispatchCommand, onAttachRequest, registry, snapshot.items]);
 

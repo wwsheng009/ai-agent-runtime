@@ -177,6 +177,32 @@ export async function seedJobs(
 }
 
 /**
+ * seed 运行时模型目录（P2-7 子片 3）：`GET /api/runtime/models` 的 mock 数据源。
+ *
+ * 目录原文透传（不排序、不补默认模型）；未 seed 时 mock 返回空目录，前端据此
+ * 走「目录未就绪」路径（`/model` 无候选、弹窗空态），不伪造模型名。
+ */
+export async function seedRuntimeModels(
+  request: APIRequestContext,
+  catalog: {
+    providers: Array<Record<string, unknown>>;
+    default_provider?: string;
+    default_model?: string;
+  },
+): Promise<void> {
+  const response = await request.post("/api/_test/models", { data: catalog });
+  if (!response.ok()) {
+    throw new Error(`seedRuntimeModels failed: ${response.status()} ${await response.text()}`);
+  }
+  // mock 对未知 API 会回 200 `{}`：缺 `ok` 即说明注入端点缺失，必须报错而不是静默空跑
+  // （否则用例会退化成「目录为空」的假绿）。
+  const body = (await response.json()) as { ok?: unknown };
+  if (body?.ok !== true) {
+    throw new Error(`seedRuntimeModels endpoint missing: ${JSON.stringify(body)}`);
+  }
+}
+
+/**
  * seed 运行时文件（P2-1A）：`POST /api/runtime/fs/read-file` 的 mock 数据源。
  *
  * `content` 为 UTF-8 文本便捷写法；二进制/坏编码场景用 `dataBase64`；

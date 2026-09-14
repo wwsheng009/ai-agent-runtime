@@ -115,6 +115,7 @@ export function WorkspacePage() {
     reasoningEffortDefault,
     reasoningEffortError,
     reasoningEffortOptions,
+    runtimeModels,
     runtimeModelsError,
     runtimeModelsLoading,
     selectedModel,
@@ -424,6 +425,7 @@ export function WorkspacePage() {
       onBacktrackPrefillChange={setBacktrackPrefill}
       onSelectBacktrackNavigationMessage={selectBacktrackNavigationMessage}
       providerOptions={providerOptions}
+      runtimeModels={runtimeModels}
       runtimeModelsError={runtimeModelsError}
       runtimeModelsLoading={runtimeModelsLoading}
       selectedModel={selectedModel}

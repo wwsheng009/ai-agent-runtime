@@ -15,6 +15,22 @@ export type ComposerCommandKind = (typeof COMPOSER_COMMAND_KINDS)[number];
 
 export const DEFAULT_COMPOSER_COMMAND_KIND: ComposerCommandKind = "execute";
 
+/**
+ * `popupSelect` 命令的第二级候选（P2-7 子片 3）。
+ * 模型层只搬运数据：`value` 是回填执行器的参数原文，`label` 是数据原文
+ * （如模型名 / provider 名），需要翻译的副标题用 `descriptionKey`。
+ */
+export type ComposerCommandOption = {
+  /** 选中后作为命令参数传给执行器，同时用于补全命令行。 */
+  value: string;
+  /** 候选展示文本。 */
+  label: string;
+  /** 副标题（数据原文）。 */
+  description?: string;
+  /** 副标题（i18n key，优先于 `description`）。 */
+  descriptionKey?: string;
+};
+
 export type ComposerCommandDefinition = {
   /** 不含前导 `/`；大小写不敏感（查找键小写），展示沿用定义时的大小写。 */
   name: string;
@@ -23,6 +39,8 @@ export type ComposerCommandDefinition = {
   descriptionKey?: string;
   /** i18n key；参数提示（可选）。 */
   argumentHintKey?: string;
+  /** 命令专属候选（`popupSelect` 消费）；空数组按「无候选」处理，不伪造占位项。 */
+  options?: readonly ComposerCommandOption[];
 };
 
 export type ComposerCommand = ComposerCommandDefinition & {
@@ -88,6 +106,9 @@ export function createComposerCommandRegistry(
       name: definition.name.trim().replace(/^\/+/, ""),
       kind: definition.kind ?? DEFAULT_COMPOSER_COMMAND_KIND,
       key,
+      options: definition.options
+        ? Object.freeze([...definition.options])
+        : undefined,
     };
     commands.push(command);
     byKey.set(key, command);

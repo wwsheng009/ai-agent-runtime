@@ -65,6 +65,7 @@ export function WorkspaceShell({
   reasoningEffortDefault,
   reasoningEffortError,
   reasoningEffortOptions,
+  runtimeModels = null,
   onDraftChange,
   onModelChange,
   onProviderChange,
@@ -315,6 +316,7 @@ export function WorkspaceShell({
           messageListStyle={messageListStyle}
           modelOptions={modelOptions}
           newThreadSuggestions={newThreadSuggestions}
+          runtimeModels={runtimeModels}
           onAnswerPendingQuestion={onAnswerPendingQuestion}
           onPlanDecision={onPlanDecision}
           onPlanNotesChange={onPlanNotesChange}

@@ -1,7 +1,10 @@
 // P1-4 子片 3：Composer 触发菜单的纯模型（`/` 命令、`@` 引用、`+` 按钮三入口同源）。
 // 模型只做「候选组装 / 过滤 / 排序 / 高亮位移 / Tab 语义」，不渲染、不读 DOM。
 
-import { type ComposerCommand } from "@/lib/composer-commands";
+import {
+  type ComposerCommand,
+  type ComposerCommandOption,
+} from "@/lib/composer-commands";
 
 export const COMPOSER_MENU_MAX_ITEMS_PER_GROUP = 8;
 
@@ -10,10 +13,14 @@ export type ComposerMenuMode = "commands" | "references" | "all";
 
 export type ComposerMenuLevel =
   | { kind: "root" }
-  | { kind: "group"; groupId: string };
+  | { kind: "group"; groupId: string }
+  /** 命令专属候选（`popupSelect` 选中后的第二级）。 */
+  | { kind: "command-options"; commandKey: string };
 
 export type ComposerMenuItemAction =
   | { kind: "command"; name: string }
+  /** 命令专属候选：`name` 回查命令，`value` 作为参数派发。 */
+  | { kind: "command-option"; name: string; value: string }
   | { kind: "reference"; text: string }
   | { kind: "attach" };
 
@@ -69,10 +76,21 @@ export type ComposerMenuSource = {
   query: string;
   commands: readonly ComposerCommand[];
   referenceGroups: readonly ComposerReferenceGroup[];
+  /** `level.kind === "command-options"` 时的候选项来源；缺省按无候选处理。 */
+  commandOptions?: ComposerCommandOptionsSource | null;
   /** 是否提供「添加附件」动作。 */
   hasAttachAction: boolean;
   /** 「添加附件」的本地化文案（模型不持文案）。 */
   attachLabel: string;
+};
+
+export type ComposerCommandOptionsSource = {
+  commandKey: string;
+  /** 命令名（不含前导 `/`），候选派发时回传。 */
+  commandName: string;
+  /** 分组标题：命令名（数据原文，非文案）。 */
+  label: string;
+  options: readonly ComposerCommandOption[];
 };
 
 function rankMatch(label: string, extra: string, query: string): number {
@@ -200,11 +218,70 @@ function buildReferenceLeafGroup(
   };
 }
 
+function buildCommandOptionGroup(
+  source: ComposerCommandOptionsSource | null | undefined,
+  query: string,
+): ComposerMenuGroup | null {
+  if (!source || source.options.length === 0) {
+    return null;
+  }
+  const groupId = `command-options:${source.commandKey}`;
+  const ranked = source.options
+    .map((option) => ({
+      item: {
+        id: `${groupId}:${option.value}`,
+        groupId,
+        label: option.label,
+        description: option.description,
+        descriptionKey: option.descriptionKey,
+        level: "leaf" as const,
+        action: {
+          kind: "command-option" as const,
+          name: source.commandName,
+          value: option.value,
+        },
+      },
+      rank: rankMatch(
+        option.label,
+        `${option.value} ${option.description ?? ""}`,
+        query,
+      ),
+    }))
+    .filter((entry) => entry.rank >= 0);
+
+  if (ranked.length === 0) {
+    return null;
+  }
+  return {
+    id: groupId,
+    label: source.label,
+    items: sortByRank(ranked).slice(0, COMPOSER_MENU_MAX_ITEMS_PER_GROUP),
+  };
+}
+
 /** 组装菜单快照；空分组一律剔除，`empty` 表示整体无候选。 */
 export function buildComposerMenu(source: ComposerMenuSource): ComposerMenuSnapshot {
   const query = source.query.trim().toLowerCase();
   const drilledGroupId = source.level.kind === "group" ? source.level.groupId : null;
   const groups: ComposerMenuGroup[] = [];
+
+  // 命令专属候选独占一层：不再混入命令 / 引用 / 附件分组，避免与其它入口互相干扰。
+  if (source.level.kind === "command-options") {
+    const optionsGroup = buildCommandOptionGroup(source.commandOptions, query);
+    if (optionsGroup) {
+      groups.push(optionsGroup);
+    }
+    const optionsItems = groups.flatMap((group) => group.items);
+    return {
+      mode: source.mode,
+      level: source.level,
+      query: source.query,
+      groups,
+      items: optionsItems,
+      activeId: clampComposerMenuActive(optionsItems, null),
+      empty: optionsItems.length === 0,
+    };
+  }
 
   const allowCommands = source.mode === "commands" || source.mode === "all";
   const allowReferences = source.mode === "references" || source.mode === "all";

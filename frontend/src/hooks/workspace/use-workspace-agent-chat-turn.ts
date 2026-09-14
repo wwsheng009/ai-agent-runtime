@@ -436,6 +436,8 @@ export function useWorkspaceAgentChatTurn({
     trajectoryStore,
     modelOptions,
     providerOptions,
+    // P2-7 子片 3：原始运行时目录（`/model` 弹窗按 provider 分组的唯一数据源）。
+    runtimeModels,
     runtimeModelsError,
     runtimeModelsLoading,
     reasoningEffortError,

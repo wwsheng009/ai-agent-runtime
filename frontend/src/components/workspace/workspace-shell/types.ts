@@ -12,6 +12,7 @@ import {
   type RuntimeSessionPlanModeExitDecision,
   type RuntimeSessionRecord,
   type RuntimeSessionUserSummary,
+  type RuntimeModelsResponse,
   type RuntimeTeamRecord,
   type RuntimeTeamSummaryEntry,
   type RuntimeWorkspaceDirectory,
@@ -120,6 +121,8 @@ export type WorkspaceShellProps = {
   onBacktrackPrefillChange?: (prefill: boolean) => void;
   onSelectBacktrackNavigationMessage?: (messageId: string) => void;
   providerOptions: string[];
+  /** P2-7 子片 3：运行时模型目录（`/model` 候选与弹窗，与 composer 常驻座位同源）。 */
+  runtimeModels?: RuntimeModelsResponse | null;
   runtimeModelsError: string | null;
   runtimeModelsLoading: boolean;
   selectedModel: string;

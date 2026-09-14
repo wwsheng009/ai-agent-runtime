@@ -62,6 +62,9 @@ const mockJobsBySession = new Map(); // sessionId -> [{...backend background.Job
 // P2-1A：运行时文件读取（`POST /api/runtime/fs/read-file`）的 mock 文件表。
 // path -> { dataBase64, byteCount }；由 `/api/_test/files` 注入，未登记即 404。
 const mockFiles = new Map();
+// P2-7 子片 3：运行时模型目录（`GET /api/runtime/models`）。默认空目录，由
+// `/api/_test/models` 注入；前端只据这份目录组装 `/model` 候选，未注入即无候选。
+let mockRuntimeModelsCatalog = null;
 // P2-1A：技能市场（`/api/runtime/skills/*`）状态。契约对齐
 // backend/internal/api/skills/handler.go：写操作要求管理令牌；热重载未配置时
 // stats 端点返回 503，前端如实呈现「未启用」而不是伪造 watching=false。
@@ -771,6 +774,7 @@ async function handleRequest(req, res) {
     brokenEventsSessions.clear();
     mockJobsBySession.clear();
     mockFiles.clear();
+    mockRuntimeModelsCatalog = null;
     mockSkillsEmbeddingEnabled = false;
     mockSkillsHotReload = {
       configured: false,
@@ -868,6 +872,24 @@ async function handleRequest(req, res) {
       mockFiles.set(file.path, { dataBase64, byteCount });
     }
     writeJson(res, 200, { ok: true, count: files.length });
+    return;
+  }
+
+  // 测试注入（P2-7 子片 3）：POST /api/_test/models
+  // body: { providers: [{ name, models, default_model? }], default_provider?, default_model? }
+  // 只登记目录原文（不排序、不补默认模型）；`count` 与服务端一致地按 provider 数计算。
+  if (path === "/api/_test/models" && req.method === "POST") {
+    const body = await readBody(req);
+    const providers = Array.isArray(body?.providers) ? body.providers : [];
+    mockRuntimeModelsCatalog = {
+      providers,
+      count: providers.length,
+      default_provider:
+        typeof body?.default_provider === "string" ? body.default_provider : "",
+      default_model:
+        typeof body?.default_model === "string" ? body.default_model : "",
+    };
+    writeJson(res, 200, { ok: true, count: providers.length });
     return;
   }
 
@@ -1539,7 +1561,16 @@ async function handleRequest(req, res) {
     return;
   }
   if (path === "/api/runtime/models") {
-    writeJson(res, 200, { providers: [], default_provider: "", default_model: "" });
+    writeJson(
+      res,
+      200,
+      mockRuntimeModelsCatalog ?? {
+        providers: [],
+        count: 0,
+        default_provider: "",
+        default_model: "",
+      },
+    );
     return;
   }
   if (path === "/api/runtime/service") {

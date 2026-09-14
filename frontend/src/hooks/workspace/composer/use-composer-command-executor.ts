@@ -8,12 +8,17 @@
 // - 结果通知只持 i18n key 与插值（模型层不持文案），渲染层本地化。
 import { useCallback, useRef, useState } from "react";
 
+import { createLogger } from "@/core/logger";
 import {
   parseExportCommandArgs,
+  parseFeedbackCommandArgs,
   parseRenameCommandArgs,
 } from "@/lib/composer-builtin-commands";
 import type { ComposerCommand } from "@/lib/composer-commands";
-import { exportSessionTrajectoryJsonl } from "@/lib/trajectory/export-session";
+import {
+  exportSessionTrajectoryJsonl,
+  type SessionTrajectoryExportResult,
+} from "@/lib/trajectory/export-session";
 
 export type ComposerCommandResultNotice = {
   /** 语气：错误用 role="alert"，成功用 role="status"。 */
@@ -34,6 +39,17 @@ export type UseComposerCommandExecutorOptions = {
   sessionId?: string;
   /** 会话重命名；与侧栏重命名同一处理器（单一事实源）。 */
   onRenameSession?: (sessionId: string, title: string) => Promise<void>;
+  /** `/model`：宿主目录与「应用模型 / 打开弹窗」动作；缺省时命令如实报不可用。 */
+  modelSelection?: ComposerModelSelectionBridge;
+};
+
+export type ComposerModelSelectionBridge = {
+  /** 目录内真实存在的模型 id；空数组 = 目录未就绪（不按「不存在」处理）。 */
+  modelIds: readonly string[];
+  /** 应用模型；与 composer 常驻座位同一处理器（单一事实源，不另建选择通道）。 */
+  applyModel: (modelId: string) => void;
+  /** 打开 `/model` 弹窗（无参数提交时使用）。 */
+  openDialog: () => void;
 };
 
 function describeError(error: unknown): string {
@@ -42,9 +58,40 @@ function describeError(error: unknown): string {
     : String(error);
 }
 
+// log-only：本仓无反馈后端路由与外部渠道，反馈只写本地结构化日志，不上报。
+const feedbackLog = createLogger("composer.feedback");
+
+/** 模型 id 解析：精确优先；否则唯一的大小写不敏感匹配；歧义 / 未命中返回 null。 */
+function resolveModelId(
+  modelIds: readonly string[],
+  requested: string,
+): string | null {
+  if (modelIds.includes(requested)) {
+    return requested;
+  }
+  const lowered = requested.toLowerCase();
+  const matches = modelIds.filter((modelId) => modelId.toLowerCase() === lowered);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+/**
+ * 导出文件行数：`historyRowCount` 由轨迹导出实现按需提供（无内容帧的会话把
+ * 持久化历史投影成导出行）。该字段是增量能力——旧实现不提供时按 0 计，
+ * 计数只可能小于文件行数，不虚增。
+ */
+function exportRowCount(result: SessionTrajectoryExportResult): number {
+  const historyRowCount = (
+    result as SessionTrajectoryExportResult & { historyRowCount?: number }
+  ).historyRowCount;
+  return (
+    result.eventCount + (typeof historyRowCount === "number" ? historyRowCount : 0)
+  );
+}
+
 export function useComposerCommandExecutor({
   sessionId,
   onRenameSession,
+  modelSelection,
 }: UseComposerCommandExecutorOptions): ComposerCommandExecutor {
   const [notice, setNotice] = useState<ComposerCommandResultNotice | null>(null);
   const exportingRef = useRef(false);
@@ -93,7 +140,12 @@ export function useComposerCommandExecutor({
             messageKey: result.redacted
               ? "composer.builtin.export.doneRedacted"
               : "composer.builtin.export.done",
-            values: { count: result.eventCount, filename: result.filename },
+            // 无内容帧的会话导出的是「生命周期事件 + 历史兜底行」，
+            // 计数要包含兜底行，否则提示条数会小于文件里的行数。
+            values: {
+              count: exportRowCount(result),
+              filename: result.filename,
+            },
           });
         } catch (error) {
           setNotice({
@@ -146,6 +198,71 @@ export function useComposerCommandExecutor({
     [onRenameSession, sessionId],
   );
 
+  // log-only：写本地结构化日志并以回执如实说明「未上报」，不制造已提交的假象。
+  const runFeedback = useCallback(
+    (args: string) => {
+      const parsed = parseFeedbackCommandArgs(args);
+      if (!parsed.ok) {
+        setNotice({
+          tone: "error",
+          messageKey: "composer.builtin.feedback.needText",
+        });
+        return;
+      }
+      feedbackLog.info("composer feedback recorded (log-only, no remote channel)", {
+        sessionId: sessionId ?? null,
+        message: parsed.message,
+      });
+      setNotice({
+        tone: "success",
+        messageKey: "composer.builtin.feedback.recorded",
+      });
+    },
+    [sessionId],
+  );
+
+  const runModel = useCallback(
+    (args: string) => {
+      const requested = args.trim();
+      if (requested.length === 0) {
+        // 无参数：打开 `/model` 弹窗（与常驻座位同一目录、同一处理器）。
+        if (!modelSelection) {
+          setNotice({
+            tone: "error",
+            messageKey: "composer.builtin.model.unavailable",
+          });
+          return;
+        }
+        modelSelection.openDialog();
+        return;
+      }
+      if (!modelSelection || modelSelection.modelIds.length === 0) {
+        // 目录未就绪（拉取中 / 失败 / 未配置）：不按「模型不存在」报，避免误导。
+        setNotice({
+          tone: "error",
+          messageKey: "composer.builtin.model.unavailable",
+        });
+        return;
+      }
+      const modelId = resolveModelId(modelSelection.modelIds, requested);
+      if (!modelId) {
+        setNotice({
+          tone: "error",
+          messageKey: "composer.builtin.model.notFound",
+          values: { model: requested },
+        });
+        return;
+      }
+      modelSelection.applyModel(modelId);
+      setNotice({
+        tone: "success",
+        messageKey: "composer.builtin.model.applied",
+        values: { model: modelId },
+      });
+    },
+    [modelSelection],
+  );
+
   const run = useCallback(
     (command: ComposerCommand, args: string): boolean => {
       switch (command.key) {
@@ -155,12 +272,18 @@ export function useComposerCommandExecutor({
         case "rename":
           runRename(args);
           return true;
+        case "feedback":
+          runFeedback(args);
+          return true;
+        case "model":
+          runModel(args);
+          return true;
         default:
           // 未认领：composer 会显示 no-executor 提示，而不是把命令行当消息发出去。
           return false;
       }
     },
-    [runExport, runRename],
+    [runExport, runFeedback, runModel, runRename],
   );
 
   const dismissNotice = useCallback(() => setNotice(null), []);

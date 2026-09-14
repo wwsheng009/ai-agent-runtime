@@ -131,7 +131,12 @@ function ComposerMenuOption({
       ? { "data-composer-attach": "" }
       : item.action.kind === "command"
         ? { "data-composer-command-option": item.action.name }
-        : { "data-composer-reference-option": item.action.text };
+        : item.action.kind === "command-option"
+          ? {
+              "data-composer-command-option": item.action.name,
+              "data-composer-command-option-value": item.action.value,
+            }
+          : { "data-composer-reference-option": item.action.text };
   return (
     <div
       id={composerMenuItemDomId(item.id)}

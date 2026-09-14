@@ -8,8 +8,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildComposerBuiltinCommands,
   COMPOSER_BUILTIN_COMMANDS,
   parseExportCommandArgs,
+  parseFeedbackCommandArgs,
   parseRenameCommandArgs,
 } from "./composer-builtin-commands";
 import { createComposerCommandRegistry } from "./composer-commands";
@@ -20,14 +22,30 @@ describe("COMPOSER_BUILTIN_COMMANDS", () => {
     expect(registry.commands.map((command) => command.key)).toEqual([
       "export",
       "rename",
+      "feedback",
+      "model",
     ]);
     expect(registry.byKey.get("export")?.kind).toBe("action");
     expect(registry.byKey.get("rename")?.kind).toBe("execute");
+    // `/model` 的第二级候选由宿主目录注入；无目录时命令仍在位（提交即打开弹窗）。
+    expect(registry.byKey.get("feedback")?.kind).toBe("execute");
+    expect(registry.byKey.get("model")?.kind).toBe("popupSelect");
+    expect(registry.byKey.get("model")?.options).toBeUndefined();
   });
 
-  it("不注册无执行器的命令（如 /feedback 无后端路由与外部渠道）", () => {
-    const registry = createComposerCommandRegistry(COMPOSER_BUILTIN_COMMANDS);
-    expect(registry.byKey.has("feedback")).toBe(false);
+  it("宿主注入目录时 /model 携带候选；空目录不产生占位候选", () => {
+    const options = [
+      { value: "deepseek-chat", label: "deepseek-chat", description: "deepseek" },
+    ];
+    const withCatalog = createComposerCommandRegistry(
+      buildComposerBuiltinCommands({ modelOptions: options }),
+    );
+    expect(withCatalog.byKey.get("model")?.options).toEqual(options);
+
+    const emptyCatalog = createComposerCommandRegistry(
+      buildComposerBuiltinCommands({ modelOptions: [] }),
+    );
+    expect(emptyCatalog.byKey.get("model")?.options).toBeUndefined();
   });
 });
 
@@ -91,5 +109,30 @@ describe("parseRenameCommandArgs", () => {
     expect(parseRenameCommandArgs("   ")).toEqual({ ok: false, reason: "empty" });
     expect(parseRenameCommandArgs('""')).toEqual({ ok: false, reason: "empty" });
     expect(parseRenameCommandArgs('"  "')).toEqual({ ok: false, reason: "empty" });
+  });
+});
+
+describe("parseFeedbackCommandArgs", () => {
+  it("去首尾空白后作为反馈正文（与 /rename 同一归一化口径）", () => {
+    expect(parseFeedbackCommandArgs("  the menu is great  ")).toEqual({
+      ok: true,
+      message: "the menu is great",
+    });
+    expect(parseFeedbackCommandArgs('" kept inner spaces "')).toEqual({
+      ok: true,
+      message: "kept inner spaces",
+    });
+  });
+
+  it("空反馈失败：不产生空日志行", () => {
+    expect(parseFeedbackCommandArgs("")).toEqual({ ok: false, reason: "empty" });
+    expect(parseFeedbackCommandArgs("   ")).toEqual({
+      ok: false,
+      reason: "empty",
+    });
+    expect(parseFeedbackCommandArgs('""')).toEqual({
+      ok: false,
+      reason: "empty",
+    });
   });
 });
