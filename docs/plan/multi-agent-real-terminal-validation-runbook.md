@@ -128,6 +128,16 @@ Select-String -Path "$env:USERPROFILE\.aicli\config.yaml" -Pattern 'teams:|subag
 
 加约束后 team 探针已连续两次判通过：16:19:15（只跑 team，报告 `docs/working/multi-agent-real-terminal-validation-20260913-161915.md`）与 16:26:51（spawn_agent + team 整轮，报告 `docs/working/multi-agent-real-terminal-validation-20260913-162651.md`，两个分支都判「验证通过」）。
 
+### 2.4 spawn_team「验证通过」的证据源（2026-09-14 补充）
+
+脚本现行判定（`scripts/validate-multi-agent-real-terminal.ps1` §4 分支，2026-09-14 修正）：
+
+1. `Required found` 三源合并取证：探针 stdout、父会话 `tool_calls`（`~/.aicli/sessions/session_history.sqlite`，取本次窗口内 root 行的 `spawn_team` / `wait_team`）、`~/.aicli/sessions/runtime/team_store.sqlite` 的 `teams` / `team_events`（`team.summary` 与 `team.completed` 事件计数）；
+2. 报告会打印 `Required evidence source` / `Parent session` / `Parent tool calls` / `Team row`（形如 `summary-team | status=done | team.summary=1 | team.completed=1 | lead=session_…`）；
+3. 环境阻断仍按 §2.1 的信号识别，与「团队逻辑回归」区分记录。
+
+注意（假红陷阱）：`team.summary` 是**持久事件名**，不会出现在 parent 最终正文里，`session_*.json` 在当前版本也不再落盘（会话正文进 `session_history.sqlite`）。只扫 stdout 会把成功判成「未通过或证据不足」——2026-09-14 实例：`docs/working/multi-agent-real-terminal-validation-20260914-105959.md`（旧口径假红，已在该报告尾部追记原始证据）与同轮修正后的 `…-110526.md`（`Required found: wait_team, team.summary, spawn_team`、`Parent tool calls: spawn_team, wait_team`，判通过）。
+
 ## 3. 验证 A: spawn_agent 并行输出隔离
 
 启动:

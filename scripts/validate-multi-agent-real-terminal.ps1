@@ -190,6 +190,40 @@ function Get-RecentRootSessions {
     return @(Invoke-SqliteQuery -DatabasePath $storePath -Sql $sql)
 }
 
+function Get-TeamTerminalEvidence {
+    param(
+        [datetime]$Since,
+        [datetime]$Until
+    )
+    $evidence = @{
+        Rows                = @()
+        SummaryEventCount   = 0
+        CompletedEventCount = 0
+    }
+    $storePath = Join-Path (Join-Path $env:USERPROFILE ".aicli\sessions") "runtime\team_store.sqlite"
+    if (-not (Test-Path $storePath)) {
+        return $evidence
+    }
+    # teams/team_events 才是 wait_team 观察到 team.completed / team.summary 的持久证据：
+    # parent 最终输出里通常只有中文总结正文，不含 "team.summary" 这种事件名字面量。
+    $sinceText = $Since.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss")
+    if ($null -eq $Until) {
+        $Until = (Get-Date).ToUniversalTime().AddMinutes(5)
+    }
+    $untilText = $Until.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss")
+    $sql = "select t.id || ' | status=' || t.status || ' | team.summary=' || (select count(*) from team_events e where e.team_id = t.id and e.type = 'team.summary') || ' | team.completed=' || (select count(*) from team_events e where e.team_id = t.id and e.type = 'team.completed') || ' | lead=' || coalesce(t.lead_session_id, '') from teams t where t.updated_at >= '$sinceText' and t.updated_at <= '$untilText' order by t.updated_at desc limit 5;"
+    $evidence.Rows = @(Invoke-SqliteQuery -DatabasePath $storePath -Sql $sql)
+    foreach ($row in $evidence.Rows) {
+        if ($row -match "\| team\.summary=(\d+)") {
+            $evidence.SummaryEventCount += [int]$Matches[1]
+        }
+        if ($row -match "\| team\.completed=(\d+)") {
+            $evidence.CompletedEventCount += [int]$Matches[1]
+        }
+    }
+    return $evidence
+}
+
 function Get-SessionToolCallNames {
     param(
         [string[]]$SessionIds
@@ -625,6 +659,20 @@ if (-not $SkipSpawnTeamProbe) {
             }
         }
     }
+    # 命令输出只有 parent 总结正文：spawn_team/wait_team 的调用证据在 session_history.sqlite，
+    # team.summary 的完成证据在 team_store.sqlite（teams/team_events），补齐后再判定，避免假红。
+    $teamProbeEndedAt = (Get-Date).AddSeconds(5)
+    $teamRootSessions = @(Get-RecentRootSessions -Since $teamProbeStartedAt -Until $teamProbeEndedAt)
+    $teamToolCalls = @(Get-SessionToolCallNames -SessionIds $teamRootSessions)
+    foreach ($toolName in @("spawn_team", "wait_team")) {
+        if ($teamToolCalls -contains $toolName -and $teamRequiredFound -notcontains $toolName) {
+            $teamRequiredFound += $toolName
+        }
+    }
+    $teamTerminalEvidence = Get-TeamTerminalEvidence -Since $teamProbeStartedAt -Until $teamProbeEndedAt
+    if ($teamTerminalEvidence.SummaryEventCount -gt 0 -and $teamRequiredFound -notcontains "team.summary") {
+        $teamRequiredFound += "team.summary"
+    }
     $teamForbiddenFound = Test-TextContainsAny -Text $teamOutputText -Patterns $teamForbiddenPatterns
     $teamEnvironmentBlockedPatterns = @(
         "response-header guard after 20s",
@@ -646,6 +694,16 @@ if (-not $SkipSpawnTeamProbe) {
     Add-ReportLine -Path $reportPath -Text "Pattern check:"
     Add-ReportLine -Path $reportPath -Text "- Required found: $($teamRequiredFound -join ', ')"
     Add-ReportLine -Path $reportPath -Text "- Forbidden scan source: command output"
+    Add-ReportLine -Path $reportPath -Text "- Required evidence source: command output + session_history.sqlite（父会话 tool_calls）+ team_store.sqlite（teams/team_events）"
+    Add-ReportLine -Path $reportPath -Text "- Parent session: $(if ($teamRootSessions.Count -gt 0) { $teamRootSessions -join ', ' } else { '<none>' })"
+    Add-ReportLine -Path $reportPath -Text "- Parent tool calls: $(if ($teamToolCalls.Count -gt 0) { $teamToolCalls -join ', ' } else { '<none>' })"
+    if ($teamTerminalEvidence.Rows.Count -gt 0) {
+        foreach ($teamRow in $teamTerminalEvidence.Rows) {
+            Add-ReportLine -Path $reportPath -Text "- Team row: $teamRow"
+        }
+    } else {
+        Add-ReportLine -Path $reportPath -Text "- Team row: <none in probe window>"
+    }
     if ($teamForbiddenFound.Count -gt 0) {
         Add-ReportLine -Path $reportPath -Text "- Forbidden found: $($teamForbiddenFound -join ', ')"
     } else {
