@@ -104,3 +104,308 @@ export function agentMetaFacts(agent: RuntimeAgentRecord): AgentMetaFact[] {
   }
   return facts;
 }
+
+/* ------------------------------------------------------------------ *
+ * P2-9 子片 2：耗时格式化 / 子代理树 / 只读原因
+ *
+ * 数据事实（决定能力边界，勿凭空补字段）：
+ *   * 后端身份行有 `created_at` / `updated_at` / `closed_at` → 可算「记录跨度」；
+ *   * 后端**未上报**逐回合活跃时长、token 用量、one-shot 标记 → 这三项不做
+ *     （目标实现的「总活跃耗时 / token / 一次性记录只读」在本仓库无数据源）。
+ * ------------------------------------------------------------------ */
+
+function parseAgentTime(value: string | null): number | null {
+  if (!value) {
+    return null;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export type AgentDurationSpan = {
+  /** 跨度毫秒（终点 ≥ 起点）。 */
+  ms: number;
+  /** 起点 ISO（原样透传，供 title 展示）。 */
+  from: string;
+  /** 终点 ISO（原样透传，供 title 展示）。 */
+  to: string;
+};
+
+/**
+ * 记录跨度：`createdAt` → `closedAt ?? updatedAt`。
+ *
+ * 纪律：端点缺失 / 无法解析 / 终点早于起点 → `null`，UI **不显示、不推算、不补零**。
+ * 口径：这是「记录跨度」而非「活跃耗时」（后端未上报活跃时长），
+ * 文案与 title 必须如实标注，不得借用目标实现的 `duration.exactTitle` 说辞。
+ */
+export function agentDurationSpan(agent: RuntimeAgentRecord): AgentDurationSpan | null {
+  const endIso = agent.closedAt ?? agent.updatedAt;
+  const from = parseAgentTime(agent.createdAt);
+  const to = parseAgentTime(endIso);
+  if (from === null || to === null || to < from || !agent.createdAt || !endIso) {
+    return null;
+  }
+  return { ms: to - from, from: agent.createdAt, to: endIso };
+}
+
+/**
+ * 跨度文案（判别联合：每个档位的占位符类型固定，调用侧可静态取到 i18n 键与
+ * 精确插值参数，避免 `t(key, values)` 的动态键类型逃逸）。
+ */
+export type AgentDurationLabel =
+  | { key: "duration.seconds"; values: { seconds: string } }
+  | { key: "duration.minutes"; values: { minutes: string; seconds: string } }
+  | { key: "duration.hours"; values: { hours: string; minutes: string; seconds: string } }
+  | { key: "duration.days"; values: { days: string } }
+  | { key: "duration.daysHours"; values: { days: string; hours: string } }
+  | { key: "duration.months"; values: { months: string } }
+  | { key: "duration.monthsDays"; values: { months: string; days: string } }
+  | { key: "duration.years"; values: { years: string } }
+  | { key: "duration.yearsMonths"; values: { years: string; months: string } }
+  | {
+      key: "duration.exactDays";
+      values: { days: string; hours: string; minutes: string; seconds: string };
+    };
+
+/** 与目标实现同梯度的跨度文案：秒 → 分 → 时 → 天 → 月 → 年（越粗精度越低）。 */
+export function formatAgentDuration(ms: number): AgentDurationLabel | null {
+  if (!Number.isFinite(ms) || ms < 0) {
+    return null;
+  }
+  const totalSeconds = Math.floor(ms / 1000);
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const totalHours = Math.floor(totalMinutes / 60);
+  const seconds = totalSeconds % 60;
+  const minutes = totalMinutes % 60;
+  const hours = totalHours % 24;
+  const days = Math.floor(totalHours / 24);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const text = (value: number) => String(value);
+
+  if (days >= 365) {
+    const years = Math.floor(days / 365);
+    const months = Math.floor((days % 365) / 30);
+    return months === 0
+      ? { key: "duration.years", values: { years: text(years) } }
+      : { key: "duration.yearsMonths", values: { years: text(years), months: text(months) } };
+  }
+  if (days >= 30) {
+    const months = Math.floor(days / 30);
+    const remainingDays = days % 30;
+    return remainingDays === 0
+      ? { key: "duration.months", values: { months: text(months) } }
+      : {
+          key: "duration.monthsDays",
+          values: { months: text(months), days: text(remainingDays) },
+        };
+  }
+  if (days > 0) {
+    return hours === 0
+      ? { key: "duration.days", values: { days: text(days) } }
+      : { key: "duration.daysHours", values: { days: text(days), hours: text(hours) } };
+  }
+  if (totalHours > 0) {
+    return {
+      key: "duration.hours",
+      values: { hours: text(totalHours), minutes: pad(minutes), seconds: pad(seconds) },
+    };
+  }
+  if (totalMinutes > 0) {
+    return {
+      key: "duration.minutes",
+      values: { minutes: text(totalMinutes), seconds: pad(seconds) },
+    };
+  }
+  return { key: "duration.seconds", values: { seconds: text(seconds) } };
+}
+
+/** 精确到秒的跨度（悬停 / 无障碍名称）；不足一天时与紧凑文案一致。 */
+export function formatAgentDurationExact(ms: number): AgentDurationLabel | null {
+  const compact = formatAgentDuration(ms);
+  if (compact === null) {
+    return null;
+  }
+  const totalSeconds = Math.floor(ms / 1000);
+  const days = Math.floor(totalSeconds / 86400);
+  if (days === 0) {
+    return compact;
+  }
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return {
+    key: "duration.exactDays",
+    values: {
+      days: String(days),
+      hours: pad(Math.floor(totalSeconds / 3600) % 24),
+      minutes: pad(Math.floor(totalSeconds / 60) % 60),
+      seconds: pad(totalSeconds % 60),
+    },
+  };
+}
+
+export type AgentTreeNode = {
+  agent: RuntimeAgentRecord;
+  /** 树内派生的层级（0 = 当前会话的直接下级）。 */
+  depth: number;
+  children: AgentTreeNode[];
+  /** 全后代数量（折叠文案用）。 */
+  descendantCount: number;
+  /** 解析出的父身份行；无（孤儿 / 顶层）为 null。 */
+  parent: RuntimeAgentRecord | null;
+};
+
+export type AgentTreeRow = {
+  agent: RuntimeAgentRecord;
+  depth: number;
+  parent: RuntimeAgentRecord | null;
+  childCount: number;
+  /** 折叠该节点会隐藏的末级后代数量。 */
+  hiddenDescendantCount: number;
+};
+
+/**
+ * 把扁平后代列表折成树。
+ *
+ * 解析顺序：`parentAgentId`（在集合内）→ `agentPath` 的最长前缀祖先（后端缺
+ * `parent_agent_id` 时仍能还原层级）。两者都解析不到的身份行**保留为顶层节点**
+ * （宁可显示成孤儿，也不丢弃），并做环检测：出现环时断开闭环那条边。
+ */
+export function buildAgentForest(descendants: RuntimeAgentRecord[]): AgentTreeNode[] {
+  const byId = new Map<string, RuntimeAgentRecord>();
+  const byPath = new Map<string, RuntimeAgentRecord>();
+  for (const agent of descendants) {
+    byId.set(agent.agentId, agent);
+    if (agent.agentPath) {
+      byPath.set(agent.agentPath, agent);
+    }
+  }
+
+  const parentOf = new Map<string, RuntimeAgentRecord | null>();
+  const resolveParent = (agent: RuntimeAgentRecord): RuntimeAgentRecord | null => {
+    if (agent.parentAgentId) {
+      const direct = byId.get(agent.parentAgentId);
+      if (direct && direct.agentId !== agent.agentId) {
+        return direct;
+      }
+    }
+    let path = agent.agentPath ?? "";
+    while (path.includes("/")) {
+      path = path.slice(0, path.lastIndexOf("/"));
+      if (!path) {
+        break;
+      }
+      const candidate = byPath.get(path);
+      if (candidate && candidate.agentId !== agent.agentId) {
+        return candidate;
+      }
+    }
+    return null;
+  };
+  const reaches = (start: RuntimeAgentRecord, target: string): boolean => {
+    const seen = new Set<string>();
+    let cursor: RuntimeAgentRecord | null | undefined = start;
+    while (cursor && !seen.has(cursor.agentId)) {
+      if (cursor.agentId === target) {
+        return true;
+      }
+      seen.add(cursor.agentId);
+      cursor = parentOf.get(cursor.agentId) ?? null;
+    }
+    return false;
+  };
+
+  for (const agent of descendants) {
+    const resolved = resolveParent(agent);
+    // 环检测：这条边若让父链绕回自己，则断开（该行退化为顶层）。
+    parentOf.set(agent.agentId, resolved && !reaches(resolved, agent.agentId) ? resolved : null);
+  }
+
+  const nodes = new Map<string, AgentTreeNode>();
+  for (const agent of descendants) {
+    nodes.set(agent.agentId, {
+      agent,
+      depth: 0,
+      children: [],
+      descendantCount: 0,
+      parent: parentOf.get(agent.agentId) ?? null,
+    });
+  }
+  const roots: AgentTreeNode[] = [];
+  for (const agent of descendants) {
+    const node = nodes.get(agent.agentId)!;
+    const parent = node.parent ? nodes.get(node.parent.agentId) : undefined;
+    if (parent) {
+      parent.children.push(node);
+    } else {
+      roots.push(node);
+    }
+  }
+
+  const order = (list: AgentTreeNode[]): AgentTreeNode[] =>
+    list.sort((a, b) => {
+      const path = (a.agent.agentPath ?? "").localeCompare(b.agent.agentPath ?? "");
+      return path !== 0 ? path : a.agent.agentId.localeCompare(b.agent.agentId);
+    });
+
+  const finalize = (node: AgentTreeNode, depth: number): number => {
+    node.depth = depth;
+    order(node.children);
+    let total = 0;
+    for (const child of node.children) {
+      total += 1 + finalize(child, depth + 1);
+    }
+    node.descendantCount = total;
+    return total;
+  };
+  order(roots);
+  for (const root of roots) {
+    finalize(root, 0);
+  }
+  return roots;
+}
+
+/** 按折叠集合摊平成可见行（前序）：被折叠节点的后代一律不产出。 */
+export function flattenAgentTree(
+  forest: AgentTreeNode[],
+  collapsedIds: ReadonlySet<string> = new Set<string>(),
+): AgentTreeRow[] {
+  const rows: AgentTreeRow[] = [];
+  const walk = (nodes: AgentTreeNode[]) => {
+    for (const node of nodes) {
+      rows.push({
+        agent: node.agent,
+        depth: node.depth,
+        parent: node.parent,
+        childCount: node.children.length,
+        hiddenDescendantCount: node.descendantCount,
+      });
+      if (!collapsedIds.has(node.agent.agentId)) {
+        walk(node.children);
+      }
+    }
+  };
+  walk(forest);
+  return rows;
+}
+
+/**
+ * 只读原因：只回答**能从数据证实**的两件事。
+ *
+ *   * `closed-record`：身份行已关闭 → 历史记录只读；
+ *   * `parent-offline`：父身份行存在且不在 `active`（含 stale / closed / unknown）
+ *     → 父会话不在线，此代理暂不可继续。
+ * 其余（one-shot 记录 / 活跃耗时）后端未上报，本函数**不猜**，返回 null。
+ */
+export type AgentReadOnlyReason = "closed-record" | "parent-offline";
+
+export function agentReadOnlyReason(
+  agent: RuntimeAgentRecord,
+  parent: RuntimeAgentRecord | null,
+): AgentReadOnlyReason | null {
+  if (agent.status === "closed") {
+    return "closed-record";
+  }
+  if (parent && parent.status !== "active") {
+    return "parent-offline";
+  }
+  return null;
+}

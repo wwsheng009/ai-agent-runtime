@@ -4,11 +4,17 @@ import { describe, expect, it } from "vitest";
 
 import {
   agentDisplayName,
+  agentDurationSpan,
   agentMetaFacts,
   agentPathSegments,
+  agentReadOnlyReason,
   agentStatusLabelKey,
+  buildAgentForest,
   canResumeAgent,
   canStopAgent,
+  flattenAgentTree,
+  formatAgentDuration,
+  formatAgentDurationExact,
   isAgentRunning,
   splitSessionAgents,
 } from "./session-agents-panel-shared";
@@ -133,5 +139,194 @@ describe("agentMetaFacts", () => {
   it("team 缺 teammate 时回退 team_id", () => {
     const facts = agentMetaFacts(agent({ agentId: "a1", teamId: "team-1" }));
     expect(facts).toEqual([{ key: "team", value: "team-1" }]);
+  });
+});
+
+describe("agentDurationSpan（记录跨度：不推算、不补零）", () => {
+  it("createdAt → updatedAt；有 closedAt 时以 closedAt 为终点", () => {
+    const updated = agentDurationSpan(
+      agent({
+        agentId: "a1",
+        createdAt: "2026-09-13T10:00:00.000Z",
+        updatedAt: "2026-09-13T10:01:30.000Z",
+      }),
+    );
+    expect(updated).toEqual({
+      ms: 90_000,
+      from: "2026-09-13T10:00:00.000Z",
+      to: "2026-09-13T10:01:30.000Z",
+    });
+
+    const closed = agentDurationSpan(
+      agent({
+        agentId: "a1",
+        createdAt: "2026-09-13T10:00:00.000Z",
+        updatedAt: "2026-09-13T12:00:00.000Z",
+        closedAt: "2026-09-13T10:30:00.000Z",
+      }),
+    );
+    expect(closed?.to).toBe("2026-09-13T10:30:00.000Z");
+    expect(closed?.ms).toBe(1_800_000);
+  });
+
+  it("端点缺失 / 无法解析 / 终点早于起点 → null", () => {
+    expect(agentDurationSpan(agent({ agentId: "a1" }))).toBeNull();
+    expect(
+      agentDurationSpan(agent({ agentId: "a1", createdAt: "not-a-date", updatedAt: "2026-09-13T10:00:00.000Z" })),
+    ).toBeNull();
+    expect(
+      agentDurationSpan(
+        agent({
+          agentId: "a1",
+          createdAt: "2026-09-13T11:00:00.000Z",
+          updatedAt: "2026-09-13T10:00:00.000Z",
+        }),
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("formatAgentDuration（秒 → 分 → 时 → 天 → 月 → 年梯度）", () => {
+  it("按量级选择档位与精度", () => {
+    expect(formatAgentDuration(0)).toEqual({
+      key: "duration.seconds",
+      values: { seconds: "0" },
+    });
+    expect(formatAgentDuration(59_400)).toEqual({
+      key: "duration.seconds",
+      values: { seconds: "59" },
+    });
+    expect(formatAgentDuration(90_000)).toEqual({
+      key: "duration.minutes",
+      values: { minutes: "1", seconds: "30" },
+    });
+    expect(formatAgentDuration(3_600_000 + 125_000)).toEqual({
+      key: "duration.hours",
+      values: { hours: "1", minutes: "02", seconds: "05" },
+    });
+    expect(formatAgentDuration(2 * 86_400_000)).toEqual({
+      key: "duration.days",
+      values: { days: "2" },
+    });
+    expect(formatAgentDuration(2 * 86_400_000 + 3 * 3_600_000)).toEqual({
+      key: "duration.daysHours",
+      values: { days: "2", hours: "3" },
+    });
+    expect(formatAgentDuration(45 * 86_400_000)).toEqual({
+      key: "duration.monthsDays",
+      values: { months: "1", days: "15" },
+    });
+    expect(formatAgentDuration(400 * 86_400_000)).toEqual({
+      key: "duration.yearsMonths",
+      values: { years: "1", months: "1" },
+    });
+  });
+
+  it("NaN / 负数 → null（不猜）", () => {
+    expect(formatAgentDuration(Number.NaN)).toBeNull();
+    expect(formatAgentDuration(Number.POSITIVE_INFINITY)).toBeNull();
+    expect(formatAgentDuration(-1)).toBeNull();
+  });
+});
+
+describe("formatAgentDurationExact", () => {
+  it("不足一天与紧凑文案一致；≥ 一天补零到秒", () => {
+    expect(formatAgentDurationExact(90_000)).toEqual({
+      key: "duration.minutes",
+      values: { minutes: "1", seconds: "30" },
+    });
+    expect(formatAgentDurationExact(86_400_000 + 3_661_000)).toEqual({
+      key: "duration.exactDays",
+      values: { days: "1", hours: "01", minutes: "01", seconds: "01" },
+    });
+  });
+});
+
+describe("buildAgentForest / flattenAgentTree", () => {
+  const rootAgent = agent({ agentId: "root", agentPath: "/root" });
+  const child = agent({ agentId: "c1", agentPath: "/root/c1", parentAgentId: "root" });
+  const grand = agent({ agentId: "g1", agentPath: "/root/c1/g1", parentAgentId: "c1" });
+
+  it("按 parentAgentId 建树并派生层级 / 后代计数", () => {
+    const forest = buildAgentForest([grand, rootAgent, child]);
+
+    expect(forest).toHaveLength(1);
+    expect(forest[0]!.agent.agentId).toBe("root");
+    expect(forest[0]!.descendantCount).toBe(2);
+    expect(forest[0]!.children[0]!.agent.agentId).toBe("c1");
+    expect(forest[0]!.children[0]!.depth).toBe(1);
+    expect(forest[0]!.children[0]!.children[0]!.depth).toBe(2);
+  });
+
+  it("parentAgentId 缺失时按 agent_path 最长前缀祖先回退", () => {
+    const orphanedGrand = { ...grand, parentAgentId: null };
+    const forest = buildAgentForest([rootAgent, child, orphanedGrand]);
+
+    expect(forest).toHaveLength(1);
+    expect(forest[0]!.children[0]!.children.map((node) => node.agent.agentId)).toEqual(["g1"]);
+  });
+
+  it("解析不到父行的身份行保留为顶层（不丢弃）", () => {
+    const detached = agent({ agentId: "x1", agentPath: "/other/x1" });
+    const forest = buildAgentForest([rootAgent, child, detached]);
+
+    expect(forest.map((node) => node.agent.agentId).sort()).toEqual(["root", "x1"]);
+  });
+
+  it("环数据断开闭环边，不递归爆栈", () => {
+    const a = agent({ agentId: "a", agentPath: "/a", parentAgentId: "b" });
+    const b = agent({ agentId: "b", agentPath: "/b", parentAgentId: "a" });
+
+    const rows = flattenAgentTree(buildAgentForest([a, b]));
+
+    expect(rows.map((row) => row.agent.agentId).sort()).toEqual(["a", "b"]);
+  });
+
+  it("折叠只隐藏该节点的后代（其余行保持可见）", () => {
+    const forest = buildAgentForest([rootAgent, child, grand]);
+    const expanded = flattenAgentTree(forest);
+    expect(expanded.map((row) => row.agent.agentId)).toEqual(["root", "c1", "g1"]);
+    expect(expanded[1]).toMatchObject({ depth: 1, childCount: 1, hiddenDescendantCount: 1 });
+
+    const collapsed = flattenAgentTree(forest, new Set(["c1"]));
+    expect(collapsed.map((row) => row.agent.agentId)).toEqual(["root", "c1"]);
+  });
+});
+
+describe("agentReadOnlyReason（只回答能证实的两种原因）", () => {
+  it("已关闭身份行 → closed-record", () => {
+    expect(agentReadOnlyReason(agent({ agentId: "a1", status: "closed" }), null)).toBe(
+      "closed-record",
+    );
+  });
+
+  it("父身份行不在 active（stale / closed / unknown）→ parent-offline", () => {
+    for (const status of ["stale", "closed", "unknown"] as const) {
+      expect(
+        agentReadOnlyReason(
+          agent({ agentId: "a1", status: "active" }),
+          agent({ agentId: "p1", status }),
+        ),
+      ).toBe("parent-offline");
+    }
+  });
+
+  it("父身份行 active 或无父行 → null（无理由不展示只读解释）", () => {
+    expect(
+      agentReadOnlyReason(
+        agent({ agentId: "a1", status: "active" }),
+        agent({ agentId: "p1", status: "active" }),
+      ),
+    ).toBeNull();
+    expect(agentReadOnlyReason(agent({ agentId: "a1", status: "active" }), null)).toBeNull();
+  });
+
+  it("自身已关闭优先于父离线", () => {
+    expect(
+      agentReadOnlyReason(
+        agent({ agentId: "a1", status: "closed" }),
+        agent({ agentId: "p1", status: "closed" }),
+      ),
+    ).toBe("closed-record");
   });
 });

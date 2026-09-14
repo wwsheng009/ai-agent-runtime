@@ -8,6 +8,8 @@
 //   * 目录触顶（后端 count > 返回行数）→ 显式提示，不假装全量；
 //   * `unknown` 状态不给停止/恢复按钮，并说明原因（不知道就别动）；
 //   * 动作失败展示后端错误原文，不做本地乐观改写（状态以响应回写为准）。
+// P2-9 子片 2：后代目录改为可折叠的**子代理树**（层级 / 只读原因 / 记录跨度
+// 见 `session-agents-tree.tsx` 与 `session-agents-panel-shared.ts`）。
 // 交互：Esc / 遮罩点击关闭，关闭后焦点回到触发按钮（use-focus-restore）。
 
 import {
@@ -25,17 +27,13 @@ import { DialogOverlay, DialogPanel } from "@/components/ui/dialog-shell";
 import { useDialogLifecycle } from "@/components/ui/use-dialog-lifecycle";
 import {
   agentDisplayName,
-  agentMetaFacts,
-  agentPathSegments,
   agentStatusLabelKey,
   agentStatusToneClass,
-  canResumeAgent,
-  canStopAgent,
   splitSessionAgents,
 } from "@/components/workspace/session-agents-panel-shared";
+import { SessionAgentsTree } from "@/components/workspace/session-agents-tree";
 import { useFocusRestore } from "@/hooks/workspace/use-focus-restore";
 import type { UseSessionAgentsResult } from "@/hooks/use-session-agents";
-import type { RuntimeAgentRecord } from "@/types/runtime";
 import { cn } from "@/lib/utils";
 
 export type SessionAgentsPanelProps = {
@@ -182,7 +180,7 @@ export function SessionAgentsPanel({ agents, onClose, open }: SessionAgentsPanel
                 <div className="app-text-11 uppercase tracking-[0.16em] text-muted-foreground">
                   {t("panels.agents.lineageTitle")}
                 </div>
-                <ol className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1.5">
+                <ol className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-2">
                   {tree.lineage.map((agent, index) => (
                     <li className="flex items-center gap-2" key={agent.agentId}>
                       {index > 0 ? (
@@ -253,12 +251,19 @@ export function SessionAgentsPanel({ agents, onClose, open }: SessionAgentsPanel
                     </p>
                   </div>
                 ) : (
-                  <div className="mt-2 space-y-3">
-                    <AgentGroup
+                  <>
+                    <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 app-text-10 text-muted-foreground">
+                      <span data-testid="agents-count-running">
+                        {t("panels.agents.running", { count: running.length })}
+                      </span>
+                      <span data-testid="agents-count-settled">
+                        {t("panels.agents.settled", { count: settled.length })}
+                      </span>
+                    </div>
+                    <SessionAgentsTree
                       actionError={actionError}
                       actionErrorAgentId={actionErrorAgentId}
-                      agents={running}
-                      groupLabel={t("panels.agents.running", { count: running.length })}
+                      agents={tree.descendants}
                       onClose={(agentId) => {
                         void closeAgent(agentId);
                       }}
@@ -266,23 +271,8 @@ export function SessionAgentsPanel({ agents, onClose, open }: SessionAgentsPanel
                         void resumeAgent(agentId);
                       }}
                       pendingAgentId={pendingAgentId}
-                      testId="agents-running"
                     />
-                    <AgentGroup
-                      actionError={actionError}
-                      actionErrorAgentId={actionErrorAgentId}
-                      agents={settled}
-                      groupLabel={t("panels.agents.settled", { count: settled.length })}
-                      onClose={(agentId) => {
-                        void closeAgent(agentId);
-                      }}
-                      onResume={(agentId) => {
-                        void resumeAgent(agentId);
-                      }}
-                      pendingAgentId={pendingAgentId}
-                      testId="agents-settled"
-                    />
-                  </div>
+                  </>
                 )}
               </section>
             </>
@@ -291,147 +281,5 @@ export function SessionAgentsPanel({ agents, onClose, open }: SessionAgentsPanel
       </DialogPanel>
     </DialogOverlay>,
     document.body,
-  );
-}
-
-type GroupCallbacks = {
-  actionError: unknown;
-  actionErrorAgentId: string | null;
-  onClose: (agentId: string) => void;
-  onResume: (agentId: string) => void;
-  pendingAgentId: string | null;
-};
-
-function AgentGroup({
-  agents,
-  actionError,
-  actionErrorAgentId,
-  groupLabel,
-  onClose,
-  onResume,
-  pendingAgentId,
-  testId,
-}: GroupCallbacks & {
-  agents: RuntimeAgentRecord[];
-  groupLabel: string;
-  testId: string;
-}) {
-  const { t } = useTranslation("workspace");
-
-  if (agents.length === 0) {
-    return null;
-  }
-
-  return (
-    <div data-testid={testId}>
-      <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
-        {groupLabel}
-      </div>
-      <ul className="mt-1.5 space-y-1.5">
-        {agents.map((agent) => {
-          const pending = pendingAgentId === agent.agentId;
-          const failed = actionErrorAgentId === agent.agentId && actionError !== null;
-          const facts = agentMetaFacts(agent);
-          const segments = agentPathSegments(agent.agentPath);
-          return (
-            <li
-              key={agent.agentId}
-              className="rounded-card border border-border bg-surface-softer px-2.5 py-2"
-              data-agent-id={agent.agentId}
-              data-status={agent.status}
-              data-testid="agent-row"
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                    <span className="app-text-13 font-medium text-foreground">
-                      {agentDisplayName(agent)}
-                    </span>
-                    <Badge
-                      className={cn(
-                        "h-5 px-1.5 text-[10px]",
-                        agentStatusToneClass(agent.status),
-                      )}
-                    >
-                      {t(agentStatusLabelKey(agent.status), { defaultValue: agent.status })}
-                    </Badge>
-                    {agent.agentType ? (
-                      <span className="app-text-10 text-muted-foreground">
-                        {agent.agentType}
-                      </span>
-                    ) : null}
-                  </div>
-                  <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 app-text-10 text-muted-foreground">
-                    {segments.length > 0 ? (
-                      <span className="truncate" title={agent.agentPath ?? ""}>
-                        {segments.join(" / ")}
-                      </span>
-                    ) : (
-                      <span title={agent.agentId}>{agent.agentId}</span>
-                    )}
-                    {facts.map((fact) => (
-                      <span key={fact.key}>
-                        {t(`panels.agents.meta.${fact.key}`, { value: fact.value })}
-                      </span>
-                    ))}
-                    {agent.updatedAt ? (
-                      <span>
-                        {t("panels.agents.updatedAt", { time: agent.updatedAt })}
-                      </span>
-                    ) : null}
-                  </div>
-                </div>
-                {canStopAgent(agent.status) ? (
-                  <Button
-                    aria-label={t("panels.agents.stopLabel", {
-                      name: agentDisplayName(agent),
-                    })}
-                    className="shrink-0"
-                    disabled={pending}
-                    onClick={() => onClose(agent.agentId)}
-                    size="sm"
-                    variant="ghost"
-                  >
-                    {pending ? t("panels.agents.stopping") : t("panels.agents.stop")}
-                  </Button>
-                ) : null}
-                {canResumeAgent(agent.status) ? (
-                  <Button
-                    aria-label={t("panels.agents.resumeLabel", {
-                      name: agentDisplayName(agent),
-                    })}
-                    className="shrink-0"
-                    disabled={pending}
-                    onClick={() => onResume(agent.agentId)}
-                    size="sm"
-                    variant="ghost"
-                  >
-                    {pending ? t("panels.agents.resuming") : t("panels.agents.resume")}
-                  </Button>
-                ) : null}
-                {!canStopAgent(agent.status) && !canResumeAgent(agent.status) ? (
-                  <span
-                    className="shrink-0 app-text-10 text-muted-foreground"
-                    data-testid="agent-no-action"
-                  >
-                    {t("panels.agents.unknownAction")}
-                  </span>
-                ) : null}
-              </div>
-              {failed ? (
-                <div
-                  className="mt-1.5 break-words app-text-11 text-analytics-danger"
-                  data-testid="agent-action-error"
-                >
-                  {t("panels.agents.actionErrorTitle")}
-                  {" · "}
-                  {errorText(actionError)}
-                </div>
-              ) : null}
-            </li>
-          );
-        })}
-      </ul>
-    </div>
   );
 }
