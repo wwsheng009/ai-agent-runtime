@@ -127,7 +127,69 @@ describe("MessageList", () => {
     expect(markup).toContain("回溯导航已激活");
     expect(markup).toContain('aria-current="true"');
     expect(markup).toContain('data-backtrack-selected="true"');
-    expect(markup).toContain(" · selected");
+    // A3：元数据不上屏（§5.2），选中态改由 sr-only 标记 + aria-current 表达。
+    expect(markup).toContain("已选中这条用户轮次");
+  });
+
+  it("renders history tool receipts as tool rows instead of context injection", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "tool-1",
+        role: "assistant",
+        author: "Tool receipt",
+        label: "tool",
+        segments: [
+          {
+            type: "tool",
+            toolCallId: "call-1",
+            name: "read_file",
+            status: "finished",
+            resultSummary: "42 行",
+            details: { filePath: "frontend/src/app.tsx" },
+          },
+        ],
+      },
+    ];
+
+    const markup = renderToStaticMarkup(
+      <MessageList
+        artifacts={[]}
+        isResponding={false}
+        messages={messages}
+        onSelectArtifact={() => {}}
+      />,
+    );
+
+    // 标题是工具名而不是「上下文注入」，摘要带出具体路径（§5.5 / §8.5）。
+    expect(markup).toContain("read_file");
+    expect(markup).toContain("frontend/src/app.tsx");
+    expect(markup).toContain('data-tool-row-status="finished"');
+    expect(markup).toContain('data-chat-flow-kind="tool-call"');
+    expect(markup).not.toContain("上下文注入");
+  });
+
+  it("falls back to the context row for legacy tool receipts without tool segments", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "tool-legacy",
+        role: "assistant",
+        author: "Tool receipt",
+        label: "tool",
+        segments: [{ type: "text", content: "# AGENTS.md\n项目约定…" }],
+      },
+    ];
+
+    const markup = renderToStaticMarkup(
+      <MessageList
+        artifacts={[]}
+        isResponding={false}
+        messages={messages}
+        onSelectArtifact={() => {}}
+      />,
+    );
+
+    expect(markup).toContain("上下文注入");
+    expect(markup).not.toContain("read_file");
   });
 
   it("announces rich-segment and related-artifact fallbacks as status updates", () => {

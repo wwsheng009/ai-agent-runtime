@@ -17,6 +17,9 @@ export const zhWorkspacePanelsMessages = {
     editPromptPlaceholder: "编辑这条用户提示词，然后继续回溯…",
     cancel: "取消",
     continue: "继续回溯",
+    copy: "复制",
+    copyAriaLabel: "复制这条用户消息",
+    selected: "已选中这条用户轮次",
     editHint:
       "内联编辑会作为回溯对话框的初始内容。在那里确认后即可截断后续轮次并预填输入框。",
   },
@@ -37,11 +40,26 @@ export const zhWorkspacePanelsMessages = {
     collapse: "折叠系统提示词",
   },
   contextRow: {
+    title: "上下文注入",
     expand: "展开上下文",
     collapse: "折叠上下文",
   },
+  toolReceipt: {
+    title: "工具调用",
+  },
   turnUsage: {
     summary: "Token 用量：输入 {{prompt}} · 输出 {{completion}} · 合计 {{total}}",
+  },
+  turnTail: {
+    copy: "复制",
+    copyAriaLabel: "复制这条回复",
+    copied: "已复制",
+    retryAriaLabel: "重试这一回合",
+    statsLabel: "回合统计",
+  },
+  flowFallback: {
+    title: "未知事件类型",
+    hint: "已保留原始载荷，只读展示。",
   },
   segmentFallback: {
     loading: "正在加载 {{label}}…",
@@ -56,6 +74,9 @@ export const zhWorkspacePanelsMessages = {
   reasoningRow: {
     title: "推理过程",
     trimmed: "已截断 {{chars}} 个前导字符",
+    empty: "等待推理输出…",
+    expandLabel: "展开推理过程",
+    collapseLabel: "折叠推理过程",
   },
   toolRow: {
     inputLabel: "输入",
@@ -67,8 +88,8 @@ export const zhWorkspacePanelsMessages = {
       failed: "失败",
     },
     announcement: "工具 {{name}} 状态：{{status}}",
-    expandLabel: "展开工具输入",
-    collapseLabel: "折叠工具输入",
+    expandLabel: "展开工具详情",
+    collapseLabel: "折叠工具详情",
     exitCode: "退出码 {{code}}",
     diffAdditions: "+{{value}}",
     diffRemovals: "−{{value}}",

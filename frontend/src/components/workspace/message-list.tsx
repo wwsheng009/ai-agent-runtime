@@ -8,12 +8,19 @@ import { ConnectionStatusBadge } from "@/components/ui/connection-status-badge";
 import { type Artifact } from "@/data/mock";
 import { useConnectionStatusLabels } from "@/hooks/workspace/use-connection-status-labels";
 import { useConversationScroll } from "@/hooks/workspace/use-conversation-scroll";
+import {
+  isContextMessage,
+  isSystemPromptMessage,
+  isToolReceiptMessage,
+} from "@/lib/chat-view";
 import { isArtifactEvidence } from "@/lib/workspace-artifacts";
 import { cn } from "@/lib/utils";
 import { type ChatStreamPhase } from "@/types/runtime";
 
 import { AssistantMessageCard } from "./message-list/assistant-message-card";
 import { HistoryContextMessageCard } from "./message-list/history-context-message-card";
+import { HistoryToolMessageRow } from "./message-list/history-tool-message-row";
+import { NoticeRow } from "./message-list/notice-row";
 import type { MessageListProps } from "./message-list/types";
 import { UserMessageBubble } from "./message-list/user-message-bubble";
 
@@ -123,39 +130,37 @@ export function MessageList({
         aria-label={logLabel}
         aria-live="polite"
         aria-relevant="additions text"
-        className={cn("mx-auto flex max-w-[52rem] flex-col gap-6", contentClassName)}
+        className={cn(
+          // 批次 A1/F2：列宽走宽度轴（W = clamp(680px, 列宽×64%, 920px)），不再写死 52rem。
+          "mx-auto flex w-full max-w-[var(--app-chat-content-width)] flex-col gap-4",
+          contentClassName,
+        )}
         role="log"
       >
         {messages.length === 0 ? (
-          <div className="rounded-panel-lg border border-dashed border-border bg-surface-softer px-4 py-8 text-center">
-            <div className="mx-auto inline-flex size-10 items-center justify-center rounded-card border border-accent-teal/18 bg-accent-teal/10 text-accent-teal">
-              <ScrollTextIcon size={18} />
-            </div>
-            <div className="mt-3 text-sm font-semibold text-foreground">
+          <div className="flex flex-col items-center gap-2 py-8 text-center">
+            <ScrollTextIcon aria-hidden="true" className="text-accent-teal" size={18} />
+            <div className="text-sm font-semibold text-foreground">
               {t("panels.messages.messageList.emptyTitle")}
             </div>
-            <p className="mt-2 text-sm leading-6 text-muted-foreground">
+            <p className="max-w-[32rem] text-sm leading-6 text-muted-foreground">
               {t("panels.messages.messageList.emptyHint")}
             </p>
           </div>
         ) : null}
 
         {backtrackNavigationActive ? (
-          <div className="rounded-card-lg border border-accent-gold/20 bg-accent-gold/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
+          <NoticeRow tone="warn">
             {t("panels.messages.messageList.backtrackNavHint")}
-          </div>
+          </NoticeRow>
         ) : null}
 
         {backtrackError ? (
-          <div className="rounded-card-lg border border-accent-orange/18 bg-accent-orange/8 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
-            {backtrackError}
-          </div>
+          <NoticeRow tone="error">{backtrackError}</NoticeRow>
         ) : null}
 
         {backtrackNotice ? (
-          <div className="rounded-card-lg border border-accent-teal/18 bg-accent-teal/10 px-3.5 py-3 text-sm leading-6 text-muted-foreground">
-            {backtrackNotice}
-          </div>
+          <NoticeRow>{backtrackNotice}</NoticeRow>
         ) : null}
 
         {messages.map((message, messageIndex) => {
@@ -164,11 +169,10 @@ export function MessageList({
             .filter((artifact): artifact is Artifact => artifact !== undefined)
             .filter((artifact) => isArtifactEvidence(artifact));
           const isUser = message.role === "user";
+          // E1：消息分类以 `lib/chat-view` 的 flow 判据为准（单一事实源），
+          // 渲染层不重复维护 label/author 的组合条件（§8.4 规则 2/3）。
           const isHistoryContextMessage =
-            message.label === "system" ||
-            message.label === "tool" ||
-            message.author === "System context" ||
-            message.author === "Tool receipt";
+            isSystemPromptMessage(message) || isContextMessage(message);
           const labelId = `${message.id}-label`;
           const metaId = `${message.id}-meta`;
           const statusId = `${message.id}-status`;
@@ -219,6 +223,17 @@ export function MessageList({
                   setInlineEditDraft={setInlineEditDraft}
                   showBacktrack={showBacktrack}
                   statusId={statusId}
+                />
+              ) : isToolReceiptMessage(message) ? (
+                <HistoryToolMessageRow
+                  labelId={labelId}
+                  message={message}
+                  metaId={metaId}
+                  onPreviewFilePath={onPreviewFilePath}
+                  onSelectArtifact={onSelectArtifact}
+                  relatedEvidence={relatedEvidence}
+                  statusId={statusId}
+                  streamingMessageId={streamingMessageId}
                 />
               ) : isHistoryContextMessage ? (
                 <HistoryContextMessageCard

@@ -159,6 +159,36 @@ export async function seedRuntimeEvents(
 }
 
 /**
+ * 等 mock 把 assistant 回复落进会话历史（与后端同口径：turn 收尾的 `done` 帧才写库）。
+ *
+ * 正文 chunk 先于 `done` 到达：对着「刚看到正文」就 `reload()` 的用例，刷新可能落在
+ * 落库窗口内，恢复出的历史只有用户消息（P3-1 曾因此抖动）。用例应在刷新前显式等待。
+ */
+export async function waitForAssistantHistory(
+  request: APIRequestContext,
+  sessionId: string,
+  text: string,
+): Promise<void> {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const response = await request.get(
+      `/api/runtime/sessions/${encodeURIComponent(sessionId)}/history`,
+    );
+    if (response.ok()) {
+      const body = (await response.json()) as {
+        history?: Array<{ role?: string; content?: string }>;
+      };
+      const recorded = (body.history ?? []).some(
+        (entry) => entry.role === "assistant" && (entry.content ?? "").includes(text),
+      );
+      if (recorded) return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`timed out waiting for assistant history to include: ${text}`);
+}
+
+/**
  * seed 后台任务（P2-1A）：jobs 数组按后端 `background.Job` 的序列化字段名
  * （`ID` / `Status` / `Command` / `StartedAt` / `FinishedAt` / `ExitCode`，可选 `Output`）
  * 提供；mock 按会话保存，列表端点按 `session_id` 过滤。
@@ -173,6 +203,26 @@ export async function seedJobs(
   });
   if (!response.ok()) {
     throw new Error(`seedJobs failed: ${response.status()} ${await response.text()}`);
+  }
+}
+
+/**
+ * seed 会话历史（`GET /api/runtime/sessions/:id/history` 的数据源）。
+ *
+ * 条目按后端 `types.Message` 的 JSON 形态提供（`role` / `content` /
+ * `tool_call_id` / `tool_calls` / `metadata`）；工具回执条目（`role: "tool"`）
+ * 只有配上对应的 `tool_calls` 才能还原出具体工具名与入参，因此用例需成对注入。
+ */
+export async function seedSessionHistory(
+  request: APIRequestContext,
+  sessionId: string,
+  history: Array<Record<string, unknown>>,
+): Promise<void> {
+  const response = await request.post("/api/_test/history", {
+    data: { session_id: sessionId, history },
+  });
+  if (!response.ok()) {
+    throw new Error(`seedSessionHistory failed: ${response.status()} ${await response.text()}`);
   }
 }
 

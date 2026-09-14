@@ -5,7 +5,6 @@ import { lazy } from "react";
 import { useTranslation } from "react-i18next";
 
 import { MessageMarkdown } from "@/components/workspace/message-markdown";
-import { useTypewriter } from "@/hooks/workspace/use-typewriter";
 import { type MessageSegment } from "@/data/mock";
 
 export const MessageRichSegment = lazy(() =>
@@ -28,13 +27,12 @@ export function StreamingMarkdown({
   interrupted?: boolean;
   streaming?: boolean;
 }) {
-  const typedContent = useTypewriter(content, streaming === true);
+  // 打字机已移除（方案 §8.6 / 批次 D3）：`useTypewriter` 返回的是
+  // `content.slice(0, shown)`，滞后帧会让 MessageMarkdown 的冻结前缀比对
+  // （stableContent.startsWith(上一帧)）判成「内容被改写」→ generation++ →
+  // 已冻结块 remount 重解析。这里直连，内容按到达节奏渲染。
   return (
-    <MessageMarkdown
-      content={typedContent}
-      interrupted={interrupted}
-      streaming={streaming}
-    />
+    <MessageMarkdown content={content} interrupted={interrupted} streaming={streaming} />
   );
 }
 

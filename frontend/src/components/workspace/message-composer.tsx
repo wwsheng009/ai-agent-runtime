@@ -238,7 +238,7 @@ export function MessageComposer({
   }
 
   return (
-    <div className="relative rounded-panel-lg border border-border [background:var(--workspace-composer-bg)] shadow-[0_8px_24px_rgba(0,0,0,0.18)]">
+    <div className="relative rounded-panel-lg border border-border [background:var(--workspace-composer-bg)] shadow-[var(--shadow-lv1)]">
       <ComposerStatusRow
         hasCommandNotice={menu.notice !== null}
         isCommandLine={menu.commandLine}
@@ -268,7 +268,7 @@ export function MessageComposer({
           <div
             role="alert"
             data-composer-command-notice={menu.notice.kind}
-            className="flex items-start justify-between gap-2 px-3 pt-2 app-text-10 text-[#d8a66d]"
+            className="flex items-start justify-between gap-2 px-3 pt-2 app-text-10 text-accent-gold"
           >
             <span>{commandNoticeText}</span>
             <button
@@ -427,14 +427,14 @@ export function MessageComposer({
             ) : null}
             {runtimeModelsError ? (
               <>
-                <span className="size-1 shrink-0 rounded-full bg-[#d8a66d]/40" />
-                <span className="truncate text-[#d8a66d]">{runtimeModelsError}</span>
+                <span className="size-1 shrink-0 rounded-full bg-accent-gold/40" />
+                <span className="truncate text-accent-gold">{runtimeModelsError}</span>
               </>
             ) : null}
             {reasoningEffortError ? (
               <>
-                <span className="size-1 shrink-0 rounded-full bg-[#d8a66d]/40" />
-                <span className="truncate text-[#d8a66d]">
+                <span className="size-1 shrink-0 rounded-full bg-accent-gold/40" />
+                <span className="truncate text-accent-gold">
                   {reasoningEffortError}
                 </span>
               </>

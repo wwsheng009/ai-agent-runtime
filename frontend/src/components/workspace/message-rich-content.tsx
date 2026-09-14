@@ -67,7 +67,7 @@ export function MessageRichSegment({
         className={cn(
           "mt-2 overflow-hidden rounded-card-lg border p-3",
           isFailed
-            ? "border-accent-gold/16 bg-[linear-gradient(180deg,rgba(240,199,123,0.08),rgba(240,199,123,0.03))]"
+            ? "border-accent-gold/16 bg-accent-gold/8"
             : "border-border bg-surface-softer",
         )}
         role="status"
@@ -114,7 +114,7 @@ export function MessageRichSegment({
               </div>
             ) : (
               <div className="mt-2.5 h-2 overflow-hidden rounded-full bg-surface-soft">
-                <div className="h-full w-1/3 animate-pulse rounded-full bg-[linear-gradient(90deg,rgba(143,208,198,0.15),rgba(240,199,123,0.35),rgba(143,208,198,0.15))]" />
+                <div className="h-full w-1/3 animate-pulse rounded-full [background-image:var(--media-shimmer-gradient)]" />
               </div>
             )}
             {segment.errorMessage ? (
@@ -241,14 +241,14 @@ export function MessageRichSegment({
     segment.tone === "warning"
       ? {
           wrapper:
-            "border-accent-gold/16 bg-[linear-gradient(180deg,rgba(240,199,123,0.08),rgba(240,199,123,0.03))]",
+            "border-accent-gold/16 bg-accent-gold/8",
           iconClass: "border-accent-gold/24 bg-accent-gold/12 text-accent-gold",
           Icon: TriangleAlertIcon,
         }
       : segment.tone === "success"
         ? {
             wrapper:
-              "border-accent-teal/16 bg-[linear-gradient(180deg,rgba(143,208,198,0.08),rgba(143,208,198,0.03))]",
+              "border-accent-teal/16 bg-accent-teal/8",
             iconClass: "border-accent-teal/24 bg-accent-teal/12 text-accent-teal",
             Icon: CheckIcon,
           }

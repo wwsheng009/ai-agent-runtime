@@ -37,6 +37,45 @@ describe("MessageMarkdown", () => {
     expect(markup).toContain('target="_blank"');
   });
 
+  it("calibrates inline code to the reference chip: 0 5px padding, no border", () => {
+    const markup = renderToStaticMarkup(
+      <MessageMarkdown content={"Run `pnpm test` before pushing."} />,
+    );
+    const codeClassName = /<code class="([^"]*)"/.exec(markup)?.[1] ?? "";
+    const tokens = codeClassName.split(/\s+/).filter(Boolean);
+
+    // 批次 D2：字号/行高由 `.app-md-inline-code` 走码字轴 token 派生（14/22）。
+    expect(tokens).toContain("app-md-inline-code");
+    // 参考站 MarkdownText.module.css:161-172：padding 0 5px、radius 6px、无边框。
+    expect(tokens).toContain("px-[5px]");
+    expect(tokens).toContain("rounded-[6px]");
+    expect(
+      tokens.filter((token) => token === "border" || token.startsWith("border-")),
+    ).toEqual([]);
+    expect(tokens.filter((token) => /^(py-|p-|pt-|pb-)/.test(token))).toEqual([]);
+    // 字号/行高不得内联在组件里（必须由 base.css 的码字轴 token 派生）。
+    expect(tokens.filter((token) => /^(text-\[|leading-)/.test(token))).toEqual([]);
+  });
+
+  it("keeps the code block body and banner on distinct surface tokens", () => {
+    const markup = renderToStaticMarkup(
+      <MessageMarkdown
+        content={["```ts", "const answer = 42;", "```"].join("\n")}
+      />,
+    );
+    const surfaceClassName =
+      /class="([^"]*app-code-surface[^"]*)"/.exec(markup)?.[1] ?? "";
+    const bannerClassName =
+      /class="([^"]*bg-code-block-header-bg[^"]*)"/.exec(markup)?.[1] ?? "";
+
+    // 批次 D2：代码块 13/22（行高走 `.app-chat-copy .app-code-surface pre` 的码字轴
+    // 22px token），底/条分色沿用语义 token（参考站 #1b1b1c / #2c2c2e）。
+    expect(surfaceClassName).toContain("bg-code-block-bg");
+    expect(surfaceClassName).not.toContain("bg-code-block-header-bg");
+    expect(bannerClassName).toContain("bg-code-block-header-bg");
+    expect(bannerClassName).not.toContain("bg-code-block-bg");
+  });
+
   it("keeps unfinished fenced blocks renderable while streaming", () => {
     const markup = renderToStaticMarkup(
       <MessageMarkdown

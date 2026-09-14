@@ -137,6 +137,68 @@ textarea::placeholder {
     line-height: var(--app-chat-line-height);
   }
 
+  /* 过程行共享排版（§8.2 / §8.5）：次级字号轴 + 行高盒 24 + delta。
+     行控件只负责结构（图标/标题/摘要），字号与行高一律由 token 派生。 */
+  .app-chat-process-row {
+    min-height: var(--app-chat-process-row-height);
+    font-size: var(--app-chat-font-size-secondary);
+    line-height: var(--app-chat-line-height-secondary);
+  }
+
+  /* 用户气泡（§8.5 user/steering / §13 C4）：字号走内容轴，行高 = 22px + delta。 */
+  .app-chat-bubble {
+    font-size: var(--app-chat-font-size);
+    line-height: var(--app-chat-bubble-line-height);
+  }
+
+  /* 过程行分隔点（§8.5）：标题与摘要之间的 2px 圆点，颜色随 currentColor。 */
+  .chat-row-sep {
+    display: inline-block;
+    flex: none;
+    width: 0.125rem;
+    height: 0.125rem;
+    margin-inline: 0.5rem;
+    border-radius: 1px;
+    background: currentcolor;
+    opacity: 0.5;
+  }
+
+  /* 回合统计折叠行（§8.5 turn-process / §13 C2）：24px 文本 + 8px 下内距 = 33px。
+     底边 0.5px 取自参考站源码（§13 C3）：其全仓有 17 处 0.5px，dpr=1 下解析并绘制为
+     1px，因此本仓整体取 1px 等价；本类是全仓唯一的 0.5px 例外点（dpr≥2 时更细）。 */
+  .app-chat-turn-process {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 0.5px solid var(--border);
+    font-size: var(--app-chat-font-size-secondary);
+    line-height: var(--app-chat-line-height-secondary);
+  }
+
+  /* 收起态（过程行不渲染）下，答案行间距收 8px（§13 C2）。 */
+  .app-chat-turn-process[data-state="closed"] {
+    margin-bottom: 0.5rem;
+  }
+
+  /* 悬停显现（§8.5 用户动作区 / turn-tail 统计）：宿主 .group 悬停或内部获得键盘
+     焦点时显现；无悬停能力的设备（触屏）常显，避免动作不可达（§11 风险）。 */
+  .app-hover-reveal {
+    opacity: 0;
+    transition: opacity 160ms ease;
+  }
+
+  .group:hover .app-hover-reveal,
+  .group:focus-within .app-hover-reveal {
+    opacity: 1;
+  }
+
+  @media (hover: none) {
+    .app-hover-reveal {
+      opacity: 1;
+    }
+  }
+
   .app-chat-copy span[data-streaming-active="true"] {
     border-radius: 0.45rem;
     background: var(--streaming-active-inline-bg);
@@ -431,5 +493,57 @@ textarea::placeholder {
   .ide-toolbar {
     border: 1px solid var(--border);
     background: var(--surface-solid);
+  }
+}
+
+/* ================= 批次 D2：Markdown 码字排版标定 =================
+   参考站源码口径（E:\projects\ai\deepseek-harness\packages\client）：
+   - 行内 code：运行时令牌 `--dsw-font-markdown-code: 14px/22px`；聊天区
+     实测计算样式（frontend/.tmp/style-report-ref.md:49）为
+     `display=inline-flex | 14px/22px | bg rgb(44,44,46) | padding=0 5px |
+      radius=6px | border=0px none`；`ui-primitives/src/markdown/
+      MarkdownText.module.css:161-172` 同口径（`padding: 0 5px`、
+      `border-radius: 6px`），其声明的 hairline 在聊天区未生效；本仓按
+     方案 §5.4 / §9 D2 / §11 验收取「无边框」。
+   - 代码块：`--dsw-font-markdown-code-block: 13px/22px`；
+     `ui-primitives/src/markdown/CodeBlock.module.css:5,10-11` 给出底/条分色
+     （`--dsw-alias-markdown-code-block` #1b1b1c 与 `-banner` #2c2c2e）。
+   本仓两处字号/行高一律由码字轴派生：行内 = 码字轴基准 + 1px（14px），
+   代码块 = 码字轴基准（13px），行高统一走 22px 基准。 */
+:root {
+  --app-code-font-size-inline: calc(var(--app-code-font-size) + 1px);
+  --app-code-line-height-markdown: 22px;
+}
+
+@layer base {
+  /* 行内 code chip（批次 D2）：尺寸走码字轴 token，无边框。 */
+  .app-md-inline-code {
+    display: inline-flex;
+    align-items: center;
+    box-sizing: border-box;
+    border: 0;
+    font-family: var(--font-mono);
+    font-size: var(--app-code-font-size-inline);
+    line-height: var(--app-code-line-height-markdown);
+  }
+
+  /* 标题内的行内 code 继承标题字号（参考站 `MarkdownText.module.css:174-177`）。 */
+  .app-chat-copy :where(h1, h2, h3, h4, h5, h6) .app-md-inline-code {
+    font-size: inherit;
+    line-height: inherit;
+  }
+
+  /* 代码块行高 = 码字轴 22px 基准（参考站 13/22）。既有 `.app-code-surface pre`
+     声明带 !important，这里以更高特异性覆盖聊天正文内的代码块；行与行号同步，
+     避免行号仍按 1.55 比例下坠。 */
+  .app-chat-copy .app-code-surface pre,
+  .app-chat-copy pre.app-code-surface {
+    font-size: var(--app-code-font-size) !important;
+    line-height: var(--app-code-line-height-markdown) !important;
+  }
+
+  .app-chat-copy .app-code-surface .app-code-line,
+  .app-chat-copy .app-code-surface .app-code-line-number {
+    line-height: var(--app-code-line-height-markdown);
   }
 }

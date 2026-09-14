@@ -35,7 +35,7 @@ export function ToolRowSummaryView({
   return (
     <span
       className={cn(
-        "flex min-w-0 items-center gap-1.5 overflow-hidden app-text-11",
+        "flex min-w-0 items-center gap-1.5 overflow-hidden",
         tone === "danger" ? "text-accent-gold" : "text-muted-foreground",
       )}
       data-tool-row-summary="true"

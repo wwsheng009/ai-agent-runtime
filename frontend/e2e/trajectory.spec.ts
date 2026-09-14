@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 
 import { expect, test } from "./fixtures";
-import { resetMockState, seedRuntimeEvents } from "./support";
+import { resetMockState, seedRuntimeEvents, waitForAssistantHistory } from "./support";
 
 // Phase 2 acceptance coverage for the trajectory view:
 // - P2-1: events appear row by row during/after streaming; filters apply;
@@ -144,6 +144,13 @@ test("P3-1: trajectory recovers from EventStore after page reload", async ({
   await expect(page.getByText("Paris is the capital of France.").first()).toBeVisible({
     timeout: 20_000,
   });
+  // mock（与后端同口径）在 turn 收尾的 `done` 帧才把 assistant 落库，正文 chunk 先到；
+  // 若此刻刷新，恢复出的历史只有用户消息 → 先显式等落库，去掉恢复断言的竞态。
+  await waitForAssistantHistory(
+    page.request,
+    "e2e-session-1",
+    "Paris is the capital of France.",
+  );
 
   // Q4：注入一条 runtime 生命周期事件（approval_requested）进入 EventStore，
   // 验证恢复路径把它映射为轨迹 system 行（与 chat.sse.* 共用 seq 序列）。

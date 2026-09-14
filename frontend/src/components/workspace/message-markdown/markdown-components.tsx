@@ -8,8 +8,13 @@ import { CodeBlock } from "@/components/ui/code-block";
 const LINK_CLASS_NAME =
   "font-medium text-accent-secondary underline decoration-accent-secondary/35 underline-offset-4 transition hover:text-foreground hover:decoration-accent-secondary";
 
+// 行内 code（方案 §5.4 / 批次 D2）：参考站源码 `ui-primitives/src/markdown/
+// MarkdownText.module.css:161-172`（`padding: 0 5px`、`border-radius: 6px`、
+// 无边框）+ 运行时令牌 `--dsw-font-markdown-code: 14px/22px`。
+// 字号/行高一律由 `.app-md-inline-code` 走码字轴 token 派生（见 base.css 批次 D2 段）；
+// 底色取代码块标题条色（参考站行内 code 底色 = `--dsw-alias-markdown-code-block-banner`）。
 const INLINE_CODE_CLASS_NAME =
-  "app-inline-mono rounded-md border border-border bg-surface-solid px-1.5 py-0.5 text-[0.95em] text-foreground";
+  "app-md-inline-code rounded-[6px] bg-[var(--code-block-header-bg)] px-[5px] text-foreground";
 
 // 图片与占位样式：占位尽量贴近 <img> 的卡片观感，避免流式/被拦截时布局跳动。
 const IMAGE_CLASS_NAME =

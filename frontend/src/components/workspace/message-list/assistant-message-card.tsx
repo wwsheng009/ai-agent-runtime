@@ -1,19 +1,23 @@
-// 由 components/workspace/message-list.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
+// 批次 A2/C3/F3（§8.3/§8.4/§8.5）：助手回合 = 无外壳的扁平行序列。
+// - A2：删除卡片外壳（圆角 / 边框 / 渐变 / 投影）、头像 chip、作者行、竖直渐变线；
+// - F3：回合折叠由 turn-process 统计行承担，收起态过程行不渲染；
+// - C3：卡内 token 用量文本行删除，改由 turn-tail 行承担（默认 hover 显现）。
+// 行序列来自 E1 的扁平 flow 投影（`projectMessageFlow`），每行是同级兄弟。
 
-import { BotIcon } from "lucide-react";
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { Badge } from "@/components/ui/badge";
-import { type Artifact, type ChatMessage } from "@/data/mock";
-import { projectChatView } from "@/lib/chat-view";
+import { projectChatView, projectMessageFlow } from "@/lib/chat-view";
 import { createArtifactFilePathLinkResolver } from "@/lib/tool-row/artifact-links";
+import { type Artifact, type ChatMessage } from "@/data/mock";
 
-import { ProcessCollapseRow } from "./process-collapse-row";
+import { FlowFallbackRow } from "./flow-fallback-row";
 import {
   renderMessageSegment,
   renderRelatedArtifactSection,
 } from "./segment-rendering";
+import { TurnProcessRow } from "./turn-process-row";
+import { TurnTailRow } from "./turn-tail-row";
 
 type AssistantMessageCardProps = {
   labelId: string;
@@ -21,6 +25,8 @@ type AssistantMessageCardProps = {
   metaId: string;
   /** P2-1A：关联产物未命中时的运行时文件预览兜底。 */
   onPreviewFilePath?: (path: string) => void;
+  /** 回合级重试入口（宿主提供才渲染）。 */
+  onRetry?: () => void;
   onSelectArtifact: (artifactId: string) => void;
   relatedEvidence: Artifact[];
   statusId: string;
@@ -32,6 +38,7 @@ export function AssistantMessageCard({
   message,
   metaId,
   onPreviewFilePath,
+  onRetry,
   onSelectArtifact,
   relatedEvidence,
   statusId,
@@ -47,93 +54,91 @@ export function AssistantMessageCard({
   const view = projectChatView(message, {
     streaming: message.id === streamingMessageId,
   });
+  const items = projectMessageFlow(message, {
+    expandedMessageIds: processExpanded ? [message.id] : [],
+    streamingMessageId,
+  });
+  const streaming = message.id === streamingMessageId;
+
   return (
-                <div className="relative w-full max-w-[48rem]">
-                  <div className="overflow-hidden rounded-[1rem] border border-accent-teal/14 bg-[linear-gradient(180deg,rgba(143,208,198,0.08),rgba(143,208,198,0.02))] px-4 py-3.5 shadow-[0_16px_40px_rgba(0,0,0,0.12)]">
-                    <div className="flex items-start gap-3">
-                      <div className="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-field border border-accent-teal/20 bg-accent-teal/10 text-accent-teal">
-                        <BotIcon size={14} />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <div
-                            className="app-text-13 font-semibold text-foreground"
-                            id={labelId}
-                          >
-                            {message.author}
-                          </div>
-                          <div
-                            className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground"
-                            id={metaId}
-                          >
-                            {message.label}
-                          </div>
-                          {message.id === streamingMessageId ? (
-                            <Badge className="border-transparent bg-accent-teal/12 text-accent-teal">
-                              {t("panels.messages.messageCard.streamingBadge")}
-                            </Badge>
-                          ) : null}
-                        </div>
+    <div className="flex w-full min-w-0 flex-col gap-2">
+      <span className="sr-only" id={labelId}>
+        {message.author}
+      </span>
+      <span className="sr-only" id={metaId}>
+        {message.label}
+      </span>
+      <div className="flex min-w-0 flex-col gap-2" id={statusId}>
+        {items.map((item) => {
+          if (item.kind === "turn-process") {
+            return view.summary ? (
+              <TurnProcessRow
+                anchorKey={item.anchorKey}
+                expanded={processExpanded}
+                flowKey={item.key}
+                key={item.key}
+                onToggle={() => setProcessExpanded((value) => !value)}
+                summary={view.summary}
+              />
+            ) : null;
+          }
 
-                        <div className="relative mt-3" id={statusId}>
-                          <div className="pointer-events-none absolute left-0 top-4 bottom-4 w-px bg-gradient-to-b from-accent-teal/0 via-accent-teal/18 to-accent-teal/0" />
+          if (item.kind === "turn-tail") {
+            return (
+              <TurnTailRow
+                anchorKey={item.anchorKey}
+                flowKey={item.key}
+                key={item.key}
+                message={message}
+                onRetry={onRetry}
+                usage={view.usage}
+              />
+            );
+          }
 
-                          <div className="relative space-y-4">
-                            {view.collapsed && view.summary ? (
-                              <ProcessCollapseRow
-                                expanded={processExpanded}
-                                onToggle={() =>
-                                  setProcessExpanded((value) => !value)
-                                }
-                                summary={view.summary}
-                              />
-                            ) : null}
+          if (item.kind === "fallback") {
+            return (
+              <FlowFallbackRow
+                anchorKey={item.anchorKey}
+                flowKey={item.key}
+                key={item.key}
+                raw={item.raw}
+              />
+            );
+          }
 
-                            {view.collapsed && processExpanded
-                              ? view.hiddenNodes.map((node) => (
-                                  <div key={node.key}>
-                                    {renderMessageSegment(node.segment, {
-                                      interrupted: message.interrupted === true,
-                                      streaming: false,
-                                      onSelectArtifact,
-                                      resolveFilePathLink,
-                                    })}
-                                  </div>
-                                ))
-                              : null}
+          // assistant-step / tool-call / notice：统一交给 segment 渲染器，
+          // 行锚点由具体行控件落在自身根节点上（e2e 可定位任意过程行）。
+          if (
+            item.kind === "assistant-step" ||
+            item.kind === "tool-call" ||
+            item.kind === "notice"
+          ) {
+            return (
+              <Fragment key={item.key}>
+                {renderMessageSegment(item.node.segment, {
+                  anchorKey: item.anchorKey,
+                  flowKey: item.key,
+                  interrupted: message.interrupted === true,
+                  streaming,
+                  onSelectArtifact,
+                  resolveFilePathLink,
+                })}
+              </Fragment>
+            );
+          }
 
-                            {view.nodes.map((node) => (
-                              <div key={node.key}>
-                                {renderMessageSegment(node.segment, {
-                                  interrupted: message.interrupted === true,
-                                  streaming: message.id === streamingMessageId,
-                                  onSelectArtifact,
-                                  resolveFilePathLink,
-                                })}
-                              </div>
-                            ))}
-                          </div>
+          return null;
+        })}
 
-                          {view.usage ? (
-                            <div className="mt-3 app-text-10 text-muted-foreground">
-                              {t("panels.messages.turnUsage.summary", {
-                                prompt:
-                                  view.usage.promptTokens.toLocaleString(),
-                                completion:
-                                  view.usage.completionTokens.toLocaleString(),
-                                total: view.usage.totalTokens.toLocaleString(),
-                              })}
-                            </div>
-                          ) : null}
+        {streaming ? (
+          <span className="sr-only">
+            {t("panels.messages.messageCard.streamingBadge")}
+          </span>
+        ) : null}
+      </div>
 
-                          {renderRelatedArtifactSection(
-                            relatedEvidence,
-                            onSelectArtifact,
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
+      {renderRelatedArtifactSection(relatedEvidence, onSelectArtifact)}
+    </div>
   );
 }

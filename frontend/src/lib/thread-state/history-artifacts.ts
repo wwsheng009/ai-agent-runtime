@@ -133,6 +133,14 @@ export function normalizeSessionHistoryMessages(
       {
         role: typeof item.role === "string" ? item.role : "",
         content: typeof item.content === "string" ? item.content : "",
+        // 工具配对字段必须透传：tool 回执只有带着 tool_call_id，才能回填工具名/入参，
+        // 进而按 24px 工具行呈现（否则只能退化成通用文本行）。
+        ...(Array.isArray(item.tool_calls)
+          ? { tool_calls: item.tool_calls }
+          : {}),
+        ...(typeof item.tool_call_id === "string" && item.tool_call_id.trim()
+          ? { tool_call_id: item.tool_call_id }
+          : {}),
         metadata:
           item.metadata && typeof item.metadata === "object"
             ? item.metadata

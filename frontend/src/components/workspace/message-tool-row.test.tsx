@@ -50,6 +50,18 @@ describe("MessageToolRow", () => {
     return { type: "tool", name: "read_file", status: "finished", ...partial };
   }
 
+  it("标题：始终渲染原始工具名（已注册 kind 也不替换为动作词）", () => {
+    renderRow(toolSegment({ details: { filePath: "src/a.ts" } }));
+    expect(
+      container.querySelector('[data-chat-row-title="true"]')?.textContent,
+    ).toBe("read_file");
+
+    renderRow(toolSegment({ name: "mcp__server__custom_thing" }));
+    expect(
+      container.querySelector('[data-chat-row-title="true"]')?.textContent,
+    ).toBe("mcp__server__custom_thing");
+  });
+
   it("成功态：状态播报、可展开输入、长输出在滚动容器内", () => {
     const longOutput = Array.from({ length: 40 }, (_, index) => `line ${index + 1}`).join("\n");
     renderRow(
@@ -67,22 +79,54 @@ describe("MessageToolRow", () => {
     expect(container.querySelector('[role="status"]')?.textContent).toContain("已完成");
 
     const toggle = container.querySelector<HTMLButtonElement>(
-      '[aria-controls$="-panel"]',
+      '[data-chat-row-toggle="chevron"]',
     );
     expect(toggle?.getAttribute("aria-expanded")).toBe("false");
-    const panel = container.querySelector<HTMLElement>('[data-tool-row-input-panel="true"]');
+    // 折叠态 24px 单行：结果与输入都在 hidden 面板内（不占高度，不参与默认滚动噪声）。
+    const panel = container.querySelector<HTMLElement>('[data-tool-row-detail-panel="true"]');
     expect(panel?.hidden).toBe(true);
+    expect(panel?.querySelector('[data-tool-row-output="result"]')).toBeTruthy();
+    expect(panel?.querySelector('[data-tool-row-input-panel="true"]')).toBeTruthy();
 
     act(() => toggle?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     expect(toggle?.getAttribute("aria-expanded")).toBe("true");
-    expect(container.querySelector<HTMLElement>('[data-tool-row-input-panel="true"]')?.hidden).toBe(
-      false,
-    );
+    expect(
+      container.querySelector<HTMLElement>('[data-tool-row-detail-panel="true"]')?.hidden,
+    ).toBe(false);
 
     const output = container.querySelector('[data-tool-row-output="result"] pre');
     expect(output?.textContent).toBe(longOutput);
     expect(output?.className).toContain("max-h-48");
     expect(output?.className).toContain("overflow-y-auto");
+  });
+
+  it("展开入口：点前导图标与点右侧 chevron 同义，aria-expanded 同步", () => {
+    renderRow(toolSegment({ argsSummary: "npm test", resultSummary: "ok" }));
+
+    const iconToggle = container.querySelector<HTMLButtonElement>(
+      '[data-chat-row-toggle="icon"]',
+    );
+    const chevronToggle = container.querySelector<HTMLButtonElement>(
+      '[data-chat-row-toggle="chevron"]',
+    );
+    const panel = () =>
+      container.querySelector<HTMLElement>('[data-tool-row-detail-panel="true"]');
+
+    expect(iconToggle).toBeTruthy();
+    expect(chevronToggle).toBeTruthy();
+    expect(panel()?.hidden).toBe(true);
+
+    act(() => iconToggle?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(panel()?.hidden).toBe(false);
+    expect(iconToggle?.getAttribute("aria-expanded")).toBe("true");
+    expect(chevronToggle?.getAttribute("aria-expanded")).toBe("true");
+    // 指针可达但不在 Tab 顺序里：每行只留一个键盘停靠点。
+    expect(iconToggle?.tabIndex).toBe(-1);
+    expect(chevronToggle?.tabIndex).toBe(0);
+
+    act(() => chevronToggle?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(panel()?.hidden).toBe(true);
+    expect(iconToggle?.getAttribute("aria-expanded")).toBe("false");
   });
 
   it("失败态：错误块替换输出、文件链接禁用且不残留结果块", () => {
@@ -100,20 +144,27 @@ describe("MessageToolRow", () => {
 
     const row = container.querySelector('[data-tool-row="true"]');
     expect(row?.getAttribute("data-tool-row-status")).toBe("error");
-    expect(container.querySelector('[data-tool-row-output="error"]')?.textContent).toContain(
-      "patch 校验失败",
-    );
-    expect(container.querySelector('[data-tool-row-output="result"]')).toBeNull();
-    expect(container.textContent).not.toContain("旧的输出不应出现");
-
     // 失败态禁用链接：不渲染可聚焦按钮，路径以禁用标记呈现。
     expect(container.querySelector('[data-tool-row-file-link="true"]')).toBeNull();
     expect(container.querySelector('[data-tool-row-link-disabled="true"]')?.textContent).toBe(
       "src/a.ts",
     );
 
-    const toggle = container.querySelector<HTMLButtonElement>('[aria-controls$="-panel"]');
+    // 失败态行高不变：错误详情收进折叠面板，展开后才出现（错误块替换输出块）。
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-chat-row-toggle="chevron"]',
+    );
     expect(toggle?.getAttribute("aria-expanded")).toBe("false");
+    expect(
+      container.querySelector<HTMLElement>('[data-tool-row-detail-panel="true"]')?.hidden,
+    ).toBe(true);
+
+    act(() => toggle?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(container.querySelector('[data-tool-row-output="error"]')?.textContent).toContain(
+      "patch 校验失败",
+    );
+    expect(container.querySelector('[data-tool-row-output="result"]')).toBeNull();
+    expect(container.textContent).not.toContain("旧的输出不应出现");
   });
 
   it("流式中：运行态图标与徽标，尚未产生输出块", () => {
@@ -125,6 +176,9 @@ describe("MessageToolRow", () => {
     expect(row?.getAttribute("data-tool-row-status")).toBe("running");
     expect(container.textContent).toContain("执行中");
     expect(container.querySelector(".animate-spin")).toBeTruthy();
+    expect(
+      container.querySelector<HTMLElement>('[data-tool-row-detail-panel="true"]')?.hidden,
+    ).toBe(true);
     expect(container.querySelector('[data-tool-row-output="result"]')).toBeNull();
     expect(container.querySelector('[data-tool-row-output="error"]')).toBeNull();
   });
@@ -178,7 +232,9 @@ describe("MessageToolRow", () => {
     act(() => link?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     expect(openFile).toHaveBeenCalledTimes(1);
 
-    const toggle = container.querySelector<HTMLButtonElement>('[aria-controls$="-panel"]');
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-chat-row-toggle="chevron"]',
+    );
     expect(toggle?.getAttribute("aria-expanded")).toBe("false");
   });
 

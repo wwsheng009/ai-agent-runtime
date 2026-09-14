@@ -60,7 +60,7 @@ export function MessageBacktrackDialog({
       className="fixed inset-0 z-[80] flex items-center justify-center bg-black/55 px-4 py-6 backdrop-blur-[2px]"
       role="dialog"
     >
-      <div className="w-full max-w-[32rem] overflow-hidden rounded-[1rem] border border-white/10 bg-[var(--dialog-bg,var(--background))] shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
+      <div className="w-full max-w-[32rem] overflow-hidden rounded-[1rem] border border-white/10 bg-[var(--dialog-bg,var(--background))] shadow-[var(--shadow-lv2)]">
         <div className="flex items-start justify-between gap-3 border-b border-white/8 px-4 py-3.5">
           <div className="flex items-start gap-2.5">
             <div className="mt-0.5 inline-flex size-8 items-center justify-center rounded-[0.75rem] border border-accent-gold/20 bg-accent-gold/10 text-accent-gold">

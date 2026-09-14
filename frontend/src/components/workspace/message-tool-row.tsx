@@ -1,9 +1,10 @@
-// P1-6：工具行状态机视图。呈现结论全部来自 lib/tool-row/state；这里只做布局、图标与交互接线。
+// P1-6 / 批次 B4（§8.5 tool-call）：24px 单行 = 图标 + 工具名 + 分隔点 + 富摘要 + 状态词缀。
+// 呈现结论全部来自 lib/tool-row/state；这里只做布局、图标与交互接线。
+// 失败态：图标 + 摘要尾缀表达（不整行变红底，行高不随错误内容增长）；详情在展开面板。
 
 import {
   BracesIcon,
   CheckCircle2Icon,
-  ChevronDownIcon,
   CircleIcon,
   FileDiffIcon,
   FileTextIcon,
@@ -18,6 +19,7 @@ import {
 import { useId, useState, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
 
+import { ChatProcessRow } from "@/components/workspace/chat-process-row";
 import { type ToolMessageSegment } from "@/lib/thread-state/messages";
 import { type FilePathLink } from "@/lib/tool-row";
 import { type ToolCardKind } from "@/lib/tool-row/kind";
@@ -28,12 +30,13 @@ import {
   type ToolStatus,
   type ToolStatusTone,
 } from "@/lib/tool-row/state";
-import { cn } from "@/lib/utils";
 
 import { ToolRowPanels } from "./tool-row/tool-row-panels";
 import { ToolRowSummaryView } from "./tool-row/tool-row-summary";
 
 type MessageToolRowProps = {
+  anchorKey?: string;
+  flowKey?: string;
   segment: ToolMessageSegment;
   /**
    * 宿主路径解析：返回可激活回调才渲染链接，返回 null 即无可跳转目标（不渲染死按钮）。
@@ -60,25 +63,29 @@ const KIND_ICON: Record<ToolCardKind, ComponentType<{ size?: number; className?:
   generic: WrenchIcon,
 };
 
-const TONE_BADGE: Record<ToolStatusTone, string> = {
-  pending: "border-border bg-surface-soft text-muted-foreground",
-  running: "border-accent-teal/20 bg-accent-teal/10 text-accent-teal",
-  success: "border-accent-teal/20 bg-accent-teal/10 text-accent-teal",
-  danger: "border-accent-gold/24 bg-accent-gold/12 text-accent-gold",
-};
-
 const TONE_ICON: Record<ToolStatusTone, string> = {
   pending: "text-muted-foreground",
   running: "animate-spin text-accent-teal",
   success: "text-accent-teal",
-  danger: "text-accent-gold",
+  danger: "text-accent-orange",
 };
 
-export function MessageToolRow({ segment, resolveFilePathLink }: MessageToolRowProps) {
+const TONE_TEXT: Record<ToolStatusTone, string> = {
+  pending: "text-muted-foreground",
+  running: "text-accent-teal",
+  success: "text-accent-teal",
+  danger: "text-accent-orange",
+};
+
+export function MessageToolRow({
+  anchorKey,
+  flowKey,
+  segment,
+  resolveFilePathLink,
+}: MessageToolRowProps) {
   const { t } = useTranslation("workspace");
   const [open, setOpen] = useState(false);
   const baseId = useId();
-  const titleId = `${baseId}-title`;
   const panelId = `${baseId}-panel`;
 
   const presentation = resolveToolRowPresentation(segment);
@@ -86,6 +93,10 @@ export function MessageToolRow({ segment, resolveFilePathLink }: MessageToolRowP
   const StatusIcon = STATUS_ICON[segment.status];
   const KindIcon = KIND_ICON[presentation.kind];
   const statusLabel = t(STATUS_LABEL_KEY[segment.status]);
+  // 标题始终是工具名（§5.5 / §8.5：图标 + 工具名 + 分隔点 + 摘要；
+  // 参考站实测样例 `Grep | resource-manager/retry`）。kind 只决定图标与摘要语义，
+  // 不参与标题——否则会与运行时工具身份脱节、也无法被 e2e 以工具名定位。
+  const title = segment.name;
 
   const activate =
     presentation.filePath && !presentation.fileLinkDisabled
@@ -94,68 +105,63 @@ export function MessageToolRow({ segment, resolveFilePathLink }: MessageToolRowP
   const filePathLink: FilePathLink | null =
     presentation.filePath && activate ? { path: presentation.filePath, activate } : null;
   const mono = presentation.kind === "terminal" || presentation.kind === "search";
+  const failureSuffix = presentation.isFailure
+    ? (segment.errorMessage?.trim() ?? "")
+    : "";
+  const hasSummary =
+    presentation.summary.parts.length > 0 || failureSuffix.length > 0;
 
   return (
-    <section
-      aria-labelledby={titleId}
-      className={cn(
-        "mt-2 overflow-hidden rounded-card-lg border bg-surface-softer",
-        presentation.isFailure ? "border-accent-gold/24" : "border-border",
-      )}
-      {...presentation.attributes}
-    >
-      <div className="flex items-center gap-2.5 px-3 py-2.5">
-        <KindIcon size={14} className="shrink-0 text-muted-foreground" />
-        <span
-          className="max-w-[40%] shrink-0 truncate app-text-13 font-semibold text-foreground"
-          id={titleId}
-        >
-          {segment.name}
-        </span>
-        <span className="sr-only" role="status">
-          {t("panels.messages.toolRow.announcement", {
-            name: segment.name,
-            status: statusLabel,
-          })}
-        </span>
-        <div className="min-w-0 flex-1">
-          <ToolRowSummaryView
-            fileLinkDisabled={presentation.fileLinkDisabled}
-            filePathLink={filePathLink}
-            mono={mono}
-            parts={presentation.summary.parts}
-            tone={presentation.summary.tone}
-          />
-        </div>
-        <span
-          className={cn(
-            "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 app-text-10 uppercase tracking-[0.12em]",
-            TONE_BADGE[tone],
-          )}
-        >
-          <StatusIcon size={11} className={TONE_ICON[tone]} />
-          {statusLabel}
-        </span>
-        {presentation.expandable ? (
-          <button
-            aria-controls={panelId}
-            aria-expanded={open}
-            aria-label={t(
-              open
-                ? "panels.messages.toolRow.collapseLabel"
-                : "panels.messages.toolRow.expandLabel",
-            )}
-            className="shrink-0 rounded-chip p-1 text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
-            onClick={() => setOpen((current) => !current)}
-            type="button"
+    <div {...presentation.attributes}>
+      <ChatProcessRow
+        anchorKey={anchorKey}
+        expandable={presentation.expandable}
+        expanded={open}
+        flowKey={flowKey}
+        icon={<KindIcon className="size-4 text-muted-foreground" />}
+        interactiveSummary
+        onToggle={() => setOpen((current) => !current)}
+        panelId={panelId}
+        rowKind="tool"
+        statusLabel={t("panels.messages.toolRow.announcement", {
+          name: segment.name,
+          status: statusLabel,
+        })}
+        summary={
+          hasSummary ? (
+            <>
+              <ToolRowSummaryView
+                fileLinkDisabled={presentation.fileLinkDisabled}
+                filePathLink={filePathLink}
+                mono={mono}
+                parts={presentation.summary.parts}
+                tone={presentation.summary.tone}
+              />
+              {failureSuffix ? (
+                <span className="shrink-0 truncate text-accent-orange">
+                  {failureSuffix}
+                </span>
+              ) : null}
+            </>
+          ) : undefined
+        }
+        title={title}
+        tone={presentation.isFailure ? "danger" : "default"}
+        toggleLabel={t(
+          open
+            ? "panels.messages.toolRow.collapseLabel"
+            : "panels.messages.toolRow.expandLabel",
+        )}
+        trailing={
+          <span
+            className={`inline-flex shrink-0 items-center gap-1 app-text-11 ${TONE_TEXT[tone]}`}
+            data-tool-row-status={segment.status}
           >
-            <ChevronDownIcon
-              size={14}
-              className={cn("transition-transform duration-200", open ? "rotate-0" : "-rotate-90")}
-            />
-          </button>
-        ) : null}
-      </div>
+            <StatusIcon className={TONE_ICON[tone]} size={12} />
+            {statusLabel}
+          </span>
+        }
+      />
 
       <ToolRowPanels
         expandable={presentation.expandable}
@@ -165,6 +171,6 @@ export function MessageToolRow({ segment, resolveFilePathLink }: MessageToolRowP
         panelId={panelId}
         segment={segment}
       />
-    </section>
+    </div>
   );
 }

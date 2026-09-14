@@ -99,6 +99,7 @@
   --primitive-gold-200-a000: rgba(240, 199, 123, 0);
   --primitive-gold-200-a100: rgba(240, 199, 123, 0.1);
   --primitive-gold-200-a240: rgba(240, 199, 123, 0.24);
+  --primitive-gold-200-a350: rgba(240, 199, 123, 0.35);
   --primitive-gold-200-a280: rgba(240, 199, 123, 0.28);
   --primitive-gold-a240: rgba(221, 164, 82, 0.24);
   --primitive-amber-100: #b45309;
@@ -132,6 +133,7 @@
   --primitive-teal-300-a080: rgba(143, 208, 198, 0.08);
   --primitive-teal-300-a100: rgba(143, 208, 198, 0.1);
   --primitive-teal-300-a120: rgba(143, 208, 198, 0.12);
+  --primitive-teal-300-a150: rgba(143, 208, 198, 0.15);
   --primitive-teal-300-a220: rgba(143, 208, 198, 0.22);
   --primitive-teal-300-a240: rgba(143, 208, 198, 0.24);
   --primitive-teal-300-a280: rgba(143, 208, 198, 0.28);
@@ -185,6 +187,9 @@
   --background-elevated: var(--primitive-ink-7-a940);
   --foreground: var(--primitive-ink-750);
   --muted-foreground: var(--primitive-ink-3-a680);
+  /* 发丝口径（§10.4 / §13 C3）：参考站源码确有 17 处 `border-*.width: 0.5px`，
+     dpr=1 下解析并绘制为 1px，与本仓 1px 等价，故本仓不追；唯一例外是
+     `.app-chat-turn-process` 的底边（见 base.css）。 */
   --border: var(--primitive-paper-450-a080);
   --border-strong: var(--primitive-paper-450-a140);
   --ring: var(--primitive-blue-1-a260);
@@ -241,6 +246,13 @@
   --streaming-active-block-bg: var(--primitive-teal-300-a080);
   --streaming-active-block-accent: var(--primitive-teal-300-a280);
   --streaming-active-caret: var(--primitive-teal-300);
+  /* 富内容（图片生成中）占位条的流光：teal→gold→teal，透明度只走 primitive（§9 E2）。 */
+  --media-shimmer-gradient: linear-gradient(
+    90deg,
+    var(--primitive-teal-300-a150),
+    var(--primitive-gold-200-a350),
+    var(--primitive-teal-300-a150)
+  );
   --code-line-inserted-bg: var(--primitive-green-2-a120);
   --code-line-inserted-accent: var(--primitive-green-1-a350);
   --code-line-deleted-bg: var(--primitive-red-2-a120);
@@ -290,8 +302,35 @@
   --app-root-font-size-12: calc(var(--app-root-font-size) * 0.75);
   --app-root-font-size-12-5: calc(var(--app-root-font-size) * 0.78125);
   --app-root-font-size-13: calc(var(--app-root-font-size) * 0.8125);
+  /* 字号轴（§13 C4 / 批次 F1）：基准 15px = 本地现状，delta = 0 时渲染与改造前一致；
+     行高、行高盒一律 calc(基准 + delta) 派生，组件内禁止硬编码 16/28。 */
   --app-chat-font-size: 15px;
-  --app-chat-line-height: 1.72;
+  --app-chat-font-size-base: 15px;
+  --app-chat-font-delta: calc(var(--app-chat-font-size) - var(--app-chat-font-size-base));
+  --app-chat-line-height-base: 25.8px;
+  --app-chat-line-height: calc(
+    var(--app-chat-line-height-base) + var(--app-chat-font-delta)
+  );
+  /* 次级字号轴：过程行标题/摘要/通知行（默认 = 主轴 − 2px，随主轴同步位移）。 */
+  --app-chat-font-size-secondary: calc(var(--app-chat-font-size) - 2px);
+  --app-chat-font-size-secondary-base: 13px;
+  --app-chat-font-delta-secondary: calc(
+    var(--app-chat-font-size-secondary) - var(--app-chat-font-size-secondary-base)
+  );
+  --app-chat-line-height-secondary-base: 20px;
+  --app-chat-line-height-secondary: calc(
+    var(--app-chat-line-height-secondary-base) + var(--app-chat-font-delta-secondary)
+  );
+  /* 过程行行高盒：折叠态单行 = 24px + delta（§8.5）。 */
+  --app-chat-process-row-height: calc(24px + var(--app-chat-font-delta));
+  /* 用户气泡行高（§8.5 / §13 C4）：22px 基准 + delta，与正文字号轴同步。 */
+  --app-chat-bubble-line-height: calc(22px + var(--app-chat-font-delta));
+  /* 宽度轴（§13 C1 / 批次 F2）：转录列 = W、停靠卡 = W − 32px、输入卡 = W + 32px。
+     W 取「会话列宽 × 64%」：本地以会话主区（main-section 列容器，声明 container-type:
+     inline-size）为查询容器，用 cqw 保证「滚动宿主 ± 滚动条」不影响三处宽度的一致性。 */
+  --app-chat-content-width: clamp(680px, 64cqw, 920px);
+  --app-chat-content-width-dock: calc(var(--app-chat-content-width) - 32px);
+  --app-chat-content-width-composer: calc(var(--app-chat-content-width) + 32px);
   --app-chat-font-size-9: calc(var(--app-chat-font-size) * 0.6);
   --app-chat-font-size-10: calc(var(--app-chat-font-size) * 0.6666667);
   --app-chat-font-size-11: calc(var(--app-chat-font-size) * 0.7333333);

@@ -1,4 +1,8 @@
-// P1-6：工具行面板。失败态用错误块替换输出块（不追加），输入始终在展开面板内。
+// P1-6 / 批次 B4（§5.5 / §8.5）：工具行面板。
+//
+// 折叠契约：折叠态工具行只有 24px 单行（结果/错误/输入均在展开面板内），
+// 否则不满足「折叠态 24px / 失败态行高不变」。失败态用错误块替换输出块（不追加）。
+// 面板：无 1px 边框，用底色 + 间距分隔（B4）。
 
 import { useTranslation } from "react-i18next";
 
@@ -38,51 +42,57 @@ export function ToolRowPanels({
   const { t } = useTranslation("workspace");
   const failureText = segment.errorMessage?.trim() || segment.resultSummary?.trim() || "";
   const outputText = segment.resultSummary?.trim() || "";
-
-  return (
-    <>
-      {isFailure
-        ? failureText
-          ? (
-              <div
-                className="border-t border-accent-gold/16 bg-accent-gold/8 px-3 py-2.5 app-text-11 text-accent-gold"
-                data-tool-row-output="error"
-                role="note"
-              >
-                {failureText}
-              </div>
-            )
-          : null
-        : outputText
-          ? (
-              <div className="border-t border-border px-3 py-2.5" data-tool-row-output="result">
-                <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
-                  {t("panels.messages.toolRow.outputLabel")}
-                </div>
-                <pre className="mt-1.5 max-h-48 overflow-y-auto whitespace-pre-wrap break-words app-text-12 app-chat-copy text-foreground">
-                  {kind === "json" ? prettyJson(outputText) : outputText}
-                </pre>
-              </div>
-            )
-          : null}
-
-      {expandable ? (
-        <div
-          className={cn("border-t border-border", !open && "hidden")}
-          data-tool-row-input-panel="true"
-          hidden={!open}
-          id={panelId}
-        >
-          <div className="px-3 py-2.5">
+  const inputText = segment.argsSummary?.trim() || "";
+  const detail = isFailure
+    ? failureText
+      ? (
+          <div
+            className="mt-1 rounded-lg bg-accent-gold/8 px-2.5 py-2 app-text-11 text-accent-orange"
+            data-tool-row-output="error"
+            role="note"
+          >
+            {failureText}
+          </div>
+        )
+      : null
+    : outputText
+      ? (
+          <div
+            className="mt-1 rounded-lg bg-surface-soft px-2.5 py-2"
+            data-tool-row-output="result"
+          >
             <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
-              {t("panels.messages.toolRow.inputLabel")}
+              {t("panels.messages.toolRow.outputLabel")}
             </div>
-            <pre className="mt-1.5 max-h-48 overflow-y-auto whitespace-pre-wrap break-words app-text-12 app-chat-copy text-muted-foreground">
-              {segment.argsSummary}
+            <pre className="mt-1.5 max-h-48 overflow-y-auto whitespace-pre-wrap break-words app-text-12 app-chat-copy text-foreground">
+              {kind === "json" ? prettyJson(outputText) : outputText}
             </pre>
           </div>
+        )
+      : null;
+
+  if (!expandable) {
+    return null;
+  }
+
+  return (
+    <div
+      className={cn(!open && "hidden")}
+      data-tool-row-detail-panel="true"
+      hidden={!open}
+      id={panelId}
+    >
+      {detail}
+      {inputText ? (
+        <div className="mt-1 rounded-lg bg-surface-soft px-2.5 py-2" data-tool-row-input-panel="true">
+          <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
+            {t("panels.messages.toolRow.inputLabel")}
+          </div>
+          <pre className="mt-1.5 max-h-48 overflow-y-auto whitespace-pre-wrap break-words app-text-12 app-chat-copy text-muted-foreground">
+            {inputText}
+          </pre>
         </div>
       ) : null}
-    </>
+    </div>
   );
 }

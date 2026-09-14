@@ -400,6 +400,28 @@ const reasoningScript = [
   { event: "done", delay: 150, payload: DONE },
 ];
 
+// G1 用：批次 B2 后推理展开区是 Markdown 面板，回合 done 会随历史刷新卸载该行，
+// 因此把推理块间隔放大，保证「展开 → 读到全文」的断言落在稳定的流式窗口内。
+const reasoningHoldScript = [
+  { event: "meta", payload: META },
+  {
+    event: "reasoning",
+    payload: makeChunk(0, "Checking whether the user request needs a tool", "reasoning"),
+  },
+  {
+    event: "reasoning",
+    delay: 900,
+    payload: makeChunk(1, "No tool needed, drafting the answer", "reasoning"),
+  },
+  {
+    event: "reasoning",
+    delay: 900,
+    payload: makeChunk(2, "Writing the final answer now", "reasoning"),
+  },
+  { event: "chunk", delay: 900, payload: makeChunk(3, "The capital of France is Paris.") },
+  { event: "done", delay: 150, payload: DONE },
+];
+
 function collectStrings(value, out) {
   if (typeof value === "string") {
     out.push(value);
@@ -421,6 +443,7 @@ function pickScript(rawBody) {
   if (haystack.includes("scroll")) return { name: "scroll", script: scrollScript };
   if (haystack.includes("error")) return { name: "error", script: errorScript };
   if (haystack.includes("interrupt")) return { name: "interrupt", script: null };
+  if (haystack.includes("hold")) return { name: "reasoning-hold", script: reasoningHoldScript };
   return { name: "reasoning", script: reasoningScript };
 }
 
@@ -890,6 +913,25 @@ async function handleRequest(req, res) {
         typeof body?.default_model === "string" ? body.default_model : "",
     };
     writeJson(res, 200, { ok: true, count: providers.length });
+    return;
+  }
+
+  // 测试注入（B4/B5）：POST /api/_test/history
+  // body: { session_id, history: [{ role, content, tool_call_id?, tool_calls?, metadata? }] }
+  // 覆盖 `GET /api/runtime/sessions/:id/history` 的数据源，用于「历史里的工具回执
+  // 还原成具体工具行（读文件/改文件/执行命令）」的用例；未注入即空历史。
+  if (path === "/api/_test/history" && req.method === "POST") {
+    const body = await readBody(req);
+    const sessionId =
+      typeof body?.session_id === "string" && body.session_id
+        ? body.session_id
+        : "e2e-session-1";
+    const history = Array.isArray(body?.history) ? body.history : [];
+    const session = ensureMockSession(sessionId);
+    if (session) {
+      session.history = history;
+    }
+    writeJson(res, 200, { ok: true, session_id: sessionId, count: history.length });
     return;
   }
 

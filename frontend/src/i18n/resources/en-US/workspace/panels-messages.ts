@@ -16,6 +16,9 @@ export const enWorkspacePanelsMessages = {
     editPromptPlaceholder: "Edit this user prompt, then continue to backtrack…",
     cancel: "Cancel",
     continue: "Continue to backtrack",
+    copy: "Copy",
+    copyAriaLabel: "Copy this user message",
+    selected: "Selected this user turn",
     editHint:
       "Inline edit seeds the backtrack dialog. Confirm there to truncate later turns and prefill the composer.",
   },
@@ -36,12 +39,27 @@ export const enWorkspacePanelsMessages = {
     collapse: "Collapse system prompt",
   },
   contextRow: {
+    title: "Context injection",
     expand: "Expand context",
     collapse: "Collapse context",
+  },
+  toolReceipt: {
+    title: "Tool call",
   },
   turnUsage: {
     summary:
       "Token usage: prompt {{prompt}} · completion {{completion}} · total {{total}}",
+  },
+  turnTail: {
+    copy: "Copy",
+    copyAriaLabel: "Copy this reply",
+    copied: "Copied",
+    retryAriaLabel: "Retry this turn",
+    statsLabel: "Turn stats",
+  },
+  flowFallback: {
+    title: "Unknown event type",
+    hint: "Raw payload preserved in a read-only view.",
   },
   segmentFallback: {
     loading: "Loading {{label}}…",
@@ -56,6 +74,9 @@ export const enWorkspacePanelsMessages = {
   reasoningRow: {
     title: "Reasoning",
     trimmed: "{{chars}} leading chars trimmed",
+    empty: "Waiting for reasoning output…",
+    expandLabel: "Expand reasoning",
+    collapseLabel: "Collapse reasoning",
   },
   toolRow: {
     inputLabel: "Input",
@@ -67,8 +88,8 @@ export const enWorkspacePanelsMessages = {
       failed: "Failed",
     },
     announcement: "Tool {{name}} status: {{status}}",
-    expandLabel: "Expand tool input",
-    collapseLabel: "Collapse tool input",
+    expandLabel: "Expand tool details",
+    collapseLabel: "Collapse tool details",
     exitCode: "Exit code {{code}}",
     diffAdditions: "+{{value}}",
     diffRemovals: "−{{value}}",

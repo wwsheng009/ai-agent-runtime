@@ -1,11 +1,16 @@
-// 由 components/workspace/message-list.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
+// 批次 A3/C1（§5.2 / §8.5 user|steering）：右对齐气泡 + hover 动作区。
+// - 一层底色、无边框、无阴影、无渐变；圆角 22px；
+// - 限宽按列宽比例（525/748 ≈ 0.702，与 82% 取小），随宽度轴同步；
+// - 元数据不上屏：作者/label 只留 sr-only（保留 aria-labelledby 契约）；
+// - 动作区（复制 / 编辑 / 回溯）28×28 圆图标按钮，默认隐藏，hover / 键盘焦点显现。
 
-import { HistoryIcon, LoaderCircleIcon, PencilLineIcon, User2Icon } from "lucide-react";
+import { CopyIcon, HistoryIcon, LoaderCircleIcon, PencilLineIcon } from "lucide-react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { type ChatMessage, type MessageSegment } from "@/data/mock";
+import { isSteeringMessage } from "@/lib/chat-view";
 import { cn } from "@/lib/utils";
 
 import { renderMessageSegment } from "./segment-rendering";
@@ -41,6 +46,10 @@ function extractUserBubbleText(message: ChatMessage): string {
     .replace(/\r\n/g, "\n");
 }
 
+/** 动作按钮统一形制：28×28 圆图标，默认三级文本，hover 升二级。 */
+const ACTION_BUTTON_CLASS =
+  "inline-flex size-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition hover:bg-surface-soft hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:opacity-40";
+
 export function UserMessageBubble({
   actionsDisabled,
   backtrackNavigationActive,
@@ -60,158 +69,179 @@ export function UserMessageBubble({
   statusId,
 }: UserMessageBubbleProps) {
   const { t } = useTranslation("workspace");
-  return (
-                <div
-                  className={cn(
-                    "relative w-full max-w-[42rem] overflow-hidden rounded-[1rem] border px-4 py-3.5 shadow-[0_16px_40px_rgba(0,0,0,0.12)] transition",
-                    isNavigationSelected
-                      ? "border-accent-gold/55 bg-[linear-gradient(180deg,rgba(240,199,123,0.16),rgba(240,199,123,0.06))] ring-2 ring-accent-gold/25"
-                      : "border-accent-gold/16 bg-[linear-gradient(180deg,rgba(240,199,123,0.08),rgba(240,199,123,0.03))]",
-                    backtrackNavigationActive ? "cursor-pointer hover:border-accent-gold/40" : null,
-                  )}
-                  onClick={() => {
-                    if (
-                      backtrackNavigationActive &&
-                      typeof onSelectBacktrackNavigationMessage === "function"
-                    ) {
-                      onSelectBacktrackNavigationMessage(message.id);
-                    }
-                  }}
-                  onDoubleClick={(event) => {
-                    if (!showBacktrack) {
-                      return;
-                    }
-                    event.stopPropagation();
-                    // Double-click confirms the anchor both in normal and Esc-nav mode.
-                    onBacktrackToMessage?.(message.id, "conversation");
-                  }}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-center gap-2.5">
-                      <div className="inline-flex size-7 items-center justify-center rounded-field border border-accent-gold/20 bg-accent-gold/10 text-accent-gold">
-                        <User2Icon size={14} />
-                      </div>
-                      <div>
-                        <div
-                          className="app-text-13 font-semibold text-foreground"
-                          id={labelId}
-                        >
-                          {message.author}
-                        </div>
-                        <div
-                          className="mt-0.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground"
-                          id={metaId}
-                        >
-                          {message.label}
-                          {isNavigationSelected ? " · selected" : ""}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="flex flex-wrap items-center justify-end gap-2">
-                      {showBacktrack ? (
-                        <>
-                          <Button
-                            aria-label={t("panels.messages.userBubble.editAriaLabel")}
-                            disabled={actionsDisabled}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              setEditingMessageId(message.id);
-                              setInlineEditDraft(extractUserBubbleText(message));
-                            }}
-                            size="sm"
-                            type="button"
-                            variant="ghost"
-                            className="h-7 gap-1.5 px-2 text-[11px] uppercase tracking-[0.12em]"
-                          >
-                            <PencilLineIcon size={12} />
-                            {t("panels.messages.userBubble.edit")}
-                          </Button>
-                          <Button
-                            aria-label={t("panels.messages.userBubble.backtrackAriaLabel")}
-                            disabled={actionsDisabled}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              onBacktrackToMessage?.(message.id, "conversation");
-                            }}
-                            size="sm"
-                            type="button"
-                            variant="ghost"
-                            className="h-7 gap-1.5 px-2 text-[11px] uppercase tracking-[0.12em]"
-                          >
-                            {backtrackPending ? (
-                              <LoaderCircleIcon size={12} className="animate-spin" />
-                            ) : (
-                              <HistoryIcon size={12} />
-                            )}
-                            {t("panels.messages.userBubble.backtrack")}
-                          </Button>
-                        </>
-                      ) : null}
-                      <Badge className="border-transparent bg-surface-soft text-foreground">
-                        {message.role}
-                      </Badge>
-                    </div>
-                  </div>
+  const [copied, setCopied] = useState(false);
+  const text = extractUserBubbleText(message);
+  const flowKind = isSteeringMessage(message) ? "steering" : "user";
 
-                  <div className="mt-3 space-y-3" id={statusId}>
-                    {isEditing ? (
-                      <div className="space-y-3">
-                        <textarea
-                          aria-label={t("panels.messages.userBubble.editPromptAriaLabel")}
-                          className="min-h-[7rem] w-full resize-y rounded-card-lg border border-accent-gold/25 bg-black/10 px-3 py-2.5 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-accent-gold/45 focus:bg-black/15"
-                          onChange={(event) => setInlineEditDraft(event.target.value)}
-                          onClick={(event) => event.stopPropagation()}
-                          placeholder={t(
-                            "panels.messages.userBubble.editPromptPlaceholder",
-                          )}
-                          value={inlineEditDraft}
-                        />
-                        <div className="flex flex-wrap items-center justify-end gap-2">
-                          <Button
-                            disabled={actionsDisabled}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              setEditingMessageId(null);
-                              setInlineEditDraft("");
-                            }}
-                            size="sm"
-                            type="button"
-                            variant="ghost"
-                          >
-                            {t("panels.messages.userBubble.cancel")}
-                          </Button>
-                          <Button
-                            disabled={actionsDisabled}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              onBacktrackToMessage?.(message.id, "conversation", {
-                                editPrompt: inlineEditDraft,
-                              });
-                              setEditingMessageId(null);
-                              setInlineEditDraft("");
-                            }}
-                            size="sm"
-                            type="button"
-                          >
-                            {t("panels.messages.userBubble.continue")}
-                          </Button>
-                        </div>
-                        <p className="text-xs leading-5 text-muted-foreground">
-                          {t("panels.messages.userBubble.editHint")}
-                        </p>
-                      </div>
-                    ) : (
-                      message.segments.map((segment, index) => (
-                        <div key={`${message.id}-${segment.type}-${index}`}>
-                          {renderMessageSegment(segment, {
-                            interrupted: message.interrupted === true,
-                            streaming: false,
-                            onSelectArtifact,
-                          })}
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
+  const copy = async () => {
+    if (!text) {
+      return;
+    }
+    try {
+      await navigator.clipboard?.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      // 剪贴板不可用（权限 / 非安全上下文）时静默：动作区不阻塞阅读。
+    }
+  };
+
+  return (
+    <div
+      className="group flex w-full flex-col items-end gap-1.5"
+      data-chat-anchor-key={message.id}
+      data-chat-flow-key={`${flowKind}:${message.id}`}
+      data-chat-flow-kind={flowKind}
+    >
+      <span className="sr-only" id={labelId}>
+        {message.author}
+      </span>
+      <span className="sr-only" id={metaId}>
+        {message.label}
+      </span>
+
+      <div
+        className={cn(
+          "app-chat-bubble max-w-[min(calc(var(--app-chat-content-width)*0.702),82%)] rounded-[22px] px-4 py-2.5 transition",
+          isNavigationSelected
+            ? "bg-accent-gold/16 ring-2 ring-accent-gold/25"
+            : "bg-surface-strong",
+          backtrackNavigationActive
+            ? "cursor-pointer hover:ring-2 hover:ring-accent-gold/25"
+            : null,
+        )}
+        onClick={() => {
+          if (
+            backtrackNavigationActive &&
+            typeof onSelectBacktrackNavigationMessage === "function"
+          ) {
+            onSelectBacktrackNavigationMessage(message.id);
+          }
+        }}
+        onDoubleClick={(event) => {
+          if (!showBacktrack) {
+            return;
+          }
+          event.stopPropagation();
+          // Double-click confirms the anchor both in normal and Esc-nav mode.
+          onBacktrackToMessage?.(message.id, "conversation");
+        }}
+      >
+        <div className="min-w-0" id={statusId}>
+          {isEditing ? (
+            <div className="space-y-2">
+              <textarea
+                aria-label={t("panels.messages.userBubble.editPromptAriaLabel")}
+                className="min-h-[7rem] w-full resize-y rounded-card-lg border border-border bg-surface-softer px-3 py-2.5 app-chat-bubble text-foreground outline-none transition placeholder:text-muted-foreground focus:border-accent-gold/45 focus-visible:ring-2 focus-visible:ring-ring"
+                onChange={(event) => setInlineEditDraft(event.target.value)}
+                onClick={(event) => event.stopPropagation()}
+                placeholder={t("panels.messages.userBubble.editPromptPlaceholder")}
+                value={inlineEditDraft}
+              />
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <Button
+                  disabled={actionsDisabled}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setEditingMessageId(null);
+                    setInlineEditDraft("");
+                  }}
+                  size="sm"
+                  type="button"
+                  variant="ghost"
+                >
+                  {t("panels.messages.userBubble.cancel")}
+                </Button>
+                <Button
+                  disabled={actionsDisabled}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onBacktrackToMessage?.(message.id, "conversation", {
+                      editPrompt: inlineEditDraft,
+                    });
+                    setEditingMessageId(null);
+                    setInlineEditDraft("");
+                  }}
+                  size="sm"
+                  type="button"
+                >
+                  {t("panels.messages.userBubble.continue")}
+                </Button>
+              </div>
+              <p className="app-text-11 leading-5 text-muted-foreground">
+                {t("panels.messages.userBubble.editHint")}
+              </p>
+            </div>
+          ) : (
+            message.segments.map((segment, index) => (
+              <div key={`${message.id}-${segment.type}-${index}`}>
+                {renderMessageSegment(segment, {
+                  interrupted: message.interrupted === true,
+                  streaming: false,
+                  onSelectArtifact,
+                })}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      <div className="flex h-7 items-center gap-1 pr-1 app-hover-reveal">
+        {/* 元数据不上屏（§5.2）：选中态只保留无障碍标记 + aria-current。 */}
+        {isNavigationSelected ? (
+          <span className="sr-only">
+            {t("panels.messages.userBubble.selected")}
+          </span>
+        ) : null}
+        <span aria-live="polite" className="sr-only">
+          {copied ? t("panels.messages.turnTail.copied") : ""}
+        </span>
+        <button
+          aria-label={t("panels.messages.userBubble.copyAriaLabel")}
+          className={ACTION_BUTTON_CLASS}
+          disabled={!text}
+          onClick={(event) => {
+            event.stopPropagation();
+            void copy();
+          }}
+          type="button"
+        >
+          <CopyIcon aria-hidden="true" size={15} />
+        </button>
+        {showBacktrack ? (
+          <>
+            <button
+              aria-label={t("panels.messages.userBubble.editAriaLabel")}
+              className={ACTION_BUTTON_CLASS}
+              disabled={actionsDisabled}
+              onClick={(event) => {
+                event.stopPropagation();
+                setEditingMessageId(message.id);
+                setInlineEditDraft(extractUserBubbleText(message));
+              }}
+              type="button"
+            >
+              <PencilLineIcon aria-hidden="true" size={15} />
+            </button>
+            <button
+              aria-label={t("panels.messages.userBubble.backtrackAriaLabel")}
+              className={ACTION_BUTTON_CLASS}
+              disabled={actionsDisabled}
+              onClick={(event) => {
+                event.stopPropagation();
+                onBacktrackToMessage?.(message.id, "conversation");
+              }}
+              type="button"
+            >
+              {backtrackPending ? (
+                <LoaderCircleIcon aria-hidden="true" className="animate-spin" size={15} />
+              ) : (
+                <HistoryIcon aria-hidden="true" size={15} />
+              )}
+            </button>
+          </>
+        ) : null}
+      </div>
+    </div>
   );
 }

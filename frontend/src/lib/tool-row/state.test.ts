@@ -3,7 +3,13 @@ import { describe, expect, it } from "vitest";
 import { type ToolMessageSegment } from "@/lib/thread-state/messages";
 
 import { resolveToolCardKind } from "./kind";
-import { isToolRowExpandable, resolveToolRowPresentation } from "./state";
+import {
+  isToolRowExpandable,
+  orderSummaryParts,
+  resolveToolRowPresentation,
+  SUMMARY_MAX_PARTS,
+  SUMMARY_TEXT_LIMIT,
+} from "./state";
 
 function toolSegment(
   partial: Partial<Omit<ToolMessageSegment, "type">> = {},
@@ -31,10 +37,58 @@ describe("resolveToolCardKind", () => {
 });
 
 describe("isToolRowExpandable", () => {
-  it("只有存在输入摘要时可展开", () => {
+  it("存在输入或输出/错误详情时可展开（折叠态 24px 单行）", () => {
     expect(isToolRowExpandable(toolSegment({ argsSummary: "src/a.ts" }))).toBe(true);
     expect(isToolRowExpandable(toolSegment({ argsSummary: "   " }))).toBe(false);
-    expect(isToolRowExpandable(toolSegment({ resultSummary: "ok" }))).toBe(false);
+    expect(isToolRowExpandable(toolSegment({ resultSummary: "ok" }))).toBe(true);
+    expect(
+      isToolRowExpandable(toolSegment({ status: "error", errorMessage: "boom" })),
+    ).toBe(true);
+    expect(isToolRowExpandable(toolSegment())).toBe(false);
+  });
+});
+
+describe("orderSummaryParts（B5 单行摘要）", () => {
+  it("按 路径 > 命令/查询 > URL > diff > 退出码 排序并最多保留两项", () => {
+    expect(
+      orderSummaryParts([
+        { type: "exitCode", code: 2 },
+        { type: "diff", additions: 1, removals: 1 },
+        { type: "url", url: "https://example.com" },
+        { type: "text", text: "npm test" },
+        { type: "path", path: "src/a.ts" },
+      ]),
+    ).toEqual([
+      { type: "path", path: "src/a.ts" },
+      { type: "text", text: "npm test" },
+    ]);
+    expect(SUMMARY_MAX_PARTS).toBe(2);
+  });
+
+  it("命令/查询等自由文本按阈值截断（单行长度 ≤ 阈值且带省略号）", () => {
+    const command = `npm run ${"very-long-argument ".repeat(10)}`;
+    const [part] = orderSummaryParts([{ type: "text", text: command }]);
+    expect(part.type).toBe("text");
+    if (part.type === "text") {
+      expect(part.text.length).toBeLessThanOrEqual(SUMMARY_TEXT_LIMIT);
+      expect(part.text.endsWith("…")).toBe(true);
+    }
+  });
+
+  it("给定 details 时首选路径/命令，不把 diff/退出码顶到首位", () => {
+    expect(
+      orderSummaryParts([
+        { type: "diff", additions: 4, removals: 2 },
+        { type: "path", path: "src/a.ts" },
+      ])[0],
+    ).toEqual({ type: "path", path: "src/a.ts" });
+
+    expect(
+      orderSummaryParts([
+        { type: "exitCode", code: 2 },
+        { type: "text", text: "npm test" },
+      ])[0],
+    ).toEqual({ type: "text", text: "npm test" });
   });
 });
 

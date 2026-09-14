@@ -32,6 +32,43 @@ export type ToolRowPresentation = {
   fileLinkDisabled: boolean;
 };
 
+/**
+ * B5（§8.5 tool-call）：单行摘要的优先级与截断阈值。
+ * 顺序：路径 > 命令/查询 > URL > diff > 退出码；单行只保留最有用的前两项。
+ */
+export const SUMMARY_PART_PRIORITY: Record<ToolRowSummaryPart["type"], number> = {
+  path: 0,
+  text: 1,
+  url: 2,
+  diff: 3,
+  exitCode: 4,
+};
+
+export const SUMMARY_MAX_PARTS = 2;
+
+/** 命令/查询等自由文本的单行截断阈值（路径与 URL 由宿主 title + CSS 截断）。 */
+export const SUMMARY_TEXT_LIMIT = 72;
+
+/** 摘要排序 + 截断：只做纯变换，不改换 part 语义。 */
+export function orderSummaryParts(
+  parts: readonly ToolRowSummaryPart[],
+): ToolRowSummaryPart[] {
+  return [...parts]
+    .sort(
+      (left, right) =>
+        SUMMARY_PART_PRIORITY[left.type] - SUMMARY_PART_PRIORITY[right.type],
+    )
+    .slice(0, SUMMARY_MAX_PARTS)
+    .map((part) =>
+      part.type === "text" && part.text.length > SUMMARY_TEXT_LIMIT
+        ? {
+            ...part,
+            text: `${part.text.slice(0, SUMMARY_TEXT_LIMIT - 1).trimEnd()}…`,
+          }
+        : part,
+    );
+}
+
 export const STATUS_TONE: Record<ToolStatus, ToolStatusTone> = {
   started: "pending",
   running: "running",
@@ -46,8 +83,16 @@ export const STATUS_LABEL_KEY = {
   error: "panels.messages.toolRow.status.failed",
 } as const satisfies Record<ToolStatus, string>;
 
+/**
+ * B4（§5.5 / §8.5）：折叠态必须是 24px 单行——结果/错误/输入全部收进展开面板。
+ * 因此只要有任一详情可看即可展开（不再仅限输入）。
+ */
 export function isToolRowExpandable(segment: ToolMessageSegment) {
-  return Boolean(segment.argsSummary?.trim());
+  return Boolean(
+    segment.argsSummary?.trim() ||
+      segment.resultSummary?.trim() ||
+      segment.errorMessage?.trim(),
+  );
 }
 
 function summaryForKind(
@@ -125,11 +170,16 @@ export function resolveToolRowPresentation(segment: ToolMessageSegment): ToolRow
   const summary: ToolRowSummary = isFailure
     ? {
         tone: "danger",
-        parts: details?.filePath?.trim()
-          ? [{ type: "path", path: details.filePath.trim() }]
-          : [],
+        parts: orderSummaryParts(
+          details?.filePath?.trim()
+            ? [{ type: "path", path: details.filePath.trim() }]
+            : [],
+        ),
       }
-    : { tone: "default", parts: summaryForKind(kind, details, segment) };
+    : {
+        tone: "default",
+        parts: orderSummaryParts(summaryForKind(kind, details, segment)),
+      };
 
   return {
     kind,

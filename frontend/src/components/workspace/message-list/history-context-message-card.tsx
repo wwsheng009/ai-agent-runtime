@@ -1,13 +1,14 @@
-// 由 components/workspace/message-list.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
+// 批次 B3/F4（§8.5 context / system-prompt）：24px 单行 + 展开面板。
+// 去卡片：无外层 bg/border/shadow、无头像 chip、无竖直渐变线；来源文件名/包名直接在行内可读。
+// F4：`system-prompt` 与 `context` 拆为**不同渲染分支**（不再共用一行语义）。
 
-import { BotIcon, ChevronDownIcon } from "lucide-react";
+import { BotIcon, ScrollTextIcon } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { Badge } from "@/components/ui/badge";
-import { projectChatView } from "@/lib/chat-view";
+import { ChatProcessRow } from "@/components/workspace/chat-process-row";
+import { contextSource, projectChatView } from "@/lib/chat-view";
 import { createArtifactFilePathLinkResolver } from "@/lib/tool-row/artifact-links";
-import { cn } from "@/lib/utils";
 import { type Artifact, type ChatMessage } from "@/data/mock";
 
 import {
@@ -44,83 +45,86 @@ export function HistoryContextMessageCard({
   );
   const panelId = `${message.id}-context-panel`;
   const view = projectChatView(message, { expanded });
-  const toggleHint = expanded
+  const isSystemPrompt = view.systemPrompt;
+  const title = isSystemPrompt
+    ? t("panels.messages.systemPrompt.title")
+    : t("panels.messages.contextRow.title");
+  const toggleLabel = expanded
     ? t(
-        view.systemPrompt
+        isSystemPrompt
           ? "panels.messages.systemPrompt.collapse"
           : "panels.messages.contextRow.collapse",
       )
     : t(
-        view.systemPrompt
+        isSystemPrompt
           ? "panels.messages.systemPrompt.expand"
           : "panels.messages.contextRow.expand",
       );
+  const streaming = message.id === streamingMessageId;
+  const flowKey = `${isSystemPrompt ? "system-prompt" : "context"}:${message.id}`;
 
   return (
-    <div className="relative w-full max-w-[48rem]">
-      <div className="overflow-hidden rounded-[1rem] border border-accent-teal/14 bg-[linear-gradient(180deg,rgba(143,208,198,0.08),rgba(143,208,198,0.02))] px-4 py-3.5 shadow-[0_16px_40px_rgba(0,0,0,0.12)]">
-        <button
-          type="button"
-          aria-expanded={expanded}
-          aria-controls={panelId}
-          onClick={() => setExpanded((v) => !v)}
-          className="flex w-full items-start gap-3 text-left"
-        >
-          <div className="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-field border border-accent-teal/20 bg-accent-teal/10 text-accent-teal">
-            <BotIcon size={14} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <div
-                className="app-text-13 font-semibold text-foreground"
-                id={labelId}
-              >
-                {view.systemPrompt
-                  ? t("panels.messages.systemPrompt.title")
-                  : message.author}
-              </div>
-              <div
-                className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground"
-                id={metaId}
-              >
-                {message.label}
-              </div>
-              {message.id === streamingMessageId ? (
-                <Badge className="border-transparent bg-accent-teal/12 text-accent-teal">
+    <div className="w-full min-w-0" data-chat-anchor-key={message.id}>
+      <span className="sr-only" id={labelId}>
+        {title}
+      </span>
+      <span className="sr-only" id={metaId}>
+        {message.label}
+      </span>
+      <div id={statusId}>
+        <ChatProcessRow
+          anchorKey={message.id}
+          expandable
+          expanded={expanded}
+          flowKey={flowKey}
+          icon={
+            isSystemPrompt ? (
+              <ScrollTextIcon className="size-4 text-accent-teal" />
+            ) : (
+              <BotIcon className="size-4 text-accent-teal" />
+            )
+          }
+          onToggle={() => setExpanded((value) => !value)}
+          panelId={panelId}
+          rowKind={isSystemPrompt ? "system-prompt" : "context"}
+          summary={isSystemPrompt ? undefined : contextSource(message)}
+          title={title}
+          titleClassName="text-muted-foreground"
+          toggleLabel={toggleLabel}
+          trailing={
+            streaming ? (
+              <>
+                <span
+                  aria-hidden="true"
+                  className="size-1.5 shrink-0 animate-pulse rounded-full bg-accent-teal"
+                />
+                <span className="sr-only">
                   {t("panels.messages.messageCard.streamingBadge")}
-                </Badge>
-              ) : null}
+                </span>
+              </>
+            ) : null
+          }
+        >
+          {/* 展开面板：§8.5 代码面板形制（无边框 + 底色分隔 + max-height 141px）。 */}
+          <div
+            className="mt-1 max-h-[141px] overflow-auto rounded-lg bg-surface-strong px-3 py-2 font-mono app-text-11"
+            data-chat-panel="context"
+          >
+            <div className="space-y-2">
+              {view.nodes.map((node) => (
+                <div key={node.key}>
+                  {renderMessageSegment(node.segment, {
+                    interrupted: message.interrupted === true,
+                    streaming: false,
+                    onSelectArtifact,
+                    resolveFilePathLink,
+                  })}
+                </div>
+              ))}
             </div>
-            <div className="mt-0.5 app-text-11 text-muted-foreground">
-              {toggleHint}
-            </div>
+            {renderRelatedArtifactSection(relatedEvidence, onSelectArtifact)}
           </div>
-          <ChevronDownIcon
-            size={16}
-            className={cn(
-              "mt-2 shrink-0 text-muted-foreground transition-transform duration-200",
-              expanded ? "rotate-0" : "-rotate-90",
-            )}
-          />
-        </button>
-        <div className="relative mt-3" hidden={!expanded} id={panelId}>
-          <div className="pointer-events-none absolute left-0 top-4 bottom-4 w-px bg-gradient-to-b from-accent-teal/0 via-accent-teal/18 to-accent-teal/0" />
-
-          <div className="relative space-y-4" id={statusId}>
-            {view.nodes.map((node) => (
-              <div key={node.key}>
-                {renderMessageSegment(node.segment, {
-                  interrupted: message.interrupted === true,
-                  streaming: message.id === streamingMessageId,
-                  onSelectArtifact,
-                  resolveFilePathLink,
-                })}
-              </div>
-            ))}
-          </div>
-
-          {renderRelatedArtifactSection(relatedEvidence, onSelectArtifact)}
-        </div>
+        </ChatProcessRow>
       </div>
     </div>
   );

@@ -94,27 +94,33 @@ test.beforeEach(async ({ page }) => {
 test("G1: reasoning renders live before the answer chunk, then completes", async ({
   page,
 }) => {
-  await sendPrompt(page, "capital of france (reasoning)");
+  // 关键字 "hold" 选中间隔放大的推理脚本：展开断言必须落在 done 之前的流式窗口内
+  // （done 之后本回合过程行随历史刷新收敛，推理行不再驻留页面）。
+  await sendPrompt(page, "capital of france (reasoning hold)");
 
   // reasoning row appears while the answer is still pending
-  // 限定在消息时间线内：composer 的推理强度选择器（disabled 的 “Reasoning”
-  // listbox 按钮）与消息内的推理面板开关同名，全局查询会命中两个元素。
-  const reasoningButton = page
-    .getByRole("log")
-    .getByRole("button", { name: /Reasoning/ });
-  await expect(reasoningButton).toBeVisible({ timeout: 15_000 });
-  await expect(
-    page.getByText("Checking whether the user request needs a tool").first(),
-  ).toBeVisible();
+  // 批次 B2：推理行收敛为 24px 单行（标题 + 单行摘要），断言走语义锚点。
+  const reasoningRow = page.locator('[data-chat-row="reasoning"]').first();
+  await expect(reasoningRow).toBeVisible({ timeout: 15_000 });
+  await expect(reasoningRow).toHaveAttribute("data-chat-row-state", "closed");
+  await expect(reasoningRow.locator('[data-chat-row-summary="true"]')).toContainText(
+    "Checking whether the user request needs a tool",
+  );
+
+  // §13 C2：流式期恒不折叠，本回合不产出 turn-process 统计行
+  await expect(page.locator('[data-chat-flow-kind="turn-process"]')).toHaveCount(0);
 
   // reasoning is still not followed by the answer yet
   await expect(page.getByText("The capital of France is Paris.")).not.toBeVisible();
 
   // expand reasoning to reveal the full transcript
-  await reasoningButton.click();
-  const reasoningTranscript = page.locator("pre");
-  await expect(reasoningTranscript).toContainText("No tool needed, drafting the answer");
-  await expect(reasoningTranscript).toContainText("Writing the final answer now");
+  // 批次 B2：展开区改 Markdown 排版（不再有独立 <pre>），内容容器锚点
+  // `data-chat-row-panel`，不依赖 class 断言。
+  await reasoningRow.locator("button").first().click();
+  await expect(reasoningRow).toHaveAttribute("data-chat-row-state", "open");
+  const reasoningPanel = reasoningRow.locator('[data-chat-row-panel="reasoning"]');
+  await expect(reasoningPanel).toContainText("No tool needed, drafting the answer");
+  await expect(reasoningPanel).toContainText("Writing the final answer now");
 
   // answer chunk lands afterwards
   await expect(page.getByText("The capital of France is Paris.")).toBeVisible({
@@ -122,7 +128,7 @@ test("G1: reasoning renders live before the answer chunk, then completes", async
   });
 });
 
-test("G2: tool card walks Started -> Running -> Finished with visible result", async ({
+test("G2: tool card walks Started -> Running -> Finished；折叠态单行，展开后可见结果", async ({
   page,
 }) => {
   await sendPrompt(page, "use the tool to look it up");
@@ -130,8 +136,11 @@ test("G2: tool card walks Started -> Running -> Finished with visible result", a
   // phase strip reports the tool phase
   await expect(page.getByText("Calling tools…")).toBeVisible({ timeout: 15_000 });
 
+  // E1（§8.4）：工具行可用 flow 锚点定位；
   // tool identity is shown (exact match: the sr-only status live region also contains the name)
-  await expect(page.getByText("web_search", { exact: true })).toBeVisible();
+  const toolRow = page.locator('[data-chat-flow-kind="tool-call"]').first();
+  await expect(toolRow).toBeVisible({ timeout: 15_000 });
+  await expect(toolRow.getByText("web_search", { exact: true })).toBeVisible();
 
   // badge lifecycle
   const startedBadge = page.getByText("Started", { exact: true }).first();
@@ -142,9 +151,14 @@ test("G2: tool card walks Started -> Running -> Finished with visible result", a
     timeout: 10_000,
   });
 
-  // tool args are displayed (collapsible section) and the result shows
+  // B4（§5.5）：折叠态只有 24px 单行摘要（参数/目标可见），结果收进展开面板
   await expect(page.getByText(/capital of France/).first()).toBeVisible();
-  await expect(page.getByText("Paris", { exact: true }).first()).toBeVisible();
+  const resultText = page.getByText("Paris", { exact: true }).first();
+  await expect(resultText).toBeHidden();
+
+  // 展开入口有两个（前导图标 / 右侧 chevron）；这里走键盘可达的那个。
+  await toolRow.locator('[data-chat-row-toggle="chevron"]').click();
+  await expect(resultText).toBeVisible();
 
   // final assistant text arrives
   await expect(page.getByText("Paris is the capital of France.")).toBeVisible({
