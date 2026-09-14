@@ -193,8 +193,13 @@ const (
 	// arguments).
 	outputBudgetEscalationMaxCount = 2
 
-	// outputBudgetEscalationCeiling caps the widened output budget.
-	outputBudgetEscalationCeiling = 32768
+	// outputBudgetEscalationCeiling caps the widened output budget. Aligned with
+	// the caller-side one-shot escalation target (EscalatedMaxTokens): for a
+	// request whose budget is above the capped default the loop deliberately does
+	// not escalate (shouldEscalate* requires MaxTokens <= CappedDefaultMaxTokens),
+	// so this ceiling is the only lever left and must not stop below the budget
+	// the loop itself would have used.
+	outputBudgetEscalationCeiling = EscalatedMaxTokens
 
 	// degenerateOutputReplyMaxStreak bounds how many consecutive degenerate
 	// replies (reasoning-only / empty) a single call may sample before the retry

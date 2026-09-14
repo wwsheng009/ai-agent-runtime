@@ -909,6 +909,18 @@ func TestEscalateOutputBudgetForDegenerateReply(t *testing.T) {
 	require.True(t, escalateOutputBudgetForDegenerateReply(&truncatedBudget, 0, truncatedToolCall))
 	require.Equal(t, 8000, truncatedBudget)
 
+	// 天花板与 caller 侧的一次性升级目标对齐（EscalatedMaxTokens）：显式预算
+	// （loop 按设计不做一次性升级）也必须能爬到同一个目标，而不是停在旧值 32768。
+	require.Equal(t, EscalatedMaxTokens, outputBudgetEscalationCeiling)
+	explicitBudget := 20000
+	require.True(t, escalateOutputBudgetForDegenerateReply(&explicitBudget, 0, truncatedToolCall))
+	require.Equal(t, 40000, explicitBudget)
+	require.True(t, escalateOutputBudgetForDegenerateReply(&explicitBudget, 1, truncatedToolCall))
+	require.Equal(t, EscalatedMaxTokens, explicitBudget)
+	require.False(t, escalateOutputBudgetForDegenerateReply(&explicitBudget, 2, truncatedToolCall),
+		"the per-call escalation count bounds the widening")
+	require.Equal(t, EscalatedMaxTokens, explicitBudget)
+
 	// Malformed tool arguments are usually the same cut-off markup: the widened
 	// budget lets the next sample finish the JSON instead of replaying the same
 	// truncated completion.
@@ -941,6 +953,32 @@ func TestEscalateOutputBudgetForDegenerateReply(t *testing.T) {
 
 	require.False(t, escalateOutputBudgetForDegenerateReply(nil, 0, reasoningOnly))
 	require.False(t, escalateOutputBudgetForDegenerateReply(&maxTokens, 0, nil))
+}
+
+// TestIsTruncatedToolCallError pin 聚合校验层截断形态的可判定性：响应在到达
+// caller 之前就被丢弃，错误对象是上层唯一的预算信号来源；判定还必须穿透
+// runtime 终态（retryExhaustedError）吞掉内层分类的那层包装。
+func TestIsTruncatedToolCallError(t *testing.T) {
+	truncated := validateStreamingAggregateResponse("openai", []byte(strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"content":"writing"},"finish_reason":"length"}]}`,
+		"data: [DONE]",
+	}, "\n\n")), map[string]interface{}{
+		"content":       "writing",
+		"finish_reason": "length",
+		"tool_calls":    []map[string]interface{}{{"id": "call_1"}},
+	})
+	require.Error(t, truncated)
+	require.Equal(t, "truncated_tool_call", classifyRetryableLLMError(truncated).Reason)
+	require.True(t, IsTruncatedToolCallError(truncated))
+	require.True(t, IsTruncatedToolCallError(
+		markRetryExhausted("provider call failed after retries", 3, truncated)),
+		"the terminal runtime wrapper must stay classifiable")
+
+	require.False(t, IsTruncatedToolCallError(nil))
+	require.False(t, IsTruncatedToolCallError(fmt.Errorf("rate_limit: too many requests")))
+	require.False(t, IsTruncatedToolCallError(fmt.Errorf(
+		"openai_stream_protocol_error: code=invalid_tool_arguments: tool call 0 (write) has incomplete or non-object JSON arguments")),
+		"the adapter class is matched by its Truncated field, not by reason")
 }
 
 // TestTrackDegenerateOutputReplyBoundsConsecutiveStreak pins the fast-fail

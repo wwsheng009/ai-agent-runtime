@@ -80,6 +80,54 @@ func (p *malformedToolCallProvider) GetCapabilities() *llm.ModelCapabilities {
 
 func (p *malformedToolCallProvider) CheckHealth(ctx context.Context) error { return nil }
 
+// aggregateTruncatedToolCallProvider 前几次 Call 返回聚合校验层的
+// truncated_tool_call（响应带工具调用且 finish_reason=length，整条响应被丢弃），
+// 之后返回正常响应。
+type aggregateTruncatedToolCallProvider struct {
+	name          string
+	truncatedRuns int
+	callCount     int
+	requests      []*llm.LLMRequest
+	responses     []*llm.LLMResponse
+}
+
+func (p *aggregateTruncatedToolCallProvider) Name() string { return p.name }
+
+func (p *aggregateTruncatedToolCallProvider) DefaultModelName() string { return "test-model" }
+
+func (p *aggregateTruncatedToolCallProvider) Call(ctx context.Context, req *llm.LLMRequest) (*llm.LLMResponse, error) {
+	p.requests = append(p.requests, cloneLLMRequest(req))
+	p.callCount++
+	if p.callCount <= p.truncatedRuns {
+		return nil, fmt.Errorf("truncated_tool_call: incomplete tool call markup in aggregated assistant response")
+	}
+	if idx := p.callCount - 1 - p.truncatedRuns; idx < len(p.responses) {
+		return p.responses[idx], nil
+	}
+	return &llm.LLMResponse{Content: "No more responses configured.", Model: "test-model"}, nil
+}
+
+func (p *aggregateTruncatedToolCallProvider) Stream(ctx context.Context, req *llm.LLMRequest) (<-chan llm.StreamChunk, error) {
+	ch := make(chan llm.StreamChunk, 1)
+	ch <- llm.StreamChunk{Type: llm.EventTypeDone, Done: true}
+	close(ch)
+	return ch, nil
+}
+
+func (p *aggregateTruncatedToolCallProvider) CountTokens(text string) int { return len(text) / 4 }
+
+func (p *aggregateTruncatedToolCallProvider) GetCapabilities() *llm.ModelCapabilities {
+	return &llm.ModelCapabilities{
+		MaxContextTokens:  128000,
+		MaxOutputTokens:   4096,
+		SupportsTools:     true,
+		SupportsStreaming: true,
+		SupportsJSONMode:  true,
+	}
+}
+
+func (p *aggregateTruncatedToolCallProvider) CheckHealth(ctx context.Context) error { return nil }
+
 // findToolResultMessages 提取请求中的 tool_role 消息。
 func findToolResultMessages(req *llm.LLMRequest) []string {
 	var contents []string
@@ -439,4 +487,47 @@ func TestReActLoop_TruncatedToolCallEscalatesBudgetThenReprompts(t *testing.T) {
 	require.Contains(t, contents[0], "cut off by the output budget")
 	require.Contains(t, contents[0], "finish_reason=length")
 	require.NotContains(t, contents[0], "not valid JSON")
+}
+
+// TestReActLoop_AggregatedTruncatedToolCallEscalatesBudget 固化聚合校验层
+// truncated_tool_call 的升级出口：响应在到达 caller 之前就被丢弃，finish_reason
+// 只存在于错误对象里，而该形态既不满足 MalformedToolCallError 判据（无法升级、
+// 无法 re-prompt），也没有 turn 自动重跑通道——此前只能等内层退化 streak 耗尽后
+// 终止整轮。现在它复用同一套一次性 8k→64k escalate：前 3 次调用跑在 8k，
+// 升级后的 3 次跑在 64k；升级后仍截断则整轮终态（聚合形态没有可回注的工具调用）。
+func TestReActLoop_AggregatedTruncatedToolCallEscalatesBudget(t *testing.T) {
+	t.Setenv(llm.EnvDisableMaxTokensCap, "")
+	t.Setenv(llm.EnvMaxOutputTokens, "")
+	t.Setenv(llm.EnvAICLIMaxOutputTokens, "")
+
+	llmRuntime := llm.NewLLMRuntime(nil)
+	provider := &aggregateTruncatedToolCallProvider{name: "test-provider", truncatedRuns: 6}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+	agent := NewAgentWithLLM(&Config{
+		Name: "aggregate-truncated-agent", Provider: "test-provider", Model: "test-model",
+		MaxSteps: 5, DefaultMaxTokens: llm.CappedDefaultMaxTokens,
+	}, &RecoveringMCPManager{}, llmRuntime)
+	bus := runtimeevents.NewBus()
+	var escalated runtimeevents.Event
+	bus.Subscribe("llm.max_output_tokens.escalated", func(event runtimeevents.Event) { escalated = event })
+	agent.SetEventBus(bus)
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{MaxSteps: 5, EnableToolCalls: true})
+
+	_, err := loop.Run(context.Background(), "write the file")
+
+	require.Error(t, err, "升级后仍截断：聚合形态没有 re-prompt 通道，整轮终态")
+	require.Equal(t, 6, provider.callCount)
+	require.Len(t, provider.requests, 6)
+
+	// 首次 think 保持 8k 槽位预留；升级只发生一次（第 4~6 次调用）。
+	require.Equal(t, llm.CappedDefaultMaxTokens, provider.requests[0].MaxTokens)
+	for _, index := range []int{3, 4, 5} {
+		require.Equal(t, llm.EscalatedMaxTokens, provider.requests[index].MaxTokens)
+	}
+	require.Equal(t, true, provider.requests[3].Metadata["max_output_tokens_escalated"])
+
+	require.Equal(t, "llm.max_output_tokens.escalated", escalated.Type)
+	require.Equal(t, "truncated_tool_call", escalated.Payload["reason"])
+	require.Equal(t, llm.CappedDefaultMaxTokens, escalated.Payload["from_max_tokens"])
+	require.Equal(t, llm.EscalatedMaxTokens, escalated.Payload["to_max_tokens"])
 }

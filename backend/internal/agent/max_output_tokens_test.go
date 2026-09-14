@@ -97,3 +97,50 @@ func TestShouldEscalateTruncatedToolCallBudget(t *testing.T) {
 		t.Fatal("did not expect escalation without a request")
 	}
 }
+
+// TestShouldEscalateAggregatedTruncatedToolCallBudget 验证聚合校验层丢弃的
+// truncated_tool_call（响应带工具调用且 finish_reason=length）也能触发同一套
+// 一次性 8k→64k 升级。这条通道此前只有 MalformedToolCallError 可达：聚合层
+// 丢整条响应的形态没有升级出口，同预算重采样必然再次截断，只能等内层采样
+// 耗尽后整轮失败。
+func TestShouldEscalateAggregatedTruncatedToolCallBudget(t *testing.T) {
+	t.Setenv(llm.EnvDisableMaxTokensCap, "")
+	t.Setenv(llm.EnvMaxOutputTokens, "")
+	t.Setenv(llm.EnvAICLIMaxOutputTokens, "")
+
+	truncated := fmt.Errorf("truncated_tool_call: incomplete tool call markup in aggregated assistant response")
+	req := &llm.LLMRequest{MaxTokens: llm.CappedDefaultMaxTokens}
+	if !shouldEscalateTruncatedToolCallBudget(req, truncated) {
+		t.Fatal("expected capped request with an aggregated truncated tool call to escalate")
+	}
+	// runtime 的终态错误带着包装返回，判定必须仍然可达。
+	if !shouldEscalateTruncatedToolCallBudget(req, fmt.Errorf("LLM call failed after retries: %w", truncated)) {
+		t.Fatal("expected wrapped aggregated truncated tool call to escalate")
+	}
+
+	req.Metadata = map[string]interface{}{"max_output_tokens_escalated": true}
+	if shouldEscalateTruncatedToolCallBudget(req, truncated) {
+		t.Fatal("did not expect a second escalate after the flag is set")
+	}
+	req.Metadata = nil
+	req.MaxTokens = llm.EscalatedMaxTokens
+	if shouldEscalateTruncatedToolCallBudget(req, truncated) {
+		t.Fatal("did not expect escalate when the budget is already widened")
+	}
+
+	// 其它失败类别不受影响：空回复、传输失败、语法退化都不扩大预算。
+	req.MaxTokens = llm.CappedDefaultMaxTokens
+	for _, other := range []error{
+		fmt.Errorf("empty_reply: stream ended without substantive output"),
+		fmt.Errorf("transport: connection reset by peer"),
+		&llmadapter.MalformedToolCallError{
+			Kind:         "openai_stream_protocol_error",
+			Code:         "invalid_tool_arguments",
+			FinishReason: "tool_calls",
+		},
+	} {
+		if shouldEscalateTruncatedToolCallBudget(req, other) {
+			t.Fatalf("did not expect budget escalation for %v", other)
+		}
+	}
+}

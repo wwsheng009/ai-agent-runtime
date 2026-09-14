@@ -1911,10 +1911,11 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		})
 		response, err = loop.llmRuntime.Call(callCtx, req)
 	}
-	// 参数被输出预算截断（invalid_tool_arguments + finish_reason=length）走不到
-	// 下面那条成功路径：响应没有返回，finish_reason 只存在于错误对象里。同预算
-	// 重采样必然再次截断，所以这里复用同一套一次性 escalate，把 8k 槽位预留抬到
-	// 64k 后重试；只有这次仍然截断才会回到 re-prompt / 错误路径。
+	// 参数被输出预算截断（invalid_tool_arguments + finish_reason=length）或整条
+	// 响应因工具调用未闭合被丢弃（truncated_tool_call）都走不到下面那条成功路径：
+	// 响应没有返回，finish_reason 只存在于错误对象里。同预算重采样必然再次截断，
+	// 所以这里复用同一套一次性 escalate，把 8k 槽位预留抬到 64k 后重试；只有这次
+	// 仍然截断才会回到 re-prompt / 错误路径。
 	if err != nil && shouldEscalateTruncatedToolCallBudget(req, err) {
 		escalated := llm.EscalatedRequestMaxTokens(req.MaxTokens, 0)
 		if escalated > req.MaxTokens {
@@ -5571,20 +5572,24 @@ func shouldEscalateMaxOutputTokens(req *llm.LLMRequest, response *llm.LLMRespons
 	return llm.EscalatedRequestMaxTokens(req.MaxTokens, 0) > req.MaxTokens
 }
 
-// shouldEscalateTruncatedToolCallBudget reports whether a malformed-tool-call
-// error was caused by the output budget (finish_reason=length) rather than a
-// degenerate JSON literal. Replaying the same capped budget would truncate
-// again, so the request is eligible for the same one-shot 8k→64k escalation as
-// shouldEscalateMaxOutputTokens; the only difference is where the signal lives
-// (in the error object, because the truncated response never reached the
-// caller). Degenerate JSON literals stay on the sampling-retry + re-prompt path
-// and must not widen the budget.
+// shouldEscalateTruncatedToolCallBudget reports whether a tool-call truncation
+// reported through the error channel was caused by the output budget
+// (finish_reason=length) rather than a degenerate JSON literal. Replaying the
+// same capped budget would truncate again, so the request is eligible for the
+// same one-shot 8k→64k escalation as shouldEscalateMaxOutputTokens; the only
+// difference is where the signal lives (in the error object, because the
+// truncated response never reached the caller). Two error shapes carry it: the
+// adapter's MalformedToolCallError with Truncated set (arguments cut mid-JSON)
+// and the aggregate validator's truncated_tool_call reason (response discarded
+// while a tool call was still open). Degenerate JSON literals stay on the
+// sampling-retry + re-prompt path and must not widen the budget.
 func shouldEscalateTruncatedToolCallBudget(req *llm.LLMRequest, err error) bool {
 	if req == nil || err == nil {
 		return false
 	}
 	var malformed *llmadapter.MalformedToolCallError
-	if !stderrors.As(err, &malformed) || !malformed.Truncated {
+	truncated := stderrors.As(err, &malformed) && malformed.Truncated
+	if !truncated && !llm.IsTruncatedToolCallError(err) {
 		return false
 	}
 	if req.Metadata != nil {

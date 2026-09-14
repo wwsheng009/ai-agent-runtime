@@ -777,6 +777,23 @@ func ClassifyFailureCode(err error) string {
 	return classifyLLMFailureCode(err, classifyRetryableLLMError(err))
 }
 
+// IsTruncatedToolCallError reports whether err belongs to the aggregated-response
+// truncation class (retry reason truncated_tool_call): the completion budget cut
+// a tool call off, so the whole response was discarded by the aggregate
+// validator before it could reach the caller. The budget-bound signal therefore
+// only lives in the error object, and the agent loop uses this predicate to
+// apply the same one-shot max_tokens escalation it applies on the success path
+// (shouldEscalateTruncatedToolCallBudget). The wrap chain is walked because the
+// runtime's terminal retryExhaustedError swallows the inner classification.
+func IsTruncatedToolCallError(err error) bool {
+	for candidate := err; candidate != nil; candidate = stderrs.Unwrap(candidate) {
+		if classifyRetryableLLMError(candidate).Reason == "truncated_tool_call" {
+			return true
+		}
+	}
+	return false
+}
+
 // DiagnoseFailure classifies an LLM failure and explains the safe recovery
 // action. Retryable describes whether a fresh bounded attempt can help; it is
 // false after retry exhaustion and for account, permission, and request errors.
