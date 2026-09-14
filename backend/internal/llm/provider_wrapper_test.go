@@ -436,6 +436,75 @@ func TestProviderWrapper_CallRejectsEmptyChoices(t *testing.T) {
 	require.Contains(t, err.Error(), "empty_provider_choices")
 }
 
+// TestProviderWrapper_CallRetriesTransientHTTP400 复现网关把上游瞬时故障包在
+// 400 里的场景：报文带 "bad gateway" 时第一次尝试必须重试，而不是直接终态。
+func TestProviderWrapper_CallRetriesTransientHTTP400(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		if requests == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":{"type":"server_error","message":"bad gateway: upstream connect error"}}`)
+			return
+		}
+		fmt.Fprint(w, `{"id":"chatcmpl-retry","object":"chat.completion","created":1,"model":"gpt-4o-mini","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:       "openai",
+		BaseURL:    server.URL,
+		MaxRetries: 2,
+	})
+	require.NoError(t, err)
+
+	resp, err := provider.Call(context.Background(), &LLMRequest{
+		Model: "gpt-4o-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, 2, requests, "a transient 400 must be retried instead of failing the call")
+}
+
+// TestProviderWrapper_CallRetriesEmptyProviderChoices 验证 200 + 空 choices 的
+// 退化采样会被重试（短退避），而不是当次直接失败。
+func TestProviderWrapper_CallRetriesEmptyProviderChoices(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		if requests == 1 {
+			fmt.Fprint(w, `{"id":"chatcmpl-empty","object":"chat.completion","created":1,"model":"gpt-4o-mini","choices":null,"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`)
+			return
+		}
+		fmt.Fprint(w, `{"id":"chatcmpl-retry","object":"chat.completion","created":1,"model":"gpt-4o-mini","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:       "openai",
+		BaseURL:    server.URL,
+		MaxRetries: 2,
+	})
+	require.NoError(t, err)
+
+	resp, err := provider.Call(context.Background(), &LLMRequest{
+		Model: "gpt-4o-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, 2, requests, "an empty choices reply must be retried as a degenerate sample")
+}
+
 func TestNewProvider_UsesConfiguredAPIPathOverride(t *testing.T) {
 	var capturedPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2099,7 +2168,62 @@ func TestProviderWrapper_Call_RetriesAfterReasoningOnlyEmptyReplyWithoutContent(
 	assert.Equal(t, 2, requests)
 }
 
-func TestProviderWrapper_Call_StreamRejectsTruncatedToolCallMarkup(t *testing.T) {
+// TestProviderWrapper_Call_StopsAfterConsecutiveDegenerateReplies pins the
+// fast-fail bound end to end: with a generous retry budget, a call whose every
+// sample returns reasoning only (finish_reason=length, empty content) must stop
+// after the streak bound instead of replaying the identical request for the
+// whole budget (observed live: ~64s per attempt across 10 attempts). The
+// surfaced error must stay terminal for the outer retry loop.
+func TestProviderWrapper_Call_StopsAfterConsecutiveDegenerateReplies(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+			"id":"chatcmpl-degenerate",
+			"object":"chat.completion",
+			"created":1,
+			"model":"deepseek-v4-pro",
+			"choices":[
+				{
+					"index":0,
+					"message":{
+						"role":"assistant",
+						"content":"",
+						"reasoning_content":"继续思考。"
+					},
+					"finish_reason":"length"
+				}
+			],
+			"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}
+		}`)
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:       "openai",
+		BaseURL:    server.URL,
+		MaxRetries: 9,
+	})
+	require.NoError(t, err)
+
+	resp, err := provider.Call(context.Background(), &LLMRequest{
+		Model: "deepseek-v4-pro",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "stay degenerate",
+		}},
+	})
+	require.Error(t, err)
+	require.Nil(t, resp)
+	assert.Equal(t, degenerateOutputReplyMaxStreak, requests,
+		"the loop must stop at the streak bound instead of burning the whole retry budget")
+	assert.Contains(t, err.Error(), "aborted after repeated degenerate replies")
+	assert.False(t, isHandoffEligibleError(err),
+		"a stopped degenerate streak must not be handed to the outer retry loop")
+}
+
+func TestProviderWrapper_Call_StreamRetriesTruncatedToolCallMarkup(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
@@ -2131,7 +2255,63 @@ func TestProviderWrapper_Call_StreamRejectsTruncatedToolCallMarkup(t *testing.T)
 	require.Error(t, err)
 	assert.Nil(t, resp)
 	assert.Contains(t, err.Error(), "truncated_tool_call")
-	assert.Equal(t, 1, requests, "truncated tool calls should surface immediately instead of retrying the same oversized write")
+	assert.Greater(t, requests, 1,
+		"a truncated tool call is retryable: the next sample may complete the call")
+	assert.LessOrEqual(t, requests, degenerateOutputReplyMaxStreak,
+		"the consecutive-degenerate bound still caps the replay of the same truncated sample")
+}
+
+func TestProviderWrapper_Call_StreamRecoversTruncatedToolCallWithWidenedBudget(t *testing.T) {
+	requests := 0
+	var secondMaxTokens float64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requests == 1 {
+			fmt.Fprint(w, strings.Join([]string{
+				`data: {"choices":[{"index":0,"delta":{"content":"<tool_call>write<arg_key>file_path</arg_key><arg_value>C:\\temp\\chapter7.md</arg_value><arg_key>content</arg_key><arg_value># 第7章"},"finish_reason":"length"}]}`,
+				"",
+				`data: [DONE]`,
+				"",
+			}, "\n"))
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var payload map[string]interface{}
+		_ = json.Unmarshal(body, &payload)
+		secondMaxTokens, _ = payload["max_tokens"].(float64)
+		fmt.Fprint(w, strings.Join([]string{
+			`data: {"choices":[{"index":0,"delta":{"content":"<tool_call>write<arg_key>file_path</arg_key><arg_value>C:\\temp\\chapter7.md</arg_value><arg_key>content</arg_key><arg_value># 第7章</arg_value></tool_call>"},"finish_reason":"tool_calls"}]}`,
+			"",
+			`data: [DONE]`,
+			"",
+		}, "\n"))
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:       "openai",
+		BaseURL:    server.URL,
+		MaxRetries: 2,
+	})
+	require.NoError(t, err)
+
+	resp, err := provider.Call(context.Background(), &LLMRequest{
+		Model:     "z-ai/glm4.7",
+		Stream:    true,
+		MaxTokens: 2048,
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "写入文件",
+		}},
+	})
+	require.NoError(t, err, "the retry must recover once the model completes the tool call")
+	require.NotNil(t, resp)
+	assert.Equal(t, 2, requests)
+	assert.Equal(t, float64(4096), secondMaxTokens,
+		"the retry must carry the widened output budget")
+	require.Len(t, resp.ToolCalls, 1)
+	assert.Equal(t, "write", resp.ToolCalls[0].Name)
 }
 
 func TestProviderWrapper_Call_StreamPreservesLengthFinishReason(t *testing.T) {

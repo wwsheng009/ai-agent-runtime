@@ -340,7 +340,9 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 
 	var lastError error
 	maxTokensRecovered := false
+	outputBudgetEscalations := 0
 	consecutiveHandoffs := 0
+	degenerateReplies := 0
 	for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
 		retryInfo.Attempt = attempt
@@ -395,6 +397,38 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 				}
 				retryInfo.MaxAttempts = activeMaxAttempts
 				continue
+			}
+			// A reasoning-only empty reply or a truncated tool call burned the
+			// whole completion budget. Widen the budget for the next attempt (the
+			// provider rebuilds its body from req on every call) instead of
+			// replaying the identical request.
+			if escalateOutputBudgetForDegenerateReply(&req.MaxTokens, outputBudgetEscalations, err) {
+				outputBudgetEscalations++
+				reportHTTPDebug(attemptCtx, HTTPDebugEvent{
+					Source:      "gateway_client",
+					Phase:       "response",
+					Protocol:    selected.Provider.Type,
+					Model:       model,
+					Attempt:     attempt,
+					MaxAttempts: activeMaxAttempts,
+					Error: fmt.Sprintf("%s: widened max_tokens to %d for the next attempt",
+						classifyRetryableLLMError(err).Reason, req.MaxTokens),
+				})
+				if activeMaxAttempts < attempt+1 {
+					activeMaxAttempts = attempt + 1
+				}
+				if policy.MaxAttempts > 0 && policy.MaxAttempts < activeMaxAttempts {
+					policy.MaxAttempts = activeMaxAttempts
+				}
+				retryInfo.MaxAttempts = activeMaxAttempts
+			}
+			// Stop replaying the same degenerate sample once the budget
+			// widenings are spent: rotating providers or keys cannot fix a
+			// reply whose whole completion budget went to reasoning, and the
+			// attempt budget would otherwise be spent on identical requests.
+			if trackDegenerateOutputReply(&degenerateReplies, err) {
+				return nil, markRetryExhausted(
+					"gateway call aborted after repeated degenerate replies", attempt, err)
 			}
 			// 更新重试信息
 			if selected.GroupName != "" {

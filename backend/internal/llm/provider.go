@@ -1086,8 +1086,10 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 	resolvedModel := p.resolveModel(chatReq.Model)
 	activeMaxAttempts := policy.initialMaxAttempts()
 	maxTokensRecovered := false
+	outputBudgetEscalations := 0
 	var consecutiveHeaderTimeouts int
 	var transportAttempts int
+	var degenerateReplies int
 
 	for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt) && transportAttemptAllowed(policy.MaxTransportAttempts, transportAttempts); attempt++ {
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
@@ -1139,6 +1141,40 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 				policy.MaxAttempts = activeMaxAttempts
 			}
 			continue
+		}
+		// A reasoning-only empty reply or a truncated tool call burned the whole
+		// completion budget (finish_reason=length). Widen the budget handed to
+		// the next attempt instead of replaying the identical one; the retry
+		// loop below keeps its own budget, backoff and events.
+		if escalateOutputBudgetForDegenerateReply(&chatReq.MaxTokens, outputBudgetEscalations, err) {
+			outputBudgetEscalations++
+			reportHTTPDebug(attemptCtx, HTTPDebugEvent{
+				Source:      "provider_wrapper",
+				Phase:       "response",
+				Protocol:    p.config.Type,
+				Model:       resolvedModel,
+				Method:      http.MethodPost,
+				URL:         p.buildURL(p.adapter.GetAPIPath()),
+				Attempt:     attempt,
+				MaxAttempts: activeMaxAttempts,
+				Error: fmt.Sprintf("%s: widened max_tokens to %d for the next attempt",
+					classifyRetryableLLMError(err).Reason, chatReq.MaxTokens),
+			})
+			if activeMaxAttempts < attempt+1 {
+				activeMaxAttempts = attempt + 1
+			}
+			if policy.MaxAttempts > 0 && policy.MaxAttempts < activeMaxAttempts {
+				policy.MaxAttempts = activeMaxAttempts
+			}
+		}
+		// A run of degenerate replies means the same prompt keeps burning its
+		// whole completion budget on reasoning. The budget widening above is the
+		// only lever that changes the next sample; once it is exhausted the loop
+		// stops here with a terminal exhaustion error instead of replaying the
+		// identical request until the attempt budget is gone.
+		if trackDegenerateOutputReply(&degenerateReplies, err) {
+			return nil, markRetryExhausted(
+				"provider call aborted after repeated degenerate replies", attempt, err)
 		}
 		// Charge a transport failure to the transport budget immediately after
 		// the failed call.  prepareRetry waits for the backoff delay, so counting
@@ -1331,8 +1367,10 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 	startedAt := time.Now()
 	activeMaxAttempts := policy.initialMaxAttempts()
 	maxTokensRecovered := false
+	outputBudgetEscalations := 0
 	var consecutiveHeaderTimeouts int
 	var transportAttempts int
+	var degenerateReplies int
 
 	for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt) && transportAttemptAllowed(policy.MaxTransportAttempts, transportAttempts); attempt++ {
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
@@ -1581,6 +1619,48 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 				if policy.MaxTransportAttempts > 0 && transportAttempts >= policy.MaxTransportAttempts {
 					return nil, markRetryExhaustedForNextLayer("streaming aggregate call failed after retries", attempt, lastErr)
 				}
+			}
+			// A reasoning-only empty reply or a truncated tool call burned the
+			// whole completion budget. The streaming body is prebuilt, so
+			// widening the budget requires rebuilding it for the next attempt.
+			if escalateOutputBudgetForDegenerateReply(&request.MaxTokens, outputBudgetEscalations, lastErr) {
+				outputBudgetEscalations++
+				rebuiltAdapterRequest, rebuiltBody, rebuiltBytes, rebuiltHeaders, rebuildErr := buildStreamingBody(request)
+				if rebuildErr != nil {
+					return nil, rebuildErr
+				}
+				adapterRequest = rebuiltAdapterRequest
+				requestBody = rebuiltBody
+				bodyBytes = rebuiltBytes
+				headers = rebuiltHeaders
+				reportHTTPDebug(attemptCtx, HTTPDebugEvent{
+					Source:      "provider_wrapper",
+					Phase:       "response",
+					Protocol:    p.config.Type,
+					Model:       adapterRequest.Model,
+					Method:      http.MethodPost,
+					URL:         url,
+					Attempt:     attempt,
+					MaxAttempts: activeMaxAttempts,
+					Error: fmt.Sprintf("%s: widened max_tokens to %d for the next attempt",
+						classifyRetryableLLMError(lastErr).Reason, request.MaxTokens),
+				})
+				if activeMaxAttempts < attempt+1 {
+					activeMaxAttempts = attempt + 1
+				}
+				if policy.MaxAttempts > 0 && policy.MaxAttempts < activeMaxAttempts {
+					policy.MaxAttempts = activeMaxAttempts
+				}
+			}
+			// Same bound as the non-streaming wrapper loop: once the budget
+			// widenings are spent, repeated degenerate replies get a terminal
+			// exhaustion error instead of another identical replay.
+			if trackDegenerateOutputReply(&degenerateReplies, lastErr) {
+				if emissionState.emittedAnything() {
+					lastErr = withPartialOutputMarker(lastErr)
+				}
+				return nil, markRetryExhausted(
+					"streaming aggregate call aborted after repeated degenerate replies", attempt, lastErr)
 			}
 			retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, lastErr, retryExecutionMeta{
 				Source:        "provider_wrapper",

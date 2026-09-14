@@ -477,9 +477,36 @@ func (p retryPolicy) delayForDecision(attempt int, decision retryDecision) time.
 	}
 	delay = p.randomizeDelay(delay)
 	if decision.Delay > delay {
-		return capServerHintDelay(p.MaxDelay, decision.Delay)
+		delay = capServerHintDelay(p.MaxDelay, decision.Delay)
+	}
+	// Degenerate-output retries (reasoning-only / empty reply) are a fresh
+	// sampling attempt, not upstream congestion: the next draw is what
+	// recovers, so a long backoff only stretches the stall. Observed in the
+	// wild: 30s -> 60s backoff turned a single retry chain into 6+ minutes of
+	// wall clock while every attempt returned the same degenerate sample.
+	if isDegenerateOutputRetryReason(decision.Reason) && delay > degenerateOutputRetryMaxDelay {
+		return degenerateOutputRetryMaxDelay
 	}
 	return delay
+}
+
+// degenerateOutputRetryMaxDelay caps the backoff of retry reasons whose cause
+// is the sampled response itself rather than the transport or the upstream.
+const degenerateOutputRetryMaxDelay = 2 * time.Second
+
+// isDegenerateOutputRetryReason reports whether a retry reason is a degenerate
+// model output (reasoning only / nothing substantive / a tool call cut off
+// mid-markup) that is resolved by sampling again rather than by backing off.
+// truncated_tool_call belongs here because the retry reuses the same prompt and
+// the same completion budget: the next sample is what recovers, so the 2s cap
+// applies instead of the full exponential backoff.
+func isDegenerateOutputRetryReason(reason string) bool {
+	switch strings.TrimSpace(reason) {
+	case "empty_reply", "reasoning_only_empty_reply", "truncated_tool_call":
+		return true
+	default:
+		return false
+	}
 }
 
 // capServerHintDelay 限制服务端 Retry-After 类提示延迟的上限，防止上游
@@ -836,6 +863,13 @@ func classifyLLMFailureCode(err error, decision retryDecision) string {
 	if isQuotaExhaustionError(err) {
 		return "UPSTREAM_QUOTA_EXHAUSTED"
 	}
+	// 报文里的瞬时故障信号优先于裸状态码：网关可能把 "bad gateway" /
+	// "service unavailable" / 连接中断包在 400/404 里。若按状态码上报成
+	// UPSTREAM_INVALID_REQUEST，next_action 会退化为误导性的
+	// "Correct the provider request or unsupported parameters"。
+	if decision.Retryable && (decision.Reason == "transient_stream_or_server" || decision.Reason == "transport") {
+		return "UPSTREAM_UNAVAILABLE"
+	}
 	if statusCode, ok := providerCallHTTPStatus(err); ok {
 		switch {
 		case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
@@ -853,7 +887,12 @@ func classifyLLMFailureCode(err error, decision retryDecision) string {
 		return "STREAM_INTERRUPTED"
 	case "insufficient_system_resource":
 		return "UPSTREAM_UNAVAILABLE"
-	case "malformed_tool_call":
+	case "malformed_tool_call", "truncated_tool_call":
+		// 工具调用标记被 completion 预算截断属于响应完整性问题，不是请求
+		// 参数错误。该 reason 现在是可重试的（见
+		// classifyRetryableLLMErrorWithRules），错误码必须落在
+		// UPSTREAM_INVALID_RESPONSE，否则 next_action 会退化成误导性的
+		// "Correct the provider request or unsupported parameters"。
 		return "UPSTREAM_INVALID_RESPONSE"
 	case "content_filter":
 		return "CONTENT_FILTERED"
@@ -861,7 +900,7 @@ func classifyLLMFailureCode(err error, decision retryDecision) string {
 		return "UPSTREAM_UNAVAILABLE"
 	case "context_canceled":
 		return "USER_CANCELLED"
-	case "invalid_request", "non_retryable_response", "content_inspection_failed", "truncated_tool_call":
+	case "invalid_request", "non_retryable_response", "content_inspection_failed":
 		return "UPSTREAM_INVALID_REQUEST"
 	case "retry_exhausted", "retry_suppressed":
 		// retryExhaustedError/retrySuppressedError 已吞掉底层错误的分类。
@@ -914,6 +953,9 @@ func llmFailureNextAction(code string, decision retryDecision) string {
 	case "CONTENT_FILTERED":
 		return "Do not retry unchanged; revise the request only when policy-compliant output is possible."
 	case "UPSTREAM_INVALID_RESPONSE":
+		if decision.Reason == "truncated_tool_call" {
+			return "Retry with bounded backoff; never execute the incomplete tool call, and split oversized writes into smaller chunks."
+		}
 		if decision.Retryable {
 			return "Retry once with bounded backoff; never execute malformed tool arguments."
 		}
@@ -976,6 +1018,18 @@ func classifyRetryableLLMErrorWithRules(err error, rules []RetryRule) retryDecis
 			Delay:     decisionDelayFromServerHint(err),
 			Reason:    "malformed_tool_call",
 		}
+	case "empty_provider_choices":
+		// 200 携带空/缺失的 choices 数组：这是退化采样（和空流回复同类），
+		// 不是上游拥塞。复用 empty_reply reason 让该错误获得：短采样退避
+		// （isDegenerateOutputRetryReason，2s 上限）、连续退化上限
+		// （trackDegenerateOutputReply，3 次后终止）以及 handoff 资格。
+		// 旧分类会落到 default_retryable：虽然同样重试，但要等完整指数退避，
+		// 且不受退化 streak 保护。
+		return retryDecision{
+			Retryable: true,
+			Delay:     decisionDelayFromServerHint(err),
+			Reason:    "empty_reply",
+		}
 	case "invalid_tool_arguments":
 		// 工具参数本身是非法 JSON：重放同一请求无法修复（模型会再次生成
 		// 同样的非法参数，只会重复烧 token）。不可重试——由执行层降级为
@@ -989,7 +1043,7 @@ func classifyRetryableLLMErrorWithRules(err error, rules []RetryRule) retryDecis
 	lower := strings.ToLower(err.Error())
 	if statusCode, ok := providerCallHTTPStatus(err); ok {
 		switch statusCode {
-		case http.StatusRequestTimeout, http.StatusConflict:
+		case http.StatusRequestTimeout, http.StatusConflict, http.StatusTooEarly:
 			return retryDecision{
 				Retryable: true,
 				Delay:     decisionDelayFromServerHint(err),
@@ -1021,6 +1075,17 @@ func classifyRetryableLLMErrorWithRules(err error, rules []RetryRule) retryDecis
 					Reason:    "invalid_request",
 				}
 			}
+			// 网关可能把上游瞬时故障包在 400 里（例如 body 是 "bad gateway" /
+			// "upstream connect error" / "timed out"）。显式瞬时提示优先于裸状态码：
+			// 重放有机会命中已恢复的上游。判定放在确定性请求缺陷之后，
+			// 因此 invalid_request / content inspection 仍然是终态。
+			if transientUpstreamTextHint(lower) || isRetryableTransportError(err, lower) {
+				return retryDecision{
+					Retryable: true,
+					Delay:     decisionDelayFromServerHint(err),
+					Reason:    "transient_stream_or_server",
+				}
+			}
 			return retryDecision{Retryable: false, Reason: fmt.Sprintf("http_%d", statusCode)}
 		default:
 			if statusCode >= 500 {
@@ -1028,6 +1093,19 @@ func classifyRetryableLLMErrorWithRules(err error, rules []RetryRule) retryDecis
 					Retryable: true,
 					Delay:     decisionDelayFromServerHint(err),
 					Reason:    fmt.Sprintf("http_%d", statusCode),
+				}
+			}
+			// 认证/计费类 4xx 重放无意义，保持终态。
+			if statusCode == http.StatusUnauthorized || statusCode == http.StatusPaymentRequired || statusCode == http.StatusForbidden {
+				return retryDecision{Retryable: false, Reason: fmt.Sprintf("http_%d", statusCode)}
+			}
+			// 其余 4xx（404/405/422/499 等）默认是确定性请求缺陷；只有报文里
+			// 出现显式瞬时提示时才重试。
+			if transientUpstreamTextHint(lower) || isRetryableTransportError(err, lower) {
+				return retryDecision{
+					Retryable: true,
+					Delay:     decisionDelayFromServerHint(err),
+					Reason:    "transient_stream_or_server",
 				}
 			}
 			return retryDecision{Retryable: false, Reason: fmt.Sprintf("http_%d", statusCode)}
@@ -1065,8 +1143,16 @@ func classifyRetryableLLMErrorWithRules(err error, rules []RetryRule) retryDecis
 		}
 	}
 	if containsAny(lower, "truncated_tool_call", "incomplete tool call markup", "truncated before completing a tool call") {
+		// 输出被 completion 预算截断，工具调用标记不完整（常伴
+		// finish_reason=length）。这是采样/预算问题，不是请求参数错误：换一次
+		// 采样有机会生成完整调用，因此标记为可重试。为避免同一截断样本被反复
+		// 重放烧预算，配合三重有界：退化输出短退避
+		// （isDegenerateOutputRetryReason）、连续退化上限
+		// （trackDegenerateOutputReply，3 次）、以及输出预算升级
+		// （escalateOutputBudgetForDegenerateReply）。
 		return retryDecision{
-			Retryable: false,
+			Retryable: true,
+			Delay:     decisionDelayFromServerHint(err),
 			Reason:    "truncated_tool_call",
 		}
 	}
@@ -1112,7 +1198,7 @@ func classifyRetryableLLMErrorWithRules(err error, rules []RetryRule) retryDecis
 		}
 	}
 
-	if containsAny(lower,
+	if transientUpstreamTextHint(lower) || containsAny(lower,
 		"empty_stream_response",
 		"only ping events",
 		"heartbeat timeout",
@@ -1525,6 +1611,33 @@ func isRetryableTransportError(err error, lower string) bool {
 		"temporarily unavailable",
 		"tls handshake timeout",
 		"unexpected eof",
+	) || transientUpstreamTextHint(lower)
+}
+
+// transientUpstreamTextHint reports whether a provider/gateway message carries
+// an explicit upstream-availability signal (rather than a request defect).
+//
+// It is used in two places: as a text-only classification hint when the message
+// carries no HTTP status (bad gateway / service unavailable / overloaded /
+// connection aborted ... usually mean the upstream is briefly unreachable), and
+// as a rescue for terminal 4xx statuses whose body reports a transient failure
+// (a gateway answering 400 while its upstream restarts). Matching is
+// substring-based on a lower-cased message, so the caller keeps the
+// deterministic needles (invalid_request_error, api key, content inspection)
+// ahead of it.
+func transientUpstreamTextHint(lower string) bool {
+	return containsAny(lower,
+		"service unavailable",
+		"bad gateway",
+		"gateway timeout",
+		"upstream connect error",
+		"no healthy upstream",
+		"temporarily unavailable",
+		"overloaded",
+		"connection aborted",
+		"broken pipe",
+		"goaway",
+		"internal server error",
 	)
 }
 

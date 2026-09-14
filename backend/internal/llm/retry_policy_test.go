@@ -583,8 +583,20 @@ func TestValidateStreamingAggregateResponse_ClassifiesReasoningOnlyContentInspec
 	})
 	require.Error(t, truncatedToolCallErr)
 	assert.Contains(t, truncatedToolCallErr.Error(), "truncated_tool_call")
-	assert.False(t, classifyRetryableLLMError(truncatedToolCallErr).Retryable)
-	assert.Equal(t, "truncated_tool_call", classifyRetryableLLMError(truncatedToolCallErr).Reason)
+	truncatedDecision := classifyRetryableLLMError(truncatedToolCallErr)
+	assert.True(t, truncatedDecision.Retryable,
+		"a truncated tool call is a sampling/completion-budget failure: the next sample may complete the call")
+	assert.Equal(t, "truncated_tool_call", truncatedDecision.Reason)
+
+	// 预算耗尽（连续退化上限/外层 MaxAttempts）后仍按 cause 还原为可重试，
+	// 且错误码与 NextAction 不再误导为"修正 provider 请求参数"。
+	truncatedExhausted := markRetryExhausted(
+		"streaming aggregate call aborted after repeated degenerate replies", 3, truncatedToolCallErr)
+	truncatedDiag := DiagnoseFailure(truncatedExhausted)
+	assert.Equal(t, "UPSTREAM_INVALID_RESPONSE", truncatedDiag.ErrorCode)
+	assert.True(t, truncatedDiag.Retryable)
+	assert.Contains(t, truncatedDiag.NextAction, "never execute the incomplete tool call")
+	assert.NotContains(t, truncatedDiag.NextAction, "Correct the provider request")
 }
 
 func TestOpenAIStreamBodyHasCompletionRecognizesNamedTerminalEvents(t *testing.T) {
@@ -698,6 +710,87 @@ func TestClassifyRetryableLLMError_UsageLimitIsQuotaExhausted(t *testing.T) {
 	assert.Equal(t, "quota_exhausted", decision.Reason)
 }
 
+func TestClassifyRetryableLLMError_RescuesTransient4xxStatuses(t *testing.T) {
+	// 网关会把上游瞬时故障包在 4xx 里（自建网关/反代尤其常见）。报文里出现
+	// 显式瞬时信号时按可重试处理，否则重放机会被裸状态码吞掉。
+	for _, body := range []string{
+		"bad gateway: upstream connect error",
+		"upstream connect error: no healthy upstream",
+		"service unavailable",
+		"overloaded",
+		"connection aborted",
+		"i/o timeout",
+	} {
+		err := newProviderHTTPError(http.StatusBadRequest, body, nil)
+		decision := classifyRetryableLLMError(err)
+		assert.True(t, decision.Retryable, body)
+		assert.Equal(t, "transient_stream_or_server", decision.Reason, body)
+		assert.Equal(t, "UPSTREAM_UNAVAILABLE", ClassifyFailureCode(err),
+			"瞬时故障不能被上报成 UPSTREAM_INVALID_REQUEST，否则 next_action 会误导")
+	}
+
+	// 非认证类 4xx（404/422 等）同样按瞬时信号救援。
+	assert.True(t, classifyRetryableLLMError(
+		newProviderHTTPError(http.StatusNotFound, "gateway timeout while contacting upstream", nil)).Retryable)
+	assert.True(t, classifyRetryableLLMError(
+		newProviderHTTPError(http.StatusUnprocessableEntity, "connection reset by peer", nil)).Retryable)
+
+	// 确定性请求缺陷仍然是终态：显式 invalid_request / 内容检查优先于瞬时信号。
+	invalid := newProviderHTTPError(http.StatusBadRequest,
+		`{"error":{"type":"invalid_request_error","message":"missing required parameter: tools"}}`, nil)
+	assert.False(t, classifyRetryableLLMError(invalid).Retryable)
+	assert.Equal(t, "non_retryable_response", classifyRetryableLLMError(invalid).Reason)
+	assert.Equal(t, "UPSTREAM_INVALID_REQUEST", ClassifyFailureCode(invalid))
+
+	inspection := newProviderHTTPError(http.StatusBadRequest, "data_inspection_failed: content flagged", nil)
+	assert.False(t, classifyRetryableLLMError(inspection).Retryable)
+	assert.Equal(t, "content_inspection_failed", classifyRetryableLLMError(inspection).Reason)
+
+	// 认证/计费类 4xx 重放无意义：即使报文里带瞬时字样也保持终态。
+	auth := newProviderHTTPError(http.StatusForbidden, "service unavailable", nil)
+	assert.False(t, classifyRetryableLLMError(auth).Retryable)
+	assert.Equal(t, "http_403", classifyRetryableLLMError(auth).Reason)
+}
+
+func TestClassifyRetryableLLMError_HTTP425TooEarlyIsRetryable(t *testing.T) {
+	// RFC 8470 425 Too Early 是明确的瞬时状态：重放请求即可恢复。
+	decision := classifyRetryableLLMError(newProviderHTTPError(http.StatusTooEarly, "too early", nil))
+	assert.True(t, decision.Retryable)
+	assert.Equal(t, "http_425", decision.Reason)
+}
+
+func TestClassifyRetryableLLMError_EmptyProviderChoicesIsDegenerateEmptyReply(t *testing.T) {
+	err := &emptyProviderChoicesError{model: "gpt-4o-mini"}
+	decision := classifyRetryableLLMError(err)
+	assert.True(t, decision.Retryable)
+	assert.Equal(t, "empty_reply", decision.Reason,
+		"空 choices 是退化采样，必须复用 empty_reply 的短退避与 streak 保护")
+	assert.True(t, isDegenerateOutputRetryReason(decision.Reason))
+	assert.True(t, isHandoffEligibleError(err))
+
+	policy := newProviderRetryPolicy(3, 0, RetryTuning{
+		BaseDelay:     30 * time.Second,
+		MaxDelay:      60 * time.Second,
+		Multiplier:    2,
+		Randomization: -1,
+	}, nil)
+	assert.LessOrEqual(t, policy.delayForDecision(1, decision), degenerateOutputRetryMaxDelay,
+		"退化采样必须用短退避，而不是 30s 起的指数退避")
+}
+
+func TestIsHandoffEligibleError_CoversAllRetryable5xx(t *testing.T) {
+	// 任意 5xx（529 Anthropic overloaded / 520-524 Cloudflare 源站故障 /
+	// 598 等）都应交给外层循环做 provider/key 轮换，而不是内层预算耗尽即终态。
+	for _, status := range []int{http.StatusInternalServerError, 520, 524, 529, 598} {
+		err := newProviderHTTPError(status, "upstream unavailable", nil)
+		require.True(t, classifyRetryableLLMError(err).Retryable, status)
+		assert.True(t, isHandoffEligibleError(err), "status %d must hand off to the outer loop", status)
+	}
+
+	terminal := newProviderHTTPError(http.StatusBadRequest, "invalid_request_error: unknown parameter", nil)
+	assert.False(t, isHandoffEligibleError(terminal))
+}
+
 func TestDelayForDecision_CapsServerHintDelay(t *testing.T) {
 	policy := newProviderRetryPolicy(3, 0, RetryTuning{
 		BaseDelay:     400 * time.Millisecond,
@@ -775,4 +868,126 @@ func TestSuppressRetryAfterEmission_PreservesPartialOutputMarker(t *testing.T) {
 	assert.False(t, decision.Retryable)
 	assert.True(t, errHasPartialOutput(suppressed))
 	assert.Contains(t, suppressed.Error(), "read SSE stream: unexpected EOF")
+}
+
+// TestEscalateOutputBudgetForDegenerateReply covers the incident signature:
+// the model spends the whole completion budget on reasoning and returns neither
+// content nor a tool call, so replaying the identical max_tokens mostly
+// reproduces the degenerate sample. A tool call truncated mid-markup is the
+// same class of budget exhaustion. The escalation must widen the next attempt's
+// budget, stay bounded, and never touch other failure classes.
+func TestEscalateOutputBudgetForDegenerateReply(t *testing.T) {
+	reasoningOnly := validateStreamingAggregateResponse("openai", []byte(strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"reasoning_content":"再确认一次。"},"finish_reason":"length"}]}`,
+		"data: [DONE]",
+	}, "\n\n")), map[string]interface{}{
+		"reasoning_content": "再确认一次。",
+	})
+	require.Error(t, reasoningOnly)
+	require.Equal(t, "reasoning_only_empty_reply", classifyRetryableLLMError(reasoningOnly).Reason)
+
+	maxTokens := 8000
+	require.True(t, escalateOutputBudgetForDegenerateReply(&maxTokens, 0, reasoningOnly))
+	require.Equal(t, 16000, maxTokens)
+	require.True(t, escalateOutputBudgetForDegenerateReply(&maxTokens, 1, reasoningOnly))
+	require.Equal(t, 32000, maxTokens)
+	require.False(t, escalateOutputBudgetForDegenerateReply(&maxTokens, 2, reasoningOnly),
+		"the per-call escalation count bounds the widening")
+	require.Equal(t, 32000, maxTokens)
+
+	// A truncated tool call is budget-bound too: widening lets the next sample
+	// finish the markup instead of replaying the same truncated budget.
+	truncatedToolCall := fmt.Errorf("truncated_tool_call: incomplete tool call markup in aggregated assistant response")
+	truncatedBudget := 4000
+	require.True(t, escalateOutputBudgetForDegenerateReply(&truncatedBudget, 0, truncatedToolCall))
+	require.Equal(t, 8000, truncatedBudget)
+
+	// Only budget-bound classes are widened; other failure classes are untouched.
+	rateLimited := 8000
+	require.False(t, escalateOutputBudgetForDegenerateReply(&rateLimited, 0,
+		newProviderHTTPError(http.StatusTooManyRequests, "rate limit reached", nil)))
+	require.Equal(t, 8000, rateLimited)
+	emptyReply := 8000
+	require.False(t, escalateOutputBudgetForDegenerateReply(&emptyReply, 0,
+		fmt.Errorf("empty_reply: stream ended without substantive output")),
+		"a truly empty reply is not budget-bound and must not widen the request")
+	require.Equal(t, 8000, emptyReply)
+
+	// A request without an explicit budget keeps the provider default.
+	unset := 0
+	require.False(t, escalateOutputBudgetForDegenerateReply(&unset, 0, reasoningOnly))
+	require.Zero(t, unset)
+
+	require.False(t, escalateOutputBudgetForDegenerateReply(nil, 0, reasoningOnly))
+	require.False(t, escalateOutputBudgetForDegenerateReply(&maxTokens, 0, nil))
+}
+
+// TestTrackDegenerateOutputReplyBoundsConsecutiveStreak pins the fast-fail
+// bound added after the live incident: a call whose every sample returned
+// reasoning only kept retrying for the whole attempt budget (10 attempts x
+// ~64s per step) while the response never changed. The two budget widenings
+// must still happen, the third consecutive degenerate sample must stop the
+// loop, and any other failure class must reset the streak.
+func TestTrackDegenerateOutputReplyBoundsConsecutiveStreak(t *testing.T) {
+	reasoningOnly := validateStreamingAggregateResponse("openai", []byte(strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"reasoning_content":"再确认一次。"},"finish_reason":"length"}]}`,
+		"data: [DONE]",
+	}, "\n\n")), map[string]interface{}{
+		"reasoning_content": "再确认一次。",
+	})
+	require.Equal(t, "reasoning_only_empty_reply", classifyRetryableLLMError(reasoningOnly).Reason)
+
+	streak := 0
+	require.False(t, trackDegenerateOutputReply(&streak, reasoningOnly),
+		"the first degenerate sample still gets a widened retry")
+	require.Equal(t, 1, streak)
+	require.False(t, trackDegenerateOutputReply(&streak, reasoningOnly),
+		"the second degenerate sample still gets a widened retry")
+	require.Equal(t, 2, streak)
+	require.True(t, trackDegenerateOutputReply(&streak, reasoningOnly),
+		"the third consecutive degenerate sample stops the loop")
+	require.Equal(t, degenerateOutputReplyMaxStreak, streak)
+
+	// A truncated tool call belongs to the same degenerate class: the same
+	// prompt and budget keep producing the same cut-off markup.
+	truncated := fmt.Errorf("truncated_tool_call: incomplete tool call markup in aggregated assistant response")
+	streak = 0
+	require.False(t, trackDegenerateOutputReply(&streak, truncated))
+	require.False(t, trackDegenerateOutputReply(&streak, truncated))
+	require.True(t, trackDegenerateOutputReply(&streak, truncated),
+		"the third consecutive truncated tool call stops the loop")
+
+	// Any other failure class resets the streak instead of accumulating.
+	require.False(t, trackDegenerateOutputReply(&streak,
+		newProviderHTTPError(http.StatusTooManyRequests, "rate limit reached", nil)))
+	require.Zero(t, streak)
+	require.False(t, trackDegenerateOutputReply(&streak, nil))
+	require.Zero(t, streak)
+}
+
+// TestDegenerateOutputRetryDelayIsCapped pins the backoff class: a
+// reasoning-only / empty reply is a fresh sample, not upstream congestion, so a
+// configured 30s business backoff must not stretch the retry chain into minutes
+// (observed live: 30s -> 60s backoff produced 6+ minute chains while every
+// attempt returned the same degenerate sample).
+func TestDegenerateOutputRetryDelayIsCapped(t *testing.T) {
+	policy := retryPolicy{
+		BaseDelay:   30 * time.Second,
+		MaxDelay:    60 * time.Second,
+		Multiplier:  2,
+		MaxAttempts: 10,
+	}
+
+	require.Equal(t, degenerateOutputRetryMaxDelay,
+		policy.delayForDecision(1, retryDecision{Retryable: true, Reason: "reasoning_only_empty_reply"}))
+	require.Equal(t, degenerateOutputRetryMaxDelay,
+		policy.delayForDecision(3, retryDecision{Retryable: true, Reason: "empty_reply"}))
+	require.Equal(t, degenerateOutputRetryMaxDelay,
+		policy.delayForDecision(1, retryDecision{Retryable: true, Reason: "truncated_tool_call"}))
+
+	// Congestion-class retries keep the configured backoff.
+	require.Equal(t, 30*time.Second,
+		policy.delayForDecision(1, retryDecision{Retryable: true, Reason: "http_503"}))
+	require.Equal(t, 60*time.Second,
+		policy.delayForDecision(2, retryDecision{Retryable: true, Reason: "http_503"}))
 }

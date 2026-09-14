@@ -186,6 +186,91 @@ func IsMaxTokensLimitError(err error) bool {
 	return ok
 }
 
+const (
+	// outputBudgetEscalationMaxCount bounds how many times a single request may
+	// widen its output budget after a completion-budget-bound degenerate reply
+	// (reasoning-only empty reply, truncated tool call).
+	outputBudgetEscalationMaxCount = 2
+
+	// outputBudgetEscalationCeiling caps the widened output budget.
+	outputBudgetEscalationCeiling = 32768
+
+	// degenerateOutputReplyMaxStreak bounds how many consecutive degenerate
+	// replies (reasoning-only / empty) a single call may sample before the retry
+	// loop stops. The widening path above gets its two escalations, so a third
+	// identical sample means the model is stuck on the same prompt and replaying
+	// it again only burns wall-clock: the incident signature was 10 attempts at
+	// ~64s each while every attempt returned reasoning only (finish_reason=length)
+	// and neither content nor a tool call.
+	degenerateOutputReplyMaxStreak = 3
+)
+
+// isOutputBudgetEscalationReason reports whether a retry reason is bound to an
+// exhausted completion budget, where doubling max_tokens is what changes the
+// next sample: reasoning_only_empty_reply spends the whole budget on reasoning
+// and returns neither content nor a tool call, while truncated_tool_call cuts a
+// tool call mid-markup (typically finish_reason=length). Other degenerate
+// reasons (empty_reply) are not budget-bound and must not widen the request.
+func isOutputBudgetEscalationReason(reason string) bool {
+	switch strings.TrimSpace(reason) {
+	case "reasoning_only_empty_reply", "truncated_tool_call":
+		return true
+	default:
+		return false
+	}
+}
+
+// escalateOutputBudgetForDegenerateReply widens max_tokens after a degenerate
+// reply that exhausted the completion budget (a reasoning-only empty reply, or
+// a tool call truncated mid-markup). Replaying the identical budget mostly
+// reproduces the same degenerate sample, so the budget handed to the next
+// attempt is doubled instead. The retry policy is untouched; the widening is
+// bounded by an absolute ceiling and a per-call escalation count. A request
+// without an explicit budget is left alone because the provider default governs
+// it.
+func escalateOutputBudgetForDegenerateReply(currentMaxTokens *int, escalations int, err error) bool {
+	if currentMaxTokens == nil || err == nil || escalations >= outputBudgetEscalationMaxCount {
+		return false
+	}
+	if !isOutputBudgetEscalationReason(classifyRetryableLLMError(err).Reason) {
+		return false
+	}
+	current := *currentMaxTokens
+	if current <= 0 || current >= outputBudgetEscalationCeiling {
+		return false
+	}
+	widened := current * 2
+	if widened > outputBudgetEscalationCeiling {
+		widened = outputBudgetEscalationCeiling
+	}
+	if widened <= current {
+		return false
+	}
+	*currentMaxTokens = widened
+	return true
+}
+
+// trackDegenerateOutputReply advances the consecutive-degenerate-reply streak
+// and reports whether the retry loop must stop. A degenerate sample means the
+// model spent its completion budget on reasoning and returned neither content
+// nor a tool call, or cut a tool call off mid-markup; widening the budget is the
+// only lever that changes the next sample, so once the streak reaches
+// degenerateOutputReplyMaxStreak the loop returns a terminal exhaustion error
+// instead of replaying the identical request until the whole attempt budget is
+// gone. Any other error (transport, server, quota, ...) resets the streak,
+// mirroring trackHeaderTimeoutStreak.
+func trackDegenerateOutputReply(consecutive *int, err error) (exhausted bool) {
+	if err == nil {
+		return false
+	}
+	if !isDegenerateOutputRetryReason(classifyRetryableLLMError(err).Reason) {
+		*consecutive = 0
+		return false
+	}
+	*consecutive++
+	return *consecutive >= degenerateOutputReplyMaxStreak
+}
+
 // isHandoffEligibleError reports whether an inner-loop exhaustion should hand
 // the transient failure to the enclosing runtime retry loop instead of
 // becoming terminal. Transport-class failures (connection drops, SSE stream
@@ -200,6 +285,12 @@ func isHandoffEligibleError(err error) bool {
 	decision := classifyRetryableLLMError(err)
 	if !decision.Retryable {
 		return false
+	}
+	// 任意 5xx 都是上游不可用：除列出的 500/502/503/504 外，529（Anthropic
+	// overloaded）、520-524（Cloudflare 源站故障）、598 等也应交给外层重试
+	// 循环做 provider/key 轮换，而不是在内层预算耗尽后直接终态。
+	if strings.HasPrefix(decision.Reason, "http_5") {
+		return true
 	}
 	switch decision.Reason {
 	case "transport", "transient_stream_or_server", "stream_interrupted",

@@ -64,14 +64,15 @@
 4. **配额耗尽**：`isQuotaExhaustionError` → `quota_exhausted`（不可重试）
 5. **非可重试响应**：`isRetryableProviderResponseError` 为 false → `non_retryable_response`（请求类错误、API key 错误等）
 6. **HTTP 状态码**：
-   - `408`/`409` → 可重试 `http_408`/`http_409`
+   - `408`/`409`/`425` → 可重试 `http_408`/`http_409`/`http_425`（425 Too Early 见 RFC 8470）
    - `429`：含 rate-limit 关键词 → `rate_limit`；否则 → `http_429`（均携带服务器提示延迟）
-   - `400`：`content_inspection_failed`/`invalid_request`/`http_400`（不可重试）
+   - `400`：先判确定性缺陷 —— `content_inspection_failed`/`invalid_request`（不可重试）；若报文含显式瞬时信号（`transientUpstreamTextHint` 或 `isRetryableTransportError`：bad gateway / service unavailable / gateway timeout / upstream connect error / overloaded / 连接中断 / timeout 等）→ `transient_stream_or_server`（**可重试**，2026-09-14）；都不命中才 → `http_400`（不可重试）
+   - 其余 4xx：`401`/`402`/`403`（认证/计费）恒为终态；`404`/`405`/`422`/`499` 等默认终态，但同样可被上述显式瞬时信号救援为 `transient_stream_or_server`（**可重试**，2026-09-14）
    - `5xx` → 可重试 `http_5xx`
-7. **内容类错误**：`content_filter`（不可重试）、`insufficient_system_resource`（可重试）、`malformed_tool_call`（`invalid_tool_arguments` 不可重试，其余可重试）、`truncated_tool_call`（不可重试）
+7. **内容类错误**：`content_filter`（不可重试）、`insufficient_system_resource`（可重试）、`malformed_tool_call`（`invalid_tool_arguments` 不可重试，其余可重试）、`truncated_tool_call`（**可重试**：输出被 completion 预算截断属采样/预算问题，非请求参数错误）、`empty_provider_choices`（**可重试**并按 `empty_reply` 处理：200 + 空/缺失 choices 是退化采样，复用短退避、退化 streak 上限与 handoff 资格）
 8. **流中断**：`stream_interrupted`、`empty_reply`、`reasoning_only_empty_reply`（可重试）
 9. **transport 错误**：`isRetryableTransportError` → `transport`（可重试）
-10. **瞬态关键词**：`transient_stream_or_server`（timeout、connection reset、unexpected eof 等，可重试）
+10. **瞬态关键词**：`transient_stream_or_server`（timeout、connection reset、unexpected eof、bad gateway、service unavailable、gateway timeout、upstream connect error、no healthy upstream、overloaded、connection aborted、broken pipe、goaway、internal server error，可重试；`transientUpstreamTextHint`，retry_policy.go）
 11. **兜底**：`default_retryable`（可重试）
 
 ### 关键判定函数
@@ -83,6 +84,7 @@
 | `isRetryableProviderResponseError` | provider_retry.go:60 | 请求类/内容检查/上下文窗口等确定性错误返回 false |
 | `IsContextWindowError` | provider_retry.go:100 | 上下文超长（不可重试，需压缩） |
 | `isQuotaExhaustionError` | retry_policy.go:775 | 配额/余额耗尽（不可重试） |
+| `isOutputBudgetEscalationReason` | provider_retry.go:207 | completion 预算耗尽的 reason（`reasoning_only_empty_reply` / `truncated_tool_call`）才允许 widen `max_tokens` |
 
 ---
 
@@ -102,6 +104,8 @@
 
 ### 上限保护
 - `capServerHintDelay`：服务器提示（如月度限额 Reset 需要 1 天）被 `MaxDelay` 截断，避免请求挂死数小时。
+- `degenerateOutputRetryMaxDelay`（2026-09-13）：`empty_reply` / `reasoning_only_empty_reply` / `truncated_tool_call` 属于采样退化（恢复手段是重新采样，而非等待上游），`delayForDecision` 把抖动后的延迟统一截到 **2s** —— 服务器提示同样受该上限约束（先 `capServerHintDelay(MaxDelay)`，再套退化上限）。实测 30s→60s 业务退避把单条重试链拉到 6+ 分钟，而每次返回的仍是同一个退化样本。判定入口 `isDegenerateOutputRetryReason`（retry_policy.go）。
+- `truncated_tool_call` 重试化（2026-09-14）：工具调用标记被 completion 预算截断（常伴 `finish_reason=length`）原先直接终态，并给出误导性的 `UPSTREAM_INVALID_REQUEST` + "修正请求参数" 指引。现按采样/预算退化处理：分类层可重试、退避套用 `degenerateOutputRetryMaxDelay`、错误码归入 `UPSTREAM_INVALID_RESPONSE`、`escalateOutputBudgetForDegenerateReply` 把下一次尝试的 `max_tokens` 翻倍；连续 3 次截断仍由 `trackDegenerateOutputReply` 收敛，避免烧穿预算。
 - `canRetryAfter`：`MaxElapsedTime > 0` 时，若 `now-start + delay > MaxElapsedTime` 则停止重试。
 - `waitRetryDelay`：用 `context` 可取消的 timer 等待，父上下文取消立即返回。
 
@@ -185,11 +189,12 @@ if handleErr != nil {
 ```
 transport | transient_stream_or_server | stream_interrupted | empty_reply
 | reasoning_only_empty_reply | insufficient_system_resource | rate_limit
-| http_429 | http_408 | http_409 | http_500 | http_502 | http_503 | http_504
+| http_429 | http_408 | http_409 | http_5*（任意 5xx）
 ```
 
+- `http_5*` 前缀匹配（2026-09-14）：除 500/502/503/504 外，529（Anthropic overloaded）、520-524（Cloudflare 源站故障）、598 等同样交给外层做 provider/key 轮换，而不是内层预算耗尽即终态。
 - 命中 → `markRetryExhaustedForNextLayer`（标记 `retryAtNextLayer=true`）
-- 未命中（确定性错误：`quota_exhausted`、`invalid_request`、`content_filter`、`malformed_tool_call` 等）→ `markRetryExhausted`（终态）
+- 未命中（确定性错误或本层用尽即终态的 reason：`quota_exhausted`、`invalid_request`、`content_filter`、`malformed_tool_call`、`truncated_tool_call` 等）→ `markRetryExhausted`（本层终态）。其中可重试 cause（如 `truncated_tool_call`）仍会被 `DiagnoseFailure` 还原为 `Retryable: true`，由会话层发起新的有界尝试。
 
 ### 4.4 GatewayClient：多上游 failover 重试（gateway_client.go）
 
@@ -383,7 +388,7 @@ for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 
 **耗尽还原语义**：`retryExhaustedError` 包装本身表示"该层预算耗尽"，但 `DiagnoseFailure` 会解开包装、按底层 cause 还原语义：
 
-- cause 是瞬态可重试错误（5xx / transport / 流中断 / 系统资源不足 / 429）→ `Retryable: true`，NextAction 指引"bounded backoff 后换 provider/上报"，让会话层（goal 自动续跑、下轮用户输入）自动发起新尝试，而不是把预算耗尽误报为"不可重试、必须手动继续"
+- cause 是瞬态/采样可重试错误（5xx / transport / 流中断 / 系统资源不足 / 429 / 截断工具调用）→ `Retryable: true`，NextAction 指引"bounded backoff 后换 provider/上报"，让会话层（goal 自动续跑、下轮用户输入）自动发起新尝试，而不是把预算耗尽误报为"不可重试、必须手动继续"
 - cause 是确定性错误（quota / invalid_request / content_filter / 用户取消）→ `Retryable: false`，保持终态；`retrySuppressedError`（已输出内容 + 确定性错误）同样保持终态
 
 错误码映射（`classifyLLMFailureCode`）：
@@ -399,7 +404,7 @@ for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 | `STREAM_INTERRUPTED` | 流中断 / 空回复 |
 | `UPSTREAM_UNAVAILABLE` | 5xx / transport / 系统资源不足 |
 | `CONTENT_FILTERED` | 内容过滤 |
-| `UPSTREAM_INVALID_RESPONSE` | malformed_tool_call / 格式错误 |
+| `UPSTREAM_INVALID_RESPONSE` | malformed_tool_call / truncated_tool_call / 格式错误 |
 
 ---
 
@@ -407,9 +412,11 @@ for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 
 1. **两层互相配合**：内层在 transport 小预算上快速失败（连接超时后快速断开），外层用大预算保证总重试次数；内层"快速断开 + 接力"避免把外层预算浪费在死连接上。
 2. **transport 预算绑定死连接**：请求阶段 transport 耗尽在内层快速失败（不烧业务预算），但作为瞬态失败接力外层；外层 fast-fail 守卫（3 轮）防止对不可达上游无限建连。
-3. **已输出内容 + 瞬态错误 → 强制重试（partial-output replay，2026-08-31）**：流式中途出错若已产生可见内容，只有确定性错误（quota/invalid_request/content_filter/取消）保持 `suppressRetry` 终态；瞬态错误（SSE EOF/连接重置/空闲超时/5xx/429/流中断/空回复）继续走完整重试链路，重放重新生成全文并接受重复的部分输出。重放事件通过 `llm.retry` 的 `partial_output=true` 标记透传（RetryEvent.PartialOutput → loop.go/skills handler payload → aicli `chatLLMRetryParts` 渲染 `partial_output=true`）。判定入口：`mustSuppressRetryAfterEmission`（retry_policy.go，非 `classifyRetryableLLMError().Retryable` 即抑制）；标记：`withPartialOutputMarker`/`errHasPartialOutput`（`partialOutputError` 包装，对分类透明）。
+3. **已输出内容 + 瞬态错误 → 强制重试（partial-output replay，2026-08-31）**：流式中途出错若已产生可见内容，只有确定性错误（quota/invalid_request/content_filter/取消）保持 `suppressRetry` 终态；瞬态/采样类错误（SSE EOF/连接重置/空闲超时/5xx/429/流中断/空回复/截断工具调用）继续走完整重试链路，重放重新生成全文并接受重复的部分输出。重放事件通过 `llm.retry` 的 `partial_output=true` 标记透传（RetryEvent.PartialOutput → loop.go/skills handler payload → aicli `chatLLMRetryParts` 渲染 `partial_output=true`）。判定入口：`mustSuppressRetryAfterEmission`（retry_policy.go，非 `classifyRetryableLLMError().Retryable` 即抑制）；标记：`withPartialOutputMarker`/`errHasPartialOutput`（`partialOutputError` 包装，对分类透明）。
 4. **已输出内容永不重复计费重试的例外已收窄**：历史行为是"已输出即永不重试"，导致 aicli 端 `read SSE stream: unexpected EOF` 在已流出部分正文后零重试直接终态（2026-08-31 修复前）；现仅确定性错误保留该语义。
 4. **无限预算防放大**：外层无限（MaxRetries=-1）时接力不会扩展循环；连续接力 3 轮封顶。
 5. **尊重服务器提示但设上限**：Retry-After 优先，但被 MaxDelay 截断，防止异常巨大的等待时间挂死请求。
-6. **确定性错误零重试**：配额、参数、内容过滤、非法工具参数等重放无法修复的错误立即终态并给出明确 NextAction。
+6. **确定性错误零重试**：配额、参数、内容过滤、非法工具参数等重放无法修复的错误立即终态并给出明确 NextAction。例外（2026-09-14）：4xx 报文里出现显式上游瞬时信号时不再按状态码一刀切终态，而是按 `transient_stream_or_server` 重试；判定顺序保证确定性 needle（`invalid_request_error`/api key/内容检查）与认证计费类状态（401/402/403）仍然优先终态。
 7. **退避带抖动**：默认 ±10% 抖动，避免同步重试风暴。
+8. **退化输出 = 短退避 + 输出预算升级（2026-09-13，2026-09-14 扩展到截断工具调用）**：`empty_reply` / `reasoning_only_empty_reply` / `truncated_tool_call` 的成因是模型把整个 completion 预算烧在 reasoning 或被预算截断（常伴 `finish_reason=length`），用同样预算重放基本只复现同一退化样本。两条对策：①外层延迟上限见 §3 `degenerateOutputRetryMaxDelay`（2s）；②内层在 `reasoning_only_empty_reply` / `truncated_tool_call` 上把下一次尝试的 `max_tokens` 翻倍（`escalateOutputBudgetForDegenerateReply`，provider_retry.go；最多 2 次、封顶 32768、仅当请求显式设置过预算，`<=0`/已达上限/次数用尽不改；`empty_reply` 与预算无关，不 widen）。接入三处：`Call`（max_tokens 超限恢复块之后）、`callStreamingAggregate`（升级后必须 `buildStreamingBody` 重建 `adapterRequest`/`requestBody`/`bodyBytes`/`headers`，否则重建请求仍带旧预算）、GatewayClient（每次调用从 `req` 重建 body，无需手工重建）。重试分类与尝试次数语义不变。
+9. **重试面审计补遗（2026-09-14）**：按"能重试就重试"复核全部终态分支后收敛出四类缺口并修复：①4xx 瞬时信号救援（`transientUpstreamTextHint` + `isRetryableTransportError`，400 与 404/405/422/499 等，401/402/403 除外）；②HTTP `425` Too Early 纳入可重试状态；③`empty_provider_choices`（200 + 空 choices）归入 `empty_reply`，获得 2s 短退避、3 次退化 streak 上限与 handoff 资格（旧分类落到 `default_retryable`，要等完整指数退避且不受 streak 保护）；④`isHandoffEligibleError` 改为 `http_5*` 前缀匹配，让 529/520-524/598 等 5xx 也能接力外层。同时 `classifyLLMFailureCode` 让"瞬态 reason 优先于裸状态码"，避免瞬时 400 被上报成 `UPSTREAM_INVALID_REQUEST` + "修正请求参数"的误导性 NextAction。仍保持终态：`retry_exhausted`/`retry_suppressed`/`context_canceled`/`quota_exhausted`/上下文窗口/`invalid_request`/api key/`content_filter`/内容检查/`invalid_tool_arguments`（执行层 re-prompt 恢复）。
