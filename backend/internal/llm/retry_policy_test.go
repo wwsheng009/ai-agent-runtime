@@ -643,10 +643,17 @@ func TestValidateAssistantMessageSemanticsRejectsUnsafeToolCallsAndClassifiesFin
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid_tool_arguments")
-	// invalid_tool_arguments 不可重试：重放同一请求无法修复非法 JSON 参数，
-	// 恢复通道是执行层降级 re-prompt（附 schema 让模型按 schema 重发）。
-	assert.False(t, classifyRetryableLLMError(err).Retryable)
-	assert.Equal(t, "malformed_tool_call", classifyRetryableLLMError(err).Reason)
+	// invalid_tool_arguments 按退化采样重试：参数被 completion 预算截断或不是
+	// JSON 对象是模型输出的随机退化，重采样有机会拿到合法参数。走短退避
+	// （degenerateOutputRetryMaxDelay，2s 上限）并由 trackDegenerateOutputReply
+	// 连续 3 次收敛；重试耗尽后执行层 re-prompt（附 schema）仍是第二恢复通道。
+	malformedDecision := classifyRetryableLLMError(err)
+	assert.True(t, malformedDecision.Retryable)
+	assert.Equal(t, "invalid_tool_arguments", malformedDecision.Reason)
+	assert.True(t, isDegenerateOutputRetryReason(malformedDecision.Reason))
+	// 退化采样只在本层重采样，不做外层 handoff：否则三层循环会把同一个非法
+	// 样本各自重放满预算（见 retry-architecture §4.3 的 handoff 白名单）。
+	assert.False(t, isHandoffEligibleError(err))
 
 	contentFilterErr := validateAssistantMessageSemantics(map[string]interface{}{
 		"finish_reason": "content_filter",
@@ -902,6 +909,14 @@ func TestEscalateOutputBudgetForDegenerateReply(t *testing.T) {
 	require.True(t, escalateOutputBudgetForDegenerateReply(&truncatedBudget, 0, truncatedToolCall))
 	require.Equal(t, 8000, truncatedBudget)
 
+	// Malformed tool arguments are usually the same cut-off markup: the widened
+	// budget lets the next sample finish the JSON instead of replaying the same
+	// truncated completion.
+	malformedArgs := fmt.Errorf("openai_stream_protocol_error: code=invalid_tool_arguments: tool call 0 (write) has incomplete or non-object JSON arguments")
+	malformedBudget := 4000
+	require.True(t, escalateOutputBudgetForDegenerateReply(&malformedBudget, 0, malformedArgs))
+	require.Equal(t, 8000, malformedBudget)
+
 	// Only budget-bound classes are widened; other failure classes are untouched.
 	rateLimited := 8000
 	require.False(t, escalateOutputBudgetForDegenerateReply(&rateLimited, 0,
@@ -913,10 +928,16 @@ func TestEscalateOutputBudgetForDegenerateReply(t *testing.T) {
 		"a truly empty reply is not budget-bound and must not widen the request")
 	require.Equal(t, 8000, emptyReply)
 
-	// A request without an explicit budget keeps the provider default.
+	// A request without an explicit budget used to replay untouched because the
+	// provider default governs it; that replay never changes a degenerate
+	// sample, so the model default budget is now the escalation baseline and the
+	// widened value is pinned to the shared ceiling.
 	unset := 0
-	require.False(t, escalateOutputBudgetForDegenerateReply(&unset, 0, reasoningOnly))
-	require.Zero(t, unset)
+	require.True(t, escalateOutputBudgetForDegenerateReply(&unset, 0, reasoningOnly))
+	require.Equal(t, outputBudgetEscalationCeiling, unset)
+	require.False(t, escalateOutputBudgetForDegenerateReply(&unset, 1, reasoningOnly),
+		"an unset budget widened to the ceiling must not widen again")
+	require.Equal(t, outputBudgetEscalationCeiling, unset)
 
 	require.False(t, escalateOutputBudgetForDegenerateReply(nil, 0, reasoningOnly))
 	require.False(t, escalateOutputBudgetForDegenerateReply(&maxTokens, 0, nil))
@@ -957,6 +978,15 @@ func TestTrackDegenerateOutputReplyBoundsConsecutiveStreak(t *testing.T) {
 	require.True(t, trackDegenerateOutputReply(&streak, truncated),
 		"the third consecutive truncated tool call stops the loop")
 
+	// Malformed tool arguments are the same degenerate class: resampling the
+	// same prompt keeps producing non-object JSON until the streak bound stops.
+	malformedArgs := fmt.Errorf("openai_stream_protocol_error: code=invalid_tool_arguments: tool call 0 (write) has incomplete or non-object JSON arguments")
+	streak = 0
+	require.False(t, trackDegenerateOutputReply(&streak, malformedArgs))
+	require.False(t, trackDegenerateOutputReply(&streak, malformedArgs))
+	require.True(t, trackDegenerateOutputReply(&streak, malformedArgs),
+		"the third consecutive malformed-arguments sample stops the loop")
+
 	// Any other failure class resets the streak instead of accumulating.
 	require.False(t, trackDegenerateOutputReply(&streak,
 		newProviderHTTPError(http.StatusTooManyRequests, "rate limit reached", nil)))
@@ -984,6 +1014,8 @@ func TestDegenerateOutputRetryDelayIsCapped(t *testing.T) {
 		policy.delayForDecision(3, retryDecision{Retryable: true, Reason: "empty_reply"}))
 	require.Equal(t, degenerateOutputRetryMaxDelay,
 		policy.delayForDecision(1, retryDecision{Retryable: true, Reason: "truncated_tool_call"}))
+	require.Equal(t, degenerateOutputRetryMaxDelay,
+		policy.delayForDecision(1, retryDecision{Retryable: true, Reason: "invalid_tool_arguments"}))
 
 	// Congestion-class retries keep the configured backoff.
 	require.Equal(t, 30*time.Second,

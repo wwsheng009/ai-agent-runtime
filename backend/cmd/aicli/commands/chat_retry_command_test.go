@@ -9,6 +9,7 @@ import (
 	"time"
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	llmadapter "github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 )
 
 func TestHandleRetryCommandRestoresFailedPromptWithoutExecuting(t *testing.T) {
@@ -141,6 +142,33 @@ func TestRenderChatTurnRecoveryHintExplainsLiveSessionLeaseConflict(t *testing.T
 	got := output.String()
 	if !strings.Contains(got, "仍被其他执行器占用") || !strings.Contains(got, "不会强制抢占") {
 		t.Fatalf("expected lease-specific recovery hint, got %q", got)
+	}
+}
+
+// TestRenderChatTurnRecoveryHintExplainsMalformedToolArguments 固化：
+// invalid_tool_arguments 是"工具未执行"的退化采样失败（参数非法/被截断），
+// 提示必须说明无副作用，而不是套用通用的"避免重复工具副作用"文案。
+func TestRenderChatTurnRecoveryHintExplainsMalformedToolArguments(t *testing.T) {
+	session := &ChatSession{}
+	coord := newChatInteractionCoordinator(session)
+	var output bytes.Buffer
+	coord.SetWriter(&output)
+	session.Interaction = coord
+	rememberChatTurnRecovery(session, "写文件", false)
+
+	malformed := &llmadapter.MalformedToolCallError{
+		Kind:    "openai_stream_protocol_error",
+		Code:    "invalid_tool_arguments",
+		Message: "openai_stream_protocol_error: code=invalid_tool_arguments: tool call 0 (write_file) has incomplete or non-object JSON arguments",
+	}
+	renderChatTurnRecoveryHintForError(session, fmt.Errorf("LLM call failed after retries: %w", malformed))
+
+	got := output.String()
+	if !strings.Contains(got, "工具未执行") || !strings.Contains(got, "无副作用") || !strings.Contains(got, "/retry") {
+		t.Fatalf("expected side-effect-free recovery hint, got %q", got)
+	}
+	if strings.Contains(got, "为避免重复工具副作用") {
+		t.Fatalf("malformed tool arguments never executed a tool; hint must not warn about duplicate side effects: %q", got)
 	}
 }
 

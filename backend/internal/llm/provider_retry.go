@@ -189,7 +189,8 @@ func IsMaxTokensLimitError(err error) bool {
 const (
 	// outputBudgetEscalationMaxCount bounds how many times a single request may
 	// widen its output budget after a completion-budget-bound degenerate reply
-	// (reasoning-only empty reply, truncated tool call).
+	// (reasoning-only empty reply, truncated tool call, malformed tool-call
+	// arguments).
 	outputBudgetEscalationMaxCount = 2
 
 	// outputBudgetEscalationCeiling caps the widened output budget.
@@ -209,11 +210,14 @@ const (
 // exhausted completion budget, where doubling max_tokens is what changes the
 // next sample: reasoning_only_empty_reply spends the whole budget on reasoning
 // and returns neither content nor a tool call, while truncated_tool_call cuts a
-// tool call mid-markup (typically finish_reason=length). Other degenerate
-// reasons (empty_reply) are not budget-bound and must not widen the request.
+// tool call mid-markup (typically finish_reason=length). invalid_tool_arguments
+// joins them because the aggregated arguments were cut off mid-JSON often enough
+// (finish_reason=length) that a wider budget changes the next sample. Other
+// degenerate reasons (empty_reply) are not budget-bound and must not widen the
+// request.
 func isOutputBudgetEscalationReason(reason string) bool {
 	switch strings.TrimSpace(reason) {
-	case "reasoning_only_empty_reply", "truncated_tool_call":
+	case "reasoning_only_empty_reply", "truncated_tool_call", "invalid_tool_arguments":
 		return true
 	default:
 		return false
@@ -226,8 +230,12 @@ func isOutputBudgetEscalationReason(reason string) bool {
 // reproduces the same degenerate sample, so the budget handed to the next
 // attempt is doubled instead. The retry policy is untouched; the widening is
 // bounded by an absolute ceiling and a per-call escalation count. A request
-// without an explicit budget is left alone because the provider default governs
-// it.
+// without an explicit budget (0) is no longer left alone: the provider default
+// still governs the wire value, but replaying the identical request never
+// changes a degenerate sample, so the model default budget
+// (DefaultModelMaxOutputTokens, before the 8k slot-reservation cap) is used as
+// the escalation baseline instead. The widened value only ever moves upward,
+// and stays bounded by the same ceiling and per-call escalation count.
 func escalateOutputBudgetForDegenerateReply(currentMaxTokens *int, escalations int, err error) bool {
 	if currentMaxTokens == nil || err == nil || escalations >= outputBudgetEscalationMaxCount {
 		return false
@@ -236,6 +244,11 @@ func escalateOutputBudgetForDegenerateReply(currentMaxTokens *int, escalations i
 		return false
 	}
 	current := *currentMaxTokens
+	if current <= 0 {
+		// 请求未显式设置预算：provider 默认值不受本层控制，但「原样重放」无法
+		// 改变退化样本，所以以模型默认预算作为升级起点（只升不降）。
+		current = DefaultModelMaxOutputTokens
+	}
 	if current <= 0 || current >= outputBudgetEscalationCeiling {
 		return false
 	}
@@ -243,7 +256,7 @@ func escalateOutputBudgetForDegenerateReply(currentMaxTokens *int, escalations i
 	if widened > outputBudgetEscalationCeiling {
 		widened = outputBudgetEscalationCeiling
 	}
-	if widened <= current {
+	if widened <= *currentMaxTokens {
 		return false
 	}
 	*currentMaxTokens = widened

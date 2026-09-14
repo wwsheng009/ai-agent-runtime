@@ -18,13 +18,15 @@ type MalformedToolCall struct {
 	Arguments string
 }
 
-// MalformedToolCallError 表示模型生成了无法解析为 JSON 的工具调用参数。
+// MalformedToolCallError 表示模型生成了无法解析为 JSON 对象格式的工具调用参数。
 //
 // 与 openAIProtocolError / codexResponseError 不同，这不是传输或协议故障，而是
 // 模型输出内容本身非法：流是完整读完的、finish_reason 也正常，只是参数文本
-// 语法错误（例如 `{"timeout": 60s}`）。这种错误无法通过重试同一请求修复，
-// 但可以在执行层降级：把「参数非法 + 工具 schema」作为工具执行反馈注入下一轮，
-// 让模型按 schema 重新输出参数。
+// 语法错误（例如 `{"timeout": 60s}`）或被 completion 预算截断（incomplete）。
+// 这是可恢复的退化采样：换一次采样有机会拿到合法参数，因此 retry policy 按
+// invalid_tool_arguments 做有界重试（短退避 + 连续退化上限 + 预算扩展）；
+// 重试耗尽后由执行层降级：把「参数非法 + 工具 schema」作为工具执行反馈注入
+// 下一轮，让模型按 schema 重新输出参数。
 type MalformedToolCallError struct {
 	// Kind 是来源 adapter 的错误前缀，保持与旧错误消息一致
 	// （"openai_stream_protocol_error" / "codex response invalid"）。
@@ -50,8 +52,9 @@ func (e *MalformedToolCallError) Error() string {
 	return fmt.Sprintf("%s: code=%s: tool call arguments are not valid JSON", e.Kind, e.Code)
 }
 
-// RetryErrorCode 保持 invalid_tool_arguments 的 retry 分类标识（malformed_tool_call）；
-// 注意该错误不可重试（重放无法修复非法 JSON），恢复通道是执行层降级 re-prompt。
+// RetryErrorCode 保持 invalid_tool_arguments 的 retry 分类标识
+// （retry reason：invalid_tool_arguments）。该错误现在按退化采样做有界重试，
+// 重试耗尽后由执行层降级 re-prompt 兜底。
 func (e *MalformedToolCallError) RetryErrorCode() string {
 	if e == nil {
 		return ""
@@ -72,7 +75,9 @@ func newCodexMalformedToolCallError(calls []MalformedToolCall) *MalformedToolCal
 func newMalformedToolCallError(kind string, calls []MalformedToolCall) *MalformedToolCallError {
 	parts := make([]string, 0, len(calls))
 	for _, call := range calls {
-		parts = append(parts, fmt.Sprintf("tool call %d (%s) has incomplete or non-object JSON arguments", call.Index, call.Name))
+		parts = append(parts, fmt.Sprintf(
+			"tool call %d (%s) has incomplete or non-object JSON arguments (call not executed; retried with bounded backoff, then re-prompted with the tool schema)",
+			call.Index, call.Name))
 	}
 	code := "invalid_tool_arguments"
 	return &MalformedToolCallError{

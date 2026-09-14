@@ -496,13 +496,15 @@ const degenerateOutputRetryMaxDelay = 2 * time.Second
 
 // isDegenerateOutputRetryReason reports whether a retry reason is a degenerate
 // model output (reasoning only / nothing substantive / a tool call cut off
-// mid-markup) that is resolved by sampling again rather than by backing off.
-// truncated_tool_call belongs here because the retry reuses the same prompt and
-// the same completion budget: the next sample is what recovers, so the 2s cap
-// applies instead of the full exponential backoff.
+// mid-markup / tool arguments that are not a JSON object) that is resolved by
+// sampling again rather than by backing off. truncated_tool_call and
+// invalid_tool_arguments belong here because the retry reuses the same prompt:
+// the next sample is what recovers (with invalid_tool_arguments the completion
+// budget is widened when the arguments were cut off), so the 2s cap applies
+// instead of the full exponential backoff.
 func isDegenerateOutputRetryReason(reason string) bool {
 	switch strings.TrimSpace(reason) {
-	case "empty_reply", "reasoning_only_empty_reply", "truncated_tool_call":
+	case "empty_reply", "reasoning_only_empty_reply", "truncated_tool_call", "invalid_tool_arguments":
 		return true
 	default:
 		return false
@@ -625,6 +627,19 @@ func markRetryExhaustedForNextLayer(prefix string, attempts int, err error) erro
 	}
 	exhaustedErr.retryAtNextLayer = true
 	return exhaustedErr
+}
+
+// isNextLayerHandoffError reports whether err is a lower-level exhaustion that
+// was explicitly handed to the enclosing retry loop (retryAtNextLayer=true).
+// Such handoffs are bounded by the enclosing loop's own consecutive-handoff
+// guard and may legitimately be answered by a different provider/key, so they
+// are excluded from the degenerate-reply streak bound.
+func isNextLayerHandoffError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var exhaustedErr *retryExhaustedError
+	return stderrs.As(err, &exhaustedErr) && exhaustedErr != nil && exhaustedErr.retryAtNextLayer
 }
 
 func suppressRetry(err error) error {
@@ -887,10 +902,10 @@ func classifyLLMFailureCode(err error, decision retryDecision) string {
 		return "STREAM_INTERRUPTED"
 	case "insufficient_system_resource":
 		return "UPSTREAM_UNAVAILABLE"
-	case "malformed_tool_call", "truncated_tool_call":
-		// 工具调用标记被 completion 预算截断属于响应完整性问题，不是请求
-		// 参数错误。该 reason 现在是可重试的（见
-		// classifyRetryableLLMErrorWithRules），错误码必须落在
+	case "malformed_tool_call", "truncated_tool_call", "invalid_tool_arguments":
+		// 工具调用标记被 completion 预算截断、或参数不是合法 JSON 对象，都
+		// 属于响应完整性问题，不是请求参数错误。这些 reason 现在都是可重试
+		// 的（见 classifyRetryableLLMErrorWithRules），错误码必须落在
 		// UPSTREAM_INVALID_RESPONSE，否则 next_action 会退化成误导性的
 		// "Correct the provider request or unsupported parameters"。
 		return "UPSTREAM_INVALID_RESPONSE"
@@ -955,6 +970,9 @@ func llmFailureNextAction(code string, decision retryDecision) string {
 	case "UPSTREAM_INVALID_RESPONSE":
 		if decision.Reason == "truncated_tool_call" {
 			return "Retry with bounded backoff; never execute the incomplete tool call, and split oversized writes into smaller chunks."
+		}
+		if decision.Reason == "invalid_tool_arguments" {
+			return "Retry with bounded backoff; never execute malformed tool arguments. When retries are exhausted the tool loop re-prompts the model with the tool schema."
 		}
 		if decision.Retryable {
 			return "Retry once with bounded backoff; never execute malformed tool arguments."
@@ -1031,12 +1049,15 @@ func classifyRetryableLLMErrorWithRules(err error, rules []RetryRule) retryDecis
 			Reason:    "empty_reply",
 		}
 	case "invalid_tool_arguments":
-		// 工具参数本身是非法 JSON：重放同一请求无法修复（模型会再次生成
-		// 同样的非法参数，只会重复烧 token）。不可重试——由执行层降级为
-		// 工具反馈 re-prompt（附 schema 让模型按 schema 重发）作为唯一恢复通道。
+		// 工具参数不是合法 JSON 对象（截断或类型错误）：这是模型输出的退化
+		// 采样，不是请求参数错误，重新采样有机会拿到合法参数。按退化输出
+		// 治理（isDegenerateOutputRetryReason + trackDegenerateOutputReply）：
+		// 短退避、连续 3 次即收敛，避免重放同一非法样本烧穿预算；执行层
+		// re-prompt（附 schema）仍是重试耗尽后的第二恢复通道。
 		return retryDecision{
-			Retryable: false,
-			Reason:    "malformed_tool_call",
+			Retryable: true,
+			Delay:     decisionDelayFromServerHint(err),
+			Reason:    "invalid_tool_arguments",
 		}
 	}
 
@@ -1136,10 +1157,12 @@ func classifyRetryableLLMErrorWithRules(err error, rules []RetryRule) retryDecis
 		}
 	}
 	if containsAny(lower, "code=invalid_tool_arguments") {
-		// 与上方 switch 分支一致：非法 JSON 参数重放无法修复，由执行层降级 re-prompt。
+		// 与上方 switch 分支一致：非法 JSON 参数按退化采样重试（短退避 +
+		// 连续退化上限），重试耗尽后由执行层降级 re-prompt。
 		return retryDecision{
-			Retryable: false,
-			Reason:    "malformed_tool_call",
+			Retryable: true,
+			Delay:     decisionDelayFromServerHint(err),
+			Reason:    "invalid_tool_arguments",
 		}
 	}
 	if containsAny(lower, "truncated_tool_call", "incomplete tool call markup", "truncated before completing a tool call") {

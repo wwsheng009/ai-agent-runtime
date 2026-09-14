@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	llmadapter "github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -779,4 +780,130 @@ func TestLLMRuntime_ProviderAliasesRemainScopedWhenGlobalAliasCollides(t *testin
 		[]string{"provider-b", "provider-b-only", "shared-model"},
 		runtime.ProviderAliases("provider-b"),
 	)
+}
+
+// malformedToolArgumentsError 构造与 SSE 适配器同形的非法工具参数错误
+// （code=invalid_tool_arguments），用于验证 runtime 层的退化采样重试。
+func malformedToolArgumentsError() error {
+	return &llmadapter.MalformedToolCallError{
+		Kind:    "openai_stream_protocol_error",
+		Code:    "invalid_tool_arguments",
+		Message: "openai_stream_protocol_error: code=invalid_tool_arguments: tool call 0 (shell) has incomplete or non-object JSON arguments",
+		ToolCalls: []llmadapter.MalformedToolCall{{
+			Index:     0,
+			ID:        "call-bad",
+			Name:      "shell",
+			Arguments: `{"command": "echo hi"`,
+		}},
+	}
+}
+
+// newDegenerateRetryRuntime 构造一个重试预算充足、但退避几乎为零的 runtime，
+// 让退化采样上限（degenerateOutputReplyMaxStreak）成为唯一约束，测试无需等待真实退避。
+func newDegenerateRetryRuntime(t *testing.T) *LLMRuntime {
+	t.Helper()
+	runtime := NewLLMRuntime(&RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "test-model",
+		MaxRetries:      9,
+		RetryTuning: RetryTuning{
+			BaseDelay:     time.Millisecond,
+			MaxDelay:      time.Millisecond,
+			Randomization: -1,
+		},
+	})
+	return runtime
+}
+
+// flakyStreamProvider 在 Stream 上也按序返回错误（flakyProvider 的 Stream 恒成功），
+// 用于覆盖 runtime 的 openStreamWithRetry 路径。
+type flakyStreamProvider struct {
+	flakyProvider
+}
+
+func (p *flakyStreamProvider) Stream(ctx context.Context, req *LLMRequest) (<-chan StreamChunk, error) {
+	p.calls++
+	if index := p.calls - 1; index < len(p.errs) && p.errs[index] != nil {
+		return nil, p.errs[index]
+	}
+	ch := make(chan StreamChunk, 1)
+	ch <- StreamChunk{Type: EventTypeDone, Done: true}
+	close(ch)
+	return ch, nil
+}
+
+// TestLLMRuntime_Call_RetriesMalformedToolArguments 验证非法工具参数错误在
+// runtime 层是可重试的退化采样：首次采样非法、第二次合法时，单次 Call 内
+// 完成重采样并对调用方透明（不再直接终态冒泡）。
+func TestLLMRuntime_Call_RetriesMalformedToolArguments(t *testing.T) {
+	runtime := newDegenerateRetryRuntime(t)
+	provider := &flakyProvider{
+		name: "provider-a",
+		errs: []error{malformedToolArgumentsError()},
+		resp: &LLMResponse{Content: "recovered", Model: "test-model"},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+
+	response, err := runtime.Call(context.Background(), &LLMRequest{
+		Model:    "test-model",
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, response)
+	require.Equal(t, "recovered", response.Content)
+	require.Equal(t, 2, provider.calls, "非法参数样本应在同一 Call 内重采样恢复")
+}
+
+// TestLLMRuntime_Call_BoundsConsecutiveMalformedToolArguments 验证连续非法参数
+// 不会吃满整个 runtime 预算：达到 degenerateOutputReplyMaxStreak 后收敛为终态，
+// 且 Unwrap 链上保留 *MalformedToolCallError（agent loop 借此降级为工具反馈回注）。
+func TestLLMRuntime_Call_BoundsConsecutiveMalformedToolArguments(t *testing.T) {
+	runtime := newDegenerateRetryRuntime(t)
+	errs := make([]error, 0, 12)
+	for i := 0; i < 12; i++ {
+		errs = append(errs, malformedToolArgumentsError())
+	}
+	provider := &flakyProvider{name: "provider-a", errs: errs}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+
+	_, err := runtime.Call(context.Background(), &LLMRequest{
+		Model:    "test-model",
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+
+	require.Error(t, err)
+	require.Equal(t, degenerateOutputReplyMaxStreak, provider.calls,
+		"连续退化采样达到上限后必须收敛，而不是吃满 MaxAttempts")
+	require.Contains(t, err.Error(), "repeated degenerate replies")
+
+	var malformed *llmadapter.MalformedToolCallError
+	require.ErrorAs(t, err, &malformed, "Unwrap 链必须保留原始非法参数错误")
+	require.Equal(t, "invalid_tool_arguments", malformed.Code)
+
+	decision := classifyRetryableLLMError(err)
+	require.False(t, decision.Retryable, "收敛后的错误对上层是终态")
+	require.Equal(t, "retry_exhausted", decision.Reason)
+}
+
+// TestLLMRuntime_Stream_BoundsConsecutiveMalformedToolArguments 验证流式开口
+// 路径（openStreamWithRetry）与 Call 使用同一退化采样上限。
+func TestLLMRuntime_Stream_BoundsConsecutiveMalformedToolArguments(t *testing.T) {
+	runtime := newDegenerateRetryRuntime(t)
+	errs := make([]error, 0, 12)
+	for i := 0; i < 12; i++ {
+		errs = append(errs, malformedToolArgumentsError())
+	}
+	provider := &flakyStreamProvider{flakyProvider{name: "provider-a", errs: errs}}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+
+	stream, err := runtime.Stream(context.Background(), &LLMRequest{
+		Model:    "test-model",
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+
+	require.Error(t, err)
+	require.Nil(t, stream)
+	require.Equal(t, degenerateOutputReplyMaxStreak, provider.calls)
+	require.Contains(t, err.Error(), "repeated degenerate replies")
 }

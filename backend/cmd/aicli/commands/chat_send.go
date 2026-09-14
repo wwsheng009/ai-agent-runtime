@@ -86,6 +86,19 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 		fmt.Print("\r   \r")
 	}
 	if err != nil {
+		// 无副作用的退化采样（invalid_tool_arguments：工具参数非法且从未执行）在
+		// CLI 层做有界自动重跑；重跑仍失败时继续走下面的既有错误路径
+		// （goal 续跑 / 失败记录 / 错误渲染），不需要用户手动重发。
+		if retryResponse, retryErr, attempted := maybeAutoRetryDegenerateTurn(ctx, session, executor, userMessage, err); attempted {
+			response, err = retryResponse, retryErr
+			if err == nil {
+				if continueErr := maybeAutoContinueActiveGoal(ctx, session, executor); continueErr != nil {
+					reportGoalAutoContinuationWarning(session, continueErr)
+				}
+				turnSucceeded = true
+				return response, nil
+			}
+		}
 		if shouldAutoContinueAfterGoalTurnError(session, err) {
 			writeSessionDebugInfo(session, fmt.Sprintf("[goal] initial turn ended with error; starting auto continuation error=%q", err.Error()), false)
 			continueCtx, continueCancel := goalAutoContinuationAttemptContext(ctx, session)

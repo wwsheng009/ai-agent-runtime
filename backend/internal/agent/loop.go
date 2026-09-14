@@ -101,8 +101,10 @@ type ReActLoop struct {
 	reasoningEffortUnsupported   atomic.Bool
 	thinkingUnsupported          atomic.Bool
 	temperatureUnsupported       atomic.Bool
-	// malformedToolCallRecoveries 记录同一工具名被「参数非法」降级重发的次数，
-	// 防止模型反复生成非法参数导致死循环烧 token（参照 Reasonix repeat_failure_guard）。
+	// malformedToolCallRecoveries 记录同一工具名「连续」被「参数非法」降级重发的
+	// 次数：工具一旦成功执行（说明模型已能按 schema 产出合法参数）即清零，防止
+	// 跨步骤的历史累计误触护栏；连续非法达到上限才放弃，避免模型反复生成非法参数
+	// 导致死循环烧 token（参照 Reasonix repeat_failure_guard）。
 	malformedToolCallRecoveries map[string]int
 }
 
@@ -1362,6 +1364,27 @@ func (loop *ReActLoop) tryRecoverMalformedToolCall(ctx context.Context, traceID,
 	return true
 }
 
+// resetMalformedToolCallRecoveriesOnSuccess 把「参数非法」降级计数收敛为连续
+// 失败语义：一次成功的工具执行证明模型已能按 schema 产出合法参数，此前的降级
+// 次数不应再计入护栏，否则跨步骤的偶发合法输出会被历史累计提前耗尽恢复预算。
+// 只有真正执行成功（无拒绝、无执行错误）的调用才会清零。
+func (loop *ReActLoop) resetMalformedToolCallRecoveriesOnSuccess(toolCalls []types.ToolCall, results []toolExecutionResult) {
+	if loop == nil || len(loop.malformedToolCallRecoveries) == 0 {
+		return
+	}
+	for i := range toolCalls {
+		// Call.Name 为空说明该槽位未被本次批次写入（零值），不能当作成功。
+		if i >= len(results) || results[i].Call.Name == "" || results[i].Error != "" {
+			continue
+		}
+		name := strings.TrimSpace(toolCalls[i].Name)
+		if name == "" {
+			continue
+		}
+		delete(loop.malformedToolCallRecoveries, name)
+	}
+}
+
 // emitRuntimeEvent stamps every event emitted by this ReAct run with the
 // durable actor turn identity. Trace IDs identify individual model/tool work;
 // they are not sufficient to reject delayed events after the next turn starts.
@@ -2116,7 +2139,9 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 	}
 	results := make([]toolExecutionResult, len(toolCalls))
 	if plan := loop.buildParallelToolBatchPlan(toolCalls, toolWhitelist); plan != nil {
-		return loop.runParallelToolBatch(ctx, traceID, sessionID, step, depth, toolCalls, plan), nil
+		parallelResults := loop.runParallelToolBatch(ctx, traceID, sessionID, step, depth, toolCalls, plan)
+		loop.resetMalformedToolCallRecoveriesOnSuccess(toolCalls, parallelResults)
+		return parallelResults, nil
 	}
 	gateway := loop.agent.GetOutputGateway()
 	allowedTools := whitelistSet(toolWhitelist)
@@ -2721,6 +2746,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 		loop.agent.runPostToolUseHooks(ctx, sessionID, result)
 	}
 
+	loop.resetMalformedToolCallRecoveriesOnSuccess(toolCalls, results)
 	return results, nil
 }
 

@@ -3,7 +3,6 @@ package llm
 import (
 	"context"
 	"encoding/json"
-	stderrs "errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -463,6 +462,7 @@ func (r *LLMRuntime) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, e
 	startedAt := time.Now()
 	activeMaxAttempts := policy.initialMaxAttempts()
 	consecutiveHandoffs := 0
+	degenerateReplies := 0
 
 	for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
@@ -476,8 +476,8 @@ func (r *LLMRuntime) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, e
 		// handing the transient error back to this outer loop, stop after a
 		// few rounds instead of spending the whole runtime budget on the same
 		// dead upstream. Any non-handoff error resets the streak.
-		var exhaustedErr *retryExhaustedError
-		if stderrs.As(err, &exhaustedErr) && exhaustedErr != nil && exhaustedErr.retryAtNextLayer {
+		handoffToNextLayer := isNextLayerHandoffError(err)
+		if handoffToNextLayer {
 			consecutiveHandoffs++
 			if consecutiveHandoffs >= maxConsecutiveFastFailHandoffs {
 				// Use consecutiveHandoffs as the attempt count so
@@ -491,6 +491,18 @@ func (r *LLMRuntime) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, e
 			}
 		} else {
 			consecutiveHandoffs = 0
+		}
+
+		// Bounded resampling for degenerate samples (empty / reasoning-only
+		// reply, truncated or malformed tool arguments): the same prompt rarely
+		// changes the outcome on the next sample, so stop after a few
+		// consecutive degenerate replies instead of spending the whole runtime
+		// attempt budget on the same degenerate response (same bound as the
+		// provider loops). Explicit handoffs stay excluded: they are bounded by
+		// the consecutive-handoff guard and may be answered by a different
+		// provider/key on the next outer attempt.
+		if !handoffToNextLayer && trackDegenerateOutputReply(&degenerateReplies, err) {
+			return nil, markRetryExhausted("LLM call aborted after repeated degenerate replies", attempt, err)
 		}
 
 		retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, err, retryExecutionMeta{
@@ -590,6 +602,7 @@ func openStreamWithRetry(ctx context.Context, provider Provider, policy retryPol
 	var lastErr error
 	lastAttempt := startAttempt
 	consecutiveHandoffs := 0
+	degenerateReplies := 0
 	for attempt := startAttempt; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 		lastAttempt = attempt
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
@@ -604,8 +617,8 @@ func openStreamWithRetry(ctx context.Context, provider Provider, policy retryPol
 
 		// Consecutive-handoff guard: same as Call — stop after repeated
 		// fast-fail handoffs from the provider.
-		var exhaustedErr *retryExhaustedError
-		if stderrs.As(err, &exhaustedErr) && exhaustedErr != nil && exhaustedErr.retryAtNextLayer {
+		handoffToNextLayer := isNextLayerHandoffError(err)
+		if handoffToNextLayer {
 			consecutiveHandoffs++
 			if consecutiveHandoffs >= maxConsecutiveFastFailHandoffs {
 				// Same guard as Call: use consecutiveHandoffs as the attempt
@@ -616,6 +629,12 @@ func openStreamWithRetry(ctx context.Context, provider Provider, policy retryPol
 			}
 		} else {
 			consecutiveHandoffs = 0
+		}
+
+		// Same degenerate bound as Call: a stream that keeps answering with a
+		// degenerate sample must not burn the whole runtime attempt budget.
+		if !handoffToNextLayer && trackDegenerateOutputReply(&degenerateReplies, err) {
+			return nil, attempt, markRetryExhausted("LLM stream aborted after repeated degenerate replies", attempt, err)
 		}
 
 		retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, err, meta)
@@ -638,6 +657,7 @@ func openStreamWithRetry(ctx context.Context, provider Provider, policy retryPol
 func forwardStreamWithRetry(ctx context.Context, out chan<- StreamChunk, provider Provider, policy retryPolicy, startedAt time.Time, attempt int, stream <-chan StreamChunk, req *LLMRequest, meta retryExecutionMeta) {
 	defer close(out)
 	activeMaxAttempts := policy.initialMaxAttempts()
+	degenerateReplies := 0
 
 	for stream != nil {
 		emissionState := &streamEmissionState{}
@@ -653,6 +673,14 @@ func forwardStreamWithRetry(ctx context.Context, out chan<- StreamChunk, provide
 			if chunk.Type == EventTypeError && strings.TrimSpace(chunk.Error) != "" &&
 				(!emissionState.emittedAnything() || !mustSuppressRetryAfterEmission(fmt.Errorf("%s", chunk.Error))) {
 				err := fmt.Errorf("%s", chunk.Error)
+				// Mid-stream degenerate failures (reasoning-only / empty reply,
+				// malformed tool arguments) get the same bound as the open loop:
+				// repeated resampling must not burn the whole attempt budget.
+				if !isNextLayerHandoffError(err) && trackDegenerateOutputReply(&degenerateReplies, err) {
+					exhausted := markRetryExhausted("LLM stream aborted after repeated degenerate replies", attempt, err)
+					sendStreamChunk(ctx, out, StreamChunk{Type: EventTypeError, Error: exhausted.Error(), Done: true})
+					return
+				}
 				attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
 				retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, err, retryExecutionMeta{
 					Source:        meta.Source,

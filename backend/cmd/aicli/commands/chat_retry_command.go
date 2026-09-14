@@ -7,6 +7,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	llmadapter "github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 )
 
 type chatTurnRecovery struct {
@@ -66,6 +67,14 @@ func renderChatTurnRecoveryHintForError(session *ChatSession, turnErr error) {
 	message := "恢复建议: 输入 /retry 可将上一条失败消息恢复到输入区；为避免重复工具副作用，该命令不会自动执行。"
 	if recovery.Interrupted {
 		message = "恢复建议: 本轮可能已部分执行工具。输入 /retry 可恢复原消息，检查后再发送；该命令不会自动执行。"
+	}
+	// 工具参数非法（invalid_tool_arguments）是可重试的退化采样：本轮没有任何
+	// 可执行的工具调用，工具从未执行（无副作用）。通用提示里的"避免重复工具
+	// 副作用"对这类错误是误导，改为说明系统已自动重采样、按 schema 重发并做过
+	// 有界的 turn 级自动重跑（见 maybeAutoRetryDegenerateTurn）。
+	var malformed *llmadapter.MalformedToolCallError
+	if errors.As(turnErr, &malformed) {
+		message = "恢复建议: 本轮模型返回的工具参数非法，工具未执行（无副作用）。系统已自动重采样、按 schema 重发并自动重跑了少量次数仍失败；可直接重新发送，或输入 /retry 将上一条消息恢复到输入区（该命令不会自动执行）。"
 	}
 	var leaseConflict *runtimechat.LeaseConflictError
 	if errors.As(turnErr, &leaseConflict) {
