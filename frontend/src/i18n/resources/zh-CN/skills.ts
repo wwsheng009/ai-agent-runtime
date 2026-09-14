@@ -1,0 +1,135 @@
+// P2-1A：技能市场 / 热重载（独立页面 /runtime/skills）。
+//
+// 呈现口径（与后端契约一致，禁止美化）：
+//   * `errors.unavailable` 表示端点不可用 / 未配置（404/405/501/503），
+//     不是「空市场」，也不允许渲染成成功态；
+//   * `errors.forbidden` 表示写操作被鉴权或 mutation policy 拒绝（403）；
+//   * `stats.unknown` / `detail.absent` 只用于后端确实没有该字段的情况。
+
+export const zhSkills = {
+  badge: "技能市场",
+  independentPage: "独立页面",
+  title: "技能市场 / 热重载",
+  description: "浏览运行时技能目录、检索技能定义，并管理技能目录的文件热重载。",
+  backToRuntimeConfig: "返回运行时配置",
+
+  nav: {
+    usage: "用量分析",
+    logs: "日志",
+  },
+
+  actions: {
+    refresh: "刷新",
+    search: "检索",
+    clearSearch: "返回目录",
+    refreshDetail: "刷新详情",
+    closeDetail: "收起",
+    retry: "重试",
+  },
+
+  errors: {
+    forbidden: "请求被拒绝（403）：当前管理令牌无权执行该操作。",
+    unavailable: "该能力在当前运行时未启用（端点返回 404/405/501/503）。",
+    failed: "请求失败，请查看日志后重试。",
+  },
+
+  catalog: {
+    title: "技能目录",
+    count: "共 {{count}} 个技能",
+    loading: "正在加载技能目录…",
+    empty: "当前筛选条件下没有技能。",
+    searchPlaceholder: "搜索技能关键词",
+    categoryPlaceholder: "分类（可选）",
+    modeLabel: "检索模式",
+    mode: {
+      auto: "自动",
+      lexical: "关键词",
+      semantic: "语义",
+    },
+    searching: "正在检索…",
+    resultCount: "“{{query}}” 命中 {{count}} 条",
+    resolvedMode: "实际模式：{{mode}}",
+    usedEmbedding: "使用向量检索",
+    lexicalOnly: "仅关键词检索",
+    limitReached: "已达返回上限 {{limit}} 条，结果可能被截断。",
+    searchEmpty: "没有匹配的技能。",
+    selectHint: "点击技能查看详情",
+  },
+
+  detail: {
+    title: "技能详情",
+    loading: "正在加载技能详情…",
+    absent: "未提供",
+    category: "分类",
+    version: "版本",
+    source: "来源",
+    promptPath: "提示词文件",
+    tags: "标签",
+    capabilities: "能力",
+    tools: "工具",
+    permissions: "权限",
+    triggers: "触发条件",
+    weight: "权重 {{value}}",
+    workflow: "工作流",
+    dependsOn: "依赖 {{value}}",
+    systemPrompt: "系统提示词",
+    userPrompt: "用户提示词",
+    contextFiles: "上下文文件：{{value}}",
+  },
+
+  stats: {
+    title: "技能统计",
+    loading: "正在加载技能统计…",
+    totalSkills: "技能总数",
+    embedding: "向量检索",
+    embeddingEnabled: "已启用",
+    embeddingDisabled: "未启用",
+    unknown: "未知",
+    absent: "未提供",
+    skillDirs: "技能目录",
+    policy: "mutation policy",
+    policyUnknown: "后端未上报 mutation policy，写操作是否可用未知。",
+    policyFlags: {
+      readOnly: "只读",
+      disableImport: "禁用导入",
+      disablePersist: "禁用持久化",
+      disableReloadOps: "禁用重载操作",
+      disableHotReload: "禁用热重载",
+    },
+    flagOn: "开",
+    flagOff: "关",
+    sourceSummary: "来源统计",
+    unknownSource: "未知来源",
+    topSkills: "调用次数 Top",
+    noRows: "暂无调用统计。",
+    callCount: "调用 {{count}} 次",
+    successRate: "成功率",
+    avgDuration: "平均耗时",
+  },
+
+  hotReload: {
+    title: "技能热重载",
+    loading: "正在加载热重载状态…",
+    policyDisabled: "mutation policy 已禁用热重载，启动 / 停止 / 重载操作不可用。",
+    enabled: "热重载",
+    watching: "监听中",
+    yes: "是",
+    no: "否",
+    skillCount: "已加载技能",
+    callbackCount: "回调数",
+    debounce: "防抖",
+    dirs: "监听目录",
+    startDirs: "启动监听目录（每行一个）",
+    startDirsPlaceholder: "D:/skills\nE:/shared/skills",
+    debounceMs: "防抖（毫秒）",
+    debouncePlaceholder: "留空用后端默认",
+    start: "启动监听",
+    starting: "启动中…",
+    stop: "停止监听",
+    stopping: "停止中…",
+    reload: "立即重载",
+    reloading: "重载中…",
+    forbiddenHint: "请在日志页设置管理令牌后重试。",
+    setTokenLink: "前往日志页设置令牌",
+  },
+} as const;
