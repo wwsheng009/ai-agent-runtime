@@ -35,6 +35,35 @@ export const enCommon = {
     details: "Loading details...",
     logs: "Loading logs...",
   },
+  errors: {
+    boundary: {
+      globalTitle: "Something went wrong",
+      globalDescription:
+        "The interface failed to render and this view cannot continue. You can retry, or go back to the home page.",
+      routeTitle: "Page failed to load",
+      routeDescription:
+        "This page is temporarily unavailable. Retry, or go back to the home page.",
+      panelTitle: "Panel failed to load",
+      panelDescription:
+        "This panel is temporarily unavailable. The rest of the workspace is unaffected.",
+      retry: "Retry",
+      home: "Back to home",
+      reload: "Reload",
+    },
+    chunk: {
+      title: "Resource failed to load",
+      description:
+        "Page resources failed to load after {{attempts}} automatic retries. Check your network and retry manually.",
+      hint: "If retrying keeps failing, refresh the page.",
+    },
+    startup: {
+      title: "Application failed to start",
+      description:
+        "Something went wrong while initializing the application, so the interface cannot load.",
+      missingRoot: "The application mount node (#root) is missing. Check the page markup.",
+      reload: "Reload",
+    },
+  },
   states: {
     justNow: "just now",
     none: "None",

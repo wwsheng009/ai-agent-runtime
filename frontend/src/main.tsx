@@ -1,6 +1,15 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 
+import { GlobalErrorBoundary } from "@/components/errors/boundaries";
+import {
+  DEFAULT_STARTUP_READY_TIMEOUT_MS,
+  hasVisibleFailureSurface,
+  renderStartupFailure,
+  resolveRootElement,
+  waitForStartupReadiness,
+} from "@/core/bootstrap";
+import { logger } from "@/core/logger";
 import {
   getStoredAppSettings,
   getSystemTheme,
@@ -32,12 +41,73 @@ function bootstrapDocumentSettings() {
   );
 }
 
-bootstrapDocumentSettings();
+// P1-10：启动路径上的任何失败都要落到可见错误面（非白屏）。
+// 若 React 错误边界已经渲染出 `role="alert"`，则不覆盖它，只补一条日志。
+function reportStartupFailure(error: unknown, description?: string): void {
+  if (hasVisibleFailureSurface()) {
+    logger.error("startup failure already surfaced by an error boundary", error);
+    return;
+  }
+  renderStartupFailure({
+    error,
+    ...(description === undefined ? {} : { description }),
+  });
+}
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <SettingsProvider>
-      <App />
-    </SettingsProvider>
-  </React.StrictMode>,
-);
+function createAppRoot(): ReturnType<typeof ReactDOM.createRoot> | null {
+  try {
+    return ReactDOM.createRoot(resolveRootElement(document));
+  } catch (error) {
+    logger.error("failed to create the React root", error);
+    reportStartupFailure(error);
+    return null;
+  }
+}
+
+function renderApp(root: ReturnType<typeof ReactDOM.createRoot>): boolean {
+  try {
+    root.render(
+      <React.StrictMode>
+        <GlobalErrorBoundary>
+          <SettingsProvider>
+            <App />
+          </SettingsProvider>
+        </GlobalErrorBoundary>
+      </React.StrictMode>,
+    );
+    return true;
+  } catch (error) {
+    logger.error("failed to render the application", error);
+    reportStartupFailure(error);
+    return false;
+  }
+}
+
+function startApp(): void {
+  if (typeof window === "undefined" || typeof document === "undefined") {
+    return;
+  }
+
+  try {
+    bootstrapDocumentSettings();
+  } catch (error) {
+    logger.error("failed to bootstrap document settings", error);
+    reportStartupFailure(error);
+    return;
+  }
+
+  const root = createAppRoot();
+  if (!root || !renderApp(root)) {
+    return;
+  }
+
+  // P1-10：启动完整性检查——挂载后确认根节点有内容、应用壳（provider + 路由）
+  // 已就绪、i18n 已初始化；超时未就绪则进入可见错误面而非半加载状态。
+  void waitForStartupReadiness({
+    timeoutMs: DEFAULT_STARTUP_READY_TIMEOUT_MS,
+  }).catch((error: unknown) => {
+    reportStartupFailure(error);
+  });
+}
+
+startApp();

@@ -33,6 +33,30 @@ export const zhCommon = {
     details: "正在加载详情...",
     logs: "正在加载日志...",
   },
+  errors: {
+    boundary: {
+      globalTitle: "页面出现错误",
+      globalDescription: "界面渲染失败，当前视图无法继续显示。你可以重试，或返回首页重新开始。",
+      routeTitle: "页面加载失败",
+      routeDescription: "这个页面暂时无法显示。请重试，或返回首页。",
+      panelTitle: "面板加载失败",
+      panelDescription: "这个面板暂时无法显示，其他区域不受影响。",
+      retry: "重试",
+      home: "返回首页",
+      reload: "重新加载",
+    },
+    chunk: {
+      title: "资源加载失败",
+      description: "页面资源加载失败，已自动重试 {{attempts}} 次。请检查网络后手动重试。",
+      hint: "若多次重试仍失败，请刷新页面。",
+    },
+    startup: {
+      title: "应用启动失败",
+      description: "应用初始化时出现问题，界面无法正常加载。",
+      missingRoot: "未找到应用挂载节点（#root），请检查页面结构。",
+      reload: "重新加载",
+    },
+  },
   states: {
     justNow: "刚刚",
     none: "无",

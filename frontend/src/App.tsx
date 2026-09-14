@@ -1,46 +1,108 @@
-import { lazy, Suspense } from "react";
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { useTranslation } from "react-i18next";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
-const LandingPage = lazy(() =>
+import { RouteErrorBoundary } from "@/components/errors/boundaries";
+import { RetryableLazyRoute } from "@/components/errors/retryable-lazy-route";
+import { StartupReadySignal } from "@/components/startup/startup-ready-signal";
+import { type LazySurfaceLoader } from "@/lib/lazy-retry";
+
+// P1-10：路由级 lazy 元素持有模块级稳定 loader 引用，RetryableLazyRoute 才能在
+// 手动重试时重建 lazy 组件（受上限 + 递增退避约束），而不是无界重载。
+const loadLandingPage: LazySurfaceLoader = () =>
   import("@/pages/landing-page").then((module) => ({
     default: module.LandingPage,
-  })),
-);
-const LogsPage = lazy(() =>
+  }));
+const loadLogsPage: LazySurfaceLoader = () =>
   import("@/pages/logs-page").then((module) => ({
     default: module.LogsPage,
-  })),
-);
-const RuntimeConfigPage = lazy(() =>
+  }));
+const loadRuntimeConfigPage: LazySurfaceLoader = () =>
   import("@/pages/runtime-config-page").then((module) => ({
     default: module.RuntimeConfigPage,
-  })),
-);
-const UsageAnalyticsPage = lazy(() =>
+  }));
+const loadUsageAnalyticsPage: LazySurfaceLoader = () =>
   import("@/pages/usage-analytics-page").then((module) => ({
     default: module.UsageAnalyticsPage,
-  })),
-);
-const WorkspacePage = lazy(() =>
+  }));
+const loadSkillsPage: LazySurfaceLoader = () =>
+  import("@/pages/skills-page").then((module) => ({
+    default: module.SkillsPage,
+  }));
+const loadWorkspacePage: LazySurfaceLoader = () =>
   import("@/pages/workspace-page").then((module) => ({
     default: module.WorkspacePage,
-  })),
-);
+  }));
+
+const defaultWorkspaceRoute = "/workspace/chats/new";
 
 export default function App() {
-  const defaultWorkspaceRoute = "/workspace/chats/new";
-
   return (
     <BrowserRouter>
-      <Suspense fallback={<AppRouteFallback />}>
+      <RouteErrorBoundary>
         <Routes>
-          <Route path="/" element={<LandingPage />} />
-          <Route path="/logs" element={<LogsPage />} />
-          <Route path="/usage" element={<UsageAnalyticsPage />} />
-          <Route path="/usage/sessions/:sessionId" element={<UsageAnalyticsPage />} />
-          <Route path="/analytics" element={<UsageAnalyticsPage />} />
-          <Route path="/runtime/config" element={<RuntimeConfigPage />} />
+          <Route
+            path="/"
+            element={
+              <RetryableLazyRoute
+                fallback={<AppRouteFallback />}
+                loader={loadLandingPage}
+              />
+            }
+          />
+          <Route
+            path="/logs"
+            element={
+              <RetryableLazyRoute
+                fallback={<AppRouteFallback />}
+                loader={loadLogsPage}
+              />
+            }
+          />
+          <Route
+            path="/usage"
+            element={
+              <RetryableLazyRoute
+                fallback={<AppRouteFallback />}
+                loader={loadUsageAnalyticsPage}
+              />
+            }
+          />
+          <Route
+            path="/usage/sessions/:sessionId"
+            element={
+              <RetryableLazyRoute
+                fallback={<AppRouteFallback />}
+                loader={loadUsageAnalyticsPage}
+              />
+            }
+          />
+          <Route
+            path="/analytics"
+            element={
+              <RetryableLazyRoute
+                fallback={<AppRouteFallback />}
+                loader={loadUsageAnalyticsPage}
+              />
+            }
+          />
+          <Route
+            path="/runtime/config"
+            element={
+              <RetryableLazyRoute
+                fallback={<AppRouteFallback />}
+                loader={loadRuntimeConfigPage}
+              />
+            }
+          />
+          <Route
+            path="/runtime/skills"
+            element={
+              <RetryableLazyRoute
+                fallback={<AppRouteFallback />}
+                loader={loadSkillsPage}
+              />
+            }
+          />
           <Route
             path="/workspace"
             element={<Navigate to={defaultWorkspaceRoute} replace />}
@@ -57,12 +119,37 @@ export default function App() {
             path="/workspace/restore"
             element={<Navigate to="/workspace/sessions" replace />}
           />
-          <Route path="/workspace/restore/:sessionId" element={<WorkspacePage />} />
-          <Route path="/workspace/sessions/:sessionId" element={<WorkspacePage />} />
-          <Route path="/workspace/chats/:threadId" element={<WorkspacePage />} />
+          <Route
+            path="/workspace/restore/:sessionId"
+            element={
+              <RetryableLazyRoute
+                fallback={<AppRouteFallback />}
+                loader={loadWorkspacePage}
+              />
+            }
+          />
+          <Route
+            path="/workspace/sessions/:sessionId"
+            element={
+              <RetryableLazyRoute
+                fallback={<AppRouteFallback />}
+                loader={loadWorkspacePage}
+              />
+            }
+          />
+          <Route
+            path="/workspace/chats/:threadId"
+            element={
+              <RetryableLazyRoute
+                fallback={<AppRouteFallback />}
+                loader={loadWorkspacePage}
+              />
+            }
+          />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
-      </Suspense>
+      </RouteErrorBoundary>
+      <StartupReadySignal />
     </BrowserRouter>
   );
 }
