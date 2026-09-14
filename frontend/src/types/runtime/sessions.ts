@@ -6,6 +6,8 @@ export type RuntimeSessionRecord = {
     title?: string;
     titleSource?: string;
     summary?: string;
+    /** 服务端会话标签（P2-1A：检索按标签 AND 过滤）。 */
+    tags?: string[];
     totalTurns?: number;
     lastAgent?: string;
     lastSkill?: string;
@@ -39,6 +41,66 @@ export type RuntimeSessionsResponse = {
 
 export type RuntimeSessionsQuery = {
   userId?: string;
+};
+
+/**
+ * 元数据检索筛选（POST /api/runtime/sessions/search）。
+ * 全部可选；tags 为 AND 语义，state 为全等匹配（active/idle/closed/archived）。
+ */
+export type RuntimeSessionSearchFilters = {
+  userId?: string;
+  tags?: string[];
+  state?: string;
+  limit?: number;
+  offset?: number;
+};
+
+/**
+ * 后端回显的筛选条件（chat.SessionSearchOptions）：与请求体不同，
+ * 回显的 json tag 是 camelCase（userId/tags/state/limit/offset）。
+ */
+export type RuntimeSessionSearchEcho = {
+  userId?: string;
+  tags?: string[];
+  state?: string;
+  limit?: number;
+  offset?: number;
+};
+
+/** 检索响应：`{sessions, count, filters}`（sessions 为 chat.Session 记录）。 */
+export type RuntimeSessionSearchResponse = {
+  sessions: RuntimeSessionRecord[];
+  count: number;
+  filters?: RuntimeSessionSearchEcho;
+};
+
+/** 会话统计（对应后端 chat.SessionStatistics）。 */
+export type RuntimeSessionStats = {
+  total: number;
+  active: number;
+  idle: number;
+  closed: number;
+  archived: number;
+  /** camelCase per backend json tag。 */
+  totalMessages: number;
+  tags: Record<string, number>;
+};
+
+export type RuntimeSessionStatsResponse = {
+  user_id: string;
+  stats: RuntimeSessionStats;
+};
+
+/** 归档/激活/关闭返回体：`{"session": ..., "state": "archived"|"active"|"closed"}`。 */
+export type RuntimeSessionStateChangeResponse = {
+  session: RuntimeSessionRecord;
+  state: string;
+};
+
+/** 批量归档/删除返回体（后端只保证 action 与计数类字段，其余按需读取）。 */
+export type RuntimeSessionBatchActionResponse = {
+  action: string;
+  [key: string]: unknown;
 };
 
 export type RuntimeWorkspaceDirectory = {

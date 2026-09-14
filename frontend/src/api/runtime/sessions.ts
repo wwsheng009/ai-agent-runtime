@@ -4,6 +4,7 @@ import type {
   RuntimeSessionBacktrackAuditResponse,
   RuntimeSessionBacktrackRequest,
   RuntimeSessionBacktrackResponse,
+  RuntimeSessionBatchActionResponse,
   RuntimeSessionCheckpointFilesResponse,
   RuntimeSessionCheckpointPreviewMode,
   RuntimeSessionCheckpointPreviewResponse,
@@ -13,6 +14,7 @@ import type {
   RuntimeSessionPlanMode,
   RuntimeSessionPlanModeUpdateRequest,
   RuntimeSessionRecord,
+  RuntimeSessionStateChangeResponse,
   RuntimeSessionTurnsResponse,
   RuntimeSessionUsersResponse,
   RuntimeSessionsQuery,
@@ -159,6 +161,88 @@ export async function deleteRuntimeSession(
       headers: {
         Accept: "application/json",
       },
+    },
+  );
+}
+
+/** 归档会话（P1-9）：列表默认隐藏归档，`activateRuntimeSession` 可恢复。 */
+export async function archiveRuntimeSession(
+  sessionId: string,
+): Promise<RuntimeSessionStateChangeResponse> {
+  return fetchRuntimeJson<RuntimeSessionStateChangeResponse>(
+    buildRuntimeUrl(`/api/runtime/sessions/${encodeURIComponent(sessionId)}/archive`),
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+      },
+    },
+  );
+}
+
+/** 恢复（激活）已归档会话。 */
+export async function activateRuntimeSession(
+  sessionId: string,
+): Promise<RuntimeSessionStateChangeResponse> {
+  return fetchRuntimeJson<RuntimeSessionStateChangeResponse>(
+    buildRuntimeUrl(`/api/runtime/sessions/${encodeURIComponent(sessionId)}/activate`),
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+      },
+    },
+  );
+}
+
+/** 关闭会话（保留数据，状态置 closed）。 */
+export async function closeRuntimeSession(
+  sessionId: string,
+): Promise<RuntimeSessionStateChangeResponse> {
+  return fetchRuntimeJson<RuntimeSessionStateChangeResponse>(
+    buildRuntimeUrl(`/api/runtime/sessions/${encodeURIComponent(sessionId)}/close`),
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+      },
+    },
+  );
+}
+
+/** 批量归档（后端 body `{session_ids: [...]}`）。 */
+export async function batchArchiveRuntimeSessions(
+  sessionIds: string[],
+): Promise<RuntimeSessionBatchActionResponse> {
+  return fetchRuntimeJson<RuntimeSessionBatchActionResponse>(
+    buildRuntimeUrl("/api/runtime/sessions/batch/archive"),
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ session_ids: sessionIds }),
+    },
+  );
+}
+
+/**
+ * 批量删除（非破坏语义由调用方保证：仅移除引用后刷新列表，
+ * 不连带删除工作区或其他会话数据）。
+ */
+export async function batchDeleteRuntimeSessions(
+  sessionIds: string[],
+): Promise<RuntimeSessionBatchActionResponse> {
+  return fetchRuntimeJson<RuntimeSessionBatchActionResponse>(
+    buildRuntimeUrl("/api/runtime/sessions/batch/delete"),
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ session_ids: sessionIds }),
     },
   );
 }
