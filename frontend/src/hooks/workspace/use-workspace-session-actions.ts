@@ -1,0 +1,144 @@
+// P1-9：会话行动作（重命名 / 归档 / 归档恢复 / Fork / 删除 / 目录内新建）自
+// pages/workspace-page.tsx 机械拆分而来（P0-2 A2 复检处置），仅搬迁不改语义。
+
+import type { Dispatch, SetStateAction } from "react";
+
+import {
+  activateRuntimeSession,
+  archiveRuntimeSession,
+  deleteRuntimeSession,
+} from "@/api/runtime/sessions";
+import {
+  buildForkSessionRequest,
+  resolveSelectionAfterSessionDelete,
+} from "@/components/workspace/workspace-sidebar/session-row-actions";
+import type { Thread } from "@/data/mock";
+import { createRuntimeSession, updateRuntimeSession } from "@/lib/runtime-api";
+import { normalizeSessionId } from "@/lib/session-id";
+import type { RuntimeSessionRecord } from "@/types/runtime";
+import { useNavigate } from "react-router-dom";
+import { useTranslation } from "react-i18next";
+
+type UseWorkspaceSessionActionsOptions = {
+  /** 当前选中会话（线程 sessionId / id / 路由参数的归一值）：删除它时回到工作台首页。 */
+  activeSessionId: string;
+  /** 运行客户端身份里的用户 id（`selectedUserId` 为空时的回落）。 */
+  clientUserId: string;
+  /** 轨迹硬重置（会话切换后事件日志独立自增，必须显式清游标）。 */
+  onResetTrajectory: () => void;
+  /** 会话列表刷新（重命名 / 归档 / Fork / 删除后统一走快照刷新）。 */
+  refreshSessions: () => void;
+  runtimeSessions: RuntimeSessionRecord[];
+  /** 多用户视图下选中的用户 id（优先于 clientUserId）。 */
+  selectedUserId: string;
+  setThreads: Dispatch<SetStateAction<Thread[]>>;
+};
+
+export function useWorkspaceSessionActions({
+  activeSessionId,
+  clientUserId,
+  onResetTrajectory,
+  refreshSessions,
+  runtimeSessions,
+  selectedUserId,
+  setThreads,
+}: UseWorkspaceSessionActionsOptions) {
+  const navigate = useNavigate();
+  const { t } = useTranslation("workspace");
+
+  async function handleRenameRuntimeSession(sessionId: string, title: string) {
+    await updateRuntimeSession(sessionId, { title });
+    refreshSessions();
+    setThreads((current) =>
+      current.map((thread) =>
+        normalizeSessionId(thread.sessionId || thread.id) === sessionId
+          ? { ...thread, title }
+          : thread,
+      ),
+    );
+  }
+
+  // P1-9：归档为可恢复的非破坏操作，完成后刷新列表（新的 state 由快照统一呈现）。
+  async function handleArchiveRuntimeSession(sessionId: string) {
+    await archiveRuntimeSession(sessionId);
+    refreshSessions();
+  }
+
+  async function handleRestoreRuntimeSession(sessionId: string) {
+    await activateRuntimeSession(sessionId);
+    refreshSessions();
+  }
+
+  // P1-9：后端无克隆 API，Fork = 继承标题后缀与工作目录的新独立会话（不复制历史）。
+  async function handleForkRuntimeSession(
+    sessionId: string,
+    sourceTitle: string,
+  ) {
+    const source = runtimeSessions.find((session) => session.id === sessionId);
+    if (!source) {
+      return;
+    }
+    const response = await createRuntimeSession(
+      buildForkSessionRequest({
+        session: source,
+        sourceTitle,
+        userId: selectedUserId || clientUserId,
+        branchSuffix: t("sidebar.session.forkSuffix"),
+      }),
+    );
+    refreshSessions();
+    const createdSessionId = normalizeSessionId(response.session?.id ?? "");
+    if (createdSessionId) {
+      // 新会话为独立历史；跳转到 canonical 会话路由，避免陈旧 trajectory 串台。
+      onResetTrajectory();
+      navigate(`/workspace/sessions/${encodeURIComponent(createdSessionId)}`);
+    }
+  }
+
+  // P1-9：非破坏删除——仅移除会话记录（不连带目录与磁盘数据）。
+  // 删除的恰好是当前会话时清空本地线程并回到工作台首页，避免路由悬空。
+  async function handleDeleteRuntimeSession(sessionId: string) {
+    await deleteRuntimeSession(sessionId);
+    setThreads((current) =>
+      current.filter(
+        (thread) =>
+          normalizeSessionId(thread.sessionId || thread.id) !== sessionId,
+      ),
+    );
+    refreshSessions();
+    if (resolveSelectionAfterSessionDelete(activeSessionId, sessionId) === null) {
+      onResetTrajectory();
+      navigate("/workspace/chats/new");
+    }
+  }
+
+  async function handleCreateSessionInDirectory(request: {
+    path: string;
+    directoryId?: string;
+    label: string;
+  }) {
+    const response = await createRuntimeSession({
+      title: request.label,
+      user_id: selectedUserId || clientUserId,
+      workspace_path: request.path || undefined,
+      directory_id: request.directoryId,
+    });
+    refreshSessions();
+    const createdSessionId = normalizeSessionId(response.session?.id ?? "");
+    if (createdSessionId) {
+      // 会话已绑定目录；直接跳转到 canonical 会话路由，等待 sessions
+      // 刷新后由 mergeRuntimeSessionsIntoThreads 生成对应线程。
+      onResetTrajectory();
+      navigate(`/workspace/sessions/${encodeURIComponent(createdSessionId)}`);
+    }
+  }
+
+  return {
+    archiveSession: handleArchiveRuntimeSession,
+    createSessionInDirectory: handleCreateSessionInDirectory,
+    deleteSession: handleDeleteRuntimeSession,
+    forkSession: handleForkRuntimeSession,
+    renameSession: handleRenameRuntimeSession,
+    restoreSession: handleRestoreRuntimeSession,
+  };
+}

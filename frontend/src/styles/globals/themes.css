@@ -1,0 +1,150 @@
+/* ---------- L2 landing 专用别名（原 landing.css :root，并入同层） ---------- */
+:root {
+  --landing-header-bg: var(--primitive-ink-100-a720);
+  --section-panel-bg: linear-gradient(180deg, var(--primitive-paper-450-a045), var(--primitive-paper-450-a020));
+  --section-panel-topline: var(--primitive-paper-450-a140);
+  --hero-overlay-bg: radial-gradient(circle at top, var(--primitive-paper-450-a050), transparent 28%), radial-gradient(circle at 70% 18%, var(--primitive-teal-300-a100), transparent 18%), linear-gradient(180deg, var(--primitive-ink-100-a940), var(--primitive-ink-100-a440) 35%, var(--primitive-ink-100-a940));
+  --panel-soft-bg: var(--primitive-paper-450-a040);
+  --panel-solid-bg: var(--primitive-ink-500);
+  --panel-solid-hover-bg: var(--primitive-ink-700);
+  --terminal-shell-bg: var(--primitive-ink-300);
+  --terminal-label: var(--primitive-paper-450-a420);
+  --terminal-text: var(--primitive-paper-5-a780);
+}
+
+/* ---------- 亮色主题覆盖（仅此选择器允许覆盖 L2） ---------- */
+html[data-theme="light"] {
+  color-scheme: light;
+  --background: var(--primitive-paper-350);
+  --background-elevated: var(--primitive-paper-450-a960);
+  --foreground: var(--primitive-ink-650);
+  --muted-foreground: var(--primitive-ink-650-a660);
+  --border: var(--primitive-slate-5-a100);
+  --border-strong: var(--primitive-slate-5-a160);
+  --ring: var(--primitive-blue-2-a240);
+  --page-background: linear-gradient(180deg, var(--primitive-paper-350) 0%, var(--primitive-paper-150) 100%);
+  --surface-soft: var(--primitive-slate-5-a040);
+  --surface-soft-hover: var(--primitive-slate-5-a070);
+  --surface-softer: var(--primitive-slate-5-a020);
+  --surface-solid: var(--primitive-slate-5-a045);
+  --surface-strong: var(--primitive-paper-450-a960);
+  --surface-overlay: var(--primitive-paper-450-a985);
+  --analytics-chart-primary: var(--primitive-amber-150);
+  --analytics-chart-secondary: var(--primitive-teal-150);
+  --analytics-chart-tertiary: var(--primitive-blue-150);
+  --analytics-chart-quaternary: var(--primitive-red-150);
+  --analytics-chart-grid: var(--primitive-slate-5-a120);
+  --analytics-chart-axis: var(--primitive-ink-650-a680);
+  --analytics-chart-hover: var(--primitive-slate-5-a045);
+  --analytics-chart-surface: var(--primitive-paper-300);
+  --analytics-warning: var(--primitive-warning-100);
+  --analytics-warning-soft: var(--primitive-warning-1-a080);
+  --analytics-warning-border: var(--primitive-warning-2-a280);
+  --analytics-danger: var(--primitive-danger-100);
+  --analytics-danger-soft: var(--primitive-danger-a070);
+  --analytics-danger-border: var(--primitive-danger-100-a240);
+  --analytics-success: var(--primitive-success-100);
+  --analytics-success-soft: var(--primitive-success-100-a070);
+  --analytics-success-border: var(--primitive-success-100-a240);
+  --analytics-info: var(--primitive-info-100);
+  --analytics-info-soft: var(--primitive-info-100-a070);
+  --analytics-info-border: var(--primitive-info-100-a240);
+  --dialog-bg: linear-gradient(180deg, var(--primitive-paper-450-a985), var(--primitive-paper-4-a995));
+  --dialog-backdrop: var(--primitive-slate-5-a180);
+  --panel-strong-bg: var(--primitive-paper-450-a960);
+  --placeholder-foreground: var(--primitive-ink-650-a340);
+  --code-block-bg: var(--primitive-paper-1-a980);
+  --code-block-header-bg: var(--primitive-slate-5-a030);
+  --code-block-foreground: var(--primitive-ink-550);
+  --code-line-number: var(--primitive-ink-550-a320);
+  --streaming-active-inline-bg: var(--primitive-teal-100-a100);
+  --streaming-active-inline-border: var(--primitive-teal-100-a180);
+  --streaming-active-block-bg: var(--primitive-teal-100-a080);
+  --streaming-active-block-accent: var(--primitive-teal-100-a200);
+  --streaming-active-caret: var(--primitive-teal-100);
+  --code-line-inserted-bg: var(--primitive-green-3-a100);
+  --code-line-inserted-accent: var(--primitive-green-3-a240);
+  --code-line-deleted-bg: var(--primitive-red-100-a100);
+  --code-line-deleted-accent: var(--primitive-red-100-a240);
+  --code-token-comment: var(--primitive-slate-3-a700);
+  --code-token-punctuation: var(--primitive-slate-4-a780);
+  --code-token-property: var(--primitive-blue-100);
+  --code-token-tag: var(--primitive-red-100);
+  --code-token-boolean: var(--primitive-cyan-100);
+  --code-token-number: var(--primitive-cyan-100);
+  --code-token-constant: var(--primitive-cyan-100);
+  --code-token-symbol: var(--primitive-cyan-100);
+  --code-token-selector: var(--primitive-teal-100);
+  --code-token-attr-name: var(--primitive-amber-100);
+  --code-token-string: var(--primitive-teal-100);
+  --code-token-char: var(--primitive-teal-100);
+  --code-token-builtin: var(--primitive-teal-100);
+  --code-token-inserted: var(--primitive-teal-100);
+  --code-token-operator: var(--primitive-slate-100);
+  --code-token-entity: var(--primitive-slate-100);
+  --code-token-url: var(--primitive-slate-100);
+  --code-token-variable: var(--primitive-orange-100);
+  --code-token-atrule: var(--primitive-amber-100);
+  --code-token-attr-value: var(--primitive-teal-100);
+  --code-token-function: var(--primitive-violet-100);
+  --code-token-class-name: var(--primitive-violet-100);
+  --code-token-keyword: var(--primitive-amber-100);
+  --code-token-regex: var(--primitive-red-100);
+  --code-token-important: var(--primitive-red-100);
+  --code-token-deleted: var(--primitive-red-100);
+  --workspace-shell-bg: linear-gradient(180deg, var(--primitive-paper-250) 0%, var(--primitive-paper-100) 100%);
+  --workspace-sidebar-bg: linear-gradient(180deg, var(--primitive-paper-400) 0%, var(--primitive-paper-200) 100%);
+  --workspace-main-bg: linear-gradient(180deg, var(--primitive-paper-400) 0%, var(--primitive-paper-250) 100%);
+  --workspace-topbar-bg: var(--primitive-paper-450-a920);
+  --workspace-composer-bg: linear-gradient(180deg, var(--primitive-paper-450-a985), var(--primitive-paper-2-a995));
+  --workspace-fade-overlay: linear-gradient(180deg, var(--primitive-paper-3-a000) 0%, var(--primitive-paper-3-a860) 100%);
+}
+
+/* landing 亮色覆盖 */
+html[data-theme="light"] {
+  --landing-header-bg: var(--primitive-paper-450-a860);
+  --section-panel-bg: linear-gradient(180deg, var(--primitive-paper-450-a860), var(--primitive-paper-450-a720));
+  --section-panel-topline: var(--primitive-slate-5-a100);
+  --hero-overlay-bg: radial-gradient(circle at top, var(--primitive-paper-450-a520), transparent 30%), radial-gradient(circle at 70% 18%, var(--primitive-teal-300-a080), transparent 18%), linear-gradient(180deg, var(--primitive-paper-450-a280), var(--primitive-paper-450-a080) 35%, var(--primitive-paper-450-a300));
+  --panel-soft-bg: var(--primitive-paper-450-a760);
+  --panel-solid-bg: var(--primitive-paper-450-a980);
+  --panel-solid-hover-bg: var(--primitive-paper-450);
+  --terminal-shell-bg: var(--primitive-ink-600);
+  --terminal-label: var(--primitive-paper-450-a500);
+  --terminal-text: var(--primitive-paper-450-a800);
+}
+
+/* landing 专属组合 token（原 landing.css 规则内内联字面量） */
+:root {
+  --landing-eyebrow-border: var(--primitive-violet-200-a240);
+  --landing-eyebrow-fg: var(--primitive-violet-300);
+  --landing-eyebrow-bg: var(--primitive-violet-200-a080);
+  --landing-grid-line: var(--primitive-paper-450-a060);
+  --landing-glow-gold: radial-gradient(circle, var(--primitive-gold-200-a280), var(--primitive-gold-200-a000) 68%);
+  --landing-glow-violet: radial-gradient(circle, var(--primitive-violet-200-a240), var(--primitive-violet-200-a000) 68%);
+}
+
+/* 强调色：cyan */
+html[data-accent-tone="cyan"] {
+  --accent-primary: var(--primitive-teal-300);
+  --accent-primary-strong: var(--primitive-teal-200);
+  --accent-primary-soft: var(--primitive-teal-300-a100);
+  --accent-primary-border: var(--primitive-teal-300-a280);
+  --accent-primary-shadow: var(--primitive-teal-200-a240);
+  --accent-secondary: var(--primitive-gold-200);
+  --accent-secondary-soft: var(--primitive-gold-200-a100);
+  --accent-secondary-border: var(--primitive-gold-200-a240);
+}
+
+/* 强调色：violet */
+html[data-accent-tone="violet"] {
+  --accent-primary: var(--primitive-violet-200);
+  --accent-primary-strong: var(--primitive-violet-150);
+  --accent-primary-soft: var(--primitive-violet-200-a120);
+  --accent-primary-border: var(--primitive-violet-200-a280);
+  --accent-primary-shadow: var(--primitive-violet-150-a240);
+  --accent-secondary: var(--primitive-teal-300);
+  --accent-secondary-soft: var(--primitive-teal-300-a100);
+  --accent-secondary-border: var(--primitive-teal-300-a240);
+}
+

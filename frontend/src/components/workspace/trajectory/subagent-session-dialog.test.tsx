@@ -8,17 +8,20 @@ import {
   SubagentSessionDialog,
 } from "@/components/workspace/trajectory/subagent-session-dialog";
 import {
-  subagentSessionTarget,
-  type SubagentSessionTarget,
-} from "@/components/workspace/trajectory/subagent-session-target";
-import { TrajectoryView } from "@/components/workspace/trajectory/trajectory-view";
-import { createTrajectoryStore } from "@/hooks/workspace/use-trajectory-snapshot";
-import type { TrajectoryItem } from "@/lib/trajectory/types";
+  approvalEvent,
+  approvalResolvedEvent,
+  captureStream,
+  chatEvent,
+  flush,
+  fetchSessionRuntimeEvents,
+  resetDialogRuntimeMocks,
+  resolveSessionToolApproval,
+  streamSessionRuntime,
+  stubResizeObserver,
+  type ReactActEnvironmentGlobal,
+} from "@/components/workspace/trajectory/subagent-session-dialog.test-helpers";
+import type { SubagentSessionTarget } from "@/components/workspace/trajectory/subagent-session-target";
 import type { SessionRuntimeEvent } from "@/types/runtime";
-
-const fetchSessionRuntimeEvents = vi.fn();
-const streamSessionRuntime = vi.fn();
-const resolveSessionToolApproval = vi.fn();
 
 vi.mock("@/api/runtime/sessions", () => ({
   fetchSessionRuntimeEvents: (...args: unknown[]) => fetchSessionRuntimeEvents(...args),
@@ -30,147 +33,12 @@ vi.mock("@/api/runtime/sse", () => ({
   streamSessionRuntime: (...args: unknown[]) => streamSessionRuntime(...args),
 }));
 
-// jsdom 无 ResizeObserver：stub 并提供容器高度，让 TrajectoryView 的虚拟滚动
-// 窗口化生效（否则 clientHeight=0 → 不渲染任何行）。
 beforeEach(() => {
-  vi.stubGlobal(
-    "ResizeObserver",
-    class {
-      private callback: ResizeObserverCallback;
-      constructor(callback: ResizeObserverCallback) {
-        this.callback = callback;
-      }
-      observe(element: Element) {
-        Object.defineProperty(element, "clientHeight", {
-          configurable: true,
-          value: 600,
-        });
-        this.callback([], this as unknown as ResizeObserver);
-      }
-      unobserve() {}
-      disconnect() {}
-    },
-  );
+  stubResizeObserver();
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
-});
-
-type ReactActEnvironmentGlobal = typeof globalThis & {
-  IS_REACT_ACT_ENVIRONMENT?: boolean;
-};
-
-function subagentItem(payload: Record<string, unknown>): TrajectoryItem {
-  return {
-    id: "subagent-7",
-    seq: 7,
-    kind: "subagent",
-    causeId: "",
-    status: "running",
-    head: { kind: "structured", payload },
-    createdAt: 7,
-    updatedAt: 7,
-  };
-}
-
-function chatEvent(seq: number, content: string): SessionRuntimeEvent {
-  return {
-    type: "chat.sse.chunk",
-    session_id: "child-1",
-    payload: { type: "text", content, seq },
-    timestamp: "2026-09-13T00:00:00Z",
-  };
-}
-
-function approvalEvent(
-  seq: number,
-  requestId: string,
-  extra: Record<string, unknown> = {},
-): SessionRuntimeEvent {
-  return {
-    type: "approval_requested",
-    session_id: "child-1",
-    timestamp: "2026-09-13T00:00:02Z",
-    payload: {
-      seq,
-      request_id: requestId,
-      tool_name: "shell",
-      reason: "writes outside workspace",
-      risk_level: "high",
-      ...extra,
-    },
-  } as SessionRuntimeEvent;
-}
-
-function approvalResolvedEvent(seq: number, requestId: string): SessionRuntimeEvent {
-  return {
-    type: "approval_resolved",
-    session_id: "child-1",
-    timestamp: "2026-09-13T00:00:03Z",
-    payload: { seq, request_id: requestId, allowed: false, tool_name: "shell" },
-  } as SessionRuntimeEvent;
-}
-
-function captureStream() {
-  let handlers: {
-    onEvent?: (event: SessionRuntimeEvent) => void;
-    signal?: AbortSignal;
-  } = {};
-  streamSessionRuntime.mockImplementation(
-    (_sessionId: string, next: typeof handlers) => {
-      handlers = next;
-      return new Promise<void>((resolve) => {
-        next.signal?.addEventListener("abort", () => resolve(), { once: true });
-      });
-    },
-  );
-  return {
-    emit(event: SessionRuntimeEvent) {
-      handlers.onEvent?.(event);
-    },
-  };
-}
-
-function flush() {
-  return act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-}
-
-describe("subagentSessionTarget", () => {
-  it("从 chat SSE subagent 载荷解析子会话 ID 与 role", () => {
-    const target = subagentSessionTarget(
-      subagentItem({ session_id: "child-9", role: "researcher" }),
-    );
-    expect(target).toEqual({
-      sessionId: "child-9",
-      agentId: undefined,
-      role: "researcher",
-      status: undefined,
-    });
-  });
-
-  it("终态镜像用 agent_id 兜底并把 status 带出", () => {
-    const target = subagentSessionTarget(
-      subagentItem({ agent_id: "child-9", session_id: "child-9", status: "completed" }),
-    );
-    expect(target?.sessionId).toBe("child-9");
-    expect(target?.agentId).toBe("child-9");
-    expect(target?.status).toBe("completed");
-  });
-
-  it("缺少 session 标识或非 subagent item 时返回 null", () => {
-    expect(subagentSessionTarget(subagentItem({ role: "researcher" }))).toBeNull();
-    expect(subagentSessionTarget(null)).toBeNull();
-    expect(
-      subagentSessionTarget({
-        ...subagentItem({ session_id: "child-9" }),
-        kind: "tool",
-      }),
-    ).toBeNull();
-  });
 });
 
 describe("SubagentSessionDialog", () => {
@@ -182,18 +50,7 @@ describe("SubagentSessionDialog", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
-    fetchSessionRuntimeEvents.mockReset();
-    streamSessionRuntime.mockReset();
-    resolveSessionToolApproval.mockReset();
-    resolveSessionToolApproval.mockResolvedValue({ ok: true });
-    fetchSessionRuntimeEvents.mockResolvedValue({ events: [], count: 0, latest_seq: 0 });
-    // 默认的实时流保持挂起，直到 signal abort。
-    streamSessionRuntime.mockImplementation(
-      (_sessionId: string, handlers: { signal?: AbortSignal }) =>
-        new Promise<void>((resolve) => {
-          handlers.signal?.addEventListener("abort", () => resolve(), { once: true });
-        }),
-    );
+    resetDialogRuntimeMocks();
   });
 
   afterEach(() => {
@@ -440,77 +297,5 @@ describe("SubagentSessionDialog", () => {
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     });
     expect(onClose).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe("TrajectoryView 子会话下钻入口", () => {
-  let container: HTMLDivElement;
-  let root: Root;
-
-  beforeEach(() => {
-    (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT = true;
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-    fetchSessionRuntimeEvents.mockReset();
-    streamSessionRuntime.mockReset();
-    fetchSessionRuntimeEvents.mockResolvedValue({ events: [], count: 0, latest_seq: 0 });
-    streamSessionRuntime.mockImplementation(
-      (_sessionId: string, handlers: { signal?: AbortSignal }) =>
-        new Promise<void>((resolve) => {
-          handlers.signal?.addEventListener("abort", () => resolve(), { once: true });
-        }),
-    );
-  });
-
-  afterEach(() => {
-    act(() => {
-      root.unmount();
-    });
-    container.remove();
-    (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT = false;
-  });
-
-  it("从 subagent item 打开子会话且不污染父轨迹 store", async () => {
-    const parentStore = createTrajectoryStore();
-    await act(async () => {
-      root.render(<TrajectoryView store={parentStore} sessionId="parent-1" />);
-    });
-    await act(async () => {
-      parentStore.push("subagent", {
-        session_id: "child-42",
-        role: "researcher",
-        status: "running",
-        _event: { sequence: 1 },
-      });
-      parentStore.flush();
-    });
-
-    const parentItemsBefore = parentStore.getSnapshot().items.length;
-    const row = container.querySelector('[data-trajectory-row="true"]');
-    expect(row).toBeInstanceOf(HTMLElement);
-    act(() => {
-      row?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-
-    const openButton = container.querySelector("[data-open-subagent-session]");
-    expect(openButton?.getAttribute("data-open-subagent-session")).toBe("child-42");
-    act(() => {
-      openButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-    await flush();
-
-    expect(container.querySelector("[data-subagent-session-dialog]")).toBeInstanceOf(
-      HTMLElement,
-    );
-    expect(fetchSessionRuntimeEvents).toHaveBeenCalledWith(
-      "child-42",
-      expect.objectContaining({ after: 0 }),
-    );
-    // 父 store 未被子的工具/审批事件写入（P1-5 验收②）。
-    expect(parentStore.getSnapshot().items.length).toBe(parentItemsBefore);
-    act(() => {
-      parentStore.dispose();
-    });
   });
 });
