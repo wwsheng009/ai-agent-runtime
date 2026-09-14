@@ -529,7 +529,8 @@ npm run build && npm run test:e2e
 
 > 落地证据（2026-09-14）：前端门禁 `npm run lint` / `npx vitest run`（192 文件 / 1424 用例）/
 > `npm run build` / `npx playwright test`（76 用例）全绿；后端新增用例见
-> `backend/internal/chat/branch_test.go`、`backend/internal/api/skills/session_branch_handlers_test.go`。
+> `backend/internal/chat/branch_test.go`、`backend/internal/api/skills/session_branch_handlers_test.go`、
+> `backend/internal/api/skills/session_branch_continuation_test.go`（§10 Q9 端到端验证）。
 
 - [x] 从**轮末尾**发起分支后，新会话历史 = 源会话在该轮次结束处的**完整前缀**（消息内容、角色、顺序一致）。
       （`PlanBranch` 前缀单测 `TestPlanBranchTurnTailAnchor` + handler `TestBranchSessionFromTurnTailAnchor`
@@ -539,7 +540,9 @@ npm run build && npm run test:e2e
       e2e ④ 逐字段比对分支前后 `GET /history`；`cloneBranchPrefix` 深拷贝 + 只对**新会话**调 `ApplyForkLineage`）
 - [x] 分支后的新会话可以**继续对话**，其上下文包含前缀（发送新消息后模型可见前缀）。
       （CI 口径：分支会话经既有 `sessionManager.CreateSession` + `ReplaceHistory`（置位 `HistoryLoaded`）
-      + `Update` 落库，读回即普通可继续会话，且可被 `List` 发现；实机 `SubmitPrompt` 确认记入 §10 Q9）
+      + `Update` 落库，读回即普通可继续会话，且可被 `List` 发现；端到端用例
+      `TestBranchSessionContinuationWithoutActorPrewarm` 直接对分支会话 `submit_prompt`，断言首个模型请求按序
+      携带前缀、且不含锚点之后的消息；已做反向 mutation 校验——移除 `ReplaceHistory(plan.Prefix)` 该用例即失败，结论见 §10 Q9）
 - [x] 非末尾消息 / 流式中 / 待审批时，入口**可见但不可用**，且有可读原因。
       （`branch-availability.test.ts` 五种输入；e2e ① 断言 `data-branch-state=unavailable` +
       `aria-disabled=true` + `aria-describedby` 指向原因文案）
@@ -602,7 +605,7 @@ npm run build && npm run test:e2e
 | Q6 | 后端端点的排期与归属 | 阻塞前置 | 本方案 §5.2 已给出可直接照搬的现有积木与落库手法 |
 | Q7 | 分支会话是否需要「回到父会话」的跳转 | 导航体验 | 徽标可点击 → 跳父会话（二期） |
 | Q8 | lineage 用哪些 context 键 | 与 agent-control / 压缩谱系的展示冲突 | 新建专用 `fork_*` 键（§5.2 第 5 条）；不复用 `agent_parent_session_id` |
-| Q9 | fork 出的会话能否**直接接续对话**（actor hub 是否需预热/注册） | 影响「分支后即可提问」的验收项 | 后端实现时显式验证：对新会话直接 `SubmitPrompt` |
+| Q9 | fork 出的会话能否**直接接续对话**（actor hub 是否需预热/注册） | 影响「分支后即可提问」的验收项 | **已验证（2026-09-14）：无需预热/注册** —— 分支端点不建 actor（`hubBuilds` 计数为 0）；首个 `submit_prompt` 经 hub 惰性建 actor 返回 200，首个 LLM 请求按序携带克隆前缀、不含锚点之后的消息，actor 恰好构建 1 次。证据：`TestBranchSessionContinuationWithoutActorPrewarm`（`backend/internal/api/skills/session_branch_continuation_test.go`） |
 | Q10 | 是否要求消息 id 跨会话稳定（引用/高亮场景） | 影响 `ReplaceHistory` 的 id 重铸策略 | 一期按「允许不一致 + 响应回显锚点」处理（R7） |
 
 ---
