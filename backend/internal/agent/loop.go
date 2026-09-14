@@ -876,12 +876,15 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			repeatedSemanticAdvisory = joinRuntimeAdvisories(repeatedSemanticAdvisory, pollObs.Advisory)
 			if pollObs.EmitNotice {
 				loop.emitRuntimeEvent(EventPollingBackoffObserved, sessionID, "", map[string]interface{}{
-					"trace_id":         traceID,
-					"step":             step,
-					"tools":            pollObs.Tools,
-					"repeat_count":     pollObs.RepeatCount,
-					"notice_threshold": pollingBackoff.Threshold(),
-					"fingerprint":      pollObs.Fingerprint,
+					"trace_id":             traceID,
+					"step":                 step,
+					"tools":                pollObs.Tools,
+					"repeat_count":         pollObs.RepeatCount,
+					"notice_threshold":     pollingBackoff.Threshold(),
+					"fingerprint":          pollObs.Fingerprint,
+					"cumulative_wait_ms":   pollObs.CumulativeWait.Milliseconds(),
+					"wait_budget_ms":       PollingWaitBudgetNoticeThreshold.Milliseconds(),
+					"wait_budget_exceeded": pollObs.WaitBudgetExceeded,
 				})
 			}
 		}
