@@ -2,7 +2,11 @@
 //
 // 目的：量化「前端流式渲染时是否重复挂载 DOM 元素 → 高 CPU」。
 //
-// 跑法（cwd = frontend）：node e2e/zz-mount-audit.mjs [--mode=both|table|plain]
+// 跑法（cwd = frontend）：node e2e/zz-mount-audit.mjs [--mode=both|table|plain] [--prod]
+//
+// `--prod`：先 vite build 再 vite preview，用生产包跑同一套审计。dev 模式 React 走
+// jsxDEV（每次建元素都抓栈），会把 longtask / ScriptDuration 抬高数倍，只有生产包
+// 的数字才代表用户端。
 //
 // 硬约束遵守点：
 //   * 自建假 SSE 服务与 vite dev server 都用「操作系统分配的空闲端口」，
@@ -23,6 +27,7 @@ const FRONTEND_DIR = path.resolve(HERE, "..");
 const args = process.argv.slice(2);
 const MODE_ARG =
   (args.find((arg) => arg.startsWith("--mode=")) ?? "--mode=both").slice(7);
+const PROD = args.includes("--prod");
 
 const children = [];
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -85,6 +90,32 @@ function killChildren() {
     }
   }
   children.length = 0;
+}
+
+/** 跑一条命令直到退出（构建用），失败时把尾部输出带进错误信息。 */
+function runToCompletion(command, commandArgs, env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, commandArgs, {
+      cwd: FRONTEND_DIR,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const tail = [];
+    const collect = (data) => {
+      tail.push(String(data).trimEnd());
+      if (tail.length > 12) tail.shift();
+    };
+    child.stdout.on("data", collect);
+    child.stderr.on("data", collect);
+    child.on("error", reject);
+    child.on("exit", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`command failed (${code}): ${tail.join(" | ")}`));
+      }
+    });
+  });
 }
 
 // --- 页面侧探针（addInitScript：每个文档都会先装好 longtask 采集器）---------
@@ -629,6 +660,7 @@ async function runMode({ browser, baseUrl, apiPort, mode, markers }) {
     await composer.fill(`${markers.prompt}`);
     const sentAt = Date.now();
     await composer.press("Control+Enter");
+    log(`[${mode}] prompt sent, waiting for first token`);
 
     await page.waitForFunction(
       (needle) => document.body.innerText.includes(needle),
@@ -636,6 +668,7 @@ async function runMode({ browser, baseUrl, apiPort, mode, markers }) {
       { timeout: 60_000, polling: 50 },
     );
     result.firstChunkVisibleMs = Date.now() - sentAt;
+    log(`[${mode}] first token visible after ${result.firstChunkVisibleMs}ms`);
     await page.waitForTimeout(1500);
     result.probeMidStream = await page.evaluate(domProbe, markers.midCandidates);
     result.mutationMidStream = await page.evaluate(readRaw);
@@ -648,6 +681,7 @@ async function runMode({ browser, baseUrl, apiPort, mode, markers }) {
       { timeout: 120_000, polling: 50 },
     );
     result.lastChunkVisibleMs = Date.now() - sentAt;
+    log(`[${mode}] last token visible after ${result.lastChunkVisibleMs}ms`);
     result.metricsStreamEnd = await readMetrics();
     result.probeStreamEnd = await page.evaluate(domProbe, markers.lastCandidates);
     result.mutationStreamEnd = await page.evaluate(readRaw);
@@ -671,6 +705,37 @@ async function runMode({ browser, baseUrl, apiPort, mode, markers }) {
       mode: serverStats.mode,
       lastAborted: serverStats.lastAborted,
     };
+  } catch (error) {
+    try {
+      const diag = await page.evaluate(() => {
+        const text = document.body.innerText || "";
+        const found = Array.from(text.matchAll(/token(\d{4})/g)).map((m) => Number(m[1]));
+        const rawText = document.body.textContent || "";
+        const rawFound = Array.from(rawText.matchAll(/token(\d{4})/g)).map((m) => Number(m[1]));
+        return {
+          bodyInnerTextLen: text.length,
+          tokensInInnerText: found.length,
+          maxTokenInInnerText: found.length ? Math.max(...found) : null,
+          tokensInTextContent: rawFound.length,
+          maxTokenInTextContent: rawFound.length ? Math.max(...rawFound) : null,
+          tail: text.slice(-300),
+          roleLog: document.querySelectorAll('[role="log"]').length,
+          table: document.querySelectorAll("table").length,
+          tr: document.querySelectorAll("tr").length,
+          td: document.querySelectorAll("td").length,
+          alertText: (document.querySelector('[role="alert"]')?.textContent || "").slice(0, 200),
+        };
+      });
+      log(`[${mode}] DIAG ${JSON.stringify(diag)}`);
+      const stats = await (await fetch(`http://127.0.0.1:${apiPort}/__stats`)).json();
+      log(
+        `[${mode}] SERVER chunks=${stats.chunks} chatRequests=${stats.chatRequests} mode=${stats.mode} aborted=${stats.lastAborted} requests=${JSON.stringify(stats.requests.slice(0, 14))}`,
+      );
+    } catch (inner) {
+      log(`[${mode}] DIAG FAILED ${inner?.message ?? inner}`);
+    }
+    log(`[${mode}] console = ${JSON.stringify(consoleLines.slice(0, 25))}`);
+    throw error;
   } finally {
     await context.close();
   }
@@ -798,12 +863,19 @@ async function main() {
   delete viteEnv.VITE_API_PROXY_TARGET;
   delete viteEnv.VITE_DEV_PUBLIC_ORIGIN;
   delete viteEnv.VITE_DEV_PORT;
+  const viteBin = path.join(FRONTEND_DIR, "node_modules", "vite", "bin", "vite.js");
+  if (PROD) {
+    log("[prod] vite build …");
+    await runToCompletion(process.execPath, [viteBin, "build"], viteEnv);
+    log("[prod] build done");
+  }
   const viteChild = track(
-    "vite-dev",
+    PROD ? "vite-preview" : "vite-dev",
     spawn(
       process.execPath,
       [
-        path.join(FRONTEND_DIR, "node_modules", "vite", "bin", "vite.js"),
+        viteBin,
+        ...(PROD ? ["preview"] : []),
         "--host",
         "127.0.0.1",
         "--port",
@@ -818,7 +890,9 @@ async function main() {
   viteChild.stderr.on("data", (data) => log(`[vite:err] ${data.trim()}`));
   const baseUrl = `http://127.0.0.1:${vitePort}`;
   await waitForHttp(baseUrl, 120_000);
-  log(`[env] vite dev pid=${viteChild.pid} url=${baseUrl} (proxy /api -> 127.0.0.1:${apiPort})`);
+  log(
+    `[env] vite ${PROD ? "preview(prod)" : "dev"} pid=${viteChild.pid} url=${baseUrl} (proxy /api -> 127.0.0.1:${apiPort})`,
+  );
 
   const browser = await chromium.launch({
     channel: "chrome",

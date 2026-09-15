@@ -6,6 +6,10 @@
 
 import type { Artifact, Thread } from "@/data/mock";
 import {
+  appendLiveStreamReasoning,
+  appendLiveStreamText,
+} from "@/lib/live-stream-text";
+import {
   appendArtifactToMessage,
   buildGeneratedImagePlaceholderSegment,
   buildTurnJsonArtifact,
@@ -204,6 +208,9 @@ export function createAgentChatStreamHandlers(
         return;
       }
       turnState.streamedText += delta;
+      // live 通道：增量先入外部 store（只惊动流式气泡），thread store 的正文
+      // 改为低频结构快照（见 streaming-frame.ts 的 STRUCTURAL_COMMIT_INTERVAL_MS）。
+      appendLiveStreamText(assistantMessageId, delta);
       // 正文开始 = 推理阶段结束，推理行不再显示运行态。
       turnState.reasoningRunning = false;
       setPhaseAndRef("streaming");
@@ -232,6 +239,7 @@ export function createAgentChatStreamHandlers(
         // 流路径 appendReasoningToMessageSegments 一致，保持原始
         // chunk 边界即可。
         turnState.reasoningText += delta;
+        appendLiveStreamReasoning(assistantMessageId, delta);
         turnState.reasoningRunning = true;
         setPhaseAndRef("streaming");
         frameScheduler.schedule();

@@ -15,11 +15,17 @@ import {
 } from "@/lib/runtime-api";
 import { matchesActiveTurn } from "@/lib/thread-state/deltas";
 import {
+  appendLiveStreamReasoning,
+  appendLiveStreamText,
+} from "@/lib/live-stream-text";
+import {
   getRuntimeDeltaKeyFromEvent,
   getRuntimeDeltaKind,
   getRuntimeEventTurnId,
   type RuntimeDeltaCoordinator,
+  type RuntimeLiveDeltaSink,
 } from "@/lib/workspace-thread-state";
+import { createStreamingFrameScheduler } from "./agent-chat-turn/streaming-frame";
 
 /** 方案B：重连循环连续失败达到该阈值才把 thread 标记为降级（防瞬断抖动）。 */
 const STREAM_FAILURE_THRESHOLD = 3;
@@ -52,6 +58,7 @@ type SessionRuntimeStreamOptions = {
     thread: Thread,
     event: SessionRuntimeEvent,
     expectedTurnId?: string,
+    liveSink?: RuntimeLiveDeltaSink,
   ) => Thread;
   selectedThread: Thread | undefined;
   setThreads: Dispatch<SetStateAction<Thread[]>>;
@@ -203,6 +210,75 @@ export function useSessionRuntimeStream({
 
     const controller = new AbortController();
 
+    // 运行时通道的**提交合帧**（2026-09-15）。chat 通道早已按最小间隔提交
+    // （agent-chat-turn/streaming-frame.ts 的 MIN_COMMIT_INTERVAL_MS = 120），
+    // 但本通道此前是「每条 SSE 事件一次 setThreads」：实测 e2e/zz-mount-audit.mjs
+    // 单次流式回合（507 帧 / 16s）把页面级提交打到 59 次/秒（≈每帧一次），
+    // MutationObserver 940 次回调、LayoutCount +945、ScriptDuration 7.3s——每次
+    // 提交都要重跑消息列的 markdown 渲染，这就是「输出过程中整页卡住」的主因。
+    // 这里复用同一个调度器：事件先入队，按最小间隔 + rAF 合并成一次提交。
+    //
+    // 关键约束：归属判定与去重 claim（deltaCoordinator.claim）**必须仍在事件
+    // 到达时执行**——见 onEvent 内注释：updater 可能被 StrictMode / 并发渲染
+    // 重放，claim 放进 updater 会吞掉去重键。因此入队的是已判定好的条目。
+    const pendingRuntimeCommits: Array<{
+      activeTurn: string;
+      event: SessionRuntimeEvent;
+      nextEvents: SessionRuntimeEvent[];
+      shouldApplyLiveDelta: boolean;
+    }> = [];
+
+    const applyPendingRuntimeCommits = () => {
+      if (pendingRuntimeCommits.length === 0) {
+        return;
+      }
+      // 按到达顺序在同一次 reducer 里兑现：逐条 apply 的结果与「一条一次提交」
+      // 完全一致（都是对最新 state 顺序应用），只是合并成一次页面级提交。
+      const batch = pendingRuntimeCommits.splice(0, pendingRuntimeCommits.length);
+      setThreadsRef.current((current) =>
+        batch.reduce(
+          (threads, item) =>
+            threads.map((thread) => {
+              if (thread.id !== threadIdRef.current) {
+                return thread;
+              }
+              // 通道恢复：收到 stream 事件说明连接已恢复，清除由
+              // stream 自身产生的降级标记（recovery 等其他来源的
+              // lastError 保持，不被误清）。
+              const recovered =
+                thread.transport === "error" &&
+                thread.lastError?.startsWith("Runtime stream failed")
+                  ? { ...thread, transport: "live" as const, lastError: null }
+                  : thread;
+              // 方案B：请求进行中，打字机增量事件直接渲染到消息；
+              // 否则只进事件快照（历史回放/reload 不误渲染）。
+              // A durable event from another turn never mutates the
+              // currently streaming assistant message.  The claim above
+              // is intentionally shared by both transport paths.
+              if (item.shouldApplyLiveDelta) {
+                return applyRuntimeDeltaToThreadRef.current(
+                  recovered,
+                  item.event,
+                  item.activeTurn || undefined,
+                );
+              }
+              return applyRuntimeEventToThreadRef.current(
+                recovered,
+                sessionId,
+                item.nextEvents,
+                item.event,
+              );
+            }),
+          current,
+        ),
+      );
+    };
+
+    const runtimeCommitScheduler = createStreamingFrameScheduler(
+      applyPendingRuntimeCommits,
+    );
+    runtimeCommitScheduler.attachVisibilityListener();
+
     const sleep = (ms: number) =>
       new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, ms);
@@ -314,41 +390,33 @@ export function useSessionRuntimeStream({
                   Boolean(deltaKey) && coordinator
                     ? willApply && coordinator.claim(deltaKey)
                     : Boolean(deltaKey) || !coordinator;
+
+                // live 通道（lib/live-stream-text.ts）：已 claim 的增量在事件到达时同步
+                // 追加；此处只取副作用，写 store 仍由 applyPendingRuntimeCommits 兑现。
+                if (shouldApplyLiveDelta && currentThread) {
+                  applyRuntimeDeltaToThreadRef.current(
+                    currentThread,
+                    event,
+                    activeTurn || undefined,
+                    (delta) =>
+                      delta.kind === "text"
+                        ? appendLiveStreamText(delta.messageId, delta.text)
+                        : appendLiveStreamReasoning(delta.messageId, delta.text),
+                  );
+                }
               }
 
-              setThreadsRef.current((current) =>
-                current.map((thread) => {
-                  if (thread.id !== threadIdRef.current) {
-                    return thread;
-                  }
-                  // 通道恢复：收到 stream 事件说明连接已恢复，清除由
-                  // stream 自身产生的降级标记（recovery 等其他来源的
-                  // lastError 保持，不被误清）。
-                  const recovered =
-                    thread.transport === "error" &&
-                    thread.lastError?.startsWith("Runtime stream failed")
-                      ? { ...thread, transport: "live" as const, lastError: null }
-                      : thread;
-                  // 方案B：请求进行中，打字机增量事件直接渲染到消息；
-                  // 否则只进事件快照（历史回放/reload 不误渲染）。
-                  // A durable event from another turn never mutates the
-                  // currently streaming assistant message.  The claim above
-                  // is intentionally shared by both transport paths.
-                  if (shouldApplyLiveDelta) {
-                    return applyRuntimeDeltaToThreadRef.current(
-                      recovered,
-                      event,
-                      activeTurn || undefined,
-                    );
-                  }
-                  return applyRuntimeEventToThreadRef.current(
-                    recovered,
-                    sessionId,
-                    nextEvents,
-                    event,
-                  );
-                }),
-              );
+              // 入队 + 合帧提交（见上方 pendingRuntimeCommits 注释）。判定结果
+              // （shouldApplyLiveDelta / activeTurn）在事件到达时固化，既保证
+              // 「先判定后 claim」的既有语义，又避免把 claim 放进 updater 被重放。
+              // 实际 apply 在 applyPendingRuntimeCommits 里按到达顺序兑现。
+              pendingRuntimeCommits.push({
+                activeTurn,
+                event,
+                nextEvents,
+                shouldApplyLiveDelta,
+              });
+              runtimeCommitScheduler.schedule();
             },
             onErrorEvent: (payload) => {
               streamFailed = true;
@@ -368,6 +436,8 @@ export function useSessionRuntimeStream({
                   ? payload.error.trim()
                   : "runtime stream reported an error";
               if (consecutiveFailures >= STREAM_FAILURE_THRESHOLD) {
+                // 先兑现挂起的增量，保证降级标记写在最后（顺序与「一条一次提交」一致）。
+                runtimeCommitScheduler.flush();
                 setThreadsRef.current((current) =>
                   current.map((thread) =>
                     thread.id === threadIdRef.current
@@ -403,6 +473,8 @@ export function useSessionRuntimeStream({
               : { key: sessionKey, status: nextStatus },
           );
           if (consecutiveFailures >= STREAM_FAILURE_THRESHOLD) {
+            // 同上：先冲刷挂起的增量，再写降级标记。
+            runtimeCommitScheduler.flush();
             setThreadsRef.current((current) =>
               current.map((thread) =>
                 thread.id === threadIdRef.current
@@ -432,6 +504,11 @@ export function useSessionRuntimeStream({
     })();
 
     return () => {
+      // 先冲刷再停表：已 claim 的 delta 若被丢弃，另一条通道会因为去重键已被
+      // 消费而永久跳过这段文本（两条通道共享 deltaCoordinator 的 key）。
+      runtimeCommitScheduler.flush();
+      runtimeCommitScheduler.cancel();
+      runtimeCommitScheduler.detachVisibilityListener();
       controller.abort();
     };
     // 依赖里只留会话身份：回调/setter 经上面的 ref 读取（保持最新引用但不参与

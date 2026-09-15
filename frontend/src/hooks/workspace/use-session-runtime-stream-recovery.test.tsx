@@ -216,6 +216,18 @@ describe("useSessionRuntimeStream connection status and manual retry", () => {
     return { apiRef, texts };
   }
 
+  /**
+   * 运行时通道的提交是**合帧**的（复用 agent-chat-turn/streaming-frame.ts 的
+   * rAF + 最小提交间隔 120ms）：`onEvent` 只把事件入队，断言「渲染了几次」之前
+   * 必须等一次提交兑现，否则读到的还是提交前的 `texts`。等待上限取 180ms
+   * （120ms 最小间隔 + 一帧 rAF + 余量）。
+   */
+  async function flushRuntimeCommits() {
+    await act(async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 180));
+    });
+  }
+
   it("moves from connecting to online when the stream delivers events", () => {
     const { apiRef } = renderHarness();
     expect(apiRef.current?.connectionStatus).toBe("connecting");
@@ -274,13 +286,16 @@ describe("useSessionRuntimeStream connection status and manual retry", () => {
     expect(apiRef.current?.connectionStatus).toBe("offline");
   });
 
-  it("manual retry reuses the local last seq and does not re-render consumed deltas", () => {
+  it("manual retry reuses the local last seq and does not re-render consumed deltas", async () => {
     const { apiRef, texts } = renderHarness();
 
     act(() => {
       calls[0].handlers.onEvent?.(textDelta(7, "Hello"));
     });
     expect(calls[0].handlers.after).toBe(0);
+
+    // 先等首帧增量提交落地，再以它为基准断言「重放不重复渲染」。
+    await flushRuntimeCommits();
 
     const renderedBeforeRetry = texts.length;
 
@@ -298,6 +313,7 @@ describe("useSessionRuntimeStream connection status and manual retry", () => {
     act(() => {
       calls[1].handlers.onEvent?.(textDelta(7, "Hello"));
     });
+    await flushRuntimeCommits();
     expect(texts.length).toBe(renderedBeforeRetry);
     expect(texts[texts.length - 1]).toBe("Hello");
   });

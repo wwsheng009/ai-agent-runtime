@@ -13,6 +13,7 @@ import {
 } from "@/hooks/workspace/agent-chat-turn/notifications";
 import { type TrajectoryStore } from "@/hooks/workspace/use-trajectory-snapshot";
 import { debugTrajectoryConsistency } from "@/lib/trajectory/projection";
+import { clearLiveStreamText } from "@/lib/live-stream-text";
 import { readTurnUsage } from "@/lib/turn-usage";
 import {
   buildAssistantMessageSegments,
@@ -233,6 +234,11 @@ export function createTurnFinalizer(deps: TurnFinalizerDeps): TurnFinalizer {
       nextThread.artifacts = upsertArtifacts(nextThread.artifacts, artifacts);
       return nextThread;
     });
+
+    // 定稿后正文已经以 terminal 文本写回 thread store，live 记录随之作废（否则该消息
+    // 会被 live 文本永久覆盖）。必须在 store 写入之后调用：两者在同一个任务里兑现，
+    // 同一帧提交，不会出现"store 还是旧的、live 又没了"的空窗。
+    clearLiveStreamText(assistantMessageId);
 
     if (artifacts[0]) {
       setSelectedArtifactId(artifacts[0].id);

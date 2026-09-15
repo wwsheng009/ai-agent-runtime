@@ -285,11 +285,14 @@ function buildHistoryMessage(
           ),
         ]
       : [
-          ...(contentText
-            ? [{ type: "text" as const, content: contentText }]
-            : []),
+          // 推理先于正文落位：思考过程在上、正式回答在下。历史条目只保存最终正文
+          // 与合并后的推理块（没有逐帧顺序信息），恢复时按固定顺序还原；
+          // 旧实现把正文放前，页面就成了「先正文、后推理过程」。
           ...(reasoningText
             ? [{ type: "reasoning" as const, content: reasoningText }]
+            : []),
+          ...(contentText
+            ? [{ type: "text" as const, content: contentText }]
             : []),
           ...generatedImageSegments,
         ];

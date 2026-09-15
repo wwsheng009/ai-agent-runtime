@@ -189,6 +189,27 @@ describe("历史空消息不占位", () => {
     ]);
   });
 
+  // 回归：历史条目同时有正文与推理时，推理段必须排在正文段之前——
+  // 页面按段落顺序渲染，旧实现（正文在前）会把「推理过程」行显示在回答下方。
+  it("正文与推理并存时推理段排在正文段之前", () => {
+    const history: SessionHistoryMessage[] = [
+      {
+        role: "assistant",
+        content: "结论：入口文件共 42 行。",
+        metadata: {
+          reasoning_details: { visibility: "visible", content: "先盘点入口文件" },
+        },
+      },
+    ];
+
+    const [assistant] = mapSessionHistoryToMessages("session-1", history, []);
+
+    expect(assistant.message.segments.map((segment) => segment.type)).toEqual([
+      "reasoning",
+      "text",
+    ]);
+  });
+
   it("匹配 live 消息时以历史正文为准，空正文不并进占位文本", () => {
     const existing: ChatMessage[] = [
       {

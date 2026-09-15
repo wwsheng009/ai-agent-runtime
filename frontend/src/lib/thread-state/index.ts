@@ -6,6 +6,7 @@ export { reconcileRuntimeText, getAssistantMessageText, getAssistantMessageReaso
 export { buildGeneratedImagePlaceholderSegment, upsertGeneratedImageSegment, buildGeneratedImageAttachments } from "./generated-images";
 export { applySessionHistoryToThread, buildTurnJsonArtifact, prependSessionHistoryToThread } from "./history-artifacts";
 export { appendArtifactToMessage, applyRuntimeEventToThread, applyRuntimeDeltaToThread, getRuntimeEventTurnId, buildStreamingMessageSegments, createStreamingAssistantMessage, isRuntimePayload, mergeRuntimeEvent, updateThreadMessage } from "./events";
+export type { RuntimeLiveDelta, RuntimeLiveDeltaSink } from "./events";
 export { getToolCallId, getToolArgumentsSummary, getToolResultSummary, getToolErrorMessage, buildToolSegmentFromPayload, getToolSegmentKey, upsertToolSegment } from "./tools";
 export { mergeRuntimeSessionsIntoThreads, getRuntimeEventSeq } from "./sessions";
 export { getErrorMessage, getFirstArtifactId, getStreamTextDelta, getToolName, mergeUniqueStrings, upsertArtifact, upsertArtifacts } from "./shared";

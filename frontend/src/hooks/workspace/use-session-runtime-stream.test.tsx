@@ -176,6 +176,18 @@ describe("useSessionRuntimeStream delta gate", () => {
     return { handlers, getThreads: () => threads };
   }
 
+  /**
+   * 运行时通道的提交是**合帧**的（复用 agent-chat-turn/streaming-frame.ts 的
+   * rAF + 最小提交间隔 120ms）：`onEvent` 只把事件入队，断言前必须等调度器
+   * 兑现一次提交，否则读到的是提交前的 state。等待上限取 180ms（120ms 最小
+   * 间隔 + 一帧 rAF + 余量）。
+   */
+  async function flushRuntimeCommits() {
+    await act(async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 180));
+    });
+  }
+
   it("appends assistant_delta to the message text when renderLiveDeltas=true", async () => {
     const { handlers, getThreads } = await renderWith(true, createThread());
     act(() => {
@@ -184,6 +196,8 @@ describe("useSessionRuntimeStream delta gate", () => {
     act(() => {
       handlers.onEvent?.(deltaEvent({ delta: "World", sequence: 2 }));
     });
+
+    await flushRuntimeCommits();
 
     const textSegment = getThreads()[0].messages[0].segments.find(
       (s) => s.type === "text",
@@ -198,6 +212,8 @@ describe("useSessionRuntimeStream delta gate", () => {
     act(() => {
       handlers.onEvent?.(deltaEvent({ delta: "World", sequence: 2 }));
     });
+
+    await flushRuntimeCommits();
 
     const textSegment = getThreads()[0].messages[0].segments.find(
       (s) => s.type === "text",
@@ -214,6 +230,8 @@ describe("useSessionRuntimeStream delta gate", () => {
         payload: { status: "running", seq: 5 },
       });
     });
+
+    await flushRuntimeCommits();
 
     const nextThread = getThreads()[0];
     expect(nextThread.lastRuntimeEventType).toBe("session_start");
@@ -280,6 +298,8 @@ describe("useSessionRuntimeStream delta gate", () => {
     act(() => {
       handlers.onEvent?.(event);
     });
+
+    await flushRuntimeCommits();
 
     const textSegment = getThreads()[0].messages[0].segments.find(
       (s) => s.type === "text",
@@ -350,6 +370,9 @@ describe("useSessionRuntimeStream delta gate", () => {
         }),
       );
     });
+
+    await flushRuntimeCommits();
+
     const textSegment = threads[0].messages[0].segments.find(
       (segment) => segment.type === "text",
     );
@@ -403,6 +426,8 @@ describe("useSessionRuntimeStream delta gate", () => {
         },
       });
     });
+
+    await flushRuntimeCommits();
 
     const nextThread = getThreads()[0];
     expect(nextThread.lastRuntimeEventType).toBe("subagent.progress");
@@ -459,6 +484,9 @@ describe("useSessionRuntimeStream delta gate", () => {
         payload: { status: "running", seq: 7 },
       });
     });
+
+    await flushRuntimeCommits();
+
     expect(threads[0].id).toBe("thread-9");
     expect(threads[0].lastRuntimeEventType).toBe("session_start");
   });

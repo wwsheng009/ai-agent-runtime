@@ -45,7 +45,12 @@ function parseTableAlignmentCell(
   if (cell.startsWith(":")) {
     return "left";
   }
-  return null;
+  // 无冒号的 `---` 是合法 GFM 分隔行（对齐 = 默认左对齐），必须返回 "left"。
+  // 此前这里返回 null，会让 `isAlignmentRowValid` 判 false，把**最常见**的表格
+  // 写法 `| --- | --- |` 整体踢出结构化流式路径，回落到 ReactMarkdown 每帧重新
+  // 解析整块：实测同一场景 ScriptDuration 10.7s / 16s，比结构化路径贵 45%。
+  // 现在 null 只表示「这个单元格不是分隔行」（如 `| abc |`、`| -- |`）。
+  return "left";
 }
 
 function isStructuredMarkdownBlock(content: string) {

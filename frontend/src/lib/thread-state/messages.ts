@@ -155,11 +155,28 @@ export function buildAssistantMessageSegments(
       ? toolIndex >= 0 && textIndex > toolIndex
       : segments.some((segment) => segment.type === "tool");
 
-  if (!textGoesLast) {
-    return [...textSegments, ...segments];
-  }
   // 收尾提示（stopped callout）始终留在最底部，它描述的是整条消息的终态。
   const callouts = segments.filter((segment) => segment.type === "callout");
   const body = segments.filter((segment) => segment.type !== "callout");
-  return [...body, ...textSegments, ...callouts];
+
+  if (textGoesLast) {
+    return [...body, ...textSegments, ...callouts];
+  }
+
+  // 正文落位：排在**起始推理块之后**，其余段（工具行 / 图片 / 富内容）相对顺序不变。
+  // 旧实现无条件把正文放回数组首位，于是「推理 + 正文」的回合里推理行被挤到
+  // 回答下方——与流式期的时间顺序（先思考、后作答）相反。
+  let textInsertAt = 0;
+  while (
+    textInsertAt < body.length &&
+    body[textInsertAt].type === "reasoning"
+  ) {
+    textInsertAt += 1;
+  }
+  return [
+    ...body.slice(0, textInsertAt),
+    ...textSegments,
+    ...body.slice(textInsertAt),
+    ...callouts,
+  ];
 }

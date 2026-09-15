@@ -25,6 +25,8 @@ export function renderMessageSegment(
     anchorKey?: string;
     flowKey?: string;
     interrupted?: boolean;
+    /** live 通道键：只由「流式消息的最后一段正文/推理」这一行携带消息 id。 */
+    liveStreamId?: string | null;
     streaming?: boolean;
     onSelectArtifact?: (artifactId: string) => void;
     resolveFilePathLink?: (path: string) => (() => void) | null;
@@ -59,6 +61,7 @@ export function renderMessageSegment(
         <StreamingMarkdown
           content={segment.content}
           interrupted={options?.interrupted}
+          liveStreamId={options?.liveStreamId}
           streaming={options?.streaming}
         />
       </div>
@@ -70,6 +73,7 @@ export function renderMessageSegment(
       <MessageReasoningRow
         anchorKey={options?.anchorKey}
         flowKey={options?.flowKey}
+        liveStreamId={options?.liveStreamId}
         segment={segment}
         streaming={options?.streaming}
       />

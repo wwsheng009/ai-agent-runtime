@@ -19,8 +19,25 @@
  */
 const MIN_COMMIT_INTERVAL_MS = 120;
 
+/**
+ * **结构快照**（thread store 里的正文副本）的最小间隔。
+ *
+ * live 通道（`lib/live-stream-text.ts`）接管了"正在揭示的文本"之后，store 里的正文
+ * 只承担两件事：① 段落骨架（工具行 / 代码块闭合 / 推理收尾位）需要文本参与；
+ * ② 定稿前给 store 一份完整副本（定稿本身会用 terminal 文本重写，见 finalize-turn）。
+ * 两者都不需要跟 SSE 节奏对齐，因此压到 1 次/秒——文本量按秒只有几百字符，
+ * 而每次写 store 都要整棵工作区树重渲染一次（Probe A：把提交间隔从 120ms 放到
+ * 1000ms，ScriptDur 3.167s → 1.049s，−67%）。
+ *
+ * 两条豁免（见 renderStreamingMessage 调用点）：
+ * - store 里还没有可见正文时立即提交：否则流式消息在首块期间没有可挂的行节点，
+ *   live 文本无行可渲染；
+ * - `flush({force:true})` 一律提交：可见性恢复 / result 收口 / 里程碑。
+ */
+export const STRUCTURAL_COMMIT_INTERVAL_MS = 1000;
+
 export function createStreamingFrameScheduler(
-  renderStreamingMessage: () => void,
+  renderStreamingMessage: (options?: { force?: boolean }) => void,
 ) {
   let pendingStreamingFrame: number | null = null;
   let pendingStreamingTimeout: number | null = null;
@@ -54,15 +71,15 @@ export function createStreamingFrameScheduler(
     clearPendingStreamingTimeout();
   };
 
-  const commitStreamingMessage = () => {
+  const commitStreamingMessage = (force = false) => {
     cancelPending();
     lastCommitAt = now();
-    renderStreamingMessage();
+    renderStreamingMessage({ force });
   };
 
   /** 立即冲刷（页面恢复可见 / 流结束时调用）：不受最小间隔约束。 */
   const flushStreamingMessage = () => {
-    commitStreamingMessage();
+    commitStreamingMessage(true);
   };
 
   /** 帧对齐提交（rAF + 后台标签页 setTimeout 兜底，G3）。 */

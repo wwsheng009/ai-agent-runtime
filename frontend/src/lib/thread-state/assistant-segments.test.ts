@@ -118,6 +118,36 @@ describe("assistant segments and generated images", () => {
     ).toBe("第一段答复续写");
   });
 
+  // 回归：没有工具行的回合里，重建也必须保持「推理 → 正文」的顺序；
+  // 旧实现无条件把正文段放回数组首位，推理行会被挤到回答下方。
+  it("推理与正文并存时正文排进推理之后", () => {
+    const segments = buildAssistantMessageSegments(
+      "结论：入口文件共 42 行。",
+      "runtime",
+      "先盘点入口文件",
+      { reasoningRunning: false, existingSegments: [] },
+    );
+
+    expect(segments.map((segment) => segment.type)).toEqual(["reasoning", "text"]);
+  });
+
+  it("重建时修正历史遗留的「正文在前、推理在后」段序", () => {
+    const segments = buildAssistantMessageSegments(
+      "结论：入口文件共 42 行。",
+      "runtime",
+      "先盘点入口文件",
+      {
+        reasoningRunning: false,
+        existingSegments: [
+          { type: "text", content: "结论：入口文件共 42 行。" },
+          { type: "reasoning", content: "先盘点入口文件", running: false },
+        ],
+      },
+    );
+
+    expect(segments.map((segment) => segment.type)).toEqual(["reasoning", "text"]);
+  });
+
   it("replaces image placeholders with generated images when building final assistant segments", () => {
     const placeholder = buildGeneratedImagePlaceholderSegment({
       phase: "partial",
@@ -159,13 +189,13 @@ describe("assistant segments and generated images", () => {
 
     expect(segments).toEqual([
       {
-        type: "text",
-        content: "Merged answer",
-      },
-      {
         type: "reasoning",
         content: "Need a follow-up step",
         running: false,
+      },
+      {
+        type: "text",
+        content: "Merged answer",
       },
       {
         type: "image",

@@ -19,6 +19,7 @@ import type {
   AgentChatStreamChunkPayload,
   ChatStreamPhase,
 } from "@/types/runtime";
+import { clearLiveStreamText } from "@/lib/live-stream-text";
 
 import { type ChatTurnRuntimeState } from "./turn-state";
 
@@ -137,6 +138,8 @@ export function createStreamingWriters(
         };
       }),
     );
+    // 错误定稿同样写回了完整文本，live 记录作废（见 finalize-turn 同处注释）。
+    clearLiveStreamText(assistantMessageId);
   };
   return {
     handleToolEnd,

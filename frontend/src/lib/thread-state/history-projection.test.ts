@@ -396,14 +396,15 @@ describe("applySessionHistoryToThread", () => {
     );
 
     expect(nextThread.messages).toHaveLength(1);
+    // 推理段在正文段之前：思考过程在上、正式回答在下（页面按段落顺序渲染）。
     expect(nextThread.messages[0].segments).toEqual([
-      {
-        type: "text",
-        content: "Final answer",
-      },
       {
         type: "reasoning",
         content: "Because the flag was unset",
+      },
+      {
+        type: "text",
+        content: "Final answer",
       },
     ]);
   });
@@ -439,9 +440,13 @@ describe("applySessionHistoryToThread", () => {
 
     const segments = nextThread.messages[0].segments;
     expect(segments).toHaveLength(2);
-    expect(segments[1]).toEqual({
+    expect(segments[0]).toEqual({
       type: "reasoning",
       content: "Short summary",
+    });
+    expect(segments[1]).toEqual({
+      type: "text",
+      content: "Final answer",
     });
   });
 

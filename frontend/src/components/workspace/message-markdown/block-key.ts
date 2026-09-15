@@ -14,14 +14,30 @@
 /**
  * FNV-1a 32 位散列（base36）+ 长度：把块内容压成短 key，避免长文本直接进 fiber key。
  * 非加密用途，仅用于在同一段流式文本内区分块身份。
+ *
+ * 结果按内容缓存：冻结块的 key 在流式期间每拍（打字机 ~32ms）都要重算一次，
+ * 而块内容一旦冻结就逐字不变 —— 不缓存等于每拍把整段前缀重散列一遍。
  */
+const hashCache = new Map<string, string>();
+/** 上限只是防无界增长：一段流里出现的块内容种类远小于此，触顶即清空重来。 */
+const HASH_CACHE_LIMIT = 512;
+
 function hashBlockContent(content: string): string {
+  const cached = hashCache.get(content);
+  if (cached !== undefined) {
+    return cached;
+  }
   let hash = 0x811c9dc5;
   for (let index = 0; index < content.length; index += 1) {
     hash ^= content.charCodeAt(index);
     hash = Math.imul(hash, 0x01000193);
   }
-  return `${(hash >>> 0).toString(36)}.${content.length.toString(36)}`;
+  const key = `${(hash >>> 0).toString(36)}.${content.length.toString(36)}`;
+  if (hashCache.size >= HASH_CACHE_LIMIT) {
+    hashCache.clear();
+  }
+  hashCache.set(content, key);
+  return key;
 }
 
 /** 块内容 + 出现次序 → 稳定 key（同一内容第 n 次出现用 `#n` 区分）。 */

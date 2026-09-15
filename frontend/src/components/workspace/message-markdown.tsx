@@ -21,6 +21,7 @@ import { createMarkdownComponents } from "./message-markdown/markdown-components
 import { renderStreamingStructuredTail, renderStreamingPlainTail } from "./message-markdown/streaming-tails";
 import { rehypeCollapseBreakNewlines } from "./message-markdown/rehype-collapse-break-newlines";
 import { StableMarkdownFragment } from "./message-markdown/stable-fragment";
+import { SettledMarkdownBlocks } from "./message-markdown/settled-blocks";
 import { markdownBlockKey } from "./message-markdown/block-key";
 
 export const MessageMarkdown = memo(function MessageMarkdown({
@@ -131,13 +132,10 @@ export const MessageMarkdown = memo(function MessageMarkdown({
         // 前缀按块渲染：key = 块内容（跨 offset 漂移 / 冻结边界移动都稳定），
         // 块内容本身逐字不变，因此 memo 让每块只解析一次，而不是随每个 chunk
         // 重解析整段前缀；块真的被改写时只有该块换 key。
-        settledEntries.map((entry) => (
-          <StableMarkdownFragment
-            key={entry.key}
-            components={markdownComponents}
-            content={entry.content}
-          />
-        ))
+        <SettledMarkdownBlocks
+          blocks={settledEntries}
+          components={markdownComponents}
+        />
       ) : renderedStableContent ? (
         <StableMarkdownFragment
           components={markdownComponents}

@@ -8,12 +8,15 @@ import { useTranslation } from "react-i18next";
 import { ChatProcessRow } from "@/components/workspace/chat-process-row";
 import { MessageMarkdown } from "@/components/workspace/message-markdown";
 import { hasVisibleText } from "@/lib/chat-view/visible-text";
+import { useLiveStreamEntry } from "@/lib/live-stream-text";
 import { displayReasoningText } from "@/lib/trajectory/reasoning-window";
 import { type ReasoningMessageSegment } from "@/lib/workspace-thread-state";
 
 type MessageReasoningRowProps = {
   anchorKey?: string;
   flowKey?: string;
+  /** live 通道键（消息 id）：只由「正在增长的推理段」这一行携带。 */
+  liveStreamId?: string | null;
   segment: ReasoningMessageSegment;
   streaming?: boolean;
 };
@@ -26,6 +29,7 @@ function summarizeReasoning(content: string): string {
 export function MessageReasoningRow({
   anchorKey,
   flowKey,
+  liveStreamId,
   segment,
   streaming = false,
 }: MessageReasoningRowProps) {
@@ -33,15 +37,24 @@ export function MessageReasoningRow({
   const [open, setOpen] = useState(false);
   const baseId = useId();
   const panelId = `${baseId}-panel`;
+  // live 通道：推理增量同样不再写页面级 thread state（见 lib/live-stream-text.ts），
+  // 只有本行随增量重渲染。
+  const live = useLiveStreamEntry(streaming ? liveStreamId : null);
+  // 自愈守卫同 `StreamingMarkdown`：live 短于 store 副本说明它是 reload / 重连后
+  // 重新起算的局部文本，此时回落 store 副本，避免已显示的推理被截断。
+  const content =
+    live && live.reasoningText.length >= segment.content.length
+      ? live.reasoningText
+      : segment.content;
   const running = streaming && segment.running !== false;
-  const summary = summarizeReasoning(segment.content);
-  const reasoningDisplay = displayReasoningText(segment.content);
+  const summary = summarizeReasoning(content);
+  const reasoningDisplay = displayReasoningText(content);
   const trimmed = reasoningDisplay.droppedChars > 0;
   const title = t("panels.messages.reasoningRow.title");
 
   // §12.1.4：无推理正文时不渲染行（既不用占位文案顶上屏，也不留 24px 空行）。
   // 流式窗口内首块到达前的空壳同样不占位；有内容后行自然出现。
-  if (!hasVisibleText(segment.content)) return null;
+  if (!hasVisibleText(content)) return null;
 
   return (
     <ChatProcessRow

@@ -143,6 +143,41 @@ describe("AssistantMessageCard 折叠渲染", () => {
     expect(markup).not.toContain("展开过程证据");
   });
 
+  // 回归：同一回合同时有推理与正文时，推理过程必须渲染在正文**之前**
+  // （旧实现把推理段排在正文段之后，页面上推理行落在回答下方）。
+  it("推理行渲染在正文之前", () => {
+    const message = assistantMessage([
+      { type: "reasoning", content: "先盘点入口文件" },
+      { type: "text", content: "结论：入口文件共 42 行。" },
+    ]);
+
+    const markup = renderCard(message, message.id);
+    const reasoningIndex = markup.indexOf("推理过程");
+    const answerIndex = markup.indexOf("结论：入口文件共 42 行。");
+
+    expect(reasoningIndex).toBeGreaterThanOrEqual(0);
+    expect(answerIndex).toBeGreaterThanOrEqual(0);
+    expect(reasoningIndex).toBeLessThan(answerIndex);
+  });
+
+  // 已结束的「推理 + 正文」回合：推理行归入可折叠过程证据（统计行在上、回答在下），
+  // 与工具回合一致；展开后才回到「推理在上、正文在下」的完整序列。
+  it("已结束的推理 + 正文回合折叠为统计行 + 回答", () => {
+    const markup = renderCard(
+      assistantMessage([
+        { type: "reasoning", content: "先盘点入口文件" },
+        { type: "text", content: "结论：入口文件共 42 行。" },
+      ]),
+    );
+
+    expect(markup).toContain("思考了一会儿");
+    expect(markup).toContain("结论：入口文件共 42 行。");
+    expect(markup).not.toContain("先盘点入口文件");
+    expect(markup.indexOf("思考了一会儿")).toBeLessThan(
+      markup.indexOf("结论：入口文件共 42 行。"),
+    );
+  });
+
   it("完整用量：渲染 Token 用量行", () => {
     const message = assistantMessage([{ type: "text", content: "结论如下。" }]);
     message.usage = {

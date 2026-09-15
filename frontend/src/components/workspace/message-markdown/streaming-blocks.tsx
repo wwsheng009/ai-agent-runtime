@@ -126,8 +126,15 @@ export const StreamingTableRow = memo(
         data-streaming-active={active ? "true" : undefined}
       >
         {cells.map((cell, cellIndex) => (
+          // 稳定 key：单元格身份 = 列位置，**不能把 `cell` 文本拼进 key**。
+          // 文本参与 key 会让「同一格每帧长一点」被 React 判成「新节点」——
+          // 卸载旧 td、挂载新 td，连带整棵子树与 InlineMarkdown 一起重建。
+          // 实测（e2e/zz-mount-audit.mjs，带对齐冒号的表格、16s / 507 帧）：
+          // 同一个 td 位置被重建 913 次（MutationObserver td(+913/-912)，
+          // cellInstances={"tbody/r2/c1":913}，单格存活 P50 16.4ms ≈ 一帧），
+          // 而 characterData 只有 31 次——内容不是被更新，是被重建。
           <td
-            key={`streaming-table-cell-${cellIndex}-${cell}`}
+            key={`streaming-table-cell-${cellIndex}`}
             className={cn(
               "border-t border-border px-3 py-2.5 align-top text-foreground",
               alignmentToClassName(alignments[cellIndex] ?? null),

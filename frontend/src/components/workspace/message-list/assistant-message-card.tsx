@@ -65,6 +65,29 @@ export function AssistantMessageCard({
     streamingMessageId,
   });
   const streaming = message.id === streamingMessageId;
+  const liveStreamId = streaming ? message.id : null;
+  // live 通道只投影「正在增长的那一段」：正文取消息里最后一段 text，推理同理
+  // （更早的静态段在渲染层被判为「非增长目标」，本来就不打字）。
+  let liveTextItemKey: string | null = null;
+  let liveReasoningItemKey: string | null = null;
+  if (streaming) {
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index];
+      if (item.kind !== "assistant-step") {
+        continue;
+      }
+      const segment = item.node.segment;
+      if (!liveTextItemKey && segment.type === "text") {
+        liveTextItemKey = item.key;
+      }
+      if (!liveReasoningItemKey && segment.type === "reasoning") {
+        liveReasoningItemKey = item.key;
+      }
+      if (liveTextItemKey && liveReasoningItemKey) {
+        break;
+      }
+    }
+  }
 
   return (
     <div className="flex w-full min-w-0 flex-col gap-2">
@@ -128,6 +151,10 @@ export function AssistantMessageCard({
                   anchorKey: item.anchorKey,
                   flowKey: item.key,
                   interrupted: message.interrupted === true,
+                  liveStreamId:
+                    item.key === liveTextItemKey || item.key === liveReasoningItemKey
+                      ? liveStreamId
+                      : null,
                   streaming,
                   onSelectArtifact,
                   resolveFilePathLink,

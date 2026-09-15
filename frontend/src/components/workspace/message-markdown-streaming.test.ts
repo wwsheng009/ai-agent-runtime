@@ -190,6 +190,30 @@ describe("message-markdown-streaming", () => {
     });
   });
 
+  it("treats colon-less alignment rows as valid left-aligned tables", () => {
+    // GFM 的 `| --- | --- |` 是合法分隔行（默认左对齐）。此前这里返回 null，
+    // 让最常见的表格写法整体回落到 ReactMarkdown 每帧重解析整块（实测流式
+    // ScriptDuration 10.7s / 16s，比结构化路径贵 45%）。
+    expect(
+      parseStreamingStructuredTail(
+        ["| Name | Value |", "| --- | --- |", "| mode | live |"].join("\n"),
+      ),
+    ).toEqual({
+      kind: "table",
+      headers: ["Name", "Value"],
+      alignments: ["left", "left"],
+      rows: [["mode", "live"]],
+    });
+  });
+
+  it("still rejects cells that are not alignment rows", () => {
+    expect(
+      parseStreamingStructuredTail(
+        ["| Name | Value |", "| abc | --- |", "| mode | live |"].join("\n"),
+      ),
+    ).toBeNull();
+  });
+
   it("splits single-line plain tails at the last completed sentence", () => {
     expect(
       parseStreamingPlainTail(

@@ -21,7 +21,7 @@ import { createThreadFromPrompt } from "@/hooks/workspace/agent-chat-turn/thread
 import { useComposerAttachments } from "@/hooks/workspace/composer/use-composer-attachments";
 import { useComposerDraft } from "@/hooks/workspace/composer/use-composer-draft";
 import { createAgentChatStreamHandlers } from "@/hooks/workspace/agent-chat-turn/stream-handlers";
-import { createStreamingFrameScheduler } from "@/hooks/workspace/agent-chat-turn/streaming-frame";
+import { createStreamingFrameScheduler, STRUCTURAL_COMMIT_INTERVAL_MS } from "@/hooks/workspace/agent-chat-turn/streaming-frame";
 import { createStreamingWriters } from "@/hooks/workspace/agent-chat-turn/streaming-writers";
 import { createTurnRuntimeState } from "@/hooks/workspace/agent-chat-turn/turn-state";
 import { useChatTurnReasoningEffort } from "@/hooks/workspace/agent-chat-turn/use-reasoning-effort";
@@ -38,6 +38,11 @@ import {
 } from "@/lib/runtime-api";
 import { getSessionLeaseConflictTitle } from "@/api/runtime/shared";
 import { normalizeSessionId } from "@/lib/session-id";
+import { hasVisibleText } from "@/lib/chat-view/visible-text";
+import {
+  setLiveStreamReasoning,
+  setLiveStreamText,
+} from "@/lib/live-stream-text";
 import type { TrajectoryEventKind } from "@/lib/trajectory/types";
 import {
   appendArtifactToMessage,
@@ -208,6 +213,13 @@ export function useWorkspaceAgentChatTurn({
     };
 
     const setStreamingMessage = (label: string, author: string, content: string) => {
+      // 结构快照落 store 的同时把 live 记录对齐到同一份正文/推理。live 记录是
+      // 「比 store 更新的那一份」，但并非所有文本来源都走 append 增量：`onResult`
+      // 的 output/reasoning 是**整体快照**（`reconcileRuntimeText` 取更长者），
+      // 只更新 canonical。渲染层优先用 live，若不在这里对齐，气泡会一直显示旧
+      // live 文本直到下一次快照或定稿。文本不变时 set* 是幂等的（不通知订阅方）。
+      setLiveStreamText(assistantMessageId, content);
+      setLiveStreamReasoning(assistantMessageId, turnState.reasoningText);
       updateCurrentThread((thread) =>
         updateThreadMessage(thread, assistantMessageId, (message) => ({
           ...message,
@@ -226,7 +238,37 @@ export function useWorkspaceAgentChatTurn({
       );
     };
 
-    const renderStreamingMessage = () => {
+    // 结构快照节流（见 streaming-frame.ts / lib/live-stream-text.ts）：正文与推理
+    // 增量走 live 通道（stream-handlers 里按到达顺序 append），thread store 只按
+    // STRUCTURAL_COMMIT_INTERVAL_MS 写一次完整副本。每次写 store 都会让整棵工作区树
+    // （topbar / 侧栏 / composer / 消息列）重渲染一次，因此这里的频率就是流式期的
+    // 页面级提交频率。
+    let lastStructuralCommitAt = 0;
+    // 结构快照里是否已经存在「可挂 live 文本/推理的行节点」。live 通道只能渲染到已
+    // 存在的 segment 行上（渲染层对空文本段不产出行），所以首块必须先落一次 store。
+    let storeHasTextRow = false;
+    let storeHasReasoningRow = false;
+
+    const renderStreamingMessage = (options?: { force?: boolean }) => {
+      const nowMs =
+        typeof performance !== "undefined" ? performance.now() : Date.now();
+      const liveHasText = hasVisibleText(turnState.streamedText);
+      const liveHasReasoning = hasVisibleText(turnState.reasoningText);
+      const missingRow =
+        (liveHasText && !storeHasTextRow) ||
+        (liveHasReasoning && !storeHasReasoningRow);
+
+      if (
+        !options?.force &&
+        !missingRow &&
+        nowMs - lastStructuralCommitAt < STRUCTURAL_COMMIT_INTERVAL_MS
+      ) {
+        return;
+      }
+
+      lastStructuralCommitAt = nowMs;
+      storeHasTextRow = storeHasTextRow || liveHasText;
+      storeHasReasoningRow = storeHasReasoningRow || liveHasReasoning;
       setStreamingMessage(
         turnState.currentSource,
         turnState.currentKind === "agent" ? "Runtime agent" : "Runtime stream",
