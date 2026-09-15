@@ -954,7 +954,7 @@ func cloneControllerStatusModel(model *style.StatusLineModel) *style.StatusLineM
 
 func normalizeControllerStatusModel(model style.StatusLineModel) *style.StatusLineModel {
 	model = sanitizeStatusLineModel(model)
-	if strings.TrimSpace(style.StatusLineDocument(model, 0).PlainText()) == "" {
+	if style.StatusLineBlank(model) {
 		model = style.StatusLineModel{State: style.RunReady}
 	}
 	return cloneControllerStatusModel(&model)
@@ -965,7 +965,7 @@ func normalizeControllerDynamicStatusModel(model *style.StatusLineModel) *style.
 		return nil
 	}
 	value := sanitizeStatusLineModel(*model)
-	if strings.TrimSpace(style.StatusLineDocument(value, 0).PlainText()) == "" {
+	if style.StatusLineBlank(value) {
 		return nil
 	}
 	return cloneControllerStatusModel(&value)

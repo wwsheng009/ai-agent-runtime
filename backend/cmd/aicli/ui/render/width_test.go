@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -134,4 +135,45 @@ func containsMarker(s, marker string) bool {
 		}
 		return false
 	})())
+}
+
+// runeWidthAllocSink keeps the benchmarked result observable without letting
+// the compiler delete the measured loop.
+var runeWidthAllocSink int
+
+// TestRuneWidthAllocationFree pins the property that makes RuneWidth worth
+// using in per-rune wrapping loops: measuring one rune must not allocate.
+// Callers in ui/ (prompt input virtualization, full-screen list wrapping,
+// bottom-surface truncation) run per frame and used to call
+// DisplayWidth(string(r)), which allocated a string per rune -- 276 allocations
+// for a 276-rune prompt line.
+func TestRuneWidthAllocationFree(t *testing.T) {
+	sample := []rune("a中\u0301\u200d\U0001F600")
+	allocs := testing.AllocsPerRun(200, func() {
+		total := 0
+		for _, r := range sample {
+			total += RuneWidth(r)
+		}
+		runeWidthAllocSink = total
+	})
+	if allocs != 0 {
+		t.Fatalf("RuneWidth allocated %v times per run, want 0", allocs)
+	}
+}
+
+// eastAsianWideRune is consulted before the Mark/Format lookup in RuneWidth
+// because the range switch is far cheaper for CJK-heavy text. That reorder is
+// only exact while the wide intervals hold no Mark or Format codepoint: such a
+// rune would report width 2 instead of 0. TestRuneWidthMatchesWidth already
+// covers the equivalence; this test names the invariant the ordering depends
+// on, so a future change to the interval list gets a direct failure message.
+func TestEastAsianWideRangesExcludeMarksAndFormat(t *testing.T) {
+	for r := rune(0); r <= utf8.MaxRune; r++ {
+		if !eastAsianWideRune(r) {
+			continue
+		}
+		if unicode.In(r, unicode.Mn, unicode.Me, unicode.Cf) {
+			t.Fatalf("U+%04X is East Asian wide and Mark/Format; RuneWidth must test unicode.In before eastAsianWideRune", r)
+		}
+	}
 }

@@ -61,9 +61,13 @@ func LayoutBottomPaneRows(bottom BottomPaneState, geometry GeometryState) Bottom
 		outputBottom = 0
 	}
 
-	rows := make(map[int]BottomPaneRow, bottomRows)
+	// Reserved rows are contiguous (firstRow..statusRow), so address them by
+	// offset instead of hashing each assignment and re-walking a map on every
+	// frame. bottomRows is clamped to the frame above, so every index is in
+	// range without a bounds check in setRow.
+	rows := make([]BottomPaneRow, bottomRows)
 	for row := firstRow; row <= statusRow; row++ {
-		rows[row] = BottomPaneRow{Row: row, Owner: renderengine.RowOwnerGap}
+		rows[row-firstRow] = BottomPaneRow{Row: row, Owner: renderengine.RowOwnerGap}
 	}
 	setRow := func(row int, owner renderengine.RowOwner, text string) {
 		if row < firstRow || row > statusRow {
@@ -72,7 +76,7 @@ func LayoutBottomPaneRows(bottom BottomPaneState, geometry GeometryState) Bottom
 		// Terminal snapshots contain empty cells after the last visible glyph.
 		// Preserve that projection in the plain plan instead of treating a
 		// trailing input space as a painted cell that legacy output does not own.
-		rows[row] = BottomPaneRow{Row: row, Owner: owner, Text: strings.TrimRight(text, " ")}
+		rows[row-firstRow] = BottomPaneRow{Row: row, Owner: owner, Text: strings.TrimRight(text, " ")}
 	}
 
 	// Popup paints after the prompt in the legacy text path. Owner allocation is
@@ -97,14 +101,11 @@ func LayoutBottomPaneRows(bottom BottomPaneState, geometry GeometryState) Bottom
 	setRow(statusRow, renderengine.RowOwnerStatus, bottomPaneStatusPlainText(bottom.StatusModel, policy.Width))
 
 	plan := BottomPaneRowPlan{
-		Rows:                make([]BottomPaneRow, 0, bottomRows),
+		Rows:                rows,
 		StatusRow:           statusRow,
 		OutputBottomRow:     outputBottom,
 		PromptInputStartRow: promptInputStart,
 		PromptInputRows:     promptInputRows,
-	}
-	for row := firstRow; row <= statusRow; row++ {
-		plan.Rows = append(plan.Rows, rows[row])
 	}
 	return plan
 }
@@ -146,7 +147,13 @@ func bottomPanePopupStartRow(bottom BottomPaneState, height, promptBottom, rows 
 		row := promptBottom + bottom.promptBottomMarginRowCount() + 1
 		return clampBottomPaneRow(row, statusRow)
 	}
-	row := statusRow - bottom.popupInputGapRowCount() - rows
+	// A popup that does not expand below the prompt shares the reserve with the
+	// prompt area (active band, notice, dynamic status, margins, input row).
+	// Those rows sit above the status row and below the popup, so the popup
+	// must be anchored by the whole bottom gap; using only the input-gap row
+	// let the prompt-area rows overwrite the popup tail (ask_user_question was
+	// split by its own band/dynamic status rows).
+	row := statusRow - bottom.popupBottomGapRowCount() - rows
 	if row < 1 {
 		return 1
 	}

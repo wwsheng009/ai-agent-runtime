@@ -67,16 +67,7 @@ func StatusLineDocument(model StatusLineModel, width int) render.Document {
 	if sep == "" {
 		sep = " · "
 	}
-	stateText := ""
-	if !model.HideState {
-		stateText = model.StateText
-		if stateText == "" {
-			stateText = string(model.State)
-		}
-		if stateText == "" {
-			stateText = string(RunReady)
-		}
-	}
+	stateText := statusLineStateText(model)
 
 	spans := make([]render.Span, 0, 1+2*len(model.Segments))
 	if stateText != "" {
@@ -120,6 +111,48 @@ func StatusLineDocument(model StatusLineModel, width int) render.Document {
 		line = render.Truncate(line, width, "...")
 	}
 	return render.SingleLineDoc(line.Spans...)
+}
+
+// statusLineStateText returns the implicit state prefix of the status line, or
+// the empty string when the state prefix is hidden. StatusLineDocument and
+// StatusLineBlank share it so the "is this row visible" rule cannot drift from
+// the rendering rule.
+func statusLineStateText(model StatusLineModel) string {
+	if model.HideState {
+		return ""
+	}
+	if model.StateText != "" {
+		return model.StateText
+	}
+	if model.State != "" {
+		return string(model.State)
+	}
+	return string(RunReady)
+}
+
+// StatusLineBlank reports whether the model paints no visible text, which is
+// the emptiness test callers need before deciding to reserve a status row.
+//
+// It answers exactly the question
+//
+//	strings.TrimSpace(StatusLineDocument(model, 0).PlainText()) == ""
+//
+// without building a document, because row planning asks it several times per
+// frame. The equivalence is pinned by TestStatusLineBlankMatchesDocument.
+//
+// The contract is defined for width 0 (no folding). A blank model is blank at
+// every width; a non-blank model may still fold away entirely on very narrow
+// terminals, which is a rendering decision made by the document path.
+func StatusLineBlank(model StatusLineModel) bool {
+	if strings.TrimSpace(statusLineStateText(model)) != "" {
+		return false
+	}
+	for _, seg := range model.Segments {
+		if strings.TrimSpace(seg.Text) != "" {
+			return false
+		}
+	}
+	return true
 }
 
 func roleForRunState(state RunState, text string) Role {
@@ -187,6 +220,20 @@ func foldSegments(stateText string, segments []StatusSegment, sep string, width 
 			w += render.Width(sep) + render.Width(seg.Text)
 		}
 		if w <= width {
+			return remaining
+		}
+		if len(remaining) == 1 {
+			if strings.TrimSpace(stateText) != "" {
+				// The state prefix alone still paints the row, and clipping it
+				// to make room for a marker would lose more than the dropped
+				// segment is worth.
+				return nil
+			}
+			// HideState (or a blank state prefix): dropping the last segment
+			// would leave the caller reserving a status row that paints
+			// nothing. Keep it so the document path truncates it with a
+			// marker instead; render.Truncate degrades to the marker prefix on
+			// degenerate widths rather than returning an empty line.
 			return remaining
 		}
 		// Drop lowest priority (highest Priority number wins retention? Plan:

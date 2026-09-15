@@ -851,7 +851,7 @@ func wrapFullScreenText(value string, width, limit int) []string {
 func splitFullScreenText(value string, width int) (string, string) {
 	used, end := 0, 0
 	for index, r := range value {
-		runeWidth := DisplayWidth(string(r))
+		runeWidth := render.RuneWidth(r)
 		if used+runeWidth > width {
 			return value[:end], value[index:]
 		}
@@ -873,7 +873,7 @@ func truncateFullScreenText(value string, width int) string {
 	var builder strings.Builder
 	used := 0
 	for _, r := range value {
-		runeWidth := DisplayWidth(string(r))
+		runeWidth := render.RuneWidth(r)
 		if used+runeWidth > target {
 			break
 		}

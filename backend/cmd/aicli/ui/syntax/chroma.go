@@ -252,7 +252,7 @@ func tokensToLines(it chroma.Iterator, style *chroma.Style, deadline time.Time) 
 }
 
 func chromaEntryToStyle(entry chroma.StyleEntry, tokType chroma.TokenType) render.Style {
-	s := render.Style{Role: "Code." + tokType.String()}
+	s := render.Style{Role: chromaRoleFor(tokType)}
 	if entry.Bold == chroma.Yes {
 		s.Bold = true
 	}
@@ -269,6 +269,25 @@ func chromaEntryToStyle(entry chroma.StyleEntry, tokType chroma.TokenType) rende
 	// Background from theme is intentionally ignored for terminal code blocks
 	// in ANSI-16/low-depth; TrueColor path may adopt later via ThemeContext.
 	return s
+}
+
+// chromaRoleCache memoizes the "Code."+TokenType.String() role per token type.
+//
+// Token types are a small closed set while tokens are unbounded (tens of
+// thousands per code block), so the concatenation used to allocate once per
+// token: pprof alloc_objects attributed 6.8% of all allocations while
+// highlighting a 100 KiB Go block to this one expression. The role is a pure
+// function of the token type, so the memo changes allocation counts only,
+// never the produced value.
+var chromaRoleCache sync.Map // chroma.TokenType -> string
+
+func chromaRoleFor(tokType chroma.TokenType) string {
+	if role, ok := chromaRoleCache.Load(tokType); ok {
+		return role.(string)
+	}
+	role := "Code." + tokType.String()
+	chromaRoleCache.Store(tokType, role)
+	return role
 }
 
 // Default is a process-wide highlighter instance.

@@ -335,6 +335,100 @@ func TestLayoutBottomPaneRows_LegacyParityMatrix(t *testing.T) {
 	}
 }
 
+// ask_user_question 走 merged answer prompt 时，问题正文是一个 body-only
+// popup，回答输入复用底部 prompt。此时 popup 与 prompt 区域（active band、
+// 动态状态、上下边距、输入行）共用同一段底部保留区，prompt 区域必须整体
+// 落在 popup 之下；一旦 popup 只按 input-gap 单行定位，prompt 区域的行就会
+// 覆盖卡片尾部，把问题卡片切成上下两段。
+func TestLayoutBottomPaneRows_KeepsMergedQuestionPopupAbovePromptArea(t *testing.T) {
+	card := []string{
+		"[提问] Agent 需要你的补充信息",
+		"[提问] 问题：这两个「会话用户」卡片希望怎么处理？",
+		"[提问] 1. 保留现状：继续按 runtime 用户过滤会话列表",
+		"[提问] 2. 增加说明：卡片上标注过滤范围",
+		"[提问] 3. 增加可移除入口：卡片上提供隐藏/删除，并持久化到本地",
+		"[提问] 请输入回答，可输入建议编号（必答）：",
+	}
+	band := "Running [broker] ask_user_question prompt=… required=true"
+	semantic := BottomPaneState{
+		StatusModel:        &style.StatusLineModel{State: style.RunReady, StateText: "Ready"},
+		DynamicStatusModel: &style.StatusLineModel{State: style.RunStreaming, StateText: "Waiting for answer"},
+		PromptLine:         "> ",
+		PromptVisible:      true,
+		PromptReservedRows: 1,
+		ActiveBandLines:    []string{band},
+		PopupLines:         append([]string(nil), card...),
+		PopupOwner:         "question",
+	}
+	geometry := GeometryState{Width: 120, Height: 30}
+	plan := LayoutBottomPaneRows(semantic, geometry)
+	if plan.PromptInputRows != 1 {
+		t.Fatalf("prompt input rows = %d, want 1: %+v", plan.PromptInputRows, plan)
+	}
+
+	popupRows := make([]BottomPaneRow, 0, len(card))
+	for _, row := range plan.Rows {
+		if row.Owner == renderengine.RowOwnerPopup {
+			popupRows = append(popupRows, row)
+		}
+	}
+	if len(popupRows) != len(card) {
+		t.Fatalf("question card lost rows: popup=%d painted=%d\nplan=%#v", len(card), len(popupRows), plan.Rows)
+	}
+	for index, row := range popupRows {
+		if index > 0 && row.Row != popupRows[index-1].Row+1 {
+			t.Fatalf("question card is not contiguous: %#v", popupRows)
+		}
+		if row.Text != card[index] {
+			t.Fatalf("card row %d = %q, want %q", row.Row, row.Text, card[index])
+		}
+	}
+
+	// 卡片之下依次是：band 顶分隔、band 行、动态状态行、上边距、prompt 输入行、
+	// 下边距、状态行。任何一行插进卡片范围内都会再次切断问题卡片。
+	cardEnd := popupRows[len(popupRows)-1].Row
+	below := []BottomPaneRow{
+		{Row: cardEnd + 1, Owner: renderengine.RowOwnerGap},
+		{Row: cardEnd + 2, Owner: renderengine.RowOwnerBand, Text: band},
+		{Row: cardEnd + 3, Owner: renderengine.RowOwnerStatus},
+		{Row: cardEnd + 4, Owner: renderengine.RowOwnerGap},
+		{Row: cardEnd + 5, Owner: renderengine.RowOwnerPrompt},
+		{Row: cardEnd + 6, Owner: renderengine.RowOwnerGap},
+		{Row: cardEnd + 7, Owner: renderengine.RowOwnerStatus},
+	}
+	firstRow := plan.Rows[0].Row
+	for _, want := range below {
+		got := plan.Rows[want.Row-firstRow]
+		if got.Row != want.Row || got.Owner != want.Owner {
+			t.Fatalf("row %d = %+v, want %+v\nplan=%#v", want.Row, got, want, plan.Rows)
+		}
+	}
+	if !strings.Contains(plan.Rows[below[2].Row-firstRow].Text, "Waiting for answer") {
+		t.Fatalf("dynamic status row lost its text: %+v", plan.Rows[below[2].Row-firstRow])
+	}
+	if !strings.Contains(plan.Rows[below[6].Row-firstRow].Text, "Ready") {
+		t.Fatalf("status row lost its text: %+v", plan.Rows[below[6].Row-firstRow])
+	}
+	if strings.TrimSpace(plan.Rows[below[4].Row-firstRow].Text) != ">" {
+		t.Fatalf("prompt row = %+v, want the answer input row", plan.Rows[below[4].Row-firstRow])
+	}
+	if plan.PromptInputStartRow != below[4].Row {
+		t.Fatalf("prompt input start = %d, want %d", plan.PromptInputStartRow, below[4].Row)
+	}
+	if plan.StatusRow != geometry.Height {
+		t.Fatalf("status row = %d, want %d", plan.StatusRow, geometry.Height)
+	}
+
+	// 纯布局与 legacy adapter 必须给出同一行分配：本次回归正是两者在
+	// body-only popup 上出现了分歧（legacy 已按整个 bottom gap 定位）。
+	derived := DeriveBottomPaneState(semantic, geometry)
+	surface := newOwnedTestFixedBottomSurfaceWithSize(geometry.Width, geometry.Height)
+	surface.mu.Lock()
+	defer surface.mu.Unlock()
+	applyBottomPaneStateForLegacyParityLocked(surface, derived)
+	assertBottomPaneRowPlanParityLocked(t, surface)
+}
+
 func TestLayoutBottomPaneRows_LegacyParityAcrossGeometryChanges(t *testing.T) {
 	semantic := BottomPaneState{
 		StatusModel:            &style.StatusLineModel{State: style.RunReady, StateText: "Ready"},
@@ -414,6 +508,53 @@ func assertBottomPaneRowPlanParityLocked(t *testing.T, surface *FixedBottomSurfa
 		wantText := strings.TrimRight(cellRowPlainText(legacyRow.Cells), " ")
 		if got.Text != wantText {
 			t.Fatalf("row %d text: pure=%q legacy=%q", got.Row, got.Text, wantText)
+		}
+	}
+}
+
+// promptNoticeLinesRowCount must equal len(promptNoticeLines()) for every
+// notice shape, because both feed the same bottom-pane row math: the width
+// planner asks for the ungated count (allocation-free) while the row-count
+// chain asks for the gated one. A divergence here would silently mis-size the
+// prompt viewport instead of failing loudly.
+func TestPromptNoticeRowCountsMatchLineList(t *testing.T) {
+	notices := []string{
+		"",
+		"single",
+		"queue\nattachments",
+		"a\r\nb\r\nc",
+		"trailing\n",
+		"  \n \n",
+		"中文通知\nsecond line",
+	}
+	statuses := []string{"", "   ", "Saved"}
+	composers := []string{"", "draft"}
+	reserved := []int{0, 1, 3, -1}
+
+	for _, notice := range notices {
+		for _, status := range statuses {
+			for _, composer := range composers {
+				for _, reservedRows := range reserved {
+					bottom := BottomPaneState{
+						PromptNoticeLine:       notice,
+						PromptEditorStatusLine: status,
+						ComposerLine:           composer,
+						PromptReservedRows:     reservedRows,
+					}
+					if got, want := bottom.promptNoticeLinesRowCount(), len(bottom.promptNoticeLines()); got != want {
+						t.Fatalf("notice=%q status=%q composer=%q reserved=%d: ungated count = %d, want %d",
+							notice, status, composer, reservedRows, got, want)
+					}
+					want := 0
+					if strings.TrimSpace(composer) == "" && reservedRows >= 1 {
+						want = len(bottom.promptNoticeLines())
+					}
+					if got := bottom.promptNoticeVisibleRowCount(); got != want {
+						t.Fatalf("notice=%q status=%q composer=%q reserved=%d: gated count = %d, want %d",
+							notice, status, composer, reservedRows, got, want)
+					}
+				}
+			}
 		}
 	}
 }

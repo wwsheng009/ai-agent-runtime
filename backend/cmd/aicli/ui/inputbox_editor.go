@@ -14,6 +14,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"golang.org/x/term"
 )
 
@@ -1707,7 +1708,7 @@ func interactiveInputVisualRows(prompt string, line []rune, termWidth int) []str
 			newRow()
 			continue
 		}
-		width := DisplayWidth(string(r))
+		width := render.RuneWidth(r)
 		if width <= 0 {
 			rows[len(rows)-1].WriteRune(r)
 			continue
@@ -1867,7 +1868,7 @@ func interactiveInputVisualPosition(line []rune, cursor, startCol, termWidth int
 			pos.col = 0
 			continue
 		}
-		width := DisplayWidth(string(r))
+		width := render.RuneWidth(r)
 		if width <= 0 {
 			continue
 		}

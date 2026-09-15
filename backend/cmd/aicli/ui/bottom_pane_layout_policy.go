@@ -90,7 +90,7 @@ func promptInputMaxVisibleRowsForGeometry(bottom BottomPaneState, policy BottomP
 	}
 	rows := policy.Height - 1 - 1 - 1 - bottom.sessionStatusVisibleRowCount() -
 		policy.PromptTopMarginRows - policy.PromptBottomMarginRows -
-		dynamicRows - len(bottom.promptNoticeLines()) - activeRows
+		dynamicRows - bottom.promptNoticeLinesRowCount() - activeRows
 	if rows < 1 {
 		return 1
 	}

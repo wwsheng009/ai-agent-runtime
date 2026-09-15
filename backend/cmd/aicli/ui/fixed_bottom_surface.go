@@ -3192,8 +3192,7 @@ func (s *FixedBottomSurface) setStatusModelImpl(model style.StatusLineModel) {
 		return
 	}
 	model = sanitizeStatusLineModel(model)
-	line := strings.TrimSpace(style.StatusLineDocument(model, 0).PlainText())
-	if line == "" {
+	if style.StatusLineBlank(model) {
 		model = style.StatusLineModel{State: style.RunReady}
 	}
 	s.mu.Lock()
@@ -3221,7 +3220,7 @@ func (s *FixedBottomSurface) setDynamicStatusModelImpl(model *style.StatusLineMo
 	var normalized *style.StatusLineModel
 	if model != nil {
 		value := sanitizeStatusLineModel(*model)
-		if strings.TrimSpace(style.StatusLineDocument(value, 0).PlainText()) != "" {
+		if !style.StatusLineBlank(value) {
 			normalized = cloneStatusLineModel(&value)
 		}
 	}
@@ -3274,13 +3273,13 @@ func (s *FixedBottomSurface) setStatusModelsImpl(status style.StatusLineModel, d
 		return
 	}
 	status = sanitizeStatusLineModel(status)
-	if strings.TrimSpace(style.StatusLineDocument(status, 0).PlainText()) == "" {
+	if style.StatusLineBlank(status) {
 		status = style.StatusLineModel{State: style.RunReady}
 	}
 	var normalizedDynamic *style.StatusLineModel
 	if dynamic != nil {
 		value := sanitizeStatusLineModel(*dynamic)
-		if strings.TrimSpace(style.StatusLineDocument(value, 0).PlainText()) != "" {
+		if !style.StatusLineBlank(value) {
 			normalizedDynamic = cloneStatusLineModel(&value)
 		}
 	}
@@ -3814,7 +3813,6 @@ func (s *FixedBottomSurface) applyOwnedViewportGeometryLocked(width, height int)
 	}
 }
 
-
 func (s *FixedBottomSurface) renderStatusLocked() {
 	if !s.enabled {
 		return
@@ -3943,7 +3941,11 @@ func (s *FixedBottomSurface) moveToPopupInputLocked() {
 		s.moveToOutputLocked()
 		return
 	}
-	row := s.popupStartRowLocked(len(visibleLines)+composerRows, state.popupInputGapRowCount()) + len(visibleLines) + composerRows - 1
+	// Move to the last row of the popup block. The popup start must use the
+	// same bottom gap as popupPaintPlanLocked, otherwise a body-only popup
+	// (merged ask_user_question answer) is targeted past its own tail, on the
+	// prompt-area rows that now sit below it.
+	row := s.popupStartRowLocked(len(visibleLines)+composerRows, state.popupBottomGapRowCount()) + len(visibleLines) + composerRows - 1
 	if row < 1 {
 		row = 1
 	}
@@ -4327,7 +4329,7 @@ func (s BottomPaneState) statusVisibleRowCount() int {
 	if s.StatusModel == nil {
 		return 0
 	}
-	if strings.TrimSpace(style.StatusLineDocument(*s.StatusModel, 0).PlainText()) == "" {
+	if style.StatusLineBlank(*s.StatusModel) {
 		return 0
 	}
 	return 1
@@ -4350,14 +4352,27 @@ func (s BottomPaneState) promptNoticeVisibleRowCount() int {
 	if s.composerVisibleRowCount() > 0 || s.promptReservedRowCount() < 1 {
 		return 0
 	}
-	return len(s.promptNoticeLines())
+	return s.promptNoticeLinesRowCount()
+}
+
+// promptNoticeLinesRowCount reports len(promptNoticeLines()) without
+// materializing the line slice. The row-count chain asks for this several times
+// per frame (popupBottomGapRowCount → … → here) and the width planner asks for
+// the ungated count, so both paths share this one counter instead of each
+// rebuilding the lines only to measure them.
+func (s BottomPaneState) promptNoticeLinesRowCount() int {
+	count := promptNoticeDisplayLineCount(s.PromptNoticeLine)
+	if strings.TrimSpace(s.PromptEditorStatusLine) != "" {
+		count++
+	}
+	return count
 }
 
 func (s BottomPaneState) dynamicStatusVisibleRowCount() int {
 	if s.composerVisibleRowCount() > 0 || s.DynamicStatusModel == nil {
 		return 0
 	}
-	if strings.TrimSpace(style.StatusLineDocument(*s.DynamicStatusModel, 0).PlainText()) == "" {
+	if style.StatusLineBlank(*s.DynamicStatusModel) {
 		return 0
 	}
 	return 1
@@ -4714,13 +4729,34 @@ func maxBottomPanePopupRows(height int, composerRows int, gapRows int) int {
 }
 
 func promptNoticeDisplayLines(line string) []string {
+	line = normalizePromptNoticeLine(line)
+	if line == "" {
+		return nil
+	}
+	return strings.Split(line, "\n")
+}
+
+// promptNoticeDisplayLineCount reports how many rows promptNoticeDisplayLines
+// would return, without allocating the slice.
+func promptNoticeDisplayLineCount(line string) int {
+	line = normalizePromptNoticeLine(line)
+	if line == "" {
+		return 0
+	}
+	return strings.Count(line, "\n") + 1
+}
+
+// normalizePromptNoticeLine canonicalizes newlines and trims trailing ones. It
+// returns "" when the notice has no visible text. Both the line list and the
+// count derive from it, so they cannot disagree.
+func normalizePromptNoticeLine(line string) string {
 	line = strings.ReplaceAll(line, "\r\n", "\n")
 	line = strings.ReplaceAll(line, "\r", "\n")
 	line = strings.TrimRight(line, "\n")
 	if strings.TrimSpace(line) == "" {
-		return nil
+		return ""
 	}
-	return strings.Split(line, "\n")
+	return line
 }
 
 func (s *FixedBottomSurface) bottomPaneStateLocked() BottomPaneState {
@@ -4797,7 +4833,7 @@ func truncateFixedPopupLine(line string, width int) string {
 	current := 0
 	limit := width - 3
 	for _, r := range line {
-		w := DisplayWidth(string(r))
+		w := render.RuneWidth(r)
 		if w <= 0 {
 			continue
 		}
@@ -4882,7 +4918,6 @@ func terminalMoveToSequence(row, col int) string {
 	return fmt.Sprintf("\x1b[%d;%dH", row, col)
 }
 
-
 func appendClearRowsSequence(builder *strings.Builder, startRow, rows int) {
 	if builder == nil || startRow < 1 || rows < 1 {
 		return
@@ -4941,7 +4976,7 @@ func fixedPromptLineEndPosition(line string, termWidth int) (int, int) {
 			col = 0
 			continue
 		}
-		width := DisplayWidth(string(r))
+		width := render.RuneWidth(r)
 		if width <= 0 {
 			continue
 		}

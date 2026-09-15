@@ -72,17 +72,25 @@ func RuneWidth(r rune) int {
 	if r < 0x80 {
 		return 1
 	}
-	// Marks and format controls occupy no cell (matches uniseg Extend/ZWJ and
-	// the pre-uniseg zero-width fallback).
-	if unicode.In(r, unicode.Mn, unicode.Me, unicode.Cf) {
-		return 0
-	}
 	// Common East Asian Wide/Fullwidth ranges (matches uniseg's
 	// propertyEastAsianWidth W/F classification). Kept conservative: anything
 	// not listed falls through to uniseg so ambiguous/regional-indicator/emoji
 	// runes keep uniseg's exact width.
+	//
+	// Tested before the Mark/Format lookup on purpose: eastAsianWideRune is a
+	// pure integer-range switch, while unicode.In searches three Unicode
+	// tables. CJK-heavy transcripts dominated RuneWidth's profile (38% of the
+	// streaming-chunk benchmark, most of it unicode.Is), and the listed
+	// intervals contain no Mark or Format codepoints, so the reorder is exact —
+	// see TestEastAsianWideRangesExcludeMarksAndFormat plus the exhaustive
+	// TestRuneWidthMatchesWidth.
 	if eastAsianWideRune(r) {
 		return 2
+	}
+	// Marks and format controls occupy no cell (matches uniseg Extend/ZWJ and
+	// the pre-uniseg zero-width fallback).
+	if unicode.In(r, unicode.Mn, unicode.Me, unicode.Cf) {
+		return 0
 	}
 	return uniseg.StringWidth(string(r))
 }
