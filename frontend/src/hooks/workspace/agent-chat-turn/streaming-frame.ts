@@ -6,7 +6,7 @@
  *
  * 2026-09-15 追加**最小提交间隔**（`MIN_COMMIT_INTERVAL_MS`）：文本 / 推理 delta 的每次
  * 提交都会改写页面级 thread state，因此 `WorkspacePage` → `WorkspaceShell` → 侧栏 /
- * 面板 / 消息列整棵树都要重渲染一次。CDP CPU profile 实测（`e2e/zz-perf-probe.spec.ts`）：
+ * 面板 / 消息列整棵树都要重渲染一次。CDP CPU profile 实测（`e2e/zz-perf-probe.manual.ts`）：
  * 按 rAF（≈60 次/秒）提交时，流式期间主线程约 330ms/s 花在这条链上——i18next 每帧几十次
  * `t()`、React 全页协调、样式重算（另有 ~80ms/s RecalcStyle + ~30ms/s Layout）；长会话下
  * 还会打出 150-200ms 的长任务，即用户看到的「整页卡住」。

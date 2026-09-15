@@ -36,7 +36,7 @@ export const MessageMarkdown = memo(function MessageMarkdown({
   // 紧急更新；`useDeferredValue` 每帧重新申请一个 transition lane，而 transition
   // 只在紧急队列排空时才跑 —— 连续流下永远排不到，`renderContent` 停在旧值，
   // 用户看到的就是「流式输出完成后才整体渲染」（2026-09-15 复现：perfmark 连续流，
-  // 见 `e2e/zz-perf-probe.spec.ts`）。
+  // 见 `e2e/zz-perf-probe.manual.ts`）。
   // 非流式路径保留延迟：历史回填 / 消息改写是低频大块替换，降级能避免阻塞输入，
   // 且此时没有连续紧急更新，不存在饿死。
   const renderContent = streaming ? content : deferredContent;

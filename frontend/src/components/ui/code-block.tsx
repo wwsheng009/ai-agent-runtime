@@ -174,7 +174,7 @@ function CodeBlockSurface({
               // key 只认位置 + 行种类，**不认内容**：把行内容 / 分词内容拼进 key（原实现）
               // 意味着 Prism 每重切一次尾部，相关行的整棵 div（行号 + <code> 容器）就被
               // 卸载重挂。实测流式期间单个 chunk 有 58 次 childList 落在 <code> 上
-              // （e2e/zz-perf-probe.spec.ts → idspike-40），并连带整块样式失效与重排。
+              // （e2e/zz-perf-probe.manual.ts → idspike-40），并连带整块样式失效与重排。
               key={`line-${index}-${line.kind}`}
               className="app-code-line grid grid-cols-[2.5rem_minmax(0,1fr)] gap-3 px-3 text-code-block-foreground"
               data-line-kind={line.kind === "normal" ? undefined : line.kind}

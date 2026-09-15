@@ -557,9 +557,11 @@ const PERF_CODE_BLOCK = [
 ];
 const PERF_LIST = "- first item\n- second item\n- third item\n\n";
 const PERF_TABLE = "| seq | kind |\n| --- | --- |\n| 1 | delta |\n| 2 | done |\n\n";
+// 文档规模可控（PERF_DOC_ROUNDS），用于验证「每帧开销是否随正文长度增长」。
+const PERF_DOC_ROUNDS = Number(process.env.PERF_DOC_ROUNDS ?? "40");
 const perfMarkDoc = (() => {
   const out = [];
-  for (let round = 0; round < 40; round += 1) {
+  for (let round = 0; round < PERF_DOC_ROUNDS; round += 1) {
     out.push(...PERF_SENTENCES, "\n\n", ...PERF_CODE_BLOCK, PERF_LIST, PERF_TABLE);
   }
   out.push("PERFMARK-END\n");
