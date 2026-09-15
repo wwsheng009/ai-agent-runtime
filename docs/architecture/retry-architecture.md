@@ -2,7 +2,7 @@
 
 > 代码位置：`backend/internal/llm/`
 > 核心文件：`retry_policy.go`、`retry_executor.go`、`provider_retry.go`、`provider.go`、`runtime.go`、`gateway_client.go`、`retry_config_adapter.go`
-> 更新日期：2026-08-31
+> 更新日期：2026-09-15
 
 本文梳理 ai-agent-runtime 中 LLM 调用的完整重试架构与逻辑，包括：两层重试（内层 provider / 外层 runtime）、两套预算（业务预算 / transport 预算）、错误分类、退避策略、层间接力、守卫机制与配置来源。
 
@@ -246,6 +246,8 @@ return nil, markRetryExhausted(...)                   // 确定性 → 终态
 
 `runtime.go:Call`（非流式）与 `runtime.go:Stream`（流式）使用相同策略构造与循环。
 
+> 进入循环前先做 provider 解析（`resolveProviderForRequest`）：解析失败在循环之外直接返回，不消耗任何重试预算，见 §12。
+
 ```
 maxRetries, retryTuning, retryRules := r.RetryConfigSnapshot()
 policy := newRuntimeRetryPolicy(maxRetries, 0, retryTuning, retryRules)
@@ -471,3 +473,44 @@ for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 1. runtime 层 `outputBudgetEscalationCeiling` 已对齐 loop 层 `EscalatedMaxTokens`（64000，2026-09-14）。取证补充：对 8k 槽位预留路径，真正的约束是 `degenerateOutputReplyMaxStreak`（3）而不是天花板——三次采样跑在 8k/16k/32k，第三次预算由第二次翻倍（2×16k=32k）决定，旧天花板 32768 本就不构成限制；对齐只对显式预算落在 (16k, 32k] 的请求生效（这类请求 loop 按设计不做一次性升级，内层翻倍是唯一杠杆，旧天花板会把第一次翻倍从 40000 之类的值压回 32768）。超大 `multiedit`（>64k 输出）仍会截断，此时靠 re-prompt 拆分 payload 收敛。
 2. 原始 arguments 仍只落在 http 抓包里（按 262,144 字节截断），错误载荷只有 index + 工具名，排障依赖抓包。
 3. 4 个重叠 `timeout` 参数仍在；长期应收敛为单一的 `timeout_sec`（integer），从接口上消灭单位混淆与字符串引号问题。
+
+---
+
+## 12. provider 解析与快速失败（2026-09-15）
+
+### 12.1 症状
+
+默认模型（`providers.default_model`，实机为 `claude-3-5-sonnet`）在请求未显式指定 provider 时被交给一个**没有声明该模型**的 provider：请求在 transport 层立即失败，该错误又被分类成可重试，于是烧完整轮预算（`MaxRetries=10`，实机 ~24s）才报错。流式路径在这段预算内**没有任何增量帧**，前端表现为「等 stream 结束才整体蹦出」——渲染层无辜。
+
+### 12.2 机制
+
+`LLMRuntime.Call` / `Stream` 各自内联了一份 provider 解析，兜底顺序里有两条「猜」的规则：
+
+1. `providerName = req.Model`——把模型名直接当 provider 名；
+2. `RegisterProvider` 为每个 provider 自动装一条 `RoutingRule{Model: name, Condition: &DefaultCondition{}}`。`DefaultCondition` 恒真，而 `RoutingRule.Model` 存的是 **provider 名**，于是 `router.Route()` 退化成「返回第一个注册的 provider」，注册顺序还来自 `map` 迭代（随机）。
+
+两条规则都会把一个无人声明过的模型交给任意 provider，等于「先烧掉一整轮重试预算，再报一个不可操作的上游错误」。
+
+### 12.3 修复
+
+解析入口统一为 `resolveProviderForRequest`（`runtime.go`），`Call` / `Stream` 共用；顺序（越靠前越明确）：
+
+| # | 规则 | 说明 |
+|---|---|---|
+| 1 | `req.Provider` | 显式指定，原样返回（未注册时由 `GetProvider` 立即报 `provider not found`，不进重试循环） |
+| 2 | `req.Model` 命中「声明该模型的 provider」 | 别名集由 `default_model` / `supported_models` / `model_mappings` 注册而来（`collectProviderAliases`，bootstrap），等价于「该 provider 声明支持这个模型」 |
+| 3 | `providers.default_provider` | 配置的默认 provider |
+| 4 | 配置的默认 model 的声明者 | 同 2 |
+| 5 | 显式注册的路由规则（`AddRoutingRule`） | 不再由 `RegisterProvider` 自动挂 |
+| 6 | 唯一已注册 provider | `len(providers)==1` 时归属无歧义 |
+| 7 | 快速失败 | 返回可操作错误（列出已注册 provider + 三种修法），**不猜** |
+
+同一模型被多个 provider 声明是常态（实机 5 个声明者）。第 2/4 步的选择顺序是：配置的默认 provider（若它确实声明了该模型）→ 健康度最好者（healthy < degraded < 未探测 < unhealthy）→ 名字排序第一个（保证确定性）。旧实现下同一请求可能落到任意声明者（含探活已失败者），且每次进程重启都可能不同。
+
+`req.Model` 为空时先填 `config.DefaultModel`。解析失败发生在进入重试循环**之前**，不再消耗重试预算：回归测试断言 elapsed < 1s 且任何 provider 都未被调用（`TestLLMRuntime_Call_FailsFastWhenNoProviderDeclaresModel` / `..._Stream_...`）。
+
+### 12.4 仍未闭环
+
+1. 第 2/4 步在多个声明者都「未探测」时按名字排序收敛，可能选到实际不可用的声明者；健康探测覆盖面（`shouldCheckProvider`）决定这个兜底的质量。
+2. `GetCapabilities(model)`（模型卡片 / 上下文窗口）与 preview 路径（`resolveAgentChatRouteTransparency`、`agent/loop.go` 的 `resolvePromptPreflightProviderModel`、`compactruntime` 的 `resolveRuntimeProviderModel`）仍各自用 `ResolveProviderName(model)` 解析，未接入本次的择优与健康度排序；这些路径只影响展示与预算估算，不影响实际路由。
+3. `ModelMappings` 的映射目标也被注册成别名（`collectProviderAliases`），会被当作「声明支持该模型」，严格说偏宽。
