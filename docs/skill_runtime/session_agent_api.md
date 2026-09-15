@@ -494,3 +494,51 @@ curl -sS -X POST "$BASE_URL/api/runtime/sessions/$PARENT_SESSION_ID/agents/$AGEN
 常见 `503 Service Unavailable`：
 
 - handler 没有接上 `session manager` / `agent session controller`
+
+## Agent Tool Argument Contract (model-facing)
+
+本节记录运行时 agent tools 的参数契约。HTTP endpoint 与工具一一对应（见上文 endpoint summary），但工具层额外做了 fail-closed 校验，避免"参数被静默丢弃"导致 child 拿到空任务或指向错误会话。
+
+### 通用规则
+
+- 引用已有 child session 的工具（`close_agent` / `resume_agent`）用 `id` 或 `session_id` 定位目标；值必须是 `spawn_agent` / `list_agents` 返回的真实 session id，或 `session_ref_*` handle。
+- 下面这些取值一律按"未提供"处理并报 `id is required`，不会再去创建或恢复任何会话：
+  - 缺键，或 JSON `null`；
+  - 从渲染结果里被复制回来的占位文本：`<nil>`、`nil`、`null`、`undefined`（大小写与首尾空格不敏感）。
+- 该规则修掉了一个已知缺陷：`resume_agent {"id": null}` 曾把 `null` 渲染成字面量 `<nil>` 并当成 session id 使用，最终产生名为 `<nil>` 的会话行。需要重新取 id 时先调 `list_agents`。
+
+### `spawn_agent`
+
+- `message`（必填）：child 的初始任务 prompt。
+- 别名：`goal` / `task` / `prompt`。`spawn_subagents`、`spawn_team` 用 `goal` 表达同一概念，为这些工具写好的参数可直接复用；命中别名时结果 metadata 会带 `arg_aliases: ["goal->message"]`。
+- 缺少任务正文（或只有空白）时整个调用被拒绝：`message is required (accepted aliases: goal, task, prompt)`，并且不会创建 child session —— 空 prompt 的 child 无从知道自己的任务。
+- 未知参数 fail-closed，并尽量给出替代方案：
+  - `tools_whitelist` / `tools` / `whitelist` → `spawn_agent does not restrict the child tool surface; use read_only/permission_mode, or spawn_subagents for per-task tools_whitelist`；
+  - `description` / `content` / `text` / `instruction(s)` / `task_description` → `did you mean message`；
+  - `objective` / `task_goal` / `goal_text` → `did you mean message (alias goal)`。
+- 支持的可选参数（allowlist）：`id`、`session_id`、`agent_type`、`difficulty`、`difficulty_rationale`、`provider`、`model`、`reasoning_effort`、`thinking_effort`、`permission_mode`、`completion_requirement`、`isolation`、`read_only`、`fork_context`、`fork_turns`、`timeout_sec`、`progress_timeout_sec`、`approval_timeout_sec`、`cancel_grace_sec`。
+
+### `spawn_team`
+
+- 每个 task 必须提供 `goal` 或 `title`；两者都空时报错并提示 `spawn_agent` 用 `message`、team task 用 `goal`。
+- teammate / task 的其余字段见 `SpawnTeammateSpec` 与 `SpawnTaskSpec`。
+
+### `spawn_subagents`
+
+- 批量委派时每个子任务用 `goal`，并可在子任务上写 `tools_whitelist` 等逐任务参数；需要"逐任务工具白名单"时应使用 `spawn_subagents`，`spawn_agent` 不接受该参数。
+- 模型直接给出的子任务在解码阶段按 planner 同款契约 fail-closed（此前只有 planner 生成的图会校验）：
+  - `difficulty` 必须是可识别难度（`easy|normal|hard|expert`，以及 `low|medium|high`、`simple|standard|default`、`trivial` 等同义词，大小写与 `-`/空格不敏感），命中后归一化为规范值；无法识别时报错并回显原值，不再静默降级为默认档。
+  - `id` 不能为空白；同一批内 `id` 不能重复（重复 id 会让 `depends_on` 无法唯一定位，因此直接拒绝）；省略 `id` 仍由运行时生成 `subagent_N`。
+  - `completion_requirement` 只接受 `none|complete_task`（含 `complete-task` / `completetask` / 驼峰 `completionRequirement` 写法），命中后归一化为规范值；其他取值直接报错并回显原值（`want none|complete_task`），不再被折叠成 `none` 而静默关掉该子任务的收尾约束。
+  - 逐任务字段的 JSON 类型同样 fail-closed：`budget_tokens`/`timeout` 必须是数字，`read_only` 必须是布尔，`tools_whitelist`/`depends_on`/`patches` 必须是数组；`tools_whitelist`/`depends_on` 的元素必须是非空字符串，`patches` 的元素必须是对象。类型不符时报错并回显实际类型（`must be a JSON number` 等），省略该字段即使用运行时默认值。此前 `depends_on: "writer"`（字符串而非数组）会被整段丢弃，使本该等待 writer 的 verifier 立刻开跑，是这批静默折叠里最危险的一个。
+  - `depends_on` 只能引用同一批内已声明的 `id`；自依赖与循环依赖会被拒绝，未知依赖的错误信息会回显已知 id 列表。
+  - 为什么必须失败而不是忽略：调度器把"依赖 id 不存在"与"依赖尚未完成"当作同一状态（`scheduler.go` 的 `dependenciesSatisfied`），一个拼错的 `depends_on` 过去会让该子代理永远停在未就绪状态——既不失败也不会被调度。
+  - `budget_tokens` / `timeout` 按路由计划 §32.2 保持非致命（不因为取值不可用而让整批失败），但折叠不再静默：非整数会被截断（`*_truncated_to_integer`）、0 或负数按"未设置"处理并回落到路由/宿主默认（`*_ignored_non_positive`）、超过 `2147483647` 会被裁剪（`*_clamped_to_range`），三种情况都会写入该子任务的 `route_warnings`（可见于子代理记录与团队任务结果）。裁剪同时修掉了一个真实故障：过去 `timeout: 1e30` 经 `int` 转换 + `time.Duration(秒)*time.Second` 溢出成负值，语义从"超长超时"翻转成"立刻超时"。要"不限"就省略字段，不要写 `0`。
+
+### 未知参数的可观测性（`ignored_args`）
+
+- 除 `spawn_agent`（未知键直接失败）外，其他 broker 工具不会因为多传键而让整个调用失败，但也不会再静默丢弃：结果 metadata 会带 `ignored_args: ["<key>", ...]`，并把可操作提示合并进 `next_action`（例如把 `goal` 传给 `wait_agent` → 提示改用 `spawn_agent` / `send_message`；把 `tools_whitelist` 传给不支持的工具 → 提示改用 `spawn_subagents` 的逐任务参数）。运行时会把 `next_action` 作为后续动作提示渲染给模型，因此拼错的键下一轮就能被纠正，而不是被反复重试。
+- 工具定义（`properties`）里出现的属性一定属于该工具的合法参数：有测试守护 schema 与实现读取的键保持一致，避免"schema 宣传了但代码从不读取"的再次出现。
+- 创建类工具对显式 id 的占位值做了区分处理：
+  - `spawn_agent` 的 `id` / `session_id`、`spawn_team` 的 `team_id` 若收到渲染占位文本（`<nil>` / `null` / `nil` / `undefined`，大小写与空格不敏感）会直接报错，避免创建名为 `<nil>` 的会话或团队；省略该字段即由运行时生成。
+  - `teammates[].id`、`teammates[].session_id`、`tasks[].id`、`workspace_id` 这类可省略字段遇到占位值会被丢弃并由运行时生成真实 id。

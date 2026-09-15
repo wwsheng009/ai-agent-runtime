@@ -33,7 +33,7 @@
 | P0 | 过程信息（Think/工具/上下文）应压成 24px 单行，展开才占高度 | 参考站工具行 `rect.h=24`、Think 行 `rect.h=24`（折叠态）。**注意折叠是两层**：回合级统计折叠行 + 行级 24px（§13 C2） |
 | P0 | 消息列宽与列间距走**宽度轴**：内容列 = `clamp(680px, 列宽×64%, 920px)`（用户可拖拽替换）、列间距 16px，页面横向留白由滚动区 padding + 自适应外边距承担 | `.Md3f7G_scroll{padding:16px 32px}` + `.Md3f7G_column` 的 clamp 实现；一审记的 `748px / margin 0 170px` 是解析值（§13 C1） |
 | P1 | Markdown 排版需按参考站标定（**字号轴 + 行高成对**、块间距 16px、行内 code 14/22 无边框、代码块 13/22） | 源码 `--dsh-content-font-size` + `--dsh-content-font-delta` 与全量 `calc()` 派生；实测 `p{font:16px/28px}` 是该用户 delta=+2 的解析值（§13 C4） |
-| P1 | 打字机（`useTypewriter`）应移除或降级为「仅未收到首块时的占位」 | 参考站无逐字打字；且打字机与 P1-2 的前缀冻结/绝对 offset key 存在语义冲突（显示的 content 被截断会反复触发非追加判定） |
+| P1 | 打字机（`useTypewriter`）应移除或降级为「仅未收到首块时的占位」 | 参考站无逐字打字；且打字机与 P1-2 的前缀冻结/绝对 offset key 存在语义冲突（显示的 content 被截断会反复触发非追加判定）。**已修订（2026-09-15，产品要求恢复）**：改为「单调揭示」状态机后冲突消解，见 §8.6.1 |
 | P1 | 需要统一 turn 尾行（动作区 + 时间/耗时/token 统计），且时间戳默认 `opacity: 0`、hover 显现 | 参考站 `.p-xYUq_timeStart/timeEnd{opacity:0}`、`.p-xYUq_action{28×28}`、tail 高 28 |
 | P2 | 用户气泡需右对齐、22px 圆角、`min(525px, 82%)` 限宽；编辑/回溯入口收进 hover 动作区 | 参考站 `.gdEzaW_bubble` 实测 |
 | P2 | 中性分隔/边框**取 1px 等价**：参考站源码确有 17 处 `0.5px`，但 dpr=1 下解析并绘制为 1px，本仓 `0.5px/0.25px` 同样被向上取整为 1px；本方案不追 dpr≥2 的发丝观感（唯一例外：回合折叠行，§13 C3 / 批次 F3） | 源码标注 + 像素级实测（§10.4、§13.1） |
@@ -504,6 +504,28 @@ export function projectChatFlow(messages: ChatMessage[], opts?: {
 3. 记录在案的替代方案（若产品坚持要打字机手感）：仅在 `interrupted`/等待首 token 时显示轻量占位（脉冲点），不截断正文。
 
 验收：移除后 `message-markdown.test.tsx` / 流式相关 e2e 通过；新增断言「流式过程中同一块不因打字机滞后而 remount」（用既有冻结计数器或 DOM 稳定性断言）。
+
+#### 8.6.1 修订（2026-09-15）：按产品要求恢复打字机，改为「单调揭示」
+
+**决策变更**：用户明确提出「stream output 需要打字机手感」，上节「默认移除」作废。恢复的前提是
+**不再使用会回退的 `content.slice(0, shown)`**，而换成「单调揭示」状态机：
+纯逻辑 `lib/typewriter.ts` + 驱动 `hooks/workspace/use-typewriter.ts`，接线点在
+`message-list/segment-components.tsx` 的 `StreamingMarkdown`（`active = streaming && !interrupted`）。
+
+上节理由 2 的冲突由此消解，逐条对应：
+
+| 原风险 | 新实现的约束 | 证据 |
+| --- | --- | --- |
+| 滞后帧让 `stableContent.startsWith(上一帧)` 判成「改写」→ `generation++` → 冻结块 remount | 揭示量**单调不减**（`advanceReveal` 只推进高水位）；`active` 翻转 / 未追平 / 空串一律直挂全文 | `lib/typewriter.test.ts` 9 例（单调性、改写吸附、码点边界）；`segment-components.test.tsx` 冻结块 DOM 身份断言 |
+| 逐字渲染放大流式卡顿感知 | 揭示速率随积压自适应（`BASE_CPS=90` + `CATCH_UP_CPS_PER_PENDING=6`，上限 `MAX_CPS=24000`）：大 chunk 快速追平、小 chunk 保留手感；单帧计入时长截断 `MAX_FRAME_MS=100`，长任务 / 后台标签页恢复不一次性冲刷 | 同上 |
+| 历史回放被从零重打 | 挂载即完整（`createTypewriterState` 直接全文揭示）；只对**正在增长**的目标文本进入逐字模式 | `use-typewriter.ts` 渲染期推进 + `advanceOnTargetChange` |
+| 重新生成 / 改写（非纯追加） | 直接吸附全文（不做「从头重打」，避免视觉回退与冻结块 remount）；此时 `generation++` 是正确语义 | `advanceOnTargetChange` 的 `common < prev.target.length` 分支 |
+| 常驻 rAF 开销 | `animating` 追平即翻 false → effect 卸载并取消帧回调，不做常驻循环；非流式路径零成本直挂 | `use-typewriter.ts` 的 effect 依赖 `[active, animating]` |
+
+**代价与边界**：揭示滞后会让「已定稿块」的冻结时机随之略微延后（同一内容下的冻结判定不变，
+只是路径依赖揭示进度）；`streaming` 结束或 `interrupted` 时立即回到直挂，正文不被截断。
+上节原始验收仍然成立（流式渲染与冻结块身份断言均须通过），对应用例已在
+`segment-components.test.tsx` 落位。
 
 ---
 

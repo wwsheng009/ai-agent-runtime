@@ -967,3 +967,30 @@ go test ./internal/agent -run "Parallel|Doom" -count=1
   - 执行层与提示：agent loop 对 `*MalformedToolCallError`（`errors.As` 穿透 `retryExhaustedError`）按工具 schema 回注 re-prompt（`maxMalformedToolCallRecoveries=2`，附 `tool.malformed_arguments.recovered`/`.guardrail_hit` 事件）；CLI `renderChatTurnRecoveryHintForError` 对该错误给出「工具未执行（无副作用）」提示，不再复用"避免重复工具副作用"的通用 `/retry` 文案，消除误导。
   - 验证（backend 目录）：`go build ./...` 与 `go vet ./internal/llm/ ./internal/agent/` 均 exit 0；新增 `TestLLMRuntime_Call_RetriesMalformedToolArguments`（第 2 次采样即恢复、对调用方透明）、`TestLLMRuntime_Call_BoundsConsecutiveMalformedToolArguments`（连续 3 次收敛、Unwrap 保留 `*MalformedToolCallError`、`classifyRetryableLLMError` 报 `retry_exhausted`）、`TestLLMRuntime_Stream_BoundsConsecutiveMalformedToolArguments`（流式开口路径同界）；`./internal/llm/...` 与 `./internal/agent`（379 tests）全绿；`internal/agent` 三个降级用例改为「runtime 先重采样 3 次 → loop 再降级」口径（callCount 4 / 9 / 4）。
   - 已知无关失败：`cmd/aicli/commands` 的 `TestLateReasoningAfterSuccessfulRequestBoundaryPrecedesAssistantFinal` 在本轮改动前即失败（已 `git stash` 复核），属并行进行中的会话事件投影改动，与本改动无关。
+
+---
+
+## 附录 D：路径锚点一致性收口（2026-09-15）
+
+- 根因（同一个不变量被两处各自实现）：一次工具调用里的相对路径会被**解析两次** —— 静态策略 `internal/policy` 解析一次用于放行判定，执行器 `internal/toolkit/tools` 解析一次用于真正落盘/执行，但两者的基准不同。执行器走两级链「ctx 的会话工作区根（`toolctx.WorkspaceRoot`）→ 注册基路径（`SetBasePath(config.Workspace.Root)`）→ 进程 CWD」，而策略在没有 ctx 工作区根时直接退到进程 CWD。当 `runtime-server` / CLI 进程目录与绑定目录不同（目录绑定会话的常态）时，同一相对参数在两处指向**不同文件**：沙箱可能放行一个从未被执行的文件（越界），也可能误拒一个合法路径（误报）。
+- 收口口径：**策略必须校验工具即将触碰的那个文件**，基准链与执行器逐级对齐；`PathAnchorRoot` 的语义被钉死为「toolkit 注册基路径」而**不是**会话工作区 —— 会话工作区永远经 ctx 传递（`toolcall` 上下文注入），从不作为存储层兜底；把策略锚到执行器不会使用的会话工作区，等于把这个 bug 换个方向重造。
+- 四处改动（同一不变量，按数据流顺序）：
+  1. 回放路径补齐 ctx：`backend/internal/agent/approved_tool.go` 新增 `approvedToolCallContext(ctx, agent)`（经 `toolWorkspaceRootForAgent` → `toolctx.WithWorkspaceRoot` 注入会话工作区根），`ExecuteApprovedToolCall` 入口统一改走该函数，`enforceApprovedToolHardConstraints` 由 `policy.AllowToolCall` 改为 `policy.AllowToolCallWithContext(ctx, ...)`。常规工具路径的同源实现是 `backend/internal/agent/loop.go:4199`（`toolCallContext`）与 `backend/internal/agent/tool_exec_middleware.go:67,73`。
+  2. CLI `/call` 路径补齐 ctx：`backend/cmd/aicli/commands/function_catalog.go:455` 在调用策略前注入 `toolctx.WithWorkspaceRoot(policyCtx, root)`。
+  3. 策略兜底锚点落地：`backend/internal/policy/tool_policy.go` 新增 `PathAnchorRoot` 字段与 `SetPathAnchorRoot`（空串即不设锚点，退化为原行为）、`AllowToolCallWithContext`，解析优先级「ctx 工作区根 → PathAnchorRoot → 进程 CWD」；`Clone()`/`DeriveChild()` 继承该字段（`tool_policy.go:348`）。
+  4. 注册点接线（三处，取值均为 `runtimeConfig.Workspace.Root`，即 `SetBasePath` 的同一个值）：`backend/internal/api/skills/handler.go:4584-4588`（API actor）、`backend/cmd/aicli/commands/chat_actor_host.go:1457-1461`（CLI 本地会话）、`chat_actor_host.go:971-978,1084-1086`（子代理 agentdef 派生策略：`DeriveChild` 出来的新策略不继承父的锚点来源，故在基路径为空时补位，且不覆盖已有值）。
+- 同族残留（本轮一并修，与上条同根因）：shell 工具此前**完全忽略**注册基路径 —— `bash` 只走「ctx → 进程 CWD」，文件类工具走「ctx → 注册基路径 → 进程 CWD」。后果比误判更重：`AllowedPaths` 只含绑定目录时会话的命令实际执行在目录之外（策略按绑定目录放行、进程在别处跑），且 `workdir` 相对参数落在服务器进程目录。修法：`backend/internal/toolkit/tools/sandbox_support.go` 新增 `sandboxPolicy.workdirForExecution(ctx, workdir)`（与 `effectiveBasePath` 同一条链），`bash.go:executeCommand` 与 `aicli_exec.go` 的 CWD 解析改走该方法（`AICLIExecTool` 内嵌 `sandboxPolicy` 以取得注册基路径）；已无调用方的 `resolveWorkdirWithBase` 删除（避免留下一条"只认 ctx"的旧链被再次误用）。绝对 `workdir` 仍原样优先，语义未变。
+- 验证（backend 目录）：
+  - `internal/policy`：`TestResolvePolicyPathFallsBackToAnchorRoot`（ctx 根优先 / 锚点兜底 / 空白锚点退化）、`TestSetPathAnchorRootSurvivesCloneAndDeriveChild`、`TestAllowToolCallAnchorsRelativePathToPolicyRoot` 全绿。
+  - `internal/api/skills`：接线回归 `TestApplyAgentExecutionPolicy_AnchorsRelativePathChecks`（`:2256`）全绿。
+  - `internal/toolkit/tools`：`bash_workdir_test.go` 改写为统一链用例 `TestWorkdirForExecutionPrefersSessionRoot` / `...FallsBackToRegisteredBasePath` / `...FallsBackToProcessCWD` 全绿。
+  - 包级回归：`go test ./internal/toolkit/... ./internal/tools/ -count=1`（2.11s / 17.12s / 0.76s）、`./internal/chat/ ./internal/api/skills/ -count=1`（19.38s / 17.49s）、`./cmd/aicli/commands/ -count=1`（79.90s）全绿；`go build ./...` exit 0；本轮改动文件 `gofmt -l` 无输出。
+- 未做/边界：`internal/toolkit/tools/` 下仍有若干**改动前即存在**的未格式化文件（`append_write.go`、`download.go` 等，与本轮无关，未触碰）；真实终端 probe（一个无 ctx 工作区的 runtime-server 会话里执行 `pwd`/相对路径写文件）未跑，需要运行中的 server + CLI。
+
+### 附录 D 补充：preflight 轴对齐（2026-09-15，第二轮）
+
+- 补齐动机：附录 D 收口后「策略 ↔ 执行器」已同链，但同一次调用里还有**第三方**在解析相对路径 —— 预检（`backend/internal/toolexec/preflight.go:1648-1661 resolvePreflightPath`，其 root 来自 `PreflightRequest.WorkspaceRoot`，由 `backend/internal/agent/tool_exec_middleware.go:54` 填 `loop.toolWorkspaceRoot()`）。该值只读 `agent.config.Options["tool_base_path"]` → `["workspace_path"]`（`tool_exec_middleware.go:73-84`），**没有**注册基路径这一级；而 `tool_base_path` 只在 CLI（`chat_actor_host.go:1305`）写入，API 侧只写 `workspace_path`（`handler.go:1686`、`session_runtime_support.go:3643`）。于是「未绑定会话工作区 + 服务端配置了 `config.Workspace.Root`」时：策略与执行器都按 `config.Workspace.Root` 解析，只有预检退到进程 CWD。
+- 危害不只是误拒：预检的 read-path 存在性检查带**参数自愈**（`uniqueHighConfidencePathCandidate` 按解析后的目录给同级候选并改写参数），CWD 锚定下会把相对参数改写成**另一棵树里的同名邻居**，而且发生在策略校验之前。
+- 修法（三行 + 一个函数）：`tool_exec_middleware.go` 新增 `preflightWorkspaceRoot()` —— 先取 agent options 的会话根，再退到 `policy.PathAnchorRoot`（即注册基路径），`prepareToolExecution` 改用它。与执行器「ctx 会话根 → 注册基路径」逐级同源，且不引入新的装配点：锚点已在附录 D 的三处接线上就位。
+- 验证（backend 目录）：新增 `TestPreflightWorkspaceRootFallsBackToPolicyAnchor`（无 options 无锚点 → 空；仅锚点 → 取锚点；会话根存在 → 会话根优先）通过；`go build ./...` exit 0；`go test ./internal/agent/ ./internal/toolexec/ -count=1`（11.17s / 1.41s）、`./internal/policy/ ./internal/toolkit/tools/ ./internal/api/skills/ -count=1`（1.41s / 15.59s / 17.63s）全绿；两处改动文件 `gofmt -l` 无输出。
+- 边界：预检仍是「更严」方向（嵌套键递归检查、`File_Path` 大小写只被策略识别等轻微差异未动，均为 fail-closed）；`pathExistsChecker` 的 `PathExists` 测试钩子语义未变。

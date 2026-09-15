@@ -250,6 +250,32 @@ assistant/step-interrupted      → 中断态
   仍全量渲染但仅对**可见文本增量 diff**（React reconciliation 本身 diff，重渲染成本主要在
   markdown→AST→DOM）。若实测 jank，再做 AST 级增量。
 
+**实施记录（2026-09-15，用户报「stream output 时页面卡住」）**：现场取证后确认
+**主因不在 markdown→AST**（该路径已由消息渲染方案的 P1-2 前缀冻结 + 绝对 offset key
+承接，见 `frontend-message-rendering-deepseek-alignment-plan.md` §6.3 / 批次 D3），
+而在**每 chunk 提交都要扫掠整表几何的滚动宿主**。本轮实际改动：
+
+| 位置 | 原实现（每提交） | 现实现 | 效果 |
+| --- | --- | --- | --- |
+| `hooks/workspace/use-conversation-scroll.ts` `readRows` | 布局效应 / ResizeObserver / rAF 各调一次 → 3 次 `getBoundingClientRect` 全表扫掠 + 3 次强制回流 | 帧内几何缓存（rAF 末清空），一帧只量一次 | 大会话流式提交的几何开销 ÷3 |
+| 同上 `restoreAnchor` | `readRows().find(...)` 全表扫掠只为取锚点行 | `readRowById` 用 `[data-message-id]` 直取单行 | O(n) → O(1) |
+| 同上 active 标记对账 | 每次提交都 `sync()`（读快照 + setState） | `scheduleMarkerSync` 节流 150ms（rAF 合流），键切换 / 恢复仍 `force` 立即对齐 | reading-line 高亮仍跟手，提交不再触发每帧 setState |
+| 同上 布局效应 | `readSnapshot()` + rAF 里第二次 `readSnapshot()` | 贴底只 `pinToBottom()`；其余走节流对账 | 去掉每提交两次全表扫掠 |
+
+打字机手感（用户同批要求）以「单调揭示」状态机恢复，与上述几何优化正交，见消息渲染方案
+§8.6.1。验收：`tsc -b --force` 0 error；`lib/typewriter.test.ts` / `lib/conversation-scroll.test.ts` /
+`message-list/segment-components.test.tsx` / `message-list.test.tsx` 定向 44 例通过；
+全量 `npx vitest run` 200 文件 / 1519 用例通过；`npm run build` exit 0；e2e
+`workspace-chat.spec.ts` 9 passed（含 P1-3a/b/c 三条流式滚动所有权用例，直接覆盖本轮滚动改动）。
+
+**遗留红项（非本轮引入，归 `/runtime/stream` 游标批次）**：e2e `live-delta.spec.ts` 仍在
+「请求进行中显示增量前缀」一步失败（`element(s) not found`）。已做 A/B 对照：把本轮打字机的
+`active` 强制置 false 后重建 dist 重跑，**失败点与报错完全一致**，证明与本轮改动无关；
+机制是该 spec 的 route 对 `after > 0` 一律返回空流，而实时流建连已改为从「轨迹已回放到的
+最大 seq」续拉（`use-session-runtime-stream.ts` 的建连游标 + `use-trajectory-recovery.ts`
+尾部优先窗口），`after` 因此不再是 0，mock 不再吐出那条 `assistant_delta`。该 spec 的
+mock 契约需随游标语义更新（或改由 mock server 支持按 `after` 续播），与本轮文件无交集。
+
 ### 方案 D（环境/可观测，1-2 小时）
 
 - 上游网关健康检查：`/api/agent/chat` 的 meta 前置探活（9000 拒连、ttai Cloudflare

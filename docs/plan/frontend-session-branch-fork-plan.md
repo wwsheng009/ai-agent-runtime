@@ -1,6 +1,6 @@
 # 会话分支（在新对话中分支 / Session Fork）前端实施方案
 
-状态：**草案（待评审）**——本文只做方案设计，未改动任何代码。
+状态：**已实施（含方案 A 修订）**——批次 1–4 已按本文落地；分支可用性从「整条 transcript 末尾单锚点」修订为「任意已完成轮次的末条回答消息」，差异见各节「落地修订」注记。
 
 日期：2026-09-14
 
@@ -60,7 +60,7 @@
 1. **补齐真实分支语义**：从某条消息锚点创建新会话时，新会话上下文 = 原会话在锚点处的历史前缀（消息、轮次、以及可选的锚点文件快照），而不是空会话。
 2. **两个入口对齐参照实现**：① 消息流内「在新对话中分支」（锚点入口，主入口）；② 会话行操作里的整会话 Fork（保留现有入口，语义升级为「复制全量历史」或明确标注为「新会话+同目录」二选一，见 §4.2.2）。
 3. **子会话可见**：分支产生的新会话在侧栏可辨识其来源（父行附近呈现 + 来源标识），且不破坏现有分组/排序/拖拽账目。
-4. **可用性规则可解释**：只有「已完成轮次的最后一条消息」可分支；不满足时按钮可见但不可用，并给出可读原因（对齐参照实现的口径，§2.2）。
+4. **可用性规则可解释**：**任意已完成轮次的末条回答消息**都可分支（不限于整条 transcript 的最后一条）；不可分支的位置（轮内中间消息 / 流式中 / 只有推理或工具的消息）**不渲染入口**，没有「可见但不可用」的常驻按钮（方案 A 落地口径，见 §4.2.5 落地修订）。
 5. **最小侵入**：不重写消息投影内核、不改 SSE 协议、不引入消息树可视化（与 `frontend-message-rendering-deepseek-alignment-plan.md:59` 的非目标一致）。
 
 ### 1.4 非目标
@@ -76,7 +76,7 @@
 | 级别 | 结论 | 一句话依据 |
 |---|---|---|
 | P0 | **前端无法独立实现真实分支**，必须先补后端「按锚点 seed 历史建会话」端点，否则只能维持「伪 Fork」 | 现有 `POST /sessions` 不收历史（`handler.go:2311-2337`）；但后端已有 `ReplaceHistory` + `PlanBacktrack` 两个现成积木（`backtrack_actor.go:241-279`、`backtrack.go:258-268`） |
-| P0 | 分支的**锚点语义应与参照实现一致**：轮末尾（assistant 侧）而非用户消息 | 参照实现只在 assistant 答案下渲染 branch，且仅「completed transcript tail」可用（`apps/web/tests/message-actions.e2e.ts:190-203`） |
+| P0 | 分支的**锚点语义**：assistant 侧的**轮末尾**而非用户消息；本仓修订为**任意已完成轮次**的轮末尾 | 参照实现只在 assistant 答案下渲染 branch，且仅「completed transcript tail」可用（`apps/web/tests/message-actions.e2e.ts:190-203`）；后端端点本就接受任一完成轮末尾（409 只针对轮内中间消息） |
 | P0 | 主入口应挂在 **turn-tail 行**（`turn-tail-row.tsx`），而不是用户气泡动作行 | 同 P0 上一条；turn-tail 天然是「轮末尾」渲染位（`frontend/src/lib/chat-view/flow.ts:299-304`） |
 | P1 | 子会话呈现采用「**父行后紧跟 + 缩进**」并复用现有树形无障碍口径，但需先定义与手动排序/拖拽的优先级 | 侧栏已有 `ml-4` 组缩进（`sessions-section.tsx:363-365`）与 `role=treeitem/aria-level/paddingLeft` 先例（`session-agents-tree.tsx:165-175`） |
 | P1 | 分支关系持久化只能走 `metadata.context`（`parent_session_id` / `fork_anchor_message_id` / `fork_anchor_turn`） | `RuntimeSessionRecord` 无 parent 字段（`types/runtime/sessions.ts:1-21`）；`PATCH /sessions/{id}` 的 `context` 逐键合并是既有惯例（`use-workspace-session-actions.ts:61-62`） |
@@ -105,12 +105,15 @@
 - 不可用时**不使用原生 `disabled`**，而是 `aria-disabled` + `aria-describedby` 指向一段 visually-hidden 的原因文本——注释明确写了原因：原生 disabled 按钮不派发 Tooltip 需要的 hover/focus 事件（`MessageIconActions.tsx:93-101,107-109`）。
 - 规则：**只有 assistant 答案下渲染**（用户气泡没有 branch），且**只有已完成轮次的最后一条消息**才可用（`apps/web/tests/message-actions.e2e.ts:190-203`）。
 
+> 上三条是**参照实现**的口径。本仓落地时收紧了交互（方案 A）：可用位置与不可用位置都**不渲染禁用图标**，只有真正可分支的锚点才渲染入口——见 §2.3 / §4.2.5 的落地修订。
+
 ### 2.3 文案口径（原样沿用）
 
 | key | zh-CN | en-US |
 |---|---|---|
 | `message.branch` | 在新对话中分支 | Branch into a new conversation |
-| `message.branchUnavailable` | 仅可从已完成轮次的最后一条消息分支 | Available only on the last message of a completed turn |
+
+**落地修订（方案 A）**：本仓**没有**保留 `message.branchUnavailable`——不可用位置改为「不渲染入口」，没有承载原因文案的禁用图标；两语言词典最终只有 `branch.label` / `branch.failed` / `branch.pending`（`frontend/src/i18n/resources/{zh-CN,en-US}/workspace/panels-messages.ts:61-65`）。参照实现的「可见但不可用 + tooltip 原因」口径仅作对比参考。
 
 证据：`packages/client/ui-chat/src/client/locale.ts:71-72,182-183`。
 
@@ -134,8 +137,8 @@
 - flow 投影：`frontend/src/lib/chat-view/flow.ts:299-304` 生成 `turn-tail` item（语义 = 轮末尾）。
 - 行组件：
   - 用户气泡 `frontend/src/components/workspace/message-list/user-message-bubble.tsx`：动作行门控 `:199`，复制按钮 `:212-224`，编辑/回溯按钮 `:225-257`，按钮样式常量 `ACTION_BUTTON_CLASS :51-52`（28×28 圆钮，hover 显现见 `frontend/src/styles/globals/base.css:186-200`）。
-  - 轮尾行 `frontend/src/components/workspace/message-list/turn-tail-row.tsx:61-107`，props 契约 `:13-20`。
-- 宿主：`frontend/src/components/workspace/message-list.tsx`——`showBacktrack` 门控 `:195-196`、`actionsDisabled = backtrackPending || isResponding || backtrackNavigationActive :202-205`、用户气泡入参 `:222-240`、assistant 卡片 → turn tail `:263-273`、流式判定 `:63-65`。
+  - 轮尾行 `frontend/src/components/workspace/message-list/turn-tail-row.tsx:76-150`，props 契约 `:24-35`（方案 A 落地后：`:58` 门控，分支按钮 `:97-123`）。
+- 宿主：`frontend/src/components/workspace/message-list.tsx`——`showBacktrack` 门控 `:209-210`、`actionsDisabled = backtrackPending || branchPending || isResponding || backtrackNavigationActive :223-227`、锚点求解 `:71-77`、分支下发 `:216-222`、用户气泡入参 `:245-262`、assistant 卡片 → turn tail `:286-297`、流式判定 `:69-70`。
 
 **关键事实**：本仓当前**没有任何轮末尾/完成态判定**可用于「是否可分支」——`actionsDisabled` 只表达「正在忙」，不表达「这条消息是不是完成轮次的最后一条」。这是新增能力（见 §4.1 G3）。
 
@@ -219,7 +222,7 @@
 |---|---|---|---|
 | G1 | 后端没有「按锚点 seed 历史建会话」端点 | `handler.go:735-782`（路由表无 fork/branch）；`CreateSession` 不收历史 `handler.go:2311-2337` | 阻塞项：不补则只能维持伪 Fork |
 | G2 | 前端没有分支 API 客户端与编排 hook | `api/runtime/sessions.ts:88-102` 只有 `createRuntimeSession`；`use-workspace-session-actions.ts:84-108` 是旧语义 | 前端主链路 |
-| G3 | 没有「已完成轮次最后一条消息」判定 | `message-list.tsx:202-205` 的 `actionsDisabled` 只表达「忙」；`turn-tail-row.tsx:13-20` 无相关 props | 决定按钮可用性 |
+| G3 | 原实现只判定「整条 transcript 末尾」单锚点，中间已完成轮次被误判为不可用（方案 A 已修） | 旧实现：`message-list.tsx` 用 `resolveBranchAnchor(flowItems)` 求全局唯一锚点；现为 `branch-availability.ts:42-48` 的 `isTurnTailMessage`（其后首条是 user 或已是历史末尾）+ `resolveBranchAnchors`（`:68-101`）逐轮求解锚点集合 | 决定按钮可用性 |
 | G4 | 没有消息级入口（只有侧栏行级 Fork） | 入口清单见 §3.1；`session-item.tsx:243-256` | 交互形态 |
 | G5 | 会话无父子字段，侧栏无层级呈现 | `types/runtime/sessions.ts:1-21`；`lib/thread-state/sessions.ts:132-136` 纯时间序 | 侧栏可辨识性 |
 | G6 | 无不可用原因呈现原语（全仓无 Tooltip） | `components/ui/` 无 tooltip 文件；现有降级 `user-message-bubble.tsx:203-206` | 可用性可解释性 |
@@ -283,6 +286,8 @@
 1. **最小档**：`aria-disabled` + 原生 `title={t("...branchUnavailable")}` + 视觉降透明度 + 点击拦截（不做 `disabled`），并配 `sr-only` 原因文本（复用 `user-message-bubble.tsx:203-206` 的写法）。
 2. **进阶档（可选）**：在 `components/ui/` 新增最小 Tooltip 原语（`role="tooltip"` + 焦点/悬停双触发），再把消息动作区切过去；该原语同时可为侧栏行操作复用。
 
+**落地修订（方案 A，2026-09-14）**：两档降级**均未采用**——入口改为「只为可分支锚点在 `turn-tail` 行渲染」，不可分支的位置一律不渲染按钮（含只有推理或只有工具调用的消息、流式中的消息、轮内中间消息、`${sessionId}-history-${index}` 合成 id 消息），因此不存在需要 hover/focus 解释原因的禁用图标，`aria-disabled` / `sr-only` 原因文本 / Tooltip 原语都不需要。判定在整段历史上一次求解（`frontend/src/lib/chat-view/branch-availability.ts:68-101`），渲染层按锚点 id 下发 `onBranch`（`message-list.tsx:71-77`、`turn-tail-row.tsx:58,97-123`：无回调即无按钮）。
+
 > 注意：`title` 属性同样受 i18n 门禁扫描（`verify-frontend-i18n.ts:20-27`），必须写成 `t()` 调用。
 
 ---
@@ -292,7 +297,7 @@
 ### 5.1 总览
 
 ```text
-[入口 1] 轮尾行「在新对话中分支」（主入口，锚点=该轮末尾）
+[入口 1] 轮尾行「在新对话中分支」（主入口，锚点=**任意已完成轮次**的末条回答消息）
 [入口 2] 侧栏会话行 Fork（锚点=会话末尾，整会话分支）
 
         └─► use-session-branch（可用性判定 + 请求编排 + 跳转）
@@ -338,35 +343,31 @@
 **可用性模型**（新增纯逻辑，单测友好）：
 
 ```ts
-// frontend/src/lib/chat-view/branch-availability.ts（新增）
-type BranchAvailability =
-  | { kind: "available"; messageId: string }
-  | { kind: "unavailable"; reasonKey: string };
-
-/** 在 flow items 上求「唯一可分支锚点」：已完成轮次的最后一条消息。 */
-export function resolveBranchAnchor(
-  items: FlowItem[],
+// frontend/src/lib/chat-view/branch-availability.ts（落地签名）
+/** 求当前历史里所有可分支锚点的消息 id（每个已完成轮次的末条回答消息）。 */
+export function resolveBranchAnchors(
+  messages: readonly ChatMessage[],
   options: { isResponding: boolean; hasPendingApproval?: boolean },
-): BranchAvailability;
+): Set<string>;
 ```
 
-判定规则（与参照实现一致，`apps/web/tests/message-actions.e2e.ts:190-203`）：
+判定规则（**方案 A 修订**：逐轮求解，不再只取整条 transcript 的末尾）：
 
 1. 会话**不在**流式/等待审批中（`isResponding === false`）；
-2. 锚点必须是**已完成轮次**的**最后一条**内容消息（其后没有该轮的新增内容）；
-3. 该消息必须是**可寻址**的真实消息（有稳定 id，`history-mapping.ts:237,264`）；合成 id（`` `${sessionId}-history-${index}` `` 退化分支）不产生锚点，避免与服务端 id 对不上。
+2. 锚点 = **每个已完成轮次**的末条回答消息：轮边界对齐后端 `ListUserTurns`，由 `isTurnTailMessage` 判定「其后首条消息是 user 或它已是历史末尾」（`branch-availability.ts:42-48`）；
+3. 只有**可寻址的真实回答消息**进入结果集：排除 system prompt / 历史上下文 / 工具回执行（不产出 `turn-tail`）、`streaming` / `interrupted` 的 live-only 消息、合成退化 id（`` `${sessionId}-history-${index}` ``），以及**只有推理或只有工具调用**（无可复现正文）的消息。
 
-> 判定必须在**整条流**上求一次（O(n)），再把布尔值下发给每一行；**不要**在行组件里做「我是不是最后一条」的判断（会引入 O(n²) 与实时边界误判，`history-artifacts.ts:33-41` 的 live-only 追加是典型陷阱）。
+> **落地修订（方案 A，2026-09-14）**：不可用消息**不进入结果集**，渲染层据此完全不渲染按钮（不再是「禁用图标 + 原因文案」）。求解仍在**整段历史**上一次完成（O(n)，`message-list.tsx:71-77` 的 `useMemo`），**不要**在行组件里自判「我是不是锚点」（会引入 O(n²) 与实时边界误判，`history-artifacts.ts:33-41` 的 live-only 追加是典型陷阱）。
 
 **渲染接线**（纯透传为主）：
 
 | 文件 | 改动 |
 |---|---|
-| `frontend/src/components/workspace/message-list/turn-tail-row.tsx:13-20,61-107` | 新增 props `canBranch / branchPending / branchDisabledReason / onBranch`；渲染 `IconBranch` 风格按钮（`aria-disabled` + 原因，不用 `disabled`） |
+| `frontend/src/components/workspace/message-list/turn-tail-row.tsx:24-35,58,97-123` | props 为 `branchPending / message / onBranch`；**只有传入 `onBranch` 且正文可见才渲染按钮**（无 `canBranch` 布尔、无不可用态） |
 | `frontend/src/components/workspace/message-list/assistant-message-card.tsx` | 透传上述 props 到 `TurnTailRow` |
-| `frontend/src/components/workspace/message-list.tsx:263-273` | 用 `resolveBranchAnchor(...)` 的结果驱动 `canBranch`，并在 `actionsDisabled` 中并入 `branchPending` |
-| `frontend/src/components/workspace/message-list/types.ts:13-41` | 扩展 props 签名（`onBranchFromMessage(messageId)`、`branchPendingMessageId`、`branchDisabledReason(messageId)`） |
-| `frontend/src/components/workspace/workspace-shell/main-section.tsx:341-368`、`workspace-shell.tsx:91-98,305-325`、`workspace-shell/types.ts:110-121` | 透传（无逻辑） |
+| `frontend/src/components/workspace/message-list.tsx:71-77` | `resolveBranchAnchors(messages, { isResponding, hasPendingApproval })` 一次求解 `Set<string>`；仅命中锚点的消息收到 `onBranch` |
+| `frontend/src/components/workspace/message-list/types.ts:22-23,29-33,41-46` | props 为 `onBranchFromMessage?(messageId)` 与 `branchPendingMessageId?`；**没有** `branchDisabledReason` |
+| `frontend/src/components/workspace/workspace-shell/main-section.tsx:313-335`、`workspace-shell.tsx:91-98,305-325`、`workspace-shell/types.ts:110-121` | 透传（无逻辑；`hasPendingApproval={Boolean(pendingInteraction)}` 在 `main-section.tsx:328`） |
 
 **用户气泡是否也放一个入口**：参照实现**没有**（`message-actions.e2e.ts:190-191`：用户气泡不带 branch）。本方案**同样不加**，避免与「回溯（回到发送前）」语义混淆——两者在用户气泡上会变成两个含义相近但结果不同的按钮。
 
@@ -394,7 +395,7 @@ export function resolveBranchAnchor(
 
 | 语言文件 | 新增 key |
 |---|---|
-| `frontend/src/i18n/resources/{zh-CN,en-US}/workspace/panels-messages.ts` | `branch`（=「在新对话中分支」/ "Branch into a new conversation"）、`branchUnavailable`（=「仅可从已完成轮次的最后一条消息分支」/ "Available only on the last message of a completed turn"）、`branchFailed`（失败提示） |
+| `frontend/src/i18n/resources/{zh-CN,en-US}/workspace/panels-messages.ts` | `branch.label`（=「在新对话中分支」/ "Branch into a new conversation"）、`branch.failed`（失败提示）、`branch.pending`（在途提示）；**没有** `branchUnavailable`（方案 A：不可分支处不渲染入口，无原因文案位） |
 | `frontend/src/i18n/resources/{zh-CN,en-US}/workspace/base.ts:140-149` | `forkMenuItem` 措辞（若侧栏入口语义升级为「整会话分支」）、`forkBadge`（子会话来源徽标） |
 
 > 文案直接沿用参照实现的中英文（`packages/client/ui-chat/src/client/locale.ts:71-72,182-183`），避免自创口径造成后续对比困难。
@@ -403,12 +404,12 @@ export function resolveBranchAnchor(
 
 | 层级 | 文件 | 断言 |
 |---|---|---|
-| 单测 | `frontend/src/lib/chat-view/branch-availability.test.ts`（新增） | 空流/流式中/中断消息尾部/合成 id/正常末尾 五种输入的锚点结论 |
+| 单测 | `frontend/src/lib/chat-view/branch-availability.test.ts`（新增/修订） | 多轮锚点集合（每个完成轮次各自入选）、流式中/待审批返回空集、中断或流式消息排除、合成 id 排除、纯推理轮不给锚点 |
 | 单测 | `frontend/src/lib/workspace/session-lineage.test.ts`（新增） | 父行在后、父行跨组、父行缺失、多子行、与手动排序冲突时的稳定化结果 |
 | 单测 | `frontend/src/components/workspace/workspace-sidebar/session-row-actions.test.ts:9-49` | 扩展：`buildBranchSessionRequest` 带 `anchor_message_id`；不带锚点时退化为整会话分支 |
 | 单测 | `frontend/src/hooks/workspace/use-session-branch.test.tsx`（新增） | 可用性门、pending、成功后的 navigate 与 reset 调用顺序、失败不改路由 |
 | e2e | `frontend/e2e/sidebar-session-actions.spec.ts:46` | 既有「Fork 生成带分支后缀的独立新会话」保持通过（或不改断言、只改实现） |
-| e2e | `frontend/e2e/session-branch.spec.ts`（新增） | ① 仅轮末尾按钮可用，其余 `aria-disabled=true` 且有原因；② 点击后发出 `POST /sessions/{id}/branch` 且 body 带 `anchor_message_id`；③ 新会话 URL 落 canonical 且侧栏出现缩进子行；④ 源会话历史不变（回源后消息数一致） |
+| e2e | `frontend/e2e/session-branch.spec.ts`（新增） | ① 每个已完成轮次的末条回答消息各有一个 `data-branch-state=available` 入口（共 2 个），只有推理的轮次无按钮、全页无 `unavailable` 态；② 点击后发出 `POST /sessions/{id}/branch` 且 body 带 `anchor_message_id`；③ 新会话 URL 落 canonical 且侧栏出现缩进子行；④ 源会话历史不变（回源后消息数一致） |
 
 **门禁命令**（提交前逐条）：
 
@@ -488,9 +489,9 @@ npm run build && npm run test:e2e
 
 | 状态 | 场景 | 前端处理 |
 |---|---|---|
-| 400 | 锚点格式非法 | 提示不可用原因，不跳转 |
+| 400 | 锚点格式非法 | 提示失败原因，不跳转 |
 | 404 | 源会话不存在 | 刷新快照并提示 |
-| 409 | 锚点不在完成轮末尾 / 源会话正在生成中 | 提示原因（复用 `branchUnavailable` 文案） |
+| 409 | 锚点不在完成轮末尾 / 源会话正在生成中 | 提示失败原因（`branch.failed` + 服务端 message；正常路径下入口只出现在可分支锚点，409 属竞态兜底） |
 | 503 | 会话库被占用（既有 `writeSessionStoreError` 口径） | 提示可重试 |
 | 501/404（端点未实现） | 后端未排期 | 降级：提示「当前后端不支持真实分支」，不改路由 |
 
@@ -504,9 +505,9 @@ npm run build && npm run test:e2e
 ## 7. 时序（成功路径）
 
 ```text
-用户 → 轮尾按钮（仅可用态可点）
+用户 → 轮尾按钮（只在可分支锚点的 turn-tail 行渲染）
   → use-session-branch.branch(messageId)
-    → resolveBranchAnchor 复核（防抖/竞态）
+    → pendingRef 门（同名重入直接返回）
     → POST /sessions/{source}/branch {anchor_message_id}
       → 后端：load 源会话 → PlanBacktrack(前缀) → CreateSession
               → ReplaceHistory(prefix) + SetHeadOffset(0) + persist
@@ -527,7 +528,7 @@ npm run build && npm run test:e2e
 
 ### 8.1 功能验收（可勾选）
 
-> 落地证据（2026-09-14）：前端门禁 `npm run lint` / `npx vitest run`（192 文件 / 1424 用例）/
+> 落地证据（2026-09-14）：前端门禁 `npm run lint` / `npx vitest run`（193 文件 / 1445 用例）/
 > `npm run build` / `npx playwright test`（76 用例）全绿；后端新增用例见
 > `backend/internal/chat/branch_test.go`、`backend/internal/api/skills/session_branch_handlers_test.go`、
 > `backend/internal/api/skills/session_branch_continuation_test.go`（§10 Q9 端到端验证）。
@@ -543,9 +544,11 @@ npm run build && npm run test:e2e
       + `Update` 落库，读回即普通可继续会话，且可被 `List` 发现；端到端用例
       `TestBranchSessionContinuationWithoutActorPrewarm` 直接对分支会话 `submit_prompt`，断言首个模型请求按序
       携带前缀、且不含锚点之后的消息；已做反向 mutation 校验——移除 `ReplaceHistory(plan.Prefix)` 该用例即失败，结论见 §10 Q9）
-- [x] 非末尾消息 / 流式中 / 待审批时，入口**可见但不可用**，且有可读原因。
-      （`branch-availability.test.ts` 五种输入；e2e ① 断言 `data-branch-state=unavailable` +
-      `aria-disabled=true` + `aria-describedby` 指向原因文案）
+- [x] 入口只在**可分支锚点**的轮尾出现，且**任意已完成轮次**都可作为锚点：中间轮次不再是「不可用」。
+      轮内中间消息 / 流式中 / 待审批 / 只有推理或只有工具调用的消息一律**不渲染按钮**（无「可见但不可用」态）。
+      （`branch-availability.test.ts` 覆盖多轮锚点集合 / 流式 / 待审批 / 中断 / 合成 id / 纯推理；
+      `turn-tail-row.test.tsx` 断言无 `onBranch` 即无按钮；e2e ① 断言 `data-branch-state=available` 恰 2 个、
+      reasoning-only 轮无按钮、不存在 `data-branch-state=unavailable`）
 - [x] 侧栏中新会话**紧随父会话**并缩进显示，且带来源徽标。
       （`session-lineage.test.ts`（父行在后 / 跨组 / 父行缺失 / 多子行 / 手动排序冲突）；
       e2e ③ 断言 `aria-level=2` + `data-depth=1` + `session-fork-badge` = "Branch" 且位于父行下方）
@@ -566,8 +569,13 @@ npm run build && npm run test:e2e
 - [x] `frontend/scripts/verify-max-lines.mjs` 非空行门禁通过（必要时先抽子组件）。
       （`[verify-max-lines] OK（918 个 .ts/.tsx，0 个 > 500 非空行，最大 sessions-section.tsx = 500）`）
 - [x] 两语言词典齐备（`zh-CN` / `en-US`），`verify-frontend-i18n.ts` 无硬编码告警。
-      （`i18n lint OK（scanned=656, violations=0）`；新增 `branch` / `branchUnavailable` / `branchFailed` /
-      `forkBadge` / `forkBadgeTitle` / `forkSuffix` 两语言同步）
+      （`i18n lint OK（scanned=656, violations=0）`；分支相关为 `branch.label` / `branch.failed` / `branch.pending` +
+      `forkBadge` / `forkBadgeTitle` / `forkSuffix` 两语言同步；方案 A 后 `branchUnavailable` 已移除）
+
+> 复跑记录（2026-09-14）：`workspace-chat.spec.ts` 的既有滚动用例 P1-3a 在本机多次全量运行中偶发失败
+> （读数偏离 1032px，指向 reading-line 的时序抖动；同用例在本次最终改动之前的运行中也有失败产物留存）。
+> 该用例隔离 `--repeat-each=3`、单文件运行（9 passed）与全量复跑（`--retries=2`，未触发重试、76 passed）均通过；
+> 与本方案（分支锚点可用性）无交互面，后续若持续复现应单独排查 `useConversationScroll` 的滚动手势与流式提交时序。
 
 ### 8.3 发布清单
 
@@ -622,9 +630,9 @@ npm run build && npm run test:e2e
 
 **本仓前端**
 
-- 动作区：`frontend/src/components/workspace/message-list/user-message-bubble.tsx:51-52,199,212-224,225-257`；`frontend/src/components/workspace/message-list/turn-tail-row.tsx:5,13-20,61-107`
+- 动作区：`frontend/src/components/workspace/message-list/user-message-bubble.tsx:51-52,199,212-224,225-257`；`frontend/src/components/workspace/message-list/turn-tail-row.tsx:5-8,24-35,58,85-123`
 - flow：`frontend/src/lib/chat-view/flow.ts:299-304`
-- 宿主与门控：`frontend/src/components/workspace/message-list.tsx:63-65,195-205,222-240,263-273`
+- 宿主与门控：`frontend/src/components/workspace/message-list.tsx:69-77,209-210,216-227,245-262,286-297`
 - 稳定 id 与实时边界：`frontend/src/lib/thread-state/history-mapping.ts:237,264`、`frontend/src/lib/thread-state/history-artifacts.ts:33-41`
 - 回溯锚点：`frontend/src/hooks/workspace/session-backtrack/helpers.ts:137-157`；对话框 `frontend/src/components/workspace/message-backtrack-dialog.tsx:11-18,32-44,56-61`；挂载 `frontend/src/components/workspace/workspace-shell/overlays-section.tsx:106-120`
 - 会话类型：`frontend/src/types/runtime/sessions.ts:1-44`；线程 `frontend/src/data/mock/types.ts:103-121`

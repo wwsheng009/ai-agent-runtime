@@ -1,9 +1,27 @@
 # Workspace 工作目录管理实施方案（目录增加/删除 + 目录内会话管理）
 
-> 状态：草案（待评审）
-> 日期：2026-09-10
+> 状态：**已实施**（P0–P4 已落地，并含三轮实施后修复）；§14 为参考实现借鉴的**增强候选（尚未实施）**
+> 日期：2026-09-10（初稿）／2026-09-15（章节重编号 + §14 增强候选）
 > 涉及端：frontend（React + Vite）、backend（Go runtime-server，:8101）
 > 关联页面：`http://localhost:8101/workspace/chats/new`
+
+## 0. 变更记录与阅读导航
+
+| 日期 | 变更 | 章节 |
+| --- | --- | --- |
+| 2026-09-10 | 方案初稿：需求、现状分析、详细设计、实施计划、兼容/验收/风险、自审记录 | §1–§10 |
+| 2026-09-10 | 实施记录（一）：会话执行 CWD 接线与绑定防漂移 | §11 |
+| 2026-09-10 | 实施记录（二）：文件工具与 `aicli_exec` 的会话根感知 | §12 |
+| 2026-09-10 | 实施记录（三）：第三轮实施后审查（M1/M2/m4） | §13 |
+| 2026-09-15 | 修正重复章节号（原实施记录误用「6./7./8.」，与 §6–§8 冲突）；新增参考实现借鉴增强候选 | §11–§14 |
+| 2026-09-15 | 侧栏「工作目录 / 会话」分区合并落地（Phase 0–2 + Phase 4 清理）：分区一分为二造成的「同一会话两行」重复问题收敛；§14 增强候选的落点按合并后组件结构更新 | §14、`workspace-sidebar-directory-session-merge-plan.md` §10 |
+
+**阅读导航**
+
+- 需求与设计：§1 背景与目标 → §2 现状与差距 → §3 目标方案 → §4 详细设计
+- 交付与状态：§5 实施计划 → §7 测试与验收 → §11/§12/§13 实施记录（含已修缺陷与已知边界）
+- 后续增强：§10-F6（方案自审遗留）+ §14（参考实现借鉴项，含优先级、落点与验收）
+- 排障速查：§8 风险与回滚、§9 关键代码位置索引
 
 ---
 
@@ -498,6 +516,16 @@ type UseRuntimeWorkspaceDirectoriesResult = {
 
 在 `sessions` 分区上方新增 `SidebarSection`（id: `directories`，默认展开）：
 
+> **2026-09-15 状态修正**：本节描述的是当时（双分区）形态。侧栏「工作目录 / 会话」已合并为单一分区，
+> 该分区即合并段（会话浏览工具条整体迁入），`sessions` 分区已删除；段头徽标语义按合并方案 D5 定为
+> **会话数**（不再是目录数），目录则作为分组载体、组头挂管理动作。详见
+> `workspace-sidebar-directory-session-merge-plan.md` §10。
+>
+> **2026-09-15 样式优化**：目录行右侧三个平铺图标（新建会话 / 重命名 / 移除）已收敛为**一个**
+> hover 才显示的菜单入口（`directory-group-actions.tsx`：`aria-haspopup="menu"` + 完整键盘导航 +
+> 忙碌禁用）；目录内会话行的行内铅笔按钮并入行菜单作为首项「重命名会话」。目录/会话行同时去掉嵌套
+> 缩进、顶到侧栏最左侧，标题获得更多宽度。详见该方案 §11。
+
 - 标题行：`FolderIcon` + `t("sidebar.sections.directories")` + 数量 `Badge` +
   **"+" 添加按钮**（`MessageSquarePlusIcon` 语义不合适，用 `FolderPlusIcon`）；
 - 目录行（每个注册目录）：
@@ -582,6 +610,9 @@ export function mergeDirectoryGroups(
   - 行内 `<input>` 初值 = 当前标题，Enter 提交 / Esc 取消 / blur 取消；
 - 提交 → `updateRuntimeSession(sessionId, { title })` → 成功后本地乐观更新 +
   `refresh()`；空串提交视为取消（后端 `UpdateTitle("")` 语义为清空，前端拦截）；
+- **「未修改直接提交」必须照常发 PATCH**：该手势的语义是把当前自动标题“钉住”
+  （`titleSource` 由 auto 变 `manual`），不能被“值未变化”短路掉；只有空串才是取消
+  （对齐 deepseek-harness `Rows.tsx` 的 `useRenameSession` 约定，见 §14-E9）；
 - 重命名后 `metadata.titleSource` 变为 `manual`，现有标题展示逻辑
   （`thread?.title || session.metadata?.title || session.id`）自动生效。
 
@@ -687,7 +718,7 @@ CreateSession 扩展；"会话重命名"仅依赖既有 PATCH 端点，可随 P2
    存在性校验会向调用方泄露"任意绝对路径是否为存在目录"。该信息面严格弱于
    既有 `/api/runtime/fs/read-file`、`/fs/write-file` 端点已暴露的能力，
    在 runtime-server 现行"本机单用户信任模型"下可接受；若未来引入远程多租户，
-   需与 §6.2 的根目录白名单一并收敛。
+   需与 §6 第 2 条（根目录白名单）及 §10-F6 第 4 项一并收敛。
 
 ---
 
@@ -805,18 +836,21 @@ CreateSession 扩展；"会话重命名"仅依赖既有 PATCH 端点，可随 P2
 | workspace 路由 `/workspace/chats/new` → `WorkspacePage` | ✅ App.tsx（命中 `/workspace/chats/:threadId`） |
 | `RUNTIME_FETCH_TIMEOUT_MS = 10s` 默认超时 | ✅ shared.ts L182（目录 API 需在此窗口内返回） |
 
-### F6 🟡 后续增强（不阻塞本期，记录备查）
+### F6 🟡 后续增强（自审遗留项，不阻塞本期，记录备查）
+
+> 本节为方案自审（§10）遗留项；§14 为参考实现（deepseek-harness）借鉴项，
+> 两份清单互补，排期时合并排序。
 
 1. **子树归并**：注册目录聚合其子目录下 cwd 的会话（需产品确认计数口径）；
 2. **目录健康巡检**：后台定时 `os.Stat` 注册目录，`exists=false` 主动提示而非仅在 GET 时发现；
 3. **会话删除入口**：`deleteRuntimeSession` 已在 P3 顺带封装，后续可在侧边栏补删除 UI；
 4. **根目录白名单**：`$AICLI_WORKSPACE_ROOTS` 限制可注册路径（多租户前置条件）。
 
-### F7 🟡 审查中新识别的安全说明（已补充 → §6.7）
+### F7 🟡 审查中新识别的安全说明（已补充 → §6 第 7 条）
 
 `POST /workspace-directories` 的存在性校验构成路径探测面；因服务端已暴露
 `/fs/read-file`、`/fs/write-file`，该信息面严格更弱，本机信任模型下可接受，
-已写入 §6 作为显式已知项而非隐性风险。
+已写入 §6 第 7 条作为显式已知项而非隐性风险。
 
 ### F8 🟢 阶段依赖修正（已修正 → §5）
 
@@ -832,7 +866,7 @@ CreateSession 扩展；"会话重命名"仅依赖既有 PATCH 端点，可随 P2
 
 ---
 
-## 6. 实施后修复：会话执行 CWD 接线与绑定防漂移（2026-09-10）
+## 11. 实施记录（一）：会话执行 CWD 接线与绑定防漂移（2026-09-10）
 
 ### 现象
 
@@ -863,15 +897,15 @@ workspace 上下文记录值（如 `E:\temp`）不一致：`bash.go` 的 `resolv
   materialization 不覆盖四组用例。
 - 前端：hook 测试 5/5（新增 workspace_path 决策两例），`npm run build` 通过。
 
-### 已知边界（已于 §7 消除）
+### 已知边界（已于 §12 消除）
 
 第一轮结束时文件工具的相对路径仍解析到全局注册 basePath，未随会话绑定
 目录切换（preflight 与 shell 已按会话 root 解析）。该缺口已在第二轮增强中
-修复，见 §7。
+修复，见 §12。
 
 ---
 
-## 7. 第二轮增强：文件工具与 aicli_exec 的会话根感知（2026-09-10）
+## 12. 实施记录（二）：文件工具与 aicli_exec 的会话根感知（2026-09-10）
 
 ### 缺口
 
@@ -907,9 +941,9 @@ workspace 上下文记录值（如 `E:\temp`）不一致：`bash.go` 的 `resolv
 parseOptions 双路径断言。toolkit/tools 全包 + agent/toolctx/toolexec/tools
 回归 + `go vet` 全部通过。
 
-## 8. 第三轮审查修复（2026-09-10，实施后审查）
+## 13. 实施记录（三）：第三轮实施后审查修复（2026-09-10）
 
-对 §6/§7 两轮实施做独立审查后确认的 2 个 major + 4 个次要项，均已修复。
+对 §11/§12 两轮实施做独立审查后确认的 2 个 major + 4 个次要项，均已修复。
 
 ### M2（major）目录绑定物化早于 workspace 校验 → 会话锁死
 
@@ -931,7 +965,7 @@ parseOptions 双路径断言。toolkit/tools 全包 + agent/toolctx/toolexec/too
 
 - 现象：`buildPathNotFoundHint` / `buildPathKindMismatchHint`（及
   `buildPathNotFoundError` / `buildPathKindMismatchError`）用 `p.basePath`
-  构造提示，而实际解析已改走会话根（§7）。目录绑定会话下，工具报错给出的
+  构造提示，而实际解析已改走会话根（§12）。目录绑定会话下，工具报错给出的
   workdir/候选路径来自另一个目录，误导模型重试。grep 分支当时已用有效根，
   工具间行为不一致。
 - 修复（`sandbox_support.go` + 13 处调用点）：提示构造器统一改为
@@ -967,3 +1001,205 @@ parseOptions 双路径断言。toolkit/tools 全包 + agent/toolctx/toolexec/too
   识别为绝对路径，会按相对路径拼接会话根；属既有解析语义（与旧 basePath
   行为一致），未在本轮改变。
 - 前端 eslint 与 `cmd/` 少量既有失败与本轮改动无关（改动前即存在）。
+
+---
+
+## 14. 参考实现借鉴：deepseek-harness 左侧栏增强候选（2026-09-15）
+
+> 来源：`E:\projects\ai\deepseek-harness`（同构客户端，其侧栏为 Figma 设计稿驱动）。
+> 本节只收录「与本方案同一功能面、且本仓库当前确实缺失或更弱」的条目；每条给出
+> **参考证据 / 本仓库现状 / 建议 / 落点 / 验收**。全部为增强候选，不改动 §11–§13
+> 已交付的 CWD 与工具根感知语义，也不推翻 §3.2 的核心设计决策。
+>
+> **前置阅读**：`docs/plan/workspace-sidebar-directory-session-merge-plan.md`（2026-09-15，**已落地**）
+> 已把「工作目录 / 会话」两个分区合并为单一目录骨架的会话浏览器（原「同一会话在侧栏出现两行」
+> 的重复问题随之消除）；其中 Phase 2 交付了「组内超过 5 条只渲染 5 条 + 展开其余 N 个会话」，
+> 与本文件 E1 重叠，E3/E4/E5/E7/E8 的落点也已随合并后的组件结构确定（`sessions-section.tsx` 已删除）。
+> 分工与排序以 §14.4 为准。
+
+### 14.0 对照总表
+
+| 能力面 | deepseek-harness | 本仓库现状 | 结论 |
+| --- | --- | --- | --- |
+| 添加目录 | 只有「选目录」一条路径：应用内浏览选择器（`ui-workspace/src/client/WorkspacePicker.tsx` + 独立包 `ui-directory-picker-browse`），不提供手输 | 手输绝对路径 + 校验（`workspace-directory-add-dialog.tsx`） | 借鉴 → E2 |
+| 目录组内会话过多 | 阈值折叠 + 「展开其余 N 个」（`ui-workspace/src/client/rows/WorkspaceBrowser.tsx`） | 目录分区不折叠；折叠交互只用在会话分组（`session-group-toggle.tsx`；合并后由 `directories-section.tsx` 使用） | 借鉴 → E1 |
+| 目录行动作 | 「+」常驻；重命名/删除收进「…」菜单；hover 时右侧信息位由相对时间**交换**为「…」（`rows/Rows.tsx`） | 三个图标在 hover 时同时出现（`directories-section.tsx` L210 起） | 借鉴 → E3 |
+| 目录行信息 | HoverCard：完整路径 + `~` 缩写 + 复制，并复用为「目录缺失」提示载体（`rows/Rows.tsx`） | 无 HoverCard 原语（`frontend/src` grep 无命中） | 借鉴 → E4 |
+| 视图选项 | `groupBy` + `orderBy` 存于单一版本化键、账户切换时清理（`ui-workspace/src/client/stores.ts`、`tree.ts`） | 已有 orderBy（`session-order-control.tsx` + `session-order-store.ts` v1、按账户分桶）；groupBy 未持久化 | 部分借鉴 → E5 |
+| 搜索 | 250ms 防抖、分页 `hasMore`、后端检索不可用时给降级文案（`rows/WorkspaceBrowser.tsx`） | `use-session-search.ts` 已有 AbortController + 请求序号保护；无防抖、无降级文案 | 借鉴 → E6 |
+| 行状态 | 待处理交互优先于运行态；子代理活动沿 lineage 冒泡；已完成未读提示（`rows/Rows.tsx`、`subagent-lineage.ts`） | 优先级已实现（`session-row-status.ts` L84–L96、L149–L160）；无 unseen 提醒 | 借鉴 → E7 |
+| i18n 对齐 | key 联合类型 + 逐键断言（`ui-workspace/src/client/locales.ts`） | 已有编译期对齐（`i18n/resources/shape.ts` + en-US `satisfies DeepStringShape`） | **无需重复建设**；仅补 a11y → E8 |
+| 重命名提交语义 | 未修改的非空标题同样提交，用于把自动标题钉成 manual（`rows/Rows.tsx` `useRenameSession`） | §4.7 原先未写明 | 语义补强 → E9（正文已并入 §4.7） |
+
+### 14.1 增强候选（按建议优先级排列）
+
+#### E1 🟠 目录组内会话折叠阈值（P1，纯前端）
+
+- **参考**：`WorkspaceBrowser.tsx` 用 `COLLAPSED_SESSION_LIMIT`（默认 5）截断目录组内会话，
+  尾部渲染「展开其余 N 个」；空白（尚未命名）的新会话行单独处理，不占用折叠名额。
+- **现状**：`directories-section.tsx` 无截断；`session-group-toggle.tsx` 的折叠交互只服务会话分组。
+- **建议**：目录组内会话 > 5 条时默认折叠，尾部「展开其余 N 个 / 收起」；**刚在目录下新建的空白会话
+  必须可见**（不参与计数）；折叠状态仅存内存，不写 localStorage（与 dsh 一致，避免"上次折叠状态"造成困惑）。
+- **与在飞方案重叠（见 §14.4）**：合并方案 §3.5-A 已把同一阈值行为写入 Phase 2 交付范围
+  （并补了「被选中的会话若被上限隐藏则自动展开该组」）；若其按计划落地，E1 随其交付，
+  本文件只保留验收口径与「空白会话不占名额」这一补充约束。
+- **落点**：`frontend/src/components/workspace/workspace-sidebar/directories-section.tsx`、
+  `workspace-sidebar-shared.ts`（截断计算做成纯函数便于单测）、
+  `i18n/resources/{zh-CN,en-US}/workspace/base.ts`（复用 `sidebar.sessionGrouping.showMore` 的文案模式）。
+- **验收**：vitest 三例——「6 条 → 显示 5 + 其余 1」「空白会话不计入且始终可见」「展开不写入存储」。
+
+#### E2 🟠 添加目录：应用内目录浏览选择器（P1，需后端新端点）
+
+- **参考**：dsh 添加目录只有一条路径——从菜单项 `::add-workspace` 进入 `WorkspacePicker.tsx` 的
+  `useDirectoryFlow`，最终由独立包 `ui-directory-picker-browse` 渲染浏览选择器；
+  选择结果天然是**真实存在的绝对路径**，从根上消除手输歧义。
+- **现状**：`workspace-directory-add-dialog.tsx` 仅支持手输路径，错误路径只能靠后置校验纠正；
+  §8 已记录的 Windows `C:foo` / `\foo`「驱动器相对」写法无法被 `filepath.IsAbs` 识别，
+  手输路线下只能报错，无法自愈。
+- **建议**：对话框增加「浏览…」入口（面包屑 + 目录列表 + 上一级 / 刷新 / 选中即填），
+  手输保留为「手动输入」折叠区（兼容既有习惯、脚本化输入与 no-home 环境）。
+  **后端需新增目录列举端点**：现有 `/api/runtime/fs/*` 只有 `read-file` / `write-file` / `append-file`
+  （`backend/internal/api/skills/handler.go` L701–L703），没有 list。
+- **安全（必须与 §6 同步）**：该端点把 §6 第 7 条的「路径存在性探测面」升级为「目录内容枚举面」，
+  需显式设计边界：只返回目录项（不回传文件名之外的内容元信息）、默认过滤隐藏项、
+  符号链接不跟随或跟随但不得逃出所选根、沿用与目录 API 一致的 5s 超时/错误语义；
+  落地时在 §6 第 7 条后追加一条已知项并同步 §10-F7。
+- **落点**：`backend/internal/api/skills/handler.go` + 新 handler 文件（含 go test）、
+  `frontend/src/api/runtime/workspace-directories.ts`（或复用 fs 客户端封装）、
+  `workspace-directory-add-dialog.tsx`、i18n。
+- **验收**：后端——不存在路径 400/404、指向文件而非目录、隐藏项过滤、超时 503；
+  前端——面包屑上/下级导航、选中回填后原校验链路不变（仍走 `POST /workspace-directories` 的 `ValidatePath`）。
+
+#### E3 🟡 目录行动作收敛：「+」常驻 + 其余进「…」菜单（P2，纯前端）
+
+- **参考**：`rows/Rows.tsx` 目录行常驻「+」（在该工作区新建会话），重命名/删除进「…」菜单；
+  右侧信息位 hover 时由相对时间**交换**为「…」，不额外占位、不引发布局跳动。
+- **现状**：`directories-section.tsx` L210 起 hover 同时浮现 3 个图标（新建会话、重命名、删除），
+  点击目标小、删除与重命名相邻易误触（删除虽有 §4.5.4 确认弹窗兜底）。
+- **建议**：目录行 = 「+」常驻 + hover 显示「…」（重命名 / 删除，删除保持危险色与二次确认）；
+  会话行已有「…」菜单（`session-item.tsx` L227），对齐其 hover 交换语义即可，无需重构。
+- **落点**：`directories-section.tsx`、`session-item.tsx`（仅 hover 语义对齐）、
+  复用 `session-row-actions.ts` 的菜单原语，i18n 新增菜单项文案键。
+- **验收**：Tab 可聚焦「…」→ ArrowDown 选择 → Esc 关闭并归还焦点；删除仍需二次确认；
+  hover 交换不改变行高（快照/计算样式断言任选其一）。
+
+#### E4 🟡 目录行 HoverCard：完整路径 + 复制 + 缺失提示（P2，纯前端）
+
+- **参考**：`rows/Rows.tsx` 的 `WorkspaceHoverContent` 展示完整路径，`abbreviateHomePath` 做 `~` 缩写，
+  带复制按钮；同一卡片复用于「目录已不存在」的状态提示。
+- **现状**：无 HoverCard；目录名被截断后（同名尾目录场景）无法确认指向哪个路径。
+- **建议**：hover 约 500ms 显示卡片：`~` 缩写路径（可展开全路径）、复制按钮（复制后就地反馈）、
+  `exists=false` 时提示「目录不存在」并内联给出移除入口（与既有 `sidebar.directories.existsWarning` 联动）。
+- **落点**：新组件 `frontend/src/components/workspace/workspace-sidebar/workspace-directory-hover-card.tsx`
+  + `directories-section.tsx`；i18n 增加 `pathLabel` / `pathCopied` / `expandFullPath` 等键。
+- **验收**：键盘 focus 同样触发；`prefers-reduced-motion` 下无延迟动画；超长路径不撑破侧栏
+  （`max-w` + 折行）；复制走 `navigator.clipboard` 失败时降级为可选中文本。
+
+#### E5 🟡 视图选项统一持久化：补齐 `groupBy`（P2，改动存储）
+
+- **参考**：`stores.ts` 把 `{ groupBy, orderBy }` 存进**单一版本化键**（`dsh.workspace.view.v5`），
+  文档内 `version` 不匹配即整体丢弃回默认，并提供账户维度的 key 清理；
+  `tree.ts` 用纯函数完成"构建树 / 拉平"，UI 只做渲染。
+- **现状**：orderBy 已完整落地（`session-order-control.tsx`：最近更新 / 手动 + 拖拽重排，
+  `session-order-store.ts` 有 `SESSION_ORDER_STORAGE_VERSION = 1` 与按账户分桶）；
+  groupBy 未持久化（会话分组的展开/折叠只存内存，符合预期），
+  但「按工作区 / 单列表」这类**视图模式**尚无存储位。
+- **建议**：把视图模式并入 `session-order-store` 的同一份版本化文档（升到 v2，旧 v1 文档安全回退默认），
+  沿用其账户隔离、解析失败回退与纯函数测试范式；不新增第二套存储键。
+- **落点**：`frontend/src/lib/workspace/session-order-store.ts`（v2 + 迁移回退）、
+  `session-grouping-control.tsx`、`hooks/workspace/use-session-order.ts`。
+- **验收**：旧 v1 文档在 v2 下不抛错且取默认值；账户 A/B 互不串味（沿用现有测试模式新增用例）；
+  存储写入失败（隐私模式）不阻塞渲染。
+
+#### E6 🟡 搜索健壮性补齐：防抖 + 降级文案 + 命中定位（P2，纯前端）
+
+- **参考**：`WorkspaceBrowser.tsx` 用 `SEARCH_DEBOUNCE_MS = 250` 防抖；结果带 `hasMore` 分页；
+  宿主检索不可用时给出明确降级提示，而不是渲染空列表。
+- **现状**：`use-session-search.ts` 已有 `AbortController` 与请求序号保护（旧请求不覆盖新结果，
+  取消不落错误态），但**没有防抖**；`session-search-dialog.tsx` 未区分"无匹配"与"检索不可用"，
+  也没有"命中后展开所在目录组并滚动定位"。
+- **建议**：输入 250ms 防抖（防抖窗口内新输入直接 abort 在途请求）；空结果区分两态并给重试按钮；
+  `hasMore=true` 时尾部「加载更多」；选中命中项后展开其所属目录组（与 E1 联动）并滚动到可见区。
+- **落点**：`hooks/workspace/use-session-search.ts`、`components/workspace/session-search-dialog.tsx`、
+  `i18n/resources/{zh-CN,en-US}/workspace/panels-session-search.ts`。
+- **验收**：fake timers 下连续输入只发一次请求；失败态与空态文案不同（快照断言）；
+  命中后目标行进入可视区；abort 不产生未处理 rejection。
+
+#### E7 🟡 已完成未读提醒（unseen）（P2，纯前端派生状态）
+
+- **参考**：`rows/Rows.tsx` 对"本轮已跑完但用户尚未查看"的会话打点提示；
+  子代理活动沿 `subagent-lineage.ts` 冒泡，父行同步可见。
+- **现状**：`session-row-status.ts` 已实现「待审批 / 待回答 / 计划评审 > 运行中 > 子代理运行中」
+  的优先级（L84–L96 与 L149–L160），**没有**"已完成未读"；`lib/workspace/session-lineage.ts` 已存在，
+  可复用于父行聚合。
+- **建议**：未读判据放在前端派生层：会话切走时处于 running → 切回前收到完成事件即标记 unseen，
+  点击/切回后清除；父会话按 lineage 汇总子代理完成；渲染顺序让 unseen 弱于 pending、强于纯 running。
+  （dsh 的分组头聚合状态是其已知局限，我们不必照抄其取舍——分组头可只做计数不做状态汇总。）
+- **落点**：`session-row-status.ts`（新增 `completedUnseen` 分支）、`session-row-view-model.ts`、
+  `hooks/workspace/use-session-runtime-state.ts`。
+- **验收**：单测覆盖「未读 → 点击清除」「子代理完成冒泡到父行」「unseen 不覆盖 pending 优先级」。
+
+#### E8 🟢 行级可访问性与状态文案（P3，纯前端）
+
+- **参考**：`rows/Rows.tsx` 用 `role="treeitem"` / `aria-expanded` 表达分组层级，
+  状态图标配 visually-hidden 文本。
+- **现状**：i18n 键对齐已有**编译期**保障（`i18n/resources/shape.ts` 把 zh-CN 键树投影为宽字符串形状，
+  en-US 用 `satisfies DeepStringShape` 对齐），无需照搬 dsh 的联合类型方案；
+  但侧栏目录行/分组行缺少 `aria-expanded` 与状态朗读文本（`session-agents-tree.tsx` 已有同类实践可参考）。
+- **建议**：目录行与分组行补 `aria-expanded`；状态图标补 visually-hidden 文本（运行中 / 待处理 / 未读）；
+  「…」菜单补 `aria-haspopup="menu"` 与 `aria-expanded`。
+- **落点**：`directories-section.tsx`、`session-row.tsx`、`session-item.tsx`、
+  `i18n/resources/{zh-CN,en-US}/workspace/base.ts`（新增 a11y 文案键）。
+- **验收**：可访问性树中分组行带展开状态；状态语义不只由图标形状承载（读屏可辨）。
+
+#### E9 🟢 重命名「未修改提交」语义（P3，语义 + 测试）
+
+- **参考**：`rows/Rows.tsx` 的 `useRenameSession` 明确约定：**非空但未修改**的提交同样发出请求，
+  用于把自动标题钉成 manual；只有空串才是取消。
+- **现状**：§4.7 已并入该条正文（本节不重复描述），但尚未列入测试清单。
+- **落点/验收**：`hooks/workspace/use-workspace-session-actions.ts` 及对应测试；
+  断言「输入未改 → 仍发 PATCH 且 `titleSource` 变 manual」「输入清空 → 不发请求」两例。
+
+### 14.2 明确不照搬（避免二期评审重复讨论）
+
+1. **宿主侧 Workspace 实体 + `sessionIds` 成员表**：dsh 的 workspace 是宿主一等实体、成员关系显式存储；
+   本方案已定型「`sessionmeta.WorkspacePath` 单源 + 注册表与派生分组双轨合并」（§3.2），
+   照搬会引入双写与迁移，收益不足。
+2. **会话重命名改对话框**：dsh 用对话框承载重命名；本方案 §4.7 的行内编辑更贴合桌面习惯，保留。
+3. **归档语义**：dsh 的归档直接影响默认可见性与计数；本仓库无归档概念，属产品决策，不在本方案引入。
+4. **OS 原生目录选择器**：dsh 通过 slot 组合选择器后端；我们面对的是 runtime-server 主机文件系统，
+   只能走服务端列举（E2），不引入原生对话框依赖。
+
+### 14.3 排期建议（与 §10-F6 合并为「目录管理二期」）
+
+| 批次 | 内容 | 依赖 | 说明 |
+| --- | --- | --- | --- |
+| 第一批 | E1、E3、E4、E8 | 无 | 纯前端，可与 §10-F6 第 3 项（会话删除入口）一起做一个迭代 |
+| 第二批 | E6、E7、E9 | 无 | 状态/搜索类，需要测试补齐，可与第一批并行 |
+| 第三批 | E2 | 后端新端点 + §6 安全条目 | 需先定枚举端点边界（隐藏项/符号链接/超时），再动前端 |
+| 第四批 | E5 | 存储 v2 + 迁移回退 | 改动面小但影响既有偏好，单独提交便于回滚 |
+
+- 每项均为**增量且可独立回滚**：不触碰 §11–§13 已交付的 CWD 接线、绑定防漂移与会话根解析语义。
+- 若二期立项，建议把本节提升为独立文档，本文件保留 14.0 对照表作为索引。
+
+### 14.4 与在飞方案的协调（`workspace-sidebar-directory-session-merge-plan.md`）
+
+该合并方案（2026-09-15，**已落地**，纯前端）与本节部分条目同址；下表据此更新处置口径，
+避免按已删除的 `sessions-section.tsx` 排期：
+
+| 本文件条目 | 与合并方案的关系 | 建议处置 |
+| --- | --- | --- |
+| E1 折叠阈值 | **重叠**：其 §3.5-A / Phase 2 已承诺同一行为，并额外补了「被选中的会话若被上限隐藏则自动展开该组」 | 以合并方案为准交付；本文件只保留「空白会话不占名额」的补充约束与验收口径 |
+| E2 目录选择器 | **互补**：需后端新端点，与该方案「纯前端、后端零改动」范围不冲突 | 独立立项；先定枚举端点边界（§14-E2 安全条目）再动前端 |
+| E3 目录行动作收敛 | **互补且同址**：合并方案已把组头抽为 `directory-group-header.tsx`（动作区由 `directory-group-actions.tsx` 承载），当前仍是 hover 三图标 | 直接在 `directory-group-header.tsx` / `directory-group-actions.tsx` 上做（`directories-section.tsx` 只负责接线） |
+| E4 HoverCard | **互补且受益**：合并后的组头具备「标签 / 计数 / 告警 / 落点 / 动作槽」结构，挂卡片更自然 | 建议排在合并方案 Phase 2 之后 |
+| E5 groupBy 持久化 | **独立**：合并方案只做工具条整体迁入，不触碰存储 | 可并行；落点：合并后的 `session-browser-toolbar.tsx`（`sessions-section.tsx` 已删除） |
+| E6 搜索健壮性 | **独立**：搜索弹窗不在合并范围内 | 可并行 |
+| E7 unseen 提醒 | **互补且受益**：合并方案统一为单一 `session-row.tsx`，状态语义只需实现一处 | 建议排在合并方案 Phase 2 之后，直接落在统一行组件 |
+| E8 行级 a11y | 同 E3/E7，落点随新组件（`directory-group-header.tsx` / `session-row.tsx`） | 与 E3 同批 |
+| E9 重命名语义 | 合并方案 §3.5-E 会删除 `origin` 双入口机制，语义不变 | 与 E9 的测试用例一起补即可 |
+
+- **排序结论**：合并方案 Phase 0–2（消除「同一会话在侧栏出现两行」）已落地，本节 UI 类增强
+  （E1/E3/E4/E7/E8）可直接按合并后结构排期；E2/E5/E6/E9 与之并行不冲突。
+- **文档维护约定**：合并方案 Phase 4 已回填本文件与优化台账（见 §0 变更记录）。本节作为「参考实现借鉴」
+  的唯一入口，新增借鉴项一律记在此处，避免三份文档各自立排期。
