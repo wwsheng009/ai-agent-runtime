@@ -34,6 +34,8 @@ const loadWorkspacePage: LazySurfaceLoader = () =>
   }));
 
 const defaultWorkspaceRoute = "/workspace/chats/new";
+// 根路由已改为直达默认工作台，原根路由页面（Landing）迁移到 /about。
+const aboutRoute = "/about";
 
 export default function App() {
   return (
@@ -42,6 +44,10 @@ export default function App() {
         <Routes>
           <Route
             path="/"
+            element={<Navigate to={defaultWorkspaceRoute} replace />}
+          />
+          <Route
+            path={aboutRoute}
             element={
               <RetryableLazyRoute
                 fallback={<AppRouteFallback />}
@@ -146,7 +152,10 @@ export default function App() {
               />
             }
           />
-          <Route path="*" element={<Navigate to="/" replace />} />
+          <Route
+            path="*"
+            element={<Navigate to={defaultWorkspaceRoute} replace />}
+          />
         </Routes>
       </RouteErrorBoundary>
       <StartupReadySignal />
