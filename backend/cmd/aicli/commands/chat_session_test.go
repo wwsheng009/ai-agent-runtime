@@ -388,6 +388,39 @@ func TestLoadRequestedRuntimeSessionReturnsLatestMeaningfulSessionForResume(t *t
 	}
 }
 
+// 回归：web/server 身份平面创建的会话默认归属 "anonymous"，本地 CLI 解析出的
+// 身份是 OS 用户；按显式 ID 续接时不允许再用归属差异拒绝加载。
+func TestLoadRequestedRuntimeSessionByIDIgnoresForeignOwner(t *testing.T) {
+	storage, err := runtimechat.NewFileStorage(t.TempDir())
+	if err != nil {
+		t.Fatalf("new file storage: %v", err)
+	}
+	manager := runtimechat.NewSessionManager(storage, runtimechat.DefaultSessionManagerConfig())
+	defer manager.Stop()
+	ctx := context.Background()
+
+	foreign, err := manager.Create(ctx, "anonymous")
+	if err != nil {
+		t.Fatalf("create anonymous session: %v", err)
+	}
+	foreign.ReplaceHistory([]runtimetypes.Message{{
+		Role:     "user",
+		Content:  "cross-plane resume",
+		Metadata: runtimetypes.NewMetadata(),
+	}})
+	if err := manager.Update(ctx, foreign); err != nil {
+		t.Fatalf("update foreign session: %v", err)
+	}
+
+	loaded, err := loadRequestedRuntimeSession(ctx, manager, `thinkbook14\wangweisheng`, foreign.ID, true)
+	if err != nil {
+		t.Fatalf("expected cross-owner session to load by explicit id, got %v", err)
+	}
+	if loaded == nil || loaded.ID != foreign.ID {
+		t.Fatalf("expected session %s, got %#v", foreign.ID, loaded)
+	}
+}
+
 func TestLoadLatestResumableRuntimeSessionUsesBoundedSQLitePreviews(t *testing.T) {
 	manager, userID, _, err := newChatSessionManager(t.TempDir())
 	if err != nil {

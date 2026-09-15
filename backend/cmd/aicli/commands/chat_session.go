@@ -136,9 +136,11 @@ func loadRequestedRuntimeSessionWithFilter(ctx context.Context, manager *runtime
 		if err != nil {
 			return nil, err
 		}
-		if session.UserID != userID {
-			return nil, fmt.Errorf("session %s does not belong to user %s", trimmedID, userID)
-		}
+		// 显式会话 ID 加载不做用户归属校验：会话库由多个身份平面共享
+		// （web/server 请求默认落到 "anonymous"，本地 CLI 解析 OS 用户），
+		// 归属差异不代表越权访问。拒绝加载会让跨平面创建的会话无法续接，
+		// 因此按显式 ID 加载时直接继续（不新增直连终端写入，见
+		// TestChatInteractiveDirectWriterInventory 迁移门禁）。
 		return session, nil
 	}
 
@@ -352,9 +354,8 @@ func loadRuntimeConversation(session *ChatSession, sessionID string) error {
 	if err != nil {
 		return err
 	}
-	if runtimeSession.UserID != session.SessionUserID {
-		return fmt.Errorf("会话 %s 不属于当前用户", sessionID)
-	}
+	// 与 loadRequestedRuntimeSessionWithFilter 保持一致：/resume、/load 按显式
+	// ID 切换时不校验用户归属，否则 web/server 平面创建的会话在 CLI 无法续接。
 	if err := applyRuntimeSessionExecutionContext(session, runtimeSession); err != nil {
 		return err
 	}

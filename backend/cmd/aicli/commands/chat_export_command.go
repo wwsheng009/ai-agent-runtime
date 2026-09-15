@@ -776,9 +776,8 @@ func resolveChatExportRuntimeSession(session *ChatSession, opts chatExportOption
 		if err != nil {
 			return nil, "", err
 		}
-		if runtimeSession.UserID != session.SessionUserID {
-			return nil, "", fmt.Errorf("会话 %s 不属于当前用户", target)
-		}
+		// 与 CLI 会话加载一致：按显式 ID 导出不校验用户归属，跨身份平面
+		// （web/server 的 "anonymous" 与本地 OS 用户）创建的会话同样可导出。
 		return runtimeSession.Clone(), "session", nil
 	}
 }
