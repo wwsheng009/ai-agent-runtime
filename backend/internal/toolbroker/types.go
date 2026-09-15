@@ -121,21 +121,26 @@ type WaitTeamEventResult struct {
 
 // WaitTeamResult returns terminal state plus recent durable lifecycle events.
 type WaitTeamResult struct {
-	TeamID             string                 `json:"team_id"`
-	Status             string                 `json:"status"`
-	Terminal           bool                   `json:"terminal"`
-	TimedOut           bool                   `json:"timed_out"`
-	WaitTimeoutMs      int                    `json:"wait_timeout_ms,omitempty"`
-	ExecutionContinues bool                   `json:"execution_continues,omitempty"`
-	NextAction         string                 `json:"next_action,omitempty"`
-	SummaryReady       bool                   `json:"summary_ready"`
-	Summary            string                 `json:"summary,omitempty"`
-	SummarySource      string                 `json:"summary_source,omitempty"`
-	SummaryPayload     map[string]interface{} `json:"summary_payload,omitempty"`
-	SummaryEventSeq    int64                  `json:"summary_event_seq,omitempty"`
-	Events             []WaitTeamEventResult  `json:"events,omitempty"`
-	EventCount         int                    `json:"event_count"`
-	LatestSeq          int64                  `json:"latest_seq,omitempty"`
+	TeamID        string `json:"team_id"`
+	Status        string `json:"status"`
+	Terminal      bool   `json:"terminal"`
+	TimedOut      bool   `json:"timed_out"`
+	WaitTimeoutMs int    `json:"wait_timeout_ms,omitempty"`
+	// WaitTimeoutRequestedMs / WaitTimeoutClamped echo how the requested team
+	// observation window was normalized against agents.minWaitTimeoutMs /
+	// agents.maxWaitTimeoutMs so a clamped wait is never silent.
+	WaitTimeoutRequestedMs int                    `json:"wait_timeout_requested_ms,omitempty"`
+	WaitTimeoutClamped     bool                   `json:"wait_timeout_clamped,omitempty"`
+	ExecutionContinues     bool                   `json:"execution_continues,omitempty"`
+	NextAction             string                 `json:"next_action,omitempty"`
+	SummaryReady           bool                   `json:"summary_ready"`
+	Summary                string                 `json:"summary,omitempty"`
+	SummarySource          string                 `json:"summary_source,omitempty"`
+	SummaryPayload         map[string]interface{} `json:"summary_payload,omitempty"`
+	SummaryEventSeq        int64                  `json:"summary_event_seq,omitempty"`
+	Events                 []WaitTeamEventResult  `json:"events,omitempty"`
+	EventCount             int                    `json:"event_count"`
+	LatestSeq              int64                  `json:"latest_seq,omitempty"`
 }
 
 // TeamMailboxDispatcher delivers mailbox events to active team sessions.
@@ -580,6 +585,24 @@ func FinalizeAgentEventsResult(result *AgentEventsResult) *AgentEventsResult {
 // is the window the host actually used, and clamped reports whether the request
 // was pinned to agents.minWaitTimeoutMs / agents.maxWaitTimeoutMs.
 func ApplyAgentWaitTimeout(result *AgentWaitResult, requestedMs, effectiveMs int, clamped bool) *AgentWaitResult {
+	if result == nil {
+		return nil
+	}
+	result.WaitTimeoutRequestedMs = requestedMs
+	if effectiveMs > 0 {
+		result.WaitTimeoutMs = effectiveMs
+	}
+	result.WaitTimeoutClamped = clamped
+	return result
+}
+
+// ApplyWaitTeamTimeout records the normalized observation window on a wait_team
+// result. wait_team shares the agents.minWaitTimeoutMs / agents.maxWaitTimeoutMs
+// policy with wait_agent, so a team wait must echo the same request/effective/
+// clamped triple: requestedMs is echoed verbatim (0 means "host default"),
+// effectiveMs is the window the host actually used, and clamped reports whether
+// the request was pinned to a bound.
+func ApplyWaitTeamTimeout(result *WaitTeamResult, requestedMs, effectiveMs int, clamped bool) *WaitTeamResult {
 	if result == nil {
 		return nil
 	}

@@ -4542,3 +4542,47 @@ func TestRunLocalSubagentStartupRecoveryCancellationSkipsDelayedPass(t *testing.
 	default:
 	}
 }
+
+// wait_team 的观察窗口由 broker 自己解析，所以本地宿主必须把同一份 agents 策略交给
+// broker：否则 wait_agent/read_agent_events 受 agents.maxWaitTimeoutMs 约束，而
+// wait_team 会悄悄回落到共享默认值（P2-11 目标：任何路径的等待时长都落在
+// [minWaitTimeoutMs, maxWaitTimeoutMs]）。
+func TestBuildLocalChatAgentStampsSharedWaitTimeoutPolicyOnBroker(t *testing.T) {
+	runtimeConfig := runtimecfg.DefaultRuntimeConfig()
+	runtimeConfig.Agents.DefaultWaitTimeoutMs = 45000
+	runtimeConfig.Agents.MinWaitTimeoutMs = 20000
+	runtimeConfig.Agents.MaxWaitTimeoutMs = 60000
+	runtimeConfig.Agents.WaitTimeoutMode = agentcontrol.WaitTimeoutModeError
+
+	session := &ChatSession{}
+	host := &localChatRuntimeHost{
+		Bootstrap:     &runtimebootstrap.Manager{},
+		RuntimeConfig: runtimeConfig,
+	}
+	host.ActorRegistry = &localActorRegistry{Host: host}
+
+	apiAgent := buildLocalChatAgent(session, host, runtimeConfig, t.TempDir(), "", "")
+	if apiAgent == nil {
+		t.Fatal("expected agent")
+	}
+	broker := apiAgent.GetToolBroker()
+	if broker == nil {
+		t.Fatal("expected tool broker")
+	}
+	if broker.WaitTimeoutPolicy == nil {
+		t.Fatal("local host must let the broker resolve wait_team windows from the live agents policy")
+	}
+	policy := broker.WaitTimeoutPolicy().Normalize()
+	if policy.DefaultMs != 45000 || policy.MinMs != 20000 || policy.MaxMs != 60000 || policy.Mode != agentcontrol.WaitTimeoutModeError {
+		t.Fatalf("unexpected broker wait policy: %#v", policy)
+	}
+
+	// provider 必须每次读取宿主配置，而不是在装配时缓存：配置重载后下一次
+	// wait_team 必须跟着变。
+	host.RuntimeConfig = nil
+	host.Bootstrap = nil
+	fallback := broker.WaitTimeoutPolicy().Normalize()
+	if fallback.DefaultMs != agentcontrol.DefaultWaitTimeoutMs || fallback.Mode != agentcontrol.WaitTimeoutModeClamp {
+		t.Fatalf("expected the provider to re-read host config, got %#v", fallback)
+	}
+}

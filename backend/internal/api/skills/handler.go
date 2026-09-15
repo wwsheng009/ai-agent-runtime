@@ -4608,6 +4608,16 @@ func (h *Handler) applyAgentRuntimeServices(a *agent.Agent, runtimeConfig *runti
 	if a == nil {
 		return
 	}
+	// The broker resolves wait_team windows on its own, so it has to read the
+	// same live agents policy as this host's wait_agent / read_agent_events
+	// paths. Stamped on the way out so every branch below (including the
+	// config==nil early return) leaves the broker on the operator policy instead
+	// of the shared fallback.
+	defer func() {
+		if broker := a.GetToolBroker(); broker != nil {
+			broker.WaitTimeoutPolicy = h.brokerWaitTimeoutPolicy
+		}
+	}()
 	config := runtimeConfig
 	if config == nil {
 		config = h.runtimeConfig

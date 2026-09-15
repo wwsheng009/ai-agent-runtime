@@ -255,6 +255,21 @@ func (h *Handler) supervisionSubjectPresence() supervision.SubjectPresenceFunc {
 	}
 }
 
+// supervisionHostCapabilities declares which notification action channels this
+// HTTP host can actually execute, so digest/snapshot only announce reachable
+// actions (P2-12 方案 1). The action service is shared with the runtime control
+// plane, so ExecutorReady reports whether mutation actions (cancel/close) have a
+// real runtime executor; without one those rows could only be recorded.
+func (h *Handler) supervisionHostCapabilities() *supervision.HostCapabilities {
+	if h == nil || h.getSupervisionStore() == nil {
+		return nil
+	}
+	caps := supervision.FullHostCapabilities()
+	service := h.getSupervisionActionService()
+	caps.ControlActions = service != nil && service.ExecutorReady()
+	return &caps
+}
+
 // injectSupervisionPreflight builds the unresolved lifecycle digest immediately
 // before a parent/lead turn starts and prepends it to that turn's prompt. A
 // notification becoming visible in the prompt is marked delivered+seen, but is
@@ -292,6 +307,7 @@ func (h *Handler) injectSupervisionPreflight(ctx context.Context, sessionID, pro
 		Limit:                 20,
 		IncludeResolvedSince:  true,
 		SubjectPresence:       h.supervisionSubjectPresence(),
+		HostCapabilities:      h.supervisionHostCapabilities(),
 	})
 	if err != nil {
 		return "", fmt.Errorf("build supervision preflight digest: %w", err)
@@ -347,6 +363,7 @@ func (h *Handler) GetSupervisionDigest(w http.ResponseWriter, r *http.Request) {
 		Limit:                 intQuery(q.Get("limit")),
 		IncludeResolvedSince:  boolQuery(q.Get("include_resolved_since")),
 		SubjectPresence:       h.supervisionSubjectPresence(),
+		HostCapabilities:      h.supervisionHostCapabilities(),
 	})
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
@@ -379,11 +396,12 @@ func (h *Handler) GetSupervisionSnapshot(w http.ResponseWriter, r *http.Request)
 			RootTeamID:    strings.TrimSpace(q.Get("root_team_id")),
 			Mode:          strings.TrimSpace(q.Get("mode")),
 		},
-		AfterSeq:        int64Query(q.Get("after_seq")),
-		Health:          strings.TrimSpace(q.Get("health")),
-		IncludeTerminal: boolQuery(q.Get("include_terminal")),
-		Limit:           intQuery(q.Get("limit")),
-		Provider:        h.getSupervisionDescendantProvider(),
+		AfterSeq:         int64Query(q.Get("after_seq")),
+		Health:           strings.TrimSpace(q.Get("health")),
+		IncludeTerminal:  boolQuery(q.Get("include_terminal")),
+		Limit:            intQuery(q.Get("limit")),
+		Provider:         h.getSupervisionDescendantProvider(),
+		HostCapabilities: h.supervisionHostCapabilities(),
 	})
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
@@ -594,7 +612,11 @@ func (h *Handler) ScheduleSupervisionWake(w http.ResponseWriter, r *http.Request
 	}
 	scheduler := h.getSupervisionWakeScheduler()
 	if scheduler == nil {
-		scheduler = supervision.NewWakeScheduler(h.getSupervisionStore(), supervision.WakeSchedulerConfig{})
+		// Ad-hoc schedulers built for a single wake request must announce the
+		// same reachable actions as the registered control plane (P2-12 方案 1).
+		scheduler = supervision.NewWakeScheduler(h.getSupervisionStore(), supervision.WakeSchedulerConfig{
+			HostCapabilities: h.supervisionHostCapabilities,
+		})
 	}
 	result, err := scheduler.ScheduleWake(r.Context(), req)
 	if err != nil {

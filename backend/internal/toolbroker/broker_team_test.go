@@ -474,7 +474,15 @@ func TestBrokerExecuteWaitTeamTimeoutReportsExecutionContinues(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	broker := &Broker{TeamStore: store}
+	// This test is about the expired-window path, not about the shared bounds:
+	// pin a sub-second policy so the wait expires immediately. Bounds behavior
+	// itself is covered by broker_team_wait_policy_test.go.
+	broker := &Broker{
+		TeamStore: store,
+		WaitTimeoutPolicy: func() agentcontrol.WaitTimeoutPolicy {
+			return agentcontrol.WaitTimeoutPolicy{DefaultMs: 1, MinMs: 1, MaxMs: 1000}
+		},
+	}
 	raw, meta, err := broker.Execute(ctx, "lead-session", ToolWaitTeam, map[string]interface{}{
 		"team_id":    teamID,
 		"timeout_ms": 1,
@@ -485,6 +493,8 @@ func TestBrokerExecuteWaitTeamTimeoutReportsExecutionContinues(t *testing.T) {
 	assert.True(t, result.TimedOut)
 	assert.False(t, result.Terminal)
 	assert.Equal(t, 1, result.WaitTimeoutMs)
+	assert.Equal(t, 1, result.WaitTimeoutRequestedMs)
+	assert.False(t, result.WaitTimeoutClamped)
 	assert.True(t, result.ExecutionContinues)
 	assert.Contains(t, result.NextAction, "wait timeout only ended this observation")
 	assert.Equal(t, string(team.TeamStatusActive), result.Status)

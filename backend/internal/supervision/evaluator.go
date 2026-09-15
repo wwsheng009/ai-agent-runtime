@@ -23,6 +23,15 @@ type Evaluator struct{}
 //   - otherwise the subject kind decides between cancel/close and
 //     cancel_subtree.
 func (e Evaluator) EvaluateAllowedActions(n Notification) []string {
+	return e.evaluateAllowedActions(n)
+}
+
+// evaluateAllowedActions is the host-neutral computation shared by
+// EvaluateAllowedActions (enforcement and durable rows) and
+// EvaluateAllowedActionsForHost (capability-filtered announcements, see
+// capabilities.go). Keeping one implementation is what makes the announced set
+// and the enforced set the same policy, differing only by the capability input.
+func (e Evaluator) evaluateAllowedActions(n Notification) []string {
 	allowed := []string{string(ActionInspect)}
 	if n.DecisionState == DecisionAcknowledged || n.DecisionState == DecisionActioned {
 		return dedupeAllowed(allowed)

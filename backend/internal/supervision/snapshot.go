@@ -18,15 +18,15 @@ type Scope struct {
 // supervision package stays decoupled from agentcontrol/team by receiving
 // these states through a provider callback.
 type DescendantState struct {
-	Kind               SubjectKind
-	ID                 string
-	ParentPath         []string
-	ExecutionStatus    string
-	SupervisionState   SupervisionState
-	HeartbeatAgeMs     int64
-	ProgressAgeMs      int64
+	Kind                SubjectKind
+	ID                  string
+	ParentPath          []string
+	ExecutionStatus     string
+	SupervisionState    SupervisionState
+	HeartbeatAgeMs      int64
+	ProgressAgeMs       int64
 	ExecutionDeadlineAt *time.Time
-	Reason             string
+	Reason              string
 }
 
 // DescendantProvider supplies the current execution state of a scope's
@@ -38,13 +38,13 @@ type DescendantProvider interface {
 
 // Snapshot is the unified supervision read model (doc 6.2).
 type Snapshot struct {
-	Scope       Scope              `json:"scope"`
-	SnapshotSeq int64              `json:"snapshot_seq,omitempty"`
-	GeneratedAt time.Time          `json:"generated_at,omitempty"`
-	Summary     SnapshotSummary    `json:"summary"`
-	Descendants []SnapshotItem     `json:"descendants,omitempty"`
-	Truncated   bool               `json:"truncated,omitempty"`
-	NextSeq     int64              `json:"next_seq,omitempty"`
+	Scope       Scope           `json:"scope"`
+	SnapshotSeq int64           `json:"snapshot_seq,omitempty"`
+	GeneratedAt time.Time       `json:"generated_at,omitempty"`
+	Summary     SnapshotSummary `json:"summary"`
+	Descendants []SnapshotItem  `json:"descendants,omitempty"`
+	Truncated   bool            `json:"truncated,omitempty"`
+	NextSeq     int64           `json:"next_seq,omitempty"`
 }
 
 // SnapshotSummary is the rollup counters (doc 6.2 summary).
@@ -62,52 +62,59 @@ type SnapshotSummary struct {
 
 // SnapshotItem is one descendant row in the snapshot.
 type SnapshotItem struct {
-	Kind               SubjectKind        `json:"kind,omitempty"`
-	ID                 string             `json:"id,omitempty"`
-	ParentPath         []string           `json:"parent_path,omitempty"`
-	ExecutionStatus    string             `json:"execution_status,omitempty"`
-	SupervisionState   SupervisionState   `json:"supervision_state,omitempty"`
-	HeartbeatAgeMs     int64              `json:"heartbeat_age_ms,omitempty"`
-	ProgressAgeMs      int64              `json:"progress_age_ms,omitempty"`
-	ExecutionDeadlineAt *time.Time        `json:"execution_deadline_at,omitempty"`
+	Kind                SubjectKind      `json:"kind,omitempty"`
+	ID                  string           `json:"id,omitempty"`
+	ParentPath          []string         `json:"parent_path,omitempty"`
+	ExecutionStatus     string           `json:"execution_status,omitempty"`
+	SupervisionState    SupervisionState `json:"supervision_state,omitempty"`
+	HeartbeatAgeMs      int64            `json:"heartbeat_age_ms,omitempty"`
+	ProgressAgeMs       int64            `json:"progress_age_ms,omitempty"`
+	ExecutionDeadlineAt *time.Time       `json:"execution_deadline_at,omitempty"`
 	// Execution run supervision fields (P6-3): attached from the durable
 	// execution run record so operators see attempt, deadlines, heartbeat and
 	// progress timestamps in one view (doc 10 rule 3).
-	RunID              string     `json:"run_id,omitempty"`
-	RunStatus          string     `json:"run_status,omitempty"`
-	Attempt            int        `json:"attempt,omitempty"`
-	MaxAttempts        int        `json:"max_attempts,omitempty"`
-	RunOwnerID         string     `json:"run_owner_id,omitempty"`
-	ProgressDeadlineAt *time.Time `json:"progress_deadline_at,omitempty"`
-	ApprovalDeadlineAt *time.Time `json:"approval_deadline_at,omitempty"`
-	CancelDeadlineAt   *time.Time `json:"cancel_deadline_at,omitempty"`
-	LastHeartbeatAt    *time.Time `json:"last_heartbeat_at,omitempty"`
-	LastProgressAt     *time.Time `json:"last_progress_at,omitempty"`
-	Reason             string             `json:"reason,omitempty"`
+	RunID              string              `json:"run_id,omitempty"`
+	RunStatus          string              `json:"run_status,omitempty"`
+	Attempt            int                 `json:"attempt,omitempty"`
+	MaxAttempts        int                 `json:"max_attempts,omitempty"`
+	RunOwnerID         string              `json:"run_owner_id,omitempty"`
+	ProgressDeadlineAt *time.Time          `json:"progress_deadline_at,omitempty"`
+	ApprovalDeadlineAt *time.Time          `json:"approval_deadline_at,omitempty"`
+	CancelDeadlineAt   *time.Time          `json:"cancel_deadline_at,omitempty"`
+	LastHeartbeatAt    *time.Time          `json:"last_heartbeat_at,omitempty"`
+	LastProgressAt     *time.Time          `json:"last_progress_at,omitempty"`
+	Reason             string              `json:"reason,omitempty"`
 	AutoAction         *SnapshotAutoAction `json:"auto_action,omitempty"`
-	RecommendedAction  string             `json:"recommended_action,omitempty"`
-	AllowedActions     []string           `json:"allowed_actions,omitempty"`
-	ActionRequired     bool               `json:"action_required,omitempty"`
-	NotificationID     string             `json:"notification_id,omitempty"`
-	LastChangeSeq      int64              `json:"last_change_seq,omitempty"`
+	RecommendedAction  string              `json:"recommended_action,omitempty"`
+	AllowedActions     []string            `json:"allowed_actions,omitempty"`
+	// NextAction explains which remediation path was filtered out because this
+	// host has no entry point for it (empty when nothing was filtered).
+	NextAction     string `json:"next_action,omitempty"`
+	ActionRequired bool   `json:"action_required,omitempty"`
+	NotificationID string `json:"notification_id,omitempty"`
+	LastChangeSeq  int64  `json:"last_change_seq,omitempty"`
 }
 
 // SnapshotAutoAction reports the runtime action already in flight (doc 6.2
 // rule 6) so the parent does not duplicate cancel/retry.
 type SnapshotAutoAction struct {
-	Action   ActionKind `json:"action,omitempty"`
+	Action   ActionKind   `json:"action,omitempty"`
 	Status   ActionStatus `json:"status,omitempty"`
-	ActionID string     `json:"action_id,omitempty"`
+	ActionID string       `json:"action_id,omitempty"`
 }
 
 // SnapshotRequest configures a snapshot build.
 type SnapshotRequest struct {
-	Scope            Scope
-	AfterSeq         int64
-	Health           string // any | abnormal | action_required
-	IncludeTerminal  bool
-	Limit            int
-	Provider         DescendantProvider
+	Scope           Scope
+	AfterSeq        int64
+	Health          string // any | abnormal | action_required
+	IncludeTerminal bool
+	Limit           int
+	Provider        DescendantProvider
+	// HostCapabilities optionally narrows the announced action set to the
+	// channels this host actually wired (P2-12 方案 1). nil = undeclared: the
+	// host-neutral set is returned unchanged.
+	HostCapabilities *HostCapabilities
 }
 
 // BuildSnapshot assembles the unified snapshot from durable notifications,
@@ -133,10 +140,10 @@ func BuildSnapshot(ctx context.Context, store Store, req SnapshotRequest) (*Snap
 
 	// Load unresolved notifications for the scope.
 	notifications, err := store.ListNotifications(ctx, NotificationFilter{
-		RootScopeID:          rootScopeIDFor(req.Scope),
+		RootScopeID:           rootScopeIDFor(req.Scope),
 		TargetParentSessionID: req.Scope.RootSessionID,
-		TargetParentTeamID:   req.Scope.RootTeamID,
-		IncludeResolved:      req.IncludeTerminal,
+		TargetParentTeamID:    req.Scope.RootTeamID,
+		IncludeResolved:       req.IncludeTerminal,
 	})
 	if err != nil {
 		return nil, err
@@ -193,7 +200,7 @@ func BuildSnapshot(ctx context.Context, store Store, req SnapshotRequest) (*Snap
 		if hasNotification {
 			item.Reason = firstNonEmpty(d.Reason, n.Reason)
 			item.RecommendedAction = evaluator.EvaluateRecommendedAction(n)
-			item.AllowedActions = evaluator.EvaluateAllowedActions(n)
+			item.AllowedActions, item.NextAction = evaluator.EvaluateAllowedActionsForHost(n, req.HostCapabilities)
 			item.ActionRequired = n.ActionRequired()
 			item.NotificationID = n.NotificationID
 			item.LastChangeSeq = n.EventSeq
@@ -208,12 +215,12 @@ func BuildSnapshot(ctx context.Context, store Store, req SnapshotRequest) (*Snap
 				SubjectKind:      d.Kind,
 				SupervisionState: d.SupervisionState,
 			})
-			item.AllowedActions = evaluator.EvaluateAllowedActions(Notification{
+			item.AllowedActions, item.NextAction = evaluator.EvaluateAllowedActionsForHost(Notification{
 				SubjectKind:      d.Kind,
 				SupervisionState: d.SupervisionState,
 				DecisionState:    DecisionUnacknowledged,
 				ResolutionState:  ResolutionUnresolved,
-			})
+			}, req.HostCapabilities)
 		}
 		if action, ok := actionByTarget[key]; ok {
 			item.AutoAction = &SnapshotAutoAction{
@@ -222,14 +229,14 @@ func BuildSnapshot(ctx context.Context, store Store, req SnapshotRequest) (*Snap
 				ActionID: action.ActionID,
 			}
 			// Runtime already acting: never recommend a duplicate.
-			item.AllowedActions = evaluator.EvaluateAllowedActions(Notification{
-				SubjectKind:         d.Kind,
-				SupervisionState:    d.SupervisionState,
-				DecisionState:       DecisionUnacknowledged,
-				ResolutionState:     ResolutionUnresolved,
-				AutoActionID:        action.ActionID,
-				RecommendedAction:   string(action.Action),
-			})
+			item.AllowedActions, item.NextAction = evaluator.EvaluateAllowedActionsForHost(Notification{
+				SubjectKind:       d.Kind,
+				SupervisionState:  d.SupervisionState,
+				DecisionState:     DecisionUnacknowledged,
+				ResolutionState:   ResolutionUnresolved,
+				AutoActionID:      action.ActionID,
+				RecommendedAction: string(action.Action),
+			}, req.HostCapabilities)
 			item.RecommendedAction = "inspect_cancel_result"
 			item.ActionRequired = false
 		}
@@ -246,13 +253,15 @@ func BuildSnapshot(ctx context.Context, store Store, req SnapshotRequest) (*Snap
 		if _, ok := notificationBySubject[key]; !ok {
 			continue
 		}
+		allowedActions, capabilityHint := evaluator.EvaluateAllowedActionsForHost(n, req.HostCapabilities)
 		item := SnapshotItem{
 			Kind:              n.SubjectKind,
 			ID:                n.SubjectID,
 			SupervisionState:  n.SupervisionState,
 			Reason:            n.Reason,
 			RecommendedAction: evaluator.EvaluateRecommendedAction(n),
-			AllowedActions:    evaluator.EvaluateAllowedActions(n),
+			AllowedActions:    allowedActions,
+			NextAction:        capabilityHint,
 			ActionRequired:    n.ActionRequired(),
 			NotificationID:    n.NotificationID,
 			LastChangeSeq:     n.EventSeq,

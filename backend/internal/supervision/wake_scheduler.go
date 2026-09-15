@@ -92,6 +92,12 @@ type WakeSchedulerConfig struct {
 	// rate window when its wake was deferred by an exhausted class budget.
 	// 0 (the default) disables the self-check.
 	SelfCheckPerWindow int
+	// HostCapabilities optionally reports which action channels this process
+	// can actually execute, so the wake digest (which becomes a parent turn's
+	// prompt) only announces reachable actions (P2-12 方案 1). It is a function
+	// because executors may be wired after the scheduler is constructed; nil
+	// means undeclared and keeps the host-neutral action set.
+	HostCapabilities func() *HostCapabilities
 }
 
 // WakeScheduler subscribes the lifecycle inbox to the parent turn start
@@ -111,6 +117,10 @@ type WakeScheduler struct {
 	maxSelfCheck    int // 0 => self-check disabled
 	budgetMode      WakeBudgetMode
 	now             func() time.Time
+	// hostCapabilities resolves the announced-action capabilities lazily, so a
+	// control plane that wires its executor after construction still reports
+	// the truth (see WakeSchedulerConfig.HostCapabilities).
+	hostCapabilities func() *HostCapabilities
 }
 
 // NewWakeScheduler creates a wake scheduler over a durable store.
@@ -138,16 +148,27 @@ func NewWakeScheduler(store Store, config WakeSchedulerConfig) *WakeScheduler {
 		budgetMode = WakeBudgetModeMemory
 	}
 	return &WakeScheduler{
-		store:           store,
-		claims:          map[string][]time.Time{},
-		selfChecks:      map[string][]time.Time{},
-		rateWindow:      rateWindow,
-		maxAutoWake:     maxAutoWake,
-		maxApprovalWake: maxApprovalWake,
-		maxSelfCheck:    config.SelfCheckPerWindow,
-		budgetMode:      budgetMode,
-		now:             timeNow,
+		store:            store,
+		claims:           map[string][]time.Time{},
+		selfChecks:       map[string][]time.Time{},
+		rateWindow:       rateWindow,
+		maxAutoWake:      maxAutoWake,
+		maxApprovalWake:  maxApprovalWake,
+		maxSelfCheck:     config.SelfCheckPerWindow,
+		budgetMode:       budgetMode,
+		now:              timeNow,
+		hostCapabilities: config.HostCapabilities,
 	}
+}
+
+// hostCapabilitySnapshot evaluates the declared capabilities at digest build
+// time. A nil or unset resolver means undeclared, which keeps the host-neutral
+// announcement instead of guessing that a channel is missing.
+func (s *WakeScheduler) hostCapabilitySnapshot() *HostCapabilities {
+	if s == nil || s.hostCapabilities == nil {
+		return nil
+	}
+	return s.hostCapabilities()
 }
 
 // ScheduleWake persists a durable, deduplicated wake request. It is safe to
@@ -302,6 +323,7 @@ func (s *WakeScheduler) DrainRunnable(ctx context.Context, parentSessionID, pare
 		TargetParentTeamID:    parentTeamID,
 		AfterSeq:              afterSeq,
 		IncludeResolvedSince:  true,
+		HostCapabilities:      s.hostCapabilitySnapshot(),
 	})
 	if err != nil {
 		return claimed, nil, err

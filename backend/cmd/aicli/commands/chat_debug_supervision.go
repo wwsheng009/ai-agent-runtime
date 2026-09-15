@@ -29,6 +29,8 @@ func chatDebugSupervisionUsageText() string {
 		"    延后通知；未到期不再注入 preflight，到期自动恢复注入。",
 		"/debug supervision resolve <notification_id> --state <closed|recovered|failed> [--expected-version N]",
 		"    收敛通知的 resolution 状态；标的已消失的 critical 行可据此退出未决集合。",
+		"/debug supervision control <notification_id> --action <cancel|close|cancel_subtree|retry|reassign> --reason <text> [--cascade target|descendants] [--expected-version N]",
+		"    对通知标的执行 durable 控制动作（与模型侧 control_descendant、HTTP 宿主同一实现，动作全程落 action 审计行）。",
 		chatDebugSupervisorUsageText(),
 	}, "\n"), "\n")
 }
@@ -52,6 +54,8 @@ type chatDebugSupervisionRequest struct {
 	Reason          string
 	Until           string
 	State           string
+	Action          string
+	Cascade         string
 	TeamID          string
 	ExpectedVersion int64
 	HasVersion      bool
@@ -122,6 +126,22 @@ func parseChatDebugSupervisionRequest(argument string) (chatDebugSupervisionRequ
 			req.State = strings.ToLower(value)
 		case strings.HasPrefix(lower, "--state="):
 			req.State = strings.ToLower(strings.TrimSpace(token[len("--state="):]))
+		case lower == "--action":
+			value, err := takeValue()
+			if err != nil {
+				return req, err
+			}
+			req.Action = strings.ToLower(strings.TrimSpace(value))
+		case strings.HasPrefix(lower, "--action="):
+			req.Action = strings.ToLower(strings.TrimSpace(token[len("--action="):]))
+		case lower == "--cascade":
+			value, err := takeValue()
+			if err != nil {
+				return req, err
+			}
+			req.Cascade = strings.ToLower(strings.TrimSpace(value))
+		case strings.HasPrefix(lower, "--cascade="):
+			req.Cascade = strings.ToLower(strings.TrimSpace(token[len("--cascade="):]))
 		case lower == "--team":
 			value, err := takeValue()
 			if err != nil {
@@ -311,6 +331,8 @@ func handleChatDebugSupervisionCommand(session *ChatSession, argument string) (s
 		return runChatDebugSupervisionDefer(ctx, store, scopes, req)
 	case "resolve":
 		return runChatDebugSupervisionResolve(ctx, store, scopes, req)
+	case "control":
+		return runChatDebugSupervisionControl(ctx, session, scopes, req)
 	case "help", "--help", "-h":
 		return chatDebugSupervisionUsageText(), nil
 	default:
@@ -570,4 +592,106 @@ func chatDebugSupervisionMutationSummary(verb, notificationID, actionID string, 
 	}
 	summary += "；下一轮 preflight 将不再计入 critical_unresolved"
 	return summary
+}
+
+// chatDebugSupervisionControlActionNames lists the durable control actions the
+// local operator may issue. The set mirrors the HTTP host / model-facing
+// control_descendant surface; LocalControlService.Control re-validates the
+// action against the notification's server-computed allowed actions.
+func chatDebugSupervisionControlActionNames() []string {
+	return []string{
+		string(supervision.ActionCancel),
+		string(supervision.ActionClose),
+		string(supervision.ActionCancelSubtree),
+		string(supervision.ActionRetry),
+		string(supervision.ActionReassign),
+	}
+}
+
+func parseChatDebugSupervisionControlAction(value string) (supervision.ActionKind, error) {
+	action := supervision.ActionKind(strings.ToLower(strings.TrimSpace(value)))
+	names := chatDebugSupervisionControlActionNames()
+	for _, name := range names {
+		if string(action) == name {
+			return action, nil
+		}
+	}
+	return "", fmt.Errorf("control 需要 --action %s，收到 %q", strings.Join(names, "|"), value)
+}
+
+// parseChatDebugSupervisionCascade maps the operator-facing cascade word onto
+// the store's CascadeMode. "target" spells out the default (act on the subject
+// only) so an operator never has to guess what an omitted flag means.
+func parseChatDebugSupervisionCascade(value string) (supervision.CascadeMode, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "target", string(supervision.CascadeNone):
+		return supervision.CascadeNone, nil
+	case string(supervision.CascadeDescendants):
+		return supervision.CascadeDescendants, nil
+	default:
+		return "", fmt.Errorf("--cascade 需要 target|descendants，收到 %q", value)
+	}
+}
+
+// chatDebugSupervisionControlService resolves the same durable control plane
+// the model-facing tools use. A host that never wired an action service cannot
+// persist or execute a control action, so it fails with an actionable message
+// instead of reporting a half-run action.
+func chatDebugSupervisionControlService(session *ChatSession) (*supervision.LocalControlService, error) {
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.Supervision == nil || session.LocalRuntimeHost.Supervision.Store == nil {
+		return nil, fmt.Errorf("当前会话没有 supervision store：本地宿主未启用监督控制面")
+	}
+	plane := session.LocalRuntimeHost.Supervision
+	if plane.Actions == nil {
+		return nil, fmt.Errorf("本地宿主未接线 action service：control 无法执行（HTTP 宿主与模型侧 control_descendant 不受影响）")
+	}
+	return supervision.NewLocalControlService(plane.Store, plane.Actions), nil
+}
+
+// runChatDebugSupervisionControl is the operator half of P2-12: the model-facing
+// control_descendant tool and the HTTP host could already run cancel/close/…,
+// but an interactive CLI operator could only ack/defer/resolve, so a critical
+// row whose subject is a stuck child had no local convergence path unless the
+// model happened to call the tool itself.
+func runChatDebugSupervisionControl(ctx context.Context, session *ChatSession, scopes []string, req chatDebugSupervisionRequest) (string, error) {
+	action, err := parseChatDebugSupervisionControlAction(req.Action)
+	if err != nil {
+		return "", err
+	}
+	reason := strings.TrimSpace(req.Reason)
+	if reason == "" {
+		return "", fmt.Errorf("control 必须带 --reason <审计理由>：动作会持久化为 action 行，没有理由就无法审计")
+	}
+	cascade, err := parseChatDebugSupervisionCascade(req.Cascade)
+	if err != nil {
+		return "", err
+	}
+	service, err := chatDebugSupervisionControlService(session)
+	if err != nil {
+		return "", err
+	}
+	// 与模型侧一致：scope 归属由 control service 按 scopes 加载通知时校验，
+	// 随后走 request→accept→execute 的 durable 流程。
+	requestedBy := ""
+	if len(scopes) > 0 {
+		requestedBy = scopes[0]
+	}
+	record, execErr := service.Control(ctx, supervision.ControlRequest{
+		NotificationID:     strings.TrimSpace(req.NotificationID),
+		Scopes:             scopes,
+		RequestedByID:      requestedBy,
+		Action:             action,
+		Reason:             reason,
+		CascadeMode:        cascade,
+		ExpectedVersion:    req.ExpectedVersion,
+		HasExpectedVersion: req.HasVersion,
+	})
+	if execErr != nil {
+		if record.ActionID != "" {
+			return "", fmt.Errorf("control %s 未完成（action_id=%s status=%s）: %w", action, record.ActionID, record.Status, execErr)
+		}
+		return "", fmt.Errorf("control %s 未完成: %w", action, execErr)
+	}
+	return fmt.Sprintf("control %s notification=%s target=%s action_id=%s status=%s cascade=%s（动作已落审计行，可用 list 复核）",
+		action, strings.TrimSpace(req.NotificationID), record.TargetID, record.ActionID, record.Status, cascade), nil
 }

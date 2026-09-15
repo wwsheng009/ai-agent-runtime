@@ -624,6 +624,13 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 	}
 	result, err := c.snapshot(ctx, sessionID)
 	if err != nil {
+		if !queued {
+			// 没有排队任何 prompt，因此不存在会把这笔预约推到终态的 run：不回滚就等于
+			// 留下一个永久 active 的僵尸行，持续占用 agents.maxThreads（与 N1 同类）。
+			return nil, rollbackSpawnFailure(fmt.Errorf("snapshot child session: %w", err))
+		}
+		// 已有 prompt 在跑：此时删除子会话等于杀掉一个活着的 agent，只上报诊断原因，
+		// 让正常的完成回调（subscribeAgentCompletion）去收敛预约。
 		return nil, err
 	}
 	result.Created = true
@@ -2979,23 +2986,18 @@ func (c *sessionAgentController) observeQuotaChildren(ctx context.Context, recor
 }
 
 func (c *sessionAgentController) agentsConfig() runtimecfg.AgentsConfig {
-	defaults := runtimecfg.DefaultRuntimeConfig().Agents
 	if c == nil || c.handler == nil || c.handler.runtimeConfig == nil {
-		return defaults
+		return runtimecfg.NormalizeAgentsConfig(runtimecfg.AgentsConfig{})
 	}
-	cfg := c.handler.runtimeConfig.Agents
-	if cfg.MaxThreads == 0 && cfg.MaxDepth == 0 && cfg.DefaultWaitTimeoutMs == 0 &&
-		cfg.MinWaitTimeoutMs == 0 && cfg.MaxWaitTimeoutMs == 0 && strings.TrimSpace(cfg.WaitTimeoutMode) == "" &&
-		strings.TrimSpace(cfg.DefaultForkTurns) == "" && cfg.RegistryReconcileInterval == 0 &&
-		strings.TrimSpace(cfg.RegistryReconcileMode) == "" && cfg.RegistryTerminalRetention == 0 &&
-		cfg.ReclaimIdleMs == 0 {
-		return defaults
-	}
-	return cfg
+	// 单一「未设置即默认」解析点（runtimecfg.NormalizeAgentsConfig）：不要在这里重建
+	// 「整个结构体全零才回退」的字段清单——新增字段会漏改，而且部分写入的 `agents:`
+	// 配置块会绕过那份快照，把未设置字段交给各消费者各自解释。
+	return runtimecfg.NormalizeAgentsConfig(c.handler.runtimeConfig.Agents)
 }
 
 // waitTimeoutPolicy maps the agents config onto the shared wait-window bounds
-// resolver used by wait_agent and read_agent_events.
+// resolver used by every wait path: wait_agent and read_agent_events here, and
+// wait_team through brokerWaitTimeoutPolicy below.
 func (c *sessionAgentController) waitTimeoutPolicy() agentcontrol.WaitTimeoutPolicy {
 	cfg := c.agentsConfig()
 	return agentcontrol.WaitTimeoutPolicy{
@@ -3004,6 +3006,14 @@ func (c *sessionAgentController) waitTimeoutPolicy() agentcontrol.WaitTimeoutPol
 		MaxMs:     cfg.MaxWaitTimeoutMs,
 		Mode:      cfg.WaitTimeoutMode,
 	}
+}
+
+// brokerWaitTimeoutPolicy hands the same mapping to the tool broker, which
+// resolves the wait_team window on its own. Both consumers share this one
+// mapper so a config change can never move only part of the wait paths
+// (P2-11 目标：任何路径的等待时长都落在 [minWaitTimeoutMs, maxWaitTimeoutMs]).
+func (h *Handler) brokerWaitTimeoutPolicy() agentcontrol.WaitTimeoutPolicy {
+	return (&sessionAgentController{handler: h}).waitTimeoutPolicy()
 }
 
 func (c *sessionAgentController) countAgentTree(ctx context.Context, rootSessionID string) (int, error) {
@@ -3689,11 +3699,7 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		toolPolicy.SetCapabilityScope(runtimepolicy.ReadOnlyChildCapabilities())
 		apiAgent.SetToolExecutionPolicy(toolPolicy)
 	}
-	maxDepth := 0
-	if selectedConfig != nil {
-		maxDepth = selectedConfig.Agents.MaxDepth
-	}
-	applyAPIAgentChildDepthPolicy(apiAgent, childDepth, maxDepth)
+	applyAPIAgentChildDepthPolicy(apiAgent, childDepth, apiAgentDepthCeiling(selectedConfig))
 	h.applyAgentHooks(apiAgent, selectedConfig)
 	h.applyAgentRuntimeServices(apiAgent, selectedConfig)
 
@@ -3772,6 +3778,17 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 	// does not block other channels. The next run re-acquires via PrepareRun.
 	releaseLease()
 	return actor, nil
+}
+
+// apiAgentDepthCeiling resolves the effective child-depth ceiling for the config
+// that governs this session. 直接读 `Agents.MaxDepth` 会把「部分写入的 agents 块」
+// （例如只设了 maxThreads）里的 0 当成「无上限」，静默抬掉默认深度上限；归一化后
+// 0 只有一个含义——未设置 → 默认上限（见 runtimecfg.NormalizeAgentsConfig）。
+func apiAgentDepthCeiling(cfg *runtimecfg.RuntimeConfig) int {
+	if cfg == nil {
+		return runtimecfg.NormalizeAgentsConfig(runtimecfg.AgentsConfig{}).MaxDepth
+	}
+	return runtimecfg.NormalizeAgentsConfig(cfg.Agents).MaxDepth
 }
 
 func applyAPIAgentChildDepthPolicy(apiAgent *agent.Agent, depth, maxDepth int) {

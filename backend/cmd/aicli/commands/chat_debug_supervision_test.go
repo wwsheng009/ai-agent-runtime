@@ -228,3 +228,111 @@ func TestLocalSupervisionSubjectPresenceMarksMissingRunStale(t *testing.T) {
 	require.Contains(t, digest.Text, "- agent_run batch-missing: stale")
 	require.Contains(t, digest.Text, "batch-alive")
 }
+
+// P2-12 残留（N9 同族）：本地操作员入口此前只有 ack/defer/resolve，卡住的子会话
+// 只能靠模型自己去调 control_descendant。本组用例锁定 /debug supervision control
+// 与模型侧、HTTP 宿主共用同一条 durable 控制路径。
+func TestChatDebugSupervisionControlRunsDurableAction(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	executor := &recordingSupervisionExecutor{}
+	host.Supervision.SetActionExecutor(executor)
+	session := newChatDebugSupervisionSession(host, "parent-session")
+	notification := upsertChatDebugSupervisionNotification(t, host, "parent-session", "batch-debug-control-1", supervision.SeverityCritical, 1)
+
+	require.Contains(t, chatDebugSupervisionUsageText(), "supervision control")
+
+	// 省略 --cascade 等价于只作用于标的本身；只有 cancel_subtree/close/retry
+	// 这类动作才允许 descendants（由 ActionService 复核，见下一条用例）。
+	const reason = "stuck child never finishes"
+	text, err := handleChatDebugSupervisionCommand(session,
+		"supervision control "+notification.NotificationID+" --action cancel --reason \""+reason+"\"")
+	require.NoError(t, err)
+	require.Contains(t, text, "control cancel")
+	require.Contains(t, text, notification.NotificationID)
+	require.Contains(t, text, "action_id=")
+	require.Contains(t, text, "status=completed")
+	require.Contains(t, text, "cascade=none")
+	require.Len(t, executor.calls, 1)
+	require.Equal(t, supervision.ActionCancel, executor.calls[0].Action)
+	require.Equal(t, supervision.CascadeNone, executor.calls[0].CascadeMode)
+	require.Equal(t, reason, executor.calls[0].Reason)
+	require.Equal(t, "parent-session", executor.calls[0].RequestedByID)
+	require.Equal(t, notification.SubjectID, executor.calls[0].TargetID)
+
+	// descendants 级联对支持它的动作照常透传到 durable action 行。注意这里换一个
+	// 标的新建通知：control 走的是 CAS，动作会为同一标的写入解析通知并推进版本，
+	// 沿用旧行 id 再次控制会被正确拒绝（stale view），而不是静默重放。
+	cascadeTarget := upsertChatDebugSupervisionNotification(t, host, "parent-session", "batch-debug-control-1b", supervision.SeverityCritical, 2)
+	text, err = handleChatDebugSupervisionCommand(session,
+		"supervision control "+cascadeTarget.NotificationID+" --action close --reason \"close the stuck subtree\" --cascade descendants")
+	require.NoError(t, err)
+	require.Contains(t, text, "control close")
+	require.Contains(t, text, "cascade=descendants")
+	require.Len(t, executor.calls, 2)
+	require.Equal(t, supervision.ActionClose, executor.calls[1].Action)
+	require.Equal(t, supervision.CascadeDescendants, executor.calls[1].CascadeMode)
+}
+
+func TestChatDebugSupervisionControlValidatesOperatorInput(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	executor := &recordingSupervisionExecutor{}
+	host.Supervision.SetActionExecutor(executor)
+	session := newChatDebugSupervisionSession(host, "parent-session")
+	notification := upsertChatDebugSupervisionNotification(t, host, "parent-session", "batch-debug-control-2", supervision.SeverityCritical, 1)
+
+	cases := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{"missing action", "supervision control " + notification.NotificationID + " --reason why", "--action"},
+		{"unknown action", "supervision control " + notification.NotificationID + " --action explode --reason why", "--action"},
+		{"read only action stays out of the operator mutation set", "supervision control " + notification.NotificationID + " --action inspect --reason why", "--action"},
+		{"missing reason", "supervision control " + notification.NotificationID + " --action cancel", "--reason"},
+		{"bad cascade", "supervision control " + notification.NotificationID + " --action cancel --reason why --cascade everywhere", "--cascade"},
+		{"cascade unsupported by the action", "supervision control " + notification.NotificationID + " --action cancel --reason why --cascade descendants", "cascade"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			text, err := handleChatDebugSupervisionCommand(session, tc.command)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.want)
+			require.Empty(t, text)
+		})
+	}
+	require.Empty(t, executor.calls, "invalid input must never reach the executor")
+}
+
+func TestChatDebugSupervisionControlRejectsForeignScope(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	executor := &recordingSupervisionExecutor{}
+	host.Supervision.SetActionExecutor(executor)
+	session := newChatDebugSupervisionSession(host, "parent-session")
+	foreign := upsertChatDebugSupervisionNotification(t, host, "other-session", "batch-debug-control-3", supervision.SeverityCritical, 1)
+
+	_, err := handleChatDebugSupervisionCommand(session,
+		"supervision control "+foreign.NotificationID+" --action close --reason \"not mine\"")
+	require.ErrorIs(t, err, supervision.ErrActionNotAllowed)
+	require.Empty(t, executor.calls)
+}
+
+func TestChatDebugSupervisionControlRequiresWiredActionService(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	session := newChatDebugSupervisionSession(host, "parent-session")
+	notification := upsertChatDebugSupervisionNotification(t, host, "parent-session", "batch-debug-control-4", supervision.SeverityCritical, 1)
+	command := "supervision control " + notification.NotificationID + " --action cancel --reason \"why\""
+
+	original := host.Supervision.Actions
+	host.Supervision.Actions = nil
+	t.Cleanup(func() { host.Supervision.Actions = original })
+	_, err := handleChatDebugSupervisionCommand(session, command)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "action service")
+
+	// 宿主完全没有监督控制面时，报错同样要指向缺失的那一层（不能悄悄成功）；
+	// 这里换一个空宿主而不是把共享 host 的 Store 置 nil，否则 store 不会被关闭，
+	// Windows 上的 TempDir 清理会因文件占用失败。
+	_, err = handleChatDebugSupervisionCommand(newChatDebugSupervisionSession(&localChatRuntimeHost{}, "parent-session"), command)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "supervision store")
+}

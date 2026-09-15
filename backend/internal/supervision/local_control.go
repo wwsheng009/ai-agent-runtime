@@ -71,6 +71,9 @@ type LocalSnapshotRequest struct {
 	// SubjectPresence optionally downgrades rows whose subject no longer
 	// exists in the control plane (P2-12 stale 判定).
 	SubjectPresence SubjectPresenceFunc
+	// HostCapabilities optionally narrows the announced action set to the
+	// channels this host actually wired (P2-12 方案 1). nil = undeclared.
+	HostCapabilities *HostCapabilities
 }
 
 // Snapshot returns the deterministic preflight digest for one root scope. It
@@ -91,6 +94,7 @@ func (s *LocalControlService) Snapshot(ctx context.Context, req LocalSnapshotReq
 		Limit:                 req.Limit,
 		IncludeResolvedSince:  req.IncludeResolved,
 		SubjectPresence:       req.SubjectPresence,
+		HostCapabilities:      req.HostCapabilities,
 	})
 }
 

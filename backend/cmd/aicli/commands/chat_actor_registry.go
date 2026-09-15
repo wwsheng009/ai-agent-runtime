@@ -740,6 +740,14 @@ func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, 
 	}
 	result, err := r.agentSnapshot(ctx, sessionID)
 	if err != nil {
+		if !queued {
+			// 与 API 宿主同一口径（P0-3）：没有排队任何 prompt，因此不存在会把这笔预约
+			// 推到终态的 run，不回滚等于留下一条永久 active 的僵尸行，持续占用
+			// agents.maxThreads（与 N1 同类）。
+			return nil, rollbackSpawnFailure(fmt.Errorf("snapshot child session: %w", err))
+		}
+		// 已有 prompt 在跑：此时删除子会话等于杀掉一个活着的 agent，只上报诊断原因，
+		// 让正常的完成回调（subscribeLocalAgentCompletion）去收敛预约。
 		return nil, err
 	}
 	result.Created = true
@@ -3512,26 +3520,19 @@ func (r *localActorRegistry) observeLocalQuotaChildren(ctx context.Context, reco
 }
 
 func (r *localActorRegistry) localAgentsConfig() runtimecfg.AgentsConfig {
-	defaults := runtimecfg.DefaultRuntimeConfig().Agents
 	if r == nil || r.Host == nil {
-		return defaults
+		return runtimecfg.NormalizeAgentsConfig(runtimecfg.AgentsConfig{})
 	}
 	runtimeConfig := r.Host.RuntimeConfig
 	if runtimeConfig == nil && r.Host.Bootstrap != nil {
 		runtimeConfig = r.Host.Bootstrap.Config()
 	}
 	if runtimeConfig == nil {
-		return defaults
+		return runtimecfg.NormalizeAgentsConfig(runtimecfg.AgentsConfig{})
 	}
-	cfg := runtimeConfig.Agents
-	if cfg.MaxThreads == 0 && cfg.MaxDepth == 0 && cfg.DefaultWaitTimeoutMs == 0 &&
-		cfg.MinWaitTimeoutMs == 0 && cfg.MaxWaitTimeoutMs == 0 && strings.TrimSpace(cfg.WaitTimeoutMode) == "" &&
-		strings.TrimSpace(cfg.DefaultForkTurns) == "" && cfg.RegistryReconcileInterval == 0 &&
-		strings.TrimSpace(cfg.RegistryReconcileMode) == "" && cfg.RegistryTerminalRetention == 0 &&
-		cfg.ReclaimIdleMs == 0 {
-		return defaults
-	}
-	return cfg
+	// 与 API 宿主同口径、同解析点（runtimecfg.NormalizeAgentsConfig）：本函数不再持有
+	// 「全零才回退」的字段清单，避免两宿主清单漂移与新增字段漏改。
+	return runtimecfg.NormalizeAgentsConfig(runtimeConfig.Agents)
 }
 
 // localWaitTimeoutPolicy maps the agents config onto the shared wait-window

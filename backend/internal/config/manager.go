@@ -85,9 +85,10 @@ type AgentsConfig struct {
 	MaxThreads           int `yaml:"maxThreads" json:"maxThreads"`
 	MaxDepth             int `yaml:"maxDepth" json:"maxDepth"`
 	DefaultWaitTimeoutMs int `yaml:"defaultWaitTimeoutMs,omitempty" json:"defaultWaitTimeoutMs,omitempty"`
-	// MinWaitTimeoutMs / MaxWaitTimeoutMs bound every wait_agent and
-	// read_agent_events observation window. Timeouts outside the bounds are
-	// clamped or rejected depending on WaitTimeoutMode.
+	// MinWaitTimeoutMs / MaxWaitTimeoutMs bound every model-issued wait window
+	// (wait_agent, read_agent_events, and wait_team): no wait path may block
+	// longer than MaxWaitTimeoutMs. Timeouts outside the bounds are clamped or
+	// rejected depending on WaitTimeoutMode.
 	MinWaitTimeoutMs int `yaml:"minWaitTimeoutMs,omitempty" json:"minWaitTimeoutMs,omitempty"`
 	MaxWaitTimeoutMs int `yaml:"maxWaitTimeoutMs,omitempty" json:"maxWaitTimeoutMs,omitempty"`
 	// WaitTimeoutMode selects the out-of-range behavior: "clamp" (default)

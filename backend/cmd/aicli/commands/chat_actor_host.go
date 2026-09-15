@@ -978,13 +978,7 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		applyLocalChildAgentdefToolPolicy(apiAgent, childAgentType, session, workspaceRoot, toolkitBasePath)
 	}
 	applyLocalChildReadOnlyPolicy(apiAgent, childReadOnly)
-	maxDepth := 0
-	if runtimeConfig != nil {
-		maxDepth = runtimeConfig.Agents.MaxDepth
-	} else if h != nil && h.RuntimeConfig != nil {
-		maxDepth = h.RuntimeConfig.Agents.MaxDepth
-	}
-	applyLocalChildDepthPolicy(apiAgent, childDepth, maxDepth)
+	applyLocalChildDepthPolicy(apiAgent, childDepth, localAgentDepthCeiling(runtimeConfig, h))
 	leaseHandle, leaseErr := acquireLocalChatSessionLease(context.Background(), h.RuntimeStore, sessionID)
 	if leaseErr != nil {
 		return nil, leaseErr
@@ -1131,6 +1125,20 @@ func applyLocalChildReadOnlyPolicy(apiAgent *agent.Agent, readOnly bool) {
 	}
 	toolPolicy.SetCapabilityScope(runtimepolicy.ReadOnlyChildCapabilities())
 	apiAgent.SetToolExecutionPolicy(toolPolicy)
+}
+
+// localAgentDepthCeiling resolves the effective child-depth ceiling for a child
+// actor. 与 API 宿主同口径（runtimecfg.NormalizeAgentsConfig）：0 是「未设置」而不是
+// 「无上限」，否则只设了某个无关 agents 字段的配置块会静默抬掉默认深度上限。
+func localAgentDepthCeiling(runtimeConfig *runtimecfg.RuntimeConfig, h *localChatRuntimeHost) int {
+	switch {
+	case runtimeConfig != nil:
+		return runtimecfg.NormalizeAgentsConfig(runtimeConfig.Agents).MaxDepth
+	case h != nil && h.RuntimeConfig != nil:
+		return runtimecfg.NormalizeAgentsConfig(h.RuntimeConfig.Agents).MaxDepth
+	default:
+		return runtimecfg.NormalizeAgentsConfig(runtimecfg.AgentsConfig{}).MaxDepth
+	}
 }
 
 func applyLocalChildDepthPolicy(apiAgent *agent.Agent, depth, maxDepth int) {
@@ -1429,6 +1437,12 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	}
 	if broker := apiAgent.GetToolBroker(); broker != nil && broker.SessionContextStore == nil {
 		broker.SessionContextStore = toolbrokersessionctx.New(host.SessionStore)
+	}
+	// wait_team resolves its window inside the broker, so the broker must read
+	// the same live policy the local wait_agent/read_agent_events paths use
+	// (P2-11 目标：任何路径的等待时长都落在 [minWaitTimeoutMs, maxWaitTimeoutMs]).
+	if broker := apiAgent.GetToolBroker(); broker != nil && host.ActorRegistry != nil {
+		broker.WaitTimeoutPolicy = host.ActorRegistry.localWaitTimeoutPolicy
 	}
 	if host.Background != nil {
 		broker := apiAgent.GetToolBroker()
@@ -2189,6 +2203,25 @@ func resolveLocalChatSupervisionDataDir(session *ChatSession, runtimeConfig *run
 	return filepath.Join(os.TempDir(), "ai-agent-runtime", "supervision")
 }
 
+// localSupervisionHostCapabilities declares which notification action channels
+// this CLI host can actually execute, so preflight and the model-facing
+// supervision_snapshot only announce reachable actions (P2-12 方案 1).
+//
+// acknowledge/defer/resolve are durable store writes inside this process
+// (/debug supervision ack|defer|resolve and the model ack_lifecycle tool), so
+// they are reachable whenever the store is. cancel/close additionally need a
+// wired runtime executor: without one the action row can only be recorded and
+// execution fails with "runtime executor not configured" — exactly the step the
+// announcement must not invite.
+func localSupervisionHostCapabilities(host *localChatRuntimeHost) *supervision.HostCapabilities {
+	if host == nil || host.Supervision == nil || host.Supervision.Store == nil {
+		return nil
+	}
+	caps := supervision.FullHostCapabilities()
+	caps.ControlActions = host.Supervision.Actions != nil && host.Supervision.Actions.ExecutorReady()
+	return &caps
+}
+
 // localSupervisionSubjectPresence mirrors the API host checks: notifications
 // whose execution-run rows or team records disappeared are stale, so they stop
 // counting as critical (P2-12). Subjects the local host cannot verify (for
@@ -2298,6 +2331,7 @@ func injectLocalSupervisionPreflight(ctx context.Context, host *localChatRuntime
 		Limit:                 host.supervisionConfig.WithDefaults().DigestMaxItems,
 		IncludeResolvedSince:  true,
 		SubjectPresence:       localSupervisionSubjectPresence(host),
+		HostCapabilities:      localSupervisionHostCapabilities(host),
 	})
 	if err != nil {
 		return "", fmt.Errorf("build supervision preflight digest: %w", err)

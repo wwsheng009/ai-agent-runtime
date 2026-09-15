@@ -17,6 +17,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentdef"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentguidance"
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
@@ -80,7 +81,15 @@ type Broker struct {
 	// supervision_snapshot / ack_lifecycle / control_descendant (P2-12 方案 3).
 	// Optional: nil keeps those tools out of Definitions() entirely, so a host
 	// without durable supervision never advertises a tool it cannot serve.
-	Supervision AgentSupervisionController
+	// WaitTimeoutPolicy optionally supplies the operator's wait-window policy
+	// (agents.defaultWaitTimeoutMs / minWaitTimeoutMs / maxWaitTimeoutMs /
+	// waitTimeoutMode) for wait_team, which resolves its window inside the
+	// broker instead of in the session host. It is a provider, not a snapshot:
+	// the host reads its live config on every wait, so a late runtime config
+	// update still takes effect. nil falls back to the shared defaults, never to
+	// an unbounded wait.
+	WaitTimeoutPolicy func() agentcontrol.WaitTimeoutPolicy
+	Supervision       AgentSupervisionController
 	// agentEventsReads remembers the last read_agent_events window per
 	// caller/target cursor so an identical repeated read can answer with an
 	// explicit unchanged/repeat_count signal (plan P1-7 待补) instead of a
@@ -409,7 +418,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolWaitAgent,
-				Description: "Wait for spawn_agent progress or, without ids, for a parent mailbox event. Batch results include every current snapshot and each ready agent's output once. Consume ready outputs directly. If timed_out, follow next_action and do not immediately repeat the same wait while independent work remains. waiting_approval requires approval handling. Do not use this for spawn_team teammate ids.",
+				Description: "Wait for spawn_agent progress or, without ids, for a parent mailbox event. Batch results include every current snapshot and each ready agent's output once. Consume ready outputs directly. If timed_out, follow next_action and do not immediately repeat the same wait while independent work remains. waiting_approval requires approval handling. Do not use this for spawn_team teammate ids. " + agentguidance.WaitDisciplineText(),
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -418,7 +427,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"ids":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Child ids or paths. Returns when any becomes ready and reports all current ready/pending ids."},
 						"session_ids": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Alias for ids."},
 						"after_seq":   map[string]interface{}{"type": "integer", "description": "When no id is provided, wait only for parent mailbox/collab events after this session event sequence."},
-						"timeout_ms":  map[string]interface{}{"type": "integer", "description": "Optional wait timeout in milliseconds."},
+						"timeout_ms":  map[string]interface{}{"type": "integer", "description": agentguidance.WaitTimeoutArgText(agentcontrol.DefaultWaitTimeoutMs, agentcontrol.MinWaitTimeoutMs, agentcontrol.MaxWaitTimeoutMs)},
 					},
 				},
 			},
@@ -432,7 +441,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
 						"after_seq":  map[string]interface{}{"type": "integer", "description": "Only return events after this sequence number."},
 						"limit":      map[string]interface{}{"type": "integer", "description": "Maximum number of events to return."},
-						"wait_ms":    map[string]interface{}{"type": "integer", "description": "Optional wait timeout while waiting for new events to arrive."},
+						"wait_ms":    map[string]interface{}{"type": "integer", "description": agentguidance.EventsWaitArgText(agentcontrol.MinWaitTimeoutMs, agentcontrol.MaxWaitTimeoutMs)},
 						"view":       map[string]interface{}{"type": "string", "enum": []string{AgentEventsViewAll, AgentEventsViewToolProgress}, "description": "Projection of the window: all (default) or tool_progress (tool events plus terminal/approval events)."},
 					},
 				},
@@ -586,7 +595,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolWaitAgent,
-				Description: "Wait for spawn_agent children to become idle, blocked, failed, or waiting_approval. Batch results include every current snapshot and each ready output once. Consume ready outputs directly. If timed_out, follow next_action and do not immediately repeat the same wait while independent work remains. Use wait_team for spawn_team teammates.",
+				Description: "Wait for spawn_agent children to become idle, blocked, failed, or waiting_approval. Batch results include every current snapshot and each ready output once. Consume ready outputs directly. If timed_out, follow next_action and do not immediately repeat the same wait while independent work remains. Use wait_team for spawn_team teammates. " + agentguidance.WaitDisciplineText(),
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -594,7 +603,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"session_id":  map[string]interface{}{"type": "string", "description": "Alias for id."},
 						"ids":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Child ids or paths. Returns when any becomes ready and reports all current ready/pending ids."},
 						"session_ids": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Alias for ids."},
-						"timeout_ms":  map[string]interface{}{"type": "integer", "description": "Optional wait timeout in milliseconds."},
+						"timeout_ms":  map[string]interface{}{"type": "integer", "description": agentguidance.WaitTimeoutArgText(agentcontrol.DefaultWaitTimeoutMs, agentcontrol.MinWaitTimeoutMs, agentcontrol.MaxWaitTimeoutMs)},
 					},
 				},
 			},
@@ -608,7 +617,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
 						"after_seq":  map[string]interface{}{"type": "integer", "description": "Only return events after this sequence number."},
 						"limit":      map[string]interface{}{"type": "integer", "description": "Maximum number of events to return."},
-						"wait_ms":    map[string]interface{}{"type": "integer", "description": "Optional wait timeout while waiting for new events to arrive."},
+						"wait_ms":    map[string]interface{}{"type": "integer", "description": agentguidance.EventsWaitArgText(agentcontrol.MinWaitTimeoutMs, agentcontrol.MaxWaitTimeoutMs)},
 						"view":       map[string]interface{}{"type": "string", "enum": []string{AgentEventsViewAll, AgentEventsViewToolProgress}, "description": "Projection of the window: all (default) or tool_progress (tool events plus terminal/approval events)."},
 					},
 				},
@@ -806,7 +815,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		},
 		types.ToolDefinition{
 			Name:        ToolWaitTeam,
-			Description: "Wait for a spawn_team run to reach durable team.completed/team.summary state and return recent persisted team lifecycle events. Use this after spawn_team auto_start=true instead of wait_agent/read_agent_events; those are only for spawn_agent child sessions.",
+			Description: "Wait for a spawn_team run to reach durable team.completed/team.summary state and return recent persisted team lifecycle events. Use this after spawn_team auto_start=true instead of wait_agent/read_agent_events; those are only for spawn_agent child sessions. " + agentguidance.WaitDisciplineText(),
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -820,7 +829,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 					},
 					"timeout_ms": map[string]interface{}{
 						"type":        "integer",
-						"description": "Optional wait timeout in milliseconds. Defaults to 30000.",
+						"description": agentguidance.WaitTimeoutArgText(agentcontrol.DefaultWaitTimeoutMs, agentcontrol.MinWaitTimeoutMs, agentcontrol.MaxWaitTimeoutMs),
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
@@ -2646,15 +2655,19 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			return nil, nil, err
 		}
 		return result, attachCacheSafeSummary(map[string]interface{}{
-			"team_id":             result.TeamID,
-			"status":              result.Status,
-			"terminal":            result.Terminal,
-			"summary_ready":       result.SummaryReady,
-			"timed_out":           result.TimedOut,
-			"wait_timeout_ms":     result.WaitTimeoutMs,
-			"execution_continues": result.ExecutionContinues,
-			"next_action":         result.NextAction,
-			"latest_seq":          result.LatestSeq,
+			"team_id":         result.TeamID,
+			"status":          result.Status,
+			"terminal":        result.Terminal,
+			"summary_ready":   result.SummaryReady,
+			"timed_out":       result.TimedOut,
+			"wait_timeout_ms": result.WaitTimeoutMs,
+			// Same echo as wait_agent: the model must be able to see that its
+			// requested team window was normalized, not silently replaced.
+			"wait_timeout_requested_ms": result.WaitTimeoutRequestedMs,
+			"wait_timeout_clamped":      result.WaitTimeoutClamped,
+			"execution_continues":       result.ExecutionContinues,
+			"next_action":               result.NextAction,
+			"latest_seq":                result.LatestSeq,
 		}, waitTeamCacheSafeSummary(result)), nil
 
 	case ToolSendTeamMessage:
@@ -3574,10 +3587,31 @@ func (b *Broker) resolveWaitTeamID(ctx context.Context, sessionID, explicitTeamI
 	return "", fmt.Errorf("team_id is required")
 }
 
+// waitTimeoutPolicy returns the operator's wait-window policy for waits the
+// broker resolves itself (wait_team). A broker with no provider keeps the shared
+// defaults (agents defaults: 30s window, 10s..1h bounds, clamp), so a wait can
+// never become unbounded just because a host forgot to wire the provider.
+func (b *Broker) waitTimeoutPolicy() agentcontrol.WaitTimeoutPolicy {
+	if b == nil || b.WaitTimeoutPolicy == nil {
+		return agentcontrol.WaitTimeoutPolicy{}.Normalize()
+	}
+	return b.WaitTimeoutPolicy().Normalize()
+}
+
 func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request WaitTeamArgs) (WaitTeamResult, error) {
 	if b == nil || b.TeamStore == nil {
 		return WaitTeamResult{}, fmt.Errorf("team store is not configured")
 	}
+	// wait_team is a wait path like any other: its observation window is
+	// normalized against the same agents.minWaitTimeoutMs /
+	// agents.maxWaitTimeoutMs / waitTimeoutMode policy the session hosts apply to
+	// wait_agent and read_agent_events. Resolving before any side effect keeps a
+	// rejected out-of-range request from reconciling or notifying first.
+	resolution, err := agentcontrol.ResolveWaitTimeout(request.TimeoutMs, b.waitTimeoutPolicy())
+	if err != nil {
+		return WaitTeamResult{}, err
+	}
+	request.TimeoutMs = resolution.EffectiveMs
 	teamID, err := b.resolveWaitTeamID(ctx, sessionID, request.TeamID)
 	if err != nil {
 		return WaitTeamResult{}, err
@@ -3596,9 +3630,9 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 	if request.Limit > 100 {
 		request.Limit = 100
 	}
-	if request.TimeoutMs <= 0 {
-		request.TimeoutMs = 30000
-	}
+	// request.TimeoutMs is already the effective window (see ResolveWaitTimeout
+	// above): a zero/negative request became agents.defaultWaitTimeoutMs and an
+	// out-of-range one was clamped or rejected there.
 	waitCtx, cancel := context.WithTimeout(ctx, time.Duration(request.TimeoutMs)*time.Millisecond)
 	defer cancel()
 
@@ -3634,7 +3668,7 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 			if snapshotErr != nil {
 				result = WaitTeamResult{TeamID: teamID}
 			}
-			return finalizeWaitTeamTimeout(result, request.TimeoutMs), nil
+			return finalizeWaitTeamTimeout(result, resolution), nil
 		default:
 		}
 		result, err := b.readWaitTeamSnapshot(ctx, teamID, request)
@@ -3642,7 +3676,7 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 			return WaitTeamResult{}, err
 		}
 		if result.Terminal && (!b.waitTeamRequiresSummary(request) || result.SummaryReady) {
-			result.WaitTimeoutMs = request.TimeoutMs
+			result = *ApplyWaitTeamTimeout(&result, resolution.RequestedMs, request.TimeoutMs, resolution.Clamped)
 			return result, nil
 		}
 		select {
@@ -3650,7 +3684,7 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 			if ctx.Err() != nil {
 				return WaitTeamResult{}, ctx.Err()
 			}
-			return finalizeWaitTeamTimeout(result, request.TimeoutMs), nil
+			return finalizeWaitTeamTimeout(result, resolution), nil
 		case wake, ok := <-wakeCh:
 			if !ok {
 				wakeCh = nil
@@ -3665,9 +3699,9 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 	}
 }
 
-func finalizeWaitTeamTimeout(result WaitTeamResult, timeoutMs int) WaitTeamResult {
+func finalizeWaitTeamTimeout(result WaitTeamResult, resolution agentcontrol.WaitTimeoutResolution) WaitTeamResult {
 	result.TimedOut = true
-	result.WaitTimeoutMs = timeoutMs
+	result = *ApplyWaitTeamTimeout(&result, resolution.RequestedMs, resolution.EffectiveMs, resolution.Clamped)
 	result.ExecutionContinues = !result.Terminal
 	if result.ExecutionContinues {
 		result.NextAction = "team execution continues; wait timeout only ended this observation. Continue independent work or inspect current team status before waiting again"

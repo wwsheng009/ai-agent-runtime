@@ -87,6 +87,11 @@ type ActionService struct {
 	executor   ActionExecutor
 	authorizer ScopeAuthorizer
 	now        func() time.Time
+	// executorReady records whether a runtime executor able to perform mutation
+	// actions is wired. Hosts read it through ExecutorReady() to declare their
+	// control-action capability (P2-12 方案 1), so preflight never announces a
+	// cancel/close this host could only record, never execute.
+	executorReady bool
 }
 
 // NewActionService wires the durable action service. executor is required for
@@ -102,6 +107,8 @@ func NewActionService(store Store, executor ActionExecutor, authorizer ScopeAuth
 	}
 	if executor == nil {
 		svc.executor = noopExecutor{}
+	} else {
+		svc.executorReady = true
 	}
 	return svc
 }
@@ -113,8 +120,37 @@ func NewActionService(store Store, executor ActionExecutor, authorizer ScopeAuth
 func (s *ActionService) SetExecutor(executor ActionExecutor) {
 	if executor == nil {
 		executor = noopExecutor{}
+		s.executorReady = false
+	} else {
+		s.executorReady = true
 	}
 	s.executor = executor
+}
+
+// ExecutorReady reports whether a runtime executor able to perform mutation
+// actions (cancel/close/cancel_subtree/retry/reassign) is wired. Read-only and
+// bookkeeping actions (inspect/acknowledge/defer) do not depend on it.
+//
+// An executor that implements ExecutorReadiness answers for itself. Adapters
+// that wrap an optional runtime hook are installed unconditionally (so
+// bookkeeping actions and the failure wording stay identical to a wired host),
+// yet must not look wired just because a value was passed: they report their
+// real state through that interface.
+func (s *ActionService) ExecutorReady() bool {
+	if s == nil {
+		return false
+	}
+	if probe, ok := s.executor.(ExecutorReadiness); ok {
+		return probe.ExecutorReady()
+	}
+	return s.executorReady
+}
+
+// ExecutorReadiness lets an ActionExecutor declare whether it can perform
+// mutation actions right now. Executors that do not implement it are treated as
+// ready once wired, which is the default for plain adapters.
+type ExecutorReadiness interface {
+	ExecutorReady() bool
 }
 
 // noopExecutor rejects executions when no runtime executor is wired.

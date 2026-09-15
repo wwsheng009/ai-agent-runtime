@@ -79,6 +79,12 @@ func BuildSupervisionControlPlane(dataDir string, cfg supervision.Config, hooks 
 	}
 	cfg = cfg.WithDefaults()
 
+	// 适配器总是装上：inspect/acknowledge/defer 的完成语义（不依赖 runtime
+	// 副作用）与 mutation 的失败措辞，必须与 wired 宿主完全一致。但
+	// hooks.Execute == nil 时它不能"看起来有 executor"——ActionService 会据此
+	// 认为 mutation 通道已就绪，preflight 也就会宣告 cancel/close（P2-12 方案
+	// 1）。runtimeActionExecutor.ExecutorReady 如实报告 execute 是否接上，宿主
+	// 之后仍可用 SetActionExecutor 补装真实执行器。
 	actions := supervision.NewActionService(
 		store,
 		&runtimeActionExecutor{execute: hooks.Execute},
@@ -89,7 +95,18 @@ func BuildSupervisionControlPlane(dataDir string, cfg supervision.Config, hooks 
 			store:     store,
 		},
 	)
-	wakes := supervision.NewWakeScheduler(store, cfg.WakeSchedulerConfig())
+	// The wake digest becomes a parent turn's prompt, so it must announce the
+	// same reachable action set as the preflight digest: a process with no
+	// wired executor must not invite the model to cancel/close something it can
+	// only record (P2-12 方案 1). Resolved lazily because the host may wire its
+	// executor after the control plane is constructed.
+	wakeConfig := cfg.WakeSchedulerConfig()
+	wakeConfig.HostCapabilities = func() *supervision.HostCapabilities {
+		caps := supervision.FullHostCapabilities()
+		caps.ControlActions = actions.ExecutorReady()
+		return &caps
+	}
+	wakes := supervision.NewWakeScheduler(store, wakeConfig)
 	provider := &supervisionDescendantProvider{
 		store:       store,
 		agents:      hooks.AgentRegistry,
@@ -146,6 +163,14 @@ func (e *runtimeActionExecutor) Execute(ctx context.Context, a supervision.Actio
 		Status: supervision.ActionFailed,
 		Result: fmt.Sprintf("%s not executed: runtime executor not configured (needs agentcontrol/team wiring)", a.Action),
 	}, nil
+}
+
+// ExecutorReady reports the truth for capability announcement (P2-12 方案 1):
+// the adapter is installed unconditionally so bookkeeping actions behave the
+// same with or without a runtime hook, but only a wired execute can perform
+// cancel/close/cancel_subtree/retry/reassign.
+func (e *runtimeActionExecutor) ExecutorReady() bool {
+	return e != nil && e.execute != nil
 }
 
 // rootScopeAuthorizer enforces that an agent or Team target belongs to the

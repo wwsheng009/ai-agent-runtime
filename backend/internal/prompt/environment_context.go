@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentguidance"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
@@ -245,7 +246,8 @@ func RenderMultiAgentCollaborationGuidance() string {
 		"- Delegate only bounded, independent subtasks whose result you need, with a non-overlapping scope and the exact deliverable you expect back.",
 		"- After spawn_agent returns, continue meaningful non-overlapping work in the same turn; do not block immediately on wait_agent while the child runs in the background.",
 		"- Consume progress incrementally with read_agent_events using after_seq; never re-read a window you already consumed. When only progress is needed, pass view=tool_progress so the window carries tool events plus terminal/approval events and stays token-cheap.",
-		"- When you must wait, wait for all children you still need in one call and prefer the longest timeout you can afford; if the wait times out, follow next_action, use any ready outputs, and only wait again after the remaining independent work is done.",
+		"- " + agentguidance.WaitBudgetRule,
+		"- " + agentguidance.WaitEscalationRule,
 		"- Before spawning, check list_agents for the slots in use; when the thread limit is reached, reuse an existing child, close an idle one, or finish the work locally instead of retrying the same spawn_agent unchanged.",
 		"- A child that is waiting_approval or waiting_input needs your decision: use resolve_agent_approval, send_input, or followup_task instead of waiting on it again.",
 		"- Close children you no longer need with close_agent so their slots are freed; spawn_team teammates follow the separate wait_team lifecycle.",

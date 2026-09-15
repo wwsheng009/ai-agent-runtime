@@ -101,6 +101,7 @@ func (s *WakeScheduler) RootDigest(ctx context.Context, rootScopeID, parentSessi
 		RootScopeID:           strings.TrimSpace(rootScopeID),
 		TargetParentSessionID: strings.TrimSpace(parentSessionID),
 		TargetParentTeamID:    strings.TrimSpace(parentTeamID),
+		HostCapabilities:      s.hostCapabilitySnapshot(),
 	})
 }
 

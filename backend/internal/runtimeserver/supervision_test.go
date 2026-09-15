@@ -115,6 +115,27 @@ func TestSupervisionControlPlane_MutationWithoutExecutor(t *testing.T) {
 	require.Contains(t, executed.Result, "executor not configured")
 }
 
+// TestSupervisionControlPlane_ExecutorReadinessFollowsWiring pins the signal the
+// announcement layer reads (P2-12 方案 1): a plane built without hooks.Execute
+// must not claim the mutation channel even though the adapter is installed
+// (bookkeeping still completes, see TestSupervisionControlPlane_BookkeepingAction),
+// and wiring an executor later flips the channel on.
+func TestSupervisionControlPlane_ExecutorReadinessFollowsWiring(t *testing.T) {
+	plane := newTestSupervisionPlane(t)
+	require.False(t, plane.Actions.ExecutorReady(),
+		"a plane without hooks.Execute must not advertise cancel/close")
+
+	plane.SetActionExecutor(readinessTestExecutor{})
+	require.True(t, plane.Actions.ExecutorReady(),
+		"wiring a runtime executor opens the control channel")
+}
+
+type readinessTestExecutor struct{}
+
+func (readinessTestExecutor) Execute(context.Context, supervision.ActionRecord) (supervision.ActionResult, error) {
+	return supervision.ActionResult{Status: supervision.ActionCompleted}, nil
+}
+
 // TestSupervisionControlPlane_MutationWithExecutor wires the real runtime
 // executor (close adapter + AgentControl writer) and verifies a cancel action
 // closes the live session and persists the terminal subtree state, so the

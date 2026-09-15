@@ -27,6 +27,12 @@ type DigestRequest struct {
 	// that no longer exists (P2-12). checked=false keeps the original severity
 	// so missing wiring never hides a real critical.
 	SubjectPresence SubjectPresenceFunc
+	// HostCapabilities optionally declares which action channels the calling
+	// host has wired. When set, the announced allowed actions are filtered to
+	// what this host can actually execute and NextAction explains the rest
+	// (P2-12 方案 1). nil keeps the host-neutral set so a host that has not
+	// declared its channels never loses a remediation path.
+	HostCapabilities *HostCapabilities
 }
 
 // SubjectPresenceFunc reports whether the notification subject still exists in
@@ -51,6 +57,9 @@ type DigestItem struct {
 	// Stale marks a critical row whose subject no longer exists in the control
 	// plane. Stale rows are informational only: no recommended or allowed action.
 	Stale bool
+	// NextAction explains which remediation path was filtered out because this
+	// host has no entry point for it (empty when nothing was filtered).
+	NextAction string
 }
 
 // Digest is the deterministic, budget-limited preflight payload (doc 6.4).
@@ -103,13 +112,15 @@ func BuildDigest(ctx context.Context, store Store, req DigestRequest) (*Digest, 
 		if n.DecisionState == DecisionDeferred && n.DeferUntil != nil && now.Before(*n.DeferUntil) {
 			continue
 		}
+		allowedActions, capabilityHint := evaluator.EvaluateAllowedActionsForHost(n, req.HostCapabilities)
 		item := DigestItem{
 			SubjectKind:       n.SubjectKind,
 			SubjectID:         n.SubjectID,
 			SupervisionState:  n.SupervisionState,
 			Reason:            n.Reason,
 			RecommendedAction: evaluator.EvaluateRecommendedAction(n),
-			AllowedActions:    evaluator.EvaluateAllowedActions(n),
+			AllowedActions:    allowedActions,
+			NextAction:        capabilityHint,
 			AutoActionID:      n.AutoActionID,
 			ActionRequired:    n.ActionRequired(),
 			NotificationID:    n.NotificationID,
@@ -126,6 +137,7 @@ func BuildDigest(ctx context.Context, store Store, req DigestRequest) (*Digest, 
 				item.ActionRequired = false
 				item.RecommendedAction = "none"
 				item.AllowedActions = nil
+				item.NextAction = ""
 				digest.StaleSubjects++
 			}
 		}
@@ -228,6 +240,12 @@ func formatDigestText(digest *Digest) string {
 		status := string(item.SupervisionState)
 		line := fmt.Sprintf("- %s %s: %s; recommended=%s; allowed=[%s]",
 			item.SubjectKind, item.SubjectID, status, item.RecommendedAction, strings.Join(item.AllowedActions, ","))
+		// Announcement contract (P2-12 方案 1): the allowed list is what this
+		// host can execute, and next_action names the channel that was filtered
+		// out, so the parent never plans a step its own host cannot run.
+		if hint := strings.TrimSpace(item.NextAction); hint != "" {
+			line += "; next_action=" + hint
+		}
 		// notification_id is the only handle ack_lifecycle / control_descendant
 		// accept. Print it inline with every actionable row: without it the
 		// model has to guess an id from "<subject_kind> <subject_id>", and the

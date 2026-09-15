@@ -77,6 +77,7 @@ func (c *localSupervisionToolController) SupervisionSnapshot(ctx context.Context
 		IncludeResolved:       args.IncludeResolved,
 		Limit:                 limit,
 		SubjectPresence:       localSupervisionSubjectPresence(c.host),
+		HostCapabilities:      localSupervisionHostCapabilities(c.host),
 	})
 }
 
