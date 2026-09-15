@@ -348,6 +348,40 @@
 1. `lib/trajectory/recovery.ts` 的 `trajectoryRecoveryPushes()` 仍把 seq=0 帧整体排到列表末尾（`[...pushes, ...zeroSeq]`）——该函数目前**仅被测试调用**，实时链路走保序的 `trajectoryEventAction`；若将来接回生产线，需按 turn / timestamp 锚点插入而非一律末尾；
 2. 窗口重建（`prependEarlier` 整体重放）会让所有行按 seq 重新落位一次：行身份恒定，但**同一行的下标可能变化**；若要求「已渲染行绝不位移」，需把重建改为增量前插。
 
+### 批次 23（2026-09-15）：工具观测帧不再重复建行（同批 tool_end + observation 的双行收口）
+
+**症状（用户实测上报）**：`/workspace/sessions/session_20260915211037_9e9CQmZq` 页面上，「两个 shell 工具渲染在消息之后又重复地渲染」——正文助手消息之后又出现两条 `shell` 工具行，内容与消息之前那两条一致。
+
+**排查（真实事件流 + 真实管线，非仅单测）**
+
+1. **数据面**：`GET /api/runtime/sessions/session_20260915211037_9e9CQmZq/runtime/events?tail=1&limit=1500` 实测 954 帧、单轮（turn `b459f0da-b190-42a8-9b2a-ea7d6790e3fa`）；流式工具帧为 `seq=40/41/43`（`call_00_e5e43rGcfoV789JMCRvg1639`）与 `seq=45/46/48`（`call_01_CuiDyIDeT1WJ46mc3wDl0776`），另有回合末补全帧 `seq=949/950 tool_end`；
+2. **轨迹管线逐行复现**（真实事件喂真实 store）：`system` → `tool:call_00` → `tool:call_01` → `assistant:b459f0da…` → `orchestration` → `route` → **`observation-951`（tool=shell, step=step_1_tool_0）** → **`observation-952`（tool=shell, step=step_1_tool_1）** → `result`——即用户看到的「消息之后重复的两条 shell 行」；
+3. **聊天链路无重复**：同 954 帧喂 `applyRuntimeEventToThread`，助手消息内**仅 2 个工具段**（`call_00` / `call_01`）；`mapSessionHistoryToMessages` 合并后工具卡也为 2 张。两条链路对同一份观测的处理**不一致**，重复只发生在轨迹链路上。
+
+**根因（后端同批次发两份等价观测，前端两条链路口径不同）**
+
+| 环节 | 机制 |
+|---|---|
+| 后端 | `internal/api/skills/handler.go` 的 `buildObservedToolEventPayloads*`（1888 / 7832）发 `tool_end`（**带 provider call id**）与 `buildObservationEventPayloads`（8089）发 `observation`（字段 `index`/`step`/`tool`（工具**名**）/`success`/`input`/`output`/`metrics`，**无 call id**）描述**同一份**工具观测；注释已声明「不会多出一行重复工具」，那是针对聊天链路的下游约定 |
+| 聊天链路（正确） | `lib/thread-state/deltas.ts:185-189` 把 observation 判为 `{ kind: "phase" }`——阶段推进信号，**不建行**，工具卡一律由 `tool_end` 的 `tool:<call_id>` upsert |
+| 轨迹链路（缺陷） | `lib/trajectory/recovery.ts` 未做同样判定：observation 帧因缺少 call id 无法折叠进 `tool:<call_id>`，于是按 `observation-<seq>` **另起一行**，载荷里仍是同一份 `step` / `tool` / `input` / `output` |
+
+**修复（对齐聊天链路口径，判据用「是否携带工具身份」而非 kind 白名单）**
+
+| 文件 | 内容 |
+|---|---|
+| `lib/trajectory/recovery.ts` | 新增模块级 `isToolObservation(event)`：`chat.sse.observation` 且 payload 带 `tool` 或 `step` ⇒ 视为工具观测帧；`chatSseEventToTrajectoryPush()` 在其为真时返回 `null`，`trajectoryEventAction` 落到 `skip(seq)`——**游标照常推进**（不会卡住后续事件的 pending 判定），**不产生行** |
+| 语义边界（本批钉住） | 无工具身份的 observation（G7 结构化事件）语义**不变**，仍按行渲染；工具行的唯一来源仍是 `tool_end` 的 `tool:<call_id>` |
+
+**真机证据**：同 954 帧重放，轨迹管线行组成由 `{system:1, tool:2, assistant:1, orchestration:1, route:1, observation:2, result:1}` 收敛为 `{system:1, tool:2, assistant:1, orchestration:1, route:1, result:1}`（observation 行消失，工具行仍 2 条）；聊天链路工具段仍为 2，零变化。临时实测脚本（`frontend/src/lib/trajectory/dup.check.test.ts`，跑完即删）覆盖 A/B 两组对照。
+
+**门禁（本批）**：`npx tsc -b --force` exit 0；`npm run lint` **0 error / 1 基线 warning**（`artifact-detail-dialog.tsx:50` 既有 hooks 依赖告警）+ i18n scanned=686 / violations=0 + 备份门禁 1041 文件 0 残留 + 行数门禁 979 文件 0 超限（最大 `use-session-runtime-stream.ts`=500，本批 `recovery.ts`=453）+ 消息 token 门禁 37 文件 0 处；`npm run build` exit 0；`npx vitest run` **220 文件 / 1715 用例全绿**（本批在 `lib/trajectory/recovery.test.ts` 新增 3 例：映射层返回 null 且退化为 `skip(seq)`；同批 `tool_end` + observation 只留 `tool:call_00_x` 一行；无工具身份的 observation 仍渲染——既有 1712 例零改写）。
+
+**未交付（非阻塞，独立排期）**
+
+1. 后端仍在**同一批次**发 `tool_end` 与 `observation` 两份等价载荷，前端靠「工具观测帧不建行」兜住；若要彻底消除冗余，应由后端在已发 `tool_end` 时不再追加 observation 帧（涉及事件面契约与既有消费方，独立排期）；
+2. observation 帧携带的 `metrics`（duration 等）目前只进聊天链路的阶段信号、不进轨迹工具行；若要在工具行上展示耗时，需要把 `step` → `call_id` 的映射下推到后端（`entity` 帧已具备该形态，可复用）。
+
 ### 复检记录（2026-09-13，P2-1A 第八项交付后）
 
 | 项 | 复检内容 | 结果 |

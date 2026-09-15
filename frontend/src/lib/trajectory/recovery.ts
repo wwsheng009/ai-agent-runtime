@@ -170,6 +170,42 @@ function eventEnvelope(
 }
 
 /**
+ * 工具观测帧判定：`chat.sse.observation` 是否只是**已有工具行的重复来源**。
+ *
+ * 后端 `buildObservationEventPayloads`（handler.go:8089）**只**从
+ * `resultPayload["observations"]`（ReAct 工具观测）构造该帧，字段是 `step` /
+ * `tool`（工具**名**，不是 provider call id）/ `input` / `output` / `success` /
+ * `error` / `duration_ms` / `metrics`。没有 call id ⇒ 轨迹侧无法把它折叠进
+ * `tool:<call_id>` 行，只能另起 `observation-<seq>`。
+ *
+ * 但同一批次的 `buildObservedToolEventPayloads*`（handler.go:1888 / 7832）已经把
+ * **同一份**观测内容发成 `chat.sse.tool_end`（带 provider call id），前端按
+ * `tool:<call_id>` upsert 出结构完整的工具行（名称 + 入参 + 输出 + 耗时）。
+ * 两路各自建行 ⇒ 同一条命令在轨迹里出现两次。
+ *
+ * 实测（会话 `session_20260915211037_9e9CQmZq`，单轮 953 帧）：轨迹行序为
+ * `tool:call_00` / `tool:call_01` → 正文消息 → `observation-951` /
+ * `observation-952`——同一对 shell 工具在消息之后又各多出一行（载荷里是同一
+ * 条 command/input/output）。聊天链路早已把该帧当「阶段推进信号」处理
+ * （`thread-state/deltas.ts` 的 `getRuntimeBridgeKind` 返回 phase，不建行）。
+ *
+ * 轨迹链路与之对齐：本判定为真时 `chatSseEventToTrajectoryPush` 返回 null，
+ * `trajectoryEventAction` 落到 `skip(seq)`——推进持久化游标（避免后续事件永久
+ * 卡 pending）、不产生行。判据是「是否携带工具身份」而不是「kind 是否等于
+ * observation」：无工具身份的观测帧（G7 结构化事件）语义不变，仍按行渲染。
+ */
+function isToolObservation(event: SessionRuntimeEvent): boolean {
+  if (event.type !== `${CHAT_SSE_EVENT_PREFIX}observation`) {
+    return false;
+  }
+  const payload = event.payload ?? {};
+  return (
+    readTrimmedString(payload["tool"]) !== undefined ||
+    readTrimmedString(payload["step"]) !== undefined
+  );
+}
+
+/**
  * 把一条 chat SSE 事件转为轨迹 push；非 chat SSE 事件返回 null。
  *
  * P0-2（批次 20）：这里原有一份 `KNOWN_TRAJECTORY_KINDS` 前置白名单，未命中的
@@ -186,6 +222,10 @@ export function chatSseEventToTrajectoryPush(
   event: SessionRuntimeEvent,
 ): TrajectoryRecoveryPush | null {
   if (!isChatSseEvent(event)) {
+    return null;
+  }
+  // 工具观测帧不建行（与聊天链路同口径，见 isToolObservation）。
+  if (isToolObservation(event)) {
     return null;
   }
   const kind = event.type.slice(CHAT_SSE_EVENT_PREFIX.length) as TrajectoryEventKind;
