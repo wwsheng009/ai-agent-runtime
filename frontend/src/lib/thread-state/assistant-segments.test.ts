@@ -56,6 +56,34 @@ describe("assistant segments and generated images", () => {
     ]);
   });
 
+  // 跨通道不变量：桥接帧（chat.sse.tool_*）写进消息段的工具行，在直连通道定稿
+  // 重建（buildAssistantMessageSegments + existingSegments）时必须原样留下，
+  // 否则回合结束时工具行会被整段覆盖掉。
+  it("定稿重建保留桥接写入的工具行", () => {
+    const tool = {
+      type: "tool" as const,
+      toolCallId: "observation_step_1_tool_0",
+      name: "shell",
+      status: "finished" as const,
+      argsSummary: "go test ./...",
+      resultSummary: "Exit code: 0",
+    };
+
+    const segments = buildAssistantMessageSegments(
+      "最终答复",
+      "runtime",
+      "先跑测试",
+      { reasoningRunning: false, existingSegments: [tool] },
+    );
+
+    expect(segments.map((segment) => segment.type)).toEqual([
+      "text",
+      "reasoning",
+      "tool",
+    ]);
+    expect(segments.filter((segment) => segment.type === "tool")).toEqual([tool]);
+  });
+
   it("replaces image placeholders with generated images when building final assistant segments", () => {
     const placeholder = buildGeneratedImagePlaceholderSegment({
       phase: "partial",

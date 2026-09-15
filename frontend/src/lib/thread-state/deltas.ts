@@ -141,6 +141,11 @@ export type RuntimeBridgeToolStatus = "started" | "running" | "finished";
  *   `chat.sse.chunk` / `chat.sse.reasoning` 携带的是**同一段文本**（实测
  *   chunk 的 sequence 与 assistant_delta 相同，reasoning 却差 1），因此这里
  *   **不把它们当增量**——否则同一段推理会被追加两次。
+ * - `chat.sse.reasoning` 连「阶段推进」都不能做：它与 `assistant.reasoning`
+ *   在日志里**逐帧成对**（实测 2109 帧会话：156 对，间隔恒为 1）。增量侧把
+ *   尾段标成 `running: true`，这里若再收尾一次，同一个推理行会被两路写成
+ *   「跑/停」交替——实测该标志在推理阶段翻转 312 次。收尾只由阶段出口
+ *   （首个 `chunk` / `observation` / 工具帧）负责。
  * - 工具生命周期只有这一路有事件（`tool_call`/`tool_start`/`tool_end`），
  *   且都在实时循环里逐帧发出（handler.go 的 `emitter.Emit(streamEventName(...))`），
  *   正是「推理结束 → 工具执行」这段 UI 目前完全看不到的缺口。
@@ -150,8 +155,7 @@ export type RuntimeBridgeToolStatus = "started" | "running" | "finished";
  */
 export type RuntimeBridgeKind =
   | { kind: "tool"; status: RuntimeBridgeToolStatus }
-  | { kind: "text" }
-  | { kind: "reasoning" };
+  | { kind: "text" };
 
 export function getRuntimeBridgeKind(
   eventType: string,
@@ -170,8 +174,8 @@ export function getRuntimeBridgeKind(
       return { kind: "text" };
     case "chat.sse.chunk":
       return { kind: "text" };
-    case "chat.sse.reasoning":
-      return { kind: "reasoning" };
+    // chat.sse.reasoning 刻意不归类（见上方说明）：它是增量帧的孪生副本，
+    // 不是阶段出口，收尾会与 assistant.reasoning 的「仍在推理」标记打架。
     default:
       return null;
   }

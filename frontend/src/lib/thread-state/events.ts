@@ -89,10 +89,28 @@ export function applyRuntimeEventToThread(
  * 与 /api/agent/chat 的最终 result 天然不冲突：result 到达时 onChunk 以
  * 完整文本重建 text segment（替换而非追加），文本不会翻倍。
  */
+/** live 通道写入目标（lib/live-stream-text.ts）：消息 id + 本帧增量文本。 */
+export type RuntimeLiveDelta = {
+  kind: "reasoning" | "text";
+  messageId: string;
+  text: string;
+};
+
+/**
+ * live 通道接收器：只由「已 claim 成功」的那条通道在事件到达时调用。两条传输通道共享
+ * RuntimeDeltaCoordinator —— 每个增量只会被一方 claim，到达顺序即渲染顺序。
+ * 见 lib/live-stream-text.ts 与 use-session-runtime-stream。
+ */
+export type RuntimeLiveDeltaSink = (delta: RuntimeLiveDelta) => void;
+
+/** 单个增量段（正文 / 推理）的文本载荷。 */
+type LiveDeltaText = { kind: RuntimeLiveDelta["kind"]; text: string };
+
 export function applyRuntimeDeltaToThread(
   thread: Thread,
   event: SessionRuntimeEvent,
   expectedTurnId?: string,
+  liveSink?: RuntimeLiveDeltaSink,
 ): Thread {
   const eventTurnId = getRuntimeEventTurnId(event);
   // 与 useSessionRuntimeStream 的实时门控共用同一判定（见 matchesActiveTurn）：
@@ -101,8 +119,16 @@ export function applyRuntimeDeltaToThread(
     return thread;
   }
 
+  // live 通道目标：与写 store 的路径共用同一 predicate（同一条消息）。
+  const liveTargetId = liveSink
+    ? (findLatestAssistantMessage(thread, (message) =>
+        isLiveAssistantMessage(message, eventTurnId),
+      )?.message.id ?? "")
+    : "";
+
   const updateLiveAssistant = (
     updater: (message: ChatMessage) => ChatMessage,
+    live?: LiveDeltaText,
   ) => {
     let applied = false;
     const nextThread = updateLatestAssistantMessage(
@@ -113,6 +139,8 @@ export function applyRuntimeDeltaToThread(
       },
       (message) => isLiveAssistantMessage(message, eventTurnId),
     );
+    if (applied && live && liveSink && liveTargetId)
+      liveSink({ ...live, messageId: liveTargetId });
     return applied ? nextThread : thread;
   };
 
@@ -148,9 +176,7 @@ export function getRuntimeEventTurnId(event: SessionRuntimeEvent): string {
 function appendAssistantTextDelta(
   thread: Thread,
   event: SessionRuntimeEvent,
-  updateLiveAssistant: (
-    updater: (message: ChatMessage) => ChatMessage,
-  ) => Thread,
+  updateLiveAssistant: (updater: (message: ChatMessage) => ChatMessage, live?: LiveDeltaText) => Thread,
 ): Thread {
   const deltaText = readTextDelta(event.payload);
   if (!deltaText) {
@@ -159,15 +185,13 @@ function appendAssistantTextDelta(
   return updateLiveAssistant((message) => {
     const segments = appendTextToMessageSegments(message.segments, deltaText);
     return { ...message, segments };
-  });
+  }, { kind: "text", text: deltaText });
 }
 
 function appendAssistantReasoningDelta(
   thread: Thread,
   event: SessionRuntimeEvent,
-  updateLiveAssistant: (
-    updater: (message: ChatMessage) => ChatMessage,
-  ) => Thread,
+  updateLiveAssistant: (updater: (message: ChatMessage) => ChatMessage, live?: LiveDeltaText) => Thread,
 ): Thread {
   const payload = event.payload ?? {};
   const reasoningBlock =
@@ -185,7 +209,7 @@ function appendAssistantReasoningDelta(
       ...message,
       segments: appendReasoningToMessageSegments(message.segments, deltaText),
     };
-  });
+  }, { kind: "reasoning", text: deltaText });
 }
 
 function appendAssistantImageProgress(
@@ -431,10 +455,11 @@ function updateLatestAssistantMessage(
  *   已覆盖），状态按帧类型与 metadata.error 得到 started → running →
  *   finished/error。与 /api/agent/chat 通道用同一个 upsert，两条通道先后到达
  *   只会收敛成同一行。
- * - text / reasoning（chunk / reasoning / observation）→ 只做阶段推进：
- *   把仍在跑的推理段收尾。正文与推理文本**不在这里追加**——同一段文本已由
- *   `assistant_delta` / `assistant.reasoning` 写入（这正是 `getRuntimeBridgeKind`
- *   不把它们当增量的原因），在这里再追加一次会让每段内容翻倍。
+ * - text（chunk / observation）→ 只做阶段推进：把仍在跑的推理段收尾。正文与
+ *   推理文本**不在这里追加**——同一段文本已由 `assistant_delta` /
+ *   `assistant.reasoning` 写入（这正是 `getRuntimeBridgeKind` 不把它们当增量的
+ *   原因），在这里再追加一次会让每段内容翻倍。`chat.sse.reasoning` 是推理增量
+ *   的孪生副本，既不写正文也不收尾（收尾会与增量侧「仍在推理」的标记打架）。
  */
 function applyChatSseBridgeFrame(
   thread: Thread,

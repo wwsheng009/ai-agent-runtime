@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Thread } from "@/data/mock";
 import {
+  applyRuntimeDeltaToThread,
   applyRuntimeEventToThread,
   createStreamingAssistantMessage,
 } from "@/lib/workspace-thread-state";
@@ -111,14 +112,14 @@ describe("chat.sse 桥接帧分类", () => {
       kind: "text",
     });
     expect(getRuntimeBridgeKind("chat.sse.chunk")).toEqual({ kind: "text" });
-    expect(getRuntimeBridgeKind("chat.sse.reasoning")).toEqual({
-      kind: "reasoning",
-    });
   });
 
   it("总线增量与未知事件都不算桥接帧", () => {
     expect(getRuntimeBridgeKind("assistant_delta")).toBeNull();
     expect(getRuntimeBridgeKind("assistant.reasoning")).toBeNull();
+    // 推理帧是增量帧的孪生副本：它若参与收尾，推理行会被两路写成「跑/停」交替
+    // （真实会话 156 对帧 → 312 次翻转）。收尾只由阶段出口负责。
+    expect(getRuntimeBridgeKind("chat.sse.reasoning")).toBeNull();
     expect(getRuntimeBridgeKind("chat.sse.done")).toBeNull();
     expect(getRuntimeBridgeKind("runtime.step")).toBeNull();
   });
@@ -219,6 +220,51 @@ describe("chat.sse 阶段帧推进渲染", () => {
     );
 
     expect(reasoningSegments(thread)[0].running).toBe(false);
+  });
+
+  it("chat.sse.reasoning 孪生帧不与推理增量抢状态", () => {
+    let thread = createLiveThread([
+      { type: "reasoning", content: "先看失败原因", running: true },
+    ]);
+
+    thread = applyRuntimeDeltaToThread(
+      thread,
+      {
+        type: "assistant.reasoning",
+        timestamp: "2026-09-15T00:00:06Z",
+        payload: {
+          type: "reasoning",
+          content: "再确认工具",
+          stream_id: "stream-1",
+          sequence: 12,
+          turn_id: "turn-1",
+        },
+      },
+      "turn-1",
+    );
+    expect(reasoningSegments(thread)[0].running).toBe(true);
+    const messagesAfterDelta = thread.messages;
+
+    // 同一段推理的孪生帧紧随其后到达（真实日志间隔恒为 1）：既不改文本，
+    // 也不把推理行判成已结束——messages 身份不变，React 侧可整块跳过。
+    const next = apply(thread, {
+      type: "chat.sse.reasoning",
+      timestamp: "2026-09-15T00:00:06.100Z",
+      payload: {
+        type: "reasoning",
+        content: " ",
+        reasoning: { content: " ", delta: " ", length: 1 },
+        stream_id: "stream-1",
+        sequence: 388,
+        turn_id: "turn-1",
+      },
+    });
+
+    expect(next.messages).toBe(messagesAfterDelta);
+    expect(reasoningSegments(next)[0]).toMatchObject({
+      content: "先看失败原因再确认工具",
+      running: true,
+    });
   });
 
   it("没有在跑的推理段时不重建消息段（逐帧不换身份）", () => {
