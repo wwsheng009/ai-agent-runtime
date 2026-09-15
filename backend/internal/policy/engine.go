@@ -206,7 +206,7 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 
 	// 2) Static tool/capability policy — hard deny (evaluated against the
 	// possibly hook-modified args).
-	if deny := e.validateStaticPolicy(req); deny != nil {
+	if deny := e.validateStaticPolicy(ctx, req); deny != nil {
 		return *deny, nil
 	}
 
@@ -285,7 +285,7 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 		if len(callbackDecision.PatchedArgs) > 0 {
 			// A callback patch must not bypass hard constraints; re-validate
 			// the replacement args before accepting them.
-			updated, deny := e.applyPatchAndRevalidate(req, callbackDecision.PatchedArgs, autoCapabilities)
+			updated, deny := e.applyPatchAndRevalidate(ctx, req, callbackDecision.PatchedArgs, autoCapabilities)
 			if deny != nil {
 				return *deny, nil
 			}
@@ -330,7 +330,7 @@ func (e *Engine) resolveCapabilities(req EvalRequest) []Capability {
 // (capability scope, tool allow/deny, tool-info governance, and sandbox
 // path/URL/command checks in AllowToolCall) against the current request args.
 // It returns a deny decision when blocked, or nil when the request passes.
-func (e *Engine) validateStaticPolicy(req EvalRequest) *Decision {
+func (e *Engine) validateStaticPolicy(ctx context.Context, req EvalRequest) *Decision {
 	if e == nil || e.Policy == nil {
 		return nil
 	}
@@ -347,7 +347,9 @@ func (e *Engine) validateStaticPolicy(req EvalRequest) *Decision {
 			d := withStage(Decision{Type: DecisionDeny, Reason: err.Error()}, StagePolicy, err.Error())
 			return &d
 		}
-		if err := e.Policy.AllowToolCall(*req.ToolInfo, req.Args); err != nil {
+		// The session-bound workspace root travels in ctx so path checks cover
+		// the same file the executor will touch.
+		if err := e.Policy.AllowToolCallWithContext(ctx, *req.ToolInfo, req.Args); err != nil {
 			d := withStage(Decision{Type: DecisionDeny, Reason: err.Error()}, StagePolicy, err.Error())
 			return &d
 		}
@@ -374,8 +376,8 @@ func (e *Engine) firstMatchingRule(req EvalRequest) (Decision, bool) {
 // candidate. It never runs the hook, grants, readonly-auto, permission mode,
 // callback, or the ask handler, so it is safe to call after a callback or
 // approval argument patch without re-triggering approval prompts.
-func (e *Engine) validateHardConstraints(req EvalRequest) *Decision {
-	if deny := e.validateStaticPolicy(req); deny != nil {
+func (e *Engine) validateHardConstraints(ctx context.Context, req EvalRequest) *Decision {
+	if deny := e.validateStaticPolicy(ctx, req); deny != nil {
 		return deny
 	}
 	if ruleDecision, matched := e.firstMatchingRule(req); matched && ruleDecision.Type == DecisionDeny {
@@ -388,7 +390,7 @@ func (e *Engine) validateHardConstraints(req EvalRequest) *Decision {
 // req.Args, re-resolves auto-derived capabilities, and enforces hard
 // constraints. On failure it returns a deny decision; on success it returns the
 // updated request.
-func (e *Engine) applyPatchAndRevalidate(req EvalRequest, patched json.RawMessage, autoCapabilities bool) (EvalRequest, *Decision) {
+func (e *Engine) applyPatchAndRevalidate(ctx context.Context, req EvalRequest, patched json.RawMessage, autoCapabilities bool) (EvalRequest, *Decision) {
 	patchedArgs, err := ApplyPatchedArgs(req.Args, patched)
 	if err != nil {
 		d := withStage(Decision{Type: DecisionDeny, Reason: err.Error()}, StagePolicy, "patched_args_invalid")
@@ -398,7 +400,7 @@ func (e *Engine) applyPatchAndRevalidate(req EvalRequest, patched json.RawMessag
 	if autoCapabilities {
 		req.Capabilities = e.resolveCapabilities(req)
 	}
-	if deny := e.validateHardConstraints(req); deny != nil {
+	if deny := e.validateHardConstraints(ctx, req); deny != nil {
 		return req, deny
 	}
 	return req, nil
@@ -467,7 +469,7 @@ func (e *Engine) ValidateHardConstraints(ctx context.Context, req EvalRequest) (
 		}
 	}
 
-	if deny := e.validateHardConstraints(req); deny != nil {
+	if deny := e.validateHardConstraints(ctx, req); deny != nil {
 		return *deny, nil
 	}
 	return withStage(Decision{Type: DecisionAllow, PatchedArgs: patched, Reason: "hard_constraints_ok"}, StagePolicy, "hard_constraints_ok"), nil
@@ -668,7 +670,7 @@ func (e *Engine) resolveAsk(ctx context.Context, decision Decision, req EvalRequ
 			return withStage(Decision{Type: DecisionDeny, Reason: patchErr.Error()}, StageAsk, "patched_args_invalid"), nil
 		}
 		revalReq.Args = updatedArgs
-		if deny := e.validateHardConstraints(revalReq); deny != nil {
+		if deny := e.validateHardConstraints(ctx, revalReq); deny != nil {
 			return *deny, nil
 		}
 		patchedArgs = resp.PatchedArgs

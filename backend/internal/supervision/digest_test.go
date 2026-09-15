@@ -224,3 +224,21 @@ func TestProjectAgentCompletion_AllocatesRootScopedCursor(t *testing.T) {
 	require.Equal(t, int64(1), first.EventSeq)
 	require.Equal(t, int64(2), second.EventSeq)
 }
+
+// TestBuildDigest_TextCarriesNotificationID pins the model-facing handle: the
+// injected preflight line must expose the real opaque notification_id, because
+// ack_lifecycle / control_descendant accept nothing else. Without it the model
+// guesses "<subject_kind>:<subject_id>" (observed: "agent_run:run_2026...") and
+// the call fails with a load-notification error.
+func TestBuildDigest_TextCarriesNotificationID(t *testing.T) {
+	store := testDigestStore(t, "supervision-digest-notification-id")
+	ctx := context.Background()
+
+	created, err := store.UpsertNotification(ctx, testNotification("child-handle", 7))
+	require.NoError(t, err)
+
+	digest, err := BuildDigest(ctx, store, DigestRequest{RootScopeID: "root-session-1"})
+	require.NoError(t, err)
+	require.Contains(t, digest.Text, "notification_id="+created.NotificationID)
+	require.Contains(t, digest.Text, "recommended=cancel")
+}

@@ -3,6 +3,7 @@ package skills
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -23,6 +24,10 @@ import (
 const (
 	sessionRuntimeSubmitSyncWaitBudget = 100 * time.Millisecond
 	sessionRuntimeSubmitPollInterval   = 10 * time.Millisecond
+	// 尾部优先窗口（tail-first 回放）的默认/上限页大小：首屏只回放最近一页，
+	// 旧内容由用户上滚按需逐页向前取。
+	sessionRuntimeEventWindowDefault = 200
+	sessionRuntimeEventWindowMax     = 1000
 )
 
 type sessionRuntimeSubmitOutcome struct {
@@ -534,6 +539,30 @@ func (h *Handler) ListSessionRuntimeEvents(w http.ResponseWriter, r *http.Reques
 		h.writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	// 尾部优先窗口（tail-first 回放）：`tail=1` 取最新一页；`before_seq=N` 取
+	// seq < N 的上一页（排他上界，与 /history 的游标语义一致）。默认（都不传）
+	// 仍是原有的 after 升序续拉，既有调用方行为不变。
+	tailWindow := false
+	beforeSeq := int64(0)
+	if raw := strings.TrimSpace(r.URL.Query().Get("before_seq")); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed <= 0 {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid before_seq value"))
+			return
+		}
+		beforeSeq = parsed
+		tailWindow = true
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("tail")); raw != "" {
+		switch strings.ToLower(raw) {
+		case "1", "true", "yes":
+			tailWindow = true
+		case "0", "false", "no":
+		default:
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid tail value"))
+			return
+		}
+	}
 	waitMs := 0
 	if raw := strings.TrimSpace(r.URL.Query().Get("wait_ms")); raw != "" {
 		parsed, err := strconv.Atoi(raw)
@@ -562,6 +591,70 @@ func (h *Handler) ListSessionRuntimeEvents(w http.ResponseWriter, r *http.Reques
 		eventWake, unwatch = watcher.WatchEvents(ctx, sessionID)
 	}
 	defer unwatch()
+
+	// 窗口模式是一次性历史读取（无 live 等待语义）：首屏只取最近一页，用户上滚
+	// 时用 next_before_seq 逐页向前。大会话（实测 2288 条 / 2.25MB）因此不必在
+	// 打开时把整份事件日志重放一遍。
+	if tailWindow {
+		windowStore, ok := store.(chat.EventWindowStore)
+		if !ok {
+			h.writeError(w, http.StatusNotImplemented, errors.New(errors.ErrConfigInvalid, "session event store does not support windowed reads"))
+			return
+		}
+		windowLimit := limit
+		if windowLimit <= 0 {
+			windowLimit = sessionRuntimeEventWindowDefault
+		}
+		if windowLimit > sessionRuntimeEventWindowMax {
+			windowLimit = sessionRuntimeEventWindowMax
+		}
+		upper := beforeSeq
+		if upper <= 0 {
+			upper = math.MaxInt64
+		}
+		// 多取一条判断「还有更早一页」（与 /history 的 has_more 同语义）：多出的
+		// 那条丢弃，省掉为一次布尔判断再发一次请求。
+		events, err := windowStore.ListEventsBefore(ctx, sessionID, upper, windowLimit+1)
+		if err != nil {
+			writeSessionStoreError(w, err)
+			return
+		}
+		hasMore := len(events) > windowLimit
+		if hasMore {
+			events = events[len(events)-windowLimit:]
+		}
+		latestSeq := int64(0)
+		if sequenceStore, ok := store.(chat.EventSequenceStore); ok {
+			seq, err := sequenceStore.LastEventSeq(ctx, sessionID)
+			if err != nil {
+				writeSessionStoreError(w, err)
+				return
+			}
+			latestSeq = seq
+		}
+		firstSeq := int64(0)
+		lastSeq := int64(0)
+		if len(events) > 0 {
+			firstSeq = agentEventSeq(events[0])
+			lastSeq = agentEventSeq(events[len(events)-1])
+		}
+		for _, event := range events {
+			if seq := agentEventSeq(event); seq > latestSeq {
+				latestSeq = seq
+			}
+		}
+		h.writeJSON(w, http.StatusOK, map[string]interface{}{
+			"events":          buildSessionRuntimeEventViews(events),
+			"count":           len(events),
+			"latest_seq":      latestSeq,
+			"after_seq":       after,
+			"first_seq":       firstSeq,
+			"last_seq":        lastSeq,
+			"has_more":        hasMore,
+			"next_before_seq": firstSeq,
+		})
+		return
+	}
 
 	for {
 		events, err := store.ListEvents(ctx, sessionID, after, limit)

@@ -54,6 +54,30 @@ func (p *sandboxPolicy) effectiveBasePath(ctx context.Context) string {
 	return p.basePath
 }
 
+// workdirForExecution returns the working directory a shell invocation runs in.
+// It walks the same chain as effectiveBasePath - session workspace root from
+// ctx, then the tool-registered base path (SetBasePath) - and only falls back to
+// the process working directory when neither is bound. Shell commands therefore
+// stay in the same directory the file tools read and write when a run context
+// carries no workspace root, instead of silently executing in the server process
+// directory while the policy cleared the call against the bound workspace.
+// Precedence for an explicit workdir param is unchanged: absolute wins as-is,
+// relative joins the base.
+func (p *sandboxPolicy) workdirForExecution(ctx context.Context, workdir string) (string, error) {
+	base := p.effectiveBasePath(ctx)
+	if base == "" {
+		return resolveWorkdir(workdir)
+	}
+	workdir = strings.TrimSpace(workdir)
+	if workdir == "" {
+		return filepath.Clean(base), nil
+	}
+	if filepath.IsAbs(workdir) {
+		return filepath.Clean(workdir), nil
+	}
+	return filepath.Clean(filepath.Join(base, workdir)), nil
+}
+
 // resolvePathWithContext resolves a tool path argument like resolvePath, but
 // anchors relative targets to the session-bound workspace root from ctx
 // (falling back to the registered basePath). Absolute targets are returned

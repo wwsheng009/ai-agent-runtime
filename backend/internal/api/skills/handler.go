@@ -2430,6 +2430,79 @@ func sessionNeedsWorkspacePathMaterialization(session *chat.Session, workspacePa
 	return current == ""
 }
 
+// sessionListContextKeys 是会话"列表/检索"响应中保留的 metadata.context 白名单。
+//
+// metadata.context 同时承担两类职责：会话内部账目（冻结的系统提示词、环境快照、
+// 工具句柄别名、compact/backtrack 审计链）和前端分组/展示所需的小字段。前者单条
+// 会话可达数 KB——实测 245 条会话的 system_prompt_frozen + environment_* 等键共
+// 1.4 MB，占 GET /sessions 响应体的 79%——而列表 UI 只消费下列键：
+//   - 工作目录绑定：侧栏按目录分组（frontend/src/components/workspace/workspace-sidebar-shared.ts）
+//   - 分支谱系：分支行归属（frontend/src/lib/workspace/session-lineage.ts）
+//   - reasoning_effort：输入框档位回显（frontend/src/lib/thread-state/sessions.ts）
+//
+// 单会话详情（GET /sessions/{id}）与运行时接口不做裁剪，需要完整上下文的调用方
+// 应直接使用 sessionManager 返回的对象。
+var sessionListContextKeys = []string{
+	sessionmeta.WorkspacePath,
+	"workspacePath",
+	"cwd",
+	"workdir",
+	"working_dir",
+	sessionmeta.ProfileRoot,
+	"profileRoot",
+	sessionmeta.LegacyAICLIProfileRoot,
+	sessionmeta.ReasoningEffort,
+	"fork_parent_session_id",
+	"fork_source_message_id",
+	"fork_origin_title",
+}
+
+// projectSessionsForList 返回会话列表响应用的浅拷贝：只把 metadata.context 缩减为
+// filterAddressableSessions 丢弃无法按原字符串读回的会话记录（历史脏数据：
+// ID 带路径分隔符如 "/root/p26s3b"，或为 "<nil>"）。读取路径会先做
+// NormalizeSessionID，这类 ID 命中另一个键，因此记录只能出现在列表里、点开必然
+// 404。只在展示层过滤，不删除数据，列表之外的行为不受影响。
+func filterAddressableSessions(sessions []*chat.Session) []*chat.Session {
+	if len(sessions) == 0 {
+		return sessions
+	}
+	filtered := make([]*chat.Session, 0, len(sessions))
+	for _, session := range sessions {
+		if session == nil || !chat.IsAddressableSessionID(session.ID) {
+			continue
+		}
+		filtered = append(filtered, session)
+	}
+	return filtered
+}
+
+// projectSessionsForList 返回会话列表响应用的浅拷贝：只把 metadata.context 缩减为
+// sessionListContextKeys。sessionManager 返回的对象可能与正在运行的会话共享
+// （context map 由 live run 持续写入），因此这里必须复制而不是原地删除键。
+// 未持有任何白名单键的会话保持原对象返回，避免无谓分配。
+func projectSessionsForList(sessions []*chat.Session) []*chat.Session {
+	if sessions == nil {
+		return nil
+	}
+	projected := make([]*chat.Session, 0, len(sessions))
+	for _, session := range sessions {
+		if session == nil || len(session.Metadata.Context) == 0 {
+			projected = append(projected, session)
+			continue
+		}
+		trimmed := make(map[string]interface{}, len(sessionListContextKeys))
+		for _, key := range sessionListContextKeys {
+			if value, ok := session.Metadata.Context[key]; ok {
+				trimmed[key] = value
+			}
+		}
+		clone := *session
+		clone.Metadata.Context = trimmed
+		projected = append(projected, &clone)
+	}
+	return projected
+}
+
 // ListSessions 列出会话
 func (h *Handler) ListSessions(w http.ResponseWriter, r *http.Request) {
 	if h.sessionManager == nil {
@@ -2450,11 +2523,12 @@ func (h *Handler) ListSessions(w http.ResponseWriter, r *http.Request) {
 		writeSessionStoreError(w, err)
 		return
 	}
+	sessions = filterAddressableSessions(sessions)
 
 	resolvedUserID := h.resolveServerSessionUserID(r.URL.Query().Get("user_id"))
 
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"sessions": sessions,
+		"sessions": projectSessionsForList(sessions),
 		"count":    len(sessions),
 		"user_id":  resolvedUserID,
 	})
@@ -2647,7 +2721,7 @@ func (h *Handler) SearchSessions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"sessions": sessions,
+		"sessions": projectSessionsForList(sessions),
 		"count":    len(sessions),
 		"filters":  searchOpts,
 	})
@@ -4500,6 +4574,18 @@ func (h *Handler) applyAgentExecutionPolicy(a *agent.Agent, workspacePath string
 			logger.Warnf("API agent sandbox: %s", warning)
 		}
 	}
+
+	// Anchor relative path checks to the same base the toolkit executes against
+	// (SetBasePath = config.Workspace.Root). Without it a run context that carries
+	// no session workspace root would have the policy resolve relative arguments
+	// against the process working directory while the executor falls back to the
+	// registered base path, so the sandbox could approve a different file than
+	// the tool touches.
+	runtimeWorkspaceRoot := ""
+	if runtimeConfig != nil {
+		runtimeWorkspaceRoot = runtimeConfig.Workspace.Root
+	}
+	toolPolicy.SetPathAnchorRoot(runtimeWorkspaceRoot)
 
 	a.SetToolExecutionPolicy(toolPolicy)
 }
@@ -8304,6 +8390,19 @@ func writeSSEEventWithEnvelope(w http.ResponseWriter, event string, data interfa
 	}
 }
 
+// writeSSEComment 写一行 SSE 注释帧（`: keepalive`）并立即 flush。
+// 注释帧按 SSE 规范被客户端忽略，只用于静默长连接的存活证明：既让 proxy/LB 的
+// idle timeout 不至于把「没有业务事件」误判为死连接，也给客户端一个可观测的
+// 建连证据（配合 handler 首帧前的响应头 flush）。
+func writeSSEComment(w http.ResponseWriter, comment string) {
+	if _, err := fmt.Fprintf(w, ": %s\n\n", comment); err != nil {
+		return
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
 func wrapSSEData(event string, data interface{}, sequence int64) interface{} {
 	eventMeta := map[string]interface{}{
 		"name":           event,
@@ -8586,8 +8685,15 @@ func writeSessionStoreError(w http.ResponseWriter, err error) {
 	code := "STORE_UNAVAILABLE"
 	message := err.Error()
 
-	// 检测数据库锁错误
-	if strings.Contains(message, "database is locked") ||
+	// 会话不存在是客户端语义（404），不是"存储不可用"（503）。此前统一
+	// 落 503，前端把 503 当作可重试的服务故障（退避重试 + 降级横幅），
+	// 已删除/失效会话的读取因此会在控制台反复报错，且掩盖了真正的存储
+	// 故障。仅当错误确实是 not-found 时才降级为 404。
+	if stderrors.Is(err, chat.ErrSessionNotFound) ||
+		strings.Contains(strings.ToLower(message), "session not found") {
+		code = "SESSION_NOT_FOUND"
+		statusCode = http.StatusNotFound
+	} else if strings.Contains(message, "database is locked") ||
 		strings.Contains(message, "database locked") {
 		code = "STORE_LOCKED"
 		message = "会话存储被其他进程（aicli CLI）锁定，请稍后重试。"

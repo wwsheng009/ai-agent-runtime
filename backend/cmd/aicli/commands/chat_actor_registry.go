@@ -623,6 +623,13 @@ func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, 
 	}
 	args = normalizedArgs
 	sessionID := firstNonEmptyChatValue(strings.TrimSpace(args.ID), strings.TrimSpace(args.SessionID))
+	// 外部传入的 ID 必须先证明可寻址：带路径分隔符（如 "/root/p26s3b"）或尾部
+	// 分隔符的 ID 会被存储层在读取时规范化成另一个键，落库后立刻变成列表里
+	// 可见、打开即 404 的孤儿记录。<nil> 是 nil 被渲染成字符串的脏数据。
+	// 这里选择快速失败而不是静默改写，避免调用方拿到一个与预期不同的会话 ID。
+	if sessionID != "" && !runtimechat.IsAddressableSessionID(sessionID) {
+		return nil, fmt.Errorf("invalid session id %q: session ids must not contain path separators, trailing separators or nil placeholders", sessionID)
+	}
 	parentSessionID = firstNonEmptyChatValue(strings.TrimSpace(parentSessionID), r.Host.baseRuntimeSessionID())
 
 	var parentSession *runtimechat.Session

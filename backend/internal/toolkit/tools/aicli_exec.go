@@ -30,6 +30,10 @@ const (
 // owns cwd/env/argv/timeout/output capture.
 type AICLIExecTool struct {
 	*toolkit.BaseTool
+	// sandboxPolicy carries the tool-registered base path (SetBasePath) so the
+	// working directory resolution matches the other shell tools instead of
+	// silently falling back to the server process directory.
+	sandboxPolicy
 }
 
 func NewAICLIExecTool() *AICLIExecTool {
@@ -172,10 +176,10 @@ func NewAICLIExecTool() *AICLIExecTool {
 
 func (t *AICLIExecTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
-		runtimetypes.ToolMetadataKindKey:            runtimetypes.ToolKindExec,
-		runtimetypes.ToolMetadataReadOnlyKey:        false,
-		runtimetypes.ToolMetadataMutatesFSKey:       false,
-		runtimetypes.ToolMetadataRequiresNetKey:     false,
+		runtimetypes.ToolMetadataKindKey:             runtimetypes.ToolKindExec,
+		runtimetypes.ToolMetadataReadOnlyKey:         false,
+		runtimetypes.ToolMetadataMutatesFSKey:        false,
+		runtimetypes.ToolMetadataRequiresNetKey:      false,
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassNever,
 		"execution_model":                            "argv_process",
@@ -207,9 +211,10 @@ func (t *AICLIExecTool) Execute(ctx context.Context, params map[string]interface
 	if err != nil {
 		return &toolkit.ToolResult{Success: false, OutputKind: toolresult.KindText, Error: err}, nil
 	}
-	// Resolve like the shell tools: anchor to the session-bound workspace
-	// root when present so aicli runs inside the bound project directory.
-	cwd, err := resolveWorkdirWithBase(ctx, req.CWD)
+	// Resolve like the shell tools: prefer the session-bound workspace root from
+	// ctx, then the tool-registered base path, so aicli runs inside the bound
+	// project directory instead of the server process directory.
+	cwd, err := t.workdirForExecution(ctx, req.CWD)
 	if err != nil {
 		return &toolkit.ToolResult{Success: false, OutputKind: toolresult.KindText, Error: err}, nil
 	}

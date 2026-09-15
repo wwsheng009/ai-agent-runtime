@@ -250,6 +250,19 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 	}
 	mutatedPaths := extractStringList(params["mutated_paths"])
 	workdir := extractString(params["workdir"])
+	// Report and hint against the directory the command will actually run in
+	// (the session workspace root when the run context carries one) instead of
+	// the raw argument: an omitted workdir used to leave the model-facing
+	// "Workdir:" line blank and anchored relative-path hints to the server
+	// process directory rather than the bound workspace.
+	effectiveWorkdir, workdirErr := b.workdirForExecution(ctx, workdir)
+	if workdirErr != nil {
+		return &toolkit.ToolResult{
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      workdirErr,
+		}, nil
+	}
 	captureSettings, err := parseOutputCaptureSettings(params)
 	if err != nil {
 		return &toolkit.ToolResult{
@@ -287,7 +300,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 
 	// 使用 executer 执行命令
 	started := time.Now()
-	execResult, err := b.executeCommand(ctx, command, workdir, timeout, captureSettings)
+	execResult, err := b.executeCommand(ctx, command, effectiveWorkdir, timeout, captureSettings)
 	duration := time.Since(started)
 	if err != nil {
 		// rg/grep exit 1 with empty/no-error output is "no matches", not a hard
@@ -308,10 +321,10 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 			content := strings.TrimSpace(stripPowerShellNoiseForSearchClassification(execResult.Output))
 			if content == "" {
 				content = "未匹配到结果（rg/grep exit 1）。这是空证据，不是命令崩溃。优先改用 toolkit `grep`，或更换关键词/扩大 path。"
-			} else if hint := friendlyHintFor(command, execResult.Output, err, workdir); hint != "" {
+			} else if hint := friendlyHintFor(command, execResult.Output, err, effectiveWorkdir); hint != "" {
 				content = strings.TrimSpace(content + "\n" + hint)
 			}
-			content = formatShellCommandContent(1, execResult.ShellType, workdir, duration, false, content)
+			content = formatShellCommandContent(1, execResult.ShellType, effectiveWorkdir, duration, false, content)
 			return &toolkit.ToolResult{
 				Success:    true,
 				OutputKind: toolresult.KindText,
@@ -336,8 +349,8 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 			if next := bashCommandFailureNextAction(command, execResult.Output, err); next != "" {
 				metadata[toolresult.MetadataNextActionKey] = next
 			}
-			content := formatShellCommandContent(exitCode, execResult.ShellType, workdir, duration, false, execResult.Output)
-			if hint := friendlyHintFor(command, execResult.Output, err, workdir); hint != "" {
+			content := formatShellCommandContent(exitCode, execResult.ShellType, effectiveWorkdir, duration, false, execResult.Output)
+			if hint := friendlyHintFor(command, execResult.Output, err, effectiveWorkdir); hint != "" {
 				content = strings.TrimRight(content, "\n") + "\n" + hint
 			}
 			return &toolkit.ToolResult{
@@ -377,7 +390,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 	return &toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,
-		Content:    formatShellCommandContent(0, execResult.ShellType, workdir, duration, false, execResult.Output),
+		Content:    formatShellCommandContent(0, execResult.ShellType, effectiveWorkdir, duration, false, execResult.Output),
 		Metadata:   metadata,
 	}, nil
 }
@@ -678,7 +691,7 @@ func bashBatchCommandParams(parent, item map[string]interface{}) map[string]inte
 
 func (b *BashTool) executeCommand(ctx context.Context, command string, workdir string, timeout time.Duration, captureSettings outputCaptureSettings) (CommandExecutionResult, error) {
 	// 解析工作目录
-	resolvedWorkdir, err := resolveWorkdirWithBase(ctx, workdir)
+	resolvedWorkdir, err := b.workdirForExecution(ctx, workdir)
 	if err != nil {
 		return CommandExecutionResult{}, err
 	}
@@ -1094,26 +1107,6 @@ func resolveWorkdir(workdir string) (string, error) {
 		return "", fmt.Errorf("获取当前工作目录失败: %w", err)
 	}
 	return filepath.Clean(filepath.Join(cwd, workdir)), nil
-}
-
-// resolveWorkdirWithBase resolves the working directory with an explicit base
-// root (the session-bound workspace carried in toolctx). Precedence:
-//   1. explicit workdir param (absolute wins as-is; relative joins the base)
-//   2. session workspace root from ctx (directory-bound sessions execute here)
-//   3. process working directory (legacy fallback when no base is bound)
-func resolveWorkdirWithBase(ctx context.Context, workdir string) (string, error) {
-	base := strings.TrimSpace(toolctx.WorkspaceRoot(ctx))
-	if base == "" {
-		return resolveWorkdir(workdir)
-	}
-	workdir = strings.TrimSpace(workdir)
-	if workdir == "" {
-		return filepath.Clean(base), nil
-	}
-	if filepath.IsAbs(workdir) {
-		return filepath.Clean(workdir), nil
-	}
-	return filepath.Clean(filepath.Join(base, workdir)), nil
 }
 
 // prefixPowershellUTF8 prepends a UTF-8 encoding command for PowerShell

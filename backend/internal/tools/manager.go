@@ -543,6 +543,20 @@ func (m *Manager) metaToolDescriptor() *ToolDescriptor {
 }
 
 func (m *Manager) listMCPResources(ctx context.Context, args map[string]interface{}) (string, error) {
+	// A mistyped server/cursor kind used to be dropped silently, which turned a
+	// request for one server's resources into "list everything" and a paging
+	// request into "start from page one". Reject the call instead.
+	if raw, present := args["server"]; present && raw != nil {
+		if _, ok := raw.(string); !ok {
+			return "", fmt.Errorf("list_mcp_resources server must be a string, got %T (%v); omit it to list every enabled server", raw, raw)
+		}
+	}
+	if raw, present := args["cursor"]; present && raw != nil {
+		if _, ok := raw.(string); !ok {
+			return "", fmt.Errorf("list_mcp_resources cursor must be a string, got %T (%v); omit it to start from the first page", raw, raw)
+		}
+	}
+
 	if m.mcp == nil {
 		payload := map[string]interface{}{
 			"servers": map[string]interface{}{},

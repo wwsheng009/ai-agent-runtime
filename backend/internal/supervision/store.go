@@ -24,6 +24,10 @@ type Store interface {
 	// A refresh keeps the original notification_id and timestamps but updates
 	// state/reason/severity and bumps version.
 	UpsertNotification(ctx context.Context, n Notification) (Notification, error)
+	// GetNotification returns (nil, nil) when the row does not exist. A missing
+	// row is a caller-level not-found, never a store failure: callers decide
+	// between ErrActionNotFound (stale id) and a real load error, so the store
+	// must not leak sql.ErrNoRows / driver-level "no rows" text upward.
 	GetNotification(ctx context.Context, notificationID string) (*Notification, error)
 	ListNotifications(ctx context.Context, filter NotificationFilter) ([]Notification, error)
 	// LastNotificationSeq returns the highest event_seq observed for a root scope.

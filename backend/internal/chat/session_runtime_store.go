@@ -203,6 +203,15 @@ type EventSequenceStore interface {
 	LastEventSeq(ctx context.Context, sessionID string) (int64, error)
 }
 
+// EventWindowStore exposes tail-first windowed reads of session events.
+//
+// 与 ListEvents（after 升序续拉）互补：轨迹首屏只需要最近一页事件，用户上滚
+// 时再按 before_seq（排他上界）逐页向前。大会话（实测 2288 条 / 2.25MB）因此
+// 不必在打开会话时把整份事件日志重放一遍——「先渲染最近的消息」。
+type EventWindowStore interface {
+	ListEventsBefore(ctx context.Context, sessionID string, beforeSeq int64, limit int) ([]runtimeevents.Event, error)
+}
+
 // RuntimeStoreConfig configures the sqlite-backed runtime store.
 type RuntimeStoreConfig struct {
 	Path             string
@@ -1054,6 +1063,43 @@ func (s *InMemoryRuntimeStore) ListEvents(ctx context.Context, sessionID string,
 		if limit > 0 && len(result) >= limit {
 			break
 		}
+	}
+	return result, nil
+}
+
+// ListEventsBefore returns up to limit events with seq < beforeSeq, ascending.
+//
+// 尾部优先读取：从尾部向前收集「最近一页」，再翻回升序返回，返回契约与
+// ListEvents 完全一致（payload.seq 注入、升序、limit<=0 表示不限）。
+func (s *InMemoryRuntimeStore) ListEventsBefore(ctx context.Context, sessionID string, beforeSeq int64, limit int) ([]runtimeevents.Event, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	list := s.events[sessionID]
+	if list.len() == 0 {
+		return nil, nil
+	}
+	descending := make([]runtimeevents.Event, 0, list.len())
+	for index := list.len() - 1; index >= 0; index-- {
+		entry := list.at(index)
+		if entry.Seq >= beforeSeq {
+			continue
+		}
+		event := cloneRuntimeEvent(entry.Event)
+		if event.Payload == nil {
+			event.Payload = map[string]interface{}{}
+		}
+		event.Payload["seq"] = entry.Seq
+		descending = append(descending, event)
+		if limit > 0 && len(descending) >= limit {
+			break
+		}
+	}
+	result := make([]runtimeevents.Event, 0, len(descending))
+	for index := len(descending) - 1; index >= 0; index-- {
+		result = append(result, descending[index])
 	}
 	return result, nil
 }
@@ -3337,6 +3383,85 @@ func (s *SQLiteRuntimeStore) ListEvents(ctx context.Context, sessionID string, a
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	return events, nil
+}
+
+// ListEventsBefore returns up to limit events with seq < beforeSeq, ascending.
+//
+// 大会话首屏「先渲染最近的消息」的服务端支撑：只读最近一页（ORDER BY seq DESC
+// 走 session_events 的主键/索引前缀），再翻回升序，避免 after=0 的整份重放。
+func (s *SQLiteRuntimeStore) ListEventsBefore(ctx context.Context, sessionID string, beforeSeq int64, limit int) ([]runtimeevents.Event, error) {
+	if s == nil {
+		return nil, fmt.Errorf("runtime store is not initialized")
+	}
+	if skip, err := s.ensureForReadCtx(ctx); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
+	}
+	query := `
+		SELECT seq, type, trace_id, agent_name, tool_name, payload_json, created_at
+		FROM session_events
+		WHERE session_id = ? AND seq < ?
+		ORDER BY seq DESC
+	`
+	args := []interface{}{sessionID, beforeSeq}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list session events before: %w", err)
+	}
+	defer rows.Close()
+
+	events := make([]runtimeevents.Event, 0)
+	for rows.Next() {
+		var (
+			seq         int64
+			eventType   string
+			traceID     sql.NullString
+			agentName   sql.NullString
+			toolName    sql.NullString
+			payloadJSON string
+			createdRaw  string
+		)
+		if err := rows.Scan(&seq, &eventType, &traceID, &agentName, &toolName, &payloadJSON, &createdRaw); err != nil {
+			return nil, fmt.Errorf("scan session event: %w", err)
+		}
+		ev := runtimeevents.Event{
+			Type:      eventType,
+			SessionID: sessionID,
+			Payload:   map[string]interface{}{},
+		}
+		if traceID.Valid {
+			ev.TraceID = traceID.String
+		}
+		if agentName.Valid {
+			ev.AgentName = agentName.String
+		}
+		if toolName.Valid {
+			ev.ToolName = toolName.String
+		}
+		if payloadJSON != "" {
+			_ = json.Unmarshal([]byte(payloadJSON), &ev.Payload)
+		}
+		if ev.Payload == nil {
+			ev.Payload = map[string]interface{}{}
+		}
+		ev.Payload["seq"] = seq
+		if createdRaw != "" {
+			ev.Timestamp, _ = time.Parse(time.RFC3339Nano, createdRaw)
+		}
+		events = append(events, ev)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for left, right := 0, len(events)-1; left < right; left, right = left+1, right-1 {
+		events[left], events[right] = events[right], events[left]
 	}
 	return events, nil
 }

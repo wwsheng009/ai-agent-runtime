@@ -900,6 +900,17 @@ func (s *SQLiteSessionStorage) canonicalAppendStartTx(ctx context.Context, tx *s
 	}
 	start, anchored := identityAlignedAppendStart(history, tail)
 	if !anchored {
+		if !prefixMatches && canonicalCount > 0 && legacyStart >= len(history) {
+			// The caller's window shares no message with the stored transcript
+			// tail and no heuristic dares to append: either a deliberate
+			// replacement, or a stall that used to be completely invisible
+			// (the transcript lagged minutes behind without an error). Keep the
+			// second shape observable instead of silent.
+			if s := logpkg.S(); s != nil {
+				s.Infof("[session-history] canonical append unresolved session=%s history=%d canonical=%d prompt_rows=%d",
+					session.ID, len(history), canonicalCount, len(promptRows))
+			}
+		}
 		return legacyStart, nil
 	}
 	return start, nil
@@ -926,6 +937,17 @@ func legacyCanonicalAppendStart(session *Session, promptRows []promptProjectionR
 // tail. Everything after that anchor is new and must be appended; everything at
 // or before it is already stored, so appending it again would duplicate a turn.
 //
+// The walk runs twice. The identity pass matches id *and* substance, so a
+// message that was rewritten in place (retry) is appended instead of being
+// collapsed into its stored row. The counted pass then covers the live
+// persistence path, which rebuilds messages (streaming assembly, active-turn
+// compaction, CLI sync) and mints fresh ids for identical content: it matches by
+// substance alone, but each canonical row only backs one history message, so
+// repeated short content (tool results, "继续", the empty assistant placeholder
+// a transcript ends with while a turn streams) anchors only as often as it is
+// actually stored. Anything the canonical tail cannot back that way is new and
+// stays behind the anchor.
+//
 // anchored is false when no message of the history exists in the canonical
 // tail: the history is then a replacement/compaction view rather than an append
 // and the caller must fall back to the legacy heuristics.
@@ -946,7 +968,27 @@ func identityAlignedAppendStart(history, canonicalTail []types.Message) (int, bo
 			return index + 1, true
 		}
 	}
-	return len(history), false
+	// Counted substance pass: every canonical row backs at most one history
+	// message, so a message whose content is only present as often as it is
+	// stored stays matched even when its id was reissued, while the surplus at
+	// the end of the history is what actually gets appended.
+	quota := make(map[string]int, len(canonicalTail))
+	for index := range canonicalTail {
+		quota[canonicalMessageSubstanceKey(canonicalTail[index])]++
+	}
+	lastStored := -1
+	for index := range history {
+		key := canonicalMessageSubstanceKey(history[index])
+		if quota[key] == 0 {
+			continue
+		}
+		quota[key]--
+		lastStored = index
+	}
+	if lastStored < 0 {
+		return len(history), false
+	}
+	return lastStored + 1, true
 }
 
 func messageStoredInCanonical(message types.Message, storedIDs, storedContent map[string]struct{}) bool {

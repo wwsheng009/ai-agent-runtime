@@ -3,6 +3,7 @@ package skills
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -302,4 +303,60 @@ func TestApplySessionBacktrackRejectsBusySession(t *testing.T) {
 	router.ServeHTTP(rec, req)
 	// Busy session is a conflict with in-flight work, not a malformed request.
 	require.Equal(t, http.StatusConflict, rec.Code, "body=%s", rec.Body.String())
+}
+
+// 只读端点（turns / backtrack-audit）不应要求 session actor 租约：
+// 即使没有 session hub（或会话正被其它持有者租用），也必须能返回快照，
+// 否则前端在会话被 aicli CLI 持有时会拿到 409/503 并在控制台刷屏。
+func TestSessionReadEndpointsDoNotRequireSessionHub(t *testing.T) {
+	ctx := context.Background()
+	storage := chat.NewInMemoryStorage()
+	sessionManager := chat.NewSessionManager(storage, nil)
+	session, err := sessionManager.Create(ctx, "read-only-user")
+	require.NoError(t, err)
+	session.AddMessage(*runtimetypes.NewUserMessage("first"))
+	session.AddMessage(*runtimetypes.NewAssistantMessage("a1"))
+	require.NoError(t, storage.Update(ctx, session))
+
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetSessionManager(sessionManager)
+	// 用一个"必定失败"的 hub 工厂：旧实现通过 hub.GetOrCreate 取 actor，
+	// 会被租约冲突挡成 409；只读端点一旦走了这条路就会命中这里。
+	handler.sessionHub = chat.NewSessionHub(func(sessionID string) (*chat.SessionActor, error) {
+		t.Errorf("read-only endpoint must not acquire a session actor: %s", sessionID)
+		return nil, fmt.Errorf("session lease held by another process")
+	})
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	for _, path := range []string{
+		"/api/runtime/sessions/" + session.ID + "/turns",
+		"/api/runtime/sessions/" + session.ID + "/backtrack/audit",
+	} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, "path=%s body=%s", path, rec.Body.String())
+	}
+}
+
+// 已删除/失效会话的读取是客户端语义错误（404），不是可重试的存储故障（503）。
+func TestSessionReadEndpointsReturn404ForUnknownSession(t *testing.T) {
+	_, router, _, _, _, _ := newBacktrackHandlerFixture(t, []runtimetypes.Message{
+		*runtimetypes.NewUserMessage("first"),
+	})
+
+	missing := "session_20260915073017_missing"
+	for _, path := range []string{
+		"/api/runtime/sessions/" + missing + "/turns",
+		"/api/runtime/sessions/" + missing + "/backtrack/audit",
+		"/api/runtime/sessions/" + missing + "/history",
+	} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusNotFound, rec.Code, "path=%s body=%s", path, rec.Body.String())
+		require.Contains(t, rec.Body.String(), "SESSION_NOT_FOUND", "path=%s body=%s", path, rec.Body.String())
+	}
 }

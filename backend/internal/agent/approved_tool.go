@@ -11,6 +11,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -42,14 +43,28 @@ func (a *Agent) ExecuteToolCall(ctx context.Context, sessionID string, call type
 	return types.NewToolMessage(call.ID, ""), nil
 }
 
+// approvedToolCallContext anchors an approved tool replay to the same session
+// workspace the normal tool path uses (see toolCallContext). Without it the
+// static policy would resolve relative path arguments against the server
+// process working directory while the executor resolves them against the
+// session workspace root, so a relative argument could pass the sandbox check
+// and still escape the bound project directory.
+func approvedToolCallContext(ctx context.Context, agent *Agent) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if workspaceRoot := toolWorkspaceRootForAgent(agent); strings.TrimSpace(workspaceRoot) != "" {
+		ctx = toolctx.WithWorkspaceRoot(ctx, workspaceRoot)
+	}
+	return ctx
+}
+
 // ExecuteApprovedToolCall executes a previously approved tool call without re-running approval checks.
 func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, call types.ToolCall, history []types.Message) (*types.Message, error) {
 	if a == nil {
 		return nil, fmt.Errorf("agent is nil")
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = approvedToolCallContext(ctx, a)
 	call = NewReActLoop(a, a.llmRuntime, nil).bindFreeformToolCall(ctx, call)
 	traceID := "trace_" + uuid.NewString()
 	gateway := a.GetOutputGateway()
@@ -300,7 +315,7 @@ func (a *Agent) enforceApprovedToolHardConstraints(ctx context.Context, sessionI
 	// approved replay still cannot escape capability/tool/sandbox constraints.
 	if policy := a.GetToolExecutionPolicy(); policy != nil {
 		if info != nil {
-			if err := policy.AllowToolCall(*info, call.Args); err != nil {
+			if err := policy.AllowToolCallWithContext(ctx, *info, call.Args); err != nil {
 				return call, err.Error()
 			}
 		} else if err := policy.AllowTool(call.Name); err != nil {

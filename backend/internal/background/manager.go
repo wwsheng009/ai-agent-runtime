@@ -264,6 +264,10 @@ func (m *Manager) SubmitShell(ctx context.Context, sessionID string, req Backgro
 		}
 	}
 	req = sanitizeBackgroundTaskArgs(req)
+	// Anchor the job to the session workspace root the policy resolved the cwd
+	// argument against; otherwise exec.Cmd runs the job in the server process
+	// directory (see resolveJobCwd).
+	req.Cwd = resolveJobCwd(ctx, req.Cwd)
 	jobCtx, cancel := context.WithCancel(context.Background())
 	managed := &managedJob{
 		ctx: jobCtx,

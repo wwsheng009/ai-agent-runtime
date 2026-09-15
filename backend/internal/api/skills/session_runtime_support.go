@@ -496,6 +496,14 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 	}
 	args = normalizedArgs
 	sessionID := firstNonEmptyString(strings.TrimSpace(args.ID), strings.TrimSpace(args.SessionID))
+	// 与 aicli 侧 localActorRegistry.Spawn 同源的问题：外部传入的 ID 只有在
+	// 规范化下保持不变时才能按原字符串读回（见 chat.IsAddressableSessionID）。
+	// 否则下面的 Load 永远 not found（读取先取路径最后一段），而 Save 会把原始
+	// 字符串落库，结果是列表里可见、打开即 404 的孤儿记录（如 "/root/p26s3b"）。
+	// 与 CLI 侧一致选择快速失败，不做静默改写。
+	if sessionID != "" && !chat.IsAddressableSessionID(sessionID) {
+		return nil, fmt.Errorf("invalid session id %q: session ids must not contain path separators, trailing separators or nil placeholders", sessionID)
+	}
 	storage := c.handler.sessionManager.GetStorage()
 	if storage == nil {
 		return nil, fmt.Errorf("session storage not configured")

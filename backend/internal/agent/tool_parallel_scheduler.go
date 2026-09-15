@@ -85,6 +85,9 @@ func (loop *ReActLoop) buildParallelToolBatchPlan(toolCalls []types.ToolCall, to
 			return nil
 		}
 		if policy != nil {
+			// Planning runs without a session tool context, so a deny here only
+			// keeps the call out of the parallel batch; the execution pass
+			// re-validates with the workspace-aware context below.
 			if err := policy.AllowToolCall(toolInfo, tc.Args); err != nil {
 				return nil
 			}
@@ -239,7 +242,9 @@ func (loop *ReActLoop) executeParallelToolCall(ctx context.Context, gateway *out
 			result.Call.Args = patched
 		}
 	} else if policy := loop.agent.GetToolExecutionPolicy(); policy != nil {
-		if err := policy.AllowToolCall(item.toolInfo, item.call.Args); err != nil {
+		// Re-check with the session tool context: the planning pass above has no
+		// ctx, so only this call resolves relative paths like the executor does.
+		if err := policy.AllowToolCallWithContext(callCtx, item.toolInfo, item.call.Args); err != nil {
 			result.Error = err.Error()
 			return loop.finishParallelToolCall(ctx, gateway, sessionID, step, traceID, metadata, result, item, len(toolCalls))
 		}

@@ -230,3 +230,24 @@ func TestLocalControlService_Control_WithoutExecutor(t *testing.T) {
 	require.Equal(t, ActionFailed, record.Status)
 	require.Contains(t, record.Result, "no executor configured")
 }
+
+// TestLocalControlService_Control_UnknownNotificationIsNotFound reproduces the
+// observed agent failure: a synthesized id ("agent_run:<run_id>") instead of the
+// real opaque notification_id must surface as a domain not-found error that
+// points back at supervision_snapshot. Before the fix it leaked
+// "load notification <id>: sql: no rows in result set", which the tool broker
+// classified as TOOL_BROKER_FAILURE and reported as a broker malfunction.
+func TestLocalControlService_Control_UnknownNotificationIsNotFound(t *testing.T) {
+	_, svc, _ := newLocalControlEnv(t, "supervision-local-control-missing")
+
+	_, err := svc.Control(context.Background(), ControlRequest{
+		NotificationID: "agent_run:run_20260915012435_0a26d930",
+		Scopes:         []string{"root-session-1"},
+		Action:         ActionClose,
+		Reason:         "stale run, close it",
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrActionNotFound)
+	require.NotContains(t, err.Error(), "no rows in result set", "driver errors must not leak into the tool surface")
+	require.Contains(t, err.Error(), "supervision_snapshot", "the error must tell the caller where live ids come from")
+}

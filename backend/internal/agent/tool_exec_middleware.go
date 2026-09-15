@@ -51,7 +51,7 @@ func (loop *ReActLoop) prepareToolExecution(metadata map[string]interface{}, too
 		Args:          args,
 		InputSchema:   schema,
 		Metadata:      toolMeta,
-		WorkspaceRoot: loop.toolWorkspaceRoot(),
+		WorkspaceRoot: loop.preflightWorkspaceRoot(),
 	})
 	toolexec.AttachPreflightMetadata(metadata, decision)
 	return decision
@@ -65,6 +65,34 @@ func (loop *ReActLoop) prepareToolExecution(metadata map[string]interface{}, too
 // mismatches do not false-deny.
 func (loop *ReActLoop) toolWorkspaceRoot() string {
 	return toolWorkspaceRootForAgent(loop.agent)
+}
+
+// preflightWorkspaceRoot resolves the base for preflight path checks exactly the
+// way the executor resolves the file it is about to touch: the session-bound
+// root carried by the agent options, then the toolkit base path the builtin
+// tools were registered with (ToolExecutionPolicy.PathAnchorRoot, i.e.
+// SetBasePath(config.Workspace.Root)).
+//
+// Without the second step a run whose context carries no workspace root would
+// have preflight test relative paths against the server process directory while
+// the executor resolves them against the registered base path. The consequence
+// is not only a false denial: the read-path auto-heal ranks siblings of the
+// resolved path, so a CWD-anchored miss can rewrite the argument to a file in
+// the wrong tree before the call is ever validated.
+func (loop *ReActLoop) preflightWorkspaceRoot() string {
+	if loop == nil {
+		return ""
+	}
+	if root := loop.toolWorkspaceRoot(); root != "" {
+		return root
+	}
+	if loop.agent == nil {
+		return ""
+	}
+	if policy := loop.agent.GetToolExecutionPolicy(); policy != nil {
+		return strings.TrimSpace(policy.PathAnchorRoot)
+	}
+	return ""
 }
 
 // toolWorkspaceRootForAgent is the agent-level variant of toolWorkspaceRoot so

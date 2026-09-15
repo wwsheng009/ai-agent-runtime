@@ -648,6 +648,7 @@ func TestBroker_Execute_SpawnAgentRejectsInvalidPermissionMode(t *testing.T) {
 	broker := &Broker{AgentSessions: controller}
 
 	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+		"message":         "inspect",
 		"permission_mode": "unsafe",
 	})
 	if err == nil || !strings.Contains(err.Error(), "invalid agent permission_mode") {
@@ -663,6 +664,7 @@ func TestBroker_Execute_SpawnAgentUsesThinkingEffortAlias(t *testing.T) {
 	broker := &Broker{AgentSessions: controller}
 
 	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+		"message":         "inspect",
 		"thinking_effort": "medium",
 	})
 	if err != nil {
@@ -681,6 +683,7 @@ func TestBroker_Execute_SpawnAgentRejectsInvalidDifficulty(t *testing.T) {
 	broker := &Broker{AgentSessions: controller}
 
 	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+		"message":    "inspect",
 		"difficulty": "extreme",
 	})
 	if err == nil || !strings.Contains(err.Error(), "invalid agent difficulty") {
@@ -1414,6 +1417,18 @@ func TestClassifyBrokerExecutionErrorAgentLifecycle(t *testing.T) {
 		{name: "already exists", err: fmt.Errorf("session already exists: child-1"), code: runtimeerrors.ErrAgentAlreadyExists},
 		{name: "busy", err: fmt.Errorf("session is busy (running)"), code: runtimeerrors.ErrAgentBusy},
 		{name: "sqlite interrupted", err: fmt.Errorf("sqlite3: interrupted"), code: runtimeerrors.ErrStreamInterrupted},
+		{
+			name: "supervision notification not found",
+			err:  fmt.Errorf("supervision: action not found: notification agent_run:run_2026 not found (use notification_id from supervision_snapshot)"),
+			code: runtimeerrors.ErrToolInvalidArgs,
+		},
+		{
+			// Older hosts can still surface the raw store text; it must not be
+			// reported as a broker malfunction either.
+			name: "supervision load notification without not-found wording",
+			err:  fmt.Errorf("load notification agent_run:run_2026: sql: no rows in result set"),
+			code: runtimeerrors.ErrToolInvalidArgs,
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {

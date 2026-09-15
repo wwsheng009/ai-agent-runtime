@@ -304,7 +304,12 @@ func (s *LocalControlService) loadScopedNotification(ctx context.Context, req Li
 		return nil, fmt.Errorf("load notification %s: %w", notificationID, err)
 	}
 	if record == nil {
-		return nil, fmt.Errorf("%w: notification %s", ErrActionNotFound, notificationID)
+		// The id is stale, fabricated (e.g. "agent_run:<subject_id>" instead of
+		// the real opaque "n-<subject>-<hash>"), or belongs to another host's
+		// store. Point the caller at the only reliable source of live ids so
+		// the retry is a snapshot read, not another guess.
+		return nil, fmt.Errorf("%w: notification %s not found (use notification_id from supervision_snapshot; ids are opaque and change per subject)",
+			ErrActionNotFound, notificationID)
 	}
 	if !notificationInScopes(*record, req.Scopes) {
 		return nil, fmt.Errorf("%w: notification %s is outside the caller scope", ErrActionNotAllowed, notificationID)

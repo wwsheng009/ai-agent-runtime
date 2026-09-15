@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -688,6 +689,14 @@ func (s *SQLiteSupervisionStore) GetNotification(ctx context.Context, notificati
 	`, notificationID)
 	record, err := scanNotification(row)
 	if err != nil {
+		// The Store contract keeps "no such notification" in the caller
+		// (LocalControlService turns nil into ErrActionNotFound with the scope
+		// check). Leaking sql.ErrNoRows here made a stale/fabricated
+		// notification_id surface as an opaque
+		// "load notification <id>: no rows in result set" broker failure.
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	return &record, nil

@@ -23,6 +23,7 @@ import (
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	llmadapter "github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -2714,7 +2715,9 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 				result.Call.Args = patched
 			}
 		} else if policy := loop.agent.GetToolExecutionPolicy(); policy != nil {
-			if err := policy.AllowToolCall(toolInfo, tc.Args); err != nil {
+			// Validate against the session-bound tool context so relative paths
+			// are checked where the tool will actually read/write them.
+			if err := policy.AllowToolCallWithContext(callCtx, toolInfo, tc.Args); err != nil {
 				result.Error = err.Error()
 				loop.emitToolDenied(sessionID, tc, step, traceID, classifyDeniedPolicy(result.Error), result.Error, metadata)
 				result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, map[string]interface{}{
@@ -5701,6 +5704,9 @@ func sanitizeGeneratedImageSessionID(value string) string {
 }
 
 func decodeSubagentTasks(args map[string]interface{}) ([]SubagentTask, error) {
+	if err := validateDecodedSubagentTopLevelArgs(args); err != nil {
+		return nil, err
+	}
 	rawTasks, ok := args["agents"]
 	if !ok {
 		return nil, fmt.Errorf("spawn_subagents missing agents")
@@ -5717,6 +5723,9 @@ func decodeSubagentTasks(args map[string]interface{}) ([]SubagentTask, error) {
 		if !ok {
 			return nil, fmt.Errorf("spawn_subagents agent %d is invalid", index)
 		}
+		if err := validateDecodedSubagentFieldTypes(index, item); err != nil {
+			return nil, err
+		}
 		reasoningEffort := stringValue(item["reasoning_effort"])
 		thinkingEffort := stringValue(item["thinking_effort"])
 		routeWarnings := []string(nil)
@@ -5728,18 +5737,34 @@ func decodeSubagentTasks(args map[string]interface{}) ([]SubagentTask, error) {
 		if completionRequirement == "" {
 			completionRequirement = stringValue(item["completionRequirement"])
 		}
+		difficulty, err := normalizeDecodedSubagentDifficulty(index, stringValue(item["difficulty"]))
+		if err != nil {
+			return nil, err
+		}
+		completionRequirement, err = normalizeDecodedSubagentCompletionRequirement(index, completionRequirement)
+		if err != nil {
+			return nil, err
+		}
+		budgetTokens, budgetWarning := sanitizeDecodedSubagentOptionRange("budget_tokens", item["budget_tokens"])
+		if budgetWarning != "" {
+			routeWarnings = append(routeWarnings, budgetWarning)
+		}
+		timeoutSec, timeoutWarning := sanitizeDecodedSubagentOptionRange("timeout", item["timeout"])
+		if timeoutWarning != "" {
+			routeWarnings = append(routeWarnings, timeoutWarning)
+		}
 		task := SubagentTask{
 			ID:                    stringValue(item["id"]),
 			Role:                  stringValue(item["role"]),
 			Goal:                  stringValue(item["goal"]),
-			Difficulty:            stringValue(item["difficulty"]),
+			Difficulty:            difficulty,
 			DifficultyRationale:   stringValue(item["difficulty_rationale"]),
 			Provider:              stringValue(item["provider"]),
 			Model:                 stringValue(item["model"]),
 			ReasoningEffort:       reasoningEffort,
 			RouteWarnings:         routeWarnings,
-			BudgetTokens:          intValue(item["budget_tokens"]),
-			TimeoutSec:            intValue(item["timeout"]),
+			BudgetTokens:          budgetTokens,
+			TimeoutSec:            timeoutSec,
 			ReadOnly:              boolValue(item["read_only"]),
 			CompletionRequirement: completionRequirement,
 		}
@@ -5755,7 +5780,327 @@ func decodeSubagentTasks(args map[string]interface{}) ([]SubagentTask, error) {
 		tasks = append(tasks, task)
 	}
 
+	if err := validateDecodedSubagentDependencies(tasks); err != nil {
+		return nil, err
+	}
+
 	return tasks, nil
+}
+
+// normalizeDecodedSubagentDifficulty canonicalizes the routing hint a model sent
+// for one spawned subagent. spawn_agent already fails closed on an unknown
+// difficulty; spawn_subagents forwarded the raw text, and an unrecognized value
+// silently degraded to the default rank in subagentDifficultyRank.
+func normalizeDecodedSubagentDifficulty(index int, raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	difficulty, ok := modelrouting.NormalizeDifficulty(raw)
+	if !ok {
+		return "", fmt.Errorf(
+			"spawn_subagents agent %d has invalid difficulty %q (accepted: easy|normal|hard|expert, plus common synonyms such as low|medium|high)",
+			index, raw)
+	}
+	return difficulty, nil
+}
+
+// normalizeDecodedSubagentCompletionRequirement canonicalizes the per-task outcome
+// contract. NormalizeCompletionRequirement silently folds an unknown value into
+// "none" (child_factory.go), so a typo such as "must_complete" used to disable the
+// requirement instead of being reported; agentdef/validate.go rejects the same
+// mistake for agent definitions.
+func normalizeDecodedSubagentCompletionRequirement(index int, raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", nil
+	}
+	switch strings.ToLower(trimmed) {
+	case CompletionRequirementNone:
+		return CompletionRequirementNone, nil
+	case CompletionRequirementCompleteTask, "complete-task", "completetask":
+		return CompletionRequirementCompleteTask, nil
+	default:
+		return "", fmt.Errorf(
+			"spawn_subagents agent %d has invalid completion_requirement %q (want none|complete_task)",
+			index, trimmed)
+	}
+}
+
+const (
+	subagentFieldString = "JSON string"
+	subagentFieldNumber = "JSON number"
+	subagentFieldBool   = "JSON boolean"
+	subagentFieldArray  = "JSON array"
+)
+
+// decodedSubagentTopLevelArgTypes lists the JSON kinds the spawn_subagents
+// top-level options must use. execution_mode used to fall back to the
+// synchronous default on a wrong kind or a typo such as "backgroud", which
+// turned an explicit background request into a blocking wait with no
+// diagnostic; wait_timeout_sec and batch_idempotency_key were dropped the same
+// silent way.
+var decodedSubagentTopLevelArgTypes = []struct {
+	key  string
+	want string
+}{
+	{"execution_mode", subagentFieldString},
+	{"wait_timeout_sec", subagentFieldNumber},
+	{"batch_idempotency_key", subagentFieldString},
+}
+
+func validateDecodedSubagentTopLevelArgs(args map[string]interface{}) error {
+	for _, field := range decodedSubagentTopLevelArgTypes {
+		value, present := args[field.key]
+		if !present || value == nil {
+			continue
+		}
+		if !subagentFieldMatchesType(value, field.want) {
+			return fmt.Errorf(
+				"spawn_subagents field %q must be a %s, got %T (%v); omit it to use the runtime default",
+				field.key, field.want, value, value)
+		}
+	}
+	if raw, present := args["execution_mode"]; present && raw != nil {
+		mode, ok := raw.(string)
+		if !ok {
+			return fmt.Errorf(
+				"spawn_subagents field %q must be a JSON string, got %T (%v); omit it to keep the synchronous default",
+				"execution_mode", raw, raw)
+		}
+		if trimmed := strings.TrimSpace(mode); trimmed != "" {
+			if _, err := subagentbatch.ParseExecutionMode(trimmed); err != nil {
+				return fmt.Errorf(
+					"spawn_subagents execution_mode %q is not supported (want wait|background); omit it to keep the synchronous default",
+					trimmed)
+			}
+		}
+	}
+	return nil
+}
+
+// decodedSubagentFieldTypes lists the JSON kind spawn_subagents expects for every
+// key this decoder reads. stringValue/boolValue/intValue/stringSliceValue ignore a
+// mismatched kind and yield the zero value, so a mistyped field used to vanish
+// silently. That mattered most for depends_on: a string instead of an array (or a
+// non-string element) dropped a dependency entirely, so a "verifier" could start
+// before the writer it was meant to check.
+var decodedSubagentFieldTypes = []struct {
+	key  string
+	want string
+}{
+	{"id", subagentFieldString},
+	{"role", subagentFieldString},
+	{"goal", subagentFieldString},
+	{"difficulty", subagentFieldString},
+	{"difficulty_rationale", subagentFieldString},
+	{"provider", subagentFieldString},
+	{"model", subagentFieldString},
+	{"reasoning_effort", subagentFieldString},
+	{"thinking_effort", subagentFieldString},
+	{"completion_requirement", subagentFieldString},
+	{"completionRequirement", subagentFieldString},
+	{"budget_tokens", subagentFieldNumber},
+	{"timeout", subagentFieldNumber},
+	{"read_only", subagentFieldBool},
+	{"tools_whitelist", subagentFieldArray},
+	{"depends_on", subagentFieldArray},
+	{"patches", subagentFieldArray},
+}
+
+func validateDecodedSubagentFieldTypes(index int, item map[string]interface{}) error {
+	for _, field := range decodedSubagentFieldTypes {
+		value, present := item[field.key]
+		if !present || value == nil {
+			continue
+		}
+		if !subagentFieldMatchesType(value, field.want) {
+			return fmt.Errorf(
+				"spawn_subagents agent %d field %q must be a %s, got %T (%v); omit it to use the runtime default",
+				index, field.key, field.want, value, value)
+		}
+		switch field.key {
+		case "tools_whitelist", "depends_on":
+			if err := validateDecodedSubagentStringItems(index, field.key, value); err != nil {
+				return err
+			}
+		case "patches":
+			for position, patch := range value.([]interface{}) {
+				if _, ok := patch.(map[string]interface{}); !ok {
+					return fmt.Errorf(
+						"spawn_subagents agent %d field \"patches\" item %d must be an object, got %T (%v)",
+						index, position, patch, patch)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func validateDecodedSubagentStringItems(index int, key string, value interface{}) error {
+	items, ok := value.([]interface{})
+	if !ok {
+		return nil
+	}
+	for position, item := range items {
+		text, ok := item.(string)
+		if !ok || strings.TrimSpace(text) == "" {
+			return fmt.Errorf(
+				"spawn_subagents agent %d field %q item %d must be a non-empty string, got %T (%v)",
+				index, key, position, item, item)
+		}
+	}
+	return nil
+}
+
+func subagentFieldMatchesType(value interface{}, want string) bool {
+	switch want {
+	case subagentFieldString:
+		_, ok := value.(string)
+		return ok
+	case subagentFieldNumber:
+		switch value.(type) {
+		case int, int8, int16, int32, int64,
+			uint, uint8, uint16, uint32, uint64,
+			float32, float64, json.Number:
+			return true
+		default:
+			return false
+		}
+	case subagentFieldBool:
+		_, ok := value.(bool)
+		return ok
+	case subagentFieldArray:
+		_, ok := value.([]interface{})
+		return ok
+	default:
+		return true
+	}
+}
+
+// subagentNumericOptionMax bounds the two numeric spawn_subagents options. Both
+// are consumed as ints (tokens, seconds) and both feed time.Duration/int
+// arithmetic, so anything above the int32 range is nonsense that only creates
+// overflow paths.
+const subagentNumericOptionMax = math.MaxInt32
+
+// sanitizeDecodedSubagentOptionRange converts a decoded numeric option into the
+// value the runtime consumes, and reports what it had to change.
+//
+// The routing plan (docs/plan/task-difficulty-model-routing-plan.md §32.2) keeps
+// `budget_tokens`/`timeout` non-fatal on purpose: an unusable value falls back to
+// the configured default or is clipped to the allowed range. That policy is fine
+// as long as the fallback is visible, because the raw int conversion was not:
+//
+//   - 1200.5 silently became 1200, and an out-of-range float (1e30) turned into an
+//     undefined int; the downstream time.Duration(seconds)*time.Second then
+//     overflows int64 into a negative deadline, so "an enormous timeout" behaved
+//     like "expire immediately".
+//   - 0 and negative values are read downstream as "not set" (modelrouting
+//     resolver.go applies only task.BudgetTokens > 0 and
+//     internal/agent/child_factory.go only task.TimeoutSec > 0), so the requested
+//     value silently turned into the routed or host default instead.
+//
+// Returning a warning keeps the documented fallback while telling the caller what
+// its value actually became; the caller sees it through task.RouteWarnings.
+func sanitizeDecodedSubagentOptionRange(key string, value interface{}) (int, string) {
+	if value == nil {
+		return 0, ""
+	}
+	number, ok := subagentOptionFloat(value)
+	if !ok || math.IsNaN(number) {
+		return 0, key + "_ignored_non_numeric"
+	}
+	truncated := math.Trunc(number)
+	if truncated > float64(subagentNumericOptionMax) {
+		return subagentNumericOptionMax, key + "_clamped_to_range"
+	}
+	if truncated < 1 {
+		return 0, key + "_ignored_non_positive"
+	}
+	if truncated != number {
+		return int(truncated), key + "_truncated_to_integer"
+	}
+	return int(truncated), ""
+}
+
+func subagentOptionFloat(value interface{}) (float64, bool) {
+	switch typed := value.(type) {
+	case int:
+		return float64(typed), true
+	case int8:
+		return float64(typed), true
+	case int16:
+		return float64(typed), true
+	case int32:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case uint:
+		return float64(typed), true
+	case uint8:
+		return float64(typed), true
+	case uint16:
+		return float64(typed), true
+	case uint32:
+		return float64(typed), true
+	case uint64:
+		return float64(typed), true
+	case float32:
+		return float64(typed), true
+	case float64:
+		return typed, true
+	case json.Number:
+		parsed, err := typed.Float64()
+		if err != nil {
+			return 0, false
+		}
+		return parsed, true
+	default:
+		return 0, false
+	}
+}
+
+// validateDecodedSubagentDependencies applies the planner's dependency contract
+// (subagent_plan.go validates planned tasks the same way) to tasks the model
+// supplied directly. The scheduler treats "dependency id does not exist" exactly
+// like "dependency has not completed yet" (scheduler.go dependenciesSatisfied),
+// so one typo in depends_on used to leave the child permanently unready instead
+// of failing the batch with a message the caller can act on.
+func validateDecodedSubagentDependencies(tasks []SubagentTask) error {
+	byID := make(map[string]SubagentTask, len(tasks))
+	ids := make([]string, 0, len(tasks))
+	for index, task := range tasks {
+		id := strings.TrimSpace(task.ID)
+		if id == "" {
+			return fmt.Errorf("spawn_subagents agent %d is missing id", index)
+		}
+		if _, exists := byID[id]; exists {
+			return fmt.Errorf("spawn_subagents agent id %q is duplicated; depends_on cannot address it unambiguously", id)
+		}
+		byID[id] = task
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, task := range tasks {
+		for _, raw := range task.DependsOn {
+			dependency := strings.TrimSpace(raw)
+			if dependency == "" {
+				continue
+			}
+			if dependency == strings.TrimSpace(task.ID) {
+				return fmt.Errorf("spawn_subagents agent %q cannot depend on itself", task.ID)
+			}
+			if _, ok := byID[dependency]; !ok {
+				return fmt.Errorf("spawn_subagents agent %q depends on unknown agent %q (known ids: %s)",
+					task.ID, dependency, strings.Join(ids, ", "))
+			}
+		}
+	}
+	if hasSubagentDependencyCycle(byID) {
+		return fmt.Errorf("spawn_subagents dependency graph has cyclic dependencies")
+	}
+	return nil
 }
 
 // subagentToolExecutionMode parses execution_mode from the tool request,
@@ -6153,9 +6498,19 @@ func spawnSubagentsToolDefinition() types.ToolDefinition {
 									},
 								},
 							},
-							"model":         map[string]interface{}{"type": "string"},
-							"budget_tokens": map[string]interface{}{"type": "integer"},
-							"timeout":       map[string]interface{}{"type": "integer"},
+							"model": map[string]interface{}{"type": "string"},
+							"budget_tokens": map[string]interface{}{
+								"type":        "integer",
+								"minimum":     1,
+								"maximum":     subagentNumericOptionMax,
+								"description": "Optional per-task token cap. It is not a way to request an unlimited run: 0 or a negative value is ignored (the routed or host default applies) and the effective value is reported back in route_warnings, so omit the field instead of sending 0. Values above the maximum are clipped and reported the same way.",
+							},
+							"timeout": map[string]interface{}{
+								"type":        "integer",
+								"minimum":     1,
+								"maximum":     subagentNumericOptionMax,
+								"description": "Optional per-task wall-clock limit in seconds. 0 or a negative value is ignored (the routed default applies) and reported in route_warnings, so omit the field instead of sending 0. Non-integer values are truncated and values above the maximum are clipped, both reported in route_warnings.",
+							},
 							"read_only": map[string]interface{}{
 								"type":        "boolean",
 								"description": runtimepolicy.ReadOnlyChildOptionDescription,

@@ -165,16 +165,27 @@ func supervisionToolDefinitions() []types.ToolDefinition {
 }
 
 // parseSupervisionSnapshotArgs converts raw tool args into the typed input.
-func parseSupervisionSnapshotArgs(args map[string]interface{}) SupervisionSnapshotArgs {
+//
+// after_seq and limit go through the shared JSON-number readers: the previous
+// intToolValue folded every other spelling (a stringified cursor, uint,
+// json.Number) into 0, which silently re-read the digest from the beginning
+// instead of resuming the caller's cursor.
+func parseSupervisionSnapshotArgs(args map[string]interface{}) (SupervisionSnapshotArgs, error) {
 	parsed := SupervisionSnapshotArgs{}
-	parsed.AfterSeq = int64(intToolValue(args["after_seq"]))
+	if value, ok, err := toolArgInt64(ToolSupervisionSnapshot, args, "after_seq"); err != nil {
+		return parsed, err
+	} else if ok {
+		parsed.AfterSeq = value
+	}
 	if value, ok := args["include_resolved"].(bool); ok {
 		parsed.IncludeResolved = value
 	}
-	if value := intToolValue(args["limit"]); value > 0 {
+	if value, ok, err := brokerToolArgInt(ToolSupervisionSnapshot, args, "limit"); err != nil {
+		return parsed, err
+	} else if ok && value > 0 {
 		parsed.Limit = value
 	}
-	return parsed
+	return parsed, nil
 }
 
 // parseAckLifecycleArgs converts raw tool args into the typed input.
@@ -204,13 +215,11 @@ func parseAckLifecycleArgs(args map[string]interface{}) (AckLifecycleArgs, error
 		}
 		parsed.Until = until
 	}
-	if value, ok := args["expected_version"]; ok {
-		if version, err := int64ToolValue(value); err == nil {
-			parsed.ExpectedVersion = version
-			parsed.HasExpectedVersion = true
-		} else {
-			return parsed, fmt.Errorf("expected_version: %w", err)
-		}
+	if version, ok, err := toolArgInt64(ToolAckLifecycle, args, "expected_version"); err != nil {
+		return parsed, err
+	} else if ok {
+		parsed.ExpectedVersion = version
+		parsed.HasExpectedVersion = true
 	}
 	return parsed, nil
 }
@@ -236,11 +245,9 @@ func parseControlDescendantArgs(args map[string]interface{}) (ControlDescendantA
 	default:
 		return parsed, fmt.Errorf("cascade must be target or descendants, got %q", parsed.Cascade)
 	}
-	if value, ok := args["expected_version"]; ok {
-		version, err := int64ToolValue(value)
-		if err != nil {
-			return parsed, fmt.Errorf("expected_version: %w", err)
-		}
+	if version, ok, err := toolArgInt64(ToolControlDescendant, args, "expected_version"); err != nil {
+		return parsed, err
+	} else if ok {
 		parsed.ExpectedVersion = version
 		parsed.HasExpectedVersion = true
 	}
@@ -248,9 +255,9 @@ func parseControlDescendantArgs(args map[string]interface{}) (ControlDescendantA
 }
 
 // supervisionArgValue reads one optional string argument. A missing key or an
-// explicit JSON null must read as empty: the generic stringValue helper renders
-// nil as the literal "<nil>", which would otherwise be parsed as a real
-// deadline/state and reject an argument the caller never sent.
+// explicit JSON null must read as empty: an absent deadline or state must not be
+// parsed as a real value, and the placeholder text "<nil>" must never be
+// rejected as if the caller had sent an unsupported deadline/state.
 func supervisionArgValue(args map[string]interface{}, key string) string {
 	raw, ok := args[key]
 	if !ok || raw == nil {
@@ -269,32 +276,6 @@ func parseSupervisionDeadline(raw string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("until %q is neither RFC3339 nor a duration such as 30m", raw)
 	}
 	return time.Now().UTC().Add(duration), nil
-}
-
-func intToolValue(value interface{}) int {
-	switch typed := value.(type) {
-	case float64:
-		return int(typed)
-	case int:
-		return typed
-	case int64:
-		return int(typed)
-	default:
-		return 0
-	}
-}
-
-func int64ToolValue(value interface{}) (int64, error) {
-	switch typed := value.(type) {
-	case float64:
-		return int64(typed), nil
-	case int:
-		return int64(typed), nil
-	case int64:
-		return typed, nil
-	default:
-		return 0, fmt.Errorf("expected an integer, got %T", value)
-	}
 }
 
 // supervisionNotificationPayload renders a compact, model-facing view of a
@@ -347,7 +328,10 @@ func (b *Broker) executeSupervisionTool(ctx context.Context, toolName, sessionID
 	}
 	switch normalizeToolName(toolName) {
 	case ToolSupervisionSnapshot:
-		request := parseSupervisionSnapshotArgs(args)
+		request, err := parseSupervisionSnapshotArgs(args)
+		if err != nil {
+			return nil, nil, err
+		}
 		digest, err := b.Supervision.SupervisionSnapshot(ctx, sessionID, request)
 		if err != nil {
 			return nil, nil, err

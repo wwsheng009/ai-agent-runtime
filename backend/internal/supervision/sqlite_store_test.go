@@ -327,3 +327,23 @@ func TestSQLiteStore_TeamEdge_AncestorsAndCycle(t *testing.T) {
 	_, err = store.ListTeamAncestors(ctx, "team-root")
 	require.Error(t, err, "cycle in team edges must be rejected")
 }
+
+// TestStoreGetNotification_MissingRowIsNilNil pins the not-found contract that
+// LocalControlService relies on: a missing notification is reported as
+// (nil, nil), never as a driver error. Leaking sql.ErrNoRows here is what turned
+// a stale/fabricated notification_id into the opaque
+// "load notification <id>: no rows in result set" broker failure.
+func TestStoreGetNotification_MissingRowIsNilNil(t *testing.T) {
+	store := newTestStore(t, "supervision-get-notification-missing")
+	ctx := context.Background()
+
+	record, err := store.GetNotification(ctx, "agent_run:run_missing")
+	require.NoError(t, err, "a missing row is a caller-level not-found, not a store error")
+	require.Nil(t, record)
+
+	seeded := seedLocalNotification(t, store, "child-present")
+	found, err := store.GetNotification(ctx, seeded.NotificationID)
+	require.NoError(t, err)
+	require.NotNil(t, found)
+	require.Equal(t, seeded.NotificationID, found.NotificationID)
+}

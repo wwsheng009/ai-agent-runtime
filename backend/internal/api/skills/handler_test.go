@@ -2248,6 +2248,54 @@ func TestApplyAgentExecutionPolicy_MergesRuntimeSandboxConfig(t *testing.T) {
 	assert.Equal(t, []string{"localhost"}, sandboxCfg.DeniedHosts)
 }
 
+// The static policy must resolve relative path arguments against the same base
+// the toolkit executes against: the registered toolkit base path
+// (config.Workspace.Root). A session-bound request workspace is deliberately not
+// used, because the executor only honors it through toolctx.WorkspaceRoot and
+// otherwise resolves against the registered base path.
+func TestApplyAgentExecutionPolicy_AnchorsRelativePathChecks(t *testing.T) {
+	mcpManager := &testMCPManager{}
+	registry := skill.NewRegistry(mcpManager)
+	handler := NewHandler(registry, nil, mcpManager)
+
+	runtimeCfg := runtimecfg.DefaultRuntimeConfig()
+	runtimeCfg.Workspace.Root = t.TempDir()
+	boundWorkspace := t.TempDir()
+
+	agentInstance := handler.newAPIAgent(&agent.Config{
+		Name:     "api-agent",
+		Model:    "test-model",
+		MaxSteps: 3,
+	})
+	handler.applyAgentExecutionPolicy(agentInstance, boundWorkspace, runtimeCfg, nil)
+
+	policy := agentInstance.GetToolExecutionPolicy()
+	require.NotNil(t, policy)
+	assert.Equal(t, runtimeCfg.Workspace.Root, policy.PathAnchorRoot,
+		"the anchor must mirror the registered toolkit base path, not the request workspace")
+
+	// Same contract without a bound request workspace.
+	unbound := handler.newAPIAgent(&agent.Config{
+		Name:     "api-agent",
+		Model:    "test-model",
+		MaxSteps: 3,
+	})
+	handler.applyAgentExecutionPolicy(unbound, "", runtimeCfg, nil)
+	assert.Equal(t, runtimeCfg.Workspace.Root, unbound.GetToolExecutionPolicy().PathAnchorRoot,
+		"an unbound session must anchor to the runtime toolkit root")
+
+	// A handler without a runtime config leaves the anchor empty rather than
+	// inventing a root the executor would not use; the context workspace root
+	// still governs resolution in that case.
+	noRuntime := handler.newAPIAgent(&agent.Config{
+		Name:     "api-agent",
+		Model:    "test-model",
+		MaxSteps: 3,
+	})
+	handler.applyAgentExecutionPolicy(noRuntime, boundWorkspace, nil, nil)
+	assert.Empty(t, noRuntime.GetToolExecutionPolicy().PathAnchorRoot)
+}
+
 func TestAgentChat_ProfileInjectsSystemPrompt(t *testing.T) {
 	profileRoot := t.TempDir()
 	writeProfileFile := func(path, contents string) {

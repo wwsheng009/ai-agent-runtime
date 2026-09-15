@@ -968,7 +968,14 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 	}
 	apiAgent := buildLocalChatAgent(session, h, runtimeConfig, workspaceRoot, childAgentType, requestedModel, requestedProvider, requestedReasoningEffort)
 	if !isBaseSession && strings.TrimSpace(childAgentType) != "" {
-		applyLocalChildAgentdefToolPolicy(apiAgent, childAgentType, session, workspaceRoot)
+		toolkitBasePath := ""
+		switch {
+		case runtimeConfig != nil:
+			toolkitBasePath = runtimeConfig.Workspace.Root
+		case h != nil && h.RuntimeConfig != nil:
+			toolkitBasePath = h.RuntimeConfig.Workspace.Root
+		}
+		applyLocalChildAgentdefToolPolicy(apiAgent, childAgentType, session, workspaceRoot, toolkitBasePath)
 	}
 	applyLocalChildReadOnlyPolicy(apiAgent, childReadOnly)
 	maxDepth := 0
@@ -1026,7 +1033,11 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 
 // applyLocalChildAgentdefToolPolicy overlays agentdef allow/deny/read-only onto
 // a child actor when spawn_agent agent_type resolves to a portable definition.
-func applyLocalChildAgentdefToolPolicy(apiAgent *agent.Agent, agentType string, session *ChatSession, workspaceRoot string) {
+// toolkitBasePath is the base path the builtin tools were registered with
+// (SetBasePath(config.Workspace.Root)); it becomes the child policy's fallback
+// anchor for relative path checks - never the child's own binding workspace,
+// which the executor only honors through toolctx.WorkspaceRoot.
+func applyLocalChildAgentdefToolPolicy(apiAgent *agent.Agent, agentType string, session *ChatSession, workspaceRoot string, toolkitBasePath string) {
 	if apiAgent == nil {
 		return
 	}
@@ -1065,6 +1076,13 @@ func applyLocalChildAgentdefToolPolicy(apiAgent *agent.Agent, agentType string, 
 		toolPolicy = agent.NewToolExecutionPolicy(allowlist, readOnly)
 	} else {
 		toolPolicy = toolPolicy.DeriveChild(allowlist, readOnly)
+	}
+	// A freshly created child policy inherits nothing, so seat the toolkit base
+	// path on it before a sandbox is materialized; otherwise its relative path
+	// checks would fall back to the server process directory while the executor
+	// resolves against the registered base path.
+	if strings.TrimSpace(toolPolicy.PathAnchorRoot) == "" {
+		toolPolicy.SetPathAnchorRoot(toolkitBasePath)
 	}
 	if len(binding.ToolDenylist) > 0 {
 		if toolPolicy.DeniedTools == nil {
@@ -1432,6 +1450,15 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 		}
 	}
 	if toolPolicy := buildLocalChatToolPolicy(session, host.ToolSurface, apiAgent.GetToolBroker()); toolPolicy != nil {
+		// Mirror the toolkit base path (SetBasePath(config.Workspace.Root)) for the
+		// static policy: when the run context carries no workspace root, relative
+		// path arguments still have to be validated against the file the executor
+		// will touch instead of the server process working directory.
+		runtimeWorkspaceRoot := ""
+		if runtimeConfig != nil {
+			runtimeWorkspaceRoot = runtimeConfig.Workspace.Root
+		}
+		toolPolicy.SetPathAnchorRoot(runtimeWorkspaceRoot)
 		apiAgent.SetToolExecutionPolicy(toolPolicy)
 	}
 	// Product permission overlay rules on the actor permission engine.

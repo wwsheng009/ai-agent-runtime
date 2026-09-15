@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -310,13 +312,15 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		return withBrokerSourceDefinitions(append(definitions,
 			types.ToolDefinition{
 				Name:        ToolSpawnAgent,
-				Description: "Create a child session for bounded, independent work that can run in parallel and whose result is needed. Avoid delegation when the parent can finish the same work with fewer calls. Depth limit errors are not retryable: complete locally, reuse an existing child, or use spawn_team. This is separate from spawn_team teammates.",
+				Description: "Create a child session for bounded, independent work that can run in parallel and whose result is needed. Required: message — the child's initial task prompt (aliases: goal, task). A call without a task prompt is rejected instead of creating an empty child session. Unsupported arguments (for example tools_whitelist) are rejected. Avoid delegation when the parent can finish the same work with fewer calls. Depth limit errors are not retryable: complete locally, reuse an existing child, or use spawn_team. This is separate from spawn_team teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"id":                     map[string]interface{}{"type": "string", "description": "Optional explicit child session id."},
 						"session_id":             map[string]interface{}{"type": "string", "description": "Alias for id."},
-						"message":                map[string]interface{}{"type": "string", "description": "Initial prompt for the child agent."},
+						"message":                map[string]interface{}{"type": "string", "description": "Required: the child's initial task prompt. A spawn_agent call without a task prompt (or its alias goal/task) is rejected instead of creating an empty child session that has no task in context."},
+						"goal":                   map[string]interface{}{"type": "string", "description": "Alias for message (spawn_subagents/spawn_team name the same concept goal). Prefer message."},
+						"task":                   map[string]interface{}{"type": "string", "description": "Alias for message. Prefer message."},
 						"agent_type":             map[string]interface{}{"type": "string", "description": "Optional role hint for the child agent."},
 						"difficulty":             map[string]interface{}{"type": "string", "enum": []string{"easy", "normal", "hard", "expert"}, "description": "Optional task difficulty hint for local child routing."},
 						"difficulty_rationale":   map[string]interface{}{"type": "string", "description": "Optional short rationale for the selected task difficulty."},
@@ -485,13 +489,15 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		definitions = append(definitions,
 			types.ToolDefinition{
 				Name:        ToolSpawnAgent,
-				Description: "Create a child session for bounded, independent work that can run in parallel and whose result is needed. Avoid delegation when the parent can finish the same work with fewer calls. Depth limit errors are not retryable: complete locally, reuse an existing child, or use spawn_team. This is separate from spawn_team teammates.",
+				Description: "Create a child session for bounded, independent work that can run in parallel and whose result is needed. Required: message — the child's initial task prompt (aliases: goal, task). A call without a task prompt is rejected instead of creating an empty child session. Unsupported arguments (for example tools_whitelist) are rejected. Avoid delegation when the parent can finish the same work with fewer calls. Depth limit errors are not retryable: complete locally, reuse an existing child, or use spawn_team. This is separate from spawn_team teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"id":                     map[string]interface{}{"type": "string", "description": "Optional explicit child session id."},
 						"session_id":             map[string]interface{}{"type": "string", "description": "Alias for id."},
-						"message":                map[string]interface{}{"type": "string", "description": "Initial prompt for the child agent."},
+						"message":                map[string]interface{}{"type": "string", "description": "Required: the child's initial task prompt. A spawn_agent call without a task prompt (or its alias goal/task) is rejected instead of creating an empty child session that has no task in context."},
+						"goal":                   map[string]interface{}{"type": "string", "description": "Alias for message (spawn_subagents/spawn_team name the same concept goal). Prefer message."},
+						"task":                   map[string]interface{}{"type": "string", "description": "Alias for message. Prefer message."},
 						"agent_type":             map[string]interface{}{"type": "string", "description": "Optional role hint for the child agent."},
 						"difficulty":             map[string]interface{}{"type": "string", "enum": []string{"easy", "normal", "hard", "expert"}, "description": "Optional task difficulty hint for local child routing."},
 						"difficulty_rationale":   map[string]interface{}{"type": "string", "description": "Optional short rationale for the selected task difficulty."},
@@ -1025,12 +1031,18 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 // Execute runs a broker tool without an originating tool call id.
 func (b *Broker) Execute(ctx context.Context, sessionID, toolName string, args map[string]interface{}) (interface{}, map[string]interface{}, error) {
 	result, metadata, err := b.execute(ctx, sessionID, toolName, args, "")
+	if err == nil {
+		metadata = annotateIgnoredBrokerToolArgs(toolName, args, metadata)
+	}
 	return result, withBrokerSourceMetadata(metadata), classifyBrokerExecutionError(toolName, err)
 }
 
 // ExecuteToolCall runs a broker tool for a concrete tool call.
 func (b *Broker) ExecuteToolCall(ctx context.Context, sessionID string, call types.ToolCall) (interface{}, map[string]interface{}, error) {
 	result, metadata, err := b.execute(ctx, sessionID, call.Name, call.Args, call.ID)
+	if err == nil {
+		metadata = annotateIgnoredBrokerToolArgs(call.Name, call.Args, metadata)
+	}
 	return result, withBrokerSourceMetadata(metadata), classifyBrokerExecutionError(call.Name, err)
 }
 
@@ -1059,6 +1071,14 @@ func classifyBrokerExecutionError(toolName string, err error) error {
 		strings.Contains(lower, "unknown agent session reference"),
 		strings.Contains(lower, "agent session not found"):
 		code = runtimeerrors.ErrAgentSessionNotFound
+	case strings.Contains(lower, "notification") && (strings.Contains(lower, "not found") || strings.Contains(lower, "load notification")):
+		// A supervision notification that cannot be loaded (stale or
+		// fabricated id, or a row from another host's scope) is an args/scope
+		// problem, not a broker malfunction. Keep this case ahead of the
+		// generic "not found" branch so the model sees a retryable input error
+		// instead of TOOL_BROKER_FAILURE. The message also tells it to re-read
+		// supervision_snapshot for a live notification_id.
+		code = runtimeerrors.ErrToolInvalidArgs
 	case strings.Contains(lower, "sqlite3: interrupted"),
 		strings.Contains(lower, "database operation interrupted"):
 		code = runtimeerrors.ErrStreamInterrupted
@@ -1110,6 +1130,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		ctx = context.Background()
 	}
 	args = toolargs.Normalize(args)
+	if err := validateBrokerToolArgKinds(toolName, args); err != nil {
+		return nil, nil, err
+	}
 	handleAliases, err := b.loadSessionHandleAliases(ctx, sessionID)
 	if err != nil {
 		return nil, nil, err
@@ -1222,14 +1245,14 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["cwd"].(string); ok {
 			req.Cwd = strings.TrimSpace(value)
 		}
-		if value, ok := args["timeout_sec"].(float64); ok {
-			req.TimeoutSec = int(value)
-		} else if value, ok := args["timeout_sec"].(int); ok {
+		if value, ok, err := brokerToolArgInt(ToolBackgroundTask, args, "timeout_sec"); err != nil {
+			return nil, nil, err
+		} else if ok {
 			req.TimeoutSec = value
 		}
-		if value, ok := args["priority"].(float64); ok {
-			req.Priority = int(value)
-		} else if value, ok := args["priority"].(int); ok {
+		if value, ok, err := brokerToolArgInt(ToolBackgroundTask, args, "priority"); err != nil {
+			return nil, nil, err
+		} else if ok {
 			req.Priority = value
 		}
 		if value, ok := args["restart_policy"].(string); ok {
@@ -1240,8 +1263,16 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			if probe, ok := value["probe"].(string); ok {
 				startup.Probe = background.StartupProbeType(strings.TrimSpace(probe))
 			}
-			startup.GracePeriodMs = brokerIntArg(value["grace_period_ms"])
-			startup.TimeoutMs = brokerIntArg(value["timeout_ms"])
+			gracePeriodMs, _, err := brokerToolArgInt(ToolBackgroundTask+" startup_acceptance", value, "grace_period_ms")
+			if err != nil {
+				return nil, nil, err
+			}
+			startup.GracePeriodMs = gracePeriodMs
+			startupTimeoutMs, _, err := brokerToolArgInt(ToolBackgroundTask+" startup_acceptance", value, "timeout_ms")
+			if err != nil {
+				return nil, nil, err
+			}
+			startup.TimeoutMs = startupTimeoutMs
 			startup.Address, _ = value["address"].(string)
 			startup.URL, _ = value["url"].(string)
 			req.Startup = startup
@@ -1295,14 +1326,14 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}
 		offset := int64(0)
 		limit := 0
-		if value, ok := args["offset"].(float64); ok {
-			offset = int64(value)
-		} else if value, ok := args["offset"].(int); ok {
-			offset = int64(value)
+		if value, ok, err := toolArgInt64(ToolTaskOutput, args, "offset"); err != nil {
+			return nil, nil, err
+		} else if ok {
+			offset = value
 		}
-		if value, ok := args["limit"].(float64); ok {
-			limit = int(value)
-		} else if value, ok := args["limit"].(int); ok {
+		if value, ok, err := brokerToolArgInt(ToolTaskOutput, args, "limit"); err != nil {
+			return nil, nil, err
+		} else if ok {
 			limit = value
 		}
 		output, err := b.Background.ReadOutput(ctx, background.TaskOutputArgs{
@@ -1382,15 +1413,25 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if b.AgentSessions == nil {
 			return nil, nil, fmt.Errorf("agent session controller is not configured")
 		}
-		request := SpawnAgentArgs{}
+		message, messageAlias, err := normalizeSpawnAgentToolArgs(args)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := validateSpawnAgentArgTypes(args); err != nil {
+			return nil, nil, err
+		}
+		request := SpawnAgentArgs{Message: message}
 		if value, ok := args["id"].(string); ok {
 			request.ID = strings.TrimSpace(value)
+			if err := rejectRenderedPlaceholderID(ToolSpawnAgent, "id", request.ID); err != nil {
+				return nil, nil, err
+			}
 		}
 		if value, ok := args["session_id"].(string); ok && strings.TrimSpace(request.ID) == "" {
 			request.SessionID = strings.TrimSpace(value)
-		}
-		if value, ok := args["message"].(string); ok {
-			request.Message = strings.TrimSpace(value)
+			if err := rejectRenderedPlaceholderID(ToolSpawnAgent, "session_id", request.SessionID); err != nil {
+				return nil, nil, err
+			}
 		}
 		if value, ok := args["agent_type"].(string); ok {
 			request.AgentType = strings.TrimSpace(value)
@@ -1495,16 +1536,29 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["fork_turns"].(string); ok {
 			request.ForkTurns = strings.TrimSpace(value)
 		}
-		if value, ok := args["timeout_sec"].(int64); ok {
+		// Read the supervision budgets through toolArgInt64: a tool call
+		// decoded from JSON carries float64 (or json.Number on the toolexec
+		// preflight path), never int64, so the old direct assertions dropped
+		// these keys for every real caller - and made the non-negative check
+		// below unreachable for them.
+		if value, ok, err := toolArgInt64("spawn_agent", args, "timeout_sec"); err != nil {
+			return nil, nil, err
+		} else if ok {
 			request.TimeoutSec = value
 		}
-		if value, ok := args["progress_timeout_sec"].(int64); ok {
+		if value, ok, err := toolArgInt64("spawn_agent", args, "progress_timeout_sec"); err != nil {
+			return nil, nil, err
+		} else if ok {
 			request.ProgressTimeoutSec = value
 		}
-		if value, ok := args["approval_timeout_sec"].(int64); ok {
+		if value, ok, err := toolArgInt64("spawn_agent", args, "approval_timeout_sec"); err != nil {
+			return nil, nil, err
+		} else if ok {
 			request.ApprovalTimeoutSec = value
 		}
-		if value, ok := args["cancel_grace_sec"].(int64); ok {
+		if value, ok, err := toolArgInt64("spawn_agent", args, "cancel_grace_sec"); err != nil {
+			return nil, nil, err
+		} else if ok {
 			request.CancelGraceSec = value
 		}
 		if request.TimeoutSec < 0 || request.ProgressTimeoutSec < 0 || request.ApprovalTimeoutSec < 0 || request.CancelGraceSec < 0 {
@@ -1536,6 +1590,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"status":        valueOrEmptyAgentStatus(result),
 			"created":       result != nil && result.Created,
 			"queued":        result != nil && result.Queued,
+		}
+		if messageAlias != "" {
+			metadata["arg_aliases"] = []string{messageAlias + "->message"}
 		}
 		if b.ExecutionSupervisor != nil && result != nil && result.Created {
 			runID, deadlineAt, runErr := startSpawnExecutionRun(ctx, b.ExecutionSupervisor, strings.TrimSpace(sessionID), request, result)
@@ -1639,6 +1696,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if b.AgentSessions == nil {
 			return nil, nil, fmt.Errorf("agent session controller is not configured")
 		}
+		if err := validateAgentMessageArgTypes(toolName, args); err != nil {
+			return nil, nil, err
+		}
 		request := AgentMessageArgs{}
 		if value, ok := args["target"].(string); ok {
 			request.Target = strings.TrimSpace(value)
@@ -1689,6 +1749,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 	case ToolSendInput:
 		if b.AgentSessions == nil {
 			return nil, nil, fmt.Errorf("agent session controller is not configured")
+		}
+		if err := validateAgentMessageArgTypes(toolName, args); err != nil {
+			return nil, nil, err
 		}
 		request := SendAgentInputArgs{}
 		if value, ok := args["id"].(string); ok {
@@ -1816,17 +1879,15 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["session_id"].(string); ok && strings.TrimSpace(request.ID) == "" {
 			request.SessionID = strings.TrimSpace(value)
 		}
-		if value, ok := args["timeout_ms"].(float64); ok {
-			request.TimeoutMs = int(value)
-		} else if value, ok := args["timeout_ms"].(int); ok {
+		if value, ok, err := brokerToolArgInt(ToolWaitAgent, args, "timeout_ms"); err != nil {
+			return nil, nil, err
+		} else if ok {
 			request.TimeoutMs = value
 		}
-		if value, ok := args["after_seq"].(float64); ok {
-			request.AfterSeq = int64(value)
-		} else if value, ok := args["after_seq"].(int64); ok {
+		if value, ok, err := toolArgInt64(ToolWaitAgent, args, "after_seq"); err != nil {
+			return nil, nil, err
+		} else if ok {
 			request.AfterSeq = value
-		} else if value, ok := args["after_seq"].(int); ok {
-			request.AfterSeq = int64(value)
 		}
 		request.IDs = coerceStringSlice(args["ids"])
 		request.SessionIDs = coerceStringSlice(args["session_ids"])
@@ -1890,21 +1951,19 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["session_id"].(string); ok && strings.TrimSpace(request.ID) == "" {
 			request.SessionID = strings.TrimSpace(value)
 		}
-		if value, ok := args["after_seq"].(float64); ok {
-			request.AfterSeq = int64(value)
-		} else if value, ok := args["after_seq"].(int64); ok {
+		if value, ok, err := toolArgInt64(ToolReadAgentEvents, args, "after_seq"); err != nil {
+			return nil, nil, err
+		} else if ok {
 			request.AfterSeq = value
-		} else if value, ok := args["after_seq"].(int); ok {
-			request.AfterSeq = int64(value)
 		}
-		if value, ok := args["limit"].(float64); ok {
-			request.Limit = int(value)
-		} else if value, ok := args["limit"].(int); ok {
+		if value, ok, err := brokerToolArgInt(ToolReadAgentEvents, args, "limit"); err != nil {
+			return nil, nil, err
+		} else if ok {
 			request.Limit = value
 		}
-		if value, ok := args["wait_ms"].(float64); ok {
-			request.WaitMs = int(value)
-		} else if value, ok := args["wait_ms"].(int); ok {
+		if value, ok, err := brokerToolArgInt(ToolReadAgentEvents, args, "wait_ms"); err != nil {
+			return nil, nil, err
+		} else if ok {
 			request.WaitMs = value
 		}
 		if value, ok := args["view"].(string); ok {
@@ -1977,9 +2036,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if b.AgentSessions == nil {
 			return nil, nil, fmt.Errorf("agent session controller is not configured")
 		}
-		sessionKey := strings.TrimSpace(stringValue(args["id"]))
+		sessionKey := agentSessionRefArgValue(args["id"])
 		if sessionKey == "" {
-			sessionKey = strings.TrimSpace(stringValue(args["session_id"]))
+			sessionKey = agentSessionRefArgValue(args["session_id"])
 		}
 		if sessionKey == "" {
 			return nil, nil, fmt.Errorf("id is required")
@@ -2013,9 +2072,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if b.AgentSessions == nil {
 			return nil, nil, fmt.Errorf("agent session controller is not configured")
 		}
-		sessionKey := strings.TrimSpace(stringValue(args["id"]))
+		sessionKey := agentSessionRefArgValue(args["id"])
 		if sessionKey == "" {
-			sessionKey = strings.TrimSpace(stringValue(args["session_id"]))
+			sessionKey = agentSessionRefArgValue(args["session_id"])
 		}
 		if sessionKey == "" {
 			return nil, nil, fmt.Errorf("id is required")
@@ -2148,8 +2207,14 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			return nil, nil, fmt.Errorf("team store is not configured")
 		}
 		request := SpawnTeamArgs{}
+		if err := validateSpawnTeamArgTypes(args); err != nil {
+			return nil, nil, err
+		}
 		if value, ok := args["team_id"].(string); ok {
 			request.TeamID = strings.TrimSpace(value)
+			if err := rejectRenderedPlaceholderID(ToolSpawnTeam, "team_id", request.TeamID); err != nil {
+				return nil, nil, err
+			}
 		}
 		if value, ok := args["workspace_id"].(string); ok {
 			request.WorkspaceID = strings.TrimSpace(value)
@@ -2168,7 +2233,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}
 		if value, ok := args["workspace_id"].(string); ok {
 			request.WorkspaceID = strings.TrimSpace(value)
-			if isCurrentPlaceholder(request.WorkspaceID) {
+			if isOptionalIdentityPlaceholder(request.WorkspaceID) {
 				request.WorkspaceID = ""
 			}
 		}
@@ -2178,15 +2243,18 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["status"].(string); ok {
 			request.Status = strings.TrimSpace(value)
 		}
-		if value, ok := args["max_teammates"].(float64); ok {
+		// Numeric reads go through toolArgInt64 so every JSON spelling reaches
+		// the request; the previous float64/int assertions dropped json.Number
+		// and Go-native int64/uint values that validateSpawnTeamArgTypes accepts.
+		if value, ok, err := toolArgInt64("spawn_team", args, "max_teammates"); err != nil {
+			return nil, nil, err
+		} else if ok {
 			request.MaxTeammates = int(value)
-		} else if value, ok := args["max_teammates"].(int); ok {
-			request.MaxTeammates = value
 		}
-		if value, ok := args["max_writers"].(float64); ok {
+		if value, ok, err := toolArgInt64("spawn_team", args, "max_writers"); err != nil {
+			return nil, nil, err
+		} else if ok {
 			request.MaxWriters = int(value)
-		} else if value, ok := args["max_writers"].(int); ok {
-			request.MaxWriters = value
 		}
 		if value, ok := args["allow_existing"].(bool); ok {
 			request.AllowExisting = &value
@@ -2199,10 +2267,16 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			if err != nil {
 				return nil, nil, err
 			}
-			for _, entry := range entries {
+			for index, entry := range entries {
+				if err := validateSpawnTeamTeammateTypes(index, entry); err != nil {
+					return nil, nil, err
+				}
 				spec := SpawnTeammateSpec{}
 				if value, ok := entry["id"].(string); ok {
 					spec.ID = strings.TrimSpace(value)
+					if isOptionalIdentityPlaceholder(spec.ID) {
+						spec.ID = ""
+					}
 				}
 				if value, ok := entry["name"].(string); ok {
 					spec.Name = strings.TrimSpace(value)
@@ -2212,7 +2286,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				}
 				if value, ok := entry["session_id"].(string); ok {
 					spec.SessionID = strings.TrimSpace(value)
-					if isCurrentPlaceholder(spec.SessionID) {
+					if isOptionalIdentityPlaceholder(spec.SessionID) {
 						spec.SessionID = ""
 					}
 				}
@@ -2230,10 +2304,16 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			if err != nil {
 				return nil, nil, err
 			}
-			for _, entry := range entries {
+			for index, entry := range entries {
+				if err := validateSpawnTeamTaskTypes(index, entry); err != nil {
+					return nil, nil, err
+				}
 				spec := SpawnTaskSpec{}
 				if value, ok := entry["id"].(string); ok {
 					spec.ID = strings.TrimSpace(value)
+					if isOptionalIdentityPlaceholder(spec.ID) {
+						spec.ID = ""
+					}
 				}
 				if value, ok := entry["title"].(string); ok {
 					spec.Title = strings.TrimSpace(value)
@@ -2255,10 +2335,10 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				spec.ReadPaths = coerceStringSlice(entry["read_paths"])
 				spec.WritePaths = coerceStringSlice(entry["write_paths"])
 				spec.Deliverables = coerceStringSlice(entry["deliverables"])
-				if value, ok := entry["priority"].(float64); ok {
+				if value, ok, err := toolArgInt64("spawn_team tasks[]", entry, "priority"); err != nil {
+					return nil, nil, err
+				} else if ok {
 					spec.Priority = int(value)
-				} else if value, ok := entry["priority"].(int); ok {
-					spec.Priority = value
 				}
 				if value, ok := entry["assignee"].(string); ok {
 					spec.Assignee = strings.TrimSpace(value)
@@ -2543,21 +2623,19 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["team_id"].(string); ok {
 			request.TeamID = strings.TrimSpace(value)
 		}
-		if value, ok := args["after_seq"].(float64); ok {
-			request.AfterSeq = int64(value)
-		} else if value, ok := args["after_seq"].(int64); ok {
+		if value, ok, err := toolArgInt64(ToolWaitTeam, args, "after_seq"); err != nil {
+			return nil, nil, err
+		} else if ok {
 			request.AfterSeq = value
-		} else if value, ok := args["after_seq"].(int); ok {
-			request.AfterSeq = int64(value)
 		}
-		if value, ok := args["timeout_ms"].(float64); ok {
-			request.TimeoutMs = int(value)
-		} else if value, ok := args["timeout_ms"].(int); ok {
+		if value, ok, err := brokerToolArgInt(ToolWaitTeam, args, "timeout_ms"); err != nil {
+			return nil, nil, err
+		} else if ok {
 			request.TimeoutMs = value
 		}
-		if value, ok := args["limit"].(float64); ok {
-			request.Limit = int(value)
-		} else if value, ok := args["limit"].(int); ok {
+		if value, ok, err := brokerToolArgInt(ToolWaitTeam, args, "limit"); err != nil {
+			return nil, nil, err
+		} else if ok {
 			request.Limit = value
 		}
 		if value, ok := args["require_summary"].(bool); ok {
@@ -2670,9 +2748,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["agent_id"].(string); ok {
 			request.AgentID = strings.TrimSpace(value)
 		}
-		if value, ok := args["limit"].(float64); ok {
-			request.Limit = int(value)
-		} else if value, ok := args["limit"].(int); ok {
+		if value, ok, err := brokerToolArgInt(ToolReadMailboxDigest, args, "limit"); err != nil {
+			return nil, nil, err
+		} else if ok {
 			request.Limit = value
 		}
 		if value, ok := args["mark_read"].(bool); ok {
@@ -2751,17 +2829,17 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["include_mailbox"].(bool); ok {
 			request.IncludeMailbox = &value
 		}
-		if value, ok := args["mailbox_limit"].(float64); ok {
-			request.MailboxLimit = int(value)
-		} else if value, ok := args["mailbox_limit"].(int); ok {
+		if value, ok, err := brokerToolArgInt(ToolReadTaskContext, args, "mailbox_limit"); err != nil {
+			return nil, nil, err
+		} else if ok {
 			request.MailboxLimit = value
 		}
 		if value, ok := args["mark_read"].(bool); ok {
 			request.MarkRead = &value
 		}
-		if value, ok := args["context_budget"].(float64); ok {
-			request.ContextBudget = int(value)
-		} else if value, ok := args["context_budget"].(int); ok {
+		if value, ok, err := brokerToolArgInt(ToolReadTaskContext, args, "context_budget"); err != nil {
+			return nil, nil, err
+		} else if ok {
 			request.ContextBudget = value
 		}
 		teamID, agentID, task, err := b.loadScopedTask(ctx, sessionID, request.TeamID, request.TaskID)
@@ -2931,6 +3009,14 @@ func isCurrentPlaceholder(value string) bool {
 	return strings.EqualFold(strings.TrimSpace(value), "current")
 }
 
+// isOptionalIdentityPlaceholder reports whether an optional identity argument
+// carries no usable value: the "current" keyword and the placeholder text a
+// model copies out of an empty tool result both mean "omit this id and let the
+// runtime generate or resolve it".
+func isOptionalIdentityPlaceholder(value string) bool {
+	return isCurrentPlaceholder(value) || isRenderedPlaceholderReference(value)
+}
+
 func (b *Broker) workspaceRoot() string {
 	if b == nil || b.TeamClaims == nil {
 		return ""
@@ -2995,6 +3081,92 @@ func synthesizeAutoStartTeammates(tasks []SpawnTaskSpec, maxTeammates int) []Spa
 	return specs
 }
 
+// spawnAgentMessageAliasKeys are the alternative keys callers use for the
+// spawn_agent task prompt. spawn_subagents and spawn_team name the same concept
+// `goal`, so prompts written for those tools routinely send it to spawn_agent;
+// silently ignoring it created a child session with an empty prompt, and the
+// child then correctly reported that no task was visible in its context.
+var spawnAgentMessageAliasKeys = []string{"goal", "task", "prompt"}
+
+// spawnAgentToolArgKeys is the fail-closed allowlist of spawn_agent arguments.
+// Every key the broker consumes must be listed here: a key that is accepted but
+// never read is a silent intent drop (callers used to pass tools_whitelist,
+// which spawn_agent does not implement).
+var spawnAgentToolArgKeys = []string{
+	"id", "session_id", "message", "goal", "task", "prompt",
+	"agent_type", "difficulty", "difficulty_rationale",
+	"provider", "model", "reasoning_effort", "thinking_effort",
+	"permission_mode", "completion_requirement", "completionRequirement",
+	"isolation", "read_only", "fork_context", "fork_turns",
+	"timeout_sec", "progress_timeout_sec", "approval_timeout_sec", "cancel_grace_sec",
+}
+
+// unsupportedSpawnAgentArgHint teaches the caller what to use instead of the
+// rejected key. Empty means the generic message is enough.
+func unsupportedSpawnAgentArgHint(key string) string {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "tools_whitelist", "tool_whitelist", "tools", "whitelist":
+		return "spawn_agent does not restrict the child tool surface; use read_only/permission_mode, or spawn_subagents for per-task tools_whitelist"
+	case "description", "content", "text", "instruction", "instructions", "task_description":
+		return "did you mean message"
+	case "objective", "task_goal", "goal_text":
+		return "did you mean message (alias goal)"
+	default:
+		return ""
+	}
+}
+
+// normalizeSpawnAgentToolArgs validates a spawn_agent call and resolves its task
+// prompt. It fails closed on unsupported keys and on a missing prompt so the
+// caller can correct the call instead of receiving a child session that has no
+// task in context.
+func normalizeSpawnAgentToolArgs(args map[string]interface{}) (message string, alias string, err error) {
+	allowed := make(map[string]struct{}, len(spawnAgentToolArgKeys))
+	for _, key := range spawnAgentToolArgKeys {
+		allowed[key] = struct{}{}
+	}
+	unsupported := make([]string, 0, 2)
+	for key := range args {
+		if _, ok := allowed[key]; !ok {
+			unsupported = append(unsupported, key)
+		}
+	}
+	if len(unsupported) > 0 {
+		sort.Strings(unsupported)
+		described := make([]string, 0, len(unsupported))
+		for _, key := range unsupported {
+			if hint := unsupportedSpawnAgentArgHint(key); hint != "" {
+				described = append(described, fmt.Sprintf("%s (%s)", key, hint))
+				continue
+			}
+			described = append(described, key)
+		}
+		return "", "", fmt.Errorf("spawn_agent invalid arguments: unsupported argument(s): %s; supported arguments: %s",
+			strings.Join(described, ", "), strings.Join(spawnAgentToolArgKeys, ", "))
+	}
+	if value, ok := args["message"].(string); ok {
+		message = strings.TrimSpace(value)
+	}
+	if message == "" {
+		for _, key := range spawnAgentMessageAliasKeys {
+			value, ok := args[key].(string)
+			if !ok {
+				continue
+			}
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				message = trimmed
+				alias = key
+				break
+			}
+		}
+	}
+	if message == "" {
+		return "", "", fmt.Errorf("spawn_agent invalid arguments: message is required (accepted aliases: %s); pass the child's initial task prompt, or use send_message/followup_task to reach an existing child",
+			strings.Join(spawnAgentMessageAliasKeys, ", "))
+	}
+	return message, alias, nil
+}
+
 func (b *Broker) prepareSpawnTaskSpecs(specs []SpawnTaskSpec) ([]SpawnTaskSpec, error) {
 	if len(specs) == 0 {
 		return nil, nil
@@ -3012,6 +3184,12 @@ func (b *Broker) prepareSpawnTaskSpecs(specs []SpawnTaskSpec) ([]SpawnTaskSpec, 
 			return nil, fmt.Errorf("duplicate spawn_team task id %q", id)
 		}
 		seenIDs[id] = struct{}{}
+	}
+	for index := range resolved {
+		if strings.TrimSpace(resolved[index].Goal) != "" || strings.TrimSpace(resolved[index].Title) != "" {
+			continue
+		}
+		return nil, fmt.Errorf("spawn_team task %d is missing goal: every task needs goal (or title) so the teammate receives its assignment; note that spawn_agent uses message, while spawn_team tasks declare the assignment as goal", index+1)
 	}
 	if root == "" {
 		return resolved, nil
@@ -4010,15 +4188,57 @@ func payloadString(payload map[string]interface{}, key string) string {
 	return strings.TrimSpace(text)
 }
 
+// stringValue renders an argument value as text. A nil value (an absent or
+// explicitly null JSON argument) must render as empty: fmt.Sprintf("%v", nil)
+// yields the literal "<nil>", and callers that read identifiers through this
+// helper then treated that text as a real reference. That defect is what
+// produced agent sessions literally named "<nil>" (resume_agent received
+// {"id": null} and resolved it as a session reference). Typed nil pointers,
+// maps, slices and interfaces read as empty for the same reason.
 func stringValue(value interface{}) string {
+	if value == nil {
+		return ""
+	}
 	switch typed := value.(type) {
 	case string:
 		return typed
 	case fmt.Stringer:
 		return typed.String()
-	default:
-		return fmt.Sprintf("%v", value)
 	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Interface, reflect.Func, reflect.Chan:
+		if reflected.IsNil() {
+			return ""
+		}
+	}
+	return fmt.Sprintf("%v", value)
+}
+
+// agentSessionRefArgValue reads an agent-session reference argument (id or
+// session_id) for the tools that act on an existing child session. Absent, JSON
+// null, and the placeholder tokens a model copies out of a rendered tool result
+// ("<nil>", "null") all read as empty, so the caller raises "id is required"
+// instead of resolving a bogus reference into a session literally named "<nil>".
+func agentSessionRefArgValue(value interface{}) string {
+	text := strings.TrimSpace(stringValue(value))
+	if isRenderedPlaceholderReference(text) {
+		return ""
+	}
+	return text
+}
+
+// rejectRenderedPlaceholderID fails a call that asks for an explicit entity id
+// using the placeholder text that appears in rendered tool output when an id was
+// empty. Accepting such a value as a real name is what created agent sessions
+// and teams literally called "<nil>".
+func rejectRenderedPlaceholderID(toolName, field, value string) error {
+	if !isRenderedPlaceholderReference(value) {
+		return nil
+	}
+	return fmt.Errorf(
+		"%s: %s %q is a rendered placeholder, not an id: omit %s to let the runtime generate one, or pass the id returned by the tool that created the entity",
+		toolName, field, value, field)
 }
 
 func deterministicQuestionID(toolCallID string, request AskUserQuestionArgs) string {

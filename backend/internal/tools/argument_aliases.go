@@ -1,57 +1,49 @@
 package tools
 
-import "strings"
+import (
+	"sort"
+	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
+)
 
 // normalizeToolkitToolArgs accepts common, unambiguous model aliases for the
 // built-in tools. External MCP calls keep their provider-defined arguments.
+//
+// The alias table itself lives in internal/toolargs so the runtime policy can
+// inspect exactly the same argument names this executor reads (see
+// toolargs.ToolkitArgAliases); promotion order within a pair is preserved.
 func normalizeToolkitToolArgs(toolName string, args map[string]interface{}) map[string]interface{} {
-	normalized := args
-	promote := func(canonical string, aliases ...string) {
-		normalized = promoteToolArgAlias(normalized, canonical, aliases...)
+	aliases, ok := toolargs.ToolkitArgAliasesFor(toolName)
+	if !ok {
+		return args
 	}
-
-	switch strings.ToLower(strings.TrimSpace(toolName)) {
-	case "view":
-		promote("file_path", "path", "file", "filename", "filePath")
-		normalized = normalizeObjectListAliases(normalized, "files", map[string][]string{
-			"file_path": {"path", "file", "filename", "filePath"},
-		})
-	case "edit":
-		promote("file_path", "path", "file", "filename", "filePath")
-		promote("old_string", "old_text", "old", "oldString")
-		promote("new_string", "new_text", "new", "replacement", "newString")
-	case "write", "append_write":
-		promote("file_path", "path", "file", "filename", "filePath")
-		promote("content", "text", "data")
-	case "multiedit":
-		promote("file_path", "path", "file", "filename", "filePath")
-		normalized = normalizeObjectListAliases(normalized, "edits", map[string][]string{
-			"old_string": {"old_text", "old", "oldString"},
-			"new_string": {"new_text", "new", "replacement", "newString"},
-		})
-	case "shell", "bash", "execute_shell_command":
-		promote("command", "cmd", "script", "shell_command")
-		promote("workdir", "cwd", "working_directory")
-		normalized = normalizeObjectListAliases(normalized, "commands", map[string][]string{
-			"command": {"cmd", "script", "shell_command"},
-			"workdir": {"cwd", "working_directory"},
-		})
-	case "grep":
-		promote("pattern", "query", "search", "regex")
-		promote("patterns", "queries", "searches")
-		promote("path", "root", "directory", "search_path")
-	case "glob":
-		promote("pattern", "glob", "glob_pattern")
-		promote("path", "root", "directory", "search_path")
-	case "ls":
-		promote("path", "root", "directory")
-	case "download":
-		promote("url", "uri")
-		promote("file_path", "path", "target", "target_path")
-	case "apply_patch":
-		promote("patch", "diff", "input", "patch_text")
+	normalized := args
+	for _, pair := range aliases.Args {
+		normalized = promoteToolArgAlias(normalized, pair.Canonical, pair.Aliases...)
+	}
+	for _, field := range sortedAliasListFields(aliases) {
+		candidates := make(map[string][]string, len(aliases.ListFields[field]))
+		for _, pair := range aliases.ListFields[field] {
+			candidates[pair.Canonical] = pair.Aliases
+		}
+		normalized = normalizeObjectListAliases(normalized, field, candidates)
 	}
 	return normalized
+}
+
+// sortedAliasListFields keeps promotion deterministic when a tool declares more
+// than one array-of-objects argument.
+func sortedAliasListFields(aliases toolargs.ToolkitArgAliases) []string {
+	if len(aliases.ListFields) == 0 {
+		return nil
+	}
+	fields := make([]string, 0, len(aliases.ListFields))
+	for field := range aliases.ListFields {
+		fields = append(fields, field)
+	}
+	sort.Strings(fields)
+	return fields
 }
 
 func promoteToolArgAlias(args map[string]interface{}, canonical string, aliases ...string) map[string]interface{} {

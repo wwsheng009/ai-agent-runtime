@@ -1195,3 +1195,27 @@ func (m *metaResourcesMCPManager) ListResources(ctx context.Context, mcpName str
 		},
 	}, nil
 }
+
+func TestListMCPResourcesRejectsNonStringServerAndCursor(t *testing.T) {
+	manager := &Manager{}
+
+	if _, err := manager.listMCPResources(context.Background(), map[string]interface{}{"server": 42}); err == nil {
+		t.Fatal("expected numeric server to be rejected instead of listing every server")
+	} else if !strings.Contains(err.Error(), "server must be a string") {
+		t.Fatalf("expected actionable server error, got %v", err)
+	}
+
+	if _, err := manager.listMCPResources(context.Background(), map[string]interface{}{"cursor": map[string]interface{}{"page": 2}}); err == nil {
+		t.Fatal("expected object cursor to be rejected instead of restarting from page one")
+	} else if !strings.Contains(err.Error(), "cursor must be a string") {
+		t.Fatalf("expected actionable cursor error, got %v", err)
+	}
+
+	output, err := manager.listMCPResources(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("expected nil args to keep working without an MCP manager, got %v", err)
+	}
+	if !strings.Contains(output, "servers") {
+		t.Fatalf("expected empty server payload, got %q", output)
+	}
+}

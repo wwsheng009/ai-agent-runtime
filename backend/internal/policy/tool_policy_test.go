@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -9,6 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 )
 
 func TestToolExecutionPolicy_AllowToolInfo_BlocksRemoteWrite(t *testing.T) {
@@ -417,5 +420,506 @@ func TestToolExecutionPolicy_BlockDelegationOverridesRuntimeEssentialBypass(t *t
 	child := policy.DeriveChild([]string{"spawn_agent"}, true)
 	if !child.BlockDelegation {
 		t.Fatal("expected delegation boundary to be inherited by derived child")
+	}
+}
+
+// testPatchMarker keeps the Codex apply_patch markers out of the patch hunk
+// that defines them.
+const testPatchMarker = "***"
+
+func TestToolExecutionPolicy_AllowToolCall_RejectsUninspectableArgumentKinds(t *testing.T) {
+	root := t.TempDir()
+	info := skill.ToolInfo{Name: "read_file", MCPTrustLevel: "local", ExecutionMode: "local_mcp"}
+	newSandboxedPolicy := func() *ToolExecutionPolicy {
+		policy := NewToolExecutionPolicy(nil, false)
+		policy.Sandbox = executor.NewSandbox(&executor.SandboxConfig{
+			Enabled:      true,
+			AllowedPaths: []string{root},
+		})
+		return policy
+	}
+
+	cases := []struct {
+		name string
+		args map[string]interface{}
+		want string
+	}{
+		{
+			name: "scalar path",
+			args: map[string]interface{}{"path": 42},
+			want: `"path" must be a string, got number`,
+		},
+		{
+			name: "nested bool target",
+			args: map[string]interface{}{"options": map[string]interface{}{"target": true}},
+			want: `"target" must be a string, got bool`,
+		},
+		{
+			name: "list with numeric entry",
+			args: map[string]interface{}{"paths": []interface{}{"notes.txt", 7}},
+			want: `"paths" must be a string, got number`,
+		},
+		{
+			name: "object patch",
+			args: map[string]interface{}{"patch": map[string]interface{}{"file_path": "notes.txt"}},
+			want: `"patch" must be a patch/diff string, got object`,
+		},
+		{
+			name: "numeric command",
+			args: map[string]interface{}{"command": 1.5},
+			want: `"command" must be a string, got number`,
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := newSandboxedPolicy().AllowToolCall(info, testCase.args)
+			if err == nil {
+				t.Fatalf("expected %#v to be rejected instead of silently skipping sandbox checks", testCase.args)
+			}
+			if !strings.Contains(err.Error(), "cannot verify") {
+				t.Fatalf("expected actionable policy error, got %v", err)
+			}
+			if !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("expected error to mention %q, got %v", testCase.want, err)
+			}
+		})
+	}
+}
+
+func TestToolExecutionPolicy_AllowToolCall_KeepsInspectableArgumentsAllowed(t *testing.T) {
+	root := t.TempDir()
+	policy := NewToolExecutionPolicy(nil, false)
+	policy.Sandbox = executor.NewSandbox(&executor.SandboxConfig{
+		Enabled:      true,
+		AllowedPaths: []string{root},
+	})
+	info := skill.ToolInfo{Name: "apply_patch", MCPTrustLevel: "local", ExecutionMode: "local_mcp"}
+
+	inside := filepath.Join(root, "notes.txt")
+	args := map[string]interface{}{
+		"paths": []interface{}{inside},
+		"options": map[string]interface{}{
+			"workdir": root,
+		},
+		"patch": strings.Join([]string{
+			testPatchMarker + " Begin Patch",
+			testPatchMarker + " Add File: " + inside,
+			"+hello",
+			testPatchMarker + " End Patch",
+		}, "\n"),
+	}
+	if err := policy.AllowToolCall(info, args); err != nil {
+		t.Fatalf("expected inspectable in-sandbox arguments to pass, got %v", err)
+	}
+
+	// An empty patch carries no mutation and must not trip the kind check.
+	if err := policy.AllowToolCall(info, map[string]interface{}{"patch": ""}); err != nil {
+		t.Fatalf("expected empty patch to pass the kind check, got %v", err)
+	}
+}
+
+func TestToolExecutionPolicy_AllowToolCall_KindCheckRequiresActiveEnforcement(t *testing.T) {
+	// Without a sandbox and outside read-only mode there is nothing to bypass,
+	// so the kind check must stay out of the way.
+	policy := NewToolExecutionPolicy(nil, false)
+	if err := policy.AllowToolCall(skill.ToolInfo{Name: "read_file"}, map[string]interface{}{"path": 42}); err != nil {
+		t.Fatalf("expected no enforcement without sandbox or read-only mode, got %v", err)
+	}
+}
+
+func TestToolExecutionPolicy_AllowToolCall_InspectsRawFallbackArguments(t *testing.T) {
+	policy := NewToolExecutionPolicy(nil, true)
+	info := skill.ToolInfo{Name: "read_file", MCPTrustLevel: "local", ExecutionMode: "local_mcp"}
+
+	err := policy.AllowToolCall(info, map[string]interface{}{"_raw": `{"command": "bash"}`})
+	if err == nil {
+		t.Fatal("expected shell-like command hidden in the _raw fallback to be blocked")
+	}
+
+	if err := policy.AllowToolCall(info, map[string]interface{}{"_raw": `{"path": "notes.txt"}`}); err != nil {
+		t.Fatalf("expected benign _raw fallback to stay allowed, got %v", err)
+	}
+}
+
+func TestToolExecutionPolicy_AllowToolCall_MinesPathsFromPatchTextAlias(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "..", "outside.txt")
+	policy := NewToolExecutionPolicy(nil, false)
+	policy.Sandbox = executor.NewSandbox(&executor.SandboxConfig{
+		Enabled:      true,
+		AllowedPaths: []string{root},
+	})
+
+	patch := strings.Join([]string{
+		testPatchMarker + " Begin Patch",
+		testPatchMarker + " Add File: " + outside,
+		"+hello",
+		testPatchMarker + " End Patch",
+	}, "\n")
+	err := policy.AllowToolCall(skill.ToolInfo{
+		Name:          "apply_patch",
+		MCPTrustLevel: "local",
+		ExecutionMode: "local_mcp",
+	}, map[string]interface{}{
+		"patch_text": patch,
+	})
+	if err == nil {
+		t.Fatal("expected path outside sandbox mined from patch_text to be blocked")
+	}
+}
+
+func TestHasMutationHintsDetectsEveryMutationShape(t *testing.T) {
+	beginPatchText := testPatchMarker + " Begin Patch"
+	updateFileText := testPatchMarker + " Update File: a.go"
+	mutating := []map[string]interface{}{
+		{"patch": beginPatchText},
+		{"patch_text": beginPatchText},
+		{"diff": []interface{}{updateFileText}},
+		{"patch": map[string]interface{}{"file_path": "a.go"}},
+		{"mutated_paths": []interface{}{1}},
+		{"mutated_files": []string{"a.go"}},
+		{"changed_paths": 3},
+		{"changed_files": map[string]interface{}{"a.go": true}},
+	}
+	for _, args := range mutating {
+		if !HasMutationHints(args) {
+			t.Fatalf("expected mutation hint for %#v", args)
+		}
+	}
+
+	benign := []map[string]interface{}{
+		nil,
+		{},
+		{"patch": ""},
+		{"diff": "   "},
+		{"mutated_paths": []interface{}{}},
+		{"mutated_files": []string{}},
+		{"path": "notes.txt"},
+	}
+	for _, args := range benign {
+		if HasMutationHints(args) {
+			t.Fatalf("expected no mutation hint for %#v", args)
+		}
+	}
+}
+
+// sandboxedPolicyAllowing builds the same shape of policy a directory-bound
+// session uses: a sandbox that permits only the given paths.
+func sandboxedPolicyAllowing(allowed ...string) *ToolExecutionPolicy {
+	policy := NewToolExecutionPolicy(nil, false)
+	policy.Sandbox = executor.NewSandbox(&executor.SandboxConfig{
+		Enabled:      true,
+		AllowedPaths: allowed,
+	})
+	return policy
+}
+
+func localToolInfo(name string) skill.ToolInfo {
+	return skill.ToolInfo{Name: name, MCPTrustLevel: "local", ExecutionMode: "local_mcp"}
+}
+
+// TestToolExecutionPolicy_InspectsCanonicalToolkitArgumentNames covers the gap
+// where the executor reads file_path/root/target_path/... while the policy only
+// knew the legacy alias names, so the sandbox path check silently covered
+// nothing for the common built-in call shape.
+func TestToolExecutionPolicy_InspectsCanonicalToolkitArgumentNames(t *testing.T) {
+	workspace := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+
+	denied := []struct {
+		tool string
+		args map[string]interface{}
+	}{
+		{"view", map[string]interface{}{"file_path": outside}},
+		{"write", map[string]interface{}{"file_path": outside, "content": "x"}},
+		{"edit", map[string]interface{}{"filename": outside, "old_string": "a", "new_string": "b"}},
+		{"download", map[string]interface{}{"url": "https://example.com/x", "target_path": outside}},
+		{"grep", map[string]interface{}{"pattern": "todo", "root": outside}},
+		{"glob", map[string]interface{}{"pattern": "*.go", "directory": outside}},
+		{"ls", map[string]interface{}{"search_path": outside}},
+		{"shell", map[string]interface{}{"command": "git status", "workdir": outside}},
+	}
+	for _, testCase := range denied {
+		t.Run("denies_"+testCase.tool, func(t *testing.T) {
+			err := sandboxedPolicyAllowing(workspace).AllowToolCall(localToolInfo(testCase.tool), testCase.args)
+			if err == nil {
+				t.Fatalf("expected %s %#v to be sandbox-checked", testCase.tool, testCase.args)
+			}
+			if !strings.Contains(err.Error(), "outside sandbox allowlist") {
+				t.Fatalf("expected sandbox denial for %s, got %v", testCase.tool, err)
+			}
+		})
+	}
+
+	allowed := []struct {
+		tool string
+		args map[string]interface{}
+	}{
+		{"view", map[string]interface{}{"file_path": filepath.Join(workspace, "notes.md")}},
+		{"write", map[string]interface{}{"file_path": filepath.Join(workspace, "notes.md"), "content": "x"}},
+		{"grep", map[string]interface{}{"pattern": "todo", "root": workspace}},
+		{"ls", map[string]interface{}{"directory": workspace}},
+		{"shell", map[string]interface{}{"command": "git status", "workdir": workspace}},
+		{"apply_patch", map[string]interface{}{"patch": strings.Join([]string{
+			testPatchMarker + " Begin Patch",
+			testPatchMarker + " Add File: " + filepath.Join(workspace, "notes.md"),
+			"+hello",
+			testPatchMarker + " End Patch",
+		}, "\n")}},
+	}
+	for _, testCase := range allowed {
+		t.Run("allows_"+testCase.tool, func(t *testing.T) {
+			if err := sandboxedPolicyAllowing(workspace).AllowToolCall(localToolInfo(testCase.tool), testCase.args); err != nil {
+				t.Fatalf("expected in-sandbox %s call to pass, got %v", testCase.tool, err)
+			}
+		})
+	}
+}
+
+// TestToolExecutionPolicy_ResolvesRelativePathsAgainstSessionWorkspace pins the
+// resolution contract: the policy must validate the file the executor touches,
+// which anchors relative paths to the session workspace root instead of the
+// server process working directory.
+func TestToolExecutionPolicy_ResolvesRelativePathsAgainstSessionWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	policy := sandboxedPolicyAllowing(workspace)
+	info := localToolInfo("write")
+	args := map[string]interface{}{"file_path": "notes/todo.md", "content": "x"}
+
+	// Without session context the legacy cwd-based resolution applies, which
+	// falls outside this sandbox.
+	if err := policy.AllowToolCall(info, args); err == nil {
+		t.Fatal("expected cwd-based resolution to fall outside the sandbox allowlist")
+	}
+
+	ctx := toolctx.WithWorkspaceRoot(context.Background(), workspace)
+	if err := policy.AllowToolCallWithContext(ctx, info, args); err != nil {
+		t.Fatalf("expected relative path to resolve inside the session workspace, got %v", err)
+	}
+
+	// A workspace root anchors relative paths; it never widens the sandbox.
+	absoluteOutside := map[string]interface{}{
+		"file_path": filepath.Join(filepath.Dir(workspace), "escape.md"),
+		"content":   "x",
+	}
+	if err := policy.AllowToolCallWithContext(ctx, info, absoluteOutside); err == nil {
+		t.Fatal("expected absolute path outside the workspace to stay denied")
+	}
+
+	traversal := map[string]interface{}{"file_path": filepath.Join("..", "escape.md"), "content": "x"}
+	if err := policy.AllowToolCallWithContext(ctx, info, traversal); err == nil {
+		t.Fatal("expected traversal to be cleaned before the sandbox check")
+	}
+}
+
+// TestToolExecutionPolicy_KeepsProviderDefinedArgumentNamesUntouched freezes the
+// other half of the contract: widening built-in coverage must not reinterpret
+// arguments of tools the runtime does not own.
+func TestToolExecutionPolicy_KeepsProviderDefinedArgumentNamesUntouched(t *testing.T) {
+	workspace := t.TempDir()
+	args := map[string]interface{}{
+		"root":      filepath.Join(t.TempDir(), "index"),
+		"directory": "corpus",
+		"script":    "echo hi",
+	}
+	if err := sandboxedPolicyAllowing(workspace).AllowToolCall(localToolInfo("mcp_search_docs"), args); err != nil {
+		t.Fatalf("expected provider-defined arguments to stay untouched, got %v", err)
+	}
+}
+
+// TestPolicyArgKeys_CoverEveryToolkitCanonicalArgument is the drift guard: when a
+// built-in tool starts reading a new argument, the policy must either classify it
+// or deliberately treat it as an uninspectable payload.
+func TestPolicyArgKeys_CoverEveryToolkitCanonicalArgument(t *testing.T) {
+	payloadCanonicalArgs := map[string]bool{
+		"content":    true,
+		"pattern":    true,
+		"patterns":   true,
+		"old_string": true,
+		"new_string": true,
+	}
+
+	toolNames := toolargs.ToolkitToolNames()
+	if len(toolNames) == 0 {
+		t.Fatal("expected the shared toolkit alias table to list the built-in tools")
+	}
+	for _, toolName := range toolNames {
+		aliases, ok := toolargs.ToolkitArgAliasesFor(toolName)
+		if !ok {
+			t.Fatalf("expected alias table entry for built-in tool %q", toolName)
+		}
+		keys := policyArgKeysForTool(toolName)
+		pairs := append([]toolargs.ToolkitArgAliasPair{}, aliases.Args...)
+		for _, field := range aliases.ListFields {
+			pairs = append(pairs, field...)
+		}
+		if len(pairs) == 0 {
+			t.Fatalf("expected %q to declare at least one argument", toolName)
+		}
+		for _, pair := range pairs {
+			canonical := strings.ToLower(strings.TrimSpace(pair.Canonical))
+			if payloadCanonicalArgs[canonical] {
+				if keys.scalar[canonical] {
+					t.Fatalf("%q of %q carries a payload but is classified as policy-relevant", canonical, toolName)
+				}
+				continue
+			}
+			if !keys.scalar[canonical] {
+				t.Fatalf("canonical argument %q of built-in tool %q is not classified by the policy; add it to policyToolkitCanonicalArgClasses or to the payload allowlist", canonical, toolName)
+			}
+			for _, alias := range pair.Aliases {
+				normalizedAlias := strings.ToLower(strings.TrimSpace(alias))
+				if normalizedAlias == "" {
+					continue
+				}
+				if !keys.scalar[normalizedAlias] {
+					t.Fatalf("alias %q (of %q in %q) is promoted by the executor but not inspected by the policy", alias, canonical, toolName)
+				}
+			}
+		}
+	}
+}
+
+func TestResolvePolicyPath(t *testing.T) {
+	workspace := t.TempDir()
+	ctx := toolctx.WithWorkspaceRoot(context.Background(), workspace)
+	policy := NewToolExecutionPolicy(nil, false)
+
+	if got := policy.resolvePolicyPath(ctx, filepath.Join(workspace, "a.txt")); got != filepath.Join(workspace, "a.txt") {
+		t.Fatalf("expected absolute path to be preserved, got %q", got)
+	}
+	if got := policy.resolvePolicyPath(ctx, filepath.Join("sub", "a.txt")); got != filepath.Join(workspace, "sub", "a.txt") {
+		t.Fatalf("expected relative path to join the workspace root, got %q", got)
+	}
+	if got := policy.resolvePolicyPath(ctx, filepath.Join("..", "escape.txt")); got != filepath.Clean(filepath.Join(workspace, "..", "escape.txt")) {
+		t.Fatalf("expected traversal to be cleaned, got %q", got)
+	}
+	if got := policy.resolvePolicyPath(context.Background(), filepath.Join("sub", "a.txt")); got != filepath.Join("sub", "a.txt") {
+		t.Fatalf("expected path to stay untouched without a workspace root, got %q", got)
+	}
+	if got := policy.resolvePolicyPath(nil, "a.txt"); got != "a.txt" {
+		t.Fatalf("expected nil context to keep the raw path, got %q", got)
+	}
+	if got := policy.resolvePolicyPath(ctx, "   "); got != "" {
+		t.Fatalf("expected blank path to stay blank, got %q", got)
+	}
+
+	relativeRoot, err := filepath.Abs(filepath.Join("relative", "root"))
+	if err != nil {
+		t.Fatalf("resolve relative root: %v", err)
+	}
+	relativeCtx := toolctx.WithWorkspaceRoot(context.Background(), filepath.Join("relative", "root"))
+	if got := policy.resolvePolicyPath(relativeCtx, "a.txt"); got != filepath.Join(relativeRoot, "a.txt") {
+		t.Fatalf("expected non-absolute workspace root to be resolved, got %q", got)
+	}
+}
+
+// The static policy must resolve relative path arguments against the same base
+// path the toolkit executes against (SetBasePath) whenever the context carries no
+// workspace root; otherwise it validates a different file than the tool touches.
+func TestResolvePolicyPathFallsBackToAnchorRoot(t *testing.T) {
+	anchor := t.TempDir()
+	ctxRoot := t.TempDir()
+
+	policy := NewToolExecutionPolicy(nil, false)
+	policy.SetPathAnchorRoot(anchor)
+
+	if got := policy.resolvePolicyPath(context.Background(), filepath.Join("sub", "a.txt")); got != filepath.Join(anchor, "sub", "a.txt") {
+		t.Fatalf("expected relative path to join the anchor root, got %q", got)
+	}
+	if got := policy.resolvePolicyPath(nil, "a.txt"); got != filepath.Join(anchor, "a.txt") {
+		t.Fatalf("expected nil context to use the anchor root, got %q", got)
+	}
+	if got := policy.resolvePolicyPath(context.Background(), filepath.Join("..", "escape.txt")); got != filepath.Clean(filepath.Join(anchor, "..", "escape.txt")) {
+		t.Fatalf("expected traversal to be cleaned against the anchor root, got %q", got)
+	}
+	if got := policy.resolvePolicyPath(context.Background(), filepath.Join(anchor, "abs.txt")); got != filepath.Join(anchor, "abs.txt") {
+		t.Fatalf("expected absolute path to be preserved, got %q", got)
+	}
+
+	// The session-bound root from ctx always wins over the fallback anchor.
+	ctx := toolctx.WithWorkspaceRoot(context.Background(), ctxRoot)
+	if got := policy.resolvePolicyPath(ctx, "a.txt"); got != filepath.Join(ctxRoot, "a.txt") {
+		t.Fatalf("expected context root to win over the anchor, got %q", got)
+	}
+
+	// A blank anchor keeps the historical "leave it to the sandbox" behavior.
+	blank := NewToolExecutionPolicy(nil, false)
+	blank.SetPathAnchorRoot("   ")
+	if got := blank.resolvePolicyPath(context.Background(), "a.txt"); got != "a.txt" {
+		t.Fatalf("expected blank anchor to keep the raw path, got %q", got)
+	}
+}
+
+// A clone must keep the anchor so derived child policies resolve paths the same
+// way as the parent (DeriveChild clones before narrowing the allowlist).
+func TestSetPathAnchorRootSurvivesCloneAndDeriveChild(t *testing.T) {
+	anchor := t.TempDir()
+	parent := NewToolExecutionPolicy([]string{"read_file"}, false).SetPathAnchorRoot(anchor)
+	if parent.PathAnchorRoot != anchor {
+		t.Fatalf("expected anchor %q on parent, got %q", anchor, parent.PathAnchorRoot)
+	}
+	clone := parent.Clone()
+	if clone.PathAnchorRoot != anchor {
+		t.Fatalf("expected clone to keep anchor %q, got %q", anchor, clone.PathAnchorRoot)
+	}
+	child := parent.DeriveChild([]string{"read_file"}, true)
+	if child.PathAnchorRoot != anchor {
+		t.Fatalf("expected derived child to keep anchor %q, got %q", anchor, child.PathAnchorRoot)
+	}
+}
+
+// Without a context root the sandbox must still decide on the file the executor
+// will touch. The process working directory differs from the anchored workspace
+// here, so a cwd-anchored check would reach the opposite verdict for the first
+// call and would silently validate the wrong file for the second.
+func TestAllowToolCallAnchorsRelativePathToPolicyRoot(t *testing.T) {
+	anchor := t.TempDir()
+	policy := NewToolExecutionPolicy(nil, false).SetPathAnchorRoot(anchor)
+	policy.Sandbox = executor.NewSandbox(&executor.SandboxConfig{
+		Enabled:      true,
+		AllowedPaths: []string{anchor},
+	})
+	info := skill.ToolInfo{Name: "view"}
+
+	if err := policy.AllowToolCall(info, map[string]interface{}{"file_path": "inside.txt"}); err != nil {
+		t.Fatalf("expected anchored relative path inside the workspace to be allowed, got %v", err)
+	}
+	if err := policy.AllowToolCall(info, map[string]interface{}{"file_path": filepath.Join("..", "escape.txt")}); err == nil {
+		t.Fatal("expected anchored traversal out of the workspace to be denied")
+	}
+}
+
+func TestHasMutationHints_DetectsThirdPartyMutationNames(t *testing.T) {
+	mutations := []map[string]interface{}{
+		{"write_paths": []interface{}{"a.go"}},
+		{"files_written": []interface{}{"a.go"}},
+		{"deleted_files": "a.go"},
+		{"created_paths": []string{"a.go"}},
+		{"mutated_uris": "https://example.com"},
+		{"patched_uri": "https://example.com"},
+		{"renamed_files": map[string]interface{}{"a.go": "b.go"}},
+		{"writes": 2},
+	}
+	for _, args := range mutations {
+		if !HasMutationHints(args) {
+			t.Fatalf("expected %#v to be detected as a mutation hint", args)
+		}
+	}
+
+	reads := []map[string]interface{}{
+		{"path": "a.go"},
+		{"pattern": "todo"},
+		{"created_after": "2026-01-01"},
+		{"updated_at": "2026-01-01"},
+		{"updated_ids": []interface{}{1}},
+		{"search_paths": []interface{}{"docs"}},
+		{"write_enabled": true},
+	}
+	for _, args := range reads {
+		if HasMutationHints(args) {
+			t.Fatalf("expected %#v to stay a read hint", args)
+		}
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gorilla/mux"
+	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 )
@@ -14,22 +15,9 @@ import (
 // ListSessionTurns lists user-turn anchors for a session.
 // GET /api/runtime/sessions/{id}/turns
 func (h *Handler) ListSessionTurns(w http.ResponseWriter, r *http.Request) {
-	hub := h.getSessionHub()
-	if hub == nil {
-		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "session hub not configured"))
-		return
-	}
 	sessionID := runtimechat.NormalizeSessionID(mux.Vars(r)["id"])
 	if sessionID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
-		return
-	}
-	actor, err := hub.GetOrCreate(sessionID)
-	if err != nil {
-		if h.writeSessionLeaseConflict(w, err) {
-			return
-		}
-		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	// turns 锚点落在共享 session_history.sqlite（win7 配置与 aicli 共享
@@ -37,11 +25,14 @@ func (h *Handler) ListSessionTurns(w http.ResponseWriter, r *http.Request) {
 	// 显示 "signal timed out"。
 	queryCtx, queryCancel := sessionStoreQueryContext(r)
 	defer queryCancel()
-	turns, err := actor.ListTurns(queryCtx)
+	session, err := h.readSessionSnapshot(queryCtx, sessionID)
 	if err != nil {
 		writeSessionStoreError(w, err)
 		return
 	}
+	// checkpoint 注解是 best-effort：读取失败只降级为无注解的 turn 锚点。
+	checkpoints := h.readSessionCheckpoints(queryCtx, sessionID)
+	turns := runtimechat.ListUserTurns(session.GetMessages(), checkpoints)
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"session_id": sessionID,
 		"turns":      turns,
@@ -53,22 +44,9 @@ func (h *Handler) ListSessionTurns(w http.ResponseWriter, r *http.Request) {
 // GET /api/runtime/sessions/{id}/backtrack/audit
 // Entries are oldest-first; physical history remains truncated.
 func (h *Handler) ListSessionBacktrackAudit(w http.ResponseWriter, r *http.Request) {
-	hub := h.getSessionHub()
-	if hub == nil {
-		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "session hub not configured"))
-		return
-	}
 	sessionID := runtimechat.NormalizeSessionID(mux.Vars(r)["id"])
 	if sessionID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
-		return
-	}
-	actor, err := hub.GetOrCreate(sessionID)
-	if err != nil {
-		if h.writeSessionLeaseConflict(w, err) {
-			return
-		}
-		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	// backtrack audit 落在共享 session_history.sqlite（win7 配置与 aicli
@@ -76,11 +54,12 @@ func (h *Handler) ListSessionBacktrackAudit(w http.ResponseWriter, r *http.Reque
 	// 超时显示 "signal timed out"。
 	queryCtx, queryCancel := sessionStoreQueryContext(r)
 	defer queryCancel()
-	entries, err := actor.ListBacktrackAudit(queryCtx)
+	session, err := h.readSessionSnapshot(queryCtx, sessionID)
 	if err != nil {
 		writeSessionStoreError(w, err)
 		return
 	}
+	entries := runtimechat.ListBacktrackTombstones(session)
 	if entries == nil {
 		entries = []runtimechat.BacktrackTombstone{}
 	}
@@ -89,6 +68,38 @@ func (h *Handler) ListSessionBacktrackAudit(w http.ResponseWriter, r *http.Reque
 		"entries":    entries,
 		"count":      len(entries),
 	})
+}
+
+// readSessionSnapshot 以"免租约"方式读取会话快照，供只读端点使用。
+//
+// turns / backtrack-audit 都是纯读端点，不改变会话状态。此前它们通过
+// hub.GetOrCreate 获取 session actor，于是只要会话正被另一个持有者
+// （aicli CLI 或另一个 web 回合）租用，纯读请求也会拿到
+// 409 SESSION_LEASE_CONFLICT，前端只能在控制台反复报错。租约的语义是
+// 互斥写入而非互斥读取，因此读路径直接读会话存储：代价是可能看到略微
+// 滞后的已持久化快照，但不会再因为别人持有写租约而失败。
+func (h *Handler) readSessionSnapshot(ctx context.Context, sessionID string) (*runtimechat.Session, error) {
+	if h == nil || h.sessionManager == nil {
+		return nil, errors.New(errors.ErrConfigInvalid, "session manager not configured")
+	}
+	return h.sessionManager.Get(ctx, sessionID)
+}
+
+// readSessionCheckpoints 读取会话 checkpoint 列表，用于 turn 锚点注解。
+// 与 actor 内部行为一致：失败只降级为 nil（无注解），不阻断读路径。
+func (h *Handler) readSessionCheckpoints(ctx context.Context, sessionID string) []artifact.Checkpoint {
+	reader, cleanup, err := h.openCheckpointReadService(sessionID)
+	if err != nil || reader == nil {
+		return nil
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+	checkpoints, err := reader.ListCheckpoints(ctx, 0, 0)
+	if err != nil {
+		return nil
+	}
+	return checkpoints
 }
 
 // PreviewSessionBacktrack plans a user-turn backtrack without mutating state.

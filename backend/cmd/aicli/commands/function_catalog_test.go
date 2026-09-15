@@ -2,11 +2,13 @@ package commands
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
@@ -491,5 +493,52 @@ func TestAICLIFunctionCatalog_SelectRequestFunctions_HidesOpenAIImageGenerateWhe
 	}
 	if selectionContainsFunction(selection, toolnames.OpenAIImageGenerateToolName) {
 		t.Fatalf("did not expect %s when codex native image tool is available: %+v", toolnames.OpenAIImageGenerateToolName, selection.FinalFunctionNames)
+	}
+}
+
+// The CLI /call surface resolves relative path arguments against the session
+// workspace root (resolveLocalWorkspacePath), while the static policy used to
+// resolve them against the process working directory. A relative argument could
+// therefore pass the sandbox check and still escape the bound project
+// directory, so the catalog now binds the resolver to the policy context.
+func TestAICLIFunctionCatalog_ResolvesRelativePathsAgainstWorkspaceRoot(t *testing.T) {
+	workspaceRoot := t.TempDir()
+
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("openai", registry)
+	catalog.RegisterBuiltinToolFunction(&testFunction{name: "grep"}, runtimetools.ToolDescriptor{
+		Name:        "grep",
+		Description: "search files",
+		Parameters:  map[string]interface{}{"type": "object"},
+	})
+
+	policy := runtimepolicy.NewToolExecutionPolicy(nil, false)
+	policy.Sandbox = runtimeexecutor.NewSandbox(&runtimeexecutor.SandboxConfig{
+		Enabled:      true,
+		AllowedPaths: []string{workspaceRoot},
+	})
+	catalog.SetToolPolicy(policy)
+	catalog.workspaceRootResolver = func() string { return "  " + workspaceRoot + "  " }
+
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if _, _, err := catalog.ExecuteFunctionWithMeta(context.Background(), "grep", map[string]interface{}{"path": outside}); err == nil {
+		t.Fatal("expected absolute path outside the sandbox to be blocked")
+	}
+
+	// No resolver (embedders, tests) keeps the historical process-cwd behavior.
+	catalog.workspaceRootResolver = nil
+	relative := map[string]interface{}{"path": filepath.Join("sub", "inside.txt")}
+	withoutResolver, _, cwdErr := catalog.ExecuteFunctionWithMeta(context.Background(), "grep", relative)
+	if cwdErr == nil || withoutResolver != "" {
+		t.Fatalf("expected the cwd-resolved call to be denied by the sandbox, got output %q err %v", withoutResolver, cwdErr)
+	}
+	catalog.workspaceRootResolver = func() string { return workspaceRoot }
+
+	output, _, err := catalog.ExecuteFunctionWithMeta(context.Background(), "grep", relative)
+	if err != nil {
+		t.Fatalf("expected relative path inside the workspace root to pass the policy, got %v", err)
+	}
+	if output != "ok" {
+		t.Fatalf("expected the tool to run after the policy allowed it, got %q", output)
 	}
 }

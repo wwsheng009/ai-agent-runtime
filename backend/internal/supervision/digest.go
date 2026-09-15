@@ -228,6 +228,15 @@ func formatDigestText(digest *Digest) string {
 		status := string(item.SupervisionState)
 		line := fmt.Sprintf("- %s %s: %s; recommended=%s; allowed=[%s]",
 			item.SubjectKind, item.SubjectID, status, item.RecommendedAction, strings.Join(item.AllowedActions, ","))
+		// notification_id is the only handle ack_lifecycle / control_descendant
+		// accept. Print it inline with every actionable row: without it the
+		// model has to guess an id from "<subject_kind> <subject_id>", and the
+		// observed failure mode was exactly that (a fabricated
+		// "agent_run:<run_id>" id that no store row ever had, surfacing as an
+		// opaque "load notification ...: no rows in result set").
+		if id := strings.TrimSpace(item.NotificationID); id != "" {
+			line += "; notification_id=" + id
+		}
 		// Action-required items carry their parent-facing detail (for child
 		// approvals that is session/path/tool/request_id/waiting) so a single
 		// preflight line is enough to act without an extra snapshot round.

@@ -190,14 +190,19 @@ func (s *handleAliasSet) register(actual, preferredAlias string) string {
 }
 
 func (s *handleAliasSet) resolve(reference, prefix, label string) (actual string, alias string, err error) {
-	if s == nil {
-		return strings.TrimSpace(reference), "", nil
-	}
-	s.normalize()
 	reference = strings.TrimSpace(reference)
 	if reference == "" {
 		return "", "", nil
 	}
+	if isRenderedPlaceholderReference(reference) {
+		return "", "", fmt.Errorf(
+			"%s reference %q is a rendered placeholder, not an id: pass the id or %s handle returned by the tool that created it",
+			label, reference, prefix)
+	}
+	if s == nil {
+		return reference, "", nil
+	}
+	s.normalize()
 	if actual = strings.TrimSpace(s.AliasToActual[reference]); actual != "" {
 		return actual, reference, nil
 	}
@@ -213,6 +218,20 @@ func (s *handleAliasSet) resolve(reference, prefix, label string) (actual string
 		return "", "", fmt.Errorf("unknown %s reference: %s", label, reference)
 	}
 	return reference, strings.TrimSpace(s.ActualToAlias[reference]), nil
+}
+
+// isRenderedPlaceholderReference reports whether reference is one of the
+// tokens that appear in rendered tool output when an identifier was missing:
+// fmt.Sprintf("%v", nil) prints "<nil>" and a JSON null prints "null". Models
+// copy those tokens back as ids, and treating them as names created agent
+// sessions and background jobs literally called "<nil>".
+func isRenderedPlaceholderReference(reference string) bool {
+	switch strings.ToLower(strings.TrimSpace(reference)) {
+	case "<nil>", "nil", "null", "undefined":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *handleAliasSet) aliasFor(actual string) string {

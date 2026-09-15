@@ -12,6 +12,7 @@ import (
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 )
 
@@ -34,6 +35,10 @@ type aicliFunctionCatalog struct {
 	toolPolicy    *runtimepolicy.ToolExecutionPolicy
 	entries       map[string]*aicliCatalogEntry
 	entryOrder    []string
+	// workspaceRootResolver lazily resolves the session workspace root used to
+	// anchor relative path arguments for the static tool policy. It stays nil
+	// for catalogs without a session (unit tests, embedders).
+	workspaceRootResolver func() string
 }
 
 func newAICLIFunctionCatalog(protocol string, registry *functions.FunctionRegistry) *aicliFunctionCatalog {
@@ -76,6 +81,11 @@ func ensureFunctionCatalog(session *ChatSession) *aicliFunctionCatalog {
 	}
 	if session.FunctionCatalog.toolPolicy == nil && session.ToolPolicy != nil {
 		session.FunctionCatalog.toolPolicy = session.ToolPolicy
+	}
+	if session.FunctionCatalog.workspaceRootResolver == nil {
+		session.FunctionCatalog.workspaceRootResolver = func() string {
+			return resolveLocalWorkspacePath(loadRuntimeToolConfig(session.Config, session), session)
+		}
 	}
 
 	session.FunctionCatalog.syncFromRegistry()
@@ -435,7 +445,17 @@ func (c *aicliFunctionCatalog) ExecuteFunctionWithMeta(ctx context.Context, name
 	args = toolargs.Normalize(args)
 	c.syncFromRegistry()
 	if entry, ok := c.entries[name]; ok && entry != nil && !entry.isSkill && c.toolPolicy != nil {
-		if err := c.toolPolicy.AllowToolCall(skill.ToolInfo{Name: name}, args); err != nil {
+		// Anchor relative path arguments to the session workspace root the
+		// executor resolves against. Without this the sandbox check would run
+		// against the process working directory, so a relative argument could
+		// pass the check and still escape the bound project directory.
+		policyCtx := ctx
+		if c.workspaceRootResolver != nil {
+			if root := strings.TrimSpace(c.workspaceRootResolver()); root != "" {
+				policyCtx = toolctx.WithWorkspaceRoot(policyCtx, root)
+			}
+		}
+		if err := c.toolPolicy.AllowToolCallWithContext(policyCtx, skill.ToolInfo{Name: name}, args); err != nil {
 			return "", nil, err
 		}
 	}

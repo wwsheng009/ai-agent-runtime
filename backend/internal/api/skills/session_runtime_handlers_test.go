@@ -1698,3 +1698,204 @@ func TestStreamSessionRuntimeEventsIncludesCompactProvenanceSummary(t *testing.T
 	assert.Contains(t, rec.BodyString(), `"profile_resource_labels":["memory:memory.json"]`)
 	assert.NotContains(t, rec.BodyString(), `"data":{"type":"context.profile.injected"`)
 }
+
+// 回归：游标已追平（after == latest_seq）的空闲会话没有任何历史事件可发，
+// handler 必须立即提交并 flush 响应头（200 + text/event-stream），否则 Go 的
+// net/http 直到第一帧才发响应头，客户端的 fetch 会长期不 resolve：onOpen 不
+// 触发、连接状态卡在 connecting、中间 proxy 只能看到「等待响应」。
+func TestStreamSessionRuntimeEventsCommitsHeadersWithoutPendingEvents(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	runtimeStore := chat.NewInMemoryRuntimeStore(64)
+	handler.sessionRuntimeStore = runtimeStore
+	handler.sessionEventStore = runtimeStore
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// after=3 追平不存在的历史：既无历史回放，也无 live 事件。
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/session-runtime-stream-idle/runtime/stream?after=3&live=1&poll_ms=500", nil).WithContext(ctx)
+	req = mux.SetURLVars(req, map[string]string{"id": "session-runtime-stream-idle"})
+	rec := newSynchronizedResponseRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		handler.StreamSessionRuntimeEvents(rec, req)
+		close(done)
+	}()
+
+	require.Eventually(t, func() bool {
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		return rec.Flushed
+	}, 2*time.Second, 10*time.Millisecond, "stream handler must flush headers before any event frame")
+
+	rec.mu.Lock()
+	status := rec.Code
+	contentType := rec.Header().Get("Content-Type")
+	rec.mu.Unlock()
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, "text/event-stream", contentType)
+	assert.NotContains(t, rec.BodyString(), "event: runtime_event")
+	// 首字节握手帧：只 flush 响应头不足以穿透中间代理（代理要等第一个响应体字节
+	// 才转发头部），因此建连必须立刻写出一帧注释。
+	assert.Contains(t, rec.BodyString(), ": open")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream handler did not exit after context cancellation")
+	}
+}
+
+// 回归（真 TCP）：SSE 是「字节必须立刻出站」的协议，而 httptest.ResponseRecorder
+// 只是把字节同步落进内存 —— flush 有没有真正走到 socket，在 recorder 上永远观察不到。
+// 此前 flushSSE 只调 bufio.Flush，字节停在 net/http 自己的 2048B 响应缓冲里
+//（server.go 的 bufferBeforeChunkingSize），客户端要等缓冲攒满或 handler 返回才收到
+// 任何字节：线上表现为「直连 8101 的空闲会话 25s 零字节」，而单测全绿。
+// 本用例走真实 socket 与默认 http.Server 写链路（含 net/http 内部缓冲与 chunked
+// 编码），断言空闲会话在建连后立即收到 `: open` 握手帧。
+func TestStreamSessionRuntimeEventsFlushesHandshakeFrameOverRealTCP(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	runtimeStore := chat.NewInMemoryRuntimeStore(64)
+	handler.sessionRuntimeStore = runtimeStore
+	handler.sessionEventStore = runtimeStore
+
+	router := mux.NewRouter()
+	router.HandleFunc("/api/runtime/sessions/{id}/runtime/stream", handler.StreamSessionRuntimeEvents).Methods(http.MethodGet)
+	server := httptest.NewServer(router)
+	// 注意 defer 顺序：cancel 在 server.Close 之后注册 ⇒ 先取消请求，让 handler
+	// 从 select 里退出，server.Close 才不用等这个永不返回的 SSE 流。
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// after=3 追平不存在的历史 + live=1：没有任何业务帧可发，建连后的首批字节只可能
+	// 来自握手帧（keepalive 要等 15s，足以把「卡在缓冲里」区分出来）。
+	streamURL := server.URL + "/api/runtime/sessions/session-runtime-stream-tcp/runtime/stream?after=3&live=1&poll_ms=500"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
+	require.NoError(t, err)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "text/event-stream", resp.Header.Get("Content-Type"))
+
+	type readOutcome struct {
+		text string
+		err  error
+	}
+	outcomes := make(chan readOutcome, 1)
+	go func() {
+		buf := make([]byte, 128)
+		var seen strings.Builder
+		for !strings.Contains(seen.String(), ": open") {
+			n, readErr := resp.Body.Read(buf)
+			if n > 0 {
+				seen.Write(buf[:n])
+			}
+			if readErr != nil {
+				outcomes <- readOutcome{text: seen.String(), err: readErr}
+				return
+			}
+		}
+		outcomes <- readOutcome{text: seen.String()}
+	}()
+
+	select {
+	case outcome := <-outcomes:
+		require.NoError(t, outcome.err)
+		assert.Contains(t, outcome.text, ": open",
+			"握手注释帧必须立刻出站：只做 bufio.Flush 时它会滞留在 net/http 的 2048B 内部缓冲里")
+	case <-time.After(3 * time.Second):
+		t.Fatal("建连 3s 内没有收到任何字节：SSE flush 卡在 net/http 内部缓冲（回归）")
+	}
+}
+
+// flakyEventStore 让前 N 次 ListEvents 失败，用于验证存储层瞬时错误不会终止 SSE 流。
+type flakyEventStore struct {
+	*chat.InMemoryRuntimeStore
+	mu        sync.Mutex
+	failures  int
+	listCalls int
+}
+
+func (s *flakyEventStore) ListEvents(ctx context.Context, sessionID string, afterSeq int64, limit int) ([]runtimeevents.Event, error) {
+	s.mu.Lock()
+	s.listCalls++
+	fail := s.listCalls <= s.failures
+	s.mu.Unlock()
+	if fail {
+		return nil, fmt.Errorf("database is locked (simulated transient failure)")
+	}
+	return s.InMemoryRuntimeStore.ListEvents(ctx, sessionID, afterSeq, limit)
+}
+
+// 回归：存储层瞬时错误不得终止 SSE 流。旧实现一旦 ListEvents 报错就写一个 error 帧
+// 并 return —— 客户端立刻重连，重连本身又加剧 SQLite 争用（写事务持有唯一连接），
+// 形成「超时 → 断开 → 重连 → 更慢」的正反馈；而 error 帧还会被前端当作致命错误。
+// 现在应改为注释帧留痕 + 指数退避重试，连接保持存活并继续投递后续事件。
+func TestStreamSessionRuntimeEventsSurvivesTransientStoreErrors(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	runtimeStore := chat.NewInMemoryRuntimeStore(64)
+	const sessionID = "session-runtime-stream-retry"
+	_, err := runtimeStore.AppendEvent(context.Background(), runtimeevents.Event{
+		Type:      chat.EventAssistantMessage,
+		SessionID: sessionID,
+		Payload:   map[string]interface{}{"content": "delivered after retries"},
+	})
+	require.NoError(t, err)
+
+	flaky := &flakyEventStore{InMemoryRuntimeStore: runtimeStore, failures: 2}
+	handler.sessionRuntimeStore = runtimeStore
+	handler.sessionEventStore = flaky
+
+	router := mux.NewRouter()
+	router.HandleFunc("/api/runtime/sessions/{id}/runtime/stream", handler.StreamSessionRuntimeEvents).Methods(http.MethodGet)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	streamURL := server.URL + "/api/runtime/sessions/" + sessionID + "/runtime/stream?after=0&poll_ms=500"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
+	require.NoError(t, err)
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	type readOutcome struct {
+		text string
+		err  error
+	}
+	outcomes := make(chan readOutcome, 1)
+	go func() {
+		buf := make([]byte, 512)
+		var seen strings.Builder
+		for !strings.Contains(seen.String(), "delivered after retries") {
+			n, readErr := resp.Body.Read(buf)
+			if n > 0 {
+				seen.Write(buf[:n])
+			}
+			if readErr != nil {
+				outcomes <- readOutcome{text: seen.String(), err: readErr}
+				return
+			}
+		}
+		outcomes <- readOutcome{text: seen.String()}
+	}()
+
+	select {
+	case outcome := <-outcomes:
+		require.NoError(t, outcome.err)
+		assert.Contains(t, outcome.text, ": stream-retry", "瞬时错误应留下注释帧而不是终止流")
+		assert.Contains(t, outcome.text, "delivered after retries", "重试成功后必须继续投递事件")
+	case <-time.After(8 * time.Second):
+		t.Fatal("瞬时 ListEvents 错误后未能恢复投递：流被过早终止")
+	}
+}

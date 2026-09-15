@@ -170,6 +170,30 @@ func TestToolWorkspaceRootPrefersToolBasePath(t *testing.T) {
 	}
 }
 
+func TestPreflightWorkspaceRootFallsBackToPolicyAnchor(t *testing.T) {
+	agent := &Agent{config: &Config{Options: map[string]interface{}{}}}
+	loop := NewReActLoop(agent, nil, nil)
+
+	// No session root and no registered base path: preflight keeps the legacy
+	// process-directory behaviour.
+	if got := loop.preflightWorkspaceRoot(); got != "" {
+		t.Fatalf("expected empty root without options or anchor, got %q", got)
+	}
+
+	// The toolkit base path (SetBasePath) is what the executor falls back to, so
+	// preflight must resolve relative paths against it too.
+	agent.SetToolExecutionPolicy(NewToolExecutionPolicy(nil, false).SetPathAnchorRoot("/registered/root"))
+	if got := loop.preflightWorkspaceRoot(); got != "/registered/root" {
+		t.Fatalf("expected anchor fallback, got %q", got)
+	}
+
+	// A session-bound root still wins, mirroring the executor's ctx-first chain.
+	agent.config.Options["tool_base_path"] = "/tools/root"
+	if got := loop.preflightWorkspaceRoot(); got != "/tools/root" {
+		t.Fatalf("session root should win over anchor, got %q", got)
+	}
+}
+
 // emptySoftMCPManager returns successful empty results with explicit empty_result
 // metadata so RecordOutcome can open the soft negative cache.
 type emptySoftMCPManager struct {

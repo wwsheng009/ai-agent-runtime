@@ -981,6 +981,32 @@ func NormalizeSessionID(sessionID string) string {
 	return sanitizeSessionID(sessionID)
 }
 
+// IsAddressableSessionID 判断会话 ID 是否能按原字符串读回。
+//
+// 存储层在每次读取时都会应用 sanitizeSessionID（去首尾空白、去尾部分隔符、
+// 取路径最后一段），因此 "dir/abc"、"abc/"、" abc " 这类 ID 可以被写入，却永远
+// 无法读回：写入侧保留了原始字符串，读取侧却先规范化成另一个键。这类记录会
+// 出现在会话列表里，点击后必然 404，属于不可寻址的孤儿。
+//
+// 判据是“规范化的固定点”：只有完全经得起同一次规范化的字符串才会命中同一行。
+// 注意这里不能先 TrimSpace 再比较，那会把 " abc " 误判为可寻址，而它读回来的是
+// "abc" —— 恰恰是要拦住的脏数据。
+//
+// 由外部（工具参数 / HTTP / agent 派生）传入的会话 ID 必须在落库前过这道校验，
+// 否则每一次误传都会新增一条只能手动清理的脏记录。
+//
+// "<nil>" 是 Go 侧把 nil 渲染成字符串留下的历史脏数据（如 fmt.Sprint(nil)），
+// 它虽是规范化的固定点，但同样不应作为会话 ID。
+func IsAddressableSessionID(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(sessionID), "<nil>") {
+		return false
+	}
+	return sanitizeSessionID(sessionID) == sessionID
+}
+
 func sortSessionsByUpdated(sessions []*Session) {
 	sort.Slice(sessions, func(i, j int) bool {
 		left, right := sessions[i], sessions[j]
