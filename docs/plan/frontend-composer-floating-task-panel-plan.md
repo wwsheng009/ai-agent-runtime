@@ -1,6 +1,6 @@
 # frontend composer 上方浮动任务列表（Todo 面板）实现方案（参考 deepseek-harness）
 
-状态：**已实施（工作树未提交，2026-09-15）**——T0–T3 与 T5 已落地、T4 为可选打磨未做，实施记录与门禁证据见 §11；此前 2026-09-15 完成一轮完整性自审（§10）并按审查结论就地优化（D1–D6 已定稿，见 §10.3）。
+状态：**已实施并结项（2026-09-15）**——T0–T3、T5 与现场回归 R1 已落地交付；T4 经结项判定**本期不做**（理由见 §11）；D2 折叠态口径结项定案为「按会话 `sessionStorage`」（§6.3 / §9.1 已同步）；历史工具 metadata 形状按现场实测修正为 `metadata.tool_metadata.todos`（§5.1 F7 / §5.2 / §10.1 V6）。实施记录、门禁证据与按路径拆批提交见 §11；此前 2026-09-15 完成一轮完整性自审（§10）并按审查结论就地优化（D1–D6 已定稿，见 §10.3）。
 
 日期：2026-09-15
 
@@ -172,7 +172,7 @@
 | F4 | 现有 `todos` 特判只有「摘要放宽」：32 行 / 240 字符；`arg_preview` 已有 `todos=[N]` 形态 | `tool_runtime_events.go:969-981`；`tool_runtime_events_test.go:328` | 摘要文本有损、只够做兜底，不能当数据源 |
 | F5 | **刷新后不会重放历史工具事件**：运行时流首连游标 = `max(本地已消费 seq, 轨迹回放游标)`，窗口回放已把轨迹推进到 `latest_seq`，首连**有意跳过历史 dump** | `hooks/workspace/use-session-runtime-stream.ts:66-80, 311-314` | ★ 纯「从事件流派生」的方案在页面刷新/重开后会**空白**，必须配一条冷启动读通道 |
 | F6 | 客户端运行时事件缓冲是**最近 100 条**滚动窗口 | `lib/thread-state/history-artifacts.ts:15`；`lib/thread-state/events.ts:387` | 事件派生只覆盖近场；再次证明需要 F2 的权威读通道 |
-| F7 | 历史原文 `session-history-{id}` 逐字保留，内部上下文消息（含 `todo_state`）被过滤掉，但**工具消息 metadata 幸存**；前端保留 `metadata`（仅过滤 `context_stage`/developer 消息） | `lib/thread-state/history-artifacts.ts:151-158, 190-192, 208-211, 220-237`；配上 `agent/loop.go:4221-4233`、`types/message.go:30`、`api/skills/handler.go:2629-2637` | **B1 已由证据链确认为「复用既有契约」而非未知量**（§10.1 V6），T0 由此降级为一条断言（见 §7） |
+| F7 | 历史原文 `session-history-{id}` 逐字保留，内部上下文消息（含 `todo_state`）被过滤掉，但**工具消息 metadata 幸存**；前端保留 `metadata`（仅过滤 `context_stage`/developer 消息） | `lib/thread-state/history-artifacts.ts:151-158, 190-192, 208-211, 220-237`；配上 `agent/loop.go:4221-4233`、`types/message.go:30`、`api/skills/handler.go:2629-2637` | **B1 已由证据链确认为「复用既有契约」而非未知量**（§10.1 V6），T0 由此降级为一条断言（见 §7）；**形状修正（2026-09-15 现场实测）**：历史消息里的工具 metadata 是**整体嵌在 `metadata.tool_metadata` 下**的（`history[i].metadata.tool_metadata.todos`），**不是**平铺 `metadata.todos`——前端按「嵌套优先 + 平铺兼容回退」读取，见 §5.2 通道 B 与 §11 R1 |
 
 ### 5.2 数据通道设计（推荐 A + B，分两步走）
 
@@ -291,12 +291,12 @@ payload["protocol_result"] = wire.EventMap()
 
 | ID | 任务 | 交付物 | 文件（新增 / 修改） | 依赖 |
 |---|---|---|---|---|
-| **T0** | **B1 契约确认**（**已降级为 ~5 分钟**：静态证据链成立，见 §10.1 V6） | 一条断言输出 `curl .../sessions/{id}/history \| jq '.. \| .metadata?.todos? // empty'` 非空；顺带确认 `gateway.Process` 入参 metadata 逐键透传（唯一未逐行追证的一环） | 无代码改动（复用现有历史接口） | — |
+| **T0** | **B1 契约确认**（**已降级为 ~5 分钟**：静态证据链成立，见 §10.1 V6） | 一条断言输出 `curl .../sessions/{id}/history \| jq '.. \| .metadata?.tool_metadata?.todos? // empty'` 非空（**嵌套路径**；初稿的平铺写法 `.. \| .metadata?.todos?` 已按现场实测作废，见 §11 R1）；顺带确认 `gateway.Process` 入参 metadata 逐键透传（唯一未逐行追证的一环） | 无代码改动（复用现有历史接口） | — |
 | **T1** | 通道 A：`todos` 工具作用域白名单 | 后端放行 + 单测 | 改 `backend/internal/agent/tool_runtime_events.go`（`attachProtocolResultToPayload:667-693`）、必要时 `backend/internal/toolprotocol/result.go:172-217`；测试 `agent/tool_runtime_events_test.go` | — |
 | **T2** | 前端数据层 | 纯派生 + hook + 单测 | 新 `frontend/src/lib/thread-state/todos.ts`、`frontend/src/hooks/workspace/use-session-todos.ts`、对应 `.test.ts` | T1 |
 | **T2b** | 仅当 T0 判定 B1 不可用时：B2 只读接口 | 后端 handler + 前端 api + 测试 | 后端仿 `api/skills/handler.go:778-779`、复用 `chat/compact_reconciliation.go:76-101`；前端在 `api/runtime/sessions.ts` 新增取数函数（形态仿同文件 `:361-389` 的 plan-mode GET；既有历史分页读取先例见 `lib/trajectory/history-fallback.ts:33`） | T0 |
 | **T3** | UI 面板 + 挂载 + i18n | 4 个组件 + 双语词典 + 组件测试 | 新 `frontend/src/components/workspace/task-panel/{index,task-panel-header,task-panel-list,task-panel-item}.tsx`、`i18n/resources/{zh-CN,en-US}/workspace/panels-todos.ts`；改 `components/workspace/workspace-shell/main-section.tsx:418-446`、两侧 `workspace/index.ts` | T2 |
-| **T4** | 打磨（可独立排期，非阻塞） | `todos` 工具行不再是无摘要的通用行 | 改 `frontend/src/lib/tool-row/kind.ts:13-85`、`lib/tool-row/state.ts:98-162`、`lib/thread-state/tools.ts:70-92`（读 `summary_lines`） | T3 |
+| **T4** | 打磨（**结项定案（2026-09-15）：本期不做**，理由见 §11；保留为独立排期项） | —（本期不交付） | 原计划路径不变，供后续排期取用：改 `frontend/src/lib/tool-row/kind.ts:13-85`、`lib/tool-row/state.ts:98-162`、`lib/thread-state/tools.ts:70-92`（读 `summary_lines`） | 独立排期 |
 | **T5** | **文档回填**（D5，非阻塞，但须在结项前完成） | 三处文档同步：缺口登记、优化计划状态、事件契约说明 | 改 `docs/plan/frontend-deepseek-harness-gap-list.md`（登记本缺口与交付态）、`docs/plan/frontend-deepseek-harness-optimization-plan.md`（P2-9 邻位补本子片状态）、`docs/plan/grok-harness-productization-implementation-plan.md:500`（`protocol_result` 契约处补 `todo_snapshot`：仅 `todos` 工具作用域出现、additive） | T1（键名已定稿，T1 合并后即可写） |
 
 **范围控制**：T1 只改「放行」，不改生产侧 metadata 键名与 `compact_reconciliation` 的读取契约；T3 只加一个 DOM 节点，不动 composer 内部结构与 `pointer-events` 语义；T5 只改文档，不触碰代码与既有契约表述。
@@ -382,16 +382,16 @@ payload["protocol_result"] = wire.EventMap()
 | V6 | **B1 的可行性（原定为「唯一未知量」）** | 已可由静态证据链确认，T0 应降级 | 见下 |
 | V7 | 组件拆分是否满足 500 非空行门禁 | 满足 | §6.2 预估 120/90/110/60 + hook 60，均远低于阈值 |
 
-**V6 证据链（B1：刷新后从历史取 `metadata.todos`）**
+**V6 证据链（B1：刷新后从历史取 `metadata.tool_metadata.todos`）**
 
 1. 工具结果 Metadata 进入 envelope：`agent/loop.go:2394-2399`（另有 `:2465-2470`、`:2628-2633`、`:2785-2789`、`tool_parallel_scheduler.go:283-287` 共 5 处同构）`gateway.Process(...)` → `result.Envelope = envelope`；
 2. envelope.Metadata 逐键写入工具消息：`agent/loop.go:4221-4233`（`toolExecutionResultMessage`，与 `approved_tool.go:106-115` 同构）；
 3. 消息 Metadata 参与历史序列化：`backend/internal/types/message.go:30`（`Metadata Metadata \`json:"metadata,omitempty"\``）；
 4. `/history` 直接返回该批消息：`api/skills/handler.go:2629-2637`（`history: page.Messages`）；
-5. 前端历史消息保留 metadata：`lib/thread-state/history-artifacts.ts:208-211`（`metadata: item.metadata ?? undefined`，仅过滤 `context_stage` / developer 消息，见 `:220-248`）；
-6. 该链**已被既有实现消费**：`chat/compact_reconciliation.go:80-101` 正读 `message.Metadata["todos"]` + `goal_id`，并有测试夹具 `compact_reconciliation_test.go:18-21` 构造同形态工具消息。
+5. 前端历史消息保留 metadata：`lib/thread-state/history-artifacts.ts:208-211`（`metadata: item.metadata ?? undefined`，仅过滤 `context_stage` / developer 消息，见 `:220-248`）——**实测关键形状**：该 metadata 下的工具结果键是**嵌套包 `tool_metadata`**（`history[i].metadata.tool_metadata.todos`），前端按「嵌套优先 + 平铺回退」读取；
+6. 该链**已被既有实现消费**：`chat/compact_reconciliation.go:80-101` 读 `message.Metadata["todos"]` + `goal_id`，并有测试夹具 `compact_reconciliation_test.go:18-21` 构造同形态工具消息（注意：这是**服务端另一条写入路径**的平铺形状，与第 5 步 `/history` 载荷的嵌套形状**不同源**——两种形状都保留兼容，见 §11 R1）。
 
-> 因此 B1 不是「押运气」，而是**复用既有契约**。建议把 T0 从「30 分钟 devtools 手工探针」降级为「一条断言」——`curl .../sessions/{id}/history | jq '.. | .metadata?.todos? // empty'`，或直接由 T2 的单测夹具覆盖。**唯一尚未逐行追证的一环**是第 1 步中 `gateway.Process` 的入参 metadata 是否逐键等于工具结果 Metadata（本审查已定位到写入点，未回溯到 gateway 内部）；保留 5 分钟确认即可，不影响选型。**→ 本轮已落地**：§5.2 通道 B 与 §7 T0 已按此结论改写（T0 降级为一条 `curl | jq` 断言），§5.1 F7 同步改判。
+> 因此 B1 不是「押运气」，而是**复用既有契约**。建议把 T0 从「30 分钟 devtools 手工探针」降级为「一条断言」——`curl .../sessions/{id}/history | jq '.. | .metadata?.tool_metadata?.todos? // empty'`，或直接由 T2 的单测夹具覆盖。**唯一尚未逐行追证的一环**是第 1 步中 `gateway.Process` 的入参 metadata 是否逐键等于工具结果 Metadata（本审查已定位到写入点，未回溯到 gateway 内部）；保留 5 分钟确认即可，不影响选型。**→ 本轮已落地**：§5.2 通道 B 与 §7 T0 已按此结论改写（T0 降级为一条 `curl | jq` 断言），§5.1 F7 同步改判。**结项复核（2026-09-15）**：T0 按此静态口径执行、真实载荷由 §11 R1 的逐字回归用例固化；断言路径已从平铺改为嵌套 `.. | .metadata?.tool_metadata?.todos?`。
 
 ### 10.2 内部矛盾（已在本轮就地修正）
 
@@ -484,7 +484,7 @@ payload["protocol_result"] = wire.EventMap()
 
 ---
 
-## 11. 实施记录（2026-09-15，T0–T3 + T5 已落地 · 工作树未提交）
+## 11. 实施记录（2026-09-15，T0–T3 + T5 + R1 已落地并结项）
 
 | 任务 | 状态 | 落地内容 | 验证 |
 |---|---|---|---|
@@ -493,14 +493,18 @@ payload["protocol_result"] = wire.EventMap()
 | **T2** 前端投影 | 完成 | `lib/thread-state/todos.ts`（派生 / 合并 / 折叠）+ `hooks/workspace/use-session-todos.ts`（可见性 / 三态计数 / 当前项 / 折叠态）；`lib/thread-state/events.ts` 接入折叠调用，私有文本工具搬迁到 `lib/thread-state/text-utils.ts`（语义不变，过 ≤500 非空行门禁）；`history-artifacts.ts` 补**通道 B1** 历史兜底 | `todos.test.ts` 17 例、`use-session-todos.test.tsx` 6 例 |
 | **T2b** 只读接口 | **不需要** | T0 判定 B1 可用，未新增任何后端读接口 | — |
 | **T3** UI 面板 + 挂载 + i18n | 完成 | `components/workspace/task-panel/{index,task-panel-header,task-panel-list,task-panel-item}.tsx`；`workspace-shell/main-section.tsx` 在 `chatSurfaceVisible` 分支、`PendingInteractionBar` **之前**挂载（复用既有吸底 overlay）；双语 `panels.todos.*` 逐键对齐；`data/mock/types.ts` 补可选 `todoSnapshot` | `task-panel.test.tsx` 7 例（jsdom + `act` + `createRoot`，未引入 testing-library）；`npm run build` exit 0 |
-| **T4** 工具行摘要打磨 | **未做（可选，非阻塞）** | 留待独立排期（`lib/tool-row/*`） | — |
+| **T4** 工具行摘要打磨 | **明确不做（本期）** | 决策理由：结构化列表已由面板（T2/T3）承担，工具行摘要打磨的边际收益低；且要动 `lib/tool-row/*` **共享渲染路径**（回归面覆盖全部工具行 + e2e 基线），与本方案「只增不改、控制 diff 面」的范围控制冲突。保留为独立排期项，落地路径不变（§7 T4） | — |
 | **T5** 文档回填 | 完成 | ① `frontend-deepseek-harness-gap-list.md` 新增 `### 批次 18（2026-09-15）` 并补 §2 B5 行的子片 4；② `frontend-deepseek-harness-optimization-plan.md` 状态头 + §9.3 台账行；③ `grok-harness-productization-implementation-plan.md` §C1 `protocol_result` 契约处补 `todo_snapshot`（additive、仅 `todos` 工具作用域）+ 变更记录行 | 三处文档 diff 已复核 |
 | **R1** 现场回归修复（2026-09-15 晚） | 完成 | 真实会话刷新后面板不显示：通道 B1 改读生产形状 `metadata.tool_metadata.todos`（保留平铺 `metadata.todos` 兼容回退），并从同一嵌套包取 `session_id` / `goal_id`；`todos.test.ts` 夹具换成生产形状 + 新增 3 例（实测载荷逐字回归 / 平铺兼容 / `tool_metadata` 无 `todos` 键时不误读其它工具）；`history-projection.test.ts` 新增通道 B1 集成用例 | `npx vitest run src/lib/thread-state` **93 例全绿**；`npm test` **216 文件 / 1679 例全绿**；`npx tsc -b --force` exit 0；`npm run lint` 0 error / 1 基线 warning |
 
-**与方案正文的差异（实现口径）**：§5.3 写的 `deriveLatestTodos(events, historyContent?)` 在实现中拆成三个纯函数——`deriveTodoSnapshotFromRuntimeEvent`（单事件解析）、`deriveLatestTodosFromRuntimeEvents`（事件序列取最新）、`deriveLatestTodosFromHistoryMessages`（历史兜底），职责与断言口径不变、便于单测；折叠调用集中在 `applyTodoSnapshotToThread`，并保证「与 todo 无关的事件返回入参同一引用」，不打断下游 memo。
+**与方案正文的差异（实现口径）**：§5.3 写的 `deriveLatestTodos(events, historyContent?)` 在实现中拆成三个纯函数——`deriveTodoSnapshotFromRuntimeEvent`（单事件解析）、`deriveLatestTodosFromRuntimeEvents`（事件序列取最新）、`deriveLatestTodosFromHistoryMessages`（历史兜底），职责与断言口径不变、便于单测；折叠调用集中在 `applyTodoSnapshotToThread`，并保证「与 todo 无关的事件返回入参同一引用」，不打断下游 memo。**D2 口径（结项定案）**：折叠态按会话记在 `sessionStorage`（初稿曾定为组件内 state，结项时按实现回归并写明理由，见 §6.3 / §9.1 / §10.3）。
 
-**门禁证据（工作树，2026-09-15）**：`npx tsc -b --force` exit 0；`npm run build`（`tsc -b && vite build`）exit 0；`npm run lint` **0 error / 1 基线 warning**（`artifact-detail-dialog.tsx:50` 既有 `react-hooks/exhaustive-deps`；i18n scanned=684 / violations=0、备份门禁 1035 文件 0 残留、行数门禁 973 个 `.ts/.tsx` 中 0 个 > 500（最大 `hooks/workspace/use-session-runtime-stream.ts`=500）、消息 token 门禁 37 文件 0 处）；`npm test` **216 文件 / 1669 用例全绿**（本批新增 30 例：`todos.test.ts` 17、`use-session-todos.test.tsx` 6、`task-panel.test.tsx` 7）；后端 `go build ./...` / `go vet ./...` / `go test ./internal/agent/... ./internal/toolprotocol/... ./internal/toolkit/...` 全绿。
+**门禁证据（2026-09-15，结项复核值）**：`npx tsc -b --force` exit 0；`npm run build`（`tsc -b && vite build`）exit 0；`npm run lint` **0 error / 1 基线 warning**（`artifact-detail-dialog.tsx:50` 既有 `react-hooks/exhaustive-deps`；i18n scanned=685 / violations=0、备份门禁 1038 文件 0 残留、行数门禁 974 个 `.ts/.tsx` 中 0 个 > 500（最大 `hooks/workspace/use-session-runtime-stream.ts`=500）、消息 token 门禁 37 文件 0 处）；`npm test` **216 文件 / 1679 用例全绿**（本批新增 33 例：`todos.test.ts` 20（含 R1 新增 3）、`use-session-todos.test.tsx` 6、`task-panel.test.tsx` 7）；后端 `go build ./...` exit 0、`go vet ./...` exit 0、`go test ./internal/agent/... ./internal/toolprotocol/... ./internal/toolkit/...` 全绿（结项复核独立复跑）。
 
-**e2e**：按 D3 **不新增用例、未改任何既有 e2e 文件**（实现期间创建的两个临时探针脚本已在收尾时删除）。全量 `npm run test:e2e` 的失败项已全部定性为**基线既有**：`live-delta.spec.ts:85` / `thread-link.spec.ts:52` / `thread-link.spec.ts:116` 在干净 HEAD `2d6dd61c` 独立 worktree + 独立 fresh build 上**同样失败**（同断言、同超时）；`trajectory.spec.ts:71`（P2-1 搜索过滤）同口径在 HEAD 基线复现；`workspace-chat.spec.ts:205`（P1-3a 阅读位置保持）为**时序敏感 flaky**——`.artifacts/e2e-failures/` 存有 2026-09-14 起的多次失败留图（18:21 / 21:11 / 22:36 / 23:38 等，均早于本批），本批 `--repeat-each=3` **3 passed**、干净 HEAD 单跑亦通过。未修任何基线红项（不在本方案范围）。
+**e2e**：按 D3 **不新增用例、未改任何既有 e2e 文件**。两个临时探针脚本（`frontend/probe-dom.mjs` / `probe-rows.mjs`）在结项复核时**仍在工作树**——先前记的「收尾时已删除」与事实不符，已随本次收口删除（2026-09-15）。全量 `npm run test:e2e` 的失败项已全部定性为**基线既有**：`live-delta.spec.ts:85` / `thread-link.spec.ts:52` / `thread-link.spec.ts:116` 在干净 HEAD `2d6dd61c` 独立 worktree + 独立 fresh build 上**同样失败**（同断言、同超时）；`trajectory.spec.ts:71`（P2-1 搜索过滤）同口径在 HEAD 基线复现；`workspace-chat.spec.ts:205`（P1-3a 阅读位置保持）为**时序敏感 flaky**——`.artifacts/e2e-failures/` 存有 2026-09-14 起的多次失败留图（18:21 / 21:11 / 22:36 / 23:38 等，均早于本批），本批 `--repeat-each=3` **3 passed**、干净 HEAD 单跑亦通过。未修任何基线红项（不在本方案范围）。
 
-**交付物清单（工作树未提交）**：后端 4 文件（`internal/toolprotocol/result.go` + `result_test.go`、`internal/agent/tool_runtime_events.go` + `tool_runtime_events_test.go`）；前端**新增 11 个文件**（`components/workspace/task-panel/` 4 组件 + 组件测试、`lib/thread-state/todos.ts` + `todos.test.ts`、`hooks/workspace/use-session-todos.ts` + `use-session-todos.test.tsx`、双语 `i18n/resources/{zh-CN,en-US}/workspace/panels-todos.ts`）；前端**修改 7 个文件**（`workspace-shell/main-section.tsx`、`data/mock/types.ts`、两侧 `workspace/index.ts`、`lib/thread-state/events.ts`、`history-artifacts.ts`、`text-utils.ts`）；文档 4 篇（本方案 + 缺口清单 + 优化计划 + `grok-harness` 事件契约）。
+**交付物清单（已提交 `ba39858b`）**：后端 4 文件（`internal/toolprotocol/result.go` + `result_test.go`、`internal/agent/tool_runtime_events.go` + `tool_runtime_events_test.go`）；前端**新增 11 个文件**（`components/workspace/task-panel/` 4 组件 + 组件测试、`lib/thread-state/todos.ts` + `todos.test.ts`、`hooks/workspace/use-session-todos.ts` + `use-session-todos.test.tsx`、双语 `i18n/resources/{zh-CN,en-US}/workspace/panels-todos.ts`）；前端**修改 7 个文件**（`workspace-shell/main-section.tsx`、`data/mock/types.ts`、两侧 `workspace/index.ts`、`lib/thread-state/events.ts`、`history-artifacts.ts`、`text-utils.ts`）；文档 4 篇（本方案 + 缺口清单 + 优化计划 + `grok-harness` 事件契约）。
+
+**结项收口记录（2026-09-15 晚，本轮复核）**：① **D2 定案**——折叠态保留实现侧的**按会话 `sessionStorage`**，§6.3 / §9.1 / §10.3 已同步并写明理由；② **形状同步**——历史工具 metadata 的实测形状 `metadata.tool_metadata.todos` 回填 §5.1 F7 / §5.2 通道 B / §7 T0 / §10.1 V6（含断言路径订正，以及「服务端 `compact_reconciliation` 走另一条平铺写入路径」的区分）；③ **T4 定案**——本期不做，理由与后续落地路径写入 §7 / §11；④ **打扫**——`frontend/probe-dom.mjs`、`frontend/probe-rows.mjs` 已删除；上方门禁数字按结项复核值订正（1669 → 1679、新增 30 → 33 例、i18n 684 → 685、备份 1035 → 1038、行数 973 → 974）。
+
+**提交拆分（按路径）**：① **本方案批次**已提交为 `ba39858b`（27 文件：后端 additive 出口、前端面板 / 数据层 / i18n / 测试与文档 4 篇）；② **实时工具行批次**（`frontend/src/lib/thread-state/{events-live.ts,index.ts,deltas.ts,chat-sse-bridge.test.ts}` + `backend/internal/api/skills/{live_tool_stream.go,live_tool_stream_test.go}`，`handler.go` 与 `events.ts` 的拆分包同属该链路）在结项时**仍在工作树未提交**，且与之同树并行的还有**第三条在途工作流**（`internal/chat/durable_history.go`、`internal/types/context_scope.go`、`api/skills/runtime_event_delivery.go`、`cmd/session-dedupe/` 等）——两者归属各自批次，本方案**不代提交**，避免把在途改动混进本批记录。
