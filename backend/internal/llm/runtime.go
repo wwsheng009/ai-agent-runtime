@@ -156,14 +156,11 @@ func (r *LLMRuntime) RegisterProvider(name string, provider Provider) error {
 		r.health.AddProvider(name)
 	}
 
-	// 添加路由规则（如果提供了模型信息）
-	if caps := provider.GetCapabilities(); caps != nil {
-		r.router.AddRule(&RoutingRule{
-			Model:     name,
-			Condition: &DefaultCondition{},
-		})
-	}
-
+	// 不再自动注册「无条件命中」的路由规则：DefaultCondition 恒为 true，而
+	// RoutingRule.Model 存的是 provider 名，于是 router.Route() 退化成
+	// 「返回第一个注册的 provider」——注册顺序还取决于 map 迭代（随机）。
+	// 路由规则只由 AddRoutingRule 显式注册，请求归属统一交给
+	// resolveProviderForRequest 解析。
 	return nil
 }
 
@@ -187,12 +184,6 @@ func (r *LLMRuntime) ReplaceProviderRegistration(name string, provider Provider,
 		r.health.AddProvider(name)
 	}
 	r.router.RemoveRule(name)
-	if caps := provider.GetCapabilities(); caps != nil {
-		r.router.AddRule(&RoutingRule{
-			Model:     name,
-			Condition: &DefaultCondition{},
-		})
-	}
 
 	for alias, providerName := range r.aliases {
 		if providerName == name && alias != name {
@@ -327,6 +318,178 @@ func (r *LLMRuntime) ResolveProviderName(name string) string {
 	return r.resolveRegisteredProviderName(name)
 }
 
+// configuredDefaults returns the runtime-level default provider/model.
+func (r *LLMRuntime) configuredDefaults() (string, string) {
+	if r == nil || r.config == nil {
+		return "", ""
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.config.DefaultProvider, r.config.DefaultModel
+}
+
+// resolveProviderForRequest 解析请求应交给哪个已注册 provider，无法确定时快速失败。
+//
+// 解析顺序（越靠前越明确）：
+//  1. 请求显式指定的 provider；
+//  2. 请求的 model 命中已注册 provider 名称/别名——别名集由 provider 的
+//     default_model / supported_models 注册而来，等价于「该 provider 声明支持这个模型」；
+//  3. 配置的默认 provider；
+//  4. 配置的默认 model 命中已注册 provider 名称/别名；
+//  5. 显式注册的路由规则（AddRoutingRule）；
+//  6. 只注册了一个 provider 时用它（唯一，不存在歧义）;
+//  7. 以上都不成立 → 立即返回可操作的错误，不再猜 provider。
+//
+// 旧实现在第 6 步会把 model 名直接当 provider 名，或者退回到 RegisterProvider 自动
+// 注册的「无条件命中」路由规则（DefaultCondition 恒真，等于返回第一个注册的
+// provider）。两者都会把请求交给一个没有声明该模型的 provider，于是为一个无人能
+// 服务的默认模型白等整轮重试（实测真后端 ~24s）才报错。
+func (r *LLMRuntime) resolveProviderForRequest(req *LLMRequest) (string, error) {
+	if req == nil {
+		return "", errors.New(errors.ErrValidationFailed, "request cannot be nil")
+	}
+
+	defaultProvider, defaultModel := r.configuredDefaults()
+	defaultProvider = strings.TrimSpace(defaultProvider)
+	defaultModel = strings.TrimSpace(defaultModel)
+	if strings.TrimSpace(req.Model) == "" && defaultModel != "" {
+		req.Model = defaultModel
+	}
+
+	if name := strings.TrimSpace(req.Provider); name != "" {
+		return name, nil
+	}
+
+	model := strings.TrimSpace(req.Model)
+	if name := r.pickProviderForModel(model, defaultProvider); name != "" {
+		return name, nil
+	}
+	if defaultProvider != "" {
+		return defaultProvider, nil
+	}
+	if name := r.pickProviderForModel(defaultModel, defaultProvider); name != "" {
+		return name, nil
+	}
+	if name := strings.TrimSpace(r.router.Route(req)); name != "" {
+		return name, nil
+	}
+	if name := r.singleRegisteredProvider(); name != "" {
+		return name, nil
+	}
+
+	return "", errors.New(errors.ErrValidationFailed, r.describeUnresolvedProvider(model))
+}
+
+// singleRegisteredProvider 返回唯一的已注册 provider；多于一个时返回空。
+// 只有一个 provider 时归属不存在歧义，历史上依赖这一兜底。
+func (r *LLMRuntime) singleRegisteredProvider() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if len(r.providers) != 1 {
+		return ""
+	}
+	for name := range r.providers {
+		return name
+	}
+	return ""
+}
+
+// pickProviderForModel 从「声明了该 model」的 provider 中确定性地挑一个。
+//
+// 同一个 model 被多个 provider 声明是常态（真实配置里 claude-3-5-sonnet 就有 5 个
+// 声明者）。别名表 r.aliases 是扁平的「最后写入者胜」，而 provider 注册顺序来自 map
+// 迭代（随机），因此旧实现下同一请求可能落到任意一个声明者上，包括探活已经失败的
+// 那些——这正是「默认模型没人能服务却要重试到预算耗尽」的来源之一。
+//
+// 选择顺序：显式配置的默认 provider（且确实声明了该 model）→ 健康度最好者 →
+// 名字排序第一个（保证确定性，不再依赖 map 迭代顺序）。
+func (r *LLMRuntime) pickProviderForModel(model string, preferred string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+
+	candidates := r.providersDeclaringModel(model)
+	if len(candidates) == 0 {
+		return ""
+	}
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+
+	if preferred := r.resolveRegisteredProviderName(preferred); preferred != "" {
+		for _, name := range candidates {
+			if name == preferred {
+				return name
+			}
+		}
+	}
+
+	best, bestRank := candidates[0], r.providerHealthRank(candidates[0])
+	for _, name := range candidates[1:] {
+		if rank := r.providerHealthRank(name); rank < bestRank {
+			best, bestRank = name, rank
+		}
+	}
+	return best
+}
+
+// providersDeclaringModel 返回声明支持该 model 的已注册 provider（按名字排序）。
+func (r *LLMRuntime) providersDeclaringModel(model string) []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	names := make([]string, 0, len(r.providerAliases))
+	for name, aliases := range r.providerAliases {
+		if _, ok := aliases[model]; ok {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// providerHealthRank 越小越优先：健康 < 降级 < 未探测 < 不健康。
+func (r *LLMRuntime) providerHealthRank(name string) int {
+	if r.health == nil {
+		return 0
+	}
+	health, ok := r.health.Get(name)
+	if !ok {
+		return 2
+	}
+	switch health.Status {
+	case HealthStatusHealthy:
+		return 0
+	case HealthStatusDegraded:
+		return 1
+	case HealthStatusUnhealthy:
+		return 3
+	default:
+		return 2
+	}
+}
+
+// describeUnresolvedProvider 生成「没有 provider 能服务该请求」的可操作错误信息。
+func (r *LLMRuntime) describeUnresolvedProvider(model string) string {
+	names := r.ListProviders()
+	sort.Strings(names)
+	available := "(none registered)"
+	if len(names) > 0 {
+		available = strings.Join(names, ", ")
+	}
+
+	if model == "" {
+		return fmt.Sprintf(
+			"no provider available: set the request provider, configure providers.default_provider, or register a provider (registered providers: %s)",
+			available)
+	}
+	return fmt.Sprintf(
+		"no provider available for model %q: no registered provider declares this model and no default provider is configured; set the request provider, add the model to a provider's supported_models/default_model, or configure providers.default_provider (registered providers: %s)",
+		model, available)
+}
+
 // ListProviders 列出所有提供者
 func (r *LLMRuntime) ListProviders() []string {
 	r.mu.RLock()
@@ -425,27 +588,9 @@ func (r *LLMRuntime) Call(ctx context.Context, req *LLMRequest) (*LLMResponse, e
 	}
 	ctx = withHTTPDebugRequestMetadata(ctx, req.Metadata)
 
-	providerName := strings.TrimSpace(req.Provider)
-	if providerName == "" {
-		providerName = r.resolveRegisteredProviderName(req.Model)
-	}
-	if providerName == "" && r.config != nil {
-		providerName = strings.TrimSpace(r.config.DefaultProvider)
-	}
-	if providerName == "" {
-		providerName = r.router.Route(req)
-	}
-	if providerName == "" {
-		providerName = strings.TrimSpace(req.Model)
-	}
-	if providerName == "" && r.config != nil {
-		providerName = r.resolveRegisteredProviderName(r.config.DefaultModel)
-		if providerName == "" {
-			providerName = strings.TrimSpace(r.config.DefaultModel)
-		}
-	}
-	if req.Model == "" && r.config != nil {
-		req.Model = strings.TrimSpace(r.config.DefaultModel)
+	providerName, err := r.resolveProviderForRequest(req)
+	if err != nil {
+		return nil, err
 	}
 	req.Provider = providerName
 
@@ -539,27 +684,9 @@ func (r *LLMRuntime) Stream(ctx context.Context, req *LLMRequest) (<-chan Stream
 
 	req.Stream = true
 
-	providerName := strings.TrimSpace(req.Provider)
-	if providerName == "" {
-		providerName = r.resolveRegisteredProviderName(req.Model)
-	}
-	if providerName == "" && r.config != nil {
-		providerName = strings.TrimSpace(r.config.DefaultProvider)
-	}
-	if providerName == "" {
-		providerName = r.router.Route(req)
-	}
-	if providerName == "" {
-		providerName = strings.TrimSpace(req.Model)
-	}
-	if providerName == "" && r.config != nil {
-		providerName = r.resolveRegisteredProviderName(r.config.DefaultModel)
-		if providerName == "" {
-			providerName = strings.TrimSpace(r.config.DefaultModel)
-		}
-	}
-	if req.Model == "" && r.config != nil {
-		req.Model = strings.TrimSpace(r.config.DefaultModel)
+	providerName, err := r.resolveProviderForRequest(req)
+	if err != nil {
+		return nil, err
 	}
 	req.Provider = providerName
 

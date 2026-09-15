@@ -290,6 +290,198 @@ func TestLLMRuntime_Call_UsesDefaultProviderWhenRequestOmitsProvider(t *testing.
 	assert.Nil(t, providerA.lastReq)
 }
 
+// 旧实现会把 model 名当 provider 名、或退回到「第一个注册的 provider」兜底路由，
+// 于是为一个没有 provider 声明的默认模型白等整轮重试。现在必须立即失败。
+func TestLLMRuntime_Call_FailsFastWhenNoProviderDeclaresModel(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{
+		DefaultModel: "claude-3-5-sonnet",
+		MaxRetries:   3,
+	})
+	provider := &captureProvider{name: "opencode-ai"}
+	other := &captureProvider{name: "opencode-console"}
+	require.NoError(t, runtime.RegisterProvider("opencode-ai", provider))
+	require.NoError(t, runtime.RegisterProvider("opencode-console", other))
+
+	startedAt := time.Now()
+	resp, err := runtime.Call(context.Background(), &LLMRequest{
+		Model:    "claude-3-5-sonnet",
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+	elapsed := time.Since(startedAt)
+
+	require.Nil(t, resp)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `no provider available for model "claude-3-5-sonnet"`)
+	assert.Contains(t, err.Error(), "opencode-ai")
+	assert.Nil(t, provider.lastReq, "a provider that does not declare the model must not be called")
+	assert.Nil(t, other.lastReq, "a provider that does not declare the model must not be called")
+	assert.Less(t, elapsed, time.Second, "unresolvable requests must fail immediately instead of draining the retry budget")
+}
+
+func TestLLMRuntime_Stream_FailsFastWhenNoProviderDeclaresModel(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{
+		DefaultModel: "claude-3-5-sonnet",
+		MaxRetries:   3,
+	})
+	provider := &captureProvider{name: "opencode-ai"}
+	other := &captureProvider{name: "opencode-console"}
+	require.NoError(t, runtime.RegisterProvider("opencode-ai", provider))
+	require.NoError(t, runtime.RegisterProvider("opencode-console", other))
+
+	stream, err := runtime.Stream(context.Background(), &LLMRequest{
+		Model:    "claude-3-5-sonnet",
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+
+	require.Nil(t, stream)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `no provider available for model "claude-3-5-sonnet"`)
+	assert.Nil(t, provider.lastReq, "a provider that does not declare the model must not be called")
+	assert.Nil(t, other.lastReq, "a provider that does not declare the model must not be called")
+}
+
+// 只注册了一个 provider 时归属无歧义，仍然沿用它（历史行为）。
+func TestLLMRuntime_Call_SingleRegisteredProviderServesUnownedModel(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{
+		DefaultModel: "gpt-4-turbo",
+		MaxRetries:   0,
+	})
+	provider := &captureProvider{name: "test-provider"}
+	require.NoError(t, runtime.RegisterProvider("test-provider", provider))
+
+	resp, err := runtime.Call(context.Background(), &LLMRequest{
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "provider:test-provider", resp.Content)
+	require.NotNil(t, provider.lastReq)
+	assert.Equal(t, "gpt-4-turbo", provider.lastReq.Model)
+}
+
+// 声明了该 model 的 provider 比默认 provider 更具体，应当优先。
+func TestLLMRuntime_Call_ModelOwnerBeatsDefaultProvider(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{
+		DefaultProvider: "provider-b",
+		DefaultModel:    "model-b",
+		MaxRetries:      0,
+	})
+	providerA := &captureProvider{name: "provider-a"}
+	providerB := &captureProvider{name: "provider-b"}
+	require.NoError(t, runtime.RegisterProvider("provider-a", providerA))
+	require.NoError(t, runtime.RegisterProvider("provider-b", providerB))
+	require.NoError(t, runtime.RegisterProviderAliases("provider-a", "model-b"))
+
+	resp, err := runtime.Call(context.Background(), &LLMRequest{
+		Model:    "model-b",
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "provider:provider-a", resp.Content)
+	assert.Nil(t, providerB.lastReq)
+}
+
+// 同一 model 有多个声明者时：显式配置的默认 provider 优先。
+func TestLLMRuntime_Call_MultipleDeclarersPreferConfiguredDefaultProvider(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{
+		DefaultProvider: "provider-c",
+		MaxRetries:      0,
+	})
+	for _, name := range []string{"provider-a", "provider-b", "provider-c"} {
+		require.NoError(t, runtime.RegisterProvider(name, &captureProvider{name: name}))
+		require.NoError(t, runtime.RegisterProviderAliases(name, "shared-model"))
+	}
+
+	resp, err := runtime.Call(context.Background(), &LLMRequest{
+		Model:    "shared-model",
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "provider:provider-c", resp.Content)
+}
+
+// 没有默认 provider 时优先选探活健康的声明者（旧实现只看「最后写入别名表的那个」）。
+func TestLLMRuntime_Call_MultipleDeclarersPreferHealthyProvider(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{MaxRetries: 0})
+	providerA := &captureProvider{name: "provider-a"}
+	providerB := &captureProvider{name: "provider-b"}
+	require.NoError(t, runtime.RegisterProvider("provider-a", providerA))
+	require.NoError(t, runtime.RegisterProvider("provider-b", providerB))
+	require.NoError(t, runtime.RegisterProviderAliases("provider-a", "shared-model"))
+	require.NoError(t, runtime.RegisterProviderAliases("provider-b", "shared-model"))
+
+	for i := 0; i < 3; i++ {
+		runtime.health.RecordCheck("provider-a", fmt.Errorf("connection refused"))
+	}
+	runtime.health.RecordCheck("provider-b", nil)
+
+	resp, err := runtime.Call(context.Background(), &LLMRequest{
+		Model:    "shared-model",
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "provider:provider-b", resp.Content)
+	assert.Nil(t, providerA.lastReq, "an unhealthy declarer must not be picked")
+}
+
+// 健康度相同（都未探测）时按名字排序取第一个：结果与注册顺序无关。
+func TestLLMRuntime_Call_MultipleDeclarersResolveDeterministically(t *testing.T) {
+	for _, order := range [][]string{
+		{"provider-a", "provider-b"},
+		{"provider-b", "provider-a"},
+	} {
+		runtime := NewLLMRuntime(&RuntimeConfig{MaxRetries: 0})
+		providers := map[string]*captureProvider{
+			"provider-a": {name: "provider-a"},
+			"provider-b": {name: "provider-b"},
+		}
+		for _, name := range order {
+			require.NoError(t, runtime.RegisterProvider(name, providers[name]))
+			require.NoError(t, runtime.RegisterProviderAliases(name, "shared-model"))
+		}
+
+		resp, err := runtime.Call(context.Background(), &LLMRequest{
+			Model:    "shared-model",
+			Messages: []types.Message{{Role: "user", Content: "hello"}},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		assert.Equal(t, "provider:provider-a", resp.Content, "registration order must not change the outcome")
+	}
+}
+
+// 显式注册的路由规则仍然生效（第 5 级兜底）。
+func TestLLMRuntime_Call_UsesExplicitRoutingRuleForUnownedModel(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{MaxRetries: 0})
+	provider := &captureProvider{name: "provider-a"}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	runtime.AddRoutingRule(&RoutingRule{
+		Model:     "provider-a",
+		Condition: &ModelCondition{ModelName: "special-model"},
+	})
+
+	resp, err := runtime.Call(context.Background(), &LLMRequest{
+		Model:    "special-model",
+		Messages: []types.Message{{Role: "user", Content: "hello"}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "provider:provider-a", resp.Content)
+}
+
+// RegisterProvider 不再自动挂「无条件命中」的路由规则，否则 router.Route()
+// 就是「返回第一个注册的 provider」（顺序还取决于 map 迭代）。
+func TestLLMRuntime_RegisterProviderDoesNotAddBlanketRoutingRule(t *testing.T) {
+	runtime := NewLLMRuntime(&RuntimeConfig{MaxRetries: 0})
+	require.NoError(t, runtime.RegisterProvider("provider-a", &captureProvider{name: "provider-a"}))
+	require.NoError(t, runtime.RegisterProvider("provider-b", &captureProvider{name: "provider-b"}))
+
+	assert.Empty(t, runtime.router.GetRules(), "providers must not install blanket routing rules")
+}
+
 func TestLLMRuntime_Call_DoesNotRetryMissingRequiredParameterErrors(t *testing.T) {
 	runtime := NewLLMRuntime(&RuntimeConfig{
 		DefaultProvider: "provider-a",
