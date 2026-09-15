@@ -126,6 +126,57 @@ export function getRuntimeDeltaKind(
   }
 }
 
+/** 工具行的三态：与 `ToolMessageSegment["status"]` 的取值一一对应。 */
+export type RuntimeBridgeToolStatus = "started" | "running" | "finished";
+
+/**
+ * `chat.sse.*` 帧在 runtime/stream 通道上的桥接分类。
+ *
+ * /api/agent/chat 的每一帧 SSE 都会被持久化成 `chat.sse.<event-name>`
+ * （backend `trajectory_events.go` 的 chatSSEStreamEventPrefix），并在
+ * 会话 runtime/stream 上按同一 seq 重放。但两侧的语义分工不同：
+ *
+ * - 正文/推理由总线事件（`assistant_delta` / `assistant.reasoning`）承担，
+ *   它们与服务端 provider 的 stream_id + sequence 对齐，跨通道去重键相同。
+ *   `chat.sse.chunk` / `chat.sse.reasoning` 携带的是**同一段文本**（实测
+ *   chunk 的 sequence 与 assistant_delta 相同，reasoning 却差 1），因此这里
+ *   **不把它们当增量**——否则同一段推理会被追加两次。
+ * - 工具生命周期只有这一路有事件（`tool_call`/`tool_start`/`tool_end`），
+ *   且都在实时循环里逐帧发出（handler.go 的 `emitter.Emit(streamEventName(...))`），
+ *   正是「推理结束 → 工具执行」这段 UI 目前完全看不到的缺口。
+ *
+ * 归类只做「事件名 → 桥接种类」的映射，不读 payload；payload 解析沿用
+ * `buildToolSegmentFromPayload`（tool / tool_call / delta 三种载体都覆盖）。
+ */
+export type RuntimeBridgeKind =
+  | { kind: "tool"; status: RuntimeBridgeToolStatus }
+  | { kind: "text" }
+  | { kind: "reasoning" };
+
+export function getRuntimeBridgeKind(
+  eventType: string,
+): RuntimeBridgeKind | null {
+  switch (eventType) {
+    case "chat.sse.tool_start":
+      return { kind: "tool", status: "started" };
+    case "chat.sse.tool_call":
+      return { kind: "tool", status: "running" };
+    case "chat.sse.tool_end":
+      return { kind: "tool", status: "finished" };
+    // observation 的 payload 只带工具**名**（`payload.tool` 是字符串，无 id，
+    // 见 buildObservationEventPayloads），据它建行会退化成名叫 “tool” 的错行。
+    // 工具行的收尾由同一次观测的 tool_end 完成，这里只当「阶段推进」信号。
+    case "chat.sse.observation":
+      return { kind: "text" };
+    case "chat.sse.chunk":
+      return { kind: "text" };
+    case "chat.sse.reasoning":
+      return { kind: "reasoning" };
+    default:
+      return null;
+  }
+}
+
 /**
  * 打字机增量的 turn 归属判定（两条投递通道共用同一语义）。
  *

@@ -13,6 +13,13 @@ export type ChatTurnRuntimeState = {
   currentKind: string;
   streamedText: string;
   reasoningText: string;
+  /**
+   * 推理段是否仍在生成。渲染层此前把它写死为 true（见 setStreamingMessage），
+   * 于是整轮回复期间推理行都挂着「推理中…」转圈，直到终态快照才结束——
+   * 模型进入工具/正文阶段后并不会自动收尾。改由 SSE 边界维护：推理增量置真，
+   * 首个正文分片或首个工具帧置假。
+   */
+  reasoningRunning: boolean;
   planningPayload: Record<string, unknown> | null;
   orchestrationPayload: Record<string, unknown> | null;
   routePayload: Record<string, unknown> | null;
@@ -35,6 +42,7 @@ export function createTurnRuntimeState(
     currentKind: "llm",
     streamedText: "",
     reasoningText: "",
+    reasoningRunning: false,
     planningPayload: null,
     orchestrationPayload: null,
     routePayload: null,

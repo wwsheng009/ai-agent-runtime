@@ -1,14 +1,15 @@
 // 由 lib/workspace-thread-state.ts 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { type Artifact, type ChatMessage, type MessageSegment, type Thread } from "@/data/mock";
-import { type SessionRuntimeEvent } from "@/types/runtime";
+import { type AgentChatStreamChunkPayload, type SessionRuntimeEvent } from "@/types/runtime";
 
 import { buildGeneratedImagePlaceholderSegment, upsertGeneratedImageSegment } from "./generated-images";
 import { buildRuntimeEventKey, buildSessionRuntimeEventsArtifact, MAX_RUNTIME_EVENTS } from "./history-artifacts";
-import { getRuntimeDeltaKind, matchesActiveTurn } from "./deltas";
-import { STREAM_PLACEHOLDER_TEXT } from "./messages";
+import { getRuntimeBridgeKind, getRuntimeDeltaKind, matchesActiveTurn, type RuntimeBridgeKind } from "./deltas";
+import { closeRunningReasoningSegments, STREAM_PLACEHOLDER_TEXT, type ToolMessageSegment } from "./messages";
 import { getRuntimeEventSeq } from "./sessions";
-import { mergeUniqueStrings, upsertArtifact } from "./shared";
+import { getToolName, mergeUniqueStrings, upsertArtifact } from "./shared";
+import { buildToolSegmentFromPayload, getToolCallId, getToolErrorMessage, upsertToolSegment } from "./tools";
 
 export function appendArtifactToMessage(
   thread: Thread,
@@ -61,6 +62,15 @@ export function applyRuntimeEventToThread(
         segments: upsertGeneratedImageSegment(message.segments, imageSegment),
       }));
     }
+  }
+
+  // 方案C：会话 runtime/stream 上的 `chat.sse.*` 桥接帧（工具生命周期 /
+  // 阶段推进）。与 image_progress 一样走「始终生效」的路径：它不写增量文本，
+  // 只把工具行补进消息段、把跑完的推理段收尾，历史回放的安全由
+  // isLiveAssistantMessage 的 streaming 闸门与上游 after 游标共同保证。
+  const bridgeFrame = getRuntimeBridgeKind(event.type);
+  if (bridgeFrame) {
+    nextThread = applyChatSseBridgeFrame(nextThread, event, bridgeFrame);
   }
 
   return nextThread;
@@ -366,9 +376,8 @@ export function updateThreadMessage(
   };
 }
 
-function updateLatestAssistantMessage(
+function findLatestAssistantMessage(
   thread: Thread,
-  updater: (message: ChatMessage) => ChatMessage,
   predicate: (message: ChatMessage) => boolean = () => true,
 ) {
   for (let index = thread.messages.length - 1; index >= 0; index--) {
@@ -376,15 +385,106 @@ function updateLatestAssistantMessage(
     if (message.role !== "assistant" || !predicate(message)) {
       continue;
     }
-    return {
-      ...thread,
-      messages: thread.messages.map((current, currentIndex) =>
-        currentIndex === index ? updater(current) : current,
-      ),
-    };
+    return { index, message };
   }
 
-  return thread;
+  return null;
+}
+
+function replaceMessageSegments(
+  thread: Thread,
+  messageIndex: number,
+  segments: MessageSegment[],
+  lastRuntimeEventType?: string,
+) {
+  return {
+    ...thread,
+    ...(lastRuntimeEventType ? { lastRuntimeEventType } : {}),
+    messages: thread.messages.map((message, index) =>
+      index === messageIndex ? { ...message, segments } : message,
+    ),
+  };
+}
+
+function updateLatestAssistantMessage(
+  thread: Thread,
+  updater: (message: ChatMessage) => ChatMessage,
+  predicate: (message: ChatMessage) => boolean = () => true,
+) {
+  const target = findLatestAssistantMessage(thread, predicate);
+  if (!target) {
+    return thread;
+  }
+  return {
+    ...thread,
+    messages: thread.messages.map((current, currentIndex) =>
+      currentIndex === target.index ? updater(current) : current,
+    ),
+  };
+}
+
+/**
+ * 把一条 `chat.sse.*` 桥接帧应用到「当前仍在 streaming 的助手消息」上。
+ *
+ * - tool（tool_start / tool_call / tool_end）→ 归并工具行：键取
+ *   `tool_call.id`（帧里还有 `tool` / `delta` 两种载体，buildToolSegmentFromPayload
+ *   已覆盖），状态按帧类型与 metadata.error 得到 started → running →
+ *   finished/error。与 /api/agent/chat 通道用同一个 upsert，两条通道先后到达
+ *   只会收敛成同一行。
+ * - text / reasoning（chunk / reasoning / observation）→ 只做阶段推进：
+ *   把仍在跑的推理段收尾。正文与推理文本**不在这里追加**——同一段文本已由
+ *   `assistant_delta` / `assistant.reasoning` 写入（这正是 `getRuntimeBridgeKind`
+ *   不把它们当增量的原因），在这里再追加一次会让每段内容翻倍。
+ */
+function applyChatSseBridgeFrame(
+  thread: Thread,
+  event: SessionRuntimeEvent,
+  frame: RuntimeBridgeKind,
+): Thread {
+  const payload = event.payload as AgentChatStreamChunkPayload | undefined;
+  if (!payload) {
+    return thread;
+  }
+  const target = findLatestAssistantMessage(thread, (message) =>
+    isLiveAssistantMessage(message, getRuntimeEventTurnId(event)),
+  );
+  if (!target) {
+    return thread;
+  }
+
+  const closeReasoning = () => {
+    const segments = closeRunningReasoningSegments(target.message.segments);
+    // 没有在跑的推理段就返回原引用：单回合上千帧，逐帧换身份会让下游 memo 全部失效。
+    return segments === target.message.segments
+      ? thread
+      : replaceMessageSegments(thread, target.index, segments);
+  };
+
+  if (frame.kind !== "tool") {
+    return closeReasoning();
+  }
+
+  const toolName = getToolName(payload);
+  // 既无工具调用 id、也无真实工具名（旧帧/残缺帧）时不落行：upsertToolSegment
+  // 的键会退化成兜底名 “tool”，把互不相干的调用合并成一行假工具。
+  if (!getToolCallId(payload) && toolName === "tool") {
+    return closeReasoning();
+  }
+
+  const status: ToolMessageSegment["status"] = getToolErrorMessage(payload)
+    ? "error"
+    : frame.status;
+  const segments = upsertToolSegment(
+    closeRunningReasoningSegments(target.message.segments),
+    buildToolSegmentFromPayload(payload, status),
+  );
+  // 与直连通道同形（`tool_end:shell`）：线程条与历史重载键读的是同一个字段。
+  return replaceMessageSegments(
+    thread,
+    target.index,
+    segments,
+    `${event.type.replace(/^chat\.sse\./, "")}:${toolName}`,
+  );
 }
 
 function isLiveAssistantMessage(

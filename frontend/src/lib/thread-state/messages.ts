@@ -73,6 +73,30 @@ export function getAssistantMessageReasoning(message: ChatMessage): string {
     .join("");
 }
 
+/**
+ * 结束当前仍在跑的推理段（`running: true` → `false`）。
+ *
+ * 推理行只有在 `running` 为真时才显示「推理中…」与转圈（见
+ * components/workspace/message-reasoning-row.tsx）。此前这个标记只会被
+ * 「整条消息按最终快照重建」清掉，于是模型已经进入工具/正文阶段、推理块早就
+ * 写完了，行上仍挂着运行态——观感就是「页面一直在推理」。工具帧与首个正文
+ * 分片到达时调用本函数，让渲染层及时切回已完成的推理行。
+ *
+ * 无段可改时返回**原数组引用**：runtime 事件按帧触发（单回合上千帧），
+ * 每次分配新数组会让下游 memo 全部失效。
+ */
+export function closeRunningReasoningSegments(segments: MessageSegment[]) {
+  let changed = false;
+  const nextSegments = segments.map((segment) => {
+    if (segment.type !== "reasoning" || segment.running !== true) {
+      return segment;
+    }
+    changed = true;
+    return { ...segment, running: false };
+  });
+  return changed ? nextSegments : segments;
+}
+
 type AssistantMessageSegmentOptions = {
   status?: "streaming" | "stopped";
   reasoningRunning?: boolean;

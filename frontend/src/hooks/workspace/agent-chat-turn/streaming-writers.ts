@@ -8,6 +8,7 @@ import {
   buildAssistantMessageSegments,
   buildToolSegmentFromPayload,
   buildTurnJsonArtifact,
+  closeRunningReasoningSegments,
   getToolName,
   getToolErrorMessage,
   updateThreadMessage,
@@ -72,11 +73,14 @@ export function createStreamingWriters(
         turnState.toolPayloads,
       ),
     );
+    // 工具帧 = 推理阶段已结束：收尾消息里仍在跑的推理段，并让后续流式帧按
+    // 新阶段渲染（渲染层曾把 reasoningRunning 写死为 true，推理行会一直转圈）。
+    turnState.reasoningRunning = false;
     updateCurrentThread((thread) =>
       updateThreadMessage(thread, assistantMessageId, (message) => ({
         ...message,
         segments: upsertToolSegment(
-          message.segments,
+          closeRunningReasoningSegments(message.segments),
           buildToolSegmentFromPayload(payload, status),
         ),
       })),

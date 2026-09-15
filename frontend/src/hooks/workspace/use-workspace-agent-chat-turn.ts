@@ -218,7 +218,7 @@ export function useWorkspaceAgentChatTurn({
             turnState.currentSource,
             turnState.reasoningText,
             {
-              reasoningRunning: true,
+              reasoningRunning: turnState.reasoningRunning,
               existingSegments: message.segments,
             },
           ),

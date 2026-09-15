@@ -2,7 +2,7 @@
 export type { RuntimeDeltaKind, RuntimeDeltaCoordinator } from "./deltas";
 export { createRuntimeDeltaCoordinator, getRuntimeDeltaKey, getRuntimeDeltaKind, getRuntimeDeltaKeyFromEvent } from "./deltas";
 export type { ToolMessageSegment, ReasoningMessageSegment } from "./messages";
-export { reconcileRuntimeText, getAssistantMessageText, getAssistantMessageReasoning, buildAssistantMessageSegments } from "./messages";
+export { reconcileRuntimeText, getAssistantMessageText, getAssistantMessageReasoning, buildAssistantMessageSegments, closeRunningReasoningSegments } from "./messages";
 export { buildGeneratedImagePlaceholderSegment, upsertGeneratedImageSegment, buildGeneratedImageAttachments } from "./generated-images";
 export { applySessionHistoryToThread, buildTurnJsonArtifact, prependSessionHistoryToThread } from "./history-artifacts";
 export { appendArtifactToMessage, applyRuntimeEventToThread, applyRuntimeDeltaToThread, getRuntimeEventTurnId, buildStreamingMessageSegments, createStreamingAssistantMessage, isRuntimePayload, mergeRuntimeEvent, updateThreadMessage } from "./events";

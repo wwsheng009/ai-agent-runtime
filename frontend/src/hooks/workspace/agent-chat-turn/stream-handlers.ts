@@ -204,6 +204,8 @@ export function createAgentChatStreamHandlers(
         return;
       }
       turnState.streamedText += delta;
+      // 正文开始 = 推理阶段结束，推理行不再显示运行态。
+      turnState.reasoningRunning = false;
       setPhaseAndRef("streaming");
       frameScheduler.schedule();
     },
@@ -230,6 +232,7 @@ export function createAgentChatStreamHandlers(
         // 流路径 appendReasoningToMessageSegments 一致，保持原始
         // chunk 边界即可。
         turnState.reasoningText += delta;
+        turnState.reasoningRunning = true;
         setPhaseAndRef("streaming");
         frameScheduler.schedule();
       }
