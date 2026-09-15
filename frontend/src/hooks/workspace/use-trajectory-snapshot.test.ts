@@ -19,6 +19,23 @@ describe("createTrajectoryStore（快照订阅 store）", () => {
     store.dispose();
   });
 
+  it("回放日志被上限裁剪后标记 truncated，只有硬重置才清除", () => {
+    const store = createTrajectoryStore({ fallbackDelayMs: 0 });
+    expect(store.isReplayLogTruncated()).toBe(false);
+    // 上限 8000：第 8001 条动作触发裁剪（丢弃最老动作，无法再忠实重建投影）。
+    for (let index = 0; index < 8001; index += 1) {
+      store.push("chunk", { type: "text", content: `t${index}` });
+    }
+    expect(store.isReplayLogTruncated()).toBe(true);
+    // 软重置（保留续传游标）不清除：更老动作依然不在日志里。
+    store.reset();
+    expect(store.isReplayLogTruncated()).toBe(true);
+    // 硬重置（会话/线程切换）清空日志与标记。
+    store.reset({ hard: true });
+    expect(store.isReplayLogTruncated()).toBe(false);
+    store.dispose();
+  });
+
   it("subscribe 在 flush 时收到通知", () => {
     const store = createTrajectoryStore();
     const listener = vi.fn();

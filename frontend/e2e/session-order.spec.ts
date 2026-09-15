@@ -20,9 +20,11 @@ async function gotoWorkspace(page: Page) {
   await expect(page.locator(".app-chat-input")).toBeVisible({ timeout: 30_000 });
 }
 
+// Phase 2（合并方案 §3.2）：原「工作目录」与「会话」两段已合并为单一分区，
+// 标题仍是 `Directories`（决策 D1：段名沿用工作目录），徽标是会话数（决策 D5）。
 function sessionsSection(page: Page) {
   return page.locator("section").filter({
-    has: page.getByRole("button", { name: /^Sessions \d+$/ }),
+    has: page.getByRole("button", { name: /^Directories \d+$/ }),
   });
 }
 

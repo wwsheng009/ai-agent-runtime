@@ -68,7 +68,7 @@ export function ArtifactPanel({
     checkpointProvenance,
     checkpointProvenanceSummary,
     checkpointRestoreError,
-    checkpointRestoreNotice,
+    checkpointRestoreSummary,
     checkpointRestorePendingId,
     checkpoints,
     checkpointsError,
@@ -236,7 +236,7 @@ export function ArtifactPanel({
               checkpointProvenance={checkpointProvenance}
               checkpointProvenanceSummary={checkpointProvenanceSummary}
               checkpointRestoreError={checkpointRestoreError}
-              checkpointRestoreNotice={checkpointRestoreNotice}
+              checkpointRestoreSummary={checkpointRestoreSummary}
               checkpointRestorePendingId={checkpointRestorePendingId}
               checkpoints={checkpoints}
               checkpointsError={checkpointsError}

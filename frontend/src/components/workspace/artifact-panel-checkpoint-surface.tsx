@@ -29,7 +29,7 @@ export function ArtifactPanelCheckpointSurface({
   checkpointProvenance,
   checkpointProvenanceSummary,
   checkpointRestoreError = null,
-  checkpointRestoreNotice = null,
+  checkpointRestoreSummary = null,
   checkpointRestorePendingId = "",
   checkpoints,
   checkpointsError,
@@ -92,7 +92,7 @@ export function ArtifactPanelCheckpointSurface({
         checkpointProvenance={checkpointProvenance}
         checkpointProvenanceSummary={checkpointProvenanceSummary}
         checkpointRestoreError={checkpointRestoreError}
-        checkpointRestoreNotice={checkpointRestoreNotice}
+        checkpointRestoreSummary={checkpointRestoreSummary}
         checkpointRestorePendingId={checkpointRestorePendingId}
         onRestoreCheckpoint={onRestoreCheckpoint}
         onSelectCheckpointFile={onSelectCheckpointFile}

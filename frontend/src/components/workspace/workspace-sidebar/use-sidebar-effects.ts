@@ -40,17 +40,19 @@ export function useSidebarEffects({
         return;
       }
 
+      // Phase 2（合并方案 §3.2）：会话树已并入 `directories` 段，检索时展开合并段与历史段。
       setOpenSections((current) =>
-        current.chats && current.sessions
+        current.chats && current.directories
           ? current
-          : { ...current, chats: true, sessions: true },
+          : { ...current, chats: true, directories: true },
       );
     });
 
     return () => {
       cancelled = true;
     };
-  }, [deferredQuery]);
+    // setOpenSections 来自父层 useState，identity 稳定，加入依赖数组不改变语义。
+  }, [deferredQuery, setOpenSections]);
 
   useEffect(() => {
     if (!mobileOpen || !onCloseMobile) {
@@ -97,5 +99,11 @@ export function useSidebarEffects({
 
       return changed ? next : current;
     });
-  }, [mergedDirectoryGroups, selectedThreadId, sessionThreadById]);
+    // setOpenSessionDirectories 同上（父层 useState setter，identity 稳定）。
+  }, [
+    mergedDirectoryGroups,
+    selectedThreadId,
+    sessionThreadById,
+    setOpenSessionDirectories,
+  ]);
 }

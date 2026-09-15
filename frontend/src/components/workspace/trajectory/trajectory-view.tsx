@@ -54,6 +54,8 @@ import {
   trajectorySearchSignature,
   useTrajectorySearchIndex,
 } from "./trajectory-search-index";
+import { TrajectoryLoadEarlierRow } from "./trajectory-load-earlier-row";
+import { useTrajectoryListAnchor } from "./use-trajectory-list-anchor";
 import { useVirtualRows } from "./trajectory-virtual-rows";
 
 const KIND_ICONS: Record<TrajectoryItem["kind"], ComponentType<{ size?: number; className?: string }>> = {
@@ -141,12 +143,24 @@ export function TrajectoryView({
   isLive = false,
   sessionId,
   className,
+  hasEarlier = false,
+  loadingEarlier = false,
+  onLoadEarlier,
 }: {
   store: TrajectoryStore;
   isLive?: boolean;
   /** 会话 ID：导出 JSONL 时从 EventStore 拉取事件（P3-2）。 */
   sessionId?: string;
   className?: string;
+  /**
+   * 尾部优先（tail-first）：已回放窗口之前还有更早的事件可加载
+   * （首屏只回放最近一页，见 hooks/workspace/use-trajectory-recovery.ts）。
+   */
+  hasEarlier?: boolean;
+  /** 「加载更早」在途：禁用入口，避免并发重复翻页。 */
+  loadingEarlier?: boolean;
+  /** 加载更早一页（前插到窗口之前；滚动到顶端时也会自动触发）。 */
+  onLoadEarlier?: () => void;
 }) {
   const snapshot = useTrajectorySnapshot(store);
   const { t } = useTranslation("workspace");
@@ -219,6 +233,18 @@ export function TrajectoryView({
     estimateHeight: ESTIMATE_ROW_HEIGHT,
     overscan: OVERSCAN,
     containerRef,
+  });
+
+  // 尾部优先：前插更早页的视口锚定 + 滚到顶端自动续页（实现见同目录 hook）。
+  const handleListScroll = useTrajectoryListAnchor({
+    containerRef,
+    firstItemKey: items.length > 0 ? getKey(items[0]) : null,
+    itemCount: items.length,
+    followLive: virtual.followLive,
+    syncScroll: virtual.handleScroll,
+    hasEarlier,
+    loadingEarlier,
+    onLoadEarlier,
   });
 
   const selectedItem = useMemo(
@@ -408,12 +434,21 @@ export function TrajectoryView({
           data-testid="trajectory-list-region"
         >
           {items.length === 0 ? (
-            <div className="flex h-full items-center justify-center px-4 text-center app-text-12 text-muted-foreground">
-              {snapshot.items.length === 0
-                ? t("panels.shell.trajectory.empty")
-                : windowFiltered
-                  ? t("panels.shell.trajectory.timelineFilter.noWindowMatches")
-                  : t("panels.shell.trajectory.noMatches")}
+            <div className="flex h-full flex-col">
+              {/* 窗口内还没有可渲染行、但更早还有内容时（极端：最新一页全是
+                  生命周期事件），入口仍要可见——否则用户会以为会话是空的。 */}
+              <TrajectoryLoadEarlierRow
+                visible={hasEarlier || loadingEarlier}
+                loading={loadingEarlier}
+                onLoad={onLoadEarlier}
+              />
+              <div className="flex flex-1 items-center justify-center px-4 text-center app-text-12 text-muted-foreground">
+                {snapshot.items.length === 0
+                  ? t("panels.shell.trajectory.empty")
+                  : windowFiltered
+                    ? t("panels.shell.trajectory.timelineFilter.noWindowMatches")
+                    : t("panels.shell.trajectory.noMatches")}
+              </div>
             </div>
           ) : (
             <div
@@ -421,8 +456,13 @@ export function TrajectoryView({
               data-row-count={items.length}
               ref={containerRef}
               className="h-full overflow-y-auto"
-              onScroll={virtual.handleScroll}
+              onScroll={handleListScroll}
             >
+              <TrajectoryLoadEarlierRow
+                visible={hasEarlier || loadingEarlier}
+                loading={loadingEarlier}
+                onLoad={onLoadEarlier}
+              />
               <div className="relative w-full" style={{ height: virtual.totalHeight }}>
                 {virtual.rows.map(({ item, index, offset, height }) => (
                   <div

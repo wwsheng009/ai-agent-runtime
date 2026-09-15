@@ -131,7 +131,6 @@ export const enWorkspaceBase = {
     sections: {
       chats: "Local chats",
       directories: "Directories",
-      sessions: "Sessions",
       runtime: "Runtime overview",
     },
     sessionUserSelect: "Session user",
@@ -209,6 +208,7 @@ export const enWorkspaceBase = {
       namePlaceholder: "Defaults to the folder name",
       cancel: "Cancel",
       existsWarning: "Directory is missing on the runtime host",
+      actions: "Directory actions",
       newChat: "New chat in this directory",
       rename: "Rename directory",
       deleteTitle: "Remove directory",
@@ -218,6 +218,15 @@ export const enWorkspaceBase = {
         "Only the registry entry is removed; files on disk stay untouched.",
       deleteConfirmButton: "Remove",
       empty: "Registered workspace directories will appear here.",
+      manage: "Manage directories",
+      manageTitle: "Manage workspace directories",
+      manageHint:
+        "Create a session, rename the alias, or remove a registered directory from here.",
+      manageEmpty: "No workspace directories registered yet.",
+      manageUnregisteredTitle: "Not registered (from sessions)",
+      manageUnregisteredHint:
+        "These directories come from session workspaces and are not in the registry yet. Register one to rename it, remove it, or start a session inside it.",
+      register: "Register",
     },
     threadStatuses: {
       review: "Waiting for review",

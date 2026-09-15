@@ -29,6 +29,7 @@ import {
   type WorkspaceShellProps,
   type WorkspaceViewMode,
 } from "@/components/workspace/workspace-shell/types";
+import { WorkspaceViewTabBar } from "@/components/workspace/workspace-shell/view-tab-bar";
 import { WorkspaceShellTopbar } from "@/components/workspace/workspace-shell-topbar";
 import { type WorkspaceDensity } from "@/core/settings";
 import { useFilePreview } from "@/hooks/workspace/use-file-preview";
@@ -52,6 +53,7 @@ type WorkspaceMainSectionProps = Pick<
   | "composerAttachments"
   | "connectionStatus"
   | "draft"
+  | "earlierLoader"
   | "isResponding"
   | "modelOptions"
   | "onAnswerPendingQuestion"
@@ -85,6 +87,7 @@ type WorkspaceMainSectionProps = Pick<
   | "selectedReasoningEffort"
   | "selectedThread"
   | "trajectoryStore"
+  | "trajectoryEarlier"
 > & {
   composerOverlayRef: RefObject<HTMLDivElement | null>;
   density: WorkspaceDensity;
@@ -124,6 +127,7 @@ export function WorkspaceMainSection({
   composerAttachments,
   connectionStatus,
   draft,
+  earlierLoader,
   isResponding,
   modelOptions,
   onBacktrackToMessage,
@@ -157,6 +161,7 @@ export function WorkspaceMainSection({
   selectedReasoningEffort,
   selectedThread,
   trajectoryStore,
+  trajectoryEarlier,
   composerOverlayRef,
   density,
   handleOpenArtifact,
@@ -229,13 +234,6 @@ export function WorkspaceMainSection({
   const chatSurfaceVisible =
     !skillsSurfaceVisible &&
     (isNewThread || viewMode === "chat" || !trajectoryStore);
-  const viewTabClass = (active: boolean) =>
-    cn(
-      "rounded-t-md border border-b-0 px-3 py-1.5 app-text-12 transition",
-      active
-        ? "border-border bg-surface-softer text-foreground"
-        : "border-transparent text-muted-foreground hover:text-foreground",
-    );
 
   return (
     <section
@@ -301,44 +299,12 @@ export function WorkspaceMainSection({
         >
           {!isNewThread ? (
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-              <div
-                aria-label={t("panels.shell.viewTabs.ariaLabel")}
-                className="flex items-center gap-1 border-b border-border px-3 pt-2"
-                role="tablist"
-              >
-                <button
-                  aria-selected={viewMode === "chat"}
-                  className={viewTabClass(viewMode === "chat")}
-                  data-testid="workspace-view-tab-chat"
-                  onClick={() => setViewMode("chat")}
-                  role="tab"
-                  type="button"
-                >
-                  {t("panels.shell.viewTabs.chat")}
-                </button>
-                <button
-                  aria-selected={viewMode === "skills"}
-                  className={viewTabClass(viewMode === "skills")}
-                  data-testid="workspace-view-tab-skills"
-                  onClick={() => setViewMode("skills")}
-                  role="tab"
-                  type="button"
-                >
-                  {t("panels.shell.viewTabs.skills")}
-                </button>
-                {trajectoryStore ? (
-                  <button
-                    aria-selected={viewMode === "trajectory"}
-                    className={viewTabClass(viewMode === "trajectory")}
-                    data-testid="workspace-view-tab-trajectory"
-                    onClick={() => setViewMode("trajectory")}
-                    role="tab"
-                    type="button"
-                  >
-                    {t("panels.shell.viewTabs.trajectory")}
-                  </button>
-                ) : null}
-              </div>
+              <WorkspaceViewTabBar
+                onSelectViewMode={setViewMode}
+                t={t}
+                trajectoryAvailable={Boolean(trajectoryStore)}
+                viewMode={viewMode}
+              />
               {skillsSurfaceVisible ? (
                 <Suspense fallback={null}>
                   <WorkspaceSkillsSurface />
@@ -363,6 +329,8 @@ export function WorkspaceMainSection({
                     // 列宽由 message-list 的宽度轴（W）提供，此处只覆盖行间距。
                     isCompact ? "gap-4" : "gap-6",
                   )}
+                  earlierLoader={earlierLoader}
+                  hasPendingApproval={Boolean(pendingInteraction)}
                   isResponding={isResponding}
                   messages={selectedThread.messages}
                   onBacktrackToMessage={onBacktrackToMessage}
@@ -379,7 +347,10 @@ export function WorkspaceMainSection({
                 <Suspense fallback={null}>
                   <TrajectoryView
                     className="h-full"
+                    hasEarlier={trajectoryEarlier?.hasEarlier ?? false}
                     isLive={isResponding}
+                    loadingEarlier={trajectoryEarlier?.loading ?? false}
+                    onLoadEarlier={trajectoryEarlier?.onLoad}
                     sessionId={selectedThread.sessionId}
                     store={trajectoryStore}
                   />

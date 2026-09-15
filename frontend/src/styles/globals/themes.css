@@ -27,6 +27,8 @@ html[data-theme="light"] {
   --surface-soft-hover: var(--primitive-slate-5-a070);
   --surface-softer: var(--primitive-slate-5-a020);
   --surface-solid: var(--primitive-slate-5-a045);
+  /* 浮层菜单不透明底色（亮色）：纯白，与 select 菜单的 near-opaque 观感对齐。 */
+  --surface-popover: var(--primitive-paper-450);
   --surface-strong: var(--primitive-paper-450-a960);
   --surface-overlay: var(--primitive-paper-450-a985);
   --analytics-chart-primary: var(--primitive-amber-150);
@@ -49,6 +51,19 @@ html[data-theme="light"] {
   --analytics-info: var(--primitive-info-100);
   --analytics-info-soft: var(--primitive-info-100-a070);
   --analytics-info-border: var(--primitive-info-100-a240);
+  /* 连接状态：亮色改用 `-100` 深色前景 + 低透明度同色底（见 tokens.css 同名组）。 */
+  --connection-online: var(--primitive-success-100);
+  --connection-online-soft: var(--primitive-success-100-a070);
+  --connection-online-border: var(--primitive-success-100-a240);
+  --connection-connecting: var(--primitive-info-100);
+  --connection-connecting-soft: var(--primitive-info-100-a070);
+  --connection-connecting-border: var(--primitive-info-100-a240);
+  --connection-reconnecting: var(--primitive-warning-100);
+  --connection-reconnecting-soft: var(--primitive-warning-1-a080);
+  --connection-reconnecting-border: var(--primitive-warning-2-a280);
+  --connection-offline: var(--primitive-danger-100);
+  --connection-offline-soft: var(--primitive-danger-a070);
+  --connection-offline-border: var(--primitive-danger-100-a240);
   --dialog-bg: linear-gradient(180deg, var(--primitive-paper-450-a985), var(--primitive-paper-4-a995));
   --dialog-backdrop: var(--primitive-slate-5-a180);
   --panel-strong-bg: var(--primitive-paper-450-a960);

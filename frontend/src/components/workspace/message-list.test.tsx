@@ -305,4 +305,114 @@ describe("MessageList", () => {
       expect(markup).not.toContain("重试");
     }
   });
+
+  it("renders branch entries on every completed turn tail, not only the transcript tail", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        author: "You",
+        label: "prompt",
+        segments: [{ type: "text", content: "first question" }],
+      },
+      {
+        id: "answer-1",
+        role: "assistant",
+        author: "Runtime",
+        label: "answer",
+        segments: [{ type: "text", content: "first answer" }],
+      },
+      {
+        id: "user-2",
+        role: "user",
+        author: "You",
+        label: "prompt",
+        segments: [{ type: "text", content: "second question" }],
+      },
+      {
+        id: "answer-2",
+        role: "assistant",
+        author: "Runtime",
+        label: "answer",
+        segments: [{ type: "text", content: "second answer" }],
+      },
+    ];
+
+    const markup = renderToStaticMarkup(
+      <MessageList
+        artifacts={[]}
+        isResponding={false}
+        messages={messages}
+        onBranchFromMessage={() => {}}
+        onSelectArtifact={() => {}}
+      />,
+    );
+
+    // 两个已完成轮次各一个锚点；不存在「可见但不可用」的常驻按钮。
+    expect(markup.split('data-branch-state="available"').length - 1).toBe(2);
+    expect(markup).not.toContain('data-branch-state="unavailable"');
+  });
+
+  it("drops branch entries while a pending interaction keeps the turn open", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        author: "You",
+        label: "prompt",
+        segments: [{ type: "text", content: "run the plan" }],
+      },
+      {
+        id: "answer-1",
+        role: "assistant",
+        author: "Runtime",
+        label: "answer",
+        segments: [{ type: "text", content: "waiting for approval" }],
+      },
+    ];
+
+    const markup = renderToStaticMarkup(
+      <MessageList
+        artifacts={[]}
+        hasPendingApproval
+        isResponding={false}
+        messages={messages}
+        onBranchFromMessage={() => {}}
+        onSelectArtifact={() => {}}
+      />,
+    );
+
+    expect(markup).not.toContain("data-branch-state");
+  });
+
+  it("never renders a branch entry on a reasoning-only turn tail", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        author: "You",
+        label: "prompt",
+        segments: [{ type: "text", content: "think first" }],
+      },
+      {
+        id: "reasoning-1",
+        role: "assistant",
+        author: "Runtime",
+        label: "reasoning",
+        segments: [{ type: "reasoning", content: "先盘点入口文件" }],
+      },
+    ];
+
+    const markup = renderToStaticMarkup(
+      <MessageList
+        artifacts={[]}
+        isResponding={false}
+        messages={messages}
+        onBranchFromMessage={() => {}}
+        onSelectArtifact={() => {}}
+      />,
+    );
+
+    expect(markup).not.toContain("data-branch-state");
+  });
 });

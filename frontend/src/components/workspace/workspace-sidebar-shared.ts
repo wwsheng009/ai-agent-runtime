@@ -338,6 +338,26 @@ export function mergeDirectoryGroups(
 }
 
 /**
+ * 合并方案 §3.4 / §3.5-F：目录会话树的组列表 = 排序后的会话组 + 0 会话的注册目录。
+ *
+ * 排序账目（`sessionGroups`）只含「有会话」的组，且顺序由 hook 负责；本函数**只做追加**，
+ * 不参与排序，避免把排序逻辑搬进渲染层。注册目录即使 0 会话也要常驻，
+ * 否则「在目录中新建会话」的入口会随会话消失而消失。
+ */
+export function appendEmptyRegisteredGroups(
+  orderedSessionGroups: readonly MergedDirectoryGroup[],
+  mergedGroups: readonly MergedDirectoryGroup[],
+): MergedDirectoryGroup[] {
+  const emptyRegisteredGroups = mergedGroups.filter(
+    (group) => group.registered && group.sessions.length === 0,
+  );
+  if (emptyRegisteredGroups.length === 0) {
+    return orderedSessionGroups as MergedDirectoryGroup[];
+  }
+  return [...orderedSessionGroups, ...emptyRegisteredGroups];
+}
+
+/**
  * P2-6 子片 2：把跨组移动的**乐观覆盖**套用到会话集合上——只改写
  * `metadata.context.workspace_path`，其余字段（metadata 其它键、context
  * 其它键）原样保留。无覆盖时返回入参同一引用，避免无谓的重算与重渲染。

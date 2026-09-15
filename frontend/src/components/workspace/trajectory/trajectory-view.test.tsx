@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -52,9 +52,9 @@ describe("TrajectoryView", () => {
     (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT = false;
   });
 
-  function renderView() {
+  function renderView(props: Partial<ComponentProps<typeof TrajectoryView>> = {}) {
     act(() => {
-      root.render(<TrajectoryView store={store} />);
+      root.render(<TrajectoryView store={store} {...props} />);
     });
   }
 
@@ -320,6 +320,56 @@ describe("TrajectoryView", () => {
     pushEvent(store, "chunk", 6, { type: "text", content: "new answer" });
     expect(container.textContent).toContain("#5");
     expect(container.textContent).toContain("#6");
+  });
+
+  it("尾部优先：还有更早内容时顶部显示「加载更早」入口，点击向前翻页", () => {
+    const onLoadEarlier = vi.fn();
+    renderView({ hasEarlier: true, onLoadEarlier });
+    pushEvent(store, "chunk", 1, { type: "text", content: "最近的消息" });
+
+    const entry = container.querySelector("[data-trajectory-load-earlier]");
+    expect(entry).toBeInstanceOf(HTMLElement);
+    expect(container.textContent).toContain("加载更早的轨迹");
+
+    click(entry?.querySelector("button"));
+    expect(onLoadEarlier).toHaveBeenCalledTimes(1);
+  });
+
+  it("尾部优先：已到日志开头不渲染入口；加载中禁用并提示", () => {
+    renderView({ hasEarlier: false });
+    pushEvent(store, "chunk", 1, { type: "text", content: "唯一一页" });
+    expect(container.querySelector("[data-trajectory-load-earlier]")).toBeNull();
+
+    renderView({ hasEarlier: true, loadingEarlier: true });
+    const button = container.querySelector("[data-trajectory-load-earlier] button");
+    expect(button).toBeInstanceOf(HTMLButtonElement);
+    expect((button as HTMLButtonElement | null)?.disabled).toBe(true);
+    expect(container.textContent).toContain("正在加载更早的轨迹");
+  });
+
+  it("尾部优先：滚到列表顶端自动续页（在途时幂等不重复触发）", () => {
+    const onLoadEarlier = vi.fn();
+    renderView({ hasEarlier: true, onLoadEarlier });
+    pushEvent(store, "chunk", 1, { type: "text", content: "最近的消息" });
+
+    const list = container.querySelector("[data-trajectory-list]");
+    expect(list).toBeInstanceOf(HTMLElement);
+    if (!(list instanceof HTMLElement)) {
+      return;
+    }
+    list.scrollTop = 0;
+    act(() => {
+      list.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    expect(onLoadEarlier).toHaveBeenCalledTimes(1);
+
+    // 在途（loadingEarlier）时同一条入口短路：不重复翻页。
+    renderView({ hasEarlier: true, loadingEarlier: true, onLoadEarlier });
+    list.scrollTop = 0;
+    act(() => {
+      list.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    expect(onLoadEarlier).toHaveBeenCalledTimes(1);
   });
 });
 

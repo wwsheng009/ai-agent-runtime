@@ -230,9 +230,12 @@ export function WorkspacePage() {
     );
   }
 
-  useSessionHistorySync({
+  const { earlierLoader, recoverSessionHistory } = useSessionHistorySync({
     applySessionHistoryToThread,
     isResponding,
+    // 回滚（检查点还原 / 会话回溯）会重写服务端历史，事件到达后必须重新同步消息列表。
+    lastRuntimeEventType: selectedThread?.lastRuntimeEventType,
+    runtimeEventCount: selectedThread?.runtimeEventCount,
     selectedThread,
     setThreads,
   });
@@ -287,12 +290,41 @@ export function WorkspacePage() {
       selectedThread?.sessionId,
     ],
   );
+  // 尾部优先回放：先回放「最近一页」事件，再放行实时流建连。顺序很重要——
+  // 若先建连（after=0），后端会把整份事件日志按 SSE dump 重放一遍，窗口化
+  // 就失效了；见 use-trajectory-recovery。
+  const trajectoryReplay = useTrajectoryRecovery({
+    store: trajectoryStore,
+    sessionId: selectedThread?.sessionId,
+    onError: (failedSessionId, message) => {
+      // 轨迹恢复失败 → 发起恢复的会话对应的 thread 标记为连接降级
+      // （Topbar/composer 显示"运行时降级 / 需要恢复关注"提示），
+      // 不再静默吞错。按发起时的 sessionId 匹配，避免竞态错标。
+      const normalizedFailedSession =
+        normalizeSessionId(failedSessionId) || failedSessionId;
+      if (!normalizedFailedSession) return;
+      setThreads((current) =>
+        current.map((t) =>
+          normalizeSessionId(t.sessionId || t.id) === normalizedFailedSession
+            ? {
+                ...t,
+                transport: "error",
+                lastError: `Trajectory recovery failed: ${message}`,
+              }
+            : t,
+        ),
+      );
+    },
+  });
   const { connectionStatus, retryConnection } = useSessionRuntimeStream({
     applyRuntimeEventToThread,
     applyRuntimeDeltaToThread,
     getErrorMessage,
     getRuntimeEventSeq,
     mergeRuntimeEvent,
+    // 建连闸门 + 建连游标：窗口就绪后才连，且只订阅窗口之后的新事件。
+    enabled: trajectoryReplay.ready,
+    getReplayCursor: () => trajectoryStore.getSnapshot().lastEventSeq,
     onTrajectoryEvent: (event) => {
       // Q4：runtime 生命周期事件实时投递到轨迹，与恢复路径共用同一转换
       // （幂等：reducer 按 seq 去重）。被过滤的事件（tool_started/
@@ -323,29 +355,30 @@ export function WorkspacePage() {
     connectionStatus,
     selectedThread?.transport,
   );
-  useTrajectoryRecovery({
-    store: trajectoryStore,
-    sessionId: selectedThread?.sessionId,
-    onError: (failedSessionId, message) => {
-      // 轨迹恢复失败 → 发起恢复的会话对应的 thread 标记为连接降级
-      // （Topbar/composer 显示"运行时降级 / 需要恢复关注"提示），
-      // 不再静默吞错。按发起时的 sessionId 匹配，避免竞态错标。
-      const normalizedFailedSession =
-        normalizeSessionId(failedSessionId) || failedSessionId;
-      if (!normalizedFailedSession) return;
-      setThreads((current) =>
-        current.map((t) =>
-          normalizeSessionId(t.sessionId || t.id) === normalizedFailedSession
-            ? {
-                ...t,
-                transport: "error",
-                lastError: `Trajectory recovery failed: ${message}`,
-              }
-            : t,
-        ),
-      );
-    },
-  });
+  // P1-8：降级来源不止会话运行时流（直连 chat、轨迹恢复、历史同步失败都会置
+  // transport=error）。只重启会话流无法清除这些降级——空闲会话上点「重试」
+  // 徽标不变，用户会认为重试失效。降级时追加一次权威历史探活：成功即恢复，
+  // 失败保留降级并刷新原因（回合进行中不做，避免覆盖在途的流式消息）。
+  function handleRetryConnection() {
+    retryConnection();
+    if (!isResponding && selectedThread?.transport === "error") {
+      void recoverSessionHistory();
+    }
+  }
+  // 轨迹视图的「加载更早」入口（尾部优先窗口）：对象引用保持稳定，避免下游
+  // 每次 render 收到新 prop（`window` 状态不变时不必重建）。
+  const trajectoryEarlier = useMemo(
+    () => ({
+      hasEarlier: trajectoryReplay.window.hasMore,
+      loading: trajectoryReplay.loadingEarlier,
+      onLoad: trajectoryReplay.loadEarlier,
+    }),
+    [
+      trajectoryReplay.loadEarlier,
+      trajectoryReplay.loadingEarlier,
+      trajectoryReplay.window.hasMore,
+    ],
+  );
   const {
     backtrackDialog,
     backtrackError,
@@ -398,19 +431,19 @@ export function WorkspacePage() {
       onAddWorkspaceDirectory={addWorkspaceDirectory}
       onRenameWorkspaceDirectory={renameWorkspaceDirectory}
       onRemoveWorkspaceDirectory={removeWorkspaceDirectory}
-      onRetryConnection={retryConnection}
+      onRetryConnection={handleRetryConnection}
       onCreateSessionInDirectory={handleCreateSessionInDirectory}
       onRenameRuntimeSession={handleRenameRuntimeSession}
       onMoveRuntimeSession={handleMoveRuntimeSession}
       onArchiveRuntimeSession={handleArchiveRuntimeSession}
       onRestoreRuntimeSession={handleRestoreRuntimeSession}
       onForkRuntimeSession={handleForkRuntimeSession}
-      onDeleteRuntimeSession={handleDeleteRuntimeSession}
-      sessionActivity={sessionActivity}
-      runtimeClient={runtimeClient}
       onBranchFromMessage={handleBranchFromMessage}
       branchPendingMessageId={branchPendingMessageId}
       branchError={branchError}
+      onDeleteRuntimeSession={handleDeleteRuntimeSession}
+      sessionActivity={sessionActivity}
+      runtimeClient={runtimeClient}
       selectedRuntimeSessionUserId={selectedRuntimeSessionUserId}
       selectedThread={selectedThread}
       selectedArtifact={selectedArtifact}
@@ -425,6 +458,8 @@ export function WorkspacePage() {
       reasoningEffortError={reasoningEffortError}
       reasoningEffortOptions={reasoningEffortOptions}
       trajectoryStore={trajectoryStore}
+      trajectoryEarlier={trajectoryEarlier}
+      earlierLoader={earlierLoader}
       onDraftChange={setDraft}
       onModelChange={setSelectedModel}
       onProviderChange={setSelectedProvider}

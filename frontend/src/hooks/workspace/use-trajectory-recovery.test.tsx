@@ -64,6 +64,7 @@ function Harness({
   return null;
 }
 
+
 describe("useTrajectoryRecovery", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -98,7 +99,7 @@ describe("useTrajectoryRecovery", () => {
     });
   }
 
-  it("恢复事件按序重放进 store（chat.sse.* 转换）", async () => {
+  it("首屏尾部优先：只回放最近一页（tail=1），不从头全量分页", async () => {
     mockFetch.mockResolvedValue({
       events: [
         chatSseEvent("meta", 1, { kind: "chat", status: "started" }),
@@ -114,9 +115,33 @@ describe("useTrajectoryRecovery", () => {
     await vi.waitFor(() => {
       expect(store.getSnapshot().items.length).toBeGreaterThan(0);
     });
-    expect(mockFetch).toHaveBeenCalledWith("session-1", { after: 0, limit: 500 });
+    // 尾部优先窗口：不再 `after=0` 全量分页，首屏只请求最新一页。
+    expect(mockFetch).toHaveBeenCalledWith("session-1", {
+      tail: true,
+      limit: 800,
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
     const items = store.getSnapshot().items;
     expect(items.some((item) => item.head.kind === "tool")).toBe(true);
+  });
+
+  it("游标已前移时从游标续拉：实时流已重放的事件不再重复分页（省掉重叠的整份日志）", async () => {
+    // 模拟 `/runtime/stream?after=0` 的批量重放已经喂进同一个 store 并前移游标。
+    store.advanceCursor(2288);
+    expect(store.getSnapshot().lastEventSeq).toBe(2288);
+    mockFetch.mockResolvedValue({ events: [], count: 0, latest_seq: 2288 });
+
+    render("session-1");
+
+    await vi.waitFor(() => {
+      expect(mockFetch).toHaveBeenCalled();
+    });
+    expect(mockFetch).toHaveBeenCalledWith("session-1", {
+      after: 2288,
+      limit: 500,
+    });
+    // 尾部已空 → 只发一次请求，不再从 0 逐页重拉。
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
   it("同一会话成功恢复后不重复拉取（防重）", async () => {
@@ -161,7 +186,7 @@ describe("useTrajectoryRecovery", () => {
     await vi.waitFor(() => {
       expect(store.getSnapshot().items.length).toBeGreaterThan(0);
     });
-    console.log("DBG calls:", mockFetch.mock.calls.length, "sessionIds:", mockFetch.mock.calls.map(c=>c[0])); expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
   it("无 sessionId 时不拉取", () => {
@@ -392,4 +417,5 @@ describe("useTrajectoryRecovery", () => {
     });
     expect(mockHistory).not.toHaveBeenCalled();
   });
+
 });

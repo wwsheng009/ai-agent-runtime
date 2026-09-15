@@ -7,6 +7,8 @@ export const zhWorkspacePanelsMessages = {
       "发起一轮对话即可填充工作区时间线。运行时证据、相关条目与流式输出会回挂到产生它们的消息上。",
     backtrackNavHint:
       "回溯导航已激活 — 用 ↑/↓（或 j/k）选择用户轮次，Enter 打开确认对话框，Esc 退出。",
+    loadEarlier: "加载更早的消息",
+    loadingEarlier: "正在加载更早的消息…",
   },
   userBubble: {
     editAriaLabel: "在回溯前编辑该用户轮次",
@@ -60,7 +62,6 @@ export const zhWorkspacePanelsMessages = {
   // 文案口径对齐参照实现（deepseek-harness locale.ts:71-72），不自创说法。
   branch: {
     label: "在新对话中分支",
-    unavailable: "仅可从已完成轮次的最后一条消息分支",
     failed: "分支失败，请稍后重试",
     pending: "正在创建分支会话…",
   },
@@ -118,6 +119,11 @@ export const zhWorkspacePanelsMessages = {
     codeRestoreBaseCheckpoint: "代码还原可使用基准检查点",
     noCheckpoint: "该轮次尚未映射到任何变更检查点。",
     restoreMode: "还原模式",
+    modeConversation: "仅还原对话",
+    modeBoth: "还原对话与文件",
+    modeCode: "仅还原文件（高级）",
+    modeCodeHint: "只回写该轮次之后的文件变更，对话保持截断后的状态。",
+    modeSelectHint: "切换选项只会刷新下方的预览，点确认按钮后才会执行回溯。",
     editPromptLabel: "在预填前编辑提示词",
     editPromptAriaLabel: "编辑回溯提示词",
     editPromptPlaceholder: "编辑原始用户提示词…",
@@ -125,6 +131,7 @@ export const zhWorkspacePanelsMessages = {
       "保持不变即可沿用原文。编辑内容会作为 edit_prompt 发送，并在应用后预填到输入框。",
     prefillToggle: "用原始（或编辑后的）提示词预填输入框",
     cancel: "取消",
+    confirm: "确认回溯",
     working: "处理中…",
   },
 } as const;

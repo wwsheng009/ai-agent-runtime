@@ -4,6 +4,11 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { type RuntimeConfigDocument, type RuntimeServiceStatus, getRuntimeConfigDocument, getRuntimeServiceStatus } from "@/lib/runtime-api";
 import { buildConfigLineDiff } from "../runtime-config-diff";
+import {
+  countConfigIssues,
+  validateRuntimeConfigRawDraft,
+  validateRuntimeConfigStructuredDraft,
+} from "../runtime-config-validation";
 import { getRuntimeCircuitBreakerConfig } from "../runtime-circuit-breaker-domain-utils";
 import { getRuntimeConcurrencyConfig, listRuntimeConcurrencyProviderLimits } from "../runtime-concurrency-domain-utils";
 import { getRuntimeAuthConfig, listRuntimeProviderGroupSummaries } from "../runtime-config-domain-utils";
@@ -155,6 +160,17 @@ export function useConfigEditorState() {
     () => getRuntimeDefaultProvider(draftParsed),
     [draftParsed],
   );
+  // 批次 18（P2-2 子片 1）：草稿校验只读草稿本身，渲染期不触文档、不写存储。
+  const draftIssues = useMemo(
+    () =>
+      mode === "source"
+        ? validateRuntimeConfigRawDraft(draftRaw)
+        : validateRuntimeConfigStructuredDraft(draftParsed),
+    [draftParsed, draftRaw, mode],
+  );
+  const draftErrorCount = countConfigIssues(draftIssues, "error");
+  const draftWarningCount = countConfigIssues(draftIssues, "warning");
+  const hasDraftErrors = draftErrorCount > 0;
   const translatedModeMenuEntries = useMemo(
     () =>
       modeMenuEntries.map((entry) => ({
@@ -433,6 +449,10 @@ export function useConfigEditorState() {
     circuitBreakerConfig,
     authConfig,
     defaultProvider,
+    draftIssues,
+    draftErrorCount,
+    draftWarningCount,
+    hasDraftErrors,
     translatedModeMenuEntries,
     hasDomainChanges,
     hasSourceChanges,

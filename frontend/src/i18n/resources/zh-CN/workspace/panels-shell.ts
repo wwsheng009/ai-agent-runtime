@@ -55,6 +55,8 @@ export const zhWorkspacePanelsShell = {
     noSessionToExport: "没有可导出的会话",
     empty: "暂无轨迹事件——开始对话以查看 Agent 运行轨迹。",
     noMatches: "没有匹配当前筛选条件的行。",
+    loadEarlier: "加载更早的轨迹",
+    loadingEarlier: "正在加载更早的轨迹…",
     streaming: "流式传输中",
     closeDetail: "关闭轨迹详情",
     openSubagentAria: "打开子会话",

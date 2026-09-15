@@ -31,7 +31,10 @@ export function SidebarSection({
 }: SidebarSectionProps) {
   return (
     <section>
-      <div className="mb-2 flex w-full items-center justify-between gap-3 rounded-field px-1.5 py-1 transition hover:bg-surface-softer">
+      {/* 2026-09-15 样式优化：分区标题行左内边距收到 4px（原 6px），与组头
+          （`directory-group-header.tsx` 的 `px-1`）左对齐 —— 分区图标与每个目录
+          行的 FolderIcon 落在同一条竖线上，整段左侧只剩一条基准线。 */}
+      <div className="mb-2 flex w-full items-center justify-between gap-3 rounded-field px-1 py-1 transition hover:bg-surface-softer">
         <button
           type="button"
           onClick={() => onToggle(id)}

@@ -170,10 +170,11 @@ async function gotoWorkspace(page: Page) {
   await expect(page.locator(".app-chat-input")).toBeVisible({ timeout: 30_000 });
 }
 
-/** 侧栏「会话」段（section 名随 zh-CN 本地化：`会话 <count>`）。 */
+// Phase 2（合并方案 §3.2）：目录段与会话段已合并为单一分区，段名沿用工作目录（决策 D1），
+// 徽标是会话数（决策 D5）；zh-CN 下标题按钮形如「工作目录 6」。
 function sessionsSection(page: Page) {
   return page.locator("section").filter({
-    has: page.getByRole("button", { name: /^会话 \d+$/ }),
+    has: page.getByRole("button", { name: /^工作目录 \d+$/ }),
   });
 }
 
@@ -201,9 +202,16 @@ function groupHeader(page: Page, key: string): Locator {
   );
 }
 
-/** 组容器：组头 + 该组会话行列表的共同父节点（归属断言的观察范围）。 */
+/** 组容器：组头 + 该组会话行列表的共同父节点（归属断言的观察范围）。
+ *
+ * Phase 2（合并方案 §3.2）：组头抽为 `directory-group-header.tsx` 后，落点钩子挂在组头
+ * **按钮**上，`xpath=..` 只能拿到组头自身的包裹层；合并段的组容器有独立钩子
+ * `data-testid="sidebar-session-group"`（单测 `workspace-sidebar-cross-group-move.test.tsx`
+ * 用的是同一口径），这里改为按它定位。 */
 function groupContainer(page: Page, key: string): Locator {
-  return groupHeader(page, key).locator("xpath=..");
+  return sessionsSection(page).locator(
+    `[data-testid="sidebar-session-group"]:has([data-testid="sidebar-session-group-drop"][title="${key}"])`,
+  );
 }
 
 /** 指定分组内某会话的行容器（可见即「归属该组」）。 */
@@ -271,9 +279,11 @@ test("拖到目标目录组头即乐观归属并写回 Host，刷新后仍在目
   // 跨组落点 = 目标目录组头。
   await sessionRow(page, ALPHA_SESSION_ID).dragTo(groupHeader(page, BETA_GROUP_KEY));
 
-  // 乐观归属：会话立即出现在目标组；源组已无会话（空组不留在会话段）。
+  // 乐观归属：会话立即出现在目标组；源目录是**注册目录**，合并段按方案 §3.3
+  // 「0 会话目录常驻」保留组头（计数归 0、不再渲染行），不像会话段那样整组消失。
   await expect(rowInGroup(page, BETA_GROUP_KEY, ALPHA_SESSION_ID)).toBeVisible();
-  await expect(groupHeader(page, ALPHA_GROUP_KEY)).toHaveCount(0);
+  await expect(rowInGroup(page, ALPHA_GROUP_KEY, ALPHA_SESSION_ID)).toHaveCount(0);
+  await expect(groupHeader(page, ALPHA_GROUP_KEY)).toContainText(/alpha\s*0/);
   await expect(sessionsSection(page).getByText(MOVE_FAILED_TEXT)).toHaveCount(0);
 
   // Host 写回：body 用注册表原始路径（反斜杠），不是组头显示的规范化路径。
@@ -284,10 +294,10 @@ test("拖到目标目录组头即乐观归属并写回 Host，刷新后仍在目
     },
   ]);
 
-  // 刷新页面：归属由 Host 快照裁决，仍显示在目标组（源组已空，不再渲染组头）。
+  // 刷新页面：归属由 Host 快照裁决，仍显示在目标组；源注册目录仍以 0 会话形态常驻。
   await page.reload();
   await expect(page.locator(".app-chat-input")).toBeVisible({ timeout: 30_000 });
-  await expect(groupHeader(page, ALPHA_GROUP_KEY)).toHaveCount(0);
+  await expect(groupHeader(page, ALPHA_GROUP_KEY)).toContainText(/alpha\s*0/);
   await expandGroup(page, BETA_GROUP_KEY);
   await expect(rowInGroup(page, BETA_GROUP_KEY, ALPHA_SESSION_ID)).toBeVisible();
   await expect(rowInGroup(page, ALPHA_GROUP_KEY, ALPHA_SESSION_ID)).toHaveCount(0);

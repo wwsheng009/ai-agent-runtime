@@ -2,9 +2,18 @@
 
 import {
   type RuntimeSessionCheckpointFile,
+  type RuntimeSessionCheckpointPreviewMode,
   type RuntimeSessionCheckpointPreviewResult,
   type RuntimeSessionCheckpointSummary,
 } from "@/lib/runtime-api";
+
+/** 还原执行结果（结构化）：文案由视图层按当前语言渲染。 */
+export type CheckpointRestoreSummary = {
+  checkpointId: string;
+  mode: RuntimeSessionCheckpointPreviewMode;
+  appliedPaths: number;
+  conversationChanged: boolean;
+};
 
 export type UseRuntimeCheckpointsOptions = {
   lastRuntimeEventType?: string;

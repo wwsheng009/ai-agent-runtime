@@ -101,10 +101,11 @@ async function installHostStub(page: Page): Promise<void> {
   );
 }
 
-/** 侧栏「会话」段（section 名随 zh-CN 本地化：`会话 <count>`）。 */
+// Phase 2（合并方案 §3.2）：目录段与会话段已合并为单一分区，段名沿用工作目录（决策 D1），
+// 徽标是会话数（决策 D5）；zh-CN 下标题按钮形如「工作目录 6」。
 function sessionsSection(page: Page) {
   return page.locator("section").filter({
-    has: page.getByRole("button", { name: /^会话 \d+$/ }),
+    has: page.getByRole("button", { name: /^工作目录 \d+$/ }),
   });
 }
 

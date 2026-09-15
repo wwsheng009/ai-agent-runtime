@@ -51,7 +51,9 @@ export function MessageBacktrackDialog({
   const target = state.target;
   const removedMessages = preview?.removed_message_count ?? null;
   const removedTurns = preview?.removed_user_turns ?? null;
-  const canApply = Boolean(preview) && !state.busy && !state.error?.includes("busy");
+  // 选择还原模式只会刷新预览；只有底部确认按钮能触发回滚（busy = 应用在途）。
+  const interactionLocked = state.busy || state.previewing;
+  const canApply = Boolean(preview) && !interactionLocked && !state.error;
 
   return createPortal(
     <div
@@ -60,7 +62,10 @@ export function MessageBacktrackDialog({
       className="fixed inset-0 z-[80] flex items-center justify-center bg-black/55 px-4 py-6 backdrop-blur-[2px]"
       role="dialog"
     >
-      <div className="w-full max-w-[32rem] overflow-hidden rounded-[1rem] border border-white/10 bg-[var(--dialog-bg,var(--background))] shadow-[var(--shadow-lv2)]">
+      {/* 面板底色（用户诉求：取消半透明 → 不透明）：`--dialog-bg` 是带 alpha 的渐变，
+          当颜色用（bg-[…] → background-color）会让整条声明失效、面板变全透明。
+          这里走 `background` 简写把渐变叠在不透明底色 `--background` 上，结果为真不透明。 */}
+      <div className="w-full max-w-[32rem] overflow-hidden rounded-[1rem] border border-white/10 [background:var(--dialog-bg)_var(--background)] shadow-[var(--shadow-lv2)]">
         <div className="flex items-start justify-between gap-3 border-b border-white/8 px-4 py-3.5">
           <div className="flex items-start gap-2.5">
             <div className="mt-0.5 inline-flex size-8 items-center justify-center rounded-[0.75rem] border border-accent-gold/20 bg-accent-gold/10 text-accent-gold">
@@ -82,7 +87,7 @@ export function MessageBacktrackDialog({
             ref={closeRef}
             aria-label={t("panels.messages.backtrackDialog.closeLabel")}
             className="inline-flex size-8 items-center justify-center rounded-field border border-white/10 text-muted-foreground transition hover:bg-white/6 hover:text-foreground"
-            disabled={state.busy}
+            disabled={interactionLocked}
             onClick={onClose}
             type="button"
           >
@@ -101,7 +106,7 @@ export function MessageBacktrackDialog({
             </p>
           </div>
 
-          {state.busy && !preview ? (
+          {state.previewing && !preview ? (
             <div className="inline-flex items-center gap-2 text-sm text-muted-foreground">
               <LoaderCircleIcon className="animate-spin" size={14} />
               {t("panels.messages.backtrackDialog.planning")}
@@ -160,9 +165,9 @@ export function MessageBacktrackDialog({
             </legend>
             {(
               [
-                ["conversation", "Conversation only"],
-                ["both", "Conversation + files"],
-                ["code", "Files only (advanced)"],
+                ["conversation", t("panels.messages.backtrackDialog.modeConversation")],
+                ["both", t("panels.messages.backtrackDialog.modeBoth")],
+                ["code", t("panels.messages.backtrackDialog.modeCode")],
               ] as const
             ).map(([value, label]) => (
               <label
@@ -177,7 +182,7 @@ export function MessageBacktrackDialog({
                 <input
                   checked={state.mode === value}
                   className="accent-accent-gold"
-                  disabled={state.busy}
+                  disabled={interactionLocked}
                   name="backtrack-mode"
                   onChange={() => onModeChange(value)}
                   type="radio"
@@ -186,6 +191,14 @@ export function MessageBacktrackDialog({
                 <span>{label}</span>
               </label>
             ))}
+            {state.mode === "code" ? (
+              <p className="text-xs leading-5 text-muted-foreground">
+                {t("panels.messages.backtrackDialog.modeCodeHint")}
+              </p>
+            ) : null}
+            <p className="text-xs leading-5 text-muted-foreground">
+              {t("panels.messages.backtrackDialog.modeSelectHint")}
+            </p>
           </fieldset>
 
           <label className="grid gap-2">
@@ -195,7 +208,7 @@ export function MessageBacktrackDialog({
             <textarea
               aria-label={t("panels.messages.backtrackDialog.editPromptAriaLabel")}
               className="min-h-[7.5rem] w-full resize-y rounded-card-lg border border-white/10 bg-white/[0.03] px-3 py-2.5 text-sm leading-6 text-foreground outline-none transition placeholder:text-muted-foreground focus:border-accent-gold/35 focus:bg-white/[0.05]"
-              disabled={state.busy}
+              disabled={interactionLocked}
               onChange={(event) => onEditPromptChange(event.target.value)}
               placeholder={t("panels.messages.backtrackDialog.editPromptPlaceholder")}
               value={state.editPrompt}
@@ -209,7 +222,7 @@ export function MessageBacktrackDialog({
             <input
               checked={state.prefillComposer}
               className="accent-accent-gold"
-              disabled={state.busy}
+              disabled={interactionLocked}
               onChange={(event) => onPrefillChange(event.target.checked)}
               type="checkbox"
             />
@@ -234,7 +247,7 @@ export function MessageBacktrackDialog({
                 {t("panels.messages.backtrackDialog.working")}
               </span>
             ) : (
-              "Confirm backtrack"
+              t("panels.messages.backtrackDialog.confirm")
             )}
           </Button>
         </div>

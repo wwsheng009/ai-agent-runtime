@@ -440,6 +440,7 @@ function pickScript(rawBody) {
   if (haystack.includes("tool")) return { name: "tool", script: toolScript };
   if (haystack.includes("read-file")) return { name: "read-file", script: readFileScript };
   if (haystack.includes("burst")) return { name: "burst", script: burstScript };
+  if (haystack.includes("perfmark")) return { name: "perfmark", script: perfMarkScript };
   if (haystack.includes("scroll")) return { name: "scroll", script: scrollScript };
   if (haystack.includes("error")) return { name: "error", script: errorScript };
   if (haystack.includes("interrupt")) return { name: "interrupt", script: null };
@@ -535,6 +536,54 @@ for (let i = 0; i < 10; i += 1) {
   });
 }
 burstScript.push({ event: "done", delay: 1, payload: { ...DONE, content: "burst complete" } });
+
+// perfmark（临时诊断脚本，keyword=`perfmark`）：贴近真实「长回答 + 高频 token 流」的
+// 压力场景——约 21KB markdown（散文 + 围栏代码块 + 列表 + 表格）切成 40 字符增量、
+// 10ms 一帧，共约 525 帧 / 5.3s。用于 CDP Profiler 定位流式期间的主线程开销。
+const PERF_SENTENCES = [
+  "The runtime keeps a bounded event window per session. ",
+  "Each frame carries a monotonically increasing sequence. ",
+  "Delivery is at-least-once, so the client merges by sequence. ",
+  "The renderer freezes completed markdown blocks by absolute offset. ",
+  "Only the tail block is reparsed while a response is streaming. ",
+];
+const PERF_CODE_BLOCK = [
+  "```ts\n",
+  "export function reveal(target: string, shown: number, step: number) {\n",
+  "  const next = Math.min(target.length, shown + step);\n",
+  "  return target.slice(0, next);\n",
+  "}\n",
+  "```\n\n",
+];
+const PERF_LIST = "- first item\n- second item\n- third item\n\n";
+const PERF_TABLE = "| seq | kind |\n| --- | --- |\n| 1 | delta |\n| 2 | done |\n\n";
+const perfMarkDoc = (() => {
+  const out = [];
+  for (let round = 0; round < 40; round += 1) {
+    out.push(...PERF_SENTENCES, "\n\n", ...PERF_CODE_BLOCK, PERF_LIST, PERF_TABLE);
+  }
+  out.push("PERFMARK-END\n");
+  return out.join("");
+})();
+
+const perfMarkScript = [{ event: "meta", payload: META }];
+{
+  const PERF_DELTA_CHARS = 40;
+  let index = 0;
+  for (let offset = 0; offset < perfMarkDoc.length; offset += PERF_DELTA_CHARS) {
+    perfMarkScript.push({
+      event: "chunk",
+      delay: 10,
+      payload: makeChunk(index, perfMarkDoc.slice(offset, offset + PERF_DELTA_CHARS)),
+    });
+    index += 1;
+  }
+  perfMarkScript.push({
+    event: "done",
+    delay: 10,
+    payload: { ...DONE, content: perfMarkDoc },
+  });
+}
 
 // --- 用量 / 配额 mock 数据（P2-1A 用量面板）---
 // 键名与后端 handler 直接构造的 map 一致（snake_case）；
@@ -777,6 +826,26 @@ const server = http.createServer(async (req, res) => {
     }
   }
 });
+
+/** /logs 页固定日志条目（字段对齐 RuntimeLogEntry）。 */
+const MOCK_RUNTIME_LOGS = [
+  {
+    cursor: 42,
+    raw_text: "runtime-server listening on 0.0.0.0:8101",
+    timestamp: "2026-09-14T10:00:00Z",
+    level: "info",
+    module: "runtime-server",
+    message: "runtime-server listening on 0.0.0.0:8101",
+  },
+  {
+    cursor: 41,
+    raw_text: "provider call failed: upstream timeout",
+    timestamp: "2026-09-14T09:59:58Z",
+    level: "error",
+    module: "provider",
+    message: "provider call failed: upstream timeout",
+  },
+];
 
 async function handleRequest(req, res) {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
@@ -1583,6 +1652,25 @@ async function handleRequest(req, res) {
     writeJson(res, 200, { session_id: sessionId, id: sessionId, state: session?.state });
     return;
   }
+  // 行内重命名（PATCH /api/runtime/sessions/{id}，body: { title }）：真实后端更新标题
+  // 后返回会话记录；侧栏 refreshSessions 重取列表时行标题随之更新。
+  // 少了这条，e2e 里「重命名成功但行标题不变」会被误判成前端没刷新。
+  if (/^\/api\/runtime\/sessions\/[^/]+$/.test(path) && req.method === "PATCH") {
+    const sessionId = decodeURIComponent(path.split("/")[4]);
+    const patchBody = await readBody(req);
+    const session = mockSessions.get(sessionId);
+    if (!session) {
+      writeJson(res, 404, { error: `session not found: ${sessionId}` });
+      return;
+    }
+    if (typeof patchBody?.title === "string" && patchBody.title.trim()) {
+      session.title = patchBody.title;
+      session.metadata = { ...(session.metadata ?? {}), title: patchBody.title };
+    }
+    session.updated_at = new Date().toISOString();
+    writeJson(res, 200, { session });
+    return;
+  }
   if (/^\/api\/runtime\/sessions\/[^/]+$/.test(path) && req.method === "DELETE") {
     const sessionId = decodeURIComponent(path.split("/")[4]);
     const deleted = mockSessions.delete(sessionId);
@@ -1706,6 +1794,39 @@ async function handleRequest(req, res) {
   }
   if (path === "/api/runtime/service") {
     writeJson(res, 200, { status: "running", healthy: true });
+    return;
+  }
+
+  // /logs 页此前完全没有 mock 覆盖：页面拿到兜底 `{}`（entries 缺失）后曾在
+  // entries.some / entries.find 上抛 TypeError，把整条路由打成错误面。
+  // 前端已按「缺字段降级为空列表」加固，这里补上真实契约让页面能正常渲染。
+  if (path === "/api/runtime/logs" && req.method === "GET") {
+    writeJson(res, 200, {
+      count: MOCK_RUNTIME_LOGS.length,
+      entries: MOCK_RUNTIME_LOGS,
+      exists: true,
+      file_path: "backend/logs/runtime-server.log",
+      next_cursor: MOCK_RUNTIME_LOGS[0]?.cursor ?? 0,
+    });
+    return;
+  }
+
+  if (path === "/api/runtime/logs/stream" && req.method === "GET") {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    res.write(
+      sseEvent("ready", {
+        cursor: MOCK_RUNTIME_LOGS[0]?.cursor ?? 0,
+        exists: true,
+        file_path: "backend/logs/runtime-server.log",
+      }),
+    );
+    // 保持长连接（与真实后端一致）：用例结束由浏览器断开时同步释放 socket。
+    req.on("close", () => res.destroy());
     return;
   }
 

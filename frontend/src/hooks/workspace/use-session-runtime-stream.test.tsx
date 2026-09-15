@@ -80,6 +80,11 @@ function Harness({
   onThreadsChange: (threads: Thread[]) => void;
 }) {
   const [thread, setThread] = useState(initialThread);
+  // 模拟父级在启动期重新归并线程数组：selectedThread 会换成新的对象（新 id、
+  // 同 sessionId）。这里按 id 变化同步本地状态，贴近真实父级的替换行为。
+  if (initialThread.id !== thread.id) {
+    setThread(initialThread);
+  }
   const getErrorMessage = useCallback(
     (error: unknown, fallback: string) =>
       error instanceof Error ? error.message : fallback,
@@ -353,5 +358,59 @@ describe("useSessionRuntimeStream delta gate", () => {
     const nextThread = getThreads()[0];
     expect(nextThread.lastRuntimeEventType).toBe("subagent.progress");
     expect(nextThread.runtimeEventCount).toBe(1);
+  });
+
+  it("线程身份重键（threadId 变、sessionId 不变）不重连 runtime stream", async () => {
+    const initial = createThread();
+    let threads: Thread[] = [initial];
+    const onThreadsChange = (next: Thread[]) => {
+      threads = next;
+    };
+
+    act(() => {
+      root.render(
+        <Harness
+          renderLiveDeltas
+          initialThread={initial}
+          onThreadsChange={onThreadsChange}
+        />,
+      );
+    });
+    await vi.waitFor(() => {
+      expect(mockStream).toHaveBeenCalledTimes(1);
+    });
+    const handlers = mockStream.mock.calls[0][1];
+
+    // 启动期 `mergeRuntimeSessionsIntoThreads` 会丢弃占位线程、按 sessionId 重新
+    // 归并：sessionId 不变、threadId 变化。旧实现把 threadId 放进 effect key，
+    // 这里会 abort 重连（实测首屏 0.75s 内 6 条 SSE、5 条被 cleanup 掐断）。
+    const rekeyed: Thread = { ...createThread(), id: "thread-9" };
+    act(() => {
+      root.render(
+        <Harness
+          renderLiveDeltas
+          initialThread={rekeyed}
+          onThreadsChange={onThreadsChange}
+        />,
+      );
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(mockStream).toHaveBeenCalledTimes(1);
+    expect(mockStream.mock.calls[0][0]).toBe("session-1");
+
+    // 事件回填必须落到「当前」线程：threadId 经 ref 读取，不做订阅依赖。
+    act(() => {
+      handlers.onEvent?.({
+        type: "session_start",
+        timestamp: "2026-08-30T00:00:03Z",
+        payload: { status: "running", seq: 7 },
+      });
+    });
+    expect(threads[0].id).toBe("thread-9");
+    expect(threads[0].lastRuntimeEventType).toBe("session_start");
   });
 });

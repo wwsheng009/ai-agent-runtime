@@ -56,12 +56,29 @@ describe("connection-status", () => {
     const offline = getConnectionStatusTone("offline", labels);
     expect(offline.label).toBe("连接中断");
     expect(offline.icon).toBe("offline");
-    expect(offline.badgeClassName).toContain("red");
+    expect(offline.badgeClassName).toContain("connection-offline");
 
     const reconnecting = getConnectionStatusTone("reconnecting", labels);
     expect(reconnecting.label).toBe("重连中…");
     expect(reconnecting.icon).toBe("connecting");
 
     expect(getConnectionStatusTone("online", labels).label).toBe("在线");
+  });
+
+  it("keeps every tone on theme-aware connection tokens", () => {
+    // 回归：色调不得再回落到只适配暗色的调色板字面量
+    //（`bg-*-500/12 + text-*-200` 在亮色主题下前景与背景同色，见 contrast 测试）。
+    for (const status of ["online", "connecting", "reconnecting", "offline"] as const) {
+      const { badgeClassName } = getConnectionStatusTone(status, labels);
+
+      expect(badgeClassName).toContain(`connection-${status}`);
+      expect(badgeClassName).not.toMatch(
+        /(?:text|bg|border)-(?:sky|emerald|amber|red|green|blue)-\d/,
+      );
+    }
+
+    expect(getConnectionStatusTone("idle", labels).badgeClassName).not.toMatch(
+      /connection-/,
+    );
   });
 });

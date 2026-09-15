@@ -20,7 +20,10 @@ export type SessionBacktrackTarget = {
 
 export type SessionBacktrackDialogState = {
   open: boolean;
+  /** 应用（回滚）在途：只有确认按钮能置位，用于禁用整框交互 + 底部主按钮转圈。 */
   busy: boolean;
+  /** 预览在途：切换还原模式只会重新取预览，绝不触发应用。 */
+  previewing: boolean;
   error: string | null;
   target: SessionBacktrackTarget | null;
   preview: RuntimeSessionBacktrackResult | null;
@@ -51,6 +54,7 @@ export type UseSessionBacktrackOptions = {
 export const initialDialogState: SessionBacktrackDialogState = {
   open: false,
   busy: false,
+  previewing: false,
   error: null,
   target: null,
   preview: null,

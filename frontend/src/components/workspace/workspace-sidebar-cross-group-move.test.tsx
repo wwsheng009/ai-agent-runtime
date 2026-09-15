@@ -145,9 +145,14 @@ describe("WorkspaceSidebar 跨组移动（P2-6 子片 2）", () => {
     });
   }
 
+  /**
+   * 组头定位口径：组头 title 是规范化路径（`\` → `/`），与写回用的注册表原始路径不同；
+   * 组容器身份键（data-group-key）在注册目录组里是 directory.id，不是路径，所以这里按 title 找组头，
+   * 再向上取组容器。Phase 1 抽件后组头外面多了一层 hover/动作行，不能再用「最近的 div」。
+   */
   function findGroupHeader(key: string): HTMLElement | null {
     return container.querySelector<HTMLElement>(
-      `[data-testid="sidebar-session-group-drop"][title="${key}"]`,
+      `[data-testid="sidebar-session-group"] [data-testid="sidebar-session-group-drop"][title="${key}"]`,
     );
   }
 
@@ -160,11 +165,13 @@ describe("WorkspaceSidebar 跨组移动（P2-6 子片 2）", () => {
   }
 
   function groupContainer(key: string): HTMLElement {
-    const group = groupHeader(key).closest("div");
+    const group = groupHeader(key).closest<HTMLElement>(
+      '[data-testid="sidebar-session-group"]',
+    );
     if (!group) {
       throw new Error(`未找到目录分组容器：${key}`);
     }
-    return group as HTMLElement;
+    return group;
   }
 
   /** 目录组默认折叠：欠展开时点一次组头，行渲染出来才能观察归属。 */
@@ -241,8 +248,13 @@ describe("WorkspaceSidebar 跨组移动（P2-6 子片 2）", () => {
       BETA_PATH,
     );
     expect(rowTitle(groupContainer(BETA_KEY), "Alpha 会话")).not.toBeNull();
-    // 源组已无可见会话：会话段只保留有会话的组，组头随之消失（不留空壳）。
-    expect(findGroupHeader(ALPHA_KEY)).toBeNull();
+    // Phase 2（合并方案 §3.5-F）：注册目录即使被移空也常驻成 0 会话组，
+    // 组头保留「在目录中新建会话」的入口，只在组内显示空提示。
+    expect(findGroupHeader(ALPHA_KEY)).not.toBeNull();
+    expect(rowTitle(groupContainer(ALPHA_KEY), "Alpha 会话")).toBeNull();
+    expect(container.textContent).toContain(
+      "可恢复的运行时会话会在加载后显示在这里。",
+    );
     expect(container.textContent).not.toContain("移动会话失败");
   });
 

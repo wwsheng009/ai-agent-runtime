@@ -27,7 +27,10 @@ import {
   shouldReloadBacktrackAudit,
   shouldReloadRuntimeCheckpoints,
 } from "./runtime-checkpoints/reload-keys";
-import { type UseRuntimeCheckpointsOptions } from "./runtime-checkpoints/types";
+import {
+  type CheckpointRestoreSummary,
+  type UseRuntimeCheckpointsOptions,
+} from "./runtime-checkpoints/types";
 
 export {
   buildRuntimeEventReloadKey,
@@ -35,6 +38,7 @@ export {
   shouldReloadRuntimeCheckpoints,
 } from "./runtime-checkpoints/reload-keys";
 export { resolveCheckpointDetailState } from "./runtime-checkpoints/detail-state";
+export type { CheckpointRestoreSummary } from "./runtime-checkpoints/types";
 
 export function useRuntimeCheckpoints({
   lastRuntimeEventType,
@@ -62,7 +66,8 @@ export function useRuntimeCheckpoints({
   >({});
   const [checkpointRestorePendingId, setCheckpointRestorePendingId] = useState("");
   const [checkpointRestoreError, setCheckpointRestoreError] = useState<string | null>(null);
-  const [checkpointRestoreNotice, setCheckpointRestoreNotice] = useState<string | null>(null);
+  const [checkpointRestoreSummary, setCheckpointRestoreSummary] =
+    useState<CheckpointRestoreSummary | null>(null);
   const [backtrackAuditEntries, setBacktrackAuditEntries] = useState<
     RuntimeSessionBacktrackTombstone[]
   >([]);
@@ -87,7 +92,7 @@ export function useRuntimeCheckpoints({
       setCheckpointDetailsError(null);
       setCheckpointDetailsLoadingId("");
       setCheckpointRestoreError(null);
-      setCheckpointRestoreNotice(null);
+      setCheckpointRestoreSummary(null);
       return;
     }
 
@@ -326,29 +331,22 @@ export function useRuntimeCheckpoints({
       return;
     }
 
-    const confirmed =
-      typeof window === "undefined"
-        ? true
-        : window.confirm(
-            `Restore checkpoint ${selectedCheckpointId} with mode="${mode}"?\nThis may rewrite conversation and/or workspace files.`,
-          );
-    if (!confirmed) {
-      return;
-    }
-
+    // 确认动作由面板上的「确认还原」按钮承担：能走到这里即表示用户已选择模式并明确确认，
+    // 不再叠加 window.confirm（否则点选项就会立即弹确认框）。
     setCheckpointRestorePendingId(selectedCheckpointId);
     setCheckpointRestoreError(null);
-    setCheckpointRestoreNotice(null);
+    setCheckpointRestoreSummary(null);
     try {
       const response = await restoreSessionCheckpoint(sessionId, selectedCheckpointId, mode);
       if (!response.ok) {
         throw new Error(response.error || "Failed to restore checkpoint");
       }
-      const applied = response.result?.applied_paths?.length ?? 0;
-      const conversationChanged = response.result?.conversation_changed ? "yes" : "no";
-      setCheckpointRestoreNotice(
-        `Restored ${selectedCheckpointId} (mode=${mode}, files=${applied}, conversation_changed=${conversationChanged}).`,
-      );
+      setCheckpointRestoreSummary({
+        checkpointId: selectedCheckpointId,
+        mode,
+        appliedPaths: response.result?.applied_paths?.length ?? 0,
+        conversationChanged: Boolean(response.result?.conversation_changed),
+      });
       // Force list reload on next event/effect cycle.
       setLoadedCheckpointSessionId("");
       setCheckpoints([]);
@@ -375,7 +373,7 @@ export function useRuntimeCheckpoints({
     checkpointProvenance,
     checkpointProvenanceSummary,
     checkpointRestoreError,
-    checkpointRestoreNotice,
+    checkpointRestoreSummary,
     checkpointRestorePendingId,
     checkpoints,
     checkpointsError,

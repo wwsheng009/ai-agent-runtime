@@ -53,6 +53,20 @@ export type ConversationScrollState = {
   stickToBottom: boolean;
 };
 
+/**
+ * active 标记（reading-line 命中行）的刷新间隔。
+ *
+ * 它是**视觉标记**而不是滚动所有权：贴底跟随期间内容每 chunk 都在长，整表几何
+ * 却只需要维持一个「读到哪一行」的高亮。节流到 150ms（≈6.7 次/秒）后，大会话
+ * 的流式渲染不再把 O(n) 的 rect 扫掠压在每一帧上。
+ */
+const MARKER_SYNC_THROTTLE_MS = 150;
+
+/** 属性选择器的值转义（消息 id 只可能含引号/反斜杠这类字符）。 */
+function escapeAttributeValue(value: string): string {
+  return value.replace(/["\\]/g, "\\$&");
+}
+
 export function useConversationScroll({
   containerRef,
   contentRef,
@@ -72,10 +86,30 @@ export function useConversationScroll({
   const suspendedRef = useRef(suspended);
   const wasSuspendedRef = useRef(false);
   const frameRef = useRef(0);
+  /**
+   * 帧内几何缓存：同一帧里布局效应 / ResizeObserver / rAF 回调都会做对账，缓存让
+   * 整表 `getBoundingClientRect` 扫掠一帧只发生一次（流式期间每 chunk 一次提交，
+   * 原实现是 3 次 O(n) 扫掠 + 3 次强制回流，大会话下就是「页面卡住」的主因）。
+   */
+  const rowsCacheRef = useRef<ReadingLineRow[] | null>(null);
+  const rowsCacheFrameRef = useRef(0);
+  /** active 标记（reading-line 命中行）的刷新节流时间戳。 */
+  const markerSyncAtRef = useRef(0);
 
   useEffect(() => {
     suspendedRef.current = suspended;
   }, [suspended]);
+
+  useEffect(
+    () => () => {
+      if (rowsCacheFrameRef.current) {
+        cancelAnimationFrame(rowsCacheFrameRef.current);
+        rowsCacheFrameRef.current = 0;
+      }
+      rowsCacheRef.current = null;
+    },
+    [],
+  );
 
   const readMetrics = useCallback((): ScrollMetrics | null => {
     const container = containerRef.current;
@@ -90,6 +124,10 @@ export function useConversationScroll({
   }, [containerRef]);
 
   const readRows = useCallback((): ReadingLineRow[] => {
+    const cached = rowsCacheRef.current;
+    if (cached) {
+      return cached;
+    }
     const container = containerRef.current;
     const content = contentRef.current;
     if (!container || !content) {
@@ -111,8 +149,43 @@ export function useConversationScroll({
           bottom: rect.bottom - containerTop,
         });
       });
+    rowsCacheRef.current = rows;
+    if (!rowsCacheFrameRef.current) {
+      rowsCacheFrameRef.current = requestAnimationFrame(() => {
+        rowsCacheFrameRef.current = 0;
+        rowsCacheRef.current = null;
+      });
+    }
     return rows;
   }, [containerRef, contentRef]);
+
+  /**
+   * 单行几何：锚点恢复只关心锚点行自身，不必扫掠整表（阅读历史 + 流式增长时
+   * 原来每个 chunk 都要重新量 N 行，这里退化成 1 行）。
+   */
+  const readRowById = useCallback(
+    (messageId: string): ReadingLineRow | null => {
+      const container = containerRef.current;
+      const content = contentRef.current;
+      if (!container || !content) {
+        return null;
+      }
+      const node = content.querySelector<HTMLElement>(
+        `[data-message-id="${escapeAttributeValue(messageId)}"]`,
+      );
+      if (!node) {
+        return null;
+      }
+      const containerTop = container.getBoundingClientRect().top;
+      const rect = node.getBoundingClientRect();
+      return {
+        id: messageId,
+        top: rect.top - containerTop,
+        bottom: rect.bottom - containerTop,
+      };
+    },
+    [containerRef, contentRef],
+  );
 
   const pinToBottom = useCallback(() => {
     const container = containerRef.current;
@@ -130,7 +203,7 @@ export function useConversationScroll({
       if (!container || !anchor || !metrics) {
         return;
       }
-      const row = readRows().find((item) => item.id === anchor.messageId);
+      const row = readRowById(anchor.messageId);
       if (!row) {
         return;
       }
@@ -144,7 +217,7 @@ export function useConversationScroll({
         container.scrollTop = next;
       }
     },
-    [containerRef, readMetrics, readRows],
+    [containerRef, readMetrics, readRowById],
   );
 
   /** DOM 几何快照：贴底判定、锚点行、reading-line 命中。 */
@@ -211,6 +284,29 @@ export function useConversationScroll({
     applySnapshot(snapshot);
   }, [applySnapshot, readSnapshot, refreshAnchor]);
 
+  /**
+   * active 标记的节流对账：内容增长（流式 chunk / 工具卡回流 / 折叠展开）时
+   * 只按 `MARKER_SYNC_THROTTLE_MS` 刷新一次，不再每帧扫掠整表几何。
+   * `force` 用于记忆键切换 / 让出恢复这类必须立即对齐的时刻。
+   */
+  const scheduleMarkerSync = useCallback(
+    (force = false) => {
+      const now = Date.now();
+      if (!force && now - markerSyncAtRef.current < MARKER_SYNC_THROTTLE_MS) {
+        return;
+      }
+      markerSyncAtRef.current = now;
+      if (frameRef.current) {
+        return;
+      }
+      frameRef.current = requestAnimationFrame(() => {
+        frameRef.current = 0;
+        sync();
+      });
+    },
+    [sync],
+  );
+
   // 滚动事件 rAF 合流：读取最新 DOM 几何，避免每个滚动事件都触发一次布局查询。
   useEffect(() => {
     const container = containerRef.current;
@@ -258,7 +354,7 @@ export function useConversationScroll({
       } else {
         restoreAnchor(anchorRef.current);
       }
-      sync();
+      scheduleMarkerSync();
     });
     observer.observe(content);
     observer.observe(container);
@@ -270,8 +366,8 @@ export function useConversationScroll({
     contentRef,
     pinToBottom,
     restoreAnchor,
+    scheduleMarkerSync,
     suspended,
-    sync,
   ]);
 
   // 每次提交后的布局对账（绘制前）：记忆键切换 → 恢复阅读位置；否则贴底跟随 /
@@ -299,33 +395,23 @@ export function useConversationScroll({
     if (keyChanged && anchorRef.current) {
       // 首次进入该线程：按记忆恢复阅读位置（锚点贴近底部时等价于贴底）。
       restoreAnchor(anchorRef.current);
+      scheduleMarkerSync(true);
     } else if (stickRef.current) {
       pinToBottom();
+      // 贴底跟随期间只需要钉住底线；active 标记是纯视觉状态，节流刷新即可，
+      // 这样流式提交不再每帧触发整表几何扫掠。
+      scheduleMarkerSync(keyChanged || resumed);
     } else {
       restoreAnchor(anchorRef.current);
+      scheduleMarkerSync(false);
     }
-    // 滚动位置这一帧已同步写入；锚点/状态对账走帧回调，避免 effect 内同步
-    // setState 把流式提交放大成级联渲染。
-    const snapshot = readSnapshot();
-    if (!snapshot) {
-      return;
-    }
-    refreshAnchor(snapshot.anchor);
-    const frame = requestAnimationFrame(() => {
-      const latest = readSnapshot();
-      if (latest) {
-        applySnapshot(latest);
-      }
-    });
-    return () => cancelAnimationFrame(frame);
   }, [
-    applySnapshot,
     memoryKey,
     pinToBottom,
     readSnapshot,
-    refreshAnchor,
     restoreAnchor,
     revision,
+    scheduleMarkerSync,
     suspended,
   ]);
 

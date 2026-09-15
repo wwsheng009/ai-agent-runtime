@@ -1,6 +1,6 @@
 // 由 hooks/workspace/use-session-backtrack.ts 机械拆分而来（P0-2），仅搬迁不改语义。
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   applySessionBacktrack,
@@ -64,7 +64,25 @@ export function useSessionBacktrack({
   setThreads,
   draft = "",
 }: UseSessionBacktrackOptions) {
-  const [dialog, setDialog] = useState<SessionBacktrackDialogState>(initialDialogState);
+  const [dialog, setDialogState] = useState<SessionBacktrackDialogState>(initialDialogState);
+  // 对话框状态的同步镜像：切换「还原模式」必须在同一个事件里读到刚写入的状态。
+  // 不能依赖 React 是否同步求值 setState 的 updater——组件 fiber 上存在待处理更新时
+  // （workspace 页几乎一直在更新）updater 会被推迟，读到的空 target 会让模式切换直接
+  // return，而排队中的 previewing=true 仍然生效 → 确认按钮永久不可点。
+  // 回归用例见 hooks/workspace/use-session-backtrack.test.tsx。
+  const dialogRef = useRef<SessionBacktrackDialogState>(initialDialogState);
+  const setDialog = useCallback(
+    (
+      update:
+        | SessionBacktrackDialogState
+        | ((current: SessionBacktrackDialogState) => SessionBacktrackDialogState),
+    ) => {
+      const next = typeof update === "function" ? update(dialogRef.current) : update;
+      dialogRef.current = next;
+      setDialogState(next);
+    },
+    [],
+  );
   const [navigation, setNavigation] =
     useState<SessionBacktrackNavigationState>(initialNavigationState);
   const [bannerError, setBannerError] = useState<string | null>(null);
@@ -98,7 +116,7 @@ export function useSessionBacktrack({
 
   const closeDialog = useCallback(() => {
     setDialog(initialDialogState);
-  }, []);
+  }, [setDialog]);
 
   const exitNavigation = useCallback(() => {
     setNavigation(initialNavigationState);
@@ -216,7 +234,7 @@ export function useSessionBacktrack({
       setDialog({
         ...initialDialogState,
         open: true,
-        busy: true,
+        previewing: true,
         target,
         mode,
         editPrompt: seededEditPrompt,
@@ -224,22 +242,27 @@ export function useSessionBacktrack({
 
       try {
         const preview = await loadPreview(sessionId, target, mode);
-        setDialog((current) => ({
-          ...current,
-          busy: false,
-          preview,
-          error: null,
-        }));
+        // 丢弃过期响应：期间用户可能已切换还原模式，旧模式的预览不能当作新模式的预览。
+        setDialog((current) =>
+          current.mode === mode && current.target?.messageId === target.messageId
+            ? { ...current, previewing: false, preview, error: null }
+            : current,
+        );
       } catch (error) {
-        setDialog((current) => ({
-          ...current,
-          busy: false,
-          preview: null,
-          error: error instanceof Error ? error.message : "Failed to preview backtrack",
-        }));
+        setDialog((current) =>
+          current.mode === mode && current.target?.messageId === target.messageId
+            ? {
+                ...current,
+                previewing: false,
+                preview: null,
+                error:
+                  error instanceof Error ? error.message : "Failed to preview backtrack",
+              }
+            : current,
+        );
       }
     },
-    [isResponding, loadPreview, selectedThread?.sessionId, targetByMessageId],
+    [isResponding, loadPreview, selectedThread?.sessionId, setDialog, targetByMessageId],
   );
 
   const confirmNavigationSelection = useCallback(() => {
@@ -249,47 +272,52 @@ export function useSessionBacktrack({
     void backtrackToMessage(navigation.selectedMessageId, "conversation");
   }, [backtrackToMessage, navigation.active, navigation.selectedMessageId]);
 
+  // 选中「还原模式」只切换选项并刷新预览，绝不触发应用：
+  // 真正的回滚只能由对话框底部的确认按钮触发（confirmBacktrack）。
   const setDialogMode = useCallback(
     async (mode: RuntimeSessionBacktrackMode) => {
       const sessionId = selectedThread?.sessionId;
-      let target: SessionBacktrackTarget | null = null;
-      let shouldPreview = false;
-      setDialog((current) => {
-        target = current.target;
-        if (!current.open || !current.target || !sessionId) {
-          return { ...current, mode };
-        }
-        shouldPreview = true;
-        return {
-          ...current,
-          mode,
-          busy: true,
-          error: null,
-        };
-      });
-
-      if (!sessionId || !target || !shouldPreview) {
+      // 决策必须基于同步镜像，而不是 setState 的 updater 副作用：
+      // updater 被推迟时会读不到 target，直接 return 却留下 previewing=true（按钮卡死）。
+      const current = dialogRef.current;
+      const target = current.target;
+      if (!current.open || !target || !sessionId) {
+        // 对话框未打开时只记住选项，不取预览。
+        setDialog({ ...current, mode });
         return;
       }
+      if (current.mode === mode && current.preview && !current.error) {
+        // 同一模式且预览仍有效：不重复请求。
+        return;
+      }
+      setDialog({ ...current, mode, previewing: true, error: null });
       try {
         const preview = await loadPreview(sessionId, target, mode);
-        setDialog((current) => ({
-          ...current,
-          mode,
-          preview,
-          busy: false,
-          error: null,
-        }));
+        setDialog((current) =>
+          // 丢弃过期响应：用户可能已经切到别的模式。
+          current.mode === mode
+            ? {
+                ...current,
+                preview,
+                previewing: false,
+                error: null,
+              }
+            : current,
+        );
       } catch (error) {
-        setDialog((current) => ({
-          ...current,
-          mode,
-          busy: false,
-          error: error instanceof Error ? error.message : "Failed to preview backtrack",
-        }));
+        setDialog((current) =>
+          current.mode === mode
+            ? {
+                ...current,
+                previewing: false,
+                error:
+                  error instanceof Error ? error.message : "Failed to preview backtrack",
+              }
+            : current,
+        );
       }
     },
-    [loadPreview, selectedThread?.sessionId],
+    [loadPreview, selectedThread?.sessionId, setDialog],
   );
 
   const setPrefillComposer = useCallback((prefillComposer: boolean) => {
@@ -297,20 +325,26 @@ export function useSessionBacktrack({
       ...current,
       prefillComposer,
     }));
-  }, []);
+  }, [setDialog]);
 
   const setEditPrompt = useCallback((editPrompt: string) => {
     setDialog((current) => ({
       ...current,
       editPrompt,
     }));
-  }, []);
+  }, [setDialog]);
 
   const confirmBacktrack = useCallback(async () => {
     const sessionId = selectedThread?.sessionId;
     const threadId = selectedThread?.id;
-    const target = dialog.target;
-    if (!sessionId || !threadId || !target || dialog.busy) {
+    // 以同步镜像为准：点击瞬间的状态才是用户确认的状态（预览模式、编辑框内容）。
+    const current = dialogRef.current;
+    const target = current.target;
+    // 应用闸门：预览在途或已失败时不允许执行，避免用未确认的模式回滚。
+    if (!sessionId || !threadId || !target || current.busy || current.previewing) {
+      return;
+    }
+    if (current.error) {
       return;
     }
 
@@ -321,10 +355,10 @@ export function useSessionBacktrack({
     }));
 
     try {
-      const editPrompt = resolveBacktrackEditPrompt(dialog.editPrompt, target.fullText);
+      const editPrompt = resolveBacktrackEditPrompt(current.editPrompt, target.fullText);
       const response = await applySessionBacktrack(sessionId, {
         ...buildBacktrackRequestFields(target, sessionId),
-        mode: dialog.mode,
+        mode: current.mode,
         auto_submit: false,
         ...(editPrompt !== undefined ? { edit_prompt: editPrompt } : {}),
       });
@@ -334,11 +368,11 @@ export function useSessionBacktrack({
 
       await refreshHistory(threadId, sessionId);
 
-      if (dialog.prefillComposer) {
+      if (current.prefillComposer) {
         const composerPrompt =
           response.result.composer_prompt?.trim() ||
           response.result.edited_prompt?.trim() ||
-          dialog.editPrompt.trim() ||
+          current.editPrompt.trim() ||
           target.fullText.trim() ||
           target.preview;
         if (composerPrompt && composerPrompt !== "(empty)") {
@@ -361,17 +395,7 @@ export function useSessionBacktrack({
         error: error instanceof Error ? error.message : "Backtrack failed",
       }));
     }
-  }, [
-    dialog.busy,
-    dialog.editPrompt,
-    dialog.mode,
-    dialog.prefillComposer,
-    dialog.target,
-    refreshHistory,
-    selectedThread?.id,
-    selectedThread?.sessionId,
-    setDraft,
-  ]);
+  }, [refreshHistory, selectedThread?.id, selectedThread?.sessionId, setDialog, setDraft]);
 
   // Keep navigation selection valid when history changes; exit when backtrack is unavailable.
   useEffect(() => {

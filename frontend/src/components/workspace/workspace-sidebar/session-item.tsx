@@ -1,7 +1,7 @@
 // 由 components/workspace/workspace-sidebar.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 // P1-9 增量：行内相对时间、归档状态徽标与带键盘/aria 的操作菜单（新增 props 均可选）。
 
-import { MoreHorizontalIcon, PencilIcon } from "lucide-react";
+import { MoreHorizontalIcon } from "lucide-react";
 import { useEffect, useRef, useState, type DragEvent } from "react";
 import { type RuntimeSessionRecord } from "@/lib/runtime-api";
 import { cn } from "@/lib/utils";
@@ -134,7 +134,11 @@ type SessionRowMenuProps = {
   onArchive?: (sessionId: string) => void;
   onDelete?: (sessionId: string) => void;
   onFork?: (sessionId: string) => void;
+  /** 2026-09-15 样式优化：行内铅笔按钮并入菜单，作为首个菜单项。 */
+  onRename?: (() => void) | undefined;
   onRestore?: (sessionId: string) => void;
+  /** 重命名菜单项文案（缺省不渲染该项）。 */
+  renameLabel?: string | undefined;
   sessionId: string;
 };
 
@@ -144,7 +148,9 @@ function SessionRowMenu({
   onArchive,
   onDelete,
   onFork,
+  onRename,
   onRestore,
+  renameLabel,
   sessionId,
 }: SessionRowMenuProps) {
   const [open, setOpen] = useState(false);
@@ -253,8 +259,23 @@ function SessionRowMenu({
               closeMenu(false);
             }
           }}
-          className="absolute right-0 top-full z-20 mt-1 min-w-[9rem] rounded-[0.6rem] border border-border bg-surface-solid py-1 shadow-lg"
+          className="absolute right-0 top-full z-20 mt-1 min-w-[9rem] rounded-[0.6rem] border border-border bg-surface-popover py-1 shadow-lg"
         >
+          {/* 2026-09-15 样式优化：重命名从行内铅笔收敛为菜单首项，标题右侧只留一个入口。 */}
+          {onRename && renameLabel ? (
+            <button
+              type="button"
+              role="menuitem"
+              tabIndex={-1}
+              onClick={() => {
+                onRename();
+                closeMenu(true);
+              }}
+              className="block w-full px-2.5 py-1.5 text-left text-xs text-foreground transition hover:bg-surface-soft"
+            >
+              {renameLabel}
+            </button>
+          ) : null}
           {!archived && onFork ? (
             <button
               type="button"
@@ -352,8 +373,11 @@ export function SidebarSessionItem({
   const showMenu =
     Boolean(actionLabels) &&
     (archived
-      ? Boolean(onRestore) || Boolean(onDelete)
-      : Boolean(onArchive) || Boolean(onDelete) || Boolean(onFork));
+      ? Boolean(onRestore) || Boolean(onDelete) || Boolean(onStartRename)
+      : Boolean(onArchive) ||
+        Boolean(onDelete) ||
+        Boolean(onFork) ||
+        Boolean(onStartRename));
 
   if (renaming) {
     return (
@@ -406,7 +430,9 @@ export function SidebarSessionItem({
         onClick={onSelect}
         className={cn(
           "flex w-full items-center gap-2 rounded-[0.72rem] border py-1.5 pl-2 text-left transition",
-          showMenu ? "pr-16" : "pr-9",
+          // 2026-09-15 样式优化：hover 动作从「铅笔 + 菜单」两个图标收敛为一个菜单入口，
+          // 右侧预留随之收窄（16 → 8 个间距单位），让出的宽度全部归还标题。
+          showMenu ? "pr-8" : "pr-2",
           isActive
             ? "border-accent-secondary-border bg-accent-secondary-soft"
             : archived
@@ -443,19 +469,11 @@ export function SidebarSessionItem({
         ) : null}
         <SidebarStateIcon spec={statusIcon} />
       </button>
-      <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition focus-within:opacity-100 group-hover/session:opacity-100">
-        <button
-          type="button"
-          aria-label={renameLabels.rename}
-          title={renameLabels.rename}
-          onClick={(event) => {
-            event.stopPropagation();
-            onStartRename(session.id, title);
-          }}
-          className="rounded-chip p-1 text-muted-foreground transition hover:bg-surface-soft hover:text-foreground focus-visible:opacity-100"
-        >
-          <PencilIcon size={12} />
-        </button>
+      {/* z-30：该容器被 `translate`/`opacity` 建立为层叠上下文，容器自身必须带正
+          z-index，否则容器内菜单的 `z-20` 只在本上下文内生效，整行会被后续兄弟行
+          （同为 z-index:auto 的定位元素，DOM 顺序在后）覆盖 —— 表现为菜单被下一行
+          的按钮压住、菜单项点不到。 */}
+      <div className="absolute right-1 top-1/2 z-30 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition focus-within:opacity-100 group-hover/session:opacity-100">
         {showMenu && actionLabels ? (
           <SessionRowMenu
             actionLabels={actionLabels}
@@ -463,7 +481,9 @@ export function SidebarSessionItem({
             onArchive={onArchive}
             onDelete={onDelete}
             onFork={onFork}
+            onRename={() => onStartRename(session.id, title)}
             onRestore={onRestore}
+            renameLabel={renameLabels.rename}
             sessionId={session.id}
           />
         ) : null}

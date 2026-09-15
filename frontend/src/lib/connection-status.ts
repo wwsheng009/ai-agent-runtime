@@ -34,24 +34,31 @@ export type LogsLikeConnectionState =
   | "reconnecting"
   | "error";
 
+// 配色一律走 `--connection-*` L2 语义 token（tokens.css 暗色基准 + themes.css 亮色覆盖）：
+// 早前写死的 `bg-*-500/12 + text-*-200` 只在暗色主题成立，亮色下浅前景压浅背景导致
+// 「连接中… 重试」几乎不可见；语义 token 由主题变量翻转，两套主题都保持可读对比度。
 const CONNECTION_TONES: Record<
   ConnectionStatus,
   { badgeClassName: string; icon: ConnectionStatusIcon }
 > = {
   online: {
-    badgeClassName: "border-emerald-500/30 bg-emerald-500/12 text-emerald-200",
+    badgeClassName:
+      "border-connection-online-border bg-connection-online-soft text-connection-online",
     icon: "online",
   },
   connecting: {
-    badgeClassName: "border-sky-500/30 bg-sky-500/12 text-sky-200",
+    badgeClassName:
+      "border-connection-connecting-border bg-connection-connecting-soft text-connection-connecting",
     icon: "connecting",
   },
   reconnecting: {
-    badgeClassName: "border-amber-500/30 bg-amber-500/12 text-amber-200",
+    badgeClassName:
+      "border-connection-reconnecting-border bg-connection-reconnecting-soft text-connection-reconnecting",
     icon: "connecting",
   },
   offline: {
-    badgeClassName: "border-red-500/30 bg-red-500/12 text-red-200",
+    badgeClassName:
+      "border-connection-offline-border bg-connection-offline-soft text-connection-offline",
     icon: "offline",
   },
   idle: {

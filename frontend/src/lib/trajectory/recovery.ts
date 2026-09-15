@@ -16,6 +16,30 @@ export const CHAT_SSE_EVENT_PREFIX = "chat.sse.";
 
 export const TRAJECTORY_RECOVERY_PAGE_SIZE = 500;
 
+/**
+ * 尾部优先回放（tail-first）的首屏窗口：只回放最近 N 条事件。
+ *
+ * 大会话实测（2288 条事件 / 2.25MB SSE dump）：首屏从 seq=0 全量重放是
+ * long task 与卡顿的主要来源，而用户打开会话时关心的是**最近的消息**。
+ * 因此首屏只取最后一页，旧内容由「加载更早」按需逐页向前（见
+ * `TRAJECTORY_EARLIER_PAGE_EVENTS`），窗口之前的 seq 用基准游标跳过
+ * （`TrajectoryStore.setBaselineSeq`）。
+ */
+export const TRAJECTORY_TAIL_WINDOW_EVENTS = 800;
+
+/** 「加载更早」每次向前取的事件条数（与恢复分页同量级）。 */
+export const TRAJECTORY_EARLIER_PAGE_EVENTS = TRAJECTORY_RECOVERY_PAGE_SIZE;
+
+/**
+ * 尾部窗口落地后的补齐次数上限（每轮一页）。
+ *
+ * 窗口回放依赖「事件序列连续推进游标」，但游标可能停在窗口末尾之前：同一段
+ * 增量已被实时路径应用（`seenDeltaKeys` 去重后不再推进）、后端返回的一页被
+ * 截断、或 EventStore 保留期丢弃了中间的持久化事件。此时窗口渲染不全，窗口
+ * 落地后按 `after` 续拉补齐；游标已到窗口末尾则一次请求都不发（正常路径零成本）。
+ */
+export const TRAJECTORY_WINDOW_REPAIR_MAX_PAGES = 8;
+
 /** live-only 工具进度事件类型（对齐后端 `toolprotocol.EventTypeProgress`）。 */
 export const TOOL_PROGRESS_EVENT_TYPE = "tool.progress";
 

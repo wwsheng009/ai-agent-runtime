@@ -10,22 +10,44 @@ import { upsertArtifacts } from "./shared";
 
 export const MAX_RUNTIME_EVENTS = 100;
 
+/** 会话历史页 → 线程投影的公共前置：会话 id 归一 + 历史产物 + 消息映射。 */
+function mapHistoryPage(thread: Thread, response: SessionHistoryResponse) {
+  const sessionId =
+    normalizeSessionId(response.session_id) ||
+    normalizeSessionId(thread.sessionId);
+  return {
+    sessionId,
+    historyArtifact: buildSessionHistoryArtifact(response),
+    mappedHistory: mapSessionHistoryToMessages(
+      sessionId,
+      response.history,
+      thread.messages,
+    ),
+  };
+}
+
 export function applySessionHistoryToThread(
   thread: Thread,
   response: SessionHistoryResponse,
 ) {
-  const sessionId =
-    normalizeSessionId(response.session_id) ||
-    normalizeSessionId(thread.sessionId);
   const transport: Thread["transport"] =
     thread.transport === "error" ? "error" : "live";
-  const historyArtifact = buildSessionHistoryArtifact(response);
-  const mappedHistory = mapSessionHistoryToMessages(
-    sessionId,
-    response.history,
-    thread.messages,
+  const { sessionId, historyArtifact, mappedHistory } = mapHistoryPage(
+    thread,
+    response,
   );
   const mappedMessages = mappedHistory.map((item) => item.message);
+  // 已加载的更早内容（「加载更早」前插的常住窗口）：本页首条消息**之前**的本地
+  // 消息不在本页返回范围内，但仍是服务端确认过的历史前缀。重同步（挂载 / 回合
+  // 结束 / 回滚事件）若整体覆盖，用户刚翻出来的旧消息会凭空消失——因此按「本页
+  // 首条消息在本地列表中的位置」保留它前面的部分；本页为空（截断到 0 条）时
+  // 找不到锚点，自然回落成整体替换。
+  const pageMessageIds = new Set(mappedMessages.map((message) => message.id));
+  const firstPageIndex = thread.messages.findIndex((message) =>
+    pageMessageIds.has(message.id),
+  );
+  const olderResidentMessages =
+    firstPageIndex > 0 ? thread.messages.slice(0, firstPageIndex) : [];
   // 历史是权威投影，但在途/被中断的本地消息尚未（或不会）落盘：用户按 Ctrl+Enter
   // 中止流式回合时后端只持久化了用户消息，若此时用历史整体覆盖，刚渲染出的部分
   // 回答会连同“已停止”标记一起消失。这里保留历史未覆盖到的 live-only 消息，
@@ -41,7 +63,7 @@ export function applySessionHistoryToThread(
   //   这个形态（后端返回 `{"count":0,"history":[]}`）。若沿用「保留本地消息」，
   //   消息列表会停留在回滚前的内容，用户看到的就是「点了确认没反应」。
   const resolvedMessages = Array.isArray(response.history)
-    ? [...mappedMessages, ...liveOnlyMessages]
+    ? [...olderResidentMessages, ...mappedMessages, ...liveOnlyMessages]
     : thread.messages;
   return {
     ...thread,
@@ -50,6 +72,38 @@ export function applySessionHistoryToThread(
     transport,
     lastError: thread.transport === "error" ? thread.lastError : null,
     messages: resolvedMessages,
+    artifacts: upsertArtifacts(thread.artifacts, [
+      historyArtifact,
+      ...mappedHistory.flatMap((item) => item.artifacts),
+    ]),
+  };
+}
+
+/**
+ * 更早一页的**前插**（对话面「加载更早」）：`before_seq` 页映射成消息后放到列表
+ * 最前，与本地已有消息按 id 去重——重复请求同一页（或与常住窗口重叠）时不会出现
+ * 双份消息；整页都已在本地时返回原线程，避免无意义的重渲染与滚动对账。
+ */
+export function prependSessionHistoryToThread(
+  thread: Thread,
+  response: SessionHistoryResponse,
+) {
+  const { sessionId, historyArtifact, mappedHistory } = mapHistoryPage(
+    thread,
+    response,
+  );
+  const existingIds = new Set(thread.messages.map((message) => message.id));
+  const olderMessages = mappedHistory
+    .map((item) => item.message)
+    .filter((message) => !existingIds.has(message.id));
+  if (olderMessages.length === 0) {
+    return thread;
+  }
+  return {
+    ...thread,
+    updatedAt: new Date().toISOString(),
+    sessionId,
+    messages: [...olderMessages, ...thread.messages],
     artifacts: upsertArtifacts(thread.artifacts, [
       historyArtifact,
       ...mappedHistory.flatMap((item) => item.artifacts),

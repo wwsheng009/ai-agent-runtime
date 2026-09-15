@@ -34,6 +34,27 @@ type WorkspaceRouteSelection = {
 
 export const NEW_THREAD_ID = "new";
 
+// 工作区「线程面」路由族：/workspace/{chats,sessions,restore}/...
+const WORKSPACE_THREAD_PATH_PREFIXES = [
+  "/workspace/chats/",
+  "/workspace/sessions/",
+  "/workspace/restore/",
+] as const;
+
+/**
+ * 当前地址是否仍停留在工作区线程面。
+ *
+ * 回写规范线程路径必须以此为前提：离开工作区（/runtime/**、/usage、/logs、/）时
+ * 目标路由是 lazy chunk，切换期间本页仍挂载、而 location 已经指向目标地址；
+ * 无条件回写会让本 effect 抢在目标路由提交前把地址顶回当前会话，表现为
+ * 「点 /runtime/config、/runtime/skills 等无法跳转，被强制回跳会话地址」。
+ */
+export function isWorkspaceThreadPath(pathname: string): boolean {
+  return WORKSPACE_THREAD_PATH_PREFIXES.some((prefix) =>
+    pathname.startsWith(prefix),
+  );
+}
+
 // 左侧会话列表点击是否需要弹「切换确认」对话框：只有当前会话仍在生成回复
 // （isCurrentThreadResponding）时才确认——空闲状态下的切换不应打断用户；
 // 重复点击当前会话、「新建会话」入口同理。
@@ -241,6 +262,12 @@ export function useWorkspaceThreadSelection({
 
   useEffect(() => {
     if (!selectedThread) {
+      return;
+    }
+
+    // 只有当地址仍停在工作区线程面时才回写；否则会把用户主动导航到
+    // /runtime/**、/usage 等独立页面的地址顶回当前会话（见 isWorkspaceThreadPath）。
+    if (!isWorkspaceThreadPath(location.pathname)) {
       return;
     }
 

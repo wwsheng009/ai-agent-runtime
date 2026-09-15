@@ -81,6 +81,36 @@ export const enRuntimeConfigEditorShell = {
     helpStale:
       "The draft changed after the preview was generated; regenerate the preview.",
   },
+  draftValidation: {
+    title: "Draft checks",
+    description:
+      "Draft structure is checked before writing; errors block save and preview, warnings are advisory.",
+    errorBadge: "{{count}} errors",
+    warningBadge: "{{count}} warnings",
+    severityError: "error",
+    severityWarning: "warning",
+    blocked:
+      "The draft has {{count}} structural errors; writing is blocked until they are fixed.",
+    blockedHint:
+      "Save and preview requests are not sent to the backend while errors remain.",
+    rootNotMapping:
+      "The root node must be a mapping (object); it currently has another type.",
+    providersNotMapping: "The providers section must be a mapping.",
+    providersItemsNotMapping:
+      "providers.items must be a mapping of provider name to config.",
+    providerNotMapping:
+      "The config of provider \"{{name}}\" must be a mapping.",
+    providerFieldNotString: "Field \"{{field}}\" must be a string.",
+    providerFieldNotBoolean: "Field \"{{field}}\" must be a boolean.",
+    providerFieldNotStringList:
+      "Field \"{{field}}\" must be a list of strings.",
+    providerFieldNotMapping: "Field \"{{field}}\" must be a mapping (object).",
+    defaultProviderNotString: "providers.default_provider must be a string.",
+    defaultProviderUnknown:
+      "default_provider points at provider \"{{name}}\", which is not in providers.items (advisory only).",
+    rawEmpty:
+      "The source draft is empty; an empty config would stop the runtime from starting, so writing is blocked.",
+  },
   sticky: {
     unsaved: "Unsaved draft",
     hint: "Preview the diff first, then save it to the current runtime config document.",

@@ -6,6 +6,8 @@ export const enWorkspacePanelsMessages = {
       "Start a turn to populate the workspace timeline. Runtime evidence, related items, and streamed output will attach back to the messages that produced them.",
     backtrackNavHint:
       "Backtrack navigation active — use ↑/↓ (or j/k) to choose a user turn, Enter to open the confirm dialog, Esc to exit.",
+    loadEarlier: "Load earlier messages",
+    loadingEarlier: "Loading earlier messages…",
   },
   userBubble: {
     editAriaLabel: "Edit this user turn before backtrack",
@@ -60,7 +62,6 @@ export const enWorkspacePanelsMessages = {
   // Wording mirrors the reference implementation (deepseek-harness locale.ts:71-72).
   branch: {
     label: "Branch into a new conversation",
-    unavailable: "Available only on the last message of a completed turn",
     failed: "Branch failed. Please try again.",
     pending: "Creating branch session…",
   },
@@ -119,6 +120,13 @@ export const enWorkspacePanelsMessages = {
     codeRestoreBaseCheckpoint: "Code restore can use base checkpoint",
     noCheckpoint: "No mutation checkpoint is mapped to this turn yet.",
     restoreMode: "Restore mode",
+    modeConversation: "Conversation only",
+    modeBoth: "Conversation + files",
+    modeCode: "Files only (advanced)",
+    modeCodeHint:
+      "Only file mutations after this turn are written back; the conversation keeps its truncated state.",
+    modeSelectHint:
+      "Switching modes only refreshes the preview below; the backtrack runs after you press Confirm.",
     editPromptLabel: "Edit prompt before prefill",
     editPromptAriaLabel: "Edit backtrack prompt",
     editPromptPlaceholder: "Edit the original user prompt…",
@@ -126,6 +134,7 @@ export const enWorkspacePanelsMessages = {
       "Leave unchanged to keep the original text. Edits are sent as edit_prompt and prefilled into the composer after apply.",
     prefillToggle: "Prefill composer with the original (or edited) prompt",
     cancel: "Cancel",
+    confirm: "Confirm backtrack",
     working: "Working…",
   },
 } as const;

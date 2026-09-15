@@ -9,8 +9,10 @@ import { type ConfigEditorState } from "./use-config-state";
 
 export function createConfigEditorActions(state: ConfigEditorState) {
   const {
+    draftErrorCount,
     draftParsed,
     draftRaw,
+    hasDraftErrors,
     hasDomainChanges,
     hasSourceChanges,
     hasUnsavedChanges,
@@ -106,6 +108,11 @@ export function createConfigEditorActions(state: ConfigEditorState) {
   }
 
   async function saveDocument(options?: { suppressStatusMessage?: boolean }) {
+    if (hasDraftErrors) {
+      setError(t("editor.draftValidation.blocked", { count: draftErrorCount }));
+      return null;
+    }
+
     setIsSaving(true);
     setError(null);
     try {
@@ -138,6 +145,11 @@ export function createConfigEditorActions(state: ConfigEditorState) {
   }
 
   async function generatePreview() {
+    if (hasDraftErrors) {
+      setError(t("editor.draftValidation.blocked", { count: draftErrorCount }));
+      return;
+    }
+
     setIsPreviewLoading(true);
     setError(null);
     try {
@@ -216,6 +228,11 @@ export function createConfigEditorActions(state: ConfigEditorState) {
   }
 
   async function saveAndRestartDocument() {
+    if (hasDraftErrors) {
+      setError(t("editor.draftValidation.blocked", { count: draftErrorCount }));
+      return;
+    }
+
     if (
       !window.confirm(t("editor.messages.saveAndRestartConfirm"))
     ) {

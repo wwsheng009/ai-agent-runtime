@@ -3,9 +3,11 @@ import { describe, expect, it } from "vitest";
 import type { RuntimeSessionRecord, RuntimeWorkspaceDirectory } from "@/types/runtime";
 
 import {
+  appendEmptyRegisteredGroups,
   applySessionWorkspaceOverrides,
   pruneSessionMoveOverrides,
   resolveSessionMoveTarget,
+  type MergedDirectoryGroup,
 } from "./workspace-sidebar-shared";
 
 function session(
@@ -157,6 +159,66 @@ describe("workspace-sidebar-shared · 跨组移动纯口径", () => {
         label: "demo",
         path: "E:/projects/demo",
       });
+    });
+  });
+});
+
+function group(
+  key: string,
+  sessions: RuntimeSessionRecord[],
+  overrides: Partial<MergedDirectoryGroup> = {},
+): MergedDirectoryGroup {
+  return {
+    key,
+    label: key,
+    fullPath: key,
+    registered: true,
+    sessions,
+    ...overrides,
+  };
+}
+
+describe("workspace-sidebar-shared · 目录会话树装配（合并方案 §3.5-F）", () => {
+  describe("appendEmptyRegisteredGroups", () => {
+    it("把 0 会话的注册目录追加到排序账目末尾，不改动既有顺序与引用", () => {
+      const withSessions = group("dir-a", [session("s1", "E:/a")]);
+      const emptyRegistered = group("dir-b", []);
+
+      const groups = appendEmptyRegisteredGroups(
+        [withSessions],
+        [withSessions, emptyRegistered],
+      );
+
+      expect(groups.map((item) => item.key)).toEqual(["dir-a", "dir-b"]);
+      expect(groups[0]).toBe(withSessions);
+      // 0 会话目录必须常驻：否则「在目录中新建会话」的入口会随会话消失而消失。
+      expect(groups[1]).toBe(emptyRegistered);
+      expect(groups[1].sessions).toEqual([]);
+    });
+
+    it("不重复补位：已有会话的注册目录与派生目录都不追加", () => {
+      const registered = group("dir-a", [session("s1", "E:/a")]);
+      const derived = group("e:/derived", [session("s2", "E:/derived")], {
+        registered: false,
+      });
+      const emptyRegistered = group("dir-b", []);
+
+      const groups = appendEmptyRegisteredGroups(
+        [registered, derived],
+        [registered, derived, emptyRegistered],
+      );
+
+      expect(groups.map((item) => item.key)).toEqual([
+        "dir-a",
+        "e:/derived",
+        "dir-b",
+      ]);
+    });
+
+    it("没有空注册目录时返回入参原引用，避免无谓重算", () => {
+      const ordered = [group("dir-a", [session("s1", "E:/a")])];
+
+      expect(appendEmptyRegisteredGroups(ordered, ordered)).toBe(ordered);
     });
   });
 });

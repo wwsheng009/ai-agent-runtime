@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 
 import { MessageMarkdown } from "@/components/workspace/message-markdown";
 import { type MessageSegment } from "@/data/mock";
+import { useTypewriter } from "@/hooks/workspace/use-typewriter";
 
 export const MessageRichSegment = lazy(() =>
   import("@/components/workspace/message-rich-content").then((module) => ({
@@ -27,12 +28,21 @@ export function StreamingMarkdown({
   interrupted?: boolean;
   streaming?: boolean;
 }) {
-  // 打字机已移除（方案 §8.6 / 批次 D3）：`useTypewriter` 返回的是
-  // `content.slice(0, shown)`，滞后帧会让 MessageMarkdown 的冻结前缀比对
-  // （stableContent.startsWith(上一帧)）判成「内容被改写」→ generation++ →
-  // 已冻结块 remount 重解析。这里直连，内容按到达节奏渲染。
+  // 打字机（批次 D3 曾因「滞后帧 → 冻结前缀比对判成改写 → generation++ → 冻结块
+  // remount」删除，本批次以「单调揭示」重建）：`useTypewriter` 只做两件事——
+  // ① 单调追加：揭示量只增不减，冻结前缀比对永远判「追加」；
+  // ② 只对正在增长的目标文本生效：挂载即完整（历史回放 / 历史同步重建）与
+  //    同一条流式消息里更早的静态文本段都不打字，直接直挂。
+  const revealedContent = useTypewriter(
+    content,
+    Boolean(streaming) && !interrupted,
+  );
   return (
-    <MessageMarkdown content={content} interrupted={interrupted} streaming={streaming} />
+    <MessageMarkdown
+      content={revealedContent}
+      interrupted={interrupted}
+      streaming={streaming}
+    />
   );
 }
 

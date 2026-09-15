@@ -23,13 +23,20 @@ function assistantMessage(segments: MessageSegment[]): ChatMessage {
 
 function renderTail(
   message: ChatMessage,
-  options: { onRetry?: () => void; usage?: TurnUsage | null } = {},
+  options: {
+    onBranch?: () => void;
+    branchPending?: boolean;
+    onRetry?: () => void;
+    usage?: TurnUsage | null;
+  } = {},
 ) {
   return renderToStaticMarkup(
     <TurnTailRow
       anchorKey={`anchor:${message.id}`}
+      branchPending={options.branchPending}
       flowKey={`turn-tail:${message.id}`}
       message={message}
+      onBranch={options.onBranch}
       onRetry={options.onRetry}
       usage={options.usage ?? null}
     />,
@@ -50,8 +57,33 @@ describe("TurnTailRow 可见性", () => {
 
     expect(markup).toContain("复制这条回复");
     expect(markup).toContain('data-chat-flow-kind="turn-tail"');
+    // 未命中锚点（宿主不下发 onBranch）时不渲染分支入口。
+    expect(markup).not.toContain("在新对话中分支");
     // §12.1.4：动作图标走 hover 显现轴，不默认常驻。
     expect(markup).toContain("app-hover-reveal");
+  });
+
+  it("可分支锚点：渲染分支按钮，且不带禁用态（可用即可点）", () => {
+    const markup = renderTail(
+      assistantMessage([{ type: "text", content: "结论：入口文件共 42 行。" }]),
+      { onBranch: () => {} },
+    );
+
+    expect(markup).toContain('data-branch-state="available"');
+    expect(markup).toContain('aria-label="在新对话中分支"');
+    expect(markup).not.toContain("aria-disabled");
+    expect(markup).not.toContain("aria-describedby");
+  });
+
+  it("分支在途：按钮进入 pending（spinner + aria-busy），不再是不可用态", () => {
+    const markup = renderTail(
+      assistantMessage([{ type: "text", content: "结论：入口文件共 42 行。" }]),
+      { branchPending: true, onBranch: () => {} },
+    );
+
+    expect(markup).toContain('data-branch-state="pending"');
+    expect(markup).toContain('aria-busy="true"');
+    expect(markup).toContain("正在创建分支会话…");
   });
 
   it("仅空白文本：整行不渲染（空格不构成可复制内容）", () => {
@@ -82,6 +114,15 @@ describe("TurnTailRow 可见性", () => {
   it("仅推理回合（无正文）：整行不渲染", () => {
     const markup = renderTail(
       assistantMessage([{ type: "reasoning", content: "先盘点入口文件" }]),
+    );
+
+    expect(markup).toBe("");
+  });
+
+  it("仅推理回合（无正文）：即使宿主误传 onBranch 也不渲染分支按钮", () => {
+    const markup = renderTail(
+      assistantMessage([{ type: "reasoning", content: "先盘点入口文件" }]),
+      { onBranch: () => {} },
     );
 
     expect(markup).toBe("");

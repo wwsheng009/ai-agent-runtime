@@ -148,13 +148,19 @@ export function useRuntimeLogs({
           return;
         }
 
-        setEntries(response.entries);
+        // 载荷防御：/api 面异常时（例如代理回 200 + 空对象）entries 可能缺失，
+        // 直接写进 state 会让页面在 entries.some / entries.find 上抛 TypeError，
+        // 把整条 /logs 路由打成错误面。缺字段按「没有日志」降级。
+        const loadedEntries = Array.isArray(response.entries)
+          ? response.entries
+          : [];
+        setEntries(loadedEntries);
         setFilePath(response.file_path ?? "");
         setLogFileExists(response.exists ?? true);
         updateSelectedCursor((currentCursor) =>
-          response.entries.some((entry) => entry.cursor === currentCursor)
+          loadedEntries.some((entry) => entry.cursor === currentCursor)
             ? currentCursor
-            : (response.entries[0]?.cursor ?? null),
+            : (loadedEntries[0]?.cursor ?? null),
         );
         setStreamSeed({
           cursor: response.next_cursor ?? 0,

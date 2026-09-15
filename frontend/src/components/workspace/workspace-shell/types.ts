@@ -21,6 +21,21 @@ import { type ChatStreamPhase } from "@/types/runtime";
 
 import { type SidebarSessionActivity } from "@/components/workspace/workspace-sidebar/session-row-status";
 
+/**
+ * 尾部优先回放（tail-first）的「加载更早」入口。
+ *
+ * 首屏只回放最近一页事件（见 hooks/workspace/use-trajectory-recovery.ts），
+ * 更早的页由轨迹视图顶部入口按需前插；无更早页时 hasEarlier=false，入口隐藏。
+ */
+export type TrajectoryEarlierEntry = {
+  /** 窗口之前还有更早一页（服务端 has_more）。 */
+  hasEarlier: boolean;
+  /** 在途：入口禁用，避免并发重复翻页。 */
+  loading: boolean;
+  /** 加载更早一页（前插到窗口之前）。 */
+  onLoad: () => void;
+};
+
 export type WorkspaceShellProps = {
   threads: Thread[];
   runtimeTeams: RuntimeTeamRecord[];
@@ -92,6 +107,10 @@ export type WorkspaceShellProps = {
   reasoningEffortError: string | null;
   reasoningEffortOptions: string[];
   trajectoryStore?: import("@/hooks/workspace/use-trajectory-snapshot").TrajectoryStore | null;
+  /** 尾部优先回放的「加载更早」入口（可选：无窗口语义时不传）。 */
+  trajectoryEarlier?: TrajectoryEarlierEntry;
+  /** 对话面「加载更早」入口（会话历史尾部优先分页；可选：无分页元数据时不传）。 */
+  earlierLoader?: import("@/lib/thread-state/history-paging").HistoryEarlierLoader;
   onDraftChange: (value: string) => void;
   onModelChange: (value: string) => void;
   onProviderChange: (value: string) => void;

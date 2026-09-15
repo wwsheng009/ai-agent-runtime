@@ -85,6 +85,18 @@ export const enWorkspacePanelsArtifacts = {
     restoreConversation: "Restore conversation",
     restoreFiles: "Restore files",
     restoreBoth: "Restore both",
+    restoreModeLegend: "Restore mode",
+    restoreConversationHint: "Rewinds chat history only; workspace files stay as they are.",
+    restoreFilesHint:
+      "Writes back only the file changes captured by this checkpoint; chat history stays as it is.",
+    restoreBothHint: "Rewinds chat history and workspace files together (recommended).",
+    restoreHint: "Pick a restore mode, then press Confirm restore to run it.",
+    confirmRestore: "Confirm restore",
+    restorePending: "Restoring…",
+    restoreNotice:
+      "Restored checkpoint {{checkpoint}} (mode: {{mode}}, files: {{files, number}}, conversation {{conversation}}).",
+    restoreConversationChanged: "rewound",
+    restoreConversationUnchanged: "unchanged",
     conversationSnapshot: "Conversation snapshot",
     previewSummary: "Preview summary",
     fileDiffReader: "File diff reader",

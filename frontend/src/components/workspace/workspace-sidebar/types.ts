@@ -80,7 +80,11 @@ export type WorkspaceSidebarProps = {
   onSelectThread: (threadId: string) => void;
 };
 
-export type SidebarSectionId = "directories" | "chats" | "sessions" | "runtime";
+/**
+ * Phase 2（合并方案 §3.2）：`sessions` 分区已被合并进 `directories` 段（目录会话树），
+ * 分段折叠状态里不再有该 id。
+ */
+export type SidebarSectionId = "directories" | "chats" | "runtime";
 
 export type SidebarSectionState = Record<SidebarSectionId, boolean>;
 

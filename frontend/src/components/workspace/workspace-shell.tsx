@@ -111,7 +111,9 @@ export function WorkspaceShell({
   selectedModel,
   selectedProvider,
   selectedReasoningEffort,
+  earlierLoader,
   trajectoryStore = null,
+  trajectoryEarlier,
 }: WorkspaceShellProps) {
   const { settings } = useAppSettings();
   const { t } = useTranslation("workspace");
@@ -351,6 +353,7 @@ export function WorkspaceShell({
           reasoningEffortOptions={reasoningEffortOptions}
           runtimeModelsError={runtimeModelsError}
           runtimeModelsLoading={runtimeModelsLoading}
+          earlierLoader={earlierLoader}
           selectedModel={selectedModel}
           selectedProvider={selectedProvider}
           selectedReasoningEffort={selectedReasoningEffort}
@@ -362,6 +365,7 @@ export function WorkspaceShell({
           threadStatusLabel={threadStatusLabel}
           threadSubtitle={threadSubtitle}
           trajectoryStore={trajectoryStore}
+          trajectoryEarlier={trajectoryEarlier}
           transportLabel={transportLabel}
           viewMode={viewMode}
         />

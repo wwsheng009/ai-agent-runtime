@@ -3,10 +3,12 @@
 import type {
   RuntimeSessionBacktrackTombstone,
   RuntimeSessionCheckpointFile,
+  RuntimeSessionCheckpointPreviewMode,
   RuntimeSessionCheckpointPreviewFile,
   RuntimeSessionCheckpointPreviewResult,
   RuntimeSessionCheckpointSummary,
 } from "@/lib/runtime-api";
+import type { CheckpointRestoreSummary } from "@/hooks/workspace/use-runtime-checkpoints";
 
 export type CheckpointFileCode = {
   code: string;
@@ -23,6 +25,8 @@ export type CheckpointFileSelection =
   | RuntimeSessionCheckpointFile
   | RuntimeSessionCheckpointPreviewFile;
 
+export type { CheckpointRestoreSummary };
+
 export type ArtifactPanelCheckpointSurfaceProps = {
   backtrackAuditEntries?: RuntimeSessionBacktrackTombstone[];
   backtrackAuditError?: string | null;
@@ -37,12 +41,12 @@ export type ArtifactPanelCheckpointSurfaceProps = {
   checkpointProvenance: string[];
   checkpointProvenanceSummary: string[];
   checkpointRestoreError?: string | null;
-  checkpointRestoreNotice?: string | null;
+  checkpointRestoreSummary?: CheckpointRestoreSummary | null;
   checkpointRestorePendingId?: string;
   checkpoints: RuntimeSessionCheckpointSummary[];
   checkpointsError: string | null;
   checkpointsLoading: boolean;
-  onRestoreCheckpoint?: (mode?: "both" | "code" | "conversation") => void;
+  onRestoreCheckpoint?: (mode?: RuntimeSessionCheckpointPreviewMode) => void;
   onSelectCheckpoint: (checkpointId: string) => void;
   onSelectCheckpointFile: (filePath: string) => void;
   selectedCheckpoint: RuntimeSessionCheckpointSummary | null;

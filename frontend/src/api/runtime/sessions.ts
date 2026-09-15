@@ -19,8 +19,6 @@ import type {
   RuntimeSessionUsersResponse,
   RuntimeSessionsQuery,
   RuntimeSessionsResponse,
-  SessionHistoryResponse,
-  SessionRuntimeEvent,
 } from "@/types/runtime";
 
 import {
@@ -29,61 +27,16 @@ import {
   fetchRuntimeJson,
 } from "./shared";
 
-export type SessionHistoryQuery = {
-  /** 每页条数（后端默认 100、上限 1000）。 */
-  limit?: number;
-  /** 向前翻页游标（后端 `before_seq`；缺省取最新一页）。 */
-  beforeSeq?: number;
-};
-
-export async function getSessionHistory(
-  sessionId: string,
-  query: SessionHistoryQuery = {},
-): Promise<SessionHistoryResponse> {
-  return fetchRuntimeJson<SessionHistoryResponse>(
-    buildRuntimeUrlWithQuery(
-      `/api/runtime/sessions/${encodeURIComponent(sessionId)}/history`,
-      { limit: query.limit, before_seq: query.beforeSeq },
-    ),
-    {
-      headers: {
-        Accept: "application/json",
-      },
-    },
-  );
-}
-
-export type RuntimeSessionEventsResponse = {
-  events: SessionRuntimeEvent[];
-  count: number;
-  latest_seq: number;
-};
-
-export type RuntimeSessionEventsQuery = {
-  after?: number;
-  limit?: number;
-};
-
-/** 增量拉取会话事件（P3-1/P3-2）：after=已收最大 seq，limit 分页。 */
-export async function fetchSessionRuntimeEvents(
-  sessionId: string,
-  query: RuntimeSessionEventsQuery = {},
-): Promise<RuntimeSessionEventsResponse> {
-  return fetchRuntimeJson<RuntimeSessionEventsResponse>(
-    buildRuntimeUrlWithQuery(
-      `/api/runtime/sessions/${encodeURIComponent(sessionId)}/runtime/events`,
-      {
-        after: query.after,
-        limit: query.limit,
-      },
-    ),
-    {
-      headers: {
-        Accept: "application/json",
-      },
-    },
-  );
-}
+// 会话事件 / 历史的窗口读取见 `./session-event-window`（P0-2 拆文件）；
+// 此处 barrel re-export 保持 `@/api/runtime/sessions` 的既有调用方与
+// `vi.mock("@/api/runtime/sessions")` 不变。
+export {
+  fetchSessionRuntimeEvents,
+  getSessionHistory,
+  type RuntimeSessionEventsQuery,
+  type RuntimeSessionEventsResponse,
+  type SessionHistoryQuery,
+} from "./session-event-window";
 
 export async function createRuntimeSession(
   request: RuntimeCreateSessionRequest,

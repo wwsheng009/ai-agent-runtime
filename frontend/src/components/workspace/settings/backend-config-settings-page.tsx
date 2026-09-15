@@ -25,6 +25,7 @@ import { ConfigImpactSection } from "./backend-config-settings-page/sections/imp
 import { ConfigEditorMenuPanel } from "./backend-config-settings-page/sections/menu-panel";
 import { ConfigPreviewSection } from "./backend-config-settings-page/sections/preview-section";
 import { ConfigUnsavedBar } from "./backend-config-settings-page/sections/unsaved-bar";
+import { ConfigDraftValidationPanel } from "./backend-config-settings-page/sections/validation-panel";
 
 import { ProvidersModeSection } from "./backend-config-settings-page/sections/modes/providers";
 import { AgentRoutingModeSection } from "./backend-config-settings-page/sections/modes/agentRouting";
@@ -75,6 +76,7 @@ export function BackendConfigSettingsPage() {
           <ConfigEditorMenuPanel core={core} />
 
           <div className="min-w-0 space-y-3">
+            <ConfigDraftValidationPanel core={core} />
             {core.mode === "providers" ? (
               <ProvidersModeSection core={core} domain={providersDomain} />
             ) : null}

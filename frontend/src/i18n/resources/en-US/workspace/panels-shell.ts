@@ -57,6 +57,8 @@ export const enWorkspacePanelsShell = {
     noSessionToExport: "No session to export",
     empty: "No trajectory events yet — start a conversation to see the agent run trail.",
     noMatches: "No rows match the current filter.",
+    loadEarlier: "Load earlier trajectory",
+    loadingEarlier: "Loading earlier trajectory…",
     streaming: "Streaming",
     closeDetail: "Close trajectory detail",
     openSubagentAria: "Open subagent session",

@@ -181,7 +181,60 @@ export async function parseErrorPayload(response: Response) {
 /** 默认请求超时：避免后端因共享 SQLite 被锁/排队时前端无限等待 "Connecting to runtime…"。 */
 export const RUNTIME_FETCH_TIMEOUT_MS = 10_000;
 
+/**
+ * 在途 GET 请求合并（inflight dedupe）。
+ *
+ * 同一 URL 已有一个在途请求时直接复用它的 Promise，不再发出第二个请求。
+ * 目的是消掉「同一份大 payload 被并发重复拉取」：实测一次会话页首屏
+ * `/api/runtime/models`(560KB)×2、`/api/runtime/sessions`(180KB)×3、
+ * `/runtime/events`(380KB)×6，其中相当一部分来自 React StrictMode 双挂载与
+ * 多个组件各自取数，而前端没有任何请求缓存/去重层。
+ *
+ * 只合并「调用方未自带 signal 的 GET」：调用方一旦传入 signal，取消语义必须
+ * 独占该请求，共享 Promise 会让一方的 abort 连带影响另一方。请求结束后立即
+ * 移出在途表，因此顺序轮询（每轮都期望拿到最新数据）语义不变——只合并重叠
+ * 的并发请求，不做 TTL 缓存。
+ */
+const inflightRuntimeGets = new Map<string, Promise<unknown>>();
+
+function isDedupableRuntimeGet(input: string, init?: RequestInit) {
+  if (typeof input !== "string" || input.length === 0) {
+    return false;
+  }
+  if (init?.signal) {
+    return false;
+  }
+  return (init?.method ?? "GET").toUpperCase() === "GET";
+}
+
 export async function fetchRuntimeJson<T>(
+  input: string,
+  init?: RequestInit,
+): Promise<T> {
+  const dedupeKey = isDedupableRuntimeGet(input, init) ? input : null;
+  if (dedupeKey) {
+    const existing = inflightRuntimeGets.get(dedupeKey);
+    if (existing) {
+      return existing as Promise<T>;
+    }
+  }
+
+  const request = performRuntimeJsonFetch<T>(input, init);
+  if (dedupeKey) {
+    inflightRuntimeGets.set(dedupeKey, request);
+    void request
+      .finally(() => {
+        if (inflightRuntimeGets.get(dedupeKey) === request) {
+          inflightRuntimeGets.delete(dedupeKey);
+        }
+      })
+      // 请求失败由各自的调用方处理；这里只做在途表清理，避免未处理拒绝。
+      .catch(() => {});
+  }
+  return request;
+}
+
+async function performRuntimeJsonFetch<T>(
   input: string,
   init?: RequestInit,
 ): Promise<T> {

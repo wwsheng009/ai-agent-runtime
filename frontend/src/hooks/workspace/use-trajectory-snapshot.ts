@@ -21,6 +21,26 @@ import {
 
 const MAX_SEEN_DELTA_KEYS = 2048;
 
+/**
+ * 前插/重建单元：与 `trajectoryEventAction()` 同形（push / skip 两种动作）。
+ *
+ * 尾部优先回放（tail-first）需要「把更早的一页插到已回放窗口前面」，而
+ * reducer 的投影是有状态的单向追加（delta 合并、游标消费），无法真正前插——
+ * 因此 store 自己保留一份已应用动作日志，前插后**整体重建**投影：log 顺序
+ * 恒为「已加载事件按 seq 升序」，重建即从空快照重放到尾，结果与一次性回放
+ * 同一份事件完全一致（幂等、无重复行）。
+ */
+export type TrajectoryRawAction =
+  | { type: "push"; kind: TrajectoryEventKind; payload: Record<string, unknown> }
+  | { type: "skip"; seq: number };
+
+/** 重建日志上限：超大会话下最老的动作会被挤出（只影响更早页的重建保真度）。 */
+const MAX_REPLAY_ACTIONS = 8000;
+
+function rawActionSeq(action: TrajectoryRawAction): number {
+  return action.type === "skip" ? action.seq : eventSeqOf(action.payload);
+}
+
 function trajectoryDeltaKey(
   kind: TrajectoryEventKind,
   payload: Record<string, unknown>,
@@ -97,6 +117,28 @@ export interface TrajectoryStore {
   /** 订阅快照变更；返回取消订阅函数。 */
   subscribe(listener: () => void): () => void;
   dispose(): void;
+  /**
+   * 设定基准游标：窗口起点之前的 seq 视为「已跳过」。
+   *
+   * 尾部优先回放的首屏只回放最近一页事件（seq 从中间开始），若没有基准游标，
+   * reducer 会把首个事件当作「乱序待补」，永久卡在 pending——轨迹一行都不渲染。
+   * 仅在快照为空（首屏）或前插更早页前调用。
+   */
+  setBaselineSeq(seq: number): void;
+  /**
+   * 前插更早的事件帧并重建投影（「加载更早」）：保留已加载事件与实时游标，
+   * 重建后快照与「一次性回放全部已加载事件」完全一致。
+   */
+  prependEarlier(actions: TrajectoryRawAction[]): void;
+  /**
+   * 回放日志是否已被上限裁剪（`MAX_REPLAY_ACTIONS`）。
+   *
+   * 裁剪丢弃的是**最老**的动作，而 `prependEarlier` 会整体重建投影：重建时
+   * 最早保留动作之前的行无法复现（reducer 按游标丢弃过期 seq）。此时再前插
+   * 更早页只会「加载即被裁掉」，调用方应停止提供「加载更早」入口，避免
+   * 已渲染的最早行被静默吞掉。仅 `reset({ hard: true })` 会清除该标记。
+   */
+  isReplayLogTruncated(): boolean;
 }
 
 export function createTrajectoryStore(options?: {
@@ -105,6 +147,20 @@ export function createTrajectoryStore(options?: {
   let snapshot = createEmptyTrajectory();
   const listeners = new Set<() => void>();
   const seenDeltaKeys = new Set<string>();
+  /** 已应用动作日志（前插更早页后用于重建；顺序 = 事件 seq 升序）。 */
+  let replayLog: TrajectoryRawAction[] = [];
+  /** 日志被上限裁剪过（更早动作已永久丢失，无法再忠实重建）。 */
+  let replayLogTruncated = false;
+  /** 窗口起点之前的缺口游标（尾部优先首屏；0 = 从 seq 1 起完整回放）。 */
+  let baselineSeq = 0;
+
+  const recordAction = (action: TrajectoryRawAction) => {
+    replayLog.push(action);
+    if (replayLog.length > MAX_REPLAY_ACTIONS) {
+      replayLog.splice(0, replayLog.length - MAX_REPLAY_ACTIONS);
+      replayLogTruncated = true;
+    }
+  };
 
   const notify = () => {
     for (const listener of listeners) {
@@ -116,12 +172,15 @@ export function createTrajectoryStore(options?: {
     batcher.flushNow();
   };
 
-  const advanceCursor = (targetSeq: number) => {
+  const advanceCursorEntry = (targetSeq: number, record: boolean) => {
     batcher.flushNow();
     const before = snapshot.lastEventSeq;
     const result = advanceSeqCursor(snapshot, targetSeq);
     const moved = result.snapshot.lastEventSeq !== before || result.changes.length > 0;
     snapshot = result.snapshot;
+    if (record) {
+      recordAction({ type: "skip", seq: targetSeq });
+    }
     if (moved) {
       notify();
     }
@@ -132,12 +191,76 @@ export function createTrajectoryStore(options?: {
     if (options?.hard) {
       snapshot = createEmptyTrajectory();
       seenDeltaKeys.clear();
+      replayLog = [];
+      replayLogTruncated = false;
+      baselineSeq = 0;
     } else {
       snapshot = {
         ...createEmptyTrajectory(),
         lastEventSeq: snapshot.lastEventSeq,
       };
     }
+    notify();
+  };
+
+  const pushEntry = (
+    kind: TrajectoryEventKind,
+    payload: Record<string, unknown> | null | undefined,
+    record: boolean,
+  ) => {
+    const normalizedPayload = payload ?? {};
+    if (record) {
+      recordAction({ type: "push", kind, payload: normalizedPayload });
+    }
+    const deltaKey = trajectoryDeltaKey(kind, normalizedPayload);
+    if (deltaKey) {
+      if (seenDeltaKeys.has(deltaKey)) {
+        const duplicateSeq = eventSeqOf(normalizedPayload);
+        if (duplicateSeq > 0) {
+          batcher.push(
+            makeTrajectoryEvent("runtime", duplicateSeq, {
+              __trajectory_skip: true,
+            }),
+          );
+        }
+        return;
+      }
+      seenDeltaKeys.add(deltaKey);
+      while (seenDeltaKeys.size > MAX_SEEN_DELTA_KEYS) {
+        const oldest = seenDeltaKeys.values().next().value as string | undefined;
+        if (oldest === undefined) {
+          break;
+        }
+        seenDeltaKeys.delete(oldest);
+      }
+    }
+    batcher.push(
+      makeTrajectoryEvent(kind, eventSeqOf(normalizedPayload), normalizedPayload),
+    );
+  };
+
+  /** 从零重建投影（前插更早页后调用）：基准缺口 → 日志顺序回放。 */
+  const rebuildFromLog = () => {
+    batcher.clear();
+    snapshot = createEmptyTrajectory();
+    seenDeltaKeys.clear();
+    // 有效基准缺口：随「加载更早」向前推进而缩小。若仍按首屏基准（例如
+    // firstSeq-1 = 799）跳过，前插进来的更老事件（seq < 799）会被 reducer
+    // 判为过期 seq 直接丢弃——更早一页就白加载了。故取「日志最早动作之前」。
+    const oldestSeq = replayLog.length > 0 ? rawActionSeq(replayLog[0]) : 0;
+    const effectiveBaseline =
+      oldestSeq > 0 && oldestSeq <= baselineSeq ? oldestSeq - 1 : baselineSeq;
+    if (effectiveBaseline > 0) {
+      snapshot = advanceSeqCursor(snapshot, effectiveBaseline).snapshot;
+    }
+    for (const action of replayLog) {
+      if (action.type === "push") {
+        pushEntry(action.kind, action.payload, false);
+      } else {
+        advanceCursorEntry(action.seq, false);
+      }
+    }
+    batcher.flushNow();
     notify();
   };
 
@@ -153,37 +276,49 @@ export function createTrajectoryStore(options?: {
 
   return {
     getSnapshot: () => snapshot,
-    push: (kind, payload) => {
-      const normalizedPayload = payload ?? {};
-      const deltaKey = trajectoryDeltaKey(kind, normalizedPayload);
-      if (deltaKey) {
-        if (seenDeltaKeys.has(deltaKey)) {
-          const duplicateSeq = eventSeqOf(normalizedPayload);
-          if (duplicateSeq > 0) {
-            batcher.push(
-              makeTrajectoryEvent("runtime", duplicateSeq, {
-                __trajectory_skip: true,
-              }),
-            );
-          }
-          return;
-        }
-        seenDeltaKeys.add(deltaKey);
-        while (seenDeltaKeys.size > MAX_SEEN_DELTA_KEYS) {
-          const oldest = seenDeltaKeys.values().next().value as string | undefined;
-          if (oldest === undefined) {
-            break;
-          }
-          seenDeltaKeys.delete(oldest);
-        }
-      }
-      batcher.push(
-        makeTrajectoryEvent(kind, eventSeqOf(normalizedPayload), normalizedPayload),
-      );
-    },
+    push: (kind, payload) => pushEntry(kind, payload, true),
     flush,
-    advanceCursor,
+    advanceCursor: (targetSeq) => advanceCursorEntry(targetSeq, true),
     reset,
+    setBaselineSeq: (seq) => {
+      if (!Number.isFinite(seq) || seq <= baselineSeq) {
+        return;
+      }
+      baselineSeq = seq;
+      // 首屏：快照为空时直接把游标推到缺口位置，后续事件（seq > baselineSeq）
+      // 因此落在「连续区间」内被立即应用，而不是全部卡在乱序缓冲。
+      if (snapshot.lastEventSeq < seq) {
+        advanceCursorEntry(seq, false);
+      }
+    },
+    prependEarlier: (actions) => {
+      if (actions.length === 0) {
+        return;
+      }
+      const known = new Set(replayLog.map((action) => rawActionSeq(action)));
+      const older = actions.filter((action) => {
+        const seq = rawActionSeq(action);
+        if (seq <= 0) {
+          return false;
+        }
+        if (known.has(seq)) {
+          return false;
+        }
+        known.add(seq);
+        return true;
+      });
+      if (older.length === 0) {
+        return;
+      }
+      // 更早页整体前插（页内已是升序）；上限裁剪与 recordAction 同口径。
+      replayLog = [...older, ...replayLog];
+      if (replayLog.length > MAX_REPLAY_ACTIONS) {
+        replayLog.splice(0, replayLog.length - MAX_REPLAY_ACTIONS);
+        replayLogTruncated = true;
+      }
+      rebuildFromLog();
+    },
+    isReplayLogTruncated: () => replayLogTruncated,
     subscribe: (listener) => {
       listeners.add(listener);
       return () => {

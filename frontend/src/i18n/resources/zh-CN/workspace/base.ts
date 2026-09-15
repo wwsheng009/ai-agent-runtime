@@ -123,7 +123,6 @@ export const zhWorkspaceBase = {
     sections: {
       chats: "本地聊天",
       directories: "工作目录",
-      sessions: "会话",
       runtime: "运行时概览",
     },
     sessionUserSelect: "会话用户",
@@ -199,6 +198,7 @@ export const zhWorkspaceBase = {
       namePlaceholder: "默认使用文件夹名",
       cancel: "取消",
       existsWarning: "目录在运行时主机上不存在",
+      actions: "目录操作",
       newChat: "在该目录下新建会话",
       rename: "重命名目录",
       deleteTitle: "移除目录",
@@ -206,6 +206,14 @@ export const zhWorkspaceBase = {
       deleteHint: "仅移除注册表条目，磁盘文件不受影响。",
       deleteConfirmButton: "移除",
       empty: "已注册的工作目录会显示在这里。",
+      manage: "管理目录",
+      manageTitle: "管理工作目录",
+      manageHint: "在这里可以新建会话、重命名别名或移除已注册的目录。",
+      manageEmpty: "还没有注册的工作目录。",
+      manageUnregisteredTitle: "未注册（来自会话）",
+      manageUnregisteredHint:
+        "这些目录来自会话的工作路径，尚未纳入注册表；注册后即可重命名、移除与在目录内新建会话。",
+      register: "注册",
     },
     threadStatuses: {
       review: "等待复核",

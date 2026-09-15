@@ -39,6 +39,8 @@ type StreamCall = {
   after: number;
   handlers: StreamHandlers;
   aborted: boolean;
+  /** 正常收流（服务端/代理关闭长连接），区别于 abort 的强制中断。 */
+  finish: () => void;
 };
 
 const calls: StreamCall[] = [];
@@ -51,6 +53,7 @@ function installControllableStream() {
         after: handlers.after ?? 0,
         handlers,
         aborted: false,
+        finish: () => resolve(),
       };
       calls.push(call);
       handlers.signal?.addEventListener("abort", () => {
@@ -221,6 +224,36 @@ describe("useSessionRuntimeStream connection status and manual retry", () => {
 
     act(() => {
       calls[0].handlers.onEvent?.(textDelta(1, "Hello"));
+    });
+
+    expect(apiRef.current?.connectionStatus).toBe("online");
+  });
+
+  it("reports online once the stream is open, before any event (idle session)", () => {
+    const { apiRef } = renderHarness();
+    expect(apiRef.current?.connectionStatus).toBe("connecting");
+    expect(calls).toHaveLength(1);
+
+    act(() => {
+      calls[0].handlers.onOpen?.();
+    });
+
+    // 空闲会话是健康的长连接：建连即在线，不再停在「连接中… 重试」。
+    expect(apiRef.current?.connectionStatus).toBe("online");
+  });
+
+  it("keeps online when a healthy idle stream ends and the loop is about to reconnect", async () => {
+    const { apiRef } = renderHarness();
+
+    act(() => {
+      calls[0].handlers.onOpen?.();
+    });
+    expect(apiRef.current?.connectionStatus).toBe("online");
+
+    // 服务端/代理按空闲超时正常收流后进入退避重连窗口：不得按「本轮无事件」
+    // 回落 connecting，否则每次重连都会闪回「连接中… 重试」假故障。
+    await act(async () => {
+      calls[0].finish();
     });
 
     expect(apiRef.current?.connectionStatus).toBe("online");

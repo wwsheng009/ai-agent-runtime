@@ -227,10 +227,29 @@
   --analytics-info: var(--primitive-info-150);
   --analytics-info-soft: var(--primitive-info-150-a090);
   --analytics-info-border: var(--primitive-info-150-a280);
+  /* 连接状态（ConnectionStatusBadge，P1-8）：暗色基准，亮色在 themes.css 覆盖。
+     前景/背景必须成对取自同一语义色阶：只改 `-200/-500` 调色板会在亮色主题下
+     出现「浅色文字压浅色底」——即 `连接中… 重试` 不可读的回归。 */
+  --connection-online: var(--primitive-success-150);
+  --connection-online-soft: var(--primitive-success-150-a090);
+  --connection-online-border: var(--primitive-success-150-a280);
+  --connection-connecting: var(--primitive-info-150);
+  --connection-connecting-soft: var(--primitive-info-150-a090);
+  --connection-connecting-border: var(--primitive-info-150-a280);
+  --connection-reconnecting: var(--primitive-warning-150);
+  --connection-reconnecting-soft: var(--primitive-warning-150-a090);
+  --connection-reconnecting-border: var(--primitive-warning-150-a300);
+  --connection-offline: var(--primitive-danger-150);
+  --connection-offline-soft: var(--primitive-danger-150-a090);
+  --connection-offline-border: var(--primitive-danger-150-a300);
   --surface-soft: var(--primitive-paper-450-a050);
   --surface-soft-hover: var(--primitive-paper-450-a075);
   --surface-softer: var(--primitive-paper-450-a028);
   --surface-solid: var(--primitive-paper-450-a035);
+  /* 浮层菜单（会话行操作菜单等）必须不透明：`surface-soft/softer/solid` 都是
+     3%~7% 的 alpha 叠加，仅适合做贴近背景的着色表面；作为浮层底色会让下层
+     文字透出（用户诉求：菜单显示半透明 → 修复为不透明）。 */
+  --surface-popover: var(--primitive-ink-500);
   --surface-strong: var(--primitive-ink-600-a960);
   --surface-overlay: var(--primitive-ink-8-a985);
   --dialog-bg: linear-gradient(180deg, var(--primitive-ink-5-a985), var(--primitive-ink-9-a990));

@@ -8,7 +8,6 @@ import { Fragment, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { projectChatView, projectMessageFlow } from "@/lib/chat-view";
-import { type BranchUnavailableReasonKey } from "@/lib/chat-view/branch-availability";
 import { createArtifactFilePathLinkResolver } from "@/lib/tool-row/artifact-links";
 import { type Artifact, type ChatMessage } from "@/data/mock";
 
@@ -21,16 +20,12 @@ import { TurnProcessRow } from "./turn-process-row";
 import { TurnTailRow } from "./turn-tail-row";
 
 type AssistantMessageCardProps = {
-  /** 批次 2（§5.4）：分支不可用原因 i18n 键（宿主在整条 flow 上求解后下发）。 */
-  branchDisabledReason?: BranchUnavailableReasonKey;
   /** 批次 2（§5.4）：本回合的分支请求在途。 */
   branchPending?: boolean;
-  /** 批次 2（§5.4）：本回合是否是唯一可分支锚点。 */
-  canBranch?: boolean;
   labelId: string;
   message: ChatMessage;
   metaId: string;
-  /** 批次 2（§5.4）：分支入口（宿主提供才渲染）。 */
+  /** 批次 2（§5.4）：分支入口；宿主只对可分支锚点提供（非锚点不渲染按钮）。 */
   onBranch?: () => void;
   /** P2-1A：关联产物未命中时的运行时文件预览兜底。 */
   onPreviewFilePath?: (path: string) => void;
@@ -43,9 +38,7 @@ type AssistantMessageCardProps = {
 };
 
 export function AssistantMessageCard({
-  branchDisabledReason,
   branchPending,
-  canBranch,
   labelId,
   message,
   metaId,
@@ -100,9 +93,7 @@ export function AssistantMessageCard({
             return (
               <TurnTailRow
                 anchorKey={item.anchorKey}
-                branchDisabledReason={branchDisabledReason}
                 branchPending={branchPending}
-                canBranch={canBranch}
                 flowKey={item.key}
                 key={item.key}
                 message={message}

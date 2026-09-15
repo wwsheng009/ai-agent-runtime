@@ -1,6 +1,7 @@
 // 由 components/workspace/artifact-panel-checkpoint-surface.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { HistoryIcon, LoaderCircleIcon, ScrollTextIcon } from "lucide-react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
@@ -13,6 +14,7 @@ import {
   formatCheckpointTitle,
 } from "@/components/workspace/artifact-panel-shared";
 import { MessageMarkdown } from "@/components/workspace/message-markdown";
+import type { RuntimeSessionCheckpointPreviewMode } from "@/lib/runtime-api";
 import { cn, formatRelativeTimestamp } from "@/lib/utils";
 
 import {
@@ -29,7 +31,7 @@ type ArtifactPanelCheckpointDetailSectionProps = Pick<
   | "checkpointProvenance"
   | "checkpointProvenanceSummary"
   | "checkpointRestoreError"
-  | "checkpointRestoreNotice"
+  | "checkpointRestoreSummary"
   | "checkpointRestorePendingId"
   | "onRestoreCheckpoint"
   | "onSelectCheckpointFile"
@@ -39,6 +41,29 @@ type ArtifactPanelCheckpointDetailSectionProps = Pick<
   checkpointDetailLoading: boolean;
   checkpointFilesForSelection: CheckpointFileSelection[];
 };
+
+// 「还原模式」选项：选中只记录意图，必须再点确认按钮才会执行还原。
+const RESTORE_MODE_OPTIONS = [
+  {
+    value: "conversation",
+    labelKey: "panels.artifacts.checkpointDetail.restoreConversation",
+    hintKey: "panels.artifacts.checkpointDetail.restoreConversationHint",
+  },
+  {
+    value: "code",
+    labelKey: "panels.artifacts.checkpointDetail.restoreFiles",
+    hintKey: "panels.artifacts.checkpointDetail.restoreFilesHint",
+  },
+  {
+    value: "both",
+    labelKey: "panels.artifacts.checkpointDetail.restoreBoth",
+    hintKey: "panels.artifacts.checkpointDetail.restoreBothHint",
+  },
+] as const satisfies readonly {
+  value: RuntimeSessionCheckpointPreviewMode;
+  labelKey: string;
+  hintKey: string;
+}[];
 
 export function ArtifactPanelCheckpointDetailSection({
   checkpointConversationSummary,
@@ -50,7 +75,7 @@ export function ArtifactPanelCheckpointDetailSection({
   checkpointProvenance,
   checkpointProvenanceSummary,
   checkpointRestoreError = null,
-  checkpointRestoreNotice = null,
+  checkpointRestoreSummary = null,
   checkpointRestorePendingId = "",
   onRestoreCheckpoint,
   onSelectCheckpointFile,
@@ -58,6 +83,24 @@ export function ArtifactPanelCheckpointDetailSection({
   selectedCheckpointFilePath,
 }: ArtifactPanelCheckpointDetailSectionProps) {
   const { t } = useTranslation("workspace");
+  const [restoreMode, setRestoreMode] = useState<RuntimeSessionCheckpointPreviewMode>("both");
+  const restorePending = Boolean(checkpointRestorePendingId);
+  const restoreSummaryText = checkpointRestoreSummary
+    ? t("panels.artifacts.checkpointDetail.restoreNotice", {
+        checkpoint: checkpointRestoreSummary.checkpointId.slice(0, 12),
+        conversation: t(
+          checkpointRestoreSummary.conversationChanged
+            ? "panels.artifacts.checkpointDetail.restoreConversationChanged"
+            : "panels.artifacts.checkpointDetail.restoreConversationUnchanged",
+        ),
+        files: checkpointRestoreSummary.appliedPaths,
+        mode: t(
+          RESTORE_MODE_OPTIONS.find(
+            (option) => option.value === checkpointRestoreSummary.mode,
+          )?.labelKey ?? RESTORE_MODE_OPTIONS[2].labelKey,
+        ),
+      })
+    : null;
 
   return (
     <section className="min-h-0 overflow-hidden rounded-panel-lg border border-white/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(255,255,255,0.02))]">
@@ -105,37 +148,59 @@ export function ArtifactPanelCheckpointDetailSection({
             </div>
 
             {typeof onRestoreCheckpoint === "function" ? (
-              <div className="mt-3 flex flex-wrap gap-2">
-                <Button
-                  disabled={Boolean(checkpointRestorePendingId)}
-                  onClick={() => onRestoreCheckpoint("conversation")}
-                  size="sm"
-                  type="button"
-                  variant="secondary"
-                >
-                  {checkpointRestorePendingId === selectedCheckpoint.id ? (
-                    <LoaderCircleIcon size={14} className="animate-spin" />
-                  ) : null}
-                  {t("panels.artifacts.checkpointDetail.restoreConversation")}
-                </Button>
-                <Button
-                  disabled={Boolean(checkpointRestorePendingId)}
-                  onClick={() => onRestoreCheckpoint("code")}
-                  size="sm"
-                  type="button"
-                  variant="secondary"
-                >
-                  {t("panels.artifacts.checkpointDetail.restoreFiles")}
-                </Button>
-                <Button
-                  disabled={Boolean(checkpointRestorePendingId)}
-                  onClick={() => onRestoreCheckpoint("both")}
-                  size="sm"
-                  type="button"
-                  variant="primary"
-                >
-                  {t("panels.artifacts.checkpointDetail.restoreBoth")}
-                </Button>
+              <div className="mt-3 rounded-[0.75rem] border border-white/8 bg-black/20 px-3 py-3">
+                <div className="app-text-11 uppercase tracking-[0.18em] text-muted-foreground">
+                  {t("panels.artifacts.checkpointDetail.restoreModeLegend")}
+                </div>
+                <div className="mt-2 space-y-1.5">
+                  {RESTORE_MODE_OPTIONS.map((option) => (
+                    <label
+                      key={option.value}
+                      className={cn(
+                        "flex cursor-pointer items-start gap-2.5 rounded-[0.75rem] border px-3 py-2 transition",
+                        restoreMode === option.value
+                          ? "border-accent-teal/30 bg-accent-teal/10 text-foreground"
+                          : "border-white/8 bg-white/[0.02] text-muted-foreground hover:border-white/14",
+                      )}
+                    >
+                      <input
+                        checked={restoreMode === option.value}
+                        className="mt-0.5 accent-accent-teal"
+                        disabled={restorePending}
+                        name="checkpoint-restore-mode"
+                        onChange={() => setRestoreMode(option.value)}
+                        type="radio"
+                        value={option.value}
+                      />
+                      <span className="min-w-0">
+                        <span className="block app-text-13">{t(option.labelKey)}</span>
+                        <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">
+                          {t(option.hintKey)}
+                        </span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs leading-5 text-muted-foreground">
+                    {t("panels.artifacts.checkpointDetail.restoreHint")}
+                  </span>
+                  <Button
+                    aria-label={t("panels.artifacts.checkpointDetail.confirmRestore")}
+                    disabled={restorePending}
+                    onClick={() => onRestoreCheckpoint(restoreMode)}
+                    size="sm"
+                    type="button"
+                    variant="primary"
+                  >
+                    {restorePending ? (
+                      <LoaderCircleIcon className="animate-spin" size={14} />
+                    ) : null}
+                    {restorePending
+                      ? t("panels.artifacts.checkpointDetail.restorePending")
+                      : t("panels.artifacts.checkpointDetail.confirmRestore")}
+                  </Button>
+                </div>
               </div>
             ) : null}
 
@@ -144,9 +209,9 @@ export function ArtifactPanelCheckpointDetailSection({
                 {checkpointRestoreError}
               </div>
             ) : null}
-            {checkpointRestoreNotice ? (
+            {restoreSummaryText ? (
               <div className="mt-3 rounded-[0.75rem] border border-accent-teal/18 bg-accent-teal/10 px-3 py-2 text-sm text-muted-foreground">
-                {checkpointRestoreNotice}
+                {restoreSummaryText}
               </div>
             ) : null}
           </div>

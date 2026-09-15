@@ -5,30 +5,19 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ConnectionStatusBadge } from "@/components/ui/connection-status-badge";
-import { type Artifact } from "@/data/mock";
 import { useConnectionStatusLabels } from "@/hooks/workspace/use-connection-status-labels";
 import { useConversationScroll } from "@/hooks/workspace/use-conversation-scroll";
-import {
-  hasVisibleMessageContent,
-  isContextMessage,
-  isSystemPromptMessage,
-  isToolReceiptMessage,
-  projectChatFlow,
-} from "@/lib/chat-view";
-import {
-  BRANCH_UNAVAILABLE_REASON_KEY,
-  resolveBranchAnchor,
-} from "@/lib/chat-view/branch-availability";
+import { hasVisibleMessageContent } from "@/lib/chat-view";
+import { resolveBranchAnchors } from "@/lib/chat-view/branch-availability";
 import { isArtifactEvidence } from "@/lib/workspace-artifacts";
 import { cn } from "@/lib/utils";
 import { type ChatStreamPhase } from "@/types/runtime";
 
-import { AssistantMessageCard } from "./message-list/assistant-message-card";
-import { HistoryContextMessageCard } from "./message-list/history-context-message-card";
-import { HistoryToolMessageRow } from "./message-list/history-tool-message-row";
+import { MessageRow } from "./message-list/message-row";
 import { NoticeRow } from "./message-list/notice-row";
+import { LoadEarlierRow } from "./message-list/load-earlier-row";
 import type { MessageListProps } from "./message-list/types";
-import { UserMessageBubble } from "./message-list/user-message-bubble";
+import { useMessageListEarlierLoader } from "./message-list/use-message-list-earlier-loader";
 
 export type { MessageBacktrackOptions } from "./message-list/types";
 
@@ -53,6 +42,8 @@ export function MessageList({
   className,
   connectionStatus = null,
   contentClassName,
+  earlierLoader,
+  hasPendingApproval = false,
   isResponding,
   messages,
   onBacktrackToMessage,
@@ -67,24 +58,22 @@ export function MessageList({
 }: MessageListProps) {
   const { t } = useTranslation("workspace");
   const { labels: connectionLabels, retryLabel } = useConnectionStatusLabels();
-  const artifactMap = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
+  // 产物索引：`artifacts` 身份在文本流式期间保持稳定，缓存后行组件可以安全 memo
+  // （否则每帧新建的 Map 会让整列历史行全部重渲染）。
+  const artifactMap = useMemo(
+    () => new Map(artifacts.map((artifact) => [artifact.id, artifact])),
+    [artifacts],
+  );
   const lastMessage = messages[messages.length - 1];
   const streamingMessageId =
     isResponding && lastMessage?.role === "assistant" ? lastMessage.id : null;
-  // 批次 2（§5.4）：分支锚点在**整条 flow** 上求一次（O(n)），再按消息 id 下发给各行；
-  // 行组件不做「我是不是最后一条」的自判（live-only 消息是追加在历史之后的，
-  // 逐行判断会退化成 O(n²) 且漏判实时边界）。
-  const flowItems = useMemo(
-    () => projectChatFlow(messages, { streamingMessageId }),
-    [messages, streamingMessageId],
+  // 批次 2（§5.4）：分支锚点在**整段历史**上求一次（O(n)）：每个已完成轮次的末条消息
+  // 各自成锚点（对齐后端 `ListUserTurns` 的轮边界）；只有锚点会拿到 `onBranch`，
+  // 非锚点（含只有推理的消息）不渲染按钮。
+  const branchAnchors = useMemo(
+    () => resolveBranchAnchors(messages, { isResponding, hasPendingApproval }),
+    [messages, isResponding, hasPendingApproval],
   );
-  const branchAnchor = resolveBranchAnchor(flowItems, { isResponding });
-  const branchAnchorMessageId =
-    branchAnchor.kind === "available" ? branchAnchor.messageId : null;
-  const branchDisabledReason =
-    branchAnchor.kind === "unavailable"
-      ? branchAnchor.reasonKey
-      : BRANCH_UNAVAILABLE_REASON_KEY;
   const logLabel =
     messages.length > 0 ? "Workspace conversation timeline" : "Empty workspace conversation timeline";
   // P1-8：只有非在线态才在流尾提示，避免在线时增加噪声。
@@ -110,6 +99,13 @@ export function MessageList({
   });
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
+  // 行内动作（回溯 / 分支）在这些情况下整体禁用。只依赖行间共享状态，所以在
+  // 列表层算一次：行组件拿到的是稳定布尔值，memo 不会因为重算被打破。
+  const actionsDisabled =
+    Boolean(backtrackPendingMessageId) ||
+    Boolean(branchPendingMessageId) ||
+    isResponding ||
+    backtrackNavigationActive;
   // P1-3：滚动所有权收口到 useConversationScroll（贴底跟随 / 阅读保顶 /
   // 跨挂载语义锚点），组件只消费 reading-line 命中的 active 消息。
   const { activeMessageId } = useConversationScroll({
@@ -119,6 +115,15 @@ export function MessageList({
     suspended: backtrackNavigationActive,
     memoryKey: scrollMemoryKey,
   });
+  // 会话历史尾部优先分页：滚到消息流顶端自动续页；入口按钮（列表顶部）始终可用，
+  // 两者走同一条幂等入口，因此内容不足一屏时也不会出现「翻不动」死角。
+  useMessageListEarlierLoader({
+    containerRef: scrollContainerRef,
+    hasMore: earlierLoader?.hasMore ?? false,
+    loading: earlierLoader?.loading ?? false,
+    onLoadEarlier: earlierLoader?.onLoadEarlier,
+  });
+  const showEarlierEntry = Boolean(earlierLoader?.hasMore) || Boolean(earlierLoader?.loading);
 
   useEffect(() => {
     if (!editingMessageId) {
@@ -173,6 +178,12 @@ export function MessageList({
         )}
         role="log"
       >
+        <LoadEarlierRow
+          loading={earlierLoader?.loading ?? false}
+          onLoad={earlierLoader?.onLoadEarlier}
+          visible={showEarlierEntry}
+        />
+
         {messages.length === 0 ? (
           <div className="flex flex-col items-center gap-2 py-8 text-center">
             <ScrollTextIcon aria-hidden="true" className="text-accent-teal" size={18} />
@@ -201,116 +212,39 @@ export function MessageList({
           <NoticeRow>{backtrackNotice}</NoticeRow>
         ) : null}
 
-        {visibleMessages.map((message, messageIndex) => {
-          const relatedEvidence = (message.relatedArtifactIds ?? [])
-            .map((artifactId) => artifactMap.get(artifactId))
-            .filter((artifact): artifact is Artifact => artifact !== undefined)
-            .filter((artifact) => isArtifactEvidence(artifact));
-          const isUser = message.role === "user";
-          // E1：消息分类以 `lib/chat-view` 的 flow 判据为准（单一事实源），
-          // 渲染层不重复维护 label/author 的组合条件（§8.4 规则 2/3）。
-          const isHistoryContextMessage =
-            isSystemPromptMessage(message) || isContextMessage(message);
-          const labelId = `${message.id}-label`;
-          const metaId = `${message.id}-meta`;
-          const statusId = `${message.id}-status`;
-          const describedBy = [metaId, statusId].join(" ");
-          const backtrackPending = backtrackPendingMessageId === message.id;
-          const showBacktrack =
-            isUser && canBacktrack && typeof onBacktrackToMessage === "function";
-          const isEditing = isUser && editingMessageId === message.id;
-          const isNavigationSelected =
-            isUser &&
-            backtrackNavigationActive &&
-            backtrackSelectedMessageId === message.id;
-          // 批次 2（§5.4）：只有锚点行可用；其余行按钮「可见但不可用」，原因同口径下发。
-          const canBranch = branchAnchorMessageId === message.id;
-          const branchPending = branchPendingMessageId === message.id;
-          const onBranch =
-            typeof onBranchFromMessage === "function"
-              ? () => onBranchFromMessage(message.id)
-              : undefined;
-          const actionsDisabled =
-            Boolean(backtrackPendingMessageId) ||
-            Boolean(branchPendingMessageId) ||
-            isResponding ||
-            backtrackNavigationActive;
-
-          return (
-            <article
-              aria-busy={message.id === streamingMessageId ? "true" : undefined}
-              aria-current={isNavigationSelected ? "true" : undefined}
-              aria-describedby={describedBy}
-              aria-labelledby={labelId}
-              aria-setsize={visibleMessages.length}
-              aria-posinset={messageIndex + 1}
-              data-active-turn={activeMessageId === message.id ? "true" : undefined}
-              data-backtrack-selected={isNavigationSelected ? "true" : undefined}
-              data-message-id={message.id}
-              key={message.id}
-              ref={isNavigationSelected ? selectedMessageRef : undefined}
-              className={cn("flex w-full", isUser ? "justify-end" : "justify-start")}
-            >
-              {isUser ? (
-                <UserMessageBubble
-                  actionsDisabled={actionsDisabled}
-                  backtrackNavigationActive={backtrackNavigationActive}
-                  backtrackPending={backtrackPending}
-                  inlineEditDraft={inlineEditDraft}
-                  isEditing={isEditing}
-                  isNavigationSelected={isNavigationSelected}
-                  labelId={labelId}
-                  message={message}
-                  metaId={metaId}
-                  onBacktrackToMessage={onBacktrackToMessage}
-                  onSelectArtifact={onSelectArtifact}
-                  onSelectBacktrackNavigationMessage={onSelectBacktrackNavigationMessage}
-                  setEditingMessageId={setEditingMessageId}
-                  setInlineEditDraft={setInlineEditDraft}
-                  showBacktrack={showBacktrack}
-                  statusId={statusId}
-                />
-              ) : isToolReceiptMessage(message) ? (
-                <HistoryToolMessageRow
-                  labelId={labelId}
-                  message={message}
-                  metaId={metaId}
-                  onPreviewFilePath={onPreviewFilePath}
-                  onSelectArtifact={onSelectArtifact}
-                  relatedEvidence={relatedEvidence}
-                  statusId={statusId}
-                  streamingMessageId={streamingMessageId}
-                />
-              ) : isHistoryContextMessage ? (
-                <HistoryContextMessageCard
-                  labelId={labelId}
-                  message={message}
-                  metaId={metaId}
-                  onPreviewFilePath={onPreviewFilePath}
-                  onSelectArtifact={onSelectArtifact}
-                  relatedEvidence={relatedEvidence}
-                  statusId={statusId}
-                  streamingMessageId={streamingMessageId}
-                />
-              ) : (
-                <AssistantMessageCard
-                  branchDisabledReason={branchDisabledReason}
-                  branchPending={branchPending}
-                  canBranch={canBranch}
-                  labelId={labelId}
-                  message={message}
-                  metaId={metaId}
-                  onBranch={onBranch}
-                  onPreviewFilePath={onPreviewFilePath}
-                  onSelectArtifact={onSelectArtifact}
-                  relatedEvidence={relatedEvidence}
-                  statusId={statusId}
-                  streamingMessageId={streamingMessageId}
-                />
-              )}
-            </article>
-          );
-        })}
+        {visibleMessages.map((message, messageIndex) => (
+          <MessageRow
+            actionsDisabled={actionsDisabled}
+            artifactMap={artifactMap}
+            backtrackNavigationActive={backtrackNavigationActive}
+            backtrackPending={backtrackPendingMessageId === message.id}
+            branchPending={branchPendingMessageId === message.id}
+            canBacktrack={canBacktrack}
+            // 批次 2（§5.4）：只有可分支锚点下发入口（其余行不渲染按钮）。
+            canBranch={branchAnchors.has(message.id)}
+            editDraft={editingMessageId === message.id ? inlineEditDraft : ""}
+            index={messageIndex}
+            isActive={activeMessageId === message.id}
+            isEditing={message.role === "user" && editingMessageId === message.id}
+            isNavigationSelected={
+              message.role === "user" &&
+              backtrackNavigationActive &&
+              backtrackSelectedMessageId === message.id
+            }
+            key={message.id}
+            message={message}
+            onBacktrackToMessage={onBacktrackToMessage}
+            onBranchFromMessage={onBranchFromMessage}
+            onPreviewFilePath={onPreviewFilePath}
+            onSelectArtifact={onSelectArtifact}
+            onSelectBacktrackNavigationMessage={onSelectBacktrackNavigationMessage}
+            rowRef={selectedMessageRef}
+            setEditingMessageId={setEditingMessageId}
+            setInlineEditDraft={setInlineEditDraft}
+            streaming={streamingMessageId === message.id}
+            totalCount={visibleMessages.length}
+          />
+        ))}
 
         {isResponding ? (
           <div

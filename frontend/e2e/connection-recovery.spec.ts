@@ -67,4 +67,13 @@ test("直连 chat 流失败可见断线状态，手动重试不产生重复请�
     .toBeGreaterThan(streamsBeforeRetry);
   // 且不重发直连 chat 请求：整场只应有一次 agent/chat 提交。
   expect(chatRequests).toBe(1);
+
+  // 重试同时做一次权威历史探活（GET session history，不重发 chat）：探活成功即
+  // 清除降级，顶栏收敛回在线、断线徽标消失——不必等下一条 chat 回合的 meta 事件，
+  // 否则空闲会话上点「重试」看不出任何变化（按钮形同失效）。
+  await expect(
+    page.locator('[data-connection-status="online"]').first(),
+  ).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('[data-connection-status="offline"]')).toHaveCount(0);
+  expect(chatRequests).toBe(1);
 });

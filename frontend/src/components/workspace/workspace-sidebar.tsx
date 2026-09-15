@@ -2,9 +2,9 @@
 
 import { useDeferredValue, useMemo, useState } from "react";
 import { SessionSearchDialog } from "@/components/workspace/session-search-dialog";
-import { type MergedDirectoryGroup } from "@/components/workspace/workspace-sidebar-shared";
 import { WorkspaceDirectoryAddDialog } from "@/components/workspace/workspace-directory-add-dialog";
 import { WorkspaceDirectoryDeleteDialog } from "@/components/workspace/workspace-directory-delete-dialog";
+import { WorkspaceDirectoryManageDialog } from "@/components/workspace/workspace-directory-manage-dialog";
 import { type Thread } from "@/data/mock";
 import { cn } from "@/lib/utils";
 import { useTranslation } from "react-i18next";
@@ -13,9 +13,9 @@ import { useSessionGroupView } from "@/hooks/workspace/use-session-group-view";
 import { WorkspaceSidebarChatsSection } from "@/components/workspace/workspace-sidebar/chats-section";
 import { WorkspaceSidebarDirectoriesSection } from "@/components/workspace/workspace-sidebar/directories-section";
 import { WorkspaceSidebarHeader } from "@/components/workspace/workspace-sidebar/sidebar-header";
+import { useDirectoryRegistry } from "@/components/workspace/workspace-sidebar/use-directory-registry";
 import { WorkspaceSidebarRuntimeSection } from "@/components/workspace/workspace-sidebar/runtime-section";
 import { WorkspaceSidebarRuntimeTeamsSurface } from "@/components/workspace/workspace-sidebar/runtime-teams-surface";
-import { WorkspaceSidebarSessionsSection } from "@/components/workspace/workspace-sidebar/sessions-section";
 import { buildSessionUserMenuItems } from "@/components/workspace/workspace-sidebar/session-user-menu";
 import { useSidebarEffects } from "@/components/workspace/workspace-sidebar/use-sidebar-effects";
 import { splitRuntimeSessionsByVisibility } from "@/components/workspace/workspace-sidebar/session-row-status";
@@ -24,7 +24,6 @@ import {
   type SidebarSectionState,
   type WorkspaceSidebarProps,
 } from "@/components/workspace/workspace-sidebar/types";
-
 
 export function WorkspaceSidebar({
   density,
@@ -76,33 +75,15 @@ export function WorkspaceSidebar({
   const [openSections, setOpenSections] = useState<SidebarSectionState>({
     directories: true,
     chats: true,
-    sessions: true,
     runtime: false,
   });
   const [openSessionDirectories, setOpenSessionDirectories] = useState<
     Record<string, boolean>
   >({});
-  const [directoryAddOpen, setDirectoryAddOpen] = useState(false);
-  const [directoryDeleteTarget, setDirectoryDeleteTarget] = useState<{
-    id: string;
-    label: string;
-    fullPath: string;
-    sessionCount: number;
-  } | null>(null);
-  const [renamingDirectoryId, setRenamingDirectoryId] = useState<string | null>(
-    null,
-  );
-  const [submittingDirectoryRename, setSubmittingDirectoryRename] =
-    useState(false);
+  /** 合并为单段后同一会话只有一处编辑器，不再需要按分区下发（方案 §3.5-E）。 */
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   /** P1-9：归档会话默认隐藏，可一键展开/收起（本次会话内有效）。 */
   const [showArchivedSessions, setShowArchivedSessions] = useState(false);
-  const [creatingSessionKey, setCreatingSessionKey] = useState<string | null>(
-    null,
-  );
-  const [sidebarActionError, setSidebarActionError] = useState<string | null>(
-    null,
-  );
   const deferredQuery = useDeferredValue(query.trim().toLowerCase());
   const filteredThreads = deferredQuery
     ? threads.filter((thread) => {
@@ -174,6 +155,34 @@ export function WorkspaceSidebar({
     t,
     visibleSessions: sessionVisibility.visible,
   });
+  // Phase 2（合并方案 §3.5-D/E）：目录注册表的弹层开关 / 行内重命名 / 目录内新建会话下沉到 hook。
+  const {
+    cancelDirectoryRename,
+    commitDirectoryRename,
+    creatingSessionKey,
+    directoryAddOpen,
+    directoryDeleteTarget,
+    directoryManageOpen,
+    directorySessionCounts,
+    handleCreateSessionFromManager,
+    handleCreateSessionInDirectory,
+    handleRequestRemoveDirectory,
+    registerDirectoryFromManager,
+    renameDirectoryById,
+    renamingDirectoryId,
+    setDirectoryAddOpen,
+    setDirectoryDeleteTarget,
+    setDirectoryManageOpen,
+    setSidebarActionError,
+    sidebarActionError,
+    startDirectoryRename,
+    unregisteredDirectories,
+  } = useDirectoryRegistry({
+    mergedDirectoryGroups,
+    onCreateSessionInDirectory,
+    onRegisterWorkspaceDirectory: onAddWorkspaceDirectory,
+    onRenameWorkspaceDirectory,
+  });
   const sessionThreadById = useMemo(() => {
     const byId = new Map<string, Thread>();
     for (const thread of sessionThreads) {
@@ -188,7 +197,8 @@ export function WorkspaceSidebar({
   // P2-1A：会话统计（`GET /sessions/stats`）与侧栏用户筛选同口径（同一 userId）。
   const sessionStats = useSessionStats(selectedRuntimeSessionUserId);
 
-  const showSessionsSection =
+  // 合并方案 §3.4：原两段显示条件的**并集**——任一段原本会出现的场景，合并段都仍然出现。
+  const showWorkspaceSection =
     sessionThreads.length > 0 ||
     runtimeSessions.length > 0 ||
     runtimeSessionsLoading ||
@@ -197,13 +207,12 @@ export function WorkspaceSidebar({
     runtimeSessionUsersLoading ||
     Boolean(runtimeSessionUsersError) ||
     sessionUserMenuItems.length > 0 ||
-    Boolean(deferredQuery);
-  const showDirectoriesSection =
     workspaceDirectories.length > 0 ||
     mergedDirectoryGroups.length > 0 ||
     workspaceDirectoriesLoading ||
     workspaceDirectoriesRefreshing ||
-    Boolean(workspaceDirectoriesError);
+    Boolean(workspaceDirectoriesError) ||
+    Boolean(deferredQuery);
   const showChatsSection = chatThreads.length > 0 || Boolean(deferredQuery);
   const showSearch = threads.length > 0 || runtimeSessions.length > 0;
 
@@ -232,62 +241,6 @@ export function WorkspaceSidebar({
     }));
   }
 
-  function startDirectoryRename(group: MergedDirectoryGroup) {
-    if (!group.directoryId) {
-      return;
-    }
-    setSidebarActionError(null);
-    setRenamingDirectoryId(group.directoryId);
-  }
-
-  function cancelDirectoryRename() {
-    setRenamingDirectoryId(null);
-  }
-
-  async function commitDirectoryRename(nextName: string) {
-    const directoryId = renamingDirectoryId;
-    const trimmedName = nextName.trim();
-    if (!directoryId || submittingDirectoryRename) {
-      return;
-    }
-    if (!trimmedName) {
-      cancelDirectoryRename();
-      return;
-    }
-    setSubmittingDirectoryRename(true);
-    try {
-      await onRenameWorkspaceDirectory(directoryId, trimmedName);
-      cancelDirectoryRename();
-    } catch (renameError) {
-      setSidebarActionError(
-        renameError instanceof Error ? renameError.message : String(renameError),
-      );
-    } finally {
-      setSubmittingDirectoryRename(false);
-    }
-  }
-
-  async function handleCreateSessionInDirectory(group: MergedDirectoryGroup) {
-    if (!group.fullPath || creatingSessionKey) {
-      return;
-    }
-    setSidebarActionError(null);
-    setCreatingSessionKey(group.key);
-    try {
-      await onCreateSessionInDirectory({
-        path: group.fullPath,
-        directoryId: group.directoryId,
-        label: group.label,
-      });
-    } catch (createError) {
-      setSidebarActionError(
-        createError instanceof Error ? createError.message : String(createError),
-      );
-    } finally {
-      setCreatingSessionKey(null);
-    }
-  }
-
   async function handleRenameSession(sessionId: string, title: string) {
     setRenamingSessionId(null);
     try {
@@ -299,9 +252,14 @@ export function WorkspaceSidebar({
     }
   }
 
+  /** 合并为单段后不再区分发起分区，同一会话在整段内只有一处行内编辑器（方案 §3.5-E）。 */
   function startSessionRename(sessionId: string) {
     setSidebarActionError(null);
     setRenamingSessionId(sessionId);
+  }
+
+  function cancelSessionRename() {
+    setRenamingSessionId(null);
   }
 
   return (
@@ -356,41 +314,18 @@ export function WorkspaceSidebar({
               t={t}
               toggleSection={toggleSection}
             />
+          {/* Phase 2（合并方案 §3.2）：原「工作目录」与「会话」两段在此合并为单段。 */}
           <WorkspaceSidebarDirectoriesSection
+              canMoveSessionToGroup={canMoveSessionToGroup}
               cancelDirectoryRename={cancelDirectoryRename}
+              cancelSessionRename={cancelSessionRename}
               commitDirectoryRename={commitDirectoryRename}
               creatingSessionKey={creatingSessionKey}
+              deferredQuery={deferredQuery}
               handleCreateSessionInDirectory={handleCreateSessionInDirectory}
               handleRenameSession={handleRenameSession}
-              mergedDirectoryGroups={mergedDirectoryGroups}
-              onSelectThread={onSelectThread}
-              openSections={openSections}
-              openSessionDirectories={openSessionDirectories}
-              renamingDirectoryId={renamingDirectoryId}
-              renamingSessionId={renamingSessionId}
-              selectedThreadId={selectedThreadId}
-              sessionThreadById={sessionThreadById}
-              setDirectoryAddOpen={setDirectoryAddOpen}
-              setDirectoryDeleteTarget={setDirectoryDeleteTarget}
-              setRenamingSessionId={setRenamingSessionId}
-              setSidebarActionError={setSidebarActionError}
-              showDirectoriesSection={showDirectoriesSection}
-              sidebarActionError={sidebarActionError}
-              startDirectoryRename={startDirectoryRename}
-              startSessionRename={startSessionRename}
-              toggleSection={toggleSection}
-              toggleSessionDirectory={toggleSessionDirectory}
-              workspaceDirectories={workspaceDirectories}
-              workspaceDirectoriesError={workspaceDirectoriesError}
-              workspaceDirectoriesLoading={workspaceDirectoriesLoading}
-              workspaceDirectoriesRefreshing={workspaceDirectoriesRefreshing}
-              t={t}
-            />
-          <WorkspaceSidebarSessionsSection
-              canMoveSessionToGroup={canMoveSessionToGroup}
-              deferredQuery={deferredQuery}
-              handleRenameSession={handleRenameSession}
               hiddenArchivedCount={sessionVisibility.hiddenArchivedCount}
+              mergedDirectoryGroups={mergedDirectoryGroups}
               onArchiveSession={onArchiveRuntimeSession}
               onDeleteSession={onDeleteRuntimeSession}
               onForkSession={onForkRuntimeSession}
@@ -399,21 +334,24 @@ export function WorkspaceSidebar({
               }}
               onRefreshSessionStats={sessionStats.refresh}
               onReorderSessions={commitSessionOrder}
+              onRequestManageDirectories={() => setDirectoryManageOpen(true)}
               onRestoreSession={onRestoreRuntimeSession}
+              onSelectRuntimeSessionUser={onSelectRuntimeSessionUser}
               onSelectSessionGroupingMode={setSessionGroupingMode}
               onSelectSessionOrderMode={setSessionOrderMode}
+              onSelectThread={onSelectThread}
               onToggleArchivedSessions={() =>
                 setShowArchivedSessions((current) => !current)
               }
-              onSelectRuntimeSessionUser={onSelectRuntimeSessionUser}
-              onSelectThread={onSelectThread}
               openSections={openSections}
               openSessionDirectories={openSessionDirectories}
+              renamingDirectoryId={renamingDirectoryId}
               renamingSessionId={renamingSessionId}
               runtimeSessionUsersError={runtimeSessionUsersError}
               runtimeSessionUsersLoading={runtimeSessionUsersLoading}
               selectedRuntimeSessionUserId={selectedRuntimeSessionUserId}
               selectedThreadId={selectedThreadId}
+              sessionActivity={sessionActivity}
               sessionDirectoryGroups={orderedSessionDirectoryGroups}
               sessionGroupingMode={sessionGroupingMode}
               sessionMoveError={sessionMoveError}
@@ -425,14 +363,21 @@ export function WorkspaceSidebar({
               sessionThreadById={sessionThreadById}
               sessionThreads={sessionThreads}
               sessionUserMenuItems={sessionUserMenuItems}
-              sessionActivity={sessionActivity}
-              setRenamingSessionId={setRenamingSessionId}
+              setDirectoryAddOpen={setDirectoryAddOpen}
+              setDirectoryDeleteTarget={setDirectoryDeleteTarget}
+              setSidebarActionError={setSidebarActionError}
               showArchivedSessions={showArchivedSessions}
-              showSessionsSection={showSessionsSection}
+              showWorkspaceSection={showWorkspaceSection}
+              sidebarActionError={sidebarActionError}
+              startDirectoryRename={startDirectoryRename}
               startSessionRename={startSessionRename}
               t={t}
               toggleSection={toggleSection}
               toggleSessionDirectory={toggleSessionDirectory}
+              workspaceDirectories={workspaceDirectories}
+              workspaceDirectoriesError={workspaceDirectoriesError}
+              workspaceDirectoriesLoading={workspaceDirectoriesLoading}
+              workspaceDirectoriesRefreshing={workspaceDirectoriesRefreshing}
             />
           <WorkspaceSidebarRuntimeSection
               onCloseMobile={onCloseMobile}
@@ -472,6 +417,22 @@ export function WorkspaceSidebar({
         sessionCount={directoryDeleteTarget?.sessionCount ?? 0}
         onClose={() => setDirectoryDeleteTarget(null)}
         onConfirm={onRemoveWorkspaceDirectory}
+      />
+      {/* Phase 2（合并方案 §3.5-D）：平铺模式没有组头，目录注册表管理由本弹层承载。 */}
+      <WorkspaceDirectoryManageDialog
+        open={directoryManageOpen}
+        onClose={() => setDirectoryManageOpen(false)}
+        directories={workspaceDirectories}
+        sessionCounts={directorySessionCounts}
+        unregisteredDirectories={unregisteredDirectories}
+        onRegisterDirectory={registerDirectoryFromManager}
+        onRequestAdd={() => {
+          setDirectoryManageOpen(false);
+          setDirectoryAddOpen(true);
+        }}
+        onCreateSession={handleCreateSessionFromManager}
+        onRenameDirectory={renameDirectoryById}
+        onRequestRemove={handleRequestRemoveDirectory}
       />
       <SessionSearchDialog
         defaultUserId={selectedRuntimeSessionUserId}
