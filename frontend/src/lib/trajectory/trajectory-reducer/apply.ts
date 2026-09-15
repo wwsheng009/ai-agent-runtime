@@ -2,7 +2,7 @@
 
 import { TRAJECTORY_ITEM_ID_KEY, type TrajectoryChange, type TrajectoryEvent, type TrajectoryHead, type TrajectoryItemStatus, type TrajectorySnapshot, type TrajectoryToolPhase } from "../types";
 
-import { describeRuntimeEvent, eventTimestampOf, readFirstString, readNumber, readString, textDeltaOf, toolArgsSummaryOf, toolCallIdOf, toolErrorOf, toolNameOf, toolResultSummaryOf } from "./event-readers";
+import { describeRuntimeEvent, eventTimestampOf, readFirstString, readNumber, readString, textDeltaOf, toolArgsSummaryOf, toolCallIdOf, toolDurationMsOf, toolErrorOf, toolNameOf, toolResultSummaryOf } from "./event-readers";
 import { appendChange, cloneItem, findItem, upsertItem } from "./snapshot-ops";
 
 /**
@@ -338,6 +338,9 @@ function applyToolEvent(
       toolResultSummaryOf(event.payload) ||
       (existing?.head.kind === "tool" ? existing.head.resultSummary : undefined),
     errorMessage,
+    durationMs:
+      toolDurationMsOf(event.payload) ??
+      (existing?.head.kind === "tool" ? existing.head.durationMs : undefined),
   };
   upsertItem(
     snapshot,

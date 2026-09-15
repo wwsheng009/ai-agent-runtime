@@ -303,46 +303,175 @@ export function toolErrorOf(payload: Record<string, unknown>): string {
   }
   const result = payload["result"];
   if (result && typeof result === "object") {
-    return readFirstString(result as Record<string, unknown>, [
+    const error = readFirstString(result as Record<string, unknown>, [
       "error",
       "error_message",
       "message",
     ]);
+    if (error) {
+      return error;
+    }
+  }
+  const metadata = payload["metadata"];
+  if (metadata && typeof metadata === "object") {
+    return readFirstString(metadata as Record<string, unknown>, [
+      "error",
+      "error_message",
+    ]);
   }
   return "";
 }
+
+/**
+ * 原始入参/结果文本的上限（对齐 chat 侧 getToolArgumentsSummary /
+ * getToolResultSummary 的量级：轨迹详情面板仍可读，又不把超大输出灌进内存）。
+ * 只用于从原始字段派生摘要；`*_summary`/`output`/`result` 这些已由生产方
+ * 收敛过的字段原样透传。
+ */
+const TOOL_ARGS_RAW_LIMIT = 320;
+const TOOL_RESULT_RAW_LIMIT = 240;
+
+function truncateRawText(text: string, limit: number): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= limit) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, limit - 3).trimEnd()}...`;
+}
+
+/**
+ * 原始入参 → 摘要文本：字符串直取，对象 JSON 序列化。
+ *
+ * EventStore 里 `chat.sse.tool_*` 帧的 `tool.args` / `tool_call.arguments` /
+ * `delta.arguments` 是**对象**（如 `{command, workdir}`），历史上的
+ * readFirstString 只认字符串，导致轨迹工具行只剩名称。
+ */
+function readRawArgsText(value: unknown): string {
+  if (typeof value === "string") {
+    return truncateRawText(value, TOOL_ARGS_RAW_LIMIT);
+  }
+  if (value && typeof value === "object") {
+    try {
+      return truncateRawText(JSON.stringify(value), TOOL_ARGS_RAW_LIMIT);
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
+/** 已收敛的摘要字段（生产方自带截断，原样透传）。 */
+const TOOL_ARGS_SUMMARY_KEYS = ["args_summary", "arguments_summary"] as const;
+/** 原始入参字段（需要序列化/截断）。 */
+const TOOL_ARGS_RAW_KEYS = [
+  "args",
+  "arguments",
+  "arguments_json",
+  "input",
+  "params",
+] as const;
 
 export function toolArgsSummaryOf(payload: Record<string, unknown>): string {
-  const tool = payload["tool"];
-  if (tool && typeof tool === "object") {
-    return readFirstString(tool as Record<string, unknown>, [
-      "args_summary",
-      "arguments_summary",
-      "args",
-      "arguments",
-    ]);
-  }
-  const toolCall = payload["tool_call"];
-  if (toolCall && typeof toolCall === "object") {
-    return readFirstString(toolCall as Record<string, unknown>, [
-      "args_summary",
-      "arguments_summary",
-      "args",
-      "arguments",
-    ]);
+  // 逐个来源兜底（tool → tool_call → delta），不再因 `tool` 存在就提前返回，
+  // 否则 tool 上没有入参时不会再看 tool_call/delta。
+  for (const source of [payload["tool"], payload["tool_call"], payload["delta"]]) {
+    if (!source || typeof source !== "object") {
+      continue;
+    }
+    const container = source as Record<string, unknown>;
+    const summary = readFirstString(container, [...TOOL_ARGS_SUMMARY_KEYS]);
+    if (summary) {
+      return summary;
+    }
+    for (const key of TOOL_ARGS_RAW_KEYS) {
+      const text = readRawArgsText(container[key]);
+      if (text) {
+        return text;
+      }
+    }
   }
   return "";
 }
 
+/** 已收敛的结果字段（历史兜底写入的 output/result 自带截断，原样透传）。 */
+const TOOL_RESULT_SUMMARY_KEYS = [
+  "output_summary",
+  "result_summary",
+  "output",
+  "result",
+] as const;
+
 export function toolResultSummaryOf(payload: Record<string, unknown>): string {
-  const tool = payload["tool"];
-  if (tool && typeof tool === "object") {
-    return readFirstString(tool as Record<string, unknown>, [
-      "output_summary",
-      "result_summary",
-      "output",
-      "result",
-    ]);
+  for (const source of [payload["tool"], payload["tool_call"]]) {
+    if (!source || typeof source !== "object") {
+      continue;
+    }
+    const container = source as Record<string, unknown>;
+    const summary = readFirstString(container, [...TOOL_RESULT_SUMMARY_KEYS]);
+    if (summary) {
+      return summary;
+    }
+    // `chat.sse.tool_end` 的结果正文落在 content（tool/tool_call/顶层三处同源）。
+    const content = readString(container["content"]);
+    if (content.trim()) {
+      return truncateRawText(content, TOOL_RESULT_RAW_LIMIT);
+    }
   }
-  return readFirstString(payload, ["output_summary", "result_summary"]);
+  const summary = readFirstString(payload, [
+    "output_summary",
+    "result_summary",
+  ]);
+  if (summary) {
+    return summary;
+  }
+  const content = readString(payload["content"]);
+  if (content.trim()) {
+    return truncateRawText(content, TOOL_RESULT_RAW_LIMIT);
+  }
+  return "";
+}
+
+/**
+ * 工具耗时（ms）。
+ *
+ * `chat.sse.tool_*` 帧有两处：`metadata.metrics.tool_metadata.duration_ms`
+ * 是工具真实执行耗时（Observation 采集来的，如 506），而 `metadata.duration_ms`
+ * 在实测数据里恒为 0（占位）。因此按「取第一个正数」的优先级读取，全为 0/缺失
+ * 时返回 undefined——详情面板宁可不显示，也不显示无意义的 0ms。
+ */
+export function toolDurationMsOf(
+  payload: Record<string, unknown>,
+): number | undefined {
+  const metadata = payload["metadata"];
+  const candidates: unknown[] = [];
+  if (metadata && typeof metadata === "object") {
+    const record = metadata as Record<string, unknown>;
+    const metrics = record["metrics"];
+    if (metrics && typeof metrics === "object") {
+      const toolMetadata = (metrics as Record<string, unknown>)["tool_metadata"];
+      if (toolMetadata && typeof toolMetadata === "object") {
+        candidates.push(
+          (toolMetadata as Record<string, unknown>)["duration_ms"],
+        );
+      }
+    }
+    candidates.push(record["duration_ms"], record["durationMs"]);
+  }
+  candidates.push(payload["duration_ms"]);
+  for (const candidate of candidates) {
+    const value = readNumber(candidate) ?? readNumericString(candidate);
+    if (value !== undefined && value > 0) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+/** 数字字符串 → number（后端部分字段以字符串落库）。 */
+function readNumericString(value: unknown): number | undefined {
+  if (typeof value !== "string" || !value.trim()) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
