@@ -215,7 +215,104 @@
 
 | 项 | 动作 | 验证 |
 |---|---|---|
+| 实时工具行（工具帧实时建行 + live 桥接收敛） | **症状（实测）：ReAct 回合内工具行不逐条出现，全部帧挤在回合末尾。**根因两处：① 后端 live `streamSink`（`backend/internal/api/skills/handler.go`）只转发 text / reasoning / image，`chat.sse.tool_*` 全由回合结束的观测补发段产生（`buildObservedToolEventPayloads`，实测 21 帧集中在最后 ~18ms）；② 前端只认 `assistant_delta` / `assistant.reasoning` / `assistant.image_progress`，运行时 `tool_started` / `tool_finished`（含 `tool.requested` / `tool.completed` 点形态别名）整类丢弃（假定工具生命周期只经 `chat.sse.*`）。**后端**：① 新增 `backend/internal/api/skills/live_tool_stream.go`——`liveToolStreamTracker`（观测键 ↔ provider call id ↔ 行 id 映射）+ `subscribeLiveToolStream`（`RunReActWithSession` 期间订阅运行时事件总线，按 `streamMu` 串行发 `tool_call` / `tool_start` / `tool_end`，`defer` 退订）；② 收尾段改走 `buildObservedToolEventPayloadsWithLive`——已实时建行的工具**只补一条权威 `tool_end`**（`tool_call.id` 重写为实时行 id，arguments / output 就地补全），其余保持 legacy 三帧形态（不新增第二行）；③ 序号加固：优先取事件 `batch_index`（并行调度 `tool_parallel_scheduler.go:187`），缺席按 step 找空位；`rowIDForObservationKey(key, toolName)` 在逻辑工具名与观测工具名不一致时**拒绝复用**（退回 legacy 形态），避免并行乱序把输出并进错误的行。**前端**：④ 拆出 `frontend/src/lib/thread-state/events-live.ts`（打字机增量应用 + 流式消息定位 + `chat.sse.*` 桥接帧；`events.ts` 只留非 live 归约，为过 P0-2 ≤500 非空行门禁，纯机械搬迁）；⑤ `resolveBridgeToolPayload` 把运行时生命周期字段（`tool_call_id` / `logical_tool` / `arg_preview` / `summary`）补成 `tool` + `tool_call` 双载体，实时行与随后到达的 `chat.sse.tool_end` 按**真实 provider call id** 收敛成同一行；无 id 且工具名落到兜底名 `tool` 的残缺帧不落行。 | `pnpm exec tsc -b --force` exit 0；`pnpm test` **216 文件 / 1679 用例全绿**（新增 `chat-sse-bridge.test.ts` 6 例：实时建行并收尾推理段 / 收尾帧按同一 id 就地补全 / 重复帧幂等 / `error` → `status:"error"` / 无 id 无名的坏帧不落行；后端 `live_tool_stream_test.go` 新增并行乱序对齐、工具名不匹配拒绝复用 2 例）；`pnpm run lint` 0 error（1 基线 warning：`artifact-detail-dialog.tsx` 既有 hooks 依赖告警）+ 行数门禁 974 文件 0 超限（最大 `use-session-runtime-stream.ts`=500）+ i18n / token / 备份门禁全绿；后端 `go build ./...`、`go vet ./internal/api/skills/...`、`go test ./internal/api/skills/...`、`go test ./internal/toolprotocol/... ./internal/agent/...` 全绿，`gofmt -l` 对本批两个文件 0 命中。 |
 | P2-9-子片4（composer 上方浮动「当前任务」Todo 面板） | **P2-9 第四个子片：把 agent 的 `todos` 快照接到 composer 卡正上方的浮动面板**（方案 `frontend-composer-floating-task-panel-plan.md`，实施记录见其 §11；后端一处 additive 契约放行 + 纯前端投影，**无新依赖 / 无新 SSE 通道 / 无新全局 store**）。**通道 A（实时）**：① `backend/internal/toolprotocol/result.go`——`Result.EventMapWithMetadataKeys(scopedKeys ...string)` 在既有 thin allowlist 之外按「单次结果」放行工具作用域键（trim 判空、缺席 / nil 跳过、**不并入共享白名单**，故同名键不会被其它工具顺带泄漏）；`eventMap(scopedKeys)` 收内部实现、`EventMap()` 委托 `eventMap(nil)`（既有语义零变化）；② `backend/internal/agent/tool_runtime_events.go`——`attachProtocolResultToPayload` 仅在工具名等价 `todos` 时把 `metadata["todos"]` 裁剪为 `protocol_result.metadata.todo_snapshot`（`{items:[{content,status,active_form}], session_id?, goal_id?}`；空 `content` / 未知 `status` **整条丢弃**、全丢则键不出现；**不改写生产侧 metadata**，与 `compact_reconciliation` 读取的 `metadata["todos"]` 命名显式分离）。**前端投影**：③ 新增 `frontend/src/lib/thread-state/todos.ts`——`deriveTodoSnapshotFromRuntimeEvent`（只认该键，无键即 `null`）、`deriveLatestTodosFromRuntimeEvents`（按 `seq` 取最新）、`mergeTodoSnapshot`（runtime 单调、历史不覆盖实时）、`applyTodoSnapshotToThread`（与 todo 无关的事件**原样返回入参引用**，不打断下游 memo）；`lib/thread-state/events.ts` 在 `applyRuntimeEventToThread` 内折叠调用，私有 `readTextDelta` / `readRawTextValue` 机械搬迁到新 `lib/thread-state/text-utils.ts`（语义不变，为过 ≤500 非空行门禁）；④ 新增 `hooks/workspace/use-session-todos.ts`（空列表不渲染 / 全部完成即隐藏、三态计数、当前项、折叠态）；⑤ **通道 B1 历史兜底**：`lib/thread-state/history-artifacts.ts` 从会话历史工具消息 metadata 反扫最近一次快照（刷新 / 会话切换后仍可恢复）。**UI 与挂载**：⑥ 新增 `components/workspace/task-panel/*`（默认折叠单行条；`aria-expanded` / `aria-controls` 对应列表 `id`、`aria-live="polite"` 进度摘要、状态不靠颜色单独表意；展开 `grid-rows-[1fr]↔[0fr]` + `motion-safe:`；`line-clamp-1` + `title` 全文；渲染上限 8 项 + 页脚；宽度取 dock 轴 `--app-chat-content-width-dock`；`data-testid="todo-panel"`）；⑦ `workspace-shell/main-section.tsx` 在 `chatSurfaceVisible` 分支、`PendingInteractionBar` **之前**挂 `<TodoPanel>`（复用既有 `absolute inset-x-0 bottom-0 z-30` 吸底 overlay，不新增定位体系、不动 composer 内部结构）；⑧ 双语 `panels.todos.*` 逐键对齐 + mock 类型补可选 `todoSnapshot`。**未交付（非阻塞）**：T4 `todos` 工具行摘要打磨留待独立排期。 | `npx tsc -b --force` exit 0；`npm run build`（`tsc -b && vite build`）exit 0；`npm run lint` **0 error / 1 基线 warning**（`artifact-detail-dialog.tsx:50` 既有 `react-hooks/exhaustive-deps`；i18n scanned=684 / violations=0、备份门禁 1035 文件 0 残留、行数门禁 973 个 `.ts/.tsx` 中 0 个 > 500（最大 `hooks/workspace/use-session-runtime-stream.ts`=500）、消息 token 门禁 37 文件 0 处）；`npm test` **216 文件 / 1669 用例全绿**（本批新增 30 例：`lib/thread-state/todos.test.ts` 17、`hooks/workspace/use-session-todos.test.tsx` 6、`components/workspace/task-panel/task-panel.test.tsx` 7）；后端 `go build ./...` / `go vet ./...` / `go test ./internal/agent/... ./internal/toolprotocol/... ./internal/toolkit/...` **全绿**（`agent` / `toolprotocol` / `toolkit` / `toolkit/tools` 四包 ok；含新增「`todos` 工具出现全量条目、**非** `todos` 工具不得出现该键、生产侧 metadata 不被改写」与 `EventMapWithMetadataKeys` opt-in 用例）；e2e 按方案 D3 **不新增用例**（面板数据依赖 live SSE 的 `tool.completed`，e2e 只吃静态 `dist/` 产物、无法稳定构造该事件，覆盖由组件测试 + 方案 §8.2 手工清单承担）。**基线既有失败登记（与本批无关）**：① 全量 `npm run test:e2e` 中 `live-delta.spec.ts:85` / `thread-link.spec.ts:52` / `thread-link.spec.ts:116` 三例在干净 HEAD `2d6dd61c` 独立 worktree + 独立 fresh build 上**同样失败**（同断言、同超时）；② `trajectory.spec.ts:71`（P2-1 搜索过滤）同口径在 HEAD 基线复现（`Expected: 0 / Received: 1`）；③ `workspace-chat.spec.ts:205`（P1-3a 阅读位置保持）为**时序敏感 flaky**——`.artifacts/e2e-failures/` 存有 2026-09-14 的多次失败留图（18:21 / 21:11 / 22:36 / 23:38 等，均早于本批），本批复跑 `--repeat-each=3` **3 passed**、干净 HEAD 单跑亦通过。三者均判定为基线既有问题，未纳入本批范围。 |
+
+### 批次 19（2026-09-15）：运行时事件「交付通道」审查（分析批次，无代码改动）
+
+**触发**：批次 18 修复实时工具行后，复核同类事件是否同病。结论：工具不是特例，缺陷在**交付通道**而非单个事件类型。
+
+**四个交付决策点（各自独立白名单，互不校验，无一处上报丢弃）**
+
+| # | 决策点 | 位置 | 作用域 | 未命中行为 |
+|---|---|---|---|---|
+| A | 总线 → 会话事件库落盘 | `backend/internal/api/skills/handler.go:3860-3882`（`shouldPersistRuntimeSessionEvent`） | `tool.requested` / `tool.completed` / `approval_*` / `checkpoint_created` / `context.profile.injected` / `recall.performed` / `agent.reclaimed` / 压缩四件套 / `session_*` / `context_reconciled` / `assistant_delta` / `assistant.reasoning` / `image_progress` | 不落盘 → 既无实时也无回放 |
+| B | 总线 → live-only SSE 旁路 | `backend/internal/api/skills/session_runtime_stream.go:349-352`（`sessionLiveOnlyRuntimeEventTypes`） | 仅 `tool.progress` + `subagent.progress` | 不订阅 → 该类型永远无实时帧（且这两类**不落盘**，刷新即丢） |
+| C | 总线 → chat SSE 帧桥 | `backend/internal/api/skills/live_tool_stream.go:298-345`（`subscribeLiveToolStream`） | 仅工具生命周期（批次 18 新增） | 无桥 → 只能等回合末尾巴 |
+| D | 回合末尾巴帧 | `backend/internal/api/skills/handler.go:7971-7981` + `:1885-1890` | 工具（`buildObservedToolEventPayloadsWithLive`）、`subagent`、`observation`、`planning`、`orchestration`、`route` | — |
+
+**关键结构性事实（本次新证）**：`/api/agent/runtime/stream` 是**事件库中介**——`store.ListEvents(afterSeq)` 长轮询（`session_runtime_stream.go:168`）+ `WatchEvents` 唤醒（`:109-110`），另加 B 作为直连旁路。因此 **A 的白名单实际决定了「前端能否实时看到某类事件」**；C 之所以必须作为独立订阅存在，正是因为工具生命周期事实在 A/B 两处都不完整。
+
+**命名分裂（同批次 18 的 M3）的确切机制**：`mapRuntimeEventToSession`（`handler.go:3884-3893`）只改 `Type` 字段、payload 原样搬运——同一事实在三个词汇表里各有一个名字：总线 `tool.requested` / `tool.completed`；事件库 `tool_started` / `tool_finished`（`backend/internal/chat/events.go:18-19`）；chat SSE `chat.sse.tool_start` / `tool_end`。三处靠手写 switch 对齐，无共享常量。
+
+**逐类裁定**
+
+| 事件类 | 实时帧 | 落盘 / 回放 | 聊天行 | 裁定 |
+|---|---|---|---|---|
+| tool 生命周期 | ✅ C | ✅ A（`tool_finished`） | ✅ | 批次 18 已修（实时） |
+| tool.progress | ✅ B（live-only） | ❌ 不落盘 | 更新既有行 | 刷新即丢（无回放映射） |
+| subagent.batch.* | ❌ 无桥 | ❌ 不在 A | 端点补发帧 | 仅回合末尾巴（`handler.go:1894-1895`），实时性 = 0 |
+| subagent.progress | ✅ B（live-only） | ❌ 不落盘 | 折叠为单行 `runtime-0` | 多子代理互相覆盖，`live` 恒 `running` |
+| planning / orchestration / route / observation | ❌ | ❌ 不在 A | **不建聊天行** | 只 `pushTrajectory` + `attachTurnArtifact`（`frontend/src/hooks/workspace/agent-chat-turn/stream-handlers.ts:266/282/298/314/330`）→ 伤害面是轨迹页与 turn artifact，非消息区 |
+| todos 快照 | ❌ 无帧 | ✅ 随 `tool_finished` payload 原样落盘 | 不建行（走面板） | **修正**：实时（通道 A）+ 历史兜底（通道 B1）均成立（`backend/internal/agent/tool_runtime_events.go:695-701`；`frontend/src/lib/thread-state/todos.ts:115-134`），不存在「两条通道都拿不到」 |
+| approval / question | ❌ 无帧 | ✅ `approval_*` 在 A | 由快照重建 | 实时性 = 0；快照无 `toolCallId`，`approval_resolved` 缺 `request_id` 时退化为会话级匹配 |
+
+**两处夸大表述的自我修正**
+1. 轨迹页 `unknown-<seq>` 告警（`frontend/src/lib/trajectory/apply.ts:241-252`）是**死代码**：`KNOWN_TRAJECTORY_KINDS` 已在 `recovery.ts:71-87 / 198-200` 前置过滤 → 现有「未知事件」兜底不可达；thread-state 侧相反是**半透传**（`events.ts:43-53` 仍入事件数组与产物，只不建 UI 行）。两套子系统策略彼此背离。
+2. 「静默丢弃」的主体不在 reducer，而在 A/B/C/D 四处白名单，加上 `frontend/src/api/runtime/sse.ts:316-317` 的 `default: return` 与 `deltas.ts:124-125 / 194-195` 的分类器 `null`。
+
+**风险登记（子审计落地，含对批次 18 的回击点）**
+
+| ID | 风险 | 证据 |
+|---|---|---|
+| b2 | 工具帧缺 `tool_call_id` → 兜底 id `tool-<seq>` 永不与 `tool:<id>` 合并 → 同一次调用分叉成两行（**直接命中批次 18 的收敛前提**） | `frontend/src/lib/trajectory/apply.ts:300` |
+| a3+c4 | 历史工具结果缺 `tool_call_id` → 结果行消失；冻结只由 `done` / `error` 触发 → 该行**永久 running** | `frontend/src/lib/trajectory/session-history.ts:158-163`；`apply.ts:308` / `:38-41` |
+| a4 | `tool.progress` 缺 call id → 静默丢弃 | `frontend/src/lib/trajectory/recovery.ts:310-313` |
+| b1 | 缺 `_event.sequence` 的实时帧 seq=0 绕过幂等，随后由 `/runtime/events` 以真实 seq 重投 → 文本二次拼接（唯一缓解：delta key 去重） | `frontend/src/api/runtime/api.ts:37-41`；`frontend/src/hooks/workspace/use-trajectory-snapshot.ts:215-236` |
+| b4 | `subagent.progress` 全部折叠到 `runtime-0`，多子代理互覆 | `frontend/src/lib/trajectory/recovery.ts:351-382`；`apply.ts:213/216` |
+| b3 | 待交互快照无 `toolCallId`；`approval_resolved` 缺 `request_id` → 会话级匹配，可能结算错卡片 | `frontend/src/lib/trajectory/snapshot.ts:42-56`；`frontend/src/lib/thread-state/events.ts:351-360` |
+| a5 | 审批卡片从快照重建，缺 id 时不建卡片且无告警 | `frontend/src/lib/trajectory/snapshot.ts:42-56` |
+| c1 | live-only 事件无回放映射 → 刷新 / 重连即丢且不可回填 | `frontend/src/lib/trajectory/recovery.ts:436-441` |
+| c2/c3 | `user` 行与历史兜底只在恢复链路存在，实时链路不调用 | `frontend/src/lib/trajectory/session-history.ts:186-199`；`frontend/src/hooks/workspace/use-trajectory-recovery.ts:200-211` |
+
+**建议（未实施，待排期）**
+
+| 优先级 | 项 | 内容 |
+|---|---|---|
+| P0-1 | 收敛前提守卫 | 为 b2 / a3+c4 补测试（id 缺失 ⇒ 分叉 / 悬挂），否则批次 18 的实时收敛在降级数据下会被无声推翻 |
+| P0-2 | 白名单可观测 | A/B/C/D 未命中计入指标；或按 `backend/internal/runtimeobserve/known_types.go` 的三分法复用到 `/api/agent/chat`（该分法此前只覆盖 CLI）；同时把轨迹侧 `unknown-*` 兜底移到白名单之前（或删掉死代码） |
+| P1-1 | 子代理实时化前置 | 先修 b4（单行折叠 + 恒 `running`），否则实时化只是把「迟到」换成「互相覆盖」 |
+| P1-2 | 统一实体身份 | `entity:{kind,id}` 随帧下发；`tool-<seq>` 类兜底显式标 `degraded`，把「无法合并」变成可观测事件而非静默双行 |
+
+### 批次 20（2026-09-15）：批次 19 四条建议落地（P0-1 / P0-2 / P1-1 / P1-2，实施批次）
+
+**触发**：批次 19 交付四条建议（P0-1 收敛前提守卫、P0-2 白名单可观测、P1-1 子代理实时化前置、P1-2 统一实体身份）。本批按原优先级 1:1 实施，不扩范围；行身份类改动一律「先钉住现状为断言，再改行为」。
+
+| 优先级 | 项 | 内容 | 验证 |
+|---|---|---|---|
+| P0-1 | 收敛前提守卫 | 新增 `frontend/src/lib/trajectory/trajectory-convergence.guard.test.ts`（5 例）：① 缺 call id 的工具帧退化为 `tool-<seq>`，与带 id 的权威帧**分叉成两行**且合成行永久 `running`；② 同一工具的两条缺 id 帧各自成行（不收敛）；③ 悬挂行只有回合末 `done` 会收尾为 completed（`freezeOpenItems` 只处理 error）；④ 历史工具结果缺 `tool_call_id` 时整帧丢弃（既无行也无终态）；⑤ 带 id 时产出 `tool_end`（对照组）。作用：批次 18 的实时收敛以真实 provider call id 为唯一合并键，这些断言把「降级数据下的必然分叉」钉成期望值——后续改动若假定「已经收敛」，会先在这里失败而不是在缺 id 的帧上无声失效。 | `npx vitest run src/lib/trajectory` 17 文件 / 170 用例全绿（含本批全部新增用例） |
+| P0-2 | 白名单可观测（A/B/C/D 四通道） | **后端**：① 新增 `backend/internal/api/skills/runtime_event_delivery.go`——`DeliveryChannelsFor` 把「类型 → 通道」收敛成一处可测判定（`session_store` / `live_only` / `chat_bridge` / `tail_only`，可多通道），复用 `runtimeobserve` 已知类型目录区分「已知但被通道裁掉」与「完全未知」；② A 通道未命中按 `reason`（`no_session_id` / `type_not_persisted`）×类型×已知性三分计数（`dropped_known` / `dropped_unknown`，类型桶上界 64 + `_other` 溢出桶，输入为外部类型名必须有界），B 通道在**真正把帧写进订阅通道时**记 `live_forwarded`（该通道不落盘，这是「有没有实时送达」的唯一正向证据）；③ 读侧经 `handler.go` 的 `runtimeStatusSnapshot["runtime_event_delivery"]` 暴露（不新增端点、不改事件流）；④ `handler.go` 落盘白名单抽成 `isPersistedRuntimeEventType`，与分类函数共用同一份清单（测试断言两者一致，防两处漂移）；⑤ `runtimeobserve/known_types.go` 补入两类 live-only 总线类型（`tool.progress` / `subagent.progress`）——它们此前不在任何清单里，会让三分法把「已知但被裁掉」误记成「完全未知」。**前端**：⑥ 删掉 `recovery.ts` 的 `KNOWN_TRAJECTORY_KINDS` 前置白名单（未命中即 `return null`，把 `apply.ts` 的 `unknown-<seq>` 兜底变成死代码）——未知 kind 现在进入 reducer 兜底，生成可见的降级 system 行，类型漂移从「没有反应」升级为可观测事件；chat 路径当前发出的名字全部在 reducer 已映射集合内，故本改动不新增任何行。 | `go test ./internal/api/skills/ -count=1` ok（16.7s，含 `runtime_event_delivery_test.go` 5 例：通道集合、与落盘白名单一致性、已知/未知三分计数、live 转发计数、计数有界且可 JSON 序列化）；`go test ./internal/runtimeobserve/...` ok |
+| P1-1 | 子代理实时化前置（风险 b4） | ① 新增 `frontend/src/lib/trajectory/entity-identity.ts`（身份契约唯一拼装点）；② `recovery.ts` 的 `subagentProgressEventToTrajectoryPush` 显式下发 `_trajectory_item_id = subagent:<child_session_id>`——修复前同一父流的所有镜像共用 `runtime-0`，多子代理互相覆盖；③ `apply.ts` 的 subagent 行身份改用 `subagentRowIdOf(payload, seq)`（无子会话标识才退回 `subagent-<seq>`）且状态不再恒 `running`：尾巴帧的 `success` 布尔是唯一权威终态（`completed` / `failed`），live 镜像无该键 ⇒ 保持 `running`（终态行会被 `upsertItem` 冻结，镜像无法就地更新）。 | 新增 `trajectory-entity-identity.test.ts`（5 例：两个子代理各占一行互不覆盖 / 同一子代理后续镜像就地更新不新增行 / entity 决定工具行身份 ×3）；`recovery.test.ts` 增两条身份断言；`npx vitest run src/lib/trajectory` 全绿 |
+| P1-2 | 统一实体身份 | ① 契约：`entity: {kind, id, degraded?}`，`<kind>:<id>` 唯一拼装点收敛到 `entity-identity.ts`（`entityItemId` / `toolItemId` / `subagentItemId` / `readTrajectoryEntity`）；② 前端读侧：`apply.ts` 的工具行身份优先取 `entity.id`（后端指定的稳定名），退回 `tool_call_id`，再退回 `tool-<seq>`，并在**任一兜底路径**上把 `degraded: true` 写进工具行 head（`TrajectoryHead` 新增 `degraded?: boolean`，`headsEqual` 纳入比较 ⇒ 标记变化触发快照更新）；③ 后端写侧：`live_tool_stream.go` 新增 `attachToolEntity`（有真实 provider call id ⇒ `entity:{kind:"tool",id:<call_id>}`；缺 id 时**不下发**，交给前端标 degraded）与 `attachDegradedToolEntity`（观测合成身份 `observation_<step>` ⇒ `degraded:true`）；`handler.go` 回合末尾巴按分支调用——实时匹配过的工具补一条**权威** `tool_end`，退回三段式的三帧全标 degraded。于是「同一次调用两行」在数据上可见，而不是等用户发现重复行。 | 新增 `entity-identity.test.ts`（7 例：非法输入一律 null 不猜身份 / degraded 原样透传 / 子会话 id 优先级 / 状态非布尔不当终态 …）+ `trajectory-entity-identity.test.ts`（3 例 entity 契约）+ Go 3 例（实时帧带权威 entity / 缺 id 不下发 entity / 尾巴两分支身份对比）；`go test ./internal/api/skills/ -count=1` ok |
+
+**未交付（非阻塞，独立排期）**：轨迹 UI 尚未把工具行的 `degraded` 呈现为可见徽标——当前可观测面 = 投影数据（head 标记）+ 导出 + 后端计数（`runtime_event_delivery`）。UI 提示需要新增 i18n 键与轨迹面板用例，按批次 18「T4 打磨留待独立排期」的同等口径登记。
+
+**门禁（本批）**：`npx tsc -b --force` exit 0；`npm run build`（`tsc -b && vite build`）exit 0；`npm test` **219 文件 / 1700 用例全绿**（本批新增 25 例——前端 17：收敛守卫 5 + 身份契约 7 + entity 帧契约 5；后端 8：交付通道 5 + entity 帧 3；另改写 2 处既有断言：未知 kind 放行、未知 kind 兜底行身份，并在 `recovery.test.ts` 补 2 条身份断言）；`npm run lint` **0 error / 1 基线 warning**（`artifact-detail-dialog.tsx:50` 既有 hooks 依赖告警）+ i18n scanned=686 / violations=0 + 备份门禁 1040 文件 0 残留 + 行数门禁 978 文件 0 超限（最大 `use-session-runtime-stream.ts`=500）+ 消息 token 门禁 37 文件 0 处；后端 `go build ./...` exit 0、`go vet ./internal/api/skills/... ./internal/runtimeobserve/...` 0、`go test ./internal/api/skills/ -count=1` ok、`go test ./internal/runtimeobserve/...` ok、`gofmt -l` 对本批 3 个 Go 文件 0 命中。
+
+### 批次 21（2026-09-15）：子代理「运行中」误报收口（身份状态 × 执行容器运行态正交化）
+
+**症状（用户实测上报）**：`/workspace/sessions/session_20260915163832_x9tdlxUk` 的子代理面板里，两个 `researcher` 在跑完后仍长期显示「运行状态」。
+
+**根因（实测）**：后端身份行（AgentControl registry record）**只有在显式 `close` / `reclaim` 时才进终态**；子代理跑完一轮后其 session 行仍是 open ⇒ 身份行长期 `active`。前端当时只按身份 `status` 分区（`active` 一律算运行中），于是「容器已结束」被渲染成「运行中」。结论：这**不是主代理忘了关**，也不该由前端臆断「已结束」。
+
+**修复：补一条正交证据，而不是改身份语义**（`runtime_state` 为 additive 字段，身份行与既有 close / resume 口径零变化）
+
+| 层 | 内容 |
+|---|---|
+| 后端取值链 | 新增 `backend/internal/api/skills/agent_control_runtime_state.go`：`runtime_state` = 活体 actor（`getSessionHub()` / session runtime store）→ 持久运行态（`session_runtime_state` 表）→ **null（未知，不下断言）**；`agent_control_agent_handlers.go` 列表 handler 逐行追加该字段 |
+| 前端契约 | `types/runtime/agents.ts` 新增 `RuntimeAgentRuntimeState = running \| idle \| stopped \| unknown` 与 `RuntimeAgentDisplayStatus = RuntimeAgentStatus \| "ended"`；`api/runtime/agents.ts` 新增 `normalizeRuntimeAgentRuntimeState`（只认三值，trim + lowercase，缺省 / 异名 → `unknown`，**不得据此推断「已结束」**） |
+| 前端派生 | `session-agents-panel-shared.ts` 新增 `agentDisplayStatus`：身份非 `active` → 原样透传（显式 `closed` 比 `ended` 更具体，优先）；root 行不收敛（轮次之间的 idle 不代表主代理结束）；子代理 `idle` / `stopped` → `ended`；`unknown` → 回退身份状态。`splitSessionAgents` 改按**展示状态**分区；`session-agents-tree.tsx` / `session-agents-panel.tsx` 的徽章、`data-status`、离线文案改用展示状态 |
+| 动作授权不变 | `canStopAgent` / `canResumeAgent` 仍按**身份状态**（子代理跑完但身份仍 `active` 时仍可显式「停止」；只有 `closed` 可 Resume） |
+| i18n | 双语 `panels.agents.status.ended`（已结束 / Ended） |
+
+**真机证据（本轮，非仅单测）**
+1. `GET /api/runtime/agent-control/agents?root_session_id=session_20260915163832_x9tdlxUk&include_closed=true` 实测 5 行全部带 `runtime_state:"idle"`；
+2. 用该**真实响应**喂真实前端代码的临时实测脚本（`frontend/src/live-agent-display.check.test.ts`，跑完即删）实测：root（active+idle）→ `active`；两个 researcher（active+idle）→ `ended`；verifier（active+idle）→ `ended`；verifier（closed+idle）→ `closed`；`splitSessionAgents` 把后三者归入 `settled`；
+3. 存储侧独立佐证（只读查询）：`backend/data/runtime/session_runtime.sqlite` 中相关 5 个会话 `session_runtime_state.status='idle'`、`current_turn_id=NULL`、`session_actor_leases` 无租约、每个会话均有 `session_end` 事件。
+
+**门禁（本批）**：后端 `go build ./...` exit 0、`go test ./internal/api/skills/ -count=1` ok（15.7s，含新增 3 例：`idle` / `running` / 无数据源不下断言）；前端 `npx tsc -b --pretty false` exit 0、`npm run lint` **0 error / 1 基线 warning**（`artifact-detail-dialog.tsx:50` 既有 hooks 依赖告警）+ i18n scanned=686 / violations=0、`npx vitest run` **219 文件 / 1706 用例全绿**（本批新增 9 例：`agentDisplayStatus` 4 + `splitSessionAgents` 1 + 归一化 3 + 列表字段 1；改写 4 个测试夹具补 `runtimeState` 必填字段）。
+
+**未交付（非阻塞，独立排期）**：本批只改**展示与分区**，不写状态、不做自动回收——身份行仍只有显式 close / reclaim 才终态。若要让已结束子代理的身份行也收敛，需要主代理主动 close 或后端增加空闲回收策略；那属于 AgentControl 生命周期语义变更，不在本批范围。
 
 ### 复检记录（2026-09-13，P2-1A 第八项交付后）
 
