@@ -140,6 +140,9 @@ describe("trajectoryEventAction：可渲染 push / 过滤事件 skip 空洞 / �
     expect(action.push.payload.live).toBe(true);
     // live-only 无持久化 seq：应用到达序，不参与空洞判定。
     expect((action.push.payload._event as { sequence: number }).sequence).toBe(0);
+    // P1-1（批次 20）：身份随帧显式下发（`subagent:<child>`），父轨迹里每个
+    // 子代理一行；否则所有镜像会共用 `runtime-0` 而互相覆盖。
+    expect(action.push.payload._trajectory_item_id).toBe("subagent:child-1");
   });
 
   it("subagent.progress 仅有 session_id 时可映射；无子会话身份则不建无主行", () => {
@@ -149,6 +152,7 @@ describe("trajectoryEventAction：可渲染 push / 过滤事件 skip 空洞 / �
       payload: { session_id: "child-2", state: "completed", tool_name: "bash" },
     } as SessionRuntimeEvent);
     expect(sessionOnly?.payload.agent_id).toBe("child-2");
+    expect(sessionOnly?.payload._trajectory_item_id).toBe("subagent:child-2");
 
     expect(
       subagentProgressEventToTrajectoryPush({
@@ -239,10 +243,14 @@ describe("chatSseEventToTrajectoryPush", () => {
     ).toBeNull();
   });
 
-  it("未知 kind 跳过", () => {
-    expect(
-      chatSseEventToTrajectoryPush(chatSseEvent("future_kind", 1)),
-    ).toBeNull();
+  it("未知 kind 放行：不再静默跳过，交给 reducer 兜底出降级行", () => {
+    const push = chatSseEventToTrajectoryPush(chatSseEvent("future_kind", 1));
+    expect(push?.kind).toBe("future_kind");
+    // 与已知 kind 同形（保留持久化游标与墙钟时间），reducer 才能据此排序与幂等。
+    expect(push?.payload._event).toEqual({
+      sequence: 1,
+      timestamp: "2026-08-16T00:00:00Z",
+    });
   });
 });
 

@@ -59,6 +59,7 @@ export const enWorkspacePanelsAgents = {
     active: "Running",
     stale: "Stale",
     closed: "Stopped",
+    ended: "Ended",
     unknown: "Unknown status",
   },
   meta: {

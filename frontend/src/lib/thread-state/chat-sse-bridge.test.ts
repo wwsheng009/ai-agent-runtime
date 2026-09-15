@@ -330,3 +330,158 @@ describe("chat.sse 桥接帧的回放安全", () => {
     expect(reasoningSegments(next)[0].running).toBe(true);
   });
 });
+
+// 实时工具行回归（2026-09-15）：agent loop 在执行每个工具的当下就把
+// tool.requested / tool.completed 发到 runtime 总线（internal/agent/loop.go），
+// 事件存储把它们落成 tool_started / tool_finished。这条路过去被整类跳过，
+// 工具行只能等回合末的证据尾巴补齐（实测 21 帧挤在末尾 18ms 内）——
+// 「推理结束 → 工具执行」这段窗口里 UI 完全没有反馈，只能看着推理行挂着。
+const LIVE_PROVIDER_ID = "call_00_live_a";
+
+const LIVE_TOOL_PAYLOAD = {
+  tool_call_id: LIVE_PROVIDER_ID,
+  logical_tool: "shell",
+  step: 1,
+  trace_id: "trace-live-1",
+  arg_preview: '{"command":"go test ./..."}',
+  command_text: "go test ./...",
+};
+
+function lifecycleFrame(
+  type: string,
+  overrides: Record<string, unknown> = {},
+): SessionRuntimeEvent {
+  // 真实生命周期载荷没有 turn_id（loop.go 只在 turnID 非空时注入）：这里刻意
+  // 省掉，覆盖「增量/桥接帧的 turn 身份未知」这条最常见路径。
+  return {
+    type,
+    timestamp: "2026-09-15T00:00:07Z",
+    payload: { ...LIVE_TOOL_PAYLOAD, ...overrides },
+  };
+}
+
+/** 回合末证据尾巴的 tool_end：行 id 已被后端改写为实时帧使用的 provider call id。 */
+function tailToolEndFrame(content: string): SessionRuntimeEvent {
+  const toolCall = {
+    id: LIVE_PROVIDER_ID,
+    name: "shell",
+    arguments: { command: "go test ./..." },
+  };
+  return {
+    type: "chat.sse.tool_end",
+    timestamp: "2026-09-15T00:00:20Z",
+    payload: {
+      index: 1,
+      type: "tool_end",
+      content,
+      metadata: { live: true, step: 1 },
+      tool_call: toolCall,
+      tool: { ...toolCall, args: toolCall.arguments, status: "tool_end", content },
+      turn_id: "turn-1",
+    },
+  };
+}
+
+describe("runtime 工具生命周期帧实时建行", () => {
+  it("生命周期事件名归类为工具帧", () => {
+    expect(getRuntimeBridgeKind("tool_started")).toEqual({
+      kind: "tool",
+      status: "started",
+    });
+    expect(getRuntimeBridgeKind("tool.requested")).toEqual({
+      kind: "tool",
+      status: "started",
+    });
+    expect(getRuntimeBridgeKind("tool_finished")).toEqual({
+      kind: "tool",
+      status: "finished",
+    });
+    expect(getRuntimeBridgeKind("tool.completed")).toEqual({
+      kind: "tool",
+      status: "finished",
+    });
+  });
+
+  it("tool_started 在执行当下建行，tool_finished 收敛到同一行", () => {
+    let thread = createLiveThread([
+      { type: "reasoning", content: "先跑测试", running: true },
+    ]);
+
+    thread = apply(thread, lifecycleFrame("tool_started"));
+
+    const started = toolSegments(thread);
+    expect(started).toHaveLength(1);
+    expect(started[0]).toMatchObject({
+      type: "tool",
+      name: "shell",
+      toolCallId: LIVE_PROVIDER_ID,
+      status: "started",
+    });
+    expect(started[0].argsSummary).toContain("go test ./...");
+    // 工具帧同样是「阶段出口」：推理行随即收尾。
+    expect(reasoningSegments(thread)[0].running).toBe(false);
+
+    thread = apply(thread, lifecycleFrame("tool_finished", { summary: "Exit code: 0" }));
+
+    const finished = toolSegments(thread);
+    expect(finished).toHaveLength(1);
+    expect(finished[0]).toMatchObject({
+      toolCallId: LIVE_PROVIDER_ID,
+      status: "finished",
+    });
+    expect(finished[0].resultSummary).toContain("Exit code: 0");
+  });
+
+  it("回合末证据尾巴按同一 provider id 就地补全，不再新增行", () => {
+    let thread = createLiveThread([]);
+    thread = apply(thread, lifecycleFrame("tool_started"));
+    thread = apply(thread, lifecycleFrame("tool_finished", { summary: "预览摘要" }));
+    thread = apply(thread, tailToolEndFrame("===== command 1/1 [ok] =====\nExit code: 0"));
+
+    const tools = toolSegments(thread);
+    expect(tools).toHaveLength(1);
+    expect(tools[0]).toMatchObject({
+      toolCallId: LIVE_PROVIDER_ID,
+      name: "shell",
+      status: "finished",
+    });
+    // 尾巴的权威输出覆盖实时预览，且入参仍在同一行上。
+    expect(tools[0].resultSummary).toContain("Exit code: 0");
+    expect(tools[0].argsSummary).toContain("go test ./...");
+  });
+
+  it("重复的请求/完成帧幂等，不产生第二行", () => {
+    let thread = createLiveThread([]);
+    thread = apply(thread, lifecycleFrame("tool_started"));
+    thread = apply(thread, lifecycleFrame("tool_started"));
+    thread = apply(thread, lifecycleFrame("tool_finished", { summary: "ok" }));
+    thread = apply(thread, lifecycleFrame("tool_finished", { summary: "ok" }));
+
+    expect(toolSegments(thread)).toHaveLength(1);
+  });
+
+  it("tool.completed 带 error 时落成错误行", () => {
+    let thread = createLiveThread([]);
+    thread = apply(thread, lifecycleFrame("tool.requested"));
+    thread = apply(
+      thread,
+      lifecycleFrame("tool.completed", { error: "[TOOL_BROKER_FAILURE] denied" }),
+    );
+
+    expect(toolSegments(thread)[0]).toMatchObject({
+      toolCallId: LIVE_PROVIDER_ID,
+      status: "error",
+      errorMessage: "[TOOL_BROKER_FAILURE] denied",
+    });
+  });
+
+  it("既无 id 也无工具名的生命周期帧不落假工具行", () => {
+    const thread = apply(createLiveThread([]), {
+      type: "tool_started",
+      timestamp: "2026-09-15T00:00:08Z",
+      payload: { step: 2 },
+    });
+
+    expect(toolSegments(thread)).toHaveLength(0);
+  });
+});

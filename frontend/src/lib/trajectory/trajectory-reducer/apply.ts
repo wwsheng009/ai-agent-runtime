@@ -4,6 +4,7 @@ import { TRAJECTORY_ITEM_ID_KEY, type TrajectoryChange, type TrajectoryEvent, ty
 
 import { describeRuntimeEvent, eventTimestampOf, readFirstString, readNumber, readString, textDeltaOf, toolArgsSummaryOf, toolCallIdOf, toolDurationMsOf, toolErrorOf, toolNameOf, toolResultSummaryOf } from "./event-readers";
 import { appendChange, cloneItem, findItem, upsertItem } from "./snapshot-ops";
+import { readTrajectoryEntity, subagentRowIdOf, subagentStatusOf, toolItemId } from "../entity-identity";
 
 /**
  * 显式 item 身份（P4 历史兜底）：降级帧（seq=0）没有 EventStore 游标可依赖，
@@ -179,10 +180,15 @@ export function applySequencedEvent(
       upsertItem(
         snapshot,
         changes,
-        `subagent-${seq}`,
+        // P1-1（批次 20）：身份按子会话收敛（`subagent:<child>`），与实时进度
+        // 镜像同一 id ⇒ 每个子代理一行；原先一行一条 `subagent-${seq}`、镜像又
+        // 全挤在 `runtime-0`，多子代理互相覆盖且无法从行上看出谁是谁。
+        subagentRowIdOf(event.payload, seq),
         "subagent",
         { kind: "structured", payload: event.payload },
-        "running",
+        // 状态不再恒 running：尾帧 success 布尔是权威终态（completed/failed），
+        // live 镜像无该键 ⇒ running（终态行会被冻结，镜像需就地更新）。
+        subagentStatusOf(event.payload),
         seq,
         "",
         at,
@@ -210,7 +216,9 @@ export function applySequencedEvent(
       upsertItem(
         snapshot,
         changes,
-        `runtime-${seq}`,
+        // P1-1：进度镜像带显式行身份（`subagent:<child>`）时按身份收敛，
+        // 其余 runtime 生命周期事件仍是一事件一行。
+        itemIdOf(event.payload) || `runtime-${seq}`,
         "system",
         { kind: "system", note: describeRuntimeEvent(event.payload) },
         event.payload["live"] === true ? "running" : "completed",
@@ -296,8 +304,16 @@ function applyToolEvent(
   event: TrajectoryEvent,
   kind: TrajectoryEvent["kind"],
 ) {
-  const toolCallId = toolCallIdOf(event.payload);
-  const itemId = toolCallId ? `tool:${toolCallId}` : `tool-${event.seq}`;
+  // P1-2（批次 20）：身份优先取帧上的权威实体对（后端 entity），退回既有读取；
+  // 无权威 id 时以 seq 兜底并在 head 上显式标 degraded——同一实体无法合并这件事
+  // 必须可观测（行上有标记），而不是静默产生两行。
+  const entity = readTrajectoryEntity(event.payload);
+  // `entity.id` 是后端指定的行身份（权威 call id，或后端自己合成的稳定 id），
+  // 是否「不可合并」由 `degraded` 单独表达，两者不混用。
+  const toolCallId =
+    entity && entity.kind === "tool" ? entity.id : toolCallIdOf(event.payload);
+  const degraded = entity ? entity.degraded === true : !toolCallId;
+  const itemId = toolCallId ? toolItemId(toolCallId) : `tool-${event.seq}`;
   const name = toolNameOf(event.payload);
   const existing = findItem(snapshot, itemId);
   const currentPhase: TrajectoryToolPhase = existing?.head.kind === "tool"
@@ -341,6 +357,7 @@ function applyToolEvent(
     durationMs:
       toolDurationMsOf(event.payload) ??
       (existing?.head.kind === "tool" ? existing.head.durationMs : undefined),
+    ...(degraded ? { degraded: true } : {}),
   };
   upsertItem(
     snapshot,

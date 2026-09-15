@@ -163,6 +163,19 @@ export function getRuntimeBridgeKind(
   eventType: string,
 ): RuntimeBridgeKind | null {
   switch (eventType) {
+    // 实时工具生命周期：agent loop 在执行每个工具的当下就会把
+    // tool.requested / tool.completed 发到 runtime 总线（internal/agent/loop.go
+    // 的 emitRuntimeEvent），事件存储把它们落成 tool_started / tool_finished。
+    // 这两条事件过去被当成「与 chat.sse 共享 seq 的空洞」直接跳过，工具行只能
+    // 等回合末由证据尾巴一次性补齐（实测 21 帧挤在末尾 18ms 内）。这里按真实
+    // provider call id 建行，随后到达的 chat.sse.tool_* 帧按同一 id upsert 合并，
+    // 因此既不会重复建行，也不必再等回合结束。
+    case "tool_started":
+    case "tool.requested":
+      return { kind: "tool", status: "started" };
+    case "tool_finished":
+    case "tool.completed":
+      return { kind: "tool", status: "finished" };
     case "chat.sse.tool_start":
       return { kind: "tool", status: "started" };
     case "chat.sse.tool_call":

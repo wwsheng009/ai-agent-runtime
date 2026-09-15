@@ -32,6 +32,7 @@ function agent(partial: Partial<RuntimeAgentRecord> & { agentId: string }): Runt
     model: null,
     difficulty: null,
     status: "active",
+    runtimeState: "unknown",
     createdAt: null,
     updatedAt: null,
     closedAt: null,

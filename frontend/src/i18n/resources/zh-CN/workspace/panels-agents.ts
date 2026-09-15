@@ -59,6 +59,7 @@ export const zhWorkspacePanelsAgents = {
     active: "运行中",
     stale: "已失联",
     closed: "已停止",
+    ended: "已结束",
     unknown: "状态未知",
   },
   meta: {

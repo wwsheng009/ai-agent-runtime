@@ -28,6 +28,7 @@ import { RuntimeApiError, buildRuntimeUrl, fetchRuntimeJson } from "./shared";
 import type {
   RuntimeAgentCatalog,
   RuntimeAgentRecord,
+  RuntimeAgentRuntimeState,
   RuntimeAgentStatus,
 } from "@/types/runtime";
 
@@ -82,6 +83,18 @@ export function normalizeRuntimeAgentStatus(value: unknown): RuntimeAgentStatus 
   return "unknown";
 }
 
+/**
+ * 运行态收口：只承认 running / idle / stopped，其余（缺字段 / 未知取值）一律
+ * `unknown`。**未知不得被当作「已结束」**，展示层据此回退到身份状态。
+ */
+export function normalizeRuntimeAgentRuntimeState(value: unknown): RuntimeAgentRuntimeState {
+  const state = readTrimmed(value)?.toLowerCase();
+  if (state === "running" || state === "idle" || state === "stopped") {
+    return state;
+  }
+  return "unknown";
+}
+
 /** 单条身份归一化；缺 `agent_id` 返回 null（调用方丢弃该条）。 */
 export function normalizeRuntimeAgent(raw: unknown): RuntimeAgentRecord | null {
   const record = asRecord(raw);
@@ -109,6 +122,7 @@ export function normalizeRuntimeAgent(raw: unknown): RuntimeAgentRecord | null {
     model: readTrimmed(record.effective_model) ?? readTrimmed(record.model),
     difficulty: readTrimmed(record.difficulty),
     status: normalizeRuntimeAgentStatus(record.status),
+    runtimeState: normalizeRuntimeAgentRuntimeState(record.runtime_state),
     createdAt: readTimestamp(record.created_at),
     updatedAt: readTimestamp(record.updated_at),
     closedAt: readTimestamp(record.closed_at),

@@ -17,6 +17,7 @@ import { useTranslation } from "react-i18next";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
+  agentDisplayStatus,
   agentDisplayName,
   agentDurationSpan,
   agentMetaFacts,
@@ -147,6 +148,9 @@ function AgentTreeRowItem({
   const failed = actionErrorAgentId === agent.agentId;
   const stopping = pending && canStopAgent(agent.status);
   const resuming = pending && canResumeAgent(agent.status);
+  // 展示状态与身份状态分开：徽章看「容器在不在跑」，动作仍按身份状态授权
+  // （子代理跑完后身份可能仍是 active，此时仍允许显式「停止」收口）。
+  const displayStatus = agentDisplayStatus(agent);
 
   const span = agentDurationSpan(agent);
   const compact = span ? formatAgentDuration(span.ms) : null;
@@ -156,7 +160,9 @@ function AgentTreeRowItem({
   const readOnlyText =
     readOnly === "parent-offline"
       ? t("panels.agents.readonly.parentOffline", {
-          status: t(agentStatusLabelKey(parent!.status), { defaultValue: parent!.status }),
+          status: t(agentStatusLabelKey(agentDisplayStatus(parent!)), {
+            defaultValue: parent!.status,
+          }),
         })
       : readOnly === "closed-record"
         ? t("panels.agents.readonly.closedRecord")
@@ -168,7 +174,7 @@ function AgentTreeRowItem({
       aria-level={depth + 1}
       data-agent-id={agent.agentId}
       data-depth={depth}
-      data-status={agent.status}
+      data-status={displayStatus}
       data-testid="agent-row"
       role="treeitem"
       style={depth > 0 ? { paddingLeft: `${depth * 14}px` } : undefined}
@@ -204,9 +210,9 @@ function AgentTreeRowItem({
                   {displayName}
                 </span>
                 <Badge
-                  className={cn("h-5 px-1.5 text-[10px]", agentStatusToneClass(agent.status))}
+                  className={cn("h-5 px-1.5 text-[10px]", agentStatusToneClass(displayStatus))}
                 >
-                  {t(agentStatusLabelKey(agent.status), { defaultValue: agent.status })}
+                  {t(agentStatusLabelKey(displayStatus), { defaultValue: displayStatus })}
                 </Badge>
                 {agent.agentType ? (
                   <span className="app-text-10 text-muted-foreground">{agent.agentType}</span>

@@ -10,7 +10,8 @@
  */
 import type { SessionRuntimeEvent } from "@/types/runtime";
 
-import type { TrajectoryEventKind } from "./types";
+import { TRAJECTORY_ITEM_ID_KEY, type TrajectoryEventKind } from "./types";
+import { subagentItemId } from "./entity-identity";
 
 export const CHAT_SSE_EVENT_PREFIX = "chat.sse.";
 
@@ -66,25 +67,6 @@ function readFiniteNumber(value: unknown): number | undefined {
   }
   return undefined;
 }
-
-/** 已知轨迹事件 kind（未知/未来事件跳过，保持 reducer 边界严格）。 */
-const KNOWN_TRAJECTORY_KINDS = new Set<TrajectoryEventKind>([
-  "meta",
-  "chunk",
-  "reasoning",
-  "tool_start",
-  "tool_call",
-  "tool_end",
-  "planning",
-  "orchestration",
-  "route",
-  "observation",
-  "subagent",
-  "result",
-  "done",
-  "error",
-  "runtime",
-]);
 
 /**
  * Assistant streaming events are emitted directly by the ReAct runtime rather
@@ -187,7 +169,19 @@ function eventEnvelope(
   return envelope;
 }
 
-/** 把一条 chat SSE 事件转为轨迹 push；非轨迹/未知 kind 返回 null。 */
+/**
+ * 把一条 chat SSE 事件转为轨迹 push；非 chat SSE 事件返回 null。
+ *
+ * P0-2（批次 20）：这里原有一份 `KNOWN_TRAJECTORY_KINDS` 前置白名单，未命中的
+ * kind 直接 `return null`。但本函数是恢复链路唯一的入闸处，白名单因此把
+ * `applySequencedEvent` 的 `unknown-<seq>` 兜底分支变成了死代码——后端新增一个
+ * emitter 名字时，前端只是「没有反应」，与「本来就没有这条事件」不可区分。
+ *
+ * 现在改为放行：未知 kind 进入 reducer 兜底，生成可见的降级 system 行
+ * （`apply.ts` 默认分支），把类型漂移从静默丢弃升级为可观测事件。chat 路径
+ * 当前发出的名字全部落在 reducer 已映射集合内，因此本改动不新增任何行；
+ * 它只在「后端新增 emitter 名字而前端未同步」时生效。已知 kind 归约语义不变。
+ */
 export function chatSseEventToTrajectoryPush(
   event: SessionRuntimeEvent,
 ): TrajectoryRecoveryPush | null {
@@ -195,9 +189,6 @@ export function chatSseEventToTrajectoryPush(
     return null;
   }
   const kind = event.type.slice(CHAT_SSE_EVENT_PREFIX.length) as TrajectoryEventKind;
-  if (!KNOWN_TRAJECTORY_KINDS.has(kind)) {
-    return null;
-  }
   const payload: Record<string, unknown> = { ...(event.payload ?? {}) };
   const seq = chatSseEventSeq(event);
   delete payload.seq;
@@ -348,9 +339,10 @@ export function toolProgressEventToTrajectoryPush(
  * - `tool_name` / `tool_call_id` / `partial` / `message` / `percent`：工具进度；
  * - `live: true` 标注镜像行（非父会话自身的工具调用）。
  *
- * live-only 事件无持久化 seq → `_event.sequence=0`：同一父流的所有镜像共用
- * `runtime-0` 一项（reducer 按 ID upsert），父轨迹只保留最新一条折叠行——
- * 与服务端「窗口内合并、状态变化穿透」的节流语义一致，不产生事件风暴行。
+ * live-only 事件无持久化 seq → `_event.sequence=0`，因此身份必须显式给出：
+ * `_trajectory_item_id = subagent:<child>`（见 entity-identity.ts）。每个子代理
+ * 一行、同一子代理的后续镜像就地更新（服务端已按窗口节流 + 状态变化穿透，不会
+ * 产生事件风暴行）。P1-1（批次 20）修复前所有子代理共用 `runtime-0` 而互相覆盖。
  */
 export function subagentProgressEventToTrajectoryPush(
   event: SessionRuntimeEvent,
@@ -372,6 +364,7 @@ export function subagentProgressEventToTrajectoryPush(
     ...source,
     agent_id: childId,
     live: true,
+    [TRAJECTORY_ITEM_ID_KEY]: subagentItemId(childId),
     _event: { sequence: 0 },
   };
   if (path) {

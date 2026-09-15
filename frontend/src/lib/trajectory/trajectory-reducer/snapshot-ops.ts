@@ -48,7 +48,8 @@ function headsEqual(a: TrajectoryHead, b: TrajectoryHead): boolean {
         a.phase === b.phase &&
         a.argsSummary === b.argsSummary &&
         a.resultSummary === b.resultSummary &&
-        a.errorMessage === b.errorMessage
+        a.errorMessage === b.errorMessage &&
+        a.degraded === b.degraded
       );
     case "structured":
       return (

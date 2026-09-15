@@ -6,12 +6,16 @@
 //     `closed` 可恢复，`unknown` **不提供任何动作**（不知道就别动）；
 //   * 分区沿用 jobs 面板口径（运行中 / 已结束），不按数组下标分页。
 
-import type { RuntimeAgentRecord, RuntimeAgentStatus } from "@/types/runtime";
+import type {
+  RuntimeAgentDisplayStatus,
+  RuntimeAgentRecord,
+  RuntimeAgentStatus,
+} from "@/types/runtime";
 
 export type SessionAgentSplit = {
   /** 仍在跑（含失联 stale，需人工处置）。 */
   running: RuntimeAgentRecord[];
-  /** 已结束（closed / unknown）。 */
+  /** 已结束（closed / unknown，以及容器已停但身份行还没关的 ended）。 */
   settled: RuntimeAgentRecord[];
 };
 
@@ -20,26 +24,61 @@ export function agentDisplayName(agent: RuntimeAgentRecord): string {
   return agent.nickname ?? agent.agentType ?? agent.agentId;
 }
 
-export function agentStatusLabelKey(status: RuntimeAgentStatus): string {
+export function agentStatusLabelKey(status: RuntimeAgentDisplayStatus): string {
   return `panels.agents.status.${status}`;
 }
 
-export function agentStatusToneClass(status: RuntimeAgentStatus): string {
+export function agentStatusToneClass(status: RuntimeAgentDisplayStatus): string {
   switch (status) {
     case "active":
       return "text-accent-primary";
     case "stale":
       return "text-analytics-warning";
     case "closed":
+    case "ended":
       return "text-muted-foreground";
     default:
       return "text-muted-foreground";
   }
 }
 
-/** active / stale 视为「运行中」（stale 是失联但未关闭，须人工干预）。 */
-export function isAgentRunning(status: RuntimeAgentStatus): boolean {
+/**
+ * active / stale 视为「运行中」（stale 是失联但未关闭，须人工干预）。
+ *
+ * 只认「运行中」的两个状态，`ended` / `closed` / `unknown` 一律落到已结束分区。
+ */
+export function isAgentRunning(status: RuntimeAgentDisplayStatus): boolean {
   return status === "active" || status === "stale";
+}
+
+/** 根容器行（当前会话自己）：会话在轮次之间本来就是 idle，不能算「已结束」。 */
+export function isRootAgentRecord(agent: RuntimeAgentRecord): boolean {
+  return agent.agentType === "root";
+}
+
+/**
+ * 展示状态：身份状态 + 运行态推导出的 `ended`。
+ *
+ * 收口纪律：
+ *   * 身份终态 / 未知优先（`closed` / `stale` / `unknown` 原样透传）：
+ *     `ended` 只描述「容器没在跑」，不得覆盖显式关闭与失联；
+ *   * 根容器行不做 `ended` 收敛（轮次之间的 idle 不代表主代理结束）；
+ *   * 运行态 `unknown`（后端未上报）→ 回退身份状态，**不臆断已结束**。
+ *
+ * 修复背景：后端身份行只有在显式 close / reclaim 时才变终态，子代理跑完一轮后
+ * 会话行仍是 open → 身份行长期 `active`，面板会一直显示「运行中」。
+ */
+export function agentDisplayStatus(agent: RuntimeAgentRecord): RuntimeAgentDisplayStatus {
+  if (agent.status !== "active") {
+    return agent.status;
+  }
+  if (isRootAgentRecord(agent)) {
+    return agent.status;
+  }
+  if (agent.runtimeState === "idle" || agent.runtimeState === "stopped") {
+    return "ended";
+  }
+  return agent.status;
 }
 
 /** 只有精确的 active / stale 才允许 Stop；unknown 不给动作。 */
@@ -56,7 +95,9 @@ export function splitSessionAgents(agents: RuntimeAgentRecord[]): SessionAgentSp
   const running: RuntimeAgentRecord[] = [];
   const settled: RuntimeAgentRecord[] = [];
   for (const agent of agents) {
-    if (isAgentRunning(agent.status)) {
+    // 分区看**展示状态**：身份行仍是 active 但容器已结束的子代理属于「已结束」，
+    // 否则面板会把跑完的子代理一直挂在「运行中」。
+    if (isAgentRunning(agentDisplayStatus(agent))) {
       running.push(agent);
     } else {
       settled.push(agent);

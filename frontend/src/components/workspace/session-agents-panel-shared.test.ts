@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   agentDisplayName,
+  agentDisplayStatus,
   agentDurationSpan,
   agentMetaFacts,
   agentPathSegments,
@@ -38,6 +39,7 @@ function agent(partial: Partial<RuntimeAgentRecord> & { agentId: string }): Runt
     model: null,
     difficulty: null,
     status: "active",
+    runtimeState: "unknown",
     createdAt: null,
     updatedAt: null,
     closedAt: null,
@@ -75,12 +77,51 @@ describe("动作可用性（未知状态不给动作）", () => {
     expect(isAgentRunning("active")).toBe(true);
     expect(isAgentRunning("stale")).toBe(true);
     expect(isAgentRunning("closed")).toBe(false);
+    expect(isAgentRunning("ended")).toBe(false);
     expect(isAgentRunning("unknown")).toBe(false);
   });
 
   it("状态文案键与状态一一对应", () => {
     expect(agentStatusLabelKey("active")).toBe("panels.agents.status.active");
     expect(agentStatusLabelKey("unknown")).toBe("panels.agents.status.unknown");
+  });
+});
+
+describe("agentDisplayStatus（身份状态 + 运行态 → 展示状态）", () => {
+  it("子代理身份 active 但容器 idle/stopped → ended", () => {
+    expect(
+      agentDisplayStatus(agent({ agentId: "c1", agentType: "child", runtimeState: "idle" })),
+    ).toBe("ended");
+    expect(
+      agentDisplayStatus(agent({ agentId: "c2", agentType: "child", runtimeState: "stopped" })),
+    ).toBe("ended");
+  });
+
+  it("容器在跑 / 运行态未知 → 保留身份 active（读不到 ≠ 已结束）", () => {
+    expect(
+      agentDisplayStatus(agent({ agentId: "c1", agentType: "child", runtimeState: "running" })),
+    ).toBe("active");
+    expect(
+      agentDisplayStatus(agent({ agentId: "c2", agentType: "child", runtimeState: "unknown" })),
+    ).toBe("active");
+  });
+
+  it("身份终态优先透传，不被运行态覆盖", () => {
+    expect(
+      agentDisplayStatus(agent({ agentId: "c1", agentType: "child", status: "closed", runtimeState: "idle" })),
+    ).toBe("closed");
+    expect(
+      agentDisplayStatus(agent({ agentId: "c2", agentType: "child", status: "stale", runtimeState: "idle" })),
+    ).toBe("stale");
+    expect(
+      agentDisplayStatus(agent({ agentId: "c3", agentType: "child", status: "unknown", runtimeState: "idle" })),
+    ).toBe("unknown");
+  });
+
+  it("根行按会话容器看待：轮次之间的 idle 不算结束", () => {
+    expect(
+      agentDisplayStatus(agent({ agentId: "root", agentType: "root", runtimeState: "idle" })),
+    ).toBe("active");
   });
 });
 
@@ -95,6 +136,32 @@ describe("splitSessionAgents", () => {
 
     expect(split.running.map((entry) => entry.agentId)).toEqual(["r", "s"]);
     expect(split.settled.map((entry) => entry.agentId)).toEqual(["c", "u"]);
+  });
+
+  it("身份行仍 active 但容器已停的子代理进「已结束」；根行 idle 留在「运行中」", () => {
+    const endedChild = agent({
+      agentId: "child-ended",
+      agentType: "child",
+      status: "active",
+      runtimeState: "idle",
+    });
+    const liveChild = agent({
+      agentId: "child-live",
+      agentType: "child",
+      status: "active",
+      runtimeState: "running",
+    });
+    const idleRoot = agent({
+      agentId: "root",
+      agentType: "root",
+      status: "active",
+      runtimeState: "idle",
+    });
+
+    const split = splitSessionAgents([endedChild, liveChild, idleRoot]);
+
+    expect(split.running.map((entry) => entry.agentId)).toEqual(["child-live", "root"]);
+    expect(split.settled.map((entry) => entry.agentId)).toEqual(["child-ended"]);
   });
 });
 

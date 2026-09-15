@@ -13,6 +13,7 @@ import {
   normalizeAgentCatalog,
   normalizeAgentMutation,
   normalizeRuntimeAgent,
+  normalizeRuntimeAgentRuntimeState,
   normalizeRuntimeAgentStatus,
   resolveAgentLimit,
   resumeRuntimeAgent,
@@ -38,6 +39,7 @@ const fullRecord = {
   effective_model: "deepseek-chat",
   difficulty: "hard",
   status: "active",
+  runtime_state: "idle",
   created_at: "2026-09-14T01:00:00Z",
   updated_at: "2026-09-14T01:05:00Z",
   closed_at: "2026-09-14T01:06:00Z",
@@ -71,9 +73,24 @@ describe("normalizeRuntimeAgent", () => {
       provider: "deepseek",
       model: "deepseek-chat",
       status: "active",
+      runtimeState: "idle",
       closedAt: "2026-09-14T01:06:00Z",
     });
     expect(agent?.routeWarnings).toEqual(["provider fallback", "model downgraded"]);
+  });
+
+  it("运行态缺失 / 取值未知一律收口为 unknown（不得当成已结束）", () => {
+    expect(normalizeRuntimeAgentRuntimeState("running")).toBe("running");
+    expect(normalizeRuntimeAgentRuntimeState(" IDLE ")).toBe("idle");
+    expect(normalizeRuntimeAgentRuntimeState("stopped")).toBe("stopped");
+    expect(normalizeRuntimeAgentRuntimeState("ended")).toBe("unknown");
+    expect(normalizeRuntimeAgentRuntimeState("")).toBe("unknown");
+    expect(normalizeRuntimeAgentRuntimeState(undefined)).toBe("unknown");
+
+    expect(normalizeRuntimeAgent({ agent_id: "a1" })?.runtimeState).toBe("unknown");
+    expect(
+      normalizeRuntimeAgent({ agent_id: "a1", runtime_state: "idle" })?.runtimeState,
+    ).toBe("idle");
   });
 
   it("缺 agent_id 时丢弃该条；非对象同样丢弃", () => {

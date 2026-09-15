@@ -78,6 +78,11 @@ export type TrajectoryHead =
       resultSummary?: string;
       errorMessage?: string;
       durationMs?: number;
+      /**
+       * true = 该行身份由 seq 兜底派生（帧缺失 tool_call_id / 后端 entity.degraded），
+       * 与后续权威帧**无法合并**（P1-2，批次 20）：显式标记，避免静默双行。
+       */
+      degraded?: boolean;
     }
   | {
       kind: "structured";

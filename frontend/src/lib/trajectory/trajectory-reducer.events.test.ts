@@ -12,13 +12,19 @@ import { createEmptyTrajectory } from "./types";
 import { chunk, reasoning, toolEvent } from "./trajectory-reducer.test-fixtures";
 
 describe("未知事件与 seq 契约（对齐 TestEncodeUnknownEvent）", () => {
-  it("未知 kind fallback 为 system Item", () => {
+  // P0-2（批次 20）：该分支此前被 recovery 的 kind 白名单挡成死代码，现在恢复
+  // 链路放行未知 kind，于是它是「类型漂移」唯一可见的落点——行身份与文案必须钉住。
+  it("未知 kind fallback 为 system Item（行身份 unknown-<seq>）", () => {
     const result = applyEvent(
       createEmptyTrajectory(),
       makeTrajectoryEvent("unknown" as never, 1, { note: "x" }),
     );
     expect(result.snapshot.items).toHaveLength(1);
-    expect(result.snapshot.items[0].head.kind).toBe("system");
+    expect(result.snapshot.items[0].id).toBe("unknown-1");
+    expect(result.snapshot.items[0].head).toEqual({
+      kind: "system",
+      note: "unknown event kind: unknown",
+    });
   });
 
   it("eventSeqOf 从 _event.sequence 提取 seq（P0-2 持久化 seq）", () => {

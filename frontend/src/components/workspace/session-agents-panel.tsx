@@ -26,6 +26,7 @@ import { Button } from "@/components/ui/button";
 import { DialogOverlay, DialogPanel } from "@/components/ui/dialog-shell";
 import { useDialogLifecycle } from "@/components/ui/use-dialog-lifecycle";
 import {
+  agentDisplayStatus,
   agentDisplayName,
   agentStatusLabelKey,
   agentStatusToneClass,
@@ -207,10 +208,10 @@ export function SessionAgentsPanel({ agents, onClose, open }: SessionAgentsPanel
                         <Badge
                           className={cn(
                             "h-5 px-1.5 text-[10px]",
-                            agentStatusToneClass(agent.status),
+                            agentStatusToneClass(agentDisplayStatus(agent)),
                           )}
                         >
-                          {t(agentStatusLabelKey(agent.status), {
+                          {t(agentStatusLabelKey(agentDisplayStatus(agent)), {
                             defaultValue: agent.status,
                           })}
                         </Badge>
