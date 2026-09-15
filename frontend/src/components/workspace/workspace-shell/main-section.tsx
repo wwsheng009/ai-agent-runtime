@@ -65,6 +65,7 @@ type WorkspaceMainSectionProps = Pick<
   | "onReasoningEffortChange"
   | "onRenameRuntimeSession"
   | "onResolvePendingApproval"
+  | "onRefreshSession"
   | "onRetryConnection"
   | "onPlanDecision"
   | "onPlanNotesChange"
@@ -86,6 +87,7 @@ type WorkspaceMainSectionProps = Pick<
   | "selectedProvider"
   | "selectedReasoningEffort"
   | "selectedThread"
+  | "sessionRefreshing"
   | "trajectoryStore"
   | "trajectoryEarlier"
 > & {
@@ -142,6 +144,7 @@ export function WorkspaceMainSection({
   onSubmit,
   pendingInteraction,
   onResolvePendingApproval,
+  onRefreshSession,
   onRetryConnection,
   onAnswerPendingQuestion,
   onPlanDecision,
@@ -173,6 +176,7 @@ export function WorkspaceMainSection({
   openSettings,
   onToggleRightRail,
   rightRailOpen,
+  sessionRefreshing,
   setMobileSidebarOpen,
   setViewMode,
   t,
@@ -252,9 +256,11 @@ export function WorkspaceMainSection({
         onOpenJobs={jobsSessionId ? () => setJobsPanelOpen(true) : undefined}
         onOpenSidebar={() => setMobileSidebarOpen(true)}
         onOpenSettings={() => openSettings("appearance")}
+        onRefreshSession={onRefreshSession}
         onRetryConnection={onRetryConnection}
         onToggleRightRail={onToggleRightRail}
         rightRailOpen={rightRailOpen}
+        sessionRefreshing={sessionRefreshing}
         selectedThread={selectedThread}
         threadSubtitle={threadSubtitle}
         threadStatusLabel={threadStatusLabel}

@@ -1,14 +1,19 @@
 import {
   ChartNoAxesCombinedIcon,
   DatabaseIcon,
+  FlaskConicalIcon,
   ListChecksIcon,
   MessageSquarePlusIcon,
   NetworkIcon,
   PanelLeftOpenIcon,
   PanelRightCloseIcon,
   PanelRightOpenIcon,
+  RadioTowerIcon,
+  RefreshCwIcon,
   Settings2Icon,
   TerminalSquareIcon,
+  WifiOffIcon,
+  type LucideIcon,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 
@@ -17,11 +22,31 @@ import { SessionGoalIndicator } from "@/components/workspace/session-goal-indica
 import { buttonVariants } from "@/components/ui/button-variants";
 import { Button } from "@/components/ui/button";
 import { ConnectionStatusBadge } from "@/components/ui/connection-status-badge";
+import {
+  getThreadTransportKind,
+  type WorkspaceThreadTransportKind,
+} from "@/components/workspace/workspace-shell-shared";
 import { type Thread } from "@/data/mock";
 import { useConnectionStatusLabels } from "@/hooks/workspace/use-connection-status-labels";
 import { type ConnectionStatus } from "@/lib/connection-status";
 import { cn } from "@/lib/utils";
 import { useTranslation } from "react-i18next";
+
+/**
+ * 传输通道的图标 / 配色：颜色复用 `--connection-*` 语义 token（亮暗主题都保持可读），
+ * 文本一律只走 tooltip（`title`）与无障碍标签，顶栏不再为它留一行文字宽度。
+ */
+const TRANSPORT_ICONS: Record<WorkspaceThreadTransportKind, LucideIcon> = {
+  live: RadioTowerIcon,
+  error: WifiOffIcon,
+  seeded: FlaskConicalIcon,
+};
+
+const TRANSPORT_TONE_CLASSNAMES: Record<WorkspaceThreadTransportKind, string> = {
+  live: "text-connection-online",
+  error: "text-connection-offline",
+  seeded: "text-muted-foreground",
+};
 
 type WorkspaceShellTopbarProps = {
   /** P2-1A：root → 当前会话的 lineage 链（≤1 段时不渲染面包屑）。 */
@@ -36,6 +61,8 @@ type WorkspaceShellTopbarProps = {
   liveJobsCount?: number;
   liveTeamCount: number;
   onRetryConnection?: () => void;
+  /** 刷新当前会话（重新拉取权威历史、运行时状态与列表投影；未提供时不渲染入口）。 */
+  onRefreshSession?: () => void;
   /** P2-1A：打开后台任务面板（未提供时不渲染入口）。 */
   onOpenJobs?: () => void;
   /** P2-1A：打开子代理控制面（未提供时不渲染入口）。 */
@@ -45,6 +72,8 @@ type WorkspaceShellTopbarProps = {
   /** 折叠/展开右侧栏（条目 / 计划 / 还原 / 会话用量 合并为同一面板）。 */
   onToggleRightRail: () => void;
   rightRailOpen: boolean;
+  /** 刷新在途：按钮禁用并转圈，避免重复触发。 */
+  sessionRefreshing?: boolean;
   selectedThread: Thread;
   threadStatusLabel: string;
   transportLabel: string;
@@ -61,11 +90,13 @@ export function WorkspaceShellTopbar({
   liveTeamCount,
   onOpenAgents,
   onOpenJobs,
+  onRefreshSession,
   onRetryConnection,
   onOpenSidebar,
   onOpenSettings,
   onToggleRightRail,
   rightRailOpen,
+  sessionRefreshing = false,
   selectedThread,
   threadSubtitle,
   threadStatusLabel,
@@ -76,6 +107,19 @@ export function WorkspaceShellTopbar({
   const { labels: connectionLabels, retryLabel } = useConnectionStatusLabels();
   const lineage = agentBreadcrumb ?? [];
   const showLineage = !isNewThread && lineage.length > 1;
+  const transportKind = getThreadTransportKind(selectedThread);
+  const TransportIcon = TRANSPORT_ICONS[transportKind];
+  // tooltip = 状态名 + 一句解释（解释按三态分别取值，避免动态 key 绕过资源类型检查）。
+  const transportHint =
+    transportKind === "live"
+      ? t("topbar.threadTransportHint.live")
+      : transportKind === "error"
+        ? t("topbar.threadTransportHint.error")
+        : t("topbar.threadTransportHint.seeded");
+  const transportTooltip = `${transportLabel} · ${transportHint}`;
+  const refreshSessionLabel = sessionRefreshing
+    ? t("topbar.refreshingSession")
+    : t("topbar.refreshSession");
 
   return (
     <header className="absolute inset-x-0 top-0 z-30 flex justify-center px-3 pt-1.5 sm:px-4">
@@ -145,15 +189,49 @@ export function WorkspaceShellTopbar({
               />
             ) : null}
             <Badge>{threadStatusLabel}</Badge>
-          <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
-            {transportLabel}
+            {liveTeamCount > 0 ? (
+              <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
+                {t("sidebar.active", { count: liveTeamCount })}
+              </div>
+            ) : null}
           </div>
-          {liveTeamCount > 0 ? (
-            <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
-              {t("sidebar.active", { count: liveTeamCount })}
-            </div>
-          ) : null}
-          </div>
+        ) : null}
+        {/* 传输状态 + 刷新放在状态簇之外：状态簇（目标 / 连接 / 线程状态）窄屏整块隐藏，
+            而这两件事任何宽度都要够得着。状态名与解释只在 tooltip / 无障碍标签里露出。 */}
+        {!isNewThread ? (
+          <>
+            <span
+              role="img"
+              aria-label={transportTooltip}
+              title={transportTooltip}
+              data-testid="topbar-transport-status"
+              data-transport-kind={transportKind}
+              className={cn(
+                "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-card",
+                TRANSPORT_TONE_CLASSNAMES[transportKind],
+              )}
+            >
+              <TransportIcon size={14} aria-hidden="true" />
+            </span>
+            {onRefreshSession ? (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6 shrink-0"
+                data-testid="topbar-refresh-session"
+                disabled={sessionRefreshing}
+                onClick={onRefreshSession}
+                aria-label={refreshSessionLabel}
+                title={refreshSessionLabel}
+              >
+                <RefreshCwIcon
+                  size={13}
+                  aria-hidden="true"
+                  className={cn(sessionRefreshing && "animate-spin")}
+                />
+              </Button>
+            ) : null}
+          </>
         ) : null}
         <Link
           to="/logs"

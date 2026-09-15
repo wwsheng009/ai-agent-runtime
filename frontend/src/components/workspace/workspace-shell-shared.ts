@@ -6,6 +6,9 @@ export type WorkspaceThreadTransportLabels = {
   seeded: string;
 };
 
+/** 传输通道三态：live=在线运行时；error=降级；seeded=预置预览。 */
+export type WorkspaceThreadTransportKind = "live" | "error" | "seeded";
+
 export type WorkspaceThreadCommandStateLabels = {
   runtimeStreamActive: string;
   readyForNextTurn: string;
@@ -22,7 +25,7 @@ export type WorkspaceThreadStatusLabels = {
 export type WorkspaceThreadSubtitleLabels = {
   needsRestoreWithSession: (sessionId: string) => string;
   needsRestore: string;
-  viaSource: (transportLabel: string, source: string) => string;
+  viaSource: (source: string) => string;
   session: (sessionId: string) => string;
 };
 
@@ -49,21 +52,31 @@ const defaultSubtitleLabels: WorkspaceThreadSubtitleLabels = {
   needsRestoreWithSession: (sessionId) =>
     `Session ${sessionId} needs restore attention`,
   needsRestore: "Runtime restore needs attention",
-  viaSource: (transportLabel, source) => `${transportLabel} via ${source}`,
+  viaSource: (source) => `via ${source}`,
   session: (sessionId) => `Session ${sessionId}`,
 };
+
+/**
+ * 传输三态的唯一判据：顶栏图标 / tooltip 与文本标签共用，
+ * 避免「图标说在线、文案说降级」这类两处各判一次造成的漂移。
+ */
+export function getThreadTransportKind(
+  thread: Thread,
+): WorkspaceThreadTransportKind {
+  if (thread.transport === "live") {
+    return "live";
+  }
+  if (thread.transport === "error") {
+    return "error";
+  }
+  return "seeded";
+}
 
 export function getThreadTransportLabel(
   thread: Thread,
   labels: WorkspaceThreadTransportLabels = defaultTransportLabels,
 ) {
-  if (thread.transport === "live") {
-    return labels.live;
-  }
-  if (thread.transport === "error") {
-    return labels.error;
-  }
-  return labels.seeded;
+  return labels[getThreadTransportKind(thread)];
 }
 
 export function getCommandStateLabel(
@@ -107,13 +120,16 @@ export function getThreadTopbarSubtitle(
       : labels.needsRestore;
   }
 
+  // 传输状态（在线运行时 / 运行时降级 / 预置预览）已由顶栏图标 + tooltip 承载，
+  // 副标题不再复述状态名，只留「这一轮消息从哪来」的来源信息。
   if (thread.sessionId && thread.runtimeSource) {
-    return labels.viaSource(transportLabel, thread.runtimeSource);
+    return labels.viaSource(thread.runtimeSource);
   }
 
   if (thread.sessionId) {
     return labels.session(thread.sessionId);
   }
 
+  // 无会话的预览线程没有来源可讲，退回传输名作兜底（此时它就是唯一元信息）。
   return transportLabel;
 }

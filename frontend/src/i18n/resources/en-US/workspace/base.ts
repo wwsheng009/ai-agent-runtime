@@ -99,6 +99,15 @@ export const enWorkspaceBase = {
       error: "Runtime degraded",
       seeded: "Seeded preview",
     },
+    threadTransportHint: {
+      live: "This thread is bound to the live runtime; messages come from the real session stream and the conversation can continue.",
+      error:
+        "The runtime connection is degraded; the local projection stays readable — use refresh or the connection badge retry to recover.",
+      seeded:
+        "Showing seeded preview data; no live runtime session is attached yet.",
+    },
+    refreshSession: "Refresh this session",
+    refreshingSession: "Refreshing this session…",
     threadStatus: {
       sessionAttached: "Session attached",
       previewThread: "Preview thread",
@@ -115,7 +124,7 @@ export const enWorkspaceBase = {
     subtitle: {
       needsRestoreWithSession: "Session {{sessionId}} needs restore attention",
       needsRestore: "Runtime restore needs attention",
-      viaSource: "{{transportLabel}} via {{source}}",
+      viaSource: "via {{source}}",
       session: "Session {{sessionId}}",
     },
   },

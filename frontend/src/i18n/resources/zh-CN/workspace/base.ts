@@ -91,6 +91,14 @@ export const zhWorkspaceBase = {
       error: "运行时降级",
       seeded: "预置预览",
     },
+    threadTransportHint: {
+      live: "本会话已附着实时运行时，消息来自真实会话流，可继续对话。",
+      error:
+        "运行时连接已降级，本地投影仍可阅读；点右侧刷新或连接徽标的「重试」恢复。",
+      seeded: "当前展示预置预览数据，尚未附着真实运行时会话。",
+    },
+    refreshSession: "刷新当前会话",
+    refreshingSession: "正在刷新当前会话…",
     threadStatus: {
       sessionAttached: "已附着会话",
       previewThread: "预览线程",
@@ -107,7 +115,7 @@ export const zhWorkspaceBase = {
     subtitle: {
       needsRestoreWithSession: "会话 {{sessionId}} 需要恢复关注",
       needsRestore: "运行时恢复需要关注",
-      viaSource: "{{transportLabel}} via {{source}}",
+      viaSource: "via {{source}}",
       session: "会话 {{sessionId}}",
     },
   },

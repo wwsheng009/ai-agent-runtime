@@ -43,6 +43,7 @@ export function WorkspaceShell({
   onAddWorkspaceDirectory,
   onRenameWorkspaceDirectory,
   onRemoveWorkspaceDirectory,
+  onRefreshSession,
   onRetryConnection,
   onCreateSessionInDirectory,
   onMoveRuntimeSession,
@@ -107,6 +108,7 @@ export function WorkspaceShell({
   selectedModel,
   selectedProvider,
   selectedReasoningEffort,
+  sessionRefreshing,
   earlierLoader,
   trajectoryStore = null,
   trajectoryEarlier,
@@ -173,11 +175,7 @@ export function WorkspaceShell({
     needsRestoreWithSession: (sessionId) =>
       t("topbar.subtitle.needsRestoreWithSession", { sessionId }),
     needsRestore: t("topbar.subtitle.needsRestore"),
-    viaSource: (transportLabelValue, source) =>
-      t("topbar.subtitle.viaSource", {
-        transportLabel: transportLabelValue,
-        source,
-      }),
+    viaSource: (source) => t("topbar.subtitle.viaSource", { source }),
     session: (sessionId) => t("topbar.subtitle.session", { sessionId }),
   });
 
@@ -329,6 +327,7 @@ export function WorkspaceShell({
           onReasoningEffortChange={onReasoningEffortChange}
           onRenameRuntimeSession={onRenameRuntimeSession}
           onResolvePendingApproval={onResolvePendingApproval}
+          onRefreshSession={onRefreshSession}
           onRetryConnection={onRetryConnection}
           onSelectBacktrackNavigationMessage={onSelectBacktrackNavigationMessage}
           onStopResponding={onStopResponding}
@@ -351,6 +350,7 @@ export function WorkspaceShell({
           selectedReasoningEffort={selectedReasoningEffort}
           selectedThread={selectedThread}
           rightRailOpen={rightRailOpen}
+          sessionRefreshing={sessionRefreshing}
           setMobileSidebarOpen={setMobileSidebarOpen}
           setViewMode={setViewMode}
           t={t}

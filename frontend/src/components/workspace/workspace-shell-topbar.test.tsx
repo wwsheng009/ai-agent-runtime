@@ -167,4 +167,82 @@ describe("WorkspaceShellTopbar", () => {
     renderTopbar({ connectionStatus: "idle", isNewThread: false });
     expect(container.querySelector("[data-connection-status]")).toBeNull();
   });
+
+  it("renders the transport state as an icon whose copy lives in the tooltip", () => {
+    renderTopbar({
+      isNewThread: false,
+      selectedThread: { ...thread, transport: "live" },
+      transportLabel: "在线运行时",
+    });
+
+    const marker = container.querySelector(
+      '[data-testid="topbar-transport-status"]',
+    );
+    expect(marker).toBeInstanceOf(HTMLElement);
+    expect(marker?.getAttribute("data-transport-kind")).toBe("live");
+    expect(marker?.getAttribute("aria-label")).toContain("在线运行时");
+    expect(marker?.getAttribute("title")).toContain("在线运行时");
+    expect(marker?.querySelector("svg")).toBeInstanceOf(SVGElement);
+    // 状态名只在 tooltip / 无障碍标签里，正文不再占文字宽度。
+    expect(container.textContent).not.toContain("在线运行时");
+  });
+
+  it("distinguishes the degraded and seeded transport states", () => {
+    renderTopbar({
+      isNewThread: false,
+      selectedThread: { ...thread, transport: "error" },
+      transportLabel: "运行时降级",
+    });
+    expect(
+      container
+        .querySelector('[data-testid="topbar-transport-status"]')
+        ?.getAttribute("data-transport-kind"),
+    ).toBe("error");
+
+    renderTopbar({
+      isNewThread: false,
+      selectedThread: { ...thread, transport: "mock" },
+      transportLabel: "预置预览",
+    });
+    expect(
+      container
+        .querySelector('[data-testid="topbar-transport-status"]')
+        ?.getAttribute("data-transport-kind"),
+    ).toBe("seeded");
+  });
+
+  it("refreshes the current session from the topbar icon and disables while pending", () => {
+    const onRefreshSession = vi.fn();
+    renderTopbar({ isNewThread: false, onRefreshSession });
+
+    const refreshButton = container.querySelector(
+      '[data-testid="topbar-refresh-session"]',
+    );
+    expect(refreshButton).toBeInstanceOf(HTMLButtonElement);
+    expect(refreshButton?.getAttribute("aria-label")).toBe("刷新当前会话");
+
+    act(() => {
+      refreshButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(onRefreshSession).toHaveBeenCalledTimes(1);
+
+    renderTopbar({ isNewThread: false, onRefreshSession, sessionRefreshing: true });
+    const pendingButton = container.querySelector(
+      '[data-testid="topbar-refresh-session"]',
+    );
+    expect(pendingButton?.hasAttribute("disabled")).toBe(true);
+    expect(pendingButton?.getAttribute("aria-label")).toBe("正在刷新当前会话…");
+  });
+
+  it("hides the refresh entry without a handler and on new threads", () => {
+    renderTopbar({ isNewThread: false });
+    expect(
+      container.querySelector('[data-testid="topbar-refresh-session"]'),
+    ).toBeNull();
+
+    renderTopbar({ isNewThread: true, onRefreshSession: vi.fn() });
+    expect(
+      container.querySelector('[data-testid="topbar-refresh-session"]'),
+    ).toBeNull();
+  });
 });

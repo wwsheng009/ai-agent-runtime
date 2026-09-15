@@ -4,6 +4,7 @@ import type { Thread } from "@/data/mock";
 import {
   getCommandStateLabel,
   getThreadStatusLabel,
+  getThreadTransportKind,
   getThreadTopbarSubtitle,
   getThreadTransportLabel,
 } from "@/components/workspace/workspace-shell-shared";
@@ -34,6 +35,20 @@ describe("workspace shell shared helpers", () => {
     expect(getThreadTransportLabel(createThread({ transport: "mock" }))).toBe(
       "Seeded preview",
     );
+  });
+
+  it("maps thread transport to the icon/tone kind used by the topbar", () => {
+    expect(getThreadTransportKind(createThread({ transport: "live" }))).toBe(
+      "live",
+    );
+    expect(getThreadTransportKind(createThread({ transport: "error" }))).toBe(
+      "error",
+    );
+    // 未标注 / mock 一律按「预置预览」呈现，与文本标签同一口径。
+    expect(getThreadTransportKind(createThread({ transport: "mock" }))).toBe(
+      "seeded",
+    );
+    expect(getThreadTransportKind(createThread())).toBe("seeded");
   });
 
   it("derives command state labels from response state and session context", () => {
@@ -95,7 +110,8 @@ describe("workspace shell shared helpers", () => {
         }),
         "Live runtime",
       ),
-    ).toBe("Live runtime via default");
+      // 传输状态已由顶栏图标承载，副标题只留来源，避免同一状态在顶栏出现两次。
+    ).toBe("via default");
 
     expect(
       getThreadTopbarSubtitle(
@@ -106,5 +122,10 @@ describe("workspace shell shared helpers", () => {
         "Runtime degraded",
       ),
     ).toBe("Session session-restore needs restore attention");
+
+    // 无会话的预览线程没有来源可讲，退回传输名兜底。
+    expect(
+      getThreadTopbarSubtitle(createThread({ transport: "mock" }), "Seeded preview"),
+    ).toBe("Seeded preview");
   });
 });

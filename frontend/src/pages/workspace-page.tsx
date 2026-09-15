@@ -8,6 +8,7 @@ import { useRuntimeWorkspaceDirectories } from "@/hooks/workspace/use-runtime-wo
 import { useSessionBacktrack } from "@/hooks/workspace/use-session-backtrack";
 import { useSessionBranch } from "@/hooks/workspace/use-session-branch";
 import { useSessionHistorySync } from "@/hooks/workspace/use-session-history-sync";
+import { useSessionRefresh } from "@/hooks/workspace/use-session-refresh";
 import { usePendingInteractions } from "@/hooks/workspace/use-pending-interactions";
 import { useRuntimePlanMode } from "@/hooks/workspace/use-runtime-plan-mode";
 import { useSessionRuntimeState } from "@/hooks/workspace/use-session-runtime-state";
@@ -139,7 +140,6 @@ export function WorkspacePage() {
     threadId: string;
     title: string;
   } | null>(null);
-
   // 只有「当前会话正在生成回复」时才需要二次确认：后台会话的 turn 会让全局
   // isResponding 保持 true，因此按会话归属（流式消息挂在哪个线程上）判断。
   const currentSessionResponding = isThreadResponding(selectedThread, activeTurnId);
@@ -249,9 +249,8 @@ export function WorkspacePage() {
     sessionId: selectedThread?.sessionId,
   });
   // P2-1A：运行时状态快照（会话切换拉取一次）——重载 / 重连后重建未决审批与提问。
-  const { state: sessionRuntimeState } = useSessionRuntimeState(
-    selectedThread?.sessionId,
-  );
+  const { state: sessionRuntimeState, refresh: refreshSessionRuntimeState } =
+    useSessionRuntimeState(selectedThread?.sessionId);
   // P1-7：审批 / 提问 / 计划评审统一生命周期（事件流归约 → 决定投递 → 结果回填）。
   const {
     answerQuestion: answerPendingQuestion,
@@ -361,6 +360,14 @@ export function WorkspacePage() {
       void recoverSessionHistory();
     }
   }
+  // 顶栏「刷新当前会话」：历史 / 运行时状态 / 列表投影一次重拉（口径见 hook 注释）。
+  const { refreshSession: handleRefreshSession, sessionRefreshing } =
+    useSessionRefresh({
+      recoverHistory: recoverSessionHistory,
+      refreshRuntimeSessions: handleRefreshRuntimeSessions,
+      refreshRuntimeState: refreshSessionRuntimeState,
+      responding: currentSessionResponding,
+    });
   // 轨迹视图的「加载更早」入口（尾部优先窗口）：对象引用保持稳定，避免下游
   // 每次 render 收到新 prop（`window` 状态不变时不必重建）。
   const trajectoryEarlier = useMemo(
@@ -424,6 +431,7 @@ export function WorkspacePage() {
       onAddWorkspaceDirectory={addWorkspaceDirectory}
       onRenameWorkspaceDirectory={renameWorkspaceDirectory}
       onRemoveWorkspaceDirectory={removeWorkspaceDirectory}
+      onRefreshSession={handleRefreshSession}
       onRetryConnection={handleRetryConnection}
       onCreateSessionInDirectory={handleCreateSessionInDirectory}
       onRenameRuntimeSession={handleRenameRuntimeSession}
@@ -439,6 +447,7 @@ export function WorkspacePage() {
       runtimeClient={runtimeClient}
       selectedRuntimeSessionUserId={selectedRuntimeSessionUserId}
       selectedThread={selectedThread}
+      sessionRefreshing={sessionRefreshing}
       selectedArtifact={selectedArtifact}
       selectedArtifactId={selectedArtifactId}
       composerAttachments={composerAttachments}

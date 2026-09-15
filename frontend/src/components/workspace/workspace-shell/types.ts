@@ -65,6 +65,10 @@ export type WorkspaceShellProps = {
   onRemoveWorkspaceDirectory: (id: string) => Promise<void>;
   /** P1-8：手动重试连接（复用既有 seq 游标续传，不新建退避循环）。 */
   onRetryConnection?: () => void;
+  /** 顶栏「刷新当前会话」：重拉权威历史 / 运行时状态快照 / 会话列表投影；缺省不渲染入口。 */
+  onRefreshSession?: () => void | Promise<void>;
+  /** 刷新在途标记（顶栏刷新按钮禁用并转圈）。 */
+  sessionRefreshing?: boolean;
   onCreateSessionInDirectory: (request: {
     path: string;
     directoryId?: string;
