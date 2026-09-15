@@ -10,6 +10,7 @@ import {
   createMissingKeyHandler,
   type FallbackReporter,
 } from "./fallback";
+import { installLanguageCodeCache } from "./language-code-cache";
 import type { ResolvedLocale } from "./locale";
 import { defaultNS, resources } from "./resources";
 
@@ -65,6 +66,7 @@ export async function createI18nInstance(
   const instance = createInstance();
   instance.on("languageChanged", (language) => applyDocumentLang(language));
   await instance.init(buildInitOptions(initialLocale, reporter));
+  installLanguageCodeCache(instance);
   return instance;
 }
 
@@ -80,6 +82,7 @@ export function initI18n(initialLocale: ResolvedLocale) {
   void i18next
     .use(initReactI18next)
     .init(buildInitOptions(initialLocale, fallbackReporter));
+  installLanguageCodeCache(i18next);
   i18next.on("languageChanged", (language) => applyDocumentLang(language));
   applyDocumentLang(initialLocale);
 

@@ -44,6 +44,28 @@ export function isAwayFromBottom(
   return distanceFromBottom(metrics) > threshold;
 }
 
+/**
+ * 贴底跟随期间判定「用户是否把视图拉离底部」。
+ *
+ * 与 `isAwayFromBottom` 的区别：贴底时 `scrollTop` 是由宿主自己钉住的，读数与
+ * 「离底距离」之间存在两个**非用户意图**的假阳性来源：
+ *   1. 内容增长：`max` 变大而 `scrollTop` 还停在上一次钉住的位置（一次成批 chunk
+ *      提交可以轻松超过阈值）；
+ *   2. 内容收缩：浏览器把 `scrollTop` 夹到新的 `max`，读数反而变小。
+ * 两者都会被 `distanceFromBottom` 误判成「用户滚上去了」，进而错误地关掉跟随
+ * ——实测在流式 + 断言/长任务造成成批提交时，跟随会在中途停掉，底部漂移上百像素。
+ *
+ * 因此贴底期间只比「用户意图」：`scrollTop` 是否被拉到低于上次钉住位置
+ * （收缩到新 max 时按新 max 收口）超过阈值。
+ */
+export function isAwayFromPinnedTop(
+  metrics: ScrollMetrics,
+  pinnedTop: number,
+  threshold: number = SCROLL_FOLLOW_THRESHOLD,
+): boolean {
+  return metrics.scrollTop < Math.min(pinnedTop, maxScrollTop(metrics)) - threshold;
+}
+
 export function maxScrollTop(metrics: ScrollMetrics): number {
   return Math.max(0, metrics.scrollHeight - metrics.clientHeight);
 }

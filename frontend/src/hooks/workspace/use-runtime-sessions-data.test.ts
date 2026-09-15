@@ -228,6 +228,126 @@ describe("use-runtime-sessions-data helpers", () => {
     expect(readStoredRuntimeSessions(storage, "user-1")).toEqual([]);
   });
 
+  it("reuses sort and summary results for an unchanged sessions reference", () => {
+    const sessions = [
+      {
+        createdAt: "2026-05-01T08:00:00Z",
+        id: "session-reuse-older",
+        state: "active",
+        updatedAt: "2026-05-01T08:30:00Z",
+      },
+      {
+        createdAt: "2026-05-01T09:00:00Z",
+        id: "session-reuse-newer",
+        state: "idle",
+        updatedAt: "2026-05-01T09:30:00Z",
+      },
+    ];
+
+    const sortedFirst = sortRuntimeSessions(sessions);
+    expect(sortRuntimeSessions(sessions)).toBe(sortedFirst);
+
+    const summaryFirst = summarizeRuntimeSessions(sessions);
+    expect(summarizeRuntimeSessions(sessions)).toBe(summaryFirst);
+
+    // 新引用、同内容：结果等值但会重算（不影响正确性，只影响开销）。
+    const sortedClone = sortRuntimeSessions([...sessions]);
+    expect(sortedClone).not.toBe(sortedFirst);
+    expect(sortedClone.map((session) => session.id)).toEqual([
+      "session-reuse-newer",
+      "session-reuse-older",
+    ]);
+  });
+
+  it("resolves each session timestamp once per sort", () => {
+    const sessions = Array.from({ length: 40 }, (_unused, index) => ({
+      createdAt: `2026-05-0${(index % 9) + 1}T08:00:00Z`,
+      id: `session-parse-${String(index).padStart(2, "0")}`,
+      state: "active",
+      updatedAt: `2026-05-0${(index % 9) + 1}T09:00:00Z`,
+    }));
+    const parseSpy = vi.spyOn(Date, "parse");
+
+    try {
+      sortRuntimeSessions(sessions);
+
+      expect(parseSpy).toHaveBeenCalledTimes(sessions.length);
+    } finally {
+      parseSpy.mockRestore();
+    }
+  });
+
+  it("orders sessions without a parsable timestamp by id", () => {
+    const sorted = sortRuntimeSessions([
+      { id: "session-order-c", state: "active" },
+      { createdAt: "n/a", id: "session-order-a", state: "active" },
+      {
+        id: "session-order-b",
+        state: "active",
+        updatedAt: "2026-05-01T09:00:00Z",
+      },
+    ]);
+
+    expect(sorted.map((session) => session.id)).toEqual([
+      "session-order-a",
+      "session-order-b",
+      "session-order-c",
+    ]);
+  });
+
+  it("reuses the parsed cache array for unchanged stored sessions", () => {
+    const storage = new MemoryStorage();
+    const cachedSession = {
+      createdAt: "2026-05-02T08:00:00Z",
+      id: "session-read-cache",
+      state: "active",
+      updatedAt: "2026-05-02T08:30:00Z",
+    };
+    writeStoredRuntimeSessions(storage, "user-read-cache", [cachedSession]);
+
+    const first = readStoredRuntimeSessions(storage, "user-read-cache");
+    expect(readStoredRuntimeSessions(storage, "user-read-cache")).toBe(first);
+    // 空 storage：命中「没有缓存」分支。
+    expect(readStoredRuntimeSessions(new MemoryStorage(), "user-read-cache")).toEqual(
+      [],
+    );
+    // 另一个 storage 实例、同样内容：必须重新解析，不能复用上个实例的数组。
+    const otherStorage = new MemoryStorage();
+    writeStoredRuntimeSessions(otherStorage, "user-read-cache", [cachedSession]);
+    const otherRead = readStoredRuntimeSessions(otherStorage, "user-read-cache");
+    expect(otherRead).not.toBe(first);
+    expect(otherRead).toEqual(first);
+  });
+
+  it("skips rewriting an unchanged stored sessions payload", () => {
+    const storage = new MemoryStorage();
+    const sessions = [
+      {
+        createdAt: "2026-05-03T08:00:00Z",
+        id: "session-write-skip",
+        state: "active",
+        updatedAt: "2026-05-03T08:30:00Z",
+      },
+    ];
+    const setItemSpy = vi.spyOn(storage, "setItem");
+
+    writeStoredRuntimeSessions(storage, "user-write-skip", sessions);
+    expect(setItemSpy).toHaveBeenCalledTimes(1);
+
+    writeStoredRuntimeSessions(storage, "user-write-skip", [...sessions]);
+    expect(setItemSpy).toHaveBeenCalledTimes(1);
+
+    writeStoredRuntimeSessions(storage, "user-write-skip", [
+      { ...sessions[0], state: "closed", updatedAt: "2026-05-03T09:30:00Z" },
+    ]);
+    expect(setItemSpy).toHaveBeenCalledTimes(2);
+    expect(
+      readStoredRuntimeSessions(storage, "user-write-skip")[0]?.state,
+    ).toBe("closed");
+
+    setItemSpy.mockRestore();
+  });
+
   it("uses a capped retry backoff for runtime session reloads", () => {
     expect(resolveRuntimeSessionsRetryDelay(0)).toBe(1200);
     expect(resolveRuntimeSessionsRetryDelay(1)).toBe(2500);

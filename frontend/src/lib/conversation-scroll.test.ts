@@ -5,6 +5,7 @@ import {
   distanceFromBottom,
   forgetConversationAnchor,
   isAwayFromBottom,
+  isAwayFromPinnedTop,
   maxScrollTop,
   pickConversationAnchor,
   pickReadingLineIndex,
@@ -48,6 +49,31 @@ describe("distance / bottom ownership", () => {
     expect(clampScrollTop(-40, 1400)).toBe(0);
     expect(clampScrollTop(9999, 1400)).toBe(1400);
     expect(clampScrollTop(Number.NaN, 1400)).toBe(0);
+  });
+
+  it("treats stream growth as still pinned instead of as user intent", () => {
+    // 上一次钉底时 max=1400；这一帧内容长了 400px，scrollTop 还没跟上。
+    const grown = { clientHeight: 600, scrollHeight: 2400, scrollTop: 1400 };
+    expect(isAwayFromPinnedTop(grown, 1400)).toBe(false);
+    // 同一份读数用「离底距离」判定就会误判成用户离开底部（真实回归就发生在这里）。
+    expect(isAwayFromBottom(grown)).toBe(true);
+  });
+
+  it("treats browser-side clamping on shrink as still pinned", () => {
+    // 内容收缩后浏览器把 scrollTop 夹到新的 max=1200：读数变小但不是用户滚动。
+    const shrunk = { clientHeight: 600, scrollHeight: 1800, scrollTop: 1200 };
+    expect(isAwayFromPinnedTop(shrunk, 1400)).toBe(false);
+  });
+
+  it("still detects a real scroll-up while following", () => {
+    const base = { clientHeight: 600, scrollHeight: 2000 };
+    expect(isAwayFromPinnedTop({ ...base, scrollTop: 1400 }, 1400)).toBe(false);
+    expect(
+      isAwayFromPinnedTop({ ...base, scrollTop: 1400 - SCROLL_FOLLOW_THRESHOLD }, 1400),
+    ).toBe(false);
+    expect(
+      isAwayFromPinnedTop({ ...base, scrollTop: 1400 - SCROLL_FOLLOW_THRESHOLD - 1 }, 1400),
+    ).toBe(true);
   });
 });
 

@@ -21,6 +21,7 @@ import type { RefObject } from "react";
 
 import {
   isAwayFromBottom,
+  isAwayFromPinnedTop,
   maxScrollTop,
   pickConversationAnchor,
   pickReadingLineIndex,
@@ -93,6 +94,19 @@ export function useConversationScroll({
    */
   const rowsCacheRef = useRef<ReadingLineRow[] | null>(null);
   const rowsCacheFrameRef = useRef(0);
+  /**
+   * ResizeObserver 是否在管：回调在**布局之后**投递，那里钉底线不需要强制回流。
+   * 它接管之后布局效应里的同步 `pinToBottom()` 就是纯浪费 —— 每次流式提交
+   * 一次 `scrollTop = scrollHeight` 读，等于把整棵布局树同步重排一遍
+   * （实测单帧 3~5 次全量布局、每次约 6ms，是剩余长任务的主要来源）。
+   */
+  const resizeObserverActiveRef = useRef(false);
+  /**
+   * 最近一次成功钉底时的 `scrollTop`。贴底期间的离底判定以它为基准（见
+   * `isAwayFromPinnedTop`）：流式内容成批增长时，`max - top` 会短暂超过阈值，
+   * 那是宿主自己还没钉上的差值，不是用户意图。
+   */
+  const pinnedTopRef = useRef<number | null>(null);
   /** active 标记（reading-line 命中行）的刷新节流时间戳。 */
   const markerSyncAtRef = useRef(0);
 
@@ -193,6 +207,9 @@ export function useConversationScroll({
       return;
     }
     container.scrollTop = container.scrollHeight;
+    // 写入后回读一次：浏览器会把超出的值夹到真实 max，这里存的是**已生效**的位置，
+    // 后续离底判定才有稳定基准。
+    pinnedTopRef.current = container.scrollTop;
   }, [containerRef]);
 
   /** 把锚点行拉回原视口偏移；锚点行不在 DOM（被移除/折叠）时放弃调整。 */
@@ -234,7 +251,12 @@ export function useConversationScroll({
     return {
       activeId: activeIndex >= 0 ? rows[activeIndex].id : null,
       anchor: pickConversationAnchor(rows, metrics.clientHeight),
-      away: isAwayFromBottom(metrics),
+      // 贴底期间：只看用户有没有把 scrollTop 拉回去（内容增长/收缩都不算）。
+      // 非贴底期间：仍按离底距离判定，回答「用户是否已经回到贴底区」。
+      away:
+        stickRef.current && pinnedTopRef.current !== null
+          ? isAwayFromPinnedTop(metrics, pinnedTopRef.current)
+          : isAwayFromBottom(metrics),
     };
   }, [readMetrics, readRows]);
 
@@ -265,6 +287,9 @@ export function useConversationScroll({
       const nextStick = !snapshot.away;
       if (nextStick !== stickRef.current) {
         stickRef.current = nextStick;
+        // 所有权切换：钉底基准随之作废。恢复跟随后由下一次钉底重建，
+        // 在那之前离底判定回落到「距离」语义，避免拿陈旧基准误判。
+        pinnedTopRef.current = null;
         setStickToBottom(nextStick);
       }
       setActiveMessageId((current) =>
@@ -343,8 +368,10 @@ export function useConversationScroll({
       typeof ResizeObserver === "undefined" ||
       suspended
     ) {
+      resizeObserverActiveRef.current = false;
       return;
     }
+    resizeObserverActiveRef.current = true;
     const observer = new ResizeObserver(() => {
       if (suspendedRef.current) {
         return;
@@ -359,6 +386,7 @@ export function useConversationScroll({
     observer.observe(content);
     observer.observe(container);
     return () => {
+      resizeObserverActiveRef.current = false;
       observer.disconnect();
     };
   }, [
@@ -392,12 +420,20 @@ export function useConversationScroll({
         stickRef.current = !snapshot.away;
       }
     }
+    if (keyChanged || resumed) {
+      // 线程切换 / 让出恢复：上一次会话的钉底基准不再代表任何东西。
+      pinnedTopRef.current = null;
+    }
     if (keyChanged && anchorRef.current) {
       // 首次进入该线程：按记忆恢复阅读位置（锚点贴近底部时等价于贴底）。
       restoreAnchor(anchorRef.current);
       scheduleMarkerSync(true);
     } else if (stickRef.current) {
-      pinToBottom();
+      // 贴底跟随：有 ResizeObserver 时底线由它在布局后钉住（同一帧、绘制前，视觉等价），
+      // 这里同步再读一次 scrollHeight 只会换出一次强制全量布局。
+      if (!resizeObserverActiveRef.current) {
+        pinToBottom();
+      }
       // 贴底跟随期间只需要钉住底线；active 标记是纯视觉状态，节流刷新即可，
       // 这样流式提交不再每帧触发整表几何扫掠。
       scheduleMarkerSync(keyChanged || resumed);

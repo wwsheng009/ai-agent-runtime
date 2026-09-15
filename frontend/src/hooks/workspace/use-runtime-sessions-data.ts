@@ -1,7 +1,7 @@
 // 由 hooks/workspace/use-runtime-sessions-data.ts 机械拆分而来（P0-2），仅搬迁不改语义。
 // 对外导出面保持不变，消费方 import 路径零改动；实现见 ./runtime-sessions-data/ 各模块。
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   listRuntimeSessionUsers,
@@ -42,18 +42,38 @@ export {
   mergePinnedRuntimeSession,
 } from "./runtime-sessions-data/loading";
 
+/** 挂载时一次性读取的本地缓存快照（见 `useRuntimeSessionsData` 热路径说明）。 */
+type InitialSessionsSnapshot = {
+  selectedUserId: string;
+  sessions: RuntimeSessionRecord[];
+};
+
 export function useRuntimeSessionsData({
   pinnedSessionId,
   userId,
 }: RuntimeSessionsDataOptions = {}) {
-  const fallbackUserId = userId?.trim() || getRuntimeClientIdentity().userId;
-  const initialSelectedUserId =
-    readStoredRuntimeSessionUserId(getBrowserStorage()) || fallbackUserId;
-  const resolvedPinnedSessionId = normalizeSessionId(pinnedSessionId);
-  const initialStoredSessions = readStoredRuntimeSessions(
-    getBrowserStorage(),
-    initialSelectedUserId,
+  // 热路径说明：本 hook 由 workspace 页调用，流式回复期间每帧都会重渲染。原来的
+  // 身份解析（localStorage 读 + 正则归一化）与本地缓存读取（186KB JSON.parse +
+  // 300+ 会话归一化）直接写在渲染体里，等于**每帧重算一次**。下面分别用 useMemo
+  // （跟随 userId 变化）与惰性 ref（挂载时读一次缓存）收敛。
+  const fallbackUserId = useMemo(
+    () => userId?.trim() || getRuntimeClientIdentity().userId,
+    [userId],
   );
+  const initialSnapshotRef = useRef<InitialSessionsSnapshot | null>(null);
+  if (initialSnapshotRef.current === null) {
+    const selectedUserId =
+      readStoredRuntimeSessionUserId(getBrowserStorage()) || fallbackUserId;
+    initialSnapshotRef.current = {
+      selectedUserId,
+      sessions: readStoredRuntimeSessions(getBrowserStorage(), selectedUserId),
+    };
+  }
+  const {
+    selectedUserId: initialSelectedUserId,
+    sessions: initialStoredSessions,
+  } = initialSnapshotRef.current;
+  const resolvedPinnedSessionId = normalizeSessionId(pinnedSessionId);
   const [reloadToken, setReloadToken] = useState(0);
   const retryTimeoutRef = useRef<number | null>(null);
   const retryAttemptRef = useRef(0);
@@ -77,7 +97,11 @@ export function useRuntimeSessionsData({
     initialStoredSessions.length === 0,
   );
   const [runtimeSessionsRefreshing, setRuntimeSessionsRefreshing] = useState(false);
-  const runtimeSessionsSummary = summarizeRuntimeSessions(runtimeSessions);
+  // 汇总同样每帧被调用；输入引用不变时 `summarizeRuntimeSessions` 会命中内部记忆。
+  const runtimeSessionsSummary = useMemo(
+    () => summarizeRuntimeSessions(runtimeSessions),
+    [runtimeSessions],
+  );
 
   function clearPendingRetry() {
     if (retryTimeoutRef.current !== null && typeof window !== "undefined") {
