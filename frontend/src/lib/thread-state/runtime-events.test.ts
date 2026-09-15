@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  applyRuntimeEventToThread,
   buildStreamingMessageSegments,
   createStreamingAssistantMessage,
   mergeRuntimeSessionsIntoThreads,
@@ -119,5 +120,98 @@ describe("runtime events and session merge", () => {
     );
 
     expect(message.segments).toEqual([]);
+  });
+
+  // 回归：合并结果必须「内容没变 ⇒ 身份不变」。缺 updatedAt/createdAt 的会话此前
+  // 每次合并都会生成新的 ISO 时间戳，导致 changed 恒为 true、线程数组每事件换新、
+  // 下游 memo 全部失效（流式期间每事件一次全页重渲染）。
+  it("会话列表无变化时合并返回同一数组（不产生虚假变更）", () => {
+    const sessions: RuntimeSessionRecord[] = [
+      {
+        id: "session-stable",
+        state: "active",
+        metadata: { title: "Stable thread" },
+      },
+    ];
+
+    const first = mergeRuntimeSessionsIntoThreads([], sessions);
+    expect(first).toHaveLength(1);
+
+    const second = mergeRuntimeSessionsIntoThreads(first, sessions);
+    expect(second).toBe(first);
+
+    // 同一份快照重复合并同样不该换身份（每个 SSE 事件都会重跑一次）。
+    const third = mergeRuntimeSessionsIntoThreads(first, [...sessions]);
+    expect(third).toBe(first);
+  });
+
+  it("会话更新后仍复用同一条线程（索引替换路径不丢匹配）", () => {
+    const seeded = mergeRuntimeSessionsIntoThreads([], [
+      { id: "session-a", state: "active", metadata: { title: "First" } },
+      { id: "session-b", state: "active", metadata: { title: "Second" } },
+    ]);
+    expect(seeded).toHaveLength(2);
+
+    const next = mergeRuntimeSessionsIntoThreads(seeded, [
+      {
+        id: "session-a",
+        state: "active",
+        metadata: { title: "First" },
+        updatedAt: "2026-03-31T12:00:00Z",
+      },
+      { id: "session-b", state: "active", metadata: { title: "Second" } },
+    ]);
+
+    expect(next).toHaveLength(2);
+    expect(next.find((thread) => thread.sessionId === "session-a")?.updatedAt).toBe(
+      "2026-03-31T12:00:00Z",
+    );
+  });
+
+  // 回归：运行时事件产物承担「最近 100 条事件的完整 payload」，每来一个事件都会
+  // 重建一次。惰性化后未读取 content 就不该付出 JSON.stringify 成本（CDP 实测
+  // 单回合 729ms），但读到的字符串必须与 eager 版本完全一致。
+  it("运行时事件产物惰性序列化，且 content 与 eager 结果一致", () => {
+    let serializations = 0;
+    const event: SessionRuntimeEvent = {
+      type: "runtime.step",
+      timestamp: "2026-03-31T00:02:00Z",
+      payload: {
+        seq: 7,
+        probe: {
+          toJSON: () => {
+            serializations += 1;
+            return "probe-value";
+          },
+        },
+      },
+    };
+
+    const nextThread = applyRuntimeEventToThread(
+      createThread(),
+      "session-1",
+      [event],
+      event,
+    );
+    const artifact = nextThread.artifacts.find(
+      (item) => item.id === "session-runtime-events-session-1",
+    );
+
+    expect(artifact).toBeDefined();
+    expect(serializations).toBe(0);
+
+    // 期望串自身会触发一次 toJSON，因此按「增量」断言：读取 content 只多一次。
+    const expected = JSON.stringify(
+      { session_id: "session-1", count: 1, events: [event] },
+      null,
+      2,
+    );
+    const afterExpected = serializations;
+
+    expect(artifact?.content).toBe(expected);
+    expect(serializations).toBe(afterExpected + 1);
+    // 记忆化：重复读取不再重新序列化。
+    expect(artifact?.content).toContain("probe-value");
+    expect(serializations).toBe(afterExpected + 1);
   });
 });

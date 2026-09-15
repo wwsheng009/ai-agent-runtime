@@ -14,6 +14,7 @@ import {
   applyRuntimeDeltaToThread,
   applyRuntimeEventToThread,
   createRuntimeDeltaCoordinator,
+  getRuntimeDeltaKeyFromEvent,
   getRuntimeEventSeq,
   mergeRuntimeEvent,
   type RuntimeDeltaCoordinator,
@@ -240,6 +241,54 @@ describe("useSessionRuntimeStream delta gate", () => {
       (segment) => segment.type === "text",
     );
     expect(textSegment?.type === "text" ? textSegment.content : "").toBe("...");
+  });
+
+  it("keeps the delta key unclaimed when the runtime path cannot write it", async () => {
+    const coordinator = createRuntimeDeltaCoordinator();
+    const finalized = createThread();
+    finalized.messages[0] = {
+      ...finalized.messages[0],
+      label: "",
+      streaming: false,
+    };
+    const { handlers, getThreads } = await renderWith(true, finalized, {
+      deltaCoordinator: coordinator,
+    });
+
+    const event = deltaEvent({ delta: "Hello", sequence: 11 });
+    act(() => {
+      handlers.onEvent?.(event);
+    });
+
+    const textSegment = getThreads()[0].messages[0].segments.find(
+      (s) => s.type === "text",
+    );
+    expect(textSegment?.type === "text" ? textSegment.content : "").toBe("...");
+    // 运行时通道写不进这条消息（已定稿）→ 不得消费去重 key，否则
+    // /api/agent/chat 通道拿到同一 key 会直接 return：两条通道互相让路，
+    // 增量帧全部到达却一帧也不渲染（等 turn 结束由最终快照整块定型）。
+    expect(coordinator.claim(getRuntimeDeltaKeyFromEvent(event))).toBe(true);
+  });
+
+  it("claims the delta key once the runtime path renders it", async () => {
+    const coordinator = createRuntimeDeltaCoordinator();
+    const { handlers, getThreads } = await renderWith(true, createThread(), {
+      deltaCoordinator: coordinator,
+    });
+
+    const event = deltaEvent({ delta: " typed", sequence: 12 });
+    act(() => {
+      handlers.onEvent?.(event);
+    });
+
+    const textSegment = getThreads()[0].messages[0].segments.find(
+      (s) => s.type === "text",
+    );
+    expect(textSegment?.type === "text" ? textSegment.content : "").toBe(
+      " typed",
+    );
+    // 已渲染 → key 必须被消费，避免 /api/agent/chat 通道重复追加同一帧。
+    expect(coordinator.claim(getRuntimeDeltaKeyFromEvent(event))).toBe(false);
   });
 
   it("uses the latest turn ref without reconnecting the runtime stream", async () => {

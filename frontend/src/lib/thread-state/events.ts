@@ -5,6 +5,7 @@ import { type SessionRuntimeEvent } from "@/types/runtime";
 
 import { buildGeneratedImagePlaceholderSegment, upsertGeneratedImageSegment } from "./generated-images";
 import { buildRuntimeEventKey, buildSessionRuntimeEventsArtifact, MAX_RUNTIME_EVENTS } from "./history-artifacts";
+import { getRuntimeDeltaKind, matchesActiveTurn } from "./deltas";
 import { STREAM_PLACEHOLDER_TEXT } from "./messages";
 import { getRuntimeEventSeq } from "./sessions";
 import { mergeUniqueStrings, upsertArtifact } from "./shared";
@@ -84,11 +85,9 @@ export function applyRuntimeDeltaToThread(
   expectedTurnId?: string,
 ): Thread {
   const eventTurnId = getRuntimeEventTurnId(event);
-  if (
-    expectedTurnId &&
-    eventTurnId &&
-    expectedTurnId !== eventTurnId
-  ) {
+  // 与 useSessionRuntimeStream 的实时门控共用同一判定（见 matchesActiveTurn）：
+  // 事件未携带 turn 身份时视为「未知」而非「其他 turn」。
+  if (!matchesActiveTurn(expectedTurnId, eventTurnId)) {
     return thread;
   }
 
@@ -107,14 +106,15 @@ export function applyRuntimeDeltaToThread(
     return applied ? nextThread : thread;
   };
 
-  switch (event.type) {
-    case "assistant_delta":
+  // 分类统一走 getRuntimeDeltaKind：它是「事件名 → 增量种类」的唯一真源
+  // （含 `assistant.delta` 等总线双拼写别名），避免这里再维护一份 event.type
+  // 白名单——两份名单一旦漂移，dot 形态的增量会在本层被 default 静默吞掉。
+  switch (getRuntimeDeltaKind(event.type)) {
+    case "text":
       return appendAssistantTextDelta(thread, event, updateLiveAssistant);
-    case "assistant_reasoning":
-    case "assistant.reasoning":
-    case "assistant.reasoning_delta":
+    case "reasoning":
       return appendAssistantReasoningDelta(thread, event, updateLiveAssistant);
-    case "assistant.image_progress":
+    case "image":
       return appendAssistantImageProgress(thread, event, updateLiveAssistant);
     default:
       return thread;
@@ -399,11 +399,17 @@ function isLiveAssistantMessage(
   if (message.streaming !== true && message.label !== "streaming") {
     return false;
   }
-  // Once a request has an identity, an unlabelled or differently labelled
-  // durable event is unsafe: it may be a replay from an earlier turn.  Never
-  // fall back to the old global "currently responding" gate.
+  // 与 matchesActiveTurn / RuntimeDeltaCoordinator.claim 共用同一语义：
+  // 「未知」不等于「其他 turn」，只有两边都明确且不一致才拒绝。
+  //
+  // 旧实现要求「两边都为空」才放行，于是真后端最常见的两种形态——消息带
+  // chat turn 身份而 runtime 事件缺 turn_id，或反过来（两条通道的 turn 身份
+  // 空间本就不同）——会被整条拒绝：增量帧全部到达却一帧也写不进消息，
+  // 打字机退化成「turn 结束后一次性定型」（实测两路各约 1000 帧、DOM 全程
+  // 不动，24s 时整块蹦出）。回放安全由 hook 层 renderLiveDeltas 闸门兜底：
+  // 只在请求进行中应用增量，历史回放/reload 不走这条路径。
   if (message.runtimeTurnId && eventTurnId) {
     return message.runtimeTurnId === eventTurnId;
   }
-  return !message.runtimeTurnId && !eventTurnId;
+  return true;
 }

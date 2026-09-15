@@ -109,7 +109,11 @@ export function getRuntimeDeltaKind(
   eventType: string,
 ): RuntimeDeltaKind | null {
   switch (eventType) {
+    // 总线双拼写别名：runtimeobserve/known_types.go 明确记录
+    // `assistant.delta` 与 `assistant_delta` 两种形态都在用；漏归类会让
+    // 打字机增量在 dot 形态下整条静默丢弃（既不入消息也不占去重键）。
     case "assistant_delta":
+    case "assistant.delta":
       return "text";
     case "assistant_reasoning":
     case "assistant.reasoning":
@@ -120,6 +124,28 @@ export function getRuntimeDeltaKind(
     default:
       return null;
   }
+}
+
+/**
+ * 打字机增量的 turn 归属判定（两条投递通道共用同一语义）。
+ *
+ * 语义与 `applyRuntimeDeltaToThread` / `RuntimeDeltaCoordinator.claim` 一致：
+ * **「未知」不等于「其他 turn」**。事件没带 turn 身份时放行——provider 未暴露
+ * 身份（见 coordinator 注释）、后端 `loop.go` 仅在 `turnID != ""` 时注入
+ * `turn_id`，都会产生「事件无 turn 身份」的常态；此时若按严格相等拒绝，
+ * 真后端的增量会在 hook 层被整条丢弃，打字机退化成「流结束后一次性定型」。
+ * 只有两边都明确且不一致才拒绝，避免把别的 turn 的增量写进当前消息。
+ */
+export function matchesActiveTurn(
+  activeTurnId: string | undefined,
+  eventTurnId: string | undefined,
+): boolean {
+  const active = activeTurnId?.trim() ?? "";
+  const eventTurn = eventTurnId?.trim() ?? "";
+  if (!active || !eventTurn) {
+    return true;
+  }
+  return active === eventTurn;
 }
 
 export function getRuntimeDeltaKeyFromEvent(

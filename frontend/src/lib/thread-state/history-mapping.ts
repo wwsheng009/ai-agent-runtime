@@ -79,6 +79,39 @@ export function createJsonArtifact(
   };
 }
 
+/**
+ * 与 `createJsonArtifact` 同形，但 `content` 只在真正被读取时（产物面板/详情弹窗
+ * 渲染、导出）才序列化，并按产物实例记忆一次。
+ *
+ * 运行时事件产物（`session-runtime-events-*.json`）每来一个 SSE 事件就重建一次，
+ * 而它承载的是最近 100 条事件的完整 payload：CDP CPU profile 实测
+ * `createJsonArtifact` 单个回合 729ms（≈1ms × 734 个事件），且每次都产出几十 KB
+ * 字符串再丢掉（GC 压力）。流式期间没有任何 UI 会读它，因此把序列化推迟到读取时
+ * 即可，语义（`artifact.content` 的字符串内容）完全不变。
+ */
+export function createLazyJsonArtifact(
+  id: string,
+  filename: string,
+  summary: string,
+  buildPayload: () => unknown,
+): Artifact {
+  let cached: string | undefined;
+  return {
+    id,
+    name: filename,
+    path: `runtime/${filename}`,
+    summary,
+    kind: "json",
+    language: "json",
+    get content() {
+      if (cached === undefined) {
+        cached = JSON.stringify(buildPayload(), null, 2);
+      }
+      return cached;
+    },
+  };
+}
+
 function readHistoryMessageIdentity(
   message: SessionHistoryMessage,
 ): string | undefined {

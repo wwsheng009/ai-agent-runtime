@@ -4,7 +4,11 @@ import { type Artifact, type Thread } from "@/data/mock";
 import { normalizeSessionId } from "@/lib/session-id";
 import { type SessionHistoryMessage, type SessionHistoryResponse, type SessionRuntimeEvent } from "@/types/runtime";
 
-import { createJsonArtifact, mapSessionHistoryToMessages } from "./history-mapping";
+import {
+  createJsonArtifact,
+  createLazyJsonArtifact,
+  mapSessionHistoryToMessages,
+} from "./history-mapping";
 import { getRuntimeEventSeq } from "./sessions";
 import { upsertArtifacts } from "./shared";
 
@@ -157,15 +161,17 @@ export function buildSessionRuntimeEventsArtifact(
   sessionId: string,
   events: SessionRuntimeEvent[],
 ) {
-  return createJsonArtifact(
+  // 惰性产物：每来一个事件都会重建本产物，但内容（最近 100 条事件的完整
+  // payload）只有面板/弹窗真的渲染时才需要（见 createLazyJsonArtifact）。
+  return createLazyJsonArtifact(
     `session-runtime-events-${sessionId}`,
     `session-runtime-events-${sessionId}.json`,
     "Runtime events streamed from /api/runtime/sessions/{id}/runtime/stream.",
-    {
+    () => ({
       session_id: sessionId,
       count: events.length,
       events,
-    },
+    }),
   );
 }
 

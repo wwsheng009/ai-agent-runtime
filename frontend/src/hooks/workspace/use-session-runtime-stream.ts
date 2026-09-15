@@ -13,6 +13,7 @@ import {
   streamSessionRuntime,
   type SessionRuntimeEvent,
 } from "@/lib/runtime-api";
+import { matchesActiveTurn } from "@/lib/thread-state/deltas";
 import {
   getRuntimeDeltaKeyFromEvent,
   getRuntimeDeltaKind,
@@ -158,6 +159,13 @@ export function useSessionRuntimeStream({
   useEffect(() => {
     setThreadsRef.current = setThreads;
   }, [setThreads]);
+  // 目标线程最新值：判断「这条增量能否落到消息上」必须读线程状态（纯判定，
+  // 不写状态）。经 ref 读取，避免把 selectedThread 放进订阅 effect 依赖——
+  // 线程对象每次归并都是新引用，进依赖会掐断在途 SSE（见下方 sessionKey 注释）。
+  const selectedThreadRef = useRef(selectedThread);
+  useEffect(() => {
+    selectedThreadRef.current = selectedThread;
+  }, [selectedThread]);
   // 尾部优先：建连游标经 ref 读取（调用方每次 render 都会产出新箭头函数，
   // 不能进依赖，否则会掐断在途 SSE——与本文件其它回调同口径）。
   const getReplayCursorRef = useRef(getReplayCursor);
@@ -278,15 +286,33 @@ export function useSessionRuntimeStream({
               const deltaKind = getRuntimeDeltaKind(event.type);
               const activeTurn = activeTurnIdRef.current?.trim() ?? "";
               const eventTurn = getRuntimeEventTurnId(event);
-              const turnMatches =
-                !activeTurn || eventTurn === activeTurn;
+              // 归属判定与 applyRuntimeDeltaToThread 共用同一语义（「未知」≠
+              // 「其他 turn」）。严格相等会让缺 turn_id 的增量在 hook 层被整条
+              // 丢弃——真后端 loop.go 仅在 turnID != "" 时注入 turn_id。
+              const turnMatches = matchesActiveTurn(activeTurn, eventTurn);
               let shouldApplyLiveDelta = false;
               if (renderLiveDeltasRef.current && deltaKind && turnMatches) {
+                // 先判定「这条增量到底能不能落到消息上」，再决定是否消费去重 key。
+                // applyRuntimeDeltaToThread 在目标消息不是「当前正在 streaming 的
+                // 那条」时会原样返回 thread（turn 身份不足/已定稿/没有可写目标）。
+                // 此时若照旧 claim，key 就被吞掉：/api/agent/chat 通道随后拿到同一
+                // key 会直接 return，两条通道互相让路，整段回复只能等 turn 结束由
+                // 最终快照一次性定型（实测真后端两路各 ~1000 帧、DOM 全程不动，
+                // 24s 时整块蹦出）。判定是纯函数调用，不产生副作用。
+                const currentThread = selectedThreadRef.current;
+                const willApply = Boolean(
+                  currentThread &&
+                    applyRuntimeDeltaToThreadRef.current(
+                      currentThread,
+                      event,
+                      activeTurn || undefined,
+                    ) !== currentThread,
+                );
                 const deltaKey = getRuntimeDeltaKeyFromEvent(event);
                 const coordinator = deltaCoordinatorRef.current;
                 shouldApplyLiveDelta =
                   Boolean(deltaKey) && coordinator
-                    ? coordinator.claim(deltaKey)
+                    ? willApply && coordinator.claim(deltaKey)
                     : Boolean(deltaKey) || !coordinator;
               }
 
