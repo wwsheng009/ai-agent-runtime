@@ -455,7 +455,7 @@ function updateLatestAssistantMessage(
  *   已覆盖），状态按帧类型与 metadata.error 得到 started → running →
  *   finished/error。与 /api/agent/chat 通道用同一个 upsert，两条通道先后到达
  *   只会收敛成同一行。
- * - text（chunk / observation）→ 只做阶段推进：把仍在跑的推理段收尾。正文与
+ * - phase（chunk / observation）→ 只做阶段推进：把仍在跑的推理段收尾。正文与
  *   推理文本**不在这里追加**——同一段文本已由 `assistant_delta` /
  *   `assistant.reasoning` 写入（这正是 `getRuntimeBridgeKind` 不把它们当增量的
  *   原因），在这里再追加一次会让每段内容翻倍。`chat.sse.reasoning` 是推理增量

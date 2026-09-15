@@ -155,7 +155,9 @@ export type RuntimeBridgeToolStatus = "started" | "running" | "finished";
  */
 export type RuntimeBridgeKind =
   | { kind: "tool"; status: RuntimeBridgeToolStatus }
-  | { kind: "text" };
+  // 阶段推进：帧本身不携带可渲染内容（observation 只有工具名，chunk/reasoning
+  // 的正文另有增量通道），只用来把仍在跑的推理段收尾。
+  | { kind: "phase" };
 
 export function getRuntimeBridgeKind(
   eventType: string,
@@ -171,9 +173,9 @@ export function getRuntimeBridgeKind(
     // 见 buildObservationEventPayloads），据它建行会退化成名叫 “tool” 的错行。
     // 工具行的收尾由同一次观测的 tool_end 完成，这里只当「阶段推进」信号。
     case "chat.sse.observation":
-      return { kind: "text" };
+      return { kind: "phase" };
     case "chat.sse.chunk":
-      return { kind: "text" };
+      return { kind: "phase" };
     // chat.sse.reasoning 刻意不归类（见上方说明）：它是增量帧的孪生副本，
     // 不是阶段出口，收尾会与 assistant.reasoning 的「仍在推理」标记打架。
     default:

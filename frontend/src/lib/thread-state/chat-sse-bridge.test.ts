@@ -109,9 +109,9 @@ describe("chat.sse 桥接帧分类", () => {
     });
     // observation 只带工具名，不建行，仅作阶段推进信号。
     expect(getRuntimeBridgeKind("chat.sse.observation")).toEqual({
-      kind: "text",
+      kind: "phase",
     });
-    expect(getRuntimeBridgeKind("chat.sse.chunk")).toEqual({ kind: "text" });
+    expect(getRuntimeBridgeKind("chat.sse.chunk")).toEqual({ kind: "phase" });
   });
 
   it("总线增量与未知事件都不算桥接帧", () => {

@@ -110,12 +110,17 @@ export function buildAssistantMessageSegments(
   reasoning: string,
   options?: AssistantMessageSegmentOptions,
 ) {
-  let segments = buildStreamingMessageSegments(text, source, reasoning, {
+  const built = buildStreamingMessageSegments(text, source, reasoning, {
     status: options?.status,
     reasoningRunning: options?.reasoningRunning,
   });
+  const existing = options?.existingSegments ?? [];
+  const textSegments = built.filter((segment) => segment.type === "text");
+  let segments: MessageSegment[] = built.filter(
+    (segment) => segment.type !== "text",
+  );
 
-  for (const segment of options?.existingSegments ?? []) {
+  for (const segment of existing) {
     if (isGeneratedImageSegment(segment)) {
       segments = upsertGeneratedImageSegment(segments, segment);
     } else if (segment.type === "tool") {
@@ -131,5 +136,30 @@ export function buildAssistantMessageSegments(
     segments.push(segment);
   }
 
-  return segments;
+  if (textSegments.length === 0) {
+    return segments;
+  }
+
+  // 正文段的位置必须是**稳定**的，否则直连通道每个 flush 都会重排一次：
+  //
+  // - 已有正文段：按它当前相对工具行的位置延续（在工具前就继续在前，在工具后
+  //   就继续在后）。实时回合里正文是最后出现的阶段，第一次落位就在工具行之后，
+  //   后续 flush 必须留在原地，不能跳回顶部。
+  // - 还没有正文段：工具行已经存在时，正文排在它们之后（推理 → 工具 → 答复）。
+  //   旧实现无条件「正文最前」，于是最终答复一开始流式就跳到工具行上方，
+  //   与时间顺序相反，也与历史重放（工具回执独立成条、排在答复之前）不一致。
+  const toolIndex = existing.findIndex((segment) => segment.type === "tool");
+  const textIndex = existing.findIndex((segment) => segment.type === "text");
+  const textGoesLast =
+    textIndex >= 0
+      ? toolIndex >= 0 && textIndex > toolIndex
+      : segments.some((segment) => segment.type === "tool");
+
+  if (!textGoesLast) {
+    return [...textSegments, ...segments];
+  }
+  // 收尾提示（stopped callout）始终留在最底部，它描述的是整条消息的终态。
+  const callouts = segments.filter((segment) => segment.type === "callout");
+  const body = segments.filter((segment) => segment.type !== "callout");
+  return [...body, ...textSegments, ...callouts];
 }
