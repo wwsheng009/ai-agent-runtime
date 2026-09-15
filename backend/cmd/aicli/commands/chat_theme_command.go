@@ -719,7 +719,7 @@ func buildThemePickerFullScreenItems(snapPalette, snapMode, snapSyntax string) (
 
 func selectThemeWithReader(session *ChatSession, reader *bufio.Reader) (palette string, mode string, err error) {
 	if reader == nil {
-		reader = bufio.NewReader(os.Stdin)
+		reader = newTrackedStdinReader()
 	}
 	_ = session
 

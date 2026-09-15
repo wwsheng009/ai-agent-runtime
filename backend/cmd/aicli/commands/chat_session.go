@@ -1064,7 +1064,7 @@ func runtimeSessionWorkspacePath(session *runtimechat.Session) string {
 }
 
 func promptStartupSessionSelection(manager *runtimechat.SessionManager, userID string, filter ChatSessionListFilter) (*runtimechat.Session, bool, error) {
-	return promptStartupSessionSelectionWithReader(manager, userID, filter, bufio.NewReader(os.Stdin))
+	return promptStartupSessionSelectionWithReader(manager, userID, filter, newTrackedStdinReader())
 }
 
 func promptStartupSessionSelectionWithReader(manager *runtimechat.SessionManager, userID string, filter ChatSessionListFilter, reader *bufio.Reader) (*runtimechat.Session, bool, error) {

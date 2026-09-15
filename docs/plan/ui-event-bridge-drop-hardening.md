@@ -1142,7 +1142,7 @@ Select-String -Path "$env:TEMP\goro.txt" -Pattern '^goroutine ' | Measure-Object
 | UI actor 容量 | `ui/controller.go:24-27` | 默认 256 |
 | UI actor 投递/统计 | `ui/controller.go:231/276/319/373`, `:130-140`, `:718-735` | Post/TryPost/PostDeferred/Followup + Stats |
 | 帧泵 | `ui/renderengine/frame_pump.go` | 合帧落点 |
-| 启动 watchdog | `commands/chat_startup_timing.go:91-101` | 90s 未 ready 即 goroutine dump（拟扩展为稳态） |
+| 启动 watchdog | `commands/chat_startup_timing.go:138-190` | 采样式：无进展且不在等交互输入时 90s 后 goroutine dump；等待 stdin 输入只发一行提示（2026-09-15 修误报：启动期 prompt 等输入不再被当成挂起；稳态扩展仍未做） |
 | 失效判定点 | `ui/controller_state.go:617-621` | `transcriptReplacementInvalidatesAckedHistory`（拟加原因分类） |
 | executor 判决 | `ui/terminal_session_executor.go:62-70`, `:323-325` | 累计判决（待窗口化） |
 | observe 白名单 | `internal/runtimeobserve/projector.go:33-61` | 22 类 v1 白名单 |

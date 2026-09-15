@@ -285,7 +285,7 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		ProviderChanged:        cmd.Flags().Changed("provider"),
 		ModelChanged:           cmd.Flags().Changed("model"),
 		OutputFormat:           outputFormat,
-		InputReader:            bufio.NewReader(os.Stdin),
+		InputReader:            newTrackedStdinReader(),
 		SessionFilter:          sessionFilter,
 		SessionFeaturesRequested: listSessionsFlag || resumeFlag || strings.TrimSpace(sessionIDFlag) != "" || strings.TrimSpace(sessionDirFlag) != "" || strings.TrimSpace(sessionUserFlag) != "" ||
 			sessionFilter.State != "" || sessionFilter.Provider != "" || sessionFilter.Model != "" || sessionWorkspaceFilterExplicit || sessionFilter.Query != "",

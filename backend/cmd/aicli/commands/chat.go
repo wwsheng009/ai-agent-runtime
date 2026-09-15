@@ -499,12 +499,12 @@ const (
 // HandleChat 处理 chat 命令
 func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 	startupTiming := newChatStartupTiming()
-	activeChatStartupTiming = startupTiming
+	activeChatStartupTiming.Store(startupTiming)
 	defer func() {
-		activeChatStartupTiming = nil
+		activeChatStartupTiming.Store(nil)
 	}()
 	startupTiming.mark("begin")
-	// 启动挂起 watchdog：90s 未到 ready 自动 dump goroutine 栈。
+	// 启动挂起 watchdog：无进展且不在等交互输入时，超过阈值自动 dump goroutine 栈。
 	armChatStartupHangWatchdog()
 
 	opts, err := parseChatCommandOptions(cmd, cfg)
@@ -628,7 +628,7 @@ func printWelcome() {
 
 // selectProvider 选择 Provider
 func selectProvider(cfg *config.Config) string {
-	return selectProviderWithReader(cfg, bufio.NewReader(os.Stdin))
+	return selectProviderWithReader(cfg, newTrackedStdinReader())
 }
 
 func selectProviderWithReader(cfg *config.Config, reader *bufio.Reader) string {
@@ -742,7 +742,7 @@ func providerSelectionURL(provider config.Provider) string {
 
 // selectModel 选择 Model
 func selectModel(provider config.Provider) string {
-	return selectModelWithReader(provider, bufio.NewReader(os.Stdin))
+	return selectModelWithReader(provider, newTrackedStdinReader())
 }
 
 func selectModelWithReader(provider config.Provider, reader *bufio.Reader) string {
@@ -791,7 +791,7 @@ func selectModelWithReader(provider config.Provider, reader *bufio.Reader) strin
 
 // selectStreamMode 选择流式模式
 func selectStreamMode() bool {
-	return selectStreamModeWithReader(bufio.NewReader(os.Stdin))
+	return selectStreamModeWithReader(newTrackedStdinReader())
 }
 
 func selectStreamModeWithReader(reader *bufio.Reader) bool {
