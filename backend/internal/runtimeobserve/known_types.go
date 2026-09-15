@@ -33,6 +33,12 @@ import "strings"
 //     cmd/aicli/commands/agent_stdio_bridge.go:245 与 encoder.go:2466 均按等价分支处理）。
 //  5. 宿主侧持久化事件（internal/chat/actor.go 的中途落库上报）：
 //     session.checkpoint_persist_error（actor.go publishSessionCheckpointFailure）。
+//  6. live-only 总线类型（不落盘、只走实时旁路，但有真实消费者）：
+//     tool.progress（internal/toolprotocol/progress.go:25 EventTypeProgress）、
+//     subagent.progress（internal/supervision/subagent_progress.go:21
+//     EventTypeSubagentProgress）。二者不在来源 1-5 的任何清单里，但都是产品
+//     事件；复用本目录做交付通道分类时（批次 20 / P0-2）必须先补进来，否则
+//     「已知但被通道白名单裁掉」会被误记成「完全未知」，三分法失效。
 //
 // 匹配规则与 Projector 保持一致：TrimSpace 后精确匹配；仅大小写不同按未知处理，
 // 以保留异常语义（见 normalizeEventType）。
@@ -133,6 +139,14 @@ func buildKnownEventTypes() map[string]bool {
 		"session.checkpoint_persist_error", // internal/chat/actor.go publishSessionCheckpointFailure
 	)
 
+	// 来源 6：live-only 总线类型（见文件头说明）。这两类不落盘，只经
+	// sessionLiveOnlyRuntimeEventTypes 走实时旁路，刷新即丢；它们是产品事件，
+	// 但此前不在任何清单里。
+	add(
+		"tool.progress",     // toolprotocol/progress.go:25：工具中途进度
+		"subagent.progress", // supervision/subagent_progress.go:21：子代理进度（父流镜像）
+	)
+
 	return out
 }
 
@@ -150,8 +164,17 @@ func isKnownEventType(eventType string) bool {
 	return knownEventTypes[normalized]
 }
 
+// IsKnownEventType 暴露「产品内已知 runtime 事件类型」判定，供其它交付通道
+// （chat 会话事件库白名单等）复用同一份三分法目录：命中目录但被通道白名单裁掉
+// 与「完全未知类型」必须在指标里可区分，否则新事件类型被静默丢弃时无从发现
+// （批次 20 / P0-2）。语义与 Projector 内的判定完全一致（只 TrimSpace、不折叠
+// 大小写）。
+func IsKnownEventType(eventType string) bool {
+	return isKnownEventType(eventType)
+}
+
 // maxFilteredByTypeEntries 是 filtered_by_type 的内部计数上界（top-N 兜底）。
-// 目录是封闭集合（本文来源，67 项），正常永远触发不到；此上限只作为
+// 目录是封闭集合（本文来源，69 项），正常永远触发不到；此上限只作为
 // "目录被误扩成通配/前缀匹配"时的内存与快照体积保险，超出部分记入溢出桶。
 // 不变量由 TestKnownEventTypeCatalogInvariants 断言。
 const maxFilteredByTypeEntries = 128

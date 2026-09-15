@@ -192,6 +192,14 @@ func (s *Session) ReplaceHistory(messages []types.Message) {
 	for i, msg := range messages {
 		cloned[i] = *msg.Clone()
 	}
+	// A rebuilt transcript (compaction summary, streaming reassembly, request
+	// prefix injection) arrives without metadata. Carrying the durable
+	// identities forward keeps the canonical append anchored on the stored rows
+	// instead of minting a fresh id for every rebuild, which is what made the
+	// storage layer append one extra copy of the same turn per checkpoint.
+	// User turns are excluded: a user message opens a new turn, so reusing an
+	// older identity would swallow a genuine repeat of the same text.
+	_ = types.InheritMessageIdentities(s.History, cloned, false)
 	_ = types.EnsureHistoryMessageIdentities(cloned)
 
 	s.History = cloned

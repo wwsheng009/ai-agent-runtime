@@ -816,7 +816,13 @@ func (s *SQLiteSessionStorage) truncateCanonicalToHistoryTx(ctx context.Context,
 	`, session.ID, cutoff); err != nil {
 		return false, fmt.Errorf("truncate canonical transcript: %w", err)
 	}
-	*count = len(session.History)
+	// The retained rows keep their seq, so the last retained seq (cutoff) is the
+	// highest allocated seq after the truncation. It is not len(session.History)
+	// as soon as the transcript has a hole: session-dedupe deletes surplus rows
+	// by primary key, and resetting the counter to the row count would make the
+	// next append re-use a seq that is still stored — the insert then fails on
+	// the (session_id, seq) primary key.
+	*count = cutoff
 	return true, nil
 }
 

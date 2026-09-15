@@ -2282,6 +2282,11 @@ func appendTransientContinuationPrompt(session *Session, prompt string, metadata
 			message.Metadata.Set(key, value)
 		}
 	}
+	// Mark the prompt as request-scoped. Auto-continuation / audit prompts are
+	// replayed to the model, not typed by the user: without the marker the
+	// durable write path stores them as fresh user turns, which is exactly the
+	// duplicated user message the workspace then renders.
+	message.Metadata.Set(runtimetypes.MetadataKeyTransientPrompt, true)
 	session.AddMessage(*message)
 }
 
@@ -2718,9 +2723,18 @@ func (a *SessionActor) persistSession(ctx context.Context, session *Session) err
 	if hasRun {
 		keys = run.stripMetadataKeys
 	}
+	// Transient prompts are request-scoped by contract, so strip them
+	// unconditionally instead of relying on the caller passing
+	// StripMetadataKeys. A continuation prompt that reaches the store becomes a
+	// user turn the workspace shows next to the real one.
+	keys = normalizedMetadataKeys(append(append([]string{}, keys...), runtimetypes.MetadataKeyTransientPrompt))
 	if len(keys) > 0 {
 		stripMessagesWithMetadataKeys(session, keys)
 	}
+	// Rebuilt transcripts carry request-only context layers (fact ledger,
+	// recall, correction, ...) with fresh identities. Collapse the surplus
+	// copies before they are appended as new canonical rows.
+	session.PruneRequestScopedHistory()
 	if a.persistHook != nil {
 		prepared, err := a.persistHook(ctx, session)
 		if err != nil {
@@ -3704,7 +3718,7 @@ func (a *SessionActor) claimSessionRun(turnID string, stripMetadataKeys []string
 		sessionID:         a.id,
 		generation:        a.runSequence.Add(1),
 		turnID:            strings.TrimSpace(turnID),
-		stripMetadataKeys: normalizedMetadataKeys(stripMetadataKeys),
+		stripMetadataKeys: normalizedMetadataKeys(append(append([]string{}, stripMetadataKeys...), runtimetypes.MetadataKeyTransientPrompt)),
 		reply:             reply,
 	}
 	run.lastActivity.Store(time.Now().UnixNano())

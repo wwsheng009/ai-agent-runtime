@@ -326,6 +326,10 @@ func (h *Handler) subscribeSessionLiveRuntimeEvents(sessionID string) (<-chan ru
 			}
 			select {
 			case ch <- event:
+				// P0-2：B 通道（live-only 旁路）的转发量按类型计数。这条通道不落盘，
+				// 一旦某类事件的实时帧消失，能区分「没发生」与「没送达」的只有这里
+				// （读侧：runtimeStatusSnapshot 的 runtime_event_delivery 键）。
+				recordRuntimeEventDeliveryLiveForwarded(event.Type)
 			default:
 				// Drop when the SSE consumer lags; progress is best-effort.
 			}

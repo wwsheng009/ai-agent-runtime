@@ -46,8 +46,11 @@ func (h *Handler) ListAgentControlAgents(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
+	// 运行态是查询时刻的容器事实（活体 actor → 持久运行态 → missing），与身份
+	// 状态分开上报：面板的「运行中」必须看它，否则子代理跑完后会话行仍 open，
+	// 身份行会一直显示 active。
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"agents": records,
+		"agents": h.buildAgentControlAgentViews(r.Context(), records),
 		"count":  len(records),
 		"source": source,
 		"filters": map[string]interface{}{

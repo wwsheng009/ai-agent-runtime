@@ -203,13 +203,22 @@ func prependContextMessages(history []types.Message, contextMessages []types.Mes
 
 	merged := make([]types.Message, 0, len(contextMessages)+len(history))
 	for _, message := range contextMessages {
-		merged = append(merged, *message.Clone())
+		injected := *message.Clone()
+		// Stamp the request-scoped prefix so the durable write path can drop it
+		// regardless of its position in the rebuilt history.
+		types.MarkRequestScopedContext(&injected, agentContextPrefixStage)
+		merged = append(merged, injected)
 	}
 	for _, message := range history {
 		merged = append(merged, *message.Clone())
 	}
 	return merged
 }
+
+// agentContextPrefixStage tags the per-request system prefix that
+// prependContextMessages injects (environment facts, shell/file-editing
+// guidance, workspace summary).
+const agentContextPrefixStage = "request_prefix"
 
 // stripLeadingContextMessages removes a leading ephemeral context prefix that
 // was only injected for the current model request. Durable session history must
@@ -220,6 +229,12 @@ func stripLeadingContextMessages(history []types.Message, contextMessages []type
 	}
 	if len(contextMessages) == 0 {
 		return cloneAgentMessages(history)
+	}
+	// Remove the injected prefix by substance, not by position. Compaction and
+	// other head rewrites used to make the positional strip below a silent
+	// no-op, which is how the ephemeral prefix reached the durable transcript.
+	if durable, removed := removeContextPrefixMessages(history, contextMessages); removed {
+		return durable
 	}
 	if len(history) < len(contextMessages) {
 		return cloneAgentMessages(history)
@@ -233,6 +248,36 @@ func stripLeadingContextMessages(history []types.Message, contextMessages []type
 		}
 	}
 	return cloneAgentMessages(history[len(contextMessages):])
+}
+
+// removeContextPrefixMessages drops every history message that matches an
+// injected request-context message by role and content, wherever it sits in the
+// transcript. It reports whether anything was removed.
+func removeContextPrefixMessages(history []types.Message, contextMessages []types.Message) ([]types.Message, bool) {
+	injected := make(map[string]bool, len(contextMessages))
+	for _, message := range contextMessages {
+		injected[contextPrefixMatchKey(message)] = true
+	}
+	if len(injected) == 0 {
+		return nil, false
+	}
+	durable := make([]types.Message, 0, len(history))
+	removed := false
+	for _, message := range history {
+		if injected[contextPrefixMatchKey(message)] {
+			removed = true
+			continue
+		}
+		durable = append(durable, *message.Clone())
+	}
+	if !removed {
+		return nil, false
+	}
+	return durable, true
+}
+
+func contextPrefixMatchKey(message types.Message) string {
+	return strings.ToLower(strings.TrimSpace(message.Role)) + "\x00" + strings.TrimSpace(message.Content)
 }
 
 func cloneAgentMessages(messages []types.Message) []types.Message {

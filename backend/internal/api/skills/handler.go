@@ -1804,6 +1804,25 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
+			// 实时工具桥：ReAct 循环在执行每个工具时会发 tool.requested /
+			// tool.completed 运行事件（loop.go:2248 / 2400），把同一条流实时翻译
+			// 成 chat SSE 帧，工具行就在工具真正开始/结束时出现——而不是等整个
+			// 回合结束后由证据尾巴一次性补齐（实测 21 帧挤在末尾 18ms 内）。
+			// emit 与 streamSink 共用 streamMu：总线派发在独立 goroutine 上执行，
+			// SSE 写入与事件持久化都不能并发。
+			liveTools := newLiveToolStreamTracker()
+			unsubscribeLiveToolBridge := subscribeLiveToolStream(
+				h.getRuntimeEventBus(),
+				sessionID(execSession),
+				liveTools,
+				func(eventName string, payload map[string]interface{}) {
+					streamMu.Lock()
+					defer streamMu.Unlock()
+					emitter.Emit(eventName, payload)
+				},
+			)
+			defer unsubscribeLiveToolBridge()
+
 			reactResult, reactErr := a.RunReActWithSession(ctx, h.llmRuntime, lastMessage, execSession, &agent.LoopReActConfig{
 				MaxSteps:             agentConfig.MaxSteps,
 				MaxToolCalls:         agentConfig.MaxToolCalls,
@@ -1863,7 +1882,10 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			if routePayload, ok := buildAgentRouteEventPayload(resultPayload); ok {
 				emitter.Emit("route", routePayload)
 			}
-			for _, toolEvent := range buildObservedToolEventPayloads(resultPayload) {
+			// 已实时下发过帧的工具不再重放三段式，只补一条权威 tool_end：
+			// 前端按 id upsert，因此既能就地补全 arguments/output（观测里的
+			// 完整值覆盖实时帧的预览值），又不会多出一行重复工具。
+			for _, toolEvent := range buildObservedToolEventPayloadsWithLive(resultPayload, liveTools) {
 				emitter.Emit(toolEvent.Event, toolEvent.Payload)
 			}
 			for _, observationPayload := range buildObservationEventPayloads(resultPayload) {
@@ -3823,6 +3845,10 @@ func (h *Handler) attachRuntimeEventBridge() {
 		}
 		bus.Subscribe("", func(event runtimeevents.Event) {
 			if !shouldPersistRuntimeSessionEvent(event) {
+				// P0-2：A 通道的未命中原先完全无声——事件既不落盘（无实时/无回放），
+				// 也不出现在任何日志或指标里。按 runtimeobserve 的已知类型目录记入
+				// runtime_event_delivery（已知但被裁掉 vs 完全未知可区分）。
+				recordRuntimeEventDeliveryDrop(event.Type, event.SessionID)
 				return
 			}
 			store := h.getSessionEventStore()
@@ -3835,11 +3861,11 @@ func (h *Handler) attachRuntimeEventBridge() {
 	})
 }
 
-func shouldPersistRuntimeSessionEvent(event runtimeevents.Event) bool {
-	if strings.TrimSpace(event.SessionID) == "" {
-		return false
-	}
-	switch strings.TrimSpace(event.Type) {
+// isPersistedRuntimeEventType 是 A 通道（总线 → 会话事件库）的类型白名单。
+// 单独抽出，使落盘判定与交付通道分类（runtime_event_delivery.go 的
+// DeliveryChannelsFor）共用同一份清单，避免两处漂移导致「分类说有、实际不落盘」。
+func isPersistedRuntimeEventType(eventType string) bool {
+	switch strings.TrimSpace(eventType) {
 	case "tool.requested", "tool.completed", "context.profile.injected", "recall.performed", "checkpoint_created",
 		chat.EventApprovalRequested, chat.EventApprovalResolved,
 		// P2-8 方案 4：自动回收（agent.reclaimed）与手工清理落进父会话事件流，
@@ -3857,6 +3883,13 @@ func shouldPersistRuntimeSessionEvent(event runtimeevents.Event) bool {
 	default:
 		return false
 	}
+}
+
+func shouldPersistRuntimeSessionEvent(event runtimeevents.Event) bool {
+	if strings.TrimSpace(event.SessionID) == "" {
+		return false
+	}
+	return isPersistedRuntimeEventType(event.Type)
 }
 
 func mapRuntimeEventToSession(event runtimeevents.Event) runtimeevents.Event {
@@ -7914,6 +7947,17 @@ type staticToolEvent struct {
 }
 
 func buildObservedToolEventPayloads(resultPayload map[string]interface{}) []staticToolEvent {
+	return buildObservedToolEventPayloadsWithLive(resultPayload, nil)
+}
+
+// buildObservedToolEventPayloadsWithLive 构建回合末的工具证据尾巴。
+//
+// live 非空时，已经在实时通道下发过帧的工具（键为观测命名 `step_N_tool_M`）
+// 只补一条 tool_end：行 id 改写成实时帧使用的真实 provider call id，前端
+// upsert 合并进同一行，title/arguments/output 用观测里的权威值就地补全。
+// 未实时下发的工具（总线不可用、跨进程执行、被过滤的事件等）保持原有
+// tool_call + tool_start + tool_end 三段式，行为与修复前一致。
+func buildObservedToolEventPayloadsWithLive(resultPayload map[string]interface{}, live *liveToolStreamTracker) []staticToolEvent {
 	observations := observationsFromResultPayload(resultPayload)
 	if len(observations) == 0 {
 		return nil
@@ -7947,11 +7991,28 @@ func buildObservedToolEventPayloads(resultPayload map[string]interface{}) []stat
 			metadata["metrics"] = observation.Metrics
 		}
 
-		events = append(events,
+		if rowID, ok := live.rowIDForObservationKey(observation.Step, toolName); ok {
+			toolCall["id"] = rowID
+			metadata["live"] = true
+			liveEnd := buildStaticToolEventPayload(index, llm.EventTypeToolEnd, toolCall, metadata, observationOutputText(observation))
+			// 行 id 是实时通道登记过的真实 provider call id ⇒ 身份权威，可直接
+			// 与实时帧 upsert 合并（P1-2：把这件事写进载荷而不是留给前端猜）。
+			attachToolEntity(liveEnd.Payload, rowID)
+			events = append(events, liveEnd)
+			continue
+		}
+
+		legacyFrames := []staticToolEvent{
 			buildStaticToolEventPayload(index, llm.EventTypeToolCall, toolCall, metadata, ""),
 			buildStaticToolEventPayload(index, llm.EventTypeToolStart, toolCall, metadata, ""),
 			buildStaticToolEventPayload(index, llm.EventTypeToolEnd, toolCall, metadata, observationOutputText(observation)),
-		)
+		}
+		// 观测合成身份 `observation_<step>`：三帧之间自洽，但与实时帧的 provider
+		// call id 无法合并。显式标 degraded（见 attachDegradedToolEntity）。
+		for _, frame := range legacyFrames {
+			attachDegradedToolEntity(frame.Payload, toolCallID)
+		}
+		events = append(events, legacyFrames...)
 	}
 
 	if len(events) == 0 {
@@ -7980,7 +8041,6 @@ func buildStaticToolEventPayload(index int, eventType llm.StreamEventType, toolC
 	if eventType == llm.EventTypeToolCall {
 		payload["delta"] = toolCall
 	}
-
 	return staticToolEvent{
 		Event:   streamEventName(eventType),
 		Payload: payload,
@@ -9139,6 +9199,9 @@ func (h *Handler) runtimeStatusSnapshot(ctx context.Context, mode llm.HealthChec
 		"patch_governance":      patchGovernance,
 		"provenance":            provenance,
 		"execution_diagnostics": h.executionDiagnosticsSnapshot(ctx),
+		// P0-2：运行时事件「交付通道」未命中/转发计数（A 丢弃按原因+类型三分，
+		// B live-only 转发量）。四条通道的白名单都可观测，不再有静默丢弃。
+		"runtime_event_delivery": SnapshotRuntimeEventDelivery(),
 	}
 }
 

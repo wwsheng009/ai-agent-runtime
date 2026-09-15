@@ -108,3 +108,48 @@ func TestStripLeadingContextMessages_RemovesEphemeralPrefix(t *testing.T) {
 		t.Fatalf("expected mismatch to leave history intact, got %d", len(mismatch))
 	}
 }
+
+// Compaction rewrites the head of the transcript. The injected request prefix is
+// then no longer the leading run, so the positional strip used to no-op and the
+// ephemeral prefix stayed in the durable history.
+func TestStripLeadingContextMessages_RemovesInjectedPrefixAfterHeadRewrite(t *testing.T) {
+	contextMessages := []types.Message{
+		*types.NewSystemMessage("Environment context:\n<environment_context>frozen</environment_context>"),
+		*types.NewSystemMessage("Shell guidance:\n- prefer toolkit grep"),
+	}
+	compacted := []types.Message{
+		*types.NewSystemMessage("Compacted context from earlier turns: investigation summary"),
+		*types.NewUserMessage("hello"),
+		*types.NewSystemMessage("Shell guidance:\n- prefer toolkit grep"),
+		*types.NewAssistantMessage("hi"),
+	}
+
+	durable := stripLeadingContextMessages(compacted, contextMessages)
+	if len(durable) != 3 {
+		t.Fatalf("expected the injected prefix to be dropped, got %d: %#v", len(durable), durable)
+	}
+	if durable[0].Content != "Compacted context from earlier turns: investigation summary" {
+		t.Fatalf("compaction summary must stay durable: %#v", durable[0])
+	}
+	for _, message := range durable {
+		if strings.Contains(message.Content, "Shell guidance:") {
+			t.Fatalf("injected prefix leaked into durable history: %#v", message)
+		}
+	}
+}
+
+func TestPrependContextMessages_MarksInjectedPrefixAsRequestScoped(t *testing.T) {
+	contextMessages := []types.Message{
+		*types.NewSystemMessage("Environment context:\n<environment_context>frozen</environment_context>"),
+	}
+	prepared := prependContextMessages([]types.Message{*types.NewUserMessage("hello")}, contextMessages)
+	if len(prepared) != 2 {
+		t.Fatalf("expected 2 prepared messages, got %d", len(prepared))
+	}
+	if !types.IsRequestScopedContextMessage(prepared[0]) {
+		t.Fatalf("injected prefix must be marked request-scoped: %#v", prepared[0].Metadata)
+	}
+	if types.IsRequestScopedContextMessage(prepared[1]) {
+		t.Fatalf("conversation turns must not be marked request-scoped: %#v", prepared[1].Metadata)
+	}
+}
