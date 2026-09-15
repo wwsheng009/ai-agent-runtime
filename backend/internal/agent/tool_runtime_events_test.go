@@ -330,6 +330,162 @@ func TestToolCompletedEventPayloadPreservesTodosListLines(t *testing.T) {
 	}
 }
 
+// todoSnapshotFixtureItem mirrors toolkit/tools.TodoItem's host-relevant fields
+// plus producer-only extras, so the agent tests never import the tool package.
+type todoSnapshotFixtureItem struct {
+	Content     string `json:"content"`
+	Status      string `json:"status"`
+	ActiveForm  string `json:"active_form"`
+	CreatedAt   int64  `json:"created_at"`
+	UpdatedAt   int64  `json:"updated_at"`
+	CompletedAt int64  `json:"completed_at,omitempty"`
+}
+
+func TestToolCompletedEventPayloadAttachesTodoSnapshot(t *testing.T) {
+	producerMetadata := map[string]interface{}{
+		"total":        4,
+		"pending":      1,
+		"in_progress":  1,
+		"completed":    1,
+		"storage_mode": "memory",
+		"session_id":   "sess-1",
+		"goal_id":      "goal-1",
+		"todos": []todoSnapshotFixtureItem{
+			{Content: "  分析需求  ", Status: " in_progress ", ActiveForm: "  分析需求中  ", CreatedAt: 1, UpdatedAt: 2},
+			{Content: "修改实现", Status: "completed", ActiveForm: "修改实现中", CreatedAt: 1, UpdatedAt: 2, CompletedAt: 3},
+			{Content: "   ", Status: "pending", ActiveForm: "空内容应被丢弃"},
+			{Content: "状态非法应被丢弃", Status: "blocked", ActiveForm: "状态非法"},
+		},
+	}
+
+	payload := toolCompletedEventPayload(toolExecutionResult{
+		Call:     types.ToolCall{ID: "call-todos-snapshot", Name: "todos"},
+		Output:   "任务列表已更新: 1 待处理, 1 进行中, 1 已完成",
+		Envelope: &output.Envelope{Metadata: producerMetadata},
+	}, 2, "trace-todos-snapshot", nil)
+
+	proto, _ := payload["protocol_result"].(map[string]interface{})
+	if proto == nil {
+		t.Fatalf("expected protocol_result, payload=%#v", payload)
+	}
+	meta, _ := proto["metadata"].(map[string]interface{})
+	if meta == nil {
+		t.Fatalf("expected protocol_result.metadata, got %#v", proto)
+	}
+	rawSnapshot, ok := meta["todo_snapshot"]
+	if !ok {
+		t.Fatalf("expected protocol_result.metadata.todo_snapshot, got %#v", meta)
+	}
+	snapshot, ok := rawSnapshot.(map[string]interface{})
+	if !ok {
+		t.Fatalf("todo_snapshot type=%T", rawSnapshot)
+	}
+	if snapshot["session_id"] != "sess-1" || snapshot["goal_id"] != "goal-1" {
+		t.Fatalf("todo_snapshot owner ids=%#v", snapshot)
+	}
+	items, ok := snapshot["items"].([]map[string]interface{})
+	if !ok {
+		t.Fatalf("todo_snapshot items type=%T", snapshot["items"])
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 valid items (blank content / bad status dropped), got %#v", items)
+	}
+	wantContent := []string{"分析需求", "修改实现"}
+	wantStatus := []string{"in_progress", "completed"}
+	wantActiveForm := []string{"分析需求中", "修改实现中"}
+	for i, item := range items {
+		if len(item) != 3 {
+			t.Fatalf("item %d must carry exactly content/status/active_form, got %#v", i, item)
+		}
+		if item["content"] != wantContent[i] || item["status"] != wantStatus[i] || item["active_form"] != wantActiveForm[i] {
+			t.Fatalf("item %d=%#v", i, item)
+		}
+	}
+	// The producer map stays untouched: the snapshot is an added, wire-only key.
+	if _, mutated := producerMetadata["todo_snapshot"]; mutated {
+		t.Fatalf("producer metadata must not carry todo_snapshot: %#v", producerMetadata)
+	}
+	if todos, ok := producerMetadata["todos"].([]todoSnapshotFixtureItem); !ok || len(todos) != 4 {
+		t.Fatalf("producer todos slice mutated: %#v", producerMetadata["todos"])
+	}
+}
+
+func TestToolCompletedEventPayloadSkipsTodoSnapshotForOtherTools(t *testing.T) {
+	payload := toolCompletedEventPayload(toolExecutionResult{
+		Call:   types.ToolCall{ID: "call-read-file", Name: "read_file"},
+		Output: "file body",
+		Envelope: &output.Envelope{Metadata: map[string]interface{}{
+			"todos": []map[string]interface{}{
+				{"content": "非 todos 工具不得携带", "status": "pending", "active_form": "不得携带"},
+			},
+			"session_id": "sess-2",
+			"goal_id":    "goal-2",
+		}},
+	}, 1, "trace-read-file", nil)
+
+	proto, _ := payload["protocol_result"].(map[string]interface{})
+	if proto == nil {
+		t.Fatalf("expected protocol_result, payload=%#v", payload)
+	}
+	meta, _ := proto["metadata"].(map[string]interface{})
+	if _, ok := meta["todo_snapshot"]; ok {
+		t.Fatalf("todo_snapshot must stay scoped to the todos tool: %#v", meta)
+	}
+	// The scoping is per tool, so the shared allowlist must not have been widened
+	// with the raw producer key either.
+	if _, ok := meta["todos"]; ok {
+		t.Fatalf("raw todos metadata leaked into the shared allowlist: %#v", meta)
+	}
+}
+
+func TestToolCompletedEventPayloadOmitsEmptyTodoSnapshot(t *testing.T) {
+	// No valid item survives filtering, so the key stays absent entirely.
+	payload := toolCompletedEventPayload(toolExecutionResult{
+		Call:   types.ToolCall{ID: "call-todos-invalid", Name: "todos"},
+		Output: "任务列表已更新",
+		Envelope: &output.Envelope{Metadata: map[string]interface{}{
+			"todos": []map[string]interface{}{
+				{"content": "   ", "status": "pending"},
+				{"content": "状态非法", "status": "blocked"},
+			},
+		}},
+	}, 1, "trace-todos-invalid", nil)
+	proto, _ := payload["protocol_result"].(map[string]interface{})
+	meta, _ := proto["metadata"].(map[string]interface{})
+	if _, ok := meta["todo_snapshot"]; ok {
+		t.Fatalf("empty snapshot must stay absent: %#v", meta)
+	}
+
+	// Blank owner ids are omitted rather than emitted as empty strings.
+	payload = toolCompletedEventPayload(toolExecutionResult{
+		Call:   types.ToolCall{ID: "call-todos-noids", Name: "todos"},
+		Output: "任务列表已更新",
+		Envelope: &output.Envelope{Metadata: map[string]interface{}{
+			"todos": []map[string]interface{}{
+				{"content": "运行测试", "status": "PENDING", "active_form": ""},
+			},
+			"session_id": "   ",
+			"goal_id":    0,
+		}},
+	}, 1, "trace-todos-noids", nil)
+	proto, _ = payload["protocol_result"].(map[string]interface{})
+	meta, _ = proto["metadata"].(map[string]interface{})
+	snapshot, ok := meta["todo_snapshot"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected todo_snapshot, got %#v", meta)
+	}
+	if _, ok := snapshot["session_id"]; ok {
+		t.Fatalf("blank session_id must be omitted: %#v", snapshot)
+	}
+	if _, ok := snapshot["goal_id"]; ok {
+		t.Fatalf("non-string goal_id must be omitted: %#v", snapshot)
+	}
+	items, _ := snapshot["items"].([]map[string]interface{})
+	if len(items) != 1 || items[0]["status"] != "pending" || items[0]["active_form"] != "" {
+		t.Fatalf("items=%#v", items)
+	}
+}
+
 func TestToolCompletedEventPayloadFallsBackToEnvelopeSummary(t *testing.T) {
 	payload := toolCompletedEventPayload(toolExecutionResult{
 		Call: types.ToolCall{

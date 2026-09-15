@@ -127,6 +127,22 @@ func (r Result) Map() map[string]interface{} {
 // EventMap returns a compact wire view suitable for runtime event payloads.
 // Full content blocks are omitted; Summary is retained when present.
 func (r Result) EventMap() map[string]interface{} {
+	return r.eventMap(nil)
+}
+
+// EventMapWithMetadataKeys behaves like EventMap but additionally passes the
+// given metadata keys through the thin filter for this result only.
+//
+// It is the per-result opt-in for tool-scoped structured values that must stay
+// out of the shared thin allowlist: every tool filters through that allowlist,
+// so widening it would leak same-named fields produced by unrelated tools.
+// Blank keys are ignored, and keys missing from Metadata (or holding nil) are
+// skipped, so passing a key is always safe.
+func (r Result) EventMapWithMetadataKeys(scopedKeys ...string) map[string]interface{} {
+	return r.eventMap(scopedKeys)
+}
+
+func (r Result) eventMap(scopedKeys []string) map[string]interface{} {
 	out := map[string]interface{}{
 		"ok": r.OK,
 	}
@@ -171,8 +187,23 @@ func (r Result) EventMap() map[string]interface{} {
 	}
 	if len(r.Metadata) > 0 {
 		// Keep metadata thin: only disposition / recovery keys that hosts need.
-		// Full metadata remains on the flat tool.completed payload.
-		if thin := thinEventMetadata(r.Metadata); len(thin) > 0 {
+		// Full metadata remains on the flat tool.completed payload. Scoped keys
+		// are opted in per result and never join the shared allowlist.
+		thin := thinEventMetadata(r.Metadata)
+		for _, key := range scopedKeys {
+			if key = strings.TrimSpace(key); key == "" {
+				continue
+			}
+			value, ok := r.Metadata[key]
+			if !ok || value == nil {
+				continue
+			}
+			if thin == nil {
+				thin = make(map[string]interface{}, len(scopedKeys))
+			}
+			thin[key] = value
+		}
+		if len(thin) > 0 {
 			out["metadata"] = thin
 		}
 	}

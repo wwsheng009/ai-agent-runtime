@@ -499,6 +499,8 @@ off | workspace | read-only | strict
 
 `tool.completed.payload.protocol_result`：嵌套 portable Result 视图（ok/outcome/output_kind/summary/error/thin metadata）；扁平 disposition 字段仍权威，供 chat-log 离线分析。
 
+**Additive（2026-09-15）**：`protocol_result.metadata.todo_snapshot` —— **仅 `todos` 工具作用域出现**（后端经 `toolprotocol.Result.EventMapWithMetadataKeys` 按「单次结果」放行该键，不并入共享 thin allowlist，因此其它工具产生的同名键不会被顺带泄漏）。载荷是给前端渲染用的裁剪视图：`{ items: [{ content, status, active_form }], session_id?, goal_id? }`——空 `content` / 未知 `status` 整条丢弃、全部丢弃时该键不出现；生产侧 `metadata["todos"]`（`compact_reconciliation` 的读取契约）与既有消费者一律不受影响。**旧消费者按未知字段忽略即可，无需改动**；本仓消费方是 composer 上方「当前任务」面板，见 `docs/plan/frontend-composer-floating-task-panel-plan.md` §5.2。
+
 ### C2. Plugin 打包
 
 - 单元：skills + hooks + mcp 描述 + agents  
@@ -762,6 +764,7 @@ off | workspace | read-only | strict
 | 2026-07-26 | shell multi-key timeout_ms=1 residual：live `shell::TOOL_TIMEOUT after 1ms` 均来自 `timeout_ms=1`+`timeout_sec=20/30/60` schema 噪声；`parseShellCommandTimeout`/`parseShellFunctionTimeout` 在 ms 低于 100ms 且 coarse 至少 1s 时丢弃噪声 ms；合理短 ms 仍优先；schema 文案 + zero placeholder 对齐；`go test ./cmd/aicli/functions ./internal/toolkit/tools` green |
 | 2026-07-26 | true content_diff / 旧二进制无 closest residual：edit multi-line miss 后 token/single-line fallback 仍导出 `current_snippet*`（仅 ranking 不 auto-heal）；apply_patch closest 正文改为 full-line `N|`；Diagnose + offline rehydrate 接受截断 `%q` 最接近片段；`go test ./internal/toolkit/tools ./internal/toolresult ./internal/agent ./internal/toolprotocol` + `python -m unittest tmp.test_tool_efficiency_common` green |
 | 2026-07-26 | apply_patch invalid syntax / path crumb residual：非法 hunk/信封 → `TOOL_INVALID_ARGS`（`failure_class=invalid_patch_syntax`，不可盲重试）+ syntax next_action；`sanitizeApplyPatchPath` 剥离 Update/Add/Delete/Move 路径尾部 `",` 等粘贴标点；Diagnose 覆盖中文「不是合法的 hunk」；`go test ./internal/toolkit/tools ./internal/toolresult` green；见 optimization-plan P1-1 |
+| 2026-09-15 | C1 additive：`tool.completed.payload.protocol_result.metadata.todo_snapshot`（仅 `todos` 工具作用域；`agent/tool_runtime_events.go` 裁剪 `content/status/active_form` + owner id，`toolprotocol` 侧为 per-result opt-in） |
 
 ---
 

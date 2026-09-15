@@ -2,6 +2,7 @@
 
 import type { ToolSegmentDetails } from "@/lib/tool-row/details";
 import type { TurnUsage } from "@/lib/turn-usage";
+import type { TodoSnapshot } from "@/lib/thread-state/todos";
 
 export type MessageSegment =
   | {
@@ -129,4 +130,9 @@ export type Thread = {
   prompts: string[];
   messages: ChatMessage[];
   artifacts: Artifact[];
+  /**
+   * composer 上沿「当前任务」面板的数据源（方案 §5.3）：由事件流 /
+   * 会话历史投影折叠出的会话级最新快照；缺省 = 无数据（面板不渲染）。
+   */
+  todoSnapshot?: TodoSnapshot | null;
 };

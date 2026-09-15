@@ -12,6 +12,7 @@ import { zhWorkspaceSessionSearch } from "./panels-session-search";
 import { zhWorkspacePanelsShell } from "./panels-shell";
 import { zhWorkspacePanelsTeamsDispatch } from "./panels-teams-dispatch";
 import { zhWorkspacePanelsTeamsPanels } from "./panels-teams-panels";
+import { zhWorkspacePanelsTodos } from "./panels-todos";
 
 export const zhWorkspace = {
   ...zhWorkspaceBase,
@@ -26,5 +27,6 @@ export const zhWorkspace = {
     shell: zhWorkspacePanelsShell,
     teamsDispatch: zhWorkspacePanelsTeamsDispatch,
     teamsPanels: zhWorkspacePanelsTeamsPanels,
+    todos: zhWorkspacePanelsTodos,
   },
 } as const;

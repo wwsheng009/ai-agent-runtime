@@ -15,6 +15,7 @@ import { ArrowUpRightIcon, BotIcon, type LucideIcon } from "lucide-react";
 import { MessageComposer } from "@/components/workspace/message-composer";
 import { MessageList } from "@/components/workspace/message-list";
 import { PendingInteractionBar } from "@/components/workspace/pending-interaction-bar";
+import { TodoPanel } from "@/components/workspace/task-panel";
 import { ComposerModelDialog } from "@/components/workspace/composer-model-dialog";
 import { JobsPanel } from "@/components/workspace/jobs-panel";
 import { SessionAgentsPanel } from "@/components/workspace/session-agents-panel";
@@ -426,6 +427,11 @@ export function WorkspaceMainSection({
           >
             {chatSurfaceVisible ? (
               <>
+                {/* 任务面板（方案 §6.1）：浮在审批条与输入卡之上，不可见时自渲染为 null。 */}
+                <TodoPanel
+                  sessionId={selectedThread.sessionId}
+                  snapshot={selectedThread.todoSnapshot}
+                />
                 {/* 批次 F2：停靠卡 = W − 32px（与转录列同一宽度轴）。 */}
                 <div className="pointer-events-auto mx-auto w-full max-w-[var(--app-chat-content-width-dock)]">
                   <PendingInteractionBar

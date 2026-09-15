@@ -9,6 +9,8 @@ import { getRuntimeBridgeKind, getRuntimeDeltaKind, matchesActiveTurn, type Runt
 import { closeRunningReasoningSegments, STREAM_PLACEHOLDER_TEXT, type ToolMessageSegment } from "./messages";
 import { getRuntimeEventSeq } from "./sessions";
 import { getToolName, mergeUniqueStrings, upsertArtifact } from "./shared";
+import { readRawTextValue, readTextDelta } from "./text-utils";
+import { applyTodoSnapshotToThread } from "./todos";
 import { buildToolSegmentFromPayload, getToolCallId, getToolErrorMessage, upsertToolSegment } from "./tools";
 
 export function appendArtifactToMessage(
@@ -72,6 +74,10 @@ export function applyRuntimeEventToThread(
   if (bridgeFrame) {
     nextThread = applyChatSseBridgeFrame(nextThread, event, bridgeFrame);
   }
+
+  // 任务面板（方案 §5.2 通道 A）：整值 LWW，不解析文本摘要；与 todo 无关的事件
+  // 由折叠函数原样返回引用（折叠规则与坏载荷降级都在 lib/thread-state/todos.ts）。
+  nextThread = applyTodoSnapshotToThread(nextThread, event);
 
   return nextThread;
 }
@@ -229,29 +235,6 @@ function appendAssistantImageProgress(
       segments: upsertGeneratedImageSegment(message.segments, imageSegment),
     };
   });
-}
-
-function readTextDelta(payload: Record<string, unknown> | undefined) {
-  if (!payload) {
-    return "";
-  }
-  return (
-    readRawTextValue(payload, "delta", "content") ||
-    (payload.text && typeof payload.text === "object"
-      ? readRawTextValue(payload.text as Record<string, unknown>, "content", "delta")
-      : "")
-  );
-}
-
-/** 不 trim 的文本提取：打字机增量必须保留原始空白（delta 语义）。 */
-function readRawTextValue(source: Record<string, unknown>, ...keys: string[]) {
-  for (const key of keys) {
-    const value = source[key];
-    if (typeof value === "string" && value.length > 0) {
-      return value;
-    }
-  }
-  return "";
 }
 
 function appendTextToMessageSegments(

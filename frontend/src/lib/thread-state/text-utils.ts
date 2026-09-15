@@ -52,3 +52,32 @@ export function getPrimaryTextContent(message: ChatMessage) {
     .join("\n\n")
     .trim();
 }
+
+// 以下两个提取器原先住在 events.ts；因该文件触到 500 非空行门禁（方案 T3 只允许加一个
+// 兄弟节点、不为门禁放宽阈值），按门禁建议搬到本「文本工具」模块，语义未改。
+
+/** 不 trim 的文本提取：打字机增量必须保留原始空白（delta 语义）。 */
+export function readRawTextValue(
+  source: Record<string, unknown>,
+  ...keys: string[]
+) {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === "string" && value.length > 0) {
+      return value;
+    }
+  }
+  return "";
+}
+
+export function readTextDelta(payload: Record<string, unknown> | undefined) {
+  if (!payload) {
+    return "";
+  }
+  return (
+    readRawTextValue(payload, "delta", "content") ||
+    (payload.text && typeof payload.text === "object"
+      ? readRawTextValue(payload.text as Record<string, unknown>, "content", "delta")
+      : "")
+  );
+}

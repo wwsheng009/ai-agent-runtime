@@ -11,6 +11,10 @@ import {
 } from "./history-mapping";
 import { getRuntimeEventSeq } from "./sessions";
 import { upsertArtifacts } from "./shared";
+import {
+  deriveLatestTodosFromHistoryMessages,
+  mergeTodoSnapshot,
+} from "./todos";
 
 export const MAX_RUNTIME_EVENTS = 100;
 
@@ -69,6 +73,12 @@ export function applySessionHistoryToThread(
   const resolvedMessages = Array.isArray(response.history)
     ? [...olderResidentMessages, ...mappedMessages, ...liveOnlyMessages]
     : thread.messages;
+  // 任务面板冷启动兜底（方案 §5.2 通道 B1）：会话历史逐字保留在
+  // `session-history-{id}` 产物里，工具消息 metadata 亦在其中。这里只做
+  // 「最近一页 → 最近一次 todos」的种子，不覆盖更新的实时快照（见 mergeTodoSnapshot）。
+  const historyTodoSnapshot = Array.isArray(response.history)
+    ? deriveLatestTodosFromHistoryMessages(response.history)
+    : null;
   return {
     ...thread,
     updatedAt: new Date().toISOString(),
@@ -76,6 +86,7 @@ export function applySessionHistoryToThread(
     transport,
     lastError: thread.transport === "error" ? thread.lastError : null,
     messages: resolvedMessages,
+    todoSnapshot: mergeTodoSnapshot(thread.todoSnapshot, historyTodoSnapshot),
     artifacts: upsertArtifacts(thread.artifacts, [
       historyArtifact,
       ...mappedHistory.flatMap((item) => item.artifacts),

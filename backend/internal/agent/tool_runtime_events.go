@@ -689,7 +689,108 @@ func attachProtocolResultToPayload(payload map[string]interface{}, result toolEx
 		content = content[:4096]
 	}
 	wire := toolprotocol.ResultFromParts(toolName, toolCallID, content, result.Error, metadata)
-	payload["protocol_result"] = wire.EventMap()
+	// todo_snapshot is tool-scoped: opt it in for this result instead of adding
+	// it to the shared thin allowlist that every tool filters through.
+	scopedMetadataKeys := make([]string, 0, 1)
+	if strings.EqualFold(strings.TrimSpace(toolName), "todos") {
+		attachTodoSnapshotToProtocolResult(wire, metadata)
+		if wire.Metadata[todoSnapshotMetadataKey] != nil {
+			scopedMetadataKeys = append(scopedMetadataKeys, todoSnapshotMetadataKey)
+		}
+	}
+	payload["protocol_result"] = wire.EventMapWithMetadataKeys(scopedMetadataKeys...)
+}
+
+// todoSnapshotMetadataKey is the tool-scoped protocol_result.metadata key that
+// carries the trimmed todos snapshot. It is deliberately kept out of
+// toolprotocol's shared thin allowlist and opted in per result instead.
+const todoSnapshotMetadataKey = "todo_snapshot"
+
+// todoSnapshotItem is the frontend-facing projection of one todos tool item.
+// The producer stores toolkit/tools.TodoItem values; this mirrors only the
+// fields hosts render, so the agent package never imports the tool package.
+type todoSnapshotItem struct {
+	Content    string `json:"content"`
+	Status     string `json:"status"`
+	ActiveForm string `json:"active_form"`
+}
+
+// attachTodoSnapshotToProtocolResult adds a frontend-facing, trimmed copy of the
+// todos tool snapshot onto protocol_result.metadata.todo_snapshot. It never mutates
+// the producer metadata and only runs for the `todos` tool (tool-scoped whitelist).
+//
+// wire.Metadata is the cloned map built by toolprotocol.ResultFromParts, so
+// writing there is local to the wire object and invisible to the payload map.
+// The key is attached only when at least one valid item survives filtering.
+func attachTodoSnapshotToProtocolResult(wire toolprotocol.Result, metadata map[string]interface{}) {
+	if len(metadata) == 0 || wire.Metadata == nil {
+		return
+	}
+	raw, ok := metadata["todos"]
+	if !ok || raw == nil {
+		return
+	}
+	// Convert structurally instead of importing the producer type: the snapshot
+	// may arrive as []tools.TodoItem, []interface{} or JSON-decoded maps.
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return
+	}
+	var items []todoSnapshotItem
+	if err := json.Unmarshal(encoded, &items); err != nil {
+		return
+	}
+	rows := make([]map[string]interface{}, 0, len(items))
+	for _, item := range items {
+		content := strings.TrimSpace(item.Content)
+		if content == "" {
+			continue
+		}
+		status := normalizeTodoSnapshotStatus(item.Status)
+		if status == "" {
+			continue
+		}
+		rows = append(rows, map[string]interface{}{
+			"content":     content,
+			"status":      status,
+			"active_form": strings.TrimSpace(item.ActiveForm),
+		})
+	}
+	if len(rows) == 0 {
+		return
+	}
+	snapshot := map[string]interface{}{"items": rows}
+	if sessionID := todoSnapshotMetadataString(metadata["session_id"]); sessionID != "" {
+		snapshot["session_id"] = sessionID
+	}
+	if goalID := todoSnapshotMetadataString(metadata["goal_id"]); goalID != "" {
+		snapshot["goal_id"] = goalID
+	}
+	wire.Metadata[todoSnapshotMetadataKey] = snapshot
+}
+
+// normalizeTodoSnapshotStatus canonicalizes a todo status, returning "" for
+// anything outside the pending / in_progress / completed contract.
+func normalizeTodoSnapshotStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "pending":
+		return "pending"
+	case "in_progress":
+		return "in_progress"
+	case "completed":
+		return "completed"
+	default:
+		return ""
+	}
+}
+
+// todoSnapshotMetadataString extracts a trimmed string owner id.
+func todoSnapshotMetadataString(value interface{}) string {
+	text, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(text)
 }
 
 func summarizeToolMetadata(metadata map[string]interface{}) string {

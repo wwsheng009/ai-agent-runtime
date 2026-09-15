@@ -2,6 +2,7 @@ package toolprotocol
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -158,5 +159,73 @@ func TestFromToolkitResultNil(t *testing.T) {
 	wire := FromToolkitResult("x", "y", nil)
 	if wire.OK || wire.Error == nil {
 		t.Fatalf("expected nil failure, got %+v", wire)
+	}
+}
+
+// TestResultEventMapWithMetadataKeysScopesPassthrough covers the per-result
+// opt-in used for tool-scoped structured metadata (todos -> todo_snapshot): the
+// shared thin allowlist stays untouched, while explicitly named keys pass
+// through for that result only.
+func TestResultEventMapWithMetadataKeysScopesPassthrough(t *testing.T) {
+	result := ResultFromParts("todos", "call-scoped", "任务列表已更新", "", map[string]interface{}{
+		toolresult.MetadataKey:        toolresult.KindText,
+		toolresult.SourceKey:          toolresult.SourceToolkit,
+		toolresult.MetadataOutcomeKey: toolresult.OutcomeSuccess,
+		"todo_snapshot": map[string]interface{}{
+			"items": []map[string]interface{}{
+				{"content": "运行测试", "status": "pending", "active_form": "运行测试中"},
+			},
+		},
+		"noisy_internal": "should-not-appear",
+	})
+
+	// Default EventMap must not widen the allowlist.
+	plain := result.EventMap()
+	plainMeta, _ := plain["metadata"].(map[string]interface{})
+	if _, leaked := plainMeta["todo_snapshot"]; leaked {
+		t.Fatalf("EventMap leaked a scoped key: %#v", plainMeta)
+	}
+
+	scoped := result.EventMapWithMetadataKeys("todo_snapshot", "  ", "missing_key")
+	scopedMeta, _ := scoped["metadata"].(map[string]interface{})
+	if scopedMeta == nil {
+		t.Fatalf("expected thin metadata, got %#v", scoped)
+	}
+	snapshot, ok := scopedMeta["todo_snapshot"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("scoped key missing: %#v", scopedMeta)
+	}
+	if _, ok := snapshot["items"]; !ok {
+		t.Fatalf("scoped value mutated: %#v", snapshot)
+	}
+	if _, leaked := scopedMeta["noisy_internal"]; leaked {
+		t.Fatalf("unlisted key leaked: %#v", scopedMeta)
+	}
+	if _, ok := scopedMeta["missing_key"]; ok {
+		t.Fatalf("absent key must be skipped: %#v", scopedMeta)
+	}
+	if scopedMeta[toolresult.MetadataOutcomeKey] != toolresult.OutcomeSuccess {
+		t.Fatalf("thin allowlist keys lost: %#v", scopedMeta)
+	}
+
+	// No scoped keys behaves exactly like EventMap.
+	empty := result.EventMapWithMetadataKeys()
+	if !reflect.DeepEqual(empty, plain) {
+		t.Fatalf("EventMapWithMetadataKeys()=%#v want %#v", empty, plain)
+	}
+
+	// A result whose only metadata is the scoped key still emits a metadata map.
+	onlyScoped := ResultFromParts("todos", "call-scoped-2", "", "", map[string]interface{}{
+		"todo_snapshot": map[string]interface{}{"items": []interface{}{}},
+	}).EventMapWithMetadataKeys("todo_snapshot")
+	onlyScopedMeta, _ := onlyScoped["metadata"].(map[string]interface{})
+	if _, ok := onlyScopedMeta["todo_snapshot"]; !ok {
+		t.Fatalf("scoped-only metadata dropped: %#v", onlyScoped)
+	}
+
+	// Nil metadata / bare Result shapes must not panic or invent metadata.
+	bare := Result{ToolID: "todos"}.EventMapWithMetadataKeys("todo_snapshot")
+	if _, ok := bare["metadata"]; ok {
+		t.Fatalf("expected no metadata map: %#v", bare)
 	}
 }

@@ -11,6 +11,7 @@ import { enWorkspaceSessionSearch } from "./panels-session-search";
 import { enWorkspacePanelsShell } from "./panels-shell";
 import { enWorkspacePanelsTeamsDispatch } from "./panels-teams-dispatch";
 import { enWorkspacePanelsTeamsPanels } from "./panels-teams-panels";
+import { enWorkspacePanelsTodos } from "./panels-todos";
 
 export const enWorkspace = {
   ...enWorkspaceBase,
@@ -25,5 +26,6 @@ export const enWorkspace = {
     shell: enWorkspacePanelsShell,
     teamsDispatch: enWorkspacePanelsTeamsDispatch,
     teamsPanels: enWorkspacePanelsTeamsPanels,
+    todos: enWorkspacePanelsTodos,
   },
 } satisfies DeepStringShape<typeof zhWorkspace>;
