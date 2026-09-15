@@ -137,6 +137,8 @@ type Handler struct {
 	aicliConfig                    *agentconfig.Config
 	siteAccountService             SiteAccountService
 	configDocumentService          ConfigDocumentService
+	agentMaxStepsPersister         AgentMaxStepsPersister
+	agentMaxStepsProvider          AgentMaxStepsProvider
 	serviceControlService          RuntimeServiceControlService
 	fileTransferService            FileTransferService
 	logFilePath                    string
@@ -696,6 +698,8 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/config/document/agent-route-preview", h.PreviewAgentRoute).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/config/document", h.UpdateConfigDocument).Methods(http.MethodPut)
 	runtimeRouter.HandleFunc("/skills/config/write", h.WriteConfigDocument).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/config/agent/max-steps", h.UpdateAgentMaxSteps).Methods(http.MethodPut)
+	runtimeRouter.HandleFunc("/config/agent/max-steps", h.GetAgentMaxSteps).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/service", h.GetRuntimeServiceStatus).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/service/restart", h.RestartRuntimeService).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/fs/read-file", h.ReadRuntimeFile).Methods(http.MethodPost)

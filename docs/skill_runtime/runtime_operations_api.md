@@ -151,6 +151,35 @@ Endpoints:
 
 `runtime_impact` 会标出 `changed_paths`、`hot_reload_paths`、`restart_required_paths`、`inactive_paths`、`applied_paths` 等信息。
 
+## Agent Max Steps
+
+源码：
+
+- `backend/internal/api/skills/agent_max_steps.go`
+- `backend/internal/runtimeserver/runtime_agent_max_steps.go`
+
+Endpoints:
+
+- `GET /api/runtime/config/agent/max-steps`
+- `PUT /api/runtime/config/agent/max-steps`
+
+同一个后端键（runtime 配置文件的 `agent.maxSteps`）对应两种作用域：
+
+- 服务端缺省：请求未携带 `max_steps` 时生效，重启后仍然保留；由这组端点读写。
+- 每轮请求值：聊天请求携带的 `max_steps`（工作区设置里的「最大步骤数」，本地即时生效），会覆盖服务端缺省。
+
+`GET` 响应字段：
+
+- `limit`：后端接受的取值上限（0 = 不限制）
+- `max_steps`：当前服务端缺省值（0 = 不限制）
+- `config_file`：该值所在的 runtime 配置文件路径
+
+`PUT` request 为 `max_steps`（取值 0–`limit`），响应为 `updated`、`max_steps`、`config_file`。写入会同时更新 runtime 内存快照与配置文件：配置文件按时间戳先备份，再用 `yaml.Node` upsert 只改 `agent.maxSteps` 一个键（其余键、注释与顺序保留），成功后发布 skills-changed 事件。
+
+配置文件尚未落盘（全新安装）时不算错误：`GET` 回默认值 `max_steps: 0` 加目标路径（`RuntimeManager.Load` 把「文件不存在」当成功并用默认值继续跑），`PUT` 会新建文件与父目录、只写 `agent.maxSteps` 这一个键——与 `skills_runtime` 策略的落盘行为一致，因此「读取缺省 → 填值保存」是闭环的。
+
+未配置 provider 时 `GET` 返回 `503`；读取或落盘失败返回 `500`，错误文案在 `error` 字段。
+
 ## Models
 
 源码：

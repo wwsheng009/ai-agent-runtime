@@ -1,10 +1,14 @@
 import { BotIcon, RouteIcon } from "lucide-react";
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { Trans, useTranslation } from "react-i18next";
 
+import { Button } from "@/components/ui/button";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { Select } from "@/components/ui/select";
 import { useAppSettings, type ReasoningEffort } from "@/core/settings";
+import { useRuntimeAgentMaxSteps } from "@/hooks/workspace/use-runtime-agent-max-steps";
+import { saveRuntimeAgentMaxSteps } from "@/lib/runtime-api";
 import { cn } from "@/lib/utils";
 
 import { SettingsChoiceCard } from "./settings-choice-card";
@@ -48,6 +52,45 @@ export function ChatSettingsPage({
   const { t } = useTranslation("settings");
   const { t: tCommon } = useTranslation("common");
   const { settings, updateSection } = useAppSettings();
+  const {
+    error: backendMaxStepsError,
+    loading: backendMaxStepsLoading,
+    snapshot: backendMaxSteps,
+  } = useRuntimeAgentMaxSteps();
+  const [savingMaxSteps, setSavingMaxSteps] = useState(false);
+  const [maxStepsStatus, setMaxStepsStatus] = useState<{
+    tone: "success" | "error";
+    text: string;
+  } | null>(null);
+
+  // 本地设置改完立即对下一轮生效（请求带上 max_steps），点保存再把后端缺省值
+  // （runtime 内存快照 + 配置文件里的 agent.maxSteps）一起改掉。
+  async function handleSaveMaxSteps() {
+    setSavingMaxSteps(true);
+    setMaxStepsStatus(null);
+    try {
+      const saved = await saveRuntimeAgentMaxSteps({
+        max_steps: settings.chat.maxSteps,
+      });
+      setMaxStepsStatus({
+        tone: "success",
+        text: t("chat.maxStepsSaved", {
+          count: saved.max_steps,
+          path: saved.config_file,
+        }),
+      });
+    } catch (error) {
+      setMaxStepsStatus({
+        tone: "error",
+        text: t("chat.maxStepsSaveFailed", {
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      });
+    } finally {
+      setSavingMaxSteps(false);
+    }
+  }
+
   const providerSelectOptions = providerOptions.map((provider) => ({
     value: provider,
     label: provider,
@@ -257,7 +300,80 @@ export function ChatSettingsPage({
               {t("chat.currentMaxSteps", { count: settings.chat.maxSteps })}{" "}
               {t("chat.maxStepsAdvice")}
             </p>
+            <Button
+              className="sm:ml-auto"
+              disabled={savingMaxSteps}
+              onClick={() => void handleSaveMaxSteps()}
+              size="sm"
+              variant="secondary"
+            >
+              {savingMaxSteps
+                ? t("chat.maxStepsSaving")
+                : t("chat.maxStepsSave")}
+            </Button>
           </div>
+          <p className="mt-3 text-xs leading-6 text-muted-foreground">
+            {t("chat.maxStepsSaveHint")}
+          </p>
+          {maxStepsStatus ? (
+            <p
+              className={cn(
+                "mt-2 text-sm leading-6",
+                maxStepsStatus.tone === "success"
+                  ? "text-accent-teal"
+                  : "text-accent-orange",
+              )}
+              role={maxStepsStatus.tone === "error" ? "alert" : "status"}
+            >
+              {maxStepsStatus.text}
+            </p>
+          ) : null}
+          <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1">
+            <p className="text-xs leading-6 text-muted-foreground">
+              {backendMaxSteps
+                ? t("chat.backendMaxStepsDefault", {
+                    count: backendMaxSteps.maxSteps,
+                    path: backendMaxSteps.configFile,
+                  })
+                : backendMaxStepsLoading
+                  ? t("chat.backendMaxStepsLoading")
+                  : t("chat.backendMaxStepsUnavailable", {
+                      message: backendMaxStepsError ?? "",
+                    })}
+            </p>
+            {backendMaxSteps ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() =>
+                  updateSection("chat", {
+                    maxSteps: clampMaxSteps(String(backendMaxSteps.maxSteps)),
+                  })
+                }
+              >
+                {t("chat.backendMaxStepsAdopt")}
+              </Button>
+            ) : null}
+          </div>
+          {backendMaxSteps && backendMaxSteps.maxSteps > 20 ? (
+            <p className="mt-2 text-xs leading-6 text-accent-orange">
+              {t("chat.backendMaxStepsClamped", {
+                count: backendMaxSteps.maxSteps,
+                applied: String(
+                  clampMaxSteps(String(backendMaxSteps.maxSteps)),
+                ),
+              })}
+            </p>
+          ) : null}
+          {backendMaxSteps &&
+          backendMaxSteps.maxSteps > 0 &&
+          settings.chat.maxSteps === 0 ? (
+            <p className="mt-2 text-xs leading-6 text-accent-orange">
+              {t("chat.backendMaxStepsShadowed", {
+                count: backendMaxSteps.maxSteps,
+              })}
+            </p>
+          ) : null}
         </SettingsPanelCard>
       </SettingsSection>
     </div>

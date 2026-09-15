@@ -2,6 +2,7 @@
 
 import { SettingsSection } from "./settings-section";
 
+import { AgentMaxStepsPolicyCard } from "./agent-max-steps-policy-card";
 import { useConfigEditorCore } from "./backend-config-settings-page/use-config-core";
 
 import { createProvidersDomain } from "./backend-config-settings-page/domains/providers";
@@ -67,6 +68,8 @@ export function BackendConfigSettingsPage() {
       <ConfigEditorHeaderSection core={core} />
 
       <ConfigImpactSection core={core} />
+
+      <AgentMaxStepsPolicyCard />
 
       <SettingsSection
         title={core.t("editor.panels.editorTitle")}

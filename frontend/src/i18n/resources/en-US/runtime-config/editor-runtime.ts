@@ -229,4 +229,23 @@ export const enRuntimeConfigEditorRuntime = {
       description: "Memory sampling frequency, thresholds, and leak detection.",
     },
   },
+  agentMaxSteps: {
+    title: "Agent execution policy",
+    description:
+      "Maintains agent.maxSteps in the runtime config: the server default used when a request omits max_steps (0 = no limit). This card writes to disk directly and is not part of the draft flow below.",
+    fieldLabel: "Server default max steps",
+    currentDefault: "Server default: {{count}}.",
+    loading: "Loading…",
+    unknown: "Server default not loaded yet.",
+    limitHint: "Range 0–{{limit}}; 0 means no limit.",
+    save: "Save server default",
+    saving: "Saving…",
+    saved: "Saved: server default {{count}}, written to {{path}}.",
+    saveFailed: "Save failed: {{message}}",
+    loadFailed: "Failed to load the server default: {{message}}",
+    configFile: "Config file: {{path}}",
+    workspaceValue:
+      "Workspace per-turn value: {{count}} (chat requests send it and override the server default; both share the same agent.maxSteps key).",
+    scopeNote: "Source: agent.maxSteps in the runtime config file.",
+  },
 } satisfies DeepStringShape<typeof zhRuntimeConfigEditorRuntime>;

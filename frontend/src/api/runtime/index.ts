@@ -1,11 +1,13 @@
 export * from "@/types/runtime";
 
 export {
+  getRuntimeAgentMaxSteps,
   getRuntimeConfigDocument,
   getRuntimeServiceStatus,
   previewRuntimeAgentRoute,
   previewRuntimeConfigDocument,
   restartRuntimeService,
+  saveRuntimeAgentMaxSteps,
   saveRuntimeConfigDocument,
   writeRuntimeConfigDocument,
 } from "./config";

@@ -210,4 +210,23 @@ export const zhRuntimeConfigEditorRuntime = {
       description: "内存采样频率、阈值和泄露判断。",
     },
   },
+  agentMaxSteps: {
+    title: "Agent 执行策略",
+    description:
+      "维护 runtime 配置里的 agent.maxSteps：请求未携带 max_steps 时使用的服务端缺省值（0 = 不限制）。本卡片直接落盘，不参与本页草稿流程。",
+    fieldLabel: "服务端缺省最大步骤数",
+    currentDefault: "服务端缺省：{{count}}。",
+    loading: "正在读取…",
+    unknown: "尚未读到服务端缺省值。",
+    limitHint: "取值范围 0–{{limit}}，0 表示不限制。",
+    save: "保存服务端缺省",
+    saving: "保存中…",
+    saved: "已保存：服务端缺省 {{count}}，写入 {{path}}。",
+    saveFailed: "保存失败：{{message}}",
+    loadFailed: "读取服务端缺省值失败：{{message}}",
+    configFile: "配置文件：{{path}}",
+    workspaceValue:
+      "工作区设置的每轮值：{{count}}（聊天请求会携带它并覆盖服务端缺省；两边共用同一个键 agent.maxSteps）。",
+    scopeNote: "来源：runtime 配置文件的 agent.maxSteps。",
+  },
 } as const;

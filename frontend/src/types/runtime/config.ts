@@ -42,6 +42,25 @@ export type RuntimeConfigDocumentSaveResponse = {
   document: RuntimeConfigDocument;
 };
 
+/** 工作区设置「最大步骤数」保存：写后端 runtime 内存快照 + 配置文件。 */
+export type RuntimeAgentMaxStepsSaveRequest = {
+  max_steps: number;
+};
+
+export type RuntimeAgentMaxStepsSaveResponse = {
+  updated: boolean;
+  max_steps: number;
+  config_file: string;
+};
+
+/** 读取后端缺省的「最大步骤数」：runtime 内存快照里的 agent.maxSteps + 来源配置文件路径。 */
+export type RuntimeAgentMaxStepsResponse = {
+  /** 后端接受的取值上限（0 = 不限制）。 */
+  limit: number;
+  max_steps: number;
+  config_file: string;
+};
+
 export type RuntimeAgentRoutePreviewParent = {
   provider?: string;
   model?: string;

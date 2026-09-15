@@ -234,6 +234,21 @@ export const zhSettings = {
     currentMaxSteps: "当前值为 {{count}}。",
     maxStepsAdvice:
       "默认 0（不限制），由模型自行决定何时结束；需要约束时通常 8 到 12 足够覆盖常见工作区任务。",
+    maxStepsSave: "保存到后端",
+    maxStepsSaving: "保存中…",
+    maxStepsSaveHint:
+      "保存会同时改后端 runtime 的内存缺省值并落盘到 runtime 配置文件（agent.maxSteps）；本地改动对下一轮请求已是实时生效。",
+    maxStepsSaved: "已保存：最大步骤数 {{count}}，写入 {{path}}。",
+    maxStepsSaveFailed: "保存失败：{{message}}",
+    backendMaxStepsLoading: "正在读取后端缺省值…",
+    backendMaxStepsDefault:
+      "后端缺省：{{count}}（请求未携带 max_steps 时生效；来源 {{path}}）。",
+    backendMaxStepsUnavailable: "未能读取后端缺省值：{{message}}",
+    backendMaxStepsAdopt: "采用后端缺省",
+    backendMaxStepsClamped:
+      "后端缺省 {{count}} 超出工作区上限 20，采用后取 {{applied}}。",
+    backendMaxStepsShadowed:
+      "当前每轮值为 0（不限制），会覆盖后端缺省 {{count}}；如需跟随服务端缺省请点「采用后端缺省」。",
   },
   notifications: {
     title: "工作区通知",

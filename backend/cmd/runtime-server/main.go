@@ -1019,6 +1019,15 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		})
 		return &configCopy
 	})
+	// 工作区设置里的「最大步骤数」保存：内存快照（RuntimeManager）与配置文件一起改，
+	// 避免只改前端本地设置、重启后缺省值又丢回文件里的旧值。
+	handler.SetAgentMaxStepsPersister(
+		runtimeserver.NewRuntimeAgentMaxStepsPersister(runtimeManager),
+	)
+	// 同一个来源的读取端：设置页回显服务端缺省值 + 来源配置文件路径。
+	handler.SetAgentMaxStepsProvider(
+		runtimeserver.NewRuntimeAgentMaxStepsReader(runtimeManager),
+	)
 	handler.SetProfileSupport(skillsapi.ProfileSupportConfig{
 		Registry:          profilesys.NewRegistryFromProfilesConfig(cfg.Profiles),
 		DefaultProfile:    defaultProfile(cfg),

@@ -237,6 +237,22 @@ export const enSettings = {
     currentMaxSteps: "Current value: {{count}}.",
     maxStepsAdvice:
       "Defaults to 0 (no limit) so the model decides when a run is done; when constraining, 8 to 12 usually covers common workspace tasks.",
+    maxStepsSave: "Save to backend",
+    maxStepsSaving: "Saving…",
+    maxStepsSaveHint:
+      "Saving updates the backend runtime default in memory and writes it to the runtime config file (agent.maxSteps); local edits already apply to the next turn.",
+    maxStepsSaved: "Saved: max steps {{count}}, written to {{path}}.",
+    maxStepsSaveFailed: "Save failed: {{message}}",
+    backendMaxStepsLoading: "Loading the backend default…",
+    backendMaxStepsDefault:
+      "Backend default: {{count}} (used when a request omits max_steps; source {{path}}).",
+    backendMaxStepsUnavailable:
+      "Could not load the backend default: {{message}}",
+    backendMaxStepsAdopt: "Use backend default",
+    backendMaxStepsClamped:
+      "Backend default {{count}} exceeds the workspace limit of 20; adopting it uses {{applied}}.",
+    backendMaxStepsShadowed:
+      "The per-turn value is 0 (no limit), which overrides the backend default {{count}}; click “Use backend default” to follow the server default.",
   },
   notifications: {
     title: "Workspace notifications",
