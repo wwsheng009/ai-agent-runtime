@@ -17,7 +17,7 @@ import { MessageRow } from "./message-list/message-row";
 import { NoticeRow } from "./message-list/notice-row";
 import { LoadEarlierRow } from "./message-list/load-earlier-row";
 import type { MessageListProps } from "./message-list/types";
-import { useMessageListEarlierLoader } from "./message-list/use-message-list-earlier-loader";
+import { useMessageListEarlierEntry } from "./message-list/use-message-list-earlier-entry";
 
 export type { MessageBacktrackOptions } from "./message-list/types";
 
@@ -115,15 +115,15 @@ export function MessageList({
     suspended: backtrackNavigationActive,
     memoryKey: scrollMemoryKey,
   });
-  // 会话历史尾部优先分页：滚到消息流顶端自动续页；入口按钮（列表顶部）始终可用，
-  // 两者走同一条幂等入口，因此内容不足一屏时也不会出现「翻不动」死角。
-  useMessageListEarlierLoader({
+  // 会话历史尾部优先分页：滚到消息流顶端自动续页；入口只在**视口贴近顶部**时露面
+  // （贴底读最新消息时不常驻遮挡正文，见 hook 头注释）。两者走同一条幂等入口，
+  // 因此内容不足一屏（没有滚动事件）时入口依旧是兜底，不会出现「翻不动」死角。
+  const showEarlierEntry = useMessageListEarlierEntry({
     containerRef: scrollContainerRef,
     hasMore: earlierLoader?.hasMore ?? false,
     loading: earlierLoader?.loading ?? false,
     onLoadEarlier: earlierLoader?.onLoadEarlier,
   });
-  const showEarlierEntry = Boolean(earlierLoader?.hasMore) || Boolean(earlierLoader?.loading);
 
   useEffect(() => {
     if (!editingMessageId) {
