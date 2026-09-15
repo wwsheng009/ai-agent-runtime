@@ -92,12 +92,15 @@ describe("WorkspaceSidebar 管理目录（§12-A 未注册目录）", () => {
     onAddWorkspaceDirectory: React.ComponentProps<
       typeof WorkspaceSidebar
     >["onAddWorkspaceDirectory"],
+    onCreateSessionInDirectory: React.ComponentProps<
+      typeof WorkspaceSidebar
+    >["onCreateSessionInDirectory"] = vi.fn(),
   ) {
     const props: React.ComponentProps<typeof WorkspaceSidebar> = {
       density: "comfortable",
       onAddWorkspaceDirectory,
       onArchiveRuntimeSession: vi.fn(),
-      onCreateSessionInDirectory: vi.fn(),
+      onCreateSessionInDirectory,
       onDeleteRuntimeSession: vi.fn(),
       onForkRuntimeSession: vi.fn(),
       onMoveRuntimeSession: vi.fn(),
@@ -105,14 +108,10 @@ describe("WorkspaceSidebar 管理目录（§12-A 未注册目录）", () => {
       onRemoveWorkspaceDirectory: vi.fn(),
       onRenameRuntimeSession: vi.fn(),
       onRenameWorkspaceDirectory: vi.fn(),
-      onSelectRuntimeSessionUser: vi.fn(),
       onSelectThread: vi.fn(),
-      runtimeSessionDefaultUserId: "anonymous",
       runtimeSessionUsers: [
         { user_id: "anonymous", display_name: "匿名", session_count: 2 },
       ],
-      runtimeSessionUsersError: null,
-      runtimeSessionUsersLoading: false,
       runtimeSessions: [alphaSession, gammaSession],
       runtimeSessionsError: null,
       runtimeSessionsLoading: false,
@@ -148,11 +147,24 @@ describe("WorkspaceSidebar 管理目录（§12-A 未注册目录）", () => {
     });
   }
 
-  /** 工具条上的「管理目录」按钮（弹层入口）。 */
+  /**
+   * 「管理目录」弹层入口（2026-09-15 布局优化后落位在段头 ⋯ 面板内）：
+   * 先展开面板，再点面板里的条目。
+   */
   async function openManagerDialog() {
-    const button = Array.from(
-      document.querySelectorAll<HTMLButtonElement>("button"),
-    ).find((candidate) => candidate.textContent?.includes("管理目录"));
+    const trigger = document.querySelector<HTMLButtonElement>(
+      '[data-testid="sidebar-directories-menu-trigger"]',
+    );
+    if (!trigger) {
+      throw new Error("未找到段头 ⋯ 菜单入口");
+    }
+    await act(async () => {
+      trigger.click();
+      await flush();
+    });
+    const button = document.querySelector<HTMLButtonElement>(
+      '[data-testid="sidebar-directories-manage-entry"]',
+    );
     if (!button) {
       throw new Error("未找到「管理目录」入口");
     }
@@ -171,9 +183,32 @@ describe("WorkspaceSidebar 管理目录（§12-A 未注册目录）", () => {
   }
 
   function registerButton(row: HTMLElement): HTMLButtonElement {
-    const button = row.querySelector<HTMLButtonElement>("button");
+    const button = row.querySelector<HTMLButtonElement>(
+      '[data-testid="directory-manage-register"]',
+    );
     if (!button) {
       throw new Error("未找到「注册」按钮");
+    }
+    return button;
+  }
+
+  function registerAndCreateButton(row: HTMLElement): HTMLButtonElement {
+    const button = row.querySelector<HTMLButtonElement>(
+      '[data-testid="directory-manage-register-and-create"]',
+    );
+    if (!button) {
+      throw new Error("未找到「注册并新建会话」按钮");
+    }
+    return button;
+  }
+
+  /** 派生组头 hover 动作槽里的「注册并新建会话」（注册目录没有这个入口）。 */
+  function derivedGroupAction(): HTMLButtonElement {
+    const button = document.querySelector<HTMLButtonElement>(
+      '[data-testid="sidebar-directory-register-and-create"]',
+    );
+    if (!button) {
+      throw new Error("未找到派生组头的「注册并新建会话」入口");
     }
     return button;
   }
@@ -229,5 +264,58 @@ describe("WorkspaceSidebar 管理目录（§12-A 未注册目录）", () => {
     ).toBe("目录不存在");
     expect(unregisteredRows()).toHaveLength(1);
     expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+  });
+
+  // 方案 §15：「用即注册」——一次点击 = 登记 + 在该目录下建会话，
+  // 且新会话直接用注册响应里的 id 绑定（不再靠路径二次推导）。
+  it("弹层「注册并新建会话」：登记后用注册记录的 id 在该目录建会话", async () => {
+    const onAddWorkspaceDirectory = vi
+      .fn()
+      .mockResolvedValue({ id: "dir-gamma", path: GAMMA_KEY });
+    const onCreateSessionInDirectory = vi.fn().mockResolvedValue(undefined);
+    renderSidebar(onAddWorkspaceDirectory, onCreateSessionInDirectory);
+    await openManagerDialog();
+
+    await act(async () => {
+      registerAndCreateButton(unregisteredRows()[0]!).click();
+      await flush();
+    });
+
+    expect(onAddWorkspaceDirectory).toHaveBeenCalledWith(GAMMA_KEY);
+    expect(onCreateSessionInDirectory).toHaveBeenCalledWith({
+      path: GAMMA_KEY,
+      directoryId: "dir-gamma",
+      label: "gamma",
+    });
+    // 成功后收起弹层：新会话会被选中并跳到会话路由。
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it("派生组头「注册并新建会话」：一次点击完成登记 + 建会话（注册组没有该入口）", async () => {
+    const onAddWorkspaceDirectory = vi
+      .fn()
+      .mockResolvedValue({ id: "dir-gamma", path: GAMMA_KEY });
+    const onCreateSessionInDirectory = vi.fn().mockResolvedValue(undefined);
+    renderSidebar(onAddWorkspaceDirectory, onCreateSessionInDirectory);
+
+    // 只有派生组（gamma）有这个入口；已注册的 alpha 仍是 ⋯ 菜单三件套。
+    expect(
+      document.querySelectorAll(
+        '[data-testid="sidebar-directory-register-and-create"]',
+      ),
+    ).toHaveLength(1);
+
+    await act(async () => {
+      derivedGroupAction().click();
+      await flush();
+      await flush();
+    });
+
+    expect(onAddWorkspaceDirectory).toHaveBeenCalledWith(GAMMA_KEY);
+    expect(onCreateSessionInDirectory).toHaveBeenCalledWith({
+      path: GAMMA_KEY,
+      directoryId: "dir-gamma",
+      label: "gamma",
+    });
   });
 });

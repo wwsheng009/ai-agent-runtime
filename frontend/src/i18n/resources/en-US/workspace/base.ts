@@ -133,11 +133,6 @@ export const enWorkspaceBase = {
       directories: "Directories",
       runtime: "Runtime overview",
     },
-    sessionUserSelect: "Session user",
-    sessionUserOption: "{{user}} · {{count}} sessions",
-    sessionUserOptionDefault: "{{user}} · {{count}} sessions · default",
-    sessionUserDefault: "default",
-    sessionUsersLoading: "loading users",
     sessionDirectoryUnscoped: "Unscoped sessions",
     session: {
       archive: "Archive session",
@@ -190,6 +185,7 @@ export const enWorkspaceBase = {
       closed: "Closed {{count}}",
       error: "Failed to load session stats",
       idle: "Idle {{count}}",
+      label: "Session stats",
       loading: "Loading stats",
       refresh: "Refresh session stats",
       retry: "Retry",
@@ -218,6 +214,7 @@ export const enWorkspaceBase = {
         "Only the registry entry is removed; files on disk stay untouched.",
       deleteConfirmButton: "Remove",
       empty: "Registered workspace directories will appear here.",
+      menu: "Directory section options",
       manage: "Manage directories",
       manageTitle: "Manage workspace directories",
       manageHint:
@@ -225,8 +222,9 @@ export const enWorkspaceBase = {
       manageEmpty: "No workspace directories registered yet.",
       manageUnregisteredTitle: "Not registered (from sessions)",
       manageUnregisteredHint:
-        "These directories come from session workspaces and are not in the registry yet. Register one to rename it, remove it, or start a session inside it.",
+        "These directories come from session workspaces and are not in the registry yet. Register and start a chat books the directory and starts a session in one step; once registered you can rename or remove it.",
       register: "Register",
+      registerAndNewChat: "Register and start a chat in this directory",
     },
     threadStatuses: {
       review: "Waiting for review",

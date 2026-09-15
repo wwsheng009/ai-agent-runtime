@@ -35,10 +35,7 @@ export function WorkspaceShell({
   runtimeSessionsLoading,
   runtimeSessionsRefreshing,
   runtimeSessionsSummary,
-  runtimeSessionDefaultUserId,
   runtimeSessionUsers,
-  runtimeSessionUsersError,
-  runtimeSessionUsersLoading,
   workspaceDirectories,
   workspaceDirectoriesError,
   workspaceDirectoriesLoading,
@@ -77,7 +74,6 @@ export function WorkspaceShell({
   onSelectArtifact,
   onSelectThread,
   onRefreshRuntimeTeams,
-  onSelectRuntimeSessionUser,
   onResetRuntimeClientIdentity,
   onStopResponding,
   onSubmit,
@@ -276,13 +272,9 @@ export function WorkspaceShell({
           onRenameRuntimeSession={onRenameRuntimeSession}
           onRestoreRuntimeSession={onRestoreRuntimeSession}
           onRenameWorkspaceDirectory={onRenameWorkspaceDirectory}
-          onSelectRuntimeSessionUser={onSelectRuntimeSessionUser}
           onSelectThread={onSelectThread}
           openSettings={openSettings}
-          runtimeSessionDefaultUserId={runtimeSessionDefaultUserId}
           runtimeSessionUsers={runtimeSessionUsers}
-          runtimeSessionUsersError={runtimeSessionUsersError}
-          runtimeSessionUsersLoading={runtimeSessionUsersLoading}
           runtimeSessions={runtimeSessions}
           runtimeSessionsError={runtimeSessionsError}
           runtimeSessionsLoading={runtimeSessionsLoading}

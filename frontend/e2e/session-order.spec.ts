@@ -39,6 +39,30 @@ function orderControl(page: Page) {
   return page.getByRole("group", { name: "Session ordering" });
 }
 
+/**
+ * 段头 ⋯ 面板（2026-09-15 布局优化）：排序 / 分组控件从段内常驻工具条收敛进该面板。
+ * 幂等：面板已开时不再点触发键（再点一次会把面板关掉）。
+ */
+async function openSectionMenu(page: Page) {
+  const panel = page.getByTestId("sidebar-directories-menu-panel");
+  if (!(await panel.isVisible())) {
+    await page.getByTestId("sidebar-directories-menu-trigger").click();
+  }
+  await expect(panel).toBeVisible();
+}
+
+/** 收起面板：面板浮在会话树上方，拖拽 / 点行之前必须让开，否则落点被面板遮住。
+ *
+ * 复用触发键开合（而不是 Escape）：键盘路径依赖焦点落在面板内，
+ * 而点击是否聚焦按钮在 Firefox / WebKit 上并不一致，触发键开合与浏览器无关。 */
+async function closeSectionMenu(page: Page) {
+  const panel = page.getByTestId("sidebar-directories-menu-panel");
+  if (await panel.isVisible()) {
+    await page.getByTestId("sidebar-directories-menu-trigger").click();
+  }
+  await expect(panel).toHaveCount(0);
+}
+
 /** 按纵向位置读出可见顺序（与 DOM 结构解耦，只认真实呈现）。 */
 async function visibleOrder(page: Page): Promise<string[]> {
   const measured = await Promise.all(
@@ -73,6 +97,7 @@ test("排序控件默认最近更新，切到手动后行可拖且偏好刷新�
 }) => {
   await gotoWorkspace(page);
 
+  await openSectionMenu(page);
   const updated = orderControl(page).getByRole("button", {
     name: "Last updated",
   });
@@ -88,6 +113,7 @@ test("排序控件默认最近更新，切到手动后行可拖且偏好刷新�
 
   await page.reload();
   await expect(page.locator(".app-chat-input")).toBeVisible({ timeout: 30_000 });
+  await openSectionMenu(page);
   await expect(
     orderControl(page).getByRole("button", { name: "Manual" }),
   ).toHaveAttribute("aria-pressed", "true");
@@ -98,7 +124,9 @@ test("手动模式拖拽重排：顺序落到浏览器账目、播报结果、�
   page,
 }) => {
   await gotoWorkspace(page);
+  await openSectionMenu(page);
   await orderControl(page).getByRole("button", { name: "Manual" }).click();
+  await closeSectionMenu(page);
 
   const baseline = await visibleOrder(page);
   expect(baseline).toHaveLength(IDS.length);
@@ -130,8 +158,10 @@ test("切回最近更新不读手动账目（账目保留，切回手动后恢�
   page,
 }) => {
   await gotoWorkspace(page);
+  await openSectionMenu(page);
   const orderControlLocator = orderControl(page);
   await orderControlLocator.getByRole("button", { name: "Manual" }).click();
+  await closeSectionMenu(page);
 
   const baseline = await visibleOrder(page);
   const moved = baseline[baseline.length - 1];
@@ -141,6 +171,7 @@ test("切回最近更新不读手动账目（账目保留，切回手动后恢�
   const manualOrder = [moved, ...baseline.slice(0, -1)];
   await expect.poll(() => visibleOrder(page)).toEqual(manualOrder);
 
+  await openSectionMenu(page);
   await orderControlLocator.getByRole("button", { name: "Last updated" }).click();
   await expect.poll(() => visibleOrder(page)).toEqual(baseline);
   await expect(sessionRow(page, moved)).toHaveAttribute("draggable", "false");

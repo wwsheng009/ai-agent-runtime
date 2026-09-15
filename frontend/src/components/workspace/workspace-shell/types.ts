@@ -48,15 +48,19 @@ export type WorkspaceShellProps = {
   runtimeSessionsLoading: boolean;
   runtimeSessionsRefreshing?: boolean;
   runtimeSessionsSummary: RuntimeSessionsSummary;
-  runtimeSessionDefaultUserId?: string;
   runtimeSessionUsers: RuntimeSessionUserSummary[];
-  runtimeSessionUsersError: string | null;
-  runtimeSessionUsersLoading: boolean;
   workspaceDirectories: RuntimeWorkspaceDirectory[];
   workspaceDirectoriesError: string | null;
   workspaceDirectoriesLoading: boolean;
   workspaceDirectoriesRefreshing?: boolean;
-  onAddWorkspaceDirectory: (path: string, name?: string) => Promise<unknown>;
+  /**
+   * 注册一个工作目录（POST 注册表）。返回后端登记的目录记录：
+   * 方案 §15 的「注册并新建会话」要用它的 id 绑定新会话。
+   */
+  onAddWorkspaceDirectory: (
+    path: string,
+    name?: string,
+  ) => Promise<RuntimeWorkspaceDirectory | void>;
   onRenameWorkspaceDirectory: (id: string, name: string) => Promise<void>;
   onRemoveWorkspaceDirectory: (id: string) => Promise<void>;
   /** P1-8：手动重试连接（复用既有 seq 游标续传，不新建退避循环）。 */
@@ -118,7 +122,6 @@ export type WorkspaceShellProps = {
   onSelectArtifact: (artifactId: string) => void;
   onSelectThread: (threadId: string) => void;
   onRefreshRuntimeTeams?: () => void;
-  onSelectRuntimeSessionUser: (userId: string) => void;
   onResetRuntimeClientIdentity: () => void;
   onStopResponding: () => void;
   onSubmit: () => void;

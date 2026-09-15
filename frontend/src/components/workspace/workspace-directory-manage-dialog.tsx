@@ -24,7 +24,7 @@ import { InlineRenameInput } from "@/components/workspace/workspace-sidebar/sess
 import { type WorkspaceDirectoryCreateRequest } from "@/components/workspace/workspace-sidebar/types";
 
 /**
- * 方案 §12-A：**仅由会话派生**的目录（会话 metadata.context.workspace_path
+ * 方案 §13-A：**仅由会话派生**的目录（会话 metadata.context.workspace_path
  * 有值，但不在工作目录注册表里）。它们此前只能通过「添加目录」手动录入路径纳入管理，
  * 现在在管理弹层里直接列出并给一键「注册」入口。
  */
@@ -48,6 +48,14 @@ export type WorkspaceDirectoryManageDialogProps = {
   unregisteredDirectories?: readonly SidebarUnregisteredDirectory[];
   /** 注册一个派生目录（POST 注册表 + 刷新列表，由接线层处理）。 */
   onRegisterDirectory?: (path: string) => Promise<void> | void;
+  /**
+   * 方案 §15：注册并在该目录下新建会话（一次点击 = 登记 + 建会话，由接线层处理）。
+   * 失败时抛错，由本弹层就地提示（弹层遮住侧栏错误条）。
+   */
+  onRegisterAndCreateSession?: (
+    path: string,
+    label: string,
+  ) => Promise<void> | void;
   /** 请求打开「添加目录」弹窗（由接线层处理，本组件不自己开弹窗）。 */
   onRequestAdd: () => void;
   /** 在目录中新建会话：自己维护 in-flight 忙碌态（await 该 Promise）。 */
@@ -88,6 +96,7 @@ export function WorkspaceDirectoryManageDialog({
   sessionCounts,
   unregisteredDirectories = [],
   onRegisterDirectory,
+  onRegisterAndCreateSession,
   onRequestAdd,
   onCreateSession,
   onRenameDirectory,
@@ -97,6 +106,10 @@ export function WorkspaceDirectoryManageDialog({
   const [creatingId, setCreatingId] = useState<string | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [registeringPath, setRegisteringPath] = useState<string | null>(null);
+  /** §15：正在「注册并新建会话」的目录路径（与注册按钮互斥禁用）。 */
+  const [createAfterRegisterPath, setCreateAfterRegisterPath] = useState<
+    string | null
+  >(null);
   /** 注册失败就地提示：弹层会遮住侧栏错误条，所以这里自己显示一条。 */
   const [registerError, setRegisterError] = useState<string | null>(null);
 
@@ -179,6 +192,28 @@ export function WorkspaceDirectoryManageDialog({
       );
     } finally {
       setRegisteringPath(null);
+    }
+  }
+
+  /**
+   * 方案 §15：注册并新建会话。成功即收起弹层（新会话会被选中并跳转）；
+   * 注册失败不收起——就地提示、行仍在，用户可以改走「注册」或「添加目录」。
+   */
+  async function handleRegisterAndCreate(entry: SidebarUnregisteredDirectory) {
+    if (createAfterRegisterPath || !onRegisterAndCreateSession) {
+      return;
+    }
+    setRegisterError(null);
+    setCreateAfterRegisterPath(entry.path);
+    try {
+      await onRegisterAndCreateSession(entry.path, entry.label);
+      onClose();
+    } catch (failure) {
+      setRegisterError(
+        failure instanceof Error ? failure.message : String(failure),
+      );
+    } finally {
+      setCreateAfterRegisterPath(null);
     }
   }
 
@@ -324,7 +359,7 @@ export function WorkspaceDirectoryManageDialog({
             </ul>
           )}
 
-          {/* 方案 §12-A：会话派生的目录此前在管理弹层里完全不可见（只能手动重录路径）。 */}
+          {/* 方案 §13-A：会话派生的目录此前在管理弹层里完全不可见（只能手动重录路径）。 */}
           {unregisteredDirectories.length > 0 ? (
             <div className="mt-4" data-testid="directory-manage-unregistered">
               <h3 className="text-sm font-medium text-foreground">
@@ -380,27 +415,61 @@ export function WorkspaceDirectoryManageDialog({
                           </p>
                         </div>
 
-                        <Button
-                          size="sm"
-                          disabled={isRegistering || !onRegisterDirectory}
-                          title={t("sidebar.directories.register")}
-                          aria-label={t("sidebar.directories.register")}
-                          onClick={() => {
-                            void handleRegister(entry);
-                          }}
-                        >
-                          <span className="inline-flex items-center gap-1">
-                            {isRegistering ? (
+                        <div className="flex shrink-0 items-center gap-1">
+                          {/* §15：一次点击完成登记 + 建会话（少一跳，且新会话带 directory_id）。 */}
+                          <button
+                            type="button"
+                            data-testid="directory-manage-register-and-create"
+                            title={t("sidebar.directories.registerAndNewChat")}
+                            aria-label={t(
+                              "sidebar.directories.registerAndNewChat",
+                            )}
+                            disabled={
+                              Boolean(createAfterRegisterPath) ||
+                              isRegistering ||
+                              !onRegisterAndCreateSession
+                            }
+                            onClick={() => {
+                              void handleRegisterAndCreate(entry);
+                            }}
+                            className={ACTION_BUTTON_CLASS}
+                          >
+                            {createAfterRegisterPath === entry.path ? (
                               <LoaderCircleIcon
                                 size={12}
                                 className="animate-spin"
                               />
                             ) : (
-                              <FolderPlusIcon size={12} />
+                              <MessageSquarePlusIcon size={12} />
                             )}
-                            {t("sidebar.directories.register")}
-                          </span>
-                        </Button>
+                          </button>
+                          <Button
+                            size="sm"
+                            disabled={
+                              isRegistering ||
+                              Boolean(createAfterRegisterPath) ||
+                              !onRegisterDirectory
+                            }
+                            data-testid="directory-manage-register"
+                            title={t("sidebar.directories.register")}
+                            aria-label={t("sidebar.directories.register")}
+                            onClick={() => {
+                              void handleRegister(entry);
+                            }}
+                          >
+                            <span className="inline-flex items-center gap-1">
+                              {isRegistering ? (
+                                <LoaderCircleIcon
+                                  size={12}
+                                  className="animate-spin"
+                                />
+                              ) : (
+                                <FolderPlusIcon size={12} />
+                              )}
+                              {t("sidebar.directories.register")}
+                            </span>
+                          </Button>
+                        </div>
                       </div>
                     </li>
                   );

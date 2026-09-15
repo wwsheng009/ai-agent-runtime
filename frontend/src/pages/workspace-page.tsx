@@ -73,12 +73,8 @@ export function WorkspacePage() {
     runtimeSessionsLoading,
     runtimeSessionsRefreshing,
     runtimeSessionsSummary,
-    runtimeSessionDefaultUserId,
     runtimeSessionUsers,
-    runtimeSessionUsersError,
-    runtimeSessionUsersLoading,
     selectedRuntimeSessionUserId,
-    selectRuntimeSessionUserId,
   } = useRuntimeSessionsData({
     pinnedSessionId: routeSessionId,
     userId: runtimeClient.userId,
@@ -420,10 +416,7 @@ export function WorkspacePage() {
       runtimeSessionsLoading={runtimeSessionsLoading}
       runtimeSessionsRefreshing={runtimeSessionsRefreshing}
       runtimeSessionsSummary={runtimeSessionsSummary}
-      runtimeSessionDefaultUserId={runtimeSessionDefaultUserId}
       runtimeSessionUsers={runtimeSessionUsers}
-      runtimeSessionUsersError={runtimeSessionUsersError}
-      runtimeSessionUsersLoading={runtimeSessionUsersLoading}
       workspaceDirectories={workspaceDirectories}
       workspaceDirectoriesError={workspaceDirectoriesError}
       workspaceDirectoriesLoading={workspaceDirectoriesLoading}
@@ -467,7 +460,6 @@ export function WorkspacePage() {
       onSelectArtifact={handleSelectArtifact}
       onSelectThread={handleSelectThreadWithTrajectoryReset}
       onRefreshRuntimeTeams={handleRefreshRuntimeTeams}
-      onSelectRuntimeSessionUser={selectRuntimeSessionUserId}
       onResetRuntimeClientIdentity={handleResetRuntimeClientIdentity}
       onStopResponding={handleStopResponding}
       onSubmit={submitPrompt}

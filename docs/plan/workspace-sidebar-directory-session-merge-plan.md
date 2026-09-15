@@ -386,7 +386,7 @@ i18n 命名空间同理分裂：目录段用 `sidebar.directories.*`、`sidebar.
 
 ### 10.6 遗留与后续
 
-1. **Phase 3 未做**（可选能力补齐）：派生目录组头「登记为工作目录」、平铺模式行菜单「移动到目录」子菜单、派生目录内「新建会话」（前置：需先确认后端 `CreateSession` 仅传 `workspace_path`、不传 `directory_id` 时的行为）。
+1. **Phase 3 部分已做**（可选能力补齐）：派生目录「登记为工作目录」**已落地**，但落位从「组头菜单」改为「管理目录弹层」——见 §13；仍未做的是平铺模式行菜单「移动到目录」子菜单、派生目录内「新建会话」（前置：需先确认后端 `CreateSession` 仅传 `workspace_path`、不传 `directory_id` 时的行为）。
 2. **提交未做**：本轮为纯前端渲染层重组（无数据迁移、无接口变更），改动仍在工作树；回滚口径见 §8。
 3. **转交**：`e2e/live-delta.spec.ts` 的既有红项属消息渲染 / 流式链路在飞工作流，需其收口；本方案不修改该链路。
 ---
@@ -486,3 +486,121 @@ i18n 命名空间同理分裂：目录段用 `sidebar.directories.*`、`sidebar.
 
 1. 本次坐标系：**侧栏内容盒左缘**（`aside` 的 `p-3` / `p-2.5` 内衬之内）是「顶到左侧」的基准——分区标题、用户卡片、目录组头、组内会话行四者左缘现全部对齐到该线；若后续要求连 `aside` 内衬一并取消，需要连同搜索框、分区标题一起改，另开批次。
 2. 组内会话行的**谱系缩进**（`session-item.tsx` 按 `lineage.depth` 的 `paddingLeft: depth * 12`）按设计保留：那是「分支子行」的语义层级，与「目录分组」不是同一维度。
+
+---
+
+## 13. 方案 A 修复（2026-09-15）：管理目录弹层登记会话派生目录
+
+**状态**：已落地（随 §10–§12 同一工作树，**未提交**；纯前端，**后端零改动**）。
+
+**诉求**：§10.6 遗留 1 的第一项能力——会话派生目录的「登记为工作目录」。
+**落位选择**：**不加**在目录组头，而是放进既有「管理目录」弹层（§3.5-D 已定的唯一目录管理入口）：
+分组模式与平铺模式共用一个入口，派生目录集中成一区，避免组头菜单在两种视图下各写一套。
+
+### 13.1 根因（能力缺口，非渲染 bug）
+
+弹层列表只来自注册表 `GET /api/runtime/workspace-directories`，而侧栏目录组来自
+`mergedDirectoryGroups`（**注册表 ∪ 会话派生 ∪ Unscoped**）。两者口径不同 → 侧栏有组、弹层里看不到：
+用户只能把路径**重录**一遍；手输路线命中 Windows 驱动器相对写法（§8 的 `C:foo` / `\foo`）时只会报错，无法自愈。
+
+### 13.2 改动（文件级）
+
+| 文件 | 改动 |
+| --- | --- |
+| `components/workspace/workspace-directory-manage-dialog.tsx` | 新增 props `unregisteredDirectories` / `onRegisterDirectory`；新增「未注册（来自会话）」分区（虚线行 + 完整规范化路径 + 会话数徽标 + 「注册」按钮 + 自持忙碌态 + 失败就地 `role="alert"`）；空态条件改为 `directories.length === 0 && unregisteredDirectories.length === 0`（有派生目录时不再显示「还没有注册的工作目录」，否则界面自相矛盾） |
+| `workspace-sidebar/use-directory-registry.ts` | 新增派生 `unregisteredDirectories`（`!group.registered && group.fullPath`，排除 Unscoped 空路径桶）；新增 `registerDirectoryFromManager(path)`：trim → 清错误条 → await 注册 → 失败时写 `sidebarActionError` **并重新抛出**让弹层就地显示 |
+| `workspace-sidebar.tsx` | 接线：`useDirectoryRegistry({ …, onRegisterWorkspaceDirectory: onAddWorkspaceDirectory })`，弹层透传 `unregisteredDirectories` / `onRegisterDirectory` |
+| `i18n/resources/{zh-CN,en-US}/workspace/base.ts` | 新增 3 键：`sidebar.directories.manageUnregisteredTitle` / `manageUnregisteredHint` / `register` |
+| `workspace-directory-manage-dialog.test.tsx` | +4 例（分区渲染与空态抑制 / 不传 props 不渲染 / 注册忙碌禁用 / 失败就地提示），共 15 例 |
+| `workspace-sidebar-unregistered-directory.test.tsx`（新增） | 3 例接线级：派生列表投影、注册成功走规范化路径、失败同时落侧栏错误条与弹层提示 |
+| `e2e/sidebar-directory-register.spec.ts`（新增） | 2 例：一键注册后并入注册表（断言 POST `body.path` = 规范化路径 / 行移入已注册列表 / 组头长出 ⋯ 菜单）、注册失败就地提示且行保留 |
+
+### 13.3 验证证据
+
+| 层 | 命令 | 结果 |
+| --- | --- | --- |
+| 单测（定向） | `npx vitest run src/components/workspace/workspace-directory-manage-dialog.test.tsx src/components/workspace/workspace-sidebar-unregistered-directory.test.tsx` | **2 文件 / 18 用例全绿** |
+| 单测（工作区全量） | `npx vitest run src/components/workspace` | **90 文件 / 547 用例全绿** |
+| e2e（本批新增） | `npx playwright test e2e/sidebar-directory-register.spec.ts` | **2 passed** |
+| e2e（侧栏 / 会话相关 6 spec 回归） | `npx playwright test e2e/sidebar-directory-indent.spec.ts e2e/sidebar-directory-register.spec.ts e2e/session-grouping.spec.ts e2e/sidebar-session-actions.spec.ts e2e/session-collapse.spec.ts e2e/session-order.spec.ts` | **16 passed / 0 failed**（33.0s） |
+| e2e（全量） | `npx playwright test` | **83 passed / 2 failed**。两个红项 `live-delta.spec.ts`、`thread-link.spec.ts` 均为 §10.6-3 / §12.3 已归因的**既有红项**——本次改动只落在侧栏目录管理表面，且两者的失败截图时间戳（09:15 / 09:21）**早于本批改动**（本批首个失败截图 10:03），单独复跑同样失败，归属在飞的消息渲染 / 流式链路 |
+| 门禁 | `npm run lint` | **0 error / 1 warning**（既有 `artifact-detail-dialog.tsx:50`）。i18n scanned=670 / violations=0；备份 995 文件 0 残留；行数 941 个 `.ts/.tsx` 0 个 > 500（最大 `src/pages/workspace-page.tsx`=498）；字面色值 35 文件 0 处 |
+| 构建 | `npm run build` | exit 0（仅既有 `INEFFECTIVE_DYNAMIC_IMPORT` 警告）；e2e 跑在该产物上，故弹出行为已在真实构建产物中验过 |
+
+### 13.4 口径与遗留
+
+1. **注册用规范化路径**：派生组 `fullPath` 已经过 `normalizeRuntimeDirectoryPath`（`\` → `/`），注册请求直接复用它——与侧栏组头 `title`、分组键同口径；e2e 的 POST 断言锁的就是这条不变式（若哪天改回原样路径，用例会红）。
+2. **失败双重可见**（刻意）：弹层遮住侧栏时用户看不到侧栏错误条，因此 hook 写错误条 **并** 抛出、由弹层就地显示；关掉弹层后错误条仍在，不会「静默失败」。
+3. **代码注释里的「方案 §13-A」= 本节**（「A」沿用对话里的 A 项，文档内正式编号为 §13）；后续引用以本节为准。
+4. **e2e 语言口径**（踩坑记录）：本仓 e2e 默认语言**不是** zh-CN，按中文可访问名定位（`getByRole(..., { name: "管理目录" })`）会一直等不到元素。新 spec 必须在 `beforeEach` 里 `seedLanguage(page, "zh-CN")`（`e2e/support.ts` 用 `addInitScript` 写入，须在 `page.goto` 之前调用）。本批两个用例首次红灯即此原因，补 seed 后 1.3s 通过。
+5. **未做**：派生目录的「在目录中新建会话」仍需先确认后端 `CreateSession` 仅传 `workspace_path`、不传 `directory_id` 时的行为（同 §10.6-1 前置）；注册完成后该行自然获得「新建会话」能力（已并入注册表）。
+
+---
+
+## 14. 第三轮布局优化（2026-09-15）：工作目录工具条收敛进段头 ⋯ 菜单
+
+**状态**：已落地（随 §10–§13 同一工作树，**未提交**；纯前端渲染层，**后端零改动**）。
+
+**诉求（用户原话，第三次提出）**：「优化 /workspace/chats/new 左侧上的目录菜单：当前工作目录的统计、排序、分组、管理目录等功能都平铺在页面上，需要优化——把这些操作放到工作目录的弹出菜单上，优化布局。」
+
+### 14.1 根因（单点：工具条平铺）
+
+§10 把会话段与目录段合并为「工作目录」段时，把会话段的**整条浏览工具条**原样搬进了合并段正文：
+
+| 行 | 常驻控件 |
+| --- | --- |
+| 1 | 会话统计摘要（活跃 / 空闲 / 已归档 / 已关闭）+ 刷新 |
+| 2 | 排序（默认 / 最近活跃，分段控件） |
+| 3 | 「管理目录」按钮 |
+| 4 | 分组视图（按目录 / 平铺，分段控件） |
+| 5 | 「显示已归档会话」开关 |
+
+5 行低频「浏览设置」把目录会话树压到侧栏下半屏。合并本身没错，错在**工具条平铺**这一落位。
+
+### 14.2 落位决策
+
+| 决策 | 选择 | 理由 |
+| --- | --- | --- |
+| 段头入口 | 只留两个图标：`添加目录`（一键主操作）+ `⋯`（浏览设置） | 高频创建路径保持一键；低频设置收进菜单 |
+| 面板语义 | `role="dialog"` + `aria-haspopup="dialog"`（**非** `role="menu"`） | 面板内既有 `role="group"` + `aria-pressed` 的分段控件，也有普通按钮；菜单语义会与既有 e2e 定位口径冲突 |
+| 面板定位 | 基准 = 分区**标题行**（`section-shell.tsx` 加 `relative`），类名 `right-1 w-[calc(100%-1rem)]` | 几何实测见 14.5：以 ⋯ 图标自身为基准 + 固定 `w-64` 会把面板推出 `aside`，被 `overflow-hidden` 裁掉 |
+| 统计降级 | 面板收起时，触发键右上角留橙色圆点 | 错误信息被收进弹层后不能失联 |
+| 无会话组 | 不渲染排序 / 分组（不给空控件）；统计与管理目录仍在 | 与合并前「无组不显示排序」口径一致 |
+| 键盘 | 打开即聚焦面板；`Escape` 关闭并还焦触发键；触发键 `ArrowDown` 打开 | 与 §11 目录组头菜单同口径 |
+
+### 14.3 文件级改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `workspace-sidebar/directory-section-menu.tsx`（新增） | 段头 ⋯ 面板：用户清单、统计摘要 + 刷新、排序、分组、归档开关、管理目录；自持开关与外部点击 / `Escape` 关闭；文件头注释记录「浮层会盖住段内其下内容」这一固有权衡与三种关闭路径 |
+| `workspace-sidebar/directories-section.tsx` | 段头动作区改为「添加目录」+ ⋯ 菜单，原工具条挂载点删除 |
+| `workspace-sidebar/session-browser-toolbar.tsx` | 由常驻工具条瘦身为纯容器（用户清单 / 错误条 / 用户卡片 / `children`），`-103` 行量级 |
+| `workspace-sidebar/section-shell.tsx` | 分区标题行加 `relative`（注释说明为何以整行为基准而非 ⋯ 图标），三个分区共用同一 `SidebarSection` |
+| `workspace-sidebar/types.ts` | 工具条 props 类型随之收窄 / 下沉 |
+| `i18n/resources/{zh-CN,en-US}/workspace/base.ts` | 新增 `sidebar.sessionStats.label`、`sidebar.directories.menu`（面板无障碍名），双语逐键对齐 |
+
+### 14.4 测试口径变更
+
+| 文件 | 变更 |
+| --- | --- |
+| `workspace-sidebar/directory-section-menu.test.tsx`（新增） | 9 例：默认收起不渲染四类控件、展开后组成、无会话组不渲染排序/分组、降级告警点、排序与分组回调、管理目录回调并收起、归档开关显隐与回调、`Escape` 还焦 |
+| `e2e/session-stats.spec.ts` / `session-order.spec.ts` / `session-grouping.spec.ts` / `sidebar-session-actions.spec.ts` | 断言前先开面板（`openSectionMenu`，幂等）；面板会盖住段内其下内容，切用户 / 点被盖控件前先 `closeSectionMenu`。**控件自身的选择器口径不变**（`role="group"` + `aria-label`） |
+| `e2e/sidebar-directory-register.spec.ts` | 「管理目录」入口改为 段头 ⋯ → 管理目录 |
+| `workspace-sidebar-unregistered-directory.test.tsx` | 打开管理弹层的路径同步加一层 ⋯ |
+
+### 14.5 验证证据
+
+| 层 | 命令 | 结果 |
+| --- | --- | --- |
+| 单测（工作区全量） | `npx vitest run src/components/workspace` | **92 文件 / 572 用例全绿** |
+| e2e（侧栏 / 会话定向 7 spec，重建 `dist` 后） | `npx playwright test e2e/session-stats.spec.ts e2e/session-order.spec.ts e2e/session-grouping.spec.ts e2e/sidebar-session-actions.spec.ts e2e/sidebar-directory-register.spec.ts e2e/sidebar-directory-indent.spec.ts e2e/session-collapse.spec.ts` | **21 passed / 0 failed**（36.2s） |
+| e2e（全量） | `npx playwright test`（88 tests / 26 files） | **86 passed / 2 failed**：`live-delta.spec.ts:85`（`getByText(/final-/)` 未找到）、`thread-link.spec.ts:52`（`/runtime/events` 200 请求数 0）——均为 §10.6-3 / §12.3 已归因的**既有红项**（消息渲染 / 流式链路在飞工作流），与本轮侧栏改动无因果关系 |
+| 门禁 | `npm run lint` | **0 error / 2 warning**（两条均属既有的 `message-list-earlier-*`，非本批文件；i18n 双语齐备、行数门禁通过） |
+| 构建 | `npm run build`（`tsc -b && vite build`） | exit 0（仅既有 `INEFFECTIVE_DYNAMIC_IMPORT` 警告）；上述 e2e 全部跑在该产物上 |
+| 面板几何（定位修复留档） | Playwright 探针（1440×900） | 修复前面板矩形 `x=-15`（越出 `aside`，被 `overflow-hidden` 裁掉）；修复后 `x=22..241` 完整落在 `aside 0..256` 内，`overflowing: []` |
+
+### 14.6 遗留与口径
+
+1. **浮层会盖住段内其下内容**：实测 `coveredCount: 9`（用户卡片、首个会话行、目录组头 ⋯ 等）。关闭路径三条：点面板外 / `Escape` / 再点 ⋯。若要彻底不遮挡，需改为「段内下推式折叠面板」（会带来布局位移），本轮按用户「弹出菜单」的诉求保留浮层。
+2. **面板内控件未配图标**：如需统一视觉，与 §11.5-2 的菜单图标一起另开样式批次。
+3. **e2e 写作用例的坑（留档）**：面板改变的是**可达性**（点得到 / 点不到），不是选择器。新写侧栏用例时若直接 `click` 被面板盖住的控件，Playwright 会一直等到超时——先 `closeSectionMenu(page)`。

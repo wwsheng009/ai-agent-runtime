@@ -1,7 +1,7 @@
 # Workspace 工作目录管理实施方案（目录增加/删除 + 目录内会话管理）
 
-> 状态：**已实施**（P0–P4 已落地，并含三轮实施后修复）；§14 为参考实现借鉴的**增强候选（尚未实施）**
-> 日期：2026-09-10（初稿）／2026-09-15（章节重编号 + §14 增强候选）
+> 状态：**已实施**（P0–P4 已落地，并含三轮实施后修复 + 第四轮「用即注册」优化，见 §15）；§14 为参考实现借鉴的**增强候选（E1–E9，尚未实施）**
+> 日期：2026-09-10（初稿）／2026-09-15（章节重编号 + §14 增强候选 + §15 用即注册）
 > 涉及端：frontend（React + Vite）、backend（Go runtime-server，:8101）
 > 关联页面：`http://localhost:8101/workspace/chats/new`
 
@@ -15,11 +15,12 @@
 | 2026-09-10 | 实施记录（三）：第三轮实施后审查（M1/M2/m4） | §13 |
 | 2026-09-15 | 修正重复章节号（原实施记录误用「6./7./8.」，与 §6–§8 冲突）；新增参考实现借鉴增强候选 | §11–§14 |
 | 2026-09-15 | 侧栏「工作目录 / 会话」分区合并落地（Phase 0–2 + Phase 4 清理）：分区一分为二造成的「同一会话两行」重复问题收敛；§14 增强候选的落点按合并后组件结构更新 | §14、`workspace-sidebar-directory-session-merge-plan.md` §10 |
+| 2026-09-15 | 实施记录（四）：「用即注册」——派生目录组头/管理弹层新增「注册并在该目录下新建会话」，一次点击完成登记 + 按 `directory_id` 建会话；评审结论「注册按钮与派生列表不冗余、派生不自动入注册表」一并记录 | §15 |
 
 **阅读导航**
 
 - 需求与设计：§1 背景与目标 → §2 现状与差距 → §3 目标方案 → §4 详细设计
-- 交付与状态：§5 实施计划 → §7 测试与验收 → §11/§12/§13 实施记录（含已修缺陷与已知边界）
+- 交付与状态：§5 实施计划 → §7 测试与验收 → §11/§12/§13/§15 实施记录（含已修缺陷与已知边界）
 - 后续增强：§10-F6（方案自审遗留）+ §14（参考实现借鉴项，含优先级、落点与验收）
 - 排障速查：§8 风险与回滚、§9 关键代码位置索引
 
@@ -1203,3 +1204,71 @@ parseOptions 双路径断言。toolkit/tools 全包 + agent/toolctx/toolexec/too
   （E1/E3/E4/E7/E8）可直接按合并后结构排期；E2/E5/E6/E9 与之并行不冲突。
 - **文档维护约定**：合并方案 Phase 4 已回填本文件与优化台账（见 §0 变更记录）。本节作为「参考实现借鉴」
   的唯一入口，新增借鉴项一律记在此处，避免三份文档各自立排期。
+
+---
+
+## 15. 实施记录（四）：「用即注册」——派生目录的登记与会话创建合并（2026-09-15）
+
+> 触发：评审提问「管理工作目录里已经有注册按钮，而侧栏已经能自动列出目录，是否功能冗余？
+> 能不能在添加目录时自动注册？」
+> 本节先给出评审结论（15.1），再记录据此落地的动作（15.2–15.5）。
+
+### 15.1 评审结论：不冗余，但「显式使用」值得一条一次点击的路
+
+- **两个列表不是同一件事的两种做法**：
+  - *会话派生组*：`GROUP BY sessionmeta.WorkspacePath` 的**视图投影**（只读，随会话出现/消失，
+    不做任何持久化）；
+  - *注册组*：YAML 注册表（`~/.aicli/workspace_directories`）里的**持久条目**（可重命名、可移除、
+    可承载 `directory_id` 绑定与会话分组落点）。
+  注册按钮的作用是把「当前真实存在的派生目录」钉进注册表，而不是重复派生列表。
+- **「添加目录时自动注册」已是现状**：`workspace-directory-add-dialog.tsx` 提交的就是
+  `POST /api/runtime/workspace-directories`，一次动作直接入注册表，没有第二道登记步骤。
+- **不能反过来让派生目录自动写注册表**：派生组的来源包含「其他客户端 / 后台任务跑出来的会话」，
+  自动登记会把别人的临时路径永久写进本机配置；且后端只接受**运行时主机上真实存在**的目录
+  （不存在返回 400），静默补写会在用户看不见的地方失败。
+
+### 15.2 采取的动作：把「用」与「登记」合并成一次点击
+
+保留派生组的零副作用出现方式，只给**显式使用**一条短路径：
+
+| 入口 | 动作 | 语义 |
+| --- | --- | --- |
+| 派生目录**组头** hover 动作槽 | 「注册并在该目录下新建会话」 | ①`POST` 注册表 ②用注册响应里的 `directory.id` 新建会话并跳转 |
+| 「管理目录」弹层「未注册（来自会话）」行 | 组合动作图标 + 保留纯「注册」按钮 | 组合动作同上；纯「注册」仍然只登记、**不建会话** |
+
+- 一次点击 = 登记 + 建会话，替代原「先点注册 → 再回组头 ⋯ 菜单新建会话」两跳。
+- **纯「注册」按钮保留**（不做删除）：它是无会话副作用的登记动作（只想把目录固定进侧栏、
+  暂不建会话时用它），与组合动作语义互补而非重复。
+- 新会话直接带 `directory_id`（取自注册响应 `{directory, existing}`），不再依赖
+  「只传 `workspace_path` 的兜底解析」；拿不到记录的实现（测试桩）回落到路径绑定，行为与既有
+  「目录内新建会话」一致。
+
+### 15.3 落点
+
+| 文件 | 变更 |
+| --- | --- |
+| `workspace-sidebar/use-directory-registry.ts` | 新增 `registerAndCreateSession(path,label)`（弹层入口）与 `handleRegisterAndCreateSession(group)`（组头入口）、`registeringDirectoryPath` 忙碌态；失败统一落侧栏错误条 |
+| `workspace-sidebar/directory-derived-actions.tsx`（新） | 派生组头动作槽的单一入口（`data-testid="sidebar-directory-register-and-create"`，无障碍名「注册并在该目录下新建会话」） |
+| `workspace-sidebar/directories-section.tsx` | 组头 `actions`：注册组走 ⋯ 菜单三件套，派生组走组合动作 |
+| `workspace-directory-manage-dialog.tsx` | 未注册行并列两个动作：`directory-manage-register-and-create` / `directory-manage-register`（忙碌态互斥禁用） |
+| `workspace-shell/types.ts`、`workspace-sidebar/types.ts` | `onAddWorkspaceDirectory` 返回值由 `Promise<unknown>` 收紧为 `Promise<RuntimeWorkspaceDirectory \| void>`（组合动作要用 `directory.id`） |
+| i18n `zh-CN` / `en-US` `workspace/base.ts` | 新增 `sidebar.directories.registerAndNewChat`；`manageUnregisteredHint` 改写为指向组合动作 |
+
+### 15.4 验收
+
+- **单测（vitest，28 例）**：`workspace-directory-manage-dialog.test.tsx`（19）、
+  `workspace-sidebar-unregistered-directory.test.tsx`（5，含弹层与组头两条接线级用例）、
+  `workspace-sidebar/directory-derived-actions.test.tsx`（4）。
+  覆盖：只在派生组出现、忙碌禁用、成功后收起/失败就地提示、`(path,label)` 透传。
+- **e2e（`sidebar-directory-register.spec.ts`，3 例）**：新增「派生组头组合动作」用例，断言
+  `POST /workspace-directories` 的规范化路径、`POST /sessions` 的
+  `{workspace_path, directory_id}`、跳转到 canonical 会话路由、组头随之长出 ⋯ 菜单。
+- **门禁**：`npx tsc -b`、`npm run lint`（i18n 键对齐 / 单文件 ≤500 非空行 / 无备份残留）通过。
+- **同日布局变更的兼容**：段内常驻工具条收敛进段头 ⋯ 面板后，「管理目录」入口位置变化，
+  e2e 的入口定位改为「面板优先、常驻按钮回落」，断言本身与入口挂载位置解耦。
+
+### 15.5 明确不做
+
+1. **不做**「派生即自动注册」的后台静默写入（无用户动作的持久化副作用）。
+2. **不做**「纯注册顺带建会话」——保留无会话副作用的登记动作。
+3. **不改**注册表存储格式与后端端点（沿用 §13-A 的 `POST /api/runtime/workspace-directories`）。

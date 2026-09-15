@@ -319,10 +319,23 @@ describe("WorkspaceDirectoryManageDialog", () => {
     );
   }
 
+  /** §15 之后未注册行有两个按钮（组合动作 + 纯注册），按 testid 精确定位。 */
   function registerButton(row: HTMLElement): HTMLButtonElement {
-    const button = row.querySelector<HTMLButtonElement>("button");
+    const button = row.querySelector<HTMLButtonElement>(
+      '[data-testid="directory-manage-register"]',
+    );
     if (!button) {
       throw new Error("missing register button");
+    }
+    return button;
+  }
+
+  function registerAndCreateButton(row: HTMLElement): HTMLButtonElement {
+    const button = row.querySelector<HTMLButtonElement>(
+      '[data-testid="directory-manage-register-and-create"]',
+    );
+    if (!button) {
+      throw new Error("missing register-and-create button");
     }
     return button;
   }
@@ -405,5 +418,88 @@ describe("WorkspaceDirectoryManageDialog", () => {
     ).toBe("目录不存在");
     expect(unregisteredRows()).toHaveLength(1);
     expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+  });
+
+  // 方案 §15：「用即注册」——注册并新建会话合并为一个动作（少一跳）。
+  it("「注册并新建会话」把路径与标签交回接线层，成功后收起弹层", async () => {
+    const onRegisterAndCreateSession = vi.fn().mockResolvedValue(undefined);
+    renderDialog({
+      unregisteredDirectories: UNREGISTERED,
+      onRegisterAndCreateSession,
+    });
+
+    await act(async () => {
+      registerAndCreateButton(unregisteredRows()[0]!).click();
+      await flush();
+    });
+
+    // 标签沿用派生组名（新会话标题口径与「在该目录下新建会话」一致）。
+    expect(onRegisterAndCreateSession).toHaveBeenCalledWith(
+      "E:/work/gamma",
+      "gamma",
+    );
+    // 成功即收起：新会话会被选中并跳转，弹层留着会挡住会话。
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("「注册并新建会话」自持忙碌态，并禁用同行的纯注册按钮", async () => {
+    let resolveCombined: (() => void) | null = null;
+    const onRegisterAndCreateSession = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveCombined = resolve;
+        }),
+    );
+    renderDialog({
+      unregisteredDirectories: UNREGISTERED,
+      onRegisterAndCreateSession,
+    });
+
+    act(() => {
+      registerAndCreateButton(unregisteredRows()[0]!).click();
+    });
+
+    expect(registerAndCreateButton(unregisteredRows()[0]!).disabled).toBe(true);
+    expect(registerButton(unregisteredRows()[0]!).disabled).toBe(true);
+    expect(unregisteredRows()[0]?.querySelector(".animate-spin")).not.toBeNull();
+
+    await act(async () => {
+      resolveCombined?.();
+      await flush();
+    });
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("「注册并新建会话」失败就地提示、不收起弹层", async () => {
+    const onRegisterAndCreateSession = vi
+      .fn()
+      .mockRejectedValue(new Error("目录不存在"));
+    renderDialog({
+      unregisteredDirectories: UNREGISTERED,
+      onRegisterAndCreateSession,
+    });
+
+    await act(async () => {
+      registerAndCreateButton(unregisteredRows()[0]!).click();
+      await flush();
+    });
+
+    expect(
+      document.querySelector('[data-testid="directory-manage-register-error"]')
+        ?.textContent,
+    ).toBe("目录不存在");
+    expect(onClose).not.toHaveBeenCalled();
+    expect(unregisteredRows()).toHaveLength(1);
+  });
+
+  it("不传 onRegisterAndCreateSession 时组合动作按钮禁用（纯注册仍可用）", () => {
+    renderDialog({
+      unregisteredDirectories: UNREGISTERED,
+      onRegisterDirectory: vi.fn(),
+    });
+
+    expect(registerAndCreateButton(unregisteredRows()[0]!).disabled).toBe(true);
+    expect(registerButton(unregisteredRows()[0]!).disabled).toBe(false);
   });
 });

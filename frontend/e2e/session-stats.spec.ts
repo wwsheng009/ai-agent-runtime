@@ -4,9 +4,13 @@ import { expect, test } from "./fixtures";
 import { resetMockState, seedRuntimeEvents, seedSession } from "./support";
 
 // P2-1A e2e：侧栏会话统计（GET /api/runtime/sessions/stats）。
-// 覆盖链路：默认用户口径聚合（含 camelCase 的 totalMessages）→ 切换侧栏用户重取
+// 覆盖链路：默认用户口径聚合（含 camelCase 的 totalMessages）→ 既有持久化用户口径
 // → 端点不可用（503）如实提示且不渲染任何伪造计数 → 恢复后重试可见真实计数；
 // 以及 500 按真实失败呈现、不与降级混同。
+//
+// 2026-09-15：侧栏「会话用户」卡片下线（用户维度不再有可切换的浏览入口），
+// 故用户口径用例改走**仅存入口**——localStorage 的已选用户
+// （`runtime-sessions-data/storage.ts`），并顺带守住「侧栏不再渲染用户卡片」。
 
 const ALICE_ACTIVE = "e2e-p2-stats-alice-active";
 const ALICE_ARCHIVED = "e2e-p2-stats-alice-archived";
@@ -17,6 +21,28 @@ const STATS_ROUTE = /\/api\/runtime\/sessions\/stats(?:\?|$)/;
 async function gotoWorkspace(page: Page) {
   await page.goto("/workspace");
   await expect(page.locator(".app-chat-input")).toBeVisible({ timeout: 30_000 });
+}
+
+/**
+ * 段头 ⋯ 面板（2026-09-15 布局优化）：统计摘要与刷新按钮从段内常驻工具条收敛进该面板，
+ * 因此断言前必须先开面板。幂等：面板已开时不再点触发键（再点一次会把面板关掉）。
+ */
+async function openSectionMenu(page: Page) {
+  const panel = page.getByTestId("sidebar-directories-menu-panel");
+  if (!(await panel.isVisible())) {
+    await page.getByTestId("sidebar-directories-menu-trigger").click();
+  }
+  await expect(panel).toBeVisible();
+}
+
+/** 会话用户的既有持久化入口（键与 `runtime-sessions-data/storage.ts` 对齐）。 */
+const STORED_SESSION_USER_KEY = "workspace.runtime.sessions.selectedUser";
+
+async function seedStoredSessionUser(page: Page, userId: string) {
+  await page.addInitScript(
+    ([key, value]) => window.localStorage.setItem(key, value),
+    [STORED_SESSION_USER_KEY, userId] as const,
+  );
 }
 
 test.beforeEach(async ({ page }) => {
@@ -62,6 +88,7 @@ test("侧栏统计按默认用户聚合，计数与 seed 一致", async ({ page 
 
   await gotoWorkspace(page);
 
+  await openSectionMenu(page);
   await expect(page.getByTestId("session-stats-summary")).toBeVisible({
     timeout: 15_000,
   });
@@ -81,16 +108,28 @@ test("侧栏统计按默认用户聚合，计数与 seed 一致", async ({ page 
   await expect.poll(() => requestedUserIds.at(-1)).toBe("alice");
 });
 
-test("切换侧栏用户后统计按新用户重取", async ({ page }) => {
-  await gotoWorkspace(page);
-  await expect(page.getByTestId("session-stats-chip-total")).toHaveText("2 sessions");
+test("已存用户决定统计口径，且侧栏不再渲染用户卡片", async ({ page }) => {
+  const requestedUserIds: string[] = [];
+  await page.route(STATS_ROUTE, async (route) => {
+    requestedUserIds.push(
+      new URL(route.request().url()).searchParams.get("user_id") ?? "",
+    );
+    await route.continue();
+  });
+  await seedStoredSessionUser(page, "bob");
 
-  await page.getByTitle("bob", { exact: true }).click();
+  await gotoWorkspace(page);
+  await openSectionMenu(page);
 
   await expect(page.getByTestId("session-stats-chip-total")).toHaveText("1 sessions");
   await expect(page.getByTestId("session-stats-chip-active")).toHaveText("Active 1");
   await expect(page.getByTestId("session-stats-chip-archived")).toHaveCount(0);
   await expect(page.getByTestId("session-stats-chip-totalMessages")).toHaveCount(0);
+  await expect.poll(() => requestedUserIds.at(-1)).toBe("bob");
+
+  // 旧版用户卡片以 `title=<userId>` 暴露点击入口（alice / bob 两张）：现已下线。
+  await expect(page.getByTitle("alice", { exact: true })).toHaveCount(0);
+  await expect(page.getByTitle("bob", { exact: true })).toHaveCount(0);
 });
 
 test("统计端点 503 时如实提示且不伪造计数，恢复后重试可见真实计数", async ({
@@ -111,6 +150,7 @@ test("统计端点 503 时如实提示且不伪造计数，恢复后重试可见
 
   await gotoWorkspace(page);
 
+  await openSectionMenu(page);
   await expect(page.getByTestId("session-stats-unavailable")).toBeVisible({
     timeout: 15_000,
   });
@@ -139,6 +179,7 @@ test("统计端点 500 按真实失败呈现，不与不可用降级混同", asy
 
   await gotoWorkspace(page);
 
+  await openSectionMenu(page);
   await expect(page.getByTestId("session-stats-error")).toBeVisible({
     timeout: 15_000,
   });

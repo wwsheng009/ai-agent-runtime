@@ -21,13 +21,9 @@ type WorkspaceSidebarSectionProps = Pick<
   | "onRenameRuntimeSession"
   | "onRenameWorkspaceDirectory"
   | "onRestoreRuntimeSession"
-  | "onSelectRuntimeSessionUser"
   | "onSelectThread"
   | "sessionActivity"
-  | "runtimeSessionDefaultUserId"
   | "runtimeSessionUsers"
-  | "runtimeSessionUsersError"
-  | "runtimeSessionUsersLoading"
   | "runtimeSessions"
   | "runtimeSessionsError"
   | "runtimeSessionsLoading"
@@ -64,13 +60,9 @@ export function WorkspaceSidebarSection({
   onRenameRuntimeSession,
   onRenameWorkspaceDirectory,
   onRestoreRuntimeSession,
-  onSelectRuntimeSessionUser,
   onSelectThread,
   sessionActivity,
-  runtimeSessionDefaultUserId,
   runtimeSessionUsers,
-  runtimeSessionUsersError,
-  runtimeSessionUsersLoading,
   runtimeSessions,
   runtimeSessionsError,
   runtimeSessionsLoading,
@@ -112,12 +104,8 @@ export function WorkspaceSidebarSection({
       runtimeSessionsLoading={runtimeSessionsLoading}
       runtimeSessionsRefreshing={runtimeSessionsRefreshing}
       runtimeSessionsSummary={runtimeSessionsSummary}
-      runtimeSessionDefaultUserId={runtimeSessionDefaultUserId}
       runtimeSessionUsers={runtimeSessionUsers}
-      runtimeSessionUsersError={runtimeSessionUsersError}
-      runtimeSessionUsersLoading={runtimeSessionUsersLoading}
       selectedRuntimeSessionUserId={selectedRuntimeSessionUserId}
-      onSelectRuntimeSessionUser={onSelectRuntimeSessionUser}
       onRefreshRuntimeTeams={onRefreshRuntimeTeams}
       workspaceDirectories={workspaceDirectories}
       workspaceDirectoriesError={workspaceDirectoriesError}

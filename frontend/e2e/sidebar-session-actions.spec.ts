@@ -21,6 +21,27 @@ async function gotoWorkspace(page: Page) {
   await expect(page.locator(".app-chat-input")).toBeVisible({ timeout: 30_000 });
 }
 
+/**
+ * 段头 ⋯ 面板（2026-09-15 布局优化）：归档开关从段内常驻工具条收敛进该面板。
+ * 幂等：面板已开时不再点触发键（再点一次会把面板关掉）。
+ */
+async function openSectionMenu(page: Page) {
+  const panel = page.getByTestId("sidebar-directories-menu-panel");
+  if (!(await panel.isVisible())) {
+    await page.getByTestId("sidebar-directories-menu-trigger").click();
+  }
+  await expect(panel).toBeVisible();
+}
+
+/** 收起面板：面板浮在会话树上方，点行 / 行菜单之前必须让开，否则落点被面板遮住。 */
+async function closeSectionMenu(page: Page) {
+  const panel = page.getByTestId("sidebar-directories-menu-panel");
+  if (await panel.isVisible()) {
+    await page.getByTestId("sidebar-directories-menu-trigger").click();
+  }
+  await expect(panel).toHaveCount(0);
+}
+
 async function openSessionRowMenu(page: Page, sessionId: string) {
   // Phase 2（合并方案 §3.2）：目录段与会话段已合并为单一「Directories」分区，
   // 同一会话只有一行（行菜单与行按钮同属一个行容器），不再按分区标题去重。
@@ -138,18 +159,22 @@ test("归档会话后从默认列表隐藏，可从归档区恢复", async ({ pa
   expect(decodeURIComponent(archiveCalls[0])).toContain(
     `/sessions/${SOURCE_ID}/archive`,
   );
-  // 归档是非破坏操作：行从默认列表隐藏，但可通过「显示归档」入口找回。
+  // 归档是非破坏操作：行从默认列表隐藏，但可通过「显示归档」入口找回
+  // （2026-09-15 布局优化后该开关也在段头 ⋯ 面板内，先开面板）。
   // 行名随分组/徽章变化，统一按会话 id 前缀匹配（与 openSessionRowMenu 同口径）。
   const sessionsSection = workspaceSection(page);
   const rowName = new RegExp(SOURCE_ID.slice(0, 10));
   await expect(
     sessionsSection.getByRole("button", { name: rowName }),
   ).toHaveCount(0);
-  const showArchived = page.getByRole("button", { name: /^Show archived/ });
-  await expect(showArchived).toBeVisible();
+  await openSectionMenu(page);
+  const archivedToggle = page.getByTestId("sidebar-session-archived-toggle");
+  await expect(archivedToggle).toContainText("Show archived");
 
-  // 展开归档区：行重新出现（带 Archived 徽章），菜单入口变为「恢复归档」。
-  await showArchived.click();
+  // 展开归档区：行重新出现（带 Archived 徽章），行菜单入口变为「恢复归档」。
+  await archivedToggle.click();
+  // 归档行回到列表里，面板会盖住它：先收起面板再操作行菜单。
+  await closeSectionMenu(page);
   await expect(sessionsSection.getByRole("button", { name: rowName })).toBeVisible();
   await openSessionRowMenu(page, SOURCE_ID);
   await page
@@ -160,11 +185,13 @@ test("归档会话后从默认列表隐藏，可从归档区恢复", async ({ pa
   expect(decodeURIComponent(restoreCalls[0])).toContain(
     `/sessions/${SOURCE_ID}/activate`,
   );
-  // 恢复后回到默认列表；归档区计数归零，入口消失。
+  // 恢复后回到默认列表；归档区计数归零，入口不再提供「显示归档」
+  // （判定必须在面板打开时做，否则面板收起时是空断言）。
   await expect(
     sessionsSection.getByRole("button", { name: rowName }),
   ).toBeVisible();
-  await expect(showArchived).toHaveCount(0);
+  await openSectionMenu(page);
+  await expect(archivedToggle).toContainText("Hide archived");
 });
 
 // 回归用例（2026-09-14 的重复编辑器缺陷 → 2026-09-15 合并后口径）：

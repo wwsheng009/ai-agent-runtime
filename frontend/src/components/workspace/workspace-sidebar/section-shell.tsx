@@ -34,7 +34,10 @@ export function SidebarSection({
       {/* 2026-09-15 样式优化：分区标题行左内边距收到 4px（原 6px），与组头
           （`directory-group-header.tsx` 的 `px-1`）左对齐 —— 分区图标与每个目录
           行的 FolderIcon 落在同一条竖线上，整段左侧只剩一条基准线。 */}
-      <div className="mb-2 flex w-full items-center justify-between gap-3 rounded-field px-1 py-1 transition hover:bg-surface-softer">
+      {/* `relative`：给分区标题行内的浮层（如工作目录段头的 ⋯ 面板）当定位基准。
+          浮层若以段头右侧的小图标为基准会向左溢出侧栏（被 `aside` 的 overflow-hidden 裁掉），
+          以整行为基准 + `right-1` 才能保证面板右缘与图标对齐、左缘不越界。 */}
+      <div className="relative mb-2 flex w-full items-center justify-between gap-3 rounded-field px-1 py-1 transition hover:bg-surface-softer">
         <button
           type="button"
           onClick={() => onToggle(id)}

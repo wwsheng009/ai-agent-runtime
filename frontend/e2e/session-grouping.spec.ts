@@ -188,6 +188,27 @@ function groupingControl(page: Page) {
   return page.getByRole("group", { name: "会话分组视图" });
 }
 
+/**
+ * 段头 ⋯ 面板（2026-09-15 布局优化）：排序 / 分组控件从段内常驻工具条收敛进该面板。
+ * 幂等：面板已开时不再点触发键（再点一次会把面板关掉）。
+ */
+async function openSectionMenu(page: Page) {
+  const panel = page.getByTestId("sidebar-directories-menu-panel");
+  if (!(await panel.isVisible())) {
+    await page.getByTestId("sidebar-directories-menu-trigger").click();
+  }
+  await expect(panel).toBeVisible();
+}
+
+/** 收起面板：面板浮在会话树上方，点组头 / 拖拽之前必须让开，否则落点被面板遮住。 */
+async function closeSectionMenu(page: Page) {
+  const panel = page.getByTestId("sidebar-directories-menu-panel");
+  if (await panel.isVisible()) {
+    await page.getByTestId("sidebar-directories-menu-trigger").click();
+  }
+  await expect(panel).toHaveCount(0);
+}
+
 /** 行容器（拖拽属性宿主）是行按钮的父节点（与 session-order.spec.ts 同口径）。 */
 function sessionRow(page: Page, id: string): Locator {
   return sessionsSection(page)
@@ -234,6 +255,7 @@ async function expandGroup(page: Page, key: string): Promise<void> {
 async function openGroupedManualSidebar(page: Page): Promise<void> {
   await gotoWorkspace(page);
 
+  await openSectionMenu(page);
   const grouping = groupingControl(page);
   await expect(grouping.getByRole("button", { name: "按目录" })).toHaveAttribute(
     "aria-pressed",
@@ -244,6 +266,8 @@ async function openGroupedManualSidebar(page: Page): Promise<void> {
     "aria-pressed",
     "true",
   );
+  // 目录组头在会话树顶部，正被面板盖住：展开组之前先收起面板。
+  await closeSectionMenu(page);
 
   await expect(groupHeader(page, ALPHA_GROUP_KEY)).toBeVisible();
   await expect(groupHeader(page, BETA_GROUP_KEY)).toBeVisible();
@@ -339,6 +363,7 @@ test("切到平铺不渲染目录组头，切回按目录组头回来", async ({
   await expect(groupHeader(page, BETA_GROUP_KEY)).toBeVisible();
 
   const grouping = groupingControl(page);
+  await openSectionMenu(page);
   await grouping.getByRole("button", { name: "平铺" }).click();
   await expect(grouping.getByRole("button", { name: "平铺" })).toHaveAttribute(
     "aria-pressed",
@@ -355,6 +380,7 @@ test("切到平铺不渲染目录组头，切回按目录组头回来", async ({
     "aria-pressed",
     "true",
   );
+  await closeSectionMenu(page);
   await expect(groupHeader(page, ALPHA_GROUP_KEY)).toBeVisible();
   await expect(groupHeader(page, BETA_GROUP_KEY)).toBeVisible();
 });

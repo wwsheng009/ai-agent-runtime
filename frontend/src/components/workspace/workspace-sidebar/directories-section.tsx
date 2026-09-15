@@ -1,9 +1,11 @@
 // 由 components/workspace/workspace-sidebar.tsx 机械拆分而来（P0-2）。
 // Phase 2（合并方案 §3.6）：本件是**合并后的段主体**——原「工作目录」段与「会话」段合并为
-// 一棵「目录会话树」：段壳沿用 directories（标题「工作目录」+ 会话数徽标），段内的工具条、
-// 会话行、目录组头全部来自 Phase 1 抽出的公共件。
+// 一棵「目录会话树」：段壳沿用 directories（标题「工作目录」+ 会话数徽标），段内的会话行、
+// 目录组头全部来自 Phase 1 抽出的公共件。
 // 能力落位见方案 §3.3：目录注册表管理挂组头 hover（平铺模式走段内「管理目录」弹层，§3.5-D），
-// 会话浏览能力（用户 / 统计 / 排序 / 分组 / 归档 / 组内折叠 / 行菜单 / 拖拽 / 谱系）整体迁入本段。
+// 会话浏览能力（统计 / 排序 / 分组 / 归档 / 组内折叠 / 行菜单 / 拖拽 / 谱系）整体迁入本段。
+// 2026-09-15：会话「用户」维度下线（产品口径：只保留目录 / 工作目录维度）——段内不再渲染
+// 用户切换卡片，会话树直接落在段正文；跨组移动失败的就地提示改由本段直接渲染。
 
 import {
   FolderIcon,
@@ -23,15 +25,15 @@ import { type RuntimeWorkspaceDirectory } from "@/lib/runtime-api";
 import { type RuntimeSessionStats } from "@/types/runtime";
 
 import { appendEmptyRegisteredGroups } from "../workspace-sidebar-shared";
+import { WorkspaceSidebarDirectorySectionMenu } from "./directory-section-menu";
+import { WorkspaceSidebarDirectoryDerivedActions } from "./directory-derived-actions";
 import { WorkspaceSidebarDirectoryGroupActions } from "./directory-group-actions";
 import { WorkspaceSidebarDirectoryGroupHeader } from "./directory-group-header";
 import { SidebarSection } from "./section-shell";
 import { InlineRenameInput } from "./session-item";
-import { WorkspaceSidebarSessionBrowserToolbar } from "./session-browser-toolbar";
 import { WorkspaceSidebarSessionGroupToggle } from "./session-group-toggle";
 import { WorkspaceSidebarSessionRow } from "./session-row";
 import { type SidebarSessionActivity } from "./session-row-status";
-import { type WorkspaceSidebarSessionUserMenuItem } from "./session-user-menu";
 import { useSidebarSessionDrag } from "./use-session-drag-reorder";
 import { useSessionGroupVisibility } from "./use-session-group-visibility";
 import {
@@ -66,6 +68,10 @@ type WorkspaceSidebarDirectoriesSectionProps = {
   startDirectoryRename: (group: SidebarDirectoryGroup) => void;
   /** 平铺模式下的目录管理入口（段内工具条按钮 → 管理弹层）。 */
   onRequestManageDirectories: () => void;
+  /** 派生目录（未注册）组头动作：注册并在该目录下新建会话（方案 §15）。 */
+  onRegisterAndCreateSession?: (group: SidebarDirectoryGroup) => Promise<void>;
+  /** 正在「注册并新建会话」的目录路径（派生组按 fullPath 命中 → 忙碌态）。 */
+  registeringDirectoryPath?: string | null;
   workspaceDirectories: RuntimeWorkspaceDirectory[];
   workspaceDirectoriesError: string | null;
   workspaceDirectoriesLoading: boolean;
@@ -86,7 +92,6 @@ type WorkspaceSidebarDirectoriesSectionProps = {
   onSelectSessionGroupingMode: (mode: SessionGroupingMode) => void;
   onSelectSessionOrderMode: (mode: SessionOrderMode) => void;
   onToggleArchivedSessions: () => void;
-  onSelectRuntimeSessionUser: (userId: string) => void;
   sessionActivity?: Record<string, SidebarSessionActivity>;
   sessionDirectoryGroups: SidebarDirectoryGroup[];
   sessionGroupingMode: SessionGroupingMode;
@@ -99,16 +104,12 @@ type WorkspaceSidebarDirectoriesSectionProps = {
   sessionStatsUnavailable: boolean;
   sessionThreadById: Map<string, SidebarThread>;
   sessionThreads: SidebarThread[];
-  sessionUserMenuItems: WorkspaceSidebarSessionUserMenuItem[];
   showArchivedSessions: boolean;
   // ── 接线层公共 ────────────────────────────────────────────────
   onSelectThread: (threadId: string) => void;
   openSections: SidebarSectionState;
   openSessionDirectories: Record<string, boolean>;
   renamingSessionId: string | null;
-  runtimeSessionUsersError: string | null;
-  runtimeSessionUsersLoading: boolean;
-  selectedRuntimeSessionUserId: string;
   selectedThreadId: string;
   showWorkspaceSection: boolean;
   sidebarActionError: string | null;
@@ -136,9 +137,9 @@ export function WorkspaceSidebarDirectoriesSection({
   onMoveSessionToGroup,
   onRefreshSessionStats,
   onReorderSessions,
+  onRegisterAndCreateSession,
   onRequestManageDirectories,
   onRestoreSession,
-  onSelectRuntimeSessionUser,
   onSelectSessionGroupingMode,
   onSelectSessionOrderMode,
   onSelectThread,
@@ -147,9 +148,7 @@ export function WorkspaceSidebarDirectoriesSection({
   openSessionDirectories,
   renamingDirectoryId,
   renamingSessionId,
-  runtimeSessionUsersError,
-  runtimeSessionUsersLoading,
-  selectedRuntimeSessionUserId,
+  registeringDirectoryPath,
   selectedThreadId,
   sessionActivity,
   sessionDirectoryGroups,
@@ -162,7 +161,6 @@ export function WorkspaceSidebarDirectoriesSection({
   sessionStatsUnavailable,
   sessionThreadById,
   sessionThreads,
-  sessionUserMenuItems,
   setDirectoryAddOpen,
   setDirectoryDeleteTarget,
   setSidebarActionError,
@@ -283,18 +281,39 @@ export function WorkspaceSidebarDirectoriesSection({
       isOpen={openSections.directories}
       onToggle={toggleSection}
       action={
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => {
-            setSidebarActionError(null);
-            setDirectoryAddOpen(true);
-          }}
-          aria-label={t("sidebar.directories.add")}
-          title={t("sidebar.directories.add")}
-        >
-          <FolderPlusIcon size={14} />
-        </Button>
+        // 2026-09-15 布局优化：段头只留两个 14px 图标——「添加目录」是一键主操作，
+        // 其余低频浏览设置（统计 / 排序 / 分组 / 管理目录 / 归档）全部进 ⋯ 弹出面板。
+        <div className="flex shrink-0 items-center gap-0.5">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => {
+              setSidebarActionError(null);
+              setDirectoryAddOpen(true);
+            }}
+            aria-label={t("sidebar.directories.add")}
+            title={t("sidebar.directories.add")}
+          >
+            <FolderPlusIcon size={14} />
+          </Button>
+          <WorkspaceSidebarDirectorySectionMenu
+            hasGroups={groups.length > 0}
+            hiddenArchivedCount={hiddenArchivedCount}
+            onManageDirectories={onRequestManageDirectories}
+            onRefreshSessionStats={onRefreshSessionStats}
+            onSelectSessionGroupingMode={onSelectSessionGroupingMode}
+            onSelectSessionOrderMode={onSelectSessionOrderMode}
+            onToggleArchivedSessions={onToggleArchivedSessions}
+            sessionGroupingMode={sessionGroupingMode}
+            sessionOrderMode={sessionOrderMode}
+            sessionStats={sessionStats}
+            sessionStatsError={sessionStatsError}
+            sessionStatsStatus={sessionStatsStatus}
+            sessionStatsUnavailable={sessionStatsUnavailable}
+            showArchivedSessions={showArchivedSessions}
+            t={t}
+          />
+        </div>
       }
     >
       <div className="space-y-2">
@@ -314,30 +333,12 @@ export function WorkspaceSidebarDirectoriesSection({
             {sidebarActionError}
           </div>
         ) : null}
-        <WorkspaceSidebarSessionBrowserToolbar
-          emptyState={emptyState}
-          hasGroups={groups.length > 0}
-          hiddenArchivedCount={hiddenArchivedCount}
-          onManageDirectories={onRequestManageDirectories}
-          onRefreshSessionStats={onRefreshSessionStats}
-          onSelectRuntimeSessionUser={onSelectRuntimeSessionUser}
-          onSelectSessionGroupingMode={onSelectSessionGroupingMode}
-          onSelectSessionOrderMode={onSelectSessionOrderMode}
-          onToggleArchivedSessions={onToggleArchivedSessions}
-          runtimeSessionUsersError={runtimeSessionUsersError}
-          runtimeSessionUsersLoading={runtimeSessionUsersLoading}
-          selectedRuntimeSessionUserId={selectedRuntimeSessionUserId}
-          sessionGroupingMode={sessionGroupingMode}
-          sessionMoveError={sessionMoveError}
-          sessionOrderMode={sessionOrderMode}
-          sessionStats={sessionStats}
-          sessionStatsError={sessionStatsError}
-          sessionStatsStatus={sessionStatsStatus}
-          sessionStatsUnavailable={sessionStatsUnavailable}
-          sessionUserMenuItems={sessionUserMenuItems}
-          showArchivedSessions={showArchivedSessions}
-          t={t}
-        >
+        <div className="space-y-1.5">
+          {sessionMoveError ? (
+            <div className="rounded-[0.75rem] border border-accent-orange/18 bg-accent-orange/8 px-2.5 py-2 text-xs leading-5 text-muted-foreground">
+              {sessionMoveError}
+            </div>
+          ) : null}
           {groups.length > 0
             ? groups.map((group) => {
                 const isDirectoryOpen =
@@ -390,6 +391,16 @@ export function WorkspaceSidebarDirectoriesSection({
                                   sessionCount: group.sessions.length,
                                 })
                               }
+                              t={t}
+                            />
+                          ) : group.fullPath && onRegisterAndCreateSession ? (
+                            // 方案 §15：派生目录没有注册表 id，三件套菜单无从下手，
+                            // 只给「注册并新建会话」一个动作（一次点击 = 登记 + 建会话）。
+                            <WorkspaceSidebarDirectoryDerivedActions
+                              busy={registeringDirectoryPath === group.fullPath}
+                              onRegisterAndCreate={() => {
+                                void onRegisterAndCreateSession(group);
+                              }}
                               t={t}
                             />
                           ) : undefined
@@ -468,7 +479,7 @@ export function WorkspaceSidebarDirectoriesSection({
                 );
               })
             : emptyState}
-        </WorkspaceSidebarSessionBrowserToolbar>
+        </div>
       </div>
       {/* 拖拽重排的无障碍播报：只播报结果，不占用视觉空间。 */}
       <div

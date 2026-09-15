@@ -16,7 +16,6 @@ import { WorkspaceSidebarHeader } from "@/components/workspace/workspace-sidebar
 import { useDirectoryRegistry } from "@/components/workspace/workspace-sidebar/use-directory-registry";
 import { WorkspaceSidebarRuntimeSection } from "@/components/workspace/workspace-sidebar/runtime-section";
 import { WorkspaceSidebarRuntimeTeamsSurface } from "@/components/workspace/workspace-sidebar/runtime-teams-surface";
-import { buildSessionUserMenuItems } from "@/components/workspace/workspace-sidebar/session-user-menu";
 import { useSidebarEffects } from "@/components/workspace/workspace-sidebar/use-sidebar-effects";
 import { splitRuntimeSessionsByVisibility } from "@/components/workspace/workspace-sidebar/session-row-status";
 import {
@@ -40,13 +39,9 @@ export function WorkspaceSidebar({
   runtimeSessionsLoading,
   runtimeSessionsRefreshing,
   runtimeSessionsSummary,
-  runtimeSessionDefaultUserId,
   runtimeSessionUsers,
-  runtimeSessionUsersError,
-  runtimeSessionUsersLoading,
   selectedRuntimeSessionUserId,
   onRefreshRuntimeTeams,
-  onSelectRuntimeSessionUser,
   workspaceDirectories,
   workspaceDirectoriesError,
   workspaceDirectoriesLoading,
@@ -114,21 +109,6 @@ export function WorkspaceSidebar({
         ),
     [filteredThreads],
   );
-  const sessionUserMenuItems = useMemo(
-    () =>
-      buildSessionUserMenuItems({
-        users: runtimeSessionUsers,
-        defaultUserId: runtimeSessionDefaultUserId,
-        selectedUserId: selectedRuntimeSessionUserId,
-        totalCount: runtimeSessionsSummary.totalCount,
-      }),
-    [
-      runtimeSessionDefaultUserId,
-      runtimeSessionUsers,
-      runtimeSessionsSummary.totalCount,
-      selectedRuntimeSessionUserId,
-    ],
-  );
   const sessionVisibility = useMemo(
     () =>
       splitRuntimeSessionsByVisibility(runtimeSessions, {
@@ -167,7 +147,10 @@ export function WorkspaceSidebar({
     handleCreateSessionFromManager,
     handleCreateSessionInDirectory,
     handleRequestRemoveDirectory,
+    handleRegisterAndCreateSession,
     registerDirectoryFromManager,
+    registerAndCreateSession,
+    registeringDirectoryPath,
     renameDirectoryById,
     renamingDirectoryId,
     setDirectoryAddOpen,
@@ -204,9 +187,6 @@ export function WorkspaceSidebar({
     runtimeSessionsLoading ||
     runtimeSessionsRefreshing ||
     Boolean(runtimeSessionsError) ||
-    runtimeSessionUsersLoading ||
-    Boolean(runtimeSessionUsersError) ||
-    sessionUserMenuItems.length > 0 ||
     workspaceDirectories.length > 0 ||
     mergedDirectoryGroups.length > 0 ||
     workspaceDirectoriesLoading ||
@@ -334,9 +314,9 @@ export function WorkspaceSidebar({
               }}
               onRefreshSessionStats={sessionStats.refresh}
               onReorderSessions={commitSessionOrder}
+              onRegisterAndCreateSession={handleRegisterAndCreateSession}
               onRequestManageDirectories={() => setDirectoryManageOpen(true)}
               onRestoreSession={onRestoreRuntimeSession}
-              onSelectRuntimeSessionUser={onSelectRuntimeSessionUser}
               onSelectSessionGroupingMode={setSessionGroupingMode}
               onSelectSessionOrderMode={setSessionOrderMode}
               onSelectThread={onSelectThread}
@@ -347,9 +327,7 @@ export function WorkspaceSidebar({
               openSessionDirectories={openSessionDirectories}
               renamingDirectoryId={renamingDirectoryId}
               renamingSessionId={renamingSessionId}
-              runtimeSessionUsersError={runtimeSessionUsersError}
-              runtimeSessionUsersLoading={runtimeSessionUsersLoading}
-              selectedRuntimeSessionUserId={selectedRuntimeSessionUserId}
+              registeringDirectoryPath={registeringDirectoryPath}
               selectedThreadId={selectedThreadId}
               sessionActivity={sessionActivity}
               sessionDirectoryGroups={orderedSessionDirectoryGroups}
@@ -362,7 +340,6 @@ export function WorkspaceSidebar({
               sessionStatsUnavailable={sessionStats.unavailable}
               sessionThreadById={sessionThreadById}
               sessionThreads={sessionThreads}
-              sessionUserMenuItems={sessionUserMenuItems}
               setDirectoryAddOpen={setDirectoryAddOpen}
               setDirectoryDeleteTarget={setDirectoryDeleteTarget}
               setSidebarActionError={setSidebarActionError}
@@ -426,6 +403,7 @@ export function WorkspaceSidebar({
         sessionCounts={directorySessionCounts}
         unregisteredDirectories={unregisteredDirectories}
         onRegisterDirectory={registerDirectoryFromManager}
+        onRegisterAndCreateSession={registerAndCreateSession}
         onRequestAdd={() => {
           setDirectoryManageOpen(false);
           setDirectoryAddOpen(true);

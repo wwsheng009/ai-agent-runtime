@@ -4,6 +4,12 @@
 //
 // 覆盖范围：添加弹层 / 管理弹层 / 移除确认弹层的开关、目录行内重命名、目录内新建会话、
 // 以及侧栏就地错误条（目录动作与会话重命名共用同一条提示）。
+//
+// 2026-09-15 优化（方案 §15）：「用即注册」——派生目录一次点击完成
+// ① POST 注册表 ② 用注册响应里的 directory_id 在该目录下新建会话。
+// 注册表 POST 的响应体带 directory 记录（`{directory, existing}`，见
+// backend/internal/api/skills/workspace_directory_handlers.go 的 CreateWorkspaceDirectory），
+// 因此新会话可以直接绑定 directory_id，不必依赖「只传 workspace_path」的兜底行为。
 
 import { useMemo, useState } from "react";
 
@@ -20,8 +26,13 @@ type UseDirectoryRegistryParams = {
   onCreateSessionInDirectory: (
     request: WorkspaceDirectoryCreateRequest,
   ) => Promise<void>;
-  /** 方案 §12-A：把一个「仅由会话派生」的目录注册进注册表（POST + 刷新列表）。 */
-  onRegisterWorkspaceDirectory: (path: string) => Promise<unknown>;
+  /**
+   * 方案 §13-A：把一个「仅由会话派生」的目录注册进注册表（POST + 刷新列表）。
+   * 返回后端登记的目录记录（§15 的合并动作要用它的 id 绑定新会话）。
+   */
+  onRegisterWorkspaceDirectory: (
+    path: string,
+  ) => Promise<RuntimeWorkspaceDirectory | void>;
 };
 
 export function useDirectoryRegistry({
@@ -43,6 +54,10 @@ export function useDirectoryRegistry({
   const [creatingSessionKey, setCreatingSessionKey] = useState<string | null>(
     null,
   );
+  /** §15：正在「注册并新建会话」的目录路径（组头按 fullPath 命中，用于忙碌态）。 */
+  const [registeringSessionPath, setRegisteringSessionPath] = useState<
+    string | null
+  >(null);
   /** 侧栏就地错误条：目录动作与会话重命名共用（合并为单段后只剩一条错误条）。 */
   const [sidebarActionError, setSidebarActionError] = useState<string | null>(
     null,
@@ -95,7 +110,7 @@ export function useDirectoryRegistry({
   }, [mergedDirectoryGroups]);
 
   /**
-   * 方案 §12-A：管理弹层里「未注册（来自会话）」分区的数据源 —— 只取会话派生组
+   * 方案 §13-A：管理弹层里「未注册（来自会话）」分区的数据源 —— 只取会话派生组
    * （`registered: false` 且带真实路径，排除无路径的 Unscoped 桶）。
    * 注册成功后注册表刷新 → 同路径的派生组被合并进注册组，本列表自动少一行。
    */
@@ -194,7 +209,7 @@ export function useDirectoryRegistry({
   }
 
   /**
-   * 方案 §12-A：注册一个会话派生目录。失败时把消息落到侧栏错误条**并继续抛出**，
+   * 方案 §13-A：注册一个会话派生目录。失败时把消息落到侧栏错误条**并继续抛出**，
    * 让弹层就地显示（弹层遮住侧栏，单靠错误条用户看不到）；成功后注册表刷新，
    * 该路径在合并分组里从「派生」变「已注册」，弹层对应行随之消失。
    */
@@ -216,6 +231,51 @@ export function useDirectoryRegistry({
     }
   }
 
+  /**
+   * 方案 §15：**注册并新建会话**（一次点击，替代「先注册 → 再从组头菜单新建会话」两跳）。
+   * 注册响应带回 directory 记录 → 新会话直接带 `directory_id` 绑定；
+   * 拿不到 id 的替身实现（测试桩）回落到只用规范化路径，行为与既有「目录内新建会话」一致。
+   * 失败写侧栏错误条并重新抛出：弹层遮住侧栏，必须让调用方也能就地提示。
+   */
+  async function registerAndCreateSession(
+    path: string,
+    label: string,
+  ): Promise<void> {
+    const trimmedPath = path.trim();
+    if (!trimmedPath || registeringSessionPath) {
+      return;
+    }
+    setSidebarActionError(null);
+    setRegisteringSessionPath(trimmedPath);
+    try {
+      const record = await onRegisterWorkspaceDirectory(trimmedPath);
+      await onCreateSessionInDirectory({
+        path: record?.path.trim() || trimmedPath,
+        directoryId: record?.id.trim() || undefined,
+        label,
+      });
+    } catch (error) {
+      setSidebarActionError(
+        error instanceof Error ? error.message : String(error),
+      );
+      throw error;
+    } finally {
+      setRegisteringSessionPath(null);
+    }
+  }
+
+  /**
+   * §15 侧栏组头入口：错误已经落到侧栏错误条，这里吞掉 rejection
+   * （组件里是 `void handle…` 调用，不能留下 unhandled rejection）。
+   */
+  function handleRegisterAndCreateSession(
+    group: MergedDirectoryGroup,
+  ): Promise<void> {
+    return registerAndCreateSession(group.fullPath, group.label).catch(
+      () => undefined,
+    );
+  }
+
   return {
     cancelDirectoryRename,
     commitDirectoryRename,
@@ -227,7 +287,10 @@ export function useDirectoryRegistry({
     handleCreateSessionFromManager,
     handleCreateSessionInDirectory,
     handleRequestRemoveDirectory,
+    handleRegisterAndCreateSession,
     registerDirectoryFromManager,
+    registerAndCreateSession,
+    registeringDirectoryPath: registeringSessionPath,
     renameDirectoryById,
     renamingDirectoryId,
     setDirectoryAddOpen,
