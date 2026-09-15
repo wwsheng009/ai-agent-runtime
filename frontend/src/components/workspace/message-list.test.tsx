@@ -415,4 +415,64 @@ describe("MessageList", () => {
 
     expect(markup).not.toContain("data-branch-state");
   });
+
+  // 批次 24：CLI / 子代理批次会话的对话消息不入库（后端 `prompt_rows=0`），
+  // 会话历史只剩一条 system 行。旧口径（`messages.length === 0`）在这种情况下
+  // 既不出空态、也没有正文，页面看起来就是「整页什么都没有」。
+  it("falls back to the empty state when only prompt infrastructure rows remain", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "system-1",
+        role: "assistant",
+        author: "System context",
+        label: "system",
+        segments: [{ type: "text", content: "AGENTS.md 约定：……" }],
+      },
+    ];
+
+    const markup = renderToStaticMarkup(
+      <MessageList
+        artifacts={[]}
+        isResponding={false}
+        messages={messages}
+        onSelectArtifact={() => {}}
+      />,
+    );
+
+    expect(markup).toContain('aria-label="Empty workspace conversation timeline"');
+    expect(markup).toContain("会话时间线为空");
+    expect(markup).toContain("这个会话没有落库的对话消息");
+    expect(markup).toContain("「轨迹」页签");
+  });
+
+  it("keeps the timeline populated once a conversation row exists", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        author: "You",
+        label: "prompt",
+        segments: [{ type: "text", content: "盘点入口文件" }],
+      },
+      {
+        id: "system-1",
+        role: "assistant",
+        author: "System context",
+        label: "system",
+        segments: [{ type: "text", content: "AGENTS.md 约定：……" }],
+      },
+    ];
+
+    const markup = renderToStaticMarkup(
+      <MessageList
+        artifacts={[]}
+        isResponding={false}
+        messages={messages}
+        onSelectArtifact={() => {}}
+      />,
+    );
+
+    expect(markup).toContain('aria-label="Workspace conversation timeline"');
+    expect(markup).not.toContain("会话时间线为空");
+  });
 });

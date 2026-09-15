@@ -382,6 +382,43 @@
 1. 后端仍在**同一批次**发 `tool_end` 与 `observation` 两份等价载荷，前端靠「工具观测帧不建行」兜住；若要彻底消除冗余，应由后端在已发 `tool_end` 时不再追加 observation 帧（涉及事件面契约与既有消费方，独立排期）；
 2. observation 帧携带的 `metrics`（duration 等）目前只进聊天链路的阶段信号、不进轨迹工具行；若要在工具行上展示耗时，需要把 `step` → `call_id` 的映射下推到后端（`entity` 帧已具备该形态，可复用）。
 
+### 批次 24（2026-09-15）：空对话行不再静默（只有提示基础设施行时给出空态与去向）
+
+**症状（用户实测上报）**：`/workspace/sessions/session_20260915212801_EvAjU7Su` 页面「忽然什么内容都没有」——对话区既没有正文，也没有任何提示。
+
+**排查（真实接口 + 真实浏览器，非仅单测）**
+
+1. **数据面**：`GET /api/runtime/sessions/session_20260915212801_EvAjU7Su/history` 实测 `count=1`，唯一一条是 `role=system` 的提示基础设施行（AGENTS.md 上下文）；`runtime/events?tail=1&limit=800` 的窗口里 368 + 368 条为 `chat.sse.*` 推理/正文增量，末帧为 `chat.sse.error: context canceled`（更早的事件已被环形缓冲淘汰，窗口最早 seq=6401）；
+2. **服务面**：后端日志 `[session-history] canonical append unresolved session=… history=1 canonical=1 prompt_rows=0` —— 该会话（`metadata.context.client/entrypoint=aicli`，会话文件落在 `sessions/runtime/subagent_batches/`）**从未落库任何对话消息**，其会话库（子代理批次注册表）实测 0 行；
+3. **真机（真实 dev server，冷启动 8 秒窗口）**：对话区 DOM 只有 **1 个 `<article>`**，可见文本 = 折叠的「系统提示词」行（18 字），8 秒内没有新内容出现（**不是**「先渲染后被抹掉」）；同一页面切「轨迹」页签有 5 行内容（2×`view` + 1 条消息 + 1×`apply_patch` + 1 条 `context canceled`）⇒ 只有对话页签是空的；
+4. **代码定位**：`components/workspace/message-list.tsx` 的空态条件是 `messages.length === 0`，而该会话 `messages.length === 1`（那条 system 行）⇒ 空态**不触发**；同时 `projectChatView()` 对 system prompt 行默认折叠（`systemPrompt: true` ⇒ `nodes: []`）⇒ 页面上只剩一个折叠头部。两者叠加即用户看到的「什么都没有」。
+
+**根因（判空口径与「可见对话行」不一致）**
+
+| 环节 | 机制 |
+|---|---|
+| 数据 | CLI / 子代理批次会话的对话消息不进 canonical history（`prompt_rows=0`），历史里只有提示基础设施行 |
+| 前端判空 | `messages.length === 0` 把「有 1 条 system 行」当成「有内容」⇒ 空态不触发 |
+| 前端投影 | `isSystemPromptMessage()` 命中的行默认折叠为一行头部 ⇒ 那份「内容」实际不可见 |
+| 合起来 | 页面既没有可见正文、也没有空态解释 —— **静默空页** |
+
+**修复（判空改用「对话行」口径，不猜内容）**
+
+| 文件 | 内容 |
+|---|---|
+| `components/workspace/message-list.tsx` | 新增 `hasConversationRows = visibleMessages.some((m) => !isSystemPromptMessage(m))`（复用 P1-1 既有的提示基础设施判定，**不另写白名单**）；空态条件由 `messages.length === 0` 改为 `!hasConversationRows`；`logLabel`（a11y）同步按该布尔量取值；`visibleMessages` 计算块上移以便两处共用 |
+| 语义边界（本批钉住） | 提示基础设施行**照旧渲染**（仍是可展开的 prompt 证据），本次只决定「是否需要空态」；顺带覆盖同类静默空页：只有无可见内容的助手空壳（`visibleMessages` 为空）时同样出空态 |
+| i18n | 双语新增 `panels.messages.messageList.emptyInfraOnlyHint`（说明该会话没有落库对话消息 + 指出执行记录在「轨迹」页签）；既有 `emptyTitle` / `emptyHint` 文案与键**零改写** |
+
+**真机证据**：同一 URL、同一 dev server，修复后对话区可见文本 = 「会话时间线为空」+ 既有 `emptyHint` + 新增提示（指向「轨迹」页签）；`aria-label` 由 `Workspace conversation timeline` 变为 `Empty workspace conversation timeline`；`article` 仍为 1（system 行保留）；控制台 error 0；「轨迹」页签 5 行内容不变。
+
+**门禁（本批）**：`npx tsc -b --force` exit 0；`npm run build` exit 0；`npx vitest run` **220 文件 / 1717 用例全绿**（本批新增 2 例：仅提示基础设施行时出空态、有对话行时不出现空态；既有 1715 例零改写）；`npm run lint` **0 error / 1 基线 warning**（`artifact-detail-dialog.tsx:50` 既有 hooks 依赖告警）+ i18n scanned=686 / violations=0 + 备份门禁 1041 文件 0 残留 + 行数门禁 979 文件 0 超限（最大 `use-session-runtime-stream.ts`=500；本批 `message-list.tsx` / `message-list.test.tsx` 均未触顶）+ 消息 token 门禁 37 文件 0 处。
+
+**未交付（非阻塞，独立排期）**
+
+1. **对话消息不回填**：该会话（及同类 aicli / 子代理批次会话）的对话消息**从未落库**，前端无法凭空重建。本次交付让页面不再静默，但「对话页签重现该轮消息」需要后端把 aicli 轮次的 user / assistant 消息写进 canonical history（或改为前端从运行时事件重建消息行——与轨迹不同源，需先定契约）；
+2. 「对话与轨迹内容不同源」目前只体现在空态文案里；若要在同类会话的对话页签直接给「查看轨迹」按钮（而非文字指引），需要跨面板导航契约，独立排期。
+
 ### 复检记录（2026-09-13，P2-1A 第八项交付后）
 
 | 项 | 复检内容 | 结果 |

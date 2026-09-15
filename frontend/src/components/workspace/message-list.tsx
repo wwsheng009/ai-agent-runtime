@@ -7,7 +7,7 @@ import { useTranslation } from "react-i18next";
 import { ConnectionStatusBadge } from "@/components/ui/connection-status-badge";
 import { useConnectionStatusLabels } from "@/hooks/workspace/use-connection-status-labels";
 import { useConversationScroll } from "@/hooks/workspace/use-conversation-scroll";
-import { hasVisibleMessageContent } from "@/lib/chat-view";
+import { hasVisibleMessageContent, isSystemPromptMessage } from "@/lib/chat-view";
 import { resolveBranchAnchors } from "@/lib/chat-view/branch-availability";
 import { isArtifactEvidence } from "@/lib/workspace-artifacts";
 import { cn } from "@/lib/utils";
@@ -64,26 +64,6 @@ export function MessageList({
     () => new Map(artifacts.map((artifact) => [artifact.id, artifact])),
     [artifacts],
   );
-  const lastMessage = messages[messages.length - 1];
-  const streamingMessageId =
-    isResponding && lastMessage?.role === "assistant" ? lastMessage.id : null;
-  // 批次 2（§5.4）：分支锚点在**整段历史**上求一次（O(n)）：每个已完成轮次的末条消息
-  // 各自成锚点（对齐后端 `ListUserTurns` 的轮边界）；只有锚点会拿到 `onBranch`，
-  // 非锚点（含只有推理的消息）不渲染按钮。
-  const branchAnchors = useMemo(
-    () => resolveBranchAnchors(messages, { isResponding, hasPendingApproval }),
-    [messages, isResponding, hasPendingApproval],
-  );
-  const logLabel =
-    messages.length > 0 ? "Workspace conversation timeline" : "Empty workspace conversation timeline";
-  // P1-8：只有非在线态才在流尾提示，避免在线时增加噪声。
-  const showConnectionNotice =
-    connectionStatus === "connecting" ||
-    connectionStatus === "reconnecting" ||
-    connectionStatus === "offline";
-  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
-  const [inlineEditDraft, setInlineEditDraft] = useState("");
-  const selectedMessageRef = useRef<HTMLElement | null>(null);
   // §12.1.4：无可见内容的助手消息不产出 <article>。外层是 `flex flex-col gap-4`，
   // 空壳 article 自身高度为 0 却仍是一个 flex item，会在相邻消息间撑出一条空白行
   // （典型来源：回合开始到首块到达之间的流式空壳、纯工具回合）。
@@ -97,6 +77,35 @@ export function MessageList({
     }).length;
     return hasVisibleMessageContent(message, relatedCount);
   });
+  // 批次 24：对话区只剩「提示基础设施」行（system prompt）时，时间线同样是空的。
+  // CLI / 子代理批次驱动的会话不落库对话消息（后端 `prompt_rows=0`），此时
+  // `messages.length` 仍为 1，沿用旧口径会让页面留下一条折叠的 System prompt 行
+  // 却既没有正文、也没有任何解释 —— 用户看到的就是「整页什么都没有」。
+  // 判空必须按**对话行**（非提示基础设施行）口径。
+  const hasConversationRows = visibleMessages.some(
+    (message) => !isSystemPromptMessage(message),
+  );
+  const lastMessage = messages[messages.length - 1];
+  const streamingMessageId =
+    isResponding && lastMessage?.role === "assistant" ? lastMessage.id : null;
+  // 批次 2（§5.4）：分支锚点在**整段历史**上求一次（O(n)）：每个已完成轮次的末条消息
+  // 各自成锚点（对齐后端 `ListUserTurns` 的轮边界）；只有锚点会拿到 `onBranch`，
+  // 非锚点（含只有推理的消息）不渲染按钮。
+  const branchAnchors = useMemo(
+    () => resolveBranchAnchors(messages, { isResponding, hasPendingApproval }),
+    [messages, isResponding, hasPendingApproval],
+  );
+  const logLabel = hasConversationRows
+    ? "Workspace conversation timeline"
+    : "Empty workspace conversation timeline";
+  // P1-8：只有非在线态才在流尾提示，避免在线时增加噪声。
+  const showConnectionNotice =
+    connectionStatus === "connecting" ||
+    connectionStatus === "reconnecting" ||
+    connectionStatus === "offline";
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [inlineEditDraft, setInlineEditDraft] = useState("");
+  const selectedMessageRef = useRef<HTMLElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   // 行内动作（回溯 / 分支）在这些情况下整体禁用。只依赖行间共享状态，所以在
@@ -184,7 +193,7 @@ export function MessageList({
           visible={showEarlierEntry}
         />
 
-        {messages.length === 0 ? (
+        {!hasConversationRows ? (
           <div className="flex flex-col items-center gap-2 py-8 text-center">
             <ScrollTextIcon aria-hidden="true" className="text-accent-teal" size={18} />
             <div className="text-sm font-semibold text-foreground">
@@ -193,6 +202,11 @@ export function MessageList({
             <p className="max-w-[32rem] text-sm leading-6 text-muted-foreground">
               {t("panels.messages.messageList.emptyHint")}
             </p>
+            {messages.length > 0 ? (
+              <p className="max-w-[32rem] text-sm leading-6 text-muted-foreground">
+                {t("panels.messages.messageList.emptyInfraOnlyHint")}
+              </p>
+            ) : null}
           </div>
         ) : null}
 

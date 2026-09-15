@@ -4,6 +4,8 @@ export const enWorkspacePanelsMessages = {
     emptyTitle: "The thread timeline is empty",
     emptyHint:
       "Start a turn to populate the workspace timeline. Runtime evidence, related items, and streamed output will attach back to the messages that produced them.",
+    emptyInfraOnlyHint:
+      "No conversation messages were persisted for this session: CLI / subagent-batch driven sessions keep only prompt infrastructure rows. See the Trajectory tab for this run's execution record.",
     backtrackNavHint:
       "Backtrack navigation active — use ↑/↓ (or j/k) to choose a user turn, Enter to open the confirm dialog, Esc to exit.",
     loadEarlier: "Load earlier messages",

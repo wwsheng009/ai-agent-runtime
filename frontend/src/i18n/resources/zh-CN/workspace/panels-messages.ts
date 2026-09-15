@@ -5,6 +5,8 @@ export const zhWorkspacePanelsMessages = {
     emptyTitle: "会话时间线为空",
     emptyHint:
       "发起一轮对话即可填充工作区时间线。运行时证据、相关条目与流式输出会回挂到产生它们的消息上。",
+    emptyInfraOnlyHint:
+      "这个会话没有落库的对话消息：CLI / 子代理批次驱动的会话只保留提示基础设施行。这一轮的执行记录请到「轨迹」页签查看。",
     backtrackNavHint:
       "回溯导航已激活 — 用 ↑/↓（或 j/k）选择用户轮次，Enter 打开确认对话框，Esc 退出。",
     loadEarlier: "加载更早的消息",
