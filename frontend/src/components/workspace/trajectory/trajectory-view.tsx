@@ -27,6 +27,7 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 
+import { useEarlierEntryVisibility } from "@/components/workspace/earlier-entry-visibility";
 import type { TrajectoryStore } from "@/hooks/workspace/use-trajectory-snapshot";
 import { useTrajectorySnapshot } from "@/hooks/workspace/use-trajectory-snapshot";
 import { exportSessionTrajectoryJsonl } from "@/lib/trajectory/export-session";
@@ -247,6 +248,14 @@ export function TrajectoryView({
     onLoadEarlier,
   });
 
+  // 入口可见性：与对话面同一条判定（贴底读最新事件时不常驻遮挡列表，见共享模块）；
+  // 轨迹列表容器按行数条件挂载，故把「行非空」作为挂载键，容器后挂上时补挂监听。
+  const showEarlierEntry = useEarlierEntryVisibility({
+    containerRef,
+    enabled: hasEarlier || loadingEarlier,
+    containerKey: items.length > 0,
+  });
+
   const selectedItem = useMemo(
     () => snapshot.items.find((item) => item.id === selectedItemId) ?? null,
     [snapshot.items, selectedItemId],
@@ -438,7 +447,7 @@ export function TrajectoryView({
               {/* 窗口内还没有可渲染行、但更早还有内容时（极端：最新一页全是
                   生命周期事件），入口仍要可见——否则用户会以为会话是空的。 */}
               <TrajectoryLoadEarlierRow
-                visible={hasEarlier || loadingEarlier}
+                visible={showEarlierEntry}
                 loading={loadingEarlier}
                 onLoad={onLoadEarlier}
               />
@@ -459,7 +468,7 @@ export function TrajectoryView({
               onScroll={handleListScroll}
             >
               <TrajectoryLoadEarlierRow
-                visible={hasEarlier || loadingEarlier}
+                visible={showEarlierEntry}
                 loading={loadingEarlier}
                 onLoad={onLoadEarlier}
               />

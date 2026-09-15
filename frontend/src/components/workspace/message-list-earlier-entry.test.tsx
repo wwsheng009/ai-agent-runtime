@@ -15,7 +15,7 @@ import {
   EARLIER_ENTRY_HIDE_TOP_THRESHOLD,
   EARLIER_ENTRY_SHOW_TOP_THRESHOLD,
   resolveEarlierEntryAtTop,
-} from "./message-list/use-message-list-earlier-entry";
+} from "./earlier-entry-visibility";
 
 type ReactActEnvironmentGlobal = typeof globalThis & {
   IS_REACT_ACT_ENVIRONMENT?: boolean;
