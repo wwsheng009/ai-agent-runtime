@@ -1,12 +1,7 @@
 // 由 components/workspace/message-markdown.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 // 入口导出面保持不变（MessageMarkdown）；内部实现见 ./message-markdown/ 各域模块。
 
-import {
-  useDeferredValue,
-  memo,
-  useMemo,
-  useState,
-} from "react";
+import { useDeferredValue, memo, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { SquareIcon } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -26,6 +21,7 @@ import { createMarkdownComponents } from "./message-markdown/markdown-components
 import { renderStreamingStructuredTail, renderStreamingPlainTail } from "./message-markdown/streaming-tails";
 import { rehypeCollapseBreakNewlines } from "./message-markdown/rehype-collapse-break-newlines";
 import { StableMarkdownFragment } from "./message-markdown/stable-fragment";
+import { markdownBlockKey } from "./message-markdown/block-key";
 
 export const MessageMarkdown = memo(function MessageMarkdown({
   className,
@@ -35,15 +31,15 @@ export const MessageMarkdown = memo(function MessageMarkdown({
 }: MessageMarkdownProps) {
   const { t } = useTranslation("workspace");
   const deferredContent = useDeferredValue(content);
-  const renderContent = streaming ? deferredContent : content;
-  // generation：追加输入保持不变，非追加输入（重新生成 / 内容被改写）递增，
-  // 让下游按代丢弃冻结缓存（渲染 key 里带 generation，React 因此 remount 而不是
-  // 复用上一代的块）。使用 render 期间 state 调整（官方 "storing information from
-  // previous renders" 模式）而非 ref，以满足 react-hooks/refs 规则。
-  const [freezeState, setFreezeState] = useState({
-    content: "",
-    generation: 0,
-  });
+  // 流式分支必须**立即**渲染，不能降级到 transition lane：
+  // `use-typewriter` 在流式期间按 rAF（60fps）持续改写目标文本，每次都是一个
+  // 紧急更新；`useDeferredValue` 每帧重新申请一个 transition lane，而 transition
+  // 只在紧急队列排空时才跑 —— 连续流下永远排不到，`renderContent` 停在旧值，
+  // 用户看到的就是「流式输出完成后才整体渲染」（2026-09-15 复现：perfmark 连续流，
+  // 见 `e2e/zz-perf-probe.spec.ts`）。
+  // 非流式路径保留延迟：历史回填 / 消息改写是低频大块替换，降级能避免阻塞输入，
+  // 且此时没有连续紧急更新，不存在饿死。
+  const renderContent = streaming ? content : deferredContent;
   const markdownComponents = useMemo(
     () => createMarkdownComponents(streaming),
     [streaming],
@@ -63,19 +59,6 @@ export const MessageMarkdown = memo(function MessageMarkdown({
           },
     [renderContent, streaming],
   );
-  if (!streaming && freezeState.content) {
-    // 结算后清账：下一次流式 / 重新生成从 generation 0 重新起算。
-    setFreezeState({ content: "", generation: 0 });
-  } else if (streaming && freezeState.content !== streamingParts.stableContent) {
-    const appended = streamingParts.stableContent.startsWith(
-      freezeState.content,
-    );
-    setFreezeState({
-      content: streamingParts.stableContent,
-      generation: appended ? freezeState.generation : freezeState.generation + 1,
-    });
-  }
-  const generation = freezeState.generation;
   const renderedStableContent = streamingParts.stableContent;
   // 不稳定区可能含多个块（尾块 + 它可能继续吞并的空行续块）。前面的块内容已定稿，
   // 按绝对 offset 各自成片（key 与冻结块同源，跨边界移动时不 remount）；只有尾块
@@ -98,6 +81,15 @@ export const MessageMarkdown = memo(function MessageMarkdown({
           block.start - tailBaseOffset,
           block.end - tailBaseOffset,
         );
+  // key 只认块内容（见 block-key.ts）：块 offset 随解析重排漂移、冻结代因尾部
+  // 回退而递增，两者都会让整段前缀在同一帧集体 remount。
+  const settledOccurrences = new Map<string, number>();
+  const settledEntries = settledBlocks.map((block) => {
+    const blockContent = settledBlockContent(block);
+    const occurrence = settledOccurrences.get(blockContent) ?? 0;
+    settledOccurrences.set(blockContent, occurrence + 1);
+    return { key: markdownBlockKey(blockContent, occurrence), content: blockContent };
+  });
   const activeStreamingCodeFence = useMemo(
     () =>
       streaming && streamingParts.tailMode === "markdown"
@@ -136,14 +128,14 @@ export const MessageMarkdown = memo(function MessageMarkdown({
       )}
     >
       {streaming ? (
-        // 前缀按块渲染：key = 块在全文中的绝对起始 offset（跨冻结边界稳定），
+        // 前缀按块渲染：key = 块内容（跨 offset 漂移 / 冻结边界移动都稳定），
         // 块内容本身逐字不变，因此 memo 让每块只解析一次，而不是随每个 chunk
-        // 重解析整段前缀。
-        settledBlocks.map((block) => (
+        // 重解析整段前缀；块真的被改写时只有该块换 key。
+        settledEntries.map((entry) => (
           <StableMarkdownFragment
-            key={`${generation}:${block.start}`}
+            key={entry.key}
             components={markdownComponents}
-            content={settledBlockContent(block)}
+            content={entry.content}
           />
         ))
       ) : renderedStableContent ? (

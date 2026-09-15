@@ -20,6 +20,42 @@ type SseConsumeHandlers = {
   onOpen?: () => void;
 };
 
+/**
+ * SSE 读取循环的让出预算（毫秒）。
+ *
+ * `await reader.read()` 在浏览器缓冲区已有数据时会立即 resolve，**不会**让出事件
+ * 循环：快模型（每帧 1–2 字符、单回合 700+ 帧）会在同一个 task 里把整条流排空，
+ * 主线程既不能渲染也不能响应输入——CDP 实测单个 long task 1.5s（修复前 64s），
+ * 用户看到的是「等流结束才整体蹦出」。这里按预算主动切一次宏任务，把一个大 task
+ * 拆成多个小 task，让 React 有机会提交中间态（逐字生长）。
+ */
+const SSE_YIELD_BUDGET_MS = 8;
+
+function nowMs() {
+  return typeof performance !== "undefined" &&
+    typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
+}
+
+/**
+ * 让出到宏任务队列。MessageChannel 不受 `setTimeout(0)` 的 4ms 嵌套钳制，
+ * 让出本身的代价可忽略；环境不支持时退回 setTimeout。
+ */
+const yieldToEventLoop = (() => {
+  let channel: MessageChannel | null = null;
+  return () =>
+    new Promise<void>((resolve) => {
+      if (typeof MessageChannel === "function") {
+        channel ??= new MessageChannel();
+        channel.port1.onmessage = () => resolve();
+        channel.port2.postMessage(null);
+        return;
+      }
+      setTimeout(resolve, 0);
+    });
+})();
+
 type SessionRuntimeStreamHandlers = {
   after?: number;
   /**
@@ -101,6 +137,18 @@ export async function consumeSseResponse(
   let buffer = "";
   let eventName = "message";
   let dataLines: string[] = [];
+  let lastYieldAt = nowMs();
+
+  // 只有真的花掉预算才让出：短流（测试 / 小回合）完全不受影响，长流被切成
+  // 多个 ≤ 预算的小任务，浏览器有机会在中间渲染。
+  const maybeYield = async () => {
+    const now = nowMs();
+    if (now - lastYieldAt < SSE_YIELD_BUDGET_MS) {
+      return;
+    }
+    lastYieldAt = now;
+    await yieldToEventLoop();
+  };
 
   try {
     while (true) {
@@ -118,6 +166,7 @@ export async function consumeSseResponse(
           flushSseMessage(eventName, dataLines, handlers);
           eventName = "message";
           dataLines = [];
+          await maybeYield();
           continue;
         }
         if (line.startsWith(":")) {

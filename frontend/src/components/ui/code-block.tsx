@@ -52,7 +52,6 @@ export function CodeBlock({
 }: CodeBlockProps) {
   return (
     <CodeBlockSurface
-      key={`${language}\u0000${title ?? ""}\u0000${code}`}
       className={className}
       code={code}
       collapsible={collapsible}
@@ -172,7 +171,11 @@ function CodeBlockSurface({
         <pre className="m-0 min-w-full px-0">
           {visibleLines.map((line, index) => (
             <div
-              key={`${index}-${line.kind}-${line.segments.map((segment) => segment.content).join("")}`}
+              // key 只认位置 + 行种类，**不认内容**：把行内容 / 分词内容拼进 key（原实现）
+              // 意味着 Prism 每重切一次尾部，相关行的整棵 div（行号 + <code> 容器）就被
+              // 卸载重挂。实测流式期间单个 chunk 有 58 次 childList 落在 <code> 上
+              // （e2e/zz-perf-probe.spec.ts → idspike-40），并连带整块样式失效与重排。
+              key={`line-${index}-${line.kind}`}
               className="app-code-line grid grid-cols-[2.5rem_minmax(0,1fr)] gap-3 px-3 text-code-block-foreground"
               data-line-kind={line.kind === "normal" ? undefined : line.kind}
             >
@@ -185,13 +188,14 @@ function CodeBlockSurface({
                   : line.segments.map((segment, segmentIndex) =>
                       segment.types.length > 0 ? (
                         <span
-                          key={`${segmentIndex}-${segment.content}`}
+                          // 同理：分词内容变化只该改文本，不该换元素身份（换 key = 重挂）。
+                          key={`segment-${segmentIndex}`}
                           className={cn("token", ...segment.types)}
                         >
                           {segment.content}
                         </span>
                       ) : (
-                        <span key={`${segmentIndex}-${segment.content}`}>
+                        <span key={`segment-${segmentIndex}`}>
                           {segment.content}
                         </span>
                       ),
