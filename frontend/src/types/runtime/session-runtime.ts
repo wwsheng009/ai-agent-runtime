@@ -2,8 +2,12 @@
  * P2-1A：会话运行时状态快照（`GET /api/runtime/sessions/{id}/runtime`）。
  *
  * 后端契约：
- * - 响应 `{ state, ...execution_route }`（`session_runtime_handlers.go:375-408`，
+ * - 响应 `{ state, ...execution_route }`（`session_runtime_handlers.go:380-447`，
  *   `attachSessionExecutionRoute` 附加执行路由信息）；
+ * - `{ session_id, state: null }` = 会话存在、但从未进入 durable session actor
+ *   （例如只经无状态 `/api/agent/chat` 的 web 会话）：正常空态，客户端归一化为
+ *   `null` 快照，不虚构 `RuntimeSessionState`；
+ * - 会话不存在 → 404 `SESSION_NOT_FOUND`；存储故障 → 503/504 `STORE_*`；
  * - `state` 形状见 `pkg/skillsapi/client.go:1570-1585`（`SessionRuntimeState`）。
  *
  * 口径：`pending_approval.id` 即 `approval_requested.request_id`（`approve_tool`

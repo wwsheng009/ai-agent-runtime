@@ -158,6 +158,35 @@ describe("useSessionRuntimeState", () => {
     expect(hook.current.error).toBeNull();
   });
 
+  it("显式空快照（200 + state: null）按空态处理且不报错", async () => {
+    mockGetState.mockResolvedValue(null);
+    const hook = renderHook("sess-empty");
+
+    await flush();
+
+    expect(hook.current.snapshot).toBeNull();
+    expect(hook.current.state).toBeNull();
+    expect(hook.current.error).toBeNull();
+  });
+
+  it("刷新后返回显式空快照：清掉陈旧快照而不是沿用上一轮状态", async () => {
+    mockGetState.mockResolvedValueOnce(snapshot("sess-1", "waiting_approval"));
+    const hook = renderHook("sess-1");
+
+    await flush();
+    expect(hook.current.state?.status).toBe("waiting_approval");
+
+    mockGetState.mockResolvedValueOnce(null);
+    act(() => {
+      hook.current.refresh();
+    });
+    await flush();
+
+    expect(hook.current.snapshot).toBeNull();
+    expect(hook.current.state).toBeNull();
+    expect(hook.current.error).toBeNull();
+  });
+
   it("其他错误暴露 error 且 state 归空", async () => {
     const failure = new Error("boom");
     mockGetState.mockRejectedValue(failure);

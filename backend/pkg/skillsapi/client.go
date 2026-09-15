@@ -1581,7 +1581,11 @@ type SessionRuntimeState struct {
 }
 
 type SessionRuntimeStateResponse struct {
-	State SessionRuntimeState `json:"state"`
+	// State 为 nil 表示会话存在、但从未进入 durable session actor
+	// （服务端 200 + `state: null`）：与「会话不存在」（404，
+	// `SessionRuntimeState` 无法表达）语义不同，消费者必须区分二者。
+	State     *SessionRuntimeState `json:"state"`
+	SessionID string               `json:"session_id,omitempty"`
 }
 
 type SessionRuntimeEvent struct {

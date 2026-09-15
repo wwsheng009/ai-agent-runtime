@@ -2136,12 +2136,22 @@ func TestSessionRuntimeState_UnmarshalIncludesCurrentRunMeta(t *testing.T) {
 		}
 	}`), &response)
 	require.NoError(t, err)
+	require.NotNil(t, response.State)
 	require.NotNil(t, response.State.CurrentRunMeta)
 	require.NotNil(t, response.State.CurrentRunMeta.Team)
 
 	assert.Equal(t, "team-1", response.State.CurrentRunMeta.Team.TeamID)
 	assert.Equal(t, "mate-1", response.State.CurrentRunMeta.Team.AgentID)
 	assert.Equal(t, "task-1", response.State.CurrentRunMeta.Team.CurrentTaskID)
+}
+
+func TestSessionRuntimeState_UnmarshalExplicitEmptySnapshot(t *testing.T) {
+	var response SessionRuntimeStateResponse
+	err := json.Unmarshal([]byte(`{"session_id":"sess-1","state":null}`), &response)
+	require.NoError(t, err)
+
+	assert.Equal(t, "sess-1", response.SessionID)
+	assert.Nil(t, response.State, "显式空快照必须可判空，不能退化成零值状态")
 }
 
 func TestClient_SessionAgentLifecycle(t *testing.T) {

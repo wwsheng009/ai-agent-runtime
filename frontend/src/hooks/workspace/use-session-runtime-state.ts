@@ -19,7 +19,12 @@ type SessionRuntimeFailure = {
 export type UseSessionRuntimeStateResult = {
   snapshot: RuntimeSessionSnapshot | null;
   state: RuntimeSessionState | null;
-  /** 拉取失败（404 视为「该会话无 runtime state」，按空态处理，不计入 error）。 */
+  /**
+   * 拉取失败。以下两种「无 runtime state」不计入 error（都收敛为快照空态）：
+   * 后端显式空快照（200 + `state: null`：会话存在、从未进入 durable actor）与
+   * 404（会话不存在 / 已删除——调用方动作与空态一致，且旧后端只会回 404）。
+   * 503/504 等存储故障属于可重试错误，照常暴露。
+   */
   error: unknown;
   /** 重新拉取（会话切换自动拉取；重连 / 决策后可主动刷新）。 */
   refresh: () => void;
@@ -61,7 +66,11 @@ export function useSessionRuntimeState(
         if (!active) {
           return;
         }
-        setEntry({ sessionId: trimmedSessionId, snapshot });
+        // snapshot === null 是后端显式空态（会话存在、无 durable runtime state）：
+        // 清掉本会话的陈旧快照，避免把上一轮结果当成当前状态。
+        setEntry(
+          snapshot ? { sessionId: trimmedSessionId, snapshot } : null,
+        );
         setFailure(null);
       })
       .catch((error: unknown) => {

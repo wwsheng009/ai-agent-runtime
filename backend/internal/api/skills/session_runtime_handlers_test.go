@@ -1899,3 +1899,96 @@ func TestStreamSessionRuntimeEventsSurvivesTransientStoreErrors(t *testing.T) {
 		t.Fatal("瞬时 ListEvents 错误后未能恢复投递：流被过早终止")
 	}
 }
+
+// P2-1A 契约：runtime 快照端点必须区分「会话不存在」与「会话存在但从未进入
+// durable session actor」。只经无状态 /api/agent/chat 的 web 会话属于后者：
+// 它的快照是空（state: null），不是资源缺失。旧实现把两种终态都写成 404，
+// 调用方无法区分，只能把 404 当成常规空态吞掉——浏览器控制台因此对每个
+// web 会话都留下一条误导性 404（shared.ts:247）。
+func TestGetSessionRuntimeStateEmptySnapshotForKnownSessionWithoutActorState(t *testing.T) {
+	ctx := context.Background()
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	t.Cleanup(sessionManager.Stop)
+	session, err := sessionManager.Create(ctx, "runtime-state-user")
+	require.NoError(t, err)
+
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetSessionManager(sessionManager)
+	// 钉住运行时存储：端点不得懒加载真实数据库。
+	handler.sessionRuntimeStore = chat.NewInMemoryRuntimeStore(64)
+
+	router := mux.NewRouter()
+	router.HandleFunc("/api/runtime/sessions/{id}/runtime", handler.GetSessionRuntimeState).Methods(http.MethodGet)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+session.ID+"/runtime", nil)
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+	var payload map[string]interface{}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&payload))
+	assert.Equal(t, session.ID, payload["session_id"], "空快照必须回显会话身份")
+	state, ok := payload["state"]
+	assert.True(t, ok, "空快照必须显式带 state 键（null），不得省略")
+	assert.Nil(t, state, "无 actor 状态的会话不得伪造 runtime state")
+}
+
+// 未知 / 已删除会话是客户端语义错误：404 + SESSION_NOT_FOUND，与会话读取
+// 端点（/turns、/backtrack/audit、/history）保持同一约定。
+func TestGetSessionRuntimeStateNotFoundForUnknownSession(t *testing.T) {
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	t.Cleanup(sessionManager.Stop)
+
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetSessionManager(sessionManager)
+	handler.sessionRuntimeStore = chat.NewInMemoryRuntimeStore(64)
+
+	router := mux.NewRouter()
+	router.HandleFunc("/api/runtime/sessions/{id}/runtime", handler.GetSessionRuntimeState).Methods(http.MethodGet)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/session_20260915073017_missing/runtime", nil)
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code, "body=%s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "SESSION_NOT_FOUND", "body=%s", rec.Body.String())
+}
+
+// 有 actor 状态时快照内容原样返回（本次修复只改「空态」分支）。
+func TestGetSessionRuntimeStateReturnsActorStateWhenPresent(t *testing.T) {
+	ctx := context.Background()
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	t.Cleanup(sessionManager.Stop)
+	session, err := sessionManager.Create(ctx, "runtime-state-user")
+	require.NoError(t, err)
+
+	runtimeStore := chat.NewInMemoryRuntimeStore(64)
+	require.NoError(t, runtimeStore.SaveState(ctx, &chat.RuntimeState{
+		SessionID:    session.ID,
+		Status:       chat.SessionIdle,
+		HeadOffset:   17,
+		ActiveJobIDs: []string{"job-1"},
+	}))
+
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetSessionManager(sessionManager)
+	handler.sessionRuntimeStore = runtimeStore
+
+	router := mux.NewRouter()
+	router.HandleFunc("/api/runtime/sessions/{id}/runtime", handler.GetSessionRuntimeState).Methods(http.MethodGet)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+session.ID+"/runtime", nil)
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+	var payload struct {
+		State map[string]interface{} `json:"state"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&payload))
+	require.NotNil(t, payload.State)
+	assert.Equal(t, session.ID, payload.State["session_id"])
+	assert.Equal(t, string(chat.SessionIdle), payload.State["status"])
+	assert.Equal(t, float64(17), payload.State["head_offset"])
+	assert.Equal(t, []interface{}{"job-1"}, payload.State["active_job_ids"])
+}

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  isEmptySessionRuntimeSnapshot,
   getSessionRuntimeState,
   normalizeSessionRuntimeSnapshot,
   normalizeSessionRuntimeState,
@@ -99,6 +100,16 @@ describe("normalizeSessionRuntimeSnapshot", () => {
     ).toMatchObject({ state: { sessionId: "sess-3", status: "idle" } });
     expect(normalizeSessionRuntimeSnapshot({})).toBeNull();
   });
+
+  it("显式空快照（state: null）不是快照，但可被 isEmptySessionRuntimeSnapshot 识别", () => {
+    const empty = { session_id: "sess-4", state: null };
+
+    expect(normalizeSessionRuntimeSnapshot(empty)).toBeNull();
+    expect(isEmptySessionRuntimeSnapshot(empty)).toBe(true);
+    expect(isEmptySessionRuntimeSnapshot({ session_id: "sess-4" })).toBe(false);
+    expect(isEmptySessionRuntimeSnapshot({})).toBe(false);
+    expect(isEmptySessionRuntimeSnapshot(null)).toBe(false);
+  });
 });
 
 describe("getSessionRuntimeState", () => {
@@ -132,7 +143,13 @@ describe("getSessionRuntimeState", () => {
     expect(String(calls[0].url)).toContain(
       "/api/runtime/sessions/sess%2F1/runtime",
     );
-    expect(result.state.pendingApproval?.id).toBe("approval-42");
+    expect(result?.state.pendingApproval?.id).toBe("approval-42");
+  });
+
+  it("显式空快照（会话存在、无 actor 状态）解析为空态且不抛错", async () => {
+    respondWith({ session_id: "sess-1", state: null });
+
+    await expect(getSessionRuntimeState("sess-1")).resolves.toBeNull();
   });
 
   it("空 sessionId 直接失败（不发请求）", async () => {

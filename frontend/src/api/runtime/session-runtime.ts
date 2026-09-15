@@ -1,10 +1,17 @@
 // P2-1A：会话运行时状态快照 REST 客户端。
 //
 // 端点（backend/internal/api/skills/handler.go；实现 session_runtime_handlers.go:375-408）：
-//   GET /api/runtime/sessions/{id}/runtime → { state, ...execution_route }
+//   GET /api/runtime/sessions/{id}/runtime
+//     - 200 { state, ...execution_route }        —— 该会话有 durable runtime state；
+//     - 200 { session_id, state: null }          —— 会话存在但从未进入 durable
+//       session actor（例如只经无状态 `/api/agent/chat` 的 web 会话）。这是显式
+//       空态：`getSessionRuntimeState` 归一化为 null，不抛错、不伪造状态；
+//     - 404 SESSION_NOT_FOUND                    —— 会话不存在（已删除 / 未知 id）；
+//     - 503/504 STORE_*                          —— 会话存储故障（可重试）。
 //
 // 归一化说明：同时接受 snake_case / camelCase（与 jobs 同策略），避免后端补
-// json tag 时前端二次改动；缺 `state` 视为契约不满足（抛错而非伪造空态）。
+// json tag 时前端二次改动；既非「显式空态」又缺 `state` 视为契约不满足
+// （抛错而非伪造空态）。
 
 import type {
   RuntimeSessionApproval,
@@ -176,15 +183,37 @@ export function normalizeSessionRuntimeSnapshot(
   };
 }
 
+/**
+ * 显式空快照判定：`{ session_id, state: null }`。
+ *
+ * 这是后端「会话存在、但从未进入 durable session actor」的正常终态（旧实现把它
+ * 与「会话不存在」一起写成 404，调用方无法区分，只能在控制台留下误导性 404）。
+ * 归一化函数对它返回 null，因此需要用本判定与「坏响应」区分：
+ * 显式空态 → 返回空态；坏响应 → 抛错。
+ */
+export function isEmptySessionRuntimeSnapshot(raw: unknown): boolean {
+  const record = asRecord(raw);
+  if (!record) {
+    return false;
+  }
+  return "state" in record && record.state === null;
+}
+
 export type SessionRuntimeStateOptions = {
   signal?: AbortSignal;
 };
 
-/** 读取会话运行时状态快照（404 = 该会话尚无 runtime state，由调用方按空态处理）。 */
+/**
+ * 读取会话运行时状态快照。
+ *
+ * 返回 `null` = 后端显式声明「该会话没有 durable runtime state」（空态）；
+ * 抛出 = 契约不满足或传输/存储故障（404 = 会话不存在，带 `status` 供调用方按空态
+ * 处理；503/504 = 存储故障，属于可重试错误）。
+ */
 export async function getSessionRuntimeState(
   sessionId: string,
   options: SessionRuntimeStateOptions = {},
-): Promise<RuntimeSessionSnapshot> {
+): Promise<RuntimeSessionSnapshot | null> {
   const trimmed = sessionId.trim();
   if (!trimmed) {
     throw new Error("session id is required");
@@ -195,6 +224,9 @@ export async function getSessionRuntimeState(
     ),
     { signal: options.signal },
   );
+  if (isEmptySessionRuntimeSnapshot(raw)) {
+    return null;
+  }
   const snapshot = normalizeSessionRuntimeSnapshot(raw);
   if (!snapshot) {
     throw new Error("invalid session runtime state payload");

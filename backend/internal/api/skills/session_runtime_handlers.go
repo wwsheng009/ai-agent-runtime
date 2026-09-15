@@ -378,6 +378,15 @@ func (h *Handler) ResumeSessionAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetSessionRuntimeState returns the session actor runtime state.
+//
+// 契约（P2-1A 快照消费方按此实现）：
+//   - 200 {state, ...execution_route}   —— 该会话有 durable runtime state；
+//   - 200 {session_id, state: null}     —— 会话存在但从未进入 durable session
+//     actor（例如只经无状态 `/api/agent/chat` 的 web 会话）。空快照是正常终态：
+//     不生成状态行、也不伪造未决审批 / 提问；
+//   - 404 SESSION_NOT_FOUND             —— 会话不存在（已删除 / 未知 id），
+//     与会话读取端点（/turns、/backtrack/audit、/history）同一约定；
+//   - 503 STORE_UNAVAILABLE             —— 会话存储不可用（锁定 / 超时）。
 func (h *Handler) GetSessionRuntimeState(w http.ResponseWriter, r *http.Request) {
 	store := h.getSessionRuntimeStore()
 	if store == nil {
@@ -402,7 +411,32 @@ func (h *Handler) GetSessionRuntimeState(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if state == nil {
-		h.writeError(w, http.StatusNotFound, errors.New(errors.ErrValidationFailed, "session runtime state not found"))
+		// 「会话不存在」与「会话存在但从未进入 durable session actor」是两种
+		// 不同终态，旧实现都用 404 表达：调用方无法区分，只能把 404 当作常规
+		// 空态吞掉——于是每个只经无状态 /api/agent/chat 的 web 会话都会在浏览器
+		// 控制台留下一条误导性的 404（shared.ts:247 的 performRuntimeJsonFetch）。
+		//
+		// 这里显式区分：会话存在（sessionManager 可解析，与 /sessions/{id}、
+		// /sessions 列表同源）→ 200 + 显式空快照；只有真正不存在的会话才 404。
+		if h.sessionManager == nil {
+			// 没有会话存储可判定存在性时保持历史语义，不把未知当作空态。
+			h.writeError(w, http.StatusNotFound, errors.New(errors.ErrValidationFailed, "session runtime state not found"))
+			return
+		}
+		session, loadErr := h.sessionManager.GetSession(queryCtx, sessionID)
+		if loadErr != nil {
+			// 会话不存在 → 404 SESSION_NOT_FOUND；存储被占用 / 超时 → 503。
+			writeSessionStoreError(w, loadErr)
+			return
+		}
+		if session == nil {
+			h.writeError(w, http.StatusNotFound, errors.New(errors.ErrValidationFailed, "session runtime state not found"))
+			return
+		}
+		h.writeJSON(w, http.StatusOK, h.attachSessionExecutionRoute(r.Context(), sessionID, map[string]interface{}{
+			"session_id": sessionID,
+			"state":      nil,
+		}))
 		return
 	}
 
