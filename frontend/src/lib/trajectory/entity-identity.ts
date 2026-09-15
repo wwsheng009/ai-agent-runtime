@@ -115,3 +115,31 @@ export function subagentRowIdOf(
   const childId = subagentChildIdOf(payload);
   return childId ? subagentItemId(childId) : `subagent-${seq}`;
 }
+
+/**
+ * 消息行身份（正文 / 思考）：`assistant:<turn_id>` / `reasoning:<turn_id>`。
+ *
+ * 背景（用户实测上报：live 渲染「没有顺序概念」，已渲染的消息在下一次渲染时
+ * 被重排）：正文与思考此前共用**全局固定 id**（`assistant` / `reasoning`），
+ * 于是
+ *
+ * - 行的位置被钉死在**创建它的那一帧**（本批实测：整窗 66 行里正文行恒为第 0
+ *   项，其后 31 个工具行 + 30 个观察行全部追加在它之后）——同一行跨越所有轮次，
+ *   新内容不会出现在它所属的时间位置上；
+ * - `done` 的 `finalizeOpenItems` 会把仍在 running 的行冻结为终态，而
+ *   `upsertItem` 对终态行**拒绝 upsert**：下一轮的增量帧命中同一 id 时被静默
+ *   丢弃（要么不渲染，要么只能落到别处），表现为「已经渲染的消息被重新排」。
+ *
+ * 因此把身份按轮次收敛（与工具 `tool:<call_id>`、子代理 `subagent:<child>`
+ * 同一套 `<kind>:<id>` 命名）：每轮各自的正文/思考成行、按到达序追加，
+ * 已渲染行不再被后续轮次复用或冻结。
+ *
+ * 无 turn 标识（历史兜底帧 / 旧帧 / 降级帧）时退回既有全局 id，语义不变。
+ */
+export function messageRowIdOf(
+  payload: Record<string, unknown>,
+  kind: "assistant" | "reasoning",
+): string {
+  const turnId = readText(payload["turn_id"]) || readText(payload["turnId"]);
+  return turnId ? `${kind}:${turnId}` : kind;
+}

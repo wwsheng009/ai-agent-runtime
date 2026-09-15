@@ -314,6 +314,40 @@
 
 **未交付（非阻塞，独立排期）**：本批只改**展示与分区**，不写状态、不做自动回收——身份行仍只有显式 close / reclaim 才终态。若要让已结束子代理的身份行也收敛，需要主代理主动 close 或后端增加空闲回收策略；那属于 AgentControl 生命周期语义变更，不在本批范围。
 
+### 批次 22（2026-09-15）：live 渲染的消息行顺序收口（消息行身份按轮次收敛）
+
+**症状（用户实测上报）**：`/workspace/sessions/session_20260915191107_eNMJeqJt` 页面上，前端 SSE live 渲染「已经渲染的消息会在下一次（渲染 / 工具 / 消息）渲染时被重排，把消息又重新排在最后」。
+
+**排查（真实事件流 + 真实管线，非仅单测）**
+
+1. **数据面有序**：`GET /api/runtime/sessions/<id>/runtime/events?tail=1&limit=800` 实测 `first_seq=24529 / last_seq=25328 / latest_seq=25328`，逐帧 `seq` 全局单调、返回严格升序；
+2. **轨迹管线顺序正确**：把该 800 条真实事件喂真实 store（`createTrajectoryStore` + `setBaselineSeq(first_seq-1)` + `trajectoryReplaySteps` + `store.push/advanceCursor`），66 行实测 `nonMonotonic=[]`（行位置与 seq 单调一致）、`movedLater=[]`（逐帧增量下既有行下标不变）、`duplicated=[]`（同一内容不落在两个身份上）；
+3. **聊天链路同样就地更新**：同 800 条真实事件喂 `applyRuntimeEventToThread`，`messages` 顺序不变、无重复 id（工具 / 阶段帧只更新既有消息的线段，不新建消息行）。
+
+**根因（两条，都落在「消息行身份」上）**
+
+| 缺陷 | 机制 |
+|---|---|
+| 消息行身份是**全局固定 id** | `trajectory-reducer/apply.ts` 正文 / 思考分支取 `itemIdOf(payload) \|\| "assistant"` / `"reasoning"`：**所有轮次**的正文写进同一行，行的位置被钉死在创建它的那一帧——实测整窗 66 行里正文行恒为第 0 项，其后 31 个工具行 + 30 个观察行全部追加在它之后，新内容永远不会出现在它所属的时间位置 |
+| 轮末冻结吞掉下一轮 | `done` 的 `finalizeOpenItems` 把仍在 running 的行置 `completed`（终态），而 `upsertItem` 对终态行**拒绝 upsert** ⇒ 下一轮增量帧命中同一 id 时被静默丢弃（要么不渲染，要么只能复用旧行）⇒ 用户侧观感即「已渲染的消息被重排 / 重新排到最后」 |
+
+**修复（身份收敛，与工具 / 子代理同一套 `<kind>:<id>` 命名）**
+
+| 文件 | 内容 |
+|---|---|
+| `lib/trajectory/entity-identity.ts` | 新增 `messageRowIdOf(payload, kind)`：`assistant:<turn_id>` / `reasoning:<turn_id>`；无 turn 标识（历史兜底帧 / 旧帧 / 降级帧）退回既有全局 id，语义不变 |
+| `lib/trajectory/trajectory-reducer/apply.ts` | 正文与思考分支改用「显式消息 id → 轮次身份」；`running` / `completed` 判据从「id 是否等于全局名」改为「是否为显式身份帧」，既有语义零变化 |
+| 顺序契约（本批钉住） | 行**只追加**，既有行下标永不变化；跨轮新消息行落在既有行之后（= 事件顺序）；每轮 `done` 只冻结本轮的正文 / 思考行 |
+
+**真机证据**：同 800 条真实事件重放，正文行身份由裸 `assistant` 变为 `assistant:74dbfcc4-0542-4c73-8a51-39034389dee3`（带轮次身份）；临时实测脚本（`frontend/src/lib/trajectory/live-order.check.test.ts`，跑完即删）覆盖 A/B/C/D 四组对照。
+
+**门禁（本批）**：`npx tsc -b --force` exit 0；`npm run lint` **0 error / 1 基线 warning**（`artifact-detail-dialog.tsx:50` 既有 hooks 依赖告警）+ i18n scanned=686 / violations=0 + 备份门禁 1041 文件 0 残留 + 行数门禁 979 文件 0 超限（最大 `use-session-runtime-stream.ts`=500）+ 消息 token 门禁 37 文件 0 处；`npx vitest run` **220 文件 / 1712 用例全绿**（本批新增 1 文件 6 例：`lib/trajectory/trajectory-live-order.test.ts`——跨轮各自成行 / 同轮增量收敛 / done 后下一轮仍能落行 / 逐帧增量既有行下标不变 / 思考行按轮次 / 降级兼容；既有 18 个轨迹测试文件 172 例零改写）。
+
+**未交付（非阻塞，独立排期）**
+
+1. `lib/trajectory/recovery.ts` 的 `trajectoryRecoveryPushes()` 仍把 seq=0 帧整体排到列表末尾（`[...pushes, ...zeroSeq]`）——该函数目前**仅被测试调用**，实时链路走保序的 `trajectoryEventAction`；若将来接回生产线，需按 turn / timestamp 锚点插入而非一律末尾；
+2. 窗口重建（`prependEarlier` 整体重放）会让所有行按 seq 重新落位一次：行身份恒定，但**同一行的下标可能变化**；若要求「已渲染行绝不位移」，需把重建改为增量前插。
+
 ### 复检记录（2026-09-13，P2-1A 第八项交付后）
 
 | 项 | 复检内容 | 结果 |

@@ -4,7 +4,7 @@ import { TRAJECTORY_ITEM_ID_KEY, type TrajectoryChange, type TrajectoryEvent, ty
 
 import { describeRuntimeEvent, eventTimestampOf, readFirstString, readNumber, readString, textDeltaOf, toolArgsSummaryOf, toolCallIdOf, toolDurationMsOf, toolErrorOf, toolNameOf, toolResultSummaryOf } from "./event-readers";
 import { appendChange, cloneItem, findItem, upsertItem } from "./snapshot-ops";
-import { readTrajectoryEntity, subagentRowIdOf, subagentStatusOf, toolItemId } from "../entity-identity";
+import { messageRowIdOf, readTrajectoryEntity, subagentRowIdOf, subagentStatusOf, toolItemId } from "../entity-identity";
 
 /**
  * 显式 item 身份（P4 历史兜底）：降级帧（seq=0）没有 EventStore 游标可依赖，
@@ -84,7 +84,11 @@ export function applySequencedEvent(
         );
       } else {
         const delta = textDeltaOf(event.payload);
-        const itemId = itemIdOf(event.payload) || "assistant";
+        // 身份优先显式消息 id（P4 历史兜底帧），否则按轮次收敛
+        // （`assistant:<turn_id>`）：跨轮共用全局 id 会让行位置被钉死在创建帧，
+        // 且轮末冻结后下一轮增量被终态拒绝（见 entity-identity.messageRowIdOf）。
+        const explicitId = itemIdOf(event.payload);
+        const itemId = explicitId || messageRowIdOf(event.payload, "assistant");
         const existing = findItem(snapshot, itemId);
         const nextHead: TrajectoryHead = {
           kind: "text",
@@ -101,7 +105,7 @@ export function applySequencedEvent(
           "assistant",
           nextHead,
           // 历史兜底行是「已完成的整条消息」，live 增量帧才是 running。
-          itemId === "assistant" ? "running" : "completed",
+          explicitId ? "completed" : "running",
           seq,
           "",
           at,
@@ -268,7 +272,8 @@ function applyReasoningEvent(
   changes: TrajectoryChange[],
   event: TrajectoryEvent,
 ) {
-  const itemId = itemIdOf(event.payload) || "reasoning";
+  const explicitId = itemIdOf(event.payload);
+  const itemId = explicitId || messageRowIdOf(event.payload, "reasoning");
   const existing = findItem(snapshot, itemId);
   let delta = readString(event.payload["content"]);
   if (!delta && event.payload["reasoning"] && typeof event.payload["reasoning"] === "object") {
@@ -290,7 +295,7 @@ function applyReasoningEvent(
     itemId,
     "reasoning",
     nextHead,
-    itemId === "reasoning" ? "running" : "completed",
+    explicitId ? "completed" : "running",
     event.seq,
     "",
     eventTimestampOf(event.payload),
