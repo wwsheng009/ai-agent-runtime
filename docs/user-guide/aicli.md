@@ -195,7 +195,16 @@ aicli image "一只在月球上散步的猫"  # 图片生成
 /debug supervision ack <id> --note <text>       # 确认通知（必带审计说明）
 /debug supervision defer <id> --until 30m       # 延后注入 preflight
 /debug supervision resolve <id> --state closed  # 收敛 resolution 状态
+/debug supervision control <id> --action cancel --reason <text> [--cascade target|descendants]
+                                                # 对通知标的执行 durable 控制动作
+                                                # （cancel|close|cancel_subtree|retry|reassign）
 ```
+
+`control` 与模型侧 `control_descendant`、HTTP 宿主共用同一实现：动作按
+request → accept → execute 落 durable action 行（`action_id` 可在输出中复核），
+并受 `--expected-version` CAS 保护。每个动作会为同一标的写入解析通知并推进版本，
+连续操作前请先重新 `list` 并使用最新的 `<id>` / `--expected-version`；沿用旧行会被
+拒绝（`action conflict: state changed`），不会静默重放。
 
 ---
 
