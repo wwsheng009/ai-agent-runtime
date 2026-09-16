@@ -231,6 +231,12 @@ func teamExpertConcurrencyLimit(routingConfig *agentconfig.AICLISubagentRoutingC
 func (c *sessionAgentController) resolveSpawnAgentRoute(parentSession *chat.Session, sessionID string, args toolbroker.SpawnAgentArgs) (toolbroker.SpawnAgentArgs, error) {
 	parent := c.spawnAgentParentDefaults(parentSession)
 	routingConfig := c.subagentRoutingConfig()
+	// The parent session's own mode is the session-level policy for its
+	// children; the broker only sees the current run meta, which follow-up and
+	// resumed runs may not carry. A --yolo parent must not silently spawn
+	// approval-asking children, and a plan parent must not delegate writes.
+	args = toolbroker.ResolveSpawnAgentPermissionPolicy(args, toolbroker.ParentSessionPermissionMode(parentSession))
+	args.EffectivePermissionMode = strings.TrimSpace(args.PermissionMode)
 	task := modelrouting.TaskHint{
 		ID:                  strings.TrimSpace(sessionID),
 		Role:                strings.TrimSpace(args.AgentType),
@@ -1206,31 +1212,17 @@ func (c *sessionAgentController) wakeSupervisedParent(ctx context.Context, rootS
 	return c.supervisionWakeConsumer(scheduler).MaybeWakeParent(ctx, parentSessionID, "", rootScopeID)
 }
 
-// supervisionWakeConsumer builds the consumer shared by the auto-wake and the
-// turn-end self-check paths: both must use the same runnable gate and the same
-// delivery path, otherwise a self-check turn could start while the parent is
-// busy or bypass the digest injection.
+// supervisionWakeConsumer delegates to the handler-level consumer
+// (supervision_batch_projector.go): the auto-wake path, the turn-end self-check
+// and the batch terminal bridge must share one runnable gate and one delivery
+// path, otherwise a self-check turn could start while the parent is busy or
+// bypass the digest injection.
 func (c *sessionAgentController) supervisionWakeConsumer(scheduler *supervision.WakeScheduler) *supervision.WakeConsumer {
-	return &supervision.WakeConsumer{
-		Wakes: scheduler,
-		Runnable: func(ctx context.Context, rootScopeID, parentSessionID, parentTeamID string) bool {
-			actor := c.apiAgentActor(ctx, parentSessionID)
-			if actor == nil {
-				return false
-			}
-			state, ok := actor.StateSummary()
-			return ok && !state.Busy()
-		},
-		Deliver: func(ctx context.Context, parentSessionID string, digest *supervision.Digest, wakeIDs []string) error {
-			actor := c.apiAgentActor(ctx, parentSessionID)
-			if actor == nil {
-				return fmt.Errorf("parent actor not found")
-			}
-			// SubmitPromptAsync enqueues the wake turn on the actor loop; it
-			// does not block on the full parent turn.
-			return actor.SubmitPromptAsync(ctx, supervision.AutoWakePrompt, c.apiAgentRunMeta(ctx, parentSessionID))
-		},
+	var handler *Handler
+	if c != nil {
+		handler = c.handler
 	}
+	return handler.supervisionWakeConsumer(scheduler)
 }
 
 // selfCheckSupervisedParent is the turn-end self-check (plan P1-6 方案 4). It
@@ -1703,41 +1695,24 @@ func (c *sessionAgentController) apiAgentSessionBusy(ctx context.Context, sessio
 	return false
 }
 
-func (c *sessionAgentController) apiAgentActor(ctx context.Context, sessionID string) *chat.SessionActor {
-	if c == nil || c.handler == nil {
+// apiAgentActor 复用 handler 级实现（supervision_batch_projector.go）：批终态
+// 桥与审批桥必须解析到同一个 actor，否则两条 admission 路径会各自漂移。
+func (c *sessionAgentController) apiAgentActor(_ context.Context, sessionID string) *chat.SessionActor {
+	if c == nil {
 		return nil
 	}
-	hub := c.handler.getSessionHub()
-	if hub == nil {
-		return nil
-	}
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return nil
-	}
-	if actor, ok := hub.Get(sessionID); ok && actor != nil {
-		return actor
-	}
-	actor, err := hub.GetOrCreate(sessionID)
-	if err != nil {
-		return nil
-	}
-	return actor
+	return c.handler.apiSessionActor(sessionID)
 }
 
+// apiAgentRunMeta 复用 handler 级实现：Child follow-up/resume 的 RunMeta 重建
+// 口径必须与 wake 投递完全一致（SpawnAgentRunMetaFromContext 会把普通 spawn
+// 子会话的 completion_requirement 归一为 none，避免 legacy complete_task 重新
+// 进入 run）。
 func (c *sessionAgentController) apiAgentRunMeta(ctx context.Context, sessionID string) *team.RunMeta {
-	if c == nil || c.handler == nil || c.handler.sessionManager == nil {
+	if c == nil {
 		return nil
 	}
-	session, err := c.handler.sessionManager.Get(ctx, strings.TrimSpace(sessionID))
-	if err != nil || session == nil {
-		return nil
-	}
-	// Child follow-up/resume must rebuild RunMeta from the child session only.
-	// SpawnAgentRunMetaFromContext forces completion_requirement=none for
-	// ordinary spawn_agent children so a legacy complete_task context value
-	// cannot re-enter the run.
-	return toolbroker.SpawnAgentRunMetaFromContext(session)
+	return c.handler.apiSessionRunMeta(ctx, sessionID)
 }
 
 func (c *sessionAgentController) deliverAgentMailboxEvent(ctx context.Context, sessionID string, mail team.MailMessage) error {
@@ -1829,16 +1804,25 @@ func (c *sessionAgentController) ResolveApproval(ctx context.Context, args toolb
 	if err := actor.ApproveToolWithArgs(ctx, requestID, args.Allow, args.PatchedArgs); err != nil {
 		return nil, err
 	}
+	resolution, resumed := actor.ApprovalOutcome(requestID)
 	status, err := c.snapshot(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
+	// A decision against an already-terminated run is recorded but never applied,
+	// so it is reported as not allowed (P0-3).
+	allowed := args.Allow
+	if toolbroker.ApprovalResolutionNotApplied(resolution) {
+		allowed = false
+	}
 	return &toolbroker.AgentApprovalResult{
-		SessionID: sessionID,
-		RequestID: requestID,
-		Allowed:   args.Allow,
-		Resolved:  true,
-		Status:    status,
+		SessionID:  sessionID,
+		RequestID:  requestID,
+		Allowed:    allowed,
+		Resolved:   true,
+		Resumed:    resumed,
+		Resolution: resolution,
+		Status:     status,
 	}, nil
 }
 
@@ -3754,8 +3738,11 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		EventStore:   eventStore,
 		EventBus:     h.getRuntimeEventBus(),
 		LoopConfig:   loopConfig,
-		PersistHook:  h.runtimeServerGoalPersistHook,
-		RecoverStale: true,
+		// 灰度开关（默认开）：run 终态后到达的审批决议零恢复；显式
+		// supervision.approval_terminal_guard=false 可回退旧行为。
+		ApprovalTerminalGuard: h.supervisionConfig.ApprovalTerminalGuard,
+		PersistHook:           h.runtimeServerGoalPersistHook,
+		RecoverStale:          true,
 		PrepareRun: func(ctx context.Context, session *chat.Session, resume bool) error {
 			return ensureLease(ctx)
 		},

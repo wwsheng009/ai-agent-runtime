@@ -134,8 +134,10 @@ func TestTrajectoryEmitterPersistsAndAlignsSeq(t *testing.T) {
 	assert.Empty(t, tail)
 }
 
-// TestTrajectoryEmitterDegradesOnAppendFailure 验证错误隔离：EventStore 写入失败时
-// SSE 主链路不受影响，非 wire-only 帧降级为连接内计数且不写 id（无持久化游标）。
+// TestTrajectoryEmitterDegradesOnAppendFailure 验证错误隔离 + 游标单一真源：
+// EventStore 写入失败时 SSE 主链路不受影响，但非 wire-only 帧**既不写 id 也不写
+// _event.sequence**（Batch 4）：连接内计数器不是持久化游标，写进游标位会被前端
+// 轨迹 reducer 当成真实 seq 做幂等去重，把降级帧误判为重复而丢弃（宁缺勿假）。
 func TestTrajectoryEmitterDegradesOnAppendFailure(t *testing.T) {
 	handler := &Handler{sessionEventStore: failingEventStore{}}
 
@@ -146,11 +148,18 @@ func TestTrajectoryEmitterDegradesOnAppendFailure(t *testing.T) {
 
 	frames := parseSSETestFrames(t, rec.Body.String())
 	require.Len(t, frames, 2)
-	// 降级：连接内计数 1、2；id 不写（连接内计数不是持久化 seq）。
-	assert.Equal(t, int64(1), frames[0].sequence)
+	// 降级：seq/id 都不下发（0 在解析层表示「未知」，前端按到达序处理）。
+	assert.Zero(t, frames[0].sequence)
 	assert.Zero(t, frames[0].id)
-	assert.Equal(t, int64(2), frames[1].sequence)
+	assert.Zero(t, frames[1].sequence)
 	assert.Zero(t, frames[1].id)
+	// 时间戳等信封字段仍在，帧本身可正常消费。
+	for _, frame := range frames {
+		meta, ok := frame.data["_event"].(map[string]interface{})
+		require.True(t, ok, "降级帧仍须带 _event 信封")
+		assert.NotContains(t, meta, "sequence")
+		assert.Equal(t, "skill_runtime.sse.v1", meta["schema_version"])
+	}
 }
 
 // TestChatSSEFrameIsWireOnly 固化去重名单判据（与前端 recovery.ts 的

@@ -1,6 +1,6 @@
 # SSE live 事件通道优化与增强方案（runtime live event channel）
 
-> 状态：**方案阶段（未实施）**。本文只做盘点、定量取证与分批设计，不含代码改动。
+> 状态：**分批实施中（2026-09-16）**。Batch 1 已提交（`b24f4bfc`，前置契约 `303d56bd`）；Batch 2 代码已落地并带前后端门禁（未提交）；Batch 3 传输增强代码已落地并带回归护栏（未提交）；Batch 4 体验收口两项（回放标记、续传起始帧）已落地，第三项（单一 session 级 seq）由 Batch 1 的 `id:` 契约收口。§1–§3 的盘点与取证保持提交时原样，作为实施依据；§4 各批次附实施状态注。
 > 例外：§9 为已闭环缺陷的复盘（含已落地的代码改动与验证证据），归档于此作为同族回归证据。
 > 日期：2026-09-16（本地 +08:00）
 > 适用版本：当前仓库 `E:\projects\ai\ai-agent-runtime`（Go module：`backend`，前端 `frontend`）
@@ -227,7 +227,7 @@ chat.sse.reasoning    seq=93642  len=289  {"content":".","index":29602,"metadata
 
 > 合计预估（按 §2.2 单会话自证数据复算）：store 体积 −45~52%（2.64MB → 约 1.28~1.46MB，取决于保留 `tool_end` 还是 `observation`）；行数/帧数 −50%（2,302 → 约 1,152）；provenance 去噪合 payload 的 ~19%（wire 口径 ~16%）。帧数进一步下探需叠加 Batch 3 合帧（目标 <500 帧，以实测校准）。
 
-> **实施状态（2026-09-16，PR-1 代码已落地，未提交）**：写入侧四项已实现——`chatSSEFrameIsWireOnly`（chunk/reasoning/同源 observation 只走 wire）、`trimChatSSEEventPayloadForStore`（`done` 落盘裁 `result`）、`writeSSEEventFrame`（`id:` 仅在持久化 seq 时下发）、`summarizeRuntimeEventProvenanceIfBearing`（provenance 条件化 + 零值省略）。回归护栏：`trajectory_write_amplification_test.go`（合成回合 wire=15,471B/17 帧 → 落盘 4,495B/3 行，行 −82% / 字节 −71%，门槛 ≥50% / ≥45%）、`session_runtime_event_view_test.go`、`trajectory_events_test.go`（wire-only 帧不带 seq/id）、`export-dedup.test.ts`（新旧导出差异清单）。单会话复算（保留 `tool_end` 口径）：行 −49.9%（2,302 → 1,153）、字节 −40.6%（2.64MB → 1.57MB）。存量数据按前置条件 1 选项 (a) 保留不动；导出差异已固化（新导出不再含 chunk/reasoning/observation 行与 `done.result`，如需导出保留助手正文须独立 PR 纳入 bus 侧内容事件）。
+> **实施状态（2026-09-16，已提交：`b24f4bfc`，前置契约 `303d56bd`）**：写入侧四项已实现——`chatSSEFrameIsWireOnly`（chunk/reasoning/同源 observation 只走 wire）、`trimChatSSEEventPayloadForStore`（`done` 落盘裁 `result`）、`writeSSEEventFrame`（`id:` 仅在持久化 seq 时下发）、`summarizeRuntimeEventProvenanceIfBearing`（provenance 条件化 + 零值省略）。回归护栏：`trajectory_write_amplification_test.go`（合成回合 wire=15,471B/17 帧 → 落盘 4,495B/3 行，行 −82% / 字节 −71%，门槛 ≥50% / ≥45%）、`session_runtime_event_view_test.go`、`trajectory_events_test.go`（wire-only 帧不带 seq/id）、`export-dedup.test.ts`（新旧导出差异清单）。单会话复算（保留 `tool_end` 口径）：行 −49.9%（2,302 → 1,153）、字节 −40.6%（2.64MB → 1.57MB）。存量数据按前置条件 1 选项 (a) 保留不动；导出差异已固化（新导出不再含 chunk/reasoning/observation 行与 `done.result`，如需导出保留助手正文须独立 PR 纳入 bus 侧内容事件）。
 
 **风险与配套**：轨迹内容帧判据 `isTrajectoryContentEvent`（`frontend/src/lib/trajectory/recovery.ts:134-136`）= `chat.sse.*` ∪ `ASSISTANT_RUNTIME_EVENT_TYPES`，而后者已包含 `assistant_delta`/`assistant_reasoning`/`assistant.reasoning`（`recovery.ts:77-83`），因此**「会话是否有内容帧」的判定不受去重影响**。真正需要验证的是轨迹重放对 bus 侧增量事件的投影路径（turn 归属、reasoning 分块、与终稿的顺序）是否与 `chat.sse.*` 等价——用 `history-fallback.test.ts`（`:75-82` 已覆盖内容帧判定）与 `trajectory-recovery` 用例锁住。
 
@@ -246,6 +246,14 @@ chat.sse.reasoning    seq=93642  len=289  {"content":".","index":29602,"metadata
 | 代码生成（`go generate` 或 `make contract`） | 由注册表生成 `frontend/src/types/runtime/event-contract.ts`：类型联合 + 通道表；前端 `trajectory/recovery.ts:95`、`deltas.getRuntimeDeltaKind`、`thread-state/events.ts` 改为引用生成物 |
 | `backend/internal/agent/tool_runtime_events_test.go` | 生产者契约测试：对每类带结构化输出的工具，断言 envelope 结构字段必须出现在 `protocol_result`（把 `todo_snapshot` 这类 bug 挡在 CI） |
 
+> **实施状态（2026-09-16，代码已落地，未提交）**：
+> - 注册表与门禁：`backend/internal/events/contract.go`（通道位集合 + `ProvenanceBearing`）、`contract_test.go`（注册表 ↔ `runtimeobserve` 已知类型目录双向一致，新增未登记即失败）；`api/skills` 侧四个判定（落盘 / live-only / `DeliveryChannelsFor` / 尾巴）全部改为从注册表派生。
+> - 代码生成：`backend/cmd/contractgen` 生成 `frontend/src/types/runtime/event-contract.ts`（类型联合 + 通道表 + provenance 类型表 + 帧前缀常量，`-check` 供校验）；Makefile 增 `contract` / `contract-check` 目标。仓库无测试类 CI job（`.github/workflows` 仅 aicli 构建/发布），防漂移校验随 `make test` 跑到（`cmd/contractgen` 的 `TestGeneratedFileIsUpToDate` 逐字节比对生成物）。
+> - 前端消费点已改为引用生成物：`lib/trajectory/recovery.ts`（两份白名单改为派生 + `CHAT_SSE_EVENT_PREFIX` 同源）、`lib/thread-state/deltas.ts`（`getRuntimeDeltaKind` 家族派生 + 帧名前缀 `chatSseFrame`）、`lib/thread-state/events.ts`（图片占位判定走同一分类器）；`lib/thread-state/events-live.ts` 的帧名前缀同源。
+> - 前端门禁新增 `frontend/src/types/runtime/event-contract.test.ts`：每个落盘类型必须被**恰好一条**消费路径接住（未接住 = P0-1 的「静默丢弃」，多路径命中 = P0-2 的双渲染），并锁「派生名单与收敛前字面量等价」。
+> - 验证：`go test ./internal/events/ ./cmd/contractgen/`、`go run ./cmd/contractgen -check`、`npx tsc -p tsconfig.app.json --noEmit`、`npx vitest run`（273 文件 / 2169 用例）、`eslint`、`verify-max-lines` 全绿。
+> - **未做**：注册表的 `viewFields` 维度（当前只有通道 + provenance）——它是「生产者视角字段白名单」的落点，需按类型逐个确定投影字段，留待后续批次；`todo_snapshot` 缺陷已由 `tool_runtime_events.go` 的读取修复 + 生产者契约测试覆盖，不依赖该维度。
+
 ### Batch 3 · 传输增强
 
 | 落点 | 内容 | 对齐参考 |
@@ -256,6 +264,16 @@ chat.sse.reasoning    seq=93642  len=289  {"content":".","index":29602,"metadata
 | `session_runtime_stream.go:41-49` | 支持 `tail=N`（只发最后 N 条，配 `after` 互斥语义） | 现有 `after`/`poll_ms` 风格 |
 | `runtime_event_delivery.go` | 连接级指标并入快照：`active_connections`、`frames_sent`、`bytes_sent`、`dump_duration_ms`、`dump_pages`、`dropped_live`、`retry_count` | 既有 `/runtime/status` 键，不新增端点 |
 
+> **实施状态（2026-09-16，代码已落地并带回归护栏，未提交）**：
+> - 开关矩阵（均**按连接可配**，缺省即旧路径/旧值）：`coalesce=1` 合帧（默认关）、`latest_wins=1` B 通道归并（默认关）、`tail=N` 尾窗（默认关；与 `after` 互斥，同时给出 → 400）、`keepalive_ms`（100ms~5min，默认 15s 不变）、`retry_ms`（100ms~60s，默认不发）、`flush_ms`（1ms~500ms）。**唯一默认生效的是 `flush_ms=50ms` 出站合并窗口**（§7「建议 4」的背压/ttfB 修复），显式 `flush_ms=0` 回到「写即 flush」旧行为——合并窗口的回滚面就是这个参数。
+> - 合帧（`session_runtime_stream_coalesce.go`）：同类型 + 同 turn + **连续 seq** 才折叠；折叠窗口与单页查询同界（不跨页，内存与编码成本有界）；合并帧带 `coalesced_from`（区间下界）/`coalesced_count`，`payload.seq` 保持区间末行 → 客户端游标不变量不变；`mode=replace` 的正文按替换（而非累加）合并，行数照计。
+> - latest-wins（`session_runtime_stream_live_queue.go`）：按 `tool_call_id`/`agent` 等键归并保留最新值并累积 `coalesced_count`；键数超限的**真实丢弃**不再静默——keepalive 注释帧按增量回传（`: keepalive merged=N drops=N drops_total=N`）+ 指标 `dropped_live` 双通道可观测。
+> - `retry:` 与重试指标：`retry_count` = 本连接下发的重连建议次数（`retry:` 提示帧 + 存储层退避的注释帧留痕）；`retry:` 提示帧走 `FlushNow` 立刻出站，不被合并窗口推迟。解析器兼容性（静默忽略 `id:`/`retry:`/注释帧）由 `frontend/src/api/runtime/sse.test.ts` 锁定。
+> - 连接级指标：并入既有 `runtime_event_delivery` 快照的 `stream` 子对象（不新增端点、只增不改）：`active_connections`、`frames_sent`、`bytes_sent`、`dump_duration_ms`、`dump_pages`、`coalesced_frames`、`coalesced_rows`、`dropped_live`、`retry_count`。
+> - 回归护栏与验证：`session_runtime_stream_batch3_test.go`（合帧/替换语义/间隔与分段不误合/latest-wins 归并与超限丢弃可观测/tail+coalesce+retry 端到端/参数校验 400 矩阵）、`session_runtime_stream_flush_test.go`（出站合并窗口与 `flush_ms=0` 回退）、`runtime_event_delivery_test.go`（`stream` 子对象键集、连接计数回落、JSON 可序列化）。`go test ./internal/api/skills/ -count=1`、`go vet`、`go build ./...` 全绿。
+> - 计数口径修正（本轮落地时发现并修掉）：合帧曾按「每次折叠 = 1 帧」上报，三行折一帧会被算成两帧 → 改为一次上报「合并组数 + 吸收行数」（压缩比 = (rows+groups)/groups）；`retry:` 提示帧原本漏计 `retry_count`（已补）。
+> - **未做**：§7 首屏 ttfB 基线（需长会话真机采样）未补测；§8-4「`tail=N` 取代前端窗口拉取」未开工（当前并存）。
+
 ### Batch 4 · 体验收口
 
 | 落点 | 内容 |
@@ -263,6 +281,13 @@ chat.sse.reasoning    seq=93642  len=289  {"content":".","index":29602,"metadata
 | `session_runtime_stream.go` + `buildSessionRuntimeEventView` | 回放帧标记 `replay: true`（初始 dump 与断点补齐的帧），实时帧不带；前端可据此替代 `isResponding` 猜测 |
 | 同上 | 断点续传起始帧：`: resumed from=N to=M`（含跨窗口跨度） |
 | `handler.go`（emitter） | 收敛为单一 session 级 seq：`persist` 不可用时不再回退连接内计数器，改为该帧不带 `id:`/`sequence`；`chat.sse.*` 与 runtime stream 共用 EventStore seq |
+
+> **实施状态（2026-09-16，代码已落地，未提交）**：
+> - 回放标记：store 侧帧（初始 dump 与断点补齐）一律 `replay: true`；总线直投的实时帧 `live: true`，两者互斥（`buildSessionRuntimeReplayEventView` / `buildSessionRuntimeLiveEventView`）。前端可据此区分「历史补齐」与「刚刚发生」，不必再用 `isResponding` 猜；**前端消费本轮未改**（`payload.seq` 优先的现状不变，属可选增强）。
+> - 续传起始帧：`: resumed from=N to=M`，`from = 客户端游标 + 1`、`to = 补齐后的最高 seq`（含跨页跨度）；只在带游标且确实补到新行时下发。
+> - 游标单一真源：`persist` 可用时 `id:` 与 `_event.sequence` 都取 EventStore seq（同一 session 内 `MAX(seq)+1`，chat.sse.* 与总线事件共用该 seq 空间）；**写失败时整帧不带 `id:` 也不带 `_event.sequence`**——连接内计数器与持久化 seq 不同空间，混进游标位会被前端轨迹 reducer 的 `eventSeqOf`（0 = 降级按到达序）当成真实 seq 做幂等去重，把降级帧误判为重复丢弃（宁缺勿假，同 P0-3）。未启用 `persist` 的 SSE 端点（如 runtime stream 自身）没有存储游标语义，连接内计数保持原样供到达序排序。
+> - 回归护栏与验证：`session_runtime_stream_batch4_test.go`（`after=2` 补齐 3 帧全带 `replay:true` 且与 `live:true` 互斥、`: resumed from=3 to=5` 边界）、`trajectory_events_test.go` 的 `TestTrajectoryEmitterPersistsAndAlignsSeq` / `TestTrajectoryEmitterDegradesOnAppendFailure`（持久化帧 seq/id 对齐；失败帧 seq/id 均为 0 且 `_event` 信封完整）。`go test ./internal/api/skills/ -count=1`、`go vet`、`go build ./...` 全绿。
+> - **未做**：跨进程/多副本部署下的 seq 单一语义不在本轮范围（当前 SQLite 单写者 + 每会话 `MAX(seq)+1`，无跨副本诉求）。
 
 ---
 
@@ -307,8 +332,8 @@ chat.sse.reasoning    seq=93642  len=289  {"content":".","index":29602,"metadata
 
 | 层 | 用例 | 覆盖 |
 |---|---|---|
-| Go 单测 | `session_runtime_stream_test.go`（新增合帧/`tail=N`/`retry:`/latest-wins 丢弃计数） | Batch 3 |
-| Go 单测 | `runtime_event_delivery_test.go`（新增连接级指标） | Batch 3 |
+| Go 单测 | 合帧/`tail=N`/`retry:`/latest-wins 丢弃计数——**已落地**：`session_runtime_stream_batch3_test.go`（另加 `session_runtime_stream_flush_test.go` 锁出站合并窗口） | Batch 3 |
+| Go 单测 | 连接级指标（`runtime_event_delivery.stream` 键集/计数回落/JSON 可序列化）——**已落地**：`runtime_event_delivery_test.go::TestRuntimeEventDeliverySnapshotCarriesStreamMetrics` | Batch 3 |
 | Go 门禁 | `events/contract_test.go`（注册表 ↔ 已知类型目录双向一致） | Batch 2 |
 | Go 契约 | `tool_runtime_events_test.go`（结构化字段必须进 `protocol_result`） | Batch 2 |
 | Go 集成 | 写放大基线：同一 mock 回合（833 增量 + 87 工具）落盘行数断言下降 ≥50%、字节断言下降 ≥45%（复算见 §4 Batch 1 预估）——**已落地**：`trajectory_write_amplification_test.go` | Batch 1 |
@@ -325,15 +350,15 @@ chat.sse.reasoning    seq=93642  len=289  {"content":".","index":29602,"metadata
 
 1. **回放唯一真源选哪边**：保留 bus 侧 `assistant_delta`/`assistant.reasoning`（语义稳定、有 turn 归属），还是保留 `chat.sse.*`（贴近 wire 形状、前端已有解析）？本文倾向前者。
 2. **`observation` 与 `tool_end` 谁落盘**：若未来需要「观测级」增量重放，`observation` 更完整；若只服务 UI 工具行，`tool_end` 足够。
-3. **emitter 本地 sequence 是否需要兼容期**：外部消费者是否依赖 `_event.sequence` 的连续性？**取证（2026-09-16）**：`pkg/skillsapi/client.go` 仅定义 `StreamEnvelopeMeta.Sequence` 字段、全仓未见读取点 → 降级为低风险；切换为单一 session seq（Batch 4）前再全仓确认一次即可。
+3. **emitter 本地 sequence 是否需要兼容期**：外部消费者是否依赖 `_event.sequence` 的连续性？**取证（2026-09-16）**：`pkg/skillsapi/client.go` 仅定义 `StreamEnvelopeMeta.Sequence` 字段、全仓未见读取点 → 降级为低风险。**已收口（同年第二轮全仓复核 + Batch 4 落地）**：Go 侧无 `EventMeta.Sequence` 读取点；前端唯一消费点是轨迹 reducer 的 `eventSeqOf`（缺字段与 0 同义 = 降级按到达序，用作排序与幂等去重）。因此「写失败即不带 `_event.sequence`/`id:`」是**修缺陷**而非破坏兼容：带连接内计数的降级帧会被 `duplicateSeq` 去重路径当成真实 seq，与持久化帧撞号而误丢。
 4. **`tail=N` 与 tail-first 窗口是否合并**：前端已有窗口机制，服务端加 `tail=N` 后可考虑下线前端窗口拉取，减少一次全量分页。
-5. **`schema_version` 策略**：Batch 1 不升版（未改字段语义，仅减少冗余行）；Batch 3 合帧新增 `coalesced_from` 等字段时升 `skill_runtime.sse.v2`，并保留 v1 兼容期。
-6. **代码生成管线落点**：Makefile 当前无 `generate`/`contract` 目标、`package.json` 无 codegen 脚本 → Batch 2 需新增目标 + CI 校验（防生成物与注册表漂移）。
-7. **附录 A 脚本落点**：`.tmp/sse-live-audit.py` 位于 gitignored 目录、仓库内不可复跑 → 移入 `scripts/` 并提交（见附录 A 注）。
+5. **`schema_version` 策略**：Batch 1 不升版（未改字段语义，仅减少冗余行）；Batch 3 合帧新增 `coalesced_from` 等字段时升 `skill_runtime.sse.v2`，并保留 v1 兼容期。**已决议（2026-09-16，不升版）**：合帧（`coalesced_*`）与回放标记（`replay`）都是 `/runtime/stream` 的 `runtime_event` **帧内 payload 的可选新增字段**，SSE 信封（`_event` 结构 + `skill_runtime.sse.v1` 语义）未变；而信封版本是**跨端点共享**的（`/api/agent/chat` 亦为 v1，其 v1 断言已被 `handler_test.go` 锁定），全局升 v2 会把无关端点的契约一起改动。前端对新增字段按「有则展示」容错（如 `coalesced_count`），无需硬版本门；信封结构真正变更时再升版。
+6. **代码生成管线落点**：**已收口（2026-09-16）**——Makefile 新增 `contract`（生成）/ `contract-check`（校验，不一致退出码 1）目标；`package.json` 无需 codegen 脚本（生成物是前端类型，但由 Go 侧注册表驱动）。仓库无测试类 CI job，防漂移靠 `make contract-check` 与 `make test` 内的 `cmd/contractgen` 用例（二者等价）。
+7. **附录 A 脚本落点**：**已收口（2026-09-16）**——移入 `scripts/analyze-sse-live-audit.py`（保留 `--db` 参数与 `mode=ro` 只读模式，新增 `--session` / `--top-sessions` / `--global-limit`）；复跑复现 §2.2 的 2,302 行 / 2,642,069 字节（见附录 A 注）。
 8. **可选增强是否纳入**：HTTP 压缩（gzip/br）、订阅类型过滤、dump 序列化缓存；建议 Batch 3 后按实测收益评估，不阻塞主干。
 9. **导出是否保留助手正文**：去重后 JSONL 只含 `chat.sse.*`（`tool_end`/`result`/`done`），`chunk`/`reasoning` 行与 `done.result` 不再出现（差异清单见 `lib/trajectory/export-dedup.test.ts`）。若要求导出文件与轨迹视图同样保留正文，需在 export 侧纳入 bus 侧 `assistant_delta`/`assistant.reasoning`（或改为导出轨迹投影），独立 PR 评估。
 
-> 状态：1–2 已随 PR-1 按本文倾向落地（回放唯一真源取 bus 侧 `assistant_delta`/`assistant.reasoning`；`tool_end` 落盘、同源 `observation` 只走 wire）；3–9 随对应批次开工前给出结论。
+> 状态：1–2 已随 PR-1 按本文倾向落地（回放唯一真源取 bus 侧 `assistant_delta`/`assistant.reasoning`；`tool_end` 落盘、同源 `observation` 只走 wire）；6–7 已随 Batch 2 收口（`make contract`/`contract-check`、`scripts/analyze-sse-live-audit.py`）；3 已随 Batch 4 收口（全仓复核无 Go 侧读取点，前端 `eventSeqOf` 缺字段=降级按到达序）；5 已决议不升版（新增字段全在帧内 payload，信封语义未变）；4、8–9 待对应批次/独立 PR 启动前给出结论。
 
 ---
 
@@ -389,9 +414,9 @@ chat.sse.reasoning    seq=93642  len=289  {"content":".","index":29602,"metadata
 
 ## 附录 A · 取证方法（可复现）
 
-脚本：`.tmp/sse-live-audit.py`（只读，`mode=ro` 打开 `backend/data/runtime/session_runtime.sqlite`）。
+脚本：`scripts/analyze-sse-live-audit.py`（只读，`mode=ro` 打开 `backend/data/runtime/session_runtime.sqlite`；`--db` 可指向任意副本，`--session` 指定样本会话）。
 
-> **落点待办（可复现性）**：`.tmp/` 被 `.gitignore:68` 忽略，仓库内无法复跑 → 建议移入 `scripts/`（沿用现有 `analyze-*.mjs`/`analyze-*.ps1` 先例）并随文档提交；迁移时保留 `--db` 参数与只读模式。
+> **落点（已收口，2026-09-16）**：原 `.tmp/sse-live-audit.py` 位于 `.gitignore:68` 忽略的目录、仓库内无法复跑，已移入 `scripts/`（沿用现有 `analyze-*.mjs`/`analyze-*.ps1` 先例）；迁移时保留 `--db` 参数与只读模式。复跑校验：Top 会话 `session_20260916133052_DktyYFb3` 仍为 2,302 行 / 2,642,069 字节，与 §2.2 逐字节一致。
 
 ```sql
 -- 按会话排行

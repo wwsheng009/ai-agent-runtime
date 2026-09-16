@@ -1,10 +1,10 @@
 package skills
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,8 +14,6 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
-	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
 )
 
 // StreamSessionRuntimeEvents streams runtime events for a session via SSE.
@@ -47,12 +45,72 @@ func (h *Handler) StreamSessionRuntimeEvents(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	}
+	// Batch 4：记住客户端给的续传起点 —— afterSeq 会被 sendEvents 推着往前走，
+	// 只有这里还能拿到原始游标，dump 结束后据此下发 `: resumed from=… to=…`。
+	resumedAfterSeq := afterSeq
 
 	pollInterval := 500 * time.Millisecond
 	if raw := strings.TrimSpace(r.URL.Query().Get("poll_ms")); raw != "" {
 		if parsed, err := time.ParseDuration(raw + "ms"); err == nil && parsed > 0 {
 			pollInterval = parsed
 		}
+	}
+
+	// Batch 3 传输增强（方案 §4/§6）：合帧与 latest-wins 都是**按连接可配**的
+	// 灰度开关，默认关（缺省即旧路径，回滚面 = 不传参数）。
+	coalesceDeltas := parseTruthyQueryFlag(r.URL.Query().Get("coalesce"))
+	latestWins := parseTruthyQueryFlag(r.URL.Query().Get("latest_wins"))
+
+	tailLimit := 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("tail")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || parsed > streamTailMax {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid tail value"))
+			return
+		}
+		tailLimit = parsed
+	}
+	if tailLimit > 0 && afterSeq > 0 {
+		// 尾部窗口与增量游标是两种互斥的起始语义：同时给出无法判断「从 after
+		// 续传」还是「只看最后 N 条」，宁可显式报错也不静默偏向一边。
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "tail and after are mutually exclusive"))
+		return
+	}
+
+	keepaliveInterval := streamKeepaliveInterval
+	if raw := strings.TrimSpace(r.URL.Query().Get("keepalive_ms")); raw != "" {
+		parsed, err := time.ParseDuration(raw + "ms")
+		if err != nil || parsed < streamKeepaliveMin || parsed > streamKeepaliveMax {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid keepalive_ms value"))
+			return
+		}
+		keepaliveInterval = parsed
+	}
+
+	retryHint := time.Duration(0)
+	if raw := strings.TrimSpace(r.URL.Query().Get("retry_ms")); raw != "" {
+		parsed, err := time.ParseDuration(raw + "ms")
+		if err != nil || parsed < streamRetryHintMin || parsed > streamRetryHintMax {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid retry_ms value"))
+			return
+		}
+		retryHint = parsed
+	}
+
+	// 建议 4（服务端 flush 背压）：flush_ms 是本连接的出站合并窗口。
+	//
+	// 默认 50ms：稳态下 provider 按 token 回调（实测 400+ 帧/s），逐帧 flush 会把
+	// 一条普通回复放大成数百次 socket 写；合并窗口把出站压到 ≤20 次/s，而帧内容、
+	// 顺序、游标都不变（只改「什么时候把攒好的字节推出去」）。显式传 0 退回旧行为
+	// （每次 Flush 立即出站），这就是灰度/回滚面。
+	flushInterval := streamFlushTickInterval
+	if raw := strings.TrimSpace(r.URL.Query().Get("flush_ms")); raw != "" {
+		parsed, err := time.ParseDuration(raw + "ms")
+		if err != nil || parsed < streamFlushTickMin || parsed > streamFlushTickMax {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid flush_ms value"))
+			return
+		}
+		flushInterval = parsed
 	}
 
 	includeLive := parseTruthyQueryFlag(r.URL.Query().Get("live")) ||
@@ -67,20 +125,20 @@ func (h *Handler) StreamSessionRuntimeEvents(w http.ResponseWriter, r *http.Requ
 	// 这正是本文件此前的回归：只调 bufio.Flush 时，`: open` 与 `: keepalive`
 	// 都滞留在 net/http 内部缓冲里，客户端要等到 2KB 攒满或 handler 返回才收到
 	// 任何字节，表现为 ttfB 数十秒、代理 idle timeout 掐断、前端持续重连。
-	buffered := bufio.NewWriterSize(w, streamWriteBufferSize)
-	sseWriter := bufferedSSEWriter{ResponseWriter: w, buf: buffered}
-	// flushSSE 必须做两级 flush，缺一不可：
-	//   1) buffered.Flush() 把 SSE 帧从 16KB bufio 缓冲写进 http.ResponseWriter；
-	//   2) http.Flusher.Flush() 把 net/http 的 2048B 响应缓冲推到 socket。
-	// 只做 (1) 时数据仍停在 response.w 里，对客户端等价于「什么都没发出去」。
+	// bytes_sent 口径：在 bufio 与 net/http 之间加一层计数 writer，统计真正写进
+	// 响应体的字节（Batch 3 连接级指标，见 session_runtime_stream_metrics.go）。
+	// 建议 4 起「码帧」与「出站时刻」解耦：帧照旧进 bufio，flush 由
+	// pacedFlushWriter 按 tick 合并（flush_ms 可配，0 = 旧行为「写即 flush」）。
+	// 计数层刻意不实现 http.Flusher，所以这里把原始 w 的 Flusher 显式传进去 ——
+	// 否则 pacedFlushWriter 只能推 bufio、推不动 net/http 的响应缓冲，静默退化成
+	// 「什么都没发出去」（见 flushLocked 的两级 flush 注释）。
+	flushTarget, _ := w.(http.Flusher)
+	paced := newPacedFlushWriter(streamCountingResponseWriter{ResponseWriter: w}, flushTarget, streamWriteBufferSize, flushInterval)
+	defer func() { _ = paced.Close() }()
+	sseWriter := http.ResponseWriter(paced)
 	flushSSE := func() error {
-		if err := buffered.Flush(); err != nil {
-			return err
-		}
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
-		}
-		return nil
+		paced.Flush()
+		return paced.Err()
 	}
 	emitter := newSSEEmitter(sseWriter)
 
@@ -102,6 +160,22 @@ func (h *Handler) StreamSessionRuntimeEvents(w http.ResponseWriter, r *http.Requ
 	if err := flushSSE(); err != nil {
 		return
 	}
+	// SSE 规范的重连退避提示帧（毫秒）。默认不发（Batch 3 灰度约定），仅当连接
+	// 显式带 retry_ms 时下发；既有解析器对 `retry:` 行静默忽略 —— 兼容性由
+	// frontend/src/api/runtime/sse.test.ts 的「忽略 id:/retry: 行」用例锁定。
+	if retryHint > 0 {
+		writeSSERetry(sseWriter, retryHint)
+		// retry_count 口径 = 本连接下发的重连建议次数（含存储层退避的注释帧留痕，
+		// 见 queryPage 失败分支）；`retry:` 提示帧同样计入，否则指标只反映故障、
+		// 不反映握手期的正常提示。
+		recordRuntimeEventStreamRetry()
+		// 握手期的提示帧必须立刻可见（不能被合并窗口推迟），显式强制出站。
+		if err := paced.FlushNow(); err != nil {
+			return
+		}
+	}
+	runtimeEventStreamConnectionOpened()
+	defer runtimeEventStreamConnectionClosed()
 
 	ctx := r.Context()
 	var eventWake <-chan runtimeevents.Event
@@ -123,55 +197,63 @@ func (h *Handler) StreamSessionRuntimeEvents(w http.ResponseWriter, r *http.Requ
 	// 「有没有事件」来判断在线。间隔与 aicli web 事件流
 	//（chatWebEventKeepaliveInterval）同口径，不跟随 poll_ms —— poll_ms 只决定
 	// 兜底拉取频率，不该决定注释帧频率。
-	keepalive := time.NewTicker(streamKeepaliveInterval)
+	keepalive := time.NewTicker(keepaliveInterval)
 	defer keepalive.Stop()
 
 	var liveCh <-chan runtimeevents.Event
+	var liveQueue *streamLiveQueue
 	var unsubLive func()
 	if includeLive {
-		liveCh, unsubLive = h.subscribeSessionLiveRuntimeEvents(sessionID)
+		liveCh, liveQueue, unsubLive = h.subscribeSessionLiveRuntimeEvents(sessionID, latestWins)
 		if unsubLive != nil {
 			defer unsubLive()
 		}
 	}
 
 	sendEvents := func(events []runtimeevents.Event) {
-		for _, event := range events {
-			emitter.Emit("runtime_event", buildSessionRuntimeEventView(event))
+		// Batch 3：按页合帧（页边界不跨页折叠——折叠窗口与单页查询结果同界，
+		// 内存与编码成本保持有界）。合并帧自带 coalesced_from/coalesced_count，
+		// payload["seq"] 保持区间末行，客户端游标不变量成立。
+		for _, event := range coalesceRuntimeEventPage(events, coalesceDeltas) {
+			recordRuntimeEventStreamFrame()
+			// Batch 4：store 侧帧（初始 dump / 断点补齐）一律标记 replay:true，
+			// 实时帧走 buildSessionRuntimeLiveEventView（live:true），两者互斥。
+			emitter.Emit("runtime_event", buildSessionRuntimeReplayEventView(event))
 			if seq, ok := runtimeEventSeq(event); ok && seq > afterSeq {
 				afterSeq = seq
 			}
 		}
 	}
 
-	// drainEvents 按页拉取并写出，直到没有新事件。
-	// 分页（streamEventPageSize）取代了原来的「一次不限量查询」：
-	//   - 服务端内存与单次查询结果有界（不再把整份事件日志一次性读进内存）；
-	//   - 每页结束 flush 一次 ⇒ 客户端渐进渲染，首屏不再等整份 dump 编码完；
-	//   - flush 出错（客户端提前断开）立即返回，及时释放 watch/ticker/连接。
-	// 返回 false 表示连接已不可用（客户端断开或 flush 失败），调用方应结束 handler。
+	// drain / tail 共用分页读：streamEventPageSize 取代了原来的「一次不限量
+	// 查询」——服务端内存与单次查询结果有界，每页结束 flush 一次让客户端渐进
+	// 渲染，flush 出错（客户端提前断开）立即返回，及时释放 watch/ticker/连接。
 	//
 	// 存储层的瞬时错误不再终止流。此前任何一次 ListEvents 报错都会写一个 error
 	// 帧后 return：客户端立刻重连，重连本身又加剧 SQLite 争用（写事务持有唯一
 	// 连接，见 chat.SessionRuntimeStore），形成「超时 → 断开 → 重连 → 更慢」的
 	// 正反馈。现在改为注释帧留痕 + 指数退避 + 重新解析 store（热重载会关闭旧
 	// store 实例，旧指针只会持续报错），只要连接还在就继续重试。
+	//
+	// 单次查询限时：SQLite 侧只有一条连接（SetMaxOpenConns(1)），写事务持锁
+	// 期间读会排队；driver 的 busy_timeout 不响应 Go ctx 取消，但 database/sql
+	// 在等待空闲连接时是可取消的。限时保证即使存储层长时间无响应，handler 也能
+	// 回到循环、继续给客户端发存活字节。
 	consecutiveFailures := 0
 	retryBackoff := streamRetryInitialBackoff
-	drainEvents := func() bool {
+	// queryPage 拉取单页；ok=false 表示连接已不可用（ctx 结束或注释帧 flush 失败）。
+	queryPage := func(cursor int64) ([]runtimeevents.Event, bool) {
 		for {
-			// 单次查询限时：SQLite 侧只有一条连接（SetMaxOpenConns(1)），写事务
-			// 持锁期间读会排队；driver 的 busy_timeout 不响应 Go ctx 取消，
-			// 但 database/sql 在等待空闲连接时是可取消的。限时保证即使存储层
-			// 长时间无响应，handler 也能回到循环、继续给客户端发存活字节。
 			queryCtx, cancelQuery := context.WithTimeout(ctx, streamQueryTimeout)
-			events, err := store.ListEvents(queryCtx, sessionID, afterSeq, streamEventPageSize)
+			started := time.Now()
+			events, err := store.ListEvents(queryCtx, sessionID, cursor, streamEventPageSize)
 			cancelQuery()
 			if err != nil {
 				if ctx.Err() != nil {
-					return false
+					return nil, false
 				}
 				consecutiveFailures++
+				recordRuntimeEventStreamRetry()
 				// 用注释帧（`:` 前缀）而非新增 event 类型上报降级：所有 SSE 客户端
 				// 都按规范忽略注释帧，不会把可恢复的重试误判为致命错误；同时在
 				// DevTools 的 EventStream 面板与代理日志里留下可观测痕迹。
@@ -180,17 +262,14 @@ func (h *Handler) StreamSessionRuntimeEvents(w http.ResponseWriter, r *http.Requ
 					consecutiveFailures, sanitizeSSEComment(err.Error()),
 				))
 				if flushErr := flushSSE(); flushErr != nil {
-					return false
+					return nil, false
 				}
-				// 热重载（refreshSessionRuntimeStore → closeRuntimeStore）会关闭
-				// 本 handler 捕获的 store 指针；重新解析一次即可自愈，避免对着
-				// 一个已经关闭的 store 无休止重试。
 				if fresh := h.getSessionEventStore(); fresh != nil {
 					store = fresh
 				}
 				select {
 				case <-ctx.Done():
-					return false
+					return nil, false
 				case <-time.After(retryBackoff):
 				}
 				if retryBackoff < streamRetryMaxBackoff {
@@ -203,6 +282,18 @@ func (h *Handler) StreamSessionRuntimeEvents(w http.ResponseWriter, r *http.Requ
 			}
 			consecutiveFailures = 0
 			retryBackoff = streamRetryInitialBackoff
+			recordRuntimeEventStreamDump(time.Since(started), 1)
+			return events, true
+		}
+	}
+
+	// drainEvents 按页拉取并写出，直到没有新事件；返回 false 表示连接已不可用。
+	drainEvents := func() bool {
+		for {
+			events, ok := queryPage(afterSeq)
+			if !ok {
+				return false
+			}
 			if len(events) == 0 {
 				return true
 			}
@@ -216,9 +307,54 @@ func (h *Handler) StreamSessionRuntimeEvents(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	// Initial dump（按页全量补齐到最新 seq）。
-	if !drainEvents() {
+	// Batch 3：tail=N —— 首帧只回放最后 N 条（与 after 互斥，见入口校验）。
+	// 复用分页读 + 环形缓冲保留尾窗：内存 O(N)、下发字节 O(N)，读放大仍是
+	// 一次全量分页（存储层暂无逆序读接口，命中「只增不改」约定，见方案 §8-4）。
+	dumpTailEvents := func(limit int) bool {
+		ring := make([]runtimeevents.Event, 0, limit)
+		cursor := int64(0)
+		for {
+			events, ok := queryPage(cursor)
+			if !ok {
+				return false
+			}
+			if len(events) == 0 {
+				break
+			}
+			for _, event := range events {
+				if seq, hasSeq := runtimeEventSeq(event); hasSeq && seq > cursor {
+					cursor = seq
+				}
+				ring = append(ring, event)
+			}
+			if len(ring) > limit {
+				ring = append(ring[:0], ring[len(ring)-limit:]...)
+			}
+			if len(events) < streamEventPageSize {
+				break
+			}
+		}
+		sendEvents(ring)
+		return flushSSE() == nil
+	}
+
+	// Initial dump：tail 模式只发尾窗，否则按页全量补齐到最新 seq。
+	if tailLimit > 0 {
+		if !dumpTailEvents(tailLimit) {
+			return
+		}
+	} else if !drainEvents() {
 		return
+	}
+
+	// Batch 4 · 断点续传起始帧：只有「带游标续传且确实补到了新行」才下发。
+	// from 取客户端游标的下一行（含跨页/跨窗口的整段跨度），to 是补齐后的最高 seq，
+	// 因此客户端拿到它就等于拿到「已追平到哪里」，无需再靠 isResponding 猜。
+	if resumedAfterSeq > 0 && afterSeq > resumedAfterSeq {
+		writeSSEComment(sseWriter, fmt.Sprintf("resumed from=%d to=%d", resumedAfterSeq+1, afterSeq))
+		if err := flushSSE(); err != nil {
+			return
+		}
 	}
 
 	for {
@@ -230,6 +366,7 @@ func (h *Handler) StreamSessionRuntimeEvents(w http.ResponseWriter, r *http.Requ
 				liveCh = nil
 				continue
 			}
+			recordRuntimeEventStreamFrame()
 			emitter.Emit("runtime_event", buildSessionRuntimeLiveEventView(liveEvent))
 			if err := flushSSE(); err != nil {
 				return
@@ -243,7 +380,14 @@ func (h *Handler) StreamSessionRuntimeEvents(w http.ResponseWriter, r *http.Requ
 				return
 			}
 		case <-keepalive.C:
-			writeSSEComment(sseWriter, "keepalive")
+			// Batch 3：latest-wins 的合并/丢弃计数经注释帧增量回传——丢弃不再
+			// 静默（`drops`），且每次只报增量，空闲期不产生额外噪声。
+			comment := "keepalive"
+			if mergedDelta, droppedDelta, droppedTotal := liveQueue.statsSinceLastReport(); mergedDelta > 0 || droppedDelta > 0 {
+				comment = fmt.Sprintf("keepalive merged=%d drops=%d drops_total=%d",
+					mergedDelta, droppedDelta, droppedTotal)
+			}
+			writeSSEComment(sseWriter, comment)
 			if err := flushSSE(); err != nil {
 				return
 			}
@@ -254,9 +398,32 @@ func (h *Handler) StreamSessionRuntimeEvents(w http.ResponseWriter, r *http.Requ
 // streamKeepaliveInterval 是静默长连接上发送 SSE 注释帧（`: keepalive`）的周期。
 const streamKeepaliveInterval = 15 * time.Second
 
+// Batch 3 连接参数上界（查询参数属于外部输入，必须有界；也是灰度开关的护栏）。
+const (
+	// keepalive_ms：允许 100ms~5min（默认 15s 不变，测试用短周期验证注释帧）。
+	streamKeepaliveMin = 100 * time.Millisecond
+	streamKeepaliveMax = 5 * time.Minute
+	// retry_ms：SSE 规范 `retry:` 建议值，允许 100ms~60s。
+	streamRetryHintMin = 100 * time.Millisecond
+	streamRetryHintMax = 60 * time.Second
+	// tail=N：首帧只回放最后 N 条（上界防止一次请求拉走整个会话日志）。
+	streamTailMax = 5000
+)
+
 // streamWriteBufferSize 是 SSE 响应体的缓冲区大小：攒满即写出，兼顾首字节
 // 延迟（dump 立刻开始写，无需等整批）与 syscall 次数。
 const streamWriteBufferSize = 16 * 1024
+
+// 建议 4 的出站合并窗口（见 session_runtime_stream_flush.go 的 pacedFlushWriter）。
+const (
+	// streamFlushTickInterval 是默认合并窗口：稳态 400+ 帧/s 下把 flush 压到
+	// ≤20 次/s，而单帧迟滞不超过一个窗口 —— token 流场景不可感知。
+	streamFlushTickInterval = 50 * time.Millisecond
+	// flush_ms 的取值下界：0 表示关闭合并（旧行为「写即 flush」，显式回滚面）。
+	streamFlushTickMin = time.Duration(0)
+	// 上界 1s：再长就会让人误判「流卡住」，也失去渐进渲染的意义。
+	streamFlushTickMax = time.Second
+)
 
 // streamQueryTimeout 是单次 ListEvents 的最长等待。取 10s 而非更短：正常分页查询
 // 在毫秒级，只有唯一连接被写事务占住时才会触顶；而它必须明显小于代理的 idle
@@ -273,18 +440,6 @@ const (
 // streamEventPageSize 是 dump/兜底拉取的单页事件数上限：取代 limit=0 的不限量
 // 查询，保证服务端内存、单次查询耗时与客户端首包大小都有界。
 const streamEventPageSize = 500
-
-// bufferedSSEWriter 把 SSE 帧写进缓冲区，并刻意「不」暴露 http.Flusher：
-// writeSSEEventWithEnvelope / writeSSEComment 只有在 w 实现 http.Flusher 时才会
-// 逐帧 flush，这里让它落到缓冲，由调用方按批 flush。
-// 注意：嵌入 http.ResponseWriter 只提升接口自身的方法（Header/Write/WriteHeader），
-// Flush 不会被提升，因此 *不会* 意外满足 http.Flusher。
-type bufferedSSEWriter struct {
-	http.ResponseWriter
-	buf *bufio.Writer
-}
-
-func (b bufferedSSEWriter) Write(p []byte) (int, error) { return b.buf.Write(p) }
 
 // runtimeEventSeq 读取事件载荷里的 EventStore 持久化序号（ListEvents 会写入），
 // 用于推进游标；live-only 事件没有 seq，返回 false。
@@ -304,17 +459,27 @@ func runtimeEventSeq(event runtimeevents.Event) (int64, bool) {
 // never stalls tool execution. Only live-only types are forwarded (tool.progress
 // and the parent-side subagent.progress mirror); durable types continue via the
 // store path.
-func (h *Handler) subscribeSessionLiveRuntimeEvents(sessionID string) (<-chan runtimeevents.Event, func()) {
+//
+// Batch 3：latestWins=true 时改用 streamLiveQueue —— 同一合并键（tool_call_id /
+// agent）只保留最新值，慢消费者触发的是**合并**而不是丢弃；真正丢弃（键数超限）
+// 计入 live_dropped 并经 keepalive 注释帧回传。默认仍走原来的「满了就丢」路径。
+func (h *Handler) subscribeSessionLiveRuntimeEvents(sessionID string, latestWins bool) (<-chan runtimeevents.Event, *streamLiveQueue, func()) {
 	sessionID = strings.TrimSpace(sessionID)
 	if h == nil || sessionID == "" {
-		return nil, func() {}
+		return nil, nil, func() {}
 	}
 	bus := h.getRuntimeEventBus()
 	if bus == nil {
-		return nil, func() {}
+		return nil, nil, func() {}
 	}
 
-	ch := make(chan runtimeevents.Event, 64)
+	var ch chan runtimeevents.Event
+	var queue *streamLiveQueue
+	if latestWins {
+		queue = newStreamLiveQueue(streamLiveQueueKeyLimit)
+	} else {
+		ch = make(chan runtimeevents.Event, 64)
+	}
 	unsubscribes := make([]func(), 0, len(sessionLiveOnlyRuntimeEventTypes))
 	for _, eventType := range sessionLiveOnlyRuntimeEventTypes {
 		unsub := bus.SubscribeCancelable(eventType, func(event runtimeevents.Event) {
@@ -322,6 +487,13 @@ func (h *Handler) subscribeSessionLiveRuntimeEvents(sessionID string) (<-chan ru
 				return
 			}
 			if !isSessionLiveOnlyRuntimeEvent(event) {
+				return
+			}
+			if queue != nil {
+				// 入队即合并（同键 latest-wins）。转发量按「到达 B 通道」计，
+				// 合并后的实际帧数看 coalesced_count / 指标 coalesced_rows。
+				queue.publish(event)
+				recordRuntimeEventDeliveryLiveForwarded(event.Type)
 				return
 			}
 			select {
@@ -332,6 +504,9 @@ func (h *Handler) subscribeSessionLiveRuntimeEvents(sessionID string) (<-chan ru
 				recordRuntimeEventDeliveryLiveForwarded(event.Type)
 			default:
 				// Drop when the SSE consumer lags; progress is best-effort.
+				// Batch 3：丢弃不再静默——按类型计入 live_dropped，并经 keepalive
+				// 注释帧与 stream.dropped_live 指标回传（latest_wins=1 可避免丢弃）。
+				recordRuntimeEventDeliveryLiveDrop(event.Type)
 			}
 		})
 		if unsub != nil {
@@ -339,29 +514,29 @@ func (h *Handler) subscribeSessionLiveRuntimeEvents(sessionID string) (<-chan ru
 		}
 	}
 
-	return ch, func() {
+	cleanup := func() {
 		for _, unsub := range unsubscribes {
 			unsub()
 		}
+		queue.close()
 		// Do not close ch: handlers may still race after unsubscribe until Publish
 		// returns; GC reclaims the channel when the handler exits.
 	}
+	if queue != nil {
+		return queue.out, queue, cleanup
+	}
+	return ch, nil, cleanup
 }
 
 // sessionLiveOnlyRuntimeEventTypes are the bus types that are delivered straight
 // to live (live=1) SSE subscribers and are never persisted by that path.
-var sessionLiveOnlyRuntimeEventTypes = []string{
-	toolprotocol.EventTypeProgress,
-	supervision.EventTypeSubagentProgress,
-}
+//
+// 清单来自 internal/events 注册表的 B 通道（Batch 2 事件契约单一真源）；
+// 此处不再手写类型名，新增 live-only 类型改 contract.go。
+var sessionLiveOnlyRuntimeEventTypes = runtimeevents.LiveOnlyEventTypes()
 
 func isSessionLiveOnlyRuntimeEvent(event runtimeevents.Event) bool {
-	switch strings.TrimSpace(event.Type) {
-	case toolprotocol.EventTypeProgress, supervision.EventTypeSubagentProgress:
-		return true
-	default:
-		return false
-	}
+	return runtimeevents.IsLiveOnlyEventType(event.Type)
 }
 
 func buildSessionRuntimeLiveEventView(event runtimeevents.Event) map[string]interface{} {
@@ -408,6 +583,16 @@ func sanitizeSSEComment(raw string) string {
 
 func parseInt64(raw string) (int64, error) {
 	return strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+}
+
+// writeSSERetry 写一行 SSE 规范帧 `retry: <ms>`：告诉客户端断线后建议的重连
+// 退避时间。批次 3 默认不下发（见 StreamSessionRuntimeEvents 的 retry_ms 参数），
+// 因为它改变的是「客户端重连节奏」，属于需要灰度观察的行为。调用方负责 flush。
+func writeSSERetry(w io.Writer, delay time.Duration) {
+	if delay <= 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "retry: %d\n\n", delay.Milliseconds())
 }
 
 func asInt64(raw interface{}) (int64, bool) {

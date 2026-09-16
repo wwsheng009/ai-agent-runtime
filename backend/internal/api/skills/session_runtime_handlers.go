@@ -3,6 +3,7 @@ package skills
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"sort"
@@ -44,6 +45,9 @@ type sessionRuntimeCommandRequest struct {
 	RequestID            string                 `json:"request_id,omitempty"`
 	Allow                *bool                  `json:"allow,omitempty"`
 	PatchedArgs          json.RawMessage        `json:"patched_args,omitempty"`
+	// TurnID 可选：interrupt 命令据此做回合身份校验 —— 只有与当前在途回合
+	// 一致才取消（建议 3 契约）。空值表示「取消当前在途回合」，不做身份约束。
+	TurnID string `json:"turn_id,omitempty"`
 	QuestionID           string                 `json:"question_id,omitempty"`
 	Answer               string                 `json:"answer,omitempty"`
 	CheckpointID         string                 `json:"checkpoint_id,omitempty"`
@@ -811,12 +815,6 @@ func (h *Handler) ListSessionToolReceipts(w http.ResponseWriter, r *http.Request
 
 // SubmitSessionRuntimeCommand submits a session actor command.
 func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Request) {
-	hub := h.getSessionHub()
-	if hub == nil {
-		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "session hub not configured"))
-		return
-	}
-
 	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
 	if sessionID == "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session id is required"))
@@ -834,6 +832,38 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "command type is required"))
 		return
 	}
+
+	// 建议 3（后端 cancel 契约）：interrupt 先作用在「本进程在途回合」上。
+	//
+	// 为什么必须在 hub/actor 之前：
+	//   - web 直连回合（POST /api/agent/chat，resume_on_disconnect 的 detached
+	//     续传）根本不在 actor 里 —— 它只登记在 activeTurnRegistry，先查注册表才
+	//     能取消到真回合；
+	//   - GetOrCreate 会按需新建 durable actor（一次 stop 不该凭空建出 idle actor），
+	//     且它可能因会话租约被别的宿主持有而报冲突 —— 那种情况下本进程的在途回合
+	//     其实是可停的，不该因为拿不到 actor 就 503/409 拒掉停止请求。
+	if commandType == "interrupt" {
+		result := h.getActiveTurnRegistry().cancel(sessionID, strings.TrimSpace(req.TurnID), activeTurnCancelSourceUserInterrupt)
+		switch result.Reason {
+		case activeTurnCancelReasonTurnMismatch:
+			// 迟到的 stop 打到新回合上是最危险的误伤：拒绝，并回带当前在途回合，
+			// 让调用方自行决定是否重发（不要静默取消一个它没打算取消的回合）。
+			h.writeError(w, http.StatusConflict, errors.New(errors.ErrValidationFailed,
+				fmt.Sprintf("turn_id does not match the active turn (%s)", result.Turn.TurnID)))
+			return
+		case activeTurnCancelReasonCancelled, activeTurnCancelReasonAlreadyCancelled:
+			h.writeJSON(w, http.StatusOK, sessionTurnInterruptPayload(result, sessionTurnInterruptChannelActiveTurn))
+			return
+		}
+		// no_active_turn / not_cancelable → 落回下面的 durable actor 路径。
+	}
+
+	hub := h.getSessionHub()
+	if hub == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "session hub not configured"))
+		return
+	}
+
 	actor, err := hub.GetOrCreate(sessionID)
 	if err != nil {
 		if h.writeSessionLeaseConflict(w, err) {
@@ -938,10 +968,23 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 		}
 
 	case "interrupt":
+		// durable actor 路径：注册表没有可取消的 web 回合时的回退（aicli chat
+		// actor / 已建 actor 的会话）。cancelled 按取消前的运行态如实上报，
+		// 不把「本来就空闲」谎报成「已停止」。
+		cancelled := sessionActorRunActive(actor)
 		if err := actor.Interrupt(r.Context()); err != nil {
 			h.writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		reason := activeTurnCancelReasonNoActiveTurn
+		if cancelled {
+			reason = activeTurnCancelReasonCancelled
+		}
+		h.writeJSON(w, http.StatusOK, sessionTurnInterruptPayload(
+			activeTurnCancelResult{Cancelled: cancelled, Reason: reason},
+			sessionTurnInterruptChannelSessionActor,
+		))
+		return
 
 	case "rewind_to", "rewind":
 		checkpointID := strings.TrimSpace(req.CheckpointID)
@@ -983,6 +1026,61 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok": true,
 	})
+}
+
+// sessionTurnInterruptChannel* 标明 interrupt 命令实际作用在哪条执行通道上，
+// 便于前端/日志区分「真的停住了进程内在途回合」与「回退到 durable actor」。
+const (
+	sessionTurnInterruptChannelActiveTurn   = "active_turn"
+	sessionTurnInterruptChannelSessionActor = "session_actor"
+)
+
+// sessionTurnInterruptPayload 是 interrupt 命令的统一响应（建议 3 契约）。
+//
+// 字段语义（调用方据此决定下一步，而不是只看 HTTP 状态码）：
+//   - cancelled：本次调用是否真的触发了取消。重复 stop → false +
+//     reason=already_cancelled（同一回合已取消，仍属成功语义，不该报错）；
+//   - reason：cancelled / already_cancelled / no_active_turn / not_cancelable；
+//   - channel：取消作用在进程内在途回合还是 durable actor；
+//   - turn / turn_id / cancel_source：被取消回合的身份与取消来源；
+//     无在途回合时整组缺省，避免把「没有回合」编造成一个身份。
+func sessionTurnInterruptPayload(result activeTurnCancelResult, channel string) map[string]interface{} {
+	payload := map[string]interface{}{
+		"ok":        true,
+		"cancelled": result.Cancelled,
+		"reason":    string(result.Reason),
+		"channel":   channel,
+	}
+	turn := result.Turn
+	if strings.TrimSpace(turn.TurnID) != "" {
+		payload["turn_id"] = turn.TurnID
+		payload["turn"] = turn
+		if source := strings.TrimSpace(turn.CancelSource); source != "" {
+			payload["cancel_source"] = source
+		}
+	}
+	return payload
+}
+
+// sessionActorRunActive 判断 durable actor 此刻是否有在途运行。
+//
+// 等待审批/等待输入也算在途（两者都有活跃 run 与挂起的工具调用），Interrupt 会
+// 把它们一并收敛成 SessionStopped —— 因此必须计入 cancelled，否则「停止」明明
+// 停住了却报告 no_active_turn。
+func sessionActorRunActive(actor *chat.SessionActor) bool {
+	if actor == nil {
+		return false
+	}
+	state := actor.StateForInspection()
+	if state == nil {
+		return false
+	}
+	switch state.Status {
+	case chat.SessionRunning, chat.SessionWaitingApproval, chat.SessionWaitingInput:
+		return true
+	default:
+		return false
+	}
 }
 
 func submitSessionPrompt(actor *chat.SessionActor, requestCtx context.Context, prompt string, runMeta *team.RunMeta) (*agent.Result, *chat.RuntimeState, error, bool) {

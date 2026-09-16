@@ -268,13 +268,29 @@ assistant/step-interrupted      → 中断态
 全量 `npx vitest run` 200 文件 / 1519 用例通过；`npm run build` exit 0；e2e
 `workspace-chat.spec.ts` 9 passed（含 P1-3a/b/c 三条流式滚动所有权用例，直接覆盖本轮滚动改动）。
 
-**遗留红项（非本轮引入，归 `/runtime/stream` 游标批次）**：e2e `live-delta.spec.ts` 仍在
-「请求进行中显示增量前缀」一步失败（`element(s) not found`）。已做 A/B 对照：把本轮打字机的
-`active` 强制置 false 后重建 dist 重跑，**失败点与报错完全一致**，证明与本轮改动无关；
-机制是该 spec 的 route 对 `after > 0` 一律返回空流，而实时流建连已改为从「轨迹已回放到的
-最大 seq」续拉（`use-session-runtime-stream.ts` 的建连游标 + `use-trajectory-recovery.ts`
-尾部优先窗口），`after` 因此不再是 0，mock 不再吐出那条 `assistant_delta`。该 spec 的
-mock 契约需随游标语义更新（或改由 mock server 支持按 `after` 续播），与本轮文件无交集。
+**遗留红项已于 2026-09-16 收口（spec 侧修复；原归因保留在上文中）**：原判「非本轮引入」成立。
+机制有两重：① spec 的 route 对 `after > 0` 一律返回空流，而实时流建连按「轨迹已回放到的最大
+seq」续拉（`use-session-runtime-stream.ts` 建连游标 + `use-trajectory-recovery.ts` 尾部优先
+窗口）；② 客户端对**正常空流**按 2s 退避重连（`use-session-runtime-stream.ts` 退避分支），
+prompt 发出前若以空流回响，增量帧必然落在请求窗口之后。修复（`e2e/live-delta.spec.ts`）：
+① prompt 发出前的流请求**挂起不回应**、发出后放行；② 帧**只投递一次**且判据不再取 `after`
+（与建连游标语义解耦，投递成功后重连空流）；③ route 侧补写被拦截绕过的回合落库——等价真实后端
+`agentChatHistoryCheckpointer` 中途提交 + 收尾落库，否则收尾的历史重同步会按「服务端确认无消息」
+抹掉整轮；④ 打字机断言收紧为「`article[aria-busy="true"]` 行内含 `final-` 且不含 `answer`」，
+避免被定型文本 `final-answer` 蒙混。验证：定向 `--repeat-each=2` 2 passed；反向对照（不放行
+挂起连接）在打字机断言处失败，证明断言确实覆盖「实时渲染」；全量 e2e 中 `live-delta` 与 G8b /
+G8c 均绿。诊断附注：当前游标语义下本用例只命中 1 次流请求且 `after=0`。
+
+**同批两处既有红项亦已收口（2026-09-16，实测取证后只改 spec，未动产品侧行为）**：
+`thread-link.spec.ts` 的两条断言都停留在旧契约上。① 首屏事件读——实测首屏是 P3-1 尾部优先
+窗口读 `/runtime/events?limit=800&tail=1`（增量 `?after=` 语义仍在，供轨迹恢复 / 导出使用，
+用例改为对该端点做 200 探针），实时通道 `/runtime/stream?after=0&live=1&poll_ms=500` 并行
+建连且 200，故旧断言按 `?after=` 计数恒为 0。② 「events 500 时无可见降级提示」——**归属判定
+为 events 读取链路**：实测 events 响应序列 `200,500` 期间 stream 全部 `200`，页面正文给出
+顶栏副标题「会话 xxx 需要恢复关注」+ composer 状态条「运行时错误」
+（`composer.transport.error`）；原用例查的是 `topbar.threadTransport.error`（文案「运行时
+降级」），该文案只出现在顶栏 tooltip 与会话详情面板、正文里查不到——属断言落点误配，
+**不是静默失败**。两条断言已按上述实测固化（含 events 500 / stream 200 的归属证据断言）。
 
 ### 方案 D（环境/可观测，1-2 小时）
 
