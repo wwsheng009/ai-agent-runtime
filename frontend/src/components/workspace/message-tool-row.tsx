@@ -8,6 +8,7 @@ import {
   CircleIcon,
   FileDiffIcon,
   FileTextIcon,
+  FolderIcon,
   GlobeIcon,
   ImageIcon,
   LoaderCircleIcon,
@@ -57,6 +58,7 @@ const KIND_ICON: Record<ToolCardKind, ComponentType<{ size?: number; className?:
   diff: FileDiffIcon,
   terminal: SquareTerminalIcon,
   search: SearchIcon,
+  list: FolderIcon,
   web: GlobeIcon,
   image: ImageIcon,
   json: BracesIcon,
@@ -104,7 +106,10 @@ export function MessageToolRow({
       : null;
   const filePathLink: FilePathLink | null =
     presentation.filePath && activate ? { path: presentation.filePath, activate } : null;
-  const mono = presentation.kind === "terminal" || presentation.kind === "search";
+  const mono =
+    presentation.kind === "terminal" ||
+    presentation.kind === "search" ||
+    presentation.kind === "list";
   const failureSuffix = presentation.isFailure
     ? (segment.errorMessage?.trim() ?? "")
     : "";

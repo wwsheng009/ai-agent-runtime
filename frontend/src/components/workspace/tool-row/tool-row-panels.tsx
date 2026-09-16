@@ -7,7 +7,11 @@
 import { useTranslation } from "react-i18next";
 
 import { type ToolMessageSegment } from "@/lib/thread-state/messages";
-import { resolveToolSegmentDetails, type ToolCardKind } from "@/lib/tool-row";
+import {
+  formatToolInputPreview,
+  resolveToolSegmentDetails,
+  type ToolCardKind,
+} from "@/lib/tool-row";
 import { stripRenderedPatch } from "@/lib/tool-row/diff-text";
 import { cn } from "@/lib/utils";
 
@@ -49,7 +53,9 @@ export function ToolRowPanels({
   const rawOutputText = segment.resultSummary?.trim() || "";
   // 行级视图已经承载补丁正文：输出面板不再重复原始 diff 文本（原文仍可复制 / 下载）。
   const outputText = diffText ? stripRenderedPatch(rawOutputText) : rawOutputText;
-  const inputText = segment.argsSummary?.trim() || "";
+  // 回放链路的入参是原始 JSON、实时链路是后端预览文本：面板统一成同一套键值展示，
+  // 否则同一次调用在两条链路上「展开后长得不一样」（折叠行已统一，见 orderSummaryParts）。
+  const inputText = formatToolInputPreview(segment.argsSummary ?? "");
   const detail = isFailure
     ? failureText
       ? (

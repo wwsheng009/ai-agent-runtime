@@ -247,6 +247,27 @@ describe("MessageToolRow", () => {
     );
   });
 
+  it("ls（目录列举）：折叠行显示目录，且目录不渲染为文件链接", () => {
+    const openFile = vi.fn();
+    // 宿主**提供了**文件链接解析：目录行仍不得出现链接（目录不是可打开的文件）。
+    renderRow(
+      toolSegment({ name: "ls", argsSummary: '{"path":"frontend/e2e","depth":2}' }),
+      () => openFile,
+    );
+
+    const row = container.querySelector('[data-tool-row="true"]');
+    expect(row?.getAttribute("data-tool-row-kind")).toBe("list");
+    expect(row?.getAttribute("data-tool-row-has-summary")).toBe("true");
+    expect(container.querySelector("[data-tool-row-summary]")?.textContent).toContain(
+      "frontend/e2e",
+    );
+    expect(container.querySelector('[data-tool-row-file-link="true"]')).toBeNull();
+    expect(container.querySelector('[data-tool-row-file-link="false"]')?.textContent).toBe(
+      "frontend/e2e",
+    );
+    expect(openFile).not.toHaveBeenCalled();
+  });
+
   const NL = String.fromCharCode(10);
   /** 后端 tool.completed 的真实形态：说明行 + diff 围栏（带行号 hunk）。 */
   const DIFF_FENCE = [
@@ -269,6 +290,29 @@ describe("MessageToolRow", () => {
     const toggle = container.querySelector<HTMLButtonElement>('[data-chat-row-toggle="chevron"]');
     act(() => toggle?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
   }
+
+  it("输入面板：同一 ls 调用在回放（JSON 入参）与实时（预览文本）下展开出同一展示", () => {
+    function remount() {
+      act(() => root?.unmount());
+      root = createRoot(container);
+    }
+
+    // 回放链路：历史里存的是结构化 arguments。
+    renderRow(toolSegment({ name: "ls", argsSummary: '{"path":"frontend/e2e","depth":2}' }));
+    expandRow();
+    const replayText = container.querySelector(
+      '[data-tool-row-input-panel="true"] pre',
+    )?.textContent;
+    expect(replayText).toBe("depth=2 path=frontend/e2e");
+
+    // 实时链路：SSE 帧只带后端预览文本，展开后必须与回放一致（不能一边 JSON 一边键值）。
+    remount();
+    renderRow(toolSegment({ name: "ls", argsSummary: "depth=2 path=frontend/e2e" }));
+    expandRow();
+    expect(
+      container.querySelector('[data-tool-row-input-panel="true"] pre')?.textContent,
+    ).toBe(replayText);
+  });
 
   it("apply_patch 展开：行级 diff 替换原始文本，输出块不再重复围栏", () => {
     renderRow(

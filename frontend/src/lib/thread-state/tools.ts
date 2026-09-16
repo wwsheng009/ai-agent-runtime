@@ -154,6 +154,21 @@ export function getToolSegmentKey(segment: ToolMessageSegment) {
   return segment.toolCallId?.trim() || segment.name;
 }
 
+/**
+ * 同一行的明细是**单调累积**的：实时帧只带预览（command / pattern），回合末尾巴才补
+ * 完整入参与行级字段。后到帧缺失的字段必须保留先前解析结果，否则工具收尾的瞬间摘要
+ * 行会把已经显示出来的参数擦掉（`{...previous, ...next}` 对未赋值键等价于覆盖）。
+ */
+function mergeToolDetails(
+  previous: ToolMessageSegment["details"],
+  next: ToolMessageSegment["details"],
+) {
+  if (!next) {
+    return previous;
+  }
+  return previous ? { ...previous, ...next } : next;
+}
+
 export function upsertToolSegment(
   segments: MessageSegment[],
   nextSegment: ToolMessageSegment,
@@ -183,6 +198,10 @@ export function upsertToolSegment(
       merged.push({
         ...segment,
         ...nextSegment,
+        argsSummary: nextSegment.argsSummary?.trim()
+          ? nextSegment.argsSummary
+          : segment.argsSummary,
+        details: mergeToolDetails(segment.details, nextSegment.details),
       });
     }
   }

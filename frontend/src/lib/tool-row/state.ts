@@ -144,6 +144,22 @@ function summaryForKind(
     return parts;
   }
 
+  // 目录列举类（`ls`）：首要目标是目录本身；目录不是文件，因此没有可跳转链接，
+  // 由 `ToolRowSummaryView` 按「path part + 无匹配链接」渲染成纯文本路径。
+  if (kind === "list") {
+    const directory = details.directoryPath?.trim();
+    if (directory) {
+      parts.push({ type: "path", path: directory });
+    }
+    if (details.query) {
+      parts.push({ type: "text", text: details.query });
+    }
+    if (parts.length === 0 && segment.resultSummary?.trim()) {
+      parts.push({ type: "text", text: segment.resultSummary });
+    }
+    return parts;
+  }
+
   if (kind === "web") {
     if (details.url) {
       parts.push({ type: "url", url: details.url });
@@ -165,16 +181,14 @@ export function resolveToolRowPresentation(segment: ToolMessageSegment): ToolRow
   const kind = resolveToolCardKind(segment.name);
   const isFailure = segment.status === "error";
   const details = resolveToolSegmentDetails(segment);
+  // 失败态只保留「失败目标」本身：目标可能是文件，也可能是 `ls` 的目录。
+  const failureTarget = details?.filePath?.trim() || details?.directoryPath?.trim();
 
   // 失败态：输出块由错误块替换（不追加）；行内摘要只保留可跳转目标本身（禁用态）。
   const summary: ToolRowSummary = isFailure
     ? {
         tone: "danger",
-        parts: orderSummaryParts(
-          details?.filePath?.trim()
-            ? [{ type: "path", path: details.filePath.trim() }]
-            : [],
-        ),
+        parts: orderSummaryParts(failureTarget ? [{ type: "path", path: failureTarget }] : []),
       }
     : {
         tone: "default",

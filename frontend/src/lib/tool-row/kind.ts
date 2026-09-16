@@ -5,6 +5,7 @@ export type ToolCardKind =
   | "diff"
   | "terminal"
   | "search"
+  | "list"
   | "web"
   | "image"
   | "json"
@@ -57,9 +58,15 @@ const KIND_BY_NAME: Record<string, ToolCardKind> = {
   search: "search",
   search_files: "search",
   code_search: "search",
-  list_dir: "search",
-  list_directory: "search",
-  list_files: "search",
+
+  // 目录列举类（运行时内置 `ls` 等）：目标是**目录**而不是文件，摘要显示目录本身；
+  // 目录不进文件链接（见 details.directoryPath）。
+  ls: "list",
+  listdir: "list",
+  list_dir: "list",
+  list_directory: "list",
+  list_files: "list",
+  read_dir: "list",
 
   web_search: "web",
   websearch: "web",

@@ -13,6 +13,8 @@ export {
 export type { ToolCardKind } from "./kind";
 export { resolveToolCardKind } from "./kind";
 
+export { formatToolInputPreview } from "./input-preview";
+
 export type {
   ToolRowPresentation,
   ToolRowSummary,

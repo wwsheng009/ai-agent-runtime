@@ -343,7 +343,8 @@ const LIVE_TOOL_PAYLOAD = {
   logical_tool: "shell",
   step: 1,
   trace_id: "trace-live-1",
-  arg_preview: '{"command":"go test ./..."}',
+  // 真实后端形态：`summarizeToolCallArgs` 的键值文本，不是 JSON。
+  arg_preview: "command=go test ./...",
   command_text: "go test ./...",
 };
 
@@ -482,6 +483,8 @@ describe("runtime 工具生命周期帧实时建行", () => {
       status: "started",
     });
     expect(started[0].argsSummary).toContain("go test ./...");
+    // 摘要行渲染 details（argsSummary 只是兜底）：预览必须解析出 command。
+    expect(started[0].details).toEqual({ command: "go test ./..." });
     // 工具帧同样是「阶段出口」：推理行随即收尾。
     expect(reasoningSegments(thread)[0].running).toBe(false);
 
@@ -494,6 +497,8 @@ describe("runtime 工具生命周期帧实时建行", () => {
       status: "finished",
     });
     expect(finished[0].resultSummary).toContain("Exit code: 0");
+    // 完成帧同样带 arg_preview：参数不能被收尾擦掉。
+    expect(finished[0].details).toEqual({ command: "go test ./..." });
   });
 
   it("回合末证据尾巴按同一 provider id 就地补全，不再新增行", () => {
@@ -512,6 +517,7 @@ describe("runtime 工具生命周期帧实时建行", () => {
     // 尾巴的权威输出覆盖实时预览，且入参仍在同一行上。
     expect(tools[0].resultSummary).toContain("Exit code: 0");
     expect(tools[0].argsSummary).toContain("go test ./...");
+    expect(tools[0].details).toEqual({ command: "go test ./..." });
   });
 
   it("重复的请求/完成帧幂等，不产生第二行", () => {

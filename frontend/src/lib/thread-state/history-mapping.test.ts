@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 
 import { type ChatMessage } from "@/data/mock";
+import { resolveToolRowPresentation } from "@/lib/tool-row";
 import { type SessionHistoryMessage } from "@/types/runtime";
 
 import { HISTORY_TOOL_RESULT_LIMIT, mapSessionHistoryToMessages } from "./history-mapping";
@@ -48,6 +49,39 @@ describe("history tool receipts", () => {
     expect(segment.argsSummary).toContain("file_path");
     expect(segment.details?.filePath).toBe("frontend/src/app.tsx");
     expect(segment.resultSummary).toBe("export const app = true;");
+  });
+
+  // 回归（2026-09-16 回放页面 bug）：view 的批量形态 `files: [{file_path}, …]` 在回放
+  // 投影里拿不到顶层单文件键，整行 24px 摘要空白（实测 14 行 view 里 9 行无摘要）。
+  it("view 批量 files 入参：回放摘要显示第一个文件路径", () => {
+    const history: SessionHistoryMessage[] = [
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: "call-view-batch",
+            name: "view",
+            arguments: {
+              files: [
+                { file_path: "backend/cmd/aicli/ui/screen.go", limit: 120 },
+                { file_path: "backend/cmd/aicli/ui/app_screen_layout.go" },
+              ],
+            },
+          },
+        ],
+      },
+      { role: "tool", content: "package ui", tool_call_id: "call-view-batch" },
+    ];
+
+    const [, receipt] = mapSessionHistoryToMessages("session-1", history, []);
+    const segment = toolSegmentOf(receipt.message);
+
+    expect(segment.name).toBe("view");
+    expect(segment.details?.filePath).toBe("backend/cmd/aicli/ui/screen.go");
+    expect(resolveToolRowPresentation(segment).summary.parts).toEqual([
+      { type: "path", path: "backend/cmd/aicli/ui/screen.go" },
+    ]);
   });
 
   it("RawInput 字符串同样可解析；失败 metadata 落到 error 态", () => {

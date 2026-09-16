@@ -28,6 +28,8 @@ describe("resolveToolCardKind", () => {
     expect(resolveToolCardKind("apply_patch")).toBe("diff");
     expect(resolveToolCardKind("run_terminal_cmd")).toBe("terminal");
     expect(resolveToolCardKind("Grep")).toBe("search");
+    expect(resolveToolCardKind("ls")).toBe("list");
+    expect(resolveToolCardKind("mcp__filesystem__list_dir")).toBe("list");
     expect(resolveToolCardKind("web_search")).toBe("web");
     expect(resolveToolCardKind("generate_image")).toBe("image");
     expect(resolveToolCardKind("jq")).toBe("json");
@@ -175,6 +177,28 @@ describe("resolveToolRowPresentation", () => {
     ).toEqual([{ type: "url", url: "example.com" }]);
   });
 
+  it("实时帧只有入参预览文本时也能给出命令/查询摘要（不只剩工具名）", () => {
+    // SSE live 帧不带结构化 arguments，只有后端 `arg_preview` 键值文本；
+    // 摘要行必须还原成与历史行一致的「命令 / 查询 / 路径」，而不是退化成 0 个 part。
+    expect(
+      resolveToolRowPresentation(
+        toolSegment({ name: "shell", status: "running", argsSummary: "command=ls -la" }),
+      ).summary.parts,
+    ).toEqual([{ type: "text", text: "ls -la" }]);
+
+    expect(
+      resolveToolRowPresentation(
+        toolSegment({ name: "grep", status: "running", argsSummary: "pattern=useEffect path=src glob=*.tsx" }),
+      ).summary.parts,
+    ).toEqual([{ type: "text", text: "useEffect" }]);
+
+    expect(
+      resolveToolRowPresentation(
+        toolSegment({ name: "read_file", status: "running", argsSummary: "file_path=src/a.ts limit=20" }),
+      ).summary.parts,
+    ).toEqual([{ type: "path", path: "src/a.ts" }]);
+  });
+
   it("退出码为 0 不占摘要位；generic 工具无摘要", () => {
     expect(
       resolveToolRowPresentation(
@@ -197,5 +221,38 @@ describe("resolveToolRowPresentation", () => {
     expect(presentation.summary.parts).toEqual([
       { type: "path", path: "src/history.ts" },
     ]);
+  });
+
+  it("目录列举（ls）：摘要显示目录本身就是目标；目录不挂文件链接", () => {
+    // 回放（历史入参 JSON）与实时帧（arg_preview 键值文本）必须给出同一份摘要。
+    const replayed = resolveToolRowPresentation(
+      toolSegment({ name: "ls", argsSummary: '{"path":"frontend/e2e","depth":2}' }),
+    );
+    expect(replayed.kind).toBe("list");
+    expect(replayed.summary.parts).toEqual([{ type: "path", path: "frontend/e2e" }]);
+    expect(replayed.attributes["data-tool-row-kind"]).toBe("list");
+    expect(replayed.attributes["data-tool-row-has-summary"]).toBe("true");
+    // 目录不是可打开的文件：不得给出「打开文件」死链接。
+    expect(replayed.filePath).toBeNull();
+
+    const live = resolveToolRowPresentation(
+      toolSegment({ name: "ls", status: "running", argsSummary: "path=frontend/src depth=1" }),
+    );
+    expect(live.summary.parts).toEqual([{ type: "path", path: "frontend/src" }]);
+
+    const failed = resolveToolRowPresentation(
+      toolSegment({
+        name: "ls",
+        status: "error",
+        errorMessage: "ENOENT: no such directory",
+        argsSummary: '{"path":"frontend/nope"}',
+      }),
+    );
+    expect(failed.summary).toEqual({
+      tone: "danger",
+      parts: [{ type: "path", path: "frontend/nope" }],
+    });
+    expect(failed.filePath).toBeNull();
+    expect(failed.fileLinkDisabled).toBe(true);
   });
 });

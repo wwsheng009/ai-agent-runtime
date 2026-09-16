@@ -10,6 +10,8 @@ export const enWorkspacePanelsMessages = {
       "Backtrack navigation active — use ↑/↓ (or j/k) to choose a user turn, Enter to open the confirm dialog, Esc to exit.",
     loadEarlier: "Load earlier messages",
     loadingEarlier: "Loading earlier messages…",
+    streamStalledNotice:
+      "Server turn may still be running — this page stopped receiving data.",
   },
   userBubble: {
     editAriaLabel: "Edit this user turn before backtrack",

@@ -11,6 +11,7 @@ export const zhWorkspacePanelsMessages = {
       "回溯导航已激活 — 用 ↑/↓（或 j/k）选择用户轮次，Enter 打开确认对话框，Esc 退出。",
     loadEarlier: "加载更早的消息",
     loadingEarlier: "正在加载更早的消息…",
+    streamStalledNotice: "服务端回合可能仍在运行 — 本页已停止接收数据。",
   },
   userBubble: {
     editAriaLabel: "在回溯前编辑该用户轮次",

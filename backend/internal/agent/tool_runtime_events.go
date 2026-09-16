@@ -127,7 +127,7 @@ func editingToolRenderOutput(result toolExecutionResult) string {
 
 func shellDiffToolRenderOutput(result toolExecutionResult) string {
 	if !runtimepolicy.IsShellLikeToolName(strings.TrimSpace(result.Call.Name)) ||
-		!runtimeexecutor.IsGitDiffCommand(renderToolArgValue(result.Call.Args["command"])) ||
+		!runtimeexecutor.IsGitDiffCommand(shellCommandText(result.Call.Args)) ||
 		strings.TrimSpace(result.Error) != "" {
 		return ""
 	}
@@ -188,6 +188,9 @@ func summarizeToolCallArgs(toolName string, args map[string]interface{}) string 
 		return ""
 	}
 	if preview := summarizeSearchToolCallArgs(toolName, args); preview != "" {
+		return preview
+	}
+	if preview := summarizeShellToolCallArgs(toolName, args); preview != "" {
 		return preview
 	}
 
@@ -265,6 +268,35 @@ func summarizeSearchToolCallArgs(toolName string, args map[string]interface{}) s
 	return truncateToolEventText(strings.Join(parts, " "), 200)
 }
 
+// summarizeShellToolCallArgs 让 shell 类工具的预览直接给出命令文本：批量形态的
+// `commands` 列表若走通用渲染，会退化成被截断的 JSON（`commands=[{"command":"…`），
+// 既不可读，也会把 200 字预算耗在结构符号上。
+func summarizeShellToolCallArgs(toolName string, args map[string]interface{}) string {
+	if !runtimepolicy.IsShellLikeToolName(strings.TrimSpace(toolName)) {
+		return ""
+	}
+	command := shellCommandText(args)
+	if command == "" {
+		return ""
+	}
+
+	parts := []string{formatSingleToolArgPreview("command", command)}
+	keys := make([]string, 0, len(args))
+	for key := range args {
+		if key == "command" || key == "commands" || toolArgPreviewRenderedSeparately(key) {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if preview := formatSingleToolArgPreview(key, args[key]); preview != "" {
+			parts = append(parts, preview)
+		}
+	}
+	return truncateToolEventText(strings.Join(parts, " "), 200)
+}
+
 func formatSearchToolArgPreview(key string, value interface{}) string {
 	key = strings.TrimSpace(key)
 	if key == "" || value == nil {
@@ -277,26 +309,114 @@ func formatSearchToolArgPreview(key string, value interface{}) string {
 	return key + "=" + text
 }
 
+// renderSearchToolArgValue 渲染搜索类入参值：字符串列表（`patterns` / `paths` 的批量
+// 形态）按 " | " 连接成单行。搜索入参天然是列表语义，走 JSON 渲染会把 `["a","b"]`
+// 的标点带进 UI，还把 200 字预算耗在结构符号上；分隔符与前端折叠摘要统一
+// （`tool-row/query-text.ts` 的 LIST_TEXT_SEPARATOR），同一份入参两条链路渲染一致。
 func renderSearchToolArgValue(value interface{}) string {
-	switch value.(type) {
-	case []string, []interface{}:
-		raw, err := json.Marshal(value)
-		if err == nil {
-			return string(raw)
-		}
+	if items := searchToolArgListItems(value); len(items) > 0 {
+		return strings.Join(items, " | ")
 	}
 	return renderToolArgValue(value)
+}
+
+// searchToolArgListItems 归一搜索类入参里的字符串列表；非列表值返回 nil，交回通用渲染。
+func searchToolArgListItems(value interface{}) []string {
+	var raw []interface{}
+	switch typed := value.(type) {
+	case []string:
+		raw = make([]interface{}, 0, len(typed))
+		for _, item := range typed {
+			raw = append(raw, item)
+		}
+	case []interface{}:
+		raw = typed
+	default:
+		return nil
+	}
+	items := make([]string, 0, len(raw))
+	for _, item := range raw {
+		text := normalizeToolEventText(renderToolArgValue(item))
+		if text != "" && text != "{}" && text != "[]" {
+			items = append(items, text)
+		}
+	}
+	return items
 }
 
 func summarizeShellToolCommand(toolName string, args map[string]interface{}) string {
 	if !runtimepolicy.IsShellLikeToolName(strings.TrimSpace(toolName)) || len(args) == 0 {
 		return ""
 	}
-	command := normalizeToolEventText(renderToolArgValue(args["command"]))
+	command := shellCommandText(args)
 	if command == "" {
 		return ""
 	}
 	return truncateToolEventText(command, 200)
+}
+
+// shellCommandText 归一 shell 类工具的命令文本：单个 `command`，或批量 `commands`
+// 列表（元素为字符串，或 `{command, workdir}` 对象——见 toolargs 的 shell 参数表）。
+// 批量按 " ; " 连接成单行：这些命令是各自独立执行的，不能用 `&&` 冒充依赖关系。
+func shellCommandText(args map[string]interface{}) string {
+	if len(args) == 0 {
+		return ""
+	}
+	if command := shellArgString(args["command"]); command != "" {
+		return command
+	}
+	items := shellCommandItems(args["commands"])
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		if text := shellArgString(shellCommandItemValue(item)); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, " ; ")
+}
+
+// shellCommandItemValue 取批量命令项的命令文本；对象里没有命令字段时返回 nil，
+// 避免把整个对象渲染成 JSON 塞进摘要。
+func shellCommandItemValue(item interface{}) interface{} {
+	record, ok := item.(map[string]interface{})
+	if !ok {
+		return item
+	}
+	for _, key := range []string{"command", "cmd", "script", "shell_command"} {
+		if value, ok := record[key]; ok {
+			return value
+		}
+	}
+	return nil
+}
+
+func shellCommandItems(value interface{}) []interface{} {
+	switch typed := value.(type) {
+	case []interface{}:
+		return typed
+	case []map[string]interface{}:
+		items := make([]interface{}, 0, len(typed))
+		for _, item := range typed {
+			items = append(items, item)
+		}
+		return items
+	case []string:
+		items := make([]interface{}, 0, len(typed))
+		for _, item := range typed {
+			items = append(items, item)
+		}
+		return items
+	default:
+		return nil
+	}
+}
+
+func shellArgString(value interface{}) string {
+	text, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	return normalizeToolEventText(text)
 }
 
 func formatSingleToolArgPreview(key string, value interface{}) string {

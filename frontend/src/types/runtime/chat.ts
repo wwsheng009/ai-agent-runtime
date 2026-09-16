@@ -122,6 +122,13 @@ export type AgentChatStreamChunkPayload = {
   tool_call?: Record<string, unknown> | null;
   delta?: Record<string, unknown> | null;
   metadata?: Record<string, unknown>;
+  // 运行时工具生命周期帧（`tool.requested` / `tool.completed`，见
+  // backend/internal/agent/tool_runtime_events.go）在结构化入参之外下发的定位字段：
+  // 实时帧只有 `arg_preview` 键值文本（无 arguments），`display_file_path` 仅在路径
+  // 需要独占一行时出现。
+  arg_preview?: string;
+  command_text?: string;
+  display_file_path?: string;
 };
 
 export type ChatStreamPhase =

@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { Thread } from "@/data/mock";
+import { resolveToolRowPresentation } from "@/lib/tool-row/state";
 import {
   applyRuntimeDeltaToThread,
   applyRuntimeEventToThread,
@@ -12,6 +13,7 @@ import {
 } from "@/lib/workspace-thread-state";
 import type { RuntimeSessionRecord, SessionRuntimeEvent } from "@/types/runtime";
 import { applyChatSseBridgeFrame } from "./events-live";
+import { type ToolMessageSegment } from "./messages";
 import { createThread } from "./test-fixtures";
 
 describe("runtime events and session merge", () => {
@@ -269,6 +271,14 @@ describe("applyRuntimeEventToThread 在无 live 消息时按桥接帧补建在�
     return lastMessage(thread).segments.filter((segment) => segment.type === "tool");
   }
 
+  function toolRow(thread: Thread): ToolMessageSegment {
+    const row = toolRows(thread)[0];
+    if (!row || row.type !== "tool") {
+      throw new Error("expected a tool row");
+    }
+    return row;
+  }
+
   it("tool_end 帧补建 streaming 占位消息并落成工具行", () => {
     const next = applyTurn(
       createRecoveredThread(),
@@ -311,6 +321,36 @@ describe("applyRuntimeEventToThread 在无 live 消息时按桥接帧补建在�
     ]);
     expect(toolRows(thread)).toHaveLength(1);
     expect(toolRows(thread)[0]).toMatchObject({ toolCallId: TOOL_CALL.id, status: "finished" });
+  });
+
+  // 回归（2026-09-16）：shell 的真实入参是批量 `commands` 列表（toolargs 的 shell
+  // 参数表）。agent loop 的 tool_started 经桥接归一后，折叠行必须拿到命令文本，
+  // 而不是只剩工具名。
+  it("shell 批量命令的生命周期帧仍落出命令摘要", () => {
+    const next = applyTurn(createRecoveredThread(), {
+      type: "tool_started",
+      timestamp: "2026-09-16T00:00:07Z",
+      payload: {
+        tool_call_id: "call_batch_live",
+        logical_tool: "shell",
+        step: 1,
+        trace_id: "trace-batch",
+        arg_preview: "command=go test ./... ; git status --short",
+        command_text: "go test ./... ; git status --short",
+        turn_id: "turn-1",
+      },
+    });
+
+    const row = toolRow(next);
+    expect(row).toMatchObject({
+      toolCallId: "call_batch_live",
+      name: "shell",
+      status: "started",
+      details: { command: "go test ./... ; git status --short" },
+    });
+    expect(resolveToolRowPresentation(row).summary.parts).toEqual([
+      { type: "text", text: "go test ./... ; git status --short" },
+    ]);
   });
 
   it("回合归属不明或属于旧回合的桥接帧不补建消息（引用相等）", () => {

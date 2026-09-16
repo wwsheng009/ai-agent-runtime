@@ -196,3 +196,42 @@ test("apply_patch 历史回执：展开是行级 diff 浏览器，不再直出�
   await expect(modeGroup.locator("button").nth(1)).toHaveAttribute("aria-pressed", "true");
   await expect(panel.locator('[data-diff-cell="add"]').first()).toBeVisible();
 });
+
+test("ls 历史回执：折叠行显示目录且不挂文件链接，展开输入为键值文本（与实时帧同口径）", async ({
+  page,
+}) => {
+  await composer(page).fill("capital check");
+  await composer(page).press("Control+Enter");
+  await expect(page.getByText("The capital of France is Paris.").first()).toBeVisible({
+    timeout: 20_000,
+  });
+
+  await seedSessionHistory(page.request, "e2e-session-1", [
+    { role: "user", content: "看看 e2e 目录里有什么" },
+    {
+      role: "assistant",
+      content: "",
+      metadata: { message_id: "msg-tool-ls" },
+      tool_calls: [{ id: "call-ls", name: "ls", arguments: { path: "frontend/e2e", depth: 2 } }],
+    },
+    { role: "tool", content: "diag.manual.ts\nfixtures.ts", tool_call_id: "call-ls" },
+    { role: "assistant", content: "目录里是 e2e 用例。" },
+  ]);
+
+  await page.reload();
+  await waitForPromptVisible(page);
+
+  const row = toolRows(page).first();
+  await expect(toolRows(page)).toHaveCount(1);
+  await expect(row).toHaveAttribute("data-tool-row-kind", "list");
+  await expect(row).toContainText("ls");
+  await expect(row).toContainText("frontend/e2e");
+  // 目录不是可打开的文件：折叠行不得出现「打开文件」死链接。
+  await expect(row.locator('[data-tool-row-file-link="true"]')).toHaveCount(0);
+
+  await row.locator('[data-chat-row-toggle="chevron"]').click();
+  const panel = row.locator('[data-tool-row-input-panel="true"]');
+  // 回放链路存的是 JSON 入参，但面板展示必须与实时帧（后端 arg_preview 键值文本）一致。
+  await expect(panel).toContainText("depth=2 path=frontend/e2e");
+  await expect(panel).not.toContainText('{"path"');
+});

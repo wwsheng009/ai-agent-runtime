@@ -31,6 +31,46 @@ func TestToolRequestedEventPayloadIncludesArgPreview(t *testing.T) {
 	}
 }
 
+// 回归（2026-09-16）：shell 的真实入参是批量 `commands` 列表（toolargs 的 shell
+// 参数表），只认 `command` 会让实时行没有 command_text，arg_preview 也退化成被截断
+// 的 JSON。命令文本必须从批量列表里还原，并保持单行可读。
+func TestToolRequestedEventPayloadIncludesBatchShellCommands(t *testing.T) {
+	payload := toolRequestedEventPayload(types.ToolCall{
+		ID:   "call-batch",
+		Name: "shell",
+		Args: map[string]interface{}{
+			"commands": []interface{}{
+				map[string]interface{}{"command": "go test ./...", "workdir": "E:/repo"},
+				map[string]interface{}{"cmd": "git status --short"},
+				map[string]interface{}{"workdir": "E:/repo"},
+			},
+		},
+	}, 2, "trace-batch", nil)
+
+	want := "go test ./... ; git status --short"
+	if got := payload["command_text"]; got != want {
+		t.Fatalf("expected joined batch command text %q, got %#v", want, got)
+	}
+	if got := payload["arg_preview"]; got != "command="+want {
+		t.Fatalf("expected command preview %q, got %#v", "command="+want, got)
+	}
+}
+
+func TestToolRequestedEventPayloadPrefersExplicitCommandOverBatch(t *testing.T) {
+	payload := toolRequestedEventPayload(types.ToolCall{
+		ID:   "call-mixed",
+		Name: "bash",
+		Args: map[string]interface{}{
+			"command":  "git diff --stat",
+			"commands": []string{"git status --short"},
+		},
+	}, 1, "trace-mixed", nil)
+
+	if got := payload["command_text"]; got != "git diff --stat" {
+		t.Fatalf("explicit command must win over batch list, got %#v", got)
+	}
+}
+
 func TestToolRequestedEventPayloadIncludesMultipleGenericArgs(t *testing.T) {
 	payload := toolRequestedEventPayload(types.ToolCall{
 		ID:   "call-view",
@@ -138,9 +178,28 @@ func TestToolRequestedEventPayloadIncludesCompleteGrepPreview(t *testing.T) {
 		},
 	}, 1, "trace-grep", nil)
 
-	want := `patterns=["Popover","DialogTrigger"] paths=["apps/portal-modern/src"] glob=*.tsx context=2`
+	// 列表值按 " | " 连接（与前端折叠摘要同一口径）：不把 JSON 标点带进 UI，
+	// 也不让 `[` `"` `,` 吃掉 200 字预算。
+	want := "patterns=Popover | DialogTrigger paths=apps/portal-modern/src glob=*.tsx context=2"
 	if got := payload["arg_preview"]; got != want {
 		t.Fatalf("expected complete grep preview %q, got %#v", want, got)
+	}
+}
+
+func TestToolRequestedEventPayloadRendersTypedStringListArgs(t *testing.T) {
+	payload := toolRequestedEventPayload(types.ToolCall{
+		ID:   "call-grep-typed",
+		Name: "grep",
+		Args: map[string]interface{}{
+			// JSON 解码给 []interface{}，工具层直接构造给 []string：两条都要能渲染。
+			"patterns": []string{"TODO", "FIXME"},
+			"paths":    []string{"frontend/src"},
+		},
+	}, 1, "trace-grep", nil)
+
+	want := "patterns=TODO | FIXME paths=frontend/src"
+	if got := payload["arg_preview"]; got != want {
+		t.Fatalf("expected readable typed list preview %q, got %#v", want, got)
 	}
 }
 
