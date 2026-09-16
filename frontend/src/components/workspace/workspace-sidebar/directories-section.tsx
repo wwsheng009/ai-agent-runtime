@@ -434,9 +434,21 @@ export function WorkspaceSidebarDirectoriesSection({
                       </div>
                     ) : null}
                     {renderPlainSessionList || isDirectoryOpen ? (
-                      // 2026-09-15 样式优化：取消会话行的嵌套缩进（原 ml-4），
-                      // 目录与会话共用同一左边界，让出的横向空间归还会话标题。
-                      <div className="space-y-1">
+                      // 2026-09-16 样式优化：会话行恢复一层嵌套缩进（2026-09-15 曾整段取消，
+                      // 原值为 16px）。缩进宽度取「一枚小文件图标」的宽度 —— 全库小图标口径
+                      // 是 `size-3.5`（= 0.875rem = 14px，见文件树 `tree-list.tsx`、附件条
+                      // `composer-attachment-rail.tsx`），因此这里用同刻度的 `pl-3.5`：
+                      // 图标宽度与缩进步长同源于 rem，字号缩放时两者不会失配。
+                      // 缩进后「目录头 → 会话行」的父子层级在左边界上可见；平铺视图没有目录
+                      // 组头（行是段内顶层条目），保持贴齐，避免出现无父级的悬空缩进。
+                      <div
+                        className={
+                          renderPlainSessionList
+                            ? "space-y-1"
+                            : "space-y-1 pl-3.5"
+                        }
+                        data-testid="sidebar-session-list"
+                      >
                         {groupVisibility.visible.map((session) => (
                           <WorkspaceSidebarSessionRow
                             activity={sessionActivity?.[session.id]}

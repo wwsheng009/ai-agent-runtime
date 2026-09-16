@@ -102,9 +102,7 @@ export type WorkspaceSidebarIconLabels = {
   threadDraft: string;
   threadActive: string;
   sessionArchived: string;
-  sessionClosed: string;
   sessionError: string;
-  sessionRestored: string;
   sessionAttached: string;
   sessionPending: string;
   sessionPlanPending: string;

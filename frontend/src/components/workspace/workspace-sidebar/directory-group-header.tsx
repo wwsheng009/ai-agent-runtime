@@ -112,11 +112,18 @@ export function WorkspaceSidebarDirectoryGroupHeader({
           )}
         />
       </button>
-      {actions ? (
-        <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition group-hover/directory-row:opacity-100 focus-within:opacity-100">
-          {actions}
-        </div>
-      ) : null}
+      {/*
+        2026-09-16 样式优化：动作槽**恒定位**。未绑定目录（无注册表条目、无派生动作）
+        过去整槽缺位，组头的计数徽标与折叠箭头因此比其它组头右移一段，行与行对不齐；
+        这里把槽位宽度锁到一枚动作图标的宽度（12px 图标 + `p-1` = 1.25rem = `min-w-5`），
+        有动作时仍按内容增长，不挤占目录标题。
+      */}
+      <div
+        data-testid="sidebar-directory-actions-slot"
+        className="flex min-w-5 shrink-0 items-center justify-end gap-0.5 opacity-0 transition group-hover/directory-row:opacity-100 focus-within:opacity-100"
+      >
+        {actions}
+      </div>
     </div>
   );
 }

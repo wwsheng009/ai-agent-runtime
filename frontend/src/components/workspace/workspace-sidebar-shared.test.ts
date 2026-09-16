@@ -220,5 +220,35 @@ describe("workspace-sidebar-shared · 目录会话树装配（合并方案 §3.5
 
       expect(appendEmptyRegisteredGroups(ordered, ordered)).toBe(ordered);
     });
+
+    it("未绑定目录（无 fullPath）恒为最后一项，0 会话注册目录插在它之前", () => {
+      const registered = group("dir-a", [session("s1", "E:/a")]);
+      const unscoped = group("unscoped", [session("s2")], {
+        fullPath: "",
+        registered: false,
+      });
+      const emptyRegistered = group("dir-b", []);
+
+      const groups = appendEmptyRegisteredGroups(
+        [unscoped, registered],
+        [unscoped, registered, emptyRegistered],
+      );
+
+      expect(groups.map((item) => item.key)).toEqual([
+        "dir-a",
+        "dir-b",
+        "unscoped",
+      ]);
+      expect(groups[0]).toBe(registered);
+      expect(groups[2]).toBe(unscoped);
+    });
+
+    it("未绑定目录已在末尾且无补位组时保持入参引用", () => {
+      const registered = group("dir-a", [session("s1", "E:/a")]);
+      const unscoped = group("unscoped", [session("s2")], { fullPath: "" });
+      const ordered = [registered, unscoped];
+
+      expect(appendEmptyRegisteredGroups(ordered, ordered)).toBe(ordered);
+    });
   });
 });

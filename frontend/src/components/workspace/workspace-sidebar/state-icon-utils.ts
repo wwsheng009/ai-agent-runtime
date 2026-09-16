@@ -1,6 +1,6 @@
 // 由 components/workspace/workspace-sidebar.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
-import { ArchiveIcon, CheckIcon, Clock3Icon, HistoryIcon, LoaderCircleIcon, MessageSquareIcon, SearchIcon, SparklesIcon, TriangleAlertIcon, UsersIcon } from "lucide-react";
+import { ArchiveIcon, CheckIcon, Clock3Icon, LoaderCircleIcon, MessageSquareIcon, SearchIcon, SparklesIcon, TriangleAlertIcon, UsersIcon } from "lucide-react";
 import { type ThreadSessionDescriptor } from "@/components/workspace/workspace-sidebar-shared";
 import { type Thread } from "@/data/mock";
 import { type SidebarSessionRowStatus } from "./session-row-status";
@@ -46,9 +46,9 @@ export function getSessionStatusIcon(
   label: ThreadSessionDescriptor["label"],
   labels: Pick<
     WorkspaceSidebarIconLabels,
-    "sessionError" | "sessionRestored" | "sessionAttached" | "sessionPending"
+    "sessionError" | "sessionAttached" | "sessionPending"
   >,
-): SidebarStateIconSpec {
+): SidebarStateIconSpec | null {
   if (label === "error") {
     return {
       icon: TriangleAlertIcon,
@@ -57,12 +57,11 @@ export function getSessionStatusIcon(
     };
   }
 
+  // 2026-09-16 产品口径：会话列表不再显示「已恢复会话」图标。
+  // 从运行时会话历史物化进来的会话是列表常态，这个图标的信息量低于噪声；
+  // 返回 null 由调用方跳过渲染，其余状态（异常 / 已附着 / 待附着）保持原样。
   if (label === "restored") {
-    return {
-      icon: HistoryIcon,
-      label: labels.sessionRestored,
-      toneClassName: "border-accent-teal/24 bg-accent-teal/10 text-accent-teal",
-    };
+    return null;
   }
 
   if (label === "attached") {
@@ -90,7 +89,6 @@ export function getRuntimeSessionActivityIcon(
   labels: Pick<
     WorkspaceSidebarIconLabels,
     | "sessionArchived"
-    | "sessionClosed"
     | "sessionPending"
     | "sessionPlanPending"
     | "sessionRunning"
@@ -98,7 +96,14 @@ export function getRuntimeSessionActivityIcon(
     | "sessionWaitingAnswer"
     | "sessionWaitingApproval"
   >,
-): SidebarStateIconSpec {
+): SidebarStateIconSpec | null {
+  // 2026-09-16 产品口径：会话列表不再显示「已关闭会话」图标。
+  // 关闭态是持久化终态，行内标题与右键菜单已能表达该语义；
+  // 返回 null 由调用方跳过渲染，其余状态（等待/运行/归档等）保持原样。
+  if (status.kind === "closed") {
+    return null;
+  }
+
   switch (status.kind) {
     case "waitingApproval":
       return {
@@ -139,12 +144,6 @@ export function getRuntimeSessionActivityIcon(
       return {
         icon: ArchiveIcon,
         label: labels.sessionArchived,
-        toneClassName: "border-border bg-surface-soft text-muted-foreground",
-      };
-    case "closed":
-      return {
-        icon: CheckIcon,
-        label: labels.sessionClosed,
         toneClassName: "border-border bg-surface-soft text-muted-foreground",
       };
     default:

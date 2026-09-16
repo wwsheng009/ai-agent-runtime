@@ -59,9 +59,13 @@ export function WorkspaceSidebarChatsSection({
                   thread,
                   threadSessionDetails,
                 );
+                const sessionStatusIcon = getSessionStatusIcon(
+                  sessionDescriptor.label,
+                  sidebarLabels,
+                );
                 const itemStatusIcons = [
                   getThreadWorkflowIcon(thread, sidebarLabels),
-                  getSessionStatusIcon(sessionDescriptor.label, sidebarLabels),
+                  ...(sessionStatusIcon ? [sessionStatusIcon] : []),
                 ];
                 const title = [
               thread.title,

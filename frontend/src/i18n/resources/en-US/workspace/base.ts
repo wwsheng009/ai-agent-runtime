@@ -242,11 +242,9 @@ export const enWorkspaceBase = {
     },
     sessionStatuses: {
       error: "Session sync error",
-      restored: "Restored session",
       attached: "Attached runtime session",
       pending: "No runtime session attached yet",
       archived: "Archived session",
-      closed: "Closed session",
       planPending: "Plan awaiting review",
       running: "Running",
       subagents: "Subagents running",

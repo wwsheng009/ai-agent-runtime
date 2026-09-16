@@ -40,7 +40,11 @@ export type SidebarSessionRowViewModel = {
   /** 批次 3（§5.5）分支谱系：缩进层级 + 来源徽标；非分支会话为 undefined。 */
   lineage: SidebarSessionItemLineage | undefined;
   rowState: SidebarSessionRowState;
-  statusIcon: SidebarStateIconSpec;
+  /**
+   * 行状态图标；「已恢复会话」（空闲态）与「已关闭会话」不再渲染，
+   * 因此可能为 null，由行组件跳过图标位。
+   */
+  statusIcon: SidebarStateIconSpec | null;
   thread: SidebarThread | undefined;
   title: string;
 };

@@ -43,6 +43,7 @@ export const enWorkspacePanelsArtifacts = {
     planLive: "live",
     restore: "Restore",
     usage: "Usage",
+    sessionDetail: "Session details",
   },
   lazySurfaces: {
     loadingRestorePoints: "Loading restore points…",

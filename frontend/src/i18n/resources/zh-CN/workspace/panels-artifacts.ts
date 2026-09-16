@@ -36,6 +36,7 @@ export const zhWorkspacePanelsArtifacts = {
     planLive: "进行中",
     restore: "还原",
     usage: "会话用量",
+    sessionDetail: "会话详情",
   },
   lazySurfaces: {
     loadingRestorePoints: "正在加载还原点…",

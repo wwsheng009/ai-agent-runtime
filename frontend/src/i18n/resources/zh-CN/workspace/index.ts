@@ -8,6 +8,7 @@ import { zhWorkspaceFilePreview } from "./panels-file-preview";
 import { zhWorkspacePanelsInteractions } from "./panels-interactions";
 import { zhWorkspacePanelsJobs } from "./panels-jobs";
 import { zhWorkspacePanelsMessages } from "./panels-messages";
+import { zhWorkspacePanelsSessionDetail } from "./panels-session-detail";
 import { zhWorkspaceSessionSearch } from "./panels-session-search";
 import { zhWorkspacePanelsShell } from "./panels-shell";
 import { zhWorkspacePanelsTeamsDispatch } from "./panels-teams-dispatch";
@@ -23,6 +24,7 @@ export const zhWorkspace = {
     interactions: zhWorkspacePanelsInteractions,
     jobs: zhWorkspacePanelsJobs,
     messages: zhWorkspacePanelsMessages,
+    sessionDetail: zhWorkspacePanelsSessionDetail,
     sessionSearch: zhWorkspaceSessionSearch,
     shell: zhWorkspacePanelsShell,
     teamsDispatch: zhWorkspacePanelsTeamsDispatch,

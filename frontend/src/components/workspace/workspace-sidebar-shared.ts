@@ -340,9 +340,13 @@ export function mergeDirectoryGroups(
 /**
  * 合并方案 §3.4 / §3.5-F：目录会话树的组列表 = 排序后的会话组 + 0 会话的注册目录。
  *
- * 排序账目（`sessionGroups`）只含「有会话」的组，且顺序由 hook 负责；本函数**只做追加**，
- * 不参与排序，避免把排序逻辑搬进渲染层。注册目录即使 0 会话也要常驻，
+ * 排序账目（`sessionGroups`）只含「有会话」的组，且顺序由 hook 负责；本函数不重排既有组
+ * （唯一定序不变量见下），避免把业务排序搬进渲染层。注册目录即使 0 会话也要常驻，
  * 否则「在目录中新建会话」的入口会随会话消失而消失。
+ *
+ * 2026-09-16：「未绑定目录」（无工作路径的派生组，`fullPath` 为空）恒为最后一项——
+ * 它不属于「我的目录」清单，夹在注册目录之间会打断阅读顺序；因此补位组插在它之前，
+ * 且只在它确实没排在末尾时才重建数组（无未绑定组时保持入参引用）。
  */
 export function appendEmptyRegisteredGroups(
   orderedSessionGroups: readonly MergedDirectoryGroup[],
@@ -351,10 +355,26 @@ export function appendEmptyRegisteredGroups(
   const emptyRegisteredGroups = mergedGroups.filter(
     (group) => group.registered && group.sessions.length === 0,
   );
-  if (emptyRegisteredGroups.length === 0) {
-    return orderedSessionGroups as MergedDirectoryGroup[];
+  const appended =
+    emptyRegisteredGroups.length === 0
+      ? (orderedSessionGroups as MergedDirectoryGroup[])
+      : [...orderedSessionGroups, ...emptyRegisteredGroups];
+  return moveUnscopedGroupLast(appended);
+}
+
+/**
+ * 把「未绑定目录」（无 `fullPath` 的组）稳定地挪到末尾：其余组的相对顺序不变。
+ * 无未绑定组、或它本来就在末尾时返回入参同一引用，避免无谓重算与重渲染。
+ */
+function moveUnscopedGroupLast(
+  groups: MergedDirectoryGroup[],
+): MergedDirectoryGroup[] {
+  const scoped = groups.filter((group) => Boolean(group.fullPath));
+  const unscopedIndex = groups.findIndex((group) => !group.fullPath);
+  if (unscopedIndex < 0 || unscopedIndex === scoped.length) {
+    return groups;
   }
-  return [...orderedSessionGroups, ...emptyRegisteredGroups];
+  return [...scoped, ...groups.filter((group) => !group.fullPath)];
 }
 
 /**

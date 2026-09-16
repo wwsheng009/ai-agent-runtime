@@ -228,11 +228,9 @@ export const zhWorkspaceBase = {
     },
     sessionStatuses: {
       error: "会话同步异常",
-      restored: "已恢复会话",
       attached: "已附着运行时会话",
       pending: "尚未附着运行时会话",
       archived: "已归档会话",
-      closed: "已关闭会话",
       planPending: "计划待审",
       running: "运行中",
       subagents: "子代理运行中",

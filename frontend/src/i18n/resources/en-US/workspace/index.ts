@@ -7,6 +7,7 @@ import { enWorkspaceFilePreview } from "./panels-file-preview";
 import { enWorkspacePanelsInteractions } from "./panels-interactions";
 import { enWorkspacePanelsJobs } from "./panels-jobs";
 import { enWorkspacePanelsMessages } from "./panels-messages";
+import { enWorkspacePanelsSessionDetail } from "./panels-session-detail";
 import { enWorkspaceSessionSearch } from "./panels-session-search";
 import { enWorkspacePanelsShell } from "./panels-shell";
 import { enWorkspacePanelsTeamsDispatch } from "./panels-teams-dispatch";
@@ -22,6 +23,7 @@ export const enWorkspace = {
     interactions: enWorkspacePanelsInteractions,
     jobs: enWorkspacePanelsJobs,
     messages: enWorkspacePanelsMessages,
+    sessionDetail: enWorkspacePanelsSessionDetail,
     sessionSearch: enWorkspaceSessionSearch,
     shell: enWorkspacePanelsShell,
     teamsDispatch: enWorkspacePanelsTeamsDispatch,

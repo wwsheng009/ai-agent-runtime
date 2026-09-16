@@ -115,7 +115,8 @@ export type SidebarSessionItemProps = {
   };
   renaming: boolean;
   session: RuntimeSessionRecord;
-  statusIcon: SidebarStateIconSpec;
+  /** 行状态图标；null 表示该状态不渲染图标（如「已恢复会话」）。 */
+  statusIcon: SidebarStateIconSpec | null;
   title: string;
   /** P2-6：组内拖拽重排。缺省整行不可拖（不渲染拖拽相关属性）。 */
   dragEnabled?: boolean;
@@ -426,7 +427,7 @@ export function SidebarSessionItem({
       ) : null}
       <button
         type="button"
-        title={`${title} · ${statusIcon.label}`}
+        title={statusIcon ? `${title} · ${statusIcon.label}` : title}
         onClick={onSelect}
         className={cn(
           "flex w-full items-center gap-2 rounded-[0.72rem] border py-1.5 pl-2 text-left transition",
@@ -467,7 +468,7 @@ export function SidebarSessionItem({
             {actionLabels.archivedBadge}
           </span>
         ) : null}
-        <SidebarStateIcon spec={statusIcon} />
+        {statusIcon ? <SidebarStateIcon spec={statusIcon} /> : null}
       </button>
       {/* z-30：该容器被 `translate`/`opacity` 建立为层叠上下文，容器自身必须带正
           z-index，否则容器内菜单的 `z-20` 只在本上下文内生效，整行会被后续兄弟行

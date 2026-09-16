@@ -184,9 +184,12 @@ describe("WorkspaceSidebar 跨组移动（P2-6 子片 2）", () => {
   }
 
   function rowTitle(scope: HTMLElement, title: string): string | null {
-    const row = Array.from(scope.querySelectorAll("button")).find((button) =>
-      (button.getAttribute("title") ?? "").startsWith(`${title} ·`),
-    );
+    // 行 title 由「标题（+ 可选状态图标文案）」组成：会话列表已按产品口径
+    // 移除「已恢复会话 / 已关闭会话」图标，因此不能再假设一定带 ` · 状态` 后缀。
+    const row = Array.from(scope.querySelectorAll("button")).find((button) => {
+      const raw = button.getAttribute("title") ?? "";
+      return raw === title || raw.startsWith(`${title} ·`);
+    });
     return row?.getAttribute("title") ?? null;
   }
 
