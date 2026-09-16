@@ -130,3 +130,33 @@ func TestDoomLoopEventPayloads(t *testing.T) {
 	require.Equal(t, 8, term["stop_limit"])
 	require.Equal(t, "repeated_tool_calls", term["limit_reason"])
 }
+
+// TestDoomLoopTracker_ExemptsSupervisionInspection pins the contract stated in
+// the supervision tool descriptions: re-issuing supervision_descendants /
+// supervision_snapshot is repeated but legitimate inspection (the same query
+// observes newer rows), so it must never count as a doom-loop repeat nor raise
+// the repeat advisory.
+func TestDoomLoopTracker_ExemptsSupervisionInspection(t *testing.T) {
+	for _, toolName := range []string{"supervision_snapshot", "supervision_descendants"} {
+		t.Run(toolName, func(t *testing.T) {
+			tracker := NewDoomLoopTracker(2)
+			seed := []types.ToolCall{{Name: "view", Args: map[string]interface{}{"file_path": "x.go"}}}
+			require.Equal(t, 1, tracker.ObserveSemanticToolBatch(seed).RepeatCount)
+
+			inspect := []types.ToolCall{{
+				Name: toolName,
+				Args: map[string]interface{}{"mode": "children"},
+			}}
+			require.Empty(t, semanticToolCallFingerprint(inspect))
+			for i := 0; i < 3; i++ {
+				obs := tracker.ObserveSemanticToolBatch(inspect)
+				require.Empty(t, obs.Fingerprint)
+				require.Zero(t, obs.RepeatCount)
+				require.False(t, obs.ShouldStop)
+				require.Empty(t, obs.Advisory)
+			}
+			// Inspection clears the tracker: real work afterwards starts at 1.
+			require.Equal(t, 1, tracker.ObserveSemanticToolBatch(seed).RepeatCount)
+		})
+	}
+}

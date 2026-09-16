@@ -57,6 +57,44 @@ func TestPollingBackoffTracker_NotifiesAfterThreshold(t *testing.T) {
 	require.Equal(t, 1, mixed.RepeatCount, "a different polling batch restarts the streak")
 }
 
+// TestPollingBackoffTracker_SupervisionInspectIsNotPolling pins the split
+// between the doom-loop exemption set and the polling soft brake: supervision
+// inspection is exempt from both (its tool description promises so), while the
+// existing wait/read polling brake is untouched.
+func TestPollingBackoffTracker_SupervisionInspectIsNotPolling(t *testing.T) {
+	tracker := NewPollingBackoffTracker(0)
+	inspect := []types.ToolCall{{
+		ID:   "call-1",
+		Name: "supervision_descendants",
+		Args: map[string]interface{}{"mode": "children"},
+	}}
+	fingerprint, tools := pollingBatchFingerprint(inspect)
+	require.Empty(t, fingerprint)
+	require.Empty(t, tools)
+
+	for i := 0; i < PollingBackoffNoticeThreshold+2; i++ {
+		obs := tracker.ObserveToolBatch(inspect)
+		require.Empty(t, obs.Fingerprint)
+		require.Zero(t, obs.RepeatCount)
+		require.Empty(t, obs.Advisory)
+		require.False(t, obs.EmitNotice)
+	}
+
+	// The brake itself is unchanged: a wait_agent streak still crosses the
+	// threshold after the inspection reset.
+	for i := 1; i <= PollingBackoffNoticeThreshold; i++ {
+		obs := tracker.ObserveToolBatch([]types.ToolCall{waitAgentCall("wait", "1000")})
+		require.Equal(t, i, obs.RepeatCount)
+	}
+
+	// Mixing inspection with a blocking wait resets like real work.
+	mixed := tracker.ObserveToolBatch([]types.ToolCall{
+		waitAgentCall("wait-2", "1000"),
+		{ID: "call-2", Name: "supervision_snapshot", Args: map[string]interface{}{"mode": "descendants"}},
+	})
+	require.Zero(t, mixed.RepeatCount)
+}
+
 func TestPollingBackoffTracker_ResetsOnRealWork(t *testing.T) {
 	tracker := NewPollingBackoffTracker(2)
 	require.Equal(t, 2, tracker.Threshold())

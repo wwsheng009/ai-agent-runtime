@@ -144,7 +144,8 @@ func DoomLoopTerminationPayload(traceID string, step int, obs DoomLoopObservatio
 // semanticToolCallFingerprint hashes normalized tool name+args for the batch.
 // Reuse the execution-layer argument digest so provider-only underscore-prefixed
 // diagnostics do not split one semantic call into multiple repeat streaks.
-// Returns empty when any call is exempt (polling/control tools) or the batch is empty.
+// Returns empty when any call is exempt (polling/control/supervision-inspection
+// tools) or the batch is empty.
 func semanticToolCallFingerprint(calls []types.ToolCall) string {
 	if len(calls) == 0 {
 		return ""
@@ -163,6 +164,9 @@ func semanticToolCallFingerprint(calls []types.ToolCall) string {
 }
 
 func semanticToolCallRepeatExempt(name string) bool {
+	if supervisionInspectTool(name) {
+		return true
+	}
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "background_task",
 		"task_output",
@@ -177,6 +181,20 @@ func semanticToolCallRepeatExempt(name string) bool {
 		"read_task_context",
 		"get_goal",
 		"read_goal":
+		return true
+	default:
+		return false
+	}
+}
+
+// supervisionInspectTool reports whether name is a read-only supervision
+// inspection tool. Repeating one is legitimate work (the same query observes
+// newer rows), which is what the tool descriptions promise: repeat calls stay
+// exempt from the anti-polling advisory. Whether it may still feed the polling
+// soft-brake streak is decided separately by pollingSoftBrakeTool.
+func supervisionInspectTool(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "supervision_snapshot", "supervision_descendants":
 		return true
 	default:
 		return false

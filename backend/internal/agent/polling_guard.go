@@ -163,15 +163,25 @@ func (t *PollingBackoffTracker) reset() {
 	t.budgetNotified = false
 }
 
+// pollingSoftBrakeTool reports whether name participates in the polling
+// soft-brake streak. The set is the doom-loop polling/control exemption set
+// minus read-only supervision inspection: re-reading a supervision view is an
+// observation, not a blocking wait, and those calls stay exempt from the
+// anti-polling advisory their tool descriptions promise.
+func pollingSoftBrakeTool(name string) bool {
+	return semanticToolCallRepeatExempt(name) && !supervisionInspectTool(name)
+}
+
 // pollingBatchFingerprint hashes an all-polling batch. It returns an empty
-// fingerprint when the batch contains real work or no polling call at all, so
-// mixed batches reset the streak instead of being counted as polling loops.
+// fingerprint when the batch contains real work (including supervision
+// inspection) or no polling call at all, so mixed batches reset the streak
+// instead of being counted as polling loops.
 func pollingBatchFingerprint(calls []types.ToolCall) (string, []string) {
 	batch := strings.Builder{}
 	tools := make([]string, 0, len(calls))
 	for _, call := range calls {
 		name := strings.ToLower(strings.TrimSpace(call.Name))
-		if name == "" || !semanticToolCallRepeatExempt(name) {
+		if name == "" || !pollingSoftBrakeTool(name) {
 			return "", nil
 		}
 		digest := toolexec.ArgsDigest(name, pollingFingerprintArgs(call.Args))
