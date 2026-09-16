@@ -90,6 +90,7 @@ type WorkspaceMainSectionProps = Pick<
   | "selectedReasoningEffort"
   | "selectedThread"
   | "sessionRefreshing"
+  | "streamStalled"
   | "trajectoryStore"
   | "trajectoryEarlier"
 > & {
@@ -166,6 +167,7 @@ export function WorkspaceMainSection({
   selectedProvider,
   selectedReasoningEffort,
   selectedThread,
+  streamStalled,
   trajectoryStore,
   trajectoryEarlier,
   composerOverlayHeight,
@@ -328,10 +330,7 @@ export function WorkspaceMainSection({
                   branchError={branchError}
                   branchPendingMessageId={branchPendingMessageId}
                   canBacktrack={canBacktrack}
-                  className={cn(
-                    "h-full px-3 sm:px-4 lg:px-5",
-                    isCompact ? "pt-3" : "pt-4",
-                  )}
+                  className={cn("h-full px-3 sm:px-4 lg:px-5", isCompact ? "pt-3" : "pt-4")}
                   connectionStatus={connectionStatus}
                   contentClassName={cn(
                     // 列宽由 message-list 的宽度轴（W）提供，此处只覆盖行间距。
@@ -349,6 +348,7 @@ export function WorkspaceMainSection({
                   onSelectArtifact={handleOpenArtifact}
                   phase={phase}
                   scrollMemoryKey={selectedThread.sessionId ?? selectedThread.id}
+                  streamStalled={streamStalled}
                   style={messageListStyle}
                 />
               ) : (

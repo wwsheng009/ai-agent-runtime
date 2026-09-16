@@ -58,5 +58,12 @@ export type MessageListProps = {
   phase?: ChatStreamPhase | null;
   /** P1-3：跨挂载滚动记忆键（线程 id）；缺省时滚动锚点只在本次挂载内有效。 */
   scrollMemoryKey?: string | null;
+  /**
+   * 读侧静默看门狗命中：本页 chat 流已停止接收（`isResponding` 已回落），
+   * 但服务端回合可能仍在运行。为真时在消息流尾显示「服务端可能仍在运行 +
+   * 重试」提示——这是「状态说真话」的关键：旧行为只把本地态置 false，
+   * 用户看到的是转圈消失、输出停住，却没有任何解释或恢复入口。
+   */
+  streamStalled?: boolean;
   style?: CSSProperties;
 };

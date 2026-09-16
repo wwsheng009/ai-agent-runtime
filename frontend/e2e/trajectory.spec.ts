@@ -76,8 +76,11 @@ test("P2-1: search filters rows by content", async ({ page }) => {
 
   await trajectoryTab(page).click();
   const search = page.getByRole("textbox", { name: "Search trajectory" });
-  await search.fill("capital");
-  await expect(rows(page).filter({ hasText: "capital" }).first()).toBeVisible();
+  // 检索词必须只命中「回答」：mock 的 web_search 入参是 "capital of France"，
+  // 而 argsSummary 参与检索是既定口径（trajectoryItemText 含工具入参摘要），
+  // 用 "capital" 检索本来就会命中工具行。改用只出现在回答正文里的词。
+  await search.fill("gave us");
+  await expect(rows(page).filter({ hasText: "gave us" }).first()).toBeVisible();
   await expect(rows(page).filter({ hasText: "web_search" })).toHaveCount(0);
 
   await search.fill("no-such-term");

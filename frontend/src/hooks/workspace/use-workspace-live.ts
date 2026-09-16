@@ -1,13 +1,31 @@
-import { type Dispatch, type SetStateAction } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
 
+import { requestSessionTurnInterrupt } from "@/api/runtime/session-turn-control";
 import { type Thread } from "@/data/mock";
 import { type ConnectionStatus } from "@/lib/connection-status";
+import {
+  reportBlockedDelta,
+  reportRenderGate,
+  reportSnapshotRefresh,
+  reportUnownedTurn,
+} from "@/lib/live-diagnostics/store";
 import {
   type RuntimeSessionActiveTurn,
   type SessionRuntimeEvent,
 } from "@/lib/runtime-api";
+import { matchesActiveTurn } from "@/lib/thread-state/deltas";
 import { trajectoryEventAction } from "@/lib/trajectory/recovery";
-import { type RuntimeDeltaCoordinator } from "@/lib/workspace-thread-state";
+import {
+  getRuntimeDeltaKind,
+  getRuntimeEventTurnId,
+  type RuntimeDeltaCoordinator,
+} from "@/lib/workspace-thread-state";
 import {
   applyRuntimeDeltaToThread,
   applyRuntimeEventToThread,
@@ -19,6 +37,13 @@ import { useResumedSessionTurn } from "./use-resumed-session-turn";
 import { useSessionRuntimeStream } from "./use-session-runtime-stream";
 import { type TrajectoryStore } from "./use-trajectory-snapshot";
 import { isThreadResponding } from "./use-workspace-thread-selection";
+
+/**
+ * 「未认领回合」快照刷新节流：发现服务端在途回合后拉一次 `/runtime`（续传认领
+ * 的唯一入口），同一回合在该窗口内不重复触发；窗口落空（拉取失败 / 回合刚结束）
+ * 时后续增量会再补一次，不会卡死。
+ */
+const UNOWNED_TURN_REFRESH_MS = 3_000;
 
 export type UseWorkspaceLiveOptions = {
   /** 本地直连回合身份（`/api/agent/chat` 的 POST 拥有者）；空 = 本地没有在途回合。 */
@@ -55,6 +80,18 @@ export type UseWorkspaceLiveResult = {
   liveTurnId: string | null;
   /** 当前会话是否正在生成回复（本地回合或续传回合）。 */
   currentSessionResponding: boolean;
+  /**
+   * P4-刷新续传：停止「服务端仍在跑、本地没有请求可 abort」的续传回合。
+   *
+   * 本地回合不走这里——那条路径由 chat-turn hook 在 abort 的同时带本地回合身份
+   * 投递 interrupt（见 use-workspace-agent-chat-turn.stopResponding）。这里只补
+   * 刷新后的入口：新页面没有本地回合，停止按钮不显式发命令就只是本地幻觉
+   * （`resume_on_disconnect` 之后 abort ≠ 服务端回合结束）。
+   *
+   * best-effort（网络失败 / 409 回合已换代都不阻塞 UI），随后主动刷新一次快照让
+   * `active_turn` 收敛，不必等下一次心跳（5s）按钮才变回发送态。
+   */
+  stopResumedTurn: () => Promise<void>;
 };
 
 /**
@@ -100,6 +137,58 @@ export function useWorkspaceLive({
   const currentSessionResponding =
     isThreadResponding(selectedThread, localTurnId) ||
     isThreadResponding(selectedThread, resumedTurnId);
+  // 增量闸门：请求在跑（本地或续传）且认领到了回合身份，runtime/stream 的打字机
+  // 增量才允许落到消息上。同一个值既传给流 hook，也上报给「网络详情」观测块——
+  // 「事件到了但闸门关着」正是页面不动的两类根因之一。
+  const renderLiveDeltas =
+    (localResponding || resumedTurnActive) && Boolean(liveTurnId);
+  useEffect(() => {
+    reportRenderGate(sessionId, {
+      liveTurnId: liveTurnId ?? null,
+      resumedTurnId: resumedTurnId ?? null,
+      localResponding,
+      rendering: renderLiveDeltas,
+    });
+  }, [liveTurnId, localResponding, renderLiveDeltas, resumedTurnId, sessionId]);
+  // 未认领回合发现 → 快照刷新。没有这一跳，闸门会停在关闭状态：本地 chat 流
+  // 静默中断（读侧看门狗）后本地回合身份被清空，而 `/runtime` 快照只在会话
+  // 切换 / 手动刷新 / 续传心跳里拉取，续传心跳又只在认领之后启动——鸡生蛋。
+  // 落库增量因此被 renderLiveDeltas 整帧过滤，只有整页刷新（重拉快照 + 历史）
+  // 才能重新看到内容。
+  const unownedTurnNotifyRef = useRef<{ turnId: string; at: number } | null>(
+    null,
+  );
+  const handleUnownedTurn = useCallback(
+    (turnId: string) => {
+      const now = Date.now();
+      const last = unownedTurnNotifyRef.current;
+      if (
+        last &&
+        last.turnId === turnId &&
+        now - last.at < UNOWNED_TURN_REFRESH_MS
+      ) {
+        return;
+      }
+      unownedTurnNotifyRef.current = { turnId, at: now };
+      // 观测（「网络详情」）：未认领回合是「事件在到达、闸门却是关的」的根因之一，
+      // 与随后的快照刷新成对记账，面板上才看得出自愈动作有没有真的发生。
+      reportUnownedTurn(sessionId, turnId);
+      if (refreshRuntimeState) {
+        refreshRuntimeState();
+        reportSnapshotRefresh(sessionId);
+      }
+    },
+    [refreshRuntimeState, sessionId],
+  );
+  const stopResumedTurn = useCallback(async () => {
+    // resumedTurnId 只在「本地无在途回合」时认领（见 useResumedSessionTurn 的
+    // adoptable 判定），因此本地回合在跑时这里天然是空操作，不会重复投递。
+    if (!resumedTurnId) {
+      return;
+    }
+    await requestSessionTurnInterrupt(sessionId, resumedTurnId);
+    refreshRuntimeState?.();
+  }, [refreshRuntimeState, resumedTurnId, sessionId]);
   const { connectionStatus, retryConnection } = useSessionRuntimeStream({
     applyRuntimeEventToThread,
     applyRuntimeDeltaToThread,
@@ -121,15 +210,36 @@ export function useWorkspaceLive({
         trajectoryStore.advanceCursor(action.seq);
       }
     },
-    onRuntimeEvent,
+    // 未认领回合发现（见 handleUnownedTurn 注释）：运行时流只负责传输，
+    // 「这条事件属不属于本页的在途回合」的判定收口在这里——本页没有任何回合
+    // 身份、事件却带着一个 turn 身份，说明服务端有个未认领的回合正在产增量。
+    // 不主动去认领，renderLiveDeltas 闸门就会一直关着（刷新前整条流都不渲染）。
+    onRuntimeEvent: (event) => {
+      const turnId = getRuntimeEventTurnId(event);
+      const deltaKind = getRuntimeDeltaKind(event.type);
+      if (!liveTurnId) {
+        if (turnId && deltaKind) {
+          handleUnownedTurn(turnId);
+        }
+      }
+      // 归属判定与流 hook 内一致（`未知` ≠ `其他 turn`）：不满足「闸门开 + 帧属于
+      // 在途回合」的增量帧不会渲染，逐帧记账——这是「网络详情」判定
+      // 「事件到了但没渲染」的唯一证据来源。
+      if (
+        deltaKind &&
+        !(renderLiveDeltas && matchesActiveTurn(liveTurnId ?? "", turnId))
+      ) {
+        reportBlockedDelta(sessionId);
+      }
+      onRuntimeEvent(event);
+    },
     // 方案B：请求进行中才渲染 runtime/stream 的打字机增量（delta/reasoning/
     // image_progress）；回放/reload 只进事件快照，不误渲染历史增量。
     // P4-刷新续传：刷新后本地没有直连回合，但服务端可能仍在跑——续传身份补上后
     // 闸门重新打开，落库的增量帧才会继续写进（被认领的）同一条消息。
     activeTurnId: liveTurnId,
     deltaCoordinator,
-    renderLiveDeltas:
-      (localResponding || resumedTurnActive) && Boolean(liveTurnId),
+    renderLiveDeltas,
     selectedThread,
     setThreads,
   });
@@ -139,5 +249,6 @@ export function useWorkspaceLive({
     currentSessionResponding,
     liveTurnId,
     retryConnection,
+    stopResumedTurn,
   };
 }

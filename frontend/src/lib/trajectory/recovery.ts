@@ -9,11 +9,19 @@
  * reducer 重放路径；`payload.seq` 为游标字段，不进入轨迹事件载荷。
  */
 import type { SessionRuntimeEvent } from "@/types/runtime";
+import {
+  CHAT_SSE_EVENT_PREFIX,
+  RUNTIME_EVENT_CHAT_BRIDGE_TYPES,
+  RUNTIME_EVENT_PERSISTED_TYPES,
+  RUNTIME_EVENT_PROVENANCE_TYPES,
+} from "@/types/runtime/event-contract";
 
 import { TRAJECTORY_ITEM_ID_KEY, type TrajectoryEventKind } from "./types";
 import { subagentItemId } from "./entity-identity";
 
-export const CHAT_SSE_EVENT_PREFIX = "chat.sse.";
+// 帧名前缀来自事件契约生成物（与后端 api/skills 的常量同源）；此处再导出以保持
+// 既有 import 面（export.ts 等模块从本模块取用）。
+export { CHAT_SSE_EVENT_PREFIX };
 
 export const TRAJECTORY_RECOVERY_PAGE_SIZE = 500;
 
@@ -73,13 +81,23 @@ function readFiniteNumber(value: unknown): number | undefined {
  * than through the HTTP chat SSE envelope.  They still belong to the same
  * durable trajectory and must be projected through the regular chunk /
  * reasoning reducer paths during recovery.
+ *
+ * Batch 2：名单由事件契约生成物派生——落盘的 `assistant*` 事件加上契约未登记
+ * 的旧别名（历史行仍可能出现）。新增助手事件只要登记进
+ * `internal/events/contract.go` 就会自动纳入；text/reasoning/image 的语义分类由
+ * `thread-state/deltas.getRuntimeDeltaKind` 承担，两层覆盖由
+ * `recovery-contract.test.ts` 门禁。
  */
-export const ASSISTANT_RUNTIME_EVENT_TYPES: ReadonlySet<string> = new Set([
-  "assistant_delta",
-  "assistant_reasoning",
-  "assistant.reasoning",
+const LEGACY_ASSISTANT_RUNTIME_EVENT_TYPES = [
+  // runtimeobserve 记录过、但未登记进交付契约的旧拼写。
   "assistant.reasoning_delta",
-  "assistant.image_progress",
+] as const;
+
+export const ASSISTANT_RUNTIME_EVENT_TYPES: ReadonlySet<string> = new Set([
+  ...RUNTIME_EVENT_PERSISTED_TYPES.filter((type) =>
+    type.startsWith("assistant"),
+  ),
+  ...LEGACY_ASSISTANT_RUNTIME_EVENT_TYPES,
 ]);
 
 export type TrajectoryRecoveryPush = {
@@ -88,25 +106,21 @@ export type TrajectoryRecoveryPush = {
 };
 
 /**
- * 可映射进轨迹的 runtime 生命周期事件白名单（Q4；对齐后端
- * `shouldPersistRuntimeSessionEvent` 扩展集，排除 tool_started/tool_finished——
- * 工具生命周期已由 chat.sse.tool_start/tool_end 呈现，避免重复行）。
+ * 可映射进轨迹的 runtime 生命周期事件白名单（Q4）。
+ *
+ * Batch 2：不再手写清单，由事件契约生成物派生——落盘（session_store）事件减去
+ * 助手增量（专门路径）、工具帧桥（chat_bridge；工具生命周期已由
+ * chat.sse.tool_start/tool_end 呈现，避免重复行）与 provenance 承载类型（不建行）。
+ * 注册表新增落盘生命周期事件会自动进入本集合，经 `runtimeEventToTrajectoryPush`
+ * 的通用 runtime 行渲染——把类型漂移从「静默丢弃」升级为可见行（P0-1）。
  */
 export const RUNTIME_EVENT_TYPES: ReadonlySet<string> = new Set([
-  "approval_requested",
-  "approval_resolved",
-  // P2-8 方案 4：配额驱逐（spawn 闸门 / `/agents cleanup`）的产品事件，
-  // 由父会话流渲染为一行 system note，解释“子会话为何消失、是谁回收的”。
-  "agent.reclaimed",
-  "session_compact_started",
-  "session_compact_completed",
-  "session_compact_skipped",
-  "session_compact_failed",
-  "session_start",
-  "session_end",
-  "session_interrupted",
-  "context_reconciled",
-  "checkpoint_created",
+  ...RUNTIME_EVENT_PERSISTED_TYPES.filter(
+    (type) =>
+      !ASSISTANT_RUNTIME_EVENT_TYPES.has(type) &&
+      !RUNTIME_EVENT_CHAT_BRIDGE_TYPES.includes(type) &&
+      !RUNTIME_EVENT_PROVENANCE_TYPES.includes(type),
+  ),
 ]);
 
 /** 事件是否为 chat SSE 轨迹事件（可重放进轨迹 reducer）。 */

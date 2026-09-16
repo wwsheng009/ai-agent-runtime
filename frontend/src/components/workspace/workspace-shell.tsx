@@ -61,6 +61,7 @@ export function WorkspaceShell({
   onRemoveWorkspaceDirectory,
   onRefreshSession,
   onRetryConnection,
+  streamStalled,
   onCreateSessionInDirectory,
   onMoveRuntimeSession,
   onRenameRuntimeSession,
@@ -387,6 +388,7 @@ export function WorkspaceShell({
           onResolvePendingApproval={onResolvePendingApproval}
           onRefreshSession={onRefreshSession}
           onRetryConnection={onRetryConnection}
+          streamStalled={streamStalled}
           onSelectBacktrackNavigationMessage={onSelectBacktrackNavigationMessage}
           onStopResponding={onStopResponding}
           onSubmit={onSubmit}

@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { consumeSseResponse, parseSsePayload } from "@/api/runtime/sse";
+import {
+  consumeSseResponse,
+  parseSsePayload,
+  SseIdleTimeoutError,
+} from "@/api/runtime/sse";
 
 function createSseResponse(chunks: string[]) {
   const encoder = new TextEncoder();
@@ -84,5 +88,82 @@ describe("runtime sse helpers", () => {
       ["meta", { session_id: "s-1" }],
       ["chunk", { type: "text", content: "hi" }],
     ]);
+  });
+
+  // 故障现场：半开连接不会让 fetch 报错，`reader.read()` 可以永远挂着
+  // （CDP 网络层只到达 13 字节、页面侧消费 21 字节，UI 永久停在
+  // "Streaming output…"）。看门狗必须把「连着但没数据」变成可处理的错误。
+  it("静默超过 idleTimeoutMs：取消底层连接并抛 SseIdleTimeoutError", async () => {
+    vi.useFakeTimers();
+    try {
+      const encoder = new TextEncoder();
+      let cancelled = false;
+      const response = new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(": open\n\n"));
+            // 之后不再写入任何字节：模拟半开连接（不报错、不结束）。
+          },
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { headers: { "Content-Type": "text/event-stream" }, status: 200 },
+      );
+      const onEvent = vi.fn();
+
+      const consumed = consumeSseResponse(response, {
+        idleTimeoutMs: 45_000,
+        onEvent,
+      });
+      const rejection = expect(consumed).rejects.toBeInstanceOf(
+        SseIdleTimeoutError,
+      );
+      await vi.advanceTimersByTimeAsync(45_000);
+
+      await rejection;
+      expect(cancelled).toBe(true);
+      expect(onEvent).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // 反向约束：注释帧（服务端每 15s 一行 `: keepalive`）同样是存活证据，
+  // 空闲会话（after == latest_seq）只有 keepalive，不能被误判成死连接。
+  it("keepalive 注释帧重置看门狗：空闲长连接不被误判", async () => {
+    vi.useFakeTimers();
+    try {
+      const encoder = new TextEncoder();
+      let ticks = 0;
+      const response = new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(": open\n\n"));
+            const timer = setInterval(() => {
+              ticks += 1;
+              controller.enqueue(encoder.encode(": keepalive\n\n"));
+              if (ticks >= 5) {
+                clearInterval(timer);
+                controller.close();
+              }
+            }, 10_000);
+          },
+        }),
+        { headers: { "Content-Type": "text/event-stream" }, status: 200 },
+      );
+      const onEvent = vi.fn();
+
+      const consumed = consumeSseResponse(response, {
+        idleTimeoutMs: 45_000,
+        onEvent,
+      });
+      await vi.advanceTimersByTimeAsync(50_000);
+
+      await expect(consumed).resolves.toBeUndefined();
+      expect(onEvent).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

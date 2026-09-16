@@ -11,7 +11,8 @@
 // 链路各环节分别有单测（resumed-turn / use-resumed-session-turn /
 // use-session-runtime-stream / deltas），本文件只验证它们在真实组合下的接线：
 // 刷新后闸门（renderLiveDeltas + activeTurnId）确实被续传身份打开，页面消费的
-// 身份（liveTurnId / currentSessionResponding）与之一致。
+// 身份（liveTurnId / currentSessionResponding）与之一致，以及刷新后的停止入口
+// （无本地回合 → 必须显式投递 interrupt，见「建议 3」后端 cancel 契约）。
 
 import {
   act,
@@ -29,6 +30,10 @@ import type {
   RuntimeSessionActiveTurn,
   SessionRuntimeEvent,
 } from "@/lib/runtime-api";
+import {
+  getLiveDiagnosticsSnapshot,
+  resetLiveDiagnostics,
+} from "@/lib/live-diagnostics/store";
 import { createRuntimeDeltaCoordinator } from "@/lib/workspace-thread-state";
 import {
   useWorkspaceLive,
@@ -47,9 +52,15 @@ vi.mock("@/lib/runtime-api", async (importOriginal) => {
   };
 });
 
+vi.mock("@/api/runtime/session-turn-control", () => ({
+  requestSessionTurnInterrupt: vi.fn().mockResolvedValue(null),
+}));
+
+import { requestSessionTurnInterrupt } from "@/api/runtime/session-turn-control";
 import { streamSessionRuntime } from "@/lib/runtime-api";
 
 const mockStream = vi.mocked(streamSessionRuntime);
+const mockInterrupt = vi.mocked(requestSessionTurnInterrupt);
 
 type StreamHandlers = Parameters<typeof streamSessionRuntime>[1];
 
@@ -143,7 +154,11 @@ function textOf(thread: Thread): string {
 
 type LiveApi = Pick<
   UseWorkspaceLiveResult,
-  "connectionStatus" | "currentSessionResponding" | "liveTurnId" | "retryConnection"
+  | "connectionStatus"
+  | "currentSessionResponding"
+  | "liveTurnId"
+  | "retryConnection"
+  | "stopResumedTurn"
 >;
 
 function Harness({
@@ -153,6 +168,7 @@ function Harness({
   initialThread,
   trajectoryStore,
   onThreadsChange,
+  onRefreshRuntimeState,
 }: {
   apiRef: { current: LiveApi | null };
   activeTurn: RuntimeSessionActiveTurn | null;
@@ -160,6 +176,7 @@ function Harness({
   initialThread: Thread;
   trajectoryStore: TrajectoryStore;
   onThreadsChange: (thread: Thread) => void;
+  onRefreshRuntimeState?: () => void;
 }) {
   const [thread, setThread] = useState(initialThread);
   const setThreads = useCallback<Dispatch<SetStateAction<Thread[]>>>(
@@ -181,6 +198,7 @@ function Harness({
     localResponding: false,
     localTurnId: null,
     onRuntimeEvent: () => {},
+    refreshRuntimeState: onRefreshRuntimeState,
     selectedThread: thread,
     sessionActiveTurn: serverTurn,
     sessionId: "session-1",
@@ -198,6 +216,8 @@ type RenderedHarness = {
   apiRef: { current: LiveApi | null };
   store: TrajectoryStore;
   thread: () => Thread;
+  /** 模拟 `/runtime` 快照刷新返回的新在途回合（续传认领的唯一入口）。 */
+  rerenderServerTurn: (turn: RuntimeSessionActiveTurn | null) => void;
 };
 
 describe("刷新后续传（runtime/stream 增量接续到被认领的消息）", () => {
@@ -206,6 +226,8 @@ describe("刷新后续传（runtime/stream 增量接续到被认领的消息）"
 
   beforeEach(() => {
     installControllableStream();
+    // 「网络详情」观测 store 是模块级单例：用例之间必须隔离，否则计数会串台。
+    resetLiveDiagnostics();
     container = document.createElement("div");
     document.body.appendChild(container);
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -220,26 +242,40 @@ describe("刷新后续传（runtime/stream 增量接续到被认领的消息）"
     vi.clearAllMocks();
   });
 
-  function renderHarness(serverTurn: RuntimeSessionActiveTurn | null): RenderedHarness {
+  function renderHarness(
+    serverTurn: RuntimeSessionActiveTurn | null,
+    options: { onRefreshRuntimeState?: () => void } = {},
+  ): RenderedHarness {
     const apiRef: { current: LiveApi | null } = { current: null };
     let latest: Thread = refreshedThread();
+    // 与 workspace-page 同源：增量认领协调器跨重渲染保持同一实例
+    // （快照刷新只换 activeTurn prop，认领账目不能被重置）。
     const deltaCoordinator = createRuntimeDeltaCoordinator();
     const trajectoryStore = createTrajectoryStore();
-    act(() => {
-      root.render(
-        <Harness
-          apiRef={apiRef}
-          activeTurn={serverTurn}
-          deltaCoordinator={deltaCoordinator}
-          initialThread={latest}
-          trajectoryStore={trajectoryStore}
-          onThreadsChange={(next) => {
-            latest = next;
-          }}
-        />,
-      );
-    });
-    return { apiRef, store: trajectoryStore, thread: () => latest };
+    const renderWith = (turn: RuntimeSessionActiveTurn | null) => {
+      act(() => {
+        root.render(
+          <Harness
+            apiRef={apiRef}
+            activeTurn={turn}
+            deltaCoordinator={deltaCoordinator}
+            initialThread={latest}
+            trajectoryStore={trajectoryStore}
+            onRefreshRuntimeState={options.onRefreshRuntimeState}
+            onThreadsChange={(next) => {
+              latest = next;
+            }}
+          />,
+        );
+      });
+    };
+    renderWith(serverTurn);
+    return {
+      apiRef,
+      store: trajectoryStore,
+      thread: () => latest,
+      rerenderServerTurn: renderWith,
+    };
   }
 
   /** 运行时通道按 120ms 最小间隔合帧提交：等一次兑现再断言。 */
@@ -298,8 +334,11 @@ describe("刷新后续传（runtime/stream 增量接续到被认领的消息）"
     expect(textOf(thread())).toBe("前半截答案，继续");
   });
 
-  it("没有续传身份时不渲染增量（对照：这正是刷新后「整条流都断了」的表现）", async () => {
-    const { apiRef, thread } = renderHarness(null);
+  it("没有认领身份时不渲染增量，但会主动触发一次快照刷新（未认领回合发现）", async () => {
+    const refresh = vi.fn();
+    const { apiRef, thread } = renderHarness(null, {
+      onRefreshRuntimeState: refresh,
+    });
 
     expect(apiRef.current).toMatchObject({
       currentSessionResponding: false,
@@ -311,8 +350,85 @@ describe("刷新后续传（runtime/stream 增量接续到被认领的消息）"
     });
     await flushRuntimeCommits();
 
+    // 闸门仍关着：归属未定前不往消息上写（这一帧也可能属于别的回合）。
     expect(thread().messages).toHaveLength(2);
     expect(textOf(thread())).toBe("前半截答案");
+    // 但「本页没认领、服务端在产增量」必须触发认领：刷新快照是唯一入口
+    // （续传心跳只在认领之后才启动，见 use-resumed-session-turn）。
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("未认领增量触发节流刷新；快照认领后续传增量写回同一条消息", async () => {
+    const refresh = vi.fn();
+    const { rerenderServerTurn, thread } = renderHarness(null, {
+      onRefreshRuntimeState: refresh,
+    });
+
+    act(() => {
+      calls[0].handlers.onEvent?.(textDelta(1, "，继续"));
+      calls[0].handlers.onEvent?.(textDelta(2, "写完后半截"));
+    });
+    await flushRuntimeCommits();
+
+    // 同一回合的连续帧只换一次快照刷新（发现即可，不能变成每帧一次 GET）。
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    // 「网络详情」观测：未认领回合 / 快照刷新 / 被拦增量在接线层记账——
+    // 这是把「页面不动」归因到「事件到了但闸门关着」的证据（而不是「SSE 没有事件」）。
+    const observed = getLiveDiagnosticsSnapshot("session-1");
+    expect(observed.counters.unownedTurns).toBe(1);
+    expect(observed.counters.snapshotRefreshes).toBe(1);
+    expect(observed.counters.blockedDeltas).toBe(2);
+    expect(observed.gate.rendering).toBe(false);
+
+    // 快照（真实环境里由 refresh 拉回）报告服务端仍在跑 turn-9：续传认领挂载。
+    rerenderServerTurn(activeTurn());
+    expect(thread().messages[thread().messages.length - 1]).toMatchObject({
+      id: "msg-assistant-1",
+      streaming: true,
+      runtimeTurnId: "turn-9",
+    });
+
+    act(() => {
+      calls[0].handlers.onEvent?.(textDelta(3, "，收尾"));
+    });
+    await flushRuntimeCommits();
+
+    // 认领之后闸门重新打开：后续增量继续写进同一条（不另起占位、不再丢帧）。
+    expect(thread().messages).toHaveLength(2);
+    expect(textOf(thread())).toBe("前半截答案，收尾");
+    // 闸门开启后，同一回合的增量不再计入「被拦增量」。
+    const claimed = getLiveDiagnosticsSnapshot("session-1");
+    expect(claimed.gate.rendering).toBe(true);
+    expect(claimed.counters.blockedDeltas).toBe(2);
+  });
+
+  it("刷新后停止：投递 interrupt（带续传回合身份）并主动刷新一次快照", async () => {
+    const refresh = vi.fn();
+    const { apiRef } = renderHarness(activeTurn(), {
+      onRefreshRuntimeState: refresh,
+    });
+
+    await act(async () => {
+      await apiRef.current?.stopResumedTurn();
+    });
+
+    // 回合身份必须带上：后端据此校验，迟到的 stop 不得误伤新回合（409 turn_mismatch）。
+    expect(mockInterrupt).toHaveBeenCalledWith("session-1", "turn-9");
+    // 刷新一次快照让 active_turn 收敛，不必等续传心跳（5s）按钮才变回发送态。
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("没有续传回合时停止是空操作（本地回合停止路径不重复投递）", async () => {
+    const refresh = vi.fn();
+    const { apiRef } = renderHarness(null, { onRefreshRuntimeState: refresh });
+
+    await act(async () => {
+      await apiRef.current?.stopResumedTurn();
+    });
+
+    expect(mockInterrupt).not.toHaveBeenCalled();
+    expect(refresh).not.toHaveBeenCalled();
   });
 
   it("运行时生命周期事件桥接到轨迹快照（可渲染事件 push / 过滤事件前移空洞游标）", async () => {

@@ -54,6 +54,7 @@ export function MessageList({
   onSelectArtifact,
   phase,
   scrollMemoryKey = null,
+  streamStalled = false,
   style,
 }: MessageListProps) {
   const { t } = useTranslation("workspace");
@@ -271,6 +272,30 @@ export function MessageList({
           >
             <span className="size-2 rounded-full animate-pulse bg-accent-teal" />
             {phase ? PHASE_LABELS[phase] : "Runtime stream active"}
+          </div>
+        ) : null}
+
+        {/* 本页流已死但回合未必结束：不静默收场，明确告知并给恢复入口。
+            文案走 i18n（`panels.messages.messageList.streamStalledNotice`），
+            与同区块的连接状态徽标保持同一套语义。 */}
+        {streamStalled && !isResponding ? (
+          <div
+            aria-atomic="true"
+            aria-live="polite"
+            className="inline-flex flex-wrap items-center gap-2 app-text-10 uppercase tracking-[0.14em] text-muted-foreground"
+            role="status"
+          >
+            <span className="size-2 rounded-full bg-destructive" />
+            {t("panels.messages.messageList.streamStalledNotice")}
+            {onRetryConnection ? (
+              <button
+                className="underline underline-offset-2 transition-colors hover:text-foreground"
+                onClick={onRetryConnection}
+                type="button"
+              >
+                {retryLabel}
+              </button>
+            ) : null}
           </div>
         ) : null}
 

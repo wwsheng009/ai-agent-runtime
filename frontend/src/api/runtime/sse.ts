@@ -6,6 +6,8 @@ import {
   type AgentChatStreamMetaPayload,
   type SessionRuntimeEvent,
 } from "@/types/runtime";
+import { beginLiveChannel } from "@/lib/live-diagnostics/store";
+import { type LiveDiagnosticsChannelId } from "@/lib/live-diagnostics/types";
 
 import {
   buildRuntimeUrl,
@@ -18,7 +20,49 @@ type SseConsumeHandlers = {
   onClose?: () => void;
   onEvent: (eventName: string, payload: Record<string, unknown>) => void;
   onOpen?: () => void;
+  /**
+   * 读侧静默看门狗（毫秒）：连续该时长没有从 socket 读到**任何字节**
+   * （`: keepalive` 注释帧同样算存活证据）即判定连接已死。
+   *
+   * 为什么必须有：半开连接不会让浏览器报错，`reader.read()` 可以永远挂着
+   * ——实测故障现场 CDP 网络层只到达 13 字节、页面侧消费 21 字节，而
+   * `isResponding` 永远为 true，UI 永久停在 "Streaming output…"。只有
+   * 「按字节计时的看门狗」能把这种「连着但没数据」变成可处理的错误。
+   *
+   * 命中后取消底层 body（浏览器据此 abort 请求）并抛 SseIdleTimeoutError，
+   * 由调用方决定重连（runtime stream 按游标续传）或降级（chat 流标记
+   * transport=error 并给重试入口）。缺省不启用。
+   */
+  idleTimeoutMs?: number;
+  /**
+   * 观测通道（右侧「会话详情 → 网络详情」）：把本次读取循环的字节数、keepalive、
+   * 业务事件与静默超时写入 live-diagnostics store。缺省不观测——其它 SSE 消费方
+   * 无需改动，也不承担任何额外开销。
+   */
+  diagnostics?: { channel: LiveDiagnosticsChannelId; sessionId?: string | null };
 };
+
+/**
+ * 读侧静默看门狗命中时抛出的错误。
+ *
+ * 单独成类型是为了让调用方把它与「网络错误」「用户 abort」区分开：
+ * 前者要自愈/降级，后者要静默收尾（例如 stopResponding 的 abort）。
+ */
+export class SseIdleTimeoutError extends Error {
+  readonly idleTimeoutMs: number;
+
+  constructor(idleTimeoutMs: number) {
+    super(`runtime stream idle timeout: no bytes for ${idleTimeoutMs}ms`);
+    this.name = "SseIdleTimeoutError";
+    this.idleTimeoutMs = idleTimeoutMs;
+  }
+}
+
+export function isSseIdleTimeoutError(
+  error: unknown,
+): error is SseIdleTimeoutError {
+  return error instanceof SseIdleTimeoutError;
+}
 
 /**
  * SSE 读取循环的让出预算（毫秒）。
@@ -58,6 +102,8 @@ const yieldToEventLoop = (() => {
 
 type SessionRuntimeStreamHandlers = {
   after?: number;
+  /** 读侧静默看门狗（见 SseConsumeHandlers.idleTimeoutMs）；缺省不启用。 */
+  idleTimeoutMs?: number;
   /**
    * 订阅宿主进程内的 live-only 事件（如 `tool.progress`）；这些事件不落
    * EventStore，只在 `live=1` 时随 SSE 投递（payload.live=true）。
@@ -72,6 +118,8 @@ type SessionRuntimeStreamHandlers = {
 };
 
 type AgentChatStreamHandlers = {
+  /** 读侧静默看门狗（见 SseConsumeHandlers.idleTimeoutMs）；缺省不启用。 */
+  idleTimeoutMs?: number;
   onChunk?: (payload: AgentChatStreamChunkPayload) => void;
   onClose?: () => void;
   onDone?: (payload: AgentChatStreamDonePayload) => void;
@@ -114,11 +162,13 @@ function flushSseMessage(
   eventName: string,
   dataLines: string[],
   handlers: SseConsumeHandlers,
+  diagnostics: ReturnType<typeof beginLiveChannel> | null,
 ) {
   const payload = parseSsePayload(dataLines);
   if (payload === null) {
     return;
   }
+  diagnostics?.event(eventName, payload);
   handlers.onEvent(eventName, payload);
 }
 
@@ -130,7 +180,12 @@ export async function consumeSseResponse(
     throw new Error("runtime stream response body is empty");
   }
 
+  // 观测句柄在建连时创建：open/close/字节/事件/静默超时全部落到同一个会话键上。
+  const diagnostics = handlers.diagnostics
+    ? beginLiveChannel(handlers.diagnostics)
+    : null;
   handlers.onOpen?.();
+  diagnostics?.open();
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -138,6 +193,39 @@ export async function consumeSseResponse(
   let eventName = "message";
   let dataLines: string[] = [];
   let lastYieldAt = nowMs();
+
+  // 静默看门狗：定时器在「每次 read 返回」后重置，因此它度量的是
+  // 「距离最后一次收到字节」的时长，而不是「距离最后一次业务事件」。
+  // 这一点很关键：空闲会话（after == latest_seq）唯一的存活证据就是
+  // 服务端每 15s 一行的 `: keepalive`，按事件计时会把健康连接误判成死连接。
+  const idleTimeoutMs = handlers.idleTimeoutMs ?? 0;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let idleTimedOut = false;
+  const clearIdleTimer = () => {
+    if (idleTimer !== undefined) {
+      clearTimeout(idleTimer);
+      idleTimer = undefined;
+    }
+  };
+  const armIdleTimer = () => {
+    if (idleTimeoutMs <= 0) {
+      return;
+    }
+    clearIdleTimer();
+    idleTimer = setTimeout(() => {
+      idleTimedOut = true;
+      // 静默看门狗命中是「连接还在、字节没了」的唯一现场证据，先记账再收连接。
+      diagnostics?.stall(idleTimeoutMs);
+      // cancel 让挂起的 read 以 done 收尾并释放连接（浏览器据此 abort 请求）。
+      // 真正的错误在循环结束后统一抛出，避免在定时器回调里制造未捕获拒绝。
+      try {
+        void reader.cancel().catch(() => {});
+      } catch {
+        // 流已关闭/已锁定时 cancel 可能同步抛错：忽略，循环会在 read 返回后收敛。
+      }
+    }, idleTimeoutMs);
+  };
+  armIdleTimer();
 
   // 只有真的花掉预算才让出：短流（测试 / 小回合）完全不受影响，长流被切成
   // 多个 ≤ 预算的小任务，浏览器有机会在中间渲染。
@@ -152,24 +240,37 @@ export async function consumeSseResponse(
 
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await reader.read().catch((error: unknown) => {
+        // 看门狗命中时不同浏览器可能以 done 收尾、也可能让 read 拒绝：
+        // 两种都归一成同一个可识别错误，调用方只处理一种形态。
+        if (idleTimedOut) {
+          throw new SseIdleTimeoutError(idleTimeoutMs);
+        }
+        throw error;
+      });
       if (done) {
         break;
       }
 
+      armIdleTimer();
+      // 字节数按读取分片累加：keepalive 也算流量——「只剩 keepalive」与
+      // 「完全没字节」是两种不同的故障，面板要能分开看。
+      diagnostics?.bytes(value.byteLength);
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() ?? "";
 
       for (const line of lines) {
         if (line === "") {
-          flushSseMessage(eventName, dataLines, handlers);
+          flushSseMessage(eventName, dataLines, handlers, diagnostics);
           eventName = "message";
           dataLines = [];
           await maybeYield();
           continue;
         }
         if (line.startsWith(":")) {
+          // 注释帧：服务端每 15s 一行的 `: keepalive`。读侧看门狗据此判活。
+          diagnostics?.keepalive();
           continue;
         }
         if (line.startsWith("event:")) {
@@ -180,6 +281,10 @@ export async function consumeSseResponse(
           dataLines.push(line.slice(5).trimStart());
         }
       }
+    }
+
+    if (idleTimedOut) {
+      throw new SseIdleTimeoutError(idleTimeoutMs);
     }
 
     if (buffer.trim()) {
@@ -195,9 +300,11 @@ export async function consumeSseResponse(
       }
     }
 
-    flushSseMessage(eventName, dataLines, handlers);
+    flushSseMessage(eventName, dataLines, handlers, diagnostics);
   } finally {
+    clearIdleTimer();
     handlers.onClose?.();
+    diagnostics?.close();
     reader.releaseLock();
   }
 }
@@ -229,6 +336,8 @@ export async function streamSessionRuntime(
   }
 
   await consumeSseResponse(response, {
+    diagnostics: { channel: "runtime", sessionId },
+    idleTimeoutMs: handlers.idleTimeoutMs,
     onClose: handlers.onClose,
     onOpen: handlers.onOpen,
     onEvent: (eventName, payload) => {
@@ -267,6 +376,8 @@ export async function streamAgentChat(
   }
 
   await consumeSseResponse(response, {
+    diagnostics: { channel: "chat", sessionId: request.session_id },
+    idleTimeoutMs: handlers.idleTimeoutMs,
     onClose: handlers.onClose,
     onOpen: handlers.onOpen,
     onEvent: (eventName, payload) => {

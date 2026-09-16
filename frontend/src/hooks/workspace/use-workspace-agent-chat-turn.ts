@@ -10,20 +10,22 @@ import { useNavigate } from "react-router-dom";
 
 import { useAppSettings } from "@/core/settings";
 import { type Artifact, type ChatMessage, type Thread } from "@/data/mock";
+import { createConnectTimeoutGuard } from "@/hooks/workspace/agent-chat-turn/connect-timeout";
 import { createTurnFinalizer } from "@/hooks/workspace/agent-chat-turn/finalize-turn";
 import { maybeShowDesktopNotification } from "@/hooks/workspace/agent-chat-turn/notifications";
 import {
-  RUNTIME_CONNECT_TIMEOUT_MS,
+  CHAT_STREAM_IDLE_TIMEOUT_MS,
   resolveChatTurnWorkspacePath,
   shouldIgnoreTerminalStreamError,
 } from "@/hooks/workspace/agent-chat-turn/shared";
 import { createThreadFromPrompt } from "@/hooks/workspace/agent-chat-turn/thread-factory";
+import { applyChatStreamStall, useChatStreamStall } from "@/hooks/workspace/agent-chat-turn/stall";
 import { useComposerAttachments } from "@/hooks/workspace/composer/use-composer-attachments";
 import { useComposerDraft } from "@/hooks/workspace/composer/use-composer-draft";
 import { createAgentChatStreamHandlers } from "@/hooks/workspace/agent-chat-turn/stream-handlers";
 import { createStreamingFrameScheduler, STRUCTURAL_COMMIT_INTERVAL_MS } from "@/hooks/workspace/agent-chat-turn/streaming-frame";
 import { createStreamingWriters } from "@/hooks/workspace/agent-chat-turn/streaming-writers";
-import { createTurnRuntimeState } from "@/hooks/workspace/agent-chat-turn/turn-state";
+import { createTurnRuntimeState, type ChatTurnRuntimeState } from "@/hooks/workspace/agent-chat-turn/turn-state";
 import { useChatTurnReasoningEffort } from "@/hooks/workspace/agent-chat-turn/use-reasoning-effort";
 import {
   useRuntimeModelCatalog,
@@ -36,7 +38,9 @@ import { NEW_THREAD_ID } from "@/hooks/workspace/use-workspace-thread-selection"
 import {
   streamAgentChat,
 } from "@/lib/runtime-api";
+import { isSseIdleTimeoutError } from "@/api/runtime/sse";
 import { getSessionLeaseConflictTitle } from "@/api/runtime/shared";
+import { requestSessionTurnInterrupt } from "@/api/runtime/session-turn-control";
 import { normalizeSessionId } from "@/lib/session-id";
 import { hasVisibleText } from "@/lib/chat-view/visible-text";
 import {
@@ -91,8 +95,12 @@ export function useWorkspaceAgentChatTurn({
   const [isResponding, setIsResponding] = useState(false);
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
   const activeTurnIdRef = useRef<string | null>(null);
+  // 在途回合的运行时状态（与 activeTurnIdRef 同生命周期）。停止按钮要按草稿落库后的
+  // currentSessionId 投递 interrupt（该字段由 stream-handlers 就地更新），故持对象引用。
+  const activeTurnStateRef = useRef<ChatTurnRuntimeState | null>(null);
   const [phase, setPhase] = useState<ChatStreamPhase | null>(null);
   const phaseRef = useRef<ChatStreamPhase | null>(null);
+  const stall = useChatStreamStall();
   const activeRequestControllerRef = useRef<AbortController | null>(null);
   const trajectoryStoreRef = useRef<TrajectoryStore | null>(null);
   if (!trajectoryStoreRef.current) {
@@ -188,6 +196,7 @@ export function useWorkspaceAgentChatTurn({
     );
 
     const turnState = createTurnRuntimeState(threadSnapshot);
+    activeTurnStateRef.current = turnState;
     const controller = new AbortController();
 
     const updateCurrentThread = (updater: (thread: Thread) => Thread) => {
@@ -336,24 +345,16 @@ export function useWorkspaceAgentChatTurn({
     // 新 turn 开始：轨迹快照 reset（同步于首个 SSE 事件之前，避免
     // 导航渲染迟到的 effect reset 打断流事件收集造成 seq gap）。
     trajectoryStore.reset();
+    stall.clear();
     activeTurnIdRef.current = turnId;
     setActiveTurnId(turnId);
     setIsResponding(true);
     setPhaseAndRef("connecting");
     frameScheduler.attachVisibilityListener();
     activeRequestControllerRef.current = controller;
-    // 连接超时保护：后端可能因共享 SQLite 被其他进程锁住而无法在有限时间内
-    // 建立 SSE 流（表现为 "Connecting to runtime…" 无限旋转）。若 N 秒内未收到
-    // 任何 runtime 事件（onMeta 等会置 turnState.receivedRuntimeActivity），主动中止请求
-    // 并进入错误状态，而不是让前端永远卡在 connecting 阶段。
-    let connectTimeoutId: number | undefined;
-    const startConnectTimeout = () => {
-      connectTimeoutId = window.setTimeout(() => {
-        if (turnState.receivedRuntimeActivity || turnState.turnFinalized || controller.signal.aborted) {
-          return;
-        }
-        turnState.connectTimedOut = true;
-        controller.abort();
+    const connectTimeout = createConnectTimeoutGuard({
+      controller,
+      onTimeout: () => {
         const message =
           "连接 runtime 超时（可能被其他 aicli 进程占用的共享数据库锁定），请稍后重试。";
         updateStreamingError(message);
@@ -363,15 +364,10 @@ export function useWorkspaceAgentChatTurn({
           transport: "error",
           lastError: message,
         }));
-      }, RUNTIME_CONNECT_TIMEOUT_MS);
-    };
-    const clearConnectTimeout = () => {
-      if (connectTimeoutId !== undefined && typeof window !== "undefined") {
-        window.clearTimeout(connectTimeoutId);
-      }
-      connectTimeoutId = undefined;
-    };
-    startConnectTimeout();
+      },
+      turnState,
+    });
+    connectTimeout.start();
     if (selectedThread.id === NEW_THREAD_ID) {
       startTransition(() => {
         navigate(`/workspace/chats/${threadId}`);
@@ -400,6 +396,7 @@ export function useWorkspaceAgentChatTurn({
         await streamAgentChat(
           requestPayload,
           {
+            idleTimeoutMs: CHAT_STREAM_IDLE_TIMEOUT_MS,
             signal: controller.signal,
             ...createAgentChatStreamHandlers({
               assistantMessageId,
@@ -430,6 +427,12 @@ export function useWorkspaceAgentChatTurn({
           // 消息段错误提示），此处直接返回，避免 finalizeTurn 清空 lastError。
           return;
         }
+        if (isSseIdleTimeoutError(error)) {
+          // 读侧静默看门狗命中：本页流已死，但回合 detached，服务端可能仍在跑。
+          stall.mark();
+          applyChatStreamStall({ notifyFailure, updateCurrentThread, updateStreamingError });
+          return;
+        }
         if (controller.signal.aborted) {
           finalizeTurn({}, { stopped: true });
           return;
@@ -455,7 +458,7 @@ export function useWorkspaceAgentChatTurn({
         }));
         notifyFailure(message);
       } finally {
-        clearConnectTimeout();
+        connectTimeout.clear();
         frameScheduler.cancel();
         frameScheduler.detachVisibilityListener();
         if (activeRequestControllerRef.current === controller) {
@@ -464,6 +467,9 @@ export function useWorkspaceAgentChatTurn({
         if (activeTurnIdRef.current === turnId) {
           activeTurnIdRef.current = null;
           setActiveTurnId(null);
+        }
+        if (activeTurnStateRef.current === turnState) {
+          activeTurnStateRef.current = null;
         }
         deltaCoordinator?.endTurn(turnId);
         setIsResponding(false);
@@ -478,6 +484,12 @@ export function useWorkspaceAgentChatTurn({
   }
 
   function stopResponding() {
+    // 建议 3（后端 cancel 契约）：abort 只让本地 UI 收尾，服务端 detached 回合仍在跑，
+    // 因此带回合身份投递 interrupt（best-effort，失败不阻塞本地停止）。
+    void requestSessionTurnInterrupt(
+      activeTurnStateRef.current?.currentSessionId,
+      activeTurnIdRef.current,
+    );
     activeRequestControllerRef.current?.abort();
   }
 
@@ -485,8 +497,10 @@ export function useWorkspaceAgentChatTurn({
     composerAttachments,
     draft,
     isResponding,
+    streamStalled: stall.streamStalled,
     activeTurnId,
     phase,
+    clearStreamStall: stall.clear,
     trajectoryStore,
     modelOptions,
     providerOptions,

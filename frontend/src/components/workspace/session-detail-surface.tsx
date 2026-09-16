@@ -30,6 +30,7 @@ import {
   resolveSessionDetailState,
 } from "@/components/workspace/session-detail-panel-shared";
 import { type WorkspacePanelThreadRelation } from "@/components/workspace/panel-registry";
+import { SessionDetailNetworkSection } from "@/components/workspace/session-detail-network";
 import {
   type WorkspaceThreadRelationKind,
   type WorkspaceThreadTransportKind,
@@ -266,6 +267,9 @@ export function SessionDetailSurface({
       {threadRelation ? (
         <SessionDetailRelationBlock relation={threadRelation} />
       ) : null}
+
+      {/* 观测块常驻（不依赖会话快照加载状态）：它要回答的正是「快照/渲染没动静」时的归因问题。 */}
+      <SessionDetailNetworkSection sessionId={sessionId} />
 
       {error ? (
         <div className="flex items-start gap-2 rounded-card border border-border bg-surface-softer px-2.5 py-2 text-xs text-analytics-danger">

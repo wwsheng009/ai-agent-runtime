@@ -51,4 +51,71 @@ export const enWorkspacePanelsSessionDetail = {
     tags: "Tags",
     summary: "Summary",
   },
+  network: {
+    title: "Network details",
+    channels: {
+      runtime: "Runtime stream",
+      chat: "Direct turn",
+    },
+    state: {
+      active: "Connected",
+      inactive: "Not connected",
+    },
+    fields: {
+      lastFrame: "Last bytes",
+      lastEvent: "Last event",
+      lastKeepalive: "Last keepalive",
+      events: "Events",
+      keepalives: "Keepalives",
+      bytes: "Bytes",
+      stalls: "Idle stalls",
+      errors: "Errors",
+      cursor: "Cursor",
+      opens: "Opens/closes",
+      gap: "Frame gap",
+      never: "None yet",
+      none: "—",
+    },
+    gate: {
+      title: "Render gate",
+      open: "Open",
+      closed: "Closed",
+      blockedDeltas: "Blocked deltas",
+      unownedTurns: "Unowned turns",
+      snapshotRefreshes: "Snapshot refreshes",
+      turn: "Live turn",
+      none: "None",
+    },
+    dom: {
+      title: "DOM activity",
+      changes: "Changes",
+      lastChange: "Last change",
+      observing: "Message list attached",
+      detached: "Message list not found",
+    },
+    frames: {
+      title: "Recent frames",
+      empty: "No frames received yet",
+      keepalive: "Keepalive",
+    },
+    verdict: {
+      states: {
+        healthy: "Healthy",
+        renderBlocked: "Arrived, not rendered",
+        noEvents: "No events",
+        channelError: "Channel error",
+        idle: "Idle",
+      },
+      hints: {
+        healthy: "SSE is pushing data and the gate is open: the render path is healthy.",
+        renderBlocked:
+          "Deltas arrive over SSE but the front-end gate drops them: the fault is in rendering, not the network.",
+        noEvents:
+          "The channel is open but no bytes arrived recently: the fault is in the SSE live / server / proxy path, not in front-end rendering.",
+        channelError:
+          "The connection reported errors or fell back after repeated failures: check the network and the runtime service first.",
+        idle: "The channel is open; no in-flight turn is producing data right now.",
+      },
+    },
+  },
 } as const;

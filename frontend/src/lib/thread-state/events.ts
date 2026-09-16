@@ -5,7 +5,7 @@
 import { type Artifact, type ChatMessage, type MessageSegment, type Thread } from "@/data/mock";
 import { type SessionRuntimeEvent } from "@/types/runtime";
 
-import { getRuntimeBridgeKind } from "./deltas";
+import { getRuntimeBridgeKind, isAssistantImageProgressEvent } from "./deltas";
 import { applyChatSseBridgeFrame, updateLatestAssistantMessage } from "./events-live";
 import { buildGeneratedImagePlaceholderSegment, upsertGeneratedImageSegment } from "./generated-images";
 import { buildRuntimeEventKey, buildSessionRuntimeEventsArtifact, MAX_RUNTIME_EVENTS } from "./history-artifacts";
@@ -58,7 +58,7 @@ export function applyRuntimeEventToThread(
   // Keep the historical snapshot behavior for image progress.  Text and
   // reasoning deltas are gated to the live path, but image placeholders are
   // also useful while replaying a session that was restored mid-generation.
-  if (event.type === "assistant.image_progress") {
+  if (isAssistantImageProgressEvent(event.type)) {
     const imageSegment = buildGeneratedImagePlaceholderSegment(event.payload);
     if (imageSegment) {
       nextThread = updateLatestAssistantMessage(nextThread, (message) => ({

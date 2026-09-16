@@ -9,6 +9,7 @@ import {
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { SseIdleTimeoutError } from "@/api/runtime/sse";
 import type { Thread } from "@/data/mock";
 import { useSessionRuntimeStream } from "@/hooks/workspace/use-session-runtime-stream";
 import {
@@ -41,6 +42,8 @@ type StreamCall = {
   aborted: boolean;
   /** 正常收流（服务端/代理关闭长连接），区别于 abort 的强制中断。 */
   finish: () => void;
+  /** 连接层失败：fetch/SSE 抛错，含读侧静默看门狗抛出的 SseIdleTimeoutError。 */
+  fail: (error: unknown) => void;
 };
 
 const calls: StreamCall[] = [];
@@ -48,12 +51,13 @@ const calls: StreamCall[] = [];
 function installControllableStream() {
   calls.length = 0;
   mockStream.mockImplementation((_sessionId, handlers) => {
-    return new Promise<void>((resolve) => {
+    return new Promise<void>((resolve, reject) => {
       const call: StreamCall = {
         after: handlers.after ?? 0,
         handlers,
         aborted: false,
         finish: () => resolve(),
+        fail: (error: unknown) => reject(error),
       };
       calls.push(call);
       handlers.signal?.addEventListener("abort", () => {
@@ -284,6 +288,36 @@ describe("useSessionRuntimeStream connection status and manual retry", () => {
       calls[0].handlers.onErrorEvent?.({ error: "boom" });
     });
     expect(apiRef.current?.connectionStatus).toBe("offline");
+  });
+
+  // 故障现场：半开连接「建连成功 → 永久静默」既不报错也不结束，旧实现让徽标
+  // 一直显示在线、增量再也不出现。看门狗命中后按游标重连，且重连的 onOpen 不再
+  // 是恢复信号——只有真正收到字节才算恢复。
+  it("stays reconnecting after a silent stall until real bytes arrive", async () => {
+    const { apiRef } = renderHarness();
+
+    act(() => {
+      calls[0].handlers.onOpen?.();
+    });
+    expect(apiRef.current?.connectionStatus).toBe("online");
+
+    await act(async () => {
+      calls[0].fail(new SseIdleTimeoutError(45_000));
+      await new Promise<void>((resolve) => setTimeout(resolve, 1_200));
+    });
+
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    expect(apiRef.current?.connectionStatus).toBe("reconnecting");
+
+    act(() => {
+      calls[1].handlers.onOpen?.();
+    });
+    expect(apiRef.current?.connectionStatus).toBe("reconnecting");
+
+    act(() => {
+      calls[1].handlers.onEvent?.(textDelta(1, "Hello"));
+    });
+    expect(apiRef.current?.connectionStatus).toBe("online");
   });
 
   it("manual retry reuses the local last seq and does not re-render consumed deltas", async () => {

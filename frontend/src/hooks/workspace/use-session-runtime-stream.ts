@@ -23,6 +23,7 @@ import {
   type RuntimeLiveDeltaSink,
 } from "@/lib/workspace-thread-state";
 import { createStreamingFrameScheduler } from "./agent-chat-turn/streaming-frame";
+import { createStallGuard, RUNTIME_STREAM_IDLE_TIMEOUT_MS } from "./session-stream-stall";
 
 /** 方案B：重连循环连续失败达到该阈值才把 thread 标记为降级（防瞬断抖动）。 */
 const STREAM_FAILURE_THRESHOLD = 3;
@@ -294,6 +295,14 @@ export function useSessionRuntimeStream({
       // 防抖：连续失败达到阈值才标记 thread error，偶发瞬断（循环重连
       // 场景的常见噪音）不会把 thread 粘滞在降级状态。
       let consecutiveFailures = 0;
+      // 状态写入收敛到一处：同 key 同 status 保持原引用，避免无意义重渲染。
+      const setStreamStatus = (status: ConnectionStatus) =>
+        setStatusState((current) =>
+          current?.key === sessionKey && current.status === status
+            ? current
+            : { key: sessionKey, status },
+        );
+      const stallGuard = createStallGuard();
       while (!controller.signal.aborted) {
         let streamFailed = false;
         try {
@@ -308,6 +317,7 @@ export function useSessionRuntimeStream({
               runtimeSeqRef.current[sessionId] ?? 0,
               getReplayCursorRef.current?.() ?? 0,
             ),
+            idleTimeoutMs: RUNTIME_STREAM_IDLE_TIMEOUT_MS,
             // P1-5 方案 2：父流订阅 live-only 事件——子会话 `subagent.progress`
             // 节流镜像与父会话自身 `tool.progress` 只在 `live=1` 时随 SSE 投递
             // （不落库、无持久化 seq，`trajectoryEventAction` 按 seq=0 即时应用）。
@@ -319,21 +329,19 @@ export function useSessionRuntimeStream({
             // 「连接中… 重试」，把健康连接误报成假故障。与日志流 onOpen→open
             // 同口径；成功建连同时打断「连续失败」计数（瞬断抖动不粘滞降级）。
             onOpen: () => {
+              // 静默超时后的重连：建连成功 ≠ 有数据，保持 reconnecting 等 onEvent。
+              if (stallGuard.holdReconnecting) {
+                setStreamStatus("reconnecting");
+                return;
+              }
               consecutiveFailures = 0;
-              setStatusState((current) =>
-                current?.key === sessionKey && current.status === "online"
-                  ? current
-                  : { key: sessionKey, status: "online" },
-              );
+              setStreamStatus("online");
             },
             onEvent: (event) => {
-              // 收到事件 = 通道已恢复；重置连续失败计数。
+              // 收到事件 = 通道已恢复；重置连续失败计数与静默标记。
+              stallGuard.markAlive();
               consecutiveFailures = 0;
-              setStatusState((current) =>
-                current?.key === sessionKey && current.status === "online"
-                  ? current
-                  : { key: sessionKey, status: "online" },
-              );
+              setStreamStatus("online");
               onTrajectoryEventRef.current?.(event);
               onRuntimeEventRef.current?.(event);
 
@@ -415,17 +423,15 @@ export function useSessionRuntimeStream({
             },
             onErrorEvent: (payload) => {
               streamFailed = true;
+              // 服务端显式 error 帧属于「有信号」的结束，不算静默超时。
+              stallGuard.markAlive();
               // 方案B 防抖：SSE error 事件同样计入连续失败，达到阈值才标记降级。
               consecutiveFailures += 1;
               const nextStatus: ConnectionStatus =
                 consecutiveFailures >= STREAM_FAILURE_THRESHOLD
                   ? "offline"
                   : "reconnecting";
-              setStatusState((current) =>
-                current?.key === sessionKey && current.status === nextStatus
-                  ? current
-                  : { key: sessionKey, status: nextStatus },
-              );
+              setStreamStatus(nextStatus);
               const message =
                 typeof payload.error === "string" && payload.error.trim()
                   ? payload.error.trim()
@@ -453,20 +459,16 @@ export function useSessionRuntimeStream({
             return;
           }
           streamFailed = true;
-          const message = getErrorMessageRef.current(
+          const message = stallGuard.noteFailure(
             error,
-            "failed to connect runtime stream",
+            getErrorMessageRef.current,
           );
           consecutiveFailures += 1;
           const nextStatus: ConnectionStatus =
             consecutiveFailures >= STREAM_FAILURE_THRESHOLD
               ? "offline"
               : "reconnecting";
-          setStatusState((current) =>
-            current?.key === sessionKey && current.status === nextStatus
-              ? current
-              : { key: sessionKey, status: nextStatus },
-          );
+          setStreamStatus(nextStatus);
           if (consecutiveFailures >= STREAM_FAILURE_THRESHOLD) {
             // 同上：先冲刷挂起的增量，再写降级标记。
             runtimeCommitScheduler.flush();

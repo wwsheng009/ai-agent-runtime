@@ -108,7 +108,10 @@ export type WorkspaceShellProps = {
   /** P1-8：会话运行时流连接状态（顶栏与消息流尾统一呈现）。 */
   connectionStatus?: ConnectionStatus | null;
   draft: string;
+  /** 会话是否在生成回复（本地回合或刷新后认领的续传回合）：composer 停止态与流尾提示都按它判定。 */
   isResponding: boolean;
+  /** 读侧静默看门狗命中：本页 chat 流已停止接收（服务端回合可能仍在跑）。 */
+  streamStalled?: boolean;
   modelOptions: string[];
   phase?: ChatStreamPhase | null;
   reasoningEffortDefault: string;

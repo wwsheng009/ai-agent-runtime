@@ -306,6 +306,40 @@ describe("MessageList", () => {
     }
   });
 
+  // 读侧静默看门狗命中后：本页流已死、服务端回合可能仍在跑。必须显式告知
+  // 并给恢复入口，而不是让 "Streaming output…" 永远挂着（half-open 连接）。
+  it("surfaces a stalled page stream at the stream tail with manual retry", () => {
+    const markup = renderToStaticMarkup(
+      <MessageList
+        artifacts={[]}
+        isResponding={false}
+        messages={[]}
+        onRetryConnection={() => {}}
+        onSelectArtifact={() => {}}
+        streamStalled
+      />,
+    );
+
+    expect(markup).toContain("服务端回合可能仍在运行");
+    expect(markup).toContain('aria-live="polite"');
+    expect(markup).toContain("重试");
+  });
+
+  it("keeps the stalled notice hidden while the turn is still responding", () => {
+    const markup = renderToStaticMarkup(
+      <MessageList
+        artifacts={[]}
+        isResponding
+        messages={[]}
+        onRetryConnection={() => {}}
+        onSelectArtifact={() => {}}
+        streamStalled
+      />,
+    );
+
+    expect(markup).not.toContain("服务端回合可能仍在运行");
+  });
+
   it("renders branch entries on every completed turn tail, not only the transcript tail", () => {
     const messages: ChatMessage[] = [
       {

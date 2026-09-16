@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 
 import { expect, test } from "./fixtures";
-import { resetMockState } from "./support";
+import { resetMockState, seedSession, seedSessionHistory } from "./support";
 
 // e2e acceptance coverage for the workspace streaming chat surface
 // (Phase 1: G1 reasoning-first, G2 tool card lifecycle, G5 scroll-follow,
@@ -319,7 +319,28 @@ test("G8a: server-side interruption surfaces a stopped marker", async ({ page })
   });
 });
 
-test("G8b: the Stop shortcut aborts a live stream", async ({ page }) => {
+test("G8b: the Stop shortcut aborts a live stream and cancels the server turn", async ({ page }) => {
+  // 建议 3（后端 cancel 契约）：停止不只要 abort 本地 SSE —— resume_on_disconnect
+  // 之后服务端回合仍在跑，必须把 interrupt 命令投到 /runtime/commands 且带上
+  // 正在跑的那个回合身份。mock server 未实现该端点，这里拦截并记录请求体。
+  const commandBodies: Array<Record<string, unknown>> = [];
+  await page.route(
+    /\/api\/runtime\/sessions\/[^/]+\/runtime\/commands$/,
+    async (route) => {
+      commandBodies.push(JSON.parse(route.request().postData() ?? "{}"));
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          ok: true,
+          cancelled: true,
+          reason: "cancelled",
+          channel: "active_turn",
+        }),
+      });
+    },
+  );
+
   await sendPrompt(page, "interrupt this stream");
 
   // chunks are flowing
@@ -331,4 +352,89 @@ test("G8b: the Stop shortcut aborts a live stream", async ({ page }) => {
 
   // the assistant message is marked stopped instead of completed
   await expect(page.getByText("Stopped", { exact: true }).first()).toBeVisible();
+
+  // 服务端一侧真的收到了中断，而不是只停了本地渲染
+  await expect.poll(() => commandBodies.length).toBeGreaterThan(0);
+  expect(commandBodies[0]?.type).toBe("interrupt");
+  expect(String(commandBodies[0]?.turn_id ?? "")).not.toBe("");
+});
+
+test("G8c: 刷新后的续传回合仍能停止（无本地请求可 abort → 显式投递 interrupt）", async ({
+  page,
+}) => {
+  // P4-刷新续传 + 建议 3（后端 cancel 契约）：刷新后的页面本地没有回合，停止按钮
+  // 由会话级 currentSessionResponding 驱动——它必须出现，且点击后把 interrupt 投给
+  // 服务端（带服务端仍在跑的那个回合身份），否则停止只是本地幻觉。
+  // mock 静态服务不报告在途回合，这里按真实后端契约构造快照与命令响应。
+  await seedSession(page.request, { id: "e2e-session-1", title: "Resumed turn" });
+  await seedSessionHistory(page.request, "e2e-session-1", [
+    { role: "user", content: "继续写完" },
+    { role: "assistant", content: "前半截答案" },
+  ]);
+
+  let activeTurn: Record<string, unknown> | null = {
+    session_id: "e2e-session-1",
+    turn_id: "e2e-turn-9",
+    source: "agent_chat_stream",
+    detached: true,
+  };
+  const commandBodies: Array<Record<string, unknown>> = [];
+
+  // GET /runtime 快照：本会话此刻仍在服务端执行 turn-9（续传身份的唯一来源）。
+  await page.route(/\/api\/runtime\/sessions\/[^/]+\/runtime$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        session_id: "e2e-session-1",
+        state: null,
+        active_turn: activeTurn,
+      }),
+    });
+  });
+  await page.route(
+    "**/api/runtime/sessions/e2e-session-1/runtime/stream*",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: "",
+      });
+    },
+  );
+  await page.route(
+    /\/api\/runtime\/sessions\/[^/]+\/runtime\/commands$/,
+    async (route) => {
+      commandBodies.push(JSON.parse(route.request().postData() ?? "{}"));
+      // 取消成功后：服务端不再报告在途回合 → 快照收敛，停止态回落。
+      activeTurn = null;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          ok: true,
+          cancelled: true,
+          reason: "cancelled",
+          channel: "active_turn",
+          turn_id: "e2e-turn-9",
+        }),
+      });
+    },
+  );
+
+  await page.goto("/workspace/chats/e2e-session-1");
+
+  // 半截答复被认领为在途回合 → composer 出现停止按钮（本地 isResponding 为 false）。
+  const stop = page.getByRole("button", { name: "Stop response" });
+  await expect(stop).toBeVisible({ timeout: 30_000 });
+
+  await stop.click();
+
+  await expect.poll(() => commandBodies.length).toBeGreaterThan(0);
+  expect(commandBodies[0]?.type).toBe("interrupt");
+  // 带上续传回合身份：错代的 stop 不得误伤新回合（后端 409 turn_mismatch）。
+  expect(commandBodies[0]?.turn_id).toBe("e2e-turn-9");
+
+  // 快照收敛后按钮回到发送态（停止不是一次性假动作）。
+  await expect(stop).toBeHidden({ timeout: 15_000 });
 });

@@ -99,6 +99,7 @@ export function WorkspacePage() {
     composerAttachments,
     draft,
     isResponding,
+    streamStalled,
     modelOptions,
     phase,
     providerOptions,
@@ -116,6 +117,7 @@ export function WorkspacePage() {
     setSelectedModel,
     setSelectedProvider,
     stopResponding,
+    clearStreamStall,
     submitPrompt,
     trajectoryStore,
   } = useWorkspaceAgentChatTurn({
@@ -261,6 +263,12 @@ export function WorkspacePage() {
   // 避免停止后卡片仍挂在 composer 上沿。
   function handleStopResponding() {
     convergePendingInteractions("session_interrupted");
+    if (!activeTurnId) {
+      // P4-刷新续传：刷新后的页面没有本地请求可 abort（停止按钮由会话级
+      // currentSessionResponding 驱动），必须显式把 interrupt 投给服务端；
+      // 本地回合在跑时不走这里——chat-turn hook 已带本地回合身份投递，避免重复。
+      void stopResumedTurn();
+    }
     stopResponding();
   }
   // 尾部优先回放：先回放「最近一页」事件，再放行实时流建连。顺序很重要——
@@ -295,6 +303,7 @@ export function WorkspacePage() {
     connectionStatus,
     currentSessionResponding,
     retryConnection,
+    stopResumedTurn,
   } = useWorkspaceLive({
     deltaCoordinator: runtimeDeltaCoordinator,
     localResponding: isResponding,
@@ -337,6 +346,9 @@ export function WorkspacePage() {
   // 徽标不变，用户会认为重试失效。降级时追加一次权威历史探活：成功即恢复，
   // 失败保留降级并刷新原因（回合进行中不做，避免覆盖在途的流式消息）。
   function handleRetryConnection() {
+    // 读侧静默看门狗命中后的手动重试：先清掉「本页流已死」提示，再走既有
+    // 会话流重连 + 权威历史探活（两者都成功才算真正恢复）。
+    clearStreamStall();
     retryConnection();
     if (!isResponding && selectedThread?.transport === "error") {
       void recoverSessionHistory();
@@ -435,7 +447,8 @@ export function WorkspacePage() {
       composerAttachments={composerAttachments}
       connectionStatus={connectionStatusForUi}
       draft={draft}
-      isResponding={isResponding}
+      isResponding={currentSessionResponding}
+      streamStalled={streamStalled}
       modelOptions={modelOptions}
       phase={phase}
       reasoningEffortDefault={reasoningEffortDefault}
