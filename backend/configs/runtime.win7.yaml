@@ -32,6 +32,12 @@ background:
   # -1 keeps explicitly rerunnable jobs recovering until they are cancelled.
   recoveryMaxAttempts: -1
   recoveryBackoffSchedule: [30s, 1m, 2m, 3m, 5m]
+  # 作业持久化：显式 storePath 指向 aicli local 会话共用的 background.sqlite，
+  # 使 web 服务提交的作业跨重启保留，并与 CLI 会话双向可见（同一个文件）。
+  # WAL + busy_timeout + 单连接池 + 锁重试的统一并发基线见 internal/sqliteutil；
+  # 显式 storePath 不依赖 sessionRuntime.defaultPersistence，因此不会把
+  # Team/AgentControl/Artifact 一并级联到共享目录。
+  storePath: ~/.aicli/sessions/runtime/background.sqlite
 
 context:
   # Used only when neither provider/model capability nor context.maxPromptTokens
