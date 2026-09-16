@@ -361,9 +361,16 @@
   --app-chat-content-width: clamp(680px, 64cqw, 920px);
   --app-chat-content-width-dock: calc(var(--app-chat-content-width) - 32px);
   --app-chat-content-width-composer: calc(var(--app-chat-content-width) + 32px);
+  /* 聊天轴的 `.app-text-N` 阶梯：与 root 轴逐级一一对应（7 档全备），
+     比值取自「默认聊天基准 15px ÷ 默认 root 基准 16px」，因此 delta = 0 时
+     每个档位渲染值与 root 轴完全相同；一旦移动「聊天字号」滑杆，
+     聊天作用域内的所有文本会整体同步位移，不再有掉队的固定档位。 */
   --app-chat-font-size-9: calc(var(--app-chat-font-size) * 0.6);
   --app-chat-font-size-10: calc(var(--app-chat-font-size) * 0.6666667);
+  --app-chat-font-size-10-5: calc(var(--app-chat-font-size) * 0.7);
   --app-chat-font-size-11: calc(var(--app-chat-font-size) * 0.7333333);
+  --app-chat-font-size-12: calc(var(--app-chat-font-size) * 0.8);
+  --app-chat-font-size-12-5: calc(var(--app-chat-font-size) * 0.8333333);
   --app-chat-font-size-13: calc(var(--app-chat-font-size) * 0.8666667);
   --app-code-font-size: 13px;
   --app-code-line-height: 1.55;

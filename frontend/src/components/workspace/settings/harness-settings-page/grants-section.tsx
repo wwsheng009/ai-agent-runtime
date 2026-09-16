@@ -108,7 +108,13 @@ export function HarnessGrantsSection({
                       </span>
                       {grant.scope ? <Badge>{grant.scope}</Badge> : null}
                     </div>
-                    <p className="mt-1 app-inline-mono break-all text-sm text-muted-foreground">
+                    {/* 不给 `text-sm`：`.text-sm` 与 `.app-inline-mono` 同为单类选择器，
+                        Tailwind 工具类在产物中后出现 → 会盖掉 .app-inline-mono 的
+                        `calc(var(--app-code-font-size) - 1px)`，把这行授权 pattern 从
+                        码字轴 12px 拉到界面轴 14px。同目录的路径展示（本文件 L59、
+                        workspace-section L46、about-settings-page 等）都是裸
+                        `app-inline-mono`，此处对齐同一约定。 */}
+                    <p className="mt-1 app-inline-mono break-all text-muted-foreground">
                       {grant.pattern || t("harness.toolWideGrant")}
                     </p>
                   </div>

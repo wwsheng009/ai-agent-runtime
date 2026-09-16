@@ -23,7 +23,9 @@ export function ArtifactMetadataAside({
           <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
             {t("panels.artifacts.detail.artifactPath")}
           </div>
-          <div className="app-inline-mono mt-2 break-all text-sm text-foreground">
+          {/* 不写 text-sm：`.text-sm` 会覆盖 `.app-inline-mono` 的码字轴字号
+              （级联实测 14px root 轴 vs 12px 码字轴），留下裸宿主类即随「码字字号」滑杆。 */}
+          <div className="app-inline-mono mt-2 break-all text-foreground">
             {artifact.path}
           </div>
         </section>

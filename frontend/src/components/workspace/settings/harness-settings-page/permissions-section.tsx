@@ -42,7 +42,9 @@ export function HarnessPermissionsSection({
               />
             }
           >
-            <p className="app-inline-mono break-all text-sm text-muted-foreground">
+            {/* 不给 `text-sm`：会盖掉 `.app-inline-mono` 的码字轴字号（详见
+                grants-section 同处注释），与本目录其它路径展示保持同一约定。 */}
+            <p className="app-inline-mono break-all text-muted-foreground">
               {permissions?.source_path ||
                 (workspacePath
                   ? `${workspacePath}/.aicli/permissions.yaml`

@@ -83,13 +83,6 @@ a {
   text-decoration: none;
 }
 
-button,
-input,
-textarea,
-select {
-  font: inherit;
-}
-
 textarea.font-mono,
 input.font-mono,
 .app-code-editor {
@@ -403,24 +396,38 @@ textarea::placeholder {
     font-size: var(--app-root-font-size-13);
   }
 
-  .app-chat-copy .app-text-9,
-  .app-chat-input .app-text-9 {
-    font-size: var(--app-chat-font-size-9);
-  }
-
-  .app-chat-copy .app-text-10,
-  .app-chat-input .app-text-10 {
-    font-size: var(--app-chat-font-size-10);
-  }
-
-  .app-chat-copy .app-text-11,
-  .app-chat-input .app-text-11 {
-    font-size: var(--app-chat-font-size-11);
-  }
-
-  .app-chat-copy .app-text-13,
-  .app-chat-input .app-text-13 {
-    font-size: var(--app-chat-font-size-13);
+  /* 聊天轴作用域（§13 C4）：转录列 / 正文 / 输入框 / 过程行 / 气泡内，
+     把 root 轴的 `.app-text-N` 阶梯**整体重绑**到聊天轴 token。
+     原理：`.app-text-N` 只读 `--app-root-font-size-N`，在此作用域内重声明该变量，
+     后代与宿主自身（如 `class="app-text-12 app-chat-copy"`）一并生效，
+     无需逐档列举类名，也不会与码字轴（走 `--app-code-font-size-N`）互相覆盖。
+     默认配置下聊天轴 7 档与 root 轴逐项等值（15 × 0.6/0.6667/0.7/0.7333/
+     0.8/0.8333/0.8667 = 9/10/10.5/11/12/12.5/13），因此 delta = 0 时渲染零变化，
+     差异只体现在「由哪根滑杆驱动」。 */
+  :is(
+    .app-chat-scope,
+    .app-chat-copy,
+    .app-chat-input,
+    .app-chat-process-row,
+    .app-chat-turn-process,
+    .app-chat-bubble
+  ) {
+    --app-root-font-size-9: var(--app-chat-font-size-9);
+    --app-root-font-size-10: var(--app-chat-font-size-10);
+    --app-root-font-size-10-5: var(--app-chat-font-size-10-5);
+    --app-root-font-size-11: var(--app-chat-font-size-11);
+    --app-root-font-size-12: var(--app-chat-font-size-12);
+    --app-root-font-size-12-5: var(--app-chat-font-size-12-5);
+    --app-root-font-size-13: var(--app-chat-font-size-13);
+    /* Tailwind v4 的字阶工具类同样是 `font-size: var(--text-sm)` 形式
+       （实测产物：`--text-sm: 0.875rem` + `.text-sm { font-size: var(--text-sm) }`），
+       因此在同一作用域内一并重绑，聊天语境里残余的 `text-xs/sm/base/lg` 也归入聊天轴。
+       比值 = 默认像素 ÷ 默认聊天基准 15px（12/14/16/18 → 0.8/0.9333/1.0667/1.2），
+       行高变量 `--text-*--line-height` 是无单位比值，随字号自动同步，无需重绑。 */
+    --text-xs: calc(var(--app-chat-font-size) * 0.8);
+    --text-sm: calc(var(--app-chat-font-size) * 0.9333333);
+    --text-base: calc(var(--app-chat-font-size) * 1.0666667);
+    --text-lg: calc(var(--app-chat-font-size) * 1.2);
   }
 
   .app-code-surface .app-text-9,
@@ -470,6 +477,18 @@ textarea::placeholder {
   .app-inline-mono .app-text-13,
   .font-mono.app-text-13 {
     font-size: var(--app-code-font-size-13);
+  }
+
+  /* 图表坐标轴刻度（SVG <text>）：recharts 的 `tick.fontSize` 只收数值，会绕开
+     token；改为不传该属性，由这里按 root 轴 11 档统一供给。实测该 <text> 自带
+     `recharts-text recharts-cartesian-axis-tick-value` 两个类，且**没有**
+     `.recharts-cartesian-axis-tick` 包裹层（其父节点是
+     `.recharts-cartesian-axis-tick-label`），故以 tick-value 为主选择器、
+     保留包裹层写法兼容其它版本。CSS 声明优先于 SVG 表现属性，因此无需数值也能
+     随「界面字号」滑杆位移。 */
+  .app-analytics-chart .recharts-cartesian-axis-tick-value,
+  .app-analytics-chart .recharts-cartesian-axis-tick text {
+    font-size: var(--app-root-font-size-11);
   }
 
   .surface-panel {
