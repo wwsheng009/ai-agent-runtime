@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { type RuntimeSessionRecord } from "@/types/runtime";
 
+import { type WorkspacePanelThreadRelation } from "./panel-registry";
 import { SessionDetailSurface } from "./session-detail-surface";
 
 const { getRuntimeSessionMock } = vi.hoisted(() => ({
@@ -63,11 +64,16 @@ function fieldText(key: string) {
   );
 }
 
-async function mountSurface(sessionId = "session-1", workspacePath?: string) {
+async function mountSurface(
+  sessionId = "session-1",
+  workspacePath?: string,
+  threadRelation?: WorkspacePanelThreadRelation,
+) {
   await act(async () => {
     root?.render(
       <SessionDetailSurface
         sessionId={sessionId}
+        threadRelation={threadRelation}
         workspacePath={workspacePath}
       />,
     );
@@ -75,6 +81,10 @@ async function mountSurface(sessionId = "session-1", workspacePath?: string) {
   await act(async () => {
     await flush();
   });
+}
+
+function relationNode(testId: string) {
+  return document.body.querySelector(`[data-testid="${testId}"]`);
 }
 
 function findButtonByText(text: string) {
@@ -177,5 +187,54 @@ describe("SessionDetailSurface", () => {
 
     expect(getRuntimeSessionMock).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain("尚未选择会话");
+  });
+
+  it("给出关联快照时展示关联状态与传输通道，tooltip 同时带名称与解释", async () => {
+    getRuntimeSessionMock.mockResolvedValue({ session: sessionFixture() });
+
+    await mountSurface("session-1", undefined, {
+      kind: "attached",
+      transport: "live",
+    });
+
+    const relation = relationNode("session-detail-relation-state");
+    expect(relation?.textContent).toBe("已附着运行时会话");
+    expect(relation?.getAttribute("data-relation-kind")).toBe("attached");
+    expect(relation?.getAttribute("title")).toContain("已附着运行时会话");
+    expect(relation?.getAttribute("title")).toContain(
+      "已附着到当前工作区流程中的运行时会话。",
+    );
+
+    const transport = relationNode("session-detail-relation-transport");
+    expect(transport?.textContent).toBe("在线运行时");
+    expect(transport?.getAttribute("data-transport-kind")).toBe("live");
+    expect(transport?.getAttribute("title")).toContain(
+      "本会话已附着实时运行时",
+    );
+  });
+
+  it("关联四态用不同图标与文案：恢复态不自称已附着", async () => {
+    getRuntimeSessionMock.mockResolvedValue({ session: sessionFixture() });
+
+    await mountSurface("session-1", undefined, {
+      kind: "restored",
+      transport: "seeded",
+    });
+
+    expect(relationNode("session-detail-relation-state")?.textContent).toBe(
+      "已恢复运行时会话",
+    );
+    expect(relationNode("session-detail-relation-transport")?.textContent).toBe(
+      "预置预览",
+    );
+  });
+
+  it("未提供关联快照时不渲染关联区块（独立挂载不臆造关联）", async () => {
+    getRuntimeSessionMock.mockResolvedValue({ session: sessionFixture() });
+
+    await mountSurface("session-1");
+
+    expect(relationNode("session-detail-relation-state")).toBeNull();
+    expect(relationNode("session-detail-relation-transport")).toBeNull();
   });
 });

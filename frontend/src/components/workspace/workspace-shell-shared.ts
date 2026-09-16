@@ -96,17 +96,65 @@ export function getCommandStateLabel(
   return labels.readyToStartNewSession;
 }
 
+/**
+ * 线程状态三态：已附着运行时会话 / 仅本地预览 / 空白新会话。
+ * 顶栏状态图标的图形、tooltip 与文本标签共用本判据，避免「图标说已附着、文案说预览」。
+ */
+export type WorkspaceThreadStatusKind = "attached" | "preview" | "new";
+
+export function getThreadStatusKind(thread: Thread): WorkspaceThreadStatusKind {
+  if (thread.sessionId) {
+    return "attached";
+  }
+  return thread.messages.length > 0 ? "preview" : "new";
+}
+
+const statusLabelKeys: Record<
+  WorkspaceThreadStatusKind,
+  keyof WorkspaceThreadStatusLabels
+> = {
+  attached: "sessionAttached",
+  preview: "previewThread",
+  new: "newThread",
+};
+
 export function getThreadStatusLabel(
   thread: Thread,
   labels: WorkspaceThreadStatusLabels = defaultStatusLabels,
 ) {
-  if (thread.sessionId) {
-    return labels.sessionAttached;
+  return labels[statusLabelKeys[getThreadStatusKind(thread)]];
+}
+
+/**
+ * 本地线程 ↔ 运行时会话的关联四态（与传输三态正交）：
+ * - `pending`：尚未附着任何运行时会话；
+ * - `error`：会话已附着，但最新同步失败，需要再次尝试恢复；
+ * - `restored`：由运行时会话历史物化进来，可继续推进；
+ * - `attached`：当前工作区流程直接附着的运行时会话。
+ * 侧栏行状态与「会话详情」面共用本判据（`describeThreadSession` 也据此派生）。
+ */
+export type WorkspaceThreadRelationKind =
+  | "attached"
+  | "restored"
+  | "error"
+  | "pending";
+
+export function getThreadRelationKind(
+  thread: Thread,
+): WorkspaceThreadRelationKind {
+  if (!thread.sessionId) {
+    return "pending";
   }
-  if (thread.messages.length > 0) {
-    return labels.previewThread;
+  if (thread.transport === "error") {
+    return "error";
   }
-  return labels.newThread;
+  if (
+    thread.tags.includes("runtime-session") ||
+    thread.tags.includes("restored")
+  ) {
+    return "restored";
+  }
+  return "attached";
 }
 
 export function getThreadTopbarSubtitle(

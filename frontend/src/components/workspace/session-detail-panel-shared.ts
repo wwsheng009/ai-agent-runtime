@@ -1,6 +1,10 @@
 // 「会话详情」面的纯派生口径：状态徽标配色与时间戳格式化。
 // 与组件分离的原因同 session-usage-panel-shared：可单测、无 IO、无 React。
 
+import {
+  type WorkspaceThreadRelationKind,
+  type WorkspaceThreadTransportKind,
+} from "@/components/workspace/workspace-shell-shared";
 import { type RuntimeSessionRecord } from "@/types/runtime";
 
 export type SessionDetailStateDisplay = {
@@ -41,6 +45,90 @@ export function resolveSessionDetailState(
       labelKey: "panels.sessionDetail.states.unknown",
     }
   );
+}
+
+/** 关联状态徽标的配色 + 文案 key；关联判据本身来自 workspace-shell-shared。 */
+export type SessionDetailRelationDisplay = {
+  className: string;
+  /** i18n key（`workspace` 命名空间）：`panels.sessionDetail.relation.states.*`。 */
+  labelKey: string;
+  /** i18n key：`panels.sessionDetail.relation.details.*`（tooltip 与正文共用）。 */
+  detailKey: string;
+};
+
+const RELATION_DISPLAY: Record<
+  WorkspaceThreadRelationKind,
+  SessionDetailRelationDisplay
+> = {
+  attached: {
+    className: "border-accent-gold/24 bg-accent-gold/10 text-accent-gold",
+    labelKey: "panels.sessionDetail.relation.states.attached",
+    detailKey: "panels.sessionDetail.relation.details.attached",
+  },
+  restored: {
+    className: "border-accent-teal/24 bg-accent-teal/10 text-accent-teal",
+    labelKey: "panels.sessionDetail.relation.states.restored",
+    detailKey: "panels.sessionDetail.relation.details.restored",
+  },
+  error: {
+    className:
+      "border-accent-orange/24 bg-accent-orange/10 text-accent-orange",
+    labelKey: "panels.sessionDetail.relation.states.error",
+    detailKey: "panels.sessionDetail.relation.details.error",
+  },
+  pending: {
+    className: "border-border bg-surface-soft text-muted-foreground",
+    labelKey: "panels.sessionDetail.relation.states.pending",
+    detailKey: "panels.sessionDetail.relation.details.pending",
+  },
+};
+
+/** 关联四态 → 徽标样式 + 文案 key（配色与侧栏行状态同一口径）。 */
+export function resolveSessionDetailRelation(
+  kind: WorkspaceThreadRelationKind,
+): SessionDetailRelationDisplay {
+  return RELATION_DISPLAY[kind];
+}
+
+/**
+ * 传输通道徽标：状态名与解释都复用顶栏同一份 key
+ * （`topbar.threadTransport.*` + `topbar.threadTransportHint.*`）——
+ * 同一个传输状态在顶栏与「会话详情」里给出一致的名称与解释，避免两处各写一份造成漂移。
+ */
+export type SessionDetailTransportDisplay = {
+  /** 只染文字色：底/描边保持中性，避免与关联状态徽标的强色抢注意力。 */
+  toneClassName: string;
+  /** i18n key：`topbar.threadTransport.*`。 */
+  labelKey: string;
+  /** i18n key：`topbar.threadTransportHint.*`。 */
+  hintKey: string;
+};
+
+const TRANSPORT_DISPLAY: Record<
+  WorkspaceThreadTransportKind,
+  SessionDetailTransportDisplay
+> = {
+  live: {
+    toneClassName: "text-connection-online",
+    labelKey: "topbar.threadTransport.live",
+    hintKey: "topbar.threadTransportHint.live",
+  },
+  error: {
+    toneClassName: "text-connection-offline",
+    labelKey: "topbar.threadTransport.error",
+    hintKey: "topbar.threadTransportHint.error",
+  },
+  seeded: {
+    toneClassName: "text-muted-foreground",
+    labelKey: "topbar.threadTransport.seeded",
+    hintKey: "topbar.threadTransportHint.seeded",
+  },
+};
+
+export function resolveSessionDetailTransport(
+  transport: WorkspaceThreadTransportKind,
+): SessionDetailTransportDisplay {
+  return TRANSPORT_DISPLAY[transport];
 }
 
 /** 时间戳 → 本地可读时间；缺失或不可解析时返回 null（调用方跳过该行）。 */

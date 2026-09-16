@@ -1,7 +1,9 @@
 import {
   ChartNoAxesCombinedIcon,
   DatabaseIcon,
+  EyeIcon,
   FlaskConicalIcon,
+  LinkIcon,
   ListChecksIcon,
   MessageSquarePlusIcon,
   NetworkIcon,
@@ -11,19 +13,21 @@ import {
   RadioTowerIcon,
   RefreshCwIcon,
   Settings2Icon,
+  SquarePenIcon,
   TerminalSquareIcon,
   WifiOffIcon,
   type LucideIcon,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 
-import { Badge } from "@/components/ui/badge";
 import { SessionGoalIndicator } from "@/components/workspace/session-goal-indicator";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { Button } from "@/components/ui/button";
 import { ConnectionStatusBadge } from "@/components/ui/connection-status-badge";
 import {
+  getThreadStatusKind,
   getThreadTransportKind,
+  type WorkspaceThreadStatusKind,
   type WorkspaceThreadTransportKind,
 } from "@/components/workspace/workspace-shell-shared";
 import { type Thread } from "@/data/mock";
@@ -46,6 +50,23 @@ const TRANSPORT_TONE_CLASSNAMES: Record<WorkspaceThreadTransportKind, string> = 
   live: "text-connection-online",
   error: "text-connection-offline",
   seeded: "text-muted-foreground",
+};
+
+/**
+ * 线程状态（已附着 / 仅有本地预览 / 空白新会话）的图标与配色：
+ * 状态名与解释只放 tooltip（`title`）与无障碍标签，正文不占文字宽度。
+ * 已附着沿用侧栏「已附着运行时会话」的金色口径，一眼与传输图标区分开。
+ */
+const THREAD_STATUS_ICONS: Record<WorkspaceThreadStatusKind, LucideIcon> = {
+  attached: LinkIcon,
+  preview: EyeIcon,
+  new: SquarePenIcon,
+};
+
+const THREAD_STATUS_TONE_CLASSNAMES: Record<WorkspaceThreadStatusKind, string> = {
+  attached: "border-accent-gold/24 bg-accent-gold/10 text-accent-gold",
+  preview: "border-border bg-surface-soft text-muted-foreground",
+  new: "border-accent-primary/30 bg-accent-primary/10 text-accent-primary",
 };
 
 type WorkspaceShellTopbarProps = {
@@ -117,6 +138,17 @@ export function WorkspaceShellTopbar({
         ? t("topbar.threadTransportHint.error")
         : t("topbar.threadTransportHint.seeded");
   const transportTooltip = `${transportLabel} · ${transportHint}`;
+  // 线程状态与传输状态是两件事：前者说「这个聊天和运行时会话的关系」，
+  // 后者说「这条会话流现在通不通」；各自用图标 + tooltip 表达，文案不进正文。
+  const threadStatusKind = getThreadStatusKind(selectedThread);
+  const ThreadStatusIcon = THREAD_STATUS_ICONS[threadStatusKind];
+  const threadStatusHint =
+    threadStatusKind === "attached"
+      ? t("topbar.threadStatusHint.attached")
+      : threadStatusKind === "preview"
+        ? t("topbar.threadStatusHint.preview")
+        : t("topbar.threadStatusHint.new");
+  const threadStatusTooltip = `${threadStatusLabel} · ${threadStatusHint}`;
   const refreshSessionLabel = sessionRefreshing
     ? t("topbar.refreshingSession")
     : t("topbar.refreshSession");
@@ -188,7 +220,19 @@ export function WorkspaceShellTopbar({
                 retryLabel={retryLabel}
               />
             ) : null}
-            <Badge>{threadStatusLabel}</Badge>
+            <span
+              role="img"
+              aria-label={threadStatusTooltip}
+              title={threadStatusTooltip}
+              data-testid="topbar-thread-status"
+              data-thread-status={threadStatusKind}
+              className={cn(
+                "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-card border",
+                THREAD_STATUS_TONE_CLASSNAMES[threadStatusKind],
+              )}
+            >
+              <ThreadStatusIcon size={13} aria-hidden="true" />
+            </span>
             {liveTeamCount > 0 ? (
               <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
                 {t("sidebar.active", { count: liveTeamCount })}

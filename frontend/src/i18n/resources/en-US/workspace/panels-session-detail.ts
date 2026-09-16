@@ -16,6 +16,24 @@ export const enWorkspacePanelsSessionDetail = {
     archived: "Archived",
     unknown: "Unknown state",
   },
+  relation: {
+    label: "Runtime link",
+    transportLabel: "Transport",
+    states: {
+      attached: "Attached runtime session",
+      restored: "Restored runtime session",
+      error: "Session sync error",
+      pending: "No runtime session attached yet",
+    },
+    details: {
+      attached:
+        "Attached to a live runtime session from the active workspace flow.",
+      restored: "Recovered from runtime session history and ready to continue.",
+      error:
+        "The session exists, but the latest sync failed and needs another restore attempt.",
+      pending: "No runtime session attached yet.",
+    },
+  },
   fields: {
     id: "Session ID",
     userId: "User",

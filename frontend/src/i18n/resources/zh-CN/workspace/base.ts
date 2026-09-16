@@ -104,6 +104,13 @@ export const zhWorkspaceBase = {
       previewThread: "预览线程",
       newThread: "新线程",
     },
+    threadStatusHint: {
+      attached:
+        "当前聊天已附着运行时会话：历史来自真实会话流，新回合会写回该会话，可继续对话。",
+      preview:
+        "尚未附着运行时会话：当前内容只是本地预览，发送消息会新建运行时会话。",
+      new: "空白新聊天：尚未创建或附着任何运行时会话。",
+    },
     connection: {
       connecting: "连接中…",
       idle: "空闲",

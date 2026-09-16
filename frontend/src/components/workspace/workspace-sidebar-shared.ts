@@ -1,4 +1,5 @@
 import { type Thread } from "@/data/mock";
+import { getThreadRelationKind } from "@/components/workspace/workspace-shell-shared";
 import {
   type RuntimeSessionRecord,
   type RuntimeWorkspaceDirectory,
@@ -67,7 +68,11 @@ export function describeThreadSession(
   thread: Thread,
   labels: ThreadSessionDetailLabels = defaultThreadSessionDetailLabels,
 ): ThreadSessionDescriptor {
-  if (!thread.sessionId) {
+  // 关联四态的唯一判据在 workspace-shell-shared（与顶栏状态图标 / 「会话详情」面共用），
+  // 本函数只负责把判据结果翻成侧栏文案与配色，避免两处各判一次造成漂移。
+  const relation = getThreadRelationKind(thread);
+
+  if (relation === "pending") {
     return {
       detail: labels.pending,
       label: "pending",
@@ -75,7 +80,7 @@ export function describeThreadSession(
     };
   }
 
-  if (thread.transport === "error") {
+  if (relation === "error") {
     return {
       detail: labels.error,
       label: "error",
@@ -83,7 +88,7 @@ export function describeThreadSession(
     };
   }
 
-  if (thread.tags.includes("runtime-session") || thread.tags.includes("restored")) {
+  if (relation === "restored") {
     return {
       detail: labels.restored,
       label: "restored",

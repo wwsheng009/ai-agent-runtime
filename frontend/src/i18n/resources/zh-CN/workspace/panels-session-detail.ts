@@ -17,6 +17,24 @@ export const zhWorkspacePanelsSessionDetail = {
     archived: "已归档",
     unknown: "未知状态",
   },
+  // 本地线程 ↔ 运行时会话的关联状态；判据由 shell 侧给定（见 workspace-shell-shared）。
+  // 名称沿用侧栏同一套词汇，解释同时作为徽标 tooltip 与区块正文。
+  relation: {
+    label: "关联状态",
+    transportLabel: "传输通道",
+    states: {
+      attached: "已附着运行时会话",
+      restored: "已恢复运行时会话",
+      error: "会话同步异常",
+      pending: "尚未附着运行时会话",
+    },
+    details: {
+      attached: "已附着到当前工作区流程中的运行时会话。",
+      restored: "已从运行时会话历史中恢复，可继续推进。",
+      error: "会话已存在，但最新同步失败，需要再次尝试恢复。",
+      pending: "尚未附着运行时会话。",
+    },
+  },
   fields: {
     id: "会话 ID",
     userId: "用户",

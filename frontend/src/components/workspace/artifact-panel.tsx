@@ -47,6 +47,7 @@ export function ArtifactPanel({
   runtimeEventCount,
   selectedArtifactId,
   sessionId,
+  threadRelation,
   workspacePath,
 }: ArtifactPanelProps) {
   const { t } = useTranslation("workspace");
@@ -312,6 +313,7 @@ export function ArtifactPanel({
           sessionId={sessionId?.trim() ?? ""}
           spec={spec}
           tabIds={surfaceTabIds[spec.id]}
+          threadRelation={threadRelation}
           workspacePath={workspacePath}
         />
       ))}

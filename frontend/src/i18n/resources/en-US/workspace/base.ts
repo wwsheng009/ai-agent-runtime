@@ -113,6 +113,13 @@ export const enWorkspaceBase = {
       previewThread: "Preview thread",
       newThread: "New thread",
     },
+    threadStatusHint: {
+      attached:
+        "This chat is attached to a runtime session: history comes from the real session stream and new turns are written back to it.",
+      preview:
+        "No runtime session is attached yet: this content is a local preview, and sending a message starts a new runtime session.",
+      new: "Blank new chat: no runtime session is created or attached yet.",
+    },
     connection: {
       connecting: "Connecting…",
       idle: "Idle",

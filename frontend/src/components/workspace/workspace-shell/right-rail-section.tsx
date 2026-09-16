@@ -23,7 +23,14 @@ import {
 } from "react";
 
 import { PanelErrorBoundary } from "@/components/errors/boundaries";
-import { type WorkspacePanelSurfaceId } from "@/components/workspace/panel-registry";
+import {
+  type WorkspacePanelSurfaceId,
+  type WorkspacePanelThreadRelation,
+} from "@/components/workspace/panel-registry";
+import {
+  getThreadRelationKind,
+  getThreadTransportKind,
+} from "@/components/workspace/workspace-shell-shared";
 import {
   resolveRailSurfaceWidthClass,
   type RightRailWidthController,
@@ -123,6 +130,12 @@ export function WorkspaceRightRailSection({
   }
 
   const sessionId = selectedThread.sessionId?.trim() ?? "";
+  // 关联快照在这里按纯判据派生一次后向下传值：自包含面（会话详情）不再各判一次，
+  // 与侧栏行状态、顶栏状态图标共用同一口径。
+  const threadRelation: WorkspacePanelThreadRelation = {
+    kind: getThreadRelationKind(selectedThread),
+    transport: getThreadTransportKind(selectedThread),
+  };
   const railStyle = {
     "--right-rail-width": `${widthController.widthPx}px`,
   } as CSSProperties;
@@ -159,6 +172,7 @@ export function WorkspaceRightRailSection({
               runtimeEventCount={selectedThread.runtimeEventCount}
               selectedArtifactId={selectedArtifactId}
               sessionId={selectedThread.sessionId}
+              threadRelation={threadRelation}
             />
           </Suspense>
         </PanelErrorBoundary>

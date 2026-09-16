@@ -11,6 +11,7 @@ import { Suspense } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
+  type WorkspacePanelThreadRelation,
   type WorkspacePanelSurfaceSpec,
   type WorkspacePanelSurfaceTabIds,
 } from "@/components/workspace/panel-registry";
@@ -32,12 +33,14 @@ export function SelfContainedSurfacePanel({
   sessionId,
   spec,
   tabIds,
+  threadRelation,
   workspacePath,
 }: {
   active: boolean;
   sessionId: string;
   spec: WorkspacePanelSurfaceSpec;
   tabIds: WorkspacePanelSurfaceTabIds;
+  threadRelation?: WorkspacePanelThreadRelation;
   workspacePath?: string;
 }) {
   // 只做属性读取：组件身份来自注册表模块作用域，渲染期不创建组件。
@@ -60,7 +63,11 @@ export function SelfContainedSurfacePanel({
     >
       {active ? (
         <Suspense fallback={<ArtifactPanelSurfaceLoading />}>
-          <Surface sessionId={sessionId} workspacePath={workspacePath} />
+          <Surface
+            sessionId={sessionId}
+            threadRelation={threadRelation}
+            workspacePath={workspacePath}
+          />
         </Suspense>
       ) : null}
     </div>

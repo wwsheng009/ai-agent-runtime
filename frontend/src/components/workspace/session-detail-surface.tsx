@@ -7,15 +7,33 @@
 //
 // 只读展示：不在此面提供归档 / 关闭 / 删除入口，避免侧栏行菜单与本面板两套写入口。
 
-import { AlertTriangleIcon, IdCardIcon, RefreshCwIcon } from "lucide-react";
+import {
+  AlertTriangleIcon,
+  FlaskConicalIcon,
+  HistoryIcon,
+  IdCardIcon,
+  LinkIcon,
+  RadioTowerIcon,
+  RefreshCwIcon,
+  UnlinkIcon,
+  WifiOffIcon,
+  type LucideIcon,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import {
   formatSessionDetailTimestamp,
   normalizeSessionDetailTags,
+  resolveSessionDetailRelation,
+  resolveSessionDetailTransport,
   resolveSessionDetailState,
 } from "@/components/workspace/session-detail-panel-shared";
+import { type WorkspacePanelThreadRelation } from "@/components/workspace/panel-registry";
+import {
+  type WorkspaceThreadRelationKind,
+  type WorkspaceThreadTransportKind,
+} from "@/components/workspace/workspace-shell-shared";
 import { useSessionDetail } from "@/hooks/workspace/use-session-detail";
 import { cn } from "@/lib/utils";
 import { type RuntimeSessionRecord } from "@/types/runtime";
@@ -23,6 +41,23 @@ import { type RuntimeSessionRecord } from "@/types/runtime";
 export type SessionDetailSurfaceProps = {
   sessionId: string;
   workspacePath?: string;
+  /** 当前线程 ↔ 运行时会话的关联快照；缺省时不渲染关联状态区块（独立挂载/测试）。 */
+  threadRelation?: WorkspacePanelThreadRelation;
+};
+
+/** 关联四态图标：与侧栏行状态同源（金=已附着 / 青=已恢复 / 橙=同步异常 / 灰=未附着）。 */
+const RELATION_ICONS: Record<WorkspaceThreadRelationKind, LucideIcon> = {
+  attached: LinkIcon,
+  restored: HistoryIcon,
+  error: AlertTriangleIcon,
+  pending: UnlinkIcon,
+};
+
+/** 传输三态图标：与顶栏传输状态图标保持同一套图形。 */
+const TRANSPORT_ICONS: Record<WorkspaceThreadTransportKind, LucideIcon> = {
+  live: RadioTowerIcon,
+  error: WifiOffIcon,
+  seeded: FlaskConicalIcon,
 };
 
 type SessionDetailRow = {
@@ -99,8 +134,75 @@ function buildSessionDetailRows(
   return rows;
 }
 
+/**
+ * 关联状态区块：本地线程 ↔ 运行时会话（关联四态 + 传输三态）。
+ * 判据由 shell 侧传入（与侧栏行状态、顶栏状态图标同一口径），本组件只负责展示，
+ * 状态名与解释同时作为 tooltip（`title`），便于在 288px 侧栏内不撑宽。
+ */
+function SessionDetailRelationBlock({
+  relation,
+}: {
+  relation: WorkspacePanelThreadRelation;
+}) {
+  const { t } = useTranslation("workspace");
+  const relationDisplay = resolveSessionDetailRelation(relation.kind);
+  const transportDisplay = resolveSessionDetailTransport(relation.transport);
+  const RelationIcon = RELATION_ICONS[relation.kind];
+  const TransportIcon = TRANSPORT_ICONS[relation.transport];
+  const relationLabel = t(relationDisplay.labelKey as never) as string;
+  const relationDetail = t(relationDisplay.detailKey as never) as string;
+  const relationTooltip = `${relationLabel} · ${relationDetail}`;
+  const transportLabel = t(transportDisplay.labelKey as never) as string;
+  const transportHint = t(transportDisplay.hintKey as never) as string;
+  const transportTooltip = `${transportLabel} · ${transportHint}`;
+
+  return (
+    <div
+      className="grid gap-2 rounded-card border border-border bg-surface-softer px-2.5 py-2"
+      data-testid="session-detail-relation"
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
+          {t("panels.sessionDetail.relation.label")}
+        </span>
+        <span
+          className={cn(
+            "inline-flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-0.5 app-text-10 tracking-[0.08em]",
+            relationDisplay.className,
+          )}
+          data-relation-kind={relation.kind}
+          data-testid="session-detail-relation-state"
+          title={relationTooltip}
+        >
+          <RelationIcon aria-hidden="true" size={11} />
+          {relationLabel}
+        </span>
+      </div>
+      <p className="text-xs leading-5 text-muted-foreground">{relationDetail}</p>
+      <div className="flex items-center justify-between gap-2">
+        <span className="app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
+          {t("panels.sessionDetail.relation.transportLabel")}
+        </span>
+        <span
+          className={cn(
+            "inline-flex shrink-0 items-center gap-1 rounded-full border border-border bg-surface-soft px-1.5 py-0.5 app-text-10",
+            transportDisplay.toneClassName,
+          )}
+          data-testid="session-detail-relation-transport"
+          data-transport-kind={relation.transport}
+          title={transportTooltip}
+        >
+          <TransportIcon aria-hidden="true" size={11} />
+          {transportLabel}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export function SessionDetailSurface({
   sessionId,
+  threadRelation,
   workspacePath,
 }: SessionDetailSurfaceProps) {
   const { t } = useTranslation("workspace");
@@ -160,6 +262,10 @@ export function SessionDetailSurface({
           </Button>
         </div>
       </div>
+
+      {threadRelation ? (
+        <SessionDetailRelationBlock relation={threadRelation} />
+      ) : null}
 
       {error ? (
         <div className="flex items-start gap-2 rounded-card border border-border bg-surface-softer px-2.5 py-2 text-xs text-analytics-danger">

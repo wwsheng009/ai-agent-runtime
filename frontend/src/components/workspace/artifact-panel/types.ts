@@ -2,7 +2,10 @@
 
 import { type Artifact } from "@/data/mock";
 
-import { type WorkspacePanelSurfaceId } from "@/components/workspace/panel-registry";
+import {
+  type WorkspacePanelSurfaceId,
+  type WorkspacePanelThreadRelation,
+} from "@/components/workspace/panel-registry";
 
 /** 兼容别名：面枚举的单一事实来源已收敛到 `components/workspace/panel-registry`。 */
 export type ArtifactPanelSurface = WorkspacePanelSurfaceId;
@@ -15,6 +18,8 @@ export type ArtifactPanelProps = {
   onOpenArtifact: (artifactId: string) => void;
   selectedArtifactId: string | null;
   sessionId?: string;
+  /** 当前线程 ↔ 运行时会话的关联快照；「会话详情」面据此渲染关联状态区块。 */
+  threadRelation?: WorkspacePanelThreadRelation;
   /**
    * 当前会话绑定的工作目录；files/git 面据此给出默认作用域根候选。
    * 缺省时自包含面退化为「只读运行时工作目录（cwd）」并提示。

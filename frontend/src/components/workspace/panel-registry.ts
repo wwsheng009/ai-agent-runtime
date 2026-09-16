@@ -17,6 +17,10 @@ import {
   IdCardIcon,
   ScrollTextIcon,
 } from "lucide-react";
+import {
+  type WorkspaceThreadRelationKind,
+  type WorkspaceThreadTransportKind,
+} from "@/components/workspace/workspace-shell-shared";
 
 /** 右侧栏全部面 id（单一事实来源；联合类型由此派生）。 */
 export type WorkspacePanelSurfaceId =
@@ -44,12 +48,23 @@ export type WorkspacePanelSurfaceTone =
  */
 export type WorkspacePanelWidthClass = "content" | "wide";
 
+/**
+ * 当前本地线程 ↔ 运行时会话的关联快照（由 shell 侧的纯判据派生一次，向下传值）。
+ * 供「会话详情」这类需要解释「这个聊天和运行时会话是什么关系」的面使用。
+ */
+export type WorkspacePanelThreadRelation = {
+  kind: WorkspaceThreadRelationKind;
+  transport: WorkspaceThreadTransportKind;
+};
+
 /** 自包含面从 PanelHost 收到的上下文（刻意保持小：不引入面板内部状态）。 */
 export type WorkspacePanelSurfaceProps = {
   /** 当前会话 id（无会话时为空字符串）。 */
   sessionId: string;
   /** 当前会话绑定的工作目录（作用域根的候选之一）；无则 undefined。 */
   workspacePath?: string;
+  /** 当前线程与会话的关联快照；未提供时面不渲染关联状态区块。 */
+  threadRelation?: WorkspacePanelThreadRelation;
 };
 
 export type WorkspacePanelSurfaceSpec = {
