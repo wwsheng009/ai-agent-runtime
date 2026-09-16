@@ -126,6 +126,9 @@ type Handler struct {
 	runtimeToolCatalogConfigKey    string
 	runtimeMCPBridgeOnce           sync.Once
 	runtimeEventBridgeOnce         sync.Once
+	// P4-刷新续传：会话在途回合注册表（懒初始化，见 session_active_turn.go）。
+	activeTurnsOnce sync.Once
+	activeTurns     *activeTurnRegistry
 	observeMu                      sync.RWMutex
 	observeService                 *runtimeobserve.Service
 	scopeResolverMu                sync.RWMutex
@@ -1438,6 +1441,11 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		PatchApproval              *agent.PatchApproval  `json:"patch_approval,omitempty"`
 		TurnID                     string                `json:"turn_id,omitempty"`
 		Stream                     bool                  `json:"stream,omitempty"`
+		// ResumeOnDisconnect（P4-刷新续传）：客户端断开（页面刷新/关标签）后
+		// 不取消本回合，run 继续执行并把增量/历史照常落库；刷新后的新页面通过
+		// GET /runtime/stream 按游标续传，并依据 /runtime 的 active_turn 重新
+		// 挂载在途回合身份。缺省 false 保持旧语义（客户端断开即中止）。
+		ResumeOnDisconnect bool `json:"resume_on_disconnect,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1832,7 +1840,36 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			// 断开，本轮已产生的对话都会落库。
 			historyCheckpointer := newAgentChatHistoryCheckpointer(h, r, session, execSession, contextMessages, turnID)
 
-			reactResult, reactErr := a.RunReActWithSession(ctx, h.llmRuntime, lastMessage, execSession, &agent.LoopReActConfig{
+			// P4-刷新续传：`resume_on_disconnect` 声明「客户端断开后回合继续」。
+			// 浏览器刷新会 abort 在途 POST → r.Context() 取消；若把请求上下文直接
+			// 交给 ReAct 循环，刷新就等于中止回合（这正是「刷新后整个 SSE live
+			// 断开」的根因）。detach 后 run 与请求解耦：SSE 写出失败不再影响执行
+			// （前端已断开），增量与历史照常落库，新页面在 /runtime/stream 上按
+			// 游标续传并据 active_turn 重新挂载在途回合。
+			runCtx := ctx
+			if req.ResumeOnDisconnect {
+				runCtx = context.WithoutCancel(ctx)
+				// 无取消信号的 run 必须有兜底时限：上游挂死时不能留下常驻 goroutine。
+				// 以配置的 Agent.Timeout 为准，未配置时退化为默认上限。
+				runTimeout := agentConfig.MaxRunDuration
+				if runTimeout <= 0 {
+					runTimeout = defaultDetachedAgentChatRunTimeout
+				}
+				var cancelRun context.CancelFunc
+				runCtx, cancelRun = context.WithTimeout(runCtx, runTimeout+detachedAgentChatRunGrace)
+				defer cancelRun()
+			}
+			// 在途回合登记（进程内）：刷新后的新页面据此重新挂载回合身份，
+			// 打开增量渲染门控（renderLiveDeltas）继续把增量写进同一条消息。
+			releaseActiveTurn := h.getActiveTurnRegistry().begin(
+				sessionID(execSession),
+				turnID,
+				agentChatActiveTurnSource,
+				req.ResumeOnDisconnect,
+			)
+			defer releaseActiveTurn()
+
+			reactResult, reactErr := a.RunReActWithSession(runCtx, h.llmRuntime, lastMessage, execSession, &agent.LoopReActConfig{
 				MaxSteps:             agentConfig.MaxSteps,
 				MaxToolCalls:         agentConfig.MaxToolCalls,
 				MaxRunDuration:       agentConfig.MaxRunDuration,

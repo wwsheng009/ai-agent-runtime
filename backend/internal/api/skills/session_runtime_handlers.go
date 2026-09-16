@@ -380,13 +380,18 @@ func (h *Handler) ResumeSessionAgent(w http.ResponseWriter, r *http.Request) {
 // GetSessionRuntimeState returns the session actor runtime state.
 //
 // 契约（P2-1A 快照消费方按此实现）：
-//   - 200 {state, ...execution_route}   —— 该会话有 durable runtime state；
-//   - 200 {session_id, state: null}     —— 会话存在但从未进入 durable session
+//   - 200 {state, active_turn, ...execution_route} —— 该会话有 durable runtime state；
+//   - 200 {session_id, state: null, active_turn}   —— 会话存在但从未进入 durable session
 //     actor（例如只经无状态 `/api/agent/chat` 的 web 会话）。空快照是正常终态：
 //     不生成状态行、也不伪造未决审批 / 提问；
 //   - 404 SESSION_NOT_FOUND             —— 会话不存在（已删除 / 未知 id），
 //     与会话读取端点（/turns、/backtrack/audit、/history）同一约定；
 //   - 503 STORE_UNAVAILABLE             —— 会话存储不可用（锁定 / 超时）。
+//
+// `active_turn`（P4-刷新续传）：本进程此刻在该会话上执行的在途回合
+// （{session_id, turn_id, source, detached, started_at}），无则为 null。
+// 页面刷新后据此重新挂载在途回合身份，让 runtime/stream 上落库的增量帧
+// 继续渲染到同一条 streaming 消息。
 func (h *Handler) GetSessionRuntimeState(w http.ResponseWriter, r *http.Request) {
 	store := h.getSessionRuntimeStore()
 	if store == nil {
@@ -434,16 +439,28 @@ func (h *Handler) GetSessionRuntimeState(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		h.writeJSON(w, http.StatusOK, h.attachSessionExecutionRoute(r.Context(), sessionID, map[string]interface{}{
-			"session_id": sessionID,
-			"state":      nil,
+			"session_id":  sessionID,
+			"state":       nil,
+			"active_turn": h.activeTurnSnapshotPayload(sessionID),
 		}))
 		return
 	}
 
 	payload := map[string]interface{}{
-		"state": state,
+		"state":       state,
+		"active_turn": h.activeTurnSnapshotPayload(sessionID),
 	}
 	h.writeJSON(w, http.StatusOK, h.attachSessionExecutionRoute(r.Context(), sessionID, payload))
+}
+
+// activeTurnSnapshotPayload 返回 /runtime 快照里的 `active_turn` 字段：
+// 无在途回合时显式 null（消费方按 `active_turn == null` 判定终态）。
+func (h *Handler) activeTurnSnapshotPayload(sessionID string) interface{} {
+	entry, ok := h.getActiveTurnRegistry().get(sessionID)
+	if !ok {
+		return nil
+	}
+	return entry
 }
 
 // ListSessionRuntimeTools returns the current runtime-server tool surface for a session.
