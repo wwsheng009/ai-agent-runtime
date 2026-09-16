@@ -246,4 +246,165 @@ describe("MessageToolRow", () => {
       "src/a.ts",
     );
   });
+
+  const NL = String.fromCharCode(10);
+  /** 后端 tool.completed 的真实形态：说明行 + diff 围栏（带行号 hunk）。 */
+  const DIFF_FENCE = [
+    "补丁已应用：修改 1；影响 1 个路径",
+    "",
+    "文件差异:",
+    "```diff",
+    "--- a/src/a.ts",
+    "+++ b/src/a.ts",
+    "@@ -1 +1 @@",
+    "-old line",
+    "+new line",
+    "```",
+  ].join(NL);
+  const RENDERABLE_PATCH = ["--- a/src/a.ts", "+++ b/src/a.ts", "@@ -1 +1 @@", "-old line", "+new line"].join(
+    NL,
+  );
+
+  function expandRow() {
+    const toggle = container.querySelector<HTMLButtonElement>('[data-chat-row-toggle="chevron"]');
+    act(() => toggle?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+  }
+
+  it("apply_patch 展开：行级 diff 替换原始文本，输出块不再重复围栏", () => {
+    renderRow(
+      toolSegment({
+        name: "apply_patch",
+        resultSummary: DIFF_FENCE,
+        details: {
+          filePath: "src/a.ts",
+          diff: { additions: 1, removals: 1 },
+          diffText: RENDERABLE_PATCH,
+        },
+      }),
+    );
+    expandRow();
+
+    const panel = container.querySelector('[data-testid="tool-row-diff-panel"]');
+    expect(panel).toBeTruthy();
+    expect(container.querySelector('[data-tool-row-input-panel="true"]')).toBeNull();
+    expect(panel?.querySelector('[data-testid="tool-row-diff-path"]')?.textContent).toBe("src/a.ts");
+    expect(panel?.querySelector('[data-diff-hunk-header="expanded"]')).toBeTruthy();
+    expect(panel?.textContent).toContain("@@ -1 +1 @@");
+    expect(panel?.querySelectorAll('[data-diff-cell="add"]').length).toBe(1);
+    expect(panel?.querySelectorAll('[data-diff-cell="del"]').length).toBe(1);
+    expect(panel?.textContent).toContain("old line");
+    expect(panel?.textContent).toContain("new line");
+
+    // 样式口径（回归：正文整层灰化）：视口只留边框 / 圆角，不得再铺 `bg-black/*` 的整层灰底
+    // （增删语义由行底色 `-bg` token 承载）；增行文本一律前景色，`-accent` 是半透明轨色不得当文字色。
+    const viewport = panel?.querySelector<HTMLElement>('[data-testid="tool-row-diff-rows"]');
+    expect(viewport?.className).toContain("rounded-panel");
+    expect(viewport?.className).not.toMatch(/bg-black/);
+    expect(panel?.innerHTML).not.toContain("bg-black");
+    const addCell = panel?.querySelector('[data-diff-cell="add"]');
+    expect(addCell?.className).toContain("text-foreground");
+    expect(addCell?.className).not.toContain("text-code-line-inserted-accent");
+
+    // 输出块保留工具说明行，但补丁正文不再以原始文本重复出现。
+    const output = container.querySelector('[data-tool-row-output="result"]')?.textContent ?? "";
+    expect(output).toContain("补丁已应用：修改 1；影响 1 个路径");
+    expect(output).not.toContain("```diff");
+    expect(output).not.toContain("+new line");
+  });
+
+  it("apply_patch 展开：多文件补丁按文件切换，只渲染选中文件的行", () => {
+    const patch = [
+      "diff --git a/a.ts b/a.ts",
+      "--- a/a.ts",
+      "+++ b/a.ts",
+      "@@ -1 +1 @@",
+      "-a old",
+      "+a new",
+      "diff --git a/b.ts b/b.ts",
+      "--- a/b.ts",
+      "+++ b/b.ts",
+      "@@ -1 +1 @@",
+      "-b old",
+      "+b new",
+    ].join(NL);
+    renderRow(
+      toolSegment({
+        name: "apply_patch",
+        resultSummary: "补丁已应用",
+        details: { diff: { additions: 2, removals: 2 }, diffText: patch },
+      }),
+    );
+    expandRow();
+
+    const files = container.querySelectorAll('[data-testid="tool-row-diff-files"] button');
+    expect(files.length).toBe(2);
+    expect(container.textContent).toContain("a old");
+    expect(container.textContent).not.toContain("b old");
+
+    act(() => files[1]?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(container.textContent).toContain("b old");
+    expect(container.textContent).not.toContain("a old");
+  });
+
+  it("apply_patch 展开：截断与末尾 hunk 不完整都明示，不假装完整", () => {
+    renderRow(
+      toolSegment({
+        name: "apply_patch",
+        resultSummary: "补丁已应用",
+        details: {
+          diff: { additions: 0, removals: 1 },
+          diffText: ["--- a/x.ts", "+++ b/x.ts", "@@ -1,3 +1,3 @@", " one", " two"].join(NL),
+          diffTextTruncated: true,
+        },
+      }),
+    );
+    expandRow();
+
+    expect(container.querySelector('[data-testid="tool-row-diff-truncated"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="tool-row-diff-partial"]')).toBeTruthy();
+  });
+
+  it("失败态：错误块优先，不从补丁文本渲染行级视图", () => {
+    renderRow(
+      toolSegment({
+        name: "apply_patch",
+        status: "error",
+        errorMessage: "patch 校验失败",
+        details: { diffText: RENDERABLE_PATCH },
+      }),
+    );
+    expandRow();
+
+    expect(container.querySelector('[data-testid="tool-row-diff-panel"]')).toBeNull();
+    expect(container.querySelector('[data-tool-row-output="error"]')?.textContent).toContain(
+      "patch 校验失败",
+    );
+  });
+
+  it("补丁不可解析：保持原始输入面板（不渲染行级视图）", () => {
+    const marker = "***";
+    const codexPatch = [
+      `${marker} Begin Patch`,
+      `${marker} Update File: src/a.ts`,
+      "@@",
+      "-old",
+      "+new",
+      `${marker} End Patch`,
+    ].join(NL);
+    renderRow(
+      toolSegment({
+        name: "apply_patch",
+        argsSummary: codexPatch,
+        resultSummary: "补丁已应用：修改 1；影响 1 个路径",
+        details: { filePath: "src/a.ts", diff: { additions: 1, removals: 1 } },
+      }),
+    );
+    expandRow();
+
+    expect(container.querySelector('[data-testid="tool-row-diff-panel"]')).toBeNull();
+    expect(container.querySelector('[data-tool-row-input-panel="true"]')).toBeTruthy();
+    expect(container.querySelector('[data-tool-row-output="result"]')?.textContent).toContain(
+      "补丁已应用：修改 1；影响 1 个路径",
+    );
+  });
 });

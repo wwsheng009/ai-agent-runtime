@@ -5,6 +5,7 @@ import { type AgentChatStreamChunkPayload } from "@/types/runtime";
 
 import { readFirstNumberValue, readFirstTextValue } from "@/lib/thread-state/history-mapping";
 
+import { parseToolPatch, patchTextFromArgs, patchTextFromOutput } from "./diff-text";
 import { resolveToolCardKind, type ToolCardKind } from "./kind";
 
 export type ToolDiffStats = {
@@ -19,6 +20,10 @@ export type ToolSegmentDetails = {
   url?: string;
   diff?: ToolDiffStats;
   exitCode?: number;
+  /** 真实补丁文本（行级 diff 视图的数据源）；解析不出来就不保留，面板回落原始文本。 */
+  diffText?: string;
+  /** 补丁文本已按行边界截断到上限（UI 必须明示，不得假装完整）。 */
+  diffTextTruncated?: boolean;
 };
 
 const PATCH_TARGET_PATTERN = /^\*\*\* (?:Update|Add|Delete) File: (.+)$/m;
@@ -170,10 +175,39 @@ function compact(details: ToolSegmentDetails) {
   return Object.keys(details).length > 0 ? details : undefined;
 }
 
+/**
+ * 保留行级 diff 文本：只有能解析成带行号 hunk 的补丁才写入 details
+ * （解析失败 = 保持原样，面板继续展示原始文本，不存半截结构化数据）。
+ * 增删统计优先用事件里已有的真实数字，缺失时才用补丁行统计兜底。
+ */
+function withDiffText(
+  details: ToolSegmentDetails,
+  args: Record<string, unknown> | undefined,
+  outputText: string,
+): ToolSegmentDetails {
+  const patch = patchTextFromOutput(outputText) ?? patchTextFromArgs(args);
+  if (!patch) {
+    return details;
+  }
+  const parsed = parseToolPatch(patch.text);
+  if (!parsed.ok) {
+    return details;
+  }
+  details.diffText = patch.text;
+  if (patch.truncated) {
+    details.diffTextTruncated = true;
+  }
+  if (!details.diff) {
+    details.diff = { additions: parsed.insertions, removals: parsed.deletions };
+  }
+  return details;
+}
+
 /** 从工具事件入参里解析明细；入参是裸路径字符串时按工具种类回退识别。 */
 export function parseToolDetailsFromArgsText(
   text: string,
   toolName: string,
+  outputText = "",
 ): ToolSegmentDetails | undefined {
   const trimmed = text.trim();
   if (!trimmed) {
@@ -183,10 +217,18 @@ export function parseToolDetailsFromArgsText(
   const kind = resolveToolCardKind(toolName);
   const parsed = tryParseRecord(trimmed);
   if (parsed) {
-    return compact(extractDetailsFromArgs(parsed, kind));
+    const details = extractDetailsFromArgs(parsed, kind);
+    if (kind === "diff") {
+      withDiffText(details, parsed, outputText);
+    }
+    return compact(details);
   }
 
   const details: ToolSegmentDetails = {};
+  if (kind === "diff") {
+    // 入参本身就是补丁正文（没有 JSON 包裹）时同样尝试保留行级文本。
+    withDiffText(details, { patch: trimmed }, outputText);
+  }
   const patchTarget =
     trimmed.match(PATCH_TARGET_PATTERN)?.[1]?.trim() ??
     trimmed.match(PATCH_TARGET_EMBEDDED_PATTERN)?.[1]?.trim();
@@ -281,6 +323,14 @@ export function extractToolDetails(
     }
   }
 
+  if (kind === "diff") {
+    // render_output 是后端下发的工具输出原文（apply_patch 带 ```diff 围栏）；
+    // 取不到再退回 content/output/result，最后退回入参 patch。
+    const outputText =
+      firstText(sources, ["render_output"]) || firstText(sources, ["content", "output", "result"]);
+    withDiffText(details, args, outputText);
+  }
+
   return compact(details);
 }
 
@@ -288,14 +338,17 @@ export function extractToolDetails(
 export function resolveToolSegmentDetails(segment: {
   name: string;
   argsSummary?: string;
+  resultSummary?: string;
   details?: ToolSegmentDetails;
 }): ToolSegmentDetails | undefined {
   if (segment.details) {
     return segment.details;
   }
-  return segment.argsSummary
-    ? parseToolDetailsFromArgsText(segment.argsSummary, segment.name)
-    : undefined;
+  if (segment.argsSummary) {
+    return parseToolDetailsFromArgsText(segment.argsSummary, segment.name, segment.resultSummary ?? "");
+  }
+  // 没有入参文本时仍可从结果里的 ```diff 围栏恢复行级文本（历史/演示数据的常见形态）。
+  return compact(withDiffText({}, undefined, segment.resultSummary ?? ""));
 }
 
 /** 工具路径与产物路径的宽松匹配：分隔符归一后的全等或相对/绝对后缀关系。 */

@@ -103,6 +103,14 @@ export const enWorkspacePanelsMessages = {
     diffAdditions: "+{{value}}",
     diffRemovals: "−{{value}}",
     openFile: "Open {{path}}",
+    diff: {
+      label: "Diff (line view)",
+      ariaLabel: "Line-level diff of the tool patch: {{path}}",
+      expand: "Expand diff view",
+      filesAriaLabel: "Patch touches {{count}} files",
+      truncated: "Patch text was truncated (first {{count}} lines kept): the line view covers only what was kept.",
+      partial: "Patch text is incomplete (the trailing hunk has fewer lines); line numbers still come from the patch itself.",
+    },
   },
   richContent: {
     relatedEvidence: "Related evidence",

@@ -103,6 +103,14 @@ export const zhWorkspacePanelsMessages = {
     diffAdditions: "+{{value}}",
     diffRemovals: "−{{value}}",
     openFile: "打开 {{path}}",
+    diff: {
+      label: "差异（行级视图）",
+      ariaLabel: "工具补丁的行级 diff：{{path}}",
+      expand: "放大差异视图",
+      filesAriaLabel: "补丁涉及 {{count}} 个文件",
+      truncated: "补丁文本已截断（保留前 {{count}} 行）：行级视图只覆盖保留部分。",
+      partial: "补丁文本不完整（末尾 hunk 行数不足），行号仍取自补丁本身，未补行。",
+    },
   },
   richContent: {
     relatedEvidence: "相关证据",

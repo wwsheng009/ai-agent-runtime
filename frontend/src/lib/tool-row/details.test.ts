@@ -144,3 +144,70 @@ describe("matchToolFilePath", () => {
     expect(matchToolFilePath("", "src/a.ts")).toBe(false);
   });
 });
+
+describe("extractToolDetails：行级 diff 文本", () => {
+  /** 后端 tool.completed 的真实形态：说明行 + ```diff 围栏（带行号 hunk）。 */
+  const DIFF_FENCE = [
+    "补丁已应用：修改 1；影响 1 个路径",
+    "",
+    "文件差异:",
+    "```diff",
+    "--- a/src/a.ts",
+    "+++ b/src/a.ts",
+    "@@ -1,2 +1,2 @@",
+    "-old",
+    "+new",
+    "```",
+  ].join("\n");
+  const CODEX_PATCH = "*** Begin Patch\n*** Update File: src/a.ts\n@@\n-old\n+new\n*** End Patch";
+
+  it("apply_patch：从 render_output 围栏里保留补丁文本，并按补丁行统计兜底", () => {
+    const details = extractToolDetails(
+      payload({ tool: { render_output: DIFF_FENCE, args: { patch: CODEX_PATCH } } }),
+      "apply_patch",
+    );
+
+    expect(details?.filePath).toBe("src/a.ts");
+    expect(details?.diffText).toBe("--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,2 +1,2 @@\n-old\n+new");
+    expect(details?.diff).toEqual({ additions: 1, removals: 1 });
+    expect(details?.diffTextTruncated).toBeUndefined();
+  });
+
+  it("事件里已有的真实统计优先于解析结果", () => {
+    const details = extractToolDetails(
+      payload({ tool: { render_output: DIFF_FENCE, additions: 7, removals: 9 } }),
+      "apply_patch",
+    );
+
+    expect(details?.diff).toEqual({ additions: 7, removals: 9 });
+    expect(details?.diffText).toBeTruthy();
+  });
+
+  it("Codex 裸 @@ 补丁没有行号 → 不保留 diffText（回落原始文本）", () => {
+    const details = extractToolDetails(
+      payload({ tool: { args: { patch: CODEX_PATCH } } }),
+      "apply_patch",
+    );
+
+    expect(details?.diffText).toBeUndefined();
+    expect(details?.diff).toEqual({ additions: 1, removals: 1 });
+  });
+
+  it("非 diff 类工具即使输出里有补丁围栏也不保留行级文本", () => {
+    const details = extractToolDetails(
+      payload({ tool: { render_output: DIFF_FENCE } }),
+      "read_file",
+    );
+
+    expect(details?.diffText).toBeUndefined();
+  });
+
+  it("resolveToolSegmentDetails：没有入参文本时从结果围栏恢复行级文本", () => {
+    const details = resolveToolSegmentDetails({
+      name: "apply_patch",
+      resultSummary: DIFF_FENCE,
+    });
+
+    expect(details?.diffText).toContain("@@ -1,2 +1,2 @@");
+  });
+});

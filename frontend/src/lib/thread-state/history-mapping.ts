@@ -2,7 +2,7 @@
 
 import { type Artifact, type ChatMessage, type MessageSegment } from "@/data/mock";
 import { type SessionHistoryMessage, type SessionHistoryToolCall } from "@/types/runtime";
-import { parseToolDetailsFromArgsText } from "@/lib/tool-row/details";
+import { parseToolDetailsFromArgsText, resolveToolSegmentDetails } from "@/lib/tool-row/details";
 
 import { extractGeneratedImagesFromAssistantMessage } from "./generated-images";
 import { buildHistoryArtifacts, normalizeSessionHistoryMessages } from "./history-artifacts";
@@ -251,7 +251,10 @@ function buildHistoryToolSegment(
   if (errorMessage) {
     segment.errorMessage = errorMessage;
   }
-  const details = parseToolDetailsFromArgsText(argsSummary, name);
+  // 历史结果正文（未截断）里可能带 ```diff 围栏：行级 diff 视图优先用它恢复真实补丁文本。
+  const details =
+    parseToolDetailsFromArgsText(argsSummary, name, result) ??
+    (result ? resolveToolSegmentDetails({ name, resultSummary: result }) : undefined);
   if (details) {
     segment.details = details;
   }

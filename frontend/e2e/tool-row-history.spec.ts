@@ -11,6 +11,8 @@ import { resetMockState, seedSessionHistory } from "./support";
 // `GET /api/runtime/sessions/:id/history`；页面刷新走 history sync 投影。
 
 const composer = (page: Page) => page.locator(".app-chat-input");
+/** 不用 \n 转义，避免多行字符串在补丁/快照工具链里被当成结构标记。 */
+const NL = String.fromCharCode(10);
 
 async function waitForPromptVisible(page: Page) {
   await expect(composer(page)).toBeVisible({ timeout: 30_000 });
@@ -114,4 +116,83 @@ test("B4/B5: 历史工具回执渲染为具体工具行（文件 / 命令）并�
   await expect(chevronToggle).toHaveAttribute("aria-expanded", "false");
   // 面板收起后仍挂载（React 常驻 + hidden），因此断言可见性而不是文本缺失。
   await expect(shellRow.locator('[data-tool-row-input-panel="true"]')).toBeHidden();
+});
+
+test("apply_patch 历史回执：展开是行级 diff 浏览器，不再直出原始 diff 文本", async ({ page }) => {
+  await composer(page).fill("capital check");
+  await composer(page).press("Control+Enter");
+  await expect(page.getByText("The capital of France is Paris.").first()).toBeVisible({
+    timeout: 20_000,
+  });
+
+  const marker = "***";
+  // render_output 形态：说明行 + 带真实行号的 diff 围栏（行级视图的数据源）。
+  const toolContent = [
+    "补丁已应用：修改 1；影响 1 个路径",
+    "",
+    "文件差异:",
+    "```diff",
+    "--- a/src/a.ts",
+    "+++ b/src/a.ts",
+    "@@ -1,2 +1,2 @@",
+    ' const keep = 1;',
+    '-const value = "old";',
+    '+const value = "new";',
+    "```",
+  ].join(NL);
+
+  await seedSessionHistory(page.request, "e2e-session-1", [
+    { role: "user", content: "把常量改个名" },
+    {
+      role: "assistant",
+      content: "",
+      metadata: { message_id: "msg-tool-patch" },
+      tool_calls: [
+        {
+          id: "call-patch",
+          name: "apply_patch",
+          arguments: {
+            patch: [
+              `${marker} Begin Patch`,
+              `${marker} Update File: src/a.ts`,
+              "@@",
+              '-const value = "old";',
+              '+const value = "new";',
+              `${marker} End Patch`,
+            ].join(NL),
+          },
+        },
+      ],
+    },
+    { role: "tool", content: toolContent, tool_call_id: "call-patch" },
+    { role: "assistant", content: "改好了。" },
+  ]);
+
+  await page.reload();
+  await waitForPromptVisible(page);
+
+  const row = toolRows(page).first();
+  await expect(toolRows(page)).toHaveCount(1);
+  await expect(row).toContainText("apply_patch");
+  await row.locator('[data-chat-row-toggle="chevron"]').click();
+
+  const panel = row.locator('[data-testid="tool-row-diff-panel"]');
+  await expect(panel).toBeVisible();
+  // 行级视图取代原始入参面板：补丁正文不再以纯文本重复一遍。
+  await expect(row.locator('[data-tool-row-input-panel="true"]')).toHaveCount(0);
+  await expect(panel.locator('[data-testid="tool-row-diff-path"]')).toHaveText("src/a.ts");
+  await expect(panel.locator('[data-diff-hunk-header="expanded"]')).toContainText("@@ -1,2 +1,2 @@");
+  await expect(panel.locator('[data-diff-cell="del"]').first()).toContainText('const value = "old";');
+  await expect(panel.locator('[data-diff-cell="add"]').first()).toContainText('const value = "new";');
+
+  // 输出面板保留工具说明行，但围栏里的原始 diff 文本不再直出。
+  const output = row.locator('[data-tool-row-output="result"]');
+  await expect(output).toContainText("补丁已应用：修改 1；影响 1 个路径");
+  await expect(output).not.toContainText("@@ -1,2 +1,2 @@");
+
+  // 并排（split）模式：同一个补丁的另一种读法，切换后行号与增删行仍来自真实补丁。
+  const modeGroup = panel.locator('[role="group"]').first();
+  await modeGroup.locator("button").nth(1).click();
+  await expect(modeGroup.locator("button").nth(1)).toHaveAttribute("aria-pressed", "true");
+  await expect(panel.locator('[data-diff-cell="add"]').first()).toBeVisible();
 });

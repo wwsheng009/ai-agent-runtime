@@ -7,8 +7,11 @@
 import { useTranslation } from "react-i18next";
 
 import { type ToolMessageSegment } from "@/lib/thread-state/messages";
-import { type ToolCardKind } from "@/lib/tool-row";
+import { resolveToolSegmentDetails, type ToolCardKind } from "@/lib/tool-row";
+import { stripRenderedPatch } from "@/lib/tool-row/diff-text";
 import { cn } from "@/lib/utils";
+
+import { ToolRowDiffPanel } from "./tool-row-diff-panel";
 
 type ToolRowPanelsProps = {
   expandable: boolean;
@@ -41,7 +44,11 @@ export function ToolRowPanels({
 }: ToolRowPanelsProps) {
   const { t } = useTranslation("workspace");
   const failureText = segment.errorMessage?.trim() || segment.resultSummary?.trim() || "";
-  const outputText = segment.resultSummary?.trim() || "";
+  const details = kind === "diff" && !isFailure ? resolveToolSegmentDetails(segment) : undefined;
+  const diffText = details?.diffText;
+  const rawOutputText = segment.resultSummary?.trim() || "";
+  // 行级视图已经承载补丁正文：输出面板不再重复原始 diff 文本（原文仍可复制 / 下载）。
+  const outputText = diffText ? stripRenderedPatch(rawOutputText) : rawOutputText;
   const inputText = segment.argsSummary?.trim() || "";
   const detail = isFailure
     ? failureText
@@ -83,7 +90,14 @@ export function ToolRowPanels({
       id={panelId}
     >
       {detail}
-      {inputText ? (
+      {diffText ? (
+        <ToolRowDiffPanel
+          filePathHint={details?.filePath}
+          patchText={diffText}
+          stats={details?.diff}
+          truncated={details?.diffTextTruncated === true}
+        />
+      ) : inputText ? (
         <div className="mt-1 rounded-lg bg-surface-soft px-2.5 py-2" data-tool-row-input-panel="true">
           <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
             {t("panels.messages.toolRow.inputLabel")}
