@@ -410,6 +410,120 @@ func TestToolCompletedEventPayloadAttachesTodoSnapshot(t *testing.T) {
 	}
 }
 
+// 生产形状回归（2026-09-16）：真实执行路径不把工具结果元数据平铺进 envelope，
+// 而是由 recordToolExecutionOutcome 整体嵌到 metadata["tool_metadata"]（todos 数组
+// 只存在该包内）。若快照只从顶层 metadata["todos"] 取值，
+// protocol_result.metadata.todo_snapshot 永远不会出现，前端任务面板（通道 A）就只剩
+// 文本摘要，组件不渲染。
+func TestToolCompletedEventPayloadAttachesTodoSnapshotFromNestedToolMetadata(t *testing.T) {
+	nested := map[string]interface{}{
+		"total":        2,
+		"pending":      1,
+		"in_progress":  1,
+		"completed":    0,
+		"storage_mode": "memory",
+		"session_id":   "session_20260916133052_DktyYFb3",
+		"goal_id":      "goal-nested",
+		"todos": []todoSnapshotFixtureItem{
+			{Content: "编写 index.html 页面骨架", Status: "in_progress", ActiveForm: "编写 index.html 页面骨架中", CreatedAt: 1, UpdatedAt: 2},
+			{Content: "编写 assets/css/style.css 报表样式", Status: "pending", ActiveForm: "编写 assets/css/style.css 报表样式中"},
+		},
+	}
+	envelopeMetadata := map[string]interface{}{
+		"step":          3,
+		"trace_id":      "trace-todos-nested",
+		"tool_source":   "toolkit",
+		"tool_metadata": nested,
+	}
+
+	payload := toolCompletedEventPayload(toolExecutionResult{
+		Call:     types.ToolCall{ID: "call-todos-nested", Name: "todos"},
+		Output:   "任务列表已更新: 1 待处理, 1 进行中, 0 已完成",
+		Envelope: &output.Envelope{Metadata: envelopeMetadata},
+	}, 3, "trace-todos-nested", nil)
+
+	proto, _ := payload["protocol_result"].(map[string]interface{})
+	if proto == nil {
+		t.Fatalf("expected protocol_result, payload=%#v", payload)
+	}
+	meta, _ := proto["metadata"].(map[string]interface{})
+	if meta == nil {
+		t.Fatalf("expected protocol_result.metadata, got %#v", proto)
+	}
+	snapshot, ok := meta["todo_snapshot"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected todo_snapshot from nested tool_metadata, got %#v", meta)
+	}
+	if snapshot["session_id"] != "session_20260916133052_DktyYFb3" || snapshot["goal_id"] != "goal-nested" {
+		t.Fatalf("todo_snapshot owner ids=%#v", snapshot)
+	}
+	items, ok := snapshot["items"].([]map[string]interface{})
+	if !ok || len(items) != 2 {
+		t.Fatalf("todo_snapshot items=%#v", snapshot["items"])
+	}
+	if items[0]["status"] != "in_progress" || items[1]["content"] != "编写 assets/css/style.css 报表样式" {
+		t.Fatalf("todo_snapshot items=%#v", items)
+	}
+	// 原始 todos 仍不得进入线上薄白名单，嵌套包本身也不该被写入。
+	if _, leaked := meta["todos"]; leaked {
+		t.Fatalf("raw todos must not leak into wire metadata: %#v", meta)
+	}
+	if _, mutated := nested["todo_snapshot"]; mutated {
+		t.Fatalf("producer tool_metadata must not carry todo_snapshot: %#v", nested)
+	}
+}
+
+// 端到端形状回归：不走手搭 map，而是按真实三步装配——recordToolExecutionOutcome
+// 嵌套工具元数据 → gateway.Process 生成 envelope → toolCompletedEventPayload 生成
+// 事件载荷。装配形状一旦回退到只平铺，这里的断言会先红。
+func TestToolCompletedEventPayloadTodoSnapshotThroughRealAssembly(t *testing.T) {
+	tc := types.ToolCall{ID: "call-todos-e2e", Name: "todos"}
+	metadata := map[string]interface{}{
+		"step":        3,
+		"trace_id":    "trace-todos-e2e",
+		"tool_source": "toolkit",
+	}
+	rawMeta := map[string]interface{}{
+		"total":        2,
+		"pending":      1,
+		"in_progress":  1,
+		"completed":    0,
+		"storage_mode": "memory",
+		"session_id":   "session-e2e",
+		"goal_id":      "goal-e2e",
+		"todos": []todoSnapshotFixtureItem{
+			{Content: "编写 index.html 页面骨架", Status: "in_progress", ActiveForm: "编写 index.html 页面骨架中"},
+			{Content: "编写 assets/js/data.js 数据层", Status: "pending", ActiveForm: "编写 assets/js/data.js 数据层中"},
+		},
+	}
+	result := toolExecutionResult{Call: tc}
+	recordToolExecutionOutcome(&result, metadata, "任务列表已更新: 1 待处理, 1 进行中, 0 已完成", rawMeta, nil)
+
+	envelope, err := output.NewGateway(nil).Process(
+		context.Background(),
+		newRawToolResult("session-e2e", tc, 3, result.Output, result.Error, metadata),
+	)
+	if err != nil || envelope == nil {
+		t.Fatalf("gateway.Process envelope=%#v err=%v", envelope, err)
+	}
+	result.Envelope = envelope
+
+	payload := toolCompletedEventPayload(result, 3, "trace-todos-e2e", nil)
+	proto, _ := payload["protocol_result"].(map[string]interface{})
+	meta, _ := proto["metadata"].(map[string]interface{})
+	snapshot, ok := meta["todo_snapshot"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected todo_snapshot through the real assembly, got %#v", meta)
+	}
+	items, ok := snapshot["items"].([]map[string]interface{})
+	if !ok || len(items) != 2 {
+		t.Fatalf("todo_snapshot items=%#v", snapshot["items"])
+	}
+	if snapshot["session_id"] != "session-e2e" || snapshot["goal_id"] != "goal-e2e" {
+		t.Fatalf("todo_snapshot owner ids=%#v", snapshot)
+	}
+}
+
 func TestToolCompletedEventPayloadSkipsTodoSnapshotForOtherTools(t *testing.T) {
 	payload := toolCompletedEventPayload(toolExecutionResult{
 		Call:   types.ToolCall{ID: "call-read-file", Name: "read_file"},

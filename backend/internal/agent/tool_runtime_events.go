@@ -722,11 +722,19 @@ type todoSnapshotItem struct {
 // wire.Metadata is the cloned map built by toolprotocol.ResultFromParts, so
 // writing there is local to the wire object and invisible to the payload map.
 // The key is attached only when at least one valid item survives filtering.
+//
+// The producer keys are resolved through todoSnapshotSourceBag: the live agent
+// path nests tool-authored metadata under "tool_metadata"
+// (recordToolExecutionOutcome), while direct callers keep them flat.
 func attachTodoSnapshotToProtocolResult(wire toolprotocol.Result, metadata map[string]interface{}) {
 	if len(metadata) == 0 || wire.Metadata == nil {
 		return
 	}
-	raw, ok := metadata["todos"]
+	bag := todoSnapshotSourceBag(metadata)
+	if len(bag) == 0 {
+		return
+	}
+	raw, ok := bag["todos"]
 	if !ok || raw == nil {
 		return
 	}
@@ -760,13 +768,45 @@ func attachTodoSnapshotToProtocolResult(wire toolprotocol.Result, metadata map[s
 		return
 	}
 	snapshot := map[string]interface{}{"items": rows}
-	if sessionID := todoSnapshotMetadataString(metadata["session_id"]); sessionID != "" {
+	if sessionID := todoSnapshotOwnerID(bag, metadata, "session_id"); sessionID != "" {
 		snapshot["session_id"] = sessionID
 	}
-	if goalID := todoSnapshotMetadataString(metadata["goal_id"]); goalID != "" {
+	if goalID := todoSnapshotOwnerID(bag, metadata, "goal_id"); goalID != "" {
 		snapshot["goal_id"] = goalID
 	}
 	wire.Metadata[todoSnapshotMetadataKey] = snapshot
+}
+
+// todoSnapshotSourceBag returns the metadata bag that actually carries the todos
+// tool result keys.
+//
+// The live execution path stores the tool result metadata under
+// metadata["tool_metadata"] (see recordToolExecutionOutcome) instead of flattening
+// it, so reading only the top level silently loses the snapshot and leaves the
+// frontend task panel with just the text summary. Nested wins when it carries the
+// key; flat stays supported for direct callers and older payloads.
+func todoSnapshotSourceBag(metadata map[string]interface{}) map[string]interface{} {
+	if nested, ok := metadata["tool_metadata"].(map[string]interface{}); ok && len(nested) > 0 {
+		if _, hasTodos := nested["todos"]; hasTodos {
+			return nested
+		}
+	}
+	if _, hasTodos := metadata["todos"]; hasTodos {
+		return metadata
+	}
+	return nil
+}
+
+// todoSnapshotOwnerID prefers the owner id from the resolved bag and falls back
+// to the flat envelope metadata (nested bag may omit an id the host set flat).
+func todoSnapshotOwnerID(bag, metadata map[string]interface{}, key string) string {
+	if id := todoSnapshotMetadataString(bag[key]); id != "" {
+		return id
+	}
+	if bag == nil {
+		return ""
+	}
+	return todoSnapshotMetadataString(metadata[key])
 }
 
 // normalizeTodoSnapshotStatus canonicalizes a todo status, returning "" for
