@@ -25,9 +25,13 @@ var chatInputActivity struct {
 }
 
 func beginChatInputWait() {
-	if chatInputActivity.pending.Add(1) == 1 {
+	// 先发布等待起点、再发布计数：Go 原子操作是顺序一致的，观测者只要看到
+	// pending>0，就一定能读到非零起点；反过来（先 Add 再 Store）会留下一个
+	// publish 间隙，让观测者把"刚刚开始等待"读成 0 时长（CI 高负载下已出现）。
+	if chatInputActivity.pending.Load() == 0 {
 		chatInputActivity.pendingFrom.Store(time.Now().UnixNano())
 	}
+	chatInputActivity.pending.Add(1)
 }
 
 func endChatInputWait() {

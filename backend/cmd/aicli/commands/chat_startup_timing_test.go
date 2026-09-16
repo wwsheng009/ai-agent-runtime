@@ -104,9 +104,7 @@ func TestChatInputActivity_TracksBlockingRead(t *testing.T) {
 	}()
 
 	waitForChatInputWaitState(t, true)
-	if _, waited := chatInputWaitState(); waited <= 0 {
-		t.Fatalf("expected a positive wait duration while blocked on stdin")
-	}
+	waitForPositiveChatInputWait(t)
 
 	if _, err := pipeWriter.WriteString("high\n"); err != nil {
 		t.Fatalf("write to stdin pipe: %v", err)
@@ -298,6 +296,22 @@ func waitForChatInputWaitState(t *testing.T, want bool) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("stdin wait state did not become %v within 5s", want)
+}
+
+// waitForPositiveChatInputWait 等待「正在等待输入」且等待时长已开始累计。
+// 等待计数与等待起点是两个独立的原子量，观测者可能在两者发布之间读到
+// pending>0 而时长为 0（全包高负载运行下已复现为 flaky）。把「已记录等待时长」
+// 作为观测目标即可跨过这个发布间隙，不必依赖写入顺序。
+func waitForPositiveChatInputWait(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if pending, waited := chatInputWaitState(); pending && waited > 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("stdin wait state did not report a positive wait duration within 5s")
 }
 
 // resetChatInputActivityForTest 清空共享 stdin 活动计数，并返回复位函数。
