@@ -13,6 +13,8 @@
 | --- | --- | --- |
 | 2026-09-16 | 规划初稿：需求拆解、已核验现状基线、关键设计决策、前端/后端详细设计、接口契约、分期实施、测试验收、风险、自审 | §1–§11 |
 | 2026-09-16 | **v2 修订**：① 右侧栏宽度由「两档预设」升级为**用户可拖拽的可变宽度 + 自适应（auto）默认**（重写 D2、§4.2，新增 §4.2.1 交互细则与 §4.2.2 文件清单）；② §11.2 全部待确认问题**按最优建议拍板**并转写为决策记录；③ 新增宽度相关风险、验收项与代码位置索引 | §0、§1.1、§1.2、D2、§3、§4.2、§4.7、§7 P0-2、§8.2、§9、§10、§11 |
+| 2026-09-16 | **v3 修订（未跟踪 / 删除文件处理）**：① 未跟踪文件在 status 中按真实文件内容统计新增行数，读不到结论时用 `-1` + `warnings[]` 如实降级（**禁止** `+0 −0` 伪装）；② `target=working` 下未跟踪文件用 `git diff --no-index -- /dev/null <file>` 合成新增 diff（退出码 1 按「存在差异」正常处理）；③ 请求目标对这条路径无改动而另一侧有改动时回退取数并回报 `target_fallback`（UI 必须标注显示的是哪一侧）；④ 新增未跟踪行数扫描的**单文件上限 + 单次请求总预算** | §0、§5.5、§5.6、§5.8、§5.10、§7 P3-3、§8.2 |
+| 2026-09-16 | **v4 修订（diff 行号列合并）**：diff 行号列由「老 + 新」**两列合并为一列**（`add`→新侧、`del`→老侧、`context`→新侧，**不借用对侧数字**）；split 每侧各保留一列；合并只发生在展示层 —— `old_no`/`new_no` 契约、split 配对与行 aria 文案不变（读屏仍能分辨增删行） | §0、§1.1、§4.6、§8.2 |
 
 **阅读导航**
 
@@ -35,7 +37,7 @@
 | 「文件上传、下载」 | HTTP 上传（分片）与下载（Range 流式）端点 + 右侧栏进度 UI |
 | 「大文件续传」 | 上传：分片 + 服务端 offset 校验 + 断线/刷新后按 offset 续传；下载：`Range`/ETag + 可选 File System Access API 续传 |
 | 「不同类型文件，md/文本文件直接渲染预览」 | 类型探测 → 文本/markdown/代码/图片/二进制/超限 分流渲染，复用既有 `file-preview` 解码层 |
-| 「git 变更渲染器参考 github.com」 | GitHub 风格变更视图：变更列表（分组 + 状态徽标 + 增删行数）+ unified/split diff + 折叠上下文 + 行号 |
+| 「git 变更渲染器参考 github.com」 | GitHub 风格变更视图：变更列表（分组 + 状态徽标 + 增删行数）+ unified/split diff + 折叠上下文 + 行号（v4：unified **单列**行号） |
 | 「还有对应的后端的相关接口」 | 新增 `/api/runtime/fs/*`（浏览/预览/传输）与 `/api/runtime/git/*` 端点，含契约、错误码、限额 |
 
 ### 1.2 目标能力清单
@@ -490,7 +492,7 @@ idle → hashing?(可选) → init → transferring ⇄ paused ⇄ retrying → 
 | --- | --- |
 | unified / split | 同一份结构化 hunks，两种布局；split 需要按行对齐（服务端已给 old/new 行号，前端做配对） |
 | 折叠上下文 | 每 hunk 上下各显示 3 行（默认）；「展开上方/下方 N 行」再请求一次带更大 `context` 的 diff（**服务端不返回全文件**，避免巨大载荷）；「展开整个文件」= `context=999999` 但受行数上限保护 |
-| 行 | 老行号 / 新行号 / `+`/`-`/空格 前缀 / 代码（可选中复制）；`\ No newline at end of file` 显式渲染 |
+| 行 | **单列行号**（老/新两列已合并：`add`→新侧、`del`→老侧、`context`→新侧；缺失侧渲染空串，**不借对侧数字**）+ `+`/`-`/空格 前缀 + 代码（可选中复制）；split 每侧各一列行号；`\ No newline at end of file` 显式渲染 |
 | 白色空白 | 开关：忽略空白变更（服务端 `--ignore-all-space`），开关变化需要重新取 diff（**不**在前端假装过滤） |
 | 二进制 | 显示「二进制文件，已变更」+ 大小变化，不渲染内容 |
 | 超大 diff | 服务端 `truncated=true` + `truncated_reason`（行数/字节）；前端显示「已截断，仅显示前 N 行」并提供「下载原始 diff」 |
@@ -748,7 +750,7 @@ idle → hashing?(可选) → init → transferring ⇄ paused ⇄ retrying → 
   "clean": false,
   "staged":   [ { "path": "src/a.ts", "status": "M", "insertions": 12, "deletions": 3, "binary": false } ],
   "unstaged": [ { "path": "src/b.ts", "status": "M", "insertions": 4, "deletions": 1, "binary": false } ],
-  "untracked":[ { "path": "new.txt", "status": "U" } ],
+  "untracked":[ { "path": "new.txt", "status": "U", "insertions": 3, "deletions": 0, "binary": false } ],
   "conflicts":[ { "path": "src/c.ts", "status": "!" } ],
   "renames":  [ { "from": "old.ts", "to": "new.ts", "status": "R" } ],
   "generated_at": 1758000000
@@ -758,12 +760,18 @@ idle → hashing?(可选) → init → transferring ⇄ paused ⇄ retrying → 
 - 数据来源：`git status --porcelain=v2 --branch -z --untracked-files=all`（v2 稳定、含 rename/XY 分离，**必须 `-z` 解析**以避免文件名中的空格/换行/引号问题），增删行数来自 `git diff --numstat -z` 与 `git diff --cached --numstat -z`；
 - 解析纪律：`-z` 输出按 `\x00` 切分；遇到**无法识别的 porcelain 记录类型**（v2 的 `#`/`1`/`2`/`u`/`?`/`!`）时按「无法解析 → 记录到 `warnings[]` 并跳过」，不猜测语义（与前端 `decode.ts` 不臆造数据同一纪律）；
 - 二进制文件在 numstat 中表现为 `-\t-` → `binary: true`，**不要**当成 0/0。
+- 未跟踪文件不在 numstat 里：服务端按**读取文件**统计行数（`\n` 计数，末行无换行也算一行；探测到 NUL 字节 → `binary: true`；符号链接按 git 口径算 1 行）。
+  未跟踪文件只能逐个读，因此统计有**单文件上限**（`MaxOutputBytes`，默认 4 MiB）与**单次 status 的总扫描预算**（`MaxUntrackedScanBytes`，默认 16 MiB，见 §5.8）；读不到结论时（非常规文件、超过单文件上限或总预算、读取失败）用 `insertions = deletions = -1` 表示「统计不可用」并追加 `warnings[]`，**不得**回落到 `+0 −0`（那会把「未知」显示成「没有改动」）。
 
 **`GET /git/diff?scope=…&path=…&file=src/a.ts&target=working|staged|commit:<sha>&context=3&whitespace=show|ignore_all`**
 
 - 命令：`git diff --no-color --no-ext-diff --find-renames [--cached|<sha>] --unified=<context> [--ignore-all-space] -- <file>`
+- **未跟踪文件**（仅 `target=working`）：`git diff -- <file>` 对未跟踪路径没有任何输出，照抄会显示成「没有差异」。这类文件改用 `git diff … --no-index -- /dev/null <file>` 合成「新增文件」diff（进程根取作用域根，路径口径与 `file` 参数一致）。注意 `--no-index` 的退出码 1 有两种含义：存在差异（stdout 有内容、stderr 为空）与路径读不到（stdout 为空、stderr 有 `error:` 行），只有前者算成功，后者按 `git_failed` 报错——绝不能渲染成「新增的空文件」。
+- 空的新文件没有任何 hunk，但结论仍是 `status: "A"`（不是「与目标一致」）：前端据此显示「新增的空文件」而不是「没有差异」。
+- **目标回退（改动在另一侧）**：变更列表按「改动在哪一侧」分组，而 `target` 由用户在「工作区 / 已暂存」里选。当请求目标对这条路径没有任何改动、而另一侧有改动时（典型：未跟踪或已暂存的新文件 + `target=working`，或未暂存的删除 + `target=staged`），服务端**回退**到另一侧取 diff，并在响应里如实回报 `effective_target`（实际使用的目标）与 `target_fallback: true`；前端**必须**说明「当前对比目标没有该文件的改动，以下显示的是另一侧的改动」，不得默默换源。`target=commit:<sha>` 没有「另一侧」（用户显式选了历史版本），不回退。
+- 判定「该目标对这条路径到底有没有改动」用 `git diff --name-status -z -- <file>`（空的新文件、被删除的空文件、仅模式变更在 unified diff 里可能连文件头都没有，无法从文本得出结论）：有记录就用它的状态字母补 `file.status`（`A`/`D`/`R`），没有记录才考虑回退。
 - 服务端把 unified diff 解析为结构化 hunks（见 §5.6），响应同时带 `raw`（原文，供复制/下载）与 `hunks`（供渲染）；
-- 解析失败（非标准输出，如 `--no-index` 场景或子模块）→ 返回 `{ "hunks": [], "raw": "...", "parse_error": "..." }`，让前端降级为纯文本展示，**不要** 500；
+- 解析失败（非标准输出，如子模块或 git 版本差异）→ 返回 `{ "hunks": [], "raw": "...", "parse_error": "..." }`，让前端降级为纯文本展示，**不要** 500；
 - 子模块变更：`git diff --submodule=log`；本期可只标 `is_submodule: true` 并显示「子模块变更」。
 
 **`GET /git/commits?scope=…&path=…&limit=50&cursor=<sha>`**
@@ -778,6 +786,8 @@ idle → hashing?(可选) → init → transferring ⇄ paused ⇄ retrying → 
   "file": { "path": "src/a.ts", "abs_path": "E:\\…\\src\\a.ts",
             "old_path": null, "status": "M", "is_binary": false, "is_submodule": false },
   "target": "working",
+  "effective_target": "working",
+  "target_fallback": false,
   "context": 3,
   "whitespace": "show",
   "insertions": 12, "deletions": 3,
@@ -845,6 +855,7 @@ idle → hashing?(可选) → init → transferring ⇄ paused ⇄ retrying → 
 | `fs/preview` 文本字节 | 256 KiB | 是 | 文本预览不需要更多；超限截断 |
 | `fs/preview` 图片字节 | 2 MiB | 是 | base64 膨胀 33%，再大不适合内联 |
 | diff 输出上限 | 4 MiB / 20000 行 | 是 | 巨型 lock 文件/生成代码 diff |
+| 未跟踪文件行数扫描预算 | 16 MiB / 次 status（单文件另有 `MaxOutputBytes`，默认 4 MiB） | 是 | 未跟踪文件只能逐个读，防止一次列表请求变成无上限磁盘读取；超预算按 `insertions = -1` + `warnings[]` 如实降级 |
 | `git status` 超时 | 5s | 是 | 大仓库 `--untracked-files=all` 可能慢 |
 | `git diff` / `git log` 超时 | 15s / 10s | 是 | 慢命令必须可中断（`exec.CommandContext` + kill） |
 | 上传并发分片 | 客户端 3；服务端同一 upload_id 串行 | 是 | 磁盘随机写 + 顺序一致性 |
@@ -893,8 +904,8 @@ handler.SetGitBrowseService(gitbrowse.NewLocalService())   // git 缺失时内�
 | 分页 | 1000 项临时目录：`limit=200` 翻页不重不漏；`cursor` 非法 → 400；排序稳定（同名不同大小写场景） |
 | 上传 | 顺序分片成功；乱序 → 409 + expected_offset；断点重连后从 offset 续传；checksum 不符 → 409；`conflict_policy=fail` → 409；`overwrite` 成功；abort 后临时文件消失 |
 | 下载 | `Range` 单区间正确；越界 → 416；`HEAD` 返回 ETag/Accept-Ranges；大文件不 OOM（用 `httptest` + 流式校验前 N 字节） |
-| Git | 临时仓库（`git init` + commit + 改文件）：status 分组正确；重命名（`git mv`）解析；二进制文件 `binary=true`；非仓库 → `repo_not_found`；**git 不存在**（PATH 置空）→ `git_unavailable` 而非崩溃 |
-| diff 解析 | 新增/删除文件、`\ No newline at end of file`、纯空白变更、超限截断（`truncated=true`）、CRLF 文件 |
+| Git | 临时仓库（`git init` + commit + 改文件）：status 分组正确；重命名（`git mv`）解析；二进制文件 `binary=true`；非仓库 → `repo_not_found`；**git 不存在**（PATH 置空）→ `git_unavailable` 而非崩溃；未跟踪文件行数统计（文本按真实行数含无尾换行；二进制标 `binary=true`；超单文件上限/总预算 → `-1` + `warnings[]`） |
+| diff 解析 | 新增/删除文件、`\ No newline at end of file`、纯空白变更、超限截断（`truncated=true`）、CRLF 文件、未跟踪文件合成 `--no-index` 新增 diff（空文件 `status="A"` / 二进制 / 无尾换行 / 点开前被删除 → `git_failed`）、请求目标无改动时回退并回报 `target_fallback` |
 
 ---
 
@@ -960,7 +971,7 @@ handler.SetGitBrowseService(gitbrowse.NewLocalService())   // git 缺失时内�
 | --- | --- | --- |
 | P3-1 git 沙箱 | `gitbrowse/exec.go`（超时/限额/降级） | PATH 无 git → `git_unavailable`；15s 卡死命令被 kill |
 | P3-2 status | porcelain v2 解析 + numstat | 分组/重命名/二进制/冲突用例（临时仓库）全过 |
-| P3-3 diff | unified → hunks 解析 + 截断 | 新增/删除/无尾换行/CRLF/纯空白/超限用例全过 |
+| P3-3 diff | unified → hunks 解析 + 截断 | 新增/删除/无尾换行/CRLF/纯空白/超限用例全过；未跟踪文件合成新增 diff（点击可见内容）与目标回退（`target_fallback`）用例全过 |
 | P3-4 变更列表 | `change-list.tsx`（分组、树/平铺、状态徽标、计数） | 与 `git status` 输出逐项对照一致 |
 | P3-5 diff 视图 | `diff-view.tsx`/`diff-hunk.tsx`/`virtual-line-list.tsx` | unified/split 切换、折叠展开、空白忽略（重新取 diff）、复制原文 |
 | P3-6 提交视图（可选裁剪） | `commit-list.tsx` | 点击提交看 diff |
@@ -1001,7 +1012,7 @@ handler.SetGitBrowseService(gitbrowse.NewLocalService())   // git 缺失时内�
 4. 预览：`.md`（中文 + 表格 + 代码块）、`.ts`（高亮 + 行号）、`.png`、`.exe`（二进制提示）、2GB 文件（超限提示 + 下载入口）；
 5. 上传：500MB 文件 → 中途暂停 10s → 继续 → 完成后比对 sha256；上传同名文件 → 冲突提示三种策略各试一次；上传中断网 → 恢复后续传；
 6. 下载：Chromium 用 Tier A 暂停/继续；Firefox 用 Tier C 得到「不支持续传」的说明；
-7. Git：改 3 个文件（含重命名、含二进制）→ 变更列表计数与 `git status` 一致 → diff 与 `git diff` 一致（含 `\ No newline`）→ 空白忽略开关行为正确；
+7. Git：改 3 个文件（含重命名、含二进制）→ 变更列表计数与 `git status` 一致 → diff 与 `git diff` 一致（含 `\ No newline`）→ 空白忽略开关行为正确；行号只有**一列**（unified 不再并排老/新两列，split 每侧各一列）；另加**未跟踪新文件**与**已删除文件**：计数为真实新增行数（读不到时显示「统计不可用」而非 `+0 −0`）、点击可见新增/删除内容、对比目标不覆盖改动侧时自动回退并标注；
 8. 在非 Git 目录选 Git 页签 → 显示「不是 Git 仓库」空态，不报错；
 9. 面板切换不丢上传进度；关闭右侧栏后重新打开，文件/Git 面状态、作用域与宽度保持。
 
