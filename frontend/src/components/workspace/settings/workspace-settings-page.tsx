@@ -4,6 +4,8 @@ import { useTranslation } from "react-i18next";
 import { useAppSettings } from "@/core/settings";
 
 import { PanelIcon } from "@/components/ui/panel-icon";
+// P0-2：右侧栏宽度区块（滑块 + 当前值 + 恢复自适应），与拖拽手柄共用同一宽度出口。
+import { RailWidthSection } from "@/components/workspace/workspace-shell/rail-width-section";
 
 import { SettingsChoiceCard } from "./settings-choice-card";
 import { SettingsSection } from "./settings-section";
@@ -77,6 +79,8 @@ export function WorkspaceSettingsPage() {
           iconWrapperClassName="text-accent-secondary"
         />
       </SettingsSection>
+
+      <RailWidthSection />
     </div>
   );
 }

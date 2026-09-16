@@ -8,6 +8,20 @@ export const enWorkspacePanelsShell = {
     git: "Git changes",
     disabledNoSession: "Select a session to use this tab",
   },
+  rightRail: {
+    resizeHandle: "Resize right rail",
+    widthLabel: "Right rail width",
+    widthDescription:
+      "Drag the handle on the rail's left edge, or use the slider below; \"Reset to adaptive\" computes the width from the active surface.",
+    widthValue: "{{px}} px",
+    sliderLabel: "Drag the slider to set the right rail width",
+    resetAuto: "Reset to adaptive",
+    resetAutoHint: "Double-click the handle or press Enter to reset",
+    modeAuto: "Adaptive",
+    modeManual: "Manual",
+    overlayLabel: "Right rail (overlay)",
+    overlayClose: "Close right rail",
+  },
   threadStrip: {
     activeThread: "Active thread",
     updatedAt: "{{time}} updated",

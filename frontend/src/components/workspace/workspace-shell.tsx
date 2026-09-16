@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Code2Icon, FileSearchIcon, ListTodoIcon, ShieldCheckIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import { type WorkspacePanelSurfaceId } from "@/components/workspace/panel-registry";
 import { type SettingsSectionId } from "@/components/workspace/settings";
 import {
   getThreadStatusLabel,
@@ -11,7 +12,9 @@ import {
   getThreadTransportLabel,
 } from "@/components/workspace/workspace-shell-shared";
 import { useAppSettings } from "@/core/settings";
+import { useRightRailWidth } from "@/hooks/workspace/use-right-rail-width";
 import { NEW_THREAD_ID } from "@/hooks/workspace/use-workspace-thread-selection";
+import { RAIL_GRID_MIN_VIEWPORT_PX } from "@/lib/layout/rail-width";
 import {
   WORKSPACE_SIDEBAR_COLLAPSED_WIDTH,
   WORKSPACE_SIDEBAR_EXPANDED_WIDTH,
@@ -26,6 +29,15 @@ import {
   type WorkspaceShellProps,
   type WorkspaceViewMode,
 } from "./workspace-shell/types";
+
+/** P0-2：视口宽度兜底读取（无 window 时按 xl 断点处理，避免 NaN 宽度）。 */
+function readViewportWidth() {
+  if (typeof window === "undefined") {
+    return RAIL_GRID_MIN_VIEWPORT_PX;
+  }
+
+  return Math.round(window.innerWidth);
+}
 
 export function WorkspaceShell({
   threads,
@@ -152,12 +164,16 @@ export function WorkspaceShell({
     },
   ];
   const composerOverlayRef = useRef<HTMLDivElement | null>(null);
+  /** 根容器：复用既有 ResizeObserver 监听它，拿到视口宽度的变化时机。 */
+  const shellRef = useRef<HTMLDivElement | null>(null);
   const [artifactDialogOpen, setArtifactDialogOpen] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   /** 桌面（xl+）左栏收起：整列只剩图标；移动抽屉不受影响（见 workspace-sidebar 的 xl 门控）。 */
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [viewMode, setViewMode] = useState<WorkspaceViewMode>("chat");
+  /** P0-2：视口宽度（右栏 auto 宽度与 `<xl` 降级判定共用）。 */
+  const [shellViewportWidth, setShellViewportWidth] = useState(readViewportWidth);
   const [settingsSection, setSettingsSection] =
     useState<SettingsSectionId>("appearance");
   const [rightRailManualOpen, setRightRailManualOpen] = useState(
@@ -166,6 +182,14 @@ export function WorkspaceShell({
   // 右侧栏是「条目 / 计划 / 还原 / 会话用量」合并后的单一可折叠面板。
   const rightRailOpen = !isNewThread && rightRailManualOpen;
   const rightRailVisible = rightRailOpen;
+  // P0-2：右栏宽度状态源（模式 + 视口重算 + 提交持久化）；宽度算术只在 lib/layout/rail-width.ts。
+  const [railSurface, setRailSurface] = useState<WorkspacePanelSurfaceId | null>(
+    null,
+  );
+  const railWidth = useRightRailWidth({
+    surface: railSurface,
+    viewportWidth: shellViewportWidth,
+  });
 
   const transportLabel = getThreadTransportLabel(selectedThread, {
     live: t("topbar.threadTransport.live"),
@@ -200,14 +224,24 @@ export function WorkspaceShell({
       return;
     }
 
+    // P0-2：同一个 observer 兼听根容器，视口尺寸变化时重算右栏 auto 宽度（不新增监听）。
+    const shellNode = shellRef.current;
+
     const observer = new ResizeObserver(() => {
       const nextHeight = Math.ceil(node.getBoundingClientRect().height);
       setComposerOverlayHeight((currentHeight) =>
         currentHeight === nextHeight ? currentHeight : nextHeight,
       );
+      const nextViewportWidth = readViewportWidth();
+      setShellViewportWidth((currentWidth) =>
+        currentWidth === nextViewportWidth ? currentWidth : nextViewportWidth,
+      );
     });
 
     observer.observe(node);
+    if (shellNode) {
+      observer.observe(shellNode);
+    }
 
     return () => {
       observer.disconnect();
@@ -252,20 +286,27 @@ export function WorkspaceShell({
     setArtifactDialogOpen(true);
   }
 
-  // 网格第一列（左栏）读 CSS 变量：动态类名会破坏 Tailwind 静态扫描，运行时只改变量。
+  // 网格第一列（左栏）与第三列（右栏）都读 CSS 变量（动态类名会破坏 Tailwind 静态扫描，
+  // 运行时只改变量）；右栏关闭时不注入 `--right-rail-width` → 保持两列网格、不占位（回归红线 ①）。
   const shellGridStyle = {
     "--workspace-sidebar-width": sidebarCollapsed
       ? WORKSPACE_SIDEBAR_COLLAPSED_WIDTH
       : WORKSPACE_SIDEBAR_EXPANDED_WIDTH,
+    ...(rightRailVisible
+      ? { "--right-rail-width": `${railWidth.widthPx}px` }
+      : {}),
   } as CSSProperties;
 
   return (
-    <div className="h-screen overflow-hidden [background:var(--workspace-shell-bg)] text-foreground">
+    <div
+      className="h-screen overflow-hidden [background:var(--workspace-shell-bg)] text-foreground"
+      ref={shellRef}
+    >
       <div
         className={cn(
           "grid h-full min-h-0 grid-cols-1 gap-0",
           rightRailVisible
-            ? "xl:grid-cols-[var(--workspace-sidebar-width,16rem)_minmax(0,1fr)_18rem]"
+            ? "xl:grid-cols-[var(--workspace-sidebar-width,16rem)_minmax(0,1fr)_var(--right-rail-width,18rem)]"
             : "xl:grid-cols-[var(--workspace-sidebar-width,16rem)_minmax(0,1fr)]",
         )}
         style={shellGridStyle}
@@ -381,6 +422,9 @@ export function WorkspaceShell({
           handleOpenArtifact={handleOpenArtifact}
           isNewThread={isNewThread}
           isResponding={isResponding}
+          onActiveSurfaceChange={setRailSurface}
+          onCloseRightRail={() => setRightRailManualOpen(false)}
+          railWidth={railWidth}
           rightRailOpen={rightRailOpen}
           selectedArtifactId={selectedArtifactId}
           selectedThread={selectedThread}

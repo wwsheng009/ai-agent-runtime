@@ -1,4 +1,11 @@
 import type { LocalePreference } from "@/i18n/locale";
+// P0-2：右栏宽度常量必须走**相对路径**导入 —— core/theme/boot-script.ts 会把本文件
+// 带进 vite.config.ts 的 esbuild 打包图，而该图不解析 `@` 别名（boot-script.ts 同理）。
+import {
+  RAIL_WIDTH_CONTENT_PX,
+  RAIL_WIDTH_MAX_PX,
+  type RailWidthMode,
+} from "../../lib/layout/rail-width";
 
 export const APP_SETTINGS_STORAGE_KEY = "ai-agent-runtime.workspace.settings";
 
@@ -98,6 +105,10 @@ export interface AppSettings {
     autoOpenArtifacts: boolean;
     sessionOrder: SessionOrderPreference;
     sessionGrouping: SessionGroupingPreference;
+    /** P0-2：右栏宽度模式（auto = 按面自适应；manual = 用用户拖拽/输入的值）。 */
+    rightRailWidthMode: RailWidthMode;
+    /** P0-2：manual 模式的宽度意图（px）；auto 下保留但不用，便于一键切回 manual。 */
+    rightRailWidthPx: number;
   };
   notification: {
     enabled: boolean;
@@ -137,6 +148,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     autoOpenArtifacts: true,
     sessionOrder: "updated",
     sessionGrouping: "directory",
+    rightRailWidthMode: "auto",
+    rightRailWidthPx: RAIL_WIDTH_CONTENT_PX,
   },
   notification: {
     enabled: true,
@@ -206,6 +219,29 @@ function normalizeWorkspaceDensity(value: unknown): WorkspaceDensity {
   return value === "comfortable" || value === "compact"
     ? value
     : DEFAULT_APP_SETTINGS.workspace.density;
+}
+
+/** P0-2：只认两种右栏宽度模式，未知值回落到 auto（不做隐式映射）。 */
+function normalizeRightRailWidthMode(value: unknown): RailWidthMode {
+  return value === "manual" || value === "auto"
+    ? value
+    : DEFAULT_APP_SETTINGS.workspace.rightRailWidthMode;
+}
+
+/**
+ * P0-2：持久化宽度只做「与视口无关」的合法性收敛（下界用内容型面宽度，
+ * 因为 auto 默认值 288 必须保持合法）；视口相关的上界收窄统一由 `clampRailWidth()` 在渲染期完成。
+ */
+function normalizeRightRailWidthPx(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_APP_SETTINGS.workspace.rightRailWidthPx;
+  }
+
+  return Math.min(
+    RAIL_WIDTH_MAX_PX,
+    Math.max(RAIL_WIDTH_CONTENT_PX, Math.round(parsed)),
+  );
 }
 
 /** 只认两种排序模式，未知值回落到默认（不做隐式映射）。 */
@@ -291,6 +327,12 @@ export function mergeAppSettings(
       autoOpenArtifacts: toBoolean(
         value?.workspace?.autoOpenArtifacts,
         DEFAULT_APP_SETTINGS.workspace.autoOpenArtifacts,
+      ),
+      rightRailWidthMode: normalizeRightRailWidthMode(
+        value?.workspace?.rightRailWidthMode,
+      ),
+      rightRailWidthPx: normalizeRightRailWidthPx(
+        value?.workspace?.rightRailWidthPx,
       ),
       sessionOrder: normalizeSessionOrderPreference(
         value?.workspace?.sessionOrder,

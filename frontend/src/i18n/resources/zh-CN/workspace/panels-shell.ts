@@ -7,6 +7,20 @@ export const zhWorkspacePanelsShell = {
     git: "Git 变更",
     disabledNoSession: "该页签需要先选择一个会话",
   },
+  rightRail: {
+    resizeHandle: "调整右侧栏宽度",
+    widthLabel: "右侧栏宽度",
+    widthDescription:
+      "拖动右栏左边缘的手柄，或用下方滑块调整宽度；「恢复自适应」按当前面自动计算。",
+    widthValue: "{{px}} px",
+    sliderLabel: "拖拽滑块调整右侧栏宽度",
+    resetAuto: "恢复自适应",
+    resetAutoHint: "双击手柄或按 Enter 也可恢复自适应",
+    modeAuto: "自适应",
+    modeManual: "手动",
+    overlayLabel: "右侧栏（覆盖层）",
+    overlayClose: "关闭右侧栏",
+  },
   threadStrip: {
     activeThread: "活跃线程",
     updatedAt: "{{time}} 更新",

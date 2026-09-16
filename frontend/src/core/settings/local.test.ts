@@ -82,6 +82,9 @@ describe("app settings storage helpers", () => {
         autoOpenArtifacts: true,
         sessionOrder: "updated",
         sessionGrouping: "directory",
+        // P0-2：右栏可变宽度的默认值（auto + 18rem，与改造前的固定列宽一致）。
+        rightRailWidthMode: "auto",
+        rightRailWidthPx: 288,
       },
       notification: {
         enabled: true,
