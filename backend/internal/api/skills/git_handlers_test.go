@@ -170,6 +170,13 @@ func TestGitDiffHandlerPassesParams(t *testing.T) {
 		Whitespace:  "ignore_all",
 	}, service.gotDiff)
 
+	// 回退信息是前端契约的一部分：响应体必须带 effective_target / target_fallback，
+	// 否则前端无法说明「当前显示的是哪一侧的改动」。
+	var diffBody map[string]any
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&diffBody))
+	require.Contains(t, diffBody, "effective_target")
+	require.Contains(t, diffBody, "target_fallback")
+
 	// 非法 context 归 0，由服务层套用默认值（默认 3）。
 	rec = doGitRequest(router, http.MethodGet, "/api/runtime/git/diff?file=a.txt&context=abc", "", nil)
 	require.Equal(t, http.StatusOK, rec.Code)

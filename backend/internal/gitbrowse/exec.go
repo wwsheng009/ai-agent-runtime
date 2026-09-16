@@ -53,6 +53,8 @@ const (
 	maxOutputBytes = 4 * 1024 * 1024
 	maxCommitLimit = 200
 	maxDiffLines   = 20000
+	// maxUntrackedScanBytes 见 Limits.MaxUntrackedScanBytes。
+	maxUntrackedScanBytes = 16 * 1024 * 1024
 	// probeMaxOutputBytes 是仓库探测（rev-parse）的内部输出上限：
 	// 它是内部命令而非响应内容，固定给足空间，避免被 MaxOutputBytes 截断后解析出错误的仓库根。
 	probeMaxOutputBytes = 1 << 20
@@ -159,22 +161,26 @@ type Limits struct {
 	LogTimeout     time.Duration // git log 超时，默认 10s
 	StageTimeout   time.Duration // git add / restore 超时，默认 15s
 	MaxOutputBytes int64         // 单个子命令输出上限，默认 4MiB
-	MaxDiffLines   int           // 结构化 diff 行数上限，默认 20000
-	MaxCommits     int           // commits 的 limit 上限，默认 200
-	RepoCacheTTL   time.Duration // 仓库探测缓存，默认 30s
+	// MaxUntrackedScanBytes 是单次 status 统计未跟踪文件行数的总扫描预算，默认 16MiB：
+	// 未跟踪文件不在 numstat 里，只能逐个读文件；极端仓库不能把一次列表请求变成无上限的磁盘读取。
+	MaxUntrackedScanBytes int64
+	MaxDiffLines          int           // 结构化 diff 行数上限，默认 20000
+	MaxCommits            int           // commits 的 limit 上限，默认 200
+	RepoCacheTTL          time.Duration // 仓库探测缓存，默认 30s
 }
 
 // DefaultLimits 返回文档 §5.8 的默认限额。
 func DefaultLimits() Limits {
 	return Limits{
-		StatusTimeout:  5 * time.Second,
-		DiffTimeout:    15 * time.Second,
-		LogTimeout:     10 * time.Second,
-		StageTimeout:   15 * time.Second,
-		MaxOutputBytes: maxOutputBytes,
-		MaxDiffLines:   maxDiffLines,
-		MaxCommits:     maxCommitLimit,
-		RepoCacheTTL:   30 * time.Second,
+		StatusTimeout:         5 * time.Second,
+		DiffTimeout:           15 * time.Second,
+		LogTimeout:            10 * time.Second,
+		StageTimeout:          15 * time.Second,
+		MaxOutputBytes:        maxOutputBytes,
+		MaxUntrackedScanBytes: maxUntrackedScanBytes,
+		MaxDiffLines:          maxDiffLines,
+		MaxCommits:            maxCommitLimit,
+		RepoCacheTTL:          30 * time.Second,
 	}
 }
 
@@ -195,6 +201,9 @@ func (l Limits) withDefaults() Limits {
 	}
 	if l.MaxOutputBytes <= 0 {
 		l.MaxOutputBytes = defaults.MaxOutputBytes
+	}
+	if l.MaxUntrackedScanBytes <= 0 {
+		l.MaxUntrackedScanBytes = defaults.MaxUntrackedScanBytes
 	}
 	if l.MaxDiffLines <= 0 {
 		l.MaxDiffLines = defaults.MaxDiffLines
@@ -250,6 +259,12 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 // runProcess 以参数数组执行外部命令（不经过 shell），带超时 kill 与输出截断。
 // 所有失败都返回结构化 *Error，调用方不需要再做分类。
 func runProcess(ctx context.Context, label, path string, args, env []string, timeout time.Duration, maxBytes int64) (*cmdResult, error) {
+	return runProcessWithAllowedExit(ctx, label, path, args, env, timeout, maxBytes, nil)
+}
+
+// runProcessWithAllowedExit 是 runProcess 的扩展：allowedExit 中的退出码按成功处理。
+// 典型场景是 `git diff --no-index`：两侧存在差异时退出码为 1，那是正常结果而不是失败。
+func runProcessWithAllowedExit(ctx context.Context, label, path string, args, env []string, timeout time.Duration, maxBytes int64, allowedExit map[int]bool) (*cmdResult, error) {
 	runCtx := ctx
 	if timeout > 0 {
 		var cancel context.CancelFunc
@@ -285,6 +300,9 @@ func runProcess(ctx context.Context, label, path string, args, env []string, tim
 	var exitErr *exec.ExitError
 	if stderrors.As(runErr, &exitErr) {
 		result.exitCode = exitErr.ExitCode()
+		if allowedExit[result.exitCode] {
+			return result, nil
+		}
 		message := fmt.Sprintf("%s failed (exit %d): %s", label, result.exitCode, stderrTail(result.stderr))
 		structured := newError(CodeGitFailed, strings.TrimSpace(message))
 		structured.ExitCode = result.exitCode
@@ -351,6 +369,12 @@ func gitEnv() []string {
 // git 执行 `git -C <root> --no-pager --no-optional-locks <args...>`。
 // maxBytes <= 0 时使用 limits.MaxOutputBytes。
 func (r *runner) git(ctx context.Context, root, label string, timeout time.Duration, maxBytes int64, args ...string) (*cmdResult, error) {
+	return r.gitAllowingExit(ctx, root, label, timeout, maxBytes, nil, args...)
+}
+
+// gitAllowingExit 与 git 相同，但把 allowedExit 中的退出码视为成功
+// （`git diff --no-index` 在两侧存在差异时退出码为 1）。
+func (r *runner) gitAllowingExit(ctx context.Context, root, label string, timeout time.Duration, maxBytes int64, allowedExit map[int]bool, args ...string) (*cmdResult, error) {
 	gitPath, err := r.lookPath("git")
 	if err != nil {
 		return nil, newError(CodeGitUnavailable, "git executable not found on PATH: "+err.Error())
@@ -358,7 +382,7 @@ func (r *runner) git(ctx context.Context, root, label string, timeout time.Durat
 	if maxBytes <= 0 {
 		maxBytes = r.limits.MaxOutputBytes
 	}
-	return runProcess(ctx, label, gitPath, gitArgs(root, args), gitEnv(), timeout, maxBytes)
+	return runProcessWithAllowedExit(ctx, label, gitPath, gitArgs(root, args), gitEnv(), timeout, maxBytes, allowedExit)
 }
 
 // gitArgs 组装固定的 git 全局参数：`-C <root> --no-pager --no-optional-locks <args…>`。

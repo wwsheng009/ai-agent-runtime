@@ -29,6 +29,9 @@ func TestDiffStagedNewFile(t *testing.T) {
 	require.Nil(t, result.File.OldPath)
 	require.False(t, result.File.IsBinary)
 	require.Equal(t, "staged", result.Target)
+	// 请求目标就是有改动的一侧：不得回退。
+	require.Equal(t, "staged", result.EffectiveTarget)
+	require.False(t, result.TargetFallback)
 	require.Equal(t, 3, result.Context)
 	require.Equal(t, "show", result.Whitespace)
 	require.Equal(t, 2, result.Insertions)
@@ -75,6 +78,120 @@ func TestDiffWorkingDeletion(t *testing.T) {
 		require.Nil(t, line.NewNo)
 	}
 	require.Equal(t, "line1", result.Hunks[0].Lines[0].Text)
+}
+
+// 变更在另一侧时必须回退，否则「已暂存的新文件 + 目标=工作区」会显示成「没有差异」。
+func TestDiffFallsBackToStagedWhenWorkingSideIsUnchanged(t *testing.T) {
+	root := newTestRepo(t)
+	writeFile(t, filepath.Join(root, "new.txt"), "one\ntwo\n")
+	runGit(t, root, "add", "new.txt")
+
+	service := newTestService(t, root, Limits{})
+	result, err := service.Diff(context.Background(), DiffRequest{
+		RepoRequest: RepoRequest{Scope: "cwd"},
+		File:        "new.txt",
+		Target:      "working",
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, "working", result.Target)
+	require.Equal(t, "staged", result.EffectiveTarget)
+	require.True(t, result.TargetFallback)
+	require.Equal(t, "A", result.File.Status)
+	require.Equal(t, 2, result.Insertions)
+	require.Len(t, result.Hunks, 1)
+	require.Contains(t, result.Raw, "+++ b/new.txt")
+}
+
+// 反方向同理：未暂存的删除 + 目标=已暂存 也必须回退到工作区，而不是空 diff。
+func TestDiffFallsBackToWorkingWhenChangeIsUnstaged(t *testing.T) {
+	root := newTestRepo(t)
+	require.NoError(t, os.Remove(filepath.Join(root, "a.txt")))
+
+	service := newTestService(t, root, Limits{})
+	result, err := service.Diff(context.Background(), DiffRequest{
+		RepoRequest: RepoRequest{Scope: "cwd"},
+		File:        "a.txt",
+		Target:      "staged",
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, "staged", result.Target)
+	require.Equal(t, "working", result.EffectiveTarget)
+	require.True(t, result.TargetFallback)
+	require.Equal(t, "D", result.File.Status)
+	require.Equal(t, 3, result.Deletions)
+	require.Len(t, result.Hunks, 1)
+}
+
+// 空的新文件在 unified diff 里连文件头都没有：回退后必须靠 name-status 给出 A，
+// 否则「已暂存的空新文件」会被显示成「没有差异」。
+func TestDiffFallbackKeepsAddedStatusForEmptyNewFile(t *testing.T) {
+	root := newTestRepo(t)
+	writeFile(t, filepath.Join(root, "empty.txt"), "")
+	runGit(t, root, "add", "empty.txt")
+
+	service := newTestService(t, root, Limits{})
+	result, err := service.Diff(context.Background(), DiffRequest{
+		RepoRequest: RepoRequest{Scope: "cwd"},
+		File:        "empty.txt",
+		Target:      "working",
+	})
+	require.NoError(t, err)
+
+	require.True(t, result.TargetFallback)
+	require.Equal(t, "staged", result.EffectiveTarget)
+	require.Equal(t, "A", result.File.Status)
+	require.Equal(t, 0, result.Insertions)
+	require.Equal(t, 0, result.Deletions)
+	require.Empty(t, result.Hunks)
+}
+
+// 未跟踪文件 + 目标=已暂存：它本来就不在索引里，必须回退到工作区并用 --no-index 合成新增内容。
+func TestDiffUntrackedFallsBackToWorkingForStagedTarget(t *testing.T) {
+	root := newTestRepo(t)
+	writeFile(t, filepath.Join(root, "fresh.txt"), "one\ntwo\nthree\n")
+
+	service := newTestService(t, root, Limits{})
+	result, err := service.Diff(context.Background(), DiffRequest{
+		RepoRequest: RepoRequest{Scope: "cwd"},
+		File:        "fresh.txt",
+		Target:      "staged",
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, "staged", result.Target)
+	require.Equal(t, "working", result.EffectiveTarget)
+	require.True(t, result.TargetFallback)
+	require.Equal(t, "A", result.File.Status)
+	require.Equal(t, 3, result.Insertions)
+	require.Len(t, result.Hunks, 1)
+	require.Contains(t, result.Raw, "+++ b/fresh.txt")
+}
+
+// commit 目标没有「另一侧」：该提交没动这条路径就是「没有差异」，不得回退到工作区/暂存区。
+func TestDiffCommitTargetNeverFallsBack(t *testing.T) {
+	root := newTestRepo(t)
+	writeFile(t, filepath.Join(root, "b.txt"), "next\n")
+	runGit(t, root, "add", "b.txt")
+	runGit(t, root, "commit", "-q", "-m", "second")
+	sha := strings.TrimSpace(runGit(t, root, "rev-parse", "HEAD"))
+
+	service := newTestService(t, root, Limits{})
+	result, err := service.Diff(context.Background(), DiffRequest{
+		RepoRequest: RepoRequest{Scope: "cwd"},
+		File:        "a.txt",
+		Target:      "commit:" + sha,
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, "commit:"+sha, result.Target)
+	require.Equal(t, "commit:"+sha, result.EffectiveTarget)
+	require.False(t, result.TargetFallback)
+	require.Empty(t, result.Raw)
+	require.Empty(t, result.Hunks)
+	require.Equal(t, 0, result.Insertions)
+	require.Equal(t, 0, result.Deletions)
 }
 
 // 中段修改：行号必须与 unified diff 的 hunk 头一致。
@@ -208,6 +325,8 @@ func TestDiffWhitespaceIgnoreAll(t *testing.T) {
 	require.Empty(t, ignored.Raw)
 	require.Empty(t, ignored.Hunks)
 	require.Equal(t, 0, ignored.Insertions)
+	// 已跟踪但无差异的文件不得被误判为新增。
+	require.Equal(t, "M", ignored.File.Status)
 }
 
 func TestDiffBinaryFile(t *testing.T) {
@@ -228,6 +347,153 @@ func TestDiffBinaryFile(t *testing.T) {
 	require.Empty(t, result.Hunks)
 	require.Empty(t, result.ParseError)
 	require.Contains(t, result.Raw, "Binary files")
+}
+
+// 未跟踪文件必须合成「新增文件」diff：否则点击后显示「没有差异」，与事实相反。
+func TestDiffUntrackedFileSynthesizesNewFile(t *testing.T) {
+	root := newTestRepo(t)
+	writeFile(t, filepath.Join(root, "untracked.txt"), "one\ntwo\n")
+
+	service := newTestService(t, root, Limits{})
+	result, err := service.Diff(context.Background(), DiffRequest{
+		RepoRequest: RepoRequest{Scope: "cwd"},
+		File:        "untracked.txt",
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, "untracked.txt", result.File.Path)
+	require.Equal(t, "A", result.File.Status)
+	require.Nil(t, result.File.OldPath)
+	require.Equal(t, "working", result.Target)
+	require.Equal(t, 2, result.Insertions)
+	require.Equal(t, 0, result.Deletions)
+	require.Empty(t, result.ParseError)
+	require.False(t, result.Truncated)
+	require.Contains(t, result.Raw, "new file mode")
+	require.Contains(t, result.Raw, "--- /dev/null")
+	require.Contains(t, result.Raw, "+++ b/untracked.txt")
+
+	require.Len(t, result.Hunks, 1)
+	hunk := result.Hunks[0]
+	require.Equal(t, 0, hunk.OldStart)
+	require.Equal(t, 0, hunk.OldLines)
+	require.Equal(t, 1, hunk.NewStart)
+	require.Equal(t, 2, hunk.NewLines)
+	require.Len(t, hunk.Lines, 2)
+	require.Equal(t, "add", hunk.Lines[0].Type)
+	require.Nil(t, hunk.Lines[0].OldNo)
+	require.Equal(t, 1, *hunk.Lines[0].NewNo)
+	require.Equal(t, "one", hunk.Lines[0].Text)
+	require.Equal(t, 2, *hunk.Lines[1].NewNo)
+	require.Equal(t, "two", hunk.Lines[1].Text)
+}
+
+// 未跟踪且无尾换行：末行仍是新增行，并保留 nonewline 尾标记。
+func TestDiffUntrackedFileWithoutTrailingNewline(t *testing.T) {
+	root := newTestRepo(t)
+	writeFile(t, filepath.Join(root, "no-newline.txt"), "one\ntwo")
+
+	service := newTestService(t, root, Limits{})
+	result, err := service.Diff(context.Background(), DiffRequest{
+		RepoRequest: RepoRequest{Scope: "cwd"},
+		File:        "no-newline.txt",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "A", result.File.Status)
+	require.Equal(t, 2, result.Insertions)
+	require.Equal(t, 0, result.Deletions)
+	require.Empty(t, result.ParseError)
+
+	var adds, markers int
+	for _, line := range result.Hunks[0].Lines {
+		switch line.Type {
+		case "add":
+			adds++
+		case "nonewline":
+			markers++
+		}
+	}
+	require.Equal(t, 2, adds)
+	require.GreaterOrEqual(t, markers, 1)
+	require.Contains(t, result.Raw, `\ No newline at end of file`)
+}
+
+// 未跟踪的二进制文件不该被当成文本 diff 渲染。
+func TestDiffUntrackedBinaryFile(t *testing.T) {
+	root := newTestRepo(t)
+	writeFile(t, filepath.Join(root, "untracked-bin.dat"), "start\x00\x01\x02\x03")
+
+	service := newTestService(t, root, Limits{})
+	result, err := service.Diff(context.Background(), DiffRequest{
+		RepoRequest: RepoRequest{Scope: "cwd"},
+		File:        "untracked-bin.dat",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "A", result.File.Status)
+	require.True(t, result.File.IsBinary)
+	require.Empty(t, result.Hunks)
+	require.Empty(t, result.ParseError)
+	require.Contains(t, result.Raw, "Binary files")
+}
+
+// `--no-index` 的退出码 1 有两种含义，必须按 stdout/stderr 形状区分（本机实测：
+// 存在差异 → stdout 有内容 / stderr 为空；路径读不到 → stdout 为空 / stderr 有 error 行）。
+func TestNoIndexFailureDistinguishesDiffFromUnreadablePath(t *testing.T) {
+	diff := &cmdResult{stdout: []byte("diff --git a/x b/x\nnew file mode 100644\n"), exitCode: 1}
+	require.NoError(t, noIndexFailure(diff))
+
+	// 空的新文件：两侧都没有内容，本来就没有输出，不算失败。
+	require.NoError(t, noIndexFailure(&cmdResult{exitCode: 0}))
+
+	missing := &cmdResult{stderr: []byte("error: Could not access 'gone.txt'\n"), exitCode: 1}
+	err := noIndexFailure(missing)
+	require.Error(t, err)
+	require.Equal(t, CodeGitFailed, Code(err))
+	require.Equal(t, 500, HTTPStatus(err))
+	require.Equal(t, 1, ExitCode(err))
+	require.Contains(t, err.Error(), "Could not access 'gone.txt'")
+}
+
+// 真机复现「未跟踪文件在点开前被删除」：`--no-index` 退出码同样是 1，但 stdout 为空、
+// stderr 有 error 行。这里锁住该形状假设，避免日后有人把「退出码 1」简化成「有差异」。
+func TestNoIndexFailureOnRealMissingPath(t *testing.T) {
+	root := newTestRepo(t)
+	service := newTestService(t, root, Limits{})
+	ctx := context.Background()
+	gitCtx, err := service.prepare(ctx, RepoRequest{Scope: "cwd"})
+	require.NoError(t, err)
+
+	result, err := service.runner.gitAllowingExit(ctx, gitCtx.ScopeRoot, "git diff --no-index",
+		service.limits.DiffTimeout, 0, map[int]bool{1: true},
+		"diff", "--no-color", "--no-ext-diff", "--unified=3", "--no-index", "--",
+		devNullPath, "deleted-after-status.txt")
+	require.NoError(t, err)
+	require.Empty(t, result.stdout)
+	require.NotEmpty(t, result.stderr)
+
+	failure := noIndexFailure(result)
+	require.Error(t, failure)
+	require.Equal(t, CodeGitFailed, Code(failure))
+	require.Equal(t, 500, HTTPStatus(failure))
+	require.Contains(t, failure.Error(), "could not read the file")
+}
+
+// 空的新文件没有 hunk，但结论仍是「新增」而不是「没有差异」。
+func TestDiffUntrackedEmptyFileKeepsAddedStatus(t *testing.T) {
+	root := newTestRepo(t)
+	writeFile(t, filepath.Join(root, "empty.txt"), "")
+
+	service := newTestService(t, root, Limits{})
+	result, err := service.Diff(context.Background(), DiffRequest{
+		RepoRequest: RepoRequest{Scope: "cwd"},
+		File:        "empty.txt",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "A", result.File.Status)
+	require.Equal(t, 0, result.Insertions)
+	require.Equal(t, 0, result.Deletions)
+	require.Empty(t, result.Hunks)
+	require.Empty(t, result.ParseError)
 }
 
 func TestDiffCommitTarget(t *testing.T) {

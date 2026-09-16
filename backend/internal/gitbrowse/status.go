@@ -1,8 +1,12 @@
 package gitbrowse
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -90,6 +94,32 @@ func (s *Service) status(ctx context.Context, gitCtx *gitContext) (*StatusResult
 	}
 	for i := range parsed.Unstaged {
 		fillCounts(&parsed.Unstaged[i], working)
+	}
+
+	// 未跟踪文件不在 numstat 里（它们不在索引中），必须单独读文件统计：
+	// 否则列表会把「统计缺失」显示成 +0 −0，与事实相反。
+	uncounted := 0
+	budget := s.limits.MaxUntrackedScanBytes
+	for i := range parsed.Untracked {
+		counts, ok := untrackedCounts(
+			joinRepoPath(gitCtx.RepoRoot, parsed.Untracked[i].Path),
+			s.limits.MaxOutputBytes,
+			&budget,
+		)
+		if !ok {
+			// 未知就是未知：用 -1 表示统计不可用，不用 0 伪装（前端据此显示「统计不可用」）。
+			parsed.Untracked[i].Insertions = -1
+			parsed.Untracked[i].Deletions = -1
+			uncounted++
+			continue
+		}
+		parsed.Untracked[i].Insertions = counts.insertions
+		parsed.Untracked[i].Deletions = counts.deletions
+		parsed.Untracked[i].Binary = counts.binary
+	}
+	if uncounted > 0 {
+		parsed.Warnings = append(parsed.Warnings, fmt.Sprintf(
+			"%d untracked file(s) could not be counted (unreadable, non-regular, oversized or beyond the scan budget)", uncounted))
 	}
 
 	// 仓库相对路径 → 作用域相对路径；作用域之外的行必须显式计入 warnings，不静默丢弃。
@@ -398,4 +428,82 @@ func numstatCounts(added, deleted string) (numstatEntry, bool) {
 		return numstatEntry{}, false
 	}
 	return numstatEntry{insertions: insertions, deletions: deletions}, true
+}
+
+// untrackedBinaryProbeBytes 是未跟踪文件的二进制探测长度（与 git 的 FIRST_FEW_BYTES=8000 一致）。
+const untrackedBinaryProbeBytes = 8000
+
+// untrackedCounts 统计未跟踪文件的新增/删除行数。
+//
+// 背景：`git diff --numstat` 不覆盖未跟踪文件（它们不在索引里），照抄会退化成「+0 −0」的假统计。
+// 这里直接读文件，口径与 diff 对齐：
+//   - 二进制（头部含 NUL，与 git 的启发式一致）→ binary=true、计数保持 0/0（对齐 numstat 的 `-` 口径）；
+//   - 普通文件 → insertions = 行数（末尾无换行时补 1，与 hunk 行号口径一致），deletions = 0；
+//   - 符号链接 → git 视为「内容为链接目标路径」的单行文件；
+//   - 读取失败 / 非常规文件 / 超过单文件上限或总扫描预算 → ok=false（调用方填 -1 表示未知，不用 0 伪装）。
+//
+// budget 是本次 status 剩余的扫描字节数；按文件大小预扣，避免一次列表请求变成无上限的磁盘读取。
+func untrackedCounts(absPath string, maxBytes int64, budget *int64) (numstatEntry, bool) {
+	info, err := os.Lstat(absPath)
+	switch {
+	case err != nil:
+		return numstatEntry{}, false
+	case info.Mode()&os.ModeSymlink != 0:
+		if _, err := os.Readlink(absPath); err != nil {
+			return numstatEntry{}, false
+		}
+		return numstatEntry{insertions: 1}, true
+	case !info.Mode().IsRegular():
+		return numstatEntry{}, false
+	}
+	if maxBytes > 0 && info.Size() > maxBytes {
+		return numstatEntry{}, false
+	}
+	if budget != nil {
+		if info.Size() > *budget {
+			return numstatEntry{}, false
+		}
+		*budget -= info.Size()
+	}
+
+	file, err := os.Open(absPath)
+	if err != nil {
+		return numstatEntry{}, false
+	}
+	defer func() { _ = file.Close() }()
+
+	reader := bufio.NewReaderSize(file, untrackedBinaryProbeBytes)
+	probe, err := reader.Peek(untrackedBinaryProbeBytes)
+	if err != nil && err != io.EOF {
+		return numstatEntry{}, false
+	}
+	if bytes.IndexByte(probe, 0) >= 0 {
+		return numstatEntry{binary: true}, true
+	}
+
+	buffer := make([]byte, 64*1024)
+	total, lines := 0, 0
+	last := byte('\n')
+	for {
+		read, readErr := reader.Read(buffer)
+		if read > 0 {
+			total += read
+			// 文件在统计过程中变大也不越过上限：超限即视为无法给出结论。
+			if maxBytes > 0 && int64(total) > maxBytes {
+				return numstatEntry{}, false
+			}
+			lines += bytes.Count(buffer[:read], []byte{'\n'})
+			last = buffer[read-1]
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				return numstatEntry{}, false
+			}
+			break
+		}
+	}
+	if total > 0 && last != '\n' {
+		lines++
+	}
+	return numstatEntry{insertions: lines}, true
 }

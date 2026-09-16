@@ -4,6 +4,7 @@ import (
 	"context"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -58,9 +59,80 @@ func TestStatusGroupsAndCounts(t *testing.T) {
 	require.Equal(t, "untracked.txt", result.Untracked[0].Path)
 	require.Equal(t, "U", result.Untracked[0].Status)
 	require.Equal(t, "?", result.Untracked[0].XY)
+	// 未跟踪文件不在 numstat 里：必须读文件统计，不能退化成 +0 −0。
+	require.Equal(t, 1, result.Untracked[0].Insertions)
+	require.Equal(t, 0, result.Untracked[0].Deletions)
+	require.False(t, result.Untracked[0].Binary)
 
 	require.Empty(t, result.Conflicts)
 	require.Empty(t, result.Renames)
+}
+
+// 未跟踪文件的行数口径与 diff 一致：末尾无换行不产生空行，二进制按标记而非 0/0 伪装。
+func TestStatusUntrackedCounts(t *testing.T) {
+	root := newTestRepo(t)
+	writeFile(t, filepath.Join(root, "multi.txt"), "one\ntwo\nthree\n")
+	writeFile(t, filepath.Join(root, "no-newline.txt"), "one\ntwo")
+	writeFile(t, filepath.Join(root, "untracked-bin.dat"), "a\x00b\x00c")
+
+	service := newTestService(t, root, Limits{})
+	result, err := service.Status(context.Background(), RepoRequest{Scope: "cwd"})
+	require.NoError(t, err)
+	require.Len(t, result.Untracked, 3)
+
+	byPath := make(map[string]ChangeEntry, len(result.Untracked))
+	for _, entry := range result.Untracked {
+		byPath[entry.Path] = entry
+	}
+	require.Equal(t, 3, byPath["multi.txt"].Insertions)
+	require.Equal(t, 0, byPath["multi.txt"].Deletions)
+	require.False(t, byPath["multi.txt"].Binary)
+	// 无尾换行：2 行（不是 1 行，也不是 3 行）。
+	require.Equal(t, 2, byPath["no-newline.txt"].Insertions)
+	require.Equal(t, 0, byPath["no-newline.txt"].Deletions)
+	require.True(t, byPath["untracked-bin.dat"].Binary)
+	require.Equal(t, 0, byPath["untracked-bin.dat"].Insertions)
+	require.Empty(t, result.Warnings)
+}
+
+// 读不到结论时用 -1 表示未知（不用 0 伪装），并给出可解释 warning。
+func TestStatusUntrackedCountsUnknownWhenOversized(t *testing.T) {
+	root := newTestRepo(t)
+	writeFile(t, filepath.Join(root, "huge.txt"), strings.Repeat("a", 8192))
+
+	service := newTestService(t, root, Limits{MaxOutputBytes: 4096})
+	result, err := service.Status(context.Background(), RepoRequest{Scope: "cwd"})
+	require.NoError(t, err)
+
+	require.Len(t, result.Untracked, 1)
+	require.Equal(t, "huge.txt", result.Untracked[0].Path)
+	require.Equal(t, -1, result.Untracked[0].Insertions)
+	require.Equal(t, -1, result.Untracked[0].Deletions)
+	require.Contains(t, result.Warnings,
+		"1 untracked file(s) could not be counted (unreadable, non-regular, oversized or beyond the scan budget)")
+}
+
+// 总扫描预算耗尽后，剩余未跟踪文件按未知（-1）处理并给出 warning；预算内的文件照常统计。
+// 目的是让「一次列表请求」不会退化成无上限的磁盘读取。
+func TestStatusUntrackedCountsUnknownWhenScanBudgetExhausted(t *testing.T) {
+	root := newTestRepo(t)
+	writeFile(t, filepath.Join(root, "a-big.txt"), "one\ntwo\nthree\n") // 14 字节
+	writeFile(t, filepath.Join(root, "b-big.txt"), "one\ntwo\nthree\n") // 14 字节
+
+	service := newTestService(t, root, Limits{MaxUntrackedScanBytes: 20})
+	result, err := service.Status(context.Background(), RepoRequest{Scope: "cwd"})
+	require.NoError(t, err)
+	require.Len(t, result.Untracked, 2)
+
+	byPath := make(map[string]ChangeEntry, len(result.Untracked))
+	for _, entry := range result.Untracked {
+		byPath[entry.Path] = entry
+	}
+	require.Equal(t, 3, byPath["a-big.txt"].Insertions)
+	require.Equal(t, -1, byPath["b-big.txt"].Insertions)
+	require.Equal(t, -1, byPath["b-big.txt"].Deletions)
+	require.Contains(t, result.Warnings,
+		"1 untracked file(s) could not be counted (unreadable, non-regular, oversized or beyond the scan budget)")
 }
 
 func TestStatusCleanRepository(t *testing.T) {
