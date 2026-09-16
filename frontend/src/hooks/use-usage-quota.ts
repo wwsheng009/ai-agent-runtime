@@ -82,6 +82,23 @@ export function isUsageQuotaLedgerUnavailable(
   return error?.status === 503;
 }
 
+/**
+ * 账本 503 的两种成因语义不同，UI 不能混为一谈：
+ * - 配置未启用：`usage ledger not configured`（`skills_runtime.usage_ledger_enabled` 为 false）；
+ * - 已启用但初始化失败：`usage ledger unavailable: <reason>`（dsn 为空 / 驱动不是 sqlite /
+ *   建表失败 / 目录不可写，由后端启动期降级为 503，服务本身仍可用）。
+ * 只有明确出现 `not configured` 才判定为「未启用」，其余 503 一律按「启用但不可用」处理，
+ * 避免把初始化失败误报成「开关没开」，让用户少走一圈排查。
+ */
+export function isUsageQuotaLedgerDisabled(
+  error: UsageQuotaSectionError | null | undefined,
+): boolean {
+  if (!isUsageQuotaLedgerUnavailable(error)) {
+    return false;
+  }
+  return (error?.message ?? "").includes("usage ledger not configured");
+}
+
 export function useUsageQuota({
   adminToken,
   enabled = true,

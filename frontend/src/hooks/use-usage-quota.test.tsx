@@ -24,6 +24,7 @@ vi.mock("@/api/runtime", () => ({
 
 import {
   isUsageQuotaAdminForbidden,
+  isUsageQuotaLedgerDisabled,
   isUsageQuotaLedgerUnavailable,
   toUsageQuotaSectionError,
   useUsageQuota,
@@ -31,6 +32,17 @@ import {
   type UsageQuotaScope,
   type UseUsageQuotaResult,
 } from "./use-usage-quota";
+
+/** 后端「已启用但初始化失败」的 503：message 带降级原因，且不含 not configured。 */
+function ledgerBroken(): Error {
+  return Object.assign(
+    new Error(
+      "usage ledger unavailable: initialize skills usage ledger store: " +
+        "unsupported usage ledger driver: postgres",
+    ),
+    { status: 503 },
+  );
+}
 
 type ReactActEnvironmentGlobal = typeof globalThis & {
   IS_REACT_ACT_ENVIRONMENT?: boolean;
@@ -243,6 +255,26 @@ describe("useUsageQuota", () => {
     expect(hook.current.policy?.users).toHaveLength(1);
     expect(hook.current.statsError).toBeNull();
     expect(hook.current.policyError).toBeNull();
+  });
+
+  it("账本 503 区分「未启用」与「已启用但初始化失败」（不把降级原因说成未配置）", async () => {
+    getUsageLedgerMock.mockRejectedValue(ledgerBroken());
+
+    const hook = renderHook({ adminToken: "admin-secret" });
+
+    await flush();
+
+    expect(isUsageQuotaLedgerUnavailable(hook.current.ledgerError)).toBe(true);
+    expect(isUsageQuotaLedgerDisabled(hook.current.ledgerError)).toBe(false);
+    expect(hook.current.ledgerError?.message).toContain("unsupported usage ledger driver: postgres");
+    // 判定只看 503 + `not configured`：未启用为 true，非 503 一律 false
+    expect(
+      isUsageQuotaLedgerDisabled({ status: 503, message: "usage ledger not configured" }),
+    ).toBe(true);
+    expect(isUsageQuotaLedgerDisabled({ status: 403, message: "usage ledger not configured" })).toBe(
+      false,
+    );
+    expect(isUsageQuotaLedgerDisabled(null)).toBe(false);
   });
 
   it("403 由调用方按 admin token 缺失分类（不改写为通用错误）", async () => {

@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import {
   isUsageQuotaAdminForbidden,
+  isUsageQuotaLedgerDisabled,
   isUsageQuotaLedgerUnavailable,
   useUsageQuota,
   type UsageQuotaSectionError,
@@ -119,12 +120,19 @@ export function UsageQuotaPanel({ adminToken }: { adminToken: string }) {
   const usage = stats?.usage ?? null;
   const quota = stats?.quota ?? null;
   const ledgerUnavailable = isUsageQuotaLedgerUnavailable(ledgerError);
+  // 账本 503 分两种：配置未启用（not configured）与「已启用但初始化失败」（后端降级并回传原因）。
+  // 后者不能提示成「未配置」，否则会被误判为开关没开，把 dsn / 驱动 / 目录问题带偏。
+  const ledgerErrorLabel = !ledgerUnavailable
+    ? t("quota.errors.ledger")
+    : isUsageQuotaLedgerDisabled(ledgerError)
+      ? t("quota.errors.ledgerUnavailable")
+      : t("quota.errors.ledgerBroken");
   const sectionErrorCandidates: SectionErrorEntry[] = [
     { key: "stats", label: t("quota.errors.stats"), error: statsError },
     { key: "policy", label: t("quota.errors.policy"), error: policyError },
     {
       key: "ledger",
-      label: ledgerUnavailable ? t("quota.errors.ledgerUnavailable") : t("quota.errors.ledger"),
+      label: ledgerErrorLabel,
       error: ledgerError,
     },
   ];

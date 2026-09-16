@@ -264,6 +264,25 @@ describe("UsageQuotaPanel", () => {
     expect(container.querySelectorAll('[role="alert"]')).toHaveLength(1);
   });
 
+  it("账本 503 已启用但初始化失败时，说明「不可用 + 原因」而非「未配置」", async () => {
+    getUsageLedgerMock.mockRejectedValue(
+      httpError(
+        503,
+        "[CONFIG_INVALID] usage ledger unavailable: initialize skills usage ledger store: " +
+          "unsupported usage ledger driver: postgres",
+      ),
+    );
+
+    render();
+    await flush();
+
+    expect(container.textContent).toContain("后端已启用 usage ledger 但初始化失败（503）");
+    expect(container.textContent).toContain("unsupported usage ledger driver: postgres");
+    // 关键：不能把「启用但初始化失败」说成「未配置」，否则会把人带向开关而不是 dsn / 驱动
+    expect(container.textContent).not.toContain("后端未配置 usage ledger（503）");
+    expect(container.textContent).toContain("账本数据不可用");
+  });
+
   it("结构不满足时抛出并显示错误消息（不显示伪造空态）", async () => {
     getUsageStatsMock.mockRejectedValue(new Error("invalid usage stats payload"));
 
