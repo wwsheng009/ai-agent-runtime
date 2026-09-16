@@ -12,6 +12,8 @@
 //   * `insertions/deletions` 非有限数 → -1（二进制在 numstat 中就是 `-`，不用 0 伪装）；
 //   * `hunks` 非法结构 → 抛错（**不静默当空 diff**，否则会显示成「文件没改动」）；
 //   * `raw`/`parse_error` 缺失 → 空字符串，且 `parse_error` 非空时 UI 必须降级为纯文本；
+//   * `effective_target` 缺失 → 取 `target`；`target_fallback` 只有在「确实换了一侧」时才为 true
+//     （两个目标相同却声称回退，会让 UI 写出与实际不符的说明）；
 //   * stage 的 `status` 缺失 → null（由 hook 决定保留旧快照），不伪造空状态。
 
 import {
@@ -241,11 +243,17 @@ export function normalizeGitDiffPayload(payload: unknown): GitDiffResult {
   }
   const targetValue = asString(record.target);
   const target = (targetValue || "working") as GitDiffTarget;
+  const effectiveValue = asString(record.effective_target);
+  const effectiveTarget = (effectiveValue || target) as GitDiffTarget;
+  // 回退标记只有在「确实换了一侧」时才算数：否则 UI 的说明会与实际显示的内容不符。
+  const targetFallback = record.target_fallback === true && effectiveTarget !== target;
   const whitespace = record.whitespace === "ignore_all" ? "ignore_all" : "show";
   const context = Number.isFinite(record.context) ? Number(record.context) : 3;
   return {
     file: normalizeDiffFile(record.file),
     target,
+    effectiveTarget,
+    targetFallback,
     context,
     whitespace,
     insertions: asCount(record.insertions),

@@ -63,7 +63,7 @@ export const enWorkspacePanelsGit = {
     rowAria: "{{path}}: {{badge}} ({{group}})",
     renamedFrom: "from {{path}}",
     binary: "Binary file",
-    statUnknown: "Line stats unavailable (binary)",
+    statUnknown: "Line stats unavailable",
     stats: "+{{insertions}} −{{deletions}}",
     keyboardHint: "↑/↓ switch files",
     stale:
@@ -81,9 +81,14 @@ export const enWorkspacePanelsGit = {
     stageAllHint: "Stage every file in this group (no commit)",
   },
   diff: {
+    expand: "Expand diff view",
     empty: "Select a file on the left to view its diff.",
     loading: "Reading diff…",
     noChanges: "No differences against the selected target (file content matches it).",
+    targetFallback:
+      "The selected target has no changes for this file; the changes below come from “{{target}}”.",
+    emptyNewFile: "New empty file: it has no content, so there are no diff lines to show.",
+    emptyDeletedFile: "Deleted empty file: its original content was empty, so there are no diff lines to show.",
     errorTitle: "Failed to read diff",
     unavailable: "Repository or git is unavailable; the diff could not be read.",
     retry: "Retry",

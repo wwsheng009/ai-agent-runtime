@@ -3,7 +3,7 @@
 //
 // 后端契约（types/runtime/git-browse.ts · GitFileStatus）：
 //   * `status` 是 `git status --porcelain=v2` 的 XY 组合（X=暂存侧，Y=工作区侧，`.` 表示无变化）；
-//   * `insertions/deletions` 为 -1 表示二进制（numstat 的 `-`），不能用 0 伪装；
+//   * `insertions/deletions` 为 -1 表示「统计不可用」（numstat 的 `-`/二进制，或未跟踪文件读不到结论），不能用 0 伪装；
 //   * `from` 只在重命名记录上存在；`binary` 是后端给定结论，前端不自行探测文件内容。
 //
 // 归一化纪律：

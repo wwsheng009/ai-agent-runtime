@@ -6,7 +6,9 @@
 // hunk 一律来自服务端（前端不自行拼接 diff 文本，避免与服务端结论不一致）。
 //
 // 归一化纪律：行文本一律走 React 文本节点（无 dangerouslySetInnerHTML），高亮只加 token class；
-// split 缺侧显示占位格（不复制对侧文本、不编造行号）；组件不跨模式读数据。
+// split 缺侧显示占位格（不复制对侧文本、不编造行号）；组件不跨模式读数据；
+// 行号列**每行只保留一列**（unified 原来是老/新两列，现合并为一列：add→新侧、del→老侧、
+// context→新侧；split 每侧各一列）；行号仍进 aria 文案，`oldNo/newNo` 保留在数据模型里。
 //
 // 降级判据：Prism 语言表未就绪 / 语言不支持 → 回落纯文本行（不阻塞首屏，不显示假高亮）；
 // `expandStep === null` 表示上下文已达上限 → 隐藏展开入口，而不是发无效请求；
@@ -38,18 +40,40 @@ import type { GitDiffHunk } from "@/types/runtime/git-browse";
 /** diff 行固定行高（与虚拟列表共享，必须一致）。 */
 export const DIFF_ROW_HEIGHT = 22;
 
+/**
+ * 差异正文视口外框：Git 面板与消息流 apply_patch 面板**共用同一份类名**。
+ *
+ * 口径：正文不铺整层灰底——增删语义只由行底色 `-bg` token 承载，外层再叠
+ * `bg-black/*` 会让上下文行与留白整体发灰、与宿主面板底色割裂。
+ * 高度 / 布局差异由调用方追加自己的 className，外框配色一律复用本常量。
+ *
+ * 历史缺陷：两处各自复制类名，消息流一侧漏改，长期残留 `bg-black/20` 的整层灰底。
+ */
+export const DIFF_VIEWPORT_FRAME = "min-h-0 rounded-panel border border-white/8";
+
 const NUMBER_CELL = "select-none px-2 text-right font-mono app-text-11 text-code-line-number";
 const TEXT_CELL = "min-w-0 truncate px-2 font-mono app-text-12 whitespace-pre";
 const GHOST_BUTTON = "rounded-chip px-1.5 py-0.5 hover:bg-white/6";
 const EMPTY_CELL: DiffCell = { lineNo: null, prefix: "", text: "", tone: "empty" };
 
 const TONE_CLASS: Record<DiffCell["tone"], string> = {
-  add: "bg-code-line-inserted-bg text-code-line-inserted-accent",
-  del: "bg-code-line-deleted-bg text-code-line-deleted-accent",
+  // 底色只负责「这一行变了」，代码文本一律用前景色：语义由底色 + `+`/`-` 标记 + 行 aria 承载。
+  // 历史缺陷：把半透明的 `-accent`（左轨色）当文字色 → 「绿字压浅绿底 / 红字压浅红底」无法分辨。
+  add: "bg-code-line-inserted-bg text-foreground",
+  del: "bg-code-line-deleted-bg text-foreground",
   context: "text-foreground/85",
   nonewline: "text-muted-foreground italic",
-  number: "",
-  empty: "bg-black/10",
+  // split 缺侧占位：主题表面色（不再用 `black/10` 的灰块）。
+  empty: "bg-surface-softer",
+};
+
+/** `+`/`-` 标记色：实体 fg token（`-accent` 是半透明的轨 / 边框色，不得当文字色）。 */
+const TONE_MARKER_CLASS: Record<DiffCell["tone"], string> = {
+  add: "text-code-line-inserted-fg",
+  del: "text-code-line-deleted-fg",
+  context: "text-foreground/60",
+  nonewline: "text-muted-foreground/70",
+  empty: "",
 };
 
 export type GitDiffHunkProps = {
@@ -103,10 +127,10 @@ export function GitDiffHunk({
         </span>
       ) : null}
       <span className="ml-auto flex shrink-0 items-center gap-2" role="cell">
-        <span className="text-code-line-inserted-accent">
+        <span className="text-code-line-inserted-fg">
           {t("panels.git.diff.additions", { count: additions })}
         </span>
-        <span className="text-code-line-deleted-accent">
+        <span className="text-code-line-deleted-fg">
           {t("panels.git.diff.deletions", { count: deletions })}
         </span>
         {expandStep !== null ? (
@@ -179,7 +203,10 @@ export function DiffGapRow({ gap, expandStep, onExpandContext }: DiffGapRowProps
 
 export type DiffLineRowProps = { row: DiffViewRow; mode: DiffViewMode; language: string };
 
-/** 单行内容：unified = 老/新行号列 + 前缀 + 文本；split = 老格 + 新格（缺侧占位）。 */
+/**
+ * 单行内容：unified = **一列行号** + 前缀 + 文本；split = 每侧「一列行号 + 前缀 + 文本」。
+ * 行号列原来在 unified 是并排两列（老/新），现已合并为一列：add→新侧、del→老侧、context→新侧。
+ */
 export function DiffLineRow({ row, mode, language }: DiffLineRowProps) {
   const { t } = useTranslation("workspace");
   const highlight = useLineHighlighting(language);
@@ -194,10 +221,10 @@ export function DiffLineRow({ row, mode, language }: DiffLineRowProps) {
         className="grid h-full grid-cols-[3rem_minmax(0,1fr)_3rem_minmax(0,1fr)] items-center"
         role="row"
       >
-        <Cell content={oldCell} highlight={highlight} language={language} part="no" />
-        <Cell content={oldCell} highlight={highlight} language={language} part="text" />
-        <Cell content={newCell} highlight={highlight} language={language} part="no" />
-        <Cell content={newCell} highlight={highlight} language={language} part="text" />
+        <NumberCell lineNo={oldCell.lineNo} />
+        <Cell content={oldCell} highlight={highlight} language={language} />
+        <NumberCell lineNo={newCell.lineNo} />
+        <Cell content={newCell} highlight={highlight} language={language} />
       </div>
     );
   }
@@ -206,13 +233,21 @@ export function DiffLineRow({ row, mode, language }: DiffLineRowProps) {
   return (
     <div
       aria-label={ariaLabel}
-      className="grid h-full grid-cols-[3rem_3rem_minmax(0,1fr)] items-center"
+      className="grid h-full grid-cols-[3rem_minmax(0,1fr)] items-center"
       role="row"
     >
-      <Cell content={row.old ?? EMPTY_CELL} highlight={false} language={language} part="no" />
-      <Cell content={row.new ?? EMPTY_CELL} highlight={false} language={language} part="no" />
-      <Cell content={content} highlight={highlight} language={language} part="text" />
+      <NumberCell lineNo={content.lineNo} />
+      <Cell content={content} highlight={highlight} language={language} />
     </div>
+  );
+}
+
+/** 行号列（每行只渲染一列）；`null` = 该侧不存在 → 渲染空串，**不补 0**。 */
+function NumberCell({ lineNo }: { lineNo: number | null }) {
+  return (
+    <span className={NUMBER_CELL} role="cell">
+      {lineNo === null ? "" : String(lineNo)}
+    </span>
   );
 }
 
@@ -220,28 +255,20 @@ function Cell({
   content,
   highlight,
   language,
-  part,
 }: {
   content: DiffCell;
   highlight: boolean;
   language: string;
-  part: "no" | "text";
 }) {
-  const lineNo = content.lineNo === null ? "" : String(content.lineNo);
-  if (part === "no") {
-    return (
-      <span className={NUMBER_CELL} role="cell">
-        {lineNo}
-      </span>
-    );
-  }
   return (
     <span
       className={cn(TEXT_CELL, TONE_CLASS[content.tone])}
       data-diff-cell={content.tone}
       role="cell"
     >
-      <span className="mr-1 select-none opacity-70">{content.prefix || " "}</span>
+      <span className={cn("mr-1 select-none", TONE_MARKER_CLASS[content.tone])}>
+        {content.prefix || " "}
+      </span>
       <LineText highlight={highlight} language={language} text={content.text} tone={content.tone} />
     </span>
   );
@@ -368,7 +395,7 @@ export function RawDiffPane({ raw, testId }: { raw: string; testId: string }) {
         {lines.length > shown.length ? ` ${t("panels.git.diff.rawLineCap")}` : ""}
       </span>
       <pre
-        className="app-scrollbar min-h-0 select-text overflow-auto rounded-panel border border-white/8 bg-black/25 p-2 font-mono app-text-12 whitespace-pre"
+        className="app-scrollbar min-h-0 select-text overflow-auto rounded-panel border border-white/8 bg-surface-soft/40 p-2 font-mono app-text-12 whitespace-pre"
         data-raw-lines={lines.length}
         data-raw-shown={shown.length}
         data-testid={testId}

@@ -8,7 +8,12 @@
 //
 // 归一化纪律：
 //   * 状态码沿用 `git status --porcelain=v2` 的 XY 语义（前端只做展示映射）；
-//   * `insertions/deletions` 为 -1 表示二进制（numstat 的 `-`），不用 0 伪装；
+//   * `insertions/deletions` 为 -1 表示「行数统计不可用」：numstat 的 `-`（二进制），
+//     或未跟踪文件读不到结论（非常规文件 / 超大 / 读取失败，后端同时给 warnings），不用 0 伪装；
+//   * 未跟踪文件（target=working）的 diff 由服务端用 `--no-index /dev/null <file>` 合成，
+//     `file.status` 为 `A`（空的新文件同样为 `A` 且 hunks 为空 → 前端显示「新增的空文件」）；
+//   * `effective_target` 是本次 diff **实际**使用的目标：请求目标对这条路径没有改动、而另一侧
+//     有时服务端会回退（`target_fallback=true`），UI 必须据此说明「显示的是哪一侧的改动」；
 //   * 结构化 diff 的 `hunks` 非法结构 → 抛错（不静默当空 diff，避免「文件没改动」假象）；
 //   * stage 的 `status` 与 GET /git/status 同构，缺失 → null（调用方保留本地快照，不用空状态覆盖）。
 
@@ -20,6 +25,7 @@ export type GitFileStatus = {
   from?: string;
   /** porcelain v2 的 XY 组合（如 "M." / ".M" / "R." / "??"）。 */
   status: string;
+  /** -1 = 统计不可用（二进制 / 未跟踪且读不到结论），不得当作 0。 */
   insertions: number;
   deletions: number;
   binary: boolean;
@@ -80,6 +86,10 @@ export type GitDiffFile = {
 export type GitDiffResult = {
   file: GitDiffFile | null;
   target: GitDiffTarget;
+  /** 本次 diff 实际使用的目标（可能因「改动在另一侧」而回退）；等于 target 时未回退。 */
+  effectiveTarget: GitDiffTarget;
+  /** true = effectiveTarget ≠ target：UI 必须说明「显示的是哪一侧的改动」。 */
+  targetFallback: boolean;
   context: number;
   whitespace: "show" | "ignore_all";
   insertions: number;

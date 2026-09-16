@@ -11,83 +11,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { i18n } from "@/i18n";
 import { zhWorkspacePanelsGit } from "@/i18n/resources/zh-CN/workspace/panels-git";
-import type { GitSnapshot } from "@/hooks/workspace/use-git-changes";
 import { DEFAULT_DIFF_ROW_LIMIT, buildDiffRows } from "@/lib/git/diff-view-model";
-import type {
-  GitDiffHunk,
-  GitDiffLine,
-  GitDiffLineType,
-  GitDiffResult,
-} from "@/types/runtime/git-browse";
 
 import { GitDiffView } from "./diff-view";
 import { RAW_TEXT_LINE_CAP } from "./diff-hunk";
+import { defaultProps, diffResult, hunk, line, snapshot } from "./diff-view.test-fixtures";
 
 type ReactActEnvironmentGlobal = typeof globalThis & {
   IS_REACT_ACT_ENVIRONMENT?: boolean;
 };
-
-function line(type: GitDiffLineType, oldNo: number | null, newNo: number | null, text: string): GitDiffLine {
-  return { type, oldNo, newNo, text };
-}
-
-function hunk(lines: GitDiffLine[], oldStart = 1, newStart = 1): GitDiffHunk {
-  return {
-    header: `@@ -${oldStart},2 +${newStart},2 @@`,
-    oldStart,
-    newStart,
-    oldLines: lines.filter((item) => item.type !== "add").length,
-    newLines: lines.filter((item) => item.type !== "del").length,
-    lines,
-  };
-}
-
-const CHANGE_HUNK = hunk([
-  line("del", 1, null, "const a = 1;"),
-  line("add", null, 1, "const a = 2;"),
-  line("context", 2, 2, "export {};"),
-]);
-
-function diffResult(overrides: Partial<GitDiffResult> = {}): GitDiffResult {
-  return {
-    file: { path: "src/app.ts", status: "M", isBinary: false, isSubmodule: false },
-    target: "working",
-    context: 3,
-    whitespace: "show",
-    insertions: 1,
-    deletions: 1,
-    hunks: [CHANGE_HUNK],
-    raw: "--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,2 +1,2 @@\n-const a = 1;\n+const a = 2;\n",
-    parseError: "",
-    truncated: false,
-    truncatedReason: "",
-    generatedAt: 0,
-    ...overrides,
-  };
-}
-
-function snapshot(overrides: Partial<GitSnapshot<GitDiffResult>> = {}): GitSnapshot<GitDiffResult> {
-  return { status: "ready", data: diffResult(), error: null, unavailable: false, ...overrides };
-}
-
-function defaultProps(overrides: Partial<Parameters<typeof GitDiffView>[0]> = {}) {
-  return {
-    snapshot: snapshot(),
-    selectedPath: "src/app.ts",
-    stale: false,
-    targetLabel: "工作区",
-    mode: "unified" as const,
-    onModeChange: vi.fn(),
-    whitespace: "show" as const,
-    onWhitespaceChange: vi.fn(),
-    canExpandContext: true,
-    onExpandContext: vi.fn(),
-    rowLimit: 2000,
-    onShowMoreRows: vi.fn(),
-    onRetry: vi.fn(),
-    ...overrides,
-  };
-}
 
 describe("GitDiffView", () => {
   let roots: Root[] = [];
@@ -153,6 +85,36 @@ describe("GitDiffView", () => {
     expect(rawPane?.getAttribute("data-raw-lines")).toBe(String(RAW_TEXT_LINE_CAP + 25));
     expect(rawPane?.getAttribute("data-raw-shown")).toBe(String(RAW_TEXT_LINE_CAP));
     expect(container.textContent).toContain("原始文本按当前渲染上限截断显示。");
+  });
+
+  it("target_fallback=true → 写明「显示的是另一侧（{{target}}）的改动」，并原样透传报文证据", () => {
+    const container = mount(
+      <GitDiffView
+        {...defaultProps({
+          fallbackTargetLabel: "已暂存",
+          snapshot: snapshot({
+            data: diffResult({
+              target: "working",
+              effectiveTarget: "staged",
+              targetFallback: true,
+            }),
+          }),
+        })}
+      />,
+    );
+
+    const banner = container.querySelector('[data-testid="git-diff-target-fallback"]');
+    expect(banner).not.toBeNull();
+    expect(banner?.getAttribute("data-target-requested")).toBe("working");
+    expect(banner?.getAttribute("data-target-effective")).toBe("staged");
+    expect(banner?.textContent).toContain("已暂存");
+  });
+
+  it("未回退（target_fallback=false）→ 即使调用方给了目标名也不显示回退说明（不凭空换源）", () => {
+    const container = mount(<GitDiffView {...defaultProps({ fallbackTargetLabel: "已暂存" })} />);
+
+    expect(container.querySelector('[data-testid="git-diff-target-fallback"]')).toBeNull();
+    expect(container.textContent).not.toContain("以下显示的是");
   });
 
   it("truncated → 显示截断行数与 truncated_reason，并提供复制 / 下载 .patch", async () => {
@@ -232,7 +194,78 @@ describe("GitDiffView", () => {
     );
   });
 
-  it("unified 渲染行号 + 前缀 + 文本；点击模式按钮回调 split", () => {
+  it("新增的空文件（status=A、无 hunks）→ 说明「文件没有任何内容」，不写「没有差异」", () => {
+    const container = mount(
+      <GitDiffView
+        {...defaultProps({
+          selectedPath: "empty.ts",
+          snapshot: snapshot({
+            data: diffResult({
+              file: { path: "empty.ts", status: "A", isBinary: false, isSubmodule: false },
+              hunks: [],
+              raw: "",
+              insertions: 0,
+              deletions: 0,
+            }),
+          }),
+        })}
+      />,
+    );
+
+    const hint = container.querySelector('[data-testid="git-diff-empty-new"]');
+    expect(hint?.textContent).toContain("没有任何内容");
+    expect(container.querySelector('[data-testid="git-diff-no-changes"]')).toBeNull();
+  });
+
+  it("删除的空文件（status=D、无 hunks）→ 说明「原内容为空」，不写「没有差异」", () => {
+    const container = mount(
+      <GitDiffView
+        {...defaultProps({
+          selectedPath: "gone.ts",
+          snapshot: snapshot({
+            data: diffResult({
+              file: { path: "gone.ts", status: "D", isBinary: false, isSubmodule: false },
+              hunks: [],
+              raw: "",
+              insertions: 0,
+              deletions: 0,
+            }),
+          }),
+        })}
+      />,
+    );
+
+    const hint = container.querySelector('[data-testid="git-diff-empty-deleted"]');
+    expect(hint?.textContent).toContain("原内容为空");
+    expect(container.querySelector('[data-testid="git-diff-no-changes"]')).toBeNull();
+  });
+
+  it("截断后没有可渲染行 → 只留截断横幅，不冒充空文件 / 没有差异", () => {
+    const container = mount(
+      <GitDiffView
+        {...defaultProps({
+          selectedPath: "empty.ts",
+          snapshot: snapshot({
+            data: diffResult({
+              file: { path: "empty.ts", status: "A", isBinary: false, isSubmodule: false },
+              hunks: [],
+              raw: "",
+              insertions: 0,
+              deletions: 0,
+              truncated: true,
+              truncatedReason: "diff exceeds 5 lines",
+            }),
+          }),
+        })}
+      />,
+    );
+
+    expect(container.querySelector('[data-testid="git-diff-truncated"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="git-diff-empty-new"]')).toBeNull();
+    expect(container.querySelector('[data-testid="git-diff-no-changes"]')).toBeNull();
+  });
+
+  it("unified 行号只有一列（老/新两列已合并）；点击模式按钮回调 split", () => {
     const onModeChange = vi.fn();
     const container = mount(<GitDiffView {...defaultProps({ onModeChange })} />);
 
@@ -243,6 +276,29 @@ describe("GitDiffView", () => {
     );
     expect(container.textContent).toContain("const a = 2;");
 
+    // 行号列合并（回归：unified 曾并排渲染 老/新 两列 3rem 行号）：
+    // 每行 = 1 个行号格 + 1 个内容格，行号格样式类每行只出现一次。
+    const contentRows = [...container.querySelectorAll('[data-testid="git-diff-rows"] [role="row"]')].filter(
+      (row) => row.querySelector("[data-diff-cell]") !== null,
+    );
+    expect(contentRows.length).toBeGreaterThan(0);
+    expect(contentRows.every((row) => row.querySelectorAll('[role="cell"]').length === 2)).toBe(true);
+    expect(
+      contentRows.every((row) => row.querySelectorAll(".text-code-line-number").length === 1),
+    ).toBe(true);
+
+    // 样式口径（回归：绿字压浅绿底不可读 + 正文整层灰底）：
+    // 行底色负责「哪一行变了」，文字一律前景色；`+`/`-` 标记才用实体 fg token；
+    // 正文容器不得再铺 `bg-black/*` 的整层灰底。
+    const addCell = container.querySelector('[data-diff-cell="add"]');
+    expect(addCell?.className).toContain("bg-code-line-inserted-bg");
+    expect(addCell?.className).toContain("text-foreground");
+    expect(addCell?.className).not.toContain("text-code-line-inserted-accent");
+    expect(addCell?.querySelector("span")?.className).toContain("text-code-line-inserted-fg");
+    expect(container.querySelector('[data-testid="git-diff-rows"]')?.className).not.toMatch(
+      /bg-black/,
+    );
+
     const splitButton = [...container.querySelectorAll("button")].find((button) =>
       button.textContent?.includes("并排视图"),
     );
@@ -250,6 +306,47 @@ describe("GitDiffView", () => {
       splitButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(onModeChange).toHaveBeenCalledWith("split");
+  });
+
+  it("unified 单列行号取该行存在的那一侧：add→新侧 / del→老侧 / context→新侧", () => {
+    const container = mount(
+      <GitDiffView
+        {...defaultProps({
+          snapshot: snapshot({
+            data: diffResult({
+              hunks: [
+                hunk(
+                  [
+                    line("del", 10, null, "old line"),
+                    line("add", null, 20, "new line"),
+                    line("context", 11, 21, "same"),
+                  ],
+                  10,
+                  20,
+                ),
+              ],
+            }),
+          }),
+        })}
+      />,
+    );
+
+    const contentRows = [...container.querySelectorAll('[data-testid="git-diff-rows"] [role="row"]')].filter(
+      (row) => row.querySelector("[data-diff-cell]") !== null,
+    );
+    expect(contentRows.length).toBe(3);
+    const numberFor = (tone: string) =>
+      contentRows
+        .find((row) => row.querySelector(`[data-diff-cell="${tone}"]`) !== null)
+        ?.querySelector(".text-code-line-number")?.textContent;
+    // 老/新行号 10/20/21 都不同：单列必须取「该行真正存在的那一侧」，不借用对侧数字。
+    expect(numberFor("del")).toBe("10");
+    expect(numberFor("add")).toBe("20");
+    expect(numberFor("context")).toBe("21");
+    // 行号仍进 aria（读屏可分辨增删行），不因合并成视觉一列而丢失。
+    expect(
+      contentRows.find((row) => row.querySelector('[data-diff-cell="add"]'))?.getAttribute("aria-label"),
+    ).toContain("新增行 20");
   });
 
   it("split 视图按 old/new 配对，缺侧为占位且不复制对侧文本", () => {
@@ -282,6 +379,16 @@ describe("GitDiffView", () => {
     expect(empties.every((cell) => (cell.textContent ?? "").trim() === "")).toBe(true);
     const rows = [...container.querySelectorAll('[role="row"]')];
     expect(rows.some((row) => row.getAttribute("aria-label")?.includes("替换行"))).toBe(true);
+
+    // split 每侧各一列行号：context 行老侧显示 oldNo(8)、新侧显示 newNo(9)，不共用同一个数字。
+    const contentRows = [...container.querySelectorAll('[data-testid="git-diff-rows"] [role="row"]')].filter(
+      (row) => row.querySelector("[data-diff-cell]") !== null,
+    );
+    expect(contentRows.every((row) => row.querySelectorAll('[role="cell"]').length === 4)).toBe(true);
+    const contextRow = contentRows.find((row) => row.querySelector('[data-diff-cell="context"]') !== null);
+    expect(
+      [...(contextRow?.querySelectorAll(".text-code-line-number") ?? [])].map((cell) => cell.textContent),
+    ).toEqual(["8", "9"]);
   });
 
   it("hunk 折叠只影响渲染，展开入口用更大 context 重新请求", () => {

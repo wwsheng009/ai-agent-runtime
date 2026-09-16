@@ -79,8 +79,11 @@ html[data-theme="light"] {
   --streaming-active-caret: var(--primitive-teal-100);
   --code-line-inserted-bg: var(--primitive-green-3-a100);
   --code-line-inserted-accent: var(--primitive-green-3-a240);
+  /* 亮色下 accent 只有 24% alpha，当文字色必然糊在色底里 → 文字改用 700 档深色（见 tokens.css 同名组）。 */
+  --code-line-inserted-fg: var(--primitive-green-4);
   --code-line-deleted-bg: var(--primitive-red-100-a100);
   --code-line-deleted-accent: var(--primitive-red-100-a240);
+  --code-line-deleted-fg: var(--primitive-red-3);
   --code-token-comment: var(--primitive-slate-3-a700);
   --code-token-punctuation: var(--primitive-slate-4-a780);
   --code-token-property: var(--primitive-blue-100);

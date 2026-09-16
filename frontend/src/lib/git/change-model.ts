@@ -182,13 +182,14 @@ export type GitChangeSection = {
 
 /** 徽标色调 → 类名；文件浏览器树行角标复用同一映射（避免两处颜色漂移）。 */
 export const GIT_STATUS_TONE_CLASS: Record<GitStatusTone, string> = {
-  add: "text-code-line-inserted-accent border-code-line-inserted-accent/40",
+  // 文字走 `-fg` 实体色（`-accent` 半透明，只留给边框 / 左轨，当文字色在亮色主题下几乎看不见）。
+  add: "text-code-line-inserted-fg border-code-line-inserted-accent/40",
   modify: "text-amber-300 border-amber-300/40",
-  delete: "text-code-line-deleted-accent border-code-line-deleted-accent/40",
+  delete: "text-code-line-deleted-fg border-code-line-deleted-accent/40",
   rename: "text-sky-300 border-sky-300/40",
   copy: "text-sky-300 border-sky-300/40",
   typechange: "text-violet-300 border-violet-300/40",
-  unmerged: "text-code-line-deleted-accent border-code-line-deleted-accent/40",
+  unmerged: "text-code-line-deleted-fg border-code-line-deleted-accent/40",
   untracked: "text-muted-foreground border-white/15",
   unknown: "text-muted-foreground border-white/15",
 };

@@ -214,7 +214,7 @@ describe("GitChangeList", () => {
     expect(binary).not.toMatch(/\+\d/);
 
     const unknown = container.querySelector('[data-git-path="mystery.ts"]')?.textContent ?? "";
-    expect(unknown).toContain("行数统计不可用（二进制）");
+    expect(unknown).toContain("行数统计不可用");
     expect(unknown).not.toContain("+0");
   });
 

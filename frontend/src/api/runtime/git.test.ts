@@ -131,6 +131,28 @@ describe("normalizeGitDiffPayload", () => {
     expect(result.generatedAt).toBe(1720000000);
   });
 
+  it("回退目标：effective_target 缺省取 target，target_fallback 只在确实换了一侧时才为 true", () => {
+    const fallback = normalizeGitDiffPayload({
+      target: "working",
+      effective_target: "staged",
+      target_fallback: true,
+      hunks: [],
+    });
+    expect(fallback.target).toBe("working");
+    expect(fallback.effectiveTarget).toBe("staged");
+    expect(fallback.targetFallback).toBe(true);
+
+    // 两个目标相同却声称回退 → 不算回退（UI 的说明不能与实际显示的内容不符）。
+    const same = normalizeGitDiffPayload({ target: "staged", target_fallback: true, hunks: [] });
+    expect(same.effectiveTarget).toBe("staged");
+    expect(same.targetFallback).toBe(false);
+
+    // 旧后端没有这两个字段：effective_target 取 target，并且不声称回退。
+    const legacy = normalizeGitDiffPayload({ target: "staged", hunks: [] });
+    expect(legacy.effectiveTarget).toBe("staged");
+    expect(legacy.targetFallback).toBe(false);
+  });
+
   it("未知 line type 直接丢弃（不猜语义）", () => {
     const result = normalizeGitDiffPayload({
       hunks: [

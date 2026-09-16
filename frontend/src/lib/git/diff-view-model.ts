@@ -7,6 +7,8 @@
 //
 // 归一化纪律：
 //   * 行号缺失一律保留 null，**不用 0 伪装**（0 会被读成真实行号）；
+//   * 展示层每行只渲染**一列**行号（unified 把原来的老/新两列合并成一列）：取值口径
+//     add→新侧、del→老侧、context→新侧（与磁盘上的文件对齐），**从不借用对侧数字**；
 //   * split 配对只在同一 hunk 内做「相邻 del 段 ↔ add 段按序配对」，跨 hunk 不配对、context 不参与配对；
 //   * 折叠区间行数由相邻 hunk 的 old/new 行号区间推导；文件尾部行数服务端未给出 → 保留 null，不猜。
 //
@@ -37,14 +39,12 @@ export type DiffCellTone =
   | "del"
   | "context"
   | "nonewline"
-  /** 纯行号列（unified 模式的老/新行号列，无内容）。 */
-  | "number"
-  /** split 模式的缺侧占位（无行号、无内容）。 */
+  /** split 模式的缺侧占位（无内容；此前还承载过「纯行号列」，行号列移除后只剩占位语义）。 */
   | "empty";
 
-/** 行内两侧的单格（split 两格 / unified 一格）。 */
+/** 行内单格（split 两格 / unified 一格）。 */
 export type DiffCell = {
-  /** 老行号 / 新行号；null = 该侧不存在（契约禁止用 0 代替）。 */
+  /** 该格对应的行号（unified 单格 = 该行展示的那一个行号）；null = 该侧不存在（禁止用 0 代替）。 */
   lineNo: number | null;
   prefix: "+" | "-" | " " | "";
   text: string;
@@ -77,9 +77,9 @@ export type DiffViewRow = {
   /** hunk 头部行携带的原始 header 文本（其余行为空串）。 */
   header: string;
   /**
-   * 老/新两侧格子，口径随模式变化（组件不得跨模式混读）：
-   * - unified：只承载**行号列**（prefix/text 为空），内容在 `unified`；
-   * - split：承载各自的行号 + 前缀 + 文本，`unified` 为 null。
+   * 老/新两侧格子（**仅 split 模式有值**，组件不得跨模式混读）：
+   * - unified：两侧均为 null（行号列由 `unified.lineNo` 单独渲染成**一列**，不再需要行号专用格）；
+   * - split：承载各自的行号 + 前缀 + 文本（每侧各一列），`unified` 为 null。
    */
   old: DiffCell | null;
   new: DiffCell | null;
@@ -198,8 +198,8 @@ function pushHunkLines(
         kind,
         hunkIndex,
         header: "",
-        old: del ? toCell(del, "del") : emptyCell(),
-        new: add ? toCell(add, "add") : emptyCell(),
+        old: del ? toCell(del, "del", "old") : emptyCell(),
+        new: add ? toCell(add, "add", "new") : emptyCell(),
         unified: null,
         gap: null,
       });
@@ -221,7 +221,8 @@ function pushHunkLines(
     }
     flush();
     if (line.type === "nonewline") {
-      const cell = toCell(line, "nonewline");
+      // 标记行没有行号：两侧共用同一格（内容相同，不涉及单侧数字）。
+      const cell = toCell(line, "nonewline", "new");
       rows.push(
         mode === "split"
           ? {
@@ -238,7 +239,6 @@ function pushHunkLines(
       );
       continue;
     }
-    const cell = toCell(line, "context");
     rows.push(
       mode === "split"
         ? {
@@ -246,8 +246,9 @@ function pushHunkLines(
             kind: "context",
             hunkIndex,
             header: "",
-            old: cell,
-            new: cell,
+            // 每侧各一列行号：老侧取 oldNo、新侧取 newNo（共用一格会让新栏显示老侧行号）。
+            old: toCell(line, "context", "old"),
+            new: toCell(line, "context", "new"),
             unified: null,
             gap: null,
           }
@@ -264,32 +265,41 @@ function unifiedRow(
   line: GitDiffLine,
   tone: DiffCellTone,
 ): DiffViewRow {
+  // unified 单列行号：add→新侧、del→老侧、context→新侧；老/新两列合并为一列后无额外行号格。
   return {
     key,
     kind,
     hunkIndex,
     header: "",
-    old: numberCell(tone === "add" ? null : line.oldNo),
-    new: numberCell(tone === "del" ? null : line.newNo),
-    unified: toCell(line, tone),
+    old: null,
+    new: null,
+    unified: toCell(line, tone, tone === "del" ? "old" : "new"),
     gap: null,
   };
-}
-
-function numberCell(lineNo: number | null): DiffCell {
-  return { lineNo, prefix: "", text: "", tone: "number" };
 }
 
 function emptyCell(): DiffCell {
   return { lineNo: null, prefix: "", text: "", tone: "empty" };
 }
 
-function toCell(line: GitDiffLine, tone: DiffCellTone): DiffCell {
+/**
+ * 行号取值：add 行没有老侧行号、del 行没有新侧行号（返回 null，**不借用对侧数字**）；
+ * context 两侧都有 → 由 `side` 决定取哪一侧（unified 单列取新侧，与磁盘上的文件对齐）。
+ */
+function lineNoFor(line: GitDiffLine, tone: DiffCellTone, side: "old" | "new"): number | null {
+  if (tone === "nonewline") {
+    return null;
+  }
+  if (side === "old") {
+    return tone === "add" ? null : line.oldNo;
+  }
+  return tone === "del" ? null : line.newNo;
+}
+
+function toCell(line: GitDiffLine, tone: DiffCellTone, side: "old" | "new"): DiffCell {
   const prefix: DiffCell["prefix"] =
     tone === "add" ? "+" : tone === "del" ? "-" : tone === "context" ? " " : "";
-  const lineNo =
-    tone === "add" ? line.newNo : tone === "del" ? line.oldNo : line.oldNo ?? line.newNo;
-  return { lineNo, prefix, text: line.text, tone };
+  return { lineNo: lineNoFor(line, tone, side), prefix, text: line.text, tone };
 }
 
 export type DiffRowSlice = {

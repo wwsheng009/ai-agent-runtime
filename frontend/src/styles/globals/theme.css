@@ -90,8 +90,10 @@
   --color-streaming-active-caret: var(--streaming-active-caret);
   --color-code-line-inserted-bg: var(--code-line-inserted-bg);
   --color-code-line-inserted-accent: var(--code-line-inserted-accent);
+  --color-code-line-inserted-fg: var(--code-line-inserted-fg);
   --color-code-line-deleted-bg: var(--code-line-deleted-bg);
   --color-code-line-deleted-accent: var(--code-line-deleted-accent);
+  --color-code-line-deleted-fg: var(--code-line-deleted-fg);
   --color-code-token-comment: var(--code-token-comment);
   --color-code-token-punctuation: var(--code-token-punctuation);
   --color-code-token-property: var(--code-token-property);

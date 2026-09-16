@@ -56,7 +56,7 @@ function kinds(rows: DiffViewRow[]): string[] {
 }
 
 describe("buildDiffRows · unified", () => {
-  it("del 段先于 add 段输出，行号与前缀逐行对应", () => {
+  it("del 段先于 add 段输出，行号列合并为一列（context 取新侧）", () => {
     const rows = buildDiffRows(
       [
         hunk(10, 20, [
@@ -73,24 +73,21 @@ describe("buildDiffRows · unified", () => {
     expect(rows[0].gap).toEqual({ position: "top", hiddenOld: 9, hiddenNew: 19 });
     const [header, context, del, add] = rows.slice(1);
     expect(header.header).toContain("@@ -10,2 +20,2 @@");
+    // 老/新两列合并为一列：context 行取**新侧**行号（与磁盘上的文件对齐，不并排显示 10/20）。
     expect(context.unified).toEqual({
-      lineNo: 10,
+      lineNo: 20,
       prefix: " ",
       text: "ctx",
       tone: "context",
     });
-    // unified 行同时保留两列行号：context 两侧都有，del 只有老行号，add 只有新行号。
-    expect([context.old?.lineNo, context.new?.lineNo]).toEqual([10, 20]);
+    // 行号由内容单格承载（aria 文案据此生成）：add 取新侧、del 取老侧，两侧格子一律为 null。
+    expect([context.old, context.new]).toEqual([null, null]);
     expect(del.unified?.lineNo).toBe(11);
     expect(del.unified?.prefix).toBe("-");
-    expect([del.old?.lineNo, del.new?.lineNo]).toEqual([11, null]);
+    expect([del.old, del.new]).toEqual([null, null]);
     expect(add.unified?.lineNo).toBe(21);
     expect(add.unified?.prefix).toBe("+");
-    expect([add.old?.lineNo, add.new?.lineNo]).toEqual([null, 21]);
-    // unified 行的 old/new 只承载行号列（不重复内容），组件不得跨模式混读。
-    expect(del.old?.tone).toBe("number");
-    expect(del.old?.text).toBe("");
-    expect(del.old?.prefix).toBe("");
+    expect([add.old, add.new]).toEqual([null, null]);
   });
 
   it("nonewline 行显式成行且带原文，不吃掉相邻增删配对", () => {
@@ -110,7 +107,8 @@ describe("buildDiffRows · unified", () => {
     expect(marker.unified?.tone).toBe("nonewline");
     expect(marker.unified?.text).toBe("\\ No newline at end of file");
     expect(marker.unified?.lineNo).toBeNull();
-    expect([marker.old?.lineNo, marker.new?.lineNo]).toEqual([null, null]);
+    // unified 行不再携带行号专用格（行号只由 `unified` 单格承载，且标记行本就没有行号）。
+    expect([marker.old, marker.new]).toEqual([null, null]);
   });
 });
 
@@ -173,6 +171,8 @@ describe("buildDiffRows · split 配对", () => {
     expect(kinds(rows)).toEqual(["hunk-header", "del", "context", "add"]);
     expect(rows[1].new?.tone).toBe("empty");
     expect(rows[3].old?.tone).toBe("empty");
+    // 每侧各一列行号：老侧取 oldNo、新侧取 newNo（共用一格会让新栏错显老侧行号）。
+    expect([rows[2].old?.lineNo, rows[2].new?.lineNo]).toEqual([2, 1]);
   });
 });
 

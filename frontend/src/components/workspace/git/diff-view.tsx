@@ -6,7 +6,9 @@
 //
 // 归一化纪律：parseError 非空 → 必须降级为纯文本展示 raw，并提示解析失败（**不得**显示成「无改动」）；
 // truncated → 显示「已截断，仅显示前 N 行」+ truncated_reason，并提供复制 / 下载；二进制只给结论与统计；
-// 行数统计 < 0 时显示「不可用」，不补 0；空白开关只改请求参数（重新取 diff），前端不做本地过滤。
+// 行数统计 < 0 时显示「不可用」，不补 0；空白开关只改请求参数（重新取 diff），前端不做本地过滤；
+// `targetFallback` → 必须说明「请求目标没有该文件的改动，下面是另一侧的改动」（不得默默换源）；
+// 无 hunks 且未截断时按 file.status 区分：`A`/`D` 明说「文件为空」，其余才是「与该目标没有差异」。
 //
 // 降级判据：剪贴板 / Blob 下载不可用 → 明示失败原因（copyFailed / downloadFailed），不静默；
 // 客户端渲染预算截断只隐藏渲染行，不改写服务端结论，必须给出「继续加载」入口。
@@ -16,6 +18,7 @@ import { useTranslation } from "react-i18next";
 
 import {
   DIFF_ROW_HEIGHT,
+  DIFF_VIEWPORT_FRAME,
   DiffGapRow,
   DiffLineRow,
   GitDiffHunk,
@@ -44,6 +47,8 @@ export type GitDiffViewProps = {
   /** 选中文件已不在当前变更列表（服务端最新结论）→ 必须提示结果可能过期。 */
   stale: boolean;
   targetLabel: string;
+  /** 服务端回退到另一侧时的目标名；null 表示本次结果来自请求目标本身（不得凭空显示提示）。 */
+  fallbackTargetLabel: string | null;
   mode: DiffViewMode;
   onModeChange: (mode: DiffViewMode) => void;
   whitespace: "show" | "ignore_all";
@@ -53,6 +58,8 @@ export type GitDiffViewProps = {
   rowLimit: number;
   onShowMoreRows: () => void;
   onRetry: () => void;
+  /** 右上角放大入口（宿主注入：右侧栏 → 打开放大面板；放大面板自身不再注入，避免套娃）。 */
+  expandAction?: ReactNode;
 };
 
 export function GitDiffView({
@@ -60,6 +67,7 @@ export function GitDiffView({
   selectedPath,
   stale,
   targetLabel,
+  fallbackTargetLabel,
   mode,
   onModeChange,
   whitespace,
@@ -69,6 +77,7 @@ export function GitDiffView({
   rowLimit,
   onShowMoreRows,
   onRetry,
+  expandAction,
 }: GitDiffViewProps) {
   const { t } = useTranslation("workspace");
   const result = snapshot.data;
@@ -140,6 +149,7 @@ export function GitDiffView({
     >
       <Toolbar
         canExpandContext={canExpandContext}
+        expandAction={expandAction}
         mode={mode}
         onModeChange={onModeChange}
         onToggleWhitespace={() => onWhitespaceChange(whitespace === "ignore_all" ? "show" : "ignore_all")}
@@ -150,6 +160,18 @@ export function GitDiffView({
       />
       <div className="grid gap-1">
         {stale ? <Banner tone="warning" testId="git-diff-stale">{t("panels.git.list.stale")}</Banner> : null}
+        {result.targetFallback && fallbackTargetLabel ? (
+          <Banner
+            data={{
+              "data-target-requested": result.target,
+              "data-target-effective": result.effectiveTarget,
+            }}
+            tone="warning"
+            testId="git-diff-target-fallback"
+          >
+            {t("panels.git.diff.targetFallback", { target: fallbackTargetLabel })}
+          </Banner>
+        ) : null}
         {result.truncated ? (
           <Banner
             data={{
@@ -249,12 +271,25 @@ export function GitDiffView({
       return null;
     }
     if (slice.rows.length === 0) {
+      // 没有可渲染行 ≠ 没有改动：被截断或被行预算挡住时只由对应横幅解释，本层不下结论。
+      if (result.truncated || result.hunks.length > 0) {
+        return null;
+      }
+      // 空文件在 unified diff 里没有任何 hunk：那是「内容为空」，不是「与目标一致」。
+      const status = result.file?.status;
+      if (status === "A") {
+        return <Hint testId="git-diff-empty-new">{t("panels.git.diff.emptyNewFile")}</Hint>;
+      }
+      if (status === "D") {
+        return <Hint testId="git-diff-empty-deleted">{t("panels.git.diff.emptyDeletedFile")}</Hint>;
+      }
       return <Hint testId="git-diff-no-changes">{t("panels.git.diff.noChanges")}</Hint>;
     }
     const language = diffLanguageForPath(result.file?.path ?? selectedPath ?? "");
     return (
       <VirtualLineList
-        className="min-h-0 rounded-panel border border-white/8 bg-black/20"
+        // 正文外框走共享常量：留白直接透出宿主面板表面，绝不铺整层灰底（口径与历史缺陷见常量注释）。
+        className={DIFF_VIEWPORT_FRAME}
         containerAriaLabel={t("panels.git.ariaLabel")}
         containerRole="rowgroup"
         resetKey={resetKey}
@@ -305,6 +340,7 @@ function Toolbar({
   whitespace,
   onToggleWhitespace,
   canExpandContext,
+  expandAction,
 }: {
   path: string;
   statsLabel: string;
@@ -314,6 +350,7 @@ function Toolbar({
   whitespace: "show" | "ignore_all";
   onToggleWhitespace: () => void;
   canExpandContext: boolean;
+  expandAction?: ReactNode;
 }) {
   const { t } = useTranslation("workspace");
   return (
@@ -350,6 +387,7 @@ function Toolbar({
           : t("panels.git.diff.whitespaceShow")}
       </button>
       {!canExpandContext ? null : <span className="sr-only">{t("panels.git.diff.expandContext", { count: DIFF_CONTEXT_EXPAND_STEP })}</span>}
+      {expandAction}
     </div>
   );
 }

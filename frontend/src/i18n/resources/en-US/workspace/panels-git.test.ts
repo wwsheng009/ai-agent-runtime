@@ -70,6 +70,8 @@ describe("panels-git i18n 模块", () => {
       "diff.binaryBody",
       "diff.gapUnknown",
       "diff.noNewlineMarker",
+      "diff.emptyNewFile",
+      "diff.emptyDeletedFile",
       "list.statUnknown",
       "scope.missing",
     ];

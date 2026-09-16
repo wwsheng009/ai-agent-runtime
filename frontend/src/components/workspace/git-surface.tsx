@@ -13,9 +13,13 @@ import { GitBranchIcon, RefreshCwIcon } from "lucide-react";
 import { useState, type KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 
+import {
+  ExpandedPreviewDialog,
+  ExpandPreviewButton,
+} from "@/components/workspace/expanded-preview";
 import { GitChangeList } from "@/components/workspace/git/change-list";
 import { GitCommitList } from "@/components/workspace/git/commit-list";
-import { GitDiffView } from "@/components/workspace/git/diff-view";
+import { GitDiffView, type GitDiffViewProps } from "@/components/workspace/git/diff-view";
 import { useGitChanges } from "@/hooks/workspace/use-git-changes";
 import { describeError } from "@/lib/errors";
 import { moveGitSelection } from "@/lib/git/change-model";
@@ -43,17 +47,43 @@ export function GitSurface({
   const { t } = useTranslation("workspace");
   const [view, setView] = useState<"changes" | "commits">("changes");
   const [mode, setMode] = useState<DiffViewMode>("unified");
+  /** 放大面板开关：小窗口（右侧栏）与放大面板复用同一份 GitDiffView 渲染。 */
+  const [expandedDiff, setExpandedDiff] = useState(false);
   const git = useGitChanges({ sessionId, workspacePath });
   const repo = git.status.data?.repo ?? null;
   const scopeUnknown = sessionId.trim() === "" && (workspacePath ?? "").trim() === "";
   const warnings = git.status.data?.warnings ?? [];
 
-  const targetLabel =
-    git.target === "working"
+  const targetNameOf = (target: GitDiffTarget): string =>
+    target === "working"
       ? t("panels.git.repo.targetWorking")
-      : git.target === "staged"
+      : target === "staged"
         ? t("panels.git.repo.targetStaged")
-        : t("panels.git.repo.targetCommit", { sha: git.target.slice("commit:".length).slice(0, 7) });
+        : t("panels.git.repo.targetCommit", { sha: target.slice("commit:".length).slice(0, 7) });
+  const targetLabel = targetNameOf(git.target);
+  // 服务端在「请求目标没有这条路径的改动、另一侧有」时回退到另一侧：只在如实回报回退时给说明文案，
+  // 目标没换就不显示（宁可少说，也不写出与实际内容不符的说明）。
+  const diffData = git.diff.data;
+  const fallbackTargetLabel =
+    diffData?.targetFallback === true ? targetNameOf(diffData.effectiveTarget) : null;
+
+  // 右侧栏小窗口与放大面板共用同一组 props：放大只换容器尺寸，不另起一份 diff 渲染。
+  const diffViewProps: GitDiffViewProps = {
+    canExpandContext: git.canExpandContext,
+    fallbackTargetLabel,
+    mode,
+    onExpandContext: () => git.expandContext(),
+    onModeChange: setMode,
+    onRetry: git.retryDiff,
+    onShowMoreRows: git.showMoreRows,
+    onWhitespaceChange: git.setWhitespace,
+    rowLimit: git.rowLimit,
+    selectedPath: git.selectedPath,
+    snapshot: git.diff,
+    stale: git.selectedPath !== null && !git.selectedStillChanged,
+    targetLabel,
+    whitespace: git.whitespace,
+  };
 
   const useCommitAsTarget = (sha: string) => {
     git.setTarget(`commit:${sha}` as GitDiffTarget);
@@ -273,19 +303,14 @@ export function GitSurface({
             </div>
             <div className={PANE}>
               <GitDiffView
-                canExpandContext={git.canExpandContext}
-                mode={mode}
-                onExpandContext={() => git.expandContext()}
-                onModeChange={setMode}
-                onRetry={git.retryDiff}
-                onShowMoreRows={git.showMoreRows}
-                onWhitespaceChange={git.setWhitespace}
-                rowLimit={git.rowLimit}
-                selectedPath={git.selectedPath}
-                snapshot={git.diff}
-                stale={git.selectedPath !== null && !git.selectedStillChanged}
-                targetLabel={targetLabel}
-                whitespace={git.whitespace}
+                {...diffViewProps}
+                expandAction={
+                  <ExpandPreviewButton
+                    label={t("panels.git.diff.expand")}
+                    onClick={() => setExpandedDiff(true)}
+                    testId="git-diff-expand"
+                  />
+                }
               />
             </div>
           </>
@@ -302,6 +327,21 @@ export function GitSurface({
           </div>
         )}
       </div>
+
+      <ExpandedPreviewDialog
+        ariaLabel={t("panels.git.diff.expand")}
+        closeLabel={t("panels.preview.close")}
+        eyebrow={t("panels.preview.eyebrow")}
+        hint={t("panels.preview.hint")}
+        onClose={() => setExpandedDiff(false)}
+        open={expandedDiff}
+        subtitle={targetLabel}
+        testId="git-diff-expanded"
+        title={git.selectedPath ?? ""}
+      >
+        {/* 正文与右侧栏小窗口同源：同一份 props 再挂一次，放大只换容器尺寸。 */}
+        <GitDiffView {...diffViewProps} />
+      </ExpandedPreviewDialog>
     </div>
   );
 }
