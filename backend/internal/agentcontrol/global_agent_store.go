@@ -202,6 +202,45 @@ func (s *SQLiteGlobalAgentRegistryStore) ensureForRead() (skipEmpty bool, err er
 	return true, nil
 }
 
+// liveDBHandle reads the open database handle under the same lock Close takes.
+// Callers must hold the returned handle in a local variable for the duration of
+// one operation: a Close racing the store then either loses the race (the
+// handle stays usable until database/sql reports "database is closed") or wins
+// it and the operation fails with a plain error instead of dereferencing a nil
+// *sql.DB. Reading s.db after ensure() without this accessor is a data race.
+func (s *SQLiteGlobalAgentRegistryStore) liveDBHandle() (*sql.DB, error) {
+	s.openMu.RLock()
+	defer s.openMu.RUnlock()
+	if s.db == nil {
+		if s.closed {
+			return nil, fmt.Errorf("agent control agent registry store is closed")
+		}
+		return nil, fmt.Errorf("agent control agent registry store is not initialized")
+	}
+	return s.db, nil
+}
+
+// dbHandle opens the store on demand and returns one handle for the operation
+// about to run.
+func (s *SQLiteGlobalAgentRegistryStore) dbHandle() (*sql.DB, error) {
+	if err := s.ensure(); err != nil {
+		return nil, err
+	}
+	return s.liveDBHandle()
+}
+
+// dbHandleForRead is the read-path variant of dbHandle: a store that was never
+// opened and has no durable file reports skip=true instead of materializing an
+// empty database just to read nothing from it.
+func (s *SQLiteGlobalAgentRegistryStore) dbHandleForRead() (db *sql.DB, skip bool, err error) {
+	skip, err = s.ensureForRead()
+	if err != nil || skip {
+		return nil, skip, err
+	}
+	db, err = s.liveDBHandle()
+	return db, false, err
+}
+
 // Close closes the underlying database if it was opened and owned.
 func (s *SQLiteGlobalAgentRegistryStore) Close() error {
 	if s == nil {
@@ -248,7 +287,8 @@ func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Con
 	if s == nil {
 		return AgentRecord{}, fmt.Errorf("agent control agent registry store is not initialized")
 	}
-	if err := s.ensure(); err != nil {
+	db, err := s.dbHandle()
+	if err != nil {
 		return AgentRecord{}, err
 	}
 	record = record.Normalize()
@@ -274,7 +314,7 @@ func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Con
 	// 扫描在 spawn 回滚释放预约之前读到旧快照，就会把刚释放的 stale 行写回
 	// active，导致被释放的预约继续占用 agents.maxThreads。守卫必须在 SQL 内
 	// 判定，索引快照的 Go 侧判空挡不住并发窗口。重新绑定走预约事务，不受影响。
-	_, err = s.db.ExecContext(ctx, `
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO agent_control_agents (
 			agent_id, root_session_id, parent_agent_id, parent_session_id, session_id, agent_path, depth,
 			agent_type, nickname, workflow, team_id, teammate_id, provider, model, reasoning_effort,
@@ -394,7 +434,8 @@ func (s *SQLiteGlobalAgentRegistryStore) ReserveAgentControlAgentSpawn(ctx conte
 	if s == nil {
 		return AgentRecord{}, fmt.Errorf("agent control agent registry store is not initialized")
 	}
-	if err := s.ensure(); err != nil {
+	db, err := s.dbHandle()
+	if err != nil {
 		return AgentRecord{}, err
 	}
 	root = root.Normalize()
@@ -420,7 +461,7 @@ func (s *SQLiteGlobalAgentRegistryStore) ReserveAgentControlAgentSpawn(ctx conte
 	if child.AgentPath == "" {
 		return AgentRecord{}, fmt.Errorf("child agent path is required")
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return AgentRecord{}, fmt.Errorf("begin agent spawn reservation: %w", err)
 	}
@@ -531,9 +572,11 @@ func (s *SQLiteGlobalAgentRegistryStore) ListAgentControlAgents(ctx context.Cont
 	if s == nil {
 		return nil, fmt.Errorf("agent control agent registry store is not initialized")
 	}
-	if skip, err := s.ensureForRead(); err != nil {
+	db, skip, err := s.dbHandleForRead()
+	if err != nil {
 		return nil, err
-	} else if skip {
+	}
+	if skip {
 		return nil, nil
 	}
 	filter = filter.Normalize()
@@ -555,7 +598,7 @@ func (s *SQLiteGlobalAgentRegistryStore) ListAgentControlAgents(ctx context.Cont
 		query += " LIMIT ?"
 		args = append(args, filter.Limit)
 	}
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list agent control agents: %w", err)
 	}
@@ -774,7 +817,8 @@ func (s *SQLiteGlobalAgentRegistryStore) markAgentControlAgentSubtreeTerminal(ct
 	if s == nil {
 		return 0, fmt.Errorf("agent control agent registry store is not initialized")
 	}
-	if err := s.ensure(); err != nil {
+	db, err := s.dbHandle()
+	if err != nil {
 		return 0, err
 	}
 	rootSessionID = strings.TrimSpace(rootSessionID)
@@ -788,7 +832,7 @@ func (s *SQLiteGlobalAgentRegistryStore) markAgentControlAgentSubtreeTerminal(ct
 	if terminalAt.IsZero() {
 		terminalAt = time.Now().UTC()
 	}
-	result, err := s.db.ExecContext(ctx, `
+	result, err := db.ExecContext(ctx, `
 		UPDATE agent_control_agents
 		SET status = ?, closed_at = ?, updated_at = ?
 		WHERE root_session_id = ?
@@ -877,13 +921,14 @@ func (s *SQLiteGlobalAgentRegistryStore) PurgeAgentControlTerminalAgents(ctx con
 	if s == nil {
 		return 0, fmt.Errorf("agent control agent registry store is not initialized")
 	}
-	if err := s.ensure(); err != nil {
+	db, err := s.dbHandle()
+	if err != nil {
 		return 0, err
 	}
 	if limit <= 0 {
 		limit = terminalPurgeBatch
 	}
-	result, err := s.db.ExecContext(ctx, purgeTerminalAgentsSQL, formatAgentTime(closedBefore), formatAgentTime(closedBefore), limit)
+	result, err := db.ExecContext(ctx, purgeTerminalAgentsSQL, formatAgentTime(closedBefore), formatAgentTime(closedBefore), limit)
 	if err != nil {
 		return 0, fmt.Errorf("purge terminal agent control agents: %w", err)
 	}
@@ -903,13 +948,14 @@ func (s *SQLiteGlobalAgentRegistryStore) PurgeAgentControlAgentWakeEvents(ctx co
 	if s == nil {
 		return 0, fmt.Errorf("agent control agent registry store is not initialized")
 	}
-	if err := s.ensure(); err != nil {
+	db, err := s.dbHandle()
+	if err != nil {
 		return 0, err
 	}
 	if limit <= 0 {
 		limit = terminalPurgeBatch
 	}
-	result, err := s.db.ExecContext(ctx, purgeAgentWakeEventsSQL, formatAgentTime(createdBefore), formatAgentTime(createdBefore), limit)
+	result, err := db.ExecContext(ctx, purgeAgentWakeEventsSQL, formatAgentTime(createdBefore), formatAgentTime(createdBefore), limit)
 	if err != nil {
 		return 0, fmt.Errorf("purge agent control agent wake events: %w", err)
 	}
@@ -921,7 +967,11 @@ func (s *SQLiteGlobalAgentRegistryStore) PurgeAgentControlAgentWakeEvents(ctx co
 }
 
 func (s *SQLiteGlobalAgentRegistryStore) getAgentControlAgentByID(ctx context.Context, agentID string) (AgentRecord, error) {
-	row := s.db.QueryRowContext(ctx, `
+	db, err := s.dbHandle()
+	if err != nil {
+		return AgentRecord{}, err
+	}
+	row := db.QueryRowContext(ctx, `
 		SELECT id, agent_id, root_session_id, parent_agent_id, parent_session_id, session_id, agent_path, depth,
 			agent_type, nickname, workflow, team_id, teammate_id, provider, model, reasoning_effort,
 			difficulty, difficulty_source, difficulty_rationale, route_source, route_warnings_json,
@@ -1002,9 +1052,11 @@ func (s *SQLiteGlobalAgentRegistryStore) LastAgentControlAgentWakeSeq(ctx contex
 	if s == nil {
 		return 0, fmt.Errorf("agent control agent registry store is not initialized")
 	}
-	if skip, err := s.ensureForRead(); err != nil {
+	db, skip, err := s.dbHandleForRead()
+	if err != nil {
 		return 0, err
-	} else if skip {
+	}
+	if skip {
 		return 0, nil
 	}
 	filter = filter.Normalize()
@@ -1014,7 +1066,7 @@ func (s *SQLiteGlobalAgentRegistryStore) LastAgentControlAgentWakeSeq(ctx contex
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
 	var seq int64
-	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&seq); err != nil {
+	if err := db.QueryRowContext(ctx, query, args...).Scan(&seq); err != nil {
 		return 0, fmt.Errorf("last agent control agent wake sequence: %w", err)
 	}
 	return seq, nil
@@ -1024,14 +1076,15 @@ func (s *SQLiteGlobalAgentRegistryStore) appendAgentWakeEvent(ctx context.Contex
 	if s == nil {
 		return AgentWakeEvent{}, fmt.Errorf("agent control agent registry store is not initialized")
 	}
-	if err := s.ensure(); err != nil {
+	db, err := s.dbHandle()
+	if err != nil {
 		return AgentWakeEvent{}, err
 	}
 	event := agentRecordWakeEvent(record, eventKind)
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now().UTC()
 	}
-	result, err := s.db.ExecContext(ctx, `
+	result, err := db.ExecContext(ctx, `
 		INSERT INTO agent_control_agent_wake_events (
 			agent_row_id, agent_id, root_session_id, parent_agent_id, parent_session_id,
 			session_id, agent_path, depth, agent_type, workflow, team_id, teammate_id,

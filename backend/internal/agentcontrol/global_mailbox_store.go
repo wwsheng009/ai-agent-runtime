@@ -197,6 +197,45 @@ func (s *SQLiteGlobalMailboxRegistryStore) ensureForRead() (skipEmpty bool, err 
 	return true, nil
 }
 
+// liveDBHandle reads the open database handle under the same lock Close takes.
+// Callers must hold the returned handle in a local variable for the duration of
+// one operation: a Close racing the store then either loses the race (the
+// handle stays usable until database/sql reports "database is closed") or wins
+// it and the operation fails with a plain error instead of dereferencing a nil
+// *sql.DB. Reading s.db after ensure() without this accessor is a data race.
+func (s *SQLiteGlobalMailboxRegistryStore) liveDBHandle() (*sql.DB, error) {
+	s.openMu.RLock()
+	defer s.openMu.RUnlock()
+	if s.db == nil {
+		if s.closed {
+			return nil, fmt.Errorf("agent control mailbox registry store is closed")
+		}
+		return nil, fmt.Errorf("agent control mailbox registry store is not initialized")
+	}
+	return s.db, nil
+}
+
+// dbHandle opens the store on demand and returns one handle for the operation
+// about to run.
+func (s *SQLiteGlobalMailboxRegistryStore) dbHandle() (*sql.DB, error) {
+	if err := s.ensure(); err != nil {
+		return nil, err
+	}
+	return s.liveDBHandle()
+}
+
+// dbHandleForRead is the read-path variant of dbHandle: a store that was never
+// opened and has no durable file reports skip=true instead of materializing an
+// empty database just to read nothing from it.
+func (s *SQLiteGlobalMailboxRegistryStore) dbHandleForRead() (db *sql.DB, skip bool, err error) {
+	skip, err = s.ensureForRead()
+	if err != nil || skip {
+		return nil, skip, err
+	}
+	db, err = s.liveDBHandle()
+	return db, false, err
+}
+
 // Close closes the underlying database if it was opened and owned.
 func (s *SQLiteGlobalMailboxRegistryStore) Close() error {
 	if s == nil {
@@ -239,7 +278,8 @@ func (s *SQLiteGlobalMailboxRegistryStore) AppendGlobalMailboxRecord(ctx context
 	if s == nil {
 		return 0, fmt.Errorf("agent control mailbox registry store is not initialized")
 	}
-	if err := s.ensure(); err != nil {
+	db, err := s.dbHandle()
+	if err != nil {
 		return 0, err
 	}
 	record = record.Normalize()
@@ -278,7 +318,7 @@ func (s *SQLiteGlobalMailboxRegistryStore) AppendGlobalMailboxRecord(ctx context
 	if err != nil {
 		return 0, err
 	}
-	result, err := s.db.ExecContext(ctx, `
+	result, err := db.ExecContext(ctx, `
 		INSERT INTO agent_control_global_mailbox_records (
 			source, source_scope, source_id, source_seq, workflow, scope, session_id, session_mailbox_seq,
 			team_id, team_seq, message_id, from_agent, to_agent, task_id, kind, body, metadata_json,
@@ -299,7 +339,7 @@ func (s *SQLiteGlobalMailboxRegistryStore) AppendGlobalMailboxRecord(ctx context
 	}
 	created := rowsAffected > 0
 	if !created {
-		_, err = s.db.ExecContext(ctx, `
+		_, err = db.ExecContext(ctx, `
 			UPDATE agent_control_global_mailbox_records SET
 				workflow = ?,
 				scope = ?,
@@ -328,7 +368,7 @@ func (s *SQLiteGlobalMailboxRegistryStore) AppendGlobalMailboxRecord(ctx context
 		}
 	}
 	var seq int64
-	err = s.db.QueryRowContext(ctx, `
+	err = db.QueryRowContext(ctx, `
 		SELECT id
 		FROM agent_control_global_mailbox_records
 		WHERE source = ? AND source_scope = ? AND source_id = ? AND source_seq = ?
@@ -356,10 +396,11 @@ func (s *SQLiteGlobalMailboxRegistryStore) AppendPrimaryGlobalMailboxRecord(ctx 
 	if s == nil {
 		return MailboxRecord{}, fmt.Errorf("agent control mailbox registry store is not initialized")
 	}
-	if err := s.ensure(); err != nil {
+	db, err := s.dbHandle()
+	if err != nil {
 		return MailboxRecord{}, err
 	}
-	appended, created, err := appendPrimaryGlobalMailboxRecordSQL(ctx, s.db, "", record)
+	appended, created, err := appendPrimaryGlobalMailboxRecordSQL(ctx, db, "", record)
 	if err != nil {
 		return MailboxRecord{}, err
 	}
@@ -553,9 +594,11 @@ func (s *SQLiteGlobalMailboxRegistryStore) ListAgentControlMailboxRecords(ctx co
 	if s == nil {
 		return nil, fmt.Errorf("agent control mailbox registry store is not initialized")
 	}
-	if skip, err := s.ensureForRead(); err != nil {
+	db, skip, err := s.dbHandleForRead()
+	if err != nil {
 		return nil, err
-	} else if skip {
+	}
+	if skip {
 		return nil, nil
 	}
 	filter = filter.Normalize()
@@ -588,7 +631,7 @@ func (s *SQLiteGlobalMailboxRegistryStore) ListAgentControlMailboxRecords(ctx co
 		query += " LIMIT ?"
 		args = append(args, filter.Limit)
 	}
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list global mailbox records: %w", err)
 	}
@@ -613,9 +656,11 @@ func (s *SQLiteGlobalMailboxRegistryStore) LastAgentControlMailboxRecordSeq(ctx 
 	if s == nil {
 		return 0, fmt.Errorf("agent control mailbox registry store is not initialized")
 	}
-	if skip, err := s.ensureForRead(); err != nil {
+	db, skip, err := s.dbHandleForRead()
+	if err != nil {
 		return 0, err
-	} else if skip {
+	}
+	if skip {
 		return 0, nil
 	}
 	filter = filter.Normalize()
@@ -642,7 +687,7 @@ func (s *SQLiteGlobalMailboxRegistryStore) LastAgentControlMailboxRecordSeq(ctx 
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
 	var seq int64
-	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&seq); err != nil {
+	if err := db.QueryRowContext(ctx, query, args...).Scan(&seq); err != nil {
 		return 0, fmt.Errorf("last global mailbox record sequence: %w", err)
 	}
 	return seq, nil
@@ -652,7 +697,11 @@ func (s *SQLiteGlobalMailboxRegistryStore) getGlobalMailboxRecord(ctx context.Co
 	if seq <= 0 {
 		return MailboxRecord{}, fmt.Errorf("global mailbox sequence is required")
 	}
-	return getGlobalMailboxRecordSQL(ctx, s.db, "agent_control_global_mailbox_records", seq)
+	db, err := s.dbHandle()
+	if err != nil {
+		return MailboxRecord{}, err
+	}
+	return getGlobalMailboxRecordSQL(ctx, db, "agent_control_global_mailbox_records", seq)
 }
 
 func getGlobalMailboxRecordSQL(ctx context.Context, runner globalMailboxSQLRunner, tableName string, seq int64) (MailboxRecord, error) {
@@ -677,7 +726,11 @@ func (s *SQLiteGlobalMailboxRegistryStore) getGlobalMailboxRecordByPrimaryKey(ct
 	if primaryKey == "" {
 		return MailboxRecord{}, fmt.Errorf("global mailbox primary key is required")
 	}
-	return getGlobalMailboxRecordByPrimaryKeySQL(ctx, s.db, "agent_control_global_mailbox_records", primaryKey)
+	db, err := s.dbHandle()
+	if err != nil {
+		return MailboxRecord{}, err
+	}
+	return getGlobalMailboxRecordByPrimaryKeySQL(ctx, db, "agent_control_global_mailbox_records", primaryKey)
 }
 
 func getGlobalMailboxRecordByPrimaryKeySQL(ctx context.Context, runner globalMailboxSQLRunner, tableName string, primaryKey string) (MailboxRecord, error) {
@@ -747,9 +800,11 @@ func (s *SQLiteGlobalMailboxRegistryStore) LastAgentControlMailboxWakeSeq(ctx co
 	if s == nil {
 		return 0, fmt.Errorf("agent control mailbox registry store is not initialized")
 	}
-	if skip, err := s.ensureForRead(); err != nil {
+	db, skip, err := s.dbHandleForRead()
+	if err != nil {
 		return 0, err
-	} else if skip {
+	}
+	if skip {
 		return 0, nil
 	}
 	filter = filter.Normalize()
@@ -772,7 +827,7 @@ func (s *SQLiteGlobalMailboxRegistryStore) LastAgentControlMailboxWakeSeq(ctx co
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
 	var seq int64
-	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&seq); err != nil {
+	if err := db.QueryRowContext(ctx, query, args...).Scan(&seq); err != nil {
 		return 0, fmt.Errorf("last global mailbox wake sequence: %w", err)
 	}
 	return seq, nil

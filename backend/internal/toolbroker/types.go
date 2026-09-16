@@ -711,13 +711,43 @@ type AgentMessageResult struct {
 	Status          *AgentStatusResult `json:"status,omitempty"`
 }
 
+// Approval resolutions reported on AgentApprovalResult.Resolution. They mirror
+// the chat approval_resolved event so both hosts describe one decision the same
+// way (P0-3/P1-1).
+const (
+	ApprovalResolutionAllowed             = "allowed"
+	ApprovalResolutionDenied              = "denied"
+	ApprovalResolutionExpired             = "expired"
+	ApprovalResolutionRunTerminated       = "run_terminated"
+	ApprovalResolutionRunTerminalNoResume = "run_terminal_no_resume"
+)
+
+// ApprovalResolutionNotApplied reports whether a resolution describes a decision
+// that was recorded but never applied to the child run, because that run had
+// already terminated. Hosts must report those decisions as not allowed and as
+// not resumed (P0-3).
+func ApprovalResolutionNotApplied(resolution string) bool {
+	switch strings.TrimSpace(resolution) {
+	case ApprovalResolutionRunTerminated, ApprovalResolutionRunTerminalNoResume:
+		return true
+	default:
+		return false
+	}
+}
+
 // AgentApprovalResult reports the resolved child-agent tool approval.
 type AgentApprovalResult struct {
-	SessionID string             `json:"session_id"`
-	RequestID string             `json:"request_id"`
-	Allowed   bool               `json:"allowed"`
-	Resolved  bool               `json:"resolved"`
-	Status    *AgentStatusResult `json:"status,omitempty"`
+	SessionID string `json:"session_id"`
+	RequestID string `json:"request_id"`
+	Allowed   bool   `json:"allowed"`
+	Resolved  bool   `json:"resolved"`
+	// Resumed reports whether a recovery run was started to apply the decision.
+	// Resolution=run_terminal_no_resume with Resumed=false means the child run had
+	// already ended (execution deadline / external cancel) and was not restarted:
+	// the decision is recorded, no work continues.
+	Resumed    bool               `json:"resumed"`
+	Resolution string             `json:"resolution,omitempty"`
+	Status     *AgentStatusResult `json:"status,omitempty"`
 }
 
 // ReadAgentEventsArgs reads child-agent runtime events, or parent mailbox/collab

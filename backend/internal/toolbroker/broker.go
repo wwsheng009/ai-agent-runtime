@@ -31,34 +31,35 @@ import (
 )
 
 const (
-	ToolAskUserQuestion      = "ask_user_question"
-	ToolEnterPlanMode        = "enter_plan_mode"
-	ToolExitPlanMode         = "exit_plan_mode"
-	ToolBackgroundTask       = "background_task"
-	ToolTaskOutput           = "task_output"
-	ToolSpawnAgent           = "spawn_agent"
-	ToolListAgents           = "list_agents"
-	ToolSendMessage          = "send_message"
-	ToolFollowupTask         = "followup_task"
-	ToolSendInput            = "send_input"
-	ToolResolveAgentApproval = "resolve_agent_approval"
-	ToolWaitAgent            = "wait_agent"
-	ToolReadAgentEvents      = "read_agent_events"
-	ToolCloseAgent           = "close_agent"
-	ToolResumeAgent          = "resume_agent"
-	ToolApplyAgentWorktree   = "apply_agent_worktree"
-	ToolDiscardAgentWorktree = "discard_agent_worktree"
-	ToolSpawnTeam            = "spawn_team"
-	ToolWaitTeam             = "wait_team"
-	ToolSendTeamMessage      = "send_team_message"
-	ToolReadMailboxDigest    = "read_mailbox_digest"
-	ToolReadTaskSpec         = "read_task_spec"
-	ToolReadTaskContext      = "read_task_context"
-	ToolReportTaskOutcome    = "report_task_outcome"
-	ToolBlockCurrentTask     = "block_current_task"
-	ToolSupervisionSnapshot  = "supervision_snapshot"
-	ToolAckLifecycle         = "ack_lifecycle"
-	ToolControlDescendant    = "control_descendant"
+	ToolAskUserQuestion        = "ask_user_question"
+	ToolEnterPlanMode          = "enter_plan_mode"
+	ToolExitPlanMode           = "exit_plan_mode"
+	ToolBackgroundTask         = "background_task"
+	ToolTaskOutput             = "task_output"
+	ToolSpawnAgent             = "spawn_agent"
+	ToolListAgents             = "list_agents"
+	ToolSendMessage            = "send_message"
+	ToolFollowupTask           = "followup_task"
+	ToolSendInput              = "send_input"
+	ToolResolveAgentApproval   = "resolve_agent_approval"
+	ToolWaitAgent              = "wait_agent"
+	ToolReadAgentEvents        = "read_agent_events"
+	ToolCloseAgent             = "close_agent"
+	ToolResumeAgent            = "resume_agent"
+	ToolApplyAgentWorktree     = "apply_agent_worktree"
+	ToolDiscardAgentWorktree   = "discard_agent_worktree"
+	ToolSpawnTeam              = "spawn_team"
+	ToolWaitTeam               = "wait_team"
+	ToolSendTeamMessage        = "send_team_message"
+	ToolReadMailboxDigest      = "read_mailbox_digest"
+	ToolReadTaskSpec           = "read_task_spec"
+	ToolReadTaskContext        = "read_task_context"
+	ToolReportTaskOutcome      = "report_task_outcome"
+	ToolBlockCurrentTask       = "block_current_task"
+	ToolSupervisionSnapshot    = "supervision_snapshot"
+	ToolSupervisionDescendants = "supervision_descendants"
+	ToolAckLifecycle           = "ack_lifecycle"
+	ToolControlDescendant      = "control_descendant"
 )
 
 // Broker provides synthetic tools backed by runtime services.
@@ -78,9 +79,10 @@ type Broker struct {
 	// sessions (P3). Optional: nil keeps spawn behavior unchanged.
 	ExecutionSupervisor *supervision.ExecutionSupervisor
 	// Supervision is the host-side control-plane capability behind
-	// supervision_snapshot / ack_lifecycle / control_descendant (P2-12 方案 3).
-	// Optional: nil keeps those tools out of Definitions() entirely, so a host
-	// without durable supervision never advertises a tool it cannot serve.
+	// supervision_snapshot / supervision_descendants / ack_lifecycle /
+	// control_descendant (P2-12 方案 3). Optional: nil keeps those tools out of
+	// Definitions() entirely, so a host without durable supervision never
+	// advertises a tool it cannot serve.
 	// WaitTimeoutPolicy optionally supplies the operator's wait-window policy
 	// (agents.defaultWaitTimeoutMs / minWaitTimeoutMs / maxWaitTimeoutMs /
 	// waitTimeoutMode) for wait_team, which resolves its window inside the
@@ -149,7 +151,7 @@ func withBrokerSourceDefinitions(definitions []types.ToolDefinition) []types.Too
 
 func isVolatileEmptyReplayTool(name string) bool {
 	switch normalizeToolName(name) {
-	case ToolTaskOutput, ToolListAgents, ToolWaitAgent, ToolReadAgentEvents, ToolWaitTeam, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolSupervisionSnapshot:
+	case ToolTaskOutput, ToolListAgents, ToolWaitAgent, ToolReadAgentEvents, ToolWaitTeam, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolSupervisionSnapshot, ToolSupervisionDescendants:
 		return true
 	default:
 		return false
@@ -159,7 +161,7 @@ func isVolatileEmptyReplayTool(name string) bool {
 // IsBrokerTool returns true if the tool is handled by the broker.
 func (b *Broker) IsBrokerTool(name string) bool {
 	switch normalizeToolName(name) {
-	case ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolBackgroundTask, ToolTaskOutput, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask, ToolSupervisionSnapshot, ToolAckLifecycle, ToolControlDescendant:
+	case ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolBackgroundTask, ToolTaskOutput, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolAckLifecycle, ToolControlDescendant:
 		return true
 	default:
 		return false
@@ -337,7 +339,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"model":                  map[string]interface{}{"type": "string", "description": "Optional model hint stored on the child session."},
 						"reasoning_effort":       map[string]interface{}{"type": "string", "description": "Optional reasoning effort hint for the child session."},
 						"thinking_effort":        map[string]interface{}{"type": "string", "description": "Compatibility alias for reasoning_effort."},
-						"permission_mode":        map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions"}, "description": "Optional permission mode for the child agent run. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval."},
+						"permission_mode":        map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions"}, "description": "Optional permission mode for the child agent run. Omit it to inherit the parent session's mode. A parent session pinned to bypass_permissions or plan keeps its mode: requests that would re-introduce approval prompts (or delegate writes away from plan) are pinned back to the parent mode and reported in route_warnings. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval."},
 						"completion_requirement": map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Optional child completion contract. Ordinary spawn_agent sessions only support none; use spawn_team for complete_task Team workers."},
 						"completionRequirement":  map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Compatibility alias for completion_requirement. Ordinary children only support none."},
 						"isolation":              map[string]interface{}{"type": "string", "enum": []string{"none", "worktree"}, "description": "Optional workspace isolation for the child. worktree creates a dedicated git worktree under .aicli/agent-worktrees; fails closed with no main-tree fallback."},
@@ -514,7 +516,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"model":                  map[string]interface{}{"type": "string", "description": "Optional model hint stored on the child session."},
 						"reasoning_effort":       map[string]interface{}{"type": "string", "description": "Optional reasoning effort hint for the child session."},
 						"thinking_effort":        map[string]interface{}{"type": "string", "description": "Compatibility alias for reasoning_effort."},
-						"permission_mode":        map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions"}, "description": "Optional permission mode for the child agent run. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval."},
+						"permission_mode":        map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions"}, "description": "Optional permission mode for the child agent run. Omit it to inherit the parent session's mode. A parent session pinned to bypass_permissions or plan keeps its mode: requests that would re-introduce approval prompts (or delegate writes away from plan) are pinned back to the parent mode and reported in route_warnings. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval."},
 						"completion_requirement": map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Optional child completion contract. Ordinary spawn_agent sessions only support none; use spawn_team for complete_task Team workers."},
 						"completionRequirement":  map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Compatibility alias for completion_requirement. Ordinary children only support none."},
 						"isolation":              map[string]interface{}{"type": "string", "enum": []string{"none", "worktree"}, "description": "Optional workspace isolation for the child. worktree creates a dedicated git worktree under .aicli/agent-worktrees; fails closed with no main-tree fallback."},
@@ -1513,13 +1515,15 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if request.ReadOnly && !permissionModeExplicit {
 			request.PermissionMode = string(runtimepolicy.ModePlan)
 		}
-		if strings.TrimSpace(request.PermissionMode) == "" {
-			if runMeta, ok := team.GetRunMeta(ctx); ok && runMeta != nil {
-				if permissionMode, err := normalizeSpawnAgentPermissionMode(runMeta.PermissionMode); err == nil {
-					request.PermissionMode = permissionMode
-				}
-			}
+		// The parent run's permission mode is the session-level policy for the
+		// whole session tree: an omitted child mode inherits it, and a child may
+		// not silently re-introduce approval prompts in a --yolo parent session
+		// (see ResolveSpawnAgentPermissionPolicy).
+		parentPermissionMode := ""
+		if runMeta, ok := team.GetRunMeta(ctx); ok && runMeta != nil {
+			parentPermissionMode = normalizeKnownSpawnAgentPermissionMode(runMeta.PermissionMode)
 		}
+		request = ResolveSpawnAgentPermissionPolicy(request, parentPermissionMode)
 		// completion_requirement belongs to the spawned child and must never be
 		// copied from the parent run's Team task contract.
 		if strings.TrimSpace(request.CompletionRequirement) == "" && strings.TrimSpace(request.AgentType) != "" {
@@ -1538,6 +1542,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if strings.TrimSpace(request.AgentType) != "" {
 			applySpawnAgentAgentdefDefaults(&request, permissionModeExplicit, readOnlyExplicit)
 		}
+		// Agent definitions may narrow the mode (explore -> plan); re-apply the
+		// policy so a session-level pin still wins over the definition.
+		request = ResolveSpawnAgentPermissionPolicy(request, parentPermissionMode)
 		request.EffectivePermissionMode = request.PermissionMode
 		if value, ok := args["fork_context"].(bool); ok {
 			request.ForkContext = &value
@@ -1674,6 +1681,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 					metadata[key] = value
 				}
 			}
+			if len(result.RouteWarnings) > 0 {
+				metadata["route_warnings"] = append([]string(nil), result.RouteWarnings...)
+			}
 		}
 		return aliasedResult, attachCacheSafeSummary(metadata, agentStatusCacheSafeSummary(aliasedResult)), nil
 
@@ -1804,7 +1814,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"queued":        result != nil && result.Queued,
 		}, agentStatusCacheSafeSummary(aliasedResult)), nil
 
-	case ToolSupervisionSnapshot, ToolAckLifecycle, ToolControlDescendant:
+	case ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolAckLifecycle, ToolControlDescendant:
 		return b.executeSupervisionTool(ctx, toolName, sessionID, args)
 
 	case ToolResolveAgentApproval:
@@ -1868,12 +1878,18 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if result != nil && result.Status != nil {
 			status = strings.TrimSpace(result.Status.Status)
 		}
+		resolution := ""
+		if result != nil {
+			resolution = strings.TrimSpace(result.Resolution)
+		}
 		return aliasedResult, attachCacheSafeSummary(map[string]interface{}{
 			"session_id":    actualSessionID,
 			"session_alias": aliasedSessionID,
 			"request_id":    request.RequestID,
 			"allowed":       result != nil && result.Allowed,
 			"resolved":      result != nil && result.Resolved,
+			"resumed":       result != nil && result.Resumed,
+			"resolution":    resolution,
 			"status":        status,
 		}, agentApprovalCacheSafeSummary(aliasedResult)), nil
 
@@ -3342,6 +3358,8 @@ func normalizeToolName(name string) string {
 		return ToolBlockCurrentTask
 	case "supervisionsnapshot":
 		return ToolSupervisionSnapshot
+	case "supervisiondescendants":
+		return ToolSupervisionDescendants
 	case "acklifecycle":
 		return ToolAckLifecycle
 	case "controldescendant":

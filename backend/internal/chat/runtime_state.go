@@ -83,9 +83,16 @@ type RuntimeState struct {
 	PendingTool                  *PendingToolInvocation `json:"pending_tool,omitempty"`
 	PendingApproval              *ApprovalRequest       `json:"pending_approval,omitempty"`
 	PendingQuestion              *UserQuestionRequest   `json:"pending_question,omitempty"`
-	HeadOffset                   int64                  `json:"head_offset"`
-	ActiveJobIDs                 []string               `json:"active_job_ids,omitempty"`
-	UpdatedAt                    time.Time              `json:"updated_at"`
+	// LastRunTerminalReason records why the most recent run ended in a terminal
+	// cancellation class (run_timeout/deadline/execution_context/parent_*). It is
+	// set while the run tail converges the terminal state and cleared when the
+	// next run starts. A pending approval that survived such a run must never
+	// resume it: the deadline already fired (see
+	// docs/plan/supervision-approval-resume-past-deadline-fix-plan.md).
+	LastRunTerminalReason string    `json:"last_run_terminal_reason,omitempty"`
+	HeadOffset            int64     `json:"head_offset"`
+	ActiveJobIDs          []string  `json:"active_job_ids,omitempty"`
+	UpdatedAt             time.Time `json:"updated_at"`
 }
 
 // RuntimeStateSummary is the allocation-free projection used by status polls.

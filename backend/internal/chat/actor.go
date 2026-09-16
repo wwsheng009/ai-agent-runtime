@@ -45,10 +45,35 @@ var ErrSessionBusy = errors.New("session is busy")
 
 var errSessionRunSuperseded = errors.New("session run was superseded")
 
+// errSessionRunTerminal refuses to resume pending work whose run already ended in
+// a terminal cancellation class (execution deadline / external cancel). The
+// durable state is left untouched: callers must not restart the run
+// (docs/plan/supervision-approval-resume-past-deadline-fix-plan.md, P0-2).
+var errSessionRunTerminal = errors.New("session run already terminated")
+
+// Approval resolutions reported on the approval_resolved event and on
+// toolbroker.AgentApprovalResult.Resolution (see P0-3/P1-1). toolbroker owns the
+// literals so the event contract and the tool contract cannot drift.
+const (
+	ApprovalResolutionAllowed             = toolbroker.ApprovalResolutionAllowed
+	ApprovalResolutionDenied              = toolbroker.ApprovalResolutionDenied
+	ApprovalResolutionExpired             = toolbroker.ApprovalResolutionExpired
+	ApprovalResolutionRunTerminated       = toolbroker.ApprovalResolutionRunTerminated
+	ApprovalResolutionRunTerminalNoResume = toolbroker.ApprovalResolutionRunTerminalNoResume
+)
+
 type approvalDetachContextKey struct{}
 
 type approvalDetachState struct {
 	detached atomic.Bool
+}
+
+// approvalOutcome records how the most recent approval decision was applied so
+// hosts can report it without re-deriving the decision (P0-3/P1-1).
+type approvalOutcome struct {
+	requestID  string
+	resolution string
+	resumed    bool
 }
 
 type sessionRunControlContextKey struct{}
@@ -111,6 +136,12 @@ type SessionActorConfig struct {
 	// checkpoint，实际写入按该间隔节流。0 使用 DefaultSessionCheckpointInterval；
 	// 负数禁用中途落库（turn 结束的 post-turn sync 仍照常落库）。
 	CheckpointInterval time.Duration
+	// ApprovalTerminalGuard 是「run 终态后到达的审批决议零恢复」守卫的灰度
+	// 开关（docs/plan/supervision-approval-resume-past-deadline-fix-plan.md §8）。
+	// nil 与 true 均为启用（默认开）；显式 false 让决策点、恢复入口与终态
+	// 收尾回退到引入守卫前的行为。宿主从 supervision.approval_terminal_guard
+	// 透传（supervision.Config.ApprovalTerminalGuard）。
+	ApprovalTerminalGuard *bool
 }
 
 // SessionActor serializes session commands and manages execution state.
@@ -126,6 +157,9 @@ type SessionActor struct {
 	prepareRun   func(context.Context, *Session, bool) error
 	persistHook  func(context.Context, *Session) (*Session, error)
 	recoverStale bool
+	// terminalGuard 解析自 SessionActorConfig.ApprovalTerminalGuard，默认 true
+	// （见该字段注释）。
+	terminalGuard bool
 	// runStallTimeout / onRunStalled mirror SessionActorConfig; see there.
 	runStallTimeout time.Duration
 	onRunStalled    func(turnID string)
@@ -156,7 +190,9 @@ type SessionActor struct {
 	waiterMu        sync.Mutex
 	approvalWaiters map[string]chan runtimepolicy.ApprovalResponse
 	questionWaiters map[string]chan string
-	activeRunWG     sync.WaitGroup
+	// lastApprovalOutcome is guarded by waiterMu.
+	lastApprovalOutcome approvalOutcome
+	activeRunWG         sync.WaitGroup
 }
 
 // NewSessionActor creates a new session actor.
@@ -205,6 +241,7 @@ func NewSessionActor(sessionID string, cfg SessionActorConfig) (*SessionActor, e
 		prepareRun:         cfg.PrepareRun,
 		persistHook:        cfg.PersistHook,
 		recoverStale:       cfg.RecoverStale,
+		terminalGuard:      cfg.ApprovalTerminalGuard == nil || *cfg.ApprovalTerminalGuard,
 		onStop:             cfg.OnStop,
 		runStallTimeout:    cfg.RunStallTimeout,
 		onRunStalled:       cfg.OnRunStalled,
@@ -838,6 +875,8 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 		state.CurrentTurnID = turnID
 		state.CurrentRunMeta = cmd.RunMeta.Clone()
 		resetFrozenTurnTools(state)
+		// A new run invalidates the previous run's terminal marker (P0-1).
+		state.LastRunTerminalReason = ""
 		state.UpdatedAt = time.Now().UTC()
 		return nil
 	}); err != nil {
@@ -876,6 +915,8 @@ func (a *SessionActor) handleContinueSession(cmd ContinueSession) {
 		state.CurrentTurnID = turnID
 		state.CurrentRunMeta = cmd.RunMeta.Clone()
 		resetFrozenTurnTools(state)
+		// A new run invalidates the previous run's terminal marker (P0-1).
+		state.LastRunTerminalReason = ""
 		state.UpdatedAt = time.Now().UTC()
 		return nil
 	}); err != nil {
@@ -905,11 +946,51 @@ func (a *SessionActor) handleApproveTool(cmd ApproveTool) {
 	}
 	// 幂等：审批已被其它入口（如 web client）处理过，不再报错。
 	if state.PendingApproval == nil {
+		// P0-3: after a restart the retirement is visible only through durable
+		// state. A terminal-run marker with no pending approval means the
+		// decision died with its run, so report it as recorded-but-not-applied
+		// instead of implying it was honoured.
+		if reason := strings.TrimSpace(state.LastRunTerminalReason); a.terminalGuard && reason != "" && !a.hasApprovalWaiter(cmd.RequestID) {
+			if recorded, _ := a.ApprovalOutcome(cmd.RequestID); recorded == "" {
+				a.recordApprovalOutcome(cmd.RequestID, ApprovalResolutionRunTerminalNoResume, false)
+			}
+		}
 		cmd.Reply <- nil
 		return
 	}
 	if state.PendingApproval.ID != cmd.RequestID {
 		cmd.Reply <- fmt.Errorf("approval request not found")
+		return
+	}
+	// P0-1: the run already ended in a terminal cancellation class, so this
+	// decision must not restart it. Report the outcome, retire the stale pending
+	// approval durably, and never resume.
+	if reason, terminal := a.pendingApprovalRunTerminal(state, cmd.RequestID); terminal {
+		a.resolveApproval(cmd.RequestID, runtimepolicy.ApprovalResponse{
+			Allowed: false,
+			Reason:  ApprovalResolutionRunTerminalNoResume,
+		})
+		if err := a.updateState(ctx, func(runtimeState *RuntimeState) error {
+			if runtimeState.PendingApproval != nil && runtimeState.PendingApproval.ID == cmd.RequestID {
+				runtimeState.PendingApproval = nil
+				runtimeState.PendingTool = nil
+			}
+			if strings.TrimSpace(runtimeState.CurrentTurnID) == "" {
+				runtimeState.Status = SessionStopped
+			}
+			runtimeState.UpdatedAt = time.Now().UTC()
+			return nil
+		}); err != nil {
+			cmd.Reply <- err
+			return
+		}
+		payload := approvalResolvedEventPayload(state, cmd.RequestID, cmd.Allow)
+		payload["resolution"] = ApprovalResolutionRunTerminalNoResume
+		payload["resumed"] = false
+		payload["run_terminal_reason"] = reason
+		a.publish(runtimeevents.Event{Type: EventApprovalResolved, SessionID: a.id, Payload: payload})
+		a.recordApprovalOutcome(cmd.RequestID, ApprovalResolutionRunTerminalNoResume, false)
+		cmd.Reply <- nil
 		return
 	}
 	if approvalRequestExpired(state.PendingApproval, time.Now().UTC()) {
@@ -934,16 +1015,20 @@ func (a *SessionActor) handleApproveTool(cmd ApproveTool) {
 			return
 		}
 		payload := approvalResolvedEventPayload(state, cmd.RequestID, false)
-		payload["resolution"] = "expired"
+		payload["resolution"] = ApprovalResolutionExpired
+		payload["resumed"] = false
 		payload["error_code"] = string(runtimeerrors.ErrApprovalExpired)
 		a.publish(runtimeevents.Event{Type: EventApprovalResolved, SessionID: a.id, Payload: payload})
+		a.recordApprovalOutcome(cmd.RequestID, ApprovalResolutionExpired, false)
 		cmd.Reply <- expiryErr
 		return
 	}
+	resumed := false
 	if a.resolveApproval(cmd.RequestID, runtimepolicy.ApprovalResponse{
 		Allowed:     cmd.Allow,
 		PatchedArgs: cmd.PatchedArgs,
 	}) {
+		// A blocked run picked the decision up in place: nothing is restarted.
 		if err := a.updateState(ctx, func(state *RuntimeState) error {
 			if state.PendingApproval == nil || state.PendingApproval.ID != cmd.RequestID {
 				return fmt.Errorf("approval request not found")
@@ -962,16 +1047,26 @@ func (a *SessionActor) handleApproveTool(cmd ApproveTool) {
 			cmd.Reply <- err
 			return
 		}
+		resumed = true
 	} else {
 		if err := a.resumeApprovedPendingTool(ctx, state, cmd.PatchedArgs); err != nil {
 			cmd.Reply <- err
 			return
 		}
+		resumed = true
 	}
+	resolution := ApprovalResolutionDenied
+	if cmd.Allow {
+		resolution = ApprovalResolutionAllowed
+	}
+	payload := approvalResolvedEventPayload(state, cmd.RequestID, cmd.Allow)
+	payload["resolution"] = resolution
+	payload["resumed"] = resumed
+	a.recordApprovalOutcome(cmd.RequestID, resolution, resumed)
 	a.publish(runtimeevents.Event{
 		Type:      EventApprovalResolved,
 		SessionID: a.id,
-		Payload:   approvalResolvedEventPayload(state, cmd.RequestID, cmd.Allow),
+		Payload:   payload,
 	})
 	cmd.Reply <- nil
 }
@@ -2525,6 +2620,15 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		a.clearSessionRunCancel(run)
 		approvalDetached := approvalDetach.detached.Load()
 		interrupted := run.interrupted.Load()
+		cancelSource := sessionRunCancelSource(ctx, execErr, interrupted, result)
+		// P0-4: a deadline/cancel-class run must not leave a resumable approval
+		// behind. Once the execution deadline fired, a late decision must never
+		// restart the run, so the approval is terminated with the run instead of
+		// being detached across it. A clean completion or an explicit user
+		// interrupt keeps the existing cross-run approval semantics. 灰度关闭
+		// （§8）时本段不生效：审批照旧 detach，保持引入守卫前的跨 run 语义。
+		terminalApproval := approvalDetached && a.terminalGuard && sessionRunTerminalCancelSource(cancelSource)
+		var terminalApprovalEvent map[string]interface{}
 		status := SessionIdle
 		if ctx.Err() != nil || interrupted || errors.Is(execErr, context.Canceled) || errors.Is(execErr, context.DeadlineExceeded) {
 			status = SessionStopped
@@ -2558,19 +2662,49 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			// this goroutine reaches event dispatch, but the completed turn must
 			// still publish its assistant_message/session_end pair.
 			publishTerminal = a.sessionRunOwned(run)
-			if !approvalDetached && publishTerminal {
+			terminalApproval = terminalApproval && publishTerminal
+			if publishTerminal && (!approvalDetached || terminalApproval) {
+				approvalSnapshot := a.stateWithoutToolSurfaces()
+				applied := false
 				_ = a.updateStateConvergent(context.Background(), func(state *RuntimeState) error {
 					if state.CurrentTurnID != turnID {
 						return nil
 					}
+					applied = true
 					state.Status = status
 					state.CurrentTurnID = ""
 					state.CurrentRunMeta = nil
 					resetFrozenTurnTools(state)
 					state.PendingTool = nil
+					if terminalApproval {
+						// The approval died with the run: no later decision may
+						// revive it (P0-1/P0-4).
+						state.PendingApproval = nil
+					}
+					switch {
+					case !a.terminalGuard:
+						// 灰度关闭（§8）：不写终态标记，并清掉可能残留的旧值。
+						state.LastRunTerminalReason = ""
+					case sessionRunTerminalCancelSource(cancelSource):
+						// Durable terminal marker for the host preflight and the
+						// decision-point guard (P0-1/P0-3).
+						state.LastRunTerminalReason = strings.TrimSpace(cancelSource)
+					case !approvalDetached:
+						state.LastRunTerminalReason = ""
+					}
 					state.UpdatedAt = time.Now().UTC()
 					return nil
 				})
+				if applied && terminalApproval {
+					terminalApprovalEvent = terminalApprovalResolvedEventPayload(approvalSnapshot, cancelSource)
+					if approvalSnapshot != nil && approvalSnapshot.PendingApproval != nil {
+						// The approval was retired here, before the decision
+						// arrived. Record how it ended so hosts still report
+						// the late decision as resolved-but-not-resumed
+						// instead of falling back to an empty outcome (P0-3).
+						a.recordApprovalOutcome(approvalSnapshot.PendingApproval.ID, ApprovalResolutionRunTerminated, false)
+					}
+				}
 			}
 		}
 
@@ -2587,7 +2721,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			"duration": duration,
 			"status":   status,
 		}
-		if cancelSource := sessionRunCancelSource(ctx, execErr, interrupted, result); cancelSource != "" {
+		if cancelSource != "" {
 			payload["cancel_source"] = cancelSource
 		}
 		appendStructuredRunErrorPayload(payload, execErr)
@@ -2670,6 +2804,16 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 				SessionID: a.id,
 				TraceID:   resultTraceID(result, turnID),
 				Payload:   payload,
+			})
+		}
+		// P0-4: a deadline/cancel-class run retires its detached approval here, so
+		// the supervision projector closes the blocked row instead of treating the
+		// later decision as a resumable edge.
+		if publishTerminal && terminalApprovalEvent != nil {
+			a.publish(runtimeevents.Event{
+				Type:      EventApprovalResolved,
+				SessionID: a.id,
+				Payload:   terminalApprovalEvent,
 			})
 		}
 		if !run.abandoned.Load() {
@@ -2966,25 +3110,51 @@ func stopRecoveredRuntimeState(state *RuntimeState) {
 	state.UpdatedAt = time.Now().UTC()
 }
 
+// Cancel sources that describe a run which ended on its own execution deadline or
+// through an external cancel. A pending approval left behind by such a run is not
+// resumable: the deadline already fired, so deciding it later must never restart
+// the run (P0-4). "user_interrupt" is deliberately excluded — that path keeps its
+// existing cross-run approval semantics.
+const (
+	runCancelSourceUserInterrupt    = "user_interrupt"
+	runCancelSourceRunTimeout       = "run_timeout"
+	runCancelSourceDeadline         = "deadline"
+	runCancelSourceExecutionContext = "execution_context"
+	runCancelSourceParentDeadline   = "parent_deadline"
+	runCancelSourceParentContext    = "parent_context"
+)
+
+// sessionRunTerminalCancelSource reports whether a cancel source describes a run
+// that must not be revived by a late approval decision.
+func sessionRunTerminalCancelSource(source string) bool {
+	switch strings.TrimSpace(source) {
+	case runCancelSourceRunTimeout, runCancelSourceDeadline, runCancelSourceExecutionContext,
+		runCancelSourceParentDeadline, runCancelSourceParentContext:
+		return true
+	default:
+		return false
+	}
+}
+
 func sessionRunCancelSource(ctx context.Context, execErr error, interrupted bool, result *agent.Result) string {
 	if interrupted {
-		return "user_interrupt"
+		return runCancelSourceUserInterrupt
 	}
 	if result != nil && result.LimitReason == "run_timeout" {
-		return "run_timeout"
+		return runCancelSourceRunTimeout
 	}
 	if errors.Is(execErr, context.DeadlineExceeded) {
-		return "deadline"
+		return runCancelSourceDeadline
 	}
 	if errors.Is(execErr, context.Canceled) {
-		return "execution_context"
+		return runCancelSourceExecutionContext
 	}
 	if ctx != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return "parent_deadline"
+			return runCancelSourceParentDeadline
 		}
 		if errors.Is(ctx.Err(), context.Canceled) {
-			return "parent_context"
+			return runCancelSourceParentContext
 		}
 	}
 	return ""
@@ -3347,6 +3517,13 @@ func (a *SessionActor) resumePendingBatchAfterCurrentResult(ctx context.Context,
 		ctx = context.Background()
 	}
 	turnID := strings.TrimSpace(state.CurrentTurnID)
+	// P0-2: never restart a run that already ended in a terminal cancellation
+	// class. The durable reason field is the signal; a superseded/foreign run
+	// token is refused by run ownership instead. 灰度关闭（§8）时该断言不生效，
+	// 恢复入口回到引入守卫前的行为。
+	if reason := strings.TrimSpace(state.LastRunTerminalReason); a.terminalGuard && reason != "" {
+		return fmt.Errorf("%w: %s", errSessionRunTerminal, reason)
+	}
 	if turnID == "" {
 		turnID = "turn_" + uuid.NewString()
 	}
@@ -4058,6 +4235,26 @@ func approvalResolvedEventPayload(state *RuntimeState, requestID string, allowed
 	return payload
 }
 
+// terminalApprovalResolvedEventPayload describes an approval that was retired
+// with its run instead of being decided: the run already ended under its
+// execution deadline / an external cancel, so no resume happened (P0-4).
+func terminalApprovalResolvedEventPayload(state *RuntimeState, cancelSource string) map[string]interface{} {
+	if state == nil || state.PendingApproval == nil {
+		return nil
+	}
+	requestID := strings.TrimSpace(state.PendingApproval.ID)
+	if requestID == "" {
+		return nil
+	}
+	payload := approvalResolvedEventPayload(state, requestID, false)
+	payload["resolution"] = ApprovalResolutionRunTerminated
+	payload["resumed"] = false
+	if reason := strings.TrimSpace(cancelSource); reason != "" {
+		payload["run_terminal_reason"] = reason
+	}
+	return payload
+}
+
 func appendApprovalRunMetaPayload(payload map[string]interface{}, state *RuntimeState) {
 	if payload == nil {
 		return
@@ -4228,6 +4425,82 @@ func (a *SessionActor) resolveApproval(requestID string, resp runtimepolicy.Appr
 	default:
 	}
 	return true
+}
+
+// hasApprovalWaiter reports whether this actor still has a run blocked on the
+// approval, i.e. the decision can be applied in place instead of resuming.
+func (a *SessionActor) hasApprovalWaiter(requestID string) bool {
+	if a == nil {
+		return false
+	}
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return false
+	}
+	a.waiterMu.Lock()
+	defer a.waiterMu.Unlock()
+	_, ok := a.approvalWaiters[requestID]
+	return ok
+}
+
+// recordApprovalOutcome stores how the decision for requestID was applied.
+func (a *SessionActor) recordApprovalOutcome(requestID, resolution string, resumed bool) {
+	if a == nil {
+		return
+	}
+	a.waiterMu.Lock()
+	defer a.waiterMu.Unlock()
+	a.lastApprovalOutcome = approvalOutcome{
+		requestID:  strings.TrimSpace(requestID),
+		resolution: strings.TrimSpace(resolution),
+		resumed:    resumed,
+	}
+}
+
+// ApprovalOutcome reports how the most recent decision for requestID was applied
+// (P0-3): resolution is one of the ApprovalResolution* constants and resumed
+// reports whether a recovery run was started to apply it. It returns ("", false)
+// when another entry resolved the request or the decision predates this actor
+// instance, so hosts can fall back to echoing the request.
+func (a *SessionActor) ApprovalOutcome(requestID string) (string, bool) {
+	if a == nil {
+		return "", false
+	}
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return "", false
+	}
+	a.waiterMu.Lock()
+	defer a.waiterMu.Unlock()
+	if strings.TrimSpace(a.lastApprovalOutcome.requestID) != requestID {
+		return "", false
+	}
+	return a.lastApprovalOutcome.resolution, a.lastApprovalOutcome.resumed
+}
+
+// pendingApprovalRunTerminal reports whether the pending approval belongs to a
+// run that already ended in a terminal cancellation class (P0-1). The verdict
+// comes from the durable reason field — never from "no active run" — and a live
+// approval waiter vetoes it: that waiter proves a run is still blocked on this
+// decision, so the normal resume path stays intact. The gray-release switch
+// (SessionActorConfig.ApprovalTerminalGuard, plan §8) turns the whole guard
+// off, restoring the pre-fix resume path.
+func (a *SessionActor) pendingApprovalRunTerminal(state *RuntimeState, requestID string) (string, bool) {
+	if a == nil || state == nil {
+		return "", false
+	}
+	if !a.terminalGuard {
+		// 灰度关闭（§8）：回退到引入守卫前的行为，迟到决议仍走旧恢复路径。
+		return "", false
+	}
+	reason := strings.TrimSpace(state.LastRunTerminalReason)
+	if reason == "" {
+		return "", false
+	}
+	if a.hasApprovalWaiter(requestID) {
+		return "", false
+	}
+	return reason, true
 }
 
 func (a *SessionActor) registerQuestionWaiter(questionID string) chan string {

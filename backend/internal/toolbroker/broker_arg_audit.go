@@ -56,9 +56,10 @@ var brokerToolArgKeys = map[string][]string{
 		"auto_replan", "blocker", "handoff_to", "notify_lead",
 		"summary", "task_id", "task_status", "team_id",
 	},
-	ToolSupervisionSnapshot: {"after_seq", "include_resolved", "limit"},
-	ToolAckLifecycle:        {"notification_id", "decision", "note", "reason", "state", "until", "expected_version"},
-	ToolControlDescendant:   {"notification_id", "action", "reason", "cascade", "expected_version"},
+	ToolSupervisionSnapshot:    {"after_seq", "include_resolved", "limit"},
+	ToolSupervisionDescendants: {"after_seq", "health", "include_terminal", "limit", "mode"},
+	ToolAckLifecycle:           {"notification_id", "decision", "note", "reason", "state", "until", "expected_version"},
+	ToolControlDescendant:      {"notification_id", "action", "reason", "cascade", "expected_version"},
 }
 
 // brokerIgnoredArgHint explains what to use instead of a key the addressed tool

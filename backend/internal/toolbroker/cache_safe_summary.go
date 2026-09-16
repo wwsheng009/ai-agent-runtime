@@ -216,7 +216,14 @@ func agentApprovalCacheSafeSummary(result *AgentApprovalResult) string {
 	if result.Allowed {
 		decision = "approved"
 	}
+	notApplied := ApprovalResolutionNotApplied(result.Resolution)
+	if notApplied {
+		decision = "not applied"
+	}
 	lines := []string{fmt.Sprintf("Child agent %s approval %s.", sessionRef, decision)}
+	if notApplied {
+		lines = append(lines, "The child run had already terminated; the decision was recorded but no work was resumed.")
+	}
 	if requestID := strings.TrimSpace(result.RequestID); requestID != "" {
 		lines = append(lines, "Request: "+requestID)
 	}

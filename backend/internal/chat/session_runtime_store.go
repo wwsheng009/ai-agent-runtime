@@ -1931,7 +1931,7 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 	}
 	row := s.db.QueryRowContext(ctx, `
 		SELECT session_id, status, current_turn_id, current_checkpoint_id, current_run_meta_json, ambient_run_meta_json, stable_tool_surface_json, frozen_turn_tools_json,
-		       pending_tool_json, pending_approval_json, pending_question_json, head_offset, active_job_ids_json, updated_at
+		       pending_tool_json, pending_approval_json, pending_question_json, last_run_terminal_reason, head_offset, active_job_ids_json, updated_at
 		FROM session_runtime_state
 		WHERE session_id = ?
 	`, sessionID)
@@ -1946,6 +1946,7 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 		pendingToolRaw       []byte
 		pendingApprovalRaw   []byte
 		pendingQuestionRaw   []byte
+		lastRunReasonRaw     sql.NullString
 		activeJobsRaw        []byte
 		updatedAtRaw         string
 		currentTurnIDRaw     sql.NullString
@@ -1963,6 +1964,7 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 		&pendingToolRaw,
 		&pendingApprovalRaw,
 		&pendingQuestionRaw,
+		&lastRunReasonRaw,
 		&state.HeadOffset,
 		&activeJobsRaw,
 		&updatedAtRaw,
@@ -2035,6 +2037,9 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 		if err := json.Unmarshal(pendingQuestionRaw, &question); err == nil {
 			state.PendingQuestion = &question
 		}
+	}
+	if lastRunReasonRaw.Valid {
+		state.LastRunTerminalReason = strings.TrimSpace(lastRunReasonRaw.String)
 	}
 	if len(bytes.TrimSpace(activeJobsRaw)) > 0 {
 		_ = json.Unmarshal(activeJobsRaw, &state.ActiveJobIDs)
@@ -2131,8 +2136,8 @@ func (s *SQLiteRuntimeStore) SaveState(ctx context.Context, state *RuntimeState)
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO session_runtime_state (
 			session_id, status, current_turn_id, current_checkpoint_id, current_run_meta_json, ambient_run_meta_json, stable_tool_surface_json,
-			frozen_turn_tools_json, pending_tool_json, pending_approval_json, pending_question_json, head_offset, active_job_ids_json, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			frozen_turn_tools_json, pending_tool_json, pending_approval_json, pending_question_json, last_run_terminal_reason, head_offset, active_job_ids_json, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id) DO UPDATE SET
 			status = excluded.status,
 			current_turn_id = excluded.current_turn_id,
@@ -2144,11 +2149,12 @@ func (s *SQLiteRuntimeStore) SaveState(ctx context.Context, state *RuntimeState)
 			pending_tool_json = excluded.pending_tool_json,
 			pending_approval_json = excluded.pending_approval_json,
 			pending_question_json = excluded.pending_question_json,
+			last_run_terminal_reason = excluded.last_run_terminal_reason,
 			head_offset = excluded.head_offset,
 			active_job_ids_json = excluded.active_job_ids_json,
 			updated_at = excluded.updated_at
 	`, state.SessionID, string(state.Status), nullIfEmpty(state.CurrentTurnID), nullIfEmpty(state.CurrentCheckpointID),
-		nullIfEmptyBytes(currentRunMetaJSON), nullIfEmptyBytes(ambientRunMetaJSON), nullIfEmptyBytes(stableToolSurfaceJSON), nullIfEmptyBytes(frozenTurnToolsJSON), nullIfEmptyBytes(pendingToolJSON), nullIfEmptyBytes(pendingApprovalJSON), nullIfEmptyBytes(pendingQuestionJSON), state.HeadOffset, activeJobsJSON, state.UpdatedAt.Format(time.RFC3339Nano))
+		nullIfEmptyBytes(currentRunMetaJSON), nullIfEmptyBytes(ambientRunMetaJSON), nullIfEmptyBytes(stableToolSurfaceJSON), nullIfEmptyBytes(frozenTurnToolsJSON), nullIfEmptyBytes(pendingToolJSON), nullIfEmptyBytes(pendingApprovalJSON), nullIfEmptyBytes(pendingQuestionJSON), nullIfEmpty(state.LastRunTerminalReason), state.HeadOffset, activeJobsJSON, state.UpdatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("save runtime state: %w", err)
 	}
@@ -4447,6 +4453,13 @@ func (s *SQLiteRuntimeStore) init(ctx context.Context) error {
 				);
 				CREATE INDEX IF NOT EXISTS idx_cache_requests_session_started
 				ON cache_requests(session_id, started_at_unix_nano ASC, llm_request_id ASC);
+			`,
+		},
+		{
+			Version: 21,
+			Name:    "session_runtime_state_last_run_terminal_reason",
+			UpSQL: `
+				ALTER TABLE session_runtime_state ADD COLUMN last_run_terminal_reason TEXT;
 			`,
 		},
 	}
