@@ -21,6 +21,10 @@ type Config struct {
 	// DigestMaxChars 限制 digest 文本预算，避免撑爆父上下文。
 	// 0 使用默认 4000。
 	DigestMaxChars int `json:"digest_max_chars,omitempty" yaml:"digest_max_chars,omitempty"`
+	// SnapshotMaxItems 是 snapshot/descendants 投影在调用方未显式给 limit 时的
+	// 缺省行数上限（plan §9 待决项：此前硬编码 200，两个宿主各写一份）。
+	// 0 使用默认 200。
+	SnapshotMaxItems int `json:"snapshot_max_items,omitempty" yaml:"snapshot_max_items,omitempty"`
 	// ActionTTL 是 pending action 的存活时间；超时后由扫描标记 failed。
 	// 0 使用默认 24h。
 	ActionTTL time.Duration `json:"action_ttl,omitempty" yaml:"action_ttl,omitempty"`
@@ -41,6 +45,18 @@ type Config struct {
 	// mailbox/digest 的父 turn，避免父会话在子 agent 仍异常时静默空闲。
 	// 0（默认）关闭该行为，保持历史语义；正数即该 scope 每窗口的自检次数上限。
 	WakeSelfCheckPerWindow int `json:"wake_self_check_per_window,omitempty" yaml:"wake_self_check_per_window,omitempty"`
+	// ProgressCheckInterval 是 P2-D 的 opt-in 周期巡查间隔：正数时宿主按该
+	// 间隔检查"是否存在 running background batch"，只在父会话空闲且无待投递
+	// wake 时经既有 wake 通道注入一次 progress 汇报 turn。
+	// 0（默认）不注册任何 ticker，宿主行为与引入该开关前完全一致：progress 只
+	// 在父 turn 的 preflight digest 里被动出现，不存在常驻巡检 goroutine。
+	ProgressCheckInterval time.Duration `json:"progress_check_interval,omitempty" yaml:"progress_check_interval,omitempty"`
+	// ApprovalTerminalGuard 是「run 终态后到达的审批决议零恢复」守卫的灰度
+	// 开关（docs/plan/supervision-approval-resume-past-deadline-fix-plan.md §8，
+	// 装配处见 chat.SessionActorConfig.ApprovalTerminalGuard）。
+	// nil（未配置）与 true 均表示启用（默认开）；显式 false 时决策点与恢复
+	// 入口回退到引入守卫前的行为，用于灰度与快速回滚，无需回滚二进制。
+	ApprovalTerminalGuard *bool `json:"approval_terminal_guard,omitempty" yaml:"approval_terminal_guard,omitempty"`
 }
 
 // DefaultConfig 返回默认调参。
@@ -50,6 +66,7 @@ func DefaultConfig() Config {
 		HeartbeatTimeout:  5 * time.Minute,
 		DigestMaxItems:    20,
 		DigestMaxChars:    4000,
+		SnapshotMaxItems:  200,
 		ActionTTL:         24 * time.Hour,
 		WakeRateWindow:    time.Hour,
 		WakeMaxAutoWake:   5,
@@ -72,6 +89,9 @@ func (c Config) WithDefaults() Config {
 	if c.DigestMaxChars > 0 {
 		d.DigestMaxChars = c.DigestMaxChars
 	}
+	if c.SnapshotMaxItems > 0 {
+		d.SnapshotMaxItems = c.SnapshotMaxItems
+	}
 	if c.ActionTTL > 0 {
 		d.ActionTTL = c.ActionTTL
 	}
@@ -87,7 +107,34 @@ func (c Config) WithDefaults() Config {
 	if strings.EqualFold(strings.TrimSpace(c.WakeBudgetMode), string(WakeBudgetModeDurable)) {
 		d.WakeBudgetMode = string(WakeBudgetModeDurable)
 	}
+	// ProgressCheckInterval 没有默认值：它是显式 opt-in，0 必须保持 0。
+	if c.ProgressCheckInterval > 0 {
+		d.ProgressCheckInterval = c.ProgressCheckInterval
+	}
+	// ApprovalTerminalGuard 默认开：nil 保持 nil（等价启用），仅显式值需传递。
+	if c.ApprovalTerminalGuard != nil {
+		d.ApprovalTerminalGuard = c.ApprovalTerminalGuard
+	}
 	return d
+}
+
+// ProgressCheckEnabled reports whether the opt-in periodic progress sweep is
+// configured. It never enables the sweep implicitly, so an unwired or
+// zero-valued config keeps the historical behavior.
+func (c Config) ProgressCheckEnabled() bool {
+	return c.WithDefaults().ProgressCheckInterval > 0
+}
+
+// ApprovalTerminalGuardEnabled reports whether the terminal-run approval guard
+// (docs/plan/supervision-approval-resume-past-deadline-fix-plan.md §8) is
+// active. Unset means enabled: the guard is on by default and only an explicit
+// false turns it off, so an unwired or zero-valued config keeps the fixed
+// behavior.
+func (c Config) ApprovalTerminalGuardEnabled() bool {
+	if c.ApprovalTerminalGuard == nil {
+		return true
+	}
+	return *c.ApprovalTerminalGuard
 }
 
 // WakeSchedulerConfig 导出给装配层使用的 wake 调参。

@@ -33,6 +33,11 @@ type DigestRequest struct {
 	// (P2-12 方案 1). nil keeps the host-neutral set so a host that has not
 	// declared its channels never loses a remediation path.
 	HostCapabilities *HostCapabilities
+	// Progress optionally adds the P0-B progress rollup (batch 里程碑：2/3 完成、
+	// 谁还在跑、最近进度多久之前). The projection is read-only, never durable-new,
+	// and never triggers a wake: progress is visible inside the parent turn
+	// only. nil keeps the digest byte-identical to the pre-P0-B output.
+	Progress ProgressSource
 }
 
 // SubjectPresenceFunc reports whether the notification subject still exists in
@@ -54,6 +59,11 @@ type DigestItem struct {
 	EventSeq          int64
 	Resolved          bool
 	ResolutionState   ResolutionState
+	// DeliveryState reports how far this row already travelled toward the parent
+	// (pending → delivered → seen). Hosts use it to skip re-marking a row the
+	// parent already saw: those writes only churn version/updated_at and were
+	// observed pushing a single stale stalled row past version 180 (plan §4.3).
+	DeliveryState DeliveryState
 	// Stale marks a critical row whose subject no longer exists in the control
 	// plane. Stale rows are informational only: no recommended or allowed action.
 	Stale bool
@@ -74,6 +84,11 @@ type Digest struct {
 	Items                 []DigestItem `json:"items,omitempty"`
 	// NextSeq is the cursor for supervision_snapshot(after_seq=...).
 	NextSeq int64 `json:"next_seq,omitempty"`
+	// Progress is the opt-in progress rollup (P0-B). Empty when the caller wired
+	// no ProgressSource, which keeps the injected text byte-identical.
+	Progress []ProgressSummary `json:"progress,omitempty"`
+	// ProgressTruncated marks that the rollup itself was bounded (budget).
+	ProgressTruncated bool `json:"progress_truncated,omitempty"`
 	// Full text block injected into the parent turn.
 	Text string `json:"text,omitempty"`
 }
@@ -127,6 +142,7 @@ func BuildDigest(ctx context.Context, store Store, req DigestRequest) (*Digest, 
 			EventSeq:          n.EventSeq,
 			Resolved:          n.ResolutionState != "" && n.ResolutionState != ResolutionUnresolved,
 			ResolutionState:   n.ResolutionState,
+			DeliveryState:     n.DeliveryState,
 		}
 		// Stale subjects are resolved in the control plane but still carry an
 		// unresolved notification row. Downgrade them before counting so a dead
@@ -192,8 +208,26 @@ func BuildDigest(ctx context.Context, store Store, req DigestRequest) (*Digest, 
 		digest.Truncated = true
 	}
 	digest.Items = items
+	digest.Progress, digest.ProgressTruncated = buildDigestProgress(ctx, req, limit, now)
 	digest.Text = formatDigestText(digest)
 	return digest, nil
+}
+
+// buildDigestProgress projects the optional P0-B progress rollup. It is
+// best-effort by design: a host whose batch projection fails must still get its
+// lifecycle digest (and its critical rows) injected — the same rule the wake
+// budget projection follows. A nil source and an empty rollup both render
+// nothing, so unwired hosts keep their previous output exactly.
+func buildDigestProgress(ctx context.Context, req DigestRequest, limit int, now time.Time) ([]ProgressSummary, bool) {
+	summaries, truncated, err := BuildProgressSummary(ctx, req.Progress, ProgressRequest{
+		RootScopeID:     req.RootScopeID,
+		ParentSessionID: req.TargetParentSessionID,
+		RowLimit:        limit,
+	}, limit, now)
+	if err != nil {
+		return nil, false
+	}
+	return summaries, truncated
 }
 
 func itemPriority(item DigestItem) int {
@@ -269,6 +303,9 @@ func formatDigestText(digest *Digest) string {
 	}
 	if len(digest.Items) > 0 {
 		fmt.Fprintf(&b, "\nUse supervision_snapshot(after_seq=%d) for full diagnostics.\n", digest.NextSeq)
+	}
+	if block := formatProgressText(digest, time.Now()); block != "" {
+		b.WriteString(block)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

@@ -182,11 +182,18 @@ func finalizeChildExecutionRuns(ctx context.Context, store Store, childSessionID
 	}
 	status := childRunTerminalStatus(childStatus)
 	for _, run := range runs {
-		if !run.Active() {
-			continue
+		if run.Active() {
+			if _, err := runStore.MarkExecutionRunTerminal(ctx, run.RunID, status, "", "", now); err != nil {
+				return fmt.Errorf("supervision: finalize child execution run %s: %w", run.RunID, err)
+			}
 		}
-		if _, err := runStore.MarkExecutionRunTerminal(ctx, run.RunID, status, "", "", now); err != nil {
-			return fmt.Errorf("supervision: finalize child execution run %s: %w", run.RunID, err)
+		// The child session is terminal, so the live-condition alerts this run
+		// projected (progress_stalled and friends) are stale (plan §4.3).
+		// Converging already-terminal runs too repairs rows that were written
+		// before this path existed; a resolution recorded earlier is never
+		// rewritten because ConvergeRunAlerts only touches unresolved rows.
+		if _, err := ConvergeRunAlerts(ctx, store, run.RootSessionID, run.RunID, status, now); err != nil {
+			return fmt.Errorf("supervision: converge child run alerts %s: %w", run.RunID, err)
 		}
 	}
 	return nil

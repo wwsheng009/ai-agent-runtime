@@ -14,6 +14,14 @@ type Scope struct {
 	Mode          string // children | descendants
 }
 
+// Scope mode values (doc 6.2). Mode narrows what a caller sees; the provider
+// contract stays subtree-shaped, so both hosts and the HTTP handler share the
+// same narrowing rule here instead of each maintaining its own filter.
+const (
+	ScopeModeChildren    = "children"
+	ScopeModeDescendants = "descendants"
+)
+
 // DescendantState is the runtime-projected state of one descendant. The
 // supervision package stays decoupled from agentcontrol/team by receiving
 // these states through a provider callback.
@@ -105,12 +113,24 @@ type SnapshotAutoAction struct {
 
 // SnapshotRequest configures a snapshot build.
 type SnapshotRequest struct {
-	Scope           Scope
+	Scope Scope
+	// RootScopeID overrides the durable root scope used to filter notifications
+	// and pending actions. Empty falls back to rootScopeIDFor(Scope). It exists
+	// for callers whose projected subtree is not the durable scope itself: a
+	// team lead projects its own session's descendants (Scope.RootSessionID)
+	// while the durable rows are rooted at the team id — the same split the
+	// preflight digest expresses with RootScopeID + TargetParentSessionID
+	// (LocalSnapshotRequest).
+	RootScopeID     string
 	AfterSeq        int64
 	Health          string // any | abnormal | action_required
 	IncludeTerminal bool
 	Limit           int
-	Provider        DescendantProvider
+	// DefaultLimit is the host-configured fallback used when Limit is not set
+	// (plan §9: the 200-row cap used to be hardcoded here). Zero keeps the
+	// package-level default so unwired hosts behave exactly as before.
+	DefaultLimit int
+	Provider     DescendantProvider
 	// HostCapabilities optionally narrows the announced action set to the
 	// channels this host actually wired (P2-12 方案 1). nil = undeclared: the
 	// host-neutral set is returned unchanged.
@@ -129,6 +149,10 @@ func BuildSnapshot(ctx context.Context, store Store, req SnapshotRequest) (*Snap
 		Scope:       req.Scope,
 		GeneratedAt: timeNow().UTC(),
 	}
+	rootScopeID := strings.TrimSpace(req.RootScopeID)
+	if rootScopeID == "" {
+		rootScopeID = rootScopeIDFor(req.Scope)
+	}
 	var descendants []DescendantState
 	if req.Provider != nil {
 		list, err := req.Provider.ListDescendants(ctx, req.Scope)
@@ -140,7 +164,7 @@ func BuildSnapshot(ctx context.Context, store Store, req SnapshotRequest) (*Snap
 
 	// Load unresolved notifications for the scope.
 	notifications, err := store.ListNotifications(ctx, NotificationFilter{
-		RootScopeID:           rootScopeIDFor(req.Scope),
+		RootScopeID:           rootScopeID,
 		TargetParentSessionID: req.Scope.RootSessionID,
 		TargetParentTeamID:    req.Scope.RootTeamID,
 		IncludeResolved:       req.IncludeTerminal,
@@ -164,7 +188,7 @@ func BuildSnapshot(ctx context.Context, store Store, req SnapshotRequest) (*Snap
 	}
 
 	// Load pending actions for the scope to surface auto/in-flight actions.
-	actions, err := store.ListActions(ctx, ActionFilter{RootScopeID: rootScopeIDFor(req.Scope)})
+	actions, err := store.ListActions(ctx, ActionFilter{RootScopeID: rootScopeID})
 	if err != nil {
 		return nil, err
 	}
@@ -273,6 +297,23 @@ func BuildSnapshot(ctx context.Context, store Store, req SnapshotRequest) (*Snap
 		snapshot.Descendants = append(snapshot.Descendants, item)
 	}
 
+	// Scope mode narrowing: mode=children keeps only direct descendants of the
+	// scope root. ParentPath carries the ancestor chain, so a direct child has
+	// at most the scope root itself; deeper rows are dropped before the rollup
+	// so the summary counters always describe the rows the caller received.
+	// Standalone notification-only rows (subjects that vanished from runtime
+	// state) have no path and stay visible, matching the existing subtree rule.
+	if strings.EqualFold(strings.TrimSpace(req.Scope.Mode), ScopeModeChildren) {
+		direct := snapshot.Descendants[:0]
+		for _, item := range snapshot.Descendants {
+			if len(item.ParentPath) > 1 {
+				continue
+			}
+			direct = append(direct, item)
+		}
+		snapshot.Descendants = direct
+	}
+
 	// Summary rollup.
 	for _, item := range snapshot.Descendants {
 		switch item.SupervisionState {
@@ -302,6 +343,9 @@ func BuildSnapshot(ctx context.Context, store Store, req SnapshotRequest) (*Snap
 
 	// Filter by health and limit.
 	limit := req.Limit
+	if limit <= 0 {
+		limit = req.DefaultLimit
+	}
 	if limit <= 0 {
 		limit = defaultSnapshotLimit
 	}

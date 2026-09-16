@@ -24,7 +24,7 @@ func selfCheckTestConsumer(t *testing.T, scheduler *WakeScheduler, runnable Pare
 	return &WakeConsumer{
 		Wakes:    scheduler,
 		Runnable: runnable,
-		Deliver: func(ctx context.Context, parentSessionID string, digest *Digest, wakeIDs []string) error {
+		Deliver: func(ctx context.Context, parentSessionID, rootScopeID string, digest *Digest, wakeIDs []string) error {
 			require.Empty(t, wakeIDs, "a self-check turn must not claim wake ids")
 			return deliver(digest)
 		},

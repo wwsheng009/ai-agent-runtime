@@ -98,6 +98,11 @@ type WakeSchedulerConfig struct {
 	// because executors may be wired after the scheduler is constructed; nil
 	// means undeclared and keeps the host-neutral action set.
 	HostCapabilities func() *HostCapabilities
+	// Progress optionally adds the P0-B progress rollup to every drained wake
+	// digest. The opt-in progress check (P2-D) carries no lifecycle
+	// notification, so this rollup is the only content its wake can deliver;
+	// nil keeps the wake digest byte-identical to the pre-P0-B output.
+	Progress ProgressSource
 }
 
 // WakeScheduler subscribes the lifecycle inbox to the parent turn start
@@ -121,6 +126,11 @@ type WakeScheduler struct {
 	// control plane that wires its executor after construction still reports
 	// the truth (see WakeSchedulerConfig.HostCapabilities).
 	hostCapabilities func() *HostCapabilities
+	// progressMu guards the lazily wired P0-B progress projection. Hosts
+	// attach their batch control plane after the scheduler is constructed
+	// (see SetProgressSource), and drains may already run concurrently.
+	progressMu sync.Mutex
+	progress   ProgressSource
 }
 
 // NewWakeScheduler creates a wake scheduler over a durable store.
@@ -158,7 +168,31 @@ func NewWakeScheduler(store Store, config WakeSchedulerConfig) *WakeScheduler {
 		budgetMode:       budgetMode,
 		now:              timeNow,
 		hostCapabilities: config.HostCapabilities,
+		progress:         config.Progress,
 	}
+}
+
+// SetProgressSource wires (or clears) the P0-B progress projection used when
+// the wake digest is built. Hosts call it once their durable batch control
+// plane exists, which is normally after the scheduler was constructed.
+func (s *WakeScheduler) SetProgressSource(source ProgressSource) {
+	if s == nil {
+		return
+	}
+	s.progressMu.Lock()
+	s.progress = source
+	s.progressMu.Unlock()
+}
+
+// progressSource reads the wired projection; nil means unwired, which keeps
+// the drained digest free of progress content.
+func (s *WakeScheduler) progressSource() ProgressSource {
+	if s == nil {
+		return nil
+	}
+	s.progressMu.Lock()
+	defer s.progressMu.Unlock()
+	return s.progress
 }
 
 // hostCapabilitySnapshot evaluates the declared capabilities at digest build
@@ -324,6 +358,10 @@ func (s *WakeScheduler) DrainRunnable(ctx context.Context, parentSessionID, pare
 		AfterSeq:              afterSeq,
 		IncludeResolvedSince:  true,
 		HostCapabilities:      s.hostCapabilitySnapshot(),
+		// The P2-D progress wake has no lifecycle notification; without this
+		// projection its digest would be empty and could never start the
+		// report turn it exists for.
+		Progress: s.progressSource(),
 	})
 	if err != nil {
 		return claimed, nil, err
@@ -333,12 +371,19 @@ func (s *WakeScheduler) DrainRunnable(ctx context.Context, parentSessionID, pare
 		if item.NotificationID == "" {
 			continue
 		}
+		// Rows that already travelled that far are skipped so a repeated drain
+		// cannot churn version/updated_at on an unchanged row (plan §4.3).
+		if item.DeliveryState == DeliveryDelivered || item.DeliveryState == DeliverySeen {
+			continue
+		}
 		_ = s.store.MarkNotificationDelivered(ctx, item.NotificationID, now)
 	}
-	// Only a digest that actually carries content spends budget: claiming a
-	// stale wake whose notification was resolved while the parent was busy
-	// must not consume the next window.
-	if len(digest.Items) > 0 {
+	// Only a digest that actually turns into a parent turn spends budget:
+	// claiming a stale wake whose notification was resolved while the parent
+	// was busy must not consume the next window, while a progress-only digest
+	// (which is delivered, see WakeConsumer) must, or the opt-in progress
+	// check would flood the parent with report turns once per tick.
+	if digestDeliverable(claimed, digest) {
 		for class, count := range claimedByClass {
 			if count == 0 {
 				continue
@@ -347,6 +392,35 @@ func (s *WakeScheduler) DrainRunnable(ctx context.Context, parentSessionID, pare
 		}
 	}
 	return claimed, digest, nil
+}
+
+// digestDeliverable reports whether a drained digest carries content worth one
+// parent turn for the given claimed wakes. Lifecycle items always qualify. A
+// progress-only digest (P2-D progress check) qualifies too, because the rollup
+// is exactly what that wake exists to surface — but only for wakes that request
+// progress: a stale lifecycle wake whose notification was acknowledged or
+// resolved while the parent was busy must keep its "no content-free turn"
+// guarantee even when the scope happens to have an active batch rollup.
+//
+// Both the delivery guard (WakeConsumer) and the budget accounting
+// (DrainRunnable) use this predicate so a turn that starts is always a turn
+// that spends budget, and a wake that is drained without a turn never does.
+func digestDeliverable(claimed []WakePending, digest *Digest) bool {
+	if digest == nil {
+		return false
+	}
+	if len(digest.Items) > 0 {
+		return true
+	}
+	if len(digest.Progress) == 0 {
+		return false
+	}
+	for _, wake := range claimed {
+		if WakeReasonIsProgressCheck(wake.WakeReason) {
+			return true
+		}
+	}
+	return false
 }
 
 // ResolveWake releases a claimed wake after the turn consumed it.

@@ -40,7 +40,25 @@ const (
 	WakeReasonExecutionFailed  = "execution_failed"
 	WakeReasonExecutionTimeout = "execution_timeout"
 	WakeReasonLifecycleFailed  = "lifecycle_failed"
+	// WakeReasonProgressCheck covers the opt-in periodic progress check
+	// (plan P2-D). The wake carries no lifecycle notification: its content is
+	// the P0-B progress rollup, so it is the only wake family allowed to be
+	// delivered without digest items.
+	WakeReasonProgressCheck = "progress_check"
 )
+
+// WakeReasonIsProgressCheck reports whether a wake reason belongs to the
+// progress-check family. Matching mirrors WakeBudgetClassOf (case-insensitive,
+// substring-based) so host-specific spellings such as
+// "supervision_progress_check" are classified without a central registry.
+//
+// Only these wakes may start a parent turn from a digest that has no lifecycle
+// items: a stale lifecycle wake whose notification was acknowledged or resolved
+// while the parent was busy must keep its "no content-free turn" guarantee even
+// when the scope happens to have an active batch rollup.
+func WakeReasonIsProgressCheck(reason string) bool {
+	return wakeReasonContainsAny(strings.ToLower(strings.TrimSpace(reason)), "progress")
+}
 
 // WakeBudgetClassOf maps a wake reason (normally the durable notification
 // event type) to its budget class. Matching is case-insensitive and

@@ -2,11 +2,52 @@ package supervision
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+// TestBuildSnapshot_DefaultLimitFromHostConfig covers the plan §9 收口: the
+// 200-row fallback used to be hardcoded inside BuildSnapshot, so a host could
+// not tune how much descendant state reaches the model. DefaultLimit is the
+// host knob, an explicit Limit still wins, and zero keeps the old cap so
+// unwired hosts are byte-identical.
+func TestBuildSnapshot_DefaultLimitFromHostConfig(t *testing.T) {
+	store := newTestStore(t, "supervision-snapshot-default-limit")
+	ctx := context.Background()
+	provider := &fakeDescendantProvider{}
+	for i := 0; i < 5; i++ {
+		provider.items = append(provider.items, DescendantState{
+			Kind:             SubjectAgentRun,
+			ID:               fmt.Sprintf("child-%d", i+1),
+			ExecutionStatus:  "running",
+			SupervisionState: SupervisionRunning,
+		})
+	}
+
+	request := SnapshotRequest{
+		Scope:        Scope{RootSessionID: "root-session-1"},
+		Provider:     provider,
+		DefaultLimit: 2,
+	}
+	snapshot, err := BuildSnapshot(ctx, store, request)
+	require.NoError(t, err)
+	require.Len(t, snapshot.Descendants, 2, "host default caps the projection")
+	require.True(t, snapshot.Truncated)
+
+	request.Limit = 4
+	snapshot, err = BuildSnapshot(ctx, store, request)
+	require.NoError(t, err)
+	require.Len(t, snapshot.Descendants, 4, "an explicit limit wins over the host default")
+
+	request.Limit = 0
+	request.DefaultLimit = 0
+	snapshot, err = BuildSnapshot(ctx, store, request)
+	require.NoError(t, err)
+	require.Len(t, snapshot.Descendants, 5, "zero values keep the package default")
+}
 
 type fakeDescendantProvider struct {
 	items []DescendantState
@@ -153,6 +194,48 @@ func TestBuildSnapshot_NotificationOnlySubject(t *testing.T) {
 	require.Equal(t, int64(7), snapshot.LastChangeSeqOf("child-gone"))
 }
 
+// TestBuildSnapshot_ScopeModeChildrenNarrowsRows verifies doc 6.2 scope modes:
+// the provider always projects the whole subtree, mode=children keeps only
+// direct descendants (ParentPath length <= 1), and descendants mode (the
+// default) keeps the whole subtree. The rollup must follow the narrowed rows so
+// summary counters never describe rows the caller did not receive.
+func TestBuildSnapshot_ScopeModeChildrenNarrowsRows(t *testing.T) {
+	store := newTestStore(t, "supervision-snapshot-mode")
+	ctx := context.Background()
+
+	provider := &fakeDescendantProvider{items: []DescendantState{
+		{
+			Kind:             SubjectAgentSession,
+			ID:               "child-direct",
+			SupervisionState: SupervisionRunning,
+			ParentPath:       []string{"root-session-1"},
+		},
+		{
+			Kind:             SubjectAgentSession,
+			ID:               "grandchild",
+			SupervisionState: SupervisionRunning,
+			ParentPath:       []string{"root-session-1", "child-direct"},
+		},
+	}}
+
+	children, err := BuildSnapshot(ctx, store, SnapshotRequest{
+		Scope:    Scope{RootSessionID: "root-session-1", Mode: ScopeModeChildren},
+		Provider: provider,
+	})
+	require.NoError(t, err)
+	require.Len(t, children.Descendants, 1)
+	require.Equal(t, "child-direct", children.Descendants[0].ID)
+	require.Equal(t, 1, children.Summary.Running)
+
+	all, err := BuildSnapshot(ctx, store, SnapshotRequest{
+		Scope:    Scope{RootSessionID: "root-session-1", Mode: ScopeModeDescendants},
+		Provider: provider,
+	})
+	require.NoError(t, err)
+	require.Len(t, all.Descendants, 2)
+	require.Equal(t, 2, all.Summary.Running)
+}
+
 // TestBuildSnapshot_Truncation verifies the limit and truncated flag.
 func TestBuildSnapshot_Truncation(t *testing.T) {
 	store := newTestStore(t, "supervision-snapshot-truncate")
@@ -231,12 +314,12 @@ func TestBuildSnapshot_AttachesExecutionRunFields(t *testing.T) {
 
 	provider := &fakeDescendantProvider{items: []DescendantState{
 		{
-			Kind:               SubjectAgentSession,
-			ID:                 "child-run-snap",
-			ExecutionStatus:    "running",
-			SupervisionState:   SupervisionRunning,
-			HeartbeatAgeMs:     5000,
-			ProgressAgeMs:      30000,
+			Kind:                SubjectAgentSession,
+			ID:                  "child-run-snap",
+			ExecutionStatus:     "running",
+			SupervisionState:    SupervisionRunning,
+			HeartbeatAgeMs:      5000,
+			ProgressAgeMs:       30000,
 			ExecutionDeadlineAt: timePtr(now.Add(60 * time.Second)),
 		},
 	}}

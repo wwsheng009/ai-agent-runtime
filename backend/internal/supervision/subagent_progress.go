@@ -234,6 +234,33 @@ func (m *SubagentProgressMirror) Forget(childSessionID string) {
 	}
 }
 
+// Latest returns the newest mirrored stamp for one child session: state,
+// message and the time it was observed. The mirror is live-only and throttled,
+// so this is a best-effort "what is this child doing right now" reading (the
+// P0-B progress rollup uses it for optional row detail); a host that never
+// mirrored progress for the child gets ok=false.
+func (m *SubagentProgressMirror) Latest(childSessionID string) (state, message string, at time.Time, ok bool) {
+	if m == nil {
+		return "", "", time.Time{}, false
+	}
+	childSessionID = strings.TrimSpace(childSessionID)
+	if childSessionID == "" {
+		return "", "", time.Time{}, false
+	}
+	prefix := childSessionID + "\x00"
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for key, stamp := range m.last {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		if !ok || stamp.at.After(at) {
+			state, message, at, ok = stamp.state, stamp.message, stamp.at, true
+		}
+	}
+	return state, message, at, ok
+}
+
 // Pending reports how many throttle entries are currently tracked (tests and
 // diagnostics; the mirror never grows past subagentProgressMaxEntries).
 func (m *SubagentProgressMirror) Pending() int {

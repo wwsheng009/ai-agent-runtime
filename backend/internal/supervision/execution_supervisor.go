@@ -46,9 +46,9 @@ type ExecutionSupervisorConfig struct {
 // timeout, 15s cancel grace, 5s scan interval.
 func DefaultExecutionSupervisorConfig() ExecutionSupervisorConfig {
 	return ExecutionSupervisorConfig{
-		Enabled:                true,
-		Mode:                   "enforce",
-		ScanInterval:           5 * time.Second,
+		Enabled:                 true,
+		Mode:                    "enforce",
+		ScanInterval:            5 * time.Second,
 		DefaultExecutionTimeout: 30 * time.Minute,
 		DefaultProgressTimeout:  5 * time.Minute,
 		DefaultApprovalTimeout:  1 * time.Hour,
@@ -581,6 +581,9 @@ func (s *ExecutionSupervisor) fenceOrphaned(ctx context.Context, run *ExecutionR
 	run.FencingToken = fenced.FencingToken
 	run.Status = fenced.Status
 	run.FinishedAt = fenced.FinishedAt
+	// The run is terminal through fencing, so its live-condition alerts are
+	// stale exactly as in projectTerminal (plan §4.3).
+	s.convergeRunAlerts(ctx, &fenced, RunStatusOrphaned)
 	return true
 }
 
@@ -651,6 +654,22 @@ func (s *ExecutionSupervisor) projectTerminal(ctx context.Context, run *Executio
 		SupervisionState:      state,
 		Reason:                reason,
 	})
+	// Plan §4.3: the run reached a terminal state, so the alerts it projected
+	// while live (progress_stalled and friends) are stale by definition. Without
+	// this the parent keeps seeing a critical/action-required row for work that
+	// already finished.
+	s.convergeRunAlerts(ctx, run, status)
+}
+
+// convergeRunAlerts is the best-effort hook that retires a run's live-condition
+// alerts once the run itself is terminal. A failure only leaves the stale row
+// behind for the next scan or parent turn; the terminal projection is already
+// durable, so it must not fail the completion path.
+func (s *ExecutionSupervisor) convergeRunAlerts(ctx context.Context, run *ExecutionRun, status string) {
+	if s == nil || s.StoreFull == nil || run == nil {
+		return
+	}
+	_, _ = ConvergeRunAlerts(ctx, s.StoreFull, run.RootSessionID, run.RunID, status, s.now())
 }
 
 func (s *ExecutionSupervisor) enforce() bool {

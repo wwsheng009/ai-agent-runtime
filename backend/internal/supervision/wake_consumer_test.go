@@ -26,7 +26,7 @@ func TestWakeConsumer_DeliversOneParentTurnPerDrain(t *testing.T) {
 
 	var mu sync.Mutex
 	var deliveries []string
-	consumer.Deliver = func(ctx context.Context, parentSessionID string, digest *Digest, wakeIDs []string) error {
+	consumer.Deliver = func(ctx context.Context, parentSessionID, rootScopeID string, digest *Digest, wakeIDs []string) error {
 		mu.Lock()
 		deliveries = append(deliveries, parentSessionID+"|"+strconv.Itoa(len(digest.Items)))
 		mu.Unlock()
@@ -83,7 +83,7 @@ func TestWakeConsumer_ParentBusyKeepsWakeDurable(t *testing.T) {
 		Runnable: func(ctx context.Context, rootScopeID, parentSessionID, parentTeamID string) bool { return runnable },
 	}
 	delivered := false
-	consumer.Deliver = func(ctx context.Context, parentSessionID string, digest *Digest, wakeIDs []string) error {
+	consumer.Deliver = func(ctx context.Context, parentSessionID, rootScopeID string, digest *Digest, wakeIDs []string) error {
 		delivered = true
 		return nil
 	}
@@ -122,7 +122,7 @@ func TestWakeConsumer_AcknowledgedPendingWakeDoesNotStartParentTurn(t *testing.T
 	consumer := &WakeConsumer{
 		Wakes:    scheduler,
 		Runnable: func(context.Context, string, string, string) bool { return true },
-		Deliver: func(context.Context, string, *Digest, []string) error {
+		Deliver: func(context.Context, string, string, *Digest, []string) error {
 			delivered = true
 			return nil
 		},
@@ -160,7 +160,7 @@ func TestWakeConsumer_DeliveryFailureReleasesClaims(t *testing.T) {
 	consumer := &WakeConsumer{
 		Wakes:    scheduler,
 		Runnable: func(ctx context.Context, rootScopeID, parentSessionID, parentTeamID string) bool { return true },
-		Deliver: func(ctx context.Context, parentSessionID string, digest *Digest, wakeIDs []string) error {
+		Deliver: func(ctx context.Context, parentSessionID, rootScopeID string, digest *Digest, wakeIDs []string) error {
 			return errors.New("turn queue full")
 		},
 	}
@@ -193,7 +193,7 @@ func TestWakeConsumer_DeliveryFailureReleasesClaims(t *testing.T) {
 	require.NoError(t, err)
 
 	delivered := false
-	consumer.Deliver = func(ctx context.Context, parentSessionID string, digest *Digest, wakeIDs []string) error {
+	consumer.Deliver = func(ctx context.Context, parentSessionID, rootScopeID string, digest *Digest, wakeIDs []string) error {
 		delivered = true
 		return nil
 	}
@@ -211,7 +211,7 @@ func TestWakeConsumer_NoWakesNoDelivery(t *testing.T) {
 	consumer := &WakeConsumer{
 		Wakes:    scheduler,
 		Runnable: func(ctx context.Context, rootScopeID, parentSessionID, parentTeamID string) bool { return true },
-		Deliver: func(ctx context.Context, parentSessionID string, digest *Digest, wakeIDs []string) error {
+		Deliver: func(ctx context.Context, parentSessionID, rootScopeID string, digest *Digest, wakeIDs []string) error {
 			delivered = true
 			return nil
 		},
@@ -236,7 +236,7 @@ func TestWakeConsumer_RateLimitKeepsWakeDurable(t *testing.T) {
 	consumer := &WakeConsumer{
 		Wakes:    scheduler,
 		Runnable: func(ctx context.Context, rootScopeID, parentSessionID, parentTeamID string) bool { return true },
-		Deliver: func(ctx context.Context, parentSessionID string, digest *Digest, wakeIDs []string) error {
+		Deliver: func(ctx context.Context, parentSessionID, rootScopeID string, digest *Digest, wakeIDs []string) error {
 			return nil
 		},
 	}

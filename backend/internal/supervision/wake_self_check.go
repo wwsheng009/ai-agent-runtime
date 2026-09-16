@@ -182,7 +182,7 @@ func (c *WakeConsumer) MaybeSelfCheckParent(ctx context.Context, parentSessionID
 	if !c.Wakes.AllowSelfCheck(rootScopeID) {
 		return false, nil
 	}
-	if err := c.Deliver(ctx, parentSessionID, digest, nil); err != nil {
+	if err := c.Deliver(ctx, parentSessionID, rootScopeID, digest, nil); err != nil {
 		return false, err
 	}
 	return true, nil

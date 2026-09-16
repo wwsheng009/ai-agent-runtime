@@ -27,10 +27,13 @@ type WakeConsumer struct {
 	// busy parent keeps the wake pending instead of queueing a second turn.
 	Runnable ParentRunnable
 	// Deliver submits the aggregated digest as one parent turn. It receives
-	// the claimed wake ids so hosts can correlate the delivery. A nil
-	// Deliver still drains and resolves wakes (notification stays durable in
-	// the inbox and preflight injects it on the next natural turn).
-	Deliver func(ctx context.Context, parentSessionID string, digest *Digest, wakeIDs []string) error
+	// the wake's root scope plus the claimed wake ids so hosts can correlate
+	// the delivery and can re-schedule the wake when the turn never started
+	// (plan §6-F: a swallowed submission error would consume the parent's
+	// only auto-wake). A nil Deliver still drains and resolves wakes
+	// (notification stays durable in the inbox and preflight injects it on
+	// the next natural turn).
+	Deliver func(ctx context.Context, parentSessionID, rootScopeID string, digest *Digest, wakeIDs []string) error
 }
 
 // MaybeWakeParent is called at every parent runnable state-transition point:
@@ -62,14 +65,16 @@ func (c *WakeConsumer) MaybeWakeParent(ctx context.Context, parentSessionID, par
 	}
 	// The underlying notification may have been acknowledged, actioned, or
 	// resolved while the parent was busy. DrainRunnable still claims that
-	// stale durable wake so it can be cleaned up, but an empty digest must not
-	// launch a content-free supervision turn.
-	if len(digest.Items) == 0 {
+	// stale durable wake so it can be cleaned up, but a digest without
+	// deliverable content must not launch a content-free supervision turn.
+	// A progress wake (P2-D) is the one family whose digest content is the
+	// P0-B rollup instead of lifecycle items; see digestDeliverable.
+	if !digestDeliverable(claimed, digest) {
 		c.release(ctx, wakeIDs)
 		return nil
 	}
 	if c.Deliver != nil {
-		if err := c.Deliver(ctx, parentSessionID, digest, wakeIDs); err != nil {
+		if err := c.Deliver(ctx, parentSessionID, rootScopeID, digest, wakeIDs); err != nil {
 			// Delivery failed: release the claims anyway. The notification
 			// stays durable in the inbox and the next natural parent turn
 			// injects it via preflight; keeping the row claimed would block
