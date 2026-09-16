@@ -9,6 +9,7 @@ import { enWorkspacePanelsGit } from "./panels-git";
 import { enWorkspacePanelsInteractions } from "./panels-interactions";
 import { enWorkspacePanelsJobs } from "./panels-jobs";
 import { enWorkspacePanelsMessages } from "./panels-messages";
+import { enWorkspacePanelsPreview } from "./panels-preview";
 import { enWorkspacePanelsSessionDetail } from "./panels-session-detail";
 import { enWorkspaceSessionSearch } from "./panels-session-search";
 import { enWorkspacePanelsShell } from "./panels-shell";
@@ -27,6 +28,7 @@ export const enWorkspace = {
     interactions: enWorkspacePanelsInteractions,
     jobs: enWorkspacePanelsJobs,
     messages: enWorkspacePanelsMessages,
+    preview: enWorkspacePanelsPreview,
     sessionDetail: enWorkspacePanelsSessionDetail,
     sessionSearch: enWorkspaceSessionSearch,
     shell: enWorkspacePanelsShell,

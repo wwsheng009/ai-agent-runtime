@@ -10,6 +10,7 @@ import { zhWorkspacePanelsGit } from "./panels-git";
 import { zhWorkspacePanelsInteractions } from "./panels-interactions";
 import { zhWorkspacePanelsJobs } from "./panels-jobs";
 import { zhWorkspacePanelsMessages } from "./panels-messages";
+import { zhWorkspacePanelsPreview } from "./panels-preview";
 import { zhWorkspacePanelsSessionDetail } from "./panels-session-detail";
 import { zhWorkspaceSessionSearch } from "./panels-session-search";
 import { zhWorkspacePanelsShell } from "./panels-shell";
@@ -28,6 +29,7 @@ export const zhWorkspace = {
     interactions: zhWorkspacePanelsInteractions,
     jobs: zhWorkspacePanelsJobs,
     messages: zhWorkspacePanelsMessages,
+    preview: zhWorkspacePanelsPreview,
     sessionDetail: zhWorkspacePanelsSessionDetail,
     sessionSearch: zhWorkspaceSessionSearch,
     shell: zhWorkspacePanelsShell,
