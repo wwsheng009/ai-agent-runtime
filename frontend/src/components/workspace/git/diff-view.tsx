@@ -132,7 +132,12 @@ export function GitDiffView({
       : t("panels.git.list.statUnknown");
 
   return (
-    <div className="grid min-h-0 grid-rows-[auto_auto_1fr] gap-2" data-testid="git-diff-view">
+    // `h-full` + `minmax(0,1fr)`：与变更列表同因（父级 PANE 为 overflow-hidden，
+    // 本层若为 auto 高度，虚拟滚动区就永远不出现滚动条、内容被裁切）。
+    <div
+      className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-2"
+      data-testid="git-diff-view"
+    >
       <Toolbar
         canExpandContext={canExpandContext}
         mode={mode}

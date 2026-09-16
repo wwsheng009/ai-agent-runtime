@@ -62,6 +62,55 @@ const mockJobsBySession = new Map(); // sessionId -> [{...backend background.Job
 // P2-1A：运行时文件读取（`POST /api/runtime/fs/read-file`）的 mock 文件表。
 // path -> { dataBase64, byteCount }；由 `/api/_test/files` 注入，未登记即 404。
 const mockFiles = new Map();
+
+// P0-P4：右侧栏「文件浏览器 / Git 变更面」夹具（/api/runtime/fs/*、/api/runtime/git/*）。
+// 夹具刻意做大（根层 83 项 / 60 个变更）：滚动条缺失与「预览区被挤出可视范围」这类缺陷
+// 只在内容超出容器时显形，而 jsdom 不计算布局 —— 这里是唯一的真实浏览器回归面。
+const E2E_FS_SCOPE = "session:e2e-workspace";
+const E2E_FS_ROOT_PATH = "E:/workspace/e2e";
+const E2E_PREVIEW_MARKER = "E2E_PREVIEW_TEXT_OK";
+// mtime 一律 Unix 秒（后端 `info.ModTime().Unix()`）：前端曾把秒当毫秒 → 恒显示 1970-01-21。
+const E2E_MTIME_SECONDS = 1758000000;
+const E2E_TREE_ENTRY_COUNT = 80;
+const E2E_CHANGED_FILE_COUNT = 60;
+
+function mockFsTreeEntries() {
+  const entries = [
+    { name: "src", path: "src", type: "dir", size: 0, mtime: E2E_MTIME_SECONDS },
+    {
+      name: "README.md",
+      path: "README.md",
+      type: "file",
+      size: 512,
+      mtime: E2E_MTIME_SECONDS,
+      ext: "md",
+      is_text: true,
+    },
+  ];
+  for (let index = 1; index <= E2E_TREE_ENTRY_COUNT; index += 1) {
+    const name = `entry-${String(index).padStart(3, "0")}.txt`;
+    entries.push({
+      name,
+      path: name,
+      type: "file",
+      size: 1024 + index,
+      mtime: E2E_MTIME_SECONDS,
+      ext: "txt",
+      is_text: true,
+    });
+  }
+  entries.push({
+    name: "notes.txt",
+    path: "notes.txt",
+    type: "file",
+    size: 96,
+    mtime: E2E_MTIME_SECONDS,
+    ext: "txt",
+    is_text: true,
+  });
+  return entries;
+}
+
 // P2-7 子片 3：运行时模型目录（`GET /api/runtime/models`）。默认空目录，由
 // `/api/_test/models` 注入；前端只据这份目录组装 `/model` 候选，未注入即无候选。
 let mockRuntimeModelsCatalog = null;
@@ -291,49 +340,60 @@ const toolScript = [
 // P2-1A：file 预览链路的最小会话（read_file 工具行 → 行内文件链接 → 文件预览弹层）。
 // 触发词：prompt 含 "read-file"。路径由 /api/_test/files 注入，未注入则弹层如实报 404。
 const READ_FILE_PATH = "/workspace/e2e/notes.txt";
-const READ_FILE_ARGS = { file_path: READ_FILE_PATH };
 
-const readFileScript = [
-  { event: "meta", payload: META },
-  {
-    event: "tool_start",
-    delay: 120,
-    payload: {
-      type: "tool_start",
-      index: 0,
-      status: "started",
-      tool: { id: "read-1", name: "read_file", args: READ_FILE_ARGS },
-      tool_call: { id: "read-1", name: "read_file", args: READ_FILE_ARGS },
-      delta: { id: "read-1" },
-      metadata: { name: "read_file" },
-    },
-  },
-  {
-    event: "tool_end",
-    delay: 200,
-    payload: {
-      type: "tool_end",
-      index: 1,
-      status: "completed",
-      tool: {
-        id: "read-1",
-        name: "read_file",
-        args: READ_FILE_ARGS,
-        result: "read 2 lines",
-        output: "read 2 lines",
+// P2-1A 修正：工具行路径也可能是「相对会话工作目录」的写法（agent 的常见输出）。
+// 前端必须先按 `/fs/roots?session_id=` 给出的会话根解析成绝对路径再读，这里按解析结果注入文件：
+// `notes/relative.txt` → `${E2E_FS_ROOT_PATH}/notes/relative.txt`。
+// 触发词：prompt 含 "read-file-rel"（匹配顺序必须早于 "read-file"）。
+const READ_FILE_RELATIVE_PATH = "notes/relative.txt";
+
+function buildReadFileScript(targetPath) {
+  const args = { file_path: targetPath };
+  return [
+    { event: "meta", payload: META },
+    {
+      event: "tool_start",
+      delay: 120,
+      payload: {
+        type: "tool_start",
+        index: 0,
+        status: "started",
+        tool: { id: "read-1", name: "read_file", args },
+        tool_call: { id: "read-1", name: "read_file", args },
+        delta: { id: "read-1" },
+        metadata: { name: "read_file" },
       },
-      tool_call: { id: "read-1", name: "read_file", args: READ_FILE_ARGS, result: "read 2 lines" },
-      delta: { id: "read-1" },
-      metadata: { name: "read_file", result: "read 2 lines" },
     },
-  },
-  { event: "chunk", delay: 120, payload: makeChunk(2, "I read the file you pointed at.") },
-  {
-    event: "done",
-    delay: 120,
-    payload: { ...DONE, content: "I read the file you pointed at." },
-  },
-];
+    {
+      event: "tool_end",
+      delay: 200,
+      payload: {
+        type: "tool_end",
+        index: 1,
+        status: "completed",
+        tool: {
+          id: "read-1",
+          name: "read_file",
+          args,
+          result: "read 2 lines",
+          output: "read 2 lines",
+        },
+        tool_call: { id: "read-1", name: "read_file", args, result: "read 2 lines" },
+        delta: { id: "read-1" },
+        metadata: { name: "read_file", result: "read 2 lines" },
+      },
+    },
+    { event: "chunk", delay: 120, payload: makeChunk(2, "I read the file you pointed at.") },
+    {
+      event: "done",
+      delay: 120,
+      payload: { ...DONE, content: "I read the file you pointed at." },
+    },
+  ];
+}
+
+const readFileScript = buildReadFileScript(READ_FILE_PATH);
+const readFileRelativeScript = buildReadFileScript(READ_FILE_RELATIVE_PATH);
 
 const LONG_LINE =
   "The quick brown fox jumps over the lazy dog near the river bank while " +
@@ -438,6 +498,8 @@ function pickScript(rawBody) {
   const haystack = strings.join("\n").toLowerCase();
 
   if (haystack.includes("tool")) return { name: "tool", script: toolScript };
+  if (haystack.includes("read-file-rel"))
+    return { name: "read-file-relative", script: readFileRelativeScript };
   if (haystack.includes("read-file")) return { name: "read-file", script: readFileScript };
   if (haystack.includes("burst")) return { name: "burst", script: burstScript };
   if (haystack.includes("perfmark")) return { name: "perfmark", script: perfMarkScript };
@@ -1147,6 +1209,164 @@ async function handleRequest(req, res) {
         data_base64: file.dataBase64,
         byte_count: file.byteCount,
       },
+    });
+    return;
+  }
+
+  // --- 文件浏览器（P0-P2：/api/runtime/fs/roots|list|preview）---
+  // 契约对齐 backend/internal/filebrowse：roots 给可用作用域根，list 只铺根层，
+  // preview 只认 notes.txt（其余路径与后端一致 404）。路径一律「相对作用域根」。
+  if (path === "/api/runtime/fs/roots" && req.method === "GET") {
+    writeJson(res, 200, {
+      roots: [
+        {
+          scope: E2E_FS_SCOPE,
+          kind: "session",
+          name: "e2e-workspace",
+          path: E2E_FS_ROOT_PATH,
+          exists: true,
+          is_git_repo: true,
+          git_root: E2E_FS_ROOT_PATH,
+        },
+      ],
+      count: 1,
+    });
+    return;
+  }
+
+  if (path === "/api/runtime/fs/list" && req.method === "GET") {
+    const requestedDir = (url.searchParams.get("path") ?? "").trim();
+    const isRoot = requestedDir === "" || requestedDir === ".";
+    writeJson(res, 200, {
+      dir: {
+        path: isRoot ? "" : requestedDir,
+        abs_path: isRoot ? E2E_FS_ROOT_PATH : `${E2E_FS_ROOT_PATH}/${requestedDir}`,
+        parent: isRoot
+          ? ""
+          : requestedDir.includes("/")
+            ? requestedDir.slice(0, requestedDir.lastIndexOf("/"))
+            : "",
+        is_root: isRoot,
+      },
+      // 只铺根层：用例不进入子目录，子层如实给空数组（不伪造条目）。
+      entries: isRoot ? mockFsTreeEntries() : [],
+      next_cursor: null,
+      has_more: false,
+      truncated: false,
+      sort: "type_then_name",
+    });
+    return;
+  }
+
+  if (path === "/api/runtime/fs/preview" && req.method === "GET") {
+    const target = (url.searchParams.get("path") ?? "").trim();
+    if (target !== "notes.txt") {
+      writeJson(res, 404, { error: `path does not exist: ${target}` });
+      return;
+    }
+    const text = [
+      E2E_PREVIEW_MARKER,
+      "第 2 行：预览区可见，说明高度链没有被内容高度顶出可视范围。",
+      "第 3 行：行号与 mtime 都来自服务端结论。",
+    ].join("\n");
+    writeJson(res, 200, {
+      kind: "text",
+      path: target,
+      abs_path: `${E2E_FS_ROOT_PATH}/notes.txt`,
+      size: 96,
+      mtime: E2E_MTIME_SECONDS,
+      mime: "text/plain",
+      text,
+      truncated: false,
+      line_count: 3,
+      encoding: "utf-8",
+    });
+    return;
+  }
+
+  // --- Git 变更面（P3-P4：/api/runtime/git/status|diff|commits）---
+  // status 给 61 个变更（列表必然溢出）；diff/commits 给最小合法载荷
+  // （git-surface 挂载即取 diff 与 commits，缺任一路由会渲染成失败态）。
+  if (path === "/api/runtime/git/status" && req.method === "GET") {
+    const unstaged = [];
+    for (let index = 1; index <= E2E_CHANGED_FILE_COUNT; index += 1) {
+      unstaged.push({
+        path: `src/module-${String(index).padStart(3, "0")}.ts`,
+        status: "M",
+        insertions: index,
+        deletions: index,
+        binary: false,
+      });
+    }
+    writeJson(res, 200, {
+      repo: {
+        root: E2E_FS_ROOT_PATH,
+        branch: "e2e-main",
+        detached: false,
+        head: "0123456789abcdef0123456789abcdef01234567",
+        ahead: 0,
+        behind: 0,
+        is_bare: false,
+      },
+      clean: false,
+      staged: [
+        { path: "src/staged.ts", status: "A", insertions: 3, deletions: 0, binary: false },
+      ],
+      unstaged,
+      untracked: [],
+      conflicts: [],
+      warnings: [],
+      generated_at: E2E_MTIME_SECONDS,
+    });
+    return;
+  }
+
+  if (path === "/api/runtime/git/diff" && req.method === "GET") {
+    const file = (url.searchParams.get("file") ?? "").trim();
+    writeJson(res, 200, {
+      file: { path: file, status: "M", is_binary: false, is_submodule: false },
+      target: "working",
+      context: 3,
+      whitespace: "show",
+      insertions: 1,
+      deletions: 1,
+      hunks: [
+        {
+          header: "@@ -1,4 +1,4 @@",
+          old_start: 1,
+          old_lines: 4,
+          new_start: 1,
+          new_lines: 4,
+          lines: [
+            { type: "context", old_no: 1, new_no: 1, text: "export function e2e() {" },
+            { type: "del", old_no: 2, new_no: null, text: "  return 1;" },
+            { type: "add", old_no: null, new_no: 2, text: "  return 2;" },
+            { type: "context", old_no: 3, new_no: 3, text: "}" },
+          ],
+        },
+      ],
+      raw: "",
+      parse_error: "",
+      truncated: false,
+      generated_at: E2E_MTIME_SECONDS,
+    });
+    return;
+  }
+
+  if (path === "/api/runtime/git/commits" && req.method === "GET") {
+    writeJson(res, 200, {
+      commits: [
+        {
+          sha: "0123456789abcdef0123456789abcdef01234567",
+          short_sha: "0123456",
+          author: "e2e",
+          authored_at: "2025-09-16T05:20:00Z",
+          subject: "e2e fixture",
+          refs: [],
+        },
+      ],
+      next_cursor: null,
+      has_more: false,
     });
     return;
   }

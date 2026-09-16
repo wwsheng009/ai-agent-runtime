@@ -347,7 +347,13 @@ export function FileBrowserSurface({ sessionId, workspacePath }: FileBrowserSurf
     : [];
 
   return (
-    <div className="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)] overflow-hidden" data-testid="file-browser-surface">
+    // 列必须是 `minmax(0,1fr)`：隐式 `auto` 列的轨道尺寸吃内容最小宽度（实测被撑到 535.7px，
+    // 容器只有 460px），整块面板会右溢出被 `overflow-hidden` 裁掉 —— 表现就是行尾的
+    // 修改时间/大小列被切、树看着「没有滚动条」。显式 0 下限允许列收缩到容器宽度。
+    <div
+      className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden"
+      data-testid="file-browser-surface"
+    >
       <ScopeHeader
         activeScope={scope}
         canGoUp={currentDir !== ""}
@@ -383,8 +389,10 @@ export function FileBrowserSurface({ sessionId, workspacePath }: FileBrowserSurf
         })}
         onDropFiles={handlePickUpload}
       >
-      <div className="grid min-h-0 grid-rows-[minmax(0,3fr)_minmax(0,2fr)] gap-2 overflow-hidden p-2">
-        <div className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto] gap-1">
+      {/* `flex-1` 是必需的：本层是 FileDropTarget（flex 列）的子项，缺它就退回内容高度，
+          `minmax(0,3fr/2fr)` 拿不到确定高度 → 树永不溢出（无滚动条）、预览区被裁到区外。 */}
+      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)] grid-rows-[minmax(0,3fr)_minmax(0,2fr)] gap-2 overflow-hidden p-2">
+        <div className="grid min-h-0 grid-cols-[minmax(0,1fr)] grid-rows-[minmax(0,1fr)_auto] gap-1">
           <FileTreeList
             expanded={browser.expanded}
             filterText={filterText}

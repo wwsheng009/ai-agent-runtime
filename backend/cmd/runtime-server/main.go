@@ -24,7 +24,9 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	"github.com/wwsheng009/ai-agent-runtime/internal/filebrowse"
 	"github.com/wwsheng009/ai-agent-runtime/internal/filetransport"
+	"github.com/wwsheng009/ai-agent-runtime/internal/gitbrowse"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
@@ -1104,7 +1106,21 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	router := mux.NewRouter()
 	router.UseEncodedPath()
 	router.HandleFunc("/healthz", runtimeInfoHandler).Methods(http.MethodGet)
-	handler.RegisterRoutes(router)
+	runtimeRouter := handler.RegisterRoutes(router)
+	// 右侧栏「文件」面板（P0–P2）：/fs/roots|list|stat|preview|download + /fs/upload/*。
+	// 追加式注册：不改变既有 /fs/read-file 等端点的语义；服务未注入时模块内统一 503 降级。
+	if runtimeRouter != nil {
+		if roots := handler.FSBrowserRoots(); roots != nil {
+			skillsapi.RegisterFSBrowserRoutes(runtimeRouter, filebrowse.NewService(filebrowse.Deps{
+				Roots:  roots,
+				Limits: filebrowse.DefaultLimits(),
+			}))
+			// 右侧栏「Git」面板（P3 只读 + P4-1 stage/unstage）：/git/status|diff|commits|stage。
+			// 与 /fs/* 共用同一个作用域解析器（gitbrowse.RootResolver 与 fsscope.RootResolver 同形）。
+			// git 不可用时由服务层返回 git_unavailable（503），不影响启动。
+			skillsapi.RegisterGitBrowseRoutes(runtimeRouter, gitbrowse.NewService(gitbrowse.Deps{Roots: roots}))
+		}
+	}
 	if webui.Available() {
 		router.PathPrefix("/").Handler(webui.Handler())
 	} else {

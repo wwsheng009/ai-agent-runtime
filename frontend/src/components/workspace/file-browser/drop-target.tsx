@@ -7,6 +7,8 @@
 //     并在 drop / dragleave 归零 / 组件卸载时清理，避免遮罩卡住。
 import { useEffect, useRef, useState, type DragEvent, type ReactNode } from "react";
 
+import { cn } from "@/lib/utils";
+
 function hasFiles(event: DragEvent<HTMLElement>): boolean {
   const types = event.dataTransfer?.types;
   if (!types) {
@@ -38,7 +40,9 @@ export function FileDropTarget({
 
   return (
     <div
-      className={className}
+      // 必须是 **flex 列容器**：子面在内部用 `flex-1` + `minmax(0,…)` 网格建立高度链，
+      // 若这里只是块级 div，内部网格高度退化为内容高度 → 树不产生滚动条、预览区被裁掉。
+      className={cn("flex min-h-0 flex-col", className)}
       data-testid="file-drop-target"
       onDragEnter={(event) => {
         if (!hasFiles(event)) {
@@ -80,7 +84,7 @@ export function FileDropTarget({
         }
       }}
     >
-      <div className="relative h-full min-h-0">
+      <div className="relative flex min-h-0 flex-1 flex-col">
         {children}
         {active ? (
           <div

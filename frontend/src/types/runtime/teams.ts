@@ -271,8 +271,20 @@ export type RuntimeCheckTeamPathClaimsResponse = {
   conflicts: RuntimePathClaimConflict[];
 };
 
-export type RuntimeErrorPayload = {
+/**
+ * 嵌套错误体：`/api/runtime/fs/*`、`/api/runtime/git/*` 等新端点用
+ * `{"error":{"code":…,"message":…}}`，旧端点仍是 `{"error":"…","code":…}`。
+ * 读取一律走 `readErrorEnvelope()`（api/runtime/shared.ts），不要再假设 `error` 是字符串。
+ */
+export type RuntimeErrorEnvelope = {
+  code?: string;
+  message?: string;
+  /** 少数后端（如 OpenAI 兼容层）把消息放在嵌套的 `error` 字段里。 */
   error?: string;
+};
+
+export type RuntimeErrorPayload = {
+  error?: string | RuntimeErrorEnvelope;
   code?: string;
   context?: Record<string, unknown>;
   request_id?: string;

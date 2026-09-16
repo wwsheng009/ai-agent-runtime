@@ -221,7 +221,10 @@ export function WorkspaceMainSection({
   );
 
   // P2-1A：工具行文件路径的运行时预览（fs/read-file，只读）；未命中关联产物时兜底。
-  const filePreview = useFilePreview();
+  // 工具行路径来自 agent，可能是「相对会话工作目录」的写法：先按会话作用域根解析成绝对路径
+  // 再读（见 use-file-preview 的路径解析注释），否则会被读取端点按运行时进程 cwd 解析到
+  // `backend/` 下——这正是「文件明明在工作区里却报 path not found」的成因。
+  const filePreview = useFilePreview({ sessionId: selectedThread.sessionId });
 
   // P2-7：composer `/` 命令面（清单 / `/model` 候选与弹窗 / 执行器 / 回执文案）。
   // `/export`、`/rename`、`/model` 分别复用轨迹导出、侧栏重命名与常驻座位选择器的

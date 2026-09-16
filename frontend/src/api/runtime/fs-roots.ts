@@ -113,6 +113,22 @@ export function pickDefaultRoot(roots: readonly FsRoot[]): FsRoot | null {
   return roots.find((root) => root.kind === "session") ?? roots[0] ?? null;
 }
 
+/**
+ * 预览路径解析用的根选择：**优先「会话目录」根**（agent 产出相对路径的基准），
+ * 其次进程 `cwd` 根（会话未声明工作目录时，agent 与运行时进程同目录）。
+ *
+ * 与 `pickDefaultRoot` 的差异：这里**不退回服务端顺序首根**——把 agent 的相对路径
+ * 拼到任意一个注册工作区根上是纯粹的猜测（猜错就是读错文件），宁可返回 `null`
+ * 让调用方保持原样路径（不猜路径、不伪造前缀）。
+ */
+export function pickPreviewRoot(roots: readonly FsRoot[]): FsRoot | null {
+  return (
+    roots.find((root) => root.kind === "session") ??
+    roots.find((root) => root.kind === "cwd") ??
+    null
+  );
+}
+
 /** 503/404/501 表示能力未就绪：UI 退化为「只用当前会话工作目录」并提示。 */
 export function isFsRootsUnavailable(error: unknown): boolean {
   return (

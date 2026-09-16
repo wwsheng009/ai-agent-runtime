@@ -12,8 +12,42 @@ export class RuntimeApiError extends Error {
   }
 }
 
+/**
+ * 统一收口两种后端错误体（**这是必修的健壮性边界**）：
+ *   * 扁平形状：`{ "error": "消息", "code": "…" }`（skills 既有 handler 多数如此）；
+ *   * 嵌套形状：`{ "error": { "code": "…", "message": "…" } }`（/fs/*、/git/*、cache analytics 等）。
+ *
+ * 曾经的缺陷：直接 `payload.error.trim()`，当 `error` 是对象时抛
+ * `payload.error.trim is not a function`，把「后端的真实错误（如 404 repo_not_found）」
+ * 变成一条前端 TypeError —— UI 既看不到原因，也无法按 code 分支降级。
+ * 这里只做形状归一化：**不猜语义、不覆盖后端码**，缺字段时如实给空串。
+ */
+export function readErrorEnvelope(payload: RuntimeErrorPayload | null): {
+  code: string;
+  message: string;
+} {
+  const flatCode = typeof payload?.code === "string" ? payload.code.trim() : "";
+  const raw = payload?.error;
+  if (typeof raw === "string") {
+    return { code: flatCode, message: raw.trim() };
+  }
+  const nested = asRecord(raw);
+  if (nested) {
+    return {
+      code: flatCode || readString(nested.code),
+      // 兼容 `message` 与嵌套 `error` 两种字段名；两者都缺时给空串，由调用方兜底文案。
+      message: readString(nested.message) || readString(nested.error),
+    };
+  }
+  return { code: flatCode, message: "" };
+}
+
 export function isRuntimeApiErrorCode(error: unknown, code: string) {
-  return error instanceof RuntimeApiError && error.payload?.code === code;
+  if (!(error instanceof RuntimeApiError)) {
+    return false;
+  }
+  // 嵌套形状的 code 位于 `error.code`，必须一起看，否则调用方无法按新端点的错误码降级。
+  return readErrorEnvelope(error.payload).code === code;
 }
 
 export function trimTrailingSlash(value: string) {
@@ -60,11 +94,12 @@ export function buildErrorMessage(
   payload: RuntimeErrorPayload | null,
 ) {
   const requestId = payload?.request_id?.trim();
-  if (payload?.code === "SESSION_LEASE_CONFLICT") {
+  const { code, message } = readErrorEnvelope(payload);
+  if (code === "SESSION_LEASE_CONFLICT") {
     return appendRequestId(buildSessionLeaseConflictMessage(payload), requestId);
   }
-  if (payload?.error && payload.error.trim()) {
-    return appendRequestId(payload.error.trim(), requestId);
+  if (message) {
+    return appendRequestId(message, requestId);
   }
   if (requestId) {
     return `runtime request failed with status ${status} (request_id: ${requestId})`;
@@ -72,10 +107,10 @@ export function buildErrorMessage(
   return `runtime request failed with status ${status}`;
 }
 
-function buildSessionLeaseConflictMessage(payload: RuntimeErrorPayload) {
-  const lease = asRecord(payload.context?.lease);
+function buildSessionLeaseConflictMessage(payload: RuntimeErrorPayload | null) {
+  const lease = asRecord(payload?.context?.lease);
   if (!lease) {
-    return payload.error?.trim() || "This session is currently active in another runtime.";
+    return readErrorEnvelope(payload).message || "This session is currently active in another runtime.";
   }
 
   const ownerKind = readString(lease.owner_kind);
@@ -88,7 +123,7 @@ function buildSessionLeaseConflictMessage(payload: RuntimeErrorPayload) {
     hostname ? `host ${hostname}` : "",
   ].filter(Boolean);
   const location = locationParts.length > 0 ? ` (${locationParts.join(", ")})` : "";
-  const suggestedAction = readString(payload.context?.suggested_action);
+  const suggestedAction = readString(payload?.context?.suggested_action);
   const expiresAt = readString(lease.expires_at);
 
   let message = `This session is currently active in ${ownerLabel}${location}.`;

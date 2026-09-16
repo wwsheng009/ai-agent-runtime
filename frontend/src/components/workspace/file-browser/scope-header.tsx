@@ -93,7 +93,14 @@ export function ScopeHeader(props: ScopeHeaderProps) {
   const activeRoot = roots.find((root) => root.scope === activeScope);
 
   return (
-    <header className={cn("grid gap-2 border-b border-border/60 px-3 py-2", className)}>
+    // 列显式 `minmax(0,1fr)`：隐式 `auto` 列的轨道会吃内容最小宽度（实测把头部撑到 533px
+    // 而容器只有 460px），尾部控件因此被 `overflow-hidden` 裁掉、点不到。0 下限允许收缩。
+    <header
+      className={cn(
+        "grid grid-cols-[minmax(0,1fr)] gap-2 border-b border-border/60 px-3 py-2",
+        className,
+      )}
+    >
       <div className="flex items-center gap-2">
         <label className="sr-only" htmlFor="file-browser-scope">
           {t("panels.fileBrowser.scope.label")}
@@ -169,7 +176,10 @@ export function ScopeHeader(props: ScopeHeaderProps) {
         ) : null}
       </div>
 
-      <div className="flex items-center gap-2">
+      {/* `flex-wrap`：本行是路径 + 角标 + 4 个固定控件（隐藏开关 / 排序 / 上传 / 传输队列），
+          窄右栏里合计宽度会超过容器（实测 513px > 436px）。不换行就只能右溢被 `overflow-hidden`
+          裁掉——被裁的控件点不到。换行保证控件永远可达，代价只是头部多占一行。 */}
+      <div className="flex flex-wrap items-center gap-2">
         <span className="truncate font-mono text-[11px] text-muted-foreground" title={currentDir || "/"}>
           /{currentDir}
         </span>

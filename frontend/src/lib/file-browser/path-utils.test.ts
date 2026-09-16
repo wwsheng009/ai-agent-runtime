@@ -8,6 +8,7 @@ import {
   fileExtension,
   formatEntryMtime,
   guessPrismLanguage,
+  isAbsoluteFilePath,
   isEnterableDirectory,
   isImagePath,
   isMarkdownPath,
@@ -17,6 +18,7 @@ import {
   parentRelativePath,
   splitRelativeSegments,
   toAbsoluteDisplayPath,
+  toAbsolutePathFromRoot,
 } from "@/lib/file-browser/path-utils";
 import type { FsEntry } from "@/types/runtime/fs-browser";
 
@@ -125,5 +127,58 @@ describe("formatEntryMtime", () => {
     expect(formatEntryMtime(new Date(2026, 8, 16, 3, 4).getTime())).toBe(
       "2026-09-16 03:04",
     );
+  });
+
+  it("线上单位是 Unix 秒：不再被当成毫秒渲染成 1970-01", () => {
+    const localMs = new Date(2026, 8, 16, 3, 4).getTime();
+    // 同一个瞬间，秒与毫秒两种写法必须渲染成同一行文本。
+    expect(formatEntryMtime(Math.floor(localMs / 1000))).toBe("2026-09-16 03:04");
+    expect(formatEntryMtime(Math.floor(localMs / 1000))).toBe(
+      formatEntryMtime(localMs),
+    );
+  });
+});
+
+describe("isAbsoluteFilePath", () => {
+  it("盘符与根前缀视为绝对：这类路径绝不与任何根拼接", () => {
+    expect(isAbsoluteFilePath("E:\\projects\\ai\\ai-agent-runtime\\frontend\\src\\app.tsx")).toBe(true);
+    expect(isAbsoluteFilePath("E:/projects/ai/ai-agent-runtime/frontend/src/app.tsx")).toBe(true);
+    expect(isAbsoluteFilePath("/workspace/e2e/notes.txt")).toBe(true);
+    expect(isAbsoluteFilePath("\\\\server\\share\\a.txt")).toBe(true);
+    expect(isAbsoluteFilePath("  C:/temp/x.log  ")).toBe(true);
+  });
+
+  it("相对写法（含 `.` 前缀与反斜杠分隔）一律不当作绝对", () => {
+    expect(isAbsoluteFilePath("frontend/src/app.tsx")).toBe(false);
+    expect(isAbsoluteFilePath("./src/app.tsx")).toBe(false);
+    expect(isAbsoluteFilePath("src\\app.tsx")).toBe(false);
+    expect(isAbsoluteFilePath("   ")).toBe(false);
+  });
+});
+
+describe("toAbsolutePathFromRoot", () => {
+  it("相对路径按根拼接，分隔符跟随根的写法", () => {
+    expect(
+      toAbsolutePathFromRoot("E:\\projects\\ai\\ai-agent-runtime", "frontend/src/app.tsx"),
+    ).toBe("E:\\projects\\ai\\ai-agent-runtime\\frontend\\src\\app.tsx");
+    expect(toAbsolutePathFromRoot("E:/workspace/e2e/", "notes/readme.md")).toBe(
+      "E:/workspace/e2e/notes/readme.md",
+    );
+  });
+
+  it("绝对路径原样返回（无论根是否已知，都不做二次拼接）", () => {
+    expect(toAbsolutePathFromRoot("E:/workspace/e2e", "E:\\projects\\x\\app.tsx")).toBe(
+      "E:\\projects\\x\\app.tsx",
+    );
+    expect(toAbsolutePathFromRoot("E:/workspace/e2e", "/workspace/e2e/notes.txt")).toBe(
+      "/workspace/e2e/notes.txt",
+    );
+    expect(toAbsolutePathFromRoot("", "C:\\temp\\a.txt")).toBe("C:\\temp\\a.txt");
+  });
+
+  it("根缺失时返回空串，由调用方降级（不猜盘符、不伪造前缀）", () => {
+    expect(toAbsolutePathFromRoot("", "frontend/src/app.tsx")).toBe("");
+    expect(toAbsolutePathFromRoot("   ", "frontend/src/app.tsx")).toBe("");
+    expect(toAbsolutePathFromRoot("E:/workspace/e2e", "   ")).toBe("");
   });
 });

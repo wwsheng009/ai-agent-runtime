@@ -4,6 +4,8 @@
 //   * `path` 一律相对作用域根，分隔符统一 `/`，绝对路径由后端拒绝（path_must_be_relative）；
 //   * `ext` 可能缺省，因此预览分流所需的扩展名在本地从 `name` 兜底推导（仅用于选择渲染器）；
 //   * 绝对路径只用于展示与「复制绝对路径」，请求永远用 `scope` + 相对 `path`。
+//     例外是消息列表预览：工具行里的路径来自 agent，可能是「相对会话工作目录」的写法，
+//     必须先用 `toAbsolutePathFromRoot` 解析成绝对路径再交给 `POST /fs/read-file`（见该函数注释）。
 //
 // 归一化纪律：
 //   * 入参先做 `\` → `/`、合并重复 `/`、去首尾 `/`、丢弃 `.` 段；
@@ -94,6 +96,45 @@ export function toAbsoluteDisplayPath(
   }
   const separator = root.includes("\\") ? "\\" : "/";
   return `${trimmedRoot}${separator}${segments.join(separator)}`;
+}
+
+/**
+ * 是否「绝对路径」：POSIX 根前缀（`/x`、`\x`）或 Windows 盘符（`C:\x`、`C:/x`、`C:x`）。
+ *
+ * 与后端 `filepath.IsAbs` 刻意不完全等价：Windows 上 `filepath.IsAbs("/x")` 为 false，
+ * 这里把根前缀也算作绝对——判据偏保守的方向是「宁可原样透传，也不与任何根拼接」，
+ * 拼接只对「明确相对」的写法生效，避免把用户给的绝对路径拼成怪路径。
+ */
+export function isAbsoluteFilePath(path: string): boolean {
+  const value = path.trim();
+  if (!value) {
+    return false;
+  }
+  if (value.startsWith("/") || value.startsWith("\\")) {
+    return true;
+  }
+  return /^[A-Za-z]:/.test(value);
+}
+
+/**
+ * 相对路径 → 绝对路径（**请求用**，与 `toAbsoluteDisplayPath` 同一拼接口径）：
+ * 绝对路径原样返回，相对路径按根拼接；根缺失时返回空串，由调用方决定降级。
+ *
+ * 为什么需要它：`POST /fs/read-file` 的既有契约是「相对路径按**运行时进程工作目录**解析」，
+ * 而 agent 工具行里的相对路径是相对**会话工作目录**的（运行时进程 cwd 常常是 `backend/`，
+ * 两者不是一回事）。文件浏览器用 `scope` + 相对 `path` 由后端 `fsscope` 解析，消息列表预览
+ * 没有 scope 参数，因此由前端拿 `/fs/roots` 的会话根先解析成绝对路径，再把绝对路径交给读取端点。
+ * 这里不猜盘符、不伪造前缀：根未知就返回空串，调用方如实退回原样路径。
+ */
+export function toAbsolutePathFromRoot(rootPath: string, path: string): string {
+  const value = path.trim();
+  if (!value) {
+    return "";
+  }
+  if (isAbsoluteFilePath(value)) {
+    return value;
+  }
+  return toAbsoluteDisplayPath(rootPath, value);
 }
 
 /** 扩展名（小写，含前导点；无扩展名返回空串）。 */
@@ -188,6 +229,18 @@ export function buildFallbackRoot(sessionId: string, workspacePath?: string): Fs
 const TWO_DIGITS = (value: number) => String(value).padStart(2, "0");
 
 /**
+ * 线上 `mtime` 单位是 **Unix 秒**（后端 `info.ModTime().Unix()`，见规划 §5.3 样例
+ * `"mtime": 1758000000`），而 `Date` 要毫秒。此前直接把秒喂给 `new Date()`，
+ * 18 亿秒被当成 18 亿毫秒 → 界面恒显示 1970-01-21/22。
+ *
+ * 判据：毫秒时间戳在当代文件上是 1e12 量级（≈2001-09 之后），秒是 1e9 量级；
+ * 因此 <1e12 一律按秒解释。只做单位归一，不改数值语义（不猜、不补默认值）。
+ */
+export function toEpochMillis(value: number): number {
+  return Math.abs(value) < 1e12 ? value * 1000 : value;
+}
+
+/**
  * 展示用修改时间。后端 `mtime` 缺失时约定为 -1（探测失败），此处如实显示「—」，
  * 不把 -1 渲染成 1970 年（避免用假数据充数）。
  */
@@ -195,7 +248,7 @@ export function formatEntryMtime(mtime: number): string {
   if (!Number.isFinite(mtime) || mtime <= 0) {
     return "";
   }
-  const date = new Date(mtime);
+  const date = new Date(toEpochMillis(mtime));
   if (Number.isNaN(date.getTime())) {
     return "";
   }

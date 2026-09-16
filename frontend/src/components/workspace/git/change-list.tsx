@@ -100,7 +100,13 @@ export function GitChangeList({
   };
 
   return (
-    <div className="grid min-h-0 gap-2" data-testid="git-change-list">
+    // `h-full` + 显式行模板：列表容器必须落在 `minmax(0,1fr)` 行里才会滚动。
+    // 此前隐式行全是 auto：容器高度=内容高度，父级 PANE 又是 `overflow-hidden`，
+    // 于是内容被裁切且不会出现任何滚动条。
+    <div
+      className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-2"
+      data-testid="git-change-list"
+    >
       <div className="flex items-center gap-2">
         <span className="app-text-11 font-medium text-muted-foreground">
           {t("panels.git.list.title")}

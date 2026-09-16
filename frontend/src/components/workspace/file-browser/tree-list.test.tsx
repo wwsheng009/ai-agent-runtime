@@ -208,6 +208,32 @@ describe("FileTreeList 渲染与 a11y", () => {
     const loadingRow = [...document.body.querySelectorAll('[role="treeitem"][aria-level="2"]')].at(-1);
     expect(loadingRow?.querySelector("button")).toBeNull();
   });
+
+  it("文件行展示人类可读大小与修改时间；缺失时如实降级（不显示 1970）", () => {
+    // 夹具必须是**线上单位（Unix 秒）**：此前用毫秒夹具，恰好绕过了
+    // 「秒被当成毫秒 → 恒显示 1970-01-21/22」这个真实缺陷。
+    const localMs = new Date(2026, 0, 2, 3, 4).getTime();
+    const entries = [
+      entry({ name: "big.bin", path: "big.bin", size: 2048, mtime: Math.floor(localMs / 1000) }),
+      entry({ name: "unknown.txt", path: "unknown.txt", size: -1, mtime: 0 }),
+    ];
+    renderList({ listings: { "": listing(entries) } });
+
+    const bigRow = rowByPath("big.bin");
+    const bigSize = bigRow?.querySelector('[data-testid="file-tree-size"]');
+    expect(bigSize?.textContent).toBe("2.0 KB");
+    // 原始字节数仍可查（title），避免「2.0 KB」被当成精确值。
+    expect(bigSize?.getAttribute("title")).toBe("2048 B");
+    const bigMtime = bigRow?.querySelector('[data-testid="file-tree-mtime"]');
+    expect(bigMtime?.textContent).toBe("2026-01-02 03:04");
+    expect(bigMtime?.textContent ?? "").not.toContain("1970");
+
+    const unknownRow = rowByPath("unknown.txt");
+    const unknownSize = unknownRow?.querySelector('[data-testid="file-tree-size"]');
+    expect((unknownSize?.textContent ?? "").trim()).not.toBe("");
+    expect(unknownSize?.getAttribute("title")).toBeNull();
+    expect(unknownRow?.querySelector('[data-testid="file-tree-mtime"]')).toBeNull();
+  });
 });
 
 // P4：Git 角标 / 多选（Ctrl 切换、Shift 范围）/ 右键菜单。角标只断言 DOM 契约（data-*），

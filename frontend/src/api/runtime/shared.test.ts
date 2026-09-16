@@ -5,6 +5,7 @@ import {
   fetchRuntimeJson,
   getSessionLeaseConflictTitle,
   isRuntimeApiErrorCode,
+  readErrorEnvelope,
   RuntimeApiError,
 } from "@/api/runtime/shared";
 
@@ -102,6 +103,55 @@ describe("runtime shared helpers", () => {
     expect(error.status).toBe(409);
     expect(isRuntimeApiErrorCode(error, "SESSION_LEASE_CONFLICT")).toBe(true);
     expect(isRuntimeApiErrorCode(error, "VALIDATION_FAILED")).toBe(false);
+  });
+});
+
+// 回归：/fs/*、/git/* 端点返回 `{"error":{"code":…,"message":…}}`。
+// 旧实现直接 `payload.error.trim()`，在对象上抛 `payload.error.trim is not a function`，
+// 把后端的真实 404/400 变成前端 TypeError —— git 变更面因此「无法浏览」。
+describe("嵌套错误体归一化", () => {
+  it("读取嵌套的 code/message，且不再抛 trim 类型错误", () => {
+    const payload = {
+      error: { code: "repo_not_found", message: "scope is not inside a git repository" },
+      request_id: "trace_nested",
+    };
+
+    expect(() => buildErrorMessage(404, payload)).not.toThrow();
+    expect(buildErrorMessage(404, payload)).toBe(
+      "scope is not inside a git repository (request_id: trace_nested)",
+    );
+  });
+
+  it("嵌套 code 参与降级判据（isRuntimeApiErrorCode）", () => {
+    const error = new RuntimeApiError(404, {
+      error: { code: "repo_not_found", message: "no git repository at scope" },
+    });
+
+    expect(isRuntimeApiErrorCode(error, "repo_not_found")).toBe(true);
+    expect(isRuntimeApiErrorCode(error, "scope_not_found")).toBe(false);
+  });
+
+  it("嵌套缺 message 时如实回退（不伪造文案），并兼容嵌套 error 字段", () => {
+    expect(readErrorEnvelope({ error: { code: "session_not_found" } })).toEqual({
+      code: "session_not_found",
+      message: "",
+    });
+    expect(readErrorEnvelope({ error: { error: "legacy nested message" } })).toEqual({
+      code: "",
+      message: "legacy nested message",
+    });
+    expect(buildErrorMessage(500, { error: { code: "internal_error" } })).toBe(
+      "runtime request failed with status 500",
+    );
+  });
+
+  it("扁平形状与既有 code 优先级保持兼容", () => {
+    expect(readErrorEnvelope({ error: "flat message", code: "flat_code" })).toEqual({
+      code: "flat_code",
+      message: "flat message",
+    });
+    expect(readErrorEnvelope({ error: 42 as unknown as string })).toEqual({ code: "", message: "" });
+    expect(readErrorEnvelope(null)).toEqual({ code: "", message: "" });
   });
 });
 

@@ -4,11 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   FS_ROOTS_PATH,
+  buildFsRootsUrl,
   fetchFsRoots,
   isFsRootsUnavailable,
   normalizeFsRootsPayload,
+  pickDefaultRoot,
+  pickPreviewRoot,
 } from "@/api/runtime/fs-roots";
 import { RuntimeApiError } from "@/api/runtime/shared";
+import type { FsRoot } from "@/types/runtime/fs-browser";
 
 describe("normalizeFsRootsPayload", () => {
   it("保留 scope/kind/name/path 与仓库探测结果", () => {
@@ -149,5 +153,66 @@ describe("fetchFsRoots", () => {
     expect(error).toBeInstanceOf(RuntimeApiError);
     expect(isFsRootsUnavailable(error)).toBe(true);
     expect(isFsRootsUnavailable(new Error("boom"))).toBe(false);
+  });
+
+  it("带 sessionId 时编码进 session_id 查询串；空白 sessionId 不落进 URL", async () => {
+    respondWith({ roots: [] });
+
+    await fetchFsRoots({ sessionId: "session:abc 1" });
+    await fetchFsRoots({ sessionId: "   " });
+    await fetchFsRoots();
+
+    const first = new URL(calls[0].url, "http://runtime.test");
+    expect(first.pathname).toBe(FS_ROOTS_PATH);
+    expect(first.searchParams.get("session_id")).toBe("session:abc 1");
+    expect(new URL(calls[1].url, "http://runtime.test").search).toBe("");
+    expect(new URL(calls[2].url, "http://runtime.test").search).toBe("");
+    expect(buildFsRootsUrl(null)).toBe(buildFsRootsUrl());
+  });
+});
+
+describe("pickDefaultRoot", () => {
+  function root(kind: FsRoot["kind"], scope: string): FsRoot {
+    return { scope, kind, name: scope, path: `/srv/${scope}`, exists: true, isGitRepo: false };
+  }
+
+  it("优先会话目录根（kind=session），无视它在列表中的位置", () => {
+    const roots = [root("workspace", "workspace:wd-1"), root("session", "session:s1"), root("cwd", "cwd")];
+    expect(pickDefaultRoot(roots)?.scope).toBe("session:s1");
+  });
+
+  it("没有会话根时退回首根；空列表给 null（由调用方兜底）", () => {
+    expect(pickDefaultRoot([root("workspace", "workspace:wd-1"), root("cwd", "cwd")])?.scope).toBe(
+      "workspace:wd-1",
+    );
+    expect(pickDefaultRoot([])).toBeNull();
+  });
+});
+
+describe("pickPreviewRoot", () => {
+  function root(kind: FsRoot["kind"], scope: string, path: string): FsRoot {
+    return { scope, kind, name: scope, path, exists: true, isGitRepo: false };
+  }
+
+  it("优先会话目录根：agent 的工具行相对路径就是相对它的", () => {
+    const roots = [
+      root("workspace", "workspace:wd-1", "E:/ai/other"),
+      root("session", "session:s1", "E:/projects/ai/ai-agent-runtime"),
+      root("cwd", "cwd", "E:/projects/ai/ai-agent-runtime/backend"),
+    ];
+    expect(pickPreviewRoot(roots)?.path).toBe("E:/projects/ai/ai-agent-runtime");
+  });
+
+  it("没有会话根时退进程 cwd 根（agent 与运行时进程同目录），不取任意工作区根", () => {
+    const roots = [
+      root("workspace", "workspace:wd-1", "E:/ai/other"),
+      root("cwd", "cwd", "E:/projects/ai/ai-agent-runtime/backend"),
+    ];
+    expect(pickPreviewRoot(roots)?.scope).toBe("cwd");
+  });
+
+  it("只有工作区根或空列表时给 null：宁可原样透传，也不把相对路径拼到猜来的根上", () => {
+    expect(pickPreviewRoot([root("workspace", "workspace:wd-1", "E:/ai/other")])).toBeNull();
+    expect(pickPreviewRoot([])).toBeNull();
   });
 });
