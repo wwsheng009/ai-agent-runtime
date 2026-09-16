@@ -3,6 +3,11 @@ import type { DeepStringShape } from "../../shape";
 import type { zhWorkspacePanelsShell } from "../../zh-CN/workspace/panels-shell";
 
 export const enWorkspacePanelsShell = {
+  panelTabs: {
+    files: "Files",
+    git: "Git changes",
+    disabledNoSession: "Select a session to use this tab",
+  },
   threadStrip: {
     activeThread: "Active thread",
     updatedAt: "{{time}} updated",

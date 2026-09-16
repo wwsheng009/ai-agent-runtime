@@ -1,6 +1,10 @@
-// 由 components/workspace/artifact-panel.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
+// 右侧栏面板宿主（PanelHost）：页签栏 + 面分发。
+//
+// 改造（P0-1）：页签由 `components/workspace/panel-registry.ts` 驱动，面分发改为
+// 「注册表声明 → 自包含面懒加载 / 宿主自渲染面」；既有 4 个面的行为、a11y 关联与
+// data-testid 保持不变，新增 files / git 两个自包含面。
 
-import { Suspense, useId, useState } from "react";
+import { Suspense, useId, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ArtifactPanelArtifactSurface } from "@/components/workspace/artifact-panel/artifact-list";
@@ -10,13 +14,22 @@ import {
   ArtifactPanelPlanFallback,
   ArtifactPanelPlanSurface,
 } from "@/components/workspace/artifact-panel/lazy-surfaces";
-import { ArtifactPanelSurfaceTabs } from "@/components/workspace/artifact-panel/surface-tabs";
+import { SelfContainedSurfacePanel } from "@/components/workspace/artifact-panel/surface-mount";
+import {
+  ArtifactPanelSurfaceTabs,
+} from "@/components/workspace/artifact-panel/surface-tabs";
+import { surfaceBadgeClass } from "@/components/workspace/artifact-panel/surface-tone";
 import {
   type ArtifactPanelProps,
   type ArtifactPanelSurface,
-  type ArtifactPanelSurfaceTabIds,
 } from "@/components/workspace/artifact-panel/types";
+import {
+  WORKSPACE_PANEL_SURFACES,
+  buildSurfaceTabIds,
+  type WorkspacePanelSurfaceId,
+} from "@/components/workspace/panel-registry";
 import { SessionUsagePanel } from "@/components/workspace/session-usage-panel";
+import { Badge } from "@/components/ui/badge";
 import { useRuntimeCheckpoints } from "@/hooks/workspace/use-runtime-checkpoints";
 import { useRuntimePlanMode } from "@/hooks/workspace/use-runtime-plan-mode";
 import {
@@ -25,34 +38,31 @@ import {
 } from "@/lib/workspace-artifacts";
 
 export function ArtifactPanel({
+  activeSurface: controlledSurface,
   artifacts,
   isResponding = false,
   lastRuntimeEventType,
-  runtimeEventCount,
+  onActiveSurfaceChange,
   onOpenArtifact,
+  runtimeEventCount,
   selectedArtifactId,
   sessionId,
+  workspacePath,
 }: ArtifactPanelProps) {
   const { t } = useTranslation("workspace");
   const asideTitleId = useId();
   const asideDescriptionId = useId();
-  const artifactSurfaceTabId = useId();
-  const planSurfaceTabId = useId();
-  const checkpointSurfaceTabId = useId();
-  const artifactSurfacePanelId = useId();
-  const planSurfacePanelId = useId();
-  const checkpointSurfacePanelId = useId();
-  const usageSurfaceTabId = useId();
-  const usageSurfacePanelId = useId();
-  const [activeSurface, setActiveSurface] = useState<ArtifactPanelSurface>(
-    artifacts.length > 0 ? "artifacts" : "plan",
-  );
+  const tabIdBase = useId();
+  const [uncontrolledSurface, setUncontrolledSurface] =
+    useState<ArtifactPanelSurface>(artifacts.length > 0 ? "artifacts" : "plan");
   // 用户显式点选页签后不再被自动回落覆盖，保证「会话用量」等页签可稳定停留。
   const [surfacePinnedByUser, setSurfacePinnedByUser] = useState(false);
   const selectSurface = (surface: ArtifactPanelSurface) => {
     setSurfacePinnedByUser(true);
-    setActiveSurface(surface);
+    setUncontrolledSurface(surface);
+    onActiveSurfaceChange?.(surface);
   };
+  const activeSurface = controlledSurface ?? uncontrolledSurface;
 
   const {
     backtrackAuditEntries,
@@ -121,22 +131,49 @@ export function ArtifactPanel({
   const selectedArtifactCategory = selectedArtifact
     ? classifyArtifactCategory(selectedArtifact)
     : null;
-  const surfaceTabDisabledStates = [false, !sessionId, !sessionId, !sessionId];
   const artifactSelectionAnnouncement = selectedArtifact
     ? `${formatArtifactCategory(selectedArtifactCategory ?? "file")} selected: ${
         selectedArtifact.name
       }. Opens in dialog.`
     : "Artifact rail ready. Select an item to open it in a dialog.";
 
-  const artifactPanelTabIds: ArtifactPanelSurfaceTabIds = {
-    artifactPanelId: artifactSurfacePanelId,
-    artifactTabId: artifactSurfaceTabId,
-    checkpointPanelId: checkpointSurfacePanelId,
-    checkpointTabId: checkpointSurfaceTabId,
-    planPanelId: planSurfacePanelId,
-    planTabId: planSurfaceTabId,
-    usagePanelId: usageSurfacePanelId,
-    usageTabId: usageSurfaceTabId,
+  const surfaceTabIds = useMemo(
+    () =>
+      Object.fromEntries(
+        WORKSPACE_PANEL_SURFACES.map((spec) => [
+          spec.id,
+          buildSurfaceTabIds(tabIdBase, spec.id),
+        ]),
+      ) as Record<WorkspacePanelSurfaceId, { panelId: string; tabId: string }>,
+    [tabIdBase],
+  );
+
+  // 会话依赖面（计划/还原/用量）在无会话时给出可解释的禁用原因，不白屏。
+  const surfaceDisabledReasons = useMemo(() => {
+    const reasons: Partial<Record<WorkspacePanelSurfaceId, string>> = {};
+    for (const spec of WORKSPACE_PANEL_SURFACES) {
+      if (spec.requiresSession && !sessionId) {
+        // 注册表以 string 下发键名，这里按仓库惯例收窄到 i18n 键类型。
+        reasons[spec.id] = t(
+          (spec.disabledReasonKey ?? "panels.shell.panelTabs.disabledNoSession") as never,
+        ) as string;
+      }
+    }
+    return reasons;
+  }, [sessionId, t]);
+
+  const surfaceBadges: Partial<Record<WorkspacePanelSurfaceId, ReactNode>> = {
+    plan: plan?.active ? (
+      <span className={surfaceBadgeClass("plan")}>
+        {t("panels.artifacts.tabs.planLive")}
+      </span>
+    ) : null,
+    checkpoints:
+      backtrackAuditEntries.length > 0 ? (
+        <span className={surfaceBadgeClass("checkpoint")}>
+          {backtrackAuditEntries.length}
+        </span>
+      ) : null,
   };
 
   return (
@@ -158,23 +195,21 @@ export function ArtifactPanel({
         {t("panels.artifacts.panel.description")}
       </div>
 
-    <ArtifactPanelSurfaceTabs
-      activeSurface={resolvedActiveSurface}
-      artifactCount={artifacts.length}
-      backtrackCount={backtrackAuditEntries.length}
-      onSelectSurface={selectSurface}
-      planIsActive={Boolean(plan?.active)}
-      sessionId={sessionId}
-      surfaceTabDisabledStates={surfaceTabDisabledStates}
-      tabIds={artifactPanelTabIds}
-      titleId={asideTitleId}
-    />
+      <ArtifactPanelSurfaceTabs
+        activeSurface={resolvedActiveSurface}
+        badges={surfaceBadges}
+        disabledReasons={surfaceDisabledReasons}
+        tabIds={surfaceTabIds}
+        titleId={asideTitleId}
+        trailingBadge={<Badge>{artifacts.length}</Badge>}
+        onSelectSurface={selectSurface}
+      />
 
       <div
-        aria-labelledby={artifactSurfaceTabId}
+        aria-labelledby={surfaceTabIds.artifacts.tabId}
         className="min-h-0 flex-1"
         hidden={resolvedActiveSurface !== "artifacts"}
-        id={artifactSurfacePanelId}
+        id={surfaceTabIds.artifacts.panelId}
         role="tabpanel"
       >
         <ArtifactPanelArtifactSurface
@@ -185,10 +220,10 @@ export function ArtifactPanel({
         />
       </div>
       <div
-        aria-labelledby={planSurfaceTabId}
+        aria-labelledby={surfaceTabIds.plan.tabId}
         className="min-h-0 flex-1"
         hidden={resolvedActiveSurface !== "plan"}
-        id={planSurfacePanelId}
+        id={surfaceTabIds.plan.panelId}
         role="tabpanel"
       >
         {resolvedActiveSurface === "plan" ? (
@@ -214,10 +249,10 @@ export function ArtifactPanel({
         ) : null}
       </div>
       <div
-        aria-labelledby={checkpointSurfaceTabId}
+        aria-labelledby={surfaceTabIds.checkpoints.tabId}
         className="min-h-0 flex-1"
         hidden={resolvedActiveSurface !== "checkpoints"}
-        id={checkpointSurfacePanelId}
+        id={surfaceTabIds.checkpoints.panelId}
         role="tabpanel"
       >
         {resolvedActiveSurface === "checkpoints" ? (
@@ -253,10 +288,10 @@ export function ArtifactPanel({
         ) : null}
       </div>
       <div
-        aria-labelledby={usageSurfaceTabId}
+        aria-labelledby={surfaceTabIds.usage.tabId}
         className="min-h-0 flex-1 overflow-y-auto"
         hidden={resolvedActiveSurface !== "usage"}
-        id={usageSurfacePanelId}
+        id={surfaceTabIds.usage.panelId}
         role="tabpanel"
       >
         {resolvedActiveSurface === "usage" && sessionId ? (
@@ -270,6 +305,16 @@ export function ArtifactPanel({
           />
         ) : null}
       </div>
+      {WORKSPACE_PANEL_SURFACES.filter((spec) => spec.surface).map((spec) => (
+        <SelfContainedSurfacePanel
+          key={spec.id}
+          active={resolvedActiveSurface === spec.id}
+          sessionId={sessionId?.trim() ?? ""}
+          spec={spec}
+          tabIds={surfaceTabIds[spec.id]}
+          workspacePath={workspacePath}
+        />
+      ))}
     </aside>
   );
 }

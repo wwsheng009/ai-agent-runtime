@@ -2,8 +2,10 @@
 
 import { type Artifact } from "@/data/mock";
 
-// 「会话用量」与条目/计划/还原同属一个右侧面板，仅作为第四个页签，不再单独成面板。
-export type ArtifactPanelSurface = "artifacts" | "checkpoints" | "plan" | "usage";
+import { type WorkspacePanelSurfaceId } from "@/components/workspace/panel-registry";
+
+/** 兼容别名：面枚举的单一事实来源已收敛到 `components/workspace/panel-registry`。 */
+export type ArtifactPanelSurface = WorkspacePanelSurfaceId;
 
 export type ArtifactPanelProps = {
   artifacts: Artifact[];
@@ -13,15 +15,18 @@ export type ArtifactPanelProps = {
   onOpenArtifact: (artifactId: string) => void;
   selectedArtifactId: string | null;
   sessionId?: string;
+  /**
+   * 当前会话绑定的工作目录；files/git 面据此给出默认作用域根候选。
+   * 缺省时自包含面退化为「只读运行时工作目录（cwd）」并提示。
+   */
+  workspacePath?: string;
+  /** 受控激活面（右栏宽度需要按面型重算）；缺省时面板自管并回调通知。 */
+  activeSurface?: WorkspacePanelSurfaceId;
+  onActiveSurfaceChange?: (surface: WorkspacePanelSurfaceId) => void;
 };
 
-export type ArtifactPanelSurfaceTabIds = {
-  artifactPanelId: string;
-  artifactTabId: string;
-  checkpointPanelId: string;
-  checkpointTabId: string;
-  planPanelId: string;
-  planTabId: string;
-  usagePanelId: string;
-  usageTabId: string;
+/** 自包含面（files/git）从 PanelHost 收到的上下文；刻意保持小。 */
+export type ArtifactPanelSelfContainedProps = {
+  sessionId: string;
+  workspacePath?: string;
 };

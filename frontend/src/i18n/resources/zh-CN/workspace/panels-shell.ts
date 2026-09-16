@@ -1,6 +1,12 @@
 // P0-6：workspace.panels.shell 文案模块（并行批次独占，勿跨模块写入）。
 // 新增键请在本对象内按 feature 嵌套；en-US 同名模块需同步补齐（编译期对齐）。
 export const zhWorkspacePanelsShell = {
+  // 右侧栏页签（panel-registry 存 key 不存文案）：文件浏览器与 Git 变更面。
+  panelTabs: {
+    files: "文件",
+    git: "Git 变更",
+    disabledNoSession: "该页签需要先选择一个会话",
+  },
   threadStrip: {
     activeThread: "活跃线程",
     updatedAt: "{{time}} 更新",

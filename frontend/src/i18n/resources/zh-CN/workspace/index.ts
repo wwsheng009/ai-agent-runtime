@@ -4,7 +4,9 @@
 import { zhWorkspaceBase } from "./base";
 import { zhWorkspacePanelsAgents } from "./panels-agents";
 import { zhWorkspacePanelsArtifacts } from "./panels-artifacts";
+import { zhWorkspacePanelsFileBrowser } from "./panels-file-browser";
 import { zhWorkspaceFilePreview } from "./panels-file-preview";
+import { zhWorkspacePanelsGit } from "./panels-git";
 import { zhWorkspacePanelsInteractions } from "./panels-interactions";
 import { zhWorkspacePanelsJobs } from "./panels-jobs";
 import { zhWorkspacePanelsMessages } from "./panels-messages";
@@ -20,7 +22,9 @@ export const zhWorkspace = {
   panels: {
     agents: zhWorkspacePanelsAgents,
     artifacts: zhWorkspacePanelsArtifacts,
+    fileBrowser: zhWorkspacePanelsFileBrowser,
     filePreview: zhWorkspaceFilePreview,
+    git: zhWorkspacePanelsGit,
     interactions: zhWorkspacePanelsInteractions,
     jobs: zhWorkspacePanelsJobs,
     messages: zhWorkspacePanelsMessages,
