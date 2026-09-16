@@ -6,7 +6,7 @@
 
 import { FileWarningIcon, LoaderCircleIcon, RefreshCwIcon, XIcon } from "lucide-react";
 import { type TFunction } from "i18next";
-import { useEffect, useRef } from "react";
+import { type CSSProperties, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { createPortal } from "react-dom";
 
@@ -17,16 +17,41 @@ import { DialogOverlay, DialogPanel } from "@/components/ui/dialog-shell";
 import { useDialogLifecycle } from "@/components/ui/use-dialog-lifecycle";
 import { useFocusRestore } from "@/hooks/workspace/use-focus-restore";
 import type { UseFilePreviewResult } from "@/hooks/workspace/use-file-preview";
+import { isMarkdownPath } from "@/lib/file-browser/path-utils";
 import { formatByteSize } from "@/lib/file-preview/decode";
+import {
+  FILE_PREVIEW_BODY_PANEL_ID,
+  filePreviewTabId,
+  type FilePreviewBodyTab,
+} from "@/lib/file-preview/tabs";
+
+import {
+  FilePreviewBodyTabs,
+  FilePreviewMarkdownBody,
+} from "./file-preview/tabbed-body";
 
 export type FilePreviewDialogProps = {
+  /** composer 底栏实测高度（px）；缺省 / 0 表示没有底部浮层（如新会话的内联 composer）。 */
+  composerInsetPx?: number;
   preview: UseFilePreviewResult;
 };
 
-export function FilePreviewDialog({ preview }: FilePreviewDialogProps) {
+export function FilePreviewDialog({
+  composerInsetPx = 0,
+  preview,
+}: FilePreviewDialogProps) {
   const { t } = useTranslation("workspace");
   const open = preview.status !== "closed";
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const [activeTab, setActiveTab] = useState<FilePreviewBodyTab>("raw");
+  /** 页签绑定到「哪个文件」：换文件（含关闭后重开）时同步回到「原始」。 */
+  const [tabPath, setTabPath] = useState(preview.requestedPath);
+
+  // 渲染期纠正而不是放进 effect：换文件后不能先按上一份文件的页签渲染一帧预览。
+  if (tabPath !== preview.requestedPath) {
+    setTabPath(preview.requestedPath);
+    setActiveTab("raw");
+  }
 
   useDialogLifecycle(open, preview.close);
   useFocusRestore(open);
@@ -46,13 +71,29 @@ export function FilePreviewDialog({ preview }: FilePreviewDialogProps) {
   }
 
   const { body, result } = preview;
+  // 只有 Markdown 文本才给出页签：解析路径优先（相对路径的实际落点），退回请求路径。
+  const markdownText =
+    body?.kind === "text" &&
+    isMarkdownPath(result?.path || preview.requestedPath);
+
+  // 底部避让（1440×900 实测）：composer 是绝对定位底栏（z-30），面板整屏居中时与其输入框
+  // 重叠 101px，且输入框盖在面板之上截获点击。遮罩底衬垫设为 composer 实测高度 + 12px 间距，
+  // 面板高度收敛到剩余容器内，底边停在 composer 上沿之上；最多让出 46vh 以免面板被压没。
+  const overlayStyle: CSSProperties | undefined =
+    composerInsetPx > 0
+      ? { paddingBottom: `calc(min(${composerInsetPx}px, 46vh) + 0.75rem)` }
+      : undefined;
 
   return createPortal(
-    <DialogOverlay onDismiss={preview.close}>
+    <DialogOverlay
+      className="z-[120] backdrop-blur-sm"
+      onDismiss={preview.close}
+      style={overlayStyle}
+    >
       <DialogPanel
         aria-label={t("panels.filePreview.ariaLabel")}
         aria-modal="true"
-        className="max-w-4xl"
+        className="max-h-full max-w-4xl"
         data-testid="file-preview-dialog"
         ref={panelRef}
         role="dialog"
@@ -110,7 +151,16 @@ export function FilePreviewDialog({ preview }: FilePreviewDialogProps) {
           ) : null}
         </div>
 
-        <div className="min-h-0 flex-1 overflow-auto px-3.5 py-3.5 sm:px-4">
+        {markdownText ? (
+          <FilePreviewBodyTabs activeTab={activeTab} onSelectTab={setActiveTab} />
+        ) : null}
+
+        <div
+          aria-labelledby={markdownText ? filePreviewTabId(activeTab) : undefined}
+          className="min-h-0 flex-1 overflow-auto px-3.5 py-3.5 sm:px-4"
+          id={markdownText ? FILE_PREVIEW_BODY_PANEL_ID : undefined}
+          role={markdownText ? "tabpanel" : undefined}
+        >
           {preview.status === "loading" ? (
             <div
               className="flex items-center gap-2 rounded-card border border-border bg-surface-softer px-2.5 py-2 text-xs text-muted-foreground"
@@ -180,17 +230,27 @@ export function FilePreviewDialog({ preview }: FilePreviewDialogProps) {
           ) : null}
 
           {body?.kind === "text" ? (
-            <pre
-              className="max-h-[60vh] overflow-auto rounded-card border border-border bg-surface-solid px-3 py-2.5 font-mono app-text-12 leading-5 text-foreground"
-              data-testid="file-preview-text"
-            >
-              {body.text}
-            </pre>
+            markdownText && activeTab === "markdown" ? (
+              <FilePreviewMarkdownBody text={body.text} />
+            ) : (
+              <RawTextBody text={body.text} />
+            )
           ) : null}
         </div>
       </DialogPanel>
     </DialogOverlay>,
     document.body,
+  );
+}
+
+function RawTextBody({ text }: { text: string }) {
+  return (
+    <pre
+      className="overflow-auto rounded-card border border-border bg-surface-solid px-3 py-2.5 font-mono app-text-12 leading-5 text-foreground"
+      data-testid="file-preview-text"
+    >
+      {text}
+    </pre>
   );
 }
 

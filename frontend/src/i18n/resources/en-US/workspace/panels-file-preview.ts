@@ -10,6 +10,11 @@ export const enWorkspaceFilePreview = {
   close: "Close file preview",
   description:
     "Content is read from a local file visible to the runtime process (read-only, POST /api/runtime/fs/read-file); nothing is cached or rewritten locally.",
+  tabs: {
+    ariaLabel: "Preview mode",
+    raw: "Raw",
+    preview: "Preview",
+  },
   meta: {
     requestedPath: "Requested path",
     resolvedPath: "Resolved path",
@@ -24,6 +29,8 @@ export const enWorkspaceFilePreview = {
       "Detected binary content ({{reason}}); text is not rendered, only the real byte count is shown.",
     binaryNul: "NUL byte present",
     binaryUtf8: "not UTF-8 text",
+    markdownTooLarge:
+      "The document is {{size}} characters, above the {{limit}}-character in-dialog Markdown render limit; the preview is not rendered — switch to Raw to read the full text.",
     tooLarge:
       "The file is {{size}}, above the {{limit}} preview limit; content is not rendered to keep the page responsive.",
   },

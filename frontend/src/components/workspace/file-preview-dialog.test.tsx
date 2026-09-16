@@ -48,6 +48,21 @@ function flush() {
   return Promise.resolve().then(() => Promise.resolve());
 }
 
+function makeMarkdownPreview(
+  text: string,
+  path = "docs/readme.md",
+): UseFilePreviewResult {
+  return makePreview({
+    requestedPath: path,
+    result: {
+      path: `/repo/${path}`,
+      dataBase64: toBase64Text(text),
+      byteCount: new TextEncoder().encode(text).byteLength,
+    },
+    body: { kind: "text", text, lineCount: text.split("\n").length },
+  });
+}
+
 describe("FilePreviewDialog", () => {
   let container: HTMLDivElement;
   let root: Root | null;
@@ -68,9 +83,11 @@ describe("FilePreviewDialog", () => {
     delete (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  async function renderDialog(preview: UseFilePreviewResult) {
+  async function renderDialog(preview: UseFilePreviewResult, composerInsetPx?: number) {
     await act(async () => {
-      root?.render(<FilePreviewDialog preview={preview} />);
+      root?.render(
+        <FilePreviewDialog composerInsetPx={composerInsetPx} preview={preview} />,
+      );
     });
     await act(flush);
   }
@@ -103,6 +120,118 @@ describe("FilePreviewDialog", () => {
 
     expect(document.querySelector('[data-testid="file-preview-loading"]')).not.toBeNull();
     expect(document.querySelector('[data-testid="file-preview-text"]')).toBeNull();
+  });
+
+  it("Markdown 文件给出「原始 / 预览」页签：默认原始，切到预览后渲染 Markdown", async () => {
+    const markdown = "# 标题\n\n正文 **加粗**\n";
+    await renderDialog(makeMarkdownPreview(markdown));
+
+    const rawTab = document.querySelector('[data-testid="file-preview-tab-raw"]');
+    const previewTab = document.querySelector('[data-testid="file-preview-tab-markdown"]');
+    expect(rawTab?.textContent).toContain("原始");
+    expect(previewTab?.textContent).toContain("预览");
+    expect(rawTab?.getAttribute("aria-selected")).toBe("true");
+    expect(previewTab?.getAttribute("aria-selected")).toBe("false");
+    // 默认仍是原始文本，Markdown 未渲染。
+    expect(document.querySelector('[data-testid="file-preview-text"]')?.textContent).toBe(
+      markdown,
+    );
+    expect(document.querySelector('[data-testid="file-preview-markdown"]')).toBeNull();
+
+    await act(async () => {
+      previewTab?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(flush);
+
+    expect(rawTab?.getAttribute("aria-selected")).toBe("false");
+    expect(previewTab?.getAttribute("aria-selected")).toBe("true");
+    expect(document.querySelector('[data-testid="file-preview-text"]')).toBeNull();
+
+    const rendered = document.querySelector('[data-testid="file-preview-markdown"]');
+    expect(rendered?.querySelector("h1")?.textContent).toBe("标题");
+    expect(rendered?.textContent).toContain("加粗");
+    // 渲染后不应再出现 Markdown 记号本身。
+    expect(rendered?.textContent).not.toContain("#");
+    expect(rendered?.querySelector("strong")).not.toBeNull();
+  });
+
+  it("页签支持方向键切换（roving tabindex）", async () => {
+    await renderDialog(makeMarkdownPreview("# 标题\n"));
+
+    const rawTab = document.querySelector('[data-testid="file-preview-tab-raw"]');
+    await act(async () => {
+      rawTab?.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, key: "ArrowRight" }),
+      );
+    });
+    await act(flush);
+
+    expect(rawTab?.getAttribute("aria-selected")).toBe("false");
+    expect(
+      document
+        .querySelector('[data-testid="file-preview-tab-markdown"]')
+        ?.getAttribute("aria-selected"),
+    ).toBe("true");
+  });
+
+  it("换文件后页签回到「原始」，不沿用上一份文件的预览页签", async () => {
+    await renderDialog(makeMarkdownPreview("# 第一份\n", "docs/one.md"));
+
+    await act(async () => {
+      document
+        .querySelector('[data-testid="file-preview-tab-markdown"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(flush);
+    expect(
+      document
+        .querySelector('[data-testid="file-preview-tab-markdown"]')
+        ?.getAttribute("aria-selected"),
+    ).toBe("true");
+
+    await renderDialog(makeMarkdownPreview("# 第二份\n", "docs/two.md"));
+
+    expect(
+      document
+        .querySelector('[data-testid="file-preview-tab-raw"]')
+        ?.getAttribute("aria-selected"),
+    ).toBe("true");
+    expect(document.querySelector('[data-testid="file-preview-text"]')?.textContent).toBe(
+      "# 第二份\n",
+    );
+  });
+
+  it("非 Markdown 文本与二进制文件不出现页签", async () => {
+    await renderDialog(makePreview());
+    expect(document.querySelector('[data-testid="file-preview-tab-raw"]')).toBeNull();
+
+    await renderDialog(
+      makePreview({
+        requestedPath: "docs/blob.md",
+        result: { path: "/repo/docs/blob.md", dataBase64: "AA==", byteCount: 1 },
+        body: { kind: "binary", reason: "nul-byte" },
+      }),
+    );
+    expect(document.querySelector('[data-testid="file-preview-tab-raw"]')).toBeNull();
+  });
+
+  it("超过渲染上限的 Markdown 在预览页如实提示，不渲染内容", async () => {
+    const huge = `# huge\n\n${"a".repeat(200_000)}\n`;
+    await renderDialog(makeMarkdownPreview(huge, "docs/huge.md"));
+
+    await act(async () => {
+      document
+        .querySelector('[data-testid="file-preview-tab-markdown"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(flush);
+
+    const notice = document.querySelector('[data-testid="file-preview-markdown-too-large"]');
+    // 如实给出真实字符数与渲染上限，并指向「原始」页签。
+    expect(notice?.textContent).toContain(String(huge.length));
+    expect(notice?.textContent).toContain("200000");
+    expect(notice?.textContent).toContain("原始");
+    expect(document.querySelector('[data-testid="file-preview-markdown"]')).toBeNull();
   });
 
   it("空文件如实提示 0 字节，不渲染空文本块", async () => {
@@ -204,5 +333,27 @@ describe("FilePreviewDialog", () => {
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     });
     expect(close).toHaveBeenCalledTimes(2);
+  });
+
+  it("composer 避让：遮罩抬到常驻底栏之上，并让出底部空间收敛面板高度", async () => {
+    await renderDialog(makePreview(), 240);
+
+    const panel = document.querySelector('[data-testid="file-preview-dialog"]') as HTMLElement;
+    const overlay = panel.parentElement as HTMLElement;
+
+    // z-[120]：与设置 / 后台任务弹层同层，必须高于 composer 底栏（z-30）与右栏抽屉（z-[96]）。
+    expect(overlay.className).toContain("z-[120]");
+    // 底部衬垫 = composer 实测高度（+间距）；面板高度随之收敛到遮罩容器内。
+    expect(overlay.style.paddingBottom).not.toBe("");
+    expect(panel.className).toContain("max-h-full");
+  });
+
+  it("无底部浮层时不加衬垫（内联 composer 的新会话保持原形制）", async () => {
+    await renderDialog(makePreview());
+
+    const panel = document.querySelector('[data-testid="file-preview-dialog"]') as HTMLElement;
+    const overlay = panel.parentElement as HTMLElement;
+
+    expect(overlay.style.paddingBottom).toBe("");
   });
 });

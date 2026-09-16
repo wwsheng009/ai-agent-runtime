@@ -1,4 +1,9 @@
-import { type ComponentProps, type MouseEvent, type ReactNode } from "react";
+import {
+  type ComponentProps,
+  type CSSProperties,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
 
 import { cva, type VariantProps } from "class-variance-authority";
 
@@ -9,12 +14,15 @@ type DialogOverlayProps = {
   children: ReactNode;
   className?: string;
   onDismiss: () => void;
+  /** 实例级内衬：如文件预览按 composer 实测高度让出底部空间（不改变其他弹层默认形制）。 */
+  style?: CSSProperties;
 };
 
 export function DialogOverlay({
   children,
   className,
   onDismiss,
+  style,
 }: DialogOverlayProps) {
   const handleMouseDown = (event: MouseEvent<HTMLDivElement>) => {
     if (event.target === event.currentTarget) {
@@ -29,6 +37,7 @@ export function DialogOverlay({
         className,
       )}
       onMouseDown={handleMouseDown}
+      style={style}
     >
       {children}
     </div>

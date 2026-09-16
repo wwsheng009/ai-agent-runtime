@@ -87,6 +87,7 @@ export const zhWorkspacePanelsFileBrowser = {
   },
   preview: {
     ariaLabel: "文件预览",
+    expand: "放大文件预览",
     empty: "选择左侧文件查看预览。",
     loading: "正在加载预览…",
     error: "预览加载失败：{{message}}",

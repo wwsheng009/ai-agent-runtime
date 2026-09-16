@@ -83,6 +83,7 @@ export const enWorkspacePanelsFileBrowser = {
   },
   preview: {
     ariaLabel: "File preview",
+    expand: "Expand file preview",
     empty: "Select a file on the left to preview it.",
     loading: "Loading preview…",
     error: "Preview failed: {{message}}",

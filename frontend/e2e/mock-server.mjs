@@ -347,6 +347,10 @@ const READ_FILE_PATH = "/workspace/e2e/notes.txt";
 // 触发词：prompt 含 "read-file-rel"（匹配顺序必须早于 "read-file"）。
 const READ_FILE_RELATIVE_PATH = "notes/relative.txt";
 
+// P2-1A 扩展：Markdown 文本文件的预览页签（原始 / Markdown 预览）。
+// 触发词：prompt 含 "read-file-md"（匹配顺序必须早于泛化的 "read-file"）。
+const READ_FILE_MARKDOWN_PATH = "/workspace/e2e/readme.md";
+
 function buildReadFileScript(targetPath) {
   const args = { file_path: targetPath };
   return [
@@ -394,6 +398,7 @@ function buildReadFileScript(targetPath) {
 
 const readFileScript = buildReadFileScript(READ_FILE_PATH);
 const readFileRelativeScript = buildReadFileScript(READ_FILE_RELATIVE_PATH);
+const readFileMarkdownScript = buildReadFileScript(READ_FILE_MARKDOWN_PATH);
 
 const LONG_LINE =
   "The quick brown fox jumps over the lazy dog near the river bank while " +
@@ -500,6 +505,8 @@ function pickScript(rawBody) {
   if (haystack.includes("tool")) return { name: "tool", script: toolScript };
   if (haystack.includes("read-file-rel"))
     return { name: "read-file-relative", script: readFileRelativeScript };
+  if (haystack.includes("read-file-md"))
+    return { name: "read-file-md", script: readFileMarkdownScript };
   if (haystack.includes("read-file")) return { name: "read-file", script: readFileScript };
   if (haystack.includes("burst")) return { name: "burst", script: burstScript };
   if (haystack.includes("perfmark")) return { name: "perfmark", script: perfMarkScript };

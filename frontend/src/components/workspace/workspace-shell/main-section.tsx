@@ -93,6 +93,7 @@ type WorkspaceMainSectionProps = Pick<
   | "trajectoryStore"
   | "trajectoryEarlier"
 > & {
+  composerOverlayHeight: number;
   composerOverlayRef: RefObject<HTMLDivElement | null>;
   density: WorkspaceDensity;
   handleOpenArtifact: (artifactId: string) => void;
@@ -167,6 +168,7 @@ export function WorkspaceMainSection({
   selectedThread,
   trajectoryStore,
   trajectoryEarlier,
+  composerOverlayHeight,
   composerOverlayRef,
   density,
   handleOpenArtifact,
@@ -223,10 +225,9 @@ export function WorkspaceMainSection({
   // P2-1A：工具行文件路径的运行时预览（fs/read-file，只读）；未命中关联产物时兜底。
   const filePreview = useFilePreview({ sessionId: selectedThread.sessionId });
 
-  // P2-7：composer `/` 命令面（清单 / `/model` 候选与弹窗 / 执行器 / 回执文案）。
-  // `/export`、`/rename`、`/model` 分别复用轨迹导出、侧栏重命名与常驻座位选择器的
-  // 同一实现；`/feedback` 写本地日志（log-only）。目录未就绪时菜单无候选、
-  // 弹窗如实显示空/失败态，不伪造模型名。
+  // P2-7：composer `/` 命令面（清单 / `/model` 候选与弹窗 / 执行器 / 回执文案）；`/export`、
+  // `/rename`、`/model` 复用轨迹导出、侧栏重命名与常驻座位选择器的同一实现，`/feedback`
+  // 写本地日志（log-only）。目录未就绪时菜单无候选、弹窗如实显示空/失败态，不伪造模型名。
   const composerCommandSurface = useComposerCommandSurface({
     runtimeModels,
     onModelChange,
@@ -234,8 +235,7 @@ export function WorkspaceMainSection({
     sessionId: selectedThread.sessionId,
   });
 
-  // P2-1B：中部视图页签（对话 / 技能 / 轨迹）。技能与轨迹页签都不承载输入框，
-  // 只有对话面（含新会话；以及无轨迹 store 时回落对话面的会话）保留 composer。
+  // P2-1B：中部视图页签（对话 / 技能 / 轨迹）；技能与轨迹页签不承载输入框，只有对话面保留 composer。
   const skillsSurfaceVisible = !isNewThread && viewMode === "skills";
   const chatSurfaceVisible =
     !skillsSurfaceVisible &&
@@ -285,7 +285,7 @@ export function WorkspaceMainSection({
         />
       ) : null}
 
-      <FilePreviewDialog preview={filePreview} />
+      <FilePreviewDialog composerInsetPx={composerOverlayHeight} preview={filePreview} />
 
       <div
         className={cn(

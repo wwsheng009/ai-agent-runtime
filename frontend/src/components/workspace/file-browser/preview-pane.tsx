@@ -21,6 +21,10 @@ import remarkGfm from "remark-gfm";
 
 import { fetchFsPreview, isFsPreviewUnavailable } from "@/api/runtime/fs-preview";
 import { TextViewer } from "@/components/workspace/file-browser/text-viewer";
+import {
+  ExpandedPreviewDialog,
+  ExpandPreviewButton,
+} from "@/components/workspace/expanded-preview";
 import { isAbortError } from "@/hooks/workspace/use-file-browser";
 import { RuntimeApiError } from "@/api/runtime/shared";
 import { countPreviewLines, decodeFilePreview, formatByteSize } from "@/lib/file-preview/decode";
@@ -50,6 +54,8 @@ export type PreviewPaneProps = {
 export function PreviewPane({ className, entry, onDownload, scope }: PreviewPaneProps) {
   const { t } = useTranslation("workspace");
   const [reloadToken, setReloadToken] = useState(0);
+  /** 放大面板开关：小窗口与放大面板共用同一份取数与正文渲染（放大不重复请求）。 */
+  const [expanded, setExpanded] = useState(false);
   // 结果与「请求身份」绑定：key 不匹配即视为陈旧结果（竞态与取消都不需要再写状态）。
   const [result, setResult] = useState<{ key: string; state: PreviewState } | null>(null);
   const activeRequestRef = useRef("");
@@ -103,6 +109,43 @@ export function PreviewPane({ className, entry, onDownload, scope }: PreviewPane
   const meta = entry;
   const activePreview = state.status === "ready" && state.path === targetPath ? state.preview : null;
 
+  /** 放大面板头部副标题：小窗口头部已展示的次要信息（大小 / 修改时间），不另造口径。 */
+  const metaFacts = meta
+    ? [formatByteSize(meta.size), meta.mtime > 0 ? formatEntryMtime(meta.mtime) : ""]
+        .filter((part) => part !== "")
+        .join(" · ")
+    : "";
+
+  // 正文按容器尺寸复用：右侧栏小窗口给 `flex-1`，放大面板给 `h-full`；分支与文案只有这一份，
+  // 放大面板不重新取数（请求仍由上面这一个实例持有），因此不会出现两份不一致的预览。
+  const renderBody = (wrapperClassName: string) => (
+    <div className={wrapperClassName}>
+      {!meta ? (
+        <p className="px-3 py-4 text-xs text-muted-foreground">{t("panels.fileBrowser.preview.empty")}</p>
+      ) : state.status === "loading" ? (
+        <p className="inline-flex items-center gap-2 px-3 py-4 text-xs text-muted-foreground">
+          <LoaderCircleIcon aria-hidden className="size-3.5 animate-spin" />
+          {t("panels.fileBrowser.preview.loading")}
+        </p>
+      ) : state.status === "error" ? (
+        <div className="grid gap-2 px-3 py-3 text-xs" data-testid="file-browser-preview-error">
+          <p className="inline-flex items-center gap-2 text-accent-gold">
+            <AlertTriangleIcon aria-hidden className="size-3.5" />
+            {t("panels.fileBrowser.preview.error", { message: errorMessage })}
+          </p>
+          {isFsPreviewUnavailable(state.error) ? (
+            <p className="text-muted-foreground">
+              {t("panels.fileBrowser.preview.unavailable", { status: errorMessage })}
+            </p>
+          ) : null}
+          <DownloadEntryButton entry={meta} onDownload={onDownload} />
+        </div>
+      ) : activePreview ? (
+        <PreviewBody entry={meta} onDownload={onDownload} preview={activePreview} />
+      ) : null}
+    </div>
+  );
+
   return (
     <section
       aria-label={t("panels.fileBrowser.preview.ariaLabel")}
@@ -121,45 +164,47 @@ export function PreviewPane({ className, entry, onDownload, scope }: PreviewPane
         ) : (
           <span>{t("panels.fileBrowser.preview.empty")}</span>
         )}
-        {meta && state.status === "error" ? (
-          <button
-            aria-label={t("panels.fileBrowser.preview.retry")}
-            className="ml-auto inline-flex items-center gap-1 rounded border border-border/60 px-1.5 py-0.5 text-foreground hover:bg-white/5"
-            onClick={() => setReloadToken((value) => value + 1)}
-            title={t("panels.fileBrowser.preview.retry")}
-            type="button"
-          >
-            <RotateCwIcon aria-hidden className="size-3" />
-            {t("panels.fileBrowser.preview.retry")}
-          </button>
+        {meta ? (
+          <span className="ml-auto flex shrink-0 items-center gap-1">
+            {state.status === "error" ? (
+              <button
+                aria-label={t("panels.fileBrowser.preview.retry")}
+                className="inline-flex items-center gap-1 rounded border border-border/60 px-1.5 py-0.5 text-foreground hover:bg-white/5"
+                onClick={() => setReloadToken((value) => value + 1)}
+                title={t("panels.fileBrowser.preview.retry")}
+                type="button"
+              >
+                <RotateCwIcon aria-hidden className="size-3" />
+                {t("panels.fileBrowser.preview.retry")}
+              </button>
+            ) : null}
+            {/* 没有可预览目标（目录 / 无权限项）时不提供放大入口：点开必然是个空面板。 */}
+            {shouldPreviewEntry(meta) ? (
+              <ExpandPreviewButton
+                label={t("panels.fileBrowser.preview.expand")}
+                onClick={() => setExpanded(true)}
+                testId="file-preview-expand"
+              />
+            ) : null}
+          </span>
         ) : null}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-hidden">
-        {!meta ? (
-          <p className="px-3 py-4 text-xs text-muted-foreground">{t("panels.fileBrowser.preview.empty")}</p>
-        ) : state.status === "loading" ? (
-          <p className="inline-flex items-center gap-2 px-3 py-4 text-xs text-muted-foreground">
-            <LoaderCircleIcon aria-hidden className="size-3.5 animate-spin" />
-            {t("panels.fileBrowser.preview.loading")}
-          </p>
-        ) : state.status === "error" ? (
-          <div className="grid gap-2 px-3 py-3 text-xs" data-testid="file-browser-preview-error">
-            <p className="inline-flex items-center gap-2 text-accent-gold">
-              <AlertTriangleIcon aria-hidden className="size-3.5" />
-              {t("panels.fileBrowser.preview.error", { message: errorMessage })}
-            </p>
-            {isFsPreviewUnavailable(state.error) ? (
-              <p className="text-muted-foreground">
-                {t("panels.fileBrowser.preview.unavailable", { status: errorMessage })}
-              </p>
-            ) : null}
-            <DownloadEntryButton entry={meta} onDownload={onDownload} />
-          </div>
-        ) : activePreview ? (
-          <PreviewBody entry={meta} onDownload={onDownload} preview={activePreview} />
-        ) : null}
-      </div>
+      {renderBody("min-h-0 flex-1 overflow-hidden")}
+
+      <ExpandedPreviewDialog
+        ariaLabel={t("panels.fileBrowser.preview.expand")}
+        closeLabel={t("panels.preview.close")}
+        eyebrow={t("panels.preview.eyebrow")}
+        hint={t("panels.preview.hint")}
+        onClose={() => setExpanded(false)}
+        open={expanded && meta !== null}
+        subtitle={metaFacts}
+        testId="file-preview-expanded"
+        title={meta?.path ?? ""}
+      >
+        {renderBody("h-full")}
+      </ExpandedPreviewDialog>
     </section>
   );
 }

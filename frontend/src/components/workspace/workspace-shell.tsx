@@ -360,6 +360,7 @@ export function WorkspaceShell({
           branchError={branchError}
           branchPendingMessageId={branchPendingMessageId}
           composerAttachments={composerAttachments}
+          composerOverlayHeight={composerOverlayHeight}
           composerOverlayRef={composerOverlayRef}
           connectionStatus={connectionStatus}
           density={settings.workspace.density}
