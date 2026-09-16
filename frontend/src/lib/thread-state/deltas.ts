@@ -1,6 +1,10 @@
 // 由 lib/workspace-thread-state.ts 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { type SessionRuntimeEvent } from "@/types/runtime";
+import {
+  CHAT_SSE_EVENT_PREFIX,
+  RUNTIME_EVENT_PERSISTED_TYPES,
+} from "@/types/runtime/event-contract";
 
 export type RuntimeDeltaKind = "text" | "reasoning" | "image";
 
@@ -105,25 +109,55 @@ export function getRuntimeDeltaKey(
   return ["runtime-delta", turnId, streamId, kind, sequence].join("|");
 }
 
+/**
+ * 助手增量家族（Batch 2：名单由事件契约生成物派生）。
+ *
+ * 成员 = 契约里落盘的 `assistant*`（`internal/events/contract.go` 注册表经
+ * codegen 投影到 `@/types/runtime/event-contract`）+ 总线历史别名：
+ * - `assistant.delta` 是 `assistant_delta` 的点形态（runtimeobserve/known_types.go
+ *   明确记录两形态都在用），通道为空但历史总线在用；
+ * - `assistant.reasoning_delta` 是推理增量的旧拼写，未登记进契约。
+ * 漏归类会让打字机增量整条静默丢弃（既不入消息也不占去重键），因此别名集中
+ * 在这里、由注释解释，而不是散落回 switch。
+ *
+ * 语义分类走命名约定：`.image_progress` → image；含 `reasoning` → reasoning；
+ * 其余 → text。新增落盘 `assistant*` 类型会自动纳入（漂移不再表现为静默丢弃），
+ * 分类覆盖由 `types/runtime/event-contract.test.ts` 门禁。
+ */
+const LEGACY_ASSISTANT_DELTA_ALIASES = [
+  "assistant.delta",
+  "assistant.reasoning_delta",
+] as const;
+
+const ASSISTANT_DELTA_TYPES: ReadonlySet<string> = new Set([
+  ...RUNTIME_EVENT_PERSISTED_TYPES.filter((type) =>
+    type.startsWith("assistant"),
+  ),
+  ...LEGACY_ASSISTANT_DELTA_ALIASES,
+]);
+
 export function getRuntimeDeltaKind(
   eventType: string,
 ): RuntimeDeltaKind | null {
-  switch (eventType) {
-    // 总线双拼写别名：runtimeobserve/known_types.go 明确记录
-    // `assistant.delta` 与 `assistant_delta` 两种形态都在用；漏归类会让
-    // 打字机增量在 dot 形态下整条静默丢弃（既不入消息也不占去重键）。
-    case "assistant_delta":
-    case "assistant.delta":
-      return "text";
-    case "assistant_reasoning":
-    case "assistant.reasoning":
-    case "assistant.reasoning_delta":
-      return "reasoning";
-    case "assistant.image_progress":
-      return "image";
-    default:
-      return null;
+  if (!ASSISTANT_DELTA_TYPES.has(eventType)) {
+    return null;
   }
+  if (eventType.endsWith(".image_progress")) {
+    return "image";
+  }
+  if (eventType.includes("reasoning")) {
+    return "reasoning";
+  }
+  return "text";
+}
+
+/**
+ * 是否为图片生成增量事件。历史快照路径（`thread-state/events.ts`）据此在回放
+ * 中途恢复的会话里补图片占位段——与 `assistant.image_progress` 的旧字面量判定
+ * 等价，但种类来自同一处契约派生。
+ */
+export function isAssistantImageProgressEvent(eventType: string): boolean {
+  return getRuntimeDeltaKind(eventType) === "image";
 }
 
 /** 工具行的三态：与 `ToolMessageSegment["status"]` 的取值一一对应。 */
@@ -159,6 +193,16 @@ export type RuntimeBridgeKind =
   // 的正文另有增量通道），只用来把仍在跑的推理段收尾。
   | { kind: "phase" };
 
+/**
+ * chat SSE 帧名 = 契约前缀 + kind。
+ *
+ * 帧名不在注册表里（contract.go 明确：帧名 = 前缀 + kind，是前缀派生而非封闭
+ * 枚举），但前缀本身是契约常量，生成物与后端 `ChatSSEEventPrefix` 同源。
+ */
+function chatSseFrame(kind: string): string {
+  return `${CHAT_SSE_EVENT_PREFIX}${kind}`;
+}
+
 export function getRuntimeBridgeKind(
   eventType: string,
 ): RuntimeBridgeKind | null {
@@ -170,24 +214,29 @@ export function getRuntimeBridgeKind(
     // 等回合末由证据尾巴一次性补齐（实测 21 帧挤在末尾 18ms 内）。这里按真实
     // provider call id 建行，随后到达的 chat.sse.tool_* 帧按同一 id upsert 合并，
     // 因此既不会重复建行，也不必再等回合结束。
+    //
+    // 契约锚定：点形态 `tool.requested` / `tool.completed` 即注册表的 chat_bridge
+    // 通道（`RUNTIME_EVENT_CHAT_BRIDGE_TYPES`）；`tool_started` / `tool_finished`
+    // 是 store 侧改名（handler.go 的 mapRuntimeEventToSession），注册表中通道为 0。
+    // 二者必须都被归类——event-contract.test.ts 门禁断言。
     case "tool_started":
     case "tool.requested":
       return { kind: "tool", status: "started" };
     case "tool_finished":
     case "tool.completed":
       return { kind: "tool", status: "finished" };
-    case "chat.sse.tool_start":
+    case chatSseFrame("tool_start"):
       return { kind: "tool", status: "started" };
-    case "chat.sse.tool_call":
+    case chatSseFrame("tool_call"):
       return { kind: "tool", status: "running" };
-    case "chat.sse.tool_end":
+    case chatSseFrame("tool_end"):
       return { kind: "tool", status: "finished" };
     // observation 的 payload 只带工具**名**（`payload.tool` 是字符串，无 id，
     // 见 buildObservationEventPayloads），据它建行会退化成名叫 “tool” 的错行。
     // 工具行的收尾由同一次观测的 tool_end 完成，这里只当「阶段推进」信号。
-    case "chat.sse.observation":
+    case chatSseFrame("observation"):
       return { kind: "phase" };
-    case "chat.sse.chunk":
+    case chatSseFrame("chunk"):
       return { kind: "phase" };
     // chat.sse.reasoning 刻意不归类（见上方说明）：它是增量帧的孪生副本，
     // 不是阶段出口，收尾会与 assistant.reasoning 的「仍在推理」标记打架。

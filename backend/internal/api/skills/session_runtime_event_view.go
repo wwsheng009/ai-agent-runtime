@@ -1,8 +1,6 @@
 package skills
 
 import (
-	"strings"
-
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 )
 
@@ -33,6 +31,19 @@ func buildSessionRuntimeEventViews(events []runtimeevents.Event) []map[string]in
 	return views
 }
 
+// buildSessionRuntimeReplayEventView 标记「回放帧」：runtime/stream 的初始 dump 与
+// 断点补齐都从 EventStore 读，属于历史回放；总线直投的实时帧走
+// buildSessionRuntimeLiveEventView（带 live:true）。两者互斥，客户端据此可以区分
+// 「历史补齐」与「刚刚发生」，不必再用 isResponding 之类的状态猜测（Batch 4）。
+//
+// 注意：不回改 buildSessionRuntimeEventView —— 窗口读取（/runtime/events）与轨迹
+// 恢复复用同一构造器，它们不是 runtime/stream 意义上的回放，语义不能混。
+func buildSessionRuntimeReplayEventView(event runtimeevents.Event) map[string]interface{} {
+	view := buildSessionRuntimeEventView(event)
+	view["replay"] = true
+	return view
+}
+
 func summarizeSingleRuntimeEventProvenance(event runtimeevents.Event) map[string]interface{} {
 	summary := runtimeevents.ProvenanceView{
 		ProfileResourceKinds: make(map[string]int),
@@ -42,12 +53,12 @@ func summarizeSingleRuntimeEventProvenance(event runtimeevents.Event) map[string
 }
 
 // runtimeEventBearsProvenance 判定事件是否可能携带 provenance 信号：
-// 类型白名单（profile 注入 / recall）或载荷自带来源引用（source_refs /
-// profile_source_refs，如 checkpoint_created 以来源反哺统计的事件）。
-// 判据与 runtimeevents.applyProvenanceEvent 的读取口径对齐，避免漏掉承载事件。
+// 类型维度（注册表的 ProvenanceBearing：profile 注入 / recall）或载荷自带来源引用
+// （source_refs / profile_source_refs，如 checkpoint_created 以来源反哺统计的事件）。
+// 判据与 runtimeevents.applyProvenanceEvent 的读取口径对齐，避免漏掉承载事件；
+// 类型清单收敛在 internal/events/contract.go（Batch 2），此处不再手写。
 func runtimeEventBearsProvenance(event runtimeevents.Event) bool {
-	switch strings.TrimSpace(event.Type) {
-	case "context.profile.injected", "recall.performed":
+	if runtimeevents.IsProvenanceBearingEventType(event.Type) {
 		return true
 	}
 	for _, key := range []string{"source_refs", "profile_source_refs"} {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -123,6 +124,52 @@ func TestRuntimeEventDeliveryCountersAreBoundedAndSerializable(t *testing.T) {
 
 	_, err := json.Marshal(snapshot)
 	require.NoError(t, err, "快照挂在 runtimeStatusSnapshot 上，必须可 JSON 序列化")
+}
+
+// TestRuntimeEventDeliverySnapshotCarriesStreamMetrics 验证 Batch 3 的连接级指标
+// 并入既有快照（方案 §4 Batch 3 表 / §7 验收）：键固定在 runtime_event_delivery.stream
+// 子对象里，不新增端点，形状只增不改，且整份快照仍可 JSON 序列化。
+func TestRuntimeEventDeliverySnapshotCarriesStreamMetrics(t *testing.T) {
+	resetRuntimeEventDeliveryCountersForTest()
+	resetRuntimeEventStreamMetricsForTest()
+
+	runtimeEventStreamConnectionOpened()
+	recordRuntimeEventStreamFrame()
+	recordRuntimeEventStreamBytes(128)
+	recordRuntimeEventStreamDump(12*time.Millisecond, 2)
+	recordRuntimeEventStreamCoalesced(2, 5)
+	recordRuntimeEventStreamLiveDrop(3)
+	recordRuntimeEventStreamRetry()
+
+	stream, ok := SnapshotRuntimeEventDelivery()["stream"].(map[string]interface{})
+	require.True(t, ok, "连接级指标必须收在 stream 子对象里（既有键与形状不变）")
+	// 键名即对外契约：与方案 §4 Batch 3 表逐项对应。
+	for _, key := range []string{
+		"active_connections", "frames_sent", "bytes_sent",
+		"dump_duration_ms", "dump_pages",
+		"coalesced_frames", "coalesced_rows",
+		"dropped_live", "retry_count",
+	} {
+		require.Contains(t, stream, key, "stream 子对象缺少指标键 %q", key)
+	}
+
+	assert.Equal(t, int64(1), stream["active_connections"])
+	assert.Equal(t, uint64(1), stream["frames_sent"])
+	assert.Equal(t, uint64(128), stream["bytes_sent"])
+	assert.Equal(t, uint64(12), stream["dump_duration_ms"])
+	assert.Equal(t, uint64(2), stream["dump_pages"])
+	// 合帧口径：2 个合并组吸收了 5 行（压缩比 = (rows + groups) / groups）。
+	assert.Equal(t, uint64(2), stream["coalesced_frames"])
+	assert.Equal(t, uint64(5), stream["coalesced_rows"])
+	assert.Equal(t, uint64(3), stream["dropped_live"])
+	assert.Equal(t, uint64(1), stream["retry_count"])
+
+	// 连接关闭后回落，避免指标随连接泄漏。
+	runtimeEventStreamConnectionClosed()
+	assert.Equal(t, int64(0), SnapshotRuntimeEventDelivery()["stream"].(map[string]interface{})["active_connections"])
+
+	_, err := json.Marshal(SnapshotRuntimeEventDelivery())
+	require.NoError(t, err, "含 stream 子对象的快照仍须可 JSON 序列化")
 }
 
 func channelsContain(channels []string, wanted string) bool {

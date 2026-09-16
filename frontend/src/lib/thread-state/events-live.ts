@@ -9,6 +9,7 @@ import {
   type AgentChatStreamChunkPayload,
   type SessionRuntimeEvent,
 } from "@/types/runtime";
+import { CHAT_SSE_EVENT_PREFIX } from "@/types/runtime/event-contract";
 
 import { getRuntimeDeltaKind, matchesActiveTurn, type RuntimeBridgeKind } from "./deltas";
 import {
@@ -33,6 +34,13 @@ import {
   getToolErrorMessage,
   upsertToolSegment,
 } from "./tools";
+
+/** `chat.sse.<name>` → `<name>`；非帧名原样返回（与旧 replace 行为一致）。 */
+function chatSseFrameName(eventType: string): string {
+  return eventType.startsWith(CHAT_SSE_EVENT_PREFIX)
+    ? eventType.slice(CHAT_SSE_EVENT_PREFIX.length)
+    : eventType;
+}
 
 /**
  * 方案B：把 runtime/stream 实时到达的打字机增量事件应用到 thread。
@@ -364,7 +372,7 @@ export function applyChatSseBridgeFrame(
     target.thread,
     target.index,
     segments,
-    `${event.type.replace(/^chat\.sse\./, "")}:${toolName}`,
+    `${chatSseFrameName(event.type)}:${toolName}`,
   );
 }
 
@@ -390,7 +398,7 @@ function resolveBridgeToolPayload(
   if (!raw) {
     return undefined;
   }
-  if (event.type.startsWith("chat.sse.")) {
+  if (event.type.startsWith(CHAT_SSE_EVENT_PREFIX)) {
     return raw;
   }
 

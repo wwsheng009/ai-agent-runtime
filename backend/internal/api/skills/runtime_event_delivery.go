@@ -4,9 +4,8 @@ import (
 	"strings"
 	"sync"
 
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
-	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
 )
 
 // 运行时事件「交付通道」可观测（批次 20 / P0-2）。
@@ -26,15 +25,18 @@ import (
 //  2. 计数：A 记丢弃（按原因 + 类型 + 已知性三分），B 记实际转发量，读侧经
 //     runtimeStatusSnapshot 的 runtime_event_delivery 键暴露（不新增端点、
 //     不改事件流本身）。
+//
+// Batch 2 起「类型 → 通道」的声明收敛到 internal/events 的注册表
+// （contract.go）：本文件只做位集合 → 字符串名的翻译与计数，不再手写类型清单。
 const (
 	// A：落盘 ⇒ 实时（长轮询）与回放都能看到。
-	runtimeEventDeliverySessionStore = "session_store"
+	runtimeEventDeliverySessionStore = runtimeevents.ChannelNameSessionStore
 	// B：仅实时转发，不落盘（刷新即丢）。
-	runtimeEventDeliveryLiveOnly = "live_only"
+	runtimeEventDeliveryLiveOnly = runtimeevents.ChannelNameLiveOnly
 	// C：chat SSE 帧桥（工具生命周期在对话流里实时建行）。
-	runtimeEventDeliveryChatBridge = "chat_bridge"
+	runtimeEventDeliveryChatBridge = runtimeevents.ChannelNameChatBridge
 	// D：仅回合末尾巴补发。
-	runtimeEventDeliveryTailOnly = "tail_only"
+	runtimeEventDeliveryTailOnly = runtimeevents.ChannelNameTailOnly
 )
 
 // 丢弃原因（reason 维度）。
@@ -55,22 +57,17 @@ const (
 func DeliveryChannelsFor(eventType string) []string {
 	normalized := strings.TrimSpace(eventType)
 	channels := make([]string, 0, 2)
-	if isPersistedRuntimeEventType(normalized) {
+	set := runtimeevents.ChannelsFor(normalized)
+	if set&runtimeevents.ChannelSessionStore != 0 {
 		channels = append(channels, runtimeEventDeliverySessionStore)
 	}
-	switch normalized {
-	case toolprotocol.EventTypeProgress, supervision.EventTypeSubagentProgress:
+	if set&runtimeevents.ChannelLiveOnly != 0 {
 		channels = append(channels, runtimeEventDeliveryLiveOnly)
 	}
-	switch normalized {
-	case runtimeEventToolRequested, runtimeEventToolCompleted:
+	if set&runtimeevents.ChannelChatBridge != 0 {
 		channels = append(channels, runtimeEventDeliveryChatBridge)
 	}
-	switch normalized {
-	// 子代理批量事件只在回合末经端点补发帧进入对话流（handler.go 收尾段），
-	// 实时通道与事件库都没有它们。
-	case "subagent.batch.started", "subagent.batch.completed",
-		"subagent.started", "subagent.completed":
+	if set&runtimeevents.ChannelTailOnly != 0 {
 		channels = append(channels, runtimeEventDeliveryTailOnly)
 	}
 	return channels
@@ -84,12 +81,16 @@ type runtimeEventDeliveryCounters struct {
 	droppedUnknown  uint64
 	// liveForwarded：类型 -> 计数（B 通道实际转发量）。
 	liveForwarded map[string]uint64
-	overflow      uint64
+	// liveDropped：类型 -> 计数（B 通道真实丢弃量：latest-wins 键数超限）。
+	liveDropped     map[string]uint64
+	liveDroppedNum  uint64
+	overflow        uint64
 }
 
 var runtimeEventDelivery = &runtimeEventDeliveryCounters{
 	droppedByReason: make(map[string]map[string]uint64, 2),
 	liveForwarded:   make(map[string]uint64, 4),
+	liveDropped:     make(map[string]uint64, 2),
 }
 
 func (c *runtimeEventDeliveryCounters) recordDrop(reason, eventType string, known bool) {
@@ -136,6 +137,27 @@ func (c *runtimeEventDeliveryCounters) recordLiveForwarded(eventType string) {
 	c.liveForwarded[key]++
 }
 
+// recordLiveDropped 记 B 通道真实丢弃（latest-wins 键数超限时）。转发量
+// （recordLiveForwarded）证明「这类事件送达过」，丢弃量证明「这类事件被裁过」——
+// 两者分账，才能区分「没发生」与「发生了但没送达」。
+func (c *runtimeEventDeliveryCounters) recordLiveDropped(eventType string) {
+	if c == nil {
+		return
+	}
+	key := strings.TrimSpace(eventType)
+	if key == "" {
+		key = runtimeEventDeliveryOverflow
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.liveDroppedNum++
+	if _, exists := c.liveDropped[key]; !exists && len(c.liveDropped) >= maxRuntimeEventDeliveryTypes {
+		c.overflow++
+		key = runtimeEventDeliveryOverflow
+	}
+	c.liveDropped[key]++
+}
+
 // recordRuntimeEventDeliveryDrop 由 A 通道（总线 → 会话事件库）在过滤掉事件时
 // 调用。已知性与 runtimeobserve 的三分法同源：命中已知目录 ⇒ 该类型有产品语义，
 // 只是被白名单裁掉；未命中 ⇒ 保持异常语义（可能是拼写错误或未登记的新事件）。
@@ -152,6 +174,13 @@ func recordRuntimeEventDeliveryDrop(eventType, sessionID string) {
 // 的唯一正向证据。
 func recordRuntimeEventDeliveryLiveForwarded(eventType string) {
 	runtimeEventDelivery.recordLiveForwarded(eventType)
+}
+
+// recordRuntimeEventDeliveryLiveDrop 由 B 通道（latest-wins 队列）在真正丢弃帧时
+// 调用，并同步连接级指标（runtime_event_delivery.stream.dropped_live）。
+func recordRuntimeEventDeliveryLiveDrop(eventType string) {
+	runtimeEventDelivery.recordLiveDropped(eventType)
+	recordRuntimeEventStreamLiveDrop(1)
 }
 
 // SnapshotRuntimeEventDelivery 返回计数快照（runtimeStatusSnapshot 的
@@ -173,6 +202,10 @@ func SnapshotRuntimeEventDelivery() map[string]interface{} {
 	for key, value := range c.liveForwarded {
 		liveForwarded[key] = value
 	}
+	liveDropped := make(map[string]uint64, len(c.liveDropped))
+	for key, value := range c.liveDropped {
+		liveDropped[key] = value
+	}
 
 	return map[string]interface{}{
 		"dropped_total":     c.droppedKnown + c.droppedUnknown,
@@ -180,7 +213,11 @@ func SnapshotRuntimeEventDelivery() map[string]interface{} {
 		"dropped_unknown":   c.droppedUnknown,
 		"dropped_by_reason": droppedByReason,
 		"live_forwarded":    liveForwarded,
+		"live_dropped":      liveDropped,
+		"live_dropped_total": c.liveDroppedNum,
 		"overflow":          c.overflow,
+		// Batch 3：连接级指标并入同一快照（不新增端点），收在 stream 子对象里。
+		"stream": runtimeEventStreamMetricsSnapshot(),
 		"channels": []string{
 			runtimeEventDeliverySessionStore,
 			runtimeEventDeliveryLiveOnly,
@@ -197,7 +234,9 @@ func resetRuntimeEventDeliveryCountersForTest() {
 	defer c.mu.Unlock()
 	c.droppedByReason = make(map[string]map[string]uint64, 2)
 	c.liveForwarded = make(map[string]uint64, 4)
+	c.liveDropped = make(map[string]uint64, 2)
 	c.droppedKnown = 0
 	c.droppedUnknown = 0
+	c.liveDroppedNum = 0
 	c.overflow = 0
 }

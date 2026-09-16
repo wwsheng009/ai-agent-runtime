@@ -1,4 +1,4 @@
-.PHONY: build test lint tidy clean aicli aicli-console install-aicli uninstall-aicli package-server
+.PHONY: build test lint tidy clean aicli aicli-console install-aicli uninstall-aicli package-server contract contract-check
 
 BACKEND_DIR := backend
 FRONTEND_DIR := frontend
@@ -47,6 +47,16 @@ test:
 
 lint:
 	cd $(BACKEND_DIR) && go vet ./...
+
+# 由后端事件契约注册表（backend/internal/events/contract.go）生成前端类型
+# frontend/src/types/runtime/event-contract.ts。只允许改注册表后重新生成，勿手改生成物。
+contract:
+	cd $(BACKEND_DIR) && go run ./cmd/contractgen
+
+# 校验生成物与注册表一致（CI 用；不一致时退出码 1）。注意 make test 也会跑到
+# cmd/contractgen 的 TestGeneratedFileIsUpToDate，二者等价。
+contract-check:
+	cd $(BACKEND_DIR) && go run ./cmd/contractgen -check
 
 tidy:
 	cd $(BACKEND_DIR) && go mod tidy
