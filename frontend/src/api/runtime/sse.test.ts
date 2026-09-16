@@ -61,4 +61,28 @@ describe("runtime sse helpers", () => {
       ["error", { error: "boom" }],
     ]);
   });
+
+  // Batch 1 起服务端在持久化帧首写 `id: <seq>`（真实持久化游标；wire-only 帧
+  // 不写，见 `handler.go` 的 writeSSEEventFrame），Batch 3/4 还可能出现 `retry:`。
+  // 兼容契约：解析器只认 `:`/`event:`/`data:`，其余行静默忽略——既不报错，也不
+  // 产生多余事件（未升级的前端可以安全接住新服务端）。
+  it("忽略 `id:`/`retry:` 行：不报错、不产生多余事件", async () => {
+    const onEvent = vi.fn<
+      (eventName: string, payload: Record<string, unknown>) => void
+    >();
+
+    await consumeSseResponse(
+      createSseResponse([
+        'id: 41\nevent: meta\ndata: {"session_id":"s-1"}\n\n',
+        "retry: 3000\n: keep-alive\n\n",
+        'id: 42\nevent: chunk\ndata: {"type":"text","content":"hi"}\n\n',
+      ]),
+      { onEvent },
+    );
+
+    expect(onEvent.mock.calls).toEqual([
+      ["meta", { session_id: "s-1" }],
+      ["chunk", { type: "text", content: "hi" }],
+    ]);
+  });
 });
