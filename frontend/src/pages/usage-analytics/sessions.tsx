@@ -12,7 +12,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
-import { diagnosticDetailKey, diagnosticTitleKey, errorCategoryKey, errorRate, formatDimensionTick, formatDuration, formatNumber, formatPercent, formatTimestamp, outcomeKey, outcomeTone, readAdminToken, reconciliationKey, shortID, statusTone, titleSourceKey } from "./format";
+import { diagnosticDetailKey, diagnosticTitleKey, errorRate, formatDimensionTick, formatDuration, formatNumber, formatPercent, formatTimestamp, outcomeKey, outcomeTone, readAdminToken, reconciliationKey, shortID, statusTone, titleSourceKey } from "./format";
 import { AnalyticsHeader, Metric, QualityBadge, QualityNotice, TabButton } from "./primitives";
 
 export function SessionTable({ sessions, total, loading, search, offset, pageSize, onPage }: {
@@ -261,22 +261,9 @@ function Diagnostics({ diagnostics }: { diagnostics: AnalyticsDiagnostic[] }) {
 }
 
 function SessionTokens({ detail }: { detail: AnalyticsSessionUsageDetail }) {
-  const { t } = useTranslation("usageAnalytics");
-  return (
-    <>
-      <TurnTable turns={detail.turns} />
-      <section aria-labelledby="requests-title" className="surface-panel rounded-panel-lg p-3.5 sm:p-4">
-        <div className="mb-2"><h3 id="requests-title" className="text-sm font-semibold">{t("requests.title")}</h3><p className="text-xs text-muted-foreground">{t("requests.subtitle", { count: detail.step_count })}</p></div>
-        <div className="w-full max-w-full overflow-x-auto rounded-card border border-border">
-          <table className="w-full min-w-[820px] border-collapse text-left text-sm">
-            <thead className="bg-surface-softer text-xs text-muted-foreground"><tr className="border-b border-border"><th className="px-3 py-2 font-medium">{t("requests.columns.turn")}</th><th className="px-3 py-2 font-medium">{t("requests.columns.step")}</th><th className="px-3 py-2 font-medium">{t("requests.columns.tokens")}</th><th className="px-3 py-2 font-medium">{t("requests.columns.cache")}</th><th className="px-3 py-2 font-medium">{t("requests.columns.context")}</th><th className="px-3 py-2 font-medium">{t("requests.columns.duration")}</th><th className="px-3 py-2 font-medium">{t("requests.columns.outcome")}</th></tr></thead>
-            <tbody>{detail.steps.slice(-250).map((step, index) => <tr key={`${step.trace_id}-${step.step}-${index}`} className="border-b border-border/70 last:border-b-0"><td className="max-w-52 truncate px-3 py-2 font-mono text-xs" title={step.trace_id}>{shortID(step.trace_id || "-")}</td><td className="px-3 py-2 tabular-nums">{step.step ?? index + 1}</td><td className="px-3 py-2 tabular-nums">{step.usage_available ? formatNumber(step.total_tokens) : t("unavailable")}</td><td className="px-3 py-2 tabular-nums">{formatNumber(step.cached_tokens)}</td><td className="px-3 py-2 tabular-nums">{formatPercent(step.context_utilization)}</td><td className="px-3 py-2 tabular-nums">{formatDuration(step.duration_ms)}</td><td className="px-3 py-2"><Badge className={step.success ? "border-analytics-success-border bg-analytics-success-soft text-analytics-success" : "border-analytics-danger-border bg-analytics-danger-soft text-analytics-danger"}>{step.success ? t("outcomes.success") : t(errorCategoryKey(step.error_category))}</Badge></td></tr>)}</tbody>
-          </table>
-        </div>
-        {detail.steps.length > 250 ? <p className="mt-2 text-xs text-muted-foreground">{t("requests.capped", { count: 250, total: String(detail.steps.length) })}</p> : null}
-      </section>
-    </>
-  );
+  // 「LLM 请求明细」已并入缓存面板的「请求明细」表（新增 Trace / 轮次、耗时、结果三列），
+  // 避免同一批逐请求事实在一页内重复渲染（步骤级 steps 仍由 analytics API 提供）。
+  return <TurnTable turns={detail.turns} />;
 }
 
 function TurnTable({ turns, compact = false }: { turns: AnalyticsTurnUsage[]; compact?: boolean }) {

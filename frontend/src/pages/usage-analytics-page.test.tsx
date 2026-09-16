@@ -224,6 +224,84 @@ describe("UsageAnalyticsPage session detail", () => {
       container.remove();
     }
   });
+
+  it("renders the tokens tab without the duplicated LLM request detail table", async () => {
+    const detail = {
+      schema_version: "runtime.analytics.v1",
+      generated_at: "2026-09-10T12:00:00Z",
+      data_window: {},
+      coverage: {
+        sessions: 1,
+        sessions_with_usage: 1,
+        usage_session_rate: 1,
+        llm_requests: 1,
+        llm_requests_with_usage: 1,
+        usage_request_rate: 1,
+        tool_results_observed: 0,
+        dropped_messages: 0,
+      },
+      partial: false,
+      partial_reasons: [],
+      session: {
+        session_id: "session-tokens-tab",
+        title: "Token 视图会话",
+        status: "active",
+        usage_quality: "provider_reported",
+        usage_coverage: 1,
+        partial: false,
+        turn_count: 0,
+        failed_turns: 0,
+        llm_requests: 2,
+        llm_requests_with_usage: 2,
+        llm_errors: 0,
+        tool_errors: 0,
+        tool_results_observed: 0,
+        total_duration_ms: 1000,
+        total_tokens: 10,
+        prompt_tokens: 8,
+        completion_tokens: 2,
+        reconciliation_status: "matched",
+        reconciliation_delta: 0,
+      },
+      steps: [
+        { trace_id: "trace-dup-1", step: 1, duration_ms: 1200, success: true, total_tokens: 10, cached_tokens: 5, context_utilization: 0.5, usage_available: true },
+      ],
+      step_count: 1,
+      turns: [],
+      diagnostics: [],
+      error_categories: {},
+    } as unknown as AnalyticsSessionUsageDetail;
+    getAnalyticsSessionUsageMock.mockResolvedValue(detail);
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    let root: Root | undefined;
+    try {
+      await act(async () => {
+        root = createRoot(container);
+        root.render(
+          <MemoryRouter initialEntries={["/usage/sessions/session-tokens-tab?tab=tokens"]}>
+            <Routes>
+              <Route path="/usage/sessions/:sessionId" element={<UsageAnalyticsPage />} />
+            </Routes>
+          </MemoryRouter>,
+        );
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      // Token tab 仍渲染轮次表，但不再重复渲染步骤级「LLM 请求明细」；
+      // 逐请求事实只在缓存面板的「请求明细」表中呈现（已合并 Trace / 耗时 / 结果列）。
+      expect(container.textContent).toContain("轮次 Token");
+      expect(container.textContent).not.toContain("LLM 请求明细");
+      expect(container.textContent).toContain("请求明细");
+      expect(container.textContent).not.toContain("trace-dup-1");
+    } finally {
+      act(() => root?.unmount());
+      container.remove();
+    }
+  });
 });
 
 describe("UsageAnalyticsPage session list pagination", () => {

@@ -36,6 +36,7 @@ export const zhUsageAnalytics = {
     },
     columns: {
       time: "时间",
+      trace: "Trace / 轮次",
       providerModel: "Provider / Model",
       message: "消息 ID",
       tokens: "输入 / 输出",
@@ -43,6 +44,8 @@ export const zhUsageAnalytics = {
       cacheWrite: "缓存写入",
       hitRatio: "命中率",
       cacheStatus: "缓存状态",
+      duration: "耗时",
+      outcome: "结果",
     },
     trace: {
       title: "消息缓存追溯",
@@ -305,20 +308,6 @@ export const zhUsageAnalytics = {
       outcome: "结果",
     },
   },
-  requests: {
-    title: "LLM 请求明细",
-    subtitle: "共 {{count}} 个请求事实",
-    capped: "为保证渲染性能，仅显示最近 {{count}} / {{total}} 条。",
-    columns: {
-      turn: "Trace / 轮次",
-      step: "Step",
-      tokens: "Token",
-      cache: "缓存 Token",
-      context: "上下文",
-      duration: "耗时",
-      outcome: "结果",
-    },
-  },
   quota: {
     title: "用量与配额",
     description: "token 口径的用量、配额余量与持久化账本（后端无货币成本字段，本面板不展示费用）。",
@@ -333,6 +322,7 @@ export const zhUsageAnalytics = {
       policy: "策略明细读取失败",
       ledger: "账本读取失败",
       ledgerUnavailable: "后端未配置 usage ledger（503），账本不可用。",
+      ledgerBroken: "后端已启用 usage ledger 但初始化失败（503），账本不可用。",
     },
     policy: {
       title: "用量策略",

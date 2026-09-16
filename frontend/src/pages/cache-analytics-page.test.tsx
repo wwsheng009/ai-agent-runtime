@@ -40,7 +40,11 @@ function cacheRequest(id: string): CacheRequestRecord {
   return {
     llm_request_id: id,
     session_id: "sess-1",
+    trace_id: "trace-1",
+    step: 1,
     started_at: "2026-09-13T00:00:00Z",
+    duration_ms: 1234,
+    status: "success",
     provider: "anthropic",
     model: "claude",
     cache_status: "hit",
@@ -131,6 +135,11 @@ describe("CacheAnalyticsPanel", () => {
     expect(markup).toContain("缓存总览");
     expect(markup).toContain("缓存状态分布");
     expect(markup).toContain("请求明细");
+    // 原「LLM 请求明细」的三列已并入请求明细表，页面不再重复渲染步骤级列表。
+    expect(markup).toContain("Trace / 轮次");
+    expect(markup).toContain("耗时");
+    expect(markup).toContain("结果");
+    expect(markup).not.toContain("LLM 请求明细");
     // 独立页面壳（返回链接 / 会话下拉）已删除，且不得再指向 /usage/cache。
     expect(markup).not.toContain('href="/usage/cache"');
     expect(markup).not.toContain("返回用量");
@@ -160,6 +169,10 @@ describe("CacheAnalyticsPanel", () => {
         offset: 0,
       });
       expect(container.textContent).toContain("第 1-50 条，共 120 条");
+      // 合并列来自同一批请求事实：Trace / 轮次、耗时、结果。
+      expect(container.textContent).toContain("trace-1");
+      expect(container.textContent).toContain("1.2 s");
+      expect(container.textContent).toContain("成功");
 
       const next = findButton(container, "下一页");
       expect(next).toBeDefined();

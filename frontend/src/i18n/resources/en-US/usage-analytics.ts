@@ -38,6 +38,7 @@ export const enUsageAnalytics = {
     },
     columns: {
       time: "Time",
+      trace: "Trace / turn",
       providerModel: "Provider / Model",
       message: "Message ID",
       tokens: "Prompt / completion",
@@ -45,6 +46,8 @@ export const enUsageAnalytics = {
       cacheWrite: "Cache write",
       hitRatio: "Hit ratio",
       cacheStatus: "Cache status",
+      duration: "Duration",
+      outcome: "Outcome",
     },
     trace: {
       title: "Message cache trace",
@@ -307,20 +310,6 @@ export const enUsageAnalytics = {
       outcome: "Outcome",
     },
   },
-  requests: {
-    title: "LLM request detail",
-    subtitle: "{{count}} request facts",
-    capped: "Showing the latest {{count}} of {{total}} rows to keep rendering responsive.",
-    columns: {
-      turn: "Trace / turn",
-      step: "Step",
-      tokens: "Tokens",
-      cache: "Cached tokens",
-      context: "Context",
-      duration: "Duration",
-      outcome: "Outcome",
-    },
-  },
   quota: {
     title: "Usage and quota",
     description: "Token-denominated usage, remaining quota, and the persisted ledger (the backend exposes no monetary cost fields, so this panel shows none).",
@@ -335,6 +324,7 @@ export const enUsageAnalytics = {
       policy: "Failed to load policy details",
       ledger: "Failed to load the ledger",
       ledgerUnavailable: "The backend has no usage ledger configured (503), so the ledger is unavailable.",
+      ledgerBroken: "The backend enabled the usage ledger but it failed to initialize (503), so the ledger is unavailable.",
     },
     policy: {
       title: "Usage policy",
