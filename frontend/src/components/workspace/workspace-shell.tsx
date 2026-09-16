@@ -12,6 +12,10 @@ import {
 } from "@/components/workspace/workspace-shell-shared";
 import { useAppSettings } from "@/core/settings";
 import { NEW_THREAD_ID } from "@/hooks/workspace/use-workspace-thread-selection";
+import {
+  WORKSPACE_SIDEBAR_COLLAPSED_WIDTH,
+  WORKSPACE_SIDEBAR_EXPANDED_WIDTH,
+} from "@/lib/layout/sidebar-width";
 import { cn } from "@/lib/utils";
 
 import { WorkspaceMainSection } from "./workspace-shell/main-section";
@@ -150,6 +154,8 @@ export function WorkspaceShell({
   const composerOverlayRef = useRef<HTMLDivElement | null>(null);
   const [artifactDialogOpen, setArtifactDialogOpen] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  /** 桌面（xl+）左栏收起：整列只剩图标；移动抽屉不受影响（见 workspace-sidebar 的 xl 门控）。 */
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [viewMode, setViewMode] = useState<WorkspaceViewMode>("chat");
   const [settingsSection, setSettingsSection] =
@@ -246,19 +252,29 @@ export function WorkspaceShell({
     setArtifactDialogOpen(true);
   }
 
+  // 网格第一列（左栏）读 CSS 变量：动态类名会破坏 Tailwind 静态扫描，运行时只改变量。
+  const shellGridStyle = {
+    "--workspace-sidebar-width": sidebarCollapsed
+      ? WORKSPACE_SIDEBAR_COLLAPSED_WIDTH
+      : WORKSPACE_SIDEBAR_EXPANDED_WIDTH,
+  } as CSSProperties;
+
   return (
     <div className="h-screen overflow-hidden [background:var(--workspace-shell-bg)] text-foreground">
       <div
         className={cn(
           "grid h-full min-h-0 grid-cols-1 gap-0",
           rightRailVisible
-            ? "xl:grid-cols-[16rem_minmax(0,1fr)_18rem]"
-            : "xl:grid-cols-[16rem_minmax(0,1fr)]",
+            ? "xl:grid-cols-[var(--workspace-sidebar-width,16rem)_minmax(0,1fr)_18rem]"
+            : "xl:grid-cols-[var(--workspace-sidebar-width,16rem)_minmax(0,1fr)]",
         )}
+        style={shellGridStyle}
       >
         <WorkspaceSidebarSection
+          collapsed={sidebarCollapsed}
           density={settings.workspace.density}
           mobileOpen={mobileSidebarOpen}
+          onCollapsedChange={setSidebarCollapsed}
           onAddWorkspaceDirectory={onAddWorkspaceDirectory}
           onCreateSessionInDirectory={onCreateSessionInDirectory}
           onRefreshRuntimeTeams={onRefreshRuntimeTeams}

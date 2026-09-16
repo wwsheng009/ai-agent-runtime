@@ -27,6 +27,10 @@ export type WorkspaceDirectoryCreateRequest = {
 
 export type WorkspaceSidebarProps = {
   density: "comfortable" | "compact";
+  /** 桌面（xl+）侧栏收起为「只显示图标的列」；移动抽屉始终按展开态渲染。 */
+  collapsed?: boolean;
+  /** 收起/展开开关的接线口；缺省时头部与图标列不渲染切换按钮。 */
+  onCollapsedChange?: (collapsed: boolean) => void;
   mobileOpen?: boolean;
   onCloseMobile?: () => void;
   onOpenSettings?: () => void;

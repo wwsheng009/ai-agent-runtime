@@ -42,8 +42,11 @@ type WorkspaceSidebarSectionProps = Pick<
   | "workspaceDirectoriesLoading"
   | "workspaceDirectoriesRefreshing"
 > & {
+  /** 桌面侧栏收起状态与切换口（由工作区壳层持有，供网格列宽共用）。 */
+  collapsed: boolean;
   density: WorkspaceDensity;
   mobileOpen: boolean;
+  onCollapsedChange: (collapsed: boolean) => void;
   openSettings: (section?: SettingsSectionId) => void;
   setMobileSidebarOpen: Dispatch<SetStateAction<boolean>>;
 };
@@ -80,15 +83,19 @@ export function WorkspaceSidebarSection({
   workspaceDirectoriesError,
   workspaceDirectoriesLoading,
   workspaceDirectoriesRefreshing,
+  collapsed,
   density,
   mobileOpen,
+  onCollapsedChange,
   openSettings,
   setMobileSidebarOpen,
 }: WorkspaceSidebarSectionProps) {
   return (
     <WorkspaceSidebar
+      collapsed={collapsed}
       density={density}
       mobileOpen={mobileOpen}
+      onCollapsedChange={onCollapsedChange}
       onCloseMobile={() => setMobileSidebarOpen(false)}
       onOpenSettings={() => {
         setMobileSidebarOpen(false);

@@ -11,6 +11,7 @@ import { useTranslation } from "react-i18next";
 import { useSessionStats } from "@/hooks/workspace/use-session-stats";
 import { useSessionGroupView } from "@/hooks/workspace/use-session-group-view";
 import { WorkspaceSidebarChatsSection } from "@/components/workspace/workspace-sidebar/chats-section";
+import { WorkspaceSidebarCollapsedRail } from "@/components/workspace/workspace-sidebar/collapsed-rail";
 import { WorkspaceSidebarDirectoriesSection } from "@/components/workspace/workspace-sidebar/directories-section";
 import { WorkspaceSidebarHeader } from "@/components/workspace/workspace-sidebar/sidebar-header";
 import { useDirectoryRegistry } from "@/components/workspace/workspace-sidebar/use-directory-registry";
@@ -25,7 +26,9 @@ import {
 } from "@/components/workspace/workspace-sidebar/types";
 
 export function WorkspaceSidebar({
+  collapsed = false,
   density,
+  onCollapsedChange,
   mobileOpen = false,
   onCloseMobile,
   onOpenSettings,
@@ -221,6 +224,14 @@ export function WorkspaceSidebar({
     }));
   }
 
+  /** 图标列里点分区：展开侧栏，并把该段切到展开态（不动用户原本打开的其他段）。 */
+  function selectSectionFromRail(section: SidebarSectionId) {
+    setOpenSections((current) =>
+      current[section] ? current : { ...current, [section]: true },
+    );
+    onCollapsedChange?.(false);
+  }
+
   async function handleRenameSession(sessionId: string, title: string) {
     setRenamingSessionId(null);
     try {
@@ -263,7 +274,14 @@ export function WorkspaceSidebar({
             : "invisible -translate-x-full",
         )}
       >
+        <div
+          className={cn(
+            "flex min-h-0 flex-1 flex-col",
+            collapsed && "xl:hidden",
+          )}
+        >
         <WorkspaceSidebarHeader
+            onCollapsedChange={onCollapsedChange}
             isCompact={isCompact}
             onCloseMobile={onCloseMobile}
             onOpenSessionSearch={() => setSessionSearchOpen(true)}
@@ -371,6 +389,18 @@ export function WorkspaceSidebar({
             />
         </div>
       </div>
+        </div>
+      {collapsed ? (
+        <WorkspaceSidebarCollapsedRail
+          onCollapsedChange={onCollapsedChange}
+          onOpenSessionSearch={() => setSessionSearchOpen(true)}
+          onOpenSettings={onOpenSettings}
+          onSelectSection={selectSectionFromRail}
+          onSelectThread={onSelectThread}
+          selectedThreadId={selectedThreadId}
+          t={t}
+        />
+      ) : null}
       {runtimeTeamsDialogOpen ? (
       <WorkspaceSidebarRuntimeTeamsSurface
           error={runtimeTeamsError}

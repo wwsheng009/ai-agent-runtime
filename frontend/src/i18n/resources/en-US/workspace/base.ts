@@ -135,6 +135,8 @@ export const enWorkspaceBase = {
     openSettings: "Open settings",
     navigation: "Chat and session navigation",
     closeNavigation: "Close chat navigation",
+    collapse: "Collapse sidebar",
+    expand: "Expand sidebar",
     startNewChat: "Start new chat",
     searchPlaceholder: "Search threads",
     sections: {

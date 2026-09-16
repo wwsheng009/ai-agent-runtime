@@ -126,6 +126,8 @@ export const zhWorkspaceBase = {
     openSettings: "打开设置",
     navigation: "聊天与会话导航",
     closeNavigation: "关闭聊天导航",
+    collapse: "收起侧栏",
+    expand: "展开侧栏",
     startNewChat: "新建聊天",
     searchPlaceholder: "搜索线程",
     sections: {

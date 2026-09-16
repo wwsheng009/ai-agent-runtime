@@ -1,6 +1,6 @@
 // 由 components/workspace/workspace-sidebar.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
-import { MessageSquarePlusIcon, SearchIcon, Settings2Icon, SlidersHorizontalIcon, SparklesIcon, XIcon } from "lucide-react";
+import { MessageSquarePlusIcon, PanelLeftCloseIcon, SearchIcon, Settings2Icon, SlidersHorizontalIcon, SparklesIcon, XIcon } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,8 @@ import { type TFunction } from "i18next";
 
 type WorkspaceSidebarHeaderProps = {
   isCompact: boolean;
+  /** 桌面（xl+）才可收起：移动抽屉靠遮罩/关闭按钮退出，不提供收起态。 */
+  onCollapsedChange?: (collapsed: boolean) => void;
   onCloseMobile?: () => void;
   onOpenSessionSearch?: () => void;
   onOpenSettings?: () => void;
@@ -25,6 +27,7 @@ type WorkspaceSidebarHeaderProps = {
 
 export function WorkspaceSidebarHeader({
   isCompact,
+  onCollapsedChange,
   onCloseMobile,
   onOpenSessionSearch,
   onOpenSettings,
@@ -58,6 +61,18 @@ export function WorkspaceSidebarHeader({
           </div>
         </Link>
         <div className="flex items-center gap-1">
+          {onCollapsedChange ? (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="hidden xl:inline-flex"
+              onClick={() => onCollapsedChange(true)}
+              aria-label={t("sidebar.collapse")}
+              title={t("sidebar.collapse")}
+            >
+              <PanelLeftCloseIcon size={16} />
+            </Button>
+          ) : null}
           <Button
             variant="ghost"
             size="icon"
