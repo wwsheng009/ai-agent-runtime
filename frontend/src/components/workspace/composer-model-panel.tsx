@@ -1,0 +1,680 @@
+// composer 常驻模型座位：provider / model / reasoning effort 收进同一个弹出面板。
+//
+// 动机：三个并排 Select 在窄窗口下把工具条挤成两行，且「换模型 + 调推理强度」要走两次弹层。
+//
+// 交互（二级菜单）：
+// - 一级：供应商 / 模型 / 推理等级 三行摘要，行内是当前生效值，点行进二级候选列表；
+// - 二级：一次只渲染当前这一项的候选（不再让三段列表同屏滚动），左上角返回，Esc 回一级；
+// - 换供应商：宿主会立即重解析模型（保留仍被支持的，否则回落）并钳制推理档位；面板额外把
+//   「模型 + 推理等级」标成待重新选择并自动下钻到模型列表，选完模型再自动进入推理列表，
+//   用户不显式确认就不会把这组选择当作已定 —— 避免换供应商后把旧组合默默带过去；
+// - 同一供应商原地重选不触发失效。
+//
+// 边界（与旧三个 Select 的语义保持一致，不新增猜测）：
+// - 只渲染宿主投影的候选：不拉取 / 不缓存 / 不推断默认选中；
+// - 某段候选为空 → 整段隐藏；三段都为空 → 连触发器都不渲染（没有目录就不假装能选）；
+// - 不校验 / 不降级任何取值：有效值由宿主解析（`resolveRuntimeModelSelection`、
+//   `resolveEffectiveReasoningEffort`），面板只如实显示并把「重选」这一步显式化；
+// - 禁用态与原因由宿主传入（目录加载中 / 响应中），原因挂在 title，避免「点了没反应」；
+// - 点选即回调宿主；关闭按钮 / 外部点击 / Esc（一级）关闭并归还焦点。
+import {
+  useCallback,
+  type KeyboardEvent as ReactKeyboardEvent,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
+
+import {
+  CheckIcon,
+  ChevronDownIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  SlidersHorizontalIcon,
+  XIcon,
+} from "lucide-react";
+import { useTranslation } from "react-i18next";
+
+import {
+  resolvePopoverPosition,
+  type PopoverPosition,
+} from "@/components/ui/popover-position";
+import { cn } from "@/lib/utils";
+
+export type ComposerModelPanelProps = {
+  disabled?: boolean;
+  /** 禁用原因：作为触发器 title，让「为什么点不动」可见。 */
+  disabledReason?: string | null;
+  modelOptions: readonly string[];
+  onModelChange: (model: string) => void;
+  onProviderChange: (provider: string) => void;
+  onReasoningEffortChange: (effort: string) => void;
+  providerOptions: readonly string[];
+  reasoningEffortDefault: string;
+  reasoningEffortOptions: readonly string[];
+  selectedModel: string;
+  selectedProvider: string;
+  selectedReasoningEffort: string;
+};
+
+type ComposerModelPanelSectionId = "provider" | "model" | "reasoning";
+
+type ComposerModelPanelOption = {
+  value: string;
+  label: string;
+  selected: boolean;
+  onSelect: () => void;
+};
+
+type ComposerModelPanelSection = {
+  id: ComposerModelPanelSectionId;
+  label: string;
+  /** 一级行显示的当前生效值。 */
+  value: string;
+  options: ComposerModelPanelOption[];
+};
+
+/** 二级菜单视图：一级是摘要行，二级是某一项的候选列表。 */
+type ComposerModelPanelView =
+  | { level: "root" }
+  | { level: "section"; section: ComposerModelPanelSectionId };
+
+/** 换供应商后待用户显式重选的两项。 */
+type ComposerModelPanelPending = {
+  model: boolean;
+  reasoning: boolean;
+};
+
+/** 面板最小宽度：候选列表同屏可读，窄视口由定位函数夹到视口内。 */
+const PANEL_MIN_WIDTH = 320;
+const PANEL_MAX_HEIGHT = 380;
+const PANEL_MIN_HEIGHT = 160;
+
+export function ComposerModelPanel({
+  disabled = false,
+  disabledReason = null,
+  modelOptions,
+  onModelChange,
+  onProviderChange,
+  onReasoningEffortChange,
+  providerOptions,
+  reasoningEffortDefault,
+  reasoningEffortOptions,
+  selectedModel,
+  selectedProvider,
+  selectedReasoningEffort,
+}: ComposerModelPanelProps) {
+  const { t } = useTranslation("workspace");
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<PopoverPosition | null>(null);
+  const [view, setView] = useState<ComposerModelPanelView>({ level: "root" });
+  const [pending, setPending] = useState<ComposerModelPanelPending>({
+    model: false,
+    reasoning: false,
+  });
+  const panelId = useId();
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+
+  const unselectedLabel = t("composer.modelPanel.unselected");
+  const reselectHint = t("composer.modelPanel.reselectHint");
+  const defaultEffortLabel = reasoningEffortDefault
+    ? t("composer.reasoningDefaultWithValue", { effort: reasoningEffortDefault })
+    : t("composer.reasoningDefault");
+  const reasoningLabel = selectedReasoningEffort
+    ? selectedReasoningEffort
+    : defaultEffortLabel;
+
+  function goBackToRoot() {
+    setView({ level: "root" });
+  }
+
+  function hasSection(id: ComposerModelPanelSectionId) {
+    return sections.some((section) => section.id === id);
+  }
+
+  // 供应商一变，「模型 × 推理等级」这组选择就可能失效：宿主会重解析模型（仍被支持的才保留，
+  // 否则回落）并钳制推理档位。面板不猜宿主结果，只把重选这一步显式化并顺序引导。
+  function handleProviderSelect(provider: string) {
+    onProviderChange(provider);
+    if (provider === selectedProvider) {
+      goBackToRoot();
+      return;
+    }
+
+    const needsModel = hasSection("model");
+    const needsReasoning = hasSection("reasoning");
+    setPending({ model: needsModel, reasoning: needsReasoning });
+
+    if (needsModel) {
+      setView({ level: "section", section: "model" });
+      return;
+    }
+    if (needsReasoning) {
+      setView({ level: "section", section: "reasoning" });
+      return;
+    }
+    goBackToRoot();
+  }
+
+  function handleModelSelect(model: string) {
+    onModelChange(model);
+    if (!pending.model) {
+      // 普通换模型：留在候选列表里继续比较。
+      return;
+    }
+
+    const needsReasoning = hasSection("reasoning");
+    setPending({ model: false, reasoning: needsReasoning });
+    if (needsReasoning) {
+      setView({ level: "section", section: "reasoning" });
+      return;
+    }
+    goBackToRoot();
+  }
+
+  function handleReasoningSelect(effort: string) {
+    onReasoningEffortChange(effort);
+    if (!pending.reasoning) {
+      // 普通调档：留在候选列表里继续比较。
+      return;
+    }
+
+    setPending({ model: false, reasoning: false });
+    goBackToRoot();
+  }
+
+  // 段顺序固定为 provider → model → reasoning：与旧工具条从左到右的阅读顺序一致。
+  const sections: ComposerModelPanelSection[] = [];
+  if (providerOptions.length > 1) {
+    sections.push({
+      id: "provider",
+      label: t("composer.provider"),
+      value: selectedProvider || unselectedLabel,
+      options: providerOptions.map((provider) => ({
+        value: provider,
+        label: provider,
+        selected: provider === selectedProvider,
+        onSelect: () => {
+          handleProviderSelect(provider);
+        },
+      })),
+    });
+  }
+  if (modelOptions.length > 0) {
+    sections.push({
+      id: "model",
+      label: t("composer.model"),
+      value: selectedModel || unselectedLabel,
+      options: modelOptions.map((model) => ({
+        value: model,
+        label: model,
+        selected: model === selectedModel,
+        onSelect: () => {
+          handleModelSelect(model);
+        },
+      })),
+    });
+  }
+  if (reasoningEffortOptions.length > 0) {
+    sections.push({
+      id: "reasoning",
+      label: t("composer.reasoning"),
+      value: reasoningLabel,
+      options: [
+        {
+          value: "",
+          label: defaultEffortLabel,
+          selected: selectedReasoningEffort === "",
+          onSelect: () => {
+            handleReasoningSelect("");
+          },
+        },
+        ...reasoningEffortOptions.map((effort) => ({
+          value: effort,
+          label: effort,
+          selected: effort === selectedReasoningEffort,
+          onSelect: () => {
+            handleReasoningSelect(effort);
+          },
+        })),
+      ],
+    });
+  }
+
+  // 候选段消失时（例如新模型不声明推理档位）对应的「待确认」就没有对象了，不该继续提醒。
+  const modelPending = pending.model && hasSection("model");
+  const reasoningPending = pending.reasoning && hasSection("reasoning");
+  const hasPending = modelPending || reasoningPending;
+
+  // 摘要只列「有候选可选」的项：单 provider 不给选择，就不占位置。
+  const summarySegments = [
+    providerOptions.length > 1 ? selectedProvider : "",
+    modelOptions.length > 0 ? selectedModel : "",
+    reasoningEffortOptions.length > 0 ? reasoningLabel : "",
+  ].filter((segment) => segment.length > 0);
+  const triggerLabel =
+    summarySegments.length > 0
+      ? summarySegments.join(" · ")
+      : t("composer.modelPanel.trigger");
+
+  // 二级菜单：候选在切换后消失时退回一级，而不是渲染一个空列表。
+  const activeSection =
+    view.level === "section"
+      ? sections.find((section) => section.id === view.section)
+      : undefined;
+
+  const updatePosition = useCallback(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const triggerRect = triggerRef.current?.getBoundingClientRect();
+    if (!triggerRect) {
+      return;
+    }
+
+    // composer 在页面底部：固定向上展开，避免弹层被视口下沿裁掉。
+    setPosition(
+      resolvePopoverPosition(triggerRect, {
+        align: "start",
+        maxHeight: PANEL_MAX_HEIGHT,
+        minHeight: PANEL_MIN_HEIGHT,
+        minWidth: PANEL_MIN_WIDTH,
+        side: "top",
+      }),
+    );
+  }, []);
+
+  function focusTrigger() {
+    requestAnimationFrame(() => {
+      triggerRef.current?.focus();
+    });
+  }
+
+  function closePanel(restoreFocus = false) {
+    setOpen(false);
+    if (restoreFocus) {
+      focusTrigger();
+    }
+  }
+
+  function openPanel() {
+    if (disabled) {
+      return;
+    }
+
+    // 每次打开都从一级开始：二级是「这一次要改什么」的上下文，不该跨次保留。
+    setView({ level: "root" });
+    updatePosition();
+    setOpen(true);
+  }
+
+  // 响应开始 / 目录重新加载：禁用即收起，避免停留在无法生效的面板上。
+  useEffect(() => {
+    if (disabled) {
+      setOpen(false);
+    }
+  }, [disabled]);
+
+  // 一级 ↔ 二级切换后把焦点放进当前层的条目（二级优先当前选中项），
+  // 键盘用户不必先 Tab 穿过表头。
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    if (view.level === "section") {
+      const options = Array.from(
+        panelRef.current?.querySelectorAll<HTMLButtonElement>(
+          `[data-composer-model-panel-option="${view.section}"]`,
+        ) ?? [],
+      );
+      const selected = options.find(
+        (node) => node.getAttribute("aria-selected") === "true",
+      );
+      (selected ?? options[0] ?? panelRef.current)?.focus();
+      return;
+    }
+
+    panelRef.current?.focus();
+  }, [open, view]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+
+      if (
+        !rootRef.current?.contains(target) &&
+        !panelRef.current?.contains(target)
+      ) {
+        closePanel();
+      }
+    };
+
+    const handleWindowKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+
+      // 二级菜单里的 Esc 只退一层：先回一级，再按一次才关面板。
+      if (view.level === "section") {
+        setView({ level: "root" });
+        return;
+      }
+
+      closePanel(true);
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleWindowKeyDown);
+
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleWindowKeyDown);
+    };
+  }, [open, view]);
+
+  useEffect(() => {
+    if (!open || typeof window === "undefined") {
+      return;
+    }
+
+    const handleViewportChange = () => {
+      updatePosition();
+    };
+
+    window.addEventListener("resize", handleViewportChange);
+    window.addEventListener("scroll", handleViewportChange, true);
+
+    const triggerNode = triggerRef.current;
+    const resizeObserver =
+      typeof ResizeObserver !== "undefined" && triggerNode
+        ? new ResizeObserver(() => {
+            handleViewportChange();
+          })
+        : null;
+
+    if (resizeObserver && triggerNode) {
+      resizeObserver.observe(triggerNode);
+    }
+
+    return () => {
+      window.removeEventListener("resize", handleViewportChange);
+      window.removeEventListener("scroll", handleViewportChange, true);
+      resizeObserver?.disconnect();
+    };
+  }, [open, updatePosition]);
+
+  // 面板内上下键在「当前这一层」的条目间移动焦点（条目本身是 button，Enter/Space 走原生语义）。
+  function handlePanelKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key === "ArrowLeft" && activeSection) {
+      event.preventDefault();
+      goBackToRoot();
+      return;
+    }
+
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
+      return;
+    }
+
+    const selector = activeSection
+      ? `[data-composer-model-panel-option="${activeSection.id}"]`
+      : "[data-composer-model-panel-row]";
+    const nodes = panelRef.current?.querySelectorAll<HTMLButtonElement>(selector);
+    if (!nodes || nodes.length === 0) {
+      return;
+    }
+
+    event.preventDefault();
+    const options = Array.from(nodes);
+    const currentIndex = options.findIndex(
+      (node) => node === document.activeElement,
+    );
+    const step = event.key === "ArrowDown" ? 1 : -1;
+    const nextIndex =
+      currentIndex < 0
+        ? step === 1
+          ? 0
+          : options.length - 1
+        : (currentIndex + step + options.length) % options.length;
+    options[nextIndex]?.focus();
+  }
+
+  if (sections.length === 0) {
+    return null;
+  }
+
+  const panel =
+    open && position ? (
+      <div
+        ref={panelRef}
+        id={panelId}
+        role="dialog"
+        aria-label={t("composer.modelPanel.title")}
+        data-composer-model-panel
+        data-composer-model-panel-level={activeSection ? "section" : "root"}
+        onKeyDown={handlePanelKeyDown}
+        style={{ position: "fixed", ...position }}
+        tabIndex={-1}
+        className={cn(
+          "z-[160] flex w-max max-w-[min(24rem,calc(100vw-1rem))] flex-col overflow-hidden",
+          "rounded-card-lg border border-border bg-surface-overlay shadow-[0_10px_24px_rgba(0,0,0,0.24)] outline-none",
+        )}
+      >
+        <header className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
+          {activeSection ? (
+            <button
+              type="button"
+              aria-label={t("composer.modelPanel.back")}
+              data-composer-model-panel-back
+              onClick={goBackToRoot}
+              title={t("composer.modelPanel.back")}
+              className="inline-flex size-5 shrink-0 items-center justify-center rounded-control text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
+            >
+              <ChevronLeftIcon size={12} aria-hidden="true" />
+            </button>
+          ) : null}
+          <span
+            id={`${panelId}-heading`}
+            data-composer-model-panel-title
+            className="app-text-9 uppercase tracking-[0.12em] text-muted-foreground"
+          >
+            {activeSection
+              ? activeSection.label
+              : t("composer.modelPanel.title")}
+          </span>
+          <button
+            type="button"
+            aria-label={t("composer.modelPanel.close")}
+            data-composer-model-panel-close
+            onClick={() => {
+              closePanel(true);
+            }}
+            title={t("composer.modelPanel.close")}
+            className="ml-auto inline-flex size-5 shrink-0 items-center justify-center rounded-control text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
+          >
+            <XIcon size={12} aria-hidden="true" />
+          </button>
+        </header>
+        {activeSection ? (
+          <div
+            role="listbox"
+            aria-labelledby={`${panelId}-heading`}
+            data-composer-model-panel-section={activeSection.id}
+            className="flex max-h-[inherit] min-h-0 flex-col gap-0.5 overflow-y-auto p-1.5"
+          >
+            {activeSection.options.map((option) => (
+              <button
+                key={`${activeSection.id}\u0000${option.value}`}
+                type="button"
+                role="option"
+                aria-selected={option.selected}
+                data-composer-model-panel-option={activeSection.id}
+                onClick={option.onSelect}
+                title={option.label}
+                className={cn(
+                  "flex w-full cursor-pointer items-center gap-2 rounded-control px-2.5 py-2 text-left leading-5 transition",
+                  option.selected
+                    ? "bg-surface-soft text-foreground"
+                    : "text-muted-foreground hover:bg-surface-soft hover:text-foreground",
+                )}
+              >
+                <span className="flex size-4 shrink-0 items-center justify-center">
+                  {option.selected ? (
+                    <CheckIcon size={13} aria-hidden="true" />
+                  ) : null}
+                </span>
+                <span className="truncate text-base">{option.label}</span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div
+            role="group"
+            aria-labelledby={`${panelId}-heading`}
+            className="flex max-h-[inherit] min-h-0 flex-col gap-0.5 overflow-y-auto p-1.5"
+          >
+            {sections.map((section) => {
+              const sectionPending =
+                section.id === "model"
+                  ? modelPending
+                  : section.id === "reasoning"
+                    ? reasoningPending
+                    : false;
+
+              return (
+                <button
+                  key={section.id}
+                  type="button"
+                  data-composer-model-panel-row={section.id}
+                  data-composer-model-panel-row-pending={
+                    sectionPending ? "true" : undefined
+                  }
+                  aria-haspopup="listbox"
+                  aria-label={`${section.label}: ${section.value}`}
+                  title={
+                    sectionPending
+                      ? `${section.value} · ${reselectHint}`
+                      : section.value
+                  }
+                  onClick={() => {
+                    setView({ level: "section", section: section.id });
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key !== "ArrowRight") {
+                      return;
+                    }
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setView({ level: "section", section: section.id });
+                  }}
+                  className={cn(
+                    "flex w-full cursor-pointer items-center gap-2 rounded-control px-2.5 py-2 text-left transition",
+                    "text-muted-foreground hover:bg-surface-soft hover:text-foreground",
+                  )}
+                >
+                  <span className="shrink-0 app-text-9 uppercase tracking-[0.12em] text-muted-foreground">
+                    {section.label}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-base text-foreground">
+                    {section.value}
+                  </span>
+                  {sectionPending ? (
+                    <span className="shrink-0 rounded-chip border border-amber-300/40 px-1.5 app-text-10 text-amber-200">
+                      {t("composer.modelPanel.pendingConfirm")}
+                    </span>
+                  ) : null}
+                  <ChevronRightIcon
+                    size={13}
+                    aria-hidden="true"
+                    className="shrink-0 text-muted-foreground"
+                  />
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    ) : null;
+
+  return (
+    <>
+      <div ref={rootRef} className="inline-flex min-w-0">
+        <button
+          ref={triggerRef}
+          type="button"
+          aria-label={t("composer.modelPanel.trigger")}
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          aria-controls={open ? panelId : undefined}
+          data-composer-model-panel-trigger
+          disabled={disabled}
+          title={
+            disabled && disabledReason
+              ? disabledReason
+              : hasPending
+                ? `${triggerLabel} · ${reselectHint}`
+                : triggerLabel
+          }
+          onClick={(event) => {
+            event.stopPropagation();
+            if (open) {
+              closePanel();
+              return;
+            }
+            openPanel();
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
+              return;
+            }
+            event.preventDefault();
+            event.stopPropagation();
+            openPanel();
+          }}
+          className={cn(
+            "inline-flex min-w-0 max-w-[22rem] items-center gap-1.5 rounded-[0.6rem] border border-border",
+            "bg-surface-soft px-2 py-1 text-left text-base leading-none text-muted-foreground outline-none transition",
+            "hover:border-border-strong hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
+            "disabled:cursor-not-allowed disabled:opacity-60",
+          )}
+        >
+          <SlidersHorizontalIcon size={13} aria-hidden="true" className="shrink-0" />
+          <span className="truncate" data-composer-model-panel-summary>
+            {triggerLabel}
+          </span>
+          {/* 面板关着也要能看出「换了供应商、还欠一次确认」。 */}
+          {hasPending ? (
+            <span
+              data-composer-model-panel-pending
+              aria-hidden="true"
+              className="size-1.5 shrink-0 rounded-full bg-amber-300/70"
+            />
+          ) : null}
+          <ChevronDownIcon
+            size={12}
+            aria-hidden="true"
+            className={cn(
+              "shrink-0 transition-transform duration-150",
+              open ? "rotate-180" : "rotate-0",
+            )}
+          />
+        </button>
+      </div>
+      {panel && typeof document !== "undefined" && document.body
+        ? createPortal(panel, document.body)
+        : panel}
+    </>
+  );
+}

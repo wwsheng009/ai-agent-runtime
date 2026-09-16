@@ -1,6 +1,5 @@
 import {
   useCallback,
-  type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   useEffect,
   useId,
@@ -12,6 +11,11 @@ import { createPortal } from "react-dom";
 import { CheckIcon, ChevronDownIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+
+import {
+  resolvePopoverPosition,
+  type PopoverPosition,
+} from "./popover-position";
 
 export type SelectOption = {
   value: string;
@@ -33,60 +37,6 @@ type SelectProps = {
   menuClassName?: string;
   optionClassName?: string;
 };
-
-type SelectMenuPosition = Pick<
-  CSSProperties,
-  "bottom" | "left" | "minWidth" | "top" | "right"
-> & {
-  maxHeight: number;
-};
-
-const SELECT_MENU_GAP = 8;
-const SELECT_VIEWPORT_PADDING = 8;
-
-function resolveMenuPosition(
-  triggerRect: DOMRect,
-  align: NonNullable<SelectProps["align"]>,
-  side: NonNullable<SelectProps["side"]>,
-): SelectMenuPosition {
-  const viewportWidth = window.innerWidth;
-  const viewportHeight = window.innerHeight;
-  const minWidth = Math.min(
-    triggerRect.width,
-    viewportWidth - SELECT_VIEWPORT_PADDING * 2,
-  );
-  const availableHeight =
-    side === "top"
-      ? triggerRect.top - SELECT_MENU_GAP - SELECT_VIEWPORT_PADDING
-      : viewportHeight -
-        triggerRect.bottom -
-        SELECT_MENU_GAP -
-        SELECT_VIEWPORT_PADDING;
-
-  return {
-    bottom:
-      side === "top"
-        ? viewportHeight - triggerRect.top + SELECT_MENU_GAP
-        : "auto",
-    left:
-      align === "start"
-        ? Math.max(triggerRect.left, SELECT_VIEWPORT_PADDING)
-        : "auto",
-    maxHeight: Math.max(96, Math.min(240, availableHeight)),
-    minWidth,
-    right:
-      align === "end"
-        ? Math.max(
-            viewportWidth - triggerRect.right,
-            SELECT_VIEWPORT_PADDING,
-          )
-        : "auto",
-    top:
-      side === "bottom"
-        ? Math.max(triggerRect.bottom + SELECT_MENU_GAP, SELECT_VIEWPORT_PADDING)
-        : "auto",
-  };
-}
 
 function findFirstEnabledOptionIndex(options: readonly SelectOption[]) {
   return options.findIndex((option) => !option.disabled);
@@ -147,7 +97,7 @@ export function Select({
   const listboxRef = useRef<HTMLDivElement | null>(null);
   const listboxId = useId();
   const [open, setOpen] = useState(false);
-  const [menuPosition, setMenuPosition] = useState<SelectMenuPosition | null>(null);
+  const [menuPosition, setMenuPosition] = useState<PopoverPosition | null>(null);
   const selectedIndex = options.findIndex((option) => option.value === value);
   const selectedOption = selectedIndex >= 0 ? options[selectedIndex] : undefined;
   const triggerLabel = selectedOption?.label ?? (value || placeholder);
@@ -178,7 +128,7 @@ export function Select({
       return;
     }
 
-    setMenuPosition(resolveMenuPosition(triggerRect, align, side));
+    setMenuPosition(resolvePopoverPosition(triggerRect, { align, side }));
   }, [align, side]);
 
   function closeMenu() {

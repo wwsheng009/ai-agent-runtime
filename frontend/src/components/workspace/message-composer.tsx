@@ -10,9 +10,9 @@ import {
   type ComposerCommandResultNotice,
 } from "@/components/workspace/composer-command-result-notice";
 import { ComposerMenu } from "@/components/workspace/composer-menu";
+import { ComposerModelPanel } from "@/components/workspace/composer-model-panel";
 import { ComposerStatusRow } from "@/components/workspace/composer-status-row";
 import { Button } from "@/components/ui/button";
-import { Select } from "@/components/ui/select";
 import { type Thread } from "@/data/mock";
 import { type ComposerAttachmentsController } from "@/hooks/workspace/composer/use-composer-attachments";
 import { useComposerMenu } from "@/hooks/workspace/composer/use-composer-menu";
@@ -113,31 +113,7 @@ export function MessageComposer({
       : hasSession
         ? t("composer.submit.sendTurn")
         : t("composer.submit.startThread");
-  const showProviderPicker = providerOptions.length > 1;
   const showModelPicker = modelOptions.length > 0;
-  const showReasoningEffortPicker = reasoningEffortOptions.length > 0;
-  const providerSelectOptions = providerOptions.map((provider) => ({
-    value: provider,
-    label: provider,
-  }));
-  const modelSelectOptions = modelOptions.map((model) => ({
-    value: model,
-    label: model,
-  }));
-  const reasoningEffortSelectOptions = [
-    {
-      value: "",
-      label: reasoningEffortDefault
-        ? t("composer.reasoningDefaultWithValue", {
-            effort: reasoningEffortDefault,
-          })
-        : t("composer.reasoningDefault"),
-    },
-    ...reasoningEffortOptions.map((effort) => ({
-      value: effort,
-      label: effort,
-    })),
-  ];
   const runtimeModelStatusLabel = runtimeModelsLoading
     ? t("composer.loadingModels")
     : !showModelPicker && !runtimeModelsError
@@ -374,54 +350,24 @@ export function MessageComposer({
                 {t("composer.menu.trigger")}
               </span>
             </button>
-            {showProviderPicker ? (
-              <label className="inline-flex items-center gap-1.5">
-                <span>{t("composer.provider")}</span>
-                <Select
-                  ariaLabel={t("composer.provider")}
-                  value={selectedProvider}
-                  onChange={onProviderChange}
-                  options={providerSelectOptions}
-                  disabled={runtimeModelsLoading || isResponding}
-                  side="top"
-                  triggerClassName="min-w-[7rem] max-w-[12rem] rounded-[0.6rem] px-2 py-1 text-base leading-none"
-                  menuClassName="max-w-[14rem]"
-                  optionClassName="text-base"
-                />
-              </label>
-            ) : null}
-            {showModelPicker ? (
-              <label className="inline-flex items-center gap-1.5">
-                <span>{t("composer.model")}</span>
-                <Select
-                  ariaLabel={t("composer.model")}
-                  value={selectedModel}
-                  onChange={onModelChange}
-                  options={modelSelectOptions}
-                  disabled={runtimeModelsLoading || isResponding}
-                  side="top"
-                  triggerClassName="min-w-[9rem] max-w-[16rem] rounded-[0.6rem] px-2 py-1 text-base leading-none"
-                  menuClassName="max-w-[18rem]"
-                  optionClassName="text-base"
-                />
-              </label>
-            ) : null}
-            {showReasoningEffortPicker ? (
-              <label className="inline-flex items-center gap-1.5">
-                <span>{t("composer.reasoning")}</span>
-                <Select
-                  ariaLabel={t("composer.reasoning")}
-                  value={selectedReasoningEffort}
-                  onChange={onReasoningEffortChange}
-                  options={reasoningEffortSelectOptions}
-                  disabled={runtimeModelsLoading || isResponding}
-                  side="top"
-                  triggerClassName="min-w-[6rem] max-w-[11rem] rounded-[0.6rem] px-2 py-1 text-base leading-none"
-                  menuClassName="max-w-[12rem]"
-                  optionClassName="text-base"
-                />
-              </label>
-            ) : null}
+            <ComposerModelPanel
+              disabled={runtimeModelsLoading || isResponding}
+              disabledReason={
+                isResponding
+                  ? t("composer.modelPanel.lockedWhileResponding")
+                  : t("composer.loadingModels")
+              }
+              modelOptions={modelOptions}
+              onModelChange={onModelChange}
+              onProviderChange={onProviderChange}
+              onReasoningEffortChange={onReasoningEffortChange}
+              providerOptions={providerOptions}
+              reasoningEffortDefault={reasoningEffortDefault}
+              reasoningEffortOptions={reasoningEffortOptions}
+              selectedModel={selectedModel}
+              selectedProvider={selectedProvider}
+              selectedReasoningEffort={selectedReasoningEffort}
+            />
             {runtimeModelStatusLabel ? (
               <span className="truncate">{runtimeModelStatusLabel}</span>
             ) : null}

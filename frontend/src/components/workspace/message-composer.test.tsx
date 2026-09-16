@@ -155,26 +155,101 @@ describe("MessageComposer", () => {
     expect(onStop).toHaveBeenCalledTimes(1);
   });
 
-  it("renders the reasoning effort picker with the config default label", () => {
-    const onReasoningEffortChange = vi.fn();
+  it("combines provider / model / reasoning into one panel trigger", () => {
     renderComposer({
-      onReasoningEffortChange,
+      providerOptions: ["provider-a", "provider-b"],
       reasoningEffortDefault: "medium",
       reasoningEffortOptions: ["low", "high"],
     });
 
     const trigger = container.querySelector(
-      'button[aria-label="推理强度"]',
+      "[data-composer-model-panel-trigger]",
     ) as HTMLButtonElement | null;
     expect(trigger).not.toBeNull();
-    expect(trigger?.textContent).toContain("默认（medium）");
+    expect(trigger?.textContent).toContain(
+      "provider-a · model-a · 默认（medium）",
+    );
     expect(trigger?.disabled).toBe(false);
+
+    // 三项不再各自占用工具条座位。
+    expect(container.querySelector('button[aria-label="Provider"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Model"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="推理强度"]')).toBeNull();
+
+    act(() => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(document.body.querySelector("[data-composer-model-panel]")).not.toBeNull();
+    // 一级只列座位，候选在二级列表里。
+    expect(
+      document.body.querySelector(
+        '[data-composer-model-panel-row="provider"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      document.body.querySelector('[data-composer-model-panel-row="model"]'),
+    ).not.toBeNull();
+    expect(
+      document.body.querySelector(
+        '[data-composer-model-panel-row="reasoning"]',
+      ),
+    ).not.toBeNull();
   });
 
-  it("hides the reasoning effort picker when the model declares none", () => {
+  it("applies a model picked from the combined panel and keeps it open", () => {
+    const onModelChange = vi.fn();
+    renderComposer({ modelOptions: ["model-a", "model-b"], onModelChange });
+
+    const trigger = container.querySelector(
+      "[data-composer-model-panel-trigger]",
+    ) as HTMLButtonElement | null;
+    act(() => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const modelRow = document.body.querySelector(
+      '[data-composer-model-panel-row="model"]',
+    );
+    act(() => {
+      modelRow?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const modelOption = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>(
+        '[data-composer-model-panel-option="model"]',
+      ),
+    ).find((node) => node.textContent?.includes("model-b"));
+    expect(modelOption).not.toBeUndefined();
+
+    act(() => {
+      modelOption?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(onModelChange).toHaveBeenCalledWith("model-b");
+    expect(document.body.querySelector("[data-composer-model-panel]")).not.toBeNull();
+  });
+
+  it("hides the reasoning section when the model declares none", () => {
     renderComposer({ reasoningEffortOptions: [] });
 
-    expect(container.querySelector('button[aria-label="推理强度"]')).toBeNull();
+    const trigger = container.querySelector(
+      "[data-composer-model-panel-trigger]",
+    ) as HTMLButtonElement | null;
+    expect(trigger).not.toBeNull();
+
+    act(() => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(
+      document.body.querySelector(
+        '[data-composer-model-panel-row="reasoning"]',
+      ),
+    ).toBeNull();
+    expect(
+      document.body.querySelector('[data-composer-model-panel-row="model"]'),
+    ).not.toBeNull();
   });
 
   it("caps the textarea at 14 lines and scrolls inside when the draft overflows", () => {
