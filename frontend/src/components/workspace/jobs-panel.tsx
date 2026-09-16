@@ -349,7 +349,7 @@ function JobRow({
           </div>
           <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 app-text-10 text-muted-foreground">
             <Badge
-              className={cn("h-5 px-1.5 text-[10px]", jobStatusToneClass(job.status))}
+              className={cn("h-5 px-1.5 app-text-10", jobStatusToneClass(job.status))}
             >
               {t(jobStatusLabelKey(job.status), { defaultValue: job.status })}
             </Badge>

@@ -81,7 +81,7 @@ export function RuntimeRoutingOverviewSection({
           </ConfigFormField>
 
           <div className="rounded-card border border-border bg-surface-softer p-3">
-            <div className="text-[13px] font-semibold text-foreground">
+            <div className="app-text-13 font-semibold text-foreground">
               {t("editor.routing.fields.failover")}
             </div>
             <div className="mt-1 text-xs leading-5 text-muted-foreground">

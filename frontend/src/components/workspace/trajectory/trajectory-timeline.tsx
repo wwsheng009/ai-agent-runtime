@@ -205,7 +205,7 @@ export function TrajectoryTimeline({
       </span>
       <div className="flex items-center justify-between gap-2">
         <span
-          className="truncate text-[11px] text-muted-foreground"
+          className="truncate app-text-11 text-muted-foreground"
           data-testid="trajectory-timeline-range"
           title={t("panels.shell.trajectory.timeline.selectionHint")}
         >
@@ -271,7 +271,7 @@ export function TrajectoryTimeline({
       {spanPresets.length > 0 ? (
         <div
           aria-label={t("panels.shell.trajectory.timeline.presetGroup")}
-          className="flex flex-wrap items-center gap-1 text-[10px] text-muted-foreground"
+          className="flex flex-wrap items-center gap-1 app-text-10 text-muted-foreground"
           data-testid="trajectory-timeline-presets"
           role="group"
         >
@@ -340,7 +340,7 @@ export function TrajectoryTimeline({
           <span
             key={`${tick.value}-${index}`}
             className={cn(
-              "absolute top-0 text-[10px] whitespace-nowrap text-muted-foreground",
+              "absolute top-0 app-text-10 whitespace-nowrap text-muted-foreground",
               index === 0
                 ? "left-0"
                 : index === ticks.length - 1

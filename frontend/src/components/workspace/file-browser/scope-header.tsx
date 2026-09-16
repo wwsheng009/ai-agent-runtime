@@ -180,12 +180,12 @@ export function ScopeHeader(props: ScopeHeaderProps) {
           窄右栏里合计宽度会超过容器（实测 513px > 436px）。不换行就只能右溢被 `overflow-hidden`
           裁掉——被裁的控件点不到。换行保证控件永远可达，代价只是头部多占一行。 */}
       <div className="flex flex-wrap items-center gap-2">
-        <span className="truncate font-mono text-[11px] text-muted-foreground" title={currentDir || "/"}>
+        <span className="truncate font-mono app-text-11 text-muted-foreground" title={currentDir || "/"}>
           /{currentDir}
         </span>
         {activeRoot?.isGitRepo ? (
           <span
-            className="inline-flex shrink-0 items-center gap-1 rounded border border-accent/40 px-1.5 py-0.5 text-[10px] text-accent-secondary"
+            className="inline-flex shrink-0 items-center gap-1 rounded border border-accent/40 px-1.5 py-0.5 app-text-10 text-accent-secondary"
             title={activeRoot.gitRoot ? t("panels.fileBrowser.scope.gitRoot", { path: activeRoot.gitRoot }) : t("panels.fileBrowser.scope.gitBadge")}
           >
             <GitBranchIcon aria-hidden className="size-3" />
@@ -206,7 +206,7 @@ export function ScopeHeader(props: ScopeHeaderProps) {
         </label>
         <select
           aria-label={t("panels.fileBrowser.scope.sortAria")}
-          className="rounded border border-border/60 bg-surface-solid px-1.5 py-1 text-[11px] text-foreground"
+          className="rounded border border-border/60 bg-surface-solid px-1.5 py-1 app-text-11 text-foreground"
           id="file-browser-sort"
           onChange={(event) => onChangeSort(normalizeSortKey(event.target.value))}
           value={sortKey}
@@ -218,7 +218,7 @@ export function ScopeHeader(props: ScopeHeaderProps) {
           ))}
         </select>
         <label
-          className="inline-flex cursor-pointer items-center gap-1 rounded border border-border/60 px-1.5 py-1 text-[11px] text-muted-foreground hover:bg-white/5"
+          className="inline-flex cursor-pointer items-center gap-1 rounded border border-border/60 px-1.5 py-1 app-text-11 text-muted-foreground hover:bg-white/5"
           title={t("panels.fileBrowser.scope.upload")}
         >
           <UploadIcon aria-hidden className="size-3.5" />
@@ -239,7 +239,7 @@ export function ScopeHeader(props: ScopeHeaderProps) {
         <button
           aria-label={transferCount > 0 ? t("panels.fileBrowser.scope.transferTray", { count: transferCount }) : t("panels.fileBrowser.scope.transferTrayEmpty")}
           aria-pressed={transferOpen}
-          className="rounded border border-border/60 px-1.5 py-1 text-[11px] text-muted-foreground hover:bg-white/5"
+          className="rounded border border-border/60 px-1.5 py-1 app-text-11 text-muted-foreground hover:bg-white/5"
           onClick={onToggleTransferTray}
           title={transferCount > 0 ? t("panels.fileBrowser.scope.transferTray", { count: transferCount }) : t("panels.fileBrowser.scope.transferTrayEmpty")}
           type="button"
@@ -249,7 +249,7 @@ export function ScopeHeader(props: ScopeHeaderProps) {
       </div>
 
       {degraded ? (
-        <p className="rounded border border-accent-gold/30 bg-accent-gold/10 px-2 py-1 text-[11px] text-foreground" data-testid="file-browser-degraded">
+        <p className="rounded border border-accent-gold/30 bg-accent-gold/10 px-2 py-1 app-text-11 text-foreground" data-testid="file-browser-degraded">
           {hasFallback
             ? degradedReason
               ? t("panels.fileBrowser.scope.degradedOther", { reason: degradedReason })
@@ -258,12 +258,12 @@ export function ScopeHeader(props: ScopeHeaderProps) {
         </p>
       ) : null}
       {activeRoot?.probeError ? (
-        <p className="text-[11px] text-muted-foreground">
+        <p className="app-text-11 text-muted-foreground">
           {t("panels.fileBrowser.scope.probeError", { reason: activeRoot.probeError })}
         </p>
       ) : null}
       {degraded && hasFallback ? (
-        <p className="text-[11px] text-muted-foreground">{t("panels.fileBrowser.scope.unavailableHint")}</p>
+        <p className="app-text-11 text-muted-foreground">{t("panels.fileBrowser.scope.unavailableHint")}</p>
       ) : null}
     </header>
   );

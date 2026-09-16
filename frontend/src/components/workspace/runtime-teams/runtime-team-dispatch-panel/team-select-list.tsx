@@ -60,7 +60,7 @@ export function DispatchTeamList({
                 className="size-4 rounded border-white/14 bg-transparent"
               />
               <span className="min-w-0">
-                <span className="block truncate text-[13px] font-semibold text-foreground">
+                <span className="block truncate app-text-13 font-semibold text-foreground">
                   {truncateIdentifier(team.id, 18)}
                 </span>
                 <span className="block truncate text-xs text-muted-foreground">

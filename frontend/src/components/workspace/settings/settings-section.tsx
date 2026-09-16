@@ -14,7 +14,7 @@ export function SettingsSection({
   return (
     <section className="space-y-3">
       <div>
-        <div className="text-[13px] font-semibold text-foreground">{title}</div>
+        <div className="app-text-13 font-semibold text-foreground">{title}</div>
         <p className="mt-1 text-sm leading-6 text-muted-foreground">
           {description}
         </p>

@@ -412,24 +412,24 @@ export function FileBrowserSurface({ sessionId, workspacePath }: FileBrowserSurf
             showHidden={browser.showHidden}
             sortKey={browser.sortKey}
           />
-          {treeState ? <p className="px-1 text-[11px] text-muted-foreground">{treeState}</p> : null}
+          {treeState ? <p className="px-1 app-text-11 text-muted-foreground">{treeState}</p> : null}
           {currentListing?.truncated ? (
-            <p className="px-1 text-[11px] text-accent-gold" data-testid="listing-truncated">
+            <p className="px-1 app-text-11 text-accent-gold" data-testid="listing-truncated">
               {t("panels.fileBrowser.tree.truncated", { count: currentListing.entries.length })}
             </p>
           ) : null}
           {currentListing?.cursorExpired ? (
-            <p className="px-1 text-[11px] text-accent-gold">{t("panels.fileBrowser.tree.cursorExpired")}</p>
+            <p className="px-1 app-text-11 text-accent-gold">{t("panels.fileBrowser.tree.cursorExpired")}</p>
           ) : null}
-          {ready ? <p className="px-1 text-[11px] text-muted-foreground">{t("panels.fileBrowser.tree.emptyDir")}</p> : null}
+          {ready ? <p className="px-1 app-text-11 text-muted-foreground">{t("panels.fileBrowser.tree.emptyDir")}</p> : null}
           {selectedPaths.length > 1 ? (
-            <p className="px-1 text-[11px] text-muted-foreground" data-testid="file-selection-count">
+            <p className="px-1 app-text-11 text-muted-foreground" data-testid="file-selection-count">
               {t("panels.fileBrowser.tree.selectionCount", { count: selectedPaths.length })}
             </p>
           ) : null}
           {copyNotice ? (
             <p
-              className={cn("px-1 text-[11px]", copyNotice === "done" ? "text-muted-foreground" : "text-accent-gold")}
+              className={cn("px-1 app-text-11", copyNotice === "done" ? "text-muted-foreground" : "text-accent-gold")}
               data-testid="file-copy-notice"
             >
               {t(copyNotice === "done" ? "panels.fileBrowser.menu.copyDone" : "panels.fileBrowser.menu.copyFailed")}

@@ -400,7 +400,7 @@ export function TrajectoryView({
 
       {chartKind || windowFiltered ? (
         <div
-          className="flex flex-wrap items-center gap-1.5 border-b border-border bg-surface-softer px-3 py-1 text-[10px] text-muted-foreground"
+          className="flex flex-wrap items-center gap-1.5 border-b border-border bg-surface-softer px-3 py-1 app-text-10 text-muted-foreground"
           data-testid="trajectory-timeline-filter"
         >
           <span data-testid="trajectory-timeline-filter-summary">

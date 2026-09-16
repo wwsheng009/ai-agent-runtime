@@ -38,7 +38,7 @@ export function ArtifactPanelCheckpointsSection({
   return (
     <section className="flex min-h-0 flex-col overflow-hidden rounded-panel-lg border border-white/8 bg-white/[0.035]">
       <div className="flex items-center justify-between gap-3 border-b border-white/8 px-3 py-2.5">
-        <div className="inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
+        <div className="inline-flex items-center gap-2 app-text-10 uppercase tracking-[0.16em] text-muted-foreground">
           <HistoryIcon size={14} />
           {t("panels.artifacts.checkpoints.title")}
         </div>
@@ -46,7 +46,7 @@ export function ArtifactPanelCheckpointsSection({
       </div>
       <div className="min-h-0 flex-1 overflow-auto px-2.5 py-2.5">
         {checkpointsLoading ? (
-          <div className="mb-2 inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
+          <div className="mb-2 inline-flex items-center gap-2 app-text-10 uppercase tracking-[0.16em] text-muted-foreground">
             <LoaderCircleIcon size={14} className="animate-spin" />
             {t("panels.artifacts.checkpoints.loading")}
           </div>
@@ -85,10 +85,10 @@ export function ArtifactPanelCheckpointsSection({
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0 flex-1">
-                        <div className="truncate text-[13px] font-semibold">
+                        <div className="truncate app-text-13 font-semibold">
                           {formatCheckpointTitle(checkpoint)}
                         </div>
-                        <div className="mt-0.5 text-[11px] text-muted-foreground">
+                        <div className="mt-0.5 app-text-11 text-muted-foreground">
                           {formatCheckpointMeta(checkpoint)}
                         </div>
                       </div>

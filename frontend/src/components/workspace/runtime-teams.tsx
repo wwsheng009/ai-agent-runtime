@@ -293,7 +293,7 @@ export function RuntimeTeams({
     <section className={cn(showHeader ? "mt-4" : "mt-0", className)}>
       {showHeader ? (
         <div className="mb-2 flex items-center justify-between">
-          <div className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
+          <div className="app-text-10 uppercase tracking-[0.16em] text-muted-foreground">
             {t("panels.teamsDispatch.summary.header")}
           </div>
         </div>

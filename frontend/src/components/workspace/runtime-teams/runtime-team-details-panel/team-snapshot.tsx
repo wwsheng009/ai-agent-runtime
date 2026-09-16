@@ -54,7 +54,7 @@ export function RuntimeTeamSnapshot({
         </Badge>
       </div>
 
-      <div className="mt-2.5 flex flex-wrap gap-1.5 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+      <div className="mt-2.5 flex flex-wrap gap-1.5 app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
         {selectedTeam.workspace_id ? (
           <span className="rounded-control border border-border bg-surface-soft px-2 py-0.5">
             {t("panels.teamsPanels.details.snapshot.workspacePill", {
@@ -78,7 +78,7 @@ export function RuntimeTeamSnapshot({
 
       <div className="mt-3 grid gap-2.5 lg:grid-cols-3">
         <div className="rounded-card border border-border bg-surface-softer px-3 py-2.5">
-          <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+          <div className="flex items-center gap-2 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
             <ActivityIcon size={14} />
             {t("panels.teamsPanels.details.snapshot.tasksTitle")}
           </div>
@@ -119,7 +119,7 @@ export function RuntimeTeamSnapshot({
         </div>
 
         <div className="rounded-card border border-border bg-surface-softer px-3 py-2.5">
-          <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+          <div className="flex items-center gap-2 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
             <UsersRoundIcon size={14} />
             {t("panels.teamsPanels.details.snapshot.teammatesTitle")}
           </div>
@@ -143,7 +143,7 @@ export function RuntimeTeamSnapshot({
         </div>
 
         <div className="rounded-card border border-border bg-surface-softer px-3 py-2.5">
-          <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+          <div className="flex items-center gap-2 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
             <GitBranchPlusIcon size={14} />
             {t("panels.teamsPanels.details.snapshot.graphTitle")}
             {isDetailsLoading ? (

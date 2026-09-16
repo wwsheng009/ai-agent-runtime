@@ -207,7 +207,7 @@ export function SessionAgentsPanel({ agents, onClose, open }: SessionAgentsPanel
                         </span>
                         <Badge
                           className={cn(
-                            "h-5 px-1.5 text-[10px]",
+                            "h-5 px-1.5 app-text-10",
                             agentStatusToneClass(agentDisplayStatus(agent)),
                           )}
                         >

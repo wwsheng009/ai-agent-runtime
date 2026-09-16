@@ -182,7 +182,9 @@ export function MessageList({
         aria-relevant="additions text"
         className={cn(
           // 批次 A1/F2：列宽走宽度轴（W = clamp(680px, 列宽×64%, 920px)），不再写死 52rem。
-          "mx-auto flex w-full max-w-[var(--app-chat-content-width)] flex-col gap-4",
+          // app-chat-scope：转录列整体纳入聊天字号轴作用域，列内一切 `.app-text-N`
+          // （含过程行统计、更早记录按钮、编辑提示等散点）都随「聊天字号」滑杆位移。
+          "app-chat-scope mx-auto flex w-full max-w-[var(--app-chat-content-width)] flex-col gap-4",
           contentClassName,
         )}
         role="log"

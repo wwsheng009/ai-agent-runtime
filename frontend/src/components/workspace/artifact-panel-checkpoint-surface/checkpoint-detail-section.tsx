@@ -357,7 +357,7 @@ export function ArtifactPanelCheckpointDetailSection({
                           >
                             <div className="flex items-start justify-between gap-3">
                               <div className="min-w-0 flex-1">
-                                <div className="truncate text-[13px] font-medium text-foreground">
+                                <div className="truncate app-text-13 font-medium text-foreground">
                                   {file.path}
                                 </div>
                                 <div className="mt-0.5 app-text-11 uppercase tracking-[0.14em] text-muted-foreground">

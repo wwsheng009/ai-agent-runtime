@@ -106,7 +106,7 @@ export function TeamsDirectoryView({
       <aside className="rounded-panel-lg border border-border bg-surface-softer p-2.5">
         <div className="mb-2.5 flex items-center justify-between gap-3 px-0.5">
           <div>
-            <div className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
+            <div className="app-text-10 uppercase tracking-[0.16em] text-muted-foreground">
               {t("panels.teamsPanels.directory.title")}
             </div>
             <div className="mt-0.5 text-sm font-semibold text-foreground">

@@ -294,7 +294,7 @@ function FileTreeRowView(props: FileTreeRowViewProps) {
         {item.status !== "loading" ? (
           <button
             aria-label={action}
-            className="ml-auto rounded border border-border/70 px-1.5 py-0.5 text-[11px] text-foreground hover:bg-white/5"
+            className="ml-auto rounded border border-border/70 px-1.5 py-0.5 app-text-11 text-foreground hover:bg-white/5"
             onClick={(event) => {
               event.stopPropagation();
               if (orphan) {
@@ -404,14 +404,14 @@ function FileTreeRowView(props: FileTreeRowViewProps) {
             {badge.letter === "untracked" ? "?" : badge.letter}
           </span>
         ) : null}
-        {entry.type === "symlink" ? <span className="shrink-0 text-[10px] text-muted-foreground">{t("panels.fileBrowser.tree.symlink")}</span> : null}
-        {entry.type === "unknown" ? <span className="shrink-0 text-[10px] text-accent-gold">{t("panels.fileBrowser.tree.unknownType")}</span> : null}
-        {truncationHint ? <span className="shrink-0 text-[10px] text-accent-gold">{truncationHint}</span> : null}
-        {entry.internal ? <span className="shrink-0 text-[10px] text-muted-foreground">{t("panels.fileBrowser.tree.internal")}</span> : null}
+        {entry.type === "symlink" ? <span className="shrink-0 app-text-10 text-muted-foreground">{t("panels.fileBrowser.tree.symlink")}</span> : null}
+        {entry.type === "unknown" ? <span className="shrink-0 app-text-10 text-accent-gold">{t("panels.fileBrowser.tree.unknownType")}</span> : null}
+        {truncationHint ? <span className="shrink-0 app-text-10 text-accent-gold">{truncationHint}</span> : null}
+        {entry.internal ? <span className="shrink-0 app-text-10 text-muted-foreground">{t("panels.fileBrowser.tree.internal")}</span> : null}
         {entry.type === "file" || entry.type === "symlink" ? (
           // 末两列固定语义：修改时间（探测失败/缺失 → 不渲染，不显示 1970）与人类可读大小
           // （原始字节数放 title，避免「1.0 KB」被当成精确值）。
-          <span className="ml-auto flex shrink-0 items-center gap-2 font-mono text-[10px] text-muted-foreground">
+          <span className="ml-auto flex shrink-0 items-center gap-2 font-mono app-text-10 text-muted-foreground">
             {entry.mtime > 0 && formatEntryMtime(entry.mtime) ? (
               <span className="hidden sm:inline" data-testid="file-tree-mtime">
                 {formatEntryMtime(entry.mtime)}

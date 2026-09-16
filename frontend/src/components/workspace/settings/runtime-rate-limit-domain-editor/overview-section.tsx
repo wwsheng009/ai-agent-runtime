@@ -66,7 +66,7 @@ export function RuntimeRateLimitOverviewSection({
 
       <div className="mt-3 grid gap-3 xl:grid-cols-[12rem_minmax(0,1fr)_minmax(0,1fr)]">
         <div className="rounded-card border border-border bg-surface-softer p-3">
-          <div className="text-[13px] font-semibold text-foreground">
+          <div className="app-text-13 font-semibold text-foreground">
             {t("editor.rateLimit.fields.enabled")}
           </div>
           <div className="mt-1 text-xs leading-5 text-muted-foreground">
@@ -93,7 +93,7 @@ export function RuntimeRateLimitOverviewSection({
         </div>
 
         <div className="space-y-3 rounded-card border border-border bg-surface-softer p-3">
-          <div className="text-[13px] font-semibold text-foreground">
+          <div className="app-text-13 font-semibold text-foreground">
             {t("editor.rateLimit.basicConfig")}
           </div>
           <div className="grid gap-3 xl:grid-cols-2">
@@ -127,7 +127,7 @@ export function RuntimeRateLimitOverviewSection({
         </div>
 
         <div className="space-y-3 rounded-card border border-border bg-surface-softer p-3">
-          <div className="text-[13px] font-semibold text-foreground">
+          <div className="app-text-13 font-semibold text-foreground">
             {t("editor.rateLimit.summaryTitle")}
           </div>
           <SettingsBadgeList>
@@ -144,7 +144,7 @@ export function RuntimeRateLimitOverviewSection({
 
       <div className="mt-3 grid gap-3 xl:grid-cols-2">
         <div className="rounded-card border border-border bg-surface-softer p-3">
-          <div className="mb-3 text-[13px] font-semibold text-foreground">
+          <div className="mb-3 app-text-13 font-semibold text-foreground">
             {t("editor.rateLimit.fields.defaultLimits")}
           </div>
           <div className="grid gap-3 xl:grid-cols-2">
@@ -200,7 +200,7 @@ export function RuntimeRateLimitOverviewSection({
         </div>
 
         <div className="rounded-card border border-border bg-surface-softer p-3">
-          <div className="mb-3 text-[13px] font-semibold text-foreground">
+          <div className="mb-3 app-text-13 font-semibold text-foreground">
             {t("editor.rateLimit.fields.globalLimits")}
           </div>
           <div className="grid gap-3 xl:grid-cols-2">

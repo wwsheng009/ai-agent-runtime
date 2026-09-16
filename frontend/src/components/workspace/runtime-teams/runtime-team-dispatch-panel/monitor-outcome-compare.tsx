@@ -64,7 +64,7 @@ export function DispatchMonitorOutcomeCompare({
               className="rounded-[0.75rem] border border-white/8 bg-white/4 px-3 py-2"
             >
               <div className="flex items-center justify-between gap-3">
-                <div className="truncate text-[13px] font-semibold text-foreground">
+                <div className="truncate app-text-13 font-semibold text-foreground">
                   {truncateIdentifier(row.teamId, 18)}
                 </div>
                 <span
@@ -133,7 +133,7 @@ export function DispatchMonitorOutcomeCompare({
                 className="rounded-field border border-white/8 bg-black/15 px-3 py-2"
               >
                 <div className="flex items-center justify-between gap-3">
-                  <div className="text-[11px] font-semibold text-foreground">
+                  <div className="app-text-11 font-semibold text-foreground">
                     {truncateIdentifier(row.teamId, 18)}
                   </div>
                   <span
@@ -171,7 +171,7 @@ export function DispatchMonitorOutcomeCompare({
                   className="rounded-field border border-white/8 bg-black/15 px-3 py-2"
                 >
                   <div className="flex items-center justify-between gap-3">
-                    <div className="text-[11px] font-semibold text-foreground">
+                    <div className="app-text-11 font-semibold text-foreground">
                       {truncateIdentifier(row.teamId, 18)}
                     </div>
                     <span

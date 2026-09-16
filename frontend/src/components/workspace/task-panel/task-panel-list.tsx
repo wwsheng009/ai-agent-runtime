@@ -44,7 +44,7 @@ export function TaskPanelList({ items, listId }: TaskPanelListProps) {
       </ul>
       {hiddenCount > 0 ? (
         <p
-          className="border-t border-border px-3 py-1.5 text-[11px] text-muted-foreground"
+          className="border-t border-border px-3 py-1.5 app-text-11 text-muted-foreground"
           data-testid="todo-panel-more"
         >
           {t("panels.todos.more", { count: hiddenCount })}

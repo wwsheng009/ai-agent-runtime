@@ -117,7 +117,7 @@ export function MenuButton({
           <span className="rounded-control border border-border bg-surface-softer p-1.5 text-accent-primary">
             <Icon size={14} />
           </span>
-          <div className="min-w-0 truncate text-[13px] font-semibold text-foreground">
+          <div className="min-w-0 truncate app-text-13 font-semibold text-foreground">
             {label}
           </div>
         </div>

@@ -22,7 +22,7 @@ export function ProviderReferenceBadge({
   return (
     <span
       title={describeMemberProviderHint(member.name, provider, t)}
-      className={`inline-flex max-w-full items-center rounded-[0.6rem] border px-2 py-0.5 text-[11px] ${
+      className={`inline-flex max-w-full items-center rounded-[0.6rem] border px-2 py-0.5 app-text-11 ${
         provider
           ? "border-border bg-surface-solid text-muted-foreground"
           : "border-accent-orange/30 bg-accent-orange/10 text-[#f5c7b8]"

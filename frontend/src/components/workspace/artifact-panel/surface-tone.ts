@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 /** 页签徽标样式的统一出口（各面复用，避免各处手写 px/圆角）。 */
 export function surfaceBadgeClass(tone: WorkspacePanelSurfaceTone) {
   return cn(
-    "rounded-full px-1.5 py-0.5 text-[10px] tracking-[0.08em]",
+    "rounded-full px-1.5 py-0.5 app-text-10 tracking-[0.08em]",
     tone === "plan" && "bg-[#9db7ff]/20 text-[#9db7ff]",
     tone === "checkpoint" && "bg-accent-gold/20 text-accent-gold",
     tone === "artifact" && "bg-accent-gold/20 text-accent-gold",

@@ -96,7 +96,7 @@ export function TextViewer({
 
   return (
     <div className={cn("flex min-h-0 flex-col", className)}>
-      <div className="flex items-center gap-2 border-b border-border/60 px-2 py-1 text-[11px] text-muted-foreground">
+      <div className="flex items-center gap-2 border-b border-border/60 px-2 py-1 app-text-11 text-muted-foreground">
         <span>{language}</span>
         <span>{(totalLines ?? lines.length).toLocaleString()}</span>
         {truncated && truncatedNote ? (
@@ -106,7 +106,7 @@ export function TextViewer({
         ) : null}
       </div>
       <div
-        className="app-scrollbar min-h-0 flex-1 overflow-auto bg-surface-solid/40 font-mono text-[11px] leading-5"
+        className="app-scrollbar min-h-0 flex-1 overflow-auto bg-surface-solid/40 font-mono app-text-11 leading-5"
         data-testid="text-viewer"
         onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
         ref={viewportRef}

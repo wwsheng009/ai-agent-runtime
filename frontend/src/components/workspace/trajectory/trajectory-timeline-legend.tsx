@@ -35,7 +35,7 @@ export function TrajectoryTimelineKindLegend({
   return (
     <div
       aria-label={t("panels.shell.trajectory.timeline.kindLegend")}
-      className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground"
+      className="flex flex-wrap items-center gap-x-2 gap-y-0.5 app-text-10 text-muted-foreground"
       data-testid="trajectory-timeline-kind-legend"
       role="group"
     >
@@ -97,7 +97,7 @@ export function TrajectoryTimelineStatusLegend({
   return (
     <div
       aria-label={t("panels.shell.trajectory.timeline.statusLegend")}
-      className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground"
+      className="flex flex-wrap items-center gap-x-2 gap-y-0.5 app-text-10 text-muted-foreground"
       data-testid="trajectory-timeline-legend"
       role="group"
     >

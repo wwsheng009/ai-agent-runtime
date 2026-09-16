@@ -15,7 +15,7 @@ export function LocalizationSettings() {
   return (
     <div className="mb-6 grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.55fr)]">
       <div>
-        <div className="text-[13px] font-semibold text-foreground">
+        <div className="app-text-13 font-semibold text-foreground">
           {t("localization.title")}
         </div>
         <p className="mt-1 text-sm leading-6 text-muted-foreground">

@@ -91,13 +91,13 @@ export function TransferTray(props: TransferTrayProps) {
             </span>
           </p>
           {task.state === "completed" && task.targetPath ? (
-            <p className="text-[11px] text-muted-foreground">{t("panels.fileBrowser.transfer.completedHint", { path: task.targetPath })}</p>
+            <p className="app-text-11 text-muted-foreground">{t("panels.fileBrowser.transfer.completedHint", { path: task.targetPath })}</p>
           ) : null}
           {task.state === "conflict" ? (
             <div className="grid gap-1 rounded border border-accent-gold/30 bg-accent-gold/10 p-1.5" data-testid="upload-conflict">
               <p className="font-medium text-foreground">{t("panels.fileBrowser.transfer.conflictTitle", { name: task.name })}</p>
-              <p className="text-[11px] text-muted-foreground">{t("panels.fileBrowser.transfer.conflictBody")}</p>
-              <p className="text-[11px] text-muted-foreground">{t("panels.fileBrowser.transfer.conflictHint")}</p>
+              <p className="app-text-11 text-muted-foreground">{t("panels.fileBrowser.transfer.conflictBody")}</p>
+              <p className="app-text-11 text-muted-foreground">{t("panels.fileBrowser.transfer.conflictHint")}</p>
               <div className="flex gap-1.5">
                 <TrayButton icon={CheckCircle2Icon} label={t("panels.fileBrowser.transfer.conflictOverwrite")} onClick={() => onResolveConflict(task.id, "overwrite")} />
                 <TrayButton icon={PauseIcon} label={t("panels.fileBrowser.transfer.conflictRename")} onClick={() => onResolveConflict(task.id, "rename")} />
@@ -105,7 +105,7 @@ export function TransferTray(props: TransferTrayProps) {
             </div>
           ) : null}
           {task.state === "failed" ? (
-            <p className="inline-flex items-center gap-1 text-[11px] text-accent-gold">
+            <p className="inline-flex items-center gap-1 app-text-11 text-accent-gold">
               <AlertTriangleIcon aria-hidden className="size-3" />
               {task.error instanceof Error ? task.error.message : t("panels.fileBrowser.transfer.state.failed")}
             </p>
@@ -125,11 +125,11 @@ export function TransferTray(props: TransferTrayProps) {
               {t(`panels.fileBrowser.transfer.download.${task.state}`)} · {progress(task.transferred, task.size)}
             </span>
           </p>
-          <p className="text-[11px] text-muted-foreground">
+          <p className="app-text-11 text-muted-foreground">
             {t("panels.fileBrowser.transfer.layerHint", { layer: t(`panels.fileBrowser.transfer.layer.${task.layer}`) })}
           </p>
           {(task.notes ?? []).map((note) => (
-            <p className="text-[11px] text-accent-gold" data-note-key={note.key} key={note.key}>
+            <p className="app-text-11 text-accent-gold" data-note-key={note.key} key={note.key}>
               {/* 动态键：键集合由 transfer-model.ts 的 layerNotes 收口（字面量联合），沿用仓库既有 `as never` 约定。 */}
               {t(note.key as never, note.params as never) as unknown as string}
             </p>
@@ -141,7 +141,7 @@ export function TransferTray(props: TransferTrayProps) {
       ))}
 
       {retained.length > 0 ? (
-        <p className="text-[11px] text-muted-foreground" data-testid="retained-uploads">
+        <p className="app-text-11 text-muted-foreground" data-testid="retained-uploads">
           {t("panels.fileBrowser.transfer.retainedHint", { count: retained.length })}
         </p>
       ) : null}
@@ -151,7 +151,7 @@ export function TransferTray(props: TransferTrayProps) {
 
 function TrayButton({ icon: Icon, label, onClick }: { icon: typeof XIcon; label: string; onClick: () => void }) {
   return (
-    <button aria-label={label} className="inline-flex items-center gap-1 rounded border border-border/60 px-1.5 py-0.5 text-[11px] text-foreground hover:bg-white/5" onClick={onClick} title={label} type="button">
+    <button aria-label={label} className="inline-flex items-center gap-1 rounded border border-border/60 px-1.5 py-0.5 app-text-11 text-foreground hover:bg-white/5" onClick={onClick} title={label} type="button">
       <Icon aria-hidden className="size-3" />
       {label}
     </button>

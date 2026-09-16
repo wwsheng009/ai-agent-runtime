@@ -136,7 +136,7 @@ export function SessionDetailSurface({
           {session ? (
             <span
               className={cn(
-                "rounded-full border px-1.5 py-0.5 text-[10px] tracking-[0.08em]",
+                "rounded-full border px-1.5 py-0.5 app-text-10 tracking-[0.08em]",
                 stateDisplay.className,
               )}
               data-testid="session-detail-state"

@@ -34,7 +34,9 @@ export function AppearancePreviewSection({
               className="rounded-[0.75rem] border border-border bg-surface-solid p-3"
               style={{ fontSize: `${settings.appearance.textSize}px` }}
             >
-              <div className="text-sm leading-7 text-foreground">
+              {/* 不写 text-sm：`.text-sm` 会覆盖容器的实时 fontSize，示例文本就不再
+                  跟着「界面字号」滑杆走；留空继承才能真实预览当前设置。 */}
+              <div className="leading-7 text-foreground">
                 {t("appearance.previewWorkspaceBody")}
               </div>
             </div>

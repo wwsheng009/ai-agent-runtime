@@ -59,7 +59,7 @@ export function ArtifactPanelPlanSurface({
       <section className="flex min-h-0 flex-col overflow-hidden rounded-panel-lg border border-white/8 bg-white/[0.035]">
         <div className="flex items-start justify-between gap-3 border-b border-white/8 px-3 py-2.5">
           <div className="min-w-0 space-y-1">
-            <div className="inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
+            <div className="inline-flex items-center gap-2 app-text-10 uppercase tracking-[0.16em] text-muted-foreground">
               <ScrollTextIcon size={14} />
               {t("panels.artifacts.plan.title")}
             </div>
@@ -91,7 +91,7 @@ export function ArtifactPanelPlanSurface({
 
         <div className="min-h-0 flex-1 overflow-auto px-2.5 py-2.5">
           {planLoading ? (
-            <div className="mb-2 inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
+            <div className="mb-2 inline-flex items-center gap-2 app-text-10 uppercase tracking-[0.16em] text-muted-foreground">
               <LoaderCircleIcon size={14} className="animate-spin" />
               {t("panels.artifacts.plan.loading")}
             </div>
@@ -177,7 +177,7 @@ export function ArtifactPanelPlanSurface({
 
               {plan?.plan_content_available ? (
                 <div className="overflow-hidden rounded-card-lg border border-white/8 bg-black/15">
-                  <div className="flex items-center justify-between gap-2 border-b border-white/8 px-3 py-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
+                  <div className="flex items-center justify-between gap-2 border-b border-white/8 px-3 py-2 app-text-10 uppercase tracking-[0.16em] text-muted-foreground">
                     <span className="inline-flex items-center gap-1.5">
                       <FileTextIcon size={13} />
                       {t("panels.artifacts.plan.contentTitle")}
@@ -200,7 +200,7 @@ export function ArtifactPanelPlanSurface({
 
               <div className="space-y-2 rounded-card-lg border border-white/8 bg-black/10 px-3 py-2.5">
                 <label
-                  className="block text-[10px] uppercase tracking-[0.16em] text-muted-foreground"
+                  className="block app-text-10 uppercase tracking-[0.16em] text-muted-foreground"
                   htmlFor="artifact-panel-plan-notes"
                 >
                   {t("panels.artifacts.plan.reviewNotes")}

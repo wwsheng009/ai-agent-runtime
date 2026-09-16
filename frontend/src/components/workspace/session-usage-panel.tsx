@@ -171,7 +171,7 @@ export function SessionUsagePanel({
           </dl>
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
             {summary.status ? (
-              <Badge className="h-5 px-1.5 text-[10px]">{summary.status}</Badge>
+              <Badge className="h-5 px-1.5 app-text-10">{summary.status}</Badge>
             ) : null}
             <span>
               {t("usagePanel.quality", {

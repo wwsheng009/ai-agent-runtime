@@ -150,7 +150,7 @@ export function DispatchTaskComposer({
               className="rounded-card border border-white/8 bg-white/4 px-3 py-2.5"
             >
               <div className="flex items-center justify-between gap-3">
-                <div className="text-[13px] font-semibold text-foreground">
+                <div className="app-text-13 font-semibold text-foreground">
                   {truncateIdentifier(result.teamId, 18)}
                 </div>
                 <span

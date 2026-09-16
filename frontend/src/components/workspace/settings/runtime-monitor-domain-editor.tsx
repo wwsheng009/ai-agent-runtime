@@ -75,7 +75,7 @@ export function RuntimeMonitorDomainEditor({
       <div className="rounded-card border border-border bg-surface-softer p-3">
         <div className="mb-3 flex items-center justify-between gap-3">
           <div>
-            <div className="text-[13px] font-semibold text-foreground">
+            <div className="app-text-13 font-semibold text-foreground">
               {t("editor.monitor.master.title")}
             </div>
             <div className="mt-1 text-xs text-muted-foreground">
@@ -98,7 +98,7 @@ export function RuntimeMonitorDomainEditor({
         <div className="rounded-card border border-border bg-surface-softer p-3">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
-              <div className="text-[13px] font-semibold text-foreground">
+              <div className="app-text-13 font-semibold text-foreground">
                 {t("editor.monitor.metrics.title")}
               </div>
               <div className="mt-1 text-xs text-muted-foreground">
@@ -139,7 +139,7 @@ export function RuntimeMonitorDomainEditor({
         <div className="rounded-card border border-border bg-surface-softer p-3">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
-              <div className="text-[13px] font-semibold text-foreground">
+              <div className="app-text-13 font-semibold text-foreground">
                 {t("editor.monitor.tracing.title")}
               </div>
               <div className="mt-1 text-xs text-muted-foreground">
@@ -194,7 +194,7 @@ export function RuntimeMonitorDomainEditor({
         <div className="rounded-card border border-border bg-surface-softer p-3">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
-              <div className="text-[13px] font-semibold text-foreground">
+              <div className="app-text-13 font-semibold text-foreground">
                 {t("editor.monitor.alert.title")}
               </div>
               <div className="mt-1 text-xs text-muted-foreground">
@@ -260,7 +260,7 @@ export function RuntimeMonitorDomainEditor({
           <div className="rounded-card border border-border bg-surface-softer p-3">
             <div className="mb-3 flex items-center justify-between gap-3">
               <div>
-                <div className="text-[13px] font-semibold text-foreground">
+                <div className="app-text-13 font-semibold text-foreground">
                   {t("editor.monitor.pprof.title")}
                 </div>
                 <div className="mt-1 text-xs text-muted-foreground">
@@ -306,7 +306,7 @@ export function RuntimeMonitorDomainEditor({
           <div className="rounded-card border border-border bg-surface-softer p-3">
             <div className="mb-3 flex items-center justify-between gap-3">
               <div>
-                <div className="text-[13px] font-semibold text-foreground">
+                <div className="app-text-13 font-semibold text-foreground">
                   {t("editor.monitor.memory.title")}
                 </div>
                 <div className="mt-1 text-xs text-muted-foreground">

@@ -152,7 +152,7 @@ export function PreviewPane({ className, entry, onDownload, scope }: PreviewPane
       className={cn("flex min-h-0 flex-col", className)}
       data-testid="file-browser-preview"
     >
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/60 px-2 py-1 text-[11px] text-muted-foreground">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/60 px-2 py-1 app-text-11 text-muted-foreground">
         {meta ? (
           <>
             <span className="truncate font-mono text-foreground/80" title={meta.path}>
@@ -274,7 +274,7 @@ function PreviewBody({
           className="max-w-full rounded border border-border/60"
           src={`data:${preview.mime && preview.mime !== "" ? preview.mime : "image/png"};base64,${preview.dataBase64 ?? ""}`}
         />
-        {preview.truncated ? <p className="mt-2 text-[11px] text-accent-gold">{truncatedNote}</p> : null}
+        {preview.truncated ? <p className="mt-2 app-text-11 text-accent-gold">{truncatedNote}</p> : null}
       </div>
     );
   }
@@ -282,7 +282,7 @@ function PreviewBody({
   if (svgAsText && svgText !== null) {
     return (
       <div className="flex h-full flex-col">
-        <p className="border-b border-border/60 px-2 py-1 text-[11px] text-muted-foreground">
+        <p className="border-b border-border/60 px-2 py-1 app-text-11 text-muted-foreground">
           {t("panels.fileBrowser.preview.svgAsText")}
         </p>
         <TextViewer className="min-h-0 flex-1" language="markup" text={svgText} />

@@ -50,7 +50,7 @@ export function ProviderNetworkFields({
           <div className="rounded-card border border-border bg-surface-softer p-3">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
               <div>
-                <div className="text-[13px] font-semibold text-foreground">
+                <div className="app-text-13 font-semibold text-foreground">
                   {t("editor.providers.proxy.title")}
                 </div>
                 <div className="mt-1 text-xs text-muted-foreground">

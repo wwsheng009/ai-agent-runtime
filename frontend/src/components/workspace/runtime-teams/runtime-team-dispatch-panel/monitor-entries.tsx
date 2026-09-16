@@ -27,7 +27,7 @@ export function DispatchMonitorEntries({ dispatchMonitor }: DispatchMonitorEntri
           >
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <div className="truncate text-[13px] font-semibold text-foreground">
+                <div className="truncate app-text-13 font-semibold text-foreground">
                   {truncateIdentifier(entry.teamId, 18)}
                 </div>
                 <div className="mt-0.5 text-xs text-muted-foreground">

@@ -104,7 +104,7 @@ export function ProviderGroupBasicFields({
             <div className="space-y-3 rounded-card border border-border bg-surface-softer p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <div className="text-[13px] font-semibold text-foreground">
+                  <div className="app-text-13 font-semibold text-foreground">
                     {t("editor.providerGroups.sections.failover")}
                   </div>
                   <div className="mt-1 text-xs text-muted-foreground">
@@ -176,7 +176,7 @@ export function ProviderGroupBasicFields({
             <div className="space-y-3 rounded-card border border-border bg-surface-softer p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <div className="text-[13px] font-semibold text-foreground">
+                  <div className="app-text-13 font-semibold text-foreground">
                     {t("editor.providerGroups.sections.truncation")}
                   </div>
                   <div className="mt-1 text-xs text-muted-foreground">

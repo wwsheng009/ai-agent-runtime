@@ -81,7 +81,9 @@ export function UsageAnalyticsCharts({
   return (
     <section
       aria-label={t("charts.title")}
-      className="grid min-w-0 gap-2 lg:grid-cols-[minmax(0,1.7fr)_minmax(280px,0.8fr)]"
+      // app-analytics-chart：坐标轴刻度字号交给 CSS 统一字号轴（见 base.css），
+      // 不再用 recharts 的数值型 `tick.fontSize`（那会绕开 token）。
+      className="app-analytics-chart grid min-w-0 gap-2 lg:grid-cols-[minmax(0,1.7fr)_minmax(280px,0.8fr)]"
     >
       <div className="surface-panel min-w-0 rounded-panel-lg p-3.5 sm:p-4">
         <ChartHeading
@@ -107,14 +109,14 @@ export function UsageAnalyticsCharts({
                   tickFormatter={(value) =>
                     formatDimensionTick(String(value), groupBy)
                   }
-                  tick={{ fill: "var(--analytics-chart-axis)", fontSize: 11 }}
+                  tick={{ fill: "var(--analytics-chart-axis)" }}
                   tickLine={false}
                   axisLine={{ stroke: "var(--analytics-chart-grid)" }}
                 />
                 <YAxis
                   width={54}
                   tickFormatter={formatCompactNumber}
-                  tick={{ fill: "var(--analytics-chart-axis)", fontSize: 11 }}
+                  tick={{ fill: "var(--analytics-chart-axis)" }}
                   tickLine={false}
                   axisLine={false}
                 />
@@ -240,7 +242,7 @@ function TokenCompositionChart({
               </PieChart>
             </ResponsiveContainer>
             <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
-              <span className="text-[11px] text-muted-foreground">
+              <span className="app-text-11 text-muted-foreground">
                 {t("charts.tokens.centerLabel")}
               </span>
               <strong className="text-base tabular-nums">
