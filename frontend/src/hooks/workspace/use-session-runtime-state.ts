@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import {
   getSessionRuntimeState,
+  type RuntimeSessionActiveTurn,
   type RuntimeSessionSnapshot,
   type RuntimeSessionState,
 } from "@/lib/runtime-api";
@@ -19,6 +20,13 @@ type SessionRuntimeFailure = {
 export type UseSessionRuntimeStateResult = {
   snapshot: RuntimeSessionSnapshot | null;
   state: RuntimeSessionState | null;
+  /**
+   * P4-刷新续传：本会话此刻的在途回合（快照 `active_turn`），无则 null。
+   *
+   * 与 `state` 相互独立：web 直连会话没有 durable state（`state` 恒为 null），
+   * 但在途回合仍会出现在这里——刷新后据此重新挂载回合身份，续传增量流。
+   */
+  activeTurn: RuntimeSessionActiveTurn | null;
   /**
    * 拉取失败。以下两种「无 runtime state」不计入 error（都收敛为快照空态）：
    * 后端显式空快照（200 + `state: null`：会话存在、从未进入 durable actor）与
@@ -96,6 +104,7 @@ export function useSessionRuntimeState(
   return {
     snapshot,
     state: snapshot?.state ?? null,
+    activeTurn: snapshot?.activeTurn ?? null,
     error:
       failure && failure.sessionId === trimmedSessionId ? failure.error : null,
     refresh,

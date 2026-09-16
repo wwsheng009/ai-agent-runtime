@@ -9,11 +9,16 @@
 //     - 404 SESSION_NOT_FOUND                    —— 会话不存在（已删除 / 未知 id）；
 //     - 503/504 STORE_*                          —— 会话存储故障（可重试）。
 //
+// P4-刷新续传：两个 200 分支都带 `active_turn`（`session_active_turn.go`）。它是
+// `state` 的兄弟字段而非其子字段，因此在 `state: null` 的 web 会话上同样有效——
+// 那正是「刷新后回合仍在跑」的唯一信号：只要它非空，快照就不是空态。
+//
 // 归一化说明：同时接受 snake_case / camelCase（与 jobs 同策略），避免后端补
 // json tag 时前端二次改动；既非「显式空态」又缺 `state` 视为契约不满足
 // （抛错而非伪造空态）。
 
 import type {
+  RuntimeSessionActiveTurn,
   RuntimeSessionApproval,
   RuntimeSessionQuestion,
   RuntimeSessionSnapshot,
@@ -164,6 +169,33 @@ export function normalizeSessionRuntimeState(
   };
 }
 
+/**
+ * P4-刷新续传：`active_turn` → 归一化在途回合（缺 turn_id 返回 null：回合身份
+ * 是续传的唯一钥匙，绝不能伪造）。
+ */
+export function normalizeSessionRuntimeActiveTurn(
+  raw: unknown,
+): RuntimeSessionActiveTurn | null {
+  const record = asRecord(raw);
+  if (!record) {
+    return null;
+  }
+  const turnId = pickString(record, "turn_id", "turnId");
+  if (!turnId) {
+    return null;
+  }
+  const detached = record.detached;
+  return {
+    sessionId: pickString(record, "session_id", "sessionId"),
+    turnId,
+    source: pickString(record, "source"),
+    detached: typeof detached === "boolean" ? detached : false,
+    ...(pickOptionalString(record, "started_at", "startedAt")
+      ? { startedAt: pickString(record, "started_at", "startedAt") }
+      : {}),
+  };
+}
+
 export function normalizeSessionRuntimeSnapshot(
   raw: unknown,
 ): RuntimeSessionSnapshot | null {
@@ -172,13 +204,19 @@ export function normalizeSessionRuntimeSnapshot(
     return null;
   }
   const state = normalizeSessionRuntimeState(record.state ?? record);
-  if (!state) {
+  const activeTurn = normalizeSessionRuntimeActiveTurn(
+    record.active_turn ?? record.activeTurn,
+  );
+  // 既无 durable state 又无在途回合 = 显式空态（旧后端只有这一种形态）；
+  // 只有 active_turn 的响应（web 会话 + 在途回合）是有效快照，刷新续传依赖它。
+  if (!state && !activeTurn) {
     return null;
   }
   const executionRoute =
     asRecord(record.execution_route) ?? asRecord(record.executionRoute);
   return {
     state,
+    activeTurn,
     ...(executionRoute ? { executionRoute } : {}),
   };
 }
@@ -190,13 +228,23 @@ export function normalizeSessionRuntimeSnapshot(
  * 与「会话不存在」一起写成 404，调用方无法区分，只能在控制台留下误导性 404）。
  * 归一化函数对它返回 null，因此需要用本判定与「坏响应」区分：
  * 显式空态 → 返回空态；坏响应 → 抛错。
+ *
+ * P4-刷新续传：带 `active_turn` 的 `state: null` **不是**空态——回合正在服务端
+ * 执行，刷新后的页面必须拿到这条身份去续传（否则表现为「刷新即断流」）。
  */
 export function isEmptySessionRuntimeSnapshot(raw: unknown): boolean {
   const record = asRecord(raw);
   if (!record) {
     return false;
   }
-  return "state" in record && record.state === null;
+  if (!("state" in record) || record.state !== null) {
+    return false;
+  }
+  return (
+    normalizeSessionRuntimeActiveTurn(
+      record.active_turn ?? record.activeTurn,
+    ) === null
+  );
 }
 
 export type SessionRuntimeStateOptions = {

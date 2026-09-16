@@ -7,6 +7,8 @@
  * - `{ session_id, state: null }` = 会话存在、但从未进入 durable session actor
  *   （例如只经无状态 `/api/agent/chat` 的 web 会话）：正常空态，客户端归一化为
  *   `null` 快照，不虚构 `RuntimeSessionState`；
+ * - 两个分支都附带 `active_turn`（P4-刷新续传，`session_active_turn.go`）：
+ *   本进程此刻在该会话上的在途回合，无则显式 `null`；
  * - 会话不存在 → 404 `SESSION_NOT_FOUND`；存储故障 → 503/504 `STORE_*`；
  * - `state` 形状见 `pkg/skillsapi/client.go:1570-1585`（`SessionRuntimeState`）。
  *
@@ -50,8 +52,34 @@ export type RuntimeSessionState = {
   updatedAt?: string;
 };
 
+/**
+ * P4-刷新续传：本进程此刻在该会话上执行的在途回合（`/runtime` 的 `active_turn`）。
+ *
+ * 页面刷新会 abort 在途的 `/api/agent/chat` POST，服务端回合却继续执行
+ * （`resume_on_disconnect`）。刷新后的新页面只能从快照得知「还有回合在跑、
+ * 它叫什么」。据此重新挂载回合身份后，`/runtime/stream` 上落库的增量帧才会
+ * 继续渲染到同一条 streaming 消息（`renderLiveDeltas` 门控）。
+ */
+export type RuntimeSessionActiveTurn = {
+  sessionId: string;
+  turnId: string;
+  /** 回合来源（`agent_chat_stream` = web 直连 `/api/agent/chat`）。 */
+  source: string;
+  /** true = 客户端断开后仍继续执行（刷新可续传）。 */
+  detached: boolean;
+  /** ISO 时间：回合开始时刻。 */
+  startedAt?: string;
+};
+
 export type RuntimeSessionSnapshot = {
-  state: RuntimeSessionState;
+  /**
+   * durable runtime state；`null` = 会话存在但从未进入 durable session actor
+   * （web 直连会话的常态）。此时 `activeTurn` 仍可能非空——那正是刷新续传
+   * 依赖的在途回合信号，因此不能把「state 为空」等同于「整份快照为空」。
+   */
+  state: RuntimeSessionState | null;
+  /** P4-刷新续传：本会话此刻的在途回合，无则 null。 */
+  activeTurn: RuntimeSessionActiveTurn | null;
   /** `attachSessionExecutionRoute` 的附加信息（原样透传，本批次未消费）。 */
   executionRoute?: Record<string, unknown>;
 };

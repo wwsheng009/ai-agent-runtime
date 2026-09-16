@@ -12,22 +12,15 @@ import { useSessionRefresh } from "@/hooks/workspace/use-session-refresh";
 import { usePendingInteractions } from "@/hooks/workspace/use-pending-interactions";
 import { useRuntimePlanMode } from "@/hooks/workspace/use-runtime-plan-mode";
 import { useSessionRuntimeState } from "@/hooks/workspace/use-session-runtime-state";
-import { useSessionRuntimeStream } from "@/hooks/workspace/use-session-runtime-stream";
 import { useTrajectoryRecovery } from "@/hooks/workspace/use-trajectory-recovery";
 import { useWorkspaceAgentChatTurn } from "@/hooks/workspace/use-workspace-agent-chat-turn";
+import { useWorkspaceLive } from "@/hooks/workspace/use-workspace-live";
 import { useWorkspaceSessionActions } from "@/hooks/workspace/use-workspace-session-actions";
 import {
-  isThreadResponding,
   shouldConfirmThreadSwitch,
   useWorkspaceThreadSelection,
 } from "@/hooks/workspace/use-workspace-thread-selection";
-import {
-  applyRuntimeDeltaToThread,
-  applyRuntimeEventToThread,
-  getErrorMessage,
-  getRuntimeEventSeq,
-  mergeRuntimeEvent,
-} from "@/hooks/workspace/thread-runtime";
+import { getErrorMessage } from "@/hooks/workspace/thread-runtime";
 import { withTransportDegradation } from "@/lib/connection-status";
 import {
   resetStoredRuntimeClientId,
@@ -38,7 +31,6 @@ import {
   applySessionHistoryToThread,
   createRuntimeDeltaCoordinator,
 } from "@/lib/workspace-thread-state";
-import { trajectoryEventAction } from "@/lib/trajectory/recovery";
 import { buildSidebarSessionActivity } from "@/components/workspace/workspace-sidebar/session-row-status";
 import { useParams } from "react-router-dom";
 
@@ -140,10 +132,6 @@ export function WorkspacePage() {
     threadId: string;
     title: string;
   } | null>(null);
-  // 只有「当前会话正在生成回复」时才需要二次确认：后台会话的 turn 会让全局
-  // isResponding 保持 true，因此按会话归属（流式消息挂在哪个线程上）判断。
-  const currentSessionResponding = isThreadResponding(selectedThread, activeTurnId);
-
   // 用户主动切换线程：轨迹快照 reset（同步于选择动作；新 turn 的 reset
   // 在提交 hook 内处理，避免导航渲染迟到的 effect reset 打断流事件收集）。
   function performSelectThread(threadId: string) {
@@ -249,8 +237,13 @@ export function WorkspacePage() {
     sessionId: selectedThread?.sessionId,
   });
   // P2-1A：运行时状态快照（会话切换拉取一次）——重载 / 重连后重建未决审批与提问。
-  const { state: sessionRuntimeState, refresh: refreshSessionRuntimeState } =
-    useSessionRuntimeState(selectedThread?.sessionId);
+  // P4-刷新续传：快照同时带 active_turn（本会话此刻在跑的回合），刷新后的新页面
+  // 据此重新挂载回合身份（见 use-workspace-live）。
+  const {
+    state: sessionRuntimeState,
+    activeTurn: sessionActiveTurn,
+    refresh: refreshSessionRuntimeState,
+  } = useSessionRuntimeState(selectedThread?.sessionId);
   // P1-7：审批 / 提问 / 计划评审统一生命周期（事件流归约 → 决定投递 → 结果回填）。
   const {
     answerQuestion: answerPendingQuestion,
@@ -270,21 +263,6 @@ export function WorkspacePage() {
     convergePendingInteractions("session_interrupted");
     stopResponding();
   }
-  // P1-9：侧栏行状态只消费本地已知信号（当前会话的运行/待交互），
-  // 后台会话缺信号时回落为快照状态，不伪造「在等我」。
-  const sessionActivity = useMemo(
-    () =>
-      buildSidebarSessionActivity({
-        sessionId: selectedThread?.sessionId,
-        pendingInteractionKind: pendingInteraction?.kind ?? null,
-        responding: currentSessionResponding,
-      }),
-    [
-      currentSessionResponding,
-      pendingInteraction?.kind,
-      selectedThread?.sessionId,
-    ],
-  );
   // 尾部优先回放：先回放「最近一页」事件，再放行实时流建连。顺序很重要——
   // 若先建连（after=0），后端会把整份事件日志按 SSE dump 重放一遍，窗口化
   // 就失效了；见 use-trajectory-recovery。
@@ -311,36 +289,40 @@ export function WorkspacePage() {
       );
     },
   });
-  const { connectionStatus, retryConnection } = useSessionRuntimeStream({
-    applyRuntimeEventToThread,
-    applyRuntimeDeltaToThread,
-    getErrorMessage,
-    getRuntimeEventSeq,
-    mergeRuntimeEvent,
-    // 建连闸门 + 建连游标：窗口就绪后才连，且只订阅窗口之后的新事件。
-    enabled: trajectoryReplay.ready,
-    getReplayCursor: () => trajectoryStore.getSnapshot().lastEventSeq,
-    onTrajectoryEvent: (event) => {
-      // Q4：runtime 生命周期事件实时投递到轨迹，与恢复路径共用同一转换
-      // （幂等：reducer 按 seq 去重）。被过滤的事件（tool_started/
-      // tool_finished 等与 chat.sse 共享同一 EventStore 全局 seq）已持久化
-      // 但不会渲染——advanceCursor 跳过其空洞，避免后续事件永久卡 pending。
-      const action = trajectoryEventAction(event);
-      if (action.kind === "push") {
-        trajectoryStore.push(action.push.kind, action.push.payload);
-      } else if (action.kind === "skip") {
-        trajectoryStore.advanceCursor(action.seq);
-      }
-    },
-    onRuntimeEvent: applyPendingInteractionEvent,
-    // 方案B：请求进行中才渲染 runtime/stream 的打字机增量（delta/reasoning/
-    // image_progress）；回放/reload 只进事件快照，不误渲染历史增量。
-    activeTurnId,
+  // P4-刷新续传：live 通道（续传回合认领 → 在途回合身份统一 → /runtime/stream 按
+  // 游标重连并继续渲染增量）整链路收口在 use-workspace-live。
+  const {
+    connectionStatus,
+    currentSessionResponding,
+    retryConnection,
+  } = useWorkspaceLive({
     deltaCoordinator: runtimeDeltaCoordinator,
-    renderLiveDeltas: isResponding && Boolean(activeTurnId),
+    localResponding: isResponding,
+    localTurnId: activeTurnId,
+    onRuntimeEvent: applyPendingInteractionEvent,
+    refreshRuntimeState: refreshSessionRuntimeState,
     selectedThread,
+    sessionActiveTurn,
+    sessionId: selectedThread?.sessionId,
     setThreads,
+    trajectoryReady: trajectoryReplay.ready,
+    trajectoryStore,
   });
+  // P1-9：侧栏行状态只消费本地已知信号（当前会话的运行/待交互），
+  // 后台会话缺信号时回落为快照状态，不伪造「在等我」。
+  const sessionActivity = useMemo(
+    () =>
+      buildSidebarSessionActivity({
+        sessionId: selectedThread?.sessionId,
+        pendingInteractionKind: pendingInteraction?.kind ?? null,
+        responding: currentSessionResponding,
+      }),
+    [
+      currentSessionResponding,
+      pendingInteraction?.kind,
+      selectedThread?.sessionId,
+    ],
+  );
   // P1-8：连接状态统一收口。会话运行时流状态是主判据；直连 `/api/agent/chat`
   // 流失败会把线程标记为 transport=error（见 use-workspace-agent-chat-turn），
   // 此时会话流可能仍在线，但顶栏/流尾必须显示「断线 + 可手动重试」。手动重试

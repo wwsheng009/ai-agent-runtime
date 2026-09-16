@@ -169,6 +169,11 @@ export function useWorkspaceAgentChatTurn({
       reasoning_effort: selectedReasoningEffort || undefined,
       enable_react: settings.chat.enableReact,
       enable_routing: true,
+      // P4-刷新续传：页面刷新/关标签会 abort 这个 POST，服务器随后照常取消
+      // `r.Context()`。声明 resume_on_disconnect 后回合与请求解耦继续执行，
+      // 刷新后的新页面据 `/runtime` 的 active_turn 重新挂载回合身份，
+      // 在 `/runtime/stream` 上按游标续传（否则刷新即中止本回合）。
+      resume_on_disconnect: true,
       max_steps: settings.chat.maxSteps,
     };
 

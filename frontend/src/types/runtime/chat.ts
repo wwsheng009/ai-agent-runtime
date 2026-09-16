@@ -14,6 +14,12 @@ export type AgentChatRequest = {
   reasoning_effort?: string;
   enable_react?: boolean;
   enable_routing?: boolean;
+  /**
+   * P4-刷新续传：客户端断开（页面刷新 / 关标签）后不取消本回合，run 继续执行并把
+   * 增量与历史照常落库；刷新后的新页面通过 `/runtime` 的 `active_turn` 重新挂载
+   * 回合身份，在 `/runtime/stream` 上按游标续传。缺省 false 保持旧语义（断开即中止）。
+   */
+  resume_on_disconnect?: boolean;
   max_steps?: number;
   stream?: boolean;
 };

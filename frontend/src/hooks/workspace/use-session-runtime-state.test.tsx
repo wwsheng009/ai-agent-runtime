@@ -35,6 +35,7 @@ function snapshot(sessionId: string, status = "running"): RuntimeSessionSnapshot
       headOffset: 0,
       activeJobIds: [],
     },
+    activeTurn: null,
   };
 }
 
@@ -143,7 +144,7 @@ describe("useSessionRuntimeState", () => {
     expect(mockGetState).toHaveBeenCalledWith("sess-1", {
       signal: expect.any(AbortSignal),
     });
-    expect(hook.current.snapshot?.state.sessionId).toBe("sess-1");
+    expect(hook.current.snapshot?.state?.sessionId).toBe("sess-1");
     expect(hook.current.state?.status).toBe("running");
     expect(hook.current.error).toBeNull();
   });

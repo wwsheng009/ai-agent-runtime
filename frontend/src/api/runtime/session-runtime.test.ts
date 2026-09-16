@@ -143,7 +143,7 @@ describe("getSessionRuntimeState", () => {
     expect(String(calls[0].url)).toContain(
       "/api/runtime/sessions/sess%2F1/runtime",
     );
-    expect(result?.state.pendingApproval?.id).toBe("approval-42");
+    expect(result?.state?.pendingApproval?.id).toBe("approval-42");
   });
 
   it("显式空快照（会话存在、无 actor 状态）解析为空态且不抛错", async () => {
