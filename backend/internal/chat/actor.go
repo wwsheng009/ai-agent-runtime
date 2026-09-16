@@ -2767,44 +2767,26 @@ func (a *SessionActor) persistSession(ctx context.Context, session *Session) err
 	return a.sessionStore.Update(ctx, session)
 }
 
-// DefaultSessionCheckpointInterval 是长 turn 中途落库的默认节流间隔：turn 内
-// 至多每 15s 把已提交的 durable 历史增量写回会话存储，使权威历史（SQLite /
-// 会话列表 / resume）在长 turn 运行期间持续前进，而不是等 turn 结束才落地。
-const DefaultSessionCheckpointInterval = 15 * time.Second
-
-func resolveSessionCheckpointInterval(configured time.Duration) time.Duration {
-	if configured == 0 {
-		return DefaultSessionCheckpointInterval
-	}
-	return configured
-}
-
 // checkpointSessionHistory 是 ReAct 循环 OnHistoryCheckpoint 的落点：把长 turn
 // 中已提交的 durable 历史增量写回会话存储。
 //
 // 与 persistSession 的区别只有时机与失败语义：这里是 turn 中途的尽力而为写入，
-// 按 checkpointInterval 节流（窗口内直接跳过），失败只上报事件、绝不冒泡成 turn
+// 按 checkpointInterval 节流（窗口内直接跳过；窗口策略与 runtime HTTP
+// agent-chat 共用 reserveCheckpointWindow），失败只上报事件、绝不冒泡成 turn
 // 失败；turn 结束的 post-turn sync 仍是最终一致性的保证。
 func (a *SessionActor) checkpointSessionHistory(ctx context.Context, session *Session) {
 	if a == nil || session == nil || a.sessionStore == nil {
 		return
 	}
-	interval := a.checkpointInterval
-	if interval <= 0 {
-		return
-	}
-	now := time.Now()
-	last := a.lastCheckpointAt.Load()
-	if last != 0 && now.Sub(time.Unix(0, last)) < interval {
-		return
-	}
-	if !a.lastCheckpointAt.CompareAndSwap(last, now.UnixNano()) {
-		// 另一个提交点已占用本窗口，跳过本次写入。
+	undo, ok := reserveCheckpointWindow(&a.lastCheckpointAt, a.checkpointInterval)
+	if !ok {
 		return
 	}
 	if err := a.persistSession(ctx, session); err != nil {
 		// 失败回退时间戳：让下一个提交点立刻重试，而不是再等一个节流窗口。
-		a.lastCheckpointAt.Store(last)
+		if undo != nil {
+			undo()
+		}
 		a.publishSessionCheckpointFailure(ctx, err)
 	}
 }

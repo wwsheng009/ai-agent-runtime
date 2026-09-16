@@ -1823,6 +1823,12 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			)
 			defer unsubscribeLiveToolBridge()
 
+			// 长 turn 中途落库：与 aicli chat actor 共用同一套节流窗口，让权威
+			// 会话在 turn 运行期间就持续前进（刷新/新标签页/其他观察者读
+			// /history 时不再只看到起始状态），且无论 turn 成功、失败还是客户端
+			// 断开，本轮已产生的对话都会落库。
+			historyCheckpointer := newAgentChatHistoryCheckpointer(h, r, session, execSession, contextMessages, turnID)
+
 			reactResult, reactErr := a.RunReActWithSession(ctx, h.llmRuntime, lastMessage, execSession, &agent.LoopReActConfig{
 				MaxSteps:             agentConfig.MaxSteps,
 				MaxToolCalls:         agentConfig.MaxToolCalls,
@@ -1839,12 +1845,18 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 					}
 					return 1
 				}(),
-				ReasoningEffort: types.ResolveReasoningEffort(req.ReasoningEffort),
-				Thinking:        types.ResolveThinkingConfig(req.Thinking),
-				Temperature:     0.7,
-				StreamSink:      streamSink,
+				ReasoningEffort:     types.ResolveReasoningEffort(req.ReasoningEffort),
+				Thinking:            types.ResolveThinkingConfig(req.Thinking),
+				Temperature:         0.7,
+				StreamSink:          streamSink,
+				OnHistoryCheckpoint: historyCheckpointer.OnCheckpoint,
 			})
 			if reactErr != nil {
+				// 失败/中断（含客户端断开导致的 ctx 取消）也要落库：否则本轮已产生
+				// 的 user/assistant/tool 行只存在于事件仓库，权威对话永久缺失。
+				if persistErr := historyCheckpointer.PersistFinal(); persistErr != nil {
+					logger.Warnf("agent chat: persist turn history after failure: %s", persistErr)
+				}
 				emitter.Emit("error", map[string]interface{}{
 					"index":   chunkIndex,
 					"message": reactErr.Error(),
@@ -1854,13 +1866,8 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			if session != nil {
-				// Persist conversation turns only; strip the ephemeral request
-				// context prefix so multi-turn history does not accumulate it.
-				session.ReplaceHistory(stripLeadingContextMessages(execSession.GetMessages(), contextMessages))
-				updateCtx, updateCancel := sessionStoreQueryContext(r)
-				_ = h.sessionManager.Update(updateCtx, session)
-				updateCancel()
+			if persistErr := historyCheckpointer.PersistFinal(); persistErr != nil {
+				logger.Warnf("agent chat: persist turn history: %s", persistErr)
 			}
 
 			resultPayload := buildAgentResultPayload("agent_react", reactResult)
@@ -2117,6 +2124,9 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 
 	if req.EnableReAct && h.llmRuntime != nil {
 		contextMessages := buildAgentContextMessages(agentContext, workspaceCtx)
+		// execSession 由 chatcore 在内部创建、失败时不返回，因此非流式入口用
+		// 提交点快照做中途落库与失败收尾，保证长 turn 不会整轮丢失。
+		historyCheckpointer := newAgentChatHistoryCheckpointer(h, r, session, nil, contextMessages, turnID)
 		execResult, reactErr := runtimechatcore.ExecuteNonStream(ctx, runtimechatcore.ExecuteRequest{
 			Agent:           a,
 			LLMRuntime:      h.llmRuntime,
@@ -2140,24 +2150,31 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 					}
 					return 1
 				}(),
-				ReasoningEffort: types.ResolveReasoningEffort(req.ReasoningEffort),
-				Thinking:        types.ResolveThinkingConfig(req.Thinking),
-				Temperature:     0.7,
+				ReasoningEffort:     types.ResolveReasoningEffort(req.ReasoningEffort),
+				Thinking:            types.ResolveThinkingConfig(req.Thinking),
+				Temperature:         0.7,
+				OnHistoryCheckpoint: historyCheckpointer.OnCheckpoint,
 			},
 		})
 		if reactErr != nil {
+			// 失败（含客户端断开）也要落库：否则本轮已产生的 user/assistant/tool
+			// 行只存在于事件仓库，权威对话永久缺失。
+			if persistErr := historyCheckpointer.PersistFinal(); persistErr != nil {
+				logger.Warnf("agent chat: persist turn history after failure: %s", persistErr)
+			}
 			h.writeAgentChatExecutionError(ctx, w, http.StatusInternalServerError, reactErr, session, requestTraceID)
 			return
 		}
 		reactResult := execResult.ReactResult
 
 		if session != nil && execResult.UpdatedSession != nil {
-			// Persist conversation turns only; strip the ephemeral request
-			// context prefix so multi-turn history does not accumulate it.
-			session.ReplaceHistory(stripLeadingContextMessages(execResult.UpdatedSession.GetMessages(), contextMessages))
-			updateCtx, updateCancel := sessionStoreQueryContext(r)
-			_ = h.sessionManager.Update(updateCtx, session)
-			updateCancel()
+			// 与流式入口共用同一条写路径：剥离请求级上下文前缀、增量追加，并
+			// 使用不随客户端断开取消的写 ctx。
+			if persistErr := h.persistAgentChatTurnHistory(
+				r, session, execResult.UpdatedSession.GetMessages(), contextMessages, true,
+			); persistErr != nil {
+				logger.Warnf("agent chat: persist turn history: %s", persistErr)
+			}
 		}
 
 		responseResult := buildAgentResultPayload("agent_react", reactResult)
