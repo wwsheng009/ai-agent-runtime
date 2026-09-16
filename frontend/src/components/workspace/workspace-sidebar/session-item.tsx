@@ -1,5 +1,6 @@
 // 由 components/workspace/workspace-sidebar.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 // P1-9 增量：行内相对时间、归档状态徽标与带键盘/aria 的操作菜单（新增 props 均可选）。
+// 2026-09-16 样式优化：相对时间并入标题行末尾，与 hover 菜单图标同槽互换（整行单行高）。
 
 import { MoreHorizontalIcon } from "lucide-react";
 import { useEffect, useRef, useState, type DragEvent } from "react";
@@ -75,7 +76,7 @@ export type SidebarSessionItemActionLabels = {
 
 export type SidebarSessionItemTime = {
   relative: string;
-  /** 悬浮完整文案（含「创建于」）。 */
+  /** 完整时间文案（含「创建于」）；2026-09-16 起并入整行 tooltip，不再挂在时间元素上。 */
   title: string;
 };
 
@@ -379,6 +380,11 @@ export function SidebarSessionItem({
         Boolean(onDelete) ||
         Boolean(onFork) ||
         Boolean(onStartRename));
+  // 2026-09-16：相对时间并入标题行末尾，与 hover 菜单图标同槽互换（平时时间 / hover 图标）；
+  // 完整时间戳随之内联进整行 tooltip，避免原生 tooltip 落在被让位隐藏的元素上。
+  const rowTitle = [title, statusIcon?.label, time?.title]
+    .filter((part): part is string => Boolean(part))
+    .join(" · ");
 
   if (renaming) {
     return (
@@ -427,13 +433,13 @@ export function SidebarSessionItem({
       ) : null}
       <button
         type="button"
-        title={statusIcon ? `${title} · ${statusIcon.label}` : title}
+        title={rowTitle}
         onClick={onSelect}
         className={cn(
           "flex w-full items-center gap-2 rounded-[0.72rem] border py-1.5 pl-2 text-left transition",
-          // 2026-09-15 样式优化：hover 动作从「铅笔 + 菜单」两个图标收敛为一个菜单入口，
-          // 右侧预留随之收窄（16 → 8 个间距单位），让出的宽度全部归还标题。
-          showMenu ? "pr-8" : "pr-2",
+          // 2026-09-16：菜单入口与行内时间同槽 —— 时间顶到行尾（pr-2），图标悬浮其上；
+          // 仅「没有时间可让位」的行（时间戳缺失 / 不可解析）保留右侧预留位，否则图标会压住徽标。
+          showMenu && !time ? "pr-8" : "pr-2",
           isActive
             ? "border-accent-secondary-border bg-accent-secondary-soft"
             : archived
@@ -441,18 +447,8 @@ export function SidebarSessionItem({
               : "border-border bg-surface-softer hover:border-border-strong hover:bg-surface-soft",
         )}
       >
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-medium text-foreground">
-            {title}
-          </div>
-          {time ? (
-            <div
-              className="truncate app-text-10 text-muted-foreground"
-              title={time.title}
-            >
-              {time.relative}
-            </div>
-          ) : null}
+        <div className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
+          {title}
         </div>
         {lineage ? (
           <span
@@ -469,12 +465,34 @@ export function SidebarSessionItem({
           </span>
         ) : null}
         {statusIcon ? <SidebarStateIcon spec={statusIcon} /> : null}
+        {time ? (
+          <span
+            className={cn(
+              "shrink-0 truncate app-text-10 text-muted-foreground transition",
+              // 让位条件与菜单槽显示条件对齐（无菜单时不隐藏时间）：hover 整行，
+              // 或键盘焦点落在菜单槽内。不用 `group-focus-within`：点击行后按钮保留焦点会误藏时间。
+              showMenu &&
+                "group-hover/session:opacity-0 group-has-[.session-row-actions:focus-within]/session:opacity-0",
+            )}
+            data-testid="session-row-time"
+          >
+            {time.relative}
+          </span>
+        ) : null}
       </button>
       {/* z-30：该容器被 `translate`/`opacity` 建立为层叠上下文，容器自身必须带正
           z-index，否则容器内菜单的 `z-20` 只在本上下文内生效，整行会被后续兄弟行
           （同为 z-index:auto 的定位元素，DOM 顺序在后）覆盖 —— 表现为菜单被下一行
           的按钮压住、菜单项点不到。 */}
-      <div className="absolute right-1 top-1/2 z-30 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition focus-within:opacity-100 group-hover/session:opacity-100">
+      <div
+        className={cn(
+          "session-row-actions absolute right-1 top-1/2 z-30 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition",
+          // 与时间同槽互换：hover 整行、或键盘焦点落在本槽（图标 / 菜单项）时图标显现。
+          showMenu &&
+            "group-hover/session:opacity-100 focus-within:opacity-100",
+        )}
+        data-testid="session-row-actions-slot"
+      >
         {showMenu && actionLabels ? (
           <SessionRowMenu
             actionLabels={actionLabels}
