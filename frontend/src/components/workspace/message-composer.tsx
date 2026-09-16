@@ -1,5 +1,5 @@
 import { ArrowUpIcon, PlusIcon, SquareIcon } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { type ReactNode, useEffect, useLayoutEffect, useRef } from "react";
 
 import {
   ComposerAttachmentRail,
@@ -51,6 +51,8 @@ type MessageComposerProps = {
   onProviderChange: (value: string) => void;
   onDismissCommandResult?: () => void;
   onReasoningEffortChange: (value: string) => void;
+  /** P1-x：会话权限选择器（由宿主注入，composer 不直接耦合 runtime API）。 */
+  permissionModeControl?: ReactNode;
   providerOptions: string[];
   reasoningEffortDefault: string;
   reasoningEffortError: string | null;
@@ -85,6 +87,7 @@ export function MessageComposer({
   onModelChange,
   onProviderChange,
   onReasoningEffortChange,
+  permissionModeControl = null,
   providerOptions,
   reasoningEffortDefault,
   reasoningEffortError,
@@ -368,6 +371,7 @@ export function MessageComposer({
               selectedProvider={selectedProvider}
               selectedReasoningEffort={selectedReasoningEffort}
             />
+            {permissionModeControl}
             {runtimeModelStatusLabel ? (
               <span className="truncate">{runtimeModelStatusLabel}</span>
             ) : null}

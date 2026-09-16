@@ -305,6 +305,29 @@ export const zhWorkspaceBase = {
       pendingConfirm: "待确认",
       reselectHint: "已切换供应商，请重新确认模型与推理强度",
     },
+    permission: {
+      label: "权限",
+      pending: "切换中",
+      error: "权限模式不可用",
+      mode: {
+        default: {
+          label: "默认",
+          description: "写入与执行前逐次确认",
+        },
+        accept_edits: {
+          label: "自动接受编辑",
+          description: "文件编辑自动通过，危险命令仍需确认",
+        },
+        plan: {
+          label: "计划模式",
+          description: "只读探索，仅允许写入 plan 文件",
+        },
+        bypass_permissions: {
+          label: "跳过权限校验",
+          description: "全部工具调用直接放行，仅在可信工作区使用",
+        },
+      },
+    },
     loadingModels: "正在加载模型",
     modelCatalogUnavailable: "模型目录不可用",
     runtimeDefaultModel: "运行时默认模型",

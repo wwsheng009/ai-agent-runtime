@@ -100,6 +100,7 @@ export {
   getSessionHistory,
   getSessionCheckpointFiles,
   getSessionPlanMode,
+  getSessionPermissionMode,
   listRuntimeSessionUsers,
   listRuntimeSessions,
   listSessionBacktrackAudit,
@@ -110,6 +111,7 @@ export {
   restoreSessionCheckpoint,
   resolveSessionToolApproval,
   updateRuntimeSession,
+  updateSessionPermissionMode,
   updateSessionPlanMode,
 } from "./sessions";
 export { branchRuntimeSession } from "./session-branch";

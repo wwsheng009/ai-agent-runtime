@@ -4,6 +4,7 @@ export * from "./session-runtime";
 export * from "./checkpoints";
 export * from "./backtrack";
 export * from "./plans";
+export * from "./permission-modes";
 export * from "./events";
 export * from "./logs";
 export * from "./analytics";

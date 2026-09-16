@@ -777,6 +777,9 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/sessions/{id}/backtrack", h.ApplySessionBacktrack).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/plan", h.GetSessionPlanMode).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/plan", h.UpdateSessionPlanMode).Methods(http.MethodPost)
+	// 会话权限模式（composer 权限选择器）：运行中切换同样生效。
+	runtimeRouter.HandleFunc("/sessions/{id}/permission-mode", h.GetSessionPermissionMode).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/permission-mode", h.UpdateSessionPermissionMode).Methods(http.MethodPost)
 	// 用量分析 + 缓存分析：server 启动（路由注册）即挂载（§3.2），
 	// 二者写/读同一个 usage_analytics.sqlite；避免启动初期到首个请求
 	// 之间的 LLM 事件丢失。

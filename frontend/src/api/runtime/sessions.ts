@@ -13,6 +13,8 @@ import type {
   RuntimeSessionCheckpointsResponse,
   RuntimeSessionPlanMode,
   RuntimeSessionPlanModeUpdateRequest,
+  RuntimeSessionPermissionMode,
+  RuntimeSessionPermissionModeUpdateRequest,
   RuntimeSessionRecord,
   RuntimeSessionStateChangeResponse,
   RuntimeSessionTurnsResponse,
@@ -377,6 +379,51 @@ export async function updateSessionPlanMode(
 ): Promise<RuntimeSessionPlanMode> {
   return fetchRuntimeJson<RuntimeSessionPlanMode>(
     buildRuntimeUrl(`/api/runtime/sessions/${encodeURIComponent(sessionId)}/plan`),
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+/**
+ * 读取会话当前权限模式与后端支持的模式清单。
+ *
+ * 模式真值（含 `accept_edits` / `bypass_permissions` 这类下划线式枚举）
+ * 由后端 `internal/policy` 提供，前端不写死枚举，只按 value 渲染文案。
+ */
+export async function getSessionPermissionMode(
+  sessionId: string,
+): Promise<RuntimeSessionPermissionMode> {
+  return fetchRuntimeJson<RuntimeSessionPermissionMode>(
+    buildRuntimeUrl(
+      `/api/runtime/sessions/${encodeURIComponent(sessionId)}/permission-mode`,
+    ),
+    {
+      headers: {
+        Accept: "application/json",
+      },
+    },
+  );
+}
+
+/**
+ * 切换会话权限模式；会话运行中同样立即生效。
+ *
+ * 未知模式由后端 400 拒绝（不会静默降级），调用方需把错误透出到 UI。
+ */
+export async function updateSessionPermissionMode(
+  sessionId: string,
+  body: RuntimeSessionPermissionModeUpdateRequest,
+): Promise<RuntimeSessionPermissionMode> {
+  return fetchRuntimeJson<RuntimeSessionPermissionMode>(
+    buildRuntimeUrl(
+      `/api/runtime/sessions/${encodeURIComponent(sessionId)}/permission-mode`,
+    ),
     {
       method: "POST",
       headers: {

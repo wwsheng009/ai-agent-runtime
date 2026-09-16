@@ -324,6 +324,29 @@ export const enWorkspaceBase = {
       pendingConfirm: "Reconfirm",
       reselectHint: "Provider switched — reconfirm model and reasoning",
     },
+    permission: {
+      label: "Permission",
+      pending: "switching",
+      error: "permission mode unavailable",
+      mode: {
+        default: {
+          label: "Default",
+          description: "Confirm every write and command",
+        },
+        accept_edits: {
+          label: "Accept edits",
+          description: "File edits pass automatically; risky commands still ask",
+        },
+        plan: {
+          label: "Plan",
+          description: "Read-only exploration; only the plan file is writable",
+        },
+        bypass_permissions: {
+          label: "Bypass permissions",
+          description: "Every tool call runs without asking — trusted workspaces only",
+        },
+      },
+    },
     loadingModels: "loading models",
     modelCatalogUnavailable: "model catalog unavailable",
     runtimeDefaultModel: "runtime default model",

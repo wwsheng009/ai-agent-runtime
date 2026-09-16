@@ -13,6 +13,7 @@ import { type TFunction } from "i18next";
 import { ArrowUpRightIcon, BotIcon, type LucideIcon } from "lucide-react";
 
 import { MessageComposer } from "@/components/workspace/message-composer";
+import { ComposerPermissionModeControl } from "@/components/workspace/composer-permission-mode-control";
 import { MessageList } from "@/components/workspace/message-list";
 import { PendingInteractionBar } from "@/components/workspace/pending-interaction-bar";
 import { TodoPanel } from "@/components/workspace/task-panel";
@@ -469,6 +470,13 @@ export function WorkspaceMainSection({
                     onModelChange={onModelChange}
                     onProviderChange={onProviderChange}
                     onReasoningEffortChange={onReasoningEffortChange}
+                    permissionModeControl={
+                      <ComposerPermissionModeControl
+                        lastRuntimeEventType={selectedThread.lastRuntimeEventType}
+                        runtimeEventCount={selectedThread.runtimeEventCount}
+                        sessionId={selectedThread.sessionId}
+                      />
+                    }
                     providerOptions={providerOptions}
                     runtimeModelsError={runtimeModelsError}
                     runtimeModelsLoading={runtimeModelsLoading}

@@ -21,6 +21,24 @@ func normalizeMode(mode Mode) Mode {
 	}
 }
 
+// SupportedModes returns the backend-supported permission modes in display order.
+func SupportedModes() []Mode {
+	return []Mode{ModeDefault, ModeAcceptEdits, ModePlan, ModeBypassPermissions}
+}
+
+// ParseMode parses a raw permission mode value. ok is false when the value is
+// not supported; callers must reject the request instead of silently falling
+// back so a typo cannot weaken the effective policy.
+func ParseMode(raw string) (Mode, bool) {
+	normalized := Mode(strings.ToLower(strings.TrimSpace(raw)))
+	switch normalized {
+	case ModeDefault, ModeAcceptEdits, ModePlan, ModeBypassPermissions:
+		return normalized, true
+	default:
+		return ModeDefault, false
+	}
+}
+
 func modeDecision(mode Mode, caps []Capability) DecisionType {
 	switch normalizeMode(mode) {
 	case ModeBypassPermissions:
