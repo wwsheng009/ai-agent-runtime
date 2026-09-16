@@ -65,6 +65,9 @@ export function createStreamingWriters(
     eventType: string,
   ) => {
     turnState.toolPayloads.push(payload);
+    // 工具帧 = 推理块边界（见 turn-state 的 reasoningBlockToolCounts）：之后的推理
+    // 增量属于新的一块，结构快照据此把新块插到这行工具之后。
+    turnState.toolFrameCount += 1;
     setPhaseAndRef("tool");
     attachTurnArtifact(
       buildTurnJsonArtifact(
@@ -119,6 +122,8 @@ export function createStreamingWriters(
           turnState.reasoningText,
           {
             existingSegments: currentMessage.segments,
+            reasoningBlocks: turnState.reasoningBlocks,
+            reasoningBlockToolCounts: turnState.reasoningBlockToolCounts,
           },
         );
         if (hasStreamedText) {

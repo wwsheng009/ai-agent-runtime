@@ -1,8 +1,10 @@
 // P0-2 随源拆分：由 workspace-thread-state.test.ts 按关注点切分，断言未改动。
 import { describe, expect, it } from "vitest";
 
+import type { ChatMessage, Thread } from "@/data/mock";
 import {
   applyRuntimeDeltaToThread,
+  createStreamingAssistantMessage,
 } from "@/lib/workspace-thread-state";
 import type { SessionRuntimeEvent } from "@/types/runtime";
 import { createThread } from "./test-fixtures";
@@ -195,5 +197,90 @@ describe("matchesActiveTurn（两条通道共用的 turn 归属判定）", () =>
     expect(matchesActiveTurn("turn-a", "turn-a")).toBe(true);
     expect(matchesActiveTurn(" turn-a ", "turn-a")).toBe(true);
     expect(matchesActiveTurn("turn-a", "turn-b")).toBe(false);
+  });
+});
+
+// 断流 / 重放后的事件重建（2026-09-16）：增量帧的目标回合在 thread 里没有 live
+// 助手消息时不再丢弃，而是补建 streaming 占位消息——否则 /runtime/events 重放里
+// 明明有完整的 assistant_delta 帧，对话面板也只能空着等回合结束。
+describe("applyRuntimeDeltaToThread 在无 live 消息时补建在途回合", () => {
+  function deltaEvent(payload: Record<string, unknown>): SessionRuntimeEvent {
+    return { type: "assistant_delta", timestamp: "2026-09-16T00:00:00Z", payload };
+  }
+
+  /** 断流 / reload 后的会话：助手消息已定稿，没有可写的 live 目标。 */
+  function createFinalizedThread(): Thread {
+    const thread = createThread();
+    thread.messages[0] = { ...thread.messages[0], label: "answer", streaming: false };
+    return thread;
+  }
+
+  function textOf(message: ChatMessage): string {
+    return message.segments
+      .filter((segment) => segment.type === "text")
+      .map((segment) => segment.content)
+      .join("");
+  }
+
+  it("补建 streaming 占位消息，正文只追加一次", () => {
+    const thread = applyRuntimeDeltaToThread(
+      createFinalizedThread(),
+      deltaEvent({ delta: "重放正文", turn_id: "turn-1", stream_id: "stream-1", sequence: 1 }),
+      "turn-1",
+    );
+
+    const created = thread.messages[thread.messages.length - 1];
+    expect(thread.messages.filter((message) => message.role === "assistant")).toHaveLength(2);
+    // 字段与既有命名一致（isLiveAssistantMessage 后续仍能命中这条消息）。
+    expect(created).toMatchObject({
+      id: "turn-turn-1-assistant",
+      streaming: true,
+      label: "streaming",
+      runtimeTurnId: "turn-1",
+    });
+    expect(created.segments).toEqual([{ type: "text", content: "重放正文" }]);
+    expect(textOf(created)).toBe("重放正文");
+
+    // 同回合的后续增量继续落在这条消息上：不新建第二条、也不重复写入。
+    const next = applyRuntimeDeltaToThread(
+      thread,
+      deltaEvent({ delta: "，继续", turn_id: "turn-1", stream_id: "stream-1", sequence: 2 }),
+      "turn-1",
+    );
+    expect(next.messages.filter((message) => message.role === "assistant")).toHaveLength(2);
+    expect(textOf(next.messages[next.messages.length - 1])).toBe("重放正文，继续");
+  });
+
+  it("回合归属不明或属于旧回合时不补建消息（引用相等）", () => {
+    const thread = createFinalizedThread();
+
+    // 帧无 turn_id 且调用方也没有在途回合身份：归属不明 → 保持旧行为（丢弃）。
+    expect(
+      applyRuntimeDeltaToThread(thread, deltaEvent({ delta: "x", stream_id: "s1", sequence: 1 })),
+    ).toBe(thread);
+    // 帧的回合与会话当前在途回合明确不一致：旧回合 → 不建消息。
+    expect(
+      applyRuntimeDeltaToThread(
+        thread,
+        deltaEvent({ delta: "x", turn_id: "turn-old", stream_id: "s1", sequence: 1 }),
+        "turn-1",
+      ),
+    ).toBe(thread);
+  });
+
+  it("同 id 的助手消息已存在（该回合已定稿）时不补建，避免同 id 重复消息", () => {
+    const thread = createFinalizedThread();
+    thread.messages.push({
+      ...createStreamingAssistantMessage("turn-turn-1-assistant", [], "turn-1"),
+      streaming: false,
+    });
+
+    expect(
+      applyRuntimeDeltaToThread(
+        thread,
+        deltaEvent({ delta: "x", turn_id: "turn-1", stream_id: "s1", sequence: 1 }),
+        "turn-1",
+      ),
+    ).toBe(thread);
   });
 });

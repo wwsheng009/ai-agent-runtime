@@ -1,7 +1,9 @@
 // P0-2 随源拆分：由 workspace-thread-state.test.ts 按关注点切分，断言未改动。
 import { describe, expect, it } from "vitest";
 
+import type { Thread } from "@/data/mock";
 import {
+  applyRuntimeDeltaToThread,
   applyRuntimeEventToThread,
   buildStreamingMessageSegments,
   createStreamingAssistantMessage,
@@ -9,6 +11,7 @@ import {
   mergeRuntimeEvent,
 } from "@/lib/workspace-thread-state";
 import type { RuntimeSessionRecord, SessionRuntimeEvent } from "@/types/runtime";
+import { applyChatSseBridgeFrame } from "./events-live";
 import { createThread } from "./test-fixtures";
 
 describe("runtime events and session merge", () => {
@@ -213,5 +216,130 @@ describe("runtime events and session merge", () => {
     // 记忆化：重复读取不再重新序列化。
     expect(artifact?.content).toContain("probe-value");
     expect(serializations).toBe(afterExpected + 1);
+  });
+});
+
+// 断流 / 重放后的事件重建（2026-09-16）：桥接帧的目标回合在 thread 里没有 live
+// 助手消息时，按帧的 turn id 与调用方持有的在途回合（同源于 chat 请求的 turn_id）
+// 补建 streaming 占位消息，而不是整帧丢弃——/runtime/events?after= 重放里明明有
+// 完整的 chat.sse.* 帧，对话面板却只能空着等回合结束。
+describe("applyRuntimeEventToThread 在无 live 消息时按桥接帧补建在途回合", () => {
+  const TOOL_CALL = {
+    id: "observation_step_1_tool_0",
+    name: "shell",
+    arguments: { command: "go test ./..." },
+  };
+
+  /** 断流 / reload 后的会话：助手消息已定稿，没有可写的 live 目标。 */
+  function createRecoveredThread(): Thread {
+    const thread = createThread();
+    thread.messages[0] = { ...thread.messages[0], label: "answer", streaming: false };
+    return thread;
+  }
+
+  function toolFrame(
+    type: string,
+    options: { content?: string; withDelta?: boolean; turnId?: string } = {},
+  ): SessionRuntimeEvent {
+    return {
+      type,
+      timestamp: "2026-09-16T00:00:01Z",
+      payload: {
+        type,
+        index: 1,
+        content: options.content ?? "",
+        ...(options.withDelta ? { delta: TOOL_CALL } : {}),
+        tool: { ...TOOL_CALL, args: TOOL_CALL.arguments, status: type, content: options.content ?? "" },
+        tool_call: TOOL_CALL,
+        metadata: {},
+        ...(options.turnId ? { turn_id: options.turnId } : {}),
+      },
+    };
+  }
+
+  function applyTurn(thread: Thread, event: SessionRuntimeEvent): Thread {
+    return applyRuntimeEventToThread(thread, "session-1", [event], event, "turn-1");
+  }
+
+  function lastMessage(thread: Thread) {
+    return thread.messages[thread.messages.length - 1];
+  }
+
+  function toolRows(thread: Thread) {
+    return lastMessage(thread).segments.filter((segment) => segment.type === "tool");
+  }
+
+  it("tool_end 帧补建 streaming 占位消息并落成工具行", () => {
+    const next = applyTurn(
+      createRecoveredThread(),
+      toolFrame("chat.sse.tool_end", { content: "===== command 1/1 [ok] =====\nExit code: 0", turnId: "turn-1" }),
+    );
+
+    // 字段与既有命名一致（isLiveAssistantMessage 后续仍能命中这条消息）。
+    expect(lastMessage(next)).toMatchObject({
+      id: "turn-turn-1-assistant",
+      role: "assistant",
+      streaming: true,
+      label: "streaming",
+      runtimeTurnId: "turn-1",
+    });
+    // 工具行按 tool_call.id 合键，status 走既有映射（tool_end → finished）。
+    expect(toolRows(next)).toEqual([
+      expect.objectContaining({ toolCallId: TOOL_CALL.id, name: "shell", status: "finished" }),
+    ]);
+    expect(next.lastRuntimeEventType).toBe("tool_end:shell");
+  });
+
+  it("同回合的增量 + 连续工具帧收敛到同一条补建消息", () => {
+    let thread = applyRuntimeDeltaToThread(
+      createRecoveredThread(),
+      {
+        type: "assistant_delta",
+        timestamp: "2026-09-16T00:00:02Z",
+        payload: { delta: "开始测试", turn_id: "turn-1", stream_id: "stream-1", sequence: 1 },
+      },
+      "turn-1",
+    );
+    thread = applyTurn(thread, toolFrame("chat.sse.tool_call", { withDelta: true, turnId: "turn-1" }));
+    thread = applyTurn(thread, toolFrame("chat.sse.tool_end", { content: "Exit code: 0", turnId: "turn-1" }));
+
+    expect(thread.messages.filter((message) => message.streaming === true)).toHaveLength(1);
+    expect(lastMessage(thread).id).toBe("turn-turn-1-assistant");
+    // 正文只出现一次；两条工具帧（tool_call.id 合键）收敛成一行。
+    expect(lastMessage(thread).segments.filter((segment) => segment.type === "text")).toEqual([
+      { type: "text", content: "开始测试" },
+    ]);
+    expect(toolRows(thread)).toHaveLength(1);
+    expect(toolRows(thread)[0]).toMatchObject({ toolCallId: TOOL_CALL.id, status: "finished" });
+  });
+
+  it("回合归属不明或属于旧回合的桥接帧不补建消息（引用相等）", () => {
+    const thread = createRecoveredThread();
+    const bridgeKind = { kind: "tool", status: "finished" } as const;
+
+    // 帧无 turn_id 且调用方也没有在途回合身份：归属不明 → 保持旧行为（丢弃）。
+    expect(
+      applyChatSseBridgeFrame(thread, toolFrame("chat.sse.tool_end", { content: "out" }), bridgeKind),
+    ).toBe(thread);
+    // 帧的回合与会话当前在途回合明确不一致：旧回合 → 不建消息。
+    expect(
+      applyChatSseBridgeFrame(
+        thread,
+        toolFrame("chat.sse.tool_end", { content: "out", turnId: "turn-old" }),
+        bridgeKind,
+        "turn-1",
+      ),
+    ).toBe(thread);
+  });
+
+  it("纯阶段帧（chunk）不补建空占位消息", () => {
+    const thread = createRecoveredThread();
+    const chunk: SessionRuntimeEvent = {
+      type: "chat.sse.chunk",
+      timestamp: "2026-09-16T00:00:03Z",
+      payload: { content: "增量", turn_id: "turn-1" },
+    };
+
+    expect(applyChatSseBridgeFrame(thread, chunk, { kind: "phase" }, "turn-1")).toBe(thread);
   });
 });

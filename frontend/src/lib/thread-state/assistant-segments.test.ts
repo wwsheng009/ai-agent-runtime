@@ -304,4 +304,109 @@ describe("assistant segments and generated images", () => {
     ]);
   });
 
+  // 回归（2026-09-16 页面 bug）：一个回合里推理与工具交替出现
+  // （推理 → 工具 → 工具 → 推理 → 工具），结构提交却把过程区重建回「一段推理 +
+  // 一串工具」。过程区的结构必须以**已渲染段**为准（段顺序即到达顺序），推理只
+  // 允许就地更新 / 按工具行边界插入，任何情况下都不合并。
+  describe("分块推理：推理与工具交替", () => {
+    const toolRow = (toolCallId: string) => ({
+      type: "tool" as const,
+      toolCallId,
+      name: "shell",
+      status: "finished" as const,
+    });
+
+    it("已有两段推理 + 两行工具时重建保持段序与块数", () => {
+      const existing = [
+        { type: "reasoning" as const, content: "先看入口。", running: false },
+        toolRow("call-1"),
+        toolRow("call-2"),
+        {
+          type: "reasoning" as const,
+          content: "测试失败了，看下报错。",
+          running: true,
+        },
+      ];
+
+      const segments = buildAssistantMessageSegments(
+        "最终答复",
+        "runtime",
+        "先看入口。测试失败了，看下报错。",
+        { existingSegments: existing, reasoningRunning: true },
+      );
+
+      expect(segments.map((segment) => segment.type)).toEqual([
+        "reasoning",
+        "tool",
+        "tool",
+        "reasoning",
+        "text",
+      ]);
+      expect(segments[0]).toMatchObject({ content: "先看入口。" });
+      expect(segments[3]).toMatchObject({
+        content: "测试失败了，看下报错。",
+        running: true,
+      });
+    });
+
+    it("聚合推理更长且尾块已被工具行关上 → 多出来的尾巴是新的一块", () => {
+      const existing = [
+        { type: "reasoning" as const, content: "第一块", running: false },
+        toolRow("call-1"),
+      ];
+
+      const segments = buildAssistantMessageSegments(
+        "",
+        "runtime",
+        "第一块第二块",
+        { existingSegments: existing },
+      );
+
+      expect(segments.map((segment) => segment.type)).toEqual([
+        "reasoning",
+        "tool",
+        "reasoning",
+      ]);
+      expect(segments[2]).toMatchObject({ content: "第二块" });
+    });
+
+    it("尾块还在增长时聚合文本并进尾块，而不是另起一段", () => {
+      const existing = [
+        { type: "reasoning" as const, content: "先看入口。", running: true },
+      ];
+
+      const segments = buildAssistantMessageSegments(
+        "",
+        "runtime",
+        "先看入口。再确认调用链。",
+        { existingSegments: existing, reasoningRunning: true },
+      );
+
+      expect(segments).toEqual([
+        { type: "reasoning", content: "先看入口。再确认调用链。", running: true },
+      ]);
+    });
+
+    it("显式分块信息按工具行边界落位（直连通道 /api/agent/chat）", () => {
+      const segments = buildAssistantMessageSegments(
+        "",
+        "runtime",
+        "第一块第二块",
+        {
+          existingSegments: [toolRow("call-1")],
+          reasoningBlocks: ["第一块", "第二块"],
+          reasoningBlockToolCounts: [0, 1],
+        },
+      );
+
+      expect(segments.map((segment) => segment.type)).toEqual([
+        "reasoning",
+        "tool",
+        "reasoning",
+      ]);
+      expect(segments[0]).toMatchObject({ content: "第一块" });
+      expect(segments[2]).toMatchObject({ content: "第二块" });
+    });
+  });
+
 });

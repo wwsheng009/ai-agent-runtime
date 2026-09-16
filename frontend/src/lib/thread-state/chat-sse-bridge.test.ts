@@ -382,6 +382,70 @@ function tailToolEndFrame(content: string): SessionRuntimeEvent {
   };
 }
 
+// 回归（2026-09-16 页面 bug）：一个回合里推理与工具是交替出现的
+// （推理 → 工具 → 工具 → 推理 → 工具），页面上却只剩一段推理——工具之后到达的推理
+// 增量被并回了上一段。段顺序就是到达顺序：推理段一旦被工具行顶下来就写完了，之后
+// 到达的推理属于**新的一块**，live 层（lib/live-stream-text.ts）同样按块寻址。
+describe("推理与工具交替：工具之后的推理新起一块", () => {
+  function reasoningFrame(delta: string): SessionRuntimeEvent {
+    return {
+      type: "assistant.reasoning",
+      timestamp: "2026-09-16T00:00:01Z",
+      payload: {
+        type: "reasoning",
+        content: "",
+        reasoning: { content: delta, summary: delta },
+        turn_id: "turn-1",
+      },
+    };
+  }
+
+  it("工具帧之后的推理增量不再并回上一段，live 层收到 blockStart", () => {
+    const live: Array<{ blockStart?: boolean; text: string }> = [];
+    const sink = (delta: { blockStart?: boolean; text: string }) => {
+      live.push(delta);
+    };
+
+    let thread = createLiveThread([]);
+    thread = applyRuntimeDeltaToThread(thread, reasoningFrame("先看入口。"), "turn-1", sink);
+    // 同一块内的连续增量：逐段拼接（不重置，也不新起一行）。
+    thread = applyRuntimeDeltaToThread(
+      thread,
+      reasoningFrame("再确认调用链。"),
+      "turn-1",
+      sink,
+    );
+    thread = apply(thread, toolFrame("chat.sse.tool_start"));
+    thread = apply(thread, lifecycleFrame("tool_started"));
+    thread = applyRuntimeDeltaToThread(
+      thread,
+      reasoningFrame("测试失败了，看下报错。"),
+      "turn-1",
+      sink,
+    );
+
+    expect(
+      thread.messages[thread.messages.length - 1].segments.map(
+        (segment) => segment.type,
+      ),
+    ).toEqual(["reasoning", "tool", "tool", "reasoning"]);
+    expect(reasoningSegments(thread).map((segment) => segment.content)).toEqual([
+      "先看入口。再确认调用链。",
+      "测试失败了，看下报错。",
+    ]);
+    // 旧块被工具行收尾（不再转圈），新块仍在运行。
+    const rows = reasoningSegments(thread);
+    expect(rows[0].running).toBe(false);
+    expect(rows[1].running).toBe(true);
+    // live 层按块寻址：只有新块的首个增量带 blockStart（写方据此覆盖而不是追加）。
+    expect(live).toMatchObject([
+      { blockStart: true, text: "先看入口。" },
+      { blockStart: false, text: "再确认调用链。" },
+      { blockStart: true, text: "测试失败了，看下报错。" },
+    ]);
+  });
+});
+
 describe("runtime 工具生命周期帧实时建行", () => {
   it("生命周期事件名归类为工具帧", () => {
     expect(getRuntimeBridgeKind("tool_started")).toEqual({

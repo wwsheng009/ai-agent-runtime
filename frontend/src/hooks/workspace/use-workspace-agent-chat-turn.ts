@@ -219,7 +219,12 @@ export function useWorkspaceAgentChatTurn({
       // 只更新 canonical。渲染层优先用 live，若不在这里对齐，气泡会一直显示旧
       // live 文本直到下一次快照或定稿。文本不变时 set* 是幂等的（不通知订阅方）。
       setLiveStreamText(assistantMessageId, content);
-      setLiveStreamReasoning(assistantMessageId, turnState.reasoningText);
+      // live 记录按块寻址：只对齐**当前块**（整轮拼接会让尾行把前面几块的内容也
+      // 显示出来——观感就是「所有推理并成一段」）。更早的块已定稿在各自的推理段里。
+      setLiveStreamReasoning(
+        assistantMessageId,
+        turnState.reasoningBlocks[turnState.reasoningBlocks.length - 1] ?? "",
+      );
       updateCurrentThread((thread) =>
         updateThreadMessage(thread, assistantMessageId, (message) => ({
           ...message,
@@ -232,6 +237,8 @@ export function useWorkspaceAgentChatTurn({
             {
               reasoningRunning: turnState.reasoningRunning,
               existingSegments: message.segments,
+              reasoningBlocks: turnState.reasoningBlocks,
+              reasoningBlockToolCounts: turnState.reasoningBlockToolCounts,
             },
           ),
         })),

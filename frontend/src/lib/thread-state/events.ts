@@ -37,6 +37,8 @@ export function applyRuntimeEventToThread(
   sessionId: string,
   events: SessionRuntimeEvent[],
   event: SessionRuntimeEvent,
+  /** 本会话当前在途回合（调用方持有的本轮 chat turn id）；桥接帧据此补建占位消息。 */
+  activeTurnId?: string,
 ) {
   const transport: Thread["transport"] =
     thread.transport === "error" ? "error" : "live";
@@ -72,7 +74,7 @@ export function applyRuntimeEventToThread(
   // isLiveAssistantMessage 的 streaming 闸门与上游 after 游标共同保证。
   const bridgeFrame = getRuntimeBridgeKind(event.type);
   if (bridgeFrame) {
-    nextThread = applyChatSseBridgeFrame(nextThread, event, bridgeFrame);
+    nextThread = applyChatSseBridgeFrame(nextThread, event, bridgeFrame, activeTurnId);
   }
 
   // 任务面板（方案 §5.2 通道 A）：整值 LWW，不解析文本摘要；与 todo 无关的事件

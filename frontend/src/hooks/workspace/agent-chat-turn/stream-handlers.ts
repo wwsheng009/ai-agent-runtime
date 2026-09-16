@@ -8,6 +8,7 @@ import type { Artifact, Thread } from "@/data/mock";
 import {
   appendLiveStreamReasoning,
   appendLiveStreamText,
+  setLiveStreamReasoning,
 } from "@/lib/live-stream-text";
 import {
   appendArtifactToMessage,
@@ -33,7 +34,7 @@ import type {
 } from "@/types/runtime";
 
 import { shouldIgnoreTerminalStreamError } from "./shared";
-import type { ChatTurnRuntimeState } from "./turn-state";
+import { appendReasoningDeltaToTurn, type ChatTurnRuntimeState } from "./turn-state";
 
 type FrameScheduler = {
   flush: () => void;
@@ -238,8 +239,15 @@ export function createAgentChatStreamHandlers(
         // 插入换行会让每个 delta 独占一行（显示异常）。与 runtime
         // 流路径 appendReasoningToMessageSegments 一致，保持原始
         // chunk 边界即可。
-        turnState.reasoningText += delta;
-        appendLiveStreamReasoning(assistantMessageId, delta);
+        //
+        // 按块累计（工具帧 = 块边界）：结构快照按 `reasoningBlocks` 落成多段推理，
+        // live 记录同样按块寻址——新块覆盖、块内追加。旧实现把整轮推理拼成一段并
+        // 一律追加，工具之后的推理会并回上一行渲染成一段。
+        if (appendReasoningDeltaToTurn(turnState, delta)) {
+          setLiveStreamReasoning(assistantMessageId, delta);
+        } else {
+          appendLiveStreamReasoning(assistantMessageId, delta);
+        }
         turnState.reasoningRunning = true;
         setPhaseAndRef("streaming");
         frameScheduler.schedule();

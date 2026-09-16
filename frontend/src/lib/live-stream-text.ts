@@ -1,5 +1,7 @@
 import { useCallback, useSyncExternalStore } from "react";
 
+import { type RuntimeLiveDelta } from "@/lib/thread-state/events-live";
+
 /**
  * 流式文本 live 通道（外部 store）。
  *
@@ -26,7 +28,15 @@ import { useCallback, useSyncExternalStore } from "react";
 export type LiveStreamEntry = {
   /** 正在揭示的正文（对应最后一段 text segment）。 */
   text: string;
-  /** 正在揭示的推理文本（对应最后一段 reasoning segment）。 */
+  /**
+   * 正在揭示的推理文本（对应**最后一段** reasoning segment）。
+   *
+   * 一个回合里推理与工具交替出现（推理 → 工具 → 推理 → …），每条消息因此可以有多
+   * 段推理。本字段永远只装**当前这一块**：新块的首个增量必须用
+   * `setLiveStreamReasoning` 覆盖（写方按 `RuntimeLiveDelta.blockStart` 判定），更早
+   * 的块已经定稿在 thread store 的独立推理段里。以前它累加整轮推理，尾行于是把
+   * 所有块拼成一段。
+   */
   reasoningText: string;
 };
 
@@ -98,6 +108,26 @@ export function setLiveStreamReasoning(messageId: string, text: string) {
   writeEntry(messageId, (current) =>
     current.reasoningText === text ? current : { ...current, reasoningText: text },
   );
+}
+
+/**
+ * live 增量分派：把一帧 `RuntimeLiveDelta` 按模块头「不变式 1」写入本 store。
+ * - text：追加正文；
+ * - reasoning + blockStart：**覆盖**当前推理块——新块首帧若走追加，尾行会把
+ *   「推理 → 工具 → 推理」整轮拼成一段（更早的块已定稿在 thread store 里）；
+ * - reasoning：追加推理。
+ * runtime/stream 通道在事件到达时同步调用（写完由各自的提交节奏兑现到 store）。
+ */
+export function applyLiveStreamDelta(delta: RuntimeLiveDelta) {
+  if (delta.kind === "text") {
+    appendLiveStreamText(delta.messageId, delta.text);
+    return;
+  }
+  if (delta.blockStart) {
+    setLiveStreamReasoning(delta.messageId, delta.text);
+    return;
+  }
+  appendLiveStreamReasoning(delta.messageId, delta.text);
 }
 
 /**

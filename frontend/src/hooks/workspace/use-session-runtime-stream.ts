@@ -14,10 +14,7 @@ import {
   type SessionRuntimeEvent,
 } from "@/lib/runtime-api";
 import { matchesActiveTurn } from "@/lib/thread-state/deltas";
-import {
-  appendLiveStreamReasoning,
-  appendLiveStreamText,
-} from "@/lib/live-stream-text";
+import { applyLiveStreamDelta } from "@/lib/live-stream-text";
 import {
   getRuntimeDeltaKeyFromEvent,
   getRuntimeDeltaKind,
@@ -36,6 +33,8 @@ type SessionRuntimeStreamOptions = {
     sessionId: string,
     events: SessionRuntimeEvent[],
     event: SessionRuntimeEvent,
+    /** 本会话在途回合身份：桥接帧确认归属后才允许补建 streaming 占位消息。 */
+    expectedTurnId?: string,
   ) => Thread;
   getErrorMessage: (error: unknown, fallback: string) => string;
   getRuntimeEventSeq: (event: SessionRuntimeEvent) => number;
@@ -251,7 +250,7 @@ export function useSessionRuntimeStream({
                   ? { ...thread, transport: "live" as const, lastError: null }
                   : thread;
               // 方案B：请求进行中，打字机增量事件直接渲染到消息；
-              // 否则只进事件快照（历史回放/reload 不误渲染）。
+              // 否则只进事件快照（历史回放/reload 不误渲染），在途回合身份透传给桥接帧。
               // A durable event from another turn never mutates the
               // currently streaming assistant message.  The claim above
               // is intentionally shared by both transport paths.
@@ -263,10 +262,7 @@ export function useSessionRuntimeStream({
                 );
               }
               return applyRuntimeEventToThreadRef.current(
-                recovered,
-                sessionId,
-                item.nextEvents,
-                item.event,
+                recovered, sessionId, item.nextEvents, item.event, item.activeTurn || undefined,
               );
             }),
           current,
@@ -398,10 +394,9 @@ export function useSessionRuntimeStream({
                     currentThread,
                     event,
                     activeTurn || undefined,
-                    (delta) =>
-                      delta.kind === "text"
-                        ? appendLiveStreamText(delta.messageId, delta.text)
-                        : appendLiveStreamReasoning(delta.messageId, delta.text),
+                    // live 通道副作用集中在 lib/live-stream-text.ts 的
+                    // applyLiveStreamDelta（正文追加 / 推理追加 / 新推理块覆盖）。
+                    (delta) => applyLiveStreamDelta(delta),
                   );
                 }
               }

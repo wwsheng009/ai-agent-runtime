@@ -40,10 +40,14 @@ export function MessageReasoningRow({
   // live 通道：推理增量同样不再写页面级 thread state（见 lib/live-stream-text.ts），
   // 只有本行随增量重渲染。
   const live = useLiveStreamEntry(streaming ? liveStreamId : null);
-  // 自愈守卫同 `StreamingMarkdown`：live 短于 store 副本说明它是 reload / 重连后
-  // 重新起算的局部文本，此时回落 store 副本，避免已显示的推理被截断。
+  // live 记录按**当前推理块**寻址（见 lib/live-stream-text.ts）：只有它是这一行
+  // store 副本的延长（前缀一致）时才用它。其余情况回落 store 副本——
+  // - reload / 重连后 live 从半截重新起算 → 不是前缀，回落，已显示的推理不被截断；
+  // - live 属于**另一块**推理（工具行之后新起的一块还没落到 store）→ 回落。
+  // 旧实现只比长度（`live.length >= segment.content.length`），于是「尾行 + 整轮
+  // 累加的 live 文本」会把前几块推理也拼进这一行——推理渲染全并成一段。
   const content =
-    live && live.reasoningText.length >= segment.content.length
+    live && live.reasoningText.startsWith(segment.content)
       ? live.reasoningText
       : segment.content;
   const running = streaming && segment.running !== false;

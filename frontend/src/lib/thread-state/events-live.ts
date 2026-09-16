@@ -17,6 +17,10 @@ import {
 } from "./generated-images";
 import { readFirstTextValue } from "./history-mapping";
 import {
+  findLatestAssistantMessage,
+  resolveLiveAssistantTarget,
+} from "./live-assistant-target";
+import {
   closeRunningReasoningSegments,
   STREAM_PLACEHOLDER_TEXT,
   type ToolMessageSegment,
@@ -48,6 +52,12 @@ export type RuntimeLiveDelta = {
   kind: "reasoning" | "text";
   messageId: string;
   text: string;
+  /**
+   * reasoning 专用：本帧开启了**新的一块**推理（上一块已被工具行 / 正文顶下来）。
+   * live 层按块寻址，收到它必须**覆盖**当前块的文本而不是追加，否则尾行会把整轮
+   * 推理拼成一段（「推理 → 工具 → 推理 → 工具」又变回一行）。
+   */
+  blockStart?: boolean;
 };
 
 /**
@@ -58,7 +68,11 @@ export type RuntimeLiveDelta = {
 export type RuntimeLiveDeltaSink = (delta: RuntimeLiveDelta) => void;
 
 /** 单个增量段（正文 / 推理）的文本载荷。 */
-type LiveDeltaText = { kind: RuntimeLiveDelta["kind"]; text: string };
+type LiveDeltaText = {
+  kind: RuntimeLiveDelta["kind"];
+  text: string;
+  blockStart?: boolean;
+};
 
 export function applyRuntimeDeltaToThread(
   thread: Thread,
@@ -73,29 +87,28 @@ export function applyRuntimeDeltaToThread(
     return thread;
   }
 
-  // live 通道目标：与写 store 的路径共用同一 predicate（同一条消息）。
-  const liveTargetId = liveSink
-    ? (findLatestAssistantMessage(thread, (message) =>
-        isLiveAssistantMessage(message, eventTurnId),
-      )?.message.id ?? "")
-    : "";
+  // 写目标：本回合仍在 streaming 的助手消息；没有且帧的回合归属可判定时补建一条
+  // 占位消息（断流 / 重放后据此重建在途回合，见 resolveLiveAssistantTarget）。
+  const target = resolveLiveAssistantTarget(thread, eventTurnId, expectedTurnId, true);
+  if (!target) {
+    return thread;
+  }
 
   const updateLiveAssistant = (
     updater: (message: ChatMessage) => ChatMessage,
     live?: LiveDeltaText,
   ) => {
-    let applied = false;
-    const nextThread = updateLatestAssistantMessage(
-      thread,
-      (message) => {
-        applied = true;
-        return updater(message);
-      },
-      (message) => isLiveAssistantMessage(message, eventTurnId),
-    );
-    if (applied && live && liveSink && liveTargetId)
-      liveSink({ ...live, messageId: liveTargetId });
-    return applied ? nextThread : thread;
+    const nextThread: Thread = {
+      ...target.thread,
+      messages: target.thread.messages.map((message, index) =>
+        index === target.index ? updater(message) : message,
+      ),
+    };
+    // live 通道目标与写 store 的目标是同一条消息（含本次补建的占位）。
+    if (live && liveSink) {
+      liveSink({ ...live, messageId: target.message.id });
+    }
+    return nextThread;
   };
 
   // 分类统一走 getRuntimeDeltaKind：它是「事件名 → 增量种类」的唯一真源
@@ -105,7 +118,12 @@ export function applyRuntimeDeltaToThread(
     case "text":
       return appendAssistantTextDelta(thread, event, updateLiveAssistant);
     case "reasoning":
-      return appendAssistantReasoningDelta(thread, event, updateLiveAssistant);
+      return appendAssistantReasoningDelta(
+        thread,
+        event,
+        updateLiveAssistant,
+        target.message.segments,
+      );
     case "image":
       return appendAssistantImageProgress(thread, event, updateLiveAssistant);
     default:
@@ -146,6 +164,7 @@ function appendAssistantReasoningDelta(
   thread: Thread,
   event: SessionRuntimeEvent,
   updateLiveAssistant: (updater: (message: ChatMessage) => ChatMessage, live?: LiveDeltaText) => Thread,
+  currentSegments: MessageSegment[],
 ): Thread {
   const payload = event.payload ?? {};
   const reasoningBlock =
@@ -158,12 +177,15 @@ function appendAssistantReasoningDelta(
   if (!deltaText) {
     return thread;
   }
+  // 本帧是「续写尾块」还是「新开一块」由写之前的段结构决定（判定与下面的写入
+  // 用的是同一份 segments，纯函数、可重放）。
+  const blockStart = !continuesTrailingReasoningSegment(currentSegments);
   return updateLiveAssistant((message) => {
     return {
       ...message,
       segments: appendReasoningToMessageSegments(message.segments, deltaText),
     };
-  }, { kind: "reasoning", text: deltaText });
+  }, { kind: "reasoning", text: deltaText, blockStart });
 }
 
 function appendAssistantImageProgress(
@@ -204,48 +226,44 @@ function appendTextToMessageSegments(
   return nextSegments;
 }
 
+/**
+ * 尾段（数组最后一段）是不是仍在增长的推理段。只有它才继续接收推理增量。
+ *
+ * 旧实现从数组**末尾往前找第一个**推理段往里追加，于是「推理 → 工具 → 推理 →
+ * 工具…」的回合里，工具之后到达的推理全被并回第一块——页面上只剩一段推理。
+ * 段顺序就是到达顺序：推理段一旦被工具行 / 正文 / 图片顶下来，它就写完了。
+ */
+function continuesTrailingReasoningSegment(segments: MessageSegment[]): boolean {
+  const tail = segments[segments.length - 1];
+  return Boolean(tail && tail.type === "reasoning");
+}
+
 function appendReasoningToMessageSegments(
   segments: MessageSegment[],
   delta: string,
 ): MessageSegment[] {
   const nextSegments = [...segments];
-  for (let index = nextSegments.length - 1; index >= 0; index--) {
-    const segment = nextSegments[index];
-    if (segment.type !== "reasoning") {
-      continue;
-    }
-    const previous = segment.content;
+  const tailIndex = nextSegments.length - 1;
+  const tail = nextSegments[tailIndex];
+  if (tail && tail.type === "reasoning") {
+    const previous = tail.content;
     // A persisted/final reasoning block may be followed by the first live
     // block for this turn.  Keep the visual separator used by the chat SSE
     // path, while preserving raw chunk boundaries once streaming is running.
     const separator =
-      previous.length > 0 && segment.running !== true && !previous.endsWith("\n")
+      previous.length > 0 && tail.running !== true && !previous.endsWith("\n")
         ? "\n"
         : "";
-    nextSegments[index] = {
-      ...segment,
+    nextSegments[tailIndex] = {
+      ...tail,
       content: previous + separator + delta,
       running: true,
     };
     return nextSegments;
   }
+  // 尾段不是推理段：工具执行完之后模型重新开始思考 —— 新起一块。
   nextSegments.push({ type: "reasoning", content: delta, running: true });
   return nextSegments;
-}
-
-function findLatestAssistantMessage(
-  thread: Thread,
-  predicate: (message: ChatMessage) => boolean = () => true,
-) {
-  for (let index = thread.messages.length - 1; index >= 0; index--) {
-    const message = thread.messages[index];
-    if (message.role !== "assistant" || !predicate(message)) {
-      continue;
-    }
-    return { index, message };
-  }
-
-  return null;
 }
 
 function replaceMessageSegments(
@@ -298,13 +316,25 @@ export function applyChatSseBridgeFrame(
   thread: Thread,
   event: SessionRuntimeEvent,
   frame: RuntimeBridgeKind,
+  expectedTurnId?: string,
 ): Thread {
   const payload = resolveBridgeToolPayload(event);
   if (!payload) {
     return thread;
   }
-  const target = findLatestAssistantMessage(thread, (message) =>
-    isLiveAssistantMessage(message, getRuntimeEventTurnId(event)),
+  const eventTurnId = getRuntimeEventTurnId(event);
+  const toolName = getToolName(payload);
+  // 既无工具调用 id、也无真实工具名（旧帧/残缺帧）时不落行：upsertToolSegment
+  // 的键会退化成兜底名 “tool”，把互不相干的调用合并成一行假工具。
+  const hasToolRow = Boolean(getToolCallId(payload)) || toolName !== "tool";
+
+  // 目标：本回合仍在 streaming 的助手消息；没有且「帧确实能落一行工具」且回合
+  // 归属可判定时补建占位消息——阶段帧不携带可渲染内容，不建空占位。
+  const target = resolveLiveAssistantTarget(
+    thread,
+    eventTurnId,
+    expectedTurnId,
+    frame.kind === "tool" && hasToolRow,
   );
   if (!target) {
     return thread;
@@ -314,18 +344,11 @@ export function applyChatSseBridgeFrame(
     const segments = closeRunningReasoningSegments(target.message.segments);
     // 没有在跑的推理段就返回原引用：单回合上千帧，逐帧换身份会让下游 memo 全部失效。
     return segments === target.message.segments
-      ? thread
-      : replaceMessageSegments(thread, target.index, segments);
+      ? target.thread
+      : replaceMessageSegments(target.thread, target.index, segments);
   };
 
-  if (frame.kind !== "tool") {
-    return closeReasoning();
-  }
-
-  const toolName = getToolName(payload);
-  // 既无工具调用 id、也无真实工具名（旧帧/残缺帧）时不落行：upsertToolSegment
-  // 的键会退化成兜底名 “tool”，把互不相干的调用合并成一行假工具。
-  if (!getToolCallId(payload) && toolName === "tool") {
+  if (frame.kind !== "tool" || !hasToolRow) {
     return closeReasoning();
   }
 
@@ -338,7 +361,7 @@ export function applyChatSseBridgeFrame(
   );
   // 与直连通道同形（`tool_end:shell`）：线程条与历史重载键读的是同一个字段。
   return replaceMessageSegments(
-    thread,
+    target.thread,
     target.index,
     segments,
     `${event.type.replace(/^chat\.sse\./, "")}:${toolName}`,
@@ -421,29 +444,3 @@ function resolveBridgeToolPayload(
   };
 }
 
-function isLiveAssistantMessage(
-  message: ChatMessage,
-  eventTurnId: string,
-): boolean {
-  // New messages carry an explicit streaming bit. The label fallback keeps
-  // compatibility with callers/tests created before the bit was introduced.
-  if (message.streaming === false || message.interrupted) {
-    return false;
-  }
-  if (message.streaming !== true && message.label !== "streaming") {
-    return false;
-  }
-  // 与 matchesActiveTurn / RuntimeDeltaCoordinator.claim 共用同一语义：
-  // 「未知」不等于「其他 turn」，只有两边都明确且不一致才拒绝。
-  //
-  // 旧实现要求「两边都为空」才放行，于是真后端最常见的两种形态——消息带
-  // chat turn 身份而 runtime 事件缺 turn_id，或反过来（两条通道的 turn 身份
-  // 空间本就不同）——会被整条拒绝：增量帧全部到达却一帧也写不进消息，
-  // 打字机退化成「turn 结束后一次性定型」（实测两路各约 1000 帧、DOM 全程
-  // 不动，24s 时整块蹦出）。回放安全由 hook 层 renderLiveDeltas 闸门兜底：
-  // 只在请求进行中应用增量，历史回放/reload 不走这条路径。
-  if (message.runtimeTurnId && eventTurnId) {
-    return message.runtimeTurnId === eventTurnId;
-  }
-  return true;
-}

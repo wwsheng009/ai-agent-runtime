@@ -253,4 +253,39 @@ describe("live 通道渲染", () => {
       root.unmount();
     });
   });
+
+  it("推理 live 记录属于另一块时不写进本行（推理 → 工具 → 推理 不被并成一段）", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <MessageReasoningRow
+          flowKey="k"
+          liveStreamId="m1"
+          segment={{ type: "reasoning", content: "第一块推理" }}
+          streaming
+        />,
+      );
+    });
+
+    // 工具执行完之后模型重新开始思考：live 记录被新块覆盖（setLiveStreamReasoning），
+    // 但新块的行还没落到 store（结构提交是低频的），此时尾行仍是第一块——不能把
+    // 第二块的文本显示在它这一行上。
+    await act(async () => {
+      setLiveStreamReasoning("m1", "第二块推理：看下报错信息");
+    });
+    expect(container.textContent).toContain("第一块推理");
+    expect(container.textContent).not.toContain("第二块");
+
+    // 同一块的增长仍然即时反映（live 是 store 副本的延长）。
+    await act(async () => {
+      setLiveStreamReasoning("m1", "第一块推理再加一句");
+    });
+    expect(container.textContent).toContain("第一块推理再加一句");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
 });

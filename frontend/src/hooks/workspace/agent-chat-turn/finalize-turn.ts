@@ -206,6 +206,10 @@ export function createTurnFinalizer(deps: TurnFinalizerDeps): TurnFinalizer {
             status: stopped ? "stopped" : undefined,
             existingSegments: message.segments,
             generatedImages: generatedImageAttachments,
+            // 分块推理：定稿同样按块落位（推理 → 工具 → 推理 → 工具），聚合文本多出
+            // 来的尾巴由 buildAssistantMessageSegments 并进**最后一块**。
+            reasoningBlocks: turnState.reasoningBlocks,
+            reasoningBlockToolCounts: turnState.reasoningBlockToolCounts,
           },
         );
         // DEV 双跑校验：轨迹快照 vs 现有渲染路径（确认无回归后切换唯一路径）。
