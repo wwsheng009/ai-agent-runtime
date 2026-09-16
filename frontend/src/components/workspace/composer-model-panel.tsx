@@ -27,20 +27,28 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
-import {
-  CheckIcon,
-  ChevronDownIcon,
-  ChevronLeftIcon,
-  ChevronRightIcon,
-  SlidersHorizontalIcon,
-  XIcon,
-} from "lucide-react";
+import { ChevronDownIcon, SlidersHorizontalIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import { ComposerModelPanelSurface } from "@/components/workspace/composer-model-panel-surface";
 import {
   resolvePopoverPosition,
   type PopoverPosition,
 } from "@/components/ui/popover-position";
+import {
+  advanceAfterModelSelect,
+  advanceAfterProviderSelect,
+  advanceAfterReasoningSelect,
+  buildComposerModelSections,
+  nextOptionIndex,
+  PANEL_MAX_HEIGHT,
+  PANEL_MIN_HEIGHT,
+  PANEL_MIN_WIDTH,
+  type ComposerModelPanelPending,
+  type ComposerModelPanelSection,
+  type ComposerModelPanelSectionId,
+  type ComposerModelPanelView,
+} from "@/lib/composer/model-panel-model";
 import { cn } from "@/lib/utils";
 
 export type ComposerModelPanelProps = {
@@ -58,39 +66,6 @@ export type ComposerModelPanelProps = {
   selectedProvider: string;
   selectedReasoningEffort: string;
 };
-
-type ComposerModelPanelSectionId = "provider" | "model" | "reasoning";
-
-type ComposerModelPanelOption = {
-  value: string;
-  label: string;
-  selected: boolean;
-  onSelect: () => void;
-};
-
-type ComposerModelPanelSection = {
-  id: ComposerModelPanelSectionId;
-  label: string;
-  /** 一级行显示的当前生效值。 */
-  value: string;
-  options: ComposerModelPanelOption[];
-};
-
-/** 二级菜单视图：一级是摘要行，二级是某一项的候选列表。 */
-type ComposerModelPanelView =
-  | { level: "root" }
-  | { level: "section"; section: ComposerModelPanelSectionId };
-
-/** 换供应商后待用户显式重选的两项。 */
-type ComposerModelPanelPending = {
-  model: boolean;
-  reasoning: boolean;
-};
-
-/** 面板最小宽度：候选列表同屏可读，窄视口由定位函数夹到视口内。 */
-const PANEL_MIN_WIDTH = 320;
-const PANEL_MAX_HEIGHT = 380;
-const PANEL_MIN_HEIGHT = 160;
 
 export function ComposerModelPanel({
   disabled = false,
@@ -140,110 +115,62 @@ export function ComposerModelPanel({
   // 否则回落）并钳制推理档位。面板不猜宿主结果，只把重选这一步显式化并顺序引导。
   function handleProviderSelect(provider: string) {
     onProviderChange(provider);
-    if (provider === selectedProvider) {
-      goBackToRoot();
-      return;
+    const advance = advanceAfterProviderSelect({
+      hasModel: hasSection("model"),
+      hasReasoning: hasSection("reasoning"),
+      providerChanged: provider !== selectedProvider,
+    });
+    if (advance.pending) {
+      setPending(advance.pending);
     }
-
-    const needsModel = hasSection("model");
-    const needsReasoning = hasSection("reasoning");
-    setPending({ model: needsModel, reasoning: needsReasoning });
-
-    if (needsModel) {
-      setView({ level: "section", section: "model" });
-      return;
-    }
-    if (needsReasoning) {
-      setView({ level: "section", section: "reasoning" });
-      return;
-    }
-    goBackToRoot();
+    setView(advance.view);
   }
 
   function handleModelSelect(model: string) {
     onModelChange(model);
-    if (!pending.model) {
-      // 普通换模型：留在候选列表里继续比较。
+    // 普通换模型（返回 null）：留在候选列表里继续比较。
+    const advance = advanceAfterModelSelect({
+      hasReasoning: hasSection("reasoning"),
+      pendingModel: pending.model,
+    });
+    if (!advance) {
       return;
     }
-
-    const needsReasoning = hasSection("reasoning");
-    setPending({ model: false, reasoning: needsReasoning });
-    if (needsReasoning) {
-      setView({ level: "section", section: "reasoning" });
-      return;
-    }
-    goBackToRoot();
+    setPending(advance.pending);
+    setView(advance.view);
   }
 
   function handleReasoningSelect(effort: string) {
     onReasoningEffortChange(effort);
-    if (!pending.reasoning) {
-      // 普通调档：留在候选列表里继续比较。
+    // 普通调档（返回 null）：留在候选列表里继续比较。
+    const advance = advanceAfterReasoningSelect(pending.reasoning);
+    if (!advance) {
       return;
     }
-
-    setPending({ model: false, reasoning: false });
-    goBackToRoot();
+    setPending(advance.pending);
+    setView(advance.view);
   }
 
   // 段顺序固定为 provider → model → reasoning：与旧工具条从左到右的阅读顺序一致。
-  const sections: ComposerModelPanelSection[] = [];
-  if (providerOptions.length > 1) {
-    sections.push({
-      id: "provider",
-      label: t("composer.provider"),
-      value: selectedProvider || unselectedLabel,
-      options: providerOptions.map((provider) => ({
-        value: provider,
-        label: provider,
-        selected: provider === selectedProvider,
-        onSelect: () => {
-          handleProviderSelect(provider);
-        },
-      })),
-    });
-  }
-  if (modelOptions.length > 0) {
-    sections.push({
-      id: "model",
-      label: t("composer.model"),
-      value: selectedModel || unselectedLabel,
-      options: modelOptions.map((model) => ({
-        value: model,
-        label: model,
-        selected: model === selectedModel,
-        onSelect: () => {
-          handleModelSelect(model);
-        },
-      })),
-    });
-  }
-  if (reasoningEffortOptions.length > 0) {
-    sections.push({
-      id: "reasoning",
-      label: t("composer.reasoning"),
-      value: reasoningLabel,
-      options: [
-        {
-          value: "",
-          label: defaultEffortLabel,
-          selected: selectedReasoningEffort === "",
-          onSelect: () => {
-            handleReasoningSelect("");
-          },
-        },
-        ...reasoningEffortOptions.map((effort) => ({
-          value: effort,
-          label: effort,
-          selected: effort === selectedReasoningEffort,
-          onSelect: () => {
-            handleReasoningSelect(effort);
-          },
-        })),
-      ],
-    });
-  }
+  const sections: ComposerModelPanelSection[] = buildComposerModelSections({
+    defaultEffortLabel,
+    labels: {
+      model: t("composer.model"),
+      provider: t("composer.provider"),
+      reasoning: t("composer.reasoning"),
+    },
+    modelOptions,
+    onModelSelect: handleModelSelect,
+    onProviderSelect: handleProviderSelect,
+    onReasoningSelect: handleReasoningSelect,
+    providerOptions,
+    reasoningEffortOptions,
+    reasoningValue: reasoningLabel,
+    selectedModel,
+    selectedProvider,
+    selectedReasoningEffort,
+    unselectedLabel,
+  });
 
   // 候选段消失时（例如新模型不声明推理档位）对应的「待确认」就没有对象了，不该继续提醒。
   const modelPending = pending.model && hasSection("model");
@@ -314,11 +241,15 @@ export function ComposerModelPanel({
   }
 
   // 响应开始 / 目录重新加载：禁用即收起，避免停留在无法生效的面板上。
-  useEffect(() => {
-    if (disabled) {
+  // 走 React 官方「prop 变化时调整 state」写法（渲染期比对上一轮的 disabled），不在 effect 里同步 setState，
+  // 也不用派生 `open && !disabled`（那会在禁用结束后把面板弹回来）。
+  const [lastDisabled, setLastDisabled] = useState(disabled);
+  if (lastDisabled !== disabled) {
+    setLastDisabled(disabled);
+    if (disabled && open) {
       setOpen(false);
     }
-  }, [disabled]);
+  }
 
   // 一级 ↔ 二级切换后把焦点放进当前层的条目（二级优先当前选中项），
   // 键盘用户不必先 Tab 穿过表头。
@@ -442,12 +373,7 @@ export function ComposerModelPanel({
       (node) => node === document.activeElement,
     );
     const step = event.key === "ArrowDown" ? 1 : -1;
-    const nextIndex =
-      currentIndex < 0
-        ? step === 1
-          ? 0
-          : options.length - 1
-        : (currentIndex + step + options.length) % options.length;
+    const nextIndex = nextOptionIndex(currentIndex, options.length, step);
     options[nextIndex]?.focus();
   }
 
@@ -457,155 +383,24 @@ export function ComposerModelPanel({
 
   const panel =
     open && position ? (
-      <div
-        ref={panelRef}
-        id={panelId}
-        role="dialog"
-        aria-label={t("composer.modelPanel.title")}
-        data-composer-model-panel
-        data-composer-model-panel-level={activeSection ? "section" : "root"}
+      <ComposerModelPanelSurface
+        activeSection={activeSection}
+        modelPending={modelPending}
+        onBackToRoot={goBackToRoot}
+        onClose={() => {
+          closePanel(true);
+        }}
         onKeyDown={handlePanelKeyDown}
-        style={{ position: "fixed", ...position }}
-        tabIndex={-1}
-        className={cn(
-          "z-[160] flex w-max max-w-[min(24rem,calc(100vw-1rem))] flex-col overflow-hidden",
-          "rounded-card-lg border border-border bg-surface-overlay shadow-[0_10px_24px_rgba(0,0,0,0.24)] outline-none",
-        )}
-      >
-        <header className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
-          {activeSection ? (
-            <button
-              type="button"
-              aria-label={t("composer.modelPanel.back")}
-              data-composer-model-panel-back
-              onClick={goBackToRoot}
-              title={t("composer.modelPanel.back")}
-              className="inline-flex size-5 shrink-0 items-center justify-center rounded-control text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
-            >
-              <ChevronLeftIcon size={12} aria-hidden="true" />
-            </button>
-          ) : null}
-          <span
-            id={`${panelId}-heading`}
-            data-composer-model-panel-title
-            className="app-text-9 uppercase tracking-[0.12em] text-muted-foreground"
-          >
-            {activeSection
-              ? activeSection.label
-              : t("composer.modelPanel.title")}
-          </span>
-          <button
-            type="button"
-            aria-label={t("composer.modelPanel.close")}
-            data-composer-model-panel-close
-            onClick={() => {
-              closePanel(true);
-            }}
-            title={t("composer.modelPanel.close")}
-            className="ml-auto inline-flex size-5 shrink-0 items-center justify-center rounded-control text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
-          >
-            <XIcon size={12} aria-hidden="true" />
-          </button>
-        </header>
-        {activeSection ? (
-          <div
-            role="listbox"
-            aria-labelledby={`${panelId}-heading`}
-            data-composer-model-panel-section={activeSection.id}
-            className="flex max-h-[inherit] min-h-0 flex-col gap-0.5 overflow-y-auto p-1.5"
-          >
-            {activeSection.options.map((option) => (
-              <button
-                key={`${activeSection.id}\u0000${option.value}`}
-                type="button"
-                role="option"
-                aria-selected={option.selected}
-                data-composer-model-panel-option={activeSection.id}
-                onClick={option.onSelect}
-                title={option.label}
-                className={cn(
-                  "flex w-full cursor-pointer items-center gap-2 rounded-control px-2.5 py-2 text-left leading-5 transition",
-                  option.selected
-                    ? "bg-surface-soft text-foreground"
-                    : "text-muted-foreground hover:bg-surface-soft hover:text-foreground",
-                )}
-              >
-                <span className="flex size-4 shrink-0 items-center justify-center">
-                  {option.selected ? (
-                    <CheckIcon size={13} aria-hidden="true" />
-                  ) : null}
-                </span>
-                <span className="truncate text-base">{option.label}</span>
-              </button>
-            ))}
-          </div>
-        ) : (
-          <div
-            role="group"
-            aria-labelledby={`${panelId}-heading`}
-            className="flex max-h-[inherit] min-h-0 flex-col gap-0.5 overflow-y-auto p-1.5"
-          >
-            {sections.map((section) => {
-              const sectionPending =
-                section.id === "model"
-                  ? modelPending
-                  : section.id === "reasoning"
-                    ? reasoningPending
-                    : false;
-
-              return (
-                <button
-                  key={section.id}
-                  type="button"
-                  data-composer-model-panel-row={section.id}
-                  data-composer-model-panel-row-pending={
-                    sectionPending ? "true" : undefined
-                  }
-                  aria-haspopup="listbox"
-                  aria-label={`${section.label}: ${section.value}`}
-                  title={
-                    sectionPending
-                      ? `${section.value} · ${reselectHint}`
-                      : section.value
-                  }
-                  onClick={() => {
-                    setView({ level: "section", section: section.id });
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key !== "ArrowRight") {
-                      return;
-                    }
-                    event.preventDefault();
-                    event.stopPropagation();
-                    setView({ level: "section", section: section.id });
-                  }}
-                  className={cn(
-                    "flex w-full cursor-pointer items-center gap-2 rounded-control px-2.5 py-2 text-left transition",
-                    "text-muted-foreground hover:bg-surface-soft hover:text-foreground",
-                  )}
-                >
-                  <span className="shrink-0 app-text-9 uppercase tracking-[0.12em] text-muted-foreground">
-                    {section.label}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate text-base text-foreground">
-                    {section.value}
-                  </span>
-                  {sectionPending ? (
-                    <span className="shrink-0 rounded-chip border border-amber-300/40 px-1.5 app-text-10 text-amber-200">
-                      {t("composer.modelPanel.pendingConfirm")}
-                    </span>
-                  ) : null}
-                  <ChevronRightIcon
-                    size={13}
-                    aria-hidden="true"
-                    className="shrink-0 text-muted-foreground"
-                  />
-                </button>
-              );
-            })}
-          </div>
-        )}
-      </div>
+        onSelectSection={(section) => {
+          setView({ level: "section", section });
+        }}
+        panelId={panelId}
+        panelRef={panelRef}
+        position={position}
+        reasoningPending={reasoningPending}
+        reselectHint={reselectHint}
+        sections={sections}
+      />
     ) : null;
 
   return (
