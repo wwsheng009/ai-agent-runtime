@@ -6,6 +6,7 @@
 
 | 文件 | 主题 | 日期 |
 | --- | --- | --- |
+| `supervision-business-supervision-gap-analysis-20260916.md` | Supervision 业务化监督差距分析（主 Agent 巡查 / 进度汇报 / 完成收敛） | 2026-09-16 |
 | `renderer-stall-analysis-20260901.md` | 会话主屏幕统一渲染器停止更新（scrollback 冻结死锁）现场分析 | 2026-09-01 |
 | `aicli-resume-recovery-backoff-postmortem.md` | resume 恢复回退（recovery backoff）三层架构缺陷复盘 | 2026-08-31 |
 | `aicli-resume-input-not-reaching-llm-analysis.md` | resume 后输入 prompt 不进入 LLM 请求交互：架构分析 | 2026-08-31 |
