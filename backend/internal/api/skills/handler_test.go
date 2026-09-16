@@ -5007,7 +5007,24 @@ func TestAgentChat_StreamSSE(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"source":"llm_stream"`)
 	assert.Contains(t, rec.Body.String(), `"route_attempted":false`)
 	assert.Contains(t, rec.Body.String(), `"schema_version":"skill_runtime.sse.v1"`)
-	assert.Contains(t, rec.Body.String(), `"sequence":1`)
+	// Batch 1：wire-only 帧（chunk/reasoning/带工具身份的 observation）不带
+	// sequence/id；持久化帧 seq 与 id 对齐（P0-3：id 只在持久化 seq 时下发）。
+	// 注意：此前用 `"sequence":1` 做子串断言，实为被 `"sequence":13/14/15` 命中的
+	// 假阳性，去重后最大 seq 降到个位数才暴露；这里改为按帧校验。
+	seqFrames := parseSSETestFrames(t, rec.Body.String())
+	require.NotEmpty(t, seqFrames)
+	persistedFrameCount := 0
+	for _, frame := range seqFrames {
+		if frame.sequence == 0 {
+			assert.Truef(t, chatSSEFrameIsWireOnly(frame.event, frame.data),
+				"frame without sequence must be wire-only: %q", frame.event)
+			assert.Zero(t, frame.id, "wire-only frame %q must not carry id", frame.event)
+			continue
+		}
+		persistedFrameCount++
+		assert.Equal(t, frame.sequence, frame.id, "persisted frame %q must carry matching id", frame.event)
+	}
+	assert.Positive(t, persistedFrameCount, "streaming turn should produce persisted frames")
 	assert.Contains(t, rec.Body.String(), `"reasoning":{"content":"thinking..."`)
 	assert.Contains(t, rec.Body.String(), `"tool":{"args":{"query":"weather"}`)
 	assert.Contains(t, rec.Body.String(), `"name":"search"`)
@@ -7337,4 +7354,36 @@ func TestBuildOrchestrationPayload_AgentResultCountsObservedTools(t *testing.T) 
 
 func promptPathForSource(sourcePath string) string {
 	return filepath.Join(filepath.Dir(sourcePath), "prompt.md")
+}
+
+// 账本 503 必须能区分两种状态：配置未启用（not configured）与「已启用但初始化失败」
+// （启动期降级，必须带上可排障的原因），否则运维会把 dsn / 驱动问题误判成「没开开关」。
+func TestGetUsageLedger_ServiceUnavailableDistinguishesDisabledFromBroken(t *testing.T) {
+	mcpManager := &testMCPManager{}
+	registry := skill.NewRegistry(mcpManager)
+	handler := NewHandler(registry, skill.NewLoader(mcpManager), mcpManager)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	disabledReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/ledger", nil)
+	disabledReq.RemoteAddr = "127.0.0.1:1234"
+	disabledRec := httptest.NewRecorder()
+	router.ServeHTTP(disabledRec, disabledReq)
+	require.Equal(t, http.StatusServiceUnavailable, disabledRec.Code)
+	assert.Contains(t, disabledRec.Body.String(), "usage ledger not configured")
+
+	handler.SetUsageLedgerUnavailableReason(
+		"initialize skills usage ledger store: unsupported usage ledger driver: postgres",
+	)
+
+	brokenReq := httptest.NewRequest(http.MethodGet, "/api/runtime/usage/ledger", nil)
+	brokenReq.RemoteAddr = "127.0.0.1:1234"
+	brokenRec := httptest.NewRecorder()
+	router.ServeHTTP(brokenRec, brokenReq)
+
+	require.Equal(t, http.StatusServiceUnavailable, brokenRec.Code)
+	assert.Contains(t, brokenRec.Body.String(), "usage ledger unavailable")
+	assert.Contains(t, brokenRec.Body.String(), "unsupported usage ledger driver: postgres")
+	assert.NotContains(t, brokenRec.Body.String(), "usage ledger not configured")
 }

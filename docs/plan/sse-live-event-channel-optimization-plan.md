@@ -227,6 +227,8 @@ chat.sse.reasoning    seq=93642  len=289  {"content":".","index":29602,"metadata
 
 > 合计预估（按 §2.2 单会话自证数据复算）：store 体积 −45~52%（2.64MB → 约 1.28~1.46MB，取决于保留 `tool_end` 还是 `observation`）；行数/帧数 −50%（2,302 → 约 1,152）；provenance 去噪合 payload 的 ~19%（wire 口径 ~16%）。帧数进一步下探需叠加 Batch 3 合帧（目标 <500 帧，以实测校准）。
 
+> **实施状态（2026-09-16，PR-1 代码已落地，未提交）**：写入侧四项已实现——`chatSSEFrameIsWireOnly`（chunk/reasoning/同源 observation 只走 wire）、`trimChatSSEEventPayloadForStore`（`done` 落盘裁 `result`）、`writeSSEEventFrame`（`id:` 仅在持久化 seq 时下发）、`summarizeRuntimeEventProvenanceIfBearing`（provenance 条件化 + 零值省略）。回归护栏：`trajectory_write_amplification_test.go`（合成回合 wire=15,471B/17 帧 → 落盘 4,495B/3 行，行 −82% / 字节 −71%，门槛 ≥50% / ≥45%）、`session_runtime_event_view_test.go`、`trajectory_events_test.go`（wire-only 帧不带 seq/id）、`export-dedup.test.ts`（新旧导出差异清单）。单会话复算（保留 `tool_end` 口径）：行 −49.9%（2,302 → 1,153）、字节 −40.6%（2.64MB → 1.57MB）。存量数据按前置条件 1 选项 (a) 保留不动；导出差异已固化（新导出不再含 chunk/reasoning/observation 行与 `done.result`，如需导出保留助手正文须独立 PR 纳入 bus 侧内容事件）。
+
 **风险与配套**：轨迹内容帧判据 `isTrajectoryContentEvent`（`frontend/src/lib/trajectory/recovery.ts:134-136`）= `chat.sse.*` ∪ `ASSISTANT_RUNTIME_EVENT_TYPES`，而后者已包含 `assistant_delta`/`assistant_reasoning`/`assistant.reasoning`（`recovery.ts:77-83`），因此**「会话是否有内容帧」的判定不受去重影响**。真正需要验证的是轨迹重放对 bus 侧增量事件的投影路径（turn 归属、reasoning 分块、与终稿的顺序）是否与 `chat.sse.*` 等价——用 `history-fallback.test.ts`（`:75-82` 已覆盖内容帧判定）与 `trajectory-recovery` 用例锁住。
 
 > **前置条件（PR-1 开工前定稿）**
@@ -309,12 +311,12 @@ chat.sse.reasoning    seq=93642  len=289  {"content":".","index":29602,"metadata
 | Go 单测 | `runtime_event_delivery_test.go`（新增连接级指标） | Batch 3 |
 | Go 门禁 | `events/contract_test.go`（注册表 ↔ 已知类型目录双向一致） | Batch 2 |
 | Go 契约 | `tool_runtime_events_test.go`（结构化字段必须进 `protocol_result`） | Batch 2 |
-| Go 集成 | 写放大基线：同一 mock 回合（833 增量 + 87 工具）落盘行数断言下降 ≥50%、字节断言下降 ≥45%（复算见 §4 Batch 1 预估） | Batch 1 |
-| Go 单测 | `session_runtime_event_view_test.go`：provenance 条件化（承载类型保留、非承载类型省略、零值字段收敛） | Batch 1 |
-| 前端单测 | `lib/thread-state/events.test.ts`、`runtime-events.test.ts`、`chat-sse-bridge.test.ts`（去重后行为不变） | Batch 1 |
-| 前端单测 | 新增导出等价用例：同一事件序列分别以「旧写入（含 `chat.sse.chunk/reasoning/observation`）」与「新写入（去重后）」导出 JSONL，断言投影等价或产出显式差异清单 | Batch 1 |
+| Go 集成 | 写放大基线：同一 mock 回合（833 增量 + 87 工具）落盘行数断言下降 ≥50%、字节断言下降 ≥45%（复算见 §4 Batch 1 预估）——**已落地**：`trajectory_write_amplification_test.go` | Batch 1 |
+| Go 单测 | `session_runtime_event_view_test.go`：provenance 条件化（承载类型保留、非承载类型省略、零值字段收敛）——**已落地** | Batch 1 |
+| 前端单测 | `lib/thread-state/runtime-events.test.ts`、`lib/thread-state/chat-sse-bridge.test.ts`、`lib/trajectory/history-fallback.test.ts`（去重后行为不变；实测 45 用例通过） | Batch 1 |
+| 前端单测 | 新增导出对照用例：同一事件序列分别以「旧写入（含 `chat.sse.chunk/reasoning/observation`）」与「新写入（去重后）」导出 JSONL，断言共有行逐字段等价并产出显式差异清单——**已落地**：`lib/trajectory/export-dedup.test.ts` | Batch 1 |
 | 前端单测 | `lib/trajectory/history-fallback.test.ts`、`use-session-runtime-stream-recovery.test.tsx` | Batch 1/4 |
-| 前端单测 | 新增解析器兼容用例：`id:`/`retry:` 行不报错、不影响既有帧解析（`api/runtime/sse.ts` 对应测试） | Batch 1/3 |
+| 前端单测 | 解析器兼容用例：`id:`/`retry:` 行不报错、不影响既有帧解析——**已存在**：`api/runtime/sse.test.ts`（「忽略 `id:`/`retry:` 行」用例，实测 177 用例通过） | Batch 1/3 |
 | E2E | 首屏：`after=0` 场景 dump 帧数/字节与 ttfB 对比（帧数/字节基线见 §2.2；ttfB 基线需在 PR-1 步骤 1 补测） | Batch 1/3 |
 
 ---
@@ -329,8 +331,9 @@ chat.sse.reasoning    seq=93642  len=289  {"content":".","index":29602,"metadata
 6. **代码生成管线落点**：Makefile 当前无 `generate`/`contract` 目标、`package.json` 无 codegen 脚本 → Batch 2 需新增目标 + CI 校验（防生成物与注册表漂移）。
 7. **附录 A 脚本落点**：`.tmp/sse-live-audit.py` 位于 gitignored 目录、仓库内不可复跑 → 移入 `scripts/` 并提交（见附录 A 注）。
 8. **可选增强是否纳入**：HTTP 压缩（gzip/br）、订阅类型过滤、dump 序列化缓存；建议 Batch 3 后按实测收益评估，不阻塞主干。
+9. **导出是否保留助手正文**：去重后 JSONL 只含 `chat.sse.*`（`tool_end`/`result`/`done`），`chunk`/`reasoning` 行与 `done.result` 不再出现（差异清单见 `lib/trajectory/export-dedup.test.ts`）。若要求导出文件与轨迹视图同样保留正文，需在 export 侧纳入 bus 侧 `assistant_delta`/`assistant.reasoning`（或改为导出轨迹投影），独立 PR 评估。
 
-> 状态：1–2 为 PR-1 阻塞项（须先定稿）；3–8 随对应批次开工前给出结论。
+> 状态：1–2 已随 PR-1 按本文倾向落地（回放唯一真源取 bus 侧 `assistant_delta`/`assistant.reasoning`；`tool_end` 落盘、同源 `observation` 只走 wire）；3–9 随对应批次开工前给出结论。
 
 ---
 

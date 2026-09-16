@@ -118,6 +118,10 @@ type Handler struct {
 	usagePolicy                    UsagePolicy
 	usageTracker                   *usageTracker
 	usageLedgerStore               UsageLedgerStore
+	// usageLedgerUnavailableReason 记录「配置启用了账本但 store 初始化失败」的原因，
+	// 由启动期降级路径写入（见 cmd/runtime-server）。用于让 ledger 接口返回可排障的 503，
+	// 而不是把它伪装成「未配置」。
+	usageLedgerUnavailableReason string
 	authPolicyPersister            AuthPolicyPersister
 	usagePolicyPersister           UsagePolicyPersister
 	mutationPolicyPersister        MutationPolicyPersister
@@ -541,6 +545,12 @@ func (h *Handler) SetUsagePolicy(policy UsagePolicy) {
 // SetUsageLedgerStore 设置 usage ledger 持久化存储
 func (h *Handler) SetUsageLedgerStore(store UsageLedgerStore) {
 	h.usageLedgerStore = store
+}
+
+// SetUsageLedgerUnavailableReason 记录账本启用但不可用的原因（启动期降级，见 cmd/runtime-server）。
+// 写入后 GET /api/runtime/usage/ledger 的 503 会带上该原因，便于直接定位是 dsn、驱动还是建表问题。
+func (h *Handler) SetUsageLedgerUnavailableReason(reason string) {
+	h.usageLedgerUnavailableReason = strings.TrimSpace(reason)
 }
 
 // SetAuthPolicyPersister 设置 auth/scope policy 持久化回调
@@ -8463,6 +8473,10 @@ type sseEmitter struct {
 	// 返回持久化 seq；返回 <=0 表示未持久化，降级为连接内计数。
 	// 用于 /api/agent/chat 的轨迹录制，不影响其他 SSE 使用方。
 	persist func(event string, data interface{}) int64
+	// wireOnly 可选：判定该帧是否「只走 wire、不落盘」（Batch 1 去重名单）。
+	// 命中时既不写 EventStore，也不写 `_event.sequence`/`id:`——连接内计数器
+	// 不是持久化游标，写进游标位会被前端当作真实 seq 幂等丢弃（宁缺勿假）。
+	wireOnly func(event string, data interface{}) bool
 }
 
 func newSSEEmitter(w http.ResponseWriter) *sseEmitter {
@@ -8470,14 +8484,20 @@ func newSSEEmitter(w http.ResponseWriter) *sseEmitter {
 }
 
 func (e *sseEmitter) Emit(event string, data interface{}) {
-	e.sequence++
 	data = e.withTurnID(data)
+	if e.persist != nil && e.wireOnly != nil && e.wireOnly(event, data) {
+		writeSSEEventFrame(e.w, event, data, 0, 0)
+		return
+	}
+	e.sequence++
+	var id int64
 	if e.persist != nil {
 		if seq := e.persist(event, data); seq > 0 {
 			e.sequence = seq
+			id = seq
 		}
 	}
-	writeSSEEventWithEnvelope(e.w, event, data, e.sequence)
+	writeSSEEventFrame(e.w, event, data, e.sequence, id)
 }
 
 func (e *sseEmitter) withTurnID(data interface{}) interface{} {
@@ -8508,6 +8528,17 @@ func (h *Handler) writeSSEEvent(w http.ResponseWriter, event string, data interf
 }
 
 func writeSSEEventWithEnvelope(w http.ResponseWriter, event string, data interface{}, sequence int64) {
+	writeSSEEventFrame(w, event, data, sequence, 0)
+}
+
+// writeSSEEventFrame 写一帧 SSE：`id:`（仅持久化 seq）→ `event:` → `data:` 信封。
+//
+// id <= 0 时不写 `id:` 行：宁缺勿假——连接内计数器与 EventStore seq 不在同一
+// 空间，写出去会让 `Last-Event-ID` 续传拿到假游标（见 P0-3 / Batch 4）。
+func writeSSEEventFrame(w http.ResponseWriter, event string, data interface{}, sequence int64, id int64) {
+	if id > 0 {
+		_, _ = fmt.Fprintf(w, "id: %d\n", id)
+	}
 	if event != "" {
 		_, _ = fmt.Fprintf(w, "event: %s\n", event)
 	}
@@ -11589,7 +11620,13 @@ func (h *Handler) GetUsageLedger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.usageLedgerStore == nil {
-		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "usage ledger not configured"))
+		// 区分两种 503：配置未启用账本 vs 已启用但初始化失败（原因由启动期降级路径写入）。
+		// 后者必须带上原因，否则排障时会误判成「没开开关」。
+		message := "usage ledger not configured"
+		if reason := strings.TrimSpace(h.usageLedgerUnavailableReason); reason != "" {
+			message = "usage ledger unavailable: " + reason
+		}
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, message))
 		return
 	}
 
