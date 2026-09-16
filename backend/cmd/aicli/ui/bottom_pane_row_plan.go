@@ -42,6 +42,12 @@ func LayoutBottomPaneRows(bottom BottomPaneState, geometry GeometryState) Bottom
 	height := geometry.Height
 	statusRow := height
 	popupLines := bottom.VisiblePopupLines(height)
+	// priority 正文面板（审批 / 提问）按固定预算的边框盒子呈现：盒子高度只
+	// 取决于终端高度，正文再多也不会继续撑高底区保留区。几何或 owner 不适用
+	// 时 modalBoxLines 返回 nil，这里保持原始行块行为。
+	if boxLines := modalBoxLines(bottom, height, geometry.Width); len(boxLines) > 0 {
+		popupLines = boxLines
+	}
 	popupRows := len(popupLines) + bottom.composerVisibleRowCount()
 	bottomRows := bottomPaneReservedRowCount(bottom, len(popupLines))
 	if height <= 1 {

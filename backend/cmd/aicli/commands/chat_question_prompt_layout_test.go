@@ -14,6 +14,8 @@ import (
 // 渲染在底部 prompt 区域之上。此前同一工具调用的 ActiveBand Running 行与
 // “Waiting for answer” 动态状态行会插入卡片中间，并把卡片尾部两行覆盖掉，
 // 用户看到的是“卡片上段 / Running / Waiting / 卡片最后一条建议 / >”。
+// 卡片现在由固定预算的边框盒子承载（ui.ModalBoxMaxRows），因此行数不再等于
+// 正文行数：正文变长不会继续撑高底区，卡片也不会再被顶到屏幕中部。
 func TestChatQuestionPriorityPromptKeepsCardContiguous(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
@@ -81,23 +83,35 @@ func TestChatQuestionPriorityPromptKeepsCardContiguous(t *testing.T) {
 		return b.String()
 	}
 
-	// 1) 问题卡片完整且连续：popup 行数等于正文行数，行号连续，正文不被覆盖。
+	// 1) 问题卡片整块连续，并由固定预算的边框盒子承载：行数有上界（不再等于
+	// 正文行数——正文变长不会继续撑高底区，也就不会把卡片顶到屏幕中部），
+	// 首末行是盒子边框，内容行仍携带问题摘要与回答提示，卡片尾部不被覆盖。
 	card := make([]ui.BottomPaneRow, 0, len(body))
 	for _, row := range plan.Rows {
 		if row.Owner == renderengine.RowOwnerPopup {
 			card = append(card, row)
 		}
 	}
-	if len(card) != len(body) {
-		t.Fatalf("question card lost %d row(s), painted %d of %d\n%s", len(body)-len(card), len(card), len(body), debug())
+	if len(card) < 3 {
+		t.Fatalf("question card painted %d row(s), want a bordered box\n%s", len(card), debug())
+	}
+	if maxRows := ui.ModalBoxMaxRows(height); maxRows > 0 && len(card) > maxRows {
+		t.Fatalf("question card rows = %d, want <= %d (panel height must not grow with the body)\n%s",
+			len(card), maxRows, debug())
 	}
 	for index, row := range card {
 		if index > 0 && row.Row != card[index-1].Row+1 {
 			t.Fatalf("question card is split at row %d\n%s", row.Row, debug())
 		}
-		if !strings.HasPrefix(body[index], row.Text) || strings.TrimSpace(row.Text) == "" {
-			t.Fatalf("card row %d = %q, want prefix of %q\n%s", row.Row, row.Text, body[index], debug())
+		if strings.TrimSpace(row.Text) == "" {
+			t.Fatalf("card row %d is blank\n%s", row.Row, debug())
 		}
+	}
+	if !strings.Contains(card[0].Text, "┌") || !strings.Contains(card[len(card)-1].Text, "└") {
+		t.Fatalf("question card is not a bordered box: %#v\n%s", card, debug())
+	}
+	if !strings.Contains(card[1].Text, "[提问]") || !strings.Contains(card[len(card)-2].Text, "请输入回答") {
+		t.Fatalf("question card lost its question summary or answer prompt: %#v\n%s", card, debug())
 	}
 	cardStart, cardEnd := card[0].Row, card[len(card)-1].Row
 
