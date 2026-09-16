@@ -1,0 +1,72 @@
+package skills
+
+import (
+	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
+	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
+)
+
+// SetSubagentBatchStore installs the host-owned durable batch control plane.
+//
+// 缺口背景（2026-09-16）：API 宿主此前没有共享的 batch store，每个
+// newAPIAgent* 创建的 agent 都会在首次后台 batch 时惰性创建一份自己的
+// 一次性内存 store。后果是 P0-B 进度投影在 API 侧永远读不到数据：digest 的
+// Progress 通道没有可读的控制面，父会话在 runtime-server 上只能看到终态
+// lifecycle 行（那是由 projector 单独落库的），看不到"batch 3/5 完成、谁还在跑"。
+//
+// runtime-server 可以在配置了数据目录时注入 file-backed store（跨重启可见）；
+// 未注入时宿主回落到进程内默认 store，行为仍严格优于"每个 agent 一份"。
+func (h *Handler) SetSubagentBatchStore(store subagentbatch.BatchStore) {
+	if h == nil {
+		return
+	}
+	h.subagentBatchMu.Lock()
+	h.subagentBatchStore = store
+	h.subagentBatchTried = true
+	h.subagentBatchMu.Unlock()
+}
+
+// getSubagentBatchStore 返回宿主级 batch store，第一次调用时创建进程内默认值。
+// 创建失败会缓存"已尝试"标记并返回 nil：unwired 宿主保持改动前行为（没有
+// progress 通道，digest 与旧输出逐字节一致），而不是每次 preflight 重试建库。
+func (h *Handler) getSubagentBatchStore() subagentbatch.BatchStore {
+	if h == nil {
+		return nil
+	}
+	h.subagentBatchMu.Lock()
+	defer h.subagentBatchMu.Unlock()
+	if h.subagentBatchStore != nil || h.subagentBatchTried {
+		return h.subagentBatchStore
+	}
+	store, err := subagentbatch.NewSQLiteBatchStore(&subagentbatch.StoreConfig{})
+	if err != nil {
+		h.subagentBatchTried = true
+		return nil
+	}
+	h.subagentBatchStore = store
+	h.subagentBatchTried = true
+	return h.subagentBatchStore
+}
+
+// subagentBatchCoordinator 在共享 store 上为单个 agent 组装 coordinator。
+//
+// 与 CLI 宿主（chat_actor_host.go 的 NewSubagentBatchCoordinator）同形：store 共享、
+// scheduler 属于当前 agent、emitter 由 SetSubagentBatchCoordinator 回填 agent 自身的
+// runtime-event emitter。projector 也由该方法从 agent 上取，所以调用顺序是
+// SetBatchLifecycleProjector → SetSubagentBatchCoordinator。
+func (h *Handler) subagentBatchCoordinator(scheduler *agent.SubagentScheduler) *agent.SubagentBatchCoordinator {
+	store := h.getSubagentBatchStore()
+	if store == nil {
+		return nil
+	}
+	return agent.NewSubagentBatchCoordinator(agent.SubagentBatchCoordinatorConfig{
+		Store:     store,
+		Scheduler: scheduler,
+	})
+}
+
+// supervisionProgressSource 是 P0-B 的只读投影入口：nil 表示本宿主没有可读的
+// batch 控制面，BuildDigest 因而跳过 progress 区块（与改动前一致）。
+func (h *Handler) supervisionProgressSource() supervision.ProgressSource {
+	return supervision.NewBatchProgressSource(h.getSubagentBatchStore())
+}

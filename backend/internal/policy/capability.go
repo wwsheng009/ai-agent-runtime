@@ -43,23 +43,8 @@ func (r DefaultCapabilityResolver) Resolve(req EvalRequest) []Capability {
 		}
 	}
 
-	switch normalizeToolName(toolName) {
-	case "ask_user_question":
-		return []Capability{CapAskUser}
-	case "enter_plan_mode", "exit_plan_mode":
-		return []Capability{CapReadOnly, CapAskUser}
-	case "background_task":
-		return []Capability{CapBackgroundTask}
-	case "task_output":
-		return []Capability{CapReadOnly}
-	case "spawn_agent", "send_message", "followup_task", "send_input", "close_agent", "resume_agent", "resolve_agent_approval", "spawn_team", "send_team_message":
-		return []Capability{CapReadOnly, CapAgentManagement}
-	case "list_agents", "wait_agent", "read_agent_events", "wait_team", "read_mailbox_digest", "read_task_spec", "read_task_context", "report_task_outcome", "block_current_task", "supervision_snapshot":
-		return []Capability{CapReadOnly}
-	case "ack_lifecycle", "control_descendant":
-		// Writes to the durable supervision control plane: audit + CAS still
-		// apply, and they are never satisfied by a read-only session.
-		return []Capability{CapReadOnly, CapAgentManagement}
+	if caps, ok := controlPlaneToolCapabilities(normalizeToolName(toolName)); ok {
+		return caps
 	}
 
 	caps := make([]Capability, 0, 3)
@@ -78,6 +63,50 @@ func (r DefaultCapabilityResolver) Resolve(req EvalRequest) []Capability {
 		caps = append(caps, CapExternalSideEffect)
 	}
 	return dedupeCapabilities(caps)
+}
+
+// controlPlaneToolCapabilities is the single table for runtime control-plane
+// tools whose capability needs are not derivable from the generic taxonomy
+// heuristics (ReadOnly / Kind / name keywords): a control-plane write is not a
+// filesystem write, and Kind alone cannot express agent_management.
+//
+// Both resolution paths consult this one table:
+//   - capabilitiesFromTaxonomy, for the taxonomy-first path a tool with a
+//     taxonomy row takes, and
+//   - DefaultCapabilityResolver.Resolve, as the fallback for tools without a
+//     taxonomy row (or when request metadata supplies one).
+//
+// Keeping the table in a single place matters because ResolveToolTaxonomy is
+// consulted *before* the name lookup: a mapping reachable only from one path
+// would silently never run for a tool that has a taxonomy row. That is how
+// ack_lifecycle once resolved to read_only alone, making the agent_management
+// requirement unreachable dead code.
+func controlPlaneToolCapabilities(normalizedToolName string) ([]Capability, bool) {
+	switch normalizedToolName {
+	case "ask_user_question":
+		return []Capability{CapAskUser}, true
+	case "enter_plan_mode", "exit_plan_mode":
+		// Control tools usable while already in plan mode (read-only + ask_user).
+		return []Capability{CapReadOnly, CapAskUser}, true
+	case "background_task":
+		return []Capability{CapBackgroundTask}, true
+	case "task_output":
+		return []Capability{CapReadOnly}, true
+	case "spawn_agent", "send_message", "followup_task", "send_input", "close_agent", "resume_agent", "resolve_agent_approval", "spawn_team", "send_team_message":
+		return []Capability{CapReadOnly, CapAgentManagement}, true
+	case "list_agents", "wait_agent", "read_agent_events", "wait_team", "read_mailbox_digest", "read_task_spec", "read_task_context", "report_task_outcome", "block_current_task":
+		return []Capability{CapReadOnly}, true
+	case "supervision_snapshot", "supervision_descendants":
+		// Observation-only supervision reads: no durable write, so read_only is
+		// enough and a read-only session may still inspect its own scope.
+		return []Capability{CapReadOnly}, true
+	case "ack_lifecycle", "control_descendant":
+		// Writes to the durable supervision control plane: audit + CAS still
+		// apply, and they are never satisfied by a read-only session.
+		return []Capability{CapReadOnly, CapAgentManagement}, true
+	default:
+		return nil, false
+	}
 }
 
 func dedupeCapabilities(values []Capability) []Capability {
@@ -148,6 +177,8 @@ func normalizeToolName(name string) string {
 		return "block_current_task"
 	case "supervisionsnapshot":
 		return "supervision_snapshot"
+	case "supervisiondescendants":
+		return "supervision_descendants"
 	case "acklifecycle":
 		return "ack_lifecycle"
 	case "controldescendant":

@@ -354,19 +354,7 @@ func (a *Agent) GetSubagentBatchCoordinator() *SubagentBatchCoordinator {
 			Store:              store,
 			LifecycleProjector: a.batchLifecycleProjector,
 		}
-		cfg.Emitter = func(eventType string, payload map[string]interface{}) {
-			sessionID := ""
-			toolName := "spawn_subagents"
-			if payload != nil {
-				if v, ok := payload["parent_session_id"].(string); ok {
-					sessionID = v
-				}
-				if v, ok := payload["tool_name"].(string); ok && v != "" {
-					toolName = v
-				}
-			}
-			a.emitRuntimeEvent(eventType, sessionID, toolName, payload)
-		}
+		cfg.Emitter = a.batchRuntimeEventEmitter()
 		a.batchCoordinator = NewSubagentBatchCoordinator(cfg)
 	} else {
 		// Another concurrent lazy initializer won the race while this
@@ -387,6 +375,35 @@ func (a *Agent) SetSubagentBatchCoordinator(c *SubagentBatchCoordinator) {
 	a.backgroundBatches = c != nil
 	if c != nil {
 		c.SetLifecycleProjector(a.batchLifecycleProjector)
+		// A host-injected coordinator (shared durable store) normally arrives
+		// without a display-mirror emitter, while the lazy default path always
+		// installs the agent's runtime-event emitter. Preserve that emission so
+		// injecting a shared store never silently drops batch events.
+		if !c.HasEmitter() {
+			c.SetEmitter(a.batchRuntimeEventEmitter())
+		}
+	}
+}
+
+// batchRuntimeEventEmitter adapts the agent's runtime-event sink to the batch
+// display-mirror signature. Both the lazy coordinator path and host-injected
+// coordinators use it, so "who emits what" cannot drift between the two.
+func (a *Agent) batchRuntimeEventEmitter() BatchEmitter {
+	if a == nil {
+		return nil
+	}
+	return func(eventType string, payload map[string]interface{}) {
+		sessionID := ""
+		toolName := "spawn_subagents"
+		if payload != nil {
+			if v, ok := payload["parent_session_id"].(string); ok {
+				sessionID = v
+			}
+			if v, ok := payload["tool_name"].(string); ok && v != "" {
+				toolName = v
+			}
+		}
+		a.emitRuntimeEvent(eventType, sessionID, toolName, payload)
 	}
 }
 

@@ -1,0 +1,195 @@
+package commands
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
+)
+
+// localSupervisionProgressCheckReason 是周期巡查注入的 wake 原因。
+//
+// 刻意不含 approval/failure 关键词：WakeBudgetClassOf 会把它归入有界的
+// "other" 类别，于是巡查与 critical lifecycle wake 共享同一份预算/去抖/去重，
+// 不需要新建通知类别或第二套限流（P2-D 的"复用既有 wake admission"）。
+const localSupervisionProgressCheckReason = supervision.WakeReasonProgressCheck
+
+// wireLocalSupervisionProgressSource 把只读的 P0-B batch 投影接到 wake
+// scheduler 上。progress wake 不带生命周期通知，rollup 就是它唯一的 digest
+// 内容：没有这条投影，wake 会被判成"无内容"而不投递（见 supervision.
+// digestDeliverable），巡查就永远不会产生汇报 turn。只读、幂等，可在每次
+// 巡查前重复调用。
+func (h *localChatRuntimeHost) wireLocalSupervisionProgressSource() {
+	if h == nil || h.Supervision == nil || h.Supervision.Wakes == nil || h.SubagentBatches == nil {
+		return
+	}
+	h.Supervision.Wakes.SetProgressSource(supervision.NewBatchProgressSource(h.SubagentBatches))
+}
+
+// startLocalSupervisionProgressCheck 启动 opt-in 的 P2-D 周期巡查。
+//
+// 关闭（默认）时该函数立刻返回：不注册 ticker、不新增 goroutine，宿主行为与
+// 引入该开关前完全一致。开启后循环挂在 host.lifecycleCtx 上，Close() 会连同
+// asyncWG 一起等待它退出，因此不存在进程退出后残留的巡检 goroutine。
+func (h *localChatRuntimeHost) startLocalSupervisionProgressCheck() {
+	if h == nil || h.Supervision == nil || h.Supervision.Wakes == nil || h.SubagentBatches == nil {
+		return
+	}
+	interval := h.supervisionConfig.WithDefaults().ProgressCheckInterval
+	if interval <= 0 {
+		return
+	}
+	if h.lifecycleCtx == nil || h.lifecycleCtx.Err() != nil {
+		// Host 正在关闭或从未完成初始化：保持巡检器可同步调用，但不启动
+		// Close() 不会再等待的后台循环。
+		return
+	}
+	h.progressCheckOnce.Do(func() {
+		ctx, cancel := context.WithCancel(h.lifecycleCtx)
+		h.progressCheckStop = cancel
+		h.asyncWG.Add(1)
+		go func() {
+			defer h.asyncWG.Done()
+			h.runLocalSupervisionProgressCheck(ctx, interval)
+		}()
+	})
+}
+
+// stopLocalSupervisionProgressCheck 让测试/调试路径可以在不关闭整个 host 的
+// 前提下停掉巡检循环（Close() 走 lifecycleCtx，不需要调用它）。
+func (h *localChatRuntimeHost) stopLocalSupervisionProgressCheck() {
+	if h == nil || h.progressCheckStop == nil {
+		return
+	}
+	h.progressCheckStop()
+}
+
+// runLocalSupervisionProgressCheck 是巡检循环本体：每个 tick 做一次有界检查。
+// 没有 active batch、父会话忙、或已有待投递 wake 时，本次 tick 不产生任何
+// 写入与 turn——这就是"无 active batch 即停（不产生 turn）"的落点。
+func (h *localChatRuntimeHost) runLocalSupervisionProgressCheck(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// 巡查是 best-effort：一次读取失败（例如 store 临时不可用）
+			// 只跳过本轮，绝不因此中断整个循环或影响父会话。
+			_, _ = h.runLocalSupervisionProgressCheckOnce(ctx)
+		}
+	}
+}
+
+// runLocalSupervisionProgressCheckOnce 执行一轮巡查，返回是否真的提交了一次
+// 汇报 turn。测试直接调用它，从而避免依赖 ticker 的定时。
+//
+// 依次要求：存在 active batch（否则没有"新进度"可汇报）→ 父会话空闲 →
+// 没有待投递 wake（避免与 lifecycle wake 抢同一个 turn）→ 预算未耗尽
+// （AllowAutoWake 只读判定，复用 wake 限流）→ 调度并投递。
+func (h *localChatRuntimeHost) runLocalSupervisionProgressCheckOnce(ctx context.Context) (bool, error) {
+	if h == nil || h.Supervision == nil || h.Supervision.Store == nil ||
+		h.Supervision.Wakes == nil || h.SubagentBatches == nil {
+		return false, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	parentSessionID := h.localSupervisionProgressCheckSessionID()
+	if parentSessionID == "" {
+		return false, nil
+	}
+	h.wireLocalSupervisionProgressSource()
+	active, err := h.localSupervisionHasActiveProgress(ctx, parentSessionID)
+	if err != nil {
+		return false, err
+	}
+	if !active {
+		return false, nil
+	}
+	if !h.localSupervisionParentIdle(ctx, parentSessionID) {
+		return false, nil
+	}
+	pending, err := h.Supervision.Store.ListWakePending(ctx, supervision.WakeFilter{
+		RootScopeID:           parentSessionID,
+		TargetParentSessionID: parentSessionID,
+		UnclaimedOnly:         true,
+	})
+	if err != nil {
+		return false, err
+	}
+	if len(pending) > 0 {
+		// 已有一条待投递 wake：下一次 runnable transition 会投递它，本轮
+		// 不再叠加第二个 turn（digest 里本来就含 progress 区块）。
+		return false, nil
+	}
+	class := supervision.WakeBudgetClassOf(localSupervisionProgressCheckReason)
+	if !h.Supervision.Wakes.AllowAutoWake(ctx, parentSessionID, class, time.Now().UTC()) {
+		// 预算耗尽：progress 巡查不是决策，直接跳过而不是留下一条后续会被
+		// 投递的陈旧 wake（critical lifecycle wake 仍按既有语义保持 durable）。
+		return false, nil
+	}
+	if _, err := h.Supervision.Wakes.ScheduleWake(ctx, supervision.WakeRequest{
+		RootScopeID:           parentSessionID,
+		TargetParentSessionID: parentSessionID,
+		WakeReason:            localSupervisionProgressCheckReason,
+	}); err != nil {
+		return false, err
+	}
+	if err := h.wakeSupervisedParent(ctx, parentSessionID, parentSessionID); err != nil {
+		if errors.Is(err, supervision.ErrWakeParentBusy) || errors.Is(err, supervision.ErrWakeRateLimited) {
+			// 竞态（父会话在两次检查之间变忙）或预算判定后的边界情况：
+			// 保持 durable 语义，等下一次 transition 重试。
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// localSupervisionProgressCheckSessionID 是巡检的作用域：本 host 的根会话
+// （与 bindSupervisionWakeConsumer、preflight digest 使用同一个 session id）。
+func (h *localChatRuntimeHost) localSupervisionProgressCheckSessionID() string {
+	if h == nil || h.BaseSession == nil || h.BaseSession.RuntimeSession == nil {
+		return ""
+	}
+	return strings.TrimSpace(h.BaseSession.RuntimeSession.ID)
+}
+
+// localSupervisionHasActiveProgress 复用 P0-B 的只读投影判断是否存在
+// running/queued/partially-completed batch。只读：不落表、不产生事件。
+func (h *localChatRuntimeHost) localSupervisionHasActiveProgress(ctx context.Context, parentSessionID string) (bool, error) {
+	source := supervision.NewBatchProgressSource(h.SubagentBatches)
+	if source == nil {
+		return false, nil
+	}
+	groups, err := source.ListProgress(ctx, supervision.ProgressRequest{
+		RootScopeID:     parentSessionID,
+		ParentSessionID: parentSessionID,
+	})
+	if err != nil {
+		return false, err
+	}
+	for _, group := range groups {
+		if !group.Terminal {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// localSupervisionParentIdle 与 wake consumer 的 Runnable 判定同口径：父会话
+// 没有 running/approval/input turn 时才允许注入汇报 turn。
+func (h *localChatRuntimeHost) localSupervisionParentIdle(ctx context.Context, parentSessionID string) bool {
+	if h == nil || h.RuntimeStore == nil {
+		return false
+	}
+	state, err := h.RuntimeStore.LoadState(ctx, parentSessionID)
+	if err != nil || state == nil {
+		return false
+	}
+	return !state.Summary().Busy()
+}

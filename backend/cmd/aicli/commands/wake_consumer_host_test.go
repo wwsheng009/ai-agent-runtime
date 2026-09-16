@@ -53,7 +53,7 @@ func newWakeConsumerTestHostWithConfig(t *testing.T, name string, schedulerConfi
 				}
 				return !state.Summary().Busy()
 			},
-			Deliver: func(ctx context.Context, parentSessionID string, digest *supervision.Digest, wakeIDs []string) error {
+			Deliver: func(ctx context.Context, parentSessionID, rootScopeID string, digest *supervision.Digest, wakeIDs []string) error {
 				deliveries.record(parentSessionID, digest, wakeIDs)
 				return nil
 			},

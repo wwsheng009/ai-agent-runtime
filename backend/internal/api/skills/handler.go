@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -50,6 +51,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -122,40 +124,40 @@ type Handler struct {
 	// 由启动期降级路径写入（见 cmd/runtime-server）。用于让 ledger 接口返回可排障的 503，
 	// 而不是把它伪装成「未配置」。
 	usageLedgerUnavailableReason string
-	authPolicyPersister            AuthPolicyPersister
-	usagePolicyPersister           UsagePolicyPersister
-	mutationPolicyPersister        MutationPolicyPersister
-	runtimeEventBus                *runtimeevents.Bus
-	runtimeToolCatalog             *mcpcatalog.Gateway
-	runtimeToolCatalogConfigKey    string
-	runtimeMCPBridgeOnce           sync.Once
-	runtimeEventBridgeOnce         sync.Once
+	authPolicyPersister          AuthPolicyPersister
+	usagePolicyPersister         UsagePolicyPersister
+	mutationPolicyPersister      MutationPolicyPersister
+	runtimeEventBus              *runtimeevents.Bus
+	runtimeToolCatalog           *mcpcatalog.Gateway
+	runtimeToolCatalogConfigKey  string
+	runtimeMCPBridgeOnce         sync.Once
+	runtimeEventBridgeOnce       sync.Once
 	// P4-刷新续传：会话在途回合注册表（懒初始化，见 session_active_turn.go）。
-	activeTurnsOnce sync.Once
-	activeTurns     *activeTurnRegistry
-	observeMu                      sync.RWMutex
-	observeService                 *runtimeobserve.Service
-	scopeResolverMu                sync.RWMutex
-	scopeResolverConfig            ScopeResolverConfig
-	runtimeConfig                  *runtimecfg.RuntimeConfig
-	runtimeConfigFile              string
-	runtimeConfigResolver          func(UsageScope) *runtimecfg.RuntimeConfig
-	aicliConfigMu                  sync.RWMutex
-	aicliConfig                    *agentconfig.Config
-	siteAccountService             SiteAccountService
-	configDocumentService          ConfigDocumentService
-	agentMaxStepsPersister         AgentMaxStepsPersister
-	agentMaxStepsProvider          AgentMaxStepsProvider
-	serviceControlService          RuntimeServiceControlService
-	fileTransferService            FileTransferService
-	logFilePath                    string
-	usageAnalyticsDBPath           string
-	profileRegistry                *profilesys.Registry
-	profileDefaultRef              string
-	profileGlobalRuntimePath       string
-	profileGlobalMCPPath           string
-	profileGlobalSkillDirs         []string
-	profileMCPAutoConnect          bool
+	activeTurnsOnce          sync.Once
+	activeTurns              *activeTurnRegistry
+	observeMu                sync.RWMutex
+	observeService           *runtimeobserve.Service
+	scopeResolverMu          sync.RWMutex
+	scopeResolverConfig      ScopeResolverConfig
+	runtimeConfig            *runtimecfg.RuntimeConfig
+	runtimeConfigFile        string
+	runtimeConfigResolver    func(UsageScope) *runtimecfg.RuntimeConfig
+	aicliConfigMu            sync.RWMutex
+	aicliConfig              *agentconfig.Config
+	siteAccountService       SiteAccountService
+	configDocumentService    ConfigDocumentService
+	agentMaxStepsPersister   AgentMaxStepsPersister
+	agentMaxStepsProvider    AgentMaxStepsProvider
+	serviceControlService    RuntimeServiceControlService
+	fileTransferService      FileTransferService
+	logFilePath              string
+	usageAnalyticsDBPath     string
+	profileRegistry          *profilesys.Registry
+	profileDefaultRef        string
+	profileGlobalRuntimePath string
+	profileGlobalMCPPath     string
+	profileGlobalSkillDirs   []string
+	profileMCPAutoConnect    bool
 
 	teamStoreMu               sync.RWMutex
 	teamStoreConfigKey        string
@@ -171,11 +173,41 @@ type Handler struct {
 	supervisionActions            *supervision.ActionService
 	supervisionWakes              *supervision.WakeScheduler
 	supervisionDescendantProvider supervision.DescendantProvider
+	supervisionConfig             supervision.Config
 	supervisionWakeOnce           sync.Once
+	// supervisionWake 是宿主唯一的 wake consumer（惰性构造并复用；Wakes 指针
+	// 变了就重建）。巡查、batch 终态桥与 approval 事件都从它取 Runnable/Deliver
+	// 门，宿主与测试也据此覆盖投递实现（与 CLI 的 host.supervisionWake 同形）。
+	supervisionWakeMu sync.Mutex
+	supervisionWake   *supervision.WakeConsumer
 
 	executionSupervisorMu   sync.RWMutex
 	executionSupervisor     *supervision.ExecutionSupervisor
 	executionSupervisorStop context.CancelFunc
+
+	// P0-B/P2-D：宿主级 durable batch 控制面（见 supervision_batch_store.go）。
+	// API 宿主此前让每个 agent 各自惰性创建一次性内存 store，progress 投影因此
+	// 永远读不到数据；共享 store 让 preflight digest 与周期巡查看到同一份 batch
+	// 状态，且不影响无 batch 宿主（惰性创建 + 失败缓存）。
+	subagentBatchMu    sync.Mutex
+	subagentBatchStore subagentbatch.BatchStore
+	subagentBatchTried bool
+
+	// P2-D：opt-in 的周期巡查循环（ProgressCheckInterval > 0 时启动）。
+	// SetSupervisionConfig 是唯一启动点，stop 供测试与宿主关闭使用。
+	supervisionProgressCheckMu   sync.Mutex
+	supervisionProgressCheckStop context.CancelFunc
+	// supervisionProgressCheckWG 让 StopSupervisionProgressCheck 能等到循环真正
+	// 退出（重配后不留残留巡检 goroutine）。
+	supervisionProgressCheckWG sync.WaitGroup
+
+	// P2 恢复对等（与 CLI 的 runLocalSubagentStartupRecovery 对称）：durable
+	// batch store 注入后跑两趟有界恢复（立即 + 宽限期后），把上次进程遗留的
+	// queued/running batch 收敛为终态，并重放投递失败的终态通知。
+	// Start/StopSubagentBatchRecovery 是唯一入口。
+	subagentBatchRecoveryMu   sync.Mutex
+	subagentBatchRecoveryStop context.CancelFunc
+	subagentBatchRecoveryWG   sync.WaitGroup
 
 	agentControlMu               sync.RWMutex
 	agentControlRegistryService  *agentcontrol.RegistryService
@@ -1774,8 +1806,16 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			// provider reporter observes every upstream text/reasoning/image
 			// chunk; forwarding those chunks here restores the incremental
 			// workspace experience instead of waiting for streamStaticResult.
+			//
+			// 建议 4（服务端 flush 背压）：provider 按 token 回调，逐帧 flush 会把
+			// 一条普通回复放大成数百次 socket 写，所以这里也用按 tick 合并的写出器
+			// （默认 50ms，见 pacedFlushWriter）。帧内容/顺序/seq 都不变，只改出站
+			// 时刻；defer Close 保证收尾帧一定推出去。
 			h.prepareSSEHeaders(w)
-			emitter := h.newTrajectoryEmitter(w, session, turnID)
+			chatFlusher, _ := w.(http.Flusher)
+			pacedChat := newPacedFlushWriter(w, chatFlusher, streamWriteBufferSize, streamFlushTickInterval)
+			defer func() { _ = pacedChat.Close() }()
+			emitter := h.newTrajectoryEmitter(pacedChat, session, turnID)
 			emitter.Emit("meta", map[string]interface{}{
 				"session_id": sessionID(session),
 				"agent_id":   a.GetConfig().Name,
@@ -1856,26 +1896,45 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			// 断开」的根因）。detach 后 run 与请求解耦：SSE 写出失败不再影响执行
 			// （前端已断开），增量与历史照常落库，新页面在 /runtime/stream 上按
 			// 游标续传并据 active_turn 重新挂载在途回合。
-			runCtx := ctx
+			// 建议 3（后端 cancel 契约）：两条路径都派生一个「本回合可控」的 ctx，
+			// 区别只在父 ctx —— detached 以 WithoutCancel 为父（客户端断开不取消），
+			// 非 detached 仍以请求 ctx 为父（断开即取消）。这样无论哪条路径，
+			// 注册表里都握着一个能真正中止本回合的 CancelFunc：stop 不再只是
+			// 「停本页接收」，而是服务端真停。
+			baseRunCtx := ctx
 			if req.ResumeOnDisconnect {
-				runCtx = context.WithoutCancel(ctx)
+				baseRunCtx = context.WithoutCancel(ctx)
+			}
+			runCtx, cancelRun := context.WithCancel(baseRunCtx)
+			defer cancelRun()
+			var cancelTimeoutRun context.CancelFunc
+			if req.ResumeOnDisconnect {
 				// 无取消信号的 run 必须有兜底时限：上游挂死时不能留下常驻 goroutine。
 				// 以配置的 Agent.Timeout 为准，未配置时退化为默认上限。
 				runTimeout := agentConfig.MaxRunDuration
 				if runTimeout <= 0 {
 					runTimeout = defaultDetachedAgentChatRunTimeout
 				}
-				var cancelRun context.CancelFunc
-				runCtx, cancelRun = context.WithTimeout(runCtx, runTimeout+detachedAgentChatRunGrace)
-				defer cancelRun()
+				runCtx, cancelTimeoutRun = context.WithTimeout(runCtx, runTimeout+detachedAgentChatRunGrace)
+				defer cancelTimeoutRun()
 			}
+			// turnInterrupted 是「本回合收到过接口显式取消」的进程内真相来源：
+			// error 帧据此回填 cancel_source（与 actor 路径同一字面量），
+			// 让 trajectory/前端把「用户停止」与「真失败」分开。
+			var turnInterrupted atomic.Bool
 			// 在途回合登记（进程内）：刷新后的新页面据此重新挂载回合身份，
 			// 打开增量渲染门控（renderLiveDeltas）继续把增量写进同一条消息。
-			releaseActiveTurn := h.getActiveTurnRegistry().begin(
+			// 同时登记取消句柄：interrupt 命令（建议 3）据此真正中止本回合。
+			releaseActiveTurn := h.getActiveTurnRegistry().beginCancelable(
 				sessionID(execSession),
 				turnID,
 				agentChatActiveTurnSource,
 				req.ResumeOnDisconnect,
+				func(string) bool {
+					turnInterrupted.Store(true)
+					cancelRun()
+					return true
+				},
 			)
 			defer releaseActiveTurn()
 
@@ -1907,12 +1966,20 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 				if persistErr := historyCheckpointer.PersistFinal(); persistErr != nil {
 					logger.Warnf("agent chat: persist turn history after failure: %s", persistErr)
 				}
-				emitter.Emit("error", map[string]interface{}{
+				errorPayload := map[string]interface{}{
 					"index":   chunkIndex,
 					"message": reactErr.Error(),
 					"source":  "agent_react",
 					"turn_id": turnID,
-				})
+				}
+				// 显式取消（stop/interrupt 命令）不是「异常失败」：回填与 durable
+				// actor 路径同名的 cancel_source，让 trajectory 与前端能把
+				// 「用户主动停止」与「真错误」分开判定（actor 侧同一字面量见
+				// chat/actor.go 的 sessionRunCancelSource）。
+				if turnInterrupted.Load() {
+					errorPayload["cancel_source"] = activeTurnCancelSourceUserInterrupt
+				}
+				emitter.Emit("error", errorPayload)
 				return
 			}
 
@@ -3860,9 +3927,28 @@ func (h *Handler) newAPIAgentWithRuntime(cfg *agent.Config, runtime *agentRuntim
 	} else {
 		apiAgent = agent.NewAgent(cfg, mcpManager)
 	}
-	apiAgent.SetSubagentScheduler(agent.NewSubagentScheduler(apiAgent, agent.SubagentSchedulerConfig{
+	subagentScheduler := agent.NewSubagentScheduler(apiAgent, agent.SubagentSchedulerConfig{
 		Routing: h.subagentRoutingConfig(),
-	}))
+	})
+	apiAgent.SetSubagentScheduler(subagentScheduler)
+	// Batch 终态投影：只有 durable 控制面就绪时才装（与 supervision 工具门控同
+	// 口径，无 store 的宿主保持现状）。没有这一钩子，API 宿主的后台 batch 终态
+	// 不会进入 store/digest/wake——父会话在 runtime-server 上永远等不到"batch
+	// 结束"的汇报点（CLI 早有线，见 supervision_batch_projector.go）。
+	if h.getSupervisionStore() != nil {
+		apiAgent.SetBatchLifecycleProjector(h.apiBatchLifecycleProjector())
+	}
+	// P0-B/P2-D：把宿主级共享 batch store 注入每个 API agent。没有这一步，
+	// agent 会惰性创建只属于自己的内存 store，父会话的 progress 投影永远读不到
+	// "batch 进行到哪了"。顺序必须在 SetBatchLifecycleProjector 之后：
+	// SetSubagentBatchCoordinator 从 agent 上取 projector 快照。
+	if coordinator := h.subagentBatchCoordinator(subagentScheduler); coordinator != nil {
+		// terminal sink 必须显式装上：agent 只会从自身回填 emitter/projector，
+		// 没有 sink 时 batch 终态不会写进父会话 mailbox（父会话只能靠 supervision
+		// wake 知道"有事发生"，拿不到那条 durable 汇报消息）。
+		coordinator.SetTerminalSink(h.apiSubagentBatchTerminalSink())
+		apiAgent.SetSubagentBatchCoordinator(coordinator)
+	}
 
 	if registry != nil {
 		for _, summary := range registry.ListSummaries() {
@@ -3928,28 +4014,14 @@ func (h *Handler) attachRuntimeEventBridge() {
 	})
 }
 
-// isPersistedRuntimeEventType 是 A 通道（总线 → 会话事件库）的类型白名单。
-// 单独抽出，使落盘判定与交付通道分类（runtime_event_delivery.go 的
-// DeliveryChannelsFor）共用同一份清单，避免两处漂移导致「分类说有、实际不落盘」。
+// isPersistedRuntimeEventType 是 A 通道（总线 → 会话事件库）的落盘判定。
+//
+// 清单已收敛到 internal/events 的声明式注册表（Batch 2 事件契约单一真源）：
+// 这里只做委托，不再保留第二份手写白名单——原先「落盘判定」与「交付通道分类」
+// 各持一份清单，漂移时的症状只是前端没反应。新增/调整类型请改
+// internal/events/contract.go 的注册表，契约漂移由 contract_test.go 门禁拦截。
 func isPersistedRuntimeEventType(eventType string) bool {
-	switch strings.TrimSpace(eventType) {
-	case "tool.requested", "tool.completed", "context.profile.injected", "recall.performed", "checkpoint_created",
-		chat.EventApprovalRequested, chat.EventApprovalResolved,
-		// P2-8 方案 4：自动回收（agent.reclaimed）与手工清理落进父会话事件流，
-		// 前端 /runtime/events 与子会话下钻因此能看到“子会话被谁回收”。
-		agentcontrol.EventAgentReclaimed,
-		chat.EventSessionCompactStarted, chat.EventSessionCompactCompleted, chat.EventSessionCompactSkipped, chat.EventSessionCompactFailed,
-		chat.EventSessionStart, chat.EventSessionEnd, chat.EventSessionInterrupted,
-		chat.EventContextReconciled,
-		// 方案B：增量打字机事件持久化到会话事件流，供 runtime/stream
-		// 长轮询实时消费（前端按 isResponding gate 决定是否渲染，
-		// 回放/reload 不会误渲染历史增量）。
-		chat.EventAssistantDelta, chat.EventAssistantReasoning,
-		chat.EventAssistantReasoningDelta, chat.EventAssistantImageProgress:
-		return true
-	default:
-		return false
-	}
+	return runtimeevents.IsPersistedEventType(eventType)
 }
 
 func shouldPersistRuntimeSessionEvent(event runtimeevents.Event) bool {
@@ -4768,6 +4840,23 @@ func (h *Handler) applyAgentRuntimeServices(a *agent.Agent, runtimeConfig *runti
 				Store:       store,
 				Mailbox:     team.NewMailboxService(store),
 				AutoPersist: true,
+			}
+		}
+	}
+
+	// P0-A 方案 A（doc 6.2/7）：把 unified 快照读模型接到模型工具面，让父
+	// agent 一次调用看清整个子 agent 批次，而不是逐行轮询 wait_agent。门控与
+	// CLI 宿主一致：没有 durable store 时 broker.Supervision 保持 nil，四个
+	// 监督工具不会出现在 Definitions()（悬空工具比缺少工具更糟）。
+	if h.getSupervisionStore() != nil {
+		broker := a.GetToolBroker()
+		if broker == nil {
+			broker = &toolbroker.Broker{}
+			a.SetToolBroker(broker)
+		}
+		if broker.Supervision == nil {
+			if controller := newHandlerSupervisionToolController(h); controller != nil {
+				broker.Supervision = controller
 			}
 		}
 	}
@@ -8490,14 +8579,23 @@ func (e *sseEmitter) Emit(event string, data interface{}) {
 		return
 	}
 	e.sequence++
-	var id int64
+	// Batch 4（游标单一真源）：启用 persist 钩子后，游标只有 EventStore 的
+	// session 级 seq 一个真源。写失败（seq<=0）时整帧既不带 `id:` 也不带
+	// `_event.sequence`：连接内计数器与持久化 seq 不同空间，混进游标位会被
+	// 前端轨迹 reducer（eventSeqOf，0 = 降级按到达序）当成真实 seq 做幂等去重，
+	// 把降级帧误判为重复而丢弃（宁缺勿假，同 P0-3）。
+	// persist == nil 的 SSE 端点没有存储游标语义，连接内计数照旧供到达序排序。
+	var wireSequence, id int64
 	if e.persist != nil {
 		if seq := e.persist(event, data); seq > 0 {
 			e.sequence = seq
+			wireSequence = seq
 			id = seq
 		}
+	} else {
+		wireSequence = e.sequence
 	}
-	writeSSEEventFrame(e.w, event, data, e.sequence, id)
+	writeSSEEventFrame(e.w, event, data, wireSequence, id)
 }
 
 func (e *sseEmitter) withTurnID(data interface{}) interface{} {

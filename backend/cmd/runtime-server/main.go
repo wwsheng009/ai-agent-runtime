@@ -936,15 +936,16 @@ func runtimeServerHealthURL(listenAddr string) (string, bool) {
 }
 
 type runtimeServerApp struct {
-	router         *mux.Router
-	handler        *skillsapi.Handler
-	cfg            *config.Config
-	skillsCfg      *config.SkillsRuntimeConfig
-	runtimeManager *runtimecfg.RuntimeManager
-	bootstrap      *runtimebootstrap.Manager
-	mcpManager     mcpmanager.Manager
-	ledgerStore    io.Closer
-	supervision    *runtimeserver.SupervisionControlPlane
+	router          *mux.Router
+	handler         *skillsapi.Handler
+	cfg             *config.Config
+	skillsCfg       *config.SkillsRuntimeConfig
+	runtimeManager  *runtimecfg.RuntimeManager
+	bootstrap       *runtimebootstrap.Manager
+	mcpManager      mcpmanager.Manager
+	ledgerStore     io.Closer
+	supervision     *runtimeserver.SupervisionControlPlane
+	subagentBatches io.Closer
 }
 
 func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath string) (*runtimeServerApp, error) {
@@ -1051,13 +1052,16 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		handler.SetMutationPolicyPersister(persister.PersistMutationPolicy)
 	}
 	applySkillsRuntimePolicies(handler, skillsCfg)
-	ledgerStore, err := runtimeserver.BuildUsageLedgerStore(cfg)
-	if err != nil {
-		if manager != nil {
-			_ = manager.Stop()
-		}
-		_ = bootstrapManager.Stop()
-		return nil, err
+	// usage ledger 是可选的观测 / 治理能力，不是服务可用性的前置依赖：
+	// 配置启用了账本但初始化失败（database.dsn 为空、驱动不是 sqlite、建表失败或
+	// 目录不可写等）时，这里降级为「启动告警 + 账本接口 503」，不再让整个
+	// runtime-server 启动失败。原因会透传到 503 响应，避免"账本不可用"变成哑失败。
+	// 其余子系统（例如下面的 supervision control plane）仍保持 fail-fast。
+	ledgerStore, ledgerUnavailableReason := runtimeserver.ResolveUsageLedgerStore(cfg)
+	if ledgerUnavailableReason != "" {
+		logger.Warn("Skills usage ledger unavailable; /api/runtime/usage/ledger will return 503",
+			logger.String("reason", ledgerUnavailableReason))
+		handler.SetUsageLedgerUnavailableReason(ledgerUnavailableReason)
 	}
 	if ledgerStore != nil {
 		handler.SetUsageLedgerStore(ledgerStore)
@@ -1090,6 +1094,22 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	handler.SetSupervisionActionService(supervisionPlane.Actions)
 	handler.SetSupervisionWakeScheduler(supervisionPlane.Wakes)
 	handler.SetSupervisionDescendantProvider(supervisionPlane.Provider)
+	// Same tuning knobs the CLI host reads (digest/snapshot budgets), so the
+	// two hosts cannot drift on injection size defaults (plan §9).
+	handler.SetSupervisionConfig(cfg.Supervision.WithDefaults())
+	// P2 恢复对等（2026-09-16）：CLI 宿主在启动时做「立即 + 宽限期后」两趟
+	// batch 恢复，runtime-server 此前完全没有对应入口，而且 API 侧连 durable
+	// batch store 都没接线（默认值是 per-process 内存库），重启后遗留的
+	// queued/running batch 永远停在非终态、终态投递也永不重试。这里把 store 落到
+	// 与 supervision 同级的数据目录并启动恢复；建库失败只降级告警（与 usage
+	// ledger 同口径：没有跨重启 batch 控制面不等于服务不可用）。
+	subagentBatches, batchStoreErr := handler.EnableDurableSubagentBatches(
+		filepath.Join(filepath.Dir(config.DefaultAuthStorePath()), "data", "subagent-batches"),
+	)
+	if batchStoreErr != nil {
+		logger.Warn("Subagent batch store unavailable; restart recovery is disabled",
+			logger.String("reason", batchStoreErr.Error()))
+	}
 	// Real mutation executor: agent close goes through the API session
 	// controller; team cancel goes through the durable Team store. The
 	// runtime-server host does not own an AgentControl identity graph, so
@@ -1128,15 +1148,16 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	}
 
 	return &runtimeServerApp{
-		router:         router,
-		handler:        handler,
-		cfg:            cfg,
-		skillsCfg:      skillsCfg,
-		runtimeManager: runtimeManager,
-		bootstrap:      bootstrapManager,
-		mcpManager:     manager,
-		ledgerStore:    ledgerStore,
-		supervision:    supervisionPlane,
+		router:          router,
+		handler:         handler,
+		cfg:             cfg,
+		skillsCfg:       skillsCfg,
+		runtimeManager:  runtimeManager,
+		bootstrap:       bootstrapManager,
+		mcpManager:      manager,
+		ledgerStore:     ledgerStore,
+		supervision:     supervisionPlane,
+		subagentBatches: subagentBatches,
 	}, nil
 }
 
@@ -1196,6 +1217,15 @@ func (a *runtimeServerApp) close() {
 	if a.ledgerStore != nil {
 		if err := a.ledgerStore.Close(); err != nil {
 			logger.Warn("Failed to close usage ledger store", logger.Err(err))
+		}
+	}
+	// 先停恢复循环再关库：宽限期后的第二趟扫描不能跑在已关闭的 store 上。
+	if a.handler != nil {
+		a.handler.StopSubagentBatchRecovery()
+	}
+	if a.subagentBatches != nil {
+		if err := a.subagentBatches.Close(); err != nil {
+			logger.Warn("Failed to close subagent batch store", logger.Err(err))
 		}
 	}
 	if a.supervision != nil {

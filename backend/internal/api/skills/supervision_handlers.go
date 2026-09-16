@@ -43,6 +43,36 @@ func (h *Handler) SetSupervisionActionService(service *supervision.ActionService
 	h.supervisionStoreMu.Unlock()
 }
 
+// SetSupervisionConfig sets the control-plane tuning knobs (digest/snapshot
+// budgets) this host applies when the caller does not pass an explicit limit.
+// Zero values keep supervision defaults, so an unwired host behaves exactly
+// like one configured with the package defaults (plan §9 待决项收口).
+//
+// P2-D：它同时是 opt-in 周期巡查的唯一启动点——ProgressCheckInterval > 0 时
+// 拉起巡检循环，为 0（默认）时不注册 ticker、不新增 goroutine；重复调用先停后起，
+// 因此改小/改大/关回 0 都会立刻生效（见 supervision_progress_check.go）。
+func (h *Handler) SetSupervisionConfig(cfg supervision.Config) {
+	if h == nil {
+		return
+	}
+	h.supervisionStoreMu.Lock()
+	h.supervisionConfig = cfg
+	h.supervisionStoreMu.Unlock()
+	h.syncSupervisionProgressCheck()
+}
+
+// supervisionTuning returns this host's supervision config with semantic
+// defaults applied, so callers never branch on zero values themselves.
+func (h *Handler) supervisionTuning() supervision.Config {
+	if h == nil {
+		return supervision.DefaultConfig()
+	}
+	h.supervisionStoreMu.RLock()
+	cfg := h.supervisionConfig
+	h.supervisionStoreMu.RUnlock()
+	return cfg.WithDefaults()
+}
+
 // SetSupervisionWakeScheduler sets the wake scheduler.
 func (h *Handler) SetSupervisionWakeScheduler(scheduler *supervision.WakeScheduler) {
 	if h == nil {
@@ -304,27 +334,33 @@ func (h *Handler) injectSupervisionPreflight(ctx context.Context, sessionID, pro
 		RootScopeID:           rootScopeID,
 		TargetParentSessionID: sessionID,
 		TargetParentTeamID:    targetTeamID,
-		Limit:                 20,
-		IncludeResolvedSince:  true,
-		SubjectPresence:       h.supervisionSubjectPresence(),
-		HostCapabilities:      h.supervisionHostCapabilities(),
+		// Same knob as the CLI preflight (DigestMaxItems): before this the API
+		// host hardcoded 20 while the CLI read config, so the two hosts could
+		// disagree on the injection budget.
+		Limit:                h.supervisionTuning().DigestMaxItems,
+		IncludeResolvedSince: true,
+		SubjectPresence:      h.supervisionSubjectPresence(),
+		HostCapabilities:     h.supervisionHostCapabilities(),
+		// P0-B：宿主级共享 batch store 让 progress 区块真正有数据可读（此前
+		// Progress 为 nil，判定退化成"只看 lifecycle 行"，与 CLI 宿主不对齐）。
+		// 无 batch 控制面的宿主仍是 nil ⇒ digest 与改动前逐字节一致。
+		Progress: h.supervisionProgressSource(),
 	})
 	if err != nil {
 		return "", fmt.Errorf("build supervision preflight digest: %w", err)
 	}
-	if digest == nil || len(digest.Items) == 0 {
+	// P0-B：progress 区块与 lifecycle 行共用同一个注入判定 —— 只要 batch 还在
+	// 跑（Progress 非空），父 turn 就会拿到"2/3 完成、谁还在跑"的 rollup，而不是
+	// 等终态 lifecycle 行才第一次可见。
+	if digest == nil || (len(digest.Items) == 0 && len(digest.Progress) == 0) {
 		return prompt, nil
 	}
 	now := time.Now().UTC()
 	for _, item := range digest.Items {
-		if item.NotificationID == "" {
-			continue
-		}
-		if err := store.MarkNotificationDelivered(ctx, item.NotificationID, now); err != nil {
-			return "", fmt.Errorf("mark supervision notification delivered: %w", err)
-		}
-		if err := store.MarkNotificationSeen(ctx, item.NotificationID, now); err != nil {
-			return "", fmt.Errorf("mark supervision notification seen: %w", err)
+		// Throttled (plan §4.3): rows the parent already saw are not re-marked,
+		// because each write only churned version/updated_at.
+		if err := supervision.MarkDigestItemDelivered(ctx, store, item, now); err != nil {
+			return "", err
 		}
 	}
 	text := strings.TrimSpace(digest.Text)
@@ -400,6 +436,7 @@ func (h *Handler) GetSupervisionSnapshot(w http.ResponseWriter, r *http.Request)
 		Health:           strings.TrimSpace(q.Get("health")),
 		IncludeTerminal:  boolQuery(q.Get("include_terminal")),
 		Limit:            intQuery(q.Get("limit")),
+		DefaultLimit:     h.supervisionTuning().SnapshotMaxItems,
 		Provider:         h.getSupervisionDescendantProvider(),
 		HostCapabilities: h.supervisionHostCapabilities(),
 	})

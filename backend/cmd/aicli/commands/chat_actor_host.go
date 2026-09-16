@@ -163,18 +163,23 @@ type localChatRuntimeHost struct {
 	registryReconcilerOnce sync.Once
 	registryReconciler     *agentcontrol.Reconciler
 	registryReconcilerStop context.CancelFunc
-	cleanupFns             []func()
-	closeOnce              sync.Once
-	subagentMu             sync.Mutex
-	subagentCoordinators   map[*agent.SubagentBatchCoordinator]struct{}
-	subagentOps            int
-	subagentIdle           chan struct{}
-	closing                bool
-	actorTurnGateMu        sync.Mutex
-	actorTurnGates         map[string]chan struct{}
-	lifecycleCtx           context.Context
-	lifecycleCancel        context.CancelFunc
-	asyncWG                sync.WaitGroup
+	// progressCheckOnce / progressCheckStop 是 P2-D 的 opt-in 周期巡查
+	//（supervision.progress_check_interval，默认 0 关闭）：与其它后台循环
+	// 一样随 lifecycleCtx + asyncWG 停止，见 chat_actor_progress_check.go。
+	progressCheckOnce    sync.Once
+	progressCheckStop    context.CancelFunc
+	cleanupFns           []func()
+	closeOnce            sync.Once
+	subagentMu           sync.Mutex
+	subagentCoordinators map[*agent.SubagentBatchCoordinator]struct{}
+	subagentOps          int
+	subagentIdle         chan struct{}
+	closing              bool
+	actorTurnGateMu      sync.Mutex
+	actorTurnGates       map[string]chan struct{}
+	lifecycleCtx         context.Context
+	lifecycleCancel      context.CancelFunc
+	asyncWG              sync.WaitGroup
 
 	// observeOnce / observeSvc 缓存本地 Runtime Observation Plane 服务：
 	// ensureLocalObserveService 惰性构建一次，host.Close() 时释放。
@@ -381,6 +386,7 @@ func localSubagentBatchLifecycleProjectorWithWakeDrain(host *localChatRuntimeHos
 		supervisionState := supervision.SupervisionTerminated
 		resolution := supervision.ResolutionClosed
 		recommended := string(supervision.ActionInspect)
+		convergeHint := ""
 		reason := fmt.Sprintf("subagent batch %s finished with status %s (%d/%d completed)", terminal.BatchID, terminal.Status, terminal.CompletedCount, terminal.TaskCount)
 		switch terminal.Status {
 		case subagentbatch.BatchFailed:
@@ -402,9 +408,21 @@ func localSubagentBatchLifecycleProjectorWithWakeDrain(host *localChatRuntimeHos
 			severity = supervision.SeverityWarning
 			supervisionState = supervision.SupervisionTerminated
 			resolution = supervision.ResolutionClosed
+		default:
+			// P1-C：成功完成的 batch 行推荐"收敛"——关闭已结束的子会话。
+			// 该行本身是 resolution=closed，evaluator 对已关闭行只允许
+			// inspect（plan §4.1.1），所以推荐动作必须配合 reason 里的
+			// close_agent 工具提示使用，而不是让模型对终态行发 control 动作。
+			if terminal.FailedCount == 0 && terminal.TimedOutCount == 0 {
+				recommended = string(supervision.ActionClose)
+				convergeHint = localBatchConvergeHint(ctx, host, terminal.BatchID)
+			}
 		}
 		if strings.TrimSpace(terminal.Error) != "" {
 			reason += ": " + strings.TrimSpace(terminal.Error)
+		}
+		if convergeHint != "" {
+			reason += "; " + convergeHint
 		}
 		_, err := supervision.ProjectLifecycle(ctx, host.Supervision.Store, host.Supervision.Wakes, supervision.LifecycleProjection{
 			RootScopeID:           rootScopeID,
@@ -423,6 +441,9 @@ func localSubagentBatchLifecycleProjectorWithWakeDrain(host *localChatRuntimeHos
 		if err != nil {
 			return err
 		}
+		// P1-C 方案 C：batch 终态投影之后按策略收敛已完成的子会话（默认 off
+		// 时该调用不产生任何写入）。
+		localConvergeTerminalBatchChildren(ctx, host, terminal)
 		if !drainWake {
 			return nil
 		}
@@ -442,6 +463,120 @@ func localSubagentBatchLifecycleProjectorWithWakeDrain(host *localChatRuntimeHos
 		return nil
 	}
 }
+
+// localAutoCloseCompletedPolicy 解析 agents.autoCloseCompleted（P1-C 方案 C）。
+// 未装配 runtime config 或字段未设置时回落 "off"，即与现状完全一致；未知取值
+// 一律按 off 处理（配置校验已拒绝它们，这里再兜一层，避免把拼写错误解释成
+// 「自动关闭所有子会话」）。
+func localAutoCloseCompletedPolicy(host *localChatRuntimeHost) string {
+	if host == nil || host.RuntimeConfig == nil {
+		return runtimecfg.AutoClosePolicyOff
+	}
+	switch policy := strings.ToLower(strings.TrimSpace(
+		runtimecfg.NormalizeAgentsConfig(host.RuntimeConfig.Agents).AutoCloseCompleted)); policy {
+	case runtimecfg.AutoClosePolicyCompleted, runtimecfg.AutoClosePolicyBatchTerminal:
+		return policy
+	default:
+		return runtimecfg.AutoClosePolicyOff
+	}
+}
+
+// localConvergeTerminalBatchChildren 是 P1-C 方案 C 的收敛钩子：batch 终态后，
+// 对「任务成功」的终态子会话先投影一条 unresolved 的收敛行（recommended_action=
+// close），再通过 LocalControlService.Control 真正关闭子会话——关闭动作因此有
+// durable action audit，回执由 ActionService 的 resolution 投影产出。
+//
+// 契约：
+//   - opt-in：agents.autoCloseCompleted 默认 off，本函数在 off 时不产生任何投影/
+//     动作，宿主行为与实施前逐字节一致；
+//   - 只收敛成功的子会话：failed/timed_out/canceled 的终态子会话是父 agent 需要
+//     判断的现场，批次级 critical/警告行已经覆盖它们；
+//   - 幂等：重放（startup recovery + 实时投影）时收敛行已 decided/resolved，
+//     ActionRequired() 为 false，不重复关闭、不重复写 audit；
+//   - best-effort：控制面未装配执行器时连收敛行都不投影（悬空建议比没有建议更
+//     糟）；单点失败不影响 batch 终态投影结果，也不阻塞其它子会话。
+func localConvergeTerminalBatchChildren(ctx context.Context, host *localChatRuntimeHost, terminal agent.BatchTerminalLifecycle) {
+	policy := localAutoCloseCompletedPolicy(host)
+	if policy == runtimecfg.AutoClosePolicyOff {
+		return
+	}
+	if host == nil || host.Supervision == nil || host.Supervision.Store == nil || host.SubagentBatches == nil {
+		return
+	}
+	// 「completed」只收敛干净完成的批次；失败/超时/孤儿的现场交给批次级行。
+	if policy == runtimecfg.AutoClosePolicyCompleted && terminal.Status != subagentbatch.BatchCompleted {
+		return
+	}
+	if host.Supervision.Actions == nil || !host.Supervision.Actions.ExecutorReady() {
+		return
+	}
+	rootScopeID := strings.TrimSpace(terminal.RootScopeID)
+	parentSessionID := strings.TrimSpace(terminal.ParentSessionID)
+	batchID := strings.TrimSpace(terminal.BatchID)
+	if rootScopeID == "" || batchID == "" {
+		return
+	}
+	requestedBy := parentSessionID
+	if requestedBy == "" {
+		requestedBy = rootScopeID
+	}
+	tasks, err := host.SubagentBatches.ListTasks(ctx, batchID)
+	if err != nil {
+		return
+	}
+	control := supervision.NewLocalControlService(host.Supervision.Store, host.Supervision.Actions)
+	auditReason := fmt.Sprintf(
+		"auto-close child session: subagent batch %s finished with status %s (agents.autoCloseCompleted=%s)",
+		batchID, terminal.Status, policy)
+	for _, task := range tasks {
+		childSessionID := strings.TrimSpace(task.ChildSessionID)
+		if childSessionID == "" || task.Status != subagentbatch.TaskSucceeded {
+			continue
+		}
+		notification, err := supervision.ProjectLifecycle(ctx, host.Supervision.Store, nil, supervision.LifecycleProjection{
+			RootScopeID:           rootScopeID,
+			TargetParentSessionID: parentSessionID,
+			SubjectKind:           supervision.SubjectAgentSession,
+			SubjectID:             childSessionID,
+			// 用 batch 终态版本做 subject version：同一终态的重复投影命中同一行。
+			SubjectVersion: terminal.SubjectVersion,
+			EventType:      localBatchConvergenceEventType,
+			// Severity must be warning/critical: Notification.ActionRequired()
+			// (and therefore the control plane) refuses to act on an
+			// informational row, which would leave the recommendation dangling.
+			// The row stops nagging as soon as the close below lands its
+			// resolution receipt.
+			Severity:          supervision.SeverityWarning,
+			SupervisionState:  supervision.SupervisionTerminated,
+			Reason:            fmt.Sprintf("child session %s finished with batch %s; close it to release the spawn thread quota", childSessionID, batchID),
+			RecommendedAction: string(supervision.ActionClose),
+			ResolutionState:   supervision.ResolutionUnresolved,
+		})
+		if err != nil {
+			continue
+		}
+		if !notification.ActionRequired() || strings.TrimSpace(notification.NotificationID) == "" {
+			// 已收敛（或已由父 agent 处理）：不重复关闭，也不重复写 audit。
+			continue
+		}
+		if _, err := control.Control(ctx, supervision.ControlRequest{
+			NotificationID: notification.NotificationID,
+			Scopes:         []string{rootScopeID, parentSessionID},
+			RequestedByID:  requestedBy,
+			Action:         supervision.ActionClose,
+			Reason:         auditReason,
+		}); err != nil {
+			// 拒绝/执行失败都已落 durable action 记录；收敛行保持可见，父 agent
+			// 下一次 preflight 仍能按 next_action 处理。
+			continue
+		}
+	}
+}
+
+// localBatchConvergenceEventType 是 P1-C 收敛行的稳定事件类型：与
+// ProjectAgentCompletion 的 agent_completed 区分，这样「已完成」的存档行不会把
+// 「待收敛」的动作需求顶掉。
+const localBatchConvergenceEventType = "agent_close_recommended"
 
 func localSubagentBatchTerminalSink(host *localChatRuntimeHost) agent.BatchTerminalSink {
 	return func(ctx context.Context, notification agent.BatchTerminalNotification) agent.BatchTerminalDelivery {
@@ -486,6 +621,64 @@ func (h *localChatRuntimeHost) wireLocalSupervisionExecutor() {
 	h.wireLocalSupervisionWakeConsumer()
 }
 
+// EventSupervisionWakeDeliveryFailed is published when an auto-wake turn could
+// not be handed to the parent actor. The wake itself is re-scheduled instead of
+// being dropped and the durable notification stays in the inbox (plan §6-F).
+const EventSupervisionWakeDeliveryFailed = "supervision.wake_delivery_failed"
+
+// requeueSupervisionWake records a failed auto-wake delivery and puts a fresh
+// durable wake back into the scheduler (plan §6-F).
+//
+// The WakeConsumer resolves the claimed wake rows as soon as the asynchronous
+// Deliver callback returns, so a submission failure that only got logged would
+// silently consume the parent's only auto-wake: the notification survives in
+// the inbox, but an idle parent would never be woken for it. Re-scheduling
+// keeps the retry path alive — the next runnable transition claims the fresh
+// row, and the existing class budget still bounds how often one broken
+// delivery path may retry.
+func (h *localChatRuntimeHost) requeueSupervisionWake(parentSessionID, rootScopeID string, wakeIDs []string, cause error) {
+	if h == nil || h.Supervision == nil || h.Supervision.Wakes == nil {
+		return
+	}
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	rootScopeID = strings.TrimSpace(rootScopeID)
+	if parentSessionID == "" || rootScopeID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// "critical_lifecycle" lands in the bounded `other` class: a repeatedly
+	// failing delivery cannot spin, because an exhausted class budget defers
+	// the wake instead of dropping it (wake_budget.go WakeBudgetClassOf).
+	_, requeueErr := h.Supervision.Wakes.ScheduleWake(ctx, supervision.WakeRequest{
+		RootScopeID:           rootScopeID,
+		TargetParentSessionID: parentSessionID,
+		WakeReason:            "critical_lifecycle",
+	})
+	if h.EventBus == nil {
+		return
+	}
+	detail := ""
+	if cause != nil {
+		detail = cause.Error()
+	}
+	requeueDetail := ""
+	if requeueErr != nil {
+		requeueDetail = requeueErr.Error()
+	}
+	h.EventBus.Publish(runtimeevents.Event{
+		Type:      EventSupervisionWakeDeliveryFailed,
+		SessionID: parentSessionID,
+		Payload: map[string]interface{}{
+			"parent_session_id": parentSessionID,
+			"root_scope_id":     rootScopeID,
+			"wake_ids":          strings.Join(wakeIDs, ","),
+			"delivery_error":    detail,
+			"requeue_error":     requeueDetail,
+		},
+	})
+}
+
 // wireLocalSupervisionWakeConsumer installs the wake consumer that turns
 // durable critical-lifecycle wakes into real parent turns (doc 6.5). The
 // consumer is invoked only at runnable state-transition points; the parent
@@ -509,7 +702,7 @@ func (h *localChatRuntimeHost) wireLocalSupervisionWakeConsumer() {
 			}
 			return !state.Summary().Busy()
 		},
-		Deliver: func(ctx context.Context, parentSessionID string, digest *supervision.Digest, wakeIDs []string) error {
+		Deliver: func(ctx context.Context, parentSessionID, rootScopeID string, digest *supervision.Digest, wakeIDs []string) error {
 			if h == nil || h.ActorRegistry == nil {
 				return fmt.Errorf("actor registry is not ready")
 			}
@@ -533,10 +726,16 @@ func (h *localChatRuntimeHost) wireLocalSupervisionWakeConsumer() {
 				defer cancel()
 				releaseTurn, err := h.acquireActorTurnGate(runCtx, parentSessionID)
 				if err != nil {
+					// Plan §6-F: the claimed wake rows are resolved as soon as
+					// this callback returns, so a failure that is only logged
+					// would silently consume the parent's only auto-wake.
+					h.requeueSupervisionWake(parentSessionID, rootScopeID, wakeIDs, err)
 					return
 				}
 				defer releaseTurn()
-				_ = h.submitParentWakeTurn(runCtx, parentSessionID)
+				if err := h.submitParentWakeTurn(runCtx, parentSessionID); err != nil {
+					h.requeueSupervisionWake(parentSessionID, rootScopeID, wakeIDs, err)
+				}
 			}()
 			return nil
 		},
@@ -813,6 +1012,9 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	// P2-9：宿主启动时即开启低频一致性对账（默认 observe，10 分钟），
 	// 让上一次进程崩溃/TTL 清理留下的 active 漂移在首个 pass 就被发现。
 	host.startLocalRegistryReconcile()
+	// P2-D：opt-in 周期巡查（supervision.progress_check_interval，默认 0
+	// 关闭时该调用是空操作，不注册 ticker、不新增 goroutine）。
+	host.startLocalSupervisionProgressCheck()
 	if host.Orchestrator != nil {
 		mailbox := team.NewMailboxService(host.TeamStore)
 		host.Orchestrator.Mailbox = mailbox
@@ -993,9 +1195,12 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		EventStore:   h.EventStore,
 		EventBus:     h.EventBus,
 		LoopConfig:   loopConfig,
-		PrepareRun:   localChatPrepareRunHook(apiAgent, session, workspaceRoot, isBaseSession),
-		PersistHook:  localGoalPersistHook(sessionStore),
-		RecoverStale: true,
+		// 灰度开关（默认开）：run 终态后到达的审批决议零恢复；显式
+		// supervision.approval_terminal_guard=false 可回退旧行为。
+		ApprovalTerminalGuard: h.supervisionConfig.ApprovalTerminalGuard,
+		PrepareRun:            localChatPrepareRunHook(apiAgent, session, workspaceRoot, isBaseSession),
+		PersistHook:           localGoalPersistHook(sessionStore),
+		RecoverStale:          true,
 		// 长 turn 中途增量落库：ReAct 循环每次提交 durable 历史后按该间隔把
 		// 已提交内容写回权威会话存储，避免长 turn 期间会话行长时间停在起始
 		// 状态（默认 15s，见 chat.DefaultSessionCheckpointInterval；可用
@@ -2332,23 +2537,25 @@ func injectLocalSupervisionPreflight(ctx context.Context, host *localChatRuntime
 		IncludeResolvedSince:  true,
 		SubjectPresence:       localSupervisionSubjectPresence(host),
 		HostCapabilities:      localSupervisionHostCapabilities(host),
+		// P0-B：把宿主已有的 durable batch 控制面投影成 progress 区块。只读，
+		// 不落新表也不产生唤醒；host.SubagentBatches 未装配时 NewBatchProgressSource
+		// 返回 nil，注入文本与改动前完全一致。
+		Progress: supervision.NewBatchProgressSource(host.SubagentBatches),
 	})
 	if err != nil {
 		return "", fmt.Errorf("build supervision preflight digest: %w", err)
 	}
-	if digest == nil || len(digest.Items) == 0 {
+	// 有 lifecycle 行或只有 progress 区块都要注入：正常进度（2/3 完成）过去正是
+	// "看起来什么都没发生"的那一半，S3 缺口的修复点就在这里。
+	if digest == nil || (len(digest.Items) == 0 && len(digest.Progress) == 0) {
 		return prompt, nil
 	}
 	now := time.Now().UTC()
 	for _, item := range digest.Items {
-		if item.NotificationID == "" {
-			continue
-		}
-		if err := host.Supervision.Store.MarkNotificationDelivered(ctx, item.NotificationID, now); err != nil {
-			return "", fmt.Errorf("mark supervision notification delivered: %w", err)
-		}
-		if err := host.Supervision.Store.MarkNotificationSeen(ctx, item.NotificationID, now); err != nil {
-			return "", fmt.Errorf("mark supervision notification seen: %w", err)
+		// Throttled (plan §4.3): rows the parent already saw are not re-marked,
+		// because each write only churned version/updated_at.
+		if err := supervision.MarkDigestItemDelivered(ctx, host.Supervision.Store, item, now); err != nil {
+			return "", err
 		}
 	}
 	text := strings.TrimSpace(digest.Text)

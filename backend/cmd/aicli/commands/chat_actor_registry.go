@@ -305,6 +305,11 @@ func (r *localActorRegistry) resolveSpawnAgentRoute(parentSession *runtimechat.S
 		args.RequestedPermissionMode = strings.TrimSpace(args.PermissionMode)
 		args.RequestedRouteCaptured = true
 	}
+	// The parent session's own mode is the session-level policy for its
+	// children; the broker only sees the current run meta, which follow-up and
+	// resumed runs may not carry. A --yolo parent must not silently spawn
+	// approval-asking children, and a plan parent must not delegate writes.
+	args = toolbroker.ResolveSpawnAgentPermissionPolicy(args, toolbroker.ParentSessionPermissionMode(parentSession))
 	args.EffectivePermissionMode = strings.TrimSpace(args.PermissionMode)
 	parent := r.spawnAgentParentDefaults(parentSession)
 	routingConfig := localChatSubagentRoutingConfig(nil)
@@ -2378,16 +2383,25 @@ func (r *localActorRegistry) ResolveApproval(ctx context.Context, args toolbroke
 	if err := actor.ApproveToolWithArgs(ctx, requestID, args.Allow, args.PatchedArgs); err != nil {
 		return nil, err
 	}
+	resolution, resumed := actor.ApprovalOutcome(requestID)
 	status, err := r.agentSnapshot(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
+	// A decision against an already-terminated run is recorded but never applied,
+	// so it is reported as not allowed (P0-3).
+	allowed := args.Allow
+	if toolbroker.ApprovalResolutionNotApplied(resolution) {
+		allowed = false
+	}
 	return &toolbroker.AgentApprovalResult{
-		SessionID: sessionID,
-		RequestID: requestID,
-		Allowed:   args.Allow,
-		Resolved:  true,
-		Status:    status,
+		SessionID:  sessionID,
+		RequestID:  requestID,
+		Allowed:    allowed,
+		Resolved:   true,
+		Resumed:    resumed,
+		Resolution: resolution,
+		Status:     status,
 	}, nil
 }
 

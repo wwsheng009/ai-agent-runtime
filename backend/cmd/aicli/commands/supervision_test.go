@@ -2,12 +2,15 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimeserver "github.com/wwsheng009/ai-agent-runtime/internal/runtimeserver"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
@@ -77,7 +80,7 @@ func TestLocalSubagentBatchRecoveryLifecycleProjectorDefersWakeDelivery(t *testi
 		Runnable: func(context.Context, string, string, string) bool {
 			return true
 		},
-		Deliver: func(context.Context, string, *supervision.Digest, []string) error {
+		Deliver: func(context.Context, string, string, *supervision.Digest, []string) error {
 			deliveries++
 			return nil
 		},
@@ -127,7 +130,7 @@ func TestLocalSubagentBatchRecoveryLifecycleProjectorKeepsHeadlessWakeDelivery(t
 		Runnable: func(context.Context, string, string, string) bool {
 			return true
 		},
-		Deliver: func(context.Context, string, *supervision.Digest, []string) error {
+		Deliver: func(context.Context, string, string, *supervision.Digest, []string) error {
 			deliveries++
 			return nil
 		},
@@ -232,6 +235,59 @@ func TestInjectLocalSupervisionPreflight_IncludesWakeBudgetLine(t *testing.T) {
 	require.Contains(t, noLedgerPrompt, "[Child lifecycle preflight]")
 }
 
+// TestInjectLocalSupervisionPreflight_IncludesBatchProgress covers the P0-B
+// acceptance on the CLI path: an active background batch whose children are
+// mostly done reaches the parent turn as "2/3 completed, worker-2 running" even
+// though no lifecycle notification exists. Before P0-B a healthy batch was
+// invisible, so "巡查" could only ever surface failures.
+func TestInjectLocalSupervisionPreflight_IncludesBatchProgress(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	ctx := context.Background()
+	batchStore, err := subagentbatch.NewSQLiteBatchStore(&subagentbatch.StoreConfig{
+		Path: filepath.Join(t.TempDir(), "subagent_batches.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = batchStore.Close() })
+	host.SubagentBatches = batchStore
+
+	_, err = batchStore.CreateBatch(ctx, &subagentbatch.SubagentBatch{
+		BatchID:         "batch-progress-1",
+		RootScopeID:     "parent-session",
+		ParentSessionID: "parent-session",
+		ExecutionMode:   subagentbatch.ExecutionModeBackground,
+		Status:          subagentbatch.BatchRunning,
+		TaskCount:       3,
+		CompletedCount:  2,
+		RunningCount:    1,
+	}, []subagentbatch.SubagentTaskRecord{
+		{TaskID: "worker-1", ChildSessionID: "session-1", Status: subagentbatch.TaskSucceeded},
+		{TaskID: "worker-2", ChildSessionID: "session-2", Status: subagentbatch.TaskRunning},
+		{TaskID: "worker-3", ChildSessionID: "session-3", Status: subagentbatch.TaskSucceeded},
+	})
+	require.NoError(t, err)
+
+	prompt, err := injectLocalSupervisionPreflight(ctx, host, "parent-session", "continue work", nil)
+	require.NoError(t, err)
+	require.Contains(t, prompt, "[Child lifecycle preflight]")
+	require.Contains(t, prompt, "progress:")
+	require.Contains(t, prompt, "batch-progress-1: 2/3 completed, 1 running")
+	require.Contains(t, prompt, "worker-2: running; session=session-2")
+	require.NotContains(t, prompt, "worker-1", "terminal children stay out of the rollup")
+	require.Contains(t, prompt, "continue work")
+
+	// A host without a batch store keeps the pre-P0-B text: the rollup is opt-in,
+	// and with nothing to report the prompt is returned untouched.
+	unwired := newLocalSupervisionTestHost(t)
+	unwiredPrompt, err := injectLocalSupervisionPreflight(ctx, unwired, "parent-session", "continue work", nil)
+	require.NoError(t, err)
+	require.Equal(t, "continue work", unwiredPrompt)
+
+	// Batches owned by another parent never leak into this turn's scope.
+	otherPrompt, err := injectLocalSupervisionPreflight(ctx, host, "other-session", "continue work", nil)
+	require.NoError(t, err)
+	require.NotContains(t, otherPrompt, "batch-progress-1")
+}
+
 func TestInjectLocalSupervisionPreflight_DoesNotRepeatAcknowledgedNotification(t *testing.T) {
 	host := newLocalSupervisionTestHost(t)
 	ctx := context.Background()
@@ -329,4 +385,59 @@ func TestLocalActorRegistry_SubmitPromptInjectsPreflight(t *testing.T) {
 	updated, err := host.Supervision.Store.GetNotification(ctx, notification.NotificationID)
 	require.NoError(t, err)
 	require.Equal(t, supervision.DeliverySeen, updated.DeliveryState)
+}
+
+// TestRequeueSupervisionWakeKeepsRetryPath 覆盖 plan §6-F：CLI 的投递是异步的，
+// 唤醒行在 Deliver 返回时就被 resolve；因此提交失败若只被记录，父会话唯一的
+// auto-wake 就被静默消费。requeue 必须留下一条新的 durable wake 并发布可观测事件。
+func TestRequeueSupervisionWakeKeepsRetryPath(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	host.EventBus = runtimeevents.NewBusWithRetention(8)
+	var mu sync.Mutex
+	var events []runtimeevents.Event
+	host.EventBus.Subscribe(EventSupervisionWakeDeliveryFailed, func(event runtimeevents.Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, event)
+	})
+
+	host.requeueSupervisionWake("parent-session", "parent-session", []string{"wake-1"}, errors.New("actor registry is not ready"))
+
+	ctx := context.Background()
+	pending, err := host.Supervision.Store.ListWakePending(ctx, supervision.WakeFilter{
+		RootScopeID:           "parent-session",
+		TargetParentSessionID: "parent-session",
+		UnclaimedOnly:         true,
+	})
+	require.NoError(t, err)
+	require.Len(t, pending, 1, "a failed delivery must leave a durable wake behind")
+	require.Equal(t, "critical_lifecycle", pending[0].WakeReason)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, events, 1)
+	require.Equal(t, "parent-session", events[0].Payload["parent_session_id"])
+	require.Equal(t, "parent-session", events[0].Payload["root_scope_id"])
+	require.Equal(t, "wake-1", events[0].Payload["wake_ids"])
+	require.Equal(t, "actor registry is not ready", events[0].Payload["delivery_error"])
+}
+
+// TestRequeueSupervisionWakeIgnoresIncompleteScope 固定空 scope 的保护：没有
+// root scope 时不能伪造 wake（ScheduleWake 会拒绝，等于最坏情况的静默失败）。
+func TestRequeueSupervisionWakeIgnoresIncompleteScope(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	host.EventBus = runtimeevents.NewBusWithRetention(8)
+	delivered := 0
+	host.EventBus.Subscribe(EventSupervisionWakeDeliveryFailed, func(runtimeevents.Event) { delivered++ })
+
+	host.requeueSupervisionWake("parent-session", "", nil, errors.New("boom"))
+
+	pending, err := host.Supervision.Store.ListWakePending(context.Background(), supervision.WakeFilter{
+		RootScopeID:           "parent-session",
+		TargetParentSessionID: "parent-session",
+		UnclaimedOnly:         true,
+	})
+	require.NoError(t, err)
+	require.Empty(t, pending)
+	require.Zero(t, delivered)
 }

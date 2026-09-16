@@ -104,6 +104,90 @@ func TestLocalSupervisionToolController_SnapshotThenAckConverges(t *testing.T) {
 	require.Zero(t, digest.CriticalUnresolved, "acknowledged row must leave the model-facing digest")
 }
 
+// recordingDescendantProvider captures the scope each inspection used, so the
+// tests can assert the model cannot widen it.
+type recordingDescendantProvider struct {
+	states []supervision.DescendantState
+	scopes []supervision.Scope
+}
+
+func (p *recordingDescendantProvider) ListDescendants(ctx context.Context, scope supervision.Scope) ([]supervision.DescendantState, error) {
+	p.scopes = append(p.scopes, scope)
+	return p.states, nil
+}
+
+// TestLocalSupervisionToolController_DescendantsCoversWholeBatch is the P0-A
+// acceptance scenario: a parent that spawned three children reads all three in
+// one call (2 running + 1 stalled) instead of polling wait_agent row by row.
+func TestLocalSupervisionToolController_DescendantsCoversWholeBatch(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	session := newChatDebugSupervisionSession(host, "parent-session")
+	controller := newLocalSupervisionToolController(host, session)
+	provider := &recordingDescendantProvider{states: []supervision.DescendantState{
+		{Kind: supervision.SubjectAgentSession, ID: "worker-1", ExecutionStatus: "running", SupervisionState: supervision.SupervisionRunning, ProgressAgeMs: 1200},
+		{Kind: supervision.SubjectAgentSession, ID: "worker-2", ExecutionStatus: "running", SupervisionState: supervision.SupervisionRunning, ProgressAgeMs: 800},
+		{Kind: supervision.SubjectAgentSession, ID: "worker-3", ExecutionStatus: "running", SupervisionState: supervision.SupervisionStalled, ProgressAgeMs: 90000, Reason: "no progress event"},
+	}}
+	host.Supervision.Provider = provider
+
+	snapshot, err := controller.SupervisionDescendants(context.Background(), "parent-session", toolbroker.SupervisionDescendantsArgs{})
+	require.NoError(t, err)
+	require.Len(t, snapshot.Descendants, 3, "one call must cover the whole batch")
+	require.Equal(t, 2, snapshot.Summary.Running)
+	require.Equal(t, 1, snapshot.Summary.Stalled)
+	require.Equal(t, supervision.Scope{RootSessionID: "parent-session"}, provider.scopes[0],
+		"the host derives the subtree from the caller session; the model cannot name a scope")
+	require.Empty(t, snapshot.Scope.RootTeamID)
+
+	// Filters are applied by the builder and forwarded verbatim.
+	filtered, err := controller.SupervisionDescendants(context.Background(), "parent-session", toolbroker.SupervisionDescendantsArgs{
+		Mode:   "children",
+		Health: "abnormal",
+		Limit:  1,
+	})
+	require.NoError(t, err)
+	require.Len(t, filtered.Descendants, 1)
+	require.Equal(t, "worker-3", filtered.Descendants[0].ID)
+	require.Equal(t, "no progress event", filtered.Descendants[0].Reason)
+	require.Equal(t, supervision.Scope{RootSessionID: "parent-session", Mode: "children"}, provider.scopes[1])
+}
+
+// TestLocalSupervisionToolController_DescendantsTeamLeadKeepsTeamRoot pins the
+// team-lead口径: the projected subtree stays the lead's own session (so agent
+// rows remain visible) while the durable root scope stays the team, which is
+// what makes team-addressed rows show up in the matrix.
+func TestLocalSupervisionToolController_DescendantsTeamLeadKeepsTeamRoot(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	t.Cleanup(func() { _ = host.TeamStore.Close() })
+	teamID, err := host.TeamStore.CreateTeam(context.Background(), team.Team{
+		ID:            "team-descendants",
+		LeadSessionID: "lead-session",
+		Status:        team.TeamStatusActive,
+	})
+	require.NoError(t, err)
+
+	session := newChatDebugSupervisionSession(host, "lead-session")
+	session.ActiveTeam = &chatTeamBinding{TeamID: teamID, AgentID: "lead"}
+	controller := newLocalSupervisionToolController(host, session)
+	notification := upsertTeamScopedSupervisionNotification(t, host, teamID, "lead-session", "batch-team-desc")
+	seedSupervisionExecutionRun(t, host, "batch-team-desc")
+
+	snapshot, err := controller.SupervisionDescendants(context.Background(), "lead-session", toolbroker.SupervisionDescendantsArgs{})
+	require.NoError(t, err)
+	require.Equal(t, teamID, snapshot.Scope.RootTeamID)
+	require.Equal(t, "lead-session", snapshot.Scope.RootSessionID)
+	require.Len(t, snapshot.Descendants, 1, "team rows addressed at the lead must be visible")
+	require.Equal(t, notification.NotificationID, snapshot.Descendants[0].NotificationID)
+	require.True(t, snapshot.Descendants[0].ActionRequired)
+
+	// A foreign session never sees the team matrix.
+	other := newChatDebugSupervisionSession(host, "other-session")
+	otherController := newLocalSupervisionToolController(host, other)
+	foreign, err := otherController.SupervisionDescendants(context.Background(), "other-session", toolbroker.SupervisionDescendantsArgs{})
+	require.NoError(t, err)
+	require.Empty(t, foreign.Descendants)
+}
+
 func TestLocalSupervisionToolController_RejectsForeignScope(t *testing.T) {
 	host := newLocalSupervisionTestHost(t)
 	session := newChatDebugSupervisionSession(host, "parent-session")

@@ -242,6 +242,33 @@ func (c *SubagentBatchCoordinator) SetEmitter(emitter BatchEmitter) {
 	c.emitterMu.Unlock()
 }
 
+// HasEmitter reports whether a display-mirror emitter is already installed.
+// Hosts that inject a shared coordinator use it to keep the agent's own
+// runtime-event emitter when the injected coordinator arrived without one:
+// the lazy default path always installs one, so an injected coordinator with a
+// nil emitter would otherwise silently stop streaming batch events.
+func (c *SubagentBatchCoordinator) HasEmitter() bool {
+	if c == nil {
+		return false
+	}
+	c.emitterMu.RLock()
+	defer c.emitterMu.RUnlock()
+	return c.emitter != nil
+}
+
+// HasTerminalSink reports whether a durable parent-notification sink is
+// installed. Hosts use it to prove the terminal mailbox bridge is wired: without
+// a sink the batch terminal stops at the in-memory supervision row and the
+// parent never gets the durable "batch finished" mailbox message.
+func (c *SubagentBatchCoordinator) HasTerminalSink() bool {
+	if c == nil {
+		return false
+	}
+	c.terminalMu.Lock()
+	defer c.terminalMu.Unlock()
+	return c.sink != nil
+}
+
 // Store exposes the durable control plane (used by hosts for recovery).
 func (c *SubagentBatchCoordinator) Store() subagentbatch.BatchStore {
 	if c == nil {

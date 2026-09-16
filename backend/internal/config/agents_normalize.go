@@ -60,5 +60,8 @@ func NormalizeAgentsConfig(cfg AgentsConfig) AgentsConfig {
 	if cfg.ReclaimIdleMs == 0 {
 		cfg.ReclaimIdleMs = defaults.ReclaimIdleMs
 	}
+	if strings.TrimSpace(cfg.AutoCloseCompleted) == "" {
+		cfg.AutoCloseCompleted = defaults.AutoCloseCompleted
+	}
 	return cfg
 }

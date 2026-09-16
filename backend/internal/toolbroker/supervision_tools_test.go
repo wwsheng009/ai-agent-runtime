@@ -15,15 +15,17 @@ import (
 
 type fakeSupervisionController struct {
 	digest       *supervision.Digest
+	snapshot     *supervision.Snapshot
 	notification *supervision.Notification
 	record       supervision.ActionRecord
 	err          error
 
-	parentID    string
-	snapshotReq SupervisionSnapshotArgs
-	ackReq      AckLifecycleArgs
-	controlReq  ControlDescendantArgs
-	calls       int
+	parentID       string
+	snapshotReq    SupervisionSnapshotArgs
+	descendantsReq SupervisionDescendantsArgs
+	ackReq         AckLifecycleArgs
+	controlReq     ControlDescendantArgs
+	calls          int
 }
 
 func (f *fakeSupervisionController) SupervisionSnapshot(ctx context.Context, parentSessionID string, args SupervisionSnapshotArgs) (*supervision.Digest, error) {
@@ -31,6 +33,13 @@ func (f *fakeSupervisionController) SupervisionSnapshot(ctx context.Context, par
 	f.parentID = parentSessionID
 	f.snapshotReq = args
 	return f.digest, f.err
+}
+
+func (f *fakeSupervisionController) SupervisionDescendants(ctx context.Context, parentSessionID string, args SupervisionDescendantsArgs) (*supervision.Snapshot, error) {
+	f.calls++
+	f.parentID = parentSessionID
+	f.descendantsReq = args
+	return f.snapshot, f.err
 }
 
 func (f *fakeSupervisionController) AckLifecycle(ctx context.Context, parentSessionID string, args AckLifecycleArgs) (*supervision.Notification, error) {
@@ -63,6 +72,7 @@ func TestBroker_Definitions_GateSupervisionToolsOnHostCapability(t *testing.T) {
 	// declared-but-unreachable tool is worse than a missing one.
 	without := toolDefinitionNames((&Broker{}).Definitions())
 	require.NotContains(t, without, ToolSupervisionSnapshot)
+	require.NotContains(t, without, ToolSupervisionDescendants)
 	require.NotContains(t, without, ToolAckLifecycle)
 	require.NotContains(t, without, ToolControlDescendant)
 
@@ -70,6 +80,7 @@ func TestBroker_Definitions_GateSupervisionToolsOnHostCapability(t *testing.T) {
 	defs := broker.Definitions()
 	names := toolDefinitionNames(defs)
 	require.Contains(t, names, ToolSupervisionSnapshot)
+	require.Contains(t, names, ToolSupervisionDescendants)
 	require.Contains(t, names, ToolAckLifecycle)
 	require.Contains(t, names, ToolControlDescendant)
 
@@ -77,6 +88,37 @@ func TestBroker_Definitions_GateSupervisionToolsOnHostCapability(t *testing.T) {
 	require.NotNil(t, snapshot.Metadata)
 	require.Equal(t, false, snapshot.Metadata[types.ToolMetadataEmptyReplayCacheKey],
 		"snapshot is a polling tool: an empty result must not be cached as a negative answer")
+	require.Contains(t, snapshot.Description, "use supervision_descendants",
+		"the digest description must point routine matrix inspection at supervision_descendants")
+
+	descendants := supervisionDefinition(t, defs, ToolSupervisionDescendants)
+	require.Equal(t, false, descendants.Metadata[types.ToolMetadataEmptyReplayCacheKey],
+		"descendants is an inspection tool: an empty matrix must not be cached as a negative answer")
+	require.Contains(t, descendants.Description, "anti-polling",
+		"the description must tell the model that repeated inspection is the intended primitive")
+	require.Contains(t, descendants.Description, "do not poll wait_agent",
+		"the description must steer routine supervision away from repeated wait_agent polling")
+	for _, field := range []string{"recommended_action", "allowed_actions", "next_action"} {
+		require.Contains(t, descendants.Description, field,
+			"the description must explain the decision field %q returned per row", field)
+	}
+	descendantParams, ok := descendants.Parameters["properties"].(map[string]interface{})
+	require.True(t, ok)
+	for _, key := range []string{"mode", "health", "include_terminal", "limit", "after_seq"} {
+		require.Contains(t, descendantParams, key)
+	}
+	healthParam, ok := descendantParams["health"].(map[string]interface{})
+	require.True(t, ok)
+	require.Contains(t, healthParam["description"], "action_required",
+		"the health parameter must document the action_required filter")
+	terminalParam, ok := descendantParams["include_terminal"].(map[string]interface{})
+	require.True(t, ok)
+	require.Contains(t, terminalParam["description"], "default false",
+		"the include_terminal parameter must document its default")
+	limitParam, ok := descendantParams["limit"].(map[string]interface{})
+	require.True(t, ok)
+	require.Contains(t, limitParam["description"], "truncated=true",
+		"the limit parameter must document how truncation is reported")
 
 	ack := supervisionDefinition(t, defs, ToolAckLifecycle)
 	require.NotEqual(t, false, ack.Metadata[types.ToolMetadataEmptyReplayCacheKey])
@@ -85,14 +127,22 @@ func TestBroker_Definitions_GateSupervisionToolsOnHostCapability(t *testing.T) {
 	require.True(t, ok)
 	require.Contains(t, params, "expected_version")
 	require.Contains(t, params, "note")
+	ackNotification, ok := params["notification_id"].(map[string]interface{})
+	require.True(t, ok)
+	require.Contains(t, ackNotification["description"], "verbatim",
+		"ack_lifecycle must require a notification_id copied from the read models")
 	controlParams, ok := supervisionDefinition(t, defs, ToolControlDescendant).Parameters["properties"].(map[string]interface{})
 	require.True(t, ok)
 	require.Contains(t, controlParams, "cascade")
+	controlNotification, ok := controlParams["notification_id"].(map[string]interface{})
+	require.True(t, ok)
+	require.Contains(t, controlNotification["description"], "verbatim",
+		"control_descendant must require a notification_id copied from the read models")
 }
 
 func TestBroker_IsBrokerTool_RecognizesSupervisionTools(t *testing.T) {
 	broker := &Broker{}
-	for _, name := range []string{ToolSupervisionSnapshot, ToolAckLifecycle, ToolControlDescendant, "supervisionSnapshot", "ackLifecycle", "controlDescendant"} {
+	for _, name := range []string{ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolAckLifecycle, ToolControlDescendant, "supervisionSnapshot", "supervisionDescendants", "ackLifecycle", "controlDescendant"} {
 		require.Truef(t, broker.IsBrokerTool(name), "%s must be recognized as a broker tool", name)
 	}
 }
@@ -129,6 +179,60 @@ func TestBroker_Execute_SupervisionSnapshot(t *testing.T) {
 	require.Equal(t, 1, meta["stale_subjects"])
 	require.Equal(t, int64(7), meta["next_seq"])
 	require.Contains(t, meta["next_action"], "ack_lifecycle")
+}
+
+// TestBroker_Execute_SupervisionDescendants pins the business 巡查 entry: the
+// typed filters reach the host controller, the payload is the snapshot itself
+// (so the model reads rows, not a pre-rendered string) and the summary rollup
+// is cache-safe (repeat inspections must not be replayed from a negative cache).
+func TestBroker_Execute_SupervisionDescendants(t *testing.T) {
+	controller := &fakeSupervisionController{
+		snapshot: &supervision.Snapshot{
+			Summary: supervision.SnapshotSummary{Running: 2, Stalled: 1, ActionRequired: 1},
+			Descendants: []supervision.SnapshotItem{
+				{Kind: supervision.SubjectAgentSession, ID: "child-1", SupervisionState: supervision.SupervisionRunning},
+				{Kind: supervision.SubjectAgentSession, ID: "child-2", SupervisionState: supervision.SupervisionRunning},
+				{Kind: supervision.SubjectAgentSession, ID: "child-3", SupervisionState: supervision.SupervisionStalled, NotificationID: "n-3", ActionRequired: true},
+			},
+			Truncated: true,
+			NextSeq:   9,
+		},
+	}
+	broker := &Broker{Supervision: controller}
+
+	raw, meta, err := broker.Execute(context.Background(), "parent-session", ToolSupervisionDescendants, map[string]interface{}{
+		"mode":             "CHILDREN",
+		"health":           "Action_Required",
+		"include_terminal": true,
+		"after_seq":        float64(4),
+		"limit":            float64(50),
+	})
+	require.NoError(t, err)
+	snapshot, ok := raw.(*supervision.Snapshot)
+	require.True(t, ok)
+	require.Len(t, snapshot.Descendants, 3)
+	require.Equal(t, "parent-session", controller.parentID, "the host derives scope from the caller session")
+	require.Equal(t, "children", controller.descendantsReq.Mode, "mode is a closed lowercase vocabulary")
+	require.Equal(t, "action_required", controller.descendantsReq.Health)
+	require.True(t, controller.descendantsReq.IncludeTerminal)
+	require.Equal(t, int64(4), controller.descendantsReq.AfterSeq)
+	require.Equal(t, 50, controller.descendantsReq.Limit)
+
+	require.Equal(t, 3, meta["row_count"])
+	require.Equal(t, 2, meta["running"])
+	require.Equal(t, 1, meta["stalled"])
+	require.Equal(t, 1, meta["action_required"])
+	require.Equal(t, true, meta["truncated"])
+	require.Equal(t, int64(9), meta["next_seq"])
+	require.Contains(t, meta["next_action"], "control_descendant")
+
+	// Unknown modes/health values are rejected before the host is called: a typo
+	// must not silently widen the read to the whole scope.
+	for _, bad := range []map[string]interface{}{{"mode": "everything"}, {"health": "slow"}} {
+		_, _, err := broker.Execute(context.Background(), "parent-session", ToolSupervisionDescendants, bad)
+		require.Error(t, err)
+	}
+	require.Equal(t, 1, controller.calls, "invalid filters never reach the controller")
 }
 
 func TestBroker_Execute_AckLifecycle_ValidatesAndForwards(t *testing.T) {

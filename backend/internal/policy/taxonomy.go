@@ -19,53 +19,54 @@ type ToolTaxonomy struct {
 // knownToolTaxonomy is the built-in table for core toolkit / broker tools.
 // CapabilityResolver prefers this over name heuristics when present.
 var knownToolTaxonomy = map[string]ToolTaxonomy{
-	"view":                   {Name: "view", Kind: types.ToolKindRead, ReadOnly: true},
-	"grep":                   {Name: "grep", Kind: types.ToolKindSearch, ReadOnly: true},
-	"glob":                   {Name: "glob", Kind: types.ToolKindSearch, ReadOnly: true},
-	"ls":                     {Name: "ls", Kind: types.ToolKindRead, ReadOnly: true},
-	"sourcegraph":            {Name: "sourcegraph", Kind: types.ToolKindSearch, ReadOnly: true, RequiresNet: true},
-	"web_search":             {Name: "web_search", Kind: types.ToolKindSearch, ReadOnly: true, RequiresNet: true},
-	"search_tool":            {Name: "search_tool", Kind: types.ToolKindSearch, ReadOnly: true},
-	"fetch":                  {Name: "fetch", Kind: types.ToolKindNetwork, ReadOnly: true, RequiresNet: true},
-	"download":               {Name: "download", Kind: types.ToolKindNetwork, MutatesFS: true, RequiresNet: true},
-	"write":                  {Name: "write", Kind: types.ToolKindEdit, MutatesFS: true},
-	"edit":                   {Name: "edit", Kind: types.ToolKindEdit, MutatesFS: true},
-	"multiedit":              {Name: "multiedit", Kind: types.ToolKindEdit, MutatesFS: true},
-	"append_write":           {Name: "append_write", Kind: types.ToolKindEdit, MutatesFS: true},
-	"apply_patch":            {Name: "apply_patch", Kind: types.ToolKindEdit, MutatesFS: true},
-	"shell":                  {Name: "shell", Kind: types.ToolKindExec},
-	"bash":                   {Name: "bash", Kind: types.ToolKindExec},
-	"aicli_exec":             {Name: "aicli_exec", Kind: types.ToolKindExec},
-	"ask_user_question":      {Name: "ask_user_question", Kind: types.ToolKindControl, ReadOnly: true},
-	"enter_plan_mode":        {Name: "enter_plan_mode", Kind: types.ToolKindControl, ReadOnly: true},
-	"exit_plan_mode":         {Name: "exit_plan_mode", Kind: types.ToolKindControl, ReadOnly: true},
-	"background_task":        {Name: "background_task", Kind: types.ToolKindControl},
-	"task_output":            {Name: "task_output", Kind: types.ToolKindRead, ReadOnly: true},
-	"spawn_agent":            {Name: "spawn_agent", Kind: types.ToolKindControl, ReadOnly: true},
-	"list_agents":            {Name: "list_agents", Kind: types.ToolKindControl, ReadOnly: true},
-	"send_message":           {Name: "send_message", Kind: types.ToolKindControl, ReadOnly: true},
-	"followup_task":          {Name: "followup_task", Kind: types.ToolKindControl, ReadOnly: true},
-	"send_input":             {Name: "send_input", Kind: types.ToolKindControl, ReadOnly: true},
-	"wait_agent":             {Name: "wait_agent", Kind: types.ToolKindControl, ReadOnly: true},
-	"read_agent_events":      {Name: "read_agent_events", Kind: types.ToolKindControl, ReadOnly: true},
-	"close_agent":            {Name: "close_agent", Kind: types.ToolKindControl, ReadOnly: true},
-	"resume_agent":           {Name: "resume_agent", Kind: types.ToolKindControl, ReadOnly: true},
-	"resolve_agent_approval": {Name: "resolve_agent_approval", Kind: types.ToolKindControl, ReadOnly: true},
-	"supervision_snapshot":   {Name: "supervision_snapshot", Kind: types.ToolKindRead, ReadOnly: true},
-	"ack_lifecycle":          {Name: "ack_lifecycle", Kind: types.ToolKindControl},
-	"control_descendant":     {Name: "control_descendant", Kind: types.ToolKindControl},
-	"spawn_team":             {Name: "spawn_team", Kind: types.ToolKindControl, ReadOnly: true},
-	"wait_team":              {Name: "wait_team", Kind: types.ToolKindControl, ReadOnly: true},
-	"send_team_message":      {Name: "send_team_message", Kind: types.ToolKindControl, ReadOnly: true},
-	"read_mailbox_digest":    {Name: "read_mailbox_digest", Kind: types.ToolKindControl, ReadOnly: true},
-	"read_task_spec":         {Name: "read_task_spec", Kind: types.ToolKindControl, ReadOnly: true},
-	"read_task_context":      {Name: "read_task_context", Kind: types.ToolKindControl, ReadOnly: true},
-	"report_task_outcome":    {Name: "report_task_outcome", Kind: types.ToolKindControl, ReadOnly: true},
-	"block_current_task":     {Name: "block_current_task", Kind: types.ToolKindControl, ReadOnly: true},
-	"todos":                  {Name: "todos", Kind: types.ToolKindControl, ReadOnly: true},
-	"get_goal":               {Name: "get_goal", Kind: types.ToolKindControl, ReadOnly: true},
-	"update_goal":            {Name: "update_goal", Kind: types.ToolKindControl, ReadOnly: true},
-	"openai_image_generate":  {Name: "openai_image_generate", Kind: types.ToolKindNetwork, RequiresNet: true},
+	"view":                    {Name: "view", Kind: types.ToolKindRead, ReadOnly: true},
+	"grep":                    {Name: "grep", Kind: types.ToolKindSearch, ReadOnly: true},
+	"glob":                    {Name: "glob", Kind: types.ToolKindSearch, ReadOnly: true},
+	"ls":                      {Name: "ls", Kind: types.ToolKindRead, ReadOnly: true},
+	"sourcegraph":             {Name: "sourcegraph", Kind: types.ToolKindSearch, ReadOnly: true, RequiresNet: true},
+	"web_search":              {Name: "web_search", Kind: types.ToolKindSearch, ReadOnly: true, RequiresNet: true},
+	"search_tool":             {Name: "search_tool", Kind: types.ToolKindSearch, ReadOnly: true},
+	"fetch":                   {Name: "fetch", Kind: types.ToolKindNetwork, ReadOnly: true, RequiresNet: true},
+	"download":                {Name: "download", Kind: types.ToolKindNetwork, MutatesFS: true, RequiresNet: true},
+	"write":                   {Name: "write", Kind: types.ToolKindEdit, MutatesFS: true},
+	"edit":                    {Name: "edit", Kind: types.ToolKindEdit, MutatesFS: true},
+	"multiedit":               {Name: "multiedit", Kind: types.ToolKindEdit, MutatesFS: true},
+	"append_write":            {Name: "append_write", Kind: types.ToolKindEdit, MutatesFS: true},
+	"apply_patch":             {Name: "apply_patch", Kind: types.ToolKindEdit, MutatesFS: true},
+	"shell":                   {Name: "shell", Kind: types.ToolKindExec},
+	"bash":                    {Name: "bash", Kind: types.ToolKindExec},
+	"aicli_exec":              {Name: "aicli_exec", Kind: types.ToolKindExec},
+	"ask_user_question":       {Name: "ask_user_question", Kind: types.ToolKindControl, ReadOnly: true},
+	"enter_plan_mode":         {Name: "enter_plan_mode", Kind: types.ToolKindControl, ReadOnly: true},
+	"exit_plan_mode":          {Name: "exit_plan_mode", Kind: types.ToolKindControl, ReadOnly: true},
+	"background_task":         {Name: "background_task", Kind: types.ToolKindControl},
+	"task_output":             {Name: "task_output", Kind: types.ToolKindRead, ReadOnly: true},
+	"spawn_agent":             {Name: "spawn_agent", Kind: types.ToolKindControl, ReadOnly: true},
+	"list_agents":             {Name: "list_agents", Kind: types.ToolKindControl, ReadOnly: true},
+	"send_message":            {Name: "send_message", Kind: types.ToolKindControl, ReadOnly: true},
+	"followup_task":           {Name: "followup_task", Kind: types.ToolKindControl, ReadOnly: true},
+	"send_input":              {Name: "send_input", Kind: types.ToolKindControl, ReadOnly: true},
+	"wait_agent":              {Name: "wait_agent", Kind: types.ToolKindControl, ReadOnly: true},
+	"read_agent_events":       {Name: "read_agent_events", Kind: types.ToolKindControl, ReadOnly: true},
+	"close_agent":             {Name: "close_agent", Kind: types.ToolKindControl, ReadOnly: true},
+	"resume_agent":            {Name: "resume_agent", Kind: types.ToolKindControl, ReadOnly: true},
+	"resolve_agent_approval":  {Name: "resolve_agent_approval", Kind: types.ToolKindControl, ReadOnly: true},
+	"supervision_snapshot":    {Name: "supervision_snapshot", Kind: types.ToolKindRead, ReadOnly: true},
+	"supervision_descendants": {Name: "supervision_descendants", Kind: types.ToolKindRead, ReadOnly: true},
+	"ack_lifecycle":           {Name: "ack_lifecycle", Kind: types.ToolKindControl},
+	"control_descendant":      {Name: "control_descendant", Kind: types.ToolKindControl},
+	"spawn_team":              {Name: "spawn_team", Kind: types.ToolKindControl, ReadOnly: true},
+	"wait_team":               {Name: "wait_team", Kind: types.ToolKindControl, ReadOnly: true},
+	"send_team_message":       {Name: "send_team_message", Kind: types.ToolKindControl, ReadOnly: true},
+	"read_mailbox_digest":     {Name: "read_mailbox_digest", Kind: types.ToolKindControl, ReadOnly: true},
+	"read_task_spec":          {Name: "read_task_spec", Kind: types.ToolKindControl, ReadOnly: true},
+	"read_task_context":       {Name: "read_task_context", Kind: types.ToolKindControl, ReadOnly: true},
+	"report_task_outcome":     {Name: "report_task_outcome", Kind: types.ToolKindControl, ReadOnly: true},
+	"block_current_task":      {Name: "block_current_task", Kind: types.ToolKindControl, ReadOnly: true},
+	"todos":                   {Name: "todos", Kind: types.ToolKindControl, ReadOnly: true},
+	"get_goal":                {Name: "get_goal", Kind: types.ToolKindControl, ReadOnly: true},
+	"update_goal":             {Name: "update_goal", Kind: types.ToolKindControl, ReadOnly: true},
+	"openai_image_generate":   {Name: "openai_image_generate", Kind: types.ToolKindNetwork, RequiresNet: true},
 }
 
 // LookupToolTaxonomy returns built-in taxonomy for a tool name when known.
@@ -114,19 +115,11 @@ func ResolveToolTaxonomy(toolName string, metadata map[string]interface{}) (Tool
 
 func capabilitiesFromTaxonomy(tax ToolTaxonomy) []Capability {
 	name := normalizeToolName(tax.Name)
-
-	switch name {
-	case "ask_user_question":
-		return []Capability{CapAskUser}
-	case "enter_plan_mode", "exit_plan_mode":
-		// Control tools usable while already in plan mode (read-only + ask_user).
-		return []Capability{CapReadOnly, CapAskUser}
-	case "background_task":
-		return []Capability{CapBackgroundTask}
-	case "spawn_agent", "send_message", "followup_task", "send_input", "close_agent", "resume_agent", "resolve_agent_approval", "spawn_team", "send_team_message":
-		return []Capability{CapReadOnly, CapAgentManagement}
-	case "list_agents", "wait_agent", "read_agent_events", "wait_team", "read_mailbox_digest", "read_task_spec", "read_task_context", "report_task_outcome", "block_current_task":
-		return []Capability{CapReadOnly}
+	// Control-plane tools consult the shared table first: their capability needs
+	// are not derivable from ReadOnly/Kind heuristics below (a control write is
+	// not a filesystem write, and Kind alone cannot express agent_management).
+	if caps, ok := controlPlaneToolCapabilities(name); ok {
+		return caps
 	}
 
 	caps := make([]Capability, 0, 4)

@@ -117,7 +117,24 @@ type AgentsConfig struct {
 	// 0 (default) keeps eviction conservative: only children whose container is
 	// provably missing or terminal are reclaimed.
 	ReclaimIdleMs int `yaml:"reclaimIdleMs,omitempty" json:"reclaimIdleMs,omitempty"`
+	// AutoCloseCompleted is the P1-C 方案 C convergence policy for terminal
+	// subagent batches. "off" (default) keeps every child session recoverable
+	// and changes nothing; "completed" converges child sessions whose task
+	// succeeded when the batch finished without failures; "batch_terminal"
+	// does the same for any terminal batch status. Convergence means: an
+	// unresolved lifecycle row recommending close is projected for the parent
+	// and the child session is closed through the durable control plane
+	// (audit + resolution receipt). Non-succeeded terminal children are never
+	// auto-closed — a failed/timed-out child is evidence the parent must judge.
+	AutoCloseCompleted string `yaml:"autoCloseCompleted,omitempty" json:"autoCloseCompleted,omitempty"`
 }
+
+// agents.autoCloseCompleted policy values (P1-C 方案 C).
+const (
+	AutoClosePolicyOff           = "off"
+	AutoClosePolicyCompleted     = "completed"
+	AutoClosePolicyBatchTerminal = "batch_terminal"
+)
 
 // RouterConfig 路由器配置
 type RouterConfig struct {
@@ -366,6 +383,9 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 			MaxWaitTimeoutMs:     int(time.Hour.Milliseconds()),
 			WaitTimeoutMode:      "clamp",
 			DefaultForkTurns:     "none",
+			// P1-C: the built-in default stays "off" — closing a child session
+			// is a user-visible convergence decision, not a silent cleanup.
+			AutoCloseCompleted: AutoClosePolicyOff,
 			// P2-9: report-only by default; enforce is opt-in once the audit
 			// has proven clean on a real deployment.
 			RegistryReconcileInterval: 10 * time.Minute,
@@ -1122,6 +1142,11 @@ func ValidateAgentsConfig(config *AgentsConfig) error {
 	}
 	if config.MaxWaitTimeoutMs < 0 {
 		return errors.New(errors.ErrValidationFailed, "agents.maxWaitTimeoutMs cannot be negative")
+	}
+	switch strings.ToLower(strings.TrimSpace(config.AutoCloseCompleted)) {
+	case "", AutoClosePolicyOff, AutoClosePolicyCompleted, AutoClosePolicyBatchTerminal:
+	default:
+		return errors.New(errors.ErrValidationFailed, "agents.autoCloseCompleted must be off, completed or batch_terminal")
 	}
 	if config.MinWaitTimeoutMs > 0 && config.MaxWaitTimeoutMs > 0 && config.MinWaitTimeoutMs > config.MaxWaitTimeoutMs {
 		return errors.New(errors.ErrValidationFailed, "agents.minWaitTimeoutMs cannot exceed agents.maxWaitTimeoutMs")

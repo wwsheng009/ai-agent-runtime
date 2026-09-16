@@ -40,10 +40,7 @@ func newLocalSupervisionToolController(host *localChatRuntimeHost, session *Chat
 // team scope (rows addressed at its own session), every other session reads its
 // own root scope.
 func (c *localSupervisionToolController) resolution(ctx context.Context, parentSessionID string) (string, string) {
-	sessionID := strings.TrimSpace(parentSessionID)
-	if sessionID == "" && c.session != nil {
-		sessionID = strings.TrimSpace(currentRuntimeSessionID(c.session))
-	}
+	sessionID := c.callerSessionID(parentSessionID)
 	rootScopeID := sessionID
 	targetTeamID := ""
 	if c.session == nil || c.session.ActiveTeam == nil || c.host == nil || c.host.TeamStore == nil {
@@ -58,6 +55,17 @@ func (c *localSupervisionToolController) resolution(ctx context.Context, parentS
 		return rootScopeID, targetTeamID
 	}
 	return teamID, teamID
+}
+
+// callerSessionID is the identity the tool entry acts as: the tool call's own
+// parent session, falling back to the rendered session when the broker passes
+// an empty id.
+func (c *localSupervisionToolController) callerSessionID(parentSessionID string) string {
+	sessionID := strings.TrimSpace(parentSessionID)
+	if sessionID == "" && c.session != nil {
+		sessionID = strings.TrimSpace(currentRuntimeSessionID(c.session))
+	}
+	return sessionID
 }
 
 func (c *localSupervisionToolController) SupervisionSnapshot(ctx context.Context, parentSessionID string, args toolbroker.SupervisionSnapshotArgs) (*supervision.Digest, error) {
@@ -79,6 +87,46 @@ func (c *localSupervisionToolController) SupervisionSnapshot(ctx context.Context
 		SubjectPresence:       localSupervisionSubjectPresence(c.host),
 		HostCapabilities:      localSupervisionHostCapabilities(c.host),
 	})
+}
+
+// SupervisionDescendants returns the scoped descendant state matrix (doc 6.2),
+// read-only. This is the business "巡查" primitive (P0-A): one call lists every
+// child/descendant of the caller's own scope with execution_status,
+// supervision_state, heartbeat/progress ages plus the remediation hints this
+// host can actually execute, so a parent inspects a whole batch instead of
+// polling wait_agent / list_agents row by row.
+//
+// Scope 口径与 SupervisionSnapshot 完全相同（模型不能指定 root scope）：
+//   - 普通会话：投影子树与 durable root scope 都是自身会话；
+//   - team lead：投影子树是自身会话 + 团队边，durable root scope 是团队，
+//     与 preflight digest 的 RootScopeID / TargetParentTeamID 口径一致。
+func (c *localSupervisionToolController) SupervisionDescendants(ctx context.Context, parentSessionID string, args toolbroker.SupervisionDescendantsArgs) (*supervision.Snapshot, error) {
+	rootScopeID, targetTeamID := c.resolution(ctx, parentSessionID)
+	if rootScopeID == "" {
+		return nil, fmt.Errorf("supervision scope is required")
+	}
+	request := supervision.SnapshotRequest{
+		Scope: supervision.Scope{
+			RootSessionID: c.callerSessionID(parentSessionID),
+			Mode:          strings.TrimSpace(args.Mode),
+		},
+		AfterSeq:         args.AfterSeq,
+		Health:           strings.TrimSpace(args.Health),
+		IncludeTerminal:  args.IncludeTerminal,
+		Limit:            args.Limit,
+		DefaultLimit:     c.host.supervisionConfig.WithDefaults().SnapshotMaxItems,
+		HostCapabilities: localSupervisionHostCapabilities(c.host),
+	}
+	if targetTeamID != "" {
+		request.Scope.RootTeamID = targetTeamID
+		// Durable rows stay rooted at the team while the projected subtree is
+		// the lead's own session: the same split the digest uses.
+		request.RootScopeID = targetTeamID
+	}
+	if c.host != nil && c.host.Supervision != nil {
+		request.Provider = c.host.Supervision.Provider
+	}
+	return supervision.BuildSnapshot(ctx, c.service.Store(), request)
 }
 
 func (c *localSupervisionToolController) AckLifecycle(ctx context.Context, parentSessionID string, args toolbroker.AckLifecycleArgs) (*supervision.Notification, error) {

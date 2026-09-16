@@ -197,7 +197,7 @@ func isBuiltinCoreToolName(name string) bool {
 		"read_agent_events", "close_agent", "resume_agent",
 		"apply_agent_worktree", "discard_agent_worktree",
 		"resolve_agent_approval",
-		"supervision_snapshot", "ack_lifecycle", "control_descendant",
+		"supervision_snapshot", "supervision_descendants", "ack_lifecycle", "control_descendant",
 		"get_goal", "read_goal", "update_goal",
 		ToolSearchName:
 		return true

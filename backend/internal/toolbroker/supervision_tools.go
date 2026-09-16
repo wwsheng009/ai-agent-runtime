@@ -22,12 +22,19 @@ import (
 // reason/note 并支持 expected_version CAS。
 
 // AgentSupervisionController is the host-side capability behind the
-// supervision_snapshot / ack_lifecycle / control_descendant tools. Implementations
-// must derive the caller's root scope from parentSessionID and enforce that a
-// notification outside that scope is rejected.
+// supervision_snapshot / supervision_descendants / ack_lifecycle /
+// control_descendant tools. Implementations must derive the caller's root scope
+// from parentSessionID and enforce that a notification outside that scope is
+// rejected.
 type AgentSupervisionController interface {
 	// SupervisionSnapshot returns the scoped preflight digest (read-only).
 	SupervisionSnapshot(ctx context.Context, parentSessionID string, args SupervisionSnapshotArgs) (*supervision.Digest, error)
+	// SupervisionDescendants returns the scoped descendant state matrix
+	// (doc 6.2, read-only). It is the inspection primitive for business
+	// supervision: one call shows every child/descendant of the caller's scope
+	// with its execution status, supervision state and remediation hints, so a
+	// parent does not have to poll wait_agent row by row.
+	SupervisionDescendants(ctx context.Context, parentSessionID string, args SupervisionDescendantsArgs) (*supervision.Snapshot, error)
 	// AckLifecycle applies one decision (acknowledge / defer / resolve).
 	AckLifecycle(ctx context.Context, parentSessionID string, args AckLifecycleArgs) (*supervision.Notification, error)
 	// ControlDescendant requests/executes a durable control action against the
@@ -40,6 +47,22 @@ type SupervisionSnapshotArgs struct {
 	AfterSeq        int64
 	IncludeResolved bool
 	Limit           int
+}
+
+// SupervisionDescendantsArgs is the parsed input of supervision_descendants.
+type SupervisionDescendantsArgs struct {
+	// Mode is children | descendants (empty defaults to descendants).
+	Mode string
+	// Health is any | abnormal | action_required (empty defaults to any).
+	Health string
+	// IncludeTerminal keeps terminal rows (closed/terminated) in the matrix.
+	IncludeTerminal bool
+	// Limit caps the returned rows (unresolved/abnormal rows are prioritized by
+	// the builder's ordering, never dropped silently without truncated=true).
+	Limit int
+	// AfterSeq is the caller's last seen sequence; terminal rows newer than it
+	// are counted as terminal_unacknowledged.
+	AfterSeq int64
 }
 
 // AckLifecycleArgs is the parsed input of ack_lifecycle.
@@ -64,13 +87,14 @@ type ControlDescendantArgs struct {
 	HasExpectedVersion bool
 }
 
-// supervisionToolDefinitions returns the three control-plane tool definitions.
+// supervisionToolDefinitions returns the four control-plane tool definitions.
 // Callers gate on the host capability before appending them.
 func supervisionToolDefinitions() []types.ToolDefinition {
 	return []types.ToolDefinition{
 		{
-			Name:        ToolSupervisionSnapshot,
-			Description: "Read the scoped supervision digest for this session (read-only). Returns critical_unresolved / action_required counts, the lifecycle items with their notification_id + version, and next_seq for incremental reads. Rows whose subject no longer exists are reported as stale and need no action. Call this before ack_lifecycle whenever a version conflict is reported.",
+			Name: ToolSupervisionSnapshot,
+			Description: "Read the scoped supervision digest for this session (read-only). Returns critical_unresolved / action_required counts, the lifecycle items with their notification_id + version, the rendered text and next_seq for incremental reads. Rows whose subject no longer exists are reported as stale and need no action. " +
+				"Use this digest for lifecycle decisions (acknowledge/defer/resolve); use supervision_descendants when you need the child/descendant state matrix - do not poll wait_agent row by row. Call this before ack_lifecycle whenever a version conflict is reported.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -84,20 +108,55 @@ func supervisionToolDefinitions() []types.ToolDefinition {
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
-						"description": "Cap the number of returned items; unresolved critical rows stay prioritized.",
+						"description": "Cap the number of returned items; unresolved critical rows stay prioritized and truncated=true reports the cut.",
 					},
 				},
 			},
 		},
 		{
-			Name:        ToolAckLifecycle,
-			Description: "Decide one supervision notification so it stops being re-injected: decision=acknowledge (accept the handled risk; note required), decision=defer (postpone until an RFC3339 deadline or Go duration such as 30m; reason required), decision=resolve (set the terminal resolution state closed|recovered|failed). Only notifications inside this session's own scope can be decided. Pass expected_version from supervision_snapshot; on a version conflict re-read the snapshot instead of retrying blindly.",
+			Name: ToolSupervisionDescendants,
+			Description: "Read the scoped descendant state matrix (doc 6.2, read-only): one call lists the children/descendants of this session's own scope with execution_status, supervision_state (running/blocked/stalled/timed_out/orphaned/terminal), heartbeat_age_ms / progress_age_ms, action_required, recommended_action, allowed_actions and notification_id. " +
+				"Prefer this tool for supervision inspection: it returns the whole N-row matrix (how many are still running, which one is stalled, which finished) in one call, so do not poll wait_agent / list_agents row by row; repeat calls are expected and are exempt from the anti-polling advisory because they are an observation, not a blocking wait. " +
+				"Read a row as follows: action_required=true means the parent must decide; recommended_action is the host's suggested next step for that row; allowed_actions is the subset this host can actually execute (control_descendant re-validates against it); next_action explains any remediation path that was filtered out because the host has no entry point for it. " +
+				"Rows whose subject no longer exists are reported with the state the control plane last saw. Only rows inside this session's scope are returned; the model cannot widen the scope.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"mode": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"children", "descendants"},
+						"description": "children = direct children only; descendants = whole subtree (default).",
+					},
+					"health": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"any", "abnormal", "action_required"},
+						"description": "any (default) = full matrix; abnormal = only stalled/timed_out/orphaned/invalid/terminating rows; action_required = only rows asking the parent to decide (action_required=true). Unknown values are rejected instead of silently widening the read.",
+					},
+					"include_terminal": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Keep terminal (closed/terminated) rows in the matrix (default false). Turn it on when converging a finished batch: terminal_unacknowledged counts finished rows not yet acknowledged or closed.",
+					},
+					"limit": map[string]interface{}{
+						"type":        "integer",
+						"description": "Cap the number of returned rows; abnormal/action-required rows stay prioritized and truncated=true reports the cut. Keep it small for routine inspections; raise it only when the full matrix is needed.",
+					},
+					"after_seq": map[string]interface{}{
+						"type":        "integer",
+						"description": "Last lifecycle sequence already seen by the caller (use the previous next_seq); terminal rows newer than it are counted as terminal_unacknowledged.",
+					},
+				},
+			},
+		},
+		{
+			Name: ToolAckLifecycle,
+			Description: "Decide one supervision notification so it stops being re-injected: decision=acknowledge (accept the handled risk; note required), decision=defer (postpone until an RFC3339 deadline or Go duration such as 30m; reason required), decision=resolve (set the terminal resolution state closed|recovered|failed). Only notifications inside this session's own scope can be decided. " +
+				"notification_id must be copied verbatim from supervision_snapshot or supervision_descendants output - never invented or synthesized. Pass expected_version from the snapshot; on a version conflict re-read the snapshot instead of retrying blindly.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"notification_id": map[string]interface{}{
 						"type":        "string",
-						"description": "Notification id from supervision_snapshot.",
+						"description": "Notification id copied verbatim from supervision_snapshot or supervision_descendants; do not invent or synthesize ids.",
 					},
 					"decision": map[string]interface{}{
 						"type":        "string",
@@ -130,19 +189,20 @@ func supervisionToolDefinitions() []types.ToolDefinition {
 			},
 		},
 		{
-			Name:        ToolControlDescendant,
-			Description: "Execute a durable control action against the subject of a supervision notification: action=cancel|close|cancel_subtree|retry|reassign. The subject is taken from the notification, so only rows inside this session's own scope can be controlled. reason is required (durable audit), expected_version is optional. The action is persisted before execution; the returned action_id can be re-read even when execution fails.",
+			Name: ToolControlDescendant,
+			Description: "Execute a durable control action against the subject of a supervision notification: action=cancel|close|cancel_subtree|retry|reassign. Use action=close to converge a finished (terminal) child session that is no longer needed; the parent turn's progress block reminds you when a batch reached terminal. " +
+				"The subject is taken from the notification, so only rows inside this session's own scope can be controlled; the requested action is validated against the row's allowed_actions. reason is required (durable audit), expected_version is optional. The action is persisted before execution; the returned action_id can be re-read even when execution fails, and a successful mutation produces an ack-able receipt notification.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"notification_id": map[string]interface{}{
 						"type":        "string",
-						"description": "Notification id whose subject should be controlled.",
+						"description": "Notification id whose subject should be controlled; copy it verbatim from supervision_snapshot or supervision_descendants (never invent it).",
 					},
 					"action": map[string]interface{}{
 						"type":        "string",
 						"enum":        []string{"cancel", "close", "cancel_subtree", "retry", "reassign"},
-						"description": "Required control action; validated against the notification's server-computed allowed actions.",
+						"description": "Required control action; validated against the notification's server-computed allowed_actions (a value outside that set is rejected).",
 					},
 					"reason": map[string]interface{}{
 						"type":        "string",
@@ -181,6 +241,41 @@ func parseSupervisionSnapshotArgs(args map[string]interface{}) (SupervisionSnaps
 		parsed.IncludeResolved = value
 	}
 	if value, ok, err := brokerToolArgInt(ToolSupervisionSnapshot, args, "limit"); err != nil {
+		return parsed, err
+	} else if ok && value > 0 {
+		parsed.Limit = value
+	}
+	return parsed, nil
+}
+
+// parseSupervisionDescendantsArgs converts raw tool args into the typed input.
+// mode/health are closed vocabularies: an unknown spelling is rejected instead
+// of silently widening the read to the whole scope (a typo must not turn a
+// filtered inspection into a broader one).
+func parseSupervisionDescendantsArgs(args map[string]interface{}) (SupervisionDescendantsArgs, error) {
+	parsed := SupervisionDescendantsArgs{
+		Mode:   strings.ToLower(supervisionArgValue(args, "mode")),
+		Health: strings.ToLower(supervisionArgValue(args, "health")),
+	}
+	switch parsed.Mode {
+	case "", "descendants", "children":
+	default:
+		return parsed, fmt.Errorf("mode must be children or descendants, got %q", parsed.Mode)
+	}
+	switch parsed.Health {
+	case "", "any", "abnormal", "action_required":
+	default:
+		return parsed, fmt.Errorf("health must be any, abnormal or action_required, got %q", parsed.Health)
+	}
+	if value, ok := args["include_terminal"].(bool); ok {
+		parsed.IncludeTerminal = value
+	}
+	if value, ok, err := toolArgInt64(ToolSupervisionDescendants, args, "after_seq"); err != nil {
+		return parsed, err
+	} else if ok {
+		parsed.AfterSeq = value
+	}
+	if value, ok, err := brokerToolArgInt(ToolSupervisionDescendants, args, "limit"); err != nil {
 		return parsed, err
 	} else if ok && value > 0 {
 		parsed.Limit = value
@@ -318,7 +413,65 @@ func supervisionDecisionNextAction(n *supervision.Notification) string {
 	}
 }
 
-// executeSupervisionTool handles the three control-plane tools. The dispatcher
+// supervisionDescendantsSummary renders the one-line business readout of a
+// descendant matrix: how many rows exist and how they are distributed, plus the
+// single next step when the matrix asks for one. It stays compact because it is
+// the summary the model sees when the full row payload is truncated.
+func supervisionDescendantsSummary(snapshot *supervision.Snapshot) string {
+	if snapshot == nil {
+		return "no supervision descendants in this scope"
+	}
+	parts := make([]string, 0, 8)
+	for _, entry := range []struct {
+		label string
+		count int
+	}{
+		{"running", snapshot.Summary.Running},
+		{"blocked", snapshot.Summary.Blocked},
+		{"stalled", snapshot.Summary.Stalled},
+		{"timed_out", snapshot.Summary.TimedOut},
+		{"orphaned", snapshot.Summary.Orphaned},
+		{"invalid", snapshot.Summary.Invalid},
+		{"canceling", snapshot.Summary.Canceling},
+		{"terminal_unacknowledged", snapshot.Summary.TerminalUnacknowledged},
+	} {
+		if entry.count > 0 {
+			parts = append(parts, fmt.Sprintf("%s=%d", entry.label, entry.count))
+		}
+	}
+	state := "no live descendants"
+	if len(parts) > 0 {
+		state = strings.Join(parts, " ")
+	}
+	summary := fmt.Sprintf("descendant matrix: %d row(s), %s", len(snapshot.Descendants), state)
+	if snapshot.Truncated {
+		summary += fmt.Sprintf(" (truncated; next_seq=%d)", snapshot.NextSeq)
+	}
+	if action := supervisionDescendantsNextAction(snapshot); action != "" {
+		summary += "; " + action
+	}
+	return summary
+}
+
+// supervisionDescendantsNextAction states the single next step for a matrix,
+// empty when the rows need no decision.
+func supervisionDescendantsNextAction(snapshot *supervision.Snapshot) string {
+	if snapshot == nil {
+		return ""
+	}
+	if snapshot.Summary.ActionRequired > 0 {
+		return "decide the action_required rows (notification_id + allowed_actions) with control_descendant or ack_lifecycle"
+	}
+	if snapshot.Summary.TerminalUnacknowledged > 0 {
+		return "report the finished rows to the user, then ack_lifecycle or close them to converge the lifecycle"
+	}
+	if snapshot.Summary.Running+snapshot.Summary.Blocked > 0 {
+		return "children still running: continue independent work; re-read this matrix instead of polling wait_agent"
+	}
+	return ""
+}
+
+// executeSupervisionTool handles the four control-plane tools. The dispatcher
 // stays thin on purpose: scoping, allowed_actions re-validation and CAS all
 // live in the host implementation (LocalControlService), so the model can never
 // talk the broker into a different policy.
@@ -352,6 +505,34 @@ func (b *Broker) executeSupervisionTool(ctx context.Context, toolName, sessionID
 			"next_seq":            digest.NextSeq,
 			"next_action":         nextAction,
 		}, digest.Text), nil
+
+	case ToolSupervisionDescendants:
+		request, err := parseSupervisionDescendantsArgs(args)
+		if err != nil {
+			return nil, nil, err
+		}
+		snapshot, err := b.Supervision.SupervisionDescendants(ctx, sessionID, request)
+		if err != nil {
+			return nil, nil, err
+		}
+		if snapshot == nil {
+			snapshot = &supervision.Snapshot{}
+		}
+		return snapshot, attachCacheSafeSummary(map[string]interface{}{
+			"row_count":        len(snapshot.Descendants),
+			"running":          snapshot.Summary.Running,
+			"blocked":          snapshot.Summary.Blocked,
+			"stalled":          snapshot.Summary.Stalled,
+			"timed_out":        snapshot.Summary.TimedOut,
+			"orphaned":         snapshot.Summary.Orphaned,
+			"invalid":          snapshot.Summary.Invalid,
+			"canceling":        snapshot.Summary.Canceling,
+			"terminal_unacked": snapshot.Summary.TerminalUnacknowledged,
+			"action_required":  snapshot.Summary.ActionRequired,
+			"truncated":        snapshot.Truncated,
+			"next_seq":         snapshot.NextSeq,
+			"next_action":      supervisionDescendantsNextAction(snapshot),
+		}, supervisionDescendantsSummary(snapshot)), nil
 
 	case ToolAckLifecycle:
 		request, err := parseAckLifecycleArgs(args)
