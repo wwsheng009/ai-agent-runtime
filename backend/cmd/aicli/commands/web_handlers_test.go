@@ -1575,3 +1575,65 @@ func TestHandleChatWebAPISessionsRename_CurrentSession(t *testing.T) {
 		t.Fatalf("stored title = %q, want 当前会话新名", got.Metadata.Title)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// GET /web/api/screen?tail=N — 末尾行截取
+// ---------------------------------------------------------------------------
+
+func TestChatWebScreenTailHelpers(t *testing.T) {
+	text := "l1\nl2\nl3\nl4\nl5"
+
+	if got := chatWebTailTextLines(text, 0); got != text {
+		t.Fatalf("tail=0 不应裁剪: %q", got)
+	}
+	if got := chatWebTailTextLines(text, 9); got != text {
+		t.Fatalf("tail 超过行数不应裁剪: %q", got)
+	}
+	if got := chatWebTailTextLines(text, 2); got != "l4\nl5" {
+		t.Fatalf("tail=2 = %q, want 末尾两行", got)
+	}
+
+	snap := &chatDebugScreenSnapshot{Available: true, Lines: []string{"a", "b", "c"}, Text: "a\nb\nc"}
+	chatWebApplyScreenTail(snap, 2)
+	if len(snap.Lines) != 2 || snap.Lines[0] != "b" || snap.Text != "b\nc" {
+		t.Fatalf("snapshot tail = %+v", snap)
+	}
+
+	// ?tail 解析：缺省/非法/非正数 → 0（不裁剪）；超上限 → 钳制。
+	cases := []struct {
+		query string
+		want  int
+	}{
+		{"", 0},
+		{"tail=abc", 0},
+		{"tail=0", 0},
+		{"tail=-3", 0},
+		{"tail=7", 7},
+		{"tail=999999", chatWebScreenTailMaxLines},
+	}
+	for _, tc := range cases {
+		req := httptest.NewRequest(http.MethodGet, ChatWebAPIScreenPath+"?"+tc.query, nil)
+		if got := chatWebScreenTailParam(req); got != tc.want {
+			t.Fatalf("tail 参数 %q = %d, want %d", tc.query, got, tc.want)
+		}
+	}
+}
+
+// TestHandleChatWebAPIScreen_TailSmoke 验证 ?tail=N 在真实 handler 路径上不报错，
+// 且可用时返回行数不超过 N（不可用时会话返回 "Debug Screen:" 一行，同样满足）。
+func TestHandleChatWebAPIScreen_TailSmoke(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, ChatWebAPIScreenPath+"?view=tui&tail=3", nil)
+	rec := httptest.NewRecorder()
+	HandleChatWebAPIScreen(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := strings.TrimRight(rec.Body.String(), "\n")
+	if body == "" {
+		t.Fatal("screen tail body empty")
+	}
+	if lines := strings.Split(body, "\n"); len(lines) > 3 {
+		t.Fatalf("tail=3 返回了 %d 行: %q", len(lines), body)
+	}
+}

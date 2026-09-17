@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -64,16 +65,19 @@ func writeWebAPIJSON(w http.ResponseWriter, statusCode int, data interface{}) {
 // HandleChatWebAPIScreen 返回当前屏幕合成帧（§4.2.2）。
 //   - ?format=text（默认）：纯文本面板内容
 //   - ?format=json：结构化 JSON 快照
+//   - ?tail=N：只返回末尾 N 行（长会话下避免整屏搬运；N 钳制到 [1, 2000]）
 //
 // web 客户端展示的是完整聊天历史，而非终端视口帧：使用
 // buildChatWebScreenSnapshot（完整语义 transcript 派生），避免 resume
 // 历史会话后视口裁剪导致只显示最后一个 turn。
 func HandleChatWebAPIScreen(w http.ResponseWriter, r *http.Request) {
+	tail := chatWebScreenTailParam(r)
 	// view=tui：返回终端视口的真实合成帧（与 /debug/chat/screen 同源），
 	// 供远程调用方获取"用户当前实际看到的 TUI 界面渲染"，而不是 web 客户端
 	// 使用的完整语义 transcript（默认视图，见下方注释）。
 	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("view")), "tui") {
 		snap := BuildChatDebugScreenSnapshot()
+		chatWebApplyScreenTail(snap, tail)
 		if r.URL.Query().Get("format") == "json" {
 			body, err := json.MarshalIndent(snap, "", "  ")
 			if err != nil {
@@ -91,7 +95,7 @@ func HandleChatWebAPIScreen(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("Debug Screen: " + snap.Reason + "\n"))
 			return
 		}
-		_, _ = w.Write([]byte(snap.Text + "\n"))
+		_, _ = w.Write([]byte(chatWebTailTextLines(snap.Text, tail) + "\n"))
 		return
 	}
 	if r.URL.Query().Get("format") == "json" {
@@ -112,7 +116,54 @@ func HandleChatWebAPIScreen(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("Debug Screen: " + snap.Reason + "\n"))
 		return
 	}
-	_, _ = w.Write([]byte(snap.Text + "\n"))
+	_, _ = w.Write([]byte(chatWebTailTextLines(snap.Text, tail) + "\n"))
+}
+
+// chatWebScreenTailMaxLines 限制 ?tail=N 的上限：避免调用方用超大 N 绕过
+// "只取末尾"的意图（整帧本来也可以不分页取，见 /web/api/screen 默认视图）。
+const chatWebScreenTailMaxLines = 2000
+
+// chatWebScreenTailParam 解析 ?tail=N：缺省/非法/非正数返回 0（不裁剪），
+// 超过上限时钳制到 chatWebScreenTailMaxLines。
+func chatWebScreenTailParam(r *http.Request) int {
+	if r == nil {
+		return 0
+	}
+	raw := strings.TrimSpace(r.URL.Query().Get("tail"))
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	if n > chatWebScreenTailMaxLines {
+		return chatWebScreenTailMaxLines
+	}
+	return n
+}
+
+// chatWebApplyScreenTail 按 ?tail=N 截取快照末尾 N 行，并同步重建 Text
+// （Text 与 Lines 同源；行数不足 N 时不改动）。
+func chatWebApplyScreenTail(snap *chatDebugScreenSnapshot, n int) {
+	if snap == nil || n <= 0 || len(snap.Lines) == 0 || len(snap.Lines) <= n {
+		return
+	}
+	snap.Lines = snap.Lines[len(snap.Lines)-n:]
+	snap.Text = strings.Join(snap.Lines, "\n")
+}
+
+// chatWebTailTextLines 返回文本末尾 n 行（n<=0 或行数不足时原样返回）。
+// 默认 transcript 视图只有 Text（无 Lines），因此文本输出单独走这里。
+func chatWebTailTextLines(text string, n int) string {
+	if n <= 0 || text == "" {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) <= n {
+		return text
+	}
+	return strings.Join(lines[len(lines)-n:], "\n")
 }
 
 // HandleChatWebAPIStatus 返回当前渲染器状态快照（§4.2.6）。

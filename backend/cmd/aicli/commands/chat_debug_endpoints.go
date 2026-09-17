@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	runtimeobserve "github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
 )
@@ -20,6 +21,10 @@ import (
 //
 // 列表为只读快照：只读取 session/provider 上的配置与存在性，不做任何变更。
 // ============================================================================
+
+// chatDebugProcessStartedAt 记录包初始化时刻（≈ 进程启动），供 /debug/endpoints
+// 输出 StartedAt/UptimeSec：脚本据此识别"远端进程是不是旧构建/没重启"。
+var chatDebugProcessStartedAt = time.Now()
 
 // chatDebugEndpointInfo 描述单个调试相关 HTTP 端点。
 type chatDebugEndpointInfo struct {
@@ -39,6 +44,13 @@ type chatDebugEndpointsSnapshot struct {
 	LoopbackBaseURL string `json:"loopback_base_url,omitempty"` // loopback 组基础地址
 	WebBaseURL      string `json:"web_base_url,omitempty"`      // web 远程调用端点组基础地址
 	ObserveBaseURL  string `json:"observe_base_url,omitempty"`  // runtime-observe 组基础地址
+	// Version / BuildTime 与 aicli version、/status 同源（ldflags 注入）；
+	// StartedAt / UptimeSec 标识**本进程实例**——脚本据此判断"远端进程是不是
+	// 旧构建/未重启"，避免按新契约调用旧实例。
+	Version   string `json:"version,omitempty"`
+	BuildTime string `json:"build_time,omitempty"`
+	StartedAt string `json:"started_at,omitempty"`
+	UptimeSec int64  `json:"uptime_sec"`
 	// WriteAuthHeader / WriteAuthHint 描述 Web API 状态变更请求的鉴权要求
 	// （Host/Origin 校验之外的第二层；令牌来自进程启动行或页面 meta 注入）。
 	WriteAuthHeader string `json:"write_auth_header,omitempty"`
@@ -79,9 +91,9 @@ var webDebugEndpoints = []struct {
 	{Method: "GET", Path: "/web/api/runtime", Note: "运行时元数据（provider/model/reasoning 权威值）"},
 	{Method: "GET", Path: "/web/api/events", Note: "SSE 事件流（实时 turn 事件，可续传）"},
 	{Method: "POST", Path: "/web/api/input", Note: "异步注入 prompt / 审批决议 / 提问回答 / interrupt（立即返回 queued）"},
-	{Method: "POST", Path: "/web/api/invoke", Note: "同步远程调用：注入 prompt 并等待 turn 结束。参数 wait_only（只等待，不注入）/timeout_ms/session_id/client_request_id（幂等回放 duplicate=true）；Accept: text/event-stream 时以 SSE 返回 start/delta/result 帧；响应含 status/elapsed_ms/screen，turn 结束附带 assistant/usage"},
-	{Method: "GET", Path: "/web/api/turn", Note: "turn 后验查询：?id={turn_id} 返回单条记录，缺省返回 current（busy/turn_id/pending_inputs）+ recent（最多 30m，含 status/started_at/finished_at/duration_ms/steps/error/usage）"},
-	{Method: "GET", Path: "/web/api/token", Note: "读取本进程 Web 写令牌（X-AICLI-Token，或 ?token=）；仅回环 + 同源可读，令牌每进程随机、重启即轮换"},
+	{Method: "POST", Path: "/web/api/invoke", Note: "同步远程调用：注入 prompt 并等待 turn 结束。参数 wait_only（只等待，不注入；会话已空闲时立即返回 settled 不空等）/timeout_ms/session_id/client_request_id（幂等回放 duplicate=true）；Accept: text/event-stream 时以 SSE 返回 start/delta/result 帧；响应含 status/elapsed_ms/screen，turn 结束附带 assistant/usage"},
+	{Method: "GET", Path: "/web/api/turn", Note: "turn 后验查询：?id={turn_id} 返回单条记录，缺省返回 current（busy/turn_id/pending_inputs）+ recent（最多 30m，含 status/started_at/finished_at/duration_ms/steps/error/usage+usage_scope、assistant_preview/assistant_chars）"},
+	{Method: "GET", Path: "/web/api/token", Note: "读取本进程 Web 写令牌（X-AICLI-Token，或 ?token=）；仅回环 + 同源可读，响应含 source（random=每进程随机、重启轮换；--web-token/AICLI_WEB_TOKEN=显式指定、重启不轮换）与 hint"},
 	{Method: "GET", Path: "/web/api/events/schema", Note: "SSE 事件 schema"},
 	{Method: "GET", Path: "/web/api/sessions", Note: "会话列表（current_session_id + 候选会话）"},
 	{Method: "POST", Path: "/web/api/sessions/new", Note: "新建会话"},
@@ -119,6 +131,12 @@ var observeDebugEndpoints = []struct {
 // 无会话（nil）时返回 available=false 的轻量清单（endpoints 为空）。
 func buildChatDebugEndpointList(session *ChatSession) *chatDebugEndpointsSnapshot {
 	snap := &chatDebugEndpointsSnapshot{}
+	snap.Version = strings.TrimSpace(chatStatusVersion)
+	snap.BuildTime = strings.TrimSpace(chatStatusBuildTime)
+	if !chatDebugProcessStartedAt.IsZero() {
+		snap.StartedAt = chatDebugProcessStartedAt.UTC().Format(time.RFC3339)
+		snap.UptimeSec = int64(time.Since(chatDebugProcessStartedAt).Round(time.Second) / time.Second)
+	}
 	if session == nil {
 		snap.Available = false
 		snap.Reason = "no active chat session"
@@ -257,6 +275,15 @@ func BuildChatDebugEndpointsText() string {
 	if !snap.Available {
 		return "Debug Endpoints: " + snap.Reason + "\n"
 	}
+	// 实例身份（与 JSON 同源）：脚本据此判断远端进程是否为旧构建/未重启。
+	if snap.Version != "" || snap.UptimeSec > 0 {
+		build := strings.TrimSpace(snap.Version)
+		if snap.BuildTime != "" {
+			build += " (" + snap.BuildTime + ")"
+		}
+		fmt.Fprintf(&sb, "  Build: %s\n", build)
+		fmt.Fprintf(&sb, "  Uptime: %s\n", (time.Duration(snap.UptimeSec) * time.Second).String())
+	}
 	for _, scheme := range []string{"loopback", "web", "runtime-observe"} {
 		sb.WriteString(chatDebugEndpointSchemeLabel(scheme))
 		sb.WriteString("\n")
@@ -374,6 +401,16 @@ func appendChatDebugEndpointListLines(builder *chatDebugDocumentBuilder, session
 	if !snap.Available {
 		builder.meta("Status:", snap.Reason)
 		return
+	}
+	// 实例身份：version/build_time 与 aicli version 同源，uptime 用于识别
+	// "这个进程是不是旧构建/未重启"（按新契约调用旧实例是最常见的错配）。
+	if snap.Version != "" || snap.UptimeSec > 0 {
+		build := strings.TrimSpace(snap.Version)
+		if snap.BuildTime != "" {
+			build += " (" + snap.BuildTime + ")"
+		}
+		builder.meta("Build:", build)
+		builder.meta("Uptime:", (time.Duration(snap.UptimeSec) * time.Second).String())
 	}
 	appendChatDebugEndpointSubgroupLines(builder, snap, "loopback")
 	appendChatDebugEndpointSubgroupLines(builder, snap, "web")

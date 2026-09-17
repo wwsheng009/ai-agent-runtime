@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -292,5 +293,34 @@ func TestChatDebugEndpointListTokenSurfaces(t *testing.T) {
 	}
 	if !strings.Contains(text, ChatWebAPITokenPath) {
 		t.Fatalf("endpoints text must list %s:\n%s", ChatWebAPITokenPath, text)
+	}
+}
+
+// TestBuildChatDebugEndpointList_InstanceIdentity 锁定实例身份字段：
+// version/build_time 与 aicli version 同源，started_at/uptime_sec 用于识别
+// "远端进程是不是旧构建/没重启"；无会话（轻量响应）时也应携带。
+func TestBuildChatDebugEndpointList_InstanceIdentity(t *testing.T) {
+	oldVersion, oldBuildTime := chatStatusVersion, chatStatusBuildTime
+	SetChatStatusBuildInfo("v0.999.0-test", "2026-09-17T00:00:00Z")
+	t.Cleanup(func() {
+		chatStatusVersion, chatStatusBuildTime = oldVersion, oldBuildTime
+	})
+
+	snap := buildChatDebugEndpointList(nil) // 无会话：轻量清单也应带实例身份
+	if snap.Version != "v0.999.0-test" || snap.BuildTime != "2026-09-17T00:00:00Z" {
+		t.Fatalf("version/build_time = %q/%q", snap.Version, snap.BuildTime)
+	}
+	if snap.StartedAt == "" || snap.UptimeSec < 0 {
+		t.Fatalf("started_at/uptime_seg 缺失: %+v", snap)
+	}
+
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"version":"v0.999.0-test"`, `"build_time":"2026-09-17T00:00:00Z"`, `"started_at":`, `"uptime_sec":`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("snapshot JSON 缺少 %s: %s", want, raw)
+		}
 	}
 }
