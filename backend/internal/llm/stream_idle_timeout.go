@@ -49,6 +49,11 @@ type idleTimeoutReadCloser struct {
 	timedOut atomic.Bool
 	// stop closes the watchdog goroutine when the reader is closed.
 	stop chan struct{}
+	// stopOnce guarantees stop is closed exactly once even when
+	// stopWatchdog is called concurrently from Read (EOF path), Close and
+	// the watchdog itself. A racing double close panics with "close of
+	// closed channel".
+	stopOnce sync.Once
 	// watchdogDone signals the watchdog has exited.
 	watchdogDone chan struct{}
 }
@@ -103,11 +108,7 @@ func (w *idleTimeoutReadCloser) Close() error {
 }
 
 func (w *idleTimeoutReadCloser) stopWatchdog() {
-	select {
-	case <-w.stop:
-	default:
-		close(w.stop)
-	}
+	w.stopOnce.Do(func() { close(w.stop) })
 }
 
 func (w *idleTimeoutReadCloser) watchdog() {
@@ -125,8 +126,9 @@ func (w *idleTimeoutReadCloser) watchdog() {
 			if idleFor >= w.idle {
 				// Close the underlying body to unblock a stuck Read.
 				w.timedOut.Store(true)
-				w.stopWatchdog()
-				_ = w.r.Close()
+				// Route through Close so the underlying closer is released
+				// exactly once even if the caller closes concurrently.
+				_ = w.Close()
 				return
 			}
 		}

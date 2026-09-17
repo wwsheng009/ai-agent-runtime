@@ -107,6 +107,46 @@ func TestWrapStreamIdleTimeout_Disabled(t *testing.T) {
 	}
 }
 
+func TestWrapStreamIdleTimeout_ConcurrentClose(t *testing.T) {
+	// Close may be invoked from several goroutines at once (reader EOF
+	// path, explicit Close, deferred Close). stopWatchdog must be
+	// idempotent: a racing double close of the stop channel used to
+	// panic with "close of closed channel".
+	rc := wrapStreamIdleTimeout(newBlockingReadCloser(), time.Millisecond)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				_ = rc.Close()
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestWrapStreamIdleTimeout_CloseRacesTimeout(t *testing.T) {
+	// Exercise the interleaving between the watchdog firing (which calls
+	// stopWatchdog before closing the body) and a concurrent Close on
+	// another goroutine.
+	for i := 0; i < 200; i++ {
+		rc := wrapStreamIdleTimeout(newBlockingReadCloser(), time.Millisecond)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, _ = rc.Read(make([]byte, 8))
+		}()
+		go func() {
+			defer wg.Done()
+			time.Sleep(500 * time.Microsecond)
+			_ = rc.Close()
+		}()
+		wg.Wait()
+	}
+}
+
 func TestStreamIdleTimeoutError_Unwrap(t *testing.T) {
 	err := &StreamIdleTimeoutError{Idle: time.Second}
 	if !errors.Is(err, ErrStreamIdleTimeout) {
