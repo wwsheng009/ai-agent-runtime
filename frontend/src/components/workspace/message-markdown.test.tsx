@@ -485,4 +485,96 @@ describe("MessageMarkdown", () => {
     expect(markup).not.toMatch(/<br\s*\/?>\n/);
     expect(markup.split("<br").length - 1).toBe(3);
   });
+
+  it("renders a clickable artifact output link for the raw output pointer line", () => {
+    const artifactId = "art_325227a5aeb54277b9e39b834d216e76";
+    const markup = renderToStaticMarkup(
+      <MessageMarkdown
+        content={`Some tool output\n\nFull raw output artifact_id: ${artifactId}`}
+      />,
+    );
+
+    expect(markup).toContain('data-artifact-output-link="true"');
+    expect(markup).toContain("查看完整原始输出");
+    expect(markup).toContain(
+      `aria-label="查看完整原始输出（${artifactId}）"`,
+    );
+    // 指针行原文本不再以普通文本暴露。
+    expect(markup).not.toContain(`Full raw output artifact_id: ${artifactId}`);
+  });
+
+  it("renders the artifact link for a pointer line inside a fenced code block", () => {
+    const artifactId = "art_325227a5aeb54277b9e39b834d216e76";
+    const markup = renderToStaticMarkup(
+      <MessageMarkdown
+        content={`\`\`\`json\n{"ok": true}\n\nFull raw output artifact_id: ${artifactId}\n\`\`\``}
+      />,
+    );
+
+    expect(markup).toContain('data-artifact-output-link="true"');
+    expect(markup).toContain(
+      `aria-label="查看完整原始输出（${artifactId}）"`,
+    );
+  });
+
+  it("opens the artifact detail dialog via onSelectArtifact when the pointer link is clicked", async () => {
+    const artifactId = "art_325227a5aeb54277b9e39b834d216e76";
+    const onSelectArtifact = vi.fn();
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <MessageMarkdown
+          content={`Full raw output artifact_id: ${artifactId}`}
+          onSelectArtifact={onSelectArtifact}
+        />,
+      );
+    });
+
+    const button = container.querySelector<HTMLButtonElement>(
+      "[data-artifact-output-link]",
+    );
+    expect(button).not.toBeNull();
+    button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    expect(onSelectArtifact).toHaveBeenCalledTimes(1);
+    expect(onSelectArtifact).toHaveBeenCalledWith(artifactId);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("falls back to copying the artifact id with visible feedback when no onSelectArtifact is provided", async () => {
+    const artifactId = "art_325227a5aeb54277b9e39b834d216e76";
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <MessageMarkdown content={`Full raw output artifact_id: ${artifactId}`} />,
+      );
+    });
+
+    const button = container.querySelector<HTMLButtonElement>(
+      "[data-artifact-output-link]",
+    );
+    expect(button).not.toBeNull();
+    await act(async () => {
+      button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledWith(artifactId);
+    // 可见反馈：按钮文本切换为「已复制完整原始输出 id」。
+    expect(container.innerHTML).toContain("已复制完整原始输出 id");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
 });
