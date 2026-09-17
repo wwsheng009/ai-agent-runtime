@@ -12,8 +12,21 @@ import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
-import { diagnosticDetailKey, diagnosticTitleKey, errorRate, formatDimensionTick, formatDuration, formatNumber, formatPercent, formatTimestamp, outcomeKey, outcomeTone, readAdminToken, reconciliationKey, shortID, statusTone, titleSourceKey } from "./format";
+import { diagnosticDetailKey, diagnosticTitleKey, errorCategoryKey, errorRate, formatDimensionTick, formatDuration, formatNumber, formatPercent, formatTimestamp, outcomeKey, outcomeTone, readAdminToken, reconciliationKey, shortID, statusTone, titleSourceKey } from "./format";
+import { ErrorPatternsPanel } from "./error-patterns-panel";
 import { AnalyticsHeader, Metric, QualityBadge, QualityNotice, TabButton } from "./primitives";
+import { SubagentStatsPanel } from "./subagent-stats-panel";
+import { ToolStatsPanel } from "./tool-stats-panel";
+
+// 批次 7.2：会话观测 tab 清单。tab 状态只存在 URL query（刷新/分享可复现），
+// 面板数据在对应 tab 激活（组件挂载）时才拉取。
+const sessionTabs = ["overview", "tokens", "tools", "subagents", "diagnostics"] as const;
+
+type SessionTab = (typeof sessionTabs)[number];
+
+function isSessionTab(value: string | null): value is SessionTab {
+  return value !== null && (sessionTabs as readonly string[]).includes(value);
+}
 
 export function SessionTable({ sessions, total, loading, search, offset, pageSize, onPage }: {
   sessions: AnalyticsSessionRollup[];
@@ -26,7 +39,7 @@ export function SessionTable({ sessions, total, loading, search, offset, pageSiz
 }) {
   const { t } = useTranslation("usageAnalytics");
   return (
-    <section aria-labelledby="usage-sessions-title" className="surface-panel min-w-0 rounded-panel-lg p-3.5 sm:p-4">
+    <section aria-labelledby="usage-sessions-title" className="surface-panel min-w-0 rounded-panel-lg p-3 sm:p-4">
       <div className="mb-3 flex items-end justify-between gap-3">
         <div>
           <h2 id="usage-sessions-title" className="text-sm font-semibold">{t("sessions.title")}</h2>
@@ -56,19 +69,19 @@ export function SessionTable({ sessions, total, loading, search, offset, pageSiz
               </div>
               <dl className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
                 <div>
-                  <dt className="app-text-10 uppercase tracking-[0.12em] text-muted-foreground">{t("sessions.columns.provider")}</dt>
+                  <dt className="text-xs uppercase tracking-[0.12em] text-muted-foreground">{t("sessions.columns.provider")}</dt>
                   <dd className="mt-1 truncate text-sm" title={`${session.provider || "-"} / ${session.model || "-"}`}>{session.provider || "-"} / {session.model || "-"}</dd>
                 </div>
                 <div>
-                  <dt className="app-text-10 uppercase tracking-[0.12em] text-muted-foreground">{t("sessions.columns.tokens")}</dt>
+                  <dt className="text-xs uppercase tracking-[0.12em] text-muted-foreground">{t("sessions.columns.tokens")}</dt>
                   <dd className="mt-1 text-sm font-medium tabular-nums">{formatNumber(session.total_tokens)}</dd>
                 </div>
                 <div>
-                  <dt className="app-text-10 uppercase tracking-[0.12em] text-muted-foreground">{t("sessions.columns.turns")}</dt>
+                  <dt className="text-xs uppercase tracking-[0.12em] text-muted-foreground">{t("sessions.columns.turns")}</dt>
                   <dd className="mt-1 text-sm font-medium tabular-nums">{formatNumber(session.turn_count)}</dd>
                 </div>
                 <div>
-                  <dt className="app-text-10 uppercase tracking-[0.12em] text-muted-foreground">{t("sessions.columns.coverage")}</dt>
+                  <dt className="text-xs uppercase tracking-[0.12em] text-muted-foreground">{t("sessions.columns.coverage")}</dt>
                   <dd className="mt-1"><QualityBadge quality={session.usage_quality} coverage={session.usage_coverage} partial={session.partial} /></dd>
                 </div>
               </dl>
@@ -85,7 +98,7 @@ export function SessionTable({ sessions, total, loading, search, offset, pageSiz
       </div>
 
       <div className="hidden w-full max-w-full overflow-x-auto rounded-card border border-border lg:block">
-        <table className="w-full min-w-[1240px] border-collapse text-left text-sm">
+        <table className="w-full min-w-[1100px] border-collapse text-left text-sm">
           <thead className="bg-surface-softer text-xs text-muted-foreground">
             <tr className="border-b border-border">
               <th className="px-3 py-2 font-medium">{t("sessions.columns.session")}</th>
@@ -106,7 +119,7 @@ export function SessionTable({ sessions, total, loading, search, offset, pageSiz
             ) : sessions.map((session) => {
               const href = `/usage/sessions/${encodeURIComponent(session.session_id)}${search ? `?${search}` : ""}`;
               return (
-                <tr key={session.session_id} className="border-b border-border/70 last:border-b-0 hover:bg-surface-soft-hover">
+                <tr key={session.session_id} className="border-b border-border last:border-b-0 hover:bg-surface-soft-hover">
                   <td className="px-3 py-2.5">
                     <Link to={href} className="font-medium hover:text-accent-primary">{shortID(session.session_id)}</Link>
                     <div className="mt-0.5 text-xs text-muted-foreground">{formatTimestamp(session.start_time)}</div>
@@ -145,7 +158,9 @@ export function SessionDetail() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const adminToken = readAdminToken();
-  const tab = searchParams.get("tab") === "tokens" ? "tokens" : "overview";
+  const tabParam = searchParams.get("tab");
+  const tab: SessionTab = isSessionTab(tabParam) ? tabParam : "overview";
+  const errorCategory = (searchParams.get("error_category") ?? "").trim();
 
   const load = useCallback(async () => {
     if (!sessionId) return;
@@ -171,11 +186,24 @@ export function SessionDetail() {
   }, [adminToken, sessionId]);
 
   useEffect(() => { void load(); }, [load]);
-  const selectTab = (next: "overview" | "tokens") => {
+  const selectTab = (next: SessionTab) => {
     setSearchParams((current) => {
       const params = new URLSearchParams(current);
       if (next === "overview") params.delete("tab");
       else params.set("tab", next);
+      // 失败分类过滤只属于诊断 tab；切走时清理，避免污染其他 tab 的分享链接。
+      if (next !== "diagnostics") params.delete("error_category");
+      return params;
+    }, { replace: true });
+  };
+
+  const drillIntoDiagnostics = (pattern: { failure_category?: string; error_code?: string }) => {
+    const target = (pattern.failure_category ?? pattern.error_code ?? "").trim();
+    setSearchParams((current) => {
+      const params = new URLSearchParams(current);
+      params.set("tab", "diagnostics");
+      if (target) params.set("error_category", target);
+      else params.delete("error_category");
       return params;
     }, { replace: true });
   };
@@ -191,7 +219,7 @@ export function SessionDetail() {
             <div className="surface-panel flex min-h-60 items-center justify-center rounded-panel-lg text-sm text-muted-foreground"><RefreshCwIcon size={16} className={cn("mr-2", loading && "animate-spin")} />{t("loading")}</div>
           ) : (
             <>
-              <section className="surface-panel flex flex-col gap-3 rounded-panel-lg p-3.5 sm:p-4 lg:flex-row lg:items-end lg:justify-between">
+              <section className="surface-panel flex flex-col gap-3 rounded-panel-lg p-3 sm:p-4 lg:flex-row lg:items-end lg:justify-between">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <h2 className="break-all text-base font-semibold">{detail.session.title || detail.session.session_id}</h2>
@@ -203,10 +231,37 @@ export function SessionDetail() {
                 <div className="flex items-center gap-1 rounded-[0.75rem] border border-border bg-surface-softer p-1" role="tablist" aria-label={t("detail.tabs.label")}>
                   <TabButton active={tab === "overview"} onClick={() => selectTab("overview")}>{t("detail.tabs.overview")}</TabButton>
                   <TabButton active={tab === "tokens"} onClick={() => selectTab("tokens")}>{t("detail.tabs.tokens")}</TabButton>
+                  <TabButton active={tab === "tools"} onClick={() => selectTab("tools")}>{t("detail.tabs.tools")}</TabButton>
+                  <TabButton active={tab === "subagents"} onClick={() => selectTab("subagents")}>{t("detail.tabs.subagents")}</TabButton>
+                  <TabButton active={tab === "diagnostics"} onClick={() => selectTab("diagnostics")}>{t("detail.tabs.diagnostics")}</TabButton>
                 </div>
               </section>
               <QualityNotice coverage={detail.coverage} partial={detail.partial} reasons={detail.partial_reasons} />
-              {tab === "overview" ? <SessionOverview detail={detail} /> : <SessionTokens detail={detail} />}
+              {tab === "overview" ? <SessionOverview detail={detail} /> : null}
+              {tab === "tokens" ? <SessionTokens detail={detail} /> : null}
+              {tab === "tools" && sessionId ? (
+                <ToolStatsPanel sessionId={sessionId} adminToken={adminToken} />
+              ) : null}
+              {tab === "subagents" && sessionId ? (
+                <SubagentStatsPanel sessionId={sessionId} adminToken={adminToken} />
+              ) : null}
+              {tab === "diagnostics" ? (
+                <>
+                  <SessionDiagnostics
+                    detail={detail}
+                    errorCategory={errorCategory}
+                    onClearFilter={() => selectTab("diagnostics")}
+                  />
+                  {sessionId ? (
+                    <ErrorPatternsPanel
+                      sessionId={sessionId}
+                      adminToken={adminToken}
+                      selectedCategory={errorCategory}
+                      onDrilldown={drillIntoDiagnostics}
+                    />
+                  ) : null}
+                </>
+              ) : null}
               {sessionId ? <CacheAnalyticsPanel key={sessionId} sessionId={sessionId} /> : null}
             </>
           )}
@@ -229,8 +284,43 @@ function SessionOverview({ detail }: { detail: AnalyticsSessionUsageDetail }) {
         <Metric label={t("metrics.toolErrorRate")} value={formatPercent(errorRate(session.tool_errors, session.tool_results_observed))} detail={t("metrics.observedTools", { count: session.tool_results_observed })} tone={session.tool_errors > 0 ? "warning" : "default"} />
         <Metric label={t("metrics.duration")} value={formatDuration(session.total_duration_ms)} detail={t("detail.reconciliation", { status: t(reconciliationKey(session.reconciliation_status)), delta: formatNumber(Math.abs(session.reconciliation_delta)) })} />
       </section>
-      <Diagnostics diagnostics={detail.diagnostics} />
       <TurnTable turns={detail.turns} compact />
+    </>
+  );
+}
+
+// 批次 7.2：诊断 tab 内容（原 Overview 内嵌区块升级为独立 tab）。
+// `error_category` 来自失败模式 Top-N 的下钻；只做客户端过滤，不发明新的服务端语义。
+function SessionDiagnostics({
+  detail,
+  errorCategory,
+  onClearFilter,
+}: {
+  detail: AnalyticsSessionUsageDetail;
+  errorCategory: string;
+  onClearFilter: () => void;
+}) {
+  const { t } = useTranslation("usageAnalytics");
+  const diagnostics = errorCategory
+    ? detail.diagnostics.filter(
+        (diagnostic) => (diagnostic.error_category ?? "").trim() === errorCategory,
+      )
+    : detail.diagnostics;
+  return (
+    <>
+      {errorCategory ? (
+        <div className="flex items-center justify-between gap-3 rounded-panel border border-border bg-surface-softer px-3 py-2 text-sm">
+          <span className="min-w-0 truncate">
+            {t("observability.errors.filteredBy", {
+              key: t(errorCategoryKey(errorCategory)),
+            })}
+          </span>
+          <Button variant="ghost" size="sm" className="h-7 px-2" onClick={onClearFilter}>
+            {t("observability.errors.clearFilter")}
+          </Button>
+        </div>
+      ) : null}
+      <Diagnostics diagnostics={diagnostics} />
     </>
   );
 }
@@ -238,7 +328,7 @@ function SessionOverview({ detail }: { detail: AnalyticsSessionUsageDetail }) {
 function Diagnostics({ diagnostics }: { diagnostics: AnalyticsDiagnostic[] }) {
   const { t } = useTranslation("usageAnalytics");
   return (
-    <section aria-labelledby="diagnostics-title" className="surface-panel rounded-panel-lg p-3.5 sm:p-4">
+    <section aria-labelledby="diagnostics-title" className="surface-panel rounded-panel-lg p-3 sm:p-4">
       <div className="mb-2 flex items-center justify-between gap-3">
         <div><h3 id="diagnostics-title" className="text-sm font-semibold">{t("diagnostics.title")}</h3><p className="text-xs text-muted-foreground">{t("diagnostics.subtitle")}</p></div>
         <Badge>{t("diagnostics.count", { count: diagnostics.length })}</Badge>
@@ -270,7 +360,7 @@ function TurnTable({ turns, compact = false }: { turns: AnalyticsTurnUsage[]; co
   const { t } = useTranslation("usageAnalytics");
   const visibleTurns = compact ? turns.slice(-20) : turns;
   return (
-    <section aria-labelledby={compact ? "recent-turns-title" : "turns-title"} className="surface-panel rounded-panel-lg p-3.5 sm:p-4">
+    <section aria-labelledby={compact ? "recent-turns-title" : "turns-title"} className="surface-panel rounded-panel-lg p-3 sm:p-4">
       <div className="mb-2"><h3 id={compact ? "recent-turns-title" : "turns-title"} className="text-sm font-semibold">{compact ? t("turns.recentTitle") : t("turns.title")}</h3><p className="text-xs text-muted-foreground">{t("turns.subtitle", { count: turns.length })}</p></div>
       <div className="w-full max-w-full overflow-x-auto rounded-card border border-border">
         <table className="w-full min-w-[860px] border-collapse text-left text-sm">

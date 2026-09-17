@@ -177,6 +177,8 @@ export const enRuntimeConfigEditorFeedback = {
     warningsTitle: "Backend notes",
   },
   cards: {
+    overviewTitle: "Overview",
+    overviewCounts: "({{providers}} providers, {{routes}} routes)",
     provider: "Provider",
     providerDefault: "Default provider: {{defaultProvider}}",
     providerEmpty: "No default provider set yet",

@@ -27,6 +27,7 @@ export {
 } from "./logs";
 export {
   getAnalyticsDimensions,
+  getAnalyticsOverview,
   getAnalyticsSessionUsage,
   getAnalyticsSummary,
   listAnalyticsSessions,

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/uniqid"
@@ -95,6 +96,11 @@ type SubagentBatchCoordinatorConfig struct {
 	DefaultDeadline         time.Duration // applied when a request carries no deadline
 	TerminalDeliveryTimeout time.Duration
 	HeartbeatInterval       time.Duration
+	// TaskProgressInterval enables throttled LastProgressAt write-back for
+	// running background batches. Zero (the default) disables write-back
+	// entirely, preserving the pre-M1 behavior of never touching
+	// LastProgressAt. Hosts wire this from supervision.Config.TaskProgressInterval.
+	TaskProgressInterval time.Duration
 }
 
 // subagentExecutor is the kernel abstraction the coordinator drives. It is a
@@ -114,6 +120,7 @@ type SubagentBatchCoordinator struct {
 	deadline           time.Duration
 	deliveryTimeout    time.Duration
 	heartbeatEvery     time.Duration
+	taskProgressEvery  time.Duration
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
@@ -133,7 +140,42 @@ type SubagentBatchCoordinator struct {
 	terminalDelivered map[string]struct{}
 	emitterMu         sync.RWMutex
 	lifecycleMu       sync.RWMutex
+
+	taskProgressStats subagentTaskProgressStats
+	progressErrMu     sync.Mutex
+	progressErrLast   time.Time
 }
+
+// SubagentTaskProgressCounts is a point-in-time snapshot of the coordinator's
+// TaskProgressInterval write-back counters. Hosts render it on /debug
+// supervision to distinguish "producer is writing" from "throttled" and
+// "dropped by CAS/terminal fence".
+type SubagentTaskProgressCounts struct {
+	// Writes counts durable LastProgressAt stamps committed by the
+	// write-back: forced started/settle transitions plus throttled
+	// refreshes.
+	Writes int64
+	// WindowSkipped counts refresh attempts coalesced because the task
+	// already reported progress inside the current throttle window.
+	WindowSkipped int64
+	// ConflictsDropped counts CAS/fence rejections (stale version, terminal
+	// task or batch) that are intentionally dropped without retry.
+	ConflictsDropped int64
+	// Errors counts write-back failures other than conflicts (best-effort).
+	Errors int64
+}
+
+type subagentTaskProgressStats struct {
+	writes           atomic.Int64
+	windowSkipped    atomic.Int64
+	conflictsDropped atomic.Int64
+	errors           atomic.Int64
+}
+
+// taskProgressErrorEmitMinInterval throttles the best-effort
+// subagent.batch.progress debug event so a persistently failing store cannot
+// produce an event storm from the refresh ticker.
+const taskProgressErrorEmitMinInterval = time.Second
 
 // NewSubagentBatchCoordinator constructs a coordinator from a config. The
 // store must be non-nil for StartBackground to work.
@@ -157,6 +199,7 @@ func NewSubagentBatchCoordinator(cfg SubagentBatchCoordinatorConfig) *SubagentBa
 		deadline:           cfg.DefaultDeadline,
 		deliveryTimeout:    cfg.TerminalDeliveryTimeout,
 		heartbeatEvery:     cfg.HeartbeatInterval,
+		taskProgressEvery:  cfg.TaskProgressInterval,
 		cancels:            make(map[string]context.CancelFunc),
 		owned:              make(map[string]struct{}),
 		abandoned:          make(map[string]struct{}),
@@ -1068,6 +1111,13 @@ func (c *SubagentBatchCoordinator) runBatch(ctx context.Context, batchID string,
 	claimToken := updated.FencingToken
 	stopHeartbeat := c.startHeartbeat(ctx, batchID, ownerID, claimToken)
 	defer stopHeartbeat()
+	// M1/ADR-1: only background batches write progress back, and only when the
+	// host opted in with a positive interval.
+	progressWriteback := c.taskProgressWritebackEnabled(opts.ExecutionMode)
+	stopProgress := func() {}
+	if progressWriteback {
+		stopProgress = c.startTaskProgressRefresher(ctx, batchID)
+	}
 	c.emit("subagent.batch.started", map[string]interface{}{
 		"batch_id":            batchID,
 		"parent_session_id":   opts.ParentSessionID,
@@ -1078,7 +1128,10 @@ func (c *SubagentBatchCoordinator) runBatch(ctx context.Context, batchID string,
 		"task_count":          len(tasks),
 	})
 
-	reports, runErr := c.runTasksWithProgress(ctx, batchID, opts, tasks)
+	reports, runErr := c.runTasksWithProgress(ctx, batchID, opts, tasks, progressWriteback)
+	// Stop refreshing before finalization: the settle path below force-writes
+	// its own stamps, and no throttled tick may race the terminal result CAS.
+	stopProgress()
 	c.finalizeBatch(ctx, batchID, opts, tasks, reports, runErr)
 }
 
@@ -1139,11 +1192,171 @@ func (c *SubagentBatchCoordinator) renewHeartbeat(ctx context.Context, batchID, 
 	})
 }
 
+// TaskProgressWriteCounts returns a snapshot of the TaskProgressInterval
+// write-back counters for host debug surfaces. Safe to call concurrently.
+func (c *SubagentBatchCoordinator) TaskProgressWriteCounts() SubagentTaskProgressCounts {
+	if c == nil {
+		return SubagentTaskProgressCounts{}
+	}
+	return SubagentTaskProgressCounts{
+		Writes:           c.taskProgressStats.writes.Load(),
+		WindowSkipped:    c.taskProgressStats.windowSkipped.Load(),
+		ConflictsDropped: c.taskProgressStats.conflictsDropped.Load(),
+		Errors:           c.taskProgressStats.errors.Load(),
+	}
+}
+
+// taskProgressWritebackEnabled reports whether M1 progress write-back applies
+// to one worker. Hosts opt in with interval > 0 and ADR-1 restricts the
+// feature to background batches: wait/foreground batches keep the pre-M1
+// behavior (no LastProgressAt writes at all).
+func (c *SubagentBatchCoordinator) taskProgressWritebackEnabled(mode subagentbatch.ExecutionMode) bool {
+	return c != nil && c.taskProgressEvery > 0 && mode == subagentbatch.ExecutionModeBackground
+}
+
+// startTaskProgressRefresher launches the throttled LastProgressAt writer for
+// one claimed background batch. The returned stop function is idempotent and
+// only returns after the refresher goroutine exited, so callers can stop it
+// before finalizing without racing a late progress write against the settle
+// path.
+func (c *SubagentBatchCoordinator) startTaskProgressRefresher(ctx context.Context, batchID string) func() {
+	if c == nil || c.taskProgressEvery <= 0 {
+		return func() {}
+	}
+	interval := c.taskProgressEvery
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				writeTimeout := interval
+				if writeTimeout > 5*time.Second {
+					writeTimeout = 5 * time.Second
+				}
+				persistCtx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+				c.refreshBatchTaskProgress(persistCtx, batchID, interval)
+				cancel()
+			case <-ctx.Done():
+				return
+			case <-stop:
+				return
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() { close(stop) })
+		<-done
+	}
+}
+
+// refreshBatchTaskProgress stamps LastProgressAt on every non-terminal task of
+// the batch at most once per window. The stored LastProgressAt is the throttle
+// state: a fresh stamp coalesces the tick, a stale/nil one triggers one
+// CAS-versioned write whose rejection (stale version, terminal task/batch) is
+// dropped silently. Progress is best-effort and must never affect execution.
+func (c *SubagentBatchCoordinator) refreshBatchTaskProgress(ctx context.Context, batchID string, interval time.Duration) {
+	if c == nil || c.store == nil {
+		return
+	}
+	unlockWrite, writable := c.acquireBatchWrite(batchID)
+	if !writable {
+		return
+	}
+	records, err := c.store.ListTasks(ctx, batchID)
+	unlockWrite()
+	if err != nil {
+		c.taskProgressStats.errors.Add(1)
+		c.emitTaskProgressError(batchID, "", err)
+		return
+	}
+	now := subagentbatch.Now()
+	for i := range records {
+		record := records[i]
+		if record.Status.Terminal() {
+			continue
+		}
+		if record.LastProgressAt != nil && !record.LastProgressAt.IsZero() && now.Sub(*record.LastProgressAt) < interval {
+			c.taskProgressStats.windowSkipped.Add(1)
+			continue
+		}
+		c.writeTaskProgress(ctx, batchID, record.TaskID, record.Version, now)
+	}
+}
+
+// writeTaskProgress applies one throttled LastProgressAt stamp using the
+// version read by refreshBatchTaskProgress. It is best-effort: conflicts are
+// counted and dropped, other failures are counted and reported through a
+// rate-limited debug event, and neither path reports back to the caller.
+func (c *SubagentBatchCoordinator) writeTaskProgress(ctx context.Context, batchID, taskID string, expectedVersion int64, now time.Time) {
+	unlockWrite, writable := c.acquireBatchWrite(batchID)
+	if !writable {
+		return
+	}
+	_, err := c.store.UpdateTask(ctx, batchID, taskID, expectedVersion, func(task *subagentbatch.SubagentTaskRecord) {
+		task.LastProgressAt = &now
+	})
+	unlockWrite()
+	if err == nil {
+		c.taskProgressStats.writes.Add(1)
+		return
+	}
+	c.recordTaskProgressWriteError(batchID, taskID, err)
+}
+
+// recordTaskProgressWriteError classifies one failed progress write: CAS/fence
+// rejections (stale version, terminal task or batch) are dropped silently,
+// everything else is counted and reported through a rate-limited debug event.
+// Callers must already hold no batch write barrier.
+func (c *SubagentBatchCoordinator) recordTaskProgressWriteError(batchID, taskID string, err error) {
+	if err == nil {
+		return
+	}
+	var conflict *subagentbatch.VersionConflictError
+	if errors.As(err, &conflict) {
+		c.taskProgressStats.conflictsDropped.Add(1)
+		return
+	}
+	c.taskProgressStats.errors.Add(1)
+	c.emitTaskProgressError(batchID, taskID, err)
+}
+
+// emitTaskProgressError publishes the existing best-effort
+// subagent.batch.progress event pattern, rate-limited to
+// taskProgressErrorEmitMinInterval so a persistent store failure cannot storm
+// the bus.
+func (c *SubagentBatchCoordinator) emitTaskProgressError(batchID, taskID string, err error) {
+	if c == nil || err == nil {
+		return
+	}
+	now := time.Now()
+	c.progressErrMu.Lock()
+	if !c.progressErrLast.IsZero() && now.Sub(c.progressErrLast) < taskProgressErrorEmitMinInterval {
+		c.progressErrMu.Unlock()
+		return
+	}
+	c.progressErrLast = now
+	c.progressErrMu.Unlock()
+	payload := map[string]interface{}{
+		"batch_id":    batchID,
+		"error":       err.Error(),
+		"error_class": subagentbatch.CanonicalErrorClass(err),
+	}
+	if strings.TrimSpace(taskID) != "" {
+		payload["task_id"] = taskID
+	}
+	c.emit("subagent.batch.progress", payload)
+}
+
 // runTasksWithProgress runs the tasks through the scheduler, mirroring task
 // transitions (started) into the store along the way. Result persistence is
 // deferred to finalizeBatch so the worker writes the cohort atomically and
 // avoids racing per-task CAS from parallel wave goroutines.
-func (c *SubagentBatchCoordinator) runTasksWithProgress(ctx context.Context, batchID string, opts BatchStartOptions, tasks []SubagentTask) ([]SubagentResult, error) {
+func (c *SubagentBatchCoordinator) runTasksWithProgress(ctx context.Context, batchID string, opts BatchStartOptions, tasks []SubagentTask, progressWriteback bool) ([]SubagentResult, error) {
 	c.mu.Lock()
 	executor := c.executor
 	c.mu.Unlock()
@@ -1156,14 +1369,14 @@ func (c *SubagentBatchCoordinator) runTasksWithProgress(ctx context.Context, bat
 		ParentToolCallID: opts.ParentToolCallID,
 		Depth:            opts.Depth,
 		OnTaskEvent: func(taskID, event string) {
-			c.recordTaskEvent(ctx, batchID, taskID, event)
+			c.recordTaskEvent(ctx, batchID, taskID, event, progressWriteback)
 		},
 	}
 	return executor.RunChildren(ctx, runOpts, tasks)
 }
 
 // recordTaskEvent mirrors a single task lifecycle transition into the store.
-func (c *SubagentBatchCoordinator) recordTaskEvent(ctx context.Context, batchID, taskID, event string) {
+func (c *SubagentBatchCoordinator) recordTaskEvent(ctx context.Context, batchID, taskID, event string, progressWriteback bool) {
 	now := subagentbatch.Now()
 	switch event {
 	case "started":
@@ -1171,16 +1384,28 @@ func (c *SubagentBatchCoordinator) recordTaskEvent(ctx context.Context, batchID,
 		if !writable {
 			return
 		}
+		progressStamped := false
 		_, err := c.store.UpdateTask(ctx, batchID, taskID, -1, func(t *subagentbatch.SubagentTaskRecord) {
 			if t.Status.Terminal() {
 				return
 			}
 			t.Status = subagentbatch.TaskRunning
 			t.StartedAt = &now
+			// M1: the started transition forces a progress stamp in the same
+			// write; it is a state transition, not a throttled refresh, so the
+			// TaskProgressInterval window never suppresses it (ADR-1: only
+			// background batches participate).
+			if progressWriteback {
+				t.LastProgressAt = &now
+				progressStamped = true
+			}
 			t.UpdatedAt = now
 		})
 		unlockWrite()
 		if err == nil {
+			if progressStamped {
+				c.taskProgressStats.writes.Add(1)
+			}
 			c.emit("subagent.task.started", map[string]interface{}{
 				"batch_id": batchID,
 				"task_id":  taskID,
@@ -1195,7 +1420,7 @@ func (c *SubagentBatchCoordinator) recordTaskEvent(ctx context.Context, batchID,
 // and could overwrite a result committed by a sibling owner. Keeping the
 // read/promote/result sequence behind the coordinator write barrier also makes
 // local lifecycle emission correspond to the durable mutation that succeeded.
-func (c *SubagentBatchCoordinator) prepareTaskResult(ctx context.Context, batchID, taskID string, status subagentbatch.TaskStatus, result *subagentbatch.TaskResult) (alreadyTerminal bool, err error) {
+func (c *SubagentBatchCoordinator) prepareTaskResult(ctx context.Context, batchID, taskID string, status subagentbatch.TaskStatus, result *subagentbatch.TaskResult, progressWriteback bool) (alreadyTerminal bool, err error) {
 	if c == nil || c.store == nil {
 		return false, fmt.Errorf("subagent batch coordinator is not configured")
 	}
@@ -1234,6 +1459,7 @@ func (c *SubagentBatchCoordinator) prepareTaskResult(ctx context.Context, batchI
 	if status == subagentbatch.TaskSucceeded || status == subagentbatch.TaskFailed {
 		switch task.Status {
 		case subagentbatch.TaskPending, subagentbatch.TaskReady:
+			progressStamped := false
 			updated, updateErr := c.store.UpdateTask(ctx, batchID, taskID, version, func(current *subagentbatch.SubagentTaskRecord) {
 				if current.Status.Terminal() {
 					return
@@ -1243,6 +1469,12 @@ func (c *SubagentBatchCoordinator) prepareTaskResult(ctx context.Context, batchI
 				if current.StartedAt == nil {
 					current.StartedAt = &now
 				}
+				// M1: the settle path force-writes a progress stamp in the
+				// same write; it is not a throttled refresh (background only).
+				if progressWriteback {
+					current.LastProgressAt = &now
+					progressStamped = true
+				}
 				current.UpdatedAt = now
 			})
 			if updateErr != nil {
@@ -1251,10 +1483,62 @@ func (c *SubagentBatchCoordinator) prepareTaskResult(ctx context.Context, batchI
 			if updated == nil {
 				return false, fmt.Errorf("subagent task %q promotion returned nil", taskID)
 			}
+			if progressStamped {
+				c.taskProgressStats.writes.Add(1)
+			}
 			version = updated.Version
 		case subagentbatch.TaskRunning:
+			// M1: force a fresh progress stamp right before the terminal
+			// result CAS so the throttle window can never leave the last
+			// stamp older than the result. Best-effort: on failure keep the
+			// version read above so the result write behaves exactly as
+			// before (a CAS conflict here implies that write would conflict
+			// too). The batch write barrier is already held by this method.
+			if progressWriteback {
+				now := subagentbatch.Now()
+				stamped, stampErr := c.store.UpdateTask(ctx, batchID, taskID, version, func(current *subagentbatch.SubagentTaskRecord) {
+					current.LastProgressAt = &now
+				})
+				if stampErr == nil && stamped != nil {
+					c.taskProgressStats.writes.Add(1)
+					version = stamped.Version
+				} else if stampErr != nil {
+					c.recordTaskProgressWriteError(batchID, taskID, stampErr)
+				}
+			}
 		default:
 			return false, fmt.Errorf("subagent task %q cannot settle from %s", taskID, task.Status)
+		}
+	}
+	// M3 (§3.4 改动 3): the durable capsule carries TaskResult.SessionID, but the
+	// task row itself had no producer for ChildSessionID, so session-keyed reads
+	// (read_agent_result / include_results) could only fall back to the capsule.
+	// Backfill it through the same CAS/fence discipline as the result write, but
+	// strictly best-effort: a failure here must never turn into a result-write
+	// failure, and a conflict (stale version, terminal batch) is an expected
+	// loser that is dropped silently instead of overwriting another owner's row.
+	if result != nil {
+		if sessionID := strings.TrimSpace(result.SessionID); sessionID != "" && strings.TrimSpace(task.ChildSessionID) == "" {
+			updated, sessionErr := c.store.UpdateTask(ctx, batchID, taskID, version, func(current *subagentbatch.SubagentTaskRecord) {
+				if strings.TrimSpace(current.ChildSessionID) == "" {
+					current.ChildSessionID = sessionID
+				}
+			})
+			switch {
+			case sessionErr == nil && updated != nil:
+				version = updated.Version
+			case sessionErr != nil:
+				var conflict *subagentbatch.VersionConflictError
+				if !errors.As(sessionErr, &conflict) {
+					c.emit("subagent.batch.progress", map[string]interface{}{
+						"batch_id":    batchID,
+						"task_id":     taskID,
+						"field":       "child_session_id",
+						"error":       sessionErr.Error(),
+						"error_class": subagentbatch.CanonicalErrorClass(sessionErr),
+					})
+				}
+			}
 		}
 	}
 	if err := c.store.RecordTaskResult(ctx, batchID, taskID, version, status, result); err != nil {
@@ -1320,6 +1604,9 @@ func (c *SubagentBatchCoordinator) finalizeBatch(ctx context.Context, batchID st
 	var criticalErrors []string
 	resultWriteBlocked := false
 	unreported := false
+	// M1/ADR-1: background batches with an opted-in interval force a progress
+	// stamp on the settle path.
+	progressWriteback := c.taskProgressWritebackEnabled(opts.ExecutionMode)
 
 	for i, task := range tasks {
 		taskID := strings.TrimSpace(task.ID)
@@ -1333,14 +1620,15 @@ func (c *SubagentBatchCoordinator) finalizeBatch(ctx context.Context, batchID st
 		if i < len(reports) && reportProduced(reports[i]) {
 			r := reports[i]
 			result = subagentResultForStore{
-				TaskID:    taskID,
-				Role:      task.Role,
-				SessionID: r.SessionID,
-				Success:   r.Success && r.Error == "",
-				Summary:   r.Summary,
-				Findings:  r.Findings,
-				Patches:   batchFilePatchesToSpec(r.Patches),
-				Error:     r.Error,
+				TaskID:     taskID,
+				Role:       task.Role,
+				SessionID:  r.SessionID,
+				UsageTotal: usageTotal(r.Usage),
+				Success:    r.Success && r.Error == "",
+				Summary:    r.Summary,
+				Findings:   r.Findings,
+				Patches:    batchFilePatchesToSpec(r.Patches),
+				Error:      r.Error,
 			}
 			if r.Success && r.Error == "" {
 				ts = subagentbatch.TaskSucceeded
@@ -1375,9 +1663,10 @@ func (c *SubagentBatchCoordinator) finalizeBatch(ctx context.Context, batchID st
 			Findings:    result.Findings,
 			Patches:     result.Patches,
 			Error:       result.Error,
+			UsageTotal:  result.UsageTotal,
 			ArtifactRef: result.ArtifactRef,
 		}
-		alreadyTerminal, prepareErr := c.prepareTaskResult(persistCtx, batchID, taskID, ts, taskResult)
+		alreadyTerminal, prepareErr := c.prepareTaskResult(persistCtx, batchID, taskID, ts, taskResult, progressWriteback)
 		if prepareErr != nil {
 			var conflict *subagentbatch.VersionConflictError
 			if errors.As(prepareErr, &conflict) && conflict.Kind == "batch" {
@@ -1892,9 +2181,13 @@ func (c *SubagentBatchCoordinator) forgetCancel(batchID string) {
 // subagentResultForStore is the host-side bridge between a scheduler report
 // and a durable TaskResult capsule.
 type subagentResultForStore struct {
-	TaskID      string
-	Role        string
-	SessionID   string
+	TaskID    string
+	Role      string
+	SessionID string
+	// UsageTotal is the child's token total (usageTotal convention: TotalTokens,
+	// nil usage contributes 0). It travels into TaskResult.UsageTotal so
+	// read_agent_result/include_results can report a real total.
+	UsageTotal  int
 	Success     bool
 	Summary     string
 	Findings    []string

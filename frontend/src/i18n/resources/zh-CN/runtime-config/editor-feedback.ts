@@ -174,6 +174,8 @@ export const zhRuntimeConfigEditorFeedback = {
     warningsTitle: "后端提示",
   },
   cards: {
+    overviewTitle: "配置概览",
+    overviewCounts: "（{{providers}} 个 provider，{{routes}} 条 route）",
     provider: "Provider",
     providerDefault: "默认 provider: {{defaultProvider}}",
     providerEmpty: "尚未设置默认 provider",

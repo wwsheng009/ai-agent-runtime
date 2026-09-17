@@ -3,13 +3,12 @@
 // 两种面的区别（有意保留，不是遗漏）：
 // - 自包含面：注册 `surface`（模块作用域 `lazy()`），由 PanelHost 懒加载并渲染，只接收会话上下文 props。
 //   `files` / `git` 走这条路（它们的数据来自作用域根，不依赖面板级会话状态）。
-// - 面板级面：`plan` / `checkpoints` / `usage` 的状态由 PanelHost 里的会话 hook 解析
+// - 面板级面：`plan` / `checkpoints` 的状态由 PanelHost 里的会话 hook 解析
 //   （panel 级 useState/useEffect 不能下沉到懒加载子组件，否则页签徽标与面板会各拉一次数据），
 //   因此不注册 `surface`，由 PanelHost 用已解析的 props 显式渲染。新增面请优先做成自包含面。
 
 import { lazy, type ComponentType, type LazyExoticComponent, type ReactNode } from "react";
 import {
-  ChartNoAxesCombinedIcon,
   FileCode2Icon,
   FolderTreeIcon,
   GitCompareIcon,

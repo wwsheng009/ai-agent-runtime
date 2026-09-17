@@ -138,6 +138,9 @@ func ListProviderSummaries(cfg *Config, filter ProviderListFilter) []ProviderSum
 }
 
 func DeleteProvidersConfig(configPath string, req ProviderDeleteRequest) (*ProviderDeleteResult, error) {
+	// Layered configs: delete in the layer that owns the providers. Writing the
+	// deletion into another file would leave the providers visible from below.
+	configPath = routeConfigWritePath(configPath, providerNamesWriteKeys(req.Names)...)
 	document, root, err := readProviderConfigDocument(configPath)
 	if err != nil {
 		return nil, err
@@ -299,6 +302,9 @@ func DeleteProvidersConfig(configPath string, req ProviderDeleteRequest) (*Provi
 }
 
 func SetProvidersEnabledConfig(configPath string, names []string, enabled bool) (*ProviderEnableResult, error) {
+	// Layered configs: enabling/disabling edits providers.items.<name>, so the
+	// write belongs to the layer that owns those entries.
+	configPath = routeConfigWritePath(configPath, providerNamesWriteKeys(names)...)
 	document, root, err := readProviderConfigDocument(configPath)
 	if err != nil {
 		return nil, err
@@ -337,13 +343,18 @@ func SetDefaultProviderConfig(configPath, name string) (*ProviderDefaultResult, 
 	if name == "" {
 		return nil, fmt.Errorf("provider name is required")
 	}
+	configPath = routeConfigWritePath(configPath, "providers.default_provider", "providers.items."+name)
 	document, root, err := readProviderConfigDocument(configPath)
 	if err != nil {
 		return nil, err
 	}
 	providersNode := ensureChildMapping(root, "providers")
 	itemsNode := ensureChildMapping(providersNode, "items")
-	if mappingValue(itemsNode, name) == nil {
+	// Layered mode may route this write to the layer that pins
+	// providers.default_provider even when the provider entry itself lives in a
+	// lower layer (the merged view is what users see and select from). Only the
+	// single-file path keeps the strict file-local check.
+	if mappingValue(itemsNode, name) == nil && !providerKnownToMergedConfig(name) {
 		return nil, fmt.Errorf("provider %q not found", name)
 	}
 	previous := scalarString(mappingValue(providersNode, "default_provider"))

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
@@ -36,6 +37,14 @@ type SupervisionRuntimeHooks struct {
 	// retry/reassign）。nil 时这些动作返回 failed 结果并保留在 durable
 	// action 记录中，不假装成功。
 	Execute func(ctx context.Context, a supervision.ActionRecord) (supervision.ActionResult, error)
+	// SubagentBatchStore 是宿主级 durable batch 控制面，供结果读出口
+	// （supervision_descendants(include_results=true) / read_agent_result）
+	// 读取每个 task 的 TaskResult/ArtifactRef（P0-4）。nil 时结果读出口只
+	// 保留 mailbox completion payload 兜底；不传该 hook 的既有宿主行为不变。
+	SubagentBatchStore subagentbatch.BatchStore
+	// CompletionMailboxReader 是宿主父会话的 AgentControl mailbox 读通道
+	// （completion payload 兜底，P0-4）。nil 时兜底不可用。
+	CompletionMailboxReader CompletionMailboxReader
 }
 
 // SupervisionControlPlane 是装配完成的 P2 控制面（doc 6.2-6.9）。
@@ -48,6 +57,9 @@ type SupervisionControlPlane struct {
 	Wakes *supervision.WakeScheduler
 	// Provider 聚合运行时 descendant 状态供 snapshot 使用（doc 6.2）。
 	Provider supervision.DescendantProvider
+	// Results 读取 scope 内有界的结果记录（batch task → mailbox completion
+	// payload），是 read_agent_result 的读通道（P0-4 改动 2）。永不为 nil。
+	Results supervision.ResultSource
 }
 
 // SetActionExecutor 在控制面装配后注入/替换运行时 mutation executor。Host
@@ -114,11 +126,14 @@ func BuildSupervisionControlPlane(dataDir string, cfg supervision.Config, hooks 
 		agentStates: hooks.ListAgentDescendants,
 		teamStates:  hooks.ListTeamDescendants,
 	}
+	results := NewSupervisionResultSource(hooks.SubagentBatchStore, hooks.CompletionMailboxReader)
+	resultProvider := NewDescendantResultProvider(provider, results, store, hooks.AgentRegistry)
 	return &SupervisionControlPlane{
 		Store:    store,
 		Actions:  actions,
 		Wakes:    wakes,
-		Provider: provider,
+		Provider: resultProvider,
+		Results:  results,
 	}, nil
 }
 

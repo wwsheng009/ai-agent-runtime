@@ -161,6 +161,26 @@ export function AgentMaxStepsPolicyCard({ className }: { className?: string }) {
               : t("editor.agentMaxSteps.scopeNote")
           }
         />
+        {snapshot && snapshot.layers.length > 0 ? (
+          <SettingsInfoCard
+            size="compact"
+            description={t("editor.agentMaxSteps.layerSummary", {
+              layers: snapshot.layers
+                .map((layer) =>
+                  [
+                    layer.kind,
+                    layer.path,
+                    layer.read_only
+                      ? t("editor.agentMaxSteps.layerReadOnly")
+                      : layer.present
+                        ? t("editor.agentMaxSteps.layerWritable")
+                        : t("editor.agentMaxSteps.layerCandidate"),
+                  ].join(" · "),
+                )
+                .join("  |  "),
+            })}
+          />
+        ) : null}
         <SettingsInfoCard
           size="compact"
           description={t("editor.agentMaxSteps.workspaceValue", {

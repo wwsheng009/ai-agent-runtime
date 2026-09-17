@@ -600,7 +600,10 @@ func configuredMCPConfigPathForHotReload(cfg *agentconfig.Config) string {
 	if cfg == nil || cfg.AICLI == nil || cfg.AICLI.MCP == nil {
 		return ""
 	}
-	return strings.TrimSpace(ResolveUpwardPath(cfg.AICLI.MCP.ConfigFile))
+	// Keep hot reload aligned with the startup path: both must resolve MCP
+	// config through the same ./.aicli > ~/.aicli > override > upward search
+	// order, otherwise a reload silently switches the effective MCP file.
+	return aiclipaths.ResolveMCPConfigPath(cfg.AICLI.MCP.ConfigFile)
 }
 
 func configuredMCPAutoConnectForHotReload(cfg *agentconfig.Config) bool {

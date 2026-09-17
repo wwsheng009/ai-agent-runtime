@@ -24,7 +24,7 @@ export function AnalyticsHeader({ onRefresh, refreshing }: { onRefresh: () => vo
     : "/workspace/chats/new";
   return (
     <header className="surface-panel relative overflow-hidden rounded-panel-lg px-3 py-3 sm:px-4">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(240,199,123,0.18),transparent_28%),radial-gradient(circle_at_right,rgba(103,215,230,0.12),transparent_24%)]" />
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,color-mix(in_srgb,var(--accent-primary)_18%,transparent),transparent_28%),radial-gradient(circle_at_right,color-mix(in_srgb,var(--accent-secondary)_12%,transparent),transparent_24%)]" />
       <div className="relative flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="min-w-0 space-y-1.5">
           <div className="flex flex-wrap items-center gap-2">
@@ -98,11 +98,11 @@ export function Metric({ label, value, detail, tone }: {
 }) {
   return (
     <div className={cn(
-      "min-w-0 rounded-panel border border-border bg-surface-softer px-3 py-3 shadow-[0_12px_34px_rgba(0,0,0,0.08)]",
+      "min-w-0 rounded-panel border border-border bg-surface-softer px-3 py-3 shadow-[var(--elevation-panel)]",
       tone === "warning" && "border-analytics-warning-border bg-analytics-warning-soft",
       tone === "danger" && "border-analytics-danger-border bg-analytics-danger-soft",
     )}>
-      <div className="app-text-10 uppercase tracking-[0.14em] text-muted-foreground">{label}</div>
+      <div className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">{label}</div>
       <div className={cn(
         "mt-1 truncate text-2xl font-semibold tracking-[-0.03em] tabular-nums",
         tone === "warning" && "text-analytics-warning",
@@ -123,7 +123,7 @@ export function QualityNotice({ coverage, partial, reasons }: {
   const { t } = useTranslation("usageAnalytics");
   return (
     <div className={cn(
-      "flex items-start gap-2 rounded-panel border px-3 py-2.5 text-sm shadow-[0_12px_34px_rgba(0,0,0,0.08)]",
+      "flex items-start gap-2 rounded-panel border px-3 py-2.5 text-sm shadow-[var(--elevation-panel)]",
       partial
         ? "border-analytics-warning-border bg-analytics-warning-soft text-analytics-warning"
         : "border-analytics-success-border bg-analytics-success-soft text-analytics-success",
@@ -192,10 +192,10 @@ export function UsageAnalyticsChartsFallback() {
   return (
     <section
       aria-label={t("charts.title")}
-      className="grid min-w-0 gap-2 lg:grid-cols-[minmax(0,1.7fr)_minmax(280px,0.8fr)]"
+      className="grid min-w-0 gap-2 lg:grid-cols-[minmax(0,1.6fr)_minmax(300px,0.9fr)]"
     >
       {[t("charts.trend.title"), t("charts.tokens.title")].map((title) => (
-        <div key={title} className="surface-panel min-h-[260px] rounded-panel-lg p-3.5 sm:p-4">
+        <div key={title} className="surface-panel min-h-[260px] rounded-panel-lg p-3 sm:p-4">
           <h2 className="text-sm font-semibold">{title}</h2>
           <div className="flex min-h-52 items-center justify-center text-sm text-muted-foreground">
             <RefreshCwIcon size={15} className="mr-2 animate-spin" />

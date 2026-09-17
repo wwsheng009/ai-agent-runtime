@@ -62,11 +62,30 @@ func (h *Handler) subagentBatchCoordinator(scheduler *agent.SubagentScheduler) *
 	return agent.NewSubagentBatchCoordinator(agent.SubagentBatchCoordinatorConfig{
 		Store:     store,
 		Scheduler: scheduler,
+		// P0-1a/M1: task-level progress write-back is an explicit opt-in
+		// (supervision.task_progress_interval, default 0 = no writes), wired
+		// from the same host tuning the CLI reads so the two hosts cannot drift.
+		TaskProgressInterval: h.supervisionTuning().TaskProgressInterval,
 	})
 }
 
 // supervisionProgressSource 是 P0-B 的只读投影入口：nil 表示本宿主没有可读的
 // batch 控制面，BuildDigest 因而跳过 progress 区块（与改动前一致）。
 func (h *Handler) supervisionProgressSource() supervision.ProgressSource {
-	return supervision.NewBatchProgressSource(h.getSubagentBatchStore())
+	if h == nil {
+		return nil
+	}
+	source := supervision.NewBatchProgressSource(h.getSubagentBatchStore())
+	batchSource, ok := source.(*supervision.BatchProgressSource)
+	if !ok || batchSource == nil {
+		return source
+	}
+	// P0-1c/M7: enrich running-task rows with the host's live-only progress
+	// mirror so supervision_descendants / digest last_message matches the CLI
+	// host. The mirror is shared with the per-child event subscription; a host
+	// that never observed child progress simply reports no message.
+	if mirror := h.subagentProgressMirror(); mirror != nil {
+		batchSource.Messages = supervision.MirrorProgressMessages{Mirror: mirror}
+	}
+	return source
 }

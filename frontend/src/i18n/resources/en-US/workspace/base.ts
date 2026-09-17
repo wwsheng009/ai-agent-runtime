@@ -355,6 +355,9 @@ export const enWorkspaceBase = {
       unselected: "Not selected",
       pendingConfirm: "Reconfirm",
       reselectHint: "Provider switched — reconfirm model and reasoning",
+      providerFilterPlaceholder: "Filter providers",
+      providerFilterEmpty: "No matching providers",
+      providerFilterClear: "Clear filter",
     },
     contextUsage: {
       triggerLabel: "Session context usage {{percent}}",

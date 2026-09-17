@@ -1103,7 +1103,14 @@ func scanTaskRow(s singleRow) (*SubagentTaskRecord, error) {
 		return nil, err
 	}
 	t.DependencyIDs = parseBatchJSONList(depIDs)
+	// Every column selected above must land back on the record; the nullable
+	// time columns mirror the write projection in insertTaskRow/overwriteTaskRow
+	// (NULL stays a nil pointer / zero time, RFC3339Nano parses back in UTC).
+	t.TaskDeadline = timeFromPtr(parseNullableBatchTime(taskDeadline))
+	t.StartedAt = parseNullableBatchTime(startedAt)
 	t.UpdatedAt = parseBatchTime(updatedAt.String)
+	t.FinishedAt = parseNullableBatchTime(finishedAt)
+	t.LastProgressAt = parseNullableBatchTime(lastProgressAt)
 	t.Spec = []byte(specJSON)
 	if resultJSON.Valid && resultJSON.String != "" {
 		t.ResultSummary = []byte(resultJSON.String)

@@ -58,10 +58,13 @@ export type RuntimeEventType =
   | "session_interrupted"
   | "session_start"
   | "subagent.batch.completed"
+  | "subagent.batch.progress"
   | "subagent.batch.started"
   | "subagent.completed"
   | "subagent.progress"
   | "subagent.started"
+  | "subagent.task.completed"
+  | "subagent.task.started"
   | "tool.completed"
   | "tool.denied"
   | "tool.malformed_arguments.guardrail_hit"
@@ -114,10 +117,13 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "session_interrupted": ["session_store"],
   "session_start": ["session_store"],
   "subagent.batch.completed": ["tail_only"],
+  "subagent.batch.progress": ["live_only"],
   "subagent.batch.started": ["tail_only"],
   "subagent.completed": ["tail_only"],
   "subagent.progress": ["live_only"],
   "subagent.started": ["tail_only"],
+  "subagent.task.completed": ["tail_only"],
+  "subagent.task.started": ["tail_only"],
   "tool.completed": ["session_store", "chat_bridge"],
   "tool.denied": [],
   "tool.malformed_arguments.guardrail_hit": [],
@@ -155,6 +161,7 @@ export const RUNTIME_EVENT_PERSISTED_TYPES: readonly RuntimeEventType[] = [
 ];
 
 export const RUNTIME_EVENT_LIVE_ONLY_TYPES: readonly RuntimeEventType[] = [
+  "subagent.batch.progress",
   "subagent.progress",
   "tool.progress",
 ];
@@ -169,6 +176,8 @@ export const RUNTIME_EVENT_TAIL_ONLY_TYPES: readonly RuntimeEventType[] = [
   "subagent.batch.started",
   "subagent.completed",
   "subagent.started",
+  "subagent.task.completed",
+  "subagent.task.started",
 ];
 
 export const RUNTIME_EVENT_PROVENANCE_TYPES: readonly RuntimeEventType[] = [

@@ -27,47 +27,28 @@ const (
 	usageCacheRequestsDefaultLimit = 20
 	usageCacheRequestsMaxLimit     = 100
 	usageCacheUnavailableHint      = "缓存分析不可用（当前后端版本不支持）"
+
+	// usageCommandUsage 是 /usage 的稳定用法文本（未知子命令与参数错误共用）。
+	usageCommandUsage = "用法: /usage [cache [requests [N] | trace <message_id>]] | tools [N] | subagents [N] [--failed] | errors [top N]"
 )
 
 // handleUsageCommand /usage 命令入口（command.go 分发挂接，与 /status 同型）。
 // 返回值对齐既有命令处理器（false = 不退出 REPL）。
 func handleUsageCommand(session *ChatSession, command string) bool {
-	args := parseUsageCommandArgs(command)
-	if len(args) > 0 && args[0] != "cache" {
-		printfChatCommandOutput(session, "错误: 未知子命令 %q\n用法: /usage [cache [requests [N] | trace <message_id>]]", args[0])
+	req, errText := resolveUsageViewRequest(parseUsageCommandArgs(command))
+	if errText != "" {
+		printChatCommandOutput(session, errText)
 		return false
 	}
-	sub := args
-	if len(sub) > 0 && sub[0] == "cache" {
-		sub = sub[1:]
+	src, sessionID, errLines, ok := usageCacheSourceOrLines(session)
+	analytics := chatUsageAnalyticsSourceOrNil()
+	if !ok {
+		printChatCommandOutput(session,
+			strings.Join(usageDegradationLines(analytics, req.Mode, errLines), "\n"))
+		return false
 	}
-
-	switch {
-	case len(sub) == 0:
-		printUsageCacheOverview(session)
-	case sub[0] == "requests":
-		limit := usageCacheRequestsDefaultLimit
-		if len(sub) > 1 {
-			n, err := strconv.Atoi(sub[1])
-			if err != nil || n <= 0 {
-				printfChatCommandOutput(session, "错误: requests 数量非法: %q（应为 1-%d）", sub[1], usageCacheRequestsMaxLimit)
-				return false
-			}
-			limit = n
-			if limit > usageCacheRequestsMaxLimit {
-				limit = usageCacheRequestsMaxLimit
-			}
-		}
-		printUsageCacheRequests(session, limit)
-	case sub[0] == "trace":
-		if len(sub) < 2 || strings.TrimSpace(sub[1]) == "" {
-			printChatCommandOutput(session, "错误: trace 需要 message_id\n用法: /usage cache trace <message_id>")
-			return false
-		}
-		printUsageCacheTrace(session, strings.TrimSpace(sub[1]))
-	default:
-		printfChatCommandOutput(session, "错误: 未知 cache 子命令 %q\n用法: /usage cache [requests [N] | trace <message_id>]", sub[0])
-	}
+	printChatCommandOutput(session,
+		strings.Join(usageDocumentLines(src, analytics, sessionID, req), "\n"))
 	return false
 }
 
@@ -80,6 +61,124 @@ func parseUsageCommandArgs(command string) []string {
 	return strings.Fields(arg)
 }
 
+// resolveUsageViewRequest 把 /usage 参数词解析为视图请求。错误文本为空表示成功；
+// 两种投影（legacy stdout / 结构化 CommandResult）共用同一解析，避免参数语义漂移。
+// 参数边界与既有 requests 契约一致：非法或 <=0 报错，超上限归一（clamp）。
+func resolveUsageViewRequest(args []string) (UsageScreenRequest, string) {
+	if len(args) == 0 {
+		return UsageScreenRequest{Mode: usageScreenModeOverview}, ""
+	}
+	switch args[0] {
+	case "cache":
+		return resolveUsageCacheViewRequest(args[1:])
+	case "tools":
+		return resolveUsageToolsViewRequest(args[1:])
+	case "subagents":
+		return resolveUsageSubagentsViewRequest(args[1:])
+	case "errors":
+		return resolveUsageErrorsViewRequest(args[1:])
+	default:
+		return UsageScreenRequest{}, fmt.Sprintf("错误: 未知子命令 %q\n%s", args[0], usageCommandUsage)
+	}
+}
+
+// resolveUsageCacheViewRequest 解析既有缓存视图子命令（行为与 §6.4 完全一致）。
+func resolveUsageCacheViewRequest(sub []string) (UsageScreenRequest, string) {
+	switch {
+	case len(sub) == 0:
+		return UsageScreenRequest{Mode: usageScreenModeOverview}, ""
+	case sub[0] == "requests":
+		limit := usageCacheRequestsDefaultLimit
+		if len(sub) > 1 {
+			n, err := strconv.Atoi(sub[1])
+			if err != nil || n <= 0 {
+				return UsageScreenRequest{}, fmt.Sprintf("错误: requests 数量非法: %q（应为 1-%d）", sub[1], usageCacheRequestsMaxLimit)
+			}
+			limit = n
+			if limit > usageCacheRequestsMaxLimit {
+				limit = usageCacheRequestsMaxLimit
+			}
+		}
+		return UsageScreenRequest{Mode: usageScreenModeRequests, Limit: limit}, ""
+	case sub[0] == "trace":
+		if len(sub) < 2 || strings.TrimSpace(sub[1]) == "" {
+			return UsageScreenRequest{}, "错误: trace 需要 message_id\n用法: /usage cache trace <message_id>"
+		}
+		return UsageScreenRequest{Mode: usageScreenModeTrace, TraceID: strings.TrimSpace(sub[1])}, ""
+	default:
+		return UsageScreenRequest{}, fmt.Sprintf("错误: 未知 cache 子命令 %q\n用法: /usage cache [requests [N] | trace <message_id>]", sub[0])
+	}
+}
+
+// resolveUsageToolsViewRequest 解析 /usage tools [N]。
+func resolveUsageToolsViewRequest(rest []string) (UsageScreenRequest, string) {
+	limit, errText := resolveUsageLimitArg("tools", rest, usageToolsDefaultLimit, usageToolsMaxLimit)
+	if errText != "" {
+		return UsageScreenRequest{}, errText
+	}
+	return UsageScreenRequest{Mode: usageScreenModeTools, Limit: limit}, ""
+}
+
+// resolveUsageSubagentsViewRequest 解析 /usage subagents [N] [--failed]；N 与
+// --failed 顺序无关，重复 N 以最后一个为准。
+func resolveUsageSubagentsViewRequest(rest []string) (UsageScreenRequest, string) {
+	req := UsageScreenRequest{Mode: usageScreenModeSubagents, Limit: usageSubagentsDefaultLimit}
+	for _, arg := range rest {
+		if arg == "--failed" {
+			req.FailedOnly = true
+			continue
+		}
+		n, err := strconv.Atoi(arg)
+		if err != nil || n <= 0 {
+			return UsageScreenRequest{}, fmt.Sprintf("错误: subagents 参数非法: %q\n用法: /usage subagents [N] [--failed]", arg)
+		}
+		if n > usageSubagentsMaxLimit {
+			n = usageSubagentsMaxLimit
+		}
+		req.Limit = n
+	}
+	return req, ""
+}
+
+// resolveUsageErrorsViewRequest 解析 /usage errors [top N]（裸 N 亦接受）。
+func resolveUsageErrorsViewRequest(rest []string) (UsageScreenRequest, string) {
+	top := usageErrorsDefaultTop
+	tokens := rest
+	if len(tokens) > 0 && tokens[0] == "top" {
+		tokens = tokens[1:]
+		if len(tokens) == 0 {
+			return UsageScreenRequest{}, "错误: errors 需要 top 数量\n用法: /usage errors [top N]"
+		}
+	}
+	if len(tokens) > 0 {
+		n, err := strconv.Atoi(tokens[0])
+		if err != nil || n <= 0 {
+			return UsageScreenRequest{}, fmt.Sprintf("错误: errors 数量非法: %q（应为 1-%d）", tokens[0], usageErrorsMaxTop)
+		}
+		if n > usageErrorsMaxTop {
+			n = usageErrorsMaxTop
+		}
+		top = n
+	}
+	return UsageScreenRequest{Mode: usageScreenModeErrors, Top: top}, ""
+}
+
+// resolveUsageLimitArg 解析「子命令 [N]」形式的数量参数：缺省取默认值，
+// 非法/<=0 报错，超上限归一（clamp）。
+func resolveUsageLimitArg(name string, rest []string, defaultLimit, maxLimit int) (int, string) {
+	if len(rest) == 0 {
+		return defaultLimit, ""
+	}
+	n, err := strconv.Atoi(rest[0])
+	if err != nil || n <= 0 {
+		return 0, fmt.Sprintf("错误: %s 数量非法: %q（应为 1-%d）", name, rest[0], maxLimit)
+	}
+	if n > maxLimit {
+		n = maxLimit
+	}
+	return n, ""
+}
+
 // executeStructuredUsageCommand renders /usage through the structured command
 // channel. In the unified interactive projection the view variants request
 // the lease-bound alternate-screen usage viewer (like /model and /debug
@@ -89,40 +188,11 @@ func parseUsageCommandArgs(command string) []string {
 // inside a CommandResult, so the unified command gate can never observe a
 // /usage fall-through.
 func executeStructuredUsageCommand(session *ChatSession, command string) CommandResult {
-	args := parseUsageCommandArgs(command)
-	if len(args) > 0 && args[0] != "cache" {
-		return commandTextResult(fmt.Sprintf("错误: 未知子命令 %q\n用法: /usage [cache [requests [N] | trace <message_id>]]", args[0]))
+	req, errText := resolveUsageViewRequest(parseUsageCommandArgs(command))
+	if errText != "" {
+		return commandTextResult(errText)
 	}
-	sub := args
-	if len(sub) > 0 && sub[0] == "cache" {
-		sub = sub[1:]
-	}
-
-	switch {
-	case len(sub) == 0:
-		return structuredUsageViewResult(session, UsageScreenRequest{Mode: usageScreenModeOverview})
-	case sub[0] == "requests":
-		limit := usageCacheRequestsDefaultLimit
-		if len(sub) > 1 {
-			n, err := strconv.Atoi(sub[1])
-			if err != nil || n <= 0 {
-				return commandTextResult(fmt.Sprintf("错误: requests 数量非法: %q（应为 1-%d）", sub[1], usageCacheRequestsMaxLimit))
-			}
-			limit = n
-			if limit > usageCacheRequestsMaxLimit {
-				limit = usageCacheRequestsMaxLimit
-			}
-		}
-		return structuredUsageViewResult(session, UsageScreenRequest{Mode: usageScreenModeRequests, Limit: limit})
-	case sub[0] == "trace":
-		if len(sub) < 2 || strings.TrimSpace(sub[1]) == "" {
-			return commandTextResult("错误: trace 需要 message_id\n用法: /usage cache trace <message_id>")
-		}
-		messageID := strings.TrimSpace(sub[1])
-		return structuredUsageViewResult(session, UsageScreenRequest{Mode: usageScreenModeTrace, TraceID: messageID})
-	default:
-		return commandTextResult(fmt.Sprintf("错误: 未知 cache 子命令 %q\n用法: /usage cache [requests [N] | trace <message_id>]", sub[0]))
-	}
+	return structuredUsageViewResult(session, req)
 }
 
 // structuredUsageViewResult resolves the cache source, then either requests
@@ -131,8 +201,9 @@ func executeStructuredUsageCommand(session *ChatSession, command string) Command
 // lines with the same stable text in every projection.
 func structuredUsageViewResult(session *ChatSession, req UsageScreenRequest) CommandResult {
 	src, sessionID, errLines, ok := usageCacheSourceOrLines(session)
+	analytics := chatUsageAnalyticsSourceOrNil()
 	if !ok {
-		return commandTextResult(strings.Join(errLines, "\n"))
+		return commandTextResult(strings.Join(usageDegradationLines(analytics, req.Mode, errLines), "\n"))
 	}
 	if unifiedDirectInteractiveOutput(session) {
 		// The viewer captures its snapshot after the command result crosses
@@ -140,23 +211,30 @@ func structuredUsageViewResult(session *ChatSession, req UsageScreenRequest) Com
 		// no Scene-cell document.
 		return CommandResult{Action: CommandContinue, OpenUsageScreen: &req}
 	}
-	return commandTextResult(strings.Join(usageDocumentLines(src, sessionID, req), "\n"))
+	return commandTextResult(strings.Join(usageDocumentLines(src, analytics, sessionID, req), "\n"))
 }
 
 // usageDocumentLines keeps the §6.4 single-section document semantics for
-// plain/JSON/noninteractive projections.
-func usageDocumentLines(src cacheanalytics.Source, sessionID string, req UsageScreenRequest) []string {
+// plain/JSON/noninteractive projections. The batch 1.3 aggregation modes share
+// the same single-section shape; every mode carries the health line first.
+func usageDocumentLines(src cacheanalytics.Source, analytics usageAnalyticsSource, sessionID string, req UsageScreenRequest) []string {
 	switch req.Mode {
+	case usageScreenModeTools:
+		return usageHealthFirstLines(analytics, renderUsageAnalyticsToolStats(analytics, sessionID, req.Limit))
+	case usageScreenModeSubagents:
+		return usageHealthFirstLines(analytics, renderUsageAnalyticsSubagentStats(analytics, sessionID, req.Limit, req.FailedOnly))
+	case usageScreenModeErrors:
+		return usageHealthFirstLines(analytics, renderUsageAnalyticsErrorPatterns(analytics, sessionID, req.Top))
 	case usageScreenModeRequests:
 		limit := req.Limit
 		if limit <= 0 {
 			limit = usageCacheRequestsDefaultLimit
 		}
-		return renderUsageCacheRequests(src, sessionID, limit)
+		return usageHealthFirstLines(analytics, renderUsageCacheRequests(src, sessionID, limit))
 	case usageScreenModeTrace:
-		return renderUsageCacheTrace(src, sessionID, req.TraceID)
+		return usageHealthFirstLines(analytics, renderUsageCacheTrace(src, sessionID, req.TraceID))
 	default:
-		return renderUsageCacheOverview(src, sessionID)
+		return usageHealthFirstLines(analytics, renderUsageCacheOverview(src, sessionID))
 	}
 }
 
@@ -181,42 +259,6 @@ func usageCacheSourceOrLines(session *ChatSession) (cacheanalytics.Source, strin
 		return nil, "", []string{"错误: 当前会话没有 runtime session id"}, false
 	}
 	return src, sessionID, nil, true
-}
-
-// usageCacheSource resolves the source and prints degradation lines for legacy
-// stdout callers (plain/JSON projections). Structured callers must use
-// usageCacheSourceOrLines so errors stay inside the command document.
-func usageCacheSource(session *ChatSession) (cacheanalytics.Source, string, bool) {
-	src, sessionID, errLines, ok := usageCacheSourceOrLines(session)
-	if !ok {
-		printChatCommandOutput(session, strings.Join(errLines, "\n"))
-		return nil, "", false
-	}
-	return src, sessionID, true
-}
-
-func printUsageCacheOverview(session *ChatSession) {
-	src, sessionID, ok := usageCacheSource(session)
-	if !ok {
-		return
-	}
-	printChatCommandOutput(session, strings.Join(renderUsageCacheOverview(src, sessionID), "\n"))
-}
-
-func printUsageCacheRequests(session *ChatSession, limit int) {
-	src, sessionID, ok := usageCacheSource(session)
-	if !ok {
-		return
-	}
-	printChatCommandOutput(session, strings.Join(renderUsageCacheRequests(src, sessionID, limit), "\n"))
-}
-
-func printUsageCacheTrace(session *ChatSession, messageID string) {
-	src, sessionID, ok := usageCacheSource(session)
-	if !ok {
-		return
-	}
-	printChatCommandOutput(session, strings.Join(renderUsageCacheTrace(src, sessionID, messageID), "\n"))
 }
 
 // ---------------------------------------------------------------------------

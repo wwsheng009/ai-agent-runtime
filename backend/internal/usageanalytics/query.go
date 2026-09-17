@@ -59,19 +59,30 @@ const sessionStartExpr = "COALESCE(NULLIF(s.started_at_unix_nano, 0), NULLIF(req
 // sessionLastExpr 会话最后活动时间：MAX(会话 updated/ended, 末条请求时间)。
 const sessionLastExpr = "MAX(COALESCE(s.updated_at_unix_nano, 0), COALESCE(s.ended_at_unix_nano, 0), COALESCE(req.last_started, 0))"
 
+// statsSessionStartExpr / statsSessionLastExpr 是 schema v3 预聚合列的等价表达式。
+const (
+	statsSessionStartExpr = "COALESCE(NULLIF(s.started_at_unix_nano, 0), NULLIF(s.c_first_started_at, 0), 0)"
+	statsSessionLastExpr  = "MAX(COALESCE(s.updated_at_unix_nano, 0), COALESCE(s.ended_at_unix_nano, 0), COALESCE(s.c_last_started_at, 0))"
+)
+
 type whereClause struct {
 	sql  string
 	args []interface{}
 }
 
-func buildWhere(q Query) whereClause {
+// buildWhere 构造过滤条件；sessionStart 为会话开始时间表达式
+// （schema v3 与旧聚合两种来源的占位方式不同）。
+func buildWhere(q Query, sessionStart string) whereClause {
+	if strings.TrimSpace(sessionStart) == "" {
+		sessionStart = sessionStartExpr
+	}
 	clause := whereClause{sql: "1=1"}
 	if !q.From.IsZero() {
-		clause.sql += " AND " + sessionStartExpr + " >= ?"
+		clause.sql += " AND " + sessionStart + " >= ?"
 		clause.args = append(clause.args, q.From.UnixNano())
 	}
 	if !q.To.IsZero() {
-		clause.sql += " AND " + sessionStartExpr + " < ?"
+		clause.sql += " AND " + sessionStart + " < ?"
 		clause.args = append(clause.args, q.To.UnixNano())
 	}
 	if provider := strings.TrimSpace(q.Provider); provider != "" {
@@ -160,6 +171,51 @@ SELECT
 FROM usage_sessions s
 LEFT JOIN req ON req.session_id = s.session_id
 WHERE `
+
+// sessionStatsSelect 是 schema v3 的单表会话统计 SELECT（§5.4）：
+// 不再聚合 usage_requests，列顺序与 sessionSelect 完全一致，scanSessionRows 共用。
+const sessionStatsSelect = `SELECT
+  s.session_id,
+  s.title,
+  s.project_path,
+  s.working_directory,
+  s.provider,
+  s.model,
+  s.protocol,
+  s.status,
+  COALESCE(s.started_at_unix_nano, 0),
+  COALESCE(s.ended_at_unix_nano, 0),
+  COALESCE(s.updated_at_unix_nano, 0),
+  s.c_total_requests,
+  s.c_llm_successes,
+  s.c_llm_errors,
+  s.c_requests_with_usage,
+  s.c_total_tokens,
+  s.c_prompt_tokens,
+  s.c_completion_tokens,
+  s.c_cached_tokens,
+  s.c_reasoning_tokens,
+  s.c_total_duration_ms,
+  CASE WHEN s.c_duration_samples > 0 THEN s.c_total_duration_ms / s.c_duration_samples ELSE 0 END AS c_avg_duration_ms,
+  s.c_turn_count,
+  s.c_failed_turns,
+  ` + statsSessionStartExpr + ` AS session_start,
+  ` + statsSessionLastExpr + ` AS session_last
+FROM usage_sessions s
+WHERE `
+
+// sessionQuerySource 是读路径选源结果：按 schema/逃生开关二选一（§5.4/§10）。
+type sessionQuerySource struct {
+	selectSQL string
+	startExpr string
+}
+
+func (s *Store) sessionQuerySource() sessionQuerySource {
+	if s.statsReady() {
+		return sessionQuerySource{selectSQL: sessionStatsSelect, startExpr: statsSessionStartExpr}
+	}
+	return sessionQuerySource{selectSQL: sessionSelect, startExpr: sessionStartExpr}
+}
 
 // scanSessionRows 读取会话聚合行。
 func scanSessionRows(rows *sql.Rows) ([]SessionRollup, error) {
@@ -357,8 +413,9 @@ func (s *Store) ListSessions(q Query) (ListResult, error) {
 	offset := normalizeOffset(q.Offset)
 	result := emptyListResult(limit, offset)
 
-	where := buildWhere(q)
-	sessionQuery := sessionSelect + where.sql
+	source := s.sessionQuerySource()
+	where := buildWhere(q, source.startExpr)
+	sessionQuery := source.selectSQL + where.sql
 
 	rows, ok, err := s.query("SELECT COUNT(*) FROM ("+sessionQuery+")", where.args...)
 	if err != nil {
@@ -402,6 +459,8 @@ func (s *Store) ListSessions(q Query) (ListResult, error) {
 	}
 	result.Sessions = rollups
 	result.Count = len(rollups)
+	// schema v2：补齐工具/子代理/恢复维度（按页批量查询，避免 N+1）。
+	s.enrichRollupsWithV2(result.Sessions)
 
 	totals, coverage, window, err := s.aggregateTotals(sessionQuery, where.args)
 	if err != nil {
@@ -517,8 +576,9 @@ func (s *Store) Summarize(q Query) (SummaryResult, error) {
 	limit := normalizeLimit(q.Limit, defaultSummaryLimit, maxSummaryLimit)
 	result := emptySummaryResult(groupBy)
 
-	where := buildWhere(q)
-	sessionQuery := sessionSelect + where.sql
+	source := s.sessionQuerySource()
+	where := buildWhere(q, source.startExpr)
+	sessionQuery := source.selectSQL + where.sql
 
 	totals, coverage, window, err := s.aggregateTotals(sessionQuery, where.args)
 	if err != nil {
@@ -593,7 +653,7 @@ LIMIT ?`
 			groups = append(groups, bucket)
 		}
 		if err := rows.Err(); err != nil {
-			return SummaryResult{}, fmt.Errorf("aggregate analytics groups: %w", err)
+			return SummaryResult{}, fmt.Errorf("scan analytics groups: %w", err)
 		}
 	}
 	result.Groups = groups
@@ -634,55 +694,57 @@ func (s *Store) Dimensions(q Query) (DimensionsResult, error) {
 		Projects:      []string{},
 		Statuses:      []string{},
 	}
-	where := buildWhere(q)
-	sessionQuery := sessionSelect + where.sql
+	source := s.sessionQuerySource()
+	where := buildWhere(q, source.startExpr)
+	sessionQuery := source.selectSQL + where.sql
 
+	// 5 个维度合并为一次 base 扫描（§8.1）：每段独立 ORDER BY + LIMIT，
+	// UNION ALL 后按维度标签分发，最后在 Go 内按值排序保证输出稳定。
 	dimensions := []struct {
+		key   string
 		out   *[]string
 		expr  string
-		order string
 	}{
-		{&result.Providers, "provider", "provider"},
-		{&result.Models, "model", "model"},
-		{&result.Directories, "working_directory", "working_directory"},
-		{&result.Projects, "project_path", "project_path"},
-		{&result.Statuses, "status", "status"},
+		{"provider", &result.Providers, "provider"},
+		{"model", &result.Models, "model"},
+		{"directory", &result.Directories, "working_directory"},
+		{"project", &result.Projects, "project_path"},
+		{"status", &result.Statuses, "status"},
+	}
+	parts := make([]string, 0, len(dimensions))
+	args := make([]interface{}, 0, len(dimensions)*(len(where.args)+1))
+	for _, dim := range dimensions {
+		parts = append(parts, "SELECT '"+dim.key+"' AS dim, value FROM (SELECT DISTINCT "+dim.expr+
+			" AS value FROM ("+sessionQuery+") WHERE value IS NOT NULL AND TRIM(value) <> '' ORDER BY value ASC LIMIT ?)")
+		args = append(args, where.args...)
+		args = append(args, maxDimensionValues)
+	}
+	rows, ok, err := s.query(strings.Join(parts, " UNION ALL "), args...)
+	if err != nil {
+		return DimensionsResult{}, fmt.Errorf("query analytics dimensions: %w", err)
+	}
+	if ok {
+		defer rows.Close()
+		for rows.Next() {
+			var key, value string
+			if err := rows.Scan(&key, &value); err != nil {
+				return DimensionsResult{}, fmt.Errorf("scan analytics dimensions: %w", err)
+			}
+			for _, dim := range dimensions {
+				if dim.key == key {
+					*dim.out = append(*dim.out, value)
+					break
+				}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return DimensionsResult{}, fmt.Errorf("query analytics dimensions: %w", err)
+		}
 	}
 	for _, dim := range dimensions {
-		column := dim.expr
-		values, err := s.distinctValues(sessionQuery, column, where.args)
-		if err != nil {
-			return DimensionsResult{}, err
-		}
-		*dim.out = values
+		sort.Strings(*dim.out)
 	}
 	return result, nil
-}
-
-func (s *Store) distinctValues(sessionQuery, column string, args []interface{}) ([]string, error) {
-	values := []string{}
-	sqlText := "SELECT DISTINCT " + column + " AS value FROM (" + sessionQuery + ")" +
-		" WHERE value IS NOT NULL AND TRIM(value) <> '' ORDER BY value ASC LIMIT ?"
-	queryArgs := append(append([]interface{}{}, args...), maxDimensionValues)
-	rows, ok, err := s.query(sqlText, queryArgs...)
-	if err != nil {
-		return nil, fmt.Errorf("query analytics dimensions: %w", err)
-	}
-	if !ok {
-		return values, nil
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var value string
-		if err := rows.Scan(&value); err != nil {
-			return nil, fmt.Errorf("scan analytics dimensions: %w", err)
-		}
-		values = append(values, value)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("query analytics dimensions: %w", err)
-	}
-	return values, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -725,12 +787,34 @@ func (s *Store) SessionUsage(sessionID string) (SessionUsageDetail, error) {
 	if !found {
 		rollup = rollupFromSteps(trimmed, rows)
 	}
+	// schema v2 会话级聚合（工具失败率/子代理失败率/重试恢复回合）。
+	enriched := []SessionRollup{rollup}
+	s.enrichRollupsWithV2(enriched)
+	rollup = enriched[0]
 
 	detail.Session = rollup
 	detail.Steps = steps
 	detail.StepCount = len(steps)
 	detail.Turns = buildTurns(rows)
-	detail.Diagnostics = buildDiagnostics(rollup, detail.Turns)
+	s.enrichTurnsWithV2(trimmed, detail.Turns)
+	// schema v2：单会话工具/子代理明细与失败模式 Top-N。
+	if toolStats, err := s.ToolStats(ToolStatsQuery{SessionID: trimmed, Limit: maxToolStatsRows}); err == nil {
+		detail.Tools = toolStats.Tools
+	}
+	if subagentStats, err := s.SubagentStats(SubagentStatsQuery{SessionID: trimmed, Limit: maxSubagentStatsRows}); err == nil {
+		detail.Subagents = subagentStats.Subagents
+		if subagentStats.Summary.Total > 0 {
+			rollup.SubagentRuns = subagentStats.Summary.Total
+			rollup.SubagentFailures = subagentStats.Summary.Failed
+			rollup.SubagentFailureRate = subagentStats.Summary.FailureRate
+			rollup.SubagentTimeouts = subagentStats.Summary.Timeouts
+		}
+	}
+	if patterns, err := s.ErrorPatterns(ErrorPatternsQuery{SessionID: trimmed, Top: 10}); err == nil {
+		detail.ErrorPatterns = patterns.Patterns
+	}
+	detail.Session = rollup
+	detail.Diagnostics = append(buildDiagnostics(rollup, detail.Turns), buildV2Diagnostics(rollup, rollup.ToolCallsObserved > 0 || rollup.SubagentRuns > 0 || rollup.RetryRecoveredTurns > 0)...)
 	detail.ErrorCategories = errorCategoryCounts(steps)
 	detail.Coverage = detailCoverage(rollup, steps)
 	detail.Partial = false
@@ -743,7 +827,8 @@ func (s *Store) SessionUsage(sessionID string) (SessionUsageDetail, error) {
 
 // sessionRollup 读取单会话聚合行；found=false 表示 usage_sessions 无该行。
 func (s *Store) sessionRollup(sessionID string) (SessionRollup, bool, error) {
-	rows, ok, err := s.query(sessionSelect+"s.session_id = ? LIMIT 1", sessionID)
+	source := s.sessionQuerySource()
+	rows, ok, err := s.query(source.selectSQL+"s.session_id = ? LIMIT 1", sessionID)
 	if err != nil {
 		return SessionRollup{}, false, fmt.Errorf("query analytics session: %w", err)
 	}

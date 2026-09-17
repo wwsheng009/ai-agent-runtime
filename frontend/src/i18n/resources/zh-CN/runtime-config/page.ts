@@ -4,7 +4,6 @@ export const zhRuntimeConfigPage = {
     badge: "Runtime config",
     independentPage: "独立页面",
     title: "后端配置工作台",
-    description: "独立处理 runtime 后端配置，并为 provider 提供专门入口。",
     backToWorkspace: "返回工作台",
     logs: "日志",
     usage: "用量",

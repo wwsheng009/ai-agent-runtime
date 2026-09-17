@@ -1,7 +1,7 @@
 // P1-4 子片 3：光标处触发器（`/` 命令、`@` 引用）的纯几何判定与替换。
 // 不读 DOM、不持有状态：输入值 + 光标位置 → 触发上下文 / 替换结果。
 
-export type ComposerTriggerKind = "slash" | "reference";
+export type ComposerTriggerKind = "slash" | "reference" | "skill";
 
 export type ComposerTrigger = {
   kind: ComposerTriggerKind;

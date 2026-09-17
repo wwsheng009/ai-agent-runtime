@@ -37,6 +37,15 @@ type Config struct {
 	Supervision    supervision.Config   `yaml:"supervision" mapstructure:"supervision"`
 	Log            logger.LogConfig     `yaml:"log" mapstructure:"log"`
 	ConfigFilePath string               `yaml:"-" mapstructure:"-"`
+	// ConfigLayers, ConfigOrigins and ConfigMergeMode describe how this config
+	// was assembled when layered merging is active. They are diagnostics only
+	// and never participate in YAML decoding.
+	ConfigLayers    []ConfigLayer     `yaml:"-" mapstructure:"-"`
+	ConfigOrigins   map[string]string `yaml:"-" mapstructure:"-"`
+	// ConfigOriginFiles maps the same key paths to the layer file that supplied
+	// them, which is what write routing (see config_write_route.go) needs.
+	ConfigOriginFiles map[string]string `yaml:"-" mapstructure:"-"`
+	ConfigMergeMode MergeMode         `yaml:"-" mapstructure:"-"`
 }
 
 // ProvidersConfig holds the provider collection configuration.

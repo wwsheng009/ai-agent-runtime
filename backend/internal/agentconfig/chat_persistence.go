@@ -30,6 +30,9 @@ func UpdateAICLIChatPreferences(configPath string, update AICLIChatPreferenceUpd
 	if configPath == "" {
 		return nil, fmt.Errorf("config path is required")
 	}
+	// Layered configs: aicli.chat edits go back to the layer that owns the
+	// section instead of always landing in the highest layer (design §7).
+	configPath = routeConfigWritePath(configPath, chatUpdateWriteKeys(update)...)
 
 	raw, err := os.ReadFile(configPath)
 	if err != nil {

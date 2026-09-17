@@ -164,32 +164,34 @@ func TestRuntimeServerConfigSearchNamesAlwaysFallBackToStandardName(t *testing.T
 }
 
 func runtimeServerConfigSearchPathsForNames(names []string) []string {
-	paths := make([]string, 0, 4*len(names))
+	paths := make([]string, 0, 4*len(names)+1)
+	for _, name := range names {
+		paths = append(paths, filepath.Join(".aicli", name))
+	}
 	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
 		for _, name := range names {
 			paths = append(paths, filepath.Join(home, ".aicli", name))
 		}
 	}
+	paths = append(paths, aiclipaths.DefaultCLIConfigFileName)
 	for _, name := range names {
-		paths = append(paths,
-			filepath.Join(".aicli", name),
-			name,
-			filepath.Join("configs", name),
-		)
+		paths = append(paths, name)
+	}
+	for _, name := range names {
+		paths = append(paths, filepath.Join("configs", name))
 	}
 	return paths
 }
 
 func runtimeServerConfigPathsForDotEnv(names []string) []string {
-	paths := make([]string, 0, 4*len(names))
+	// Every candidate directory collapses to a single .env entry; the shared
+	// layer stack only ever yields the .aicli, user .aicli, current and configs
+	// directories regardless of how many file names are searched.
+	paths := []string{filepath.Join(".aicli", ".env")}
 	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
 		paths = append(paths, filepath.Join(home, ".aicli", ".env"))
 	}
-	paths = append(paths,
-		filepath.Join(".aicli", ".env"),
-		".env",
-		filepath.Join("configs", ".env"),
-	)
+	paths = append(paths, ".env", filepath.Join("configs", ".env"))
 	return paths
 }
 

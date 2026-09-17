@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/runtimeserver"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
@@ -21,6 +22,12 @@ type localSupervisionToolController struct {
 	host    *localChatRuntimeHost
 	session *ChatSession
 	service *supervision.LocalControlService
+	// results is the P0-4 read channel (batch TaskResult → mailbox completion
+	// payload). The provider is decorated per call so
+	// supervision_descendants(include_results=true) behaves exactly like the
+	// API host; the CLI plane deliberately does not receive the host batch
+	// store through hooks, so the decoration happens here.
+	results supervision.ResultSource
 }
 
 // newLocalSupervisionToolController returns nil when the host has no durable
@@ -29,11 +36,56 @@ func newLocalSupervisionToolController(host *localChatRuntimeHost, session *Chat
 	if host == nil || host.Supervision == nil || host.Supervision.Store == nil {
 		return nil
 	}
-	return &localSupervisionToolController{
+	controller := &localSupervisionToolController{
 		host:    host,
 		session: session,
 		service: supervision.NewLocalControlService(host.Supervision.Store, host.Supervision.Actions),
 	}
+	controller.results = runtimeserver.NewSupervisionResultSource(host.SubagentBatches, localCompletionMailboxReader(host))
+	return controller
+}
+
+// localCompletionMailboxReader returns the host's AgentControl session mailbox
+// read channel — the same store the completion dispatcher appends to
+// (chat_actor_execution_supervisor.go) — so the P0-4 completion-payload
+// fallback reads exactly what the delivery path wrote.
+func localCompletionMailboxReader(host *localChatRuntimeHost) runtimeserver.CompletionMailboxReader {
+	if host == nil {
+		return nil
+	}
+	if reader, ok := host.EventStore.(runtimeserver.CompletionMailboxReader); ok && reader != nil {
+		return reader
+	}
+	if reader, ok := host.RuntimeStore.(runtimeserver.CompletionMailboxReader); ok && reader != nil {
+		return reader
+	}
+	return nil
+}
+
+// resultProvider decorates the current plane provider with the host's result
+// source. It is built per call so a host that swaps its provider (tests, or a
+// future re-wire) keeps working.
+func (c *localSupervisionToolController) resultProvider() supervision.DescendantProvider {
+	if c == nil || c.host == nil || c.host.Supervision == nil {
+		return nil
+	}
+	var runs supervision.ExecutionRunStore
+	if store, ok := c.host.Supervision.Store.(supervision.ExecutionRunStore); ok {
+		runs = store
+	}
+	return runtimeserver.NewDescendantResultProvider(c.host.Supervision.Provider, c.results, runs, c.host.AgentRegistryStore)
+}
+
+// resultSource is the read channel behind read_agent_result: the decorated
+// provider when available (it also resolves agent paths), otherwise the raw
+// batch/mailbox source.
+func (c *localSupervisionToolController) resultSource() supervision.ResultSource {
+	if provider := c.resultProvider(); provider != nil {
+		if source, ok := provider.(supervision.ResultSource); ok {
+			return source
+		}
+	}
+	return c.results
 }
 
 // resolution mirrors the preflight rule exactly: a team lead reads/writes the
@@ -113,6 +165,7 @@ func (c *localSupervisionToolController) SupervisionDescendants(ctx context.Cont
 		AfterSeq:         args.AfterSeq,
 		Health:           strings.TrimSpace(args.Health),
 		IncludeTerminal:  args.IncludeTerminal,
+		IncludeResults:   args.IncludeResults,
 		Limit:            args.Limit,
 		DefaultLimit:     c.host.supervisionConfig.WithDefaults().SnapshotMaxItems,
 		HostCapabilities: localSupervisionHostCapabilities(c.host),
@@ -124,9 +177,46 @@ func (c *localSupervisionToolController) SupervisionDescendants(ctx context.Cont
 		request.RootScopeID = targetTeamID
 	}
 	if c.host != nil && c.host.Supervision != nil {
-		request.Provider = c.host.Supervision.Provider
+		if provider := c.resultProvider(); provider != nil {
+			request.Provider = provider
+		} else {
+			request.Provider = c.host.Supervision.Provider
+		}
 	}
 	return supervision.BuildSnapshot(ctx, c.service.Store(), request)
+}
+
+// ReadAgentResult returns the bounded durable result of one child session or
+// batch task inside the caller's own scope (P0-4 改动 2). Scope resolution is
+// identical to SupervisionDescendants (a team lead reads the team scope); the
+// model cannot name a root scope. Missing records are reported as
+// no_result_recorded with an executable next_action, never as a tool failure.
+func (c *localSupervisionToolController) ReadAgentResult(ctx context.Context, parentSessionID string, args toolbroker.ReadAgentResultArgs) (supervision.ReadResultPayload, error) {
+	rootScopeID, targetTeamID := c.resolution(ctx, parentSessionID)
+	if rootScopeID == "" {
+		return supervision.ReadResultPayload{}, fmt.Errorf("supervision scope is required")
+	}
+	source := c.resultSource()
+	if source == nil {
+		return supervision.NoResultRecordedPayload(args.SessionID, args.TaskID), nil
+	}
+	scope := supervision.Scope{RootSessionID: c.callerSessionID(parentSessionID)}
+	if targetTeamID != "" {
+		scope.RootTeamID = targetTeamID
+	}
+	record, found, err := source.LoadAgentResult(ctx, scope, args.SessionID, args.TaskID)
+	if err != nil {
+		return supervision.ReadResultPayload{}, err
+	}
+	if !found {
+		return supervision.NoResultRecordedPayload(args.SessionID, args.TaskID), nil
+	}
+	return supervision.BuildReadResultPayload(record, supervision.ReadResultArgs{
+		SessionID: args.SessionID,
+		TaskID:    args.TaskID,
+		Sections:  args.Sections,
+		MaxChars:  args.MaxChars,
+	}), nil
 }
 
 func (c *localSupervisionToolController) AckLifecycle(ctx context.Context, parentSessionID string, args toolbroker.AckLifecycleArgs) (*supervision.Notification, error) {

@@ -192,6 +192,42 @@ func TestExternalEventFamilyConstantsAreRegistered(t *testing.T) {
 	}
 }
 
+// TestSubagentTaskEventChannelRegistrations：M4（P0-1b）登记的 subagent 任务事件通道。
+// 只补登记不改行为：高频批次进度走 live-only，任务里程碑与 batch.started/completed
+// 同档走 tail-only。
+func TestSubagentTaskEventChannelRegistrations(t *testing.T) {
+	cases := []struct {
+		eventType string
+		channel   events.ChannelSet
+	}{
+		{"subagent.batch.progress", events.ChannelLiveOnly},
+		{"subagent.task.started", events.ChannelTailOnly},
+		{"subagent.task.completed", events.ChannelTailOnly},
+	}
+	for _, tc := range cases {
+		if !events.IsRegisteredEventType(tc.eventType) {
+			t.Errorf("%q 未登记", tc.eventType)
+			continue
+		}
+		if got := events.ChannelsFor(tc.eventType); got != tc.channel {
+			t.Errorf("%q 通道 = %d，期望 %d", tc.eventType, got, tc.channel)
+		}
+	}
+
+	// live-only 快照列表（sessionLiveOnlyRuntimeEventTypes 的派生来源）必须包含
+	// subagent.batch.progress，否则实时旁路仍会把它当未知类型裁掉。
+	found := false
+	for _, eventType := range events.LiveOnlyEventTypes() {
+		if eventType == "subagent.batch.progress" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("LiveOnlyEventTypes 缺少 %q", "subagent.batch.progress")
+	}
+}
+
 // TestContractFileImportsOnlyStdlib：contract.go 的结构约束（防 import cycle）。
 func TestContractFileImportsOnlyStdlib(t *testing.T) {
 	path := filepath.Join(repoRoot(t), "internal", "events", "contract.go")

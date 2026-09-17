@@ -35,6 +35,16 @@ type DescendantState struct {
 	ProgressAgeMs       int64
 	ExecutionDeadlineAt *time.Time
 	Reason              string
+	// Bounded result projection (P0-4 改动 1). Result-aware providers fill
+	// these only when asked (DescendantResultProvider); BuildSnapshot copies
+	// them into the row only when SnapshotRequest.IncludeResults is set, so a
+	// default snapshot stays byte-identical.
+	ResultStatus    string
+	ResultSummary   string
+	ResultTruncated bool
+	ArtifactRefs    []string
+	ErrorClass      string
+	FinishedAt      *time.Time
 }
 
 // DescendantProvider supplies the current execution state of a scope's
@@ -42,6 +52,15 @@ type DescendantState struct {
 // team store state.
 type DescendantProvider interface {
 	ListDescendants(ctx context.Context, scope Scope) ([]DescendantState, error)
+}
+
+// DescendantResultProvider is the optional result-reading extension of
+// DescendantProvider (P0-4 改动 1). BuildSnapshot calls it instead of
+// ListDescendants when SnapshotRequest.IncludeResults is set; providers that do
+// not implement it keep returning rows without result fields, so unwired hosts
+// stay byte-identical (plan §3.4 "默认 include_results=false 保证既有输出逐字节兼容").
+type DescendantResultProvider interface {
+	ListDescendantsWithResults(ctx context.Context, scope Scope) ([]DescendantState, error)
 }
 
 // Snapshot is the unified supervision read model (doc 6.2).
@@ -101,6 +120,15 @@ type SnapshotItem struct {
 	ActionRequired bool   `json:"action_required,omitempty"`
 	NotificationID string `json:"notification_id,omitempty"`
 	LastChangeSeq  int64  `json:"last_change_seq,omitempty"`
+	// Bounded result fields (P0-4 改动 1): filled only when
+	// SnapshotRequest.IncludeResults is set; omitempty keeps the default output
+	// byte-identical (plan §5 读模型行).
+	ResultStatus    string     `json:"result_status,omitempty"`
+	ResultSummary   string     `json:"result_summary,omitempty"`
+	ResultTruncated bool       `json:"result_truncated,omitempty"`
+	ArtifactRefs    []string   `json:"artifact_refs,omitempty"`
+	ErrorClass      string     `json:"error_class,omitempty"`
+	FinishedAt      *time.Time `json:"finished_at,omitempty"`
 }
 
 // SnapshotAutoAction reports the runtime action already in flight (doc 6.2
@@ -125,7 +153,11 @@ type SnapshotRequest struct {
 	AfterSeq        int64
 	Health          string // any | abnormal | action_required
 	IncludeTerminal bool
-	Limit           int
+	// IncludeResults asks the provider for the bounded result projection
+	// (result_status/result_summary/artifact_refs/error_class/finished_at).
+	// Default false keeps the row payload unchanged (P0-4 改动 1).
+	IncludeResults bool
+	Limit          int
 	// DefaultLimit is the host-configured fallback used when Limit is not set
 	// (plan §9: the 200-row cap used to be hardcoded here). Zero keeps the
 	// package-level default so unwired hosts behave exactly as before.
@@ -155,11 +187,24 @@ func BuildSnapshot(ctx context.Context, store Store, req SnapshotRequest) (*Snap
 	}
 	var descendants []DescendantState
 	if req.Provider != nil {
-		list, err := req.Provider.ListDescendants(ctx, req.Scope)
-		if err != nil {
-			return nil, fmt.Errorf("list descendants: %w", err)
+		loaded := false
+		if req.IncludeResults {
+			if resultProvider, ok := req.Provider.(DescendantResultProvider); ok {
+				list, err := resultProvider.ListDescendantsWithResults(ctx, req.Scope)
+				if err != nil {
+					return nil, fmt.Errorf("list descendants: %w", err)
+				}
+				descendants = list
+				loaded = true
+			}
 		}
-		descendants = list
+		if !loaded {
+			list, err := req.Provider.ListDescendants(ctx, req.Scope)
+			if err != nil {
+				return nil, fmt.Errorf("list descendants: %w", err)
+			}
+			descendants = list
+		}
 	}
 
 	// Load unresolved notifications for the scope.
@@ -265,6 +310,9 @@ func BuildSnapshot(ctx context.Context, store Store, req SnapshotRequest) (*Snap
 			item.ActionRequired = false
 		}
 		attachExecutionRun(ctx, runStore, &item)
+		if req.IncludeResults {
+			applySnapshotResult(&item, d)
+		}
 		snapshot.Descendants = append(snapshot.Descendants, item)
 	}
 

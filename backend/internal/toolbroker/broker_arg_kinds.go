@@ -187,10 +187,17 @@ var brokerToolArgKinds = map[string]map[string]string{
 	},
 	ToolSupervisionDescendants: {
 		"include_terminal": toolArgFieldBool,
+		"include_results":  toolArgFieldBool,
 		"health":           toolArgFieldString,
 		"mode":             toolArgFieldString,
 		"after_seq":        toolArgFieldNumber,
 		"limit":            toolArgFieldNumber,
+	},
+	ToolReadAgentResult: {
+		"id":        toolArgFieldString,
+		"task_id":   toolArgFieldString,
+		"sections":  toolArgFieldStringOrList,
+		"max_chars": toolArgFieldNumber,
 	},
 	ToolAckLifecycle: {
 		"decision":         toolArgFieldString,

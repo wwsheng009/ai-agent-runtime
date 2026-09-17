@@ -540,30 +540,30 @@ CREATE INDEX IF NOT EXISTS idx_usage_turns_time ON usage_turns(session_id, ended
 
 ## 8. 排期与批次状态表
 
-| 批次 | 优先级 | 预估 | 依赖 | 状态 | 完成判据 |
+| 批次 | 优先级 | 预估 | 依赖 | 状态 | 落地位置 / 完成判据 |
 | --- | --- | --- | --- | --- | --- |
-| 0.1 采集启动即 attach | P0 | 0.5 人日 | — | 未开始 | usage_* > 0 |
-| 0.2 `tool.*` 落库修复 | P0 | 0.5 人日 | — | 未开始 | `tool.*` 事件可见 |
-| 0.3 工具回执写入 | P0 | 0.5 人日 | — | 未开始 | `session_tool_receipts` > 0 |
-| 0.4 旧表归档 + 基线脚本 | P0 | 0.5 人日 | — | 未开始 | 脚本幂等可复现 |
-| 1.1 schema v2 | P0 | 0.5 人日 | 0.4 | 未开始 | 三表建立、测试通过 |
-| 1.2 ingest 扩展 | P0 | 1 人日 | 1.1 | 未开始 | 三表有行 |
-| 1.3 rollup/诊断 | P1 | 1 人日 | 1.2 | 未开始 | golden 测试通过 |
-| 1.4（可选）历史 backfill | P2 | 1 人日 | 1.2 | 待定 | 显式子命令、幂等 |
-| 2.1 载荷归一化 | P0 | 1 人日 | — | 未开始 | 双生产者同构 |
-| 2.2 ingest 幂等去重 | P0 | 0.5 人日 | 2.1 | 未开始 | 历史回放单行 |
-| 3.1 API 端点 | P1 | 1 人日 | 1.3 | 未开始 | curl 冒烟通过 |
-| 3.2 健康快照 + 词表对齐 | P1 | 0.5 人日 | 0.1 | 未开始 | e2e 断言 |
-| 4.1 CLI 命令 | P1 | 1.5 人日 | 1.3 | 未开始 | 单测 + 手工运行 |
-| 4.2 退出码与 doctor | P1 | 0.5 人日 | 4.1 | 未开始 | runbook 记录 |
-| 5.x 基线与文档 | P2 | 1 人日 | 1–3 | 未开始 | 新基线 + runbook 落地 |
-| 6.1 恢复建议 | P1 | 1 人日 | 2.1 | 未开始 | 父上下文可见 `retry_advice` |
-| 6.2 有界重试 | P1 | 1–1.5 人日 | 2.1 | 未开始 | 只读 `attempt=2`、写任务不重试 |
-| 6.3 部分结果降级 | P2 | 1 人日 | 6.1 + 前置核对 | 待定 | 部分产出保留 |
-| 6.4 采纳率指标 | P2 | 0.5–1 人日 | 1.2、4.1 | 待定 | 诊断输出重复率 |
-| 7.1 micro web 分析页签 | P1 | 1–1.5 人日 | 3.1、3.2 | 未开始 | 页签渲染 + 降级用例 |
-| 7.2 frontend 观测 tab | P1 | 1.5–2 人日 | 3.1、3.2 | 未开始 | tab/指标卡 + e2e |
-| 7.3 TUI `/usage` 扩展 | P1 | 1–1.5 人日 | 1.3、3.2 | 未开始 | 命令单测 + 降级用例 |
+| 0.1 采集启动即 attach | P0 | 0.5 人日 | — | ✅ 代码完成 | aicli 启动期挂载（`chat_cache_local.go` + `chat_actor_host.go` 初始化链）；runtime-server 侧启动装配 + `usage_analytics` 健康块见 `internal/api/skills/{handler.go,analytics_handlers.go}`；实机 `usage_* > 0` 待真实会话复核 |
+| 0.2 `tool.*` 落库修复 | P0 | 0.5 人日 | — | ✅ 完成 | 本地 A 通道桥 `localChatRuntimeHost.bindRuntimeEventPersistence`（`cmd/aicli/commands/chat_actor_host.go`）+ 别名单一实现 `internal/events/session_store_alias.go`；回归测试 `TestLocalHostPersistsToolLifecycleEvents` / `TestLocalHostEventPersistenceSkipsAlreadyPersistedAndLiveOnly` |
+| 0.3 工具回执写入 | P0 | 0.5 人日 | — | ✅ 完成 | 终局回执补齐 `internal/chat/tool_receipt_reconcile.go`（含失败分支 `ok=false`；已回放消费的回执不复活）；测试 `TestToolReceiptPersistedOnToolCompletion` |
+| 0.4 旧表归档 + 基线脚本 | P0 | 0.5 人日 | — | ✅ 完成 | `backend/scripts/usage-analytics-{archive-legacy,baseline}.ps1`（幂等、`-Restore`、`-Json`）；实机已归档（备份 `~/.aicli/sessions/runtime/backup/20260917-121922/`） |
+| 1.1 schema v2 | P0 | 0.5 人日 | 0.4 | ✅ 完成 | `internal/usageanalytics/store.go`（三表 + 索引 + `PRAGMA user_version=2`）；测试 `TestStoreMigratesV2Idempotent` / `TestReadOnlyOpenSkipsMigration` |
+| 1.2 ingest 扩展 | P0 | 1 人日 | 1.1 | ✅ 完成 | `internal/usageanalytics/ingest_v2.go`（tool/subagent/turn 三类 handler + 幂等 upsert）；测试 `TestCollectorIngestsSchemaV2Events` 等 |
+| 1.3 rollup/诊断 | P1 | 1 人日 | 1.2 | ✅ 完成 | `internal/usageanalytics/query_v2.go`（ToolStats/SubagentStats/ErrorPatterns + rollup/诊断扩展）；测试 `TestStoreV2StatsQueries` / `TestSessionUsageCarriesV2Dimensions` |
+| 1.4（可选）历史 backfill | P2 | 1 人日 | 1.2 | ⏸ 跳过（默认不迁） | 依 §1.2 边界：历史死表只归档；如需历史可见再单独实施显式子命令 |
+| 2.1 载荷归一化 | P0 | 1 人日 | — | ✅ 完成 | 写侧 `usageanalytics.NormalizeSubagentCompletionPayload`（scheduler / api+cli agent-controller 镜像共用）+ 读侧 `NormalizeSubagentCompletion`；测试 `TestSubagentCompletedPayloadNormalized` |
+| 2.2 ingest 幂等去重 | P0 | 0.5 人日 | 2.1 | ✅ 完成（回放脚本未做） | `usage_subagents` 主键 upsert + 冲突计数；历史 271 行回放脚本（附录 A.5）未实施，读取侧已兼容 |
+| 3.1 API 端点 | P1 | 1 人日 | 1.3 | ✅ 代码完成 | `internal/api/skills/analytics_handlers.go` + 路由挂载；测试 `TestAnalyticsHandlersToolStats/SubagentStats/ErrorPatterns`；curl 冒烟待服务进程 |
+| 3.2 健康快照 + 词表对齐 | P1 | 0.5 人日 | 0.1 | ✅ 代码完成 | `runtimeStatusSnapshot["usage_analytics"]`（attached/db_path/ingested_total/conflict_total/last_ingest_at）+ `internal/usageanalytics/query_v2_health.go`；测试 `TestAnalyticsHandlersUsageAnalyticsHealthBlock` |
+| 4.1 CLI 命令 | P1 | 1.5 人日 | 1.3 | ✅ 完成 | `backend/cmd/aicli/commands/stats.go`（sessions/session/errors/subagents/doctor + `--json`/`--db`）；`go run ./cmd/aicli stats doctor` 手工验证通过 |
+| 4.2 退出码与 doctor | P1 | 0.5 人日 | 4.1 | ✅ 完成 | 退出码 0/1/2 约定 + `docs/plan/session-analytics-runbook.md` |
+| 5.x 基线与文档 | P2 | 1 人日 | 1–3 | ✅ 完成 | `docs/analysis/session-analytics-baseline-20260917.md`、`docs/analysis/README.md` 勘误指引、本表回填 |
+| 6.1 恢复建议 | P1 | 1 人日 | 2.1 | ✅ 完成 | `internal/agent/subagent_retry.go`（分类→建议映射）+ `renderSubagentResults` 追加 `retry_advice=`；测试 `TestRenderSubagentResultsCarriesRetryAdvice` 等 |
+| 6.2 有界重试 | P1 | 1–1.5 人日 | 2.1 | ✅ 完成 | `SubagentSchedulerConfig.MaxAttemptsPerTask`（默认 2、1=关闭、封顶 5）+ 只读瞬时重试 + 指数退避 jitter 封顶 5s；测试 `TestSubagentAutoRetryOnlyTransientReadOnly` 等 |
+| 6.3 部分结果降级 | P2 | 1 人日 | 6.1 + 前置核对 | 🟡 部分实施 | 生产者侧已落 `completion_reason=budget_exceeded/context_overflow` + Findings/Patches 保留 + `split_task` 建议；分析侧「部分产出单列」待 ≥1 周数据后补 |
+| 6.4 采纳率指标 | P2 | 0.5–1 人日 | 1.2、4.1 | ⏸ 数据触发后实施 | 依 §1.2 边界：需 ≥1 周真实数据后再定阈值与文案 |
+| 7.1 micro web 分析页签 | P1 | 1–1.5 人日 | 3.1、3.2 | ✅ 代码完成 | `cmd/aicli/commands/web/{index.html,js/analysis.js,app.js,js/ui.js}` + `web_analysis_handlers.go`（薄 adapter，直接序列化 usageanalytics 查询结构体）+ `web_handlers_test.go` 页签断言；`go test ./cmd/aicli/commands/ -run 'Web|Analysis'` 通过 |
+| 7.2 frontend 观测 tab | P1 | 1.5–2 人日 | 3.1、3.2 | ✅ 代码完成 | `frontend/src/pages/usage-analytics/{tool,subagent,error-patterns}-panel.tsx` + sessions/overview/charts + i18n + vitest + `e2e/usage-observability.spec.ts`；`npm run lint`、`npx tsc -b` 通过（e2e 未运行，见 §10） |
+| 7.3 TUI `/usage` 扩展 | P1 | 1–1.5 人日 | 1.3、3.2 | 🟡 部分完成 | `chat_usage_tools.go` 新增 `/usage tools|subagents|errors` + 首行采集健康 + 空库降级；`go test ./cmd/aicli/commands/ -run Usage` 通过；§9.3 的 T1（`/status` 采集健康行）与 T3（Agent Panel outcome 列）未实现（超出本次改动面） |
 
 **建议实施顺序**：0.1 → 0.2 → 0.3 → 0.4（可并行 2.1）→ 1.1 → 1.2 → 1.3 → 2.2 → 3.1 → 3.2 → 4.x → 7.x（三端呈现，可与 5.x 并行）→ 5.x；6.1/6.2 可在 2.1 完成后与 3.x/4.x 并行，6.3/6.4 待 ≥1 周真实数据后实施。
 
@@ -722,3 +722,40 @@ go run ./cmd/aicli stats subagents --failed-only --json
 ### A.5 历史事件回放（批次 2.2，一次性）
 
 回放脚本从 `session_runtime.sqlite` 读取 `subagent.completed` 事件，经 §5.2 归一化函数写入 `usage_subagents`；脚本需幂等（按主键 upsert），执行前备份分析库。脚本落地位置建议 `backend/scripts/usage-analytics-replay-subagents.ps1`，与批次 0.4 脚本同目录同风格。
+
+---
+
+## 10. 交付与验证记录（2026-09-17）
+
+> 本节记录本轮实施的**实际**验证证据与未闭环项，供复核与后续接手使用。
+
+### 10.1 已执行的验证（工作目录）
+
+| 范围 | 命令 | 结果 |
+| --- | --- | --- |
+| 分析库/事件/会话/agent | `go test ./internal/usageanalytics/... ./internal/events/... ./internal/chat/ ./internal/agent/ -count=1`（`backend/`） | 全部 ok（使用 `-timeout 900s`） |
+| HTTP API | `go test ./internal/api/skills/ -run 'Analytics' -count=1` | ok（新增 4 个 handler 用例） |
+| CLI + micro web + TUI | `go test ./cmd/aicli/commands/ -count=1`（`backend/`） | ok（含 `stats`/`Web|Analysis`/`Usage` 新增用例；整包 91s） |
+| 构建 | `go build ./cmd/aicli`、`go build ./internal/usageanalytics/... ./internal/agent/ ./internal/chat/ ./internal/api/skills/ ./internal/events/` | ok |
+| 采集链路端到端（本地） | `TestLocalHostPipelinePersistsToolObservability` | ok：同一条 `tool.requested/completed` 同时落 `session_events`（`tool_started/tool_finished`）与 `usage_tool_calls` |
+| 基线脚本 | `pwsh -File backend/scripts/usage-analytics-baseline.ps1 [-Json]` | ok（输出见 `docs/analysis/session-analytics-baseline-20260917.md`） |
+| 归档脚本 | `pwsh -File backend/scripts/usage-analytics-archive-legacy.ps1`（先临时副本跑两遍 + `-Restore`） | ok：导出 → 重命名；第二遍 `already archived`；`-Restore` 可回滚；实机已归档 |
+| CLI 手工验收 | `go run ./cmd/aicli stats doctor / sessions --limit 3 / subagents --failed-only --json / errors --top 5` | ok（空库降级：退出码 0、「暂无数据」、JSON 字段稳定） |
+| frontend 门禁 | `npm run lint`（`frontend/`） | ok（0 error；i18n / max-lines / message-tokens 全过；2 条既有 warning 与本方案无关） |
+| frontend 类型 | `npx tsc -b` | ok（修复了新面板 2 处 i18n 类型错误） |
+| frontend 单测 | `npm run test`（vitest run） | ok：298 个文件 / 2420 个用例全部通过（含新增 `observability-panels.test.tsx` 7 例） |
+
+### 10.2 未闭环项（需真实进程/环境，或按方案边界有意延后）
+
+1. **真实会话验收**：`usage_requests/usage_sessions/usage_tool_calls/usage_subagents/usage_turns` 需要在**修复后的进程**里跑一次真实 chat 回合才会出现行（本机历史数据产生于修复之前）。验收命令见附录 A.2 与 `docs/plan/session-analytics-runbook.md`。
+2. **curl 冒烟**（附录 A.3）：需启动 runtime-server；端点与鉴权已由 handler 单测覆盖。
+3. **`go build ./...` 全仓**：本仓库当前有**另一条并行工作流**（supervision batch store / agent result 控制面，涉及 `internal/supervision`、`internal/toolbroker`、`cmd/runtime-server` 等）同时在改动，其编译状态在实施期间多次抖动；本方案涉及的包在上表命令中独立构建/测试通过。
+4. **frontend e2e**：`frontend/e2e/usage-observability.spec.ts` 已落地，但未在本机运行 playwright（需要浏览器依赖）；按 `npm run test:e2e -- usage-observability` 执行。
+5. **有意延后（方案自身边界）**：1.4 历史 backfill（默认不迁历史）、2.2 的历史回放脚本（附录 A.5）、6.3 分析侧「部分产出单列」、6.4 采纳率指标（均标注为数据触发后实施）、§9.3 的 T1/T3（`/status` 健康行与 Agent Panel outcome 列）。
+6. **历史事件的工具观测空白**：批次 0.2/0.3 只对**新回合**生效；16062 行历史 `session_events` 中 `tool.*` 仍为 0，属预期（不做历史回填）。
+
+### 10.3 实施期发现的额外问题（已一并修复）
+
+- 分析库是单连接池（`SetMaxOpenConns(1)`）：`ToolStats` 原先在遍历结果集时嵌套查询耗时样本，会永久阻塞。已改为「先读完并关闭游标，再补齐 p50/p95 与 error_top」，并加注释防回归。
+- 回执语义冲突：`session_tool_receipts` 的既有语义是"待回放结果、消费后删除"。终局补回执若不排除已回放消费的调用，会把陈旧结果重新写成待回放状态。已在 `SessionActor` 记录一次性回放标记并在补齐时跳过。
+- 落盘别名：`tool.requested/tool.completed` 在**会话事件库**中必须保持历史别名 `tool_started/tool_finished`（前端 trajectory 回放契约有显式断言），分析库则消费总线原名。别名单点实现在 `internal/events/session_store_alias.go`。

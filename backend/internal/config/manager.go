@@ -548,6 +548,36 @@ func (rm *RuntimeManager) Load() error {
 	return nil
 }
 
+// LoadDocument 应用一份已经合并好的配置文档（分层启动用）。sourcePath 成为管理器的
+// 文件路径；校验、candidate 与 history 行为与 Load 完全一致。
+func (rm *RuntimeManager) LoadDocument(raw []byte, sourcePath string) error {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+
+	if sourcePath != "" {
+		rm.filePath = sourcePath
+	}
+
+	config := DefaultRuntimeConfig()
+	if len(raw) > 0 {
+		// 分层加载器输出 YAML；YAML 解析器同时接受 JSON。
+		if err := yaml.Unmarshal(raw, config); err != nil {
+			return errors.Wrap(errors.ErrConfigInvalid, "failed to parse merged runtime config", err)
+		}
+	}
+	if err := ValidateRuntimeConfig(config); err != nil {
+		return err
+	}
+	ensureRuntimeConfigVersion(config)
+
+	rm.config = config
+	if err := rm.loadCandidateLocked(); err != nil {
+		return err
+	}
+	rm.recordHistoryLocked(config)
+	return nil
+}
+
 // Save 保存配置到文件
 func (rm *RuntimeManager) Save() error {
 	rm.mu.RLock()

@@ -57,7 +57,8 @@ var brokerToolArgKeys = map[string][]string{
 		"summary", "task_id", "task_status", "team_id",
 	},
 	ToolSupervisionSnapshot:    {"after_seq", "include_resolved", "limit"},
-	ToolSupervisionDescendants: {"after_seq", "health", "include_terminal", "limit", "mode"},
+	ToolSupervisionDescendants: {"after_seq", "health", "include_results", "include_terminal", "limit", "mode"},
+	ToolReadAgentResult:        {"id", "max_chars", "sections", "task_id"},
 	ToolAckLifecycle:           {"notification_id", "decision", "note", "reason", "state", "until", "expected_version"},
 	ToolControlDescendant:      {"notification_id", "action", "reason", "cascade", "expected_version"},
 }

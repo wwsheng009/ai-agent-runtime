@@ -112,7 +112,8 @@ func main() {
 		}
 
 		cfgFlag, _ := rootCmd.Flags().GetString("config")
-		configPath := strings.TrimSpace(cfgFlag)
+		explicitConfigPath := strings.TrimSpace(cfgFlag)
+		configPath := explicitConfigPath
 		if configPath == "" {
 			configPath = config.ResolveConfigPath(config.DefaultConfigSearchPaths())
 		}
@@ -129,7 +130,7 @@ func main() {
 		} else if created {
 			fmt.Fprintf(os.Stderr, "Info: no user presets found, created presets at %s\n", presetsPath)
 		}
-		loadedConfig, err := config.InitGlobalConfig(configPath)
+		loadedConfig, err := config.InitGlobalConfigLayered(configPath, explicitConfigPath)
 		if err != nil {
 			return fmt.Errorf("failed to load config: %w", err)
 		}
@@ -262,6 +263,12 @@ func main() {
 		return cfg
 	}))
 
+	// stats 只读分析子命令（会话用量/失败模式/采集健康自检）
+	rootCmd.AddCommand(commands.NewStatsCommand())
+
+	// usage-analytics 分析库维护子命令（rebuild-stats 对账/修复漂移）
+	rootCmd.AddCommand(commands.NewUsageAnalyticsCommand())
+
 	// balance 账户余额子命令
 	rootCmd.AddCommand(commands.NewBalanceCommand(func() *config.Config {
 		return cfg
@@ -374,12 +381,12 @@ func shouldBootstrapConfigForCommand(cmd *cobra.Command, args []string) bool {
 	}
 	name := strings.ToLower(strings.TrimSpace(cmd.Name()))
 	switch name {
-	case "", "aicli", "help", "init", "uninstall", "version", "skill", "skills":
+	case "", "aicli", "help", "init", "uninstall", "version", "skill", "skills", "stats":
 		return false
 	}
 	for current := cmd; current != nil; current = current.Parent() {
 		switch strings.ToLower(strings.TrimSpace(current.Name())) {
-		case "skill", "skills":
+		case "skill", "skills", "stats":
 			return false
 		}
 	}

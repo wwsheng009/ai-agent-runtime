@@ -514,3 +514,154 @@ func TestFileBackedStoreRoundTrip(t *testing.T) {
 
 // timeHour allows the sample helper to express a deadline without extra imports.
 const timeHour = time.Hour
+
+// TestTaskRecordReadProjectionRoundTripsWriteColumns pins the read projection
+// against the write projection: every column serialized by
+// insertTaskRow/overwriteTaskRow must land back on SubagentTaskRecord through
+// both GetTask and ListTasks. Before the fix the nullable time columns
+// (task_deadline/started_at/finished_at/last_progress_at) were scanned into
+// locals and dropped, so LastProgressAt write-back and FinishedAt-based result
+// projections were invisible to every reader.
+func TestTaskRecordReadProjectionRoundTripsWriteColumns(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	batch, tasks := sampleBatch(t, "", "session-task-projection")
+	base := Now()
+	deadline := base.Add(30 * time.Minute)
+	started := base.Add(time.Second)
+	finished := base.Add(2 * time.Second)
+	progress := base.Add(3 * time.Second)
+
+	tasks[0].ParentTaskID = "task-parent"
+	tasks[0].DependencyIDs = []string{"dep-a", "dep-b"}
+	tasks[0].ChildSessionID = "child-session-a"
+	tasks[0].ReadOnly = true
+	tasks[0].Attempt = 3
+	tasks[0].TaskDeadline = deadline
+	tasks[0].StartedAt = &started
+	tasks[0].FinishedAt = &finished
+	tasks[0].LastProgressAt = &progress
+
+	if created, err := store.CreateBatch(ctx, batch, tasks); err != nil || !created {
+		t.Fatalf("CreateBatch: created=%v err=%v", created, err)
+	}
+
+	got, err := store.GetTask(ctx, batch.BatchID, tasks[0].TaskID)
+	if err != nil || got == nil {
+		t.Fatalf("GetTask: task=%+v err=%v", got, err)
+	}
+	assertTaskRecordProjection(t, "GetTask", *got, tasks[0])
+
+	listed, err := store.ListTasks(ctx, batch.BatchID)
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if len(listed) != 2 {
+		t.Fatalf("ListTasks len = %d, want 2", len(listed))
+	}
+	var listedFirst SubagentTaskRecord
+	for _, record := range listed {
+		if record.TaskID == tasks[0].TaskID {
+			listedFirst = record
+		}
+	}
+	if listedFirst.TaskID == "" {
+		t.Fatalf("ListTasks did not return %q: %+v", tasks[0].TaskID, listed)
+	}
+	assertTaskRecordProjection(t, "ListTasks", listedFirst, tasks[0])
+
+	// The sibling row must keep its NULL/zero values: the projection must not
+	// leak stamps across rows.
+	sibling := listed[1]
+	if sibling.TaskID != "task-b" {
+		t.Fatalf("ListTasks ordering mismatch: %+v", listed)
+	}
+	if sibling.TaskDeadline != (time.Time{}) || sibling.StartedAt != nil || sibling.FinishedAt != nil || sibling.LastProgressAt != nil {
+		t.Fatalf("task-b nullable time columns = deadline=%v started=%v finished=%v progress=%v, want zero/nil", sibling.TaskDeadline, sibling.StartedAt, sibling.FinishedAt, sibling.LastProgressAt)
+	}
+
+	// UpdateTask writes LastProgressAt, and the stamp must be visible to the
+	// very next read (this is what the M1 throttled write-back relies on).
+	visible := progress.Add(time.Second)
+	updated, err := store.UpdateTask(ctx, batch.BatchID, got.TaskID, got.Version, func(record *SubagentTaskRecord) {
+		record.LastProgressAt = &visible
+	})
+	if err != nil {
+		t.Fatalf("UpdateTask(last progress): %v", err)
+	}
+	if updated == nil || updated.LastProgressAt == nil || !updated.LastProgressAt.Equal(visible) {
+		t.Fatalf("UpdateTask returned progress = %+v, want %v", updated.LastProgressAt, visible)
+	}
+	again, err := store.GetTask(ctx, batch.BatchID, got.TaskID)
+	if err != nil {
+		t.Fatalf("GetTask(after UpdateTask): %v", err)
+	}
+	if again.LastProgressAt == nil || !again.LastProgressAt.Equal(visible) {
+		t.Fatalf("LastProgressAt after UpdateTask = %v, want %v", again.LastProgressAt, visible)
+	}
+	// Unrelated columns survive the same write.
+	if again.StartedAt == nil || !again.StartedAt.Equal(started) {
+		t.Fatalf("StartedAt after UpdateTask = %v, want %v", again.StartedAt, started)
+	}
+	if again.FinishedAt == nil || !again.FinishedAt.Equal(finished) {
+		t.Fatalf("FinishedAt after UpdateTask = %v, want %v", again.FinishedAt, finished)
+	}
+	if !again.TaskDeadline.Equal(deadline) {
+		t.Fatalf("TaskDeadline after UpdateTask = %v, want %v", again.TaskDeadline, deadline)
+	}
+}
+
+func assertTaskRecordProjection(t *testing.T, source string, got, want SubagentTaskRecord) {
+	t.Helper()
+	if got.TaskID != want.TaskID || got.BatchID != want.BatchID || got.ParentTaskID != want.ParentTaskID {
+		t.Errorf("%s: identity mismatch got=(%s/%s parent=%s) want=(%s/%s parent=%s)",
+			source, got.TaskID, got.BatchID, got.ParentTaskID, want.TaskID, want.BatchID, want.ParentTaskID)
+	}
+	if strings.Join(got.DependencyIDs, ",") != strings.Join(want.DependencyIDs, ",") {
+		t.Errorf("%s: DependencyIDs = %v, want %v", source, got.DependencyIDs, want.DependencyIDs)
+	}
+	if got.ChildSessionID != want.ChildSessionID {
+		t.Errorf("%s: ChildSessionID = %q, want %q", source, got.ChildSessionID, want.ChildSessionID)
+	}
+	if got.Role != want.Role || got.Difficulty != want.Difficulty {
+		t.Errorf("%s: role/difficulty = %q/%q, want %q/%q", source, got.Role, got.Difficulty, want.Role, want.Difficulty)
+	}
+	if got.ReadOnly != want.ReadOnly {
+		t.Errorf("%s: ReadOnly = %v, want %v", source, got.ReadOnly, want.ReadOnly)
+	}
+	if got.Status != want.Status || got.OrderIndex != want.OrderIndex || got.Attempt != want.Attempt {
+		t.Errorf("%s: status/order/attempt = %s/%d/%d, want %s/%d/%d",
+			source, got.Status, got.OrderIndex, got.Attempt, want.Status, want.OrderIndex, want.Attempt)
+	}
+	if !got.TaskDeadline.Equal(want.TaskDeadline) {
+		t.Errorf("%s: TaskDeadline = %v, want %v", source, got.TaskDeadline, want.TaskDeadline)
+	}
+	assertNullableTaskTime(t, source, "StartedAt", got.StartedAt, want.StartedAt)
+	assertNullableTaskTime(t, source, "FinishedAt", got.FinishedAt, want.FinishedAt)
+	assertNullableTaskTime(t, source, "LastProgressAt", got.LastProgressAt, want.LastProgressAt)
+	// CreateBatch overwrites UpdatedAt with its own clock, so only non-zero is
+	// asserted here; the UpdateTask write path is checked separately below.
+	if got.UpdatedAt.IsZero() {
+		t.Errorf("%s: UpdatedAt is zero", source)
+	}
+	if string(got.Spec) != string(want.Spec) {
+		t.Errorf("%s: Spec = %s, want %s", source, got.Spec, want.Spec)
+	}
+	if got.ArtifactRef != want.ArtifactRef || got.ErrorClass != want.ErrorClass || got.ErrorCode != want.ErrorCode {
+		t.Errorf("%s: artifact/error projection mismatch got=%+v want=%+v", source, got, want)
+	}
+	if got.Version != want.Version {
+		t.Errorf("%s: Version = %d, want %d", source, got.Version, want.Version)
+	}
+}
+
+func assertNullableTaskTime(t *testing.T, source, field string, got, want *time.Time) {
+	t.Helper()
+	if (got == nil) != (want == nil) {
+		t.Errorf("%s: %s = %v, want %v", source, field, got, want)
+		return
+	}
+	if got != nil && !got.Equal(*want) {
+		t.Errorf("%s: %s = %v, want %v", source, field, got, want)
+	}
+}

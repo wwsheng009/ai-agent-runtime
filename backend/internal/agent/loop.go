@@ -6309,6 +6309,17 @@ func renderSubagentResults(results []SubagentResult) string {
 		if result.Error != "" {
 			lines = append(lines, "  error: "+result.Error)
 		}
+		// §6.1：失败的子代理结果必须携带机器可读的恢复建议，父代理据此
+		// 选择重派（换输入）/拆分任务/本地完成，而不是盲目重试或直接放弃。
+		if retryAdvice := strings.TrimSpace(result.RetryAdvice); retryAdvice != "" {
+			lines = append(lines, "  retry_advice="+retryAdvice)
+		}
+		if category := strings.TrimSpace(result.FailureCategory); category != "" && !result.Success {
+			lines = append(lines, "  failure_category="+category)
+		}
+		if !result.Success && result.Attempt > 1 {
+			lines = append(lines, fmt.Sprintf("  attempts: %d/%d", result.Attempt, result.MaxAttempts))
+		}
 		if len(result.ReadOnlyFilteredTools) > 0 {
 			lines = append(lines, "  read-only: the child was denied these requested write-like tools: "+
 				strings.Join(result.ReadOnlyFilteredTools, ", ")+"; do not delegate writes to it.")

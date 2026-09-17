@@ -27,6 +27,10 @@ var (
 const (
 	// defaultMaxAutoWakePerWindow is the bounded-class default (doc 6.5 rule 4).
 	defaultMaxAutoWakePerWindow = 5
+	// defaultMaxProgressWakePerWindow is the independent progress-class default
+	// (P0-2/ADR-2): bounded like the other non-approval classes, but accounted
+	// separately so progress reports cannot starve critical lifecycle wakes.
+	defaultMaxProgressWakePerWindow = 6
 	// unlimitedWakeBudget marks a budget class without a hard cap.
 	unlimitedWakeBudget = 0
 )
@@ -84,6 +88,12 @@ type WakeSchedulerConfig struct {
 	// an approval stalls the child that is waiting for the decision. Set a
 	// positive value for an explicit cap.
 	MaxApprovalWakePerWindow int
+	// MaxProgressWakePerWindow caps the progress class (the opt-in periodic
+	// progress check) in the same rolling window, independently of the
+	// failure/other budget. 0 uses the default (6 per window); a negative
+	// value removes the cap (not recommended: progress is the floodable
+	// family).
+	MaxProgressWakePerWindow int
 	// BudgetMode selects the budget ledger (see WakeBudgetMode). The empty
 	// value means WakeBudgetModeMemory.
 	BudgetMode WakeBudgetMode
@@ -119,6 +129,7 @@ type WakeScheduler struct {
 	rateWindow      time.Duration
 	maxAutoWake     int // 0 => unlimited (failure / other classes)
 	maxApprovalWake int // 0 => unlimited (approval class)
+	maxProgressWake int // 0 => unlimited (progress class)
 	maxSelfCheck    int // 0 => self-check disabled
 	budgetMode      WakeBudgetMode
 	now             func() time.Time
@@ -153,6 +164,13 @@ func NewWakeScheduler(store Store, config WakeSchedulerConfig) *WakeScheduler {
 	if maxApprovalWake < 0 {
 		maxApprovalWake = unlimitedWakeBudget
 	}
+	maxProgressWake := config.MaxProgressWakePerWindow
+	switch {
+	case maxProgressWake < 0:
+		maxProgressWake = unlimitedWakeBudget
+	case maxProgressWake == 0:
+		maxProgressWake = defaultMaxProgressWakePerWindow
+	}
 	budgetMode := config.BudgetMode
 	if budgetMode != WakeBudgetModeDurable {
 		budgetMode = WakeBudgetModeMemory
@@ -164,6 +182,7 @@ func NewWakeScheduler(store Store, config WakeSchedulerConfig) *WakeScheduler {
 		rateWindow:       rateWindow,
 		maxAutoWake:      maxAutoWake,
 		maxApprovalWake:  maxApprovalWake,
+		maxProgressWake:  maxProgressWake,
 		maxSelfCheck:     config.SelfCheckPerWindow,
 		budgetMode:       budgetMode,
 		now:              timeNow,
@@ -475,8 +494,11 @@ func (s *WakeScheduler) BudgetState(ctx context.Context, rootScopeID string, cla
 // budgetLimit returns the per-window cap of a class; unlimitedWakeBudget means
 // the class has no hard cap.
 func (s *WakeScheduler) budgetLimit(class WakeBudgetClass) int {
-	if class == WakeBudgetClassApproval {
+	switch class {
+	case WakeBudgetClassApproval:
 		return s.maxApprovalWake
+	case WakeBudgetClassProgress:
+		return s.maxProgressWake
 	}
 	return s.maxAutoWake
 }

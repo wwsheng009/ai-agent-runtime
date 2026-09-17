@@ -8,13 +8,6 @@ import { type Artifact } from "@/data/mock";
 
 import { ArtifactPanel } from "./artifact-panel";
 
-// 会话用量页签只验证接线，面板本体由 session-usage-panel.test.tsx 覆盖。
-vi.mock("@/components/workspace/session-usage-panel", () => ({
-  SessionUsagePanel: ({ sessionId }: { sessionId: string }) => (
-    <div data-testid="session-usage-panel-stub">usage:{sessionId}</div>
-  ),
-}));
-
 // 附着会话后计划/还原/回溯审计会各自拉一次数据；这里静默返回空态，避免测试触发真实网络。
 vi.mock("@/lib/runtime-api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/runtime-api")>();

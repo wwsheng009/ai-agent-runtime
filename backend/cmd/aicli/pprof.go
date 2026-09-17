@@ -243,6 +243,11 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	// cacheanalytics.Service（复用 host.EventBus，与 TUI /usage 共用）。
 	mux.HandleFunc(commands.ChatWebAPICachePath, commands.HandleChatWebAPICache)
 	mux.HandleFunc(commands.ChatWebAPICachePath+"/", commands.HandleChatWebAPICache)
+	// /web/api/analysis/* 用量分析端点族（runtime.analytics.v1「分析」页签）：
+	// status / tools / subagents / errors，数据源与 TUI /usage tools|subagents|errors
+	// 同源（进程内 usageanalytics.Service，同一 usage_analytics.sqlite）。
+	mux.HandleFunc(commands.ChatWebAPIAnalysisPath, commands.HandleChatWebAPIAnalysis)
+	mux.HandleFunc(commands.ChatWebAPIAnalysisPath+"/", commands.HandleChatWebAPIAnalysis)
 	// /web/api/skills[/{name}] 当前会话的 skill catalog（与 TUI /skills 同源：
 	// session.FunctionCatalog 的 skill 描述符），供「技能」页签的列表与详情面板。
 	mux.HandleFunc(commands.ChatWebAPISkillsPath, commands.HandleChatWebAPISkills)

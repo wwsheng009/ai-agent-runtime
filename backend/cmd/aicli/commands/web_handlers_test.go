@@ -138,8 +138,9 @@ func TestHandleChatWebPage_HeaderLayout(t *testing.T) {
 	}
 }
 
-// TestHandleChatWebPage_Tabs 锁定页签集合：对话 / 技能 / 日志 / 配置 / 缓存 / 调试 / 关于。
+// TestHandleChatWebPage_Tabs 锁定页签集合：对话 / 技能 / 日志 / 配置 / 缓存 / 分析 / 调试 / 关于。
 // 「技能」紧邻「对话」（会话的第二页签），承载当前会话的 skill 目录与详情弹层。
+// 「分析」紧跟「缓存」，承载工具 / 子代理 / 失败模式聚合（runtime.analytics.v1）。
 // 「调试」页签承载与 aicli /debug 一致的「状态文档」，「关于」页签展示客户端标识。
 func TestHandleChatWebPage_Tabs(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, ChatWebPath, nil)
@@ -148,12 +149,12 @@ func TestHandleChatWebPage_Tabs(t *testing.T) {
 	HandleChatWebPage(rec, req)
 
 	body := rec.Body.String()
-	for _, id := range []string{"tab-main-btn", "tab-skills-btn", "tab-log-btn", "tab-config-btn", "tab-cache-btn", "tab-debug-btn", "tab-about-btn"} {
+	for _, id := range []string{"tab-main-btn", "tab-skills-btn", "tab-log-btn", "tab-config-btn", "tab-cache-btn", "tab-analysis-btn", "tab-debug-btn", "tab-about-btn"} {
 		if !strings.Contains(body, `id="`+id+`"`) {
 			t.Fatalf("page body missing tab button %q", id)
 		}
 	}
-	for _, id := range []string{"tab-main", "tab-skills", "tab-log", "tab-config", "tab-cache", "tab-debug", "tab-about"} {
+	for _, id := range []string{"tab-main", "tab-skills", "tab-log", "tab-config", "tab-cache", "tab-analysis", "tab-debug", "tab-about"} {
 		if !strings.Contains(body, `id="`+id+`"`) {
 			t.Fatalf("page body missing tab panel %q", id)
 		}
@@ -171,12 +172,26 @@ func TestHandleChatWebPage_Tabs(t *testing.T) {
 			t.Fatalf("skills tab missing element %q", id)
 		}
 	}
-	// 按钮与面板同序：调试在缓存之后、关于在调试之后，避免新的页签插错位置。
+	// 按钮与面板同序：分析紧跟缓存、调试在分析之后、关于在调试之后，避免新的页签插错位置。
 	debugBtnIdx := strings.Index(body, `id="tab-debug-btn"`)
 	aboutBtnIdx := strings.Index(body, `id="tab-about-btn"`)
 	cacheBtnIdx := strings.Index(body, `id="tab-cache-btn"`)
-	if !(cacheBtnIdx < debugBtnIdx && debugBtnIdx < aboutBtnIdx) {
-		t.Fatalf("tab button order = cache:%d debug:%d about:%d, want cache < debug < about", cacheBtnIdx, debugBtnIdx, aboutBtnIdx)
+	analysisBtnIdx := strings.Index(body, `id="tab-analysis-btn"`)
+	if !(cacheBtnIdx < analysisBtnIdx && analysisBtnIdx < debugBtnIdx && debugBtnIdx < aboutBtnIdx) {
+		t.Fatalf("tab button order = cache:%d analysis:%d debug:%d about:%d, want cache < analysis < debug < about",
+			cacheBtnIdx, analysisBtnIdx, debugBtnIdx, aboutBtnIdx)
+	}
+	// 分析页签：采集健康条 + 汇总卡 + 工具/子代理/失败模式三区 + 范围/自动/刷新入口
+	// + 行下钻弹层（元素 id 与 js/analysis.js 一一对应）。
+	for _, id := range []string{
+		"analysis-status", "analysis-health", "analysis-cards",
+		"analysis-tools", "analysis-subagents", "analysis-errors",
+		"analysis-scope-btn", "analysis-auto-btn", "analysis-refresh-btn",
+		"analysis-detail-overlay", "analysis-detail-title", "analysis-detail-body", "analysis-detail-close",
+	} {
+		if !strings.Contains(body, `id="`+id+`"`) {
+			t.Fatalf("analysis tab missing element %q", id)
+		}
 	}
 	// 调试页签：文档容器 + 刷新入口（数据源由 debug.js 固定为 /web/api/status?format=text）。
 	for _, id := range []string{"debug-output", "debug-refresh-btn", "debug-meta"} {

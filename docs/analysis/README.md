@@ -6,6 +6,27 @@
 
 ---
 
+## ⚠️ 勘误指引（2026-09-17 实施复核）
+
+本目录下 `session_analysis_report.md`、`code_verification.md`、`session-analytics-report.md`
+三份报告保留原始调查记录，**不改写**；但其技术口径存在已实测确认的偏差，实施时一律以
+[`docs/plan/session-analytics-subagent-reliability-implementation-plan.md`](../plan/session-analytics-subagent-reliability-implementation-plan.md)
+§0.2 的对照表为准：
+
+- 分析库现役表是 `usage_requests` / `usage_sessions`（外加 schema v2 的 `usage_tool_calls`
+  / `usage_subagents` / `usage_turns`），`analytics_*` 与 `rollup_json` 为**死表**（无读取代码，
+  按实施计划批次 0.4 归档为 `analytics_legacy_*`）。
+- 工具事件注册名是 `tool.requested` / `tool.completed`（落盘别名 `tool_started` /
+  `tool_finished`，前端回放依赖该别名），不存在 `tool.call.*`。
+- 子代理完成事件**不拆分**为 success/failure 两个类型（报告"选项A"不采纳）；改为规范化载荷：
+  `success`（权威）+ `status`（兼容别名）+ `completion_reason` / `failure_category` /
+  `attempt` / `retry_advice`，读取侧对历史数据按映射表回退。
+- Go module 根在 `backend/`，入口在 `backend/cmd/…`；测试命令以 `backend/` 为工作目录。
+- 报告中的数据快照早于实施，行数与失败率不再是当前口径；本轮实施后的可复现基线见
+  `docs/analysis/session-analytics-baseline-20260917.md`。
+
+---
+
 ## 📋 报告清单
 
 1. **[session_analysis_report.md](./session_analysis_report.md)** - 会话质量深度分析

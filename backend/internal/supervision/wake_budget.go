@@ -29,6 +29,11 @@ const (
 	// WakeBudgetClassOther is the catch-all for critical lifecycle events
 	// that are neither approvals nor failures; it shares the bounded budget.
 	WakeBudgetClassOther WakeBudgetClass = "other"
+	// WakeBudgetClassProgress covers the opt-in periodic progress check. It has
+	// its own bounded allowance (MaxProgressWakePerWindow) so a busy progress
+	// sweep can never consume the failure/other budget that carries critical
+	// lifecycle notifications, and vice versa (P0-2/ADR-2).
+	WakeBudgetClassProgress WakeBudgetClass = "progress"
 )
 
 // Wake reasons mirrored from the projection-layer event types. Hosts may emit
@@ -68,6 +73,12 @@ func WakeBudgetClassOf(reason string) WakeBudgetClass {
 	normalized := strings.ToLower(strings.TrimSpace(reason))
 	if normalized == "" {
 		return WakeBudgetClassOther
+	}
+	// Progress is checked first: a host-specific spelling such as
+	// "supervision_progress_check" must land in the independent progress
+	// bucket even though it contains no failure/approval keyword today.
+	if WakeReasonIsProgressCheck(normalized) {
+		return WakeBudgetClassProgress
 	}
 	if wakeReasonContainsAny(normalized,
 		"approval", "approve", "question", "input_required", "permission", "authorize", "confirm",

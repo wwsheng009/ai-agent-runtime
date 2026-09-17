@@ -2,15 +2,18 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentresult"
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -76,6 +79,15 @@ type SubagentResult struct {
 	Usage                 *types.TokenUsage   `json:"usage,omitempty" yaml:"usage,omitempty"`
 	Error                 string              `json:"error,omitempty" yaml:"error,omitempty"`
 	Contract              *agentresult.Result `json:"result_contract,omitempty" yaml:"result_contract,omitempty"`
+	// 失败分类与重试证据（方案 §6.1）：供父代理选择重派/拆分/本地完成，
+	// 并随 subagent.completed 载荷进入分析库（failure_category 等）。
+	FailureCategory string `json:"failure_category,omitempty" yaml:"failure_category,omitempty"`
+	ErrorCode       string `json:"error_code,omitempty" yaml:"error_code,omitempty"`
+	Retryable       bool   `json:"retryable,omitempty" yaml:"retryable,omitempty"`
+	Attempt         int    `json:"attempt,omitempty" yaml:"attempt,omitempty"`
+	MaxAttempts     int    `json:"max_attempts,omitempty" yaml:"max_attempts,omitempty"`
+	RetryReason     string `json:"retry_reason,omitempty" yaml:"retry_reason,omitempty"`
+	RetryAdvice     string `json:"retry_advice,omitempty" yaml:"retry_advice,omitempty"`
 }
 
 // SubagentSchedulerConfig 控制子代理并发与递归深度。
@@ -92,7 +104,18 @@ type SubagentSchedulerConfig struct {
 	// unsuccessful batches. Zero uses the conservative runtime default.
 	MaxConsecutiveFailures int                                     `json:"maxConsecutiveFailures" yaml:"maxConsecutiveFailures"`
 	Routing                *agentconfig.AICLISubagentRoutingConfig `json:"-" yaml:"-"`
+	// MaxAttemptsPerTask 是**只读任务瞬时失败**的任务级有界重试上限
+	//（方案 §6.2）。0 使用默认值 2；1 表示关闭自动重试。
+	// 写任务永不在任务级自动重试（避免重复副作用），只产出 §6.1 的建议。
+	MaxAttemptsPerTask int `json:"maxAttemptsPerTask,omitempty" yaml:"maxAttemptsPerTask,omitempty"`
 }
+
+// 子代理任务级重试默认参数（§6.2：指数退避 + jitter，封顶 5s）。
+const (
+	defaultSubagentMaxAttemptsPerTask = 2
+	defaultSubagentRetryBaseDelay     = 200 * time.Millisecond
+	defaultSubagentRetryMaxDelay      = 5 * time.Second
+)
 
 // SubagentRunOptions 描述一次 parent -> child 协同批次的上下文。
 type SubagentRunOptions struct {
@@ -429,15 +452,48 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 
 	loop := NewReActLoop(childAgent, spec.Runtime, spec.LoopConfig)
 
-	result, err := loop.run(childCtx, task.Goal, loopRunOptions{
-		TraceID:       options.TraceID,
-		SessionID:     childSessionID,
-		IncludePrompt: true,
-		Depth:         options.Depth,
-		BudgetTokens:  task.BudgetTokens,
-		ToolWhitelist: task.ToolsWhitelist,
-	})
-	if err != nil {
+	// §6.2：只读任务的瞬时失败做有界重试（写任务永不自动重试）。
+	// 熔断语义保持：一次自动重试链条只以最终结果计入批次连续失败数
+	//（recordBatchOutcome 看到的仍是每任务一条结果），中间尝试因此不会
+	// 额外推高 consecutiveFailures。
+	maxAttempts := s.maxAttemptsPerTask()
+	attempt := 0
+	retryReason := ""
+	var (
+		result      *Result
+		runErr      error
+		disposition SubagentFailureDisposition
+	)
+	for attempt = 1; attempt <= maxAttempts; attempt++ {
+		result, runErr = loop.run(childCtx, task.Goal, loopRunOptions{
+			TraceID:       options.TraceID,
+			SessionID:     childSessionID,
+			IncludePrompt: true,
+			Depth:         options.Depth,
+			BudgetTokens:  task.BudgetTokens,
+			ToolWhitelist: task.ToolsWhitelist,
+		})
+		if runErr == nil {
+			break
+		}
+		disposition = ClassifySubagentFailure(runErr)
+		if !shouldAutoRetrySubagentTask(task, disposition, attempt, maxAttempts, childCtx.Err()) {
+			break
+		}
+		retryReason = disposition.Category
+		// 中间尝试也留完成事件（attempt 可见），标记 intermediate_attempt：
+		// 分析侧按 conflict_count 统计而不把中间失败当最终结果。
+		s.emitSubagentAttemptEvent(childSessionID, options, task, childConfig.Name, spec, attempt, maxAttempts, disposition, runErr)
+		if !sleepWithContext(childCtx, subagentRetryBackoff(attempt, defaultSubagentRetryBaseDelay, defaultSubagentRetryMaxDelay)) {
+			break
+		}
+	}
+	if attempt > maxAttempts {
+		attempt = maxAttempts
+	}
+	if runErr != nil {
+		retryAdvice := SubagentRetryAdvice(disposition.Category, task.ReadOnly)
+		// 写任务只给建议，不自动重派（§6.2）。
 		report := SubagentResult{
 			ID:                    task.ID,
 			Role:                  task.Role,
@@ -448,15 +504,32 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			ReadOnlyFilteredTools: subagentReadOnlyFilteredTools(task),
 			BudgetTokens:          task.BudgetTokens,
 			Success:               false,
-			Error:                 err.Error(),
-			Summary:               err.Error(),
+			Error:                 runErr.Error(),
+			Summary:               runErr.Error(),
+			FailureCategory:       disposition.Category,
+			ErrorCode:             disposition.ErrorCode,
+			Retryable:             disposition.Retryable,
+			Attempt:               attempt,
+			MaxAttempts:           maxAttempts,
+			RetryReason:           retryReason,
+			RetryAdvice:           retryAdvice,
 		}
 		s.parent.emitRuntimeEvent("subagent.completed", childSessionID, "", mergeRouteAuditPayload(map[string]interface{}{
 			"subagent_id":         task.ID,
 			"role":                task.Role,
 			"read_only":           task.ReadOnly,
 			"success":             false,
-			"error":               err.Error(),
+			"status":              "failed",
+			"completion_reason":   subagentCompletionReason(false, disposition),
+			"failure_category":    disposition.Category,
+			"error_code":          disposition.ErrorCode,
+			"retryable":           disposition.Retryable,
+			"attempt":             attempt,
+			"max_attempts":        maxAttempts,
+			"retry_reason":        retryReason,
+			"retry_advice":        retryAdvice,
+			"source":              "scheduler",
+			"error":               runErr.Error(),
 			"budget_tokens":       task.BudgetTokens,
 			"parent_session_id":   options.ParentSessionID,
 			"parent_tool_call_id": options.ParentToolCallID,
@@ -469,7 +542,15 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 				"role":                task.Role,
 				"read_only":           task.ReadOnly,
 				"success":             false,
-				"error":               err.Error(),
+				"status":              "failed",
+				"completion_reason":   subagentCompletionReason(false, disposition),
+				"failure_category":    disposition.Category,
+				"error_code":          disposition.ErrorCode,
+				"attempt":             attempt,
+				"max_attempts":        maxAttempts,
+				"retry_reason":        retryReason,
+				"retry_advice":        retryAdvice,
+				"error":               runErr.Error(),
 				"budget_tokens":       task.BudgetTokens,
 				"parent_session_id":   options.ParentSessionID,
 				"parent_tool_call_id": options.ParentToolCallID,
@@ -495,6 +576,9 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		Summary:               result.Output,
 		Usage:                 result.Usage,
 		Contract:              result.Contract.Clone(),
+		Attempt:               attempt,
+		MaxAttempts:           maxAttempts,
+		RetryReason:           retryReason,
 	}
 	if task.ReadOnly {
 		report.Findings = collectFindings(result.Observations)
@@ -504,11 +588,40 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 	if result.Error != "" {
 		report.Error = result.Error
 	}
+	// §6.3（部分实施）：预算/上下文耗尽时保留已收集的 Findings/Patches
+	//（上面已按只读/写任务分别收集），并把 completion_reason 标注为
+	// budget_exceeded / context_overflow，供分析侧把"有部分产出"的失败单列；
+	// 不做自动拆分/重派（避免无界递归），只给父代理 split_task 建议。
+	completionReason := "completed"
+	if result.LimitReached {
+		completionReason = "budget_exceeded"
+	}
+	if !result.Success {
+		disposition := ClassifySubagentFailure(errors.New(firstNonEmptyString(report.Error, "subagent run finished unsuccessfully")))
+		if disposition.Category == llm.FailureCategoryUnknown && result.LimitReached {
+			disposition = SubagentFailureDisposition{Category: llm.FailureCategoryBudgetExceeded, Retryable: false}
+		}
+		report.FailureCategory = disposition.Category
+		report.ErrorCode = disposition.ErrorCode
+		report.Retryable = disposition.Retryable
+		report.RetryAdvice = SubagentRetryAdvice(disposition.Category, task.ReadOnly)
+		completionReason = subagentCompletionReason(false, disposition)
+	}
 	s.parent.emitRuntimeEvent("subagent.completed", childSessionID, "", mergeRouteAuditPayload(map[string]interface{}{
 		"subagent_id":         task.ID,
 		"role":                task.Role,
 		"read_only":           task.ReadOnly,
 		"success":             report.Success,
+		"status":              statusAliasForCompletionReason(completionReason, report.Success),
+		"completion_reason":   completionReason,
+		"failure_category":    report.FailureCategory,
+		"error_code":          report.ErrorCode,
+		"retryable":           report.Retryable,
+		"retry_advice":        report.RetryAdvice,
+		"attempt":             attempt,
+		"max_attempts":        maxAttempts,
+		"retry_reason":        retryReason,
+		"source":              "scheduler",
 		"error":               report.Error,
 		"budget_tokens":       task.BudgetTokens,
 		"parent_session_id":   options.ParentSessionID,
@@ -523,6 +636,14 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			"role":                task.Role,
 			"read_only":           task.ReadOnly,
 			"success":             report.Success,
+			"status":              statusAliasForCompletionReason(completionReason, report.Success),
+			"completion_reason":   completionReason,
+			"failure_category":    report.FailureCategory,
+			"error_code":          report.ErrorCode,
+			"attempt":             attempt,
+			"max_attempts":        maxAttempts,
+			"retry_reason":        retryReason,
+			"retry_advice":        report.RetryAdvice,
 			"error":               report.Error,
 			"budget_tokens":       task.BudgetTokens,
 			"parent_session_id":   options.ParentSessionID,

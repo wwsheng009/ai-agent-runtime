@@ -498,6 +498,12 @@ textarea::placeholder {
     box-shadow: var(--elevation-panel);
   }
 
+   @media (prefers-reduced-motion: reduce) {
+     .surface-panel {
+       backdrop-filter: none;
+     }
+   }
+
   .ide-panel {
     border: 1px solid var(--border);
     background: var(--surface-strong);

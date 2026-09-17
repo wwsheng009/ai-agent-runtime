@@ -31,6 +31,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
+	"github.com/wwsheng009/ai-agent-runtime/internal/usageanalytics"
 )
 
 type sessionActorClient struct {
@@ -958,9 +959,11 @@ func (c *sessionAgentController) subscribeAgentCompletion(parentSessionID string
 
 	var unsubscribe func()
 	// P1-5 方案 2: mirror throttled child tool progress onto the parent stream as
-	// the live-only subagent.progress event. The mirror is per child (dropped
-	// together with the subscription) and never writes to the event store, so
-	// the parent transcript/replay cannot be polluted by child progress.
+	// the live-only subagent.progress event. P0-1c/M7: the mirror is per host
+	// (shared with the durable progress projection's Messages hook, so both
+	// hosts enrich last_message identically); per-child state is dropped via
+	// Forget on session end. It never writes to the event store, so the parent
+	// transcript/replay cannot be polluted by child progress.
 	progressTarget := supervision.SubagentProgressTarget{
 		ParentSessionID: parentSessionID,
 		ChildSessionID:  childSessionID,
@@ -968,7 +971,7 @@ func (c *sessionAgentController) subscribeAgentCompletion(parentSessionID string
 		Depth:           childDepth,
 		AgentType:       childType,
 	}
-	progressMirror := supervision.NewSubagentProgressMirror(supervision.DefaultSubagentProgressWindow)
+	progressMirror := c.handler.subagentProgressMirror()
 	handler := func(event runtimeevents.Event) {
 		if !strings.EqualFold(strings.TrimSpace(event.SessionID), childSessionID) {
 			return
@@ -986,15 +989,19 @@ func (c *sessionAgentController) subscribeAgentCompletion(parentSessionID string
 			c.resolveAgentApproval(context.Background(), parentSessionID, childSessionID, childPath, eventType, event.Payload)
 			return
 		case toolprotocol.EventTypeProgress:
-			if mirrored, ok := progressMirror.Observe(progressTarget, event, time.Now().UTC()); ok {
-				bus.Publish(mirrored)
+			if progressMirror != nil {
+				if mirrored, ok := progressMirror.Observe(progressTarget, event, time.Now().UTC()); ok {
+					bus.Publish(mirrored)
+				}
 			}
 			return
 		}
 		if eventType != chat.EventSessionEnd && eventType != chat.EventSessionInterrupted {
 			return
 		}
-		progressMirror.Forget(childSessionID)
+		if progressMirror != nil {
+			progressMirror.Forget(childSessionID)
+		}
 		if unsubscribe != nil {
 			unsubscribe()
 		}
@@ -1019,6 +1026,11 @@ func (c *sessionAgentController) subscribeAgentCompletion(parentSessionID string
 		}
 		toolbroker.AddSpawnAgentRoutePayload(payload, childSession)
 		copyAgentCompletionPayload(payload, event.Payload)
+		// 方案 §2.1 / D4：镜像载荷补齐规范化字段，使 agent-controller 与
+		// scheduler 两个生产者的 subagent.completed 同构（success 为权威，
+		// status 保留为兼容别名）。归一化只有一处实现（usageanalytics）。
+		payload["source"] = "agent_controller"
+		usageanalytics.NormalizeSubagentCompletionPayload(payload, agentCompletionStatus(event))
 		if registry := c.handler.getAgentControlAgentStore(); registry != nil && childPath != "" {
 			rootSessionID := apiAgentRootSessionID(childSession, parentSessionID)
 			if _, closeErr := registry.CloseAgentControlAgentSubtree(context.Background(), rootSessionID, childPath, time.Now().UTC()); closeErr != nil {
@@ -1640,25 +1652,76 @@ func (c *sessionAgentController) deliverAgentMessage(ctx context.Context, fromSe
 	if message == "" {
 		return nil, fmt.Errorf("message is required")
 	}
+	// P0-3a/M5: v2 语义（默认关，关闭时与灰度前逐字段一致）。
+	v2 := c.handler.supervisionConfig.MessageSemanticsV2Enabled()
+	toolName := toolbroker.ToolSendMessage
+	if trigger {
+		toolName = toolbroker.ToolFollowupTask
+	}
+	if v2 && c.apiAgentSessionTerminal(ctx, sessionID) {
+		closedErr := fmt.Errorf("%s target %s: %w", toolName, sessionID, toolbroker.ErrAgentSessionClosed)
+		c.recordAPIAgentMailboxDeliveryAudit(ctx, chat.MailboxDeliveryAudit{
+			FromSessionID:   fromSessionID,
+			TargetSessionID: sessionID,
+			Tool:            toolName,
+			Status:          chat.MailboxDeliveryStatusFailed,
+			Error:           closedErr.Error(),
+		})
+		return nil, closedErr
+	}
 	delivered := false
 	triggered := false
+	queued := false
+	duplicate := false
 	if trigger && !c.apiAgentSessionBusy(ctx, sessionID) {
 		if actor := c.apiAgentActor(ctx, sessionID); actor != nil {
 			state, ok := actor.StateSummary()
 			if !ok || !state.Busy() {
 				if err := actor.SubmitPromptAsync(ctx, message, c.apiAgentRunMeta(ctx, sessionID)); err != nil {
+					if v2 {
+						c.recordAPIAgentMailboxDeliveryAudit(ctx, chat.MailboxDeliveryAudit{
+							FromSessionID:   fromSessionID,
+							TargetSessionID: sessionID,
+							Tool:            toolName,
+							Status:          chat.MailboxDeliveryStatusFailed,
+							Error:           err.Error(),
+						})
+					}
 					return nil, err
 				}
 				triggered = true
 			}
 		}
 	}
+	messageID := ""
 	if !triggered {
 		mail := toolbroker.BuildAgentMailboxMessage(fromSessionID, sessionID, message, trigger)
-		if err := c.deliverAgentMailboxEvent(ctx, sessionID, mail); err != nil {
+		if v2 {
+			status := chat.MailboxDeliveryStatusDelivered
+			if trigger {
+				status = chat.MailboxDeliveryStatusQueued
+			}
+			chat.AnnotateAgentMailboxDelivery(&mail, status, nil, false)
+		}
+		delivery, err := c.deliverAgentMailboxEventResult(ctx, sessionID, mail)
+		if err != nil {
+			if v2 {
+				c.recordAPIAgentMailboxDeliveryAudit(ctx, chat.MailboxDeliveryAudit{
+					FromSessionID:   fromSessionID,
+					TargetSessionID: sessionID,
+					Tool:            toolName,
+					Status:          chat.MailboxDeliveryStatusFailed,
+					Error:           err.Error(),
+				})
+			}
 			return nil, err
 		}
 		delivered = true
+		duplicate = delivery.Duplicate
+		messageID = chat.MailboxDeliveryResultMessageID(delivery)
+		if v2 {
+			queued = !triggered
+		}
 	}
 	status, err := c.snapshot(ctx, sessionID)
 	if err != nil {
@@ -1667,12 +1730,68 @@ func (c *sessionAgentController) deliverAgentMessage(ctx context.Context, fromSe
 	if status != nil && triggered {
 		status.Queued = true
 	}
-	return &toolbroker.AgentMessageResult{
+	result := &toolbroker.AgentMessageResult{
 		TargetSessionID: sessionID,
 		Delivered:       delivered || triggered,
 		Triggered:       triggered,
 		Status:          status,
-	}, nil
+	}
+	if v2 {
+		result.Queued = queued
+		result.Duplicate = duplicate
+		auditStatus := chat.MailboxDeliveryStatusDelivered
+		if queued {
+			auditStatus = chat.MailboxDeliveryStatusQueued
+		}
+		c.recordAPIAgentMailboxDeliveryAudit(ctx, chat.MailboxDeliveryAudit{
+			FromSessionID:   fromSessionID,
+			TargetSessionID: sessionID,
+			Tool:            toolName,
+			MessageID:       messageID,
+			Status:          auditStatus,
+			Delivered:       result.Delivered,
+			Queued:          result.Queued,
+			Triggered:       result.Triggered,
+			Duplicate:       result.Duplicate,
+		})
+	}
+	return result, nil
+}
+
+// deliverAgentMailboxEventResult is deliverAgentMailboxEvent with the durable
+// idempotency result, so callers can report duplicate=true (P0-3a).
+func (c *sessionAgentController) deliverAgentMailboxEventResult(ctx context.Context, sessionID string, mail team.MailMessage) (chat.MailboxDeliveryResult, error) {
+	if c == nil || c.handler == nil {
+		return chat.MailboxDeliveryResult{}, fmt.Errorf("handler not configured")
+	}
+	return chat.DeliverMailboxEventFirstResult(ctx, c.handler.getSessionEventStore(), c.handler.getRuntimeEventBus(), c.deliverMailboxToActor, sessionID, mail)
+}
+
+// recordAPIAgentMailboxDeliveryAudit writes the best-effort parent-side delivery
+// record (agent mailbox_delivery event). It never fails the delivery.
+func (c *sessionAgentController) recordAPIAgentMailboxDeliveryAudit(ctx context.Context, audit chat.MailboxDeliveryAudit) {
+	if c == nil || c.handler == nil {
+		return
+	}
+	// send_input 没有调用方会话身份（控制器接口不带 from），审计落在目标会话
+	// 事件流；send_message/followup_task 落在发起方会话。
+	sessionID := strings.TrimSpace(audit.FromSessionID)
+	if sessionID == "" {
+		sessionID = audit.TargetSessionID
+	}
+	chat.AppendMailboxDeliveryAudit(ctx, c.handler.getSessionEventStore(), c.handler.getRuntimeEventBus(), sessionID, audit)
+}
+
+// apiAgentSessionTerminal reports whether the target child session is terminal
+// (closed/archived). Terminal targets must return an explicit error instead of
+// silently dropping the instruction (ADR-3).
+func (c *sessionAgentController) apiAgentSessionTerminal(ctx context.Context, sessionID string) bool {
+	snapshot, err := c.snapshot(ctx, sessionID)
+	if err != nil || snapshot == nil {
+		return false
+	}
+	state := strings.ToLower(strings.TrimSpace(snapshot.SessionState))
+	return state == string(chat.StateClosed) || state == string(chat.StateArchived)
 }
 
 func (c *sessionAgentController) apiAgentSessionBusy(ctx context.Context, sessionID string) bool {
@@ -1747,29 +1866,93 @@ func (c *sessionAgentController) SendInput(ctx context.Context, args toolbroker.
 	if message == "" {
 		return nil, fmt.Errorf("message is required")
 	}
+	// P0-3a/M5: v2 语义（默认关）。关闭时保持灰度前的 busy 报错行为。
+	v2 := c.handler.supervisionConfig.MessageSemanticsV2Enabled()
+	if v2 && c.apiAgentSessionTerminal(ctx, sessionID) {
+		closedErr := fmt.Errorf("send_input target %s: %w", sessionID, toolbroker.ErrAgentSessionClosed)
+		c.recordAPIAgentMailboxDeliveryAudit(ctx, chat.MailboxDeliveryAudit{
+			TargetSessionID: sessionID,
+			Tool:            toolbroker.ToolSendInput,
+			Status:          chat.MailboxDeliveryStatusFailed,
+			Error:           closedErr.Error(),
+		})
+		return nil, closedErr
+	}
 	actor, err := c.handler.getSessionHub().GetOrCreate(sessionID)
 	if err != nil {
 		return nil, err
 	}
+	busy := false
+	busyStatus := ""
 	if state, ok := actor.StateSummary(); ok {
-		if state.Busy() {
-			interrupt := args.Interrupt != nil && *args.Interrupt
-			if !interrupt {
-				return nil, fmt.Errorf("session is busy (%s)", state.Status)
+		busy = state.Busy()
+		busyStatus = string(state.Status)
+	}
+	// v2 的 busy 判定对齐 followup_task（hub 或 durable state 任一为 busy），
+	// 避免 actor 未加载 durable running 状态时把排队投递误判为空闲。
+	if v2 && !busy {
+		busy = c.apiAgentSessionBusy(ctx, sessionID)
+	}
+	if busy {
+		interrupt := args.Interrupt != nil && *args.Interrupt
+		if !interrupt {
+			if v2 {
+				// ADR-3: busy + interrupt=false 与 followup_task 同语义，
+				// 排队投递（trigger_turn=true）而不是直接报错。
+				mail := toolbroker.BuildAgentMailboxMessage("", sessionID, message, true)
+				chat.AnnotateAgentMailboxDelivery(&mail, chat.MailboxDeliveryStatusQueued, nil, false)
+				delivery, deliverErr := c.deliverAgentMailboxEventResult(ctx, sessionID, mail)
+				if deliverErr != nil {
+					c.recordAPIAgentMailboxDeliveryAudit(ctx, chat.MailboxDeliveryAudit{
+						TargetSessionID: sessionID,
+						Tool:            toolbroker.ToolSendInput,
+						Status:          chat.MailboxDeliveryStatusFailed,
+						Error:           deliverErr.Error(),
+					})
+					return nil, deliverErr
+				}
+				result, snapshotErr := c.snapshot(ctx, sessionID)
+				if snapshotErr != nil {
+					return nil, snapshotErr
+				}
+				if result != nil {
+					result.Queued = true
+					result.Delivered = true
+					result.Duplicate = delivery.Duplicate
+				}
+				c.recordAPIAgentMailboxDeliveryAudit(ctx, chat.MailboxDeliveryAudit{
+					TargetSessionID: sessionID,
+					Tool:            toolbroker.ToolSendInput,
+					MessageID:       chat.MailboxDeliveryResultMessageID(delivery),
+					Status:          chat.MailboxDeliveryStatusQueued,
+					Delivered:       true,
+					Queued:          true,
+					Duplicate:       delivery.Duplicate,
+				})
+				return result, nil
 			}
-			if err := actor.Interrupt(ctx); err != nil {
-				return nil, err
-			}
-			waited, waitErr := c.Wait(ctx, toolbroker.WaitAgentArgs{SessionID: sessionID, TimeoutMs: 5000})
-			if waitErr != nil {
-				return nil, waitErr
-			}
-			if waited != nil && waited.Agent != nil && waited.Agent.Status == string(chat.SessionRunning) {
-				return nil, fmt.Errorf("session is still running")
-			}
+			return nil, fmt.Errorf("session is busy (%s)", busyStatus)
+		}
+		if err := actor.Interrupt(ctx); err != nil {
+			return nil, err
+		}
+		waited, waitErr := c.Wait(ctx, toolbroker.WaitAgentArgs{SessionID: sessionID, TimeoutMs: 5000})
+		if waitErr != nil {
+			return nil, waitErr
+		}
+		if waited != nil && waited.Agent != nil && waited.Agent.Status == string(chat.SessionRunning) {
+			return nil, fmt.Errorf("session is still running")
 		}
 	}
 	if err := actor.SubmitPromptAsync(ctx, message, c.apiAgentRunMeta(ctx, sessionID)); err != nil {
+		if v2 {
+			c.recordAPIAgentMailboxDeliveryAudit(ctx, chat.MailboxDeliveryAudit{
+				TargetSessionID: sessionID,
+				Tool:            toolbroker.ToolSendInput,
+				Status:          chat.MailboxDeliveryStatusFailed,
+				Error:           err.Error(),
+			})
+		}
 		return nil, err
 	}
 	result, err := c.snapshot(ctx, sessionID)
@@ -1777,6 +1960,17 @@ func (c *sessionAgentController) SendInput(ctx context.Context, args toolbroker.
 		return nil, err
 	}
 	result.Queued = true
+	if v2 {
+		result.Delivered = true
+		result.Triggered = true
+		c.recordAPIAgentMailboxDeliveryAudit(ctx, chat.MailboxDeliveryAudit{
+			TargetSessionID: sessionID,
+			Tool:            toolbroker.ToolSendInput,
+			Status:          chat.MailboxDeliveryStatusDelivered,
+			Delivered:       true,
+			Triggered:       true,
+		})
+	}
 	return result, nil
 }
 
@@ -3741,8 +3935,15 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		// 灰度开关（默认开）：run 终态后到达的审批决议零恢复；显式
 		// supervision.approval_terminal_guard=false 可回退旧行为。
 		ApprovalTerminalGuard: h.supervisionConfig.ApprovalTerminalGuard,
-		PersistHook:           h.runtimeServerGoalPersistHook,
-		RecoverStale:          true,
+		// P0-3a/M5 + P0-3b/M6：v2 指令语义显式开启且未关闭 trigger_turn_auto
+		// 时，run 结束后消费子会话 mailbox 的 trigger_turn 指令并自动起一次
+		// 新 turn。RunMeta 复用 followup_task 的 child-session 重建口径。
+		TriggerTurnDrain: h.supervisionConfig.TriggerTurnDrainEnabled(),
+		TriggerTurnRunMeta: func(ctx context.Context, _ *chat.Session) *team.RunMeta {
+			return h.apiSessionRunMeta(ctx, sessionID)
+		},
+		PersistHook:  h.runtimeServerGoalPersistHook,
+		RecoverStale: true,
 		PrepareRun: func(ctx context.Context, session *chat.Session, resume bool) error {
 			return ensureLease(ctx)
 		},

@@ -385,6 +385,7 @@
   /* 阴影与浮层 */
   --shadow-lv1: 0 10px 30px var(--primitive-black-a160);
   --shadow-lv2: 0 24px 90px var(--primitive-black-a160);
+  --primitive-white-a030: rgba(255, 255, 255, 0.03);
   --elevation-hairline: inset 0 1px 0 var(--primitive-white-a030);
   --elevation-panel: var(--shadow-lv1), var(--elevation-hairline);
   /* 滚动条 */

@@ -196,3 +196,24 @@ func requireSingleBackupFile(t *testing.T, configPath string) string {
 	sort.Strings(matches)
 	return matches[len(matches)-1]
 }
+
+func TestLoadEffectiveConfigDocumentExpandsEnvVars(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	initial := []byte("circuit_breaker:\n  failure_threshold: ${CB_FAILURE_THRESHOLD:-3}\n  failure_rate: ${CB_FAILURE_RATE:-0.5}\n")
+	require.NoError(t, os.WriteFile(configPath, initial, 0o644))
+
+	document, err := loadEffectiveConfigDocument(configPath, "", "yaml")
+	require.NoError(t, err)
+
+	// Raw should retain the original template syntax
+	require.Contains(t, string(document.Raw), "${CB_FAILURE_THRESHOLD:-3}")
+	require.Contains(t, string(document.Raw), "${CB_FAILURE_RATE:-0.5}")
+
+	// Parsed should have expanded values
+	root, ok := document.Parsed.(map[string]interface{})
+	require.True(t, ok)
+	circuitBreaker, ok := root["circuit_breaker"].(map[string]interface{})
+	require.True(t, ok)
+	require.Equal(t, int(3), circuitBreaker["failure_threshold"])
+	require.Equal(t, float64(0.5), circuitBreaker["failure_rate"])
+}

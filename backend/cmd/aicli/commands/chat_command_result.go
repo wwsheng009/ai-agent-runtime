@@ -85,14 +85,19 @@ type ExportPickerRequest struct{}
 
 // UsageScreenRequest is the immutable query carried by the typed /usage
 // alternate-screen effect. It captures the parsed subcommand before dispatch:
-// Mode selects the overview / requests / trace view, Limit the request-list
-// size, and TraceID the message id for trace mode. The viewer builds its
-// snapshot from the cache analytics source only while it owns a ScreenLease,
-// and commits no Scene cell in the main message stream.
+// Mode selects the cache views (overview / requests / trace) or the batch 1.3
+// aggregation views (tools / subagents / errors). Limit bounds the row count of
+// the requests/tools/subagents views, TraceID carries the message id for trace
+// mode, FailedOnly restricts subagent mode to failures, and Top bounds the
+// errors view. The viewer builds its snapshot from the cache analytics source
+// and the usage analytics query layer only while it owns a ScreenLease, and
+// commits no Scene cell in the main message stream.
 type UsageScreenRequest struct {
-	Mode    string
-	Limit   int
-	TraceID string
+	Mode       string
+	Limit      int
+	TraceID    string
+	FailedOnly bool
+	Top        int
 }
 
 // CommandResult is the renderer-neutral result of a local chat command.

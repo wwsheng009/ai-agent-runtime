@@ -6,8 +6,6 @@ export const enRuntimeConfigPage = {
     badge: "Runtime config",
     independentPage: "Independent page",
     title: "Backend config workspace",
-    description:
-      "Manage runtime backend configuration separately, with a dedicated entry for providers.",
     backToWorkspace: "Back to workspace",
     logs: "Logs",
     usage: "Usage",

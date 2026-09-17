@@ -42,6 +42,66 @@ func TestParseUsageCommandArgs(t *testing.T) {
 	}
 }
 
+// TestResolveUsageViewRequest 锁定 /usage 参数解析：既有缓存子命令语义不变，
+// 新增聚合子命令的默认值/上限归一/非法值报错（§9.3 T2）。
+func TestResolveUsageViewRequest(t *testing.T) {
+	valid := []struct {
+		command string
+		want    UsageScreenRequest
+	}{
+		{"/usage", UsageScreenRequest{Mode: usageScreenModeOverview}},
+		{"/usage cache", UsageScreenRequest{Mode: usageScreenModeOverview}},
+		{"/usage cache requests", UsageScreenRequest{Mode: usageScreenModeRequests, Limit: usageCacheRequestsDefaultLimit}},
+		{"/usage cache requests 999", UsageScreenRequest{Mode: usageScreenModeRequests, Limit: usageCacheRequestsMaxLimit}},
+		{"/usage cache trace msg-1", UsageScreenRequest{Mode: usageScreenModeTrace, TraceID: "msg-1"}},
+		{"/usage tools", UsageScreenRequest{Mode: usageScreenModeTools, Limit: usageToolsDefaultLimit}},
+		{"/usage tools 3", UsageScreenRequest{Mode: usageScreenModeTools, Limit: 3}},
+		{"/usage tools 999", UsageScreenRequest{Mode: usageScreenModeTools, Limit: usageToolsMaxLimit}},
+		{"/usage subagents", UsageScreenRequest{Mode: usageScreenModeSubagents, Limit: usageSubagentsDefaultLimit}},
+		{"/usage subagents --failed", UsageScreenRequest{Mode: usageScreenModeSubagents, Limit: usageSubagentsDefaultLimit, FailedOnly: true}},
+		{"/usage subagents 5 --failed", UsageScreenRequest{Mode: usageScreenModeSubagents, Limit: 5, FailedOnly: true}},
+		{"/usage subagents --failed 5", UsageScreenRequest{Mode: usageScreenModeSubagents, Limit: 5, FailedOnly: true}},
+		{"/usage subagents 999", UsageScreenRequest{Mode: usageScreenModeSubagents, Limit: usageSubagentsMaxLimit}},
+		{"/usage errors", UsageScreenRequest{Mode: usageScreenModeErrors, Top: usageErrorsDefaultTop}},
+		{"/usage errors top 3", UsageScreenRequest{Mode: usageScreenModeErrors, Top: 3}},
+		{"/usage errors 3", UsageScreenRequest{Mode: usageScreenModeErrors, Top: 3}},
+		{"/usage errors top 999", UsageScreenRequest{Mode: usageScreenModeErrors, Top: usageErrorsMaxTop}},
+	}
+	for _, tc := range valid {
+		req, errText := resolveUsageViewRequest(parseUsageCommandArgs(tc.command))
+		if errText != "" {
+			t.Fatalf("%q unexpected error: %s", tc.command, errText)
+		}
+		if req != tc.want {
+			t.Fatalf("%q request = %+v, want %+v", tc.command, req, tc.want)
+		}
+	}
+
+	invalid := []struct {
+		command  string
+		contains string
+	}{
+		{"/usage bogus", "未知子命令"},
+		{"/usage cache requests 0", "数量非法"},
+		{"/usage cache requests abc", "数量非法"},
+		{"/usage cache trace", "trace 需要 message_id"},
+		{"/usage cache bogus", "未知 cache 子命令"},
+		{"/usage tools 0", "数量非法"},
+		{"/usage tools abc", "数量非法"},
+		{"/usage subagents 0", "参数非法"},
+		{"/usage subagents nope", "参数非法"},
+		{"/usage errors 0", "数量非法"},
+		{"/usage errors abc", "数量非法"},
+		{"/usage errors top", "需要 top 数量"},
+	}
+	for _, tc := range invalid {
+		_, errText := resolveUsageViewRequest(parseUsageCommandArgs(tc.command))
+		if !strings.Contains(errText, tc.contains) {
+			t.Fatalf("%q error = %q, want contains %q", tc.command, errText, tc.contains)
+		}
+	}
+}
+
 // fakeUsageSource 实现 cacheanalytics.Source，用于精准驱动渲染降级分支
 // （partial 窗口标注、稳定错误码映射）。
 type fakeUsageSource struct {

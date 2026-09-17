@@ -142,6 +142,15 @@ type SessionActorConfig struct {
 	// 收尾回退到引入守卫前的行为。宿主从 supervision.approval_terminal_guard
 	// 透传（supervision.Config.ApprovalTerminalGuard）。
 	ApprovalTerminalGuard *bool
+	// TriggerTurnDrain 开启 P0-3b 的 run 结束 drain：把子会话 mailbox 中
+	// trigger_turn=true 且未消费的指令合并成一个 prompt 自动起新 turn。宿主
+	// 从 supervision.Config.TriggerTurnDrainEnabled() 透传（v2 语义且
+	// trigger_turn_auto 未关闭）。
+	TriggerTurnDrain bool
+	// TriggerTurnRunMeta 为 drain 提交的新 turn 构造 RunMeta。宿主复用
+	// followup_task 的 child-session RunMeta 重建口径
+	// (toolbroker.SpawnAgentRunMetaFromContext)；nil 表示提交空 RunMeta。
+	TriggerTurnRunMeta func(ctx context.Context, session *Session) *team.RunMeta
 }
 
 // SessionActor serializes session commands and manages execution state.
@@ -154,12 +163,27 @@ type SessionActor struct {
 	stateStore   RuntimeStateStore
 	eventStore   EventStore
 	eventBus     *runtimeevents.Bus
-	prepareRun   func(context.Context, *Session, bool) error
-	persistHook  func(context.Context, *Session) (*Session, error)
-	recoverStale bool
+	// replayedReceipts 记录本次进程内已从回执库回放并消费掉的 tool_call_id：
+	// 回执在消费后被删除是既有语义（避免陈旧结果被再次回放），因此终局补回执
+	// 时必须跳过这些调用，不能把已消费的回执重新写成"待回放"状态。
+	replayedReceiptsMu sync.Mutex
+	replayedReceipts   map[string]struct{}
+	prepareRun         func(context.Context, *Session, bool) error
+	persistHook        func(context.Context, *Session) (*Session, error)
+	recoverStale       bool
 	// terminalGuard 解析自 SessionActorConfig.ApprovalTerminalGuard，默认 true
 	// （见该字段注释）。
 	terminalGuard bool
+	// triggerTurnDrain / 限流状态实现 P0-3b：run 结束后消费 trigger_turn
+	// mailbox 指令。triggerTurnMu 保护 lastAutoAt/consecutive 与 dropped 去重。
+	triggerTurnDrain          bool
+	triggerTurnRunMeta        func(ctx context.Context, session *Session) *team.RunMeta
+	triggerTurnDrainInFlight  atomic.Bool
+	triggerTurnMu             sync.Mutex
+	triggerTurnLastAutoAt     time.Time
+	triggerTurnConsecutive    int
+	triggerTurnLastDroppedAt  time.Time
+	triggerTurnLastDroppedKey string
 	// runStallTimeout / onRunStalled mirror SessionActorConfig; see there.
 	runStallTimeout time.Duration
 	onRunStalled    func(turnID string)
@@ -242,6 +266,8 @@ func NewSessionActor(sessionID string, cfg SessionActorConfig) (*SessionActor, e
 		persistHook:        cfg.PersistHook,
 		recoverStale:       cfg.RecoverStale,
 		terminalGuard:      cfg.ApprovalTerminalGuard == nil || *cfg.ApprovalTerminalGuard,
+		triggerTurnDrain:   cfg.TriggerTurnDrain,
+		triggerTurnRunMeta: cfg.TriggerTurnRunMeta,
 		onStop:             cfg.OnStop,
 		runStallTimeout:    cfg.RunStallTimeout,
 		onRunStalled:       cfg.OnRunStalled,
@@ -352,6 +378,9 @@ type SubmitPromptOption struct {
 	ImagePaths       []string
 	ImageArtifactDir string
 	RouteOverride    *RunRouteOverride
+	// TriggerTurnAuto marks a prompt submitted by the trigger_turn drain, so
+	// the loop guard can tell automatic turns from explicit ones (P0-3b).
+	TriggerTurnAuto bool
 }
 
 // SubmitPrompt submits a prompt and waits for the result.
@@ -372,6 +401,7 @@ func (a *SessionActor) SubmitPrompt(ctx context.Context, prompt string, runMeta 
 		ImageArtifactDir: opt.ImageArtifactDir,
 		RunMeta:          runMeta.Clone(),
 		RouteOverride:    opt.RouteOverride.Clone(),
+		TriggerTurnAuto:  opt.TriggerTurnAuto,
 		Reply:            reply,
 	}
 	if err := a.send(ctx, cmd); err != nil {
@@ -437,6 +467,7 @@ func (a *SessionActor) SubmitPromptAsync(ctx context.Context, prompt string, run
 		ImageArtifactDir: opt.ImageArtifactDir,
 		RunMeta:          runMeta.Clone(),
 		RouteOverride:    opt.RouteOverride.Clone(),
+		TriggerTurnAuto:  opt.TriggerTurnAuto,
 		Reply:            reply,
 	}
 	if err := a.send(ctx, cmd); err != nil {
@@ -831,6 +862,7 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 		reply <- SubmitResult{Err: err}
 		return
 	}
+	a.noteRunTriggerOrigin(cmd.TriggerTurnAuto)
 	turnID := "turn_" + uuid.NewString()
 	run := a.claimSessionRun(turnID, nil, reply)
 	runCtx := withSessionRunControl(ctx, run)
@@ -900,6 +932,7 @@ func (a *SessionActor) handleContinueSession(cmd ContinueSession) {
 		reply <- SubmitResult{Err: err}
 		return
 	}
+	a.noteRunTriggerOrigin(false)
 	turnID := "turn_" + uuid.NewString()
 	run := a.claimSessionRun(turnID, cmd.StripMetadataKeys, reply)
 	runCtx := withSessionRunControl(ctx, run)
@@ -2656,6 +2689,10 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 					!errors.Is(persistErr, errSessionRunSuperseded) && execErr == nil {
 					execErr = persistErr
 				}
+				// 工具回执补齐（方案 §0.3 / G3）：内联工具执行不经过审批恢复
+				// 路径，历史落盘后统一为本次回合已完成、尚无回执的工具落回执。
+				// 逐条失败只跳过该条，不影响主流程与终态发布。
+				a.reconcileToolReceipts(finalizeCtx, session, turnID)
 			}
 			// Latch terminal ownership while the runtime state is still busy.
 			// Once idle/stopped is exposed a successor may claim the actor before
@@ -2818,6 +2855,13 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		}
 		if !run.abandoned.Load() {
 			run.complete(SubmitResult{Result: result, Err: execErr})
+		}
+		// P0-3b: the run released the session; consume trigger_turn mailbox
+		// instructions that arrived while it was busy. Detached from this run so
+		// a slow store read cannot delay the terminal reply; the drain itself is
+		// idempotent and reverts to the mailbox on failure.
+		if a.triggerTurnDrain && publishTerminal {
+			go a.drainTriggerTurnMailbox()
 		}
 	}()
 	a.runLifecycleMu.Unlock()
@@ -3383,6 +3427,7 @@ func (a *SessionActor) resumeApprovedPendingTool(ctx context.Context, state *Run
 	if receipt, message, ok, err := a.loadStoredToolReceipt(ctx, a.id, pending.ToolCallID); err != nil {
 		return err
 	} else if ok && message != nil {
+		a.markReplayedToolReceipt(pending.ToolCallID)
 		session.AddMessage(*message)
 		if err := a.persistSession(ctx, session); err != nil {
 			return err
@@ -3395,6 +3440,7 @@ func (a *SessionActor) resumeApprovedPendingTool(ctx context.Context, state *Run
 		if err != nil {
 			return err
 		}
+		a.markReplayedToolReceipt(pending.ToolCallID)
 		a.publishToolReceiptEvent(EventToolReceiptReplayed, strings.TrimSpace(state.CurrentTurnID), "runtime_state", toolExecutionReceiptFromPending(a.id, &pending))
 		return a.resumeFromPersistedToolResult(ctx, state, session)
 	}
@@ -4953,6 +4999,16 @@ func (a *SessionActor) publishToolReceiptEvent(eventType, traceID, source string
 	if strings.TrimSpace(receipt.ToolName) != "" {
 		payload["tool_name"] = receipt.ToolName
 		payload["receipt"].(map[string]interface{})["tool_name"] = receipt.ToolName
+	}
+	// 方案 §0.3：失败工具的回执必须携带 ok=false 与失败分类，否则审计侧
+	// 只能靠解析 message_json 才能区分成功/失败。
+	if receipt.OK != nil {
+		payload["ok"] = *receipt.OK
+		payload["receipt"].(map[string]interface{})["ok"] = *receipt.OK
+	}
+	if strings.TrimSpace(receipt.FailureCategory) != "" {
+		payload["failure_category"] = strings.TrimSpace(receipt.FailureCategory)
+		payload["receipt"].(map[string]interface{})["failure_category"] = strings.TrimSpace(receipt.FailureCategory)
 	}
 	a.publish(runtimeevents.Event{
 		Type:      eventType,

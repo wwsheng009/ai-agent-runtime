@@ -62,8 +62,9 @@ func newProgressWakeHarness(t *testing.T, name string, maxAutoWake int) (*SQLite
 // TestWakeConsumer_ProgressOnlyWakeDeliversRollup pins P2-D: the progress check
 // has no lifecycle notification, so the P0-B rollup is the only content its
 // digest can carry. That rollup must be enough to start the report turn, the
-// turn must spend the bounded wake budget exactly once, and the claimed wake
-// must be resolved so the next check can schedule a fresh one.
+// turn must spend exactly one progress-class claim (never the shared
+// failure/other budget, see P0-2/ADR-2), and the claimed wake must be resolved
+// so the next check can schedule a fresh one.
 func TestWakeConsumer_ProgressOnlyWakeDeliversRollup(t *testing.T) {
 	store, scheduler, consumer, probe := newProgressWakeHarness(t, "wake-consumer-progress-only", 1)
 	ctx := context.Background()
@@ -90,8 +91,12 @@ func TestWakeConsumer_ProgressOnlyWakeDeliversRollup(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, pending, "the delivered progress wake is consumed, not left dangling")
 
-	require.False(t, scheduler.AllowAutoWake(ctx, "root-session-1", WakeBudgetClassOther, time.Now().UTC()),
-		"the delivered report turn spends the bounded class budget")
+	progress := scheduler.BudgetState(ctx, "root-session-1", WakeBudgetClassProgress)
+	require.Equal(t, 1, progress.Used, "the delivered report turn spends one progress claim")
+	require.Equal(t, 6, progress.Limit)
+	require.True(t, scheduler.AllowAutoWake(ctx, "root-session-1", WakeBudgetClassOther, time.Now().UTC()),
+		"the report turn must not consume the shared failure/other budget")
+	require.True(t, scheduler.AllowAutoWake(ctx, "root-session-1", WakeBudgetClassFailure, time.Now().UTC()))
 }
 
 // TestWakeConsumer_ProgressSource_StaleLifecycleWakeStaysSilent pins the other

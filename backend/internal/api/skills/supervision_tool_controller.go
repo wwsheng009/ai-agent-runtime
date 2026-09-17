@@ -134,6 +134,7 @@ func (c *handlerSupervisionToolController) SupervisionDescendants(ctx context.Co
 		AfterSeq:         args.AfterSeq,
 		Health:           strings.TrimSpace(args.Health),
 		IncludeTerminal:  args.IncludeTerminal,
+		IncludeResults:   args.IncludeResults,
 		Limit:            args.Limit,
 		DefaultLimit:     c.handler.supervisionTuning().SnapshotMaxItems,
 		Provider:         c.handler.getSupervisionDescendantProvider(),
@@ -192,4 +193,39 @@ func (c *handlerSupervisionToolController) ControlDescendant(ctx context.Context
 		ExpectedVersion:    args.ExpectedVersion,
 		HasExpectedVersion: args.HasExpectedVersion,
 	})
+}
+
+// ReadAgentResult returns the bounded durable result of one child session or
+// batch task inside the caller's own scope (P0-4 改动 2). Scope resolution is
+// identical to SupervisionDescendants (a team lead reads the team scope); the
+// model cannot name a root scope. The read channel is the descendant provider
+// decorated by runtimeserver (batch TaskResult → mailbox completion payload);
+// a host without a result-aware provider answers no_result_recorded with an
+// executable next_action instead of failing the call.
+func (c *handlerSupervisionToolController) ReadAgentResult(ctx context.Context, parentSessionID string, args toolbroker.ReadAgentResultArgs) (supervision.ReadResultPayload, error) {
+	rootScopeID, targetTeamID := c.resolution(ctx, parentSessionID)
+	if rootScopeID == "" {
+		return supervision.ReadResultPayload{}, fmt.Errorf("supervision scope is required")
+	}
+	source, _ := c.handler.getSupervisionDescendantProvider().(supervision.ResultSource)
+	if source == nil {
+		return supervision.NoResultRecordedPayload(args.SessionID, args.TaskID), nil
+	}
+	scope := supervision.Scope{RootSessionID: strings.TrimSpace(parentSessionID)}
+	if targetTeamID != "" {
+		scope.RootTeamID = targetTeamID
+	}
+	record, found, err := source.LoadAgentResult(ctx, scope, args.SessionID, args.TaskID)
+	if err != nil {
+		return supervision.ReadResultPayload{}, err
+	}
+	if !found {
+		return supervision.NoResultRecordedPayload(args.SessionID, args.TaskID), nil
+	}
+	return supervision.BuildReadResultPayload(record, supervision.ReadResultArgs{
+		SessionID: args.SessionID,
+		TaskID:    args.TaskID,
+		Sections:  args.Sections,
+		MaxChars:  args.MaxChars,
+	}), nil
 }

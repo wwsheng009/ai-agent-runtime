@@ -28,7 +28,6 @@ import {
   buildSurfaceTabIds,
   type WorkspacePanelSurfaceId,
 } from "@/components/workspace/panel-registry";
-import { SessionUsagePanel } from "@/components/workspace/session-usage-panel";
 import { Badge } from "@/components/ui/badge";
 import { useRuntimeCheckpoints } from "@/hooks/workspace/use-runtime-checkpoints";
 import { useRuntimePlanMode } from "@/hooks/workspace/use-runtime-plan-mode";
@@ -286,24 +285,6 @@ export function ArtifactPanel({
               sessionId={sessionId}
             />
           </Suspense>
-        ) : null}
-      </div>
-      <div
-        aria-labelledby={surfaceTabIds.usage.tabId}
-        className="min-h-0 flex-1 overflow-y-auto"
-        hidden={resolvedActiveSurface !== "usage"}
-        id={surfaceTabIds.usage.panelId}
-        role="tabpanel"
-      >
-        {resolvedActiveSurface === "usage" && sessionId ? (
-          <SessionUsagePanel
-            key={sessionId}
-            className="border-b-0"
-            isResponding={isResponding}
-            lastRuntimeEventType={lastRuntimeEventType}
-            runtimeEventCount={runtimeEventCount}
-            sessionId={sessionId}
-          />
         ) : null}
       </div>
       {WORKSPACE_PANEL_SURFACES.filter((spec) => spec.surface).map((spec) => (

@@ -198,13 +198,12 @@ func resolveGlobalRuntimeConfigPath(cfg *config.Config) string {
 }
 
 func resolveConfiguredMCPConfigPath(cfg *config.Config) string {
-	if cfg != nil && cfg.AICLI != nil && cfg.AICLI.MCP != nil && strings.TrimSpace(cfg.AICLI.MCP.ConfigFile) != "" {
-		if resolved := resolveExistingPathValue(cfg.AICLI.MCP.ConfigFile, false); resolved != "" {
-			return resolved
-		}
-		return strings.TrimSpace(cfg.AICLI.MCP.ConfigFile)
+	if cfg == nil || cfg.AICLI == nil || cfg.AICLI.MCP == nil {
+		return ""
 	}
-	return ""
+	// Same priority as the runtime config and the runtime-server: ./.aicli/mcp.yaml >
+	// ~/.aicli/mcp.yaml > explicit override > upward search > configs/mcp.yaml.
+	return aiclipaths.ResolveMCPConfigPath(cfg.AICLI.MCP.ConfigFile)
 }
 
 func skillRuntimeConfig(cfg *config.Config) *config.SkillsRuntimeConfig {

@@ -86,14 +86,18 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/usage",
-			Usage:       "/usage [cache [requests [N] | trace <message_id>]]",
-			Summary:     "显示会话用量与缓存统计",
+			Usage:       "/usage [cache [requests [N] | trace <message_id>]] | tools [N] | subagents [N] [--failed] | errors [top N]",
+			Summary:     "显示会话用量、缓存与工具/子代理/失败分析",
 			Group:       string(chatSlashCommandGroupSession),
 			AcceptsArgs: true,
 			Args: []chatSlashCommandArgSpec{
 				{Token: "cache", Summary: "缓存统计（默认视图）"},
 				{Token: "requests", Summary: "最近 N 条 LLM 请求明细（默认 20，上限 100）"},
 				{Token: "trace", Summary: "按消息 id 追溯（produced_by/consumed_by）"},
+				{Token: "tools", Summary: "工具调用/失败/耗时表（N 默认 10，上限 50）"},
+				{Token: "subagents", Summary: "子代理完成率/失败分类/重试/耗时（N 默认 10，上限 50）"},
+				{Token: "--failed", Summary: "subagents 仅显示失败记录"},
+				{Token: "errors", Summary: "失败模式 Top-N（top N，默认 10，上限 50）"},
 			},
 		},
 		{

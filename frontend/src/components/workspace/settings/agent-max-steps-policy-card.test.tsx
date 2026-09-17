@@ -82,6 +82,19 @@ describe("AgentMaxStepsPolicyCard", () => {
           limit: 100,
           max_steps: 12,
           config_file: CONFIG_FILE,
+          layers: [
+            {
+              kind: "portable",
+              path: "configs/runtime.yaml",
+              present: true,
+              read_only: true,
+            },
+            {
+              kind: "user",
+              path: "C:/Users/x/.aicli/runtime.yaml",
+              present: true,
+            },
+          ],
         });
       }
       const body = JSON.parse(String(init?.body)) as { max_steps: number };
@@ -100,6 +113,10 @@ describe("AgentMaxStepsPolicyCard", () => {
     expect(document.body.textContent).toContain("服务端缺省：12");
     expect(document.body.textContent).toContain(CONFIG_FILE);
     expect(document.body.textContent).toContain("取值范围 0–100");
+    // runtime.yaml 层栈：只读 portable 默认层 + 可写用户层（P2 分层）。
+    expect(document.body.textContent).toContain("只读默认（不写入）");
+    expect(document.body.textContent).toContain("写入层");
+    expect(document.body.textContent).toContain("C:/Users/x/.aicli/runtime.yaml");
 
     const input = container.querySelector<HTMLInputElement>(
       'input[type="number"]',

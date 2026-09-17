@@ -22,45 +22,100 @@ func DefaultLogsDir() string {
 	return defaultAICLIDir("logs")
 }
 
-// DefaultRuntimeConfigSearchPaths returns the active profile's portable bundle
-// path followed by the repository-layout compatibility path. Build-tag files
-// select only the filename; path/layout behavior remains shared.
-func DefaultRuntimeConfigSearchPaths() []string {
-	return []string{
-		filepath.FromSlash(DefaultRuntimeConfigRelativePath),
-		filepath.Join("backend", "configs", DefaultRuntimeConfigFileName),
+// ResolveConfigFilePath resolves a config file path with the following priority
+// (highest first):
+//  1. explicitPath, when it is a real override (see below)
+//  2. ./.aicli/<filename> (project-level override in CWD)
+//  3. $HOME/.aicli/<filename> (user-level default)
+//  4. CWD upward search for <filename> in searchPaths
+//  5. Executable directory upward search
+//  6. explicitPath (when no candidate exists) or portableDefault
+//
+// A value that equals the bare filename, the portable default, or one of the
+// searchPaths counts as a convention path, not as an explicit override: values
+// copied from older templates (for example backend/configs/<filename>) must not
+// shadow the ./.aicli/ and ~/.aicli/ lookups.
+//
+// A leading "~" in explicitPath is expanded to the current user's home
+// directory; other explicit values are returned exactly as configured.
+func ResolveConfigFilePath(filename, explicitPath, portableDefault string, searchPaths []string) string {
+	filename = strings.TrimSpace(filename)
+	if filename == "" {
+		return strings.TrimSpace(explicitPath)
 	}
-}
 
-// ResolveRuntimeConfigBootstrapPath locates the active profile's default
-// runtime config from the working directory or executable directory. Explicit
-// non-default paths are returned unchanged so YAML/flag configuration keeps
-// precedence over build-profile defaults.
-func ResolveRuntimeConfigBootstrapPath(configPath string) string {
-	configPath = strings.TrimSpace(configPath)
-	portableDefault := filepath.FromSlash(DefaultRuntimeConfigRelativePath)
-	if configPath != "" && filepath.Clean(configPath) != filepath.Clean(portableDefault) {
-		return configPath
+	explicitPath = expandExplicitConfigPath(explicitPath)
+	if explicitPath != "" && !isConventionConfigPath(explicitPath, filename, portableDefault, searchPaths) {
+		return explicitPath
 	}
 
+	// Project-level override: ./.aicli/<filename> in CWD
 	if cwd, err := os.Getwd(); err == nil {
-		if resolved := resolveDefaultRuntimeConfigPathFromBase(cwd); resolved != "" {
-			return resolved
+		projectConfig := filepath.Join(cwd, ".aicli", filename)
+		if info, err := os.Stat(projectConfig); err == nil && !info.IsDir() {
+			return filepath.Clean(projectConfig)
 		}
 	}
-	if executable, err := os.Executable(); err == nil {
-		if resolved := resolveDefaultRuntimeConfigPathFromBase(filepath.Dir(executable)); resolved != "" {
+
+	// User-level default: $HOME/.aicli/<filename>
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		userConfig := filepath.Join(home, ".aicli", filename)
+		if info, err := os.Stat(userConfig); err == nil && !info.IsDir() {
+			return userConfig
+		}
+	}
+
+	// CWD upward search
+	if cwd, err := os.Getwd(); err == nil {
+		if resolved := resolveDefaultConfigPathFromBase(cwd, filename, searchPaths); resolved != "" {
 			return resolved
 		}
 	}
 
-	if configPath != "" {
-		return configPath
+	// Executable directory upward search
+	if executable, err := os.Executable(); err == nil {
+		if resolved := resolveDefaultConfigPathFromBase(filepath.Dir(executable), filename, searchPaths); resolved != "" {
+			return resolved
+		}
 	}
-	return DefaultRuntimeConfigRelativePath
+
+	if explicitPath != "" {
+		return explicitPath
+	}
+	return portableDefault
 }
 
-func resolveDefaultRuntimeConfigPathFromBase(baseDir string) string {
+// expandExplicitConfigPath expands a leading "~" while leaving every other
+// configured value byte-for-byte intact (callers may compare or display it).
+func expandExplicitConfigPath(explicitPath string) string {
+	trimmed := strings.TrimSpace(explicitPath)
+	if trimmed == "~" || strings.HasPrefix(trimmed, "~/") || strings.HasPrefix(trimmed, "~\\") {
+		return ExpandUserPath(trimmed)
+	}
+	return trimmed
+}
+
+// isConventionConfigPath reports whether candidate is one of the well-known
+// default locations rather than a deliberate override.
+func isConventionConfigPath(candidate, filename, portableDefault string, searchPaths []string) bool {
+	cleaned := filepath.Clean(strings.TrimSpace(candidate))
+	if cleaned == "." {
+		return true
+	}
+	if cleaned == filepath.Clean(filename) || cleaned == filepath.Clean(portableDefault) {
+		return true
+	}
+	for _, relativePath := range searchPaths {
+		if cleaned == filepath.Clean(strings.TrimSpace(relativePath)) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveDefaultConfigPathFromBase searches upward from baseDir for filename
+// in the given searchPaths (relative subpaths).
+func resolveDefaultConfigPathFromBase(baseDir, filename string, searchPaths []string) string {
 	baseDir = strings.TrimSpace(baseDir)
 	if baseDir == "" {
 		return ""
@@ -70,8 +125,9 @@ func resolveDefaultRuntimeConfigPathFromBase(baseDir string) string {
 	}
 	baseDir = filepath.Clean(baseDir)
 
+	paths := append([]string{filepath.Join(".aicli", filename)}, searchPaths...)
 	for dir := baseDir; ; {
-		for _, relativePath := range DefaultRuntimeConfigSearchPaths() {
+		for _, relativePath := range paths {
 			candidate := filepath.Join(dir, relativePath)
 			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
 				return filepath.Clean(candidate)
@@ -84,6 +140,55 @@ func resolveDefaultRuntimeConfigPathFromBase(baseDir string) string {
 		dir = parent
 	}
 	return ""
+}
+
+// DefaultRuntimeConfigSearchPaths returns the relative runtime config
+// filenames tried during upward directory search, most specific first.
+// The ./.aicli/ project-level path is added automatically by
+// resolveDefaultConfigPathFromBase; these are the additional repository-layout
+// compatibility paths.
+func DefaultRuntimeConfigSearchPaths() []string {
+	return []string{
+		filepath.FromSlash(DefaultRuntimeConfigRelativePath),
+		filepath.Join("backend", "configs", DefaultRuntimeConfigFileName),
+	}
+}
+
+// ResolveRuntimeConfigBootstrapPath locates the active profile's default
+// runtime config. It delegates to ResolveConfigFilePath with the runtime
+// config filename and search paths.
+func ResolveRuntimeConfigBootstrapPath(configPath string) string {
+	return ResolveConfigFilePath(
+		DefaultRuntimeConfigFileName,
+		configPath,
+		DefaultRuntimeConfigRelativePath,
+		DefaultRuntimeConfigSearchPaths(),
+	)
+}
+
+// DefaultMCPConfigFileName is the conventional global MCP config filename.
+const DefaultMCPConfigFileName = "mcp.yaml"
+
+// DefaultMCPConfigRelativePath uses forward slashes so generated YAML stays
+// portable across platforms.
+const DefaultMCPConfigRelativePath = "configs/" + DefaultMCPConfigFileName
+
+// ResolveMCPConfigPath resolves the effective global MCP config path:
+// ./.aicli/mcp.yaml > ~/.aicli/mcp.yaml > explicit override > upward search
+// (configs/mcp.yaml) > executable directory > configs/mcp.yaml.
+//
+// An empty explicit path yields "" so callers keep their "MCP not configured"
+// semantics instead of silently loading a directory-wide default.
+func ResolveMCPConfigPath(explicitPath string) string {
+	if strings.TrimSpace(explicitPath) == "" {
+		return ""
+	}
+	return ResolveConfigFilePath(
+		DefaultMCPConfigFileName,
+		explicitPath,
+		DefaultMCPConfigRelativePath,
+		[]string{DefaultMCPConfigRelativePath},
+	)
 }
 
 // DatePartition returns year/month/day path segments for t in local time.

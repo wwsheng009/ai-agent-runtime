@@ -9,10 +9,73 @@ import (
 	"strconv"
 	"strings"
 
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"gopkg.in/yaml.v3"
 )
+
+// NewLayeredRuntimeAgentMaxStepsPersister 是分层版的最大步骤数保存动作（P2）：
+// 内存快照部分与单文件版一致；落盘改走 runtime.yaml 的层栈——键所属的**可写**层优先，
+// 只读的 portable 层（仓库/发行包自带）永不写入，新键落到可写层（用户级，必要时新建）。
+// 因此开发态下编辑 agent.maxSteps 不会再改脏仓库里的 backend/configs/runtime.yaml。
+func NewLayeredRuntimeAgentMaxStepsPersister(
+	manager *runtimecfg.RuntimeManager,
+) skillsapi.AgentMaxStepsPersister {
+	return func(maxSteps int) (string, error) {
+		if manager == nil {
+			return "", fmt.Errorf("runtime config manager is not configured")
+		}
+		previous := manager.Get()
+		if previous == nil {
+			return "", fmt.Errorf("runtime config is not loaded")
+		}
+
+		next := *previous
+		next.Agent.MaxMaxSteps = maxSteps
+		if err := manager.Update(&next); err != nil {
+			return "", err
+		}
+
+		target, _ := config.RuntimeConfigWriteTarget()
+		merged, err := config.LoadMergedRuntimeConfigDocument()
+		if err != nil || merged == nil {
+			// 层栈不可用时退回单文件写入，保持旧行为可用。
+			configFile := manager.GetFilePath()
+			if err := PersistRuntimeAgentMaxSteps(configFile, maxSteps); err != nil {
+				_ = manager.Update(previous)
+				return configFile, err
+			}
+			return configFile, nil
+		}
+		if _, err := merged.ApplyDocumentPathChange("agent.maxSteps", maxSteps, target); err != nil {
+			_ = manager.Update(previous)
+			return target, err
+		}
+		return target, nil
+	}
+}
+
+// NewLayeredRuntimeAgentMaxStepsReader 与单文件版一致，但把返回的「来源配置文件路径」
+// 换成**写入目标**（可写层；全新安装时是用户级路径），使设置页显示的文件与实际落盘一致。
+func NewLayeredRuntimeAgentMaxStepsReader(
+	manager *runtimecfg.RuntimeManager,
+) skillsapi.AgentMaxStepsProvider {
+	return func() (int, string, error) {
+		if manager == nil {
+			return 0, "", fmt.Errorf("runtime config manager is not configured")
+		}
+		current := manager.Get()
+		if current == nil {
+			return 0, "", fmt.Errorf("runtime config is not loaded")
+		}
+		configFile := manager.GetFilePath()
+		if target, _ := config.RuntimeConfigWriteTarget(); strings.TrimSpace(target) != "" {
+			configFile = target
+		}
+		return current.Agent.MaxMaxSteps, configFile, nil
+	}
+}
 
 // NewRuntimeAgentMaxStepsPersister 组装「最大步骤数」保存动作：
 // 先改 RuntimeManager 的内存快照（后续每轮请求的缺省值来源），再把 agent.maxSteps

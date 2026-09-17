@@ -334,13 +334,14 @@ func TestListSessionsReleasesConnection(t *testing.T) {
 	collector := newCollector(store, nil, nil)
 	finished := time.Now()
 	for i := 0; i < 3; i++ {
-		collector.upsertRequest(cacheanalytics.CacheRequestRecord{
+		started := finished.Add(-time.Second)
+		collector.persistRequestTerminal(cacheanalytics.CacheRequestRecord{
 			LLMRequestID: fmt.Sprintf("req-%d", i),
 			SessionID:    "s-1",
 			Status:       cacheanalytics.RequestStatusSuccess,
-			StartedAt:    finished.Add(-time.Second),
+			StartedAt:    started,
 			FinishedAt:   &finished,
-		})
+		}, SessionMeta{}, started, finished)
 	}
 	// 会话 rollup 需要 usage_sessions 行（ListSessions 以会话为单位聚合）。
 	collector.upsertSession("s-1", SessionMeta{Provider: "acme", Model: "model-a"}, finished.Add(-time.Second), finished)

@@ -68,7 +68,7 @@ func TestSupervisionDigest_WakeBudgetProjection(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.GetSupervisionDigest(rec, httptest.NewRequest(http.MethodGet, "/api/runtime/supervision/digest?root_scope_id=root-1", nil))
 	budget := decodeWakeBudget(t, rec)
-	require.Len(t, budget, 3, "one row per budget class")
+	require.Len(t, budget, 4, "one row per budget class (approval/failure/other/progress)")
 
 	byClass := make(map[supervision.WakeBudgetClass]supervision.WakeBudgetState, len(budget))
 	for _, state := range budget {
@@ -87,6 +87,10 @@ func TestSupervisionDigest_WakeBudgetProjection(t *testing.T) {
 	other := byClass[supervision.WakeBudgetClassOther]
 	require.Zero(t, other.Used)
 	require.Equal(t, 5, other.Limit)
+	progress := byClass[supervision.WakeBudgetClassProgress]
+	require.Zero(t, progress.Used, "progress has an independent ledger")
+	require.Equal(t, 6, progress.Limit, "progress defaults to 6 per window (ADR-2)")
+	require.False(t, progress.Unlimited)
 }
 
 // TestSupervisionSnapshot_WakeBudgetProjection covers the snapshot half and the
@@ -98,7 +102,7 @@ func TestSupervisionSnapshot_WakeBudgetProjection(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.GetSupervisionSnapshot(rec, httptest.NewRequest(http.MethodGet, "/api/runtime/supervision/snapshot?root_team_id=team-1", nil))
 	budget := decodeWakeBudget(t, rec)
-	require.Len(t, budget, 3)
+	require.Len(t, budget, 4)
 	for _, state := range budget {
 		require.Equal(t, "team-1", state.RootScopeID)
 		if state.BudgetClass == supervision.WakeBudgetClassApproval {
@@ -110,17 +114,17 @@ func TestSupervisionSnapshot_WakeBudgetProjection(t *testing.T) {
 	// Session and team scope are both projected; duplicates collapse.
 	rec = httptest.NewRecorder()
 	handler.GetSupervisionSnapshot(rec, httptest.NewRequest(http.MethodGet, "/api/runtime/supervision/snapshot?root_session_id=team-1&root_team_id=team-1", nil))
-	require.Len(t, decodeWakeBudget(t, rec), 3, "same scope requested twice must not duplicate rows")
+	require.Len(t, decodeWakeBudget(t, rec), 4, "same scope requested twice must not duplicate rows")
 
 	rec = httptest.NewRecorder()
 	handler.GetSupervisionSnapshot(rec, httptest.NewRequest(http.MethodGet, "/api/runtime/supervision/snapshot?root_session_id=session-1&root_team_id=team-1", nil))
 	budget = decodeWakeBudget(t, rec)
-	require.Len(t, budget, 6)
+	require.Len(t, budget, 8)
 	scopes := make(map[string]int, 2)
 	for _, state := range budget {
 		scopes[state.RootScopeID]++
 	}
-	require.Equal(t, map[string]int{"session-1": 3, "team-1": 3}, scopes)
+	require.Equal(t, map[string]int{"session-1": 4, "team-1": 4}, scopes)
 }
 
 // TestSupervisionWakeBudget_OmittedWithoutScheduler verifies the field is absent

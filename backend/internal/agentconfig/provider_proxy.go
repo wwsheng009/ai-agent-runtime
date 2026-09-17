@@ -117,6 +117,10 @@ func SetProviderProxyConfig(configPath, name string, update ProviderProxyUpdate)
 	if name == "" {
 		return nil, fmt.Errorf("provider name is required")
 	}
+	// Layered mode: the provider may live in another layer than the resolved
+	// source file, so reroute the write to the layer that owns the entry before
+	// reading/writing the target document.
+	configPath = routeConfigWritePath(configPath, "providers.items."+name+".proxy", "providers.items."+name)
 
 	_, root, err := readProviderConfigDocument(configPath)
 	if err != nil {
@@ -270,6 +274,9 @@ func RemoveProviderProxyConfig(configPath, name string) (*ProviderProxyResult, e
 	if name == "" {
 		return nil, fmt.Errorf("provider name is required")
 	}
+	// See SetProviderProxyConfig: reroute before the file-local lookup so a
+	// provider defined in a lower layer can have its proxy removed.
+	configPath = routeConfigWritePath(configPath, "providers.items."+name+".proxy", "providers.items."+name)
 
 	_, root, err := readProviderConfigDocument(configPath)
 	if err != nil {

@@ -18,7 +18,8 @@ func TestBrokerToolArgKeys_CoversEveryBrokerTool(t *testing.T) {
 		ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree,
 		ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest,
 		ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask,
-		ToolSupervisionSnapshot, ToolAckLifecycle, ToolControlDescendant,
+		ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolReadAgentResult,
+		ToolAckLifecycle, ToolControlDescendant,
 	}
 	for _, tool := range tools {
 		if !(&Broker{}).IsBrokerTool(tool) {

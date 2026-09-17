@@ -89,6 +89,32 @@ func TestExecuteStructuredUsageCommandUnifiedTTYRequestsUsageScreen(t *testing.T
 		t.Fatalf("trace variant must carry the message id, got %+v", result.OpenUsageScreen)
 	}
 
+	// 批次 7.3 聚合视图：同一 ScreenLease 契约（只携带请求，不提交 Scene cell）。
+	result, handled, err = tryExecuteStructuredChatCommand(session, "/usage tools 7")
+	if err != nil || !handled {
+		t.Fatalf("tools variant handled=%v err=%v", handled, err)
+	}
+	if result.OpenUsageScreen == nil || result.OpenUsageScreen.Mode != usageScreenModeTools || result.OpenUsageScreen.Limit != 7 {
+		t.Fatalf("tools variant must carry the typed limit, got %+v", result.OpenUsageScreen)
+	}
+
+	result, handled, err = tryExecuteStructuredChatCommand(session, "/usage subagents --failed")
+	if err != nil || !handled {
+		t.Fatalf("subagents variant handled=%v err=%v", handled, err)
+	}
+	if result.OpenUsageScreen == nil || result.OpenUsageScreen.Mode != usageScreenModeSubagents ||
+		!result.OpenUsageScreen.FailedOnly {
+		t.Fatalf("subagents variant must carry --failed, got %+v", result.OpenUsageScreen)
+	}
+
+	result, handled, err = tryExecuteStructuredChatCommand(session, "/usage errors top 5")
+	if err != nil || !handled {
+		t.Fatalf("errors variant handled=%v err=%v", handled, err)
+	}
+	if result.OpenUsageScreen == nil || result.OpenUsageScreen.Mode != usageScreenModeErrors || result.OpenUsageScreen.Top != 5 {
+		t.Fatalf("errors variant must carry the typed top, got %+v", result.OpenUsageScreen)
+	}
+
 	// 参数错误仍是文档 cell（校验错误不属于视图内容，也不打开备用屏）。
 	result, _, _ = tryExecuteStructuredChatCommand(session, "/usage cache requests 0")
 	if result.OpenUsageScreen != nil {
@@ -96,6 +122,17 @@ func TestExecuteStructuredUsageCommandUnifiedTTYRequestsUsageScreen(t *testing.T
 	}
 	if plain := ui.RenderDocumentPlain(result.Document()); !strings.Contains(plain, "数量非法") {
 		t.Fatalf("invalid args document = %q", plain)
+	}
+
+	// 聚合视图的非法数量同样留在文档 cell 内。
+	for _, command := range []string{"/usage tools 0", "/usage subagents --failed 0", "/usage errors top abc"} {
+		result, _, _ = tryExecuteStructuredChatCommand(session, command)
+		if result.OpenUsageScreen != nil {
+			t.Fatalf("%s must not open the usage screen, got %+v", command, result.OpenUsageScreen)
+		}
+		if plain := ui.RenderDocumentPlain(result.Document()); !strings.Contains(plain, "非法") {
+			t.Fatalf("%s invalid args document = %q", command, plain)
+		}
 	}
 }
 

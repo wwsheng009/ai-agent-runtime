@@ -24,9 +24,26 @@ const (
 	usageScreenModeRequests = "requests"
 	usageScreenModeTrace    = "trace"
 
+	// 批次 1.3 聚合视图（§9.3 T2）：与缓存视图共用同一 ScreenLease 与渲染风格，
+	// 数据来自 usageanalytics 查询层而非 cacheanalytics.Source。
+	usageScreenModeTools     = "tools"
+	usageScreenModeSubagents = "subagents"
+	usageScreenModeErrors    = "errors"
+
 	// usageScreenTitle 是备用屏标题（FullscreenRequest 与 overlay 头部共用）。
 	usageScreenTitle = "会话缓存用量"
+	// usageAnalyticsScreenTitle 是批次 1.3 聚合视图的备用屏标题。
+	usageAnalyticsScreenTitle = "会话用量分析"
 )
+
+// usageScreenTitleForMode 返回当前视图的备用屏标题：缓存视图保持既有标题
+// （行为不变），聚合视图用"会话用量分析"以避免标题与内容口径不符。
+func usageScreenTitleForMode(mode string) string {
+	if isUsageAnalyticsMode(mode) {
+		return usageAnalyticsScreenTitle
+	}
+	return usageScreenTitle
+}
 
 // canOpenChatUsageScreen keeps /usage strictly inside the unified
 // alternate-screen contract. The viewer borrows the same ScreenLease the
@@ -66,8 +83,9 @@ func openChatUsageScreen(session *ChatSession, req UsageScreenRequest) {
 		_ = renderChatCommandResult(session, commandTextResult(body), false)
 		return
 	}
+	title := usageScreenTitleForMode(req.Mode)
 	lease, err := session.Surface.AcquireAlternateScreen(context.Background(), ui.FullscreenRequest{
-		Title: usageScreenTitle,
+		Title: title,
 	})
 	if err != nil {
 		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("打开缓存用量界面失败: %w", err)), false)
@@ -83,7 +101,7 @@ func openChatUsageScreen(session *ChatSession, req UsageScreenRequest) {
 	}
 
 	runErr := ui.RunDebugOverlayWithLease(context.Background(), resumeFullScreenTerminal(session), ui.DebugOverlayOptions{
-		Title: usageScreenTitle,
+		Title: title,
 		Body:  body,
 	}, lease)
 	releaseErr := lease.Release(context.Background())
@@ -102,9 +120,11 @@ func openChatUsageScreen(session *ChatSession, req UsageScreenRequest) {
 func usageFallbackDocumentResult(session *ChatSession, req UsageScreenRequest) CommandResult {
 	src, sessionID, errLines, ok := usageCacheSourceOrLines(session)
 	if !ok {
-		return commandTextResult(strings.Join(errLines, "\n"))
+		return commandTextResult(strings.Join(
+			usageDegradationLines(chatUsageAnalyticsSourceOrNil(), req.Mode, errLines), "\n"))
 	}
-	return commandTextResult(strings.Join(usageDocumentLines(src, sessionID, req), "\n"))
+	return commandTextResult(strings.Join(
+		usageDocumentLines(src, chatUsageAnalyticsSourceOrNil(), sessionID, req), "\n"))
 }
 
 // buildUsageScreenBody composes the plain-text overlay body from the §6.4
@@ -114,29 +134,43 @@ func usageFallbackDocumentResult(session *ChatSession, req UsageScreenRequest) C
 // terminal width.
 func buildUsageScreenBody(session *ChatSession, req UsageScreenRequest) (string, bool) {
 	src, sessionID, errLines, ok := usageCacheSourceOrLines(session)
+	analytics := chatUsageAnalyticsSourceOrNil()
 	if !ok {
-		return strings.Join(errLines, "\n"), false
+		return strings.Join(usageDegradationLines(analytics, req.Mode, errLines), "\n"), false
 	}
-	return strings.Join(usageScreenBodyLines(src, sessionID, req), "\n"), true
+	return strings.Join(usageScreenBodyLines(src, analytics, sessionID, req), "\n"), true
 }
 
 // usageScreenBodyLines projects one screen body per view mode. The overview
 // mode appends the request list below the stats; requests/trace modes stay
-// focused on their own §6.4 section.
-func usageScreenBodyLines(src cacheanalytics.Source, sessionID string, req UsageScreenRequest) []string {
+// focused on their own §6.4 section. Every mode is prefixed with the usage
+// analytics health line（§9.4：/usage 首行显示采集健康）; the cache modes keep
+// their own lines byte-for-byte below it.
+func usageScreenBodyLines(src cacheanalytics.Source, analytics usageAnalyticsSource, sessionID string, req UsageScreenRequest) []string {
 	switch req.Mode {
+	case usageScreenModeTools:
+		return usageHealthFirstLines(analytics, renderUsageAnalyticsToolStats(analytics, sessionID, req.Limit))
+	case usageScreenModeSubagents:
+		return usageHealthFirstLines(analytics, renderUsageAnalyticsSubagentStats(analytics, sessionID, req.Limit, req.FailedOnly))
+	case usageScreenModeErrors:
+		return usageHealthFirstLines(analytics, renderUsageAnalyticsErrorPatterns(analytics, sessionID, req.Top))
 	case usageScreenModeRequests:
 		limit := req.Limit
 		if limit <= 0 {
 			limit = usageCacheRequestsDefaultLimit
 		}
-		return renderUsageCacheRequests(src, sessionID, limit)
+		return usageHealthFirstLines(analytics, renderUsageCacheRequests(src, sessionID, limit))
 	case usageScreenModeTrace:
-		return renderUsageCacheTrace(src, sessionID, req.TraceID)
+		return usageHealthFirstLines(analytics, renderUsageCacheTrace(src, sessionID, req.TraceID))
 	default:
 		lines := renderUsageCacheOverview(src, sessionID)
 		lines = append(lines, "")
 		lines = append(lines, renderUsageCacheRequests(src, sessionID, usageCacheRequestsDefaultLimit)...)
-		return lines
+		return usageHealthFirstLines(analytics, lines)
 	}
+}
+
+// usageHealthFirstLines 把采集健康行置于 /usage 任意视图首行（§9.4）。
+func usageHealthFirstLines(analytics usageAnalyticsSource, body []string) []string {
+	return append([]string{renderUsageAnalyticsHealthLine(analytics)}, body...)
 }

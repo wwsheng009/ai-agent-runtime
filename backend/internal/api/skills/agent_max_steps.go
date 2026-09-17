@@ -28,6 +28,27 @@ func (h *Handler) SetAgentMaxStepsProvider(provider AgentMaxStepsProvider) {
 	h.agentMaxStepsProvider = provider
 }
 
+// RuntimeConfigLayersProvider 返回 runtime 配置文件（runtime.yaml）的层栈快照：
+// 候选文件、是否存在、是否只读。设置页用它说明「值可能来自哪一层、写回落到哪一层」。
+type RuntimeConfigLayersProvider func() []ConfigDocumentLayer
+
+// SetRuntimeConfigLayersProvider 设置 runtime 层栈读取回调（runtime-server 接分层栈）。
+func (h *Handler) SetRuntimeConfigLayersProvider(provider RuntimeConfigLayersProvider) {
+	h.runtimeConfigLayersProvider = provider
+}
+
+// runtimeLayers 返回层栈快照；未接线或为空时返回 nil，响应里省略该字段。
+func (h *Handler) runtimeLayers() []ConfigDocumentLayer {
+	if h == nil || h.runtimeConfigLayersProvider == nil {
+		return nil
+	}
+	layers := h.runtimeConfigLayersProvider()
+	if len(layers) == 0 {
+		return nil
+	}
+	return layers
+}
+
 // UpdateAgentMaxSteps 更新 agent 最大步骤数：同时写入 runtime 配置的内存快照与配置文件。
 //
 // 该值只影响「请求未显式指定 max_steps」时的后端缺省；前端工作区设置会随每轮请求带上
@@ -82,6 +103,7 @@ func (h *Handler) UpdateAgentMaxSteps(w http.ResponseWriter, r *http.Request) {
 		"updated":     true,
 		"max_steps":   maxSteps,
 		"config_file": configFile,
+		"layers":      h.runtimeLayers(),
 	})
 }
 
@@ -106,9 +128,13 @@ func (h *Handler) GetAgentMaxSteps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+	payload := map[string]interface{}{
 		"limit":       runtimeAgentMaxStepsLimit,
 		"max_steps":   maxSteps,
 		"config_file": strings.TrimSpace(configFile),
-	})
+	}
+	if layers := h.runtimeLayers(); len(layers) > 0 {
+		payload["layers"] = layers
+	}
+	h.writeJSON(w, http.StatusOK, payload)
 }

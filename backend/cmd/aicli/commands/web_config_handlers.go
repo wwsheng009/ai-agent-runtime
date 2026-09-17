@@ -292,7 +292,7 @@ func refreshChatWebSessionConfigFromRuntime(session *ChatSession) {
 	if runtimePath == "" {
 		return
 	}
-	reloaded, err := agentconfig.InitGlobalConfig(runtimePath)
+	reloaded, err := agentconfig.ReloadGlobalConfig(runtimePath)
 	if err == nil && reloaded != nil {
 		session.Config = reloaded
 	}

@@ -1408,3 +1408,183 @@ func TestSessionAgentController_ReadEventsReportsPagination(t *testing.T) {
 	require.False(t, next.HasMore)
 	require.Zero(t, next.UnreadCount)
 }
+
+// P0-3a/M5 三态语义矩阵（ADR-3）：v2 默认关闭时保持现状；显式开启后
+// busy send_input 排队投递、终态返回 ErrAgentSessionClosed，并写投递审计。
+func newSessionAgentSemanticsV2Host(t *testing.T, v2 bool) (*Handler, *chat.SessionManager) {
+	t.Helper()
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	t.Cleanup(sessionManager.Stop)
+	t.Cleanup(handler.getSessionHub().StopAll)
+	handler.SetSessionManager(sessionManager)
+	handler.SetRuntimeConfig(runtimecfg.DefaultRuntimeConfig(), "")
+	cfg := supervision.Config{}
+	if v2 {
+		cfg.MessageSemanticsV2 = true
+	}
+	handler.SetSupervisionConfig(cfg)
+	t.Cleanup(func() { handler.SetSupervisionConfig(supervision.Config{}) })
+	return handler, sessionManager
+}
+
+func markSessionAgentBusy(t *testing.T, handler *Handler, sessionID string) {
+	t.Helper()
+	actor, err := handler.getSessionHub().GetOrCreate(sessionID)
+	require.NoError(t, err)
+	require.NoError(t, actor.UpdateStateForTest(context.Background(), func(state *chat.RuntimeState) error {
+		state.Status = chat.SessionRunning
+		state.UpdatedAt = time.Now().UTC()
+		return nil
+	}))
+	require.NoError(t, handler.getSessionRuntimeStore().SaveState(context.Background(), &chat.RuntimeState{
+		SessionID: sessionID,
+		Status:    chat.SessionRunning,
+		UpdatedAt: time.Now().UTC(),
+	}))
+}
+
+func TestSessionAgentControllerV2SendInputBusyQueuesWithAudit(t *testing.T) {
+	ctx := context.Background()
+	handler, sessionManager := newSessionAgentSemanticsV2Host(t, true)
+	rootSession, err := sessionManager.Create(ctx, "user-v2-sendinput-busy")
+	require.NoError(t, err)
+	controller := handler.getAgentSessionController()
+	require.NotNil(t, controller)
+
+	_, err = controller.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{ID: "api-v2-sendinput-child"})
+	require.NoError(t, err)
+	markSessionAgentBusy(t, handler, "api-v2-sendinput-child")
+
+	result, err := controller.SendInput(ctx, toolbroker.SendAgentInputArgs{
+		ID:      "api-v2-sendinput-child",
+		Message: "queue input while busy",
+	})
+	require.NoError(t, err, "v2 send_input(interrupt=false) on a busy child must queue instead of failing")
+	require.NotNil(t, result)
+	assert.True(t, result.Queued)
+	assert.True(t, result.Delivered)
+	assert.False(t, result.Triggered)
+
+	events, err := handler.getSessionEventStore().ListEvents(ctx, "api-v2-sendinput-child", 0, 10)
+	require.NoError(t, err)
+	var mailboxEvent *runtimeevents.Event
+	for index := range events {
+		if events[index].Type == chat.EventMailboxReceived {
+			mailboxEvent = &events[index]
+			break
+		}
+	}
+	require.NotNil(t, mailboxEvent, "busy send_input must deliver a durable mailbox row")
+	metadata, ok := mailboxEvent.Payload["metadata"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, true, metadata["trigger_turn"])
+	assert.Equal(t, chat.MailboxDeliveryStatusQueued, metadata["mailbox_delivery_status"])
+
+	// send_input 无调用方身份，审计落在目标会话事件流。
+	targetEvents, err := handler.getSessionEventStore().ListEvents(ctx, "api-v2-sendinput-child", 0, 10)
+	require.NoError(t, err)
+	foundAudit := false
+	for _, event := range targetEvents {
+		if event.Type != chat.EventMailboxDelivery {
+			continue
+		}
+		foundAudit = true
+		assert.Equal(t, chat.MailboxDeliveryStatusQueued, event.Payload["mailbox_delivery_status"])
+		assert.Equal(t, "api-v2-sendinput-child", event.Payload["target_session_id"])
+		assert.Equal(t, toolbroker.ToolSendInput, event.Payload["tool"])
+	}
+	assert.True(t, foundAudit, "target session must keep a readable delivery audit record")
+}
+
+func TestSessionAgentControllerV1SendInputBusyKeepsLegacyError(t *testing.T) {
+	ctx := context.Background()
+	handler, sessionManager := newSessionAgentSemanticsV2Host(t, false)
+	rootSession, err := sessionManager.Create(ctx, "user-v1-sendinput-busy")
+	require.NoError(t, err)
+	controller := handler.getAgentSessionController()
+
+	_, err = controller.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{ID: "api-v1-sendinput-child"})
+	require.NoError(t, err)
+	markSessionAgentBusy(t, handler, "api-v1-sendinput-child")
+
+	_, err = controller.SendInput(ctx, toolbroker.SendAgentInputArgs{
+		ID:      "api-v1-sendinput-child",
+		Message: "should still fail",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "busy")
+
+	events, err := handler.getSessionEventStore().ListEvents(ctx, rootSession.ID, 0, 10)
+	require.NoError(t, err)
+	for _, event := range events {
+		assert.NotEqual(t, chat.EventMailboxDelivery, event.Type, "v1 must not write v2 audit events")
+	}
+}
+
+func TestSessionAgentControllerV2TerminalTargetReturnsSessionClosed(t *testing.T) {
+	ctx := context.Background()
+	handler, sessionManager := newSessionAgentSemanticsV2Host(t, true)
+	rootSession, err := sessionManager.Create(ctx, "user-v2-terminal")
+	require.NoError(t, err)
+	controller := handler.getAgentSessionController()
+
+	_, err = controller.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{ID: "api-v2-terminal-child"})
+	require.NoError(t, err)
+	_, err = controller.Close(ctx, "api-v2-terminal-child")
+	require.NoError(t, err)
+
+	_, err = controller.SendMessage(ctx, rootSession.ID, toolbroker.AgentMessageArgs{
+		Target:  "api-v2-terminal-child",
+		Message: "late message",
+	})
+	require.ErrorIs(t, err, toolbroker.ErrAgentSessionClosed)
+
+	_, err = controller.FollowupTask(ctx, rootSession.ID, toolbroker.AgentMessageArgs{
+		Target:  "api-v2-terminal-child",
+		Message: "late followup",
+	})
+	require.ErrorIs(t, err, toolbroker.ErrAgentSessionClosed)
+
+	_, err = controller.SendInput(ctx, toolbroker.SendAgentInputArgs{
+		ID:      "api-v2-terminal-child",
+		Message: "late input",
+	})
+	require.ErrorIs(t, err, toolbroker.ErrAgentSessionClosed)
+
+	// The rejected delivery is observable in the audit trail.
+	parentEvents, err := handler.getSessionEventStore().ListEvents(ctx, rootSession.ID, 0, 20)
+	require.NoError(t, err)
+	targetEvents, err := handler.getSessionEventStore().ListEvents(ctx, "api-v2-terminal-child", 0, 20)
+	require.NoError(t, err)
+	failures := 0
+	parentEvents = append(parentEvents, targetEvents...)
+	for _, event := range parentEvents {
+		if event.Type == chat.EventMailboxDelivery && event.Payload["mailbox_delivery_status"] == chat.MailboxDeliveryStatusFailed {
+			failures++
+		}
+	}
+	assert.GreaterOrEqual(t, failures, 1, "terminal rejection must be audited")
+}
+
+func TestSessionAgentControllerV2FollowupBusyReportsQueued(t *testing.T) {
+	ctx := context.Background()
+	handler, sessionManager := newSessionAgentSemanticsV2Host(t, true)
+	rootSession, err := sessionManager.Create(ctx, "user-v2-followup-busy")
+	require.NoError(t, err)
+	controller := handler.getAgentSessionController()
+
+	_, err = controller.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{ID: "api-v2-followup-child"})
+	require.NoError(t, err)
+	markSessionAgentBusy(t, handler, "api-v2-followup-child")
+
+	result, err := controller.FollowupTask(ctx, rootSession.ID, toolbroker.AgentMessageArgs{
+		Target:  "api-v2-followup-child",
+		Message: "queued followup",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.Delivered)
+	assert.True(t, result.Queued)
+	assert.False(t, result.Triggered)
+}

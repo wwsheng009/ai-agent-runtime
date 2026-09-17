@@ -161,3 +161,54 @@ func TestGetAgentMaxStepsProviderFailure(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
 	require.Contains(t, payload["error"], "runtime config is not loaded")
 }
+
+func TestGetAgentMaxStepsIncludesRuntimeLayers(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetAgentMaxStepsProvider(func() (int, string, error) {
+		return 5, "  C:/Users/x/.aicli/runtime.yaml  ", nil
+	})
+	handler.SetRuntimeConfigLayersProvider(func() []ConfigDocumentLayer {
+		return []ConfigDocumentLayer{
+			{Kind: "portable", Path: "configs/runtime.yaml", Present: false, ReadOnly: true},
+			{Kind: "user", Path: "C:/Users/x/.aicli/runtime.yaml", Present: false},
+			{Kind: "project", Path: ".aicli/runtime.yaml", Present: false},
+		}
+	})
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest(http.MethodGet, agentMaxStepsRoutePath, nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var payload struct {
+		ConfigFile string                `json:"config_file"`
+		Layers     []ConfigDocumentLayer `json:"layers"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	require.Equal(t, "C:/Users/x/.aicli/runtime.yaml", payload.ConfigFile)
+	require.Len(t, payload.Layers, 3)
+	require.True(t, payload.Layers[0].ReadOnly)
+	require.False(t, payload.Layers[1].ReadOnly)
+	require.False(t, payload.Layers[2].ReadOnly)
+	require.Equal(t, "user", payload.Layers[1].Kind)
+}
+
+func TestGetAgentMaxStepsOmitsLayersWithoutProvider(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetAgentMaxStepsProvider(func() (int, string, error) {
+		return 5, "C:/tmp/runtime.yaml", nil
+	})
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	req := httptest.NewRequest(http.MethodGet, agentMaxStepsRoutePath, nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotContains(t, rec.Body.String(), "layers")
+}

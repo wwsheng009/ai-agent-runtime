@@ -3,6 +3,7 @@ package toolbroker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,6 +12,12 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
+
+// ErrAgentSessionClosed reports an instruction aimed at a terminal
+// (closed/archived) child session. Both hosts return it wrapped so callers can
+// use errors.Is while still reading the target session from the message; the
+// instruction is never silently dropped (P0-3a, plan §3.3).
+var ErrAgentSessionClosed = errors.New("agent session is closed")
 
 // UserQuestionRequest captures a prompt that needs user input.
 type UserQuestionRequest struct {
@@ -445,7 +452,13 @@ type AgentStatusResult struct {
 	Exists                   bool     `json:"exists"`
 	Created                  bool     `json:"created,omitempty"`
 	Queued                   bool     `json:"queued,omitempty"`
-	TimedOut                 bool     `json:"timed_out,omitempty"`
+	// Delivered/Triggered/Duplicate mirror AgentMessageResult for send_input,
+	// whose v2 return type is this status result (P0-3a, plan §3.3). All three
+	// are omitted when false, so pre-v2 hosts serialize the same fields.
+	Delivered bool `json:"delivered,omitempty"`
+	Triggered bool `json:"triggered,omitempty"`
+	Duplicate bool `json:"duplicate,omitempty"`
+	TimedOut  bool `json:"timed_out,omitempty"`
 	// RunID is the durable execution run identity assigned by the execution
 	// supervisor at spawn time (doc 7.1). Empty when supervision is disabled.
 	RunID               string `json:"run_id,omitempty"`
@@ -704,11 +717,22 @@ type AgentListResult struct {
 }
 
 // AgentMessageResult reports queued inter-agent communication.
+//
+// v2 semantics (P0-3a, plan §3.3) add Queued and Duplicate; both are omitted
+// when false so a host that keeps MessageSemanticsV2 disabled still serializes
+// exactly the pre-v2 result.
 type AgentMessageResult struct {
-	TargetSessionID string             `json:"target_session_id"`
-	Delivered       bool               `json:"delivered"`
-	Triggered       bool               `json:"triggered,omitempty"`
-	Status          *AgentStatusResult `json:"status,omitempty"`
+	TargetSessionID string `json:"target_session_id"`
+	Delivered       bool   `json:"delivered"`
+	Triggered       bool   `json:"triggered,omitempty"`
+	// Queued reports that delivery waits in the child mailbox until the child
+	// consumes it (a busy followup_task / send_input(interrupt=false), or every
+	// send_message).
+	Queued bool `json:"queued,omitempty"`
+	// Duplicate reports that the durable mailbox id was already committed, so
+	// the retry is an idempotent hit and no second turn/message is produced.
+	Duplicate bool               `json:"duplicate,omitempty"`
+	Status    *AgentStatusResult `json:"status,omitempty"`
 }
 
 // Approval resolutions reported on AgentApprovalResult.Resolution. They mirror

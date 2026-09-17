@@ -95,6 +95,9 @@ func runConfigCommand(cfg *config.Config, providerFlag string, showGroups, showM
 	}
 
 	payload, err := buildConfigJSONPayload(cfg, providerFlag, showGroups, showModels)
+	if err == nil {
+		err = attachMergedConfigDocument(payload)
+	}
 	if err != nil {
 		return result, details, err
 	}

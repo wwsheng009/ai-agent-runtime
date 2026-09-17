@@ -199,3 +199,194 @@ func TestLocalSupervisionProgressCheckLifecycleGatedByConfig(t *testing.T) {
 		}
 	})
 }
+
+// localProgressCheckCriticalNotification 落一条未决 critical 通知（不产生
+// wake），用于钉住 P0-2 改动 2 的让位门：scope 内仍有 critical 未决时，巡查
+// 不得抢跑汇报 turn；该通知被 resolve 后巡查必须自动恢复。
+func localProgressCheckCriticalNotification(t *testing.T, host *localChatRuntimeHost) supervision.Notification {
+	t.Helper()
+	notification, err := host.Supervision.Store.UpsertNotification(context.Background(), supervision.Notification{
+		RootScopeID:      localProgressCheckTestSession,
+		SubjectKind:      supervision.SubjectAgentRun,
+		SubjectID:        "child-critical-1",
+		SubjectVersion:   1,
+		EventType:        "agent_failed",
+		Severity:         supervision.SeverityCritical,
+		SupervisionState: supervision.SupervisionBlocked,
+		ResolutionState:  supervision.ResolutionUnresolved,
+	})
+	require.NoError(t, err)
+	require.True(t, notification.Unresolved())
+	return notification
+}
+
+// TestLocalSupervisionProgressCheckDefersToUnresolvedCritical 钉住 P0-2 改动 2：
+// 存在未决 critical 时本轮不调度、不起 turn，且不留 stale wake；critical 被
+// resolve 后同一巡查逻辑立即恢复注入。
+func TestLocalSupervisionProgressCheckDefersToUnresolvedCritical(t *testing.T) {
+	host, deliveries := newLocalProgressCheckHost(t, subagentbatch.BatchRunning)
+	ctx := context.Background()
+	notification := localProgressCheckCriticalNotification(t, host)
+
+	reported, err := host.runLocalSupervisionProgressCheckOnce(ctx)
+	require.NoError(t, err)
+	require.False(t, reported, "an unresolved critical notification owns the next turn")
+	require.Zero(t, *deliveries, "the gated sweep must not start a progress turn")
+	requireNoPendingWake(t, host, "the gated sweep must not leave a stale progress wake behind")
+
+	ok, err := host.Supervision.Store.ResolveNotification(ctx, notification.NotificationID,
+		supervision.ResolutionRecovered, time.Now().UTC(), notification.Version)
+	require.NoError(t, err)
+	require.True(t, ok, "the fixture critical notification must be resolvable")
+
+	reported, err = host.runLocalSupervisionProgressCheckOnce(ctx)
+	require.NoError(t, err)
+	require.True(t, reported, "the sweep resumes once the critical notification is resolved")
+	require.Equal(t, 1, *deliveries)
+}
+
+// TestLocalSupervisionProgressCheckSpendsOnlyProgressBudget 钉住 P0-2/ADR-2 的
+// CLI 侧分账：汇报 turn 记一条 progress claim，绝不占用 failure/other 的有界
+// 额度；连续巡查只受自己的 6 次/窗口约束，用尽后跳过且不留 stale wake。
+func TestLocalSupervisionProgressCheckSpendsOnlyProgressBudget(t *testing.T) {
+	host, deliveries := newLocalProgressCheckHost(t, subagentbatch.BatchRunning)
+	ctx := context.Background()
+
+	reported, err := host.runLocalSupervisionProgressCheckOnce(ctx)
+	require.NoError(t, err)
+	require.True(t, reported)
+	require.Equal(t, 1, *deliveries)
+
+	progress := host.Supervision.Wakes.BudgetState(ctx, localProgressCheckTestSession, supervision.WakeBudgetClassProgress)
+	require.Equal(t, 1, progress.Used, "the report turn books one progress claim")
+	require.Equal(t, 6, progress.Limit)
+	require.Zero(t, host.Supervision.Wakes.BudgetState(ctx, localProgressCheckTestSession, supervision.WakeBudgetClassOther).Used)
+	require.Zero(t, host.Supervision.Wakes.BudgetState(ctx, localProgressCheckTestSession, supervision.WakeBudgetClassFailure).Used)
+	now := time.Now().UTC()
+	require.True(t, host.Supervision.Wakes.AllowAutoWake(ctx, localProgressCheckTestSession, supervision.WakeBudgetClassOther, now),
+		"a progress turn must not consume the other budget")
+	require.True(t, host.Supervision.Wakes.AllowAutoWake(ctx, localProgressCheckTestSession, supervision.WakeBudgetClassFailure, now),
+		"a progress turn must not consume the failure budget")
+
+	// 继续巡查直到 progress 的 6 次窗口额度用尽：第 7 次跳过（不投递、不落
+	// stale wake），而 failure/other 的额度始终未受影响。
+	for i := 0; i < 5; i++ {
+		reported, err = host.runLocalSupervisionProgressCheckOnce(ctx)
+		require.NoError(t, err)
+		require.Truef(t, reported, "sweep %d must still deliver within the progress allowance", i+2)
+	}
+	require.Equal(t, 6, *deliveries)
+
+	reported, err = host.runLocalSupervisionProgressCheckOnce(ctx)
+	require.NoError(t, err)
+	require.False(t, reported, "the progress allowance (6 per window) must rate-limit the sweep")
+	requireNoPendingWake(t, host, "a rate-limited sweep skips instead of leaving a stale wake")
+	require.True(t, host.Supervision.Wakes.AllowAutoWake(ctx, localProgressCheckTestSession, supervision.WakeBudgetClassFailure, now))
+	require.True(t, host.Supervision.Wakes.AllowAutoWake(ctx, localProgressCheckTestSession, supervision.WakeBudgetClassOther, now))
+}
+
+// TestLocalSupervisionProgressCheckSurvivesExhaustedCriticalBudget 是分账的
+// 反方向：共享有界额度（这里收紧到 1/窗口）已整份花光、花光它的 critical
+// 通知也已 resolve 之后，progress 巡查仍有自己的额度并正常注入。
+func TestLocalSupervisionProgressCheckSurvivesExhaustedCriticalBudget(t *testing.T) {
+	host, deliveries := newLocalProgressCheckHost(t, subagentbatch.BatchRunning)
+	ctx := context.Background()
+
+	tight := supervision.NewWakeScheduler(host.Supervision.Store, supervision.WakeSchedulerConfig{
+		RateWindow:           time.Hour,
+		MaxAutoWakePerWindow: 1,
+	})
+	host.Supervision.Wakes = tight
+	host.supervisionWake = &supervision.WakeConsumer{
+		Wakes:    tight,
+		Runnable: func(context.Context, string, string, string) bool { return true },
+		Deliver: func(context.Context, string, string, *supervision.Digest, []string) error {
+			*deliveries = *deliveries + 1
+			return nil
+		},
+	}
+
+	// 一条 other 类 critical lifecycle wake 花光唯一的共享额度（memory 账本）。
+	projected, err := supervision.ProjectLifecycle(ctx, host.Supervision.Store, tight, supervision.LifecycleProjection{
+		RootScopeID:           localProgressCheckTestSession,
+		TargetParentSessionID: localProgressCheckTestSession,
+		SubjectKind:           supervision.SubjectAgentRun,
+		SubjectID:             "critical-budget-1",
+		SubjectVersion:        1,
+		EventType:             "critical_lifecycle",
+		Severity:              supervision.SeverityCritical,
+		SupervisionState:      supervision.SupervisionBlocked,
+	})
+	require.NoError(t, err)
+	require.NoError(t, host.wakeSupervisedParent(ctx, localProgressCheckTestSession, localProgressCheckTestSession))
+	require.False(t, tight.AllowAutoWake(ctx, localProgressCheckTestSession, supervision.WakeBudgetClassOther, time.Now().UTC()),
+		"the fixture must exhaust the shared bounded budget")
+
+	// critical 消除（让位门放行）后，progress 类不应因共享额度耗尽被挡。
+	// 投递会 MarkNotificationDelivered 抬升 version，resolve 前必须重读拿最新版本。
+	require.NotEmpty(t, projected.NotificationID)
+	notifications, err := host.Supervision.Store.ListNotifications(ctx, supervision.NotificationFilter{
+		RootScopeID:     localProgressCheckTestSession,
+		IncludeResolved: false,
+	})
+	require.NoError(t, err)
+	require.Len(t, notifications, 1)
+	ok, err := host.Supervision.Store.ResolveNotification(ctx, notifications[0].NotificationID,
+		supervision.ResolutionRecovered, time.Now().UTC(), notifications[0].Version)
+	require.NoError(t, err)
+	require.True(t, ok, "the delivered lifecycle notification must still be resolvable via its current version")
+
+	reported, err := host.runLocalSupervisionProgressCheckOnce(ctx)
+	require.NoError(t, err)
+	require.True(t, reported, "an exhausted critical budget must not block the progress check")
+	require.Equal(t, 2, *deliveries)
+
+	other := tight.BudgetState(ctx, localProgressCheckTestSession, supervision.WakeBudgetClassOther)
+	require.Equal(t, 1, other.Used)
+	require.Equal(t, 1, other.Limit, "the progress turn must not add an other-class claim")
+	progress := tight.BudgetState(ctx, localProgressCheckTestSession, supervision.WakeBudgetClassProgress)
+	require.Equal(t, 1, progress.Used)
+	require.Equal(t, 6, progress.Limit)
+}
+
+// TestLocalSupervisionProgressCheckClampsSubFloorInterval 钉住 P0-2 改动 3 的
+// 钳制告警判定与生效间隔：1s→30s（warning=true），0/负数保持"关闭"且不告警，
+// 正常值不变且不告警；钳制点仍然只有 supervision.Config.WithDefaults 一处。
+func TestLocalSupervisionProgressCheckClampsSubFloorInterval(t *testing.T) {
+	cases := []struct {
+		name      string
+		raw       time.Duration
+		effective time.Duration
+		wantWarn  bool
+	}{
+		{"sub-floor is clamped and warned", time.Second, supervision.MinProgressCheckInterval, true},
+		{"exactly the floor is untouched", supervision.MinProgressCheckInterval, supervision.MinProgressCheckInterval, false},
+		{"a normal value is untouched", 90 * time.Second, 90 * time.Second, false},
+		{"zero keeps the opt-in off without a warning", 0, 0, false},
+		{"negative keeps the opt-in off without a warning", -time.Second, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.wantWarn, warnProgressCheckIntervalClamped(tc.raw, tc.effective))
+			require.Equal(t, tc.effective,
+				supervision.Config{ProgressCheckInterval: tc.raw}.WithDefaults().ProgressCheckInterval,
+				"WithDefaults 仍是唯一的钳制点")
+		})
+	}
+
+	// 配了 1s 的宿主仍然开启巡查（只是生效间隔被抬到 30s），0 配置不注册 ticker。
+	host, _ := newLocalProgressCheckHost(t, subagentbatch.BatchRunning)
+	host.supervisionConfig = supervision.Config{ProgressCheckInterval: time.Second}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	host.lifecycleCtx = ctx
+	host.startLocalSupervisionProgressCheck()
+	require.NotNil(t, host.progressCheckStop, "a sub-floor opt-in still starts the sweep at the clamped interval")
+	host.stopLocalSupervisionProgressCheck()
+
+	off, _ := newLocalProgressCheckHost(t, subagentbatch.BatchRunning)
+	off.supervisionConfig = supervision.Config{}
+	require.False(t, off.supervisionConfig.ProgressCheckEnabled())
+	off.startLocalSupervisionProgressCheck()
+	require.Nil(t, off.progressCheckStop, "0 must keep the sweep off")
+}

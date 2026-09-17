@@ -225,6 +225,10 @@ export const zhRuntimeConfigEditorRuntime = {
     saveFailed: "保存失败：{{message}}",
     loadFailed: "读取服务端缺省值失败：{{message}}",
     configFile: "配置文件：{{path}}",
+    layerSummary: "层：{{layers}}",
+    layerReadOnly: "只读默认（不写入）",
+    layerWritable: "写入层",
+    layerCandidate: "候选（当前不存在）",
     workspaceValue:
       "工作区设置的每轮值：{{count}}（聊天请求会携带它并覆盖服务端缺省；两边共用同一个键 agent.maxSteps）。",
     scopeNote: "来源：runtime 配置文件的 agent.maxSteps。",

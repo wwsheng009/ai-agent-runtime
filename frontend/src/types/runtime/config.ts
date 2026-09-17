@@ -53,12 +53,23 @@ export type RuntimeAgentMaxStepsSaveResponse = {
   config_file: string;
 };
 
+/** runtime 配置文件（runtime.yaml）的一层：候选文件、是否存在、是否只读。 */
+export type RuntimeConfigLayer = {
+  kind: string;
+  path: string;
+  present: boolean;
+  /** 只读层只提供默认值（发行包/仓库自带），写入会落到可写层。 */
+  read_only?: boolean;
+};
+
 /** 读取后端缺省的「最大步骤数」：runtime 内存快照里的 agent.maxSteps + 来源配置文件路径。 */
 export type RuntimeAgentMaxStepsResponse = {
   /** 后端接受的取值上限（0 = 不限制）。 */
   limit: number;
   max_steps: number;
   config_file: string;
+  /** runtime.yaml 的层栈（分层）：候选文件、只读层与写入目标。 */
+  layers?: RuntimeConfigLayer[];
 };
 
 export type RuntimeAgentRoutePreviewParent = {

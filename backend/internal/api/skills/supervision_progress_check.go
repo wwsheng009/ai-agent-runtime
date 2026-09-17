@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 )
@@ -83,17 +84,27 @@ func (h *Handler) syncSupervisionProgressCheck() {
 		return
 	}
 	h.StopSupervisionProgressCheck()
-	if h.supervisionTuning().ProgressCheckInterval <= 0 {
+	tuning := h.supervisionTuning()
+	if tuning.ProgressCheckInterval <= 0 {
 		// opt-in 关闭（默认）：不注册 ticker、不新增 goroutine，宿主行为与引入该
 		// 开关前完全一致。
 		return
+	}
+	// 钳制告警（P0-2 改动 3）：原始配置低于下限时 WithDefaults 会抬到 30s，
+	// 必须让运维看到"配了 1s 实际是 30s"，而不是静默改语义。0=关闭不受影响。
+	h.supervisionStoreMu.RLock()
+	rawInterval := h.supervisionConfig.ProgressCheckInterval
+	h.supervisionStoreMu.RUnlock()
+	if rawInterval > 0 && rawInterval < supervision.MinProgressCheckInterval {
+		logger.Warnf("supervision: progress_check_interval %s is below the %s floor; clamped to %s",
+			rawInterval, supervision.MinProgressCheckInterval, tuning.ProgressCheckInterval)
 	}
 	if h.getSupervisionStore() == nil {
 		// 控制面还没接线：等下一次 SetSupervisionConfig（宿主总是最后调用它）再
 		// 启动，而不是留一个每 tick 都空转的 goroutine。
 		return
 	}
-	h.startSupervisionProgressCheck(h.supervisionTuning().ProgressCheckInterval)
+	h.startSupervisionProgressCheck(tuning.ProgressCheckInterval)
 }
 
 // startSupervisionProgressCheck 启动巡检循环；已在运行时是 no-op。
@@ -242,6 +253,12 @@ func (h *Handler) runSupervisionProgressCheckForParent(
 		// 第二个 turn（digest 里本来就含 progress 区块）。
 		return false, nil
 	}
+	if h.supervisionHasUnresolvedCritical(ctx, rootScopeID) {
+		// P0-2 改动 2：scope 内仍有未决的 critical 通知时让位。critical 的投递
+		// 本身会带来同一个 digest（其中已含 progress 区块），progress 汇报不该
+		// 抢在它前面消耗一次父 turn；critical 消除后巡查自动恢复。
+		return false, nil
+	}
 	class := supervision.WakeBudgetClassOf(apiSupervisionProgressCheckReason)
 	if !scheduler.AllowAutoWake(ctx, rootScopeID, class, now) {
 		// 预算耗尽：progress 巡查不是决策，直接跳过而不是留下一条后续会被投递的
@@ -264,6 +281,31 @@ func (h *Handler) runSupervisionProgressCheckForParent(
 		return false, err
 	}
 	return true, nil
+}
+
+// supervisionHasUnresolvedCritical reports whether the root scope still holds
+// an unresolved critical notification. It reuses the same store read the
+// preflight digest uses (ListNotifications) and adds no new access pattern; a
+// read failure degrades to "no gate" so one best-effort tick keeps its
+// historical behavior instead of blocking the sweep.
+func (h *Handler) supervisionHasUnresolvedCritical(ctx context.Context, rootScopeID string) bool {
+	store := h.getSupervisionStore()
+	if store == nil {
+		return false
+	}
+	notifications, err := store.ListNotifications(ctx, supervision.NotificationFilter{
+		RootScopeID:     strings.TrimSpace(rootScopeID),
+		IncludeResolved: false,
+	})
+	if err != nil {
+		return false
+	}
+	for _, notification := range notifications {
+		if notification.Severity == supervision.SeverityCritical && notification.Unresolved() {
+			return true
+		}
+	}
+	return false
 }
 
 // supervisionProgressCheckParents 枚举本轮的父会话：只读 batch store，按最近活动

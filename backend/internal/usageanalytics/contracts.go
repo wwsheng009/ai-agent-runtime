@@ -41,51 +41,60 @@ type Query struct {
 
 // SessionRollup is a coarse per-session usage record for list/global views.
 type SessionRollup struct {
-	SessionID             string    `json:"session_id"`
-	RuntimeSessionID      string    `json:"runtime_session_id,omitempty"`
-	Title                 string    `json:"title,omitempty"`
-	TitleSource           string    `json:"title_source,omitempty"`
-	Directory             string    `json:"directory"`
-	Project               string    `json:"project,omitempty"`
-	RelPath               string    `json:"-"`
-	StartTime             time.Time `json:"start_time"`
-	EndTime               time.Time `json:"end_time,omitempty"`
-	LastObservedAt        time.Time `json:"last_observed_at,omitempty"`
-	Status                string    `json:"status,omitempty"`
-	Provider              string    `json:"provider,omitempty"`
-	Protocol              string    `json:"protocol,omitempty"`
-	Model                 string    `json:"model,omitempty"`
-	BaseURL               string    `json:"-"`
-	Stream                bool      `json:"stream,omitempty"`
-	TotalRequests         int       `json:"total_requests"`
-	TotalResponses        int       `json:"total_responses"`
-	TotalToolCalls        int       `json:"total_tool_calls"`
-	TotalTokens           int       `json:"total_tokens"`
-	PromptTokens          int       `json:"prompt_tokens,omitempty"`
-	CompletionTokens      int       `json:"completion_tokens,omitempty"`
-	CachedTokens          int       `json:"cached_tokens,omitempty"`
-	ReasoningTokens       int       `json:"reasoning_tokens,omitempty"`
-	LLMRequests           int       `json:"llm_requests,omitempty"`
-	LLMRequestsWithUsage  int       `json:"llm_requests_with_usage,omitempty"`
-	LLMSuccesses          int       `json:"llm_successes,omitempty"`
-	LLMErrors             int       `json:"llm_errors,omitempty"`
-	TurnCount             int       `json:"turn_count"`
-	FailedTurns           int       `json:"failed_turns"`
-	RecoveredTurns        int       `json:"recovered_turns"`
-	ToolResultsObserved   int       `json:"tool_results_observed"`
-	ToolErrors            int       `json:"tool_errors"`
-	AverageResponseTimeMs int64     `json:"average_response_time_ms,omitempty"`
-	TotalDurationMs       int64     `json:"total_duration_ms,omitempty"`
-	HasDebugUsage         bool      `json:"has_debug_usage,omitempty"`
-	Source                string    `json:"source,omitempty"` // live（数据库实时写入）
-	UsageQuality          string    `json:"usage_quality"`
-	UsageComplete         bool      `json:"usage_complete"`
-	UsageCoverage         float64   `json:"usage_coverage"`
-	Partial               bool      `json:"partial"`
-	PartialReasons        []string  `json:"partial_reasons"`
-	DroppedMessages       int       `json:"dropped_messages"`
-	ReconciliationStatus  string    `json:"reconciliation_status"`
-	ReconciliationDelta   int       `json:"reconciliation_delta"`
+	SessionID            string    `json:"session_id"`
+	RuntimeSessionID     string    `json:"runtime_session_id,omitempty"`
+	Title                string    `json:"title,omitempty"`
+	TitleSource          string    `json:"title_source,omitempty"`
+	Directory            string    `json:"directory"`
+	Project              string    `json:"project,omitempty"`
+	RelPath              string    `json:"-"`
+	StartTime            time.Time `json:"start_time"`
+	EndTime              time.Time `json:"end_time,omitempty"`
+	LastObservedAt       time.Time `json:"last_observed_at,omitempty"`
+	Status               string    `json:"status,omitempty"`
+	Provider             string    `json:"provider,omitempty"`
+	Protocol             string    `json:"protocol,omitempty"`
+	Model                string    `json:"model,omitempty"`
+	BaseURL              string    `json:"-"`
+	Stream               bool      `json:"stream,omitempty"`
+	TotalRequests        int       `json:"total_requests"`
+	TotalResponses       int       `json:"total_responses"`
+	TotalToolCalls       int       `json:"total_tool_calls"`
+	TotalTokens          int       `json:"total_tokens"`
+	PromptTokens         int       `json:"prompt_tokens,omitempty"`
+	CompletionTokens     int       `json:"completion_tokens,omitempty"`
+	CachedTokens         int       `json:"cached_tokens,omitempty"`
+	ReasoningTokens      int       `json:"reasoning_tokens,omitempty"`
+	LLMRequests          int       `json:"llm_requests,omitempty"`
+	LLMRequestsWithUsage int       `json:"llm_requests_with_usage,omitempty"`
+	LLMSuccesses         int       `json:"llm_successes,omitempty"`
+	LLMErrors            int       `json:"llm_errors,omitempty"`
+	TurnCount            int       `json:"turn_count"`
+	FailedTurns          int       `json:"failed_turns"`
+	RecoveredTurns       int       `json:"recovered_turns"`
+	ToolResultsObserved  int       `json:"tool_results_observed"`
+	ToolErrors           int       `json:"tool_errors"`
+	// schema v2（方案 §4 批次 1.3）：工具/子代理维度增量字段，仅增不改。
+	ToolCallsObserved     int      `json:"tool_calls_observed,omitempty"`
+	ToolFailures          int      `json:"tool_failures,omitempty"`
+	ToolFailureRate       float64  `json:"tool_failure_rate,omitempty"`
+	SubagentRuns          int      `json:"subagent_runs,omitempty"`
+	SubagentFailures      int      `json:"subagent_failures,omitempty"`
+	SubagentFailureRate   float64  `json:"subagent_failure_rate,omitempty"`
+	SubagentTimeouts      int      `json:"subagent_timeouts,omitempty"`
+	RetryRecoveredTurns   int      `json:"retry_recovered_turns,omitempty"`
+	AverageResponseTimeMs int64    `json:"average_response_time_ms,omitempty"`
+	TotalDurationMs       int64    `json:"total_duration_ms,omitempty"`
+	HasDebugUsage         bool     `json:"has_debug_usage,omitempty"`
+	Source                string   `json:"source,omitempty"` // live（数据库实时写入）
+	UsageQuality          string   `json:"usage_quality"`
+	UsageComplete         bool     `json:"usage_complete"`
+	UsageCoverage         float64  `json:"usage_coverage"`
+	Partial               bool     `json:"partial"`
+	PartialReasons        []string `json:"partial_reasons"`
+	DroppedMessages       int      `json:"dropped_messages"`
+	ReconciliationStatus  string   `json:"reconciliation_status"`
+	ReconciliationDelta   int      `json:"reconciliation_delta"`
 }
 
 // TokenTotals aggregates token counters.
@@ -240,6 +249,8 @@ type TurnUsage struct {
 	LLMErrors             int         `json:"llm_errors"`
 	ToolResultsObserved   int         `json:"tool_results_observed"`
 	ToolErrors            int         `json:"tool_errors"`
+	RecoveredToolErrors   int         `json:"recovered_tool_errors,omitempty"`
+	UnrecoveredToolErrors int         `json:"unrecovered_tool_errors,omitempty"`
 	Usage                 TokenTotals `json:"usage"`
 	UsageQuality          string      `json:"usage_quality"`
 	UsageCoverage         float64     `json:"usage_coverage"`
@@ -266,7 +277,11 @@ type SessionUsageDetail struct {
 	Turns           []TurnUsage    `json:"turns"`
 	Diagnostics     []Diagnostic   `json:"diagnostics"`
 	ErrorCategories map[string]int `json:"error_categories"`
-	Coverage        Coverage       `json:"coverage"`
-	Partial         bool           `json:"partial"`
-	PartialReasons  []string       `json:"partial_reasons"`
+	// schema v2：工具/子代理明细与失败模式 Top-N（增量字段）。
+	Tools          []ToolStat     `json:"tools"`
+	Subagents      []SubagentStat `json:"subagents"`
+	ErrorPatterns  []ErrorPattern `json:"error_patterns"`
+	Coverage       Coverage       `json:"coverage"`
+	Partial        bool           `json:"partial"`
+	PartialReasons []string       `json:"partial_reasons"`
 }

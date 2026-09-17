@@ -21,22 +21,22 @@ export function StatCard({
   return (
     <div
       title={detail}
-      className="rounded-card-lg border border-border bg-surface-softer px-3 py-2.5"
+      className="rounded-card border border-border bg-surface-solid px-2.5 py-2"
     >
-      <div className="flex items-center gap-3">
-        <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-field border border-border bg-surface-solid text-accent-primary">
-          <Icon size={14} />
+      <div className="flex items-center gap-2">
+        <span className="inline-flex size-5 shrink-0 items-center justify-center rounded-field border border-border bg-surface-softer text-accent-primary">
+          <Icon size={11} />
         </span>
-        <div className="min-w-0">
-          <div className="app-text-11 uppercase tracking-[0.14em] text-muted-foreground">
+        <div className="min-w-0 flex-1">
+          <div className="app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
             {label}
           </div>
-          <div className="mt-0.5 truncate text-sm font-semibold text-foreground">
+          <div className="mt-0.5 truncate text-xs font-semibold text-foreground">
             {value}
           </div>
         </div>
       </div>
-      <p className="mt-2 truncate text-xs leading-5 text-muted-foreground">
+      <p className="mt-1 truncate text-[11px] leading-4 text-muted-foreground">
         {detail}
       </p>
     </div>

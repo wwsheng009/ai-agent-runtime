@@ -46,6 +46,12 @@ type ToolExecutionReceipt struct {
 	ToolName    string          `json:"tool_name,omitempty"`
 	MessageJSON json.RawMessage `json:"message_json"`
 	CreatedAt   time.Time       `json:"created_at"`
+
+	// OK / FailureCategory 是回执的结果证据（方案 §0.3：失败工具同样落回执）。
+	// nil 表示未知（不猜测）。这两项只进入事件载荷与内存回执；SQLite 表仍以
+	// message_json 为权威内容，因此不需要 schema 变更。
+	OK              *bool  `json:"ok,omitempty"`
+	FailureCategory string `json:"failure_category,omitempty"`
 }
 
 // SessionStatus represents the lifecycle state of a session actor.

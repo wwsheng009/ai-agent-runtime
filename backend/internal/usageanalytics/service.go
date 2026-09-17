@@ -31,6 +31,8 @@ type Service struct {
 	store     *Store
 	collector *collector
 	source    cacheanalytics.Source
+	// cache 服务端短 TTL 查询缓存（§8.2）；只读降级路径不经过缓存。
+	cache *analyticsQueryCache
 
 	closeOnce sync.Once
 }
@@ -42,7 +44,7 @@ func Attach(bus *runtimeevents.Bus, opts Options) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	service := &Service{store: store}
+	service := &Service{store: store, cache: newAnalyticsQueryCache(opts.Now)}
 	if bus != nil {
 		service.collector = newCollector(store, opts.Lookup, opts.Now)
 		service.collector.subscribe(bus)
@@ -104,7 +106,15 @@ func (s *Service) Query() *Store {
 // ListSessions 返回过滤 + 分页后的会话 rollup。
 func (s *Service) ListSessions(q Query) (ListResult, error) {
 	if store := s.Query(); store != nil {
-		return store.ListSessions(q)
+		if cached, ok := s.cacheLookup("sessions", q); ok {
+			return cached.(ListResult), nil
+		}
+		result, err := store.ListSessions(q)
+		if err != nil {
+			return ListResult{}, err
+		}
+		s.cachePut("sessions", q, result)
+		return result, nil
 	}
 	return emptyListResult(q.Limit, q.Offset), nil
 }
@@ -112,7 +122,15 @@ func (s *Service) ListSessions(q Query) (ListResult, error) {
 // Summarize 返回 group_by 聚合统计。
 func (s *Service) Summarize(q Query) (SummaryResult, error) {
 	if store := s.Query(); store != nil {
-		return store.Summarize(q)
+		if cached, ok := s.cacheLookup("summary", q); ok {
+			return cached.(SummaryResult), nil
+		}
+		result, err := store.Summarize(q)
+		if err != nil {
+			return SummaryResult{}, err
+		}
+		s.cachePut("summary", q, result)
+		return result, nil
 	}
 	return emptySummaryResult(q.GroupBy), nil
 }
@@ -120,7 +138,15 @@ func (s *Service) Summarize(q Query) (SummaryResult, error) {
 // Dimensions 返回 distinct 过滤维度。
 func (s *Service) Dimensions(q Query) (DimensionsResult, error) {
 	if store := s.Query(); store != nil {
-		return store.Dimensions(q)
+		if cached, ok := s.cacheLookup("dimensions", q); ok {
+			return cached.(DimensionsResult), nil
+		}
+		result, err := store.Dimensions(q)
+		if err != nil {
+			return DimensionsResult{}, err
+		}
+		s.cachePut("dimensions", q, result)
+		return result, nil
 	}
 	return DimensionsResult{
 		SchemaVersion: SchemaVersion,
@@ -139,6 +165,46 @@ func (s *Service) SessionUsage(sessionID string) (SessionUsageDetail, error) {
 		return store.SessionUsage(sessionID)
 	}
 	return SessionUsageDetail{}, errSessionNotFound(sessionID)
+}
+
+// ToolStats 返回工具维度聚合（schema v2；空库返回空数组）。
+func (s *Service) ToolStats(q ToolStatsQuery) (ToolStatsResult, error) {
+	if store := s.Query(); store != nil {
+		return store.ToolStats(q)
+	}
+	return ToolStatsResult{SchemaVersion: SchemaVersion, GeneratedAt: time.Now().UTC(), Tools: []ToolStat{}}, nil
+}
+
+// ToolStatsDetail 返回单个工具的百分位耗时与错误码 Top-N。
+func (s *Service) ToolStatsDetail(q ToolStatsQuery, toolName string) (ToolStat, error) {
+	if store := s.Query(); store != nil {
+		return store.ToolStatsDetail(q, toolName)
+	}
+	return ToolStat{ToolName: toolName}, nil
+}
+
+// SubagentStats 返回子代理维度聚合（schema v2；空库返回空数组）。
+func (s *Service) SubagentStats(q SubagentStatsQuery) (SubagentStatsResult, error) {
+	if store := s.Query(); store != nil {
+		return store.SubagentStats(q)
+	}
+	return SubagentStatsResult{
+		SchemaVersion: SchemaVersion,
+		GeneratedAt:   time.Now().UTC(),
+		Summary: SubagentStatsSummary{
+			FailureCategories: map[string]int{},
+			Sources:           map[string]int{},
+		},
+		Subagents: []SubagentStat{},
+	}, nil
+}
+
+// ErrorPatterns 返回失败模式 Top-N（schema v2；空库返回空数组）。
+func (s *Service) ErrorPatterns(q ErrorPatternsQuery) (ErrorPatternsResult, error) {
+	if store := s.Query(); store != nil {
+		return store.ErrorPatterns(q)
+	}
+	return ErrorPatternsResult{SchemaVersion: SchemaVersion, GeneratedAt: time.Now().UTC(), Patterns: []ErrorPattern{}}, nil
 }
 
 // ============================================================================

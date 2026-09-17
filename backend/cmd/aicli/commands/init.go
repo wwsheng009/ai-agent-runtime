@@ -23,29 +23,35 @@ func NewInitCommand() *cobra.Command {
 		Short: "初始化 aicli starter 配置",
 		Long: fmt.Sprintf(`初始化本地 aicli 配置文件。
 
-默认会在当前工作目录的 .aicli/%[1]s 创建最小 starter 配置。
-如需写入用户目录，可使用 --global 或 --config ~/.aicli/%[1]s。
+默认会在用户目录创建 ~/.aicli/%[1]s（最小 starter 配置），避免在任意目录就地生成配置文件。
+如需在当前工作目录创建项目级配置，使用 --project。
+--global 与 --config ~/.aicli/%[1]s 仍然可用（与默认行为等价，保留以兼容旧脚本）。
 如果配置文件已经存在，则保持原样，不会覆盖。
 
 首次使用推荐：
-  aicli init --global
+  aicli init
   aicli login --provider openai --protocol openai --base-url https://api.openai.com --api-key sk-... --set-default
   aicli
 
 更多说明见 docs/aicli/quickstart.md。`, aiclipaths.DefaultConfigFileName),
 		Example: fmt.Sprintf(`  aicli init
   aicli init --global
+  aicli init --project
   aicli init --config .aicli/%[1]s
   aicli init --config ~/.aicli/%[1]s
   aicli init --config /path/to/custom/config.yaml
-  aicli init --global --json`, aiclipaths.DefaultConfigFileName),
+  aicli init --project --json`, aiclipaths.DefaultConfigFileName),
 		Run: func(cmd *cobra.Command, args []string) {
 			handleInitCommand(cmd)
 		},
 	}
 	cmd.Flags().StringP("config", "c", "", "初始化目标配置文件路径（留空时使用默认本地 starter 路径）")
+	cmd.Flags().Bool("project", false, fmt.Sprintf(
+		"在当前工作目录创建项目级配置 .aicli/%[1]s（默认写入用户目录）",
+		aiclipaths.DefaultConfigFileName,
+	))
 	cmd.Flags().Bool("global", false, fmt.Sprintf(
-		"初始化用户目录下的 ~/.aicli/%[1]s（等价于 --config ~/.aicli/%[1]s）",
+		"初始化用户目录下的 ~/.aicli/%[1]s（已是默认行为，保留以兼容旧脚本）",
 		aiclipaths.DefaultConfigFileName,
 	))
 	cmd.Flags().String("output", "", "输出格式（text|json）")
@@ -71,12 +77,24 @@ func runInitCommand(cmd *cobra.Command) (initCommandResult, map[string]interface
 
 	explicitPath := ""
 	useGlobal := false
+	useProject := false
 	if cmd != nil {
 		explicitPath, _ = cmd.Flags().GetString("config")
 		useGlobal, _ = cmd.Flags().GetBool("global")
+		useProject, _ = cmd.Flags().GetBool("project")
 	}
 	targetPath := strings.TrimSpace(explicitPath)
-	if targetPath == "" && useGlobal {
+	if targetPath != "" && (useProject || useGlobal) {
+		return result, details, fmt.Errorf("--config 与 --project/--global 不能同时使用")
+	}
+	if useProject && useGlobal {
+		return result, details, fmt.Errorf("--project 与 --global 不能同时使用")
+	}
+	switch {
+	case targetPath != "":
+	case useProject, targetPath == "" && !useGlobal:
+		targetPath = config.ResolveProjectConfigPath()
+	case useGlobal:
 		globalPath, err := config.ResolveGlobalConfigPath()
 		if err != nil {
 			return result, details, err

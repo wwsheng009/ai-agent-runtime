@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	cacheanalytics "github.com/wwsheng009/ai-agent-runtime/internal/cacheanalytics"
 	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
+	cacheanalytics "github.com/wwsheng009/ai-agent-runtime/internal/cacheanalytics"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 )
@@ -27,6 +27,11 @@ const (
 	ChatWebAPISessionsResumePath = "/web/api/sessions/resume"
 	ChatWebAPISessionsDeletePath = "/web/api/sessions/delete"
 	ChatWebAPISessionsRenamePath = "/web/api/sessions/rename"
+	// ChatWebAPIAnalysisPath 「分析」页签端点前缀（runtime.analytics.v1 契约，
+	// 与 runtime-server /api/runtime/analytics/* 同一查询层、同一字段名）。
+	// 子路径：/status、/tools、/subagents、/errors；v1 不新增 SSE 事件
+	// （页签激活时按需拉取，见 web/js/analysis.js）。
+	ChatWebAPIAnalysisPath = "/web/api/analysis"
 )
 
 // chatWebSchemaVersion 是 SSE 事件 data 中 _event.schema_version 字段的值。

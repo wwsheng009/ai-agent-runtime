@@ -324,7 +324,8 @@ func handleChatDebugSupervisionCommand(session *ChatSession, argument string) (s
 		if err != nil {
 			return text, err
 		}
-		return text + chatDebugSupervisionWakeBudgetText(ctx, session, scopes), nil
+		return text + chatDebugSupervisionWakeBudgetText(ctx, session, scopes) +
+			chatDebugSupervisionTaskProgressText(session), nil
 	case "ack":
 		return runChatDebugSupervisionAck(ctx, store, scopes, req)
 	case "defer":
@@ -387,6 +388,7 @@ func chatDebugSupervisionWakeBudgetText(ctx context.Context, session *ChatSessio
 		supervision.WakeBudgetClassApproval,
 		supervision.WakeBudgetClassFailure,
 		supervision.WakeBudgetClassOther,
+		supervision.WakeBudgetClassProgress,
 	}
 	lines := make([]string, 0, len(scopes))
 	window := time.Duration(0)
@@ -413,6 +415,30 @@ func chatDebugSupervisionWakeBudgetText(ctx context.Context, session *ChatSessio
 		title += fmt.Sprintf("（窗口 %s）", window)
 	}
 	return "\n" + title + "：\n" + strings.Join(lines, "\n")
+}
+
+// chatDebugSupervisionTaskProgressText renders the M1 task-level progress
+// write-back counters (plan §7.3): before this line an operator could not tell
+// "the producer is silently disabled" from "the producer writes but every
+// refresh was coalesced by the throttle window" or "CAS/terminal fences drop
+// late progress". It renders only when the feature is explicitly enabled or a
+// coordinator already counted activity, so unwired hosts keep the historical
+// output byte-identical.
+func chatDebugSupervisionTaskProgressText(session *ChatSession) string {
+	if session == nil || session.LocalRuntimeHost == nil {
+		return ""
+	}
+	writes, windowSkipped, conflictsDropped, errs, enabled := session.LocalRuntimeHost.subagentTaskProgressCounts()
+	if !enabled && writes == 0 && windowSkipped == 0 && conflictsDropped == 0 && errs == 0 {
+		return ""
+	}
+	state := "on"
+	if !enabled {
+		state = "off"
+	}
+	return fmt.Sprintf(
+		"\n进度写回（task_progress_interval=%s）：writes=%d window_skipped=%d conflicts_dropped=%d errors=%d",
+		state, writes, windowSkipped, conflictsDropped, errs)
 }
 
 // chatDebugSupervisionWakeScheduler resolves the scheduler from either the

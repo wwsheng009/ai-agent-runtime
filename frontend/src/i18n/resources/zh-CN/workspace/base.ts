@@ -336,6 +336,9 @@ export const zhWorkspaceBase = {
       unselected: "未选择",
       pendingConfirm: "待确认",
       reselectHint: "已切换供应商，请重新确认模型与推理强度",
+      providerFilterPlaceholder: "筛选供应商",
+      providerFilterEmpty: "没有匹配的供应商",
+      providerFilterClear: "清除筛选",
     },
     contextUsage: {
       triggerLabel: "会话上下文用量 {{percent}}",

@@ -20,8 +20,13 @@ const (
 	EventLLMRequestStartedAlias  = "llm_request_started"
 	EventLLMRequestFinishedAlias = "llm_request_finished"
 	EventAssistantMessage        = "assistant_message"
+	EventSessionStart            = "session_start"
 	EventSessionEnd              = "session_end"
 	EventSessionInterrupted      = "session_interrupted"
+	// schema v2 输入（方案 §5.3）：工具生命周期与子代理完成。
+	EventToolRequested     = "tool.requested"
+	EventToolCompleted     = "tool.completed"
+	EventSubagentCompleted = "subagent.completed"
 )
 
 // SessionStatusCompleted / SessionStatusInterrupted 会话终态。
@@ -73,6 +78,8 @@ type collector struct {
 	mu       sync.Mutex
 	inflight map[string]*inflightRequest
 	unsubs   []func()
+	// turnToolStats：回合内工具失败/恢复计数（会话终止时落 usage_turns）。
+	turnToolStats map[string]*turnToolStats
 
 	// writeFailureCount：分析库写入失败此前被完全静默（行丢失且无痕迹）。
 	// 首次失败提示一次，之后每 100 次再提示一次，既留痕又不刷屏。
@@ -99,7 +106,8 @@ func (c *collector) subscribe(bus *runtimeevents.Bus) {
 	for _, eventType := range []string{
 		EventLLMRequestStarted, EventLLMRequestFinished,
 		EventLLMRequestStartedAlias, EventLLMRequestFinishedAlias,
-		EventAssistantMessage, EventSessionEnd, EventSessionInterrupted,
+		EventAssistantMessage, EventSessionStart, EventSessionEnd, EventSessionInterrupted,
+		EventToolRequested, EventToolCompleted, EventSubagentCompleted,
 	} {
 		c.unsubs = append(c.unsubs, bus.SubscribeCancelable(eventType, c.handleEvent))
 	}
@@ -118,6 +126,7 @@ func (c *collector) close() {
 	c.unsubs = nil
 	c.mu.Lock()
 	c.inflight = make(map[string]*inflightRequest)
+	c.turnToolStats = make(map[string]*turnToolStats)
 	c.mu.Unlock()
 }
 
@@ -129,8 +138,16 @@ func (c *collector) handleEvent(event runtimeevents.Event) {
 		c.onRequestFinished(event)
 	case EventAssistantMessage:
 		c.onAssistantMessage(event)
+	case EventSessionStart:
+		c.onSessionStart(event)
 	case EventSessionEnd, EventSessionInterrupted:
 		c.onSessionTerminal(event)
+	case EventToolRequested:
+		c.onToolRequested(event)
+	case EventToolCompleted:
+		c.onToolCompleted(event)
+	case EventSubagentCompleted:
+		c.onSubagentCompleted(event)
 	}
 }
 
@@ -241,8 +258,7 @@ func (c *collector) onRequestFinished(event runtimeevents.Event) {
 		PromptFingerprint: inflight.promptFingerprint,
 		Payload:           payload,
 	})
-	c.upsertRequest(record)
-	c.upsertSession(record.SessionID, SessionMeta{
+	c.persistRequestTerminal(record, SessionMeta{
 		Provider: record.Provider,
 		Model:    record.Model,
 	}, record.StartedAt, finishedAt)
@@ -305,7 +321,7 @@ func (c *collector) onSessionTerminal(event runtimeevents.Event) {
 			PromptFingerprint: inflight.promptFingerprint,
 			Interrupted:       true,
 		})
-		c.upsertRequest(record)
+		c.persistRequestTerminal(record, SessionMeta{}, record.StartedAt, finishedAt)
 	}
 
 	status := SessionStatusCompleted
@@ -313,6 +329,8 @@ func (c *collector) onSessionTerminal(event runtimeevents.Event) {
 		status = SessionStatusInterrupted
 	}
 	c.upsertSession(sessionID, SessionMeta{Status: status}, time.Time{}, now)
+	// schema v2：回合级终值（含工具失败/恢复计数），session_end 为权威。
+	c.upsertTurnTerminal(sessionID, event)
 }
 
 // upsertRequest 幂等写入一条请求终态行（同 llm_request_id 覆盖）。
@@ -320,6 +338,14 @@ func (c *collector) upsertRequest(record cacheanalytics.CacheRequestRecord) {
 	if c == nil || c.store == nil {
 		return
 	}
+	statement, args := c.requestUpsertStatement(record)
+	if err := c.store.execWithLockRetry(statement, args...); err != nil {
+		c.reportWriteFailure("usage_requests", err)
+	}
+}
+
+// requestUpsertStatement 构造 usage_requests 幂等 UPSERT（ON CONFLICT 语义不变）。
+func (c *collector) requestUpsertStatement(record cacheanalytics.CacheRequestRecord) (string, []interface{}) {
 	startedAt := record.StartedAt
 	if startedAt.IsZero() && record.FinishedAt != nil {
 		startedAt = *record.FinishedAt
@@ -345,7 +371,7 @@ func (c *collector) upsertRequest(record cacheanalytics.CacheRequestRecord) {
 	if record.Usage != nil {
 		usageAvailable = 1
 	}
-	if err := c.store.execWithLockRetry(`
+	const statement = `
 INSERT INTO usage_requests (
   llm_request_id, session_id, trace_id, turn_id, step, provider, model, status, cache_status,
   success, error_category, started_at_unix_nano, duration_ms, prompt_tokens, completion_tokens,
@@ -371,7 +397,8 @@ ON CONFLICT(llm_request_id) DO UPDATE SET
   reasoning_tokens = excluded.reasoning_tokens,
   total_tokens = excluded.total_tokens,
   usage_available = excluded.usage_available,
-  record_json = excluded.record_json`,
+  record_json = excluded.record_json`
+	return statement, []interface{}{
 		record.LLMRequestID,
 		record.SessionID,
 		record.TraceID,
@@ -393,8 +420,6 @@ ON CONFLICT(llm_request_id) DO UPDATE SET
 		totalTokens,
 		usageAvailable,
 		string(payload),
-	); err != nil {
-		c.reportWriteFailure("usage_requests", err)
 	}
 }
 
@@ -415,6 +440,14 @@ func (c *collector) upsertSession(sessionID string, meta SessionMeta, startedAt,
 	if c == nil || c.store == nil || strings.TrimSpace(sessionID) == "" {
 		return
 	}
+	statement, args := c.sessionUpsertStatement(sessionID, meta, startedAt, endedAt)
+	if err := c.store.execWithLockRetry(statement, args...); err != nil {
+		c.reportWriteFailure("usage_sessions", err)
+	}
+}
+
+// sessionUpsertStatement 构造 usage_sessions 元数据合并 UPSERT（空值不覆盖）。
+func (c *collector) sessionUpsertStatement(sessionID string, meta SessionMeta, startedAt, endedAt time.Time) (string, []interface{}) {
 	now := c.now()
 	if c.lookup != nil {
 		if looked, ok := c.lookup.SessionMeta(sessionID); ok {
@@ -428,7 +461,7 @@ func (c *collector) upsertSession(sessionID string, meta SessionMeta, startedAt,
 	if !endedAt.IsZero() {
 		ended = endedAt.UnixNano()
 	}
-	if err := c.store.execWithLockRetry(`
+	const statement = `
 INSERT INTO usage_sessions (
   session_id, title, project_path, working_directory, provider, model, protocol, status,
   started_at_unix_nano, ended_at_unix_nano, updated_at_unix_nano, meta_json
@@ -446,7 +479,8 @@ ON CONFLICT(session_id) DO UPDATE SET
     WHEN usage_sessions.started_at_unix_nano = 0 THEN excluded.started_at_unix_nano
     ELSE MIN(usage_sessions.started_at_unix_nano, excluded.started_at_unix_nano) END,
   ended_at_unix_nano = MAX(usage_sessions.ended_at_unix_nano, excluded.ended_at_unix_nano),
-  updated_at_unix_nano = MAX(usage_sessions.updated_at_unix_nano, excluded.updated_at_unix_nano)`,
+  updated_at_unix_nano = MAX(usage_sessions.updated_at_unix_nano, excluded.updated_at_unix_nano)`
+	return statement, []interface{}{
 		sessionID,
 		meta.Title,
 		meta.ProjectPath,
@@ -458,8 +492,6 @@ ON CONFLICT(session_id) DO UPDATE SET
 		started,
 		ended,
 		now.UnixNano(),
-	); err != nil {
-		c.reportWriteFailure("usage_sessions", err)
 	}
 }
 

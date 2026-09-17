@@ -27,7 +27,9 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
+	"github.com/wwsheng009/ai-agent-runtime/internal/usageanalytics"
 )
 
 type localActorRegistry struct {
@@ -1035,6 +1037,76 @@ func annotateLocalSpawnWorktreeCompletion(ctx context.Context, r *localActorRegi
 	}
 }
 
+// subagentProgressMirror 返回 per-host 长生命周期的 live-only 进度镜像。
+// 与 API 宿主一致使用 DefaultSubagentProgressWindow（2s）；同一实例同时服务
+// 子会话事件订阅与 BatchProgressSource.Messages 富化，绝不为单次调用新建。
+func (h *localChatRuntimeHost) subagentProgressMirror() *supervision.SubagentProgressMirror {
+	if h == nil {
+		return nil
+	}
+	h.subagentProgressMirrorOnce.Do(func() {
+		h.subagentProgressMirrorValue = supervision.NewSubagentProgressMirror(supervision.DefaultSubagentProgressWindow)
+	})
+	return h.subagentProgressMirrorValue
+}
+
+// trackChildEventSubscription 登记一个 per-child 事件订阅句柄。登记本身不
+// 改变订阅语义：子会话结束走 releaseChildEventSubscription 立即释放，
+// host.Close() 用 releaseAllChildEventSubscriptions 兜底。
+func (h *localChatRuntimeHost) trackChildEventSubscription(childSessionID string, unsubscribe func()) {
+	if h == nil || unsubscribe == nil {
+		return
+	}
+	childSessionID = strings.TrimSpace(childSessionID)
+	if childSessionID == "" {
+		return
+	}
+	h.childEventUnsubsMu.Lock()
+	if h.childEventUnsubs == nil {
+		h.childEventUnsubs = make(map[string]func())
+	}
+	h.childEventUnsubs[childSessionID] = unsubscribe
+	h.childEventUnsubsMu.Unlock()
+}
+
+// releaseChildEventSubscription 释放并注销一个子会话的订阅（幂等）。
+func (h *localChatRuntimeHost) releaseChildEventSubscription(childSessionID string) {
+	if h == nil {
+		return
+	}
+	childSessionID = strings.TrimSpace(childSessionID)
+	if childSessionID == "" {
+		return
+	}
+	h.childEventUnsubsMu.Lock()
+	unsubscribe := h.childEventUnsubs[childSessionID]
+	delete(h.childEventUnsubs, childSessionID)
+	h.childEventUnsubsMu.Unlock()
+	if unsubscribe != nil {
+		unsubscribe()
+	}
+}
+
+// releaseAllChildEventSubscriptions 是 host.Close() 的兜底收敛：释放所有
+// 尚未随 session_end 释放的子会话事件订阅。
+func (h *localChatRuntimeHost) releaseAllChildEventSubscriptions() {
+	if h == nil {
+		return
+	}
+	h.childEventUnsubsMu.Lock()
+	pending := make([]func(), 0, len(h.childEventUnsubs))
+	for childSessionID, unsubscribe := range h.childEventUnsubs {
+		if unsubscribe != nil {
+			pending = append(pending, unsubscribe)
+		}
+		delete(h.childEventUnsubs, childSessionID)
+	}
+	h.childEventUnsubsMu.Unlock()
+	for _, unsubscribe := range pending {
+		unsubscribe()
+	}
+}
+
 func (r *localActorRegistry) subscribeLocalAgentCompletion(parentSessionID string, childSession *runtimechat.Session) {
 	if r == nil || r.Host == nil || r.Host.EventBus == nil || r.Host.EventStore == nil || childSession == nil {
 		return
@@ -1053,6 +1125,16 @@ func (r *localActorRegistry) subscribeLocalAgentCompletion(parentSessionID strin
 		}
 	}
 
+	// P0-1c: 子会话 tool.progress → live-only 父侧镜像（与 API 宿主
+	// session_runtime_support.go 的接线对等）。目标身份与完成投影同一口径。
+	progressTarget := supervision.SubagentProgressTarget{
+		ParentSessionID: parentSessionID,
+		ChildSessionID:  childSessionID,
+		Path:            childPath,
+		Depth:           childDepth,
+		AgentType:       childType,
+	}
+
 	var unsubscribe func()
 	handler := func(event runtimeevents.Event) {
 		if !strings.EqualFold(strings.TrimSpace(event.SessionID), childSessionID) {
@@ -1068,13 +1150,21 @@ func (r *localActorRegistry) subscribeLocalAgentCompletion(parentSessionID strin
 		case runtimechat.EventApprovalResolved, runtimechat.EventQuestionAnswered:
 			r.resolveLocalAgentApproval(context.Background(), parentSessionID, childSessionID, childPath, eventType, event.Payload)
 			return
+		case toolprotocol.EventTypeProgress:
+			// P0-1c: 只发父侧 live 通道。mirror 不写 event store；
+			// subagent.progress 在 events/contract.go 登记为 ChannelLiveOnly，
+			// A 通道桥也不会把它落盘。
+			if mirrored, ok := r.Host.subagentProgressMirror().Observe(progressTarget, event, time.Now().UTC()); ok {
+				r.Host.EventBus.Publish(mirrored)
+			}
+			return
 		}
 		if eventType != runtimechat.EventSessionEnd && eventType != runtimechat.EventSessionInterrupted {
 			return
 		}
-		if unsubscribe != nil {
-			unsubscribe()
-		}
+		// 子会话终态：丢弃该子会话的节流状态并释放 per-child 订阅。
+		r.Host.subagentProgressMirror().Forget(childSessionID)
+		r.Host.releaseChildEventSubscription(childSessionID)
 		payload := map[string]interface{}{
 			"agent_id":              childSessionID,
 			"session_id":            childSessionID,
@@ -1096,6 +1186,10 @@ func (r *localActorRegistry) subscribeLocalAgentCompletion(parentSessionID strin
 		}
 		toolbroker.AddSpawnAgentRoutePayload(payload, childSession)
 		copyLocalAgentCompletionPayload(payload, event.Payload)
+		// 方案 §2.1 / D4：本地镜像载荷补齐规范化字段（success 权威、status
+		// 兼容别名），与 runtime-server 侧共用同一归一化实现。
+		payload["source"] = "agent_controller"
+		usageanalytics.NormalizeSubagentCompletionPayload(payload, localAgentCompletionStatus(event))
 		if store := r.localAgentRegistryStore(); store != nil && childPath != "" {
 			rootSessionID := localAgentRootSessionID(childSession, parentSessionID)
 			if _, closeErr := store.CloseAgentControlAgentSubtree(context.Background(), rootSessionID, childPath, time.Now().UTC()); closeErr != nil {
@@ -1129,6 +1223,7 @@ func (r *localActorRegistry) subscribeLocalAgentCompletion(parentSessionID strin
 		r.Host.EventBus.Publish(mirrored)
 	}
 	unsubscribe = r.Host.EventBus.SubscribeCancelable("", handler)
+	r.Host.trackChildEventSubscription(childSessionID, unsubscribe)
 }
 
 // projectLocalAgentCompletion mirrors the API host bridge. It never turns an
@@ -2204,28 +2299,79 @@ func (r *localActorRegistry) deliverAgentMessage(ctx context.Context, fromSessio
 	if message == "" {
 		return nil, fmt.Errorf("message is required")
 	}
+	// P0-3a/M5: v2 语义（默认关，关闭时本函数与灰度前逐字段一致）。
+	v2 := r.Host.supervisionConfig.MessageSemanticsV2Enabled()
+	toolName := toolbroker.ToolSendMessage
+	if trigger {
+		toolName = toolbroker.ToolFollowupTask
+	}
+	if v2 && r.localAgentSessionTerminal(ctx, sessionID) {
+		closedErr := fmt.Errorf("%s target %s: %w", toolName, sessionID, toolbroker.ErrAgentSessionClosed)
+		r.recordLocalAgentMailboxDeliveryAudit(ctx, runtimechat.MailboxDeliveryAudit{
+			FromSessionID:   fromSessionID,
+			TargetSessionID: sessionID,
+			Tool:            toolName,
+			Status:          runtimechat.MailboxDeliveryStatusFailed,
+			Error:           closedErr.Error(),
+		})
+		return nil, closedErr
+	}
 	if err := r.ensureSession(ctx, sessionID); err != nil {
 		return nil, err
 	}
 	delivered := false
 	triggered := false
+	queued := false
+	duplicate := false
 	if trigger && !r.localAgentSessionBusy(ctx, sessionID) {
 		if actor := r.localAgentActor(ctx, sessionID); actor != nil {
 			state, ok := actor.StateSummary()
 			if !ok || !state.Busy() {
 				if err := actor.SubmitPromptAsync(ctx, message, r.localAgentRunMeta(ctx, sessionID)); err != nil {
+					if v2 {
+						r.recordLocalAgentMailboxDeliveryAudit(ctx, runtimechat.MailboxDeliveryAudit{
+							FromSessionID:   fromSessionID,
+							TargetSessionID: sessionID,
+							Tool:            toolName,
+							Status:          runtimechat.MailboxDeliveryStatusFailed,
+							Error:           err.Error(),
+						})
+					}
 					return nil, err
 				}
 				triggered = true
 			}
 		}
 	}
+	messageID := ""
 	if !triggered {
 		mail := toolbroker.BuildAgentMailboxMessage(fromSessionID, sessionID, message, trigger)
-		if err := r.deliverAgentMailboxEvent(ctx, sessionID, mail); err != nil {
+		if v2 {
+			status := runtimechat.MailboxDeliveryStatusDelivered
+			if trigger {
+				status = runtimechat.MailboxDeliveryStatusQueued
+			}
+			runtimechat.AnnotateAgentMailboxDelivery(&mail, status, nil, false)
+		}
+		delivery, err := r.deliverLocalAgentMailboxEventResult(ctx, sessionID, mail)
+		if err != nil {
+			if v2 {
+				r.recordLocalAgentMailboxDeliveryAudit(ctx, runtimechat.MailboxDeliveryAudit{
+					FromSessionID:   fromSessionID,
+					TargetSessionID: sessionID,
+					Tool:            toolName,
+					Status:          runtimechat.MailboxDeliveryStatusFailed,
+					Error:           err.Error(),
+				})
+			}
 			return nil, err
 		}
 		delivered = true
+		duplicate = delivery.Duplicate
+		messageID = localAgentMailboxEventMessageID(delivery)
+		if v2 {
+			queued = !triggered
+		}
 	}
 	status, err := r.agentSnapshot(ctx, sessionID)
 	if err != nil {
@@ -2234,12 +2380,85 @@ func (r *localActorRegistry) deliverAgentMessage(ctx context.Context, fromSessio
 	if status != nil && triggered {
 		status.Queued = true
 	}
-	return &toolbroker.AgentMessageResult{
+	result := &toolbroker.AgentMessageResult{
 		TargetSessionID: sessionID,
 		Delivered:       delivered || triggered,
 		Triggered:       triggered,
 		Status:          status,
-	}, nil
+	}
+	if v2 {
+		result.Queued = queued
+		result.Duplicate = duplicate
+		auditStatus := runtimechat.MailboxDeliveryStatusDelivered
+		if queued {
+			auditStatus = runtimechat.MailboxDeliveryStatusQueued
+		}
+		r.recordLocalAgentMailboxDeliveryAudit(ctx, runtimechat.MailboxDeliveryAudit{
+			FromSessionID:   fromSessionID,
+			TargetSessionID: sessionID,
+			Tool:            toolName,
+			MessageID:       messageID,
+			Status:          auditStatus,
+			Delivered:       result.Delivered,
+			Queued:          result.Queued,
+			Triggered:       result.Triggered,
+			Duplicate:       result.Duplicate,
+		})
+	}
+	return result, nil
+}
+
+// deliverLocalAgentMailboxEventResult is deliverAgentMailboxEvent with the
+// durable idempotency result, so callers can report duplicate=true (P0-3a).
+func (r *localActorRegistry) deliverLocalAgentMailboxEventResult(ctx context.Context, sessionID string, mail team.MailMessage) (runtimechat.MailboxDeliveryResult, error) {
+	if r == nil || r.Host == nil {
+		return runtimechat.MailboxDeliveryResult{}, fmt.Errorf("runtime host not configured")
+	}
+	return runtimechat.DeliverMailboxEventFirstResult(ctx, r.Host.EventStore, r.Host.EventBus, r.deliverMailboxToActor, sessionID, mail)
+}
+
+// recordLocalAgentMailboxDeliveryAudit writes the best-effort parent-side
+// delivery record (agent mailbox_delivery event). It never fails the delivery.
+func (r *localActorRegistry) recordLocalAgentMailboxDeliveryAudit(ctx context.Context, audit runtimechat.MailboxDeliveryAudit) {
+	if r == nil || r.Host == nil {
+		return
+	}
+	// send_input 没有调用方会话身份（控制器接口不带 from），审计落在目标会话
+	// 事件流；send_message/followup_task 落在发起方会话。
+	sessionID := strings.TrimSpace(audit.FromSessionID)
+	if sessionID == "" {
+		sessionID = audit.TargetSessionID
+	}
+	runtimechat.AppendMailboxDeliveryAudit(ctx, r.Host.EventStore, r.Host.EventBus, sessionID, audit)
+}
+
+// localAgentMailboxEventMessageID extracts the durable message id assigned by
+// the mailbox store (empty when the fallback live path was used).
+func localAgentMailboxEventMessageID(delivery runtimechat.MailboxDeliveryResult) string {
+	if delivery.Event.Payload == nil {
+		return ""
+	}
+	value, _ := delivery.Event.Payload["message_id"].(string)
+	return strings.TrimSpace(value)
+}
+
+// localAgentSessionTerminal reports whether the target child session is
+// terminal (closed/archived). Terminal targets must return an explicit error
+// instead of silently dropping the instruction (ADR-3).
+func (r *localActorRegistry) localAgentSessionTerminal(ctx context.Context, sessionID string) bool {
+	if r == nil || r.Host == nil {
+		return false
+	}
+	if r.Host.SessionStore != nil {
+		if session, err := r.Host.SessionStore.Load(ctx, sessionID); err == nil && session != nil {
+			return isClosedLocalAgentSession(session)
+		}
+	}
+	if snapshot, err := r.agentSnapshot(ctx, sessionID); err == nil && snapshot != nil {
+		state := strings.ToLower(strings.TrimSpace(snapshot.SessionState))
+		return state == string(runtimechat.StateClosed) || state == string(runtimechat.StateArchived)
+	}
+	return false
 }
 
 func (r *localActorRegistry) localAgentSessionBusy(ctx context.Context, sessionID string) bool {
@@ -2327,6 +2546,18 @@ func (r *localActorRegistry) SendInput(ctx context.Context, args toolbroker.Send
 	if message == "" {
 		return nil, fmt.Errorf("message is required")
 	}
+	// P0-3a/M5: v2 语义（默认关）。关闭时保持灰度前的 busy 报错与立即提交行为。
+	v2 := r.Host.supervisionConfig.MessageSemanticsV2Enabled()
+	if v2 && r.localAgentSessionTerminal(ctx, sessionID) {
+		closedErr := fmt.Errorf("send_input target %s: %w", sessionID, toolbroker.ErrAgentSessionClosed)
+		r.recordLocalAgentMailboxDeliveryAudit(ctx, runtimechat.MailboxDeliveryAudit{
+			TargetSessionID: sessionID,
+			Tool:            toolbroker.ToolSendInput,
+			Status:          runtimechat.MailboxDeliveryStatusFailed,
+			Error:           closedErr.Error(),
+		})
+		return nil, closedErr
+	}
 	if err := r.ensureSession(ctx, sessionID); err != nil {
 		return nil, err
 	}
@@ -2334,18 +2565,79 @@ func (r *localActorRegistry) SendInput(ctx context.Context, args toolbroker.Send
 	if err != nil {
 		return nil, err
 	}
+	busy := false
+	busyStatus := ""
 	if state, ok := actor.StateSummary(); ok {
-		if state.Busy() {
-			interrupt := args.Interrupt != nil && *args.Interrupt
-			if !interrupt {
-				return nil, fmt.Errorf("session is busy (%s)", state.Status)
+		busy = state.Busy()
+		busyStatus = string(state.Status)
+	}
+	// v2 的 busy 判定对齐 followup_task（hub 或 durable state 任一为 busy）。
+	if v2 && !busy {
+		busy = r.localAgentSessionBusy(ctx, sessionID)
+	}
+	if busy {
+		interrupt := args.Interrupt != nil && *args.Interrupt
+		if !interrupt {
+			if v2 {
+				// ADR-3: busy + interrupt=false 与 followup_task 同语义，
+				// 排队投递（trigger_turn=true）而不是直接报错。
+				mail := toolbroker.BuildAgentMailboxMessage("", sessionID, message, true)
+				runtimechat.AnnotateAgentMailboxDelivery(&mail, runtimechat.MailboxDeliveryStatusQueued, nil, false)
+				delivery, deliverErr := r.deliverLocalAgentMailboxEventResult(ctx, sessionID, mail)
+				if deliverErr != nil {
+					r.recordLocalAgentMailboxDeliveryAudit(ctx, runtimechat.MailboxDeliveryAudit{
+						TargetSessionID: sessionID,
+						Tool:            toolbroker.ToolSendInput,
+						Status:          runtimechat.MailboxDeliveryStatusFailed,
+						Error:           deliverErr.Error(),
+					})
+					return nil, deliverErr
+				}
+				result, snapshotErr := r.agentSnapshot(ctx, sessionID)
+				if snapshotErr != nil {
+					return nil, snapshotErr
+				}
+				if result != nil {
+					result.Queued = true
+					result.Delivered = true
+					result.Duplicate = delivery.Duplicate
+				}
+				r.recordLocalAgentMailboxDeliveryAudit(ctx, runtimechat.MailboxDeliveryAudit{
+					TargetSessionID: sessionID,
+					Tool:            toolbroker.ToolSendInput,
+					MessageID:       localAgentMailboxEventMessageID(delivery),
+					Status:          runtimechat.MailboxDeliveryStatusQueued,
+					Delivered:       true,
+					Queued:          true,
+					Duplicate:       delivery.Duplicate,
+				})
+				return result, nil
 			}
-			if err := actor.Interrupt(ctx); err != nil {
-				return nil, err
+			return nil, fmt.Errorf("session is busy (%s)", busyStatus)
+		}
+		if err := actor.Interrupt(ctx); err != nil {
+			return nil, err
+		}
+		if v2 {
+			// 双宿主统一超时上限：等待旧 run 退出后再提交新 prompt。
+			waited, waitErr := r.Wait(ctx, toolbroker.WaitAgentArgs{SessionID: sessionID, TimeoutMs: 5000})
+			if waitErr != nil {
+				return nil, waitErr
+			}
+			if waited != nil && waited.Agent != nil && waited.Agent.Status == string(runtimechat.SessionRunning) {
+				return nil, fmt.Errorf("session is still running")
 			}
 		}
 	}
 	if err := actor.SubmitPromptAsync(ctx, message, r.localAgentRunMeta(ctx, sessionID)); err != nil {
+		if v2 {
+			r.recordLocalAgentMailboxDeliveryAudit(ctx, runtimechat.MailboxDeliveryAudit{
+				TargetSessionID: sessionID,
+				Tool:            toolbroker.ToolSendInput,
+				Status:          runtimechat.MailboxDeliveryStatusFailed,
+				Error:           err.Error(),
+			})
+		}
 		return nil, err
 	}
 	result, err := r.agentSnapshot(ctx, sessionID)
@@ -2353,6 +2645,17 @@ func (r *localActorRegistry) SendInput(ctx context.Context, args toolbroker.Send
 		return nil, err
 	}
 	result.Queued = true
+	if v2 {
+		result.Delivered = true
+		result.Triggered = true
+		r.recordLocalAgentMailboxDeliveryAudit(ctx, runtimechat.MailboxDeliveryAudit{
+			TargetSessionID: sessionID,
+			Tool:            toolbroker.ToolSendInput,
+			Status:          runtimechat.MailboxDeliveryStatusDelivered,
+			Delivered:       true,
+			Triggered:       true,
+		})
+	}
 	return result, nil
 }
 

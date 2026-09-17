@@ -36,9 +36,11 @@ import "strings"
 //  6. live-only 总线类型（不落盘、只走实时旁路，但有真实消费者）：
 //     tool.progress（internal/toolprotocol/progress.go:25 EventTypeProgress）、
 //     subagent.progress（internal/supervision/subagent_progress.go:21
-//     EventTypeSubagentProgress）。二者不在来源 1-5 的任何清单里，但都是产品
-//     事件；复用本目录做交付通道分类时（批次 20 / P0-2）必须先补进来，否则
-//     「已知但被通道白名单裁掉」会被误记成「完全未知」，三分法失效。
+//     EventTypeSubagentProgress）、subagent.batch.progress
+//     （internal/agent/subagent_batch_coordinator.go，M1 的写回失败/降级事件；由
+//     internal/events/contract.go 登记为 live-only）。它们不在来源 1-5 的任何
+//     清单里，但都是产品事件；复用本目录做交付通道分类时（批次 20 / P0-2）必须
+//     先补进来，否则「已知但被通道白名单裁掉」会被误记成「完全未知」，三分法失效。
 //  7. 交付契约注册表登记的 chat 侧产品事件（internal/events/contract.go，Batch 2）：
 //     context.profile.injected（internal/contextmgr/manager.go:579）、
 //     recall.performed（internal/contextmgr/manager.go:735）、
@@ -47,9 +49,11 @@ import "strings"
 //     internal/agent/loop.go:2567）、subagent.batch.completed
 //     （internal/agent/subagent_batch_coordinator.go:1771、loop.go:2604）、
 //     subagent.started（internal/agent/scheduler.go:417）、subagent.completed
-//     （internal/agent/scheduler.go:454/:507）。这些类型此前只出现在交付侧白名单里、
-//     不在本目录内，导致「已知但被通道裁掉」与「完全未知」三分法对它们失效
-//     （由 internal/events/contract_test.go 的注册表 ↔ 目录双向一致门禁暴露）。
+//     （internal/agent/scheduler.go:454/:507）、subagent.task.started /
+//     subagent.task.completed（internal/agent/subagent_batch_coordinator.go，
+//     登记为 tail-only）。这些类型此前只出现在交付侧白名单里、不在本目录内，
+//     导致「已知但被通道裁掉」与「完全未知」三分法对它们失效（由
+//     internal/events/contract_test.go 的注册表 ↔ 目录双向一致门禁暴露）。
 //
 // 匹配规则与 Projector 保持一致：TrimSpace 后精确匹配；仅大小写不同按未知处理，
 // 以保留异常语义（见 normalizeEventType）。
@@ -154,8 +158,9 @@ func buildKnownEventTypes() map[string]bool {
 	// sessionLiveOnlyRuntimeEventTypes 走实时旁路，刷新即丢；它们是产品事件，
 	// 但此前不在任何清单里。
 	add(
-		"tool.progress",     // toolprotocol/progress.go:25：工具中途进度
-		"subagent.progress", // supervision/subagent_progress.go:21：子代理进度（父流镜像）
+		"tool.progress",           // toolprotocol/progress.go:25：工具中途进度
+		"subagent.progress",       // supervision/subagent_progress.go:21：子代理进度（父流镜像）
+		"subagent.batch.progress", // agent/subagent_batch_coordinator.go：批次进度写回失败/降级（events/contract.go 登记为 live-only）
 	)
 
 	// 来源 7：交付契约注册表登记的 chat 侧产品事件（见文件头说明）。它们经 A 通道
@@ -168,6 +173,8 @@ func buildKnownEventTypes() map[string]bool {
 		"subagent.batch.completed", // agent/subagent_batch_coordinator.go:1771
 		"subagent.started",         // agent/scheduler.go:417
 		"subagent.completed",       // agent/scheduler.go:454
+		"subagent.task.started",    // agent/subagent_batch_coordinator.go:1184（events/contract.go 登记为 tail-only）
+		"subagent.task.completed",  // agent/subagent_batch_coordinator.go:1399（events/contract.go 登记为 tail-only）
 	)
 
 	return out

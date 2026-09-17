@@ -176,7 +176,7 @@ func reloadChatConfigForModelCommand(session *ChatSession) error {
 		return fmt.Errorf("读取本地配置文件 %s 失败: 路径是目录", configPath)
 	}
 
-	reloaded, err := config.InitGlobalConfig(configPath)
+	reloaded, err := config.ReloadGlobalConfig(configPath)
 	if err != nil {
 		return fmt.Errorf("重新读取本地配置文件 %s 失败: %w", configPath, err)
 	}

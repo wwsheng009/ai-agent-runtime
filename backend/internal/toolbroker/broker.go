@@ -58,6 +58,7 @@ const (
 	ToolBlockCurrentTask       = "block_current_task"
 	ToolSupervisionSnapshot    = "supervision_snapshot"
 	ToolSupervisionDescendants = "supervision_descendants"
+	ToolReadAgentResult        = "read_agent_result"
 	ToolAckLifecycle           = "ack_lifecycle"
 	ToolControlDescendant      = "control_descendant"
 )
@@ -151,7 +152,7 @@ func withBrokerSourceDefinitions(definitions []types.ToolDefinition) []types.Too
 
 func isVolatileEmptyReplayTool(name string) bool {
 	switch normalizeToolName(name) {
-	case ToolTaskOutput, ToolListAgents, ToolWaitAgent, ToolReadAgentEvents, ToolWaitTeam, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolSupervisionSnapshot, ToolSupervisionDescendants:
+	case ToolTaskOutput, ToolListAgents, ToolWaitAgent, ToolReadAgentEvents, ToolWaitTeam, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolReadAgentResult:
 		return true
 	default:
 		return false
@@ -161,7 +162,7 @@ func isVolatileEmptyReplayTool(name string) bool {
 // IsBrokerTool returns true if the tool is handled by the broker.
 func (b *Broker) IsBrokerTool(name string) bool {
 	switch normalizeToolName(name) {
-	case ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolBackgroundTask, ToolTaskOutput, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolAckLifecycle, ToolControlDescendant:
+	case ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolBackgroundTask, ToolTaskOutput, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
 		return true
 	default:
 		return false
@@ -363,7 +364,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolSendMessage,
-				Description: "Queue a plain message for a spawn_agent child session without interrupting or starting a new turn.",
+				Description: "Deliver a plain message to a spawn_agent child session mailbox without starting a new turn (idle or busy); the child reads it on its next natural turn. Returns delivered/queued/triggered/duplicate. A closed child returns agent session is closed instead of silently dropping the message. This does not address spawn_team teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -377,7 +378,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolFollowupTask,
-				Description: "Send a follow-up task to a spawn_agent child session. If the child is busy, the message is delivered without interrupting the active run.",
+				Description: "Send a follow-up task to a spawn_agent child session and start a new turn. If the child is busy, the message is queued in its mailbox with trigger_turn=true and a new turn starts automatically when the current run ends (returns queued=true); interrupt=true is not needed. Returns delivered/queued/triggered/duplicate. A closed child returns agent session is closed.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -391,7 +392,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolSendInput,
-				Description: "Send a follow-up prompt to an existing spawn_agent child session. This does not address spawn_team teammates.",
+				Description: "Send input to an existing spawn_agent child session. interrupt=true stops the active run (bounded wait) before submitting the prompt. interrupt=false behaves like followup_task: an idle child starts a turn immediately, a busy child gets a queued mailbox delivery with trigger_turn=true (queued=true) that starts a turn when the current run ends. Returns delivered/queued/triggered/duplicate. A closed child returns agent session is closed. This does not address spawn_team teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -540,7 +541,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolSendMessage,
-				Description: "Queue a plain message for a spawn_agent child session without interrupting or starting a new turn.",
+				Description: "Deliver a plain message to a spawn_agent child session mailbox without starting a new turn (idle or busy); the child reads it on its next natural turn. Returns delivered/queued/triggered/duplicate. A closed child returns agent session is closed instead of silently dropping the message. This does not address spawn_team teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -554,7 +555,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolFollowupTask,
-				Description: "Send a follow-up task to a spawn_agent child session. If the child is busy, the message is delivered without interrupting the active run.",
+				Description: "Send a follow-up task to a spawn_agent child session and start a new turn. If the child is busy, the message is queued in its mailbox with trigger_turn=true and a new turn starts automatically when the current run ends (returns queued=true); interrupt=true is not needed. Returns delivered/queued/triggered/duplicate. A closed child returns agent session is closed.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -568,7 +569,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolSendInput,
-				Description: "Send a follow-up prompt to an existing spawn_agent child session. This does not address spawn_team teammates.",
+				Description: "Send input to an existing spawn_agent child session. interrupt=true stops the active run (bounded wait) before submitting the prompt. interrupt=false behaves like followup_task: an idle child starts a turn immediately, a busy child gets a queued mailbox delivery with trigger_turn=true (queued=true) that starts a turn when the current run ends. Returns delivered/queued/triggered/duplicate. A closed child returns agent session is closed. This does not address spawn_team teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -1758,12 +1759,21 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			return nil, nil, err
 		}
 		aliasedResult := aliasAgentMessageResult(result, handleAliases)
-		return aliasedResult, attachCacheSafeSummary(map[string]interface{}{
+		summary := map[string]interface{}{
 			"session_id":    strings.TrimSpace(actualSessionID),
 			"session_alias": aliasSessionValue(actualSessionID, handleAliases),
 			"delivered":     result != nil && result.Delivered,
 			"triggered":     result != nil && result.Triggered,
-		}, agentMessageCacheSafeSummary(aliasedResult)), nil
+		}
+		// v2 fields stay absent unless a host sets them, so a disabled
+		// MessageSemanticsV2 switch keeps the pre-v2 summary identical.
+		if result != nil && result.Queued {
+			summary["queued"] = true
+		}
+		if result != nil && result.Duplicate {
+			summary["duplicate"] = true
+		}
+		return aliasedResult, attachCacheSafeSummary(summary, agentMessageCacheSafeSummary(aliasedResult)), nil
 
 	case ToolSendInput:
 		if b.AgentSessions == nil {
@@ -1807,14 +1817,24 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if aliasedResult != nil {
 			aliasedSessionID = firstNonEmptyToolValue(aliasedResult.SessionID, aliasedResult.ID)
 		}
-		return aliasedResult, attachCacheSafeSummary(map[string]interface{}{
+		summary := map[string]interface{}{
 			"session_id":    actualSessionID,
 			"session_alias": aliasedSessionID,
 			"status":        valueOrEmptyAgentStatus(result),
 			"queued":        result != nil && result.Queued,
-		}, agentStatusCacheSafeSummary(aliasedResult)), nil
+		}
+		if result != nil && result.Delivered {
+			summary["delivered"] = true
+		}
+		if result != nil && result.Triggered {
+			summary["triggered"] = true
+		}
+		if result != nil && result.Duplicate {
+			summary["duplicate"] = true
+		}
+		return aliasedResult, attachCacheSafeSummary(summary, agentStatusCacheSafeSummary(aliasedResult)), nil
 
-	case ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolAckLifecycle, ToolControlDescendant:
+	case ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
 		return b.executeSupervisionTool(ctx, toolName, sessionID, args)
 
 	case ToolResolveAgentApproval:
@@ -3360,6 +3380,8 @@ func normalizeToolName(name string) string {
 		return ToolSupervisionSnapshot
 	case "supervisiondescendants":
 		return ToolSupervisionDescendants
+	case "readagentresult", "read_agent_result", "agentresult":
+		return ToolReadAgentResult
 	case "acklifecycle":
 		return ToolAckLifecycle
 	case "controldescendant":

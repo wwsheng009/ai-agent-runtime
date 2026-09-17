@@ -1,6 +1,7 @@
 # 业务监督操作手册（Supervision Operator Runbook）
 
 - 日期：2026-09-16
+- 更新：2026-09-17（P0-2：progress 独立预算/让位门、巡查配置默认关闭、wake 预算行可见性）
 - 输入：`docs/analysis/supervision-business-supervision-gap-analysis-20260916.md`（方案 A–F）、`plan.md`（P0–P2 实施计划）
 - 适用宿主：CLI（`aicli`，监督工具面已装配）与 runtime-server（HTTP 接口，模型工具面按宿主能力门控）
 - 文档结构：第 1–6 章是"业务监督"（spawn → 巡查 → 汇报 → 收敛）操作手册；附录 A 保留原 P6-4
@@ -18,7 +19,7 @@
 | --- | --- | --- |
 | spawn | `spawn_subagents`（`execution_mode=wait\|background`） | `wait` 是同步语义，返回即完成；只有 `background` 才需要事后监督 |
 | 巡查 | `supervision_descendants` | 一次调用返回 N 行矩阵；不要用重复 `wait_agent` 轮询；只读、scope 不可越权 |
-| 汇报 | 父 turn preflight digest（`critical_unresolved` / `action_required` 行 + `progress` 区块） | 进度只在父 turn 内可见，**不产生唤醒**；"成功不唤醒"策略不变 |
+| 汇报 | 父 turn preflight digest（`critical_unresolved` / `action_required` 行 + `progress` 区块） | 默认只在父 turn 内可见、**不产生唤醒**（"成功不唤醒"策略不变）；显式开启 `progress_check_interval` 后才有 opt-in 周期巡查（§3.4，默认关闭） |
 | 收敛 | `control_descendant close`（配合 `ack_lifecycle`） | 关闭动作持久化审计（`action_id`）+ 回执通知；终态 batch 的 progress 行会提示 close |
 
 > 本文所有配置键以代码实际键名为准；`agents:` 段为 camelCase、`supervision:` 段为 snake_case，
@@ -181,8 +182,9 @@ progress:
 **三条硬性语义**（回归契约）：
 
 1. **只在父 turn 内可见**：progress 是读投影，不落新表；父 agent 不在 turn 内时它不推送任何东西。
-2. **不产生唤醒**：进度本身不触发父 turn；唤醒仍只由 lifecycle 通知（失败 / 审批 / 阻塞等）驱动，
-   "成功不唤醒"策略不变。
+2. **默认不产生唤醒**：进度本身不触发父 turn；唤醒仍只由 lifecycle 通知（失败 / 审批 / 阻塞等）驱动，
+   "成功不唤醒"策略不变。唯一例外是显式开启的 P0-2 周期巡查（§3.4，`progress_check_interval`，
+   默认 `0`=关闭），它用独立 budget class 按间隔注入一次 progress 汇报。
 3. **未接线时字节级不变**：宿主没有装配 progress source 时，注入文本与改动前完全一致。
 
 ### 3.3 父 agent 的汇报纪律
@@ -192,6 +194,45 @@ progress:
 - 若 progress 行显示终态，按 §4 收敛并汇报"已关闭哪些子会话"。
 - 若 progress 行迟迟不出现：先确认 batch 是否 `background`、宿主是否装配了 progress source
   （见 §5.4）。
+
+### 3.4 P0-2 周期巡查（opt-in，默认关闭）
+
+P0-B 的 progress 区块默认只在"父 turn 恰好发生"时被动注入（§3.2）。若要让父会话在空闲期
+也能主动收到一次进度摘要，打开 `supervision.progress_check_interval`（正数即开启；
+**0/未配置 = 关闭**，不注册 ticker、不新增 goroutine，宿主行为与引入该开关前逐字节一致）：
+
+```yaml
+supervision:
+  progress_check_interval: 90s   # 0=关闭（默认）；<30s 会被钳制为 30s 并记 warning
+  wake_max_progress_wake: 6      # progress wake 独立额度（默认 6/窗口；负数不设限，不推荐）
+```
+
+**注入条件（四条同时成立）**：存在 running/queued background batch → 父会话空闲 →
+scope 内没有未决 critical 通知 → progress 预算未耗尽。任一条不成立时本轮静默跳过，
+既不留 stale wake，也不产生 turn。
+
+**与 critical 告警的关系（P0-2/ADR-2）**：
+
+- **让位门**：scope 内存在 `SeverityCritical && Unresolved` 的通知时，本轮巡查跳过。
+  critical 的投递本身会带来同一个 digest（其中已含 progress 区块），巡查不该抢在它
+  前面消耗一次父 turn；critical 被 ack/resolve 后巡查自动恢复。
+- **预算分账**：progress wake 记在自己的 `progress` 类别（默认 6 次/窗口），**不占用**
+  failure/other 的 critical 告警预算；反之 failure 告警密集也不会饿死进度汇报。预算
+  耗尽时巡查直接跳过（它只是汇报、不是决策），而 critical lifecycle wake 仍按既有
+  durable 语义保留到下一窗口投递。
+
+**开启成本**：每次注入 = 一个父 turn + progress 区块 token（常态约 60–150，满配
+200–400，见 §4.5）；无 active batch 时不产生任何写入与 turn。低于 30s 的间隔会被
+钳制为 30s 并记 warning——配 `1s` 实际得到 `30s`，请按 §4.5 的推荐值配置。
+
+**怎么确认它在工作 / 为什么没有注入**：
+
+- CLI：`/debug supervision list` 的"wake 预算"段每个 scope 一行
+  `approval=… failure=… other=… progress=used/limit`；
+- 父 turn 的 preflight digest 同样带 `wake_budget:` 行（含 `progress=` 行），模型可见；
+- HTTP：`GET /api/runtime/supervision/snapshot?...` 的 `wake_budget` 字段（§5.2）；
+- `progress=6/6` 表示本窗口巡查额度已用尽（等下一窗口，critical 不受影响）；一直
+  `progress=0/6` 且从无注入时，按 §5.4 依次核对 active batch、父会话空闲与未决 critical。
 
 ---
 
@@ -247,7 +288,9 @@ control_descendant(notification_id="<从快照/矩阵原样取得>", action="clo
 | 配置键（实际键名） | 取值 | 默认 | 作用 |
 | --- | --- | --- | --- |
 | `agents.autoCloseCompleted` | `off` \| `completed` \| `batch_terminal` | `off` | 关闭时行为与现状完全一致（人工/模型按 §4.2 收敛）。开启后，batch 终态会自动 close 已完成的子会话，并产出**可 ack 的回执通知**（可用 `ack_lifecycle` 收敛，动作有 audit）。语义（与实现一致）：`completed` 只在 batch 干净完成（状态 completed、无失败）时收敛**任务成功**的子会话；`batch_terminal` 在 batch 以任何终态（含 failed / timed_out）结束时收敛其中的成功子会话；failed / timed_out / canceled 的子会话**永不自动关闭**（现场留给父 agent 判断） |
-| `supervision.progress_check_interval` | Go duration（如 `30s`、`2m`） | `0`（关闭） | opt-in 周期巡查。开启后仅在"存在 running background batch 且父会话空闲"时，按间隔把**轻量 progress 摘要**注入父 turn，并受既有 wake 预算 / 去抖约束；不引入"每 5s 扫描全部会话"的常驻轮询开销。0 = 关闭，行为与现状完全一致 |
+| `supervision.progress_check_interval` | Go duration（如 `30s`、`2m`） | `0`（关闭） | opt-in 周期巡查（P0-2，完整语义见 §3.4）。开启后仅在"存在 running background batch + 父会话空闲 + 无未决 critical + progress 预算未耗尽"时，按间隔把**轻量 progress 摘要**注入父 turn，并受既有 wake 去抖/去重约束；不引入"每 5s 扫描全部会话"的常驻轮询开销。低于 `30s` 会被钳制为 `30s` 并记 warning；0 = 关闭，行为与现状完全一致 |
+| `supervision.wake_max_progress_wake` | 正整数 \| 负数 | `6` | progress wake 的独立窗口额度（P0-2/ADR-2）。`0` 使用默认 6；负数不设限（不推荐）。它与 `supervision.wake_max_auto_wake`（failure/other）**互不占用**：调整它只影响进度汇报频率，不影响 critical 告警送达 |
+| `supervision.task_progress_interval` | Go duration（如 `1m`） | `0`（关闭） | P0-1 task 级进度写回节流。关闭（默认）时行为与引入前逐字节一致；开启后 running 任务按窗口刷新 `LastProgressAt`，父侧 progress 汇总显示真实进度年龄而不是 60s 心跳粒度 |
 
 **键名对照（以当前代码为准，两段风格不同）**：
 
@@ -305,6 +348,16 @@ control_descendant(notification_id="<从快照/矩阵原样取得>", action="clo
 - CLI 与模型侧 `ack_lifecycle` / `control_descendant` **是同一实现**（同一 durable store、同一 CAS 语义）；
   排查时两边应看到同一份通知与版本号。
 - `list` 是"父 agent 现在能看到什么"的权威对照视图；模型侧 digest 行数受预算裁剪，`list` 不受。
+- `list` 末尾的 "wake 预算"段按 scope × 类别给出
+  `approval/failure/other/progress=used/limit`（不限流类别显示 `unlimited(used=N)`）。
+  `progress=6/6` 表示 opt-in 周期巡查本窗口已暂停（critical 告警不受影响）；`progress=0/6`
+  且无注入时按 §5.4 核对让位条件。
+- 若开启了 `supervision.task_progress_interval`（默认 0 关闭），`list` 末尾还会出现
+  "进度写回"一行：`writes=N window_skipped=N conflicts_dropped=N errors=N`（P0-1/M1）。
+  读法：`writes` 持续增长说明进度生产者真的在写；只有 `window_skipped` 增长说明节流窗口
+  合并正常（不是故障）；`conflicts_dropped` 增长说明存在终态/版本竞争（迟到进度被静默
+  丢弃，属预期）；`errors>0` 才是需要查 store 的信号。该行在功能未开启且无计数时不渲染，
+  未接线宿主输出与历史一致。
 
 ### 5.2 HTTP：runtime-server 快照接口
 
@@ -343,9 +396,35 @@ control_descendant(notification_id="<从快照/矩阵原样取得>", action="clo
 | 同一 critical 行每轮都注入 | `/debug supervision list` 看 decision/resolution 是否仍 unresolved、是否被 defer 到期 | `ack_lifecycle acknowledge/defer/resolve`（带 note/reason），不要再等一轮 |
 | 父 turn 看不到 progress 行 | batch 是否为 `background`；宿主是否装配 progress source；digest 是否被 `DigestMaxItems`/`DigestMaxChars` 裁剪 | 用 `supervision_descendants` 直接读矩阵；确认装配后重试 |
 | 子会话终态后一直不关 | `agents.autoCloseCompleted` 是否为 `off`（默认） | 按 §4.2 手动 close，或开启该配置 |
-| 开启周期巡查后没有变化 | `supervision.progress_check_interval` 是否 >0；是否存在 running background batch；父会话是否空闲；wake 预算是否耗尽 | 看 HTTP `snapshot` 的 `wake_budget`；调大间隔或等待预算窗口 |
+| 开启周期巡查后没有变化 | `supervision.progress_check_interval` 是否 >0；是否存在 running background batch；父会话是否空闲；**是否有未决 critical（让位门）**；`wake_budget` 的 `progress` 行是否已 6/6 | 看 `/debug supervision list` 或 HTTP `snapshot` 的 `wake_budget`（含 `progress=` 行）；先按 §4.3 收敛 critical；额度耗尽则等下一窗口 |
 | 模型看不到 supervision 工具 | 宿主是否装配 supervision controller（工具按宿主能力门控） | CLI 与 runtime-server API 宿主均已装配；API 宿主在无 durable store 时 supervision 面保持 nil（与 CLI 宿主一致），此时用 `/debug supervision` 与 HTTP 读模型 |
 | 重复巡查被"刹车"提示 | 该批次是否混入了真正的 polling 工具（`wait_agent` 等） | 巡查工具本身不计数；减少混批、用 `after_seq` 增量读 |
+| busy 子代理收到 `followup_task` / `send_input(interrupt=false)` 后没有起新 turn | `supervision.message_semantics_v2` 是否为 true（默认 false=旧语义：仅投递）；`supervision.trigger_turn_auto` 是否被显式关成 false；`read_agent_events` 里是否出现 `agent.trigger_turn.dropped`（限流/环保护） | 打开 v2 后按 §5.5 核对 drain；限流命中（同 child 30s 下限、连续 ≤3 次）时 mailbox 仍留痕，父侧收敛后可再投递；关闭开关即回到"仅投递" |
+| `read_agent_result` 返回 `no_result_recorded` | 该 child 是否为 batch task（有 durable `TaskResult`）或已完成并写过 completion mailbox；`source=none` 表示两条回退都没有记录 | 用 `read_agent_events` / `wait_agent` 读原始事件；仍在运行的子会话没有终态结果，属预期 |
+
+### 5.5 指令投递 v2 与 trigger drain（P0-3）
+
+`supervision.message_semantics_v2`（默认 `false`，灰度开关）打开后，指令类工具按
+三态语义矩阵执行：`send_message` 只投递不起 turn；`followup_task` 与
+`send_input(interrupt=false)` 在 idle 直接起 turn、在 busy 排队投递
+（`queued=true`）；`send_input(interrupt=true)` 先打断（有界等待）再提交。
+终态子会话一律返回 `ErrAgentSessionClosed`，不再静默丢弃。`supervision.trigger_turn_auto`
+（默认 `true`，仅 v2 下生效）控制 busy 指令是否由 run 结束后的 drain 自动消费。
+
+**排查"busy 指令是否真的产生了新 turn"**（无需读实现）：
+
+1. `read_agent_events` 看子会话事件流：出现 `agent.trigger_turn.consumed` 即 drain 已消费，
+   payload 里有 `message_ids/mailbox_seq/count/consecutive`；出现 `agent.trigger_turn.dropped`
+   即被限流/环保护拦下，payload 的 `reason` 会说明（同 child 30s 下限、连续 ≤3 次）。
+2. 看工具的返回字段：`delivered`（已写入 mailbox）、`queued`（等待子会话消费）、
+   `triggered`（已提交 turn）、`duplicate`。v2 下 busy 的 `followup_task` 应是
+   `delivered=true, queued=true, triggered=false`；idle 则是 `triggered=true`。
+3. 投递失败可从发起方会话的 `mailbox_delivery` 事件或目标 mailbox 消息的
+   `mailbox_delivery_status/mailbox_delivery_error` 元数据读到。
+
+drain 的幂等账本基于子会话事件（消费成功后写 `agent.trigger_turn.consumed` 并记高水位），
+重复调用零副作用；`SubmitPromptAsync` 失败时不写标记，下一次 run 结束或 resume 会重试。
+限流计数（30s/≤3）为进程内状态，重启清零；幂等不受重启影响。
 
 ---
 
@@ -358,6 +437,9 @@ control_descendant(notification_id="<从快照/矩阵原样取得>", action="clo
 | 模型工具定义（描述/参数） | `backend/internal/toolbroker/supervision_tools.go` |
 | 快照读模型（6.2） | `backend/internal/supervision/snapshot.go` |
 | progress 投影与渲染（P0-B） | `backend/internal/supervision/progress.go`、`batch_progress.go`、`digest.go` |
+| 结果读出口（P0-4） | `backend/internal/toolbroker/supervision_tools.go`（`read_agent_result` / `include_results`）、`backend/internal/supervision/agent_result.go`、`backend/internal/runtimeserver/supervision_results.go` |
+| 指令语义 v2 与 trigger drain（P0-3） | `backend/internal/supervision/message_semantics.go`、`backend/internal/chat/trigger_turn_drain.go`、`backend/internal/chat/mailbox_delivery_audit.go` |
+| 进度写回（P0-1） | `backend/internal/agent/subagent_batch_coordinator.go`（`TaskProgressInterval` / `TaskProgressWriteCounts`）、`backend/internal/subagentbatch/sqlite_store.go` |
 | 父 turn preflight 注入 | `backend/cmd/aicli/commands/chat_actor_host.go`（preflight digest 注入点） |
 | polling 软刹车 | `backend/internal/agent/polling_guard.go`；doom-loop 豁免见 `doom-loop.go` |
 | CLI 控制入口 | `backend/cmd/aicli/commands/chat_debug_supervision.go` |

@@ -97,10 +97,13 @@ var runtimeEventContracts = []Contract{
 	// ---- B 通道：live-only（不落盘，刷新即丢）----
 	{Type: "tool.progress", Channels: ChannelLiveOnly},
 	{Type: "subagent.progress", Channels: ChannelLiveOnly},
+	{Type: "subagent.batch.progress", Channels: ChannelLiveOnly},
 
 	// ---- D 通道：仅回合末尾巴补发（实时通道与事件库都没有它们）----
 	{Type: "subagent.batch.started", Channels: ChannelTailOnly},
 	{Type: "subagent.batch.completed", Channels: ChannelTailOnly},
+	{Type: "subagent.task.started", Channels: ChannelTailOnly},
+	{Type: "subagent.task.completed", Channels: ChannelTailOnly},
 	{Type: "subagent.started", Channels: ChannelTailOnly},
 	{Type: "subagent.completed", Channels: ChannelTailOnly},
 

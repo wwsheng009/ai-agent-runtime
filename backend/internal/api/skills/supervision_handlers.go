@@ -199,6 +199,7 @@ func (h *Handler) supervisionWakeBudgetStates(ctx context.Context, scopes ...str
 		supervision.WakeBudgetClassApproval,
 		supervision.WakeBudgetClassFailure,
 		supervision.WakeBudgetClassOther,
+		supervision.WakeBudgetClassProgress,
 	}
 	seen := make(map[string]bool, len(scopes))
 	states := make([]supervision.WakeBudgetState, 0, len(scopes)*len(classes))

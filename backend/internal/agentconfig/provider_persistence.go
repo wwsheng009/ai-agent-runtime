@@ -69,6 +69,9 @@ func UpdateProviderConfig(configPath string, update ProviderConfigUpdate) (*Prov
 	if update.Name == "" {
 		return nil, fmt.Errorf("provider name is required")
 	}
+	// Layered configs: keep the edit in the layer that owns this provider so a
+	// project-level file cannot silently pin a user-level value (design §7).
+	configPath = routeConfigWritePath(configPath, providerUpdateWriteKeys(update.Name, update)...)
 
 	raw, err := os.ReadFile(configPath)
 	if err != nil && !os.IsNotExist(err) {

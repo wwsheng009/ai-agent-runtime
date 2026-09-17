@@ -898,7 +898,7 @@ func (t *configTUI) renderProviderDetail(name string, provider config.Provider) 
 }
 
 func (t *configTUI) reload() error {
-	loaded, err := config.InitGlobalConfig(t.cfg.ConfigFilePath)
+	loaded, err := config.ReloadGlobalConfig(t.cfg.ConfigFilePath)
 	if err != nil {
 		return err
 	}

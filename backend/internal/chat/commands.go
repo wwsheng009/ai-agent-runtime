@@ -24,7 +24,9 @@ type SubmitPrompt struct {
 	ImageArtifactDir string
 	RunMeta          *team.RunMeta
 	RouteOverride    *RunRouteOverride
-	Reply            chan SubmitResult
+	// TriggerTurnAuto marks a prompt submitted by the P0-3b trigger_turn drain.
+	TriggerTurnAuto bool
+	Reply           chan SubmitResult
 }
 
 // RunRouteOverride carries per-run model routing values for a chat execution.

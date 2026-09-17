@@ -169,22 +169,23 @@ func TestDefaultConfigSearchPathsUseBuildProfileNames(t *testing.T) {
 	})
 
 	paths := DefaultConfigSearchPaths()
-	expected := []string{
-		filepath.Join(home, ".aicli", aiclipaths.DefaultConfigFileName),
+	expected := []string{}
+	for _, name := range defaultConfigSearchNames() {
+		expected = append(expected, filepath.Join(".aicli", name))
 	}
-	if aiclipaths.DefaultConfigFileName != aiclipaths.StandardConfigFileName {
-		expected = append(expected, filepath.Join(home, ".aicli", aiclipaths.StandardConfigFileName))
+	if home, err := userHomeDir(); err == nil && home != "" {
+		for _, name := range defaultConfigSearchNames() {
+			expected = append(expected, filepath.Join(home, ".aicli", name))
+		}
 	}
 	expected = append(expected,
-		filepath.Join(".aicli", aiclipaths.DefaultConfigFileName),
 		aiclipaths.DefaultCLIConfigFileName,
-		filepath.Join("configs", aiclipaths.DefaultConfigFileName),
 	)
-	if aiclipaths.DefaultConfigFileName != aiclipaths.StandardConfigFileName {
-		expected = append(expected,
-			filepath.Join(".aicli", aiclipaths.StandardConfigFileName),
-			filepath.Join("configs", aiclipaths.StandardConfigFileName),
-		)
+	for _, name := range defaultConfigSearchNames() {
+		expected = append(expected, name)
+	}
+	for _, name := range defaultConfigSearchNames() {
+		expected = append(expected, filepath.Join("configs", name))
 	}
 	if strings.Join(paths, "\n") != strings.Join(expected, "\n") {
 		t.Fatalf("unexpected %s config search paths:\n got: %v\nwant: %v", aiclipaths.BuildProfile, paths, expected)
@@ -248,8 +249,8 @@ func TestDefaultDotEnvSearchPathsDeriveFromConfigSearchPaths(t *testing.T) {
 
 	paths := DefaultDotEnvSearchPaths()
 	expected := []string{
-		filepath.Join(home, ".aicli", ".env"),
 		filepath.Join(".aicli", ".env"),
+		filepath.Join(home, ".aicli", ".env"),
 		".env",
 		filepath.Join("configs", ".env"),
 	}

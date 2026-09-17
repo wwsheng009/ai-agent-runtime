@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 )
 
@@ -25,7 +26,27 @@ func (h *localChatRuntimeHost) wireLocalSupervisionProgressSource() {
 	if h == nil || h.Supervision == nil || h.Supervision.Wakes == nil || h.SubagentBatches == nil {
 		return
 	}
-	h.Supervision.Wakes.SetProgressSource(supervision.NewBatchProgressSource(h.SubagentBatches))
+	h.Supervision.Wakes.SetProgressSource(h.newLocalBatchProgressSource())
+}
+
+// newLocalBatchProgressSource 构造 CLI 的只读 batch 进度投影，并把 per-host
+// 的 live-only 进度镜像接到可选的 Messages 富化钩子上：supervision_descendants
+// /digest 的 last_message 因此在 CLI 与 API 宿主同口径（P0-1c）。镜像实例由
+// subagentProgressMirror() 统一持有，绝不在这里新建；store 未装配时返回 nil，
+// 未接线宿主的行为逐字节不变。
+func (h *localChatRuntimeHost) newLocalBatchProgressSource() supervision.ProgressSource {
+	if h == nil || h.SubagentBatches == nil {
+		return nil
+	}
+	source := supervision.NewBatchProgressSource(h.SubagentBatches)
+	batchSource, ok := source.(*supervision.BatchProgressSource)
+	if !ok || batchSource == nil {
+		return source
+	}
+	if mirror := h.subagentProgressMirror(); mirror != nil {
+		batchSource.Messages = supervision.MirrorProgressMessages{Mirror: mirror}
+	}
+	return source
 }
 
 // startLocalSupervisionProgressCheck 启动 opt-in 的 P2-D 周期巡查。
@@ -38,6 +59,9 @@ func (h *localChatRuntimeHost) startLocalSupervisionProgressCheck() {
 		return
 	}
 	interval := h.supervisionConfig.WithDefaults().ProgressCheckInterval
+	// 钳制告警（P0-2 改动 3）：宿主字段可能持有未钳制的原始配置（构造路径与
+	// 直接注入的宿主都走这里），低于下限时必须留下 warning 而不是静默改语义。
+	warnProgressCheckIntervalClamped(h.supervisionConfig.ProgressCheckInterval, interval)
 	if interval <= 0 {
 		return
 	}
@@ -55,6 +79,18 @@ func (h *localChatRuntimeHost) startLocalSupervisionProgressCheck() {
 			h.runLocalSupervisionProgressCheck(ctx, interval)
 		}()
 	})
+}
+
+// warnProgressCheckIntervalClamped 在显式配置低于下限（< 30s）时记录 warning，
+// 并返回是否发生了钳制。0/负数表示"关闭"，不触发告警（关闭语义不得改变）；
+// 生效间隔由 supervision.Config.WithDefaults 统一钳到 MinProgressCheckInterval。
+func warnProgressCheckIntervalClamped(raw, effective time.Duration) bool {
+	if raw <= 0 || raw >= supervision.MinProgressCheckInterval {
+		return false
+	}
+	logpkg.Warnf("supervision: progress_check_interval %s is below the %s floor; clamped to %s",
+		raw, supervision.MinProgressCheckInterval, effective)
+	return true
 }
 
 // stopLocalSupervisionProgressCheck 让测试/调试路径可以在不关闭整个 host 的
@@ -126,6 +162,12 @@ func (h *localChatRuntimeHost) runLocalSupervisionProgressCheckOnce(ctx context.
 		// 不再叠加第二个 turn（digest 里本来就含 progress 区块）。
 		return false, nil
 	}
+	if h.localSupervisionHasUnresolvedCritical(ctx, parentSessionID) {
+		// P0-2 改动 2：scope 内仍有未决的 critical 通知时让位。critical 的投递
+		// 本身会带来同一个 digest（其中已含 progress 区块），progress 汇报不该
+		// 抢在它前面消耗一次父 turn；critical 消除后巡查自动恢复。
+		return false, nil
+	}
 	class := supervision.WakeBudgetClassOf(localSupervisionProgressCheckReason)
 	if !h.Supervision.Wakes.AllowAutoWake(ctx, parentSessionID, class, time.Now().UTC()) {
 		// 预算耗尽：progress 巡查不是决策，直接跳过而不是留下一条后续会被
@@ -148,6 +190,30 @@ func (h *localChatRuntimeHost) runLocalSupervisionProgressCheckOnce(ctx context.
 		return false, err
 	}
 	return true, nil
+}
+
+// localSupervisionHasUnresolvedCritical reports whether the root scope still
+// holds an unresolved critical notification. It reuses the same store read the
+// preflight digest uses (ListNotifications) and does not add a new access
+// pattern; a read failure is surfaced to the caller so one best-effort tick is
+// skipped instead of guessing.
+func (h *localChatRuntimeHost) localSupervisionHasUnresolvedCritical(ctx context.Context, rootScopeID string) bool {
+	if h == nil || h.Supervision == nil || h.Supervision.Store == nil {
+		return false
+	}
+	notifications, err := h.Supervision.Store.ListNotifications(ctx, supervision.NotificationFilter{
+		RootScopeID:     strings.TrimSpace(rootScopeID),
+		IncludeResolved: false,
+	})
+	if err != nil {
+		return false
+	}
+	for _, notification := range notifications {
+		if notification.Severity == supervision.SeverityCritical && notification.Unresolved() {
+			return true
+		}
+	}
+	return false
 }
 
 // localSupervisionProgressCheckSessionID 是巡检的作用域：本 host 的根会话

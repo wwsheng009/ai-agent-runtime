@@ -34,6 +34,7 @@ import (
 	runtimeserver "github.com/wwsheng009/ai-agent-runtime/internal/runtimeserver"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	"github.com/wwsheng009/ai-agent-runtime/internal/webui"
 	"go.uber.org/zap/zapcore"
@@ -275,22 +276,13 @@ func runtimeServerConfigSearchNames() []string {
 	return names
 }
 
+// defaultRuntimeServerConfigSearchPaths returns the shared bootstrap config
+// layer stack (highest precedence first). It must stay derived from
+// agentconfig so the CLI and the server cannot drift apart: a server and a
+// CLI resolving different files for the same directory tree is what makes
+// "which config is actually in effect" unanswerable.
 func defaultRuntimeServerConfigSearchPaths() []string {
-	names := runtimeServerConfigSearchNames()
-	paths := make([]string, 0, 4*len(names))
-	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
-		for _, name := range names {
-			paths = append(paths, filepath.Join(home, ".aicli", name))
-		}
-	}
-	for _, name := range names {
-		paths = append(paths,
-			filepath.Join(".aicli", name),
-			name,
-			filepath.Join("configs", name),
-		)
-	}
-	return paths
+	return config.DefaultConfigSearchPaths()
 }
 
 func resolveRuntimeServerConfigCandidate(configPath string) string {
@@ -948,11 +940,41 @@ type runtimeServerApp struct {
 	subagentBatches io.Closer
 }
 
+// loadRuntimeServerManager 通过分层栈加载 runtime.yaml（P2）：
+//
+//   - 用户级 $HOME/.aicli/runtime.yaml 与项目级 ./.aicli/runtime.yaml 覆盖只读的
+//     portable 层（开发仓库里的 configs/runtime.yaml / backend/configs/runtime.yaml）；
+//   - 读取路径（RuntimeManager.GetFilePath）取「生效来源」= 最高存在层，未改动既有语义
+//     （sessions 目录仍相对它解析）；全新安装（任何层都不存在）时取用户级写入目标；
+//   - 写回不在这里：agent.maxSteps 由分层版 persister 按层分摊，只读层永不被改写。
+func loadRuntimeServerManager(runtimeManager *runtimecfg.RuntimeManager) error {
+	merged, err := config.LoadMergedRuntimeConfigDocument()
+	if err != nil {
+		return fmt.Errorf("failed to load layered runtime config: %w", err)
+	}
+	if merged == nil {
+		if err := runtimeManager.Load(); err != nil {
+			return fmt.Errorf("failed to load runtime config: %w", err)
+		}
+		return nil
+	}
+	sourcePath := strings.TrimSpace(merged.SourcePath)
+	if sourcePath == "" {
+		if target, _ := config.RuntimeConfigWriteTarget(); target != "" {
+			sourcePath = target
+		}
+	}
+	if err := runtimeManager.LoadDocument(merged.MergedYAML, sourcePath); err != nil {
+		return fmt.Errorf("failed to load runtime config: %w", err)
+	}
+	return nil
+}
+
 func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath string) (*runtimeServerApp, error) {
 	skillsCfg := normalizeSkillsRuntimeConfig(cfg)
 	runtimeManager := runtimecfg.NewRuntimeManager(skillsCfg.ConfigFile)
-	if err := runtimeManager.Load(); err != nil {
-		return nil, fmt.Errorf("failed to load runtime config: %w", err)
+	if err := loadRuntimeServerManager(runtimeManager); err != nil {
+		return nil, err
 	}
 	runtimeConfig := runtimeManager.Get()
 	runtimeConfig.Sessions.Dir = resolveRuntimeServerSessionDir(runtimeManager.GetFilePath(), runtimeConfig.Sessions.Dir)
@@ -1025,11 +1047,15 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	// 工作区设置里的「最大步骤数」保存：内存快照（RuntimeManager）与配置文件一起改，
 	// 避免只改前端本地设置、重启后缺省值又丢回文件里的旧值。
 	handler.SetAgentMaxStepsPersister(
-		runtimeserver.NewRuntimeAgentMaxStepsPersister(runtimeManager),
+		runtimeserver.NewLayeredRuntimeAgentMaxStepsPersister(runtimeManager),
 	)
 	// 同一个来源的读取端：设置页回显服务端缺省值 + 来源配置文件路径。
 	handler.SetAgentMaxStepsProvider(
-		runtimeserver.NewRuntimeAgentMaxStepsReader(runtimeManager),
+		runtimeserver.NewLayeredRuntimeAgentMaxStepsReader(runtimeManager),
+	)
+	// runtime.yaml 的层栈快照：设置页据此显示候选文件、只读层与写入目标。
+	handler.SetRuntimeConfigLayersProvider(
+		runtimeserver.NewRuntimeConfigLayersProvider(),
 	)
 	handler.SetProfileSupport(skillsapi.ProfileSupportConfig{
 		Registry:          profilesys.NewRegistryFromProfilesConfig(cfg.Profiles),
@@ -1072,12 +1098,31 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	// executors (agentcontrol / team orchestrator) are injected by the aicli
 	// host; until then cancel/close/retry fail durably with a clear result
 	// instead of pretending success.
+	//
+	// P0-4：durable batch store 先建，再作为结果读出口（include_results /
+	// read_agent_result）的数据源接进控制面；建库失败只降级告警（与 usage
+	// ledger 同口径：没有跨重启 batch 控制面不等于服务不可用）。
+	subagentBatchCloser, batchStoreErr := handler.EnableDurableSubagentBatches(
+		filepath.Join(filepath.Dir(config.DefaultAuthStorePath()), "data", "subagent-batches"),
+	)
+	if batchStoreErr != nil {
+		logger.Warn("Subagent batch store unavailable; restart recovery is disabled",
+			logger.String("reason", batchStoreErr.Error()))
+	}
+	// EnableDurableSubagentBatches returns the store it installed (as an
+	// io.Closer); recover the read interface for the P0-4 result source.
+	var subagentBatches subagentbatch.BatchStore
+	if store, ok := subagentBatchCloser.(subagentbatch.BatchStore); ok {
+		subagentBatches = store
+	}
 	supervisionDataDir := filepath.Join(filepath.Dir(config.DefaultAuthStorePath()), "data", "supervision")
 	supervisionPlane, err := runtimeserver.BuildSupervisionControlPlane(
 		supervisionDataDir,
 		cfg.Supervision.WithDefaults(),
 		runtimeserver.SupervisionRuntimeHooks{
-			TeamStore: bootstrapManager.TeamStore(),
+			TeamStore:               bootstrapManager.TeamStore(),
+			SubagentBatchStore:      subagentBatches,
+			CompletionMailboxReader: handler.SupervisionAgentControlMailboxReader(),
 		},
 	)
 	if err != nil {
@@ -1100,16 +1145,9 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	// P2 恢复对等（2026-09-16）：CLI 宿主在启动时做「立即 + 宽限期后」两趟
 	// batch 恢复，runtime-server 此前完全没有对应入口，而且 API 侧连 durable
 	// batch store 都没接线（默认值是 per-process 内存库），重启后遗留的
-	// queued/running batch 永远停在非终态、终态投递也永不重试。这里把 store 落到
-	// 与 supervision 同级的数据目录并启动恢复；建库失败只降级告警（与 usage
-	// ledger 同口径：没有跨重启 batch 控制面不等于服务不可用）。
-	subagentBatches, batchStoreErr := handler.EnableDurableSubagentBatches(
-		filepath.Join(filepath.Dir(config.DefaultAuthStorePath()), "data", "subagent-batches"),
-	)
-	if batchStoreErr != nil {
-		logger.Warn("Subagent batch store unavailable; restart recovery is disabled",
-			logger.String("reason", batchStoreErr.Error()))
-	}
+	// queued/running batch 永远停在非终态、终态投递也永不重试。store 落到与
+	// supervision 同级的数据目录并启动恢复（建库调用已上移到控制面装配之前，
+	// 见 P0-4 结果读出口接线）。
 	// Real mutation executor: agent close goes through the API session
 	// controller; team cancel goes through the durable Team store. The
 	// runtime-server host does not own an AgentControl identity graph, so
@@ -1476,7 +1514,9 @@ func configuredMCPConfigPath(cfg *config.Config) string {
 	if cfg == nil || cfg.AICLI == nil || cfg.AICLI.MCP == nil {
 		return ""
 	}
-	return strings.TrimSpace(cfg.AICLI.MCP.ConfigFile)
+	// Same priority as the runtime config and the CLI: ./.aicli/mcp.yaml >
+	// ~/.aicli/mcp.yaml > explicit override > upward search > configs/mcp.yaml.
+	return aiclipaths.ResolveMCPConfigPath(cfg.AICLI.MCP.ConfigFile)
 }
 
 func configuredMCPAutoConnect(cfg *config.Config) bool {

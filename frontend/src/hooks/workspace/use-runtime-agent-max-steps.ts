@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { getRuntimeAgentMaxSteps } from "@/lib/runtime-api";
+import type { RuntimeConfigLayer } from "@/types/runtime/config";
 
 export type RuntimeAgentMaxStepsSnapshot = {
   /** 服务端缺省的落盘位置（runtime 配置文件）。 */
@@ -9,6 +10,8 @@ export type RuntimeAgentMaxStepsSnapshot = {
   limit: number;
   /** 服务端缺省值：请求未携带 max_steps 时生效，0 = 不限制。 */
   maxSteps: number;
+  /** runtime.yaml 的层栈（分层）：候选文件、只读层与写入目标。 */
+  layers: RuntimeConfigLayer[];
 };
 
 export type RuntimeAgentMaxStepsController = {
@@ -49,6 +52,7 @@ export function useRuntimeAgentMaxSteps(): RuntimeAgentMaxStepsController {
         configFile: response.config_file,
         limit: response.limit,
         maxSteps: response.max_steps,
+        layers: response.layers ?? [],
       });
       setError(null);
     } catch (fetchError) {

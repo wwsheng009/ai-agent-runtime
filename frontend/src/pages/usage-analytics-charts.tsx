@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import {
   Bar,
   BarChart,
@@ -15,16 +16,22 @@ import {
 
 import { Badge } from "@/components/ui/badge";
 import type {
+  AnalyticsErrorPattern,
   AnalyticsGlobalTotals,
   AnalyticsGroupBucket,
   AnalyticsGroupBy,
 } from "@/types/runtime";
+import { TruncatedTick } from "./usage-analytics/chart-tick";
 
 type UsageAnalyticsChartsProps = {
   totals: AnalyticsGlobalTotals;
   groups: AnalyticsGroupBucket[];
   groupBy: AnalyticsGroupBy;
   onSelect: (key: string) => void;
+  /** 批次 7.2：全局失败分类分布（GET /api/runtime/analytics/errors）。 */
+  failurePatterns?: AnalyticsErrorPattern[];
+  selectedFailure?: string | null;
+  onSelectFailure?: (key: string) => void;
 };
 
 export function UsageAnalyticsCharts({
@@ -32,6 +39,9 @@ export function UsageAnalyticsCharts({
   groups,
   groupBy,
   onSelect,
+  failurePatterns,
+  selectedFailure,
+  onSelectFailure,
 }: UsageAnalyticsChartsProps) {
   const { t } = useTranslation("usageAnalytics");
   const chartGroups = useMemo(() => {
@@ -77,15 +87,34 @@ export function UsageAnalyticsCharts({
     (sum, item) => sum + item.value,
     0,
   );
+  // 失败分类键与 sessions.tsx 的下钻口径一致：优先 failure_category，回退 error_code。
+  const failureBuckets = useMemo(() => {
+    return (failurePatterns ?? [])
+      .map((pattern) => {
+        const key = failureKey(pattern);
+        return {
+          key,
+          label: failurePatternLabel(t, pattern),
+          count: pattern.count,
+        };
+      })
+      .filter((bucket) => bucket.key.length > 0)
+      .sort((left, right) => right.count - left.count)
+      .slice(0, 10);
+  }, [failurePatterns, t]);
+  const visibleFailures =
+    selectedFailure && selectedFailure.length > 0
+      ? failureBuckets.filter((bucket) => bucket.key === selectedFailure)
+      : failureBuckets;
 
   return (
     <section
       aria-label={t("charts.title")}
       // app-analytics-chart：坐标轴刻度字号交给 CSS 统一字号轴（见 base.css），
       // 不再用 recharts 的数值型 `tick.fontSize`（那会绕开 token）。
-      className="app-analytics-chart grid min-w-0 gap-2 lg:grid-cols-[minmax(0,1.7fr)_minmax(280px,0.8fr)]"
+      className="app-analytics-chart grid min-w-0 gap-2 lg:grid-cols-[minmax(0,1.6fr)_minmax(300px,0.9fr)]"
     >
-      <div className="surface-panel min-w-0 rounded-panel-lg p-3.5 sm:p-4">
+      <div className="surface-panel min-w-0 rounded-panel-lg p-3 sm:p-4">
         <ChartHeading
           title={t("charts.trend.title")}
           subtitle={t("groups.subtitle", { groupBy: t(groupByKey(groupBy)) })}
@@ -106,6 +135,7 @@ export function UsageAnalyticsCharts({
                 />
                 <XAxis
                   dataKey="key"
+                  interval={0}
                   tickFormatter={(value) =>
                     formatDimensionTick(String(value), groupBy)
                   }
@@ -153,14 +183,107 @@ export function UsageAnalyticsCharts({
         )}
       </div>
 
-      <div className="surface-panel min-w-0 rounded-panel-lg p-3.5 sm:p-4">
+      <div className="surface-panel min-w-0 rounded-panel-lg p-3 sm:p-4">
         <ChartHeading
           title={t("charts.tokens.title")}
           subtitle={t("charts.tokens.subtitle")}
         />
         <TokenCompositionChart data={tokenComposition} total={compositionTotal} />
       </div>
+
+      <div className="surface-panel min-w-0 rounded-panel-lg p-3 sm:p-4 lg:col-span-2">
+        <ChartHeading title={t("charts.failures.title")} subtitle={t("charts.failures.subtitle")} badge={selectedFailure ? t("charts.failures.selected", { key: selectedFailure }) : undefined} />
+        {failureBuckets.length === 0 ? (
+          <div className="flex h-[220px] items-center justify-center text-sm text-muted-foreground">{t("charts.failures.empty")}</div>
+        ) : (
+          <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1.2fr)_minmax(240px,0.8fr)]">
+            <div className="h-[220px] min-w-0" data-testid="analytics-failure-chart">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart layout="vertical" data={failureBuckets} margin={{ top: 4, right: 12, left: 8, bottom: 4 }}>
+                  <CartesianGrid horizontal={false} stroke="var(--analytics-chart-grid)" />
+                  <XAxis type="number" allowDecimals={false} tick={{ fill: "var(--analytics-chart-axis)" }} tickLine={false} axisLine={{ stroke: "var(--analytics-chart-grid)" }} />
+                  <YAxis type="category" dataKey="label" width={160} interval={0} tick={TruncatedTick} tickLine={false} axisLine={false} />
+                  <Tooltip cursor={{ fill: "var(--analytics-chart-hover)" }} content={<FailureChartTooltip />} />
+                  <Bar dataKey="count" radius={[0, 3, 3, 0]} maxBarSize={22}>
+                    {failureBuckets.map((bucket) => (
+                      <Cell key={bucket.key} fill="var(--analytics-chart-primary)" fillOpacity={selectedFailure && selectedFailure !== bucket.key ? 0.35 : 1} cursor="pointer" role="button" tabIndex={0} aria-label={t("charts.failures.filterAction", { key: bucket.label })} onClick={() => onSelectFailure?.(bucket.key)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelectFailure?.(bucket.key); } }} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+            <ul className="divide-y divide-border rounded-card border border-border">
+              {visibleFailures.map((bucket) => (
+                <li key={bucket.key} className="flex items-center justify-between gap-3 px-3 py-2 text-sm">
+                  <span className="min-w-0 truncate" title={bucket.label}>{bucket.label}</span>
+                  <span className="tabular-nums text-muted-foreground">{formatNumber(bucket.count)}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {selectedFailure ? (
+          <button type="button" className="mt-2 rounded-field border border-border px-2 py-1 text-xs transition hover:bg-surface-soft" onClick={() => onSelectFailure?.(selectedFailure)}>{t("charts.failures.clear")}</button>
+        ) : null}
+      </div>
     </section>
+  );
+}
+
+const failureCategoryKeyMap = {
+  provider_error: "observability.failureCategories.providerError",
+  rate_limited: "observability.failureCategories.rateLimited",
+  timeout: "observability.failureCategories.timeout",
+  context_overflow: "observability.failureCategories.contextOverflow",
+  tool_error: "observability.failureCategories.toolError",
+  budget_exceeded: "observability.failureCategories.budgetExceeded",
+  cancelled: "observability.failureCategories.cancelled",
+  interrupted: "observability.failureCategories.interrupted",
+  unknown: "observability.failureCategories.unknown",
+} as const;
+
+type FailureCategoryI18nKey = (typeof failureCategoryKeyMap)[keyof typeof failureCategoryKeyMap];
+
+function failureCategoryI18nKey(category: string): FailureCategoryI18nKey | null {
+  return failureCategoryKeyMap[category as keyof typeof failureCategoryKeyMap] ?? null;
+}
+
+function failureKey(pattern: AnalyticsErrorPattern) {
+  return (pattern.failure_category ?? pattern.error_code ?? "").trim();
+}
+
+function failurePatternLabel(t: TFunction<"usageAnalytics">, pattern: AnalyticsErrorPattern) {
+  const code = (pattern.error_code ?? "").trim();
+  const category = (pattern.failure_category ?? "").trim().toLowerCase();
+  const categoryKey = failureCategoryI18nKey(category);
+  const categoryLabel = categoryKey ? t(categoryKey) : category;
+  if (code && categoryLabel) return `${code} · ${categoryLabel}`;
+  return code || categoryLabel || "";
+}
+
+function FailureChartTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: readonly {
+    value?: number | string;
+    payload?: { label?: string; count?: number };
+  }[];
+}) {
+  const { t } = useTranslation("usageAnalytics");
+  if (!active || !payload?.length) return null;
+  const bucket = payload[0]?.payload;
+  return (
+    <div className="max-w-[min(82vw,360px)] border border-border-strong bg-surface-overlay px-3 py-2 text-xs shadow-xl">
+      <div className="break-all font-medium">{bucket?.label ?? "-"}</div>
+      <div className="mt-1 flex justify-between gap-5 text-muted-foreground">
+        <span>{t("observability.errors.columns.count")}</span>
+        <span className="tabular-nums text-foreground">
+          {formatNumber(Number(payload[0]?.value ?? 0))}
+        </span>
+      </div>
+    </div>
   );
 }
 

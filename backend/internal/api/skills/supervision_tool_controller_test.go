@@ -63,6 +63,7 @@ func TestApplyAgentRuntimeServicesGatesSupervisionToolController(t *testing.T) {
 	for _, want := range []string{
 		toolbroker.ToolSupervisionDescendants,
 		toolbroker.ToolSupervisionSnapshot,
+		toolbroker.ToolReadAgentResult,
 		toolbroker.ToolAckLifecycle,
 		toolbroker.ToolControlDescendant,
 	} {

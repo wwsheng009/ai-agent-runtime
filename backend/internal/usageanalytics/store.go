@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
@@ -79,6 +80,13 @@ type Store struct {
 	empty bool
 
 	mu sync.Mutex
+
+	// statsOnce/statsAvailable：schema v3 预聚合列能力探测缓存
+	// （可写迁移成功后直接置位；只读库按 user_version + 列集合惰性探测）。
+	statsOnce      sync.Once
+	statsAvailable bool
+	// statsGen 写入代数：请求终态落库后自增，供服务端查询缓存惰性失效。
+	statsGen atomic.Uint64
 }
 
 // Open 打开（必要时创建并迁移）分析库。
@@ -123,7 +131,10 @@ func Open(cfg Config) (*Store, error) {
 // openWritable 建立一次可写连接并完成迁移（不做锁重试，由 Open 负责）。
 func openWritable(path string, busyTimeout time.Duration) (*Store, error) {
 	store := &Store{path: path}
-	db, err := sql.Open("sqlite3", path)
+	// _txlock=immediate：写事务一开始就取写锁。默认 deferred 事务在
+	// "先读旧计数、再写" 的升级路径上遇到并发进程写锁会立即返回
+	// SQLITE_BUSY（busy_timeout 不适用），而分析库在多进程间共享是常态。
+	db, err := sql.Open("sqlite3", writableDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("open usage analytics db: %w", err)
 	}
@@ -245,6 +256,21 @@ func readOnlyDSN(path string) string {
 	return "file:" + slashed + "?mode=ro"
 }
 
+// writableDSN 构造可写 DSN：文件 URI + _txlock=immediate（见 openWritable）。
+func writableDSN(path string) string {
+	slashed := filepath.ToSlash(path)
+	if strings.HasPrefix(slashed, "file:") {
+		if strings.Contains(slashed, "?") {
+			return slashed + "&_txlock=immediate"
+		}
+		return slashed + "?_txlock=immediate"
+	}
+	if !strings.HasPrefix(slashed, "/") && !looksLikeDrivePath(slashed) {
+		slashed = "./" + slashed
+	}
+	return "file:" + slashed + "?_txlock=immediate"
+}
+
 func looksLikeDrivePath(path string) bool {
 	return len(path) >= 3 && path[1] == ':' && (path[2] == '/' || path[2] == '\\')
 }
@@ -308,13 +334,108 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 		`CREATE INDEX IF NOT EXISTS idx_usage_sessions_project ON usage_sessions(project_path)`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_sessions_provider ON usage_sessions(provider)`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_sessions_status ON usage_sessions(status)`,
+		// 复合索引：时间窗 + 常用过滤维度，覆盖 Summarize/ListSessions 的 WHERE + ORDER BY
+		`CREATE INDEX IF NOT EXISTS idx_usage_sessions_time_provider_model_status ON usage_sessions(started_at_unix_nano DESC, provider, model, status)`,
+		// ---- schema v2（方案 §5.1）：工具调用 / 子代理 / 回合级终值 ----
+		`CREATE TABLE IF NOT EXISTS usage_tool_calls (
+  tool_call_id            TEXT PRIMARY KEY,
+  session_id              TEXT NOT NULL DEFAULT '',
+  trace_id                TEXT NOT NULL DEFAULT '',
+  turn_id                 TEXT NOT NULL DEFAULT '',
+  step                    INTEGER NOT NULL DEFAULT 0,
+  tool_name               TEXT NOT NULL DEFAULT '',
+  source                  TEXT NOT NULL DEFAULT '',
+  kind                    TEXT NOT NULL DEFAULT '',
+  outcome                 TEXT NOT NULL DEFAULT '',
+  ok                      INTEGER,
+  empty_result            INTEGER NOT NULL DEFAULT 0,
+  error_code              TEXT NOT NULL DEFAULT '',
+  retryable               INTEGER,
+  failed_count            INTEGER NOT NULL DEFAULT 0,
+  succeeded_count         INTEGER NOT NULL DEFAULT 0,
+  started_at_unix_nano    INTEGER NOT NULL DEFAULT 0,
+  completed_at_unix_nano  INTEGER NOT NULL DEFAULT 0,
+  duration_ms             INTEGER NOT NULL DEFAULT 0,
+  record_json             BLOB
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_tool_calls_session ON usage_tool_calls(session_id, started_at_unix_nano DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_tool_calls_name ON usage_tool_calls(tool_name)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_tool_calls_outcome ON usage_tool_calls(outcome, error_code)`,
+		`CREATE TABLE IF NOT EXISTS usage_subagents (
+  subagent_id             TEXT NOT NULL DEFAULT '',
+  parent_session_id       TEXT NOT NULL DEFAULT '',
+  child_session_id        TEXT NOT NULL DEFAULT '',
+  role                    TEXT NOT NULL DEFAULT '',
+  read_only               INTEGER NOT NULL DEFAULT 0,
+  success                 INTEGER,
+  completion_reason       TEXT NOT NULL DEFAULT '',
+  failure_category        TEXT NOT NULL DEFAULT '',
+  error_code              TEXT NOT NULL DEFAULT '',
+  attempt                 INTEGER NOT NULL DEFAULT 1,
+  max_attempts            INTEGER NOT NULL DEFAULT 1,
+  retry_reason            TEXT NOT NULL DEFAULT '',
+  id_synthesized          INTEGER NOT NULL DEFAULT 0,
+  duration_ms             INTEGER NOT NULL DEFAULT 0,
+  started_at_unix_nano    INTEGER NOT NULL DEFAULT 0,
+  completed_at_unix_nano  INTEGER NOT NULL DEFAULT 0,
+  usage_total_tokens      INTEGER NOT NULL DEFAULT 0,
+  source                  TEXT NOT NULL DEFAULT '',
+  conflict_count          INTEGER NOT NULL DEFAULT 0,
+  record_json             BLOB,
+  PRIMARY KEY (subagent_id, parent_session_id)
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_subagents_session ON usage_subagents(parent_session_id, completed_at_unix_nano DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_subagents_fail ON usage_subagents(success, failure_category)`,
+		`CREATE TABLE IF NOT EXISTS usage_turns (
+  session_id                   TEXT NOT NULL,
+  turn_id                      TEXT NOT NULL,
+  trace_id                     TEXT NOT NULL DEFAULT '',
+  success                      INTEGER,
+  completion_reason            TEXT NOT NULL DEFAULT '',
+  error_code                   TEXT NOT NULL DEFAULT '',
+  steps                        INTEGER NOT NULL DEFAULT 0,
+  duration_ms                  INTEGER NOT NULL DEFAULT 0,
+  tool_error_count             INTEGER NOT NULL DEFAULT 0,
+  recovered_tool_error_count   INTEGER NOT NULL DEFAULT 0,
+  unrecovered_tool_error_count INTEGER NOT NULL DEFAULT 0,
+  prompt_tokens                INTEGER NOT NULL DEFAULT 0,
+  completion_tokens            INTEGER NOT NULL DEFAULT 0,
+  total_tokens                 INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens            INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens             INTEGER NOT NULL DEFAULT 0,
+  started_at_unix_nano         INTEGER NOT NULL DEFAULT 0,
+  ended_at_unix_nano           INTEGER NOT NULL DEFAULT 0,
+  record_json                  BLOB,
+  PRIMARY KEY (session_id, turn_id)
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_turns_time ON usage_turns(session_id, ended_at_unix_nano DESC)`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.Exec(statement); err != nil {
 			return fmt.Errorf("migrate usage analytics db: %w", err)
 		}
 	}
-	return nil
+	// 可选索引：旧库可能缺少 error_category 列（v1 部分 schema），先探测再建。
+	// 错误模式部分索引（Phase 4）只服务 usage_requests(error_category)。
+	if hasErrorCategory, err := s.hasColumn("usage_requests", "error_category"); err != nil {
+		return err
+	} else if hasErrorCategory {
+		if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_usage_requests_error_category ON usage_requests(error_category) WHERE error_category <> ''`); err != nil {
+			return fmt.Errorf("migrate usage analytics db: %w", err)
+		}
+	}
+	// 版本门控迁移：v1/v2 基础表 → v2 版本号 → v3 预聚合列（§6.1）。
+	// 各步骤幂等；v3 迁移失败回滚后库保持 v2 可读。
+	version, err := s.schemaVersion()
+	if err != nil {
+		return err
+	}
+	if version < 2 {
+		if _, err := s.db.Exec("PRAGMA user_version = 2"); err != nil {
+			return fmt.Errorf("migrate usage analytics db: %w", err)
+		}
+	}
+	return s.migrateStatsV3()
 }
 
 // query 在只读降级时返回 (nil, false)：调用方给出空结果。

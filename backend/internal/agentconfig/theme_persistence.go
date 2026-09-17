@@ -27,6 +27,8 @@ func UpdateAICLIThemePreferences(configPath string, update AICLIThemePreferenceU
 	if configPath == "" {
 		return nil, fmt.Errorf("config path is required")
 	}
+	// Layered configs: theme edits go back to the layer that owns aicli.theme.
+	configPath = routeConfigWritePath(configPath, "aicli.theme")
 
 	raw, err := os.ReadFile(configPath)
 	if err != nil {

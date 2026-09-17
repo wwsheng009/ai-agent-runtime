@@ -14,6 +14,7 @@ import type { AnalyticsSessionUsageDetail } from "@/types/runtime";
 
 const {
   getAnalyticsSessionUsageMock,
+  getAnalyticsOverviewMock,
   listAnalyticsSessionsMock,
   getAnalyticsSummaryMock,
   getAnalyticsDimensionsMock,
@@ -22,6 +23,7 @@ const {
   getCacheRequestsMock,
 } = vi.hoisted(() => ({
   getAnalyticsSessionUsageMock: vi.fn(),
+  getAnalyticsOverviewMock: vi.fn(),
   listAnalyticsSessionsMock: vi.fn(),
   getAnalyticsSummaryMock: vi.fn(),
   getAnalyticsDimensionsMock: vi.fn(),
@@ -68,6 +70,7 @@ const {
 vi.mock("@/lib/runtime-api", () => ({
   getAnalyticsDimensions: getAnalyticsDimensionsMock,
   getAnalyticsSessionUsage: getAnalyticsSessionUsageMock,
+  getAnalyticsOverview: getAnalyticsOverviewMock,
   getAnalyticsSummary: getAnalyticsSummaryMock,
   listAnalyticsSessions: listAnalyticsSessionsMock,
   getCacheCapabilities: getCacheCapabilitiesMock,
@@ -306,36 +309,60 @@ describe("UsageAnalyticsPage session detail", () => {
 
 describe("UsageAnalyticsPage session list pagination", () => {
   it("pages the session list with DB offset/limit instead of client-side slicing", async () => {
-    listAnalyticsSessionsMock.mockImplementation((query: { offset?: number } = {}) =>
+    getAnalyticsOverviewMock.mockImplementation((query: { offset?: number } = {}) =>
       Promise.resolve({
         schema_version: "runtime.analytics.v1",
         generated_at: "2026-09-13T00:00:00Z",
-        sessions: [
-          {
-            session_id: `session-page-${query.offset ?? 0}`,
-            title: "分页会话",
-            status: "active",
-            project: "",
-            provider: "anthropic",
-            model: "claude",
-            title_source: "session_history",
-            usage_quality: "provider_reported",
-            usage_coverage: 1,
-            partial: false,
-            turn_count: 1,
-            failed_turns: 0,
-            llm_requests: 1,
-            llm_errors: 0,
-            total_tokens: 10,
-            start_time: "2026-09-13T00:00:00Z",
-          },
-        ],
-        totals: emptyTotals,
-        coverage: emptyCoverage,
-        partial: false,
-        partial_reasons: [],
-        total: 120,
-        scanned: 120,
+        matched: 120,
+        sessions: {
+          schema_version: "runtime.analytics.v1",
+          generated_at: "2026-09-13T00:00:00Z",
+          sessions: [
+            {
+              session_id: `session-page-${query.offset ?? 0}`,
+              title: "分页会话",
+              status: "active",
+              project: "",
+              provider: "anthropic",
+              model: "claude",
+              title_source: "session_history",
+              usage_quality: "provider_reported",
+              usage_coverage: 1,
+              partial: false,
+              turn_count: 1,
+              failed_turns: 0,
+              llm_requests: 1,
+              llm_errors: 0,
+              total_tokens: 10,
+              start_time: "2026-09-13T00:00:00Z",
+            },
+          ],
+          totals: emptyTotals,
+          coverage: emptyCoverage,
+          partial: false,
+          partial_reasons: [],
+          total: 120,
+          scanned: 120,
+        },
+        summary: {
+          schema_version: "runtime.analytics.v1",
+          generated_at: "2026-09-13T00:00:00Z",
+          group_by: "day",
+          groups: [],
+          totals: emptyTotals,
+          coverage: emptyCoverage,
+          partial: false,
+          partial_reasons: [],
+        },
+        dimensions: {
+          schema_version: "runtime.analytics.v1",
+          generated_at: "2026-09-13T00:00:00Z",
+          providers: [],
+          models: [],
+          directories: [],
+          projects: [],
+          statuses: [],
+        },
       }),
     );
     getAnalyticsSummaryMock.mockResolvedValue({
@@ -371,7 +398,7 @@ describe("UsageAnalyticsPage session list pagination", () => {
       });
       await flush();
 
-      expect(listAnalyticsSessionsMock).toHaveBeenCalledWith(
+      expect(getAnalyticsOverviewMock).toHaveBeenCalledWith(
         expect.objectContaining({ limit: 50, offset: 0 }),
       );
       expect(container.textContent).toContain("第 1-1 条，共 120 条");
@@ -383,7 +410,7 @@ describe("UsageAnalyticsPage session list pagination", () => {
       });
       await flush();
 
-      expect(listAnalyticsSessionsMock).toHaveBeenLastCalledWith(
+      expect(getAnalyticsOverviewMock).toHaveBeenLastCalledWith(
         expect.objectContaining({ limit: 50, offset: 50 }),
       );
       expect(container.textContent).toContain("第 51-51 条，共 120 条");

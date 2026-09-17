@@ -23,9 +23,9 @@ import (
 
 // AgentSupervisionController is the host-side capability behind the
 // supervision_snapshot / supervision_descendants / ack_lifecycle /
-// control_descendant tools. Implementations must derive the caller's root scope
-// from parentSessionID and enforce that a notification outside that scope is
-// rejected.
+// control_descendant / read_agent_result tools. Implementations must derive the
+// caller's root scope from parentSessionID and enforce that a notification or
+// result outside that scope is rejected.
 type AgentSupervisionController interface {
 	// SupervisionSnapshot returns the scoped preflight digest (read-only).
 	SupervisionSnapshot(ctx context.Context, parentSessionID string, args SupervisionSnapshotArgs) (*supervision.Digest, error)
@@ -40,6 +40,12 @@ type AgentSupervisionController interface {
 	// ControlDescendant requests/executes a durable control action against the
 	// notification subject (cancel / close / retry / reassign).
 	ControlDescendant(ctx context.Context, parentSessionID string, args ControlDescendantArgs) (supervision.ActionRecord, error)
+	// ReadAgentResult returns the bounded durable result of one child session
+	// or batch task inside the caller's own scope (P0-4 改动 2, read-only).
+	// Scope comes from the host; the model can never widen it. A missing
+	// durable record is reported as source=none + no_result_recorded with an
+	// actionable next_action, not as a hard tool error.
+	ReadAgentResult(ctx context.Context, parentSessionID string, args ReadAgentResultArgs) (supervision.ReadResultPayload, error)
 }
 
 // SupervisionSnapshotArgs is the parsed input of supervision_snapshot.
@@ -57,12 +63,29 @@ type SupervisionDescendantsArgs struct {
 	Health string
 	// IncludeTerminal keeps terminal rows (closed/terminated) in the matrix.
 	IncludeTerminal bool
+	// IncludeResults asks the provider for the bounded result projection
+	// (result_status/result_summary/artifact_refs/error_class/finished_at).
+	// Default false: the row payload stays byte-identical to before (P0-4).
+	IncludeResults bool
 	// Limit caps the returned rows (unresolved/abnormal rows are prioritized by
 	// the builder's ordering, never dropped silently without truncated=true).
 	Limit int
 	// AfterSeq is the caller's last seen sequence; terminal rows newer than it
 	// are counted as terminal_unacknowledged.
 	AfterSeq int64
+}
+
+// ReadAgentResultArgs is the parsed input of read_agent_result (P0-4 改动 2).
+type ReadAgentResultArgs struct {
+	// SessionID is the child session id or agent path (required).
+	SessionID string
+	// TaskID optionally narrows the read to one durable batch task.
+	TaskID string
+	// Sections selects summary | findings | changes | artifacts | errors |
+	// usage; empty means all sections.
+	Sections []string
+	// MaxChars bounds the serialized output; zero uses the default 4000.
+	MaxChars int
 }
 
 // AckLifecycleArgs is the parsed input of ack_lifecycle.
@@ -87,7 +110,7 @@ type ControlDescendantArgs struct {
 	HasExpectedVersion bool
 }
 
-// supervisionToolDefinitions returns the four control-plane tool definitions.
+// supervisionToolDefinitions returns the five control-plane tool definitions.
 // Callers gate on the host capability before appending them.
 func supervisionToolDefinitions() []types.ToolDefinition {
 	return []types.ToolDefinition{
@@ -118,6 +141,7 @@ func supervisionToolDefinitions() []types.ToolDefinition {
 			Description: "Read the scoped descendant state matrix (doc 6.2, read-only): one call lists the children/descendants of this session's own scope with execution_status, supervision_state (running/blocked/stalled/timed_out/orphaned/terminal), heartbeat_age_ms / progress_age_ms, action_required, recommended_action, allowed_actions and notification_id. " +
 				"Prefer this tool for supervision inspection: it returns the whole N-row matrix (how many are still running, which one is stalled, which finished) in one call, so do not poll wait_agent / list_agents row by row; repeat calls are expected and are exempt from the anti-polling advisory because they are an observation, not a blocking wait. " +
 				"Read a row as follows: action_required=true means the parent must decide; recommended_action is the host's suggested next step for that row; allowed_actions is the subset this host can actually execute (control_descendant re-validates against it); next_action explains any remediation path that was filtered out because the host has no entry point for it. " +
+				"include_results=true additionally attaches the bounded per-row result projection (result_status/result_summary/artifact_refs/error_class/finished_at); it significantly increases the output, so use it only when converging finished rows. " +
 				"Rows whose subject no longer exists are reported with the state the control plane last saw. Only rows inside this session's scope are returned; the model cannot widen the scope.",
 			Parameters: map[string]interface{}{
 				"type": "object",
@@ -136,6 +160,10 @@ func supervisionToolDefinitions() []types.ToolDefinition {
 						"type":        "boolean",
 						"description": "Keep terminal (closed/terminated) rows in the matrix (default false). Turn it on when converging a finished batch: terminal_unacknowledged counts finished rows not yet acknowledged or closed.",
 					},
+					"include_results": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Attach the bounded result projection per row (result_status, result_summary <=512 runes with result_truncated, artifact_refs <=3, error_class, finished_at). Default false. Significantly increases the output; use it only when converging results (typically with include_terminal=true), then read details with read_agent_result.",
+					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
 						"description": "Cap the number of returned rows; abnormal/action-required rows stay prioritized and truncated=true reports the cut. Keep it small for routine inspections; raise it only when the full matrix is needed.",
@@ -145,6 +173,35 @@ func supervisionToolDefinitions() []types.ToolDefinition {
 						"description": "Last lifecycle sequence already seen by the caller (use the previous next_seq); terminal rows newer than it are counted as terminal_unacknowledged.",
 					},
 				},
+			},
+		},
+		{
+			Name: ToolReadAgentResult,
+			Description: "Read the bounded durable result of one child session or batch task (read-only, P0-4). Resolves id inside this session's own scope only (the model cannot widen the scope) and reads, in priority order: the batch task TaskResult (summary/findings/changes/artifacts/errors/usage) and then the terminal mailbox completion payload (status/success/error/usage). " +
+				"The output is bounded: findings <=3, changes <=8, artifacts <=8, errors <=3 and a total max_chars budget (default 4000); truncated=true reports any cut. source is task_result | completion_payload | none. " +
+				"When no durable record exists the call still succeeds with source=none and error_code=no_result_recorded plus a next_action: follow it (read_agent_events / wait_agent) instead of retrying the same read. Sections let you fetch only what you need (summary/findings/changes/artifacts/errors/usage).",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"id": map[string]interface{}{
+						"type":        "string",
+						"description": "Child session id or agent path (required). Must belong to this session's own scope.",
+					},
+					"task_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional batch task id; narrows the read to that durable task record.",
+					},
+					"sections": map[string]interface{}{
+						"type":        "array",
+						"items":       map[string]interface{}{"type": "string"},
+						"description": "Optional subset of summary | findings | changes | artifacts | errors | usage (default: all). An unknown section is rejected instead of widening the read.",
+					},
+					"max_chars": map[string]interface{}{
+						"type":        "integer",
+						"description": "Optional output budget in characters (default 4000, clamped to 256..20000). truncated=true reports any cut.",
+					},
+				},
+				"required": []string{"id"},
 			},
 		},
 		{
@@ -270,6 +327,9 @@ func parseSupervisionDescendantsArgs(args map[string]interface{}) (SupervisionDe
 	if value, ok := args["include_terminal"].(bool); ok {
 		parsed.IncludeTerminal = value
 	}
+	if value, ok := args["include_results"].(bool); ok {
+		parsed.IncludeResults = value
+	}
 	if value, ok, err := toolArgInt64(ToolSupervisionDescendants, args, "after_seq"); err != nil {
 		return parsed, err
 	} else if ok {
@@ -281,6 +341,57 @@ func parseSupervisionDescendantsArgs(args map[string]interface{}) (SupervisionDe
 		parsed.Limit = value
 	}
 	return parsed, nil
+}
+
+// parseReadAgentResultArgs converts raw tool args into the typed input.
+// sections is a closed vocabulary: an unknown value is rejected instead of
+// silently widening the read to every section.
+func parseReadAgentResultArgs(args map[string]interface{}) (ReadAgentResultArgs, error) {
+	parsed := ReadAgentResultArgs{
+		SessionID: supervisionArgValue(args, "id"),
+		TaskID:    supervisionArgValue(args, "task_id"),
+	}
+	if parsed.SessionID == "" {
+		return parsed, fmt.Errorf("id is required")
+	}
+	sections, err := readResultSectionsArg(args)
+	if err != nil {
+		return parsed, err
+	}
+	parsed.Sections = sections
+	if value, ok, err := brokerToolArgInt(ToolReadAgentResult, args, "max_chars"); err != nil {
+		return parsed, err
+	} else if ok && value > 0 {
+		parsed.MaxChars = value
+	}
+	return parsed, nil
+}
+
+// readResultSectionsArg reads the optional sections list, accepting a single
+// string or a list of strings.
+func readResultSectionsArg(args map[string]interface{}) ([]string, error) {
+	raw, ok := args["sections"]
+	if !ok || raw == nil {
+		return nil, nil
+	}
+	values := make([]string, 0, 6)
+	switch typed := raw.(type) {
+	case string:
+		values = append(values, typed)
+	case []string:
+		values = append(values, typed...)
+	case []interface{}:
+		for _, item := range typed {
+			text, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("sections must be a list of strings")
+			}
+			values = append(values, text)
+		}
+	default:
+		return nil, fmt.Errorf("sections must be a list of strings")
+	}
+	return supervision.NormalizeReadResultSections(values)
 }
 
 // parseAckLifecycleArgs converts raw tool args into the typed input.
@@ -471,6 +582,47 @@ func supervisionDescendantsNextAction(snapshot *supervision.Snapshot) string {
 	return ""
 }
 
+// readAgentResultSummary renders the one-line cache-safe summary of a
+// read_agent_result payload: how much was returned and what to do when nothing
+// durable was recorded.
+func readAgentResultSummary(payload supervision.ReadResultPayload) string {
+	if payload.Source == supervision.ResultSourceNone {
+		summary := "no durable result recorded"
+		if payload.ErrorCode != "" {
+			summary += " (" + payload.ErrorCode + ")"
+		}
+		if payload.NextAction != "" {
+			summary += "; " + payload.NextAction
+		}
+		return summary
+	}
+	parts := []string{fmt.Sprintf("result source=%s", payload.Source)}
+	if payload.Status != "" {
+		parts = append(parts, "status="+payload.Status)
+	}
+	counts := make([]string, 0, 4)
+	for _, entry := range []struct {
+		label string
+		count int
+	}{
+		{"findings", len(payload.Findings)},
+		{"changes", len(payload.Changes)},
+		{"artifacts", len(payload.Artifacts)},
+		{"errors", len(payload.Errors)},
+	} {
+		if entry.count > 0 {
+			counts = append(counts, fmt.Sprintf("%s=%d", entry.label, entry.count))
+		}
+	}
+	if len(counts) > 0 {
+		parts = append(parts, strings.Join(counts, " "))
+	}
+	if payload.Truncated {
+		parts = append(parts, "truncated=true")
+	}
+	return strings.Join(parts, "; ")
+}
+
 // executeSupervisionTool handles the four control-plane tools. The dispatcher
 // stays thin on purpose: scoping, allowed_actions re-validation and CAS all
 // live in the host implementation (LocalControlService), so the model can never
@@ -533,6 +685,23 @@ func (b *Broker) executeSupervisionTool(ctx context.Context, toolName, sessionID
 			"next_seq":         snapshot.NextSeq,
 			"next_action":      supervisionDescendantsNextAction(snapshot),
 		}, supervisionDescendantsSummary(snapshot)), nil
+
+	case ToolReadAgentResult:
+		request, err := parseReadAgentResultArgs(args)
+		if err != nil {
+			return nil, nil, err
+		}
+		payload, err := b.Supervision.ReadAgentResult(ctx, sessionID, request)
+		if err != nil {
+			return nil, nil, err
+		}
+		return payload, attachCacheSafeSummary(map[string]interface{}{
+			"source":      payload.Source,
+			"status":      payload.Status,
+			"truncated":   payload.Truncated,
+			"error_code":  payload.ErrorCode,
+			"next_action": payload.NextAction,
+		}, readAgentResultSummary(payload)), nil
 
 	case ToolAckLifecycle:
 		request, err := parseAckLifecycleArgs(args)

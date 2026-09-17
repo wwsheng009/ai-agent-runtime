@@ -199,6 +199,26 @@ type localChatRuntimeHost struct {
 	// 用互斥锁而非 sync.Once：构建失败不缓存，后续调用可重试。
 	usageMu  sync.Mutex
 	usageSvc *usageanalytics.Service
+
+	// P0-1c: CLI 宿主与 API 宿主对等的 live-only 子代理进度镜像。
+	// 一个 host 一个实例（Once + 值），既服务子会话 tool.progress 订阅，
+	// 也作为 BatchProgressSource.Messages 的富化源；镜像自身不落库、
+	// 不起 goroutine，随 host 生命周期收敛。
+	subagentProgressMirrorOnce  sync.Once
+	subagentProgressMirrorValue *supervision.SubagentProgressMirror
+	// childEventUnsubsMu / childEventUnsubs 收敛 per-child 的事件订阅句柄：
+	// 子会话结束时立即释放；host.Close() 兜底释放，避免子会话未结束就关
+	// host 时在总线上残留订阅（订阅回调本身无 goroutine）。
+	childEventUnsubsMu sync.Mutex
+	childEventUnsubs   map[string]func()
+
+	// runtimeEventBridgeOnce / runtimeEventBridgeUnsub 缓存本地 A 通道桥
+	// （总线 → session_runtime.sqlite）的订阅句柄，host.Close() 时释放。
+	// 方案 §0.2 / G2：aicli 本地 chat 走 localChatRuntimeHost，而 A 通道桥
+	// 原先只存在于 runtime-server 的 api/skills handler 内，导致 agent loop
+	// 发出的 tool.requested/tool.completed 在本地模式从未落库。
+	runtimeEventBridgeOnce  sync.Once
+	runtimeEventBridgeUnsub func()
 }
 
 // acquireActorTurnGate serializes internally-triggered and foreground turns
@@ -261,6 +281,10 @@ func (h *localChatRuntimeHost) Close() {
 				h.cleanupFns[i]()
 			}
 		}
+		// P0-1c 兜底：清理清理函数不会覆盖的 per-child 子会话事件订阅
+		// （正常情况下已随 actor 停止时的 session_end 释放，这里保证
+		// 子会话未结束就关闭 host 也不残留订阅）。
+		h.releaseAllChildEventSubscriptions()
 	})
 }
 
@@ -330,6 +354,34 @@ func (h *localChatRuntimeHost) shutdownSubagentCoordinators() {
 		_ = coordinator.Shutdown(ctx, "host shutdown")
 		cancel()
 	}
+}
+
+// subagentTaskProgressCounts aggregates the M1 task-level progress write-back
+// counters over this host's registered batch coordinators. enabled reports
+// whether the write-back is explicitly configured (interval > 0), so the debug
+// view can distinguish "feature off" from "on but nothing written yet".
+// Best-effort read-only projection: it never mutates a coordinator.
+func (h *localChatRuntimeHost) subagentTaskProgressCounts() (writes, windowSkipped, conflictsDropped, errors int64, enabled bool) {
+	if h == nil {
+		return 0, 0, 0, 0, false
+	}
+	h.subagentMu.Lock()
+	coordinators := make([]*agent.SubagentBatchCoordinator, 0, len(h.subagentCoordinators))
+	for coordinator := range h.subagentCoordinators {
+		if coordinator != nil {
+			coordinators = append(coordinators, coordinator)
+		}
+	}
+	h.subagentMu.Unlock()
+	for _, coordinator := range coordinators {
+		counts := coordinator.TaskProgressWriteCounts()
+		writes += counts.Writes
+		windowSkipped += counts.WindowSkipped
+		conflictsDropped += counts.ConflictsDropped
+		errors += counts.Errors
+	}
+	enabled = h.supervisionConfig.WithDefaults().TaskProgressInterval > 0
+	return writes, windowSkipped, conflictsDropped, errors, enabled
 }
 
 func localSubagentBatchEmitter(host *localChatRuntimeHost) agent.BatchEmitter {
@@ -804,6 +856,46 @@ func (h *localChatRuntimeHost) submitParentWakeTurn(ctx context.Context, parentS
 	return err
 }
 
+// bindRuntimeEventPersistence 安装本地 A 通道桥（总线 → 会话事件库）。
+//
+// 方案 §0.2 / G2：runtime-server 的 A 通道桥在 api/skills
+// handler.attachRuntimeEventBridge 内，而 aicli 本地 chat 使用
+// localChatRuntimeHost，历史上只有若干特例镜像（子代理完成、team 生命周期、
+// 输入事件、agent 回收），agent loop 发布的 tool.requested/tool.completed 等
+// 事件因此从未写入本地 session_runtime.sqlite。
+//
+// 落盘判定复用 internal/events 的声明式注册表（单一真源），别名映射复用
+// events.SessionStoreTypeAlias；不得在此另建白名单或第二份 switch。
+// 生产者已直接落库的事件（payload 携带 seq，如 SessionActor.publish、
+// 子代理完成镜像、team 生命周期）在这里跳过，避免重复 append。
+func (h *localChatRuntimeHost) bindRuntimeEventPersistence() {
+	if h == nil || h.EventBus == nil || h.EventStore == nil {
+		return
+	}
+	h.runtimeEventBridgeOnce.Do(func() {
+		handler := func(event runtimeevents.Event) {
+			if strings.TrimSpace(event.SessionID) == "" {
+				return
+			}
+			if event.Payload != nil {
+				if _, persisted := event.Payload["seq"]; persisted {
+					return
+				}
+			}
+			if !runtimeevents.IsPersistedEventType(event.Type) {
+				return
+			}
+			mapped := event
+			mapped.Type = runtimeevents.SessionStoreTypeAlias(event.Type)
+			_, _ = h.EventStore.AppendEvent(context.Background(), mapped)
+		}
+		h.runtimeEventBridgeUnsub = h.EventBus.SubscribeCancelable("", handler)
+		if h.runtimeEventBridgeUnsub != nil {
+			h.cleanupFns = append(h.cleanupFns, h.runtimeEventBridgeUnsub)
+		}
+	})
+}
+
 // bindSupervisionWakeConsumer subscribes the parent root session turn end so
 // wakes accumulated while the parent was busy are drained as soon as the
 // parent becomes idle again (doc 6.5 rule 2 closure).
@@ -928,6 +1020,9 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		globalAgentStore = agentControlRegistry.AgentStore
 	}
 	supervisionConfig := cfg.Supervision.WithDefaults()
+	// P0-2 改动 3：原始配置低于 30s 下限时，构造路径就把钳制事实记进日志
+	//（host.supervisionConfig 存的是钳制后的值，启动巡查时不再重复告警）。
+	warnProgressCheckIntervalClamped(cfg.Supervision.ProgressCheckInterval, supervisionConfig.ProgressCheckInterval)
 	supervisionPlane, err := runtimeserver.BuildSupervisionControlPlane(
 		resolveLocalChatSupervisionDataDir(session, runtimeConfig),
 		supervisionConfig,
@@ -1085,6 +1180,9 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		},
 	}
 
+	// A 通道桥：先把总线 → 会话事件库的落盘管道接上（方案 §0.2），
+	// 再接采集器；两者都只按订阅生效，顺序不影响各自语义。
+	host.bindRuntimeEventPersistence()
 	// 缓存分析 collector：本地 runtime host 初始化完成即挂载（对齐
 	// runtime-server 路由注册即挂载，§3.2）。EventBus 订阅不具备回溯能力：
 	// 若延迟到首次 /web/api/cache/* 查询才构建 service，会丢失此前的
@@ -1198,9 +1296,16 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		// 灰度开关（默认开）：run 终态后到达的审批决议零恢复；显式
 		// supervision.approval_terminal_guard=false 可回退旧行为。
 		ApprovalTerminalGuard: h.supervisionConfig.ApprovalTerminalGuard,
-		PrepareRun:            localChatPrepareRunHook(apiAgent, session, workspaceRoot, isBaseSession),
-		PersistHook:           localGoalPersistHook(sessionStore),
-		RecoverStale:          true,
+		// P0-3a/M5 + P0-3b/M6：v2 指令语义显式开启且未关闭 trigger_turn_auto
+		// 时，run 结束后消费子会话 mailbox 的 trigger_turn 指令并自动起一次
+		// 新 turn。RunMeta 复用 followup_task 的 child-session 重建口径。
+		TriggerTurnDrain: h.supervisionConfig.TriggerTurnDrainEnabled(),
+		TriggerTurnRunMeta: func(_ context.Context, session *runtimechat.Session) *team.RunMeta {
+			return toolbroker.SpawnAgentRunMetaFromContext(session)
+		},
+		PrepareRun:   localChatPrepareRunHook(apiAgent, session, workspaceRoot, isBaseSession),
+		PersistHook:  localGoalPersistHook(sessionStore),
+		RecoverStale: true,
 		// 长 turn 中途增量落库：ReAct 循环每次提交 durable 历史后按该间隔把
 		// 已提交内容写回权威会话存储，避免长 turn 期间会话行长时间停在起始
 		// 状态（默认 15s，见 chat.DefaultSessionCheckpointInterval；可用
@@ -1554,6 +1659,9 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 			Emitter:            localSubagentBatchEmitter(host),
 			TerminalSink:       localSubagentBatchTerminalSink(host),
 			LifecycleProjector: localSubagentBatchLifecycleProjector(host),
+			// P0-1a/M1: task-level progress write-back is an explicit opt-in
+			// (supervision.task_progress_interval, default 0 = no writes).
+			TaskProgressInterval: host.supervisionConfig.WithDefaults().TaskProgressInterval,
 		})
 		if release, active := host.beginSubagentOperation(); active {
 			if host.registerSubagentCoordinator(coordinator) {
@@ -2489,6 +2597,7 @@ func localWakeBudgetStates(ctx context.Context, host *localChatRuntimeHost, scop
 		supervision.WakeBudgetClassApproval,
 		supervision.WakeBudgetClassFailure,
 		supervision.WakeBudgetClassOther,
+		supervision.WakeBudgetClassProgress,
 	}
 	seen := make(map[string]bool, len(scopes))
 	states := make([]supervision.WakeBudgetState, 0, len(scopes)*len(classes))
@@ -2538,9 +2647,10 @@ func injectLocalSupervisionPreflight(ctx context.Context, host *localChatRuntime
 		SubjectPresence:       localSupervisionSubjectPresence(host),
 		HostCapabilities:      localSupervisionHostCapabilities(host),
 		// P0-B：把宿主已有的 durable batch 控制面投影成 progress 区块。只读，
-		// 不落新表也不产生唤醒；host.SubagentBatches 未装配时 NewBatchProgressSource
-		// 返回 nil，注入文本与改动前完全一致。
-		Progress: supervision.NewBatchProgressSource(host.SubagentBatches),
+		// 不落新表也不产生唤醒；P0-1c 起同一构造器带上 per-host 的 live-only
+		// 镜像富化（last_message 与 API 宿主一致）；host.SubagentBatches 未装配
+		// 时返回 nil，注入文本与改动前完全一致。
+		Progress: host.newLocalBatchProgressSource(),
 	})
 	if err != nil {
 		return "", fmt.Errorf("build supervision preflight digest: %w", err)

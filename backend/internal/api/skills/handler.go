@@ -148,6 +148,7 @@ type Handler struct {
 	configDocumentService    ConfigDocumentService
 	agentMaxStepsPersister   AgentMaxStepsPersister
 	agentMaxStepsProvider    AgentMaxStepsProvider
+	runtimeConfigLayersProvider RuntimeConfigLayersProvider
 	serviceControlService    RuntimeServiceControlService
 	fileTransferService      FileTransferService
 	logFilePath              string
@@ -200,6 +201,12 @@ type Handler struct {
 	// supervisionProgressCheckWG 让 StopSupervisionProgressCheck 能等到循环真正
 	// 退出（重配后不留残留巡检 goroutine）。
 	supervisionProgressCheckWG sync.WaitGroup
+
+	// P0-1c/M7：per-host 长生命周期的 live-only 进度镜像（与 CLI 宿主的
+	// host.subagentProgressMirror 同形）。子会话事件订阅与 progress 投影的
+	// Messages 富化共用同一实例，保证两宿主的 last_message 口径一致。
+	supervisionProgressMirrorOnce  sync.Once
+	supervisionProgressMirrorValue *supervision.SubagentProgressMirror
 
 	// P2 恢复对等（与 CLI 的 runLocalSubagentStartupRecovery 对称）：durable
 	// batch store 注入后跑两趟有界恢复（立即 + 宽限期后），把上次进程遗留的
@@ -761,12 +768,16 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/logs", h.ListRuntimeLogs).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/logs/stream", h.StreamRuntimeLogs).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/analytics/sessions", h.ListAnalyticsSessions).Methods(http.MethodGet)
-	runtimeRouter.HandleFunc("/analytics/overview", h.GetAnalyticsSummary).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/overview", h.GetAnalyticsOverview).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/analytics/summary", h.GetAnalyticsSummary).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/analytics/dimensions", h.GetAnalyticsDimensions).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/analytics/sessions/{id}", h.GetAnalyticsSessionUsage).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/analytics/sessions/{id}/usage", h.GetAnalyticsSessionUsage).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/analytics/sessions/{id}/turns", h.ListAnalyticsSessionTurns).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/tools", h.ListAnalyticsToolStats).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/tools/{tool}", h.GetAnalyticsToolStatsDetail).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/subagents", h.ListAnalyticsSubagentStats).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/errors", h.ListAnalyticsErrorPatterns).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/traces/stats", h.GetRuntimeTraceStats).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/traces/governance", h.GetRuntimeTraceGovernance).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/traces", h.GetRuntimeTraces).Methods(http.MethodGet)
@@ -4033,12 +4044,9 @@ func shouldPersistRuntimeSessionEvent(event runtimeevents.Event) bool {
 
 func mapRuntimeEventToSession(event runtimeevents.Event) runtimeevents.Event {
 	mapped := event
-	switch strings.TrimSpace(event.Type) {
-	case "tool.requested":
-		mapped.Type = chat.EventToolStarted
-	case "tool.completed":
-		mapped.Type = chat.EventToolFinished
-	}
+	// 别名映射收敛到 internal/events 单一实现（aicli 本地 A 通道桥共用）；
+	// 这里不再保留第二份 switch，避免两处落盘名漂移。
+	mapped.Type = runtimeevents.SessionStoreTypeAlias(event.Type)
 	return mapped
 }
 
@@ -9388,6 +9396,9 @@ func (h *Handler) runtimeStatusSnapshot(ctx context.Context, mode llm.HealthChec
 		// P0-2：运行时事件「交付通道」未命中/转发计数（A 丢弃按原因+类型三分，
 		// B live-only 转发量）。四条通道的白名单都可观测，不再有静默丢弃。
 		"runtime_event_delivery": SnapshotRuntimeEventDelivery(),
+		// P0-1/批次 3.2：分析库采集健康（attached/db_path/ingested_total/
+		// conflict_total/last_ingest_at）；attached=false 时字段仍齐全。
+		"usage_analytics": h.usageAnalyticsHealthSnapshot(),
 	}
 }
 

@@ -244,6 +244,10 @@ export const enRuntimeConfigEditorRuntime = {
     saveFailed: "Save failed: {{message}}",
     loadFailed: "Failed to load the server default: {{message}}",
     configFile: "Config file: {{path}}",
+    layerSummary: "Layers: {{layers}}",
+    layerReadOnly: "read-only default (never written)",
+    layerWritable: "write target",
+    layerCandidate: "candidate (not created yet)",
     workspaceValue:
       "Workspace per-turn value: {{count}} (chat requests send it and override the server default; both share the same agent.maxSteps key).",
     scopeNote: "Source: agent.maxSteps in the runtime config file.",

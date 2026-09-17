@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 )
 
 type effectiveConfigDocument struct {
@@ -11,6 +13,10 @@ type effectiveConfigDocument struct {
 	Parsed            interface{}
 	SourcePath        string
 	SnapshotRecovered bool
+	// Layered is set when layered merging is enabled and more than one layer
+	// exists on disk; writes must then be distributed per layer instead of
+	// overwriting a single file with the merged result.
+	Layered *agentconfig.MergedConfigDocument
 }
 
 var sparseProviderRecoveryKeys = []string{"model_capabilities", "supports_max_output_tokens"}
@@ -28,7 +34,7 @@ func loadEffectiveConfigDocument(
 		if err != nil {
 			return nil, err
 		}
-		parsed, err := parseConfigDocumentValue(raw, format)
+		parsed, err := parseConfigDocumentValue([]byte(expandConfigDocumentEnvVars(string(raw))), format)
 		if err != nil {
 			return nil, err
 		}
@@ -43,7 +49,7 @@ func loadEffectiveConfigDocument(
 	if err != nil {
 		return nil, err
 	}
-	snapshotParsed, err := parseConfigDocumentValue(snapshotRaw, format)
+	snapshotParsed, err := parseConfigDocumentValue([]byte(expandConfigDocumentEnvVars(string(snapshotRaw))), format)
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +58,7 @@ func loadEffectiveConfigDocument(
 	if err != nil {
 		return nil, err
 	}
-	baseParsed, err := parseConfigDocumentValue(baseRaw, format)
+	baseParsed, err := parseConfigDocumentValue([]byte(expandConfigDocumentEnvVars(string(baseRaw))), format)
 	if err != nil {
 		return nil, err
 	}

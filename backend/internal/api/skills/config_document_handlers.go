@@ -22,6 +22,19 @@ type ConfigDocument struct {
 	RestartRequired        bool                         `json:"restart_required"`
 	SupportsStructuredSave bool                         `json:"supports_structured_save"`
 	RuntimeImpact          *ConfigDocumentRuntimeImpact `json:"runtime_impact,omitempty"`
+	// Layers/Origins describe config layering when it is active: the candidate
+	// files in precedence order and the layer that supplied each key.
+	Layers  []ConfigDocumentLayer `json:"layers,omitempty"`
+	Origins map[string]string     `json:"origins,omitempty"`
+}
+
+type ConfigDocumentLayer struct {
+	Kind    string `json:"kind"`
+	Path    string `json:"path"`
+	Present bool   `json:"present"`
+	// ReadOnly marks a layer that only supplies defaults (runtime.yaml's
+	// portable/repository file): writes are routed to a writable layer.
+	ReadOnly bool `json:"read_only,omitempty"`
 }
 
 type ConfigDocumentRuntimeImpact struct {
@@ -30,6 +43,10 @@ type ConfigDocumentRuntimeImpact struct {
 	RestartRequiredPaths []string `json:"restart_required_paths,omitempty"`
 	InactivePaths        []string `json:"inactive_paths,omitempty"`
 	AppliedPaths         []string `json:"applied_paths,omitempty"`
+	// PathLayers attributes each changed path to the layer kind its write will
+	// land in (origin layer, or the highest present layer for new keys). Empty
+	// when layering is off.
+	PathLayers map[string]string `json:"path_layers,omitempty"`
 }
 
 type ConfigDocumentSection struct {

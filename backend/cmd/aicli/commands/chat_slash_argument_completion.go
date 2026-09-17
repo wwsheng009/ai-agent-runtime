@@ -162,6 +162,9 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 			{Command: "cache", Summary: "会话缓存统计（默认视图）", Group: string(chatSlashCommandGroupSession)},
 			{Command: "requests", Summary: "最近 N 条 LLM 请求明细", Group: string(chatSlashCommandGroupSession)},
 			{Command: "trace", Summary: "按消息 id 追溯", Group: string(chatSlashCommandGroupSession)},
+			{Command: "tools", Summary: "工具调用/失败/耗时表", Group: string(chatSlashCommandGroupSession)},
+			{Command: "subagents", Summary: "子代理完成率/失败分类/重试/耗时", Group: string(chatSlashCommandGroupSession)},
+			{Command: "errors", Summary: "失败模式 Top-N", Group: string(chatSlashCommandGroupSession)},
 		})
 	case "/debug":
 		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{

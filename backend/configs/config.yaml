@@ -1252,7 +1252,7 @@ skills_runtime:
   aicli_skill_exposure_mode: ${SKILLS_RUNTIME_AICLI_SKILL_EXPOSURE_MODE:-auto}
   aicli_skill_exposure_top_k: ${SKILLS_RUNTIME_AICLI_SKILL_EXPOSURE_TOP_K:-5}
   api_key_scopes: {}
-  config_file: ${SKILLS_RUNTIME_CONFIG_FILE:-backend/configs/runtime.yaml}
+  config_file: ${SKILLS_RUNTIME_CONFIG_FILE:-configs/runtime.yaml}
   default_max_requests: ${SKILLS_RUNTIME_DEFAULT_MAX_REQUESTS:-0}
   default_max_tokens: ${SKILLS_RUNTIME_DEFAULT_MAX_TOKENS:-0}
   disable_hot_reload_ops: ${SKILLS_RUNTIME_DISABLE_HOT_RELOAD_OPS:-false}
@@ -1328,6 +1328,36 @@ special_apis:
     enabled: ${SPECIAL_APIS_METRICS_ENABLED:-true}
     namespace: ai_gateway
     subsystem: special_apis
+supervision:
+  # P0-2（2026-09-17）周期巡查是显式 opt-in，出厂 0 = 关闭：不注册 ticker、
+  # 不新增 goroutine，宿主行为与引入该开关前完全一致。
+  # 开启后（正数间隔）仅在「存在 running background batch + 父会话空闲 +
+  # scope 内无未决 critical + progress 预算未耗尽」四条同时成立时，经既有 wake
+  # 通路注入一次轻量 progress 摘要。成本：每次注入约 60–400 token（progress
+  # 区块上限 3 组 × (1 组行 + ≤4 子行)），并按间隔持续消耗一次父 turn；无
+  # active batch 时不产生任何写入或 turn。
+  # 语义与约束：
+  #   - 低于 30s 的间隔会被钳制为 30s 并记 warning（MinProgressCheckInterval）；
+  #     建议 30s–2m——进度时间戳是分钟级粒度，更密只会重复同一行。
+  #   - progress wake 有独立预算，默认 6 次/窗口，不占用 failure/other 的
+  #     critical 告警预算；存在未决 critical 时巡查让位。
+  #   - 0 = 关闭（默认），关闭语义不得被其它开关隐式打开。
+  # progress_check_interval: 90s
+  # progress wake 的独立窗口额度（默认 6；负数不设限，不推荐——progress 是
+  # 最容易被放大的唤醒家族）。
+  # wake_max_progress_wake: 6
+  # P0-1 task 级进度写回节流（默认 0 = 不写，灰度期出厂关闭）：正数为窗口
+  #（如 1m），running 任务的 LastProgressAt 按窗口刷新，父侧 progress 汇总
+  # 显示真实进度年龄而不是 60s 心跳粒度；关闭时写入成本为 0。
+  # task_progress_interval: 1m
+  # P0-3 指令投递语义 v2（默认 false = 2026-09-17 现状，逐字段兼容）：
+  # send_message 仅投递不起 turn；followup_task / send_input(interrupt=false)
+  # 在 busy 时排队投递（queued=true），run 结束后由 trigger drain 自动消费；
+  # 终态子会话返回明确错误。灰度通过后再转默认 true。
+  # message_semantics_v2: true
+  # busy 指令是否由 run 结束后的 drain 自动起 turn（默认 true，仅 v2 生效；
+  # 置 false 时 busy 指令只留 mailbox，不自动消费）。
+  # trigger_turn_auto: true
 transformer:
   body_modifiers:
     request: null

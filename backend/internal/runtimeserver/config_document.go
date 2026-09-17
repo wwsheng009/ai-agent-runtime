@@ -78,6 +78,10 @@ func (s *LocalConfigDocumentService) LoadDocument() (*skillsapi.ConfigDocument, 
 	if info, statErr := os.Stat(effectiveDocument.SourcePath); statErr == nil {
 		doc.UpdatedAt = info.ModTime().UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
+	if effectiveDocument.Layered != nil {
+		doc.Layers = configDocumentLayers(effectiveDocument.Layered)
+		doc.Origins = effectiveDocument.Layered.Origins
+	}
 
 	return doc, nil
 }
@@ -115,6 +119,7 @@ func (s *LocalConfigDocumentService) PreviewDocument(
 
 	currentParsed := currentDocument.Parsed
 	impact := analyzeConfigDocumentRuntimeImpact(currentParsed, parsed)
+	attachConfigDocumentPathLayers(impact, currentDocument.Layered)
 
 	warnings := append([]string{
 		"这是预览结果，尚未写入磁盘。",
@@ -134,7 +139,7 @@ func (s *LocalConfigDocumentService) PreviewDocument(
 		"结构化保存会重新序列化整个文档，注释和手工排版可能会丢失；原始 YAML 模式更适合保留注释。",
 	)
 
-	return &skillsapi.ConfigDocument{
+	preview := &skillsapi.ConfigDocument{
 		Path:                   resolveAbsolutePath(documentPath),
 		Format:                 format,
 		Raw:                    string(content),
@@ -145,7 +150,12 @@ func (s *LocalConfigDocumentService) PreviewDocument(
 		SupportsStructuredSave: true,
 		RuntimeImpact:          impact,
 		Warnings:               warnings,
-	}, nil
+	}
+	if currentDocument.Layered != nil {
+		preview.Layers = configDocumentLayers(currentDocument.Layered)
+		preview.Origins = currentDocument.Layered.Origins
+	}
+	return preview, nil
 }
 
 func (s *LocalConfigDocumentService) SaveDocument(req skillsapi.ConfigDocumentSaveRequest) (*skillsapi.ConfigDocument, error) {
@@ -182,8 +192,23 @@ func (s *LocalConfigDocumentService) SaveDocument(req skillsapi.ConfigDocumentSa
 		return nil, err
 	}
 	impact := analyzeConfigDocumentRuntimeImpact(currentParsed, nextParsed)
-	if err := writeFilePreserveMode(documentPath, content); err != nil {
-		return nil, err
+	attachConfigDocumentPathLayers(impact, currentDocument.Layered)
+	if layered := currentDocument.Layered; layered != nil {
+		// Layered mode: send every changed key back to the layer that owns it.
+		// Writing the merged result to one file would pin lower-layer values
+		// into the highest layer and flatten the stack (design §7 R-1).
+		// New keys fall back to the highest present layer, never to the snapshot.
+		fallback := strings.TrimSpace(layered.SourcePath)
+		if fallback == "" {
+			fallback = documentPath
+		}
+		if _, err := agentconfig.ApplyMergedDocumentChanges(layered, nextParsed, fallback); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := writeFilePreserveMode(documentPath, content); err != nil {
+			return nil, err
+		}
 	}
 
 	doc, err := s.LoadDocument()
@@ -224,6 +249,10 @@ func (s *LocalConfigDocumentService) SaveDocument(req skillsapi.ConfigDocumentSa
 			currentDocument.SnapshotRecovered,
 		)...,
 	)
+	if currentDocument.Layered != nil {
+		doc.Warnings = append(doc.Warnings,
+			"分层配置已启用：本次保存按层分摊写回，每个改动键写入它来源的配置文件，未改动的文件不受影响。")
+	}
 	if !strings.EqualFold(strings.TrimSpace(req.Mode), "raw") {
 		doc.Warnings = append(doc.Warnings,
 			"结构化保存会重新序列化整个文档，注释和手工排版可能会丢失；原始 YAML 模式更适合保留注释。",
@@ -258,7 +287,64 @@ func (s *LocalConfigDocumentService) loadEffectiveDocument(
 	if s == nil {
 		return nil, fmt.Errorf("config path is required")
 	}
+	// Layered mode: serve the same merged document the CLI computes. Single
+	// layer setups keep the byte-identical single-file path below.
+	if agentconfig.MergeModeFromEnv() == agentconfig.MergeModeOn {
+		merged, err := agentconfig.LoadMergedConfigDocument()
+		if err != nil {
+			return nil, err
+		}
+		if merged.MultiLayer() {
+			parsed, parseErr := parseConfigDocumentValue(merged.MergedYAML, format)
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			return &effectiveConfigDocument{
+				Raw:        merged.MergedYAML,
+				Parsed:     parsed,
+				SourcePath: merged.SourcePath,
+				Layered:    merged,
+			}, nil
+		}
+	}
 	return loadEffectiveConfigDocument(s.baseConfigPath, s.snapshotPath, format)
+}
+
+// configDocumentLayers converts the layered stack into the API shape.
+func configDocumentLayers(merged *agentconfig.MergedConfigDocument) []skillsapi.ConfigDocumentLayer {
+	if merged == nil {
+		return nil
+	}
+	layers := make([]skillsapi.ConfigDocumentLayer, 0, len(merged.Layers))
+	for _, layer := range merged.Layers {
+		layers = append(layers, skillsapi.ConfigDocumentLayer{
+			Kind:    string(layer.Kind),
+			Path:    resolveAbsolutePath(layer.Path),
+			Present: layer.Present,
+		})
+	}
+	return layers
+}
+
+// attachConfigDocumentPathLayers attributes every changed path to the layer its
+// write will land in, so the runtime impact can name the file an edit touches
+// (design §9 H4). No-op when layering is off or nothing changed.
+func attachConfigDocumentPathLayers(
+	impact *skillsapi.ConfigDocumentRuntimeImpact,
+	merged *agentconfig.MergedConfigDocument,
+) {
+	if impact == nil || merged == nil || len(impact.ChangedPaths) == 0 {
+		return
+	}
+	layers := make(map[string]string, len(impact.ChangedPaths))
+	for _, path := range impact.ChangedPaths {
+		if kind := merged.WriteLayerKindFor(path); kind != "" {
+			layers[path] = kind
+		}
+	}
+	if len(layers) > 0 {
+		impact.PathLayers = layers
+	}
 }
 
 func (s *LocalConfigDocumentService) loadCurrentDocumentBytes() ([]byte, string, error) {

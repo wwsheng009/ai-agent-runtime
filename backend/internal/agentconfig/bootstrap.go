@@ -30,41 +30,34 @@ func SetUserHomeDirForTest(resolver func() (string, error)) {
 	userHomeDir = resolver
 }
 
-// DefaultConfigSearchPaths returns the default config lookup order for aicli.
-// Callers should treat the first existing file as authoritative.
+// DefaultConfigSearchPaths returns the default config lookup order for aicli,
+// highest precedence first. Callers should treat the first existing file as
+// authoritative in single-file mode.
 //
-// On non-main build profiles (for example win7compat) the profile-specific
-// filename leads and the standard filename (config.yaml) follows as a
-// compatibility fallback, so a win7compat binary discovers the same config
-// file that a standard runtime-server / web UI writes to instead of creating
-// an isolated profile config that silently diverges.
+// It is derived from ConfigLayerStack so aicli and runtime-server always agree
+// on precedence; see that function for the individual layer roles. On non-main
+// build profiles (for example win7compat) the profile-specific filename leads
+// and the standard filename (config.yaml) follows as a compatibility fallback,
+// so a win7compat binary discovers the same config file that a standard
+// runtime-server / web UI writes to instead of creating an isolated profile
+// config that silently diverges.
 func DefaultConfigSearchPaths() []string {
-	paths := make([]string, 0, 8)
-	if home, err := userHomeDir(); err == nil && home != "" {
-		paths = append(paths, filepath.Join(home, ".aicli", aiclipaths.DefaultConfigFileName))
-		if aiclipaths.StandardConfigFileName != aiclipaths.DefaultConfigFileName {
-			paths = append(paths, filepath.Join(home, ".aicli", aiclipaths.StandardConfigFileName))
-		}
-	}
-	paths = append(paths,
-		filepath.Join(".aicli", aiclipaths.DefaultConfigFileName),
-		aiclipaths.DefaultCLIConfigFileName,
-		filepath.Join("configs", aiclipaths.DefaultConfigFileName),
-	)
+	return ConfigLayerSearchPaths()
+}
+
+func defaultConfigSearchNames() []string {
+	names := []string{aiclipaths.DefaultConfigFileName}
 	if aiclipaths.StandardConfigFileName != aiclipaths.DefaultConfigFileName {
-		paths = append(paths,
-			filepath.Join(".aicli", aiclipaths.StandardConfigFileName),
-			filepath.Join("configs", aiclipaths.StandardConfigFileName),
-		)
+		names = append(names, aiclipaths.StandardConfigFileName)
 	}
-	return paths
+	return names
 }
 
 // DefaultDotEnvSearchPaths returns the default .env file lookup order for aicli.
 // The order is derived from DefaultConfigSearchPaths so .env lookup stays in
 // sync with config file lookup:
-//  1. $HOME/.aicli/.env (user-level)
-//  2. .aicli/.env (project-level)
+//  1. .aicli/.env (project-level)
+//  2. $HOME/.aicli/.env (user-level)
 //  3. .env (current directory)
 //  4. configs/.env (legacy)
 //
@@ -177,6 +170,19 @@ func ResolveWritableConfigPath(configPath string) string {
 	if configPath != "" {
 		return configPath
 	}
+	// New configs default to the user-level path (decision D4): both the CLI and
+	// the server create and look up $HOME/.aicli/<config>, and project-level
+	// files only appear when explicitly created (`aicli init --project`).
+	if globalPath, err := ResolveGlobalConfigPath(); err == nil && strings.TrimSpace(globalPath) != "" {
+		return globalPath
+	}
+	return ResolveProjectConfigPath()
+}
+
+// ResolveProjectConfigPath returns the project-level config path
+// (./.aicli/<config>), used by `aicli init --project` and as the last-resort
+// fallback when no user home directory is available.
+func ResolveProjectConfigPath() string {
 	return filepath.Clean(starterConfigRelativePath)
 }
 
@@ -196,19 +202,31 @@ func ResolveGlobalConfigPath() (string, error) {
 // EnsureStarterConfigFile returns an existing config path or creates a starter
 // config when no config file can be found.
 //
-// The helper intentionally keeps the generated file minimal:
-// - provider-related sections stay empty so users can fill them in later
-// - only the selected runtime-config path is explicit; other settings use code defaults
+// Search order (highest first):
+//  1. Explicit configPath (if non-empty)
+//  2. ./.aicli/<config> (project-level override)
+//  3. $HOME/.aicli/<config> (user-level default)
+//
+// When no config exists, a starter file is created at the user-level path
+// when the home directory is available; otherwise it falls back to the
+// project-level path.
 func EnsureStarterConfigFile(configPath string) (string, bool, error) {
 	configPath = normalizeConfigPath(configPath)
 	if configPath != "" {
 		return configPath, false, nil
 	}
 
+	// Project-level override: ./.aicli/<config> (return existing without creating)
+	projectPath := filepath.Clean(starterConfigRelativePath)
+	if info, err := os.Stat(projectPath); err == nil && !info.IsDir() {
+		return projectPath, false, nil
+	}
+
+	// User-level default: $HOME/.aicli/<config> (create if missing)
 	if globalPath, err := ResolveGlobalConfigPath(); err == nil && strings.TrimSpace(globalPath) != "" {
 		return EnsureStarterConfigAtPath(globalPath)
 	}
-	return EnsureStarterConfigAtPath(filepath.Clean(starterConfigRelativePath))
+	return EnsureStarterConfigAtPath(projectPath)
 }
 
 // EnsureStarterConfigAtPath creates a starter config at the specified path when

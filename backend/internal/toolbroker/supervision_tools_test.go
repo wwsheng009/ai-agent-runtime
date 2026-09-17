@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -18,6 +19,7 @@ type fakeSupervisionController struct {
 	snapshot     *supervision.Snapshot
 	notification *supervision.Notification
 	record       supervision.ActionRecord
+	result       supervision.ReadResultPayload
 	err          error
 
 	parentID       string
@@ -25,6 +27,7 @@ type fakeSupervisionController struct {
 	descendantsReq SupervisionDescendantsArgs
 	ackReq         AckLifecycleArgs
 	controlReq     ControlDescendantArgs
+	resultReq      ReadAgentResultArgs
 	calls          int
 }
 
@@ -56,6 +59,13 @@ func (f *fakeSupervisionController) ControlDescendant(ctx context.Context, paren
 	return f.record, f.err
 }
 
+func (f *fakeSupervisionController) ReadAgentResult(ctx context.Context, parentSessionID string, args ReadAgentResultArgs) (supervision.ReadResultPayload, error) {
+	f.calls++
+	f.parentID = parentSessionID
+	f.resultReq = args
+	return f.result, f.err
+}
+
 func supervisionDefinition(t *testing.T, defs []types.ToolDefinition, name string) types.ToolDefinition {
 	t.Helper()
 	for _, def := range defs {
@@ -73,6 +83,7 @@ func TestBroker_Definitions_GateSupervisionToolsOnHostCapability(t *testing.T) {
 	without := toolDefinitionNames((&Broker{}).Definitions())
 	require.NotContains(t, without, ToolSupervisionSnapshot)
 	require.NotContains(t, without, ToolSupervisionDescendants)
+	require.NotContains(t, without, ToolReadAgentResult)
 	require.NotContains(t, without, ToolAckLifecycle)
 	require.NotContains(t, without, ToolControlDescendant)
 
@@ -81,6 +92,7 @@ func TestBroker_Definitions_GateSupervisionToolsOnHostCapability(t *testing.T) {
 	names := toolDefinitionNames(defs)
 	require.Contains(t, names, ToolSupervisionSnapshot)
 	require.Contains(t, names, ToolSupervisionDescendants)
+	require.Contains(t, names, ToolReadAgentResult)
 	require.Contains(t, names, ToolAckLifecycle)
 	require.Contains(t, names, ToolControlDescendant)
 
@@ -107,6 +119,11 @@ func TestBroker_Definitions_GateSupervisionToolsOnHostCapability(t *testing.T) {
 	for _, key := range []string{"mode", "health", "include_terminal", "limit", "after_seq"} {
 		require.Contains(t, descendantParams, key)
 	}
+	resultsParam, ok := descendantParams["include_results"].(map[string]interface{})
+	require.True(t, ok, "include_results must be part of the descendants contract")
+	require.Contains(t, resultsParam["description"], "Significantly increases the output",
+		"include_results must warn about the output cost")
+	require.Contains(t, resultsParam["description"], "Default false")
 	healthParam, ok := descendantParams["health"].(map[string]interface{})
 	require.True(t, ok)
 	require.Contains(t, healthParam["description"], "action_required",
@@ -138,11 +155,27 @@ func TestBroker_Definitions_GateSupervisionToolsOnHostCapability(t *testing.T) {
 	require.True(t, ok)
 	require.Contains(t, controlNotification["description"], "verbatim",
 		"control_descendant must require a notification_id copied from the read models")
+
+	readResult := supervisionDefinition(t, defs, ToolReadAgentResult)
+	require.Equal(t, false, readResult.Metadata[types.ToolMetadataEmptyReplayCacheKey],
+		"read_agent_result is a polling tool: an empty answer must not be cached as a negative one")
+	require.Contains(t, readResult.Description, "no_result_recorded")
+	require.Contains(t, readResult.Description, "read_agent_events")
+	require.Contains(t, readResult.Description, "max_chars")
+	readResultParams, ok := readResult.Parameters["properties"].(map[string]interface{})
+	require.True(t, ok)
+	for _, key := range []string{"id", "task_id", "sections", "max_chars"} {
+		require.Contains(t, readResultParams, key)
+	}
+	idParam, ok := readResultParams["id"].(map[string]interface{})
+	require.True(t, ok)
+	require.Contains(t, idParam["description"], "required")
+	require.Equal(t, []string{"id"}, readResult.Parameters["required"])
 }
 
 func TestBroker_IsBrokerTool_RecognizesSupervisionTools(t *testing.T) {
 	broker := &Broker{}
-	for _, name := range []string{ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolAckLifecycle, ToolControlDescendant, "supervisionSnapshot", "supervisionDescendants", "ackLifecycle", "controlDescendant"} {
+	for _, name := range []string{ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant, "supervisionSnapshot", "supervisionDescendants", "readAgentResult", "ackLifecycle", "controlDescendant"} {
 		require.Truef(t, broker.IsBrokerTool(name), "%s must be recognized as a broker tool", name)
 	}
 }
@@ -204,6 +237,7 @@ func TestBroker_Execute_SupervisionDescendants(t *testing.T) {
 		"mode":             "CHILDREN",
 		"health":           "Action_Required",
 		"include_terminal": true,
+		"include_results":  true,
 		"after_seq":        float64(4),
 		"limit":            float64(50),
 	})
@@ -215,6 +249,7 @@ func TestBroker_Execute_SupervisionDescendants(t *testing.T) {
 	require.Equal(t, "children", controller.descendantsReq.Mode, "mode is a closed lowercase vocabulary")
 	require.Equal(t, "action_required", controller.descendantsReq.Health)
 	require.True(t, controller.descendantsReq.IncludeTerminal)
+	require.True(t, controller.descendantsReq.IncludeResults, "include_results must reach the host controller")
 	require.Equal(t, int64(4), controller.descendantsReq.AfterSeq)
 	require.Equal(t, 50, controller.descendantsReq.Limit)
 
@@ -233,6 +268,84 @@ func TestBroker_Execute_SupervisionDescendants(t *testing.T) {
 		require.Error(t, err)
 	}
 	require.Equal(t, 1, controller.calls, "invalid filters never reach the controller")
+}
+
+// TestBroker_Execute_SupervisionDescendantsIncludeResultsDefaultsFalse pins the
+// byte-compat contract: without the argument the host must see IncludeResults
+// false, so the provider keeps returning the legacy row payload.
+func TestBroker_Execute_SupervisionDescendantsIncludeResultsDefaultsFalse(t *testing.T) {
+	controller := &fakeSupervisionController{snapshot: &supervision.Snapshot{}}
+	broker := &Broker{Supervision: controller}
+
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSupervisionDescendants, map[string]interface{}{})
+	require.NoError(t, err)
+	require.False(t, controller.descendantsReq.IncludeResults, "include_results defaults to false")
+}
+
+// TestBroker_Execute_ReadAgentResult pins the P0-4 改动 2 contract: id/task_id/
+// sections/max_chars reach the host, the payload is the bounded structured
+// record itself, and the meta carries the actionable source/next_action.
+func TestBroker_Execute_ReadAgentResult(t *testing.T) {
+	payload := supervision.ReadResultPayload{
+		SessionID: "child-1",
+		Status:    "failed",
+		Summary:   "tests failed",
+		Findings:  []string{"finding-1"},
+		Source:    supervision.ResultSourceTaskResult,
+		Truncated: true,
+	}
+	controller := &fakeSupervisionController{result: payload}
+	broker := &Broker{Supervision: controller}
+
+	raw, meta, err := broker.Execute(context.Background(), "parent-session", ToolReadAgentResult, map[string]interface{}{
+		"id":        "child-1",
+		"task_id":   "task-1",
+		"sections":  []interface{}{"summary", "errors"},
+		"max_chars": float64(800),
+	})
+	require.NoError(t, err)
+	result, ok := raw.(supervision.ReadResultPayload)
+	require.True(t, ok)
+	require.Equal(t, "child-1", result.SessionID)
+	require.Equal(t, "parent-session", controller.parentID, "the host derives scope from the caller session")
+	require.Equal(t, "child-1", controller.resultReq.SessionID)
+	require.Equal(t, "task-1", controller.resultReq.TaskID)
+	require.Equal(t, []string{"summary", "errors"}, controller.resultReq.Sections)
+	require.Equal(t, 800, controller.resultReq.MaxChars)
+
+	require.Equal(t, supervision.ResultSourceTaskResult, meta["source"])
+	require.Equal(t, "failed", meta["status"])
+	require.Equal(t, true, meta["truncated"])
+	require.Equal(t, toolresult.KindStructured, meta[toolresult.MetadataKey])
+
+	// id is required, unknown sections are rejected, and neither reaches the host.
+	before := controller.calls
+	_, _, err = broker.Execute(context.Background(), "parent-session", ToolReadAgentResult, map[string]interface{}{"task_id": "task-1"})
+	require.Error(t, err)
+	_, _, err = broker.Execute(context.Background(), "parent-session", ToolReadAgentResult, map[string]interface{}{
+		"id":       "child-1",
+		"sections": []interface{}{"everything"},
+	})
+	require.Error(t, err)
+	require.Equal(t, before, controller.calls, "invalid reads never reach the host")
+}
+
+// TestBroker_Execute_ReadAgentResultNoRecordedResult: a missing durable record
+// is a successful, actionable read (source=none + no_result_recorded), not a
+// tool failure the model would retry blindly.
+func TestBroker_Execute_ReadAgentResultNoRecordedResult(t *testing.T) {
+	controller := &fakeSupervisionController{result: supervision.NoResultRecordedPayload("child-1", "")}
+	broker := &Broker{Supervision: controller}
+
+	raw, meta, err := broker.Execute(context.Background(), "parent-session", ToolReadAgentResult, map[string]interface{}{"id": "child-1"})
+	require.NoError(t, err)
+	result, ok := raw.(supervision.ReadResultPayload)
+	require.True(t, ok)
+	require.Equal(t, supervision.ResultSourceNone, result.Source)
+	require.Equal(t, "no_result_recorded", result.ErrorCode)
+	require.Contains(t, result.NextAction, "read_agent_events")
+	require.Equal(t, "no_result_recorded", meta["error_code"])
+	require.Contains(t, meta[cacheSafeSummaryMetadataKey], "no durable result recorded")
 }
 
 func TestBroker_Execute_AckLifecycle_ValidatesAndForwards(t *testing.T) {

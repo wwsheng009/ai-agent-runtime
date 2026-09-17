@@ -3,6 +3,7 @@
 // <script type="module"> 直接加载本入口);各模块导出 initXxx() 供此处按
 // 原初始化顺序统一调用。测试方法见 docs/aicli/web-testing.md。
 import { initChat, renderButton, refreshScreen } from "./js/chat.js";
+import { initAnalysis } from "./js/analysis.js";
 import { initConfigAdmin } from "./js/config-admin.js";
 import { initProviderEditor } from "./js/provider-editor.js";
 import { initProviderImport } from "./js/provider-import.js";
@@ -28,6 +29,7 @@ initConfigAdmin();
 initProviderEditor();
 initProviderImport();
 initSkills();
+initAnalysis();
 
 // ---- 启动序列(原文件尾部) ----
 loadRuntimeMeta(); // 权威 provider/model/reasoning 值同步到底部选择器
