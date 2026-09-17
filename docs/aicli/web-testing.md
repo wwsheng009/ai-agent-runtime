@@ -59,6 +59,9 @@ aicli chat --pprof
 - [ ] **关于页签**：显示客户端名 `aicli micro web client`、一行说明与页签清单/端点链接；
        「写令牌」行显示当前 `X-AICLI-Token`（与启动行/`GET /web/api/token` 一致，每进程随机），
        「复制」按钮写入剪贴板并弹「写令牌已复制」提示；
+       「调试速览」行给出四个入口（`/debug/chat/status`、`/web/api/screen?view=tui&tail=N`、
+       `POST /web/api/invoke` 含 `wait_only`、写令牌与文档指针），与 `?format=text` 末尾
+       「Debug 使用说明」同一口径；
        「远程调用端点」清单进入页签时拉取 `GET /debug/endpoints?format=json` 并按
        web / loopback / runtime-observe 分组渲染 `方法 + 路径 + 说明`，写操作（POST）带「需令牌」标记，
        不可用时显示原因（启动早期会自动重试数次）；与 `/debug/endpoints?format=text`、`aicli /debug`

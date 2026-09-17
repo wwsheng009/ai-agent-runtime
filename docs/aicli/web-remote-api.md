@@ -20,6 +20,8 @@ Info: web write token (X-AICLI-Token): 3f9c8a...  (POST /web/api/* 必需)
 > 同一清单也渲染在微型 Web 客户端「关于」页签（`GET /debug/endpoints?format=json`，
 > 按 web / loopback / runtime-observe 分组，POST 端点标注「需令牌」），因此新增端点
 > 只需在此登记一次，About 页与 `/debug display` 自动同步。
+> `?format=text` 末尾附「Debug 使用说明」速览（排查入口 / `invoke` 驱动 / 写令牌 / 文档指针），
+> 与「关于」页签的「调试速览」同一口径。
 
 ```powershell
 curl.exe 'http://127.0.0.1:61772/debug/endpoints?format=text'
