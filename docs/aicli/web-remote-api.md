@@ -80,7 +80,7 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
 |------|------|------|
 | POST | `/web/api/invoke` | **同步远程调用**：注入 prompt（或 `wait_only`），等待 turn 结束，一次响应返回最终状态 + assistant 回复 + TUI 渲染 + token 用量；`Accept: text/event-stream` 时改为流式 delta + 最终 result |
 | POST | `/web/api/input` | 异步注入：prompt / 审批决议 / 提问回答 / 中断，立即返回 `queued` |
-| GET | `/web/api/turn` | turn 后验查询：`?id={turn_id}` 取单条（含耗时/步数/`assistant_preview`/`usage`+`usage_scope`），无参数返回当前 turn + 最近 20 条 |
+| GET | `/web/api/turn` | turn 后验查询：`?id={turn_id}` 取单条（含耗时/步数/`assistant_preview`/`usage`+`usage_scope`/`usage_source`），无参数返回当前 turn + 最近 20 条 |
 | GET | `/web/api/screen` | 当前渲染：默认完整 transcript（`messages` 结构化）；`?view=tui` 返回 TUI 合成帧；`?format=json` 结构化；`?tail=N` 只取末尾 N 行（≤2000） |
 | GET | `/web/api/status` | 渲染器/显示状态快照（等价 `/debug/chat/status`） |
 | GET | `/web/api/runtime` | 运行时元数据（provider/model/reasoning 权威值） |
@@ -229,14 +229,19 @@ curl -s 'http://127.0.0.1:61772/web/api/turn' | jq '.current, .recent[0]'
 ```
 
 `/web/api/turn` 返回：`found` / `turn`（`status` = running|completed|failed|interrupted，
-`started_at` / `finished_at` / `duration_ms` / `steps` / `error` / `usage` + `usage_scope`）/
+`started_at` / `finished_at` / `duration_ms` / `steps` / `error` / `usage` + `usage_scope` + `usage_source`）/
 `current`（活动 turn 实时探测：`turn_id` / `busy` / `pending_inputs` / `pending_approval` / `pending_question`）/
 `recent`（最近 20 条，最新在前）。记录上限 128 条、保留 30 分钟。
 
 - `assistant_preview`（≤200 rune，超出以 `…` 结尾）/ `assistant_chars`：本轮最后一条
   assistant 消息的预览与完整字符数——查“这轮回了什么”不必再拉整份 transcript。
-- `usage_scope` 说明 `usage` 口径：`turn`=本轮增量；`session`=本轮增量不可得时回退为
-  会话累计快照（与 invoke `/status` 同源），避免把“没基线”误读成“零消耗”。
+- `usage` 的口径由 `usage_scope` 标注：
+  - `turn` = **本轮增量**。优先取 session_end / session_interrupted 事件载荷里的
+    `usage_prompt_tokens` / `usage_completion_tokens` / `usage_total_tokens`（actor 在结算时刻
+    写入的 `result.Usage`，无竞态、无需等待）；载荷缺失时退回会话计数器差值。
+  - `session` = 增量确实不可得时的**会话累计快照**，仅作参考（采集时刻可能与 invoke 响应不同）。
+- `usage_source` 透传事件载荷的 `usage_source`（如 `provider_reported` / 估算值），
+  用于区分“provider 真报”与“本地估算”。
 
 ## 5. 读取状态与渲染
 

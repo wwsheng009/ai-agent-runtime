@@ -236,7 +236,7 @@ $r = [IO.File]::ReadAllText($tmp, [Text.Encoding]::UTF8) | ConvertFrom-Json
 |------|------|------|
 | POST | `/web/api/invoke` | 同步远程调用：注入 prompt（或 `wait_only`）→ 等 turn 结束 → 一次返回状态 + assistant + TUI 渲染 + 用量 |
 | POST | `/web/api/input` | 异步注入：`prompt` / `approval` / `question_answer` / `interrupt`，立即返回 `queued` |
-| GET | `/web/api/turn` | turn 后验查询：`?id={turn_id}` 单条；缺省返回 `current` + `recent`（含 `assistant_preview`/`assistant_chars`、`usage` + `usage_scope`） |
+| GET | `/web/api/turn` | turn 后验查询：`?id={turn_id}` 单条；缺省返回 `current` + `recent`（含 `assistant_preview`/`assistant_chars`、`usage` + `usage_scope` + `usage_source`） |
 | GET | `/web/api/screen` | 默认完整 transcript；`?view=tui` 用户实际看到的合成帧；`?format=json` 结构化；`?tail=N` 只取末尾 N 行 |
 | GET | `/web/api/status` | 渲染器/显示状态快照（等价 `/debug/chat/status`） |
 | GET | `/web/api/runtime` | 运行时元数据（provider / model / reasoning 权威值） |
@@ -373,7 +373,8 @@ curl.exe -s "$base/web/api/turn"
 | 字段 | 口径 |
 |------|------|
 | `assistant_preview` / `assistant_chars` | 本轮最后一条 assistant 消息的预览（≤200 rune，超出以 `…` 结尾）与完整字符数；完整回复走 `screen`（transcript）或 invoke 响应 |
-| `usage` + `usage_scope` | `usage_scope=turn`：`usage` 为本轮增量；`usage_scope=session`：本轮增量不可得时回退为会话累计快照（与 invoke `/status` 同源）。两处数字不一致时以 `usage_scope` 为准理解口径 |
+| `usage` + `usage_scope` | `turn`：本轮增量（优先取 turn 结束事件载荷 `usage_*`，即 actor 结算值；无载荷时退回计数器差值）；`session`：增量确实不可得时回退的会话累计快照，**仅作参考**（采集时刻可能与 invoke 响应不同） |
+| `usage_source` | 透传事件载荷的 `usage_source`（如 `provider_reported`），区分 provider 真报与本地估算 |
 | `steps` | 本轮工具/步骤计数（来自 turn 结束事件）|
 
 ### 5.5 审批 / 提问 / 中断

@@ -92,7 +92,7 @@ var webDebugEndpoints = []struct {
 	{Method: "GET", Path: "/web/api/events", Note: "SSE 事件流（实时 turn 事件，可续传）"},
 	{Method: "POST", Path: "/web/api/input", Note: "异步注入 prompt / 审批决议 / 提问回答 / interrupt（立即返回 queued）"},
 	{Method: "POST", Path: "/web/api/invoke", Note: "同步远程调用：注入 prompt 并等待 turn 结束。参数 wait_only（只等待，不注入；会话已空闲时立即返回 settled 不空等）/timeout_ms/session_id/client_request_id（幂等回放 duplicate=true）；Accept: text/event-stream 时以 SSE 返回 start/delta/result 帧；响应含 status/elapsed_ms/screen，turn 结束附带 assistant/usage"},
-	{Method: "GET", Path: "/web/api/turn", Note: "turn 后验查询：?id={turn_id} 返回单条记录，缺省返回 current（busy/turn_id/pending_inputs）+ recent（最多 30m，含 status/started_at/finished_at/duration_ms/steps/error/usage+usage_scope、assistant_preview/assistant_chars）"},
+	{Method: "GET", Path: "/web/api/turn", Note: "turn 后验查询：?id={turn_id} 返回单条记录，缺省返回 current（busy/turn_id/pending_inputs）+ recent（最多 30m，含 status/started_at/finished_at/duration_ms/steps/error/usage+usage_scope[turn=本轮增量，优先取 turn 结束事件载荷；session=累计参考]+usage_source、assistant_preview/assistant_chars）"},
 	{Method: "GET", Path: "/web/api/token", Note: "读取本进程 Web 写令牌（X-AICLI-Token，或 ?token=）；仅回环 + 同源可读，响应含 source（random=每进程随机、重启轮换；--web-token/AICLI_WEB_TOKEN=显式指定、重启不轮换）与 hint"},
 	{Method: "GET", Path: "/web/api/events/schema", Note: "SSE 事件 schema"},
 	{Method: "GET", Path: "/web/api/sessions", Note: "会话列表（current_session_id + 候选会话）"},
