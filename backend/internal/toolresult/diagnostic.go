@@ -2151,10 +2151,19 @@ func nextActionForToolError(code string, message string) string {
 		}
 		return "Correct the tool arguments using the current schema, then call it again. Do not retry the same invalid/missing args unchanged."
 	case runtimeerrors.ErrJobNotFound:
+		if refined := jobReferenceNextAction(message); refined != "" {
+			return refined
+		}
 		return "Use the exact job_id returned by background_task; do not guess or synthesize an id."
 	case runtimeerrors.ErrToolNotFound, runtimeerrors.ErrToolNotRegistered:
+		if refined := artifactReferenceNextAction(message); refined != "" {
+			return refined
+		}
 		return "Choose a tool name from the current tool definitions; do not retry the unavailable name."
 	case runtimeerrors.ErrToolPathNotFound:
+		if refined := artifactReferenceNextAction(message); refined != "" {
+			return refined
+		}
 		return "Path not found. Prefer path_candidates when present, or ls/glob under the existing parent directory to discover the correct name; then retry with a confirmed path. Do not retry the same missing path unchanged."
 	case runtimeerrors.ErrToolShellCompat:
 		return DefaultShellCompatNextAction
@@ -2209,10 +2218,90 @@ func nextActionForToolError(code string, message string) string {
 	case runtimeerrors.ErrAgentRunCanceled:
 		return "Do not retry automatically; start a new run only when continuation is still required."
 	case runtimeerrors.ErrToolExecution:
+		if refined := artifactReferenceNextAction(message); refined != "" {
+			return refined
+		}
 		return DefaultToolExecutionNextAction
 	default:
+		if refined := artifactReferenceNextAction(message); refined != "" {
+			return refined
+		}
 		return DefaultToolExecutionNextAction
 	}
+}
+
+// jobReferenceNextAction returns targeted recovery guidance when a
+// job-not-found error carries a reference that is not a background job id at
+// all. Models repeatedly copy artifact record ids (art_<32 hex>, rendered as
+// "Full raw output artifact_id: art_…" in tool output) into task_output, where
+// they can never resolve; the generic "use the exact job_id" advice does not
+// explain why. Only the JOB_NOT_FOUND path consults this helper.
+func jobReferenceNextAction(message string) string {
+	lower := strings.ToLower(message)
+	if !(strings.Contains(lower, "job") && strings.Contains(lower, "not found")) {
+		return ""
+	}
+	// Extract the referenced id from "background job not found: <id>"; the
+	// raw manager message has no other ": " segment, and the chat-augmented
+	// form appends "; use the exact…" without one.
+	id := strings.TrimSpace(message)
+	if idx := strings.LastIndex(message, ": "); idx >= 0 {
+		id = strings.TrimSpace(message[idx+2:])
+	}
+	id = strings.TrimSpace(strings.TrimSuffix(id, ";"))
+	if strings.HasPrefix(id, "art_") {
+		return "The id passed to task_output is an artifact record id (art_…), not a background job id. Use the exact job_id returned by background_task (job_ref_… or job_…); do not reuse an artifact_id seen in tool output."
+	}
+	// Some manager/chat wrappers reflow the message so the referenced id is not
+	// the last ": " segment; scan the whole message for an artifact id token.
+	if aid := firstArtifactID(message); aid != "" {
+		return "The task_output reference (" + aid + ") is an artifact record id (art_…), not a background job id. Use the exact job_id returned by background_task (job_ref_… or job_…); do not reuse an artifact_id seen in tool output."
+	}
+	return ""
+}
+
+// artifactReferenceNextAction returns targeted recovery guidance when a
+// not-found error carries an artifact record id (art_<32 hex>) reference.
+// Artifact ids are raw-output pointers rendered as "Full raw output artifact_id:
+// art_…"; they are not file paths, tool names, or background job ids, and they
+// can go stale after TTL pruning. The generic path/tool guidance does not
+// explain why retrying the same reference cannot succeed.
+func artifactReferenceNextAction(message string) string {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if !strings.Contains(lower, "not found") && !strings.Contains(lower, "no such") {
+		return ""
+	}
+	id := firstArtifactID(message)
+	if id == "" {
+		return ""
+	}
+	return "The reference (" + id + ") is an artifact record id (art_…), not a file path, tool name, or background job id. The record may have expired or been pruned from the artifact store; re-run the tool that produced it or use context/artifact search to regenerate the full raw output. Never pass artifact ids to task_output."
+}
+
+// firstArtifactID scans text for an artifact record id token (art_ followed by
+// exactly 32 hex chars) and returns it, or "" when absent.
+func firstArtifactID(text string) string {
+	const prefix = "art_"
+	from := 0
+	for {
+		idx := strings.Index(text[from:], prefix)
+		if idx < 0 {
+			return ""
+		}
+		start := from + idx
+		end := start + len(prefix)
+		for end < len(text) && isHexDigit(text[end]) {
+			end++
+		}
+		if end-start == len(prefix)+32 {
+			return text[start:end]
+		}
+		from = start + len(prefix)
+	}
+}
+
+func isHexDigit(ch byte) bool {
+	return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')
 }
 
 // invalidArgsNextAction refines generic schema guidance for common argument

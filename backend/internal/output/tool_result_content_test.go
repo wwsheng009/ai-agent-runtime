@@ -67,8 +67,12 @@ func TestRenderToolResultContentForModel_PreservesStructuredEnvelopeSummary(t *t
 		"team_id": "team-1",
 		"task_id": "task-1",
 	}, "", envelope)
-	if got != "Created team run with 3 teammates and 3 tasks" {
+	if !strings.Contains(got, "Created team run with 3 teammates and 3 tasks") {
 		t.Fatalf("expected envelope summary, got %q", got)
+	}
+	// B4: structured envelope summaries carry a compact schema/size signal too.
+	if !strings.Contains(got, "Structured output summary: kind=structured fields=2") {
+		t.Fatalf("expected structured schema summary, got %q", got)
 	}
 }
 
@@ -723,8 +727,11 @@ func TestRenderToolResultContentForModel_ToolkitMCPPreservesStructuredSummary(t 
 		"count": 3,
 		"files": []string{"a.txt", "b.txt", "c.txt"},
 	}, "", envelope)
-	if got != "reduced toolkit summary" {
+	if !strings.Contains(got, "reduced toolkit summary") {
 		t.Fatalf("expected reduced toolkit summary, got %q", got)
+	}
+	if !strings.Contains(got, "Structured output summary: kind=structured") {
+		t.Fatalf("expected structured schema summary, got %q", got)
 	}
 }
 
@@ -758,8 +765,129 @@ func TestRenderToolResultContentForModel_AppendsArtifactNoticeForSmallText(t *te
 
 	got := RenderToolResultContentForModel("short output", "", envelope)
 
-	want := "short output\n\nFull raw output artifact: C:\\temp\\shell-output\\toolkit\\git_456.txt"
+	want := "short output\n\nFull raw output artifact: C:\\temp\\shell-output\\toolkit\\git_456.txt kind=text"
 	if got != want {
 		t.Fatalf("expected artifact notice for small text, got %q", got)
+	}
+}
+
+func TestModelArtifactNotice_NewFormatCarriesTailAndConsumerHint(t *testing.T) {
+	envelope := &Envelope{
+		ArtifactIDs: []string{"art_ef182934f39842729c57899a488a7ea3"},
+		Metadata: map[string]interface{}{
+			"artifact_id": "art_ef182934f39842729c57899a488a7ea3",
+			"raw_bytes":   12345,
+			toolresult.MetadataKey: toolresult.KindText,
+		},
+	}
+	notice := modelArtifactNotice(envelope)
+	if !strings.HasPrefix(notice, "Full raw output artifact_id: art_ef182934f39842729c57899a488a7ea3") {
+		t.Fatalf("expected id prefix, got %q", notice)
+	}
+	// A2: machine-parseable tail (size + kind) on the same line.
+	if !strings.Contains(notice, "size=12345") {
+		t.Fatalf("expected size= tail, got %q", notice)
+	}
+	if !strings.Contains(notice, "kind=text") {
+		t.Fatalf("expected kind= tail, got %q", notice)
+	}
+	// A1: consumer hint + never-pass-to-task_output warning.
+	if !strings.Contains(notice, "artifact read tool") {
+		t.Fatalf("expected consumer hint, got %q", notice)
+	}
+	if !strings.Contains(notice, "never pass this id to task_output") {
+		t.Fatalf("expected task_output warning, got %q", notice)
+	}
+	// Single line so splitTrailingArtifactNotice can peel it.
+	if strings.Contains(notice, "\n") {
+		t.Fatalf("expected single-line notice, got %q", notice)
+	}
+}
+
+func TestModelArtifactNotice_FallsBackToPathWithoutConsumerHint(t *testing.T) {
+	envelope := &Envelope{
+		Metadata: map[string]interface{}{
+			"raw_output_artifact_path": `C:\temp\shell-output\toolkit\git_1.txt`,
+			"raw_bytes":                2048,
+		},
+	}
+	notice := modelArtifactNotice(envelope)
+	if !strings.HasPrefix(notice, "Full raw output artifact: C:\\temp\\shell-output\\toolkit\\git_1.txt") {
+		t.Fatalf("expected path prefix, got %q", notice)
+	}
+	if !strings.Contains(notice, "size=2048") {
+		t.Fatalf("expected size= tail for path notice, got %q", notice)
+	}
+	if !strings.Contains(notice, "kind=raw_output") {
+		t.Fatalf("expected default kind tail, got %q", notice)
+	}
+	if strings.Contains(notice, "task_output") {
+		t.Fatalf("path notice must not carry the id-only task_output warning, got %q", notice)
+	}
+}
+
+func TestFormatTruncatedToolTextForModel_ExtractsFirstErrorLine(t *testing.T) {
+	content := strings.Repeat("noisy success line\n", 200) +
+		"2026-03-14 10:00:02 ERROR failed to fetch artifact\n" +
+		strings.Repeat("noisy tail line\n", 200)
+	got := formatTruncatedToolTextForModel(content, 2*1024)
+	if !strings.Contains(got, "First error line:") {
+		t.Fatalf("expected First error line in truncated summary, got %q", got)
+	}
+	if !strings.Contains(got, "failed to fetch artifact") {
+		t.Fatalf("expected failure line content in summary, got %q", got)
+	}
+	// The earliest failure line wins, not the tail.
+	if !strings.Contains(got, "ERROR failed to fetch artifact") {
+		t.Fatalf("expected earliest error line, got %q", got)
+	}
+
+	// No failure markers -> no extra header line, keep existing shape.
+	clean := strings.Repeat("clean line\n", 300)
+	cleanGot := formatTruncatedToolTextForModel(clean, 2*1024)
+	if strings.Contains(cleanGot, "First error line:") {
+		t.Fatalf("did not expect First error line without failure markers, got %q", cleanGot)
+	}
+	if !strings.Contains(cleanGot, "Total output lines: 300") {
+		t.Fatalf("expected total line header, got %q", cleanGot)
+	}
+}
+
+func TestRenderToolResultContentForModel_PreservesNoticeAcrossTruncationPaths(t *testing.T) {
+	const id = "art_ef182934f39842729c57899a488a7ea3"
+	envelope := &Envelope{
+		ToolCallID: "call-artifact-trunc",
+		ArtifactIDs: []string{id},
+		Metadata: map[string]interface{}{
+			"artifact_id": id,
+			"raw_bytes":   60000,
+			toolresult.MetadataKey: toolresult.KindText,
+		},
+	}
+	body := strings.Repeat("truncation test detail line for budget checks\n", 1200)
+	got := RenderToolResultContentForModel(body, "", envelope)
+	if !strings.Contains(got, "Full raw output artifact_id: "+id) {
+		t.Fatalf("expected artifact notice preserved, got %q", got)
+	}
+	if !strings.Contains(got, "output truncated for history safety") {
+		t.Fatalf("expected truncation marker, got %q", got)
+	}
+	// size tail survives truncation too.
+	if !strings.Contains(got, "size=60000") {
+		t.Fatalf("expected size tail in preserved notice, got %q", got)
+	}
+
+	// Exact-budget boundary: notice still wins over body.
+	smallEnvelope := &Envelope{
+		ArtifactIDs: []string{id},
+		Metadata: map[string]interface{}{
+			"artifact_id": id,
+			toolresult.MetadataKey: toolresult.KindText,
+		},
+	}
+	smallBody := strings.Repeat("x", modelToolTextByteBudget+len(id)+64)
+	gotSmall := RenderToolResultContentForModel(smallBody, "", smallEnvelope)
+	if !strings.Contains(gotSmall, "Full raw output artifact_id: "+id) {
+		t.Fatalf("expected artifact notice preserved at budget boundary, got %q", gotSmall)
 	}
 }

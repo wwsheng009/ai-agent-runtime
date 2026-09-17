@@ -2002,7 +2002,7 @@ func TestReActLoop_Run_PromptBudgetCompactsActiveTurnReplayBeforeThirdRequest(t 
 		DefaultMaxTokens: 256,
 		SystemPrompt:     "You are a helpful assistant.",
 		Options: map[string]interface{}{
-			"context_max_prompt_tokens":    1350,
+			"context_max_prompt_tokens":    1400,
 			"context_max_messages":         16,
 			"context_keep_recent_messages": 8,
 		},
@@ -2083,7 +2083,7 @@ func TestReActLoop_RunWithSession_PromptOnlyActiveTurnCompactionDoesNotPersist(t
 		DefaultMaxTokens: 256,
 		SystemPrompt:     "You are a helpful assistant.",
 		Options: map[string]interface{}{
-			"context_max_prompt_tokens":    1350,
+			"context_max_prompt_tokens":    1400,
 			"context_max_messages":         16,
 			"context_keep_recent_messages": 8,
 		},
@@ -2584,7 +2584,7 @@ func TestReActLoop_RunWithSession_AutoCompactionRecoveryContinuesAfterPromptPref
 		DefaultMaxTokens: 256,
 		SystemPrompt:     "You are a helpful assistant.",
 		Options: map[string]interface{}{
-			"context_max_prompt_tokens":    1500,
+			"context_max_prompt_tokens":    1400,
 			"context_max_messages":         16,
 			"context_keep_recent_messages": 8,
 		},

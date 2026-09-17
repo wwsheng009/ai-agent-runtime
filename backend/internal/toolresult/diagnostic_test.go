@@ -28,6 +28,95 @@ func TestDiagnoseFailureUsesStructuredMetadataAndAction(t *testing.T) {
 	}
 }
 
+func TestDiagnoseJobNotFoundArtifactIDGetsSpecificHint(t *testing.T) {
+	// art_<32 hex> is the artifact record id namespace (internal/artifact),
+	// never a background job id (job_… / job_ref_…). Models copy artifact ids
+	// from rendered tool output into task_output; the diagnostic must say so.
+	diagnostic := Diagnose("task_output", "call-art", "background job not found: art_ef182934f39842729c57899a488a7ea3", map[string]interface{}{
+		"tool_metadata": map[string]interface{}{
+			"error_code": string(runtimeerrors.ErrJobNotFound),
+		},
+	})
+	if diagnostic.ErrorCode != string(runtimeerrors.ErrJobNotFound) {
+		t.Fatalf("error_code=%q want JOB_NOT_FOUND", diagnostic.ErrorCode)
+	}
+	if !strings.Contains(diagnostic.NextAction, "artifact record id") {
+		t.Fatalf("expected artifact-id hint, got %q", diagnostic.NextAction)
+	}
+	if diagnostic.Retryable {
+		t.Fatal("job-not-found must not be blindly retried")
+	}
+
+	// A genuine job handle must keep the generic precise-id guidance.
+	generic := Diagnose("task_output", "call-job", "background job not found: job_ef182934f39842729c57899a488a7ea3", map[string]interface{}{
+		"tool_metadata": map[string]interface{}{
+			"error_code": string(runtimeerrors.ErrJobNotFound),
+		},
+	})
+	if strings.Contains(generic.NextAction, "artifact record id") {
+		t.Fatalf("artifact hint must not fire for a real job id, got %q", generic.NextAction)
+	}
+	if !strings.Contains(generic.NextAction, "exact job_id") {
+		t.Fatalf("expected generic exact-job_id action, got %q", generic.NextAction)
+	}
+}
+
+func TestDiagnoseJobNotFoundReflowedArtifactIDStillGetsHint(t *testing.T) {
+	// Manager/chat wrappers may reflow the message so the referenced id is not
+	// the last ": " segment; the whole-message scan must still catch art_<32hex>.
+	diagnostic := Diagnose("task_output", "call-ref", "background job not found; task_output cannot resolve art_ef182934f39842729c57899a488a7ea3", map[string]interface{}{
+		"tool_metadata": map[string]interface{}{
+			"error_code": string(runtimeerrors.ErrJobNotFound),
+		},
+	})
+	if !strings.Contains(diagnostic.NextAction, "artifact record id") {
+		t.Fatalf("expected artifact-id hint for reflowed reference, got %q", diagnostic.NextAction)
+	}
+	if !strings.Contains(diagnostic.NextAction, "art_ef182934f39842729c57899a488a7ea3") {
+		t.Fatalf("expected the referenced artifact id in the hint, got %q", diagnostic.NextAction)
+	}
+}
+
+func TestDiagnoseArtifactNotFoundGetsExpiryHint(t *testing.T) {
+	// artifact read failures surface as generic not-found errors; an art_<32hex>
+	// reference means the pointer is stale (pruned/expired) rather than a wrong
+	// path or tool name. The hint must say so instead of generic path guidance.
+	var cases = []struct {
+		name    string
+		code    runtimeerrors.ErrorCode
+		message string
+	}{
+		{"tool execution", runtimeerrors.ErrToolExecution, "artifact not found: art_ef182934f39842729c57899a488a7ea3"},
+		{"tool path", runtimeerrors.ErrToolPathNotFound, "artifact file not found art_ef182934f39842729c57899a488a7ea3"},
+		{"tool not found", runtimeerrors.ErrToolNotFound, "no such tool or artifact: art_ef182934f39842729c57899a488a7ea3"},
+		{"reflowed", runtimeerrors.ErrToolExecution, "cannot load artifact; record art_ef182934f39842729c57899a488a7ea3 not found in store"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			diagnostic := Diagnose("artifact_read", "call-art", tc.message, map[string]interface{}{
+				"tool_metadata": map[string]interface{}{
+					"error_code": string(tc.code),
+				},
+			})
+			if !strings.Contains(diagnostic.NextAction, "artifact record id") {
+				t.Fatalf("expected artifact-id expiry hint, got %q", diagnostic.NextAction)
+			}
+			if !strings.Contains(diagnostic.NextAction, "expired or been pruned") {
+				t.Fatalf("expected expiry/prune mention, got %q", diagnostic.NextAction)
+			}
+			if !strings.Contains(diagnostic.NextAction, "task_output") {
+				t.Fatalf("expected never-pass-to-task_output warning, got %q", diagnostic.NextAction)
+			}
+		})
+	}
+
+	// Non-artifact references must keep their generic guidance.
+	generic := Diagnose("view", "call-path", "path not found: C:\\temp\\missing\\dir", nil)
+	if strings.Contains(generic.NextAction, "artifact record id") {
+		t.Fatalf("artifact hint must not fire for a plain path, got %q", generic.NextAction)
+	}
+}
+
 func TestDiagnoseAttachesStaleViewHints(t *testing.T) {
 	snippet := "\tfunc Hello() {\n\t\treturn 1\n\t}\n"
 	diagnostic := Diagnose("edit", "call-stale-hints", "old_string 未在文件中找到", map[string]interface{}{

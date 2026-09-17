@@ -3,6 +3,7 @@ package output
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -10,11 +11,43 @@ import (
 )
 
 const (
-	modelToolTextByteBudget      = 12 * 1024
 	modelToolTextMarkerReserve   = 160
 	modelToolTextMinSegmentBytes = 1024
-	modelArtifactNoticePrefix    = "Full raw output artifact: "
+	// modelArtifactNoticeIDPrefix marks a pointer to a persisted artifact record
+	// (art_<uuid32>). The prefix is the stable span that splitTrailingArtifactNotice
+	// and the frontend renderer match on; keep it byte-identical everywhere.
+	modelArtifactNoticeIDPrefix = "Full raw output artifact_id: "
+	// modelArtifactNoticePathPrefix marks a pointer to a shell-output artifact
+	// file on disk (raw_output_artifact_path), honored when no artifact record id
+	// was created.
+	modelArtifactNoticePathPrefix = "Full raw output artifact: "
+	// modelArtifactNoticeReadHint tells the model which consumer understands the
+	// pointer. The id is an artifact record id, not a background job id; models
+	// repeatedly copy it into task_output where it can never resolve.
+	modelArtifactNoticeReadHint = "read the full raw output via the artifact read tool; never pass this id to task_output"
 )
+
+// modelToolTextByteBudget is the model-visible cap for tool result text entering
+// history. Large outputs are truncated with a head/tail summary plus the raw
+// output pointer. Configurable via SetModelToolTextByteBudget (e.g. from a
+// per-session or startup setting); the zero-value default is 12 KiB.
+var modelToolTextByteBudget = 12 * 1024
+
+// SetModelToolTextByteBudget adjusts the model-visible tool text budget used
+// when truncating large tool output before history insertion. Non-positive
+// values are ignored so callers can safely pass parsed config even when unset.
+func SetModelToolTextByteBudget(bytes int) {
+	if bytes > 0 {
+		modelToolTextByteBudget = bytes
+	}
+}
+
+// ModelToolTextByteBudget returns the current model-visible tool text budget.
+// Exported so shell tooling (bash output artifact threshold) stays aligned with
+// the same configurable cap.
+func ModelToolTextByteBudget() int {
+	return modelToolTextByteBudget
+}
 
 // RenderFullToolResultContent builds the full tool_result text that should be
 // sent back to the model. It preserves the original tool output instead of the
@@ -113,7 +146,13 @@ func renderToolResultBodyForModel(content interface{}, toolErr string, envelope 
 		case toolresult.KindStructured, toolresult.KindBinary:
 			if envelope != nil {
 				if summary := strings.TrimSpace(envelope.Render()); summary != "" {
+					if extra := structuredEnvelopeSummary(envelope, content); extra != "" {
+						return summary + "\n" + extra
+					}
 					return summary
+				}
+				if extra := structuredEnvelopeSummary(envelope, content); extra != "" {
+					return extra
 				}
 			}
 			return RenderFullToolResultContent(content, toolErr)
@@ -273,8 +312,8 @@ func splitTrailingArtifactNotice(body string) (core string, notice string) {
 		return "", ""
 	}
 	for _, prefix := range []string{
-		"Full raw output artifact_id: ",
-		modelArtifactNoticePrefix,
+		modelArtifactNoticeIDPrefix,
+		modelArtifactNoticePathPrefix,
 	} {
 		if strings.HasPrefix(body, prefix) && !strings.Contains(body, "\n") {
 			return "", body
@@ -469,17 +508,61 @@ func modelArtifactNotice(envelope *Envelope) string {
 	if envelope == nil {
 		return ""
 	}
+	tail := artifactNoticeTail(envelope)
 	if artifactID := strings.TrimSpace(metadataString(envelope.Metadata, "artifact_id")); artifactID != "" {
-		return "Full raw output artifact_id: " + artifactID
+		return modelArtifactNoticeIDPrefix + artifactID + tail + "; " + modelArtifactNoticeReadHint
 	}
 	if len(envelope.ArtifactIDs) > 0 && strings.TrimSpace(envelope.ArtifactIDs[0]) != "" {
-		return "Full raw output artifact_id: " + strings.TrimSpace(envelope.ArtifactIDs[0])
+		return modelArtifactNoticeIDPrefix + strings.TrimSpace(envelope.ArtifactIDs[0]) + tail + "; " + modelArtifactNoticeReadHint
 	}
 	path := strings.TrimSpace(metadataString(envelope.Metadata, "raw_output_artifact_path"))
 	if path != "" {
-		return modelArtifactNoticePrefix + path
+		return modelArtifactNoticePathPrefix + path + tail
 	}
 	return ""
+}
+
+// artifactNoticeTail appends a compact machine-parseable summary to the raw
+// output pointer: size=<bytes> when known, plus kind=<output kind>. The line
+// stays single-line so splitTrailingArtifactNotice and the frontend renderer
+// can match the prefix and peel the whole notice.
+func artifactNoticeTail(envelope *Envelope) string {
+	if envelope == nil {
+		return ""
+	}
+	parts := make([]string, 0, 2)
+	if size := metadataInt(envelope.Metadata, "raw_bytes", "byte_count"); size > 0 {
+		parts = append(parts, "size="+strconv.Itoa(size))
+	}
+	kind := strings.TrimSpace(toolresult.KindFromMetadata(envelope.Metadata))
+	if kind == "" {
+		kind = "raw_output"
+	}
+	parts = append(parts, "kind="+kind)
+	return " " + strings.Join(parts, " ")
+}
+
+// metadataInt reads the first numeric metadata value found among keys,
+// tolerating int/float64 (JSON round-trips) and string encodings.
+func metadataInt(metadata map[string]interface{}, keys ...string) int {
+	if len(metadata) == 0 {
+		return 0
+	}
+	for _, key := range keys {
+		switch value := metadata[key].(type) {
+		case int:
+			return value
+		case int64:
+			return int(value)
+		case float64:
+			return int(value)
+		case string:
+			if parsed, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+				return parsed
+			}
+		}
+	}
+	return 0
 }
 
 func appendToolArtifactNotice(body string, notice string) string {
@@ -504,6 +587,9 @@ func formatTruncatedToolTextForModel(content string, budget int) string {
 	totalLines := countTextLines(content)
 	totalBytes := len(content)
 	header := fmt.Sprintf("Total output lines: %d\nTotal output bytes: %d\n\n", totalLines, totalBytes)
+	if firstErr := firstFailureLine(content); firstErr != "" {
+		header += "First error line: " + firstErr + "\n\n"
+	}
 
 	headTailBudget := budget - len(header) - modelToolTextMarkerReserve
 	if headTailBudget < modelToolTextMinSegmentBytes*2 {
@@ -553,6 +639,62 @@ func formatTruncatedToolTextForModel(content string, budget int) string {
 	}
 	marker := fmt.Sprintf("\n\n[output truncated for history safety: omitted %d bytes from the middle]\n\n", omittedBytes)
 	return header + head + marker + tail
+}
+
+// firstFailureLine returns the first content line that looks like a failure
+// (error/failed/fatal/panic/exception or Chinese equivalents). Failures often
+// live at the tail of a large output that head/tail truncation can still miss
+// (or that lands inside the omitted middle), so the truncated summary carries
+// the earliest signal line explicitly. Returns "" when nothing matches.
+func firstFailureLine(text string) string {
+	markers := []string{"error", "failed", "failure", "fatal", "panic", "exception", "错误", "失败"}
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		for _, marker := range markers {
+			if strings.Contains(lower, marker) {
+				return summarizeLine(line, 240)
+			}
+		}
+	}
+	return ""
+}
+
+// structuredEnvelopeSummary emits a compact schema/size summary for
+// structured/binary tool results that render as envelope summaries, so the
+// model still gets data-shape signal instead of a bare summary line or id.
+func structuredEnvelopeSummary(envelope *Envelope, content interface{}) string {
+	if envelope == nil {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if kind := strings.TrimSpace(toolresult.KindFromMetadata(envelope.Metadata)); kind != "" {
+		parts = append(parts, "kind="+kind)
+	}
+	if fields := structuredFieldCount(content); fields > 0 {
+		parts = append(parts, "fields="+strconv.Itoa(fields))
+	}
+	if size := metadataInt(envelope.Metadata, "raw_bytes", "byte_count"); size > 0 {
+		parts = append(parts, "size="+strconv.Itoa(size))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Structured output summary: " + strings.Join(parts, " ")
+}
+
+func structuredFieldCount(content interface{}) int {
+	switch typed := content.(type) {
+	case map[string]interface{}:
+		return len(typed)
+	case []interface{}:
+		return len(typed)
+	default:
+		return 0
+	}
 }
 
 func countTextLines(text string) int {

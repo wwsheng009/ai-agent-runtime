@@ -20,6 +20,7 @@ import (
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
@@ -51,17 +52,24 @@ var defaultBlacklist = []string{
 }
 
 const (
-	modelHistoryArtifactThresholdBytes = 12 * 1024
-	defaultShellCommandTimeout         = 30 * time.Second
-	defaultGoTestCommandTimeout        = 5 * time.Minute
-	defaultSearchShellCommandTimeout   = 12 * time.Second
-	shellCommandTimeoutEnv             = "AICLI_SHELL_COMMAND_TIMEOUT"
-	shellCommandTimeoutMSEnv           = "AICLI_SHELL_COMMAND_TIMEOUT_MS"
+	defaultShellCommandTimeout       = 30 * time.Second
+	defaultGoTestCommandTimeout      = 5 * time.Minute
+	defaultSearchShellCommandTimeout = 12 * time.Second
+	shellCommandTimeoutEnv           = "AICLI_SHELL_COMMAND_TIMEOUT"
+	shellCommandTimeoutMSEnv         = "AICLI_SHELL_COMMAND_TIMEOUT_MS"
 	// shellTimeoutNoiseFloor rejects absurdly small numeric timeout_ms values.
 	// Live sessions show models using timeout_ms=1/30 as if the unit were seconds;
 	// deliberate sub-100ms budgets remain available through timeout="30ms".
 	shellTimeoutNoiseFloor = 100 * time.Millisecond
 )
+
+// modelHistoryArtifactThresholdBytes keeps shell output artifacts aligned with
+// the configurable model-visible tool text budget (default 12 KiB). Large
+// outputs are persisted to the shell output artifact dir instead of entering
+// history verbatim; output.SetModelToolTextByteBudget adjusts both sides.
+func modelHistoryArtifactThresholdBytes() int {
+	return output.ModelToolTextByteBudget()
+}
 
 // NewBashTool 创建 Bash 工具
 func NewBashTool() *BashTool {
@@ -638,7 +646,7 @@ func buildBashBatchResult(ctx context.Context, parent map[string]interface{}, co
 	if mutatedPaths := extractStringList(parent["mutated_paths"]); len(mutatedPaths) > 0 {
 		metadata["mutated_paths"] = mutatedPaths
 	}
-	if len(batchOutput) > modelHistoryArtifactThresholdBytes {
+	if len(batchOutput) > modelHistoryArtifactThresholdBytes() {
 		artifactPath, artifactErr := runtimeexecutor.PersistShellOutputArtifact(
 			"toolkit", "bash command batch", toolctx.ShellOutputArtifactDir(ctx), batchOutput,
 		)
@@ -1080,7 +1088,7 @@ func ensureLargeHistoryOutputArtifact(capture runtimeexecutor.CombinedOutputCapt
 	if strings.TrimSpace(artifactPath) != "" || artifactErr != nil || capture.Truncated {
 		return artifactPath, artifactErr
 	}
-	if capture.TotalBytes <= modelHistoryArtifactThresholdBytes || strings.TrimSpace(capture.Output) == "" {
+	if capture.TotalBytes <= modelHistoryArtifactThresholdBytes() || strings.TrimSpace(capture.Output) == "" {
 		return artifactPath, artifactErr
 	}
 	path, err := runtimeexecutor.PersistShellOutputArtifact(scope, command, preferredRoot, capture.Output)
