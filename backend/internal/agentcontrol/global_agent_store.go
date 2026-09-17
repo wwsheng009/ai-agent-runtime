@@ -921,9 +921,15 @@ func (s *SQLiteGlobalAgentRegistryStore) PurgeAgentControlTerminalAgents(ctx con
 	if s == nil {
 		return 0, fmt.Errorf("agent control agent registry store is not initialized")
 	}
-	db, err := s.dbHandle()
+	// Retention runs from the host's startup reconcile loop, which must not
+	// materialize the durable file: a store that was never opened and has no
+	// on-disk database has no terminal rows to prune.
+	db, skip, err := s.dbHandleForRead()
 	if err != nil {
 		return 0, err
+	}
+	if skip {
+		return 0, nil
 	}
 	if limit <= 0 {
 		limit = terminalPurgeBatch
@@ -948,9 +954,14 @@ func (s *SQLiteGlobalAgentRegistryStore) PurgeAgentControlAgentWakeEvents(ctx co
 	if s == nil {
 		return 0, fmt.Errorf("agent control agent registry store is not initialized")
 	}
-	db, err := s.dbHandle()
+	// Same lazy-open contract as PurgeAgentControlTerminalAgents: pruning an
+	// absent database is a no-op, not a reason to create it.
+	db, skip, err := s.dbHandleForRead()
 	if err != nil {
 		return 0, err
+	}
+	if skip {
+		return 0, nil
 	}
 	if limit <= 0 {
 		limit = terminalPurgeBatch

@@ -153,6 +153,33 @@ func TestRegistryService_PathBackedIsLazyUntilFirstUse(t *testing.T) {
 	}
 }
 
+func TestRegistryServiceStartupRetentionPurgeKeepsDatabaseUnopened(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "agent_control.sqlite")
+	service, err := NewRegistryService(ctx, RegistryServiceConfig{StorePath: path})
+	if err != nil {
+		t.Fatalf("NewRegistryService: %v", err)
+	}
+	t.Cleanup(func() { _ = service.Close() })
+
+	// The host starts a registry reconciler whose first pass runs terminal
+	// retention; pruning an empty registry must stay a no-op instead of
+	// materializing agent_control.sqlite during bootstrap.
+	outcome, err := PurgeTerminalAgentRecords(ctx, service.AgentStore, TerminalPurgePolicy{
+		Now:       time.Now().UTC(),
+		Retention: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("PurgeTerminalAgentRecords: %v", err)
+	}
+	if outcome.Rows != 0 || outcome.WakeEvents != 0 {
+		t.Fatalf("expected empty purge outcome, got %#v", outcome)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("startup retention purge must not create agent_control.sqlite: %v", err)
+	}
+}
+
 func TestRegistryServiceHealthModeAndIdempotentClose(t *testing.T) {
 	ctx := context.Background()
 	service, err := NewRegistryService(ctx, RegistryServiceConfig{StorePath: filepath.Join(t.TempDir(), "agent-control.sqlite")})
