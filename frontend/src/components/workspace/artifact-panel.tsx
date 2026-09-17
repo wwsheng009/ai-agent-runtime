@@ -39,7 +39,6 @@ import {
 export function ArtifactPanel({
   activeSurface: controlledSurface,
   artifacts,
-  isResponding = false,
   lastRuntimeEventType,
   onActiveSurfaceChange,
   onOpenArtifact,

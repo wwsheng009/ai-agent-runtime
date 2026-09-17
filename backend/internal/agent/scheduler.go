@@ -67,6 +67,10 @@ type SubagentResult struct {
 	ParentSessionID  string `json:"parent_session_id,omitempty" yaml:"parent_session_id,omitempty"`
 	ParentToolCallID string `json:"parent_tool_call_id,omitempty" yaml:"parent_tool_call_id,omitempty"`
 	ReadOnly         bool   `json:"read_only,omitempty" yaml:"read_only,omitempty"`
+	// ReadOnlySource records the effective read-only boundary origin (explicit /
+	// agentdef / parent_tool_execution_policy) for the parent spawn report and
+	// the child prompt banner, so the parent can see WHY writes were stripped.
+	ReadOnlySource string `json:"read_only_source,omitempty" yaml:"read_only_source,omitempty"`
 	// ReadOnlyFilteredTools lists write-like tools dropped from the requested
 	// whitelist because the child ran read-only. It is surfaced to the parent so
 	// a silently narrowed allowlist is visible in the spawn report.
@@ -355,6 +359,7 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			ParentSessionID:       options.ParentSessionID,
 			ParentToolCallID:      options.ParentToolCallID,
 			ReadOnly:              task.ReadOnly,
+			ReadOnlySource:        subagentReadOnlySource(task),
 			ReadOnlyFilteredTools: subagentReadOnlyFilteredTools(task),
 			BudgetTokens:          task.BudgetTokens,
 			Success:               false,
@@ -379,6 +384,7 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			ParentSessionID:       options.ParentSessionID,
 			ParentToolCallID:      options.ParentToolCallID,
 			ReadOnly:              task.ReadOnly,
+			ReadOnlySource:        subagentReadOnlySource(task),
 			ReadOnlyFilteredTools: subagentReadOnlyFilteredTools(task),
 			BudgetTokens:          task.BudgetTokens,
 			Success:               false,
@@ -398,6 +404,7 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			ParentSessionID:       options.ParentSessionID,
 			ParentToolCallID:      options.ParentToolCallID,
 			ReadOnly:              task.ReadOnly,
+			ReadOnlySource:        subagentReadOnlySource(task),
 			ReadOnlyFilteredTools: subagentReadOnlyFilteredTools(task),
 			BudgetTokens:          task.BudgetTokens,
 			Success:               false,
@@ -501,6 +508,7 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			ParentSessionID:       options.ParentSessionID,
 			ParentToolCallID:      options.ParentToolCallID,
 			ReadOnly:              task.ReadOnly,
+			ReadOnlySource:        subagentReadOnlySource(task),
 			ReadOnlyFilteredTools: subagentReadOnlyFilteredTools(task),
 			BudgetTokens:          task.BudgetTokens,
 			Success:               false,
@@ -570,6 +578,7 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		ParentSessionID:       options.ParentSessionID,
 		ParentToolCallID:      options.ParentToolCallID,
 		ReadOnly:              task.ReadOnly,
+		ReadOnlySource:        subagentReadOnlySource(task),
 		ReadOnlyFilteredTools: subagentReadOnlyFilteredTools(task),
 		BudgetTokens:          task.BudgetTokens,
 		Success:               result.Success,
@@ -1328,6 +1337,20 @@ func subagentReadOnlyFilteredTools(task SubagentTask) []string {
 		return nil
 	}
 	return append([]string(nil), task.ReadOnlyFilteredTools...)
+}
+
+// subagentReadOnlySource resolves the effective read-only boundary origin for
+// the parent spawn report. decodeSubagentTasks stamps the explicit source on
+// the task; this helper mirrors the child factory's fallback so scheduler and
+// factory never disagree about which boundary is in force.
+func subagentReadOnlySource(task SubagentTask) string {
+	if source := strings.TrimSpace(task.ReadOnlySource); source != "" {
+		return source
+	}
+	if task.ReadOnly {
+		return "spawn_subagents.read_only"
+	}
+	return ""
 }
 
 type indexedSubagentTask struct {

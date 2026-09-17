@@ -14,7 +14,6 @@ export function surfaceBadgeClass(tone: WorkspacePanelSurfaceTone) {
     tone === "plan" && "bg-[#9db7ff]/20 text-[#9db7ff]",
     tone === "checkpoint" && "bg-accent-gold/20 text-accent-gold",
     tone === "artifact" && "bg-accent-gold/20 text-accent-gold",
-    tone === "usage" && "bg-accent-primary/20 text-accent-primary",
     tone === "file" && "bg-accent-cyan/20 text-accent-cyan",
     tone === "git" && "bg-accent-violet/20 text-accent-violet",
   );

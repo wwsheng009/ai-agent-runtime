@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 )
 
@@ -53,9 +54,6 @@ func (b *PromptBuilder) BuildSubagentPrompt(parent *Config, task SubagentTask) s
 	lines = append(lines, "Focus only on your assigned subtask and return a concise final report.")
 	lines = append(lines, "The parent receives only your compressed report, not your full transcript.")
 	lines = append(lines, "Do not change the overall plan unless the subtask requires it.")
-	lines = append(lines, "When writing or editing files, prefer small patches and chunked file-tool calls over one huge inline payload.")
-	lines = append(lines, "For code edits and multi-line replacements, prefer apply_patch; use edit only for small exact strings that were just confirmed.")
-	lines = append(lines, "For long file generation, prefer skeleton first, then append_write chunks, then apply_patch cleanup.")
 	if guidance := strings.TrimSpace(runtimeprompt.RenderParallelToolGuidance()); guidance != "" {
 		lines = append(lines, guidance)
 	}
@@ -67,8 +65,21 @@ func (b *PromptBuilder) BuildSubagentPrompt(parent *Config, task SubagentTask) s
 		lines = append(lines, "For shell, submit exactly one command per command field; do not chain commands with ;, &, &&, ||, pipes, redirections, variable expansion, or command substitution.")
 		lines = append(lines, "For multiple read-only shell commands, use the shell commands array so each entry is validated independently.")
 		lines = append(lines, "Read-only is a hard execution boundary and cannot be overridden by approval or bypass_permissions.")
+		// M2：边界横幅与出路文案同源（policy.BoundaryManifest），子代理第一轮
+		// 就能看到边界来源、被剥离的写工具与「写需求出路」，而不是试错后才知道。
+		if block := strings.TrimSpace(runtimepolicy.RenderReadOnlyBoundaryBlock(runtimepolicy.BoundaryManifest{
+			ReadOnly:       true,
+			Source:         task.ReadOnlySource,
+			RemovedTools:   task.ReadOnlyFilteredTools,
+			PermissionMode: "read_only",
+		})); block != "" {
+			lines = append(lines, block)
+		}
 	} else {
 		lines = append(lines, "This subagent may act as the single writer only if the scheduler permits it.")
+		lines = append(lines, "When writing or editing files, prefer small patches and chunked file-tool calls over one huge inline payload.")
+		lines = append(lines, "For code edits and multi-line replacements, prefer apply_patch; use edit only for small exact strings that were just confirmed.")
+		lines = append(lines, "For long file generation, prefer skeleton first, then append_write chunks, then apply_patch cleanup.")
 	}
 
 	if task.ToolsWhitelist != nil {

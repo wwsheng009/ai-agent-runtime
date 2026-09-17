@@ -458,13 +458,8 @@ export function SessionDetailSurface({
       {/* 观测块常驻（不依赖会话快照加载状态）：它要回答的正是「快照/渲染没动静」时的归因问题。 */}
       <SessionDetailNetworkSection sessionId={sessionId} />
 
-      {/* 「会话用量」子面板：原先挂在 artifact 面板的 usage tab 上，现移入会话详情。 */}
-      <section className="grid gap-2">
-        <h3 className={SESSION_DETAIL_SECTION_LABEL_CLASS}>
-          {t("panels.artifacts.tabs.usage")}
-        </h3>
-        <SessionUsagePanel sessionId={sessionId} />
-      </section>
+      {/* 「会话用量」子面板：原先挂在 artifact 面板的 usage tab 上，现移入会话详情，标签由面板自身呈现。 */}
+      <SessionUsagePanel sessionId={sessionId} />
     </section>
   );
 }

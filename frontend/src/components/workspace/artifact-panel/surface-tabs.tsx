@@ -28,7 +28,6 @@ const TAB_DISABLED =
 const TONE_ACTIVE_CLASS: Record<WorkspacePanelSurfaceTone, string> = {
   artifact: "border-accent-gold/30 bg-accent-gold/8 text-accent-gold",
   plan: "border-[#9db7ff]/30 bg-[#9db7ff]/10 text-[#9db7ff]",
-  usage: "border-accent-primary/30 bg-accent-primary/10 text-accent-primary",
   checkpoint: "border-accent-teal/30 bg-accent-teal/10 text-accent-teal",
   file: "border-accent-cyan/30 bg-accent-cyan/10 text-accent-cyan",
   git: "border-accent-violet/30 bg-accent-violet/10 text-accent-violet",

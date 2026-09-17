@@ -35,7 +35,6 @@ export const zhWorkspacePanelsArtifacts = {
     plan: "计划",
     planLive: "进行中",
     restore: "还原",
-    usage: "会话用量",
     sessionDetail: "会话详情",
   },
   lazySurfaces: {

@@ -26,7 +26,6 @@ export type WorkspacePanelSurfaceId =
   | "artifacts"
   | "checkpoints"
   | "plan"
-  | "usage"
   | "files"
   | "git"
   | "sessionDetail";
@@ -35,7 +34,6 @@ export type WorkspacePanelSurfaceId =
 export type WorkspacePanelSurfaceTone =
   | "artifact"
   | "plan"
-  | "usage"
   | "checkpoint"
   | "file"
   | "git";
@@ -117,15 +115,6 @@ export const WORKSPACE_PANEL_SURFACES: readonly WorkspacePanelSurfaceSpec[] = [
     labelKey: "panels.artifacts.tabs.restore",
     icon: HistoryIcon,
     tone: "checkpoint",
-    requiresSession: true,
-    widthClass: "content",
-    disabledReasonKey: "panels.shell.panelTabs.disabledNoSession",
-  },
-  {
-    id: "usage",
-    labelKey: "panels.artifacts.tabs.usage",
-    icon: ChartNoAxesCombinedIcon,
-    tone: "usage",
     requiresSession: true,
     widthClass: "content",
     disabledReasonKey: "panels.shell.panelTabs.disabledNoSession",

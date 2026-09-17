@@ -115,6 +115,13 @@ type ReActLoop struct {
 	// 跨步骤的历史累计误触护栏；连续非法达到上限才放弃，避免模型反复生成非法参数
 	// 导致死循环烧 token（参照 Reasonix repeat_failure_guard）。
 	malformedToolCallRecoveries map[string]int
+	// readOnlyDenyStreak 记录本 run 内「连续」被只读策略拒绝的次数；一旦某个
+	// 工具执行成功（说明模型已理解边界）即清零，防止跨阶段的累计误触熔断。
+	// M6 在 Escalate 阈值（3）时向父会话邮箱发 subagent.requires_write 事件，
+	// 在 HardStop 阈值（5）时终止 do-loop（参照 exploration_stall 护栏），
+	// 把「模型反复尝试写操作烧 token」变成一次明确的终止。
+	readOnlyDenyStreak         int
+	readOnlyDenyEscalationSent bool
 }
 
 type toolExecutionResult struct {
@@ -619,6 +626,11 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	lastDispositionErrorCode := ""
 	consecutiveExplorationSteps := 0
 	totalToolCalls := 0
+	// 只读拒绝熔断按 run 独立计数：每次 run 开始时清零，避免上个 run 的历史
+	// 拒绝数泄漏进新的 do-loop（M6）。并发工具调用导致的并排拒绝仍计入同一
+	// streak，只有真正理解边界（某工具执行成功）才会重置。
+	loop.readOnlyDenyStreak = 0
+	loop.readOnlyDenyEscalationSent = false
 	completionRequirement := NormalizeCompletionRequirement(loop.config.CompletionRequirement)
 	maxCompletionRecoveryTurns := normalizeCompletionRecoveryTurns(loop.config.MaxCompletionRecoveryTurns, completionRequirement)
 	completionRecoveryUsed := 0
@@ -1067,6 +1079,25 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			}
 			return result, nil
 		}
+		// M6 hard-stop：连续只读拒绝达到 HardStop 阈值时终止，终态消息明确
+		// 「goal 需要写权限、当前只读子代理无法获得」，与 exploration_stall 一样
+		// 把无意义的反复试错变成一次可诊断的终止，而不是无限空转。
+		if loop.readOnlyDenyStreak >= ReadOnlyDenyHardStopThreshold {
+			result.Success = false
+			result.LimitReached = true
+			result.LimitReason = "read_only_denial"
+			result.Output = readOnlyDenialLimitReachedMessage(loop.readOnlyDenyStreak, ReadOnlyDenyHardStopThreshold)
+			result.Error = result.Output
+			result.Steps = step
+			result.Observations = observations
+			result.Duration = *startTime
+			result.Usage = totalUsage.Clone()
+			builder.AppendAssistantAction(result.Output, nil, nil, nil)
+			if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
+				return nil, err
+			}
+			return result, nil
+		}
 		if doomObs.ShouldStop {
 			termPayload := DoomLoopTerminationPayload(traceID, step, doomObs)
 			loop.emitRuntimeEvent(EventDoomLoopTerminated, sessionID, "", termPayload)
@@ -1420,6 +1451,23 @@ func (loop *ReActLoop) resetMalformedToolCallRecoveriesOnSuccess(toolCalls []typ
 			continue
 		}
 		delete(loop.malformedToolCallRecoveries, name)
+	}
+}
+
+// resetReadOnlyDenyStreakOnSuccess 收敛只读拒绝熔断为连续失败语义：一次真正
+// 执行成功（无拒绝、无执行错误）证明模型已理解边界，此前的连续拒绝不再计入
+// M6 熔断；否则只读子代理在 long 目标里先成功过 1 次就会被历史拒绝数提前
+// 硬停。与 malformedToolCallRecoveries 的收敛规则保持一致。
+func (loop *ReActLoop) resetReadOnlyDenyStreakOnSuccess(toolCalls []types.ToolCall, results []toolExecutionResult) {
+	if loop == nil || loop.readOnlyDenyStreak == 0 {
+		return
+	}
+	for i := range toolCalls {
+		if i >= len(results) || results[i].Call.Name == "" || results[i].Error != "" {
+			continue
+		}
+		loop.readOnlyDenyStreak = 0
+		return
 	}
 }
 
@@ -2829,6 +2877,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 	}
 
 	loop.resetMalformedToolCallRecoveriesOnSuccess(toolCalls, results)
+	loop.resetReadOnlyDenyStreakOnSuccess(toolCalls, results)
 	return results, nil
 }
 
@@ -2842,7 +2891,14 @@ func (loop *ReActLoop) finalizeDeniedToolResult(ctx context.Context, gateway *ou
 		return result
 	}
 	metadata = loop.enrichDeniedToolMetadata(metadata, result.Error)
-	envelope, gatewayErr := gateway.Process(ctx, newRawToolResult(sessionID, tc, step, result.Output, result.Error, metadata))
+	// M3：只读拒绝的模型可见文本升级为「原因+规则+修复」，让 LLM 明白是哪个边界
+	// 规则被触犯、下一步该怎么解决，而不是面对一段底层策略字符串继续盲试。非只读
+	// 拒绝仍原样透传（向后兼容，不改变其他策略语义）。
+	content := renderDenialGuidance(tc.Name, result.Error)
+	if loop.readOnlyDenyStreak >= ReadOnlyDenyEscalateThreshold && classifyDeniedPolicy(result.Error) == "read_only" {
+		content += "\n" + readOnlyDenyEscalationAdvisory(loop.readOnlyDenyStreak)
+	}
+	envelope, gatewayErr := gateway.Process(ctx, newRawToolResult(sessionID, tc, step, result.Output, content, metadata))
 	if gatewayErr != nil && envelope != nil {
 		envelope.Metadata["gateway_error"] = gatewayErr.Error()
 	}
@@ -2923,6 +2979,23 @@ func (loop *ReActLoop) emitToolDenied(sessionID string, tc types.ToolCall, step 
 		payload[key] = value
 	}
 	if readOnlyDenied {
+		// M6：连续只读拒绝计数。达到 Escalate 阈值时向事件总线发 subagent.requires_write
+		// （父会话据此选择重派 read_only=false 或接受只读报告），把无限试错变成一次
+		// 明确的上浮决策。循环内工具执行是串行的，普通 int 无数据竞争。
+		loop.readOnlyDenyStreak++
+		if !loop.readOnlyDenyEscalationSent && loop.readOnlyDenyStreak == ReadOnlyDenyEscalateThreshold {
+			loop.readOnlyDenyEscalationSent = true
+			loop.emitRuntimeEvent("subagent.requires_write", sessionID, tc.Name, map[string]interface{}{
+				"trace_id":        traceID,
+				"step":            step,
+				"tool":            tc.Name,
+				"deny_streak":     loop.readOnlyDenyStreak,
+				"policy_source":   loop.readOnlyPolicySource(),
+				"advisory":        readOnlyDenyEscalationAdvisory(loop.readOnlyDenyStreak),
+				"escalate_after":  ReadOnlyDenyEscalateThreshold,
+				"hard_stop_after": ReadOnlyDenyHardStopThreshold,
+			})
+		}
 		// Tool/preflight metadata is untrusted diagnostic context. Reassert the
 		// hard-boundary fields after merging it so a generic permission stamp
 		// cannot make read_only appear approval-overridable.
@@ -3355,6 +3428,12 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 		surfaceFilteredTools = nil
 	} else {
 		tools, surfaceFilteredTools = filterPolicyBlockedToolDefinitions(tools, loop.agent.GetToolExecutionPolicy())
+	}
+	if policy := loop.agent.GetToolExecutionPolicy(); policy != nil && policy.ReadOnly {
+		// M4：只读子代理的 shell 工具 description 动态追加 READ-ONLY MODE 预告，
+		// 让模型第一轮就知道 shell 边界（哪些命令允许、写操作出路在哪），而不是
+		// 逐个命令试错被硬拒后才在 tool.denied 里看到规则。
+		tools = enrichReadOnlyToolDescriptions(tools, policy)
 	}
 
 	listCtx := listToolsContextForAgent(ctx, loop.agent, len(tools))
@@ -5777,6 +5856,15 @@ func decodeSubagentTasks(args map[string]interface{}) ([]SubagentTask, error) {
 		if task.Goal == "" {
 			return nil, fmt.Errorf("spawn_subagents agent %d missing goal", index)
 		}
+		if task.ReadOnly && task.ReadOnlySource == "" {
+			task.ReadOnlySource = "spawn_subagents.read_only"
+		}
+		// M5：goal 明显需要写操作却声明 read_only 时，在 spawn 结果里即时追加
+		// route_warning，让父模型在决策点就能纠正（去掉 read_only 或改用纯分析
+		// 目标），而不是等子代理反复被拒后才在 tool.denied 里发现不匹配。
+		if task.ReadOnly && goalHasWriteIntent(task.Goal) {
+			task.RouteWarnings = append(task.RouteWarnings, writeIntentRouteWarning())
+		}
 		tasks = append(tasks, task)
 	}
 
@@ -6323,6 +6411,11 @@ func renderSubagentResults(results []SubagentResult) string {
 		if len(result.ReadOnlyFilteredTools) > 0 {
 			lines = append(lines, "  read-only: the child was denied these requested write-like tools: "+
 				strings.Join(result.ReadOnlyFilteredTools, ", ")+"; do not delegate writes to it.")
+		}
+		// M1：边界来源上浮到父代理 spawn 报告，父模型能区分 explicit / agentdef /
+		// parent_tool_execution_policy，并明确「重派 read_only=false」的出路。
+		if source := strings.TrimSpace(result.ReadOnlySource); source != "" && result.ReadOnly {
+			lines = append(lines, "  read-only boundary source: "+source+"; re-spawn with read_only=false only if the goal requires writes.")
 		}
 	}
 	return strings.Join(lines, "\n")

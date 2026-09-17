@@ -77,7 +77,6 @@ const FALLBACK_RAIL_WIDTH: RightRailWidthController = {
 export function WorkspaceRightRailSection({
   handleOpenArtifact,
   isNewThread,
-  isResponding,
   onActiveSurfaceChange,
   onCloseRightRail,
   railWidth,
@@ -165,7 +164,6 @@ export function WorkspaceRightRailSection({
           >
             <ArtifactPanel
               artifacts={selectedThread.artifacts}
-              isResponding={isResponding}
               lastRuntimeEventType={selectedThread.lastRuntimeEventType}
               onActiveSurfaceChange={handleActiveSurfaceChange}
               onOpenArtifact={handleOpenArtifact}

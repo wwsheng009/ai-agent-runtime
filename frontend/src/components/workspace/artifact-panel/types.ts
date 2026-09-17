@@ -12,7 +12,6 @@ export type ArtifactPanelSurface = WorkspacePanelSurfaceId;
 
 export type ArtifactPanelProps = {
   artifacts: Artifact[];
-  isResponding?: boolean;
   lastRuntimeEventType?: string;
   runtimeEventCount?: number;
   onOpenArtifact: (artifactId: string) => void;
