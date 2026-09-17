@@ -57,13 +57,19 @@ func BuildTerminalRecord(in TerminalRecordInput) CacheRequestRecord {
 		PromptCacheKey:    in.PromptCacheKey,
 		PromptFingerprint: in.PromptFingerprint,
 	}
+	// 上下文事实先于错误分支提取：失败请求（如上下文超限被拒）同样携带窗口与预算，
+	// 前端仍能显示"已用 / 窗口 / 预算"。interrupted 兜底路径没有载荷，保持 0。
+	payload := in.Payload
+	record.ContextPromptTokens = payloadInt(payload, "context_prompt_tokens")
+	record.ContextWindowTokens = payloadInt(payload, "context_window_tokens")
+	record.PromptBudget = payloadInt(payload, "prompt_budget")
+
 	if in.Interrupted {
 		record.Status = RequestStatusError
 		record.ErrorCategory = errorCategoryInterrupted
 		record.CacheStatus = CacheStatusError
 		return record
 	}
-	payload := in.Payload
 	if !payloadBool(payload, "success") {
 		record.Status = RequestStatusError
 		record.ErrorCategory = payloadString(payload, "error_code")

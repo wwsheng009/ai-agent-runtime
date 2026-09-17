@@ -93,32 +93,39 @@ type CacheUsage struct {
 // CacheRequestRecord 每条 LLM 请求一行（§4.1）。
 // 记录终态后不可变（assistant/user message id 回填除外，且回填不改 usage/聚合）。
 type CacheRequestRecord struct {
-	SchemaVersion      string      `json:"schema_version"`
-	LLMRequestID       string      `json:"llm_request_id"`
-	SessionID          string      `json:"session_id"`
-	TraceID            string      `json:"trace_id,omitempty"`
-	TurnID             string      `json:"turn_id,omitempty"`
-	Step               int         `json:"step,omitempty"`
-	Provider           string      `json:"provider,omitempty"`
-	Model              string      `json:"model,omitempty"`
-	Stream             bool        `json:"stream,omitempty"`
-	Status             string      `json:"status"`
-	Attempt            int         `json:"attempt,omitempty"`
-	StartedAt          time.Time   `json:"started_at"`
-	FinishedAt         *time.Time  `json:"finished_at,omitempty"`
-	DurationMS         int64       `json:"duration_ms,omitempty"`
-	Usage              *CacheUsage `json:"usage,omitempty"`
-	CacheHitRatio      *float64    `json:"cache_hit_ratio,omitempty"`
-	CacheWriteRatio    *float64    `json:"cache_write_ratio,omitempty"`
-	CacheStatus        string      `json:"cache_status"`
-	CacheEpoch         int         `json:"cache_epoch,omitempty"`
-	PromptCacheKey     string      `json:"prompt_cache_key,omitempty"`
-	PromptFingerprint  string      `json:"prompt_fingerprint,omitempty"`
-	UserMessageID      string      `json:"user_message_id,omitempty"`
-	AssistantMessageID string      `json:"assistant_message_id,omitempty"`
-	ProviderRequestID  string      `json:"provider_request_id,omitempty"`
-	ErrorCategory      string      `json:"error_category,omitempty"`
-	CorrelationSource  string      `json:"correlation_source,omitempty"`
+	SchemaVersion string     `json:"schema_version"`
+	LLMRequestID  string     `json:"llm_request_id"`
+	SessionID     string     `json:"session_id"`
+	TraceID       string     `json:"trace_id,omitempty"`
+	TurnID        string     `json:"turn_id,omitempty"`
+	Step          int        `json:"step,omitempty"`
+	Provider      string     `json:"provider,omitempty"`
+	Model         string     `json:"model,omitempty"`
+	Stream        bool       `json:"stream,omitempty"`
+	Status        string     `json:"status"`
+	Attempt       int        `json:"attempt,omitempty"`
+	StartedAt     time.Time  `json:"started_at"`
+	FinishedAt    *time.Time `json:"finished_at,omitempty"`
+	DurationMS    int64      `json:"duration_ms,omitempty"`
+	// ContextPromptTokens/ContextWindowTokens/PromptBudget 是出站上下文的运行时事实
+	// （来自 llm.request.finished 载荷）：出站消息总 token / 模型上下文窗口 /
+	// 本次请求的 prompt 预算。0 表示未观测（历史记录或 provider 未提供能力信息），
+	// 前端据此显示"未知"而不是编造数值。
+	ContextPromptTokens int         `json:"context_prompt_tokens,omitempty"`
+	ContextWindowTokens int         `json:"context_window_tokens,omitempty"`
+	PromptBudget        int         `json:"prompt_budget,omitempty"`
+	Usage               *CacheUsage `json:"usage,omitempty"`
+	CacheHitRatio       *float64    `json:"cache_hit_ratio,omitempty"`
+	CacheWriteRatio     *float64    `json:"cache_write_ratio,omitempty"`
+	CacheStatus         string      `json:"cache_status"`
+	CacheEpoch          int         `json:"cache_epoch,omitempty"`
+	PromptCacheKey      string      `json:"prompt_cache_key,omitempty"`
+	PromptFingerprint   string      `json:"prompt_fingerprint,omitempty"`
+	UserMessageID       string      `json:"user_message_id,omitempty"`
+	AssistantMessageID  string      `json:"assistant_message_id,omitempty"`
+	ProviderRequestID   string      `json:"provider_request_id,omitempty"`
+	ErrorCategory       string      `json:"error_category,omitempty"`
+	CorrelationSource   string      `json:"correlation_source,omitempty"`
 }
 
 // CacheStatusDistribution 缓存状态分布（overview 直接画饼）。

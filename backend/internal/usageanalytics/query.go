@@ -830,6 +830,11 @@ LIMIT ?`
 		if source := usageSourceFromRecord(raw); source != "" {
 			step.UsageSource = source
 		}
+		if facts, ok := contextFactsFromRecord(raw); ok {
+			step.ContextPromptTokens = facts.promptTokens
+			step.ContextWindowTokens = facts.windowTokens
+			step.PromptBudget = facts.budget
+		}
 		steps = append(steps, row)
 	}
 	if err := rows.Err(); err != nil {
@@ -1061,4 +1066,34 @@ func usageSourceFromRecord(raw []byte) string {
 		return ""
 	}
 	return strings.TrimSpace(record.Usage.UsageSource)
+}
+
+// contextFacts 是从 record_json 回放出的上下文事实；0 表示该次请求未观测到。
+type contextFacts struct {
+	promptTokens int
+	windowTokens int
+	budget       int
+}
+
+// contextFactsFromRecord 从 record_json 回放上下文事实（出站消息 token / 窗口 / 预算）。
+// 三项全部缺失时返回 ok=false，避免给历史记录写出零值字段（前端据字段是否存在
+// 区分"未观测"与"观测为 0"）。
+func contextFactsFromRecord(raw []byte) (contextFacts, bool) {
+	var record struct {
+		ContextPromptTokens int `json:"context_prompt_tokens"`
+		ContextWindowTokens int `json:"context_window_tokens"`
+		PromptBudget        int `json:"prompt_budget"`
+	}
+	if err := jsonUnmarshalRecord(raw, &record); err != nil {
+		return contextFacts{}, false
+	}
+	facts := contextFacts{
+		promptTokens: record.ContextPromptTokens,
+		windowTokens: record.ContextWindowTokens,
+		budget:       record.PromptBudget,
+	}
+	if facts.promptTokens <= 0 && facts.windowTokens <= 0 && facts.budget <= 0 {
+		return contextFacts{}, false
+	}
+	return facts, true
 }

@@ -1,6 +1,7 @@
 package usageanalytics
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -205,4 +206,47 @@ func TestIngestWithoutSessionIDIsIgnored(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, list.Total)
 	require.Empty(t, list.Sessions)
+}
+
+// TestIngestPersistsContextFacts 验证 llm.request.finished 的上下文事实
+// （出站消息 token / 窗口 / 预算）随终态行落库，并能在会话明细里回放：
+// 这是工作台"上下文用量"面板的数据源（此前这些字段被丢弃，面板只能显示"未知"）。
+func TestIngestPersistsContextFacts(t *testing.T) {
+	now := time.Date(2026, 9, 17, 9, 30, 0, 0, time.UTC)
+	service, bus := newTestService(t, nil, now)
+
+	publishRequestStarted(bus, "sess-ctx", "req-ctx", "trace-ctx", "turn-ctx", 1, now.Add(-time.Second), "acme", "model-a")
+	extra := usagePayload(120224, 88, 120312, 0)
+	extra["context_prompt_tokens"] = 120224
+	extra["context_window_tokens"] = 128000
+	extra["prompt_budget"] = 108800
+	publishRequestFinished(bus, "sess-ctx", "req-ctx", extra)
+
+	detail, err := service.SessionUsage("sess-ctx")
+	require.NoError(t, err)
+	require.Equal(t, 1, detail.StepCount)
+	step := detail.Steps[0]
+	require.Equal(t, 120224, step.ContextPromptTokens)
+	require.Equal(t, 128000, step.ContextWindowTokens)
+	require.Equal(t, 108800, step.PromptBudget)
+}
+
+// TestIngestWithoutContextFactsLeavesFieldsUnset 验证旧事件（无上下文事实）不会
+// 被写成 0 值字段：JSON 里保持缺失，前端据此显示"未知"而不是编造 0%。
+func TestIngestWithoutContextFactsLeavesFieldsUnset(t *testing.T) {
+	now := time.Date(2026, 9, 17, 9, 30, 0, 0, time.UTC)
+	service, bus := newTestService(t, nil, now)
+
+	publishRequestStarted(bus, "sess-old", "req-old", "trace-old", "turn-old", 1, now.Add(-time.Second), "acme", "model-a")
+	publishRequestFinished(bus, "sess-old", "req-old", usagePayload(500, 20, 520, 0))
+
+	detail, err := service.SessionUsage("sess-old")
+	require.NoError(t, err)
+	require.Equal(t, 1, detail.StepCount)
+
+	raw, err := json.Marshal(detail.Steps[0])
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "context_prompt_tokens")
+	require.NotContains(t, string(raw), "context_window_tokens")
+	require.NotContains(t, string(raw), "prompt_budget")
 }

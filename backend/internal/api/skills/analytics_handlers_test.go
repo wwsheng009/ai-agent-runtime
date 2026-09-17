@@ -68,6 +68,9 @@ func TestAnalyticsHandlersReadFromUsageDB(t *testing.T) {
 			"usage_prompt_tokens":     20,
 			"usage_completion_tokens": 10,
 			"usage_total_tokens":      30,
+			"context_prompt_tokens":   20000,
+			"context_window_tokens":   128000,
+			"prompt_budget":           108800,
 		},
 	})
 	bus.Publish(runtimeevents.Event{Type: usageanalytics.EventSessionEnd, SessionID: sessionID})
@@ -125,6 +128,15 @@ func TestAnalyticsHandlersReadFromUsageDB(t *testing.T) {
 	require.NoError(t, json.Unmarshal(detailRec.Body.Bytes(), &detailPayload))
 	require.EqualValues(t, 1, detailPayload["step_count"])
 	require.Len(t, detailPayload["turns"], 1)
+
+	// 上下文事实（出站 token / 窗口 / 预算）必须出现在 HTTP 明细里——工作台
+	// composer 的"上下文用量"面板直接读这三个字段，缺一个就退回"未知"。
+	steps := detailPayload["steps"].([]interface{})
+	require.Len(t, steps, 1)
+	firstStep := steps[0].(map[string]interface{})
+	require.EqualValues(t, 20000, firstStep["context_prompt_tokens"])
+	require.EqualValues(t, 128000, firstStep["context_window_tokens"])
+	require.EqualValues(t, 108800, firstStep["prompt_budget"])
 
 	turnsRec := get("/api/runtime/analytics/sessions/" + sessionID + "/turns")
 	require.Equal(t, http.StatusOK, turnsRec.Code)
