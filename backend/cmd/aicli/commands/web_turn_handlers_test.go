@@ -202,8 +202,8 @@ func TestChatWebTurnRecorder_AssistantPreview(t *testing.T) {
 }
 
 // TestChatWebTurnRecorder_UsageScope 锁定 usage 口径：
-// 有增量时报 turn 增量（usage_scope=turn）；增量不可得的场景回退为与
-// invoke/status 同源的累计快照（usage_scope=session），不再静默报 0。
+// 有增量时报 turn 增量（usage_scope=turn）；增量确实不可得的场景才回退为
+// 会话累计快照（usage_scope=session，仅作参考），不再静默报 0。
 func TestChatWebTurnRecorder_UsageScope(t *testing.T) {
 	session, bus := newTurnRecorderTestSession(t)
 	ensureChatWebTurnRecorder(session)
@@ -255,7 +255,7 @@ func TestChatWebTurnRecorder_UsageScope(t *testing.T) {
 		t.Fatalf("turn_zero usage missing: %+v", record)
 	}
 	if record.Usage.InputTokens != 1100 || record.Usage.OutputTokens != 270 || record.Usage.TotalTokens != 1370 {
-		t.Fatalf("回退快照 = %+v, want 1100/270/1370（与 invoke 同源）", record.Usage)
+		t.Fatalf("回退快照 = %+v, want 1100/270/1370（会话累计，仅参考）", record.Usage)
 	}
 	if record.UsageScope != chatWebTurnUsageScopeSession {
 		t.Fatalf("usage_scope = %q, want %q", record.UsageScope, chatWebTurnUsageScopeSession)
@@ -302,5 +302,60 @@ func TestChatWebTurnRecorder_DuplicateStartKeepsBaseline(t *testing.T) {
 	}
 	if record.UsageScope != chatWebTurnUsageScopeTurn {
 		t.Fatalf("usage_scope = %q, want %q", record.UsageScope, chatWebTurnUsageScopeTurn)
+	}
+}
+
+// TestChatWebTurnRecorder_UsageFromEventPayload 锁定首选口径：终态事件载荷
+// 自带 usage_*（actor 结算时写入 result.Usage）。即使会话计数器在事件之后
+// 才落账（增量为 0），也必须以载荷为准报 usage_scope=turn，而不是回退累计
+// 快照或报 0——这正是"0/0/0 与口径漂移"的根因场景。
+func TestChatWebTurnRecorder_UsageFromEventPayload(t *testing.T) {
+	session, bus := newTurnRecorderTestSession(t)
+	ensureChatWebTurnRecorder(session)
+
+	// 会话计数器先保持不动（模拟"事件先到、账后到"）。
+	session.InputTokenCount, session.OutputTokenCount, session.TokenCount = 33015, 281, 33296
+	bus.Publish(runtimeevents.Event{
+		Type: runtimechat.EventSessionStart, SessionID: "session_t",
+		Payload: map[string]interface{}{"turn_id": "turn_payload"},
+	})
+	bus.Publish(runtimeevents.Event{
+		Type: runtimechat.EventSessionEnd, SessionID: "session_t",
+		Payload: map[string]interface{}{
+			"turn_id":                 "turn_payload",
+			"success":                 true,
+			"steps":                   11,
+			"usage_prompt_tokens":     369602,
+			"usage_completion_tokens": 10968,
+			"usage_total_tokens":      380570,
+			"usage_cached_tokens":     1024,
+			"usage_source":            "provider_reported",
+		},
+	})
+
+	record := recorderForSession(session).lookup("turn_payload")
+	if record == nil || record.Usage == nil {
+		t.Fatalf("turn_payload usage missing: %+v", record)
+	}
+	if record.Usage.InputTokens != 369602 || record.Usage.OutputTokens != 10968 || record.Usage.TotalTokens != 380570 {
+		t.Fatalf("载荷口径 usage = %+v, want 369602/10968/380570", record.Usage)
+	}
+	if record.UsageScope != chatWebTurnUsageScopeTurn {
+		t.Fatalf("usage_scope = %q, want %q（载荷即本轮增量）", record.UsageScope, chatWebTurnUsageScopeTurn)
+	}
+	if record.UsageSource != "provider_reported" {
+		t.Fatalf("usage_source = %q, want provider_reported", record.UsageSource)
+	}
+
+	// 线级契约：usage_source 必须出现在 JSON 里（脚本据此判断真报/估算）。
+	body := httptest.NewRecorder()
+	HandleChatWebAPITurn(body, httptest.NewRequest(http.MethodGet, "/web/api/turn?id=turn_payload", nil))
+	raw := body.Body.String()
+	// 注意：载荷字段名（usage_prompt_tokens）与响应字段名（input_tokens）不同，
+	// 这里锁定的是 API 契约名。
+	for _, want := range []string{`"usage_scope":"turn"`, `"usage_source":"provider_reported"`, `"input_tokens":369602`} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("turn 响应缺少 %s: %s", want, raw)
+		}
 	}
 }

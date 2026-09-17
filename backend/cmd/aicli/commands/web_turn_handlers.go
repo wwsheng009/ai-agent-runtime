@@ -46,10 +46,15 @@ type chatWebTurnRecord struct {
 	Steps      int                 `json:"steps,omitempty"`
 	Error      string              `json:"error,omitempty"`
 	Usage      *chatWebInvokeUsage `json:"usage,omitempty"`
-	// UsageScope 说明 Usage 的口径：turn=本轮增量；session=本轮增量不可得
-	// （计数基线缺失）时回退为会话累计快照（与 /web/api/invoke、/status 同源），
-	// 避免把"看起来没消耗 token"误读成本轮真的零消耗。
+	// UsageScope 说明 Usage 的口径：turn=本轮增量（优先取 session_end /
+	// session_interrupted 事件载荷里的 usage_*，其次取会话计数器差值）；
+	// session=本轮增量不可得（事件未携带 usage 且计数器未变化）时回退为会话
+	// 累计快照——仅作参考，采集时刻与 /web/api/invoke 可能不同，避免把
+	// "看起来没消耗 token"误读成本轮真的零消耗。
 	UsageScope string `json:"usage_scope,omitempty"`
+	// UsageSource 透传事件载荷的 usage_source（provider_reported / estimated
+	// 等），便于区分"provider 真实回报"与"本地估算"。
+	UsageSource string `json:"usage_source,omitempty"`
 	// AssistantPreview 是本轮最后一条 assistant 消息的截断预览（≤200 rune），
 	// AssistantChars 是其完整字符数（大于预览长度说明有截断）。
 	AssistantPreview string `json:"assistant_preview,omitempty"`
@@ -174,10 +179,10 @@ func (r *chatWebTurnRecorder) observe(event runtimeevents.Event) {
 		}
 		r.finish(turnID, event.SessionID, status,
 			strings.TrimSpace(payloadStringValue(event.Payload["error"])),
-			chatWebPayloadInt(event.Payload["steps"]))
+			chatWebPayloadInt(event.Payload["steps"]), event.Payload)
 
 	case runtimechat.EventSessionInterrupted:
-		r.finish("", event.SessionID, "interrupted", "", 0)
+		r.finish("", event.SessionID, "interrupted", "", 0, event.Payload)
 
 	case runtimechat.EventAssistantMessage, "assistant.message":
 		// 记录本轮最后一条 assistant 消息的预览，供 /web/api/turn 直接给摘要
@@ -193,7 +198,9 @@ func (r *chatWebTurnRecorder) observe(event runtimeevents.Event) {
 }
 
 // finish 收尾指定 turn；turnID 为空时收尾该会话最近一条 running 记录。
-func (r *chatWebTurnRecorder) finish(turnID, sessionID, status, errText string, steps int) {
+// payload 为终态事件载荷（可为 nil），优先从中取本轮 usage——actor 在结算时刻
+// 已把 result.Usage 写入载荷，这是无竞态的权威增量；会话计数器只是兜底。
+func (r *chatWebTurnRecorder) finish(turnID, sessionID, status, errText string, steps int, payload map[string]interface{}) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	record := r.records[turnID]
@@ -213,32 +220,65 @@ func (r *chatWebTurnRecorder) finish(turnID, sessionID, status, errText string, 
 		record.DurationMs = now.Sub(record.startedAt).Milliseconds()
 	}
 	if r.session != nil {
-		usage := &chatWebInvokeUsage{
-			InputTokens:         r.session.InputTokenCount - record.baseInput,
-			OutputTokens:        r.session.OutputTokenCount - record.baseOutput,
-			TotalTokens:         r.session.TokenCount - record.baseTotal,
-			ContextTokens:       r.session.ContextTokenCount,
-			ContextWindowTokens: r.session.ContextWindowTokenCount,
-		}
-		usage.InputTokens = max(usage.InputTokens, 0)
-		usage.OutputTokens = max(usage.OutputTokens, 0)
-		usage.TotalTokens = max(usage.TotalTokens, 0)
-		scope := chatWebTurnUsageScopeTurn
-		if usage.InputTokens == 0 && usage.OutputTokens == 0 && usage.TotalTokens == 0 {
-			// 增量不可得（基线在计数更新之后才建立等）：回退到与 invoke/status
-			// 同源的累计快照，并用 usage_scope 明确口径，避免静默报 0。
-			if absolute := chatWebInvokeUsageFrom(r.session); absolute != nil &&
-				(absolute.InputTokens != 0 || absolute.OutputTokens != 0 || absolute.TotalTokens != 0) {
-				usage = absolute
-				scope = chatWebTurnUsageScopeSession
-			}
-		}
-		if usage.InputTokens != 0 || usage.OutputTokens != 0 || usage.TotalTokens != 0 ||
-			usage.ContextTokens != 0 {
+		usage, scope, source := chatWebTurnResolveUsage(record, payload, r.session)
+		if usage != nil {
+			usage.ContextTokens = r.session.ContextTokenCount
+			usage.ContextWindowTokens = r.session.ContextWindowTokenCount
 			record.Usage = usage
 			record.UsageScope = scope
+			record.UsageSource = source
 		}
 	}
+}
+
+// chatWebTurnResolveUsage 按确定性从高到低解析本轮 usage：
+//  1. 终态事件载荷的 usage_*（actor 结算时写入的 result.Usage，即本轮权威增量）；
+//  2. 会话计数器相对本轮基线的差值（载荷缺失时的传统口径）；
+//  3. 会话累计快照（增量确实不可得，标记 usage_scope=session 且仅作参考）。
+func chatWebTurnResolveUsage(record *chatWebTurnRecord, payload map[string]interface{}, session *ChatSession) (*chatWebInvokeUsage, string, string) {
+	if usage, source := chatWebTurnUsageFromPayload(payload); usage != nil {
+		return usage, chatWebTurnUsageScopeTurn, source
+	}
+	if session == nil {
+		return nil, "", ""
+	}
+	delta := &chatWebInvokeUsage{
+		InputTokens:  max(session.InputTokenCount-record.baseInput, 0),
+		OutputTokens: max(session.OutputTokenCount-record.baseOutput, 0),
+		TotalTokens:  max(session.TokenCount-record.baseTotal, 0),
+	}
+	if delta.InputTokens != 0 || delta.OutputTokens != 0 || delta.TotalTokens != 0 {
+		return delta, chatWebTurnUsageScopeTurn, ""
+	}
+	// 增量不可得（计数器在事件之后才落账等）：回退到会话累计快照，并用
+	// usage_scope=session 明确口径，避免静默报 0。
+	if absolute := chatWebInvokeUsageFrom(session); absolute != nil &&
+		(absolute.InputTokens != 0 || absolute.OutputTokens != 0 || absolute.TotalTokens != 0) {
+		return absolute, chatWebTurnUsageScopeSession, ""
+	}
+	return nil, "", ""
+}
+
+// chatWebTurnUsageFromPayload 提取终态事件载荷里的本轮 usage；
+// 载荷未携带任何 token 数字时返回 nil（调用方继续走兜底口径）。
+func chatWebTurnUsageFromPayload(payload map[string]interface{}) (*chatWebInvokeUsage, string) {
+	if payload == nil {
+		return nil, ""
+	}
+	input, _ := payloadIntValue(payload["usage_prompt_tokens"])
+	output, _ := payloadIntValue(payload["usage_completion_tokens"])
+	total, _ := payloadIntValue(payload["usage_total_tokens"])
+	if input == 0 && output == 0 && total == 0 {
+		return nil, ""
+	}
+	if total <= 0 {
+		total = input + output
+	}
+	return &chatWebInvokeUsage{
+		InputTokens:  input,
+		OutputTokens: output,
+		TotalTokens:  total,
+	}, strings.TrimSpace(payloadStringValue(payload["usage_source"]))
 }
 
 // latestRunningLocked 返回该会话最近一条 running 记录（调用方持锁）。
