@@ -149,6 +149,39 @@ describe("ComposerModelPanel", () => {
     );
   }
 
+  function queryFilterInput(id: PanelSectionId): HTMLInputElement | null {
+    return document.body.querySelector(
+      `[data-composer-model-panel-filter="${id}"]`,
+    );
+  }
+
+  function queryFilterClear(id: PanelSectionId): HTMLButtonElement | null {
+    return document.body.querySelector(
+      `[data-composer-model-panel-filter-clear="${id}"]`,
+    );
+  }
+
+  function queryFilterEmpty(id: PanelSectionId): HTMLElement | null {
+    return document.body.querySelector(
+      `[data-composer-model-panel-filter-empty="${id}"]`,
+    );
+  }
+
+  function typeFilter(id: PanelSectionId, value: string) {
+    const input = queryFilterInput(id);
+    if (!input) {
+      throw new Error(`filter input missing for ${id}`);
+    }
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    act(() => {
+      setter?.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
   function openPanel(): HTMLElement {
     dispatchClick(queryTrigger() as HTMLButtonElement);
     const panel = queryPanel();
@@ -207,6 +240,96 @@ describe("ComposerModelPanel", () => {
     // 二级只渲染当前这一项。
     expect(querySection("provider")).toBeNull();
     expect(querySection("reasoning")).toBeNull();
+  });
+
+  it("filters provider candidates as the user types and keeps a narrowed section selectable", () => {
+    const onProviderChange = vi.fn();
+    renderPanel({ onProviderChange });
+
+    openPanel();
+    drillInto("provider");
+    expect(queryFilterInput("provider")?.placeholder).toBe("筛选供应商");
+    expect(queryOptions("provider")).toHaveLength(2);
+
+    typeFilter("provider", "b");
+
+    // 命中 1 个时供应商段必须保留：输入框随段渲染，段消失会让筛选无法继续。
+    expect(queryOptions("provider")).toHaveLength(1);
+    expect(queryOptions("provider")[0]?.textContent).toContain("provider-b");
+    expect(querySection("provider")).not.toBeNull();
+
+    dispatchClick(queryOptions("provider")[0] as HTMLButtonElement);
+    expect(onProviderChange).toHaveBeenCalledWith("provider-b");
+  });
+
+  it("shows a no-match state with a clear action and drops the query on the next open", () => {
+    renderPanel();
+
+    openPanel();
+    drillInto("provider");
+    typeFilter("provider", "zzz");
+
+    // 无匹配时输入框仍在，用户能继续改查询或清除，而不是被弹回一级。
+    expect(queryFilterInput("provider")).not.toBeNull();
+    expect(queryOptions("provider")).toHaveLength(0);
+    expect(queryFilterEmpty("provider")?.textContent).toBe("没有匹配的供应商");
+
+    dispatchClick(queryFilterClear("provider") as HTMLButtonElement);
+    expect(queryFilterInput("provider")?.value).toBe("");
+    expect(queryFilterEmpty("provider")).toBeNull();
+    expect(queryOptions("provider")).toHaveLength(2);
+
+    // 关闭再打开：筛选串只属于这一次面板会话。
+    typeFilter("provider", "provider-b");
+    dispatchClick(queryTrigger() as HTMLButtonElement);
+    openPanel();
+    drillInto("provider");
+    expect(queryFilterInput("provider")?.value).toBe("");
+    expect(queryOptions("provider")).toHaveLength(2);
+  });
+
+  it("filters model candidates as the user types and applies the narrowed match", () => {
+    const onModelChange = vi.fn();
+    renderPanel({ onModelChange });
+
+    openPanel();
+    drillInto("model");
+    expect(queryFilterInput("model")?.placeholder).toBe("筛选模型");
+    expect(queryOptions("model")).toHaveLength(2);
+
+    typeFilter("model", "b");
+
+    // 命中 1 个时模型段必须保留，否则输入框会随筛选一起消失。
+    expect(queryOptions("model")).toHaveLength(1);
+    expect(queryOptions("model")[0]?.textContent).toContain("model-b");
+    expect(querySection("model")).not.toBeNull();
+
+    dispatchClick(queryOptions("model")[0] as HTMLButtonElement);
+    expect(onModelChange).toHaveBeenCalledWith("model-b");
+  });
+
+  it("shows a no-match state for the model list and drops the query on the next open", () => {
+    renderPanel();
+
+    openPanel();
+    drillInto("model");
+    typeFilter("model", "zzz");
+
+    expect(queryFilterInput("model")).not.toBeNull();
+    expect(queryOptions("model")).toHaveLength(0);
+    expect(queryFilterEmpty("model")?.textContent).toBe("没有匹配的模型");
+
+    dispatchClick(queryFilterClear("model") as HTMLButtonElement);
+    expect(queryFilterInput("model")?.value).toBe("");
+    expect(queryFilterEmpty("model")).toBeNull();
+    expect(queryOptions("model")).toHaveLength(2);
+
+    typeFilter("model", "model-b");
+    dispatchClick(queryTrigger() as HTMLButtonElement);
+    openPanel();
+    drillInto("model");
+    expect(queryFilterInput("model")?.value).toBe("");
+    expect(queryOptions("model")).toHaveLength(2);
   });
 
   it("applies a picked model through the host handler and keeps the list open", () => {
@@ -417,8 +540,12 @@ describe("ComposerModelPanel", () => {
     dispatchKeyDown(panel, "ArrowUp");
     expect(document.activeElement).toBe(queryRow("reasoning"));
 
-    // 二级里的上下键只在当前候选列表内移动，且从当前选中项开始。
+    // 二级里的上下键只在当前候选列表内移动；模型段带筛选框，进入时焦点先给检索框。
     drillInto("model");
+    expect(document.activeElement).toBe(queryFilterInput("model"));
+
+    // 从筛选框按 ↓ 进入候选列表，从第一个候选开始。
+    dispatchKeyDown(panel, "ArrowDown");
     expect(document.activeElement).toBe(queryOptions("model")[0]);
 
     dispatchKeyDown(panel, "ArrowDown");

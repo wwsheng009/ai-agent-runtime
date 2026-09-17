@@ -49,6 +49,7 @@ import {
   type ComposerModelPanelSectionId,
   type ComposerModelPanelView,
 } from "@/lib/composer/model-panel-model";
+import { isOptionFilterEmpty } from "@/lib/composer/model-panel-option-filter";
 import { cn } from "@/lib/utils";
 
 export type ComposerModelPanelProps = {
@@ -58,10 +59,8 @@ export type ComposerModelPanelProps = {
   modelOptions: readonly string[];
   onModelChange: (model: string) => void;
   onProviderChange: (provider: string) => void;
-  onProviderQueryChange: (query: string) => void;
   onReasoningEffortChange: (effort: string) => void;
   providerOptions: readonly string[];
-  providerQuery: string;
   reasoningEffortDefault: string;
   reasoningEffortOptions: readonly string[];
   selectedModel: string;
@@ -75,10 +74,8 @@ export function ComposerModelPanel({
   modelOptions,
   onModelChange,
   onProviderChange,
-  onProviderQueryChange,
   onReasoningEffortChange,
   providerOptions,
-  providerQuery,
   reasoningEffortDefault,
   reasoningEffortOptions,
   selectedModel,
@@ -93,6 +90,9 @@ export function ComposerModelPanel({
     model: false,
     reasoning: false,
   });
+  // 筛选是「这一次面板会话」的临时状态：打开重置，离开对应段或完成选择即清空。
+  const [providerQuery, setProviderQuery] = useState("");
+  const [modelQuery, setModelQuery] = useState("");
   const panelId = useId();
   const panelRef = useRef<HTMLDivElement | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -109,6 +109,8 @@ export function ComposerModelPanel({
 
   function goBackToRoot() {
     setView({ level: "root" });
+    setProviderQuery("");
+    setModelQuery("");
   }
 
   function hasSection(id: ComposerModelPanelSectionId) {
@@ -118,6 +120,9 @@ export function ComposerModelPanel({
   // 供应商一变，「模型 × 推理等级」这组选择就可能失效：宿主会重解析模型（仍被支持的才保留，
   // 否则回落）并钳制推理档位。面板不猜宿主结果，只把重选这一步显式化并顺序引导。
   function handleProviderSelect(provider: string) {
+    setProviderQuery("");
+    // 供应商一变宿主会重解析模型候选：旧筛选串对新列表没有意义。
+    setModelQuery("");
     onProviderChange(provider);
     const advance = advanceAfterProviderSelect({
       hasModel: hasSection("model"),
@@ -131,6 +136,7 @@ export function ComposerModelPanel({
   }
 
   function handleModelSelect(model: string) {
+    setModelQuery("");
     onModelChange(model);
     // 普通换模型（返回 null）：留在候选列表里继续比较。
     const advance = advanceAfterModelSelect({
@@ -164,10 +170,12 @@ export function ComposerModelPanel({
       reasoning: t("composer.reasoning"),
     },
     modelOptions,
+    modelQuery,
     onModelSelect: handleModelSelect,
     onProviderSelect: handleProviderSelect,
     onReasoningSelect: handleReasoningSelect,
     providerOptions,
+    providerQuery,
     reasoningEffortOptions,
     reasoningValue: reasoningLabel,
     selectedModel,
@@ -180,6 +188,8 @@ export function ComposerModelPanel({
   const modelPending = pending.model && hasSection("model");
   const reasoningPending = pending.reasoning && hasSection("reasoning");
   const hasPending = modelPending || reasoningPending;
+  const providerFilterEmpty = isOptionFilterEmpty(providerOptions, providerQuery);
+  const modelFilterEmpty = isOptionFilterEmpty(modelOptions, modelQuery);
 
   // 摘要只列「有候选可选」的项：单 provider 不给选择，就不占位置。
   const summarySegments = [
@@ -240,6 +250,8 @@ export function ComposerModelPanel({
 
     // 每次打开都从一级开始：二级是「这一次要改什么」的上下文，不该跨次保留。
     setView({ level: "root" });
+    setProviderQuery("");
+    setModelQuery("");
     updatePosition();
     setOpen(true);
   }
@@ -263,6 +275,15 @@ export function ComposerModelPanel({
     }
 
     if (view.level === "section") {
+      // 带筛选框的段（供应商 / 模型）：焦点先给输入框，键盘用户打开即可直接输入。
+      const filterInput = panelRef.current?.querySelector<HTMLInputElement>(
+        `[data-composer-model-panel-filter="${view.section}"]`,
+      );
+      if (filterInput) {
+        filterInput.focus();
+        return;
+      }
+
       const options = Array.from(
         panelRef.current?.querySelectorAll<HTMLButtonElement>(
           `[data-composer-model-panel-option="${view.section}"]`,
@@ -353,7 +374,12 @@ export function ComposerModelPanel({
 
   // 面板内上下键在「当前这一层」的条目间移动焦点（条目本身是 button，Enter/Space 走原生语义）。
   function handlePanelKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
-    if (event.key === "ArrowLeft" && activeSection) {
+    // 筛选框里的左右键属于文本光标，不能被当成「返回一级」。
+    const filterFocused =
+      event.target instanceof Element &&
+      event.target.hasAttribute("data-composer-model-panel-filter");
+
+    if (event.key === "ArrowLeft" && activeSection && !filterFocused) {
       event.preventDefault();
       goBackToRoot();
       return;
@@ -398,9 +424,15 @@ export function ComposerModelPanel({
         onSelectSection={(section) => {
           setView({ level: "section", section });
         }}
+        modelFilterEmpty={modelFilterEmpty}
+        modelQuery={modelQuery}
+        onModelQueryChange={setModelQuery}
+        onProviderQueryChange={setProviderQuery}
         panelId={panelId}
         panelRef={panelRef}
         position={position}
+        providerFilterEmpty={providerFilterEmpty}
+        providerQuery={providerQuery}
         reasoningPending={reasoningPending}
         reselectHint={reselectHint}
         sections={sections}

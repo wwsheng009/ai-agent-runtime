@@ -17,35 +17,71 @@ import { cn } from "@/lib/utils";
 
 export type ComposerModelPanelSurfaceProps = {
   activeSection?: ComposerModelPanelSection;
+  modelFilterEmpty: boolean;
   modelPending: boolean;
+  modelQuery: string;
   reasoningPending: boolean;
   panelId: string;
   panelRef: RefObject<HTMLDivElement | null>;
   position: PopoverPosition;
+  providerFilterEmpty: boolean;
+  providerQuery: string;
   reselectHint: string;
   sections: readonly ComposerModelPanelSection[];
   onBackToRoot: () => void;
   onClose: () => void;
   onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+  onModelQueryChange: (query: string) => void;
+  onProviderQueryChange: (query: string) => void;
   onSelectSection: (section: ComposerModelPanelSectionId) => void;
 };
 
 /** 二级菜单：候选在切换后消失时退回一级，而不是渲染一个空列表。 */
 export function ComposerModelPanelSurface({
   activeSection,
+  modelFilterEmpty,
   modelPending,
+  modelQuery,
   onBackToRoot,
   onClose,
   onKeyDown,
+  onModelQueryChange,
+  onProviderQueryChange,
   onSelectSection,
   panelId,
   panelRef,
   position,
+  providerFilterEmpty,
+  providerQuery,
   reasoningPending,
   reselectHint,
   sections,
 }: ComposerModelPanelSurfaceProps) {
   const { t } = useTranslation("workspace");
+
+  // 供应商 / 模型两段共用一套检索语义与标记，只有文案与查询状态按段区分。
+  const filterSection =
+    activeSection && (activeSection.id === "provider" || activeSection.id === "model")
+      ? activeSection.id
+      : null;
+  const filterQuery = filterSection === "provider" ? providerQuery : modelQuery;
+  const filterEmpty = filterSection === "provider" ? providerFilterEmpty : modelFilterEmpty;
+  const filterPlaceholder =
+    filterSection === "provider"
+      ? t("composer.modelPanel.providerFilterPlaceholder")
+      : t("composer.modelPanel.modelFilterPlaceholder");
+  const filterEmptyLabel =
+    filterSection === "provider"
+      ? t("composer.modelPanel.providerFilterEmpty")
+      : t("composer.modelPanel.modelFilterEmpty");
+
+  function changeFilter(next: string) {
+    if (filterSection === "provider") {
+      onProviderQueryChange(next);
+      return;
+    }
+    onModelQueryChange(next);
+  }
 
   return (
     <div
@@ -96,33 +132,77 @@ export function ComposerModelPanelSurface({
       </header>
       {activeSection ? (
         <div
-          role="listbox"
-          aria-labelledby={`${panelId}-heading`}
           data-composer-model-panel-section={activeSection.id}
-          className="flex max-h-[inherit] min-h-0 flex-col gap-0.5 overflow-y-auto p-1.5"
+          className="flex max-h-[inherit] min-h-0 flex-col"
         >
-          {activeSection.options.map((option) => (
-            <button
-              key={`${activeSection.id}\u0000${option.value}`}
-              type="button"
-              role="option"
-              aria-selected={option.selected}
-              data-composer-model-panel-option={activeSection.id}
-              onClick={option.onSelect}
-              title={option.label}
-              className={cn(
-                "flex w-full cursor-pointer items-center gap-2 rounded-control px-2.5 py-2 text-left leading-5 transition",
-                option.selected
-                  ? "bg-surface-soft text-foreground"
-                  : "text-muted-foreground hover:bg-surface-soft hover:text-foreground",
-              )}
+          {/* 候选可能很多：检索框固定在列表上方，不随列表一起滚走。 */}
+          {filterSection ? (
+            <div className="flex shrink-0 items-center gap-1.5 border-b border-border/60 px-2.5 py-2">
+              <input
+                autoComplete="off"
+                aria-label={filterPlaceholder}
+                data-composer-model-panel-filter={filterSection}
+                placeholder={filterPlaceholder}
+                type="text"
+                value={filterQuery}
+                onChange={(event) => {
+                  changeFilter(event.currentTarget.value);
+                }}
+                className="min-w-0 flex-1 bg-transparent text-base text-foreground outline-none placeholder:text-muted-foreground"
+              />
+              {filterQuery ? (
+                <button
+                  type="button"
+                  aria-label={t("composer.modelPanel.filterClear")}
+                  data-composer-model-panel-filter-clear={filterSection}
+                  title={t("composer.modelPanel.filterClear")}
+                  onClick={() => {
+                    changeFilter("");
+                  }}
+                  className="inline-flex size-4 shrink-0 items-center justify-center rounded-control text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
+                >
+                  <XIcon size={11} aria-hidden="true" />
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          {filterSection && filterEmpty ? (
+            <p
+              data-composer-model-panel-filter-empty={filterSection}
+              className="px-2.5 py-3 text-base text-muted-foreground"
             >
-              <span className="flex size-4 shrink-0 items-center justify-center">
-                {option.selected ? <CheckIcon size={13} aria-hidden="true" /> : null}
-              </span>
-              <span className="truncate text-base">{option.label}</span>
-            </button>
-          ))}
+              {filterEmptyLabel}
+            </p>
+          ) : (
+            <div
+              role="listbox"
+              aria-labelledby={`${panelId}-heading`}
+              className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto p-1.5"
+            >
+              {activeSection.options.map((option) => (
+                <button
+                  key={`${activeSection.id}\u0000${option.value}`}
+                  type="button"
+                  role="option"
+                  aria-selected={option.selected}
+                  data-composer-model-panel-option={activeSection.id}
+                  onClick={option.onSelect}
+                  title={option.label}
+                  className={cn(
+                    "flex w-full cursor-pointer items-center gap-2 rounded-control px-2.5 py-2 text-left leading-5 transition",
+                    option.selected
+                      ? "bg-surface-soft text-foreground"
+                      : "text-muted-foreground hover:bg-surface-soft hover:text-foreground",
+                  )}
+                >
+                  <span className="flex size-4 shrink-0 items-center justify-center">
+                    {option.selected ? <CheckIcon size={13} aria-hidden="true" /> : null}
+                  </span>
+                  <span className="truncate text-base">{option.label}</span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       ) : (
         <div

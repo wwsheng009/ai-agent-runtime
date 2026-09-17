@@ -357,7 +357,9 @@ export const enWorkspaceBase = {
       reselectHint: "Provider switched — reconfirm model and reasoning",
       providerFilterPlaceholder: "Filter providers",
       providerFilterEmpty: "No matching providers",
-      providerFilterClear: "Clear filter",
+      modelFilterPlaceholder: "Filter models",
+      modelFilterEmpty: "No matching models",
+      filterClear: "Clear filter",
     },
     contextUsage: {
       triggerLabel: "Session context usage {{percent}}",

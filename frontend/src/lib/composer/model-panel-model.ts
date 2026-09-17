@@ -5,7 +5,10 @@
 //   * 某段候选为空 → 整段隐藏（三段都空时连触发器都不渲染，由组件判断 sections.length === 0）；
 //   * 换供应商后的「待重选」只由这里的状态机推进：用户不显式确认，就不把这组选择当作已定。
 
-import { filterProviderOptions } from "./model-panel-provider-filter";
+import {
+  filterOptionValues,
+  normalizeOptionQuery,
+} from "./model-panel-option-filter";
 
 export type ComposerModelPanelSectionId = "provider" | "model" | "reasoning";
 
@@ -45,6 +48,8 @@ export type ComposerModelPanelSectionsInput = {
   /** 供应商一级列表的筛选串；省略 / 空串 = 不过滤，原样使用宿主投影的候选与顺序。 */
   providerQuery?: string;
   modelOptions: readonly string[];
+  /** 模型列表的筛选串；省略 / 空串 = 不过滤，原样使用宿主投影的候选与顺序。 */
+  modelQuery?: string;
   reasoningEffortOptions: readonly string[];
   selectedProvider: string;
   selectedModel: string;
@@ -70,6 +75,7 @@ export function buildComposerModelSections(
     defaultEffortLabel,
     labels,
     modelOptions,
+    modelQuery = "",
     onModelSelect,
     onProviderSelect,
     onReasoningSelect,
@@ -84,8 +90,11 @@ export function buildComposerModelSections(
   } = input;
   const sections: ComposerModelPanelSection[] = [];
 
-  const visibleProviderOptions = filterProviderOptions(providerOptions, providerQuery);
-  if (visibleProviderOptions.length > 1) {
+  const visibleProviderOptions = filterOptionValues(providerOptions, providerQuery);
+  // 筛选生效时即使只剩 0/1 个候选也必须保留供应商段：输入框、清除按钮与空态都挂在段内，
+  // 段一旦消失，用户既看不到「无匹配」，也无法继续输入或清除。
+  const providerFilterActive = normalizeOptionQuery(providerQuery).length > 0;
+  if (visibleProviderOptions.length > 1 || providerFilterActive) {
     sections.push({
       id: "provider",
       label: labels.provider,
@@ -100,12 +109,14 @@ export function buildComposerModelSections(
       })),
     });
   }
-  if (modelOptions.length > 0) {
+  const visibleModelOptions = filterOptionValues(modelOptions, modelQuery);
+  const modelFilterActive = normalizeOptionQuery(modelQuery).length > 0;
+  if (visibleModelOptions.length > 0 || modelFilterActive) {
     sections.push({
       id: "model",
       label: labels.model,
       value: selectedModel || unselectedLabel,
-      options: modelOptions.map((model) => ({
+      options: visibleModelOptions.map((model) => ({
         value: model,
         label: model,
         selected: model === selectedModel,
