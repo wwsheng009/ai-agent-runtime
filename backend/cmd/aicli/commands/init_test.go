@@ -10,7 +10,8 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 )
 
-func TestRunInitCommandUsesLocalStarterPathByDefault(t *testing.T) {
+func TestRunInitCommandUsesUserLevelStarterPathByDefault(t *testing.T) {
+	home := isolateInitHome(t)
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("Getwd failed: %v", err)
@@ -30,8 +31,9 @@ func TestRunInitCommandUsesLocalStarterPathByDefault(t *testing.T) {
 	if !result.Created {
 		t.Fatalf("expected starter config to be created, got %+v", result)
 	}
-	if result.ConfigPath != filepath.Join(".aicli", aiclipaths.DefaultConfigFileName) {
-		t.Fatalf("unexpected config path: %q", result.ConfigPath)
+	want := filepath.Join(home, ".aicli", aiclipaths.DefaultConfigFileName)
+	if result.ConfigPath != want {
+		t.Fatalf("config path = %q, want %q", result.ConfigPath, want)
 	}
 
 	raw, err := os.ReadFile(result.ConfigPath)
@@ -45,6 +47,7 @@ func TestRunInitCommandUsesLocalStarterPathByDefault(t *testing.T) {
 }
 
 func TestRunInitCommandSupportsGlobalFlag(t *testing.T) {
+	isolateInitHome(t)
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("Getwd failed: %v", err)
@@ -83,6 +86,7 @@ func TestRunInitCommandSupportsGlobalFlag(t *testing.T) {
 }
 
 func TestRunInitCommandExpandsTildeConfigPath(t *testing.T) {
+	isolateInitHome(t)
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("Getwd failed: %v", err)

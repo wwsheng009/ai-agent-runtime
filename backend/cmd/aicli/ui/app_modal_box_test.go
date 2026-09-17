@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -195,5 +196,66 @@ func TestLayoutBottomPaneRowsBoundsPriorityPanelReserve(t *testing.T) {
 	if firstPopupRow <= geometry.Height/2 {
 		t.Fatalf("approval box starts at row %d, want below the screen midpoint %d (rows=%#v)",
 			firstPopupRow, geometry.Height/2, boxed.Rows)
+	}
+}
+
+// 回归：用户报告提问卡片“问题列表没有换行”——标题/问题文本、前几条选项被
+// " | " 合并进同一行（priorityPromptViewport 的语义摘要），超宽正文又被 "…"
+// 截断。盒子必须保持每条问题一行：超宽行就地折行（续行计入固定预算），
+// 不得再合并或截断。
+func TestModalBoxLinesWrapsQuestionListWithoutMerging(t *testing.T) {
+	lines := []string{
+		"[提问] Agent 需要你的补充信息",
+		"[提问] 问题：状态汇报：监督（supervision）子代理控制优化这一支线已收尾",
+		"[提问] 1. 启动 P1（M9）：先实现 P1-1 progress_note + report_progress",
+		"[提问] 2. 把本轮实测证据（probe1 生命周期闭环、控制面清零）补录进 plan 文档",
+		"[提问] 4. 其他（我来说明）",
+		"[提问] 请输入回答，可输入建议编号（必答）：",
+	}
+	// 复刻生产者的语义 viewport（priorityPromptViewport 用 " | " 合并 Header/
+	// Body）：盒子必须忽略这份合并压缩，逐条折行。
+	state := BottomPaneState{
+		PopupOwner:    modalBoxTestOwner,
+		PopupLines:    lines,
+		PopupViewport: modalBoxTestViewport(lines),
+	}
+	const width = 52 // 内宽 48：问题文本与选项都超宽，必须折行而不是截断
+	box := modalBoxLines(state, 24, width)
+	if len(box) < 3 {
+		t.Fatalf("expected a bordered modal box, got %#v", box)
+	}
+	content := box[1 : len(box)-1]
+	if len(content) > modalBoxInteriorRows(24) {
+		t.Fatalf("box content rows = %d, exceed budget %d", len(content), modalBoxInteriorRows(24))
+	}
+	joined := strings.Join(content, "\n")
+	// 折行后的纯文本（去掉边框与行内补白）：用于核对问题原文被完整保留。
+	var plainBuilder strings.Builder
+	for _, row := range content {
+		interior := strings.TrimPrefix(strings.TrimLeft(row, " "), "│ ")
+		interior = strings.TrimRight(strings.TrimSuffix(interior, " │"), " ")
+		plainBuilder.WriteString(interior)
+	}
+	foldedPlain := plainBuilder.String()
+	if strings.Contains(joined, " | ") {
+		t.Fatalf("question lines were merged with separator:\n%s", strings.Join(box, "\n"))
+	}
+	// 每条编号选项独立成行：同一行不得出现两个 "[提问] N. "。
+	numbered := regexp.MustCompile(`\[提问\] \d\. `)
+	for _, row := range content {
+		if len(numbered.FindAllStringIndex(row, -1)) > 1 {
+			t.Fatalf("row merges multiple questions: %q\n%s", row, strings.Join(box, "\n"))
+		}
+	}
+	// 超宽问题行被折行保留（续行可见其尾部），而不是 "…" 截断。折行边界可能
+	// 落在子串中间，因此按去掉边框/换行的整体纯文本核对。
+	if !strings.Contains(foldedPlain, "子代理控制优化这一支线已收尾") {
+		t.Fatalf("long question line was not wrapped (tail lost):\n%s", strings.Join(box, "\n"))
+	}
+	if strings.Contains(joined, "...") {
+		t.Fatalf("question text truncated with ..., want wrapping:\n%s", strings.Join(box, "\n"))
+	}
+	if !strings.Contains(content[len(content)-1], "请输入回答") {
+		t.Fatalf("answer prompt lost: %#v\n%s", content, strings.Join(box, "\n"))
 	}
 }

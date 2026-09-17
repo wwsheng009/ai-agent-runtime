@@ -92,9 +92,11 @@ func runInitCommand(cmd *cobra.Command) (initCommandResult, map[string]interface
 	}
 	switch {
 	case targetPath != "":
-	case useProject, targetPath == "" && !useGlobal:
+	case useProject:
 		targetPath = config.ResolveProjectConfigPath()
-	case useGlobal:
+	default:
+		// Bare `aicli init` defaults to the user-level config so a checkout is
+		// not polluted unless --project is passed explicitly.
 		globalPath, err := config.ResolveGlobalConfigPath()
 		if err != nil {
 			return result, details, err

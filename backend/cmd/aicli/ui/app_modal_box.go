@@ -2,6 +2,8 @@ package ui
 
 import (
 	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 )
 
 // 审批 / 提问面板（modal:priority:*）是 body-only 的底部 popup：正文型面板不
@@ -13,8 +15,10 @@ import (
 // 这里把这类面板改成固定预算的边框盒子：
 //   - 盒子高度只由终端高度决定（modalBoxInteriorRows），不随正文行数增长，
 //     底区保留高度因此有上界，面板不会再因为正文变长而顶到屏幕中部；
-//   - 正文超出预算时按 PopupViewportSpec 语义压缩（header/body/footer + anchor），
-//     与 VisiblePopupLines 既有的压缩语义一致；
+//   - 正文超出预算时保持“每条问题一行”的语义：按首行 → 正文 → 末行提示的
+//     优先级挑选原始 popup 行，超宽行按盒子内宽就地折行，折行行数计入固定
+//     预算。不再把多行用 " | " 合并进一条、也不用 "…" 硬截断——提问卡片此前
+//     正是因此把标题/问题文本、前几条选项挤在同一行且无法换行；
 //   - 盒子整行仍落在底区保留范围内、且在 prompt 输入行之上，光标归属不变。
 //
 // 预算放不下（矮终端 / 窄终端）时返回 nil，调用方回退到原始 popup 行块行为。
@@ -102,56 +106,114 @@ func modalBoxLines(bottom BottomPaneState, height, width int) []string {
 	return lines
 }
 
-// modalBoxContentLines 选择盒子正文：预算足够时保留全部行，否则先按 viewport
-// 语义压缩，再退回首尾压缩。
+// modalBoxContentLines 选择盒子正文：预算足够时按原始顺序逐行保留（超宽行
+// 就地折行），预算不足时按 modalBoxPriorityFolds 挑选重点行。盒子不使用
+// PopupViewportSpec 的 " | " 合并压缩——提问卡片曾因此把标题/问题文本、前
+// 几条选项挤在同一行且无法换行——也不再用 "…" 硬截断正文。
 func modalBoxContentLines(bottom BottomPaneState, rows, maxWidth int) []string {
-	lines := cloneAndSanitizePopupLines(bottom.PopupLines)
+	lines := dropBlankModalBoxLines(cloneAndSanitizePopupLines(bottom.PopupLines))
 	if len(lines) == 0 {
 		return nil
 	}
 	if len(lines) > rows {
-		if semantic := visibleSemanticPopupLines(bottom.PopupViewport, rows); len(semantic) > 0 {
-			lines = semantic
-		} else {
-			lines = compactPopupHeadTail(lines, rows)
-		}
+		return modalBoxPriorityFolds(lines, rows, maxWidth)
 	}
-	out := make([]string, 0, len(lines))
+	return foldModalBoxLines(lines, rows, maxWidth)
+}
+
+// foldModalBoxLines 按原始顺序把每一行折到 maxWidth 以内并平铺进结果，累计
+// 行数达到 rows 即停；空行不产出。
+func foldModalBoxLines(lines []string, rows, maxWidth int) []string {
+	if rows <= 0 {
+		return nil
+	}
+	out := make([]string, 0, rows)
 	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		out = append(out, truncateFixedPopupLine(line, maxWidth))
-		if len(out) >= rows {
-			break
+		for _, folded := range wrapModalBoxLine(line, maxWidth) {
+			if len(out) >= rows {
+				return out
+			}
+			out = append(out, folded)
 		}
 	}
 	return out
 }
 
-// compactPopupHeadTail 是 VisiblePopupLines 的纯文本压缩分支，独立出来供盒子
-// 使用：首行 + 省略号 + 末尾若干行。
-func compactPopupHeadTail(lines []string, rows int) []string {
-	if rows <= 0 {
+// modalBoxPriorityFolds 预算不足时的挑选策略：最后一行（回答提示 / 决策提示）
+// 固定保留并预留其折行行数；其余行按原始顺序从头填充（标题 → 问题文本 →
+// 选项），长行折行后占用更多预算，靠后的选项自然让位。返回行数不超过 rows。
+func modalBoxPriorityFolds(lines []string, rows, maxWidth int) []string {
+	if rows <= 0 || len(lines) == 0 {
 		return nil
 	}
-	if len(lines) <= rows {
-		return lines
+	footer := wrapModalBoxLine(lines[len(lines)-1], maxWidth)
+	reserve := len(footer)
+	if reserve < 1 {
+		reserve = 1
 	}
-	if rows == 1 {
-		return []string{lines[len(lines)-1]}
+	headBudget := rows - reserve
+	if headBudget < 0 {
+		headBudget = 0
 	}
-	if rows == 2 {
-		return []string{lines[0], lines[len(lines)-1]}
+	out := foldModalBoxLines(lines[:len(lines)-1], headBudget, maxWidth)
+	for _, folded := range footer {
+		if len(out) >= rows {
+			break
+		}
+		out = append(out, folded)
 	}
-	out := make([]string, 0, rows)
-	out = append(out, lines[0], "...")
-	tail := rows - 2
-	start := len(lines) - tail
-	if start < 1 {
-		start = 1
+	return out
+}
+
+// wrapModalBoxLine 按显示宽度把一行折成若干连续行（每行 ≤ maxWidth）。空行
+// 返回 nil。折行按 rune 宽度累积，宽度为 0 的组合符跟随当前段。
+func wrapModalBoxLine(line string, maxWidth int) []string {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return nil
 	}
-	out = append(out, lines[start:]...)
+	if maxWidth <= 0 {
+		maxWidth = 80
+	}
+	if DisplayWidth(line) <= maxWidth {
+		return []string{line}
+	}
+	out := make([]string, 0, 2)
+	var builder strings.Builder
+	current := 0
+	flush := func() {
+		if builder.Len() > 0 {
+			out = append(out, builder.String())
+			builder.Reset()
+			current = 0
+		}
+	}
+	for _, r := range line {
+		width := render.RuneWidth(r)
+		if width < 0 {
+			width = 0
+		}
+		if current > 0 && current+width > maxWidth {
+			flush()
+		}
+		builder.WriteRune(r)
+		current += width
+	}
+	flush()
+	return out
+}
+
+// dropBlankModalBoxLines 剔除空白行但保持相对顺序。
+func dropBlankModalBoxLines(lines []string) []string {
+	if len(lines) == 0 {
+		return nil
+	}
+	out := lines[:0]
+	for _, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			out = append(out, line)
+		}
+	}
 	return out
 }
 
