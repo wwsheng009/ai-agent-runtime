@@ -12,20 +12,21 @@ import (
 // 面板既没有边框也没有底色，行格式与 transcript 完全一致，视觉上像是插进了消息
 // 流中间。
 //
-// 这里把这类面板改成固定预算的边框盒子：
-//   - 盒子高度只由终端高度决定（modalBoxInteriorRows），不随正文行数增长，
-//     底区保留高度因此有上界，面板不会再因为正文变长而顶到屏幕中部；
-//   - 正文超出预算时保持“每条问题一行”的语义：按首行 → 正文 → 末行提示的
-//     优先级挑选原始 popup 行，超宽行按盒子内宽就地折行，折行行数计入固定
-//     预算。不再把多行用 " | " 合并进一条、也不用 "…" 硬截断——提问卡片此前
+// 这里把这类面板改成边框盒子：
+//   - 盒子高度随正文自动扩展：每条正文行独立成行，超宽行按盒子内宽就地折行，
+//     折行行数计入总高度。正文行越多盒子越高，底区保留高度与正文行数一一对应；
+//   - 盒子高度只受终端“放得下”的上界约束（modalBoxInteriorRows）：正文 + 上下
+//     边框不能挤掉底部 prompt 输入行与状态行。正文超过该上界（极端矮终端 /
+//     超长选项列表）时才退化为按首行 → 正文 → 末行提示的优先级挑选原始行；
+//   - 不再把多行用 " | " 合并进一条、也不用 "…" 硬截断——提问卡片此前
 //     正是因此把标题/问题文本、前几条选项挤在同一行且无法换行；
 //   - 盒子整行仍落在底区保留范围内、且在 prompt 输入行之上，光标归属不变。
 //
-// 预算放不下（矮终端 / 窄终端）时返回 nil，调用方回退到原始 popup 行块行为。
+// 终端放不下（矮终端 / 窄终端）时返回 nil，调用方回退到原始 popup 行块行为。
 const (
-	// modalBoxMinInteriorRows / modalBoxMaxInteriorRows 是盒子正文行的固定预算。
-	modalBoxMinInteriorRows = 2
-	modalBoxMaxInteriorRows = 5
+	// modalBoxFitReserve 是盒子正文上界的扣除项：除上下边框外，还要为底部
+	// prompt 输入行与状态行各留至少一行，正文不能把这两层挤掉。
+	modalBoxFitReserve = 3
 	// modalBoxMinHeight 是启用盒子的最小终端高度。更矮的终端保留原始行块，
 	// 避免盒子挤掉 prompt 与状态行。
 	modalBoxMinHeight = 12
@@ -45,25 +46,25 @@ func popupRendersAsModalBox(bottom BottomPaneState) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(bottom.PopupOwner)), "modal:priority:")
 }
 
-// modalBoxInteriorRows 是盒子正文行的固定预算，只取决于终端高度，与正文行数
-// 无关。这是“面板不再撑高底区”的关键：正文再多也只占这个预算。
+// modalBoxInteriorRows 是盒子正文行数的终端上界（fit ceiling）：正文按原始
+// 顺序逐条保留、超宽就地折行，折行后的总行数达到该上界即停。它只取决于终端
+// 高度（扣掉底部 prompt / 状态行与上下边框），保证盒子永远不会挤掉 prompt
+// 输入行与状态行。实际盒子高度 = min(折行后正文行数, 该上界) + 2 边框。
 func modalBoxInteriorRows(height int) int {
 	if height < modalBoxMinHeight {
 		return 0
 	}
-	rows := height / 3
-	if rows > modalBoxMaxInteriorRows {
-		rows = modalBoxMaxInteriorRows
-	}
-	if rows < modalBoxMinInteriorRows {
-		rows = modalBoxMinInteriorRows
+	rows := height - modalBoxFitReserve - 2 // 2 = 上下边框
+	if rows < 1 {
+		rows = 1
 	}
 	return rows
 }
 
-// ModalBoxMaxRows 是 priority 正文面板盒子的行数上界（正文预算 + 上下边框）。
-// 它是“面板高度与正文行数无关”这条契约的唯一来源，布局测试与调用方直接引用，
-// 避免在多个包里复制预算策略。
+// ModalBoxMaxRows 是 priority 正文面板盒子在终端内可占的最大行数（正文上界
+// + 上下边框）。它是“盒子永远不挤掉底部 prompt 输入行与状态行”这条契约的
+// 唯一来源，布局测试与调用方直接引用，避免在多个包里复制上界策略。实际盒子
+// 高度随正文行数自动增长，直至该上界。
 func ModalBoxMaxRows(height int) int {
 	interior := modalBoxInteriorRows(height)
 	if interior < 1 {
@@ -72,8 +73,9 @@ func ModalBoxMaxRows(height int) int {
 	return interior + 2
 }
 
-// modalBoxLines 把活动 popup 渲染成水平居中、带边框的盒子文本行。返回 nil
-// 表示当前几何或 owner 不适用盒子，调用方必须回退到原始 popup 行块。
+// modalBoxLines 把活动 popup 渲染成水平居中、带边框的盒子文本行。盒子高度
+// 随正文自动扩展（每条正文行一行、超宽就地折行），只受终端放得下的上界约束。
+// 返回 nil 表示当前几何或 owner 不适用盒子，调用方必须回退到原始 popup 行块。
 func modalBoxLines(bottom BottomPaneState, height, width int) []string {
 	if !popupRendersAsModalBox(bottom) {
 		return nil
@@ -106,42 +108,50 @@ func modalBoxLines(bottom BottomPaneState, height, width int) []string {
 	return lines
 }
 
-// modalBoxContentLines 选择盒子正文：预算足够时按原始顺序逐行保留（超宽行
-// 就地折行），预算不足时按 modalBoxPriorityFolds 挑选重点行。盒子不使用
-// PopupViewportSpec 的 " | " 合并压缩——提问卡片曾因此把标题/问题文本、前
-// 几条选项挤在同一行且无法换行——也不再用 "…" 硬截断正文。
+// modalBoxContentLines 选择盒子正文：按原始顺序逐条保留（每条正文行独立成行，
+// 超宽行就地折行），行数随正文自动增长；仅当折行后的总行数超过终端上界 rows
+// （极端矮终端 / 超长选项列表）时才退化为 modalBoxPriorityFolds 按优先级挑选。
+// 盒子不使用 PopupViewportSpec 的 " | " 合并压缩——提问卡片曾因此把标题/问题
+// 文本、前几条选项挤在同一行且无法换行——也不再用 "…" 硬截断正文。
 func modalBoxContentLines(bottom BottomPaneState, rows, maxWidth int) []string {
 	lines := dropBlankModalBoxLines(cloneAndSanitizePopupLines(bottom.PopupLines))
 	if len(lines) == 0 {
 		return nil
 	}
-	if len(lines) > rows {
-		return modalBoxPriorityFolds(lines, rows, maxWidth)
+	folded := foldAllModalBoxLines(lines, maxWidth)
+	if len(folded) <= rows {
+		return folded
 	}
-	return foldModalBoxLines(lines, rows, maxWidth)
+	return modalBoxPriorityFolds(lines, rows, maxWidth)
 }
 
-// foldModalBoxLines 按原始顺序把每一行折到 maxWidth 以内并平铺进结果，累计
-// 行数达到 rows 即停；空行不产出。
-func foldModalBoxLines(lines []string, rows, maxWidth int) []string {
-	if rows <= 0 {
-		return nil
-	}
-	out := make([]string, 0, rows)
+// foldAllModalBoxLines 按原始顺序把每一行折到 maxWidth 以内并平铺进结果，不设
+// 行数上限（自动高度：盒子正文行数 = 折行后的总行数）。空行不产出。
+func foldAllModalBoxLines(lines []string, maxWidth int) []string {
+	out := make([]string, 0, len(lines))
 	for _, line := range lines {
-		for _, folded := range wrapModalBoxLine(line, maxWidth) {
-			if len(out) >= rows {
-				return out
-			}
-			out = append(out, folded)
-		}
+		out = append(out, wrapModalBoxLine(line, maxWidth)...)
 	}
 	return out
 }
 
-// modalBoxPriorityFolds 预算不足时的挑选策略：最后一行（回答提示 / 决策提示）
-// 固定保留并预留其折行行数；其余行按原始顺序从头填充（标题 → 问题文本 →
-// 选项），长行折行后占用更多预算，靠后的选项自然让位。返回行数不超过 rows。
+// foldModalBoxLines 按原始顺序把每一行折到 maxWidth 以内并平铺进结果，累计
+// 行数达到 rows 即停；空行不产出。rows 是终端上界，仅在 fit 退化路径使用。
+func foldModalBoxLines(lines []string, rows, maxWidth int) []string {
+	if rows <= 0 {
+		return nil
+	}
+	all := foldAllModalBoxLines(lines, maxWidth)
+	if len(all) > rows {
+		return all[:rows]
+	}
+	return all
+}
+
+// modalBoxPriorityFolds 终端上界不足（正文折行后仍放不下）时的挑选策略：
+// 最后一行（回答提示 / 决策提示）固定保留并预留其折行行数；其余行按原始顺序
+// 从头填充（标题 → 问题文本 → 选项），长行折行后占用更多行，靠后的选项自然
+// 让位。返回行数不超过 rows。
 func modalBoxPriorityFolds(lines []string, rows, maxWidth int) []string {
 	if rows <= 0 || len(lines) == 0 {
 		return nil

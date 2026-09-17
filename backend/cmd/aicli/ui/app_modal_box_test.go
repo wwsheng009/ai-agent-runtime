@@ -32,27 +32,44 @@ func modalBoxTestViewport(lines []string) *PopupViewportSpec {
 	}
 }
 
-// 面板高度必须只由终端高度决定：正文行数翻倍也不得让盒子变高，否则底区保留
-// 高度会被正文撑高，面板顶边再次上移到屏幕中部。
-func TestModalBoxLinesBudgetIsIndependentOfContentLength(t *testing.T) {
+// 盒子高度随正文自动扩展：正文行数翻倍时盒子必须跟着变高（每条正文行独立成
+// 行，不再按固定预算截断），且高度不超过终端上界 ModalBoxMaxRows。
+func TestModalBoxLinesHeightTracksContent(t *testing.T) {
 	lines := modalBoxTestLines()
 	short := BottomPaneState{PopupOwner: modalBoxTestOwner, PopupLines: lines, PopupViewport: modalBoxTestViewport(lines)}
 	long := BottomPaneState{PopupOwner: modalBoxTestOwner, PopupLines: append(append([]string(nil), lines...), lines...), PopupViewport: modalBoxTestViewport(lines)}
 
-	shortBox := modalBoxLines(short, 24, 80)
-	longBox := modalBoxLines(long, 24, 80)
+	// width=100 → 内宽 96：modalBoxTestLines 最宽约 70 列，不会折行，因此
+	// 每条正文行恰好占一行，便于逐行核对内容保留。
+	shortBox := modalBoxLines(short, 24, 100)
+	longBox := modalBoxLines(long, 24, 100)
 	if len(shortBox) == 0 || len(longBox) == 0 {
 		t.Fatalf("expected modal box for priority body popup, got short=%#v long=%#v", shortBox, longBox)
 	}
-	if len(longBox) != len(shortBox) {
-		t.Fatalf("box height grew with content: short=%d long=%d", len(shortBox), len(longBox))
+	if len(longBox) <= len(shortBox) {
+		t.Fatalf("box height did not grow with content: short=%d long=%d", len(shortBox), len(longBox))
 	}
-	budget := modalBoxInteriorRows(24)
-	if len(shortBox) > budget+2 {
-		t.Fatalf("box rows %d exceed budget %d (+2 borders)", len(shortBox), budget)
+	if maxRows := ModalBoxMaxRows(24); len(longBox) > maxRows {
+		t.Fatalf("box rows %d exceed terminal ceiling %d", len(longBox), maxRows)
 	}
-	if len(shortBox) < 3 {
-		t.Fatalf("box rows %d too small to carry a border and content", len(shortBox))
+	if len(shortBox)-2 != len(lines) || len(longBox)-2 != 2*len(lines) {
+		t.Fatalf("content rows (%d / %d) don't match lines (%d / %d) — width caused wrapping: %v %v",
+			len(shortBox)-2, len(longBox)-2, len(lines), 2*len(lines), shortBox, longBox)
+	}
+	// 每条正文行都必须独立成行且完整保留（正文翻倍 → 内容出现两轮）。
+	shortContent := shortBox[1 : len(shortBox)-1]
+	longContent := longBox[1 : len(longBox)-1]
+	stripRow := func(row string) string {
+		interior := strings.TrimPrefix(strings.TrimLeft(row, " "), "│ ")
+		return strings.TrimRight(strings.TrimSuffix(interior, " │"), " ")
+	}
+	for i, want := range modalBoxTestLines() {
+		if stripRow(shortContent[i]) != strings.TrimSpace(want) {
+			t.Fatalf("short box row %d = %q, want %q\n%s", i, stripRow(shortContent[i]), want, strings.Join(shortBox, "\n"))
+		}
+		if stripRow(longContent[i]) != strings.TrimSpace(want) || stripRow(longContent[i+len(lines)]) != strings.TrimSpace(want) {
+			t.Fatalf("long box lost round of %q\n%s", want, strings.Join(longBox, "\n"))
+		}
 	}
 }
 
@@ -134,9 +151,10 @@ func TestModalBoxLinesFallBackWhenGeometryOrOwnerDisqualifies(t *testing.T) {
 	}
 }
 
-// 端到端：审批正文面板走盒子后，底区保留高度不再等于原始正文行数，且 popup 行
-// 仍整体落在 prompt 输入行之上（既有不变量）。
-func TestLayoutBottomPaneRowsBoundsPriorityPanelReserve(t *testing.T) {
+// 端到端：审批正文面板走盒子后，底区保留高度 = 盒子实际高度（随正文自动扩展：
+// 每条正文行独立成行），且盒子不超过终端上界、整块落在 prompt 输入行之上
+// （既有不变量）。
+func TestLayoutBottomPaneRowsPriorityPanelBoxTracksContent(t *testing.T) {
 	lines := modalBoxTestLines()
 
 	bottomFor := func(owner string) BottomPaneState {
@@ -154,12 +172,6 @@ func TestLayoutBottomPaneRowsBoundsPriorityPanelReserve(t *testing.T) {
 	geometry := GeometryState{Width: 80, Height: 24, Generation: 1}
 
 	boxed := LayoutBottomPaneRows(bottomFor(modalBoxTestOwner), geometry)
-	legacy := LayoutBottomPaneRows(bottomFor("modal:selection"), geometry)
-
-	if boxed.OutputBottomRow <= legacy.OutputBottomRow {
-		t.Fatalf("boxed reserve did not shrink: boxed outputBottom=%d legacy=%d",
-			boxed.OutputBottomRow, legacy.OutputBottomRow)
-	}
 
 	popupRows := 0
 	firstPopupRow := 0
@@ -186,23 +198,26 @@ func TestLayoutBottomPaneRowsBoundsPriorityPanelReserve(t *testing.T) {
 	if maxRows := ModalBoxMaxRows(geometry.Height); popupRows == 0 || popupRows > maxRows {
 		t.Fatalf("boxed popup rows = %d, want 1..%d (rows=%#v)", popupRows, maxRows, boxed.Rows)
 	}
+	// 每条正文行都必须渲染进盒子（宽度 80 内宽 76，测试行全部短于 76 列，
+	// 不会折行）——高度随正文自动扩展而不是被预算截断。
+	if want := len(lines) + 2; popupRows != want {
+		t.Fatalf("boxed popup rows = %d, want %d (each body line on its own row; rows=%#v)",
+			popupRows, want, boxed.Rows)
+	}
+	if firstPopupRow < 1 {
+		t.Fatalf("approval box starts at row %d, want >= 1 (must fit on screen; rows=%#v)",
+			firstPopupRow, boxed.Rows)
+	}
 	if !sawTopBorder || !sawBottomBorder {
 		t.Fatalf("expected bordered box rows, got %#v", boxed.Rows)
 	}
-	t.Logf("approval box: rows=%d first=%d outputBottom=%d (legacy reserve outputBottom=%d)",
-		popupRows, firstPopupRow, boxed.OutputBottomRow, legacy.OutputBottomRow)
-	// 用户报告的缺陷是面板出现在屏幕中部：预算盒子必须停在屏幕下半部分，
-	// 而不是把顶边推到中线以上。
-	if firstPopupRow <= geometry.Height/2 {
-		t.Fatalf("approval box starts at row %d, want below the screen midpoint %d (rows=%#v)",
-			firstPopupRow, geometry.Height/2, boxed.Rows)
-	}
+	t.Logf("approval box: rows=%d first=%d outputBottom=%d", popupRows, firstPopupRow, boxed.OutputBottomRow)
 }
 
 // 回归：用户报告提问卡片“问题列表没有换行”——标题/问题文本、前几条选项被
 // " | " 合并进同一行（priorityPromptViewport 的语义摘要），超宽正文又被 "…"
-// 截断。盒子必须保持每条问题一行：超宽行就地折行（续行计入固定预算），
-// 不得再合并或截断。
+// 截断。盒子必须保持每条问题一行：超宽行就地折行（续行计入盒子总高度，高度
+// 随正文自动扩展），不得再合并或截断。
 func TestModalBoxLinesWrapsQuestionListWithoutMerging(t *testing.T) {
 	lines := []string{
 		"[提问] Agent 需要你的补充信息",
@@ -225,8 +240,8 @@ func TestModalBoxLinesWrapsQuestionListWithoutMerging(t *testing.T) {
 		t.Fatalf("expected a bordered modal box, got %#v", box)
 	}
 	content := box[1 : len(box)-1]
-	if len(content) > modalBoxInteriorRows(24) {
-		t.Fatalf("box content rows = %d, exceed budget %d", len(content), modalBoxInteriorRows(24))
+	if maxRows := ModalBoxMaxRows(24); len(content)+2 > maxRows {
+		t.Fatalf("box rows = %d, exceed terminal ceiling %d", len(content)+2, maxRows)
 	}
 	joined := strings.Join(content, "\n")
 	// 折行后的纯文本（去掉边框与行内补白）：用于核对问题原文被完整保留。
@@ -245,6 +260,13 @@ func TestModalBoxLinesWrapsQuestionListWithoutMerging(t *testing.T) {
 	for _, row := range content {
 		if len(numbered.FindAllStringIndex(row, -1)) > 1 {
 			t.Fatalf("row merges multiple questions: %q\n%s", row, strings.Join(box, "\n"))
+		}
+	}
+	// 高度随正文自动扩展：标题、问题、每条选项与回答提示都必须完整保留
+	// （逐条独立成行，不因预算被丢弃）。
+	for _, want := range lines {
+		if !strings.Contains(foldedPlain, strings.TrimSpace(want)) {
+			t.Fatalf("question line lost (auto-height dropped it): %q\n%s", want, strings.Join(box, "\n"))
 		}
 	}
 	// 超宽问题行被折行保留（续行可见其尾部），而不是 "…" 截断。折行边界可能

@@ -14,8 +14,9 @@ import (
 // 渲染在底部 prompt 区域之上。此前同一工具调用的 ActiveBand Running 行与
 // “Waiting for answer” 动态状态行会插入卡片中间，并把卡片尾部两行覆盖掉，
 // 用户看到的是“卡片上段 / Running / Waiting / 卡片最后一条建议 / >”。
-// 卡片现在由固定预算的边框盒子承载（ui.ModalBoxMaxRows），因此行数不再等于
-// 正文行数：正文变长不会继续撑高底区，卡片也不会再被顶到屏幕中部。
+// 卡片现在由边框盒子承载：盒子高度随正文自动扩展（每条问题一行、超宽就地
+// 折行），只受终端“放得下”的上界约束（ui.ModalBoxMaxRows：正文 + 边框不挤掉
+// 底部 prompt 输入行与状态行）。
 func TestChatQuestionPriorityPromptKeepsCardContiguous(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	ui.SetTheme(ui.ThemeAuto)
@@ -83,9 +84,10 @@ func TestChatQuestionPriorityPromptKeepsCardContiguous(t *testing.T) {
 		return b.String()
 	}
 
-	// 1) 问题卡片整块连续，并由固定预算的边框盒子承载：行数有上界（不再等于
-	// 正文行数——正文变长不会继续撑高底区，也就不会把卡片顶到屏幕中部），
-	// 首末行是盒子边框，内容行仍携带问题摘要与回答提示，卡片尾部不被覆盖。
+	// 1) 问题卡片整块连续，并由边框盒子承载：高度随正文自动扩展（每条问题
+	// 一行、超宽就地折行），且不超过终端上界 ModalBoxMaxRows（正文 + 边框
+	// 不挤掉底部 prompt 输入行与状态行）。首末行是盒子边框，内容行仍携带
+	// 问题摘要与回答提示，卡片尾部不被覆盖。
 	card := make([]ui.BottomPaneRow, 0, len(body))
 	for _, row := range plan.Rows {
 		if row.Owner == renderengine.RowOwnerPopup {
@@ -96,7 +98,7 @@ func TestChatQuestionPriorityPromptKeepsCardContiguous(t *testing.T) {
 		t.Fatalf("question card painted %d row(s), want a bordered box\n%s", len(card), debug())
 	}
 	if maxRows := ui.ModalBoxMaxRows(height); maxRows > 0 && len(card) > maxRows {
-		t.Fatalf("question card rows = %d, want <= %d (panel height must not grow with the body)\n%s",
+		t.Fatalf("question card rows = %d, want <= %d (box must not crowd out the prompt/status rows)\n%s",
 			len(card), maxRows, debug())
 	}
 	for index, row := range card {
