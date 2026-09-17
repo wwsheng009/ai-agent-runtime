@@ -230,6 +230,73 @@ func TestHandleChatWebPage_DebugModule(t *testing.T) {
 	}
 }
 
+// TestHandleChatWebPage_AboutTokenModule 验证关于页的写令牌显示：
+// 页面提供令牌容器与复制按钮，ui.js 以注入的 meta 为主源（零额外请求）、
+// /web/api/token 为回退，且 app.js 在启动序列里初始化（打开页面即可见）。
+func TestHandleChatWebPage_AboutTokenModule(t *testing.T) {
+	pageReq := httptest.NewRequest(http.MethodGet, ChatWebPath, nil)
+	pageRec := httptest.NewRecorder()
+	HandleChatWebPage(pageRec, pageReq)
+	page := pageRec.Body.String()
+	for _, want := range []string{`id="about-token-value"`, `id="about-token-copy"`} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("about panel missing token element %q", want)
+		}
+	}
+
+	for _, asset := range []struct {
+		path string
+		want []string
+	}{
+		{path: "js/ui.js", want: []string{"initAboutToken", `meta[name="aicli-web-token"]`, "/web/api/token"}},
+		{path: "app.js", want: []string{"initAboutToken()"}},
+	} {
+		req := httptest.NewRequest(http.MethodGet, ChatWebPath+asset.path, nil)
+		rec := httptest.NewRecorder()
+		HandleChatWebPage(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200", asset.path, rec.Code)
+		}
+		body := rec.Body.String()
+		for _, want := range asset.want {
+			if !strings.Contains(body, want) {
+				t.Fatalf("%s missing %q", asset.path, want)
+			}
+		}
+	}
+}
+
+// TestHandleChatWebPage_AboutEndpointsModule 验证关于页的端点清单：
+// 页面提供渲染容器，ui.js 以 /debug/endpoints?format=json（与 /debug display 同源）
+// 为唯一数据源，并按 scheme 分组渲染 —— 新增端点无需改前端。
+func TestHandleChatWebPage_AboutEndpointsModule(t *testing.T) {
+	pageReq := httptest.NewRequest(http.MethodGet, ChatWebPath, nil)
+	pageRec := httptest.NewRecorder()
+	HandleChatWebPage(pageRec, pageReq)
+	if body := pageRec.Body.String(); !strings.Contains(body, `id="about-endpoints"`) {
+		t.Fatalf("about panel missing endpoint list container, got:\n%s", body)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, ChatWebPath+"js/ui.js", nil)
+	rec := httptest.NewRecorder()
+	HandleChatWebPage(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"/debug/endpoints?format=json", // 唯一数据源
+		"renderAboutEndpoints",         // 分组渲染入口
+		"loadAboutEndpoints",           // 页签激活时拉取
+		"about-endpoints-auth",         // 写操作令牌标记
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("ui.js missing %q", want)
+		}
+	}
+}
+
 func TestHandleChatWebPage_MethodNotAllowed(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, ChatWebPath, nil)
 	rec := httptest.NewRecorder()

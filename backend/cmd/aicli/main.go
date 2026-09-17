@@ -74,6 +74,14 @@ func main() {
 		},
 	}
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		// 写令牌可在启动时显式指定（--web-token > AICLI_WEB_TOKEN > 随机生成）。
+		// 校验失败直接中止启动：静默回退随机令牌会让"我明明传了 token"变成难排查的 403。
+		webTokenFlag, _ := rootCmd.Flags().GetString("web-token")
+		webTokenSource, tokenErr := commands.ApplyChatWebAuthToken(webTokenFlag)
+		if tokenErr != nil {
+			return fmt.Errorf("failed to configure web write token: %w", tokenErr)
+		}
+
 		// pprof 诊断端点按需启动：--pprof 或 AICLI_PPROF 环境变量显式开启，
 		// 默认监听 127.0.0.1 随机空闲端口，实际地址打印到 stderr。
 		// 当 --debug 开启时也自动启动（内置 /debug/chat/status 端点提供
@@ -105,7 +113,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Info: chat screen content endpoint: %s (JSON; ?format=text for plain text)\n", handle.ScreenURL())
 			fmt.Fprintf(os.Stderr, "Info: chat debug endpoints list: %s (JSON; ?format=text for plain text)\n", handle.EndpointsURL())
 			fmt.Fprintf(os.Stderr, "Info: chat web client / remote invoke endpoint: %s (POST %s)\n", handle.WebURL(), handle.InvokeURL())
-			fmt.Fprintf(os.Stderr, "Info: web write token (%s): %s (POST /web/api/* 必需)\n", commands.ChatWebAuthTokenHeader, commands.EnsureChatWebAuthToken())
+			tokenHint := "POST /web/api/* 必需"
+			if webTokenSource != "" {
+				tokenHint += "; 来自 " + webTokenSource + "（固定令牌，重启不轮换，注意保管）"
+			}
+			fmt.Fprintf(os.Stderr, "Info: web write token (%s): %s (%s)\n", commands.ChatWebAuthTokenHeader, commands.EnsureChatWebAuthToken(), tokenHint)
 			fmt.Fprintf(os.Stderr, "Info: runtime observe plane: %s (local in-process; capabilities/snapshot/sessions/events)\n", handle.Addr()+strings.TrimRight(commands.ChatDebugObservePrefix(), "/"))
 		}
 
@@ -199,6 +211,7 @@ func main() {
 	rootCmd.PersistentFlags().String("syntax-theme", "", "代码语法高亮主题（auto 或 Chroma 主题名；优先级: --syntax-theme > 环境变量 > 配置）")
 	rootCmd.PersistentFlags().Bool("envelope", false, "JSON 输出时使用统一 envelope 结构（ok/command/data 或 ok/command/error）")
 	rootCmd.PersistentFlags().Bool("pprof", false, "启用 pprof 诊断端点（监听 127.0.0.1 随机空闲端口；可用 AICLI_PPROF 环境变量指定地址）")
+	rootCmd.PersistentFlags().String("web-token", "", "预设 Web 写令牌（默认每进程随机；也可用 AICLI_WEB_TOKEN；至少 16 位，字符集 A-Za-z0-9-._~）")
 	rootCmd.PersistentFlags().Bool("console-host", false, "Windows：当前 stdin/stdout 为 PTY/pipe 时，在新的原生 Console 窗口中重启 aicli")
 
 	// config 子命令

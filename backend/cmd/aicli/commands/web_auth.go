@@ -4,9 +4,11 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,20 +25,52 @@ import (
 //  1. Host 必须是回环地址（挡 DNS rebinding / 反向代理转发）；
 //  2. 携带 Origin 的请求必须与请求 Host 同源（挡浏览器跨站写请求）；
 //  3. 状态变更方法（POST/PUT/PATCH/DELETE）必须携带写令牌
-//     X-AICLI-Token（或 ?token=），令牌进程启动时随机生成：
+//     X-AICLI-Token（或 ?token=），令牌来源（按优先级）：
+//     - --web-token 显式指定（固定令牌，适合 CI/服务化管理）；
+//     - AICLI_WEB_TOKEN 环境变量（同上，flag 优先）；
+//     - 未指定时进程启动时随机生成（默认，重启即轮换）：
 //     - 终端启动行打印（供脚本/外部 Agent 使用）；
 //     - 页面注入 meta 并自动附加（供内置 Web 客户端使用）。
+//     - GET /web/api/token 显式读取（机器可读的稳定入口，供不便解析
+//     启动行的脚本；关于页也直接显示，便于人工复制）。
 //
 // 只读 GET（含 SSE 事件流）不要求令牌：EventSource 无法设置请求头，且
 // 读操作已被 Host/Origin 校验限制在本机同源范围内。
+//
+// 关于「令牌可被只读 GET 读取是否削弱防护」：不会。令牌挡的是浏览器
+// 跨站写请求与 DNS rebinding（二者都带 Origin 或非回环 Host，被上面两层
+// 拦下），而不是同机其他进程——本机进程本来就能读启动行、页面 meta 与
+// 进程内存。因此把读取收敛为单一显式端点只是可脚本化，不扩大信任边界；
+// 该端点明确 no-store，且令牌原文不进入 /debug/endpoints 响应。
 // ============================================================================
 
 // ChatWebAuthTokenHeader 是写操作令牌的请求头名称。
 const ChatWebAuthTokenHeader = "X-AICLI-Token"
 
+// ChatWebAuthTokenEnv 是预设写令牌的环境变量名（--web-token 优先于它）。
+const ChatWebAuthTokenEnv = "AICLI_WEB_TOKEN"
+
+// 令牌来源标识：用于启动行提示，便于操作者判断"重启是否还会轮换"。
+const (
+	chatWebAuthTokenSourceRandom = "random"
+	chatWebAuthTokenSourceFlag   = "--web-token"
+	chatWebAuthTokenSourceEnv    = ChatWebAuthTokenEnv
+)
+
+// 显式令牌的长度区间与字符集约束：
+//   - 下限 16 字节：低于此长度可被暴力猜测，直接拒绝而不是静默接受；
+//   - 上限 256 字节：避免异常输入进入常量时间比较与日志；
+//   - 字符集限定 RFC 3986 unreserved（A-Za-z0-9-._~）：既安全放在请求头，
+//     也能原样放进 ?token= 查询参数，不需要 URL 转义。
+const (
+	chatWebAuthTokenMinLen = 16
+	chatWebAuthTokenMaxLen = 256
+)
+
 var (
-	chatWebAuthMu    sync.Mutex
-	chatWebAuthToken string
+	chatWebAuthMu          sync.Mutex
+	chatWebAuthToken       string
+	chatWebAuthTokenSource = chatWebAuthTokenSourceRandom
 )
 
 // EnsureChatWebAuthToken 返回当前进程的 Web 写令牌；首次调用时随机生成。
@@ -51,6 +85,7 @@ func EnsureChatWebAuthToken() string {
 		} else {
 			chatWebAuthToken = hex.EncodeToString(buf)
 		}
+		chatWebAuthTokenSource = chatWebAuthTokenSourceRandom
 	}
 	return chatWebAuthToken
 }
@@ -62,11 +97,92 @@ func ChatWebAuthToken() string {
 	return chatWebAuthToken
 }
 
-// setChatWebAuthTokenForTest 供同包测试注入/清空令牌。
+// ChatWebAuthTokenSource 返回当前令牌来源：random / --web-token / AICLI_WEB_TOKEN。
+// 供启动行与 /debug 提示"令牌是否会随重启轮换"。
+func ChatWebAuthTokenSource() string {
+	chatWebAuthMu.Lock()
+	defer chatWebAuthMu.Unlock()
+	return chatWebAuthTokenSource
+}
+
+// SetChatWebAuthToken 预设本进程写令牌（来自 --web-token 或 AICLI_WEB_TOKEN）。
+//
+// 必须在服务器开始对外服务前调用：令牌一旦生效就不可在运行中替换
+// （避免"已注入页面的 meta 与服务器期望值不一致"这类半途换令牌状态）。
+// 校验失败返回错误，调用方应中止启动而不是回退随机令牌——静默回退会让
+// "我明明传了 token"变成难以排查的 403。
+func SetChatWebAuthToken(token string) error {
+	if err := validateChatWebAuthToken(token); err != nil {
+		return err
+	}
+	chatWebAuthMu.Lock()
+	defer chatWebAuthMu.Unlock()
+	if chatWebAuthToken != "" && chatWebAuthToken != token {
+		return fmt.Errorf("web write token already initialized")
+	}
+	chatWebAuthToken = token
+	chatWebAuthTokenSource = chatWebAuthTokenSourceFlag
+	return nil
+}
+
+// ApplyChatWebAuthToken 按优先级应用显式令牌：--web-token > AICLI_WEB_TOKEN。
+// 两者都为空时不改动任何状态（保持随机生成），返回空来源。
+// 返回的 source 用于启动行提示；校验失败时返回包装后的错误。
+func ApplyChatWebAuthToken(flagValue string) (string, error) {
+	token := strings.TrimSpace(flagValue)
+	source := chatWebAuthTokenSourceFlag
+	if token == "" {
+		token = strings.TrimSpace(os.Getenv(ChatWebAuthTokenEnv))
+		source = chatWebAuthTokenSourceEnv
+	}
+	if token == "" {
+		return "", nil
+	}
+	if err := SetChatWebAuthToken(token); err != nil {
+		return "", fmt.Errorf("%s: %w", source, err)
+	}
+	chatWebAuthMu.Lock()
+	chatWebAuthTokenSource = source
+	chatWebAuthMu.Unlock()
+	return source, nil
+}
+
+// validateChatWebAuthToken 校验显式令牌。错误信息不回显令牌内容，
+// 避免把凭证写进终端日志或 issue。
+func validateChatWebAuthToken(token string) error {
+	if token == "" {
+		return fmt.Errorf("token must not be empty")
+	}
+	if token != strings.TrimSpace(token) {
+		return fmt.Errorf("token must not contain surrounding whitespace")
+	}
+	if len(token) < chatWebAuthTokenMinLen {
+		return fmt.Errorf("token too short: %d bytes, need at least %d", len(token), chatWebAuthTokenMinLen)
+	}
+	if len(token) > chatWebAuthTokenMaxLen {
+		return fmt.Errorf("token too long: %d bytes, max %d", len(token), chatWebAuthTokenMaxLen)
+	}
+	for _, r := range token {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '.', r == '_', r == '~':
+		default:
+			return fmt.Errorf("token contains unsupported characters (allowed: A-Z a-z 0-9 - . _ ~)")
+		}
+	}
+	return nil
+}
+
+// setChatWebAuthTokenForTest 供同包测试注入/清空令牌与来源。
 func setChatWebAuthTokenForTest(token string) {
 	chatWebAuthMu.Lock()
 	defer chatWebAuthMu.Unlock()
 	chatWebAuthToken = token
+	if token == "" {
+		chatWebAuthTokenSource = chatWebAuthTokenSourceRandom
+		return
+	}
+	chatWebAuthTokenSource = chatWebAuthTokenSourceFlag
 }
 
 // ChatWebAuthGuard 包装 HTTP 处理器，实施 Host/Origin/写令牌校验。

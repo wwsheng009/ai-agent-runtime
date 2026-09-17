@@ -41,9 +41,13 @@ type chatDebugEndpointsSnapshot struct {
 	ObserveBaseURL  string `json:"observe_base_url,omitempty"`  // runtime-observe 组基础地址
 	// WriteAuthHeader / WriteAuthHint 描述 Web API 状态变更请求的鉴权要求
 	// （Host/Origin 校验之外的第二层；令牌来自进程启动行或页面 meta 注入）。
-	WriteAuthHeader string                  `json:"write_auth_header,omitempty"`
-	WriteAuthHint   string                  `json:"write_auth_hint,omitempty"`
-	Endpoints       []chatDebugEndpointInfo `json:"endpoints"`
+	WriteAuthHeader string `json:"write_auth_header,omitempty"`
+	WriteAuthHint   string `json:"write_auth_hint,omitempty"`
+	// WriteAuthToken 是令牌原文，**仅供 /debug display（TUI）渲染**，刻意
+	// json:"-" 排除在 /debug/endpoints 响应之外：清单常被脚本转发或贴进
+	// issue，不应连带泄露令牌；需要令牌的脚本走 GET /web/api/token。
+	WriteAuthToken string                  `json:"-"`
+	Endpoints      []chatDebugEndpointInfo `json:"endpoints"`
 }
 
 // loopbackDebugEndpoints 列出 aicli 本机 loopback HTTP 服务器（--pprof 时启动）
@@ -74,9 +78,10 @@ var webDebugEndpoints = []struct {
 	{Method: "GET", Path: "/web/api/status", Note: "渲染/显示状态快照（JSON / ?format=text）"},
 	{Method: "GET", Path: "/web/api/runtime", Note: "运行时元数据（provider/model/reasoning 权威值）"},
 	{Method: "GET", Path: "/web/api/events", Note: "SSE 事件流（实时 turn 事件，可续传）"},
-	{Method: "POST", Path: "/web/api/input", Note: "异步注入 prompt / 审批决议 / 提问回答 / interrupt"},
-	{Method: "POST", Path: "/web/api/invoke", Note: "同步远程调用：注入 prompt 并等待 turn 结束（wait_only/timeout_ms/client_request_id）"},
-	{Method: "GET", Path: "/web/api/turn", Note: "turn 后验查询（?id={turn_id}，含 started/finished/usage）"},
+	{Method: "POST", Path: "/web/api/input", Note: "异步注入 prompt / 审批决议 / 提问回答 / interrupt（立即返回 queued）"},
+	{Method: "POST", Path: "/web/api/invoke", Note: "同步远程调用：注入 prompt 并等待 turn 结束。参数 wait_only（只等待，不注入）/timeout_ms/session_id/client_request_id（幂等回放 duplicate=true）；Accept: text/event-stream 时以 SSE 返回 start/delta/result 帧；响应含 status/elapsed_ms/screen，turn 结束附带 assistant/usage"},
+	{Method: "GET", Path: "/web/api/turn", Note: "turn 后验查询：?id={turn_id} 返回单条记录，缺省返回 current（busy/turn_id/pending_inputs）+ recent（最多 30m，含 status/started_at/finished_at/duration_ms/steps/error/usage）"},
+	{Method: "GET", Path: "/web/api/token", Note: "读取本进程 Web 写令牌（X-AICLI-Token，或 ?token=）；仅回环 + 同源可读，令牌每进程随机、重启即轮换"},
 	{Method: "GET", Path: "/web/api/events/schema", Note: "SSE 事件 schema"},
 	{Method: "GET", Path: "/web/api/sessions", Note: "会话列表（current_session_id + 候选会话）"},
 	{Method: "POST", Path: "/web/api/sessions/new", Note: "新建会话"},
@@ -148,7 +153,9 @@ func buildChatDebugEndpointList(session *ChatSession) *chatDebugEndpointsSnapsho
 		snap.WebBaseURL = loopbackBase + "/web"
 		snap.WriteAuthHeader = ChatWebAuthTokenHeader
 		snap.WriteAuthHint = "POST 请求需携带 " + ChatWebAuthTokenHeader +
-			"（或 ?token=）；令牌见 aicli 启动行 web write token，内置页面自动注入"
+			"（或 ?token=）；令牌可由 GET /web/api/token 读取（或见 aicli 启动行 web write token），内置页面自动注入"
+		// 终端内显示：本机交互式输出，便于人工复制（不进入 HTTP 响应）。
+		snap.WriteAuthToken = ChatWebAuthToken()
 	}
 	for _, ep := range webDebugEndpoints {
 		info := chatDebugEndpointInfo{
@@ -267,6 +274,9 @@ func BuildChatDebugEndpointsText() string {
 		} else if scheme == "runtime-observe" {
 			sb.WriteString("  Base: <route-only>\n")
 		}
+		if scheme == "web" && strings.TrimSpace(snap.WriteAuthHint) != "" {
+			fmt.Fprintf(&sb, "  Auth: %s\n", strings.TrimSpace(snap.WriteAuthHint))
+		}
 		for _, info := range snap.Endpoints {
 			if info.Scheme != scheme {
 				continue
@@ -326,6 +336,15 @@ func appendChatDebugEndpointSubgroupLines(builder *chatDebugDocumentBuilder, sna
 		builder.meta("Base:", base)
 	} else if scheme == "runtime-observe" {
 		builder.meta("Base:", "<route-only>")
+	}
+	if scheme == "web" && strings.TrimSpace(snap.WriteAuthHint) != "" {
+		builder.meta("Auth:", strings.TrimSpace(snap.WriteAuthHint))
+	}
+	// 令牌原文只在 TUI（/debug display）输出：与 Auth 提示相邻便于复制；
+	// HTTP 侧 /debug/endpoints 用 WriteAuthToken(json:"-") 排除，改走
+	// GET /web/api/token，避免清单被转发时连带泄露。
+	if scheme == "web" && strings.TrimSpace(snap.WriteAuthToken) != "" {
+		builder.meta("Token:", strings.TrimSpace(snap.WriteAuthToken)+"  (GET /web/api/token)")
 	}
 	for _, info := range snap.Endpoints {
 		if info.Scheme != scheme {

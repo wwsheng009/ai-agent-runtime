@@ -247,6 +247,9 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	mux.HandleFunc(commands.ChatWebAPIInvokePath, commands.HandleChatWebAPIInvoke)
 	// /web/api/turn turn 后验查询：配合异步 input 拿终态/耗时/token 用量。
 	mux.HandleFunc(commands.ChatWebAPITurnPath, commands.HandleChatWebAPITurn)
+	// /web/api/token 写令牌读取端点：本机回环 + 同源可读（GET，无需令牌自举），
+	// 供脚本/外部 Agent 免解析启动行获取 X-AICLI-Token。
+	mux.HandleFunc(commands.ChatWebAPITokenPath, commands.HandleChatWebAPIToken)
 	mux.HandleFunc(commands.ChatWebAPISchemaPath, commands.HandleChatWebAPIEventsSchema)
 	mux.HandleFunc(commands.ChatWebAPISessionsPath, commands.HandleChatWebAPISessions)
 	mux.HandleFunc(commands.ChatWebAPISessionsNewPath, commands.HandleChatWebAPISessionsNew)

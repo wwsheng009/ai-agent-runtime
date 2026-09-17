@@ -493,6 +493,28 @@
           <dd>「调试」页签展示的内容与 <code>aicli /debug</code> 命令一致（<code>GET /web/api/status?format=text</code>）。</dd>
           <dt>页签</dt>
           <dd>对话 / 技能 / 日志 / 配置 / 缓存 / 调试 / 关于</dd>
+          <dt>写令牌</dt>
+          <dd>
+            <div class="about-token">
+              <code id="about-token-value" class="about-token-value">（未注入）</code>
+              <button id="about-token-copy" type="button" class="about-token-copy">复制</button>
+              <a href="/web/api/token" target="_blank" rel="noopener">/web/api/token</a>
+            </div>
+            <p class="about-endpoints-hint">
+              状态变更请求（POST/PUT/PATCH/DELETE）需携带 <code>X-AICLI-Token: &lt;令牌&gt;</code>
+              或 <code>?token=&lt;令牌&gt;</code>；令牌每进程随机生成、<strong>重启即轮换</strong>，
+              仅本机回环同源可读（页面已自动注入，手工调用脚本可读该端点或启动行）。
+            </p>
+          </dd>
+          <dt>远程调用端点</dt>
+          <dd>
+            <div id="about-endpoints" class="about-endpoints">加载中…</div>
+            <p class="about-endpoints-hint">
+              清单来自服务端 <code>GET /debug/endpoints?format=json</code>（与 <code>aicli /debug</code> 一致）；
+              标记 <span class="about-endpoints-auth">需令牌</span> 的写操作要求 <code>X-AICLI-Token</code>，
+              令牌已由本页面自动注入，手工调用时见启动行。
+            </p>
+          </dd>
           <dt>端点索引</dt>
           <dd><a href="/debug/endpoints" target="_blank" rel="noopener">/debug/endpoints</a></dd>
         </dl>

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -379,5 +380,225 @@ func TestSubscribeChatWebInvokeWatch_FiltersOtherSessions(t *testing.T) {
 	}
 	if ws.Assistant != "hi" {
 		t.Fatalf("assistant = %q, want hi", ws.Assistant)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// handler 级：wait_only / 幂等 / 会话校验 / 流式（P1b + P2）
+// ---------------------------------------------------------------------------
+
+// withStubbedInvokeProbe 临时替换运行状态探测器。
+func withStubbedInvokeProbe(t *testing.T, fn func(*ChatSession) (string, string, bool, map[string]interface{}, map[string]interface{})) {
+	t.Helper()
+	prev := chatWebInvokeProbeFn
+	chatWebInvokeProbeFn = fn
+	t.Cleanup(func() { chatWebInvokeProbeFn = prev })
+}
+
+func idleInvokeProbe() func(*ChatSession) (string, string, bool, map[string]interface{}, map[string]interface{}) {
+	return func(*ChatSession) (string, string, bool, map[string]interface{}, map[string]interface{}) {
+		return "", "", false, nil, nil
+	}
+}
+
+func TestHandleChatWebAPIInvokeSessionMismatch(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "session_a"},
+		InputQueue:     newChatInputQueue(nil),
+	}
+	withWebTestSession(t, session)
+
+	req := httptest.NewRequest(http.MethodPost, "/web/api/invoke",
+		strings.NewReader(`{"prompt":"hi","session_id":"session_b"}`))
+	rec := httptest.NewRecorder()
+	HandleChatWebAPIInvoke(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "session_id mismatch") {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+	if session.InputQueue.queuedSubmissionCount() != 0 {
+		t.Fatal("mismatched session must not receive the prompt")
+	}
+}
+
+func TestHandleChatWebAPIInvokeWaitOnlyTimeout(t *testing.T) {
+	session := newWebTestSession()
+	withWebTestSession(t, session)
+	withStubbedInvokeProbe(t, idleInvokeProbe())
+
+	req := httptest.NewRequest(http.MethodPost, "/web/api/invoke",
+		strings.NewReader(`{"wait_only":true,"timeout_ms":1000}`))
+	rec := httptest.NewRecorder()
+	HandleChatWebAPIInvoke(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	var resp chatWebInvokeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, rec.Body.String())
+	}
+	if resp.Status != "timeout" {
+		t.Fatalf("status = %q, want timeout", resp.Status)
+	}
+	if resp.Queued {
+		t.Fatal("wait_only must not report queued")
+	}
+	if session.InputQueue.queuedSubmissionCount() != 0 {
+		t.Fatal("wait_only must not inject any prompt")
+	}
+}
+
+func TestHandleChatWebAPIInvokeIdempotentReplay(t *testing.T) {
+	session := newWebTestSession()
+	withWebTestSession(t, session)
+
+	key := chatWebInvokeIdemKey("", "req-1")
+	storeChatWebInvokeIdem(key, &chatWebInvokeResponse{
+		Status:    "completed",
+		Assistant: &chatWebScreenMessage{Role: "assistant", Content: "hi"},
+	})
+	t.Cleanup(func() {
+		chatWebInvokeIdem.mu.Lock()
+		delete(chatWebInvokeIdem.m, key)
+		chatWebInvokeIdem.mu.Unlock()
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/web/api/invoke",
+		strings.NewReader(`{"prompt":"hi","client_request_id":"req-1"}`))
+	rec := httptest.NewRecorder()
+	HandleChatWebAPIInvoke(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	var resp chatWebInvokeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !resp.Duplicate {
+		t.Fatalf("duplicate = false, want replay (resp=%+v)", resp)
+	}
+	if resp.Status != "completed" || resp.Assistant == nil || resp.Assistant.Content != "hi" {
+		t.Fatalf("replayed response mismatch: %+v", resp)
+	}
+	if session.InputQueue.queuedSubmissionCount() != 0 {
+		t.Fatal("replay must not inject the prompt again")
+	}
+}
+
+func TestChatWebInvokeIdempotencyStoreRules(t *testing.T) {
+	key := chatWebInvokeIdemKey("session_x", "k1")
+	storeChatWebInvokeIdem(key, &chatWebInvokeResponse{Status: "settled"})
+	if cached, ok := lookupChatWebInvokeIdem(key); !ok || !cached.Duplicate || cached.Status != "settled" {
+		t.Fatalf("lookup = (%+v, %v), want settled duplicate", cached, ok)
+	}
+
+	// 过期条目不回放。
+	chatWebInvokeIdem.mu.Lock()
+	entry := chatWebInvokeIdem.m[key]
+	entry.at = time.Now().Add(-2 * chatWebInvokeIdemTTL)
+	chatWebInvokeIdem.m[key] = entry
+	chatWebInvokeIdem.mu.Unlock()
+	if _, ok := lookupChatWebInvokeIdem(key); ok {
+		t.Fatal("expired entry must not replay")
+	}
+
+	// rejected 等无副作用结果不固化。
+	rejectedKey := chatWebInvokeIdemKey("session_x", "k2")
+	storeChatWebInvokeIdem(rejectedKey, &chatWebInvokeResponse{Status: "rejected"})
+	if _, ok := lookupChatWebInvokeIdem(rejectedKey); ok {
+		t.Fatal("rejected result must not be replayable")
+	}
+}
+
+func TestHandleChatWebAPIInvokeStreaming(t *testing.T) {
+	session := newWebTestSession()
+	withWebTestSession(t, session)
+	withStubbedInvokeProbe(t, idleInvokeProbe())
+
+	req := httptest.NewRequest(http.MethodPost, "/web/api/invoke",
+		strings.NewReader(`{"wait_only":true,"timeout_ms":1000}`))
+	req.Header.Set("Accept", "text/event-stream")
+	rec := httptest.NewRecorder()
+	HandleChatWebAPIInvoke(rec, req)
+
+	out := rec.Body.String()
+	if !strings.Contains(out, "event: start") {
+		t.Fatalf("missing start frame: %s", out)
+	}
+	if !strings.Contains(out, "event: result") {
+		t.Fatalf("missing result frame: %s", out)
+	}
+	if !strings.Contains(out, `"status":"timeout"`) {
+		t.Fatalf("result frame missing status: %s", out)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+		t.Fatalf("content-type = %q", ct)
+	}
+}
+
+func TestChatWebInvokeWatchStreamsDeltas(t *testing.T) {
+	bus := runtimeevents.NewBus()
+	session := &ChatSession{
+		RuntimeSession:   &runtimechat.Session{ID: "s1"},
+		LocalRuntimeHost: &localChatRuntimeHost{EventBus: bus},
+	}
+	watch := newChatWebInvokeWatch()
+	var mu sync.Mutex
+	var got []string
+	watch.onStream = func(event string, data map[string]interface{}, sourceEvent string) {
+		mu.Lock()
+		got = append(got, event+"="+payloadStringValue(data["delta"])+payloadStringValue(data["name"]))
+		mu.Unlock()
+	}
+	unsubscribe := subscribeChatWebInvokeWatch(session, watch)
+	defer unsubscribe()
+
+	bus.Publish(runtimeevents.Event{Type: runtimechat.EventAssistantDelta, SessionID: "s1",
+		Payload: map[string]interface{}{"delta": "he"}})
+	bus.Publish(runtimeevents.Event{Type: runtimechat.EventAssistantDelta, SessionID: "s2",
+		Payload: map[string]interface{}{"delta": "other-session"}})
+	bus.Publish(runtimeevents.Event{Type: runtimechat.EventToolStarted, SessionID: "s1",
+		Payload: map[string]interface{}{"name": "shell"}})
+
+	mu.Lock()
+	joined := strings.Join(got, ",")
+	mu.Unlock()
+	if !strings.Contains(joined, "assistant_delta=he") {
+		t.Fatalf("delta not streamed: %q", joined)
+	}
+	if strings.Contains(joined, "other-session") {
+		t.Fatalf("other session event leaked into stream: %q", joined)
+	}
+	if !strings.Contains(joined, "tool_started=shell") {
+		t.Fatalf("tool event not streamed: %q", joined)
+	}
+}
+
+func TestChatWebInvokeUsageFromSession(t *testing.T) {
+	if chatWebInvokeUsageFrom(nil) != nil {
+		t.Fatal("nil session must yield nil usage")
+	}
+	if chatWebInvokeUsageFrom(&ChatSession{}) != nil {
+		t.Fatal("empty counters must yield nil usage")
+	}
+	session := &ChatSession{
+		InputTokenCount:         10,
+		OutputTokenCount:        2,
+		TokenCount:              12,
+		ContextTokenCount:       8,
+		ContextWindowTokenCount: 1000,
+	}
+	usage := chatWebInvokeUsageFrom(session)
+	if usage == nil {
+		t.Fatal("usage = nil, want counters")
+	}
+	if usage.InputTokens != 10 || usage.OutputTokens != 2 || usage.TotalTokens != 12 ||
+		usage.ContextTokens != 8 || usage.ContextWindowTokens != 1000 {
+		t.Fatalf("usage = %+v", usage)
 	}
 }

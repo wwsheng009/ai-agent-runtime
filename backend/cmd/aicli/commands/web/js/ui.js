@@ -7,6 +7,7 @@ import { loadAnalysis, stopAnalysisAuto } from "./analysis.js";
 import { loadCacheAnalytics, refreshCacheAnalytics } from "./cache.js";
 import { loadDebugInfo, refreshDebugInfo } from "./debug.js";
 import { loadSkills } from "./skills.js";
+import { esc, showToast } from "./util.js";
 
 var tabMainBtn = document.getElementById("tab-main-btn");
 var tabLogBtn = document.getElementById("tab-log-btn");
@@ -53,6 +54,8 @@ var tabDebugBtn = document.getElementById("tab-debug-btn");
 var tabDebugEl = document.getElementById("tab-debug");
 var tabAboutBtn = document.getElementById("tab-about-btn");
 var tabAboutEl = document.getElementById("tab-about");
+var aboutEndpointsEl = document.getElementById("about-endpoints");
+var aboutTokenValueEl = document.getElementById("about-token-value");
 
 function activateTab(tabName) {
   var isMain = tabName === "main";
@@ -92,7 +95,136 @@ function activateTab(tabName) {
   if (isAnalysis) { loadAnalysis(); } else { stopAnalysisAuto(); }
   // 调试页签的快照是拉取时刻的后端状态（无 SSE 增量），每次进入都重拉一次。
   if (isDebug) { loadDebugInfo(); }
-  // 关于页签为静态内容，无需拉取。
+  // 关于页签的端点清单同样按「进入即重拉」处理：清单由服务端渲染，
+  // 与 /debug display 区块同源，新增端点无需改前端。
+  if (isAbout) { loadAboutEndpoints(); }
+}
+
+// ---- 关于页签：远程调用端点清单（数据源 GET /debug/endpoints?format=json） ----
+var aboutEndpointsLoading = false;
+
+// ---- 关于页签：写令牌显示（来源：页面注入 meta，回退 GET /web/api/token） ----
+//
+// 优先读 meta：与自动注入 fetch 包装用的是同一个值，零额外请求、无失败面；
+// meta 缺失（例如手工用其它服务器托管静态页）才回退到服务端端点。
+export function initAboutToken() {
+  if (!aboutTokenValueEl) { return; }
+  var meta = document.querySelector('meta[name="aicli-web-token"]');
+  var token = meta && meta.content ? String(meta.content).trim() : "";
+  if (token) {
+    aboutTokenValueEl.textContent = token;
+  } else {
+    aboutTokenValueEl.textContent = "（不可用）";
+    fetch("/web/api/token", { cache: "no-store" })
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        aboutTokenValueEl.textContent = (data && data.token) ? String(data.token) : "（不可用）";
+      })
+      .catch(function () { /* 保留「不可用」占位 */ });
+  }
+  var copyBtn = document.getElementById("about-token-copy");
+  if (!copyBtn) { return; }
+  copyBtn.addEventListener("click", function () {
+    var text = aboutTokenValueEl.textContent || "";
+    if (!text || text === "（不可用）" || !navigator.clipboard) {
+      showToast("复制失败", "error");
+      return;
+    }
+    navigator.clipboard.writeText(text).then(function () {
+      showToast("写令牌已复制", "ok");
+    }).catch(function () {
+      showToast("复制失败", "error");
+    });
+  });
+}
+
+// 端点分组顺序：web（本次会话的远程调用 API）优先，其后为 loopback 调试与观察平面。
+var aboutEndpointGroups = [
+  { scheme: "web", label: "web  (微型 Web 客户端 / 远程调用 API)", baseKey: "web_base_url" },
+  { scheme: "loopback", label: "loopback  (aicli --pprof 本机调试服务器)", baseKey: "loopback_base_url" },
+  { scheme: "runtime-observe", label: "runtime-observe  (Runtime Observation Plane)", baseKey: "observe_base_url" }
+];
+
+// 写操作（Method 含 POST）需要 X-AICLI-Token；GET 只受 Host/Origin 校验保护。
+function aboutEndpointNeedsAuth(info) {
+  return String(info && info.method || "").toUpperCase().indexOf("POST") >= 0;
+}
+
+// renderAboutEndpoints 把 /debug/endpoints JSON 渲染为分组清单 HTML。
+// 纯字符串拼接（不做 DOM 操作），所有服务端文本一律 esc() 转义。
+export function renderAboutEndpoints(snap) {
+  if (!snap || snap.available === false) {
+    var reason = snap && snap.reason ? snap.reason : "no active chat session";
+    return '<span class="about-endpoints-dim">端点清单不可用：' + esc(reason) + "</span>";
+  }
+  var list = Array.isArray(snap.endpoints) ? snap.endpoints : [];
+  if (!list.length) {
+    return '<span class="about-endpoints-dim">端点清单为空。</span>';
+  }
+  var authHeader = String(snap.write_auth_header || "X-AICLI-Token").trim();
+  var html = "";
+  aboutEndpointGroups.forEach(function (group) {
+    var items = list.filter(function (info) { return info && info.scheme === group.scheme; });
+    if (!items.length) { return; }
+    html += '<div class="about-endpoints-group">';
+    html += '<div class="about-endpoints-group-title">' + esc(group.label) + "</div>";
+    var base = String(snap[group.baseKey] || (group.scheme === "web" ? snap.base_url : "") || "").trim();
+    if (base) {
+      html += '<div class="about-endpoints-base">Base: ' + esc(base) + "</div>";
+    } else if (group.scheme === "runtime-observe") {
+      html += '<div class="about-endpoints-base">Base: &lt;route-only&gt;</div>';
+    }
+    items.forEach(function (info) {
+      var auth = aboutEndpointNeedsAuth(info);
+      html += '<div class="about-endpoints-row">';
+      html += '<span class="about-endpoints-method">' + esc(info.method || "GET") + "</span>";
+      html += '<span class="about-endpoints-path">' + esc(info.path || "") + "</span>";
+      if (auth) {
+        html += '<span class="about-endpoints-auth" title="写操作需要 ' + esc(authHeader) + '">需令牌</span>';
+      }
+      if (info.enabled === false) {
+        html += '<span class="about-endpoints-dim">[disabled]</span>';
+      }
+      if (info.note) {
+        html += '<span class="about-endpoints-note">' + esc(info.note) + "</span>";
+      }
+      html += "</div>";
+    });
+    html += "</div>";
+  });
+  if (String(snap.write_auth_hint || "").trim()) {
+    html += '<div class="about-endpoints-base">Auth: ' + esc(String(snap.write_auth_hint).trim()) + "</div>";
+  }
+  return html;
+}
+
+export function loadAboutEndpoints() {
+  if (!aboutEndpointsEl || aboutEndpointsLoading) { return; }
+  aboutEndpointsLoading = true;
+  fetchAboutEndpoints(0);
+}
+
+// 进程刚启动时可出现「HTTP 服务已就绪、chat 会话尚未绑定」的窗口，
+// 此时清单返回 available=false；做有限次重试，避免关于页停在不可用状态。
+var aboutEndpointsRetries = 4;
+var aboutEndpointsRetryDelayMs = 800;
+
+function fetchAboutEndpoints(attempt) {
+  fetch("/debug/endpoints?format=json", { cache: "no-store" })
+    .then(function (res) { return res.json(); })
+    .then(function (snap) {
+      aboutEndpointsEl.innerHTML = renderAboutEndpoints(snap);
+      if (snap && snap.available === false && attempt < aboutEndpointsRetries) {
+        setTimeout(function () { fetchAboutEndpoints(attempt + 1); }, aboutEndpointsRetryDelayMs);
+        return;
+      }
+      aboutEndpointsLoading = false;
+    })
+    .catch(function (err) {
+      var msg = err && err.message ? err.message : String(err);
+      aboutEndpointsEl.innerHTML = '<span class="about-endpoints-dim">端点清单加载失败：' + esc(msg) + "</span>";
+      aboutEndpointsLoading = false;
+    });
 }
 
 // ---- 快捷键帮助面板切换 ----

@@ -57,8 +57,15 @@ Info: chat render status endpoint: http://127.0.0.1:50679/debug/chat/status (JSO
 Info: chat screen content endpoint: http://127.0.0.1:50679/debug/chat/screen (JSON; ?format=text for plain text)
 Info: chat debug endpoints list: http://127.0.0.1:50679/debug/endpoints (JSON; ?format=text for plain text)
 Info: chat web client / remote invoke endpoint: http://127.0.0.1:50679/web/ (POST http://127.0.0.1:50679/web/api/invoke)
+Info: web write token (X-AICLI-Token): 3f9c8a... (POST /web/api/* 必需)
 Info: runtime observe plane: http://127.0.0.1:50679/api/runtime/observe/v1 (local in-process; capabilities/snapshot/sessions/events)
 ```
+
+> `/web/*` 与 `/debug/*` 端点叠加 Host/Origin 校验：Host 必须是回环地址、携带 Origin 的请求
+> 必须同源，非 GET 写请求必须携带 `X-AICLI-Token`（内置 Web 页面自动注入并附加）。
+> `/debug display` 的「HTTP 调试端点」区块在 web 分组下额外打印 `Token:` 行（当前写令牌，
+> 等价于 `GET /web/api/token`；该指令的 HTTP JSON/text 输出**不含**令牌原文）。
+> 详见 `docs/aicli/web-remote-api.md`。
 
 > **Runtime Observation Plane（本地模式）默认随 `--pprof on` 开启。**
 > 只要 loopback HTTP 服务器启动（`--pprof` / `--debug` / `AICLI_PPROF`），本地 in-process 会话就会自动构建

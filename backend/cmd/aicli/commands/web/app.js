@@ -13,11 +13,12 @@ import { initSessions, loadSessions } from "./js/sessions.js";
 import { initSkills } from "./js/skills.js";
 import { initSSE } from "./js/sse.js";
 import { initStream } from "./js/stream.js";
-import { initFooter, initShortcutHelp, initTabs, initTheme } from "./js/ui.js";
+import { initAboutToken, initFooter, initShortcutHelp, initTabs, initTheme } from "./js/ui.js";
 
 // ---- 事件绑定(原 IIFE 尾部,按组件归属拆分到各模块) ----
 initTabs();
 initTheme();
+initAboutToken(); // 关于页签的写令牌显示（读页面注入 meta，回退 /web/api/token）
 initShortcutHelp();
 initFooter();
 initStream();

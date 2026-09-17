@@ -220,6 +220,7 @@ request → accept → execute 落 durable action 行（`action_id` 可在输出
 | `--syntax-theme <name>` | 代码语法高亮主题（`auto` 或 Chroma 主题名） |
 | `--envelope` | JSON 输出时使用统一 envelope 结构（ok/command/data） |
 | `--pprof` | 启用 pprof 诊断端点（127.0.0.1 随机空闲端口） |
+| `--web-token <token>` | 预设 Web 写令牌（默认每进程随机；未指定时也可用 `AICLI_WEB_TOKEN`；详见 [aicli-tui-remote.md](aicli-tui-remote.md) 第 2.2 节） |
 | `--console-host` | Windows：stdin/stdout 为 PTY/pipe 时在新 Console 窗口重启（MobaXterm/mintty 场景） |
 
 主题优先级：**命令行 `--theme` > 环境变量 > 配置文件**。
@@ -232,6 +233,7 @@ request → accept → execute 落 durable action 行（`action_id` 可在输出
 | `AICLI_THEME_MODE` | 明暗模式（auto/dark/light） |
 | `AICLI_THEME_SYNTAX` | 语法主题 |
 | `AICLI_PPROF` | pprof 监听地址（需同时启用 --pprof） |
+| `AICLI_WEB_TOKEN` | 预设 Web 写令牌（等价 `--web-token`，flag 优先；≥16 位 URL 安全字符） |
 | `AICLI_EXECUTION_SUPERVISOR_MODE` | 本地子 Agent 看门狗模式：`observe`（默认，仅提醒）或 `enforce`（interrupt + cancel grace，见 §4.8） |
 
 ---

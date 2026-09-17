@@ -21,7 +21,7 @@ Recommended entry points:
 - [web-testing.md](./web-testing.md)
   - Frontend testing guide for the micro web client (`/web/`): real-backend vs stub-API test setups, manual regression checklist (tabs, cfg-bar, config page, provider editor), and combo popup test cases for the protocol dropdown.
 - [web-remote-api.md](./web-remote-api.md)
-  - Remote invocation API for a running chat TUI (`/web/api/*`): synchronous `POST /web/api/invoke` (prompt → wait for turn end → final state + TUI render), async `POST /web/api/input`, `GET /web/api/screen?view=tui`, SSE events, approval/question continuation, and discovery via the `/debug/endpoints` web group.
+  - Remote invocation API for a running chat TUI (`/web/api/*`): synchronous `POST /web/api/invoke` (prompt or `wait_only` → wait for turn end → final state + usage + TUI render; SSE streaming via `Accept: text/event-stream`), idempotent retries via `client_request_id`, `GET /web/api/turn` post-hoc turn lookup, async `POST /web/api/input`, `GET /web/api/screen?view=tui`, SSE events, approval/question continuation, discovery via the `/debug/endpoints` web group, `GET /web/api/token` (write-token discovery, also shown on the About tab and by `/debug display`), and Host/Origin + `X-AICLI-Token` write auth.
 - [../plan/aicli-micro-web-client-plan.md](../plan/aicli-micro-web-client-plan.md)
   - Micro web client plan: loopback `/web/` endpoint family (HTML page + `GET /web/api/screen` + `GET /web/api/events` SSE turn events + `POST /web/api/input` prompt injection) — implemented; remote-call usage in [web-remote-api.md](./web-remote-api.md).
 - [../review/aicli-micro-web-client-plan-review.md](../review/aicli-micro-web-client-plan-review.md)

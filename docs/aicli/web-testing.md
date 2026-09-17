@@ -22,6 +22,10 @@ aicli chat --pprof
 
 优点是 API 数据真实（provider 列表、模型列表、SSE 事件流）；缺点是依赖本机已配置的 provider，且无法随意构造边界数据（如空协议、超长模型名）。
 
+> 鉴权提示：真实后端的 `POST /web/api/*` 需要 `X-AICLI-Token`（令牌在启动行打印，
+> 页面加载后会自动注入并由 fetch 包装器附加，浏览器手工测试无需处理）。
+> 若用 DevTools 或脚本直接调 POST，需自行带上该请求头，否则会收到 `403`。
+
 ### 方式 B：静态伺服 + stub API（推荐做日常开发与边界用例）
 
 前端是纯静态文件，用任意静态服务器指向 `web/` 目录，再把 `/web/api/*` 打成桩即可让页面完整跑起来。启动时页面会请求的最小端点集：
@@ -52,7 +56,13 @@ aicli chat --pprof
 - [ ] **调试页签**：进入时拉取 `GET /web/api/status?format=text` 并原样展示状态文档（与 `aicli /debug` 命令显示的内容一致），
       等宽字体、可横向/纵向滚动；工具栏「⟳ 刷新」重新拉取，「JSON 快照」链接另开 `/web/api/status` 原始 JSON；
       后端不可用时显示"加载失败：…"且不残留旧内容。
-- [ ] **关于页签**：显示客户端名 `aicli micro web client`、一行说明与页签清单/端点链接。
+- [ ] **关于页签**：显示客户端名 `aicli micro web client`、一行说明与页签清单/端点链接；
+       「写令牌」行显示当前 `X-AICLI-Token`（与启动行/`GET /web/api/token` 一致，每进程随机），
+       「复制」按钮写入剪贴板并弹「写令牌已复制」提示；
+       「远程调用端点」清单进入页签时拉取 `GET /debug/endpoints?format=json` 并按
+       web / loopback / runtime-observe 分组渲染 `方法 + 路径 + 说明`，写操作（POST）带「需令牌」标记，
+       不可用时显示原因（启动早期会自动重试数次）；与 `/debug/endpoints?format=text`、`aicli /debug`
+       的「HTTP 调试端点」区块同源，新增端点无需改前端。
 - [ ] 顶栏布局：最左侧依次为 `☰`（折叠会话列表）、主题切换图标、连接状态、轮次状态、
       发送瞬态提示；会话标题与会话 ID 居中显示（窗口缩放/侧栏折叠后仍保持居中，
       超长文本按省略号截断且不撑破顶栏）。
