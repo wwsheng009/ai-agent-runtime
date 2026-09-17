@@ -38,6 +38,10 @@ func TestViewTool_DescriptionAndSchemaSupportBatchReads(t *testing.T) {
 	if !ok || filesSchema["type"] != "array" {
 		t.Fatalf("expected files array schema, got %#v", props["files"])
 	}
+	compactSchema, ok := props["compact"].(map[string]interface{})
+	if !ok || compactSchema["type"] != "boolean" {
+		t.Fatalf("expected compact boolean schema, got %#v", props["compact"])
+	}
 }
 
 func TestViewTool_OutputPreservesLinesAndAddsLineNumbers(t *testing.T) {
@@ -97,6 +101,104 @@ func TestViewTool_BatchReadsReturnSuccessfulFilesAndPartialErrors(t *testing.T) 
 	}
 	if idx, ok := rawFailed[0]["index"].(int); !ok || idx != 2 {
 		t.Fatalf("expected failed item index=2, got %#v", rawFailed[0]["index"])
+	}
+	// 只有 missing.txt（索引 2）未显式指定 limit，应被记入 defaulted。
+	if applied, ok := result.Metadata["batch_default_limit_applied"].([]int); !ok || len(applied) != 1 || applied[0] != 2 {
+		t.Fatalf("expected defaulted index [2] for missing.txt, got %#v", result.Metadata["batch_default_limit_applied"])
+	}
+}
+
+func TestViewTool_BatchAppliesSmallerDefaultLimit(t *testing.T) {
+	root := t.TempDir()
+	var b strings.Builder
+	for i := 1; i <= 300; i++ {
+		fmt.Fprintf(&b, "line-%d\n", i)
+	}
+	if err := os.WriteFile(filepath.Join(root, "big.txt"), []byte(b.String()), 0o644); err != nil {
+		t.Fatalf("write big: %v", err)
+	}
+	tool := NewViewTool()
+	tool.SetBasePath(root)
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"files": []interface{}{
+			map[string]interface{}{"file_path": "big.txt"},
+		},
+	})
+	if err != nil || !result.Success {
+		t.Fatalf("expected batch success, result=%#v err=%v", result, err)
+	}
+	if strings.Contains(result.Content, "300: line-300") {
+		t.Fatalf("expected batch default limit to cap per-item output, got full file: %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "200: line-200") {
+		t.Fatalf("expected batch default window up to line 200, got %q", result.Content)
+	}
+	applied, ok := result.Metadata["batch_default_limit_applied"].([]int)
+	if !ok || len(applied) != 1 || applied[0] != 0 {
+		t.Fatalf("expected defaulted index [0], got %#v", result.Metadata["batch_default_limit_applied"])
+	}
+	items, ok := result.Metadata["items"].([]map[string]interface{})
+	if !ok || len(items) != 1 {
+		t.Fatalf("expected 1 item metadata, got %#v", result.Metadata["items"])
+	}
+	if limit, _ := items[0]["limit"].(int); limit != viewBatchDefaultLimit {
+		t.Fatalf("expected item limit=%d, got %#v", viewBatchDefaultLimit, items[0]["limit"])
+	}
+	if trunc, _ := items[0]["is_truncated"].(bool); !trunc {
+		t.Fatalf("expected truncated metadata on capped batch item, got %#v", items[0])
+	}
+	if next, _ := items[0]["suggested_next_offset"].(int); next != viewBatchDefaultLimit {
+		t.Fatalf("expected suggested_next_offset=%d, got %#v", viewBatchDefaultLimit, items[0]["suggested_next_offset"])
+	}
+}
+
+func TestViewTool_BatchCompactMode(t *testing.T) {
+	root := t.TempDir()
+	var b strings.Builder
+	for i := 1; i <= 30; i++ {
+		fmt.Fprintf(&b, "c%d\n", i)
+	}
+	if err := os.WriteFile(filepath.Join(root, "c.txt"), []byte(b.String()), 0o644); err != nil {
+		t.Fatalf("write c: %v", err)
+	}
+	tool := NewViewTool()
+	tool.SetBasePath(root)
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"compact": true,
+		"files": []interface{}{
+			map[string]interface{}{"file_path": "c.txt"},
+			map[string]interface{}{"file_path": "c.txt", "offset": 10, "limit": 20},
+		},
+	})
+	if err != nil || !result.Success {
+		t.Fatalf("expected compact batch success, result=%#v err=%v", result, err)
+	}
+	if compact, _ := result.Metadata["compact"].(bool); !compact {
+		t.Fatalf("expected compact metadata true, got %#v", result.Metadata["compact"])
+	}
+	// 第一项：未显式 limit 的默认窗口被压缩到 compactHeadLines（行 1-10）。
+	if !strings.Contains(result.Content, "1: c1") || !strings.Contains(result.Content, "10: c10") {
+		t.Fatalf("expected compact head window lines 1-10, got %q", result.Content)
+	}
+	// 第二项：显式 limit=20 仍被压缩到 10 行（offset=10 → 行 11-20）。
+	// "11: c11" 只允许出现一次（由第二项提供），证明默认项停在 10 行。
+	if strings.Count(result.Content, "11: c11") != 1 || !strings.Contains(result.Content, "20: c20") {
+		t.Fatalf("expected compact window lines 11-20 for explicit range, got %q", result.Content)
+	}
+	if strings.Contains(result.Content, "21: c21") {
+		t.Fatalf("expected compact to cap explicit range at 10 lines, got %q", result.Content)
+	}
+	// 摘要行携带继续读的元数据。
+	if !strings.Contains(result.Content, "suggested_next_offset=10") {
+		t.Fatalf("expected compact summary with suggested_next_offset=10, got %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "suggested_next_offset=20") {
+		t.Fatalf("expected compact summary with suggested_next_offset=20, got %q", result.Content)
+	}
+	// 未显式 limit 的项（索引 0）记入 batch_default_limit_applied。
+	applied, ok := result.Metadata["batch_default_limit_applied"].([]int)
+	if !ok || len(applied) != 1 || applied[0] != 0 {
+		t.Fatalf("expected defaulted index [0], got %#v", result.Metadata["batch_default_limit_applied"])
 	}
 }
 

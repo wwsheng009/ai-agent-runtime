@@ -19,6 +19,18 @@ import (
 
 const viewDirPreviewLimit = 40
 
+// viewBatchDefaultLimit caps per-item reads in batch mode when the caller
+// omits limit. Batch calls are for scanning many files, not pulling whole
+// files, and a smaller default keeps the combined output inside the model
+// context window instead of being truncated by the echo layer. Explicit
+// per-item limits are always honored as-is.
+const viewBatchDefaultLimit = 200
+
+// viewCompactHeadLines is the per-file head window rendered in compact batch
+// mode (scan-then-read workflow). Metadata still carries lines_read /
+// is_truncated / suggested_next_offset / total_lines for follow-up reads.
+const viewCompactHeadLines = 10
+
 // viewDefaultLimit is the default window size when callers omit limit.
 // Large files should still be segmented with explicit offset/limit.
 const viewDefaultLimit = 2000
@@ -45,7 +57,7 @@ func NewViewTool() *ViewTool {
 			},
 			"files": map[string]interface{}{
 				"type":        "array",
-				"description": "批量文件读取请求；适合一次获取多个独立文件或不同区间，减少 LLM 往返。",
+				"description": "批量文件读取请求；适合一次获取多个独立文件或不同区间，减少 LLM 往返。批内未显式指定 limit 的项默认最多读取 200 行，避免合并输出过大被回显截断。",
 				"items": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -56,6 +68,10 @@ func NewViewTool() *ViewTool {
 					"required":             []string{"file_path"},
 					"additionalProperties": false,
 				},
+			},
+			"compact": map[string]interface{}{
+				"type":        "boolean",
+				"description": "批量扫描模式（仅 files 数组生效）：每个文件只输出前 10 行 + 元数据摘要（lines_read/is_truncated/suggested_next_offset/total_lines），适合先扫描多个文件再定点细读。默认 false。",
 			},
 			"offset": map[string]interface{}{
 				"type":        "integer",
@@ -83,10 +99,10 @@ func NewViewTool() *ViewTool {
 
 func (v *ViewTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
-		runtimetypes.ToolMetadataKindKey:            runtimetypes.ToolKindRead,
-		runtimetypes.ToolMetadataReadOnlyKey:        true,
-		runtimetypes.ToolMetadataMutatesFSKey:       false,
-		runtimetypes.ToolMetadataRequiresNetKey:     false,
+		runtimetypes.ToolMetadataKindKey:             runtimetypes.ToolKindRead,
+		runtimetypes.ToolMetadataReadOnlyKey:         true,
+		runtimetypes.ToolMetadataMutatesFSKey:        false,
+		runtimetypes.ToolMetadataRequiresNetKey:      false,
 		runtimetypes.ToolMetadataSupportsParallelKey: true,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassSafe,
 	}
@@ -97,6 +113,7 @@ type ViewParams struct {
 	Files    []ViewFileRequest `json:"files,omitempty"`
 	Offset   int               `json:"offset,omitempty"`
 	Limit    int               `json:"limit,omitempty"`
+	Compact  bool              `json:"compact,omitempty"`
 }
 
 type ViewFileRequest struct {
@@ -128,10 +145,12 @@ func (v *ViewTool) Execute(ctx context.Context, params map[string]interface{}) (
 			Error:      fmt.Errorf("file_path 或 files 参数至少需要一个"),
 		}, nil
 	}
-	if len(requests) == 1 {
+	// files 数组（即使只有 1 项）表达批量意图：应用批量默认 limit 与
+	// compact 语义；仅 file_path 入参才是真正的单文件读取。
+	if len(requests) == 1 && len(p.Files) == 0 {
 		return v.executeSingle(ctx, requests[0])
 	}
-	return v.executeBatch(ctx, requests)
+	return v.executeBatch(ctx, requests, p.Compact)
 }
 
 func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolkit.ToolResult, error) {
@@ -278,13 +297,21 @@ func attachViewEfficiencyHints(result *toolkit.ToolResult, request ViewFileReque
 	result.Content = strings.TrimRight(result.Content, "\n") + "\n\n" + advisory
 }
 
-func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest) (*toolkit.ToolResult, error) {
+func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest, compact bool) (*toolkit.ToolResult, error) {
 	sections := make([]string, 0, len(requests))
 	items := make([]map[string]interface{}, 0, len(requests))
 	failures := make([]string, 0)
 	failedItems := make([]map[string]interface{}, 0)
 	succeeded := 0
+	defaulted := make([]int, 0, len(requests))
 	for index, request := range requests {
+		if request.Limit <= 0 {
+			request.Limit = viewBatchDefaultLimit
+			defaulted = append(defaulted, index)
+		}
+		if compact && request.Limit > viewCompactHeadLines {
+			request.Limit = viewCompactHeadLines
+		}
 		result, err := v.executeSingle(ctx, request)
 		if err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", request.FilePath, err))
@@ -305,7 +332,11 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest)
 			continue
 		}
 		succeeded++
-		sections = append(sections, fmt.Sprintf("===== %s =====\n%s", request.FilePath, result.Content))
+		section := fmt.Sprintf("===== %s =====\n%s", request.FilePath, result.Content)
+		if compact {
+			section += "\n" + compactViewSummary(result.Metadata)
+		}
+		sections = append(sections, section)
 		items = append(items, result.Metadata)
 	}
 	if len(failures) > 0 {
@@ -313,9 +344,11 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest)
 	}
 	if succeeded == 0 {
 		meta := map[string]interface{}{
-			"batch":         true,
-			"request_count": len(requests),
-			"failed_count":  len(failures),
+			"batch":                       true,
+			"request_count":               len(requests),
+			"failed_count":                len(failures),
+			"batch_default_limit_applied": defaulted,
+			"compact":                     compact,
 		}
 		if len(failedItems) > 0 {
 			meta[toolresult.MetadataFailedItemsKey] = failedItems
@@ -328,12 +361,14 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest)
 		}, nil
 	}
 	meta := map[string]interface{}{
-		"batch":           true,
-		"request_count":   len(requests),
-		"succeeded_count": succeeded,
-		"failed_count":    len(failures),
-		"partial_failure": len(failures) > 0,
-		"items":           items,
+		"batch":                       true,
+		"request_count":               len(requests),
+		"succeeded_count":             succeeded,
+		"failed_count":                len(failures),
+		"partial_failure":             len(failures) > 0,
+		"items":                       items,
+		"batch_default_limit_applied": defaulted,
+		"compact":                     compact,
 	}
 	if len(failedItems) > 0 {
 		meta[toolresult.MetadataFailedItemsKey] = failedItems
@@ -344,6 +379,29 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest)
 		Content:    strings.Join(sections, "\n\n"),
 		Metadata:   meta,
 	}, nil
+}
+
+// compactViewSummary renders a single-line metadata digest for compact batch
+// mode, so models can decide the next offset without re-reading the tool
+// schema or guessing from truncated content.
+func compactViewSummary(metadata map[string]interface{}) string {
+	parts := make([]string, 0, 4)
+	if v, ok := metadata["lines_read"].(int); ok {
+		parts = append(parts, fmt.Sprintf("lines_read=%d", v))
+	}
+	if v, ok := metadata["is_truncated"].(bool); ok {
+		parts = append(parts, fmt.Sprintf("is_truncated=%t", v))
+	}
+	if v, ok := metadata["suggested_next_offset"].(int); ok {
+		parts = append(parts, fmt.Sprintf("suggested_next_offset=%d", v))
+	}
+	if v, ok := metadata["total_lines"].(int); ok {
+		parts = append(parts, fmt.Sprintf("total_lines=%d", v))
+	}
+	if len(parts) == 0 {
+		return "..."
+	}
+	return "... " + strings.Join(parts, ", ")
 }
 
 type viewReadResult struct {
