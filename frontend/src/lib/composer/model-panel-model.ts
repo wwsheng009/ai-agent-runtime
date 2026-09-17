@@ -5,6 +5,8 @@
 //   * 某段候选为空 → 整段隐藏（三段都空时连触发器都不渲染，由组件判断 sections.length === 0）；
 //   * 换供应商后的「待重选」只由这里的状态机推进：用户不显式确认，就不把这组选择当作已定。
 
+import { filterProviderOptions } from "./model-panel-provider-filter";
+
 export type ComposerModelPanelSectionId = "provider" | "model" | "reasoning";
 
 export type ComposerModelPanelOption = {
@@ -40,6 +42,8 @@ export const PANEL_MIN_HEIGHT = 160;
 
 export type ComposerModelPanelSectionsInput = {
   providerOptions: readonly string[];
+  /** 供应商一级列表的筛选串；省略 / 空串 = 不过滤，原样使用宿主投影的候选与顺序。 */
+  providerQuery?: string;
   modelOptions: readonly string[];
   reasoningEffortOptions: readonly string[];
   selectedProvider: string;
@@ -70,6 +74,7 @@ export function buildComposerModelSections(
     onProviderSelect,
     onReasoningSelect,
     providerOptions,
+    providerQuery = "",
     reasoningEffortOptions,
     reasoningValue,
     selectedModel,
@@ -79,12 +84,13 @@ export function buildComposerModelSections(
   } = input;
   const sections: ComposerModelPanelSection[] = [];
 
-  if (providerOptions.length > 1) {
+  const visibleProviderOptions = filterProviderOptions(providerOptions, providerQuery);
+  if (visibleProviderOptions.length > 1) {
     sections.push({
       id: "provider",
       label: labels.provider,
       value: selectedProvider || unselectedLabel,
-      options: providerOptions.map((provider) => ({
+      options: visibleProviderOptions.map((provider) => ({
         value: provider,
         label: provider,
         selected: provider === selectedProvider,

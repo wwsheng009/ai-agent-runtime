@@ -6,9 +6,11 @@ import { type Components } from "react-markdown";
 import { CodeBlock } from "@/components/ui/code-block";
 import {
   ArtifactOutputLink,
+} from "./artifact-output-link";
+import {
   findArtifactOutputId,
   findArtifactOutputLineId,
-} from "./artifact-output-link";
+} from "./artifact-output-patterns";
 
 const LINK_CLASS_NAME =
   "font-medium text-accent-secondary underline decoration-accent-secondary/35 underline-offset-4 transition hover:text-foreground hover:decoration-accent-secondary";

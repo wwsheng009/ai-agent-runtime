@@ -1,7 +1,9 @@
 package commands
 
 import (
+	"bytes"
 	"embed"
+	"html"
 	"net/http"
 	"path"
 	"strings"
@@ -38,9 +40,50 @@ func HandleChatWebPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
+	if name == "index.html" {
+		data = chatWebInjectAuthToken(data)
+	}
 	w.Header().Set("Content-Type", webAssetContentType(name))
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	w.Write(data)
+}
+
+// chatWebAuthFetchWrapperScript 在页面最早期（head 内联脚本，先于 ES 模块
+// 执行）包装 window.fetch：对同源 /web/api/* 的状态变更请求自动附加
+// X-AICLI-Token。EventSource（SSE）无法设置请求头，只读 GET 因此不要求令牌。
+const chatWebAuthFetchWrapperScript = `<script>
+(function () {
+  var meta = document.querySelector('meta[name="aicli-web-token"]');
+  if (!meta || !meta.content || typeof window.fetch !== 'function') { return; }
+  var token = meta.content;
+  var original = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    init = init || {};
+    var url = typeof input === 'string' ? input : (input && input.url) || '';
+    var apiPath = url.indexOf('/web/api/') === 0 ||
+      (window.location.origin && url.indexOf(window.location.origin + '/web/api/') === 0);
+    var method = (init.method || (input && input.method) || 'GET').toUpperCase();
+    if (apiPath && method !== 'GET' && method !== 'HEAD') {
+      var headers = new Headers(init.headers || (input && input.headers) || {});
+      headers.set('X-AICLI-Token', token);
+      init.headers = headers;
+    }
+    return original(input, init);
+  };
+})();
+</script>
+`
+
+// chatWebInjectAuthToken 在 index.html 的 </head> 前注入写令牌 meta 与
+// fetch 包装脚本；令牌未生成（同包单测等场景）或占位缺失时原样返回。
+func chatWebInjectAuthToken(indexHTML []byte) []byte {
+	token := ChatWebAuthToken()
+	if token == "" || !bytes.Contains(indexHTML, []byte("</head>")) {
+		return indexHTML
+	}
+	snippet := "<meta name=\"aicli-web-token\" content=\"" + html.EscapeString(token) + "\">\n" +
+		chatWebAuthFetchWrapperScript + "</head>"
+	return bytes.Replace(indexHTML, []byte("</head>"), []byte(snippet), 1)
 }
 
 // webAssetContentType 按扩展名返回静态资源的 Content-Type。

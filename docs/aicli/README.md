@@ -20,8 +20,10 @@ Recommended entry points:
   - Loopback HTTP endpoint `GET /debug/chat/status` (`--pprof` / `--debug`): live JSON/text snapshot of the chat render pipeline (render encoder, scene, render output, app-state history gates, active cell ranges, executor recovery loop, projection validity) and a five-signal diagnostic method for "renderer only updates the active band and never commits".
 - [web-testing.md](./web-testing.md)
   - Frontend testing guide for the micro web client (`/web/`): real-backend vs stub-API test setups, manual regression checklist (tabs, cfg-bar, config page, provider editor), and combo popup test cases for the protocol dropdown.
+- [web-remote-api.md](./web-remote-api.md)
+  - Remote invocation API for a running chat TUI (`/web/api/*`): synchronous `POST /web/api/invoke` (prompt → wait for turn end → final state + TUI render), async `POST /web/api/input`, `GET /web/api/screen?view=tui`, SSE events, approval/question continuation, and discovery via the `/debug/endpoints` web group.
 - [../plan/aicli-micro-web-client-plan.md](../plan/aicli-micro-web-client-plan.md)
-  - Micro web client plan: loopback `/web/` endpoint family (HTML page + `GET /web/api/screen` + `GET /web/api/events` SSE turn events + `POST /web/api/input` prompt injection) — design only, implementation tracked in the plan.
+  - Micro web client plan: loopback `/web/` endpoint family (HTML page + `GET /web/api/screen` + `GET /web/api/events` SSE turn events + `POST /web/api/input` prompt injection) — implemented; remote-call usage in [web-remote-api.md](./web-remote-api.md).
 - [../review/aicli-micro-web-client-plan-review.md](../review/aicli-micro-web-client-plan-review.md)
   - Review of the micro web client plan: code-reference verification, risk assessment, and Phase 1 implementation checklist.
 - [windows7.md](./windows7.md)

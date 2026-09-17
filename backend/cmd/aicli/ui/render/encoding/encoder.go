@@ -2751,7 +2751,32 @@ func systemHead(ev runtimeevents.Event) string {
 	if head != "" {
 		return head
 	}
+	if detail := systemEventDetail(ev); detail != "" {
+		return ev.Type + ": " + detail
+	}
 	return ev.Type
+}
+
+// systemEventDetail 提取系统事件载荷中的诊断信息（阶段与错误原因），
+// 避免只带结构化载荷的事件在终端与历史文本里退化成一行裸事件名。
+func systemEventDetail(ev runtimeevents.Event) string {
+	parts := make([]string, 0, 2)
+	for _, key := range []string{"stage", "phase"} {
+		if v := payloadString(ev.Payload[key], ""); v != "" {
+			parts = append(parts, key+"="+v)
+			break
+		}
+	}
+	for _, key := range []string{"error", "reason"} {
+		if v := payloadString(ev.Payload[key], ""); v != "" {
+			parts = append(parts, v)
+			break
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " ")
 }
 
 func payloadString(v interface{}, fallback string) string {

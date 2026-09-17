@@ -81,6 +81,24 @@ func (h *pprofServerHandle) EndpointsURL() string {
 	return "http://" + addr + chatEndpointsPath
 }
 
+// WebURL 返回微型 Web 客户端页面（/web/）的完整 URL。
+func (h *pprofServerHandle) WebURL() string {
+	addr := h.Addr()
+	if addr == "" {
+		return ""
+	}
+	return "http://" + addr + commands.ChatWebPath
+}
+
+// InvokeURL 返回同步远程调用端点（POST /web/api/invoke）的完整 URL。
+func (h *pprofServerHandle) InvokeURL() string {
+	addr := h.Addr()
+	if addr == "" {
+		return ""
+	}
+	return "http://" + addr + commands.ChatWebAPIInvokePath
+}
+
 // Close 关闭服务器并释放监听端口。
 func (h *pprofServerHandle) Close() error {
 	if h == nil || h.server == nil {
@@ -224,6 +242,11 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	mux.HandleFunc(commands.ChatWebAPIRuntimePath, commands.HandleChatWebAPIRuntime)
 	mux.HandleFunc(commands.ChatWebAPIEventsPath, commands.HandleChatWebAPIEvents)
 	mux.HandleFunc(commands.ChatWebAPIInputPath, commands.HandleChatWebAPIInput)
+	// /web/api/invoke 同步远程调用：一次请求内完成"注入 prompt → 等待 turn
+	// 结束 → 返回最终状态与 TUI 渲染"，供脚本/外部 Agent 远程控制会话。
+	mux.HandleFunc(commands.ChatWebAPIInvokePath, commands.HandleChatWebAPIInvoke)
+	// /web/api/turn turn 后验查询：配合异步 input 拿终态/耗时/token 用量。
+	mux.HandleFunc(commands.ChatWebAPITurnPath, commands.HandleChatWebAPITurn)
 	mux.HandleFunc(commands.ChatWebAPISchemaPath, commands.HandleChatWebAPIEventsSchema)
 	mux.HandleFunc(commands.ChatWebAPISessionsPath, commands.HandleChatWebAPISessions)
 	mux.HandleFunc(commands.ChatWebAPISessionsNewPath, commands.HandleChatWebAPISessionsNew)
@@ -255,8 +278,11 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	// style.css / app.js / js/*.js 等静态资源由 HandleChatWebPage 统一伺服
 	// （go:embed 嵌入 web/ 目录，按文件名 + 扩展名 Content-Type 返回）。
 
+	// 写令牌：本机 Web/调试端点统一鉴权（Host/Origin 校验 + 写操作令牌）。
+	// 令牌在服务器启动时生成一次，页面通过 meta 注入，外部脚本从启动行读取。
+	commands.EnsureChatWebAuthToken()
 	server := &http.Server{
-		Handler: mux,
+		Handler: commands.ChatWebAuthGuard(mux.ServeHTTP),
 		// 本地诊断端点：读请求头超时收紧，避免残留连接占用；
 		// profile 下载期属于 body 读取，不受此限制影响。
 		ReadHeaderTimeout: 10 * time.Second,

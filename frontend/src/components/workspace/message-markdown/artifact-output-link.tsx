@@ -1,33 +1,16 @@
 // C5：把 tool_result 文本里运行时附加的指针行
 // `Full raw output artifact_id: art_<32位hex>`
-// 渲染为可点击的「查看完整原始输出」元素。
+// 渲染为可点击的「查看完整原始输出」元素（匹配工具见 artifact-output-patterns.ts）。
 //
 // 点击优先级：
 //   a. 宿主传入 onSelectArtifact → 调用它打开 artifact 详情对话框（id 为 art_ 后的完整 id）；
 //   b. 否则把完整 id 复制到剪贴板并给出可见反馈（按钮文本切换「已复制」+ aria-live 播报），
 //      绝不无响应。
-//
-// 本模块同时导出指针行匹配工具，供 markdown 渲染器（p / code）复用，两处判定同源不漂移。
 
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { CheckIcon, ClipboardIcon, FileSearchIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
-
-// 指针行内任意位置出现即可命中（捕获 art_ 之后的完整 id，仅限 32 位小写/大写 hex）。
-const ARTIFACT_OUTPUT_PATTERN = /Full raw output artifact_id:\s*(art_[0-9a-f]{32})/i;
-// 整行就是指针行（用于段落/行内 code 整体替换判定；先 trim 再匹配）。
-const ARTIFACT_OUTPUT_LINE_PATTERN = /^Full raw output artifact_id:\s*(art_[0-9a-f]{32})$/i;
-
-/** 返回文本中第一处指针的完整 artifact id；未命中返回 null。 */
-export function findArtifactOutputId(text: string): string | null {
-  return ARTIFACT_OUTPUT_PATTERN.exec(text)?.[1] ?? null;
-}
-
-/** 若整段（trim 后）就是指针行，返回完整 artifact id；否则返回 null。 */
-export function findArtifactOutputLineId(text: string): string | null {
-  return ARTIFACT_OUTPUT_LINE_PATTERN.exec(text.trim())?.[1] ?? null;
-}
 
 const ARTIFACT_LINK_CLASS_NAME =
   "inline-flex items-center gap-1.5 rounded-field border border-border bg-surface-solid px-2.5 py-1.5 app-text-12 font-medium text-accent-secondary transition hover:border-border-strong hover:bg-surface-soft hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-secondary";

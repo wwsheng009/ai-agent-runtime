@@ -50,6 +50,9 @@ func popupRendersAsModalBox(bottom BottomPaneState) bool {
 // 顺序逐条保留、超宽就地折行，折行后的总行数达到该上界即停。它只取决于终端
 // 高度（扣掉底部 prompt / 状态行与上下边框），保证盒子永远不会挤掉 prompt
 // 输入行与状态行。实际盒子高度 = min(折行后正文行数, 该上界) + 2 边框。
+//
+// 该上界不含 active band / 动态状态行 / 间距——它们由
+// modalBoxAvailableInteriorRows 按当前底区状态进一步收紧。
 func modalBoxInteriorRows(height int) int {
 	if height < modalBoxMinHeight {
 		return 0
@@ -59,6 +62,26 @@ func modalBoxInteriorRows(height int) int {
 		rows = 1
 	}
 	return rows
+}
+
+// modalBoxAvailableInteriorRows 是当前底区状态下盒子正文真正可用的行数：盒子
+// 整块必须落在 popupBottomGap（active band、动态状态行、回答输入行与间距）之上，
+// 且顶边框不得被挤出计划区——底区行计划始终为 transcript 保留顶行（bottomRows
+// 最多 height-1），因此 popupStart = height - gap - rows 必须 ≥ 2。
+//
+// 这是“卡片要能装下全部问题/选项”的关键：上界按终端真实可用空间给出，正文
+// 行数只要不超过它就逐条完整保留（不再被固定预算压缩）；矮终端下同步收缩，
+// 避免卡片顶边被裁掉、或 Running/Waiting 行插进卡片中间。
+func modalBoxAvailableInteriorRows(bottom BottomPaneState, height int) int {
+	if height < modalBoxMinHeight {
+		return 0
+	}
+	// 2 = transcript 顶行 + 状态行；2 = 上下边框。
+	available := height - 2 - bottom.popupBottomGapRowCount() - 2
+	if available < 1 {
+		return 0
+	}
+	return available
 }
 
 // ModalBoxMaxRows 是 priority 正文面板盒子在终端内可占的最大行数（正文上界
@@ -74,13 +97,18 @@ func ModalBoxMaxRows(height int) int {
 }
 
 // modalBoxLines 把活动 popup 渲染成水平居中、带边框的盒子文本行。盒子高度
-// 随正文自动扩展（每条正文行一行、超宽就地折行），只受终端放得下的上界约束。
+// 随正文自动扩展（每条正文行一行、超宽就地折行），只受终端放得下的上界约束：
+// 正文上界 = min(ModalBoxMaxRows 上界, 当前底区可用行数)，保证全部问题/选项
+// 在放得下时都留在卡片里，且盒子完整可见（顶边框不被裁、不被 band/状态行切开）。
 // 返回 nil 表示当前几何或 owner 不适用盒子，调用方必须回退到原始 popup 行块。
 func modalBoxLines(bottom BottomPaneState, height, width int) []string {
 	if !popupRendersAsModalBox(bottom) {
 		return nil
 	}
 	interior := modalBoxInteriorRows(height)
+	if available := modalBoxAvailableInteriorRows(bottom, height); available > 0 && available < interior {
+		interior = available
+	}
 	if interior < 1 || width < modalBoxMinWidth {
 		return nil
 	}

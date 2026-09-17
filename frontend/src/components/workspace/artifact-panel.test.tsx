@@ -159,9 +159,6 @@ describe("ArtifactPanel", () => {
     const restorePointsTab = Array.from(container.querySelectorAll('[role="tab"]')).find(
       (button) => button.textContent?.includes("还原"),
     );
-    const usageTab = Array.from(container.querySelectorAll('[role="tab"]')).find(
-      (button) => button.textContent?.includes("会话用量"),
-    );
 
     expect(container.querySelector('[role="tablist"]')).toBeInstanceOf(HTMLElement);
     expect(evidenceTab?.getAttribute("aria-selected")).toBe("true");
@@ -169,37 +166,17 @@ describe("ArtifactPanel", () => {
     expect((planTab as HTMLButtonElement).disabled).toBe(true);
     expect(restorePointsTab).toBeInstanceOf(HTMLButtonElement);
     expect((restorePointsTab as HTMLButtonElement).disabled).toBe(true);
-    expect(usageTab).toBeInstanceOf(HTMLButtonElement);
-    expect((usageTab as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("在合并面板内以页签呈现会话用量，而不是独立面板", async () => {
-    const artifacts: Artifact[] = [];
+  // 会话用量已从合并面板中移除（改由会话详情面呈现），这里守住「页签不再回归」。
+  it("不再把会话用量作为合并面板的页签", () => {
+    renderArtifactPanel([], { sessionId: "session-usage-1" });
 
-    renderArtifactPanel(artifacts, { sessionId: "session-usage-1" });
-    await act(async () => {
-      await Promise.resolve();
-    });
-
-    const usageTab = container.querySelector<HTMLButtonElement>(
-      '[data-testid="artifact-panel-tab-usage"]',
+    const usageTab = Array.from(container.querySelectorAll('[role="tab"]')).find(
+      (button) => button.textContent?.includes("会话用量"),
     );
-    expect(usageTab).toBeInstanceOf(HTMLButtonElement);
-    expect(usageTab?.disabled).toBe(false);
-    expect(usageTab?.getAttribute("aria-selected")).toBe("false");
-    // 未选中页签时不挂载用量面板，避免不必要的用量请求。
-    expect(
-      container.querySelector('[data-testid="session-usage-panel-stub"]'),
-    ).toBeNull();
 
-    act(() => {
-      usageTab?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-
-    expect(usageTab?.getAttribute("aria-selected")).toBe("true");
-    expect(
-      container.querySelector('[data-testid="session-usage-panel-stub"]')
-        ?.textContent,
-    ).toBe("usage:session-usage-1");
+    expect(usageTab).toBeUndefined();
+    expect(container.querySelector('[data-testid="artifact-panel-tab-usage"]')).toBeNull();
   });
 });

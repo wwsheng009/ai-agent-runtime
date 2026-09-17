@@ -69,6 +69,31 @@ func writeWebAPIJSON(w http.ResponseWriter, statusCode int, data interface{}) {
 // buildChatWebScreenSnapshot（完整语义 transcript 派生），避免 resume
 // 历史会话后视口裁剪导致只显示最后一个 turn。
 func HandleChatWebAPIScreen(w http.ResponseWriter, r *http.Request) {
+	// view=tui：返回终端视口的真实合成帧（与 /debug/chat/screen 同源），
+	// 供远程调用方获取"用户当前实际看到的 TUI 界面渲染"，而不是 web 客户端
+	// 使用的完整语义 transcript（默认视图，见下方注释）。
+	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("view")), "tui") {
+		snap := BuildChatDebugScreenSnapshot()
+		if r.URL.Query().Get("format") == "json" {
+			body, err := json.MarshalIndent(snap, "", "  ")
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			_, _ = w.Write(body)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if !snap.Available {
+			_, _ = w.Write([]byte("Debug Screen: " + snap.Reason + "\n"))
+			return
+		}
+		_, _ = w.Write([]byte(snap.Text + "\n"))
+		return
+	}
 	if r.URL.Query().Get("format") == "json" {
 		body, err := marshalChatWebScreenJSON()
 		if err != nil {
@@ -139,6 +164,9 @@ type chatWebSSEFrame struct {
 	data        map[string]interface{} // 事件数据；keepalive 帧为 nil
 	sourceEvent string
 	keepalive   bool
+	// ack 非空时，writer goroutine 在成功写出该帧后关闭它（flush 同步用）；
+	// 帧被丢弃或流判死时不会关闭，由调用方超时兜底。
+	ack chan struct{}
 }
 
 // chatWebSSEStream 是异步 SSE 发射器：
@@ -214,6 +242,33 @@ func (s *chatWebSSEStream) keepalive() {
 	s.enqueue(chatWebSSEFrame{keepalive: true})
 }
 
+// flush 入队一个 keepalive 帧并等待其被 writer goroutine 写出，用于流式
+// 响应收尾时确认最终结果帧已落盘；超时或队列满/流已死返回 false。
+func (s *chatWebSSEStream) flush(timeout time.Duration) bool {
+	if s == nil || s.Closed() {
+		return false
+	}
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+	ack := make(chan struct{})
+	select {
+	case s.queue <- chatWebSSEFrame{keepalive: true, ack: ack}:
+	default:
+		return false
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-ack:
+		return true
+	case <-s.done:
+		return false
+	case <-timer.C:
+		return false
+	}
+}
+
 // lastEventAge 返回距最近一次成功写入的时间（无锁原子读）。
 func (s *chatWebSSEStream) lastEventAge() time.Duration {
 	if s == nil {
@@ -281,6 +336,9 @@ func (s *chatWebSSEStream) runWriter(onDead func()) {
 			if err := s.writeFrame(s.renderFrame(f), timeout); err != nil {
 				s.fail(onDead)
 				return
+			}
+			if f.ack != nil {
+				close(f.ack)
 			}
 		case <-s.done:
 			return
@@ -564,23 +622,19 @@ func handleWebInterrupt(w http.ResponseWriter, session *ChatSession) {
 	writeWebAPIJSON(w, http.StatusOK, map[string]string{"status": "interrupted"})
 }
 
-// handleWebPrompt 路由普通 prompt 到 InputQueue（§4.2.4 步骤 3-5）。
-func handleWebPrompt(w http.ResponseWriter, session *ChatSession, prompt string) {
-	prompt = strings.TrimSpace(prompt)
-	if prompt == "" {
-		writeWebAPIJSON(w, http.StatusBadRequest, map[string]string{
-			"status": "rejected",
-			"reason": "empty prompt",
-		})
-		return
+// injectChatWebPrompt 把 Web 注入的 prompt 路由到会话 InputQueue
+// （§4.2.4 步骤 3-5）。返回路由结果；queue 不可用时 ok=false。
+//
+// 供 /web/api/input（异步注入，立即返回 queued）与 /web/api/invoke
+// （同步远程调用，等待 turn 结束后返回状态/渲染）共用，保证两条路径的
+// 流式开关、外部捕获模式与 composer 唤醒行为完全一致。
+func injectChatWebPrompt(session *ChatSession, prompt string) (chatInputRouteResult, bool) {
+	if session == nil {
+		return chatInputRouteResult{}, false
 	}
 	queue := ensureChatBufferedInputQueue(session)
 	if queue == nil {
-		writeWebAPIJSON(w, http.StatusInternalServerError, map[string]string{
-			"status": "error",
-			"reason": "input queue unavailable",
-		})
-		return
+		return chatInputRouteResult{}, false
 	}
 	// Web 页面需要打字机效果：确保本轮及后续轮次 LLM 走流式输出，
 	// 从而实时产生 assistant_delta / reasoning_delta 增量事件（§5.1）。
@@ -601,7 +655,29 @@ func handleWebPrompt(w http.ResponseWriter, session *ChatSession, prompt string)
 		// 统一通过 composerWakeCancel 唤醒，下一轮 chatInteractiveReadLine
 		// 会优先检查输入队列。
 		session.wakeComposerRead()
-		writeWebAPIJSON(w, http.StatusOK, map[string]string{"status": "queued"})
+	}
+	return result, true
+}
+
+// handleWebPrompt 路由普通 prompt 到 InputQueue（§4.2.4 步骤 3-5）。
+func handleWebPrompt(w http.ResponseWriter, session *ChatSession, prompt string) {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		writeWebAPIJSON(w, http.StatusBadRequest, map[string]string{
+			"status": "rejected",
+			"reason": "empty prompt",
+		})
+		return
+	}
+	result, ok := injectChatWebPrompt(session, prompt)
+	if !ok {
+		writeWebAPIJSON(w, http.StatusInternalServerError, map[string]string{
+			"status": "error",
+			"reason": "input queue unavailable",
+		})
+		return
+	}
+	switch {
 	case result.rejected():
 		writeWebAPIJSON(w, http.StatusOK, map[string]string{
 			"status": "rejected",

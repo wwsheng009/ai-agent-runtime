@@ -58,8 +58,10 @@ export type ComposerModelPanelProps = {
   modelOptions: readonly string[];
   onModelChange: (model: string) => void;
   onProviderChange: (provider: string) => void;
+  onProviderQueryChange: (query: string) => void;
   onReasoningEffortChange: (effort: string) => void;
   providerOptions: readonly string[];
+  providerQuery: string;
   reasoningEffortDefault: string;
   reasoningEffortOptions: readonly string[];
   selectedModel: string;
@@ -73,8 +75,10 @@ export function ComposerModelPanel({
   modelOptions,
   onModelChange,
   onProviderChange,
+  onProviderQueryChange,
   onReasoningEffortChange,
   providerOptions,
+  providerQuery,
   reasoningEffortDefault,
   reasoningEffortOptions,
   selectedModel,

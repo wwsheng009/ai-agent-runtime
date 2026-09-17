@@ -104,6 +104,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Info: chat render status endpoint: %s (JSON; ?format=text for plain text)\n", handle.DisplayURL())
 			fmt.Fprintf(os.Stderr, "Info: chat screen content endpoint: %s (JSON; ?format=text for plain text)\n", handle.ScreenURL())
 			fmt.Fprintf(os.Stderr, "Info: chat debug endpoints list: %s (JSON; ?format=text for plain text)\n", handle.EndpointsURL())
+			fmt.Fprintf(os.Stderr, "Info: chat web client / remote invoke endpoint: %s (POST %s)\n", handle.WebURL(), handle.InvokeURL())
+			fmt.Fprintf(os.Stderr, "Info: web write token (%s): %s (POST /web/api/* 必需)\n", commands.ChatWebAuthTokenHeader, commands.EnsureChatWebAuthToken())
 			fmt.Fprintf(os.Stderr, "Info: runtime observe plane: %s (local in-process; capabilities/snapshot/sessions/events)\n", handle.Addr()+strings.TrimRight(commands.ChatDebugObservePrefix(), "/"))
 		}
 

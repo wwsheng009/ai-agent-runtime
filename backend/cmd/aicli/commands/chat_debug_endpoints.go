@@ -33,25 +33,67 @@ type chatDebugEndpointInfo struct {
 
 // chatDebugEndpointsSnapshot 是 /debug/endpoints 的 JSON 响应体。
 type chatDebugEndpointsSnapshot struct {
-	Available       bool                    `json:"available"`
-	Reason          string                  `json:"reason,omitempty"`
-	BaseURL         string                  `json:"base_url,omitempty"`          // loopback base URL (backwards compat)
-	LoopbackBaseURL string                  `json:"loopback_base_url,omitempty"` // loopback 组基础地址
-	ObserveBaseURL  string                  `json:"observe_base_url,omitempty"`  // runtime-observe 组基础地址
+	Available       bool   `json:"available"`
+	Reason          string `json:"reason,omitempty"`
+	BaseURL         string `json:"base_url,omitempty"`          // loopback base URL (backwards compat)
+	LoopbackBaseURL string `json:"loopback_base_url,omitempty"` // loopback 组基础地址
+	WebBaseURL      string `json:"web_base_url,omitempty"`      // web 远程调用端点组基础地址
+	ObserveBaseURL  string `json:"observe_base_url,omitempty"`  // runtime-observe 组基础地址
+	// WriteAuthHeader / WriteAuthHint 描述 Web API 状态变更请求的鉴权要求
+	// （Host/Origin 校验之外的第二层；令牌来自进程启动行或页面 meta 注入）。
+	WriteAuthHeader string                  `json:"write_auth_header,omitempty"`
+	WriteAuthHint   string                  `json:"write_auth_hint,omitempty"`
 	Endpoints       []chatDebugEndpointInfo `json:"endpoints"`
 }
 
 // loopbackDebugEndpoints 列出 aicli 本机 loopback HTTP 服务器（--pprof 时启动）
 // 上提供的调试端点（相对路径）。
 var loopbackDebugEndpoints = []struct {
-	Path string
-	Note string
+	Method string
+	Path   string
+	Note   string
 }{
-	{Path: "/debug/pprof/", Note: "pprof 性能分析索引（含 heap/allocs/goroutine/block/mutex/trace 等）"},
-	{Path: "/debug/pprof/executor", Note: "executor 恢复循环逐次诊断"},
-	{Path: "/debug/chat/status", Note: "渲染/显示状态快照（JSON / ?format=text）"},
-	{Path: "/debug/chat/screen", Note: "当前屏幕合成帧（JSON / ?format=text）"},
-	{Path: "/debug/endpoints", Note: "调试端点清单（本端点）"},
+	{Method: "GET", Path: "/debug/pprof/", Note: "pprof 性能分析索引（含 heap/allocs/goroutine/block/mutex/trace 等）"},
+	{Method: "GET", Path: "/debug/pprof/executor", Note: "executor 恢复循环逐次诊断"},
+	{Method: "GET", Path: "/debug/chat/status", Note: "渲染/显示状态快照（JSON / ?format=text）"},
+	{Method: "GET", Path: "/debug/chat/screen", Note: "当前屏幕合成帧（JSON / ?format=text）"},
+	{Method: "GET", Path: "/debug/endpoints", Note: "调试端点清单（本端点）"},
+}
+
+// webDebugEndpoints 列出 /web/* 远程调用端点族（与调试端点同端口，同源）：
+// 屏幕/状态快照读取、SSE 实时事件、异步输入注入与同步 invoke 调用。
+// 该组是"远程控制 aicli chat TUI"的稳定入口，脚本/外部 Agent 可仅依赖
+// /debug/endpoints 返回的 URL 发现并调用。
+var webDebugEndpoints = []struct {
+	Method string
+	Path   string
+	Note   string
+}{
+	{Method: "GET", Path: "/web/", Note: "微型 Web 客户端页面（浏览器交互入口）"},
+	{Method: "GET", Path: "/web/api/screen", Note: "当前渲染快照（默认完整 transcript；?view=tui TUI 合成帧；?format=json 结构化）"},
+	{Method: "GET", Path: "/web/api/status", Note: "渲染/显示状态快照（JSON / ?format=text）"},
+	{Method: "GET", Path: "/web/api/runtime", Note: "运行时元数据（provider/model/reasoning 权威值）"},
+	{Method: "GET", Path: "/web/api/events", Note: "SSE 事件流（实时 turn 事件，可续传）"},
+	{Method: "POST", Path: "/web/api/input", Note: "异步注入 prompt / 审批决议 / 提问回答 / interrupt"},
+	{Method: "POST", Path: "/web/api/invoke", Note: "同步远程调用：注入 prompt 并等待 turn 结束（wait_only/timeout_ms/client_request_id）"},
+	{Method: "GET", Path: "/web/api/turn", Note: "turn 后验查询（?id={turn_id}，含 started/finished/usage）"},
+	{Method: "GET", Path: "/web/api/events/schema", Note: "SSE 事件 schema"},
+	{Method: "GET", Path: "/web/api/sessions", Note: "会话列表（current_session_id + 候选会话）"},
+	{Method: "POST", Path: "/web/api/sessions/new", Note: "新建会话"},
+	{Method: "POST", Path: "/web/api/sessions/resume", Note: "恢复指定会话为当前会话"},
+	{Method: "POST", Path: "/web/api/sessions/rename", Note: "重命名会话"},
+	{Method: "POST", Path: "/web/api/sessions/delete", Note: "删除会话（当前活动会话不可删除）"},
+	{Method: "GET", Path: "/web/api/config", Note: "配置快照（providers/chat/config_path）"},
+	{Method: "GET/POST", Path: "/web/api/config/providers", Note: "provider 详情读取（GET）/ 保存（POST）"},
+	{Method: "POST", Path: "/web/api/config/providers/delete", Note: "删除 provider（连带分组/默认值/auth 引用清理）"},
+	{Method: "POST", Path: "/web/api/config/providers/enabled", Note: "启用/禁用 provider"},
+	{Method: "POST", Path: "/web/api/config/providers/fetch-models", Note: "拉取 provider 模型列表"},
+	{Method: "POST", Path: "/web/api/config/providers/probe-models", Note: "探测 provider 模型可用性"},
+	{Method: "POST", Path: "/web/api/config/providers/auto-import", Note: "从本地客户端配置自动导入 provider"},
+	{Method: "POST", Path: "/web/api/config/chat", Note: "保存 chat 配置（默认 provider/model 等）"},
+	{Method: "GET", Path: "/web/api/skills", Note: "技能目录（/{name} 拉取单个技能详情）"},
+	{Method: "GET", Path: "/web/api/analysis", Note: "用量分析（/status|/tools|/subagents|/errors）"},
+	{Method: "GET", Path: "/web/api/cache", Note: "LLM 缓存分析（/overview|/requests|/messages/{id}/trace）"},
 }
 
 // observeDebugEndpoints 列出 Runtime Observation Plane 的版本化端点
@@ -89,9 +131,30 @@ func buildChatDebugEndpointList(session *ChatSession) *chatDebugEndpointsSnapsho
 	}
 	for _, ep := range loopbackDebugEndpoints {
 		info := chatDebugEndpointInfo{
-			Method:  "GET",
+			Method:  ep.Method,
 			Path:    ep.Path,
 			Scheme:  "loopback",
+			Enabled: loopbackActive,
+			Note:    ep.Note,
+		}
+		if loopbackActive {
+			info.URL = loopbackBase + ep.Path
+		}
+		snap.Endpoints = append(snap.Endpoints, info)
+	}
+
+	// === Web 远程调用端点（/web/*，与 loopback 同服务器同源）===
+	if loopbackActive {
+		snap.WebBaseURL = loopbackBase + "/web"
+		snap.WriteAuthHeader = ChatWebAuthTokenHeader
+		snap.WriteAuthHint = "POST 请求需携带 " + ChatWebAuthTokenHeader +
+			"（或 ?token=）；令牌见 aicli 启动行 web write token，内置页面自动注入"
+	}
+	for _, ep := range webDebugEndpoints {
+		info := chatDebugEndpointInfo{
+			Method:  ep.Method,
+			Path:    ep.Path,
+			Scheme:  "web",
 			Enabled: loopbackActive,
 			Note:    ep.Note,
 		}
@@ -169,26 +232,33 @@ func chatDebugEndpointLine(info chatDebugEndpointInfo) string {
 	if strings.TrimSpace(info.URL) != "" {
 		path = info.URL
 	}
-	return "GET " + path + "  " + chatDebugEndpointFlag(info)
+	method := strings.TrimSpace(info.Method)
+	if method == "" {
+		method = "GET"
+	}
+	return method + " " + path + "  " + chatDebugEndpointFlag(info)
 }
 
 // BuildChatDebugEndpointsText 返回全部调试端点的纯文本摘要（?format=text）。
 // 与 /debug display 面板的"HTTP 调试端点:"区块一致：按 loopback /
 // runtime-observe 分组，每组带基础地址，每行格式：
-//   GET <url|path>  [enabled|disabled]  <note>
+//
+//	GET <url|path>  [enabled|disabled]  <note>
 func BuildChatDebugEndpointsText() string {
 	snap := BuildChatDebugEndpointsSnapshot()
 	var sb strings.Builder
 	if !snap.Available {
 		return "Debug Endpoints: " + snap.Reason + "\n"
 	}
-	for _, scheme := range []string{"loopback", "runtime-observe"} {
+	for _, scheme := range []string{"loopback", "web", "runtime-observe"} {
 		sb.WriteString(chatDebugEndpointSchemeLabel(scheme))
 		sb.WriteString("\n")
 		var base string
 		switch scheme {
 		case "loopback":
 			base = snap.LoopbackBaseURL
+		case "web":
+			base = snap.WebBaseURL
 		case "runtime-observe":
 			base = snap.ObserveBaseURL
 		}
@@ -227,6 +297,8 @@ func chatDebugEndpointSchemeLabel(scheme string) string {
 	switch scheme {
 	case "loopback":
 		return "loopback  (aicli --pprof 本机调试服务器)"
+	case "web":
+		return "web  (aicli 微型 Web 客户端 / 远程调用 API)"
 	case "runtime-observe":
 		return "runtime-observe  (Runtime Observation Plane)"
 	default:
@@ -245,6 +317,8 @@ func appendChatDebugEndpointSubgroupLines(builder *chatDebugDocumentBuilder, sna
 	switch scheme {
 	case "loopback":
 		base = snap.LoopbackBaseURL
+	case "web":
+		base = snap.WebBaseURL
 	case "runtime-observe":
 		base = snap.ObserveBaseURL
 	}
@@ -283,5 +357,6 @@ func appendChatDebugEndpointListLines(builder *chatDebugDocumentBuilder, session
 		return
 	}
 	appendChatDebugEndpointSubgroupLines(builder, snap, "loopback")
+	appendChatDebugEndpointSubgroupLines(builder, snap, "web")
 	appendChatDebugEndpointSubgroupLines(builder, snap, "runtime-observe")
 }

@@ -18,6 +18,7 @@ aicli 在 **`--debug`** 或 **`--pprof`** 模式下自动启动 loopback HTTP �
 | `/debug/chat/screen` | 当前屏幕合成帧内容（用户实际看到的文本） |
 | `/debug/endpoints` | 全部调试相关端点清单（含 runtime-observe API 端点） |
 | `/api/runtime/observe/v1/*` | Runtime Observation Plane（本地 in-process，默认随 `--pprof on` 开启）：`capabilities` / `snapshot` / `sessions/{id}` / `events` |
+| `/web/api/*` | 微型 Web 客户端 / 远程调用 API：`POST /web/api/invoke`（同步调用：prompt → 等待 turn 结束 → 状态+渲染）、`POST /web/api/input`、`GET /web/api/screen`（`?view=tui` 取 TUI 合成帧）、`GET /web/api/events`（SSE）；详见 [web-remote-api.md](./web-remote-api.md) |
 
 ## `/debug/chat/status` — 渲染器状态快照（面向两种方式显示）
 
@@ -55,6 +56,7 @@ Info: pprof endpoint enabled: http://127.0.0.1:50679/debug/pprof/
 Info: chat render status endpoint: http://127.0.0.1:50679/debug/chat/status (JSON; ?format=text for plain text)
 Info: chat screen content endpoint: http://127.0.0.1:50679/debug/chat/screen (JSON; ?format=text for plain text)
 Info: chat debug endpoints list: http://127.0.0.1:50679/debug/endpoints (JSON; ?format=text for plain text)
+Info: chat web client / remote invoke endpoint: http://127.0.0.1:50679/web/ (POST http://127.0.0.1:50679/web/api/invoke)
 Info: runtime observe plane: http://127.0.0.1:50679/api/runtime/observe/v1 (local in-process; capabilities/snapshot/sessions/events)
 ```
 
@@ -768,7 +770,7 @@ curl http://127.0.0.1:50679/debug/chat/screen | python -m json.tool
 
 返回当前环境**全部调试相关 HTTP 端点**的统一清单，便于脚本/工具一次性发现所有调试入口。默认返回 JSON；`?format=text` 返回纯文本。
 
-端点按 **loopback**（本机 `--pprof` HTTP 服务器）与 **runtime-observe**（Runtime Observation Plane）两个分组展示，每个端点带 `[enabled]` / `[disabled]` 标记与用途说明。
+端点按 **loopback**（本机 `--pprof` 调试端点）、**web**（`/web/*` 微型 Web 客户端 / 远程调用 API）与 **runtime-observe**（Runtime Observation Plane）三个分组展示，每个端点带方法、`[enabled]` / `[disabled]` 标记与用途说明。
 
 ```powershell
 # JSON 格式（默认）
@@ -788,6 +790,15 @@ loopback  (aicli --pprof 本机调试服务器)
   GET http://127.0.0.1:50679/debug/chat/status  [enabled]  渲染/显示状态快照（JSON / ?format=text）
   GET http://127.0.0.1:50679/debug/chat/screen  [enabled]  当前屏幕合成帧（JSON / ?format=text）
   GET http://127.0.0.1:50679/debug/endpoints  [enabled]  调试端点清单（本端点）
+web  (aicli 微型 Web 客户端 / 远程调用 API)
+  Base: http://127.0.0.1:50679/web
+  GET http://127.0.0.1:50679/web/  [enabled]  微型 Web 客户端页面（浏览器交互入口）
+  GET http://127.0.0.1:50679/web/api/screen  [enabled]  当前渲染快照（默认完整 transcript；?view=tui TUI 合成帧；?format=json 结构化）
+  GET http://127.0.0.1:50679/web/api/status  [enabled]  渲染/显示状态快照（JSON / ?format=text）
+  GET http://127.0.0.1:50679/web/api/events  [enabled]  SSE 事件流（实时 turn 事件）
+  POST http://127.0.0.1:50679/web/api/input  [enabled]  异步注入 prompt / 审批决议 / 提问回答
+  POST http://127.0.0.1:50679/web/api/invoke  [enabled]  同步远程调用：注入 prompt 并等待 turn 结束，返回状态/渲染
+  GET http://127.0.0.1:50679/web/api/events/schema  [enabled]  SSE 事件 schema
 runtime-observe  (Runtime Observation Plane)
   Base: http://127.0.0.1:50679/api/runtime/observe/v1
   GET http://127.0.0.1:50679/api/runtime/observe/v1/capabilities  [enabled]  观察平面能力声明
@@ -798,9 +809,9 @@ runtime-observe  (Runtime Observation Plane)
 
 本地模式下 observe 组 base 就是 loopback 基础地址；只有既未启动本地 observe 服务、也未连接 runtime-server 时才会显示 `<route-only>`（仅相对路径）。
 
-JSON 响应包含 `available`、`base_url`（loopback 基础地址，向后兼容）、`loopback_base_url`、`observe_base_url` 与 `endpoints` 数组，每个端点含 `method`、`path`、`scheme`（`loopback` / `runtime-observe`）、`enabled`、`url`（base 已知时）与 `note` 字段。
+JSON 响应包含 `available`、`base_url`（loopback 基础地址，向后兼容）、`loopback_base_url`、`web_base_url`、`observe_base_url` 与 `endpoints` 数组，每个端点含 `method`、`path`、`scheme`（`loopback` / `web` / `runtime-observe`）、`enabled`、`url`（base 已知时）与 `note` 字段。
 
-在 `/debug display` 面板中，同一清单以 **"HTTP 调试端点:"** 区块展示，按 loopback / runtime-observe 分组，每组带基础地址与端点说明，与 `/debug/endpoints?format=text` 输出一致。
+在 `/debug display` 面板中，同一清单以 **"HTTP 调试端点:"** 区块展示，按 loopback / web / runtime-observe 分组，每组带基础地址与端点说明，与 `/debug/endpoints?format=text` 输出一致。远程调用的完整用法（同步 invoke、输入注入、TUI 帧读取、审批续跑）见 [web-remote-api.md](./web-remote-api.md)。
 
 ## Runtime Observation Plane（本地模式）
 

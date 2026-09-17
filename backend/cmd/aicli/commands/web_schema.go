@@ -16,11 +16,16 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	ChatWebPath                  = "/web/"
-	ChatWebAPIScreenPath         = "/web/api/screen"
-	ChatWebAPIStatusPath         = "/web/api/status"
-	ChatWebAPIEventsPath         = "/web/api/events"
-	ChatWebAPIInputPath          = "/web/api/input"
+	ChatWebPath          = "/web/"
+	ChatWebAPIScreenPath = "/web/api/screen"
+	ChatWebAPIStatusPath = "/web/api/status"
+	ChatWebAPIEventsPath = "/web/api/events"
+	ChatWebAPIInputPath  = "/web/api/input"
+	// ChatWebAPIInvokePath 是同步远程调用端点：一次请求内完成
+	// "注入 prompt → 等待 turn 结束 → 返回状态与渲染"，供脚本/外部 Agent
+	// 直接远程调用 aicli chat TUI（与异步的 /web/api/input 互补）。
+	ChatWebAPIInvokePath         = "/web/api/invoke"
+	ChatWebAPITurnPath           = "/web/api/turn"
 	ChatWebAPISchemaPath         = "/web/api/events/schema"
 	ChatWebAPISessionsPath       = "/web/api/sessions"
 	ChatWebAPISessionsNewPath    = "/web/api/sessions/new"
