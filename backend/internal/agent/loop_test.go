@@ -2584,7 +2584,15 @@ func TestReActLoop_RunWithSession_AutoCompactionRecoveryContinuesAfterPromptPref
 		DefaultMaxTokens: 256,
 		SystemPrompt:     "You are a helpful assistant.",
 		Options: map[string]interface{}{
-			"context_max_prompt_tokens":    1400,
+			// The budget must leave enough headroom for the first preflight
+			// pass to survive the active-turn replay reduction: the reduced
+			// tool result (~2.7 KiB, including the raw-output artifact notice)
+			// must stay under budget so the loop proceeds to the second tool
+			// call, exceeds the budget again, and only then exercises session
+			// compaction recovery. A tighter value (<=1500) flips the first
+			// reduction into a preflight failure, so compaction consumes a
+			// different mock response and the assertion sequence below fails.
+			"context_max_prompt_tokens":    1600,
 			"context_max_messages":         16,
 			"context_keep_recent_messages": 8,
 		},
