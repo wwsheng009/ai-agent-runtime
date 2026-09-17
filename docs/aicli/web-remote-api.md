@@ -80,8 +80,8 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
 |------|------|------|
 | POST | `/web/api/invoke` | **同步远程调用**：注入 prompt（或 `wait_only`），等待 turn 结束，一次响应返回最终状态 + assistant 回复 + TUI 渲染 + token 用量；`Accept: text/event-stream` 时改为流式 delta + 最终 result |
 | POST | `/web/api/input` | 异步注入：prompt / 审批决议 / 提问回答 / 中断，立即返回 `queued` |
-| GET | `/web/api/turn` | turn 后验查询：`?id={turn_id}` 取单条（含耗时/步数/本轮 token 增量），无参数返回当前 turn + 最近 20 条 |
-| GET | `/web/api/screen` | 当前渲染：默认完整 transcript（`messages` 结构化）；`?view=tui` 返回 TUI 合成帧；`?format=json` 结构化 |
+| GET | `/web/api/turn` | turn 后验查询：`?id={turn_id}` 取单条（含耗时/步数/`assistant_preview`/`usage`+`usage_scope`），无参数返回当前 turn + 最近 20 条 |
+| GET | `/web/api/screen` | 当前渲染：默认完整 transcript（`messages` 结构化）；`?view=tui` 返回 TUI 合成帧；`?format=json` 结构化；`?tail=N` 只取末尾 N 行（≤2000） |
 | GET | `/web/api/status` | 渲染器/显示状态快照（等价 `/debug/chat/status`） |
 | GET | `/web/api/runtime` | 运行时元数据（provider/model/reasoning 权威值） |
 | GET | `/web/api/events` | SSE 实时事件流（turn/工具/审批/提问…） |
@@ -96,6 +96,12 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
 | GET | `/debug/chat/screen` | 与 `/web/api/screen?view=tui` 同源的调试入口（保留） |
 
 > 所有 POST 均需 `X-AICLI-Token`（见上一节）。
+>
+> **Windows/PowerShell 客户端**：不要用 `curl.exe … | ConvertFrom-Json` 直接接收
+> 中文响应（PS 按控制台代码页解码原生命令 stdout，会乱码甚至解析失败）；用
+> `Invoke-RestMethod`，或 `curl.exe -o <file>` + `[IO.File]::ReadAllText($f, UTF8)`。
+> 可复制脚本见
+> [../user-guide/aicli-tui-remote.md](../user-guide/aicli-tui-remote.md) 的 §3.3。
 
 ## 3. 同步远程调用：`POST /web/api/invoke`
 
@@ -115,6 +121,8 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
 - `timeout_ms` 可选，默认 120000，钳制范围 `[1000, 600000]`。
 - `wait_only: true`：**不注入 prompt**，只等待当前 turn 结束（审批/提问决议后继续等待、
   或外部编排等待既有 turn 时使用）；此时可省略 `prompt`，响应 `queued=false`。
+  会话**本来已空闲**（无活动 turn、无待审批/提问、队列为空）时**立即返回 `settled`**
+  （`reason="session already idle: …"`），不会空等 `timeout_ms`。
 - `client_request_id` 可选（≤128 字符）：**幂等键**。同一会话内重复提交相同 id 直接回放
   首次结果（`duplicate: true`）且不会重复注入；保留窗口 10 分钟、最多 256 条。
 - `session_id` 可选：与当前活动会话不一致时返回 `409`（避免 prompt 误投递；切换会话请先
@@ -177,7 +185,7 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
 | status | 含义 | 后续动作 |
 |--------|------|----------|
 | `completed` | turn 结束，会话空闲 | 读取 `assistant` / `screen` |
-| `settled` | 输入已被消费且会话空闲，但未观察到 LLM turn（斜杠命令等） | 读取 `screen` 确认命令输出 |
+| `settled` | 输入已被消费且会话空闲但未观察到 LLM turn（斜杠命令等）；或 `wait_only` 时本来就没有在跑的 turn | 读取 `screen` 确认命令输出/当前界面 |
 | `timeout` | 超过 `timeout_ms` 仍未结束（长任务/后台作业） | 用 `/web/api/events` 或轮询 `/web/api/screen` 继续观察，可再次 invoke |
 | `interrupted` | turn 被中断（终端 Esc 或 `POST /web/api/input {"type":"interrupt"}`） | 视需要重新发起 |
 | `requires_approval` | 会话停在审批等待，`pending_approval` 携带 `request_id` / `tool_name` / `prompt` | `POST /web/api/input {"type":"approval","request_id":"...","allow":true}` 后用 `{"wait_only":true}` 继续等待 |
@@ -221,9 +229,14 @@ curl -s 'http://127.0.0.1:61772/web/api/turn' | jq '.current, .recent[0]'
 ```
 
 `/web/api/turn` 返回：`found` / `turn`（`status` = running|completed|failed|interrupted，
-`started_at` / `finished_at` / `duration_ms` / `steps` / `error` / `usage` 本轮 token 增量）/
+`started_at` / `finished_at` / `duration_ms` / `steps` / `error` / `usage` + `usage_scope`）/
 `current`（活动 turn 实时探测：`turn_id` / `busy` / `pending_inputs` / `pending_approval` / `pending_question`）/
 `recent`（最近 20 条，最新在前）。记录上限 128 条、保留 30 分钟。
+
+- `assistant_preview`（≤200 rune，超出以 `…` 结尾）/ `assistant_chars`：本轮最后一条
+  assistant 消息的预览与完整字符数——查“这轮回了什么”不必再拉整份 transcript。
+- `usage_scope` 说明 `usage` 口径：`turn`=本轮增量；`session`=本轮增量不可得时回退为
+  会话累计快照（与 invoke `/status` 同源），避免把“没基线”误读成“零消耗”。
 
 ## 5. 读取状态与渲染
 

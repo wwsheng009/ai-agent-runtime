@@ -181,8 +181,9 @@ JSON/text 输出**不含**令牌原文（避免清单被转发时泄露）。
 ### 3.3 可复用的 PowerShell 助手
 
 ```powershell
+# 推荐：Invoke-RestMethod（.NET 按 Content-Type charset 解码，Windows 中文零乱码）
 function Get-AicliToken([string]$Base = 'http://127.0.0.1:64562') {
-  (curl.exe -s "$Base/web/api/token" | ConvertFrom-Json).token
+  (Invoke-RestMethod -Uri "$Base/web/api/token" -TimeoutSec 15).token
 }
 
 function Invoke-AicliPrompt {
@@ -194,17 +195,38 @@ function Invoke-AicliPrompt {
   )
   $body = @{ prompt = $Prompt; timeout_ms = $TimeoutMs }
   if ($ClientRequestId) { $body.client_request_id = $ClientRequestId }
-  $json = $body | ConvertTo-Json -Compress
-  curl.exe -s -X POST "$Base/web/api/invoke" `
-    -H 'Content-Type: application/json' `
-    -H "X-AICLI-Token: $(Get-AicliToken -Base $Base)" `
-    -d $json | ConvertFrom-Json
+  # 注意：客户端超时必须大于 timeout_ms，否则服务端还在等就被本地中断
+  Invoke-RestMethod -Uri "$Base/web/api/invoke" -Method Post `
+    -Headers @{ 'X-AICLI-Token' = (Get-AicliToken -Base $Base) } `
+    -ContentType 'application/json; charset=utf-8' `
+    -Body ($body | ConvertTo-Json -Compress) `
+    -TimeoutSec ([math]::Ceiling($TimeoutMs / 1000) + 30)
 }
 
 $r = Invoke-AicliPrompt -Prompt '用一句话总结当前工作区状态' -TimeoutMs 180000
 $r.status
 $r.assistant.content
 ```
+
+备选（curl.exe）——**必须字节安全**：响应先落盘、再按 UTF-8 显式读取：
+
+```powershell
+$tmp = Join-Path $env:TEMP 'aicli-invoke.json'
+curl.exe -s -o $tmp -X POST "$Base/web/api/invoke" `
+  -H 'Content-Type: application/json' `
+  -H "X-AICLI-Token: $(Get-AicliToken -Base $Base)" `
+  -d ($body | ConvertTo-Json -Compress)
+$r = [IO.File]::ReadAllText($tmp, [Text.Encoding]::UTF8) | ConvertFrom-Json
+```
+
+> ⚠️ **Windows 编码陷阱（实测踩过）**：`curl.exe` 输出的是 UTF-8 字节，而 PowerShell 用
+> 控制台代码页（简体中文机器上是 GBK/936）解码**原生命令**的 stdout。把 `curl.exe …`
+> 直接管道给 `ConvertFrom-Json`，非 ASCII 内容会乱码，甚至因字节被破坏而解析失败
+> （`After parsing a value an unexpected character was encountered … Path 'assistant.content'`）。
+> 稳妥做法二选一：① 用 `Invoke-RestMethod`（推荐）；② `curl.exe -o <file>` 落盘 +
+> `[IO.File]::ReadAllText($file, [Text.Encoding]::UTF8)`。
+> 纯 ASCII 的小响应（如 `/web/api/token` 的 `.token`）通常看不出问题，但涉及中文
+> prompt/回复/`hint` 时必然踩坑——脚本模板统一按上面两种写法。
 
 ---
 
@@ -214,8 +236,8 @@ $r.assistant.content
 |------|------|------|
 | POST | `/web/api/invoke` | 同步远程调用：注入 prompt（或 `wait_only`）→ 等 turn 结束 → 一次返回状态 + assistant + TUI 渲染 + 用量 |
 | POST | `/web/api/input` | 异步注入：`prompt` / `approval` / `question_answer` / `interrupt`，立即返回 `queued` |
-| GET | `/web/api/turn` | turn 后验查询：`?id={turn_id}` 单条；缺省返回 `current` + `recent` |
-| GET | `/web/api/screen` | 默认完整 transcript；`?view=tui` 用户实际看到的合成帧；`?format=json` 结构化 |
+| GET | `/web/api/turn` | turn 后验查询：`?id={turn_id}` 单条；缺省返回 `current` + `recent`（含 `assistant_preview`/`assistant_chars`、`usage` + `usage_scope`） |
+| GET | `/web/api/screen` | 默认完整 transcript；`?view=tui` 用户实际看到的合成帧；`?format=json` 结构化；`?tail=N` 只取末尾 N 行 |
 | GET | `/web/api/status` | 渲染器/显示状态快照（等价 `/debug/chat/status`） |
 | GET | `/web/api/runtime` | 运行时元数据（provider / model / reasoning 权威值） |
 | GET | `/web/api/events` | SSE 实时事件流（turn / 工具 / 审批 / 提问…） |
@@ -227,7 +249,7 @@ $r.assistant.content
 | POST | `/web/api/sessions/delete` | 删除历史会话（仅非当前会话） |
 | GET | `/web/api/token` | 读取本进程写令牌（回环 + 同源可读，`no-store`；含 `source` 来源标识） |
 | GET | `/web/` | 浏览器微型 Web 客户端（同一后端，自动注入令牌） |
-| GET | `/debug/endpoints` | 全部调试/远程端点清单（JSON 或 `?format=text`） |
+| GET | `/debug/endpoints` | 全部调试/远程端点清单（JSON 或 `?format=text`；含 `version`/`build_time`/`started_at`/`uptime_sec`，用于识别旧构建实例） |
 
 > 配置类端点（`/web/api/config/*`：provider 增删改、模型拉取探测、chat 配置保存）、
 > 技能与用量分析（`/web/api/skills/*`、`/web/api/analysis/*`、`/web/api/cache/*`）
@@ -271,7 +293,7 @@ curl.exe -s -X POST "$base/web/api/invoke" `
 |------|------|
 | `prompt` | 要注入的文本（也可直接 POST 纯文本 body，非 JSON 时整个 body 视为 prompt） |
 | `timeout_ms` | 可选，默认 `120000`，钳制范围 `[1000, 600000]` |
-| `wait_only` | `true` 时**不注入**，只等待当前 turn 结束（审批/提问决议后继续等待时用） |
+| `wait_only` | `true` 时**不注入**，只等当前 turn 结束（审批/提问决议后继续等待也用它）；会话本来已空闲时**立即返回 `settled`**，不空等 `timeout_ms` |
 | `client_request_id` | 可选幂等键（≤128 字符）：同会话重复提交相同 id 回放首次结果（`duplicate: true`），不会重复注入 |
 | `session_id` | 可选；与当前活动会话不一致时返回 `409`（防误投递，切换会话请先 `sessions/resume`） |
 
@@ -280,7 +302,7 @@ curl.exe -s -X POST "$base/web/api/invoke" `
 | status | 含义 | 下一步 |
 |--------|------|--------|
 | `completed` | turn 结束、会话空闲 | 读 `assistant.content` / `screen` |
-| `settled` | 输入已被消费且空闲，但没观察到 LLM turn（如斜杠命令） | 读 `screen` 看命令输出 |
+| `settled` | 已就绪且空闲：输入已被消费但未观察到 LLM turn（如斜杠命令），或 `wait_only` 时本来就没有在跑的 turn（`reason` 说明 `session already idle`） | 读 `screen` 看命令输出/当前界面 |
 | `timeout` | 超过 `timeout_ms` 未结束（长任务） | 用 `events` 或轮询 `screen` 继续观察，可再次 invoke |
 | `interrupted` | turn 被中断（TUI 按 Esc 或远程 `interrupt`） | 视需要重新发起 |
 | `requires_approval` | 停在工具审批，`pending_approval` 带 `request_id`/`tool_name`/`prompt` | 见 5.5，再用 `wait_only` 继续等 |
@@ -321,6 +343,15 @@ curl -N -X POST http://127.0.0.1:64562/web/api/invoke \
 `result`（终态，含 `status` 与 `http_status`）。中途断开不会取消 turn，可再用
 `sessions`/`turn`/`screen` 查询。
 
+搭配要点：
+
+- **超 10 分钟的活儿用 SSE**：`timeout_ms` 上限是 `600000`（10 分钟），同步调用到点
+  只会给你 `timeout`；SSE 下 `delta` 帧能实时看进展，断线后用 `turn`/`screen` 幂等续看。
+- **长 prompt（几 KB 以上）**：`Invoke-AicliPrompt -Prompt (Get-Content -Raw -Encoding UTF8 .\task.md)`
+  即可；curl 路线把请求体落文件后用 `--data-binary "@$bodyFile"`（避免 shell 引号截断）。
+- **到点未结束不要重发 prompt**：重发会重复注入；改发 `{"wait_only":true,"timeout_ms":...}`
+  继续等（空闲会话会立即回 `settled`，见 5.2）。
+
 ### 5.4 只投递不等结果 + turn 后验查询
 
 ```powershell
@@ -336,6 +367,14 @@ curl.exe -s "$base/web/api/turn"
 
 `turn.status` = `running` / `completed` / `failed` / `interrupted`；记录保留
 最近 128 条、30 分钟（重启清空；持久用量看 `/web/api/analysis/*`）。
+
+记录里的几个字段口径：
+
+| 字段 | 口径 |
+|------|------|
+| `assistant_preview` / `assistant_chars` | 本轮最后一条 assistant 消息的预览（≤200 rune，超出以 `…` 结尾）与完整字符数；完整回复走 `screen`（transcript）或 invoke 响应 |
+| `usage` + `usage_scope` | `usage_scope=turn`：`usage` 为本轮增量；`usage_scope=session`：本轮增量不可得时回退为会话累计快照（与 invoke `/status` 同源）。两处数字不一致时以 `usage_scope` 为准理解口径 |
+| `steps` | 本轮工具/步骤计数（来自 turn 结束事件）|
 
 ### 5.5 审批 / 提问 / 中断
 
@@ -367,6 +406,8 @@ curl.exe -s -X POST "$base/web/api/invoke" -H "X-AICLI-Token: $token" `
 ```powershell
 # 用户实际看到的界面（合成帧文本）
 curl.exe -s "$base/web/api/screen?view=tui"
+# 只取末尾 30 行（长会话/长 transcript 时省流量，N 上限 2000）
+curl.exe -s "$base/web/api/screen?view=tui&tail=30"
 # 合成帧结构化（lines 数组）
 curl.exe -s "$base/web/api/screen?view=tui&format=json"
 # 完整会话 transcript（含角色结构化 messages）
@@ -374,6 +415,9 @@ curl.exe -s "$base/web/api/screen?format=json"
 # 渲染器内部状态（编码/提交/门控诊断，等价 aicli /debug）
 curl.exe -s "$base/web/api/status?format=text"
 ```
+
+> `?view=tui` 返回的是**剥掉 ANSI 的逻辑合成帧**（内容=用户所见，不含样式/光标状态）；
+> 需要字节级真值（含 ANSI）用 `aicli chat --render-output-file <file>` 的终端镜像。
 
 ### 5.7 实时事件订阅（SSE）
 
@@ -447,6 +491,7 @@ curl -s -X POST http://127.0.0.1:64562/web/api/invoke \
 |------|------------|
 | 启动行没有 `write token`，`/debug/endpoints` 没有 `web` 分组，`POST /web/api/invoke` 返回 `405 method not allowed` | 该进程是**旧构建**（未包含远程调用/令牌能力）。重新构建并重启：`go build ./cmd/aicli` 后用 `--pprof` 启动 |
 | `403 missing or invalid X-AICLI-Token` | 令牌取自另一个进程/重启前，或用了 `?token=` 但参数被 shell 吃掉；重新 `GET /web/api/token` |
+| `wait_only` 立刻返回 `settled` | 正常：会话本来空闲（无在跑的 turn），短路返回而不是空等到 `timeout`；`busy=false`、`reason` 含 `session already idle` |
 | 启动时传了 token，写请求仍 `403` | 传的值与**当前进程**实际生效值不一致（旧实例、输错、被 shell 截断）；`GET /web/api/token` 对照即可 |
 | 浏览器打开 `/web/` 能看不能写（按钮报错） | 页面 meta 未注入（不是同一后端/旧构建）；重新从 `http://127.0.0.1:<port>/web/` 打开，不要用文件方式打开静态页 |
 | `409 no active chat session` | 服务器已就绪但会话还没绑定；轮询 `current_session_id` 或把 409 视为可重试 |
