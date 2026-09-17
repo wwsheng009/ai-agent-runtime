@@ -27,12 +27,14 @@ Main sections:
 - `codex/` - Codex provider behavior, native tool exposure, and image generation diagnostics
 - `skill_runtime/` - runtime APIs, governance, contracts, search, persistence, and design notes
 - `multi-agents/` - multi-agent design, profile, team, and rollout plans
+- `design/` - design baseline documents (checkpoint / restore-point design, planned architecture notes)
 - `working/` - point-in-time debugging notes and implementation snapshots
 - Provider config field notes live under `backend/docs/config/` (for example `enable_image_generation`)
 
 Recommended starting points:
 
 - `development-guidelines.md`
+- `design/checkpoint-design.md`
 - `aicli/quickstart.md`
 - `aicli/README.md`
 - `aicli/install.md`
