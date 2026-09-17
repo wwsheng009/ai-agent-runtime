@@ -273,7 +273,7 @@ func BuildChatDebugEndpointsText() string {
 	snap := BuildChatDebugEndpointsSnapshot()
 	var sb strings.Builder
 	if !snap.Available {
-		return "Debug Endpoints: " + snap.Reason + "\n"
+		return "Debug Endpoints: " + snap.Reason + "\n" + chatDebugUsageGuideText()
 	}
 	// 实例身份（与 JSON 同源）：脚本据此判断远端进程是否为旧构建/未重启。
 	if snap.Version != "" || snap.UptimeSec > 0 {
@@ -317,7 +317,19 @@ func BuildChatDebugEndpointsText() string {
 			sb.WriteString("\n")
 		}
 	}
+	sb.WriteString(chatDebugUsageGuideText())
 	return sb.String()
+}
+
+// chatDebugUsageGuideText 返回「Debug 使用说明」速览块（自带前置空行）。
+// 排查入口 / 脚本驱动 / 鉴权 / 文档指针四行；与 Web 客户端「关于」页的
+// 「调试速览」保持同一口径（改一处请同步另一处）。
+func chatDebugUsageGuideText() string {
+	return "\nDebug 使用说明:\n" +
+		"  排查: GET /debug/chat/status（渲染状态）· GET /web/api/screen?view=tui&tail=N（屏幕内容）· GET /debug/pprof/（性能）\n" +
+		"  驱动: POST /web/api/invoke（注入 prompt 并等 turn 结束；只等不注入加 wait_only=true）\n" +
+		"  鉴权: 写操作需 X-AICLI-Token（见上方 Auth 行，或 GET /web/api/token）；只读端点无需令牌\n" +
+		"  文档: docs/aicli/web-remote-api.md · docs/user-guide/aicli-tui-remote.md\n"
 }
 
 // MarshalChatDebugEndpointsJSON 返回缩进 JSON 字节，供 HTTP 端点直接写入。

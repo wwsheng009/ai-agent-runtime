@@ -515,6 +515,15 @@
               令牌已由本页面自动注入，手工调用时见启动行。
             </p>
           </dd>
+          <dt>调试速览</dt>
+          <dd>
+            排查：<code>GET /debug/chat/status</code>（渲染状态）、
+            <code>GET /web/api/screen?view=tui&amp;tail=N</code>（屏幕内容）、
+            <a href="/debug/pprof/" target="_blank" rel="noopener"><code>/debug/pprof/</code></a>（性能）；
+            驱动：<code>POST /web/api/invoke</code>（注入 prompt 并等 turn 结束，只等不注入加 <code>wait_only</code>）；
+            写操作需 <code>X-AICLI-Token</code>；完整清单见上方「远程调用端点」，
+            纯文本速览另见 <a href="/debug/endpoints?format=text" target="_blank" rel="noopener"><code>/debug/endpoints?format=text</code></a> 末尾「Debug 使用说明」。
+          </dd>
           <dt>端点索引</dt>
           <dd><a href="/debug/endpoints" target="_blank" rel="noopener">/debug/endpoints</a></dd>
         </dl>

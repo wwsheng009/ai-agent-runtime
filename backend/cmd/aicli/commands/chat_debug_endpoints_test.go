@@ -324,3 +324,58 @@ func TestBuildChatDebugEndpointList_InstanceIdentity(t *testing.T) {
 		}
 	}
 }
+
+// TestChatDebugEndpointsTextUsageGuide 锁定 ?format=text 末尾的「Debug 使用说明」速览：
+// 排查入口 / invoke 驱动 / 写令牌 / 文档指针必须可 grep 到（与 Web 客户端
+// 「关于」页的「调试速览」同一口径），方便脚本与人一眼知道下一步怎么用。
+func TestChatDebugEndpointsTextUsageGuide(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	prev := chatDebugPprofProvider
+	defer func() { chatDebugPprofProvider = prev }()
+	RegisterChatDebugPprofProvider(func() string { return "http://127.0.0.1:43211/debug/pprof/" })
+
+	cfg := config.DefaultRuntimeConfig()
+	host := &localChatRuntimeHost{RuntimeConfig: cfg}
+	session := &ChatSession{ProviderName: "test", Model: "test-model", LocalRuntimeHost: host}
+
+	prevDisplay := chatDebugDisplaySessionProvider
+	defer func() { chatDebugDisplaySessionProvider = prevDisplay }()
+	RegisterChatDebugDisplayProvider(func() *ChatSession { return session })
+
+	text := BuildChatDebugEndpointsText()
+	for _, expected := range []string{
+		"\nDebug 使用说明:\n",
+		"GET /debug/chat/status",
+		"GET /web/api/screen?view=tui&tail=N",
+		"POST /web/api/invoke",
+		"wait_only=true",
+		"X-AICLI-Token",
+		"docs/aicli/web-remote-api.md",
+		"docs/user-guide/aicli-tui-remote.md",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("endpoints 文本缺少使用说明片段 %q:\n%s", expected, text)
+		}
+	}
+}
+
+// TestChatDebugEndpointsTextUsageGuideWithoutSession 锁定"清单不可用"时也带使用说明：
+// 没有活动会话恰恰是新手最需要指路的时候，早退分支不得把速览吞掉。
+func TestChatDebugEndpointsTextUsageGuideWithoutSession(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	prevDisplay := chatDebugDisplaySessionProvider
+	defer func() { chatDebugDisplaySessionProvider = prevDisplay }()
+	RegisterChatDebugDisplayProvider(func() *ChatSession { return nil })
+
+	text := BuildChatDebugEndpointsText()
+	if !strings.Contains(text, "Debug Endpoints: no active chat session") {
+		t.Fatalf("缺少无会话提示:\n%s", text)
+	}
+	if !strings.Contains(text, "Debug 使用说明:") || !strings.Contains(text, "POST /web/api/invoke") {
+		t.Fatalf("无会话时也应附使用说明:\n%s", text)
+	}
+}
