@@ -27,6 +27,8 @@ import (
 const (
 	CodeCursorInvalid         = "cursor_invalid"
 	CodeListFailed            = "fs_list_failed"
+	CodeSearchFailed          = "fs_search_failed"
+	CodeQueryTooLong          = "query_too_long"
 	CodeTargetExists          = "target_exists"
 	CodeUploadTooLarge        = "upload_too_large"
 	CodeChunkSizeInvalid      = "chunk_size_invalid"
@@ -54,33 +56,35 @@ type Deps struct {
 
 // Limits 是各端点的限额（0 值表示使用默认值，见 DefaultLimits）。
 type Limits struct {
-	ListLimitDefault  int
-	ListLimitMax      int
-	ScanMaxEntries    int
-	PreviewTextBytes  int64
-	PreviewImageBytes int64
-	MaxUploadBytes    int64
-	ChunkSizeDefault  int64
-	ChunkSizeMin      int64
-	ChunkSizeMax      int64
-	UploadTTL         time.Duration
-	GitProbeTimeout   time.Duration
+	ListLimitDefault    int
+	ListLimitMax        int
+	ScanMaxEntries      int
+	SearchDirEntriesMax int
+	PreviewTextBytes    int64
+	PreviewImageBytes   int64
+	MaxUploadBytes      int64
+	ChunkSizeDefault    int64
+	ChunkSizeMin        int64
+	ChunkSizeMax        int64
+	UploadTTL           time.Duration
+	GitProbeTimeout     time.Duration
 }
 
 // DefaultLimits 返回规划 §5.8 的默认限额。
 func DefaultLimits() Limits {
 	return Limits{
-		ListLimitDefault:  200,
-		ListLimitMax:      1000,
-		ScanMaxEntries:    50000,
-		PreviewTextBytes:  256 * 1024,
-		PreviewImageBytes: 2 * 1024 * 1024,
-		MaxUploadBytes:    10 * 1024 * 1024 * 1024,
-		ChunkSizeDefault:  4 * 1024 * 1024,
-		ChunkSizeMin:      1024 * 1024,
-		ChunkSizeMax:      8 * 1024 * 1024,
-		UploadTTL:         24 * time.Hour,
-		GitProbeTimeout:   5 * time.Second,
+		ListLimitDefault:    200,
+		ListLimitMax:        1000,
+		ScanMaxEntries:      50000,
+		SearchDirEntriesMax: 2000,
+		PreviewTextBytes:    256 * 1024,
+		PreviewImageBytes:   2 * 1024 * 1024,
+		MaxUploadBytes:      10 * 1024 * 1024 * 1024,
+		ChunkSizeDefault:    4 * 1024 * 1024,
+		ChunkSizeMin:        1024 * 1024,
+		ChunkSizeMax:        8 * 1024 * 1024,
+		UploadTTL:           24 * time.Hour,
+		GitProbeTimeout:     5 * time.Second,
 	}
 }
 
@@ -97,6 +101,9 @@ func (l Limits) normalized() Limits {
 	}
 	if l.ScanMaxEntries <= 0 {
 		l.ScanMaxEntries = defaults.ScanMaxEntries
+	}
+	if l.SearchDirEntriesMax <= 0 {
+		l.SearchDirEntriesMax = defaults.SearchDirEntriesMax
 	}
 	if l.PreviewTextBytes <= 0 {
 		l.PreviewTextBytes = defaults.PreviewTextBytes

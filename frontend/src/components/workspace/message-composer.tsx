@@ -15,7 +15,10 @@ import { ComposerStatusRow } from "@/components/workspace/composer-status-row";
 import { Button } from "@/components/ui/button";
 import { type Thread } from "@/data/mock";
 import { type ComposerAttachmentsController } from "@/hooks/workspace/composer/use-composer-attachments";
-import { useComposerMenu } from "@/hooks/workspace/composer/use-composer-menu";
+import {
+  type ComposerMenuState,
+  useComposerMenu,
+} from "@/hooks/workspace/composer/use-composer-menu";
 import { type ComposerCommand, type ComposerCommandDefinition } from "@/lib/composer-commands";
 import { type ComposerReferenceGroup } from "@/lib/composer-menu";
 import { applyComposerTextareaLayout } from "@/lib/composer-textarea";
@@ -33,6 +36,11 @@ type MessageComposerProps = {
   commands?: readonly ComposerCommandDefinition[];
   /** P2-7：命令执行结果通知（宿主已本地化；错误 alert、成功 status）。 */
   commandResultNotice?: ComposerCommandResultNotice | null;
+  /**
+   * 会话上下文进度控件（宿主注入，composer 不直接耦合 runtime API）。
+   * 座位固定在发送按钮左侧：进度环 + 上下文明细/手动压缩面板。
+   */
+  contextUsageControl?: ReactNode;
   density: "comfortable" | "compact";
   draft: string;
   /** 会话身份；变化（切换会话/新建线程落地）时输入框回焦。 */
@@ -42,6 +50,11 @@ type MessageComposerProps = {
   isResponding: boolean;
   modelOptions: string[];
   onModelChange: (value: string) => void;
+  /**
+   * P0：`@` 菜单可见状态回调（宿主用 query 拉取工作区文件候选；
+   * 菜单关闭时不得触发请求）。
+   */
+  onMenuStateChange?: (state: ComposerMenuState) => void;
   /** P1-4 子片 3：`/` 命令派发；返回 true 表示已处理（否则给出未接入提示，不降级为 prompt）。 */
   onCommand?: (
     command: ComposerCommand,
@@ -75,6 +88,7 @@ export function MessageComposer({
   attachments,
   commands = NO_COMMANDS,
   commandResultNotice = null,
+  contextUsageControl = null,
   density,
   draft,
   focusKey,
@@ -85,6 +99,7 @@ export function MessageComposer({
   onCommand,
   onDismissCommandResult,
   onModelChange,
+  onMenuStateChange,
   onProviderChange,
   onReasoningEffortChange,
   permissionModeControl = null,
@@ -138,6 +153,7 @@ export function MessageComposer({
     attachLabel: t("composer.attachments.attach"),
     onValueChange: onDraftChange,
     onAttachRequest: () => fileInputRef.current?.click(),
+    ...(onMenuStateChange ? { onMenuStateChange } : {}),
     onCommand,
   });
 
@@ -390,24 +406,27 @@ export function MessageComposer({
               </>
             ) : null}
           </div>
-          <Button
-            variant="secondary"
-            size="icon"
-            aria-label={submitButtonLabel}
-            title={`${submitButtonLabel} (${t("composer.shortcuts")})`}
-            className={
-              isResponding
-                ? "size-8 shrink-0 border-accent-secondary-border bg-accent-secondary-soft p-0 text-foreground shadow-none hover:border-accent-secondary-border hover:bg-accent-secondary-soft"
-                : "size-8 shrink-0 border-border bg-surface-soft p-0 text-foreground shadow-none hover:border-border-strong hover:bg-surface-soft-hover"
-            }
-            onClick={isResponding ? handleStop : handleSubmit}
-            disabled={
-              isResponding ? false : !draft.trim() || hasPendingAttachments
-            }
-          >
-            {isResponding ? <SquareIcon size={14} /> : <ArrowUpIcon size={14} />}
-            <span className="sr-only">{submitButtonLabel}</span>
-          </Button>
+          <div className="flex shrink-0 items-center gap-2">
+            {contextUsageControl}
+            <Button
+              variant="secondary"
+              size="icon"
+              aria-label={submitButtonLabel}
+              title={`${submitButtonLabel} (${t("composer.shortcuts")})`}
+              className={
+                isResponding
+                  ? "size-8 shrink-0 border-accent-secondary-border bg-accent-secondary-soft p-0 text-foreground shadow-none hover:border-accent-secondary-border hover:bg-accent-secondary-soft"
+                  : "size-8 shrink-0 border-border bg-surface-soft p-0 text-foreground shadow-none hover:border-border-strong hover:bg-surface-soft-hover"
+              }
+              onClick={isResponding ? handleStop : handleSubmit}
+              disabled={
+                isResponding ? false : !draft.trim() || hasPendingAttachments
+              }
+            >
+              {isResponding ? <SquareIcon size={14} /> : <ArrowUpIcon size={14} />}
+              <span className="sr-only">{submitButtonLabel}</span>
+            </Button>
+          </div>
         </div>
       </div>
       {menu.open ? (

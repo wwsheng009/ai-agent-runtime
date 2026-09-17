@@ -18,34 +18,97 @@ export type RuntimeDeltaCoordinator = {
   beginTurn: (turnId: string) => void;
   endTurn: (turnId?: string) => void;
   isTurnActive: (turnId?: string) => boolean;
-  claim: (key: string) => boolean;
+  /**
+   * 认领一条增量的跨通道身份。
+   *
+   * 多回合（多会话并发）下账目按 `turnId` 分桶：第二个参数缺省时从 key 的
+   * `runtime-delta|<turnId>|...` 结构解析；两条通道都缺身份时落到公共桶
+   * （保持单会话语义：同一 key 只消费一次）。
+   */
+  claim: (key: string, turnId?: string) => boolean;
+  /** 当前在途回合身份快照（诊断/测试可观测面）。 */
+  activeTurnIds: () => string[];
 };
 
+/** 单个回合的去重账目上限（与去单例前的单会话语义一致）。 */
 const MAX_RUNTIME_DELTA_KEYS = 512;
+/** 跨回合账目总上限：并发回合数 × 单回合上限，避免跨会话并发撑爆内存。 */
+const MAX_RUNTIME_DELTA_KEYS_TOTAL = MAX_RUNTIME_DELTA_KEYS * 4;
+
+function normalizeTurnId(turnId?: string): string {
+  return turnId?.trim() ?? "";
+}
+
+/**
+ * 从跨通道去重键解析回合身份（`runtime-delta|turnId|streamId|kind|sequence`）。
+ * 非该结构（旧拼写/无身份 provider）返回空串，落到公共桶。
+ */
+function readTurnIdFromDeltaKey(key: string): string {
+  const parts = key.split("|");
+  if (parts.length < 5 || parts[0] !== "runtime-delta") {
+    return "";
+  }
+  return normalizeTurnId(parts[1]);
+}
 
 export function createRuntimeDeltaCoordinator(): RuntimeDeltaCoordinator {
-  const seenKeys = new Set<string>();
-  let activeTurnId = "";
+  // 多回合键控（Batch 1）：每个回合一份账目，其它回合的 beginTurn/endTurn
+  // 不再清空全局 seenKeys（去单例前 B 的 beginTurn 会清掉 A 的账目）。
+  const seenKeys = new Map<string, string>();
+  const turnKeys = new Map<string, Set<string>>();
+  const activeTurns = new Set<string>();
+
+  const dropKey = (key: string) => {
+    const owner = seenKeys.get(key);
+    if (owner === undefined) {
+      return;
+    }
+    seenKeys.delete(key);
+    const bucket = turnKeys.get(owner);
+    if (bucket) {
+      bucket.delete(key);
+      if (bucket.size === 0) {
+        turnKeys.delete(owner);
+      }
+    }
+  };
 
   return {
     beginTurn(turnId: string) {
-      activeTurnId = turnId.trim();
-      seenKeys.clear();
+      const normalized = normalizeTurnId(turnId);
+      if (!normalized) {
+        return;
+      }
+      activeTurns.add(normalized);
     },
     endTurn(turnId?: string) {
-      const normalized = turnId?.trim() ?? "";
-      if (!normalized || normalized === activeTurnId) {
-        activeTurnId = "";
+      const normalized = normalizeTurnId(turnId);
+      if (!normalized) {
+        // 旧语义的无参 endTurn：结束当前回合身份，但不去动任何回合账目
+        // （调用方只有带 turnId 的路径，这里保留为兼容分支）。
+        activeTurns.clear();
+        return;
+      }
+      activeTurns.delete(normalized);
+      const bucket = turnKeys.get(normalized);
+      if (bucket) {
+        for (const key of bucket) {
+          seenKeys.delete(key);
+        }
+        turnKeys.delete(normalized);
       }
     },
     isTurnActive(turnId?: string) {
-      if (!activeTurnId) {
+      if (activeTurns.size === 0) {
         return false;
       }
-      const normalized = turnId?.trim() ?? "";
-      return !normalized || normalized === activeTurnId;
+      const normalized = normalizeTurnId(turnId);
+      if (!normalized) {
+        return true;
+      }
+      return activeTurns.has(normalized);
     },
-    claim(key: string) {
+    claim(key: string, turnId?: string) {
       const normalized = key.trim();
       if (!normalized) {
         // Legacy providers may not expose identity. Callers can still
@@ -55,15 +118,33 @@ export function createRuntimeDeltaCoordinator(): RuntimeDeltaCoordinator {
       if (seenKeys.has(normalized)) {
         return false;
       }
-      seenKeys.add(normalized);
-      while (seenKeys.size > MAX_RUNTIME_DELTA_KEYS) {
-        const oldest = seenKeys.values().next().value as string | undefined;
+      const owner =
+        normalizeTurnId(turnId) || readTurnIdFromDeltaKey(normalized);
+      seenKeys.set(normalized, owner);
+      let bucket = turnKeys.get(owner);
+      if (!bucket) {
+        bucket = new Set<string>();
+        turnKeys.set(owner, bucket);
+      }
+      bucket.add(normalized);
+      while (bucket.size > MAX_RUNTIME_DELTA_KEYS) {
+        const oldest = bucket.values().next().value as string | undefined;
         if (oldest === undefined) {
           break;
         }
-        seenKeys.delete(oldest);
+        dropKey(oldest);
+      }
+      while (seenKeys.size > MAX_RUNTIME_DELTA_KEYS_TOTAL) {
+        const oldest = seenKeys.keys().next().value as string | undefined;
+        if (oldest === undefined) {
+          break;
+        }
+        dropKey(oldest);
       }
       return true;
+    },
+    activeTurnIds() {
+      return [...activeTurns];
     },
   };
 }

@@ -14,7 +14,7 @@ import {
   resetLiveDiagnostics,
   subscribeLiveDiagnostics,
 } from "./store";
-import { LIVE_FRAME_BUFFER } from "./types";
+import { LIVE_FRAME_BUFFER, LIVE_TRAFFIC_BUFFER } from "./types";
 
 const SESSION = "session-net-1";
 
@@ -179,5 +179,46 @@ describe("live-diagnostics store", () => {
     sink.event("runtime_event", { type: "delta", seq: 3 });
     vi.advanceTimersByTime(LIVE_DIAGNOSTICS_NOTIFY_MS);
     expect(listener).toHaveBeenCalledTimes(2);
+  });
+
+  it("按秒聚合流量桶：秒内累加、跨秒新建", () => {
+    const sink = beginLiveChannel({ channel: "runtime", sessionId: SESSION });
+    sink.bytes(100);
+    sink.bytes(24);
+    vi.setSystemTime(new Date("2026-09-16T12:00:01.000Z"));
+    sink.bytes(7);
+
+    const { runtime } = getLiveDiagnosticsSnapshot(SESSION);
+    expect(runtime.bytes).toBe(131);
+    expect(runtime.traffic).toEqual([
+      { at: Date.parse("2026-09-16T12:00:01.000Z"), bytes: 7 },
+      { at: Date.parse("2026-09-16T12:00:00.000Z"), bytes: 124 },
+    ]);
+  });
+
+  it("流量桶封顶：超出 LIVE_TRAFFIC_BUFFER 后丢弃最旧的一秒", () => {
+    const sink = beginLiveChannel({ channel: "runtime", sessionId: SESSION });
+    const start = Date.parse("2026-09-16T12:00:00.000Z");
+    for (let second = 0; second < LIVE_TRAFFIC_BUFFER + 5; second += 1) {
+      vi.setSystemTime(new Date(start + second * 1_000));
+      sink.bytes(10);
+    }
+
+    const { runtime } = getLiveDiagnosticsSnapshot(SESSION);
+    expect(runtime.traffic).toHaveLength(LIVE_TRAFFIC_BUFFER);
+    expect(runtime.traffic[0]).toEqual({ at: start + 64_000, bytes: 10 });
+    // 起始秒已被挤掉：窗口只保留最近 60 桶。
+    expect(runtime.traffic[runtime.traffic.length - 1].at).toBe(start + 5_000);
+  });
+
+  it("字节流不作废快照引用，但当前秒的桶在原位可见", () => {
+    const sink = beginLiveChannel({ channel: "runtime", sessionId: SESSION });
+    sink.bytes(50);
+    const before = getLiveDiagnosticsSnapshot(SESSION);
+    sink.bytes(25);
+    const after = getLiveDiagnosticsSnapshot(SESSION);
+    // 热路径不通知也不改引用（面板按 1s 节拍读），但桶内数字必须是最新的。
+    expect(after).toBe(before);
+    expect(after.runtime.traffic[0].bytes).toBe(75);
   });
 });

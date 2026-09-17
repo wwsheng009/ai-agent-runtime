@@ -22,6 +22,20 @@ export type LiveFrameSample = {
   bytes: number;
 };
 
+/**
+ * 传输层的每**秒**流量桶（面板「流量波动图」的数据源）。
+ *
+ * 为什么按秒聚合、而不是逐帧留样：读取分片的密度极不均匀——突发时一秒可上千片，
+ * 空闲时十几秒才一个 keepalive。逐片留样在固定长度缓冲下只能覆盖几十毫秒的窗口，
+ * 图形会退化成「右边缘一撮」；按秒聚合后柱高就是该秒的吞吐，突发与静默都看得见。
+ */
+export type LiveTrafficSample = {
+  /** 该秒的起点（epoch ms，已按秒对齐）；数组新→旧。 */
+  at: number;
+  /** 该秒内累计到的字节数（含 keepalive，与 LiveChannelDiagnostics.bytes 同口径）。 */
+  bytes: number;
+};
+
 export type LiveChannelDiagnostics = {
   /** 读取循环是否在场（open→true / finally close→false）。 */
   active: boolean;
@@ -48,6 +62,12 @@ export type LiveChannelDiagnostics = {
   cursor: number | null;
   /** 最近帧（新→旧，长度上限见 LIVE_FRAME_BUFFER）。 */
   frames: readonly LiveFrameSample[];
+  /**
+   * 最近流量桶（新→旧，长度上限见 LIVE_TRAFFIC_BUFFER）。
+   * 正在累计的那一桶（下标 0）会被原地更新，其余桶写入后不再变化——面板据此
+   * 画出「每秒吞吐」的波动图。
+   */
+  traffic: readonly LiveTrafficSample[];
 };
 
 /** 渲染闸门：运行时流只负责传输，「这条增量能不能落到消息上」的判定在接线层。 */
@@ -111,6 +131,9 @@ export type LiveChannelSink = {
 
 /** 最近帧环形缓冲长度：够看清「帧有没有在流」，又不至于让面板自己变成负担。 */
 export const LIVE_FRAME_BUFFER = 40;
+
+/** 流量桶环形缓冲长度：60 桶 × 1s = 面板上「近 60s 流量波动」的窗口。 */
+export const LIVE_TRAFFIC_BUFFER = 60;
 
 /** 面板展示的最近帧条数。 */
 export const LIVE_FRAME_VISIBLE = 6;

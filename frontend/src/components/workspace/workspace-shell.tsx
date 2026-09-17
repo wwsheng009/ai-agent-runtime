@@ -69,6 +69,7 @@ export function WorkspaceShell({
   onRestoreRuntimeSession,
   onForkRuntimeSession,
   onDeleteRuntimeSession,
+  onStopRuntimeSession,
   sessionActivity,
   runtimeClient,
   selectedRuntimeSessionUserId,
@@ -327,6 +328,7 @@ export function WorkspaceShell({
           onMoveRuntimeSession={onMoveRuntimeSession}
           onRenameRuntimeSession={onRenameRuntimeSession}
           onRestoreRuntimeSession={onRestoreRuntimeSession}
+          onStopRuntimeSession={onStopRuntimeSession}
           onRenameWorkspaceDirectory={onRenameWorkspaceDirectory}
           onSelectThread={onSelectThread}
           openSettings={openSettings}

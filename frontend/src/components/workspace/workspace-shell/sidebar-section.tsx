@@ -21,6 +21,7 @@ type WorkspaceSidebarSectionProps = Pick<
   | "onRenameRuntimeSession"
   | "onRenameWorkspaceDirectory"
   | "onRestoreRuntimeSession"
+  | "onStopRuntimeSession"
   | "onSelectThread"
   | "sessionActivity"
   | "runtimeSessionUsers"
@@ -63,6 +64,7 @@ export function WorkspaceSidebarSection({
   onRenameRuntimeSession,
   onRenameWorkspaceDirectory,
   onRestoreRuntimeSession,
+  onStopRuntimeSession,
   onSelectThread,
   sessionActivity,
   runtimeSessionUsers,
@@ -128,6 +130,7 @@ export function WorkspaceSidebarSection({
       onCreateSessionInDirectory={onCreateSessionInDirectory}
       onMoveRuntimeSession={onMoveRuntimeSession}
       onRenameRuntimeSession={onRenameRuntimeSession}
+      onStopRuntimeSession={onStopRuntimeSession}
       threads={threads}
       selectedThreadId={selectedThread.id}
       onSelectThread={(threadId) => {

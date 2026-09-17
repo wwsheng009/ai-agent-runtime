@@ -18,6 +18,8 @@ import { useDirectoryRegistry } from "@/components/workspace/workspace-sidebar/u
 import { WorkspaceSidebarRuntimeSection } from "@/components/workspace/workspace-sidebar/runtime-section";
 import { WorkspaceSidebarRuntimeTeamsSurface } from "@/components/workspace/workspace-sidebar/runtime-teams-surface";
 import { useSidebarEffects } from "@/components/workspace/workspace-sidebar/use-sidebar-effects";
+import { SessionAttentionBar } from "@/components/workspace/workspace-sidebar/session-attention-bar";
+import { collectAttentionSessionIds } from "@/components/workspace/workspace-sidebar/session-attention";
 import { splitRuntimeSessionsByVisibility } from "@/components/workspace/workspace-sidebar/session-row-status";
 import {
   type SidebarSectionId,
@@ -59,6 +61,7 @@ export function WorkspaceSidebar({
   onRestoreRuntimeSession,
   onForkRuntimeSession,
   onDeleteRuntimeSession,
+  onStopRuntimeSession,
   sessionActivity,
   threads,
   selectedThreadId,
@@ -180,6 +183,26 @@ export function WorkspaceSidebar({
     return byId;
   }, [sessionThreads]);
 
+  // Batch 3（§4.7.2）：待办聚合入口——「哪个会话在等我」。选中会话不参与：
+  // 它的审批 / 提问已经在前台 composer 上直接呈现，聚合入口只做跨会话提醒。
+  const attentionSessionIds = useMemo(
+    () =>
+      collectAttentionSessionIds(sessionActivity).filter((sessionId) => {
+        const thread = sessionThreadById.get(sessionId);
+        return thread ? thread.id !== selectedThreadId : true;
+      }),
+    [sessionActivity, sessionThreadById, selectedThreadId],
+  );
+  const attentionTargetThreadId = useMemo(() => {
+    for (const sessionId of attentionSessionIds) {
+      const thread = sessionThreadById.get(sessionId);
+      if (thread) {
+        return thread.id;
+      }
+    }
+    return null;
+  }, [attentionSessionIds, sessionThreadById]);
+
   // P2-1A：会话统计（`GET /sessions/stats`）与侧栏用户筛选同口径（同一 userId）。
   const sessionStats = useSessionStats(selectedRuntimeSessionUserId);
 
@@ -295,6 +318,24 @@ export function WorkspaceSidebar({
             t={t}
           />
 
+      {attentionSessionIds.length > 0 ? (
+        <div
+          className={cn(
+            "border-b border-border",
+            isCompact ? "px-2.5 py-2" : "px-3 py-2",
+          )}
+        >
+          <SessionAttentionBar
+            onOpenSession={
+              attentionTargetThreadId
+                ? () => onSelectThread(attentionTargetThreadId)
+                : undefined
+            }
+            sessionIds={attentionSessionIds}
+          />
+        </div>
+      ) : null}
+
       <div
         className={cn(
           "min-h-0 flex-1 overflow-y-auto",
@@ -338,6 +379,7 @@ export function WorkspaceSidebar({
               onSelectSessionGroupingMode={setSessionGroupingMode}
               onSelectSessionOrderMode={setSessionOrderMode}
               onSelectThread={onSelectThread}
+              onStopSession={onStopRuntimeSession}
               onToggleArchivedSessions={() =>
                 setShowArchivedSessions((current) => !current)
               }

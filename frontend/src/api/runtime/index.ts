@@ -116,6 +116,19 @@ export {
 } from "./sessions";
 export { branchRuntimeSession } from "./session-branch";
 export {
+  compactSessionContext,
+  normalizeSessionCompactOutcome,
+  normalizeSessionCompactResult,
+  normalizeSessionCompactStatus,
+  resolveSessionCompactMode,
+  SESSION_COMPACT_MODES,
+  type CompactSessionOptions,
+  type SessionCompactMode,
+  type SessionCompactOutcome,
+  type SessionCompactResult,
+  type SessionCompactStatus,
+} from "./session-compact";
+export {
   createWorkspaceDirectory,
   deleteWorkspaceDirectory,
   listWorkspaceDirectories,

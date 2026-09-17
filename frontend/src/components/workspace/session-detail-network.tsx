@@ -13,10 +13,17 @@
 // 观测本身必须廉价：store 侧合并通知（≤4 次/秒），本组件只按 1s tick 重渲染，
 // 不会给正在排查的流式链路增加负载。
 
-import { ActivityIcon } from "lucide-react";
+import { ActivityIcon, ChevronDownIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import {
+  SESSION_DETAIL_CARD_CLASS,
+  SESSION_DETAIL_CHIP_CLASS,
+  SESSION_DETAIL_SECTION_LABEL_CLASS,
+  SESSION_DETAIL_SUBCARD_CLASS,
+} from "@/components/workspace/session-detail-panel-shared";
+import { LiveTrafficChart } from "@/components/workspace/live-traffic-chart";
 import {
   formatLiveAge,
   formatLiveBytes,
@@ -24,13 +31,16 @@ import {
   formatLiveFrameLabel,
   resolveFrameGapStats,
   resolveLiveNetworkVerdict,
+  resolveTrafficSeries,
 } from "@/lib/live-diagnostics/derive";
 import { LIVE_FRAME_VISIBLE } from "@/lib/live-diagnostics/types";
 import { type LiveChannelDiagnostics } from "@/lib/live-diagnostics/types";
+import { summarizeSessionRuntimeEntries } from "@/lib/session-runtime/diagnostics";
 import {
   useLiveDiagnostics,
   useMessageListDomObserver,
 } from "@/hooks/workspace/use-live-diagnostics";
+import { useSessionRuntimeEntries } from "@/hooks/workspace/use-session-runtime-registry";
 import { cn } from "@/lib/utils";
 
 /** 面板自身的刷新节拍：观测的是秒级链路，1s 足够，也不与流式渲染抢主线程。 */
@@ -49,9 +59,7 @@ function StatGrid({
     <dl className="grid grid-cols-2 gap-x-2 gap-y-1" data-testid={testId}>
       {stats.map((stat) => (
         <div className="min-w-0" key={stat.key}>
-          <dt className="app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
-            {stat.label}
-          </dt>
+          <dt className={SESSION_DETAIL_SECTION_LABEL_CLASS}>{stat.label}</dt>
           <dd
             className="truncate font-mono text-xs text-foreground"
             title={stat.hint ?? stat.value}
@@ -133,17 +141,15 @@ function ChannelBlock({
   const stateKey = channel.active ? "active" : "inactive";
   return (
     <div
-      className="grid gap-1 rounded-card border border-border bg-surface-soft px-2 py-1.5"
+      className={cn(SESSION_DETAIL_SUBCARD_CLASS, "grid gap-1")}
       data-active={channel.active ? "true" : "false"}
       data-testid={testId}
     >
       <div className="flex items-center justify-between gap-2">
-        <span className="app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
-          {title}
-        </span>
+        <span className={SESSION_DETAIL_SECTION_LABEL_CLASS}>{title}</span>
         <span
           className={cn(
-            "shrink-0 rounded-full border px-1.5 py-0.5 app-text-10 tracking-[0.08em]",
+            SESSION_DETAIL_CHIP_CLASS,
             channel.active
               ? "border-connection-online-border bg-connection-online-soft text-connection-online"
               : "border-border bg-surface-softer text-muted-foreground",
@@ -152,6 +158,25 @@ function ChannelBlock({
           {translate(`panels.sessionDetail.network.state.${stateKey}`)}
         </span>
       </div>
+      {/* 波动图放在计数网格之上：先看形态（还在不在推、是持续还是突刺），
+          再看数字。窗口取 60s，与 store 的 LIVE_TRAFFIC_BUFFER 一致。 */}
+      <LiveTrafficChart
+        currentLabel={translate(
+          "panels.sessionDetail.network.traffic.currentSecond",
+        )}
+        emptyLabel={translate("panels.sessionDetail.network.traffic.empty")}
+        peakLabel={translate("panels.sessionDetail.network.traffic.peak")}
+        series={resolveTrafficSeries(channel.traffic, now)}
+        testId={`${testId}-traffic`}
+        title={translate("panels.sessionDetail.network.traffic.title")}
+        totalLabel={translate("panels.sessionDetail.network.traffic.total")}
+        windowNowLabel={translate(
+          "panels.sessionDetail.network.traffic.windowNow",
+        )}
+        windowStartLabel={translate(
+          "panels.sessionDetail.network.traffic.windowStart",
+        )}
+      />
       <StatGrid
         stats={buildChannelStats(channel, translate, now)}
         testId={`${testId}-stats`}
@@ -239,29 +264,88 @@ export function SessionDetailNetworkSection({ sessionId }: { sessionId: string }
       value: formatLiveAge(now, dom.lastChangeAt) ?? field("never"),
     },
   ];
+  // Batch 4（§4.6）：多会话订阅观测。注册表关闭时 `useSessionRuntimeEntries`
+  // 返回空集合（且不订阅），区块整体不渲染——默认形态与旧行为一致。
+  const runtimeEntries = useSessionRuntimeEntries();
+  // 可见性直接读 document：本组件按 1s tick 重渲染，读数天然新鲜，无需额外监听。
+  const pageHidden =
+    typeof document !== "undefined" ? document.hidden : false;
+  const subscriptions = summarizeSessionRuntimeEntries(runtimeEntries, {
+    sessionId,
+    pageHidden,
+  });
+  const subscriptionLabel = (key: string) =>
+    translate(`panels.sessionDetail.network.subscriptions.${key}`);
+  const sessionModeLabel =
+    subscriptions.sessionMode === null
+      ? subscriptionLabel("none")
+      : subscriptionLabel(subscriptions.sessionMode);
+  const subscriptionStats = [
+    {
+      key: "live",
+      label: subscriptionLabel("live"),
+      value: String(subscriptions.live),
+      hint: `${subscriptionLabel("budget")}: ${subscriptions.foregroundBudget}+${subscriptions.backgroundBudget}`,
+    },
+    {
+      key: "poll",
+      label: subscriptionLabel("poll"),
+      value: String(subscriptions.poll),
+    },
+    {
+      key: "total",
+      label: subscriptionLabel("total"),
+      value: String(subscriptions.total),
+    },
+    {
+      key: "session",
+      label: subscriptionLabel("session"),
+      value: sessionModeLabel,
+    },
+    {
+      key: "visibility",
+      label: subscriptionLabel("visibility"),
+      value: subscriptionLabel(
+        pageHidden ? "background" : "foreground",
+      ),
+      hint: `${subscriptions.foregroundBudget}+${subscriptions.backgroundBudget}`,
+    },
+  ];
   const frames = snapshot.runtime.frames.slice(0, LIVE_FRAME_VISIBLE);
 
   return (
-    <div
-      className="grid gap-1.5 rounded-card border border-border bg-surface-softer px-2.5 py-2"
+    // 默认收起：字段卡补上后，展开态（实测 704px）会把这个观测块推到首屏之外，
+    // 「就地可读」不再成立，却让面板多出一屏滚动。收起后判读徽标 + tooltip 仍常驻
+    // 在摘要行（异常同样一眼可见），要数字时再展开，明细不再长期占高。
+    <details
+      className={cn(SESSION_DETAIL_CARD_CLASS, "group grid gap-1.5")}
       data-testid="session-detail-network"
     >
-      <div className="flex items-center justify-between gap-2">
-        <span className="flex items-center gap-1 app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-2 [&::-webkit-details-marker]:hidden">
+        <span
+          className={cn(
+            SESSION_DETAIL_SECTION_LABEL_CLASS,
+            "flex min-w-0 items-center gap-1",
+          )}
+        >
           <ActivityIcon aria-hidden="true" size={11} />
           {translate("panels.sessionDetail.network.title")}
         </span>
-        <span
-          className={cn(
-            "shrink-0 rounded-full border px-1.5 py-0.5 app-text-10 tracking-[0.08em]",
-            verdict.className,
-          )}
-          data-testid="session-detail-network-verdict"
-          title={translate(verdict.hintKey)}
-        >
-          {translate(verdict.labelKey)}
+        <span className="flex shrink-0 items-center gap-1">
+          <span
+            className={cn(SESSION_DETAIL_CHIP_CLASS, verdict.className)}
+            data-testid="session-detail-network-verdict"
+            title={translate(verdict.hintKey)}
+          >
+            {translate(verdict.labelKey)}
+          </span>
+          <ChevronDownIcon
+            aria-hidden="true"
+            className="text-muted-foreground transition-transform group-open:rotate-180"
+            size={12}
+          />
         </span>
-      </div>
+      </summary>
 
       <p className="text-xs leading-5 text-muted-foreground">
         {translate(verdict.hintKey)}
@@ -282,16 +366,39 @@ export function SessionDetailNetworkSection({ sessionId }: { sessionId: string }
         translate={translate}
       />
 
-      <StatGrid stats={gateStats} testId="session-detail-network-gate" />
+      <div className={cn(SESSION_DETAIL_SUBCARD_CLASS, "grid gap-1")}>
+        <StatGrid stats={gateStats} testId="session-detail-network-gate" />
+      </div>
 
-      <div className="grid gap-0.5">
-        <span className="app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
-          {translate("panels.sessionDetail.network.dom.title")}
-        </span>
+      {/* 多会话订阅：只有注册表真正有条目（开关打开且页面已 ensure）时才出现，
+          避免在单会话旧形态下多出一块永远为 0 的装饰。 */}
+      {runtimeEntries.length > 0 ? (
+        <div
+          className={cn(SESSION_DETAIL_SUBCARD_CLASS, "grid gap-1")}
+          data-testid="session-detail-network-subscriptions"
+        >
+          <span className={SESSION_DETAIL_SECTION_LABEL_CLASS}>
+            {subscriptionLabel("title")}
+          </span>
+          <StatGrid
+            stats={subscriptionStats}
+            testId="session-detail-network-subscriptions-stats"
+          />
+        </div>
+      ) : null}
+
+      <div className={cn(SESSION_DETAIL_SUBCARD_CLASS, "grid gap-1")}>
         <div className="flex items-center justify-between gap-2">
-          <StatGrid stats={domStats} testId="session-detail-network-dom" />
+          <span className={SESSION_DETAIL_SECTION_LABEL_CLASS}>
+            {translate("panels.sessionDetail.network.dom.title")}
+          </span>
           <span
-            className="shrink-0 self-start app-text-10 text-muted-foreground"
+            className={cn(
+              SESSION_DETAIL_CHIP_CLASS,
+              dom.observing
+                ? "border-connection-online-border bg-connection-online-soft text-connection-online"
+                : "border-border bg-surface-softer text-muted-foreground",
+            )}
             data-testid="session-detail-network-dom-status"
           >
             {translate(
@@ -301,10 +408,14 @@ export function SessionDetailNetworkSection({ sessionId }: { sessionId: string }
             )}
           </span>
         </div>
+        <StatGrid stats={domStats} testId="session-detail-network-dom" />
       </div>
 
-      <div className="grid gap-0.5" data-testid="session-detail-network-frames">
-        <span className="app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
+      <div
+        className={cn(SESSION_DETAIL_SUBCARD_CLASS, "grid gap-1")}
+        data-testid="session-detail-network-frames"
+      >
+        <span className={SESSION_DETAIL_SECTION_LABEL_CLASS}>
           {translate("panels.sessionDetail.network.frames.title")}
         </span>
         {frames.length === 0 ? (
@@ -332,6 +443,6 @@ export function SessionDetailNetworkSection({ sessionId }: { sessionId: string }
           ))
         )}
       </div>
-    </div>
+    </details>
   );
 }

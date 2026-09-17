@@ -52,6 +52,14 @@ export const zhWorkspacePanelsSessionDetail = {
     tags: "标签",
     summary: "摘要",
   },
+  // 字段分区标题：14 行元数据按「基本信息 / 时间 / 运行 / 内容」分段，
+  // 同一张卡片内用小标题 + 细分隔线切分，避免平铺成一长条难以定位。
+  sections: {
+    basic: "基本信息",
+    timing: "时间",
+    runtime: "运行",
+    content: "内容",
+  },
   // 「网络详情」：SSE live 的实时观测块（传输层字节/帧 + 渲染闸门计数）。
   // 目的是把「页面不动」拆成两个可判定的结论：SSE 没有事件（服务端/网络），
   // 还是事件到了但没渲染（前端闸门/提交）。
@@ -90,6 +98,21 @@ export const zhWorkspacePanelsSessionDetail = {
       turn: "在途回合",
       none: "无",
     },
+    // 会话订阅（Batch 4 §4.6）：注册表观测投影——本窗口有几条 live / 几条已降级
+    // 轮询、页面是否触发后台降采样、live 预算多少。开关关闭时区块不渲染。
+    subscriptions: {
+      title: "会话订阅",
+      live: "实时",
+      poll: "轮询",
+      idle: "空闲",
+      none: "未订阅",
+      total: "订阅数",
+      session: "本会话",
+      visibility: "页面可见性",
+      foreground: "前台",
+      background: "后台降采样",
+      budget: "live 预算",
+    },
     dom: {
       title: "DOM 活跃度",
       changes: "变更",
@@ -101,6 +124,17 @@ export const zhWorkspacePanelsSessionDetail = {
       title: "最近帧",
       empty: "尚未收到任何帧",
       keepalive: "保活",
+    },
+    // 流量波动图：每秒吞吐（bytes/s）的迷你柱状图。
+    // 计数网格回答「收过多少」，它回答「现在还收不收、是持续还是突刺」。
+    traffic: {
+      title: "近 60s 流量",
+      empty: "近 60s 没有流量",
+      peak: "峰值",
+      total: "合计",
+      currentSecond: "当前秒（进行中）",
+      windowStart: "60s 前",
+      windowNow: "现在",
     },
     verdict: {
       states: {

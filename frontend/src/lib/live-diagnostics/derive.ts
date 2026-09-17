@@ -1,7 +1,11 @@
 // 「网络详情」的纯派生口径：诊断结论、时间/体积格式化、帧间隔抖动。
 // 与组件分离的原因同 session-detail-panel-shared：可单测、无 IO、无 React。
 
-import { type LiveChannelDiagnostics, type LiveFrameSample } from "./types";
+import {
+  type LiveChannelDiagnostics,
+  type LiveFrameSample,
+  type LiveTrafficSample,
+} from "./types";
 
 /** 帧新鲜窗口：窗口内收到过任何字节即视为「通道在推数据」。 */
 export const LIVE_FRAME_FRESH_MS = 5_000;
@@ -180,4 +184,73 @@ export function resolveFrameGapStats(
 /** 帧的短标签：事件名 + 可选 seq；面板用它做「最近帧」列表。 */
 export function formatLiveFrameLabel(frame: LiveFrameSample): string {
   return frame.seq === null ? frame.name : `${frame.name} #${frame.seq}`;
+}
+
+/** 波动图窗口：60s × 1s 一桶，与 store 的 LIVE_TRAFFIC_BUFFER 对齐。 */
+export const LIVE_TRAFFIC_WINDOW_MS = 60_000;
+
+/** 波动图的一个槽位：`at` 是这一秒的起点，`bytes` 是该秒收到的字节数。 */
+export type LiveTrafficBucket = {
+  at: number;
+  bytes: number;
+};
+
+export type LiveTrafficSeries = {
+  /** 旧→新、定长：柱子从窗口左端排到右端，缺口就是「那一秒没有流量」。 */
+  buckets: LiveTrafficBucket[];
+  /** 单桶峰值（buckets 以 1s 为单位，即每秒字节峰值）；无流量时为 0。 */
+  max: number;
+  /** 窗口内累计字节。 */
+  total: number;
+  /** 窗口内有流量的秒数：区分「一直在推」与「只有几秒在推」。 */
+  activeSeconds: number;
+};
+
+/**
+ * 把 store 的流量桶摊进**定长窗口**：这是波动图的可读性来源——柱子按时间槽位
+ * 对齐，突发是并排的高柱，静默是中间的空缺；若按样本顺序排（不看时间），
+ * 「空了 30 秒」和「推了 3 帧」会画成同一个形状。
+ *
+ * 窗口外的桶一律丢弃：宁可少画，也不把数据挪到错误的时间点上。
+ */
+export function resolveTrafficSeries(
+  traffic: readonly LiveTrafficSample[],
+  now: number,
+  windowMs: number = LIVE_TRAFFIC_WINDOW_MS,
+): LiveTrafficSeries {
+  const bucketMs = 1_000;
+  const bucketCount = Math.max(1, Math.round(windowMs / bucketMs));
+  const currentStart = Math.floor(now / bucketMs) * bucketMs;
+  const buckets: LiveTrafficBucket[] = [];
+  for (let index = 0; index < bucketCount; index += 1) {
+    // 最右槽位 = 当前秒；其余按秒回推，保证图形每秒整体左移一格。
+    buckets.push({ at: currentStart - (bucketCount - 1 - index) * bucketMs, bytes: 0 });
+  }
+
+  let total = 0;
+  let max = 0;
+  for (const sample of traffic) {
+    if (sample.bytes <= 0) {
+      continue;
+    }
+    // 时钟极小的偏移（面板 tick 早于写入时刻）不该把当前桶挤出窗口。
+    const age = Math.max(0, now - sample.at);
+    const slot = bucketCount - 1 - Math.floor(age / bucketMs);
+    if (slot < 0 || slot >= bucketCount) {
+      continue;
+    }
+    buckets[slot].bytes += sample.bytes;
+    total += sample.bytes;
+    max = Math.max(max, buckets[slot].bytes);
+  }
+
+  return {
+    buckets,
+    max,
+    total,
+    activeSeconds: buckets.reduce(
+      (count, bucket) => (bucket.bytes > 0 ? count + 1 : count),
+      0,
+    ),
+  };
 }

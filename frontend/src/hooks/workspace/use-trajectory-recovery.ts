@@ -2,7 +2,8 @@
  * 轨迹恢复（P3-1 事件重放 + P4 历史兜底）：会话选中/页面刷新后
  * 从 EventStore 增量拉取事件并按 seq 重放进轨迹 reducer。
  *
- * - 触发：sessionId 变化（挂载/线程切换，workspace-page 已同步 reset）；
+ * - 触发：sessionId 变化（挂载/线程切换）；store 由页面级池按会话持有
+ *   （Batch 1：切换不 reset，切回走 `lastEventSeq` 增量补齐而非整段重放）；
  * - 分页：after = 已收最大 seq（后端 ListEvents 注入 payload.seq）；
  * - 幂等：reducer 乱序缓冲 + 稳定 ID upsert 保证与实时流并发安全；
  * - 失败可见：下拉失败时通过 onError 上报 UI（thread lastError banner），
@@ -369,7 +370,7 @@ export function useTrajectoryRecovery({
         beforeSeq: current.firstSeq,
         limit: TRAJECTORY_EARLIER_PAGE_EVENTS,
       });
-      // 会话在请求期间被切走：丢弃这一页（store 已被新会话 reset）。
+      // 会话在请求期间被切走：丢弃这一页（窗口游标已属于别的会话）。
       if (windowRef.current?.sessionId !== targetSession) {
         return;
       }

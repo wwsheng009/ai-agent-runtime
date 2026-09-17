@@ -1,7 +1,7 @@
 // P1-4 子片 3：Composer 触发菜单的 owner hook。
 // 三入口同源：`/`（命令）、`@`（引用）、`+` 按钮（全部）共用同一份菜单模型与派发路径。
 
-import { useCallback, useMemo, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 
 import {
   classifyComposerSubmit,
@@ -46,12 +46,24 @@ export type UseComposerMenuOptions = {
   attachLabel: string;
   onValueChange: (next: string, caret: number) => void;
   onAttachRequest: () => void;
+  /**
+   * 菜单可见状态回调：宿主据此决定是否拉取 `@` 引用候选数据
+   * （菜单关闭/未打开时不得触发网络请求）。用 effect 收敛，避免渲染期调 setState。
+   */
+  onMenuStateChange?: (state: ComposerMenuState) => void;
   /** 返回 true 表示命令已被处理；否则给出「暂未接入执行器」提示，绝不降级为 prompt。 */
   onCommand?: (
     command: ComposerCommand,
     args: string,
     source: "pick" | "submit",
   ) => boolean | void;
+};
+
+export type ComposerMenuState = {
+  open: boolean;
+  mode: ComposerMenuMode;
+  /** `@` 后的查询串（manual/命令模式为空串）。 */
+  query: string;
 };
 
 export type ComposerMenuController = {
@@ -111,6 +123,7 @@ export function useComposerMenu({
   attachLabel,
   onValueChange,
   onAttachRequest,
+  onMenuStateChange,
   onCommand,
 }: UseComposerMenuOptions): ComposerMenuController {
   const [state, setState] = useState<MenuState>(INITIAL_MENU_STATE);
@@ -173,6 +186,15 @@ export function useComposerMenu({
   const activeId = open ? clampComposerMenuActive(snapshot.items, state.activeId) : null;
   const activeDescendantId = activeId ? composerMenuItemDomId(activeId) : null;
   const commandLine = parseComposerCommandLine(value) !== null;
+
+  // 回调身份变化不触发重放（宿主可传内联箭头函数）；只有「打开态/模式/查询」变化才回调。
+  const onMenuStateChangeRef = useRef(onMenuStateChange);
+  useEffect(() => {
+    onMenuStateChangeRef.current = onMenuStateChange;
+  });
+  useEffect(() => {
+    onMenuStateChangeRef.current?.({ open, mode, query });
+  }, [open, mode, query]);
 
   const close = useCallback(() => {
     setState((previous) => ({
@@ -352,6 +374,12 @@ export function useComposerMenu({
               ? { kind: "incomplete-command" }
               : { kind: "unknown-command", name: query },
           );
+          return true;
+        }
+        // `@` 引用同语义：候选为空（加载中/无命中/失败）时不得把半截 token 当普通消息发出；
+        // 用户可先 Esc 关闭菜单再提交（此时 open=false，不进本分支）。
+        if (state.trigger?.kind === "reference") {
+          event.preventDefault();
           return true;
         }
         return false;

@@ -7,6 +7,26 @@ import {
 } from "@/components/workspace/workspace-shell-shared";
 import { type RuntimeSessionRecord } from "@/types/runtime";
 
+// 「会话详情」的容器/文字配方集中在此，供面级布局与网络观测块共用一套：
+// 三档容器（面板卡片 → 子卡片 → 徽标）+ 两档小标题，避免同一条侧栏里出现
+// 多种内边距/圆角/字号各自为政。
+
+/** 面板级卡片：面的直接子块（关联状态、字段、网络详情、状态卡）。 */
+export const SESSION_DETAIL_CARD_CLASS =
+  "rounded-card border border-border bg-surface-softer px-2.5 py-2";
+
+/** 卡片内子块（通道 / 闸门 / DOM / 帧列表）：比面板卡片低一档底色。 */
+export const SESSION_DETAIL_SUBCARD_CLASS =
+  "rounded-card border border-border bg-surface-soft px-2 py-1.5";
+
+/** 小标题：10px 大写 + 字距，章节标题与两列标签共用。 */
+export const SESSION_DETAIL_SECTION_LABEL_CLASS =
+  "app-text-10 uppercase tracking-[0.12em] text-muted-foreground";
+
+/** 状态徽标基底：底色/描边/文字色由各状态表（状态/关联/传输/判读）追加。 */
+export const SESSION_DETAIL_CHIP_CLASS =
+  "inline-flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-0.5 app-text-10 tracking-[0.08em]";
+
 export type SessionDetailStateDisplay = {
   /** 徽标配色；状态文案由组件翻译，本模块不持有自然语言。 */
   className: string;

@@ -25,6 +25,14 @@ export type WorkspaceDirectoryCreateRequest = {
   label: string;
 };
 
+/** 移除目录的确认目标（由接线层的删除确认弹窗消费）。 */
+export type SidebarDirectoryDeleteTarget = {
+  id: string;
+  label: string;
+  fullPath: string;
+  sessionCount: number;
+};
+
 export type WorkspaceSidebarProps = {
   density: "comfortable" | "compact";
   /** 桌面（xl+）侧栏收起为「只显示图标的列」；移动抽屉始终按展开态渲染。 */
@@ -80,6 +88,11 @@ export type WorkspaceSidebarProps = {
   ) => Promise<void> | void;
   /** P1-9 非破坏删除：仅移除会话记录，不连带目录与磁盘数据。 */
   onDeleteRuntimeSession?: (sessionId: string) => Promise<void> | void;
+  /**
+   * §4.8 后台会话停止：按会话投递 `interrupt`（不需要本地 controller）。
+   * 缺省时行内操作菜单不渲染「停止运行」项。
+   */
+  onStopRuntimeSession?: (sessionId: string) => Promise<void> | void;
   /** P1-9 本地已知的会话活动（等待类最醒目）；键为 sessionId。 */
   sessionActivity?: Record<string, SidebarSessionActivity>;
   threads: Thread[];

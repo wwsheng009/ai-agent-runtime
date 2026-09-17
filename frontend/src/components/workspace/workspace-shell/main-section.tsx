@@ -1,18 +1,9 @@
 // 由 components/workspace/workspace-shell.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
-import {
-  type CSSProperties,
-  type Dispatch,
-  type RefObject,
-  type SetStateAction,
-  Suspense,
-  useMemo,
-  useState,
-} from "react";
-import { type TFunction } from "i18next";
-import { ArrowUpRightIcon, BotIcon, type LucideIcon } from "lucide-react";
+import { Suspense, useCallback, useMemo, useState } from "react";
 
 import { MessageComposer } from "@/components/workspace/message-composer";
+import { ComposerContextUsageControl } from "@/components/workspace/composer-context-usage-control";
 import { ComposerPermissionModeControl } from "@/components/workspace/composer-permission-mode-control";
 import { MessageList } from "@/components/workspace/message-list";
 import { PendingInteractionBar } from "@/components/workspace/pending-interaction-bar";
@@ -21,105 +12,24 @@ import { ComposerModelDialog } from "@/components/workspace/composer-model-dialo
 import { JobsPanel } from "@/components/workspace/jobs-panel";
 import { SessionAgentsPanel } from "@/components/workspace/session-agents-panel";
 import { agentDisplayName } from "@/components/workspace/session-agents-panel-shared";
-import { type SettingsSectionId } from "@/components/workspace/settings";
 import { FilePreviewDialog } from "@/components/workspace/file-preview-dialog";
 import {
   TrajectoryView,
   WorkspaceSkillsSurface,
 } from "@/components/workspace/workspace-shell/lazy-surfaces";
-import {
-  type WorkspaceShellProps,
-  type WorkspaceViewMode,
-} from "@/components/workspace/workspace-shell/types";
+import { type WorkspaceMainSectionProps } from "@/components/workspace/workspace-shell/main-section-props";
+import { NewThreadPlaceholder } from "@/components/workspace/workspace-shell/new-thread-placeholder";
 import { WorkspaceViewTabBar } from "@/components/workspace/workspace-shell/view-tab-bar";
 import { WorkspaceShellTopbar } from "@/components/workspace/workspace-shell-topbar";
-import { type WorkspaceDensity } from "@/core/settings";
 import { useFilePreview } from "@/hooks/workspace/use-file-preview";
 import { useBackgroundJobs } from "@/hooks/workspace/use-background-jobs";
+import { useComposerFileReferences } from "@/hooks/workspace/composer/use-composer-file-references";
+import { type ComposerMenuState } from "@/hooks/workspace/composer/use-composer-menu";
 import { useComposerCommandSurface } from "@/hooks/workspace/composer/use-composer-command-surface";
 import { useSessionAgents } from "@/hooks/use-session-agents";
 import { type ComposerReferenceGroup } from "@/lib/composer-menu";
 import { artifactReferenceGroup } from "@/lib/composer-references";
 import { cn } from "@/lib/utils";
-
-type WorkspaceMainSectionProps = Pick<
-  WorkspaceShellProps,
-  | "backtrackError"
-  | "backtrackNavigationActive"
-  | "backtrackNotice"
-  | "backtrackPendingMessageId"
-  | "backtrackSelectedMessageId"
-  | "branchError"
-  | "branchPendingMessageId"
-  | "canBacktrack"
-  | "composerAttachments"
-  | "connectionStatus"
-  | "draft"
-  | "earlierLoader"
-  | "isResponding"
-  | "modelOptions"
-  | "onAnswerPendingQuestion"
-  | "onBacktrackToMessage"
-  | "onBranchFromMessage"
-  | "onDraftChange"
-  | "onModelChange"
-  | "onProviderChange"
-  | "onReasoningEffortChange"
-  | "onRenameRuntimeSession"
-  | "onResolvePendingApproval"
-  | "onRefreshSession"
-  | "onRetryConnection"
-  | "onPlanDecision"
-  | "onPlanNotesChange"
-  | "onSelectBacktrackNavigationMessage"
-  | "onStopResponding"
-  | "onSubmit"
-  | "pendingInteraction"
-  | "phase"
-  | "planActionPending"
-  | "planNotesDraft"
-  | "providerOptions"
-  | "reasoningEffortDefault"
-  | "reasoningEffortError"
-  | "reasoningEffortOptions"
-  | "runtimeModels"
-  | "runtimeModelsError"
-  | "runtimeModelsLoading"
-  | "selectedModel"
-  | "selectedProvider"
-  | "selectedReasoningEffort"
-  | "selectedThread"
-  | "sessionRefreshing"
-  | "streamStalled"
-  | "trajectoryStore"
-  | "trajectoryEarlier"
-> & {
-  composerOverlayHeight: number;
-  composerOverlayRef: RefObject<HTMLDivElement | null>;
-  density: WorkspaceDensity;
-  handleOpenArtifact: (artifactId: string) => void;
-  isCompact: boolean;
-  isNewThread: boolean;
-  liveTeamCount: number;
-  messageListStyle: CSSProperties | undefined;
-  newThreadSuggestions: {
-    key: string;
-    icon: LucideIcon;
-    title: string;
-    description: string;
-    prompt: string;
-  }[];
-  openSettings: (section?: SettingsSectionId) => void;
-  onToggleRightRail: () => void;
-  rightRailOpen: boolean;
-  setMobileSidebarOpen: Dispatch<SetStateAction<boolean>>;
-  setViewMode: Dispatch<SetStateAction<WorkspaceViewMode>>;
-  t: TFunction<"workspace">;
-  threadStatusLabel: string;
-  threadSubtitle: string;
-  transportLabel: string;
-  viewMode: WorkspaceViewMode;
-};
 
 export function WorkspaceMainSection({
   backtrackError,
@@ -191,14 +101,48 @@ export function WorkspaceMainSection({
   transportLabel,
   viewMode,
 }: WorkspaceMainSectionProps) {
-  // P1-4 子片 3：`@` 引用候选（当前线程交付物；会话/子代理分组待数据源就绪）。
+  // P0：`@` 引用候选 = 工作区文件（fs/roots 解析作用域 + fs/list 首屏小批量）+ 线程交付物兜底。
+  // 菜单查询串只在 useComposerMenu 内部持有，这里通过 onMenuStateChange 回调同步出来。
+  const [composerMenuState, setComposerMenuState] = useState<ComposerMenuState>({
+    open: false,
+    mode: "references",
+    query: "",
+  });
+  const handleComposerMenuStateChange = useCallback((next: ComposerMenuState) => {
+    setComposerMenuState((previous) =>
+      previous.open === next.open && previous.mode === next.mode && previous.query === next.query
+        ? previous
+        : next,
+    );
+  }, []);
+  const fileReferences = useComposerFileReferences({
+    sessionId: selectedThread.sessionId,
+    query: composerMenuState.query,
+    enabled: composerMenuState.open && composerMenuState.mode === "references",
+    labels: {
+      group: t("composer.references.workspaceFiles"),
+      loading: t("composer.references.workspaceFilesLoading"),
+      empty: t("composer.references.workspaceFilesEmpty"),
+      error: t("composer.references.workspaceFilesError"),
+      truncated: t("composer.references.workspaceFilesTruncated"),
+    },
+  });
+
+  // P1-4 子片 3：`@` 引用候选分组（工作区文件在前，线程交付物在后兜底）。
   const composerReferenceGroups = useMemo<ComposerReferenceGroup[]>(() => {
+    const groups: ComposerReferenceGroup[] = [];
+    if (fileReferences.group) {
+      groups.push(fileReferences.group);
+    }
     const files = artifactReferenceGroup(
       selectedThread.artifacts,
       t("composer.references.files"),
     );
-    return files ? [files] : [];
-  }, [selectedThread.artifacts, t]);
+    if (files) {
+      groups.push(files);
+    }
+    return groups;
+  }, [fileReferences.group, selectedThread.artifacts, t]);
 
   // P2-1A / P2-9：后台任务（Jobs）——shell owner 单例加载一次，
   // 顶栏常驻状态条与弹层共用同一份数据（计数天然一致，不做第二次拉取）。
@@ -366,46 +310,11 @@ export function WorkspaceMainSection({
               )}
             </div>
           ) : (
-            <div className="mx-auto flex w-full max-w-[46rem] flex-1 flex-col justify-center pb-4">
-              <div className="text-center">
-                <div className="mx-auto grid size-11 place-items-center rounded-[1rem] border border-accent-primary-border bg-accent-primary-soft text-accent-primary shadow-[0_8px_24px_var(--accent-primary-shadow)]">
-                  <BotIcon size={20} />
-                </div>
-                <h1 className="mt-3 text-[1.45rem] font-semibold tracking-[-0.03em] text-foreground sm:text-[1.7rem]">
-                  {t("shell.newChatTitle")}
-                </h1>
-              </div>
-              <div className="mt-5 grid grid-cols-2 gap-2 sm:gap-3">
-                {newThreadSuggestions.map((suggestion) => {
-                  const SuggestionIcon = suggestion.icon;
-
-                  return (
-                    <button
-                      key={suggestion.key}
-                      type="button"
-                      onClick={() => onDraftChange(suggestion.prompt)}
-                      className="group flex min-h-[5.5rem] items-start gap-3 rounded-panel border border-border bg-surface-softer px-3 py-3 text-left transition hover:border-border-strong hover:bg-surface-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:px-3.5"
-                    >
-                      <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-field border border-border bg-surface-solid text-accent-secondary">
-                        <SuggestionIcon size={15} />
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="flex items-center justify-between gap-2 text-sm font-semibold text-foreground">
-                          {suggestion.title}
-                          <ArrowUpRightIcon
-                            size={13}
-                            className="shrink-0 text-muted-foreground transition group-hover:-translate-y-0.5 group-hover:translate-x-0.5 group-hover:text-foreground"
-                          />
-                        </span>
-                        <span className="mt-1 block text-xs leading-5 text-muted-foreground">
-                          {suggestion.description}
-                        </span>
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
+            <NewThreadPlaceholder
+              onDraftChange={onDraftChange}
+              suggestions={newThreadSuggestions}
+              t={t}
+            />
           )}
 
           {!isNewThread ? (
@@ -455,6 +364,14 @@ export function WorkspaceMainSection({
                     attachments={composerAttachments}
                     commands={composerCommandSurface.commands}
                     commandResultNotice={composerCommandSurface.commandResult}
+                    contextUsageControl={
+                      <ComposerContextUsageControl
+                        isResponding={isResponding}
+                        lastRuntimeEventType={selectedThread.lastRuntimeEventType}
+                        runtimeEventCount={selectedThread.runtimeEventCount}
+                        sessionId={selectedThread.sessionId}
+                      />
+                    }
                     density={density}
                     draft={draft}
                     focusKey={selectedThread.sessionId ?? selectedThread.id}
@@ -462,6 +379,7 @@ export function WorkspaceMainSection({
                     isNewThread={isNewThread}
                     isResponding={isResponding}
                     modelOptions={modelOptions}
+                    onMenuStateChange={handleComposerMenuStateChange}
                     reasoningEffortDefault={reasoningEffortDefault}
                     reasoningEffortError={reasoningEffortError}
                     reasoningEffortOptions={reasoningEffortOptions}

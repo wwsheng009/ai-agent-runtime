@@ -12,6 +12,7 @@
 
 import {
   LIVE_FRAME_BUFFER,
+  LIVE_TRAFFIC_BUFFER,
   type LiveChannelDiagnostics,
   type LiveChannelSink,
   type LiveDomActivity,
@@ -66,6 +67,7 @@ function emptyChannel(): LiveChannelDiagnostics {
     lastEventName: null,
     cursor: null,
     frames: [],
+    traffic: [],
   };
 }
 
@@ -241,9 +243,23 @@ export function beginLiveChannel(input: {
       touch(key);
     },
     // 字节是**每帧**累加的热路径：只加数字、不通知（下一次事件到达时统一刷新）。
+    // 同时按秒聚合成一个流量桶——面板的波动图要的是每秒吞吐，而读取分片密度极
+    // 不均匀（见 LiveTrafficSample 的说明）。秒内只改桶里的数字（零分配），跨秒
+    // 才换数组。当前秒的桶是这里唯一可变的对象：快照按引用共享它，面板下一次
+    // 重渲染就自然读到最新值，不需要额外的通知来驱动。
     bytes(count: number) {
       if (count > 0) {
         channel.bytes += count;
+        const second = Math.floor(Date.now() / 1000) * 1000;
+        const head = channel.traffic[0];
+        if (head !== undefined && head.at === second) {
+          head.bytes += count;
+        } else {
+          channel.traffic = [
+            { at: second, bytes: count },
+            ...channel.traffic,
+          ].slice(0, LIVE_TRAFFIC_BUFFER);
+        }
       }
     },
     keepalive() {
@@ -340,8 +356,18 @@ export function reportSnapshotRefresh(sessionId: string | null | undefined) {
 function buildSnapshot(key: string, state: SessionState): LiveDiagnosticsSnapshot {
   return {
     sessionId: key === UNKNOWN_SESSION_KEY ? "" : key,
-    runtime: { ...state.runtime, frames: [...state.runtime.frames] },
-    chat: { ...state.chat, frames: [...state.chat.frames] },
+    runtime: {
+      ...state.runtime,
+      frames: [...state.runtime.frames],
+      // 只冻结数组本身（长度与顺序），桶对象按引用共享：当前秒那一桶仍在
+      // 原地累计，面板重渲染时读到的是最新值。
+      traffic: [...state.runtime.traffic],
+    },
+    chat: {
+      ...state.chat,
+      frames: [...state.chat.frames],
+      traffic: [...state.chat.traffic],
+    },
     gate: { ...state.gate },
     counters: { ...state.counters },
     dom: { ...domActivity },

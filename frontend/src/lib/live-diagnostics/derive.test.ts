@@ -9,6 +9,7 @@ import {
   formatLiveFrameLabel,
   resolveFrameGapStats,
   resolveLiveNetworkVerdict,
+  resolveTrafficSeries,
 } from "./derive";
 import { type LiveChannelDiagnostics, type LiveFrameSample } from "./types";
 
@@ -37,6 +38,7 @@ function channel(
     lastEventName: "delta",
     cursor: 120,
     frames: [],
+    traffic: [],
     ...overrides,
   };
 }
@@ -150,5 +152,73 @@ describe("格式化", () => {
     expect(
       formatLiveFrameLabel({ at: 0, bytes: 0, kind: "keepalive", name: ": keepalive", seq: null }),
     ).toBe(": keepalive");
+  });
+});
+
+describe("resolveTrafficSeries", () => {
+  const SECOND = 1_000;
+
+  it("空输入也返回定长窗口：最右槽位是当前秒，最左是 59s 前", () => {
+    const series = resolveTrafficSeries([], NOW);
+    expect(series.buckets).toHaveLength(60);
+    expect(series.buckets[59].at).toBe(NOW);
+    expect(series.buckets[0].at).toBe(NOW - 59 * SECOND);
+    expect(series.total).toBe(0);
+    expect(series.max).toBe(0);
+    expect(series.activeSeconds).toBe(0);
+  });
+
+  it("按时间落槽：峰值取单桶最大，合计只算窗口内", () => {
+    const series = resolveTrafficSeries(
+      [
+        { at: NOW, bytes: 300 },
+        { at: NOW - SECOND, bytes: 900 },
+        { at: NOW - 60 * SECOND, bytes: 5_000 },
+      ],
+      NOW,
+    );
+    expect(series.buckets[59].bytes).toBe(300);
+    expect(series.buckets[58].bytes).toBe(900);
+    // 窗口外的 5_000 既不画也不进合计：宁可少画，也不挪到错误的时间点。
+    expect(series.total).toBe(1_200);
+    expect(series.max).toBe(900);
+    expect(series.activeSeconds).toBe(2);
+  });
+
+  it("同一秒的多个桶相加，不互相覆盖", () => {
+    const series = resolveTrafficSeries(
+      [
+        { at: NOW, bytes: 100 },
+        { at: NOW, bytes: 200 },
+      ],
+      NOW,
+    );
+    expect(series.buckets[59].bytes).toBe(300);
+    expect(series.max).toBe(300);
+  });
+
+  it("样本时刻略晚于面板 tick 时不丢桶（时钟偏移容忍）", () => {
+    const series = resolveTrafficSeries([{ at: NOW + 500, bytes: 42 }], NOW);
+    expect(series.buckets[59].bytes).toBe(42);
+    expect(series.total).toBe(42);
+  });
+
+  it("窗口可调：短窗口只保留最近几秒", () => {
+    const series = resolveTrafficSeries(
+      [
+        { at: NOW, bytes: 300 },
+        { at: NOW - 2 * SECOND, bytes: 900 },
+        { at: NOW - 9 * SECOND, bytes: 700 },
+        { at: NOW - 10 * SECOND, bytes: 5_000 },
+      ],
+      NOW,
+      10 * SECOND,
+    );
+    expect(series.buckets).toHaveLength(10);
+    expect(series.buckets[9].bytes).toBe(300);
+    expect(series.buckets[7].bytes).toBe(900);
+    expect(series.buckets[0].bytes).toBe(700);
+    expect(series.total).toBe(1_900);
+    expect(series.max).toBe(900);
   });
 });

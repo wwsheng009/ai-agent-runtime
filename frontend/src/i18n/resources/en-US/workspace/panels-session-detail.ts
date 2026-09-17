@@ -51,6 +51,12 @@ export const enWorkspacePanelsSessionDetail = {
     tags: "Tags",
     summary: "Summary",
   },
+  sections: {
+    basic: "Basics",
+    timing: "Timing",
+    runtime: "Runtime",
+    content: "Content",
+  },
   network: {
     title: "Network details",
     channels: {
@@ -86,6 +92,22 @@ export const enWorkspacePanelsSessionDetail = {
       turn: "Live turn",
       none: "None",
     },
+    // Session subscriptions (Batch 4 §4.6): registry projection — how many entries
+    // hold live SSE, how many degraded to polling, whether page visibility forced
+    // background downsampling, and the live budget. Hidden when the flag is off.
+    subscriptions: {
+      title: "Session subscriptions",
+      live: "Live",
+      poll: "Polling",
+      idle: "Idle",
+      none: "Not subscribed",
+      total: "Subscriptions",
+      session: "This session",
+      visibility: "Visibility",
+      foreground: "Foreground",
+      background: "Background downsampled",
+      budget: "Live budget",
+    },
     dom: {
       title: "DOM activity",
       changes: "Changes",
@@ -97,6 +119,18 @@ export const enWorkspacePanelsSessionDetail = {
       title: "Recent frames",
       empty: "No frames received yet",
       keepalive: "Keepalive",
+    },
+    // Traffic sparkline: per-second throughput (bytes/s) as a mini bar chart.
+    // The counter grid says how much arrived; this says whether it is still
+    // arriving, and whether it trickles or bursts.
+    traffic: {
+      title: "Traffic · last 60s",
+      empty: "No traffic in the last 60s",
+      peak: "Peak",
+      total: "Total",
+      currentSecond: "current second (in progress)",
+      windowStart: "60s ago",
+      windowNow: "now",
     },
     verdict: {
       states: {

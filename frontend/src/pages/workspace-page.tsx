@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 
 import { SessionSwitchConfirmDialog } from "@/components/workspace/session-switch-confirm-dialog";
+import { SessionRuntimeNotices } from "@/components/workspace/session-runtime-notices";
 import { WorkspaceShell } from "@/components/workspace/workspace-shell";
 import { useRuntimeTeamsData } from "@/hooks/workspace/use-runtime-teams-data";
 import { useRuntimeSessionsData } from "@/hooks/workspace/use-runtime-sessions-data";
@@ -12,14 +13,14 @@ import { useSessionRefresh } from "@/hooks/workspace/use-session-refresh";
 import { usePendingInteractions } from "@/hooks/workspace/use-pending-interactions";
 import { useRuntimePlanMode } from "@/hooks/workspace/use-runtime-plan-mode";
 import { useSessionRuntimeState } from "@/hooks/workspace/use-session-runtime-state";
+import { useWorkspaceMultiSessionRuntime } from "@/hooks/workspace/use-workspace-multi-session-runtime";
+import { useWorkspaceSessionSwitchGuard } from "@/hooks/workspace/use-workspace-session-switch-guard";
 import { useTrajectoryRecovery } from "@/hooks/workspace/use-trajectory-recovery";
+import { useWorkspaceTrajectoryStore } from "@/hooks/workspace/use-trajectory-store-pool";
 import { useWorkspaceAgentChatTurn } from "@/hooks/workspace/use-workspace-agent-chat-turn";
 import { useWorkspaceLive } from "@/hooks/workspace/use-workspace-live";
 import { useWorkspaceSessionActions } from "@/hooks/workspace/use-workspace-session-actions";
-import {
-  shouldConfirmThreadSwitch,
-  useWorkspaceThreadSelection,
-} from "@/hooks/workspace/use-workspace-thread-selection";
+import { useWorkspaceThreadSelection } from "@/hooks/workspace/use-workspace-thread-selection";
 import { getErrorMessage } from "@/hooks/workspace/thread-runtime";
 import { withTransportDegradation } from "@/lib/connection-status";
 import {
@@ -31,7 +32,6 @@ import {
   applySessionHistoryToThread,
   createRuntimeDeltaCoordinator,
 } from "@/lib/workspace-thread-state";
-import { buildSidebarSessionActivity } from "@/components/workspace/workspace-sidebar/session-row-status";
 import { useParams } from "react-router-dom";
 
 export function WorkspacePage() {
@@ -94,7 +94,10 @@ export function WorkspacePage() {
     initialThreads: [],
     runtimeSessions,
   });
+  // Batch 1：轨迹 store 池——切换会话不再 reset（切回不重放），快照随会话保留。
+  const { pool: trajectoryStorePool, store: trajectoryStore } = useWorkspaceTrajectoryStore(selectedThread);
   const {
+    activeSessionKeys,
     activeTurnId,
     composerAttachments,
     draft,
@@ -119,59 +122,17 @@ export function WorkspacePage() {
     stopResponding,
     clearStreamStall,
     submitPrompt,
-    trajectoryStore,
   } = useWorkspaceAgentChatTurn({
     onSessionTouched: handleRefreshRuntimeSessions,
     selectedThread,
     setSelectedArtifactId,
     setThreads,
     deltaCoordinator: runtimeDeltaCoordinator,
+    trajectoryStore,
+    trajectoryStorePool,
     userId: selectedRuntimeSessionUserId || runtimeClient.userId,
     workspacePath: runtimeClient.workspacePath,
   });
-
-  const [pendingSessionSwitch, setPendingSessionSwitch] = useState<{
-    threadId: string;
-    title: string;
-  } | null>(null);
-  // 用户主动切换线程：轨迹快照 reset（同步于选择动作；新 turn 的 reset
-  // 在提交 hook 内处理，避免导航渲染迟到的 effect reset 打断流事件收集）。
-  function performSelectThread(threadId: string) {
-    // 线程/会话切换：硬重置游标——新会话的事件日志独立自增，
-    // 由 useTrajectoryRecovery 按新会话从 seq=1 重新回放。
-    trajectoryStore.reset({ hard: true });
-    handleSelectThread(threadId);
-  }
-
-  // 左侧会话列表点击其它会话：当前会话仍在生成回复时先弹确认对话框，确认后
-  // 才真正切换（轨迹重置同样延后到确认之后，避免取消时已经丢掉当前会话的
-  // 轨迹游标）；当前会话空闲时直接切换，不打断用户。
-  function handleSelectThreadWithTrajectoryReset(threadId: string) {
-    if (
-      !shouldConfirmThreadSwitch(
-        selectedThread?.id,
-        threadId,
-        currentSessionResponding,
-      )
-    ) {
-      performSelectThread(threadId);
-      return;
-    }
-
-    const targetThread = threads.find((thread) => thread.id === threadId);
-    setPendingSessionSwitch({
-      threadId,
-      title: targetThread?.title ?? threadId,
-    });
-  }
-
-  function handleConfirmSessionSwitch() {
-    const pending = pendingSessionSwitch;
-    setPendingSessionSwitch(null);
-    if (pending) {
-      performSelectThread(pending.threadId);
-    }
-  }
 
   // P1-9：会话行动作（重命名 / 归档 / 归档恢复 / Fork / 删除 / 目录内新建）由
   // hooks/workspace/use-workspace-session-actions.ts 收口（P0-2 A2 复检拆分）。
@@ -188,7 +149,8 @@ export function WorkspacePage() {
   } = useWorkspaceSessionActions({
     activeSessionId,
     clientUserId: runtimeClient.userId,
-    onResetTrajectory: () => trajectoryStore.reset({ hard: true }),
+    onResetTrajectory: () =>
+      trajectoryStorePool.reset(activeSessionId, { hard: true }),
     refreshSessions: handleRefreshRuntimeSessions,
     selectedUserId: selectedRuntimeSessionUserId,
     setThreads,
@@ -203,7 +165,8 @@ export function WorkspacePage() {
     forkSession: handleForkRuntimeSession,
   } = useSessionBranch({
     clientUserId: runtimeClient.userId,
-    onResetTrajectory: () => trajectoryStore.reset({ hard: true }),
+    onResetTrajectory: () =>
+      trajectoryStorePool.reset(activeSessionId, { hard: true }),
     refreshSessions: handleRefreshRuntimeSessions,
     selectedUserId: selectedRuntimeSessionUserId,
   });
@@ -317,21 +280,40 @@ export function WorkspacePage() {
     trajectoryReady: trajectoryReplay.ready,
     trajectoryStore,
   });
-  // P1-9：侧栏行状态只消费本地已知信号（当前会话的运行/待交互），
-  // 后台会话缺信号时回落为快照状态，不伪造「在等我」。
-  const sessionActivity = useMemo(
-    () =>
-      buildSidebarSessionActivity({
-        sessionId: selectedThread?.sessionId,
-        pendingInteractionKind: pendingInteraction?.kind ?? null,
-        responding: currentSessionResponding,
-      }),
-    [
-      currentSessionResponding,
-      pendingInteraction?.kind,
-      selectedThread?.sessionId,
-    ],
-  );
+  // P0-2 + §4.5：切线守卫（确认框 ↔ 后台继续跑）收口在
+  // `hooks/workspace/use-workspace-session-switch-guard.ts`。必须排在
+  // useWorkspaceLive 之后：守卫的 currentSessionResponding 来自 live 通道。
+  const {
+    cancelSessionSwitch,
+    confirmSessionSwitch: handleConfirmSessionSwitch,
+    pendingSessionSwitch,
+    selectThread: handleSelectThreadWithTrajectoryReset,
+  } = useWorkspaceSessionSwitchGuard({
+    currentSessionResponding,
+    onSelectThread: handleSelectThread,
+    selectedThread,
+    threads,
+  });
+  // P0-2：多会话运行时接线（后台订阅候选 / 建连游标 / 事件归约 / 活动投影 /
+  // 通知 / 按会话就地停止）已收口到
+  // `hooks/workspace/use-workspace-multi-session-runtime.ts`（§4.2 / §4.3 / §4.7）。
+  const {
+    handleOpenRuntimeNoticeSession,
+    handleStopRuntimeSession,
+    sessionActivity,
+    sessionRuntimeNotices,
+    threadBySessionId,
+  } = useWorkspaceMultiSessionRuntime({
+    activeSessionKeys,
+    applyPendingInteractionEvent,
+    openThread: handleSelectThreadWithTrajectoryReset,
+    pendingInteractionKind: pendingInteraction?.kind ?? null,
+    responding: currentSessionResponding,
+    selectedSessionId: selectedThread?.sessionId ?? null,
+    stopSelectedSession: handleStopResponding,
+    threads,
+    trajectoryStorePool,
+  });
   // P1-8：连接状态统一收口。会话运行时流状态是主判据；直连 `/api/agent/chat`
   // 流失败会把线程标记为 transport=error（见 use-workspace-agent-chat-turn），
   // 此时会话流可能仍在线，但顶栏/流尾必须显示「断线 + 可手动重试」。手动重试
@@ -437,6 +419,7 @@ export function WorkspacePage() {
       branchPendingMessageId={branchPendingMessageId}
       branchError={branchError}
       onDeleteRuntimeSession={handleDeleteRuntimeSession}
+      onStopRuntimeSession={handleStopRuntimeSession}
       sessionActivity={sessionActivity}
       runtimeClient={runtimeClient}
       selectedRuntimeSessionUserId={selectedRuntimeSessionUserId}
@@ -504,8 +487,16 @@ export function WorkspacePage() {
       <SessionSwitchConfirmDialog
         open={pendingSessionSwitch !== null}
         sessionTitle={pendingSessionSwitch?.title ?? ""}
-        onCancel={() => setPendingSessionSwitch(null)}
+        onCancel={cancelSessionSwitch}
         onConfirm={handleConfirmSessionSwitch}
+      />
+      <SessionRuntimeNotices
+        notices={sessionRuntimeNotices.notices}
+        onDismiss={sessionRuntimeNotices.dismiss}
+        onOpenSession={handleOpenRuntimeNoticeSession}
+        resolveSessionTitle={(sessionId) =>
+          threadBySessionId.get(normalizeSessionId(sessionId))?.title
+        }
       />
     </>
   );

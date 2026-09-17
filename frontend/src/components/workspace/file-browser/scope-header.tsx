@@ -13,6 +13,7 @@ import {
   EyeOffIcon,
   FolderUpIcon,
   GitBranchIcon,
+  ListTreeIcon,
   RefreshCwIcon,
   SearchIcon,
   UploadIcon,
@@ -47,10 +48,14 @@ export type ScopeHeaderProps = {
   canGoUp: boolean;
   showHidden: boolean;
   sortKey: FsSortKey;
-  /** 过滤词：由 owner 持有；这里只展示与上抛（**只作用于已加载层**，不触发远端搜索）。 */
+  /** 过滤词：由 owner 持有；这里只展示与上抛（输入时即时过滤已加载层，停顿后由 owner 触发全库搜索）。 */
   filterText: string;
   transferCount: number;
   transferOpen: boolean;
+  /** 查询词非空：显示「清除搜索/返回目录树」按钮，Esc 同源（结果视图可能仍在加载或已降级）。 */
+  searchActive: boolean;
+  /** 搜索**结果视图**替换了目录树：排序控件不适用（服务端按相关度排序），禁用并标注原因。 */
+  resultsVisible: boolean;
   onSelectScope: (scope: string) => void;
   onGoUp: () => void;
   onRefresh: () => void;
@@ -58,6 +63,7 @@ export type ScopeHeaderProps = {
   onToggleHidden: () => void;
   onChangeSort: (key: FsSortKey) => void;
   onFilterChange: (value: string) => void;
+  onExitSearch: () => void;
   onPickUpload: (files: FileList) => void;
   onToggleTransferTray: () => void;
   className?: string;
@@ -76,6 +82,7 @@ export function ScopeHeader(props: ScopeHeaderProps) {
     filterText,
     hasFallback,
     onChangeSort,
+    onExitSearch,
     onFilterChange,
     onGoUp,
     onPickUpload,
@@ -85,6 +92,8 @@ export function ScopeHeader(props: ScopeHeaderProps) {
     onToggleHidden,
     onToggleTransferTray,
     roots,
+    resultsVisible,
+    searchActive,
     showHidden,
     sortKey,
     transferCount,
@@ -158,11 +167,33 @@ export function ScopeHeader(props: ScopeHeaderProps) {
           className="min-w-0 flex-1 bg-transparent text-xs text-foreground outline-none placeholder:text-muted-foreground/60"
           data-testid="file-browser-filter"
           onChange={(event) => onFilterChange(event.target.value)}
-          placeholder={t("panels.fileBrowser.scope.filterPlaceholder")}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              // Esc 与「清除搜索/返回目录树」同源：清空查询并恢复目录树（§4.7.4 第 2 条）。
+              event.preventDefault();
+              onExitSearch();
+            }
+          }}
+          placeholder={
+            searchActive
+              ? t("panels.fileBrowser.search.placeholder")
+              : t("panels.fileBrowser.scope.filterPlaceholder")
+          }
           title={t("panels.fileBrowser.scope.filterHint")}
           type="search"
           value={filterText}
         />
+        {searchActive ? (
+          <button
+            aria-label={t("panels.fileBrowser.search.exit")}
+            className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-white/5"
+            onClick={onExitSearch}
+            title={t("panels.fileBrowser.search.exit")}
+            type="button"
+          >
+            <ListTreeIcon aria-hidden className="size-3.5" />
+          </button>
+        ) : null}
         {filterText ? (
           <button
             aria-label={t("panels.fileBrowser.scope.filterClear")}
@@ -206,9 +237,11 @@ export function ScopeHeader(props: ScopeHeaderProps) {
         </label>
         <select
           aria-label={t("panels.fileBrowser.scope.sortAria")}
-          className="rounded border border-border/60 bg-surface-solid px-1.5 py-1 app-text-11 text-foreground"
+          className="rounded border border-border/60 bg-surface-solid px-1.5 py-1 app-text-11 text-foreground disabled:opacity-40"
+          disabled={resultsVisible}
           id="file-browser-sort"
           onChange={(event) => onChangeSort(normalizeSortKey(event.target.value))}
+          title={resultsVisible ? t("panels.fileBrowser.search.sortHint") : undefined}
           value={sortKey}
         >
           {FS_SORT_KEY_OPTIONS.map((key) => (
@@ -247,6 +280,13 @@ export function ScopeHeader(props: ScopeHeaderProps) {
           {transferCount > 0 ? t("panels.fileBrowser.scope.transferTray", { count: transferCount }) : t("panels.fileBrowser.scope.transferTrayEmpty")}
         </button>
       </div>
+
+      {resultsVisible ? (
+        // 禁用外还要**可见地**标注原因（disabled 元素在多数浏览器不弹 title）。
+        <p className="app-text-11 text-muted-foreground" data-testid="file-browser-search-sort-hint">
+          {t("panels.fileBrowser.search.sortHint")}
+        </p>
+      ) : null}
 
       {degraded ? (
         <p className="rounded border border-accent-gold/30 bg-accent-gold/10 px-2 py-1 app-text-11 text-foreground" data-testid="file-browser-degraded">

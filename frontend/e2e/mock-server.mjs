@@ -111,6 +111,63 @@ function mockFsTreeEntries() {
   return entries;
 }
 
+// P1：全库搜索夹具（`/api/runtime/fs/search`）。刻意含**子目录**文件（证明是跨目录检索，
+// 而不是只回根层），并按名称子串命中（`match` 给 rune 偏移供高亮；仅 ASCII，偏移即索引）。
+const E2E_SEARCH_ITEMS = [
+  {
+    name: "notes.txt",
+    path: "notes.txt",
+    type: "file",
+    size: 96,
+    mtime: E2E_MTIME_SECONDS,
+    ext: "txt",
+    score: 150,
+  },
+  {
+    name: "composer-menu.ts",
+    path: "src/lib/composer-menu.ts",
+    type: "file",
+    size: 4096,
+    mtime: E2E_MTIME_SECONDS,
+    ext: "ts",
+    score: 120,
+  },
+  {
+    name: "composer-menu.test.ts",
+    path: "src/lib/composer-menu.test.ts",
+    type: "file",
+    size: 3072,
+    mtime: E2E_MTIME_SECONDS,
+    ext: "ts",
+    score: 110,
+  },
+  { name: "src", path: "src", type: "dir", size: 0, mtime: E2E_MTIME_SECONDS, score: 60 },
+];
+
+function mockFsSearchMatches(kinds, query) {
+  const needle = query.trim().toLowerCase();
+  const matched = [];
+  for (const item of E2E_SEARCH_ITEMS) {
+    if (kinds === "file" && item.type !== "file") {
+      continue;
+    }
+    if (kinds === "dir" && item.type !== "dir") {
+      continue;
+    }
+    const name = item.name.toLowerCase();
+    const path = item.path.toLowerCase();
+    if (needle && !name.includes(needle) && !path.includes(needle)) {
+      continue;
+    }
+    const start = needle ? name.indexOf(needle) : -1;
+    matched.push({
+      ...item,
+      ...(start >= 0 ? { match: { field: "name", start, end: start + needle.length } } : {}),
+    });
+  }
+  return matched;
+}
+
 // P2-7 子片 3：运行时模型目录（`GET /api/runtime/models`）。默认空目录，由
 // `/api/_test/models` 注入；前端只据这份目录组装 `/model` 候选，未注入即无候选。
 let mockRuntimeModelsCatalog = null;
@@ -1261,6 +1318,35 @@ async function handleRequest(req, res) {
       has_more: false,
       truncated: false,
       sort: "type_then_name",
+    });
+    return;
+  }
+
+  // P1：全库模糊搜索（`/api/runtime/fs/search`）。契约对齐 backend/internal/filebrowse/search.go：
+  // 扁平 items（带 score/match）+ 游标分页 + truncated 归因；未命中给空数组而不是 404。
+  if (path === "/api/runtime/fs/search" && req.method === "GET") {
+    const query = (url.searchParams.get("q") ?? "").trim();
+    const kinds = (url.searchParams.get("kinds") ?? "both").trim();
+    const cursor = (url.searchParams.get("cursor") ?? "").trim();
+    const limitRaw = Number(url.searchParams.get("limit") ?? "");
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 200) : 50;
+    const matched = mockFsSearchMatches(kinds, query);
+    // 第二页用固定游标名：夹具总量小，这样能在 E2E 里确定性地覆盖 has_more → loadMore。
+    const offset = cursor === "e2e-search-page-2" ? limit : 0;
+    const pageItems = matched.slice(offset, offset + limit);
+    const remaining = matched.length - (offset + pageItems.length);
+    writeJson(res, 200, {
+      scope: E2E_FS_SCOPE,
+      query,
+      base: "",
+      items: pageItems,
+      next_cursor: remaining > 0 ? "e2e-search-page-2" : null,
+      has_more: remaining > 0,
+      scanned: matched.length,
+      truncated: false,
+      truncated_reason: [],
+      elapsed_ms: 4,
+      limit,
     });
     return;
   }

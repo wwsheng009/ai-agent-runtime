@@ -6,6 +6,7 @@
 //   * 通道建立但零字节 → 无事件（问题在 SSE live / 服务端 / 代理）；
 //   * 两条通道（运行时流 / 直连回合）计数互不串台；
 //   * 消息列缺失时 DOM 口径如实说明，不假装观测到了。
+//   * 流量波动图：按秒成柱、窗口外的流量不画（宁可少画也不挪时间点）。
 // 场景装配走 store 的真实写入 API（与传输层/接线层同一入口），不 mock 观测数据。
 
 import { act } from "react";
@@ -182,5 +183,63 @@ describe("SessionDetailNetworkSection", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("流量波动图：按秒成柱，峰值/合计按 60s 窗口口径给出", async () => {
+    vi.useFakeTimers();
+    try {
+      const start = Date.parse("2026-09-16T12:00:00.000Z");
+      vi.setSystemTime(new Date(start));
+      const sink = beginLiveChannel({ channel: "runtime", sessionId: "session-1" });
+      sink.open();
+      sink.bytes(400);
+      vi.setSystemTime(new Date(start + 1_000));
+      sink.bytes(1_000);
+      // 面板 tick 前进了 50s：前两桶仍在窗口内，但都成了「左半边」的柱子。
+      vi.setSystemTime(new Date(start + 50_000));
+      sink.bytes(200);
+
+      await mount();
+
+      const chart = document.body.querySelector(
+        '[data-testid="session-detail-network-runtime-traffic"]',
+      );
+      expect(chart?.getAttribute("data-traffic-total")).toBe("1600");
+      expect(chart?.getAttribute("data-traffic-max")).toBe("1000");
+      const bars = Array.from(chart?.querySelectorAll("[data-bytes]") ?? []).map(
+        (bar) => Number(bar.getAttribute("data-bytes")),
+      );
+      expect(bars).toHaveLength(60);
+      expect(bars.filter((bytes) => bytes > 0)).toEqual([400, 1_000, 200]);
+      expect(nodeText("session-detail-network-runtime-traffic")).toContain(
+        "峰值 1000 B/s",
+      );
+      expect(nodeText("session-detail-network-runtime-traffic")).toContain(
+        "合计 1.6 KB",
+      );
+      // 两条通道各自成图：直连回合没有流量就不画柱子。
+      expect(nodeText("session-detail-network-chat-traffic")).toContain(
+        "近 60s 没有流量",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("流量波动图：窗口内零流量时只说明，不留一排空柱", async () => {
+    const sink = beginLiveChannel({ channel: "runtime", sessionId: "session-1" });
+    sink.open();
+    sink.event("assistant_delta", { seq: 3, type: "assistant_delta" });
+
+    await mount();
+
+    expect(nodeText("session-detail-network-runtime-traffic")).toContain(
+      "近 60s 没有流量",
+    );
+    expect(
+      document.body.querySelector(
+        '[data-testid="session-detail-network-runtime-traffic-bars"]',
+      ),
+    ).toBeNull();
   });
 });

@@ -3,37 +3,39 @@ import {
   type Dispatch,
   type SetStateAction,
   useEffect,
-  useRef,
-  useState,
 } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { useAppSettings } from "@/core/settings";
-import { type Artifact, type ChatMessage, type Thread } from "@/data/mock";
+import { type Artifact, type Thread } from "@/data/mock";
 import { createConnectTimeoutGuard } from "@/hooks/workspace/agent-chat-turn/connect-timeout";
 import { createTurnFinalizer } from "@/hooks/workspace/agent-chat-turn/finalize-turn";
 import { maybeShowDesktopNotification } from "@/hooks/workspace/agent-chat-turn/notifications";
 import {
   CHAT_STREAM_IDLE_TIMEOUT_MS,
-  resolveChatTurnWorkspacePath,
   shouldIgnoreTerminalStreamError,
 } from "@/hooks/workspace/agent-chat-turn/shared";
-import { createThreadFromPrompt } from "@/hooks/workspace/agent-chat-turn/thread-factory";
-import { applyChatStreamStall, useChatStreamStall } from "@/hooks/workspace/agent-chat-turn/stall";
+import { applyChatStreamStall } from "@/hooks/workspace/agent-chat-turn/stall";
 import { useComposerAttachments } from "@/hooks/workspace/composer/use-composer-attachments";
 import { useComposerDraft } from "@/hooks/workspace/composer/use-composer-draft";
 import { createAgentChatStreamHandlers } from "@/hooks/workspace/agent-chat-turn/stream-handlers";
 import { createStreamingFrameScheduler, STRUCTURAL_COMMIT_INTERVAL_MS } from "@/hooks/workspace/agent-chat-turn/streaming-frame";
 import { createStreamingWriters } from "@/hooks/workspace/agent-chat-turn/streaming-writers";
-import { createTurnRuntimeState, type ChatTurnRuntimeState } from "@/hooks/workspace/agent-chat-turn/turn-state";
+import {
+  bindSessionTurn,
+} from "@/hooks/workspace/agent-chat-turn/session-turn-registry";
+import { prepareAgentChatTurn } from "@/hooks/workspace/agent-chat-turn/turn-bootstrap";
+import { useSessionTurnView } from "@/hooks/workspace/agent-chat-turn/use-session-turn-view";
 import { useChatTurnReasoningEffort } from "@/hooks/workspace/agent-chat-turn/use-reasoning-effort";
 import {
   useRuntimeModelCatalog,
 } from "@/hooks/workspace/use-runtime-model-catalog";
 import {
-  createTrajectoryStore,
   type TrajectoryStore,
 } from "@/hooks/workspace/use-trajectory-snapshot";
+import {
+  useOwnedTrajectoryStore,
+} from "@/hooks/workspace/use-trajectory-store-pool";
 import { NEW_THREAD_ID } from "@/hooks/workspace/use-workspace-thread-selection";
 import {
   streamAgentChat,
@@ -48,17 +50,16 @@ import {
   setLiveStreamText,
 } from "@/lib/live-stream-text";
 import type { TrajectoryEventKind } from "@/lib/trajectory/types";
+import type { TrajectoryStorePool } from "@/lib/trajectory/store-pool";
 import {
   appendArtifactToMessage,
   buildAssistantMessageSegments,
-  buildTurnJsonArtifact,
   createStreamingAssistantMessage,
   getErrorMessage,
   updateThreadMessage,
   upsertArtifact,
   type RuntimeDeltaCoordinator,
 } from "@/lib/workspace-thread-state";
-import type { ChatStreamPhase } from "@/types/runtime";
 
 type WorkspaceAgentChatTurnOptions = {
   deltaCoordinator?: RuntimeDeltaCoordinator;
@@ -66,6 +67,10 @@ type WorkspaceAgentChatTurnOptions = {
   selectedThread: Thread | undefined;
   setSelectedArtifactId: (artifactId: string | null) => void;
   setThreads: Dispatch<SetStateAction<Thread[]>>;
+  /** 页面级池化 store（Batch 1）；缺省由本 hook 自持单实例（旧行为）。 */
+  trajectoryStore?: TrajectoryStore;
+  /** 页面级池：回合按**发起会话**的键取 store（后台/草稿回合不写进选中会话）。 */
+  trajectoryStorePool?: TrajectoryStorePool;
   userId?: string;
   workspacePath?: string;
 };
@@ -81,6 +86,8 @@ export function useWorkspaceAgentChatTurn({
   selectedThread,
   setSelectedArtifactId,
   setThreads,
+  trajectoryStore: providedTrajectoryStore,
+  trajectoryStorePool,
   userId,
   workspacePath,
 }: WorkspaceAgentChatTurnOptions) {
@@ -92,21 +99,18 @@ export function useWorkspaceAgentChatTurn({
   });
   // P1-4 子片 2：附件草稿轨与草稿同口径（sessionId 优先、线程 id 兜底）。
   const composerAttachments = useComposerAttachments({ threadKey });
-  const [isResponding, setIsResponding] = useState(false);
-  const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
-  const activeTurnIdRef = useRef<string | null>(null);
-  // 在途回合的运行时状态（与 activeTurnIdRef 同生命周期）。停止按钮要按草稿落库后的
-  // currentSessionId 投递 interrupt（该字段由 stream-handlers 就地更新），故持对象引用。
-  const activeTurnStateRef = useRef<ChatTurnRuntimeState | null>(null);
-  const [phase, setPhase] = useState<ChatStreamPhase | null>(null);
-  const phaseRef = useRef<ChatStreamPhase | null>(null);
-  const stall = useChatStreamStall();
-  const activeRequestControllerRef = useRef<AbortController | null>(null);
-  const trajectoryStoreRef = useRef<TrajectoryStore | null>(null);
-  if (!trajectoryStoreRef.current) {
-    trajectoryStoreRef.current = createTrajectoryStore();
-  }
-  const trajectoryStore = trajectoryStoreRef.current;
+  // Batch 1（去单例）：回合状态按会话分键，页面只消费「选中会话」的那份视图。
+  const {
+    activeSessionKeys,
+    activeTurnId,
+    clearStreamStall,
+    isResponding,
+    phase,
+    selectedTurnKey,
+    streamStalled,
+    turnRegistry,
+  } = useSessionTurnView(selectedThread);
+  const trajectoryStore = useOwnedTrajectoryStore(providedTrajectoryStore);
   const {
     modelOptions,
     providerOptions,
@@ -136,68 +140,58 @@ export function useWorkspaceAgentChatTurn({
 
   useEffect(() => {
     return () => {
-      activeRequestControllerRef.current?.abort();
-      trajectoryStoreRef.current?.dispose();
+      // 卸载中止所有在途会话请求（单会话时与旧实现等价）。
+      turnRegistry.abortAll();
     };
-  }, []);
+  }, [turnRegistry]);
 
   function submitPrompt() {
     const prompt = draft.trim();
-    if (!prompt || !selectedThread || isResponding) {
+    if (!prompt || !selectedThread) {
+      return;
+    }
+    // 提交闸门按会话（Batch 1 G1）：同会话单飞（服务端 ErrSessionBusy 的镜像），
+    // 跨会话并行——A 在跑不再阻塞 B 的提交。
+    if (turnRegistry.isBusy(selectedTurnKey)) {
       return;
     }
 
-    const threadSnapshot =
-      selectedThread.id === NEW_THREAD_ID
-        ? createThreadFromPrompt(prompt)
-        : selectedThread;
-    const threadId = threadSnapshot.id;
-    const sessionIdBeforeTurn = normalizeSessionId(threadSnapshot.sessionId ?? "");
-    const turnId = crypto.randomUUID();
-    const assistantMessageId = `turn-${turnId}-assistant`;
-    deltaCoordinator?.beginTurn(turnId);
-    const userMessage: ChatMessage = {
-      id: crypto.randomUUID(),
-      role: "user",
-      author: "You",
-      label: "draft",
-      segments: [{ type: "text", content: prompt }],
-    };
-    const requestPayload = {
-      messages: [{ role: "user" as const, content: prompt }],
-      session_id: threadSnapshot.sessionId,
-      turn_id: turnId,
-      user_id: userId || undefined,
-      workspace_path: resolveChatTurnWorkspacePath(
-        threadSnapshot.sessionId,
-        workspacePath,
-      ),
-      provider: selectedProvider || undefined,
-      model: selectedModel || undefined,
-      reasoning_effort: selectedReasoningEffort || undefined,
-      enable_react: settings.chat.enableReact,
-      enable_routing: true,
-      // P4-刷新续传：页面刷新/关标签会 abort 这个 POST，服务器随后照常取消
-      // `r.Context()`。声明 resume_on_disconnect 后回合与请求解耦继续执行，
-      // 刷新后的新页面据 `/runtime` 的 active_turn 重新挂载回合身份，
-      // 在 `/runtime/stream` 上按游标续传（否则刷新即中止本回合）。
-      resume_on_disconnect: true,
-      max_steps: settings.chat.maxSteps,
-    };
-
-    const requestArtifact = buildTurnJsonArtifact(
+    const {
+      assistantMessageId,
+      controller,
+      requestArtifact,
+      requestPayload,
+      sessionIdBeforeTurn,
+      threadId,
+      threadSnapshot,
       turnId,
-      "agent-chat-request",
-      "Streaming request payload sent from the Vite workspace to /api/agent/chat.",
-      {
-        ...requestPayload,
-        stream: true,
-      },
-    );
-
-    const turnState = createTurnRuntimeState(threadSnapshot);
-    activeTurnStateRef.current = turnState;
-    const controller = new AbortController();
+      turnKey,
+      turnState,
+      turnTrajectoryStore,
+      userMessage,
+    } = prepareAgentChatTurn({
+      deltaCoordinator,
+      prompt,
+      selectedModel,
+      selectedProvider,
+      selectedReasoningEffort,
+      selectedThread,
+      settings,
+      trajectoryStore,
+      trajectoryStorePool,
+      userId,
+      workspacePath,
+    });
+    turnRegistry.beginTurn({
+      key: turnKey,
+      threadId,
+      turnId,
+      controller,
+      turnState,
+    });
+    // 既有写入器按 ref / setter 形状接收相位与在途身份：桥接到本回合的条目。
+    const { activeTurnIdRef, phaseRef, setActiveTurnId, setPhase } =
+      bindSessionTurn(turnRegistry, turnId);
 
     const updateCurrentThread = (updater: (thread: Thread) => Thread) => {
       setThreads((current) => {
@@ -223,7 +217,7 @@ export function useWorkspaceAgentChatTurn({
       kind: TrajectoryEventKind,
       payload: Record<string, unknown> | null | undefined,
     ) => {
-      trajectoryStore.push(kind, payload);
+      turnTrajectoryStore.push(kind, payload);
     };
 
     const setStreamingMessage = (label: string, author: string, content: string) => {
@@ -335,7 +329,7 @@ export function useWorkspaceAgentChatTurn({
       settings,
       threadId,
       threadSnapshot,
-      trajectoryStore,
+      trajectoryStore: turnTrajectoryStore,
       turnId,
       turnState,
       updateCurrentThread,
@@ -344,14 +338,10 @@ export function useWorkspaceAgentChatTurn({
     setDraft("");
     // 新 turn 开始：轨迹快照 reset（同步于首个 SSE 事件之前，避免
     // 导航渲染迟到的 effect reset 打断流事件收集造成 seq gap）。
-    trajectoryStore.reset();
-    stall.clear();
-    activeTurnIdRef.current = turnId;
-    setActiveTurnId(turnId);
-    setIsResponding(true);
+    turnTrajectoryStore.reset();
+    turnRegistry.setStalled(turnKey, false);
     setPhaseAndRef("connecting");
     frameScheduler.attachVisibilityListener();
-    activeRequestControllerRef.current = controller;
     const connectTimeout = createConnectTimeoutGuard({
       controller,
       onTimeout: () => {
@@ -429,7 +419,7 @@ export function useWorkspaceAgentChatTurn({
         }
         if (isSseIdleTimeoutError(error)) {
           // 读侧静默看门狗命中：本页流已死，但回合 detached，服务端可能仍在跑。
-          stall.mark();
+          turnRegistry.setStalled(turnKey, true);
           applyChatStreamStall({ notifyFailure, updateCurrentThread, updateStreamingError });
           return;
         }
@@ -461,18 +451,13 @@ export function useWorkspaceAgentChatTurn({
         connectTimeout.clear();
         frameScheduler.cancel();
         frameScheduler.detachVisibilityListener();
-        if (activeRequestControllerRef.current === controller) {
-          activeRequestControllerRef.current = null;
-        }
-        if (activeTurnIdRef.current === turnId) {
+        if (turnRegistry.isTurnRunning(turnId)) {
           activeTurnIdRef.current = null;
           setActiveTurnId(null);
         }
-        if (activeTurnStateRef.current === turnState) {
-          activeTurnStateRef.current = null;
-        }
         deltaCoordinator?.endTurn(turnId);
-        setIsResponding(false);
+        // 条目删除 = isResponding→false、phase→null（与旧 finally 同步）。
+        turnRegistry.finishTurn(turnId);
         setPhaseAndRef(null);
 
         // 草稿线程首轮结束后会话才落库：补写用户预先选择的档位。
@@ -486,21 +471,24 @@ export function useWorkspaceAgentChatTurn({
   function stopResponding() {
     // 建议 3（后端 cancel 契约）：abort 只让本地 UI 收尾，服务端 detached 回合仍在跑，
     // 因此带回合身份投递 interrupt（best-effort，失败不阻塞本地停止）。
+    // 按**选中会话**定位：停止按钮只作用于当前会话，后台会话的回合不受影响。
+    const entry = turnRegistry.getSnapshot(selectedTurnKey).entry;
     void requestSessionTurnInterrupt(
-      activeTurnStateRef.current?.currentSessionId,
-      activeTurnIdRef.current,
+      entry?.turnState.currentSessionId,
+      entry ? (entry.activeTurnId ?? entry.turnId) : null,
     );
-    activeRequestControllerRef.current?.abort();
+    entry?.controller.abort();
   }
 
   return {
+    activeSessionKeys,
     composerAttachments,
     draft,
     isResponding,
-    streamStalled: stall.streamStalled,
+    streamStalled,
     activeTurnId,
     phase,
-    clearStreamStall: stall.clear,
+    clearStreamStall,
     trajectoryStore,
     modelOptions,
     providerOptions,

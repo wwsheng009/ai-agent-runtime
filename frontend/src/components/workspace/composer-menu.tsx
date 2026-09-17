@@ -43,7 +43,7 @@ export function ComposerMenu({
       data-composer-menu
       className="absolute bottom-full left-0 right-0 z-40 mb-2 max-h-[18rem] overflow-y-auto rounded-panel border border-border [background:var(--workspace-composer-bg)] p-1 shadow-[0_16px_40px_rgba(0,0,0,0.4)]"
     >
-      {snapshot.empty ? (
+      {snapshot.empty && snapshot.groups.length === 0 ? (
         <div
           role="presentation"
           data-composer-menu-empty
@@ -88,11 +88,21 @@ function ComposerMenuGroupBlock({
 }: ComposerMenuGroupBlockProps) {
   const { t } = useTranslation("workspace");
   const label = resolveLabel(group.label, group.labelKey);
+  const message = group.statusText ?? group.emptyText;
   return (
     <div role="group" aria-label={label} data-composer-menu-group={group.id}>
       <div className="px-2 pb-1 pt-2 app-text-9 uppercase tracking-[0.12em] text-muted-foreground">
         {label}
       </div>
+      {group.items.length === 0 && message ? (
+        <div
+          role="presentation"
+          data-composer-menu-group-note={group.id}
+          className="px-2 py-1 app-text-10 text-muted-foreground/80"
+        >
+          {message}
+        </div>
+      ) : null}
       {group.items.map((item) => (
         <ComposerMenuOption
           key={item.id}
@@ -104,6 +114,24 @@ function ComposerMenuGroupBlock({
           countLabel={item.count ? t("composer.menu.count", { count: item.count }) : null}
         />
       ))}
+      {group.items.length > 0 && message ? (
+        <div
+          role="presentation"
+          data-composer-menu-group-status={group.id}
+          className="px-2 pb-1 app-text-10 text-muted-foreground/80"
+        >
+          {message}
+        </div>
+      ) : null}
+      {group.truncated || group.hasMore ? (
+        <div
+          role="presentation"
+          data-composer-menu-group-truncated={group.id}
+          className="px-2 pb-1 app-text-9 text-muted-foreground/70"
+        >
+          {group.truncatedText ?? t("composer.menu.moreResults")}
+        </div>
+      ) : null}
     </div>
   );
 }

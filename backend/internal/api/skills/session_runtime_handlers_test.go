@@ -20,6 +20,7 @@ import (
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecheckpoint "github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
+	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
@@ -639,6 +640,188 @@ func TestSubmitSessionRuntimeCommand_RewindReturnsRestoreResult(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Body.String(), `"conversation_changed":true`)
 	require.Contains(t, rec.Body.String(), `"conversation_exact":true`)
+}
+
+func TestCompactCommandPayloadMapsFullResult(t *testing.T) {
+	usage := &types.TokenUsage{
+		UsageSource:      "provider",
+		PromptTokens:     120,
+		CompletionTokens: 30,
+		TotalTokens:      150,
+	}
+	payload := compactCommandPayload(&compactruntime.Result{
+		Mode:              "local",
+		Phase:             compactruntime.PhasePreTurn,
+		ResolvedProvider:  "openai",
+		ResolvedModel:     "gpt-test",
+		TriggerTokenLimit: 6800,
+		MaxContextTokens:  8000,
+		TokenBefore:       7000,
+		TokenAfter:        2100,
+		Usage:             usage,
+		UsageSource:       "provider",
+		CompactedMessages: 12,
+		CheckpointIDs:     []string{"ckpt-1", "ckpt-2"},
+	}, compactruntime.Status{
+		Mode:              "local",
+		Phase:             compactruntime.PhasePreTurn,
+		ResolvedProvider:  "openai",
+		ResolvedModel:     "gpt-test",
+		TriggerTokenLimit: 6800,
+		MaxContextTokens:  8000,
+		TokenBefore:       7000,
+	})
+
+	status, ok := payload["status"].(map[string]interface{})
+	require.True(t, ok, "status payload must be a map")
+	assert.Equal(t, "local", status["mode"])
+	assert.Equal(t, compactruntime.PhasePreTurn, status["phase"])
+	assert.Equal(t, "", status["reason"])
+	assert.Equal(t, "openai", status["provider"])
+	assert.Equal(t, "gpt-test", status["model"])
+	assert.Equal(t, 6800, status["trigger_token_limit"])
+	assert.Equal(t, 8000, status["max_context_tokens"])
+	assert.Equal(t, 7000, status["token_before"])
+	assert.NotContains(t, status, "token_after", "status 只暴露压缩前快照")
+
+	result, ok := payload["result"].(map[string]interface{})
+	require.True(t, ok, "result payload must be a map")
+	assert.Equal(t, "local", result["mode"])
+	assert.Equal(t, 2100, result["token_after"])
+	assert.Equal(t, 12, result["compacted_messages"])
+	assert.Equal(t, []string{"ckpt-1", "ckpt-2"}, result["checkpoint_ids"])
+	assert.Equal(t, "provider", result["usage_source"])
+	assert.Equal(t, usage, result["usage"], "usage 原样透传")
+}
+
+func TestCompactCommandPayloadNilResultKeepsStableKeys(t *testing.T) {
+	payload := compactCommandPayload(nil, compactruntime.Status{
+		Mode:   "auto",
+		Phase:  compactruntime.PhasePreTurn,
+		Reason: "history_empty",
+	})
+
+	assert.Nil(t, payload["result"], "skipped 必须显式回 null")
+	status, ok := payload["status"].(map[string]interface{})
+	require.True(t, ok, "status payload must be a map")
+	assert.Equal(t, "auto", status["mode"])
+	assert.Equal(t, compactruntime.PhasePreTurn, status["phase"])
+	assert.Equal(t, "history_empty", status["reason"])
+	assert.Equal(t, "", status["provider"])
+	assert.Equal(t, "", status["model"])
+	assert.Equal(t, 0, status["trigger_token_limit"])
+	assert.Equal(t, 0, status["max_context_tokens"])
+	assert.Equal(t, 0, status["token_before"])
+}
+
+func TestCompactCommandPayloadNormalizesNilCheckpointIDs(t *testing.T) {
+	payload := compactCommandPayload(&compactruntime.Result{Mode: "remote"}, compactruntime.Status{Mode: "remote"})
+
+	result, ok := payload["result"].(map[string]interface{})
+	require.True(t, ok, "result payload must be a map")
+	assert.Equal(t, []string{}, result["checkpoint_ids"], "nil 的 checkpoint_ids 归一成空数组")
+	assert.Nil(t, result["usage"], "无 usage 时回 null")
+}
+
+func TestNormalizeSessionCompactMode(t *testing.T) {
+	cases := []struct {
+		raw    string
+		want   string
+		wantOK bool
+	}{
+		{raw: "", want: "", wantOK: true},
+		{raw: "auto", want: "auto", wantOK: true},
+		{raw: " AUTO ", want: "auto", wantOK: true},
+		{raw: "local", want: "local", wantOK: true},
+		{raw: "remote", want: "remote", wantOK: true},
+		{raw: "bogus", want: "", wantOK: false},
+		{raw: "manual", want: "", wantOK: false},
+	}
+	for _, tc := range cases {
+		got, ok := normalizeSessionCompactMode(tc.raw)
+		assert.Equal(t, tc.wantOK, ok, "raw=%q", tc.raw)
+		assert.Equal(t, tc.want, got, "raw=%q", tc.raw)
+	}
+}
+
+// newCompactCommandHandler 构造一个接上真实 SessionActor 的 Handler 及其会话 ID，
+// 供 compact 命令的 HTTP 层用例复用（与 rewind/answer 用例同一套装配方式）。
+func newCompactCommandHandler(t *testing.T) (*Handler, string) {
+	t.Helper()
+
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	sessionStorage := chat.NewInMemoryStorage()
+	sessionManager := chat.NewSessionManager(sessionStorage, nil)
+	handler.SetSessionManager(sessionManager)
+
+	session, err := sessionManager.Create(context.Background(), "user-compact-command")
+	require.NoError(t, err)
+
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultModel: "test-runtime-command-compact-model",
+		MaxRetries:   0,
+	})
+	provider := &runtimeCommandSequenceProvider{name: "test-runtime-command-compact-model"}
+	require.NoError(t, llmRuntime.RegisterProvider(provider.Name(), provider))
+
+	apiAgent := agent.NewAgent(&agent.Config{
+		Name:  "runtime-command-compact-test",
+		Model: "test-model",
+	}, nil)
+	runtimeStore := chat.NewInMemoryRuntimeStore(64)
+	actor, err := chat.NewSessionActor(session.ID, chat.SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   llmRuntime,
+		SessionStore: sessionStorage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+
+	handler.sessionHub = chat.NewSessionHub(func(sessionID string) (*chat.SessionActor, error) {
+		require.Equal(t, session.ID, sessionID)
+		return actor, nil
+	})
+	return handler, session.ID
+}
+
+func TestSubmitSessionRuntimeCommand_CompactRejectsUnsupportedMode(t *testing.T) {
+	handler, sessionID := newCompactCommandHandler(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+sessionID+"/runtime/commands", strings.NewReader(`{
+		"type":"compact",
+		"mode":"manual"
+	}`))
+	req = mux.SetURLVars(req, map[string]string{"id": sessionID})
+	rec := httptest.NewRecorder()
+
+	handler.SubmitSessionRuntimeCommand(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code, "body=%s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "unsupported compact mode")
+}
+
+func TestSubmitSessionRuntimeCommand_CompactSkippedReturnsNullResult(t *testing.T) {
+	handler, sessionID := newCompactCommandHandler(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+sessionID+"/runtime/commands", strings.NewReader(`{
+		"type":"compact",
+		"mode":"local"
+	}`))
+	req = mux.SetURLVars(req, map[string]string{"id": sessionID})
+	rec := httptest.NewRecorder()
+
+	handler.SubmitSessionRuntimeCommand(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+	var payload map[string]interface{}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&payload))
+	assert.Equal(t, true, payload["ok"])
+	assert.Nil(t, payload["result"], "skipped 必须回 result:null")
+	status, ok := payload["status"].(map[string]interface{})
+	require.True(t, ok, "status payload must be a map")
+	assert.Equal(t, "local", status["mode"])
+	assert.Equal(t, "history_empty", status["reason"])
 }
 
 func TestSubmitSessionRuntimeCommand_SubmitPromptReturnsAcceptedWhenApprovalIsPending(t *testing.T) {
@@ -1751,7 +1934,7 @@ func TestStreamSessionRuntimeEventsCommitsHeadersWithoutPendingEvents(t *testing
 // 回归（真 TCP）：SSE 是「字节必须立刻出站」的协议，而 httptest.ResponseRecorder
 // 只是把字节同步落进内存 —— flush 有没有真正走到 socket，在 recorder 上永远观察不到。
 // 此前 flushSSE 只调 bufio.Flush，字节停在 net/http 自己的 2048B 响应缓冲里
-//（server.go 的 bufferBeforeChunkingSize），客户端要等缓冲攒满或 handler 返回才收到
+// （server.go 的 bufferBeforeChunkingSize），客户端要等缓冲攒满或 handler 返回才收到
 // 任何字节：线上表现为「直连 8101 的空闲会话 25s 零字节」，而单测全绿。
 // 本用例走真实 socket 与默认 http.Server 写链路（含 net/http 内部缓冲与 chunked
 // 编码），断言空闲会话在建连后立即收到 `: open` 握手帧。

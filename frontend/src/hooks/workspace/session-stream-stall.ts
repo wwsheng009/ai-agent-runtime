@@ -6,8 +6,9 @@
 // 表现为徽标在线、增量却再也不出现。
 import { isSseIdleTimeoutError } from "@/api/runtime/sse";
 
-/** 看门狗阈值：3 个 keepalive 周期（15s × 3）内零字节即判定本页流已死。 */
-export const RUNTIME_STREAM_IDLE_TIMEOUT_MS = 45_000;
+// 看门狗阈值（3 个 keepalive 周期）现由 `lib/session-runtime/constants` 统一持有：
+// 前台 hook 与注册表内的 headless 订阅引擎必须共用同一口径，避免 lib → hooks 反向依赖。
+export { RUNTIME_STREAM_IDLE_TIMEOUT_MS } from "@/lib/session-runtime/constants";
 
 /**
  * 单次重连周期的静默状态机：`onOpen` 只代表响应头到位，不代表有数据。命中静默

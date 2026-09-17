@@ -167,12 +167,19 @@ export const enWorkspaceBase = {
       renamePlaceholder: "New session title",
       restore: "Restore archived session",
       showArchived: "Show archived ({{count}})",
+      stop: "Stop run",
+      stopHint: "Stop the in-flight turn (works for sessions running in the background)",
       switchTitle: "Session is still responding",
       switchMessage: "Switch to {{title}}?",
       switchHint:
         "The reply keeps running in the background — switch back anytime.",
       switchConfirmButton: "Switch",
       switchCancel: "Cancel",
+    },
+    attention: {
+      summary: "{{count}} session(s) waiting for you",
+      hint: "Sessions waiting for approval, an answer, or plan review.",
+      jump: "Go to session",
     },
     sessionOrder: {
       label: "Order",
@@ -291,6 +298,24 @@ export const enWorkspaceBase = {
     active: "{{count}} active",
     unknown: "unknown",
   },
+  notices: {
+    title: "Background session updates",
+    dismiss: "Dismiss",
+    open: "Open session",
+    sessionFallback: "Session {{sessionId}}",
+    kinds: {
+      turn_finished: "“{{session}}” finished",
+      approval: "“{{session}}” needs approval",
+      question: "“{{session}}” needs an answer",
+      plan_review: "“{{session}}” needs plan review",
+    },
+    bodies: {
+      turn_finished: "The background turn finished; switch back to see the result.",
+      approval: "A tool call is waiting for your approval.",
+      question: "The runtime is waiting for your answer.",
+      plan_review: "A plan review is waiting for your decision.",
+    },
+  },
   composer: {
     transport: {
       live: "live runtime",
@@ -330,6 +355,48 @@ export const enWorkspaceBase = {
       unselected: "Not selected",
       pendingConfirm: "Reconfirm",
       reselectHint: "Provider switched — reconfirm model and reasoning",
+    },
+    contextUsage: {
+      triggerLabel: "Session context usage {{percent}}",
+      title: "Session context",
+      close: "Close",
+      refresh: "Refresh context usage",
+      loading: "loading context usage",
+      empty:
+        "No context data yet: this session has no completed LLM request with usage reporting.",
+      error: "context usage unavailable",
+      unknownValue: "unknown",
+      sourceNote:
+        "Derived from session usage detail ({{source}}), based on the latest LLM request.",
+      source: {
+        context_window: "context window",
+        prompt_budget: "prompt budget",
+        compact: "compact result",
+        none: "session usage detail",
+      },
+      metrics: {
+        used: "Used",
+        window: "Context window",
+        remaining: "Remaining",
+        budget: "Prompt budget",
+        observed: "Last observed",
+      },
+      compact: {
+        title: "Compact context",
+        description: "Fold older history into checkpoints to free the context window now.",
+        mode: "Compact mode",
+        modeAuto: "Auto",
+        modeLocal: "Local",
+        modeRemote: "Remote",
+        action: "Compact session",
+        pending: "Compacting",
+        disabledResponding: "Cannot compact while responding — stop the turn first.",
+        disabledNoSession: "Session is not persisted yet — compaction unavailable.",
+        skipped: "Nothing was compacted (reason: {{reason}}).",
+        skippedUnknown: "Nothing was compacted.",
+        done: "Compacted {{messages}} messages: {{before}} → {{after}} tokens",
+        checkpoints: "{{count}} new checkpoints",
+      },
     },
     permission: {
       label: "Permission",
@@ -397,6 +464,7 @@ export const enWorkspaceBase = {
       count: "{{count}} item(s)",
       commands: "commands",
       actions: "actions",
+      moreResults: "more results — keep typing to narrow down",
     },
     commands: {
       lineHint: "command line",
@@ -443,6 +511,11 @@ export const enWorkspaceBase = {
     },
     references: {
       files: "files",
+      workspaceFiles: "Workspace files",
+      workspaceFilesLoading: "Loading workspace files…",
+      workspaceFilesEmpty: "No files match; keep typing to narrow down",
+      workspaceFilesError: "Workspace files unavailable",
+      workspaceFilesTruncated: "Results truncated; keep typing to narrow down",
     },
   },
 } satisfies DeepStringShape<typeof zhWorkspaceBase>;

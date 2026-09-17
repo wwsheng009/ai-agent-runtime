@@ -80,6 +80,35 @@ func (h *fsBrowserHandlers) list(w http.ResponseWriter, r *http.Request) {
 	fsWriteJSON(w, http.StatusOK, result)
 }
 
+// search 处理 GET /fs/search?scope=…&q=…&path=…&cursor=…&limit=…&show_hidden=…&kinds=…&max_depth=…&max_scan=…&budget_ms=…
+//
+// 只做参数解码与错误渲染：限额夹紧、字面匹配、扫描上限与游标校验都在 filebrowse.Service
+// （规划 §4.4.5「服务端夹紧」）；错误统一走 fsWriteReadError 的既有错误体。
+func (h *fsBrowserHandlers) search(w http.ResponseWriter, r *http.Request) {
+	if !h.requireService(w, r) {
+		return
+	}
+	query := r.URL.Query()
+	result, err := h.service.Search(r.Context(), filebrowse.SearchRequest{
+		// scope/path 不在这里解码：URL 解码必须与 Clean、越界校验严格同序（同 /fs/list）。
+		Scope:      query.Get("scope"),
+		Query:      query.Get("q"),
+		Path:       query.Get("path"),
+		Cursor:     query.Get("cursor"),
+		Limit:      fsQueryInt(query.Get("limit")),
+		ShowHidden: fsQueryBool(query.Get("show_hidden")),
+		Kinds:      query.Get("kinds"),
+		MaxDepth:   fsQueryInt(query.Get("max_depth")),
+		MaxScan:    fsQueryInt(query.Get("max_scan")),
+		BudgetMs:   fsQueryInt(query.Get("budget_ms")),
+	})
+	if err != nil {
+		fsWriteReadError(w, r, err)
+		return
+	}
+	fsWriteJSON(w, http.StatusOK, result)
+}
+
 // stat 处理 GET /fs/stat?scope=…&path=…：单路径元信息。
 func (h *fsBrowserHandlers) stat(w http.ResponseWriter, r *http.Request) {
 	if !h.requireService(w, r) {

@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
@@ -47,11 +48,11 @@ type sessionRuntimeCommandRequest struct {
 	PatchedArgs          json.RawMessage        `json:"patched_args,omitempty"`
 	// TurnID 可选：interrupt 命令据此做回合身份校验 —— 只有与当前在途回合
 	// 一致才取消（建议 3 契约）。空值表示「取消当前在途回合」，不做身份约束。
-	TurnID string `json:"turn_id,omitempty"`
-	QuestionID           string                 `json:"question_id,omitempty"`
-	Answer               string                 `json:"answer,omitempty"`
-	CheckpointID         string                 `json:"checkpoint_id,omitempty"`
-	Mode                 string                 `json:"mode,omitempty"`
+	TurnID       string `json:"turn_id,omitempty"`
+	QuestionID   string `json:"question_id,omitempty"`
+	Answer       string `json:"answer,omitempty"`
+	CheckpointID string `json:"checkpoint_id,omitempty"`
+	Mode         string `json:"mode,omitempty"`
 }
 
 func (h *Handler) SpawnSessionAgent(w http.ResponseWriter, r *http.Request) {
@@ -1018,6 +1019,24 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 		})
 		return
 
+	case "compact":
+		// 手动 compact 完全委托 actor.Compact（内部走 handleCompactSession）：
+		// 这里只做 mode 归一化与结果映射，skipped（result==nil 且无 err）也算成功。
+		mode, ok := normalizeSessionCompactMode(req.Mode)
+		if !ok {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "unsupported compact mode"))
+			return
+		}
+		result, status, err := actor.Compact(r.Context(), mode)
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		payload := compactCommandPayload(result, status)
+		payload["ok"] = true
+		h.writeJSON(w, http.StatusOK, payload)
+		return
+
 	default:
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "unsupported command type"))
 		return
@@ -1026,6 +1045,70 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok": true,
 	})
+}
+
+// normalizeSessionCompactMode 归一化手动 compact 的 mode 入参。
+//
+// 只放行 compactruntime 的显式模式与空串（空串交运行时按模型能力解析）；
+// 其余值直接拒绝而不是静默降级成 auto —— 静默降级会让调用方误以为
+// 强制指定的模式生效了。
+func normalizeSessionCompactMode(raw string) (string, bool) {
+	mode := strings.ToLower(strings.TrimSpace(raw))
+	switch mode {
+	case "", compactruntime.ModeAuto, compactruntime.ModeLocal, compactruntime.ModeRemote:
+		return mode, true
+	default:
+		return "", false
+	}
+}
+
+// compactCommandPayload 把 compact 的 Result/Status 映射成稳定的 snake_case
+// JSON 契约：字符串/数值缺失也保留 key（""/0，前端统一兜底），result 为 nil
+// （skipped）时显式回 null，避免前端把「未压缩」误判成字段缺失。
+func compactCommandPayload(result *compactruntime.Result, status compactruntime.Status) map[string]interface{} {
+	payload := map[string]interface{}{
+		"status": map[string]interface{}{
+			"mode":                status.Mode,
+			"phase":               status.Phase,
+			"reason":              status.Reason,
+			"provider":            status.ResolvedProvider,
+			"model":               status.ResolvedModel,
+			"trigger_token_limit": status.TriggerTokenLimit,
+			"max_context_tokens":  status.MaxContextTokens,
+			"token_before":        status.TokenBefore,
+		},
+		"result": nil,
+	}
+	if result == nil {
+		return payload
+	}
+
+	// checkpoint_ids 对 nil 归一成空数组：前端可直接遍历，不必再做 null 兜底。
+	checkpointIDs := result.CheckpointIDs
+	if checkpointIDs == nil {
+		checkpointIDs = []string{}
+	}
+	// Usage 为 nil 时显式给 interface{} 零值，保证序列化成 null 而不是类型化空指针。
+	var usage interface{}
+	if result.Usage != nil {
+		usage = result.Usage
+	}
+	payload["result"] = map[string]interface{}{
+		"mode":                result.Mode,
+		"phase":               result.Phase,
+		"reason":              "",
+		"provider":            result.ResolvedProvider,
+		"model":               result.ResolvedModel,
+		"trigger_token_limit": result.TriggerTokenLimit,
+		"max_context_tokens":  result.MaxContextTokens,
+		"token_before":        result.TokenBefore,
+		"token_after":         result.TokenAfter,
+		"compacted_messages":  result.CompactedMessages,
+		"checkpoint_ids":      checkpointIDs,
+		"usage_source":        result.UsageSource,
+		"usage":               usage,
+	}
+	return payload
 }
 
 // sessionTurnInterruptChannel* 标明 interrupt 命令实际作用在哪条执行通道上，

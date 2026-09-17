@@ -30,6 +30,7 @@ import { WorkspaceSidebarDirectoryDerivedActions } from "./directory-derived-act
 import { WorkspaceSidebarDirectoryGroupActions } from "./directory-group-actions";
 import { WorkspaceSidebarDirectoryGroupHeader } from "./directory-group-header";
 import { SidebarSection } from "./section-shell";
+import { shouldOfferSessionStop } from "./session-attention";
 import { InlineRenameInput } from "./session-item";
 import { WorkspaceSidebarSessionGroupToggle } from "./session-group-toggle";
 import { WorkspaceSidebarSessionRow } from "./session-row";
@@ -37,19 +38,12 @@ import { type SidebarSessionActivity } from "./session-row-status";
 import { useSidebarSessionDrag } from "./use-session-drag-reorder";
 import { useSessionGroupVisibility } from "./use-session-group-visibility";
 import {
+  type SidebarDirectoryDeleteTarget,
   type SidebarDirectoryGroup,
   type SidebarSectionId,
   type SidebarSectionState,
   type SidebarThread,
 } from "./types";
-
-/** 移除目录的确认目标（由接线层的删除确认弹窗消费）。 */
-export type SidebarDirectoryDeleteTarget = {
-  id: string;
-  label: string;
-  fullPath: string;
-  sessionCount: number;
-};
 
 type WorkspaceSidebarDirectoriesSectionProps = {
   // ── 目录注册表管理（原工作目录段） ──────────────────────────────
@@ -89,6 +83,8 @@ type WorkspaceSidebarDirectoriesSectionProps = {
   onRefreshSessionStats: () => void;
   onReorderSessions: (accountKey: string, order: readonly string[]) => void;
   onRestoreSession?: (sessionId: string) => void;
+  /** §4.8：就地停止会话在途回合（菜单项只在「运行中 / 等待类」时出现）。 */
+  onStopSession?: (sessionId: string) => void;
   onSelectSessionGroupingMode: (mode: SessionGroupingMode) => void;
   onSelectSessionOrderMode: (mode: SessionOrderMode) => void;
   onToggleArchivedSessions: () => void;
@@ -143,6 +139,7 @@ export function WorkspaceSidebarDirectoriesSection({
   onSelectSessionGroupingMode,
   onSelectSessionOrderMode,
   onSelectThread,
+  onStopSession,
   onToggleArchivedSessions,
   openSections,
   openSessionDirectories,
@@ -452,6 +449,9 @@ export function WorkspaceSidebarDirectoriesSection({
                         {groupVisibility.visible.map((session) => (
                           <WorkspaceSidebarSessionRow
                             activity={sessionActivity?.[session.id]}
+                            canStop={shouldOfferSessionStop(
+                              sessionActivity?.[session.id],
+                            )}
                             dragProps={dragPropsFor(group.key, session.id)}
                             key={`session-row-${session.id}`}
                             onArchive={onArchiveSession}
@@ -464,6 +464,7 @@ export function WorkspaceSidebarDirectoriesSection({
                             onRestore={onRestoreSession}
                             onSelectThread={onSelectThread}
                             onStartRename={startSessionRename}
+                            onStop={onStopSession}
                             renaming={renamingSessionId === session.id}
                             selectedThreadId={selectedThreadId}
                             session={session}

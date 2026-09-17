@@ -17,8 +17,10 @@ import { type SidebarUnregisteredDirectory } from "@/components/workspace/worksp
 import { type MergedDirectoryGroup } from "@/components/workspace/workspace-sidebar-shared";
 import { type RuntimeWorkspaceDirectory } from "@/lib/runtime-api";
 
-import { type SidebarDirectoryDeleteTarget } from "./directories-section";
-import { type WorkspaceDirectoryCreateRequest } from "./types";
+import {
+  type SidebarDirectoryDeleteTarget,
+  type WorkspaceDirectoryCreateRequest,
+} from "./types";
 
 type UseDirectoryRegistryParams = {
   mergedDirectoryGroups: MergedDirectoryGroup[];

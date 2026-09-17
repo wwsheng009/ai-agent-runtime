@@ -8,7 +8,7 @@ import {
 } from "@/lib/workspace-thread-state";
 import type { SessionRuntimeEvent } from "@/types/runtime";
 import { createThread } from "./test-fixtures";
-import { matchesActiveTurn } from "./deltas";
+import { createRuntimeDeltaCoordinator, matchesActiveTurn } from "./deltas";
 
 describe("applyRuntimeDeltaToThread", () => {
   function deltaEvent(type: string, payload: Record<string, unknown>): SessionRuntimeEvent {
@@ -282,5 +282,76 @@ describe("applyRuntimeDeltaToThread 在无 live 消息时补建在途回合", ()
         "turn-1",
       ),
     ).toBe(thread);
+  });
+});
+
+// Batch 1（工作区多会话并发）：多回合键控——跨会话并发时 B 的 beginTurn/endTurn
+// 不得清掉 A 的已消费账目，也不得抢走 A 的在途回合身份。
+describe("createRuntimeDeltaCoordinator 多回合键控", () => {
+  it("A 在途时 beginTurn(B) 不清掉 A 的账目与身份", () => {
+    const coordinator = createRuntimeDeltaCoordinator();
+    coordinator.beginTurn("turn-a");
+    const keyA = "runtime-delta|turn-a|stream-1|text|1";
+    expect(coordinator.claim(keyA)).toBe(true);
+
+    coordinator.beginTurn("turn-b");
+    // 同一 key 仍被 A 认领过 → 不重复消费。
+    expect(coordinator.claim(keyA)).toBe(false);
+    // A 仍在途（isTurnActive 按回合判定），B 也进入在途集合。
+    expect(coordinator.isTurnActive("turn-a")).toBe(true);
+    expect(coordinator.isTurnActive("turn-b")).toBe(true);
+    expect(coordinator.activeTurnIds().sort()).toEqual(["turn-a", "turn-b"]);
+    // B 自己的新 key 照常可认领。
+    expect(coordinator.claim("runtime-delta|turn-b|stream-2|text|1")).toBe(true);
+  });
+
+  it("endTurn(B) 只清 B 的账目，不影响 A 的身份与账目", () => {
+    const coordinator = createRuntimeDeltaCoordinator();
+    coordinator.beginTurn("turn-a");
+    coordinator.beginTurn("turn-b");
+    const keyA = "runtime-delta|turn-a|stream-1|text|1";
+    const keyB = "runtime-delta|turn-b|stream-2|text|1";
+    expect(coordinator.claim(keyA)).toBe(true);
+    expect(coordinator.claim(keyB)).toBe(true);
+
+    coordinator.endTurn("turn-b");
+    expect(coordinator.isTurnActive("turn-b")).toBe(false);
+    expect(coordinator.isTurnActive("turn-a")).toBe(true);
+    // A 的账目保留（B 结束不影响 A 的去重）。
+    expect(coordinator.claim(keyA)).toBe(false);
+    // B 的账目随回合结束释放（该回合不再有在途增量，重复投递可重新渲染）。
+    expect(coordinator.claim(keyB)).toBe(true);
+  });
+
+  it("claim 的 turnId 参数按显式归属分桶（key 无结构时）", () => {
+    const coordinator = createRuntimeDeltaCoordinator();
+    expect(coordinator.claim("opaque-key-1", "turn-a")).toBe(true);
+    expect(coordinator.claim("opaque-key-1")).toBe(false);
+    coordinator.endTurn("turn-a");
+    expect(coordinator.claim("opaque-key-1")).toBe(true);
+  });
+
+  it("单会话语义保持：beginTurn 后重复 key 不重复消费，endTurn 后可重认领", () => {
+    const coordinator = createRuntimeDeltaCoordinator();
+    coordinator.beginTurn("turn-1");
+    expect(coordinator.isTurnActive()).toBe(true);
+    expect(coordinator.isTurnActive("turn-1")).toBe(true);
+    expect(coordinator.isTurnActive("turn-other")).toBe(false);
+    expect(coordinator.claim("runtime-delta|turn-1|stream-1|text|1")).toBe(true);
+    expect(coordinator.claim("runtime-delta|turn-1|stream-1|text|1")).toBe(false);
+    coordinator.endTurn("turn-1");
+    expect(coordinator.isTurnActive()).toBe(false);
+    expect(coordinator.claim("runtime-delta|turn-1|stream-1|text|1")).toBe(true);
+  });
+
+  it("无身份 key 落到公共桶且只消费一次", () => {
+    const coordinator = createRuntimeDeltaCoordinator();
+    coordinator.beginTurn("turn-a");
+    expect(coordinator.claim("")).toBe(true);
+    expect(coordinator.claim("plain-key")).toBe(true);
+    expect(coordinator.claim("plain-key")).toBe(false);
+    // 公共桶不随某个回合结束而释放（无归属信息，保持宁多留勿误删）。
+    coordinator.endTurn("turn-a");
+    expect(coordinator.claim("plain-key")).toBe(false);
   });
 });

@@ -43,6 +43,18 @@ export type ComposerMenuGroup = {
   label: string;
   labelKey?: string;
   items: ComposerMenuItem[];
+  /** 引用组的数据源状态（异步 loader 的 loading / error 表达）。 */
+  status?: ComposerReferenceStatus;
+  /** true = 还有下一页（服务端语义；仅展示"继续输入缩小范围"提示）。 */
+  hasMore?: boolean;
+  /** true = 服务端因深度/扫描量/预算截断，结果可能不完备。 */
+  truncated?: boolean;
+  /** 状态行文案（已本地化；loading/error 时渲染）。 */
+  statusText?: string;
+  /** 就绪但无候选时的空态文案（已本地化）。 */
+  emptyText?: string;
+  /** truncated=true 时的页脚文案（已本地化）。 */
+  truncatedText?: string;
 };
 
 export type ComposerMenuSnapshot = {
@@ -63,11 +75,32 @@ export type ComposerReferenceItem = {
   description?: string;
 };
 
+export type ComposerReferenceStatus = "loading" | "ready" | "error";
+
 export type ComposerReferenceGroup = {
   id: string;
   /** 已由调用方本地化的分组名。 */
   label: string;
   items: readonly ComposerReferenceItem[];
+  /**
+   * 异步数据源状态：`loading` 时空组也进入 launcher（打开瞬间不闪空），
+   * 缺省视为同步数据源（与既有行为完全一致）。
+   */
+  status?: ComposerReferenceStatus;
+  /**
+   * true = 本组结果已由服务端过滤/排序，客户端**禁止**再做 `rankMatch` 与顺序重排
+   * （模糊命中不是子串，二次过滤会误杀）。
+   */
+  serverFiltered?: boolean;
+  /** 服务端提示：还有下一页 / 结果被截断（渲染页脚用）。 */
+  hasMore?: boolean;
+  truncated?: boolean;
+  /** 状态行文案（已本地化；loading/error 时渲染）。 */
+  statusText?: string;
+  /** 就绪但无候选时的空态文案（已本地化）。 */
+  emptyText?: string;
+  /** truncated=true 时的页脚文案（已本地化）。 */
+  truncatedText?: string;
 };
 
 export type ComposerMenuSource = {
@@ -171,12 +204,20 @@ function buildAttachGroup(
 }
 
 function buildReferenceLauncherGroup(group: ComposerReferenceGroup): ComposerMenuGroup | null {
-  if (group.items.length === 0) {
+  const loading = group.status === "loading";
+  // loading 中的空组也要进 launcher：打开菜单瞬间显示"加载中"而不是整段闪空。
+  if (group.items.length === 0 && !loading) {
     return null;
   }
   return {
     id: group.id,
     label: group.label,
+    status: group.status,
+    hasMore: group.hasMore,
+    truncated: group.truncated,
+    statusText: group.statusText,
+    emptyText: group.emptyText,
+    truncatedText: group.truncatedText,
     items: [
       {
         id: `launcher:${group.id}`,
@@ -194,6 +235,37 @@ function buildReferenceLeafGroup(
   group: ComposerReferenceGroup,
   query: string,
 ): ComposerMenuGroup | null {
+  const messages = {
+    status: group.status,
+    hasMore: group.hasMore,
+    truncated: group.truncated,
+    statusText: group.statusText,
+    emptyText: group.emptyText,
+    truncatedText: group.truncatedText,
+  };
+  // 服务端已过滤/排序：原样截断，禁止客户端二次 rankMatch 与重排。
+  if (group.serverFiltered === true) {
+    const items = group.items
+      .slice(0, COMPOSER_MENU_MAX_ITEMS_PER_GROUP)
+      .map((reference) => ({
+        id: `reference:${group.id}:${reference.id}`,
+        groupId: group.id,
+        label: reference.label,
+        description: reference.description,
+        level: "leaf" as const,
+        action: { kind: "reference" as const, text: reference.insertText },
+      }));
+    if (
+      items.length === 0 &&
+      !group.statusText &&
+      !group.emptyText &&
+      !group.status
+    ) {
+      return null;
+    }
+    return { id: group.id, label: group.label, items, ...messages };
+  }
+
   const ranked = group.items
     .map((reference) => ({
       item: {
@@ -208,13 +280,16 @@ function buildReferenceLeafGroup(
     }))
     .filter((entry) => entry.rank >= 0);
 
-  if (ranked.length === 0) {
+  // 本地过滤后为空时，仍保留带状态/空态文案的分组（异步数据源需要可解释的空态行）；
+  // 既有的同步空组（无任何文案）行为不变：整组剔除。
+  if (ranked.length === 0 && !group.statusText && !group.emptyText && !group.status) {
     return null;
   }
   return {
     id: group.id,
     label: group.label,
     items: sortByRank(ranked).slice(0, COMPOSER_MENU_MAX_ITEMS_PER_GROUP),
+    ...messages,
   };
 }
 

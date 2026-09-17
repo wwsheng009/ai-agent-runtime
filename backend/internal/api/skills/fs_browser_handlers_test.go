@@ -343,6 +343,7 @@ func TestFSRoutesWithoutServiceReturn503(t *testing.T) {
 	}{
 		{http.MethodGet, "/fs/roots"},
 		{http.MethodGet, "/fs/list?scope=cwd"},
+		{http.MethodGet, "/fs/search?scope=cwd"},
 		{http.MethodGet, "/fs/stat?scope=cwd&path=a"},
 		{http.MethodGet, "/fs/preview?scope=cwd&path=a"},
 		{http.MethodGet, "/fs/download?scope=cwd&path=a"},

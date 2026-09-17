@@ -15,6 +15,7 @@ import (
 type FSBrowserService interface {
 	ListRoots(ctx context.Context) ([]filebrowse.Root, error)
 	List(ctx context.Context, req filebrowse.ListRequest) (*filebrowse.ListResult, error)
+	Search(ctx context.Context, req filebrowse.SearchRequest) (*filebrowse.SearchResult, error)
 	Stat(ctx context.Context, req filebrowse.PathRequest) (*filebrowse.EntryStat, error)
 	Preview(ctx context.Context, req filebrowse.PreviewRequest) (*filebrowse.Preview, error)
 	OpenDownload(ctx context.Context, req filebrowse.PathRequest) (*filebrowse.DownloadTarget, error)
@@ -37,6 +38,7 @@ func RegisterFSBrowserRoutes(router *mux.Router, service FSBrowserService) {
 	handlers := &fsBrowserHandlers{service: service}
 	router.HandleFunc("/fs/roots", handlers.roots).Methods(http.MethodGet)
 	router.HandleFunc("/fs/list", handlers.list).Methods(http.MethodGet)
+	router.HandleFunc("/fs/search", handlers.search).Methods(http.MethodGet)
 	router.HandleFunc("/fs/stat", handlers.stat).Methods(http.MethodGet)
 	router.HandleFunc("/fs/preview", handlers.preview).Methods(http.MethodGet)
 	// GET 与 HEAD 共用一个 handler：http.ServeContent 会自动处理 HEAD（只写头不写体）。

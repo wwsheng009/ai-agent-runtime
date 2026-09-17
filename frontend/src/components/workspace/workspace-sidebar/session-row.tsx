@@ -20,12 +20,15 @@ export type WorkspaceSidebarSessionRowProps = {
   /** 来自 useSidebarSessionDrag 的行级拖拽属性；manual 模式下才存在。 */
   dragProps?: SidebarSessionDragRowProps | undefined;
   onArchive?: ((sessionId: string) => void) | undefined;
+  /** §4.8：活动投影判定「运行中 / 等待类」时为 true，菜单出现「停止运行」。 */
+  canStop?: boolean | undefined;
   onCancelRename: () => void;
   onDelete?: ((sessionId: string) => void) | undefined;
   /** Fork：带上源标题，供接线层生成「（分支）」后缀。 */
   onFork?: ((sessionId: string, sourceTitle: string) => void) | undefined;
   onRenameSubmit: (sessionId: string, title: string) => void;
   onRestore?: ((sessionId: string) => void) | undefined;
+  onStop?: ((sessionId: string) => void) | undefined;
   onSelectThread: (threadId: string) => void;
   onStartRename: (sessionId: string) => void;
   renaming: boolean;
@@ -39,6 +42,7 @@ export type WorkspaceSidebarSessionRowProps = {
 
 export function WorkspaceSidebarSessionRow({
   activity,
+  canStop,
   dragProps,
   onArchive,
   onCancelRename,
@@ -46,6 +50,7 @@ export function WorkspaceSidebarSessionRow({
   onFork,
   onRenameSubmit,
   onRestore,
+  onStop,
   onSelectThread,
   onStartRename,
   renaming,
@@ -73,8 +78,10 @@ export function WorkspaceSidebarSessionRow({
         fork: t("sidebar.session.fork"),
         menu: t("sidebar.session.menu"),
         restore: t("sidebar.session.restore"),
+        stop: t("sidebar.session.stop"),
       }}
       {...dragProps}
+      canStop={canStop}
       isActive={row.isActive}
       lineage={row.lineage}
       onArchive={onArchive}
@@ -85,6 +92,7 @@ export function WorkspaceSidebarSessionRow({
       }
       onRenameSubmit={(sessionId, value) => onRenameSubmit(sessionId, value)}
       onRestore={onRestore}
+      onStop={onStop}
       onSelect={() => onSelectThread(row.thread?.id ?? session.id)}
       onStartRename={onStartRename}
       renameLabels={{

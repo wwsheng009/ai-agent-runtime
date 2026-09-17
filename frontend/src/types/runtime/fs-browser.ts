@@ -163,3 +163,74 @@ export type FsTransferProgress = {
   total: number;
   speedBytesPerSecond?: number;
 };
+
+// —— P1：跨目录模糊搜索（GET /api/runtime/fs/search） ——
+//
+// 后端契约（backend/internal/filebrowse/search.go，规划 §4.4.1）：
+//   query: scope, q(字面匹配，≤256 rune), path(相对根，可空), cursor, limit(≤50),
+//          show_hidden, kinds(file|dir|both), max_depth(≤16), max_scan(≤50000), budget_ms(≤1000)
+//   响应体：{ scope, query, base, items[], next_cursor?, has_more, scanned,
+//            truncated, truncated_reason?, elapsed_ms, limit }
+//
+// 归一化纪律（与 fs-list.ts 同款）：
+//   * `items` 非数组 → 抛错（不伪装成空结果）；
+//   * `next_cursor` 非字符串/空串 → null；`has_more`/`truncated` 缺省 false；
+//   * 缺 `type` 或未知 type → "unknown"（不猜成 file/dir）；
+//   * size/mtime 非有限数 → -1；未知 `truncated_reason` 收口丢弃（不猜归因）。
+
+/** 搜索的条目类型过滤；composer 只用 `file`，面板用 `both`。 */
+export type FsSearchKind = "file" | "dir" | "both";
+
+/** 命中位置（`start` 含、`end` 不含，单位是**显示字符串的 rune 偏移**），供 UI 高亮。 */
+export type FsSearchMatch = {
+  field: "name" | "path";
+  start: number;
+  end: number;
+};
+
+export type FsSearchItem = {
+  name: string;
+  /** 相对作用域根（分隔符统一 `/`）。 */
+  path: string;
+  type: FsEntryType;
+  size: number;
+  mtime: number;
+  ext?: string;
+  /** 相关度分值；空查询首屏为 0（不做打分）。 */
+  score: number;
+  match?: FsSearchMatch;
+};
+
+/** `truncated` 为真时的归因枚举（规划 §4.4.1）：区分预算耗尽与深度截断。 */
+export type FsSearchTruncatedReason = "depth" | "scan" | "budget" | "dir_entries";
+
+export type FsSearchResult = {
+  scope: string;
+  query: string;
+  base: string;
+  items: FsSearchItem[];
+  nextCursor: string | null;
+  /** 按相关度还有下一页可翻；与 `truncated` 正交（四象限都合法）。 */
+  hasMore: boolean;
+  /** 本次实际扫描的条目数（仅可观测性，不参与前端逻辑）。 */
+  scanned: number;
+  /** 结果可能不完备（深度/扫描量/预算/单目录枚举上限）。 */
+  truncated: boolean;
+  truncatedReasons: FsSearchTruncatedReason[];
+  elapsedMs: number;
+  limit: number;
+};
+
+export type FsSearchRequest = {
+  scope: string;
+  query?: string;
+  /** 相对作用域根的基础目录；空/缺省 = 整个作用域。 */
+  path?: string;
+  cursor?: string | null;
+  limit?: number;
+  showHidden?: boolean;
+  kinds?: FsSearchKind;
+  maxDepth?: number;
+  maxScan?: number;
+  budgetMs?: number;
+};

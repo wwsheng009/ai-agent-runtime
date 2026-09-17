@@ -194,6 +194,107 @@ describe("MessageComposer trigger menu", () => {
     ]);
   });
 
+  it("reports menu state changes (open/mode/query) to the host", () => {
+    const onMenuStateChange = vi.fn();
+    renderComposer({ onMenuStateChange });
+
+    // 挂载即回调关闭态：宿主据此判定「不发请求」。
+    expect(onMenuStateChange).toHaveBeenLastCalledWith({
+      open: false,
+      mode: "references",
+      query: "",
+    });
+
+    type("@app");
+    expect(onMenuStateChange).toHaveBeenLastCalledWith({
+      open: true,
+      mode: "references",
+      query: "app",
+    });
+
+    // `+` 按钮进的是 all 模式：宿主不应把它当成 `@` 搜索。
+    press("Escape");
+    const trigger = container.querySelector(
+      "button[data-composer-menu-trigger]",
+    ) as HTMLButtonElement;
+    act(() => trigger.click());
+    expect(onMenuStateChange).toHaveBeenLastCalledWith({
+      open: true,
+      mode: "all",
+      query: "",
+    });
+
+    press("Escape");
+    // 关闭态下 manual 复位：mode 回落为 references（宿主只看 open，不据此发请求）。
+    expect(onMenuStateChange).toHaveBeenLastCalledWith({
+      open: false,
+      mode: "references",
+      query: "",
+    });
+  });
+
+  it("blocks Enter when the @ menu has no candidates (no fallback to raw token)", () => {
+    renderComposer();
+    type("@zzz");
+
+    const event = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      textarea().dispatchEvent(event);
+    });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(container.querySelector("[data-composer-menu]")).not.toBeNull();
+    expect(container.querySelector("[data-composer-menu-empty]")).not.toBeNull();
+  });
+
+  it("drills into a loading workspace group and renders the status note", () => {
+    renderComposer({
+      referenceGroups: [
+        {
+          id: "workspace-files",
+          label: "工作区文件",
+          items: [],
+          status: "loading",
+          statusText: "正在读取工作区文件…",
+        },
+      ],
+    });
+    type("@");
+    press("Enter");
+
+    const note = container.querySelector("[data-composer-menu-group-note='workspace-files']");
+    expect(note?.textContent).toBe("正在读取工作区文件…");
+    // 有分组状态行时不再落「无匹配候选」根空态。
+    expect(container.querySelector("[data-composer-menu-empty]")).toBeNull();
+  });
+
+  it("renders the truncated footer for workspace groups", () => {
+    renderComposer({
+      referenceGroups: [
+        {
+          id: "workspace-files",
+          label: "工作区文件",
+          status: "ready",
+          serverFiltered: true,
+          truncated: true,
+          truncatedText: "结果已截断，继续输入以缩小范围",
+          items: [{ id: "p1", label: "index.ts", insertText: "index.ts" }],
+        },
+      ],
+    });
+    type("@");
+    press("Enter");
+
+    const footer = container.querySelector(
+      "[data-composer-menu-group-truncated='workspace-files']",
+    );
+    expect(footer?.textContent).toBe("结果已截断，继续输入以缩小范围");
+  });
+
   it("drills into a popupSelect command's own options and dispatches the picked value", () => {
     const onCommand = vi.fn(
       (command: { name: string; kind: string }, args: string, source: "pick" | "submit") => {

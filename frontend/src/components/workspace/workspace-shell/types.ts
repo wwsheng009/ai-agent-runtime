@@ -97,6 +97,11 @@ export type WorkspaceShellProps = {
   branchError?: string | null;
   /** P1-9 非破坏删除：仅移除会话记录，不连带目录与磁盘数据。 */
   onDeleteRuntimeSession?: (sessionId: string) => Promise<void> | void;
+  /**
+   * §4.8 后台会话停止：按会话投递 `interrupt`（不要求本地持有该会话的 controller）。
+   * 缺省时侧栏会话行不渲染「停止运行」菜单项。
+   */
+  onStopRuntimeSession?: (sessionId: string) => Promise<void> | void;
   /** P1-9 本地已知的会话活动（等待/运行类）；键为 sessionId。 */
   sessionActivity?: Record<string, SidebarSessionActivity>;
   runtimeClient: RuntimeClientIdentity;

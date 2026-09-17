@@ -5,6 +5,7 @@ import {
   convergePendingInteractions,
   emptyPendingInteractionState,
   failPendingInteractionResolve,
+  findPendingInteraction,
   hydratePendingInteractions,
   markPendingInteractionResolving,
   pendingPlanReviewFromPlan,
@@ -103,9 +104,25 @@ export function usePendingInteractions({
     [],
   );
 
+  // Batch 1（去单例）：投递按**条目身份**路由——条目自带 sessionId，因此后台
+  // 会话（非选中会话）的审批/回答也能落到发起会话，不再依赖 hook 入参的
+  // 「当前会话」。条目缺失 sessionId 时回落入参（旧行为，逐字节等价）。
+  const stateRef = useRef(state);
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+  const resolveEntrySessionId = useCallback(
+    (entryId: string): string => {
+      const entry = findPendingInteraction(stateRef.current, entryId);
+      return entry?.sessionId ?? sessionId ?? "";
+    },
+    [sessionId],
+  );
+
   const resolveApproval = useCallback(
     async (requestId: string, allow: boolean): Promise<boolean> => {
-      if (!sessionId || !requestId) {
+      const targetSessionId = resolveEntrySessionId(requestId);
+      if (!targetSessionId || !requestId) {
         return false;
       }
       const controller = new AbortController();
@@ -113,7 +130,7 @@ export function usePendingInteractions({
       setState((current) => markPendingInteractionResolving(current, requestId));
       try {
         await resolveSessionToolApproval(
-          sessionId,
+          targetSessionId,
           { requestId, allow },
           { signal: controller.signal },
         );
@@ -141,12 +158,13 @@ export function usePendingInteractions({
         delete controllersRef.current[requestId];
       }
     },
-    [getErrorMessage, sessionId],
+    [getErrorMessage, resolveEntrySessionId],
   );
 
   const answerQuestion = useCallback(
     async (questionId: string, answer: string): Promise<boolean> => {
-      if (!sessionId || !questionId) {
+      const targetSessionId = resolveEntrySessionId(questionId);
+      if (!targetSessionId || !questionId) {
         return false;
       }
       const controller = new AbortController();
@@ -156,7 +174,7 @@ export function usePendingInteractions({
       );
       try {
         await answerSessionQuestionApi(
-          sessionId,
+          targetSessionId,
           { questionId, answer },
           { signal: controller.signal },
         );
@@ -183,7 +201,7 @@ export function usePendingInteractions({
         delete controllersRef.current[questionId];
       }
     },
-    [getErrorMessage, sessionId],
+    [getErrorMessage, resolveEntrySessionId],
   );
 
   const planReview = useMemo(

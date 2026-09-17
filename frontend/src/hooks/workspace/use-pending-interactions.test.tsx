@@ -250,6 +250,39 @@ describe("usePendingInteractions", () => {
     expect(hook.current.pending).toBeNull();
   });
 
+  it("routes a background session decision to the entry's own session", async () => {
+    mockResolveApproval.mockResolvedValue({});
+    mockAnswerQuestion.mockResolvedValue({});
+    const hook = renderHook("session-1");
+    act(() => {
+      // 后台会话（非选中）：条目不抢占呈现位，但投递必须落到它自己的会话。
+      hook.current.applyRuntimeEvent(approvalRequested("session-2", "req-bg"));
+      hook.current.applyRuntimeEvent(
+        runtimeEvent(
+          "question_asked",
+          { question_id: "q-bg", prompt: "continue?", required: false },
+          "session-2",
+        ),
+      );
+    });
+    expect(hook.current.pending).toBeNull();
+
+    await act(async () => {
+      expect(await hook.current.resolveApproval("req-bg", true)).toBe(true);
+      expect(await hook.current.answerQuestion("q-bg", "yes")).toBe(true);
+    });
+    expect(mockResolveApproval).toHaveBeenCalledWith(
+      "session-2",
+      { requestId: "req-bg", allow: true },
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(mockAnswerQuestion).toHaveBeenCalledWith(
+      "session-2",
+      { questionId: "q-bg", answer: "yes" },
+      { signal: expect.any(AbortSignal) },
+    );
+  });
+
   it("converges pending entries on session termination events", () => {
     const hook = renderHook("session-1");
     act(() => {
