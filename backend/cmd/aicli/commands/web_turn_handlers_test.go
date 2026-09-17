@@ -158,3 +158,149 @@ func TestHandleChatWebAPITurnGuards(t *testing.T) {
 		t.Fatalf("POST status = %d, want 405", rec.Code)
 	}
 }
+
+// TestChatWebTurnRecorder_AssistantPreview 锁定 assistant 预览：
+// 按 rune 截断（≤200 + 省略号）并记录完整字符数。
+func TestChatWebTurnRecorder_AssistantPreview(t *testing.T) {
+	session, bus := newTurnRecorderTestSession(t)
+	ensureChatWebTurnRecorder(session)
+
+	bus.Publish(runtimeevents.Event{
+		Type: runtimechat.EventSessionStart, SessionID: "session_t",
+		Payload: map[string]interface{}{"turn_id": "turn_preview"},
+	})
+
+	long := strings.Repeat("测", 260)
+	bus.Publish(runtimeevents.Event{
+		Type: runtimechat.EventAssistantMessage, SessionID: "session_t",
+		Payload: map[string]interface{}{"content": long},
+	})
+
+	record := recorderForSession(session).lookup("turn_preview")
+	if record == nil {
+		t.Fatal("turn_preview not recorded")
+	}
+	if record.AssistantChars != 260 {
+		t.Fatalf("assistant_chars = %d, want 260", record.AssistantChars)
+	}
+	if runes := []rune(record.AssistantPreview); len(runes) != chatWebTurnAssistantPreviewRunes+1 {
+		t.Fatalf("preview runes = %d, want %d（含省略号）", len(runes), chatWebTurnAssistantPreviewRunes+1)
+	}
+	if !strings.HasSuffix(record.AssistantPreview, "…") {
+		t.Fatalf("preview 应以省略号结尾: %q", record.AssistantPreview)
+	}
+
+	// 短消息：原样保留、无省略号。
+	bus.Publish(runtimeevents.Event{
+		Type: runtimechat.EventAssistantMessage, SessionID: "session_t",
+		Payload: map[string]interface{}{"content": "短回复"},
+	})
+	record = recorderForSession(session).lookup("turn_preview")
+	if record.AssistantPreview != "短回复" || record.AssistantChars != 3 {
+		t.Fatalf("short assistant preview = %q chars=%d", record.AssistantPreview, record.AssistantChars)
+	}
+}
+
+// TestChatWebTurnRecorder_UsageScope 锁定 usage 口径：
+// 有增量时报 turn 增量（usage_scope=turn）；增量不可得的场景回退为与
+// invoke/status 同源的累计快照（usage_scope=session），不再静默报 0。
+func TestChatWebTurnRecorder_UsageScope(t *testing.T) {
+	session, bus := newTurnRecorderTestSession(t)
+	ensureChatWebTurnRecorder(session)
+
+	// 场景 1：正常增量。
+	session.InputTokenCount, session.OutputTokenCount, session.TokenCount = 100, 20, 120
+	bus.Publish(runtimeevents.Event{
+		Type: runtimechat.EventSessionStart, SessionID: "session_t",
+		Payload: map[string]interface{}{"turn_id": "turn_inc"},
+	})
+	session.InputTokenCount += 1000
+	session.OutputTokenCount += 250
+	session.TokenCount += 1250
+	session.ContextTokenCount = 4096
+	bus.Publish(runtimeevents.Event{
+		Type: runtimechat.EventAssistantMessage, SessionID: "session_t",
+		Payload: map[string]interface{}{"content": "增量口径测试回复"},
+	})
+	bus.Publish(runtimeevents.Event{
+		Type: runtimechat.EventSessionEnd, SessionID: "session_t",
+		Payload: map[string]interface{}{"turn_id": "turn_inc", "success": true},
+	})
+
+	record := recorderForSession(session).lookup("turn_inc")
+	if record == nil || record.Usage == nil {
+		t.Fatalf("turn_inc usage missing: %+v", record)
+	}
+	if record.Usage.InputTokens != 1000 || record.Usage.OutputTokens != 250 || record.Usage.TotalTokens != 1250 {
+		t.Fatalf("turn 增量 = %+v, want 1000/250/1250", record.Usage)
+	}
+	if record.Usage.ContextTokens != 4096 {
+		t.Fatalf("context_tokens = %d, want 4096", record.Usage.ContextTokens)
+	}
+	if record.UsageScope != chatWebTurnUsageScopeTurn {
+		t.Fatalf("usage_scope = %q, want %q", record.UsageScope, chatWebTurnUsageScopeTurn)
+	}
+
+	// 场景 2：计数未再变化（增量为 0）且累计非 0 → 回退 session 快照。
+	bus.Publish(runtimeevents.Event{
+		Type: runtimechat.EventSessionStart, SessionID: "session_t",
+		Payload: map[string]interface{}{"turn_id": "turn_zero"},
+	})
+	bus.Publish(runtimeevents.Event{
+		Type: runtimechat.EventSessionEnd, SessionID: "session_t",
+		Payload: map[string]interface{}{"turn_id": "turn_zero", "success": true},
+	})
+	record = recorderForSession(session).lookup("turn_zero")
+	if record == nil || record.Usage == nil {
+		t.Fatalf("turn_zero usage missing: %+v", record)
+	}
+	if record.Usage.InputTokens != 1100 || record.Usage.OutputTokens != 270 || record.Usage.TotalTokens != 1370 {
+		t.Fatalf("回退快照 = %+v, want 1100/270/1370（与 invoke 同源）", record.Usage)
+	}
+	if record.UsageScope != chatWebTurnUsageScopeSession {
+		t.Fatalf("usage_scope = %q, want %q", record.UsageScope, chatWebTurnUsageScopeSession)
+	}
+
+	// 线级契约：JSON 字段名必须稳定（脚本按名字读），且两条记录的 preview 一并在响应里。
+	body := httptest.NewRecorder()
+	HandleChatWebAPITurn(body, httptest.NewRequest(http.MethodGet, "/web/api/turn?id=turn_inc", nil))
+	raw := body.Body.String()
+	for _, want := range []string{`"usage_scope":"turn"`, `"assistant_preview":`, `"assistant_chars":`} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("turn 响应缺少 %s: %s", want, raw)
+		}
+	}
+}
+
+// TestChatWebTurnRecorder_DuplicateStartKeepsBaseline 锁定重复 session_start
+// （重试/自动续跑）不覆盖 token 增量基线：两次 start 前后的增量都计入本轮。
+func TestChatWebTurnRecorder_DuplicateStartKeepsBaseline(t *testing.T) {
+	session, bus := newTurnRecorderTestSession(t)
+	ensureChatWebTurnRecorder(session)
+
+	startEvent := runtimeevents.Event{
+		Type: runtimechat.EventSessionStart, SessionID: "session_t",
+		Payload: map[string]interface{}{"turn_id": "turn_dup"},
+	}
+	bus.Publish(startEvent)
+	session.InputTokenCount += 400
+	session.TokenCount += 400
+	bus.Publish(startEvent) // 重复 start：不得把基线推到 400
+	session.InputTokenCount += 600
+	session.TokenCount += 600
+	bus.Publish(runtimeevents.Event{
+		Type: runtimechat.EventSessionEnd, SessionID: "session_t",
+		Payload: map[string]interface{}{"turn_id": "turn_dup", "success": true},
+	})
+
+	record := recorderForSession(session).lookup("turn_dup")
+	if record == nil || record.Usage == nil {
+		t.Fatalf("turn_dup usage missing: %+v", record)
+	}
+	if record.Usage.InputTokens != 1000 || record.Usage.TotalTokens != 1000 {
+		t.Fatalf("delta = %+v, want 1000（含重复 start 之前的 400）", record.Usage)
+	}
+	if record.UsageScope != chatWebTurnUsageScopeTurn {
+		t.Fatalf("usage_scope = %q, want %q", record.UsageScope, chatWebTurnUsageScopeTurn)
+	}
+}

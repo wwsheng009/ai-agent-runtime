@@ -322,6 +322,20 @@ func HandleChatWebAPIInvoke(w http.ResponseWriter, r *http.Request) {
 	unsubscribe := subscribeChatWebInvokeWatch(session, watch)
 	defer unsubscribe()
 
+	if req.WaitOnly && chatWebInvokeIdle(session) {
+		// 空闲短路：wait_only 时若本来就没有在跑的 turn（也无待审批/待提问/排队
+		// 输入），立即按 settled 返回。否则会空等满 timeout_ms 再回 timeout，
+		// 让"早就空闲"和"仍在运行"在状态上无法区分。
+		final := chatWebInvokeFinalize(&chatWebInvokeResponse{}, session, watch, baselineAssistant,
+			"settled", "session already idle: wait_only had nothing to wait for")
+		final.ElapsedMs = time.Since(started).Milliseconds()
+		final.Usage = chatWebInvokeUsageFrom(session)
+		final.Queued = false
+		storeChatWebInvokeIdem(idemKey, final)
+		writeChatWebInvokeResult(w, stream, http.StatusOK, final)
+		return
+	}
+
 	if !req.WaitOnly {
 		result, ok := injectChatWebPrompt(session, prompt)
 		if !ok {
@@ -662,6 +676,22 @@ func chatWebInvokeWait(ctx context.Context, session *ChatSession, watch *chatWeb
 			return chatWebInvokeFinalize(resp, current, watch, baselineAssistant, status, "")
 		}
 	}
+}
+
+// chatWebInvokeIdle 判断会话当前是否"无事可等"：无运行中 turn、无待审批/
+// 待提问、输入队列为空。供 wait_only 的空闲短路使用（避免空等满 timeout）。
+func chatWebInvokeIdle(session *ChatSession) bool {
+	if session == nil {
+		return false
+	}
+	_, _, busy, approval, question := chatWebInvokeProbeFn(session)
+	if busy || approval != nil || question != nil {
+		return false
+	}
+	if session.InputQueue != nil && session.InputQueue.queuedSubmissionCount() > 0 {
+		return false
+	}
+	return true
 }
 
 // chatWebInvokeProbe 解析当前会话的运行状态：session/turn 标识、是否忙碌、

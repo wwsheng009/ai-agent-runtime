@@ -25,6 +25,14 @@ import (
 const (
 	chatWebTurnRecordMax = 128
 	chatWebTurnRecordTTL = 30 * time.Minute
+
+	// chatWebTurnAssistantPreviewRunes 限制 assistant 预览长度：turn 记录
+	// 是"后验摘要"，完整回复应走 /web/api/screen（transcript）或 invoke 响应。
+	chatWebTurnAssistantPreviewRunes = 200
+
+	// usage 口径标识（见 chatWebTurnRecord.UsageScope）。
+	chatWebTurnUsageScopeTurn    = "turn"
+	chatWebTurnUsageScopeSession = "session"
 )
 
 // chatWebTurnRecord 是单个 turn 的终态/进行态记录。
@@ -38,6 +46,14 @@ type chatWebTurnRecord struct {
 	Steps      int                 `json:"steps,omitempty"`
 	Error      string              `json:"error,omitempty"`
 	Usage      *chatWebInvokeUsage `json:"usage,omitempty"`
+	// UsageScope 说明 Usage 的口径：turn=本轮增量；session=本轮增量不可得
+	// （计数基线缺失）时回退为会话累计快照（与 /web/api/invoke、/status 同源），
+	// 避免把"看起来没消耗 token"误读成本轮真的零消耗。
+	UsageScope string `json:"usage_scope,omitempty"`
+	// AssistantPreview 是本轮最后一条 assistant 消息的截断预览（≤200 rune），
+	// AssistantChars 是其完整字符数（大于预览长度说明有截断）。
+	AssistantPreview string `json:"assistant_preview,omitempty"`
+	AssistantChars   int    `json:"assistant_chars,omitempty"`
 
 	// 内部字段：本轮起点 token 计数，用于结算增量（不参与 JSON）。
 	baseInput  int `json:"-"`
@@ -123,6 +139,12 @@ func (r *chatWebTurnRecorder) observe(event runtimeevents.Event) {
 			return
 		}
 		r.mu.Lock()
+		if existing := r.records[turnID]; existing != nil && existing.Status == "running" {
+			// 同一 turn_id 的重复 session_start（重试/自动续跑）不得覆盖记录：
+			// 覆盖会把 token 增量基线推到本轮中途，结算出 0 增量（历史上出现过）。
+			r.mu.Unlock()
+			return
+		}
 		record := &chatWebTurnRecord{
 			TurnID:    turnID,
 			SessionID: event.SessionID,
@@ -156,6 +178,17 @@ func (r *chatWebTurnRecorder) observe(event runtimeevents.Event) {
 
 	case runtimechat.EventSessionInterrupted:
 		r.finish("", event.SessionID, "interrupted", "", 0)
+
+	case runtimechat.EventAssistantMessage, "assistant.message":
+		// 记录本轮最后一条 assistant 消息的预览，供 /web/api/turn 直接给摘要
+		// （不必为了"这轮回了什么"去拉整份 transcript）。
+		if content := strings.TrimSpace(payloadStringValue(event.Payload["content"])); content != "" {
+			r.mu.Lock()
+			if record := r.latestRunningLocked(event.SessionID); record != nil {
+				record.AssistantPreview, record.AssistantChars = chatWebTurnAssistantPreview(content)
+			}
+			r.mu.Unlock()
+		}
 	}
 }
 
@@ -165,18 +198,7 @@ func (r *chatWebTurnRecorder) finish(turnID, sessionID, status, errText string, 
 	defer r.mu.Unlock()
 	record := r.records[turnID]
 	if turnID == "" || record == nil || record.Status != "running" {
-		record = nil
-		for i := len(r.order) - 1; i >= 0; i-- {
-			candidate := r.records[r.order[i]]
-			if candidate == nil || candidate.Status != "running" {
-				continue
-			}
-			if sessionID != "" && candidate.SessionID != "" && candidate.SessionID != sessionID {
-				continue
-			}
-			record = candidate
-			break
-		}
+		record = r.latestRunningLocked(sessionID)
 	}
 	if record == nil || record.Status != "running" {
 		return
@@ -198,20 +220,57 @@ func (r *chatWebTurnRecorder) finish(turnID, sessionID, status, errText string, 
 			ContextTokens:       r.session.ContextTokenCount,
 			ContextWindowTokens: r.session.ContextWindowTokenCount,
 		}
-		if usage.InputTokens < 0 {
-			usage.InputTokens = 0
-		}
-		if usage.OutputTokens < 0 {
-			usage.OutputTokens = 0
-		}
-		if usage.TotalTokens < 0 {
-			usage.TotalTokens = 0
+		usage.InputTokens = max(usage.InputTokens, 0)
+		usage.OutputTokens = max(usage.OutputTokens, 0)
+		usage.TotalTokens = max(usage.TotalTokens, 0)
+		scope := chatWebTurnUsageScopeTurn
+		if usage.InputTokens == 0 && usage.OutputTokens == 0 && usage.TotalTokens == 0 {
+			// 增量不可得（基线在计数更新之后才建立等）：回退到与 invoke/status
+			// 同源的累计快照，并用 usage_scope 明确口径，避免静默报 0。
+			if absolute := chatWebInvokeUsageFrom(r.session); absolute != nil &&
+				(absolute.InputTokens != 0 || absolute.OutputTokens != 0 || absolute.TotalTokens != 0) {
+				usage = absolute
+				scope = chatWebTurnUsageScopeSession
+			}
 		}
 		if usage.InputTokens != 0 || usage.OutputTokens != 0 || usage.TotalTokens != 0 ||
 			usage.ContextTokens != 0 {
 			record.Usage = usage
+			record.UsageScope = scope
 		}
 	}
+}
+
+// latestRunningLocked 返回该会话最近一条 running 记录（调用方持锁）。
+func (r *chatWebTurnRecorder) latestRunningLocked(sessionID string) *chatWebTurnRecord {
+	if r == nil {
+		return nil
+	}
+	for i := len(r.order) - 1; i >= 0; i-- {
+		candidate := r.records[r.order[i]]
+		if candidate == nil || candidate.Status != "running" {
+			continue
+		}
+		if sessionID != "" && candidate.SessionID != "" && candidate.SessionID != sessionID {
+			continue
+		}
+		return candidate
+	}
+	return nil
+}
+
+// chatWebTurnAssistantPreview 生成 assistant 消息预览：按 rune 截断，
+// 返回（预览, 完整字符数）。
+func chatWebTurnAssistantPreview(content string) (string, int) {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return "", 0
+	}
+	runes := []rune(trimmed)
+	if len(runes) <= chatWebTurnAssistantPreviewRunes {
+		return trimmed, len(runes)
+	}
+	return string(runes[:chatWebTurnAssistantPreviewRunes]) + "…", len(runes)
 }
 
 // pruneLocked 淘汰过期与超量记录（调用方持锁）。

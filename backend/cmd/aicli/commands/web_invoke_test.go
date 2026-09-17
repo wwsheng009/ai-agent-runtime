@@ -424,10 +424,15 @@ func TestHandleChatWebAPIInvokeSessionMismatch(t *testing.T) {
 	}
 }
 
-func TestHandleChatWebAPIInvokeWaitOnlyTimeout(t *testing.T) {
+// TestHandleChatWebAPIInvokeWaitOnlyBusyTimeout 锁定忙碌会话的 wait_only 语义：
+// 不短路，等到 deadline 后按 timeout 返回（空闲短路见
+// TestHandleChatWebAPIInvoke_WaitOnlyIdleShortCircuit）。
+func TestHandleChatWebAPIInvokeWaitOnlyBusyTimeout(t *testing.T) {
 	session := newWebTestSession()
 	withWebTestSession(t, session)
-	withStubbedInvokeProbe(t, idleInvokeProbe())
+	withStubbedInvokeProbe(t, func(*ChatSession) (string, string, bool, map[string]interface{}, map[string]interface{}) {
+		return "session_test", "turn_busy", true, nil, nil
+	})
 
 	req := httptest.NewRequest(http.MethodPost, "/web/api/invoke",
 		strings.NewReader(`{"wait_only":true,"timeout_ms":1000}`))
@@ -515,29 +520,45 @@ func TestChatWebInvokeIdempotencyStoreRules(t *testing.T) {
 	}
 }
 
+// TestHandleChatWebAPIInvokeStreaming 覆盖 SSE 结果帧：空闲短路（settled，
+// 立即返回）与忙碌等待（timeout）两条路径都必须写出 result 帧。
 func TestHandleChatWebAPIInvokeStreaming(t *testing.T) {
-	session := newWebTestSession()
-	withWebTestSession(t, session)
-	withStubbedInvokeProbe(t, idleInvokeProbe())
+	cases := []struct {
+		name       string
+		probe      func(*ChatSession) (string, string, bool, map[string]interface{}, map[string]interface{})
+		wantStatus string
+	}{
+		{name: "空闲短路", probe: idleInvokeProbe(), wantStatus: "settled"},
+		{name: "忙碌等待到超时", probe: func(*ChatSession) (string, string, bool, map[string]interface{}, map[string]interface{}) {
+			return "session_test", "turn_busy", true, nil, nil
+		}, wantStatus: "timeout"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			session := newWebTestSession()
+			withWebTestSession(t, session)
+			withStubbedInvokeProbe(t, tc.probe)
 
-	req := httptest.NewRequest(http.MethodPost, "/web/api/invoke",
-		strings.NewReader(`{"wait_only":true,"timeout_ms":1000}`))
-	req.Header.Set("Accept", "text/event-stream")
-	rec := httptest.NewRecorder()
-	HandleChatWebAPIInvoke(rec, req)
+			req := httptest.NewRequest(http.MethodPost, "/web/api/invoke",
+				strings.NewReader(`{"wait_only":true,"timeout_ms":1000}`))
+			req.Header.Set("Accept", "text/event-stream")
+			rec := httptest.NewRecorder()
+			HandleChatWebAPIInvoke(rec, req)
 
-	out := rec.Body.String()
-	if !strings.Contains(out, "event: start") {
-		t.Fatalf("missing start frame: %s", out)
-	}
-	if !strings.Contains(out, "event: result") {
-		t.Fatalf("missing result frame: %s", out)
-	}
-	if !strings.Contains(out, `"status":"timeout"`) {
-		t.Fatalf("result frame missing status: %s", out)
-	}
-	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
-		t.Fatalf("content-type = %q", ct)
+			out := rec.Body.String()
+			if !strings.Contains(out, "event: start") {
+				t.Fatalf("missing start frame: %s", out)
+			}
+			if !strings.Contains(out, "event: result") {
+				t.Fatalf("missing result frame: %s", out)
+			}
+			if !strings.Contains(out, `"status":"`+tc.wantStatus+`"`) {
+				t.Fatalf("result frame missing status %s: %s", tc.wantStatus, out)
+			}
+			if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+				t.Fatalf("content-type = %q", ct)
+			}
+		})
 	}
 }
 
@@ -600,5 +621,44 @@ func TestChatWebInvokeUsageFromSession(t *testing.T) {
 	if usage.InputTokens != 10 || usage.OutputTokens != 2 || usage.TotalTokens != 12 ||
 		usage.ContextTokens != 8 || usage.ContextWindowTokens != 1000 {
 		t.Fatalf("usage = %+v", usage)
+	}
+}
+
+// TestHandleChatWebAPIInvoke_WaitOnlyIdleShortCircuit 锁定 wait_only 的空闲
+// 短路：会话本来空闲时立即返回 settled（reason 说明无事可等），不空等 timeout_ms。
+func TestHandleChatWebAPIInvoke_WaitOnlyIdleShortCircuit(t *testing.T) {
+	session := newWebTestSession()
+	withWebTestSession(t, session)
+	withStubbedInvokeProbe(t, func(*ChatSession) (string, string, bool, map[string]interface{}, map[string]interface{}) {
+		return "session_test", "", false, nil, nil
+	})
+
+	start := time.Now()
+	rec := httptest.NewRecorder()
+	HandleChatWebAPIInvoke(rec, httptest.NewRequest(http.MethodPost, ChatWebAPIInvokePath,
+		strings.NewReader(`{"wait_only":true,"timeout_ms":60000}`)))
+	elapsed := time.Since(start)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 body=%s", rec.Code, rec.Body.String())
+	}
+	var resp chatWebInvokeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, rec.Body.String())
+	}
+	if resp.Status != "settled" {
+		t.Fatalf("wait_only 空闲应返回 settled，实际 %q (reason=%s)", resp.Status, resp.Reason)
+	}
+	if !strings.Contains(resp.Reason, "idle") {
+		t.Fatalf("reason 应说明会话已空闲: %q", resp.Reason)
+	}
+	if resp.Busy {
+		t.Fatalf("idle 短路不应报告 busy: %+v", resp)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("空闲短路应立即返回，实际耗时 %s", elapsed)
+	}
+	if session.InputQueue != nil && session.InputQueue.queuedSubmissionCount() != 0 {
+		t.Fatalf("wait_only 不得注入输入，队列剩余 %d", session.InputQueue.queuedSubmissionCount())
 	}
 }
