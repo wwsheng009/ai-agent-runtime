@@ -29,6 +29,7 @@ export const MessageMarkdown = memo(function MessageMarkdown({
   content,
   interrupted = false,
   streaming = false,
+  onSelectArtifact,
 }: MessageMarkdownProps) {
   const { t } = useTranslation("workspace");
   const deferredContent = useDeferredValue(content);
@@ -42,8 +43,8 @@ export const MessageMarkdown = memo(function MessageMarkdown({
   // 且此时没有连续紧急更新，不存在饿死。
   const renderContent = streaming ? content : deferredContent;
   const markdownComponents = useMemo(
-    () => createMarkdownComponents(streaming),
-    [streaming],
+    () => createMarkdownComponents(streaming, onSelectArtifact),
+    [onSelectArtifact, streaming],
   );
   const streamingParts = useMemo(
     () =>

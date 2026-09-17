@@ -24,12 +24,15 @@ export function StreamingMarkdown({
   content,
   interrupted,
   liveStreamId,
+  onSelectArtifact,
   streaming,
 }: {
   content: string;
   interrupted?: boolean;
   /** live 通道键（消息 id）：非流式行传 null，避免无谓订阅。 */
   liveStreamId?: string | null;
+  /** C5：透传给 MessageMarkdown，供 tool_result 里的 artifact 指针行打开详情对话框。 */
+  onSelectArtifact?: (artifactId: string) => void;
   streaming?: boolean;
 }) {
   // live 通道（见 lib/live-stream-text.ts）：流式期间正文按增量写外部 store，
@@ -58,6 +61,7 @@ export function StreamingMarkdown({
     <MessageMarkdown
       content={revealedContent}
       interrupted={interrupted}
+      onSelectArtifact={onSelectArtifact}
       streaming={streaming}
     />
   );

@@ -82,6 +82,10 @@ export const enWorkspacePanelsMessages = {
   markdown: {
     stoppedAriaLabel: "Response stopped",
     stopped: "Stopped",
+    openArtifactOutput: "View full raw output",
+    openArtifactOutputAriaLabel: "View full raw output ({{artifactId}})",
+    artifactOutputCopied: "Copied full raw output id",
+    artifactOutputCopyFailed: "Copy failed. Full id: {{artifactId}}",
   },
   reasoningRow: {
     title: "Reasoning",

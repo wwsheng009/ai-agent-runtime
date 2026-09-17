@@ -81,6 +81,10 @@ export const zhWorkspacePanelsMessages = {
   markdown: {
     stoppedAriaLabel: "响应已停止",
     stopped: "已停止",
+    openArtifactOutput: "查看完整原始输出",
+    openArtifactOutputAriaLabel: "查看完整原始输出（{{artifactId}}）",
+    artifactOutputCopied: "已复制完整原始输出 id",
+    artifactOutputCopyFailed: "复制失败，完整 id：{{artifactId}}",
   },
   reasoningRow: {
     title: "推理过程",

@@ -62,6 +62,7 @@ export function renderMessageSegment(
           content={segment.content}
           interrupted={options?.interrupted}
           liveStreamId={options?.liveStreamId}
+          onSelectArtifact={options?.onSelectArtifact}
           streaming={options?.streaming}
         />
       </div>

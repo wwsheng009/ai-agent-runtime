@@ -4,6 +4,11 @@
 import { isValidElement, type ReactNode } from "react";
 import { type Components } from "react-markdown";
 import { CodeBlock } from "@/components/ui/code-block";
+import {
+  ArtifactOutputLink,
+  findArtifactOutputId,
+  findArtifactOutputLineId,
+} from "./artifact-output-link";
 
 const LINK_CLASS_NAME =
   "font-medium text-accent-secondary underline decoration-accent-secondary/35 underline-offset-4 transition hover:text-foreground hover:decoration-accent-secondary";
@@ -142,7 +147,10 @@ function renderMarkdownImage(
   return renderImagePlaceholder(alt, "blocked");
 }
 
-export function createMarkdownComponents(streaming: boolean): Components {
+export function createMarkdownComponents(
+  streaming: boolean,
+  onSelectArtifact?: (artifactId: string) => void,
+): Components {
   return {
     a: ({ children, href }) => renderMarkdownLink(children, href, streaming),
     blockquote: ({ children }) => (
@@ -153,13 +161,37 @@ export function createMarkdownComponents(streaming: boolean): Components {
     code: ({ children, className }) => {
       const language = getCodeLanguage(className);
       if (language) {
+        const code = collectTextContent(children).replace(/\n$/, "");
+        const artifactId = findArtifactOutputId(code);
         return (
-          <CodeBlock
-            className="my-4"
-            collapsible
-            code={collectTextContent(children).replace(/\n$/, "")}
-            language={language}
-            streaming={streaming}
+          <>
+            <CodeBlock
+              className="my-4"
+              collapsible
+              code={code}
+              language={language}
+              streaming={streaming}
+            />
+            {artifactId ? (
+              <ArtifactOutputLink
+                artifactId={artifactId}
+                className="my-2"
+                onSelectArtifact={onSelectArtifact}
+              />
+            ) : null}
+          </>
+        );
+      }
+
+      // 无语言 code（行内 code / 无围栏代码块）：整段 content 就是指针行时才替换，
+      // 避免多行代码块因包含指针而被整体吞掉。
+      const inlineText = collectTextContent(children);
+      const inlineArtifactId = findArtifactOutputLineId(inlineText);
+      if (inlineArtifactId) {
+        return (
+          <ArtifactOutputLink
+            artifactId={inlineArtifactId}
+            onSelectArtifact={onSelectArtifact}
           />
         );
       }
@@ -204,11 +236,33 @@ export function createMarkdownComponents(streaming: boolean): Components {
         {children}
       </ol>
     ),
-    p: ({ children }) => (
-      <p className="my-3 whitespace-pre-wrap break-words text-foreground first:mt-0 last:mb-0">
-        {children}
-      </p>
-    ),
+    p: ({ children }) => {
+      const paragraphText = collectTextContent(children);
+      const lineArtifactId = findArtifactOutputLineId(paragraphText);
+      const embeddedArtifactId = lineArtifactId
+        ? null
+        : findArtifactOutputId(paragraphText);
+      return (
+        <p className="my-3 whitespace-pre-wrap break-words text-foreground first:mt-0 last:mb-0">
+          {lineArtifactId ? (
+            <ArtifactOutputLink
+              artifactId={lineArtifactId}
+              onSelectArtifact={onSelectArtifact}
+            />
+          ) : (
+            children
+          )}
+          {embeddedArtifactId ? (
+            <span className="mt-1.5 flex">
+              <ArtifactOutputLink
+                artifactId={embeddedArtifactId}
+                onSelectArtifact={onSelectArtifact}
+              />
+            </span>
+          ) : null}
+        </p>
+      );
+    },
     pre: ({ children }) => <>{children}</>,
     table: ({ children }) => (
       <div className="my-4 overflow-x-auto rounded-card border border-border bg-surface-solid">
