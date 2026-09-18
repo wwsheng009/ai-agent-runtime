@@ -310,6 +310,39 @@ describe("chat.sse 桥接帧的回放安全", () => {
     ]);
   });
 
+  it("已定稿消息被历史投影换 id 后，迟到桥接帧不再补建 streaming 占位", () => {
+    // 回归（2026-09-18）：历史投影会重写消息 id（history-mapping），补建守卫
+    // 只查 `turn-<turnId>-assistant` 时会漏掉「同回合已定稿」的消息，迟到工具帧
+    // 于是新建一条永远无人收尾的 streaming 占位（实测 UI 永久「响应中」）。
+    const thread = createLiveThread([]);
+    const finalized: Thread = {
+      ...thread,
+      messages: thread.messages.map((message) =>
+        message.role === "assistant"
+          ? {
+              ...message,
+              id: "msg-assistant-1",
+              label: "runtime",
+              streaming: false,
+              runtimeTurnId: "turn-1",
+            }
+          : message,
+      ),
+    };
+    const frame = toolFrame("chat.sse.tool_end", { content: "out" });
+
+    const next = applyRuntimeEventToThread(
+      finalized,
+      "session-1",
+      [frame],
+      frame,
+      "turn-1",
+    );
+
+    expect(next.messages).toHaveLength(finalized.messages.length);
+    expect(next.messages.some((message) => message.streaming === true)).toBe(false);
+  });
+
   it("turn 身份明确不一致时拒绝写入", () => {
     const thread = createLiveThread([
       { type: "reasoning", content: "另一个回合", running: true },

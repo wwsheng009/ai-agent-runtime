@@ -166,6 +166,8 @@ function Harness({
   activeTurn: serverTurn,
   deltaCoordinator,
   initialThread,
+  localResponding = false,
+  localTurnId = null,
   trajectoryStore,
   onThreadsChange,
   onRefreshRuntimeState,
@@ -174,6 +176,8 @@ function Harness({
   activeTurn: RuntimeSessionActiveTurn | null;
   deltaCoordinator: ReturnType<typeof createRuntimeDeltaCoordinator>;
   initialThread: Thread;
+  localResponding?: boolean;
+  localTurnId?: string | null;
   trajectoryStore: TrajectoryStore;
   onThreadsChange: (thread: Thread) => void;
   onRefreshRuntimeState?: () => void;
@@ -195,8 +199,8 @@ function Harness({
   // 与 workspace-page 完全同源：live 通道（续传身份 + 流建连）只有一个入口。
   const live = useWorkspaceLive({
     deltaCoordinator,
-    localResponding: false,
-    localTurnId: null,
+    localResponding,
+    localTurnId,
     onRuntimeEvent: () => {},
     refreshRuntimeState: onRefreshRuntimeState,
     selectedThread: thread,
@@ -218,6 +222,11 @@ type RenderedHarness = {
   thread: () => Thread;
   /** 模拟 `/runtime` 快照刷新返回的新在途回合（续传认领的唯一入口）。 */
   rerenderServerTurn: (turn: RuntimeSessionActiveTurn | null) => void;
+  /** 模拟直连回合身份建立 / 清空（看门狗、错误路径会清空）。 */
+  rerenderLocalTurn: (
+    localTurnId: string | null,
+    localResponding: boolean,
+  ) => void;
 };
 
 describe("刷新后续传（runtime/stream 增量接续到被认领的消息）", () => {
@@ -244,15 +253,24 @@ describe("刷新后续传（runtime/stream 增量接续到被认领的消息）"
 
   function renderHarness(
     serverTurn: RuntimeSessionActiveTurn | null,
-    options: { onRefreshRuntimeState?: () => void } = {},
+    options: {
+      initialThread?: Thread;
+      localResponding?: boolean;
+      localTurnId?: string | null;
+      onRefreshRuntimeState?: () => void;
+    } = {},
   ): RenderedHarness {
     const apiRef: { current: LiveApi | null } = { current: null };
-    let latest: Thread = refreshedThread();
+    let latest: Thread = options.initialThread ?? refreshedThread();
+    let localTurnId = options.localTurnId ?? null;
+    let localResponding = options.localResponding ?? false;
+    let currentServerTurn = serverTurn;
     // 与 workspace-page 同源：增量认领协调器跨重渲染保持同一实例
     // （快照刷新只换 activeTurn prop，认领账目不能被重置）。
     const deltaCoordinator = createRuntimeDeltaCoordinator();
     const trajectoryStore = createTrajectoryStore();
     const renderWith = (turn: RuntimeSessionActiveTurn | null) => {
+      currentServerTurn = turn;
       act(() => {
         root.render(
           <Harness
@@ -260,6 +278,8 @@ describe("刷新后续传（runtime/stream 增量接续到被认领的消息）"
             activeTurn={turn}
             deltaCoordinator={deltaCoordinator}
             initialThread={latest}
+            localResponding={localResponding}
+            localTurnId={localTurnId}
             trajectoryStore={trajectoryStore}
             onRefreshRuntimeState={options.onRefreshRuntimeState}
             onThreadsChange={(next) => {
@@ -275,6 +295,11 @@ describe("刷新后续传（runtime/stream 增量接续到被认领的消息）"
       store: trajectoryStore,
       thread: () => latest,
       rerenderServerTurn: renderWith,
+      rerenderLocalTurn: (nextTurnId, nextResponding) => {
+        localTurnId = nextTurnId;
+        localResponding = nextResponding;
+        renderWith(currentServerTurn);
+      },
     };
   }
 
@@ -320,6 +345,49 @@ describe("刷新后续传（runtime/stream 增量接续到被认领的消息）"
     // 仍是一条消息：续传回合的增量不允许把同一轮答复劈成两条。
     expect(thread().messages).toHaveLength(2);
     expect(textOf(thread())).toBe("前半截答案，继续写完后半截");
+  });
+
+  it("直连身份清空后，本地已终态的回合不被仍在途的快照重新认领（re-adopt）", async () => {
+    // 直连回合在跑：消息由本地直连路径创建（streaming + runtimeTurnId），
+    // `/runtime` 快照也报告同一回合。
+    const inFlight = refreshedThread();
+    inFlight.messages[1] = {
+      ...inFlight.messages[1],
+      streaming: true,
+      runtimeTurnId: "turn-9",
+    };
+    const { apiRef, thread, rerenderLocalTurn } = renderHarness(activeTurn(), {
+      initialThread: inFlight,
+      localResponding: true,
+      localTurnId: "turn-9",
+    });
+
+    expect(apiRef.current?.liveTurnId).toBe("turn-9");
+
+    // runtime 通道先到终态帧（直连流此时已无数据）——本地立即定稿。
+    act(() => {
+      calls[0].handlers.onEvent?.({
+        type: "chat.sse.done",
+        timestamp: "2026-09-16T00:00:05Z",
+        payload: { turn_id: "turn-9", status: "completed", seq: 42 },
+      });
+    });
+    await flushRuntimeCommits();
+    expect(thread().messages[1]).toMatchObject({
+      streaming: false,
+      runtimeTurnId: "turn-9",
+    });
+
+    // 直连身份随后清空（看门狗 / 错误路径），而快照尚未收敛：adoptable 由
+    // false 翻 true。没有本地终态仲裁时，adopt 会把刚定稿的消息补回 streaming。
+    rerenderLocalTurn(null, false);
+    await flushRuntimeCommits();
+
+    expect(thread().messages[1]).toMatchObject({ streaming: false });
+    expect(apiRef.current).toMatchObject({
+      liveTurnId: null,
+      currentSessionResponding: false,
+    });
   });
 
   it("重复帧被去重（同一 stream_id + sequence 只写一次）", async () => {

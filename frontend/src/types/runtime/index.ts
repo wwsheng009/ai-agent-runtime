@@ -15,6 +15,7 @@ export * from "./files";
 export * from "./skills";
 export * from "./agents";
 export * from "./config";
+export * from "./mcp";
 export * from "./service";
 export * from "./harness";
 export * from "./siteaccount";

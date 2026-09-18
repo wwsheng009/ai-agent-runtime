@@ -27,6 +27,12 @@ import {
 } from "@/lib/workspace-thread-state";
 import type { AgentChatRequest } from "@/types/runtime";
 
+/** 提交回合的可选覆盖：`/skill` 用 prompt 覆盖草稿并声明本轮 expose_skills。 */
+export type AgentChatSubmitOptions = {
+  prompt?: string;
+  exposeSkills?: readonly string[];
+};
+
 export type AgentChatTurnBootstrapInput = {
   prompt: string;
   selectedThread: Thread;
@@ -41,6 +47,8 @@ export type AgentChatTurnBootstrapInput = {
   selectedModel: string;
   selectedReasoningEffort: string;
   settings: AppSettings;
+  /** P2：本回合暴露给模型的 skill 名单（省略/空数组 = 不发送该字段）。 */
+  exposeSkills?: readonly string[];
 };
 
 export type AgentChatTurnBootstrap = {
@@ -99,6 +107,9 @@ export function prepareAgentChatTurn(
     provider: input.selectedProvider || undefined,
     model: input.selectedModel || undefined,
     reasoning_effort: input.selectedReasoningEffort || undefined,
+    ...(input.exposeSkills && input.exposeSkills.length > 0
+      ? { expose_skills: [...input.exposeSkills] }
+      : {}),
     enable_react: settings.chat.enableReact,
     enable_routing: true,
     // P4-刷新续传：页面刷新/关标签会 abort 这个 POST，服务器随后照常取消

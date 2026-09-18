@@ -44,6 +44,11 @@ export type SessionRuntimeEntrySnapshot = {
   runningAgents: number;
   lastEventAt: number | null;
   lastError: string | null;
+  /**
+   * 页面隐藏时的 poll 暂停标记（§4.6 降采样）：暂停期间不产生快照请求。
+   * `live` / `idle` 不受影响；缺省（旧夹具）视为未暂停。
+   */
+  paused?: boolean;
 };
 
 export type SessionRuntimeEntryObserver = (

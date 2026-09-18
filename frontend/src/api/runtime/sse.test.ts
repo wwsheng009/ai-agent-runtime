@@ -129,6 +129,51 @@ describe("runtime sse helpers", () => {
     }
   });
 
+  // 生产故障（2026-09-18 现场）：半开连接上 `reader.cancel()` 与挂起的
+  // `reader.read()` 双双不兑现——看门狗命中了，消费循环却停在 await 上，
+  // 回合永不收尾、提交闸门永久关闭。兜底通道必须让消费直接以
+  // SseIdleTimeoutError 失败，且 releaseLock 的异常不得将其掩盖。
+  it("cancel 无法解除挂起读取时，兜底通道仍以 SseIdleTimeoutError 收尾", async () => {
+    vi.useFakeTimers();
+    try {
+      let cancelled = 0;
+      const never = new Promise<never>(() => {});
+      const response = {
+        body: {
+          getReader: () => ({
+            read: () => never,
+            cancel: () => {
+              cancelled += 1;
+              return new Promise<void>(() => {});
+            },
+            releaseLock: () => {
+              throw new TypeError("pending read requests");
+            },
+          }),
+        },
+      } as unknown as Response;
+      const onEvent = vi.fn();
+      const onClose = vi.fn();
+
+      const consumed = consumeSseResponse(response, {
+        idleTimeoutMs: 45_000,
+        onClose,
+        onEvent,
+      });
+      const rejection = expect(consumed).rejects.toBeInstanceOf(
+        SseIdleTimeoutError,
+      );
+      await vi.advanceTimersByTimeAsync(45_000);
+
+      await rejection;
+      expect(cancelled).toBe(1);
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(onEvent).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // 反向约束：注释帧（服务端每 15s 一行 `: keepalive`）同样是存活证据，
   // 空闲会话（after == latest_seq）只有 keepalive，不能被误判成死连接。
   it("keepalive 注释帧重置看门狗：空闲长连接不被误判", async () => {

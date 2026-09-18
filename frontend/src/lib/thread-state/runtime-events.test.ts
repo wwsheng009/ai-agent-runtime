@@ -383,3 +383,97 @@ describe("applyRuntimeEventToThread 在无 live 消息时按桥接帧补建在�
     expect(applyChatSseBridgeFrame(thread, chunk, { kind: "phase" }, "turn-1")).toBe(thread);
   });
 });
+
+// 回归（2026-09-18）：直连 /api/agent/chat 静默超时后，本地 stall 路径刻意不定稿
+// （见 agent-chat-turn/stall.ts：尾巴消息保持 streaming，等 runtime 通道续写）。
+// 若 runtime 通道也不消费 `chat.sse.done`，回合在服务端正常结束后消息会永久停留
+// 在 streaming（实测：后端 active_turn=null、EventStore 已落 done，UI 仍「响应中」，
+// 刷新页面才恢复）。终态帧兜底定稿收口在 applyRuntimeEventToThread。
+describe("chat.sse 终态帧兜底定稿", () => {
+  function streamingThread(turnId: string): Thread {
+    const thread = createThread();
+    return {
+      ...thread,
+      sessionId: "session-1",
+      messages: [
+        ...thread.messages,
+        createStreamingAssistantMessage(`turn-${turnId}-assistant`, [], turnId),
+      ],
+    };
+  }
+
+  function terminalEvent(type: string, turnId: string): SessionRuntimeEvent {
+    return {
+      type,
+      timestamp: "2026-09-18T00:00:00Z",
+      payload: { turn_id: turnId, seq: 327, status: "completed" },
+    };
+  }
+
+  it("收到 chat.sse.done 时停止对应回合的 streaming", () => {
+    const thread = streamingThread("turn-9");
+    const done = terminalEvent("chat.sse.done", "turn-9");
+
+    const next = applyRuntimeEventToThread(
+      thread,
+      "session-1",
+      [done],
+      done,
+      "turn-9",
+    );
+
+    const message = next.messages.find(
+      (item) => item.id === "turn-turn-9-assistant",
+    );
+    expect(message).toMatchObject({ streaming: false, runtimeTurnId: "turn-9" });
+    // label 同步摘掉：isLiveAssistantMessage 的 label 兜底不能让迟到增量再写进来。
+    expect(message?.label).not.toBe("streaming");
+  });
+
+  it("chat.sse.error 同样定稿，重复收到终态帧保持消息引用不变", () => {
+    const thread = streamingThread("turn-9");
+    const error = terminalEvent("chat.sse.error", "turn-9");
+
+    const once = applyRuntimeEventToThread(
+      thread,
+      "session-1",
+      [error],
+      error,
+      "turn-9",
+    );
+    const twice = applyRuntimeEventToThread(
+      once,
+      "session-1",
+      [error],
+      error,
+      "turn-9",
+    );
+
+    const first = once.messages.find(
+      (item) => item.id === "turn-turn-9-assistant",
+    );
+    const second = twice.messages.find(
+      (item) => item.id === "turn-turn-9-assistant",
+    );
+    expect(first?.streaming).toBe(false);
+    expect(second).toBe(first);
+  });
+
+  it("终态帧的回合与在途消息不一致时不定稿别人的回合", () => {
+    const thread = streamingThread("turn-9");
+    const other = terminalEvent("chat.sse.done", "turn-8");
+
+    const next = applyRuntimeEventToThread(
+      thread,
+      "session-1",
+      [other],
+      other,
+      "turn-9",
+    );
+
+    const message = next.messages.find(
+      (item) => item.id === "turn-turn-9-assistant",
+    );
+    expect(message?.streaming).toBe(true);
+  });
+});

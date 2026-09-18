@@ -319,6 +319,7 @@ export const zhWorkspaceBase = {
       startNewThread: "开始新线程",
       sendTurn: "发送回合",
       startThread: "开始线程",
+      blockedInFlight: "消息未发送：会话仍在收尾上一回合，请稍候重试。",
     },
     promptTips: "提示建议",
     promptTipsMenuTitle: "提示建议",

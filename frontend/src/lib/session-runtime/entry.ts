@@ -36,9 +36,15 @@ import {
   RUNTIME_STREAM_IDLE_RECONNECT_MS,
   RUNTIME_STREAM_IDLE_TIMEOUT_MS,
   SESSION_RUNTIME_POLL_BACKOFF_FACTOR,
+  SESSION_RUNTIME_POLL_IDLE_MAX_MS,
   SESSION_RUNTIME_POLL_INITIAL_MS,
   SESSION_RUNTIME_POLL_MAX_MS,
 } from "./constants";
+import {
+  createSessionRuntimePauseGate,
+  runSessionRuntimePollLoop,
+  sleepWithSignal,
+} from "./poll-loop";
 import type {
   SessionRuntimeEntryObserver,
   SessionRuntimeEntrySnapshot,
@@ -68,6 +74,8 @@ export type SessionRuntimeEntryConfig = {
   pollInitialMs?: number;
   pollMaxMs?: number;
   pollBackoffFactor?: number;
+  /** 空闲自适应上限（成功路径的退避上限；与失败退避 `pollMaxMs` 独立）。 */
+  pollIdleMaxMs?: number;
 };
 
 export type SessionRuntimeEntry = {
@@ -76,6 +84,11 @@ export type SessionRuntimeEntry = {
   subscribe(observer: SessionRuntimeEntryObserver): () => void;
   /** 由注册表按预算/策略调用：切换订阅强度（幂等）。 */
   setMode(mode: SubscriptionMode): void;
+  /**
+   * 页面隐藏时暂停 `poll` 循环（`live` 不受影响）：暂停期间不发起快照请求，
+   * `setPaused(false)` 立即唤醒循环并拉取一次（恢复可见即刷新）。
+   */
+  setPaused(paused: boolean): void;
   /** 本地发起回合（提交流）时登记在途身份；回合终态传 null。 */
   noteActiveTurn(turn: RuntimeSessionActiveTurn | null): void;
   /** 手动重试（P1-8 语义）：重启当前循环，不新增第二套退避。 */
@@ -176,6 +189,7 @@ export function createSessionRuntimeEntry(
     pollInitialMs = SESSION_RUNTIME_POLL_INITIAL_MS,
     pollMaxMs = SESSION_RUNTIME_POLL_MAX_MS,
     pollBackoffFactor = SESSION_RUNTIME_POLL_BACKOFF_FACTOR,
+    pollIdleMaxMs = SESSION_RUNTIME_POLL_IDLE_MAX_MS,
   } = config;
 
   const observers = new Set<SessionRuntimeEntryObserver>();
@@ -190,12 +204,20 @@ export function createSessionRuntimeEntry(
     runningAgents: 0,
     lastEventAt: null,
     lastError: null,
+    paused: false,
   };
   let pendingState = emptyPendingInteractionState();
   const runningAgents = new Set<string>();
   let disposed = false;
   let loopController: AbortController | null = null;
   let loopToken = 0;
+  /**
+   * 页面隐藏时的 poll 暂停（§4.6 降采样）：暂停期间不发起任何快照请求；
+   * `setPaused(false)` 立即唤醒循环（恢复可见即刷新一次）。
+   */
+  const pauseGate = createSessionRuntimePauseGate((paused) =>
+    commit({ paused }),
+  );
 
   function commit(patch: Partial<SessionRuntimeEntrySnapshot>) {
     let changed = false;
@@ -233,23 +255,6 @@ export function createSessionRuntimeEntry(
 
   function setStatus(status: ConnectionStatus) {
     commit({ status });
-  }
-
-  function sleepWithSignal(ms: number, signal: AbortSignal) {
-    if (signal.aborted) {
-      return Promise.resolve();
-    }
-    return new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, ms);
-      signal.addEventListener(
-        "abort",
-        () => {
-          clearTimeout(timer);
-          resolve();
-        },
-        { once: true },
-      );
-    });
   }
 
   function updateAgentsFromEvent(
@@ -411,23 +416,21 @@ export function createSessionRuntimeEntry(
     }
   }
 
-  async function runPollLoop(token: number, controller: AbortController) {
-    let interval = pollInitialMs;
-    while (!disposed && loopToken === token && !controller.signal.aborted) {
-      try {
-        const snapshot = await fetchSnapshot(sessionId, {
-          signal: controller.signal,
-        });
-        if (disposed || loopToken !== token) {
-          return;
-        }
-        // 成功一次即回到起点周期（§4.6：退避只在连续失败时累积）。
-        interval = pollInitialMs;
-        applySnapshot(snapshot);
-      } catch (error) {
-        if (controller.signal.aborted || loopToken !== token) {
-          return;
-        }
+  function runPollLoop(token: number, controller: AbortController) {
+    return runSessionRuntimePollLoop({
+      sessionId,
+      signal: controller.signal,
+      fetchSnapshot,
+      pollInitialMs,
+      pollMaxMs,
+      pollIdleMaxMs,
+      pollBackoffFactor,
+      isActive: () => !disposed && loopToken === token,
+      isPaused: pauseGate.isPaused,
+      waitWhilePaused: pauseGate.waitWhilePaused,
+      onPaused: () => setStatus("idle"),
+      onSnapshot: applySnapshot,
+      onError: (error) => {
         commit({
           status: "reconnecting",
           lastError:
@@ -435,13 +438,8 @@ export function createSessionRuntimeEntry(
               ? error.message.trim()
               : "failed to poll session runtime state",
         });
-        interval = Math.min(
-          Math.round(interval * pollBackoffFactor),
-          pollMaxMs,
-        );
-      }
-      await sleepWithSignal(interval, controller.signal);
-    }
+      },
+    });
   }
 
   function stopLoop() {
@@ -513,6 +511,7 @@ export function createSessionRuntimeEntry(
       };
     },
     setMode,
+    setPaused: pauseGate.setPaused,
     noteActiveTurn,
     retry() {
       if (disposed || current.mode === "idle") {

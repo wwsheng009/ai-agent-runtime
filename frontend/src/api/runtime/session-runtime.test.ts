@@ -146,6 +146,17 @@ describe("getSessionRuntimeState", () => {
     expect(result?.state?.pendingApproval?.id).toBe("approval-42");
   });
 
+  it("view: light 走轻量视图查询参数", async () => {
+    respondWith(SNAPSHOT);
+
+    await getSessionRuntimeState("sess-1", { view: "light" });
+
+    expect(calls).toHaveLength(1);
+    expect(String(calls[0].url)).toContain(
+      "/api/runtime/sessions/sess-1/runtime?view=light",
+    );
+  });
+
   it("显式空快照（会话存在、无 actor 状态）解析为空态且不抛错", async () => {
     respondWith({ session_id: "sess-1", state: null });
 

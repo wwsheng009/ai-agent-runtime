@@ -15,3 +15,11 @@ export const MULTI_SESSION_REGISTRY_ENABLED = true;
 /** 注册表连接预算（§4.6）：live 总数 = 前台 1 + 后台 2（可配置）。 */
 export const DEFAULT_FOREGROUND_LIVE_BUDGET = 1;
 export const DEFAULT_BACKGROUND_LIVE_BUDGET = 2;
+
+/**
+ * poll 订阅上限（§4.6 资源治理）：`recent` 候选超过该数量时，多出的会话保持
+ * idle 等待名额（`deferredPoll`），不产生轮询请求；释放 / 升级腾出名额后按
+ * 等待顺序补位。live 名额之外再给轮询加上限，避免「10 分钟窗口内会话很多」
+ * 时轮询总量随会话数线性增长。
+ */
+export const DEFAULT_MAX_POLL_SESSIONS = 8;

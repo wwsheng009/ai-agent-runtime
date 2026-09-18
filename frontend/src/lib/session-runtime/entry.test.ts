@@ -5,7 +5,8 @@
  * - IN1/IN2：建连游标 `after = max(lastSeq, 轨迹窗口 seq)`，重连不重复消费；
  * - seq 单调：迟到/乱序事件不把游标回退（"切回无空洞、无重复"的判定基础）；
  * - 轻量投影：待交互计数 / 子代理计数 / 在途回合（不写 threads 的 D1-B 前提）；
- * - poll 退避：3s 起、1.5× 升至上限，成功后回落；
+ * - poll 退避：失败 1.5× 升至上限、成功后回落；空闲（指纹不变）1.5× 退避到
+ *   空闲上限，指纹变化立即回到起点周期；轻量视图 `view=light`；暂停不产生请求；
  * - 生命周期：idle/dispose 停止循环，重试复用同一游标。
  */
 
@@ -284,5 +285,83 @@ describe("createSessionRuntimeEntry（poll）", () => {
     expect(snapshot.detached).toBe(true);
     expect(snapshot.pending.approvals).toBe(1);
     expect(onEvent).not.toHaveBeenCalled();
+  });
+
+  it("轻量视图 + 空闲自适应：指纹不变 1.5× 退避，指纹变化回到起点", async () => {
+    vi.useFakeTimers();
+    let headOffset = 0;
+    const fetchCalls: Array<{ sessionId: string; view?: string }> = [];
+    const fetchSnapshot = vi.fn(
+      async (sessionId: string, options?: { view?: string }) => {
+        fetchCalls.push({ sessionId, view: options?.view });
+        return {
+          state: {
+            sessionId: "session-b",
+            status: "idle",
+            pendingApproval: null,
+            pendingQuestion: null,
+            headOffset,
+            activeJobIds: [],
+          },
+          activeTurn: null,
+        };
+      },
+    );
+    const entry = createSessionRuntimeEntry({
+      sessionId: "session-b",
+      fetchSnapshot:
+        fetchSnapshot as unknown as SessionRuntimeEntryConfig["fetchSnapshot"],
+      pollInitialMs: 100,
+      pollIdleMaxMs: 200,
+      pollBackoffFactor: 1.5,
+    });
+
+    entry.setMode("poll");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchSnapshot).toHaveBeenCalledTimes(1);
+    expect(fetchCalls[0]).toMatchObject({
+      sessionId: "session-b",
+      view: "light",
+    });
+
+    // 第 2 次仍空闲：100 → 150；第 3 次：150 → 200（封顶）。
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetchSnapshot).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(150);
+    expect(fetchSnapshot).toHaveBeenCalledTimes(3);
+
+    // 指纹变化（head_offset 推进）→ 回到起点周期 100。
+    headOffset = 7;
+    await vi.advanceTimersByTimeAsync(200);
+    expect(fetchSnapshot).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetchSnapshot).toHaveBeenCalledTimes(5);
+  });
+
+  it("暂停期间不产生请求，恢复后立即拉取一次", async () => {
+    vi.useFakeTimers();
+    const fetchSnapshot = vi.fn(async () => null);
+    const entry = createSessionRuntimeEntry({
+      sessionId: "session-b",
+      fetchSnapshot:
+        fetchSnapshot as unknown as SessionRuntimeEntryConfig["fetchSnapshot"],
+      pollInitialMs: 100,
+      pollIdleMaxMs: 100,
+    });
+
+    entry.setMode("poll");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchSnapshot).toHaveBeenCalledTimes(1);
+
+    entry.setPaused(true);
+    expect(entry.snapshot().paused).toBe(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fetchSnapshot).toHaveBeenCalledTimes(1);
+    expect(entry.snapshot().status).toBe("idle");
+
+    entry.setPaused(false);
+    expect(entry.snapshot().paused).toBe(false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchSnapshot).toHaveBeenCalledTimes(2);
   });
 });

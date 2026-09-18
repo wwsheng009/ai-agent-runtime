@@ -250,6 +250,7 @@ export const enRuntimeConfigEditorFeedback = {
     websocket: "WebSocket",
     circuitBreaker: "Breaker",
     transformer: "Transformer",
+    mcp: "MCP",
     preview: "Preview",
   },
   loadingCard: {

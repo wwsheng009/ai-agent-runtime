@@ -28,3 +28,13 @@ export const RUNTIME_STREAM_FAILURE_THRESHOLD = 3;
 export const SESSION_RUNTIME_POLL_INITIAL_MS = 3_000;
 export const SESSION_RUNTIME_POLL_MAX_MS = 30_000;
 export const SESSION_RUNTIME_POLL_BACKOFF_FACTOR = 1.5;
+
+/**
+ * `poll` 空闲自适应上限：连续两次快照的活动指纹一致（无在途回合 / 无待交互 /
+ * head_offset 未推进）时，周期从起点按 1.5 倍退到此上限；指纹一旦变化立即回到
+ * 起点周期。与失败退避（上限 `SESSION_RUNTIME_POLL_MAX_MS`）相互独立。
+ *
+ * 取 15s 而非 30s 是「流量」与「后台发现延迟」的折中：空闲会话的轮询成本降到
+ * 1/5，同时新回合/新审批最多 15s 内被发现（发现后升级 live，回到实时）。
+ */
+export const SESSION_RUNTIME_POLL_IDLE_MAX_MS = 15_000;

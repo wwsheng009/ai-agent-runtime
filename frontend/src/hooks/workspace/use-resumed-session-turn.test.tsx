@@ -62,6 +62,7 @@ function Harness(props: {
   activeTurn: RuntimeSessionActiveTurn | null;
   localTurnId?: string | null;
   localResponding?: boolean;
+  locallyFinalizedTurnIds?: ReadonlySet<string>;
   refreshRuntimeState?: () => void;
   onState: (state: HarnessState) => void;
 }) {
@@ -71,6 +72,7 @@ function Harness(props: {
     activeTurn: props.activeTurn,
     localTurnId: props.localTurnId ?? null,
     localResponding: props.localResponding ?? false,
+    locallyFinalizedTurnIds: props.locallyFinalizedTurnIds,
     setThreads,
     refreshRuntimeState: props.refreshRuntimeState,
   });
@@ -104,6 +106,7 @@ describe("useResumedSessionTurn", () => {
     activeTurn: RuntimeSessionActiveTurn | null;
     localTurnId?: string | null;
     localResponding?: boolean;
+    locallyFinalizedTurnIds?: ReadonlySet<string>;
     refreshRuntimeState?: () => void;
   }) {
     act(() => {
@@ -234,6 +237,53 @@ describe("useResumedSessionTurn", () => {
       vi.advanceTimersByTime(RESUMED_TURN_HEARTBEAT_MS * 2);
     });
     expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it("本地已终态的回合不被陈旧快照重新认领，但心跳继续拉到收敛", () => {
+    vi.useFakeTimers();
+    const refresh = vi.fn();
+    render({
+      threads: [refreshedThread()],
+      sessionId: "session-1",
+      activeTurn: activeTurn(),
+      locallyFinalizedTurnIds: new Set(["turn-9"]),
+      refreshRuntimeState: refresh,
+    });
+
+    // 不认领：消息保持权威历史的定稿态，续传身份为空。
+    expect(current().result.resumedTurnId).toBeNull();
+    expect(current().result.resumedTurnActive).toBe(false);
+    expect(tailMessage().streaming).toBeUndefined();
+    expect(tailMessage().runtimeTurnId).toBeUndefined();
+
+    // 快照仍报同一回合（服务端 release 尚未可见）：心跳照常拉，直到调用方
+    // 在快照收敛后清理抑制集（见 lib/thread-state/locally-finalized-turns.ts）。
+    act(() => {
+      vi.advanceTimersByTime(RESUMED_TURN_HEARTBEAT_MS * 2 + 1);
+    });
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it("认领后收到终态（抑制）立即撤销 streaming 并让出续传身份", () => {
+    render({
+      threads: [refreshedThread()],
+      sessionId: "session-1",
+      activeTurn: activeTurn(),
+    });
+    expect(tailMessage().streaming).toBe(true);
+
+    render({
+      threads: [refreshedThread()],
+      sessionId: "session-1",
+      activeTurn: activeTurn(),
+      locallyFinalizedTurnIds: new Set(["turn-9"]),
+    });
+
+    expect(current().result.resumedTurnId).toBeNull();
+    expect(tailMessage()).toMatchObject({
+      streaming: false,
+      runtimeTurnId: "turn-9",
+    });
   });
 
   it("会话 id 为空（草稿会话）时不动线程", () => {

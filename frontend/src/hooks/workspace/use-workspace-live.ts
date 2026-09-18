@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useRef,
+  useState,
   type Dispatch,
   type SetStateAction,
 } from "react";
@@ -15,11 +16,19 @@ import {
   reportSnapshotRefresh,
   reportUnownedTurn,
 } from "@/lib/live-diagnostics/store";
+import { normalizeSessionId } from "@/lib/session-id";
 import {
   type RuntimeSessionActiveTurn,
   type SessionRuntimeEvent,
 } from "@/lib/runtime-api";
 import { matchesActiveTurn } from "@/lib/thread-state/deltas";
+import { isChatSseTerminalFrame } from "@/lib/thread-state/events-live";
+import {
+  finalizedTurnIdsFor,
+  withLocallyFinalizedTurn,
+  withSnapshotTurn,
+  type LocallyFinalizedTurns,
+} from "@/lib/thread-state/locally-finalized-turns";
 import { trajectoryEventAction } from "@/lib/trajectory/recovery";
 import {
   getRuntimeDeltaKind,
@@ -120,9 +129,26 @@ export function useWorkspaceLive({
   trajectoryReady,
   trajectoryStore,
 }: UseWorkspaceLiveOptions): UseWorkspaceLiveResult {
+  const normalizedSessionId = normalizeSessionId(sessionId ?? "");
+  // 本地已收终态帧的回合：终态帧先于 `/runtime` 快照 release 可见时，阻断
+  // 「同回合重新认领」（否则会把刚定稿的消息补回 streaming）。抑制集在快照
+  // 收敛（active_turn 变空 / 换回合）后自动清理，见下面的 prune effect。
+  const [locallyFinalizedTurns, setLocallyFinalizedTurns] =
+    useState<LocallyFinalizedTurns>(null);
+  const locallyFinalizedTurnIds = finalizedTurnIdsFor(
+    locallyFinalizedTurns,
+    normalizedSessionId,
+  );
+  useEffect(() => {
+    setLocallyFinalizedTurns((current) =>
+      withSnapshotTurn(current, normalizedSessionId, sessionActiveTurn?.turnId),
+    );
+  }, [normalizedSessionId, sessionActiveTurn?.turnId]);
+
   const { resumedTurnId, resumedTurnActive } = useResumedSessionTurn({
     sessionId,
     activeTurn: sessionActiveTurn,
+    locallyFinalizedTurnIds,
     localTurnId,
     localResponding,
     setThreads,
@@ -216,6 +242,13 @@ export function useWorkspaceLive({
     // 不主动去认领，renderLiveDeltas 闸门就会一直关着（刷新前整条流都不渲染）。
     onRuntimeEvent: (event) => {
       const turnId = getRuntimeEventTurnId(event);
+      // 终态帧 = 本回合在本地已经结束：先记账再交给上层归约。服务端的 release
+      // 可能还没在快照里可见，靠这份记账让同一回合不被续传重新认领。
+      if (turnId && isChatSseTerminalFrame(event.type)) {
+        setLocallyFinalizedTurns((current) =>
+          withLocallyFinalizedTurn(current, normalizedSessionId, turnId),
+        );
+      }
       const deltaKind = getRuntimeDeltaKind(event.type);
       if (!liveTurnId) {
         if (turnId && deltaKind) {

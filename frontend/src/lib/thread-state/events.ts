@@ -6,7 +6,12 @@ import { type Artifact, type ChatMessage, type MessageSegment, type Thread } fro
 import { type SessionRuntimeEvent } from "@/types/runtime";
 
 import { getRuntimeBridgeKind, isAssistantImageProgressEvent } from "./deltas";
-import { applyChatSseBridgeFrame, updateLatestAssistantMessage } from "./events-live";
+import {
+  applyChatSseBridgeFrame,
+  finalizeRuntimeTurnInThread,
+  isChatSseTerminalFrame,
+  updateLatestAssistantMessage,
+} from "./events-live";
 import { buildGeneratedImagePlaceholderSegment, upsertGeneratedImageSegment } from "./generated-images";
 import { buildRuntimeEventKey, buildSessionRuntimeEventsArtifact, MAX_RUNTIME_EVENTS } from "./history-artifacts";
 import { getRuntimeEventSeq } from "./sessions";
@@ -75,6 +80,12 @@ export function applyRuntimeEventToThread(
   const bridgeFrame = getRuntimeBridgeKind(event.type);
   if (bridgeFrame) {
     nextThread = applyChatSseBridgeFrame(nextThread, event, bridgeFrame, activeTurnId);
+  }
+
+  // 回合终态（chat.sse.done / chat.sse.error）：直连通道中断/静默超时后，
+  // 这是唯一能收敛 streaming 标记的兜底（见 finalizeRuntimeTurnInThread 注释）。
+  if (isChatSseTerminalFrame(event.type)) {
+    nextThread = finalizeRuntimeTurnInThread(nextThread, event);
   }
 
   // 任务面板（方案 §5.2 通道 A）：整值 LWW，不解析文本摘要；与 todo 无关的事件

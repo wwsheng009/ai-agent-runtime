@@ -51,8 +51,9 @@ export function resolveInFlightTurnId(
  * 为「本 thread 在途回合」补建一条 streaming 助手占位消息，返回承载它的 thread。
  * 返回 null = 保持旧行为（帧被丢弃）：
  * - 回合归属不明（见 resolveInFlightTurnId）；
- * - 同 id 的消息已存在（直连通道的占位还在 / 该回合已定稿）：避免同 id 的重复消息
- *   （React key 与 updateThreadMessage 都按 id 定位）。
+ * - 该回合已有助手消息（同 id，或历史投影重写 id 后仍带同一 runtimeTurnId）：
+ *   直连占位还在时不重复建行；已定稿时若再建 streaming 占位，会留下一条永远
+ *   无人收尾的消息（迟到桥接帧的重建泄漏路径）。
  * 新消息由 `createStreamingAssistantMessage` 构造（streaming + runtimeTurnId +
  * label "streaming"，id 与直连通道同形），因此后续帧仍会被
  * `isLiveAssistantMessage` 命中，正文 / 推理 / 工具行都继续落在这条消息上。
@@ -67,7 +68,12 @@ export function createInFlightAssistantTarget(
     return null;
   }
   const messageId = `turn-${turnId}-assistant`;
-  if (thread.messages.some((message) => message.id === messageId)) {
+  const existingForTurn = thread.messages.some(
+    (message) =>
+      message.id === messageId ||
+      (message.role === "assistant" && message.runtimeTurnId === turnId),
+  );
+  if (existingForTurn) {
     return null;
   }
   const message = createStreamingAssistantMessage(messageId, [], turnId);

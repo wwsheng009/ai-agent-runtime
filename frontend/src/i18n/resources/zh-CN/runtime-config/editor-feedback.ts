@@ -247,6 +247,7 @@ export const zhRuntimeConfigEditorFeedback = {
     websocket: "WebSocket",
     circuitBreaker: "熔断",
     transformer: "转换",
+    mcp: "MCP",
     preview: "预览",
   },
   loadingCard: {

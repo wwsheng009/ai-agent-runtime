@@ -67,6 +67,11 @@ export const enRuntimeConfigEditorModes = {
       description:
         "Maintain failure thresholds, time windows, and half-open recovery parameters.",
     },
+    mcp: {
+      label: "MCP management",
+      description:
+        "Manage MCP servers: inspect connection state and tool counts, add, edit, delete, enable/disable, and hot reload.",
+    },
     transformer: {
       label: "Transformer",
       description:

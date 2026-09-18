@@ -155,6 +155,56 @@ describe("MessageComposer", () => {
     expect(onStop).toHaveBeenCalledTimes(1);
   });
 
+  // 生产故障（2026-09-18 现场）：同会话仍有在途回合时 submitPrompt 静默返回
+  // false（同会话单飞闸门），按钮看起来「点了没反应」。拦下必须可见。
+  it("提交被拦下时给出可见提示，成功提交后不再提示", () => {
+    const blocked = vi.fn(() => false);
+    renderComposer({
+      draft: "ls files",
+      hasSession: true,
+      isNewThread: false,
+      onSubmit: blocked,
+    });
+
+    const submitButton = container.querySelector(
+      'button[aria-label="发送回合"]',
+    );
+    expect(submitButton).not.toBeNull();
+    act(() => {
+      submitButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(blocked).toHaveBeenCalledTimes(1);
+    const notice = container.querySelector("[data-composer-submit-blocked]");
+    expect(notice).not.toBeNull();
+    expect(notice?.textContent).toContain("消息未发送");
+
+    act(() => {
+      notice
+        ?.querySelector("[data-composer-submit-blocked-dismiss]")
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(
+      container.querySelector("[data-composer-submit-blocked]"),
+    ).toBeNull();
+
+    // 成功提交（返回 true）不产生提示。
+    renderComposer({
+      draft: "ls files",
+      hasSession: true,
+      isNewThread: false,
+      onSubmit: vi.fn(() => true),
+    });
+    act(() => {
+      container
+        .querySelector('button[aria-label="发送回合"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(
+      container.querySelector("[data-composer-submit-blocked]"),
+    ).toBeNull();
+  });
+
   it("combines provider / model / reasoning into one panel trigger", () => {
     renderComposer({
       providerOptions: ["provider-a", "provider-b"],

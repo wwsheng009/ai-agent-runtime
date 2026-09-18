@@ -3,7 +3,7 @@
 // 流式写入层：把 SSE 事件映射为线程消息段/阶段状态与运行时元数据的写入闭包
 // （工具段 upsert、工具结束、阶段切换、流式错误落盘）。本模块不持有 React 状态。
 
-import { type Artifact, type Thread } from "@/data/mock";
+import { type Artifact, type ChatMessage, type Thread } from "@/data/mock";
 import {
   buildAssistantMessageSegments,
   buildToolSegmentFromPayload,
@@ -22,6 +22,40 @@ import type {
 import { clearLiveStreamText } from "@/lib/live-stream-text";
 
 import { type ChatTurnRuntimeState } from "./turn-state";
+
+/**
+ * 直连通道收尾错误（连接超时 / 静默看门狗 / error 帧）到达时，消息可能已被
+ * runtime 终态帧定稿（见 thread-state/events-live.ts 的
+ * finalizeRuntimeTurnInThread）。此时不能重写正文——runtime 通道渲染的回复
+ * 仍然有效，只追加一条告警行；线程级降级由调用方写 transport/lastError 承担。
+ *
+ * 返回 null = 消息仍可被错误文本重写（调用方走既有路径）。
+ */
+export function appendStreamErrorNoticeToFinalizedMessage(
+  message: ChatMessage,
+  heading: string,
+  content: string,
+): ChatMessage | null {
+  if (message.streaming === true || message.segments.length === 0) {
+    return null;
+  }
+  const last = message.segments[message.segments.length - 1];
+  if (
+    last.type === "callout" &&
+    last.title === heading &&
+    last.content === content
+  ) {
+    // 重复的收尾错误（重试 / 双通道）不重复追加。
+    return message;
+  }
+  return {
+    ...message,
+    segments: [
+      ...message.segments,
+      { type: "callout", title: heading, tone: "warning", content },
+    ],
+  };
+}
 
 export type StreamingWriterDeps = {
   assistantMessageId: string;
@@ -116,6 +150,19 @@ export function createStreamingWriters(
     const hasStreamedText = turnState.streamedText.trim().length > 0;
     updateCurrentThread((thread) =>
       updateThreadMessage(thread, assistantMessageId, (currentMessage) => {
+        // 2026-09-18：直连通道的收尾错误（连接超时 / 静默看门狗 / error 帧）
+        // 到达时，消息可能已被 runtime 终态帧定稿（见 thread-state/events-live.ts
+        // 的 finalizeRuntimeTurnInThread）。此时不能重写正文——runtime 通道渲染
+        // 的回复仍然有效，直连侧只追加一条告警行；线程级降级由调用方写
+        // transport/lastError 承担。
+        const finalizedNotice = appendStreamErrorNoticeToFinalizedMessage(
+          currentMessage,
+          heading,
+          message,
+        );
+        if (finalizedNotice) {
+          return finalizedNotice;
+        }
         const segments = buildAssistantMessageSegments(
           hasStreamedText ? turnState.streamedText : `${heading}\n\n${message}`,
           turnState.currentSource,

@@ -10,9 +10,13 @@ import {
 
 /**
  * 续传挂载期间的心跳：`/runtime` 快照只在会话切换 / 手动刷新时拉取，回合结束后
- * `active_turn` 不会自己变空——不轮询的话刷新页面上的气泡会一直转圈。挂载期间
- * 按固定间隔重新拉取（只在续传生效时开启，回合结束后自动停），快照收敛为
- * 无在途回合时由 release 撤销 streaming。
+ * `active_turn` 不会自己变空——不轮询的话刷新页面上的气泡会一直转圈。心跳在
+ * 「快照报告在途回合且本地没有直连回合」期间开启，快照收敛后自动停。
+ *
+ * 2026-09-18：终态帧（`chat.sse.done` / `chat.sse.error`）到达即把该回合记入
+ * `locallyFinalizedTurnIds`（调用方维护）：在快照 release 尚未可见的窗口里，
+ * 同一回合不再被重新认领（否则刚定稿的消息会被补回 streaming）；心跳继续跑，
+ * 只负责把快照拉到收敛，收敛后由调用方清理抑制集。
  */
 export const RESUMED_TURN_HEARTBEAT_MS = 5_000;
 
@@ -28,6 +32,11 @@ export type UseResumedSessionTurnOptions = {
   setThreads: Dispatch<SetStateAction<Thread[]>>;
   /** 重新拉取 `/runtime` 快照（心跳），通常传 use-session-runtime-state 的 refresh。 */
   refreshRuntimeState?: () => void;
+  /**
+   * 本地已收到终态帧的回合 id（见 lib/thread-state/locally-finalized-turns.ts）。
+   * 命中时该回合不再被认领，但仍会按心跳拉快照直到收敛。
+   */
+  locallyFinalizedTurnIds?: ReadonlySet<string>;
 };
 
 export type UseResumedSessionTurnResult = {
@@ -95,13 +104,20 @@ export function useResumedSessionTurn({
   localResponding,
   setThreads,
   refreshRuntimeState,
+  locallyFinalizedTurnIds,
 }: UseResumedSessionTurnOptions): UseResumedSessionTurnResult {
   const normalizedSessionId = normalizeSessionId(sessionId ?? "");
   const serverTurnId = normalizedSessionId
     ? (activeTurn?.turnId ?? "").trim()
     : "";
   const occupiedByLocalTurn = Boolean(localTurnId?.trim()) || localResponding;
-  const adoptable = Boolean(serverTurnId) && !occupiedByLocalTurn;
+  const locallyFinalized =
+    Boolean(serverTurnId) && Boolean(locallyFinalizedTurnIds?.has(serverTurnId));
+  const adoptable =
+    Boolean(serverTurnId) && !occupiedByLocalTurn && !locallyFinalized;
+  // 轮询条件与认领解耦：被本地终态抑制的回合仍要轮询——服务端的 release 可能
+  // 还没在快照里可见，只有把快照拉到收敛（active_turn 变空/换回合）才算结束。
+  const shouldPollSnapshot = Boolean(serverTurnId) && !occupiedByLocalTurn;
 
   // 已挂载的回合身份（会话 + 回合）。用 ref 而非 state：它只用于「是否已经写过
   // 线程」的去重判定，不参与渲染；渲染侧的续传身份由 adoptable 直接派生，避免
@@ -154,7 +170,7 @@ export function useResumedSessionTurn({
   const resumedTurnId = adoptable ? serverTurnId : null;
 
   useEffect(() => {
-    if (!resumedTurnId || !refreshRuntimeState) {
+    if (!shouldPollSnapshot || !refreshRuntimeState) {
       return;
     }
     const timer = window.setInterval(
@@ -162,7 +178,7 @@ export function useResumedSessionTurn({
       RESUMED_TURN_HEARTBEAT_MS,
     );
     return () => window.clearInterval(timer);
-  }, [resumedTurnId, refreshRuntimeState]);
+  }, [shouldPollSnapshot, refreshRuntimeState]);
 
   return {
     resumedTurnId,

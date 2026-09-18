@@ -201,6 +201,17 @@ export async function consumeSseResponse(
   const idleTimeoutMs = handlers.idleTimeoutMs ?? 0;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let idleTimedOut = false;
+  // 看门狗兜底通道：`reader.cancel()` 只保证「请求被取消」，不保证挂起的
+  // `reader.read()` 一定收尾——半开连接上实测出现过 cancel 与 read 双双不兑现，
+  // 看门狗命中了、消费循环却永远停在 await，回合因此永不收尾（提交闸门永久
+  // 关闭）。这里额外给循环一条 reject 通道，保证无论 read 是否兑现都能在
+  // 下一次 await 上失败。`Promise.race` 会消费这条 promise 的拒绝，创建时先挂
+  // 空 catch，避免无人等待时成为未处理拒绝。
+  let rejectStalled: ((error: SseIdleTimeoutError) => void) | null = null;
+  const stalledSignal = new Promise<never>((_, reject) => {
+    rejectStalled = reject;
+  });
+  stalledSignal.catch(() => {});
   const clearIdleTimer = () => {
     if (idleTimer !== undefined) {
       clearTimeout(idleTimer);
@@ -221,8 +232,12 @@ export async function consumeSseResponse(
       try {
         void reader.cancel().catch(() => {});
       } catch {
-        // 流已关闭/已锁定时 cancel 可能同步抛错：忽略，循环会在 read 返回后收敛。
+        // 流已关闭/已锁定时 cancel 可能同步抛错：忽略，兜底通道会收尾循环。
       }
+      // 先摘引用再拒绝：重复命中不会制造第二次拒绝。
+      const reject = rejectStalled;
+      rejectStalled = null;
+      reject?.(new SseIdleTimeoutError(idleTimeoutMs));
     }, idleTimeoutMs);
   };
   armIdleTimer();
@@ -238,11 +253,16 @@ export async function consumeSseResponse(
     await yieldToEventLoop();
   };
 
+  // 无看门狗（idleTimeoutMs <= 0）时不引入额外的 race 开销：stalledSignal 永不
+  // 拒绝，直接读即可。
+  const readOnce = () =>
+    idleTimeoutMs > 0 ? Promise.race([reader.read(), stalledSignal]) : reader.read();
+
   try {
     while (true) {
-      const { done, value } = await reader.read().catch((error: unknown) => {
-        // 看门狗命中时不同浏览器可能以 done 收尾、也可能让 read 拒绝：
-        // 两种都归一成同一个可识别错误，调用方只处理一种形态。
+      const { done, value } = await readOnce().catch((error: unknown) => {
+        // 看门狗命中时不同浏览器可能以 done 收尾、也可能让 read 拒绝或永不兑现：
+        // 三种都归一成同一个可识别错误，调用方只处理一种形态。
         if (idleTimedOut) {
           throw new SseIdleTimeoutError(idleTimeoutMs);
         }
@@ -305,7 +325,13 @@ export async function consumeSseResponse(
     clearIdleTimer();
     handlers.onClose?.();
     diagnostics?.close();
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch {
+      // 挂起的 read 未兑现时 releaseLock 会抛（规范不允许释放仍有未结读取的
+      // reader）。连接已被 cancel，这里吞掉即可——绝不能让它掩盖真正的
+      // SseIdleTimeoutError。
+    }
   }
 }
 

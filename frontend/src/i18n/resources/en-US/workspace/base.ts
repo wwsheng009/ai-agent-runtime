@@ -338,6 +338,8 @@ export const enWorkspaceBase = {
       startNewThread: "Start new thread",
       sendTurn: "Send turn",
       startThread: "Start thread",
+      blockedInFlight:
+        "Message not sent: the session is still finishing its previous turn. Please retry in a moment.",
     },
     promptTips: "prompt tips",
     promptTipsMenuTitle: "Prompt tips",

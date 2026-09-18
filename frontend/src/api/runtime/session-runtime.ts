@@ -25,7 +25,11 @@ import type {
   RuntimeSessionState,
 } from "@/types/runtime";
 
-import { buildRuntimeUrl, fetchRuntimeJson } from "./shared";
+import {
+  buildRuntimeUrl,
+  buildRuntimeUrlWithQuery,
+  fetchRuntimeJson,
+} from "./shared";
 
 type RawRecord = Record<string, unknown>;
 
@@ -249,6 +253,11 @@ export function isEmptySessionRuntimeSnapshot(raw: unknown): boolean {
 
 export type SessionRuntimeStateOptions = {
   signal?: AbortSignal;
+  /**
+   * `light`：轻量视图（后端 `?view=light`）——省略 stable_tool_surface 等大字段，
+   * 供后台会话低频轮询使用；缺省 = 完整快照（前台与刷新续传仍走完整视图）。
+   */
+  view?: "light";
 };
 
 /**
@@ -266,10 +275,11 @@ export async function getSessionRuntimeState(
   if (!trimmed) {
     throw new Error("session id is required");
   }
+  const path = `/api/runtime/sessions/${encodeURIComponent(trimmed)}/runtime`;
   const raw = await fetchRuntimeJson<unknown>(
-    buildRuntimeUrl(
-      `/api/runtime/sessions/${encodeURIComponent(trimmed)}/runtime`,
-    ),
+    options.view === "light"
+      ? buildRuntimeUrlWithQuery(path, { view: "light" })
+      : buildRuntimeUrl(path),
     { signal: options.signal },
   );
   if (isEmptySessionRuntimeSnapshot(raw)) {

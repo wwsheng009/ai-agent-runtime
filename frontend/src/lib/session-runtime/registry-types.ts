@@ -34,6 +34,11 @@ export type SessionRuntimeRegistryOptions = {
   /** 前台 live 名额（缺省 1；置 0 表示列表页等无前台场景）。 */
   foregroundLiveBudget?: number;
   /**
+   * poll 订阅上限（缺省 8）：超出后新会话保持 idle（`deferredPoll`），
+   * 名额空出时按等待顺序补位。只约束后台轮询总量，不影响 live 预算。
+   */
+  maxPollSessions?: number;
+  /**
    * 后台 live 的回合终态宽限：终态后该时长内没有新事件才降级 poll（§4.2 表格）。
    */
   backgroundLiveGraceMs?: number;
@@ -79,6 +84,8 @@ export type SessionRuntimeEntryRecord = {
   desired: SubscriptionMode;
   /** 显式升级请求：等待 live 名额。 */
   deferredLive: boolean;
+  /** poll 名额已满：等待轮询名额（防止轮询总量随窗口内会话数线性增长）。 */
+  deferredPoll: boolean;
   /** 可见性降采样前的实际模式（恢复时回升）。 */
   suspendedMode: SubscriptionMode | null;
   lastTouchedAt: number;

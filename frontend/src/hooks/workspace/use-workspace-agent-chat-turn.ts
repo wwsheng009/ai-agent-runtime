@@ -24,7 +24,7 @@ import { createStreamingWriters } from "@/hooks/workspace/agent-chat-turn/stream
 import {
   bindSessionTurn,
 } from "@/hooks/workspace/agent-chat-turn/session-turn-registry";
-import { prepareAgentChatTurn } from "@/hooks/workspace/agent-chat-turn/turn-bootstrap";
+import { prepareAgentChatTurn, type AgentChatSubmitOptions } from "@/hooks/workspace/agent-chat-turn/turn-bootstrap";
 import { useSessionTurnView } from "@/hooks/workspace/agent-chat-turn/use-session-turn-view";
 import { useChatTurnReasoningEffort } from "@/hooks/workspace/agent-chat-turn/use-reasoning-effort";
 import {
@@ -154,15 +154,16 @@ export function useWorkspaceAgentChatTurn({
     };
   }, [turnRegistry]);
 
-  function submitPrompt() {
-    const prompt = draft.trim();
+  /** 提交回合；options 供 `/skill` 覆盖 prompt 与 expose_skills。返回是否已启动。 */
+  function submitPrompt(options?: AgentChatSubmitOptions): boolean {
+    const prompt = (options?.prompt ?? draft).trim();
     if (!prompt || !selectedThread) {
-      return;
+      return false;
     }
     // 提交闸门按会话（Batch 1 G1）：同会话单飞（服务端 ErrSessionBusy 的镜像），
     // 跨会话并行——A 在跑不再阻塞 B 的提交。
     if (turnRegistry.isBusy(selectedTurnKey)) {
-      return;
+      return false;
     }
 
     const {
@@ -190,6 +191,7 @@ export function useWorkspaceAgentChatTurn({
       trajectoryStorePool,
       userId,
       workspacePath,
+      exposeSkills: options?.exposeSkills,
     });
     turnRegistry.beginTurn({
       key: turnKey,
@@ -475,6 +477,7 @@ export function useWorkspaceAgentChatTurn({
         }
       }
     })();
+    return true;
   }
 
   function stopResponding() {

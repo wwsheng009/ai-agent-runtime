@@ -238,6 +238,37 @@ describe("useSessionRuntimeStream delta gate", () => {
     expect(nextThread.runtimeEventCount).toBe(1);
   });
 
+  // 回归（2026-09-18）：直连 /api/agent/chat 断流/静默超时后，本地 stall 路径
+  // 刻意不定稿（见 agent-chat-turn/stall.ts），收尾只能靠 runtime 通道的终态帧。
+  // 断言的是 hook 接线：chat.sse.done 必须经 applyRuntimeEventToThread 落进线程，
+  // 把同回合仍在 streaming 的消息停掉。
+  it("stops the in-flight message when chat.sse.done arrives on the runtime stream", async () => {
+    const thread = createThread();
+    thread.messages[0] = {
+      ...thread.messages[0],
+      runtimeTurnId: "turn-1",
+      streaming: true,
+    };
+    const { handlers, getThreads } = await renderWith(true, thread, {
+      activeTurnId: "turn-1",
+    });
+
+    act(() => {
+      handlers.onEvent?.({
+        type: "chat.sse.done",
+        timestamp: "2026-08-30T00:00:09Z",
+        payload: { turn_id: "turn-1", seq: 9, status: "completed" },
+      });
+    });
+
+    await flushRuntimeCommits();
+
+    expect(getThreads()[0].messages[0]).toMatchObject({
+      streaming: false,
+      runtimeTurnId: "turn-1",
+    });
+  });
+
   it("ignores a durable delta from another turn", async () => {
     const coordinator = createRuntimeDeltaCoordinator();
     coordinator.beginTurn("turn-current");

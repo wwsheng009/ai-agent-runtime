@@ -58,6 +58,11 @@ export const zhRuntimeConfigEditorModes = {
       label: "Circuit Breaker",
       description: "维护熔断阈值、时间窗口和半开恢复参数。",
     },
+    mcp: {
+      label: "MCP 管理",
+      description:
+        "管理 MCP Server：查看连接状态与工具数，支持新增、编辑、删除、启用/停用与热重载。",
+    },
     transformer: {
       label: "Transformer",
       description: "维护 HTTPTransformer 开关和 request/response body modifier。",

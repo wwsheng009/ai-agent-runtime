@@ -21,4 +21,5 @@ export type EditorMode =
   | "transformer"
   | "auth"
   | "agentRouting"
+  | "mcp"
   | "source";

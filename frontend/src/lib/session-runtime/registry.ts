@@ -14,7 +14,9 @@ import { createSessionRuntimeEntry } from "./entry";
 import {
   DEFAULT_BACKGROUND_LIVE_BUDGET,
   DEFAULT_FOREGROUND_LIVE_BUDGET,
+  DEFAULT_MAX_POLL_SESSIONS,
 } from "./flags";
+import { createSubscriptionBudget } from "./subscription-budget";
 import type {
   SessionRuntimeEntrySnapshot,
   SessionRuntimeEventOutlet,
@@ -47,6 +49,7 @@ export function createSessionRuntimeRegistry(
     createEntry = createSessionRuntimeEntry,
     backgroundLiveBudget = DEFAULT_BACKGROUND_LIVE_BUDGET,
     foregroundLiveBudget = DEFAULT_FOREGROUND_LIVE_BUDGET,
+    maxPollSessions = DEFAULT_MAX_POLL_SESSIONS,
     backgroundLiveGraceMs = LIVE_GRACE_MS,
     now = () => Date.now(),
     getReplayCursor,
@@ -79,19 +82,20 @@ export function createSessionRuntimeRegistry(
     }
   }
 
-  function liveCount(role: "foreground" | "background"): number {
-    let count = 0;
-    for (const record of records.values()) {
-      if (record.role === role && record.entry.snapshot().mode === "live") {
-        count += 1;
-      }
-    }
-    return count;
-  }
-
-  function backgroundLiveSlotsExhausted(): boolean {
-    return liveCount("background") >= backgroundLiveBudget;
-  }
+  // 预算与名额调度外置到 `subscription-budget.ts`（P0-2 行数约束）；这里保持
+  // 原有调用名不变（liveCount / enterPollOrDefer / …）。
+  const {
+    liveCount,
+    backgroundLiveSlotsExhausted,
+    evictOldestBackgroundLive,
+    enterPollOrDefer,
+    promoteDeferredPoll,
+  } = createSubscriptionBudget({
+    records,
+    backgroundLiveBudget,
+    maxPollSessions,
+    notify,
+  });
 
   function notify(sessionId: string) {
     // 全局投影先失效：即使没有按会话订阅者，侧栏也要收到这次变化。
@@ -145,7 +149,7 @@ export function createSessionRuntimeRegistry(
         const latest = current.entry.snapshot();
         if (latest.mode === "live" && !latest.activeTurn) {
           current.desired = "poll";
-          current.entry.setMode("poll");
+          applyDesiredMode(current);
           notify(sessionId);
           promoteDeferred();
         }
@@ -170,15 +174,27 @@ export function createSessionRuntimeRegistry(
 
   /** 按预算决定实际模式：前台用一个名额，后台共享另一个名额池。 */
   function applyDesiredMode(record: EntryRecord) {
+    // §4.6 可见性降采样：页面隐藏时后台订阅一律暂停（poll 循环不再发请求）；
+    // 前台（若有）保留实时。先暂停再切模式：否则 setMode("poll") 起的循环会在
+    // 暂停落地前先发一次请求（隐藏期间的无效流量）。
+    record.entry.setPaused(record.role === "background" && pageHidden);
+    applyDesiredModeInner(record);
+  }
+
+  function applyDesiredModeInner(record: EntryRecord) {
     if (disposed) {
       return;
     }
     if (record.desired === "idle") {
+      record.deferredPoll = false;
       record.entry.setMode("idle");
       return;
     }
     if (record.desired === "poll") {
-      record.entry.setMode("poll");
+      if (record.entry.snapshot().mode === "poll") {
+        return;
+      }
+      enterPollOrDefer(record);
       return;
     }
     // desired === "live"
@@ -188,9 +204,10 @@ export function createSessionRuntimeRegistry(
     if (record.role === "foreground") {
       if (!alreadyLive && liveCount("foreground") >= foregroundLiveBudget) {
         record.desired = "poll";
-        record.entry.setMode("poll");
+        enterPollOrDefer(record);
         return;
       }
+      record.deferredPoll = false;
       record.entry.setMode("live");
       return;
     }
@@ -199,7 +216,7 @@ export function createSessionRuntimeRegistry(
       if (alreadyLive) {
         record.suspendedMode = "live";
       }
-      record.entry.setMode("poll");
+      enterPollOrDefer(record);
       return;
     }
     if (alreadyLive) {
@@ -207,10 +224,11 @@ export function createSessionRuntimeRegistry(
     }
     if (backgroundLiveSlotsExhausted()) {
       record.deferredLive = true;
-      record.entry.setMode("poll");
+      enterPollOrDefer(record);
       return;
     }
     record.deferredLive = false;
+    record.deferredPoll = false;
     record.entry.setMode("live");
     record.lastTouchedAt = now();
   }
@@ -228,7 +246,10 @@ export function createSessionRuntimeRegistry(
       // 活跃回合会话：即便当前是 poll（超预算/隐藏降级），也保持升级意愿。
       if (record.desired !== "live" && !pageHidden && !backgroundLiveSlotsExhausted()) {
         record.desired = "live";
+        record.deferredPoll = false;
         record.entry.setMode("live");
+        // poll → live 释放一个轮询名额，唤醒等待中的会话。
+        promoteDeferredPoll();
       }
     }
     notify(sessionId);
@@ -259,6 +280,7 @@ export function createSessionRuntimeRegistry(
       role: "background",
       desired: "idle",
       deferredLive: false,
+      deferredPoll: false,
       suspendedMode: null,
       lastTouchedAt: now(),
     };
@@ -338,29 +360,6 @@ export function createSessionRuntimeRegistry(
     }
   }
 
-  function evictOldestBackgroundLive(exceptSessionId: string) {
-    let oldest: { sessionId: string; record: EntryRecord } | null = null;
-    for (const [sessionId, record] of records) {
-      if (
-        sessionId === exceptSessionId ||
-        record.role !== "background" ||
-        record.entry.snapshot().mode !== "live"
-      ) {
-        continue;
-      }
-      if (!oldest || record.lastTouchedAt < oldest.record.lastTouchedAt) {
-        oldest = { sessionId, record };
-      }
-    }
-    if (!oldest) {
-      return;
-    }
-    oldest.record.desired = "poll";
-    oldest.record.deferredLive = false;
-    oldest.record.entry.setMode("poll");
-    notify(oldest.sessionId);
-  }
-
   function release(sessionId: string) {
     if (disposed) {
       return;
@@ -375,6 +374,7 @@ export function createSessionRuntimeRegistry(
     notifySubscribersGone(sessionId);
     invalidateEntries();
     promoteDeferred();
+    promoteDeferredPoll();
   }
 
   function notifySubscribersGone(sessionId: string) {
@@ -404,6 +404,9 @@ export function createSessionRuntimeRegistry(
       }
       const snapshot = record.entry.snapshot();
       if (hidden) {
+        // §4.6 降采样：隐藏期间暂停后台轮询（不产生 REST 请求）。先暂停再降级，
+        // 避免 live → poll 切换瞬间发出一次快照请求。
+        record.entry.setPaused(true);
         if (snapshot.mode === "live") {
           record.suspendedMode = "live";
           record.entry.setMode("poll");
@@ -411,14 +414,17 @@ export function createSessionRuntimeRegistry(
         }
         continue;
       }
-      // 恢复可见：按期望模式回升（受后台预算约束）。
+      // 恢复可见：先按期望模式回升（受后台预算约束），再恢复轮询；
+      // 停留在 poll 的会话会因 setPaused(false) 立即补拉一次快照。
       if (record.suspendedMode === "live") {
         record.suspendedMode = null;
         record.desired = "live";
         record.deferredLive = backgroundLiveSlotsExhausted();
         applyDesiredMode(record);
         notify(sessionId);
+        continue;
       }
+      record.entry.setPaused(false);
     }
     invalidateEntries();
   }

@@ -1,5 +1,11 @@
 import { ArrowUpIcon, PlusIcon, SquareIcon } from "lucide-react";
-import { type ReactNode, useEffect, useLayoutEffect, useRef } from "react";
+import {
+  type ReactNode,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 
 import {
   ComposerAttachmentRail,
@@ -81,7 +87,11 @@ type MessageComposerProps = {
   transport?: Thread["transport"];
   onDraftChange: (value: string) => void;
   onStop: () => void;
-  onSubmit: () => void;
+  /**
+   * 提交回合；返回 false = 被拦下（草稿为空 / 会话未就绪 / 同会话仍有在途
+   * 回合）。composer 据此给出可见反馈，绝不静默吞掉一次点击。
+   */
+  onSubmit: () => boolean | void;
 };
 
 export function MessageComposer({
@@ -143,6 +153,11 @@ export function MessageComposer({
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // 提交被拦下的可见原因（见 handleSubmit）：静默 return false 会让按钮
+  // 表现为「点了没反应」。按会话键记录而非布尔值：会话切换后提示自动失效，
+  // 无需在 effect 里 setState（react-hooks/set-state-in-effect）。
+  const [submitBlockedFor, setSubmitBlockedFor] = useState<string | null>(null);
+  const submitBlocked = submitBlockedFor === (focusKey ?? "");
 
   // P1-4 子片 3：`/` 命令、`@` 引用与 `+` 按钮共用同一份触发菜单。
   const menu = useComposerMenu({
@@ -223,7 +238,14 @@ export function MessageComposer({
       focusInput();
       return;
     }
-    onSubmit();
+    const started = onSubmit();
+    if (started === false && draft.trim()) {
+      // 提交闸门（同会话单飞）等前置条件把这次提交拦下了：给出可见原因，
+      // 让用户知道「不是按钮坏了」。
+      setSubmitBlockedFor(focusKey ?? "");
+    } else {
+      setSubmitBlockedFor(null);
+    }
     focusInput();
   }
 
@@ -270,6 +292,23 @@ export function MessageComposer({
               type="button"
               data-composer-command-notice-dismiss
               onClick={menu.dismissNotice}
+              className="shrink-0 underline-offset-2 hover:underline"
+            >
+              {t("composer.commands.dismiss")}
+            </button>
+          </div>
+        ) : null}
+        {submitBlocked ? (
+          <div
+            role="alert"
+            data-composer-submit-blocked
+            className="flex items-start justify-between gap-2 px-3 pt-2 app-text-10 text-accent-gold"
+          >
+            <span>{t("composer.submit.blockedInFlight")}</span>
+            <button
+              type="button"
+              data-composer-submit-blocked-dismiss
+              onClick={() => setSubmitBlockedFor(null)}
               className="shrink-0 underline-offset-2 hover:underline"
             >
               {t("composer.commands.dismiss")}

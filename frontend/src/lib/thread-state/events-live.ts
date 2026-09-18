@@ -376,6 +376,60 @@ export function applyChatSseBridgeFrame(
   );
 }
 
+/**
+ * 回合终态帧：runtime/stream 上的权威收尾信号。
+ *
+ * 直连 `/api/agent/chat` 中断时本地 stall 路径刻意不定稿（见
+ * `agent-chat-turn/stall.ts`：尾巴消息保持 streaming，等 runtime 通道续写），
+ * 而 runtime 通道此前只认工具/阶段帧，`chat.sse.done` 无人消费——直连一断，
+ * 回合在服务端正常结束也不会收敛（实测 UI 永久「响应中」）。
+ *
+ * 这里把「终态帧 → 清 streaming 标记」的兜底收口在桥接层：不做文本定稿
+ * （正文由 assistant_delta / 直连 result 写入），只幂等地摘掉标记。
+ */
+export function isChatSseTerminalFrame(eventType: string): boolean {
+  return (
+    eventType === `${CHAT_SSE_EVENT_PREFIX}done` ||
+    eventType === `${CHAT_SSE_EVENT_PREFIX}error`
+  );
+}
+
+/**
+ * 把终态帧应用到 thread：清掉同一回合仍在 streaming 的助手消息标记。
+ *
+ * 归属判定与 `isLiveAssistantMessage` 同语义：两侧都明确且不一致才拒绝，
+ * 事件缺 turn_id（旧帧）时按在途消息处理。已定稿消息原样返回（引用不变），
+ * 重连重放同一终态帧不会产生多余渲染。
+ */
+export function finalizeRuntimeTurnInThread(
+  thread: Thread,
+  event: SessionRuntimeEvent,
+): Thread {
+  const eventTurnId = getRuntimeEventTurnId(event);
+  let changed = false;
+  const messages = thread.messages.map((message) => {
+    if (message.role !== "assistant" || message.streaming !== true) {
+      return message;
+    }
+    if (
+      message.runtimeTurnId &&
+      eventTurnId &&
+      message.runtimeTurnId !== eventTurnId
+    ) {
+      return message;
+    }
+    changed = true;
+    return {
+      ...message,
+      streaming: false,
+      // `isLiveAssistantMessage` 的 label 兜底会把 label==="streaming" 的消息
+      // 继续当作可写目标；终态后必须同时摘掉 label，防止迟到增量写进已定稿消息。
+      label: message.label === "streaming" ? "runtime" : message.label,
+    };
+  });
+  return changed ? { ...thread, messages } : thread;
+}
+
 /** runtime 生命周期工具事件里可当作工具卡定位信息的字段。 */
 const BRIDGE_TOOL_LOCATION_KEYS = ["directory", "file_path", "command_text"] as const;
 

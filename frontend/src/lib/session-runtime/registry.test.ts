@@ -26,6 +26,8 @@ import type { RuntimeSessionActiveTurn, SessionRuntimeEvent } from "@/types/runt
 type FakeEntry = SessionRuntimeEntry & {
   emitActiveTurn(turn: RuntimeSessionActiveTurn | null): void;
   emitEvent(event: SessionRuntimeEvent): void;
+  /** setPaused 调用轨迹（断言隐藏暂停 / 恢复可见）。 */
+  pausedStates: boolean[];
 };
 
 function createFakeEntry(config: SessionRuntimeEntryConfig): FakeEntry {
@@ -41,7 +43,9 @@ function createFakeEntry(config: SessionRuntimeEntryConfig): FakeEntry {
     runningAgents: 0,
     lastEventAt: null,
     lastError: null,
+    paused: false,
   };
+  const pausedStates: boolean[] = [];
   const publish = (patch: Partial<SessionRuntimeEntrySnapshot>) => {
     snapshot = { ...snapshot, ...patch };
     for (const observer of [...observers]) {
@@ -58,11 +62,16 @@ function createFakeEntry(config: SessionRuntimeEntryConfig): FakeEntry {
       };
     },
     setMode: (mode: SubscriptionMode) => publish({ mode }),
+    setPaused: (paused: boolean) => {
+      pausedStates.push(paused);
+      publish({ paused });
+    },
     noteActiveTurn: (turn) => publish({ activeTurn: turn }),
     retry: () => {},
     dispose: () => observers.clear(),
     emitActiveTurn: (turn) => publish({ activeTurn: turn }),
     emitEvent: (event) => config.onEvent?.(event),
+    pausedStates,
   };
 }
 
@@ -128,6 +137,26 @@ describe("createSessionRuntimeRegistry 预算与调度", () => {
     expect(entries.filter((entry) => entry.mode === "poll")).toHaveLength(8);
   });
 
+  it("poll 名额上限：超出保持 idle，释放后按等待顺序补位", () => {
+    const registry = makeRegistry({ maxPollSessions: 2 });
+    registry.ensure("A", "recent");
+    registry.ensure("B", "recent");
+    registry.ensure("C", "recent");
+    registry.ensure("D", "recent");
+
+    expect(registry.snapshot("A")?.mode).toBe("poll");
+    expect(registry.snapshot("B")?.mode).toBe("poll");
+    expect(registry.snapshot("C")?.mode).toBe("idle");
+    expect(registry.snapshot("D")?.mode).toBe("idle");
+
+    registry.release("A", "idle");
+    expect(registry.snapshot("C")?.mode).toBe("poll");
+    expect(registry.snapshot("D")?.mode).toBe("idle");
+
+    registry.release("B", "idle");
+    expect(registry.snapshot("D")?.mode).toBe("poll");
+  });
+
   it("显式升级按最近活动 LRU 顶掉一条后台 live", () => {
     const registry = makeRegistry();
     registry.ensure("A", "selected");
@@ -191,6 +220,29 @@ describe("createSessionRuntimeRegistry 预算与调度", () => {
 
     registry.noteVisibility(false);
     expect(registry.snapshot("B")?.mode).toBe("live");
+  });
+
+  it("页面隐藏暂停后台 poll、恢复可见恢复轮询", () => {
+    const created = new Map<string, FakeEntry>();
+    const registry = makeRegistry({
+      createEntry: (config) => {
+        const entry = createFakeEntry(config);
+        created.set(config.sessionId, entry);
+        return entry;
+      },
+    });
+    registry.ensure("A", "recent");
+    expect(registry.snapshot("A")?.mode).toBe("poll");
+    expect(registry.snapshot("A")?.paused).toBe(false);
+
+    registry.noteVisibility(true);
+    expect(created.get("A")?.pausedStates).toContain(true);
+    expect(registry.snapshot("A")?.paused).toBe(true);
+    expect(registry.snapshot("A")?.mode).toBe("poll");
+
+    registry.noteVisibility(false);
+    expect(registry.snapshot("A")?.paused).toBe(false);
+    expect(registry.snapshot("A")?.mode).toBe("poll");
   });
 });
 

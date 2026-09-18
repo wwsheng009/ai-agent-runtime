@@ -43,6 +43,7 @@ import { MonitorModeSection } from "./backend-config-settings-page/sections/mode
 import { WebsocketModeSection } from "./backend-config-settings-page/sections/modes/websocket";
 import { CircuitBreakerModeSection } from "./backend-config-settings-page/sections/modes/circuitBreaker";
 import { TransformerModeSection } from "./backend-config-settings-page/sections/modes/transformer";
+import { McpModeSection } from "./backend-config-settings-page/sections/modes/mcp";
 import { SourceModeSection } from "./backend-config-settings-page/sections/modes/source";
 
 export function BackendConfigSettingsPage() {
@@ -125,6 +126,7 @@ export function BackendConfigSettingsPage() {
             {core.mode === "transformer" ? (
               <TransformerModeSection core={core} domain={transformerDomain} />
             ) : null}
+            {core.mode === "mcp" ? <McpModeSection /> : null}
             {core.mode === "source" ? (
               <SourceModeSection core={core} />
             ) : null}
