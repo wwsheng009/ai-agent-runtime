@@ -87,6 +87,75 @@ func TestSessionActorEnterPlanModeActivatesAndUpdatesEngine(t *testing.T) {
 	assert.Equal(t, string(runtimepolicy.ModePlan), modeRaw)
 }
 
+func TestSessionActorEnterPlanModeAllowsAdditionalPlanPaths(t *testing.T) {
+	actor, _, engine := newPlanModeTestActor(t, "plan-multi-path-1", runtimepolicy.ModeDefault)
+	ctx := context.Background()
+
+	result, err := actor.EnterPlanMode(ctx, "", toolbroker.EnterPlanModeArgs{
+		PlanPath: "docs/plan/primary.md",
+		PlanWritePaths: []string{
+			"docs/plan/child-a.md",
+			"docs/plan/child-b.md",
+			"docs/plan/primary.md", // duplicate of the primary path must not repeat
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "docs/plan/primary.md", result.PlanPath)
+	want := []string{
+		"docs/plan/primary.md",
+		"docs/plan/child-a.md",
+		"docs/plan/child-b.md",
+	}
+	assert.ElementsMatch(t, want, result.WriteAllowPaths)
+	assert.ElementsMatch(t, want, engine.PlanWriteAllowPaths)
+
+	session, err := actor.sessionStore.Load(ctx, actor.id)
+	require.NoError(t, err)
+	state := planmode.Load(session)
+	assert.True(t, planmode.IsActive(state))
+	assert.Equal(t, "docs/plan/primary.md", state.PlanPath)
+	assert.ElementsMatch(t, want, state.WriteAllowPaths)
+}
+
+// TestSessionActorPinsRunMetaToPlanWhilePlanStateActive pins the cross-turn
+// contract behind remote smoke test finding (2026-09-18): the host builds the
+// run meta from its session snapshot, which can still carry the pre-plan
+// bypass_permissions after plan mode was entered via a tool call. policy.Engine
+// lets EvalRequest.Mode (from run meta) win over engine.Mode, so without pinning
+// every write in the next turn bypassed plan-mode write gating.
+func TestSessionActorPinsRunMetaToPlanWhilePlanStateActive(t *testing.T) {
+	actor, _, engine := newPlanModeTestActor(t, "plan-run-meta-pin-1", runtimepolicy.ModeBypassPermissions)
+	ctx := context.Background()
+
+	// Stale host snapshot: run meta still carries the pre-plan mode.
+	// WithRunMeta clones, so the ctx-carried copy is what the loop reads.
+	runCtx := team.WithRunMeta(ctx, &team.RunMeta{PermissionMode: string(runtimepolicy.ModeBypassPermissions)})
+
+	_, err := actor.EnterPlanMode(ctx, "", toolbroker.EnterPlanModeArgs{PlanPath: "docs/plan/pinned.md"})
+	require.NoError(t, err)
+
+	// prepareRun reloads the durable session before run mode is re-applied.
+	session, err := actor.sessionStore.Load(ctx, actor.id)
+	require.NoError(t, err)
+	actor.applyDurablePlanModeToRun(runCtx, session)
+
+	liveMeta, ok := team.GetRunMeta(runCtx)
+	require.True(t, ok)
+	assert.Equal(t, string(runtimepolicy.ModePlan), liveMeta.PermissionMode, "active plan state must pin run meta")
+	assert.Equal(t, runtimepolicy.ModePlan, engine.Mode)
+	assert.Contains(t, engine.PlanWriteAllowPaths, "docs/plan/pinned.md")
+
+	// Leaving plan mode must stop pinning and leave the caller's mode alone.
+	_, err = actor.ExitPlanMode(ctx, "", toolbroker.ExitPlanModeArgs{Decision: "quit"})
+	require.NoError(t, err)
+	session, err = actor.sessionStore.Load(ctx, actor.id)
+	require.NoError(t, err)
+	liveMeta.PermissionMode = string(runtimepolicy.ModeAcceptEdits)
+	actor.applyDurablePlanModeToRun(runCtx, session)
+	assert.Equal(t, string(runtimepolicy.ModeAcceptEdits), liveMeta.PermissionMode)
+}
+
 func TestSessionActorEnterPlanModeNestedKeepsOriginalPreviousMode(t *testing.T) {
 	actor, _, _ := newPlanModeTestActor(t, "plan-nested-1", runtimepolicy.ModeAcceptEdits)
 	ctx := context.Background()

@@ -387,6 +387,40 @@ func TestPathPreflightSkipsMutationArgs(t *testing.T) {
 	}
 }
 
+func TestPathPreflightMetadataOptOut(t *testing.T) {
+	schema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"plan_path": map[string]interface{}{"type": "string"},
+		},
+	}
+	args := map[string]interface{}{"plan_path": "docs/plan/new-feature.md"}
+
+	// Baseline: without the opt-out the generic heuristic treats *_path args as
+	// read targets and denies a plan artifact that does not exist yet.
+	denied := ApplyPreflight(NewMemory(2), PreflightRequest{
+		ToolName:    "enter_plan_mode",
+		Args:        args,
+		InputSchema: schema,
+		PathExists:  func(string) bool { return false },
+	})
+	if denied.Allow {
+		t.Fatalf("expected missing plan path to be denied without opt-out: %+v", denied)
+	}
+
+	// enter_plan_mode declares plan_path as a write target that may not exist yet.
+	allowed := ApplyPreflight(NewMemory(2), PreflightRequest{
+		ToolName:    "enter_plan_mode",
+		Args:        args,
+		InputSchema: schema,
+		Metadata:    map[string]interface{}{runtimetypes.ToolMetadataPathPreflightKey: false},
+		PathExists:  func(string) bool { return false },
+	})
+	if !allowed.Allow {
+		t.Fatalf("path_preflight=false must allow not-yet-created plan targets: %+v", allowed)
+	}
+}
+
 func TestPathPreflightAutoHealsUniqueNearbyTypo(t *testing.T) {
 	dir := t.TempDir()
 	realName := "config.yaml"

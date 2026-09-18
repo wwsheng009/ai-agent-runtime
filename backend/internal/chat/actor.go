@@ -2625,9 +2625,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 	}
 	// Re-apply plan mode after prepareRun so durable plan_mode context and
 	// session permission mode stay enforced for this turn.
-	if engine := a.agent.GetPermissionEngine(); engine != nil {
-		a.applyPlanModeStateToEngine(engine, planmode.Load(session))
-	}
+	a.applyDurablePlanModeToRun(runCtx, session)
 	if runCtx.Err() != nil || !a.sessionRunOwnsRunningState(run) {
 		abortStartup()
 		return
@@ -3000,11 +2998,50 @@ func (a *SessionActor) persistSession(ctx context.Context, session *Session) err
 			}
 			session.SetContext(toolbroker.SessionHandleAliasesContextKey, copiedAliases)
 		}
+		// Plan-mode mutations run on a store-loaded session (enter_plan_mode /
+		// exit_plan_mode tool calls) while this actor still holds the run-scoped
+		// snapshot. Prefer the store copy only when it carries a newer lifecycle
+		// transition: the enter upgrades the stale snapshot, while a completed
+		// exit is not resurrected back to active by the end-of-turn write
+		// (observed live 2026-09-18: exit returned status=exited, the next row
+		// write restored status=active).
+		if storedPlan, ok := latest.GetContext(planmode.ContextKey); ok {
+			if _, hasOutgoing := session.GetContext(planmode.ContextKey); !hasOutgoing ||
+				planModeStateRevision(planmode.Load(latest)).After(planModeStateRevision(planmode.Load(session))) {
+				copiedPlan, err := cloneSessionContextValue(storedPlan)
+				if err != nil {
+					return fmt.Errorf("clone plan mode state: %w", err)
+				}
+				session.SetContext(planmode.ContextKey, copiedPlan)
+			}
+		}
 	}
 	if hasRun && !a.sessionRunOwned(run) {
 		return errSessionRunSuperseded
 	}
 	return a.sessionStore.Update(ctx, session)
+}
+
+// planModeStateRevision reports the newest lifecycle timestamp recorded in a
+// durable plan-mode state. Persist-time merging compares revisions to decide
+// whether the stored copy is newer than the outgoing in-memory snapshot; the
+// writer always stores UTC RFC3339Nano timestamps.
+func planModeStateRevision(state planmode.State) time.Time {
+	var newest time.Time
+	for _, raw := range []string{state.ExitedAt, state.EnteredAt} {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			continue
+		}
+		if parsed.After(newest) {
+			newest = parsed
+		}
+	}
+	return newest
 }
 
 // checkpointSessionHistory 是 ReAct 循环 OnHistoryCheckpoint 的落点：把长 turn
@@ -5155,6 +5192,29 @@ func (a *SessionActor) applyPlanModeStateToEngine(engine *runtimepolicy.Engine, 
 		return
 	}
 	planmode.ApplyToEngine(engine, state)
+}
+
+// applyDurablePlanModeToRun re-applies durable plan state after prepareRun and
+// pins the run meta of the current turn to plan while that state is active.
+//
+// The agent loop evaluates tools with EvalRequest.Mode taken from run meta
+// (permissionModeFromContext), and policy.Engine.Evaluate lets that per-run mode
+// win over engine.Mode. A stale run meta - typically the pre-plan
+// bypass_permissions snapshotted by the host before this turn - would otherwise
+// silently disable plan-mode write gating for the whole turn even though the
+// engine itself is in plan mode. Pinning the in-context run meta keeps the two
+// sources of truth aligned.
+func (a *SessionActor) applyDurablePlanModeToRun(ctx context.Context, session *Session) {
+	if a == nil || session == nil {
+		return
+	}
+	state := planmode.Load(session)
+	if engine := a.agent.GetPermissionEngine(); engine != nil {
+		a.applyPlanModeStateToEngine(engine, state)
+	}
+	if planmode.IsActive(state) {
+		a.syncLivePermissionMode(ctx, string(runtimepolicy.ModePlan))
+	}
 }
 
 func (a *SessionActor) publish(event runtimeevents.Event) {

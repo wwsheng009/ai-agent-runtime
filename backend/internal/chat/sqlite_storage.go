@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
+	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 
 	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
@@ -1163,6 +1164,9 @@ func canonicalMessageCountTx(ctx context.Context, tx *sql.Tx, sessionID string) 
 }
 
 func (s *SQLiteSessionStorage) upsertSessionMetadataTx(ctx context.Context, tx *sql.Tx, session *Session, count int) error {
+	if err := s.preserveActorOwnedSessionContextTx(ctx, tx, session); err != nil {
+		return err
+	}
 	metadataJSON, err := json.Marshal(session.Metadata)
 	if err != nil {
 		return fmt.Errorf("encode session metadata: %w", err)
@@ -1200,6 +1204,48 @@ func (s *SQLiteSessionStorage) upsertSessionMetadataTx(ctx context.Context, tx *
 	if err != nil {
 		return fmt.Errorf("save session metadata: %w", err)
 	}
+	return nil
+}
+
+// preserveActorOwnedSessionContextTx carries over actor-owned session context
+// keys that the incoming write omits. Plan mode is written mid-turn by the
+// session actor (enter_plan_mode / exit_plan_mode) while host-side writers
+// persist their own snapshot of the same row; without this guard the last host
+// write erases plan_mode and the next turn silently loses plan-mode gating
+// (observed live 2026-09-18: plan_mode=active at 15:16:31Z, clobbered to
+// bypass_permissions at 15:16:32Z). planmode.Clear writes an explicit inactive
+// state instead of deleting the key, so an omitted key never encodes a
+// legitimate plan transition and preserving it cannot resurrect an exited mode.
+func (s *SQLiteSessionStorage) preserveActorOwnedSessionContextTx(ctx context.Context, tx *sql.Tx, session *Session) error {
+	if session == nil || strings.TrimSpace(session.ID) == "" {
+		return nil
+	}
+	if session.Metadata.Context != nil {
+		if _, ok := session.Metadata.Context[planmode.ContextKey]; ok {
+			return nil
+		}
+	}
+	var storedJSON []byte
+	if err := tx.QueryRowContext(ctx, `SELECT metadata_json FROM sessions WHERE id = ?`, session.ID).Scan(&storedJSON); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return fmt.Errorf("load stored session metadata: %w", err)
+	}
+	var stored struct {
+		Context map[string]interface{} `json:"context"`
+	}
+	if err := json.Unmarshal(storedJSON, &stored); err != nil || len(stored.Context) == 0 {
+		return nil
+	}
+	value, ok := stored.Context[planmode.ContextKey]
+	if !ok {
+		return nil
+	}
+	if session.Metadata.Context == nil {
+		session.Metadata.Context = make(map[string]interface{}, 1)
+	}
+	session.Metadata.Context[planmode.ContextKey] = value
 	return nil
 }
 

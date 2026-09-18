@@ -204,10 +204,29 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 					"type": "object",
 					"properties": map[string]interface{}{
 						"plan_path": map[string]interface{}{
-							"type":        "string",
-							"description": "Optional plan file path to allow writes (default plan.md).",
+							"anyOf": []map[string]interface{}{
+								{"type": "string"},
+								{
+									"type":  "array",
+									"items": map[string]interface{}{"type": "string"},
+								},
+							},
+							"description": "Plan artifact path (default plan.md). Accepts a single path or an array whose first entry is the primary artifact and whose remaining entries are additional writable plan paths.",
+						},
+						"plan_write_paths": map[string]interface{}{
+							"type":        "array",
+							"items":       map[string]interface{}{"type": "string"},
+							"description": "Additional plan files writable while plan mode is active (union with plan_path).",
 						},
 					},
+				},
+				// plan_path is a write target that legitimately does not exist
+				// yet: without this opt-out the generic read-path preflight
+				// denies enter_plan_mode with TOOL_PATH_NOT_FOUND before the
+				// tool runs, contradicting the schema's "default plan.md"
+				// semantics (templates are meant to be created after entry).
+				Metadata: map[string]interface{}{
+					types.ToolMetadataPathPreflightKey: false,
 				},
 			},
 			types.ToolDefinition{
@@ -1198,10 +1217,8 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if b.PlanMode == nil {
 			return nil, nil, fmt.Errorf("plan mode controller is not configured")
 		}
-		req := EnterPlanModeArgs{}
-		if value, ok := args["plan_path"].(string); ok {
-			req.PlanPath = strings.TrimSpace(value)
-		}
+		primaryPath, extraPaths := planPathArgs(args)
+		req := EnterPlanModeArgs{PlanPath: primaryPath, PlanWritePaths: extraPaths}
 		result, err := b.PlanMode.EnterPlanMode(ctx, sessionID, req)
 		if err != nil {
 			return nil, nil, err

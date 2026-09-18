@@ -71,6 +71,19 @@ func TestBrokerDefinitionsIncludePlanModeToolsWhenControllerSet(t *testing.T) {
 		switch def.Name {
 		case ToolEnterPlanMode:
 			foundEnter = true
+			// plan_path is a write target that usually does not exist yet, so
+			// the read-path existence preflight must be explicitly disabled;
+			// otherwise every first enter_plan_mode with a fresh path is denied
+			// with TOOL_PATH_NOT_FOUND before the tool runs.
+			optOut, ok := types.BoolMetadataValue(def.Metadata, types.ToolMetadataPathPreflightKey)
+			assert.True(t, ok, "enter_plan_mode must declare path_preflight metadata")
+			assert.False(t, optOut, "enter_plan_mode must opt out of read-path preflight")
+			props, _ := def.Parameters["properties"].(map[string]interface{})
+			require.NotNil(t, props, "enter_plan_mode schema properties missing")
+			assert.Contains(t, props, "plan_write_paths")
+			planPathProp, _ := props["plan_path"].(map[string]interface{})
+			require.NotNil(t, planPathProp, "enter_plan_mode plan_path schema missing")
+			assert.NotEmpty(t, planPathProp["anyOf"], "plan_path must advertise string|array input")
 		case ToolExitPlanMode:
 			foundExit = true
 			required, _ := def.Parameters["required"].([]string)
@@ -112,6 +125,85 @@ func TestBrokerExecuteEnterPlanMode(t *testing.T) {
 	require.Len(t, ctrl.enterCalls, 1)
 	assert.Equal(t, "docs/feature-plan.md", ctrl.enterCalls[0].PlanPath)
 	assert.Equal(t, []string{"session-plan"}, ctrl.sessionIDs)
+}
+
+// A: plan_path accepts an array; the first entry stays the primary artifact and
+// the rest widen the plan-mode write allowlist.
+func TestBrokerExecuteEnterPlanModeAcceptsPlanPathArray(t *testing.T) {
+	ctrl := &capturingPlanModeController{
+		enterRes: &PlanModeResult{Active: true, Status: "active", PlanPath: "docs/plan-a.md"},
+	}
+	broker := &Broker{PlanMode: ctrl}
+
+	_, _, err := broker.ExecuteToolCall(context.Background(), "session-plan", types.ToolCall{
+		ID:   "call_enter_array",
+		Name: ToolEnterPlanMode,
+		Args: map[string]interface{}{
+			"plan_path": []interface{}{"docs/plan-a.md", "docs/plan-b.md"},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, ctrl.enterCalls, 1)
+	assert.Equal(t, "docs/plan-a.md", ctrl.enterCalls[0].PlanPath)
+	assert.Equal(t, []string{"docs/plan-b.md"}, ctrl.enterCalls[0].PlanWritePaths)
+}
+
+// B: plan_write_paths adds allowlist entries next to the primary plan_path;
+// empty entries, duplicates and a repeated primary path are dropped.
+func TestBrokerExecuteEnterPlanModeAcceptsPlanWritePaths(t *testing.T) {
+	ctrl := &capturingPlanModeController{
+		enterRes: &PlanModeResult{Active: true, Status: "active", PlanPath: "docs/plan-a.md"},
+	}
+	broker := &Broker{PlanMode: ctrl}
+
+	_, _, err := broker.ExecuteToolCall(context.Background(), "session-plan", types.ToolCall{
+		ID:   "call_enter_extra_paths",
+		Name: ToolEnterPlanMode,
+		Args: map[string]interface{}{
+			"plan_path":        "docs/plan-a.md",
+			"plan_write_paths": []interface{}{"docs/plan-b.md", " docs/plan-a.md ", "docs/plan-b.md", "  "},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, ctrl.enterCalls, 1)
+	assert.Equal(t, "docs/plan-a.md", ctrl.enterCalls[0].PlanPath)
+	assert.Equal(t, []string{"docs/plan-b.md"}, ctrl.enterCalls[0].PlanWritePaths)
+}
+
+// Omitting plan_path keeps the default-primary contract: the primary stays
+// empty here and planmode.Enter normalizes it to plan.md, while the explicit
+// extra paths still join the allowlist.
+func TestBrokerExecuteEnterPlanModeWritePathsWithoutPrimary(t *testing.T) {
+	ctrl := &capturingPlanModeController{
+		enterRes: &PlanModeResult{Active: true, Status: "active", PlanPath: "plan.md"},
+	}
+	broker := &Broker{PlanMode: ctrl}
+
+	_, _, err := broker.ExecuteToolCall(context.Background(), "session-plan", types.ToolCall{
+		ID:   "call_enter_extra_only",
+		Name: ToolEnterPlanMode,
+		Args: map[string]interface{}{
+			"plan_write_paths": []string{"docs/plan-b.md"},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, ctrl.enterCalls, 1)
+	assert.Equal(t, "", ctrl.enterCalls[0].PlanPath)
+	assert.Equal(t, []string{"docs/plan-b.md"}, ctrl.enterCalls[0].PlanWritePaths)
+}
+
+func TestBrokerExecuteEnterPlanModeRejectsNonStringPathList(t *testing.T) {
+	broker := &Broker{PlanMode: &capturingPlanModeController{}}
+	_, _, err := broker.ExecuteToolCall(context.Background(), "session-plan", types.ToolCall{
+		ID:   "call_enter_bad_kind",
+		Name: ToolEnterPlanMode,
+		Args: map[string]interface{}{
+			"plan_path": []interface{}{"docs/plan-a.md", 42},
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `plan_path`)
+	assert.Contains(t, err.Error(), "must be a")
 }
 
 func TestBrokerExecuteExitPlanModeRequiresDecision(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -937,7 +938,12 @@ func executeStructuredPermissionModeCommand(session *ChatSession, command string
 	}
 	value := strings.TrimSpace(extractCommandArgument(command))
 	if value == "" {
-		return commandTextResult(fmt.Sprintf("当前 permission-mode: %s", chatSessionPermissionMode(session)))
+		mode := chatSessionPermissionMode(session)
+		if chatPlanModeActive(session) {
+			// Plan 生效期间 CLI 字段仍是 --yolo 的模式，展示口径统一为 plan。
+			mode = runtimepolicy.ModePlan
+		}
+		return commandTextResult(fmt.Sprintf("当前 permission-mode: %s", mode))
 	}
 	mode, err := parseChatPermissionMode(value, false)
 	if err != nil {
