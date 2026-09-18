@@ -116,6 +116,15 @@ type SessionActorConfig struct {
 	LoopConfig   *agent.LoopReActConfig
 	PrepareRun   func(ctx context.Context, session *Session, resume bool) error
 	PersistHook  func(ctx context.Context, session *Session) (*Session, error)
+	// EnsureSession is the host-side recovery hook the actor invokes when a
+	// session-store Load/Update observes ErrSessionNotFound (the durable row
+	// was deleted, expired, or never persisted). The host rebuilds the row
+	// from its own in-memory snapshot; returning nil means "row restored,
+	// retry". nil disables actor self-heal and keeps the pre-existing error
+	// semantics. The actor applies single-flight plus a short negative cache
+	// (sessionRecoveryRetryInterval) so a persistently missing row cannot
+	// cause a retry storm.
+	EnsureSession func(ctx context.Context, sessionID string) error
 	// RecoverStale releases transient busy states left by a previous
 	// actor instance. Enable it only after acquiring exclusive session ownership.
 	RecoverStale bool
@@ -171,7 +180,11 @@ type SessionActor struct {
 	replayedReceipts   map[string]struct{}
 	prepareRun         func(context.Context, *Session, bool) error
 	persistHook        func(context.Context, *Session) (*Session, error)
-	recoverStale       bool
+	ensureSession      func(context.Context, string) error
+	// sessionHealMu guards ensureSession single-flight and negative caching.
+	sessionHealMu           sync.Mutex
+	sessionHealBlockedUntil time.Time
+	recoverStale            bool
 	// terminalGuard 解析自 SessionActorConfig.ApprovalTerminalGuard，默认 true
 	// （见该字段注释）。
 	terminalGuard bool
@@ -265,6 +278,7 @@ func NewSessionActor(sessionID string, cfg SessionActorConfig) (*SessionActor, e
 		eventBus:           bus,
 		prepareRun:         cfg.PrepareRun,
 		persistHook:        cfg.PersistHook,
+		ensureSession:      cfg.EnsureSession,
 		recoverStale:       cfg.RecoverStale,
 		terminalGuard:      cfg.ApprovalTerminalGuard == nil || *cfg.ApprovalTerminalGuard,
 		triggerTurnDrain:   cfg.TriggerTurnDrain,
@@ -2917,16 +2931,87 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 	a.runLifecycleMu.Unlock()
 }
 
+// sessionNotFoundError builds a typed SESSION_NOT_FOUND error for a missing
+// session record. The broker's error classifier falls back to message string
+// matching ("not found" → TOOL_PATH_NOT_FOUND) for untyped errors, which used
+// to mislabel a missing/expired session as a path failure; returning the code
+// directly keeps classification tied to the error type, not its wording.
+func sessionNotFoundError(sessionID string) *runtimeerrors.RuntimeError {
+	sessionID = strings.TrimSpace(sessionID)
+	return runtimeerrors.Newf(runtimeerrors.ErrSessionNotFound, "session not found: %s", sessionID).
+		WithContext("session_id", sessionID)
+}
+
+// sessionRecoveryRetryInterval bounds how often the actor asks the host to
+// rebuild a missing session row after a failed attempt (negative cache).
+const sessionRecoveryRetryInterval = 5 * time.Second
+
+// tryEnsureSession asks the host to rebuild the missing session row and
+// reports whether it succeeded. Failed attempts are negatively cached for
+// sessionRecoveryRetryInterval so a persistently unavailable row cannot cause
+// a retry storm across tools/turns in the same run.
+func (a *SessionActor) tryEnsureSession(ctx context.Context) bool {
+	if a == nil || a.ensureSession == nil {
+		return false
+	}
+	a.sessionHealMu.Lock()
+	defer a.sessionHealMu.Unlock()
+	if now := time.Now(); !a.sessionHealBlockedUntil.IsZero() && now.Before(a.sessionHealBlockedUntil) {
+		return false
+	}
+	if err := a.ensureSession(ctx, a.id); err != nil {
+		a.sessionHealBlockedUntil = time.Now().Add(sessionRecoveryRetryInterval)
+		return false
+	}
+	a.sessionHealBlockedUntil = time.Time{}
+	return true
+}
+
+// publishSessionRecovered emits the audit event for a self-healed session row.
+func (a *SessionActor) publishSessionRecovered(trigger string) {
+	if a == nil || a.eventBus == nil {
+		return
+	}
+	a.eventBus.Publish(runtimeevents.Event{
+		Type:      "session_recovered_from_missing_row",
+		SessionID: a.id,
+		Payload:   map[string]interface{}{"trigger": trigger},
+	})
+}
+
+// wrapSessionStoreError promotes the storage-level ErrSessionNotFound sentinel
+// to the typed runtime error while leaving every other storage failure intact.
+func wrapSessionStoreError(err error, sessionID string) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrSessionNotFound) {
+		return sessionNotFoundError(sessionID)
+	}
+	return err
+}
+
 func (a *SessionActor) loadSession(ctx context.Context) (*Session, error) {
 	if a.sessionStore == nil {
 		return nil, fmt.Errorf("session store is not configured")
 	}
 	session, err := a.sessionStore.Load(ctx, a.id)
+	if err != nil && errors.Is(err, ErrSessionNotFound) {
+		// The durable row is missing (deleted/expired/never persisted). Give
+		// the host one chance to rebuild it from its in-memory snapshot before
+		// surfacing the typed error to the tool layer.
+		if a.tryEnsureSession(ctx) {
+			session, err = a.sessionStore.Load(ctx, a.id)
+			if err == nil && session != nil {
+				a.publishSessionRecovered("load")
+			}
+		}
+	}
 	if err != nil {
-		return nil, err
+		return nil, wrapSessionStoreError(err, a.id)
 	}
 	if session == nil {
-		return nil, fmt.Errorf("session not found: %s", a.id)
+		return nil, sessionNotFoundError(a.id)
 	}
 	// Lazily mint stable message_id/turn_id for pre-Phase-6 sessions so
 	// backtrack message_id selectors and history consumers stay durable.
@@ -2987,8 +3072,22 @@ func (a *SessionActor) persistSession(ctx context.Context, session *Session) err
 	// Reload that broker-owned context immediately before the actor's full-row
 	// update so the end-of-turn write cannot erase handles created in the turn.
 	latest, err := a.sessionStore.Load(ctx, session.ID)
+	if err != nil && errors.Is(err, ErrSessionNotFound) {
+		if a.tryEnsureSession(ctx) {
+			latest, err = a.sessionStore.Load(ctx, session.ID)
+		}
+	}
 	if err != nil {
-		return err
+		if errors.Is(err, ErrSessionNotFound) && a.ensureSession != nil {
+			// The row vanished mid-turn: recreate it from the actor's full
+			// in-memory snapshot instead of failing the turn's persist.
+			if saveErr := a.sessionStore.Save(ctx, session); saveErr != nil {
+				return wrapSessionStoreError(saveErr, session.ID)
+			}
+			a.publishSessionRecovered("persist_reload")
+			return nil
+		}
+		return wrapSessionStoreError(err, session.ID)
 	}
 	if latest != nil {
 		if aliases, ok := latest.GetContext(toolbroker.SessionHandleAliasesContextKey); ok {
@@ -3019,7 +3118,19 @@ func (a *SessionActor) persistSession(ctx context.Context, session *Session) err
 	if hasRun && !a.sessionRunOwned(run) {
 		return errSessionRunSuperseded
 	}
-	return a.sessionStore.Update(ctx, session)
+	if err := a.sessionStore.Update(ctx, session); err != nil {
+		if errors.Is(err, ErrSessionNotFound) && a.ensureSession != nil {
+			// Lost a race with an external delete between reload and update:
+			// fall back to create semantics with the current snapshot.
+			if saveErr := a.sessionStore.Save(ctx, session); saveErr != nil {
+				return wrapSessionStoreError(saveErr, session.ID)
+			}
+			a.publishSessionRecovered("persist_update")
+			return nil
+		}
+		return wrapSessionStoreError(err, session.ID)
+	}
+	return nil
 }
 
 // planModeStateRevision reports the newest lifecycle timestamp recorded in a

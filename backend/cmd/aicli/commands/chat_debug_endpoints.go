@@ -109,6 +109,10 @@ var webDebugEndpoints = []struct {
 	{Method: "POST", Path: "/web/api/config/providers/auto-import", Note: "从本地客户端配置自动导入 provider"},
 	{Method: "POST", Path: "/web/api/config/chat", Note: "保存 chat 配置（默认 provider/model 等）"},
 	{Method: "GET", Path: "/web/api/skills", Note: "技能目录（/{name} 拉取单个技能详情）"},
+	{Method: "GET/POST", Path: "/web/api/mcps", Note: "MCP 列表（config+status）/ 新增（写 mcp.yaml 并热重载）"},
+	{Method: "GET/PUT/DELETE", Path: "/web/api/mcps/{name}", Note: "查看 / 更新 / 删除单个 MCP"},
+	{Method: "POST", Path: "/web/api/mcps/{name}/enable|disable", Note: "启用/停用 MCP（持久化 + 重连，刷新会话工具）"},
+	{Method: "POST", Path: "/web/api/mcps/reload", Note: "热重载 MCP 配置并重连（MCP 页签）"},
 	{Method: "GET", Path: "/web/api/analysis", Note: "用量分析（/status|/tools|/subagents|/errors）"},
 	{Method: "GET", Path: "/web/api/cache", Note: "LLM 缓存分析（/overview|/requests|/messages/{id}/trace）"},
 }

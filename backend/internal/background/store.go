@@ -583,7 +583,7 @@ func (s *SQLiteStore) PruneJobs(ctx context.Context, before time.Time) ([]Job, e
 	if len(expired) == 0 {
 		return nil, nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
 		return nil, fmt.Errorf("begin background prune tx: %w", err)
 	}
@@ -627,7 +627,10 @@ func (s *SQLiteStore) AppendEvent(ctx context.Context, jobID, eventType string, 
 	}
 	createdAt := time.Now().UTC()
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	// 读后写（SELECT MAX(seq)+1 → INSERT）：background.sqlite 由 aicli 与
+	// runtime-server 共享，deferred 事务会被并发写者顶成
+	// SQLITE_BUSY_SNAPSHOT/517（重试同一事务永不成功）。IMMEDIATE 先取写锁。
+	tx, err := s.db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
 		return fmt.Errorf("begin job event tx: %w", err)
 	}

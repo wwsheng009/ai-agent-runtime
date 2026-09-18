@@ -1537,7 +1537,7 @@ func TestConfirmClearConversationHistoryOwnsConfirmationInputMode(t *testing.T) 
 		MsgCount:   1,
 		InputQueue: queue,
 	}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = interaction
 
 	confirmed := make(chan bool, 1)
@@ -1566,7 +1566,7 @@ func TestDispatchChatCommand_ClearsInteractivePromptBeforePrinting(t *testing.T)
 	session, cleanup := newGoalCommandTestSession(t)
 	defer cleanup()
 
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var renderedPrompt bytes.Buffer
 	coord.SetWriter(&renderedPrompt)
 	session.Interaction = coord
@@ -1738,7 +1738,7 @@ func TestExecuteDirectFunctionPublishesAndRestoresToolRunningStage(t *testing.T)
 			}
 			catalog.RegisterFunction(fn)
 			session := &ChatSession{FunctionCatalog: catalog, FunctionRegistry: registry}
-			interaction := newChatInteractionCoordinator(session)
+			interaction := newTestChatInteractionCoordinator(t, session)
 			session.Interaction = interaction
 			interaction.SetAgentStageDetail(chatAgentStageAwaitingAnswer, "existing question")
 

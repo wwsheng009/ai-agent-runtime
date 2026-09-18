@@ -31,6 +31,12 @@ type PersistentSessionStorageConfig struct {
 	SQLiteCacheKiB        int
 	BusyTimeout           time.Duration
 	ImportLegacyJSON      bool
+	// SessionSnapshotTimeout 限制单次 SnapshotSession/Snapshot 的全程耗时；
+	// 默认 min(BusyTimeout*6, 60s)，负值表示不额外加 deadline（沿用调用方 ctx）。
+	SessionSnapshotTimeout time.Duration
+	// SessionSnapshotMaxBytes 是会话快照的预检上限（估算字节数），
+	// 0 表示不限制；超限时返回可解释错误且不产生残留文件（P2.13/G4）。
+	SessionSnapshotMaxBytes int64
 }
 
 func DefaultPersistentSessionStorageConfig(dir string) PersistentSessionStorageConfig {
@@ -85,7 +91,25 @@ func normalizePersistentSessionStorageConfig(cfg PersistentSessionStorageConfig)
 	if cfg.BusyTimeout <= 0 {
 		cfg.BusyTimeout = defaults.BusyTimeout
 	}
+	if cfg.SessionSnapshotTimeout == 0 {
+		cfg.SessionSnapshotTimeout = snapshotTimeoutForBusyTimeout(cfg.BusyTimeout)
+	} else if cfg.SessionSnapshotTimeout < 0 {
+		cfg.SessionSnapshotTimeout = 0
+	}
 	return cfg
+}
+
+// snapshotTimeoutForBusyTimeout 是 P2.13/D4 的默认预算：比写锁等待上限宽裕，
+// 但有明确上界，避免 context.Background() 下的无限挂起。
+func snapshotTimeoutForBusyTimeout(busyTimeout time.Duration) time.Duration {
+	if busyTimeout <= 0 {
+		busyTimeout = 5 * time.Second
+	}
+	timeout := busyTimeout * 6
+	if timeout > 60*time.Second {
+		timeout = 60 * time.Second
+	}
+	return timeout
 }
 
 // SessionStoragePreviewLister avoids materializing histories for list views.

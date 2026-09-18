@@ -147,7 +147,7 @@ func TestMatchSlashCommandCandidates(t *testing.T) {
 		{
 			name:  "shared m prefix",
 			query: "/m",
-			want:  []string{"/model", "/memory", "/mode"},
+			want:  []string{"/model", "/memory", "/mcp", "/mode"},
 		},
 		{
 			name:  "slash s prefix order",
@@ -471,6 +471,7 @@ func TestChatSlashCommandCatalogMatchesHandleCommandRoutes(t *testing.T) {
 		{canonical: "/call", forms: []string{"/call", "/tool"}, acceptsArgs: true, requiresArgs: true},
 		{canonical: "/skill", forms: []string{"/skill"}, acceptsArgs: true, requiresArgs: true},
 		{canonical: "/skills", forms: []string{"/skills"}, acceptsArgs: true, requiresArgs: false},
+		{canonical: "/mcp", forms: []string{"/mcp"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/shell", forms: []string{"/shell", "/cmd"}, acceptsArgs: true, requiresArgs: true},
 		{canonical: "/usage", forms: []string{"/usage"}, acceptsArgs: true, requiresArgs: false},
 	}

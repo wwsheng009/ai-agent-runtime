@@ -25,7 +25,7 @@ func TestChatSessionIDLineE2E_PublishedOnSurfaceMount(t *testing.T) {
 		Stream:         true,
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
 	}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	interaction.SetWriter(&bytes.Buffer{})
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
@@ -58,7 +58,7 @@ func TestChatSessionIDLineE2E_PublishedOnSurfaceMount(t *testing.T) {
 // 未绑定 runtime session 时，第二行显示 --pprof / --debug 标志状态（不渲染 "会话 " 前缀）。
 func TestChatSessionIDLineE2E_ShowsFlagStatusWithoutRuntimeSession(t *testing.T) {
 	session := &ChatSession{Stream: true}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	interaction.SetWriter(&bytes.Buffer{})
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())

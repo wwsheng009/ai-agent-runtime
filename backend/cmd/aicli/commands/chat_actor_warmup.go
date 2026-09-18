@@ -18,7 +18,9 @@ type chatActorWarmup struct {
 
 func startChatActorWarmup(session *ChatSession) {
 	// Unpersisted new sessions must not force a durable Load/Save during
-	// bootstrap. Warm them up after the first persistence flush instead.
+	// bootstrap: the actor factory performs the flush + row probe (the
+	// "actor ⇒ durable row" invariant) at the moment an actor is actually
+	// requested, so deferred storage stays lazy here.
 	if session == nil || session.runtimeSessionUnpersisted || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.SessionHub == nil || session.RuntimeSession == nil {
 		setChatActorWarmup(session, nil)
 		return

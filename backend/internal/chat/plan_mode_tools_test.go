@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -333,4 +334,61 @@ func TestSessionActorEnterPlanModeWorksWhileRunning(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.True(t, result.Active)
+}
+
+// newPlanModeTestActorWithStore builds the same fixture as
+// newPlanModeTestActor but also exposes the concrete storage so tests can
+// simulate a deleted/expired session record.
+func newPlanModeTestActorWithStore(t *testing.T, mode runtimepolicy.Mode) (*SessionActor, *Session, *InMemoryStorage) {
+	t.Helper()
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+	session, err := manager.CreateSession(ctx, "plan-mode-user")
+	require.NoError(t, err)
+
+	apiAgent := agent.NewAgent(&agent.Config{
+		Name:     "plan-mode-agent",
+		Model:    "test-model",
+		MaxSteps: 1,
+	}, nil)
+	engine := agent.NewPermissionEngine()
+	engine.Mode = mode
+	apiAgent.SetPermissionEngine(engine)
+
+	runtimeStore := NewInMemoryRuntimeStore(32)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+	return actor, session, storage
+}
+
+func TestSessionActorEnterPlanModeTypedSessionNotFound(t *testing.T) {
+	actor, session, storage := newPlanModeTestActorWithStore(t, runtimepolicy.ModeDefault)
+	ctx := context.Background()
+
+	// Simulate a deleted/expired session record: the store no longer holds it.
+	require.NoError(t, storage.Delete(ctx, session.ID))
+
+	_, err := actor.EnterPlanMode(ctx, "", toolbroker.EnterPlanModeArgs{PlanPath: "plan.md"})
+	require.Error(t, err)
+	assert.True(t, runtimeerrors.Is(err, runtimeerrors.ErrSessionNotFound), "got %v", err)
+	// The historical mislabel: raw "not found" text was classified as a path
+	// failure by the broker. The source must emit the typed code instead.
+	assert.False(t, runtimeerrors.Is(err, runtimeerrors.ErrToolPathNotFound), "session-not-found must not be classified as a path error")
+}
+
+func TestSessionActorPersistSessionTypedSessionNotFound(t *testing.T) {
+	actor, session, storage := newPlanModeTestActorWithStore(t, runtimepolicy.ModeDefault)
+	ctx := context.Background()
+
+	require.NoError(t, storage.Delete(ctx, session.ID))
+
+	err := actor.persistSession(ctx, session)
+	require.Error(t, err)
+	assert.True(t, runtimeerrors.Is(err, runtimeerrors.ErrSessionNotFound), "got %v", err)
 }

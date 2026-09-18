@@ -138,7 +138,7 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	if session.RuntimeSession == nil {
 		return "", fmt.Errorf("runtime session is not configured")
 	}
-	if err := ensureChatRuntimeSessionPersisted(session); err != nil {
+	if err := ensureSessionDurableBeforeActor(session); err != nil {
 		return "", fmt.Errorf("persist runtime session: %w", err)
 	}
 	ctx = prepareAICLIActorRuntimeContext(ctx, session)
@@ -243,7 +243,7 @@ func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *Chat
 	if session.RuntimeSession == nil {
 		return "", fmt.Errorf("runtime session is not configured")
 	}
-	if err := ensureChatRuntimeSessionPersisted(session); err != nil {
+	if err := ensureSessionDurableBeforeActor(session); err != nil {
 		return "", fmt.Errorf("persist runtime session: %w", err)
 	}
 	if session.LocalRuntimeHost == nil || session.LocalRuntimeHost.SessionHub == nil {

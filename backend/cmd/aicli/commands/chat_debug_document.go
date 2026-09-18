@@ -262,6 +262,7 @@ func buildChatDebugDisplayDocument(session *ChatSession) render.Document {
 	appendChatDebugScreenLines(&builder, session)
 	appendChatDebugEndpointListLines(&builder, session)
 	appendChatDebugComponentLines(&builder, session)
+	appendChatDebugStorageLines(&builder, session)
 	builder.heading("AgentControl Registry: (GET /debug/chat/status#agents)")
 	builder.plain(chatAgentPanelRegistryLine(session))
 	builder.plainLines(chatAgentControlConsistencyLines(session))

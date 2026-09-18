@@ -66,6 +66,45 @@ func TestBuildChatLoginResultDocumentCoversKeyFields(t *testing.T) {
 	}
 }
 
+func TestBuildLoginPickerItemsPutsCreateProviderFirst(t *testing.T) {
+	items, createIndex, optionIndexOffset := buildLoginPickerItems(
+		[]string{"alpha", "beta"},
+		"beta",
+		"provider",
+		true,
+	)
+	if createIndex != 0 {
+		t.Fatalf("expected create row index 0, got %d", createIndex)
+	}
+	if optionIndexOffset != 1 {
+		t.Fatalf("expected provider option offset 1, got %d", optionIndexOffset)
+	}
+	if len(items) != 3 {
+		t.Fatalf("expected create row plus two providers, got %d", len(items))
+	}
+	if items[0].Title != chatLoginPickerCreateRowTitle {
+		t.Fatalf("expected create row first, got %#v", items[0])
+	}
+	if items[1].Title != "alpha" || !strings.Contains(items[2].Title, "beta") {
+		t.Fatalf("provider rows were not preserved after create row: %#v", items)
+	}
+}
+
+func TestBuildLoginPickerItemsWithoutCreateKeepsProviderIndexes(t *testing.T) {
+	items, createIndex, optionIndexOffset := buildLoginPickerItems(
+		[]string{"alpha", "beta"},
+		"",
+		"provider",
+		false,
+	)
+	if createIndex != -1 || optionIndexOffset != 0 {
+		t.Fatalf("unexpected no-create indexes: create=%d offset=%d", createIndex, optionIndexOffset)
+	}
+	if len(items) != 2 || items[0].Title != "alpha" || items[1].Title != "beta" {
+		t.Fatalf("unexpected no-create rows: %#v", items)
+	}
+}
+
 func TestRefreshUnifiedLoginSessionDryRunNoWarnings(t *testing.T) {
 	result := &providerLoginResult{ProviderName: "alpha", DryRun: true}
 	warnings, notice := refreshUnifiedLoginSession(&ChatSession{}, result, false)

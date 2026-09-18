@@ -138,3 +138,35 @@ func resetFrozenTurnTools(state *RuntimeState) {
 	state.FrozenTurnTools = nil
 	state.FrozenTurnToolsSet = false
 }
+
+// InvalidateStableToolSurface 清除会话级稳定工具面缓存，使后续 turn 重新冻结
+// 最新工具目录。MCP 异步建连完成 / 热重载 / 服务启停 / 工具启停等目录变化后
+// 由宿主调用；运行中的 turn 保留其 FrozenTurnTools（请求前缀冻结），新 turn
+// 边界才生效。
+func (a *SessionActor) InvalidateStableToolSurface(ctx context.Context) error {
+	if a == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return a.updateState(ctx, func(state *RuntimeState) error {
+		if state == nil {
+			return nil
+		}
+		if !state.StableToolSurfaceSet && len(state.StableToolSurface) == 0 &&
+			state.StableToolSurfaceBinding == "" && state.StableToolSurfaceFingerprint == "" &&
+			!state.FrozenTurnToolsSet && len(state.FrozenTurnTools) == 0 {
+			return nil
+		}
+		state.StableToolSurface = nil
+		state.StableToolSurfaceSet = false
+		state.StableToolSurfaceBinding = ""
+		state.StableToolSurfaceFingerprint = ""
+		if strings.TrimSpace(state.CurrentTurnID) == "" {
+			resetFrozenTurnTools(state)
+		}
+		state.UpdatedAt = time.Now().UTC()
+		return nil
+	})
+}

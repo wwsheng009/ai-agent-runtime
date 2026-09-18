@@ -136,7 +136,7 @@ func TestTryExecuteStructuredChatCommandMigratesFiniteComposerCommands(t *testin
 func TestCommandResultMergesBlocksIntoOneAtomicCommandCell(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 
@@ -166,7 +166,7 @@ func TestDispatchChatCommandDebugDisplayDoesNotWriteRawStdout(t *testing.T) {
 		ProviderName: "openai",
 		Model:        "gpt-test",
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 
@@ -197,7 +197,7 @@ func TestUnifiedInteractiveLegacyCommandsAreFencedBeforeLegacyHandlers(t *testin
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 
@@ -268,7 +268,7 @@ func TestDispatchChatCommandDebugDisplaySurvivesOwnedViewportRepaints(t *testing
 		Model:        "gpt-test",
 		Surface:      surface,
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 	coord.SetSurface(surface)
@@ -641,7 +641,7 @@ func TestTryExecuteStructuredChatCommandReasoningEffort(t *testing.T) {
 func TestDispatchChatCommandFiniteModesDoNotWriteRawStdout(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 
@@ -667,7 +667,7 @@ func TestDispatchChatCommandFiniteModesDoNotWriteRawStdout(t *testing.T) {
 func TestDispatchChatCommandGoalDoesNotWriteRawStdout(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 
@@ -697,7 +697,7 @@ func TestDispatchChatCommandGoalSetCommitsCellThenSendsObjective(t *testing.T) {
 	session.ChatExecutor = executor
 	session.cancelCtx = context.Background()
 
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 	var retained bytes.Buffer
@@ -729,7 +729,7 @@ func TestDispatchChatCommandMemoryDoesNotWriteRawStdout(t *testing.T) {
 			ID: "memory-cmd-test",
 		},
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 
@@ -754,7 +754,7 @@ func TestDispatchChatCommandMemoryDoesNotWriteRawStdout(t *testing.T) {
 func TestDispatchChatCommandStreamDoesNotWriteRawStdout(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 
@@ -786,7 +786,7 @@ func TestDispatchChatCommandStreamSurvivesOwnedViewportRepaints(t *testing.T) {
 	session := &ChatSession{
 		Surface: surface,
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 	coord.SetSurface(surface)
@@ -861,7 +861,7 @@ func TestTryExecuteStructuredChatCommandTitle(t *testing.T) {
 func TestDispatchChatCommandTitleDoesNotWriteRawStdout(t *testing.T) {
 	runtimeSession := runtimechat.NewSession("tester")
 	session := &ChatSession{RuntimeSession: runtimeSession}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 
@@ -896,7 +896,7 @@ func TestDispatchChatCommandTitleSurvivesOwnedViewportRepaints(t *testing.T) {
 		RuntimeSession: runtimeSession,
 		Surface:        surface,
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 	coord.SetSurface(surface)

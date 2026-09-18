@@ -357,7 +357,8 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		!commandMatches(cmdLower, "/queue") && !commandMatches(cmdLower, "/attach") &&
 		!commandMatches(cmdLower, "/permission-mode") && !commandMatches(cmdLower, "/mode") &&
 		!commandMatches(cmdLower, "/approval-reuse") && !commandMatches(cmdLower, "/plan") &&
-		!commandMatches(cmdLower, "/timeline") && !commandMatches(cmdLower, "/collab") {
+		!commandMatches(cmdLower, "/timeline") && !commandMatches(cmdLower, "/collab") &&
+		!commandMatches(cmdLower, "/mcp") {
 		return CommandResult{}, false, nil
 	}
 
@@ -401,6 +402,10 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 
 	if commandMatches(cmdLower, "/collab") {
 		return executeStructuredCollabCommand(session, command), true, nil
+	}
+
+	if commandMatches(cmdLower, "/mcp") {
+		return executeStructuredMCPCommand(session, command), true, nil
 	}
 
 	if commandMatches(cmdLower, "/function") || commandMatches(cmdLower, "/describe") {

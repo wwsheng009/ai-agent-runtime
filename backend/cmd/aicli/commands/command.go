@@ -205,6 +205,12 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if commandMatches(cmdLower, "/skill") {
 		return handleDirectSkillCommand(session, command)
 	}
+	if commandMatches(cmdLower, "/mcp") {
+		// /mcp 是结构化命令：非 JSON 模式由 dispatchChatCommand 提前认领；
+		// 这里为 JSON 输出保留同一份命令单元的渲染路径，不引入新的原始终端写入。
+		_ = renderChatCommandResult(session, executeStructuredMCPCommand(session, command), false)
+		return false
+	}
 	if commandMatches(cmdLower, "/sessions") {
 		filter := session.SessionFilter
 		filter.Query = strings.TrimSpace(extractCommandArgument(command))

@@ -14,19 +14,24 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
 
 type chatDebugArchiveOptions struct {
 	OutputPath string
 	OutputDir  string
+	// RequireSnapshot 保留严格模式：快照失败即中止归档；
+	// 默认 false（degrade）——快照失败只标记 unavailable，归档继续产出（P2.13/D3）。
+	RequireSnapshot bool
 }
 
 type chatDebugArchiveItem struct {
-	Label         string `json:"label"`
-	Path          string `json:"path"`
-	Kind          string `json:"kind"`
-	SourcePath    string `json:"-"`
-	ArchivePrefix string `json:"-"`
+	Label             string `json:"label"`
+	Path              string `json:"path"`
+	Kind              string `json:"kind"`
+	UnavailableReason string `json:"unavailable_reason,omitempty"`
+	SourcePath        string `json:"-"`
+	ArchivePrefix     string `json:"-"`
 }
 
 type chatDebugArchiveResult struct {
@@ -177,6 +182,8 @@ func parseChatDebugCommand(argument string) (string, chatDebugArchiveOptions, er
 			opts.OutputDir = strings.TrimSpace(fields[i])
 		case strings.HasPrefix(lower, "--dir="):
 			opts.OutputDir = strings.TrimSpace(token[len("--dir="):])
+		case lower == "--require-snapshot" || lower == "--strict-snapshot":
+			opts.RequireSnapshot = true
 		default:
 			return action, opts, fmt.Errorf("未知 /debug 参数: %s", token)
 		}
@@ -184,8 +191,8 @@ func parseChatDebugCommand(argument string) (string, chatDebugArchiveOptions, er
 	if action == "" {
 		action = "status"
 	}
-	if action != "export" && (strings.TrimSpace(opts.OutputPath) != "" || strings.TrimSpace(opts.OutputDir) != "") {
-		return action, opts, fmt.Errorf("--output/--dir 只能与 /debug export 一起使用")
+	if action != "export" && (strings.TrimSpace(opts.OutputPath) != "" || strings.TrimSpace(opts.OutputDir) != "" || opts.RequireSnapshot) {
+		return action, opts, fmt.Errorf("--output/--dir/--require-snapshot 只能与 /debug export 一起使用")
 	}
 	return action, opts, nil
 }
@@ -231,7 +238,7 @@ func printChatDebugUsage() {
 }
 
 func chatDebugUsageText() string {
-	return "用法: /debug on | /debug off | /debug status | /debug display | /debug routing | /debug export [--output <zip>|--dir <dir>] | /debug supervision list|ack|defer|resolve"
+	return "用法: /debug on | /debug off | /debug status | /debug display | /debug routing | /debug export [--output <zip>|--dir <dir>] [--require-snapshot] | /debug supervision list|ack|defer|resolve"
 }
 
 func exportChatDebugArchive(session *ChatSession, opts chatDebugArchiveOptions) (*chatDebugArchiveResult, error) {
@@ -249,7 +256,7 @@ func exportChatDebugArchive(session *ChatSession, opts chatDebugArchiveOptions) 
 	if len(items) == 0 {
 		return nil, fmt.Errorf("当前 /debug 没有可打包的会话文件")
 	}
-	cleanupSnapshot, err := attachChatDebugSessionSnapshot(session, outputPath, items)
+	cleanupSnapshot, err := attachChatDebugSessionSnapshot(session, outputPath, items, opts.RequireSnapshot)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +287,7 @@ func exportChatDebugArchive(session *ChatSession, opts chatDebugArchiveOptions) 
 	return result, nil
 }
 
-func attachChatDebugSessionSnapshot(session *ChatSession, outputPath string, items []chatDebugArchiveItem) (func(), error) {
+func attachChatDebugSessionSnapshot(session *ChatSession, outputPath string, items []chatDebugArchiveItem, requireSnapshot bool) (func(), error) {
 	cleanup := func() {}
 	if session == nil || session.SessionManager == nil {
 		return cleanup, nil
@@ -290,6 +297,13 @@ func attachChatDebugSessionSnapshot(session *ChatSession, outputPath string, ite
 	snapshotter, hasFullSnapshot := storage.(runtimechat.SessionStorageSnapshotter)
 	if !hasSessionSnapshot && !hasFullSnapshot {
 		return cleanup, nil
+	}
+	// P2.13/D7（审查 R6）：进程被杀时 defer 清理不会执行，先清扫超龄的
+	// 快照临时目录；新鲜目录可能属于进行中的并发归档，保持不动。
+	if removed := sweepStaleChatDebugSnapshotDirs(filepath.Dir(outputPath), chatDebugSnapshotDirStaleAge); removed > 0 {
+		if logger := logpkg.S(); logger != nil {
+			logger.Infof("[debug-archive] swept %d stale session snapshot dir(s) under %s", removed, filepath.Dir(outputPath))
+		}
 	}
 	temporaryDir, err := os.MkdirTemp(filepath.Dir(outputPath), ".aicli-session-snapshot-*")
 	if err != nil {
@@ -309,8 +323,21 @@ func attachChatDebugSessionSnapshot(session *ChatSession, outputPath string, ite
 		snapshotErr = snapshotter.Snapshot(context.Background(), snapshotPath)
 	}
 	if snapshotErr != nil {
-		cleanup()
-		return func() {}, fmt.Errorf("创建 SQLite 会话一致性快照失败: %w", snapshotErr)
+		if requireSnapshot {
+			cleanup()
+			return func() {}, fmt.Errorf("创建 SQLite 会话一致性快照失败: %w", snapshotErr)
+		}
+		// 默认降级（D3）：标记 session_file 不可用，归档继续产出其余诊断材料。
+		for index := range items {
+			if items[index].Label == "session_file" {
+				items[index].UnavailableReason = snapshotErr.Error()
+				break
+			}
+		}
+		if logger := logpkg.S(); logger != nil {
+			logger.Warnf("[debug-archive] session snapshot unavailable, archiving without it: %v", snapshotErr)
+		}
+		return cleanup, nil
 	}
 	for index := range items {
 		if items[index].Label == "session_file" {
@@ -319,6 +346,39 @@ func attachChatDebugSessionSnapshot(session *ChatSession, outputPath string, ite
 		}
 	}
 	return cleanup, nil
+}
+
+const chatDebugSnapshotDirStaleAge = 24 * time.Hour
+
+// sweepStaleChatDebugSnapshotDirs 清理异常退出遗留的快照临时目录：
+// 仅处理目标目录下前缀匹配且 mtime 超过 staleAge 的目录。
+func sweepStaleChatDebugSnapshotDirs(parentDir string, staleAge time.Duration) int {
+	parentDir = strings.TrimSpace(parentDir)
+	if parentDir == "" {
+		return 0
+	}
+	if staleAge <= 0 {
+		staleAge = chatDebugSnapshotDirStaleAge
+	}
+	entries, err := os.ReadDir(parentDir)
+	if err != nil {
+		return 0
+	}
+	cutoff := time.Now().Add(-staleAge)
+	removed := 0
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), ".aicli-session-snapshot-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(parentDir, entry.Name())); err == nil {
+			removed++
+		}
+	}
+	return removed
 }
 
 func resolveChatDebugArchiveOutputPath(session *ChatSession, opts chatDebugArchiveOptions) (string, error) {
@@ -405,6 +465,12 @@ func writeChatDebugArchive(path string, session *ChatSession, items []chatDebugA
 	usedNames := make(map[string]struct{})
 
 	for _, item := range items {
+		if reason := strings.TrimSpace(item.UnavailableReason); reason != "" {
+			// 明确不可用的项（如降级跳过的会话快照）进入 manifest.skipped，
+			// 避免读者把「文件缺失」误解为「会话为空」（P2.13/G5）。
+			result.Skipped = append(result.Skipped, item)
+			continue
+		}
 		sourcePath := chatDebugArchiveSourcePath(item)
 		info, statErr := os.Stat(sourcePath)
 		if statErr != nil {

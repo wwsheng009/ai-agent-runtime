@@ -83,7 +83,7 @@ func TestChatRuntimeEventBridge_WhitespaceAssistantBeforeToolBoundaryDropped(t *
 // 分隔线，不产出任何 "• " 幽灵行。
 func TestChatInteractionCoordinator_WhitespaceAssistantBufferProducesNoGhostLine(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.liveStreamFn = func() bool { return true }
 	coord.streamRuneDelay = 0
 	var output bytes.Buffer
@@ -124,7 +124,7 @@ func TestChatInteractionCoordinator_ReasoningAndAssistantStayAdjacentWithoutEven
 	}
 
 	t.Run("live stream", func(t *testing.T) {
-		coord := newChatInteractionCoordinator(&ChatSession{})
+		coord := newTestChatInteractionCoordinator(t, &ChatSession{})
 		coord.liveStreamFn = func() bool { return true }
 		coord.streamRuneDelay = 0
 		var output bytes.Buffer
@@ -141,7 +141,7 @@ func TestChatInteractionCoordinator_ReasoningAndAssistantStayAdjacentWithoutEven
 	})
 
 	t.Run("one shot final", func(t *testing.T) {
-		coord := newChatInteractionCoordinator(&ChatSession{})
+		coord := newTestChatInteractionCoordinator(t, &ChatSession{})
 		coord.liveStreamFn = func() bool { return true }
 		coord.streamRuneDelay = 0
 		var output bytes.Buffer

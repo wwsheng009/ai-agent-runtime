@@ -24,9 +24,34 @@ func loginPickerLeaseHooks() chatPickerLeaseHooks {
 	}
 }
 
-// chatLoginPickerCreateRowTitle is the trailing row that lets the /login
+// chatLoginPickerCreateRowTitle is the leading row that lets the /login
 // provider stage fall back to a text prompt for a brand-new provider name.
 const chatLoginPickerCreateRowTitle = "＋ 新建 provider（手动输入名称）"
+
+// buildLoginPickerItems builds the searchable rows used by both the standalone
+// login command and /login in chat. The create row is deliberately prepended
+// so creating a provider is always the first action, independent of provider
+// names or sort order.
+//
+// The returned optionIndexOffset translates an item index back to the index in
+// options. It is one when the create row is present and zero otherwise.
+func buildLoginPickerItems(options []string, current, kind string, allowCreate bool) (items []ui.FullScreenListItem, createIndex, optionIndexOffset int) {
+	items = buildChatPickerItems(options, current, kind, kind)
+	createIndex = -1
+	if !allowCreate {
+		return items, createIndex, 0
+	}
+
+	createIndex = 0
+	optionIndexOffset = 1
+	createItem := ui.FullScreenListItem{
+		Title:      chatLoginPickerCreateRowTitle,
+		Detail:     kind,
+		SearchText: "create new " + kind + " 新建 provider",
+	}
+	items = append([]ui.FullScreenListItem{createItem}, items...)
+	return items, createIndex, optionIndexOffset
+}
 
 // isChatLoginCancelError reports whether a login-flow error means the user
 // aborted the interaction (full-screen picker Esc/q or a text prompt
@@ -46,16 +71,7 @@ func (p chatLoginPrompter) PromptSelect(label, kind string, options []string, cu
 		return "", false, ui.ErrFullScreenUnavailable
 	}
 
-	items := buildChatPickerItems(options, current, kind, kind)
-	createIndex := -1
-	if allowCreate {
-		createIndex = len(items)
-		items = append(items, ui.FullScreenListItem{
-			Title:      chatLoginPickerCreateRowTitle,
-			Detail:     kind,
-			SearchText: "create new " + kind + " 新建 provider",
-		})
-	}
+	items, createIndex, optionIndexOffset := buildLoginPickerItems(options, current, kind, allowCreate)
 
 	lease, err := chatPickerOpen(session, "选择 "+label, loginPickerLeaseHooks())
 	if err != nil {
@@ -82,7 +98,11 @@ func (p chatLoginPrompter) PromptSelect(label, kind string, options []string, cu
 		}
 		return strings.TrimSpace(name), false, nil
 	}
-	return options[index], false, nil
+	optionIndex := index - optionIndexOffset
+	if optionIndex < 0 || optionIndex >= len(options) {
+		return "", false, fmt.Errorf("invalid picker selection %d", index)
+	}
+	return options[optionIndex], false, nil
 }
 
 // executeStructuredLoginCommand is the unified interactive entry point for

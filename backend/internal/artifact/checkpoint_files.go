@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 )
 
 // CheckpointFile captures per-file checkpoint metadata.
@@ -70,7 +72,7 @@ func (s *Store) SaveCheckpointFiles(ctx context.Context, checkpointID string, fi
 	if len(files) == 0 {
 		return nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
 		return fmt.Errorf("begin checkpoint_files tx: %w", err)
 	}
@@ -221,7 +223,9 @@ func (s *Store) PruneSessionCheckpoints(ctx context.Context, sessionID string, k
 		return 0, fmt.Errorf("session id is required")
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	// 读后写（SELECT 待回收 checkpoint → 删除）：必须 IMMEDIATE，否则并发
+	// 写者会让 deferred 读快照升级失败（SQLITE_BUSY_SNAPSHOT/517）。
+	tx, err := s.db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
 		return 0, fmt.Errorf("begin checkpoint prune tx: %w", err)
 	}

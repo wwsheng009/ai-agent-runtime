@@ -347,6 +347,105 @@ func ensureChatRuntimeSessionPersisted(session *ChatSession) error {
 	return nil
 }
 
+// ensureSessionDurableBeforeActor makes "an actor's session row exists in the
+// durable store" an explicit entry invariant for the local host: the actor
+// factory and turn entry points call it before creating/looking up an actor,
+// so a deferred-storage shell (runtimeSessionUnpersisted) can never surface as
+// a mid-turn SESSION_NOT_FOUND from durable-dependent tools such as
+// enter_plan_mode. It is idempotent and free for already-persisted sessions.
+func ensureSessionDurableBeforeActor(session *ChatSession) error {
+	if session == nil || !session.runtimeSessionUnpersisted {
+		return nil
+	}
+	sessionID := currentRuntimeSessionID(session)
+	if err := ensureChatRuntimeSessionPersisted(session); err != nil {
+		return fmt.Errorf("session %s must be durable before actor startup: %w", sessionID, err)
+	}
+	return nil
+}
+
+// ensureSessionRowLoadable is the actor-creation probe (plan A2-a). It verifies
+// the store can Load the row an actor is about to be built for, and gives the
+// host one recovery attempt (restore from the in-memory snapshot) before
+// failing actor creation at the entry boundary instead of mid-turn.
+func ensureSessionRowLoadable(ctx context.Context, store runtimechat.SessionStorage, sessionID string, session *ChatSession) error {
+	if store == nil {
+		return fmt.Errorf("chat session storage is not configured")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, err := store.Load(ctx, sessionID); err == nil {
+		return nil
+	} else if !errors.Is(err, runtimechat.ErrSessionNotFound) {
+		return fmt.Errorf("load session %s before actor startup: %w", sessionID, err)
+	}
+	if err := restoreChatRuntimeSessionRow(ctx, session, sessionID); err != nil {
+		return fmt.Errorf("session %s is not loadable and could not be restored: %w", sessionID, err)
+	}
+	if _, err := store.Load(ctx, sessionID); err != nil {
+		return fmt.Errorf("session %s is still not loadable after restore: %w", sessionID, err)
+	}
+	return nil
+}
+
+// restoreChatRuntimeSessionRow rebuilds a missing durable session row from the
+// in-memory snapshot held by this process. It is the host half of the actor's
+// EnsureSession self-heal hook: it runs only after a Load/Update returned
+// ErrSessionNotFound, refuses to touch a different (or closed/archived)
+// session, and can be disabled with AICLI_SESSION_SELF_HEAL=0.
+func restoreChatRuntimeSessionRow(ctx context.Context, session *ChatSession, sessionID string) error {
+	if session == nil || session.SessionManager == nil || session.RuntimeSession == nil {
+		return fmt.Errorf("chat session is not configured")
+	}
+	requested := strings.TrimSpace(sessionID)
+	if requested == "" {
+		return fmt.Errorf("session id is required")
+	}
+	liveID := strings.TrimSpace(session.RuntimeSession.ID)
+	if liveID != requested {
+		return fmt.Errorf("refusing to restore session %s: host snapshot holds %s", requested, liveID)
+	}
+	switch session.RuntimeSession.State {
+	case runtimechat.StateClosed, runtimechat.StateArchived:
+		return fmt.Errorf("refusing to restore %s session %s", session.RuntimeSession.State, requested)
+	}
+	if !localChatSessionSelfHealEnabled() {
+		return fmt.Errorf("session self-heal disabled by AICLI_SESSION_SELF_HEAL")
+	}
+	if session.runtimeSessionUnpersisted {
+		// Actor already exists at this point, so flush without re-triggering
+		// the warmup path.
+		return syncRuntimeSessionFromChat(session)
+	}
+	storage := session.SessionManager.GetStorage()
+	if storage == nil {
+		return fmt.Errorf("chat session storage is not configured")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Save may mutate the object it receives (remote backends backfill server
+	// assigned fields), so hand over a shallow copy instead of the live one.
+	snapshot := *session.RuntimeSession
+	if err := storage.Save(ctx, &snapshot); err != nil {
+		return fmt.Errorf("restore session %s: %w", requested, err)
+	}
+	return nil
+}
+
+// localChatSessionSelfHealEnabled gates the actor-side session self-heal.
+// Default on; AICLI_SESSION_SELF_HEAL=0/false/off/no disables it so operators
+// can fall back to strict SESSION_NOT_FOUND errors.
+func localChatSessionSelfHealEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("AICLI_SESSION_SELF_HEAL"))) {
+	case "0", "false", "no", "off", "disable", "disabled":
+		return false
+	default:
+		return true
+	}
+}
+
 func loadRuntimeConversation(session *ChatSession, sessionID string) error {
 	if session == nil || session.SessionManager == nil {
 		return fmt.Errorf("会话管理未启用")

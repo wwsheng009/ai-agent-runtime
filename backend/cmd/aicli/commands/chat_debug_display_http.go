@@ -59,6 +59,10 @@ type chatDebugDisplaySnapshot struct {
 	Projection   *chatDebugDisplayProjectionInfo `json:"projection,omitempty"`
 	PaintTrace   string                          `json:"paint_trace,omitempty"`
 	PprofURL     string                          `json:"pprof_url,omitempty"`
+	// Storage 是存储与持久化统计（P1.5/P1.6/P1.7 观测接线）：
+	// 与 /debug display 的"存储与持久化:"区块同源，字段契约沿用
+	// internal/chat 的 JSON tag（runtime-server health 的 persist/store_pools 同构）。
+	Storage *chatDebugStorageInfo `json:"storage,omitempty"`
 }
 
 type chatDebugDisplaySessionInfo struct {
@@ -684,6 +688,9 @@ func BuildChatDebugDisplaySnapshot() *chatDebugDisplaySnapshot {
 	if session.Surface != nil {
 		snap.PaintTrace = session.Surface.PaintTraceDebugString()
 	}
+
+	// ====== Storage / Persistence (P1.5/P1.6/P1.7) ======
+	snap.Storage = chatDebugStorageSnapshot(session)
 
 	return snap
 }

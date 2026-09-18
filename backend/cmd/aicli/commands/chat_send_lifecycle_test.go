@@ -18,7 +18,7 @@ func TestSuccessfulSendFreezesWorkedSummaryAtAPICompletion(t *testing.T) {
 		ChatExecutor: executor,
 		cancelCtx:    context.Background(),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
@@ -87,7 +87,7 @@ func TestSuccessfulSendFreezesWorkedSummaryAtAPICompletion(t *testing.T) {
 }
 
 func TestNextSendReplacesCompletedSummaryWithLiveActivity(t *testing.T) {
-	coord := newChatInteractionCoordinator(&ChatSession{})
+	coord := newTestChatInteractionCoordinator(t, &ChatSession{})
 	t.Cleanup(coord.Shutdown)
 	coord.StartWaiting()
 	coord.mu.Lock()
@@ -119,7 +119,7 @@ func TestFailedSendClearsDynamicStatusWithoutSuccessfulFinalizer(t *testing.T) {
 		ChatExecutor: executor,
 		cancelCtx:    context.Background(),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 
@@ -144,7 +144,7 @@ func TestFailedSendClearsDynamicStatusWithoutSuccessfulFinalizer(t *testing.T) {
 // run first, and the late CompleteWaiting must not freeze the foreground
 // completion summary over the running internal turn.
 func TestLateCompleteWaitingDoesNotFreezeSummaryWhenInternalRunTookOver(t *testing.T) {
-	coord := newChatInteractionCoordinator(&ChatSession{})
+	coord := newTestChatInteractionCoordinator(t, &ChatSession{})
 	t.Cleanup(coord.Shutdown)
 	coord.StartWaiting()
 	coord.mu.Lock()
@@ -179,7 +179,7 @@ func TestLateCompleteWaitingDoesNotFreezeSummaryWhenInternalRunTookOver(t *testi
 // supervision wake starts. The internal run must clear the summary instead of
 // painting it for the whole wake turn.
 func TestInternalRunStartDropsFrozenForegroundSummary(t *testing.T) {
-	coord := newChatInteractionCoordinator(&ChatSession{})
+	coord := newTestChatInteractionCoordinator(t, &ChatSession{})
 	t.Cleanup(coord.Shutdown)
 	coord.StartWaiting()
 	coord.mu.Lock()
@@ -208,7 +208,7 @@ func TestInternalRunStartDropsFrozenForegroundSummary(t *testing.T) {
 // started and finished, the next foreground send must freeze its own summary
 // normally.
 func TestForegroundSummaryFreezesAgainAfterInternalRunCompletes(t *testing.T) {
-	coord := newChatInteractionCoordinator(&ChatSession{})
+	coord := newTestChatInteractionCoordinator(t, &ChatSession{})
 	t.Cleanup(coord.Shutdown)
 	coord.StartWaiting()
 	coord.ResetRunStateKind(chatRunKindInternal)

@@ -226,11 +226,11 @@ func TestChatWebSSEStream_StalledClientMarksDeadAndUnsubscribes(t *testing.T) {
 		}
 		s.writeEvent("connected", map[string]interface{}{"ok": true}, "connected")
 		t0 := time.Now()
-		go func() {
-			<-r.Context().Done()
-			t.Logf("handler ctx done at +%v err=%v", time.Since(t0), r.Context().Err())
-		}()
 		<-r.Context().Done() // 挂住 handler 直到客户端断开
+		// 记录必须留在 handler goroutine 内：httptest.Server.Close 会等待
+		// 请求处理结束，而测试完成后再从后台 goroutine 调用 t.Logf 会让
+		// testing 直接 panic（并带崩整个测试进程）。
+		t.Logf("handler ctx done at +%v err=%v", time.Since(t0), r.Context().Err())
 		t.Logf("handler returning at +%v", time.Since(t0))
 	}))
 	defer srv.Close()
@@ -261,9 +261,20 @@ func TestChatWebSSEStream_StalledClientMarksDeadAndUnsubscribes(t *testing.T) {
 	deadline := time.Now().Add(30 * time.Second)
 	enqueued := 0
 	// 停滞探测器：writer 若连续 2s 无进展，抓全量 goroutine 栈定位卡点。
+	// 探针必须能在测试结束前停机收尾：testing 禁止测试完成后从后台
+	// goroutine 调用 t.Logf（会 panic 并带崩整个测试进程）。
+	stallProbeStop := make(chan struct{})
+	stallProbeDone := make(chan struct{})
 	go func() {
+		defer close(stallProbeDone)
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
 		for {
-			time.Sleep(2 * time.Second)
+			select {
+			case <-stallProbeStop:
+				return
+			case <-ticker.C:
+			}
 			if s.Closed() || s.lastEventAge() > 2*time.Second {
 				buf := make([]byte, 8<<20)
 				n := runtime.Stack(buf, true)
@@ -272,6 +283,10 @@ func TestChatWebSSEStream_StalledClientMarksDeadAndUnsubscribes(t *testing.T) {
 			}
 		}
 	}()
+	t.Cleanup(func() {
+		close(stallProbeStop)
+		<-stallProbeDone
+	})
 	for !s.Closed() && time.Now().Before(deadline) {
 		for i := 0; i < 4096 && !s.Closed(); i++ {
 			s.writeEvent("status", map[string]interface{}{"i": i}, "probe")
@@ -370,7 +385,7 @@ func TestChatInteractionCoordinator_DynamicStatusLaneOrdered(t *testing.T) {
 	bus := runtimeevents.NewBus()
 	session := newWebTestSession()
 	session.LocalRuntimeHost = &localChatRuntimeHost{EventBus: bus}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	defer coord.Shutdown()
 
 	ch := make(chan runtimeevents.Event, 8)

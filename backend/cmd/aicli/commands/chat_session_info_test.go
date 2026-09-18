@@ -2586,7 +2586,10 @@ func captureStdout(t *testing.T, fn func()) string {
 		t.Fatalf("read stdout: %v", result.err)
 	}
 
-	return string(result.data)
+	// 与 captureStdoutStderr 对齐：同级测试可能通过进程级 stdout 异步重绘
+	// （spinner 的 \x1b[s … \x1b[u 帧），它们不是本次抓取的内容，也不能
+	// 污染 JSON 等结构化断言的解析。任何其它字节仍原样返回。
+	return stripAsyncTerminalNoise(string(result.data))
 }
 
 type recordingPanelRuntimeStore struct {

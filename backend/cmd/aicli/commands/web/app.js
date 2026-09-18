@@ -11,6 +11,7 @@ import { initApprovals } from "./js/approvals.js";
 import { initRuntimeBar, loadRuntimeMeta } from "./js/runtime.js";
 import { initSessions, loadSessions } from "./js/sessions.js";
 import { initSkills } from "./js/skills.js";
+import { initMCP } from "./js/mcp.js";
 import { initSSE } from "./js/sse.js";
 import { initStream } from "./js/stream.js";
 import { initAboutToken, initFooter, initShortcutHelp, initTabs, initTheme } from "./js/ui.js";
@@ -30,6 +31,7 @@ initConfigAdmin();
 initProviderEditor();
 initProviderImport();
 initSkills();
+initMCP();
 initAnalysis();
 
 // ---- 启动序列(原文件尾部) ----

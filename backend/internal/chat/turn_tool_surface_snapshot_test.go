@@ -303,3 +303,63 @@ func toolDefinitionNamesForRuntimeTest(tools []types.ToolDefinition) []string {
 	}
 	return names
 }
+
+func TestSessionActor_InvalidateStableToolSurface(t *testing.T) {
+	actor := &SessionActor{
+		id: "session-invalidate-surface",
+		state: &RuntimeState{
+			SessionID:                    "session-invalidate-surface",
+			Status:                       SessionRunning,
+			CurrentTurnID:                "turn-1",
+			StableToolSurfaceSet:         true,
+			StableToolSurface:            []types.ToolDefinition{{Name: "view"}},
+			StableToolSurfaceBinding:     "binding-1",
+			StableToolSurfaceFingerprint: "fingerprint-1",
+			FrozenTurnToolsSet:           true,
+			FrozenTurnTools:              []types.ToolDefinition{{Name: "view"}},
+		},
+	}
+
+	require.NoError(t, actor.InvalidateStableToolSurface(context.Background()))
+	state := actor.State()
+	require.False(t, state.StableToolSurfaceSet)
+	require.Empty(t, state.StableToolSurface)
+	require.Empty(t, state.StableToolSurfaceBinding)
+	require.Empty(t, state.StableToolSurfaceFingerprint)
+	// 在途 turn 保留前缀冻结：当前请求不换 schema，新 turn 才重建。
+	require.True(t, state.FrozenTurnToolsSet)
+	require.Len(t, state.FrozenTurnTools, 1)
+
+	// 下一个 turn 边界不再复用旧冻结面，需要重新计算并冻结。
+	tools, cached, err := actor.turnToolSurfaceSnapshot("turn-2").LoadTurnToolSurface(context.Background())
+	require.NoError(t, err)
+	require.False(t, cached)
+	require.Empty(t, tools)
+
+	// 无在途 turn 时清空会同时清掉 turn 冻结面。
+	require.NoError(t, actor.updateState(context.Background(), func(state *RuntimeState) error {
+		state.CurrentTurnID = ""
+		return nil
+	}))
+	require.NoError(t, actor.InvalidateStableToolSurface(context.Background()))
+	state = actor.State()
+	require.False(t, state.FrozenTurnToolsSet)
+	require.Empty(t, state.FrozenTurnTools)
+}
+
+func TestSessionHub_InvalidateStableToolSurfaces(t *testing.T) {
+	hub := NewSessionHub(nil)
+	actor := &SessionActor{
+		id: "session-hub-invalidate",
+		state: &RuntimeState{
+			SessionID:            "session-hub-invalidate",
+			StableToolSurfaceSet: true,
+			StableToolSurface:    []types.ToolDefinition{{Name: "view"}, {Name: "list_pages"}},
+		},
+	}
+	hub.actors[actor.id] = actor
+
+	require.Equal(t, 1, hub.InvalidateStableToolSurfaces(context.Background()))
+	require.False(t, actor.State().StableToolSurfaceSet)
+	require.Empty(t, actor.State().StableToolSurface)
+}

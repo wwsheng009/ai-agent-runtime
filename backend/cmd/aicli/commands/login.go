@@ -268,16 +268,7 @@ func (p *cliLoginPrompter) PromptSelect(label, kind string, options []string, cu
 		subtitle = "输入即搜索过滤，↑/↓ 选择，Enter 确认，x/Delete 删除选中，Esc/q 取消"
 	}
 	for {
-		items := buildChatPickerItems(options, current, kind, kind)
-		createIndex := -1
-		if allowCreate {
-			createIndex = len(items)
-			items = append(items, ui.FullScreenListItem{
-				Title:      chatLoginPickerCreateRowTitle,
-				Detail:     kind,
-				SearchText: "create new " + kind + " 新建 provider",
-			})
-		}
+		items, createIndex, optionIndexOffset := buildLoginPickerItems(options, current, kind, allowCreate)
 		var onDelete func(int) error
 		if deleteEnabled {
 			// Opt-in flag: the list returns DeleteRequested and closes; the
@@ -299,10 +290,11 @@ func (p *cliLoginPrompter) PromptSelect(label, kind string, options []string, cu
 			return "", true, nil
 		}
 		if result.DeleteRequested {
-			if !deleteEnabled || result.Index < 0 || result.Index >= len(options) {
+			optionIndex := result.Index - optionIndexOffset
+			if !deleteEnabled || optionIndex < 0 || optionIndex >= len(options) {
 				continue
 			}
-			name := options[result.Index]
+			name := options[optionIndex]
 			deleted, delErr := p.confirmAndDeleteProvider(name)
 			if delErr != nil {
 				p.PrintLine("删除失败: " + delErr.Error())
@@ -324,10 +316,11 @@ func (p *cliLoginPrompter) PromptSelect(label, kind string, options []string, cu
 			}
 			return strings.TrimSpace(name), false, nil
 		}
-		if result.Index < 0 || result.Index >= len(options) {
+		optionIndex := result.Index - optionIndexOffset
+		if optionIndex < 0 || optionIndex >= len(options) {
 			return "", false, fmt.Errorf("invalid picker selection %d", result.Index)
 		}
-		return options[result.Index], false, nil
+		return options[optionIndex], false, nil
 	}
 }
 
@@ -348,10 +341,10 @@ func (p *cliLoginPrompter) confirmAndDeleteProvider(name string) (bool, error) {
 		return false, nil
 	}
 	result, delErr := runProviderRemoveCommand(p.cfg, config.ProviderDeleteRequest{
-		Names:        []string{name},
-		Cascade:      true,
-		ClearDefault: true,
-		PruneAuth:    true,
+		Names:         []string{name},
+		Cascade:       true,
+		ClearDefault:  true,
+		PruneAuth:     true,
 		AuthStorePath: p.authStorePath,
 	})
 	if delErr != nil {

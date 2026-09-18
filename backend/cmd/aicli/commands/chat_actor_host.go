@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
@@ -219,6 +220,9 @@ type localChatRuntimeHost struct {
 	// 发出的 tool.requested/tool.completed 在本地模式从未落库。
 	runtimeEventBridgeOnce  sync.Once
 	runtimeEventBridgeUnsub func()
+	// runtimeEventBuffer 是 P1.5 批量落盘缓冲（仅当
+	// sessionRuntime.eventPersist.batchingEnabled=true 且 store 支持批量时非空）。
+	runtimeEventBuffer *runtimechat.EventPersistBuffer
 }
 
 // acquireActorTurnGate serializes internally-triggered and foreground turns
@@ -858,6 +862,28 @@ func (h *localChatRuntimeHost) submitParentWakeTurn(ctx context.Context, parentS
 
 // bindRuntimeEventPersistence 安装本地 A 通道桥（总线 → 会话事件库）。
 //
+// runtimeEventPersistSettings 读取宿主的批量落盘配置（默认关闭、逐条同步路径）。
+func (h *localChatRuntimeHost) runtimeEventPersistSettings() runtimechat.EventPersistSettings {
+	if h == nil || h.RuntimeConfig == nil {
+		return runtimechat.EventPersistSettings{}
+	}
+	cfg := h.RuntimeConfig.SessionRuntime.EventPersist
+	return runtimechat.EventPersistSettings{
+		Enabled:         cfg.BatchingEnabled,
+		BatchSize:       cfg.BatchSize,
+		FlushInterval:   cfg.FlushInterval,
+		QueueLimit:      cfg.QueueLimit,
+		QueueBytesLimit: cfg.QueueBytesLimit,
+		ShutdownTimeout: cfg.ShutdownTimeout,
+		FailMode:        cfg.FailMode,
+		AsyncDispatch:   cfg.AsyncDispatch,
+		// D3：关键事件（approval / session 终态 / 工具完成 / checkpoint）立即 flush。
+		CriticalTypes: runtimeevents.IsPersistCriticalEventType,
+	}
+}
+
+// bindRuntimeEventPersistence 安装本地 A 通道桥（总线 → 会话事件库）。
+//
 // 方案 §0.2 / G2：runtime-server 的 A 通道桥在 api/skills
 // handler.attachRuntimeEventBridge 内，而 aicli 本地 chat 使用
 // localChatRuntimeHost，历史上只有若干特例镜像（子代理完成、team 生命周期、
@@ -873,6 +899,27 @@ func (h *localChatRuntimeHost) bindRuntimeEventPersistence() {
 		return
 	}
 	h.runtimeEventBridgeOnce.Do(func() {
+		var lastPersistWarnAt atomic.Int64
+		settings := h.runtimeEventPersistSettings()
+		if settings.AsyncDispatch && !settings.Enabled {
+			logpkg.Warnf("runtime event persist async dispatch requires batching; ignoring (P2.11 前置条件未满足)")
+		}
+		if settings.Enabled {
+			if batchStore, ok := h.EventStore.(runtimechat.EventPersistBatchStore); ok {
+				buffer := runtimechat.NewEventPersistBuffer(batchStore, settings.BufferConfig())
+				h.runtimeEventBuffer = buffer
+				// cleanupFns 逆序执行：先退订（停止新事件入队），再关闭缓冲（flush 尾部）。
+				h.cleanupFns = append(h.cleanupFns, func() {
+					ctx, cancel := context.WithTimeout(context.Background(), settings.ShutdownTimeoutOrDefault())
+					defer cancel()
+					if err := buffer.Close(ctx); err != nil {
+						logpkg.Warnf("runtime event persist buffer close: %v", err)
+					}
+				})
+			} else {
+				logpkg.Warnf("runtime event persist batching enabled but store does not support AppendEvents; keeping synchronous path")
+			}
+		}
 		handler := func(event runtimeevents.Event) {
 			if strings.TrimSpace(event.SessionID) == "" {
 				return
@@ -887,7 +934,20 @@ func (h *localChatRuntimeHost) bindRuntimeEventPersistence() {
 			}
 			mapped := event
 			mapped.Type = runtimeevents.SessionStoreTypeAlias(event.Type)
-			_, _ = h.EventStore.AppendEvent(context.Background(), mapped)
+			if h.runtimeEventBuffer != nil {
+				// P1.5：只入队（非阻塞），落盘、重试、关闭 flush 由缓冲 worker 负责。
+				h.runtimeEventBuffer.Enqueue(mapped)
+				return
+			}
+			if _, err := h.EventStore.AppendEvent(context.Background(), mapped); err != nil {
+				// 历史上这里吞掉了持久化错误，池饱和时整条发布链会静默卡住。
+				// 现在 store 侧有操作超时，超时会以错误返回；限频告警让故障可见
+				// 又不会在事件洪峰时刷爆日志。
+				now := time.Now().UnixNano()
+				if last := lastPersistWarnAt.Load(); now-last > int64(5*time.Second) && lastPersistWarnAt.CompareAndSwap(last, now) {
+					logpkg.Warnf("runtime event persistence failed (type=%s session=%s): %v", mapped.Type, mapped.SessionID, err)
+				}
+			}
 		}
 		h.runtimeEventBridgeUnsub = h.EventBus.SubscribeCancelable("", handler)
 		if h.runtimeEventBridgeUnsub != nil {
@@ -1238,6 +1298,18 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		baseSessionID = strings.TrimSpace(session.RuntimeSession.ID)
 	}
 	isBaseSession := baseSessionID != "" && strings.EqualFold(strings.TrimSpace(sessionID), baseSessionID)
+	// A1/A2-a entry invariant: an actor must never be built for a base session
+	// whose durable row does not exist yet. Flush deferred-storage shells and
+	// verify the row is loadable (with one host-side restore attempt) so
+	// durable-dependent tools such as enter_plan_mode cannot erupt mid-turn.
+	if isBaseSession && session != nil {
+		if err := ensureSessionDurableBeforeActor(session); err != nil {
+			return nil, err
+		}
+		if err := ensureSessionRowLoadable(context.Background(), sessionStore, sessionID, session); err != nil {
+			return nil, err
+		}
+	}
 	if sessionStore != nil {
 		if runtimeSession, err := sessionStore.Load(context.Background(), sessionID); err == nil && runtimeSession != nil {
 			if value, ok := runtimeSession.GetContext(toolbroker.AgentSessionContextAgentType); ok {
@@ -1303,9 +1375,11 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		TriggerTurnRunMeta: func(_ context.Context, session *runtimechat.Session) *team.RunMeta {
 			return toolbroker.SpawnAgentRunMetaFromContext(session)
 		},
-		PrepareRun:   localChatPrepareRunHook(apiAgent, session, workspaceRoot, isBaseSession),
-		PersistHook:  localGoalPersistHook(sessionStore),
-		RecoverStale: true,
+		PrepareRun:  localChatPrepareRunHook(apiAgent, session, workspaceRoot, isBaseSession),
+		PersistHook: localGoalPersistHook(sessionStore),
+		// Phase 2 自愈钩子：仅基础会话启用，子会话不得以子 ID 复活基础会话行。
+		EnsureSession: localChatActorEnsureSession(session, isBaseSession),
+		RecoverStale:  true,
 		// 长 turn 中途增量落库：ReAct 循环每次提交 durable 历史后按该间隔把
 		// 已提交内容写回权威会话存储，避免长 turn 期间会话行长时间停在起始
 		// 状态（默认 15s，见 chat.DefaultSessionCheckpointInterval；可用
@@ -1333,6 +1407,18 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		return nil, err
 	}
 	return actor, nil
+}
+
+// localChatActorEnsureSession wires the actor self-heal hook for the base
+// session only. Child-session actors share the CLI's ChatSession pointer but
+// must not resurrect the base session row under a child ID.
+func localChatActorEnsureSession(session *ChatSession, isBaseSession bool) func(context.Context, string) error {
+	if !isBaseSession || session == nil {
+		return nil
+	}
+	return func(ctx context.Context, sessionID string) error {
+		return restoreChatRuntimeSessionRow(ctx, session, sessionID)
+	}
 }
 
 // applyLocalChildAgentdefToolPolicy overlays agentdef allow/deny/read-only onto
@@ -2315,7 +2401,17 @@ func ensureLocalRuntimeProvider(runtime *runtimellm.LLMRuntime, session *ChatSes
 func buildLocalChatRuntimeStores(session *ChatSession, runtimeConfig *runtimecfg.RuntimeConfig) (runtimechat.RuntimeStateStore, runtimechat.EventStore) {
 	storePath := resolveLocalChatRuntimeStorePath(session, runtimeConfig)
 	if storePath != "" {
-		store, err := runtimechat.NewSQLiteRuntimeStore(&runtimechat.RuntimeStoreConfig{Path: storePath})
+		var readPool runtimecfg.ReadPoolConfig
+		if runtimeConfig != nil {
+			readPool = runtimeConfig.SessionRuntime.ReadPool
+		}
+		store, err := runtimechat.NewSQLiteRuntimeStore(&runtimechat.RuntimeStoreConfig{
+			Path:                 storePath,
+			DisableReadPool:      readPool.Disable,
+			ReadPoolSize:         readPool.Size,
+			ReadPoolBusyTimeout:  readPool.BusyTimeout,
+			ReadOperationTimeout: readPool.OperationTimeout,
+		})
 		if err == nil {
 			return store, store
 		}

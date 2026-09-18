@@ -37,6 +37,14 @@ const (
 	// 子路径：/status、/tools、/subagents、/errors；v1 不新增 SSE 事件
 	// （页签激活时按需拉取，见 web/js/analysis.js）。
 	ChatWebAPIAnalysisPath = "/web/api/analysis"
+	// ChatWebAPIMCPsPath MCP 管理端点前缀（MCP 页签）：
+	//   GET/POST /web/api/mcps
+	//   POST     /web/api/mcps/reload
+	//   GET/PUT/DELETE /web/api/mcps/{name}
+	//   POST     /web/api/mcps/{name}/enable|disable
+	// 写操作由 ChatWebAuthGuard 统一要求写令牌；配置与 CLI、runtime-server 共用
+	// internal/mcp/admin 同一套读写实现。
+	ChatWebAPIMCPsPath = "/web/api/mcps"
 )
 
 // chatWebSchemaVersion 是 SSE 事件 data 中 _event.schema_version 字段的值。

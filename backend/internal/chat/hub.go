@@ -125,6 +125,34 @@ func (h *SessionHub) ActiveSessionIDs(limit int) []string {
 	return ids
 }
 
+// InvalidateStableToolSurfaces 清除所有活跃会话的稳定工具面缓存。
+// 返回处理的会话数；MCP 目录变化（连接/重载/启停）后由宿主调用，
+// 使各会话在下个 turn 边界重新冻结包含最新 MCP 工具的工具面。
+func (h *SessionHub) InvalidateStableToolSurfaces(ctx context.Context) int {
+	if h == nil {
+		return 0
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	h.mu.RLock()
+	actors := make([]*SessionActor, 0, len(h.actors))
+	for _, actor := range h.actors {
+		if actor != nil {
+			actors = append(actors, actor)
+		}
+	}
+	h.mu.RUnlock()
+
+	cleared := 0
+	for _, actor := range actors {
+		if err := actor.InvalidateStableToolSurface(ctx); err == nil {
+			cleared++
+		}
+	}
+	return cleared
+}
+
 // GetOrCreate returns an existing actor or creates a new one.
 func (h *SessionHub) GetOrCreate(sessionID string) (*SessionActor, error) {
 	if h == nil {

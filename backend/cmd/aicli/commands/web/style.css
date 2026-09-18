@@ -1360,3 +1360,82 @@ body.sidebar-collapsed #sidebar {
   .skill-kv { flex-direction: column; gap: 2px; }
   .skill-kv-label { flex: none; }
 }
+
+/* ---- MCP 页签：列表 / 新增编辑表单 / 启停与热重载 ----
+   工具条、列表、空态复用 skills-* 与 config-* 现有类；这里只补按钮基样式、
+   连接状态徽标与表单区微调（与 #tab-skills / #tab-config 保持同一视觉）。 */
+#tab-mcp { padding-top: 8px; overflow: auto; }
+#tab-mcp button {
+  cursor: pointer; font-family: inherit; font-size: 12px; padding: 4px 10px;
+  background: var(--bg3); color: var(--fg2); border: 1px solid var(--border); border-radius: 6px;
+}
+#tab-mcp button:hover { background: var(--hoverBg); }
+#tab-mcp button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#tab-mcp button.primary-btn { background: var(--accent); color: var(--userMsgFg, #fff); border-color: var(--accent); }
+#tab-mcp button.primary-btn:hover { background: var(--accent2); }
+#tab-mcp button.danger-btn { border-color: var(--redBg); color: var(--red); }
+#tab-mcp button.danger-btn:hover { background: var(--redBg); color: var(--red); }
+#tab-mcp button:disabled { opacity: 0.55; cursor: not-allowed; }
+.mcp-row-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.mcp-badge-on { color: var(--green); border-color: var(--border2); }
+.mcp-badge-off { color: var(--red, #e5534b); }
+.mcp-last-error { color: var(--red, #e5534b); word-break: break-word; }
+/* config-form-block 内的单行输入（描述 / 命令 / URL）复用表单输入样式：
+   现有规则只覆盖了 .config-form-grid input 与 .config-form-block textarea。 */
+#tab-mcp .config-form-block input {
+  width: 100%; box-sizing: border-box;
+  background: var(--bg3); color: var(--fg); border: 1px solid var(--border);
+  border-radius: 4px; padding: 4px 8px; font-family: inherit; font-size: 12px;
+}
+#tab-mcp .config-form-block input:focus { outline: none; border-color: var(--border2); }
+#tab-mcp .config-form-grid input:disabled { opacity: 0.6; cursor: not-allowed; }
+#tab-mcp .cfg-status { font-size: 11px; color: var(--fg4); }
+#tab-mcp .cfg-status.ok { color: var(--green); }
+#tab-mcp .cfg-status.busy { color: var(--accent); }
+#tab-mcp .cfg-status.err { color: var(--red, #e5534b); }
+
+/* ---- MCP 表单：env / headers 结构化键值行编辑器（由 js/mcp-kv.js 渲染） ----
+   基础视觉与 .config-form-block 内既有 input 一致；部分规则需要 #tab-mcp 前缀，
+   才能覆盖上面 `#tab-mcp .config-form-block input` 的 id 级优先级声明。 */
+.kv-rows { display: flex; flex-direction: column; gap: 4px; margin: 0 0 6px 0; }
+.kv-row { display: flex; align-items: center; gap: 6px; }
+.kv-row input {
+  flex: 1 1 0; min-width: 0; width: auto; box-sizing: border-box;
+  background: var(--bg3); color: var(--fg); border: 1px solid var(--border);
+  border-radius: 4px; padding: 4px 8px; font-family: inherit; font-size: 12px;
+}
+.kv-row input:focus { outline: none; border-color: var(--border2); }
+.kv-row input::placeholder { color: var(--fg4); }
+.kv-row .kv-key { flex: 0 1 42%; font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace); }
+.kv-row .kv-value { flex: 1 1 58%; }
+.kv-row .kv-sep { flex: 0 0 auto; color: var(--fg4); font-size: 12px; }
+.kv-row button { flex: 0 0 auto; padding: 2px 7px; line-height: 1.3; color: var(--fg4); }
+.kv-row button:hover { color: var(--red, #e5534b); background: var(--redBg); }
+.kv-row.invalid input { border-color: var(--red, #e5534b); }
+.kv-add-btn { margin-bottom: 4px; padding: 3px 10px; }
+.kv-hint { font-size: 11px; line-height: 1.6; color: var(--fg4); margin-bottom: 2px; }
+#tab-mcp .kv-row input { flex: 1 1 0; min-width: 0; width: auto; }
+#tab-mcp .kv-row .kv-key { flex: 0 1 42%; }
+#tab-mcp .kv-row .kv-value { flex: 1 1 58%; }
+#tab-mcp .kv-row button { padding: 2px 7px; }
+#tab-mcp .kv-row button:hover { color: var(--red, #e5534b); background: var(--redBg); }
+#tab-mcp .kv-row.invalid input { border-color: var(--red, #e5534b); }
+#tab-mcp .kv-row.invalid .kv-key { background: var(--redBg); }
+
+/* MCP 工具清单弹窗：工具行与 inputSchema 折叠块（js/mcp.js showMCPTools/renderMCPTools） */
+#mcp-tools-body .mcp-tool-row { margin: 0 0 8px; }
+#mcp-tools-body .mcp-tool-row:last-child { margin-bottom: 0; }
+.mcp-tool-schema { margin: 6px 0 0; }
+.mcp-tool-schema > summary { cursor: pointer; font-size: 12px; color: var(--fg3); user-select: none; }
+.mcp-tool-schema-pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  max-height: 240px;
+  overflow: auto;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+}

@@ -43,7 +43,7 @@ func TestSubmitAICLIActorPromptWaitsForBackgroundRunAndReadyUsesActorState(t *te
 		RuntimeSession:   &runtimechat.Session{ID: "session-1"},
 		LocalRuntimeHost: &localChatRuntimeHost{SessionHub: hub},
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 	if coord.IsReady() {

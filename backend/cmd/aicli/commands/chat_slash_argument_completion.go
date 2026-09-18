@@ -184,6 +184,16 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 		return completeCatalogFunctionArgs(session, argsText, cursor, command)
 	case "/skill", "/skills":
 		return completeSkillArgs(session, argsText, cursor)
+	case "/mcp":
+		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
+			{Command: "list", Summary: "列出全部 MCP 与连接状态", Group: string(chatSlashCommandGroupFunctions)},
+			{Command: "status", Summary: "查看单个 MCP 的配置与运行状态", Group: string(chatSlashCommandGroupFunctions), AcceptsArgs: true},
+			{Command: "add", Summary: "新增 MCP（<name> <url> 或 --command <cmd>）", Group: string(chatSlashCommandGroupFunctions), AcceptsArgs: true},
+			{Command: "enable", Summary: "启用并热重载", Group: string(chatSlashCommandGroupFunctions), AcceptsArgs: true},
+			{Command: "disable", Summary: "停用并热重载", Group: string(chatSlashCommandGroupFunctions), AcceptsArgs: true},
+			{Command: "remove", Summary: "删除并热重载", Group: string(chatSlashCommandGroupFunctions), AcceptsArgs: true},
+			{Command: "reload", Summary: "重新加载配置并重连", Group: string(chatSlashCommandGroupFunctions)},
+		})
 	case "/export":
 		return p.completeExportArgs(session, argsText, cursor)
 	case "/resume":

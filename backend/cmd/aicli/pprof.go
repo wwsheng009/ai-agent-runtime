@@ -301,6 +301,10 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	// session.FunctionCatalog 的 skill 描述符），供「技能」页签的列表与详情面板。
 	mux.HandleFunc(commands.ChatWebAPISkillsPath, commands.HandleChatWebAPISkills)
 	mux.HandleFunc(commands.ChatWebAPISkillsPath+"/", commands.HandleChatWebAPISkills)
+	// /web/api/mcps[/...] MCP 管理（MCP 页签）：列表 / 新增 / 编辑 / 删除 /
+	// 启停 / 热重载；配置读写与 CLI、runtime-server 共用 internal/mcp/admin。
+	mux.HandleFunc(commands.ChatWebAPIMCPsPath, commands.HandleChatWebAPIMCPs)
+	mux.HandleFunc(commands.ChatWebAPIMCPsPath+"/", commands.HandleChatWebAPIMCP)
 	// style.css / app.js / js/*.js 等静态资源由 HandleChatWebPage 统一伺服
 	// （go:embed 嵌入 web/ 目录，按文件名 + 扩展名 Content-Type 返回）。
 

@@ -257,7 +257,7 @@ func TestLocalHostWakeConsumer_WakeTurnOwnsComposerStatus(t *testing.T) {
 	host, _, _ := newWakeConsumerTestHost(t, "aicli-wake-composer-status")
 	session := host.BaseSession
 	require.NotNil(t, session)
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	session.Interaction = interaction
 

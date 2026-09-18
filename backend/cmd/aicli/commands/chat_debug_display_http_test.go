@@ -148,7 +148,7 @@ func TestBuildChatDebugDisplayTextExecutorSection(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	coordinator.SetWriter(&bytes.Buffer{})
 
@@ -217,7 +217,7 @@ func TestChatDebugDisplayActiveCellRanges(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 	coordinator.SetWriter(&bytes.Buffer{})
@@ -277,7 +277,7 @@ func TestChatDebugDisplayExecutorAndProjection(t *testing.T) {
 	// A bare TerminalSession is enough for ProjectionState(); the executor
 	// diag block reads the package-global provider.
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	coordinator.SetWriter(&bytes.Buffer{})
 	var terminalOutput bytes.Buffer
@@ -448,7 +448,7 @@ func TestChatDebugDisplayUIActorCostBlock(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 	coordinator.SetWriter(&bytes.Buffer{})

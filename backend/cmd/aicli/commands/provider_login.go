@@ -50,7 +50,7 @@ type providerLoginPrompter interface {
 //     full-screen list, in which case the caller must fall back to the
 //     numbered text picker.
 //
-// allowCreate appends a trailing "create new" row (used for providers: the
+// allowCreate prepends a leading "create new" row (used for providers: the
 // user may type a brand-new provider name that is not in the list yet).
 type providerLoginSelectPrompter interface {
 	providerLoginPrompter
