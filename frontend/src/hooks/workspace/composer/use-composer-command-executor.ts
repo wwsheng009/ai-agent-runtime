@@ -8,6 +8,7 @@
 // - 结果通知只持 i18n key 与插值（模型层不持文案），渲染层本地化。
 import { useCallback, useRef, useState } from "react";
 
+import { executeSkill } from "@/api/runtime/skills";
 import { createLogger } from "@/core/logger";
 import {
   parseExportCommandArgs,
@@ -19,6 +20,8 @@ import {
   exportSessionTrajectoryJsonl,
   type SessionTrajectoryExportResult,
 } from "@/lib/trajectory/export-session";
+
+const logger = createLogger("use-composer-command-executor");
 
 export type ComposerCommandResultNotice = {
   /** 语气：错误用 role="alert"，成功用 role="status"。 */
@@ -41,6 +44,9 @@ export type UseComposerCommandExecutorOptions = {
   onRenameSession?: (sessionId: string, title: string) => Promise<void>;
   /** `/model`：宿主目录与「应用模型 / 打开弹窗」动作；缺省时命令如实报不可用。 */
   modelSelection?: ComposerModelSelectionBridge;
+  /** `/skill`：技能名称列表与「打开弹窗」动作；缺省时命令如实报不可用。 */
+  skillNames?: string[];
+  openSkillDialog?: () => void;
 };
 
 export type ComposerModelSelectionBridge = {
@@ -92,6 +98,8 @@ export function useComposerCommandExecutor({
   sessionId,
   onRenameSession,
   modelSelection,
+  skillNames = [],
+  openSkillDialog,
 }: UseComposerCommandExecutorOptions): ComposerCommandExecutor {
   const [notice, setNotice] = useState<ComposerCommandResultNotice | null>(null);
   const exportingRef = useRef(false);
@@ -263,6 +271,70 @@ export function useComposerCommandExecutor({
     [modelSelection],
   );
 
+  const runSkill = useCallback(
+    async (args: string) => {
+      const trimmedArgs = args.trim();
+      if (trimmedArgs.length === 0) {
+        // 无参数，打开弹窗
+        if (openSkillDialog) {
+          openSkillDialog();
+        } else {
+          setNotice({
+            tone: "error",
+            messageKey: "composer.builtin.skill.needName",
+          });
+        }
+        return;
+      }
+      
+      // 有参数，解析 skill 名称和用户 prompt
+      // 格式: /skill skillName [user prompt]
+      const parts = trimmedArgs.split(/\s+/);
+      const skillName = parts[0];
+      const userPrompt = parts.slice(1).join(" ");
+      
+      if (skillNames.length === 0) {
+        setNotice({
+          tone: "error",
+          messageKey: "composer.builtin.skill.notAvailable",
+        });
+        return;
+      }
+      
+      // 检查 skill 是否存在
+      if (!skillNames.includes(skillName)) {
+        setNotice({
+          tone: "error",
+          messageKey: "composer.builtin.skill.notFound",
+          values: { skill: skillName },
+        });
+        return;
+      }
+
+      try {
+        // 调用后端 API 执行 skill，将用户 prompt 传递给后端
+        await executeSkill(skillName, {
+          prompt: userPrompt || undefined,
+          sessionId: sessionId,
+        });
+        
+        setNotice({
+          tone: "success",
+          messageKey: "composer.builtin.skill.applied",
+          values: { skill: skillName },
+        });
+      } catch (error) {
+        logger.error("skill execution failed", { skillName, error });
+        setNotice({
+          tone: "error",
+          messageKey: "composer.builtin.skill.failed",
+          values: { skill: skillName },
+        });
+      }
+    },
+    [skillNames, openSkillDialog, sessionId],
+  );
+
   const run = useCallback(
     (command: ComposerCommand, args: string): boolean => {
       switch (command.key) {
@@ -278,12 +350,15 @@ export function useComposerCommandExecutor({
         case "model":
           runModel(args);
           return true;
+        case "skill":
+          runSkill(args);
+          return true;
         default:
           // 未认领：composer 会显示 no-executor 提示，而不是把命令行当消息发出去。
           return false;
       }
     },
-    [runExport, runFeedback, runModel, runRename],
+    [runExport, runFeedback, runModel, runRename, runSkill],
   );
 
   const dismissNotice = useCallback(() => setNotice(null), []);

@@ -9,6 +9,7 @@ import { MessageList } from "@/components/workspace/message-list";
 import { PendingInteractionBar } from "@/components/workspace/pending-interaction-bar";
 import { TodoPanel } from "@/components/workspace/task-panel";
 import { ComposerModelDialog } from "@/components/workspace/composer-model-dialog";
+import { ComposerSkillDialog } from "@/components/workspace/composer-skill-dialog";
 import { JobsPanel } from "@/components/workspace/jobs-panel";
 import { SessionAgentsPanel } from "@/components/workspace/session-agents-panel";
 import { agentDisplayName } from "@/components/workspace/session-agents-panel-shared";
@@ -73,6 +74,9 @@ export function WorkspaceMainSection({
   runtimeModels,
   runtimeModelsError,
   runtimeModelsLoading,
+  runtimeSkills,
+  runtimeSkillsError,
+  runtimeSkillsLoading,
   selectedModel,
   selectedProvider,
   selectedReasoningEffort,
@@ -176,6 +180,8 @@ export function WorkspaceMainSection({
   // 写本地日志（log-only）。目录未就绪时菜单无候选、弹窗如实显示空/失败态，不伪造模型名。
   const composerCommandSurface = useComposerCommandSurface({
     runtimeModels,
+    runtimeSkills,
+    onDraftChange,
     onModelChange,
     onRenameSession: onRenameRuntimeSession,
     sessionId: selectedThread.sessionId,
@@ -428,6 +434,14 @@ export function WorkspaceMainSection({
         open={composerCommandSurface.modelDialogOpen}
         selectedModel={selectedModel}
         selectedProvider={selectedProvider}
+      />
+      <ComposerSkillDialog
+        error={runtimeSkillsError}
+        loading={runtimeSkillsLoading}
+        onClose={composerCommandSurface.closeSkillDialog}
+        onSelect={composerCommandSurface.selectSkill}
+        open={composerCommandSurface.skillDialogOpen}
+        skills={runtimeSkills?.skills.map((s) => s.name) ?? []}
       />
     </section>
   );

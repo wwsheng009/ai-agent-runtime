@@ -31,6 +31,9 @@ import {
   useRuntimeModelCatalog,
 } from "@/hooks/workspace/use-runtime-model-catalog";
 import {
+  useRuntimeSkillCatalog,
+} from "@/hooks/workspace/use-runtime-skill-catalog";
+import {
   type TrajectoryStore,
 } from "@/hooks/workspace/use-trajectory-snapshot";
 import {
@@ -122,6 +125,12 @@ export function useWorkspaceAgentChatTurn({
     setSelectedModel,
     setSelectedProvider,
   } = useRuntimeModelCatalog();
+
+  const {
+    runtimeSkills,
+    runtimeSkillsError,
+    runtimeSkillsLoading,
+  } = useRuntimeSkillCatalog();
 
   const {
     flushDraftReasoningEffort,
@@ -496,6 +505,9 @@ export function useWorkspaceAgentChatTurn({
     runtimeModels,
     runtimeModelsError,
     runtimeModelsLoading,
+    runtimeSkills,
+    runtimeSkillsError,
+    runtimeSkillsLoading,
     reasoningEffortError,
     reasoningEffortOptions,
     reasoningEffortDefault,

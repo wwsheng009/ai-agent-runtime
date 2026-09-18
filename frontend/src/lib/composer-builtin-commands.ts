@@ -19,6 +19,8 @@ import type {
 export type ComposerBuiltinCommandHostOptions = {
   /** `/model` 的第二级候选（宿主用真实运行时目录组装）；缺省 / 空数组 = 无候选。 */
   modelOptions?: readonly ComposerCommandOption[];
+  /** `/skill` 的第二级候选（宿主用真实运行时目录组装）；缺省 / 空数组 = 无候选。 */
+  skillOptions?: readonly ComposerCommandOption[];
 };
 
 /** 组装内置命令清单；宿主数据（`/model` 候选）由调用方注入，清单本身不持有模型名。 */
@@ -26,6 +28,7 @@ export function buildComposerBuiltinCommands(
   hostOptions: ComposerBuiltinCommandHostOptions = {},
 ): readonly ComposerCommandDefinition[] {
   const modelOptions = hostOptions.modelOptions ?? [];
+  const skillOptions = hostOptions.skillOptions ?? [];
   return [
     {
       name: "export",
@@ -51,6 +54,13 @@ export function buildComposerBuiltinCommands(
       descriptionKey: "composer.builtin.model.description",
       argumentHintKey: "composer.builtin.model.argumentHint",
       options: modelOptions.length > 0 ? modelOptions : undefined,
+    },
+    {
+      name: "skill",
+      kind: "popupSelect",
+      descriptionKey: "composer.builtin.skill.description",
+      argumentHintKey: "composer.builtin.skill.argumentHint",
+      options: skillOptions.length > 0 ? skillOptions : undefined,
     },
   ];
 }

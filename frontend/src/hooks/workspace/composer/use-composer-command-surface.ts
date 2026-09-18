@@ -14,14 +14,19 @@ import {
   type ComposerModelSelectionBridge,
 } from "@/hooks/workspace/composer/use-composer-command-executor";
 import { buildComposerBuiltinCommands } from "@/lib/composer-builtin-commands";
-import type { ComposerCommandDefinition } from "@/lib/composer-commands";
+import type { ComposerCommand, ComposerCommandDefinition } from "@/lib/composer-commands";
 import {
   composerModelCatalogGroups,
   composerModelCommandOptions,
   composerModelIds,
   type ComposerModelCatalogGroup,
 } from "@/lib/composer-model-options";
-import type { RuntimeModelsResponse } from "@/types/runtime";
+import {
+  composerSkillCommandText,
+  composerSkillCommandOptions,
+  composerSkillNames,
+} from "@/lib/composer-skill-options";
+import type { RuntimeModelsResponse, RuntimeSkillCatalog } from "@/types/runtime";
 
 export type ComposerCommandResultBanner = {
   text: string;
@@ -38,15 +43,33 @@ export type ComposerCommandSurface = {
   modelDialogOpen: boolean;
   openModelDialog: () => void;
   closeModelDialog: () => void;
-  onCommand: ComposerCommandExecutor["run"];
+  /** `/skill` 弹窗状态。 */
+  skillDialogOpen: boolean;
+  openSkillDialog: () => void;
+  closeSkillDialog: () => void;
+  /**
+   * 选中 skill 的统一动作（菜单二级候选点选 / 弹窗点选）：
+   * 只把 `/skill <name> ` 回填到输入框，不直接执行——执行发生在用户提交时。
+   */
+  selectSkill: (skillName: string) => void;
+  /** 派发命令；`source="pick"` 表示点选候选（`/skill` 点选走回填而非执行）。 */
+  onCommand: (
+    command: ComposerCommand,
+    args: string,
+    source: "pick" | "submit",
+  ) => boolean;
   onDismissCommandResult: ComposerCommandExecutor["dismissNotice"];
 };
 
 export type UseComposerCommandSurfaceOptions = {
   /** 宿主持有的运行时目录；null / 缺省 = 未就绪（不产生候选）。 */
   runtimeModels?: RuntimeModelsResponse | null;
+  /** 宿主持有的技能目录；null / 缺省 = 未就绪（不产生候选）。 */
+  runtimeSkills?: RuntimeSkillCatalog | null;
   /** 应用模型；与 composer 常驻座位同一处理器。 */
   onModelChange: (modelId: string) => void;
+  /** 回填 composer 草稿；`/skill` 点选候选与弹窗选择共用（只回填不执行）。 */
+  onDraftChange: (value: string) => void;
   /** 会话重命名处理器（与侧栏同一实现）；缺省时 `/rename` 如实报不可用。 */
   onRenameSession?: (sessionId: string, title: string) => Promise<void>;
   /** 当前会话；新会话未登记时为 undefined。 */
@@ -55,20 +78,27 @@ export type UseComposerCommandSurfaceOptions = {
 
 export function useComposerCommandSurface({
   runtimeModels,
+  runtimeSkills,
   onModelChange,
+  onDraftChange,
   onRenameSession,
   sessionId,
 }: UseComposerCommandSurfaceOptions): ComposerCommandSurface {
   const { t } = useTranslation("workspace");
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
+  const [skillDialogOpen, setSkillDialogOpen] = useState(false);
 
   const modelOptions = useMemo(
     () => composerModelCommandOptions(runtimeModels),
     [runtimeModels],
   );
+  const skillOptions = useMemo(
+    () => composerSkillCommandOptions(runtimeSkills),
+    [runtimeSkills],
+  );
   const commands = useMemo(
-    () => buildComposerBuiltinCommands({ modelOptions }),
-    [modelOptions],
+    () => buildComposerBuiltinCommands({ modelOptions, skillOptions }),
+    [modelOptions, skillOptions],
   );
   const modelGroups = useMemo(
     () => composerModelCatalogGroups(runtimeModels),
@@ -76,6 +106,8 @@ export function useComposerCommandSurface({
   );
   const openModelDialog = useCallback(() => setModelDialogOpen(true), []);
   const closeModelDialog = useCallback(() => setModelDialogOpen(false), []);
+  const openSkillDialog = useCallback(() => setSkillDialogOpen(true), []);
+  const closeSkillDialog = useCallback(() => setSkillDialogOpen(false), []);
   const modelSelection = useMemo<ComposerModelSelectionBridge>(
     () => ({
       modelIds: composerModelIds(runtimeModels),
@@ -85,11 +117,42 @@ export function useComposerCommandSurface({
     [onModelChange, openModelDialog, runtimeModels],
   );
 
+  const selectSkill = useCallback(
+    (skillName: string) => {
+      if (skillName.trim().length === 0) {
+        return;
+      }
+      onDraftChange(composerSkillCommandText(skillName));
+    },
+    [onDraftChange],
+  );
+
   const executor = useComposerCommandExecutor({
     modelSelection,
+    skillNames: composerSkillNames(runtimeSkills),
+    openSkillDialog,
     onRenameSession,
     sessionId,
   });
+
+  // 解构保持稳定引用：React Compiler 要求回调依赖与实际读取的成员一致。
+  const runExecutorCommand = executor.run;
+
+  /**
+   * 命令派发策略：`/skill` 的点选候选是「选技能」而不是「跑技能」——
+   * 回填命令文本交还用户补充 prompt，提交时才进入执行器。
+   * 其余命令（含 `/skill` 提交）保持原语义。
+   */
+  const handleCommand = useCallback(
+    (command: ComposerCommand, args: string, source: "pick" | "submit"): boolean => {
+      if (command.key === "skill" && source === "pick") {
+        selectSkill(args);
+        return true;
+      }
+      return runExecutorCommand(command, args);
+    },
+    [runExecutorCommand, selectSkill],
+  );
 
   const commandResult = useMemo<ComposerCommandResultBanner | null>(() => {
     const notice = executor.notice;
@@ -109,7 +172,11 @@ export function useComposerCommandSurface({
     modelDialogOpen,
     openModelDialog,
     closeModelDialog,
-    onCommand: executor.run,
+    skillDialogOpen,
+    openSkillDialog,
+    closeSkillDialog,
+    selectSkill,
+    onCommand: handleCommand,
     onDismissCommandResult: executor.dismissNotice,
   };
 }

@@ -520,3 +520,34 @@ export function isSkillsUnavailable(error: unknown): boolean {
 export function isSkillsForbidden(error: unknown): boolean {
   return error instanceof RuntimeApiError && error.status === 403;
 }
+
+
+/**
+ * 执行指定的 skill。
+ * 
+ * POST /api/runtime/skills/{name}/execute
+ * 
+ * @param name - skill 名称
+ * @param params - 执行参数（可选）
+ * @returns 执行结果
+ */
+export async function executeSkill(
+  name: string,
+  params?: {
+    prompt?: string;
+    sessionId?: string;
+    params?: Record<string, unknown>;
+    context?: Record<string, unknown>;
+    options?: Record<string, unknown>;
+  },
+): Promise<unknown> {
+  const url = buildRuntimeUrl(`/api/runtime/skills/${encodeURIComponent(name)}/execute`);
+  const response = await fetchRuntimeJson<unknown>(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: params ? JSON.stringify(params) : JSON.stringify({}),
+  });
+  return response;
+}
