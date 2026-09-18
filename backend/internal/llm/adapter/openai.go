@@ -189,7 +189,7 @@ func (a *OpenAIAdapter) ProcessResponse(result map[string]interface{}) ProcessRe
 						}
 					}
 				}
-				if fn, ok := msg["function_call"].(map[string]interface{}); ok {
+				if fn, ok := msg["function_call"].(map[string]interface{}); ok && !isEmptyLegacyFunctionCall(fn) {
 					procResult.HasToolCalls = true
 					procResult.ToolCalls = append(procResult.ToolCalls, map[string]interface{}{
 						"id":       "legacy_function_call_1",
@@ -1003,6 +1003,12 @@ func parseLegacyFunctionCall(state *StreamState, delta map[string]interface{}) {
 	if !ok {
 		return
 	}
+	// 部分 OpenAI 兼容中转在纯文本回复的收尾 chunk 里仍会附带一个
+	// function_call 占位对象（name/arguments 均为空）。它不是真实工具调用，
+	// 若据此创建 tool call 会让正常回复被误判为 invalid_tool_call。
+	if isEmptyLegacyFunctionCall(functionCall) {
+		return
+	}
 	tc := state.getToolCall(0)
 	if tc.ID == "" {
 		tc.ID = "legacy_function_call_1"
@@ -1016,6 +1022,21 @@ func parseLegacyFunctionCall(state *StreamState, delta map[string]interface{}) {
 	if arguments, ok := functionCall["arguments"].(string); ok {
 		tc.Args.WriteString(arguments)
 	}
+}
+
+// isEmptyLegacyFunctionCall 判断 legacy function_call 载荷是否是空占位对象：
+// name 与 arguments 均为空。这类载荷不代表任何工具调用。
+func isEmptyLegacyFunctionCall(functionCall map[string]interface{}) bool {
+	if functionCall == nil {
+		return true
+	}
+	if name := strings.TrimSpace(firstOpenAIErrorString(functionCall["name"])); name != "" {
+		return false
+	}
+	if arguments := strings.TrimSpace(firstOpenAIErrorString(functionCall["arguments"])); arguments != "" {
+		return false
+	}
+	return true
 }
 
 // parseFunction 解析 tool_call 中的 function 字段

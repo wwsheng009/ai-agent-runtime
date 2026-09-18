@@ -206,3 +206,77 @@ func TestOpenAIHandleResponse_StreamNormalizesLegacyFunctionCall(t *testing.T) {
 		t.Fatalf("unexpected finish reason: %#v", msg["finish_reason"])
 	}
 }
+
+// 复现 unsee relay 的真实抓包：纯文本回复的收尾 chunk 携带空的 legacy
+// function_call 占位对象（name/arguments 均为空），不应被判为无效工具调用。
+func TestOpenAIHandleResponse_StreamIgnoresEmptyLegacyFunctionCallPlaceholder(t *testing.T) {
+	adapter := &OpenAIAdapter{}
+	var content strings.Builder
+
+	msg, err := adapter.HandleResponse(true, strings.NewReader(strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"","reasoning_content":"","role":"assistant","tool_calls":[]},"finish_reason":null,"index":0,"logprobs":null}],"created":1789745567,"id":"cmb-1","model":"deepseek-v4.1-flash","object":"chat.completion.chunk"}`,
+		"",
+		`data: {"choices":[{"delta":{"content":"好的","tool_calls":[]},"finish_reason":null,"index":0}]}`,
+		"",
+		`data: {"choices":[{"delta":{"content":"","function_call":{"arguments":"","name":""},"reasoning_content":"","role":"assistant","tool_calls":[]},"finish_reason":"stop","index":0,"logprobs":null}],"created":1789745567,"id":"cmb-1","model":"deepseek-v4.1-flash","object":"chat.completion.chunk"}`,
+		"",
+		`data: [DONE]`,
+		"",
+	}, "\n")), StreamCallbacks{OnText: func(delta string) { content.WriteString(delta) }})
+	if err != nil {
+		t.Fatalf("empty legacy function_call placeholder must not fail the stream: %v", err)
+	}
+	if got := content.String(); got != "好的" {
+		t.Fatalf("expected streamed content 好的, got %q", got)
+	}
+	if got, _ := msg["content"].(string); got != "好的" {
+		t.Fatalf("expected assistant content 好的, got %#v", msg["content"])
+	}
+	if toolCalls, exists := msg["tool_calls"]; exists {
+		t.Fatalf("expected no tool calls, got %#v", toolCalls)
+	}
+	if got, _ := msg["finish_reason"].(string); got != "stop" {
+		t.Fatalf("expected finish_reason stop, got %#v", msg["finish_reason"])
+	}
+}
+
+// 非空 legacy function_call 仍必须被识别为真实工具调用。
+func TestOpenAIHandleResponse_StreamKeepsNamedLegacyFunctionCall(t *testing.T) {
+	adapter := &OpenAIAdapter{}
+
+	msg, err := adapter.HandleResponse(true, strings.NewReader(strings.Join([]string{
+		`data: {"choices":[{"delta":{"function_call":{"name":"lookup","arguments":"{\"q\":\"x\"}"}},"finish_reason":"function_call","index":0}]}`,
+		"",
+		`data: [DONE]`,
+		"",
+	}, "\n")), StreamCallbacks{})
+	if err != nil {
+		t.Fatalf("named legacy function_call must be accepted: %v", err)
+	}
+	toolCalls, ok := msg["tool_calls"].([]map[string]interface{})
+	if !ok || len(toolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %#v", msg["tool_calls"])
+	}
+	fn, _ := toolCalls[0]["function"].(map[string]interface{})
+	if got, _ := fn["name"].(string); got != "lookup" {
+		t.Fatalf("expected tool name lookup, got %q", got)
+	}
+}
+
+// 只有 arguments、缺 name 的 legacy function_call 仍是真实的协议错误。
+func TestOpenAIHandleResponse_StreamRejectsNamelessLegacyFunctionCallWithArguments(t *testing.T) {
+	adapter := &OpenAIAdapter{}
+
+	_, err := adapter.HandleResponse(true, strings.NewReader(strings.Join([]string{
+		`data: {"choices":[{"delta":{"function_call":{"name":"","arguments":"{\"q\":\"x\"}"}},"finish_reason":"function_call","index":0}]}`,
+		"",
+		`data: [DONE]`,
+		"",
+	}, "\n")), StreamCallbacks{})
+	if err == nil {
+		t.Fatal("expected nameless legacy function_call with arguments to fail")
+	}
+	if !strings.Contains(err.Error(), "invalid_tool_call") {
+		t.Fatalf("expected invalid_tool_call, got %v", err)
+	}
+}

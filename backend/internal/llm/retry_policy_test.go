@@ -655,6 +655,17 @@ func TestValidateAssistantMessageSemanticsRejectsUnsafeToolCallsAndClassifiesFin
 	// 样本各自重放满预算（见 retry-architecture §4.3 的 handoff 白名单）。
 	assert.False(t, isHandoffEligibleError(err))
 
+	// invalid_tool_call（缺函数名等结构性缺陷）与 invalid_tool_arguments 同类：
+	// unsee 中转在纯文本收尾 chunk 附带空 function_call 占位对象导致流被误判
+	// 缺名，换一次采样即可恢复；因此同样按退化采样治理（短退避 + 连续收敛 +
+	// 不 handoff），不能落回 default_retryable 烧穿完整指数退避预算。
+	namelessCall := fmt.Errorf("openai_stream_protocol_error: code=invalid_tool_call: tool call 0 is missing a function name")
+	namelessDecision := classifyRetryableLLMError(namelessCall)
+	assert.True(t, namelessDecision.Retryable)
+	assert.Equal(t, "invalid_tool_arguments", namelessDecision.Reason)
+	assert.True(t, isDegenerateOutputRetryReason(namelessDecision.Reason))
+	assert.False(t, isHandoffEligibleError(namelessCall))
+
 	contentFilterErr := validateAssistantMessageSemantics(map[string]interface{}{
 		"finish_reason": "content_filter",
 	})
@@ -1025,6 +1036,16 @@ func TestTrackDegenerateOutputReplyBoundsConsecutiveStreak(t *testing.T) {
 	require.True(t, trackDegenerateOutputReply(&streak, malformedArgs),
 		"the third consecutive malformed-arguments sample stops the loop")
 
+	// A nameless tool call (unsee relay empty function_call placeholder) is the
+	// same degenerate class since the invalid_tool_call split: resampling the
+	// same prompt must be bounded instead of burning the full attempt budget.
+	namelessCall := fmt.Errorf("openai_stream_protocol_error: code=invalid_tool_call: tool call 0 is missing a function name")
+	streak = 0
+	require.False(t, trackDegenerateOutputReply(&streak, namelessCall))
+	require.False(t, trackDegenerateOutputReply(&streak, namelessCall))
+	require.True(t, trackDegenerateOutputReply(&streak, namelessCall),
+		"the third consecutive nameless-tool-call sample stops the loop")
+
 	// Any other failure class resets the streak instead of accumulating.
 	require.False(t, trackDegenerateOutputReply(&streak,
 		newProviderHTTPError(http.StatusTooManyRequests, "rate limit reached", nil)))
@@ -1054,6 +1075,15 @@ func TestDegenerateOutputRetryDelayIsCapped(t *testing.T) {
 		policy.delayForDecision(1, retryDecision{Retryable: true, Reason: "truncated_tool_call"}))
 	require.Equal(t, degenerateOutputRetryMaxDelay,
 		policy.delayForDecision(1, retryDecision{Retryable: true, Reason: "invalid_tool_arguments"}))
+
+	// A nameless tool call is classified into the same degenerate class, so it
+	// also gets the capped short backoff instead of full exponential backoff.
+	namelessCall := fmt.Errorf("openai_stream_protocol_error: code=invalid_tool_call: tool call 0 is missing a function name")
+	namelessDecision := classifyRetryableLLMError(namelessCall)
+	require.True(t, namelessDecision.Retryable)
+	require.Equal(t, "invalid_tool_arguments", namelessDecision.Reason)
+	require.Equal(t, degenerateOutputRetryMaxDelay,
+		policy.delayForDecision(1, namelessDecision))
 
 	// Congestion-class retries keep the configured backoff.
 	require.Equal(t, 30*time.Second,

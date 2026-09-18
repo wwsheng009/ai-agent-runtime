@@ -1065,11 +1065,22 @@ func classifyRetryableLLMErrorWithRules(err error, rules []RetryRule) retryDecis
 			Delay:     decisionDelayFromServerHint(err),
 			Reason:    "insufficient_system_resource",
 		}
-	case "missing_tool_call", "invalid_tool_call", "ambiguous_tool_call_delta":
+	case "missing_tool_call", "ambiguous_tool_call_delta":
 		return retryDecision{
 			Retryable: true,
 			Delay:     decisionDelayFromServerHint(err),
 			Reason:    "malformed_tool_call",
+		}
+	case "invalid_tool_call":
+		// 工具调用缺函数名等结构性缺陷与 invalid_tool_arguments 同类：同一
+		// prompt 的重采样是有界随机重试（unsee 中转空 function_call 占位对象
+		// 导致的 invalid_tool_call 换一次采样即可恢复），不是上游拥塞。按退化
+		// 输出治理：短退避 + 连续 3 次收敛（trackDegenerateOutputReply），
+		// 不做外层 handoff，避免三层循环把同一退化样本各重放满预算。
+		return retryDecision{
+			Retryable: true,
+			Delay:     decisionDelayFromServerHint(err),
+			Reason:    "invalid_tool_arguments",
 		}
 	case "empty_provider_choices":
 		// 200 携带空/缺失的 choices 数组：这是退化采样（和空流回复同类），
@@ -1184,11 +1195,20 @@ func classifyRetryableLLMErrorWithRules(err error, rules []RetryRule) retryDecis
 			Reason:    "insufficient_system_resource",
 		}
 	}
-	if containsAny(lower, "code=missing_tool_call", "code=invalid_tool_call", "code=ambiguous_tool_call_delta") {
+	if containsAny(lower, "code=missing_tool_call", "code=ambiguous_tool_call_delta") {
 		return retryDecision{
 			Retryable: true,
 			Delay:     decisionDelayFromServerHint(err),
 			Reason:    "malformed_tool_call",
+		}
+	}
+	if containsAny(lower, "code=invalid_tool_call") {
+		// 与上方 switch 分支一致：缺名等结构性缺陷按退化采样重试（短退避 +
+		// 连续退化上限），不做外层 handoff。
+		return retryDecision{
+			Retryable: true,
+			Delay:     decisionDelayFromServerHint(err),
+			Reason:    "invalid_tool_arguments",
 		}
 	}
 	if containsAny(lower, "code=invalid_tool_arguments") {
