@@ -53,6 +53,7 @@
 | `--wait <duration>` | stop | 等待进程退出的超时时间（默认 10s） |
 | `--pid <pid>` | stop | 直接停止指定 PID，跳过 PID 文件 |
 | `--pprof` | serve/start | 启用 pprof 诊断端点（127.0.0.1 随机空闲端口，可用 `AICLI_PPROF` 环境变量指定地址） |
+| `--web-port <port>` | serve/start | 指定 pprof 诊断端点监听端口（1-65535）；等价 `AICLI_PPROF=127.0.0.1:<port>` 且优先级更高，越界直接报错退出；`start` 会随子进程转发 |
 
 ---
 
@@ -135,7 +136,8 @@ runtime-server serve --pprof
 ## 7. 诊断
 
 - `status` 子命令输出运行状态（PID、监听地址、配置文件）
-- `--pprof` 启用后，pprof 端点 URL 打印到 stderr；`AICLI_PPROF=127.0.0.1:6060` 可固定地址
+- `--pprof` 启用后，pprof 端点 URL 打印到 stderr；用 `--web-port 6060`（推荐）或
+  `AICLI_PPROF=127.0.0.1:6060` 固定地址（两者都不需要再传 `--pprof`）
 - 启动失败时优先检查端口冲突（日志会提示占用 PID）与配置文件路径
 
 ---

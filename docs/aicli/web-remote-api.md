@@ -1,7 +1,8 @@
 # aicli Web 远程调用 API（`/web/api/*`）
 
 > 适用版本：集成微型 Web 客户端之后的 aicli。
-> 前提：`aicli chat` / `aicli resume` / `aicli` 以 `--pprof`（或 `--debug`）启动，
+> 前提：`aicli chat` / `aicli resume` / `aicli` 以 `--pprof`（或 `--debug`，或 `--web-port <端口>` /
+> `AICLI_PPROF`）启动，
 > loopback HTTP 服务器已开启。服务器仅监听 `127.0.0.1`，并叠加
 > Host/Origin 校验与写令牌（`X-AICLI-Token`）；即便如此也不要转发/暴露到网络。
 

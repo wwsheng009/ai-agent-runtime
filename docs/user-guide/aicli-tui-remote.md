@@ -3,7 +3,7 @@
 > 对应程序：`backend/cmd/aicli`（`aicli` / `aicli.exe`）
 > 作用：在**本机**对**正在运行的** aicli TUI 会话做脚本化远程操作——注入 prompt、
 > 等待/流式取回复、回答审批与提问、中断、切换会话、抓取"用户当前看到的屏幕"。
-> 前提：TUI 以 `--pprof`（或 `--debug` / `AICLI_PPROF`）启动，loopback HTTP 服务器已开启。
+> 前提：TUI 以 `--pprof`（或 `--debug` / `--web-port` / `AICLI_PPROF`）启动，loopback HTTP 服务器已开启。
 
 ---
 
@@ -45,7 +45,7 @@
 
 ## 2. 启动与入口发现
 
-### 2.1 三种开启方式
+### 2.1 开启方式与固定端口
 
 ```powershell
 # 1) 显式开启（监听 127.0.0.1 的随机空闲端口）
@@ -54,13 +54,18 @@ aicli chat --pprof
 # 2) 用 --debug 启动 chat 时也会自动开启（内置渲染状态端点）
 aicli chat --debug
 
-# 3) 用环境变量固定地址（优先级最高，便于书签/脚本复用）
+# 3) 用 --web-port 固定端口（推荐；等价 AICLI_PPROF=127.0.0.1:<port> 且优先级更高）
+aicli chat --web-port 64562
+
+# 4) 用环境变量固定地址（可带自定义 host，便于书签/脚本复用）
 $env:AICLI_PPROF = '127.0.0.1:64562'
 aicli chat
 ```
 
 `--pprof` 是根命令的持久 flag，`aicli chat --pprof` 与 `aicli --pprof chat` 等价；
-对环境变量：**地址固定后端口不再随机**，脚本可以硬编码 `http://127.0.0.1:64562`。
+`--web-port` 是它的端口版：只接受 1-65535，固定绑定 `127.0.0.1`，越界或占用会直接报错退出
+（不会静默退化成随机端口）；优先级 **`--web-port` > `AICLI_PPROF` > 随机空闲端口**。
+固定后端口不再变化，脚本可以硬编码 `http://127.0.0.1:64562`。
 
 ### 2.2 固定写令牌（可选）
 
@@ -120,8 +125,8 @@ web  (微型 Web 客户端 / 远程调用 API)
   ...
 ```
 
-> TUI 未开启 `--pprof` 时该区块显示 `Status: 未启用` 与开启提示
-> （`--pprof` 或 `AICLI_PPROF=127.0.0.1:<端口>`）。
+> TUI 未开启 loopback 服务器时该区块显示 `Status: 未启用` 与开启提示
+> （`--pprof` / `--debug`，或 `--web-port <端口>` / `AICLI_PPROF=127.0.0.1:<端口>` 固定地址）。
 
 ### 2.5 机器可读的入口清单
 
@@ -497,7 +502,7 @@ curl -s -X POST http://127.0.0.1:64562/web/api/invoke \
 | 浏览器打开 `/web/` 能看不能写（按钮报错） | 页面 meta 未注入（不是同一后端/旧构建）；重新从 `http://127.0.0.1:<port>/web/` 打开，不要用文件方式打开静态页 |
 | `409 no active chat session` | 服务器已就绪但会话还没绑定；轮询 `current_session_id` 或把 409 视为可重试 |
 | `timeout` 后 TUI 仍在跑 | 正常：长任务/后台作业未结束；用 `events`、`turn`、`screen` 继续观察，或再发 `wait_only` 等待 |
-| 端口每次都变 | 未固定地址；用 `AICLI_PPROF=127.0.0.1:64562` 固定 |
+| 端口每次都变 | 未固定端口；用 `--web-port 64562`（推荐）或 `AICLI_PPROF=127.0.0.1:64562` 固定 |
 | `--pprof` 后终端无输出 | 服务器地址打在 **stderr**；若在管道/重定向中启动，把 stderr 落文件再 grep `web write token` |
 
 ### 6.3 快速自检脚本

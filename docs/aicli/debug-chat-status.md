@@ -47,6 +47,7 @@ aicli 在 **`--debug`** 或 **`--pprof`** 模式下自动启动 loopback HTTP �
 |------|------|
 | `--pprof` 显式开启 | `aicli resume session_<id> --pprof on` |
 | `--debug` 自动开启 | `aicli resume session_<id> --debug on` |
+| `--web-port` 固定端口 | `aicli resume session_<id> --web-port 64562` |
 | 环境变量 | `AICLI_PPROF=127.0.0.1:0 aicli resume session_<id>` |
 
 启动后 stderr 会打印：
@@ -68,7 +69,7 @@ Info: runtime observe plane: http://127.0.0.1:50679/api/runtime/observe/v1 (loca
 > 详见 `docs/aicli/web-remote-api.md`。
 
 > **Runtime Observation Plane（本地模式）默认随 `--pprof on` 开启。**
-> 只要 loopback HTTP 服务器启动（`--pprof` / `--debug` / `AICLI_PPROF`），本地 in-process 会话就会自动构建
+> 只要 loopback HTTP 服务器启动（`--pprof` / `--debug` / `--web-port` / `AICLI_PPROF`），本地 in-process 会话就会自动构建
 > observe 服务，把 `/api/runtime/observe/v1/*` 端点挂到同一个 loopback 服务器上
 > （见下文 [Runtime Observation Plane（本地模式）](#runtime-observation-plane本地模式)）。
 > 与 runtime-server 模式不同，这里**不需要**任何远端服务，也**不会** fallback 到
@@ -829,7 +830,7 @@ loopback HTTP 服务器上，前缀为 `/api/runtime/observe/v1`。**默认随 `
 
 启用条件（二者满足其一即可）：
 
-- pprof loopback HTTP 服务器已开启（`--pprof` / `--debug` / `AICLI_PPROF`）→ 默认开启；
+- pprof loopback HTTP 服务器已开启（`--pprof` / `--debug` / `--web-port` / `AICLI_PPROF`）→ 默认开启；
 - `observe.enabled = true`（显式配置）。
 
 服务为**惰性构建**：首次被 HTTP 请求或 `/debug display` 触发时创建一次并缓存，
@@ -885,4 +886,4 @@ curl http://127.0.0.1:50679/debug/pprof/goroutine
 - 无活动会话时两者均返回 `available=false`（HTTP 200），便于轮询探测；
 - 不依赖 Observe API（`service.go:126-130` 写死 `renderer_observation_not_implemented`），直接读取内存中的 Presenter / Executor / TerminalSession 内部状态；
 - 快照在 HTTP 请求处理函数中同步构建，**不是定期缓存**，确保每次请求都是当前时刻的最新状态；
-- 使用 `--pprof` 或 `--debug` 启动的 HTTP 服务器默认监听 `127.0.0.1:0`（随机空闲端口），仅本机可访问。
+- 使用 `--pprof` 或 `--debug` 启动的 HTTP 服务器默认监听 `127.0.0.1:0`（随机空闲端口），仅本机可访问；用 `--web-port <端口>` 可固定端口（仍绑定 `127.0.0.1`，端口占用时启动失败）。
