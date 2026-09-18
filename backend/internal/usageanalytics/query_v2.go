@@ -38,6 +38,8 @@ type ToolStat struct {
 	EmptyResults    int            `json:"empty_results"`
 	RetriedCalls    int            `json:"retried_calls"`
 	AverageDuration int64          `json:"average_duration_ms"`
+	MinDurationMS   int64          `json:"min_duration_ms"`
+	MaxDurationMS   int64          `json:"max_duration_ms"`
 	P50DurationMS   int64          `json:"p50_duration_ms"`
 	P95DurationMS   int64          `json:"p95_duration_ms"`
 	ErrorTop        []ErrorPattern `json:"error_top,omitempty"`
@@ -136,13 +138,13 @@ SELECT tool_name,
        SUM(CASE WHEN ok = 0 OR outcome = 'failed' THEN 1 ELSE 0 END) AS failures,
        SUM(CASE WHEN empty_result = 1 OR outcome = 'empty' THEN 1 ELSE 0 END) AS empty_results,
        SUM(CASE WHEN retryable = 1 OR outcome = 'partial' THEN 1 ELSE 0 END) AS retried,
-       SUM(CASE WHEN duration_ms > 0 THEN duration_ms ELSE 0 END) AS total_duration,
-       SUM(CASE WHEN duration_ms > 0 THEN 1 ELSE 0 END) AS duration_samples
+  SUM((%s)) AS total_duration,
+  SUM(CASE WHEN (%s) > 0 THEN 1 ELSE 0 END) AS duration_samples
 FROM usage_tool_calls
 WHERE %s
 GROUP BY tool_name
 ORDER BY calls DESC, tool_name ASC
-LIMIT ?`, where), append(args, normalizeLimit(q.Limit, maxToolStatsRows, maxToolStatsRows))...)
+LIMIT ?`, effectiveToolDurationSQL, effectiveToolDurationSQL, where), append(args, normalizeLimit(q.Limit, maxToolStatsRows, maxToolStatsRows))...)
 	if err != nil {
 		return result, fmt.Errorf("query tool stats: %w", err)
 	}
@@ -152,6 +154,7 @@ LIMIT ?`, where), append(args, normalizeLimit(q.Limit, maxToolStatsRows, maxTool
 	defer rows.Close()
 	totals := ToolStat{ToolName: "all"}
 	stats := make([]ToolStat, 0, 16)
+	var totalsDurationSum, totalsDurationSamples int64
 	for rows.Next() {
 		var (
 			stat                           ToolStat
@@ -164,6 +167,8 @@ LIMIT ?`, where), append(args, normalizeLimit(q.Limit, maxToolStatsRows, maxTool
 		if durationSamples > 0 {
 			stat.AverageDuration = totalDuration / durationSamples
 		}
+		totalsDurationSum += totalDuration
+		totalsDurationSamples += durationSamples
 		stats = append(stats, stat)
 		totals.Calls += stat.Calls
 		totals.Failures += stat.Failures
@@ -189,10 +194,15 @@ LIMIT ?`, where), append(args, normalizeLimit(q.Limit, maxToolStatsRows, maxTool
 	if err != nil {
 		return result, fmt.Errorf("query tool error tops: %w", err)
 	}
+	// 耗时样本按工具分组且组内升序：首尾即最小/最大，无需再扫库。
+	allDurationSamples := make([]int64, 0, 64)
 	for index := range stats {
 		if samples := durationsByTool[stats[index].ToolName]; len(samples) > 0 {
+			stats[index].MinDurationMS = samples[0]
+			stats[index].MaxDurationMS = samples[len(samples)-1]
 			stats[index].P50DurationMS = percentile(samples, 0.50)
 			stats[index].P95DurationMS = percentile(samples, 0.95)
+			allDurationSamples = append(allDurationSamples, samples...)
 		}
 		if top := errorTopByTool[stats[index].ToolName]; len(top) > 0 {
 			stats[index].ErrorTop = top
@@ -200,6 +210,18 @@ LIMIT ?`, where), append(args, normalizeLimit(q.Limit, maxToolStatsRows, maxTool
 	}
 	result.Tools = stats
 	totals.FailureRate = ratio(totals.Failures, totals.Calls)
+	// totals 耗时口径与行内一致：平均用加权样本；min/max/百分位用合并样本。
+	// 此前 totals 从不累计耗时，页头「P95 耗时」恒为 0——这里一并修正。
+	if totalsDurationSamples > 0 {
+		totals.AverageDuration = totalsDurationSum / totalsDurationSamples
+	}
+	if len(allDurationSamples) > 0 {
+		sort.Slice(allDurationSamples, func(i, j int) bool { return allDurationSamples[i] < allDurationSamples[j] })
+		totals.MinDurationMS = allDurationSamples[0]
+		totals.MaxDurationMS = allDurationSamples[len(allDurationSamples)-1]
+		totals.P50DurationMS = percentile(allDurationSamples, 0.50)
+		totals.P95DurationMS = percentile(allDurationSamples, 0.95)
+	}
 	result.Totals = totals
 	return result, nil
 }
@@ -207,14 +229,20 @@ LIMIT ?`, where), append(args, normalizeLimit(q.Limit, maxToolStatsRows, maxTool
 // toolErrorTopLimit 列表视图每个工具保留的错误码条数（与 ToolStatsDetail 的 Top-3 对齐）。
 const toolErrorTopLimit = 3
 
+// effectiveToolDurationSQL 是耗时样本的统一口径：优先工具自报的 duration_ms；
+// 缺失（0）时回退到 tool.requested/tool.completed 事件时间差，与实时 bridge 的
+// 墙钟口径一致。未自报耗时的工具（ls/view/grep…）与历史行因此也能参与
+// avg/min/max/p50/p95，而不是被 duration_ms > 0 整行过滤掉。
+const effectiveToolDurationSQL = `MAX(COALESCE(NULLIF(duration_ms, 0), (completed_at_unix_nano - started_at_unix_nano) / 1000000), 0)`
+
 // toolDurationSamples 一次查询取回过滤窗口内全部工具的耗时样本：
 // 按 tool_name 分组、组内 duration_ms 升序（percentile 要求有序输入）。
 func (s *Store) toolDurationSamples(q ToolStatsQuery) (map[string][]int64, error) {
 	where, args := toolStatsWhere(q)
 	rows, ok, err := s.query(fmt.Sprintf(`
-SELECT tool_name, duration_ms FROM usage_tool_calls
-WHERE %s AND duration_ms > 0
-ORDER BY tool_name ASC, duration_ms ASC`, where), args...)
+SELECT tool_name, (%s) AS duration FROM usage_tool_calls
+WHERE %s AND (%s) > 0
+ORDER BY tool_name ASC, duration ASC`, effectiveToolDurationSQL, where, effectiveToolDurationSQL), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -291,11 +319,13 @@ SELECT
   SUM(CASE WHEN ok = 0 OR outcome = 'failed' THEN 1 ELSE 0 END) AS failures,
   SUM(CASE WHEN empty_result = 1 OR outcome = 'empty' THEN 1 ELSE 0 END) AS empty_results,
   SUM(CASE WHEN retryable = 1 OR outcome = 'partial' THEN 1 ELSE 0 END) AS retried,
-  SUM(CASE WHEN duration_ms > 0 THEN duration_ms ELSE 0 END) AS total_duration,
-  SUM(CASE WHEN duration_ms > 0 THEN 1 ELSE 0 END) AS duration_samples
+  SUM((%s)) AS total_duration,
+  SUM(CASE WHEN (%s) > 0 THEN 1 ELSE 0 END) AS duration_samples,
+  COALESCE(MIN(NULLIF((%s), 0)), 0) AS min_duration,
+  COALESCE(MAX((%s)), 0) AS max_duration
 FROM usage_tool_calls
 WHERE %s AND tool_name = ?
-GROUP BY tool_name`, where), args...)
+GROUP BY tool_name`, effectiveToolDurationSQL, effectiveToolDurationSQL, effectiveToolDurationSQL, effectiveToolDurationSQL, where), args...)
 	if err != nil {
 		return stat, fmt.Errorf("query tool stats detail: %w", err)
 	}
@@ -305,13 +335,21 @@ GROUP BY tool_name`, where), args...)
 	defer rows.Close()
 	if rows.Next() {
 		var totalDuration, durationSamples int64
-		if err := rows.Scan(&stat.Calls, &stat.Failures, &stat.EmptyResults, &stat.RetriedCalls, &totalDuration, &durationSamples); err != nil {
+		if err := rows.Scan(&stat.Calls, &stat.Failures, &stat.EmptyResults, &stat.RetriedCalls, &totalDuration, &durationSamples, &stat.MinDurationMS, &stat.MaxDurationMS); err != nil {
 			return stat, fmt.Errorf("scan tool stats detail: %w", err)
 		}
 		stat.FailureRate = ratio(stat.Failures, stat.Calls)
 		if durationSamples > 0 {
 			stat.AverageDuration = totalDuration / durationSamples
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return stat, fmt.Errorf("scan tool stats detail: %w", err)
+	}
+	// 必须在后续查询（toolDurations/toolErrorTop）前关闭游标：写库是单连接池
+	//（store.go SetMaxOpenConns(1)），持着未读空的 Rows 再 Query 会永久阻塞。
+	if err := rows.Close(); err != nil {
+		return stat, fmt.Errorf("close tool stats detail rows: %w", err)
 	}
 	if durations, ok, err := s.toolDurations(q, toolName); err == nil && ok && len(durations) > 0 {
 		stat.P50DurationMS = percentile(durations, 0.50)

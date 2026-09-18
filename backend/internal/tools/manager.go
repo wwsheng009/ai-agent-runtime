@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
@@ -145,7 +146,49 @@ func (m *Manager) Execute(ctx context.Context, name string, args map[string]inte
 }
 
 // ExecuteWithMeta runs a tool and preserves structured metadata for runtime callers.
+// 统一耗时兜底：工具自报 duration_ms 优先（bash 等），未上报的进程内工具
+// （ls/view/grep/edit…）按墙钟补一个 >0 的毫秒值，使 tool.completed 与
+// usage analytics 拿到同一口径；0ms（亚毫秒或失败前置返回）不伪造样本。
 func (m *Manager) ExecuteWithMeta(ctx context.Context, name string, args map[string]interface{}) (string, map[string]interface{}, error) {
+	start := time.Now()
+	output, metadata, err := m.executeWithMeta(ctx, name, args)
+	return output, withToolDurationFallback(metadata, time.Since(start)), err
+}
+
+// withToolDurationFallback 只在工具未上报有效耗时时补墙钟值；0ms（亚毫秒）保持
+// 缺省，由 analytics 的事件时间差回退兜底，避免把未知伪造成 0。
+func withToolDurationFallback(metadata map[string]interface{}, elapsed time.Duration) map[string]interface{} {
+	if ms := elapsed.Milliseconds(); ms > 0 && toolMetadataDurationMS(metadata) <= 0 {
+		if metadata == nil {
+			metadata = map[string]interface{}{}
+		}
+		metadata["duration_ms"] = ms
+	}
+	return metadata
+}
+
+// toolMetadataDurationMS 读取工具元数据里的 duration_ms（工具可能写 int/int64/float64）。
+func toolMetadataDurationMS(metadata map[string]interface{}) int64 {
+	if metadata == nil {
+		return 0
+	}
+	switch value := metadata["duration_ms"].(type) {
+	case int:
+		return int64(value)
+	case int32:
+		return int64(value)
+	case int64:
+		return value
+	case float32:
+		return int64(value)
+	case float64:
+		return int64(value)
+	default:
+		return 0
+	}
+}
+
+func (m *Manager) executeWithMeta(ctx context.Context, name string, args map[string]interface{}) (string, map[string]interface{}, error) {
 	if name == "list_mcp_resources" {
 		metadata := toolresult.WithSource(toolresult.WithKind(nil, toolresult.KindText), toolresult.SourceMeta)
 		if toolprotocol.HasReporter(ctx) {

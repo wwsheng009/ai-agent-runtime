@@ -362,7 +362,8 @@ export const enUsageAnalytics = {
         calls: "Calls",
         failures: "Failures",
         failureRate: "Failure rate",
-        p95: "P95 latency",
+        average: "Average latency",
+        durationRange: "Min {{min}} · max {{max}}",
       },
       columns: {
         tool: "Tool",
@@ -372,6 +373,8 @@ export const enUsageAnalytics = {
         emptyResults: "Empty",
         retried: "Retried",
         average: "Average",
+        min: "Min",
+        max: "Max",
         p50: "P50",
         p95: "P95",
         actions: "Failure samples",

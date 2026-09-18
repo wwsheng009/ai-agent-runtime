@@ -47,6 +47,8 @@ function toolResponse(): AnalyticsToolStatsResponse {
         empty_results: 1,
         retried_calls: 2,
         average_duration_ms: 1200,
+        min_duration_ms: 300,
+        max_duration_ms: 5000,
         p50_duration_ms: 900,
         p95_duration_ms: 5000,
         error_top: [
@@ -67,6 +69,8 @@ function toolResponse(): AnalyticsToolStatsResponse {
       empty_results: 1,
       retried_calls: 2,
       average_duration_ms: 1200,
+      min_duration_ms: 300,
+      max_duration_ms: 5000,
       p50_duration_ms: 900,
       p95_duration_ms: 5000,
     },
@@ -86,6 +90,8 @@ function emptyToolResponse(): AnalyticsToolStatsResponse {
       empty_results: 0,
       retried_calls: 0,
       average_duration_ms: 0,
+      min_duration_ms: 0,
+      max_duration_ms: 0,
       p50_duration_ms: 0,
       p95_duration_ms: 0,
     },
@@ -206,6 +212,8 @@ describe("usage analytics observability panels", () => {
 
     expect(container.querySelector('[data-testid="tool-stats-empty"]')).not.toBeNull();
     expect(container.textContent).toContain("暂无数据");
+    // 无耗时样本 → 不伪造成 0ms（与 micro web / TUI 的「未上报 → --」同口径）。
+    expect(container.textContent).toContain("最小 -- · 最大 --");
     expect(listAnalyticsToolsMock).toHaveBeenCalledWith({
       session: "session-1",
       outcome: undefined,
@@ -223,6 +231,9 @@ describe("usage analytics observability panels", () => {
     expect(container.textContent).toContain("shell");
     expect(container.textContent).toContain("25.0%");
     expect(container.textContent).toContain("5.0 s");
+    // 页头耗时指标：平均 + 最小/最大区间；行内最小列 300 ms。
+    expect(container.textContent).toContain("1.2 s");
+    expect(container.textContent).toContain("最小 300 ms · 最大 5.0 s");
 
     // 限定在表格内：页头的 Select 触发器同样带 aria-expanded。
     const toggle = container.querySelector<HTMLButtonElement>(

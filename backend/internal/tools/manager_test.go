@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
@@ -258,6 +259,25 @@ func TestNewDefaultManagerWithRuntimeConfig_AllBuiltinToolkitToolsExposeOutputKi
 				t.Fatalf("expected %s=%q for %s, got %#v (err=%v)", toolresult.SourceKey, toolresult.SourceToolkit, name, got, execErr)
 			}
 		})
+	}
+}
+
+// TestWithToolDurationFallback 锁定工具耗时口径：工具自报优先；未上报时用墙钟
+// 兜底（ls/view/grep 等进程内工具此前完全不带 duration_ms，分析页显示「--」）；
+// 0ms（亚毫秒）不伪造，交给 analytics 的事件时间差回退。
+func TestWithToolDurationFallback(t *testing.T) {
+	if got := withToolDurationFallback(nil, 25*time.Millisecond); toolMetadataDurationMS(got) != 25 {
+		t.Fatalf("nil metadata should get wall-clock 25ms, got %#v", got)
+	}
+	reported := map[string]interface{}{"duration_ms": 957}
+	if got := withToolDurationFallback(reported, 25 * time.Millisecond); toolMetadataDurationMS(got) != 957 {
+		t.Fatalf("tool-reported duration must win, got %#v", got)
+	}
+	if got := withToolDurationFallback(nil, 0); got != nil {
+		t.Fatalf("sub-millisecond runs must not fabricate duration, got %#v", got)
+	}
+	if got := withToolDurationFallback(map[string]interface{}{"duration_ms": 12}, 0); toolMetadataDurationMS(got) != 12 {
+		t.Fatalf("existing duration must be preserved, got %#v", got)
 	}
 }
 

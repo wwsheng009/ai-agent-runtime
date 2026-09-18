@@ -93,9 +93,28 @@ func TestStoreV2StatsQueries(t *testing.T) {
 	if view.FailureRate < 0.49 || view.FailureRate > 0.51 {
 		t.Fatalf("view 失败率应约 0.5，实际 %v", view.FailureRate)
 	}
+	// 耗时来源 usage_tool_calls.duration_ms（样本 100/300）：平均 = 200，min/max = 100/300。
+	if view.AverageDuration != 200 || view.MinDurationMS != 100 || view.MaxDurationMS != 300 {
+		t.Fatalf("view 耗时聚合不符（期望 avg=200 min=100 max=300）: %+v", view)
+	}
+	if shell := byName["shell"]; shell.MinDurationMS != 50 || shell.MaxDurationMS != 50 {
+		t.Fatalf("shell 耗时聚合不符（期望 min=max=50）: %+v", shell)
+	}
 	// 错误 Top-N 现延迟至 ToolStatsDetail（不参与首屏聚合）。
 	if tools.Totals.Calls != 3 || tools.Totals.Failures != 2 {
 		t.Fatalf("全局工具合计不符: %+v", tools.Totals)
+	}
+	// totals 也必须带耗时口径（全部样本 50/100/300）：avg=150，min=50，max=300。
+	if tools.Totals.AverageDuration != 150 || tools.Totals.MinDurationMS != 50 || tools.Totals.MaxDurationMS != 300 {
+		t.Fatalf("全局工具耗时合计不符（期望 avg=150 min=50 max=300）: %+v", tools.Totals)
+	}
+	// 单工具详情（SQL 聚合路径）与列表口径一致。
+	detail, err := store.ToolStatsDetail(ToolStatsQuery{SessionID: "session-v2-stats"}, "view")
+	if err != nil {
+		t.Fatalf("ToolStatsDetail: %v", err)
+	}
+	if detail.AverageDuration != 200 || detail.MinDurationMS != 100 || detail.MaxDurationMS != 300 {
+		t.Fatalf("ToolStatsDetail 耗时聚合不符（期望 avg=200 min=100 max=300）: %+v", detail)
 	}
 
 	subagents, err := store.SubagentStats(SubagentStatsQuery{SessionID: "session-v2-stats"})
@@ -144,6 +163,60 @@ func TestStoreV2StatsQueries(t *testing.T) {
 	}
 	if len(empty.Tools) != 0 {
 		t.Fatalf("空结果应为空数组，实际 %+v", empty.Tools)
+	}
+}
+
+// TestStoreToolStatsDurationFallsBackToEventTimestamps 锁定耗时兜底口径：
+// 工具未自报 duration_ms（如会话里的 ls）时，用 tool.requested/completed 的
+// 事件时间差参与 avg/min/max/百分位，历史行无需回填即可在分析页显示。
+func TestStoreToolStatsDurationFallsBackToEventTimestamps(t *testing.T) {
+	store, err := Open(Config{Path: filepath.Join(t.TempDir(), "usage_analytics.sqlite")})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	sessionID := "session-duration-fallback"
+	bus := runtimeevents.NewBus()
+	collector := newCollector(store, nil, nil)
+	collector.subscribe(bus)
+	defer collector.close()
+
+	started := time.Date(2026, 9, 18, 10, 0, 0, 0, time.UTC)
+	publish := func(eventType string, payload map[string]interface{}, at time.Time) {
+		bus.Publish(runtimeevents.Event{Type: eventType, SessionID: sessionID, Payload: payload, Timestamp: at})
+	}
+	publish(EventSessionStart, map[string]interface{}{"session_id": sessionID, "turn_id": "turn-ls"}, started)
+	publish(EventToolRequested, map[string]interface{}{
+		"tool_call_id": "call-ls", "logical_tool": "ls", "turn_id": "turn-ls", "step": 1,
+	}, started)
+	// 关键：completed 不带 duration_ms（ls 不自报），只能靠事件时间差回退。
+	publish(EventToolCompleted, map[string]interface{}{
+		"tool_call_id": "call-ls", "logical_tool": "ls", "turn_id": "turn-ls", "step": 1,
+		"ok": true, "outcome": "success",
+	}, started.Add(25*time.Millisecond))
+
+	tools, err := store.ToolStats(ToolStatsQuery{SessionID: sessionID})
+	if err != nil {
+		t.Fatalf("ToolStats: %v", err)
+	}
+	if len(tools.Tools) != 1 {
+		t.Fatalf("期望 1 个工具聚合行，实际 %+v", tools.Tools)
+	}
+	ls := tools.Tools[0]
+	if ls.AverageDuration != 25 || ls.MinDurationMS != 25 || ls.MaxDurationMS != 25 || ls.P95DurationMS != 25 {
+		t.Fatalf("ls 事件时间差回退不符（期望全部 25ms）: %+v", ls)
+	}
+	if tools.Totals.AverageDuration != 25 || tools.Totals.MaxDurationMS != 25 {
+		t.Fatalf("totals 事件时间差回退不符: %+v", tools.Totals)
+	}
+
+	detail, err := store.ToolStatsDetail(ToolStatsQuery{SessionID: sessionID}, "ls")
+	if err != nil {
+		t.Fatalf("ToolStatsDetail: %v", err)
+	}
+	if detail.AverageDuration != 25 || detail.MinDurationMS != 25 || detail.MaxDurationMS != 25 {
+		t.Fatalf("详情事件时间差回退不符: %+v", detail)
 	}
 }
 

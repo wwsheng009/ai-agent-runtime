@@ -266,6 +266,9 @@ export type AnalyticsToolStat = {
   empty_results: number;
   retried_calls: number;
   average_duration_ms: number;
+  /** 过滤窗内耗时样本（自报 duration_ms，缺失时回退 requested→completed 事件时间差）的最小/最大值。 */
+  min_duration_ms: number;
+  max_duration_ms: number;
   p50_duration_ms: number;
   p95_duration_ms: number;
   error_top?: AnalyticsErrorPattern[];

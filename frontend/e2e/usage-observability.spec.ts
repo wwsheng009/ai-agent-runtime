@@ -62,6 +62,8 @@ const EMPTY_TOOL_STAT = {
   empty_results: 0,
   retried_calls: 0,
   average_duration_ms: 0,
+  min_duration_ms: 0,
+  max_duration_ms: 0,
   p50_duration_ms: 0,
   p95_duration_ms: 0,
 };

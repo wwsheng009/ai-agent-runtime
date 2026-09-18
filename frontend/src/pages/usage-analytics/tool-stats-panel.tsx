@@ -2,7 +2,8 @@
 //
 // 契约：{ schema_version, generated_at, tools: ToolStat[], totals: ToolStat }，
 // 其中 ToolStat = { tool_name, calls, failures, failure_rate, empty_results,
-// retried_calls, average_duration_ms, p50_duration_ms, p95_duration_ms, error_top }。
+// retried_calls, average_duration_ms, min_duration_ms, max_duration_ms,
+// p50_duration_ms, p95_duration_ms, error_top }。
 // 空库返回空数组（不是 500）→ 渲染「暂无数据」；失败沿用本地 loading/error + role="alert"。
 
 import { listAnalyticsTools } from "@/api/runtime/analytics";
@@ -51,9 +52,17 @@ const EMPTY_TOOL_STAT: AnalyticsToolStat = {
   empty_results: 0,
   retried_calls: 0,
   average_duration_ms: 0,
+  min_duration_ms: 0,
+  max_duration_ms: 0,
   p50_duration_ms: 0,
   p95_duration_ms: 0,
 };
+
+// 后端约定：duration_ms<=0 的样本不参与耗时聚合，0 值 = 无耗时样本（而非 0ms 实测）；
+// 沿用 micro web / TUI 的「未上报 → --」口径，避免把缺失伪造成 0。
+function formatToolDuration(value: number): string {
+  return value > 0 ? formatDuration(value) : "--";
+}
 
 export function ToolStatsPanel({
   sessionId,
@@ -169,9 +178,12 @@ export function ToolStatsPanel({
           tone={totals.failures > 0 ? "warning" : "default"}
         />
         <Metric
-          label={t("observability.tools.metrics.p95")}
-          value={formatDuration(totals.p95_duration_ms)}
-          detail={t("observability.tools.columns.average")}
+          label={t("observability.tools.metrics.average")}
+          value={formatToolDuration(totals.average_duration_ms)}
+          detail={t("observability.tools.metrics.durationRange", {
+            min: formatToolDuration(totals.min_duration_ms),
+            max: formatToolDuration(totals.max_duration_ms),
+          })}
         />
       </div>
 
@@ -189,7 +201,7 @@ export function ToolStatsPanel({
         </div>
       ) : (
         <div className="w-full max-w-full overflow-x-auto rounded-card border border-border">
-          <table className="w-full min-w-[920px] border-collapse text-left text-sm">
+          <table className="w-full min-w-[1080px] border-collapse text-left text-sm">
             <thead className="bg-surface-softer text-xs text-muted-foreground">
               <tr className="border-b border-border">
                 <th className="px-3 py-2 font-medium">{t("observability.tools.columns.tool")}</th>
@@ -199,6 +211,8 @@ export function ToolStatsPanel({
                 <th className="px-3 py-2 font-medium">{t("observability.tools.columns.emptyResults")}</th>
                 <th className="px-3 py-2 font-medium">{t("observability.tools.columns.retried")}</th>
                 <th className="px-3 py-2 font-medium">{t("observability.tools.columns.average")}</th>
+                <th className="px-3 py-2 font-medium">{t("observability.tools.columns.min")}</th>
+                <th className="px-3 py-2 font-medium">{t("observability.tools.columns.max")}</th>
                 <th className="px-3 py-2 font-medium">{t("observability.tools.columns.p50")}</th>
                 <th className="px-3 py-2 font-medium">{t("observability.tools.columns.p95")}</th>
                 <th className="relative w-12 px-2 py-2">
@@ -255,9 +269,11 @@ function ToolRow({
         <td className="px-3 py-2.5 tabular-nums">{formatPercent(tool.failure_rate)}</td>
         <td className="px-3 py-2.5 tabular-nums">{formatNumber(tool.empty_results)}</td>
         <td className="px-3 py-2.5 tabular-nums">{formatNumber(tool.retried_calls)}</td>
-        <td className="px-3 py-2.5 tabular-nums">{formatDuration(tool.average_duration_ms)}</td>
-        <td className="px-3 py-2.5 tabular-nums">{formatDuration(tool.p50_duration_ms)}</td>
-        <td className="px-3 py-2.5 tabular-nums">{formatDuration(tool.p95_duration_ms)}</td>
+        <td className="px-3 py-2.5 tabular-nums">{formatToolDuration(tool.average_duration_ms)}</td>
+        <td className="px-3 py-2.5 tabular-nums">{formatToolDuration(tool.min_duration_ms)}</td>
+        <td className="px-3 py-2.5 tabular-nums">{formatToolDuration(tool.max_duration_ms)}</td>
+        <td className="px-3 py-2.5 tabular-nums">{formatToolDuration(tool.p50_duration_ms)}</td>
+        <td className="px-3 py-2.5 tabular-nums">{formatToolDuration(tool.p95_duration_ms)}</td>
         <td className="px-2 py-2.5">
           <Button
             variant="ghost"
@@ -278,7 +294,7 @@ function ToolRow({
       </tr>
       {open ? (
         <tr className="border-b border-border/70 bg-surface-softer last:border-b-0">
-          <td colSpan={10} className="px-3 py-3">
+          <td colSpan={12} className="px-3 py-3">
             <div className="mb-2 text-xs font-medium text-muted-foreground">
               {t("observability.tools.detailsTitle", { count: samples.length })}
             </div>

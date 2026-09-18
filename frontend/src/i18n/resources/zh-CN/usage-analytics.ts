@@ -360,7 +360,8 @@ export const zhUsageAnalytics = {
         calls: "调用",
         failures: "失败",
         failureRate: "失败率",
-        p95: "P95 耗时",
+        average: "平均耗时",
+        durationRange: "最小 {{min}} · 最大 {{max}}",
       },
       columns: {
         tool: "工具",
@@ -370,6 +371,8 @@ export const zhUsageAnalytics = {
         emptyResults: "空结果",
         retried: "重试",
         average: "平均耗时",
+        min: "最小",
+        max: "最大",
         p50: "P50",
         p95: "P95",
         actions: "失败样本",

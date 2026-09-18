@@ -268,7 +268,9 @@ function renderAnalysisCards() {
     var toolCount = (analysisToolsData.tools || []).length;
     cards.push(analysisCard(analysisInt(toolCount),
       "工具（调用 " + analysisInt(totals.calls || 0) + " · 失败 " + analysisInt(totals.failures || 0) +
-      " · 失败率 " + analysisFailureRate(totals.failures || 0, totals.calls || 0) + "）"));
+      " · 失败率 " + analysisFailureRate(totals.failures || 0, totals.calls || 0) +
+      " · 平均耗时 " + analysisDuration(totals.average_duration_ms) +
+      "（最小 " + analysisDuration(totals.min_duration_ms) + " / 最大 " + analysisDuration(totals.max_duration_ms) + "））"));
   }
   if (analysisSubagentsData) {
     var summary = analysisSubagentsData.summary || {};
@@ -323,12 +325,17 @@ function renderAnalysisTools(result) {
       "<td>" + analysisFailureRate(stat.failures, stat.calls) + "</td>" +
       "<td>" + analysisInt(stat.empty_results) + "</td>" +
       "<td>" + analysisInt(stat.retried_calls) + "</td>" +
+      "<td>" + analysisDuration(stat.average_duration_ms) + "</td>" +
+      "<td>" + analysisDuration(stat.min_duration_ms) + "</td>" +
+      "<td>" + analysisDuration(stat.max_duration_ms) + "</td>" +
       "<td>" + analysisDuration(stat.p50_duration_ms) + "</td>" +
       "<td>" + analysisDuration(stat.p95_duration_ms) + "</td></tr>");
   }
-  el.innerHTML = '<table class="cache-table"><thead><tr>' +
-    "<th>工具</th><th>调用</th><th>失败</th><th>失败率</th><th>空结果</th><th>重试</th><th>p50</th><th>p95</th>" +
-    "</tr></thead><tbody>" + rows.join("") + "</tbody></table>";
+  el.innerHTML = '<div style="overflow-x:auto">' +
+    '<table class="cache-table"><thead><tr>' +
+    "<th>工具</th><th>调用</th><th>失败</th><th>失败率</th><th>空结果</th><th>重试</th>" +
+    "<th>平均</th><th>最小</th><th>最大</th><th>p50</th><th>p95</th>" +
+    "</tr></thead><tbody>" + rows.join("") + "</tbody></table></div>";
   renderAnalysisCards();
 }
 
@@ -453,7 +460,8 @@ function openAnalysisToolDetail(stat) {
     analysisKV("工具", analysisOrDash(stat.tool_name)) +
     analysisKV("调用 / 失败", analysisInt(stat.calls) + " / " + analysisInt(stat.failures) + "（失败率 " + analysisFailureRate(stat.failures, stat.calls) + "）") +
     analysisKV("空结果 / 重试", analysisInt(stat.empty_results) + " / " + analysisInt(stat.retried_calls)) +
-    analysisKV("平均 / p50 / p95", analysisDuration(stat.average_duration_ms) + " / " + analysisDuration(stat.p50_duration_ms) + " / " + analysisDuration(stat.p95_duration_ms)) +
+    analysisKV("平均 / 最小 / 最大", analysisDuration(stat.average_duration_ms) + " / " + analysisDuration(stat.min_duration_ms) + " / " + analysisDuration(stat.max_duration_ms)) +
+    analysisKV("p50 / p95", analysisDuration(stat.p50_duration_ms) + " / " + analysisDuration(stat.p95_duration_ms)) +
     '<div class="cache-detail-title" style="margin-top:10px">错误 Top</div>' +
     analysisPatternTable(stat.error_top);
   openAnalysisDetail("工具：" + analysisOrDash(stat.tool_name), html);

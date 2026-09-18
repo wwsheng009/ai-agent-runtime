@@ -310,7 +310,7 @@ func TestHandleChatWebAPIAnalysis_ToolsSubagentsErrors(t *testing.T) {
 	}
 	for _, key := range []string{
 		"tool_name", "calls", "failures", "failure_rate", "empty_results", "retried_calls",
-		"average_duration_ms", "p50_duration_ms", "p95_duration_ms",
+		"average_duration_ms", "min_duration_ms", "max_duration_ms", "p50_duration_ms", "p95_duration_ms",
 	} {
 		if _, exists := first[key]; !exists {
 			t.Fatalf("tool row missing contract field %q: %v", key, first)
@@ -322,6 +322,9 @@ func TestHandleChatWebAPIAnalysis_ToolsSubagentsErrors(t *testing.T) {
 	if first["retried_calls"] != float64(1) || first["p95_duration_ms"] != float64(120) {
 		t.Fatalf("shell retry/duration = %v, want retried_calls=1 p95=120", first)
 	}
+	if first["min_duration_ms"] != float64(120) || first["max_duration_ms"] != float64(120) {
+		t.Fatalf("shell min/max duration = %v, want 120/120", first)
+	}
 	if top, ok := first["error_top"].([]interface{}); !ok || len(top) == 0 {
 		t.Fatalf("shell error_top = %v, want TOOL_TIMEOUT pattern", first["error_top"])
 	}
@@ -331,6 +334,9 @@ func TestHandleChatWebAPIAnalysis_ToolsSubagentsErrors(t *testing.T) {
 	}
 	if totals["calls"] != float64(2) || totals["failures"] != float64(1) || totals["tool_name"] != "all" {
 		t.Fatalf("totals = %v, want calls=2 failures=1 tool_name=all", totals)
+	}
+	if totals["min_duration_ms"] != float64(30) || totals["max_duration_ms"] != float64(120) || totals["average_duration_ms"] != float64(75) {
+		t.Fatalf("totals duration = %v, want min=30 max=120 avg=75", totals)
 	}
 
 	// --- /subagents ---
