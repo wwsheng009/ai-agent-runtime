@@ -2416,3 +2416,72 @@ func TestSQLiteRuntimeStore_OpenFailureRecoversAfterFix(t *testing.T) {
 	require.True(t, store.Opened())
 	require.NoError(t, store.Close())
 }
+
+func TestRuntimeStores_InvalidateStableToolSurfaces(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("sqlite", func(t *testing.T) {
+		store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{Path: filepath.Join(t.TempDir(), "runtime.sqlite")})
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, store.Close()) })
+
+		require.NoError(t, store.SaveState(ctx, &RuntimeState{
+			SessionID:            "s-idle",
+			Status:               SessionIdle,
+			StableToolSurfaceSet: true,
+			StableToolSurface:    []types.ToolDefinition{{Name: "view"}, {Name: "list_pages"}},
+			FrozenTurnToolsSet:   true,
+			FrozenTurnTools:      []types.ToolDefinition{{Name: "view"}, {Name: "list_pages"}},
+		}))
+		require.NoError(t, store.SaveState(ctx, &RuntimeState{
+			SessionID:            "s-running",
+			Status:               SessionRunning,
+			CurrentTurnID:        "turn-1",
+			StableToolSurfaceSet: true,
+			StableToolSurface:    []types.ToolDefinition{{Name: "view"}},
+			FrozenTurnToolsSet:   true,
+			FrozenTurnTools:      []types.ToolDefinition{{Name: "view"}},
+		}))
+
+		affected, err := store.InvalidateStableToolSurfaces(ctx)
+		require.NoError(t, err)
+		require.Equal(t, 2, affected)
+
+		idle, err := store.LoadState(ctx, "s-idle")
+		require.NoError(t, err)
+		require.False(t, idle.StableToolSurfaceSet)
+		require.False(t, idle.FrozenTurnToolsSet)
+
+		running, err := store.LoadState(ctx, "s-running")
+		require.NoError(t, err)
+		require.False(t, running.StableToolSurfaceSet)
+		// 运行中的 turn 保留前缀冻结；下一轮边界由 turn id 变化触发重建。
+		require.True(t, running.FrozenTurnToolsSet)
+		require.Len(t, running.FrozenTurnTools, 1)
+
+		affected, err = store.InvalidateStableToolSurfaces(ctx)
+		require.NoError(t, err)
+		require.Equal(t, 1, affected)
+	})
+
+	t.Run("in_memory", func(t *testing.T) {
+		store := NewInMemoryRuntimeStore(16)
+		require.NoError(t, store.SaveState(ctx, &RuntimeState{
+			SessionID:            "mem-idle",
+			Status:               SessionIdle,
+			StableToolSurfaceSet: true,
+			StableToolSurface:    []types.ToolDefinition{{Name: "view"}},
+			FrozenTurnToolsSet:   true,
+			FrozenTurnTools:      []types.ToolDefinition{{Name: "view"}},
+		}))
+
+		affected, err := store.InvalidateStableToolSurfaces(ctx)
+		require.NoError(t, err)
+		require.Equal(t, 1, affected)
+
+		state, err := store.LoadState(ctx, "mem-idle")
+		require.NoError(t, err)
+		require.False(t, state.StableToolSurfaceSet)
+		require.False(t, state.FrozenTurnToolsSet)
+	})
+}

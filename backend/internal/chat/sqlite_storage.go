@@ -13,11 +13,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 
 	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
@@ -34,6 +36,15 @@ const sqliteSessionSchemaVersion = 1
 type SQLiteSessionStorage struct {
 	db  *sql.DB
 	cfg PersistentSessionStorageConfig
+
+	snapshotMu      sync.Mutex
+	snapshotDB      *sql.DB
+	snapshotOpenErr error
+	snapshotStats   sessionSnapshotCounters
+	// snapshotDSNOverride 仅供测试注入非法 DSN 以验证降级路径，生产恒为空。
+	snapshotDSNOverride string
+	// snapshotAfterCopyHook 仅供测试注入复制后故障以验证一致性门禁，生产恒为 nil。
+	snapshotAfterCopyHook func(context.Context, *sql.Conn, string)
 }
 
 type encodedSessionMessage struct {
@@ -54,7 +65,7 @@ type artifactWriteTracker struct {
 type artifactWriteTrackerContextKey struct{}
 
 func (s *SQLiteSessionStorage) beginWriteTx(ctx context.Context) (context.Context, *sql.Tx, *artifactWriteTracker, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
 		return ctx, nil, nil, err
 	}
@@ -199,44 +210,69 @@ func (s *SQLiteSessionStorage) Path() string {
 // Snapshot creates a compact, transactionally consistent database image.
 // VACUUM INTO includes committed WAL contents without loading the database into
 // Go memory, which makes it suitable for live debug exports.
-func (s *SQLiteSessionStorage) Snapshot(ctx context.Context, destinationPath string) error {
+//
+// P2.13：走专用快照连接池与有界超时；destination 以 O_EXCL 预留，失败只清理
+// 本次自建文件。VACUUM INTO 要求目标不存在，因此预留后立即删除空文件，再由
+// SQLite 创建（归属权凭据仍用于失败清理）。
+func (s *SQLiteSessionStorage) Snapshot(ctx context.Context, destinationPath string) (err error) {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("sqlite session storage is closed")
 	}
-	destinationPath = strings.TrimSpace(destinationPath)
-	if destinationPath == "" {
-		return fmt.Errorf("sqlite snapshot destination cannot be empty")
+	if ctx == nil {
+		ctx = context.Background()
 	}
+	if s.cfg.SessionSnapshotTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.cfg.SessionSnapshotTimeout)
+		defer cancel()
+	}
+	start := time.Now()
+	destination, err := reserveSnapshotDestination(destinationPath)
+	if err != nil {
+		s.recordSnapshotResult("", start, false, "", nil, err)
+		return err
+	}
+	committed := false
+	degraded := false
+	defer func() {
+		if !committed {
+			destination.removeIfOwned()
+		}
+		s.recordSnapshotResult("", start, degraded, destination.path, nil, err)
+	}()
 	sourcePath, err := filepath.Abs(s.cfg.Path)
 	if err != nil {
 		return fmt.Errorf("resolve sqlite session storage path: %w", err)
 	}
-	destinationPath, err = filepath.Abs(destinationPath)
-	if err != nil {
-		return fmt.Errorf("resolve sqlite snapshot path: %w", err)
-	}
-	if strings.EqualFold(filepath.Clean(sourcePath), filepath.Clean(destinationPath)) {
+	if strings.EqualFold(filepath.Clean(sourcePath), filepath.Clean(destination.path)) {
 		return fmt.Errorf("sqlite snapshot destination must differ from source")
 	}
-	if err := os.MkdirAll(filepath.Dir(destinationPath), 0o755); err != nil {
-		return fmt.Errorf("create sqlite snapshot directory: %w", err)
+	// VACUUM INTO 的目标必须不存在：释放预留文件，归属权仍属于本次调用。
+	if err := os.Remove(destination.path); err != nil {
+		return fmt.Errorf("prepare sqlite snapshot destination: %w", err)
 	}
-	if _, err := os.Stat(destinationPath); err == nil {
-		return fmt.Errorf("sqlite snapshot destination already exists")
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("inspect sqlite snapshot destination: %w", err)
+	var connection *sql.Conn
+	connection, degraded, err = s.snapshotConnection(ctx)
+	if err != nil {
+		return err
 	}
-	if _, err := s.db.ExecContext(ctx, "VACUUM INTO ?", destinationPath); err != nil {
-		_ = os.Remove(destinationPath)
+	defer connection.Close()
+	if _, err := connection.ExecContext(ctx, "VACUUM INTO ?", destination.path); err != nil {
 		return fmt.Errorf("create sqlite session snapshot: %w", err)
 	}
+	committed = true
 	return nil
 }
 
 // SnapshotSession writes a database containing only the requested session.
 // A dedicated connection and read transaction keep the three copied tables at
 // one committed source revision without materializing rows in Go memory.
-func (s *SQLiteSessionStorage) SnapshotSession(ctx context.Context, sessionID, destinationPath string) error {
+//
+// P2.13 加固：专用快照池（失败降级主池并计数）、全程 deadline、O_EXCL
+// 归属权、容量预检、复制后行数/字节一致性校验、user_version 复制与结构化
+// 遥测。事务不变量（D6/F8）：本事务只读 main、只写 snapshot.*；禁止在此
+// 事务内写主库，也不能用 PRAGMA query_only 代替（会禁止写 destination）。
+func (s *SQLiteSessionStorage) SnapshotSession(ctx context.Context, sessionID, destinationPath string) (err error) {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("sqlite session storage is closed")
 	}
@@ -244,27 +280,48 @@ func (s *SQLiteSessionStorage) SnapshotSession(ctx context.Context, sessionID, d
 	if sessionID == "" {
 		return ErrInvalidSession
 	}
-	destinationPath, err := s.prepareSnapshotDestination(destinationPath)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s.cfg.SessionSnapshotTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.cfg.SessionSnapshotTimeout)
+		defer cancel()
+	}
+	start := time.Now()
+	destination, err := reserveSnapshotDestination(destinationPath)
+	if err != nil {
+		s.recordSnapshotResult(sessionID, start, false, "", nil, err)
+		return err
+	}
+	committed := false
+	degraded := false
+	var consistency snapshotConsistency
+	defer func() {
+		if !committed {
+			destination.removeIfOwned()
+		}
+		s.recordSnapshotResult(sessionID, start, degraded, destination.path, &consistency, err)
+	}()
+	var connection *sql.Conn
+	connection, degraded, err = s.snapshotConnection(ctx)
 	if err != nil {
 		return err
 	}
-	connection, err := s.db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("open sqlite snapshot connection: %w", err)
-	}
 	defer connection.Close()
+	if err := s.preflightSnapshotSize(ctx, connection, sessionID); err != nil {
+		return err
+	}
 	attached := false
-	committed := false
+	cleanupCtx, cancelCleanup := snapshotCleanupContext()
+	defer cancelCleanup()
 	defer func() {
 		if attached {
-			_, _ = connection.ExecContext(context.Background(), "ROLLBACK")
-			_, _ = connection.ExecContext(context.Background(), "DETACH DATABASE snapshot")
-		}
-		if !committed {
-			_ = os.Remove(destinationPath)
+			_, _ = connection.ExecContext(cleanupCtx, "ROLLBACK")
+			_, _ = connection.ExecContext(cleanupCtx, "DETACH DATABASE snapshot")
 		}
 	}()
-	if _, err := connection.ExecContext(ctx, "ATTACH DATABASE ? AS snapshot", destinationPath); err != nil {
+	if _, err := connection.ExecContext(ctx, "ATTACH DATABASE ? AS snapshot", destination.path); err != nil {
 		return fmt.Errorf("attach sqlite session snapshot: %w", err)
 	}
 	attached = true
@@ -284,50 +341,59 @@ func (s *SQLiteSessionStorage) SnapshotSession(ctx context.Context, sessionID, d
 	if err := copySQLiteSessionSnapshot(ctx, connection, sessionID); err != nil {
 		return err
 	}
+	if s.snapshotAfterCopyHook != nil {
+		s.snapshotAfterCopyHook(ctx, connection, sessionID)
+	}
+	if consistency, err = verifySQLiteSessionSnapshot(ctx, connection, sessionID); err != nil {
+		return err
+	}
+	if err := copyMainUserVersionToSnapshot(ctx, connection); err != nil {
+		return err
+	}
 	if _, err := connection.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("commit sqlite session snapshot: %w", err)
 	}
+	committed = true
 	if _, err := connection.ExecContext(ctx, "DETACH DATABASE snapshot"); err != nil {
 		return fmt.Errorf("detach sqlite session snapshot: %w", err)
 	}
 	attached = false
-	committed = true
 	return nil
-}
-
-func (s *SQLiteSessionStorage) prepareSnapshotDestination(destinationPath string) (string, error) {
-	destinationPath = strings.TrimSpace(destinationPath)
-	if destinationPath == "" {
-		return "", fmt.Errorf("sqlite snapshot destination cannot be empty")
-	}
-	resolved, err := filepath.Abs(destinationPath)
-	if err != nil {
-		return "", fmt.Errorf("resolve sqlite snapshot path: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(resolved), 0o755); err != nil {
-		return "", fmt.Errorf("create sqlite snapshot directory: %w", err)
-	}
-	if _, err := os.Stat(resolved); err == nil {
-		return "", fmt.Errorf("sqlite snapshot destination already exists")
-	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("inspect sqlite snapshot destination: %w", err)
-	}
-	return resolved, nil
 }
 
 func (s *SQLiteSessionStorage) CloseStorage() error {
 	if s == nil || s.db == nil {
 		return nil
 	}
+	// 先关快照池：其读事务会阻止主库的 TRUNCATE checkpoint 越过它
+	// （P2.13/D7、审查 R6），且快照池只服务快照，关闭无副作用。
+	s.closeSnapshotPool()
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.BusyTimeout)
 	defer cancel()
-	_, checkpointErr := s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+	// TRUNCATE checkpoint 会返回 (busy, log, checkpointed) 行：跨进程快照
+	// 读事务未释放时 busy=1（不一定报错），此时降级 PASSIVE 并计数。
+	// 关闭路径上用短 busy_timeout，避免为了一次 TRUNCATE 等待整个写锁预算。
+	shortWait := s.cfg.BusyTimeout
+	if shortWait > time.Second {
+		shortWait = time.Second
+	}
+	if shortWait > 0 {
+		_, _ = s.db.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout=%d", shortWait.Milliseconds()))
+	}
+	var busy, logFrames, checkpointed int
+	checkpointErr := s.db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointed)
+	if checkpointErr != nil {
+		// TRUNCATE 需要所有读者释放（含尚未提交的跨进程快照读事务）。
+		// 降级 PASSIVE 仍推进 WAL；这是预期分支而非故障（计数供排障）。
+		s.snapshotStats.checkpointBlocked.Add(1)
+		_, _ = s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)")
+	} else if busy != 0 {
+		s.snapshotStats.checkpointBlocked.Add(1)
+		_, _ = s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)")
+	}
 	closeErr := s.db.Close()
 	if closeErr != nil {
 		return closeErr
-	}
-	if checkpointErr != nil {
-		return fmt.Errorf("checkpoint sqlite session WAL: %w", checkpointErr)
 	}
 	return nil
 }
@@ -2421,7 +2487,7 @@ func (s *SQLiteSessionStorage) deleteSession(ctx context.Context, sessionID stri
 
 func (s *SQLiteSessionStorage) ClearMessages(ctx context.Context, sessionID string) error {
 	sessionID = sanitizeSessionID(sessionID)
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
 		return fmt.Errorf("begin clear session history: %w", err)
 	}

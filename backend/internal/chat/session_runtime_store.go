@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,6 +21,7 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/migrate"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 
@@ -30,6 +33,13 @@ type RuntimeStateStore interface {
 	LoadState(ctx context.Context, sessionID string) (*RuntimeState, error)
 	SaveState(ctx context.Context, state *RuntimeState) error
 	DeleteState(ctx context.Context, sessionID string) error
+}
+
+// StableToolSurfaceInvalidator 由支持批量清理「会话级稳定工具面」缓存的 store 实现。
+// MCP 目录变化（异步建连完成 / 热重载 / 服务与工具启停）后，宿主用它让持久化工具面
+// 在下一个 turn 边界重新冻结，避免旧冻结面长期遮蔽新工具（如 list_pages）。
+type StableToolSurfaceInvalidator interface {
+	InvalidateStableToolSurfaces(ctx context.Context) (int, error)
 }
 
 // ToolReceiptStore persists replayable tool results across crashes.
@@ -151,6 +161,14 @@ func (h *SessionLeaseHandle) Release(ctx context.Context) error {
 	return h.store.ReleaseLease(ctx, h.lease.SessionID, h.lease.OwnerID)
 }
 
+const (
+	// sessionLeaseRenewTimeout caps a single lease renewal attempt.
+	sessionLeaseRenewTimeout = 10 * time.Second
+	// sessionLeaseRenewMaxRetries bounds retries of transient (timeout) renewal
+	// failures before the renewal loop gives up.
+	sessionLeaseRenewMaxRetries = 2
+)
+
 func (h *SessionLeaseHandle) renewLoop() {
 	defer close(h.done)
 	if h == nil || h.store == nil || h.lease == nil {
@@ -159,15 +177,40 @@ func (h *SessionLeaseHandle) renewLoop() {
 	interval := sessionLeaseHeartbeatInterval(h.ttl)
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
+	transientRetries := 0
 	for {
 		select {
 		case <-h.stop:
 			return
 		case <-timer.C:
-			err := h.store.RenewLease(context.Background(), h.lease.SessionID, h.lease.OwnerID, h.ttl)
+			// Never renew without a deadline: a saturated single-connection pool
+			// must not be able to block the renewal loop forever.
+			timeout := interval / 2
+			if timeout < 250*time.Millisecond {
+				timeout = 250 * time.Millisecond
+			}
+			if timeout > sessionLeaseRenewTimeout {
+				timeout = sessionLeaseRenewTimeout
+			}
+			renewCtx, cancel := context.WithTimeout(context.Background(), timeout)
+			err := h.store.RenewLease(renewCtx, h.lease.SessionID, h.lease.OwnerID, h.ttl)
+			cancel()
 			if err != nil {
+				// A timeout is transient (pool saturation, slow disk); retry with
+				// backoff instead of silently stopping renewal. Other errors keep
+				// the historical fail-fast behavior (lease lost / conflict).
+				if errors.Is(err, context.DeadlineExceeded) && transientRetries < sessionLeaseRenewMaxRetries {
+					transientRetries++
+					backoff := time.Duration(transientRetries) * 500 * time.Millisecond
+					logpkg.Warnf("session lease renewal timed out for %s (retry %d/%d in %s): %v",
+						h.lease.SessionID, transientRetries, sessionLeaseRenewMaxRetries, backoff, err)
+					timer.Reset(backoff)
+					continue
+				}
+				logpkg.Warnf("session lease renewal stopped for %s: %v", h.lease.SessionID, err)
 				return
 			}
+			transientRetries = 0
 			timer.Reset(interval)
 		}
 	}
@@ -221,6 +264,29 @@ type RuntimeStoreConfig struct {
 	EventRetention   int
 	MailboxRetention int
 	PruneInterval    int
+	// OperationTimeout bounds a single store operation when the caller passes a
+	// context without a deadline. It guards the single-connection pool against
+	// unbounded waits. Defaults to defaultRuntimeOperationTimeout when <= 0.
+	OperationTimeout time.Duration
+	// DisableSQLiteReturning 关闭 INSERT ... RETURNING 单语句取号路径，
+	// 回退到 legacy 两条语句实现（P1.6/D1）。零值=false 表示默认启用；
+	// 能力探测失败时无论该开关如何都会自动回退。
+	DisableSQLiteReturning bool
+	// DisableBackgroundMaintenance 关闭后台 incremental_vacuum 维护（P1.6/D4）。
+	// 零值=false 表示默认启用；关闭后 prune 只置 pending，不做页回收。
+	DisableBackgroundMaintenance bool
+	// DisableReadPool 关闭读写双池拆分（P1.7 回滚开关）：读走写池，
+	// 行为与拆分前逐字节一致。零值=false 表示按 ReadPoolSize 启用。
+	DisableReadPool bool
+	// ReadPoolSize 读池连接上限（P1.7）；<=0 取默认 4。仅 fileBacked 生效。
+	ReadPoolSize int
+	// DisableReadPoolQueryOnly 关闭读池逐连接 query_only(1)（仅调试用）。
+	DisableReadPoolQueryOnly bool
+	// ReadPoolBusyTimeout 读连接 busy_timeout；<=0 继承 BusyTimeout（P1.7/D3）。
+	ReadPoolBusyTimeout time.Duration
+	// ReadOperationTimeout 单个读操作上限（P1.7/D6）；<=0 取默认 3s。
+	// 读事务过长会拖住 WAL checkpoint，故独立于写侧 OperationTimeout。
+	ReadOperationTimeout time.Duration
 }
 
 const (
@@ -229,6 +295,7 @@ const (
 	defaultRuntimeEventRetention   = 2048
 	defaultRuntimeMailboxRetention = 2048
 	defaultRuntimePruneInterval    = 256
+	defaultRuntimeOperationTimeout = 10 * time.Second
 )
 
 const defaultInMemoryRuntimeRetention = 2048
@@ -477,6 +544,43 @@ func (s *InMemoryRuntimeStore) SaveState(ctx context.Context, state *RuntimeStat
 	}
 	s.states[state.SessionID] = cloned
 	return nil
+}
+
+// InvalidateStableToolSurfaces 清除内存中所有会话的稳定工具面缓存。
+// 无在途 turn 的会话同时清空 turn 冻结面；运行中的 turn 保留前缀，下一轮重建。
+func (s *InMemoryRuntimeStore) InvalidateStableToolSurfaces(ctx context.Context) (int, error) {
+	if s == nil {
+		return 0, nil
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cleared := 0
+	for _, state := range s.states {
+		if state == nil {
+			continue
+		}
+		if !state.StableToolSurfaceSet && len(state.StableToolSurface) == 0 &&
+			!state.FrozenTurnToolsSet && len(state.FrozenTurnTools) == 0 {
+			continue
+		}
+		state.StableToolSurface = nil
+		state.StableToolSurfaceSet = false
+		state.StableToolSurfaceBinding = ""
+		state.StableToolSurfaceFingerprint = ""
+		if strings.TrimSpace(state.CurrentTurnID) == "" {
+			state.FrozenTurnTools = nil
+			state.FrozenTurnToolsSet = false
+		}
+		state.UpdatedAt = time.Now().UTC()
+		cleared++
+	}
+	return cleared, nil
 }
 
 func cloneRuntimeStateForInMemoryStore(state, previous *RuntimeState) *RuntimeState {
@@ -1530,15 +1634,42 @@ type SQLiteRuntimeStore struct {
 	openErr error
 	closed  bool
 
-	mu               sync.Mutex
-	mailboxWriteMu   sync.Mutex
-	db               *sql.DB
-	fileBacked       bool
-	busyTimeout      time.Duration
-	cacheKiB         int
-	eventRetention   int
-	mailboxRetention int
-	pruneInterval    int
+	mu                sync.Mutex
+	mailboxWriteMu    sync.Mutex
+	db                *sql.DB
+	fileBacked        bool
+	busyTimeout       time.Duration
+	cacheKiB          int
+	eventRetention    int
+	mailboxRetention  int
+	pruneInterval     int
+	opTimeout         time.Duration
+	sqliteVersion     string
+	supportsReturning bool
+	appendCounters    runtimeAppendCounters
+	maintenance       *runtimeStoreMaintenance
+
+	// P1.7 读池：readDB 为 nil 时读走写池（未拆分/已降级/内存库）。
+	readPoolMu             sync.Mutex
+	readDB                 *sql.DB
+	readPoolOpen           bool
+	readPoolDegraded       bool
+	readPoolDegradedReason string
+	readPoolOpenErrors     int64
+	readDSN                string
+	readPoolSize           int
+	readBusyTimeout        time.Duration
+	readQueryOnly          bool
+	readOpTimeout          time.Duration
+	disableReadPool        bool
+	readLimitClamps        atomic.Int64
+	readQueries            atomic.Int64
+
+	// reentry refuses same-goroutine pool re-acquisition while a dedicated
+	// connection is held (see runtime_store_hardening.go for the invariants).
+	reentry     poolReentryGuard
+	notifyDrops notifyDropStats
+	contention  sqliteContentionCounters
 
 	globalMailboxWriter agentcontrol.GlobalMailboxWriter
 
@@ -1621,16 +1752,54 @@ func NewSQLiteRuntimeStore(cfg *RuntimeStoreConfig) (*SQLiteRuntimeStore, error)
 	if pruneInterval <= 0 {
 		pruneInterval = defaultRuntimePruneInterval
 	}
+	opTimeout := cfgCopy.OperationTimeout
+	if opTimeout <= 0 {
+		opTimeout = defaultRuntimeOperationTimeout
+	}
+	// P1.7：读池配置归一化；仅 fileBacked（WAL 文件库）才构造读 DSN。
+	readPoolSize := cfgCopy.ReadPoolSize
+	if readPoolSize <= 0 {
+		readPoolSize = defaultRuntimeReadPoolSize
+	}
+	if cfgCopy.DisableReadPool {
+		readPoolSize = 0
+	}
+	readBusyTimeout := cfgCopy.ReadPoolBusyTimeout
+	if readBusyTimeout <= 0 {
+		readBusyTimeout = busyTimeout
+	}
+	readOpTimeout := cfgCopy.ReadOperationTimeout
+	if readOpTimeout <= 0 {
+		readOpTimeout = defaultRuntimeReadOperationTimeout
+	}
+	readQueryOnly := !cfgCopy.DisableReadPoolQueryOnly
+	fileBacked := path != "" && !isRuntimeSQLiteMemoryDSN(dsn)
+	readDSN := ""
+	if fileBacked && readPoolSize > 0 {
+		if candidate, splittable, err := buildRuntimeReadPoolDSN(&cfgCopy, path, readBusyTimeout, readQueryOnly); err != nil {
+			logpkg.Warnf("[runtime-store] read pool disabled (%v); reads fall back to the write pool", err)
+		} else if splittable {
+			readDSN = candidate
+		}
+	}
 	store := &SQLiteRuntimeStore{
 		cfg:              cfgCopy,
 		dsn:              dsn,
 		path:             path,
-		fileBacked:       path != "" && !isRuntimeSQLiteMemoryDSN(dsn),
+		fileBacked:       fileBacked,
 		busyTimeout:      busyTimeout,
 		cacheKiB:         cacheKiB,
 		eventRetention:   eventRetention,
 		mailboxRetention: mailboxRetention,
 		pruneInterval:    pruneInterval,
+		opTimeout:        opTimeout,
+		maintenance:      newRuntimeStoreMaintenance(),
+		readDSN:          readDSN,
+		readPoolSize:     readPoolSize,
+		readBusyTimeout:  readBusyTimeout,
+		readQueryOnly:    readQueryOnly,
+		readOpTimeout:    readOpTimeout,
+		disableReadPool:  cfgCopy.DisableReadPool,
 	}
 	// In-memory stores stay eager so tests can inspect the connection immediately.
 	if path == "" || isRuntimeSQLiteMemoryDSN(dsn) {
@@ -1698,6 +1867,7 @@ func (s *SQLiteRuntimeStore) ensureCtx(ctx context.Context) error {
 		fileBacked:  s.fileBacked,
 		busyTimeout: s.busyTimeout,
 		cacheKiB:    s.cacheKiB,
+		opTimeout:   s.opTimeout,
 	}
 	store, err = openSQLiteRuntimeStoreWithLockRetryCtx(ctx, store)
 	if err != nil {
@@ -1706,6 +1876,22 @@ func (s *SQLiteRuntimeStore) ensureCtx(ctx context.Context) error {
 	}
 	s.openErr = nil
 	s.db = store.db
+	// P1.7：写池重开（锁竞争重建连接）后，旧读池句柄可能指向旧文件/旧 schema，
+	// 作废并由下一次读惰性重建。
+	s.closeReadPool()
+	// P1.6：探测 RETURNING 能力（失败自动回退 legacy），并按需启动后台维护。
+	if version, supports := probeSQLiteReturningSupport(ctx, s.db); supports {
+		s.sqliteVersion, s.supportsReturning = version, true
+	} else {
+		s.sqliteVersion = version
+		s.supportsReturning = false
+		if version != "" {
+			logpkg.Warnf("[runtime-store] sqlite %s does not support INSERT ... RETURNING (requires >= %s); using legacy append path", version, runtimeReturningMinVersion)
+		}
+	}
+	if s.fileBacked && !s.cfg.DisableBackgroundMaintenance {
+		s.maintenance.start(s)
+	}
 	return nil
 }
 
@@ -1733,10 +1919,19 @@ func (s *SQLiteRuntimeStore) ensureForReadCtx(ctx context.Context) (skipEmpty bo
 		return false, fmt.Errorf("runtime store is not initialized")
 	}
 	if s.Opened() || s.durableFileExists() {
-		return false, s.ensureCtx(ctx)
+		if err := s.ensureCtx(ctx); err != nil {
+			return false, err
+		}
+		// P1.7：schema 就绪后惰性打开读池；打开失败只降级（读回落写池）。
+		s.ensureReadPool(ctx)
+		return false, nil
 	}
 	if strings.TrimSpace(s.path) == "" {
-		return false, s.ensureCtx(ctx)
+		if err := s.ensureCtx(ctx); err != nil {
+			return false, err
+		}
+		s.ensureReadPool(ctx)
+		return false, nil
 	}
 	return true, nil
 }
@@ -1749,6 +1944,11 @@ func (s *SQLiteRuntimeStore) Close() error {
 	s.openMu.Lock()
 	defer s.openMu.Unlock()
 	s.closed = true
+	// P1.6/D4：先停止后台维护（它不持 s.mu，但会占用池连接），再走 checkpoint/close。
+	s.maintenance.stop(runtimeMaintenanceStopTimeout)
+	// P1.7/D5：先关读池——空闲读连接持有的 WAL 读标记会让 TRUNCATE checkpoint
+	// 降级为 PASSIVE。读操作有界（readOpTimeout），Close 等待有界。
+	s.closeReadPool()
 	if s.db == nil {
 		return nil
 	}
@@ -1787,11 +1987,16 @@ func (s *SQLiteRuntimeStore) AcquireLease(ctx context.Context, req LeaseRequest)
 	if err := s.ensureCtx(ctx); err != nil {
 		return nil, err
 	}
+	ctx, cancel := s.operationContext(ctx)
+	defer cancel()
+	if err := s.checkPoolReentry("AcquireLease"); err != nil {
+		return nil, err
+	}
 	lease, err := buildLeaseFromRequest(req)
 	if err != nil {
 		return nil, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
 		return nil, fmt.Errorf("begin lease transaction: %w", err)
 	}
@@ -1835,6 +2040,11 @@ func (s *SQLiteRuntimeStore) RenewLease(ctx context.Context, sessionID, ownerID 
 	if err := s.ensureCtx(ctx); err != nil {
 		return err
 	}
+	ctx, cancel := s.operationContext(ctx)
+	defer cancel()
+	if err := s.checkPoolReentry("RenewLease"); err != nil {
+		return err
+	}
 	sessionID = NormalizeSessionID(sessionID)
 	ownerID = strings.TrimSpace(ownerID)
 	if sessionID == "" || ownerID == "" {
@@ -1844,7 +2054,7 @@ func (s *SQLiteRuntimeStore) RenewLease(ctx context.Context, sessionID, ownerID 
 		ttl = defaultSessionLeaseTTL
 	}
 	now := time.Now().UTC()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
 		return fmt.Errorf("begin lease transaction: %w", err)
 	}
@@ -1880,6 +2090,11 @@ func (s *SQLiteRuntimeStore) ReleaseLease(ctx context.Context, sessionID, ownerI
 	if err := s.ensureCtx(ctx); err != nil {
 		return err
 	}
+	ctx, cancel := s.operationContext(ctx)
+	defer cancel()
+	if err := s.checkPoolReentry("ReleaseLease"); err != nil {
+		return err
+	}
 	sessionID = NormalizeSessionID(sessionID)
 	ownerID = strings.TrimSpace(ownerID)
 	if sessionID == "" || ownerID == "" {
@@ -1901,11 +2116,16 @@ func (s *SQLiteRuntimeStore) GetLease(ctx context.Context, sessionID string) (*S
 	} else if skip {
 		return nil, nil
 	}
+	ctx, cancel := s.readOperationContext(ctx)
+	defer cancel()
+	if err := s.checkPoolReentry("GetLease"); err != nil {
+		return nil, err
+	}
 	sessionID = NormalizeSessionID(sessionID)
 	if sessionID == "" {
 		return nil, fmt.Errorf("session id is required")
 	}
-	lease, err := scanSessionLease(s.db.QueryRowContext(ctx, `
+	lease, err := scanSessionLease(s.readQueryer().QueryRowContext(ctx, `
 		SELECT session_id, owner_id, owner_kind, pid, hostname, acquired_at, expires_at, heartbeat_at
 		FROM session_actor_leases
 		WHERE session_id = ?
@@ -1929,7 +2149,12 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 	} else if skip {
 		return nil, nil
 	}
-	row := s.db.QueryRowContext(ctx, `
+	ctx, cancel := s.readOperationContext(ctx)
+	defer cancel()
+	if err := s.checkPoolReentry("LoadState"); err != nil {
+		return nil, err
+	}
+	row := s.readQueryer().QueryRowContext(ctx, `
 		SELECT session_id, status, current_turn_id, current_checkpoint_id, current_run_meta_json, ambient_run_meta_json, stable_tool_surface_json, frozen_turn_tools_json,
 		       pending_tool_json, pending_approval_json, pending_question_json, last_run_terminal_reason, head_offset, active_job_ids_json, updated_at
 		FROM session_runtime_state
@@ -2058,6 +2283,11 @@ func (s *SQLiteRuntimeStore) SaveState(ctx context.Context, state *RuntimeState)
 	if err := s.ensureCtx(ctx); err != nil {
 		return err
 	}
+	ctx, cancel := s.operationContext(ctx)
+	defer cancel()
+	if err := s.checkPoolReentry("SaveState"); err != nil {
+		return err
+	}
 	if state == nil || strings.TrimSpace(state.SessionID) == "" {
 		return fmt.Errorf("runtime state requires session id")
 	}
@@ -2161,6 +2391,37 @@ func (s *SQLiteRuntimeStore) SaveState(ctx context.Context, state *RuntimeState)
 	return nil
 }
 
+// InvalidateStableToolSurfaces 清空全部持久化的会话稳定工具面缓存。
+// 无在途 turn 的会话同时清空 turn 冻结面；运行中的 turn 保留前缀，下一轮重建。
+func (s *SQLiteRuntimeStore) InvalidateStableToolSurfaces(ctx context.Context) (int, error) {
+	if s == nil {
+		return 0, fmt.Errorf("runtime store is not initialized")
+	}
+	if err := s.ensureCtx(ctx); err != nil {
+		return 0, err
+	}
+	ctx, cancel := s.operationContext(ctx)
+	defer cancel()
+	if err := s.checkPoolReentry("InvalidateStableToolSurfaces"); err != nil {
+		return 0, err
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE session_runtime_state
+		SET stable_tool_surface_json = NULL,
+			frozen_turn_tools_json = CASE WHEN COALESCE(current_turn_id, '') = '' THEN NULL ELSE frozen_turn_tools_json END,
+			updated_at = ?
+		WHERE stable_tool_surface_json IS NOT NULL OR frozen_turn_tools_json IS NOT NULL
+	`, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, fmt.Errorf("invalidate stable tool surfaces: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, nil
+	}
+	return int(affected), nil
+}
+
 // DeleteState removes runtime state for a session.
 func (s *SQLiteRuntimeStore) DeleteState(ctx context.Context, sessionID string) error {
 	if s == nil {
@@ -2224,7 +2485,9 @@ func (s *SQLiteRuntimeStore) GetToolReceipt(ctx context.Context, sessionID, tool
 	} else if skip {
 		return nil, nil
 	}
-	row := s.db.QueryRowContext(ctx, `
+	ctx, cancel := s.readOperationContext(ctx)
+	defer cancel()
+	row := s.readQueryer().QueryRowContext(ctx, `
 		SELECT session_id, tool_call_id, tool_name, message_json, created_at, created_at_unix_nano
 		FROM session_tool_receipts
 		WHERE session_id = ? AND tool_call_id = ?
@@ -2277,6 +2540,9 @@ func (s *SQLiteRuntimeStore) ListToolReceipts(ctx context.Context, sessionID str
 	} else if skip {
 		return nil, nil
 	}
+	limit = s.clampReadLimit(limit)
+	ctx, cancel := s.readOperationContext(ctx)
+	defer cancel()
 	query := `
 		SELECT session_id, tool_call_id, tool_name, message_json, created_at, created_at_unix_nano
 		FROM session_tool_receipts
@@ -2288,7 +2554,7 @@ func (s *SQLiteRuntimeStore) ListToolReceipts(ctx context.Context, sessionID str
 		query += " LIMIT ?"
 		args = append(args, limit)
 	}
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.readQueryer().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list tool receipts: %w", err)
 	}
@@ -2320,6 +2586,12 @@ func (s *SQLiteRuntimeStore) ListToolReceipts(ctx context.Context, sessionID str
 }
 
 // AppendEvent stores a runtime event and returns its sequence.
+//
+// The transaction runs in IMMEDIATE mode and is retried with a fresh
+// transaction on SQLite BUSY errors (see sqliteutil.RetryWriteTx). A deferred
+// read-then-write transaction could otherwise fail with
+// SQLITE_BUSY_SNAPSHOT(517) when another process appends to the WAL between
+// the SELECT and the INSERT.
 func (s *SQLiteRuntimeStore) AppendEvent(ctx context.Context, event runtimeevents.Event) (int64, error) {
 	if s == nil {
 		return 0, fmt.Errorf("runtime store is not initialized")
@@ -2327,6 +2599,12 @@ func (s *SQLiteRuntimeStore) AppendEvent(ctx context.Context, event runtimeevent
 	if err := s.ensureCtx(ctx); err != nil {
 		return 0, err
 	}
+	ctx, cancel := s.operationContext(ctx)
+	defer cancel()
+	if err := s.checkPoolReentry("AppendEvent"); err != nil {
+		return 0, err
+	}
+	s.maintenance.touchWrite()
 	if strings.TrimSpace(event.SessionID) == "" {
 		return 0, fmt.Errorf("event requires session id")
 	}
@@ -2337,42 +2615,117 @@ func (s *SQLiteRuntimeStore) AppendEvent(ctx context.Context, event runtimeevent
 	if err != nil {
 		return 0, fmt.Errorf("marshal event payload: %w", err)
 	}
+	start := time.Now()
+	var seq int64
+	err = sqliteutil.RetryWriteTx(ctx, s.trackWriteRetry, func(attemptCtx context.Context) error {
+		var txErr error
+		seq, txErr = s.appendEventTx(attemptCtx, event, payloadJSON)
+		return txErr
+	})
+	elapsed := time.Since(start).Nanoseconds()
+	counters := &s.appendCounters
+	counters.appends.Add(1)
+	counters.totalNs.Add(elapsed)
+	for {
+		maxObserved := counters.maxNs.Load()
+		if elapsed <= maxObserved || counters.maxNs.CompareAndSwap(maxObserved, elapsed) {
+			break
+		}
+	}
+	if err != nil {
+		s.trackWriteError(err)
+		return 0, err
+	}
+	return seq, nil
+}
+
+func (s *SQLiteRuntimeStore) appendEventTx(ctx context.Context, event runtimeevents.Event, payloadJSON []byte) (int64, error) {
 	s.mu.Lock()
-	tx, err := s.db.BeginTx(ctx, nil)
+	txStart := time.Now()
+	tx, err := s.db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
 		s.mu.Unlock()
 		return 0, fmt.Errorf("begin event tx: %w", err)
 	}
-	var seq int64
-	if err := tx.QueryRowContext(ctx, `
-		SELECT COALESCE(MAX(seq), 0) + 1 FROM session_events WHERE session_id = ?
-	`, event.SessionID).Scan(&seq); err != nil {
+	rollback := func() {
 		_ = tx.Rollback()
 		s.mu.Unlock()
-		return 0, fmt.Errorf("next event seq: %w", err)
 	}
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO session_events (
-			session_id, seq, type, trace_id, agent_name, tool_name, payload_json, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, event.SessionID, seq, event.Type, nullIfEmpty(event.TraceID), nullIfEmpty(event.AgentName),
-		nullIfEmpty(event.ToolName), string(payloadJSON), event.Timestamp.Format(time.RFC3339Nano))
+	var seq int64
+	if s.useReturningPath() {
+		seq, err = appendEventReturningSeqTx(ctx, tx, event, payloadJSON)
+		if err == nil {
+			s.appendCounters.returningUsed.Add(1)
+		}
+	} else {
+		seq, err = appendEventLegacySeqTx(ctx, tx, event, payloadJSON)
+		s.appendCounters.legacyUsed.Add(1)
+	}
 	if err != nil {
-		_ = tx.Rollback()
-		s.mu.Unlock()
-		return 0, fmt.Errorf("insert session event: %w", err)
+		rollback()
+		return 0, err
 	}
 	if err := s.pruneRuntimeRowsTx(ctx, tx, event.SessionID, seq, 0); err != nil {
-		_ = tx.Rollback()
-		s.mu.Unlock()
+		rollback()
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
 		s.mu.Unlock()
 		return 0, fmt.Errorf("commit session event: %w", err)
 	}
+	s.appendCounters.lockHoldNs.Add(time.Since(txStart).Nanoseconds())
 	s.mu.Unlock()
 	s.notifyEventWatchers(seq, event)
+	return seq, nil
+}
+
+// appendEventReturningSeqTx 用单条 INSERT ... SELECT ... RETURNING 完成
+// 「取号 + 插入」（P1.6/G1/D1）：取号与写入在同一写语句、同一写事务内，
+// 多进程下仍由 SQLite 写锁串行化，seq 语义与 legacy 路径一致。
+func appendEventReturningSeqTx(ctx context.Context, tx *sql.Tx, event runtimeevents.Event, payloadJSON []byte) (int64, error) {
+	if hook := runtimeAppendSQLHook; hook != nil {
+		hook("returning")
+	}
+	var seq int64
+	err := tx.QueryRowContext(ctx, `
+		INSERT INTO session_events (
+			session_id, seq, type, trace_id, agent_name, tool_name, payload_json, created_at
+		)
+		SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?, ?
+		  FROM session_events
+		 WHERE session_id = ?
+		RETURNING seq
+	`, event.SessionID, event.Type, nullIfEmpty(event.TraceID), nullIfEmpty(event.AgentName),
+		nullIfEmpty(event.ToolName), string(payloadJSON), event.Timestamp.Format(time.RFC3339Nano), event.SessionID).Scan(&seq)
+	if err != nil {
+		return 0, fmt.Errorf("append session event (returning): %w", err)
+	}
+	return seq, nil
+}
+
+// appendEventLegacySeqTx 是能力探测失败/开关关闭时的回退路径（两条语句），
+// 行为与 P1.6 之前的实现逐字节一致。
+func appendEventLegacySeqTx(ctx context.Context, tx *sql.Tx, event runtimeevents.Event, payloadJSON []byte) (int64, error) {
+	if hook := runtimeAppendSQLHook; hook != nil {
+		hook("legacy-select")
+	}
+	var seq int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(seq), 0) + 1 FROM session_events WHERE session_id = ?
+	`, event.SessionID).Scan(&seq); err != nil {
+		return 0, fmt.Errorf("next event seq: %w", err)
+	}
+	if hook := runtimeAppendSQLHook; hook != nil {
+		hook("legacy-insert")
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO session_events (
+			session_id, seq, type, trace_id, agent_name, tool_name, payload_json, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, event.SessionID, seq, event.Type, nullIfEmpty(event.TraceID), nullIfEmpty(event.AgentName),
+		nullIfEmpty(event.ToolName), string(payloadJSON), event.Timestamp.Format(time.RFC3339Nano)); err != nil {
+		return 0, fmt.Errorf("insert session event: %w", err)
+	}
 	return seq, nil
 }
 
@@ -2399,9 +2752,14 @@ func (s *SQLiteRuntimeStore) pruneRuntimeRowsTx(ctx context.Context, tx *sql.Tx,
 		}
 		pruned = true
 	}
-	if pruned && s.fileBacked {
-		if _, err := tx.ExecContext(ctx, "PRAGMA incremental_vacuum(64)"); err != nil {
-			return fmt.Errorf("incrementally vacuum runtime sqlite: %w", err)
+	if pruned {
+		s.appendCounters.pruneRuns.Add(1)
+		// P1.6/G2/D3：页回收（最贵部分）移出写事务，交给后台单飞维护；
+		// DELETE 仍留在事务内，保证 mailbox 恢复查询依赖的记录可见性。
+		// DisableBackgroundMaintenance 只阻止启动 worker，pending 仍会被置位
+		//（关闭维护时页回收延后，由后续进程或重新启用后处理）。
+		if s.fileBacked {
+			s.maintenance.markPending()
 		}
 	}
 	return nil
@@ -2413,7 +2771,13 @@ func (s *SQLiteRuntimeStore) AppendMailbox(ctx context.Context, sessionID string
 	if s == nil {
 		return runtimeevents.Event{}, 0, fmt.Errorf("runtime store is not initialized")
 	}
+	s.maintenance.touchWrite()
 	if err := s.ensureCtx(ctx); err != nil {
+		return runtimeevents.Event{}, 0, err
+	}
+	ctx, cancel := s.operationContext(ctx)
+	defer cancel()
+	if err := s.checkPoolReentry("AppendMailbox"); err != nil {
 		return runtimeevents.Event{}, 0, err
 	}
 	sessionID = strings.TrimSpace(sessionID)
@@ -2439,7 +2803,7 @@ func (s *SQLiteRuntimeStore) AppendMailbox(ctx context.Context, sessionID string
 		}
 	}
 	s.mu.Lock()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
 		s.mu.Unlock()
 		return runtimeevents.Event{}, 0, fmt.Errorf("begin mailbox tx: %w", err)
@@ -2448,14 +2812,14 @@ func (s *SQLiteRuntimeStore) AppendMailbox(ctx context.Context, sessionID string
 	if err != nil {
 		_ = tx.Rollback()
 		s.mu.Unlock()
-		if event, seq, ok := s.recoverSQLiteMailboxDuplicate(ctx, sessionID, message); ok {
+		if event, seq, ok := s.recoverSQLiteMailboxDuplicate(ctx, s.db, sessionID, message); ok {
 			return event, seq, nil
 		}
 		return result.event, result.mailboxSeq, err
 	}
 	if err := tx.Commit(); err != nil {
 		s.mu.Unlock()
-		if event, seq, ok := s.recoverSQLiteMailboxDuplicate(ctx, sessionID, message); ok {
+		if event, seq, ok := s.recoverSQLiteMailboxDuplicate(ctx, s.db, sessionID, message); ok {
 			return event, seq, nil
 		}
 		return result.event, result.mailboxSeq, fmt.Errorf("commit mailbox tx: %w", err)
@@ -2514,6 +2878,8 @@ func (s *SQLiteRuntimeStore) appendAgentControlMailboxSameTx(ctx context.Context
 		s.mu.Unlock()
 		return runtimeevents.Event{}, 0, false, nil
 	}
+	s.enterDedicatedConn("appendAgentControlMailboxSameTx")
+	defer s.exitDedicatedConn()
 	defer conn.Close()
 	txWriter, schema, detach, attached, err := agentcontrol.AttachGlobalMailboxSQLiteTx(ctx, conn, writer)
 	if err != nil || !attached {
@@ -2522,7 +2888,7 @@ func (s *SQLiteRuntimeStore) appendAgentControlMailboxSameTx(ctx context.Context
 	}
 	defer detach()
 
-	tx, err := conn.BeginTx(ctx, nil)
+	tx, err := conn.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
 		s.mu.Unlock()
 		return runtimeevents.Event{}, 0, true, fmt.Errorf("begin agent control mailbox tx: %w", err)
@@ -2575,7 +2941,10 @@ func (s *SQLiteRuntimeStore) appendAgentControlMailboxSameTx(ctx context.Context
 	if err != nil {
 		_ = tx.Rollback()
 		committed = true
-		if event, seq, duplicate := s.recoverSQLiteMailboxDuplicate(ctx, sessionID, message); duplicate {
+		// Recover on the connection we already hold: going back to the shared
+		// single-connection pool here would self-deadlock (the pool's only
+		// connection is checked out by this goroutine).
+		if event, seq, duplicate := s.recoverSQLiteMailboxDuplicate(ctx, conn, sessionID, message); duplicate {
 			return event, seq, true, nil
 		}
 		return result.event, result.mailboxSeq, true, err
@@ -2611,6 +2980,11 @@ func (s *SQLiteRuntimeStore) AppendAgentControlMailbox(ctx context.Context, sess
 	if err := s.ensureCtx(ctx); err != nil {
 		return runtimeevents.Event{}, 0, err
 	}
+	ctx, cancel := s.operationContext(ctx)
+	defer cancel()
+	if err := s.checkPoolReentry("AppendAgentControlMailbox"); err != nil {
+		return runtimeevents.Event{}, 0, err
+	}
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return runtimeevents.Event{}, 0, fmt.Errorf("session id is required")
@@ -2635,7 +3009,7 @@ func (s *SQLiteRuntimeStore) AppendAgentControlMailbox(ctx context.Context, sess
 		return runtimeevents.Event{}, 0, err
 	}
 	s.mu.Lock()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
 		s.mu.Unlock()
 		return runtimeevents.Event{}, 0, fmt.Errorf("begin agent control mailbox tx: %w", err)
@@ -2644,14 +3018,14 @@ func (s *SQLiteRuntimeStore) AppendAgentControlMailbox(ctx context.Context, sess
 	if err != nil {
 		_ = tx.Rollback()
 		s.mu.Unlock()
-		if event, seq, ok := s.recoverSQLiteMailboxDuplicate(ctx, sessionID, message); ok {
+		if event, seq, ok := s.recoverSQLiteMailboxDuplicate(ctx, s.db, sessionID, message); ok {
 			return event, seq, nil
 		}
 		return result.event, result.mailboxSeq, err
 	}
 	if err := tx.Commit(); err != nil {
 		s.mu.Unlock()
-		if event, seq, ok := s.recoverSQLiteMailboxDuplicate(ctx, sessionID, message); ok {
+		if event, seq, ok := s.recoverSQLiteMailboxDuplicate(ctx, s.db, sessionID, message); ok {
 			return event, seq, nil
 		}
 		return result.event, result.mailboxSeq, fmt.Errorf("commit agent control mailbox tx: %w", err)
@@ -2694,32 +3068,63 @@ type runtimeMailboxQuery interface {
 }
 
 func (s *SQLiteRuntimeStore) existingSQLiteMailboxDelivery(ctx context.Context, sessionID string, message team.MailMessage) (runtimeevents.Event, int64, bool, error) {
+	return s.existingSQLiteMailboxDeliveryVia(ctx, s.db, sessionID, message)
+}
+
+// existingSQLiteMailboxDeliveryVia runs the duplicate lookup on the supplied
+// queryer. Callers that already hold a dedicated connection (or a tx) must pass
+// it here: asking the shared single-connection pool for a second connection
+// would self-deadlock.
+func (s *SQLiteRuntimeStore) existingSQLiteMailboxDeliveryVia(ctx context.Context, query runtimeMailboxQuery, sessionID string, message team.MailMessage) (runtimeevents.Event, int64, bool, error) {
 	if s == nil || strings.TrimSpace(message.ID) == "" {
 		return runtimeevents.Event{}, 0, false, nil
 	}
-	result, ok, err := existingSQLiteMailboxDeliveryQuery(ctx, s.db, sessionID, message)
+	if query == nil {
+		query = s.db
+	}
+	if queryUsesSharedPool(query) {
+		if err := s.checkPoolReentry("existingSQLiteMailboxDelivery"); err != nil {
+			return runtimeevents.Event{}, 0, false, err
+		}
+	}
+	result, ok, err := existingSQLiteMailboxDeliveryQuery(ctx, query, sessionID, message)
 	return result.event, result.mailboxSeq, ok, err
 }
 
-func (s *SQLiteRuntimeStore) recoverSQLiteMailboxDuplicate(ctx context.Context, sessionID string, message team.MailMessage) (runtimeevents.Event, int64, bool) {
+// recoverSQLiteMailboxDuplicate polls for a concurrent duplicate delivery after
+// a failed append. It must run on the caller's already-held queryer (conn / tx)
+// when the caller is inside the single-connection critical section.
+func (s *SQLiteRuntimeStore) recoverSQLiteMailboxDuplicate(ctx context.Context, query runtimeMailboxQuery, sessionID string, message team.MailMessage) (runtimeevents.Event, int64, bool) {
 	if s == nil || strings.TrimSpace(message.ID) == "" {
 		return runtimeevents.Event{}, 0, false
+	}
+	if query == nil {
+		query = s.db
+	}
+	if queryUsesSharedPool(query) {
+		if err := s.checkPoolReentry("recoverSQLiteMailboxDuplicate"); err != nil {
+			return runtimeevents.Event{}, 0, false
+		}
 	}
 	wait := s.busyTimeout
 	if wait <= 0 || wait > 2*time.Second {
 		wait = 2 * time.Second
 	}
+	// Bound the whole recovery (including any pool wait) by the same budget the
+	// loop uses, so a saturated pool cannot turn recovery into a hang.
+	recoverCtx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
 	deadline := time.Now().Add(wait)
 	for {
-		if event, seq, ok, err := s.existingSQLiteMailboxDelivery(ctx, sessionID, message); err == nil && ok {
+		if event, seq, ok, err := s.existingSQLiteMailboxDeliveryVia(recoverCtx, query, sessionID, message); err == nil && ok {
 			return event, seq, true
 		}
-		if time.Now().After(deadline) {
+		if time.Now().After(deadline) || recoverCtx.Err() != nil {
 			return runtimeevents.Event{}, 0, false
 		}
 		timer := time.NewTimer(10 * time.Millisecond)
 		select {
-		case <-ctx.Done():
+		case <-recoverCtx.Done():
 			timer.Stop()
 			return runtimeevents.Event{}, 0, false
 		case <-timer.C:
@@ -3186,7 +3591,7 @@ func (s *SQLiteRuntimeStore) repairRuntimeMailboxLocalProjectionRecord(ctx conte
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
 		return false, fmt.Errorf("begin runtime mailbox local projection repair tx: %w", err)
 	}
@@ -3336,12 +3741,15 @@ func (s *SQLiteRuntimeStore) ListEvents(ctx context.Context, sessionID string, a
 		WHERE session_id = ? AND seq > ?
 		ORDER BY seq ASC
 	`
+	limit = s.clampReadLimit(limit)
+	ctx, cancel := s.readOperationContext(ctx)
+	defer cancel()
 	args := []interface{}{sessionID, afterSeq}
 	if limit > 0 {
 		query += " LIMIT ?"
 		args = append(args, limit)
 	}
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.readQueryer().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list session events: %w", err)
 	}
@@ -3412,12 +3820,15 @@ func (s *SQLiteRuntimeStore) ListEventsBefore(ctx context.Context, sessionID str
 		WHERE session_id = ? AND seq < ?
 		ORDER BY seq DESC
 	`
+	limit = s.clampReadLimit(limit)
+	ctx, cancel := s.readOperationContext(ctx)
+	defer cancel()
 	args := []interface{}{sessionID, beforeSeq}
 	if limit > 0 {
 		query += " LIMIT ?"
 		args = append(args, limit)
 	}
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.readQueryer().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list session events before: %w", err)
 	}
@@ -3488,12 +3899,15 @@ func (s *SQLiteRuntimeStore) ListMailbox(ctx context.Context, sessionID string, 
 		WHERE scope = ? AND session_id = ? AND session_mailbox_seq > ?
 		ORDER BY session_mailbox_seq ASC
 	`
+	limit = s.clampReadLimit(limit)
+	ctx, cancel := s.readOperationContext(ctx)
+	defer cancel()
 	args := []interface{}{agentcontrol.MailboxScopeSession, strings.TrimSpace(sessionID), afterSeq}
 	if limit > 0 {
 		query += " LIMIT ?"
 		args = append(args, limit)
 	}
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.readQueryer().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list session mailbox: %w", err)
 	}
@@ -3564,12 +3978,15 @@ func (s *SQLiteRuntimeStore) ListAgentControlMailbox(ctx context.Context, sessio
 		WHERE scope = ? AND session_id = ? AND id > ? AND COALESCE(workflow, '') <> ''
 		ORDER BY id ASC
 	`
+	limit = s.clampReadLimit(limit)
+	ctx, cancel := s.readOperationContext(ctx)
+	defer cancel()
 	args := []interface{}{agentcontrol.MailboxScopeSession, strings.TrimSpace(sessionID), afterSeq}
 	if limit > 0 {
 		query += " LIMIT ?"
 		args = append(args, limit)
 	}
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.readQueryer().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list agent control mailbox: %w", err)
 	}
@@ -3655,11 +4072,14 @@ func (s *SQLiteRuntimeStore) ListAgentControlMailboxRecords(ctx context.Context,
 		WHERE ` + strings.Join(clauses, " AND ") + `
 		ORDER BY id ASC
 	`
+	filter.Limit = s.clampReadLimit(filter.Limit)
 	if filter.Limit > 0 {
 		query += " LIMIT ?"
 		args = append(args, filter.Limit)
 	}
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	ctx, cancel := s.readOperationContext(ctx)
+	defer cancel()
+	rows, err := s.readQueryer().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list agent control mailbox records: %w", err)
 	}
@@ -3834,8 +4254,10 @@ func (s *SQLiteRuntimeStore) LastEventSeq(ctx context.Context, sessionID string)
 	} else if skip {
 		return 0, nil
 	}
+	ctx, cancel := s.readOperationContext(ctx)
+	defer cancel()
 	var seq int64
-	err := s.db.QueryRowContext(ctx, `
+	err := s.readQueryer().QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(seq), 0)
 		FROM session_events
 		WHERE session_id = ?
@@ -3856,8 +4278,10 @@ func (s *SQLiteRuntimeStore) LastMailboxSeq(ctx context.Context, sessionID strin
 	} else if skip {
 		return 0, nil
 	}
+	ctx, cancel := s.readOperationContext(ctx)
+	defer cancel()
 	var seq int64
-	err := s.db.QueryRowContext(ctx, `
+	err := s.readQueryer().QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(session_mailbox_seq), 0)
 		FROM agent_control_mailbox_records
 		WHERE scope = ? AND session_id = ?
@@ -3878,8 +4302,10 @@ func (s *SQLiteRuntimeStore) LastAgentControlMailboxSeq(ctx context.Context, ses
 	} else if skip {
 		return 0, nil
 	}
+	ctx, cancel := s.readOperationContext(ctx)
+	defer cancel()
 	var seq int64
-	err := s.db.QueryRowContext(ctx, `
+	err := s.readQueryer().QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(id), 0)
 		FROM agent_control_mailbox_records
 		WHERE scope = ? AND session_id = ? AND COALESCE(workflow, '') <> ''
@@ -3918,8 +4344,10 @@ func (s *SQLiteRuntimeStore) LastAgentControlMailboxRecordSeq(ctx context.Contex
 		clauses = append(clauses, "team_id = ?")
 		args = append(args, filter.TeamID)
 	}
+	ctx, cancel := s.readOperationContext(ctx)
+	defer cancel()
 	var seq int64
-	err := s.db.QueryRowContext(ctx, `
+	err := s.readQueryer().QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(id), 0)
 		FROM agent_control_mailbox_records
 		WHERE `+strings.Join(clauses, " AND ")+`
@@ -3959,6 +4387,7 @@ func (s *SQLiteRuntimeStore) notifyEventWatchers(seq int64, event runtimeevents.
 		select {
 		case watcher.ch <- event:
 		default:
+			s.notifyDrops.events.Add(1)
 		}
 	}
 }
@@ -3988,6 +4417,7 @@ func (s *SQLiteRuntimeStore) notifyMailboxWatchers(sessionID string, message tea
 		select {
 		case watcher.ch <- message:
 		default:
+			s.notifyDrops.mailbox.Add(1)
 		}
 	}
 }
@@ -4017,6 +4447,7 @@ func (s *SQLiteRuntimeStore) notifyAgentControlMailboxWatchers(sessionID string,
 		select {
 		case watcher.ch <- message:
 		default:
+			s.notifyDrops.agentControl.Add(1)
 		}
 	}
 }
@@ -4074,6 +4505,7 @@ func openSQLiteRuntimeStoreWithLockRetryCtx(ctx context.Context, store *SQLiteRu
 			fileBacked:  store.fileBacked,
 			busyTimeout: store.busyTimeout,
 			cacheKiB:    store.cacheKiB,
+			opTimeout:   store.opTimeout,
 		}
 	}
 }
