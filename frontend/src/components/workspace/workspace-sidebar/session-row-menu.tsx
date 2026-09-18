@@ -3,7 +3,15 @@
 // 2026-09-15 样式优化：重命名从行内铅笔收敛为菜单首项。
 // §4.8（多会话并发）：后台会话也能就地停 —— 不依赖本地 controller，按会话投递 interrupt。
 
-import { MoreHorizontalIcon } from "lucide-react";
+import {
+  MoreHorizontalIcon,
+  PencilIcon,
+  GitBranchIcon,
+  StopCircleIcon,
+  ArchiveIcon,
+  ArchiveRestoreIcon,
+  Trash2Icon,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 export type SidebarSessionItemActionLabels = {
@@ -121,7 +129,7 @@ export function SessionRowMenu({
             closeMenu(false);
           }
         }}
-        className="rounded-chip p-1 text-muted-foreground transition hover:bg-surface-soft hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-primary-border"
+        className="relative z-10 rounded-chip p-1 text-muted-foreground transition hover:bg-surface-soft hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-primary-border"
       >
         <MoreHorizontalIcon size={12} />
       </button>
@@ -152,7 +160,7 @@ export function SessionRowMenu({
               closeMenu(false);
             }
           }}
-          className="absolute right-0 top-full z-20 mt-1 min-w-[9rem] rounded-[0.6rem] border border-border bg-surface-popover py-1 shadow-lg"
+          className="absolute right-0 top-full z-20 mt-1 w-max rounded-[0.6rem] border border-border bg-surface-popover py-1 shadow-lg"
         >
           {/* 2026-09-15 样式优化：重命名从行内铅笔收敛为菜单首项，标题右侧只留一个入口。 */}
           {onRename && renameLabel ? (
@@ -166,6 +174,7 @@ export function SessionRowMenu({
               }}
               className="block w-full px-2.5 py-1.5 text-left text-xs text-foreground transition hover:bg-surface-soft"
             >
+              <PencilIcon size={12} className="inline-block mr-2" />
               {renameLabel}
             </button>
           ) : null}
@@ -180,6 +189,7 @@ export function SessionRowMenu({
               }}
               className="block w-full px-2.5 py-1.5 text-left text-xs text-foreground transition hover:bg-surface-soft"
             >
+              <GitBranchIcon size={12} className="inline-block mr-2" />
               {actionLabels.fork}
             </button>
           ) : null}
@@ -196,6 +206,7 @@ export function SessionRowMenu({
               }}
               className="block w-full px-2.5 py-1.5 text-left text-xs text-foreground transition hover:bg-surface-soft"
             >
+              <StopCircleIcon size={12} className="inline-block mr-2" />
               {actionLabels.stop}
             </button>
           ) : null}
@@ -211,6 +222,7 @@ export function SessionRowMenu({
                 }}
                 className="block w-full px-2.5 py-1.5 text-left text-xs text-foreground transition hover:bg-surface-soft"
               >
+                <ArchiveRestoreIcon size={12} className="inline-block mr-2" />
                 {actionLabels.restore}
               </button>
             ) : null
@@ -225,6 +237,7 @@ export function SessionRowMenu({
               }}
               className="block w-full px-2.5 py-1.5 text-left text-xs text-foreground transition hover:bg-surface-soft"
             >
+              <ArchiveIcon size={12} className="inline-block mr-2" />
               {actionLabels.archive}
             </button>
           ) : null}
@@ -239,6 +252,7 @@ export function SessionRowMenu({
               }}
               className="block w-full px-2.5 py-1.5 text-left text-xs text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
             >
+              <Trash2Icon size={12} className="inline-block mr-2" />
               {actionLabels.delete}
             </button>
           ) : null}

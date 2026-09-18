@@ -55,10 +55,12 @@ export type WorkspaceSidebarProps = {
   runtimeSessionUsers: RuntimeSessionUserSummary[];
   selectedRuntimeSessionUserId: string;
   onRefreshRuntimeTeams?: () => void;
+  onRefreshRuntimeSessions?: () => void;
   workspaceDirectories: RuntimeWorkspaceDirectory[];
   workspaceDirectoriesError: string | null;
   workspaceDirectoriesLoading: boolean;
   workspaceDirectoriesRefreshing?: boolean;
+  onRefreshWorkspaceDirectories?: () => void;
   /**
    * 注册一个工作目录（POST 注册表）。返回后端登记的目录记录：
    * 方案 §15 的「注册并新建会话」要用它的 id 绑定新会话。

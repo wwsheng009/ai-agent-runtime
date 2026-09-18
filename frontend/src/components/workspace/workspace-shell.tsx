@@ -86,6 +86,11 @@ export function WorkspaceShell({
   reasoningEffortError,
   reasoningEffortOptions,
   runtimeModels = null,
+  runtimeModelsError,
+  runtimeModelsLoading,
+  runtimeSkills = null,
+  runtimeSkillsError,
+  runtimeSkillsLoading,
   onDraftChange,
   onModelChange,
   onProviderChange,
@@ -93,6 +98,7 @@ export function WorkspaceShell({
   onSelectArtifact,
   onSelectThread,
   onRefreshRuntimeTeams,
+  onRefreshRuntimeSessions,
   onResetRuntimeClientIdentity,
   onStopResponding,
   onSubmit,
@@ -121,8 +127,6 @@ export function WorkspaceShell({
   onBacktrackPrefillChange,
   onSelectBacktrackNavigationMessage,
   providerOptions,
-  runtimeModelsError,
-  runtimeModelsLoading,
   selectedModel,
   selectedProvider,
   selectedReasoningEffort,
@@ -321,6 +325,7 @@ export function WorkspaceShell({
           onAddWorkspaceDirectory={onAddWorkspaceDirectory}
           onCreateSessionInDirectory={onCreateSessionInDirectory}
           onRefreshRuntimeTeams={onRefreshRuntimeTeams}
+          onRefreshRuntimeSessions={onRefreshRuntimeSessions}
           onArchiveRuntimeSession={onArchiveRuntimeSession}
           onDeleteRuntimeSession={onDeleteRuntimeSession}
           onForkRuntimeSession={onForkRuntimeSession}
@@ -377,6 +382,9 @@ export function WorkspaceShell({
           modelOptions={modelOptions}
           newThreadSuggestions={newThreadSuggestions}
           runtimeModels={runtimeModels}
+          runtimeSkills={runtimeSkills}
+          runtimeSkillsError={runtimeSkillsError}
+          runtimeSkillsLoading={runtimeSkillsLoading}
           onAnswerPendingQuestion={onAnswerPendingQuestion}
           onPlanDecision={onPlanDecision}
           onPlanNotesChange={onPlanNotesChange}
@@ -406,6 +414,8 @@ export function WorkspaceShell({
           reasoningEffortOptions={reasoningEffortOptions}
           runtimeModelsError={runtimeModelsError}
           runtimeModelsLoading={runtimeModelsLoading}
+          runtimeSkillsError={runtimeSkillsError}
+          runtimeSkillsLoading={runtimeSkillsLoading}
           earlierLoader={earlierLoader}
           selectedModel={selectedModel}
           selectedProvider={selectedProvider}

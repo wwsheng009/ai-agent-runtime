@@ -47,10 +47,12 @@ export function WorkspaceSidebar({
   runtimeSessionUsers,
   selectedRuntimeSessionUserId,
   onRefreshRuntimeTeams,
+  onRefreshRuntimeSessions,
   workspaceDirectories,
   workspaceDirectoriesError,
   workspaceDirectoriesLoading,
   workspaceDirectoriesRefreshing,
+  onRefreshWorkspaceDirectories,
   onAddWorkspaceDirectory,
   onRenameWorkspaceDirectory,
   onRemoveWorkspaceDirectory,
@@ -376,6 +378,7 @@ export function WorkspaceSidebar({
               onRegisterAndCreateSession={handleRegisterAndCreateSession}
               onRequestManageDirectories={() => setDirectoryManageOpen(true)}
               onRestoreSession={onRestoreRuntimeSession}
+              onRefreshWorkspaceDirectories={onRefreshWorkspaceDirectories}
               onSelectSessionGroupingMode={setSessionGroupingMode}
               onSelectSessionOrderMode={setSessionOrderMode}
               onSelectThread={onSelectThread}
@@ -415,6 +418,8 @@ export function WorkspaceSidebar({
               workspaceDirectoriesError={workspaceDirectoriesError}
               workspaceDirectoriesLoading={workspaceDirectoriesLoading}
               workspaceDirectoriesRefreshing={workspaceDirectoriesRefreshing}
+              runtimeSessionsRefreshing={runtimeSessionsRefreshing}
+              onRefreshRuntimeSessions={onRefreshRuntimeSessions}
             />
           <WorkspaceSidebarRuntimeSection
               onCloseMobile={onCloseMobile}

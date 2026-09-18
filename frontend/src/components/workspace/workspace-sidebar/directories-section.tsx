@@ -70,6 +70,9 @@ type WorkspaceSidebarDirectoriesSectionProps = {
   workspaceDirectoriesError: string | null;
   workspaceDirectoriesLoading: boolean;
   workspaceDirectoriesRefreshing?: boolean;
+  onRefreshWorkspaceDirectories?: () => void;
+  runtimeSessionsRefreshing?: boolean;
+  onRefreshRuntimeSessions?: () => void;
   // ── 会话浏览（原会话段） ───────────────────────────────────────
   cancelSessionRename: () => void;
   canMoveSessionToGroup: (groupKey: string) => boolean;
@@ -136,6 +139,7 @@ export function WorkspaceSidebarDirectoriesSection({
   onRegisterAndCreateSession,
   onRequestManageDirectories,
   onRestoreSession,
+  onRefreshWorkspaceDirectories,
   onSelectSessionGroupingMode,
   onSelectSessionOrderMode,
   onSelectThread,
@@ -173,6 +177,8 @@ export function WorkspaceSidebarDirectoriesSection({
   workspaceDirectoriesError,
   workspaceDirectoriesLoading,
   workspaceDirectoriesRefreshing,
+  runtimeSessionsRefreshing,
+  onRefreshRuntimeSessions,
 }: WorkspaceSidebarDirectoriesSectionProps) {
   // 平铺视图：没有组头（跨组拖拽也不启用），只输出扁平会话行。
   // 一条会话行都没有时退回目录树，否则「已登记但 0 会话」的目录与管理入口会无处可见（§3.5-D/F）。
@@ -187,6 +193,14 @@ export function WorkspaceSidebarDirectoriesSection({
   const hasRegisteredDirectories =
     workspaceDirectories.length > 0 ||
     mergedDirectoryGroups.some((group) => group.registered);
+
+  // 刷新目录下的会话：同时刷新目录元数据和会话数据
+  const handleRefreshDirectory = () => {
+    onRefreshWorkspaceDirectories?.();
+    onRefreshRuntimeSessions?.();
+  };
+
+  const isRefreshing = workspaceDirectoriesRefreshing || runtimeSessionsRefreshing;
 
   function findSessionTitle(sessionId: string): string {
     const session = sessionDirectoryGroups
@@ -379,6 +393,7 @@ export function WorkspaceSidebarDirectoriesSection({
                               onCreate={() =>
                                 void handleCreateSessionInDirectory(group)
                               }
+                              onRefresh={handleRefreshDirectory}
                               onRename={() => startDirectoryRename(group)}
                               onRemove={() =>
                                 setDirectoryDeleteTarget({
@@ -388,6 +403,7 @@ export function WorkspaceSidebarDirectoriesSection({
                                   sessionCount: group.sessions.length,
                                 })
                               }
+                              refreshing={isRefreshing}
                               t={t}
                             />
                           ) : group.fullPath && onRegisterAndCreateSession ? (

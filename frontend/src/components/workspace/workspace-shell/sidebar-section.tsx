@@ -17,6 +17,7 @@ type WorkspaceSidebarSectionProps = Pick<
   | "onForkRuntimeSession"
   | "onMoveRuntimeSession"
   | "onRefreshRuntimeTeams"
+  | "onRefreshRuntimeSessions"
   | "onRemoveWorkspaceDirectory"
   | "onRenameRuntimeSession"
   | "onRenameWorkspaceDirectory"
@@ -60,6 +61,7 @@ export function WorkspaceSidebarSection({
   onForkRuntimeSession,
   onMoveRuntimeSession,
   onRefreshRuntimeTeams,
+  onRefreshRuntimeSessions,
   onRemoveWorkspaceDirectory,
   onRenameRuntimeSession,
   onRenameWorkspaceDirectory,
@@ -116,6 +118,7 @@ export function WorkspaceSidebarSection({
       runtimeSessionUsers={runtimeSessionUsers}
       selectedRuntimeSessionUserId={selectedRuntimeSessionUserId}
       onRefreshRuntimeTeams={onRefreshRuntimeTeams}
+      onRefreshRuntimeSessions={onRefreshRuntimeSessions}
       workspaceDirectories={workspaceDirectories}
       workspaceDirectoriesError={workspaceDirectoriesError}
       workspaceDirectoriesLoading={workspaceDirectoriesLoading}

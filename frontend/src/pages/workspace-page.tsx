@@ -77,6 +77,7 @@ export function WorkspacePage() {
     loading: workspaceDirectoriesLoading,
     refreshing: workspaceDirectoriesRefreshing,
     error: workspaceDirectoriesError,
+    refresh: refreshWorkspaceDirectories,
     addDirectory: addWorkspaceDirectory,
     renameDirectory: renameWorkspaceDirectory,
     removeDirectory: removeWorkspaceDirectory,
@@ -112,6 +113,9 @@ export function WorkspacePage() {
     runtimeModels,
     runtimeModelsError,
     runtimeModelsLoading,
+    runtimeSkills,
+    runtimeSkillsError,
+    runtimeSkillsLoading,
     selectedModel,
     selectedProvider,
     selectedReasoningEffort,
@@ -404,6 +408,7 @@ export function WorkspacePage() {
       workspaceDirectoriesError={workspaceDirectoriesError}
       workspaceDirectoriesLoading={workspaceDirectoriesLoading}
       workspaceDirectoriesRefreshing={workspaceDirectoriesRefreshing}
+      onRefreshWorkspaceDirectories={refreshWorkspaceDirectories}
       onAddWorkspaceDirectory={addWorkspaceDirectory}
       onRenameWorkspaceDirectory={renameWorkspaceDirectory}
       onRemoveWorkspaceDirectory={removeWorkspaceDirectory}
@@ -447,6 +452,7 @@ export function WorkspacePage() {
       onSelectArtifact={handleSelectArtifact}
       onSelectThread={handleSelectThreadWithTrajectoryReset}
       onRefreshRuntimeTeams={handleRefreshRuntimeTeams}
+      onRefreshRuntimeSessions={handleRefreshRuntimeSessions}
       onResetRuntimeClientIdentity={handleResetRuntimeClientIdentity}
       onStopResponding={handleStopResponding}
       onSubmit={submitPrompt}
@@ -468,6 +474,9 @@ export function WorkspacePage() {
       runtimeModels={runtimeModels}
       runtimeModelsError={runtimeModelsError}
       runtimeModelsLoading={runtimeModelsLoading}
+      runtimeSkills={runtimeSkills}
+      runtimeSkillsError={runtimeSkillsError}
+      runtimeSkillsLoading={runtimeSkillsLoading}
       selectedModel={selectedModel}
       selectedProvider={selectedProvider}
       selectedReasoningEffort={selectedReasoningEffort}

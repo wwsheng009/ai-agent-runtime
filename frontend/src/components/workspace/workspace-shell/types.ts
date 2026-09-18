@@ -17,6 +17,9 @@ import {
   type RuntimeTeamSummaryEntry,
   type RuntimeWorkspaceDirectory,
 } from "@/lib/runtime-api";
+import { type RuntimeSkillCatalog } from "@/types/runtime";
+
+export type RuntimeSkillsResponse = RuntimeSkillCatalog;
 import { type ChatStreamPhase } from "@/types/runtime";
 
 import { type SidebarSessionActivity } from "@/components/workspace/workspace-sidebar/session-row-status";
@@ -63,6 +66,7 @@ export type WorkspaceShellProps = {
   ) => Promise<RuntimeWorkspaceDirectory | void>;
   onRenameWorkspaceDirectory: (id: string, name: string) => Promise<void>;
   onRemoveWorkspaceDirectory: (id: string) => Promise<void>;
+  onRefreshWorkspaceDirectories?: () => void;
   /** P1-8：手动重试连接（复用既有 seq 游标续传，不新建退避循环）。 */
   onRetryConnection?: () => void;
   /** 顶栏「刷新当前会话」：重拉权威历史 / 运行时状态快照 / 会话列表投影；缺省不渲染入口。 */
@@ -134,6 +138,7 @@ export type WorkspaceShellProps = {
   onSelectArtifact: (artifactId: string) => void;
   onSelectThread: (threadId: string) => void;
   onRefreshRuntimeTeams?: () => void;
+  onRefreshRuntimeSessions?: () => void;
   onResetRuntimeClientIdentity: () => void;
   onStopResponding: () => void;
   onSubmit: () => void;
@@ -171,6 +176,10 @@ export type WorkspaceShellProps = {
   runtimeModels?: RuntimeModelsResponse | null;
   runtimeModelsError: string | null;
   runtimeModelsLoading: boolean;
+  /** 运行时 skill 目录（`/skill` 候选与弹窗）。 */
+  runtimeSkills?: RuntimeSkillsResponse | null;
+  runtimeSkillsError: string | null;
+  runtimeSkillsLoading: boolean;
   selectedModel: string;
   selectedProvider: string;
   selectedReasoningEffort: string;

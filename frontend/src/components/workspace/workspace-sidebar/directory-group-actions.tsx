@@ -5,7 +5,14 @@
 // 键盘可达性沿用会话行菜单口径：`aria-haspopup` / `aria-expanded` / `ArrowUp` `ArrowDown`
 // `Home` `End` `Escape` `Tab`，且宿主槽位的 `focus-within:opacity-100` 保证键盘路径不被隐藏。
 
-import { LoaderCircleIcon, MoreHorizontalIcon } from "lucide-react";
+import {
+  LoaderCircleIcon,
+  MoreHorizontalIcon,
+  PlusIcon,
+  RefreshCwIcon,
+  PencilIcon,
+  Trash2Icon,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { type TFunction } from "i18next";
 
@@ -13,16 +20,20 @@ type WorkspaceSidebarDirectoryGroupActionsProps = {
   /** 该目录内正在新建会话：新会话菜单项禁用并换成旋转态。 */
   creating: boolean;
   onCreate: () => void;
+  onRefresh?: () => void;
   onRename: () => void;
   onRemove: () => void;
+  refreshing?: boolean;
   t: TFunction<"workspace">;
 };
 
 export function WorkspaceSidebarDirectoryGroupActions({
   creating,
   onCreate,
+  onRefresh,
   onRename,
   onRemove,
+  refreshing = false,
   t,
 }: WorkspaceSidebarDirectoryGroupActionsProps) {
   const [open, setOpen] = useState(false);
@@ -73,7 +84,7 @@ export function WorkspaceSidebarDirectoryGroupActions({
   }
 
   const itemClassName =
-    "flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-xs text-foreground transition hover:bg-surface-soft disabled:opacity-50";
+    "flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs text-foreground transition hover:bg-surface-soft disabled:opacity-50";
 
   return (
     <div
@@ -101,7 +112,7 @@ export function WorkspaceSidebarDirectoryGroupActions({
             closeMenu(false);
           }
         }}
-        className="rounded-chip p-1 text-muted-foreground transition hover:bg-surface-soft hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-primary-border"
+        className="relative z-10 rounded-chip p-1 text-muted-foreground transition hover:bg-surface-soft hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-primary-border"
       >
         <MoreHorizontalIcon size={12} />
       </button>
@@ -131,7 +142,7 @@ export function WorkspaceSidebarDirectoryGroupActions({
               closeMenu(false);
             }
           }}
-          className="absolute right-0 top-full z-20 mt-1 min-w-[9rem] rounded-[0.6rem] border border-border bg-surface-popover py-1 shadow-lg"
+          className="absolute right-0 top-full z-20 mt-1 w-max rounded-[0.6rem] border border-border bg-surface-popover py-1 shadow-lg"
         >
           <button
             type="button"
@@ -147,8 +158,29 @@ export function WorkspaceSidebarDirectoryGroupActions({
           >
             {creating ? (
               <LoaderCircleIcon size={12} className="animate-spin" />
-            ) : null}
+            ) : (
+              <PlusIcon size={12} />
+            )}
             {t("sidebar.directories.newChat")}
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            tabIndex={-1}
+            disabled={refreshing}
+            title={t("sidebar.directories.refresh")}
+            onClick={() => {
+              onRefresh?.();
+              closeMenu(true);
+            }}
+            className={itemClassName}
+          >
+            {refreshing ? (
+              <LoaderCircleIcon size={12} className="animate-spin" />
+            ) : (
+              <RefreshCwIcon size={12} />
+            )}
+            {t("sidebar.directories.refresh")}
           </button>
           <button
             type="button"
@@ -160,6 +192,7 @@ export function WorkspaceSidebarDirectoryGroupActions({
             }}
             className={itemClassName}
           >
+            <PencilIcon size={12} />
             {t("sidebar.directories.rename")}
           </button>
           <button
@@ -172,6 +205,7 @@ export function WorkspaceSidebarDirectoryGroupActions({
             }}
             className={`${itemClassName} text-muted-foreground hover:text-accent-orange`}
           >
+            <Trash2Icon size={12} />
             {t("sidebar.directories.deleteTitle")}
           </button>
         </div>
