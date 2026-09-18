@@ -51,7 +51,7 @@ func TestDebugDisplayViewportKeepsAllSectionsTallTerminal(t *testing.T) {
 		Model:        "gpt-test",
 		Surface:      surface,
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 	coord.SetSurface(surface)
@@ -132,7 +132,7 @@ func TestDebugDisplayViewportKeepsAllSectionsShortTerminal(t *testing.T) {
 		Model:        "gpt-test",
 		Surface:      surface,
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 	coord.SetSurface(surface)

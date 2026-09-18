@@ -71,7 +71,7 @@ func TestResumeUnifiedPromptRenderedAfterStaleAmbientTeam(t *testing.T) {
 	session.LocalRuntimeHost.BaseSession = session
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 
@@ -232,7 +232,7 @@ func TestResumeUnifiedPromptRenderedPlainHistory(t *testing.T) {
 	}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 

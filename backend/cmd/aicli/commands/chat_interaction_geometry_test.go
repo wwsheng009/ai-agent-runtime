@@ -9,7 +9,7 @@ import (
 )
 
 func TestPrimaryTerminalGeometryDoesNotWaitForCoordinatorLock(t *testing.T) {
-	coordinator := newChatInteractionCoordinator(&ChatSession{})
+	coordinator := newTestChatInteractionCoordinator(t, &ChatSession{})
 	t.Cleanup(coordinator.Shutdown)
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	surface.EnableForTest(91, 33)
@@ -44,7 +44,7 @@ func TestPrimaryTerminalGeometryDoesNotWaitForCoordinatorLock(t *testing.T) {
 }
 
 func TestSurfaceFacadePostDoesNotDeadlockBehindCoordinatorLock(t *testing.T) {
-	coordinator := newChatInteractionCoordinator(&ChatSession{})
+	coordinator := newTestChatInteractionCoordinator(t, &ChatSession{})
 	t.Cleanup(coordinator.Shutdown)
 	blockReducer := make(chan struct{})
 	var releaseOnce sync.Once

@@ -78,7 +78,7 @@ func TestChatInteractionCoordinator_StreamLeavesNoBlankRowsAbovePrompt(t *testin
 		t.Run(fmt.Sprintf("height=%d", height), func(t *testing.T) {
 			const width = 80
 			session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
-			coord := newChatInteractionCoordinator(session)
+			coord := newTestChatInteractionCoordinator(t, session)
 			coord.stableCommitDelay = time.Hour
 			t.Cleanup(coord.Shutdown)
 			surface := ui.NewFixedBottomSurface(ui.NewTerminal())
@@ -168,7 +168,7 @@ func TestChatInteractionCoordinator_SubmittedUserInputDoesNotOverwriteHistory(t 
 
 	const width, height = 80, 24
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	t.Cleanup(coord.Shutdown)
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())

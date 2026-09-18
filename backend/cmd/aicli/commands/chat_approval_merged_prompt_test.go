@@ -32,7 +32,7 @@ func TestChatApprovalAnswerMergedIntoBottomPromptReadsThroughPromptRow(t *testin
 		InputBox:    ui.NewInputBox(nil),
 		InputReader: bufio.NewReader(strings.NewReader("stale\n")),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetSurface(surface)
 	coord.SetWriter(os.Stdout)
@@ -203,7 +203,7 @@ func newBusyCaptureApprovalSession(t *testing.T) (*ChatSession, *chatInteraction
 		InputBox:    ui.NewInputBox(nil),
 		InputReader: bufio.NewReader(strings.NewReader("stale\n")),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetSurface(surface)
 	coord.SetWriter(os.Stdout)

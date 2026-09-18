@@ -138,7 +138,7 @@ func TestChatInputQueue_RejectedSlashDraftRemainsEditable(t *testing.T) {
 func TestRenderBusyInputRouteFeedbackExplainsRejectedQueueClear(t *testing.T) {
 	var output strings.Builder
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.SetWriter(&output)
 	session.Interaction = coord
 
@@ -156,7 +156,7 @@ func TestRenderBusyInputRouteFeedbackExplainsRejectedQueueClear(t *testing.T) {
 
 func TestChatInputCommandQueuableAllowsSafeSlashWhileBusy(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.StartWaiting()
 
@@ -239,7 +239,7 @@ func TestInterruptChatTurnFromBusyInputCancelRestoresComposerDraftWithQueuedInpu
 		cancelCtx:  ctx,
 		cancelFunc: cancel,
 	}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	session.Interaction.SetPromptInput("typing in busy composer")
 
 	interruptChatTurnFromBusyInputCancel(session)
@@ -373,7 +373,7 @@ func TestChatInteractiveReadPrioritySecretSuspendsAndRestoresOrdinaryInput(t *te
 	queue.stageDraft("unfinished draft")
 
 	session := &ChatSession{InputQueue: queue}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = interaction
 	result := make(chan string, 1)
 	errs := make(chan error, 1)
@@ -822,7 +822,7 @@ func TestChatInputReadLifecycleMarksQueuedReadyLineAndRecordsHistory(t *testing.
 
 func TestChatInputReadLifecycleResetsPromptOnQueuedReadError(t *testing.T) {
 	session := &ChatSession{InputBox: ui.NewInputBox(nil)}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetPromptInput("stale queued draft")
 
@@ -835,7 +835,7 @@ func TestChatInputReadLifecycleResetsPromptOnQueuedReadError(t *testing.T) {
 
 func TestChatInputReadLifecycleFinishMainReadClearsPromptOnError(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetPromptInput("failed read draft")
 
@@ -851,7 +851,7 @@ func TestChatInputReadLifecycleFinishMainReadClearsPromptOnError(t *testing.T) {
 
 func TestChatInputReadLifecycleFinishMainReadKeepsDraftForTranscriptPager(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetPromptInput("inspect this draft")
 
@@ -864,7 +864,7 @@ func TestChatInputReadLifecycleFinishMainReadKeepsDraftForTranscriptPager(t *tes
 
 func TestChatInputReadLifecycleFinishMainReadResetsPromptAfterDirectRead(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetPromptInput("submitted draft")
 
@@ -877,7 +877,7 @@ func TestChatInputReadLifecycleFinishMainReadResetsPromptAfterDirectRead(t *test
 
 func TestChatInputReadLifecycleKeepsPromptOnPrioritySuccess(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetPromptInput("main draft")
 
@@ -890,7 +890,7 @@ func TestChatInputReadLifecycleKeepsPromptOnPrioritySuccess(t *testing.T) {
 
 func TestChatInputReadLifecycleResetsPromptOnPriorityError(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetPromptInput("stale priority draft")
 

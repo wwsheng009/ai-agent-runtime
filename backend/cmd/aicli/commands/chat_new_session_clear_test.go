@@ -36,7 +36,7 @@ func TestDispatchChatCommandNewClearsPreviousConversationFromRenderPlane(t *test
 		SessionUserID:  userID,
 	}
 	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 

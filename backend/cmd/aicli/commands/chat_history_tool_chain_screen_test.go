@@ -45,7 +45,7 @@ func TestPrintVisibleChatHistory_ScreenSeparatesFinalToolCells(t *testing.T) {
 	tool2 := runtimetypes.NewToolMessage("call-2", "# Docs")
 
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.stableCommitDelay = time.Hour
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord

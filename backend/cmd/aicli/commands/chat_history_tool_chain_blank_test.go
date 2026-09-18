@@ -30,7 +30,7 @@ func TestPrintVisibleChatHistory_SeparatesFinalToolCells(t *testing.T) {
 	tool2 := runtimetypes.NewToolMessage("call-2", "# Docs")
 
 	session := &ChatSession{}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	var out bytes.Buffer
 	session.Interaction.SetWriter(&out)
 	replaceRuntimeMessages(session, []runtimetypes.Message{

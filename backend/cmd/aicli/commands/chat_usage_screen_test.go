@@ -26,7 +26,7 @@ func newUnifiedUsageCacheSession(t *testing.T) (*ChatSession, *chatInteractionCo
 
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 

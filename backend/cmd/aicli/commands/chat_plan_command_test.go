@@ -188,7 +188,7 @@ func TestDispatchPlanCommandStaysOnUnifiedTerminalSession(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	session := newPlanCommandSession(runtimepolicy.ModeDefault)
 	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	session.Interaction = interaction
 

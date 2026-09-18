@@ -166,7 +166,8 @@ func openCodeLiveSession(t *testing.T) (*ChatSession, config.Provider, *ttyCount
 		t.Fatal("expected config")
 	}
 	if cfg.AICLI != nil && cfg.AICLI.MCP != nil {
-		cfg.AICLI.MCP.AutoConnect = false
+		// MCP 默认启动即连；live 测试指向不存在的配置以保持确定性。
+		cfg.AICLI.MCP.ConfigFile = t.TempDir() + "/no-mcp.yaml"
 	}
 
 	provider := injectLiveOpenCodeProvider(t, cfg)

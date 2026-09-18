@@ -45,7 +45,8 @@ func TestAICLIChatActorExecutor_LiveAutoStartShowsTeamProgressTimeline(t *testin
 		t.Fatal("expected config")
 	}
 	if cfg.AICLI != nil && cfg.AICLI.MCP != nil {
-		cfg.AICLI.MCP.AutoConnect = false
+		// MCP 默认启动即连；live 测试指向不存在的配置以保持确定性。
+		cfg.AICLI.MCP.ConfigFile = t.TempDir() + "/no-mcp.yaml"
 	}
 
 	providerName := strings.TrimSpace(os.Getenv("LIVE_AICLI_TEAM_PROGRESS_PROVIDER"))
@@ -211,7 +212,8 @@ func TestAICLIChatActorExecutor_LiveDocsPromptCreatesTeamAndUsesLocalReadFlow(t 
 		t.Fatal("expected config")
 	}
 	if cfg.AICLI != nil && cfg.AICLI.MCP != nil {
-		cfg.AICLI.MCP.AutoConnect = false
+		// MCP 默认启动即连；live 测试指向不存在的配置以保持确定性。
+		cfg.AICLI.MCP.ConfigFile = t.TempDir() + "/no-mcp.yaml"
 	}
 
 	providerName := strings.TrimSpace(os.Getenv("LIVE_AICLI_DOCS_TEAM_REGRESSION_PROVIDER"))
@@ -485,7 +487,8 @@ func TestAICLIChatActorExecutor_LiveDocsPromptClearsPromptBeforeAsyncTimeline(t 
 		t.Fatal("expected config")
 	}
 	if cfg.AICLI != nil && cfg.AICLI.MCP != nil {
-		cfg.AICLI.MCP.AutoConnect = false
+		// MCP 默认启动即连；live 测试指向不存在的配置以保持确定性。
+		cfg.AICLI.MCP.ConfigFile = t.TempDir() + "/no-mcp.yaml"
 	}
 
 	providerName := strings.TrimSpace(os.Getenv("LIVE_AICLI_PROMPT_INTERACTION_PROVIDER"))
@@ -569,7 +572,7 @@ func TestAICLIChatActorExecutor_LiveDocsPromptClearsPromptBeforeAsyncTimeline(t 
 	session.NoInteractive = false
 	session.JSONOutput = false
 	session.OutputFormat = "interactive"
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	capture := &terminalCaptureWriter{}
 	session.Interaction.SetWriter(capture)
 	session.Interaction.promptAdvanceFn = func() bool { return false }
@@ -677,7 +680,8 @@ func TestAICLIChatActorExecutor_LiveDocsTranscriptUsesObservedListingForTeamTask
 		t.Fatal("expected config")
 	}
 	if cfg.AICLI != nil && cfg.AICLI.MCP != nil {
-		cfg.AICLI.MCP.AutoConnect = false
+		// MCP 默认启动即连；live 测试指向不存在的配置以保持确定性。
+		cfg.AICLI.MCP.ConfigFile = t.TempDir() + "/no-mcp.yaml"
 	}
 
 	providerName := strings.TrimSpace(os.Getenv("LIVE_AICLI_DOCS_TRANSCRIPT_PROVIDER"))

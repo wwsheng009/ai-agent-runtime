@@ -142,7 +142,7 @@ func TestPrintVisibleChatHistory_MatchesLiveCompleteBlockRendering(t *testing.T)
 	tool.Metadata["duration_ms"] = 1250
 
 	historySession := &ChatSession{}
-	historySession.Interaction = newChatInteractionCoordinator(historySession)
+	historySession.Interaction = newTestChatInteractionCoordinator(t, historySession)
 	var historyOutput bytes.Buffer
 	historySession.Interaction.SetWriter(&historyOutput)
 	replaceRuntimeMessages(historySession, []runtimetypes.Message{
@@ -155,7 +155,7 @@ func TestPrintVisibleChatHistory_MatchesLiveCompleteBlockRendering(t *testing.T)
 	}
 
 	liveSession := &ChatSession{}
-	liveSession.Interaction = newChatInteractionCoordinator(liveSession)
+	liveSession.Interaction = newTestChatInteractionCoordinator(t, liveSession)
 	var liveOutput bytes.Buffer
 	liveSession.Interaction.SetWriter(&liveOutput)
 	liveRenderer := newAICLITranscriptRenderer(liveSession)
@@ -200,7 +200,7 @@ func TestPrintVisibleChatHistory_PreservesCompleteMessageContent(t *testing.T) {
 
 	content := "回答：\n\n    保留缩进的代码\n"
 	historySession := &ChatSession{}
-	historySession.Interaction = newChatInteractionCoordinator(historySession)
+	historySession.Interaction = newTestChatInteractionCoordinator(t, historySession)
 	var historyOutput bytes.Buffer
 	historySession.Interaction.SetWriter(&historyOutput)
 	replaceRuntimeMessages(historySession, []runtimetypes.Message{
@@ -211,7 +211,7 @@ func TestPrintVisibleChatHistory_PreservesCompleteMessageContent(t *testing.T) {
 	}
 
 	liveSession := &ChatSession{}
-	liveSession.Interaction = newChatInteractionCoordinator(liveSession)
+	liveSession.Interaction = newTestChatInteractionCoordinator(t, liveSession)
 	var liveOutput bytes.Buffer
 	liveSession.Interaction.SetWriter(&liveOutput)
 	newAICLITranscriptRenderer(liveSession).RenderAssistant(content)
@@ -233,7 +233,7 @@ func TestPrintVisibleChatHistory_HandlesNestedMetadataAndUnknownRoles(t *testing
 		"duration_ms": 1250,
 	}
 	session := &ChatSession{}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	session.Interaction.SetWriter(&output)
 	replaceRuntimeMessages(session, []runtimetypes.Message{
@@ -277,7 +277,7 @@ func TestPrintVisibleChatHistory_RendersReasoningAndToolFailures(t *testing.T) {
 	}
 
 	session := &ChatSession{}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	session.Interaction.SetWriter(&output)
 	replaceRuntimeMessages(session, []runtimetypes.Message{assistant, *tool})
@@ -479,7 +479,7 @@ func TestPrintVisibleChatHistory_SettlesSurfaceLayoutDebtBeforeContent(t *testin
 	surface.EnableForTest(80, 24)
 
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 	session.Surface = surface

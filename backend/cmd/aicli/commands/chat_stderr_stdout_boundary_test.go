@@ -27,7 +27,7 @@ func newB4UnifiedSession(t *testing.T) (*ChatSession, *chatInteractionCoordinato
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 
@@ -116,7 +116,7 @@ func TestB4PipeModeStdoutNoDiagnostics(t *testing.T) {
 		NoInteractive: true,
 		JSONOutput:    false,
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 

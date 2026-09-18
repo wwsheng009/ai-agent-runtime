@@ -62,7 +62,7 @@ func runTTYLiveLoop(t *testing.T, reply string, script []ttyLiveScriptStep, setu
 		Formatter:    formatter.NewMarkdownFormatter(false),
 		InputBox:     ui.NewInputBox(nil),
 	}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	session.Interaction.session = session
 	if setup != nil {
 		setup(session, executor)

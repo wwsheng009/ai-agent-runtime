@@ -335,7 +335,7 @@ func TestRefreshAccountBalanceStatusReplacesCachedBalance(t *testing.T) {
 	})
 	surface := ui.NewFixedBottomSurface(nil)
 	surface.EnableForTest(120, 24)
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	interaction.SetSurface(surface)
 	session.Interaction = interaction
 	interaction.RefreshStatus("")

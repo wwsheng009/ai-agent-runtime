@@ -27,7 +27,7 @@ func scrollbackReplayGrantHarness(t *testing.T) (*chatRuntimeEventBridge, *chatI
 	bridge.eventLogPathOverride = filepath.Join(t.TempDir(), "runtime-events.jsonl")
 	session.RuntimeEventBridge = bridge
 
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())

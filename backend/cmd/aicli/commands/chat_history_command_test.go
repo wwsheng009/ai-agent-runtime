@@ -27,15 +27,15 @@ func TestHistoryLoadAndResumeCommandsReplayTheSameTranscript(t *testing.T) {
 		t.Fatalf("save transcript fixture: %v", err)
 	}
 
-	historySession := newHistoryCommandTestSession(manager)
+	historySession := newHistoryCommandTestSession(t, manager)
 	if err := replaceRuntimeMessages(historySession, history); err != nil {
 		t.Fatalf("prepare /history messages: %v", err)
 	}
 
 	outputs := map[string]string{
 		"/history": renderHistoryCommandTranscript(t, historySession, "/history"),
-		"/load":    renderHistoryCommandTranscript(t, newHistoryCommandTestSession(manager), "/load "+persisted.ID),
-		"/resume":  renderHistoryCommandTranscript(t, newHistoryCommandTestSession(manager), "/resume "+persisted.ID),
+		"/load":    renderHistoryCommandTranscript(t, newHistoryCommandTestSession(t, manager), "/load "+persisted.ID),
+		"/resume":  renderHistoryCommandTranscript(t, newHistoryCommandTestSession(t, manager), "/resume "+persisted.ID),
 	}
 
 	for command, output := range outputs {
@@ -92,12 +92,13 @@ func historyCommandTranscriptFixture() []runtimetypes.Message {
 	}
 }
 
-func newHistoryCommandTestSession(manager *runtimechat.SessionManager) *ChatSession {
+func newHistoryCommandTestSession(t *testing.T, manager *runtimechat.SessionManager) *ChatSession {
+	t.Helper()
 	session := &ChatSession{
 		SessionManager: manager,
 		SessionUserID:  "tester",
 	}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	return session
 }
 

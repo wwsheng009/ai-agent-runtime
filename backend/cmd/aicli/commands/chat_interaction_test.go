@@ -54,7 +54,7 @@ type testOutputBuffer struct {
 
 func TestChatInteractionCoordinator_RendersPromptAndAsyncLineOnSameWriter(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -75,7 +75,7 @@ func TestChatInteractionCoordinator_RenderAsyncLineClearsVisiblePromptInInteract
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.promptAdvanceFn = func() bool { return false }
 	output := &terminalCaptureWriter{}
 	coord.SetWriter(output)
@@ -97,7 +97,7 @@ func TestChatInteractionCoordinator_RenderSubmittedUserInputWritesUserBlock(t *t
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -111,7 +111,7 @@ func TestChatInteractionCoordinator_RenderSubmittedUserInputWritesUserBlock(t *t
 
 func TestChatInteractionCoordinator_RenderSubmittedUserInputDoesNotRestoreSubmittedDraft(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -133,7 +133,7 @@ func TestChatInteractionCoordinator_RenderSubmittedUserInputDoesNotRestoreSubmit
 
 func TestChatInteractionCoordinator_RenderSubmittedUserInputPreservesNewerDraft(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 
 	coord.SetPromptInput("submitted")
 	coord.SetPromptInput("next draft")
@@ -146,7 +146,7 @@ func TestChatInteractionCoordinator_RenderSubmittedUserInputPreservesNewerDraft(
 
 func TestChatInteractionCoordinator_RenderSubmittedUserInputPreservesFirstNewerDraft(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
@@ -172,7 +172,7 @@ func TestChatInteractionCoordinator_RenderSubmittedUserInputPreservesFirstNewerD
 
 func TestChatInteractionCoordinator_WaitingStateBlocksCommandInput(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 
 	if !chatInputCommandAllowed(session, "/help") {
@@ -201,7 +201,7 @@ func TestChatInteractionCoordinator_WaitingStateBlocksCommandInput(t *testing.T)
 
 func TestChatInteractionCoordinator_AgentStageOverridesLegacyThinkingState(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 
 	coord.StartThinking()
 	coord.SetAgentStageDetail(chatAgentStageToolRunning, "shell_command")
@@ -241,7 +241,7 @@ func TestChatInteractionCoordinator_AgentStageLabels(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(string(tt.stage), func(t *testing.T) {
-			coord := newChatInteractionCoordinator(&ChatSession{})
+			coord := newTestChatInteractionCoordinator(t, &ChatSession{})
 			coord.SetAgentStage(tt.stage)
 			if got := coord.currentSurfaceStateForTest(); got != tt.want {
 				t.Fatalf("expected %q, got %q", tt.want, got)
@@ -269,7 +269,7 @@ func TestChatDynamicStatusActionStoppingHasNoInterruptHint(t *testing.T) {
 }
 
 func TestChatInteractionCoordinator_AgentStagePrecedesStreamingState(t *testing.T) {
-	coord := newChatInteractionCoordinator(&ChatSession{})
+	coord := newTestChatInteractionCoordinator(t, &ChatSession{})
 	coord.mu.Lock()
 	coord.streamingActive = true
 	coord.mu.Unlock()
@@ -286,7 +286,7 @@ func TestChatInteractionCoordinator_AgentStagePrecedesStreamingState(t *testing.
 
 func TestStartWaiting_PreservesPromptDraft(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 
 	coord.SetPromptInput("draft while busy")
@@ -300,7 +300,7 @@ func TestStartWaiting_PreservesPromptDraft(t *testing.T) {
 
 func TestStartThinking_PreservesVisiblePromptDraft(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.promptAdvanceFn = func() bool { return false }
 	output := &terminalCaptureWriter{}
@@ -318,7 +318,7 @@ func TestStartThinking_PreservesVisiblePromptDraft(t *testing.T) {
 
 func TestSchedulePromptRedraw_RestoresPromptDraft(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.promptDelay = 10 * time.Millisecond
 	output := &synchronizedBuffer{}
@@ -334,7 +334,7 @@ func TestSchedulePromptRedraw_RestoresPromptDraft(t *testing.T) {
 
 func TestChatInteractionCoordinator_PrintPrompt_InsertsBlankLineAfterCompletedBlock(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -351,7 +351,7 @@ func TestChatInteractionCoordinator_PrintPrompt_InsertsBlankLineAfterCompletedBl
 // redrawn between them. Their boundary owns one separator row.
 func TestChatInteractionCoordinator_RenderAsyncLine_SeparatesCellsAcrossPromptRedraw(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.promptAdvanceFn = func() bool { return false }
 	output := &terminalCaptureWriter{}
 	coord.SetWriter(output)
@@ -371,7 +371,7 @@ func TestChatInteractionCoordinator_RenderAsyncLine_SeparatesCellsAcrossPromptRe
 
 func TestChatInteractionCoordinator_RenderToolChainEvent_CommitsOnlyFinalCellWithBoundary(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -409,7 +409,7 @@ func TestChatInteractionCoordinator_RenderToolChainEvent_CommitsOnlyFinalCellWit
 
 func TestChatInteractionCoordinator_RenderToolChainEvent_SeparatesCompletedAndFailedCells(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -452,7 +452,7 @@ func TestChatInteractionCoordinator_RenderToolChainEvent_SeparatesCompletedAndFa
 // viewport-only tool-chain renderer rather than RenderAsyncLine.
 func TestChatInteractionCoordinator_RenderAsyncLine_SeparatesIndependentCellsWhenPromptVisible(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.promptAdvanceFn = func() bool { return false }
 	output := &terminalCaptureWriter{}
 	coord.SetWriter(output)
@@ -471,7 +471,7 @@ func TestChatInteractionCoordinator_RenderAsyncLine_SeparatesIndependentCellsWhe
 
 func TestFinishInteractiveReadPromptState_PreservesDraftForQueuedInput(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 
 	coord.SetPromptInput("next draft")
@@ -500,7 +500,7 @@ func (c *chatInteractionCoordinator) currentSurfaceStateForTest() string {
 // echo 跳过（echo 只在 fixed-bottom surface 上显示），正是该 bug 的根因。
 func TestRenderSubmittedUserInputEchoRoutesToSceneWithoutSurface(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 	session.Interaction = coord
@@ -549,7 +549,7 @@ func TestChatInteractionCoordinator_ClearPromptKeepsComposerDraft(t *testing.T) 
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.promptAdvanceFn = func() bool { return false }
 	output := &terminalCaptureWriter{}
 	coord.SetWriter(output)
@@ -575,7 +575,7 @@ func TestChatInteractionCoordinator_ClearPromptClearsWrappedInput(t *testing.T) 
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.promptAdvanceFn = func() bool { return false }
 	output := &terminalCaptureWriter{}
 	coord.SetWriter(output)
@@ -597,7 +597,7 @@ func TestChatInteractionCoordinator_ClearPromptClearsMultilineInput(t *testing.T
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.promptAdvanceFn = func() bool { return false }
 	output := &terminalCaptureWriter{}
 	coord.SetWriter(output)
@@ -645,7 +645,7 @@ func TestNotifyChatInputDraftState_IsSilent(t *testing.T) {
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	output := &terminalCaptureWriter{}
 	coord.SetWriter(output)
 	session.Interaction = coord
@@ -705,7 +705,7 @@ func TestPrepareInteractiveRead_HoldsPromptWhileConfirmedDraftExists(t *testing.
 
 func TestChatSession_InterruptClearsPromptAndDraftState(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 	session.Interaction = coord
@@ -765,7 +765,7 @@ func TestChatInteractiveReadLine_ResetsPromptStateOnEOF(t *testing.T) {
 	session := &ChatSession{
 		InputBox: ui.NewInputBox(nil),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 	session.Interaction = coord
@@ -795,7 +795,7 @@ func TestChatInteractiveReadLine_ResetsPromptStateOnQueueEOF(t *testing.T) {
 	session := &ChatSession{
 		InputQueue: newChatInputQueue(bufio.NewReader(strings.NewReader(""))),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 	session.Interaction = coord
@@ -837,7 +837,7 @@ func TestChatInteractiveReadLine_ResetsPromptStateOnQueueError(t *testing.T) {
 	session := &ChatSession{
 		InputQueue: newChatInputQueue(bufio.NewReader(errorReader{err: readErr})),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 	session.Interaction = coord
@@ -877,7 +877,7 @@ func (r errorReader) Read(p []byte) (int, error) {
 
 func TestChatInteractionCoordinator_RenderAsyncLineSupportsMultilineToolSummary(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -894,7 +894,7 @@ func TestChatInteractionCoordinator_RenderAsyncLineSupportsMultilineToolSummary(
 // dense internally, while the cross-cell boundary owns exactly one blank row.
 func TestChatInteractionCoordinator_RenderAsyncLineSeparatesAdjacentBlocks(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -928,7 +928,7 @@ func TestChatInteractionCoordinator_PrintPromptSuppressesWhileActiveTeamRunning(
 		ActiveTeam:       &chatTeamBinding{TeamID: teamID, AgentID: "lead"},
 		LocalRuntimeHost: &localChatRuntimeHost{TeamStore: store},
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -977,7 +977,7 @@ func TestChatInteractionCoordinator_PrintPromptUsesAmbientRuntimeTeamBinding(t *
 		RuntimeSession:   &runtimechat.Session{ID: "lead-session"},
 		LocalRuntimeHost: &localChatRuntimeHost{RuntimeStore: runtimeStore, TeamStore: store},
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -1016,7 +1016,7 @@ func TestChatInteractionCoordinator_PrintPromptUsesTeamStoreLeadBindingFallback(
 		RuntimeSession:   &runtimechat.Session{ID: "lead-session"},
 		LocalRuntimeHost: &localChatRuntimeHost{TeamStore: store},
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -1538,7 +1538,7 @@ func TestStartBusyQueuedInputCaptureSkipsUnsupportedCancelableStdin(t *testing.T
 
 	session := &ChatSession{
 		InputBox:    ui.NewInputBox(nil),
-		Interaction: newChatInteractionCoordinator(&ChatSession{}),
+		Interaction: newTestChatInteractionCoordinator(t, &ChatSession{}),
 	}
 	session.Interaction.session = session
 
@@ -1600,7 +1600,7 @@ func TestRunChatLoop_DrainsQueuedLinesAfterTeamSettlesBeforePrompt(t *testing.T)
 		ChatExecutor:     executor,
 		Logger:           NewChatLogger("codex_ee", "codex", "gpt-5.4", false, "https://example.com"),
 		Formatter:        formatter.NewMarkdownFormatter(false),
-		Interaction:      newChatInteractionCoordinator(&ChatSession{}),
+		Interaction:      newTestChatInteractionCoordinator(t, &ChatSession{}),
 		InputQueue:       queue,
 		RuntimeSession:   &runtimechat.Session{ID: "lead-session"},
 		ActiveTeam:       &chatTeamBinding{TeamID: teamID, AgentID: "lead"},
@@ -1635,7 +1635,7 @@ func TestRunChatLoop_DrainsQueuedLinesAfterTeamSettlesBeforePrompt(t *testing.T)
 
 func TestChatInteractionCoordinator_FlushesBufferedStreamBeforeThinking(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -1655,7 +1655,7 @@ func TestChatInteractionCoordinator_FlushesBufferedStreamBeforeThinking(t *testi
 
 func TestChatInteractionCoordinator_FlushesBufferedStreamBeforeAsyncLine(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -1678,7 +1678,7 @@ func TestChatInteractionCoordinator_FlushesBufferedStreamBeforeAsyncLine(t *test
 
 func TestChatInteractionCoordinator_ClearsThinkingBeforeAssistantResponse(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -1696,7 +1696,7 @@ func TestChatInteractionCoordinator_ClearsThinkingBeforeAssistantResponse(t *tes
 
 func TestChatInteractionCoordinator_ClearPromptAdvancesLineForBufferedWriters(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -2024,7 +2024,7 @@ func TestBuildChatSurfaceStatusLine_ExplicitModalInputModeOverridesAgentState(t 
 
 func TestPushChatComposerInputMode_SameModeLeaseReleaseCannotOverwriteNewOwner(t *testing.T) {
 	session := &ChatSession{}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = interaction
 
 	releaseOlder := pushChatComposerInputMode(session, chatInputModeSelection)
@@ -2274,7 +2274,7 @@ func TestFinishSuccessfulChatSendClearsAndRefreshesAttachmentContext(t *testing.
 		ImagePaths:    []string{filepath.Join("images", "reference.png")},
 		TitleNotifier: notifier,
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.agentStage = chatAgentStagePlanning
 	session.Interaction = coord
 
@@ -2431,7 +2431,7 @@ func TestMarkChatGoalStatusActiveTurnStarted_IsStickyWithinTurn(t *testing.T) {
 
 func TestStartWaitingAndClearWaiting_TrackGoalStatusActiveTurn(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 
 	coord.StartWaiting()
@@ -2727,7 +2727,7 @@ func TestResolveChatStatusCurrentDirectory_UsesProfileRootWhenPresent(t *testing
 
 func TestChatInteractionCoordinator_AdvanceAfterPromptWhenStdinIsPiped(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.writer = os.Stdout
 
 	originalStdin := os.Stdin
@@ -2749,7 +2749,7 @@ func TestChatInteractionCoordinator_AdvanceAfterPromptWhenStdinIsPiped(t *testin
 
 func TestChatInteractionCoordinator_DebouncesPromptRedraw(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.promptDelay = 10 * time.Millisecond
 	output := &synchronizedBuffer{}
 	coord.SetWriter(output)
@@ -2772,7 +2772,7 @@ func TestChatInteractionCoordinator_FinalizeAssistantDelta_ReformatsMarkdown(t *
 	session := &ChatSession{
 		Formatter: formatter.NewMarkdownFormatter(false),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -2793,7 +2793,7 @@ func TestChatInteractionCoordinator_RenderAssistant_FormatsIndentedTable(t *test
 	session := &ChatSession{
 		Formatter: formatter.NewMarkdownFormatter(false),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -2812,7 +2812,7 @@ func TestChatInteractionCoordinator_FinalizeAssistantDelta_FormatsOnlyIndentedTa
 	session := &ChatSession{
 		Formatter: formatter.NewMarkdownFormatter(false),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -2832,7 +2832,7 @@ func TestChatInteractionCoordinator_RenderAssistant_FormatsMixedMarkdownDocument
 	session := &ChatSession{
 		Formatter: formatter.NewMarkdownFormatter(false),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -2864,7 +2864,7 @@ func TestChatInteractionCoordinator_ActiveBandOnSurfaceDuringMarkdownStream(t *t
 	session := &ChatSession{
 		Formatter: formatter.NewMarkdownFormatter(false),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.stableCommitDelay = 5 * time.Millisecond
 	t.Cleanup(coord.Shutdown)
 	var output bytes.Buffer
@@ -2912,7 +2912,7 @@ func TestChatInteractionCoordinator_ActiveBandOnSurfaceDuringMarkdownStream(t *t
 
 func TestChatInteractionCoordinator_ActiveBandDeliversCoalescedFinalFrame(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	coord.stableCommitDelay = 5 * time.Millisecond
 	coord.activeStream.Policy = motion.NewPolicy(motion.Config{
@@ -2937,7 +2937,7 @@ func TestChatInteractionCoordinator_ActiveBandDeliversCoalescedFinalFrame(t *tes
 func TestChatInteractionCoordinator_ActiveBandPromotesLongMarkdownList(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.stableCommitDelay = time.Hour
 	coord.stableCommitManual = true
 	t.Cleanup(coord.Shutdown)
@@ -2988,7 +2988,7 @@ func TestChatInteractionCoordinator_ActiveBandPromotesLongMarkdownList(t *testin
 
 func TestChatInteractionCoordinator_StableCommitQueueSeparatesEnqueuedAndEmittedPrefixes(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.stableCommitDelay = time.Hour
 	coord.stableCommitManual = true
 	t.Cleanup(coord.Shutdown)
@@ -3048,7 +3048,7 @@ func TestChatInteractionCoordinator_StableCommitQueueSeparatesEnqueuedAndEmitted
 func TestChatInteractionCoordinator_FinalSnapshotReplacesUnemittedStableQueue(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.stableCommitDelay = time.Hour
 	coord.stableCommitManual = true
 	t.Cleanup(coord.Shutdown)
@@ -3082,7 +3082,7 @@ func TestChatInteractionCoordinator_FinalSnapshotReplacesUnemittedStableQueue(t 
 
 func TestChatInteractionCoordinator_StableCommitCatchUpUsesHysteresis(t *testing.T) {
 	now := time.Now()
-	coord := newChatInteractionCoordinator(&ChatSession{})
+	coord := newTestChatInteractionCoordinator(t, &ChatSession{})
 	coord.stableCommitQueue = make([]activeStableCommitLine, activeStableCatchUpDepth)
 	for index := range coord.stableCommitQueue {
 		coord.stableCommitQueue[index].enqueuedAt = now
@@ -3117,7 +3117,7 @@ func TestChatInteractionCoordinator_StableCommitCatchUpUsesHysteresis(t *testing
 
 func TestChatInteractionCoordinator_ActiveBandSpinnerAdvancesWithoutDelta(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	coord.activeStream.Policy = motion.NewPolicy(motion.Config{
 		Forced:      motion.ForceMode(motion.ModeFull),
@@ -3144,7 +3144,7 @@ func TestChatInteractionCoordinator_ActiveBandSpinnerAdvancesWithoutDelta(t *tes
 
 func TestChatInteractionCoordinator_FinalizeUsesActiveStreamSource(t *testing.T) {
 	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
@@ -3164,7 +3164,7 @@ func TestChatInteractionCoordinator_FinalizeUsesActiveStreamSource(t *testing.T)
 
 func TestChatInteractionCoordinator_ToolRunningPaintsActiveBand(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -3214,7 +3214,7 @@ func TestChatInteractionCoordinator_ToolRunningPaintsActiveBand(t *testing.T) {
 }
 
 func TestChatInteractionCoordinator_ToolFinishIsScopedByCallID(t *testing.T) {
-	coord := newChatInteractionCoordinator(&ChatSession{})
+	coord := newTestChatInteractionCoordinator(t, &ChatSession{})
 	t.Cleanup(coord.Shutdown)
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	surface.EnableForTest(80, 24)
@@ -3244,7 +3244,7 @@ func TestChatInteractionCoordinator_ToolFinishIsScopedByCallID(t *testing.T) {
 
 func TestChatInteractionCoordinator_ToolProgressUpdatesActiveBand(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -3380,7 +3380,7 @@ func TestActiveStreamStableScrollbackCuts(t *testing.T) {
 }
 
 func TestChatInteractionCoordinator_AgentStageDetailKeepsProgressBudget(t *testing.T) {
-	coord := newChatInteractionCoordinator(&ChatSession{})
+	coord := newTestChatInteractionCoordinator(t, &ChatSession{})
 	// Longer than the old 48 budget, under the 96 ActiveBand-oriented budget.
 	detail := "shell 45% downloading large artifact from remote cache mirror xyz"
 	if ui.DisplayWidth(detail) <= 48 {
@@ -3414,7 +3414,7 @@ func TestChatInteractionCoordinator_ToolBandYieldsToAssistantStream(t *testing.T
 	session := &ChatSession{
 		Formatter: formatter.NewMarkdownFormatter(false),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -3454,7 +3454,7 @@ func TestChatInteractionCoordinator_ToolBandYieldsToAssistantStream(t *testing.T
 
 func TestChatInteractionCoordinator_LivePlainTextStreamsStableChunksWithoutSurface(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.liveStreamFn = func() bool { return true }
 	coord.streamRuneDelay = 0
 	var output bytes.Buffer
@@ -3487,7 +3487,7 @@ func TestChatInteractionCoordinator_RenderAssistantDelta_RewritesMarkdownIncreme
 	session := &ChatSession{
 		Formatter: formatter.NewMarkdownFormatter(false),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -3512,7 +3512,7 @@ func TestChatInteractionCoordinator_RenderAssistantDelta_BuffersMarkdownLead(t *
 	session := &ChatSession{
 		Formatter: formatter.NewMarkdownFormatter(false),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -3537,7 +3537,7 @@ func TestChatInteractionCoordinator_RenderAssistantDelta_UpgradesTextStreamToMar
 	session := &ChatSession{
 		Formatter: formatter.NewMarkdownFormatter(false),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -3560,7 +3560,7 @@ func TestChatInteractionCoordinator_RenderAssistantDelta_BuffersPartialTableUnti
 	session := &ChatSession{
 		Formatter: formatter.NewMarkdownFormatter(false),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -3585,7 +3585,7 @@ func TestChatInteractionCoordinator_RenderAssistantDelta_DedupesSnapshotStyleChu
 	session := &ChatSession{
 		Formatter: formatter.NewMarkdownFormatter(false),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -3609,7 +3609,7 @@ func TestChatInteractionCoordinator_RenderAssistant_StripsAsyncTeamChoiceTail(t 
 	session := &ChatSession{
 		Formatter: formatter.NewMarkdownFormatter(false),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -3635,7 +3635,7 @@ func TestChatInteractionCoordinator_RenderAssistantDelta_KeepsPlainTextModeAfter
 	session := &ChatSession{
 		Formatter: formatter.NewMarkdownFormatter(false),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -3663,7 +3663,7 @@ func TestChatInteractionCoordinator_RenderAssistantDelta_KeepsPlainTextModeAfter
 }
 
 func TestChatInteractionCoordinator_EstimateStreamFlushTimeoutScalesWithContent(t *testing.T) {
-	coord := newChatInteractionCoordinator(&ChatSession{})
+	coord := newTestChatInteractionCoordinator(t, &ChatSession{})
 	coord.streamRuneDelay = 2 * time.Millisecond
 
 	shortTimeout := coord.EstimateStreamFlushTimeout("short")
@@ -3681,7 +3681,7 @@ func TestChatInteractionCoordinator_CompleteAssistantResponse_AppendsMissingPlai
 	session := &ChatSession{
 		Formatter: formatter.NewMarkdownFormatter(false),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -3701,7 +3701,7 @@ func TestChatInteractionCoordinator_CompleteAssistantResponse_AppendsMissingPlai
 
 func TestChatInteractionCoordinator_RenderAssistantDelta_BuffersShortPlainTextUntilFinalize(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -3718,7 +3718,7 @@ func TestChatInteractionCoordinator_RenderAssistantDelta_BuffersShortPlainTextUn
 
 func TestChatInteractionCoordinator_RenderAssistantDelta_StreamsImmediatelyWhenLiveOutputEnabled(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.liveStreamFn = func() bool { return true }
 	coord.streamRuneDelay = 0
 	var output bytes.Buffer
@@ -3747,7 +3747,7 @@ func TestChatInteractionCoordinator_CompleteAssistantResponse_BuffersMarkdownWhe
 	session := &ChatSession{
 		Formatter: formatter.NewMarkdownFormatter(false),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.liveStreamFn = func() bool { return true }
 	coord.streamRuneDelay = 0
 	var output bytes.Buffer
@@ -3777,7 +3777,7 @@ func TestChatInteractionCoordinator_CompleteAssistantResponse_UpgradesLiveIntroT
 	session := &ChatSession{
 		Formatter: formatter.NewMarkdownFormatter(false),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.liveStreamFn = func() bool { return true }
 	coord.streamRuneDelay = 0
 	var output bytes.Buffer
@@ -3816,7 +3816,7 @@ func TestChatInteractionCoordinator_CompleteAssistantResponse_FormatsLiveInlineM
 	session := &ChatSession{
 		Formatter: formatter.NewMarkdownFormatter(false),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.liveStreamFn = func() bool { return true }
 	coord.streamRuneDelay = 0
 	var output bytes.Buffer
@@ -3848,7 +3848,7 @@ func TestChatInteractionCoordinator_FinalizeReasoningDelta_FormatsBufferedMarkdo
 	session := &ChatSession{
 		Formatter: formatter.NewMarkdownFormatter(false),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.liveStreamFn = func() bool { return true }
 	coord.streamRuneDelay = 0
 	var output bytes.Buffer
@@ -3886,7 +3886,7 @@ func TestChatInteractionCoordinator_FinalizeReasoningDelta_FormatsBufferedMarkdo
 
 func TestChatInteractionCoordinator_RenderAssistantDelta_PreservesLeadingWhitespaceBetweenChunks(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.liveStreamFn = func() bool { return true }
 	coord.streamRuneDelay = 0
 	var output bytes.Buffer
@@ -3907,7 +3907,7 @@ func TestChatInteractionCoordinator_RenderAssistantDelta_PreservesLeadingWhitesp
 
 func TestChatInteractionCoordinator_RenderAssistantDelta_IsolatesRTLTextInLiveStream(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.liveStreamFn = func() bool { return true }
 	coord.streamRuneDelay = 0
 	var output bytes.Buffer
@@ -3926,7 +3926,7 @@ func TestChatInteractionCoordinator_RenderAssistantDelta_IsolatesRTLTextInLiveSt
 
 func TestChatInteractionCoordinator_RenderReasoningDelta_StreamsImmediatelyWhenLiveOutputEnabled(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.liveStreamFn = func() bool { return true }
 	coord.streamRuneDelay = 0
 	var output bytes.Buffer
@@ -3959,7 +3959,7 @@ func TestChatInteractionCoordinator_RenderReasoningDelta_StreamsImmediatelyWhenL
 
 func TestChatInteractionCoordinator_CompleteReasoningResponse_SuppressesMetadataOnlyBlock(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 
@@ -3979,7 +3979,7 @@ func TestChatInteractionCoordinator_CompleteReasoningResponse_SuppressesMetadata
 
 func TestChatInteractionCoordinator_RenderReasoningDelta_PreservesLeadingWhitespaceBetweenChunks(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.liveStreamFn = func() bool { return true }
 	coord.streamRuneDelay = 0
 	var output bytes.Buffer
@@ -4008,7 +4008,7 @@ func TestChatInteractionCoordinator_RenderReasoningDelta_PreservesLeadingWhitesp
 
 func TestChatInteractionCoordinator_DefersAssistantTextUntilReasoningCompletes(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.liveStreamFn = func() bool { return true }
 	coord.streamRuneDelay = 0
 	var output bytes.Buffer
@@ -4058,7 +4058,7 @@ func TestChatInteractionCoordinator_DefersAssistantTextUntilReasoningCompletes(t
 
 func TestChatInteractionCoordinator_DoesNotRedrawPromptDuringStreaming(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.promptDelay = 10 * time.Millisecond
 	output := &synchronizedBuffer{}
 	coord.SetWriter(output)
@@ -4090,7 +4090,7 @@ func TestChatInteractionCoordinator_DoesNotRedrawPromptDuringStreaming(t *testin
 
 func TestChatInteractionCoordinator_SchedulePromptRedraw_InsertsBlankLineAfterCompletedBlock(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.promptDelay = 10 * time.Millisecond
 	output := &synchronizedBuffer{}
 	coord.SetWriter(output)
@@ -4283,7 +4283,7 @@ func (w *terminalCaptureWriter) clearScreenFromCursor() {
 
 func TestChatInteractionCoordinator_RenderReasoningDelta_HoldsBackMarkdownStream(t *testing.T) {
 	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output testOutputBuffer
 	coord.SetWriter(&output)
 	coord.liveStreamFn = func() bool { return true }
@@ -4313,7 +4313,7 @@ func TestChatInteractionCoordinator_RenderReasoningDelta_HoldsBackMarkdownStream
 
 func TestChatInteractionCoordinator_RenderReasoningDelta_StreamsPlainTextWhenNotMarkdown(t *testing.T) {
 	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output testOutputBuffer
 	coord.SetWriter(&output)
 	coord.liveStreamFn = func() bool { return true }
@@ -4332,7 +4332,7 @@ func TestChatInteractionCoordinator_RenderReasoningDelta_StreamsPlainTextWhenNot
 
 func TestChatInteractionCoordinator_CompleteReasoningResponse_NonLive_RendersMarkdown(t *testing.T) {
 	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output testOutputBuffer
 	coord.SetWriter(&output)
 
@@ -4399,7 +4399,7 @@ func TestChatInteractionCoordinator_CompleteReasoningResponse_NoDuplicateAfterLi
 	}, "\n")
 
 	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output testOutputBuffer
 	coord.SetWriter(&output)
 	coord.liveStreamFn = func() bool { return true }

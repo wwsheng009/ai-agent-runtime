@@ -45,7 +45,7 @@ func TestRenderLayer_TextParity_LiveCommandAndErrorBlocks(t *testing.T) {
 	session.RuntimeEventBridge = bridge
 
 	evs := renderParityTwoTurnEvents()
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var out bytes.Buffer
 	coord.SetWriter(&out)
 
@@ -176,7 +176,7 @@ func TestRenderLayer_CommandError_EmptyInputsAreNoOps(t *testing.T) {
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var out bytes.Buffer
 	coord.SetWriter(&out)
 

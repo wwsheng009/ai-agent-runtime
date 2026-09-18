@@ -96,7 +96,7 @@ func renderQuestionCardFrame(t *testing.T, width, height int, body []string, ban
 	surface.SetPhysicalWritesEnabled(false)
 
 	session := &ChatSession{Surface: surface, InputBox: ui.NewInputBox(nil)}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetSurface(surface)
 	coord.SetWriter(os.Stdout)

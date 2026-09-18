@@ -15,7 +15,7 @@ func TestAICLITranscriptRenderer_RendersCompleteBlocksWithInteraction(t *testing
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	session.Interaction.SetWriter(&output)
 	renderer := newAICLITranscriptRenderer(session)
@@ -141,7 +141,7 @@ func TestShellSlashCommand_RendersCompleteResponseThroughTranscriptRenderer(t *t
 		ChatExecutor: &fakeChatExecutor{output: response},
 		cancelCtx:    context.Background(),
 	}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	var transcript bytes.Buffer
 	session.Interaction.SetWriter(&transcript)
 
@@ -170,7 +170,7 @@ func TestAICLITranscriptRenderer_SuppressesNonTranscriptModes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tt.session.Interaction = newChatInteractionCoordinator(tt.session)
+			tt.session.Interaction = newTestChatInteractionCoordinator(t, tt.session)
 			var output bytes.Buffer
 			tt.session.Interaction.SetWriter(&output)
 			renderer := newAICLITranscriptRenderer(tt.session)

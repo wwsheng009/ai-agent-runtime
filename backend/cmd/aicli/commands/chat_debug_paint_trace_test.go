@@ -22,7 +22,7 @@ func newPaintTraceDebugSession(t *testing.T) (*ChatSession, *ui.FixedBottomSurfa
 		Model:        "gpt-test",
 		Surface:      surface,
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 	coord.SetSurface(surface)

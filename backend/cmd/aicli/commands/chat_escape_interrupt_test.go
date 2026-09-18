@@ -53,7 +53,7 @@ func TestStartChatEscapeInterruptWatcherPreservesQueuedInput(t *testing.T) {
 		cancelCtx:  ctx,
 		cancelFunc: cancel,
 	}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 
 	stop := startChatEscapeInterruptWatcher(session)
 	defer stop()

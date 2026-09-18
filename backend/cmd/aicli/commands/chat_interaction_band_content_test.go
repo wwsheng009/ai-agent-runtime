@@ -105,7 +105,7 @@ func TestChatInteractionCoordinator_MidStreamScreenRowsMatchReplayRows(t *testin
 	src := reply.String()
 
 	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.stableCommitDelay = time.Hour
 	t.Cleanup(coord.Shutdown)
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
@@ -202,7 +202,7 @@ func TestChatInteractionCoordinator_MidStreamBandKeepsBlockSeparatorBeforeHoldba
 		t.Run(tc.name, func(t *testing.T) {
 			const width, height = 80, 40
 			session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
-			coord := newChatInteractionCoordinator(session)
+			coord := newTestChatInteractionCoordinator(t, session)
 			coord.stableCommitDelay = time.Hour
 			t.Cleanup(coord.Shutdown)
 			surface := ui.NewFixedBottomSurface(ui.NewTerminal())
@@ -254,7 +254,7 @@ func TestChatInteractionCoordinator_MidStreamBandHoldbackStaysDim(t *testing.T) 
 	const holdback = "下一段正在流"
 
 	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(true)}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.stableCommitDelay = time.Hour
 	t.Cleanup(coord.Shutdown)
 	// EnableForTest pins geometry. Color/SGR still depend on host driver caps and

@@ -21,7 +21,7 @@ func TestRunChatLoopInteractiveInitialPromptSubmitsOnceAndStaysInteractive(t *te
 	session := newInitialPromptLoopTestSession(executor)
 	session.InputQueue = queue
 	var output bytes.Buffer
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	session.Interaction.SetWriter(&output)
 	defer session.Interaction.Shutdown()
 

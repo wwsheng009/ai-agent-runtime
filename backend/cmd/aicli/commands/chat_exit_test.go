@@ -57,7 +57,7 @@ func TestChatInterruptExitStateIdleUnifiedSessionExitsImmediately(t *testing.T) 
 	state := &chatInterruptExitState{}
 	var shouldExit atomic.Bool
 	session := &ChatSession{}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 
 	if !state.handleInterruptSignal(session, &shouldExit, time.Now()) {
 		t.Fatal("Ctrl+C while Ready should exit immediately")
@@ -71,7 +71,7 @@ func TestChatInterruptExitStateStoppingExitsImmediately(t *testing.T) {
 	state := &chatInterruptExitState{}
 	var shouldExit atomic.Bool
 	session := &ChatSession{}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	session.Interaction.SetAgentStage(chatAgentStageStopping)
 
 	if !state.handleInterruptSignal(session, &shouldExit, time.Now()) {
@@ -86,7 +86,7 @@ func TestChatInterruptExitStateFirstInterruptThenStoppingSecondExits(t *testing.
 	state := &chatInterruptExitState{}
 	var shouldExit atomic.Bool
 	session := &ChatSession{}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	session.Interaction.StartWaiting()
 
 	now := time.Now()

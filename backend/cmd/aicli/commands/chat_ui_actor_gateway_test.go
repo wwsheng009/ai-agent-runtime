@@ -22,7 +22,7 @@ func newGatewayCoordinator(t *testing.T) (*chatInteractionCoordinator, *ChatSess
 	t.Helper()
 	var terminal bytes.Buffer
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 	coordinator.SetWriter(&terminal)
@@ -81,7 +81,7 @@ func TestEnableUnifiedRendererGatewayAttachesGatewayBackedSession(t *testing.T) 
 func TestEnableUnifiedRendererGatewayShutdownClosesGateway(t *testing.T) {
 	var terminal bytes.Buffer
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coordinator
 	coordinator.SetWriter(&terminal)
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
@@ -124,7 +124,7 @@ func TestEnableUnifiedRendererGatewayNoSecondPhysicalWriter(t *testing.T) {
 func TestEnableUnifiedRendererGatewayMirrorsToRenderOutputFile(t *testing.T) {
 	var terminal bytes.Buffer
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coordinator
 	coordinator.SetWriter(&terminal)
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())

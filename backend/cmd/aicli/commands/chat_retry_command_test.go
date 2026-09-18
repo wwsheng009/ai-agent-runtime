@@ -15,7 +15,7 @@ import (
 func TestHandleRetryCommandRestoresFailedPromptWithoutExecuting(t *testing.T) {
 	executor := &fakeChatExecutor{}
 	session := &ChatSession{ChatExecutor: executor}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	rememberChatTurnRecovery(session, "修复失败的构建", false)
 
@@ -36,7 +36,7 @@ func TestHandleRetryCommandRestoresFailedPromptWithoutExecuting(t *testing.T) {
 
 func TestHandleRetryCommandInterruptedTurnWarnsAboutPartialToolEffects(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	rememberChatTurnRecovery(session, "继续修改文件", true)
 
@@ -54,7 +54,7 @@ func TestHandleRetryCommandInterruptedTurnWarnsAboutPartialToolEffects(t *testin
 
 func TestHandleRetryCommandDoesNotOverwriteExistingDraft(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetPromptInput("用户正在编辑的新草稿")
 	rememberChatTurnRecovery(session, "旧失败消息", false)
@@ -74,7 +74,7 @@ func TestHandleRetryCommandDoesNotOverwriteExistingDraft(t *testing.T) {
 func TestHandleRetryCommandRejectsForceExecution(t *testing.T) {
 	executor := &fakeChatExecutor{}
 	session := &ChatSession{ChatExecutor: executor}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	rememberChatTurnRecovery(session, "可能已执行工具的消息", true)
 
@@ -110,7 +110,7 @@ func TestHandleRetryCommandRestoresQueueDraftWithoutSubmitting(t *testing.T) {
 
 func TestRenderChatTurnRecoveryHintExplainsSafeInterruptedRecovery(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 	session.Interaction = coord
@@ -126,7 +126,7 @@ func TestRenderChatTurnRecoveryHintExplainsSafeInterruptedRecovery(t *testing.T)
 
 func TestRenderChatTurnRecoveryHintExplainsLiveSessionLeaseConflict(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 	session.Interaction = coord
@@ -150,7 +150,7 @@ func TestRenderChatTurnRecoveryHintExplainsLiveSessionLeaseConflict(t *testing.T
 // 提示必须说明无副作用，而不是套用通用的"避免重复工具副作用"文案。
 func TestRenderChatTurnRecoveryHintExplainsMalformedToolArguments(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 	session.Interaction = coord
@@ -174,7 +174,7 @@ func TestRenderChatTurnRecoveryHintExplainsMalformedToolArguments(t *testing.T) 
 
 func TestHandleRetryCommandRequiresExplicitFailureRecord(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 
 	output := captureStdout(t, func() {
@@ -191,7 +191,7 @@ func TestHandleRetryCommandRequiresExplicitFailureRecord(t *testing.T) {
 
 func TestHandleRetryCommandRejectsRecoveryFromAnotherSession(t *testing.T) {
 	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: "session-old"}}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	rememberChatTurnRecovery(session, "旧会话失败消息", false)
 	session.RuntimeSession = &runtimechat.Session{ID: "session-new"}

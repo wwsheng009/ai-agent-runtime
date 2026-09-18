@@ -16,7 +16,7 @@ import (
 
 func TestRenderAssistantDelta_ShadowUsesCausalFollowup(t *testing.T) {
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coordinator.SetWriter(&output)
 
@@ -80,7 +80,7 @@ func TestRenderAssistantDelta_ShadowUsesCausalFollowup(t *testing.T) {
 
 func TestToolStageShadowUsesCausalFollowup(t *testing.T) {
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	coordinator.SetWriter(&bytes.Buffer{})
 	coordinator.activeStream.BeginTool("shell", nil)
@@ -218,7 +218,7 @@ func TestActiveStreamShadowActionMirrorsMountedSceneCell(t *testing.T) {
 
 func TestRenderAssistantDeltaPostsShadowActionAfterCoordinatorUnlock(t *testing.T) {
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	coordinator.SetWriter(&bytes.Buffer{})
 
@@ -249,7 +249,7 @@ func TestRenderAssistantDeltaPostsShadowActionAfterCoordinatorUnlock(t *testing.
 
 func TestCompleteAssistantResponsePostsFinalizationShadowTransaction(t *testing.T) {
 	session := &ChatSession{Stream: true}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	coordinator.SetWriter(&bytes.Buffer{})
 	session.Interaction = coordinator
@@ -298,7 +298,7 @@ func TestCompleteAssistantResponsePostsFinalizationShadowTransaction(t *testing.
 
 func TestRenderReasoningDeltaMirrorsAndClearsShadowActiveCell(t *testing.T) {
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	coordinator.SetWriter(&bytes.Buffer{})
 	actor := coordinator.ensureUIActor()
@@ -340,7 +340,7 @@ func TestRuntimeDeltaSnapshotDoesNotEraseShadowStreamingLedger(t *testing.T) {
 		Stream:         true,
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
 	}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	coordinator.SetWriter(&bytes.Buffer{})
 	session.Interaction = coordinator
@@ -394,7 +394,7 @@ func TestRenderAssistantDeltaUnifiedMountsNewCell(t *testing.T) {
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{Stream: true}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 

@@ -34,7 +34,7 @@ func TestTryExecuteStructuredChatCommandLoad(t *testing.T) {
 	ui.SetTheme(ui.ThemeAuto)
 
 	manager := newLoadCommandTestManager(t, "load-structured-session")
-	session := newHistoryCommandTestSession(manager)
+	session := newHistoryCommandTestSession(t, manager)
 
 	result, handled, err := tryExecuteStructuredChatCommand(session, "/load load-structured-session")
 	if err != nil {
@@ -78,7 +78,7 @@ func TestTryExecuteStructuredChatCommandLoadErrorsStayLegacy(t *testing.T) {
 	ui.SetTheme(ui.ThemeAuto)
 
 	manager := newLoadCommandTestManager(t, "load-structured-session")
-	session := newHistoryCommandTestSession(manager)
+	session := newHistoryCommandTestSession(t, manager)
 
 	for _, command := range []string{"/load", "/load   ", "/load missing-session"} {
 		result, handled, err := tryExecuteStructuredChatCommand(session, command)
@@ -99,7 +99,7 @@ func TestDispatchChatCommandLoadCommitsDocumentBeforeReplay(t *testing.T) {
 	ui.SetTheme(ui.ThemeAuto)
 
 	manager := newLoadCommandTestManager(t, "load-structured-session")
-	session := newHistoryCommandTestSession(manager)
+	session := newHistoryCommandTestSession(t, manager)
 	var output bytes.Buffer
 	session.Interaction.SetWriter(&output)
 
@@ -152,7 +152,7 @@ func TestDispatchChatCommandLoadSurvivesOwnedViewportRepaints(t *testing.T) {
 		SessionManager: manager,
 		SessionUserID:  "tester",
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 	coord.SetSurface(surface)

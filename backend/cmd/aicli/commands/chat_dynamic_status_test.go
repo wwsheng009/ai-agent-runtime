@@ -76,7 +76,7 @@ func TestSurfaceStatusKindRunningClassification(t *testing.T) {
 }
 
 func TestRetryDetailStateKeepsDynamicStatusClockRunning(t *testing.T) {
-	coord := newChatInteractionCoordinator(&ChatSession{})
+	coord := newTestChatInteractionCoordinator(t, &ChatSession{})
 	t.Cleanup(coord.Shutdown)
 
 	// A live activity clock is already running mid-turn.

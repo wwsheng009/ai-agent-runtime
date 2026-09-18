@@ -22,7 +22,7 @@ func replayHistoryTranscriptSkeleton(t *testing.T, armWaiting bool) []string {
 	surface.EnableForTest(width, height)
 
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	coord.promptAdvanceFn = func() bool { return false }
 	session.Interaction = coord

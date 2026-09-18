@@ -36,7 +36,7 @@ func TestRenderLayer_GapParity_LegacyCoordinatorVsLayoutTranscript(t *testing.T)
 	// PrintPrompt 在用户输入前消费上一块残留 gap 的真实实现（unified plan
 	// §7.3 记录的唯一消费点），此处直接调用以模拟 prompt 重绘的 gap 部分。
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var out bytes.Buffer
 	coord.SetWriter(&out)
 	coord.RenderSubmittedUserInput("U1")

@@ -240,7 +240,7 @@ func TestPrepareRuntimeSelectionInputSuspendsAndRestoresQueuedMessages(t *testin
 	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
 	queue.routeInputText("follow up\n")
 	session := &ChatSession{InputQueue: queue}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 
 	notice, restore := prepareRuntimeSelectionInput(session, "模型选择")
 	if !strings.Contains(notice, "临时挂起") || strings.Contains(notice, "丢弃") {
@@ -492,7 +492,7 @@ func TestPrintRuntimeModelState_WritesThroughFixedBottomSurfaceAfterPromptClear(
 	}
 
 	output := captureStdout(t, func() {
-		coord := newChatInteractionCoordinator(session)
+		coord := newTestChatInteractionCoordinator(t, session)
 		session.Interaction = coord
 		session.Surface = surface
 		coord.SetSurface(surface)

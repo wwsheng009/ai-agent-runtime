@@ -32,7 +32,7 @@ func TestDispatchChatCommand_RawOutputBeforeHistoryKeepsTranscriptDense(t *testi
 	surface.EnableForTest(width, height)
 
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 	session.Surface = surface

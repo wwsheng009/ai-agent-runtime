@@ -76,7 +76,7 @@ func TestDispatchChatCommandStatusDoesNotWriteRawStdout(t *testing.T) {
 		ProviderName: "openai",
 		Model:        "gpt-test",
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 
@@ -143,7 +143,7 @@ func TestDispatchChatCommandStatusSurvivesOwnedViewportRepaints(t *testing.T) {
 		Model:        "gpt-test",
 		Surface:      surface,
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 	coord.SetSurface(surface)

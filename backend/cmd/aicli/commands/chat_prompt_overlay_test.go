@@ -10,7 +10,7 @@ import (
 
 func TestChatPromptOverlayClearSelectionPopupResetsPromptWithoutSurface(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetPromptInput("stale popup input")
 
@@ -23,7 +23,7 @@ func TestChatPromptOverlayClearSelectionPopupResetsPromptWithoutSurface(t *testi
 
 func TestChatPromptOverlayShowSelectionPopupDoesNotClearPromptWithoutSurface(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetPromptInput("main draft")
 
@@ -36,7 +36,7 @@ func TestChatPromptOverlayShowSelectionPopupDoesNotClearPromptWithoutSurface(t *
 
 func TestChatPromptOverlayClearComposerPreviewResetsPromptWithoutSurface(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetPromptInput("secret draft")
 
@@ -62,7 +62,7 @@ func TestChatPromptOverlayPriorityPromptFallbackOutputContract(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetPromptInput("approval draft")
 

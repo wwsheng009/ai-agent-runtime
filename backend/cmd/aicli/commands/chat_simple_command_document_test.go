@@ -23,7 +23,7 @@ func TestDispatchChatCommandSimpleDocumentsStayOnUnifiedTerminalSession(t *testi
 		SessionUserID:  userID,
 	}
 	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 
@@ -131,7 +131,7 @@ func TestTryExecuteStructuredChatCommandHistoryReplaysInsteadOfFallingThrough(t 
 func TestTryExecuteStructuredChatCommandHistoryOpensUnifiedTranscriptView(t *testing.T) {
 	session := &ChatSession{}
 	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 

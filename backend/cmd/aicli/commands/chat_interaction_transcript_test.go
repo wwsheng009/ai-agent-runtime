@@ -150,7 +150,7 @@ func TestChatInteractionCoordinator_TranscriptRecordsOnlyOnDrain(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.stableCommitDelay = time.Hour
 	coord.stableCommitManual = true
 	t.Cleanup(coord.Shutdown)
@@ -207,7 +207,7 @@ func TestChatInteractionCoordinator_FinalQueueCorrectDropsPendingWithoutReplay(t
 	t.Setenv("NO_COLOR", "1")
 
 	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.stableCommitDelay = time.Hour
 	coord.stableCommitManual = true
 	t.Cleanup(coord.Shutdown)
@@ -260,7 +260,7 @@ func TestChatInteractionCoordinator_EmittedDivergenceSuppressesFullReplay(t *tes
 	t.Setenv("NO_COLOR", "1")
 
 	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.stableCommitDelay = time.Hour
 	coord.stableCommitManual = true
 	t.Cleanup(coord.Shutdown)
@@ -318,7 +318,7 @@ func TestChatInteractionCoordinator_RefreshRebuildsPendingStableQueue(t *testing
 	t.Setenv("NO_COLOR", "1")
 
 	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.stableCommitDelay = time.Hour
 	coord.stableCommitManual = true
 	t.Cleanup(coord.Shutdown)
@@ -370,7 +370,7 @@ func TestChatInteractionCoordinator_RefreshRebuildsPendingStableQueue(t *testing
 func TestChatInteractionCoordinator_DebugSummarySurvivesResetStream(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
-	coord := newChatInteractionCoordinator(&ChatSession{})
+	coord := newTestChatInteractionCoordinator(t, &ChatSession{})
 	coord.stableCommitManual = true
 	t.Cleanup(coord.Shutdown)
 
@@ -424,7 +424,7 @@ func TestChatInteractionCoordinator_DrainNotesSoftEmittedTail(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.stableCommitDelay = time.Hour
 	coord.stableCommitManual = true
 	t.Cleanup(coord.Shutdown)
@@ -477,7 +477,7 @@ func TestChatInteractionCoordinator_SoftEmittedTailReflowsFromSourceOnWidthChang
 	fmtr := formatter.NewMarkdownFormatter(false)
 	fmtr.Width = 80
 	session := &ChatSession{Formatter: fmtr}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 
 	var output bytes.Buffer
@@ -551,7 +551,7 @@ func TestChatInteractionCoordinator_SoftReflowClearsWhenLiveSurfaceWindowMissing
 	fmtr := formatter.NewMarkdownFormatter(false)
 	fmtr.Width = 80
 	session := &ChatSession{Formatter: fmtr}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 
 	var output bytes.Buffer
@@ -607,7 +607,7 @@ func TestChatInteractionCoordinator_RefreshReflowsSoftTailAndKeepsEmittedOwnersh
 	fmtr := formatter.NewMarkdownFormatter(false)
 	fmtr.Width = 80
 	session := &ChatSession{Formatter: fmtr}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.stableCommitDelay = time.Hour
 	coord.stableCommitManual = true
 	t.Cleanup(coord.Shutdown)
@@ -687,7 +687,7 @@ func TestChatInteractionCoordinator_SoftEmittedTailTrimsWithSurfaceWindow(t *tes
 	t.Setenv("NO_COLOR", "1")
 
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 
 	var output bytes.Buffer
@@ -784,7 +784,7 @@ func TestChatInteractionCoordinator_ForeignWriteInvalidatesSoftEmittedTail(t *te
 	t.Setenv("NO_COLOR", "1")
 
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 
 	var output bytes.Buffer
@@ -830,7 +830,7 @@ func TestChatInteractionCoordinator_ProgressiveCommitSoftTailEndToEnd(t *testing
 	t.Setenv("NO_COLOR", "1")
 
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.stableCommitDelay = time.Hour
 	coord.stableCommitManual = true
 	t.Cleanup(coord.Shutdown)
@@ -958,7 +958,7 @@ func TestChatInteractionCoordinator_PaintPathReflowsSoftTailOnResize(t *testing.
 	t.Setenv("NO_COLOR", "1")
 
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.stableCommitDelay = time.Hour
 	coord.stableCommitManual = true
 	t.Cleanup(coord.Shutdown)

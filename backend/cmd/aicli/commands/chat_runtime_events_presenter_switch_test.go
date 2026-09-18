@@ -29,7 +29,7 @@ func runPresenterSwitchSession(t *testing.T, envOn bool) (string, *chatRuntimeEv
 	session.RuntimeEventBridge = bridge
 
 	evs := renderParityTwoTurnEvents()
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var out bytes.Buffer
 	coord.SetWriter(&out)
 

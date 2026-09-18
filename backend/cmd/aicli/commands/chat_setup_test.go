@@ -302,7 +302,7 @@ func TestBuildChatFinalCleanup_ClearsScreenAndStopsPromptRedraw(t *testing.T) {
 	output := captureStdout(t, func() {
 		session := &ChatSession{}
 		session.Layout = ui.NewLayout(ui.LayoutSimple)
-		session.Interaction = newChatInteractionCoordinator(session)
+		session.Interaction = newTestChatInteractionCoordinator(t, session)
 		session.Interaction.promptDelay = 10 * time.Millisecond
 		session.Interaction.SchedulePromptRedraw()
 
@@ -495,7 +495,7 @@ func TestPresentChatStartupSession_ReplaysHistoryInTUI(t *testing.T) {
 	session := &ChatSession{
 		RuntimeSession: loaded,
 	}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	var transcript bytes.Buffer
 	session.Interaction.SetWriter(&transcript)
 	if err := replaceRuntimeMessages(session, loaded.GetMessages()); err != nil {
@@ -1117,6 +1117,11 @@ func TestBootstrapChatSession_CreatesRuntimeConversation(t *testing.T) {
 func TestBootstrapChatSession_UsesActorExecutorByDefault(t *testing.T) {
 	// 指向一份空 runtime 配置：bootstrap 的默认持久化语义（session dir 惰性
 	// store）不应被仓库 configs/runtime.yaml 中的 server 专用 storePath 改变。
+	// 同时隔离用户主目录：任何回退到真实 ~/.aicli 配置/状态的路径都会让
+	// 该断言依赖运行环境（历史 flake 根因，见 docs/plan §16.4）。
+	home := isolateInitHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	configPath := filepath.Join(t.TempDir(), "runtime.json")
 	require.NoError(t, os.WriteFile(configPath, []byte("{}"), 0o600))
 	cfg := &config.Config{SkillsRuntime: &config.SkillsRuntimeConfig{ConfigFile: configPath}}

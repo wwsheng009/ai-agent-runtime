@@ -28,7 +28,7 @@ func TestChatQuestionAnswerMergedIntoBottomPromptReadsThroughPromptRow(t *testin
 		InputBox:    ui.NewInputBox(nil),
 		InputReader: bufio.NewReader(strings.NewReader("stale\n")),
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetSurface(surface)
 	coord.SetWriter(os.Stdout)
@@ -139,7 +139,7 @@ func TestChatQuestionAnswerMergedIntoBottomPromptReadsThroughPromptRow(t *testin
 
 func TestChatMergedAnswerPromptFallsBackWithoutSurface(t *testing.T) {
 	session := &ChatSession{InputBox: ui.NewInputBox(nil)}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 
 	if chatMergedAnswerPromptSupported(session) {
@@ -164,7 +164,7 @@ func TestChatMergedAnswerPromptDeclineRestoresDraft(t *testing.T) {
 		InputBox:      ui.NewInputBox(nil),
 		NoInteractive: true,
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetSurface(surface)
 	coord.SetWriter(os.Stdout)

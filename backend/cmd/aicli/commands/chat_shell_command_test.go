@@ -37,7 +37,7 @@ func TestExecuteStructuredShellCommandCommitsCellAndSendEffect(t *testing.T) {
 		ChatExecutor: &fakeChatExecutor{output: "structured shell response"},
 		cancelCtx:    context.Background(),
 	}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 
 	result := executeStructuredShellCommand(session, "/shell echo structured-shell-cell")
 	plain := ui.RenderDocumentPlain(result.Document())

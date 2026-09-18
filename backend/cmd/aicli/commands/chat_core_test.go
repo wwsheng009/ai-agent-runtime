@@ -1982,7 +1982,7 @@ func TestShouldDisplayActorStreamFallback_OnlyForActorExecutor(t *testing.T) {
 
 func TestAICLIEventRenderer_StreamsReasoningBeforeResult(t *testing.T) {
 	session := &ChatSession{Stream: true}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	session.Interaction.liveStreamFn = func() bool { return true }
 	session.Interaction.streamRuneDelay = 0
 	var output bytes.Buffer
@@ -2021,7 +2021,7 @@ func TestAICLIEventRenderer_DefersPlainIntroUntilMarkdownFinal(t *testing.T) {
 		Stream:    true,
 		Formatter: formatter.NewMarkdownFormatter(false),
 	}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	session.Interaction.liveStreamFn = func() bool { return true }
 	session.Interaction.streamRuneDelay = 0
 	var output bytes.Buffer
@@ -2079,7 +2079,7 @@ func TestAICLIEventRenderer_DefersPlainIntroUntilMarkdownFinal(t *testing.T) {
 
 func TestAICLIEventRenderer_SuppressesReasoningWhenReasoningOff(t *testing.T) {
 	session := &ChatSession{Stream: true, SuppressReasoningOutput: true}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	session.Interaction.liveStreamFn = func() bool { return true }
 	session.Interaction.streamRuneDelay = 0
 	var output bytes.Buffer
@@ -2107,7 +2107,7 @@ func TestAICLIEventRenderer_SuppressesReasoningWhenReasoningOff(t *testing.T) {
 
 func TestAICLIEventRenderer_Finalize_NonStreamRendersReasoningBeforeContentWithInteraction(t *testing.T) {
 	session := &ChatSession{Stream: false}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	session.Interaction.SetWriter(&output)
 
@@ -2146,7 +2146,7 @@ func TestAICLIEventRenderer_Finalize_NonStreamRendersReasoningBeforeContentWithI
 
 func TestAICLIEventRenderer_ToolBatchUsesUnifiedInteractionRendering(t *testing.T) {
 	session := &ChatSession{Stream: true}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	session.Interaction.SetWriter(&output)
 
@@ -2220,7 +2220,7 @@ func TestAICLIEventRenderer_ToolBatchUsesUnifiedInteractionRendering(t *testing.
 
 func TestAICLIEventRenderer_ShellToolUsesCompactCommandRendering(t *testing.T) {
 	session := &ChatSession{Stream: true}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	session.Interaction.SetWriter(&output)
 
@@ -2277,7 +2277,7 @@ func TestAICLIEventRenderer_ShellToolUsesCompactCommandRendering(t *testing.T) {
 
 func TestAICLIEventRenderer_SharedToolResultUsesSourceLabelsAndTighterFolding(t *testing.T) {
 	session := &ChatSession{Stream: true}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	session.Interaction.SetWriter(&output)
 
@@ -2310,7 +2310,7 @@ func TestAICLIEventRenderer_SharedToolResultUsesSourceLabelsAndTighterFolding(t 
 
 func TestAICLIEventRenderer_SharedToolRequestedStaysViewportOnlyAndKeepsSourceLabels(t *testing.T) {
 	session := &ChatSession{Stream: true}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(session.Interaction.Shutdown)
 	var output bytes.Buffer
 	session.Interaction.SetWriter(&output)
@@ -2342,7 +2342,7 @@ func TestAICLIEventRenderer_SharedToolRequestedStaysViewportOnlyAndKeepsSourceLa
 
 func TestAICLIEventRenderer_SharedBrokerToolResultUsesSourceLabels(t *testing.T) {
 	session := &ChatSession{Stream: true}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	session.Interaction.SetWriter(&output)
 

@@ -26,7 +26,7 @@ func TestTextParityDesyncSelfHealsAcrossToolCell(t *testing.T) {
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var out bytes.Buffer
 	coord.SetWriter(&out)
 
@@ -146,7 +146,7 @@ func BenchmarkSceneBlockGroupsLargeScene(b *testing.B) {
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(b, session)
 	var out bytes.Buffer
 	coord.SetWriter(&out)
 

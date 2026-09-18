@@ -8,7 +8,7 @@ import "testing"
 
 func TestDebugCommandQueuedWhileBusy(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 
 	// 忙碌状态

@@ -89,7 +89,7 @@ func TestRenderChatRuntimeTimelineEventCarriesTypedModel(t *testing.T) {
 func TestChatRuntimeEventBridgeEmitsTypedTimelineWithoutLegacyLineWriter(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	session := &ChatSession{}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	interaction.SetWriter(&output)
 	session.Interaction = interaction
@@ -127,7 +127,7 @@ func TestChatRuntimeEvents_ToolRunningIsViewportOnlyAndFinalCommitsOnce(t *testi
 		Stream:         true,
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
 	}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	var history bytes.Buffer
 	interaction.SetWriter(&history)
@@ -241,7 +241,7 @@ func TestChatRuntimeEventBridge_ToolLifecycleMirrorsSceneActiveCell(t *testing.T
 		Stream:         true,
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
 	}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	var output bytes.Buffer
 	interaction.SetWriter(&output)
@@ -351,7 +351,7 @@ func TestChatRuntimeEventBridge_ToolDurationInjectedIntoSceneTitle(t *testing.T)
 		Stream:         true,
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
 	}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	var output bytes.Buffer
 	interaction.SetWriter(&output)
@@ -430,7 +430,7 @@ func TestChatRuntimeEventBridge_ActiveBandRunningRowSurvivesRealAgentEvent(t *te
 		Stream:         true,
 		RuntimeSession: &runtimechat.Session{ID: sessionID},
 	}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	var history bytes.Buffer
 	interaction.SetWriter(&history)
@@ -514,7 +514,7 @@ func TestChatRuntimeEventBridge_ActiveBandRunningRowFullReplay(t *testing.T) {
 		Stream:         true,
 		RuntimeSession: &runtimechat.Session{ID: sessionID},
 	}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	var history bytes.Buffer
 	interaction.SetWriter(&history)
@@ -552,7 +552,7 @@ func TestChatInteractionCoordinator_FirstSubmittedUserInputRendersWithLateBridge
 		Stream:         true,
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
 	}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	var output bytes.Buffer
 	interaction.SetWriter(&output)
@@ -586,7 +586,7 @@ func TestChatRuntimeEventBridge_LLMRetryRendersDynamicStatus(t *testing.T) {
 		Stream:         true,
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
 	}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	var history bytes.Buffer
 	interaction.SetWriter(&history)
@@ -631,7 +631,7 @@ func TestChatRuntimeEventBridge_IdentitylessToolProgressFallsBackToSystem(t *tes
 		Stream:         true,
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
 	}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	var output bytes.Buffer
 	interaction.SetWriter(&output)
@@ -2473,7 +2473,7 @@ func TestChatRuntimeEvents_IgnoresNonPrimaryReasoningEvents(t *testing.T) {
 	session := &ChatSession{
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
 	}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	session.Interaction.liveStreamFn = func() bool { return true }
 
 	bridge := newChatRuntimeEventBridge(session)
@@ -2511,7 +2511,7 @@ func TestChatRuntimeEvents_CompletesFinalStreamableReasoningInsteadOfRestartingI
 	session := &ChatSession{
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
 	}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	session.Interaction.liveStreamFn = func() bool { return true }
 
 	bridge := newChatRuntimeEventBridge(session)
@@ -2566,7 +2566,7 @@ func TestChatRuntimeEvents_IgnoresLateDuplicateReasoningAfterAssistantMessageCom
 	session := &ChatSession{
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
 	}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	session.Interaction.liveStreamFn = func() bool { return true }
 
 	bridge := newChatRuntimeEventBridge(session)
@@ -2799,7 +2799,7 @@ func TestChatRuntimeEvents_DoesNotRestorePromptUntilInteractionReady(t *testing.
 	session := &ChatSession{
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 	coord.promptDelay = 10 * time.Millisecond
@@ -2829,7 +2829,7 @@ func TestChatRuntimeEvents_ProjectsBackgroundPrimaryRunAsNotReady(t *testing.T) 
 	session := &ChatSession{
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 	bridge := newChatRuntimeEventBridge(session)
@@ -3570,7 +3570,7 @@ func TestChatRuntimeEvents_RequiredQuestionRejectsEmptyButOptionalQuestionAllows
 
 func TestPushChatComposerAgentStageRestoresPreviousStageWithoutOverwritingInterrupt(t *testing.T) {
 	session := &ChatSession{NoInteractive: true}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetAgentStageDetail(chatAgentStageToolRunning, "shell_command")
 
@@ -3593,7 +3593,7 @@ func TestPushChatComposerAgentStageRestoresPreviousStageWithoutOverwritingInterr
 func TestChatRuntimeEvents_PrimaryRunUpdatesComposerAgentStage(t *testing.T) {
 	runtimeSession := &runtimechat.Session{ID: "primary-session"}
 	session := &ChatSession{RuntimeSession: runtimeSession, NoInteractive: true}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	bridge := newChatRuntimeEventBridge(session)
 
@@ -3646,7 +3646,7 @@ func TestChatRuntimeEvents_PrimaryRunUpdatesComposerAgentStage(t *testing.T) {
 func TestChatRuntimeEvents_SecondaryRunDoesNotOverrideComposerAgentStage(t *testing.T) {
 	runtimeSession := &runtimechat.Session{ID: "primary-session"}
 	session := &ChatSession{RuntimeSession: runtimeSession, NoInteractive: true}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	bridge := newChatRuntimeEventBridge(session)
 	bridge.BeginRun()
@@ -3666,7 +3666,7 @@ func TestChatRuntimeEvents_SecondaryRunDoesNotOverrideComposerAgentStage(t *test
 
 func TestChatRuntimeEvents_InterruptedRunKeepsComposerStoppingStage(t *testing.T) {
 	session := &ChatSession{NoInteractive: true}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	bridge := newChatRuntimeEventBridge(session)
 
@@ -3698,7 +3698,7 @@ func TestChatRuntimeEvents_InterruptedRunKeepsComposerStoppingStage(t *testing.T
 
 func TestChatRuntimeEvents_InterruptedRunReturnsReadyAfterCleanup(t *testing.T) {
 	session := &ChatSession{NoInteractive: true}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	bridge := newChatRuntimeEventBridge(session)
 
@@ -3834,7 +3834,7 @@ func TestChatRuntimeEvents_NextRunEpochRejectsLateQueuedEventAndAmbientRunEndEve
 
 func TestChatRuntimeEvents_NextRunEpochDropsActorRuntimeActionsWhileRunEndActionsStayValid(t *testing.T) {
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 	var output bytes.Buffer
@@ -4314,7 +4314,7 @@ func TestChatRuntimeEvents_IdentitylessPrimaryEventCannotMutateIdentifiedRun(t *
 		Stream:         true,
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
 	}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(session.Interaction.Shutdown)
 	bridge := newChatRuntimeEventBridge(session)
 	questionCalls := 0
@@ -5190,7 +5190,7 @@ func TestRenderChatRuntimePriorityPromptTranscript_PersistsApprovalDetails(t *te
 	t.Setenv("NO_COLOR", "1")
 
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 	session.Interaction = coord
@@ -6501,7 +6501,7 @@ func TestChatRuntimeEventBridge_BeginRunResetsSupplementSeparator(t *testing.T) 
 	}
 
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var output bytes.Buffer
 	coord.SetWriter(&output)
 	session.Interaction = coord
@@ -7057,7 +7057,7 @@ func TestChatRuntimeEventBridge_InteractionInjectedAtAnchor(t *testing.T) {
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var out bytes.Buffer
 	coord.SetWriter(&out)
 
@@ -7128,7 +7128,7 @@ func TestChatRuntimeEventBridge_ReplayRestoresInteraction(t *testing.T) {
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
 	bridge.eventLogPathOverride = logPath
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var out bytes.Buffer
 	coord.SetWriter(&out)
 
@@ -7236,7 +7236,7 @@ func TestChatRuntimeEventBridge_RunEndResolvesOpenToolRunningHead(t *testing.T) 
 		Stream:         true,
 		RuntimeSession: &runtimechat.Session{ID: "open-tool-run"},
 	}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	var history bytes.Buffer
 	interaction.SetWriter(&history)
@@ -7309,7 +7309,7 @@ func newAdoptTestBridge(t *testing.T) *chatRuntimeEventBridge {
 	session := &ChatSession{
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
 	}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	interaction.SetWriter(&bytes.Buffer{})
 	session.Interaction = interaction
 	return newChatRuntimeEventBridge(session)

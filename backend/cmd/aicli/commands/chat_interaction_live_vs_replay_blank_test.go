@@ -56,7 +56,7 @@ func TestChatInteractionCoordinator_LiveStreamBlankParityWithReplay(t *testing.T
 
 	// History / one-shot complete block.
 	histSession := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
-	histCoord := newChatInteractionCoordinator(histSession)
+	histCoord := newTestChatInteractionCoordinator(t, histSession)
 	t.Cleanup(histCoord.Shutdown)
 	var histOut bytes.Buffer
 	histCoord.SetWriter(&histOut)
@@ -64,7 +64,7 @@ func TestChatInteractionCoordinator_LiveStreamBlankParityWithReplay(t *testing.T
 
 	// Live progressive stream with surface + deferred stable commits.
 	liveSession := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
-	liveCoord := newChatInteractionCoordinator(liveSession)
+	liveCoord := newTestChatInteractionCoordinator(t, liveSession)
 	liveCoord.stableCommitDelay = time.Hour
 	t.Cleanup(liveCoord.Shutdown)
 	var liveOut bytes.Buffer
@@ -173,7 +173,7 @@ func TestChatInteractionCoordinator_ResidualTailKeepsInterBlockBlank(t *testing.
 	src := "# Title\n\n## Section\n\nbody paragraph.\n\n```go\nfunc Hello() {}\n```\n\n收尾段落。\n"
 
 	histSession := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
-	histCoord := newChatInteractionCoordinator(histSession)
+	histCoord := newTestChatInteractionCoordinator(t, histSession)
 	t.Cleanup(histCoord.Shutdown)
 	var histOut bytes.Buffer
 	histCoord.SetWriter(&histOut)
@@ -181,7 +181,7 @@ func TestChatInteractionCoordinator_ResidualTailKeepsInterBlockBlank(t *testing.
 	histPlain := stripTerminalDecorations(histOut.String())
 
 	liveSession := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
-	liveCoord := newChatInteractionCoordinator(liveSession)
+	liveCoord := newTestChatInteractionCoordinator(t, liveSession)
 	liveCoord.stableCommitDelay = time.Hour
 	liveCoord.stableCommitManual = true
 	t.Cleanup(liveCoord.Shutdown)
@@ -322,7 +322,7 @@ func TestChatInteractionCoordinator_MarkdownStableCommitSuffixMatchesFullFormat(
 	t.Setenv("NO_COLOR", "1")
 	src := sampleMultiBlockMarkdown()
 	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	coord.streamBuffer.WriteString(src)
 
@@ -383,7 +383,7 @@ func TestChatInteractionCoordinator_LiveStreamScreenLayoutParityWithReplay(t *te
 
 	// ---- Live progressive stream with real surface + VT capture ----
 	liveSession := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
-	liveCoord := newChatInteractionCoordinator(liveSession)
+	liveCoord := newTestChatInteractionCoordinator(t, liveSession)
 	liveCoord.stableCommitDelay = time.Hour
 	t.Cleanup(liveCoord.Shutdown)
 	liveSurface := ui.NewFixedBottomSurface(ui.NewTerminal())
@@ -494,7 +494,7 @@ func TestChatInteractionCoordinator_LiveStreamScreenLayoutParityWithReplay(t *te
 
 	// ---- History one-shot RenderAssistant on identical surface geometry ----
 	histSession := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
-	histCoord := newChatInteractionCoordinator(histSession)
+	histCoord := newTestChatInteractionCoordinator(t, histSession)
 	t.Cleanup(histCoord.Shutdown)
 	histSurface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	histSurface.EnableForTest(width, height)
@@ -689,7 +689,7 @@ func TestChatInteractionCoordinator_MarkdownRowsDeltaContract(t *testing.T) {
 				t.Fatalf("invalid cut start=%d end=%d len=%d", tc.start, tc.end, len(src))
 			}
 			session := &ChatSession{Formatter: fmtr}
-			coord := newChatInteractionCoordinator(session)
+			coord := newTestChatInteractionCoordinator(t, session)
 			t.Cleanup(coord.Shutdown)
 			coord.streamBuffer.WriteString(src)
 

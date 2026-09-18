@@ -53,7 +53,7 @@ func TestRenderLayer_TextParity_RealWritePathBlocks(t *testing.T) {
 		bridge.encodeRenderModelEvent(ev)
 	}
 
-	coord := newChatInteractionCoordinator(session) // 构造器自动接线探针
+	coord := newTestChatInteractionCoordinator(t, session) // 构造器自动接线探针
 	var out bytes.Buffer
 	coord.SetWriter(&out)
 	coord.RenderAssistant("你好")
@@ -95,7 +95,7 @@ func TestRenderLayer_TextParity_DetectsDivergence(t *testing.T) {
 		bridge.encodeRenderModelEvent(ev)
 	}
 
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var out bytes.Buffer
 	coord.SetWriter(&out)
 	coord.RenderAssistant("你好")
@@ -118,7 +118,7 @@ func TestRenderLayer_TextParity_NilProbeSafe(t *testing.T) {
 	ui.SetTheme(ui.ThemeAuto)
 
 	session := &ChatSession{} // 无 RuntimeEventBridge
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var out bytes.Buffer
 	coord.SetWriter(&out)
 	coord.RenderAssistant("你好")

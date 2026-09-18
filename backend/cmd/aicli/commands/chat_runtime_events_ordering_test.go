@@ -13,7 +13,7 @@ func TestLegacyInteractionWaitsForEarlierRuntimeActorAction(t *testing.T) {
 		Stream:         true,
 		RuntimeSession: &runtimechat.Session{ID: "ordering-session"},
 	}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coordinator
 	actor := coordinator.ensureUIActor()
 	if actor == nil {

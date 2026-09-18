@@ -137,7 +137,7 @@ func TestUnifiedReasoningDeltasAndFinalSnapshotProjectExactlyOnce(t *testing.T) 
 	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: sessionID}, Stream: true}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
@@ -305,7 +305,7 @@ func TestLateReasoningAfterSuccessfulRequestBoundaryPrecedesAssistantFinal(t *te
 	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: sessionID}}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 
@@ -397,7 +397,7 @@ func TestLateReasoningBarrierWithholdsLongAssistantFromNativeHistory(t *testing.
 	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: sessionID}}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
@@ -501,7 +501,7 @@ func TestSessionEndFinalizesOrphanMutableToolExactlyOnce(t *testing.T) {
 	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: sessionID}}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
@@ -582,7 +582,7 @@ func TestSuccessfulRequestBoundaryPreservesFortyLineFinalInNativeHistory(t *test
 	session := &ChatSession{Stream: true}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coordinator
 	t.Cleanup(coordinator.Shutdown)
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
@@ -709,7 +709,7 @@ func TestStreamingAssistantFinalTailTransfersExactlyOnceToNativeHistory(t *testi
 	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: sessionID}}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 

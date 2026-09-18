@@ -200,7 +200,7 @@ func TestSetRetryingStartsClockAndRendersInterruptibleStatus(t *testing.T) {
 	// 回归核心：SetRetrying 必须启动动态时钟（dynamicStatusStarted 非零），
 	// 否则 elapsed 永远 0s。旧实现 RefreshStatus("retrying ...") 字符串匹配
 	// 失败导致时钟不启动，UI 永远显示 "(0s • esc to interrupt)"。
-	interaction := newChatInteractionCoordinator(&ChatSession{})
+	interaction := newTestChatInteractionCoordinator(t, &ChatSession{})
 	t.Cleanup(interaction.Shutdown)
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	surface.EnableForTest(160, 12)
@@ -230,7 +230,7 @@ func TestSetRetryingStartsClockAndRendersInterruptibleStatus(t *testing.T) {
 func TestSetNoticeDoesNotStartClock(t *testing.T) {
 	// Notice 是非状态机透传文案（如 "Agent Panel"、"Paste draft N lines"），
 	// 不得启动计时，也不得产生动态活动行。
-	interaction := newChatInteractionCoordinator(&ChatSession{})
+	interaction := newTestChatInteractionCoordinator(t, &ChatSession{})
 	t.Cleanup(interaction.Shutdown)
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	surface.EnableForTest(160, 12)
@@ -253,7 +253,7 @@ func TestSetNoticeDoesNotStartClock(t *testing.T) {
 func TestRetryElapsedAdvancesOverRealTime(t *testing.T) {
 	// 端到端时钟验证（无 UI actor）：SetRetrying 后 elapsed 必须随时间真实
 	// 推进，而不是冻结在 0s —— 这是 "0s 卡死" bug 的直接回归。
-	interaction := newChatInteractionCoordinator(&ChatSession{})
+	interaction := newTestChatInteractionCoordinator(t, &ChatSession{})
 	t.Cleanup(interaction.Shutdown)
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	surface.EnableForTest(160, 12)

@@ -38,7 +38,7 @@ func newOverflowTestCoord(t *testing.T, width, height int) (*chatInteractionCoor
 	formatter := formatter.NewMarkdownFormatter(false)
 	formatter.Width = width
 	session.Formatter = formatter
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 	coord.SetSurface(surface)

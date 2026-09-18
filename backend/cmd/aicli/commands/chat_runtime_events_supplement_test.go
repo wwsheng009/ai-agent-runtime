@@ -46,7 +46,7 @@ func TestChatInteractionCoordinator_LocalSupplementProjectsTranscript(t *testing
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 	var output bytes.Buffer
@@ -82,7 +82,7 @@ func TestChatInteractionCoordinator_LocalAssistantProjectsTranscript(t *testing.
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 	var output bytes.Buffer
@@ -104,7 +104,7 @@ func TestRenderChatResponse_UsesLocalAssistantInjection(t *testing.T) {
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 	var output bytes.Buffer
@@ -196,7 +196,7 @@ func TestPriorityPromptTranscriptCompletesRuntimeSceneCell(t *testing.T) {
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 	var output bytes.Buffer
@@ -242,7 +242,7 @@ func TestPriorityPromptTranscriptFollowsApprovalHintInSceneAndLegacyOutput(t *te
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 	var output bytes.Buffer
@@ -394,7 +394,7 @@ func TestChatInteractionCoordinator_RuntimeAsyncLineDoesNotInjectSecondSceneCell
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	var output bytes.Buffer
 	coordinator.SetWriter(&output)
@@ -419,7 +419,7 @@ func TestChatInteractionCoordinator_RuntimeAssistantDoesNotInjectSecondSceneCell
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	var output bytes.Buffer
 	coordinator.SetWriter(&output)
@@ -437,7 +437,7 @@ func TestChatInteractionCoordinator_DirectToolLifecycleProjectsOneSceneCell(t *t
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 	var output bytes.Buffer

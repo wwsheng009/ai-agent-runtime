@@ -20,7 +20,7 @@ func TestTimelineCommandStaysOnUnifiedTerminalSession(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	session := &ChatSession{}
 	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	session.Interaction = interaction
 
@@ -71,7 +71,7 @@ func TestCollabSnapshotCommandStaysOnUnifiedTerminalSession(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	session := &ChatSession{}
 	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	session.Interaction = interaction
 
@@ -134,7 +134,7 @@ func TestTrustStatusCommandStaysOnUnifiedTerminalSession(t *testing.T) {
 		},
 	}
 	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	session.Interaction = interaction
 
@@ -191,7 +191,7 @@ func TestDebugReadOnlyCommandsStayOnUnifiedTerminalSession(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	session := &ChatSession{}
 	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	session.Interaction = interaction
 
@@ -252,7 +252,7 @@ func TestAgentsSnapshotCommandStaysOnUnifiedTerminalSession(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	session := &ChatSession{}
 	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	session.Interaction = interaction
 
@@ -314,7 +314,7 @@ func TestCompactCommandStaysOnUnifiedTerminalSession(t *testing.T) {
 
 	session := &ChatSession{TokenCount: 5000, TurnContextTokenCount: 999}
 	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	session.Interaction = interaction
 
@@ -362,7 +362,7 @@ func TestRetryCommandRestoresComposerThroughUnifiedPostCommitEffect(t *testing.T
 	t.Setenv("NO_COLOR", "1")
 	session := &ChatSession{}
 	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	session.Interaction = interaction
 	rememberChatTurnRecovery(session, "恢复这条失败请求", true)
@@ -411,7 +411,7 @@ func TestModelStatusCommandStaysOnUnifiedTerminalSession(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	session := &ChatSession{ProviderName: "alpha", Model: "gpt-test", ReasoningEffort: "medium"}
 	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	session.Interaction = interaction
 
@@ -477,7 +477,7 @@ func TestThemeQueriesStayOnUnifiedTerminalSession(t *testing.T) {
 
 	session := &ChatSession{}
 	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	session.Interaction = interaction
 
@@ -554,7 +554,7 @@ func TestSkillCatalogQueriesStayOnUnifiedTerminalSession(t *testing.T) {
 
 	session := &ChatSession{FunctionCatalog: catalog, FunctionRegistry: registry}
 	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	session.Interaction = interaction
 
@@ -640,7 +640,7 @@ func TestBacktrackQueriesStayOnUnifiedTerminalSession(t *testing.T) {
 		LocalRuntimeHost: &localChatRuntimeHost{SessionHub: hub},
 	}
 	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	session.Interaction = interaction
 
@@ -745,7 +745,7 @@ func TestDirectResumeTargetsStayOnUnifiedTerminalSession(t *testing.T) {
 		SessionUserID:  "tester",
 	}
 	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	session.Interaction = interaction
 

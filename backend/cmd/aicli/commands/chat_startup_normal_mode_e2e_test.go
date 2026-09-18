@@ -36,7 +36,7 @@ func TestE2E_ChatStartup_NormalMode_ReachesReadyAndRendersPrompt(t *testing.T) {
 		Formatter:    formatter.NewMarkdownFormatter(false),
 		InputBox:     ui.NewInputBox(nil),
 	}
-	session.Interaction = newChatInteractionCoordinator(session)
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	session.Interaction.session = session
 
 	const width, height = 80, 24

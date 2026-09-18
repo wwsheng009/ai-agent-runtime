@@ -57,7 +57,7 @@ func TestChatWebScreenSnapshotWin7DegradedIncludesUserPrompt(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 
@@ -168,7 +168,7 @@ func TestChatDebugScreenPrefersDerivedAppState(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 	coordinator.SetWriter(&bytes.Buffer{})
@@ -219,7 +219,7 @@ func TestChatDebugScreenTranscriptFallbackWithoutGeometry(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 	coordinator.SetWriter(&bytes.Buffer{})
@@ -449,7 +449,7 @@ func TestChatWebScreenSnapshotFullTranscriptNotViewportClipped(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 	coordinator.SetWriter(&bytes.Buffer{})

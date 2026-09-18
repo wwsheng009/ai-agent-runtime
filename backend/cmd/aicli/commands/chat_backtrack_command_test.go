@@ -106,7 +106,7 @@ func TestApplySelectedBacktrackReplacesUnifiedCanonicalTranscript(t *testing.T) 
 		t.Fatalf("seed canonical messages: %v", err)
 	}
 	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	session.Interaction = interaction
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
@@ -324,7 +324,7 @@ func TestBacktrackSubmitRunOpensRunEpoch(t *testing.T) {
 		t.Fatalf("seed canonical messages: %v", err)
 	}
 	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	session.Interaction = interaction
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())

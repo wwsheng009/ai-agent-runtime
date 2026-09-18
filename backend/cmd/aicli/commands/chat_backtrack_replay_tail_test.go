@@ -18,7 +18,7 @@ import (
 func TestReplayAfterTruncationClearsRetainedTail(t *testing.T) {
 	const width, height = 80, 24
 	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false), SystemPromptText: "Profile system prompt."}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	t.Cleanup(coord.Shutdown)
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())

@@ -129,7 +129,7 @@ func TestOpenChatSkillPickerRestoresComposerDraft(t *testing.T) {
 	// draft goes into the composer prompt input, not an error.
 	t.Setenv("NO_COLOR", "1")
 	session := newTestSkillSession()
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	session.Interaction = interaction
 

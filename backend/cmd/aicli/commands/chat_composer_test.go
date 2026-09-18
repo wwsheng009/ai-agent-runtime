@@ -11,7 +11,7 @@ import (
 
 func TestChatComposerControllerBuildsCoreHooksWithoutCompletion(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetPromptInput("draft")
 
@@ -68,7 +68,7 @@ func TestChatComposerControllerSuppressesSubmitEchoOnlyForFixedSurface(t *testin
 
 func TestChatComposerControllerTabTogglesPlanModeAndPreservesDraft(t *testing.T) {
 	session := newPlanCommandSession("")
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	composer := &chatComposerController{
 		session: session,
@@ -104,7 +104,7 @@ func TestChatComposerControllerTabTogglesPlanModeAndPreservesDraft(t *testing.T)
 
 func TestChatComposerControllerTabKeepsSlashCompletionSemantics(t *testing.T) {
 	session := newPlanCommandSession("")
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	composer := &chatComposerController{
 		session:    session,
@@ -156,7 +156,7 @@ func TestFormatChatComposerEditorStatusIsConditionalAndTracksLogicalLine(t *test
 
 func TestChatComposerControllerAddsSlashCompletionHooksWhenCompletionIsPresent(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	composer := &chatComposerController{
 		session:    session,
@@ -193,7 +193,7 @@ func TestChatComposerControllerAddsSlashCompletionHooksWhenCompletionIsPresent(t
 
 func TestChatComposerControllerTracksSnapshotBeforeCompletionRender(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	completion := newChatSlashCompletionController(session)
 	composer := &chatComposerController{
@@ -217,7 +217,7 @@ func TestChatComposerControllerTracksSnapshotBeforeCompletionRender(t *testing.T
 
 func TestNormalizeChatComposerReadErrorInterruptsAndResetsPrompt(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetPromptInput("draft")
 
@@ -235,7 +235,7 @@ func TestNormalizeChatComposerReadErrorInterruptsAndResetsPrompt(t *testing.T) {
 
 func TestNormalizeChatComposerReadErrorBacktrackDoesNotInterrupt(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetPromptInput("draft")
 
@@ -253,7 +253,7 @@ func TestNormalizeChatComposerReadErrorBacktrackDoesNotInterrupt(t *testing.T) {
 
 func TestNormalizeChatComposerReadErrorTranscriptKeepsDraft(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetPromptInput("draft")
 
@@ -271,7 +271,7 @@ func TestNormalizeChatComposerReadErrorTranscriptKeepsDraft(t *testing.T) {
 
 func TestChatBusyComposerCaptureTracksAndClearsNonPriorityPrompt(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	capture := newChatBusyComposerCapture(session, "> ", false, false)
 	hooks := capture.hooks()
@@ -300,7 +300,7 @@ func TestChatBusyComposerCaptureTracksAndClearsNonPriorityPrompt(t *testing.T) {
 
 func TestChatBusyComposerCaptureSeedsAndPreservesDraftAcrossRestarts(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetPromptInput("half typed follow-up")
 
@@ -323,7 +323,7 @@ func TestChatBusyComposerCaptureSeedsAndPreservesDraftAcrossRestarts(t *testing.
 
 func TestBusyDraftSurvivesTurnEndOutputAndFeedsNextComposer(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 
 	// The user types a follow-up while the previous turn is still streaming.
@@ -343,7 +343,7 @@ func TestBusyDraftSurvivesTurnEndOutputAndFeedsNextComposer(t *testing.T) {
 
 func TestChatBusyComposerCaptureDoesNotTrackPriorityPrompt(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetPromptInput("main draft")
 	capture := newChatBusyComposerCapture(session, "approval> ", true, false)
@@ -369,7 +369,7 @@ func TestChatBusyComposerCaptureFoldsPriorityInputIntoSurfacePopup(t *testing.T)
 	surface.SetPhysicalWritesEnabled(false)
 
 	session := &ChatSession{Surface: surface}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetPromptInput("main draft")
 
@@ -410,7 +410,7 @@ func TestChatBusyComposerCaptureFoldsPriorityInputIntoSurfacePopup(t *testing.T)
 
 func TestChatModalComposerPromptTracksAndClearsWhenSurfaceDisabled(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	prompt := newChatModalComposerPrompt(session, "select> ")
 	hooks := prompt.hooks()
@@ -428,7 +428,7 @@ func TestChatModalComposerPromptTracksAndClearsWhenSurfaceDisabled(t *testing.T)
 
 func TestChatModalComposerPromptCancelReturnsPromptCancelled(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	prompt := newChatModalComposerPrompt(session, "select> ")
 	hooks := prompt.hooks()
@@ -444,7 +444,7 @@ func TestChatModalComposerPromptCancelReturnsPromptCancelled(t *testing.T) {
 
 func TestChatSecretComposerPromptNormalizesInterruptsAndResetsPrompt(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetPromptInput("secret draft")
 
@@ -463,7 +463,7 @@ func TestChatSecretComposerPromptNormalizesInterruptsAndResetsPrompt(t *testing.
 
 func TestChatTransientLineComposerNormalizesExitRequest(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetPromptInput("transient draft")
 
@@ -535,7 +535,7 @@ func TestChatAgentPanelModalControllerDoesNotMarkRenderedWithoutSurface(t *testi
 
 func TestNormalizeChatAgentPanelComposerReadErrorClosesPanelWithoutInterruptingSession(t *testing.T) {
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	coord.SetPromptInput("panel draft")
 

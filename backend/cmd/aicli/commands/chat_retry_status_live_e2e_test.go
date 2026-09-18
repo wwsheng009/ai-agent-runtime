@@ -29,7 +29,7 @@ func TestLLMRetryEventE2E_StartsClockAndAdvancesElapsed(t *testing.T) {
 		Stream:         true,
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
 	}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	var history bytes.Buffer
 	interaction.SetWriter(&history)
@@ -120,7 +120,7 @@ func TestLLMRetryEventE2E_RepeatedRetriesKeepClockRunning(t *testing.T) {
 		Stream:         true,
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
 	}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	surface.EnableForTest(160, 12)
@@ -186,7 +186,7 @@ func TestLLMRetryUnifiedRendererProjectsDeltasBeforeFinal(t *testing.T) {
 		Stream:         true,
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
 	}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	session.Interaction = interaction
 	bridge := newChatRuntimeEventBridge(session)
@@ -321,7 +321,7 @@ func TestLLMRetryAfterRunEndDoesNotRestartCompletedStatus(t *testing.T) {
 		Stream:         true,
 		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
 	}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	session.Interaction = interaction
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())

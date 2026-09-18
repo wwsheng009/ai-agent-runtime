@@ -298,7 +298,7 @@ func TestPrintChatStatus_WritesThroughFixedBottomSurfaceAfterPromptClear(t *test
 		PermissionMode: runtimepolicy.ModeBypassPermissions,
 		RuntimeSession: &runtimechat.Session{ID: "019de76b-2481-7130-b902-f6166e6d2b96", State: runtimechat.StateActive},
 	}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coord
 	session.Surface = surface
 	coord.SetSurface(surface)

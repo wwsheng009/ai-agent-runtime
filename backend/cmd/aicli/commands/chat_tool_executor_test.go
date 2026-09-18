@@ -42,7 +42,7 @@ func TestWithLiveChatToolOutput_SkipsMirrorWhenInteractiveOutputDisabled(t *test
 }
 
 func TestWithLiveChatToolOutput_UsesActiveBandOnlyWriterForStableCall(t *testing.T) {
-	interaction := newChatInteractionCoordinator(&ChatSession{})
+	interaction := newTestChatInteractionCoordinator(t, &ChatSession{})
 	t.Cleanup(interaction.Shutdown)
 	session := &ChatSession{Interaction: interaction}
 
@@ -54,7 +54,7 @@ func TestWithLiveChatToolOutput_UsesActiveBandOnlyWriterForStableCall(t *testing
 }
 
 func TestWithLiveChatToolOutput_UnifiedStableCallStaysInActiveBand(t *testing.T) {
-	interaction := newChatInteractionCoordinator(&ChatSession{})
+	interaction := newTestChatInteractionCoordinator(t, &ChatSession{})
 	interaction.mu.Lock()
 	interaction.unifiedRenderer = true
 	interaction.mu.Unlock()
@@ -79,7 +79,7 @@ func TestWithLiveChatToolOutput_UnifiedStableCallStaysInActiveBand(t *testing.T)
 }
 
 func TestWithLiveChatToolOutput_UnifiedCallWithoutIDSuppressesRawMirror(t *testing.T) {
-	interaction := newChatInteractionCoordinator(&ChatSession{})
+	interaction := newTestChatInteractionCoordinator(t, &ChatSession{})
 	interaction.mu.Lock()
 	interaction.unifiedRenderer = true
 	interaction.mu.Unlock()

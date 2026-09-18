@@ -58,7 +58,7 @@ func TestChatInteractionCoordinator_MidStreamActiveBandLeavesNoBlankGap(t *testi
 	reply.WriteString("收尾段落。\n")
 
 	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.stableCommitDelay = time.Hour
 	t.Cleanup(coord.Shutdown)
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
@@ -411,7 +411,7 @@ func TestChatInteractionCoordinator_PendingStableQueueKeepsBandFilled(t *testing
 	budget := ui.ActiveBandRows(height)
 
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.stableCommitDelay = time.Hour
 	coord.stableCommitManual = true
 	t.Cleanup(coord.Shutdown)
@@ -518,7 +518,7 @@ func TestChatInteractionCoordinator_EOSFusionAfterFullBand(t *testing.T) {
 	reply.WriteString("融合收尾。\n")
 
 	session := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	coord.stableCommitDelay = time.Hour
 	t.Cleanup(coord.Shutdown)
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())

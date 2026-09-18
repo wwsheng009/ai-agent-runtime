@@ -58,7 +58,7 @@ func TestRenderLayer_TextParity_EventStreamVsLegacyCoordinator(t *testing.T) {
 
 	// 旧路径：真实 coordinator，同一会话两个 assistant 块。
 	session := &ChatSession{}
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var out bytes.Buffer
 	coord.SetWriter(&out)
 	coord.RenderAssistant("你好")

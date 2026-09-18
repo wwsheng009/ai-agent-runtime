@@ -58,7 +58,7 @@ func (w *persistentTerminalErrorWriter) writeCount() int {
 
 func TestUnifiedRendererPersistentFrameErrorDoesNotSelfWake(t *testing.T) {
 	session := &ChatSession{Stream: true}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	surface.EnableForTest(80, 24)
@@ -99,7 +99,7 @@ func TestUnifiedRendererPersistentFrameErrorDoesNotSelfWake(t *testing.T) {
 
 func TestChatInteractionCoordinatorSetSurfaceKeepsSessionSurfaceInSync(t *testing.T) {
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 
 	first := ui.NewFixedBottomSurface(ui.NewTerminal())
@@ -123,7 +123,7 @@ func TestChatInteractionCoordinatorSetSurfaceKeepsSessionSurfaceInSync(t *testin
 
 func TestChatInteractionCoordinatorUnifiedRendererUsesOnlyPrimaryPresenter(t *testing.T) {
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 
@@ -171,7 +171,7 @@ func TestChatInteractionCoordinatorUnifiedRendererUsesOnlyPrimaryPresenter(t *te
 // coordinator wiring, not just ScreenLease's standalone transport adapter.
 func TestChatInteractionCoordinatorUnifiedScreenLeaseUsesPresenterTransport(t *testing.T) {
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 
@@ -272,7 +272,7 @@ func (w *shutdownExitRetryWriter) Write(data []byte) (int, error) {
 // leaves the host in DEC 1049 with no remaining owner for the exit sequence.
 func TestChatInteractionCoordinatorShutdownRetriesAlternateExitBeforeDetach(t *testing.T) {
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 
@@ -316,7 +316,7 @@ func TestChatInteractionCoordinatorShutdownRetriesAlternateExitBeforeDetach(t *t
 }
 
 func TestChatInteractionCoordinatorRejectsPresenterBesideLegacyWriter(t *testing.T) {
-	coordinator := newChatInteractionCoordinator(&ChatSession{})
+	coordinator := newTestChatInteractionCoordinator(t, &ChatSession{})
 	t.Cleanup(coordinator.Shutdown)
 
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
@@ -338,7 +338,7 @@ func TestChatInteractionCoordinatorRejectsPresenterBesideLegacyWriter(t *testing
 
 func TestChatInteractionCoordinatorUnifiedEditorWriteNeverFallsBackToRawWriter(t *testing.T) {
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 
@@ -379,7 +379,7 @@ func TestChatInteractionCoordinatorUnifiedEditorWriteNeverFallsBackToRawWriter(t
 // would leave the old surface as a competing screen-state authority.
 func TestChatInteractionCoordinatorUnifiedFacadeActionBypassesLegacySurfaceApply(t *testing.T) {
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 
@@ -429,7 +429,7 @@ func TestChatInteractionCoordinatorUnifiedLocalTranscriptUsesTerminalSessionOnly
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 
@@ -485,7 +485,7 @@ func TestDispatchChatCommandUnifiedCommandGateUsesTerminalSessionOnly(t *testing
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 
@@ -555,7 +555,7 @@ func TestChatInteractionCoordinatorUnifiedAssistantStreamUsesSceneActiveCell(t *
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 
@@ -627,7 +627,7 @@ func TestChatInteractionCoordinatorUnifiedRendersDottedReasoningAndMarkdown(t *t
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 
@@ -749,7 +749,7 @@ func TestChatInteractionCoordinatorUnifiedAssistantStreamTerminalBoundaries(t *t
 			session := &ChatSession{}
 			bridge := newChatRuntimeEventBridge(session)
 			session.RuntimeEventBridge = bridge
-			coordinator := newChatInteractionCoordinator(session)
+			coordinator := newTestChatInteractionCoordinator(t, session)
 			t.Cleanup(coordinator.Shutdown)
 			session.Interaction = coordinator
 
@@ -823,7 +823,7 @@ func fixedSurfaceRowsContain(rows [][]vt.Cell, text string) bool {
 
 func TestChatRuntimeEventBridge_OrdinaryEventUsesUIActorReducer(t *testing.T) {
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 	var output bytes.Buffer
@@ -865,7 +865,7 @@ func TestChatInteractionCoordinator_NonRuntimeSceneProducersProjectTranscript(t 
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 	var output bytes.Buffer
@@ -908,7 +908,7 @@ func TestChatRuntimeEventBridge_ReplayProjectsTranscriptToUIActor(t *testing.T) 
 	}
 
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 	bridge := newChatRuntimeEventBridge(session)
@@ -934,7 +934,7 @@ func TestChatRuntimeEventBridge_ReplayProjectsTranscriptToUIActor(t *testing.T) 
 
 func TestChatInteractionCoordinatorRefreshActiveStreamViewportUsesResizeBarrier(t *testing.T) {
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 	if !coordinator.postUIAction(ui.DrawRequested{Key: "test-init"}) {
@@ -953,7 +953,7 @@ func TestChatInteractionCoordinatorRefreshActiveStreamViewportUsesResizeBarrier(
 func TestChatInteractionCoordinatorRefreshReportsMeasuredGeometryToAppState(t *testing.T) {
 	_ = captureSurfaceStdout(t, func() {
 		session := &ChatSession{}
-		coordinator := newChatInteractionCoordinator(session)
+		coordinator := newTestChatInteractionCoordinator(t, session)
 		t.Cleanup(coordinator.Shutdown)
 		session.Interaction = coordinator
 
@@ -976,7 +976,7 @@ func TestChatInteractionCoordinatorRefreshReportsMeasuredGeometryToAppState(t *t
 
 func TestChatInteractionCoordinatorPromptInputUsesSequencedInputAction(t *testing.T) {
 	session := &ChatSession{}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 
@@ -997,7 +997,7 @@ func TestChatInteractionCoordinatorPromptInputUsesSequencedInputAction(t *testin
 }
 
 func TestChatInteractionCoordinatorPromptInputNeverWaitsForActorDrain(t *testing.T) {
-	coordinator := newChatInteractionCoordinator(&ChatSession{})
+	coordinator := newTestChatInteractionCoordinator(t, &ChatSession{})
 	blocker := make(chan struct{})
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(blocker) }) }
@@ -1040,7 +1040,7 @@ func TestChatInteractionCoordinatorPromptInputNeverWaitsForActorDrain(t *testing
 }
 
 func TestChatInteractionCoordinatorPromptInputNeverWaitsForCoordinatorRenderLock(t *testing.T) {
-	coordinator := newChatInteractionCoordinator(&ChatSession{})
+	coordinator := newTestChatInteractionCoordinator(t, &ChatSession{})
 	t.Cleanup(coordinator.Shutdown)
 
 	coordinator.mu.Lock()
@@ -1074,7 +1074,7 @@ func TestChatInteractionCoordinatorPromptInputNeverWaitsForCoordinatorRenderLock
 }
 
 func TestChatInteractionCoordinatorPromptInputNeverWaitsForFullMailbox(t *testing.T) {
-	coordinator := newChatInteractionCoordinator(&ChatSession{})
+	coordinator := newTestChatInteractionCoordinator(t, &ChatSession{})
 	blocker := make(chan struct{})
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(blocker) }) }
@@ -1129,7 +1129,7 @@ func TestChatInteractionCoordinatorPromptInputNeverWaitsForFullMailbox(t *testin
 }
 
 func TestChatInteractionCoordinatorPostScheduledUIActionNeverWaitsForFullMailbox(t *testing.T) {
-	coordinator := newChatInteractionCoordinator(&ChatSession{})
+	coordinator := newTestChatInteractionCoordinator(t, &ChatSession{})
 	blocker := make(chan struct{})
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(blocker) }) }
@@ -1184,7 +1184,7 @@ func TestChatInteractionCoordinatorPostScheduledUIActionNeverWaitsForFullMailbox
 }
 
 func TestChatInteractionCoordinatorPromptEditorStatusNeverWaitsForFullMailbox(t *testing.T) {
-	coordinator := newChatInteractionCoordinator(&ChatSession{})
+	coordinator := newTestChatInteractionCoordinator(t, &ChatSession{})
 	blocker := make(chan struct{})
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(blocker) }) }
@@ -1241,7 +1241,7 @@ func TestChatInteractionCoordinatorPromptEditorStatusNeverWaitsForFullMailbox(t 
 }
 
 func TestChatInteractionCoordinatorPromptResetRejectsQueuedSnapshot(t *testing.T) {
-	coordinator := newChatInteractionCoordinator(&ChatSession{})
+	coordinator := newTestChatInteractionCoordinator(t, &ChatSession{})
 	blocker := make(chan struct{})
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(blocker) }) }
@@ -1283,7 +1283,7 @@ func TestChatInteractionCoordinatorPromptResetRejectsQueuedSnapshot(t *testing.T
 func TestChatInteractionCoordinatorScreenLeaseUsesBarrierActions(t *testing.T) {
 	_ = captureSurfaceStdout(t, func() {
 		session := &ChatSession{}
-		coordinator := newChatInteractionCoordinator(session)
+		coordinator := newTestChatInteractionCoordinator(t, session)
 		t.Cleanup(coordinator.Shutdown)
 		session.Interaction = coordinator
 
@@ -1322,7 +1322,7 @@ func TestChatInteractionCoordinatorScreenLeaseUsesBarrierActions(t *testing.T) {
 }
 
 func TestChatInteractionCoordinatorEffectResultUsesBarrierAction(t *testing.T) {
-	coordinator := newChatInteractionCoordinator(&ChatSession{})
+	coordinator := newTestChatInteractionCoordinator(t, &ChatSession{})
 	t.Cleanup(coordinator.Shutdown)
 
 	result := ui.EffectResult{Token: 41, MayHavePartiallyWritten: true}
@@ -1352,7 +1352,7 @@ func TestChatInteractionCoordinatorUnifiedHighFrequencyStreamDrainsToReady(t *te
 	}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 

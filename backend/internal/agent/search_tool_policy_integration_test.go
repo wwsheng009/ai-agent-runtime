@@ -32,13 +32,22 @@ func TestVisibleSearchToolExecutesOutsideDerivedAllowlists(t *testing.T) {
 	ctx := ensureTurnToolSurfaceSnapshot(context.Background())
 	surface, err := loop.getAvailableTools(ctx, "investigate repository architecture and tooling options", whitelist)
 	require.NoError(t, err)
-	require.Contains(t, toolDefinitionNames(surface), toolSearchName)
+	// No automatic search projection: search_tool is not injected into the surface.
+	require.NotContains(t, toolDefinitionNames(surface), toolSearchName)
+	// Policy-denied tools are filtered from the direct surface.
+	require.NotContains(t, toolDefinitionNames(surface), "deferred_helper")
 	require.NotContains(t, whitelist, toolSearchName)
 	require.NotContains(t, policyAllowlist, toolSearchName)
 
 	snapshot, ok := TurnToolSurfaceSnapshotFromContext(ctx)
 	require.True(t, ok)
-	require.NoError(t, snapshot.SaveTurnToolSurface(ctx, surface))
+	// Simulate a host that explicitly exposes search_tool: visibility is decided by
+	// the frozen turn surface, not by the catalog.
+	surfaceWithSearch := append(cloneToolDefinitions(surface), types.ToolDefinition{
+		Name:        toolSearchName,
+		Description: "meta",
+	})
+	require.NoError(t, snapshot.SaveTurnToolSurface(ctx, surfaceWithSearch))
 
 	results, err := loop.act(ctx, "trace_search", "session_search", 1, 0, nil, []types.ToolCall{{
 		ID: "call_search", Name: toolSearchName,

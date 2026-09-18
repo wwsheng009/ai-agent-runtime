@@ -34,7 +34,7 @@ func TestRenderLayer_TextParity_LiveUserInputBlocks(t *testing.T) {
 	// 按真实顺序进入数据面——用户提交 → turn-1 事件 → 用户提交 →
 	// turn-2 事件。
 	evs := renderParityTwoTurnEvents()
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var out bytes.Buffer
 	coord.SetWriter(&out)
 	coord.RenderSubmittedUserInput("U1")
@@ -192,7 +192,7 @@ func TestRenderLayer_UserInput_ReplayPathDoesNotInject(t *testing.T) {
 	before := len(bridge.sceneSnapshot().Cells)
 
 	// 回放路径：不注入（Scene cell 数不变）。
-	coord := newChatInteractionCoordinator(session)
+	coord := newTestChatInteractionCoordinator(t, session)
 	var out bytes.Buffer
 	coord.SetWriter(&out)
 	coord.RenderReplayedUserInput("旧消息")
@@ -213,7 +213,7 @@ func TestRenderLayer_UserInput_ReplayPathDoesNotInject(t *testing.T) {
 	}
 
 	// live 提交：注入（Scene cell 数 +1，RenderText 含用户文本）。
-	coord2 := newChatInteractionCoordinator(session)
+	coord2 := newTestChatInteractionCoordinator(t, session)
 	var out2 bytes.Buffer
 	coord2.SetWriter(&out2)
 	coord2.RenderSubmittedUserInput("新消息")
