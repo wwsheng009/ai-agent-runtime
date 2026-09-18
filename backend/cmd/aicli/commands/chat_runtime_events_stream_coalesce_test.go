@@ -94,7 +94,7 @@ func TestStreamMergeKeyIncludesIdentityAndSequence(t *testing.T) {
 	}
 }
 
-func TestEnqueueStreamEventBoundsPendingCount(t *testing.T) {
+func TestEnqueueStreamEventKeepsAssistantDeltasOverPendingBudget(t *testing.T) {
 	bridge := newChatRuntimeEventBridge(&ChatSession{RuntimeSession: &runtimechat.Session{ID: "pending-count"}})
 	bridge.eventQueue = make(chan chatRuntimeQueuedEvent, 1)
 	bridge.eventQueue <- chatRuntimeQueuedEvent{event: runtimeevents.Event{Type: "fill"}, size: 1}
@@ -115,12 +115,29 @@ func TestEnqueueStreamEventBoundsPendingCount(t *testing.T) {
 	bridge.streamMu.Lock()
 	count := len(bridge.pendingStreams)
 	bytes := bridge.pendingStreamsBytes
-	bridge.streamMu.Unlock()
-	if count > chatStreamCoalescePendingLimit {
-		t.Fatalf("pending count = %d, want <= %d", count, chatStreamCoalescePendingLimit)
+	// assistant 文本增量超限必须保留：丢弃一个 delta 会让中间步骤（无 run 级
+	// 终稿）永久截断。软预算不再是硬丢弃边界。
+	if count != chatStreamCoalescePendingLimit+20 {
+		bridge.streamMu.Unlock()
+		t.Fatalf("pending count = %d, want %d (assistant deltas retained)", count, chatStreamCoalescePendingLimit+20)
 	}
-	if bytes > chatStreamCoalescePendingByteLimit {
-		t.Fatalf("pending bytes = %d, want <= %d", bytes, chatStreamCoalescePendingByteLimit)
+	if bytes <= 0 {
+		bridge.streamMu.Unlock()
+		t.Fatalf("pending bytes = %d, want > 0", bytes)
+	}
+	bridge.streamMu.Unlock()
+
+	// 非 assistant 文本的流事件仍保持既有丢弃策略。
+	bridge.Handle(runtimeevents.Event{
+		Type:    runtimechat.EventAssistantReasoning,
+		TraceID: "trace-reasoning-over-budget",
+		Payload: map[string]interface{}{"reasoning": map[string]interface{}{"summary": "late"}},
+	})
+	bridge.streamMu.Lock()
+	countAfterReasoning := len(bridge.pendingStreams)
+	bridge.streamMu.Unlock()
+	if countAfterReasoning != count {
+		t.Fatalf("reasoning pending count = %d, want %d (non-text still dropped at budget)", countAfterReasoning, count)
 	}
 }
 
@@ -232,7 +249,7 @@ func TestMergeAssistantAppendEventsUsesSequenceNotTextHeuristics(t *testing.T) {
 
 func TestReasoningCompatibilityLifecycleIsScopedPerStream(t *testing.T) {
 	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: "reasoning-multi-request"}}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	interaction.liveStreamFn = func() bool { return true }
 	session.Interaction = interaction
@@ -275,7 +292,7 @@ func TestReasoningCompatibilityLifecycleIsScopedPerStream(t *testing.T) {
 
 func TestLateReasoningFinalDoesNotReplaceNewerActiveRequest(t *testing.T) {
 	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: "reasoning-interleaved"}}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	interaction.liveStreamFn = func() bool { return true }
 	session.Interaction = interaction
@@ -331,7 +348,7 @@ func TestLateReasoningFinalDoesNotReplaceNewerActiveRequest(t *testing.T) {
 
 func TestReasoningCompatibilityDropsSameSequenceRetransmission(t *testing.T) {
 	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: "reasoning-retransmission"}}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	interaction.liveStreamFn = func() bool { return true }
 	session.Interaction = interaction
@@ -421,7 +438,7 @@ func TestEnqueueStreamEventCoalescesNestedReasoningPreservesText(t *testing.T) {
 
 func TestHandleAssistantReasoningConsumesCoalescedTextAsDelta(t *testing.T) {
 	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: "coalesced-reasoning"}}
-	interaction := newChatInteractionCoordinator(session)
+	interaction := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(interaction.Shutdown)
 	interaction.liveStreamFn = func() bool { return true }
 	session.Interaction = interaction
@@ -516,7 +533,9 @@ func TestOrderAssistantDeltaAdvancesPastCoalescedInterval(t *testing.T) {
 	}
 }
 
-func TestEnqueueStreamEventBoundsPendingBytes(t *testing.T) {
+// assistant 文本增量的字节软预算同样不是硬丢弃边界：超出后保留积压，
+// 由消费端追赶排空；权威收敛依赖 llm.request.finished / assistant.message。
+func TestEnqueueStreamEventKeepsAssistantDeltasOverByteBudget(t *testing.T) {
 	bridge := newChatRuntimeEventBridge(&ChatSession{RuntimeSession: &runtimechat.Session{ID: "pending-bytes"}})
 	bridge.eventQueue = make(chan chatRuntimeQueuedEvent, 1)
 	bridge.eventQueue <- chatRuntimeQueuedEvent{event: runtimeevents.Event{Type: "fill"}, size: 1}
@@ -544,11 +563,27 @@ func TestEnqueueStreamEventBoundsPendingBytes(t *testing.T) {
 		lastText = streamEventText(bridge.pendingStreams[count-1].event)
 	}
 	bridge.streamMu.Unlock()
-	if bytes > chatStreamCoalescePendingByteLimit {
-		t.Fatalf("pending bytes = %d, want <= %d", bytes, chatStreamCoalescePendingByteLimit)
+	if count != 2 {
+		t.Fatalf("pending count = %d, want 2 (assistant deltas retained over byte budget)", count)
 	}
-	if strings.Contains(lastText, "b") {
-		t.Fatalf("oversized delta was retained; last pending contains new stream text")
+	if bytes <= chatStreamCoalescePendingByteLimit {
+		t.Fatalf("pending bytes = %d, want > %d (budget is soft for assistant text)", bytes, chatStreamCoalescePendingByteLimit)
+	}
+	if !strings.Contains(lastText, "b") {
+		t.Fatal("oversized assistant delta must be retained, want last pending to contain new stream text")
+	}
+
+	// 非 assistant 文本的流事件仍按硬预算丢弃。
+	bridge.Handle(runtimeevents.Event{
+		Type:    runtimechat.EventAssistantReasoning,
+		TraceID: "trace-over-budget-reasoning",
+		Payload: map[string]interface{}{"reasoning": map[string]interface{}{"summary": "late"}},
+	})
+	bridge.streamMu.Lock()
+	countAfterReasoning := len(bridge.pendingStreams)
+	bridge.streamMu.Unlock()
+	if countAfterReasoning != count {
+		t.Fatalf("reasoning pending count = %d, want %d (non-text still dropped at byte budget)", countAfterReasoning, count)
 	}
 }
 
@@ -603,7 +638,7 @@ func TestAssistantTerminalDropsStalePendingAndEnqueues(t *testing.T) {
 
 func TestStreamingRuntimeEventPostDropsAfterBoundedWaitWhenMailboxStalled(t *testing.T) {
 	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: "mailbox-full"}}
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	session.Interaction = coordinator
 	// Inject a one-slot actor whose Run loop is never started, so the mailbox
 	// stays full for the whole bounded retry window.

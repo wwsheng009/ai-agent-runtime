@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -320,17 +321,7 @@ func renderVisibleChatHistoryMessage(renderer *aicliTranscriptRenderer, message 
 			"tool",
 		)
 		output, toolErr := splitChatHistoryToolResult(message)
-		renderer.RenderToolEvent(runtimechatcore.ChatEvent{
-			Type:       runtimechatcore.EventTool,
-			Stage:      "tool_result",
-			ToolName:   toolName,
-			ToolCallID: message.ToolCallID,
-			Arguments:  cloneFunctionSchema(call.Args),
-			Output:     output,
-			Error:      toolErr,
-			Success:    strings.TrimSpace(toolErr) == "",
-			Metadata:   chatHistoryToolMetadataMap(message.Metadata),
-		})
+		renderer.RenderToolEvent(chatHistoryToolReplayEvent(message, toolName, call.Args, output, toolErr))
 	case "system":
 		renderer.RenderSystem(content)
 	case "user":
@@ -352,6 +343,109 @@ func indexChatHistoryToolCalls(messages []runtimetypes.Message) map[string]runti
 	return indexed
 }
 
+// chatHistoryToolReplayEvent 用持久化消息重建与实时同形的 tool_result
+// ChatEvent。
+//
+// 实时链路的 ChatEvent 由 provider loop 携带完整 Arguments（含 command）
+// 与工具元数据；持久化回放只有消息本体。若直接以空 Arguments 构造事件，
+// compact 渲染器会退化为 "• Completed <tool 名>" 并放弃摘要，导致 live 与
+// replay 的工具单元格不一致。这里从消息元数据恢复参数（tool_invocation.
+// attempted_args 是实时调用参数的持久化副本），并复用实时同款的 metadata
+// 提升逻辑，使两个路径的 renderSharedChatToolEvent 输入一致。
+func chatHistoryToolReplayEvent(
+	message runtimetypes.Message,
+	toolName string,
+	callArgs map[string]interface{},
+	output string,
+	toolErr string,
+) runtimechatcore.ChatEvent {
+	event := runtimechatcore.ChatEvent{
+		Type:       runtimechatcore.EventTool,
+		Stage:      "tool_result",
+		ToolName:   toolName,
+		ToolCallID: message.ToolCallID,
+		Arguments:  cloneFunctionSchema(callArgs),
+		Output:     output,
+		Error:      toolErr,
+		Success:    strings.TrimSpace(toolErr) == "",
+		Metadata:   chatHistoryToolMetadataMap(message.Metadata),
+	}
+	if len(event.Arguments) == 0 {
+		event.Arguments = chatHistoryToolAttemptedArgs(event.Metadata)
+	}
+	return event
+}
+
+// chatHistoryToolDisplay 返回持久化工具消息在实时链路上等价的 compact
+// 显示文本；无可用信息时返回空串，调用方回退到原始输出。
+func chatHistoryToolDisplay(message runtimetypes.Message, toolName string, callArgs map[string]interface{}) string {
+	output, toolErr := splitChatHistoryToolResult(message)
+	event := chatHistoryToolReplayEvent(message, toolName, callArgs, output, toolErr)
+	return strings.TrimSpace(renderSharedChatToolEvent(event))
+}
+
+// chatHistoryToolAttemptedArgs 从元数据的 tool_invocation.attempted_args
+// 恢复工具调用参数（兼容 map 与 JSON 字符串两种历史编码）。
+func chatHistoryToolAttemptedArgs(metadata map[string]interface{}) map[string]interface{} {
+	if len(metadata) == 0 {
+		return nil
+	}
+	raw, ok := metadata["tool_invocation"]
+	if !ok || raw == nil {
+		return nil
+	}
+	invocation, ok := raw.(map[string]interface{})
+	if !ok {
+		decoded, err := decodeChatHistoryJSONObject(raw)
+		if err != nil {
+			return nil
+		}
+		invocation = decoded
+	}
+	if invocation == nil {
+		return nil
+	}
+	attempted, ok := invocation["attempted_args"].(map[string]interface{})
+	if !ok || len(attempted) == 0 {
+		if decoded, err := decodeChatHistoryJSONObject(invocation["attempted_args"]); err == nil {
+			attempted = decoded
+		}
+	}
+	if len(attempted) == 0 {
+		return nil
+	}
+	return cloneFunctionSchema(attempted)
+}
+
+func decodeChatHistoryJSONObject(value interface{}) (map[string]interface{}, error) {
+	switch typed := value.(type) {
+	case nil:
+		return nil, nil
+	case map[string]interface{}:
+		return typed, nil
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return nil, nil
+		}
+		decoded := map[string]interface{}{}
+		if err := json.Unmarshal([]byte(trimmed), &decoded); err != nil {
+			return nil, err
+		}
+		return decoded, nil
+	default:
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		decoded := map[string]interface{}{}
+		if err := json.Unmarshal(encoded, &decoded); err != nil {
+			return nil, err
+		}
+		return decoded, nil
+	}
+}
+
 func chatHistoryToolNameFromMetadata(metadata runtimetypes.Metadata) string {
 	return payloadStringValue(chatHistoryToolMetadataMap(metadata)["tool_name"])
 }
@@ -369,7 +463,22 @@ func chatHistoryToolMetadataMap(metadata runtimetypes.Metadata) map[string]inter
 	case runtimetypes.Metadata:
 		nested = map[string]interface{}(value)
 	}
-	for _, key := range []string{"tool_name", "tool_source", "tool_error", "error", "shell_type", "shell_path", "shell_display", "workdir", "cwd"} {
+	for _, key := range []string{
+		"tool_name", "tool_source", "tool_error", "error",
+		"workdir", "cwd",
+		// 以下键来自嵌套 tool_metadata，是 compact 工具结果渲染的输入
+		// （output_kind 决定 "stdout" 段标签、capture_limit_* 决定是否
+		// 降级为纯文本预览）。重放时把它们提升到顶层，保证与实时
+		// ChatEvent 的 metadata 形状一致，否则工具单元格会退化为
+		// "• Completed <tool>" + 全量原文。
+		//
+		// 注意不要提升 shell_type/shell_path/shell_display：实时 ChatEvent
+		// 的顶层 metadata 没有它们（它们在嵌套 tool_metadata 里），提升会让
+		// compactToolContextLines 多渲染一行 "shell: pwsh (C:\...\pwsh.exe)"，
+		// 与 live 单元格不一致且把可执行文件绝对路径带进转录。
+		"output_kind", "capture_limit_reached", "output_capture_complete",
+		"exit_code", "command", "attempted_args",
+	} {
 		if payloadStringValue(flat[key]) == "" && payloadStringValue(nested[key]) != "" {
 			flat[key] = nested[key]
 		}

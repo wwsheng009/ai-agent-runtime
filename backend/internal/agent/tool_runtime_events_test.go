@@ -1292,3 +1292,45 @@ func TestFinalizeDeniedToolResultEmitsCompletedWithFailedOutcome(t *testing.T) {
 		t.Fatalf("expected 1 tool.reduced, got %d", len(reduced))
 	}
 }
+// TestToolCompletedEventPayloadPromotesEnvelopeDuration 锁定耗时同源：事件载荷
+// 缺失 duration_ms 时提升 tool_metadata.duration_ms。实时标题（bridge 编码）
+// 与事件日志/重放投影共用该字段，bridge 对已有值不再按墙钟覆盖，因此 live 与
+// replay 会显示同一个可复现的耗时。
+func TestToolCompletedEventPayloadPromotesEnvelopeDuration(t *testing.T) {
+	payload := toolCompletedEventPayload(toolExecutionResult{
+		Call: types.ToolCall{
+			ID:   "call-shell-duration",
+			Name: "shell",
+			Args: map[string]interface{}{"command": "echo hi"},
+		},
+		Envelope: &output.Envelope{
+			Metadata: map[string]interface{}{
+				"tool_metadata": map[string]interface{}{
+					"command":     "echo hi",
+					"duration_ms": 602,
+				},
+			},
+		},
+	}, 1, "trace-duration", nil)
+
+	if got := payload["duration_ms"]; got != 602 {
+		t.Fatalf("duration_ms = %#v, want promoted envelope duration 602", got)
+	}
+}
+
+// TestToolCompletedEventPayloadKeepsExplicitDuration 显式传入的 duration_ms
+// （最具体的调用方口径）优先于信封提升值。
+func TestToolCompletedEventPayloadKeepsExplicitDuration(t *testing.T) {
+	payload := toolCompletedEventPayload(toolExecutionResult{
+		Call: types.ToolCall{ID: "call-shell-explicit", Name: "shell"},
+		Envelope: &output.Envelope{
+			Metadata: map[string]interface{}{
+				"tool_metadata": map[string]interface{}{"duration_ms": 602},
+			},
+		},
+	}, 1, "trace-duration", map[string]interface{}{"duration_ms": 900})
+
+	if got := payload["duration_ms"]; got != 900 {
+		t.Fatalf("duration_ms = %#v, want explicit 900", got)
+	}
+}

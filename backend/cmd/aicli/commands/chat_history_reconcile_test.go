@@ -12,6 +12,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -118,7 +119,7 @@ func TestPrintVisibleChatHistory_UnifiedReconcilesPartialEventLogIdempotently(t 
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 
@@ -247,7 +248,7 @@ func TestPresentChatStartupSession_UnifiedRendersCanonicalHistoryWithMarkdown(t 
 	session := &ChatSession{RuntimeSession: loaded}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 
@@ -328,7 +329,7 @@ func TestPresentChatStartupSession_UnifiedSeedsHistoryWithoutLoadedRuntimeHandle
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 
@@ -394,7 +395,7 @@ func TestPrintVisibleChatHistory_UnifiedHandoffsOverflowedCanonicalHistory(t *te
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 
@@ -466,7 +467,7 @@ func TestPrintVisibleChatHistory_UnifiedPrimaryViewportRetainsHistoryTailAlongsi
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 
@@ -597,7 +598,7 @@ func TestUnifiedStartupOrderRetainsHistoryTailAndScrollback(t *testing.T) {
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 
@@ -726,7 +727,7 @@ func TestUnifiedStartupReplaysEventLogThenReconcilesCanonicalHistoryWithoutDupli
 	bridge := newChatRuntimeEventBridge(session)
 	bridge.eventLogPathOverride = logPath
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 
@@ -863,7 +864,7 @@ func TestPrintVisibleChatHistory_UnifiedOversizedSingleCellPreservesScrollbackAn
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 
@@ -932,7 +933,7 @@ func TestPrintVisibleChatHistory_UnifiedOversizedMarkdownPreservesScrollbackAndP
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
-	coordinator := newChatInteractionCoordinator(session)
+	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
 	session.Interaction = coordinator
 
@@ -1060,7 +1061,17 @@ func TestSeedPersistedHistory_ImportsFinalToolChainOnce(t *testing.T) {
 		t.Fatalf("scene cells=%d want one committed tool chain", count)
 	}
 	cell := snapshot.Cells[0]
-	if cell.Kind != scene.KindToolChain || cell.Phase != scene.CellCommitted || cell.Source != "• Completed read_file\nREADME contents" {
+	// 历史种子与实时链路同源：工具单元格使用 compact 渲染投影
+	// （renderSharedChatToolEvent），而不是原始 tool 消息正文。
+	wantSource := renderSharedChatToolEvent(runtimechatcore.ChatEvent{
+		Type:       runtimechatcore.EventTool,
+		Stage:      "tool_result",
+		ToolName:   "read_file",
+		ToolCallID: "call-history-1",
+		Output:     "README contents",
+		Success:    true,
+	})
+	if cell.Kind != scene.KindToolChain || cell.Phase != scene.CellCommitted || cell.Source != wantSource {
 		t.Fatalf("tool history cell=%+v", cell)
 	}
 

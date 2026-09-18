@@ -431,6 +431,10 @@ func classifyChatRuntimeEvent(eventType string) chatEventClass {
 		runtimechat.EventSessionEnd,
 		runtimechat.EventSessionInterrupted,
 		"run_end", "run.end",
+		// llm.request.finished 携带 assistant_snapshot（每次模型响应的权威
+		// 全文）：丢弃它等于丢弃已超越流式 delta 的内容，必须走 critical 通道。
+		runtimechat.EventLLMRequestFinished, // llm_request_finished
+		"llm.request.finished",
 		runtimechat.EventToolFinished,
 		// "tool.completed" 是总线上的真实别名（exec_event_bridge.go、
 		// agent_stdio_bridge.go、events/bus.go 都在用它），漏了它会让工具边界
@@ -1882,8 +1886,13 @@ func (b *chatRuntimeEventBridge) enqueueStreamEvent(event runtimeevents.Event, s
 			// stream callback.
 			if last.size+size > chatStreamCoalesceEventByteLimit ||
 				b.pendingStreamsBytes+size > chatStreamCoalescePendingByteLimit {
-				b.logLateRuntimeEvent(event, "coalesced stream payload exceeded byte limit; delta dropped")
-				return
+				if !assistantStreamDeltaMustNotDrop(event) {
+					b.logLateRuntimeEvent(event, "coalesced stream payload exceeded byte limit; delta dropped")
+					return
+				}
+				// assistant 文本增量不允许丢弃：中间步骤没有 run 级终稿可复原，
+				// 丢弃一个 delta 就会在 sequence 有序拼接里形成永久空洞。
+				b.logLateRuntimeEvent(event, "coalesced stream payload exceeded byte limit; assistant delta retained")
 			}
 			last.event = mergeStreamEvents(last.event, event)
 			last.size += size
@@ -1901,8 +1910,11 @@ func (b *chatRuntimeEventBridge) enqueueStreamEvent(event runtimeevents.Event, s
 		if contiguousStreamEvent(last.event, event) {
 			if last.size+size > chatStreamCoalesceEventByteLimit ||
 				b.pendingStreamsBytes+size > chatStreamCoalescePendingByteLimit {
-				b.logLateRuntimeEvent(event, "coalesced stream payload exceeded byte limit; delta dropped")
-				return
+				if !assistantStreamDeltaMustNotDrop(event) {
+					b.logLateRuntimeEvent(event, "coalesced stream payload exceeded byte limit; delta dropped")
+					return
+				}
+				b.logLateRuntimeEvent(event, "coalesced stream payload exceeded byte limit; assistant delta retained")
 			}
 			lastFrom, hasLastFrom := streamCoalescedFrom(last.event)
 			if !hasLastFrom {
@@ -1967,11 +1979,25 @@ func contiguousStreamEvent(last, incoming runtimeevents.Event) bool {
 func (b *chatRuntimeEventBridge) appendPendingStreamLocked(q chatRuntimeQueuedEvent) {
 	if len(b.pendingStreams) >= chatStreamCoalescePendingLimit ||
 		b.pendingStreamsBytes+q.size > chatStreamCoalescePendingByteLimit {
-		b.logLateRuntimeEvent(q.event, "coalesced stream pending budget exceeded; delta dropped")
-		return
+		if !assistantStreamDeltaMustNotDrop(q.event) {
+			b.logLateRuntimeEvent(q.event, "coalesced stream pending budget exceeded; delta dropped")
+			return
+		}
+		// assistant 文本增量超出软预算也保留：消费端恢复后会排空积压，而丢弃
+		// 会在请求边界前形成 sequence 空洞（中间步骤没有终稿可复原）。
+		b.logLateRuntimeEvent(q.event, "coalesced stream pending budget exceeded; assistant delta retained")
 	}
 	b.pendingStreams = append(b.pendingStreams, q)
 	b.pendingStreamsBytes += q.size
+}
+
+// assistantStreamDeltaMustNotDrop reports whether an over-budget stream event
+// is an assistant text delta. Assistant text is the one family whose loss is
+// unrecoverable for intermediate tool-calling responses (no run-level
+// assistant.message), so budget overflow degrades to a larger backlog instead
+// of a dropped delta. Other stream families keep the historical drop policy.
+func assistantStreamDeltaMustNotDrop(event runtimeevents.Event) bool {
+	return isAssistantTextStreamEvent(event.Type)
 }
 
 // streamQueueBusy reports whether the bounded queue or the in-flight
@@ -2015,7 +2041,12 @@ func (b *chatRuntimeEventBridge) flushPendingStreamBoundedLocked(budget time.Dur
 			continue
 		}
 		if time.Now().After(deadline) {
-			b.dropAllPendingStreamsLocked("coalesced stream flush budget exceeded")
+			// 不整段丢弃积压：丢弃 assistant 文本增量会造成永久截断，保留的
+			// 积压会在消费端追赶后自动排空；随后到达的权威快照负责收敛。
+			b.logLateRuntimeEvent(
+				b.pendingStreams[0].event,
+				fmt.Sprintf("coalesced stream flush budget exceeded; %d pending event(s) retained", len(b.pendingStreams)),
+			)
 			return
 		}
 		time.Sleep(time.Millisecond)
@@ -2101,16 +2132,6 @@ func (b *chatRuntimeEventBridge) flushStreamTailBoundedLocked(entries []chatRunt
 			time.Sleep(time.Millisecond)
 		}
 	}
-}
-
-// dropAllPendingStreamsLocked discards the whole coalesced backlog and logs
-// each dropped event. Caller holds streamMu.
-func (b *chatRuntimeEventBridge) dropAllPendingStreamsLocked(reason string) {
-	for _, q := range b.pendingStreams {
-		b.logLateRuntimeEvent(q.event, reason)
-	}
-	b.pendingStreams = nil
-	b.pendingStreamsBytes = 0
 }
 
 // enqueueNonStreamEvent enqueues a non-streaming event with a bounded wait.

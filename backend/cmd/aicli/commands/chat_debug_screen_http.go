@@ -397,13 +397,11 @@ func sessionTranscriptFallbackMessages(session *ChatSession) []chatWebScreenMess
 	if len(messages) == 0 {
 		return nil
 	}
+	toolCalls := indexChatHistoryToolCalls(messages)
 	msgs := make([]chatWebScreenMessage, 0, len(messages))
 	for i := range messages {
 		msg := &messages[i]
 		text := strings.TrimSpace(msg.Content)
-		if text == "" {
-			continue
-		}
 		role := "assistant"
 		switch msg.Role {
 		case "user":
@@ -412,6 +410,24 @@ func sessionTranscriptFallbackMessages(session *ChatSession) []chatWebScreenMess
 			role = "system"
 		case "tool":
 			role = "tool"
+		}
+		if role == "tool" {
+			// 兜底路径（无 surface/uiActor/Scene，例如非 TTY resume 或启动早期）
+			// 也必须使用与实时一致的 compact 工具投影：直接输出模型面向原文
+			// 会把 artifact 指针等内部细节当作历史单元格展示。
+			call := toolCalls[strings.TrimSpace(msg.ToolCallID)]
+			name := firstNonEmptyChatValue(
+				strings.TrimSpace(call.Name),
+				chatHistoryToolNameFromMetadata(msg.Metadata),
+				strings.TrimSpace(msg.ToolCallID),
+				"tool",
+			)
+			if display := chatHistoryToolDisplay(*msg, name, call.Args); display != "" {
+				text = display
+			}
+		}
+		if text == "" {
+			continue
 		}
 		msgs = append(msgs, chatWebScreenMessage{Role: role, Content: text})
 	}

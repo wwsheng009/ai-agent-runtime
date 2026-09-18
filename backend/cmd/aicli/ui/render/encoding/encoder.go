@@ -18,7 +18,9 @@ import (
 )
 
 // 单流 delta 乱序重排缓冲上限（与旧终端 orderAssistantDelta 同规格）：
-// 超过上限后该流标记 tainted，丢弃后续乱序 delta（对齐既有生产行为）。
+// 超过上限后淘汰最旧的未提交 delta，绝不 taint 整条流——旧行为会永久
+// 丢弃后续 delta，导致带工具调用的中间步骤助手消息在屏幕上被截断。
+// 被淘汰造成的缺口由 llm.request.finished 的 assistant_snapshot 权威快照补齐。
 const (
 	assistantStreamPendingLimit     = 128
 	assistantStreamPendingByteLimit = 1 << 20
@@ -29,6 +31,14 @@ const (
 // field is the interval end; this field carries the interval start so
 // downstream ordering can advance past the whole folded range.
 const StreamCoalescedFromKey = "_coalesced_sequence_from"
+
+// assistantSnapshotKey is the llm.request.finished payload field carrying the
+// authoritative full text of one model response (written by
+// internal/agent/loop.go for every response, including intermediate steps that
+// end in tool_calls). The encoder converges the streamed item on this text at
+// the request boundary so a lost or out-of-order delta can never leave a
+// permanently truncated assistant cell on screen.
+const assistantSnapshotKey = "assistant_snapshot"
 
 // ReasoningStreamDeltaKey preserves the semantic mode of a reasoning event
 // after the bridge coalesces several typed ReasoningBlock payloads into one
@@ -95,6 +105,7 @@ type EventEncoder struct {
 	priorityBy             map[string]*priorityPromptState  // approval/question request key -> delayed transcript state
 	streamOrder            map[string]*assistantStreamOrder // canonical request key -> delta 有序提交状态
 	reasoningOrder         map[string]*assistantStreamOrder // canonical request key -> reasoning delta 有序提交状态
+	assistantSnapshotBy    map[string]string                // request key -> llm.request.finished 携带的权威全文
 	orderingBarrierEnabled bool                             // production bridge reserves a hidden reasoning predecessor
 	stats                  Stats
 }
@@ -111,12 +122,41 @@ func (e *EventEncoder) EnableReasoningOrderingBarrier(enabled bool) {
 
 // assistantStreamOrder 维护单条 assistant 流的 delta 有序提交状态
 // （对齐旧终端 orderAssistantDelta：sequence 从 1 开始，乱序缓存，
-// 连续补拼；超限 tainted 丢弃后续）。
+// 连续补拼）。
 type assistantStreamOrder struct {
 	nextSeq     uint64
 	pending     map[uint64]assistantPendingDelta
 	pendingText int
-	tainted     bool
+}
+
+// absorb 记录一个乱序 delta。超出缓冲上限时淘汰最旧的未提交项而不是清空
+// 整条流：后续 delta 仍按序接收与补拼，缺口由请求边界权威快照收敛。
+func (o *assistantStreamOrder) absorb(cacheKey uint64, text string, endSeq uint64) {
+	if o == nil {
+		return
+	}
+	if o.pending == nil {
+		o.pending = make(map[uint64]assistantPendingDelta)
+	}
+	if _, duplicate := o.pending[cacheKey]; duplicate {
+		return
+	}
+	o.pending[cacheKey] = assistantPendingDelta{text: text, endSeq: endSeq}
+	o.pendingText += len(text)
+	for (len(o.pending) > assistantStreamPendingLimit ||
+		o.pendingText > assistantStreamPendingByteLimit) && len(o.pending) > 0 {
+		oldest := ^uint64(0)
+		for seq := range o.pending {
+			if seq < oldest {
+				oldest = seq
+			}
+		}
+		o.pendingText -= len(o.pending[oldest].text)
+		if o.pendingText < 0 {
+			o.pendingText = 0
+		}
+		delete(o.pending, oldest)
+	}
 }
 
 type assistantPendingDelta struct {
@@ -152,6 +192,7 @@ func NewEventEncoder() *EventEncoder {
 		priorityBy:           make(map[string]*priorityPromptState),
 		streamOrder:          make(map[string]*assistantStreamOrder),
 		reasoningOrder:       make(map[string]*assistantStreamOrder),
+		assistantSnapshotBy:  make(map[string]string),
 	}
 }
 
@@ -449,6 +490,25 @@ func (e *EventEncoder) SubmitToolCall(toolCallID, toolName string, args map[stri
 	return e.Encode(runtimeevents.Event{Type: "tool.requested", ToolName: toolName, Payload: payload})
 }
 
+// ToolItemForCall returns the mutable tool-chain item currently owned by a
+// tool call identity, or nil when the encoder has never seen it.
+//
+// History reconciliation needs this read-only view to distinguish "this call
+// is already on screen (live bus projection or event-log replay)" from "this
+// call has never been projected". Re-submitting a terminal call would append a
+// second cell, because SubmitToolCall intentionally treats a repeated call ID
+// after terminal as a fresh invocation.
+func (e *EventEncoder) ToolItemForCall(toolCallID string) *Item {
+	if e == nil {
+		return nil
+	}
+	callID := strings.TrimSpace(toolCallID)
+	if callID == "" {
+		return nil
+	}
+	return e.toolByID[callID]
+}
+
 // SubmitToolProgress 更新一个 direct tool call 的 source。没有稳定身份或
 // 未知 call 时编码器会按既有 legacy 规则降级为 system，避免错误绑定。
 func (e *EventEncoder) SubmitToolProgress(toolCallID, toolName, progress string) *ChangeSet {
@@ -599,6 +659,7 @@ func (e *EventEncoder) Reset() {
 	e.toolOutputBy = make(map[string]map[string]struct{})
 	e.priorityBy = make(map[string]*priorityPromptState)
 	e.streamOrder = make(map[string]*assistantStreamOrder)
+	e.assistantSnapshotBy = make(map[string]string)
 	e.stats = Stats{}
 }
 
@@ -950,7 +1011,7 @@ func (e *EventEncoder) upsertItem(id string, kind ItemKind, mutate func(*Item) b
 	return it, true
 }
 
-// correctTerminalReasoningItem is the sole encoder escape hatch from the
+// correctTerminalReasoningItem is the reasoning-side escape hatch from the
 // ordinary terminal-item immutability rule. assistant.message can carry the
 // authoritative reasoning snapshot after an assistant delta already closed the
 // reasoning predecessor. That snapshot corrects the same item in place; it
@@ -961,6 +1022,32 @@ func (e *EventEncoder) correctTerminalReasoningItem(id string, mutate func(*Item
 			continue
 		}
 		if it.Kind != KindReasoning || !it.Status.Terminal() {
+			e.stats.DuplicateCount++
+			return it, false
+		}
+		if mutate != nil && !mutate(it) {
+			e.stats.DuplicateCount++
+			return it, false
+		}
+		it.Updated = e.clock
+		e.revisions[id]++
+		e.stats.UpsertCount++
+		return it, true
+	}
+	e.stats.DuplicateCount++
+	return nil, false
+}
+
+// correctTerminalAssistantItem is the assistant-side counterpart: the
+// run-level assistant.message may correct the text of an item already closed
+// by the per-response llm.request.finished authoritative snapshot. It never
+// reopens the item (status stays terminal) and never applies to another kind.
+func (e *EventEncoder) correctTerminalAssistantItem(id string, mutate func(*Item) bool) (*Item, bool) {
+	for _, it := range e.model.Items {
+		if it.ID != id {
+			continue
+		}
+		if it.Kind != KindAssistant || !it.Status.Terminal() {
 			e.stats.DuplicateCount++
 			return it, false
 		}
@@ -1299,10 +1386,6 @@ func (e *EventEncoder) orderReasoningDelta(key, text string, payload map[string]
 		order = &assistantStreamOrder{nextSeq: 1, pending: make(map[uint64]assistantPendingDelta)}
 		e.reasoningOrder[key] = order
 	}
-	if order.tainted {
-		e.stats.OutOfOrderCount++
-		return "", false
-	}
 	if seq < order.nextSeq {
 		e.stats.DuplicateCount++
 		return "", false
@@ -1321,15 +1404,8 @@ func (e *EventEncoder) orderReasoningDelta(key, text string, payload map[string]
 			e.stats.DuplicateCount++
 			return "", false
 		}
-		order.pending[cacheKey] = assistantPendingDelta{text: text, endSeq: seq}
-		order.pendingText += len(text)
+		order.absorb(cacheKey, text, seq)
 		e.stats.OutOfOrderCount++
-		if len(order.pending) >= assistantStreamPendingLimit ||
-			order.pendingText > assistantStreamPendingByteLimit {
-			order.pending = make(map[uint64]assistantPendingDelta)
-			order.pendingText = 0
-			order.tainted = true
-		}
 		return "", false
 	}
 	head := text
@@ -1432,11 +1508,6 @@ func (e *EventEncoder) applyAssistantDelta(ev runtimeevents.Event, cs *ChangeSet
 		order = &assistantStreamOrder{nextSeq: 1, pending: make(map[uint64]assistantPendingDelta)}
 		e.streamOrder[key] = order
 	}
-	if order.tainted {
-		// 超限后该流丢弃后续乱序 delta（对齐旧终端 tainted 语义）。
-		e.stats.OutOfOrderCount++
-		return
-	}
 	if seq < order.nextSeq {
 		// 已提交过的旧 sequence：重复/迟到，幂等跳过。
 		e.stats.DuplicateCount++
@@ -1459,15 +1530,8 @@ func (e *EventEncoder) applyAssistantDelta(ev runtimeevents.Event, cs *ChangeSet
 				e.stats.DuplicateCount++
 				return
 			}
-			order.pending[cacheKey] = assistantPendingDelta{text: delta, endSeq: seq}
-			order.pendingText += len(delta)
+			order.absorb(cacheKey, delta, seq)
 			e.stats.OutOfOrderCount++
-			if len(order.pending) >= assistantStreamPendingLimit ||
-				order.pendingText > assistantStreamPendingByteLimit {
-				order.pending = make(map[uint64]assistantPendingDelta)
-				order.pendingText = 0
-				order.tainted = true
-			}
 			return
 		}
 	}
@@ -1515,7 +1579,22 @@ func (e *EventEncoder) applyAssistantFinal(ev runtimeevents.Event, cs *ChangeSet
 	}
 	if assistant := e.assistantBy[key]; assistant != nil && assistant.Status.Terminal() {
 		// The first assistant.message owns the terminal snapshot for this exact
-		// request. A retransmission must not apply a conflicting embedded
+		// request. The per-response llm.request.finished snapshot is the only
+		// exception: the run-level final may still correct the same response's
+		// text once.
+		text := payloadString(ev.Payload["content"], payloadString(ev.Payload["message"], ""))
+		if _, fromSnapshot := e.assistantSnapshotBy[key]; fromSnapshot && text != "" && text != assistant.Head {
+			if u, changed := e.correctTerminalAssistantItem(assistant.ID, func(t *Item) bool {
+				t.Head = text
+				setAssistantPresentation(t)
+				return true
+			}); changed {
+				e.change(cs, OpUpsert, u)
+			}
+			e.assistantSnapshotBy[key] = text
+			return
+		}
+		// A retransmission must not apply a conflicting embedded
 		// reasoning snapshot before the generic terminal upsert guard runs.
 		e.stats.DuplicateCount++
 		return
@@ -1566,6 +1645,62 @@ func (e *EventEncoder) applyAssistantFinal(ev runtimeevents.Event, cs *ChangeSet
 	if changed {
 		e.change(cs, OpUpsert, u)
 	}
+}
+
+// applyAssistantResponseSnapshot converges the assistant item for one completed
+// model response onto the authoritative full text carried by
+// llm.request.finished. It replaces whatever incremental assembly produced
+// (including gaps left by dropped or evicted deltas) and closes the request's
+// ordered-stream state. Intermediate responses that end in tool_calls have no
+// run-level assistant.message, so this is their only completeness backstop; the
+// run-level final may still correct the same item once.
+func (e *EventEncoder) applyAssistantResponseSnapshot(key, text string, cs *ChangeSet) {
+	if e == nil || cs == nil || key == "" || strings.TrimSpace(text) == "" {
+		return
+	}
+	if _, retired := e.assistantTombstones[key]; retired {
+		e.stats.DuplicateCount++
+		return
+	}
+	delete(e.streamOrder, key)
+	it := e.assistantBy[key]
+	if it == nil {
+		// Even when every delta was lost or evicted, the authoritative snapshot
+		// still materializes a complete item at its true event position (ahead
+		// of the tool chain that follows this response).
+		it = e.appendItem(KindAssistant, "", text)
+		it.BoundaryGroupKey = key
+		setAssistantPresentation(it)
+		it.Status = StatusCompleted
+		e.assistantBy[key] = it
+		e.assistantSnapshotBy[key] = text
+		e.change(cs, OpAppend, it)
+		return
+	}
+	if it.Status.Terminal() {
+		// First authoritative snapshot wins for this request identity.
+		e.stats.DuplicateCount++
+		return
+	}
+	u, changed := e.upsertItem(it.ID, KindAssistant, func(t *Item) bool {
+		changed := false
+		if t.Head != text {
+			t.Head = text
+			changed = true
+		}
+		if t.Status != StatusCompleted {
+			t.Status = StatusCompleted
+			changed = true
+		}
+		if setAssistantPresentation(t) {
+			changed = true
+		}
+		return changed
+	})
+	if changed {
+		e.change(cs, OpUpsert, u)
+	}
+	e.assistantSnapshotBy[key] = text
 }
 
 // applyFinalReasoningSnapshot applies reasoning carried by assistant.message to
@@ -1693,6 +1828,12 @@ func (e *EventEncoder) applyLLMFinished(ev runtimeevents.Event, cs *ChangeSet) {
 	}
 	if !e.reasoningBarriers[key] {
 		e.finalizeReasoning(key, StatusCompleted, cs)
+	}
+	if snapshot := payloadString(ev.Payload[assistantSnapshotKey], ""); strings.TrimSpace(snapshot) != "" {
+		// 每次模型响应的权威全文（含以 tool_calls 结束的中间步骤）：流式 delta
+		// 一旦在投递链路上丢失/乱序，这里用完整文本整段收敛，避免永久截断。
+		e.applyAssistantResponseSnapshot(key, snapshot, cs)
+		return
 	}
 	if it := e.assistantBy[key]; it != nil && !it.Status.Terminal() {
 		e.flushAssistantStream(key, it, cs)
@@ -2222,7 +2363,7 @@ func diffHeaderLabelForTool(toolName string) string {
 // 幂等：无缓冲或无 pending 时无操作。
 func (e *EventEncoder) flushAssistantStream(key string, it *Item, cs *ChangeSet) {
 	order := e.streamOrder[key]
-	if order == nil || order.tainted || len(order.pending) == 0 {
+	if order == nil || len(order.pending) == 0 {
 		return
 	}
 	seqs := make([]uint64, 0, len(order.pending))

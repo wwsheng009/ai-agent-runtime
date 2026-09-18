@@ -98,6 +98,17 @@ func toolCompletedEventPayload(result toolExecutionResult, step int, traceID str
 	// without parsing summary text. Generic: driven by envelope metadata +
 	// toolresult.Diagnose, never tool-name special cases.
 	promoteToolDispositionToPayload(payload, result)
+	// 事件载荷的 duration_ms 被实时标题（bridge 编码）与事件日志/重放投影共同
+	// 当作工具调用耗时展示。工具自身上报的执行耗时（tool_metadata.duration_ms）
+	// 比 bridge 的墙钟回退更权威且可复现：载荷缺失时在此提升，使 live 与
+	// replay 使用同一口径（bridge 对已有 duration_ms 不再覆盖）。
+	if intValue(payload["duration_ms"]) <= 0 && result.Envelope != nil {
+		if nested, ok := result.Envelope.Metadata["tool_metadata"].(map[string]interface{}); ok {
+			if durationMs := intValue(nested["duration_ms"]); durationMs > 0 {
+				payload["duration_ms"] = durationMs
+			}
+		}
+	}
 	// Nested portable wire view for hosts that prefer toolprotocol.Result shape.
 	attachProtocolResultToPayload(payload, result)
 	mergeToolEventPayload(payload, extra)

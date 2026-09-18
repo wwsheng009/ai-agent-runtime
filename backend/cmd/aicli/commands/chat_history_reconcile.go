@@ -35,6 +35,11 @@ type persistedHistorySeedUnit struct {
 	toolOutput string
 	toolError  string
 	success    bool
+	// toolDisplay 是与实时 ChatEvent 等价的 compact 工具结果投影
+	// （renderSharedChatToolEvent）。非空时它是 Scene 工具单元格的权威
+	// 头部：既用于与实时/日志重放建立的 item 匹配（避免 resume 后又追加
+	// 一个原文单元格），也用于把历史种子渲染成与 live 相同的摘要形态。
+	toolDisplay string
 }
 
 // seedPersistedHistory reconciles canonical persisted history with the Scene
@@ -140,6 +145,17 @@ func (b *chatRuntimeEventBridge) seedPersistedHistoryLocked(units []persistedHis
 		}
 		if alias := groupAliases[unit.boundaryGroupKey]; alias != "" {
 			unit.boundaryGroupKey = alias
+		}
+		if unit.kind == persistedHistorySeedTool && strings.TrimSpace(unit.toolCallID) != "" {
+			// 同一调用身份已经拥有终态工具单元格（live 总线投影，或事件日志
+			// 重放建立的 display_head 单元格），但头部形态与历史投影不同
+			// （例如 live 头部含 progress 段标签/实时耗时）。此时历史种子只
+			// 是同一行的旧投影，必须视为已导入：再走一次 SubmitToolCall 会在
+			// “终态后同 callID 重新发起”的语义下新建第二个单元格，形成重复。
+			if item := b.renderEncoder.ToolItemForCall(unit.toolCallID); item != nil && item.Status.Terminal() {
+				b.historySeedSeen[unit.identity] = struct{}{}
+				continue
+			}
 		}
 		unit.apply(b)
 		b.historySeedSeen[unit.identity] = struct{}{}
@@ -296,6 +312,7 @@ func buildPersistedHistorySeedUnits(messages []runtimetypes.Message) []persisted
 				toolOutput: output,
 				toolError:  toolErr,
 				success:    strings.TrimSpace(toolErr) == "",
+				toolDisplay: chatHistoryToolDisplay(message, name, call.Args),
 			})
 		case "system":
 			if strings.TrimSpace(content) != "" {
@@ -326,7 +343,7 @@ func (u persistedHistorySeedUnit) stableKey() string {
 	var builder strings.Builder
 	for _, value := range []string{
 		strconv.Itoa(int(u.kind)), u.content, u.toolCallID, u.toolName,
-		u.toolOutput, u.toolError, strconv.FormatBool(u.success),
+		u.toolOutput, u.toolError, strconv.FormatBool(u.success), u.toolDisplay,
 	} {
 		fmt.Fprintf(&builder, "%d:%s|", len(value), value)
 	}
@@ -376,7 +393,15 @@ func (u persistedHistorySeedUnit) matches(item *encoding.Item) bool {
 		}
 		return (item.Kind == encoding.KindSupplement || item.Kind == encoding.KindReasoning || item.Kind == encoding.KindSystem) && item.Head == u.content
 	case persistedHistorySeedTool:
-		return item.Kind == encoding.KindToolCall && item.Head == u.toolHead()
+		if item.Kind != encoding.KindToolCall {
+			return false
+		}
+		// 优先按实时 compact 投影匹配（live Scene / 事件日志重放建立的
+		// item 头部即此形态）；无投影数据时保持旧原文头语义。
+		if u.toolDisplay != "" && item.Head == u.toolDisplay {
+			return true
+		}
+		return item.Head == u.toolHead()
 	default:
 		return false
 	}
@@ -436,6 +461,13 @@ func (u persistedHistorySeedUnit) apply(b *chatRuntimeEventBridge) {
 		// row. Establish the stable call identity before the result so the
 		// encoder maps both mutations to one committed tool-chain Scene cell.
 		b.applyChangeSet(b.renderEncoder.SubmitToolCall(u.toolCallID, u.toolName, nil))
+		if strings.TrimSpace(u.toolDisplay) != "" {
+			// 与实时链路同源：live 通过 SubmitToolResultDisplay 注入
+			// compact 摘要，历史种子必须复用同一入口，否则 resume 会把
+			// 原文当作工具输出再渲染一份未摘要单元格。
+			b.applyChangeSet(b.renderEncoder.SubmitToolResultDisplay(u.toolCallID, u.toolDisplay))
+			return
+		}
 		b.applyChangeSet(b.renderEncoder.SubmitToolResult(
 			u.toolCallID, u.toolName, u.toolOutput, u.toolError, u.success,
 		))

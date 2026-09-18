@@ -2215,6 +2215,15 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	if usageSource != "" {
 		finishedPayload["usage_source"] = usageSource
 	}
+	if response != nil {
+		// 每次模型响应的权威全文快照（含以 tool_calls 结束的中间步骤）。
+		// 中间步骤没有 run 级 assistant.message，流式 delta 一旦丢失/乱序，
+		// 渲染侧就会永久截断；编码器在 llm.request.finished 边界用
+		// assistant_snapshot 整段收敛（见 ui/render/encoding 的 assistantSnapshotKey）。
+		if snapshot := strings.TrimSpace(response.Content); snapshot != "" {
+			finishedPayload["assistant_snapshot"] = response.Content
+		}
+	}
 	loop.emitRuntimeEvent("llm.request.finished", sessionID, "", finishedPayload)
 
 	// 解析响应
