@@ -806,3 +806,57 @@ func TestCallableToolNamesCanonicalizeProviderUnsafeAndLongNames(t *testing.T) {
 		t.Fatalf("distinct unsafe names collapsed to one identity: %#v", callableNames)
 	}
 }
+
+func TestSetToolUserEnabledGatesSurfaceResolutionAndInventory(t *testing.T) {
+	reg := NewRegistry()
+	for _, name := range []string{"search", "list_pages"} {
+		if err := reg.RegisterTool("docs", &protocol.Tool{Name: name}, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := reg.SetToolUserEnabled("docs", "list_pages", false); err != nil {
+		t.Fatal(err)
+	}
+	names := CallableToolNames(reg.ListTools())
+	if len(names) != 1 || names[0] != "search" {
+		t.Fatalf("disabled tool leaked into callable surface: %#v", names)
+	}
+	if _, err := reg.ResolveTool("mcp__docs__list_pages"); err == nil {
+		t.Fatalf("disabled tool must fail canonical resolution")
+	}
+	if _, err := reg.ResolveToolForMCP("docs", "list_pages"); err == nil {
+		t.Fatalf("disabled tool must fail per-MCP resolution")
+	}
+
+	all := reg.ListAllToolsForMCP("docs")
+	if len(all) != 2 {
+		t.Fatalf("all-tools inventory must include disabled tools, got %d", len(all))
+	}
+	found := false
+	for _, info := range all {
+		if info != nil && info.Tool != nil && info.Tool.Name == "list_pages" {
+			found = true
+			if !info.UserDisabled {
+				t.Fatalf("expected user-disabled bit on disabled tool")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("disabled tool missing from all-tools inventory")
+	}
+
+	if err := reg.SetToolUserEnabled("docs", "list_pages", true); err != nil {
+		t.Fatal(err)
+	}
+	if names := CallableToolNames(reg.ListTools()); len(names) != 2 {
+		t.Fatalf("re-enabled tool must return to callable surface: %#v", names)
+	}
+}
+
+func TestSetToolUserEnabledUnknownToolFailsClosed(t *testing.T) {
+	reg := NewRegistry()
+	if err := reg.SetToolUserEnabled("docs", "missing", false); err == nil {
+		t.Fatalf("unknown tool toggle must fail")
+	}
+}

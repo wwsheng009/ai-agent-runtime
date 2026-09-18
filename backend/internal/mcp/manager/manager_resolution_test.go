@@ -75,7 +75,7 @@ func TestManagerCallToolDoesNotBypassDisabledRegistration(t *testing.T) {
 
 func TestManagerLoadToolsQuarantinesOnlyInvalidDefinitions(t *testing.T) {
 	reg := registry.NewRegistry()
-	mgr := &manager{registry: reg}
+	mgr := &manager{registry: reg, started: true}
 	var quarantineEvent *LifecycleEvent
 	mgr.AddLifecycleObserver(func(event LifecycleEvent) {
 		if event.Type == "mcp.tool.quarantined" {
@@ -91,7 +91,7 @@ func TestManagerLoadToolsQuarantinesOnlyInvalidDefinitions(t *testing.T) {
 		},
 	}
 
-	mgr.loadTools(context.Background(), client, "docs")
+	mgr.loadTools(context.Background(), client, "docs", mgr.currentGeneration())
 	tools := mgr.ListTools()
 	if len(tools) != 1 || tools[0].Tool.Name != "valid" {
 		t.Fatalf("valid tools were not isolated from invalid definitions: %#v", tools)

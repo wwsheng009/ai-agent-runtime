@@ -51,7 +51,6 @@ func TestManager_RemoteEchoConnectivity(t *testing.T) {
     timeout: 30s
     maxRetry: 1
 global:
-  autoConnect: true
   healthCheckInterval: 1m
   connectTimeout: 10s
 `, addr)

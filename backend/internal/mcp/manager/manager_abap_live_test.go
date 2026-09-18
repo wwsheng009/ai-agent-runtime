@@ -40,7 +40,6 @@ func TestManager_ABAPAdtMCP_LoginSmoke(t *testing.T) {
     }
   },
   "global": {
-    "autoConnect": true,
     "healthCheckInterval": "1m",
     "connectTimeout": "10s"
   }

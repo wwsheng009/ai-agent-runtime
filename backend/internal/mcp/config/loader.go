@@ -87,9 +87,6 @@ func (l *Loader) setDefaults(config *Config) {
 	if config.Global.ConnectTimeout.Duration == 0 {
 		config.Global.ConnectTimeout.Duration = 10 * time.Second
 	}
-	if !config.Global.AutoConnect {
-		config.Global.AutoConnect = true // 默认启用自动连接
-	}
 
 	// 每个 MCP 的默认值
 	for name, mcp := range config.MCPServers {
@@ -182,21 +179,25 @@ func (l *Loader) validate(config *Config) error {
 		"stdio":     true,
 		"sse":       true,
 		"websocket": true,
+		"ws":        true,
 	}
 
 	for name, mcp := range config.MCPServers {
 		// 检查传输类型
-		if !validTypes[mcp.Type] {
-			return fmt.Errorf("无效的传输类型 '%s' (MCP: %s)，支持: stdio, sse, websocket", mcp.Type, name)
+		if !validTypes[mcp.Type] && !IsStreamableHTTPTransport(mcp.Type) {
+			return fmt.Errorf("无效的传输类型 '%s' (MCP: %s)，支持: stdio, sse, websocket, streamable", mcp.Type, name)
 		}
 
 		// stdio 类型必须有 command
-		if mcp.Type == "stdio" && mcp.Command == "" {
+		if strings.EqualFold(strings.TrimSpace(mcp.Type), "stdio") && mcp.Command == "" {
 			return fmt.Errorf("stdio 类型的 MCP 需要指定 command (MCP: %s)", name)
 		}
 
-		// sse/websocket 类型必须有 url
-		if (mcp.Type == "sse" || mcp.Type == "websocket") && mcp.URL == "" {
+		// sse/websocket/streamable 类型必须有 url
+		if (strings.EqualFold(strings.TrimSpace(mcp.Type), "sse") ||
+			strings.EqualFold(strings.TrimSpace(mcp.Type), "websocket") ||
+			strings.EqualFold(strings.TrimSpace(mcp.Type), "ws") ||
+			IsStreamableHTTPTransport(mcp.Type)) && mcp.URL == "" {
 			return fmt.Errorf("%s 类型的 MCP 需要指定 url (MCP: %s)", mcp.Type, name)
 		}
 
@@ -217,7 +218,20 @@ func (l *Loader) validate(config *Config) error {
 		if mcp.MaxParallelCalls < 0 {
 			return fmt.Errorf("maxParallelCalls cannot be negative (MCP: %s)", name)
 		}
+		for toolName := range mcp.Tools {
+			if strings.TrimSpace(toolName) == "" {
+				return fmt.Errorf("工具级配置的工具名不能为空 (MCP: %s)", name)
+			}
+		}
 	}
 
 	return nil
+}
+
+// ValidateConfig 校验配置内容（不依赖配置文件，供管理端/CLI 写入前校验）。
+func ValidateConfig(config *Config) error {
+	if config == nil {
+		return fmt.Errorf("配置不能为空")
+	}
+	return (&Loader{}).validate(config)
 }

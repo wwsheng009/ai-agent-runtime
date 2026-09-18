@@ -223,6 +223,8 @@ func TestManagerHealthCheck_ReconnectsOnFailure(t *testing.T) {
 		Global: config.GlobalConfig{ConnectTimeout: config.Duration{Duration: 50 * time.Millisecond}},
 	}
 	mgr := newTestManager(cfg)
+	// 健康检查/重连只会在 Start 之后发生，这里显式标记运行态以匹配真实生命周期。
+	mgr.started = true
 
 	failing := &fakeClient{name: "test-mcp", connected: true, listToolsErr: errors.New("boom")}
 	reconnected := &fakeClient{name: "test-mcp"}

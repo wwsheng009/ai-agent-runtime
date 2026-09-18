@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestConfig_SetDefaults(t *testing.T) {
@@ -342,7 +344,6 @@ mcpServers:
     timeout: 30s
 
 global:
-  autoConnect: true
   healthCheckInterval: 1m
   connectTimeout: 10s
 `
@@ -384,10 +385,6 @@ global:
 	}
 
 	// 验证全局配置
-	if !config.Global.AutoConnect {
-		t.Error("Expected global autoConnect to be true")
-	}
-
 	if config.Global.HealthCheckInterval.Duration != time.Minute {
 		t.Errorf("Expected healthCheckInterval 1m, got %v", config.Global.HealthCheckInterval)
 	}
@@ -469,7 +466,7 @@ func TestLoader_GetConfig(t *testing.T) {
 	loader := &Loader{
 		config: &Config{
 			Global: GlobalConfig{
-				AutoConnect: true,
+				ConnectTimeout: Duration{Duration: 5 * time.Second},
 			},
 		},
 	}
@@ -479,8 +476,8 @@ func TestLoader_GetConfig(t *testing.T) {
 		t.Error("Expected config, got nil")
 	}
 
-	if !config.Global.AutoConnect {
-		t.Error("Expected AutoConnect to be true")
+	if config.Global.ConnectTimeout.Duration != 5*time.Second {
+		t.Errorf("Expected ConnectTimeout 5s, got %v", config.Global.ConnectTimeout)
 	}
 }
 
@@ -582,5 +579,68 @@ func TestConfig_ToolInfo(t *testing.T) {
 	}
 	if info.MaxParallelCalls != 3 {
 		t.Errorf("Expected MaxParallelCalls 3, got %d", info.MaxParallelCalls)
+	}
+}
+
+func TestMCPConfig_ToolEnableDisableSemantics(t *testing.T) {
+	var cfg MCPConfig
+	if !cfg.IsToolEnabled("search") {
+		t.Fatalf("missing tools entry must default to enabled")
+	}
+	cfg.SetToolEnabled("search", false)
+	if cfg.IsToolEnabled("search") {
+		t.Fatalf("explicit enabled=false must disable the tool")
+	}
+	entry, ok := cfg.Tools["search"]
+	if !ok || entry.Enabled == nil || *entry.Enabled {
+		t.Fatalf("expected explicit enabled=false entry, got %#v", cfg.Tools)
+	}
+	cfg.SetToolEnabled("   ", false)
+	if len(cfg.Tools) != 1 {
+		t.Fatalf("blank tool name must be ignored, got %#v", cfg.Tools)
+	}
+	cfg.SetToolEnabled("search", true)
+	if !cfg.IsToolEnabled("search") {
+		t.Fatalf("re-enable must restore default-enabled semantics")
+	}
+	if cfg.Tools != nil {
+		t.Fatalf("re-enable must drop the explicit disable entry, got %#v", cfg.Tools)
+	}
+}
+
+func TestMCPConfig_ToolEnableSurvivesFileRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mcp.yaml")
+	raw := "mcpServers:\n  docs:\n    type: stdio\n    command: npx\n    tools:\n      list_pages:\n        enabled: false\n"
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := NewLoader(path).Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	docs := cfg.MCPServers["docs"]
+	if docs.IsToolEnabled("list_pages") {
+		t.Fatalf("configured disable must survive load")
+	}
+	if !docs.IsToolEnabled("search") {
+		t.Fatalf("unlisted tool must stay enabled")
+	}
+
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		t.Fatalf("write back: %v", err)
+	}
+	reloaded, err := NewLoader(path).Load()
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	reloadedDocs := reloaded.MCPServers["docs"]
+	if reloadedDocs.IsToolEnabled("list_pages") {
+		t.Fatalf("tool disable must survive save+reload round trip")
 	}
 }

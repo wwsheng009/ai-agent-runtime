@@ -39,46 +39,25 @@ func (m *trackingMCPManager) GetMCPStatus(name string) (*mcpconfig.MCPStatus, er
 func (m *trackingMCPManager) ListMCPs() []*mcpconfig.MCPStatus { return nil }
 func (m *trackingMCPManager) ReloadConfig() error              { return nil }
 
-func TestResolveChatMCPStartupConfigPath_SkipsMissingConfigWhenAutoConnectDisabled(t *testing.T) {
+func TestResolveChatMCPStartupConfigPath_SkipsMissingConfig(t *testing.T) {
 	cfg := &config.Config{
 		AICLI: &config.AICLIConfig{
 			MCP: &config.AICLIMCPConfig{
-				ConfigFile:  filepath.Join(t.TempDir(), "missing.yaml"),
-				AutoConnect: false,
+				ConfigFile: filepath.Join(t.TempDir(), "missing.yaml"),
 			},
 		},
 	}
 
 	path, shouldInit := resolveChatMCPStartupConfigPath(cfg, nil)
 	if shouldInit {
-		t.Fatalf("expected missing MCP config to be skipped when auto_connect is false, got path=%q", path)
+		t.Fatalf("expected missing MCP config to be skipped, got path=%q", path)
 	}
 	if path != "" {
 		t.Fatalf("expected empty path when MCP init is skipped, got %q", path)
 	}
 }
 
-func TestResolveChatMCPStartupConfigPath_WarnsForMissingConfigWhenAutoConnectEnabled(t *testing.T) {
-	missingPath := filepath.Join(t.TempDir(), "missing.yaml")
-	cfg := &config.Config{
-		AICLI: &config.AICLIConfig{
-			MCP: &config.AICLIMCPConfig{
-				ConfigFile:  missingPath,
-				AutoConnect: true,
-			},
-		},
-	}
-
-	path, shouldInit := resolveChatMCPStartupConfigPath(cfg, nil)
-	if !shouldInit {
-		t.Fatal("expected missing MCP config to remain actionable when auto_connect is true")
-	}
-	if path != missingPath {
-		t.Fatalf("expected path %q, got %q", missingPath, path)
-	}
-}
-
-func TestResolveChatMCPStartupConfigPath_UsesExistingConfigEvenWhenAutoConnectDisabled(t *testing.T) {
+func TestResolveChatMCPStartupConfigPath_UsesExistingConfig(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "mcp.yaml")
 	if err := os.WriteFile(configPath, []byte("mcp_servers: {}\n"), 0o644); err != nil {
@@ -87,8 +66,7 @@ func TestResolveChatMCPStartupConfigPath_UsesExistingConfigEvenWhenAutoConnectDi
 	cfg := &config.Config{
 		AICLI: &config.AICLIConfig{
 			MCP: &config.AICLIMCPConfig{
-				ConfigFile:  configPath,
-				AutoConnect: false,
+				ConfigFile: configPath,
 			},
 		},
 	}
@@ -102,7 +80,7 @@ func TestResolveChatMCPStartupConfigPath_UsesExistingConfigEvenWhenAutoConnectDi
 	}
 }
 
-func TestPrepareChatMCPManager_StopsExistingManagerWhenConfigMissingAndAutoConnectDisabled(t *testing.T) {
+func TestPrepareChatMCPManager_StopsExistingManagerWhenConfigMissing(t *testing.T) {
 	originalManager := MCPManagerInstance
 	originalPath := mcpManagerConfigPath
 	defer func() {
@@ -117,8 +95,7 @@ func TestPrepareChatMCPManager_StopsExistingManagerWhenConfigMissingAndAutoConne
 	cfg := &config.Config{
 		AICLI: &config.AICLIConfig{
 			MCP: &config.AICLIMCPConfig{
-				ConfigFile:  filepath.Join(t.TempDir(), "missing.yaml"),
-				AutoConnect: false,
+				ConfigFile: filepath.Join(t.TempDir(), "missing.yaml"),
 			},
 		},
 	}

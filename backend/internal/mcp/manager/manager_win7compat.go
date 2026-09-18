@@ -93,6 +93,14 @@ type QuarantineReporter interface {
 	ListQuarantinedTools() []registry.QuarantinedToolInfo
 }
 
+// AsyncManager 是主线 AsyncManager 能力在 Win7 兼容构建下的占位声明，
+// 保证调用方的能力断言可以编译；禁用实现不实现该接口，断言自然失败并回退同步 Start。
+type AsyncManager interface {
+	Manager
+	StartAsync(ctx context.Context) error
+	WaitReady(ctx context.Context) error
+}
+
 // disabledManager 是 Win7 兼容构建中的空实现：不加载、不启动任何 MCP。
 type disabledManager struct{}
 
@@ -103,6 +111,16 @@ func (disabledManager) Start(ctx context.Context) error { return nil }
 func (disabledManager) Stop() error { return nil }
 
 func (disabledManager) ListTools() []*registry.ToolInfo { return nil }
+
+func (disabledManager) ListAllToolsForMCP(mcpName string) []*registry.ToolInfo { return nil }
+
+func (disabledManager) SetToolEnabled(mcpName, toolName string, enabled bool) error {
+	return errMCPDisabled
+}
+
+func (disabledManager) SetToolsEnabled(mcpName string, tools []string, enabled bool) error {
+	return errMCPDisabled
+}
 
 func (disabledManager) CallTool(ctx context.Context, mcpName, toolName string, args map[string]interface{}) (*protocol.CallToolResult, error) {
 	return nil, errMCPDisabled

@@ -92,6 +92,25 @@ type QuarantineReporter interface {
 	ListQuarantinedTools() []registry.QuarantinedToolInfo
 }
 
+// AsyncManager 暴露 MCP 客户端的异步启动能力：
+//   - StartAsync 触发全部启用 MCP 的后台并行建连后立即返回；
+//   - WaitReady 等待首轮建连（含工具加载）全部结束，便于需要完整工具面的调用方。
+//
+// Manager 基础接口保持不变，调用方可按需断言该能力；未实现时回退同步 Start。
+type AsyncManager interface {
+	Manager
+	StartAsync(ctx context.Context) error
+	WaitReady(ctx context.Context) error
+}
+
+const (
+	// maxConcurrentMCPStarts 限制后台并行建连的 MCP 数量，避免一次性拉起过多子进程。
+	maxConcurrentMCPStarts = 8
+	// mcpConnectShutdownGrace 限制 Stop/Reload 等待后台建连退出的时间；
+	// 超时后由 generation 守卫丢弃迟到结果，避免关闭路径被慢握手拖住。
+	mcpConnectShutdownGrace = 5 * time.Second
+)
+
 // manager MCP 管理器实现
 type manager struct {
 	cfg       *config.Config
@@ -107,17 +126,28 @@ type manager struct {
 	healthDone   chan struct{}
 	observers    []LifecycleObserver
 	observerMu   sync.RWMutex
-	mu           sync.RWMutex
+
+	// 后台建连生命周期：generation 每次 Start/Stop/Reload 递增，
+	// 迟到的建连结果据此丢弃，避免向已停止或已重载的管理器回填客户端。
+	startCancel context.CancelFunc
+	connDone    chan struct{}
+	readyCh     chan struct{}
+	generation  uint64
+	connecting  map[string]struct{}
+	pending     map[string]client.Client
+	mu          sync.RWMutex
 }
 
 // NewManager 创建管理器
 func NewManager() Manager {
 	return &manager{
-		registry:  registry.NewRegistry(),
-		clients:   make(map[string]client.Client),
-		status:    make(map[string]*config.MCPStatus),
-		newClient: client.NewClient,
-		observers: make([]LifecycleObserver, 0),
+		registry:   registry.NewRegistry(),
+		clients:    make(map[string]client.Client),
+		status:     make(map[string]*config.MCPStatus),
+		newClient:  client.NewClient,
+		observers:  make([]LifecycleObserver, 0),
+		connecting: make(map[string]struct{}),
+		pending:    make(map[string]client.Client),
 	}
 }
 
@@ -154,20 +184,43 @@ func (m *manager) LoadConfig(configPath string) error {
 	return nil
 }
 
-// Start 启动所有启用的 MCPs
+// Start 启动所有启用的 MCPs，并等待首轮并行建连完成后返回。
 func (m *manager) Start(ctx context.Context) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	if err := m.StartAsync(ctx); err != nil {
+		return err
+	}
+	return m.WaitReady(ctx)
+}
 
+// StartAsync 触发所有启用 MCP 的后台并行建连后立即返回，不阻塞应用启动。
+// 连接进度可通过 ListMCPs/GetMCPStatus 与生命周期事件观测；
+// 需要完整工具面的调用方可用 WaitReady 等待首轮建连结束。
+func (m *manager) StartAsync(ctx context.Context) error {
+	m.mu.Lock()
 	if m.cfg == nil {
+		m.mu.Unlock()
 		return fmt.Errorf("配置未加载，请先调用 LoadConfig")
 	}
-
 	if m.started {
+		m.mu.Unlock()
 		return fmt.Errorf("管理器已经启动")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-	// 启动所有启用的 MCP
+	startCtx, cancel := context.WithCancel(ctx)
+	m.startCancel = cancel
+	m.started = true
+	m.generation++
+	m.readyCh = make(chan struct{})
+	m.connDone = make(chan struct{})
+
+	type startEntry struct {
+		name string
+		cfg  config.MCPConfig
+	}
+	enabled := make([]startEntry, 0, len(m.cfg.MCPServers))
 	for name, mcpCfg := range m.cfg.MCPServers {
 		status := m.ensureStatusLocked(name, &mcpCfg)
 		if !mcpCfg.IsEnabled() {
@@ -183,41 +236,219 @@ func (m *manager) Start(ctx context.Context) error {
 			"execution_mode": mcpCfg.ExecutionMode(),
 			"trust_level":    string(mcpCfg.ResolvedTrustLevel()),
 		})
-
-		cli, err := m.createAndConnectClient(ctx, name, &mcpCfg)
-		if err != nil {
-			status.LastError = err.Error()
-			m.emitLifecycleEvent(ctx, "mcp.connect_failed", name, map[string]interface{}{
-				"error":          err.Error(),
-				"execution_mode": mcpCfg.ExecutionMode(),
-				"trust_level":    string(mcpCfg.ResolvedTrustLevel()),
-			})
-			printStatusf("[Manager] 启动 MCP 失败: %s - %v\n", name, err)
-			continue
-		}
-
-		m.clients[name] = cli
-		m.registry.RegisterClient(name, cli)
-		status.LastConnect = time.Now()
-		status.LastError = ""
-		m.emitLifecycleEvent(ctx, "mcp.connected", name, map[string]interface{}{
-			"execution_mode": mcpCfg.ExecutionMode(),
-			"trust_level":    string(mcpCfg.ResolvedTrustLevel()),
-		})
-
-		// 加载工具
-		m.loadTools(ctx, cli, name)
-
-		printStatusf("[Manager] MCP 已启动: %s (工具: %d)\n", name, len(m.registry.ListToolsByMCP(name)))
+		enabled = append(enabled, startEntry{name: name, cfg: mcpCfg})
 	}
 
-	m.started = true
+	gen := m.generation
+	// 在持锁期间登记计数：Stop/Reload 即使在建连 goroutine 启动前抢占，
+	// 也能等待全部 goroutine 退出，避免迟到客户端回填到已清理的管理器。
+	wg := &sync.WaitGroup{}
+	wg.Add(len(enabled))
 	m.startHealthCheckerLocked(ctx)
+	readyCh := m.readyCh
+	connDone := m.connDone
+	m.mu.Unlock()
+
+	go func() {
+		wg.Wait()
+		close(readyCh)
+		close(connDone)
+	}()
+
+	sem := make(chan struct{}, maxConcurrentMCPStarts)
+	for _, entry := range enabled {
+		entry := entry
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-startCtx.Done():
+				return
+			}
+			defer func() { <-sem }()
+			m.connectMCP(startCtx, gen, entry.name, &entry.cfg)
+		}()
+	}
 	return nil
 }
 
-// createAndConnectClient 创建并连接客户端
-func (m *manager) createAndConnectClient(ctx context.Context, name string, mcpCfg *config.MCPConfig) (client.Client, error) {
+// WaitReady 等待首轮建连（含工具加载）结束；管理器未启动时立即返回。
+func (m *manager) WaitReady(ctx context.Context) error {
+	m.mu.RLock()
+	readyCh := m.readyCh
+	m.mu.RUnlock()
+	if readyCh == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-readyCh:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// connectMCP 在后台完成单个 MCP 的建连、注册与工具加载。
+func (m *manager) connectMCP(ctx context.Context, gen uint64, name string, mcpCfg *config.MCPConfig) {
+	m.markConnecting(gen, name, true)
+	defer m.markConnecting(gen, name, false)
+
+	if ctx.Err() != nil {
+		return
+	}
+
+	cli, err := m.createClient(name, mcpCfg)
+	if err != nil {
+		m.recordConnectFailure(ctx, name, mcpCfg, err)
+		return
+	}
+	if !m.trackPending(gen, name, cli) {
+		_ = cli.Close()
+		return
+	}
+	connectErr := m.connectClient(ctx, cli, mcpCfg)
+	m.untrackPending(name, cli)
+	if connectErr != nil {
+		_ = cli.Close()
+		m.recordConnectFailure(ctx, name, mcpCfg, connectErr)
+		return
+	}
+
+	m.mu.Lock()
+	if !m.isGenerationCurrentLocked(gen) || !m.isEnabledLocked(name) {
+		m.mu.Unlock()
+		_ = cli.Close()
+		return
+	}
+	m.clients[name] = cli
+	m.registry.RegisterClient(name, cli)
+	status := m.ensureStatusLocked(name, mcpCfg)
+	status.LastConnect = time.Now()
+	status.LastError = ""
+	m.mu.Unlock()
+
+	m.emitLifecycleEvent(ctx, "mcp.connected", name, map[string]interface{}{
+		"execution_mode": mcpCfg.ExecutionMode(),
+		"trust_level":    string(mcpCfg.ResolvedTrustLevel()),
+	})
+
+	// 加载工具
+	m.loadTools(ctx, cli, name, gen)
+
+	printStatusf("[Manager] MCP 已启动: %s (工具: %d)\n", name, len(m.registry.ListToolsByMCP(name)))
+}
+
+// recordConnectFailure 记录连接失败；管理器停止/重载导致的取消不记为可见失败。
+func (m *manager) recordConnectFailure(ctx context.Context, name string, mcpCfg *config.MCPConfig, err error) {
+	if err == nil || ctx.Err() != nil {
+		return
+	}
+	m.setStatus(name, mcpCfg, func(status *config.MCPStatus) {
+		status.LastError = err.Error()
+	})
+	m.emitLifecycleEvent(ctx, "mcp.connect_failed", name, map[string]interface{}{
+		"error":          err.Error(),
+		"execution_mode": mcpCfg.ExecutionMode(),
+		"trust_level":    string(mcpCfg.ResolvedTrustLevel()),
+	})
+	printStatusf("[Manager] 启动 MCP 失败: %s - %v\n", name, err)
+}
+
+// trackPending 登记在建客户端，供 Stop/Reload 主动取消慢握手。
+func (m *manager) trackPending(gen uint64, name string, cli client.Client) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.isGenerationCurrentLocked(gen) {
+		return false
+	}
+	if m.pending == nil {
+		m.pending = make(map[string]client.Client)
+	}
+	m.pending[name] = cli
+	return true
+}
+
+// untrackPending 按身份移除在建客户端，避免误删新一代同名连接。
+func (m *manager) untrackPending(name string, cli client.Client) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if current, ok := m.pending[name]; ok && current == cli {
+		delete(m.pending, name)
+	}
+}
+
+func (m *manager) markConnecting(gen uint64, name string, connecting bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.connecting == nil {
+		m.connecting = make(map[string]struct{})
+	}
+	if connecting {
+		if !m.isGenerationCurrentLocked(gen) {
+			return
+		}
+		m.connecting[name] = struct{}{}
+		return
+	}
+	// 只清理本代留下的标记，避免误删新一代同名 server 的建连状态。
+	if m.generation == gen {
+		delete(m.connecting, name)
+	}
+}
+
+func (m *manager) isConnecting(name string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, ok := m.connecting[name]
+	return ok
+}
+
+func (m *manager) isGenerationCurrent(gen uint64) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.isGenerationCurrentLocked(gen)
+}
+
+func (m *manager) isGenerationCurrentLocked(gen uint64) bool {
+	return m.started && m.generation == gen
+}
+
+func (m *manager) isEnabledLocked(name string) bool {
+	if m.cfg == nil {
+		return false
+	}
+	mcpCfg, ok := m.cfg.MCPServers[name]
+	if !ok {
+		return false
+	}
+	return mcpCfg.IsEnabled()
+}
+
+func (m *manager) currentGeneration() uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.generation
+}
+
+// waitForConnects 有界等待后台建连退出；超时仅打日志，迟到结果由 generation 丢弃。
+func (m *manager) waitForConnects(done chan struct{}) {
+	if done == nil {
+		return
+	}
+	timer := time.NewTimer(mcpConnectShutdownGrace)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		printStatusf("[Manager] 等待后台 MCP 建连退出超时，转入后台清理\n")
+	}
+}
+
+// createClient 构造客户端并桥接其生命周期事件。
+func (m *manager) createClient(name string, mcpCfg *config.MCPConfig) (client.Client, error) {
 	cli, err := m.newClient(name, mcpCfg)
 	if err != nil {
 		return nil, err
@@ -240,23 +471,26 @@ func (m *manager) createAndConnectClient(ctx context.Context, name string, mcpCf
 			m.emitLifecycleEvent(client.WithTraceID(context.Background(), event.TraceID), event.Type, name, payload)
 		})
 	}
-
-	// 连接到 MCP Server
-	// 只在连接阶段使用带超时的 context
-	timeoutCtx, cancel := context.WithTimeout(ctx, m.resolveConnectTimeout(mcpCfg))
-	defer cancel()
-
-	if err := cli.Connect(timeoutCtx); err != nil {
-		return nil, err
-	}
-
 	return cli, nil
 }
 
-// loadTools 加载 MCP 工具
-func (m *manager) loadTools(ctx context.Context, cli client.Client, mcpName string) {
+// connectClient 在带超时的上下文中连接 MCP Server（超时只在连接阶段生效）。
+func (m *manager) connectClient(ctx context.Context, cli client.Client, mcpCfg *config.MCPConfig) error {
+	timeoutCtx, cancel := context.WithTimeout(ctx, m.resolveConnectTimeout(mcpCfg))
+	defer cancel()
+	return cli.Connect(timeoutCtx)
+}
+
+// loadTools 加载 MCP 工具。gen 用于丢弃停止/重载后迟到的注册结果。
+func (m *manager) loadTools(ctx context.Context, cli client.Client, mcpName string, gen uint64) {
+	if !m.isGenerationCurrent(gen) {
+		return
+	}
 	tools, err := cli.ListTools(ctx)
 	if err != nil {
+		if !m.isGenerationCurrent(gen) {
+			return
+		}
 		m.emitLifecycleEvent(ctx, "mcp.tools_load_failed", mcpName, map[string]interface{}{
 			"error": err.Error(),
 		})
@@ -267,6 +501,9 @@ func (m *manager) loadTools(ctx context.Context, cli client.Client, mcpName stri
 	loadedCount := 0
 	quarantinedCount := 0
 	for _, tool := range tools {
+		if !m.isGenerationCurrent(gen) {
+			return
+		}
 		if registerErr := m.registry.RegisterTool(mcpName, tool, true); registerErr != nil {
 			quarantinedCount++
 			toolName := ""
@@ -287,13 +524,38 @@ func (m *manager) loadTools(ctx context.Context, cli client.Client, mcpName stri
 			m.emitLifecycleEvent(ctx, "mcp.tool.quarantined", mcpName, payload)
 			continue
 		}
+		if tool != nil && !m.toolEnabledFromConfig(mcpName, tool.Name) {
+			if cfgErr := m.registry.SetToolUserEnabled(mcpName, tool.Name, false); cfgErr != nil {
+				m.emitLifecycleEvent(ctx, "mcp.tool.config_apply_failed", mcpName, map[string]interface{}{
+					"tool_name": tool.Name,
+					"error":     cfgErr.Error(),
+				})
+			}
+		}
 		loadedCount++
+	}
+	if !m.isGenerationCurrent(gen) {
+		return
 	}
 	m.emitLifecycleEvent(ctx, "mcp.tools.loaded", mcpName, map[string]interface{}{
 		"tool_count":        loadedCount,
 		"advertised_count":  len(tools),
 		"quarantined_count": quarantinedCount,
 	})
+}
+
+// toolEnabledFromConfig 返回配置中的工具启用意图（缺省 true）。
+func (m *manager) toolEnabledFromConfig(mcpName, toolName string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.cfg == nil {
+		return true
+	}
+	mcpCfg, ok := m.cfg.MCPServers[mcpName]
+	if !ok {
+		return true
+	}
+	return mcpCfg.IsToolEnabled(toolName)
 }
 
 // Stop 停止所有 MCPs
@@ -304,12 +566,29 @@ func (m *manager) Stop() error {
 		return nil
 	}
 	clients := m.clients
+	cancel := m.startCancel
+	done := m.connDone
+	pending := m.pending
 	m.clients = make(map[string]client.Client)
+	m.pending = make(map[string]client.Client)
 	m.registry.Clear()
 	m.started = false
+	m.generation++
+	m.startCancel = nil
+	m.connDone = nil
+	m.connecting = make(map[string]struct{})
 	m.mu.Unlock()
 
+	if cancel != nil {
+		cancel()
+	}
+	// 主动关闭在建客户端，让慢握手立即中断（SDK 自身取消可能滞后）。
+	for _, cli := range pending {
+		_ = cli.Close()
+	}
 	m.stopHealthChecker()
+	// 有界等待后台建连退出；迟到客户端由 generation 守卫丢弃并自行关闭。
+	m.waitForConnects(done)
 
 	// 停止所有客户端
 	for name, cli := range clients {
@@ -392,6 +671,67 @@ func (m *manager) FindTool(toolName string) (*registry.ToolInfo, error) {
 	return m.registry.ResolveTool(toolName)
 }
 
+// ListAllToolsForMCP 列出某个 MCP 的全部已注册工具（含被禁用者）。
+func (m *manager) ListAllToolsForMCP(mcpName string) []*registry.ToolInfo {
+	return m.registry.ListAllToolsForMCP(mcpName)
+}
+
+// SetToolEnabled 启停单个工具（用户意图）：只翻转注册表标志并同步内存配置，
+// 不触发 MCP 重连。
+func (m *manager) SetToolEnabled(mcpName, toolName string, enabled bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	mcpName = strings.TrimSpace(mcpName)
+	toolName = strings.TrimSpace(toolName)
+	if mcpName == "" || toolName == "" {
+		return fmt.Errorf("MCP 名称与工具名不能为空")
+	}
+	if err := m.registry.SetToolUserEnabled(mcpName, toolName, enabled); err != nil {
+		return err
+	}
+	if m.cfg != nil {
+		if mcpCfg, ok := m.cfg.MCPServers[mcpName]; ok {
+			mcpCfg.SetToolEnabled(toolName, enabled)
+			m.cfg.MCPServers[mcpName] = mcpCfg
+		}
+	}
+	m.emitLifecycleEvent(context.Background(), "mcp.tool.state_changed", mcpName, map[string]interface{}{
+		"tool_name": toolName,
+		"enabled":   enabled,
+	})
+	return nil
+}
+
+// SetToolsEnabled 批量启停工具；tools 为空表示该 MCP 下全部工具。
+func (m *manager) SetToolsEnabled(mcpName string, tools []string, enabled bool) error {
+	names := make([]string, 0, len(tools))
+	for _, toolName := range tools {
+		if name := strings.TrimSpace(toolName); name != "" {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		for _, info := range m.registry.ListAllToolsForMCP(strings.TrimSpace(mcpName)) {
+			if info == nil || info.Tool == nil {
+				continue
+			}
+			if name := strings.TrimSpace(info.Tool.Name); name != "" {
+				names = append(names, name)
+			}
+		}
+	}
+	if len(names) == 0 {
+		return fmt.Errorf("MCP %s 没有可操作的工具", strings.TrimSpace(mcpName))
+	}
+	for _, name := range names {
+		if err := m.SetToolEnabled(mcpName, name, enabled); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // SetMCPEnabled 启用/禁用 MCP
 func (m *manager) SetMCPEnabled(name string, enabled bool) error {
 	m.mu.Lock()
@@ -433,7 +773,11 @@ func (m *manager) SetMCPEnabled(name string, enabled bool) error {
 func (m *manager) GetMCPStatus(name string) (*config.MCPStatus, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	return m.mcpStatusLocked(name)
+}
 
+// mcpStatusLocked 组装单个 MCP 状态；调用方需持有 m.mu 读锁。
+func (m *manager) mcpStatusLocked(name string) (*config.MCPStatus, error) {
 	if m.cfg == nil {
 		return nil, fmt.Errorf("配置未加载")
 	}
@@ -475,9 +819,9 @@ func (m *manager) ListMCPs() []*config.MCPStatus {
 		return nil
 	}
 
-	statuses := make([]*config.MCPStatus, 0)
+	statuses := make([]*config.MCPStatus, 0, len(m.cfg.MCPServers))
 	for name := range m.cfg.MCPServers {
-		status, _ := m.GetMCPStatus(name)
+		status, _ := m.mcpStatusLocked(name)
 		statuses = append(statuses, status)
 	}
 
@@ -488,13 +832,29 @@ func (m *manager) ListMCPs() []*config.MCPStatus {
 func (m *manager) ReloadConfig() error {
 	m.mu.Lock()
 	clients := m.clients
+	cancel := m.startCancel
+	done := m.connDone
+	pending := m.pending
 	m.clients = make(map[string]client.Client)
+	m.pending = make(map[string]client.Client)
 	m.registry.Clear()
 	wasStarted := m.started
 	m.started = false
+	m.generation++
+	m.startCancel = nil
+	m.connDone = nil
+	m.connecting = make(map[string]struct{})
 	m.status = make(map[string]*config.MCPStatus)
 	m.mu.Unlock()
 
+	if cancel != nil {
+		cancel()
+	}
+	// 主动关闭在建客户端，让慢握手立即中断（SDK 自身取消可能滞后）。
+	for _, cli := range pending {
+		_ = cli.Close()
+	}
+	m.waitForConnects(done)
 	if wasStarted {
 		m.stopHealthChecker()
 		for _, cli := range clients {
@@ -508,7 +868,9 @@ func (m *manager) ReloadConfig() error {
 		if err != nil {
 			return err
 		}
+		m.mu.Lock()
 		m.cfg = cfg
+		m.mu.Unlock()
 	}
 
 	return nil
@@ -590,8 +952,14 @@ func (m *manager) resolveConnectTimeout(mcpCfg *config.MCPConfig) time.Duration 
 	if mcpCfg != nil && mcpCfg.Timeout.Duration > 0 {
 		return mcpCfg.Timeout.Duration
 	}
-	if m.cfg != nil && m.cfg.Global.ConnectTimeout.Duration > 0 {
-		return m.cfg.Global.ConnectTimeout.Duration
+	m.mu.RLock()
+	globalTimeout := time.Duration(0)
+	if m.cfg != nil {
+		globalTimeout = m.cfg.Global.ConnectTimeout.Duration
+	}
+	m.mu.RUnlock()
+	if globalTimeout > 0 {
+		return globalTimeout
 	}
 	return 10 * time.Second
 }
@@ -678,6 +1046,10 @@ func (m *manager) healthCheckOnce() {
 }
 
 func (m *manager) checkMCPHealth(name string, mcpCfg *config.MCPConfig) {
+	// 首轮建连仍在进行时不重复触发健康检查/重连。
+	if m.isConnecting(name) {
+		return
+	}
 	cli := m.getClient(name)
 	if cli == nil || !cli.IsConnected() {
 		m.setStatus(name, mcpCfg, func(status *config.MCPStatus) {
@@ -740,6 +1112,10 @@ func (m *manager) reconnectMCP(name string, mcpCfg *config.MCPConfig) {
 	if mcpCfg == nil || !mcpCfg.IsEnabled() {
 		return
 	}
+	if m.isConnecting(name) {
+		return
+	}
+	gen := m.currentGeneration()
 
 	reconnectCtx, cancel := context.WithTimeout(context.Background(), m.resolveConnectTimeout(mcpCfg))
 	defer cancel()
@@ -748,20 +1124,29 @@ func (m *manager) reconnectMCP(name string, mcpCfg *config.MCPConfig) {
 		"trust_level":    string(mcpCfg.ResolvedTrustLevel()),
 	})
 
-	cli, err := m.createAndConnectClient(reconnectCtx, name, mcpCfg)
+	cli, err := m.createClient(name, mcpCfg)
 	if err != nil {
-		m.setStatus(name, mcpCfg, func(status *config.MCPStatus) {
-			status.LastError = err.Error()
-		})
-		m.emitLifecycleEvent(reconnectCtx, "mcp.reconnect.failed", name, map[string]interface{}{
-			"error":          err.Error(),
-			"execution_mode": mcpCfg.ExecutionMode(),
-			"trust_level":    string(mcpCfg.ResolvedTrustLevel()),
-		})
+		m.recordReconnectFailure(reconnectCtx, name, mcpCfg, err)
+		return
+	}
+	if !m.trackPending(gen, name, cli) {
+		_ = cli.Close()
+		return
+	}
+	connectErr := m.connectClient(reconnectCtx, cli, mcpCfg)
+	m.untrackPending(name, cli)
+	if connectErr != nil {
+		_ = cli.Close()
+		m.recordReconnectFailure(reconnectCtx, name, mcpCfg, connectErr)
 		return
 	}
 
 	m.mu.Lock()
+	if !m.isGenerationCurrentLocked(gen) {
+		m.mu.Unlock()
+		_ = cli.Close()
+		return
+	}
 	if oldCli, ok := m.clients[name]; ok {
 		_ = oldCli.Close()
 		m.registry.UnregisterClient(name)
@@ -777,7 +1162,18 @@ func (m *manager) reconnectMCP(name string, mcpCfg *config.MCPConfig) {
 		"trust_level":    string(mcpCfg.ResolvedTrustLevel()),
 	})
 
-	m.loadTools(reconnectCtx, cli, name)
+	m.loadTools(reconnectCtx, cli, name, gen)
+}
+
+func (m *manager) recordReconnectFailure(ctx context.Context, name string, mcpCfg *config.MCPConfig, err error) {
+	m.setStatus(name, mcpCfg, func(status *config.MCPStatus) {
+		status.LastError = err.Error()
+	})
+	m.emitLifecycleEvent(ctx, "mcp.reconnect.failed", name, map[string]interface{}{
+		"error":          err.Error(),
+		"execution_mode": mcpCfg.ExecutionMode(),
+		"trust_level":    string(mcpCfg.ResolvedTrustLevel()),
+	})
 }
 
 func (m *manager) getClient(name string) client.Client {

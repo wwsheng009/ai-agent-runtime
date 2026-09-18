@@ -56,15 +56,33 @@ type StdioTransport struct {
 
 // NewTransport 创建传输实例（兼容现有接口）
 func NewTransport(cfg *Config) (Transport, error) {
-	switch cfg.Type {
+	switch NormalizeTransportType(cfg.Type) {
 	case "stdio":
 		return NewStdioTransport(cfg), nil
 	case "sse":
 		return &SSETransport{cfg: cfg}, nil
 	case "websocket", "ws":
 		return NewWebSocketTransport(cfg), nil
+	case "streamable", "http":
+		return NewStreamableTransport(cfg), nil
 	default:
 		return nil, fmt.Errorf("不支持的传输类型: %s", cfg.Type)
+	}
+}
+
+// NormalizeTransportType 归一化传输类型别名。
+//
+// 兼容 "streamableHttp" / "streamable-http" / "streamable_http" 等写法，
+// 统一返回 "streamable"；"ws" 统一返回 "websocket"。
+func NormalizeTransportType(transportType string) string {
+	normalized := strings.ToLower(strings.TrimSpace(transportType))
+	switch normalized {
+	case "streamablehttp", "streamable-http", "streamable_http":
+		return "streamable"
+	case "ws":
+		return "websocket"
+	default:
+		return normalized
 	}
 }
 

@@ -21,10 +21,19 @@ const maxCanonicalToolNameLength = 64
 
 // ToolInfo 工具信息
 type ToolInfo struct {
-	Tool     *protocol.Tool
-	MCPName  string
-	Enabled  bool
-	Metadata map[string]interface{}
+	Tool    *protocol.Tool
+	MCPName string
+	// Enabled 是运行时可用位（健康检查会写入）。
+	Enabled bool
+	// UserDisabled 是配置意图位（mcp.yaml tools 条目）；零值表示未禁用。
+	UserDisabled bool
+	Metadata     map[string]interface{}
+}
+
+// toolExposed reports whether a tool is visible to the model and callable:
+// both the runtime health bit and the configured user intent must be true.
+func toolExposed(info *ToolInfo) bool {
+	return info != nil && info.Tool != nil && info.Enabled && !info.UserDisabled
 }
 
 // QuarantinedToolInfo records an externally supplied tool that failed schema
@@ -190,7 +199,7 @@ func (r *Registry) ListTools() []*ToolInfo {
 
 	tools := make([]*ToolInfo, 0, len(r.tools))
 	for _, info := range r.tools {
-		if info.Enabled {
+		if toolExposed(info) {
 			tools = append(tools, cloneToolInfo(info))
 		}
 	}
@@ -260,7 +269,7 @@ func ExecutionLookupName(info *ToolInfo, tools []*ToolInfo) string {
 	}
 	rawName := strings.TrimSpace(info.Tool.Name)
 	for _, candidate := range tools {
-		if candidate == nil || candidate.Tool == nil || !candidate.Enabled || candidate.MCPName != info.MCPName {
+		if !toolExposed(candidate) || candidate.MCPName != info.MCPName {
 			continue
 		}
 		candidateRawName := strings.TrimSpace(candidate.Tool.Name)
@@ -275,7 +284,7 @@ func callableNameStats(tools []*ToolInfo) (map[string]int, map[string]struct{}) 
 	counts := make(map[string]int, len(tools))
 	canonicalNames := make(map[string]struct{}, len(tools))
 	for _, info := range tools {
-		if info == nil || info.Tool == nil || !info.Enabled {
+		if !toolExposed(info) {
 			continue
 		}
 		rawName := strings.TrimSpace(info.Tool.Name)
@@ -305,7 +314,7 @@ func (r *Registry) ResolveTool(name string) (*ToolInfo, error) {
 	defer r.mu.RUnlock()
 
 	canonicalMatches := r.matchingToolsLocked(func(info *ToolInfo) bool {
-		return CanonicalToolName(info.MCPName, info.Tool.Name) == name
+		return toolExposed(info) && CanonicalToolName(info.MCPName, info.Tool.Name) == name
 	})
 	if len(canonicalMatches) == 1 {
 		return cloneToolInfo(canonicalMatches[0]), nil
@@ -314,7 +323,7 @@ func (r *Registry) ResolveTool(name string) (*ToolInfo, error) {
 		return nil, ambiguousToolError(name, canonicalMatches)
 	}
 	rawMatches := r.matchingToolsLocked(func(info *ToolInfo) bool {
-		return strings.TrimSpace(info.Tool.Name) == name
+		return toolExposed(info) && strings.TrimSpace(info.Tool.Name) == name
 	})
 	if len(rawMatches) == 1 {
 		return cloneToolInfo(rawMatches[0]), nil
@@ -335,7 +344,7 @@ func (r *Registry) ResolveToolForMCP(mcpName, name string) (*ToolInfo, error) {
 	// ResolveTool and prevents a raw name such as "mcp__docs__search" from
 	// shadowing the canonical identity of docs/search.
 	matches := r.matchingToolsLocked(func(info *ToolInfo) bool {
-		return info.MCPName == mcpName && CanonicalToolName(info.MCPName, info.Tool.Name) == name
+		return toolExposed(info) && info.MCPName == mcpName && CanonicalToolName(info.MCPName, info.Tool.Name) == name
 	})
 	if len(matches) == 1 {
 		return cloneToolInfo(matches[0]), nil
@@ -343,7 +352,7 @@ func (r *Registry) ResolveToolForMCP(mcpName, name string) (*ToolInfo, error) {
 	if len(matches) > 1 {
 		return nil, ambiguousToolError(name, matches)
 	}
-	if info, ok := r.tools[r.makeToolKey(mcpName, name)]; ok && info.Enabled {
+	if info, ok := r.tools[r.makeToolKey(mcpName, name)]; ok && toolExposed(info) {
 		return cloneToolInfo(info), nil
 	}
 	return nil, fmt.Errorf("工具不存在: %s/%s", mcpName, name)
@@ -356,7 +365,7 @@ func (r *Registry) ListToolsByMCP(mcpName string) []*ToolInfo {
 
 	tools := make([]*ToolInfo, 0)
 	for _, info := range r.tools {
-		if info.MCPName == mcpName && info.Enabled {
+		if info.MCPName == mcpName && toolExposed(info) {
 			tools = append(tools, cloneToolInfo(info))
 		}
 	}
@@ -427,7 +436,80 @@ func (r *Registry) ToolEnabled(mcpName, toolName string) bool {
 	if !ok {
 		return false
 	}
-	return info.Enabled
+	return toolExposed(info)
+}
+
+// ListAllTools 返回全部已注册工具（含被禁用者），供管理面展示状态。
+func (r *Registry) ListAllTools() []*ToolInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	tools := make([]*ToolInfo, 0, len(r.tools))
+	for _, info := range r.tools {
+		if info != nil && info.Tool != nil {
+			tools = append(tools, cloneToolInfo(info))
+		}
+	}
+	sort.Slice(tools, func(i, j int) bool {
+		leftName, rightName := "", ""
+		leftMCP, rightMCP := "", ""
+		if tools[i] != nil {
+			leftMCP = tools[i].MCPName
+			if tools[i].Tool != nil {
+				leftName = tools[i].Tool.Name
+			}
+		}
+		if tools[j] != nil {
+			rightMCP = tools[j].MCPName
+			if tools[j].Tool != nil {
+				rightName = tools[j].Tool.Name
+			}
+		}
+		if leftName == rightName {
+			return leftMCP < rightMCP
+		}
+		return leftName < rightName
+	})
+	return tools
+}
+
+// ListAllToolsForMCP 返回某个 MCP 的全部已注册工具（含被禁用者）。
+func (r *Registry) ListAllToolsForMCP(mcpName string) []*ToolInfo {
+	mcpName = strings.TrimSpace(mcpName)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	tools := make([]*ToolInfo, 0)
+	for _, info := range r.tools {
+		if info != nil && info.Tool != nil && info.MCPName == mcpName {
+			tools = append(tools, cloneToolInfo(info))
+		}
+	}
+	sort.Slice(tools, func(i, j int) bool {
+		leftName, rightName := "", ""
+		if tools[i] != nil && tools[i].Tool != nil {
+			leftName = tools[i].Tool.Name
+		}
+		if tools[j] != nil && tools[j].Tool != nil {
+			rightName = tools[j].Tool.Name
+		}
+		return leftName < rightName
+	})
+	return tools
+}
+
+// SetToolUserEnabled 翻转配置意图位，不影响运行时健康位。
+func (r *Registry) SetToolUserEnabled(mcpName, toolName string, enabled bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	key := r.makeToolKey(mcpName, toolName)
+	info, ok := r.tools[key]
+	if !ok {
+		return fmt.Errorf("工具不存在: %s/%s", mcpName, toolName)
+	}
+	info.UserDisabled = !enabled
+	return nil
 }
 
 // GetClient 获取 MCP 客户端
@@ -567,9 +649,10 @@ func cloneToolInfo(info *ToolInfo) *ToolInfo {
 		return nil
 	}
 	cloned := &ToolInfo{
-		MCPName:  info.MCPName,
-		Enabled:  info.Enabled,
-		Metadata: cloneMetadata(info.Metadata),
+		MCPName:      info.MCPName,
+		Enabled:      info.Enabled,
+		UserDisabled: info.UserDisabled,
+		Metadata:     cloneMetadata(info.Metadata),
 	}
 	if info.Tool == nil {
 		return cloned

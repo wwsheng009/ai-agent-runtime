@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,15 +9,14 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	mcpadmin "github.com/wwsheng009/ai-agent-runtime/internal/mcp/admin"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
-	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -57,8 +55,14 @@ func MCPCommand() *cobra.Command {
 		Long: `添加 MCP 服务器
 
 示例:
-  # HTTP/SSE 传输
-  aicli mcp add --transport sse context7 https://mcp.context7.com/mcp
+  # Streamable HTTP 传输 (MCP 2025-03-26 规范，推荐)
+  aicli mcp add --transport streamable context7 https://mcp.context7.com/mcp
+
+  # 本地 Streamable HTTP 端点 (如 mcp-chrome)
+  aicli mcp add --transport streamable chrome-mcp http://127.0.0.1:12306/mcp
+
+  # 传统 SSE 传输
+  aicli mcp add --transport sse my-sse https://example.com/sse
 
   # WebSocket 传输 (ws:// 或 wss://)
   aicli mcp add --transport websocket my-mcp wss://example.com/mcp
@@ -67,11 +71,11 @@ func MCPCommand() *cobra.Command {
   aicli mcp add --transport stdio -- npx chrome-devtools-mcp@latest
 
   # 带 Header
-  aicli mcp add --transport sse context7 https://mcp.context7.com/mcp --header "API_KEY: your-key"`,
+  aicli mcp add --transport streamable context7 https://mcp.context7.com/mcp --header "API_KEY: your-key"`,
 		Args: cobra.MinimumNArgs(2),
 		Run:  addMCP,
 	}
-	addCmd.Flags().StringVarP(&transportType, "transport", "t", "sse", "传输类型 (stdio, sse, websocket)")
+	addCmd.Flags().StringVarP(&transportType, "transport", "t", "sse", "传输类型 (stdio, sse, websocket, streamable)")
 	addCmd.Flags().StringVar(&addDescription, "description", "", "描述")
 	addCmd.Flags().StringVar(&addCommand, "command", "", "启动命令 (stdio 类型使用)")
 	addCmd.Flags().StringSliceVar(&headers, "header", []string{}, "HTTP 头部，格式: 'Key: Value'")
@@ -236,12 +240,27 @@ func prepareMCPOutput() func() {
 func withMCPCommand(cmd *cobra.Command, fn func(options mcpCommandOptions)) {
 	restoreOutput := prepareMCPOutput()
 	defer restoreOutput()
+	// 一次性 CLI 调用结束后必须关闭 MCP 客户端：部分 Streamable HTTP 服务端
+	// （如 mcp-chrome）同一时刻只接受一个 transport，未关闭的会话会占死连接。
+	defer shutdownMCPManager()
+	registerExitCleanup(shutdownMCPManager)
 
 	options, err := resolveMCPCommandOptions(cmd)
 	if err != nil {
 		exitCommandError("mcp", "json", err, nil)
 	}
 	fn(options)
+}
+
+// shutdownMCPManager 停止并释放全局 MCP 管理器（幂等）。
+func shutdownMCPManager() {
+	if MCPManager == nil {
+		return
+	}
+	if err := MCPManager.Stop(); err != nil {
+		fmt.Fprintf(os.Stderr, "[mcp] 关闭 MCP 连接失败: %v\n", err)
+	}
+	MCPManager = nil
 }
 
 type mcpToolOutput struct {
@@ -454,10 +473,8 @@ func runMCPTestServerCommand(name string) (*mcpServerCommandResult, error) {
 }
 
 func runMCPSetEnabledCommand(name string, enabled bool) (*mcpActionCommandResult, error) {
-	if err := ensureMCPManager(); err != nil {
-		return nil, err
-	}
-	if err := MCPManager.SetMCPEnabled(name, enabled); err != nil {
+	service := newMCPAdminService(false)
+	if _, err := service.SetEnabled(context.Background(), name, enabled); err != nil {
 		return nil, err
 	}
 	return &mcpActionCommandResult{
@@ -467,118 +484,99 @@ func runMCPSetEnabledCommand(name string, enabled bool) (*mcpActionCommandResult
 }
 
 func runMCPReloadCommand() (*mcpActionCommandResult, error) {
-	if err := ensureMCPManager(); err != nil {
-		return nil, err
-	}
-	if err := MCPManager.ReloadConfig(); err != nil {
+	if err := newMCPAdminService(true).Reload(context.Background()); err != nil {
 		return nil, err
 	}
 	return &mcpActionCommandResult{}, nil
 }
 
 func runMCPAddCommand(opts mcpAddCommandOptions) (*mcpActionCommandResult, error) {
-	configPath := getMCPConfigPath()
-	if configPath == "" {
-		return nil, fmt.Errorf("找不到 MCP 配置文件")
+	configPath := resolveMCPConfigPathForWrite()
+	target := os.ExpandEnv(opts.Target)
+	enabled := true
+	request := mcpadmin.UpsertRequest{
+		Name:    opts.Name,
+		Type:    opts.Transport,
+		Enabled: &enabled,
+	}
+	if strings.TrimSpace(opts.Description) != "" {
+		description := opts.Description
+		request.Description = &description
+	}
+	if mcpadmin.IsURLTransport(request.Type) {
+		request.URL = target
+	} else {
+		if strings.TrimSpace(opts.Command) != "" {
+			request.Command = opts.Command
+		} else {
+			request.Command = target
+		}
+		request.Args = append([]string(nil), opts.ExtraArgs...)
+	}
+	if headers := parseMCPHeaderOptions(opts.Headers); len(headers) > 0 {
+		request.Headers = headers
 	}
 
-	existingConfig, err := loadMCPConfigFile(configPath)
-	if err != nil {
-		return nil, fmt.Errorf("加载配置文件失败: %w", err)
-	}
-	if _, exists := existingConfig.MCPServers[opts.Name]; exists {
-		return nil, fmt.Errorf("MCP '%s' 已存在", opts.Name)
-	}
-
-	mcpCfg, err := buildMCPConfigForAdd(opts)
+	mcpCfg, err := newMCPAdminService(false).Add(context.Background(), request)
 	if err != nil {
 		return nil, err
 	}
 
-	if existingConfig.MCPServers == nil {
-		existingConfig.MCPServers = make(map[string]config.MCPConfig)
-	}
-	existingConfig.MCPServers[opts.Name] = mcpCfg
-	if err := writeMCPConfigFile(configPath, existingConfig); err != nil {
-		return nil, fmt.Errorf("保存配置文件失败: %w", err)
-	}
-
-	status := probeMCPStatus(configPath, opts.Name, opts.Transport)
+	status := probeMCPStatus(configPath, opts.Name, mcpCfg.Type)
 	return &mcpActionCommandResult{
 		MCPName:    opts.Name,
 		ConfigPath: configPath,
-		Config:     &mcpCfg,
+		Config:     mcpCfg,
 		Status:     status,
 	}, nil
 }
 
 func runMCPRemoveCommand(name string) (*mcpActionCommandResult, error) {
-	configPath := getMCPConfigPath()
-	if configPath == "" {
-		return nil, fmt.Errorf("找不到 MCP 配置文件")
+	configPath := resolveMCPConfigPathForWrite()
+	if err := newMCPAdminService(false).Remove(context.Background(), name); err != nil {
+		return nil, err
 	}
-
-	existingConfig, err := loadMCPConfigFile(configPath)
-	if err != nil {
-		return nil, fmt.Errorf("加载配置文件失败: %w", err)
-	}
-	if _, exists := existingConfig.MCPServers[name]; !exists {
-		return nil, fmt.Errorf("MCP '%s' 不存在", name)
-	}
-
-	delete(existingConfig.MCPServers, name)
-	if err := writeMCPConfigFile(configPath, existingConfig); err != nil {
-		return nil, fmt.Errorf("保存配置文件失败: %w", err)
-	}
-
 	return &mcpActionCommandResult{
 		MCPName:    name,
 		ConfigPath: configPath,
 	}, nil
 }
 
-func loadMCPConfigFile(configPath string) (*config.Config, error) {
-	cfgLoader := config.NewLoader(configPath)
-	return cfgLoader.Load()
+// newMCPAdminService 创建 CLI 侧 MCP 管理服务；apply=false 时只做持久化。
+func newMCPAdminService(apply bool) *mcpadmin.Service {
+	return mcpadmin.NewService(resolveMCPConfigPathForWrite(), mcpadmin.WithApplyOnMutate(apply))
 }
 
-func buildMCPConfigForAdd(opts mcpAddCommandOptions) (config.MCPConfig, error) {
-	mcpCfg := config.MCPConfig{
-		Name:        opts.Name,
-		Description: opts.Description,
-		Type:        opts.Transport,
-		Enabled:     true,
-		Timeout:     config.Duration{Duration: 30 * time.Second},
-		MaxRetry:    3,
+// resolveMCPConfigPathForWrite 解析可写配置路径：优先已存在的配置文件，
+// 否则落到用户级 ~/.aicli/mcp.yaml（不存在时由 admin 包自动创建）。
+func resolveMCPConfigPathForWrite() string {
+	if path := getMCPConfigPath(); path != "" {
+		return path
 	}
-
-	target := os.ExpandEnv(opts.Target)
-	switch opts.Transport {
-	case "stdio":
-		if opts.Command != "" {
-			mcpCfg.Command = opts.Command
-		} else {
-			mcpCfg.Command = target
-		}
-		if len(opts.ExtraArgs) > 0 {
-			mcpCfg.Args = append([]string(nil), opts.ExtraArgs...)
-		}
-	case "sse", "http", "websocket":
-		mcpCfg.URL = target
-		if len(opts.Headers) > 0 {
-			mcpCfg.Env = make(map[string]string)
-			for _, header := range opts.Headers {
-				parts := strings.SplitN(header, ":", 2)
-				if len(parts) == 2 {
-					mcpCfg.Env[fmt.Sprintf("HEADER_%s", strings.TrimSpace(parts[0]))] = strings.TrimSpace(parts[1])
-				}
-			}
-		}
-	default:
-		return config.MCPConfig{}, fmt.Errorf("不支持的传输类型: %s", opts.Transport)
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		return filepath.Join(home, ".aicli", "mcp.yaml")
 	}
+	return "mcp.yaml"
+}
 
-	return mcpCfg, nil
+// parseMCPHeaderOptions 解析 --header "Key: Value" 列表。
+func parseMCPHeaderOptions(headers []string) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	parsed := make(map[string]string, len(headers))
+	for _, header := range headers {
+		parts := strings.SplitN(header, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		if key == "" {
+			continue
+		}
+		parsed[key] = strings.TrimSpace(parts[1])
+	}
+	return parsed
 }
 
 func probeMCPStatus(configPath, name, transportType string) *config.MCPStatus {
@@ -741,32 +739,6 @@ func testServer(cmd *cobra.Command, args []string) {
 		}
 		renderMCPTestServerResult(name, payload, options)
 	})
-}
-
-func writeMCPConfigFile(configPath string, cfg *config.Config) error {
-	if cfg == nil {
-		return fmt.Errorf("config is nil")
-	}
-
-	var (
-		data []byte
-		err  error
-	)
-	if strings.HasSuffix(strings.ToLower(configPath), ".json") {
-		data, err = json.MarshalIndent(cfg, "", "  ")
-	} else {
-		var buf bytes.Buffer
-		encoder := yaml.NewEncoder(&buf)
-		encoder.SetIndent(2)
-		if err = encoder.Encode(cfg); err == nil {
-			err = encoder.Close()
-		}
-		data = buf.Bytes()
-	}
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(configPath, data, 0644)
 }
 
 func renderMCPEmptyResult(options mcpCommandOptions, textMessage string) {

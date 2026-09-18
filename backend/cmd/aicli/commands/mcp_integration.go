@@ -20,6 +20,17 @@ var mcpManagerConfigPath string
 
 // initMCPManager 初始化 MCP 管理器
 func initMCPManager(configPath string) error {
+	return initMCPManagerWithMode(configPath, false)
+}
+
+// initMCPManagerAsync 初始化 MCP 管理器，并触发后台并行建连后立即返回。
+// 供 aicli chat/TUI 启动路径使用：不再等待全部 MCP 服务器就绪，
+// MCP 工具随各客户端连接完成动态出现在工具面（ListTools 实时读取注册表）。
+func initMCPManagerAsync(configPath string) error {
+	return initMCPManagerWithMode(configPath, true)
+}
+
+func initMCPManagerWithMode(configPath string, async bool) error {
 	configPath = strings.TrimSpace(configPath)
 	if MCPManagerInstance != nil {
 		if configPath == "" || configPath == mcpManagerConfigPath {
@@ -49,13 +60,24 @@ func initMCPManager(configPath string) error {
 		return fmt.Errorf("加载 MCP 配置失败: %w", err)
 	}
 
-	// 启动所有启用的 MCP
+	// 启动所有启用的 MCP：chat 启动路径走后台并行建连，其余调用方保持同步语义。
 	ctx := context.Background()
-	if err := MCPManagerInstance.Start(ctx); err != nil {
+	if err := startMCPManager(MCPManagerInstance, ctx, async); err != nil {
 		return fmt.Errorf("启动 MCP 失败: %w", err)
 	}
+	wireChatMCPToolSurfaceInvalidation(MCPManagerInstance)
 
 	return nil
+}
+
+// startMCPManager 优先使用 AsyncManager 的后台启动能力；不支持时回退同步 Start。
+func startMCPManager(mgr manager.Manager, ctx context.Context, async bool) error {
+	if async {
+		if starter, ok := mgr.(manager.AsyncManager); ok {
+			return starter.StartAsync(ctx)
+		}
+	}
+	return mgr.Start(ctx)
 }
 
 // findMCPConfigPath 查找 MCP 配置文件
@@ -99,14 +121,14 @@ func resolveChatMCPConfigPath(cfg *config.Config, session *ChatSession) string {
 	if session != nil && strings.TrimSpace(session.MCPConfigPath) != "" {
 		return strings.TrimSpace(session.MCPConfigPath)
 	}
-	if cfg != nil && cfg.AICLI != nil && cfg.AICLI.MCP != nil && strings.TrimSpace(cfg.AICLI.MCP.ConfigFile) != "" {
-		return strings.TrimSpace(cfg.AICLI.MCP.ConfigFile)
+	// 与 CLI（aicli mcp *）和 runtime-server 共用同一优先级解析：
+	// ./.aicli/mcp.yaml > ~/.aicli/mcp.yaml > 显式覆盖 > 向上搜索 > configs/mcp.yaml。
+	// 直接返回 cfg 里的字面值会让 chat 会话加载 configs/mcp.yaml，而管理面/服务端
+	// 却在读写 .aicli/mcp.yaml，出现“面板改了、会话没变”的错位。
+	if resolved := resolveConfiguredMCPConfigPath(cfg); resolved != "" {
+		return resolved
 	}
 	return findMCPConfigPath()
-}
-
-func configuredChatMCPAutoConnect(cfg *config.Config) bool {
-	return cfg != nil && cfg.AICLI != nil && cfg.AICLI.MCP != nil && cfg.AICLI.MCP.AutoConnect
 }
 
 func resolveChatMCPStartupConfigPath(cfg *config.Config, session *ChatSession) (string, bool) {
@@ -126,7 +148,8 @@ func resolveChatMCPStartupConfigPath(cfg *config.Config, session *ChatSession) (
 
 	if _, err := os.Stat(configPath); err == nil {
 		return configPath, true
-	} else if os.IsNotExist(err) && !configuredChatMCPAutoConnect(cfg) {
+	} else if os.IsNotExist(err) {
+		// 配置缺失：静默跳过 MCP 初始化（默认建连只针对实际存在的配置）。
 		return "", false
 	}
 
@@ -138,7 +161,7 @@ func prepareChatMCPManager(cfg *config.Config, session *ChatSession) error {
 	if !shouldInit {
 		return StopMCPManager()
 	}
-	return initMCPManager(configPath)
+	return initMCPManagerAsync(configPath)
 }
 
 // registerMCPTools 注册 MCP 工具到 FunctionRegistry

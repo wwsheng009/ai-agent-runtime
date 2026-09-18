@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -81,7 +82,6 @@ func (d Duration) MarshalYAML() (interface{}, error) {
 
 // GlobalConfig 全局配置
 type GlobalConfig struct {
-	AutoConnect         bool                 `yaml:"autoConnect" json:"autoConnect"`
 	HealthCheckInterval Duration             `yaml:"healthCheckInterval" json:"healthCheckInterval"`
 	ConnectTimeout      Duration             `yaml:"connectTimeout" json:"connectTimeout"`
 	HealthCheck         MCPHealthCheckConfig `yaml:"healthCheck,omitempty" json:"healthCheck,omitempty"`
@@ -91,7 +91,7 @@ type GlobalConfig struct {
 type MCPConfig struct {
 	Name             string                `yaml:"name" json:"name"`
 	Description      string                `yaml:"description" json:"description"`
-	Type             string                `yaml:"type" json:"type"` // stdio | sse | websocket
+	Type             string                `yaml:"type" json:"type"` // stdio | sse | websocket | streamable
 	TrustLevel       MCPTrustLevel         `yaml:"trustLevel,omitempty" json:"trustLevel,omitempty"`
 	MaxParallelCalls int                   `yaml:"maxParallelCalls,omitempty" json:"maxParallelCalls,omitempty"`
 	Command          string                `yaml:"command" json:"command"`   // 启动命令（stdio）
@@ -103,6 +103,14 @@ type MCPConfig struct {
 	Timeout          Duration              `yaml:"timeout" json:"timeout"`   // 超时时间
 	MaxRetry         int                   `yaml:"maxRetry" json:"maxRetry"` // 最大重试次数
 	HealthCheck      *MCPHealthCheckConfig `yaml:"healthCheck,omitempty" json:"healthCheck,omitempty"`
+	// Tools 工具级启停配置（key = 原始工具名；缺省条目 = 启用）。
+	Tools map[string]MCPToolConfig `yaml:"tools,omitempty" json:"tools,omitempty"`
+}
+
+// MCPToolConfig 单个 MCP 工具的配置。
+type MCPToolConfig struct {
+	// Enabled 显式启停该工具；nil 表示未配置（默认启用）。
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 }
 
 // MCPHealthCheckConfig MCP 健康检查配置
@@ -121,6 +129,48 @@ func (m *MCPConfig) IsEnabled() bool {
 	return m.Enabled
 }
 
+// IsToolEnabled 返回工具是否被配置启用；未配置或未显式设置时默认启用。
+func (m *MCPConfig) IsToolEnabled(toolName string) bool {
+	if m == nil {
+		return true
+	}
+	key := strings.TrimSpace(toolName)
+	if key == "" {
+		return true
+	}
+	entry, ok := m.Tools[key]
+	if !ok || entry.Enabled == nil {
+		return true
+	}
+	return *entry.Enabled
+}
+
+// SetToolEnabled 设置工具级启停；enabled=true 时移除显式禁用条目（默认即启用）。
+func (m *MCPConfig) SetToolEnabled(toolName string, enabled bool) {
+	if m == nil {
+		return
+	}
+	key := strings.TrimSpace(toolName)
+	if key == "" {
+		return
+	}
+	if enabled {
+		if len(m.Tools) == 0 {
+			return
+		}
+		delete(m.Tools, key)
+		if len(m.Tools) == 0 {
+			m.Tools = nil
+		}
+		return
+	}
+	if m.Tools == nil {
+		m.Tools = map[string]MCPToolConfig{}
+	}
+	disabled := false
+	m.Tools[key] = MCPToolConfig{Enabled: &disabled}
+}
+
 func (m *MCPConfig) ResolvedTrustLevel() MCPTrustLevel {
 	if m == nil {
 		return MCPTrustLevelUntrusted
@@ -133,6 +183,19 @@ func (m *MCPConfig) ResolvedTrustLevel() MCPTrustLevel {
 		return MCPTrustLevelLocal
 	default:
 		return MCPTrustLevelUntrusted
+	}
+}
+
+// IsStreamableHTTPTransport 判断是否为 Streamable HTTP 传输类型。
+//
+// 兼容 "streamable" / "streamableHttp" / "streamable-http" /
+// "streamable_http" / "http" 等常见写法。
+func IsStreamableHTTPTransport(transportType string) bool {
+	switch strings.ToLower(strings.TrimSpace(transportType)) {
+	case "streamable", "streamablehttp", "streamable-http", "streamable_http", "http":
+		return true
+	default:
+		return false
 	}
 }
 
