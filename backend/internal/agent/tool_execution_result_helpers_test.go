@@ -36,6 +36,9 @@ func TestKnownToolOutcomeErrorCode_AgentSessionNotFound(t *testing.T) {
 	if !knownToolOutcomeErrorCode(string(runtimeerrors.ErrAgentSessionNotFound)) {
 		t.Fatal("AGENT_SESSION_NOT_FOUND must be accepted as structured tool metadata")
 	}
+	if !knownToolOutcomeErrorCode(string(runtimeerrors.ErrSessionNotFound)) {
+		t.Fatal("SESSION_NOT_FOUND must be accepted as structured tool metadata")
+	}
 }
 
 func TestRecordToolExecutionOutcome_PreservesToolAuthoredStaleContext(t *testing.T) {

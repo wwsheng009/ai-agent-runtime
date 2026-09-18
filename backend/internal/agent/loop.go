@@ -34,7 +34,6 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolexec"
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolschema"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -3365,7 +3364,7 @@ func (loop *ReActLoop) resolveAvailableTools(ctx context.Context, goal string, t
 		}
 		if cached {
 			stable, refreshable := sessionStableToolSurfaceState(snapshot)
-			if stable && refreshable && len(toolWhitelist) == 0 && isSimpleGoalProjectedToolSurface(tools) {
+			if stable && refreshable && len(toolWhitelist) == 0 && loop.shouldRefreshStableToolSurface(tools) {
 				expanded, _, expandErr := loop.computeAvailableTools(ctx, goal, toolWhitelist, false)
 				if expandErr != nil {
 					return nil, false, nil, expandErr
@@ -3471,10 +3470,11 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 	// Goal-specific projection is safe only for turn-local snapshots such as a
 	// one-shot exec. Session-stable chat snapshots use the task-independent core
 	// surface so the first short prompt cannot remove tools needed in later turns.
+	// No automatic directory-size projection: every authorized tool (including
+	// enabled MCP tools) is listed directly. Tool volume is controlled explicitly
+	// via per-tool enable/disable configuration instead of a hidden threshold.
 	if allowSimpleGoalProjection && len(allowed) == 0 && len(simpleGoalToolNames(goal)) > 0 {
 		tools = projectSimpleGoalToolSurface(goal, tools)
-	} else {
-		tools = projectToolSurfaceWithSearch(tools, toolkit.DefaultToolSearchThreshold)
 	}
 	tools = loop.compactToolSurfaceToBudget(tools)
 	sortToolDefinitionsByName(tools)
@@ -3519,6 +3519,46 @@ func isSimpleGoalProjectedToolSurface(tools []types.ToolDefinition) bool {
 	default:
 		return false
 	}
+}
+
+// shouldRefreshStableToolSurface 判断会话级冻结工具面是否需要在 turn 边界重建：
+//   - 历史遗留的 goal-projection 面需要一次性扩展；
+//   - MCP 目录在会话生命周期内变化（异步建连完成 / 热重载 / 服务或工具启停）后，
+//     冻结面里缺失当前已授权的 MCP 工具（例如 list_pages）。
+//
+// 仅追加能力方向（新增工具）会触发重建；工具被移除/禁用由 MCP 生命周期事件
+// 显式清除会话冻结面（A 路径），避免重连期间目录短暂为空导致反复重建。
+func (loop *ReActLoop) shouldRefreshStableToolSurface(cached []types.ToolDefinition) bool {
+	if isSimpleGoalProjectedToolSurface(cached) {
+		return true
+	}
+	return loop.liveMCPToolSurfaceAddsCapabilities(cached)
+}
+
+// liveMCPToolSurfaceAddsCapabilities 检查当前 MCP 注册表（ListTools 实时读取）
+// 是否包含冻结面缺失且通过执行策略的工具。
+func (loop *ReActLoop) liveMCPToolSurfaceAddsCapabilities(cached []types.ToolDefinition) bool {
+	if loop == nil || loop.agent == nil || loop.agent.mcpManager == nil {
+		return false
+	}
+	known := make(map[string]bool, len(cached))
+	for _, definition := range cached {
+		if name := strings.ToLower(strings.TrimSpace(definition.Name)); name != "" {
+			known[name] = true
+		}
+	}
+	policy := loop.agent.GetToolExecutionPolicy()
+	for _, info := range loop.agent.mcpManager.ListTools() {
+		name := strings.ToLower(strings.TrimSpace(info.Name))
+		if name == "" || known[name] {
+			continue
+		}
+		if policy != nil && policy.AllowToolInfo(info) != nil {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func toolSurfaceAddsCapabilities(current []types.ToolDefinition, candidate []types.ToolDefinition) bool {

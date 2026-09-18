@@ -12,14 +12,12 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
-// Tool search / dynamic listing (C4b).
+// Tool listing helpers.
 //
-// Policy:
-//   - Optional ListableTool / metadata should_list|list_when filter every catalog path.
-//   - When catalog size >= toolkit.DefaultToolSearchThreshold, inject search_tool and
-//     keep core tools listed while projecting non-core / defer_loading tools out of
-//     the direct model surface (they remain executable and searchable).
-//   - Broker / MCP tools stay callable even when projected; search_tool returns schemas.
+// Policy (2026-09-18): there is no automatic directory-size search projection.
+// Every tool that passes should_list/list_when and the execution policy is listed
+// directly, including all enabled MCP tools. search_tool is only usable when a
+// host registers it explicitly; metadata-hidden tools remain hidden by design.
 const (
 	toolSearchName = toolkit.ToolSearchName
 )
@@ -47,15 +45,6 @@ func listToolsContextForAgent(ctx context.Context, agent *Agent, catalogSize int
 	return toolkit.ListToolsContextFromContext(ctx, listCtx)
 }
 
-func ensureSearchToolPresent(tools []types.ToolDefinition) []types.ToolDefinition {
-	for _, def := range tools {
-		if strings.EqualFold(strings.TrimSpace(def.Name), toolSearchName) {
-			return tools
-		}
-	}
-	return append(tools, searchToolDefinition())
-}
-
 func searchToolVisibleInTurn(ctx context.Context) bool {
 	for _, def := range frozenTurnToolSurface(ctx) {
 		if strings.EqualFold(strings.TrimSpace(def.Name), toolSearchName) {
@@ -76,68 +65,6 @@ func filterToolDefinitionsByShouldList(tools []types.ToolDefinition, listCtx too
 		}
 	}
 	return filtered
-}
-
-func projectToolSurfaceWithSearch(tools []types.ToolDefinition, threshold int) []types.ToolDefinition {
-	if len(tools) == 0 {
-		return nil
-	}
-	if threshold <= 0 {
-		threshold = toolkit.DefaultToolSearchThreshold
-	}
-	// Always ensure search_tool is not duplicated if already present.
-	hasSearch := false
-	for _, def := range tools {
-		if strings.EqualFold(strings.TrimSpace(def.Name), toolSearchName) {
-			hasSearch = true
-			break
-		}
-	}
-	if len(tools) < threshold {
-		// Small catalogs: list everything that passed ShouldList; do not inject search.
-		if hasSearch {
-			// Keep explicit search_tool if a host already registered one.
-			return tools
-		}
-		return tools
-	}
-
-	projected := make([]types.ToolDefinition, 0, len(tools)+1)
-	for _, def := range tools {
-		name := strings.TrimSpace(def.Name)
-		if name == "" {
-			continue
-		}
-		if strings.EqualFold(name, toolSearchName) {
-			hasSearch = true
-			projected = append(projected, def)
-			continue
-		}
-		if toolkit.IsCoreTool(def.Metadata, name) {
-			projected = append(projected, def)
-			continue
-		}
-		// Non-core tools with defer_loading (or generic non-core) are hidden from
-		// the direct surface when search projection is active.
-		if deferred, ok := metadataBoolValue(def.Metadata, toolkit.MetaDeferLoading); ok && !deferred {
-			// Explicit defer_loading=false keeps the tool listed even when non-core.
-			projected = append(projected, def)
-			continue
-		}
-		// Default for non-core under large catalog: project out (searchable).
-		_ = def
-	}
-	return ensureSearchToolPresent(projected)
-}
-
-func searchToolDefinition() types.ToolDefinition {
-	tool := toolkit.NewSearchTool(nil)
-	return types.ToolDefinition{
-		Name:        tool.Name(),
-		Description: tool.Description(),
-		Parameters:  tool.Parameters(),
-		Metadata:    tool.DefinitionMetadata(),
-	}
 }
 
 func buildToolSearchIndex(tools []types.ToolDefinition) *toolkit.InMemoryToolSearchIndex {

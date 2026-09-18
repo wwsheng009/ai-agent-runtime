@@ -61,6 +61,11 @@ const (
 	// Live sessions show models using timeout_ms=1/30 as if the unit were seconds;
 	// deliberate sub-100ms budgets remain available through timeout="30ms".
 	shellTimeoutNoiseFloor = 100 * time.Millisecond
+
+	// Runtime-side ceiling: even an explicit tool timeout cannot exceed this,
+	// so a single shell call cannot wedge a turn forever.
+	maxShellCommandTimeoutEnv     = "AICLI_SHELL_MAX_COMMAND_TIMEOUT"
+	defaultMaxShellCommandTimeout = 15 * time.Minute
 )
 
 // modelHistoryArtifactThresholdBytes keeps shell output artifacts aligned with
@@ -143,6 +148,10 @@ func NewBashTool() *BashTool {
 					"type": "string",
 				},
 			},
+			"detach": map[string]interface{}{
+				"type":        "boolean",
+				"description": "可选：设为 true 时把命令作为独立进程启动（fire-and-forget），立即返回 PID。该进程不继承输出管道、不纳入本次调用的进程树守卫（不受超时/Esc 终止影响），适用于需要真实控制台/TTY 的交互程序（如再开一个 aicli TUI）或长期守护进程。输出不会被捕获；仅支持单条 command（不适用于 commands 批次）；运行时可用 AICLI_SHELL_ALLOW_DETACH=0 全局禁用。",
+			},
 		},
 		"required": []string{},
 	}
@@ -189,6 +198,17 @@ type CommandExecutionResult struct {
 	TimeoutRequestedMs     int64
 	TimeoutEffectiveMs     int64
 	TimeoutSource          string
+	// Process-tree guard diagnostics: whether the runtime had to terminate the
+	// whole tree, which PIDs were killed, and whether WaitDelay had to bound
+	// post-exit I/O (descendants keeping the output pipe open).
+	ProcessTreeKill     bool
+	KilledPIDs          []int
+	ProcessTreeMode     string
+	ProcessTreeError    string
+	WaitDelayMs         int64
+	WaitDelayUsed       bool
+	Termination         string
+	LeftoverDescendants []int
 }
 
 type outputCaptureSettings struct {
@@ -306,6 +326,12 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 		}, nil
 	}
 
+	// detach=true: fire-and-forget launch outside the per-command job object.
+	// Opt-in per call, and refusable through AICLI_SHELL_ALLOW_DETACH=0.
+	if detachRequested, _ := resolveBoolParam(params, "detach"); detachRequested {
+		return b.executeDetachedCommand(ctx, command, effectiveWorkdir)
+	}
+
 	// 使用 executer 执行命令
 	started := time.Now()
 	execResult, err := b.executeCommand(ctx, command, effectiveWorkdir, timeout, captureSettings)
@@ -378,6 +404,22 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 		if next := bashCommandFailureNextAction(command, execResult.Output, err); next != "" {
 			failureMetadata[toolresult.MetadataNextActionKey] = next
 		}
+		recoveryHint := ""
+		if isShellTimeoutError(err) {
+			recoveryHint = longRunningShellCommandHint(command)
+			if recoveryHint != "" {
+				failureMetadata["long_running_command_hint"] = true
+			}
+		}
+		if recoveryHint == "" && execResult.WaitDelayUsed {
+			recoveryHint = "命令本体已结束，但仍有后代进程占用输出管道；runtime 已按 WaitDelay 收敛，输出可能不完整。若该进程是有意保留的守护进程，请改用 background_task，或在命令内显式等待/终止该子进程。"
+			failureMetadata["wait_delay_note"] = true
+		}
+		if recoveryHint != "" {
+			if existing, _ := failureMetadata[toolresult.MetadataNextActionKey].(string); strings.TrimSpace(existing) == "" {
+				failureMetadata[toolresult.MetadataNextActionKey] = recoveryHint
+			}
+		}
 		code := classifyHardShellExecutionErrorCode(err, execResult.Output)
 		result := toolResultFailureWithCode(
 			buildBashCommandFailureError(command, execResult.Output, err),
@@ -387,6 +429,9 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 		)
 		// Preserve partial stdout/stderr for model recovery even on hard fail.
 		result.Content = execResult.Output
+		if recoveryHint != "" {
+			result.Content = strings.TrimRight(result.Content, "\n") + "\n" + recoveryHint
+		}
 		return result, nil
 	}
 
@@ -467,6 +512,14 @@ func parseBashCommandBatch(params map[string]interface{}) ([]bashCommandBatchIte
 }
 
 func (b *BashTool) executeBatch(ctx context.Context, parent map[string]interface{}, commands []bashCommandBatchItem) (*toolkit.ToolResult, error) {
+	if detachRequested, _ := resolveBoolParam(parent, "detach"); detachRequested {
+		return toolResultFailureWithCode(
+			fmt.Errorf("detach=true 只支持单条 command 调用，不支持 commands 批次；请拆分为多次 bash 调用"),
+			string(runtimeerrors.ErrToolExecution),
+			"Call bash once per detached launch with a single `command` and detach=true.",
+			map[string]interface{}{"detach_batch_refused": true},
+		), nil
+	}
 	stopOnError, _ := resolveBoolParam(parent, "stop_on_error")
 	parallel, _ := resolveBoolParam(parent, "parallel")
 	if parallel && stopOnError {
@@ -554,6 +607,14 @@ func (b *BashTool) executeBatchItem(ctx context.Context, parent map[string]inter
 	delete(commandParams, "parallel")
 	delete(commandParams, "max_parallel")
 	delete(commandParams, "stop_on_error")
+	if detach, _ := resolveBoolParam(commandParams, "detach"); detach {
+		return toolResultFailureWithCode(
+			fmt.Errorf("detach=true 只支持单条 command 调用，不支持 commands 批次；请拆分为多次 bash 调用"),
+			string(runtimeerrors.ErrToolExecution),
+			"Call bash once per detached launch with a single `command` and detach=true.",
+			map[string]interface{}{"detach_batch_refused": true},
+		)
+	}
 	result, err := b.Execute(ctx, commandParams)
 	if err != nil {
 		return &toolkit.ToolResult{Success: false, OutputKind: toolresult.KindText, Error: err}
@@ -703,7 +764,7 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 	if err != nil {
 		return CommandExecutionResult{}, err
 	}
-	budget := runtimeexecution.ResolveTimeout(ctx, timeout)
+	budget := resolveShellTimeoutBudget(ctx, timeout)
 
 	if b.sandbox == nil {
 		opts := []ExecOption{WithWorkdir(resolvedWorkdir)}
@@ -755,7 +816,7 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 		})
 	}
 
-	cmd := exec.CommandContext(cmdCtx, shellCmd[0], shellCmd[1:]...)
+	cmd := exec.Command(shellCmd[0], shellCmd[1:]...)
 	cmd.Dir = resolvedWorkdir
 	cmd.Env = runtimeexecutor.BuildFilteredEnv(b.sandbox, os.Environ())
 
@@ -770,7 +831,7 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 			"os_mode":   b.sandbox.Config().OSSandbox,
 		})
 	} else {
-		cmd = exec.CommandContext(cmdCtx, launch.Command, launch.Args...)
+		cmd = exec.Command(launch.Command, launch.Args...)
 		if strings.TrimSpace(launch.WorkDir) != "" {
 			cmd.Dir = launch.WorkDir
 		} else if !launch.Applied {
@@ -793,7 +854,18 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 		runtimeexecutor.PrepareCommandForLowLatencyOutput(cmd)
 	}
 	artifactRoot := toolctx.ShellOutputArtifactDir(ctx)
-	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputWithArtifactAndMirror(cmd, captureSettings.captureLimitBytes(), "toolkit", command, artifactRoot, outputMirror)
+	guard := runtimeexecutor.NewProcessGuard()
+	if bindErr := guard.Bind(cmd); bindErr != nil {
+		guard.Close()
+		return CommandExecutionResult{}, bindErr
+	}
+	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputGuarded(cmdCtx, cmd, guard, runtimeexecutor.GuardedCaptureOptions{
+		MaxBytes:      captureSettings.captureLimitBytes(),
+		Scope:         "toolkit",
+		Command:       command,
+		PreferredRoot: artifactRoot,
+		Mirror:        outputMirror,
+	})
 	artifactPath, artifactErr = ensureLargeHistoryOutputArtifact(capture, artifactPath, artifactErr, "toolkit", command, artifactRoot)
 	if err != nil {
 		if cmdCtx.Err() == context.DeadlineExceeded {
@@ -803,6 +875,7 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 				result.RawOutputArtifactError = artifactErr.Error()
 			}
 			result = applyCommandExecutionShell(result, shell)
+			result = applyProcessGuardResult(result, guard, err, "timeout")
 			applyCommandTimeoutBudget(&result, budget)
 			return result, runtimeexecution.TimeoutError(budget)
 		}
@@ -813,6 +886,7 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 				result.RawOutputArtifactError = artifactErr.Error()
 			}
 			result = applyCommandExecutionShell(result, shell)
+			result = applyProcessGuardResult(result, guard, err, "cancel")
 			applyCommandTimeoutBudget(&result, budget)
 			return result, runtimeexecution.ContextCancellationError(ctx)
 		}
@@ -822,6 +896,7 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 			result.RawOutputArtifactError = artifactErr.Error()
 		}
 		result = applyCommandExecutionShell(result, shell)
+		result = applyProcessGuardResult(result, guard, err, "error")
 		applyCommandTimeoutBudget(&result, budget)
 		return result, err
 	}
@@ -831,6 +906,7 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 		result.RawOutputArtifactError = artifactErr.Error()
 	}
 	result = applyCommandExecutionShell(result, shell)
+	result = applyProcessGuardResult(result, guard, err, "")
 	applyCommandTimeoutBudget(&result, budget)
 	return result, nil
 }
@@ -894,7 +970,7 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 		opt(cfg)
 	}
 
-	budget := runtimeexecution.ResolveTimeout(ctx, timeout)
+	budget := resolveShellTimeoutBudget(ctx, timeout)
 	cmdCtx, cancel := context.WithTimeout(ctx, budget.Effective)
 	defer cancel()
 
@@ -902,7 +978,7 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 	shell := runtimeexecutor.DefaultUserShell()
 	shellArgs := shell.DeriveExecArgs(command, false)
 
-	cmd := exec.CommandContext(cmdCtx, shellArgs[0], shellArgs[1:]...)
+	cmd := exec.Command(shellArgs[0], shellArgs[1:]...)
 
 	// 设置工作目录
 	if cfg.workdir != "" {
@@ -923,7 +999,18 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 	}
 
 	artifactRoot := toolctx.ShellOutputArtifactDir(ctx)
-	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputWithArtifactAndMirror(cmd, captureLimitBytesFromExecConfig(cfg), "toolkit", command, artifactRoot, outputMirror)
+	guard := runtimeexecutor.NewProcessGuard()
+	if bindErr := guard.Bind(cmd); bindErr != nil {
+		guard.Close()
+		return CommandExecutionResult{}, bindErr
+	}
+	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputGuarded(cmdCtx, cmd, guard, runtimeexecutor.GuardedCaptureOptions{
+		MaxBytes:      captureLimitBytesFromExecConfig(cfg),
+		Scope:         "toolkit",
+		Command:       command,
+		PreferredRoot: artifactRoot,
+		Mirror:        outputMirror,
+	})
 	artifactPath, artifactErr = ensureLargeHistoryOutputArtifact(capture, artifactPath, artifactErr, "toolkit", command, artifactRoot)
 
 	if err != nil {
@@ -934,6 +1021,7 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 				result.RawOutputArtifactError = artifactErr.Error()
 			}
 			result = applyCommandExecutionShell(result, shell)
+			result = applyProcessGuardResult(result, guard, err, "timeout")
 			applyCommandTimeoutBudget(&result, budget)
 			return result, runtimeexecution.TimeoutError(budget)
 		}
@@ -941,6 +1029,7 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 			result := commandExecutionFromCapture(capture)
 			result.RawOutputArtifactPath = artifactPath
 			result = applyCommandExecutionShell(result, shell)
+			result = applyProcessGuardResult(result, guard, err, "cancel")
 			applyCommandTimeoutBudget(&result, budget)
 			return result, runtimeexecution.ContextCancellationError(ctx)
 		}
@@ -954,6 +1043,7 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 				result.RawOutputArtifactError = artifactErr.Error()
 			}
 			result = applyCommandExecutionShell(result, shell)
+			result = applyProcessGuardResult(result, guard, err, "error")
 			applyCommandTimeoutBudget(&result, budget)
 			return result, fmt.Errorf("命令执行失败: %w\n%s\n\n当前环境信息:\n%s", err, friendlyHint, GetShellEnvironmentInfo())
 		}
@@ -963,6 +1053,7 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 			result.RawOutputArtifactError = artifactErr.Error()
 		}
 		result = applyCommandExecutionShell(result, shell)
+		result = applyProcessGuardResult(result, guard, err, "error")
 		applyCommandTimeoutBudget(&result, budget)
 		return result, err
 	}
@@ -973,6 +1064,7 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 		result.RawOutputArtifactError = artifactErr.Error()
 	}
 	result = applyCommandExecutionShell(result, shell)
+	result = applyProcessGuardResult(result, guard, err, "")
 	applyCommandTimeoutBudget(&result, budget)
 	return result, nil
 }
@@ -1019,6 +1111,212 @@ func applyCommandTimeoutBudget(result *CommandExecutionResult, budget runtimeexe
 	result.TimeoutEffectiveMs = budget.Effective.Milliseconds()
 	result.TimeoutMs = result.TimeoutEffectiveMs
 	result.TimeoutSource = string(budget.Source)
+}
+
+// resolveShellTimeoutBudget applies the runtime-side ceiling on top of the
+// requested timeout so an explicit tool argument cannot wedge a turn forever.
+func resolveShellTimeoutBudget(ctx context.Context, requested time.Duration) runtimeexecution.TimeoutBudget {
+	budget := runtimeexecution.ResolveTimeout(ctx, requested)
+	return runtimeexecution.LimitTimeout(budget, resolveMaxShellCommandTimeout(), runtimeexecution.TimeoutSourceRuntimeCeiling)
+}
+
+func resolveMaxShellCommandTimeout() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv(maxShellCommandTimeoutEnv)); raw != "" {
+		if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return defaultMaxShellCommandTimeout
+}
+
+// executeDetachedCommand launches the command as an independent process
+// (detach=true): new console/session, null stdio, no job-object assignment and
+// no output capture. It returns immediately with the PID so the caller can
+// manage the process explicitly.
+func (b *BashTool) executeDetachedCommand(ctx context.Context, command, resolvedWorkdir string) (*toolkit.ToolResult, error) {
+	if !runtimeexecutor.ResolveDetachAllowed() {
+		return toolResultFailureWithCode(
+			fmt.Errorf("detach=true 已被运行时禁用（%s=0）", runtimeexecutor.DetachAllowedEnv),
+			string(runtimeerrors.ErrAgentPermission),
+			"Drop detach=true, or ask the operator to unset "+runtimeexecutor.DetachAllowedEnv+".",
+			map[string]interface{}{
+				"detach_refused": true,
+				"detach_gate":    runtimeexecutor.DetachAllowedEnv,
+			},
+		), nil
+	}
+
+	shell := runtimeexecutor.DefaultUserShell()
+	shellCmd := shell.DeriveExecArgs(command, false)
+	if len(shellCmd) == 0 {
+		return toolResultFailureWithCode(
+			fmt.Errorf("detach: 无法解析 shell 启动命令"),
+			string(runtimeerrors.ErrProcessStartFailed),
+			"",
+			map[string]interface{}{"detach_failed": true},
+		), nil
+	}
+	if err := b.sandbox.CheckCommandDenied(shellCmd[0]); err != nil {
+		return toolResultFailureWithCode(
+			wrapSandboxPermissionError("sandbox denied detached shell launcher", err, map[string]interface{}{
+				"policy":    "sandbox",
+				"operation": string(runtimeexecutor.OpExecute),
+				"command":   command,
+				"launcher":  shellCmd[0],
+			}),
+			string(runtimeerrors.ErrAgentPermission),
+			"",
+			map[string]interface{}{"detach_refused": true},
+		), nil
+	}
+
+	launchPath := shellCmd[0]
+	launchArgs := shellCmd[1:]
+	launchDir := resolvedWorkdir
+	launchEnv := runtimeexecutor.BuildFilteredEnv(b.sandbox, os.Environ())
+	if launch, wrapErr := b.sandbox.PrepareOSCommand(ctx, shellCmd[0], shellCmd[1:], resolvedWorkdir, launchEnv); wrapErr != nil {
+		return toolResultFailureWithCode(
+			wrapSandboxPermissionError("sandbox denied detached os isolation", wrapErr, map[string]interface{}{
+				"policy":    "sandbox",
+				"operation": string(runtimeexecutor.OpExecute),
+				"command":   command,
+				"launcher":  shellCmd[0],
+				"os_mode":   b.sandbox.Config().OSSandbox,
+			}),
+			string(runtimeerrors.ErrAgentPermission),
+			"",
+			map[string]interface{}{"detach_refused": true},
+		), nil
+	} else if strings.TrimSpace(launch.Command) != "" {
+		launchPath = launch.Command
+		launchArgs = launch.Args
+		if strings.TrimSpace(launch.WorkDir) != "" {
+			launchDir = launch.WorkDir
+		}
+		if launch.Env != nil {
+			launchEnv = launch.Env
+		}
+	}
+
+	started := time.Now()
+	proc, err := runtimeexecutor.StartDetached(runtimeexecutor.DetachedLaunch{
+		Path: launchPath,
+		Args: launchArgs,
+		Dir:  launchDir,
+		Env:  launchEnv,
+	})
+	duration := time.Since(started)
+	if err != nil {
+		return toolResultFailureWithCode(
+			err,
+			string(runtimeerrors.ErrProcessStartFailed),
+			"Fix the executable/workdir, or run the command in the foreground to surface its output.",
+			map[string]interface{}{"detach_failed": true},
+		), nil
+	}
+
+	content := fmt.Sprintf(
+		"已在独立控制台启动（detach=true，fire-and-forget）。\nPID: %d\n隔离模式: %s（breakaway=%v）\n命令: %s\n说明: 该进程不继承输出管道，输出不会进入本工具结果；它不受本次调用超时/Esc 终止影响，请用 PID 显式管理（Windows: `Stop-Process -Id %d -Force`；Unix: `kill %d`）。",
+		proc.PID, proc.Mode, proc.Breakaway, command, proc.PID, proc.PID,
+	)
+	if warning := strings.TrimSpace(proc.Warning); warning != "" {
+		content += "\n提示: " + warning
+		content += "（该进程仍独立于本次调用的作业对象，但可能被外层作业跟踪。）"
+	}
+	metadata := map[string]interface{}{
+		toolresult.MetadataOutcomeKey: toolresult.OutcomeSuccess,
+		"detached":                    true,
+		"detached_pid":                proc.PID,
+		"detach_mode":                 proc.Mode,
+		"detach_breakaway":            proc.Breakaway,
+		"executed":                    true,
+		"duration_ms":                 duration.Milliseconds(),
+		toolresult.MetadataNextActionKey: fmt.Sprintf(
+			"Detached process started (pid=%d); it is absent from this tool's output and leftover tracking. Manage it explicitly (Stop-Process -Id %d / kill %d) and avoid launching duplicates.",
+			proc.PID, proc.PID, proc.PID,
+		),
+	}
+	if warning := strings.TrimSpace(proc.Warning); warning != "" {
+		metadata["detach_warning"] = warning
+	}
+	return &toolkit.ToolResult{
+		Success:    true,
+		OutputKind: toolresult.KindText,
+		Content:    content,
+		Metadata:   metadata,
+	}, nil
+}
+
+func nonEmptyStrings(values ...string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+// applyProcessGuardResult copies process-tree termination diagnostics onto a
+// command result so callers (and the model) can see that the runtime had to
+// terminate the tree or bound the post-exit wait instead of hanging.
+func applyProcessGuardResult(result CommandExecutionResult, guard *runtimeexecutor.ProcessGuard, runErr error, termination string) CommandExecutionResult {
+	if guard == nil {
+		return result
+	}
+	report := guard.Report()
+	result.ProcessTreeKill = report.TreeKill
+	result.KilledPIDs = report.Killed
+	result.ProcessTreeMode = report.Mode
+	result.ProcessTreeError = strings.TrimSpace(strings.Join(nonEmptyStrings(report.AttachErr, report.Err), "; "))
+	result.WaitDelayMs = guard.WaitDelay().Milliseconds()
+	if stderrors.Is(runErr, exec.ErrWaitDelay) {
+		result.WaitDelayUsed = true
+	}
+	if len(report.Leftovers) > 0 {
+		result.LeftoverDescendants = report.Leftovers
+	}
+	if strings.TrimSpace(termination) != "" {
+		result.Termination = termination
+	}
+	return result
+}
+
+var longRunningShellCommandPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\bdaemon\s+(start|stop|restart|status)\b`),
+	regexp.MustCompile(`(?i)\bstart-process\b`),
+	regexp.MustCompile(`(?i)\b(npm|pnpm|yarn|bun)\s+(run\s+)?(dev|serve|start)\b`),
+	regexp.MustCompile(`(?i)\bdocker[\s-]?compose\s+up\b`),
+	regexp.MustCompile(`(?i)\b(docker|podman)\s+run\b`),
+	regexp.MustCompile(`(?i)\b(tail\s+-f|journalctl\s+-f)\b`),
+	regexp.MustCompile(`(?i)\bssh\s+\S+`),
+	regexp.MustCompile(`(?i)\b(http-server|vite|webpack-dev-server)\b`),
+}
+
+// longRunningShellCommandHint returns a recovery hint for commands that look
+// like long-lived processes (daemons, dev servers, watchers). Such commands
+// should carry an explicit timeout or run through the background task tool.
+func longRunningShellCommandHint(command string) string {
+	trimmed := strings.TrimSpace(command)
+	if trimmed == "" {
+		return ""
+	}
+	for _, pattern := range longRunningShellCommandPatterns {
+		if pattern.MatchString(trimmed) {
+			return "该命令疑似常驻/守护类命令（daemon、dev server、watch 等）：前台执行请显式传 timeout，并优先改用 background_task；若必须先拉起守护进程，请先 `daemon start`（带超时）再查询状态，避免首次调用阻塞。"
+		}
+	}
+	return ""
+}
+
+func isShellTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if stderrors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	return runtimeerrors.Is(err, runtimeerrors.ErrToolTimeout) || runtimeerrors.Is(err, runtimeerrors.ErrTurnDeadlineExceeded)
 }
 
 func buildCommandExecutionMetadata(command string, mutatedPaths []string, result CommandExecutionResult) map[string]interface{} {
@@ -1070,6 +1368,30 @@ func buildCommandExecutionMetadata(command string, mutatedPaths []string, result
 	}
 	if strings.TrimSpace(result.TimeoutSource) != "" {
 		metadata["timeout_source"] = strings.TrimSpace(result.TimeoutSource)
+	}
+	if result.WaitDelayMs > 0 {
+		metadata["wait_delay_ms"] = result.WaitDelayMs
+	}
+	if result.WaitDelayUsed {
+		metadata["wait_delay_used"] = true
+	}
+	if result.ProcessTreeKill {
+		metadata["process_tree_kill"] = true
+	}
+	if strings.TrimSpace(result.ProcessTreeMode) != "" {
+		metadata["process_tree_mode"] = strings.TrimSpace(result.ProcessTreeMode)
+	}
+	if strings.TrimSpace(result.ProcessTreeError) != "" {
+		metadata["process_tree_error"] = strings.TrimSpace(result.ProcessTreeError)
+	}
+	if len(result.KilledPIDs) > 0 {
+		metadata["killed_pids"] = result.KilledPIDs
+	}
+	if len(result.LeftoverDescendants) > 0 {
+		metadata["leftover_descendant_pids"] = result.LeftoverDescendants
+	}
+	if strings.TrimSpace(result.Termination) != "" {
+		metadata["termination"] = strings.TrimSpace(result.Termination)
 	}
 	shell := runtimeexecutor.Shell{
 		Type: runtimeexecutor.ShellType(strings.TrimSpace(result.ShellType)),

@@ -279,7 +279,11 @@ func isTerminalCircuitErrorCode(code string) bool {
 	case "TOOL_INVALID_ARGS", "TOOL_PATH_NOT_FOUND", "AGENT_PERMISSION",
 		"TOOL_NOT_FOUND", "TOOL_NOT_REGISTERED", "JOB_NOT_FOUND",
 		"APPROVAL_EXPIRED", "API_UNAUTHORIZED", "API_BAD_REQUEST",
-		"VALIDATION_FAILED", "CONFIG_INVALID", "WRITE_PRECONDITION_FAILED":
+		"VALIDATION_FAILED", "CONFIG_INVALID", "WRITE_PRECONDITION_FAILED",
+		// The acting session/logical agent-session row is gone: replaying the
+		// same call cannot succeed until the host repairs the session, so open
+		// the circuit instead of burning attempts on identical failures.
+		"SESSION_NOT_FOUND", "AGENT_SESSION_NOT_FOUND":
 		return true
 	default:
 		return false

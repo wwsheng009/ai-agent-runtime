@@ -78,6 +78,7 @@ func knownToolOutcomeErrorCode(code string) bool {
 		runtimeerrors.ErrAgentRunCanceled,
 		runtimeerrors.ErrAgentPermission,
 		runtimeerrors.ErrAgentSessionNotFound,
+		runtimeerrors.ErrSessionNotFound,
 		runtimeerrors.ErrJobNotFound,
 		runtimeerrors.ErrProcessStartFailed,
 		runtimeerrors.ErrProcessHealthcheck,

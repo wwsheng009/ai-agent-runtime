@@ -29,48 +29,7 @@ func TestFilterToolDefinitionsByShouldList(t *testing.T) {
 	require.Equal(t, []string{"view", "team_only"}, toolDefinitionNames(filtered))
 }
 
-func TestProjectToolSurfaceWithSearch_InjectsSearchAndDropsNonCore(t *testing.T) {
-	tools := make([]types.ToolDefinition, 0, toolkit.DefaultToolSearchThreshold+2)
-	tools = append(tools,
-		types.ToolDefinition{Name: "view", Description: "core read"},
-		types.ToolDefinition{Name: "grep", Description: "core search"},
-		types.ToolDefinition{
-			Name:        "niche_analyzer",
-			Description: "specialized analysis",
-			Metadata:    map[string]interface{}{toolkit.MetaDeferLoading: true},
-		},
-		types.ToolDefinition{
-			Name:        "always_listed_helper",
-			Description: "non-core but force list",
-			Metadata: map[string]interface{}{
-				toolkit.MetaDeferLoading: false,
-			},
-		},
-	)
-	for i := 0; len(tools) < toolkit.DefaultToolSearchThreshold+1; i++ {
-		tools = append(tools, types.ToolDefinition{
-			Name:        fmt.Sprintf("extra_tool_%02d", i),
-			Description: "filler non-core tool",
-		})
-	}
-
-	// Below threshold: no projection / no search injection.
-	small := projectToolSurfaceWithSearch(tools[:toolkit.DefaultToolSearchThreshold-1], toolkit.DefaultToolSearchThreshold)
-	require.Len(t, small, toolkit.DefaultToolSearchThreshold-1)
-	require.NotContains(t, toolDefinitionNames(small), toolkit.ToolSearchName)
-
-	projected := projectToolSurfaceWithSearch(tools, toolkit.DefaultToolSearchThreshold)
-	names := toolDefinitionNames(projected)
-	assert.Contains(t, names, "view")
-	assert.Contains(t, names, "grep")
-	assert.Contains(t, names, toolkit.ToolSearchName)
-	assert.Contains(t, names, "always_listed_helper")
-	assert.NotContains(t, names, "niche_analyzer")
-	assert.NotContains(t, names, "extra_tool_00")
-	require.Less(t, len(projected), len(tools))
-}
-
-func TestProjectToolSurfaceWithSearch_SimpleGoalWinsInComputePath(t *testing.T) {
+func TestSimpleGoalProjectionCollapsesSurface(t *testing.T) {
 	// Direct unit: simple goal projection still collapses to tiny surface.
 	tools := []types.ToolDefinition{
 		{Name: "ls"},
@@ -78,8 +37,8 @@ func TestProjectToolSurfaceWithSearch_SimpleGoalWinsInComputePath(t *testing.T) 
 		{Name: "view"},
 		{Name: "extra_remote_helper", Metadata: map[string]interface{}{toolkit.MetaDeferLoading: true}},
 	}
-	// Pad so search projection would otherwise trigger if applied.
-	for i := 0; len(tools) < toolkit.DefaultToolSearchThreshold+1; i++ {
+	// Pad the catalog; there is no directory-size projection any more.
+	for i := 0; len(tools) < 40; i++ {
 		tools = append(tools, types.ToolDefinition{Name: fmt.Sprintf("pad_%02d", i)})
 	}
 
@@ -121,7 +80,7 @@ func TestSimpleGoalToolNamesSeparatesContentAndFileNameSearch(t *testing.T) {
 	}
 }
 
-func TestExecuteSearchTool_FindsProjectedTools(t *testing.T) {
+func TestExecuteSearchTool_FindsTools(t *testing.T) {
 	catalog := []types.ToolDefinition{
 		{Name: "view", Description: "Read local files"},
 		{
@@ -131,19 +90,6 @@ func TestExecuteSearchTool_FindsProjectedTools(t *testing.T) {
 		},
 		{Name: toolkit.ToolSearchName, Description: "meta"},
 	}
-	// Project model surface: only core + search.
-	surface := projectToolSurfaceWithSearch(append(catalog,
-		// pad to threshold so projection actually hides non-core
-		func() []types.ToolDefinition {
-			extra := make([]types.ToolDefinition, 0, toolkit.DefaultToolSearchThreshold)
-			for i := 0; i < toolkit.DefaultToolSearchThreshold; i++ {
-				extra = append(extra, types.ToolDefinition{Name: fmt.Sprintf("pad_%02d", i)})
-			}
-			return extra
-		}()...,
-	), toolkit.DefaultToolSearchThreshold)
-	require.NotContains(t, toolDefinitionNames(surface), "sourcegraph")
-	require.Contains(t, toolDefinitionNames(surface), toolkit.ToolSearchName)
 
 	output, meta, err := executeSearchTool(map[string]interface{}{
 		"query": "sourcegraph code",
@@ -160,7 +106,7 @@ func TestExecuteSearchTool_FindsProjectedTools(t *testing.T) {
 	require.Equal(t, "devtools", snapshot.Results[0].ServerName)
 }
 
-func TestReActLoop_GetAvailableTools_AppliesShouldListAndSearchProjection(t *testing.T) {
+func TestReActLoop_GetAvailableTools_ListsAuthorizedToolsWithoutProjection(t *testing.T) {
 	manager := &mockSearchCatalogMCPManager{}
 	agent := &Agent{
 		config: &Config{
@@ -172,22 +118,21 @@ func TestReActLoop_GetAvailableTools_AppliesShouldListAndSearchProjection(t *tes
 	}
 	loop := NewReActLoop(agent, llm.NewLLMRuntime(nil), &LoopReActConfig{EnableToolCalls: true})
 
-	// Non-simple goal so search projection can run.
+	// Non-simple goal: no goal projection is applied.
 	tools, err := loop.getAvailableTools(context.Background(), "investigate repository architecture and tooling options", nil)
 	require.NoError(t, err)
 	names := toolDefinitionNames(tools)
 
 	assert.Contains(t, names, "view")
-	assert.Contains(t, names, toolkit.ToolSearchName)
+	// All enabled MCP tools are listed directly now, including non-core ones.
+	assert.Contains(t, names, "deferred_helper")
+	assert.Contains(t, names, "filler_00")
+	// search_tool is not injected automatically when nothing is hidden.
+	assert.NotContains(t, names, toolkit.ToolSearchName)
 	assert.NotContains(t, names, "hidden_tool")
 	assert.NotContains(t, names, "team_only_tool")
-	assert.NotContains(t, names, "deferred_helper")
-	// Filler non-core tools should be projected out once catalog is large.
-	assert.NotContains(t, names, "filler_00")
 
-	// Team-active context should re-list team_only_tool only if it is core or defer_loading=false.
-	// team_only_tool is non-core with default defer, so it stays projected; filter alone is covered above.
-	// Simple goal still wins and must not force search_tool.
+	// Simple goal projection is still applied for turn-local surfaces.
 	simpleTools, err := loop.getAvailableTools(context.Background(), "ls file", nil)
 	require.NoError(t, err)
 	simpleNames := toolDefinitionNames(simpleTools)
@@ -212,7 +157,8 @@ func TestReActLoop_GetAvailableTools_SessionStableSurfaceIgnoresSimpleGoalProjec
 	assert.Contains(t, names, "glob")
 	assert.Contains(t, names, "view")
 	assert.Contains(t, names, "grep")
-	assert.Contains(t, names, toolkit.ToolSearchName)
+	assert.NotContains(t, names, toolkit.ToolSearchName)
+	assert.Contains(t, names, "deferred_helper")
 }
 
 func TestReActLoop_GetAvailableTools_UpgradesLegacySimpleSessionSurfaceAtTurnBoundary(t *testing.T) {
@@ -237,7 +183,7 @@ func TestReActLoop_GetAvailableTools_UpgradesLegacySimpleSessionSurfaceAtTurnBou
 	names := toolDefinitionNames(tools)
 	assert.Contains(t, names, "view")
 	assert.Contains(t, names, "grep")
-	assert.Contains(t, names, toolkit.ToolSearchName)
+	assert.NotContains(t, names, toolkit.ToolSearchName)
 
 	snapshot.refreshable = false
 	tools, frozen, _, err = loop.resolveAvailableTools(ctx, "analyze and fix the renderer", nil)
@@ -311,7 +257,7 @@ func (m *mockSearchCatalogMCPManager) ListTools() []skill.ToolInfo {
 			Metadata:    map[string]interface{}{toolkit.MetaDeferLoading: true},
 		},
 	}
-	for i := 0; i < toolkit.DefaultToolSearchThreshold; i++ {
+	for i := 0; i < 40; i++ {
 		tools = append(tools, skill.ToolInfo{
 			Name:        fmt.Sprintf("filler_%02d", i),
 			Description: "filler non-core tool " + strings.Repeat("x", 8),
@@ -319,4 +265,66 @@ func (m *mockSearchCatalogMCPManager) ListTools() []skill.ToolInfo {
 		})
 	}
 	return tools
+}
+
+// mcpToolListStub 可变 MCP 工具目录：模拟异步建连完成后工具才出现在 ListTools 的场景。
+type mcpToolListStub struct {
+	tools []skill.ToolInfo
+}
+
+func (m *mcpToolListStub) FindTool(toolName string) (skill.ToolInfo, error) {
+	return skill.ToolInfo{Name: toolName, Enabled: true}, nil
+}
+
+func (m *mcpToolListStub) CallTool(ctx interface{}, mcpName, toolName string, args map[string]interface{}) (interface{}, error) {
+	return "ok", nil
+}
+
+func (m *mcpToolListStub) ListTools() []skill.ToolInfo {
+	return append([]skill.ToolInfo(nil), m.tools...)
+}
+
+// TestReActLoop_ResolveAvailableTools_RefreshesFrozenSurfaceWhenMCPToolsAppear 验证
+// MCP 延迟建连场景：冻结面生成时目录里没有 MCP 工具，建连完成后在 turn 边界重建，
+// 让 list_pages 等工具进入工具面。
+func TestReActLoop_ResolveAvailableTools_RefreshesFrozenSurfaceWhenMCPToolsAppear(t *testing.T) {
+	manager := &mcpToolListStub{tools: []skill.ToolInfo{
+		{Name: "view", Enabled: true},
+		{Name: "shell", Enabled: true},
+	}}
+	agent := &Agent{
+		config:     &Config{Name: "test-agent", Model: "test-provider", MaxSteps: 1},
+		mcpManager: manager,
+	}
+	loop := NewReActLoop(agent, llm.NewLLMRuntime(nil), &LoopReActConfig{EnableToolCalls: true})
+	snapshot := &testSessionStableToolSurfaceSnapshot{
+		set:         true,
+		refreshable: true,
+		tools: []types.ToolDefinition{
+			{Name: "view"},
+			{Name: "shell"},
+		},
+	}
+	ctx := WithTurnToolSurfaceSnapshot(context.Background(), snapshot)
+
+	// 目录没有新增能力：沿用冻结面，保持 prompt cache 前缀。
+	tools, frozen, _, err := loop.resolveAvailableTools(ctx, "analyze repository", nil)
+	require.NoError(t, err)
+	require.True(t, frozen)
+	require.ElementsMatch(t, []string{"view", "shell"}, toolDefinitionNames(tools))
+
+	// MCP 建连完成（如 chrome-devtools 发布 list_pages）→ turn 边界重建工具面。
+	manager.tools = append(manager.tools, skill.ToolInfo{
+		Name:     "list_pages",
+		Enabled:  true,
+		MCPName:  "chrome-devtools",
+		Metadata: map[string]interface{}{"mcp_name": "chrome-devtools"},
+	})
+	tools, frozen, _, err = loop.resolveAvailableTools(ctx, "analyze repository and list pages", nil)
+	require.NoError(t, err)
+	require.False(t, frozen)
+	names := toolDefinitionNames(tools)
+	assert.Contains(t, names, "list_pages")
+	assert.Contains(t, names, "view")
+	assert.Contains(t, names, "shell")
 }

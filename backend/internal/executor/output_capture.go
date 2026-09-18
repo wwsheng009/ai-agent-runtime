@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 const (
@@ -72,15 +74,7 @@ func CaptureCombinedOutput(cmd *exec.Cmd, maxBytes int) (CombinedOutputCapture, 
 
 func CaptureCombinedOutputWithMirror(cmd *exec.Cmd, maxBytes int, mirror io.Writer) (CombinedOutputCapture, error) {
 	writer := newCombinedOutputWriter(maxBytes)
-	outputWriter := io.Writer(writer)
-	if mirror != nil {
-		outputWriter = newMirrorCombinedOutputWriter(writer, mirror)
-	}
-	cmd.Stdout = outputWriter
-	cmd.Stderr = outputWriter
-
-	err := cmd.Run()
-	flushOutputMirror(mirror)
+	err := runCommandCapture(context.Background(), cmd, nil, commandOutputWriter(writer, mirror), mirror, "", 0, nil)
 	return writer.Result(), err
 }
 
@@ -96,26 +90,53 @@ func CaptureCombinedOutputWithArtifact(cmd *exec.Cmd, maxBytes int, scope string
 // CaptureCombinedOutputWithArtifactAndMirror captures command output for model
 // history/artifacts while also teeing raw chunks to a live output mirror.
 func CaptureCombinedOutputWithArtifactAndMirror(cmd *exec.Cmd, maxBytes int, scope string, command string, preferredRoot string, mirror io.Writer) (CombinedOutputCapture, string, error, error) {
+	return captureCombinedOutput(context.Background(), cmd, nil, maxBytes, scope, command, preferredRoot, mirror, 0)
+}
+
+// GuardedCaptureOptions configures a guarded, artifact-aware command capture.
+type GuardedCaptureOptions struct {
+	MaxBytes      int
+	Scope         string
+	Command       string
+	PreferredRoot string
+	Mirror        io.Writer
+	// QuietNotice emits a diagnostic line into the captured output when the
+	// command produces no output for this long. Zero resolves the default from
+	// AICLI_SHELL_QUIET_NOTICE_TIMEOUT; negative disables the notice.
+	QuietNotice time.Duration
+}
+
+// CaptureCombinedOutputGuarded runs cmd under a ProcessGuard: the started
+// process is attached to the guard's process tree, context cancellation
+// terminates the whole tree, and WaitDelay bounds I/O that descendants keep
+// open after the shell exited. It is the bounded counterpart of
+// CaptureCombinedOutputWithArtifactAndMirror.
+func CaptureCombinedOutputGuarded(ctx context.Context, cmd *exec.Cmd, guard *ProcessGuard, opts GuardedCaptureOptions) (CombinedOutputCapture, string, error, error) {
+	notice := opts.QuietNotice
+	if notice == 0 {
+		notice = ResolveQuietNoticeTimeout()
+	} else if notice < 0 {
+		notice = 0
+	}
+	return captureCombinedOutput(ctx, cmd, guard, opts.MaxBytes, opts.Scope, opts.Command, opts.PreferredRoot, opts.Mirror, notice)
+}
+
+func captureCombinedOutput(ctx context.Context, cmd *exec.Cmd, guard *ProcessGuard, maxBytes int, scope string, command string, preferredRoot string, mirror io.Writer, quietNotice time.Duration) (CombinedOutputCapture, string, error, error) {
 	if maxBytes == DisableRetainedOutputLimit {
-		capture, err := CaptureCombinedOutputWithMirror(cmd, maxBytes, mirror)
-		return capture, "", err, nil
+		writer := newCombinedOutputWriter(maxBytes)
+		err := runCommandCapture(ctx, cmd, guard, commandOutputWriter(writer, mirror), mirror, command, quietNotice, guardPIDFunc(guard))
+		return writer.Result(), "", err, nil
 	}
 
 	path, artifactFile, artifactOpenErr := openShellOutputArtifactFile(scope, command, preferredRoot)
 	if artifactOpenErr != nil || artifactFile == nil {
-		capture, err := CaptureCombinedOutputWithMirror(cmd, maxBytes, mirror)
-		return capture, "", err, artifactOpenErr
+		writer := newCombinedOutputWriter(maxBytes)
+		err := runCommandCapture(ctx, cmd, guard, commandOutputWriter(writer, mirror), mirror, command, quietNotice, guardPIDFunc(guard))
+		return writer.Result(), "", err, artifactOpenErr
 	}
 
 	writer := newArtifactTeeCombinedOutputWriter(maxBytes, artifactFile)
-	outputWriter := io.Writer(writer)
-	if mirror != nil {
-		outputWriter = newMirrorCombinedOutputWriter(writer, mirror)
-	}
-	cmd.Stdout = outputWriter
-	cmd.Stderr = outputWriter
-	runErr := cmd.Run()
-	flushOutputMirror(mirror)
+	runErr := runCommandCapture(ctx, cmd, guard, commandOutputWriter(writer, mirror), mirror, command, quietNotice, guardPIDFunc(guard))
 	capture := writer.Result()
 	artifactErr := writer.ArtifactError()
 	if closeErr := artifactFile.Close(); closeErr != nil && artifactErr == nil {
@@ -126,6 +147,181 @@ func CaptureCombinedOutputWithArtifactAndMirror(cmd *exec.Cmd, maxBytes int, sco
 		return capture, "", runErr, artifactErr
 	}
 	return capture, path, runErr, nil
+}
+
+func commandOutputWriter(primary combinedOutputWriter, mirror io.Writer) io.Writer {
+	if mirror == nil {
+		return primary
+	}
+	return newMirrorCombinedOutputWriter(primary, mirror)
+}
+
+func guardPIDFunc(guard *ProcessGuard) func() int {
+	if guard == nil {
+		return nil
+	}
+	return guard.PID
+}
+
+// runCommandCapture runs cmd with optional process-tree guarding. Without a
+// guard it degrades to the historical cmd.Run() path; with a guard it starts
+// the process, attaches it to the platform tree handle, terminates the tree on
+// context cancellation, bounds post-exit I/O via WaitDelay and reports quiet
+// periods while the command is still running.
+func runCommandCapture(ctx context.Context, cmd *exec.Cmd, guard *ProcessGuard, outputWriter io.Writer, mirror io.Writer, command string, quietNotice time.Duration, pid func() int) error {
+	if cmd == nil {
+		return fmt.Errorf("executor: nil command")
+	}
+	if guard == nil {
+		cmd.Stdout = outputWriter
+		cmd.Stderr = outputWriter
+		err := cmd.Run()
+		flushOutputMirror(mirror)
+		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	activity := newCommandActivity(outputWriter)
+	cmd.Stdout = activity
+	cmd.Stderr = activity
+	if err := cmd.Start(); err != nil {
+		guard.Close()
+		flushOutputMirror(mirror)
+		return err
+	}
+	if err := guard.Attach(cmd.Process); err != nil {
+		guard.NoteAttachError(err)
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		select {
+		case <-ctx.Done():
+			guard.Terminate()
+		case <-stop:
+		}
+	}()
+	if quietNotice > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			watchCommandQuiet(activity, outputWriter, command, quietNotice, pid, stop)
+		}()
+	}
+	runErr := cmd.Wait()
+	close(stop)
+	wg.Wait()
+	guard.Close()
+	flushOutputMirror(mirror)
+	return runErr
+}
+
+const (
+	quietNoticeEnv     = "AICLI_SHELL_QUIET_NOTICE_TIMEOUT"
+	quietNoticeDefault = 2 * time.Minute
+	quietCheckInterval = 5 * time.Second
+)
+
+// ResolveQuietNoticeTimeout returns how long a running command may stay silent
+// before the runtime appends a stall notice to its output. Zero disables it.
+func ResolveQuietNoticeTimeout() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv(quietNoticeEnv)); raw != "" {
+		if parsed, err := time.ParseDuration(raw); err == nil {
+			if parsed <= 0 {
+				return 0
+			}
+			return parsed
+		}
+	}
+	return quietNoticeDefault
+}
+
+type commandActivity struct {
+	inner          io.Writer
+	startedAt      time.Time
+	lastWriteNanos int64
+	totalBytes     int64
+}
+
+func newCommandActivity(inner io.Writer) *commandActivity {
+	now := time.Now()
+	return &commandActivity{inner: inner, startedAt: now, lastWriteNanos: now.UnixNano()}
+}
+
+func (w *commandActivity) Write(p []byte) (int, error) {
+	n, err := w.inner.Write(p)
+	if n > 0 {
+		atomic.StoreInt64(&w.lastWriteNanos, time.Now().UnixNano())
+		atomic.AddInt64(&w.totalBytes, int64(n))
+	}
+	return n, err
+}
+
+func (w *commandActivity) quietFor(now time.Time) time.Duration {
+	last := atomic.LoadInt64(&w.lastWriteNanos)
+	if last <= 0 {
+		return 0
+	}
+	return now.Sub(time.Unix(0, last))
+}
+
+func (w *commandActivity) elapsed(now time.Time) time.Duration {
+	return now.Sub(w.startedAt)
+}
+
+// watchCommandQuiet appends a runtime notice to the captured output when the
+// command stops producing output but keeps running, so the model/UI can tell a
+// silent hang apart from legitimately slow work.
+func watchCommandQuiet(activity *commandActivity, sink io.Writer, command string, quiet time.Duration, pid func() int, stop <-chan struct{}) {
+	if activity == nil || sink == nil || quiet <= 0 {
+		return
+	}
+	interval := quietCheckInterval
+	if quiet < interval {
+		interval = quiet
+	}
+	if interval < time.Second {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	var lastNotice time.Time
+	for {
+		select {
+		case <-stop:
+			return
+		case now := <-ticker.C:
+			idle := activity.quietFor(now)
+			if idle < quiet {
+				continue
+			}
+			if !lastNotice.IsZero() && now.Sub(lastNotice) < quiet {
+				continue
+			}
+			lastNotice = now
+			pidText := ""
+			if pid != nil {
+				if value := pid(); value > 0 {
+					pidText = fmt.Sprintf(", pid=%d", value)
+				}
+			}
+			commandText := strings.Join(strings.Fields(command), " ")
+			if len(commandText) > 96 {
+				commandText = commandText[:96] + "..."
+			}
+			notice := fmt.Sprintf(
+				"\n[runtime] shell command has been quiet for %s (no output%s, elapsed %s) and is still running: %s\n[runtime] Press Esc to interrupt; long-running or daemon-style commands should use the background task tool instead.\n",
+				idle.Round(time.Second),
+				pidText,
+				activity.elapsed(now).Round(time.Second),
+				commandText,
+			)
+			_, _ = io.WriteString(sink, notice)
+		}
+	}
 }
 
 // Write appends a new chunk of command output to the accumulator.

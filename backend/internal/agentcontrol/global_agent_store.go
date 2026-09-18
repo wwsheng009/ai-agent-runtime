@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
 	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 )
 
 // GlobalAgentStoreConfig controls the durable AgentControl identity registry
@@ -461,7 +463,10 @@ func (s *SQLiteGlobalAgentRegistryStore) ReserveAgentControlAgentSpawn(ctx conte
 	if child.AgentPath == "" {
 		return AgentRecord{}, fmt.Errorf("child agent path is required")
 	}
-	tx, err := db.BeginTx(ctx, nil)
+	// 读后写（COUNT 名额 → upsert 两张表）：deferred 事务在 WAL 下会因
+	// 快照被并发写者推前而升级失败（SQLITE_BUSY_SNAPSHOT/517，重试同一事务
+	// 永不成功）。IMMEDIATE 先取写锁，读写共享同一无竞争快照。
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
 		return AgentRecord{}, fmt.Errorf("begin agent spawn reservation: %w", err)
 	}

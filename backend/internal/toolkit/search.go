@@ -10,10 +10,6 @@ import (
 // ToolSearchName is the model-facing meta-tool for catalog discovery.
 const ToolSearchName = "search_tool"
 
-// DefaultToolSearchThreshold is the catalog size at which hosts may inject
-// search_tool and project non-core tools out of the direct model surface.
-const DefaultToolSearchThreshold = 24
-
 // ToolSearchEntry is one searchable tool catalog entry.
 type ToolSearchEntry struct {
 	Name        string

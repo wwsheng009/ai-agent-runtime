@@ -1102,6 +1102,11 @@ func classifyBrokerExecutionError(toolName string, err error) error {
 		strings.Contains(lower, "unknown agent session reference"),
 		strings.Contains(lower, "agent session not found"):
 		code = runtimeerrors.ErrAgentSessionNotFound
+	case strings.Contains(lower, "session not found"):
+		// The acting session's own record is missing (deleted, expired, or
+		// never persisted). Keep this ahead of the generic "not found" branch
+		// so raw store text cannot be mislabeled as TOOL_PATH_NOT_FOUND.
+		code = runtimeerrors.ErrSessionNotFound
 	case strings.Contains(lower, "notification") && (strings.Contains(lower, "not found") || strings.Contains(lower, "load notification")):
 		// A supervision notification that cannot be loaded (stale or
 		// fabricated id, or a row from another host's scope) is an args/scope
