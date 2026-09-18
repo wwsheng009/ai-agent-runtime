@@ -3,8 +3,11 @@ package skills
 import (
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
 )
 
@@ -82,9 +85,12 @@ type runtimeEventDeliveryCounters struct {
 	// liveForwarded：类型 -> 计数（B 通道实际转发量）。
 	liveForwarded map[string]uint64
 	// liveDropped：类型 -> 计数（B 通道真实丢弃量：latest-wins 键数超限）。
-	liveDropped     map[string]uint64
-	liveDroppedNum  uint64
-	overflow        uint64
+	liveDropped    map[string]uint64
+	liveDroppedNum uint64
+	overflow       uint64
+	// persistErrors：A 通道调用会话事件库 AppendEvent 失败次数（P0.5）。
+	// 历史行为是 `_, _ =` 静默丢弃，导致 517/锁竞争下「事件消失且无任何痕迹」。
+	persistErrors uint64
 }
 
 var runtimeEventDelivery = &runtimeEventDeliveryCounters{
@@ -158,6 +164,31 @@ func (c *runtimeEventDeliveryCounters) recordLiveDropped(eventType string) {
 	c.liveDropped[key]++
 }
 
+func (c *runtimeEventDeliveryCounters) recordPersistError() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.persistErrors++
+	c.mu.Unlock()
+}
+
+// runtimeEventPersistErrorAt 是落盘失败告警的限频时间戳（5s 一次）。
+var runtimeEventPersistErrorAt atomic.Int64
+
+// recordRuntimeEventPersistError 记录 A 通道（总线 → 会话事件库）落盘失败：
+// 计数 + 限频告警。与 chat 侧 bindRuntimeEventPersistence 的可见性修复对齐
+// （P0.5 / 审查 R8）：写事务 BUSY 重试耗尽或 517 回归时，必须能在日志与
+// runtime_event_delivery 指标里看到，而不是静默丢事件。
+func recordRuntimeEventPersistError(eventType, sessionID string, err error) {
+	runtimeEventDelivery.recordPersistError()
+	now := time.Now().UnixNano()
+	if last := runtimeEventPersistErrorAt.Load(); now-last > int64(5*time.Second) &&
+		runtimeEventPersistErrorAt.CompareAndSwap(last, now) {
+		logpkg.Warnf("runtime event persistence failed (type=%s session=%s): %v", eventType, sessionID, err)
+	}
+}
+
 // recordRuntimeEventDeliveryDrop 由 A 通道（总线 → 会话事件库）在过滤掉事件时
 // 调用。已知性与 runtimeobserve 的三分法同源：命中已知目录 ⇒ 该类型有产品语义，
 // 只是被白名单裁掉；未命中 ⇒ 保持异常语义（可能是拼写错误或未登记的新事件）。
@@ -208,14 +239,15 @@ func SnapshotRuntimeEventDelivery() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"dropped_total":     c.droppedKnown + c.droppedUnknown,
-		"dropped_known":     c.droppedKnown,
-		"dropped_unknown":   c.droppedUnknown,
-		"dropped_by_reason": droppedByReason,
-		"live_forwarded":    liveForwarded,
-		"live_dropped":      liveDropped,
+		"dropped_total":      c.droppedKnown + c.droppedUnknown,
+		"dropped_known":      c.droppedKnown,
+		"dropped_unknown":    c.droppedUnknown,
+		"persist_errors":     c.persistErrors,
+		"dropped_by_reason":  droppedByReason,
+		"live_forwarded":     liveForwarded,
+		"live_dropped":       liveDropped,
 		"live_dropped_total": c.liveDroppedNum,
-		"overflow":          c.overflow,
+		"overflow":           c.overflow,
 		// Batch 3：连接级指标并入同一快照（不新增端点），收在 stream 子对象里。
 		"stream": runtimeEventStreamMetricsSnapshot(),
 		"channels": []string{

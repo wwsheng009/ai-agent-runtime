@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 )
 
 // Migration describes a schema migration.
@@ -81,7 +83,9 @@ func loadApplied(ctx context.Context, db *sql.DB) (map[int]bool, error) {
 }
 
 func applyOne(ctx context.Context, db *sql.DB, mig Migration) error {
-	tx, err := db.BeginTx(ctx, nil)
+	// 迁移的 UpSQL 可能包含读后写语句：IMMEDIATE 避免并发写者把 deferred
+	// 读快照顶成 SQLITE_BUSY_SNAPSHOT/517（迁移失败会中断启动）。
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
 		return fmt.Errorf("begin migration %d: %w", mig.Version, err)
 	}

@@ -272,7 +272,9 @@ func (s *SQLiteStore) Close() error {
 }
 
 // WithImmediateTx executes fn inside a SQLite IMMEDIATE transaction.
-// The DSN is configured with _txlock=immediate, so BeginTx automatically uses IMMEDIATE mode.
+// The transaction opens with sqliteutil.WriteTxOptions (driver maps
+// sql.LevelSerializable to BEGIN IMMEDIATE), so read-then-write bodies cannot
+// fail with SQLITE_BUSY_SNAPSHOT when another process writes to the WAL.
 func (s *SQLiteStore) WithImmediateTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	if s == nil {
 		return fmt.Errorf("team store is not initialized")
@@ -286,7 +288,7 @@ func (s *SQLiteStore) WithImmediateTx(ctx context.Context, fn func(*sql.Tx) erro
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
 		return fmt.Errorf("begin immediate tx: %w", err)
 	}
@@ -2335,7 +2337,7 @@ func (s *SQLiteStore) insertMailSameTx(ctx context.Context, message MailMessage)
 	controlMessage := message
 	controlMessage.ControlSeq = 0
 	wakeEvent := agentcontrol.WakeEvent{}
-	tx, err := conn.BeginTx(ctx, nil)
+	tx, err := conn.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
 		return "", true, fmt.Errorf("begin insert mail tx: %w", err)
 	}

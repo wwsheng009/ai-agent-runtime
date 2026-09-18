@@ -397,6 +397,14 @@ func (h *Handler) ResumeSessionAgent(w http.ResponseWriter, r *http.Request) {
 // （{session_id, turn_id, source, detached, started_at}），无则为 null。
 // 页面刷新后据此重新挂载在途回合身份，让 runtime/stream 上落库的增量帧
 // 继续渲染到同一条 streaming 消息。
+//
+// 查询参数 `view`（后台会话低频轮询省流量）：
+//   - `view=light`（trim + 大小写不敏感）：`state` 先经
+//     RuntimeState.CloneForInspection() 投影再序列化，丢弃 stable_tool_surface /
+//     frozen_turn_tools / pending_tool 落库结果等大字段，保留 status、
+//     pending_approval、pending_question、head_offset、active_job_ids、updated_at
+//     等控制流字段；`active_turn` 与 execution_route 注入不受影响；
+//   - 缺省 / `full` / 未知取值：返回完整 state，不报错（保持既有契约）。
 func (h *Handler) GetSessionRuntimeState(w http.ResponseWriter, r *http.Request) {
 	store := h.getSessionRuntimeStore()
 	if store == nil {
@@ -451,8 +459,12 @@ func (h *Handler) GetSessionRuntimeState(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	projectedState := state
+	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("view")), "light") {
+		projectedState = state.CloneForInspection()
+	}
 	payload := map[string]interface{}{
-		"state":       state,
+		"state":       projectedState,
 		"active_turn": h.activeTurnSnapshotPayload(sessionID),
 	}
 	h.writeJSON(w, http.StatusOK, h.attachSessionExecutionRoute(r.Context(), sessionID, payload))

@@ -60,6 +60,13 @@ sessionRuntime:
   # （/api/runtime/sessions/{id}/runtime/events）跨重启可回放。
   defaultPersistence: memory
   storePath: ../data/runtime/session_runtime.sqlite
+  # P1.7 读写双池：默认启用（读走只读连接池，query_only + 3s 读超时）；
+  # 回滚：readPool.disable: true 恢复单池行为。
+  # readPool:
+  #   disable: false
+  #   size: 4
+  #   busyTimeout: 5s
+  #   operationTimeout: 3s
 
 observe:
   # Runtime Observation Plane: 默认关闭；此处显式开启只读观测 API。

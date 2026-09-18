@@ -513,6 +513,19 @@ sessions:
 
 常用参数包括 `--config-file/-C`、`--transport`、`--header`、`--auth` 等；完整参数以 `aicli mcp --help` 和各子命令 `--help` 为准。
 
+MCP 配置文件解析顺序（chat 会话、`aicli mcp *`、console / 微型 Web 面板、runtime-server 共用同一套）：
+
+| 优先级 | 路径 | 说明 |
+|---|---|---|
+| 0 | session / profile 显式指定，或 `config_file` 指向**非约定路径** | `--profile`、session 级覆盖，或 `aicli.mcp.config_file` / `MCP_CONFIG_FILE` 写成自定义路径时直接胜出 |
+| 1 | `./.aicli/mcp.yaml` | **工作区级**（cwd 下的 `.aicli/`，该目录默认在 `.gitignore`） |
+| 2 | `~/.aicli/mcp.yaml` | 用户级 |
+| 3 | 从 cwd 逐级向上搜索 | 每级先 `.aicli/mcp.yaml`，再 `configs/mcp.yaml` |
+| 4 | 可执行文件目录逐级向上搜索 | 覆盖从无关目录启动的场景 |
+| 5 | `configs/mcp.yaml` | 兜底（`config_file` 为约定值时返回该字面路径） |
+
+`aicli mcp add` / `/mcp add` 的**写入**路径与上表一致：命中哪个文件就写哪个；若全部不存在，则创建 `~/.aicli/mcp.yaml`（runtime-server 同样落到用户级，避免在任意工作目录生成 `configs/mcp.yaml`）。
+
 ### skill 安装概览
 
 `aicli skill`（别名 `skills`）把 Codex 风格 skill 目录（含 `SKILL.md`）安装到目标工具的 skills 根目录：
@@ -613,8 +626,9 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 | `/function <name>` | 查看单个 function 描述 |
 | `/call <name> [args-json]` | 直接执行指定 function；`openai_image_generate` 可直接把后续文本作为 `prompt` |
 | `/tool <name> [args-json]` | `/call` 别名；`openai_image_generate` 可直接把后续文本作为 `prompt` |
-| `/skill <name> <prompt>` | 直接执行指定 skill，并把后面的文本作为 `prompt` |
+| `/skill [--direct] <name> <prompt>` | 默认提交 skill 回合（注入程序说明，由模型自选程序）；`--direct` 直接执行并把后面的文本作为 `prompt` |
 | `/skills [query]` | 列出并选择执行 skill |
+| `/mcp [list\|status <name>\|add <name> <url> [options]\|enable\|disable\|remove <name>\|reload\|help]` | 管理 MCP Server（列表/新增/启停/删除/热重载），与 `aicli mcp`、console 与微型 Web 面板共用同一份配置与实现 |
 | `/sessions` | 列出或筛选可恢复会话 |
 | `/load <session-id>` | 加载指定会话 |
 | `/resume [latest|<session-id>]` | 恢复最近会话或指定会话；无参数时显示可恢复会话选择器 |
@@ -630,6 +644,10 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 - `/call` / `/tool` 适合直接执行 `openai_image_generate` 这类内置工具；例如 `/call openai_image_generate 生成图片` 会自动转换为 `{"prompt":"生成图片"}`。
 - `/skill imagegen ...` 会直接调用 `skill__imagegen`，由 skill 工作流转发到 `/v1/images/generations` provider。
 - `/model` 支持 `status`、`clear-reasoning`、`--provider/-p`、`--model/-m`、`--reasoning-effort/-r`；切换后会刷新 provider、adapter、BaseURL、HTTP client、function builder、logger 和 runtime session metadata。
+- `/mcp` 直接管理当前 MCP 配置（优先级：`./.aicli/mcp.yaml` > `~/.aicli/mcp.yaml` > 显式配置 > 向上搜索），写操作落盘并热重载、重连；成功后会把最新 MCP 工具重新注册进当前会话。
+  - 新增 URL 传输：`/mcp add chrome-mcp http://127.0.0.1:12306/mcp --header "Authorization: Bearer x" --env API_KEY=1 --trust trusted_remote`（http(s)→streamable，ws(s)→websocket，可用 `--type sse|websocket|streamable` 覆盖）。
+  - 新增 stdio 传输：`/mcp add local-fs --command npx --arg -y --arg @modelcontextprotocol/server-filesystem --disabled`。
+  - `--header` 会映射为 `HEADER_*` 环境变量（与 console / 微型 Web 面板同一约定）；`/mcp status <name>` 查看连接状态、工具数与最近错误。
 - `/login` 与 `aicli login` 共用 provider 登录逻辑，支持 API key、Codex OAuth、`--models-path`、`--default-model`、`--set-default`、`--dry-run` 和 JSON 输出。
 - 交互式 TUI 会把当前 provider 的账户余额显示在底部状态栏，并为 `sub2api` / `new-api` 账户在启动后立即刷新一次，随后按 `aicli.balance.refresh_interval` 定时刷新。刷新失败时保留最后一次成功值，不改写配置文件。
 - `/stream`、`/s`、`/normal` 会更新当前会话，并在可写配置存在时写回 `aicli.chat.stream`。
@@ -646,7 +664,7 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 - builtin `execute_shell_command` function 支持 `command`、`workdir`、`output_bytes_cap`、`disable_output_cap`；Windows PowerShell/pwsh 下不要把 POSIX-only 命令如 `head` 当默认可用命令。
 - background toolbroker 能力包括 `background_task` 和 `task_output`；HTTP 观测入口见 `docs/skill_runtime/runtime_operations_api.md` 的 Background Jobs 章节。
 - shell / background：进程正常结束但 exit≠0 是内容结果，不是工具崩溃。前台 bash 返回 `Success:true` + `exit_code`；background job 状态为 `completed` 并保留 `exit_code`（可选 `non_zero_exit`），仅启动失败、超时、取消、权限/健康检查等硬失败才是 `failed`/`timed_out`/`cancelled` 并带 `error_code`。
-- 当 `aicli.mcp.auto_connect=false` 且 `config_file` 不存在时，chat 会跳过 MCP 初始化，不再为缺失的默认 `configs/mcp.yaml` 打印 warning。
+- MCP 默认启动即连（后台异步并行建连，已移除 `auto_connect` 开关）：`config_file` 解析到实际存在的配置时，chat 加载并连接其中 `enabled: true` 的 server；配置缺失时静默跳过，不再为缺失的默认 `configs/mcp.yaml` 打印 warning。单个 server 是否参与连接由 `mcpServers.<name>.enabled` 控制（缺省启用）。
 
 账户余额定时刷新间隔默认为 1 分钟，可在配置文件中修改：
 

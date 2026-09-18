@@ -192,8 +192,7 @@ func TestRuntimeConfigHotReloaderAppliesHotReloadableSettings(t *testing.T) {
 	nextCfg := &agentconfig.Config{
 		AICLI: &agentconfig.AICLIConfig{
 			MCP: &agentconfig.AICLIMCPConfig{
-				AutoConnect: true,
-				ConfigFile:  "configs/mcp.yaml",
+				ConfigFile: "configs/mcp.yaml",
 			},
 		},
 		Profiles: &agentconfig.ProfilesConfig{

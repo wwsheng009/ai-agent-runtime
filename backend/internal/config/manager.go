@@ -246,6 +246,40 @@ type SessionRuntimeConfig struct {
 	StorePath          string `yaml:"storePath" json:"storePath"`
 	StoreDSN           string `yaml:"storeDSN" json:"storeDSN"`
 	DefaultPersistence string `yaml:"defaultPersistence" json:"defaultPersistence"`
+	// EventPersist 是 P1.5 事件持久化批量化的灰度配置；
+	// BatchingEnabled 默认 false（桥接保持原逐条同步路径，行为逐字节不变）。
+	EventPersist EventPersistConfig `yaml:"eventPersist" json:"eventPersist"`
+	// ReadPool 是 P1.7 读写双池的灰度配置；默认启用（disable=false），
+	// 回滚时置 disable=true（读回落写池，行为与拆分前逐字节一致）。
+	ReadPool ReadPoolConfig `yaml:"readPool" json:"readPool"`
+}
+
+// ReadPoolConfig 控制 runtime store 的只读连接池（P1.7）。
+// 设计基线见 docs/plan/runtime-store-read-write-pool-split-plan-20260918.md §3.5。
+type ReadPoolConfig struct {
+	// Disable 关闭拆分（回滚开关）；零值=false 表示启用。
+	Disable bool `yaml:"disable" json:"disable"`
+	// Size 读池连接上限；<=0 取默认 4。仅文件库（WAL）生效。
+	Size int `yaml:"size" json:"size"`
+	// BusyTimeout 读连接 busy_timeout；<=0 继承 store 的 BusyTimeout。
+	BusyTimeout time.Duration `yaml:"busyTimeout" json:"busyTimeout"`
+	// OperationTimeout 单次读操作上限；<=0 取默认 3s（小于写侧 10s）。
+	OperationTimeout time.Duration `yaml:"operationTimeout" json:"operationTimeout"`
+}
+
+// EventPersistConfig 控制「总线 → session_runtime.sqlite」桥接的批量落盘。
+// 设计基线见 docs/plan/runtime-store-event-persistence-batching-and-async-plan-20260918.md §3.5。
+type EventPersistConfig struct {
+	BatchingEnabled bool          `yaml:"batchingEnabled" json:"batchingEnabled"`
+	BatchSize       int           `yaml:"batchSize" json:"batchSize"`
+	FlushInterval   time.Duration `yaml:"flushInterval" json:"flushInterval"`
+	QueueLimit      int           `yaml:"queueLimit" json:"queueLimit"`
+	QueueBytesLimit int64         `yaml:"queueBytesLimit" json:"queueBytesLimit"`
+	ShutdownTimeout time.Duration `yaml:"shutdownTimeout" json:"shutdownTimeout"`
+	// FailMode: "" / "block"（默认，溢出同步落盘）| "drop"（显式丢弃并计数）。
+	FailMode string `yaml:"failMode" json:"failMode"`
+	// AsyncDispatch 是 P2.11 独立开关；开启前置条件为 BatchingEnabled=true。
+	AsyncDispatch bool `yaml:"asyncDispatch" json:"asyncDispatch"`
 }
 
 // ArtifactConfig configures persistence for artifacts, context ledger, and checkpoints.

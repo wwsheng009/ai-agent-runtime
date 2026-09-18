@@ -180,15 +180,129 @@ const DefaultMCPConfigRelativePath = "configs/" + DefaultMCPConfigFileName
 // An empty explicit path yields "" so callers keep their "MCP not configured"
 // semantics instead of silently loading a directory-wide default.
 func ResolveMCPConfigPath(explicitPath string) string {
+	return ResolveMCPConfigPathDetailed(explicitPath).Path
+}
+
+// MCPConfigCandidate describes one candidate location and its current state.
+// It exists for observability output (startup logs, /api/runtime/mcps) so users
+// can tell which mcp.yaml was picked and why a different file won.
+type MCPConfigCandidate struct {
+	Path   string
+	Source string
+	Exists bool
+}
+
+// MCPConfigResolution is the detailed result of MCP config path resolution:
+// the effective path, the priority layer that produced it, and every candidate
+// that was considered (in priority order).
+type MCPConfigResolution struct {
+	Path       string
+	Source     string
+	Candidates []MCPConfigCandidate
+}
+
+// ResolveMCPConfigPathDetailed mirrors ResolveMCPConfigPath and additionally
+// reports the winning layer (explicit/project/user/upward/executable/default)
+// plus the candidate list with per-candidate existence checks.
+func ResolveMCPConfigPathDetailed(explicitPath string) MCPConfigResolution {
+	resolution := MCPConfigResolution{}
+	filename := DefaultMCPConfigFileName
+	portableDefault := DefaultMCPConfigRelativePath
+	searchPaths := []string{DefaultMCPConfigRelativePath}
+
+	explicit := expandExplicitConfigPath(explicitPath)
+	realOverride := explicit != "" && !isConventionConfigPath(explicit, filename, portableDefault, searchPaths)
 	if strings.TrimSpace(explicitPath) == "" {
+		// Empty explicit path keeps the "MCP not configured" semantics without
+		// touching the filesystem.
+		return MCPConfigResolution{}
+	}
+
+	seen := map[string]bool{}
+	addCandidate := func(path, source string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		cleaned := filepath.Clean(path)
+		if seen[cleaned] {
+			return
+		}
+		seen[cleaned] = true
+		exists := false
+		if info, err := os.Stat(cleaned); err == nil && !info.IsDir() {
+			exists = true
+		}
+		resolution.Candidates = append(resolution.Candidates, MCPConfigCandidate{Path: cleaned, Source: source, Exists: exists})
+	}
+
+	if explicit != "" {
+		addCandidate(explicit, "explicit")
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		addCandidate(filepath.Join(cwd, ".aicli", filename), "project")
+	}
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		addCandidate(filepath.Join(home, ".aicli", filename), "user")
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		addCandidate(resolveDefaultConfigPathFromBase(cwd, filename, searchPaths), "upward")
+	}
+	if executable, err := os.Executable(); err == nil {
+		addCandidate(resolveDefaultConfigPathFromBase(filepath.Dir(executable), filename, searchPaths), "executable")
+	}
+	addCandidate(portableDefault, "default")
+
+	switch {
+	case realOverride:
+		resolution.Path, resolution.Source = explicit, "explicit"
+	default:
+		if path, source := firstExistingMCPConfigCandidate(filename, searchPaths); path != "" {
+			resolution.Path, resolution.Source = path, source
+		} else if explicit != "" {
+			resolution.Path, resolution.Source = explicit, "explicit"
+		} else {
+			resolution.Path, resolution.Source = portableDefault, "default"
+		}
+	}
+	return resolution
+}
+
+// firstExistingMCPConfigCandidate reports the first existing config among the
+// non-explicit priority layers, mirroring ResolveConfigFilePath's ordering.
+func firstExistingMCPConfigCandidate(filename string, searchPaths []string) (string, string) {
+	if cwd, err := os.Getwd(); err == nil {
+		if path := firstExistingConfigFile(filepath.Join(cwd, ".aicli", filename)); path != "" {
+			return path, "project"
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		if path := firstExistingConfigFile(filepath.Join(home, ".aicli", filename)); path != "" {
+			return path, "user"
+		}
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		if path := resolveDefaultConfigPathFromBase(cwd, filename, searchPaths); path != "" {
+			return path, "upward"
+		}
+	}
+	if executable, err := os.Executable(); err == nil {
+		if path := resolveDefaultConfigPathFromBase(filepath.Dir(executable), filename, searchPaths); path != "" {
+			return path, "executable"
+		}
+	}
+	return "", ""
+}
+
+func firstExistingConfigFile(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
 		return ""
 	}
-	return ResolveConfigFilePath(
-		DefaultMCPConfigFileName,
-		explicitPath,
-		DefaultMCPConfigRelativePath,
-		[]string{DefaultMCPConfigRelativePath},
-	)
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		return filepath.Clean(path)
+	}
+	return ""
 }
 
 // DatePartition returns year/month/day path segments for t in local time.

@@ -522,8 +522,7 @@ type AICLIConfig struct {
 
 // AICLIMCPConfig holds aicli MCP configuration.
 type AICLIMCPConfig struct {
-	ConfigFile  string `yaml:"config_file" mapstructure:"config_file" env:"MCP_CONFIG_FILE"`
-	AutoConnect bool   `yaml:"auto_connect" mapstructure:"auto_connect" env:"MCP_AUTO_CONNECT"`
+	ConfigFile string `yaml:"config_file" mapstructure:"config_file" env:"MCP_CONFIG_FILE"`
 }
 
 // AICLILogConfig holds aicli log configuration.

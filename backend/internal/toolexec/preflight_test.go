@@ -29,13 +29,13 @@ func TestArgsDigestIgnoresProviderNoiseAndEmptyOptionalArgs(t *testing.T) {
 		"path":    "backend",
 	})
 	noisy := ArgsDigest("grep", map[string]interface{}{
-		"path":                  "backend",
-		"pattern":               "doom",
-		"_provider_diagnostic":  "parse-hint",
-		"glob":                  "",
-		"max_depth":             nil,
-		"include":               map[string]interface{}{},
-		"_internal_trace":       "x",
+		"path":                 "backend",
+		"pattern":              "doom",
+		"_provider_diagnostic": "parse-hint",
+		"glob":                 "",
+		"max_depth":            nil,
+		"include":              map[string]interface{}{},
+		"_internal_trace":      "x",
 	})
 	if base == "" || base != noisy {
 		t.Fatalf("expected noise-stripped digests to match, got base=%q noisy=%q", base, noisy)

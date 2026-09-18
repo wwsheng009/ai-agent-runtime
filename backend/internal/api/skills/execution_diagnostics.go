@@ -185,7 +185,7 @@ func (h *Handler) executionDiagnosticsSnapshot(ctx context.Context) map[string]i
 		}
 	}
 
-	return map[string]interface{}{
+	payload := map[string]interface{}{
 		"schema_version": executionDiagnosticsSchemaVersion,
 		"generated_at":   time.Now().UTC(),
 		"sources": map[string]interface{}{
@@ -210,6 +210,15 @@ func (h *Handler) executionDiagnosticsSnapshot(ctx context.Context) map[string]i
 			"team_loop_consistency":   true,
 		},
 	}
+	// P1.5/M4：批量落盘缓冲的只读快照（未启用批量时不出现，保持既有响应形状）。
+	if stats, ok := h.runtimeEventPersistSnapshot(); ok {
+		payload["persist"] = stats
+	}
+	// P1.7/G6：runtime store 双池排队/连接与 WAL 观测（存储不支持时不出现）。
+	if stats, ok := h.runtimeStorePoolSnapshot(); ok {
+		payload["store_pools"] = stats
+	}
+	return payload
 }
 
 func executionDiagnosticsContext(parent context.Context) (context.Context, context.CancelFunc) {

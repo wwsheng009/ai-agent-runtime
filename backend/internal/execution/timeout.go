@@ -18,6 +18,9 @@ const (
 	TimeoutSourceAgentRunDeadline      TimeoutSource = "agent_run_deadline"
 	TimeoutSourceParentContextDeadline TimeoutSource = "parent_context_deadline"
 	TimeoutSourceSandboxPolicy         TimeoutSource = "sandbox_policy"
+	// TimeoutSourceRuntimeCeiling caps a tool-supplied timeout so a single tool
+	// call cannot wedge a turn indefinitely.
+	TimeoutSourceRuntimeCeiling TimeoutSource = "runtime_ceiling"
 )
 
 type contextKey string

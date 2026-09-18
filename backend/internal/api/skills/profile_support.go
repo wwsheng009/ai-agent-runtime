@@ -26,7 +26,6 @@ type ProfileSupportConfig struct {
 	GlobalRuntimePath string
 	GlobalMCPPath     string
 	GlobalSkillDirs   []string
-	MCPAutoConnect    bool
 }
 
 type profileRuntimeState struct {
@@ -54,7 +53,6 @@ func (h *Handler) SetProfileSupport(cfg ProfileSupportConfig) {
 	h.profileGlobalRuntimePath = strings.TrimSpace(cfg.GlobalRuntimePath)
 	h.profileGlobalMCPPath = strings.TrimSpace(cfg.GlobalMCPPath)
 	h.profileGlobalSkillDirs = append([]string(nil), cfg.GlobalSkillDirs...)
-	h.profileMCPAutoConnect = cfg.MCPAutoConnect
 }
 
 func (h *Handler) resolveProfileRuntimeState(ctx context.Context, profileRef, agentID string, scope UsageScope, workspacePath string) (*profileRuntimeState, func(), error) {
@@ -385,9 +383,6 @@ func (h *Handler) resolveProfileMCPAdapter(ctx context.Context, resolved *profil
 	}
 	if samePath(configPath, h.profileGlobalMCPPath) && h.mcpManager != nil {
 		return h.mcpManager, nil, nil
-	}
-	if !h.profileMCPAutoConnect {
-		return runtimetools.NewAgentAdapter(runtimetools.NewDefaultManagerWithRuntimeConfig(nil, runtimeCfg)), nil, nil
 	}
 	if ctx == nil {
 		ctx = context.Background()

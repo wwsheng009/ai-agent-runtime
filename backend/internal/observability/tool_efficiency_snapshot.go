@@ -208,6 +208,11 @@ func failCategoryForCode(code string) string {
 		return "timeout"
 	case "STALE_CONTEXT", "TOOL_STALE_CONTEXT":
 		return "stale_context"
+	case "SESSION_NOT_FOUND", "AGENT_SESSION_NOT_FOUND":
+		// Host-side session lifecycle failures must not pollute path_missing
+		// (pre-fix mislabel) or fall into other_error: keep them visible as
+		// their own bucket for offline efficiency reports.
+		return "session_lifecycle"
 	case "SPAWN_DEPTH_LIMIT", "AGENT_SPAWN_DEPTH_LIMIT":
 		return "spawn_depth"
 	case "TOOL_EXECUTION", "PROCESS_START_FAILED", "PROCESS_HEALTHCHECK_FAILED", "TOOL_BROKER_FAILURE":

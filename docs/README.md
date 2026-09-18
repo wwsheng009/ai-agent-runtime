@@ -25,6 +25,7 @@ Main sections:
 - `aicli/` - CLI behavior, default `aicli` -> `chat` startup, headless exec, portable agents, image generation, tool output rendering, metadata propagation, and provider integration notes
 - `user-guide/` - 操作手册：安装部署、配置、启动、日常操作、构建、故障排查与升级
 - `codex/` - Codex provider behavior, native tool exposure, and image generation diagnostics
+- `mcp/` - MCP 服务器集成手册（chrome-devtools：连接已打开浏览器、配置模板、使用与排查）
 - `skill_runtime/` - runtime APIs, governance, contracts, search, persistence, and design notes
 - `multi-agents/` - multi-agent design, profile, team, and rollout plans
 - `design/` - design baseline documents (checkpoint / restore-point design, planned architecture notes)

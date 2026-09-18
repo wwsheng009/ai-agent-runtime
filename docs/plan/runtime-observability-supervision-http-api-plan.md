@@ -419,6 +419,8 @@ llm.attempt.started / llm.attempt.finished / llm.retry
 llm.stream.summary
 usage.updated
  tool.started / tool.finished / tool.failed / tool.progress.summary
+skills.invoked（SK-3 技能调用命中：总线级事件，投影时把载荷 session_id/trace_id
+提升到 correlation；低敏字段仅 name/scope/kind/basis/tool/has_path/step，路径与正文不导出）
 renderer.snapshot.changed
 observation.gap / observation.resync_required
 ```

@@ -2,11 +2,13 @@ package toolbroker
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -271,4 +273,32 @@ func TestNormalizeToolNamePlanMode(t *testing.T) {
 	assert.True(t, broker.IsBrokerTool(ToolExitPlanMode))
 	assert.True(t, broker.IsBrokerTool("EnterPlanMode"))
 	assert.True(t, broker.IsBrokerTool("exit-plan-mode"))
+}
+
+func TestBrokerExecuteEnterPlanModeDoesNotMislabelSessionNotFound(t *testing.T) {
+	// Raw store text (legacy host / untyped path): the classifier safety net
+	// must report SESSION_NOT_FOUND, never TOOL_PATH_NOT_FOUND.
+	rawBroker := &Broker{PlanMode: &capturingPlanModeController{
+		enterErr: fmt.Errorf("session not found: session-plan"),
+	}}
+	_, _, err := rawBroker.ExecuteToolCall(context.Background(), "session-plan", types.ToolCall{
+		ID:   "call_enter_raw_session_missing",
+		Name: ToolEnterPlanMode,
+		Args: map[string]interface{}{},
+	})
+	require.Error(t, err)
+	assert.True(t, runtimeerrors.Is(err, runtimeerrors.ErrSessionNotFound), "got %v", err)
+	assert.False(t, runtimeerrors.Is(err, runtimeerrors.ErrToolPathNotFound), "raw session-not-found must not be a path error: %v", err)
+
+	// Typed source errors (SessionActor.loadSession) pass through unchanged.
+	typedBroker := &Broker{PlanMode: &capturingPlanModeController{
+		enterErr: runtimeerrors.Newf(runtimeerrors.ErrSessionNotFound, "session not found: session-plan"),
+	}}
+	_, _, err = typedBroker.ExecuteToolCall(context.Background(), "session-plan", types.ToolCall{
+		ID:   "call_enter_typed_session_missing",
+		Name: ToolEnterPlanMode,
+		Args: map[string]interface{}{},
+	})
+	require.Error(t, err)
+	assert.True(t, runtimeerrors.Is(err, runtimeerrors.ErrSessionNotFound), "got %v", err)
 }

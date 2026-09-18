@@ -30,28 +30,6 @@ func TestResolveProfileMCPAdapter_ProvidesLocalToolkitWithoutConfiguredMCP(t *te
 	}
 }
 
-func TestResolveProfileMCPAdapter_KeepsLocalToolkitWhenProfileAutoConnectDisabled(t *testing.T) {
-	handler := &Handler{profileMCPAutoConnect: false}
-	runtimeConfig := runtimecfg.DefaultRuntimeConfig()
-	runtimeConfig.Workspace.Root = t.TempDir()
-
-	adapter, manager, err := handler.resolveProfileMCPAdapter(context.Background(), &profilesys.ResolvedAgent{
-		MCPConfig: filepath.Join(t.TempDir(), "mcp.yaml"),
-	}, runtimeConfig)
-	if err != nil {
-		t.Fatalf("resolveProfileMCPAdapter failed: %v", err)
-	}
-	if manager != nil {
-		t.Fatalf("expected nil external MCP manager, got %#v", manager)
-	}
-	if adapter == nil {
-		t.Fatal("expected local runtime tool adapter")
-	}
-	if _, err := adapter.FindTool("grep"); err != nil {
-		t.Fatalf("expected grep to be available: %v", err)
-	}
-}
-
 func TestResolveProfileRuntimeConfig_AppliesSharedSessionDefaults(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "runtime.yaml")

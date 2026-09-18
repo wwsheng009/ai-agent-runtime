@@ -333,12 +333,21 @@ if (!prompt || !selectedThread || turnRegistry.isBusy(targetKey)) return;
 
 | 维度 | 策略 |
 |---|---|
-| 连接预算 | `live` ≤ 3（1 前台 + 2 后台，可配置）；超预算降 `poll`；侧栏提供"跟随实时"显式升级 |
-| 轮询退避 | `poll` 周期 3s 起，按 1.5～2 倍退避至 30s；`active_turn` 出现或待交互变化 → 立刻升级 `live` |
-| 页面可见性 | `document.hidden` 时：后台 `live` 降 `poll`；前台保留（用户切回来即最新）；重新可见时按策略回升 |
+| 连接预算 | `live` ≤ 3（1 前台 + 2 后台，可配置）；超预算降 `poll`；`poll` ≤ 8（`DEFAULT_MAX_POLL_SESSIONS`，超出保持 idle 等待补位）；侧栏提供"跟随实时"显式升级 |
+| 轮询退避 | 失败退避：`poll` 周期 3s 起按 1.5 倍升至 30s；空闲自适应：活动指纹（status/head_offset/active_turn/pending id）不变时按 1.5 倍退至 15s，指纹变化立即回到 3s；`active_turn` 出现或待交互变化 → 立刻升级 `live` |
+| 页面可见性 | `document.hidden` 时：后台 `live` 降 `poll` 且 `poll` 循环暂停（隐藏期间 0 请求）；前台保留（用户切回来即最新）；重新可见时按策略回升并立即补拉一次快照 |
 | 内存 | 每会话事件缓冲/轨迹 store LRU（默认 3 个会话）；`live-stream-text` 已有 messageId 维度上限机制（沿用） |
 | 服务端对齐 | 后端 `MaxActors=32`（`hub.go:19-25`）；前端订阅 ≤3，长期不触碰上限；`active_connections` 指标可用于观测（`session_runtime_stream_metrics.go:127`） |
 | 降级可观测 | 注册表 entry 暴露 `mode`/`lastError`；侧栏行以"运行中（轮询）/连接降级"区分（复用 `transport: "error"` 既有提示位） |
+
+**2026-09-18 轮询降本（实测驱动）**：后台 `poll` 固定 3s × 每会话 60–125KB（`stable_tool_surface` 占 90%+）
+在高频窗口下放大为 ~2 req/s、0.12–0.25 MB/s。已落地三项：
+① 轮询固定 `?view=light`（后端 `GetSessionRuntimeState` 走 `RuntimeState.CloneForInspection()`，实测 66.3KB → 544B）；
+② 空闲自适应退避与隐藏暂停（`entry.ts` / `poll-loop.ts` / `registry.ts`）；
+③ `poll` 名额上限 8 与 FIFO 补位（`subscription-budget.ts`）。
+验收探针 `frontend/.live-probe/poll-optimization-probe.mjs`：3 会话 20s 窗口 15 次请求
+（旧口径约 21 次；稳态空闲口径 1/3s → 1/15s），间隔 3s→4.5s→6.8s→15s（封顶）；
+隐藏 20s 内 0 请求，恢复可见立即补 3 次；全程 `view=light`、无 console error。
 
 ### 4.7 侧栏活动、待办与通知（对应 P1-1 / P2-2）
 

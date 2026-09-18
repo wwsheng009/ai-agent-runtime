@@ -161,6 +161,20 @@ aicli mcp tools [名称]          # 列出工具
 aicli mcp reload                # 重载配置
 ```
 
+支持的传输类型：`stdio`、`sse`、`websocket`、`streamable`（Streamable HTTP，MCP 2025-03-26 规范，推荐）。
+
+```bash
+# Streamable HTTP（如 mcp-chrome 本地端点）
+aicli mcp add --transport streamable chrome-mcp http://127.0.0.1:12306/mcp
+
+# 传统 SSE
+aicli mcp add --transport sse legacy-sse https://example.com/sse
+```
+
+查看某个 MCP 当前暴露的工具：CLI 用 `aicli mcp tools <名称>`；微型 Web（`aicli chat --web`）与 console 设置页的 MCP 列表里都有「工具」按钮，
+分别读取 `GET /web/api/mcps/{name}/tools`（微 Web）与 `GET /api/runtime/mcps/{name}/tools`（runtime-server），
+返回 `{name,count,tools:[{name,description,enabled,inputSchema}]}`；未启用 / 未连接时返回空列表，由前端渲染空态。
+
 ### 4.6 `aicli agent` —— 子 Agent
 
 ```bash

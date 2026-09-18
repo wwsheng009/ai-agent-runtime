@@ -28,6 +28,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/filetransport"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gitbrowse"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	mcpadmin "github.com/wwsheng009/ai-agent-runtime/internal/mcp/admin"
 	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
@@ -1038,6 +1039,15 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	}
 
 	handler := skillsapi.NewHandler(bootstrapManager.Registry(), bootstrapManager.Loader(), mcpAdapter)
+	if manager != nil {
+		resolution := resolveRuntimeMCPConfigResolution(cfg)
+		if resolution.Path != "" {
+			handler.SetMCPAdminService(mcpadmin.NewService(resolution.Path,
+				mcpadmin.WithManager(manager),
+				mcpadmin.WithConfigDiagnostics(mcpadmin.ConfigDiagnosticsFromResolution(resolution)),
+			))
+		}
+	}
 	bootstrapManager.ApplyToSkillsHandler(handler)
 	handler.SetAICLIConfig(cfg)
 	handler.SetFileTransferService(filetransport.NewLocalService())
@@ -1088,7 +1098,6 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		GlobalRuntimePath: strings.TrimSpace(runtimeManager.GetFilePath()),
 		GlobalMCPPath:     configuredMCPConfigPath(cfg),
 		GlobalSkillDirs:   allConfiguredSkillDirs(skillsCfg),
-		MCPAutoConnect:    configuredMCPAutoConnect(cfg),
 	})
 	configDocumentService := runtimeserver.NewLocalConfigDocumentService(configPath)
 	if configDocumentService != nil {
@@ -1284,6 +1293,8 @@ func (a *runtimeServerApp) close() {
 	}
 	// 先停恢复循环再关库：宽限期后的第二趟扫描不能跑在已关闭的 store 上。
 	if a.handler != nil {
+		// P1.5：先 flush 事件持久化缓冲，再停恢复循环/关库，保证尾部事件落盘。
+		a.handler.CloseRuntimeEventPersistence()
 		a.handler.StopSubagentBatchRecovery()
 	}
 	if a.subagentBatches != nil {
@@ -1354,11 +1365,29 @@ func normalizeSkillsRuntimeConfig(cfg *config.Config) *config.SkillsRuntimeConfi
 	if len(cfg.SkillsRuntime.RoleClaims) == 0 {
 		cfg.SkillsRuntime.RoleClaims = []string{"role", "roles"}
 	}
+	// SK-7/SK-10（P0/P2）：文档模式与目录预算灰度开关默认值。
+	// DocumentMode 默认 off（不改变既有 Codex 技能执行行为）；
+	// CatalogBudgetChars 默认 8000（镜像 Codex min(8000 chars, 2% 上下文)）；
+	// DisciplineBlock 默认开启。
+	if strings.TrimSpace(cfg.SkillsRuntime.DocumentMode) == "" {
+		cfg.SkillsRuntime.DocumentMode = "off"
+	}
+	if cfg.SkillsRuntime.CatalogBudgetChars <= 0 {
+		cfg.SkillsRuntime.CatalogBudgetChars = 8000
+	}
+	if cfg.SkillsRuntime.DisciplineBlock == nil {
+		cfg.SkillsRuntime.DisciplineBlock = ptrBool(true)
+	}
 	cfg.SkillsRuntime.ConfigFile = runtimeserver.ResolveUpwardPath(cfg.SkillsRuntime.ConfigFile)
 	cfg.SkillsRuntime.SkillDir = runtimeserver.ResolveUpwardPath(cfg.SkillsRuntime.SkillDir)
 	cfg.SkillsRuntime.SkillDirs = runtimeserver.ResolveUpwardPaths(cfg.SkillsRuntime.SkillDirs)
 	cfg.SkillsRuntime.ExtraSkillDirs = runtimeserver.ResolveUpwardPaths(cfg.SkillsRuntime.ExtraSkillDirs)
 	return cfg.SkillsRuntime
+}
+
+// ptrBool 返回 bool 指针（用于 *bool 配置默认值）。
+func ptrBool(v bool) *bool {
+	return &v
 }
 
 func resolveListenAddr(cfg *config.Config, override string) string {
@@ -1382,15 +1411,45 @@ func resolveListenAddr(cfg *config.Config, override string) string {
 func buildSkillsMCPManager(ctx context.Context, cfg *config.Config, runtimeConfig *runtimecfg.RuntimeConfig) (runtimeskill.MCPManager, mcpmanager.Manager, error) {
 	var manager mcpmanager.Manager
 
-	if cfg != nil && cfg.AICLI != nil && cfg.AICLI.MCP != nil && strings.TrimSpace(cfg.AICLI.MCP.ConfigFile) != "" && cfg.AICLI.MCP.AutoConnect {
-		cfg.AICLI.MCP.ConfigFile = runtimeserver.ResolveUpwardPath(cfg.AICLI.MCP.ConfigFile)
-
+	resolution := resolveRuntimeMCPConfigResolution(cfg)
+	mcpConfigPath := resolution.Path
+	if mcpConfigPath != "" {
+		if err := mcpadmin.EnsureFile(mcpConfigPath); err != nil {
+			return nil, nil, fmt.Errorf("failed to prepare MCP config: %w", err)
+		}
 		manager = mcpmanager.NewManager()
-		if err := manager.LoadConfig(cfg.AICLI.MCP.ConfigFile); err != nil {
+		if err := manager.LoadConfig(mcpConfigPath); err != nil {
 			return nil, nil, fmt.Errorf("failed to load MCP config: %w", err)
 		}
-		if err := manager.Start(ctx); err != nil {
+		statuses := manager.ListMCPs()
+		enabledCount := 0
+		for _, status := range statuses {
+			if status != nil && status.Enabled {
+				enabledCount++
+			}
+		}
+		logger.Info("MCP config loaded",
+			logger.String("path", mcpConfigPath),
+			logger.String("source", resolution.Source),
+			logger.Int("servers", len(statuses)),
+			logger.Int("enabled", enabledCount),
+		)
+		// 默认启动即连：MCP 客户端后台并行建连，HTTP 服务不等待全部 MCP 就绪，
+		// 工具随各服务器连接完成动态进入工具面（ListTools 实时读取注册表）。
+		// 单服务器是否参与连接由 mcpServers.<name>.enabled 决定。
+		if async, ok := manager.(mcpmanager.AsyncManager); ok {
+			if err := async.StartAsync(ctx); err != nil {
+				return nil, nil, fmt.Errorf("failed to start MCP manager: %w", err)
+			}
+			logger.Info("MCP manager starting in background",
+				logger.Int("servers", len(statuses)),
+				logger.Int("enabled", enabledCount),
+			)
+		} else if err := manager.Start(ctx); err != nil {
 			return nil, nil, fmt.Errorf("failed to start MCP manager: %w", err)
+		}
+		if cfg != nil && cfg.AICLI != nil && cfg.AICLI.MCP != nil {
+			cfg.AICLI.MCP.ConfigFile = mcpConfigPath
 		}
 	}
 
@@ -1544,8 +1603,40 @@ func configuredMCPConfigPath(cfg *config.Config) string {
 	return aiclipaths.ResolveMCPConfigPath(cfg.AICLI.MCP.ConfigFile)
 }
 
-func configuredMCPAutoConnect(cfg *config.Config) bool {
-	return cfg != nil && cfg.AICLI != nil && cfg.AICLI.MCP != nil && cfg.AICLI.MCP.AutoConnect
+// resolveRuntimeMCPConfigPath 解析 runtime-server 实际使用的 MCP 配置路径：
+// 优先已存在的解析结果；都不存在时落到用户级 ~/.aicli/mcp.yaml（由 admin 包自动创建），
+// 避免 runtime-server 在任意工作目录下生成 configs/mcp.yaml。
+func resolveRuntimeMCPConfigPath(cfg *config.Config) string {
+	return resolveRuntimeMCPConfigResolution(cfg).Path
+}
+
+// resolveRuntimeMCPConfigResolution 在 resolveRuntimeMCPConfigPath 的基础上保留
+// 命中来源（explicit/project/user/upward/executable/default）与候选清单，供启动日志
+// 与管理接口观测使用。
+func resolveRuntimeMCPConfigResolution(cfg *config.Config) aiclipaths.MCPConfigResolution {
+	if cfg == nil || cfg.AICLI == nil || cfg.AICLI.MCP == nil {
+		return aiclipaths.MCPConfigResolution{}
+	}
+	if strings.TrimSpace(cfg.AICLI.MCP.ConfigFile) == "" {
+		return aiclipaths.MCPConfigResolution{}
+	}
+	resolution := aiclipaths.ResolveMCPConfigPathDetailed(cfg.AICLI.MCP.ConfigFile)
+	if resolution.Path == "" {
+		return resolution
+	}
+	if _, err := os.Stat(resolution.Path); err == nil {
+		return resolution
+	}
+	// 模板默认值（相对 configs/mcp.yaml）不代表用户显式指定位置：改落用户级目录，
+	// 避免 runtime-server 在任意工作目录下生成 configs/mcp.yaml；
+	// 其它非默认路径（含显式覆盖）按用户指定位置创建。
+	if !filepath.IsAbs(resolution.Path) && filepath.ToSlash(resolution.Path) == aiclipaths.DefaultMCPConfigRelativePath {
+		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+			resolution.Path = filepath.Join(home, ".aicli", "mcp.yaml")
+			resolution.Source = "user-fallback"
+		}
+	}
+	return resolution
 }
 
 func defaultProfile(cfg *config.Config) string {

@@ -94,6 +94,13 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
 | GET | `/web/api/skills[/{name}]` | 技能目录与详情 |
 | GET | `/web/api/analysis[/status\|tools\|subagents\|errors]` | 用量分析 |
 | GET | `/web/api/cache[/overview\|requests\|messages/{id}/trace]` | LLM 缓存分析 |
+| GET/POST | `/web/api/mcps` | MCP 列表（`config`+`status`，并附 `config` 解析诊断与 `summary` 计数）/ 新增（写 `mcp.yaml` 并热重载） |
+| GET/PUT/DELETE | `/web/api/mcps/{name}` | 查看 / 更新 / 删除单个 MCP |
+| POST | `/web/api/mcps/{name}/enable\|disable` | 启用/停用（持久化 `enabled` + 重连，刷新会话工具） |
+| GET | `/web/api/mcps/{name}/tools` | 工具清单（含被禁用项；`enabled` 有效暴露位、`configured_enabled` 用户配置位、`healthy` 运行时健康位） |
+| POST | `/web/api/mcps/{name}/tools/{tool}/enable\|disable` | 启停单个工具（持久化 `tools` 段，不重连 MCP 服务） |
+| POST | `/web/api/mcps/{name}/tools/enable\|disable` | 批量启停工具，body `{"tools":[...]}`；缺省/空数组 = 全部 |
+| POST | `/web/api/mcps/reload` | 热重载 MCP 配置并重连 |
 | GET | `/web/api/token` | 读取本进程写令牌（`X-AICLI-Token`；含 `source` 来源标识，回环 + 同源可读，`no-store`） |
 | GET | `/web/` | 浏览器微型客户端页面（同一后端） |
 | GET | `/debug/chat/screen` | 与 `/web/api/screen?view=tui` 同源的调试入口（保留） |
@@ -105,6 +112,30 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
 > `Invoke-RestMethod`，或 `curl.exe -o <file>` + `[IO.File]::ReadAllText($f, UTF8)`。
 > 可复制脚本见
 > [../user-guide/aicli-tui-remote.md](../user-guide/aicli-tui-remote.md) 的 §3.3。
+
+### MCP 管理（`/web/api/mcps`）
+
+与 `aicli mcp ...`、runtime-server `/api/runtime/mcps` 共用 `internal/mcp/admin` 的同一套
+读写实现，编辑的始终是 MCP 配置文件（优先级：`./.aicli/mcp.yaml` > `~/.aicli/mcp.yaml` >
+显式配置 > 向上搜索 > `configs/mcp.yaml`）。页面「MCP」页签即调用本组端点。
+
+`GET /web/api/mcps` 额外返回（向后兼容）：`config`（`path` / `source`
+（`explicit|project|user|upward|executable|default|user-fallback|session-override`）/
+`exists` / `size_bytes` / `mod_time` / `manager_loaded` / `candidates[]`）与
+`summary`（`{total, enabled, disabled, connected, tools}`）；`candidates` 按优先级列出
+全部候选位置及 `exists`，用于定位不同 CWD 启动解析到不同 `mcp.yaml` 的问题。
+
+`UpsertRequest` 字段：`name`、`type`（`stdio`/`sse`/`websocket`/`streamable`）、
+`command`/`args`（stdio）、`url`（其余传输）、`env`、`headers`、`description`、
+`enabled`、`trustLevel`、`timeoutSeconds`、`maxParallelCalls`；响应中 `config` 为落盘后的
+配置，`status` 为当前运行时状态（`connected`/`toolCount`/`lastError` 等）。错误统一为
+非 2xx + `{"error":{"code":"...","message":"..."}}`（校验失败 400、不存在 404）。
+
+字段语义与约定：`env`/`headers` 省略 = 保持原值，显式 `{}` = 清空，非空 map = 整体替换；
+`headers` 以 `HEADER_<Name>` 写入配置文件的 `env`（`admin/configfile.go applyHeaders`），
+URL 传输据此生成 HTTP 头。页面「MCP」页签的键值行编辑器：stdio 全部按环境变量行编辑，
+URL 传输把 `HEADER_*` 拆成请求头行（去前缀），保存时合并回 `env` 并整体替换
+（支持删除行来清空）；行内支持 `KEY=VALUE` / `Key: Value` 多行粘贴自动拆分。
 
 ## 3. 同步远程调用：`POST /web/api/invoke`
 

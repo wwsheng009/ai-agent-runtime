@@ -77,6 +77,11 @@ const (
 	// ErrAgentSessionNotFound marks an opaque session_ref_* that is not present
 	// in the current parent session's durable handle registry.
 	ErrAgentSessionNotFound ErrorCode = "AGENT_SESSION_NOT_FOUND"
+	// ErrSessionNotFound marks the acting session's own record missing from the
+	// session store (deleted, expired, or never persisted). It is a host-side
+	// lifecycle failure, not a path/reference input error: replaying the same
+	// call cannot succeed, and it must never be classified as TOOL_PATH_NOT_FOUND.
+	ErrSessionNotFound ErrorCode = "SESSION_NOT_FOUND"
 	ErrContextBudget        ErrorCode = "CONTEXT_BUDGET_EXCEEDED"
 	ErrStreamInterrupted    ErrorCode = "STREAM_INTERRUPTED"
 	ErrUpstreamUnavailable  ErrorCode = "UPSTREAM_UNAVAILABLE"

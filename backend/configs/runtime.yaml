@@ -71,3 +71,11 @@ sessionRuntime:
   # 只看 StorePath 非空即启用专用文件 store。
   defaultPersistence: memory
   storePath: ../data/runtime/session_runtime.sqlite
+  # P1.7 读写双池：默认启用——读走独立只读连接池（逐连接 query_only + 3s 读超时，
+  # 只承载只读查询），写池保持单连接/ATTACH/锁序语义不变。下面即默认值，通常无需配置。
+  # 回滚：disable: true 恢复单池行为（读回落写池，与拆分前逐字节等价）。
+  # readPool:
+  #   disable: false
+  #   size: 4              # 读连接上限；仅文件库（WAL）生效，<=0 取默认 4
+  #   busyTimeout: 5s      # 读连接 busy_timeout；缺省继承 store 的 busyTimeout
+  #   operationTimeout: 3s # 单次读操作上限；应小于写侧默认 10s（长读会拖住 WAL checkpoint）

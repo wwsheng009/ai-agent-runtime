@@ -69,7 +69,6 @@ var (
 	hotReloadProfileSupportPrefixes = []string{
 		"profiles",
 		"aicli.mcp.config_file",
-		"aicli.mcp.auto_connect",
 	}
 	hotReloadProviderPrefixes = []string{
 		"providers.timeout",
@@ -537,7 +536,6 @@ func buildProfileSupportConfigForHotReload(cfg *agentconfig.Config) skillsapi.Pr
 		GlobalRuntimePath: strings.TrimSpace(skillsCfg.ConfigFile),
 		GlobalMCPPath:     configuredMCPConfigPathForHotReload(cfg),
 		GlobalSkillDirs:   allConfiguredSkillDirsForHotReload(skillsCfg),
-		MCPAutoConnect:    configuredMCPAutoConnectForHotReload(cfg),
 	}
 }
 
@@ -604,10 +602,6 @@ func configuredMCPConfigPathForHotReload(cfg *agentconfig.Config) string {
 	// config through the same ./.aicli > ~/.aicli > override > upward search
 	// order, otherwise a reload silently switches the effective MCP file.
 	return aiclipaths.ResolveMCPConfigPath(cfg.AICLI.MCP.ConfigFile)
-}
-
-func configuredMCPAutoConnectForHotReload(cfg *agentconfig.Config) bool {
-	return cfg != nil && cfg.AICLI != nil && cfg.AICLI.MCP != nil && cfg.AICLI.MCP.AutoConnect
 }
 
 func defaultProfileForHotReload(cfg *agentconfig.Config) string {

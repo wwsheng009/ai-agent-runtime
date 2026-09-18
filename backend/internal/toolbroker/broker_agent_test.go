@@ -1418,6 +1418,13 @@ func TestClassifyBrokerExecutionErrorAgentLifecycle(t *testing.T) {
 		{name: "busy", err: fmt.Errorf("session is busy (running)"), code: runtimeerrors.ErrAgentBusy},
 		{name: "sqlite interrupted", err: fmt.Errorf("sqlite3: interrupted"), code: runtimeerrors.ErrStreamInterrupted},
 		{
+			// Raw store text from older hosts must not fall through to the
+			// generic "not found" → TOOL_PATH_NOT_FOUND branch.
+			name: "acting session not found",
+			err:  fmt.Errorf("session not found: sess-missing"),
+			code: runtimeerrors.ErrSessionNotFound,
+		},
+		{
 			name: "supervision notification not found",
 			err:  fmt.Errorf("supervision: action not found: notification agent_run:run_2026 not found (use notification_id from supervision_snapshot)"),
 			code: runtimeerrors.ErrToolInvalidArgs,

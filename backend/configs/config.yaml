@@ -3,7 +3,6 @@ aicli:
     enabled: ${AICLI_LOG_ENABLED:-true}
     file_path: ${AICLI_LOG_FILE_PATH:-~/.aicli/logs/aicli.log}
   mcp:
-    auto_connect: ${MCP_AUTO_CONNECT:-false}
     config_file: ${MCP_CONFIG_FILE:-configs/mcp.yaml}
   retry:
     fast_retry_count: ${AICLI_RETRY_FAST_COUNT:-5}

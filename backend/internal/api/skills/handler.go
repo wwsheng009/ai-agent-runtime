@@ -38,6 +38,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	mcpadmin "github.com/wwsheng009/ai-agent-runtime/internal/mcp/admin"
 	mcpcatalog "github.com/wwsheng009/ai-agent-runtime/internal/mcp/catalog"
 	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
@@ -106,6 +107,7 @@ type Handler struct {
 	skillRegistry                  *skill.Registry
 	skillLoader                    *skill.Loader
 	mcpManager                     skill.MCPManager
+	mcpAdmin                       mcpadmin.AdminService
 	llmRuntime                     *llm.LLMRuntime
 	sessionManager                 *chat.SessionManager
 	hotReload                      *skill.HotReload
@@ -136,33 +138,38 @@ type Handler struct {
 	runtimeToolCatalogConfigKey  string
 	runtimeMCPBridgeOnce         sync.Once
 	runtimeEventBridgeOnce       sync.Once
+	// P1.5：事件批量落盘缓冲（默认关闭）。仅当
+	// sessionRuntime.eventPersist.batchingEnabled=true 且事件 store 支持
+	// AppendEvents 时由 attachRuntimeEventBridge 创建；shutdown 时由
+	// CloseRuntimeEventPersistence flush。
+	runtimeEventPersistMu     sync.Mutex
+	runtimeEventPersistBuffer *chat.EventPersistBuffer
 	// P4-刷新续传：会话在途回合注册表（懒初始化，见 session_active_turn.go）。
-	activeTurnsOnce          sync.Once
-	activeTurns              *activeTurnRegistry
-	observeMu                sync.RWMutex
-	observeService           *runtimeobserve.Service
-	scopeResolverMu          sync.RWMutex
-	scopeResolverConfig      ScopeResolverConfig
-	runtimeConfig            *runtimecfg.RuntimeConfig
-	runtimeConfigFile        string
-	runtimeConfigResolver    func(UsageScope) *runtimecfg.RuntimeConfig
-	aicliConfigMu            sync.RWMutex
-	aicliConfig              *agentconfig.Config
-	siteAccountService       SiteAccountService
-	configDocumentService    ConfigDocumentService
-	agentMaxStepsPersister   AgentMaxStepsPersister
-	agentMaxStepsProvider    AgentMaxStepsProvider
+	activeTurnsOnce             sync.Once
+	activeTurns                 *activeTurnRegistry
+	observeMu                   sync.RWMutex
+	observeService              *runtimeobserve.Service
+	scopeResolverMu             sync.RWMutex
+	scopeResolverConfig         ScopeResolverConfig
+	runtimeConfig               *runtimecfg.RuntimeConfig
+	runtimeConfigFile           string
+	runtimeConfigResolver       func(UsageScope) *runtimecfg.RuntimeConfig
+	aicliConfigMu               sync.RWMutex
+	aicliConfig                 *agentconfig.Config
+	siteAccountService          SiteAccountService
+	configDocumentService       ConfigDocumentService
+	agentMaxStepsPersister      AgentMaxStepsPersister
+	agentMaxStepsProvider       AgentMaxStepsProvider
 	runtimeConfigLayersProvider RuntimeConfigLayersProvider
-	serviceControlService    RuntimeServiceControlService
-	fileTransferService      FileTransferService
-	logFilePath              string
-	usageAnalyticsDBPath     string
-	profileRegistry          *profilesys.Registry
-	profileDefaultRef        string
-	profileGlobalRuntimePath string
-	profileGlobalMCPPath     string
-	profileGlobalSkillDirs   []string
-	profileMCPAutoConnect    bool
+	serviceControlService       RuntimeServiceControlService
+	fileTransferService         FileTransferService
+	logFilePath                 string
+	usageAnalyticsDBPath        string
+	profileRegistry             *profilesys.Registry
+	profileDefaultRef           string
+	profileGlobalRuntimePath    string
+	profileGlobalMCPPath        string
+	profileGlobalSkillDirs      []string
 
 	teamStoreMu               sync.RWMutex
 	teamStoreConfigKey        string
@@ -583,6 +590,14 @@ func (h *Handler) SetMutationPolicy(policy MutationPolicy) {
 	h.mutationPolicy = policy
 }
 
+// SetMCPAdminService 注入 MCP 管理服务（runtime-server 启动时装配）。
+func (h *Handler) SetMCPAdminService(service mcpadmin.AdminService) {
+	if h == nil {
+		return
+	}
+	h.mcpAdmin = service
+}
+
 // SetUsagePolicy 设置 usage tracking / quota 策略
 func (h *Handler) SetUsagePolicy(policy UsagePolicy) {
 	if policy.QuotaEnabled {
@@ -799,6 +814,17 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/background/jobs/{id}/cancel", h.CancelBackgroundJob).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/background/jobs/{id}/events", h.ListBackgroundJobEvents).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/background/jobs/{id}/output", h.GetBackgroundJobOutput).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/mcps", h.ListRuntimeMCPs).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/mcps", h.CreateRuntimeMCP).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/mcps/{name}", h.UpdateRuntimeMCP).Methods(http.MethodPut)
+	runtimeRouter.HandleFunc("/mcps/{name}", h.DeleteRuntimeMCP).Methods(http.MethodDelete)
+	runtimeRouter.HandleFunc("/mcps/{name}/enable", h.EnableRuntimeMCP).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/mcps/{name}/disable", h.DisableRuntimeMCP).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/mcps/{name}/tools", h.ListRuntimeMCPTools).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/mcps/{name}/tools/{tool}/enable", h.EnableRuntimeMCPTool).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/mcps/{name}/tools/{tool}/disable", h.DisableRuntimeMCPTool).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/mcps/{name}/tools/enable", h.EnableRuntimeMCPTools).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/mcps/{name}/tools/disable", h.DisableRuntimeMCPTools).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/mcps/reload", h.ReloadRuntimeMCPs).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/teams/reload", h.ReloadRuntimeTeams).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/validate", h.ValidateRuntimeConfig).Methods(http.MethodGet)
@@ -4079,6 +4105,8 @@ func (h *Handler) attachRuntimeEventBridge() {
 		if bus == nil {
 			return
 		}
+		// P1.5：批量开关关闭时 buffer 为 nil，下面的回调保持原逐条同步路径。
+		buffer := h.newRuntimeEventPersistBuffer()
 		bus.Subscribe("", func(event runtimeevents.Event) {
 			if !shouldPersistRuntimeSessionEvent(event) {
 				// P0-2：A 通道的未命中原先完全无声——事件既不落盘（无实时/无回放），
@@ -4087,14 +4115,115 @@ func (h *Handler) attachRuntimeEventBridge() {
 				recordRuntimeEventDeliveryDrop(event.Type, event.SessionID)
 				return
 			}
+			mapped := mapRuntimeEventToSession(event)
+			if buffer != nil {
+				// P1.5：只入队（非阻塞）；落盘/重试/flush 由 buffer worker 负责，
+				// 失败经 persist.failed 与限频告警可见（P0.5 的可见性要求不回退）。
+				buffer.Enqueue(mapped)
+				return
+			}
 			store := h.getSessionEventStore()
 			if store == nil {
 				return
 			}
-			mapped := mapRuntimeEventToSession(event)
-			_, _ = store.AppendEvent(context.Background(), mapped)
+			if _, err := store.AppendEvent(context.Background(), mapped); err != nil {
+				// P0.5：落盘失败必须可见（历史行为是静默丢弃）。
+				recordRuntimeEventPersistError(mapped.Type, mapped.SessionID, err)
+			}
 		})
 	})
+}
+
+// runtimeEventPersistSettings 读取运行时配置中的批量落盘设置（默认关闭）。
+func (h *Handler) runtimeEventPersistSettings() chat.EventPersistSettings {
+	if h == nil || h.runtimeConfig == nil {
+		return chat.EventPersistSettings{}
+	}
+	cfg := h.runtimeConfig.SessionRuntime.EventPersist
+	return chat.EventPersistSettings{
+		Enabled:         cfg.BatchingEnabled,
+		BatchSize:       cfg.BatchSize,
+		FlushInterval:   cfg.FlushInterval,
+		QueueLimit:      cfg.QueueLimit,
+		QueueBytesLimit: cfg.QueueBytesLimit,
+		ShutdownTimeout: cfg.ShutdownTimeout,
+		FailMode:        cfg.FailMode,
+		AsyncDispatch:   cfg.AsyncDispatch,
+		// D3：关键事件（approval / session 终态 / 工具完成 / checkpoint）立即 flush。
+		CriticalTypes: runtimeevents.IsPersistCriticalEventType,
+	}
+}
+
+// newRuntimeEventPersistBuffer 在批量开关开启且 store 支持批量时创建缓冲。
+// store 不支持（如内存 store）时记录告警并保持同步路径，不静默丢事件。
+func (h *Handler) newRuntimeEventPersistBuffer() *chat.EventPersistBuffer {
+	settings := h.runtimeEventPersistSettings()
+	if !settings.Enabled {
+		if settings.AsyncDispatch {
+			logger.Warnf("runtime event persist async dispatch requires batching; ignoring (P2.11 前置条件未满足)")
+		}
+		return nil
+	}
+	batchStore, ok := h.getSessionEventStore().(chat.EventPersistBatchStore)
+	if !ok {
+		logger.Warnf("runtime event persist batching enabled but session event store does not support AppendEvents; keeping synchronous path")
+		return nil
+	}
+	buffer := chat.NewEventPersistBuffer(batchStore, settings.BufferConfig())
+	h.runtimeEventPersistMu.Lock()
+	h.runtimeEventPersistBuffer = buffer
+	h.runtimeEventPersistMu.Unlock()
+	return buffer
+}
+
+// CloseRuntimeEventPersistence 在服务器 shutdown 时 flush 并关闭批量缓冲，
+// 必须在关闭 session runtime store 之前调用（P1.5/G4：关闭时有界 flush、不静默丢）。
+func (h *Handler) CloseRuntimeEventPersistence() {
+	if h == nil {
+		return
+	}
+	h.runtimeEventPersistMu.Lock()
+	buffer := h.runtimeEventPersistBuffer
+	h.runtimeEventPersistBuffer = nil
+	h.runtimeEventPersistMu.Unlock()
+	if buffer == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), h.runtimeEventPersistSettings().ShutdownTimeoutOrDefault())
+	defer cancel()
+	if err := buffer.Close(ctx); err != nil {
+		logger.Warnf("runtime event persist buffer close: %v", err)
+	}
+}
+
+// runtimeEventPersistSnapshot 返回批量落盘缓冲的只读统计快照；
+// 未启用批量（或已关闭）时 ok=false，健康端点据此省略 persist 段。
+func (h *Handler) runtimeEventPersistSnapshot() (chat.EventPersistBufferStats, bool) {
+	if h == nil {
+		return chat.EventPersistBufferStats{}, false
+	}
+	h.runtimeEventPersistMu.Lock()
+	buffer := h.runtimeEventPersistBuffer
+	h.runtimeEventPersistMu.Unlock()
+	if buffer == nil {
+		return chat.EventPersistBufferStats{}, false
+	}
+	return buffer.Stats(), true
+}
+
+// runtimeStorePoolSnapshot 返回 runtime store 双池统计（P1.7 G6）；
+// 存储未装配或实现不支持 PoolStats 时 ok=false，健康端点省略 store_pools 段。
+func (h *Handler) runtimeStorePoolSnapshot() (chat.RuntimeStorePoolStats, bool) {
+	if h == nil {
+		return chat.RuntimeStorePoolStats{}, false
+	}
+	statter, ok := h.getSessionEventStore().(interface {
+		PoolStats() chat.RuntimeStorePoolStats
+	})
+	if !ok {
+		return chat.RuntimeStorePoolStats{}, false
+	}
+	return statter.PoolStats(), true
 }
 
 // isPersistedRuntimeEventType 是 A 通道（总线 → 会话事件库）的落盘判定。
@@ -4610,14 +4739,24 @@ func (h *Handler) refreshSessionRuntimeStore(config *runtimecfg.RuntimeConfig, c
 
 	storePath := resolveRuntimeSessionRuntimeStorePath(configFile, config.SessionRuntime.StorePath)
 	storeDSN := strings.TrimSpace(config.SessionRuntime.StoreDSN)
+	readPool := config.SessionRuntime.ReadPool
+	hasStoreConfig := storePath != "" || storeDSN != ""
+	// P1.7：读池配置在构造期生效，故非默认时纳入 store 标识（变更即重建）；
+	// 默认配置保持既有 key 形状，升级不触发无谓重建，也保留"无 store 配置"
+	// 的空键哨兵语义（见下）。
 	configKey := storePath + "|" + storeDSN
+	if readPool != (runtimecfg.ReadPoolConfig{}) {
+		configKey = fmt.Sprintf("%s|%t|%d|%s|%s", configKey,
+			readPool.Disable, readPool.Size,
+			readPool.BusyTimeout.String(), readPool.OperationTimeout.String())
+	}
 
 	h.sessionRuntimeMu.RLock()
 	currentKey := h.sessionRuntimeStoreKey
 	currentStore := h.sessionRuntimeStore
 	h.sessionRuntimeMu.RUnlock()
 
-	if currentKey == "" && configKey == "|" && currentStore != nil {
+	if currentKey == "" && !hasStoreConfig && currentStore != nil {
 		h.sessionRuntimeMu.Lock()
 		if h.sessionRuntimeStoreKey == "" {
 			h.sessionRuntimeStoreKey = configKey
@@ -4635,8 +4774,12 @@ func (h *Handler) refreshSessionRuntimeStore(config *runtimecfg.RuntimeConfig, c
 	)
 	if storePath != "" || storeDSN != "" {
 		store, err := chat.NewSQLiteRuntimeStore(&chat.RuntimeStoreConfig{
-			Path: strings.TrimSpace(storePath),
-			DSN:  storeDSN,
+			Path:                 strings.TrimSpace(storePath),
+			DSN:                  storeDSN,
+			DisableReadPool:      readPool.Disable,
+			ReadPoolSize:         readPool.Size,
+			ReadPoolBusyTimeout:  readPool.BusyTimeout,
+			ReadOperationTimeout: readPool.OperationTimeout,
 		})
 		if err != nil {
 			h.publishRuntimeEvent("session.runtime.store.reload_failed", "", map[string]interface{}{
@@ -4748,10 +4891,11 @@ func (h *Handler) attachRuntimeMCPLifecycleBridge() {
 			payload["mcp_name"] = event.MCPName
 
 			switch event.Type {
-			case "mcp.connected", "mcp.tools.loaded", "mcp.reconnected", "mcp.disabled", "mcp.stopped":
+			case "mcp.connected", "mcp.tools.loaded", "mcp.reconnected", "mcp.disabled", "mcp.stopped", "mcp.tool.state_changed":
 				if gateway := h.runtimeToolCatalog; gateway != nil {
 					gateway.Refresh()
 				}
+				h.invalidateSessionRuntimeToolSurfaces()
 			}
 
 			h.getRuntimeEventBus().Publish(runtimeevents.Event{
@@ -4763,6 +4907,25 @@ func (h *Handler) attachRuntimeMCPLifecycleBridge() {
 			})
 		})
 	})
+}
+
+// invalidateSessionRuntimeToolSurfaces 清除持久化的会话稳定工具面缓存，
+// 使 MCP 目录变化（连接/重载/服务与工具启停）在会话下一个 turn 边界生效。
+func (h *Handler) invalidateSessionRuntimeToolSurfaces() {
+	if h == nil {
+		return
+	}
+	store := h.getSessionRuntimeStore()
+	if store == nil {
+		return
+	}
+	invalidator, ok := store.(chat.StableToolSurfaceInvalidator)
+	if !ok || invalidator == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, _ = invalidator.InvalidateStableToolSurfaces(ctx)
 }
 
 func (h *Handler) applyAgentExecutionPolicy(a *agent.Agent, workspacePath string, runtimeConfig *runtimecfg.RuntimeConfig, profilePolicy *runtimepolicy.ToolExecutionPolicy) {
@@ -5091,7 +5254,9 @@ func (h *Handler) handleBackgroundEvent(event background.JobEvent) {
 		Timestamp: event.CreatedAt,
 	}
 	if store := h.getSessionEventStore(); store != nil && sessionID != "" && eventType != "job_output" {
-		_, _ = store.AppendEvent(context.Background(), runtimeEvent)
+		if _, err := store.AppendEvent(context.Background(), runtimeEvent); err != nil {
+			recordRuntimeEventPersistError(runtimeEvent.Type, runtimeEvent.SessionID, err)
+		}
 	}
 	h.getRuntimeEventBus().Publish(runtimeEvent)
 }
@@ -10468,35 +10633,44 @@ func (h *Handler) ReloadRuntimeMCPs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	manager := h.runtimeMCPManager()
-	if manager == nil {
+	service := h.runtimeMCPAdminService()
+	if manager == nil && service == nil {
 		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
 			"MCP runtime manager not available"))
+		return
+	}
+	if policy := h.getMutationPolicy(); policy.DisableReloadOps {
+		h.writeError(w, http.StatusForbidden, errors.New(errors.ErrAgentPermission,
+			"MCP reload 已被 disable_reload_ops 策略禁用"))
 		return
 	}
 
 	traceID := "trace_" + uuid.NewString()
 	_ = h.getRuntimeToolCatalogGateway()
+	mcpCount := 0
+	if manager != nil {
+		mcpCount = len(manager.ListMCPs())
+	}
 	h.publishRuntimeEvent("mcp.reload.started", traceID, map[string]interface{}{
-		"mcp_count": len(manager.ListMCPs()),
+		"mcp_count": mcpCount,
 	})
 
-	if err := manager.ReloadConfig(); err != nil {
-		h.publishRuntimeEvent("mcp.reload.completed", traceID, map[string]interface{}{
-			"success": false,
-			"error":   err.Error(),
-		})
-		h.writeError(w, http.StatusInternalServerError, errors.Wrap(errors.ErrConfigInvalid, "failed to reload MCP config", err))
-		return
-	}
-
-	reloadCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	reloadCtx, cancel := context.WithTimeout(r.Context(), runtimeMCPMutationTimeout)
 	defer cancel()
-	if err := manager.Start(mcpmanager.WithTraceID(reloadCtx, traceID)); err != nil {
+	var reloadErr error
+	if service != nil {
+		reloadErr = service.Reload(reloadCtx)
+	} else if err := manager.ReloadConfig(); err != nil {
+		reloadErr = err
+	} else {
+		reloadErr = manager.Start(mcpmanager.WithTraceID(reloadCtx, traceID))
+	}
+	if reloadErr != nil {
 		h.publishRuntimeEvent("mcp.reload.completed", traceID, map[string]interface{}{
 			"success": false,
-			"error":   err.Error(),
+			"error":   reloadErr.Error(),
 		})
-		h.writeError(w, http.StatusInternalServerError, errors.Wrap(errors.ErrConfigInvalid, "failed to restart MCP runtime", err))
+		h.writeError(w, http.StatusInternalServerError, errors.Wrap(errors.ErrConfigInvalid, "failed to reload MCP runtime", reloadErr))
 		return
 	}
 
@@ -10513,9 +10687,17 @@ func (h *Handler) ReloadRuntimeMCPs(w http.ResponseWriter, r *http.Request) {
 			"last_refresh_at": catalogStats.LastRefreshAt,
 		})
 	}
+	mcpCount = 0
+	if manager != nil {
+		mcpCount = len(manager.ListMCPs())
+	} else if service != nil {
+		if items, err := service.List(r.Context()); err == nil {
+			mcpCount = len(items)
+		}
+	}
 	h.publishRuntimeEvent("mcp.reload.completed", traceID, map[string]interface{}{
 		"success":    true,
-		"mcp_count":  len(manager.ListMCPs()),
+		"mcp_count":  mcpCount,
 		"tool_count": catalogToolCount,
 	})
 

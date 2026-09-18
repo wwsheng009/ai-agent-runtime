@@ -2028,8 +2028,13 @@ func classifyToolErrorCode(message string) string {
 		strings.Contains(lower, "storage unavailable"):
 		return string(runtimeerrors.ErrAgentRegistryUnavailable)
 	case strings.Contains(lower, "agent session reference not found"),
-		strings.Contains(lower, "unknown agent session reference"):
+		strings.Contains(lower, "unknown agent session reference"),
+		strings.Contains(lower, "agent session not found"):
 		return string(runtimeerrors.ErrAgentSessionNotFound)
+	case strings.Contains(lower, "session not found"):
+		// The acting session's own record is missing: not a child handle and
+		// not a filesystem path, so keep it ahead of any "not found" heuristics.
+		return string(runtimeerrors.ErrSessionNotFound)
 	case strings.Contains(lower, "sqlite3: interrupted"),
 		strings.Contains(lower, "database operation interrupted"):
 		return string(runtimeerrors.ErrStreamInterrupted)
@@ -2102,6 +2107,7 @@ func knownRuntimeErrorCode(code string) bool {
 		runtimeerrors.ErrAgentRunSuperseded,
 		runtimeerrors.ErrAgentThreadLimit, runtimeerrors.ErrAgentRegistryUnavailable,
 		runtimeerrors.ErrAgentSessionNotFound, runtimeerrors.ErrContextBudget,
+		runtimeerrors.ErrSessionNotFound,
 		runtimeerrors.ErrStreamInterrupted, runtimeerrors.ErrUpstreamUnavailable,
 		runtimeerrors.ErrMemoryFull, runtimeerrors.ErrWorkflowCycle, runtimeerrors.ErrWorkflowStep,
 		runtimeerrors.ErrSkillNotFound, runtimeerrors.ErrSkillLoadFailed, runtimeerrors.ErrInvalidManifest,
@@ -2213,6 +2219,8 @@ func nextActionForToolError(code string, message string) string {
 		return "The durable agent registry/store is not initialized or already closed, so spawn/query cannot be served. Do not retry the same call unchanged; report the host-side wiring failure, or continue without durable agent tracking when the host supports it."
 	case runtimeerrors.ErrAgentSessionNotFound:
 		return "Use list_agents for the current root session, then retry with an existing child id, session_id, or path. Do not retry the same unknown session reference unchanged."
+	case runtimeerrors.ErrSessionNotFound:
+		return "The acting session record is missing from the store (deleted, expired, or never persisted). This is a host-side session lifecycle failure, not a path or reference problem: do not retry the same call unchanged; the session must be recreated or the store repaired before this tool can run."
 	case runtimeerrors.ErrContextBudget:
 		return "Reduce or compact the input and tool output before continuing."
 	case runtimeerrors.ErrAgentRunCanceled:

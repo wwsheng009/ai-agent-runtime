@@ -220,6 +220,55 @@ func TestResolveMCPConfigPathExpandsTildeAndFallsBackToPortableDefault(t *testin
 	}
 }
 
+func TestResolveMCPConfigPathDetailedReportsSourceAndCandidates(t *testing.T) {
+	home := t.TempDir()
+	isolateHome(t, home)
+
+	projectDir := t.TempDir()
+	projectConfig := filepath.Join(projectDir, ".aicli", DefaultMCPConfigFileName)
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o755); err != nil {
+		t.Fatalf("create project mcp dir: %v", err)
+	}
+	if err := os.WriteFile(projectConfig, []byte("mcpServers: {}\n"), 0o644); err != nil {
+		t.Fatalf("write project mcp config: %v", err)
+	}
+	t.Chdir(projectDir)
+
+	resolution := ResolveMCPConfigPathDetailed(DefaultMCPConfigRelativePath)
+	if resolution.Path != projectConfig || resolution.Source != "project" {
+		t.Fatalf("resolution = %+v, want path=%q source=project", resolution, projectConfig)
+	}
+	if want := ResolveMCPConfigPath(DefaultMCPConfigRelativePath); resolution.Path != want {
+		t.Fatalf("detailed path = %q, ResolveMCPConfigPath = %q", resolution.Path, want)
+	}
+
+	projectCandidateFound := false
+	for _, candidate := range resolution.Candidates {
+		if candidate.Path == projectConfig {
+			projectCandidateFound = true
+			if candidate.Source != "project" || !candidate.Exists {
+				t.Fatalf("project candidate = %+v, want source=project exists=true", candidate)
+			}
+		}
+	}
+	if !projectCandidateFound {
+		t.Fatalf("project candidate missing: %+v", resolution.Candidates)
+	}
+
+	// 显式覆盖优先，且不要求文件存在（与 ResolveMCPConfigPath 保持一致）。
+	override := filepath.Join(t.TempDir(), "custom-mcp.yaml")
+	explicit := ResolveMCPConfigPathDetailed(override)
+	if explicit.Path != override || explicit.Source != "explicit" {
+		t.Fatalf("explicit resolution = %+v, want path=%q source=explicit", explicit, override)
+	}
+
+	// 空显式保持“未配置”语义，且不触发候选枚举。
+	empty := ResolveMCPConfigPathDetailed("")
+	if empty.Path != "" || empty.Source != "" || len(empty.Candidates) != 0 {
+		t.Fatalf("empty resolution = %+v, want empty", empty)
+	}
+}
+
 func TestResolveRuntimeConfigBootstrapPathPrefersUserHomeConfig(t *testing.T) {
 	home := t.TempDir()
 	isolateHome(t, home)

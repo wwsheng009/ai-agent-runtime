@@ -65,6 +65,10 @@ type Contract struct {
 	// ProvenanceBearing 表示该类型可能承载 provenance 信号（类型维度）。
 	// 载荷维度（source_refs / profile_source_refs）由 api/skills 侧补充判定。
 	ProvenanceBearing bool
+	// PersistCritical（P1.5/D3）表示该类型是关键事件：批量落盘桥接命中时必须
+	// 立即触发 flush（绕过 25ms 间隔等待），把崩溃窗口压到「当前批内更早的
+	// 事件」而非「≤batchSize 条任意事件」。仅对 ChannelSessionStore 类型有意义。
+	PersistCritical bool
 }
 
 // runtimeEventContracts 是封闭注册表：新增 runtime 事件类型必须在此表态。
@@ -73,20 +77,20 @@ type Contract struct {
 var runtimeEventContracts = []Contract{
 	// ---- A 通道：落盘（原 isPersistedRuntimeEventType 清单）----
 	{Type: "tool.requested", Channels: ChannelSessionStore | ChannelChatBridge},
-	{Type: "tool.completed", Channels: ChannelSessionStore | ChannelChatBridge},
+	{Type: "tool.completed", Channels: ChannelSessionStore | ChannelChatBridge, PersistCritical: true},
 	{Type: "context.profile.injected", Channels: ChannelSessionStore, ProvenanceBearing: true},
 	{Type: "recall.performed", Channels: ChannelSessionStore, ProvenanceBearing: true},
-	{Type: "checkpoint_created", Channels: ChannelSessionStore},
-	{Type: "approval_requested", Channels: ChannelSessionStore},
-	{Type: "approval_resolved", Channels: ChannelSessionStore},
+	{Type: "checkpoint_created", Channels: ChannelSessionStore, PersistCritical: true},
+	{Type: "approval_requested", Channels: ChannelSessionStore, PersistCritical: true},
+	{Type: "approval_resolved", Channels: ChannelSessionStore, PersistCritical: true},
 	{Type: "agent.reclaimed", Channels: ChannelSessionStore},
 	{Type: "session_compact_started", Channels: ChannelSessionStore},
 	{Type: "session_compact_completed", Channels: ChannelSessionStore},
 	{Type: "session_compact_skipped", Channels: ChannelSessionStore},
 	{Type: "session_compact_failed", Channels: ChannelSessionStore},
-	{Type: "session_start", Channels: ChannelSessionStore},
-	{Type: "session_end", Channels: ChannelSessionStore},
-	{Type: "session_interrupted", Channels: ChannelSessionStore},
+	{Type: "session_start", Channels: ChannelSessionStore, PersistCritical: true},
+	{Type: "session_end", Channels: ChannelSessionStore, PersistCritical: true},
+	{Type: "session_interrupted", Channels: ChannelSessionStore, PersistCritical: true},
 	{Type: "context_reconciled", Channels: ChannelSessionStore},
 	// 方案B：增量打字机事件落盘，供 runtime/stream 长轮询实时消费。
 	{Type: "assistant_delta", Channels: ChannelSessionStore},
@@ -177,6 +181,17 @@ func ChannelsFor(eventType string) ChannelSet {
 // IsPersistedEventType 判断类型是否经 A 通道落盘（原 api/skills 白名单语义）。
 func IsPersistedEventType(eventType string) bool {
 	return ChannelsFor(eventType)&ChannelSessionStore != 0
+}
+
+// IsPersistCriticalEventType 判断类型是否关键事件（P1.5/D3）：批量落盘桥接
+// 命中时立即触发 flush。未登记类型返回 false（批量缓冲对未登记类型不启用
+// 关键路径——落盘判定 IsPersistedEventType 已先把它们挡在外面）。
+func IsPersistCriticalEventType(eventType string) bool {
+	contract, ok := ContractFor(eventType)
+	if !ok {
+		return false
+	}
+	return contract.PersistCritical && contract.Channels&ChannelSessionStore != 0
 }
 
 // IsLiveOnlyEventType 判断类型是否走 B 通道（仅实时、不落盘）。

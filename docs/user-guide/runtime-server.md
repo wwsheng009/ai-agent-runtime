@@ -130,6 +130,62 @@ runtime-server serve --pprof
 | `/api/runtime/background` | 后台任务 |
 | `/api/runtime/images` | 生成图片管理 |
 | `/api/runtime/config` | 运行时配置 |
+| `/api/runtime/mcps` | MCP 管理（列表/新增/编辑/删除/启停/热重载） |
+
+### MCP 管理接口
+
+与 `aicli mcp ...`、微型 Web 客户端共用 `internal/mcp/admin` 的同一套读写实现，
+编辑的始终是配置文件里的 `mcpServers` 段（写操作会落盘并触发热重载）。路径解析优先级：
+`./.aicli/mcp.yaml` > `~/.aicli/mcp.yaml` > 显式配置 > 向上搜索 > `configs/mcp.yaml`
+（都不存在时落到 `~/.aicli/mcp.yaml` 并自动创建）。服务启动即自动建连（后台并行，不再有
+`auto_connect` 开关）；单个 server 是否参与连接由 `enabled` 字段控制，管理接口的写操作 /
+热重载会即时生效。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/runtime/mcps` | 列表：`{"count":N,"mcps":[{"config":{...},"status":{...}}]}` |
+| `POST` | `/api/runtime/mcps` | 新增（`UpsertRequest`），201 返回 `{"config":...,"status":...}` |
+| `GET/PUT/DELETE` | `/api/runtime/mcps/{name}` | 查看 / 更新 / 删除；删除返回 `{"removed":true}` |
+| `POST` | `/api/runtime/mcps/{name}/enable` \| `/disable` | 启停（持久化 `enabled` 并重连） |
+| `POST` | `/api/runtime/mcps/reload` | 热重载并重连，返回 `{reloaded,trace_id,catalog,runtime,health}` |
+
+`GET /api/runtime/mcps` 额外返回观测字段（向后兼容，旧字段不变）：
+
+- `config`：实际读写的配置文件与解析来源
+  （`path` / `source`（`explicit|project|user|upward|executable|default|user-fallback|session-override`）
+  / `exists` / `size_bytes` / `mod_time` / `manager_loaded` / `candidates[]`）。
+  `candidates` 按优先级列出全部候选位置及各自 `exists`，用于定位“不同 CWD 启动解析到
+  不同 `mcp.yaml`，导致某些 server 没连”。
+- `summary`：`{total, enabled, disabled, connected, tools}` 计数。
+
+启动时也会输出一行 `MCP config loaded`（`path` / `source` / `servers` / `enabled`），
+后台建连再输出 `MCP manager starting in background`。
+
+`UpsertRequest` 字段：`name`、`type`（`stdio`/`sse`/`websocket`/`streamable`）、
+`command`/`args`（stdio）、`url`（其余传输）、`env`、`headers`、`description`、
+`enabled`、`trustLevel`、`timeoutSeconds`、`maxParallelCalls`。
+
+字段语义：`env`/`headers` 为**指针语义**——请求中省略（或 JSON 不出现）表示保持原值，
+显式传 `{}` 表示清空，传非空 map 表示整体替换；`headers` 最终以 `HEADER_<Name>`
+形式落到配置文件的 `env`（stdio 的 `HEADER_*` 只是普通环境变量，不做请求头解释）。
+console 与微型 Web 面板的键值行编辑器按传输类型展示：stdio 全部是环境变量行，
+URL 传输把 `HEADER_*` 拆成请求头行（去前缀），保存时合并回 `env`（全量替换，
+清空行即清空对应配置）。
+
+```bash
+# 新增（streamable：粘贴 Chrome MCP 的 /mcp 地址即可）
+curl -X POST http://127.0.0.1:8101/api/runtime/mcps -H 'Content-Type: application/json' \
+  -d '{"name":"chrome-mcp","type":"streamable","url":"http://127.0.0.1:12306/mcp"}'
+
+# 停用 / 热重载 / 删除
+curl -X POST http://127.0.0.1:8101/api/runtime/mcps/chrome-mcp/disable
+curl -X POST http://127.0.0.1:8101/api/runtime/mcps/reload
+curl -X DELETE http://127.0.0.1:8101/api/runtime/mcps/chrome-mcp
+```
+
+鉴权：回环来源免 token；非回环需要 `X-Skills-Admin-Token`（与 skills 管理接口一致）。
+校验失败返回 400、目标不存在返回 404，错误体为
+`{"error":{"code":"...","message":"..."}}`。
 
 ---
 

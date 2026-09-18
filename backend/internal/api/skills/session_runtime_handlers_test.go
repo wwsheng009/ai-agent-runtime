@@ -2175,3 +2175,104 @@ func TestGetSessionRuntimeStateReturnsActorStateWhenPresent(t *testing.T) {
 	assert.Equal(t, float64(17), payload.State["head_offset"])
 	assert.Equal(t, []interface{}{"job-1"}, payload.State["active_job_ids"])
 }
+
+// 后台会话轮询可用 view=light 拉取轻量快照：state 经 CloneForInspection 投影，
+// 大字段（stable_tool_surface / frozen_turn_tools 及其 set 标记）被丢弃，
+// 而 status / pending_approval / head_offset / active_job_ids 与顶层 active_turn
+// 必须与完整视图一致；trim + 大小写不敏感，未知取值回退完整视图且不报错。
+func TestGetSessionRuntimeStateLightViewProjectsStateForBackgroundPolling(t *testing.T) {
+	ctx := context.Background()
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	t.Cleanup(sessionManager.Stop)
+	session, err := sessionManager.Create(ctx, "runtime-light-user")
+	require.NoError(t, err)
+
+	runtimeStore := chat.NewInMemoryRuntimeStore(64)
+	require.NoError(t, runtimeStore.SaveState(ctx, &chat.RuntimeState{
+		SessionID: session.ID,
+		Status:    chat.SessionWaitingApproval,
+		StableToolSurface: []types.ToolDefinition{{
+			Name:        "large_tool",
+			Description: strings.Repeat("d", 64<<10),
+		}},
+		StableToolSurfaceSet: true,
+		FrozenTurnTools:      []types.ToolDefinition{{Name: "large_tool"}},
+		FrozenTurnToolsSet:   true,
+		PendingApproval: &chat.ApprovalRequest{
+			ID:        "approval-light",
+			SessionID: session.ID,
+			ToolName:  "large_tool",
+			Reason:    "needs approval",
+		},
+		HeadOffset:   42,
+		ActiveJobIDs: []string{"job-light"},
+	}))
+
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetSessionManager(sessionManager)
+	handler.sessionRuntimeStore = runtimeStore
+
+	router := mux.NewRouter()
+	router.HandleFunc("/api/runtime/sessions/{id}/runtime", handler.GetSessionRuntimeState).Methods(http.MethodGet)
+
+	// 登记在途回合，让 active_turn 在两种视图下都是非平凡值。
+	const turnID = "turn_runtime_light_view"
+	release := handler.getActiveTurnRegistry().begin(session.ID, turnID, agentChatActiveTurnSource, true)
+	defer release()
+
+	fetch := func(query string) (map[string]interface{}, []byte) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+session.ID+"/runtime"+query, nil)
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, "query=%q body=%s", query, rec.Body.String())
+		body := rec.Body.Bytes()
+		var payload map[string]interface{}
+		require.NoError(t, json.Unmarshal(body, &payload))
+		return payload, body
+	}
+
+	full, fullBody := fetch("")
+	light, lightBody := fetch("?view=light")
+
+	fullState, ok := full["state"].(map[string]interface{})
+	require.True(t, ok, "默认视图必须返回完整 state，实际 %v", full["state"])
+	assert.Contains(t, fullState, "stable_tool_surface", "默认视图必须带大字段")
+	assert.Equal(t, true, fullState["stable_tool_surface_set"])
+	assert.Contains(t, fullState, "frozen_turn_tools")
+	assert.Equal(t, true, fullState["frozen_turn_tools_set"])
+
+	lightState, ok := light["state"].(map[string]interface{})
+	require.True(t, ok, "light 视图仍必须返回 state，实际 %v", light["state"])
+	assert.NotContains(t, lightState, "stable_tool_surface", "light 视图不得序列化大工具面")
+	assert.NotContains(t, lightState, "stable_tool_surface_set")
+	assert.NotContains(t, lightState, "frozen_turn_tools")
+	assert.NotContains(t, lightState, "frozen_turn_tools_set")
+	for _, key := range []string{"session_id", "status", "pending_approval", "head_offset", "active_job_ids"} {
+		assert.Equal(t, fullState[key], lightState[key], "light 视图必须保留 state.%s", key)
+	}
+	assert.Equal(t, fullState["status"], lightState["status"])
+	assert.Equal(t, fullState["pending_approval"], lightState["pending_approval"])
+
+	activeTurn, ok := light["active_turn"].(map[string]interface{})
+	require.True(t, ok, "active_turn 应为对象，实际 %v", light["active_turn"])
+	assert.Equal(t, turnID, activeTurn["turn_id"])
+	assert.Equal(t, full["active_turn"], light["active_turn"], "顶层 active_turn 不因 light 视图改变")
+
+	assert.Less(t, len(lightBody), len(fullBody)/2, "light 响应体量必须显著小于完整视图")
+	t.Logf("full response=%d bytes, light response=%d bytes", len(fullBody), len(lightBody))
+
+	// trim + 大小写不敏感： " LIGHT " 等价于 light。
+	trimmed, trimmedBody := fetch("?view=%20LIGHT%20")
+	trimmedState, ok := trimmed["state"].(map[string]interface{})
+	require.True(t, ok)
+	assert.NotContains(t, trimmedState, "stable_tool_surface", "view 值必须 trim 且大小写不敏感")
+	assert.Equal(t, len(trimmedBody), len(lightBody))
+
+	// 未知取值保持现状：回退完整视图，不报错。
+	unknown, _ := fetch("?view=banana")
+	unknownState, ok := unknown["state"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Contains(t, unknownState, "stable_tool_surface", "未知 view 取值必须回退完整视图")
+	assert.Equal(t, fullState["status"], unknownState["status"])
+}
