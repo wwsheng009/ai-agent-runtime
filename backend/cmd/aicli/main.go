@@ -82,25 +82,23 @@ func main() {
 			return fmt.Errorf("failed to configure web write token: %w", tokenErr)
 		}
 
-		// pprof 诊断端点按需启动：--pprof 或 AICLI_PPROF 环境变量显式开启，
-		// 默认监听 127.0.0.1 随机空闲端口，实际地址打印到 stderr。
-		// 当 --debug 开启时也自动启动（内置 /debug/chat/status 端点提供
-		// 会话渲染/显示状态 JSON 快照，供在线连续采样）。
+		// loopback 服务器（Web 客户端 + /debug 端点）按需启动：
+		// --web-port > AICLI_PPROF > --pprof/--debug 的随机空闲端口，
+		// 实际地址打印到 stderr。当 --debug 开启时也自动启动（内置
+		// /debug/chat/status 端点提供会话渲染/显示状态 JSON 快照）。
 		pprofFlag, _ := rootCmd.Flags().GetBool("pprof")
 		pprofEnv := strings.TrimSpace(os.Getenv("AICLI_PPROF"))
+		webPortFlag, _ := rootCmd.Flags().GetInt("web-port")
+		webPortSet := rootCmd.Flags().Changed("web-port")
 		debugFlag := false
 		if cmd != nil {
 			if f := cmd.Flags().Lookup("debug"); f != nil {
 				debugFlag, _ = cmd.Flags().GetBool("debug")
 			}
 		}
-		pprofAddr := ""
-		if pprofFlag || debugFlag {
-			pprofAddr = "127.0.0.1:0" // 默认随机空闲端口
-		}
-		if pprofEnv != "" {
-			// AICLI_PPROF 可携带自定义地址；优先级高于默认随机端口。
-			pprofAddr = pprofEnv
+		pprofAddr, addrErr := resolveLoopbackServerAddr(pprofFlag, debugFlag, webPortFlag, webPortSet, pprofEnv)
+		if addrErr != nil {
+			return addrErr
 		}
 		if pprofAddr != "" && pprofHandle == nil {
 			handle, err := startPprofServer(pprofAddr)
@@ -211,6 +209,7 @@ func main() {
 	rootCmd.PersistentFlags().String("syntax-theme", "", "代码语法高亮主题（auto 或 Chroma 主题名；优先级: --syntax-theme > 环境变量 > 配置）")
 	rootCmd.PersistentFlags().Bool("envelope", false, "JSON 输出时使用统一 envelope 结构（ok/command/data 或 ok/command/error）")
 	rootCmd.PersistentFlags().Bool("pprof", false, "启用 pprof 诊断端点（监听 127.0.0.1 随机空闲端口；可用 AICLI_PPROF 环境变量指定地址）")
+	rootCmd.PersistentFlags().Int("web-port", 0, "指定 loopback 服务器（Web 客户端 / /debug 端点）监听端口（1-65535；等价于 AICLI_PPROF=127.0.0.1:<port> 且优先级更高；默认随机空闲端口）")
 	rootCmd.PersistentFlags().String("web-token", "", "预设 Web 写令牌（默认每进程随机；也可用 AICLI_WEB_TOKEN；至少 16 位，字符集 A-Za-z0-9-._~）")
 	rootCmd.PersistentFlags().Bool("console-host", false, "Windows：当前 stdin/stdout 为 PTY/pipe 时，在新的原生 Console 窗口中重启 aicli")
 

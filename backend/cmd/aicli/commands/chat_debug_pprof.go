@@ -90,7 +90,8 @@ func appendChatDebugPprofLines(builder *chatDebugDocumentBuilder) {
 	url := chatDebugPprofEndpointURL()
 	if url == "" {
 		builder.meta("Status:", "未启用")
-		builder.plain("  启动时加 --pprof（或设 AICLI_PPROF=127.0.0.1:<端口>）即可开启")
+		builder.plain("  启动时加 --pprof / --debug（随机空闲端口），或用 --web-port <端口>、")
+		builder.plain("  AICLI_PPROF=127.0.0.1:<端口> 固定地址；Web 客户端与 /debug 端点共用该端口")
 		return
 	}
 	base := strings.TrimSuffix(url, "/")

@@ -82,17 +82,24 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 }
 
 // resolveRuntimeServerPprofAddr 解析 pprof 监听地址（与 aicli 行为一致）：
-//  1. AICLI_PPROF 环境变量非空时直接启用，并将其作为指定地址；
-//  2. 否则 --pprof 开启时默认 127.0.0.1:0（随机空闲端口）；
-//  3. 两者都未设置时返回空串（不启动 pprof 服务器）。
-func resolveRuntimeServerPprofAddr(pprofFlag bool) string {
+//  1. --web-port 显式指定 → 127.0.0.1:<port>（优先级最高；端口越界直接报错，不静默退化）；
+//  2. AICLI_PPROF 环境变量非空时直接启用，并将其作为指定地址（可含自定义 host）；
+//  3. 否则 --pprof 开启时默认 127.0.0.1:0（随机空闲端口）；
+//  4. 都未设置时返回空串（不启动 pprof 服务器）。
+func resolveRuntimeServerPprofAddr(pprofFlag bool, webPort int, webPortSet bool) (string, error) {
+	if webPortSet {
+		if webPort < 1 || webPort > 65535 {
+			return "", fmt.Errorf("invalid --web-port %d: must be between 1 and 65535", webPort)
+		}
+		return fmt.Sprintf("127.0.0.1:%d", webPort), nil
+	}
 	if env := strings.TrimSpace(os.Getenv("AICLI_PPROF")); env != "" {
-		return env
+		return env, nil
 	}
 	if pprofFlag {
-		return "127.0.0.1:0"
+		return "127.0.0.1:0", nil
 	}
-	return ""
+	return "", nil
 }
 
 // isLoopbackAddr 判断 addr（host:port）是否绑定在本机回环地址上。

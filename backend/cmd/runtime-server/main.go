@@ -49,6 +49,8 @@ type runtimeServerCommandOptions struct {
 	PID        int
 	Wait       time.Duration
 	Pprof      bool
+	WebPort    int
+	WebPortSet bool
 }
 
 type runtimeServerStartConflict struct {
@@ -121,7 +123,8 @@ Options (serve):
   -c, --config PATH        配置文件路径；未指定时按 Notes 中的搜索顺序查找 %[1]s
       --listen HOST:PORT   监听地址，优先级高于配置文件，例如 127.0.0.1:8101
       --pid-file PATH      PID 文件路径（默认 ./logs/runtime-server.pid）
-      --pprof              启用 pprof 诊断端点（监听 127.0.0.1 随机空闲端口，可用 AICLI_PPROF 指定地址）
+      --pprof              启用 pprof 诊断端点（监听 127.0.0.1 随机空闲端口，可用 --web-port 或 AICLI_PPROF 指定地址）
+      --web-port PORT      指定 pprof 诊断端点监听端口（1-65535；等价 AICLI_PPROF=127.0.0.1:<port> 且优先）
   -h, --help               显示子命令帮助
 
 Options (start):
@@ -130,6 +133,7 @@ Options (start):
       --pid-file PATH      同 serve（默认 ./logs/runtime-server.pid）
       --wait DURATION      等待后台进程完成启动的超时时间（默认 30s）
       --pprof              同 serve
+      --web-port PORT      同 serve（随子进程转发）
   -h, --help               显示子命令帮助
 
 Options (stop):
@@ -199,8 +203,13 @@ func parseServeOptions(args []string) (runtimeServerCommandOptions, error) {
 	))
 	flags.StringVar(&opts.ListenAddr, "listen", "", "监听地址，优先级高于配置文件，例如 127.0.0.1:8101")
 	flags.StringVar(&opts.PIDFile, "pid-file", opts.PIDFile, "PID 文件路径")
-	flags.BoolVar(&opts.Pprof, "pprof", false, "启用 pprof 诊断端点（监听 127.0.0.1 随机空闲端口；可用 AICLI_PPROF 环境变量指定地址）")
-	return opts, flags.Parse(args)
+	flags.BoolVar(&opts.Pprof, "pprof", false, "启用 pprof 诊断端点（监听 127.0.0.1 随机空闲端口；可用 --web-port 或 AICLI_PPROF 指定地址）")
+	flags.IntVar(&opts.WebPort, "web-port", 0, "指定 pprof 诊断端点监听端口（1-65535；等价于 AICLI_PPROF=127.0.0.1:<port> 且优先级更高）")
+	if err := flags.Parse(args); err != nil {
+		return opts, err
+	}
+	opts.WebPortSet = flags.Changed("web-port")
+	return opts, nil
 }
 
 func parseStartOptions(args []string) (runtimeServerCommandOptions, error) {
@@ -217,8 +226,13 @@ func parseStartOptions(args []string) (runtimeServerCommandOptions, error) {
 	flags.StringVar(&opts.ListenAddr, "listen", "", "监听地址，优先级高于配置文件，例如 127.0.0.1:8101")
 	flags.StringVar(&opts.PIDFile, "pid-file", opts.PIDFile, "PID 文件路径")
 	flags.DurationVar(&opts.Wait, "wait", opts.Wait, "等待后台进程完成启动的超时时间")
-	flags.BoolVar(&opts.Pprof, "pprof", false, "启用 pprof 诊断端点（监听 127.0.0.1 随机空闲端口；可用 AICLI_PPROF 环境变量指定地址）")
-	return opts, flags.Parse(args)
+	flags.BoolVar(&opts.Pprof, "pprof", false, "启用 pprof 诊断端点（监听 127.0.0.1 随机空闲端口；可用 --web-port 或 AICLI_PPROF 指定地址）")
+	flags.IntVar(&opts.WebPort, "web-port", 0, "指定 pprof 诊断端点监听端口（1-65535；等价于 AICLI_PPROF=127.0.0.1:<port> 且优先级更高）")
+	if err := flags.Parse(args); err != nil {
+		return opts, err
+	}
+	opts.WebPortSet = flags.Changed("web-port")
+	return opts, nil
 }
 
 func parseStopOptions(args []string) (runtimeServerCommandOptions, error) {
@@ -353,8 +367,14 @@ func runServe(args []string) int {
 		_ = runtimeserver.RemoveInstanceInfoIfPID(pidFile, info.PID)
 	}
 
-	// pprof 服务器在通过 PID 冲突检查后启动：AICLI_PPROF 环境变量或 --pprof 显式开启。
-	if pprofAddr := resolveRuntimeServerPprofAddr(opts.Pprof); pprofAddr != "" {
+	// pprof 服务器在通过 PID 冲突检查后启动：--web-port / AICLI_PPROF 环境变量或 --pprof 显式开启。
+	pprofAddr, addrErr := resolveRuntimeServerPprofAddr(opts.Pprof, opts.WebPort, opts.WebPortSet)
+	if addrErr != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", addrErr)
+		logger.Error("Invalid pprof listen address", logger.Err(addrErr))
+		return 1
+	}
+	if pprofAddr != "" {
 		if !isLoopbackAddr(pprofAddr) {
 			logger.Warn("pprof endpoint will listen on a non-loopback address; "+
 				"pprof 可触发 GC / 执行分析代码，暴露到网络上有风险，建议使用 127.0.0.1",
@@ -487,6 +507,11 @@ func runStart(args []string) int {
 	}
 	if opts.Pprof {
 		commandArgs = append(commandArgs, "--pprof")
+	}
+	if opts.WebPortSet {
+		// 显式端口随子进程转发：否则 background serve 会退回随机端口，
+		// 调用方拿到的 --web-port 就形同虚设。
+		commandArgs = append(commandArgs, "--web-port", fmt.Sprintf("%d", opts.WebPort))
 	}
 	launchCommand, launchArgs, err := runtimeserver.PrepareStartCommand(executable, cwd, commandArgs)
 	if err != nil {

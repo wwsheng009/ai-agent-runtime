@@ -107,6 +107,29 @@ func (h *pprofServerHandle) Close() error {
 	return h.server.Close()
 }
 
+// resolveLoopbackServerAddr 解析 loopback 服务器（Web 客户端 / /debug 端点）的监听地址。
+// 优先级（高 → 低）：
+//  1. --web-port <port>：显式端口，展开为 127.0.0.1:<port>；端口越界直接报错，
+//     避免"手滑写成 70000"这类笔误静默退化成随机端口；
+//  2. AICLI_PPROF 环境变量：非空即启用，并按原样作为地址（可含自定义 host，保持既有语义）；
+//  3. --pprof / --debug：127.0.0.1:0，随机空闲端口；
+//  4. 都未设置：返回空串，不启动服务器。
+func resolveLoopbackServerAddr(pprofFlag, debugFlag bool, webPort int, webPortSet bool, pprofEnv string) (string, error) {
+	if webPortSet {
+		if webPort < 1 || webPort > 65535 {
+			return "", fmt.Errorf("invalid --web-port %d: must be between 1 and 65535", webPort)
+		}
+		return fmt.Sprintf("127.0.0.1:%d", webPort), nil
+	}
+	if env := strings.TrimSpace(pprofEnv); env != "" {
+		return env, nil
+	}
+	if pprofFlag || debugFlag {
+		return "127.0.0.1:0", nil
+	}
+	return "", nil
+}
+
 // startPprofServer 启动 pprof HTTP 服务器。
 // addr 为空时使用 127.0.0.1:0（随机空闲端口）；传入其他地址时按原样监听，
 // 但调用方应保证其绑定在 loopback 上。
