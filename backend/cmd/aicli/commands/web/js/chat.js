@@ -153,7 +153,11 @@ export function dropPendingUserPrompt(text) {
   }
 }
 
-export function refreshScreen(forceClear) {
+// refreshScreen 以服务端权威快照重建对话区。options.keepStream=true 用于
+// 流式进行中的节流刷新（见 sse.js 的 tool_end）：只更新对话区，不隐藏
+// 正在显示的流式气泡（hideStreamMessage 会终止实时渲染视图）。
+export function refreshScreen(forceClear, options) {
+  var keepStream = !!(options && options.keepStream);
   fetch("/web/api/screen?format=json", { cache: "no-store" })
     .then(function (res) { return res.ok ? res.json() : null; })
     .then(function (data) {
@@ -176,7 +180,9 @@ export function refreshScreen(forceClear) {
       } else {
         screenEl.textContent = data.text || "";
       }
-      hideStreamMessage();
+      if (!keepStream) {
+        hideStreamMessage();
+      }
       // 尊重用户滚动位置：若用户上滚阅读历史，不强制拉底（G3）。
       scrollToBottom();
       updateWelcome();

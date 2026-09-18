@@ -40,6 +40,15 @@ const StreamCoalescedFromKey = "_coalesced_sequence_from"
 // permanently truncated assistant cell on screen.
 const assistantSnapshotKey = "assistant_snapshot"
 
+// reasoningSnapshotKey is the llm.request.finished payload field carrying the
+// authoritative full text of the reasoning stream for one model response.
+// Reasoning deltas are the one stream family the bridge may drop under its
+// coalescing budget (assistant text must never be dropped), so the encoder
+// converges the reasoning item on this snapshot at the request boundary.
+// Without it a long reasoning stream can leave the visible process cell
+// truncated or empty for the whole turn (session_20260918172548_iHgz994o).
+const reasoningSnapshotKey = "reasoning_snapshot"
+
 // ReasoningStreamDeltaKey preserves the semantic mode of a reasoning event
 // after the bridge coalesces several typed ReasoningBlock payloads into one
 // top-level text payload. Chunk boundaries are transport boundaries only; this
@@ -1826,6 +1835,13 @@ func (e *EventEncoder) applyLLMFinished(ev runtimeevents.Event, cs *ChangeSet) {
 			e.markReasoningBarrier(key, assistant, cs)
 		}
 	}
+	if snapshot := payloadString(ev.Payload[reasoningSnapshotKey], ""); strings.TrimSpace(snapshot) != "" {
+		// 请求边界的 reasoning 权威全文：桥接层的 coalesce 预算溢出会丢弃
+		// reasoning delta（assistant 文本不允许丢弃，reasoning 允许），仅靠
+		// 增量拼装无法复原；这里整段收敛，避免长思考期间界面没有可见过程
+		// 内容。正常无丢弃时文本不变，只作为完整性兜底。
+		e.applyFinalReasoningSnapshot(key, snapshot, cs)
+	}
 	if !e.reasoningBarriers[key] {
 		e.finalizeReasoning(key, StatusCompleted, cs)
 	}
@@ -1964,6 +1980,52 @@ func (e *EventEncoder) FinalizeOpenStreams(status ItemStatus) *ChangeSet {
 	cs := &ChangeSet{}
 	e.finalizeOpenStreams(status, cs)
 	e.updateTail(cs)
+	return cs
+}
+
+// FinalizeOpenToolCells closes every tool cell that never received a
+// tool.completed/failed terminal event and rewrites its head from the
+// "• Running ..." exec shape to "• Canceled/Completed/Failed ...". It is the
+// orphan sweep for run boundaries (the next BeginRun is the deterministic
+// proof that the previous run's ownership has ended) where a late tool.started
+// or a lost terminal event would otherwise leave a permanently mutable cell
+// that pins the ActiveBand — session_20260918172548_iHgz994o showed
+// "• Running grep" surviving a cancel for minutes. Assistant/reasoning items
+// are deliberately untouched here: only the tool lane is unambiguously
+// orphaned at a run boundary, while replay/backtrack may still legitimately
+// rebuild the other kinds. Idempotent: terminal cells are skipped.
+func (e *EventEncoder) FinalizeOpenToolCells(status ItemStatus) *ChangeSet {
+	if e == nil {
+		return nil
+	}
+	if !status.Terminal() {
+		status = StatusCanceled
+	}
+	e.clock++
+	e.stats.EncodeCount++
+	cs := &ChangeSet{}
+	toolIDs := make([]string, 0, len(e.toolByID))
+	for callID := range e.toolByID {
+		toolIDs = append(toolIDs, callID)
+	}
+	sort.Strings(toolIDs)
+	for _, callID := range toolIDs {
+		it := e.toolByID[callID]
+		if it == nil || it.Status.Terminal() {
+			continue
+		}
+		u, changed := e.upsertItem(it.ID, KindToolCall, func(item *Item) bool {
+			if item.Status.Terminal() {
+				return false
+			}
+			item.Status = status
+			item.Head = finalizeToolHeadAtRunEnd(item.Head, status)
+			return true
+		})
+		if changed {
+			e.change(cs, OpUpsert, u)
+		}
+	}
 	return cs
 }
 

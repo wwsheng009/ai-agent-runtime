@@ -892,7 +892,29 @@ func (b *chatRuntimeEventBridge) BeginRunKind(kind chatRunKind) {
 	}
 	b.acceptedAssistantFinalTurns = make(map[string]struct{})
 	b.finalAssistantTurns = make(map[string]struct{})
+	// 新 run epoch 是"上一轮所有权已结束"的确定性边界：上一轮若因中断
+	// drain 超时、终态事件丢失或迟到的 tool.started 留下未终态的工具
+	// 单元格，这里统一按 Canceled 收敛。否则它们会以 "• Running ..." 永久
+	// 驻留 transcript 并钉住 ActiveBand（线上
+	// session_20260918172548_iHgz994o 在取消后残留 "• Running grep"）。
+	sweptToolCells := 0
+	if b.renderEncoder != nil {
+		if changes := b.renderEncoder.FinalizeOpenToolCells(encoding.StatusCanceled); changes != nil && len(changes.Changes) > 0 {
+			sweptToolCells = len(changes.Changes)
+			b.applyChangeSet(changes)
+		}
+	}
 	b.renderMu.Unlock()
+	if sweptToolCells > 0 && b.session != nil {
+		writeSessionDebugInfo(
+			b.session,
+			fmt.Sprintf("[runtime-event] BeginRun closed %d orphaned tool cell(s) from the previous run as canceled", sweptToolCells),
+			false,
+		)
+		if b.session.Interaction != nil && b.session.Interaction.UnifiedRendererEnabled() {
+			b.session.Interaction.postTranscriptSnapshotFromBridge(b)
+		}
+	}
 	b.logMu.Lock()
 	b.activeRunPrompt = b.nextRunPrompt
 	b.nextRunPrompt = ""

@@ -1770,6 +1770,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	req.Metadata["stream_id"] = streamID
 	callCtx := ctx
 	streamedReasoning := false
+	var streamedReasoningText strings.Builder
 	var assistantSequence atomic.Uint64
 	var reasoningSequence atomic.Uint64
 	reportSink := func(chunk llm.StreamChunk, sequence uint64) {
@@ -1814,6 +1815,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 					return
 				}
 				streamedReasoning = true
+				streamedReasoningText.WriteString(chunk.Content)
 				sequence := reasoningSequence.Add(1)
 				reasoning := &types.ReasoningBlock{
 					Provider:   req.Provider,
@@ -2223,6 +2225,13 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		if snapshot := strings.TrimSpace(response.Content); snapshot != "" {
 			finishedPayload["assistant_snapshot"] = response.Content
 		}
+	}
+	// reasoning 是允许在桥接层按 coalesce 预算丢弃的唯一流（assistant 文本
+	// 不允许丢弃），仅靠增量拼装无法复原：没有这个请求边界的权威全文，一次
+	// 长思考会在界面上完全没有可见过程内容。累积值与 delta 路径逐字节一致，
+	// 正常无丢弃时文本不变，只作为完整性兜底（见 encoding.reasoningSnapshotKey）。
+	if snapshot := strings.TrimSpace(streamedReasoningText.String()); snapshot != "" {
+		finishedPayload["reasoning_snapshot"] = streamedReasoningText.String()
 	}
 	loop.emitRuntimeEvent("llm.request.finished", sessionID, "", finishedPayload)
 

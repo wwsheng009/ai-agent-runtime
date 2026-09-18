@@ -41,6 +41,25 @@ function logEvent(name, data) {
 
 var refreshKeys = { "turn_end": 1, "tool_end": 1, "session_end": 1, "session_interrupted": 1, "error": 1, "screen_refresh": 1, "compact_end": 1 };
 
+// 工具终态后的节流 transcript 刷新：长回合中完成/取消的工具单元格会写入
+// 服务端权威 messages，但流式期间对话区默认不重绘（避免打断 stream 气泡），
+// 用户会看到整轮停留在旧快照（线上表现为只显示 "• Running grep" +
+// "Analyzing"）。这里在 tool_end 后去抖 + 最小间隔刷新对话区，并保留
+// stream 气泡（keepStream），让工具过程在回合进行中可见。
+var transcriptRefreshTimer = null;
+var transcriptRefreshLast = 0;
+var TRANSCRIPT_REFRESH_MIN_INTERVAL = 1200;
+function scheduleTranscriptRefresh() {
+  if (transcriptRefreshTimer) { return; }
+  var wait = Math.max(0, TRANSCRIPT_REFRESH_MIN_INTERVAL - (Date.now() - transcriptRefreshLast));
+  transcriptRefreshTimer = setTimeout(function () {
+    transcriptRefreshTimer = null;
+    transcriptRefreshLast = Date.now();
+    // keepStream 仅在流式仍活跃时生效；回合结束后走常规刷新路径。
+    refreshScreen(false, { keepStream: isStreamActive() });
+  }, wait);
+}
+
 // ---- 动态状态栏（同步 aicli chat 底部活动状态行） ----
 // dynamicStatus: { text, role, interruptible, startedAt }
 // 由 SSE dynamic_status 事件驱动；时钟（"(1m 52s • esc to interrupt)"）由
@@ -131,6 +150,10 @@ function onSSEEvent(eventName, data) {
       if (isStreamActive()) {
         setStreamTool("[工具: " + (data.tool_name || "?") + " 完成]");
         renderStream();
+        // 流式期间用节流快照刷新对话区，但保留 stream 气泡（keepStream）。
+        scheduleTranscriptRefresh();
+      } else {
+        refreshScreen();
       }
       break;
     case "assistant_image_progress":
