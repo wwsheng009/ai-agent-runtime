@@ -1732,7 +1732,7 @@ func TestSessionActorInterruptDuringPrepareRunDoesNotStartProvider(t *testing.T)
 		state.UpdatedAt = time.Now().UTC()
 		return nil
 	}))
-	go actor.startSessionRun(ctx, session, "do not execute", false, turnID, nil, nil, reply, false, run)
+	go actor.startSessionRun(ctx, session, "do not execute", false, turnID, nil, nil, nil, reply, false, run)
 
 	select {
 	case <-prepareEntered:
@@ -1816,7 +1816,7 @@ func TestSessionActorCanceledContextDuringPrepareRunDoesNotStartProvider(t *test
 	startupReturned := make(chan struct{})
 	go func() {
 		defer close(startupReturned)
-		actor.startSessionRun(runCtx, session, "do not execute", false, turnID, nil, nil, reply, false, run)
+		actor.startSessionRun(runCtx, session, "do not execute", false, turnID, nil, nil, nil, reply, false, run)
 	}()
 
 	select {
@@ -4762,7 +4762,7 @@ func TestSessionActorSelfStopFromRunGoroutineDoesNotDeadlock(t *testing.T) {
 		state.UpdatedAt = time.Now().UTC()
 		return nil
 	}))
-	go actor.startSessionRun(ctx, session, "close yourself", false, turnID, nil, nil, reply, false, run)
+	go actor.startSessionRun(ctx, session, "close yourself", false, turnID, nil, nil, nil, reply, false, run)
 
 	select {
 	case <-provider.entered:
@@ -4846,7 +4846,7 @@ func TestSessionHubStopAsyncRemovesActorAndStopsRun(t *testing.T) {
 		state.UpdatedAt = time.Now().UTC()
 		return nil
 	}))
-	go actor.startSessionRun(ctx, session, "close via hub", false, turnID, nil, nil, reply, false, run)
+	go actor.startSessionRun(ctx, session, "close via hub", false, turnID, nil, nil, nil, reply, false, run)
 
 	select {
 	case <-provider.entered:

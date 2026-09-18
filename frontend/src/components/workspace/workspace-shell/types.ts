@@ -2,6 +2,7 @@
 
 import { type Artifact, type Thread } from "@/data/mock";
 import type { ComposerAttachmentsController } from "@/hooks/workspace/composer/use-composer-attachments";
+import { type AgentChatSubmitOptions } from "@/hooks/workspace/agent-chat-turn/turn-bootstrap";
 import { type RuntimeSessionsSummary } from "@/hooks/workspace/use-runtime-sessions-data";
 import type { SessionBacktrackDialogState } from "@/hooks/workspace/use-session-backtrack";
 import { type ConnectionStatus } from "@/lib/connection-status";
@@ -141,7 +142,8 @@ export type WorkspaceShellProps = {
   onRefreshRuntimeSessions?: () => void;
   onResetRuntimeClientIdentity: () => void;
   onStopResponding: () => void;
-  onSubmit: () => void;
+  /** `options` 供 `/skill` 回合化覆盖 prompt / expose_skills；返回 false = 未启动。 */
+  onSubmit: (options?: AgentChatSubmitOptions) => boolean | void;
   /** P1-7：待交互统一呈现位（审批 / 提问 / 计划评审），null 时不渲染。 */
   pendingInteraction?: PendingInteraction | null;
   onResolvePendingApproval?: (requestId: string, allow: boolean) => void;

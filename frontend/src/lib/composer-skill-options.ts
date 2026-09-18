@@ -119,3 +119,13 @@ export function composerSkillCommandText(skillName: string): string {
   const name = skillName.trim();
   return `/skill ${name} `;
 }
+
+/**
+ * `/skill` 回合提交时的用户消息文本：`/skill <name> <prompt>`。
+ *
+ * 与输入框回填形态一致——线程里能直接看出这是一次 skill 调用而不是普通提问；
+ * 后端注入的 ProgramGuide 会说明该前缀只是调用标记，真正的参数是其后的文本。
+ */
+export function composerSkillTurnPrompt(skillName: string, prompt: string): string {
+  return `${composerSkillCommandText(skillName)}${prompt}`;
+}

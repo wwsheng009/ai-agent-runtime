@@ -763,6 +763,44 @@ type SkillsRuntimeConfig struct {
 	RoleClaims             []string                             `yaml:"role_claims" mapstructure:"role_claims"`
 	AdminRoles             []string                             `yaml:"admin_roles" mapstructure:"admin_roles"`
 	APIKeyScopes           map[string]SkillsRuntimeScopeBinding `yaml:"api_key_scopes" mapstructure:"api_key_scopes"`
+	// SK-7/SK-10（P0/P2）：文档模式与目录预算灰度开关。
+	// DocumentMode 控制 Codex 兼容技能的自动文档模式识别：
+	//   - "auto"：按 IsDocumentMode() 规则（Codex 格式、无 handler/workflow → 文档模式）；
+	//   - "off"（默认）：保持现状，Codex 技能走 executeDefault 子调用。
+	// 显式声明 execution_mode: document 的技能始终为文档模式，与本开关无关。
+	DocumentMode       string `yaml:"document_mode" mapstructure:"document_mode" env:"SKILLS_RUNTIME_DOCUMENT_MODE"`
+	// CatalogBudgetChars 约束 catalog（技能目录）在上下文中的字符开销。
+	// 默认 8000（镜像 Codex min(8000 字符, 上下文 2%)），0 表示使用默认。
+	CatalogBudgetChars int `yaml:"catalog_budget_chars" mapstructure:"catalog_budget_chars" env:"SKILLS_RUNTIME_CATALOG_BUDGET_CHARS"`
+	// DisciplineBlock 控制是否在 catalog 后附加"How to use skills"纪律块（SK-2）。
+	// 默认开启（*bool 便于显式关闭）；nil/true 开启，显式 false 关闭。
+	DisciplineBlock *bool `yaml:"discipline_block" mapstructure:"discipline_block" env:"SKILLS_RUNTIME_DISCIPLINE_BLOCK"`
+}
+
+// DisciplineBlockEnabled 报告是否应在 catalog 后附加纪律块。
+// nil 或 *true → 开启；显式 false → 关闭。
+func (c *SkillsRuntimeConfig) DisciplineBlockEnabled() bool {
+	if c == nil || c.DisciplineBlock == nil {
+		return true
+	}
+	return *c.DisciplineBlock
+}
+
+// DocumentModeAuto 报告是否开启 Codex 技能的自动文档模式识别。
+// 仅当 DocumentMode=="auto" 时，Codex 兼容技能（无 handler/workflow）才进入文档模式。
+func (c *SkillsRuntimeConfig) DocumentModeAuto() bool {
+	if c == nil {
+		return false
+	}
+	return strings.TrimSpace(c.DocumentMode) == "auto"
+}
+
+// CatalogBudget 返回 catalog 字符预算；未配置时返回默认 8000。
+func (c *SkillsRuntimeConfig) CatalogBudget() int {
+	if c == nil || c.CatalogBudgetChars <= 0 {
+		return 8000
+	}
+	return c.CatalogBudgetChars
 }
 
 // ServerConfig holds basic server info (used by aicli config command).

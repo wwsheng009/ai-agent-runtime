@@ -49,7 +49,8 @@ var brokerToolArgKinds = map[string]map[string]string{
 		"suggestions": toolArgFieldStringOrList,
 	},
 	ToolEnterPlanMode: {
-		"plan_path": toolArgFieldString,
+		"plan_path":        toolArgFieldStringOrList,
+		"plan_write_paths": toolArgFieldStringOrList,
 	},
 	ToolExitPlanMode: {
 		"decision": toolArgFieldString,

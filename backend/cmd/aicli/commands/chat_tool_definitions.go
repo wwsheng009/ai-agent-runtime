@@ -14,22 +14,33 @@ func toolDefinitionsFromSelection(selection *aicliFunctionSelection) []runtimety
 	}
 	definitions := make([]runtimetypes.ToolDefinition, 0, len(selection.Schemas))
 	for _, schema := range selection.Schemas {
-		name, _ := schema["name"].(string)
-		if strings.TrimSpace(name) == "" {
-			continue
+		if definition, ok := toolDefinitionFromSchema(schema); ok {
+			definitions = append(definitions, definition)
 		}
-		description, _ := schema["description"].(string)
-		parameters, _ := schema["parameters"].(map[string]interface{})
-		metadata, _ := schema["metadata"].(map[string]interface{})
-		definitions = append(definitions, runtimetypes.ToolDefinition{
-			Name:        strings.TrimSpace(name),
-			Description: strings.TrimSpace(description),
-			Parameters:  cloneToolParametersSchema(parameters),
-			Metadata:    cloneFunctionSchema(metadata),
-		})
 	}
 	sortToolDefinitions(definitions)
 	return definitions
+}
+
+// toolDefinitionFromSchema 把函数目录 schema（name/description/parameters/metadata）
+// 转换为运行时工具定义；缺少 name 的 schema 视为无效。
+func toolDefinitionFromSchema(schema map[string]interface{}) (runtimetypes.ToolDefinition, bool) {
+	if len(schema) == 0 {
+		return runtimetypes.ToolDefinition{}, false
+	}
+	name, _ := schema["name"].(string)
+	if strings.TrimSpace(name) == "" {
+		return runtimetypes.ToolDefinition{}, false
+	}
+	description, _ := schema["description"].(string)
+	parameters, _ := schema["parameters"].(map[string]interface{})
+	metadata, _ := schema["metadata"].(map[string]interface{})
+	return runtimetypes.ToolDefinition{
+		Name:        strings.TrimSpace(name),
+		Description: strings.TrimSpace(description),
+		Parameters:  cloneToolParametersSchema(parameters),
+		Metadata:    cloneFunctionSchema(metadata),
+	}, true
 }
 
 func toolDefinitionsToSchemas(defs []runtimetypes.ToolDefinition) []map[string]interface{} {

@@ -4,7 +4,8 @@
 //
 // 覆盖口径：
 // - 二级候选点选（source="pick"）只回填 `/skill <name> ` 到草稿，**不直接执行**；
-// - 提交 `/skill <name> <prompt>`（source="submit"）才进入执行器，prompt 透传后端；
+// - 提交 `/skill <name> <prompt>`（source="submit"）才进入执行器，prompt 透传
+//   回合提交回调（P2 回合化；宿主持有该回调时不走 executeSkill REST）；
 // - 弹窗点选与菜单点选共用同一回填入口（`selectSkill`）；
 // - `/skill` 无参数提交仍打开弹窗（原语义不回归）。
 
@@ -159,20 +160,18 @@ describe("useComposerCommandSurface /skill 点选语义", () => {
     expect(current().commandResult).toBeNull();
   });
 
-  it("提交 `/skill <name> <prompt>`（submit）才执行，prompt 透传执行器", async () => {
-    executeSkillMock.mockResolvedValue({});
+  it("提交 `/skill <name> <prompt>`（submit）才提交回合，prompt 透传宿主", async () => {
+    const onRunSkillTurn = vi.fn();
     const onDraftChange = vi.fn();
-    await render({ onDraftChange });
+    await render({ onDraftChange, onRunSkillTurn });
 
     await act(async () => {
       current().onCommand(skillCommand(), "translate 把这段翻译成中文", "submit");
     });
     await flush();
 
-    expect(executeSkillMock).toHaveBeenCalledWith("translate", {
-      prompt: "把这段翻译成中文",
-      sessionId: "session-1",
-    });
+    expect(onRunSkillTurn).toHaveBeenCalledWith("translate", "把这段翻译成中文");
+    expect(executeSkillMock).not.toHaveBeenCalled();
     // 回填只属于「点选」；提交不追加草稿（清空由 composer 提交路径负责）。
     expect(onDraftChange).not.toHaveBeenCalled();
   });

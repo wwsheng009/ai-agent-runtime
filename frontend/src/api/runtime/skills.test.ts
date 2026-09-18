@@ -8,6 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  executeSkill,
   getHotReloadStats,
   getRuntimeSkillDetail,
   getRuntimeSkillsStats,
@@ -297,5 +298,39 @@ describe("skills API 调用", () => {
 
     expect(isSkillsUnavailable(unavailable)).toBe(true);
     expect(isSkillsForbidden(unavailable)).toBe(false);
+  });
+
+  it("执行请求把 camelCase 参数映射为后端契约字段（session_id）", async () => {
+    respondWith({ skill: "team/review skill", status: "completed", session_id: "session-1" });
+
+    await executeSkill("team/review skill", {
+      prompt: "检查这段 diff",
+      sessionId: "session-1",
+      context: { workspace: "E:/repo" },
+      options: { execution_mode: "model" },
+    });
+
+    expect(calls).toHaveLength(1);
+    const url = new URL(calls[0].url, "http://runtime.test");
+    expect(url.pathname).toBe("/api/runtime/skills/team%2Freview%20skill/execute");
+    expect(calls[0].init?.method).toBe("POST");
+
+    const body = JSON.parse(String(calls[0].init?.body));
+    expect(body).toEqual({
+      prompt: "检查这段 diff",
+      session_id: "session-1",
+      context: { workspace: "E:/repo" },
+      options: { execution_mode: "model" },
+    });
+    // 不透传 camelCase：Go json 会把它当未知字段静默丢弃，导致执行落进新建会话。
+    expect(body.sessionId).toBeUndefined();
+  });
+
+  it("执行请求无参数时发送空对象，不伪造字段", async () => {
+    respondWith({ skill: "code-review", status: "completed" });
+
+    await executeSkill("code-review");
+
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({});
   });
 });

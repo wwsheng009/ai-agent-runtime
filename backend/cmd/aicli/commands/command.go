@@ -117,6 +117,13 @@ func dispatchChatCommand(session *ChatSession, command string, noInteractive boo
 					printfDirectInteractiveOutput(session, "错误: %v\n", err)
 				}
 			}
+			if renderErr == nil && result.SendSkillTurn != nil && session != nil {
+				// /skill 默认路径：命令本身不渲染单元，登记一次性 pin 后经既有
+				// send 管线提交普通回合；pin 只对这条 send 生效。
+				if err := sendSkillTurnRequest(session, result.SendSkillTurn); err != nil {
+					printfDirectInteractiveOutput(session, "错误: %v\n", err)
+				}
+			}
 			if renderErr == nil && result.RestoreComposerDraft != "" && session != nil {
 				// /retry is a command-cell result followed by a Composer mutation.
 				// Keep that effect after the command commit so retained transcript

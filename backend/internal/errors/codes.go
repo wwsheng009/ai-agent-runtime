@@ -93,6 +93,10 @@ const (
 	ErrSkillLoadFailed   ErrorCode = "SKILL_LOAD_FAILED"
 	ErrInvalidManifest   ErrorCode = "INVALID_MANIFEST"
 	ErrToolNotRegistered ErrorCode = "TOOL_NOT_REGISTERED"
+	// ErrSkillUnavailable 表示技能存在但依赖不满足（如声明依赖的工具未在
+	// 当前运行时 surface 注册），因此不进入可执行集合。错误 context 携带
+	// missing_tools/reason/path/scope/hint，调用方据此给出可操作引导（SK-4）。
+	ErrSkillUnavailable ErrorCode = "SKILL_UNAVAILABLE"
 
 	// 验证错误
 	ErrValidationFailed ErrorCode = "VALIDATION_FAILED"

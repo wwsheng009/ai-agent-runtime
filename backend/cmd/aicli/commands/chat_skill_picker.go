@@ -128,11 +128,13 @@ func buildSkillPickerFullScreenItems(skills []aicliFunctionDescriptorReport) []u
 }
 
 // executeStructuredSkillCommand is the unified interactive entry point for
-// `/skill <name> <prompt>`. It owns the whole command: resolution, argument
-// parsing, authorization and execution all reuse the legacy direct-invoke
-// chain, but the result is rendered as one unified command cell instead of raw
-// stdout. The invocation-started supplement stays surface-aware (or is skipped
-// for non-interactive projections) exactly like the legacy path.
+// `/skill <name> <prompt>`. By default it no longer executes the skill: it
+// resolves and validates the invocation and returns a SendSkillTurn effect, so
+// dispatch submits a normal chat turn whose per-turn pin injects the skill's
+// ProgramGuide and overlays the skill function plus its declared programs onto
+// the turn function surface — the model then chooses which programs to call.
+// `/skill --direct <name> <prompt>` keeps the legacy deterministic path
+// (executeDirectFunction rendered as one unified command cell).
 func executeStructuredSkillCommand(session *ChatSession, command string) (CommandResult, bool) {
 	if session == nil {
 		return commandErrorResult(fmt.Errorf("当前没有活动会话")), true
@@ -143,9 +145,10 @@ func executeStructuredSkillCommand(session *ChatSession, command string) (Comman
 
 	payload, jsonOutput := extractCommandArgumentOptions(command)
 	jsonOutput = jsonOutput || shouldUseSessionJSONCommandOutput(session)
+	payload, directRequested := stripSkillDirectOption(payload)
 	requestedName, rawPrompt := splitCommandNameAndRemainder(payload)
 	if requestedName == "" {
-		return commandTextResult("错误: 需要指定 skill 名称\n用法: /skill <name> <prompt> 或 /skill <name> {\"prompt\":\"...\"}"), true
+		return commandTextResult("错误: 需要指定 skill 名称\n用法: /skill [--direct] <name> <prompt> 或 /skill <name> {\"prompt\":\"...\"}"), true
 	}
 
 	resolvedName, _, err := resolveDirectCallableFunctionName(session, requestedName, true)
@@ -156,22 +159,35 @@ func executeStructuredSkillCommand(session *ChatSession, command string) (Comman
 	if err != nil {
 		return commandErrorResult(err), true
 	}
-	args, err = authorizeDirectFunctionInvocation(session, resolvedName, args, !jsonOutput)
-	if err != nil {
-		return commandErrorResult(err), true
+
+	if directRequested {
+		args, err = authorizeDirectFunctionInvocation(session, resolvedName, args, !jsonOutput)
+		if err != nil {
+			return commandErrorResult(err), true
+		}
+		renderDirectSkillInvocationStarted(session, command, requestedName, resolvedName, args, jsonOutput)
+		report, err := executeDirectFunction(session, requestedName, resolvedName, args)
+		if err != nil {
+			return commandErrorResult(err), true
+		}
+
+		text := formatDirectFunctionInvokeReport(report, jsonOutput)
+		if text == "" {
+			text = fmt.Sprintf("Skill %s 执行完成", resolvedName)
+		}
+		return commandTextResult(strings.TrimRight(text, "\n")), true
 	}
 
-	renderDirectSkillInvocationStarted(session, command, requestedName, resolvedName, args, jsonOutput)
-	report, err := executeDirectFunction(session, requestedName, resolvedName, args)
-	if err != nil {
-		return commandErrorResult(err), true
-	}
-
-	text := formatDirectFunctionInvokeReport(report, jsonOutput)
-	if text == "" {
-		text = fmt.Sprintf("Skill %s 执行完成", resolvedName)
-	}
-	return commandTextResult(strings.TrimRight(text, "\n")), true
+	// 默认路径：不渲染命令单元、不直执。登记一次性 pin 后由 dispatch 经既有 send
+	// 管线提交普通 chat 回合；pin 只属于这一个回合。
+	return CommandResult{
+		Action: CommandContinue,
+		SendSkillTurn: &SendSkillTurnRequest{
+			SkillName:     resolvedName,
+			Prompt:        rawPrompt,
+			VisiblePrompt: buildSkillTurnVisiblePrompt(requestedName, rawPrompt),
+		},
+	}, true
 }
 
 // executeStructuredSkillsMenuCommand is the unified interactive entry point for

@@ -231,11 +231,17 @@ func (l *Loader) DiscoverAllWithRegistry(dirs []string, registry *Registry) erro
 func (l *Loader) registerSkills(skills []*Skill, registry *Registry) error {
 	var errs []error
 	for _, skill := range skills {
+		if skill == nil {
+			continue
+		}
 		if err := registry.Register(skill); err != nil {
 			// 工具未在当前 surface 注册属于软失败：跳过该 skill（例如 tools
 			// 被禁用或运行时未暴露 fetch/bash/view 等工具时，声明依赖这些工具
-			// 的 skill 不可用），但不阻断其余 skills 的注册。
+			// 的 skill 不可用），但不阻断其余 skills 的注册。SK-4：跳过并不
+			// 丢诊断——把缺失依赖登记到 registry 的 unavailable 集合，使列表/
+			// 统计可见、点名时返回可操作引导。
 			if errors.Is(err, errors.ErrToolNotRegistered) {
+				registry.RecordUnavailable(unavailableSkillFromSkill(skill, missingToolsFromError(err)))
 				continue
 			}
 			errs = append(errs, err)
@@ -256,8 +262,10 @@ func (l *Loader) registerSummaryStubs(summaries []*SkillSummary, registry *Regis
 			continue
 		}
 		if err := registry.Register(summary.ToSkillStub()); err != nil {
-			// 同上：工具缺失时跳过该轻量 stub，不阻断整体注册。
+			// 同上：工具缺失时跳过该轻量 stub，不阻断整体注册；同时登记
+			// unavailable 记录以保持 discovery 列表与可执行集合的一致性诊断。
 			if errors.Is(err, errors.ErrToolNotRegistered) {
+				registry.RecordUnavailable(unavailableSkillFromSummary(summary, missingToolsFromError(err)))
 				continue
 			}
 			errs = append(errs, err)
@@ -316,6 +324,11 @@ func (l *Loader) CheckSkill(skill *Skill) error {
 	// 使用验证器检查
 	if err := l.parser.validate(skill); err != nil {
 		return err
+	}
+
+	// SK-7：文档模式技能没有执行器，依赖声明只是指引，不做工具可用性校验。
+	if skill.IsDocumentMode() {
+		return nil
 	}
 
 	// 检查工具是否可用

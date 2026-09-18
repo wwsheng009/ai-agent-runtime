@@ -137,7 +137,7 @@ func handleDirectSkillCommand(session *ChatSession, command string) bool {
 		return false
 	}
 
-	resolvedName, _, err := resolveDirectCallableFunctionName(session, requestedName, true)
+	resolvedName, isSkill, err := resolveDirectCallableFunctionName(session, requestedName, true)
 	if err != nil {
 		fmt.Println(formatCommandError("错误: "+err.Error(), jsonOutput))
 		return false
@@ -151,6 +151,21 @@ func handleDirectSkillCommand(session *ChatSession, command string) bool {
 	if err != nil {
 		fmt.Println(formatCommandError("错误: "+err.Error(), jsonOutput))
 		return false
+	}
+
+	// 方案 A：说明型技能不另起技能桥 LLM 交互，而是把技能指令注入当前对话，
+	// 由主循环的模型用常规工具面决定如何执行（与模型调用 skill__x 的语义一致）。
+	if isSkill {
+		if injected, ok := buildSkillMainLoopInjection(session, resolvedName, args); ok {
+			if queue := ensureChatBufferedInputQueue(session); queue != nil {
+				result := queue.routeInputText(injected)
+				if result.queued() || result.Disposition == chatInputRoutePriority {
+					session.wakeComposerRead()
+					fmt.Println(fmt.Sprintf("已加载 skill「%s」指令并注入当前对话，由主循环执行", requestedName))
+					return false
+				}
+			}
+		}
 	}
 
 	renderDirectSkillInvocationStarted(session, command, requestedName, resolvedName, args, jsonOutput)

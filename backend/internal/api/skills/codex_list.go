@@ -36,6 +36,14 @@ type codexSkillsListResponse struct {
 	GroupCount  int                    `json:"group_count"`
 	ForceReload bool                   `json:"force_reload"`
 	CacheHit    bool                   `json:"cache_hit,omitempty"`
+	// SK-4：注册表中因工具缺失被跳过的技能。它是加性分组，不影响既有
+	// results/count 的 discovery 语义；每次响应都从注册表实时取，避免缓存
+	// 携带过期的诊断信息。
+	Unavailable      []skill.UnavailableSkill `json:"unavailable,omitempty"`
+	UnavailableCount int                      `json:"unavailable_count"`
+	// SK-5：list 对"模型将看到的 catalog"的投影——与注入共用同一
+	// BuildCatalogEntries + RenderSkillCatalogWithOptions，口径不会漂移。
+	Catalog *skillCatalogProjection `json:"catalog,omitempty"`
 }
 
 type codexSkillsListPlan struct {
@@ -88,6 +96,8 @@ func (h *Handler) ListCodexSkills(w http.ResponseWriter, r *http.Request) {
 		if cached, ok := h.getCodexSkillsListCache(cacheKey); ok {
 			cached.ForceReload = false
 			cached.CacheHit = true
+			h.attachUnavailableSkills(&cached)
+			h.attachCatalogProjection(&cached)
 			h.auditCodexSkillsList(r, cached)
 			h.writeJSON(w, http.StatusOK, cached)
 			return
@@ -116,6 +126,8 @@ func (h *Handler) ListCodexSkills(w http.ResponseWriter, r *http.Request) {
 		ForceReload: req.ForceReload,
 		CacheHit:    false,
 	}
+	h.attachUnavailableSkills(&response)
+	h.attachCatalogProjection(&response)
 	h.setCodexSkillsListCache(cacheKey, response, cacheVersion)
 	h.auditCodexSkillsList(r, response)
 	h.writeJSON(w, http.StatusOK, response)
@@ -139,6 +151,7 @@ func (h *Handler) auditCodexSkillsList(r *http.Request, response codexSkillsList
 		logger.Bool("force_reload", response.ForceReload),
 		logger.Int("count", response.Count),
 		logger.Int("group_count", response.GroupCount),
+		logger.Int("unavailable_count", response.UnavailableCount),
 	}
 	if requestID != "" {
 		fields = append(fields, logger.RequestID(requestID))

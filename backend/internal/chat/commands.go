@@ -9,6 +9,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // Command represents a session actor command.
@@ -24,6 +25,11 @@ type SubmitPrompt struct {
 	ImageArtifactDir string
 	RunMeta          *team.RunMeta
 	RouteOverride    *RunRouteOverride
+	// TurnSystemMessages 是本回合一次性 system 注入（如 /skill 的 ProgramGuide）。
+	TurnSystemMessages []runtimetypes.Message
+	// TurnPinnedTools 是本回合一次性工具叠加（如 /skill 的 skill 函数与程序），
+	// 只影响本次 run，不写回会话级稳定工具面。
+	TurnPinnedTools []runtimetypes.ToolDefinition
 	// TriggerTurnAuto marks a prompt submitted by the P0-3b trigger_turn drain.
 	TriggerTurnAuto bool
 	Reply           chan SubmitResult

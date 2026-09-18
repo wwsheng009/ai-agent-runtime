@@ -73,63 +73,68 @@ type ChatSession struct {
 	// （append-only session_messages 全量回放）。它与 Messages 严格分离：
 	// 模型上下文始终使用 Messages，ResumeHistory 只供用户可见的历史回放
 	// （/resume、启动恢复等），避免把完整长对话塞进模型上下文。
-	ResumeHistory                   []runtimetypes.Message
-	HTTPClient                      *http.Client
-	cancelCtx                       context.Context               // 可取消的上下文
-	cancelFunc                      context.CancelFunc            // 取消函数
-	composerWakeMu                  sync.Mutex                    // 保护 composer 读取唤醒取消
-	composerWakeCancel              context.CancelFunc            // 当前 composer 读取的唤醒取消
-	interrupted                     atomic.Bool                   // 是否被中断（原子操作，避免竞态）
-	interruptCleanupMu              sync.Mutex                    // 保护当前中断清理完成信号
-	interruptCleanupDone            chan struct{}                 // 阻止下一轮与上一轮异步清理交错
-	FunctionCatalog                 *aicliFunctionCatalog         // 统一管理 builtin tools + skills + schema cache
-	FunctionRegistry                *functions.FunctionRegistry   // Function 注册表
-	FunctionBuilder                 functions.FunctionCallBuilder // 协议对应的 function/tool builder
-	BuiltinSchemas                  []map[string]interface{}      // 预构建的非 skill function schemas
-	stableSharedToolSessionID       string                        // shared executor 会话级稳定工具面所属 runtime session
-	stableSharedToolSelection       *aicliFunctionSelection       // shared executor 会话级稳定工具面快照，避免跨请求动态 tools
-	Logger                          *ChatLogger                   // 聊天日志记录器
-	Formatter                       *formatter.MarkdownFormatter  // Markdown 格式化器
-	Layout                          *ui.Layout                    // 屏幕布局
-	InputBox                        *ui.InputBox                  // 输入框
-	TokenCount                      int                           // 当前会话累计的真实 LLM API token 使用量，用于 /status 的 Token usage
-	InputTokenCount                 int                           // 当前会话累计 prompt/input tokens，用于状态栏 in 计数
-	OutputTokenCount                int                           // 当前会话累计 completion/output tokens，用于状态栏 out 计数
-	ContextTokenCount               int                           // 当前活跃上下文的 token 快照，用于 ctx used 与 compact 观察值
-	ContextWindowTokenCount         int                           // 当前模型上下文窗口大小
-	TurnContextTokenCount           int                           // 当前 turn 内请求上下文 token 诊断累计，仅用于调试
-	providerContextTokenCount       int                           // provider usage 返回的当前活跃上下文快照，等待 runtime history 同步后保留
-	providerContextWindowTokenCount int                           // provider usage 对应的上下文窗口大小
-	MsgCount                        int                           // 消息计数
-	StatusMessageCount              int                           // 状态栏展示的当前上下文消息数
-	TurnRequestCount                int                           // 当前 turn 内的请求计数
-	turnPrimed                      bool                          // 当前用户 turn 已在 sendMessage 入口计数，等待首个 request scope 消费
-	SessionManager                  *runtimechat.SessionManager   // 持久化会话管理器
-	RuntimeSession                  *runtimechat.Session          // 当前持久化会话
-	runtimeSessionUnpersisted       bool                          // 新会话仅在内存中，尚未写入 session store
-	SessionUserID                   string                        // 当前会话所属用户
-	SessionDir                      string                        // 会话存储目录
-	Ephemeral                       bool                          // 会话仅驻留内存，不写入会话文件
-	SessionFilter                   ChatSessionListFilter         // 会话列表筛选条件
-	NoInteractive                   bool                          // 是否为非交互模式
-	JSONOutput                      bool                          // 是否输出 JSON
-	JSONEnvelope                    bool                          // JSON 输出是否使用 envelope
-	KeyHandler                      *ui.KeyHandler                // 键盘事件处理器（ESC 键中断）
-	MCPEnabled                      bool                          // 是否启用 MCP
-	MCPStatus                       *MCPStatus                    // MCP 状态
-	SkillsBinding                   *skillsRuntimeBinding         // Skills 运行时绑定
-	SkillsMode                      string                        // Skills 暴露模式
-	SkillsDebug                     bool                          // Skills 调试输出
-	Config                          *config.Config                // 载入的 aicli 全局配置，用于偏好持久化与 provider/model 解析
-	RetryConfig                     RetryConfig                   // 重试配置
-	RequestTimeout                  time.Duration                 // 请求超时（0 表示不设置）
-	OutputFormat                    string                        // 输出格式（interactive|text|json）
-	InputReader                     *bufio.Reader                 // 共享 stdin reader，避免交互阶段重复缓冲吞掉后续输入
-	InputQueue                      *chatInputQueue               // interactive line queue fed by stdin pump
-	ProfileReference                string                        // 用户指定或配置解析出的 profile 引用
-	ProfileName                     string                        // 当前 profile 名称
-	ProfileAgent                    string                        // 当前 profile agent
-	ProfileRoot                     string                        // 当前 profile 根目录
+	ResumeHistory             []runtimetypes.Message
+	HTTPClient                *http.Client
+	cancelCtx                 context.Context                      // 可取消的上下文
+	cancelFunc                context.CancelFunc                   // 取消函数
+	composerWakeMu            sync.Mutex                           // 保护 composer 读取唤醒取消
+	composerWakeCancel        context.CancelFunc                   // 当前 composer 读取的唤醒取消
+	interrupted               atomic.Bool                          // 是否被中断（原子操作，避免竞态）
+	interruptCleanupMu        sync.Mutex                           // 保护当前中断清理完成信号
+	interruptCleanupDone      chan struct{}                        // 阻止下一轮与上一轮异步清理交错
+	FunctionCatalog           *aicliFunctionCatalog                // 统一管理 builtin tools + skills + schema cache
+	FunctionRegistry          *functions.FunctionRegistry          // Function 注册表
+	FunctionBuilder           functions.FunctionCallBuilder        // 协议对应的 function/tool builder
+	BuiltinSchemas            []map[string]interface{}             // 预构建的非 skill function schemas
+	stableSharedToolSessionID string                               // shared executor 会话级稳定工具面所属 runtime session
+	stableSharedToolSelection *aicliFunctionSelection              // shared executor 会话级稳定工具面快照，避免跨请求动态 tools
+	pendingSkillTurn          atomic.Pointer[SendSkillTurnRequest] // /skill 回合一次性 pin：dispatch 登记，回合开始消费即焚
+	// SK-3 观测去重：回合内已发布的技能调用（键含 kind）。`/skill` 派发时发布显式
+	// 事件，模型随后再点名同一技能函数时不重复发；每回合 sendMessage 入口重置。
+	skillInvocationSeenMu           sync.Mutex
+	skillInvocationSeen             map[string]struct{}
+	Logger                          *ChatLogger                  // 聊天日志记录器
+	Formatter                       *formatter.MarkdownFormatter // Markdown 格式化器
+	Layout                          *ui.Layout                   // 屏幕布局
+	InputBox                        *ui.InputBox                 // 输入框
+	TokenCount                      int                          // 当前会话累计的真实 LLM API token 使用量，用于 /status 的 Token usage
+	InputTokenCount                 int                          // 当前会话累计 prompt/input tokens，用于状态栏 in 计数
+	OutputTokenCount                int                          // 当前会话累计 completion/output tokens，用于状态栏 out 计数
+	ContextTokenCount               int                          // 当前活跃上下文的 token 快照，用于 ctx used 与 compact 观察值
+	ContextWindowTokenCount         int                          // 当前模型上下文窗口大小
+	TurnContextTokenCount           int                          // 当前 turn 内请求上下文 token 诊断累计，仅用于调试
+	providerContextTokenCount       int                          // provider usage 返回的当前活跃上下文快照，等待 runtime history 同步后保留
+	providerContextWindowTokenCount int                          // provider usage 对应的上下文窗口大小
+	MsgCount                        int                          // 消息计数
+	StatusMessageCount              int                          // 状态栏展示的当前上下文消息数
+	TurnRequestCount                int                          // 当前 turn 内的请求计数
+	turnPrimed                      bool                         // 当前用户 turn 已在 sendMessage 入口计数，等待首个 request scope 消费
+	SessionManager                  *runtimechat.SessionManager  // 持久化会话管理器
+	RuntimeSession                  *runtimechat.Session         // 当前持久化会话
+	runtimeSessionUnpersisted       bool                         // 新会话仅在内存中，尚未写入 session store
+	SessionUserID                   string                       // 当前会话所属用户
+	SessionDir                      string                       // 会话存储目录
+	Ephemeral                       bool                         // 会话仅驻留内存，不写入会话文件
+	SessionFilter                   ChatSessionListFilter        // 会话列表筛选条件
+	NoInteractive                   bool                         // 是否为非交互模式
+	JSONOutput                      bool                         // 是否输出 JSON
+	JSONEnvelope                    bool                         // JSON 输出是否使用 envelope
+	KeyHandler                      *ui.KeyHandler               // 键盘事件处理器（ESC 键中断）
+	MCPEnabled                      bool                         // 是否启用 MCP
+	MCPStatus                       *MCPStatus                   // MCP 状态
+	SkillsBinding                   *skillsRuntimeBinding        // Skills 运行时绑定
+	SkillsMode                      string                       // Skills 暴露模式
+	SkillsDebug                     bool                         // Skills 调试输出
+	Config                          *config.Config               // 载入的 aicli 全局配置，用于偏好持久化与 provider/model 解析
+	RetryConfig                     RetryConfig                  // 重试配置
+	RequestTimeout                  time.Duration                // 请求超时（0 表示不设置）
+	OutputFormat                    string                       // 输出格式（interactive|text|json）
+	InputReader                     *bufio.Reader                // 共享 stdin reader，避免交互阶段重复缓冲吞掉后续输入
+	InputQueue                      *chatInputQueue              // interactive line queue fed by stdin pump
+	ProfileReference                string                       // 用户指定或配置解析出的 profile 引用
+	ProfileName                     string                       // 当前 profile 名称
+	ProfileAgent                    string                       // 当前 profile agent
+	ProfileRoot                     string                       // 当前 profile 根目录
 	// AgentSourcePath is the winning agentdef/profile agent config path
 	// (or builtin:<name>) that produced the active role binding.
 	AgentSourcePath string

@@ -27,17 +27,22 @@ type SkillSource struct {
 // Skill 技能定义
 type Skill struct {
 	// 基本信息
-	Name         string   `yaml:"name" json:"name"`
-	Description  string   `yaml:"description" json:"description"`
-	ShortDescription string `yaml:"shortDescription,omitempty" json:"shortDescription,omitempty"`
-	Version      string   `yaml:"version" json:"version"`
-	Category     string   `yaml:"category" json:"category"`
-	Capabilities []string `yaml:"capabilities" json:"capabilities"`
-	Tags         []string `yaml:"tags" json:"tags"`
+	Name             string   `yaml:"name" json:"name"`
+	Description      string   `yaml:"description" json:"description"`
+	ShortDescription string   `yaml:"shortDescription,omitempty" json:"shortDescription,omitempty"`
+	Version          string   `yaml:"version" json:"version"`
+	Category         string   `yaml:"category" json:"category"`
+	Capabilities     []string `yaml:"capabilities" json:"capabilities"`
+	Tags             []string `yaml:"tags" json:"tags"`
 
 	// 触发规则
 	Triggers    []Trigger `yaml:"triggers" json:"triggers"`
 	DirectRoute *bool     `yaml:"directRoute,omitempty" json:"directRoute,omitempty"`
+	// ExecutionMode 控制 skill 的执行形态：
+	//   "" / "auto"   -> 默认链路（Handler → Workflow → executeDefault）
+	//   "model"       -> 交由模型选择程序
+	//   "document"    -> 指令文档、无执行器（SK-7）
+	ExecutionMode string `yaml:"execution_mode,omitempty" json:"execution_mode,omitempty"`
 
 	// 工具列表 (引用 MCP tools)
 	Tools []string `yaml:"tools" json:"tools"`
@@ -129,6 +134,36 @@ func (s *Skill) AllowsDirectRoute() bool {
 		return *s.DirectRoute
 	}
 	return !s.HasWorkflow()
+}
+
+// IsDocumentMode 报告 skill 是否以"指令文档、无执行器"形态运行（SK-7）。
+// 显式声明 execution_mode: document，或自动识别为 Codex 兼容技能且无
+// handler/workflow（此时文档正文不再做为独立子调用的 system prompt）。
+// 该方法不受配置灰度控制，仅反映 skill 自身声明与结构；调用处需用
+// IsDocumentModeEnabled 在配置关闭时禁用自动识别（见 SK-7）。
+func (s *Skill) IsDocumentMode() bool {
+	return s.IsDocumentModeEnabled(true)
+}
+
+// IsDocumentModeEnabled 在配置约束下报告文档模式是否生效。
+// autoEnabled 来自 skills.document_mode 配置（auto 时为 true）。
+// 显式 execution_mode: document 恒生效；自动识别仅在 autoEnabled 时生效。
+func (s *Skill) IsDocumentModeEnabled(autoEnabled bool) bool {
+	if s == nil {
+		return false
+	}
+	if s.ExecutionMode == ExecutionModeDocument {
+		return true
+	}
+	if s.ExecutionMode != ExecutionModeAuto {
+		return false
+	}
+	if !autoEnabled {
+		return false
+	}
+	// 自动识别：Codex 格式、无自定义处理器、无工作流。
+	return s.Source != nil && s.Source.Format == SkillSourceFormatCodex &&
+		!s.HasCustomHandler() && !s.HasWorkflow()
 }
 
 // SetSource 设置技能来源信息

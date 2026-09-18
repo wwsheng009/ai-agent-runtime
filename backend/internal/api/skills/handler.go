@@ -87,6 +87,10 @@ const (
 	skillHotReloadActionUpdated       = "skill_hot_reload_updated"
 	skillHotReloadActionRemoved       = "skill_hot_reload_removed"
 	skillsChangedEventType            = "skills.changed"
+	// skillsInvokedEventType 是隐式/显式技能调用命中时发布的运行时事件（SK-3）。
+	skillsInvokedEventType = skill.SkillInvokedEventType
+	// skillsInvokedEnabled 控制是否启用隐式调用判定与事件发布（SK-3 灰度开关）。
+	skillsInvokedEnabled = true
 
 	apiProfileContextReference = sessionmeta.LegacyAPIProfileReference
 	apiProfileContextName      = sessionmeta.ProfileName
@@ -491,6 +495,14 @@ func cloneAICLIRoutingConfig(config *agentconfig.Config) *agentconfig.Config {
 		cloned.AICLI.Teams = &agentconfig.AICLITeamsConfig{
 			Routing: cloneAgentRoutingConfig(config.AICLI.Teams.Routing),
 		}
+	}
+	// SkillsRuntime 必须随快照保留：handler 侧 catalog 注入（SK-1/SK-2）与
+	// catalog_budget_chars / discipline_block / document_mode 三个灰度开关都经
+	// runtimeSkillsConfig() 读取本字段；漏拷会让注入与开关静默失效（2026-09-18
+	// 修复——runtime-server 唯一注入点就是 SetAICLIConfig）。
+	if config.SkillsRuntime != nil {
+		skillsRuntime := *config.SkillsRuntime
+		cloned.SkillsRuntime = &skillsRuntime
 	}
 	return cloned
 }
@@ -965,6 +977,14 @@ func (h *Handler) ListSkills(w http.ResponseWriter, r *http.Request) {
 		"skills": hydratedSkills,
 		"count":  len(hydratedSkills),
 	}
+	// SK-4：加性返回 unavailable 分组，使"列表可见"与"可执行集合"一致可解释。
+	unavailable := unavailableSkillsForResponse(h.skillRegistry, layer, dir)
+	response["unavailable"] = unavailable
+	response["unavailable_count"] = len(unavailable)
+	// SK-5：注册表口径的 catalog 投影——前端展示与模型所见同一渲染/预算口径。
+	if projection := h.catalogProjectionFromRegistry(); projection != nil {
+		response["catalog"] = projection
+	}
 
 	h.writeJSON(w, http.StatusOK, response)
 }
@@ -976,6 +996,12 @@ func (h *Handler) GetSkill(w http.ResponseWriter, r *http.Request) {
 
 	skillItem, exists := h.skillRegistry.Get(name)
 	if !exists {
+		// SK-4：未注册但命中 unavailable 集合时给出可操作引导，而不是
+		// 只报 "skill not found"（列表里仍能看到该技能）。
+		if unavailable, ok := h.skillRegistry.LookupUnavailable(name); ok {
+			h.writeUnavailableSkillError(w, unavailable)
+			return
+		}
 		h.writeError(w, http.StatusNotFound, errors.New(errors.ErrSkillNotFound,
 			fmt.Sprintf("skill not found: %s", name)))
 		return
@@ -1190,6 +1216,12 @@ func (h *Handler) ExecuteSkill(w http.ResponseWriter, r *http.Request) {
 
 	skillItem, exists := h.skillRegistry.Get(name)
 	if !exists {
+		// SK-4：点名执行 unavailable 技能时返回 409 + 结构化引导
+		//（missing_tools / reason / hint），对齐 Codex 的安装提示语义。
+		if unavailable, ok := h.skillRegistry.LookupUnavailable(name); ok {
+			h.writeUnavailableSkillError(w, unavailable)
+			return
+		}
 		h.writeError(w, http.StatusNotFound, errors.New(errors.ErrSkillNotFound,
 			fmt.Sprintf("skill not found: %s", name)))
 		return
@@ -1238,6 +1270,9 @@ func (h *Handler) ExecuteSkill(w http.ResponseWriter, r *http.Request) {
 	}
 
 	executor := skill.NewExecutor(h.skillRegistry, h.mcpManager, h.llmRuntime)
+	if skillsInvokedEnabled {
+		executor.SetImplicitInvocationIndex(h.implicitInvocationIndex())
+	}
 	result, err := executor.Execute(ctx, skillItem, runtimeReq)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
@@ -1248,6 +1283,7 @@ func (h *Handler) ExecuteSkill(w http.ResponseWriter, r *http.Request) {
 		_ = h.persistChatTurn(ctx, session, executeReq.Prompt, result.Output, nil)
 	}
 	h.recordUsage(usageScope, "execute", skillItem.Name, result.Success, estimatedPromptTokens, result.Usage, result.Output)
+	h.publishSkillInvokedEvents(r, sessionID(session), result.ImplicitInvocations)
 
 	response := map[string]interface{}{
 		"skill":      skillItem.Name,
@@ -1420,6 +1456,11 @@ func (h *Handler) SearchSkills(w http.ResponseWriter, r *http.Request) {
 		"resolved_mode":  string(resolvedMode),
 		"used_embedding": searchUsesEmbedding(hydratedMatches),
 	}
+	// SK-4：搜索契约同样加性暴露 unavailable 技能（按名称/缺失工具匹配），
+	// 避免搜索时它们再次"消失"。
+	unavailableMatches := searchUnavailableSkills(h.skillRegistry, query, layer, dir, limit)
+	response["unavailable"] = unavailableMatches
+	response["unavailable_count"] = len(unavailableMatches)
 	h.recordSearchTelemetry(query, mode, resolvedMode, len(hydratedMatches), response["used_embedding"].(bool))
 
 	h.writeJSON(w, http.StatusOK, response)
@@ -1468,32 +1509,36 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Messages                   []map[string]string   `json:"messages"`
-		Profile                    string                `json:"profile,omitempty"`
-		Agent                      string                `json:"agent,omitempty"`
-		Provider                   string                `json:"provider,omitempty"`
-		Model                      string                `json:"model,omitempty"`
-		ReasoningEffort            string                `json:"reasoning_effort,omitempty"`
-		Thinking                   *types.ThinkingConfig `json:"thinking,omitempty"`
-		SessionID                  string                `json:"session_id,omitempty"`
-		TeamID                     string                `json:"team_id,omitempty"`
-		TaskID                     string                `json:"task_id,omitempty"`
-		UserID                     string                `json:"user_id,omitempty"`
-		TenantID                   string                `json:"tenant_id,omitempty"`
-		ProjectID                  string                `json:"project_id,omitempty"`
-		WorkspacePath              string                `json:"workspace_path,omitempty"`
-		MaxSteps                   int                   `json:"max_steps,omitempty"`
-		EnableRoute                bool                  `json:"enable_routing,omitempty"`
-		EnableReAct                bool                  `json:"enable_react,omitempty"`
-		PlanningMode               string                `json:"planning_mode,omitempty"`
-		ExecutePlannedSubagents    bool                  `json:"execute_planned_subagents,omitempty"`
-		AllowWritePlannedSubagents bool                  `json:"allow_write_planned_subagents,omitempty"`
-		PatchDecisionPolicy        string                `json:"patch_decision_policy,omitempty"`
-		ApproveBlockedPatches      bool                  `json:"approve_blocked_patches,omitempty"`
-		PatchApprovalNote          string                `json:"patch_approval_note,omitempty"`
-		PatchApproval              *agent.PatchApproval  `json:"patch_approval,omitempty"`
-		TurnID                     string                `json:"turn_id,omitempty"`
-		Stream                     bool                  `json:"stream,omitempty"`
+		Messages        []map[string]string   `json:"messages"`
+		Profile         string                `json:"profile,omitempty"`
+		Agent           string                `json:"agent,omitempty"`
+		Provider        string                `json:"provider,omitempty"`
+		Model           string                `json:"model,omitempty"`
+		ReasoningEffort string                `json:"reasoning_effort,omitempty"`
+		Thinking        *types.ThinkingConfig `json:"thinking,omitempty"`
+		SessionID       string                `json:"session_id,omitempty"`
+		TeamID          string                `json:"team_id,omitempty"`
+		TaskID          string                `json:"task_id,omitempty"`
+		UserID          string                `json:"user_id,omitempty"`
+		TenantID        string                `json:"tenant_id,omitempty"`
+		ProjectID       string                `json:"project_id,omitempty"`
+		WorkspacePath   string                `json:"workspace_path,omitempty"`
+		MaxSteps        int                   `json:"max_steps,omitempty"`
+		EnableRoute     bool                  `json:"enable_routing,omitempty"`
+		EnableReAct     bool                  `json:"enable_react,omitempty"`
+		// ExposeSkills：本回合显式暴露的 skill 名称列表。运行时把对应 skill 的说明与
+		// 程序清单注入模型上下文，由模型自行选择调用哪些程序（模型驱动），而不是由
+		// 后端确定性直执行。
+		ExposeSkills               []string             `json:"expose_skills,omitempty"`
+		PlanningMode               string               `json:"planning_mode,omitempty"`
+		ExecutePlannedSubagents    bool                 `json:"execute_planned_subagents,omitempty"`
+		AllowWritePlannedSubagents bool                 `json:"allow_write_planned_subagents,omitempty"`
+		PatchDecisionPolicy        string               `json:"patch_decision_policy,omitempty"`
+		ApproveBlockedPatches      bool                 `json:"approve_blocked_patches,omitempty"`
+		PatchApprovalNote          string               `json:"patch_approval_note,omitempty"`
+		PatchApproval              *agent.PatchApproval `json:"patch_approval,omitempty"`
+		TurnID                     string               `json:"turn_id,omitempty"`
+		Stream                     bool                 `json:"stream,omitempty"`
 		// ResumeOnDisconnect（P4-刷新续传）：客户端断开（页面刷新/关标签）后
 		// 不取消本回合，run 继续执行并把增量/历史照常落库；刷新后的新页面通过
 		// GET /runtime/stream 按游标续传，并依据 /runtime 的 active_turn 重新
@@ -1511,6 +1556,12 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
 			"messages is required"))
 		return
+	}
+
+	// expose_skills 依赖 ReAct 回合把 skill 程序清单交给模型执行：显式暴露 skill 时
+	// 强制打开 ReAct，避免宿主漏配 enable_react 时"文档注入了却没有工具面可用"。
+	if len(req.ExposeSkills) > 0 {
+		req.EnableReAct = true
 	}
 
 	ctx := r.Context()
@@ -1810,6 +1861,12 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			}
 			execSession = execSession.Clone()
 			contextMessages := buildAgentContextMessages(agentContext, workspaceCtx)
+			skillMessages, skillErr := buildSkillExposureMessages(h.skillRegistry, req.ExposeSkills, h.runtimeSkillsConfig())
+			if skillErr != nil {
+				h.writeError(w, http.StatusBadRequest, skillErr)
+				return
+			}
+			contextMessages = append(contextMessages, skillMessages...)
 			execSession.ReplaceHistory(prependContextMessages(historyForAgent, contextMessages))
 			execSession.AddMessage(*types.NewUserMessage(lastMessage))
 
@@ -1821,11 +1878,11 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			// 建议 4（服务端 flush 背压）：provider 按 token 回调，逐帧 flush 会把
 			// 一条普通回复放大成数百次 socket 写，所以这里也用按 tick 合并的写出器
 			// （默认 50ms，见 pacedFlushWriter）。帧内容/顺序/seq 都不变，只改出站
-			// 时刻；defer Close 保证收尾帧一定推出去。
+			// 时刻；收尾 Close 与在途回合释放的先后由下方 releaseActiveTurn 旁的
+			// 同一个 defer 固定（先 flush 再释放，见 2026-09-18 时序修正）。
 			h.prepareSSEHeaders(w)
 			chatFlusher, _ := w.(http.Flusher)
 			pacedChat := newPacedFlushWriter(w, chatFlusher, streamWriteBufferSize, streamFlushTickInterval)
-			defer func() { _ = pacedChat.Close() }()
 			emitter := h.newTrajectoryEmitter(pacedChat, session, turnID)
 			emitter.Emit("meta", map[string]interface{}{
 				"session_id": sessionID(session),
@@ -1947,7 +2004,16 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 					return true
 				},
 			)
-			defer releaseActiveTurn()
+			// 2026-09-18 时序修正：defer 是 LIFO。此前 Close 在 1844 行先注册、
+			// releaseActiveTurn 在 1966 行后注册，于是 release 先执行——paced 缓冲里
+			// 的 orchestration/route/result/done 还没出站，`/runtime` 就已报
+			// `active_turn:null`（实测存在 ≤50ms 窗口）。刷新/新标签页在该窗口按快照
+			// 判定「回合已结束」，而流上终态帧还没到，前端只能靠终态兜底收敛。
+			// 把 Close 收进同一个 defer：先 flush 收尾帧，再释放在途登记。
+			defer func() {
+				_ = pacedChat.Close()
+				releaseActiveTurn()
+			}()
 
 			reactResult, reactErr := a.RunReActWithSession(runCtx, h.llmRuntime, lastMessage, execSession, &agent.LoopReActConfig{
 				MaxSteps:             agentConfig.MaxSteps,
@@ -2252,6 +2318,12 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 
 	if req.EnableReAct && h.llmRuntime != nil {
 		contextMessages := buildAgentContextMessages(agentContext, workspaceCtx)
+		skillMessages, skillErr := buildSkillExposureMessages(h.skillRegistry, req.ExposeSkills, h.runtimeSkillsConfig())
+		if skillErr != nil {
+			h.writeError(w, http.StatusBadRequest, skillErr)
+			return
+		}
+		contextMessages = append(contextMessages, skillMessages...)
 		// execSession 由 chatcore 在内部创建、失败时不返回，因此非流式入口用
 		// 提交点快照做中途落库与失败收尾，保证长 turn 不会整轮丢失。
 		historyCheckpointer := newAgentChatHistoryCheckpointer(h, r, session, nil, contextMessages, turnID)
@@ -7743,6 +7815,101 @@ func (h *Handler) writeJSON(w http.ResponseWriter, statusCode int, data interfac
 	json.NewEncoder(w).Encode(data)
 }
 
+// buildSkillExposureMessages 把请求显式指定的 skill 说明与程序清单投影为系统消息，
+// 让模型先读文档、再自行决定调用 skill 中的哪些程序。与 skill.Executor 的
+// execution_mode=model 共用同一投影（skill.ProgramGuide），避免两套口径漂移。
+//
+// SK-1/SK-2：在 expose_skills 回合前附加全量 catalog（name + description + 定位符）
+// 与纪律块，镜像 Codex 的常驻 directory；catalog 条目永不因预算消失，只裁剪描述。
+// SK-7：文档模式技能（显式 execution_mode: document，或 auto 配置下自动识别）不走
+// ProgramGuide，把 SKILL.md 正文注入上下文，由模型用既有工具自行完成任务。
+func buildSkillExposureMessages(registry *skill.Registry, names []string, cfg *agentconfig.SkillsRuntimeConfig) ([]types.Message, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	if registry == nil {
+		return nil, errors.New(errors.ErrConfigInvalid, "skill registry not configured")
+	}
+	messages := make([]types.Message, 0, len(names)+1)
+	seen := make(map[string]struct{}, len(names))
+
+	// 目录块：仅在配置可用且注册表非空时注入。
+	if catalogMsgs := buildSkillCatalogMessages(registry, cfg); len(catalogMsgs) > 0 {
+		messages = append(messages, catalogMsgs...)
+	}
+
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		item, ok := registry.Get(name)
+		if !ok || item == nil {
+			// SK-4：显式点名（ExposeSkills）一个 unavailable 技能时，
+			// 返回带 missing_tools/hint 的可操作错误，而不是普通 not found。
+			if unavailable, found := registry.LookupUnavailable(name); found {
+				return nil, unavailableSkillError(unavailable)
+			}
+			return nil, fmt.Errorf("skill not found: %s", name)
+		}
+		if hydrated, hydrateErr := registry.Hydrate(item); hydrateErr == nil && hydrated != nil {
+			item = hydrated
+		}
+		// SK-7：文档模式 → 正文注入上下文，不走 ProgramGuide/executeDefault。
+		if item.IsDocumentModeEnabled(cfg != nil && cfg.DocumentModeAuto()) {
+			if body := strings.TrimSpace(item.Body); body != "" {
+				messages = append(messages, *types.NewSystemMessage("## Skill instructions (document mode: " + name + ")\n" + body))
+				continue
+			}
+		}
+		if guide := skill.ProgramGuide(item); guide != "" {
+			messages = append(messages, *types.NewSystemMessage(guide))
+		}
+	}
+	return messages, nil
+}
+
+// buildSkillCatalogMessages 把全量可用技能目录渲染为系统消息（SK-1/SK-2）。
+// 仅在配置可用时注入；catalog 条目永不因预算消失，只裁剪描述。
+func buildSkillCatalogMessages(registry *skill.Registry, cfg *agentconfig.SkillsRuntimeConfig) []types.Message {
+	if registry == nil || cfg == nil {
+		return nil
+	}
+	summaries := registry.ListSummaries()
+	if len(summaries) == 0 {
+		return nil
+	}
+	entries := skill.BuildCatalogEntries(summaries)
+	if len(entries) == 0 {
+		return nil
+	}
+	budget := skill.CatalogBudget{Characters: cfg.CatalogBudget()}
+	body, report := skill.RenderSkillCatalogWithOptions(entries, budget, cfg.DisciplineBlockEnabled())
+	if report.Degraded() {
+		logger.Warn("skill catalog degraded to fit budget", logger.String("report", report.String()))
+	}
+	if strings.TrimSpace(body) == "" {
+		return nil
+	}
+	return []types.Message{*types.NewSystemMessage(body)}
+}
+
+// runtimeSkillsConfig 安全读取当前技能运行时配置（aicliConfig 可能未设置时返回 nil）。
+func (h *Handler) runtimeSkillsConfig() *agentconfig.SkillsRuntimeConfig {
+	if h == nil {
+		return nil
+	}
+	ac := h.aicliConfigSnapshot()
+	if ac == nil {
+		return nil
+	}
+	return ac.SkillsRuntime
+}
+
 func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, session *chat.Session, agentID, modelName, userPrompt string, messages []types.Message, reasoningEffort string, thinking *types.ThinkingConfig, routeAttempted bool, routeCandidates []*skill.RouteResult, fallback string, usageScope UsageScope, estimatedPromptTokens int, traceID string, planningPayload map[string]interface{}, routeAudit ...executionRouteTransparency) error {
 	model := strings.TrimSpace(modelName)
 	if model == "" {
@@ -8784,6 +8951,45 @@ func (h *Handler) publishSkillsChangedEvent(r *http.Request, payload map[string]
 	})
 }
 
+// implicitInvocationIndex 返回当前 registry 的隐式调用判定索引（SK-3）。
+// 懒构建：首次调用或 registry 摘要变化时重建。返回 nil 表示停用。
+func (h *Handler) implicitInvocationIndex() *skill.ImplicitInvocationIndex {
+	if h == nil || h.skillRegistry == nil {
+		return nil
+	}
+	summaries := h.skillRegistry.ListSummaries()
+	if len(summaries) == 0 {
+		return nil
+	}
+	return skill.BuildImplicitInvocationIndex(summaries)
+}
+
+// publishSkillInvokedEvents 把技能调用命中发布为 skills.invoked 运行时事件（SK-3）。
+// 每次命中一条事件（已去重），字段对齐计划口径：name/scope/path/kind/basis/tool（+session_id）。
+// 仅观测用途，不参与权限与计费。Event.SessionID 刻意留空：该事件与 skills.changed 一样
+// 是总线级事件，不进会话事件库，避免被 A 通道记成「未落盘丢弃」。
+func (h *Handler) publishSkillInvokedEvents(r *http.Request, sessionID string, invocations []skill.ImplicitInvocation) {
+	if h == nil || len(invocations) == 0 {
+		return
+	}
+	traceID := ""
+	if r != nil {
+		traceID = strings.TrimSpace(logger.GetRequestID(r.Context()))
+	}
+	for _, inv := range skill.DedupeInvocations(invocations) {
+		payload := skill.SkillInvokedEventPayload(inv)
+		if sessionID != "" {
+			payload["session_id"] = sessionID
+		}
+		h.getRuntimeEventBus().Publish(runtimeevents.Event{
+			Type:      skillsInvokedEventType,
+			TraceID:   traceID,
+			AgentName: "skills-runtime",
+			Payload:   payload,
+		})
+	}
+}
+
 func (h *Handler) publishHotReloadSkillChangedEvent(event *skill.ReloadEvent) {
 	if h == nil || event == nil {
 		return
@@ -9775,9 +9981,20 @@ func (h *Handler) GetStats(w http.ResponseWriter, r *http.Request) {
 		stats = append(stats, stat)
 	}
 
+	// SK-4：unavailable 技能单独计数；注册表当前没有 disabled 概念
+	//（被策略禁用走的是 tools 缺失 → unavailable 路径），故 counts 只含
+	// available/unavailable，disabled 不在本契约中虚构。
+	unavailable := unavailableSkillsForResponse(h.skillRegistry, layer, dir)
 	response := map[string]interface{}{
-		"stats":                 stats,
-		"total_skills":          len(skills),
+		"stats":             stats,
+		"total_skills":      len(skills),
+		"available_count":   len(skills),
+		"unavailable_count": len(unavailable),
+		"unavailable":       unavailable,
+		"counts": map[string]int{
+			"available":   len(skills),
+			"unavailable": len(unavailable),
+		},
 		"skill_dirs":            handlerSkillDirs(h.skillLoader),
 		"source_summary":        buildSkillSourceSummary(skills),
 		"mutation_policy":       h.mutationPolicySnapshot(),
@@ -9790,6 +10007,10 @@ func (h *Handler) GetStats(w http.ResponseWriter, r *http.Request) {
 		},
 		"runtime":    h.runtimeStatusSnapshot(r.Context(), llm.HealthCheckModeStale),
 		"validation": h.runtimeValidationSnapshot(),
+	}
+	// SK-5：stats 与 list/注入共享同一 catalog 投影，便于诊断"预算是否在裁剪"。
+	if projection := h.catalogProjectionFromRegistry(); projection != nil {
+		response["catalog"] = projection
 	}
 	if err := h.attachProfileMetadata(r, response); err != nil {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))

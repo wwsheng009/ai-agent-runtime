@@ -44,12 +44,19 @@ type fakeSkillExecutor struct {
 	lastSkill *runtimeskill.Skill
 	lastReq   *runtimetypes.Request
 	result    *runtimeskill.ExecuteResult
+	// mainLoopPrompt 非空时表示该技能走“指令注入主循环”；为空时保持旧行为
+	// （调用方因注入文本为空而回退到 Execute），避免既有断言大范围改写。
+	mainLoopPrompt string
 }
 
 func (f *fakeSkillExecutor) Execute(_ context.Context, skill *runtimeskill.Skill, req *runtimetypes.Request) (*runtimeskill.ExecuteResult, error) {
 	f.lastSkill = skill
 	f.lastReq = req
 	return f.result, nil
+}
+
+func (f *fakeSkillExecutor) BuildMainLoopPrompt(_ *runtimeskill.Skill, _ *runtimetypes.Request) (string, error) {
+	return f.mainLoopPrompt, nil
 }
 
 type recordingAICLIBridgeMCP struct {
@@ -575,6 +582,105 @@ func TestSkillFunctionExecutePrefersPlainOutputOnSuccess(t *testing.T) {
 	}
 }
 
+// TestSkillFunctionExecute_InjectsInstructionsIntoMainLoop 固化方案 A：说明型
+// 技能（无 handler / workflow）经 skill__x 调用时返回技能指令文本，由主循环的
+// 模型用常规工具执行，而不是另起一次技能桥 LLM 交互。
+func TestSkillFunctionExecute_InjectsInstructionsIntoMainLoop(t *testing.T) {
+	injected := "已加载技能「abap_search」的指令；请使用当前对话已有的常规工具完成下面的技能指令与用户请求。\n\n## 技能指令\nSearch ABAP objects\n\n## 用户请求\nsearch z* objects"
+	executor := &fakeSkillExecutor{
+		mainLoopPrompt: injected,
+		result: &runtimeskill.ExecuteResult{
+			SkillName: "abap_search",
+			Success:   true,
+			Output:    "bridge-ran",
+		},
+	}
+	fn := &SkillFunction{
+		functionName: "skill__abap_search",
+		skill: &runtimeskill.Skill{
+			Name:        "abap_search",
+			Description: "Search ABAP objects",
+		},
+		executor: executor,
+	}
+
+	output, err := fn.Execute(context.Background(), map[string]interface{}{"prompt": "search z* objects"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if output != injected {
+		t.Fatalf("expected injected instructions, got %q", output)
+	}
+	if executor.lastReq != nil {
+		t.Fatalf("技能桥不应在说明型技能上执行: %#v", executor.lastReq)
+	}
+}
+
+// TestSkillFunctionExecute_HandlerSkillStillUsesBridge：带 handler 的技能保留
+// 技能桥执行（说明型之外的能力不走注入）。
+func TestSkillFunctionExecute_HandlerSkillStillUsesBridge(t *testing.T) {
+	executor := &fakeSkillExecutor{
+		mainLoopPrompt: "should-not-be-used",
+		result: &runtimeskill.ExecuteResult{
+			SkillName: "installer",
+			Success:   true,
+			Output:    "bridge-ok",
+		},
+	}
+	fn := &SkillFunction{
+		functionName: "skill__installer",
+		skill: &runtimeskill.Skill{
+			Name:    "installer",
+			Handler: runtimeskill.SkillHandlerFunc(func(_ interface{}, _ *runtimetypes.Request) (*runtimetypes.Result, error) { return nil, nil }),
+		},
+		executor: executor,
+	}
+
+	output, err := fn.Execute(context.Background(), map[string]interface{}{"prompt": "install"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if output != "bridge-ok" {
+		t.Fatalf("handler 技能应保留技能桥执行, got %q", output)
+	}
+	if executor.lastReq == nil {
+		t.Fatalf("技能桥未被调用")
+	}
+}
+
+// TestBuildSkillMainLoopInjection_HonorsBridgeOption：/skill 直调默认走注入，
+// 显式 options.execution=bridge 时回退到技能桥执行。
+func TestBuildSkillMainLoopInjection_HonorsBridgeOption(t *testing.T) {
+	executor := &fakeSkillExecutor{mainLoopPrompt: "injected-skill-instructions"}
+	fn := &SkillFunction{
+		functionName: "skill__abap_search",
+		skill:        &runtimeskill.Skill{Name: "abap_search", Description: "Search ABAP objects"},
+		executor:     executor,
+	}
+	session := &ChatSession{
+		SkillsBinding: &skillsRuntimeBinding{
+			skillFunctions: map[string]*SkillFunction{"skill__abap_search": fn},
+		},
+	}
+
+	injected, ok := buildSkillMainLoopInjection(session, "skill__abap_search", map[string]interface{}{"prompt": "search"})
+	if !ok || injected != "injected-skill-instructions" {
+		t.Fatalf("expected injection, ok=%v injected=%q", ok, injected)
+	}
+
+	_, ok = buildSkillMainLoopInjection(session, "skill__abap_search", map[string]interface{}{
+		"prompt":  "search",
+		"options": map[string]interface{}{"execution": "bridge"},
+	})
+	if ok {
+		t.Fatalf("options.execution=bridge 应回退到技能桥")
+	}
+
+	if _, ok := buildSkillMainLoopInjection(session, "skill__missing", map[string]interface{}{"prompt": "search"}); ok {
+		t.Fatalf("未知技能不应注入")
+	}
+}
+
 func TestInitSkillFunctionsRegistersSkills(t *testing.T) {
 	tempDir := t.TempDir()
 	skillDir := filepath.Join(tempDir, "abap_search")
@@ -624,6 +730,61 @@ triggers:
 	}
 	if _, ok := session.FunctionRegistry.Get("skill__abap_search"); !ok {
 		t.Fatalf("skill function not registered")
+	}
+}
+
+// TestInitSkillFunctionsBindsSessionModelToBridge 回归“技能桥使用 runtime
+// 默认模型而不是会话模型”：共享 runtime host bootstrap 不会把会话模型写入
+// runtime 默认模型，技能桥必须由调用方显式绑定，否则请求会被发到无关模型。
+func TestInitSkillFunctionsBindsSessionModelToBridge(t *testing.T) {
+	tempDir := t.TempDir()
+	skillDir := filepath.Join(tempDir, "abap_search")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+
+	skillYAML := `name: abap_search
+description: Search ABAP objects
+triggers:
+  - type: keyword
+    values: ["abap", "search"]
+    weight: 1
+`
+	if err := os.WriteFile(filepath.Join(skillDir, "skill.yaml"), []byte(skillYAML), 0o644); err != nil {
+		t.Fatalf("write skill failed: %v", err)
+	}
+
+	session := &ChatSession{
+		ProviderName:     "commandgo",
+		Model:            "meituan/LongCat-2.0:free",
+		FunctionRegistry: functions.NewFunctionRegistry(),
+	}
+	cfg := &config.Config{
+		SkillsRuntime: &config.SkillsRuntimeConfig{
+			Enabled:  true,
+			SkillDir: tempDir,
+		},
+	}
+
+	binding, err := initSkillFunctions(cfg, session, nil, nil, 0, "")
+	if err != nil {
+		t.Fatalf("initSkillFunctions failed: %v", err)
+	}
+	if binding == nil {
+		t.Fatalf("expected skill binding")
+	}
+	defer func() { _ = binding.Close() }()
+
+	fn := binding.skillFunctions["skill__abap_search"]
+	if fn == nil || fn.executor == nil {
+		t.Fatalf("skill function executor not wired")
+	}
+	realExecutor, ok := fn.executor.(*runtimeskill.Executor)
+	if !ok {
+		t.Fatalf("unexpected executor type %T", fn.executor)
+	}
+	if got := realExecutor.DefaultModel(); got != session.Model {
+		t.Fatalf("bridge default model = %q, want session model %q", got, session.Model)
 	}
 }
 
@@ -1466,5 +1627,34 @@ func TestBuildSkillsProviderConfigsPropagatesRetryPolicyFromAgentConfig(t *testi
 	}
 	if providerCfg.RetryRules[0].StatusCode.Range != "500-504" {
 		t.Fatalf("expected status code range 500-504, got %s", providerCfg.RetryRules[0].StatusCode.Range)
+	}
+}
+
+func TestSkillUsesDefaultExecution_AndToolLoopOption(t *testing.T) {
+	if skillUsesDefaultExecution(nil) {
+		t.Fatal("nil skill must not use default execution")
+	}
+	plain := &runtimeskill.Skill{Name: "installer"}
+	if !skillUsesDefaultExecution(plain) {
+		t.Fatal("handler-less workflow-less skill must use default execution")
+	}
+	withWorkflow := &runtimeskill.Skill{
+		Name: "wf",
+		Workflow: &runtimeskill.Workflow{Steps: []runtimeskill.WorkflowStep{
+			{ID: "step_a", Name: "A", Tool: "tool_a"},
+		}},
+	}
+	if skillUsesDefaultExecution(withWorkflow) {
+		t.Fatal("workflow skill must not use default execution")
+	}
+
+	options := enableSkillToolLoopOption(nil)
+	if options["tool_loop"] != true {
+		t.Fatalf("expected tool_loop=true, got %#v", options["tool_loop"])
+	}
+	// 用户显式关闭时不得被覆盖。
+	disabled := enableSkillToolLoopOption(map[string]interface{}{"tool_loop": false})
+	if disabled["tool_loop"] != false {
+		t.Fatalf("explicit tool_loop=false must be preserved, got %#v", disabled["tool_loop"])
 	}
 }

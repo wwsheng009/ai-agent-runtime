@@ -1341,7 +1341,7 @@ func preflightMissingReadPath(req PreflightRequest) (string, string) {
 
 func shouldPreflightPaths(metadata, schema, args map[string]interface{}) bool {
 	// Explicit opt-out / opt-in via definition metadata.
-	if enabled, ok := runtimetypes.BoolMetadataValue(metadata, "path_preflight"); ok {
+	if enabled, ok := runtimetypes.BoolMetadataValue(metadata, runtimetypes.ToolMetadataPathPreflightKey); ok {
 		return enabled
 	}
 	// Never preflight path existence for write/mutation-shaped argument sets.

@@ -572,8 +572,8 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:         "/skill",
-			Usage:        "/skill <name> <prompt>",
-			Summary:      "直接执行指定 skill",
+			Usage:        "/skill [--direct] <name> <prompt>",
+			Summary:      "提交 skill 回合：注入说明与程序清单，由模型自选程序；--direct 直接执行",
 			Group:        string(chatSlashCommandGroupFunctions),
 			AcceptsArgs:  true,
 			RequiresArgs: true,

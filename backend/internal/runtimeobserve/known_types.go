@@ -88,6 +88,7 @@ func buildKnownEventTypes() map[string]bool {
 		EventToolFinished,
 		EventToolFailed,
 		EventToolProgress,
+		EventSkillInvoked,
 		EventRendererChanged,
 		EventObservationGap,
 		EventResyncRequired,

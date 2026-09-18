@@ -542,12 +542,33 @@ export async function executeSkill(
   },
 ): Promise<unknown> {
   const url = buildRuntimeUrl(`/api/runtime/skills/${encodeURIComponent(name)}/execute`);
+  // 线上契约是 snake_case（后端 `executeSkillRequest` 与 `pkg/skillsapi.ExecuteSkillRequest`
+  // 同一口径）：调用方用 camelCase，这里显式映射。直接透传 `sessionId` 会被 Go json
+  // 当作未知字段静默丢弃，导致 skill 执行落进新建会话而不是当前会话。
+  const body: Record<string, unknown> = {};
+  if (params) {
+    if (params.prompt !== undefined) {
+      body.prompt = params.prompt;
+    }
+    if (params.sessionId !== undefined) {
+      body.session_id = params.sessionId;
+    }
+    if (params.params !== undefined) {
+      body.params = params.params;
+    }
+    if (params.context !== undefined) {
+      body.context = params.context;
+    }
+    if (params.options !== undefined) {
+      body.options = params.options;
+    }
+  }
   const response = await fetchRuntimeJson<unknown>(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: params ? JSON.stringify(params) : JSON.stringify({}),
+    body: JSON.stringify(body),
   });
   return response;
 }

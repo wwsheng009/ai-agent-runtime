@@ -12,6 +12,7 @@ import {
   useComposerCommandExecutor,
   type ComposerCommandExecutor,
   type ComposerModelSelectionBridge,
+  type ComposerSkillTurnRunner,
 } from "@/hooks/workspace/composer/use-composer-command-executor";
 import { buildComposerBuiltinCommands } from "@/lib/composer-builtin-commands";
 import type { ComposerCommand, ComposerCommandDefinition } from "@/lib/composer-commands";
@@ -74,6 +75,8 @@ export type UseComposerCommandSurfaceOptions = {
   onRenameSession?: (sessionId: string, title: string) => Promise<void>;
   /** 当前会话；新会话未登记时为 undefined。 */
   sessionId?: string;
+  /** P2：`/skill` 提交为普通对话回合（宿主接线到 chat turn 提交）；缺省回退 REST。 */
+  onRunSkillTurn?: ComposerSkillTurnRunner;
 };
 
 export function useComposerCommandSurface({
@@ -83,6 +86,7 @@ export function useComposerCommandSurface({
   onDraftChange,
   onRenameSession,
   sessionId,
+  onRunSkillTurn,
 }: UseComposerCommandSurfaceOptions): ComposerCommandSurface {
   const { t } = useTranslation("workspace");
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
@@ -133,6 +137,7 @@ export function useComposerCommandSurface({
     openSkillDialog,
     onRenameSession,
     sessionId,
+    onRunSkillTurn,
   });
 
   // 解构保持稳定引用：React Compiler 要求回调依赖与实际读取的成员一致。

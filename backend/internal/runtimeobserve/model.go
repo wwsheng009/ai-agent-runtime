@@ -49,9 +49,12 @@ const (
 	EventToolFinished     = "tool.finished"
 	EventToolFailed       = "tool.failed"
 	EventToolProgress     = "tool.progress.summary"
-	EventRendererChanged  = "renderer.snapshot.changed"
-	EventObservationGap   = "observation.gap"
-	EventResyncRequired   = "observation.resync_required"
+	// EventSkillInvoked 是 SK-3 技能调用命中的观测类型（总线级事件：
+	// Event.SessionID 刻意留空，会话/Trace 归属写在载荷里，投影时提升到 correlation）。
+	EventSkillInvoked    = "skills.invoked"
+	EventRendererChanged = "renderer.snapshot.changed"
+	EventObservationGap  = "observation.gap"
+	EventResyncRequired  = "observation.resync_required"
 )
 
 // Correlation 是所有观测事件的关联上下文（方案 §4.3/§6.1）。

@@ -180,11 +180,33 @@ type CommandResult struct {
 	// noninteractive projections ignore the flag; dispatch performs the send
 	// for every projection that entered the structured path.
 	SendMessageAfterCommit string
+	// SendSkillTurn requests a post-commit chat turn for `/skill <name> <args>`.
+	// The default /skill path no longer executes the skill directly: it registers
+	// a one-shot per-turn pin (ProgramGuide system message + skill function and
+	// declared programs overlaid onto the turn function surface) and streams the
+	// command text through the normal send pipeline as its own turn, letting the
+	// model choose which programs to call. `/skill --direct` keeps the legacy
+	// executeDirectFunction result instead. Plain/JSON/non-interactive
+	// projections never reach this field.
+	SendSkillTurn *SendSkillTurnRequest
 	// RestoreComposerDraft restores a failed-turn prompt after the command cell
 	// is committed. This is a typed post-commit UI effect, not terminal output:
 	// the actor remains the only composer renderer and refuses to overwrite a
 	// draft that appeared while the command result was being committed.
 	RestoreComposerDraft string
+}
+
+// SendSkillTurnRequest 描述一个 `/skill` 回合化请求：VisiblePrompt 作为普通用户
+// 消息提交（同时是模型看到的请求文本，含 `/skill <name>` 调用标记），SkillName
+// 用于定位 ProgramGuide 与程序清单，Prompt 保存名称之后的原始参数文本。pin 只对
+// 这一次提交生效，回合结束不残留。
+type SendSkillTurnRequest struct {
+	// SkillName 是已解析到函数目录的 skill 函数名（`skill__<name>`）。
+	SkillName string
+	// Prompt 是命令名之后的原始参数文本（不含 /skill 与名称）。
+	Prompt string
+	// VisiblePrompt 是提交到会话与界面的完整命令文本：`/skill <name> <args>`。
+	VisiblePrompt string
 }
 
 // Document merges all command fragments without rendering them. This is the

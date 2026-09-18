@@ -17,6 +17,11 @@ const (
 	// may open the run-scoped same-arguments negative cache. It defaults to true;
 	// volatile polling/state tools should explicitly set it to false.
 	ToolMetadataEmptyReplayCacheKey = "empty_replay_cache"
+	// ToolMetadataPathPreflightKey is the per-tool opt-in/opt-out for the generic
+	// read-path existence preflight. Tools whose path arguments are write targets
+	// that legitimately do not exist yet (e.g. enter_plan_mode's plan_path) must
+	// set it to false so the preflight cannot deny a valid call.
+	ToolMetadataPathPreflightKey = "path_preflight"
 
 	// Tool taxonomy metadata keys (Iteration A permission/parallel productization).
 	ToolMetadataKindKey        = "tool_kind"

@@ -224,6 +224,41 @@ func TestEnginePlanModeWriteAllowPaths(t *testing.T) {
 	})
 }
 
+// TestEnginePlanModeMultiplePlanWritePaths pins the multi-path allowlist
+// contract that enter_plan_mode now feeds (plan_path array / plan_write_paths):
+// every listed plan file stays writable, and any other write is still denied.
+func TestEnginePlanModeMultiplePlanWritePaths(t *testing.T) {
+	t.Parallel()
+
+	engine := &Engine{
+		Mode: ModePlan,
+		PlanWriteAllowPaths: []string{
+			"docs/plan/primary.md",
+			"docs/plan/child-a.md",
+		},
+	}
+
+	for _, allowedPath := range []string{"docs/plan/primary.md", "docs/plan/child-a.md"} {
+		decision, err := engine.Evaluate(context.Background(), EvalRequest{
+			ToolName: "write",
+			Mode:     ModePlan,
+			Args:     map[string]interface{}{"file_path": allowedPath, "content": "# plan"},
+		})
+		require.NoError(t, err, allowedPath)
+		assert.Equal(t, DecisionAllow, decision.Type, allowedPath)
+		assert.Equal(t, "mode:plan_mode_write_path_allowed", decision.Reason, allowedPath)
+	}
+
+	denied, err := engine.Evaluate(context.Background(), EvalRequest{
+		ToolName: "write",
+		Mode:     ModePlan,
+		Args:     map[string]interface{}{"file_path": "docs/plan/child-z.md", "content": "# stray"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, DecisionDeny, denied.Type)
+	assert.Equal(t, "mode:plan_mode_write_path_not_allowed", denied.Reason)
+}
+
 func TestEnsureAndSetPlanWriteAllowPaths(t *testing.T) {
 	t.Parallel()
 

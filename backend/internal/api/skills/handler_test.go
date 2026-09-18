@@ -448,6 +448,65 @@ func TestExecuteSkill_RunsWorkflow(t *testing.T) {
 	assert.Contains(t, result["output"], "hello workflow")
 }
 
+func TestExecuteSkill_AttachesMessagesToRequestedSession(t *testing.T) {
+	mcpManager := &testMCPManager{}
+	registry := skill.NewRegistry(mcpManager)
+	require.NoError(t, registry.Register(&skill.Skill{
+		Name:        "echo-skill",
+		Description: "session binding test",
+		Triggers: []skill.Trigger{{
+			Type:   "keyword",
+			Values: []string{"echo"},
+			Weight: 1,
+		}},
+		Tools: []string{"echo_tool"},
+		Workflow: &skill.Workflow{Steps: []skill.WorkflowStep{{
+			ID:   "step_1",
+			Name: "echo",
+			Tool: "echo_tool",
+		}}},
+	}))
+
+	handler := NewHandler(registry, nil, mcpManager)
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), &chat.SessionManagerConfig{
+		TTL:             time.Hour,
+		MaxHistory:      20,
+		CleanupInterval: time.Hour,
+		AutoArchive:     false,
+		IdleTimeout:     time.Hour,
+	})
+	handler.SetSessionManager(sessionManager)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	execute := func(body string) map[string]interface{} {
+		req := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/echo-skill/execute", bytes.NewReader([]byte(body)))
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var payload map[string]interface{}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+		return payload
+	}
+
+	// 首次执行不带 session_id：服务端建会话并回显，作为后续绑定的锚点。
+	first := execute(`{"prompt":"first turn"}`)
+	boundSessionID, ok := first["session_id"].(string)
+	require.True(t, ok)
+	require.NotEmpty(t, boundSessionID)
+
+	// 带 session_id 的第二次执行必须复用既有会话（线上字段名是 snake_case）。
+	second := execute(fmt.Sprintf(`{"prompt":"second turn","session_id":%q}`, boundSessionID))
+	assert.Equal(t, boundSessionID, second["session_id"])
+
+	session, err := sessionManager.GetSession(context.Background(), boundSessionID)
+	require.NoError(t, err)
+	require.Len(t, session.GetMessages(), 4)
+	assert.Equal(t, "first turn", session.GetMessages()[0].Content)
+	assert.Equal(t, "second turn", session.GetMessages()[2].Content)
+}
+
 func TestExecuteSkill_AddsAdminDebugWarningHeader(t *testing.T) {
 	mcpManager := &testMCPManager{}
 	registry := skill.NewRegistry(mcpManager)

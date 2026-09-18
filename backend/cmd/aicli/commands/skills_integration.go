@@ -12,7 +12,9 @@ import (
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -32,6 +34,9 @@ const (
 
 type skillExecutor interface {
 	Execute(ctx context.Context, skill *runtimeskill.Skill, req *runtimetypes.Request) (*runtimeskill.ExecuteResult, error)
+	// BuildMainLoopPrompt 渲染说明型技能注入主循环的指令文本（见方案 A：
+	// 技能正文进入正常 LLM 对话，由主循环模型决定如何调用工具）。
+	BuildMainLoopPrompt(skill *runtimeskill.Skill, req *runtimetypes.Request) (string, error)
 }
 
 type skillsRuntimeBinding struct {
@@ -288,6 +293,9 @@ type SkillFunction struct {
 	contextProvider  func() map[string]interface{}
 	metadataProvider func() runtimetypes.Metadata
 	schema           map[string]interface{}
+	// invocationPublisher 把技能调用发布到本地 runtime 总线（SK-3 观测）；
+	// nil 时退化为结构化日志（宿主尚未建立 EventBus 的场景）。
+	invocationPublisher func(runtimeskill.ImplicitInvocation)
 }
 
 func (f *SkillFunction) Name() string {
@@ -365,6 +373,139 @@ func (f *SkillFunction) Parameters() map[string]interface{} {
 	}
 }
 
+// publishSkillInvocations 发布本技能调用的观测事件：显式一次（本函数被点名执行）
+// + 执行中命中的隐式调用（去重后逐条）。显式事件不依赖执行结果：调用已经发生，
+// 失败回合同样应能被远程观测；隐式命中由执行器只对成功调用填充。
+func (f *SkillFunction) publishSkillInvocations(skillItem *runtimeskill.Skill, result *runtimeskill.ExecuteResult) {
+	if f == nil || skillItem == nil || result == nil {
+		return
+	}
+	hits := runtimeskill.DedupeInvocations(result.ImplicitInvocations)
+	if f.invocationPublisher == nil {
+		if len(hits) > 0 {
+			logpkg.Info("skill implicit invocation observed",
+				logpkg.String("skill", skillItem.Name),
+				logpkg.Int("count", len(hits)),
+				logpkg.String("tool", hits[0].Tool))
+		}
+		return
+	}
+	scope := ""
+	if f.summary != nil && f.summary.Source != nil {
+		scope = strings.TrimSpace(f.summary.Source.Layer)
+	}
+	seen := make(map[string]struct{}, len(hits)+1)
+	publish := func(inv runtimeskill.ImplicitInvocation) {
+		key := runtimeskill.InvocationKey(inv)
+		if _, dup := seen[key]; dup {
+			return
+		}
+		seen[key] = struct{}{}
+		f.invocationPublisher(inv)
+	}
+	publish(runtimeskill.NewExplicitInvocation(skillItem.Name, scope, f.sourcePath))
+	for _, hit := range hits {
+		publish(hit)
+	}
+	if len(hits) > 0 {
+		logpkg.Info("skill invocation observed",
+			logpkg.String("skill", skillItem.Name),
+			logpkg.Int("implicit", len(hits)),
+			logpkg.String("tool", hits[0].Tool))
+	}
+}
+
+// newSkillInvocationPublisher 返回技能调用事件的本地总线发布器（SK-3）。
+//
+// 事件保持总线级：Event.SessionID 留空（避免被 A 通道记为「未落盘丢弃」），
+// 会话归属只写载荷 session_id；本地 observe 平面订阅同一 EventBus
+// （cmd/aicli/commands/chat_observe_local.go），因此远程可按会话查询。
+// host/EventBus 尚未建立时返回的安全闭包会在调用时静默跳过。
+func newSkillInvocationPublisher(session *ChatSession) func(runtimeskill.ImplicitInvocation) {
+	if session == nil {
+		return nil
+	}
+	return func(inv runtimeskill.ImplicitInvocation) {
+		if session.LocalRuntimeHost == nil || session.LocalRuntimeHost.EventBus == nil {
+			return
+		}
+		if !session.claimSkillInvocationObservation(inv) {
+			return
+		}
+		payload := runtimeskill.SkillInvokedEventPayload(inv)
+		payload["source"] = "tui_skill_bridge"
+		if session.RuntimeSession != nil {
+			if sessionID := strings.TrimSpace(session.RuntimeSession.ID); sessionID != "" {
+				payload["session_id"] = sessionID
+			}
+		}
+		session.LocalRuntimeHost.EventBus.Publish(runtimeevents.Event{
+			Type:      runtimeskill.SkillInvokedEventType,
+			AgentName: "aicli-skill-bridge",
+			Payload:   payload,
+		})
+	}
+}
+
+// publishSkillTurnInvocation 记录一次 `/skill` 显式执行（SK-3 观测）。
+//
+// 在 pin 解析（回合派发）时发布，而不是等技能函数被调用：`/skill` 回合可能被
+// 模型用技能声明的程序工具（如 bash）完成，根本不经过 SkillFunction.Execute；
+// 派发即代表"用户显式点名执行了该技能"。路径/作用域取 hydrated 技能定义，
+// 缺失时退化为去前缀的函数名。
+func publishSkillTurnInvocation(session *ChatSession, functionName string, skillItem *runtimeskill.Skill) {
+	publish := newSkillInvocationPublisher(session)
+	if publish == nil {
+		return
+	}
+	name := strings.TrimSpace(functionName)
+	scope := ""
+	path := ""
+	if skillItem != nil {
+		if hydrated := strings.TrimSpace(skillItem.Name); hydrated != "" {
+			name = hydrated
+		}
+		if skillItem.Source != nil {
+			scope = strings.TrimSpace(skillItem.Source.Layer)
+			path = strings.TrimSpace(skillItem.Source.Path)
+		}
+	}
+	name = strings.TrimPrefix(name, skillFunctionPrefix)
+	if name == "" {
+		return
+	}
+	publish(runtimeskill.NewExplicitInvocation(name, scope, path))
+}
+
+// claimSkillInvocationObservation 认领一次技能调用事件（回合内同键只发一次）。
+// 键 = kind + 调用去重键：显式（pin 派发 / 点名函数）与隐式（执行中命中）互不抑制。
+func (s *ChatSession) claimSkillInvocationObservation(inv runtimeskill.ImplicitInvocation) bool {
+	if s == nil {
+		return false
+	}
+	key := string(inv.Kind) + "|" + runtimeskill.InvocationKey(inv)
+	s.skillInvocationSeenMu.Lock()
+	defer s.skillInvocationSeenMu.Unlock()
+	if s.skillInvocationSeen == nil {
+		s.skillInvocationSeen = make(map[string]struct{})
+	}
+	if _, dup := s.skillInvocationSeen[key]; dup {
+		return false
+	}
+	s.skillInvocationSeen[key] = struct{}{}
+	return true
+}
+
+// resetSkillInvocationObservation 开启新回合：清空上回合的事件去重键。
+func (s *ChatSession) resetSkillInvocationObservation() {
+	if s == nil {
+		return
+	}
+	s.skillInvocationSeenMu.Lock()
+	s.skillInvocationSeen = nil
+	s.skillInvocationSeenMu.Unlock()
+}
+
 func (f *SkillFunction) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
 	if f.executor == nil {
 		return "", fmt.Errorf("skill executor is not configured")
@@ -397,6 +538,22 @@ func (f *SkillFunction) Execute(ctx context.Context, args map[string]interface{}
 	req := runtimetypes.NewRequest(prompt)
 	req.Context = mergeSkillContextMaps(f.context(), extractMapArg(args, "context"))
 	req.Options = extractMapArg(args, "options")
+	// 方案 A：说明型技能把指令注入主循环（当前对话），由主循环的模型用常规工具
+	// 执行；不再另起技能桥 LLM 交互。workflow/handler 技能与显式
+	// options.execution="bridge" 仍走技能桥。
+	if skillUsesDefaultExecution(skillItem) && !skillBridgeExecutionRequested(req.Options) {
+		if injected, injectErr := f.executor.BuildMainLoopPrompt(skillItem, req); injectErr == nil {
+			if strings.TrimSpace(injected) != "" {
+				return injected, nil
+			}
+		}
+	}
+	if skillUsesDefaultExecution(skillItem) {
+		// 说明型技能（无 handler / workflow，例如 Codex SKILL.md 技能）经
+		// /skill 调用时必须能执行工具：开启运行时工具循环，否则模型发起的
+		// 工具调用只会以 DSML 文本回显、技能实际不会执行。
+		req.Options = enableSkillToolLoopOption(req.Options)
+	}
 	req.History = trimRuntimeHistory(f.history())
 	req.Metadata = f.metadata()
 
@@ -407,6 +564,9 @@ func (f *SkillFunction) Execute(ctx context.Context, args map[string]interface{}
 	if result == nil {
 		return "", nil
 	}
+
+	// SK-3 观测：显式调用与执行中命中的隐式调用都发布 skills.invoked。
+	f.publishSkillInvocations(skillItem, result)
 
 	if result.Success && result.Error == "" && strings.TrimSpace(result.Output) != "" {
 		return result.Output, nil
@@ -435,6 +595,80 @@ func (f *SkillFunction) Execute(ctx context.Context, args map[string]interface{}
 	}
 
 	return result.Output, nil
+}
+
+// skillUsesDefaultExecution reports whether the skill is executed by the LLM
+// bridge (no explicit handler or workflow). Instruction-only skills such as
+// Codex SKILL.md skills go through this path and need the tool loop to run.
+func skillUsesDefaultExecution(skill *runtimeskill.Skill) bool {
+	if skill == nil {
+		return false
+	}
+	return skill.Handler == nil && !skill.HasWorkflow()
+}
+
+// skillBridgeExecutionRequested 判断调用方是否显式要求走技能桥执行器
+// （options.execution="bridge"），用于保留旧的“独立 LLM 循环”行为。
+func skillBridgeExecutionRequested(options map[string]interface{}) bool {
+	if options == nil {
+		return false
+	}
+	value, ok := options["execution"].(string)
+	return ok && strings.EqualFold(strings.TrimSpace(value), "bridge")
+}
+
+// buildSkillMainLoopInjection 为 /skill 直调构造注入主循环的文本：说明型技能
+// 返回渲染后的技能指令与用户请求；handler/workflow 技能或渲染失败返回 ok=false，
+// 调用方回退到技能桥执行。
+func buildSkillMainLoopInjection(session *ChatSession, functionName string, args map[string]interface{}) (string, bool) {
+	if session == nil || session.SkillsBinding == nil {
+		return "", false
+	}
+	fn := session.SkillsBinding.skillFunctions[strings.TrimSpace(functionName)]
+	if fn == nil || fn.executor == nil {
+		return "", false
+	}
+	skillItem := fn.skill
+	if fn.skillResolver != nil {
+		resolved, err := fn.skillResolver()
+		if err != nil || resolved == nil {
+			return "", false
+		}
+		skillItem = resolved
+	}
+	if !skillUsesDefaultExecution(skillItem) {
+		return "", false
+	}
+	prompt := resolveSkillPrompt(args)
+	if prompt == "" {
+		return "", false
+	}
+	req := runtimetypes.NewRequest(prompt)
+	if contextProvider := fn.context; contextProvider != nil {
+		req.Context = contextProvider()
+	}
+	req.Options = extractMapArg(args, "options")
+	if skillBridgeExecutionRequested(req.Options) {
+		return "", false
+	}
+	injected, err := fn.executor.BuildMainLoopPrompt(skillItem, req)
+	if err != nil || strings.TrimSpace(injected) == "" {
+		return "", false
+	}
+	return injected, true
+}
+
+// enableSkillToolLoopOption opts the skill invocation into the runtime tool
+// loop so model-issued tool calls are executed instead of being echoed back as
+// raw text (for example DeepSeek DSML markup).
+func enableSkillToolLoopOption(options map[string]interface{}) map[string]interface{} {
+	if options == nil {
+		options = map[string]interface{}{}
+	}
+	if _, exists := options["tool_loop"]; !exists {
+		options["tool_loop"] = true
+	}
+	return options
 }
 
 func (f *SkillFunction) Schema() map[string]interface{} {
@@ -783,6 +1017,14 @@ func initSkillFunctionsWithManager(cfg *config.Config, session *ChatSession, too
 	})
 
 	executor := runtimeskill.NewExecutor(manager.Registry(), mcpRuntime, manager.LLMRuntime())
+	// 技能桥必须使用会话当前模型：复用 runtime host 的共享 bootstrap 时，
+	// runtime 的默认模型可能是别的模型（曾观测到 claude-3-5-sonnet 被路由到
+	// 非会话 provider 并返回 HTTP 500），而用户期望 /skill 与会话模型一致。
+	if session != nil {
+		executor.SetDefaultModel(session.Model)
+	}
+	// SK-3：执行前刷新隐式调用判定索引，保证与当前技能面一致。
+	executor.RefreshImplicitInvocationIndex()
 	skillNameCounts := make(map[string]int, len(summaries))
 	for _, summaryItem := range summaries {
 		if summaryItem == nil {
@@ -799,6 +1041,12 @@ func initSkillFunctionsWithManager(cfg *config.Config, session *ChatSession, too
 		summaryRef := summaryItem
 		skillRef := summaryRef.ToSkillStub()
 		attachDirectToolBridgeSkillHandler(summaryRef, skillRef, mcpRuntime)
+		// SK-7：文档模式技能（Codex 格式、无 handler/workflow、无可绑定工具）不注册
+		// skill__<name> 函数；正文由 injection path（catalog / /skill 回合）注入上下文，
+		// 模型用既有工具完成任务。auto 识别受 skills.document_mode 灰度控制（默认 off）。
+		if skillRef.IsDocumentModeEnabled(cfg != nil && cfg.SkillsRuntime != nil && cfg.SkillsRuntime.DocumentModeAuto()) {
+			continue
+		}
 		skillName := summaryRef.Name
 		sourcePath := ""
 		if summaryRef.Source != nil {
@@ -846,6 +1094,7 @@ func initSkillFunctionsWithManager(cfg *config.Config, session *ChatSession, too
 			metadataProvider: func() runtimetypes.Metadata {
 				return buildSkillMetadata(session, skillName, functionName, sourcePath)
 			},
+			invocationPublisher: newSkillInvocationPublisher(session),
 		}
 		fn.schema = map[string]interface{}{
 			"name":        fn.Name(),

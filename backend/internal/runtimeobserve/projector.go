@@ -50,9 +50,11 @@ var eventAllowlist = map[string]bool{
 	EventToolFinished:     true,
 	EventToolFailed:       true,
 	EventToolProgress:     true,
-	EventRendererChanged:  true,
-	EventObservationGap:   true,
-	EventResyncRequired:   true,
+	// SK-3：技能调用命中（低敏投影见 projectSkillInvokedPayload）。
+	EventSkillInvoked:    true,
+	EventRendererChanged: true,
+	EventObservationGap:  true,
+	EventResyncRequired:  true,
 }
 
 // IsAllowedType 返回事件类型是否在 v1 白名单内。
@@ -133,9 +135,22 @@ func (p *Projector) ProjectRuntimeEvent(event runtimeevents.Event) (Event, bool)
 	if !IsAllowedType(eventType) {
 		return Event{}, false
 	}
+	sessionID := event.SessionID
+	traceID := event.TraceID
+	if eventType == EventSkillInvoked {
+		// skills.invoked 是总线级事件：Event.SessionID 刻意留空（避免被 A 通道记为
+		// 未落盘丢弃），会话/Trace 归属只写进载荷。观测投影把它提升到 correlation，
+		// 否则按 session_id 过滤的远程查询看不到技能调用。
+		if sessionID == "" {
+			sessionID = payloadStringField(event.Payload, "session_id", 128)
+		}
+		if traceID == "" {
+			traceID = payloadStringField(event.Payload, "trace_id", 128)
+		}
+	}
 	corr := Correlation{
-		SessionID:  event.SessionID,
-		TraceID:    event.TraceID,
+		SessionID:  sessionID,
+		TraceID:    traceID,
 		AgentID:    event.AgentName,
 		ToolCallID: event.ToolName,
 	}
@@ -164,6 +179,9 @@ var eventContentCapableTypes = map[string]bool{
 func (p *Projector) projectPayload(eventType string, payload map[string]interface{}) map[string]interface{} {
 	if len(payload) == 0 {
 		return nil
+	}
+	if eventType == EventSkillInvoked {
+		return projectSkillInvokedPayload(payload)
 	}
 	out := make(map[string]interface{})
 	for key, value := range payload {
@@ -201,6 +219,54 @@ func (p *Projector) projectPayload(eventType string, payload map[string]interfac
 				}
 			}
 		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// skillInvokedPayloadStringKeys 是 skills.invoked 允许透传的字符串字段：技能名、
+// 作用域、命中方式等短枚举/名称。文件路径与正文类字段一律不导出（safe_default
+// 不导出文件系统路径），只以 has_path 表达"来源路径存在"。
+var skillInvokedPayloadStringKeys = []string{"name", "scope", "kind", "basis", "tool"}
+
+// payloadStringField 读取字符串载荷并做 TrimSpace + UTF-8 安全截断。
+func payloadStringField(payload map[string]interface{}, key string, maxBytes int) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	value, ok := payload[key].(string)
+	if !ok {
+		return ""
+	}
+	return boundUTF8String(strings.TrimSpace(value), maxBytes)
+}
+
+// projectSkillInvokedPayload 是 skills.invoked 的专用低敏投影（SK-3 远程可观测）。
+// 与通用投影的区别：技能事件的白名单字段是名称/枚举而非数值，且需要 step 水位；
+// session_id/trace_id 已由调用方提升到 correlation，不在载荷中重复导出。
+func projectSkillInvokedPayload(payload map[string]interface{}) map[string]interface{} {
+	if len(payload) == 0 {
+		return nil
+	}
+	out := make(map[string]interface{}, len(skillInvokedPayloadStringKeys)+2)
+	for _, key := range skillInvokedPayloadStringKeys {
+		if value := payloadStringField(payload, key, 512); value != "" {
+			out[key] = value
+		}
+	}
+	if path := payloadStringField(payload, "path", 1024); path != "" {
+		out["has_path"] = true
+	}
+	switch step := payload["step"].(type) {
+	case int:
+		out["step"] = step
+	case int64:
+		out["step"] = step
+	case float64:
+		// JSON 反序列化路径（整数值的 float64）仍按水位导出。
+		out["step"] = step
 	}
 	if len(out) == 0 {
 		return nil

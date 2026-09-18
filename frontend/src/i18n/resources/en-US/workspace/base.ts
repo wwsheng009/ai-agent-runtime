@@ -518,6 +518,7 @@ export const enWorkspaceBase = {
         description: "execute a skill by name",
         argumentHint: "<skill-name>",
         needName: "provide a skill name: /skill <skill-name>",
+        needPrompt: "provide a prompt: /skill <skill-name> <prompt>",
         notAvailable: "no skills available",
         applied: "skill {{skill}} executed successfully",
         notFound: "skill {{skill}} not found",

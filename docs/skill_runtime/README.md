@@ -72,6 +72,7 @@ For the latest implementation status, start with:
 6. [Team Task Outcome Contract](./team_task_outcome_contract.md)
 7. [Skill Invocation Mechanism](./skill_invocation_mechanism.md)
 8. [AICLI Skills Usage](./aicli_skills_usage.md)
+9. [Skill 加载与交互逻辑（实况梳理，2026-09-18）](./skill_loading_and_interaction_20260918.md)
 
 ### If you want to operate or govern it
 

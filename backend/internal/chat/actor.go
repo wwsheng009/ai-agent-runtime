@@ -24,6 +24,7 @@ import (
 	runtimeoutput "github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -378,9 +379,22 @@ type SubmitPromptOption struct {
 	ImagePaths       []string
 	ImageArtifactDir string
 	RouteOverride    *RunRouteOverride
+	// TurnSystemMessages 是本回合一次性 system 注入（如 /skill 的 ProgramGuide），
+	// 只进入本次 run 的请求历史，不写入会话持久历史。
+	TurnSystemMessages []runtimetypes.Message
+	// TurnPinnedTools 是本回合一次性工具叠加（如 /skill 注入的 skill 函数与程序），
+	// 在稳定工具面冻结之后附加，不写回会话级稳定工具面。
+	TurnPinnedTools []runtimetypes.ToolDefinition
 	// TriggerTurnAuto marks a prompt submitted by the trigger_turn drain, so
 	// the loop guard can tell automatic turns from explicit ones (P0-3b).
 	TriggerTurnAuto bool
+}
+
+// turnInjection carries one-shot per-turn injections for a single prompt run.
+// It must never be persisted or reused by a later turn.
+type turnInjection struct {
+	systemMessages []runtimetypes.Message
+	pinnedTools    []runtimetypes.ToolDefinition
 }
 
 // SubmitPrompt submits a prompt and waits for the result.
@@ -395,14 +409,16 @@ func (a *SessionActor) SubmitPrompt(ctx context.Context, prompt string, runMeta 
 		opt = opts[0]
 	}
 	cmd := SubmitPrompt{
-		Ctx:              ctx,
-		Prompt:           prompt,
-		ImagePaths:       opt.ImagePaths,
-		ImageArtifactDir: opt.ImageArtifactDir,
-		RunMeta:          runMeta.Clone(),
-		RouteOverride:    opt.RouteOverride.Clone(),
-		TriggerTurnAuto:  opt.TriggerTurnAuto,
-		Reply:            reply,
+		Ctx:                ctx,
+		Prompt:             prompt,
+		ImagePaths:         opt.ImagePaths,
+		ImageArtifactDir:   opt.ImageArtifactDir,
+		RunMeta:            runMeta.Clone(),
+		RouteOverride:      opt.RouteOverride.Clone(),
+		TurnSystemMessages: cloneRuntimeMessages(opt.TurnSystemMessages),
+		TurnPinnedTools:    cloneRuntimeToolDefinitions(opt.TurnPinnedTools),
+		TriggerTurnAuto:    opt.TriggerTurnAuto,
+		Reply:              reply,
 	}
 	if err := a.send(ctx, cmd); err != nil {
 		return nil, err
@@ -461,14 +477,16 @@ func (a *SessionActor) SubmitPromptAsync(ctx context.Context, prompt string, run
 		opt = opts[0]
 	}
 	cmd := SubmitPrompt{
-		Ctx:              ctx,
-		Prompt:           prompt,
-		ImagePaths:       opt.ImagePaths,
-		ImageArtifactDir: opt.ImageArtifactDir,
-		RunMeta:          runMeta.Clone(),
-		RouteOverride:    opt.RouteOverride.Clone(),
-		TriggerTurnAuto:  opt.TriggerTurnAuto,
-		Reply:            reply,
+		Ctx:                ctx,
+		Prompt:             prompt,
+		ImagePaths:         opt.ImagePaths,
+		ImageArtifactDir:   opt.ImageArtifactDir,
+		RunMeta:            runMeta.Clone(),
+		RouteOverride:      opt.RouteOverride.Clone(),
+		TurnSystemMessages: cloneRuntimeMessages(opt.TurnSystemMessages),
+		TurnPinnedTools:    cloneRuntimeToolDefinitions(opt.TurnPinnedTools),
+		TriggerTurnAuto:    opt.TriggerTurnAuto,
+		Reply:              reply,
 	}
 	if err := a.send(ctx, cmd); err != nil {
 		return err
@@ -916,7 +934,14 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 		run.complete(SubmitResult{Err: err})
 		return
 	}
-	a.startSessionRun(runCtx, session, prompt, false, turnID, cmd.RunMeta, cmd.RouteOverride, reply, appendedPrompt, run)
+	var injection *turnInjection
+	if len(cmd.TurnSystemMessages) > 0 || len(cmd.TurnPinnedTools) > 0 {
+		injection = &turnInjection{
+			systemMessages: cmd.TurnSystemMessages,
+			pinnedTools:    cmd.TurnPinnedTools,
+		}
+	}
+	a.startSessionRun(runCtx, session, prompt, false, turnID, cmd.RunMeta, cmd.RouteOverride, injection, reply, appendedPrompt, run)
 }
 
 func (a *SessionActor) handleContinueSession(cmd ContinueSession) {
@@ -957,7 +982,7 @@ func (a *SessionActor) handleContinueSession(cmd ContinueSession) {
 		run.complete(SubmitResult{Err: err})
 		return
 	}
-	a.startSessionRun(runCtx, session, "", true, turnID, cmd.RunMeta, runRouteOverrideFromRunMeta(cmd.RunMeta), reply, false, run)
+	a.startSessionRun(runCtx, session, "", true, turnID, cmd.RunMeta, runRouteOverrideFromRunMeta(cmd.RunMeta), nil, reply, false, run)
 }
 
 func (a *SessionActor) handleApproveTool(cmd ApproveTool) {
@@ -1744,6 +1769,8 @@ func (a *SessionActor) tryRouteSkill(ctx context.Context, prompt string, session
 	if len(routes) == 0 || routes[0] == nil || routes[0].Skill == nil {
 		return nil, false, nil
 	}
+	// SK-3：执行前刷新隐式调用判定索引，保证与当前技能面一致。
+	executor.RefreshImplicitInvocationIndex()
 	req := runtimetypes.NewRequest(prompt)
 	req.History = routeHistoryForSkillPrompt(session, prompt)
 	req.Metadata.Set("permissions", []string{"*"})
@@ -1766,6 +1793,7 @@ func (a *SessionActor) tryRouteSkill(ctx context.Context, prompt string, session
 			Error:    "skill execution returned nil result",
 		}, true, fmt.Errorf("skill execution returned nil result")
 	}
+	a.publishSkillInvocations(skillResult.ImplicitInvocations)
 	if skillResult.Success {
 		session.AddMessage(*runtimetypes.NewAssistantMessage(skillResult.Output))
 	}
@@ -1779,6 +1807,26 @@ func (a *SessionActor) tryRouteSkill(ctx context.Context, prompt string, session
 		Duration:     req.Duration,
 		Error:        skillResult.Error,
 	}, true, nil
+}
+
+// publishSkillInvocations 把技能回合命中的隐式调用发布为 skills.invoked（SK-3）。
+// 与 skills API 口径一致：事件本身是总线级（Event.SessionID 留空，避免被 A 通道
+// 记为未落盘丢弃），会话归属只写进载荷 session_id。
+func (a *SessionActor) publishSkillInvocations(invocations []runtimeskill.ImplicitInvocation) {
+	if a == nil || a.eventBus == nil || len(invocations) == 0 {
+		return
+	}
+	for _, inv := range runtimeskill.DedupeInvocations(invocations) {
+		payload := runtimeskill.SkillInvokedEventPayload(inv)
+		if a.id != "" {
+			payload["session_id"] = a.id
+		}
+		a.eventBus.Publish(runtimeevents.Event{
+			Type:      runtimeskill.SkillInvokedEventType,
+			AgentName: "chat-actor",
+			Payload:   payload,
+		})
+	}
 }
 
 func routeHistoryForSkillPrompt(session *Session, prompt string) []runtimetypes.Message {
@@ -2495,7 +2543,7 @@ func normalizedMetadataKeys(keys []string) []string {
 	return normalized
 }
 
-func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, prompt string, resume bool, turnID string, runMeta *team.RunMeta, routeOverride *RunRouteOverride, reply chan SubmitResult, appendedPrompt bool, run *sessionRunControl) {
+func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, prompt string, resume bool, turnID string, runMeta *team.RunMeta, routeOverride *RunRouteOverride, injection *turnInjection, reply chan SubmitResult, appendedPrompt bool, run *sessionRunControl) {
 	if a == nil || session == nil {
 		if a != nil {
 			a.releaseSessionRun(run)
@@ -2523,6 +2571,10 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 	runCtx = team.WithRunMeta(runCtx, runMeta)
 	runCtx = agent.WithTurnID(runCtx, turnID)
 	runCtx = agent.WithTurnToolSurfaceSnapshot(runCtx, a.turnToolSurfaceSnapshot(turnID))
+	if injection != nil {
+		runCtx = agent.WithTurnSystemMessages(runCtx, injection.systemMessages)
+		runCtx = agent.WithTurnPinnedTools(runCtx, injection.pinnedTools)
+	}
 	if !a.installSessionRunCancel(run, cancel) {
 		cancel()
 		a.releaseSessionRun(run)
@@ -3634,7 +3686,7 @@ func (a *SessionActor) startPendingBatchRecoveryRun(ctx context.Context, session
 			a.finishPendingBatchRecovery(session, turnID, context.Canceled, run)
 			return
 		}
-		a.startSessionRun(withSessionRunControl(context.Background(), run), session, "", true, turnID, runMeta, runRouteOverrideFromRunMeta(runMeta), nil, false, run)
+		a.startSessionRun(withSessionRunControl(context.Background(), run), session, "", true, turnID, runMeta, runRouteOverrideFromRunMeta(runMeta), nil, nil, false, run)
 	}()
 }
 

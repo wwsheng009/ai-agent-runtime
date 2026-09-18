@@ -160,6 +160,9 @@ func (e *aicliSharedChatExecutor) execute(ctx context.Context, session *ChatSess
 		ctx = context.Background()
 	}
 	ctx = generatedImageToolContext(ctx, session)
+	// `/skill` 默认路径的一次性 pin：消费即焚。guide 只进入本回合请求历史，
+	// 工具叠加只作用于本回合 selection，均不写回会话级状态。
+	skillPin := consumeSkillTurnPin(session)
 
 	history := cloneRuntimeMessages(session.Messages)
 	if len(history) == 0 && session.RuntimeSession != nil && len(session.RuntimeSession.History) > 0 {
@@ -177,12 +180,17 @@ func (e *aicliSharedChatExecutor) execute(ctx context.Context, session *ChatSess
 			history = history[:len(history)-1]
 		}
 	}
+	if skillPin != nil && strings.TrimSpace(skillPin.Guide) != "" {
+		// 参考 goal 续写指令消息的先例：附加型 system 消息，只影响本次请求历史。
+		history = append(history, *runtimetypes.NewSystemMessage(skillPin.Guide))
+	}
 
 	var selection *aicliFunctionSelection
 	var exposureDetails *skillExposureDetails
 	var exposureReport *aicliFunctionExposureReport
 	if catalog := ensureFunctionCatalog(session); catalog != nil && catalog.Registry() != nil {
 		selection, exposureDetails = stableSharedFunctionSelectionForRequest(session, prompt)
+		selection = overlayPinnedFunctions(selection, skillPin)
 		exposureReport = buildFunctionExposureReport(catalog, prompt, selection, exposureDetails)
 		if session.SkillsDebug {
 			printfDirectInteractiveOutput(session, "\n%s\n", formatSkillExposureDebug(exposureReport))

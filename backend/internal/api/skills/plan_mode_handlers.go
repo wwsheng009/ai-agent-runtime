@@ -50,7 +50,10 @@ type sessionPlanModeRequest struct {
 	Action   string `json:"action"`
 	Decision string `json:"decision"`
 	PlanPath string `json:"plan_path"`
-	Notes    string `json:"notes"`
+	// PlanWritePaths lists additional plan files writable while plan mode is
+	// active (union with PlanPath), mirroring the enter_plan_mode tool contract.
+	PlanWritePaths []string `json:"plan_write_paths,omitempty"`
+	Notes          string   `json:"notes"`
 }
 
 // GetSessionPlanMode returns durable plan-mode state and a path-safe plan file preview.
@@ -113,7 +116,7 @@ func (h *Handler) UpdateSessionPlanMode(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if err := applyPlanModeToSession(session, action, decision, req.PlanPath, req.Notes); err != nil {
+	if err := applyPlanModeToSession(session, action, decision, req.PlanPath, req.PlanWritePaths, req.Notes); err != nil {
 		h.writePlanModeError(w, err)
 		return
 	}
@@ -169,7 +172,8 @@ func (h *Handler) applyPlanModeViaActor(
 	switch action {
 	case "enter":
 		if _, err := actor.EnterPlanMode(ctx, sessionID, toolbroker.EnterPlanModeArgs{
-			PlanPath: strings.TrimSpace(req.PlanPath),
+			PlanPath:       strings.TrimSpace(req.PlanPath),
+			PlanWritePaths: req.PlanWritePaths,
 		}); err != nil {
 			return nil, err
 		}
@@ -190,7 +194,7 @@ func (h *Handler) applyPlanModeViaActor(
 	return session, nil
 }
 
-func applyPlanModeToSession(session *chat.Session, action string, decision planmode.ExitDecision, planPath, notes string) error {
+func applyPlanModeToSession(session *chat.Session, action string, decision planmode.ExitDecision, planPath string, planWritePaths []string, notes string) error {
 	if session == nil {
 		return fmt.Errorf("session is required")
 	}
@@ -205,7 +209,7 @@ func applyPlanModeToSession(session *chat.Session, action string, decision planm
 			(!planmode.IsActive(current) || strings.TrimSpace(current.PreviousMode) == "") {
 			previousMode = string(runtimepolicy.ModeDefault)
 		}
-		state := planmode.Enter(previousMode, planPath)
+		state := planmode.Enter(previousMode, planPath, planWritePaths...)
 		planmode.Save(session, state)
 		applySessionPermissionMode(session, runtimepolicy.ModePlan)
 		return nil

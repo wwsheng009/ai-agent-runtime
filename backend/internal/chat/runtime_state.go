@@ -253,6 +253,31 @@ func cloneRuntimeToolDefinitions(input []types.ToolDefinition) []types.ToolDefin
 	return cloned
 }
 
+func cloneRuntimeMessages(input []types.Message) []types.Message {
+	if len(input) == 0 {
+		return nil
+	}
+	cloned := make([]types.Message, len(input))
+	for index, message := range input {
+		item := types.Message{
+			Role:       message.Role,
+			Content:    message.Content,
+			ToolCallID: message.ToolCallID,
+		}
+		if len(message.ContentParts) > 0 {
+			item.ContentParts = append([]types.ContentPart(nil), message.ContentParts...)
+		}
+		if len(message.ToolCalls) > 0 {
+			item.ToolCalls = append([]types.ToolCall(nil), message.ToolCalls...)
+		}
+		if message.Metadata != nil {
+			item.Metadata = message.Metadata.Clone()
+		}
+		cloned[index] = item
+	}
+	return cloned
+}
+
 func cloneRuntimeToolParameters(input map[string]interface{}) map[string]interface{} {
 	if input == nil {
 		return nil

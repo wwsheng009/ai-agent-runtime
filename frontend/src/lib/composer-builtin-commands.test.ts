@@ -24,6 +24,7 @@ describe("COMPOSER_BUILTIN_COMMANDS", () => {
       "rename",
       "feedback",
       "model",
+      "skill",
     ]);
     expect(registry.byKey.get("export")?.kind).toBe("action");
     expect(registry.byKey.get("rename")?.kind).toBe("execute");
@@ -31,6 +32,8 @@ describe("COMPOSER_BUILTIN_COMMANDS", () => {
     expect(registry.byKey.get("feedback")?.kind).toBe("execute");
     expect(registry.byKey.get("model")?.kind).toBe("popupSelect");
     expect(registry.byKey.get("model")?.options).toBeUndefined();
+    // `/skill` 同 `/model`：候选由宿主 skill 目录注入；无目录时打开弹窗。
+    expect(registry.byKey.get("skill")?.kind).toBe("popupSelect");
   });
 
   it("宿主注入目录时 /model 携带候选；空目录不产生占位候选", () => {

@@ -160,7 +160,14 @@ func restoreChatRuntimeContext(session *ChatSession, runtimeSession *runtimechat
 	// default，导致工具调用继续弹审批）。
 	if !session.permissionModeCLIChanged {
 		if mode, err := parseChatPermissionMode(runtimeSessionContextString(runtimeSession, chatRuntimeContextPermissionMode), false); err == nil {
-			session.PermissionMode = mode
+			// plan is a durable lifecycle, not a CLI mode: the stored canonical
+			// key may legitimately read "plan" while the lifecycle is active
+			// (see syncRuntimeSessionFromChatMode), but restoring it here would
+			// poison session.PermissionMode and keep the engine in plan mode
+			// even after exit_plan_mode rewrites the row.
+			if mode != runtimepolicy.ModePlan {
+				session.PermissionMode = mode
+			}
 		}
 	}
 	if debugMode, ok := runtimeSessionContextBool(runtimeSession, chatRuntimeContextDebugMode); ok {

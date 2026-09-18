@@ -291,8 +291,14 @@ type UserInputHandler interface {
 
 // EnterPlanModeArgs describes enter_plan_mode tool input.
 type EnterPlanModeArgs struct {
-	// PlanPath is the plan artifact path (default plan.md).
+	// PlanPath is the primary plan artifact path (default plan.md). The broker
+	// also accepts an array here (first entry = primary artifact, remaining
+	// entries join the write allowlist) for callers that pass a plan file list.
 	PlanPath string `json:"plan_path,omitempty"`
+	// PlanWritePaths lists additional plan files that stay writable while plan
+	// mode is active. It is a write-allowlist union with PlanPath: the primary
+	// path remains the artifact surfaced in results and reviews.
+	PlanWritePaths []string `json:"plan_write_paths,omitempty"`
 }
 
 // ExitPlanModeArgs describes exit_plan_mode tool input.

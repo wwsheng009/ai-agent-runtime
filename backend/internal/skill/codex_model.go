@@ -277,6 +277,17 @@ func skillSourceFormat(skill *Skill) string {
 	return skillManifestFormatForPath(skill.Source.Path)
 }
 
+// isCodexSummarySource 报告摘要是否来自 Codex 兼容技能。
+func isCodexSummarySource(summary *SkillSummary) bool {
+	if summary == nil {
+		return false
+	}
+	if summary.Codex != nil {
+		return true
+	}
+	return skillSummarySourceFormat(summary) == SkillSourceFormatCodex
+}
+
 func skillSummarySourceFormat(summary *SkillSummary) string {
 	if summary == nil || summary.Source == nil {
 		return skillManifestFormatForPath("")

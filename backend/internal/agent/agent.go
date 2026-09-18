@@ -65,6 +65,8 @@ type Agent struct {
 	backgroundBatches       bool
 	toolCatalog             *mcpcatalog.Catalog
 	eventBus                *runtimeevents.Bus
+	skillObserver           skillInvocationObserver
+	skillIndexGen           uint64
 	promptBuild             *PromptBuilder
 	toolPolicy              *ToolExecutionPolicy
 	toolHooks               ToolHooks
@@ -737,6 +739,7 @@ func (a *Agent) LoadSkills(dir string) error {
 			errs = append(errs, err)
 		}
 	}
+	a.noteSkillRegistryMutation()
 
 	if len(errs) > 0 {
 		return fmt.Errorf("failed to register %d skills: %v", len(errs), errs)
@@ -747,12 +750,17 @@ func (a *Agent) LoadSkills(dir string) error {
 
 // RegisterSkill 注册单个 Skill
 func (a *Agent) RegisterSkill(s *skill.Skill) error {
-	return a.skillRouter.Registry().Register(s)
+	if err := a.skillRouter.Registry().Register(s); err != nil {
+		return err
+	}
+	a.noteSkillRegistryMutation()
+	return nil
 }
 
 // UnregisterSkill 注销 Skill
 func (a *Agent) UnregisterSkill(name string) {
 	a.skillRouter.Registry().Unregister(name)
+	a.noteSkillRegistryMutation()
 }
 
 // GetSkill 获取 Skill

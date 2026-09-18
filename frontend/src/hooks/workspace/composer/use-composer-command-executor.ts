@@ -47,7 +47,18 @@ export type UseComposerCommandExecutorOptions = {
   /** `/skill`：技能名称列表与「打开弹窗」动作；缺省时命令如实报不可用。 */
   skillNames?: string[];
   openSkillDialog?: () => void;
+  /**
+   * P2：`/skill <name> <prompt>` 提交为普通对话回合（宿主在请求体携带
+   * `expose_skills`），消息流可见。缺省时回退到 executeSkill REST
+   * （无回合提交能力的宿主，例如 admin/debug 场景）。
+   */
+  onRunSkillTurn?: ComposerSkillTurnRunner;
 };
+
+export type ComposerSkillTurnRunner = (
+  skillName: string,
+  prompt: string,
+) => void | Promise<void>;
 
 export type ComposerModelSelectionBridge = {
   /** 目录内真实存在的模型 id；空数组 = 目录未就绪（不按「不存在」处理）。 */
@@ -100,6 +111,7 @@ export function useComposerCommandExecutor({
   modelSelection,
   skillNames = [],
   openSkillDialog,
+  onRunSkillTurn,
 }: UseComposerCommandExecutorOptions): ComposerCommandExecutor {
   const [notice, setNotice] = useState<ComposerCommandResultNotice | null>(null);
   const exportingRef = useRef(false);
@@ -311,11 +323,45 @@ export function useComposerCommandExecutor({
         return;
       }
 
+      // 回合 prompt 不能为空：保持「打开弹窗 / 提示补充」语义，不伪造空回合。
+      if (userPrompt.length === 0) {
+        if (openSkillDialog) {
+          openSkillDialog();
+        } else {
+          setNotice({
+            tone: "error",
+            messageKey: "composer.builtin.skill.needPrompt",
+            values: { skill: skillName },
+          });
+        }
+        return;
+      }
+
+      if (onRunSkillTurn) {
+        try {
+          // P2 回合化：宿主提交普通回合并在请求体携带 expose_skills；成功路径不
+          // 显示回执（线程里已有真实消息），避免「执行成功」提示条与消息流重复。
+          await onRunSkillTurn(skillName, userPrompt);
+          setNotice(null);
+        } catch (error) {
+          logger.error("skill turn submission failed", { skillName, error });
+          setNotice({
+            tone: "error",
+            messageKey: "composer.builtin.skill.failed",
+            values: { skill: skillName },
+          });
+        }
+        return;
+      }
+
       try {
-        // 调用后端 API 执行 skill，将用户 prompt 传递给后端
+        // 回退路径（宿主未接线回合提交）：调用后端 API 执行 skill，模型驱动
+        // （模型读取 skill 说明与程序清单后自行选择要调用的程序）。无消息流可
+        // 承接结果，因此仍以「执行成功」回执呈现。
         await executeSkill(skillName, {
-          prompt: userPrompt || undefined,
+          prompt: userPrompt,
           sessionId: sessionId,
+          options: { execution_mode: "model" },
         });
         
         setNotice({
@@ -332,7 +378,7 @@ export function useComposerCommandExecutor({
         });
       }
     },
-    [skillNames, openSkillDialog, sessionId],
+    [skillNames, openSkillDialog, onRunSkillTurn, sessionId],
   );
 
   const run = useCallback(

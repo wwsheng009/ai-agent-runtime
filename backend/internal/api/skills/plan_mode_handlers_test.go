@@ -67,7 +67,7 @@ func TestSessionPlanModeEnterExitApproveAndPreview(t *testing.T) {
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
-	enterBody := `{"action":"enter","plan_path":"docs/implementation-plan.md"}`
+	enterBody := `{"action":"enter","plan_path":"docs/implementation-plan.md","plan_write_paths":["docs/implementation-notes.md"]}`
 	enterReq := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+session.ID+"/plan", strings.NewReader(enterBody))
 	enterReq.Header.Set("Content-Type", "application/json")
 	enterRec := httptest.NewRecorder()
@@ -82,6 +82,7 @@ func TestSessionPlanModeEnterExitApproveAndPreview(t *testing.T) {
 	require.Equal(t, string(runtimepolicy.ModeAcceptEdits), entered.PreviousMode)
 	require.Equal(t, planPath, entered.PlanPath)
 	require.Contains(t, entered.WriteAllowPaths, planPath)
+	require.Contains(t, entered.WriteAllowPaths, "docs/implementation-notes.md")
 	require.True(t, entered.PlanContentAvailable)
 	require.Contains(t, entered.PlanContent, "implement preview")
 	require.Equal(t, workspace, entered.WorkspacePath)

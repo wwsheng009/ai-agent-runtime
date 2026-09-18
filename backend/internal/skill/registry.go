@@ -45,6 +45,9 @@ type Registry struct {
 	summaries       map[string]*SkillSummary
 	summariesByPath map[string]*SkillSummary
 	loadedCache     map[string]*hydratedSkillCacheEntry
+	// unavailable 记录因依赖缺失（如工具未注册）而未进入注册表的技能，
+	// 键为小写名称；见 SK-4。它只服务列表/统计/点名诊断，不参与路由。
+	unavailable map[string]*UnavailableSkill
 
 	// 按触发类型索引
 	keywordIndex map[string][]*Skill
@@ -63,6 +66,7 @@ func NewRegistry(mcpManager MCPManager) *Registry {
 		summaries:       make(map[string]*SkillSummary),
 		summariesByPath: make(map[string]*SkillSummary),
 		loadedCache:     make(map[string]*hydratedSkillCacheEntry),
+		unavailable:     make(map[string]*UnavailableSkill),
 		keywordIndex:    make(map[string][]*Skill),
 		patternIndex:    make(map[string][]*Skill),
 		weightIndex:     make(map[*Skill]float64),
@@ -77,6 +81,11 @@ func (r *Registry) Register(s *Skill) error {
 
 	// 验证 Skill
 	if err := r.validate(s); err != nil {
+		// SK-4：工具缺失导致注册被跳过时，仍登记 unavailable 记录，让列表/
+		// 统计/点名路径可见并可诊断；调用方（loader 等）保持既有的软跳过语义。
+		if errors.Is(err, errors.ErrToolNotRegistered) {
+			r.storeUnavailableLocked(unavailableSkillFromSkill(s, missingToolsFromError(err)))
+		}
 		return err
 	}
 
@@ -103,6 +112,8 @@ func (r *Registry) Register(s *Skill) error {
 	// 存储 Skill
 	r.skillsByPath[pathKey] = s
 	r.storeSummaryLocked(s)
+	// 技能已可注册：清理同名 unavailable 记录（例如工具在重载后被启用）。
+	r.clearUnavailableLocked(s.Name)
 
 	// 维护 name 索引的兼容语义。
 	if incomingFormat != SkillSourceFormatCodex {
@@ -304,6 +315,7 @@ func (r *Registry) Clear() {
 	r.summaries = make(map[string]*SkillSummary)
 	r.summariesByPath = make(map[string]*SkillSummary)
 	r.loadedCache = make(map[string]*hydratedSkillCacheEntry)
+	r.unavailable = make(map[string]*UnavailableSkill)
 	r.keywordIndex = make(map[string][]*Skill)
 	r.patternIndex = make(map[string][]*Skill)
 	r.weightIndex = make(map[*Skill]float64)
@@ -330,19 +342,35 @@ func (r *Registry) validate(s *Skill) error {
 		return errors.New(errors.ErrValidationFailed, "skill description is required")
 	}
 
+	// SK-7：文档模式技能没有执行器，其依赖声明只是给模型阅读的指引，
+	// 不做工具可用性校验（否则会因 surface 缺工具被静默跳过）。
+	if s.IsDocumentMode() {
+		return nil
+	}
+
 	if isCodexSkillSource(s) {
 		return nil
 	}
 
-	// 验证工具是否存在（如果启用了 验证）
+	// 验证工具是否存在（如果启用了 验证）。SK-4：收集所有缺失工具并挂到
+	// 错误的 missing_tools 上下文里，便于 loader 记录完整的 unavailable 记录。
+	var missingTools []string
 	for _, toolName := range s.Tools {
-		if r.mcpManager != nil {
-			_, err := r.mcpManager.FindTool(toolName)
-			if err != nil {
-				return errors.Wrap(errors.ErrToolNotRegistered,
-					fmt.Sprintf("tool not found: %s", toolName), err)
-			}
+		if r.mcpManager == nil {
+			break
 		}
+		if _, err := r.mcpManager.FindTool(toolName); err != nil {
+			missingTools = append(missingTools, toolName)
+		}
+	}
+	if len(missingTools) > 0 {
+		missingTools = normalizeUnavailableToolNames(missingTools)
+		message := fmt.Sprintf("tool not found: %s", missingTools[0])
+		if len(missingTools) > 1 {
+			message = fmt.Sprintf("tools not found: %s", strings.Join(missingTools, ", "))
+		}
+		return errors.WrapWithContext(errors.ErrToolNotRegistered, message, nil,
+			map[string]interface{}{unavailableMissingToolsContextKey: missingTools})
 	}
 
 	return nil

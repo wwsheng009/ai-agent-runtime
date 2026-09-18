@@ -170,10 +170,19 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	if reporter := newRuntimeHTTPDebugReporter(session); reporter != nil {
 		ctx = runtimellm.WithHTTPDebugReporter(ctx, reporter)
 	}
-	result, err := submitAICLIActorPrompt(ctx, actor, prompt, currentRunMetaForSession(session), runtimechat.SubmitPromptOption{
+	submitOption := runtimechat.SubmitPromptOption{
 		ImagePaths:       session.ImagePaths,
 		ImageArtifactDir: chatSessionImageArtifactDir(session),
-	})
+	}
+	// `/skill` 默认路径的一次性 pin：消费即焚，只随本回合的 SubmitPromptOption
+	// 跨包传递（guide → 回合 system 消息；pinnedTools → 稳定工具面冻结后叠加）。
+	if skillPin := consumeSkillTurnPin(session); skillPin != nil {
+		if guide := strings.TrimSpace(skillPin.Guide); guide != "" {
+			submitOption.TurnSystemMessages = []runtimetypes.Message{*runtimetypes.NewSystemMessage(guide)}
+		}
+		submitOption.TurnPinnedTools = skillPin.PinnedTools
+	}
+	result, err := submitAICLIActorPrompt(ctx, actor, prompt, currentRunMetaForSession(session), submitOption)
 	if err != nil {
 		logActorExecutorFailureIfUnrecorded(session, prompt, err)
 		warnIfChatSessionSyncFails(session, "actor error sync", syncRuntimeSessionBackIntoCLIAfterFailure(session))

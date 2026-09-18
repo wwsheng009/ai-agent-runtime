@@ -95,7 +95,8 @@
 - `/function <name> --json` 会输出机器可读的 descriptor 视图
 - `/skills` 会列出当前已加载的 skill functions，并提示输入编号或 skill 名称，随后再输入 prompt 直接执行
 - `/skills <query>` 会先按关键字过滤 skill，再进入选择
-- `/skill <name> <prompt>` 仍然保留用于直接执行已知 skill
+- `/skill <name> <prompt>` 默认提交一个普通 chat 回合：把该 skill 的程序说明（ProgramGuide）注入本回合 system 上下文，并把 skill 函数与其声明的程序叠加到本回合工具面，由模型自选程序执行（2026-09-18 起）
+- `/skill --direct <name> <prompt>` 保留直接执行（确定性、无模型参与）
 
 ## 暴露控制
 

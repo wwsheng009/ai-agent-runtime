@@ -51,7 +51,10 @@ func (a *SessionActor) EnterPlanMode(ctx context.Context, sessionID string, args
 		previousMode = string(runtimepolicy.ModeDefault)
 	}
 
-	state := planmode.Enter(previousMode, args.PlanPath)
+	// plan_path may carry a list (first entry = primary artifact) and
+	// plan_write_paths adds further allowlist entries; Enter unions the primary
+	// path with the extras and dedupes them into State.WriteAllowPaths.
+	state := planmode.Enter(previousMode, args.PlanPath, args.PlanWritePaths...)
 	planmode.Save(session, state)
 	a.applySessionPermissionMode(session, runtimepolicy.ModePlan)
 	if err := a.persistSession(ctx, session); err != nil {

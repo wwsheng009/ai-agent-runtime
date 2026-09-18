@@ -119,6 +119,18 @@ func (h *Handler) invalidateCodexSkillsListCache() {
 
 func cloneCodexSkillsListResponse(response codexSkillsListResponse) codexSkillsListResponse {
 	cloned := response
+	if response.Unavailable != nil {
+		cloned.Unavailable = make([]skill.UnavailableSkill, len(response.Unavailable))
+		for index, item := range response.Unavailable {
+			copied := item
+			copied.MissingTools = append([]string(nil), item.MissingTools...)
+			cloned.Unavailable[index] = copied
+		}
+	}
+	if response.Catalog != nil {
+		catalog := *response.Catalog
+		cloned.Catalog = &catalog
+	}
 	if response.Results == nil {
 		cloned.Results = nil
 		return cloned

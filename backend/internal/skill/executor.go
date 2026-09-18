@@ -6,6 +6,7 @@ import (
 	stderrors "errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -20,10 +21,10 @@ import (
 // Environment freeze keys mirror sessionmeta constants without importing that
 // package (sessionmeta -> chat -> agent -> skill would create an import cycle).
 const (
-	skillEnvironmentContextBlock         = "environment_context_block"
-	skillEnvironmentCapabilityGuidance   = "environment_capability_guidance"
-	skillEnvironmentProbedAt             = "environment_probed_at"
-	skillEnvironmentValues               = "environment_values"
+	skillEnvironmentContextBlock       = "environment_context_block"
+	skillEnvironmentCapabilityGuidance = "environment_capability_guidance"
+	skillEnvironmentProbedAt           = "environment_probed_at"
+	skillEnvironmentValues             = "environment_values"
 )
 
 var workflowTemplatePattern = regexp.MustCompile(`\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}`)
@@ -35,6 +36,12 @@ type Executor struct {
 	registry   *Registry
 	mcpManager MCPManager
 	llmRuntime *llm.LLMRuntime
+	// defaultModel 是技能桥调用 LLM 时显式使用的模型；为空表示沿用运行时默认
+	// 模型。会话宿主（例如 aicli 复用 runtime host 的共享 bootstrap）里运行时
+	// 默认模型未必等于会话模型，留空会把请求发到无关模型/供应商上。
+	defaultModel string
+	// implicitIndex 是隐式调用判定索引（SK-3）；nil 表示不判定。
+	implicitIndex *ImplicitInvocationIndex
 }
 
 // NewExecutor 创建执行器
@@ -44,6 +51,40 @@ func NewExecutor(registry *Registry, mcpManager MCPManager, llmRuntime *llm.LLMR
 		mcpManager: mcpManager,
 		llmRuntime: llmRuntime,
 	}
+}
+
+// SetDefaultModel 设置技能桥请求使用的模型（调用方通常传入会话当前模型）。
+func (e *Executor) SetDefaultModel(model string) {
+	if e == nil {
+		return
+	}
+	e.defaultModel = strings.TrimSpace(model)
+}
+
+// DefaultModel 返回当前配置的技能桥模型（空表示沿用运行时默认模型）。
+func (e *Executor) DefaultModel() string {
+	if e == nil {
+		return ""
+	}
+	return e.defaultModel
+}
+
+// SetImplicitInvocationIndex 设置隐式调用判定索引（SK-3）。
+// 传入 nil 表示停用隐式调用判定。索引由调用方随 registry 失效重建。
+func (e *Executor) SetImplicitInvocationIndex(index *ImplicitInvocationIndex) {
+	if e == nil {
+		return
+	}
+	e.implicitIndex = index
+}
+
+// RefreshImplicitInvocationIndex 从当前 registry 重建隐式调用判定索引（SK-3）。
+// 技能面（registry 摘要）变化后由宿主调用；registry 为空时索引自然为空。
+func (e *Executor) RefreshImplicitInvocationIndex() {
+	if e == nil || e.registry == nil {
+		return
+	}
+	e.SetImplicitInvocationIndex(BuildImplicitInvocationIndex(e.registry.ListSummaries()))
 }
 
 // SetLLMRuntime 设置 LLM Runtime
@@ -62,6 +103,9 @@ type ExecuteResult struct {
 	ErrorCode    string                 `json:"error_code,omitempty"`
 	ErrorContext map[string]interface{} `json:"error_context,omitempty"`
 	Usage        *types.TokenUsage      `json:"usage,omitempty"`
+	// ImplicitInvocations 记录本回合工具调用中命中的隐式技能调用（SK-3）。
+	// 由 executeDefault 的工具循环填充，调用方负责发布 skills.invoked 事件。
+	ImplicitInvocations []ImplicitInvocation `json:"implicit_invocations,omitempty"`
 }
 
 // Execute 执行 Skill
@@ -92,8 +136,12 @@ func (e *Executor) Execute(ctx context.Context, skill *Skill, req *types.Request
 		return result, nil
 	}
 
+	// 执行模式：auto（默认）保持 Handler → Workflow → executeDefault 的既有优先级；
+	// model 跳过直执行，把 skill 说明与程序清单交给模型，由模型选择要调用哪些程序。
+	executionMode := resolveSkillExecutionMode(req)
+
 	// 1. 如果有自定义处理器，直接执行
-	if skill.Handler != nil {
+	if executionMode != SkillExecutionModeModel && skill.Handler != nil {
 		typedResult, err := skill.Handler.Execute(ctx, req)
 		if err != nil {
 			result.setError(err)
@@ -107,7 +155,7 @@ func (e *Executor) Execute(ctx context.Context, skill *Skill, req *types.Request
 	}
 
 	// 2. 如果有工作流，执行工作流
-	if skill.HasWorkflow() {
+	if executionMode != SkillExecutionModeModel && skill.HasWorkflow() {
 		obs, output, err := e.executeWorkflow(ctx, skill, req)
 		result.Observations = obs
 		if err != nil {
@@ -120,6 +168,14 @@ func (e *Executor) Execute(ctx context.Context, skill *Skill, req *types.Request
 	}
 
 	// 3. 默认: 直接调用工具
+	// SK-7：显式声明 execution_mode: document 的技能不走 executeDefault 子调用；
+	// 正文由 injection path 注入上下文，模型用既有工具完成任务。
+	// （auto 识别在注册处处理，此处仅作显式声明的兜底。）
+	if skill.ExecutionMode == ExecutionModeDocument {
+		result.Success = true
+		result.Output = fmt.Sprintf("skill %q is in document mode (execution_mode: document); its instructions have been injected into context. Use available tools directly.", skill.Name)
+		return result, nil
+	}
 	return e.executeDefault(ctx, skill, req)
 }
 
@@ -260,6 +316,53 @@ func (e *Executor) workflowConcurrency(workflow *Workflow) int {
 	return 4
 }
 
+// BuildMainLoopPrompt 渲染「注入主循环」的技能指令文本。
+//
+// 说明型技能（无 handler / workflow）不再另起一次技能 LLM 交互（技能桥），
+// 而是把技能正文与用户请求作为上下文交给宿主的主对话循环：由主循环的模型用
+// 常规工具面（shell / 文件 / 网络等）决定如何执行，避免双重 LLM 循环与技能桥
+// 的步数上限。
+//
+// 与 executeDefault 的区别：不注入宿主已经具备的 environment / shell / file
+// editing 指引与历史消息，也不发起任何 LLM 调用，只做纯文本渲染。
+func (e *Executor) BuildMainLoopPrompt(skill *Skill, req *types.Request) (string, error) {
+	if skill == nil {
+		return "", fmt.Errorf("skill is required")
+	}
+	resolved, err := e.resolveExecutableSkill(skill)
+	if err != nil {
+		return "", err
+	}
+	if resolved != nil {
+		skill = resolved
+	}
+	systemPrompt, userPrompt, err := resolveSkillPrompts(skill)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(userPrompt) == "" && req != nil {
+		userPrompt = strings.TrimSpace(req.Prompt)
+	}
+
+	name := strings.TrimSpace(skill.Name)
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "已加载技能「%s」的指令；请使用当前对话已有的常规工具完成下面的技能指令与用户请求。\n", name)
+	if description := strings.TrimSpace(skill.Description); description != "" {
+		builder.WriteString("技能说明: " + description + "\n")
+	}
+	if body := strings.TrimSpace(systemPrompt); body != "" {
+		builder.WriteString("\n## 技能指令\n")
+		builder.WriteString(body)
+		builder.WriteString("\n")
+	}
+	if request := strings.TrimSpace(userPrompt); request != "" {
+		builder.WriteString("\n## 用户请求\n")
+		builder.WriteString(request)
+		builder.WriteString("\n")
+	}
+	return strings.TrimSpace(builder.String()), nil
+}
+
 // executeDefault 默认执行模式（使用 LLM）
 func (e *Executor) executeDefault(ctx context.Context, skill *Skill, req *types.Request) (*ExecuteResult, error) {
 	// 如果没有 LLM Runtime，返回提示信息
@@ -288,6 +391,13 @@ func (e *Executor) executeDefault(ctx context.Context, skill *Skill, req *types.
 	if systemPrompt != "" {
 		messages = append(messages, *types.NewSystemMessage(systemPrompt))
 	}
+	// 模型驱动模式：显式说明文档（systemPrompt / Codex Body）之外，再投影一份
+	// skill 说明与程序清单，让模型先读文档、再决定调用哪些程序。
+	if resolveSkillExecutionMode(req) == SkillExecutionModeModel {
+		if guide := buildSkillProgramGuide(skill); guide != "" {
+			messages = append(messages, *types.NewSystemMessage(guide))
+		}
+	}
 	if environmentContext := buildEnvironmentContextMessage(req); environmentContext != "" {
 		messages = append(messages, *types.NewSystemMessage("Environment context:\n" + environmentContext))
 	}
@@ -313,15 +423,20 @@ func (e *Executor) executeDefault(ctx context.Context, skill *Skill, req *types.
 	}
 	messages = append(messages, *types.NewUserMessage(userPrompt))
 
-	// 构建工具定义
+	// 构建工具定义：显式声明的工具（含 workflow 步骤引用的程序）优先；未声明工具的
+	// 说明型技能（例如 Codex SKILL.md 技能）在工具循环开启时暴露运行时工具面，让
+	// /skill 真正执行技能要求的动作，而不是只回显一段文本。模型驱动模式下工具循环
+	// 默认开启（显式 tool_loop=false 仍可关闭）。
 	var tools []types.ToolDefinition
-	if len(skill.Tools) > 0 {
-		tools = e.buildToolDefinitions(ctx, skill.Tools)
+	if programTools := skillProgramTools(skill); len(programTools) > 0 {
+		tools = e.buildToolDefinitions(ctx, programTools)
+	} else if skillToolLoopRequested(req) {
+		tools = e.buildToolDefinitions(ctx, e.runtimeToolNames())
 	}
 
 	// 调用 LLM
 	llmRequest := &llm.LLMRequest{
-		Model:           "",
+		Model:           e.defaultModel,
 		Messages:        messages,
 		Tools:           tools,
 		MaxTokens:       4096,
@@ -330,29 +445,581 @@ func (e *Executor) executeDefault(ctx context.Context, skill *Skill, req *types.
 		Thinking:        types.CloneThinkingConfig(req.Thinking),
 	}
 
-	response, err := e.llmRuntime.Call(ctx, llmRequest)
-	if err != nil {
-		if fallbackMessages, ok := buildSystemRoleFallbackMessages(messages, err); ok {
-			llmRequest.Messages = fallbackMessages
-			response, err = e.llmRuntime.Call(ctx, llmRequest)
+	maxSteps := resolveSkillToolLoopMaxSteps(req, len(tools) > 0)
+	observations := make([]types.Observation, 0, 4)
+	lastContent := ""
+	implicit := make([]ImplicitInvocation, 0, 4)
+	for step := 0; step < maxSteps; step++ {
+		response, callErr := e.callSkillLLM(ctx, llmRequest)
+		if callErr != nil {
+			return e.attachImplicitInvocations(&ExecuteResult{
+				SkillName:    skill.Name,
+				Success:      false,
+				Output:       "",
+				Error:        callErr.Error(),
+				Observations: observations,
+			}, implicit), callErr
 		}
-	}
-	if err != nil {
-		return &ExecuteResult{
-			SkillName: skill.Name,
-			Success:   false,
-			Output:    "",
-			Error:     err.Error(),
-		}, err
+		if response == nil {
+			break
+		}
+		lastContent = response.Content
+
+		calls := normalizeSkillToolCalls(*response)
+		if len(calls) == 0 {
+			return e.attachImplicitInvocations(&ExecuteResult{
+				SkillName:    skill.Name,
+				Success:      true,
+				Output:       response.Content,
+				Usage:        response.Usage,
+				Observations: observations,
+			}, implicit), nil
+		}
+		if len(llmRequest.Tools) == 0 {
+			// 模型发起了工具调用，但当前执行路径没有工具面：不要回显原始标记
+			// 文本（DSML/JSON 片段），返回可解释的错误让调用方决策。
+			return e.attachImplicitInvocations(&ExecuteResult{
+				SkillName:    skill.Name,
+				Success:      false,
+				Output:       "",
+				Error:        skillToolCallsWithoutToolsError(calls),
+				Observations: observations,
+			}, implicit), nil
+		}
+
+		messages = append(messages, newAssistantToolCallMessage(response.Content, calls))
+		stepObservations, toolMessages := e.executeSkillToolCalls(ctx, calls)
+		observations = append(observations, stepObservations...)
+		messages = append(messages, toolMessages...)
+		e.collectImplicitInvocations(calls, &implicit)
+		llmRequest.Messages = messages
 	}
 
-	return &ExecuteResult{
+	capNote := fmt.Sprintf("[已达工具调用步数上限（%d），技能可能未完成]", maxSteps)
+	if strings.TrimSpace(lastContent) == "" {
+		lastContent = capNote
+	} else {
+		lastContent = strings.TrimSpace(lastContent) + "\n\n" + capNote
+	}
+	return e.attachImplicitInvocations(&ExecuteResult{
 		SkillName:    skill.Name,
 		Success:      true,
-		Output:       response.Content,
-		Usage:        response.Usage,
-		Observations: []types.Observation{},
-	}, nil
+		Output:       lastContent,
+		Observations: observations,
+	}, implicit), nil
+}
+
+// attachImplicitInvocations 把收集到的隐式调用附加到结果（SK-3）。
+func (e *Executor) attachImplicitInvocations(result *ExecuteResult, implicit []ImplicitInvocation) *ExecuteResult {
+	if result == nil {
+		return result
+	}
+	if len(implicit) == 0 {
+		return result
+	}
+	result.ImplicitInvocations = append(result.ImplicitInvocations, DedupeInvocations(implicit)...)
+	return result
+}
+
+// collectImplicitInvocations 扫描本回合工具调用，把命中的隐式技能调用追加到结果（SK-3）。
+// 仅当 SetImplicitInvocationIndex 设置过索引时生效；结果由调用方在回合结束后发布。
+func (e *Executor) collectImplicitInvocations(calls []types.ToolCall, implicit *[]ImplicitInvocation) {
+	if e == nil || e.implicitIndex == nil || len(calls) == 0 || implicit == nil {
+		return
+	}
+	for _, call := range calls {
+		matches := DetectImplicitInvocations(e.implicitIndex, call.Name, call.Args)
+		if len(matches) > 0 {
+			*implicit = append(*implicit, matches...)
+		}
+	}
+}
+
+// callSkillLLM 调用技能桥 LLM，并保留既有的 system-role 回退行为。
+func (e *Executor) callSkillLLM(ctx context.Context, req *llm.LLMRequest) (*llm.LLMResponse, error) {
+	response, err := e.llmRuntime.Call(ctx, req)
+	if err != nil {
+		if fallbackMessages, ok := buildSystemRoleFallbackMessages(req.Messages, err); ok {
+			req.Messages = fallbackMessages
+			response, err = e.llmRuntime.Call(ctx, req)
+		}
+	}
+	return response, err
+}
+
+// newAssistantToolCallMessage 构造携带工具调用的 assistant 消息，供下一轮
+// 请求重放（与主 agent 循环的消息形态保持一致）。
+func newAssistantToolCallMessage(content string, calls []types.ToolCall) types.Message {
+	message := *types.NewAssistantMessage(assistantContentForToolCalls(content))
+	message.ToolCalls = calls
+	return message
+}
+
+// normalizeSkillToolCalls 归一化模型返回的工具调用：
+//   - 优先使用协议解析出的 ToolCalls；
+//   - 协议未解析（例如 DeepSeek 原生 DSML 标记落到 content）时回退解析文本。
+func normalizeSkillToolCalls(response llm.LLMResponse) []types.ToolCall {
+	calls := normalizeParsedToolCalls(response.ToolCalls)
+	if len(calls) > 0 {
+		return calls
+	}
+	return parseDSMLToolCalls(response.Content)
+}
+
+func normalizeParsedToolCalls(raw []types.ToolCall) []types.ToolCall {
+	if len(raw) == 0 {
+		return nil
+	}
+	calls := make([]types.ToolCall, 0, len(raw))
+	for index, call := range raw {
+		name := strings.TrimSpace(call.Name)
+		if name == "" {
+			continue
+		}
+		normalized := types.ToolCall{
+			ID:       strings.TrimSpace(call.ID),
+			Type:     strings.TrimSpace(call.Type),
+			Name:     name,
+			Args:     call.Args,
+			RawInput: call.RawInput,
+		}
+		if normalized.ID == "" {
+			normalized.ID = fmt.Sprintf("skill_call_%d", index+1)
+		}
+		if normalized.Type == "" {
+			normalized.Type = "function"
+		}
+		if normalized.Args == nil {
+			normalized.Args = map[string]interface{}{}
+		}
+		calls = append(calls, normalized)
+	}
+	return calls
+}
+
+func skillToolCallsWithoutToolsError(calls []types.ToolCall) string {
+	names := make([]string, 0, len(calls))
+	for _, call := range calls {
+		if name := strings.TrimSpace(call.Name); name != "" {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		names = append(names, "unknown")
+	}
+	return "模型发起了工具调用（" + strings.Join(names, ", ") + "），但当前技能执行路径没有可用工具面；" +
+		"请在启用工具循环的执行路径（如 /skill）中重试，或为该技能声明 tools。"
+}
+
+const (
+	// SkillExecutionModeAuto 保持既有优先级：Handler → Workflow → executeDefault。
+	SkillExecutionModeAuto = "auto"
+	// SkillExecutionModeModel 跳过直执行，由模型读取说明并自行选择要调用的程序。
+	SkillExecutionModeModel     = "model"
+	skillExecutionModeOptionKey = "execution_mode"
+
+	skillToolLoopOptionKey         = "tool_loop"
+	skillToolLoopMaxStepsOptionKey = "tool_loop_max_steps"
+	skillToolLoopDefaultMaxSteps   = 8
+	skillToolLoopMaxStepsLimit     = 32
+	skillToolResultMaxRunes        = 16000
+	dsmlMarker                     = "｜｜DSML｜｜"
+	dsmlMarkerASCII                = "||DSML||"
+)
+
+// skillToolLoopEnabled 读取调用方显式开启的工具循环选项。默认关闭，保持旧
+// 调用方的单次调用语义；aicli 的 /skill 路径会为说明型技能开启它。
+func skillToolLoopEnabled(req *types.Request) bool {
+	if req == nil || len(req.Options) == 0 {
+		return false
+	}
+	value, ok := req.Options[skillToolLoopOptionKey]
+	if !ok {
+		return false
+	}
+	return skillOptionTruthy(value)
+}
+
+// skillToolLoopRequested 在显式选项缺省时按执行模式回落：模型驱动模式默认开启
+// 工具循环；调用方显式给 `tool_loop=false` 时仍尊重显式关闭。
+func skillToolLoopRequested(req *types.Request) bool {
+	if req != nil && len(req.Options) > 0 {
+		if value, ok := req.Options[skillToolLoopOptionKey]; ok {
+			return skillOptionTruthy(value)
+		}
+	}
+	return resolveSkillExecutionMode(req) == SkillExecutionModeModel
+}
+
+func skillOptionTruthy(value interface{}) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case float64:
+		return typed != 0
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "on", "true", "auto", "enabled", "yes", "1":
+			return true
+		}
+	}
+	return false
+}
+
+// resolveSkillToolLoopMaxSteps 解析工具循环步数上限。没有工具面时退化为单次
+// 调用（仍会识别“模型发起工具调用但无工具可执行”并给出可解释错误）。
+func resolveSkillToolLoopMaxSteps(req *types.Request, hasTools bool) int {
+	if !hasTools {
+		return 1
+	}
+	steps := skillToolLoopDefaultMaxSteps
+	if req != nil && len(req.Options) > 0 {
+		switch typed := req.Options[skillToolLoopMaxStepsOptionKey].(type) {
+		case float64:
+			steps = int(typed)
+		case int:
+			steps = typed
+		case string:
+			if parsed, err := strconv.Atoi(strings.TrimSpace(typed)); err == nil {
+				steps = parsed
+			}
+		}
+	}
+	if steps <= 0 {
+		steps = skillToolLoopDefaultMaxSteps
+	}
+	if steps > skillToolLoopMaxStepsLimit {
+		steps = skillToolLoopMaxStepsLimit
+	}
+	return steps
+}
+
+// resolveSkillExecutionMode 解析执行模式；缺省或未知值回落 auto，保持既有调用方语义。
+func resolveSkillExecutionMode(req *types.Request) string {
+	if req == nil || len(req.Options) == 0 {
+		return SkillExecutionModeAuto
+	}
+	raw, ok := req.Options[skillExecutionModeOptionKey]
+	if !ok {
+		return SkillExecutionModeAuto
+	}
+	switch strings.ToLower(strings.TrimSpace(fmt.Sprint(raw))) {
+	case SkillExecutionModeModel, "llm", "agent":
+		return SkillExecutionModeModel
+	default:
+		return SkillExecutionModeAuto
+	}
+}
+
+// skillProgramTools 返回模型在 model 模式下可选择的程序清单：
+// 声明 tools ∪ workflow 步骤引用的 tools（去重保序）。
+func skillProgramTools(skill *Skill) []string {
+	if skill == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(skill.Tools))
+	tools := make([]string, 0, len(skill.Tools))
+	appendTool := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		tools = append(tools, name)
+	}
+	for _, name := range skill.Tools {
+		appendTool(name)
+	}
+	if skill.Workflow != nil {
+		for _, step := range skill.Workflow.Steps {
+			appendTool(step.Tool)
+		}
+	}
+	return tools
+}
+
+// buildSkillProgramGuide 把 skill 说明与程序清单投影为系统消息：模型先读文档，
+// 再自行选择调用哪些程序（而不是由运行时替它决定）。
+func buildSkillProgramGuide(skill *Skill) string {
+	if skill == nil || strings.TrimSpace(skill.Name) == "" {
+		return ""
+	}
+	var builder strings.Builder
+	builder.WriteString("Skill program guide:\n")
+	fmt.Fprintf(&builder, "- skill: %s\n", skill.Name)
+	if description := strings.TrimSpace(skill.Description); description != "" {
+		fmt.Fprintf(&builder, "- description: %s\n", description)
+	}
+	if programs := skillProgramTools(skill); len(programs) > 0 {
+		builder.WriteString("- available programs (call the tool that matches the task):\n")
+		for _, name := range programs {
+			fmt.Fprintf(&builder, "  - %s\n", name)
+		}
+	}
+	if skill.Workflow != nil && len(skill.Workflow.Steps) > 0 {
+		builder.WriteString("- workflow steps (reference only; choose the programs you actually need):\n")
+		for _, step := range skill.Workflow.Steps {
+			line := fmt.Sprintf("  - %s", strings.TrimSpace(step.ID))
+			if name := strings.TrimSpace(step.Name); name != "" {
+				line += fmt.Sprintf(" (%s)", name)
+			}
+			if tool := strings.TrimSpace(step.Tool); tool != "" {
+				line += fmt.Sprintf(" → tool %s", tool)
+			}
+			if len(step.Args) > 0 {
+				if raw, err := json.Marshal(step.Args); err == nil {
+					line += fmt.Sprintf("; args=%s", string(raw))
+				}
+			}
+			builder.WriteString(line + "\n")
+		}
+	}
+	builder.WriteString("- note: a user message may start with a `/skill <name>` call marker; the marker is the invocation itself, not part of the request — use the text after it as the concrete arguments.\n")
+	builder.WriteString("Read this guide, then call the appropriate program(s) with concrete arguments instead of only describing them.\n\n")
+	builder.WriteString(skillUsageDisciplineFooter())
+	return builder.String()
+}
+
+// skillUsageDisciplineFooter 把 SK-2 的"How to use skills"纪律精要附加到单技能
+// ProgramGuide（Phase 1 临时接入；完整版见 catalog_render.go 的 RenderSkillCatalog）。
+func skillUsageDisciplineFooter() string {
+	return "## How to use this skill\n" +
+		"- Trigger: you must use this skill when the user names it or the task clearly matches its description; do not carry it across turns unless re-mentioned.\n" +
+		"- Read this guide fully before acting; do not delegate reading/summarizing it to a subagent.\n" +
+		"- Resolve references/scripts/assets relative to the skill directory; prefer running scripts over retyping code.\n" +
+		"- If you skip an obvious skill, say why; if a skill can't be applied cleanly, state the issue and fall back.\n"
+}
+
+// ProgramGuide 返回 skill 的模型可读说明与程序清单投影。宿主（如 skills API 的
+// 显式 expose_skills 回合）与 skill.Executor 的 execution_mode=model 共用同一实现，
+// 避免"模型读到的文档"出现两套口径。
+func ProgramGuide(skill *Skill) string {
+	return buildSkillProgramGuide(skill)
+}
+
+// ProgramTools 返回 skill 声明的程序清单（tools ∪ workflow steps 引用的 tools，去重保序）。
+func ProgramTools(skill *Skill) []string {
+	return skillProgramTools(skill)
+}
+
+// runtimeToolNames 返回运行时工具面（工具管理器 + MCP）中可暴露给技能桥的工具名。
+func (e *Executor) runtimeToolNames() []string {
+	if e == nil || e.mcpManager == nil {
+		return nil
+	}
+	infos := e.mcpManager.ListTools()
+	names := make([]string, 0, len(infos))
+	seen := make(map[string]bool, len(infos))
+	for _, info := range infos {
+		name := strings.TrimSpace(info.Name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// executeSkillToolCalls 依次执行模型发起的工具调用，返回观察记录与可供下一轮
+// 请求重放的 tool 消息。工具失败（找不到工具/执行报错）不中断循环，而是把
+// 错误作为工具结果反馈给模型，让它可以换一种做法。
+//
+// 权限：嵌套工具调用由上层（例如 aicli 的 /skill 直接调用）完成授权；该路径
+// 已按技能级 CapExternalSideEffect 走审批，工具级策略的逐调用复核仍待补充。
+func (e *Executor) executeSkillToolCalls(ctx context.Context, calls []types.ToolCall) ([]types.Observation, []types.Message) {
+	observations := make([]types.Observation, 0, len(calls))
+	messages := make([]types.Message, 0, len(calls))
+	for index, call := range calls {
+		observation := types.NewObservation(fmt.Sprintf("%d", index+1), call.Name)
+		observation.WithInput(call.Args)
+		message := *types.NewToolMessage(call.ID, "")
+
+		if e == nil || e.mcpManager == nil {
+			errText := "skill tool runtime is not configured"
+			observation.MarkFailure(errText)
+			message.Content = "tool execution failed: " + errText
+			observations = append(observations, *observation)
+			messages = append(messages, message)
+			continue
+		}
+
+		info, findErr := e.mcpManager.FindTool(call.Name)
+		if findErr != nil {
+			observation.MarkFailure(findErr.Error())
+			message.Content = "tool execution failed: " + findErr.Error()
+			observations = append(observations, *observation)
+			messages = append(messages, message)
+			continue
+		}
+
+		output, callErr := e.mcpManager.CallTool(ctx, strings.TrimSpace(info.MCPName), call.Name, call.Args)
+		text := formatSkillToolOutput(output)
+		if callErr != nil {
+			observation.MarkFailure(callErr.Error())
+			if strings.TrimSpace(text) == "" {
+				text = callErr.Error()
+			}
+		} else {
+			observation.MarkSuccess()
+		}
+		text = truncateSkillToolResult(text)
+		observation.WithOutput(text)
+		message.Content = text
+		observations = append(observations, *observation)
+		messages = append(messages, message)
+	}
+	return observations, messages
+}
+
+func formatSkillToolOutput(output interface{}) string {
+	switch typed := output.(type) {
+	case nil:
+		return ""
+	case string:
+		return typed
+	default:
+		raw, err := json.Marshal(typed)
+		if err != nil {
+			return fmt.Sprint(typed)
+		}
+		return string(raw)
+	}
+}
+
+func truncateSkillToolResult(text string) string {
+	runes := []rune(text)
+	if len(runes) <= skillToolResultMaxRunes {
+		return text
+	}
+	return string(runes[:skillToolResultMaxRunes]) + "\n...[工具输出已截断]"
+}
+
+func containsDSMLMarkup(content string) bool {
+	return strings.Contains(content, dsmlMarker) || strings.Contains(content, dsmlMarkerASCII)
+}
+
+// parseDSMLToolCalls 解析落到 content 里的 DeepSeek 原生 DSML 工具调用标记
+// （协议适配缺失时会出现）。解析失败返回 nil，由调用方决定降级行为。
+func parseDSMLToolCalls(content string) []types.ToolCall {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" || !containsDSMLMarkup(trimmed) {
+		return nil
+	}
+	var calls []types.ToolCall
+	rest := trimmed
+	for {
+		idx := strings.Index(rest, "invoke name=\"")
+		if idx < 0 {
+			break
+		}
+		rest = rest[idx+len("invoke name=\""):]
+		nameEnd := strings.Index(rest, "\"")
+		if nameEnd < 0 {
+			break
+		}
+		name := strings.TrimSpace(rest[:nameEnd])
+		rest = rest[nameEnd+1:]
+
+		invokeEnd := len(rest)
+		for _, boundary := range []string{"invoke>", "invoke name=\""} {
+			if boundaryIdx := strings.Index(rest, boundary); boundaryIdx >= 0 && boundaryIdx < invokeEnd {
+				invokeEnd = boundaryIdx
+			}
+		}
+		body := rest[:invokeEnd]
+		rest = rest[invokeEnd:]
+
+		if name == "" {
+			continue
+		}
+		calls = append(calls, types.ToolCall{
+			ID:   fmt.Sprintf("dsml_call_%d", len(calls)+1),
+			Type: "function",
+			Name: name,
+			Args: parseDSMLInvokeParameters(body),
+		})
+	}
+	return calls
+}
+
+func parseDSMLInvokeParameters(body string) map[string]interface{} {
+	args := make(map[string]interface{})
+	rest := body
+	for {
+		idx := strings.Index(rest, "parameter name=\"")
+		if idx < 0 {
+			break
+		}
+		rest = rest[idx+len("parameter name=\""):]
+		nameEnd := strings.Index(rest, "\"")
+		if nameEnd < 0 {
+			break
+		}
+		name := strings.TrimSpace(rest[:nameEnd])
+		rest = rest[nameEnd+1:]
+
+		stringFlag := "false"
+		if flagIdx := strings.Index(rest, "string=\""); flagIdx >= 0 {
+			flagRest := rest[flagIdx+len("string=\""):]
+			if flagEnd := strings.Index(flagRest, "\""); flagEnd >= 0 {
+				stringFlag = strings.TrimSpace(flagRest[:flagEnd])
+			}
+		}
+
+		valueStart := strings.Index(rest, ">")
+		if valueStart < 0 {
+			break
+		}
+		valueText := rest[valueStart+1:]
+		valueEnd := len(valueText)
+		for _, terminator := range []string{"</" + dsmlMarker + " parameter>", "</" + dsmlMarkerASCII + " parameter>", "parameter>"} {
+			if termIdx := strings.Index(valueText, terminator); termIdx >= 0 && termIdx < valueEnd {
+				valueEnd = termIdx
+			}
+		}
+		value := strings.TrimSpace(valueText[:valueEnd])
+		rest = valueText[valueEnd:]
+
+		if name == "" {
+			continue
+		}
+		args[name] = decodeDSMLArgValue(value, stringFlag)
+	}
+	return args
+}
+
+func decodeDSMLArgValue(value, stringFlag string) interface{} {
+	if strings.EqualFold(strings.TrimSpace(stringFlag), "true") {
+		return value
+	}
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	var decoded interface{}
+	if err := json.Unmarshal([]byte(trimmed), &decoded); err == nil {
+		return decoded
+	}
+	return value
+}
+
+// assistantContentForToolCalls 在重放工具调用时清理 DSML 回退解析出来的原生
+// 标记，避免把标记文本再次送回模型。
+func assistantContentForToolCalls(content string) string {
+	if !containsDSMLMarkup(content) {
+		return content
+	}
+	for _, marker := range []string{dsmlMarker + " calls", dsmlMarkerASCII + " calls", dsmlMarker + " invoke", dsmlMarkerASCII + " invoke"} {
+		if idx := strings.Index(content, marker); idx >= 0 {
+			return strings.TrimSpace(content[:idx])
+		}
+	}
+	return ""
 }
 
 const contextSummaryMaxBytes = 4096

@@ -20,6 +20,8 @@ import (
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
@@ -651,6 +653,31 @@ func syncRuntimeSessionFromChatMode(session *ChatSession, preserveUpdatedAt bool
 		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ProfileRoot, session.ProfileRoot, chatRuntimeContextProfileRoot)
 	}
 	syncChatRuntimeContext(session, runtimeSession)
+
+	// Plan mode is owned and persisted by the session actor: enter_plan_mode /
+	// exit_plan_mode run mid-turn through the broker, while this sync writes the
+	// CLI's pre-turn snapshot back to the same row. Reload the durable plan-mode
+	// context before the update - otherwise the end-of-turn host write erases
+	// the actor's state and the next turn silently loses plan-mode write gating
+	// (observed 2026-09-18: plan_mode=active in the store at 15:16:31, host
+	// clobbered to bypass_permissions at 15:16:32).
+	if !session.runtimeSessionUnpersisted {
+		if stored, loadErr := session.SessionManager.GetStorage().Load(context.Background(), runtimeSession.ID); loadErr == nil && stored != nil {
+			if value, ok := stored.GetContext(planmode.ContextKey); ok {
+				runtimeSession.SetContext(planmode.ContextKey, value)
+			}
+		}
+	}
+	// Plan mode is the effective permission mode while it is active: the host
+	// snapshot above still carries the CLI mode (e.g. --yolo's
+	// bypass_permissions), which made the persisted row - and every reader of
+	// it, including the web UI selectors - report a mode that contradicted
+	// plan-mode enforcement. Reflect the durable lifecycle state after the
+	// merge; the exit path rewrites the CLI mode on the next sync.
+	if planmode.IsActive(planmode.Load(runtimeSession)) {
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.PermissionMode, string(runtimepolicy.ModePlan), chatRuntimeContextPermissionMode)
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.EffectivePermissionMode, string(runtimepolicy.ModePlan))
+	}
 
 	// 首次落库走创建语义（Save），已持久化会话走更新语义（Update）。
 	// 不再通过 "Update 失败 -> ErrSessionNotFound" 的错误探测来推断

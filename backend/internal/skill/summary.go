@@ -14,13 +14,14 @@ type WorkflowStepSummary struct {
 type SkillSummary struct {
 	Name              string                `yaml:"name" json:"name"`
 	Description       string                `yaml:"description" json:"description"`
-	ShortDescription   string                `yaml:"shortDescription,omitempty" json:"shortDescription,omitempty"`
+	ShortDescription  string                `yaml:"shortDescription,omitempty" json:"shortDescription,omitempty"`
 	Version           string                `yaml:"version,omitempty" json:"version,omitempty"`
 	Category          string                `yaml:"category,omitempty" json:"category,omitempty"`
 	Capabilities      []string              `yaml:"capabilities,omitempty" json:"capabilities,omitempty"`
 	Tags              []string              `yaml:"tags,omitempty" json:"tags,omitempty"`
 	Triggers          []Trigger             `yaml:"triggers" json:"triggers"`
 	DirectRoute       *bool                 `yaml:"directRoute,omitempty" json:"directRoute,omitempty"`
+	ExecutionMode     string                `yaml:"execution_mode,omitempty" json:"execution_mode,omitempty"`
 	Tools             []string              `yaml:"tools,omitempty" json:"tools,omitempty"`
 	Context           ContextConfig         `yaml:"context,omitempty" json:"context,omitempty"`
 	Permissions       []string              `yaml:"permissions,omitempty" json:"permissions,omitempty"`
@@ -39,6 +40,24 @@ func (s *SkillSummary) HasWorkflow() bool {
 	return s.WorkflowStepCount > 0 || len(s.WorkflowSteps) > 0
 }
 
+// IsDocumentMode 报告摘要是否对应"指令文档、无执行器"形态的技能（SK-7）。
+// 显式声明 execution_mode: document，或自动识别为 Codex 兼容技能且无
+// handler/workflow。与 Skill.IsDocumentMode 判定口径一致，供 discovery 阶段
+// 的索引/过滤使用（不依赖完整 hydration）。
+func (s *SkillSummary) IsDocumentMode() bool {
+	if s == nil {
+		return false
+	}
+	if s.ExecutionMode == ExecutionModeDocument {
+		return true
+	}
+	if s.ExecutionMode != ExecutionModeAuto {
+		return false
+	}
+	// 自动识别：Codex 格式、无自定义处理器、无工作流。
+	return isCodexSummarySource(s) && s.Handler == nil && !s.HasWorkflow()
+}
+
 // SummaryFromSkill 从完整或 stub skill 派生轻量摘要。
 func SummaryFromSkill(item *Skill) *SkillSummary {
 	if item == nil {
@@ -46,16 +65,17 @@ func SummaryFromSkill(item *Skill) *SkillSummary {
 	}
 
 	summary := &SkillSummary{
-		Name:         item.Name,
-		Description:  item.Description,
+		Name:             item.Name,
+		Description:      item.Description,
 		ShortDescription: item.ShortDescription,
-		Version:      item.Version,
-		Category:     item.Category,
-		Capabilities: append([]string(nil), item.Capabilities...),
-		Tags:         append([]string(nil), item.Tags...),
-		Triggers:     cloneTriggers(item.Triggers),
-		DirectRoute:  cloneOptionalBool(item.DirectRoute),
-		Tools:        append([]string(nil), item.Tools...),
+		Version:          item.Version,
+		Category:         item.Category,
+		Capabilities:     append([]string(nil), item.Capabilities...),
+		Tags:             append([]string(nil), item.Tags...),
+		Triggers:         cloneTriggers(item.Triggers),
+		DirectRoute:      cloneOptionalBool(item.DirectRoute),
+		ExecutionMode:    item.ExecutionMode,
+		Tools:            append([]string(nil), item.Tools...),
 		Context: ContextConfig{
 			Files:       append([]string(nil), item.Context.Files...),
 			Environment: append([]string(nil), item.Context.Environment...),
@@ -98,16 +118,17 @@ func (s *SkillSummary) ToSkillStub() *Skill {
 	}
 
 	stub := &Skill{
-		Name:         s.Name,
-		Description:  s.Description,
+		Name:             s.Name,
+		Description:      s.Description,
 		ShortDescription: s.ShortDescription,
-		Version:      s.Version,
-		Category:     s.Category,
-		Capabilities: append([]string(nil), s.Capabilities...),
-		Tags:         append([]string(nil), s.Tags...),
-		Triggers:     cloneTriggers(s.Triggers),
-		DirectRoute:  cloneOptionalBool(s.DirectRoute),
-		Tools:        append([]string(nil), s.Tools...),
+		Version:          s.Version,
+		Category:         s.Category,
+		Capabilities:     append([]string(nil), s.Capabilities...),
+		Tags:             append([]string(nil), s.Tags...),
+		Triggers:         cloneTriggers(s.Triggers),
+		DirectRoute:      cloneOptionalBool(s.DirectRoute),
+		ExecutionMode:    s.ExecutionMode,
+		Tools:            append([]string(nil), s.Tools...),
 		Context: ContextConfig{
 			Files:       append([]string(nil), s.Context.Files...),
 			Environment: append([]string(nil), s.Context.Environment...),

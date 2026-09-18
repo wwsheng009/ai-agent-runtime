@@ -569,6 +569,9 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	// mode changes are represented by appended reminders, never by deleting an old
 	// plan-mode item from the provider prefix.
 	history := cloneMessageHistory(options.History)
+	// 回合级 system 注入（如 /skill 的 ProgramGuide）：只进入本次 run 的请求
+	// 历史，跟随 ctx 生命周期，不被写入会话持久历史。
+	history = append(history, turnSystemMessagesFromContext(ctx)...)
 	history = mergeConfiguredSystemPrompt(history, loop.agent.config.SystemPrompt)
 	if options.IncludePrompt {
 		history = append(history, *types.NewUserMessage(prompt))
@@ -589,6 +592,8 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	}
 	result.TraceID = traceID
 	turnEventSessionID = sessionID
+	// SK-3：主循环观测的 turn 级去重（键 scope:path:name），同一技能跨工具调用只发一次事件。
+	implicitInvocationSeen := make(map[string]struct{})
 	// PR-4 落点 C：与上面的 finished 配对。started 只带"这轮的上限是多少"，
 	// 终局水位在 finished 里回填；step 0 表示尚未完成任何一步。
 	loop.emitRuntimeEvent("agent.turn.started", turnEventSessionID, "", map[string]interface{}{
@@ -1190,6 +1195,9 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			recoveredToolErrorCount += recovered
 		}
 
+		// SK-3：主循环工具面观测（含文档模式技能）——命中隐式调用时发布 skills.invoked。
+		loop.observeImplicitSkillInvocations(traceID, sessionID, step, normalizedCalls, toolResults, implicitInvocationSeen)
+
 		// 3. Observe: 记录执行结果
 		currentCtx = promoteTeamRunContext(currentCtx, toolResults)
 		observationStart := len(observations)
@@ -1617,6 +1625,9 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 				})
 			}
 		}
+		// 回合级工具 pin（如 /skill 注入的 skill 函数与声明的程序）在稳定工具面
+		// 冻结/落盘之后叠加：既不写回会话级快照，又能进入本回合的请求与 preflight。
+		availableTools = overlayTurnPinnedTools(availableTools, turnPinnedToolsFromContext(ctx))
 	}
 	var preflightMetadata map[string]interface{}
 	managedHistory, preflightMetadata, err = loop.enforcePromptPreflightWithTools(traceID, sessionID, step, managedHistory, availableTools, remainingBudget)

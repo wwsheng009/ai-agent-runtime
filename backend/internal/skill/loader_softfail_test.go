@@ -126,3 +126,77 @@ func TestRegisterSummaryStubs_SkipsStubsWithMissingTools(t *testing.T) {
 		t.Fatalf("stub with missing tool should be skipped")
 	}
 }
+
+// TestRegisterSkills_DocumentModeExemptsMissingTools 验证：文档模式技能（无执行器）
+// 的依赖声明只是指引，即使工具缺失也必须注册成功（SK-7 依赖校验豁免）。
+func TestRegisterSkills_DocumentModeExemptsMissingTools(t *testing.T) {
+	mcp := newFakeSkillsMCPManager() // surface 无任何工具
+	registry := NewRegistry(mcp)
+	loader := NewLoader(mcp)
+
+	skills := []*Skill{
+		{
+			Name:          "doc-skill",
+			Description:   "document mode skill",
+			ExecutionMode: ExecutionModeDocument,
+			Tools:         []string{"bash"},
+		},
+		{Name: "run_shell", Description: "run a command", Tools: []string{"bash"}},
+	}
+
+	if err := loader.registerSkills(skills, registry); err != nil {
+		t.Fatalf("registerSkills should not fail, got error: %v", err)
+	}
+	if _, ok := registry.Get("doc-skill"); !ok {
+		t.Fatalf("document-mode skill must be exempt from missing-tool validation")
+	}
+	if _, ok := registry.Get("run_shell"); ok {
+		t.Fatalf("non-document skill with missing tool must still be skipped")
+	}
+}
+
+// TestRegisterSummaryStubs_DocumentModeExemptsMissingTools 验证：轻量 stub 路径同样
+// 保留文档模式的豁免（ExecutionMode 需随 Summary → Stub 传递）。
+func TestRegisterSummaryStubs_DocumentModeExemptsMissingTools(t *testing.T) {
+	mcp := newFakeSkillsMCPManager()
+	registry := NewRegistry(mcp)
+	loader := NewLoader(mcp)
+
+	summaries := []*SkillSummary{
+		{Name: "doc-stub", Description: "document stub", ExecutionMode: ExecutionModeDocument, Tools: []string{"bash"}},
+	}
+	if err := loader.registerSummaryStubs(summaries, registry); err != nil {
+		t.Fatalf("registerSummaryStubs should not fail, got error: %v", err)
+	}
+	if _, ok := registry.Get("doc-stub"); !ok {
+		t.Fatalf("document-mode summary stub must be exempt from missing-tool validation")
+	}
+}
+
+// TestCheckSkill_DocumentModeExemptsMissingTools 验证：CheckSkill 的显式校验路径
+// 同样不对文档模式技能做工具可用性检查。
+func TestCheckSkill_DocumentModeExemptsMissingTools(t *testing.T) {
+	mcp := newFakeSkillsMCPManager()
+	loader := NewLoader(mcp)
+
+	docSkill := &Skill{
+		Name:          "doc-skill",
+		Description:   "document mode skill",
+		ExecutionMode: ExecutionModeDocument,
+		Tools:         []string{"bash"},
+		Triggers:      []Trigger{{Type: "keyword", Values: []string{"doc"}}},
+	}
+	if err := loader.CheckSkill(docSkill); err != nil {
+		t.Fatalf("document-mode skill must pass CheckSkill without tools: %v", err)
+	}
+
+	runtimeSkill := &Skill{
+		Name:        "run_shell",
+		Description: "run a command",
+		Tools:       []string{"bash"},
+		Triggers:    []Trigger{{Type: "keyword", Values: []string{"shell"}}},
+	}
+	if err := loader.CheckSkill(runtimeSkill); err == nil {
+		t.Fatalf("non-document skill with missing tool must still fail CheckSkill")
+	}
+}

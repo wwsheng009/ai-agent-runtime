@@ -12,12 +12,18 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { exportSessionTrajectoryJsonlMock } = vi.hoisted(() => ({
+const { exportSessionTrajectoryJsonlMock, executeSkillMock } = vi.hoisted(() => ({
   exportSessionTrajectoryJsonlMock: vi.fn(),
+  executeSkillMock: vi.fn(),
 }));
 
 vi.mock("@/lib/trajectory/export-session", () => ({
   exportSessionTrajectoryJsonl: exportSessionTrajectoryJsonlMock,
+}));
+
+vi.mock("@/api/runtime/skills", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/api/runtime/skills")>()),
+  executeSkill: executeSkillMock,
 }));
 
 import {
@@ -70,6 +76,7 @@ describe("useComposerCommandExecutor", () => {
     root = createRoot(container);
     latest = null;
     exportSessionTrajectoryJsonlMock.mockReset();
+    executeSkillMock.mockReset();
   });
 
   afterEach(() => {
@@ -149,6 +156,125 @@ describe("useComposerCommandExecutor", () => {
     expect(current().notice).toEqual({
       tone: "success",
       messageKey: "composer.builtin.feedback.recorded",
+    });
+  });
+
+  it("/skill 提交为普通回合：回调携带 skill 名与用户 prompt，不再调 executeSkill，成功无回执", async () => {
+    const onRunSkillTurn = vi.fn().mockResolvedValue(undefined);
+    await render({
+      sessionId: "session-1",
+      skillNames: ["run_shell_command"],
+      onRunSkillTurn,
+    });
+
+    const handled = await run("skill", "run_shell_command echo hello world");
+
+    expect(handled).toBe(true);
+    expect(onRunSkillTurn).toHaveBeenCalledWith(
+      "run_shell_command",
+      "echo hello world",
+    );
+    expect(executeSkillMock).not.toHaveBeenCalled();
+    // 成功路径不显示「执行成功」回执：消息会出现在线程里。
+    expect(current().notice).toBeNull();
+  });
+
+  it("/skill 无回合提交回调时回退 executeSkill REST（模型驱动）并保留成功回执", async () => {
+    executeSkillMock.mockResolvedValue({
+      skill: "run_shell_command",
+      status: "completed",
+    });
+    await render({
+      sessionId: "session-1",
+      skillNames: ["run_shell_command"],
+    });
+
+    const handled = await run("skill", "run_shell_command pwd");
+
+    expect(handled).toBe(true);
+    expect(executeSkillMock).toHaveBeenCalledWith("run_shell_command", {
+      prompt: "pwd",
+      sessionId: "session-1",
+      options: { execution_mode: "model" },
+    });
+    expect(current().notice).toEqual({
+      tone: "success",
+      messageKey: "composer.builtin.skill.applied",
+      values: { skill: "run_shell_command" },
+    });
+  });
+
+  it("/skill 回合提交失败：不走 executeSkill，回执如实报失败", async () => {
+    const onRunSkillTurn = vi.fn().mockRejectedValue(new Error("session busy"));
+    await render({
+      sessionId: "session-1",
+      skillNames: ["run_shell_command"],
+      onRunSkillTurn,
+    });
+
+    await run("skill", "run_shell_command pwd");
+
+    expect(executeSkillMock).not.toHaveBeenCalled();
+    expect(current().notice).toEqual({
+      tone: "error",
+      messageKey: "composer.builtin.skill.failed",
+      values: { skill: "run_shell_command" },
+    });
+  });
+
+  it("/skill 有名称无 prompt：不伪造空回合，宿主有弹窗时打开弹窗", async () => {
+    const openSkillDialog = vi.fn();
+    const onRunSkillTurn = vi.fn();
+    await render({
+      sessionId: "session-1",
+      skillNames: ["run_shell_command"],
+      openSkillDialog,
+      onRunSkillTurn,
+    });
+
+    await run("skill", "run_shell_command");
+
+    expect(openSkillDialog).toHaveBeenCalledTimes(1);
+    expect(onRunSkillTurn).not.toHaveBeenCalled();
+    expect(executeSkillMock).not.toHaveBeenCalled();
+  });
+
+  it("/skill 有名称无 prompt 且无弹窗：回执提示补 prompt", async () => {
+    const onRunSkillTurn = vi.fn();
+    await render({
+      sessionId: "session-1",
+      skillNames: ["run_shell_command"],
+      onRunSkillTurn,
+    });
+
+    await run("skill", "run_shell_command");
+
+    expect(onRunSkillTurn).not.toHaveBeenCalled();
+    expect(executeSkillMock).not.toHaveBeenCalled();
+    expect(current().notice).toEqual({
+      tone: "error",
+      messageKey: "composer.builtin.skill.needPrompt",
+      values: { skill: "run_shell_command" },
+    });
+  });
+
+  it("/skill 未知名称前置失败：不发请求，回执如实说明不存在", async () => {
+    const onRunSkillTurn = vi.fn();
+    await render({
+      sessionId: "session-1",
+      skillNames: ["run_shell_command"],
+      onRunSkillTurn,
+    });
+
+    const handled = await run("skill", "unknown_skill pwd");
+
+    expect(handled).toBe(true);
+    expect(onRunSkillTurn).not.toHaveBeenCalled();
+    expect(executeSkillMock).not.toHaveBeenCalled();
+    expect(current().notice).toEqual({
+      tone: "error",
+      messageKey: "composer.builtin.skill.notFound",
+      values: { skill: "unknown_skill" },
     });
   });
 

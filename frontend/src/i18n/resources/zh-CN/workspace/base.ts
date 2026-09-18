@@ -494,6 +494,7 @@ export const zhWorkspaceBase = {
         description: "按名称执行 skill",
         argumentHint: "<skill-名称>",
         needName: "请提供 skill 名称：/skill <skill-名称>",
+        needPrompt: "请补充 prompt：/skill <skill-名称> <prompt>",
         notAvailable: "没有可用的 skill",
         applied: "skill {{skill}} 执行成功",
         notFound: "未找到 skill {{skill}}",
