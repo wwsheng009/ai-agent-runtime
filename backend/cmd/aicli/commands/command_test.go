@@ -1082,28 +1082,31 @@ func TestChatLoggerSessionLogPath(t *testing.T) {
 	}
 
 	path := logger.SessionLogPath()
-	wantBase := strings.ReplaceAll(logger.sessionID, ".", "_") + ".json"
-	if filepath.Base(path) != wantBase {
-		t.Fatalf("unexpected session log path: %s", path)
+	sessionDir := logger.SessionDirPath()
+	wantSessionDir := strings.ReplaceAll(logger.sessionID, ".", "_")
+	if sessionDir == "" || filepath.Base(sessionDir) != wantSessionDir {
+		t.Fatalf("unexpected session dir: %q", sessionDir)
 	}
-	partDir := filepath.Dir(path)
-	if partDir == "" {
-		t.Fatalf("unexpected session partition dir (log path %q)", path)
+	year, month, day := logger.sessionLog.StartTime.Local().Format("2006"), logger.sessionLog.StartTime.Local().Format("01"), logger.sessionLog.StartTime.Local().Format("02")
+	if !strings.Contains(filepath.ToSlash(sessionDir), "/"+year+"/"+month+"/"+day+"/") {
+		t.Fatalf("expected date partition above session dir: %q", sessionDir)
 	}
-	if debugPath := logger.DebugLogPath(); debugPath == "" || filepath.Dir(debugPath) != partDir {
+	if want := filepath.Join(sessionDir, "chat", "chat.json"); path != want {
+		t.Fatalf("unexpected session log path: got %q want %q", path, want)
+	}
+	if debugPath := logger.DebugLogPath(); debugPath != filepath.Join(sessionDir, "debug", "debug.log") {
 		t.Fatalf("unexpected debug log path: %q", debugPath)
 	}
-	if artifactDir := logger.RuntimeHTTPArtifactDir(); artifactDir == "" || filepath.Dir(artifactDir) != partDir {
-		t.Fatalf("unexpected runtime HTTP artifact dir: %q", artifactDir)
-	}
-	if artifactDir := logger.LocalShellArtifactDir(); artifactDir == "" || filepath.Dir(artifactDir) != partDir {
-		t.Fatalf("unexpected local shell artifact dir: %q", artifactDir)
-	}
-	if artifactDir := logger.GeneratedImagesDir(); artifactDir == "" || filepath.Dir(artifactDir) != partDir {
-		t.Fatalf("unexpected generated images artifact dir: %q", artifactDir)
-	}
-	if artifactDir := logger.ExportsDir(); artifactDir == "" || filepath.Dir(artifactDir) != partDir {
-		t.Fatalf("unexpected exports dir: %q", artifactDir)
+	for name, artifactDir := range map[string]string{
+		"http":    logger.RuntimeHTTPArtifactDir(),
+		"shell":   logger.LocalShellArtifactDir(),
+		"images":  logger.GeneratedImagesDir(),
+		"exports": logger.ExportsDir(),
+		"events":  logger.RuntimeEventsDir(),
+	} {
+		if artifactDir != filepath.Join(sessionDir, name) {
+			t.Fatalf("unexpected %s artifact dir: %q", name, artifactDir)
+		}
 	}
 
 	summary := logger.CurrentSummary()
@@ -1133,16 +1136,13 @@ func TestNewChatLogger_UsesDefaultChatLogDir(t *testing.T) {
 	if !strings.Contains(filepath.ToSlash(logPath), "/"+year+"/"+month+"/"+day+"/") {
 		t.Fatalf("expected date partition in session log path: %q", logPath)
 	}
-	if got := logger.SessionLogPath(); got == "" || filepath.Dir(got) != partDirOf(logger) {
+	sessionDir := logger.SessionDirPath()
+	if got := logger.SessionLogPath(); got != filepath.Join(sessionDir, "chat", "chat.json") {
 		t.Fatalf("unexpected session log path: %q", got)
 	}
-	if got := logger.DebugLogPath(); got == "" || filepath.Dir(got) != partDirOf(logger) {
+	if got := logger.DebugLogPath(); got != filepath.Join(sessionDir, "debug", "debug.log") {
 		t.Fatalf("unexpected debug log path: %q", got)
 	}
-}
-
-func partDirOf(logger *ChatLogger) string {
-	return filepath.Dir(logger.SessionLogPath())
 }
 
 func TestChatLoggerSetLogDirEnsuresSessionArtifacts(t *testing.T) {

@@ -2,7 +2,9 @@ package commands
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
@@ -52,8 +54,33 @@ func (c *chatRuntimeHTTPCapture) SetArtifactDir(dir string) {
 	c.artifactDir = dir
 	c.lastRequestArtifact = ""
 	c.lastResponseArtifact = ""
-	c.artifactCounter = 0
+	// 会话恢复/进程重启后沿用目录内已有序号，保证请求日志按序追加而不是覆盖。
+	c.artifactCounter = maxRuntimeHTTPArtifactSequence(dir)
 	c.pendingArtifactSeq = 0
+}
+
+// maxRuntimeHTTPArtifactSequence 返回 artifact 目录内已有 "NNN_*.json" 的最大序号。
+func maxRuntimeHTTPArtifactSequence(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	maxSeq := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if len(name) < 4 || name[3] != '_' {
+			continue
+		}
+		seq, err := strconv.Atoi(name[:3])
+		if err != nil || seq <= maxSeq {
+			continue
+		}
+		maxSeq = seq
+	}
+	return maxSeq
 }
 
 func (c *chatRuntimeHTTPCapture) Record(event runtimellm.HTTPDebugEvent) {

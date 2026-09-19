@@ -9,7 +9,7 @@ import (
 )
 
 // TestChatRuntimeEventBridge_EventLogLazilyCreatesEventsDir 回归 `events dir
-// missing`：<session-id>.events 目录缺失时（旧进程早于
+// missing`：会话 events/ 目录缺失时（旧进程早于
 // ensureSessionArtifactLayout 补丁启动、目录被外部清理、旧布局迁移等），
 // 事件日志 append 必须惰性 MkdirAll 自愈并写入成功，而不是每次以 ENOENT
 // 静默计入 eventLogFailures —— 后者会让整会话 runtime-events.jsonl 缺失，
@@ -49,4 +49,34 @@ func TestChatRuntimeEventBridge_EventLogLazilyCreatesEventsDir(t *testing.T) {
 	_, count, _, failures = bridge.eventLogStats()
 	require.Equal(t, uint64(2), count)
 	require.Zero(t, failures)
+}
+
+// TestChatRuntimeEventBridge_EventLogPrefersLegacyLayoutWhenPresent 回归旧布局
+// 兼容：会话目录布局上线后，扁平 <session-id>.events/ 或更早的嵌套
+// <sessionID>/ 中已存在 runtime-events.jsonl 的会话必须继续追加到原文件，
+// 避免 /resume 事件链断连。
+func TestChatRuntimeEventBridge_EventLogPrefersLegacyLayoutWhenPresent(t *testing.T) {
+	logger := NewChatLogger("provider", "openai", "model", false, "")
+	require.NoError(t, logger.SetLogDir(t.TempDir()))
+
+	legacyPaths := logger.LegacyRuntimeEventsLogPaths()
+	require.Len(t, legacyPaths, 2)
+	legacy := legacyPaths[0]
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacy), 0o755))
+	require.NoError(t, os.WriteFile(legacy, []byte(`{"type":"assistant.reasoning"}`+"\n"), 0o644))
+
+	bridge := newChatRuntimeEventBridge(&ChatSession{Logger: logger})
+	bridge.appendEventLogLine([]byte(`{"type":"assistant.delta"}`))
+
+	path, count, _, failures := bridge.eventLogStats()
+	require.Zero(t, failures)
+	require.Equal(t, uint64(1), count)
+	require.Equal(t, legacy, path)
+	raw, err := os.ReadFile(legacy)
+	require.NoError(t, err)
+	require.Contains(t, string(raw), "assistant.delta")
+
+	newPath := filepath.Join(logger.RuntimeEventsDir(), "runtime-events.jsonl")
+	_, statErr := os.Stat(newPath)
+	require.True(t, os.IsNotExist(statErr), "legacy log present: new-layout file must not be created")
 }

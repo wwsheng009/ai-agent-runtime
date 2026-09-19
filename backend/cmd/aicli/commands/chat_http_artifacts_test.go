@@ -113,6 +113,65 @@ func TestWriteRuntimeHTTPArtifact_PersistsRawBodiesAndTracksLatestPaths(t *testi
 	}
 }
 
+func TestWriteRuntimeHTTPArtifactUsesSessionHTTPDirAndKeepsOrderAcrossRestart(t *testing.T) {
+	logger := NewChatLogger("codex_ee", "codex", "gpt-5.2-code", false, "https://example.com")
+	if err := logger.SetLogDir(t.TempDir()); err != nil {
+		t.Fatalf("set log dir: %v", err)
+	}
+	session := &ChatSession{
+		RuntimeSession:     &runtimechat.Session{ID: "session-1", State: runtimechat.StateActive},
+		Logger:             logger,
+		runtimeHTTPCapture: &chatRuntimeHTTPCapture{},
+	}
+
+	requestPath, err := writeRuntimeHTTPArtifact(session, runtimellm.HTTPDebugEvent{
+		Source: "gateway_client",
+		Phase:  "request",
+		Method: "POST",
+		URL:    "https://example.com/v1/chat/completions",
+	})
+	if err != nil {
+		t.Fatalf("write request artifact: %v", err)
+	}
+
+	wantDir := filepath.Join(logger.SessionDirPath(), "http")
+	if got := logger.RuntimeHTTPArtifactDir(); got != wantDir {
+		t.Fatalf("unexpected session HTTP artifact dir: got %q want %q", got, wantDir)
+	}
+	if filepath.Dir(requestPath) != wantDir {
+		t.Fatalf("request artifact must live in session http dir: %q", requestPath)
+	}
+	if filepath.Base(requestPath) != "001_request_gateway_client.json" {
+		t.Fatalf("unexpected first request artifact name: %q", filepath.Base(requestPath))
+	}
+
+	// 模拟进程重启/会话恢复：新的 capture 必须沿用目录内已有序号，按序追加而不是覆盖。
+	restarted := &ChatSession{
+		RuntimeSession:     &runtimechat.Session{ID: "session-1", State: runtimechat.StateActive},
+		Logger:             logger,
+		runtimeHTTPCapture: &chatRuntimeHTTPCapture{},
+	}
+	nextPath, err := writeRuntimeHTTPArtifact(restarted, runtimellm.HTTPDebugEvent{
+		Source: "gateway_client",
+		Phase:  "request",
+		Method: "POST",
+		URL:    "https://example.com/v1/chat/completions",
+	})
+	if err != nil {
+		t.Fatalf("write second request artifact: %v", err)
+	}
+	if filepath.Base(nextPath) != "002_request_gateway_client.json" {
+		t.Fatalf("expected ordered request artifact after restart, got %q", filepath.Base(nextPath))
+	}
+	entries, err := os.ReadDir(wantDir)
+	if err != nil {
+		t.Fatalf("read session http dir: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected two request artifacts, got %d", len(entries))
+	}
+}
+
 func TestBuildRuntimeHTTPArtifactEnvelopeMarksBoundedBody(t *testing.T) {
 	envelope := buildRuntimeHTTPArtifactEnvelope(1, runtimellm.HTTPDebugEvent{
 		Phase:             "request",

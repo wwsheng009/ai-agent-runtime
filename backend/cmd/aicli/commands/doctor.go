@@ -336,14 +336,31 @@ func enrichDoctorProviderCaseArtifacts(result *doctorProviderCaseResult, start t
 		return
 	}
 	result.LogDir = logDir
-	result.DebugLogFile = firstExistingPath(filepath.Join(logDir, "debug.log"))
+	// 新布局：chat-logs/YYYY/MM/DD/<session-id>/{chat,debug,http}；
+	// 同时兼容旧布局（嵌套 <sessionID>/ 与扁平 <session-id>.{json,debug.log,http}）。
+	partitionDir := filepath.Dir(logDir)
+	sessionBase := filepath.Base(logDir)
+	result.DebugLogFile = firstExistingPath(
+		filepath.Join(logDir, chatLogSessionDebugDirName, chatLogSessionDebugFileName),
+		filepath.Join(logDir, chatLogSessionDebugFileName),
+		filepath.Join(partitionDir, sessionBase+".debug.log"),
+	)
+	chatLogCandidates := []string{
+		filepath.Join(logDir, chatLogSessionChatDirName, chatLogSessionChatFileName),
+		filepath.Join(partitionDir, sessionBase+".json"),
+	}
 	if matches, _ := filepath.Glob(filepath.Join(logDir, "chat_*.json")); len(matches) > 0 {
 		sort.Strings(matches)
-		result.ChatLogFile = matches[len(matches)-1]
+		chatLogCandidates = append(chatLogCandidates, matches[len(matches)-1])
 	}
-	runtimeDir := filepath.Join(logDir, "runtime-http")
-	requestFile := latestArtifactFile(runtimeDir, "request")
-	responseFile := latestArtifactFile(runtimeDir, "response")
+	result.ChatLogFile = firstExistingPath(chatLogCandidates...)
+	httpDirs := []string{
+		filepath.Join(logDir, chatLogSessionHTTPDirName),
+		filepath.Join(logDir, "runtime-http"),
+		filepath.Join(partitionDir, sessionBase+".http"),
+	}
+	requestFile := latestArtifactFileInDirs(httpDirs, "request")
+	responseFile := latestArtifactFileInDirs(httpDirs, "response")
 	result.HTTPRequestFile = requestFile
 	result.HTTPResponseFile = responseFile
 	if requestFile != "" {
@@ -361,33 +378,39 @@ func enrichDoctorProviderCaseArtifacts(result *doctorProviderCaseResult, start t
 	}
 }
 
+// latestChatLogDirAfter 返回 start 之后最新的会话日志目录：
+// 新布局 chat-logs/YYYY/MM/DD/<session-id>/，兼容更早的扁平 chat-logs/<session-id>/ 目录。
 func latestChatLogDirAfter(start time.Time) string {
 	root := defaultAICLIChatLogRoot()
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return ""
-	}
 	type candidate struct {
 		path string
 		mod  time.Time
 	}
 	var candidates []candidate
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || !info.IsDir() || path == root {
+			return nil
 		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return nil
+		}
+		depth := strings.Count(rel, string(filepath.Separator)) + 1
+		if depth > 4 {
+			return filepath.SkipDir
+		}
+		if depth != 1 && depth != 4 {
+			return nil
+		}
+		if depth == 1 && isChatLogDatePartitionName(info.Name()) {
+			return nil
 		}
 		if info.ModTime().Before(start) {
-			continue
+			return nil
 		}
-		candidates = append(candidates, candidate{
-			path: filepath.Join(root, entry.Name()),
-			mod:  info.ModTime(),
-		})
-	}
+		candidates = append(candidates, candidate{path: path, mod: info.ModTime()})
+		return nil
+	})
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].mod.After(candidates[j].mod)
 	})
@@ -395,6 +418,28 @@ func latestChatLogDirAfter(start time.Time) string {
 		return ""
 	}
 	return candidates[0].path
+}
+
+// isChatLogDatePartitionName 判断目录名是否为日期分区层级（YYYY / MM / DD）。
+func isChatLogDatePartitionName(name string) bool {
+	switch len(name) {
+	case 2, 4:
+		_, err := strconv.Atoi(name)
+		return err == nil
+	default:
+		return false
+	}
+}
+
+// latestArtifactFileInDirs 依次在候选目录中查找最新的指定阶段 artifact，
+// 用于同时兼容新布局（http/）与旧布局（runtime-http/、<session-id>.http/）。
+func latestArtifactFileInDirs(dirs []string, phase string) string {
+	for _, dir := range dirs {
+		if path := latestArtifactFile(dir, phase); path != "" {
+			return path
+		}
+	}
+	return ""
 }
 
 func latestArtifactFile(dir, phase string) string {
@@ -710,12 +755,14 @@ func currentWorkingDirOrEmpty() string {
 	return wd
 }
 
-func firstExistingPath(path string) string {
-	if strings.TrimSpace(path) == "" {
-		return ""
-	}
-	if _, err := os.Stat(path); err == nil {
-		return path
+func firstExistingPath(paths ...string) string {
+	for _, path := range paths {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
 	}
 	return ""
 }

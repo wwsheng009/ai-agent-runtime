@@ -19,6 +19,20 @@ const (
 	chatLogRawMaxBytes      = 32 * 1024
 )
 
+// 会话目录内的 artifact 子目录与文件名。
+// 布局：chat-logs/YYYY/MM/DD/<session-id>/{chat,debug,http,shell,images,exports,events}
+const (
+	chatLogSessionChatDirName    = "chat"
+	chatLogSessionChatFileName   = "chat.json"
+	chatLogSessionDebugDirName   = "debug"
+	chatLogSessionDebugFileName  = "debug.log"
+	chatLogSessionHTTPDirName    = "http"
+	chatLogSessionShellDirName   = "shell"
+	chatLogSessionImagesDirName  = "images"
+	chatLogSessionExportsDirName = "exports"
+	chatLogSessionEventsDirName  = "events"
+)
+
 type aicliLogScope struct {
 	TurnID    string
 	RequestID string
@@ -205,9 +219,22 @@ func (cl *ChatLogger) ensureSessionArtifactLayout() error {
 		return nil
 	}
 
-	// 新布局：chat-logs/YYYY/MM/DD/<session-id>.{json,debug.log,http,shell,images,exports}
+	// 会话目录布局：chat-logs/YYYY/MM/DD/<session-id>/
+	//   chat/    会话主日志（chat.json）
+	//   debug/   调试日志（debug.log）
+	//   http/    请求/响应 artifact（001_request_*.json、001_response_*.json 按序编号）
+	//   shell/   本地 shell 原始输出
+	//   images/  生成图片
+	//   exports/ 导出文件
+	//   events/  runtime 事件流（runtime-events.jsonl）
+	sessionDir := cl.SessionDirPath()
+	if sessionDir == "" {
+		return nil
+	}
 	for _, subDir := range []string{
+		sessionDir,
 		filepath.Dir(cl.SessionLogPath()),
+		filepath.Dir(cl.DebugLogPath()),
 		cl.RuntimeHTTPArtifactDir(),
 		cl.LocalShellArtifactDir(),
 		cl.GeneratedImagesDir(),
@@ -223,6 +250,9 @@ func (cl *ChatLogger) ensureSessionArtifactLayout() error {
 	}
 
 	debugLogPath := cl.DebugLogPath()
+	if strings.TrimSpace(debugLogPath) == "" {
+		return fmt.Errorf("调试日志路径为空")
+	}
 	file, err := os.OpenFile(debugLogPath, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return fmt.Errorf("创建调试日志文件失败: %w", err)
@@ -637,39 +667,59 @@ func (cl *ChatLogger) CurrentSummary() *ChatSessionSummary {
 	return &cloned
 }
 
-// SessionLogPath 返回当前会话日志路径（chat-logs/YYYY/MM/DD/<session-id>.json）。
+// SessionDirPath 返回当前会话目录（chat-logs/YYYY/MM/DD/<session-id>/）。
+// 目录名使用 sessionDirName()（会话 ID 的安全化形式），避免历史版本中
+// 含点号的会话 ID 目录在 Windows/分析脚本路径解析上产生歧义。
+func (cl *ChatLogger) SessionDirPath() string {
+	if cl == nil || strings.TrimSpace(cl.logDir) == "" || cl.sessionLog == nil {
+		return ""
+	}
+	name := cl.sessionDirName()
+	if name == "" {
+		return ""
+	}
+	return aiclipaths.JoinDatePartition(cl.logDir, cl.partitionAt(), name)
+}
+
+// SessionLogPath 返回当前会话主日志路径
+// （chat-logs/YYYY/MM/DD/<session-id>/chat/chat.json）。
 func (cl *ChatLogger) SessionLogPath() string {
-	return cl.sessionArtifactPath(cl.sessionPathBase() + ".json")
+	return cl.sessionArtifactPath(filepath.Join(chatLogSessionChatDirName, chatLogSessionChatFileName))
 }
 
-// DebugLogPath 返回当前会话调试日志路径（<session-id>.debug.log）。
+// DebugLogPath 返回当前会话调试日志路径
+// （chat-logs/YYYY/MM/DD/<session-id>/debug/debug.log）。
 func (cl *ChatLogger) DebugLogPath() string {
-	return cl.sessionArtifactPath(cl.sessionPathBase() + ".debug.log")
+	return cl.sessionArtifactPath(filepath.Join(chatLogSessionDebugDirName, chatLogSessionDebugFileName))
 }
 
-// RuntimeHTTPArtifactDir 返回 runtime HTTP artifact 目录（<session-id>.http）。
+// RuntimeHTTPArtifactDir 返回 runtime HTTP artifact 目录
+// （chat-logs/YYYY/MM/DD/<session-id>/http）。
 func (cl *ChatLogger) RuntimeHTTPArtifactDir() string {
-	return cl.sessionArtifactPath(cl.sessionPathBase() + ".http")
+	return cl.sessionArtifactPath(chatLogSessionHTTPDirName)
 }
 
-// LocalShellArtifactDir 返回本地 shell 原始输出 artifact 目录（<session-id>.shell）。
+// LocalShellArtifactDir 返回本地 shell 原始输出 artifact 目录
+// （chat-logs/YYYY/MM/DD/<session-id>/shell）。
 func (cl *ChatLogger) LocalShellArtifactDir() string {
-	return cl.sessionArtifactPath(cl.sessionPathBase() + ".shell")
+	return cl.sessionArtifactPath(chatLogSessionShellDirName)
 }
 
-// GeneratedImagesDir 返回生成图片 artifact 目录（<session-id>.images）。
+// GeneratedImagesDir 返回生成图片 artifact 目录
+// （chat-logs/YYYY/MM/DD/<session-id>/images）。
 func (cl *ChatLogger) GeneratedImagesDir() string {
-	return cl.sessionArtifactPath(cl.sessionPathBase() + ".images")
+	return cl.sessionArtifactPath(chatLogSessionImagesDirName)
 }
 
-// ExportsDir 返回导出文件目录（<session-id>.exports）。
+// ExportsDir 返回导出文件目录（chat-logs/YYYY/MM/DD/<session-id>/exports）。
 func (cl *ChatLogger) ExportsDir() string {
-	return cl.sessionArtifactPath(cl.sessionPathBase() + ".exports")
+	return cl.sessionArtifactPath(chatLogSessionExportsDirName)
 }
 
-// RuntimeEventsDir 返回 runtime 事件文件目录（<session-id>.events）。
+// RuntimeEventsDir 返回 runtime 事件文件目录
+// （chat-logs/YYYY/MM/DD/<session-id>/events）。
 func (cl *ChatLogger) RuntimeEventsDir() string {
-	return cl.sessionArtifactPath(cl.sessionPathBase() + ".events")
+	return cl.sessionArtifactPath(chatLogSessionEventsDirName)
 }
 
 // updateSummary 更新会话摘要
@@ -742,10 +792,10 @@ func (cl *ChatLogger) calculateSummary() *ChatSessionSummary {
 	return summary
 }
 
-// sessionPathBase 返回会话文件与 artifact 命名的基名：
+// sessionDirName 返回会话目录名：
 // 仅将 sessionID 中的点号/空格替换为下划线，避免 Windows 路径歧义，
 // 保留日期分区可解析前缀（YYYYMMDD_HHMMSS）。
-func (cl *ChatLogger) sessionPathBase() string {
+func (cl *ChatLogger) sessionDirName() string {
 	if cl == nil {
 		return ""
 	}
@@ -765,15 +815,17 @@ func (cl *ChatLogger) partitionAt() time.Time {
 	return time.Now()
 }
 
-// sessionArtifactPath 在 logDir 的 YYYY/MM/DD 日期分区下拼接 leaf（如 "<sid>.json"）。
+// sessionArtifactPath 在会话目录（chat-logs/YYYY/MM/DD/<session-id>）下拼接相对 leaf，
+// 例如 "chat/chat.json"、"http"。
 func (cl *ChatLogger) sessionArtifactPath(leaf string) string {
 	if cl == nil || strings.TrimSpace(cl.logDir) == "" || strings.TrimSpace(leaf) == "" {
 		return ""
 	}
-	if cl.sessionPathBase() == "" {
+	sessionDir := cl.SessionDirPath()
+	if sessionDir == "" {
 		return ""
 	}
-	return aiclipaths.JoinDatePartition(cl.logDir, cl.partitionAt(), leaf)
+	return filepath.Join(sessionDir, leaf)
 }
 
 // debugLogPathFor 返回 debug 日志路径，支持外部传入的 logDir（兼容 WriteDebugInfo 用法）。
@@ -781,11 +833,36 @@ func (cl *ChatLogger) debugLogPathFor(logDir string) string {
 	if cl == nil || strings.TrimSpace(cl.sessionID) == "" || strings.TrimSpace(logDir) == "" {
 		return ""
 	}
-	base := cl.sessionPathBase()
 	if logDir == cl.logDir {
 		return cl.DebugLogPath()
 	}
-	return aiclipaths.JoinDatePartition(logDir, cl.partitionAt(), base+".debug.log")
+	base := cl.sessionDirName()
+	if base == "" {
+		return ""
+	}
+	return aiclipaths.JoinDatePartition(logDir, cl.partitionAt(), base, chatLogSessionDebugDirName, chatLogSessionDebugFileName)
+}
+
+// LegacyRuntimeEventsLogPaths 返回旧布局下 runtime 事件日志的候选路径：
+// 扁平布局（<session-id>.events/runtime-events.jsonl）优先，其次为更早的嵌套布局
+// （<原始 sessionID>/runtime-events.jsonl，目录名可能含点号）。
+// 仅用于读取兼容，写入始终使用 RuntimeEventsDir() 的新布局。
+func (cl *ChatLogger) LegacyRuntimeEventsLogPaths() []string {
+	if cl == nil || strings.TrimSpace(cl.logDir) == "" {
+		return nil
+	}
+	base := cl.sessionDirName()
+	if base == "" {
+		return nil
+	}
+	partitionAt := cl.partitionAt()
+	paths := []string{
+		aiclipaths.JoinDatePartition(cl.logDir, partitionAt, base+".events", "runtime-events.jsonl"),
+	}
+	if raw := strings.TrimSpace(cl.sessionID); raw != "" && raw != base {
+		paths = append(paths, aiclipaths.JoinDatePartition(cl.logDir, partitionAt, raw, "runtime-events.jsonl"))
+	}
+	return paths
 }
 
 func (cl *ChatLogger) extractTotalTokensFromMessages() int {

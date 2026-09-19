@@ -126,6 +126,19 @@ func TestEnqueueStreamEventKeepsAssistantDeltasOverPendingBudget(t *testing.T) {
 		t.Fatalf("pending bytes = %d, want > 0", bytes)
 	}
 	bridge.streamMu.Unlock()
+	stats := bridge.streamQueueStats()
+	if stats.RetainedEvents != 20 {
+		t.Fatalf("retained events = %d, want 20", stats.RetainedEvents)
+	}
+	if stats.RetainedBytes == 0 {
+		t.Fatal("retained bytes must be attributed when assistant text exceeds budget")
+	}
+	if stats.RetainedByType[runtimechat.EventAssistantDelta] != 20 {
+		t.Fatalf("retained by type = %#v, want assistant delta=20", stats.RetainedByType)
+	}
+	if stats.OldestPendingAge < 0 {
+		t.Fatalf("oldest pending age must be non-negative: %s", stats.OldestPendingAge)
+	}
 
 	// 非 assistant 文本的流事件仍保持既有丢弃策略。
 	bridge.Handle(runtimeevents.Event{
@@ -138,6 +151,13 @@ func TestEnqueueStreamEventKeepsAssistantDeltasOverPendingBudget(t *testing.T) {
 	bridge.streamMu.Unlock()
 	if countAfterReasoning != count {
 		t.Fatalf("reasoning pending count = %d, want %d (non-text still dropped at budget)", countAfterReasoning, count)
+	}
+	stats = bridge.streamQueueStats()
+	if stats.DroppedEvents != 1 || stats.DroppedByType[runtimechat.EventAssistantReasoning] != 1 {
+		t.Fatalf("stream drop attribution = %+v, want one reasoning drop", stats)
+	}
+	if stats.OverflowLogsSuppressed == 0 {
+		t.Fatal("stream overflow logs should be rate-limited after the first event")
 	}
 }
 
