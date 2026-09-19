@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -90,6 +91,14 @@ func (p *sandboxPolicy) resolvePathWithContext(ctx context.Context, targetPath s
 	}
 	base := p.effectiveBasePath(ctx)
 	if base == "" {
+		// Fall back to the process working directory so relative paths resolve
+		// consistently with shell workdir resolution (workdirForExecution /
+		// resolveWorkdir) when no session workspace root or registered base
+		// path is bound. Without this, relative paths are returned as-is and
+		// stat/open calls miss the file relative to the server process CWD.
+		if cwd, err := os.Getwd(); err == nil && cwd != "" {
+			return filepath.Clean(filepath.Join(cwd, trimmed))
+		}
 		return trimmed
 	}
 	return filepath.Clean(filepath.Join(base, trimmed))

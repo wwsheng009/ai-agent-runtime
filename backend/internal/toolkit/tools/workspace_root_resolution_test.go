@@ -369,3 +369,49 @@ func TestFileToolsExecuteRelativePathsInSessionRoot(t *testing.T) {
 		assertSessionFile(t, "append.txt", "second")
 	})
 }
+
+// TestResolvePathWithContextFallsBackToProcessCwd verifies that when neither a
+// session workspace root nor a registered base path is bound, relative paths
+// resolve against the process working directory (os.Getwd) instead of being
+// returned as-is. This keeps file tools consistent with shell workdir
+// resolution (workdirForExecution / resolveWorkdir) and prevents "path not
+// found" errors when the aicli runtime server runs without an explicit
+// workspace root.
+func TestResolvePathWithContextFallsBackToProcessCwd(t *testing.T) {
+	// Create a temp dir and change into it so the process CWD is predictable.
+	dir := t.TempDir()
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWd) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	// No SetBasePath call → basePath is empty; no ctx workspace root either.
+	tool := NewViewTool()
+
+	// Seed a file in the process CWD.
+	if err := os.WriteFile(filepath.Join(dir, "cwd-marker.txt"), []byte("cwd"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	resolved := tool.resolvePathWithContext(context.Background(), "cwd-marker.txt")
+	expected := filepath.Clean(filepath.Join(dir, "cwd-marker.txt"))
+	if resolved != expected {
+		t.Fatalf("expected resolved path %q (process CWD), got %q", expected, resolved)
+	}
+
+	// End-to-end: view should succeed reading the relative file.
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"file_path": "cwd-marker.txt"})
+	if err != nil {
+		t.Fatalf("Execute returned transport error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success reading relative path in process CWD, got error: %v", result.Error)
+	}
+	if !strings.Contains(result.Content, "cwd") {
+		t.Fatalf("expected content to contain %q, got %q", "cwd", result.Content)
+	}
+}
