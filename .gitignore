@@ -58,6 +58,11 @@ backend/cmd/aicli/ui/render/output/*
 !backend/cmd/aicli/ui/render/output/
 !backend/cmd/aicli/ui/render/output/**
 
+# backend/internal/output 也是源码包（tool output 归档网关），不是构建产物。
+backend/internal/output/*
+!backend/internal/output/
+!backend/internal/output/**
+
 # runtime-server embeds generated frontend files; only keep the build placeholder.
 !backend/internal/webui/dist/
 backend/internal/webui/dist/*
