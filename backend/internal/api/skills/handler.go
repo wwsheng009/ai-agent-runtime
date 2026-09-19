@@ -157,6 +157,7 @@ type Handler struct {
 	aicliConfigMu               sync.RWMutex
 	aicliConfig                 *agentconfig.Config
 	siteAccountService          SiteAccountService
+	providerOpsService          ProviderOpsService
 	configDocumentService       ConfigDocumentService
 	agentMaxStepsPersister      AgentMaxStepsPersister
 	agentMaxStepsProvider       AgentMaxStepsProvider
@@ -760,6 +761,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/siteaccount/detect", h.DetectRuntimeSiteAccount).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/siteaccount/fetch", h.FetchRuntimeSiteAccount).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/providers/{name}/account/refresh", h.RefreshRuntimeProviderAccount).Methods(http.MethodPost)
+	h.registerProviderOpsRoutes(runtimeRouter)
 	runtimeRouter.HandleFunc("/usage/stats", h.GetUsageStats).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/usage/ledger", h.GetUsageLedger).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/usage/reset", h.ResetUsageStats).Methods(http.MethodPost)

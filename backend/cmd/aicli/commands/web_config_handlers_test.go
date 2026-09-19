@@ -1150,18 +1150,29 @@ type fetchModelsGroupResponse struct {
 }
 
 type fetchModelsClassifiedResponse struct {
-	Status         string                     `json:"status"`
-	Endpoint       string                     `json:"endpoint"`
-	Models         []string                   `json:"models"`
-	ModelsTotal    int                        `json:"models_total"`
-	Protocol       string                     `json:"protocol"`
-	LoginProtocol  string                     `json:"login_protocol"`
-	OtherModelsCnt int                        `json:"other_models_count"`
-	VerifiedCnt    int                        `json:"verified_models_count"`
-	AssumedCnt     int                        `json:"assumed_models_count"`
-	AssumedModels  []string                   `json:"assumed_models"`
-	Groups         []fetchModelsGroupResponse `json:"groups"`
-	AuthNotice     string                     `json:"auth_notice"`
+	Status         string                              `json:"status"`
+	Endpoint       string                              `json:"endpoint"`
+	Models         []string                            `json:"models"`
+	ModelsTotal    int                                 `json:"models_total"`
+	Protocol       string                              `json:"protocol"`
+	LoginProtocol  string                              `json:"login_protocol"`
+	OtherModelsCnt int                                 `json:"other_models_count"`
+	VerifiedCnt    int                                 `json:"verified_models_count"`
+	AssumedCnt     int                                 `json:"assumed_models_count"`
+	AssumedModels  []string                            `json:"assumed_models"`
+	Groups         []fetchModelsGroupResponse          `json:"groups"`
+	AuthNotice     string                              `json:"auth_notice"`
+	ModelMetadata  map[string]fetchModelsMetadataEntry `json:"model_metadata"`
+}
+
+// fetchModelsMetadataEntry 对应后端 model_metadata 的单个模型视图，字段
+// 与前端 reasoning 编辑器回显一致（chatWebConfigModel 的 JSON 子集）。
+type fetchModelsMetadataEntry struct {
+	ReasoningModel         bool     `json:"reasoning_model"`
+	ReasoningEfforts       []string `json:"reasoning_efforts"`
+	DefaultReasoningEffort string   `json:"default_reasoning_effort"`
+	CompactReasoningEffort string   `json:"compact_reasoning_effort"`
+	MaxContextTokens       int      `json:"max_context_tokens"`
 }
 
 func fetchModelsGroupByProtocol(t *testing.T, groups []fetchModelsGroupResponse, protocol string) *fetchModelsGroupResponse {
@@ -1428,6 +1439,91 @@ func TestHandleChatWebAPIConfigProvidersFetchModels_CodexProviderExcludesAssumed
 	anthropicGroup := fetchModelsGroupByProtocol(t, resp.Groups, "anthropic")
 	if anthropicGroup == nil || !fetchModelsContains(anthropicGroup.OtherModels, "claude-sonnet-4-5") {
 		t.Errorf("anthropic 组 other_models 缺少 claude-sonnet-4-5: %+v", resp.Groups)
+	}
+}
+
+// TestHandleChatWebAPIConfigProvidersFetchModels_ModelMetadataOverridesSavedReasoning
+// 验证「获取模型列表」的覆盖语义：返回的 model_metadata 必须来自本次模型
+// 元数据重匹配（/models 元数据 → model card → 协议默认值），而不是已保存的
+// provider.model_capabilities——否则前端重建 reasoning 编辑行时会回显过期
+// 配置，用户“获取模型列表”后仍会保存旧 reasoning。
+func TestHandleChatWebAPIConfigProvidersFetchModels_ModelMetadataOverridesSavedReasoning(t *testing.T) {
+	var authHeader string
+	const modelID = "meta-override-model-v1"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if v := r.Header.Get("Authorization"); v != "" {
+			authHeader = v
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"` + modelID + `"}]}`))
+	}))
+	defer srv.Close()
+
+	// 用户级模型卡给出 reasoning 元数据（minimal/high、400k context）。
+	cardsPath := filepath.Join(t.TempDir(), "model_cards.yaml")
+	cardsYAML := `version: 1
+cards:
+  - id: test.meta-override
+    title: Meta Override
+    priority: 100
+    provider_template: openai.chat
+    match:
+      model_ids:
+        - meta-override-model-v1
+    capability:
+      reasoning_model: true
+      reasoning_efforts: [minimal, high]
+      default_reasoning_effort: high
+      max_context_tokens: 400000
+`
+	if err := os.WriteFile(cardsPath, []byte(cardsYAML), 0o644); err != nil {
+		t.Fatalf("write model cards: %v", err)
+	}
+
+	yamlContent := strings.Replace(webConfigTestYAML, "https://api.example.com", srv.URL, 1)
+	yamlContent = strings.Replace(yamlContent,
+		"aicli:\n",
+		"aicli:\n  model_cards:\n    user_path: "+filepath.ToSlash(cardsPath)+"\n",
+		1,
+	)
+	// 已保存配置与卡片冲突（low/low）：覆盖语义要求冲突时以本次元数据为准，
+	// 旧 model_capabilities 不得作为合并基底遮蔽匹配结果。
+	yamlContent = strings.Replace(yamlContent,
+		"      model_capabilities:\n        gpt-4o:",
+		"      model_capabilities:\n        "+modelID+":\n"+
+			"          reasoning_model: true\n"+
+			"          reasoning_efforts: [low]\n"+
+			"          default_reasoning_effort: low\n"+
+			"        gpt-4o:",
+		1,
+	)
+	withWebConfigTestSession(t, yamlContent)
+
+	rec := postConfigJSON(t, HandleChatWebAPIConfigProvidersFetchModels, map[string]interface{}{
+		"name": "alpha",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp fetchModelsClassifiedResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if authHeader == "" {
+		t.Fatalf("mock 未收到 Authorization 头")
+	}
+	if !fetchModelsContains(resp.Models, modelID) {
+		t.Fatalf("models 缺少 %q: %v", modelID, resp.Models)
+	}
+	meta, ok := resp.ModelMetadata[modelID]
+	if !ok {
+		t.Fatalf("model_metadata 缺少 %q（前端无法重建 reasoning 编辑行）: %+v", modelID, resp.ModelMetadata)
+	}
+	if !meta.ReasoningModel || strings.Join(meta.ReasoningEfforts, ",") != "minimal,high" || meta.DefaultReasoningEffort != "high" {
+		t.Errorf("model_metadata[%s] = %+v, want 卡片元数据 minimal,high/high（非已保存的 low/low）", modelID, meta)
+	}
+	if meta.MaxContextTokens != 400000 {
+		t.Errorf("model_metadata[%s].max_context_tokens = %d, want 400000", modelID, meta.MaxContextTokens)
 	}
 }
 

@@ -129,6 +129,45 @@ export const zhRuntimeConfigEditorProviders = {
       notPersisted: "（未持久化）",
       refreshMessage: "{{name}}: {{balanceLine}}{{persisted}}{{warnings}}",
     },
+    models: {
+      title: "模型发现与探测",
+      description:
+        "通过 runtime provider ops 拉取 /models、自动导入 provider 草稿，或对候选模型做最小补全实测。所有动作只改当前表单，保存仍走原有链路。",
+      fetch: "获取模型列表",
+      fetching: "拉取中...",
+      autoImport: "自动导入",
+      autoImporting: "导入中...",
+      probe: "探测模型",
+      probing: "探测中...",
+      savedHint:
+        "当前编辑已保存 provider「{{name}}」，留空的 base_url / api_key 会由配置快照补齐。",
+      draftHint:
+        "当前是未保存草稿，请先填写 base_url（可选 api_key），再执行拉取或探测。",
+      assumedCount: "本次拉取到 {{count}} 个候选模型",
+      mergeAssumed: "合并到支持模型",
+      assumedHint:
+        "「获取模型列表」按覆盖语义写入支持模型；建议先合并候选，再按需删除不可用项。",
+      fetchRequiresBaseUrl: "获取模型列表需要先填写 base_url，或先保存 provider。",
+      fetchFailed: "获取模型列表失败",
+      fetchSuccess: "已获取 {{count}} 个模型（{{endpoint}}）{{warnings}}",
+      fetchEmpty: "接口返回成功，但没有可用模型。",
+      autoImportRequiresBaseUrl: "自动导入需要先填写 base_url，或先保存 provider。",
+      autoImportSuccess: "已按探测结果回填 provider 表单{{warnings}}",
+      autoImportFailed: "自动导入 provider 失败",
+      probeRequiresModels:
+        "没有可探测的模型：请先获取模型列表，或在「支持模型」里填写模型 ID。",
+      probeFailed: "探测模型失败",
+      probeSuccess: "探测完成：{{total}} 个模型，实测支持 {{ok}} 个。",
+      mergeAssumedNotice: "已把 {{count}} 个候选模型合并进「支持模型」。",
+      mergeVerified: "合并实测支持的 {{count}} 个模型",
+      warningsSuffix: "；警告: {{warnings}}",
+      probeSummary: "共 {{total}} 个探测：支持 {{ok}}，不支持 {{unsupported}}，未知 {{error}}",
+      probeHint:
+        "结论来自最小补全实测：ok 表示实测可用；不支持/未知只说明该协议下未通过，可结合站点文档判断。",
+      verdictOk: "支持",
+      verdictUnsupported: "不支持",
+      verdictUnknown: "未知",
+    },
     proxy: {
       title: "Provider 级代理覆盖",
       description:

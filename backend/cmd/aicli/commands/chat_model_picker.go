@@ -11,6 +11,20 @@ import (
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
+// modelCommandVariant selects the picker behaviour shared by /model and
+// /provider. Both commands mutate the same model state; they differ only in
+// whether a bare invocation leads with the provider selection stage.
+type modelCommandVariant int
+
+const (
+	// modelCommandVariantModel is the /model command: switch the model within
+	// the current provider (plus optional reasoning).
+	modelCommandVariantModel modelCommandVariant = iota
+	// modelCommandVariantProvider is the /provider command: switch the
+	// provider (then pick its model and reasoning).
+	modelCommandVariantProvider
+)
+
 // canOpenChatModelPicker is intentionally stricter than a generic list
 // capability check. Switching the model mutates session state, so the picker
 // may only begin while the unified primary presenter is idle, owns its
@@ -64,8 +78,11 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 		return
 	}
 
-	// Stage 1: provider. Skipped when the request pinned one explicitly.
-	if providerName == "" {
+	// Stage 1: provider. Only the typed /provider command runs it (bare
+	// form), and a request that pinned the provider explicitly skips it. The
+	// typed /model command never asks for a provider: it switches models
+	// within the current provider.
+	if request.ProviderPicker && providerName == "" {
 		providers := runtimeProviderSelectionOptions(session, currentModelCommandProvider(session))
 		if len(providers) == 0 {
 			closeModelPickerLease(session, lease)
@@ -90,6 +107,15 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 			return
 		}
 		providerName = providers[index]
+	}
+
+	// /model never runs the provider stage (ProviderPicker is false), so a bare
+	// invocation leaves providerName empty. Resolve it against the session's
+	// current provider — the one selected by /provider or already active — so
+	// the model stage lists that provider's catalog instead of falling back to
+	// the config default provider.
+	if providerName == "" {
+		providerName = currentModelCommandProvider(session)
 	}
 
 	// Resolve the provider context so the model stage lists its real catalog.
@@ -393,10 +419,29 @@ func applyUnifiedModelCommandSelection(session *ChatSession, providerCtx *provid
 // variants degrade to a direct apply that keeps the current reasoning value;
 // bare /model falls back to a read-only status document.
 func executeStructuredModelCommand(session *ChatSession, command string) (CommandResult, bool) {
+	return executeStructuredModelCommandVariant(session, command, modelCommandVariantModel)
+}
+
+// executeStructuredProviderCommand is the unified interactive entry point for
+// /provider. It shares the /model executor and opens the leading provider
+// selection stage on a bare invocation.
+func executeStructuredProviderCommand(session *ChatSession, command string) (CommandResult, bool) {
+	return executeStructuredModelCommandVariant(session, command, modelCommandVariantProvider)
+}
+
+// needProviderPickerStage reports whether the interactive flow must run the
+// provider selection stage: only the /provider command asks for it, and only
+// when no provider was pinned explicitly.
+func needProviderPickerStage(variant modelCommandVariant, providerExplicit bool) bool {
+	return variant == modelCommandVariantProvider && !providerExplicit
+}
+
+func executeStructuredModelCommandVariant(session *ChatSession, command string, variant modelCommandVariant) (CommandResult, bool) {
 	request, err := parseModelCommandRequest(command)
 	if err != nil {
 		return commandErrorResult(err), true
 	}
+	request.Provider = resolveModelPickerProvider(session, variant, request)
 	if request.ShowStatus && !request.HasMutation() {
 		return commandTextResult(runtimeModelStateText(session)), true
 	}
@@ -407,7 +452,9 @@ func executeStructuredModelCommand(session *ChatSession, command string) (Comman
 		return CommandResult{
 			Action: CommandContinue,
 			OpenModelPicker: &ModelPickerRequest{
-				NeedReasoning: true,
+				Provider:       request.Provider,
+				NeedReasoning:  true,
+				ProviderPicker: needProviderPickerStage(variant, request.ProviderExplicit),
 			},
 		}, true
 	}
@@ -422,13 +469,27 @@ func executeStructuredModelCommand(session *ChatSession, command string) (Comman
 		return CommandResult{
 			Action: CommandContinue,
 			OpenModelPicker: &ModelPickerRequest{
-				Provider:      request.Provider,
-				Model:         request.Model,
-				NeedReasoning: true,
+				Provider:       request.Provider,
+				Model:          request.Model,
+				NeedReasoning:  true,
+				ProviderPicker: needProviderPickerStage(variant, request.ProviderExplicit),
 			},
 		}, true
 	}
 	return executeStructuredModelMutation(session, request), true
+}
+
+// resolveModelPickerProvider pins the provider the interactive model stage
+// must run against. /model is model-only: unless the caller pinned a provider
+// explicitly, it operates within the session's current provider — the one
+// selected by /provider or already active — never the config default provider.
+// /provider only pin Provider when it was explicit; a bare invocation stays
+// empty so the leading provider stage selects it.
+func resolveModelPickerProvider(session *ChatSession, variant modelCommandVariant, request modelCommandRequest) string {
+	if variant == modelCommandVariantModel && !request.ProviderExplicit {
+		return currentModelCommandProvider(session)
+	}
+	return strings.TrimSpace(request.Provider)
 }
 
 // executeStructuredModelMutation applies an explicit /model mutation and

@@ -11,6 +11,7 @@ var cfgApiKeySource = "";         // 凭据来源：inline / pool / key_store / 
 var cfgApiKeyClearPending = false; // 用户点了「清除」等待保存生效
 var cfgApiKeyMasked = "";          // 已保存 key 的掩码回显（快照 api_key_masked 或本地计算）
 var assumedFetchedModels = [];     // 最近一次 fetch-models 的 assumed 模型清单（探测按钮用）
+var fetchedModelMetadata = {};     // 最近一次 fetch-models 的 model -> 元数据匹配结果（reasoning 重匹配用）
 
 // ---- 协议下拉（Provider 编辑弹窗）----
 // 原生 <input list=datalist> 在 input 有值时会被浏览器按当前值过滤选项，
@@ -112,6 +113,7 @@ function headersFromText(text) {
 export function openProviderEditor(name) {
   var p = name ? providerByName(name) : null;
   cfgReasoningDraft = {};
+  fetchedModelMetadata = {};
   closeProtocolPopup();
   renderAssumedFetchedModels(null);
   var title = configEl("config-editor-title");
@@ -331,9 +333,49 @@ function showConfigEditor(show) {
   }
 }
 
-// 根据模型列表重建每模型的 reasoning 编辑行；已有草稿（cfgReasoningDraft）
-// 优先展示，避免输入过程中重建丢失用户已填内容。
-function rebuildModelReasoningEditors(models, provider) {
+function emptyReasoningSpec() {
+  return {
+    reasoning_model: false,
+    reasoning_efforts: "",
+    default_reasoning_effort: "",
+    compact_reasoning_effort: ""
+  };
+}
+
+// 已保存 provider 配置中该模型的 reasoning spec；未保存过该模型时返回 null。
+function providerReasoningSpec(provider, model) {
+  if (!provider) { return null; }
+  var spec = null;
+  (provider.models || []).forEach(function (m) {
+    if (m.name === model) {
+      spec = {
+        reasoning_model: !!m.reasoning_model,
+        reasoning_efforts: (m.reasoning_efforts || []).join(", "),
+        default_reasoning_effort: m.default_reasoning_effort || "",
+        compact_reasoning_effort: m.compact_reasoning_effort || ""
+      };
+    }
+  });
+  return spec;
+}
+
+// 后端 fetch-models 返回的模型元数据（/models 端点元数据 → model card →
+// 协议兼容默认值的匹配结果）→ reasoning 编辑行 spec。
+function reasoningSpecFromMetadata(meta) {
+  return {
+    reasoning_model: !!(meta && meta.reasoning_model),
+    reasoning_efforts: (meta && meta.reasoning_efforts) ? meta.reasoning_efforts.join(", ") : "",
+    default_reasoning_effort: (meta && meta.default_reasoning_effort) || "",
+    compact_reasoning_effort: (meta && meta.compact_reasoning_effort) || ""
+  };
+}
+
+// 根据模型列表重建每模型的 reasoning 编辑行。取值优先级：
+//   本地草稿（用户正在编辑、尚未保存） > 模型元数据 > 已保存 provider 配置 > 空。
+// metadataAuthoritative=true（「获取模型列表」覆盖路径）时，未命中元数据的
+// 模型不再回退已保存配置——旧 reasoning 配置必须让位于本次元数据重匹配结果，
+// 否则页面上仍会残留过期值，与“覆盖”语义不符。
+function rebuildModelReasoningEditors(models, provider, metadata, metadataAuthoritative) {
   var container = configEl("cfg-model-reasoning-editors");
   if (!container) { return; }
   var unique = [];
@@ -347,22 +389,15 @@ function rebuildModelReasoningEditors(models, provider) {
   }
   var html = "";
   unique.forEach(function (model) {
-    var spec = {
-      reasoning_model: false,
-      reasoning_efforts: "",
-      default_reasoning_effort: "",
-      compact_reasoning_effort: ""
-    };
-    if (provider) {
-      (provider.models || []).forEach(function (m) {
-        if (m.name === model) {
-          spec.reasoning_model = m.reasoning_model;
-          spec.reasoning_efforts = (m.reasoning_efforts || []).join(", ");
-          spec.default_reasoning_effort = m.default_reasoning_effort || "";
-          spec.compact_reasoning_effort = m.compact_reasoning_effort || "";
-        }
-      });
+    var spec = emptyReasoningSpec();
+    if (!metadataAuthoritative) {
+      var saved = providerReasoningSpec(provider, model);
+      if (saved) { spec = saved; }
     }
+    if (metadata && Object.prototype.hasOwnProperty.call(metadata, model)) {
+      spec = reasoningSpecFromMetadata(metadata[model]);
+    }
+    // 草稿优先：输入过程中的重建（如手动合并 assumed 模型）不丢用户已填内容。
     if (cfgReasoningDraft[model]) { spec = cfgReasoningDraft[model]; }
     html += '<div class="cfg-model-reasoning" data-model="' + esc(model) + '">' +
       '<div class="cfg-model-reasoning-head">' +
@@ -489,8 +524,10 @@ function saveProvider(ev) {
 // 调用后端 /web/api/config/providers/fetch-models 拉取该 provider 的
 // GET /models 清单：优先用表单里新填的 api key，否则用已保存的 key。
 // 后端按协议分类（与 aicli login 同源）后，models 只含与当前 provider
-// 协议一致的模型；结果合并（去重）进「支持模型」文本域，不覆盖用户
-// 手填的行，其他协议模型仅在状态栏提示、不合并。
+// 协议一致的模型。执行结果是“覆盖”：支持模型列表整体替换为本次结果，
+// reasoning 编辑行按返回的 model_metadata（模型元数据重匹配结果）重建，
+// 旧模型 ID 与旧 reasoning 草稿不再保留；其他协议模型仅在状态栏提示，
+// 不自动合并（assumed 模型可确认后手动合并）。
 function fetchModelsFromProvider() {
   var btn = configEl("cfg-provider-fetch-models-btn");
   var statusEl = configEl("cfg-provider-fetch-models-status");
@@ -525,15 +562,30 @@ function fetchModelsFromProvider() {
       // 协议一致且有 model card 数据支持的模型（openai 协议例外：/v1/models
       // 是 OpenAI 风格端点，未匹配卡片的模型按当前协议假定可用，照旧合并）；
       // 无卡数据的其他协议模型在 assumed_models / groups 里单列，不合并。
-      mergeFetchedModels(json.models);
-      var total = json.models_total || json.models.length;
+      //
+      // 覆盖语义：模型列表与 reasoning 配置整体替换为本次结果，reasoning 按
+      // model_metadata（模型元数据重匹配结果）重建，旧模型 ID / 旧草稿不再保留。
+      // 模型列表为空（网关未返回可合并模型）时保留原列表，避免误清空配置。
+      var metadata = (json.model_metadata && typeof json.model_metadata === "object") ? json.model_metadata : null;
+      var fetched = json.models || [];
+      var replacedCount = (fetched.length > 0) ? replaceFetchedModels(fetched, metadata, metadata !== null) : 0;
+      var total = json.models_total || fetched.length;
       var okMsg = "已获取 " + total + " 个模型" + (json.endpoint ? "（" + json.endpoint + "）" : "");
       if (json.protocol) { okMsg += "，协议 " + json.protocol; }
-      okMsg += "。已合并 " + json.models.length + " 个" + (json.protocol ? " " + json.protocol : "") + " 协议模型";
+      if (replacedCount > 0) {
+        okMsg += "。已覆盖支持模型列表为 " + replacedCount + " 个" + (json.protocol ? " " + json.protocol : "") + " 协议模型";
+        if (metadata) {
+          okMsg += "，并按模型元数据重匹配 reasoning 配置（命中 " + countMetadataMatches(fetched, metadata) + "/" + replacedCount + "）";
+        } else {
+          okMsg += "（后端未返回模型元数据，reasoning 沿用已保存配置）";
+        }
+      } else {
+        okMsg += "。本次未返回可覆盖的模型，已保留原支持模型列表";
+      }
       var assumed = json.assumed_models || [];
       if (assumed.length) {
         okMsg += "。另有 " + assumed.length + " 个模型无 " + (json.protocol || "当前") +
-          " 协议匹配数据，未自动合并（网关未提供协议支持证据，确认后可在下方列表手动合并）";
+          " 协议匹配数据，未自动覆盖（网关未提供协议支持证据，确认后可在下方列表手动合并）";
       }
       var otherCount = json.other_models_count || 0;
       var filtered = false;
@@ -578,8 +630,31 @@ function fetchModelsFromProvider() {
     });
 }
 
-// 把拉取到的模型 id 合并进「支持模型」文本域（去重，保留手填行），
-// 并重建 reasoning 编辑行（先收草稿再重建，不丢已输入内容）。
+// 「获取模型列表」覆盖路径：用本次拉取结果整体替换「支持模型」文本域
+// （去重保序），清空旧 reasoning 草稿与旧元数据映射，并按新元数据重建
+// reasoning 编辑行。metadataAuthoritative=true 时未命中元数据的模型清空
+// 旧配置；后端未返回元数据（旧后端）时回退已保存配置，避免误清空。
+// 返回实际写入的模型数量；列表为空时不改动表单并返回 0。
+function replaceFetchedModels(fetched, metadata, metadataAuthoritative) {
+  var ta = configEl("cfg-provider-models");
+  if (!ta || !fetched) { return 0; }
+  var models = [];
+  fetched.forEach(function (m) {
+    m = String(m).trim();
+    if (m && models.indexOf(m) < 0) { models.push(m); }
+  });
+  if (models.length === 0) { return 0; }
+  ta.value = models.join("\n");
+  cfgReasoningDraft = {}; // 覆盖语义：旧模型 / 旧 reasoning 草稿不再保留
+  fetchedModelMetadata = metadata || {};
+  var orig = (configEl("cfg-provider-original-name").value || "").trim();
+  rebuildModelReasoningEditors(models, orig ? providerByName(orig) : null, fetchedModelMetadata, !!metadataAuthoritative);
+  return models.length;
+}
+
+// 把拉取到的模型 id 合并进「支持模型」文本域（去重，保留手填行）。
+// 仅用于 assumed 模型的手动合并按钮：在现有列表上追加，并让新增行走
+// fetch-models 返回的元数据回显；已有行保留草稿/已保存配置。
 function mergeFetchedModels(fetched) {
   var ta = configEl("cfg-provider-models");
   if (!ta || !fetched) { return; }
@@ -598,8 +673,18 @@ function mergeFetchedModels(fetched) {
   if (added > 0) {
     collectReasoningDrafts();
     var orig = (configEl("cfg-provider-original-name").value || "").trim();
-    rebuildModelReasoningEditors(existing, orig ? providerByName(orig) : null);
+    rebuildModelReasoningEditors(existing, orig ? providerByName(orig) : null, fetchedModelMetadata, false);
   }
+}
+
+// 统计本次覆盖的模型里命中模型元数据的数量（状态栏提示用）。
+function countMetadataMatches(models, metadata) {
+  if (!metadata) { return 0; }
+  var count = 0;
+  (models || []).forEach(function (m) {
+    if (Object.prototype.hasOwnProperty.call(metadata, String(m))) { count++; }
+  });
+  return count;
 }
 
 // 渲染「未自动合并模型」折叠块：列出无当前协议匹配数据（仅靠协议 fallback

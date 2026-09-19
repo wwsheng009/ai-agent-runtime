@@ -1,6 +1,8 @@
 import { type Dispatch, type SetStateAction } from "react";
 import { useTranslation } from "react-i18next";
 
+import type { ProviderProbeResult } from "@/types/runtime";
+
 import { ConfigDomainDialog } from "../config-domain-dialog";
 import { ConfigFormField } from "../config-form-field";
 import { editorControlClassName } from "../editor-control-class";
@@ -11,6 +13,10 @@ import { SettingsNoticeCard } from "../settings-notice-card";
 import { type AccountAction } from "./draft-utils";
 import { ProviderAccountSection } from "./provider-account-section";
 import { ProviderBasicFields } from "./provider-basic-fields";
+import {
+  ProviderModelsSection,
+  type ProviderModelsAction,
+} from "./provider-models-section";
 import { ProviderNetworkFields } from "./provider-network-fields";
 
 type ProviderDialogProps = {
@@ -18,18 +24,27 @@ type ProviderDialogProps = {
   accountError: string | null;
   accountNotice: string | null;
   accountSummaryLine: string;
+  assumedModelIDs: string[];
   dialogError: string | null;
   draft: ProviderDraftInput;
   editingProviderName: string | null;
+  modelsBusy: ProviderModelsAction;
+  modelsError: string | null;
+  modelsNotice: string | null;
   onClose: () => void;
   onConfirm: () => void;
   onDetectSiteType: () => void;
   onFetchAccount: () => void;
+  onFetchModels: () => void;
+  onAutoImport: () => void;
+  onMergeModels: (modelIDs: string[]) => void;
+  onProbeModels: () => void;
   onRefreshProviderAccount: (
     providerName: string,
     options?: { fromDialog?: boolean },
   ) => void;
   open: boolean;
+  probeResult: ProviderProbeResult | null;
   setDraft: Dispatch<SetStateAction<ProviderDraftInput>>;
 };
 
@@ -38,15 +53,24 @@ export function ProviderDialog({
   accountError,
   accountNotice,
   accountSummaryLine,
+  assumedModelIDs,
   dialogError,
   draft,
   editingProviderName,
+  modelsBusy,
+  modelsError,
+  modelsNotice,
   onClose,
   onConfirm,
   onDetectSiteType,
   onFetchAccount,
+  onAutoImport,
+  onFetchModels,
+  onMergeModels,
+  onProbeModels,
   onRefreshProviderAccount,
   open,
+  probeResult,
   setDraft,
 }: ProviderDialogProps) {
   const { t } = useTranslation("runtimeConfig");
@@ -78,6 +102,20 @@ export function ProviderDialog({
           ) : null}
 
           <ProviderBasicFields draft={draft} setDraft={setDraft} />
+
+          <ProviderModelsSection
+            assumedModelIDs={assumedModelIDs}
+            busy={modelsBusy}
+            draft={draft}
+            editingProviderName={editingProviderName}
+            error={modelsError}
+            modelsNotice={modelsNotice}
+            onAutoImport={onAutoImport}
+            onFetchModels={onFetchModels}
+            onMergeModels={onMergeModels}
+            onProbeModels={onProbeModels}
+            probeResult={probeResult}
+          />
 
           <ProviderAccountSection
             accountBusy={accountBusy}

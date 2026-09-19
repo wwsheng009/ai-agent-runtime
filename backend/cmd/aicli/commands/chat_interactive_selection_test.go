@@ -81,6 +81,41 @@ func TestDescribeProviderSelection_FallsBackToResolvedURL(t *testing.T) {
 	}
 }
 
+func TestBuildStartupProviderPickerItems_FilterSortAndSearchText(t *testing.T) {
+	cfg := &config.Config{
+		Providers: config.ProvidersConfig{
+			DefaultProvider: "zeta",
+			Items: map[string]config.Provider{
+				"alpha": {Enabled: true, Protocol: "openai", BaseURL: "https://alpha.example.com", DefaultModel: "gpt-4.1"},
+				"beta":  {Enabled: true, Protocol: "codex", BaseURL: "https://beta.example.com"},
+				"zeta":  {Enabled: false, Protocol: "anthropic"}, // disabled provider stays out
+			},
+		},
+	}
+
+	items := buildStartupProviderPickerItems(cfg)
+	if len(items) != 2 {
+		t.Fatalf("expected 2 enabled providers, got %d: %#v", len(items), items)
+	}
+	if got := items[0].Title; got != "alpha" {
+		t.Fatalf("expected first row alpha (sorted), got %q", got)
+	}
+	if got := items[1].Title; got != "beta" {
+		t.Fatalf("expected second row beta (sorted), got %q", got)
+	}
+	if !strings.Contains(items[0].Detail, "protocol=openai") || !strings.Contains(items[0].Detail, "model=gpt-4.1") {
+		t.Fatalf("expected alpha detail with protocol/model, got %q", items[0].Detail)
+	}
+	if !strings.Contains(items[0].SearchText, "alpha") || !strings.Contains(items[0].SearchText, "gpt-4.1") {
+		t.Fatalf("expected alpha search text to cover name and model, got %q", items[0].SearchText)
+	}
+	for _, item := range items {
+		if item.Title == "zeta" {
+			t.Fatal("disabled provider zeta must not appear in the picker rows")
+		}
+	}
+}
+
 func TestSelectModelWithReader_RetriesAfterInvalidNumericChoice(t *testing.T) {
 	provider := config.Provider{
 		DefaultModel:    "gpt-4.1",

@@ -11,8 +11,8 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	httpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -187,7 +187,7 @@ func reloadChatConfigForModelCommand(session *ChatSession) error {
 	return nil
 }
 
-func executeModelCommand(session *ChatSession, request modelCommandRequest, interactive bool) error {
+func executeModelCommand(session *ChatSession, request modelCommandRequest, interactive bool, variant modelCommandVariant) error {
 	if session == nil {
 		return fmt.Errorf("当前没有活动会话")
 	}
@@ -208,9 +208,18 @@ func executeModelCommand(session *ChatSession, request modelCommandRequest, inte
 		if !interactive {
 			return nil
 		}
-		providerName, err := promptModelCommandProviderSelection(session, currentModelCommandProvider(session))
-		if err != nil {
-			return err
+		providerName := currentModelCommandProvider(session)
+		if needProviderPickerStage(variant, request.ProviderExplicit) {
+			var err error
+			providerName, err = promptModelCommandProviderSelection(session, providerName)
+			if err != nil {
+				return err
+			}
+		} else {
+			providerName = strings.TrimSpace(request.Provider)
+			if providerName == "" {
+				providerName = currentModelCommandProvider(session)
+			}
 		}
 		providerCtx, _, err := resolveModelCommandExecutionContext(session, providerName, "")
 		if err != nil {

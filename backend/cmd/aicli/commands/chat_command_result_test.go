@@ -1116,6 +1116,7 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_model_command.go", Func: "printModelCommandProviderPickerLegacyPage", Kind: "fmt.Print", Count: 3},
 		{File: "chat_model_command.go", Func: "promptModelCommandProviderSelectionLegacy", Kind: "fmt.Print", Count: 2},
 		{File: "chat_model_switch.go", Func: "handleModelCommand", Kind: "fmt.Print", Count: 3},
+		{File: "chat_model_switch.go", Func: "handleProviderCommand", Kind: "fmt.Print", Count: 3},
 		{File: "chat_model_switch.go", Func: "printRuntimeModelPickerLegacyPage", Kind: "fmt.Print", Count: 4},
 		{File: "chat_model_switch.go", Func: "promptRuntimeModelSelectionLegacy", Kind: "fmt.Print", Count: 2},
 		{File: "chat_model_switch.go", Func: "selectRuntimeReasoningEffortLegacy", Kind: "fmt.Print", Count: 5},

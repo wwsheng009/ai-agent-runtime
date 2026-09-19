@@ -19,4 +19,5 @@ export * from "./mcp";
 export * from "./service";
 export * from "./harness";
 export * from "./siteaccount";
+export * from "./provider-ops";
 export * from "./cache";

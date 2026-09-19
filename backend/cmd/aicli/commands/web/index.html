@@ -435,8 +435,8 @@
               </div>
               <div class="config-form-block">
                 <div class="cfg-label-row">
-                  <label class="cfg-label" for="cfg-provider-models">支持模型（每行一个；含 default_model）</label>
-                  <button type="button" id="cfg-provider-fetch-models-btn" class="cfg-btn" title="调用该 provider 的 GET /models 拉取模型清单，合并进下方列表">获取模型列表</button>
+                  <label class="cfg-label" for="cfg-provider-models">支持模型（每行一个；含 default_model，「获取模型列表」会整体覆盖）</label>
+                  <button type="button" id="cfg-provider-fetch-models-btn" class="cfg-btn" title="调用该 provider 的 GET /models 拉取模型清单：整体覆盖下方支持模型列表，并按模型元数据（/models 元数据 → model card → 协议默认值）重新匹配 reasoning 配置">获取模型列表</button>
                   <span id="cfg-provider-fetch-models-status" class="cfg-hint-inline"></span>
                 </div>
                 <details id="cfg-provider-fetch-models-assumed" class="cfg-fetch-assumed" hidden>

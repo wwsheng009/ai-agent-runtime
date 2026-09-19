@@ -420,10 +420,10 @@ func TestHandleCommand_ModelPromptKeepsCurrentModelAndUsesPriorityReasoningSelec
 	}
 	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
 	queue.lines <- chatQueuedInput{Text: "queued-follow-up\n", Source: "stdin"}
-	// Pre-load priority inputs for provider selector (empty = accept current),
-	// model selector (empty = accept current) and reasoning effort selector
-	// ("2" = select second option).
-	queue.priorityLines <- chatQueuedInput{Text: "", Source: "stdin"}
+	// Pre-load priority inputs for the model selector (empty = accept current
+	// model) and the reasoning effort selector ("2" = select second option).
+	// Bare /model no longer asks for a provider: it switches models within
+	// the current provider, so no provider-selector input is queued.
 	queue.priorityLines <- chatQueuedInput{Text: "", Source: "stdin"}
 	queue.priorityLines <- chatQueuedInput{Text: "2", Source: "stdin"}
 
@@ -452,7 +452,7 @@ func TestHandleCommand_ModelPromptKeepsCurrentModelAndUsesPriorityReasoningSelec
 	if session.ReasoningEffort != "medium" {
 		t.Fatalf("expected reasoning effort to switch to medium, got %q", session.ReasoningEffort)
 	}
-	if !strings.Contains(output, "provider 选择期间临时挂起") {
+	if !strings.Contains(output, "模型选择期间临时挂起") {
 		t.Fatalf("expected queued input suspension notice, got:\n%s", output)
 	}
 	if !strings.Contains(output, "当前模型: gpt-4.1") {

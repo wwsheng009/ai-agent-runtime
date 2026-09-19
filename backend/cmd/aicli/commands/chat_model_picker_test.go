@@ -232,3 +232,133 @@ func TestCanOpenChatModelPickerRequiresUnifiedSurface(t *testing.T) {
 		t.Fatal("bare session without interaction/surface must not open the model picker")
 	}
 }
+
+func TestExecuteStructuredProviderCommandBareRequestsProviderPicker(t *testing.T) {
+	// The provider stage selector decision: only a bare /provider (no pinned
+	// provider) leads with the provider stage; /model and a pinned provider
+	// never do.
+	if !needProviderPickerStage(modelCommandVariantProvider, false) {
+		t.Fatal("bare /provider must lead with the provider stage")
+	}
+	if needProviderPickerStage(modelCommandVariantProvider, true) {
+		t.Fatal("/provider with a pinned provider must not re-ask for it")
+	}
+	if needProviderPickerStage(modelCommandVariantModel, false) {
+		t.Fatal("/model must never lead with the provider stage")
+	}
+}
+
+func TestExecuteStructuredProviderCommandBareWithoutSurfaceDegradesToStatus(t *testing.T) {
+	// No picker-capable surface: bare /provider degrades to the read-only
+	// status document just like bare /model.
+	session := &ChatSession{
+		ProviderName:    "alpha",
+		Provider:        config.Provider{Protocol: "openai", DefaultModel: "gpt-4.1"},
+		Model:           "gpt-4.1",
+		ReasoningEffort: "medium",
+	}
+	result, handled := executeStructuredProviderCommand(session, "/provider")
+	if !handled {
+		t.Fatal("bare /provider without a surface was not handled")
+	}
+	if result.OpenModelPicker != nil {
+		t.Fatalf("bare /provider without a surface must not open the picker, got %#v", result.OpenModelPicker)
+	}
+	text := strings.TrimSpace(ui.RenderDocumentPlain(result.Document()))
+	if !strings.Contains(text, "当前 provider: alpha") || !strings.Contains(text, "当前模型: gpt-4.1") {
+		t.Fatalf("bare /provider must degrade to the status document, got:\n%s", text)
+	}
+}
+
+func TestExecuteStructuredProviderCommandPinnedProviderSkipsPickerStage(t *testing.T) {
+	session := &ChatSession{
+		ProviderName:    "alpha",
+		Provider:        config.Provider{Protocol: "openai", DefaultModel: "gpt-4.1"},
+		Model:           "gpt-4.1",
+		ReasoningEffort: "medium",
+		Config: &config.Config{
+			Providers: config.ProvidersConfig{
+				DefaultProvider: "alpha",
+				Items: map[string]config.Provider{
+					"alpha": {
+						Enabled:      true,
+						Protocol:     "openai",
+						DefaultModel: "gpt-4.1",
+					},
+					"beta": {
+						Enabled:      true,
+						Protocol:     "openai",
+						DefaultModel: "gpt-4.1-mini",
+					},
+				},
+			},
+		},
+	}
+	result, handled := executeStructuredProviderCommand(session, "/provider --provider beta --model gpt-4.1-mini")
+	if !handled {
+		t.Fatal("/provider --provider --model was not handled")
+	}
+	if result.OpenModelPicker != nil {
+		t.Fatal("explicit provider+model must apply directly, not open the picker")
+	}
+	if session.ProviderName != "beta" {
+		t.Fatalf("expected provider switch to beta, got %q", session.ProviderName)
+	}
+	if session.Model != "gpt-4.1-mini" {
+		t.Fatalf("expected model switch to gpt-4.1-mini, got %q", session.Model)
+	}
+}
+
+func TestExecuteStructuredModelCommandBareDoesNotRequestProviderPicker(t *testing.T) {
+	// The /model command is now model-only: bare /model degrades to the
+	// read-only status document without ever requesting the provider stage.
+	session := &ChatSession{
+		ProviderName:    "alpha",
+		Provider:        config.Provider{Protocol: "openai", DefaultModel: "gpt-4.1"},
+		Model:           "gpt-4.1",
+		ReasoningEffort: "medium",
+	}
+	result, handled := executeStructuredModelCommand(session, "/model")
+	if !handled {
+		t.Fatal("bare /model was not handled by the structured executor")
+	}
+	if result.OpenModelPicker != nil {
+		t.Fatalf("bare /model without a surface must not open the picker, got %#v", result.OpenModelPicker)
+	}
+}
+
+func TestResolveModelPickerProviderTiesModelToSelectedProvider(t *testing.T) {
+	// Regression: after /provider selects beta (session.ProviderName=beta),
+	// bare /model must resolve its interactive model stage against beta, not
+	// the config default provider, while a bare /provider must stay empty so
+	// the leading provider stage runs.
+	cfg := &config.Config{
+		Providers: config.ProvidersConfig{
+			DefaultProvider: "alpha",
+			Items: map[string]config.Provider{
+				"alpha": {Enabled: true, Protocol: "openai", DefaultModel: "alpha-model"},
+				"beta":  {Enabled: true, Protocol: "openai", DefaultModel: "beta-model"},
+			},
+		},
+	}
+	session := &ChatSession{
+		ProviderName:    "beta",
+		Provider:        cfg.Providers.Items["beta"],
+		Model:           "beta-model",
+		ReasoningEffort: "medium",
+		Config:          cfg,
+	}
+
+	if got := resolveModelPickerProvider(session, modelCommandVariantModel, modelCommandRequest{}); got != "beta" {
+		t.Fatalf("bare /model must resolve the current provider beta, got %q", got)
+	}
+	if got := resolveModelPickerProvider(session, modelCommandVariantModel, modelCommandRequest{Provider: "gamma", ProviderExplicit: true}); got != "gamma" {
+		t.Fatalf("explicit /model --provider gamma must win over the current provider, got %q", got)
+	}
+	if got := resolveModelPickerProvider(session, modelCommandVariantProvider, modelCommandRequest{}); got != "" {
+		t.Fatalf("bare /provider must stay empty so the leading provider stage runs, got %q", got)
+	}
+	if got := resolveModelPickerProvider(session, modelCommandVariantProvider, modelCommandRequest{Provider: "gamma", ProviderExplicit: true}); got != "gamma" {
+		t.Fatalf("/provider --provider gamma must pin gamma, got %q", got)
+	}
+}

@@ -2,13 +2,18 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
+  appendProviderModels,
+  autoImportRuntimeProvider,
   buildProviderAccountConfigPatch,
   detectRuntimeSiteAccount,
+  fetchRuntimeProviderModels,
   fetchRuntimeSiteAccount,
   formatProviderAccountCacheLine,
   formatSiteAccountBalanceLine,
+  probeRuntimeProviderModels,
   refreshRuntimeProviderAccount,
 } from "@/api/runtime";
+import type { ProviderProbeResult } from "@/types/runtime";
 
 import {
   buildProviderCreateConfigSnippet,
@@ -20,8 +25,19 @@ import {
   type AccountAction,
 } from "./runtime-provider-domain-editor/draft-utils";
 import { ProviderDialog } from "./runtime-provider-domain-editor/provider-dialog";
+import { type ProviderModelsAction } from "./runtime-provider-domain-editor/provider-models-section";
 import { ProviderTable } from "./runtime-provider-domain-editor/provider-table";
 import { type ProviderDraftInput } from "./runtime-provider-domain-form-utils";
+import {
+  buildProviderOpsRequestFromDraft,
+  joinProviderOpsWarnings,
+  normalizeProviderModelIDs,
+  parseSupportedModelsText,
+  providerAutoImportPatch,
+  providerModelsPatch,
+  resolveProbeModels,
+  summarizeProbeResults,
+} from "./provider-ops-utils";
 import { SettingsNoticeCard } from "./settings-notice-card";
 
 type RuntimeProviderDomainEditorProps = {
@@ -60,6 +76,11 @@ export function RuntimeProviderDomainEditor({
   const [draft, setDraft] = useState<ProviderDraftInput>(() =>
     createProviderDraftInput(null, ""),
   );
+  const [modelsBusy, setModelsBusy] = useState<ProviderModelsAction>(null);
+  const [modelsNotice, setModelsNotice] = useState<string | null>(null);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+  const [assumedModelIDs, setAssumedModelIDs] = useState<string[]>([]);
+  const [probeResult, setProbeResult] = useState<ProviderProbeResult | null>(null);
 
   const enabledCount = useMemo(
     () => providers.filter((provider) => provider.enabled).length,
@@ -81,6 +102,11 @@ export function RuntimeProviderDomainEditor({
     setAccountNotice(null);
     setAccountError(null);
     setAccountBusy(null);
+    setModelsNotice(null);
+    setModelsError(null);
+    setModelsBusy(null);
+    setAssumedModelIDs([]);
+    setProbeResult(null);
     setEditingProviderName(null);
     setDraft(createProviderDraftInput(null, defaultProvider));
     setDialogOpen(true);
@@ -91,6 +117,11 @@ export function RuntimeProviderDomainEditor({
     setAccountNotice(null);
     setAccountError(null);
     setAccountBusy(null);
+    setModelsNotice(null);
+    setModelsError(null);
+    setModelsBusy(null);
+    setAssumedModelIDs([]);
+    setProbeResult(null);
     setEditingProviderName(provider.name);
     setDraft(createProviderDraftInput(provider, defaultProvider));
     setDialogOpen(true);
@@ -306,6 +337,141 @@ export function RuntimeProviderDomainEditor({
     }
   }
 
+  function describeModelsError(error: unknown, fallback: string) {
+    return describeAccountError(error, fallback);
+  }
+
+  function modelsWarningsSuffix(warnings: string[] | undefined) {
+    const joined = joinProviderOpsWarnings(warnings);
+    return joined ? t("editor.providers.models.warningsSuffix", { warnings: joined }) : "";
+  }
+
+  async function handleFetchModels() {
+    if (!draft.baseUrl.trim() && !editingProviderName) {
+      setModelsError(t("editor.providers.models.fetchRequiresBaseUrl"));
+      return;
+    }
+
+    setModelsBusy("fetch");
+    setModelsError(null);
+    setModelsNotice(null);
+    try {
+      const result = await fetchRuntimeProviderModels(
+        buildProviderOpsRequestFromDraft(draft, editingProviderName),
+      );
+      const assumed = normalizeProviderModelIDs(result.assumed_model_ids);
+      const fetched = normalizeProviderModelIDs(result.model_ids);
+      setAssumedModelIDs(assumed);
+      setProbeResult(null);
+      const patch = providerModelsPatch(result);
+      if (patch) {
+        setDraft((current) => ({ ...current, ...patch }));
+      }
+      const warnings = modelsWarningsSuffix(result.warnings);
+      if (fetched.length > 0) {
+        setModelsNotice(
+          t("editor.providers.models.fetchSuccess", {
+            count: fetched.length,
+            endpoint: result.endpoint || "models",
+            warnings,
+          }),
+        );
+      } else {
+        setModelsNotice(
+          `${t("editor.providers.models.fetchEmpty")}${warnings}`.trim(),
+        );
+      }
+    } catch (error) {
+      setModelsError(
+        describeModelsError(error, t("editor.providers.models.fetchFailed")),
+      );
+    } finally {
+      setModelsBusy(null);
+    }
+  }
+
+  async function handleAutoImport() {
+    if (!draft.baseUrl.trim() && !editingProviderName) {
+      setModelsError(t("editor.providers.models.autoImportRequiresBaseUrl"));
+      return;
+    }
+
+    setModelsBusy("auto-import");
+    setModelsError(null);
+    setModelsNotice(null);
+    try {
+      const result = await autoImportRuntimeProvider({
+        ...buildProviderOpsRequestFromDraft(draft, editingProviderName),
+        default_model: draft.defaultModel.trim() || undefined,
+      });
+      setDraft((current) => ({ ...current, ...providerAutoImportPatch(result) }));
+      const imported = normalizeProviderModelIDs(result.supported_models);
+      setAssumedModelIDs(imported);
+      setProbeResult(null);
+      setModelsNotice(
+        t("editor.providers.models.autoImportSuccess", {
+          warnings: modelsWarningsSuffix(result.warnings),
+        }),
+      );
+    } catch (error) {
+      setModelsError(
+        describeModelsError(error, t("editor.providers.models.autoImportFailed")),
+      );
+    } finally {
+      setModelsBusy(null);
+    }
+  }
+
+  function handleMergeModels(modelIDs: string[]) {
+    const current = parseSupportedModelsText(draft.supportedModelsText);
+    const merged = appendProviderModels(current, modelIDs);
+    if (merged.length === current.length) {
+      return;
+    }
+    setDraft((currentDraft) => ({
+      ...currentDraft,
+      supportedModelsText: merged.join("\n"),
+    }));
+    setModelsError(null);
+    setModelsNotice(
+      t("editor.providers.models.mergeAssumedNotice", {
+        count: merged.length - current.length,
+      }),
+    );
+  }
+
+  async function handleProbeModels() {
+    const models = resolveProbeModels(assumedModelIDs, draft);
+    if (models.length === 0) {
+      setModelsError(t("editor.providers.models.probeRequiresModels"));
+      return;
+    }
+    setModelsBusy("probe");
+    setModelsError(null);
+    setModelsNotice(null);
+    try {
+      const result = await probeRuntimeProviderModels({
+        ...buildProviderOpsRequestFromDraft(draft, editingProviderName),
+        models,
+      });
+      setProbeResult(result);
+      const summary = summarizeProbeResults(result);
+      setModelsNotice(
+        t("editor.providers.models.probeSuccess", {
+          total: String(summary.total),
+          ok: String(summary.ok),
+        }),
+      );
+    } catch (error) {
+      setProbeResult(null);
+      setModelsError(
+        describeModelsError(error, t("editor.providers.models.probeFailed")),
+      );
+    } finally {
+      setModelsBusy(null);
+    }
+  }
+
   return (
     <>
       {rowNotice ? (
@@ -332,17 +498,26 @@ export function RuntimeProviderDomainEditor({
         accountError={accountError}
         accountNotice={accountNotice}
         accountSummaryLine={accountSummaryLine}
+        assumedModelIDs={assumedModelIDs}
         dialogError={dialogError}
         draft={draft}
         editingProviderName={editingProviderName}
+        modelsBusy={modelsBusy}
+        modelsError={modelsError}
+        modelsNotice={modelsNotice}
         onClose={() => setDialogOpen(false)}
         onConfirm={handleSave}
         onDetectSiteType={() => void handleDetectSiteType()}
         onFetchAccount={() => void handleFetchAccount()}
+        onAutoImport={() => void handleAutoImport()}
+        onFetchModels={() => void handleFetchModels()}
+        onMergeModels={handleMergeModels}
+        onProbeModels={() => void handleProbeModels()}
         onRefreshProviderAccount={(name, options) =>
           void handleRefreshProviderAccount(name, options)
         }
         open={dialogOpen}
+        probeResult={probeResult}
         setDraft={setDraft}
       />
     </>

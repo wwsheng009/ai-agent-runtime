@@ -66,6 +66,11 @@ type ModelPickerRequest struct {
 	Provider      string
 	Model         string
 	NeedReasoning bool
+	// ProviderPicker requests the leading provider selection stage. The typed
+	// /provider command sets it so the picker runs provider→model→reasoning;
+	// the typed /model command leaves it false so the model stage lists the
+	// current provider's catalog. A pinned Provider always skips the stage.
+	ProviderPicker bool
 }
 
 // ThemePickerRequest marks the live-preview theme selection effect. It carries
@@ -225,10 +230,16 @@ func (r CommandResult) Document() render.Document {
 // legacy stdout handler.
 func tryExecuteStructuredChatCommand(session *ChatSession, command string) (CommandResult, bool, error) {
 	cmdLower := strings.ToLower(strings.TrimSpace(command))
-	// /model is fully migrated: status is a finite read-only report, bare /model
-	// opens the typed provider→model→reasoning picker, and explicit mutations
-	// apply through the unified command cell. It must be recognized before the
-	// broad /model legacy fence so no variant can revive the terminal writer.
+	// /provider and /model are fully migrated: status is a finite read-only
+	// report, bare /provider opens the typed provider→model→reasoning picker,
+	// bare /model opens the model-only picker, and explicit mutations apply
+	// through the unified command cell. They must be recognized before the
+	// broad legacy fence so no variant can revive the terminal writer.
+	if commandMatches(cmdLower, "/provider") && unifiedDirectInteractiveOutput(session) {
+		if result, handled := executeStructuredProviderCommand(session, command); handled {
+			return result, true, nil
+		}
+	}
 	if commandMatches(cmdLower, "/model") && unifiedDirectInteractiveOutput(session) {
 		if result, handled := executeStructuredModelCommand(session, command); handled {
 			return result, true, nil

@@ -133,6 +133,46 @@ export const enRuntimeConfigEditorProviders = {
       notPersisted: " (not persisted)",
       refreshMessage: "{{name}}: {{balanceLine}}{{persisted}}{{warnings}}",
     },
+    models: {
+      title: "Model discovery and probing",
+      description:
+        "Use runtime provider ops to fetch /models, auto-import a provider draft, or run a minimal completion probe per candidate model. These actions only update this form; saving still uses the existing path.",
+      fetch: "Fetch models",
+      fetching: "Fetching...",
+      autoImport: "Auto import",
+      autoImporting: "Importing...",
+      probe: "Probe models",
+      probing: "Probing...",
+      savedHint:
+        "Editing saved provider \"{{name}}\"; empty base_url / api_key fall back to the config snapshot.",
+      draftHint:
+        "This is an unsaved draft. Fill in base_url (api_key optional) before fetching or probing.",
+      assumedCount: "{{count}} candidate models from the latest fetch",
+      mergeAssumed: "Merge into supported models",
+      assumedHint:
+        "\"Fetch models\" replaces supported models with the fetched list; merge candidates first, then remove unusable entries as needed.",
+      fetchRequiresBaseUrl: "Fetching models requires base_url, or save the provider first.",
+      fetchFailed: "Failed to fetch models",
+      fetchSuccess: "Fetched {{count}} models ({{endpoint}}){{warnings}}",
+      fetchEmpty: "The endpoint succeeded but returned no usable models.",
+      autoImportRequiresBaseUrl: "Auto import requires base_url, or save the provider first.",
+      autoImportSuccess: "Provider form filled from the detected config{{warnings}}",
+      autoImportFailed: "Failed to auto import the provider",
+      probeRequiresModels:
+        "No models to probe: fetch the model list first, or fill model IDs under supported models.",
+      probeFailed: "Failed to probe models",
+      probeSuccess: "Probe finished: {{total}} models, {{ok}} verified as supported.",
+      mergeAssumedNotice: "Merged {{count}} candidate models into supported models.",
+      mergeVerified: "Merge {{count}} verified models",
+      warningsSuffix: "; warnings: {{warnings}}",
+      probeSummary:
+        "{{total}} probes: {{ok}} supported, {{unsupported}} unsupported, {{error}} unknown",
+      probeHint:
+        "Verdicts come from a minimal completion probe: ok means verified; unsupported/unknown only means the protocol attempt failed, so cross-check the site docs.",
+      verdictOk: "supported",
+      verdictUnsupported: "unsupported",
+      verdictUnknown: "unknown",
+    },
     proxy: {
       title: "Provider-level proxy override",
       description:

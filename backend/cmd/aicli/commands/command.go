@@ -292,6 +292,9 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		printChatCommandOutput(session, "提示: /rewind <checkpoint_id> 尚未接线；数字参数请用 /backtrack <user_turn_index>\n用法: /backtrack [list|<index> --apply|--both|--edit|--submit]")
 		return false
 	}
+	if commandMatches(cmdLower, "/provider") {
+		return handleProviderCommand(session, command, noInteractive)
+	}
 	if commandMatches(cmdLower, "/model") {
 		return handleModelCommand(session, command, noInteractive)
 	}

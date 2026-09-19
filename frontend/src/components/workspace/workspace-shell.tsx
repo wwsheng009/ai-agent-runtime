@@ -414,8 +414,6 @@ export function WorkspaceShell({
           reasoningEffortOptions={reasoningEffortOptions}
           runtimeModelsError={runtimeModelsError}
           runtimeModelsLoading={runtimeModelsLoading}
-          runtimeSkillsError={runtimeSkillsError}
-          runtimeSkillsLoading={runtimeSkillsLoading}
           earlierLoader={earlierLoader}
           selectedModel={selectedModel}
           selectedProvider={selectedProvider}

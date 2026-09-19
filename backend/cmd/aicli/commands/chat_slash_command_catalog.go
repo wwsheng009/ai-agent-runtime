@@ -363,9 +363,16 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			ShortcutOf:  "/stream",
 		},
 		{
+			Name:        "/provider",
+			Usage:       "/provider [name|status|--provider ... --reasoning-effort ...]",
+			Summary:     "查看或切换 provider（及其模型/reasoning_effort）",
+			Group:       string(chatSlashCommandGroupModel),
+			AcceptsArgs: true,
+		},
+		{
 			Name:        "/model",
-			Usage:       "/model [name|status|clear-reasoning|--provider ...]",
-			Summary:     "查看或切换 provider/model/reasoning_effort",
+			Usage:       "/model [name|status|clear-reasoning|--reasoning-effort ...]",
+			Summary:     "查看或切换当前 provider 下的模型/reasoning_effort",
 			Group:       string(chatSlashCommandGroupModel),
 			AcceptsArgs: true,
 		},

@@ -93,17 +93,8 @@ type chatWebConfigProxy struct {
 	NoProxy string `json:"no_proxy,omitempty"`
 }
 
-// chatWebConfigModel 是单个模型的配置视图：模型名 + 其 capability 中与
-// reasoning 相关的字段（前端编辑入口）。
-type chatWebConfigModel struct {
-	Name                   string   `json:"name"`
-	ReasoningModel         bool     `json:"reasoning_model"`
-	ReasoningEfforts       []string `json:"reasoning_efforts,omitempty"`
-	DefaultReasoningEffort string   `json:"default_reasoning_effort,omitempty"`
-	CompactReasoningEffort string   `json:"compact_reasoning_effort,omitempty"`
-	MaxContextTokens       int      `json:"max_context_tokens,omitempty"`
-	MaxTokens              int      `json:"max_tokens,omitempty"`
-}
+// chatWebConfigModel 已迁移至 internal/providerops.ChatWebConfigModel，
+// commands 侧使用 provider_fetch_models_classify.go 中的类型别名。
 
 type chatWebConfigChat struct {
 	DefaultProvider string `json:"default_provider"`
@@ -889,6 +880,15 @@ func HandleChatWebAPIConfigProvidersFetchModels(w http.ResponseWriter, r *http.R
 		response["login_protocol"] = classification.LoginProtocol
 		response["groups"] = classification.Groups
 		response["other_models_count"] = classification.TotalModels - primaryCount
+		// 前端「获取模型列表」会整体覆盖 supported_models 与 reasoning 配置，
+		// 这里为可合并的模型（主组 verified + assumed）返回按模型元数据重新
+		// 匹配的 reasoning 字段。assumed 也返回，保证“手动合并”按钮追加的
+		// 模型行同样带元数据回显。
+		response["model_metadata"] = buildProviderFetchModelMetadata(req.Name, groupingProtocol, provider, classification.PrimaryModels, configPtrOrNil(session))
+	} else {
+		// 分类不可用（极端环境）：退化为旧行为返回全量模型列表，元数据同样
+		// 按全量清单匹配，避免前端拿到旧 reasoning 配置。
+		response["model_metadata"] = buildProviderFetchModelMetadata(req.Name, groupingProtocol, provider, result.Models, configPtrOrNil(session))
 	}
 	writeWebAPIJSON(w, http.StatusOK, response)
 }

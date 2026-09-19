@@ -30,6 +30,52 @@ type runtimeModelPickerResult struct {
 	Redraw   bool
 }
 
+// handleProviderCommand is the slash-command entry point for /provider. It
+// shares the /model execution core: a bare /provider opens the typed
+// provider→model→reasoning picker, while explicit flags apply directly and
+// /provider status prints the read-only state document.
+func handleProviderCommand(session *ChatSession, command string, noInteractive bool) bool {
+	if unifiedDirectInteractiveOutput(session) {
+		if result, handled := executeStructuredProviderCommand(session, command); handled {
+			renderErr := renderChatCommandResult(session, result, false)
+			if renderErr == nil && result.OpenModelPicker != nil {
+				openChatModelPicker(session, *result.OpenModelPicker)
+			}
+			return false
+		}
+		_ = renderChatCommandResult(session, commandTextResult("错误: /provider 变体无法通过统一渲染命令通道处理"), false)
+		return false
+	}
+	if rejectUnifiedInteractiveLegacyCommand(session, "/provider") {
+		return false
+	}
+	if session == nil {
+		fmt.Println("错误: 当前没有活动会话")
+		return false
+	}
+
+	request, err := parseModelCommandRequest(command)
+	if err != nil {
+		fmt.Printf("错误: %v\n", err)
+		return false
+	}
+	if request.ShowStatus && !request.HasMutation() {
+		printRuntimeModelState(session)
+		return false
+	}
+	if err := executeModelCommand(session, request, !noInteractive && !request.DirectApply, modelCommandVariantProvider); err != nil {
+		if isChatInteractivePromptCancelError(err) {
+			return false
+		}
+		fmt.Printf("错误: %v\n", err)
+		return false
+	}
+	if !request.ShowStatus {
+		printRuntimeModelState(session)
+	}
+	return false
+}
+
 func handleModelCommand(session *ChatSession, command string, noInteractive bool) bool {
 	if unifiedDirectInteractiveOutput(session) {
 		if result, handled := executeStructuredModelCommand(session, command); handled {
@@ -67,7 +113,7 @@ func handleModelCommand(session *ChatSession, command string, noInteractive bool
 
 	// DirectApply（web 注入的 --direct）即使处于交互会话也按非交互执行：
 	// 注入方无法驱动 TUI 的键盘选择。
-	if err := executeModelCommand(session, request, !noInteractive && !request.DirectApply); err != nil {
+	if err := executeModelCommand(session, request, !noInteractive && !request.DirectApply, modelCommandVariantModel); err != nil {
 		if isChatInteractivePromptCancelError(err) {
 			return false
 		}

@@ -1,441 +1,81 @@
 package commands
 
 import (
-	"encoding/json"
-	"fmt"
-	"io"
+	"context"
 	"net/http"
-	"net/url"
-	"strings"
-	"time"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
-	httpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
+	"github.com/wwsheng009/ai-agent-runtime/internal/providerops"
 )
 
-type providerModelInfo struct {
-	ID                  string                 `json:"id"`
-	DisplayName         string                 `json:"display_name,omitempty"`
-	InputModalities     []string               `json:"input_modalities,omitempty"`
-	ReasoningEfforts    []string               `json:"reasoning_efforts,omitempty"`
-	MaxContextTokens    int                    `json:"max_context_tokens,omitempty"`
-	SupportsRemoteCodex bool                   `json:"supports_remote_codex,omitempty"`
-	Raw                 map[string]interface{} `json:"-"`
-}
+// ---------------------------------------------------------------------------
+// /models 拉取与校验（commands 薄转发层）。
+//
+// 实现本体已迁移至 internal/providerops（models.go），与 runtime server 的
+// /api/runtime/providers/fetch-models、auto-import、probe-models 共用同一份
+// 逻辑；本文件只保留既有调用点（provider_login / web_config_handlers）与
+// 单元测试使用的类型别名和转发函数。
+// ---------------------------------------------------------------------------
 
-type providerModelsValidationRequest struct {
-	Config        *config.Config
-	ProviderName  string
-	Provider      config.Provider
-	LoginProtocol string
-	ModelsPath    string
-	Timeout       time.Duration
-}
+// providerModelInfo 是 /models 响应解析出的单个模型（JSON 形状不变）。
+type providerModelInfo = providerops.ModelInfo
 
-type providerModelsValidationResult struct {
-	Endpoint   string              `json:"endpoint"`
-	StatusCode int                 `json:"status_code"`
-	Models     []providerModelInfo `json:"models"`
-	VerifiedAt string              `json:"verified_at"`
-}
+// providerModelsValidationRequest 是一次 /models 校验请求。
+type providerModelsValidationRequest = providerops.FetchModelsRequest
 
+// providerModelsValidationResult 是一次 /models 校验结果。
+type providerModelsValidationResult = providerops.FetchModelsResult
+
+// validateProviderModels 拉取并校验 provider 的 /models 端点。
 func validateProviderModels(req providerModelsValidationRequest) (*providerModelsValidationResult, error) {
-	provider := req.Provider
-	if req.Config != nil {
-		provider.Headers = config.EffectiveProviderHeaders(req.Config.Providers.Headers, provider.Headers)
-	}
-	loginProtocol := normalizeLoginProtocol(req.LoginProtocol, req.Provider.AuthMode)
-	modelsPath := resolveProviderModelsPath(loginProtocol, provider, req.ModelsPath)
-	endpoint, err := buildProviderModelsURL(provider, modelsPath)
-	if err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(provider.GetAPIKey()) == "" && !strings.EqualFold(provider.AuthMode, "oauth") {
-		return nil, fmt.Errorf("api key is required for provider models validation")
-	}
-
-	httpReq, err := http.NewRequest(http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create models request: %w", err)
-	}
-	headers := buildProviderModelsHeaders(provider, loginProtocol)
-	for key, value := range headers {
-		if strings.TrimSpace(value) == "" {
-			continue
-		}
-		httpReq.Header.Set(key, value)
-	}
-	httpReq.Header.Set("Accept", "application/json")
-
-	client := http.DefaultClient
-	if req.Config != nil {
-		client = httpclient.GetHTTPClientWithProvider(req.Config, &provider)
-	}
-	if req.Timeout > 0 {
-		cloned := *client
-		cloned.Timeout = req.Timeout
-		client = &cloned
-	}
-
-	start := time.Now()
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("models request failed: %w", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
-	if err != nil {
-		return nil, fmt.Errorf("read models response: %w", err)
-	}
-	_ = start
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("models endpoint %s returned HTTP %d: %s", endpoint, resp.StatusCode, responsePreview(body, 600))
-	}
-	models, err := parseProviderModelsResponse(body, loginProtocol)
-	if err != nil {
-		return nil, fmt.Errorf("parse models response from %s: %w", endpoint, err)
-	}
-	if len(models) == 0 {
-		return nil, fmt.Errorf("models endpoint %s returned an empty model list", endpoint)
-	}
-	return &providerModelsValidationResult{
-		Endpoint:   endpoint,
-		StatusCode: resp.StatusCode,
-		Models:     models,
-		VerifiedAt: time.Now().UTC().Format(time.RFC3339),
-	}, nil
+	return providerops.FetchModels(context.Background(), req)
 }
 
-// modelsEndpointAllowsAnonymous 探测 models 端点是否校验 API key：用不带任何
-// 鉴权头的匿名请求重放同一端点，若也返回 2xx 且能解析出非空模型列表，则说明
-// 该端点公开（如 opencode.ai 网关，匿名也能拉取完整列表）。此时“获取模型列表
-// 成功”不能证明 key 有效，调用方应在 UI 上提示用户以聊天/补全请求验证 key。
-// 探测失败（网络错误、非 2xx、解析不出模型）一律视为鉴权端点，返回 false。
-// client 由调用方提供（应复用 provider 的代理/超时配置），nil 时用短超时的
-// 裸默认 client。
+// modelsEndpointAllowsAnonymous 探测 models 端点是否校验 API key。
 func modelsEndpointAllowsAnonymous(client *http.Client, endpoint, loginProtocol string) bool {
-	httpReq, err := http.NewRequest(http.MethodGet, endpoint, nil)
-	if err != nil {
-		return false
-	}
-	httpReq.Header.Set("Accept", "application/json")
-	if client == nil {
-		client = &http.Client{Timeout: 6 * time.Second}
-	}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return false
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
-	if err != nil {
-		return false
-	}
-	models, err := parseProviderModelsResponse(body, loginProtocol)
-	if err != nil || len(models) == 0 {
-		return false
-	}
-	return true
+	return providerops.ModelsEndpointAllowsAnonymous(client, endpoint, loginProtocol)
 }
 
 func buildProviderModelsHeaders(provider config.Provider, loginProtocol string) map[string]string {
-	runtimeProtocol := runtimeProtocolForLoginProtocol(loginProtocol)
-	provider.Protocol = runtimeProtocol
-	llmAdapter := adapter.GetAdapterOrDefault(runtimeProtocol)
-	return llmAdapter.BuildHeaders(adapter.AdapterConfig{
-		Type:    runtimeProtocol,
-		APIKey:  providerModelsAPIKey(provider),
-		Headers: provider.Headers,
-	})
+	return providerops.BuildProviderModelsHeaders(provider, loginProtocol)
 }
 
-// providerModelsAPIKey 返回 models 校验请求使用的 API key。
-// 内联配置的 APIKey 字段优先：login 交互中输入的新 key 写入该字段，而
-// api_key_ref 仍指向 auth store 中的旧凭据，若按常规优先读 ref 会用旧 key
-// 校验新输入（httptest 之外的实测表现为 HTTP 401 Invalid access key）。
-// 非 login 路径（运行时/doctor 等）APIKey 字段为空，行为与 GetAPIKey 一致。
 func providerModelsAPIKey(provider config.Provider) string {
-	if strings.TrimSpace(provider.APIKey) != "" {
-		return strings.TrimSpace(provider.APIKey)
-	}
-	return provider.GetAPIKey()
+	return providerops.APIKey(provider)
 }
 
 func resolveProviderModelsPath(loginProtocol string, provider config.Provider, override string) string {
-	if trimmed := strings.TrimSpace(override); trimmed != "" {
-		return trimmed
-	}
-	if trimmed := strings.TrimSpace(provider.ModelsPath); trimmed != "" {
-		return trimmed
-	}
-	return defaultModelsPath(loginProtocol, provider.BaseURL)
+	return providerops.ResolveProviderModelsPath(loginProtocol, provider, override)
 }
 
 func defaultModelsPath(loginProtocol, baseURL string) string {
-	switch normalizeLoginProtocol(loginProtocol, "") {
-	case providerLoginProtocolOpenAIImage:
-		return "/v1/models"
-	case "gemini":
-		return "/v1beta/models"
-	case "codex-apikey", "codex-oauth":
-		lowerBase := strings.ToLower(strings.TrimSpace(baseURL))
-		if strings.Contains(lowerBase, "chatgpt.com") {
-			if strings.Contains(lowerBase, "/backend-api/codex") {
-				return "/models"
-			}
-			return "/backend-api/codex/models"
-		}
-		return "/v1/models"
-	default:
-		return "/v1/models"
-	}
+	return providerops.DefaultModelsPath(loginProtocol, baseURL)
 }
 
 func buildProviderModelsURL(provider config.Provider, modelsPath string) (string, error) {
-	modelsPath = strings.TrimSpace(modelsPath)
-	if modelsPath == "" {
-		return "", fmt.Errorf("models path is required")
-	}
-	if parsed, err := url.Parse(modelsPath); err == nil && parsed.IsAbs() {
-		return modelsPath, nil
-	}
-	baseURL := strings.TrimRight(strings.TrimSpace(provider.BaseURL), "/")
-	if baseURL == "" {
-		return "", fmt.Errorf("base url is required")
-	}
-	if !strings.HasPrefix(modelsPath, "/") {
-		modelsPath = "/" + modelsPath
-	}
-	return config.JoinBaseURLAndPath(baseURL, modelsPath), nil
+	return providerops.BuildProviderModelsURL(provider, modelsPath)
 }
 
 func parseProviderModelsResponse(raw []byte, loginProtocol string) ([]providerModelInfo, error) {
-	var decoded interface{}
-	if err := json.Unmarshal(raw, &decoded); err != nil {
-		return nil, err
-	}
-	models := collectProviderModels(decoded, normalizeLoginProtocol(loginProtocol, ""))
-	return dedupeProviderModels(models), nil
-}
-
-func collectProviderModels(value interface{}, loginProtocol string) []providerModelInfo {
-	switch typed := value.(type) {
-	case []interface{}:
-		return collectProviderModelsFromList(typed, loginProtocol)
-	case map[string]interface{}:
-		for _, key := range []string{"data", "models", "items"} {
-			if list, ok := typed[key].([]interface{}); ok {
-				return collectProviderModelsFromList(list, loginProtocol)
-			}
-		}
-		for _, key := range []string{"result", "response"} {
-			if nested, ok := typed[key]; ok {
-				if models := collectProviderModels(nested, loginProtocol); len(models) > 0 {
-					return models
-				}
-			}
-		}
-	}
-	return nil
-}
-
-func collectProviderModelsFromList(items []interface{}, loginProtocol string) []providerModelInfo {
-	models := make([]providerModelInfo, 0, len(items))
-	for _, item := range items {
-		switch typed := item.(type) {
-		case string:
-			if id := normalizeProviderModelID(typed, loginProtocol); id != "" {
-				models = append(models, providerModelInfo{ID: id, DisplayName: id})
-			}
-		case map[string]interface{}:
-			if model := providerModelInfoFromMap(typed, loginProtocol); model.ID != "" {
-				models = append(models, model)
-			}
-		}
-	}
-	return models
-}
-
-func providerModelInfoFromMap(item map[string]interface{}, loginProtocol string) providerModelInfo {
-	id := firstStringField(item, "id", "slug", "name", "model")
-	id = normalizeProviderModelID(id, loginProtocol)
-	if id == "" {
-		return providerModelInfo{}
-	}
-	displayName := firstStringField(item, "display_name", "displayName", "title", "name")
-	if displayName == "" {
-		displayName = id
-	}
-	return providerModelInfo{
-		ID:                  id,
-		DisplayName:         displayName,
-		InputModalities:     firstStringSliceField(item, "input_modalities", "inputModalities", "modalities"),
-		ReasoningEfforts:    providerModelReasoningEfforts(item),
-		MaxContextTokens:    firstIntField(item, "max_context_tokens", "maxContextTokens", "context_window", "contextWindow", "context_length"),
-		SupportsRemoteCodex: firstBoolField(item, "supports_remote_codex", "supportsRemoteCodex"),
-		Raw:                 item,
-	}
-}
-
-func providerModelReasoningEfforts(item map[string]interface{}) []string {
-	values := make([]string, 0, 8)
-	values = append(values, allStringSliceFields(item, "reasoning_efforts", "reasoningEfforts", "supported_reasoning_efforts")...)
-	values = append(values, allStringSliceFields(item, "thinking_efforts", "thinkingEfforts", "supported_thinking_efforts")...)
-	return dedupeProviderStringOptions(values)
+	return providerops.ParseProviderModelsResponse(raw, loginProtocol)
 }
 
 func normalizeProviderModelID(id, loginProtocol string) string {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return ""
-	}
-	if normalizeLoginProtocol(loginProtocol, "") == "gemini" {
-		id = strings.TrimPrefix(id, "models/")
-	}
-	return id
+	return providerops.NormalizeProviderModelID(id, loginProtocol)
 }
 
 func dedupeProviderModels(models []providerModelInfo) []providerModelInfo {
-	seen := make(map[string]struct{}, len(models))
-	out := make([]providerModelInfo, 0, len(models))
-	for _, model := range models {
-		model.ID = strings.TrimSpace(model.ID)
-		if model.ID == "" {
-			continue
-		}
-		key := strings.ToLower(model.ID)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, model)
-	}
-	return out
+	return providerops.DedupeProviderModels(models)
 }
 
 func providerModelIDs(models []providerModelInfo) []string {
-	ids := make([]string, 0, len(models))
-	seen := make(map[string]struct{}, len(models))
-	for _, model := range models {
-		id := strings.TrimSpace(model.ID)
-		if id == "" {
-			continue
-		}
-		key := strings.ToLower(id)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		ids = append(ids, id)
-	}
-	return ids
-}
-
-func firstStringField(item map[string]interface{}, keys ...string) string {
-	for _, key := range keys {
-		if value, ok := item[key].(string); ok && strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
-}
-
-func firstStringSliceField(item map[string]interface{}, keys ...string) []string {
-	for _, key := range keys {
-		if values := stringSliceField(item, key); len(values) > 0 {
-			return values
-		}
-	}
-	return nil
-}
-
-func allStringSliceFields(item map[string]interface{}, keys ...string) []string {
-	values := make([]string, 0)
-	for _, key := range keys {
-		values = append(values, stringSliceField(item, key)...)
-	}
-	return values
-}
-
-func stringSliceField(item map[string]interface{}, key string) []string {
-	values, ok := item[key]
-	if !ok {
-		return nil
-	}
-	switch typed := values.(type) {
-	case []string:
-		return append([]string(nil), typed...)
-	case []interface{}:
-		out := make([]string, 0, len(typed))
-		for _, value := range typed {
-			if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
-				out = append(out, strings.TrimSpace(text))
-			}
-		}
-		return out
-	default:
-		return nil
-	}
+	return providerops.ModelIDs(models)
 }
 
 func dedupeProviderStringOptions(values []string) []string {
-	if len(values) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(values))
-	seen := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		key := strings.ToLower(value)
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, value)
-	}
-	return out
-}
-
-func firstIntField(item map[string]interface{}, keys ...string) int {
-	for _, key := range keys {
-		value, ok := item[key]
-		if !ok {
-			continue
-		}
-		switch typed := value.(type) {
-		case int:
-			return typed
-		case float64:
-			return int(typed)
-		case json.Number:
-			n, _ := typed.Int64()
-			return int(n)
-		}
-	}
-	return 0
-}
-
-func firstBoolField(item map[string]interface{}, keys ...string) bool {
-	for _, key := range keys {
-		if value, ok := item[key].(bool); ok {
-			return value
-		}
-	}
-	return false
+	return providerops.DedupeProviderStringOptions(values)
 }
 
 func responsePreview(raw []byte, limit int) string {
-	text := strings.TrimSpace(string(raw))
-	if limit > 0 && len(text) > limit {
-		return text[:limit] + "..."
-	}
-	return text
+	return providerops.ResponsePreview(raw, limit)
 }

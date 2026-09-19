@@ -60,6 +60,8 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 	}
 
 	switch command {
+	case "/provider":
+		return completeModelSlashArgs(session, argsText, cursor)
 	case "/model":
 		return completeModelSlashArgs(session, argsText, cursor)
 	case "/login":

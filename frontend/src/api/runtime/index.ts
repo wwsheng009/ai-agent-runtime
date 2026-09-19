@@ -93,6 +93,14 @@ export {
   refreshRuntimeProviderAccount,
 } from "./siteaccount";
 export {
+  appendProviderModels,
+  autoImportRuntimeProvider,
+  buildProviderOpsRequest,
+  collectProbeSupportedModels,
+  fetchRuntimeProviderModels,
+  probeRuntimeProviderModels,
+} from "./provider-ops";
+export {
   answerSessionQuestion,
   applySessionBacktrack,
   createRuntimeSession,
