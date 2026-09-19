@@ -123,8 +123,8 @@ function onSSEEvent(eventName, data) {
       beginStream();
       break;
     case "reasoning_delta":
-      if (isStreamActive() && data.content) {
-        appendStreamReasoning(data.content);
+      if (isStreamActive() && (data.content || data.text)) {
+        appendStreamReasoning(data.content || data.text);
         startTypeTimer(); // 打字机定时器逐段揭示
       }
       break;

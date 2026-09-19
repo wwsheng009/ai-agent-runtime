@@ -267,6 +267,49 @@ func TestACPEventBridge_RuntimeReasoningEmitsThoughtChunk(t *testing.T) {
 	}
 }
 
+// TestACPEventBridge_CoalescedReasoningEmitsThoughtChunk guards the merged
+// reasoning spelling: chatRuntimeEventBridge.mergeStreamEvents folds adjacent
+// stream_delta frames into one event whose bytes live in a top-level "text" key
+// (the nested ReasoningBlock and its "summary" are deleted) and marks it with
+// "_reasoning_stream_delta". Those frames must still reach the client as
+// agent_thought_chunk — session_20260919232102_sh3nFUdz lost the thinking panel
+// between ls/grep/grep/view exactly because "text" was not recognized.
+func TestACPEventBridge_CoalescedReasoningEmitsThoughtChunk(t *testing.T) {
+	t.Parallel()
+
+	bridge := newACPEventBridge("sess_1")
+	emit := &recordingACPEmitter{}
+	bridge.BeginPrompt("sess_1", emit)
+	defer bridge.EndPrompt()
+
+	bridge.HandleRuntimeEvent(runtimeevents.Event{
+		Type: runtimechat.EventAssistantReasoningDelta,
+		Payload: map[string]interface{}{
+			"_reasoning_stream_delta":  true,
+			"_coalesced_sequence_from": 1,
+			"mode":                     "append",
+			"sequence":                 16,
+			"step":                     1,
+			"text":                     "先确认需求。再确认边界。",
+		},
+	})
+
+	updates := emit.snapshot()
+	if len(updates) != 1 {
+		t.Fatalf("expected 1 update, got %d: %+v", len(updates), updates)
+	}
+	thought := updates[0]
+	if thought.SessionUpdate != acp.SessionUpdateAgentThoughtChunk {
+		t.Fatalf("u0 kind = %q, want %q", thought.SessionUpdate, acp.SessionUpdateAgentThoughtChunk)
+	}
+	if thought.Content == nil || thought.Content.Text != "先确认需求。再确认边界。" {
+		t.Fatalf("u0 content = %+v", thought.Content)
+	}
+	if thought.MessageID == "" || !strings.HasSuffix(thought.MessageID, "_thought") {
+		t.Fatalf("u0 messageId = %q, want <turn>_thought", thought.MessageID)
+	}
+}
+
 func TestACPEventBridge_RuntimeModelFailureIsVisibleToClient(t *testing.T) {
 	t.Parallel()
 

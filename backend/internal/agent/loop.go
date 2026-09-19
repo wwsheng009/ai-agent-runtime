@@ -1804,6 +1804,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 					"step":            step,
 					"content":         chunk.Content,
 					"delta":           chunk.Content,
+					"text":            chunk.Content,
 				}
 				if turnID != "" {
 					payload["turn_id"] = turnID
@@ -1832,6 +1833,9 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 					"sequence":        sequence,
 					"mode":            "append",
 					"step":            step,
+					"text":            chunk.Content,
+					"content":         chunk.Content,
+					"delta":           chunk.Content,
 					"reasoning":       reasoning.ToMap(),
 				}
 				if turnID != "" {

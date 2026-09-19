@@ -42,6 +42,9 @@ type acpEventBridge struct {
 	// question is the client-bound requester for the session/request_question
 	// extension; nil means the host has no question panel.
 	question acp.QuestionRequester
+	// elicitation is the client-bound requester for the standard ACP v1
+	// elicitation/create method; when set it is preferred over question.
+	elicitation acp.ElicitationRequester
 }
 
 func newACPEventBridge(sessionID string) *acpEventBridge {
@@ -335,7 +338,13 @@ func acpReasoningDeltaText(payload map[string]interface{}) string {
 			return text
 		}
 	}
-	for _, key := range []string{"delta", "content", "summary"} {
+	// The queue coalescer (chatRuntimeEventBridge.mergeStreamEvents) folds
+	// adjacent reasoning deltas into one frame, moves the bytes to a top-level
+	// "text" key and deletes the nested ReasoningBlock. Without accepting that
+	// spelling the folded frames never reach the client as agent_thought_chunk
+	// (session_20260919232102_sh3nFUdz: the ls/grep/grep/view turn lost its
+	// thinking panel while the provider kept streaming reasoning_content).
+	for _, key := range []string{"text", "delta", "content", "summary"} {
 		if text := acpUntrimmedString(payload[key]); text != "" {
 			return text
 		}

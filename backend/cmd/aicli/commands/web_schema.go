@@ -190,14 +190,24 @@ func chatWebSSEDataForEvent(ev runtimeevents.Event) map[string]interface{} {
 		pickField(data, payload, "turn_id")
 		pickField(data, payload, "stream_id")
 		pickField(data, payload, "sequence")
+		pickField(data, payload, "mode")
 		// 发布端把推理增量放在 "reasoning"（ReasoningBlock.ToMap()）嵌套对象里，
-		// 对外统一暴露为 "content"。
+		// 对外统一暴露为 "content"，并补 "text" 别名（合帧帧只带 text）。
 		if v, ok := payload["reasoning"]; ok {
 			if s, ok := chatWebReasoningText(v); ok {
 				data["content"] = s
+				data["text"] = s
 			}
 		} else if v, ok := payload["content"]; ok && fmt.Sprint(v) != "" {
 			data["content"] = v
+			data["text"] = v
+		}
+		// 合帧（coalesced）形状：payload 只带顶层 "text"。
+		if _, ok := data["content"]; !ok {
+			if v, ok := payload["text"]; ok && fmt.Sprint(v) != "" {
+				data["content"] = v
+				data["text"] = v
+			}
 		}
 
 	case runtimechat.EventAssistantMessage:

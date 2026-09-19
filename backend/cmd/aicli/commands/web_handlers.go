@@ -1513,7 +1513,7 @@ func chatWebSSEExampleFor(busEvent string) string {
 	case runtimechat.EventAssistantDelta:
 		return `{"turn_id":"turn_abc","stream_id":"s1","sequence":1,"text":"你好"}`
 	case runtimechat.EventAssistantReasoningDelta, runtimechat.EventAssistantReasoning:
-		return `{"turn_id":"turn_abc","stream_id":"s1","sequence":1,"content":"思考中"}`
+		return `{"turn_id":"turn_abc","stream_id":"s1","sequence":1,"content":"思考中","text":"思考中","mode":"summary"}`
 	case runtimechat.EventLLMRequestFinished:
 		return `{"turn_id":"turn_abc","request_id":"req_123","finish_reason":"stop","usage":{"input_tokens":10,"output_tokens":20}}`
 	case runtimechat.EventToolStarted:
