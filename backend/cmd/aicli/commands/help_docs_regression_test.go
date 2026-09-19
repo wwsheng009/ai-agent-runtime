@@ -177,10 +177,45 @@ func TestAgentCommandHelpMentionsAgentsAndExecDocs(t *testing.T) {
 		"Agent Client Protocol",
 		"docs/aicli/agents.md",
 		"docs/aicli/exec.md",
+		"docs/acp/README.md",
 		"--enable-tools",
+		"$/cancel_request",
 	} {
 		if !strings.Contains(stdioText, want) {
 			t.Fatalf("agent stdio help missing %q\n%s", want, stdioText)
+		}
+	}
+}
+
+func TestACPCommandEquivalenceHelp(t *testing.T) {
+	cfgFn := func() *config.Config { return nil }
+	agentStdio, _, err := NewAgentCommand(cfgFn).Find([]string{"stdio"})
+	if err != nil {
+		t.Fatalf("Find agent stdio: %v", err)
+	}
+	acpCmd := NewACPCommand(cfgFn)
+	if acpCmd.Use != "acp" {
+		t.Fatalf("acp Use = %q", acpCmd.Use)
+	}
+	// Same flag surface and run logic.
+	if acpCmd.Flags().NFlag() != 0 {
+		t.Fatalf("acp command should start with pristine flags")
+	}
+	if acpCmd.Flags().Lookup("provider") == nil || acpCmd.Flags().Lookup("yolo") == nil {
+		t.Fatalf("acp command missing shared exec flags")
+	}
+	if acpCmd.Run == nil {
+		t.Fatalf("acp command missing Run entrypoint")
+	}
+	// Both entries advertise each other.
+	for _, want := range []string{"aicli agent stdio", "Agent Client Protocol"} {
+		if !strings.Contains(acpCmd.Long, want) {
+			t.Fatalf("acp help missing %q\n%s", want, acpCmd.Long)
+		}
+	}
+	for _, want := range []string{"aicli acp", "aicli --acp"} {
+		if !strings.Contains(agentStdio.Parent().Long, want) && !strings.Contains(agentStdio.Long, want) {
+			t.Fatalf("agent help missing %q", want)
 		}
 	}
 }

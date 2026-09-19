@@ -1,7 +1,7 @@
-# ACP 使用手册（aicli agent stdio）
+# ACP 使用手册（aicli agent stdio / aicli acp）
 
 本目录是 aicli 的 Agent Client Protocol（ACP）宿主使用文档。aicli 以
-`aicli agent stdio` 子命令在 stdin/stdout 上提供 ACP 子集，可被任意实现了
+`aicli agent stdio` 或 `aicli acp` 子命令在 stdin/stdout 上提供 ACP 子集，可被任意实现了
 ACP 客户端侧的编辑器 / IDE（如 Zed 类 host）作为外部 Agent 驱动。
 
 - 代码位置：`backend/internal/acp`（协议层）、`backend/cmd/aicli/commands/agent_stdio.go`（宿主适配）
@@ -25,6 +25,10 @@ ACP 客户端侧的编辑器 / IDE（如 Zed 类 host）作为外部 Agent 驱�
 ```powershell
 # 1. 启动 ACP 宿主（stdout 只输出 NDJSON 协议消息，日志走 stderr）
 aicli agent stdio --provider openai --model gpt-4o
+# 等价快捷：
+aicli acp --provider openai --model gpt-4o
+# 通用协议 flag 形式（被其他宿主工具广泛支持）：
+aicli --acp --provider openai --model gpt-4o
 
 # 无审批阻塞的自动化场景
 aicli agent stdio --yolo --enable-tools

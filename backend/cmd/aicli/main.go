@@ -339,6 +339,12 @@ func main() {
 		return cfg
 	}))
 
+	// acp 子命令 — `aicli agent stdio` 的顶层等价入口，供通用 ACP 客户端
+	// 以规范命令名直接拉起；`aicli --acp` 亦转发至此（见 prependACPFlag）。
+	rootCmd.AddCommand(commands.NewACPCommand(func() *config.Config {
+		return cfg
+	}))
+
 	// pipe 子命令 - 管道输入处理
 	pipeCmd := &cobra.Command{
 		Use:     "pipe",
@@ -378,7 +384,7 @@ func main() {
 	mcpCmd := commands.MCPCommand()
 	rootCmd.AddCommand(mcpCmd)
 
-	rootCmd.SetArgs(prependDefaultChatCommand(os.Args[1:], rootCmd.PersistentFlags(), chatCmd.Flags()))
+	rootCmd.SetArgs(prependACPFlag(prependDefaultChatCommand(os.Args[1:], rootCmd.PersistentFlags(), chatCmd.Flags())))
 
 	// 执行
 	if err := rootCmd.Execute(); err != nil {
@@ -387,6 +393,38 @@ func main() {
 	if pprofHandle != nil {
 		_ = pprofHandle.Close()
 	}
+}
+
+// prependACPFlag rewrites the root `--acp` / `-a` convenience flag into the
+// canonical `acp` subcommand. `aicli --acp --yolo -P x -m y` becomes
+// `aicli acp --yolo -P x -m y`, so generic ACP launchers can pass the protocol
+// switch the way many tools expose it (a top-level mode flag) while aicli
+// keeps a single implementation path (aicli agent stdio == aicli acp).
+// The rewrite happens after prependDefaultChatCommand so the injected default
+// `chat` subcommand is replaced, not nested under it.
+func prependACPFlag(args []string) []string {
+	for i, arg := range args {
+		var match bool
+		switch {
+		case arg == "--acp" || arg == "-a":
+			match = true
+		case strings.HasPrefix(arg, "--acp="):
+			if v := strings.TrimPrefix(arg, "--acp="); v == "true" {
+				match = true
+			} else {
+				return args
+			}
+		default:
+			continue
+		}
+		if !match {
+			continue
+		}
+		rewritten := append([]string{"acp"}, args[:i]...)
+		rewritten = append(rewritten, args[i+1:]...)
+		return rewritten
+	}
+	return args
 }
 
 func shouldBootstrapConfigForCommand(cmd *cobra.Command, args []string) bool {

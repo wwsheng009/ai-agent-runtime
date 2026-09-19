@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
@@ -13,15 +14,38 @@ func NewAgentCommand(getCfg func() *config.Config) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "agent",
 		Short: "以外部 Agent 协议宿主运行 aicli",
-		Long: `将 aicli 作为外部 Agent 宿主暴露协议入口。
+		Long: `将 aicli 作为外部 Agent 协议宿主暴露协议入口。
 
 当前支持：
   aicli agent stdio   Agent Client Protocol (ACP) 子集，stdin/stdout NDJSON
+
+等价入口：
+  aicli acp           与 aicli agent stdio 完全等价（通用协议快捷命令）
+  aicli --acp [...]   根命令 flag 形式，转发到 aicli agent stdio
 
 角色 / agent 定义、chat --agent 与 ACP 宿主说明见 docs/aicli/agents.md；
 命令索引见 docs/aicli/install.md；headless 工具代理见 docs/aicli/exec.md。`,
 	}
 	cmd.AddCommand(newAgentStdioCommand(getCfg))
+	return cmd
+}
+
+// NewACPCommand creates the top-level `aicli acp` shortcut. It is the same
+// ACP stdio host as `aicli agent stdio`, exposed as a first-class command so
+// generic ACP clients that treat "acp" as the canonical binary entry can
+// launch `aicli acp` directly.
+func NewACPCommand(getCfg func() *config.Config) *cobra.Command {
+	cmd := newAgentStdioCommand(getCfg)
+	cmd.Use = "acp"
+	cmd.Short = "以 ACP 协议在 stdin/stdout 上运行（等价 aicli agent stdio）"
+	// Keep the canonical path in the long help so either entry documents the
+	// other one.
+	cmd.Long = strings.Replace(cmd.Long,
+		"以 Agent Client Protocol (ACP) 子集模式在 stdio 上服务。",
+		"以 Agent Client Protocol (ACP) 子集模式在 stdio 上服务（等价于 `aicli agent stdio`）。",
+		1,
+	)
+	cmd.Example = strings.ReplaceAll(cmd.Example, "aicli agent stdio", "aicli acp")
 	return cmd
 }
 
@@ -40,10 +64,15 @@ Stdout 仅用于协议消息；日志与诊断写入 stderr / 日志文件。
   session/prompt
   session/cancel
   session/load   (loadSession=true；回放历史后返回 null)
+  $/cancel_request   (JSON-RPC 标准取消通知；按请求 id 双向取消，
+    数字与字符串 id 自动归一化匹配)
 
 Agent → client：
   session/update
   session/request_permission
+
+完整协议文档（事件类型、权限流程、取消语义、故障排查）见
+docs/acp/README.md。
 
 session/load 解析顺序：先内存中已附着的 session，再按 --session-dir
 等非 ephemeral 配置从持久化存储恢复。默认 --ephemeral 时仅支持进程内
