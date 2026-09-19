@@ -349,6 +349,63 @@ export const enUsageAnalytics = {
       lastIngest: "Last ingest {{time}}",
       openLogs: "Open logs",
     },
+    artifactFlow: {
+      title: "Artifact flow observability",
+      subtitle: "Tool output archive / truncation / pointer-notice / artifact_read deref counters (runtime evidence for the §10.6 three-tier mitigation)",
+      empty: "No data yet",
+      capturedAt: "Captured at {{time}}",
+      flagsTitle: "Efficiency signals (inefficiency_flags)",
+      noBreakdown: "No breakdown recorded",
+      gapRatio: "L1/L4 competition ratio {{ratio}}",
+      layerLabels: {
+        l1_model_envelope: "L1 model envelope",
+        l2_tool_result: "L2 tool result",
+        l3_gateway_archive: "L3 gateway archive",
+        l4_render: "L4 render",
+        other: "Other",
+      },
+      dispositionLabels: {
+        inline: "Kept inline",
+        archived: "Archived",
+        pointer: "Pointer swap",
+        truncated: "Truncated",
+        other: "Other",
+      },
+      truncatedByLabels: {
+        model_context: "Model context window",
+        tool_result_limit: "Tool result limit",
+        render_cap: "Render cap",
+        other: "Other",
+      },
+      pointerReasonLabels: {
+        archived: "Archived",
+        oversized: "Oversized",
+        failed: "Failed",
+        other: "Other",
+      },
+      derefReasonLabels: {
+        not_found: "Not found",
+        expired: "Expired",
+        too_large: "Too large",
+        decode_error: "Decode error",
+        window_mismatch: "Window mismatch",
+        other: "Other",
+      },
+      archives: {
+        title: "Archives",
+      },
+      truncations: {
+        title: "Truncations",
+        gapRatio: "L1/L4 competition ratio {{ratio}}",
+      },
+      pointer: {
+        title: "Pointer notices",
+      },
+      deref: {
+        title: "artifact_read derefs",
+        followupRatio: "Follow-up read ratio {{ratio}}",
+      },
+    },
     tools: {
       title: "Tool call observability",
       subtitle: "Per-tool calls, failures, and latency for this session",

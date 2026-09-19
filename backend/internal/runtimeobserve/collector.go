@@ -604,18 +604,19 @@ func (c *Collector) Stats() (RuntimeSummary, LLMSummary) {
 	}
 	c.mu.RLock()
 	runtimeSummary := RuntimeSummary{
-		EventIngressDropped:  c.stateDropped(),
-		UnknownEventsDropped: c.stateUnknown(),
-		FilteredByType:       c.stateFilteredByType(),
-		ProjectionErrors:     c.stateProjection(),
-		GapCount:             c.stateGap(),
-		LastGapAt:            c.stateLastGap(),
-		LastEventAt:          c.stateLastEvent(),
-		RingCurrentBytes:     c.ringBytes,
-		RingOldestSeq:        c.oldestSeq,
-		RingLatestSeq:        c.latestSeq,
-		RunningTurns:         int(c.stateRunningTurns()),
-		LastTurn:             c.stateLastTurn(),
+		EventIngressDropped:         c.stateDropped(),
+		UnknownEventsDropped:        c.stateUnknown(),
+		FilteredByType:              c.stateFilteredByType(),
+		ProjectionErrors:            c.stateProjection(),
+		GapCount:                    c.stateGap(),
+		LastGapAt:                   c.stateLastGap(),
+		LastEventAt:                 c.stateLastEvent(),
+		RingCurrentBytes:            c.ringBytes,
+		RingOldestSeq:               c.oldestSeq,
+		RingLatestSeq:               c.latestSeq,
+		RuntimeObserveRingEvictions: c.ringDrops,
+		RunningTurns:                int(c.stateRunningTurns()),
+		LastTurn:                    c.stateLastTurn(),
 	}
 	c.mu.RUnlock()
 	return runtimeSummary, c.snapshotLLM()

@@ -13,6 +13,7 @@ import (
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 )
 
 // ShellFunction 执行 shell 命令的 Function
@@ -20,8 +21,14 @@ type ShellFunction struct {
 	executer CommandExecuter
 }
 
+// modelHistoryArtifactThresholdBytes aliases the runtime's model-visible tool
+// text budget so the CLI function layer stays in sync when the budget changes
+// (mirrors toolkit bash.go modelHistoryArtifactThresholdBytes).
+func modelHistoryArtifactThresholdBytes() int {
+	return output.ModelToolTextByteBudget()
+}
+
 const (
-	modelHistoryArtifactThresholdBytes = 12 * 1024
 	defaultShellFunctionTimeout        = 30 * time.Second
 	shellFunctionTimeoutEnv            = "AICLI_SHELL_COMMAND_TIMEOUT"
 	shellFunctionTimeoutMSEnv          = "AICLI_SHELL_COMMAND_TIMEOUT_MS"
@@ -390,7 +397,7 @@ func ensureLargeHistoryOutputArtifact(capture runtimeexecutor.CombinedOutputCapt
 	if strings.TrimSpace(artifactPath) != "" || artifactErr != nil || capture.Truncated {
 		return artifactPath, artifactErr
 	}
-	if capture.TotalBytes <= modelHistoryArtifactThresholdBytes || strings.TrimSpace(capture.Output) == "" {
+	if capture.TotalBytes <= modelHistoryArtifactThresholdBytes() || strings.TrimSpace(capture.Output) == "" {
 		return artifactPath, artifactErr
 	}
 	path, err := runtimeexecutor.PersistShellOutputArtifact(scope, command, "", capture.Output)

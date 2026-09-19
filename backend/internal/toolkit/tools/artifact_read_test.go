@@ -196,6 +196,25 @@ func TestArtifactReadWindowStaysUnderModelBudget(t *testing.T) {
 	require.Contains(t, result.Content, "eof=false")
 }
 
+// TestArtifactReadDefaultWindowEqualsMaxLimit pins P1-2: the default page size
+// must track the max-window cap so budget-sized artifacts dereference in a
+// single read (no follow-up page hop).
+func TestArtifactReadDefaultWindowEqualsMaxLimit(t *testing.T) {
+	if got, want := artifactReadDefaultLimitBytes(), artifactReadMaxLimitBytes(); got != want {
+		t.Fatalf("default window %d must equal max window %d", got, want)
+	}
+
+	store := newArtifactReadTestStore(t)
+	content := strings.Repeat("y", artifactReadMaxLimitBytes()*2)
+	id := putArtifactForRead(t, store, "sess-1", "shell", content)
+
+	result := executeArtifactRead(t, artifactReadContext(store, "sess-1"), map[string]interface{}{"artifact_id": id})
+	require.True(t, result.Success, result.Error)
+	window := splitArtifactReadWindow(t, result.Content)
+	require.Equal(t, artifactReadMaxLimitBytes(), len(window), "default read must cover a full max window")
+	require.Contains(t, result.Content, "eof=false")
+}
+
 func artifactReadNextOffset(content string) (int, bool) {
 	match := regexp.MustCompile(artifactReadNextOffsetPattern).FindStringSubmatch(content)
 	if len(match) != 2 {

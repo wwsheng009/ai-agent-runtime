@@ -34,12 +34,60 @@ type ToolOutcomeSnapshot struct {
 	Series      []LabeledCount     `json:"series,omitempty"`
 }
 
+// ToolFailureSnapshot aggregates tool_failure_total independently from provider
+// failures. Its series retains the exact bounded dimensions used for diagnosis.
+type ToolFailureSnapshot struct {
+	Total          float64            `json:"total"`
+	ByToolName     map[string]float64 `json:"by_tool_name"`
+	ByErrorCode    map[string]float64 `json:"by_error_code"`
+	ByFailureClass map[string]float64 `json:"by_failure_class"`
+	ByRetryable    map[string]float64 `json:"by_retryable"`
+	Series         []LabeledCount     `json:"series,omitempty"`
+}
+
 // ToolReplaySnapshot aggregates tool_disposition_replay_total.
 type ToolReplaySnapshot struct {
 	Total     float64            `json:"total"`
 	ByOutcome map[string]float64 `json:"by_outcome"`
 	ByRepeat  map[string]float64 `json:"by_repeat"`
 	Series    []LabeledCount     `json:"series,omitempty"`
+}
+
+// ArtifactFlowSnapshot aggregates the artifact cascade counters
+// (tool_output_archive_total / tool_output_truncation_total /
+// tool_pointer_notice_total / tool_artifact_deref_total /
+// tool_artifact_deref_miss_total) plus derived signals per plan §11.2.
+type ArtifactFlowSnapshot struct {
+	Archives      ArtifactArchivesSnapshot    `json:"archives"`
+	Truncations   ArtifactTruncationsSnapshot `json:"truncations"`
+	PointerNotice map[string]float64          `json:"pointer_notice"`
+	Deref         ArtifactDerefSnapshot       `json:"deref"`
+	// L1L4GapRatio is truncation_total{layer=l4_render} relative to total
+	// truncations — the layer competition signal H-1/P0-1 should eliminate.
+	L1L4GapRatio float64 `json:"l1_l4_gap_ratio"`
+}
+
+// ArtifactArchivesSnapshot groups archive decisions by layer/disposition.
+type ArtifactArchivesSnapshot struct {
+	Total         float64            `json:"total"`
+	ByLayer       map[string]float64 `json:"by_layer"`
+	ByDisposition map[string]float64 `json:"by_disposition"`
+	Series        []LabeledCount     `json:"series,omitempty"`
+}
+
+// ArtifactTruncationsSnapshot groups truncation events by layer/dimension.
+type ArtifactTruncationsSnapshot struct {
+	Total       float64            `json:"total"`
+	ByLayer     map[string]float64 `json:"by_layer"`
+	ByTruncated map[string]float64 `json:"by_truncated_by"`
+	Series      []LabeledCount     `json:"series,omitempty"`
+}
+
+// ArtifactDerefSnapshot aggregates artifact_read success/miss distribution.
+type ArtifactDerefSnapshot struct {
+	Total         float64            `json:"total"`
+	FollowupRatio float64            `json:"followup_ratio"`
+	MissByReason  map[string]float64 `json:"miss_by_reason"`
 }
 
 // ToolEfficiencySnapshot is a structured, low-cardinality view of tool-loop
@@ -49,7 +97,10 @@ type ToolEfficiencySnapshot struct {
 	CapturedAt         time.Time             `json:"captured_at"`
 	Preflight          ToolPreflightSnapshot `json:"preflight"`
 	Outcomes           ToolOutcomeSnapshot   `json:"outcomes"`
+	Failures           ToolFailureSnapshot   `json:"failures"`
 	DispositionReplays ToolReplaySnapshot    `json:"disposition_replays"`
+	// ArtifactFlow exposes the artifact cascade metrics (plan §11.2).
+	ArtifactFlow ArtifactFlowSnapshot `json:"artifact_flow"`
 	// FailCategories maps runtime error codes into coarse offline-report style buckets.
 	FailCategories map[string]float64 `json:"fail_categories"`
 	// InefficiencyFlags are generic signals derived from rates (no tool-name branches).
@@ -73,9 +124,29 @@ func (r *Registry) SnapshotToolEfficiency() ToolEfficiencySnapshot {
 			ByOutcome:   map[string]float64{},
 			ByErrorCode: map[string]float64{},
 		},
+		Failures: ToolFailureSnapshot{
+			ByToolName:     map[string]float64{},
+			ByErrorCode:    map[string]float64{},
+			ByFailureClass: map[string]float64{},
+			ByRetryable:    map[string]float64{},
+		},
 		DispositionReplays: ToolReplaySnapshot{
 			ByOutcome: map[string]float64{},
 			ByRepeat:  map[string]float64{},
+		},
+		ArtifactFlow: ArtifactFlowSnapshot{
+			Archives: ArtifactArchivesSnapshot{
+				ByLayer:       map[string]float64{},
+				ByDisposition: map[string]float64{},
+			},
+			Truncations: ArtifactTruncationsSnapshot{
+				ByLayer:     map[string]float64{},
+				ByTruncated: map[string]float64{},
+			},
+			PointerNotice: map[string]float64{},
+			Deref: ArtifactDerefSnapshot{
+				MissByReason: map[string]float64{},
+			},
 		},
 		FailCategories:    map[string]float64{},
 		InefficiencyFlags: []string{},
@@ -87,10 +158,104 @@ func (r *Registry) SnapshotToolEfficiency() ToolEfficiencySnapshot {
 	grouped := r.SnapshotCounters()
 	snap.Preflight = aggregatePreflight(grouped[MetricToolPreflightTotal])
 	snap.Outcomes = aggregateOutcomes(grouped[MetricToolOutcomeTotal])
+	snap.Failures = aggregateFailures(grouped[MetricToolFailureTotal])
 	snap.DispositionReplays = aggregateReplays(grouped[MetricToolDispositionReplayTotal])
-	snap.FailCategories = deriveFailCategories(snap.Outcomes.ByErrorCode)
+	snap.ArtifactFlow = aggregateArtifactFlow(grouped)
+	failureCodes := snap.Failures.ByErrorCode
+	if len(failureCodes) == 0 {
+		// Backward compatibility for callers/tests that still record only the
+		// legacy outcome metric.
+		failureCodes = snap.Outcomes.ByErrorCode
+	}
+	snap.FailCategories = deriveFailCategories(failureCodes)
 	snap.InefficiencyFlags = deriveInefficiencyFlags(snap)
 	return snap
+}
+
+// aggregateArtifactFlow reduces the artifact-cascade counters into the
+// structured ArtifactFlowSnapshot (plan §11.2 快照扩展).
+func aggregateArtifactFlow(grouped map[string][]MetricValue) ArtifactFlowSnapshot {
+	out := ArtifactFlowSnapshot{
+		Archives: ArtifactArchivesSnapshot{
+			ByLayer:       map[string]float64{},
+			ByDisposition: map[string]float64{},
+		},
+		Truncations: ArtifactTruncationsSnapshot{
+			ByLayer:     map[string]float64{},
+			ByTruncated: map[string]float64{},
+		},
+		PointerNotice: map[string]float64{},
+		Deref: ArtifactDerefSnapshot{
+			MissByReason: map[string]float64{},
+		},
+	}
+	for _, v := range grouped[MetricToolOutputArchiveTotal] {
+		count := v.Value
+		if count == 0 {
+			continue
+		}
+		labels := cloneLabels(v.Labels)
+		layer := labelOr(labels, LabelLayer, "other")
+		disposition := labelOr(labels, LabelDisposition, "other")
+		out.Archives.Total += count
+		out.Archives.ByLayer[layer] += count
+		out.Archives.ByDisposition[disposition] += count
+		out.Archives.Series = append(out.Archives.Series, LabeledCount{Labels: labels, Count: count})
+	}
+	sortLabeledCounts(out.Archives.Series)
+
+	for _, v := range grouped[MetricToolOutputTruncationTotal] {
+		count := v.Value
+		if count == 0 {
+			continue
+		}
+		labels := cloneLabels(v.Labels)
+		layer := labelOr(labels, LabelLayer, "other")
+		by := labelOr(labels, LabelTruncatedBy, "other")
+		out.Truncations.Total += count
+		out.Truncations.ByLayer[layer] += count
+		out.Truncations.ByTruncated[by] += count
+		out.Truncations.Series = append(out.Truncations.Series, LabeledCount{Labels: labels, Count: count})
+	}
+	sortLabeledCounts(out.Truncations.Series)
+	if out.Truncations.Total > 0 {
+		out.L1L4GapRatio = out.Truncations.ByLayer[TruncationLayerRender] / out.Truncations.Total
+	}
+
+	for _, v := range grouped[MetricToolPointerNoticeTotal] {
+		count := v.Value
+		if count == 0 {
+			continue
+		}
+		kind := labelOr(cloneLabels(v.Labels), LabelKind, "other")
+		out.PointerNotice[kind] += count
+	}
+
+	var followup float64
+	for _, v := range grouped[MetricToolArtifactDerefTotal] {
+		count := v.Value
+		if count == 0 {
+			continue
+		}
+		labels := cloneLabels(v.Labels)
+		page := labelOr(labels, LabelPage, DerefPageFirst)
+		out.Deref.Total += count
+		if page == DerefPageFollowup {
+			followup += count
+		}
+	}
+	if out.Deref.Total > 0 {
+		out.Deref.FollowupRatio = followup / out.Deref.Total
+	}
+	for _, v := range grouped[MetricToolArtifactDerefMissTotal] {
+		count := v.Value
+		if count == 0 {
+			continue
+		}
+		reason := labelOr(cloneLabels(v.Labels), LabelReason, "other")
+		out.Deref.MissByReason[reason] += count
+	}
+	return out
 }
 
 func aggregatePreflight(values []MetricValue) ToolPreflightSnapshot {
@@ -154,6 +319,34 @@ func aggregateOutcomes(values []MetricValue) ToolOutcomeSnapshot {
 		nonFail := success + out.ByOutcome[ToolOutcomeEmpty] + out.ByOutcome[ToolOutcomePartial]
 		out.SuccessRate = success / out.Total
 		out.NonFailRate = nonFail / out.Total
+	}
+	sortLabeledCounts(out.Series)
+	return out
+}
+
+func aggregateFailures(values []MetricValue) ToolFailureSnapshot {
+	out := ToolFailureSnapshot{
+		ByToolName:     map[string]float64{},
+		ByErrorCode:    map[string]float64{},
+		ByFailureClass: map[string]float64{},
+		ByRetryable:    map[string]float64{},
+		Series:         make([]LabeledCount, 0, len(values)),
+	}
+	for _, v := range values {
+		if v.Value == 0 {
+			continue
+		}
+		labels := cloneLabels(v.Labels)
+		toolName := labelOr(labels, LabelToolName, "unknown")
+		errorCode := labelOr(labels, LabelErrorCode, "unknown")
+		failureClass := labelOr(labels, LabelFailureClass, "unknown")
+		retryable := labelOr(labels, LabelRetryable, "false")
+		out.Total += v.Value
+		out.ByToolName[toolName] += v.Value
+		out.ByErrorCode[errorCode] += v.Value
+		out.ByFailureClass[failureClass] += v.Value
+		out.ByRetryable[retryable] += v.Value
+		out.Series = append(out.Series, LabeledCount{Labels: labels, Count: v.Value})
 	}
 	sortLabeledCounts(out.Series)
 	return out
@@ -229,6 +422,26 @@ func failCategoryForCode(code string) string {
 func deriveInefficiencyFlags(snap ToolEfficiencySnapshot) []string {
 	flags := make([]string, 0, 8)
 	const minSamples = 10.0
+
+	// Artifact-flow derived signals (plan §11.2). Deref samples are naturally
+	// sparser than outcome samples, so they use their own lower floor.
+	const derefMinSamples = 5.0
+	if flow := snap.ArtifactFlow; flow.Deref.Total >= derefMinSamples {
+		if flow.Deref.FollowupRatio > 0.30 {
+			flags = append(flags, "artifact_deref_heavy")
+		}
+	}
+	if flow := snap.ArtifactFlow; flow.Archives.Total > 0 {
+		skipped := flow.Archives.ByDisposition[ArchiveDispositionSkippedBelowThreshold] +
+			flow.Archives.ByDisposition[ArchiveDispositionSkippedReadWindow] +
+			flow.Archives.ByDisposition[ArchiveDispositionSkippedEmpty]
+		if skipped/flow.Archives.Total > 0.80 {
+			flags = append(flags, "archive_skipped_majority")
+		}
+	}
+	if snap.ArtifactFlow.Truncations.Total >= minSamples && snap.ArtifactFlow.L1L4GapRatio > 0.05 {
+		flags = append(flags, "l1_l4_gap_present")
+	}
 
 	if snap.Preflight.Total >= minSamples && snap.Preflight.Deny/snap.Preflight.Total >= 0.10 {
 		flags = append(flags, "high_preflight_deny_rate")

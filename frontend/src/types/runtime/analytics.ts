@@ -362,8 +362,75 @@ export type AnalyticsUsageHealth = {
   degraded?: boolean;
 };
 
+// ============================================================================
+// F-4a：runtime status 快照 tool_efficiency 观测契约。
+// 字段与 backend/internal/observability/tool_efficiency_snapshot.go 的 JSON tag
+// 一一对应；runtime status 未填块 / 403 / 网络失败时由 API 层静默降级为 null。
+// ============================================================================
+
+export type AnalyticsLabeledCount = {
+  labels: Record<string, string>;
+  count: number;
+};
+
+export type AnalyticsArtifactArchives = {
+  total: number;
+  by_layer: Record<string, number>;
+  by_disposition: Record<string, number>;
+  series?: AnalyticsLabeledCount[];
+};
+
+export type AnalyticsArtifactTruncations = {
+  total: number;
+  by_layer: Record<string, number>;
+  by_truncated_by: Record<string, number>;
+  series?: AnalyticsLabeledCount[];
+};
+
+export type AnalyticsArtifactDeref = {
+  total: number;
+  followup_ratio: number;
+  miss_by_reason: Record<string, number>;
+};
+
+export type AnalyticsArtifactFlow = {
+  archives: AnalyticsArtifactArchives;
+  truncations: AnalyticsArtifactTruncations;
+  pointer_notice: Record<string, number>;
+  deref: AnalyticsArtifactDeref;
+  l1_l4_gap_ratio: number;
+};
+
+export type AnalyticsToolEfficiencySnapshot = {
+  captured_at: string;
+  preflight: {
+    total: number;
+    allow: number;
+    deny: number;
+    allow_rate: number;
+    by_reason: Record<string, number>;
+    by_decision: Record<string, number>;
+  };
+  outcomes: {
+    total: number;
+    by_outcome: Record<string, number>;
+    by_error_code: Record<string, number>;
+    success_rate: number;
+    non_fail_rate: number;
+  };
+  disposition_replays: {
+    total: number;
+    by_outcome: Record<string, number>;
+    by_repeat: Record<string, number>;
+  };
+  artifact_flow: AnalyticsArtifactFlow;
+  fail_categories: Record<string, number>;
+  inefficiency_flags: string[];
+};
+
 export type AnalyticsRuntimeStatusEnvelope = {
   runtime?: {
     usage_analytics?: AnalyticsUsageHealth;
+    tool_efficiency?: AnalyticsToolEfficiencySnapshot;
   };
 };

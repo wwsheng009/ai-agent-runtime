@@ -132,24 +132,47 @@ func (g *Gateway) Process(ctx context.Context, result RawToolResult) (*Envelope,
 	envelope.Metadata["byte_count"] = input.ByteCount
 	envelope.Metadata["sha256"] = fmt.Sprintf("%x", sha256.Sum256([]byte(text)))
 
+	// O-1 baseline: raw tool output size at the gateway entrance.
+	observability.RecordToolOutputBytes(observability.MetricToolOutputOriginalBytes, observability.TruncationLayerRender, input.ByteCount)
+
 	var processErrs []string
+	// §6.1 contract: failed results keep the raw-output pointer (recovery
+	// hint), so the P1-1 below-threshold skip only applies to successes.
+	failedResult := strings.TrimSpace(result.Error) != ""
+	belowArchiveThreshold := input.ByteCount < artifactArchiveMinBytes()
 	if g.store != nil && strings.TrimSpace(text) != "" && !isArtifactReadWindow(result.Metadata) {
-		artifactID, err := g.store.Put(ctx, artifact.Record{
-			SessionID:  result.SessionID,
-			ToolName:   result.ToolName,
-			ToolCallID: result.ToolCallID,
-			Summary:    preview(text, 400),
-			Content:    text,
-			Metadata:   cloneMap(result.Metadata),
-			CreatedAt:  input.StoredAt,
-		})
-		if err != nil {
-			processErrs = append(processErrs, err.Error())
+		if !failedResult && belowArchiveThreshold {
+			// P1-1 archive tiering: tiny results (model already sees the full
+			// body, so a pointer is never consumed and dereferenced) skip the
+			// store to reduce storage/search-index noise. Search serves large
+			// output keyword recovery; small results stay visible in history.
+			envelope.Metadata["artifact_skipped"] = "below_threshold"
+			observability.RecordToolOutputArchive(observability.ArchiveLayerGateway, observability.ArchiveDispositionSkippedBelowThreshold)
 		} else {
-			input.Artifact = artifactID
-			envelope.ArtifactIDs = append(envelope.ArtifactIDs, artifactID)
-			envelope.Metadata["artifact_id"] = artifactID
+			artifactID, err := g.store.Put(ctx, artifact.Record{
+				SessionID:  result.SessionID,
+				ToolName:   result.ToolName,
+				ToolCallID: result.ToolCallID,
+				Summary:    preview(text, 400),
+				Content:    text,
+				Metadata:   cloneMap(result.Metadata),
+				CreatedAt:  input.StoredAt,
+			})
+			if err != nil {
+				processErrs = append(processErrs, err.Error())
+			} else {
+				input.Artifact = artifactID
+				envelope.ArtifactIDs = append(envelope.ArtifactIDs, artifactID)
+				envelope.Metadata["artifact_id"] = artifactID
+				observability.RecordToolOutputArchive(observability.ArchiveLayerGateway, observability.ArchiveDispositionArchived)
+			}
 		}
+	} else if g.store != nil && strings.TrimSpace(text) == "" {
+		observability.RecordToolOutputArchive(observability.ArchiveLayerGateway, observability.ArchiveDispositionSkippedEmpty)
+	} else if isArtifactReadWindow(result.Metadata) {
+		// Dereferenced windows must not re-archive (no-cascade guard); count
+		// them so the dereference chain stays visible in the archive mix.
+		observability.RecordToolOutputArchive(observability.ArchiveLayerGateway, observability.ArchiveDispositionSkippedReadWindow)
 	}
 
 	var handled bool
@@ -259,6 +282,10 @@ func (g *Gateway) Process(ctx context.Context, result RawToolResult) (*Envelope,
 	}
 	observability.RecordToolOutcome(outcome, diagnostic.ErrorCode)
 
+	// O-1: model-visible bytes after reduction (L4 exit); the gap against
+	// tool_output_original_bytes quantifies per-call folding.
+	observability.RecordToolOutputBytes(observability.MetricToolOutputModelVisibleBytes, observability.TruncationLayerRender, len(envelope.Render()))
+
 	if len(processErrs) > 0 {
 		envelope.Metadata["gateway_errors"] = processErrs
 	}
@@ -283,6 +310,20 @@ func isArtifactReadWindow(metadata map[string]interface{}) bool {
 		}
 	}
 	return false
+}
+
+// artifactArchiveMinBytes resolves the P1-1 archive tiering threshold: text
+// below this size is skipped by the session archive (metadata records
+// artifact_skipped=below_threshold). Tied to the model-visible tool text
+// budget (budget/12 ≈ 1 KiB) so the tier moves with the budget knob: results
+// this small are fully visible to the model, never dereferenced, and only
+// add store/search-index noise.
+func artifactArchiveMinBytes() int {
+	min := modelToolTextByteBudget / 12
+	if min < 256 {
+		return 256
+	}
+	return min
 }
 
 func prefersModelSummaryForLargeText(reducerName string) bool {

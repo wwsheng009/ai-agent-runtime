@@ -7,11 +7,11 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 const (
-	modelToolTextMarkerReserve   = 160
 	modelToolTextMinSegmentBytes = 1024
 	// modelArtifactNoticeIDPrefix marks a pointer to a persisted artifact record
 	// (art_<uuid32>). The prefix is the stable span that splitTrailingArtifactNotice
@@ -493,19 +493,39 @@ func renderToolTextForModelHistory(content interface{}, toolErr string, envelope
 		if notice == "" {
 			return full
 		}
-		if isIDArtifactNotice(notice) && !failedResult(toolErr, envelope) && !isArtifactReadWindow(envelopeMetadata(envelope)) {
-			return full
+		if isIDArtifactNotice(notice) {
+			observability.RecordToolPointerNotice(observability.PointerNoticeKindID)
+			if !failedResult(toolErr, envelope) && !isArtifactReadWindow(envelopeMetadata(envelope)) {
+				return full
+			}
+		} else {
+			observability.RecordToolPointerNotice(observability.PointerNoticeKindPath)
 		}
 		return appendToolArtifactNotice(full, notice)
 	}
+	// O-1: L4 head/tail fold happened at the render layer.
+	observability.RecordToolOutputTruncation(observability.TruncationLayerRender, observability.TruncatedByBytes)
+	// Truncation happened: thread the artifact id into the fold marker so the
+	// head/tail view itself carries an explicit continuation command.
+	artifactID := strings.TrimSpace(metadataString(envelopeMetadata(envelope), "artifact_id"))
+	if artifactID == "" && len(envelopeArtifactIDs(envelope)) > 0 {
+		artifactID = envelopeArtifactIDs(envelope)[0]
+	}
 	if notice == "" {
-		return formatTruncatedToolTextForModel(full, modelToolTextByteBudget)
+		return formatTruncatedToolTextForModel(full, modelToolTextByteBudget, artifactID)
 	}
 	bodyBudget := modelToolTextByteBudget - len(notice) - len("\n\n")
 	if bodyBudget <= 0 {
 		return safePrefixByBytes(notice, modelToolTextByteBudget)
 	}
-	return appendToolArtifactNotice(formatTruncatedToolTextForModel(full, bodyBudget), notice)
+	return appendToolArtifactNotice(formatTruncatedToolTextForModel(full, bodyBudget, artifactID), notice)
+}
+
+func envelopeArtifactIDs(envelope *Envelope) []string {
+	if envelope == nil {
+		return nil
+	}
+	return envelope.ArtifactIDs
 }
 
 // isIDArtifactNotice reports whether the notice points at an artifact record
@@ -614,7 +634,31 @@ func appendToolArtifactNotice(body string, notice string) string {
 	}
 }
 
-func formatTruncatedToolTextForModel(content string, budget int) string {
+// truncationMarker renders the fold marker inserted between the head and tail
+// segments. Both the emitted marker and the budget reserve go through this
+// helper so the charged bytes can never drift from the rendered bytes.
+func truncationMarker(artifactID string, omittedBytes int) string {
+	marker := fmt.Sprintf("\n\n[output truncated for history safety: omitted %d bytes from the middle]", omittedBytes)
+	// P2 continuation guidance: embed the exact dereference command in the
+	// fold marker so the model never wanders (e.g. re-calling the same tool).
+	if id := strings.TrimSpace(artifactID); id != "" {
+		marker += fmt.Sprintf("; read via artifact_read(artifact_id=%s, offset=<bytes>, limit=<bytes>)", id)
+	}
+	return marker + "\n\n"
+}
+
+// truncationMarkerReserve returns the exact number of bytes the fold marker can
+// occupy for a result whose omitted middle is at most maxOmittedBytes. Omitted
+// bytes never exceed the total content length, so digit-counting on that upper
+// bound makes the reserve an exact ceiling rather than a guess.
+func truncationMarkerReserve(artifactID string, maxOmittedBytes int) int {
+	if maxOmittedBytes < 0 {
+		maxOmittedBytes = 0
+	}
+	return len(truncationMarker(artifactID, maxOmittedBytes))
+}
+
+func formatTruncatedToolTextForModel(content string, budget int, artifactID ...string) string {
 	content = strings.TrimSpace(strings.ReplaceAll(content, "\r\n", "\n"))
 	if content == "" || budget <= 0 || len(content) <= budget {
 		return content
@@ -627,44 +671,47 @@ func formatTruncatedToolTextForModel(content string, budget int) string {
 		header += "First error line: " + firstErr + "\n\n"
 	}
 
-	headTailBudget := budget - len(header) - modelToolTextMarkerReserve
-	if headTailBudget < modelToolTextMinSegmentBytes*2 {
-		headTailBudget = modelToolTextMinSegmentBytes * 2
+	var pointerID string
+	if len(artifactID) > 0 {
+		pointerID = strings.TrimSpace(artifactID[0])
 	}
-	if headTailBudget >= totalBytes {
-		headTailBudget = totalBytes - 1
-	}
-	if headTailBudget <= 0 {
+	reserve := truncationMarkerReserve(pointerID, totalBytes)
+
+	// The budget is a hard ceiling: header + head + marker + tail must never
+	// exceed it. Reserve the header and the (exact, upper-bound) marker first,
+	// then split whatever remains between head and tail.
+	bodyBudget := budget - len(header) - reserve
+	if bodyBudget <= 0 {
 		return safePrefixByBytes(content, budget)
 	}
 
-	headBudget := headTailBudget * 2 / 3
-	tailBudget := headTailBudget - headBudget
-	if headBudget < modelToolTextMinSegmentBytes {
-		headBudget = modelToolTextMinSegmentBytes
-		tailBudget = headTailBudget - headBudget
+	if bodyBudget >= totalBytes {
+		bodyBudget = totalBytes - 1
 	}
-	if tailBudget < modelToolTextMinSegmentBytes {
-		tailBudget = modelToolTextMinSegmentBytes
-		headBudget = headTailBudget - tailBudget
+	if bodyBudget <= 0 {
+		return safePrefixByBytes(content, budget)
 	}
-	if headBudget <= 0 {
-		headBudget = headTailBudget / 2
-	}
-	if tailBudget <= 0 {
-		tailBudget = headTailBudget - headBudget
+
+	headBudget := bodyBudget * 2 / 3
+	tailBudget := bodyBudget - headBudget
+	// The minimum segment size is a usability floor, not a budget override:
+	// apply it only when the remaining body budget can actually afford it.
+	if bodyBudget >= modelToolTextMinSegmentBytes*2 {
+		if headBudget < modelToolTextMinSegmentBytes {
+			headBudget = modelToolTextMinSegmentBytes
+			tailBudget = bodyBudget - headBudget
+		}
+		if tailBudget < modelToolTextMinSegmentBytes {
+			tailBudget = modelToolTextMinSegmentBytes
+			headBudget = bodyBudget - tailBudget
+		}
 	}
 
 	head := safePrefixByBytes(content, headBudget)
 	tail := safeSuffixByBytes(content, tailBudget)
 	if len(head)+len(tail) >= totalBytes {
-		if budget <= modelToolTextMarkerReserve {
-			return safePrefixByBytes(content, budget)
-		}
-		bodyBudget := budget - modelToolTextMarkerReserve
-		if bodyBudget <= 0 {
-			bodyBudget = budget
-		}
+		// head+tail already span the whole content, so there is no middle to
+		// omit; take a deterministic split inside the body budget instead.
 		head = safePrefixByBytes(content, bodyBudget*2/3)
 		tail = safeSuffixByBytes(content, bodyBudget/3)
 	}
@@ -673,7 +720,10 @@ func formatTruncatedToolTextForModel(content string, budget int) string {
 	if omittedBytes < 0 {
 		omittedBytes = 0
 	}
-	marker := fmt.Sprintf("\n\n[output truncated for history safety: omitted %d bytes from the middle]\n\n", omittedBytes)
+	marker := truncationMarker(pointerID, omittedBytes)
+	if pointerID != "" {
+		observability.RecordToolPointerNotice(observability.PointerNoticeKindDerefHint)
+	}
 	return header + head + marker + tail
 }
 

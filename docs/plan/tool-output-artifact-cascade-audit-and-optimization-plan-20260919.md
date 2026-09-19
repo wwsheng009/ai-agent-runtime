@@ -1,9 +1,32 @@
 # Tool Output Artifact 链路审计与二次读取优化方案
 
 - 日期：2026-09-19
-- 状态：分析完成，待实施
-- 关联修复：本轮已完成的指针级联修复（`internal/output/gateway.go`、`internal/output/tool_result_content.go`）
+- 状态：P0/P1/P2/P3 与 §11 观测性 O-1～O-4 已全部实施，构建与测试全绿
+- 关联修复：指针级联修复（`internal/output/gateway.go`、`internal/output/tool_result_content.go`）
 - 关联文档：`docs/aicli/tool_output_contract.md`
+
+## 实施状态（2026-09-19 更新）
+
+| 项 | 状态 | 落点 |
+| --- | --- | --- |
+| P0-1 view 默认窗口字节感知 | 已实施 | `internal/toolkit/tools/view.go`（`viewDefaultLimit=400`、`viewByteBudgetReserveRatio=0.7`） |
+| P0-2 grep 字节预算硬上限 | 已实施 | `internal/toolkit/tools/grep.go`（`grepByteBudgetReserveRatio=0.8`、`results_truncated`/`truncation_reason`） |
+| P1-1 Gateway 归档分级 | 已实施 | `internal/output/gateway.go`（`artifactArchiveMinBytes()`、`artifact_skipped=below_threshold`） |
+| P1-2 artifact_read 默认窗口对齐上界 | 已实施 | `internal/toolkit/tools/artifact_read.go`（`artifactReadDefaultLimitBytes()` = max limit） |
+| P2 截断视图续读指引 | 已实施 | `internal/output/tool_result_content.go`（`formatTruncatedToolTextForModel`） |
+| P3 shell 落盘阈值常量去重 | 已实施 | `backend/cmd/aicli/functions/shell.go`、`internal/toolkit/tools/bash.go` |
+| O-1 埋点与计数器/直方图 | 已实施 | `internal/observability/tool_output_artifact.go`（archive/truncation/pointer/deref 计数器 + 字节直方图） |
+| O-2 Snapshot + status 暴露 | 已实施 | `tool_efficiency_snapshot.go`（`ArtifactFlow`、`L1L4GapRatio`、三个派生 flag）、`internal/api/skills/handler.go:9765` |
+| O-3 view/grep/render 埋点 | 已实施 | `view.go`、`grep.go`、`tool_result_content.go`、`gateway.go`、`artifact_read.go`、`bash.go` |
+| O-4 EventToolFinished metadata | 已实施 | `internal/agent/tool_runtime_events.go`（`copyToolArtifactFlowMetadata`：`output_original_bytes`、`output_model_visible_bytes`、`artifact_archived`、`artifact_skipped`、`artifact_id`）+ `runtimeobserve/projector.go` allowlist 扩展；`output_truncated_by_lines/bytes`、`pointer_notice_kind`、`deref_*` 等高基数维度由低基数计数器覆盖，事件侧按需补充 |
+| §10.6 单行截断诚实化（本轮） | 已实施 | `internal/toolkit/tools/view.go`：单行 >2000 字符由静默 `...` 改为诚实标记 `…[line truncated: N more chars]`；`viewReadResult` 新增 `LongLinesTruncated`/`HiddenBytes`/`OriginalBytes`；metadata 暴露 `long_lines_truncated`/`hidden_bytes`；view 层接入 `tool_output_original_bytes{layer=l1_view}` 直方图 |
+| F-4 frontend Artifact Flow 面板（本轮） | 已实施 | `frontend/src/pages/usage-analytics/artifact-flow-panel.tsx` + `getToolEfficiencySnapshot()`（`api/runtime/analytics.ts`）+ 类型（`types/runtime/analytics.ts`）+ i18n（zh-CN/en-US usage-analytics）+ `overview.tsx` 挂载 + `artifact-flow-panel.test.tsx`（10 用例） |
+| F-5 micro web client 分析页 Artifact Flow（本轮） | 已实施 | `web_analysis_handlers.go` 新增 `GET /web/api/analysis/tool_efficiency`（`observability.SnapshotToolEfficiency()` 同结构体透传，先于 service==nil 检查）+ `web/js/analysis.js` `renderAnalysisEfficiency()`（四卡 + 低效信号 + 降级矩阵与 F-4 同口径）+ `web/index.html` `#analysis-efficiency` 容器 + handler 测试契约断言 |
+
+验证口径：`go build ./...`、`go vet`、目标包 `go test` 全绿；
+前端 `tsc -b`、`eslint`、i18n gate、`vite build`、`vitest run`（313 文件 / 2584 测试）全绿。
+
+本轮增量验证（2026-09-19）：`go build ./...` 通过；`go test ./internal/observability/ ./internal/output/ ./internal/toolkit/tools/ ./internal/agent/ -count=1` 全绿。
 
 ---
 
@@ -359,7 +382,14 @@ P3 (常量去重) ─── 独立，一行改动
 | P1-1 | `gateway_test.go`：小结果不产生 ArtifactIDs；`artifact_read_no_cascade_test.go` 回归保持 |
 | P1-2 | `artifact_read_test.go`：默认窗口 = maxLimit；`TestArtifactReadWindowStaysUnderModelBudget` 保持通过 |
 | P2 | `tool_result_content_test.go`：截断视图中包含带 id 的续读指引 |
+| P2 | `tool_result_content_test.go`：`TestFormatTruncatedToolTextForModel_NeverExceedsBudget` —— 预算为硬上限，覆盖 1B~64KiB 与含/不含指针两种形态 |
 | P3 | `cmd/aicli/functions` 既有测试回归 |
+
+> P2 附带的预算修正：`formatTruncatedToolTextForModel` 原先固定预留 160 B 给折叠标记，
+> 而 P2 给标记追加的续读指引（约 23 B）未计入该预留，导致 12 KiB 预算下实际渲染
+> 12311 B（超 23 B）。现改为由 `truncationMarkerReserve` 按标记真实长度（含指针、
+> 以总字节数为省略量上界）精确预留，并把 `modelToolTextMinSegmentBytes` 的
+> 每段最小值降级为"预算允许时才生效"的可用性下限，使预算成为真正的硬上限。
 
 ### 6.2 集成验证（观测指标）
 
@@ -397,10 +427,10 @@ P3 (常量去重) ─── 独立，一行改动
 
 ## 8. 遗留问题（超出本方案范围，需单独跟踪）
 
-1. **permission mode 恢复优先级 bug**（本会话最初发现）：
-   `cmd/aicli/commands` `TestRestoreChatStateFromRuntimeSessionRestoresRouteTransparency`
-   失败——`ctx.PermissionMode` 的零值 "default" 越过了 session metadata 里持久化的
-   "plan"。与 artifact 链路无关，修复前即存在。
+1. ~~**permission mode 恢复优先级 bug**（本会话最初发现）~~ → **已解决（2026-09-19 全量验证）**：
+   原失败用例 `TestRestoreChatStateFromRuntimeSessionRestoresRouteTransparency` 现通过；
+   `go test ./cmd/aicli/commands/ -count=1` 全量绿（95.3s）。原症状：`ctx.PermissionMode`
+   零值 "default" 越过 session metadata 持久化的 "plan"（与 artifact 链路无关）。
 2. **`cmd/aicli/commands` 测试在非交互 shell 的转义序列噪声**：建议给 TUI
    交互测试加非 TTY 环境守卫或输出重定向。
 3. **`internal/chat` `TestSessionActorApproveToolResumesWithoutInMemoryWaiter`**
@@ -415,3 +445,389 @@ P3 (常量去重) ─── 独立，一行改动
 3. **P0-2**（grep 截断）：与 P0-1 同型，复制模式即可
 4. **P1-1**（归档分级）：先验证 Search/回放对缺失小记录的容忍度再合入
 5. **P2**（续读指引）：最后做，需要前端联动验证
+
+---
+
+## 10. Harness 层对比分析（codex-rs 与 deepseek-harness）
+
+### 10.1 Codex（codex-rs）的做法
+
+**关键事实：Codex 核心工具集里没有独立的 read_file 工具。**`core/src/tools/` 目录下只有
+`apply_patch`、`shell`、`unified_exec`、`view_image`、`mcp_resource` 等——文件读取
+完全交给 shell（`cat`/`sed`/`rg`），由 **shell 输出截断层统一兜底**：
+
+- `exec.rs:76`：`EXEC_OUTPUT_MAX_BYTES = DEFAULT_OUTPUT_BYTES_CAP`（pty 层常量），
+  stdout/stderr 各自 `truncate(max_bytes)`（L739-745），超限即截，**没有 artifact 解引用机制**
+- `utils/output-truncation/src/lib.rs`：统一截断策略
+  `TruncationPolicy::Bytes | Tokens`，实现为 **truncate_middle**（保头保尾剪中间），
+  截断后头部追加元信息：`Warning: truncated output (original token count: N)\nTotal output lines: M`
+- `unified_exec/mod.rs`：`DEFAULT_n_TOKENS = 10_000`（token 预算而非字节）
+- **截断是终点，不是指针**：模型看到截断警告后，要么换更精确的 shell 命令
+  （`sed -n '100,200p' file`），要么接受信息损失。没有"读取完整原始输出"的第二通道
+
+这个设计的前提是 prompt 工程：`prompt_with_apply_patch_instructions.md` 明确指导模型
+"Do not use python scripts to attempt to output larger chunks of a file"——即通过
+行为约定防止模型绕过截断层，而不是提供绕过通道。
+
+### 10.2 deepseek-harness 的做法
+
+`packages/fs/tool-fs/src/read.ts` + `read-render.ts` 是**双层预算的行协议**：
+
+```
+READ_LIMIT        = 2000 行     （默认窗口，同时是 limit 参数的硬上界）
+READ_MAX_BYTES    = 50 KiB      （字节硬上限，命中即停止收集）
+READ_MAX_LINE_LENGTH = 2000 字符（单行截断，防止单行爆内存）
+STREAM_MIN_SIZE   = 10 MiB      （超过则流式读取，不整文件入内存）
+```
+
+关键机制（`read-render.ts:77-89` `consumeLine`）：
+
+- **行预算与字节预算同时生效**：收集每一行前先查 `outputBytes + bytes > maxBytes`，
+  命中即标记 `truncatedByBytes` 停止——**字节预算在工具内部解决，不留给回显层**
+- **仍然扫描到文件末尾**拿精确 `totalLines`（`buildWindow` 不提前 break），
+  所以续读协议有精确的行号锚点
+- **续读脚注内嵌在输出里**（`formatReadOutput` L152-160）：
+  - 字节截断：`(Output capped. Showing lines N-M. Use offset=M+1 to continue.)`
+  - 行截断：`(Showing lines N-M of T. Use offset=M+1 to continue.)`
+  - 读完：`(End of file - total T lines)`
+  三种状态显式区分，模型不需要猜
+- **offset 越界是硬错误**（FS_NOT_FOUND），防止模型盲目递增 offset 空转
+
+### 10.3 对比矩阵
+
+| 维度 | ai-agent-runtime（现状） | codex-rs | deepseek-harness |
+|---|---|---|---|
+| 文件读取工具 | view（行协议 2000 行默认） | 无 read 工具，shell 兜底 | read（行+字节双预算） |
+| 字节预算在工具内生效 | ❌ 仅在回显层（L4） | ✅ shell 截断即终点 | ✅ consumeLine 内嵌 |
+| 截断后的恢复通道 | artifact_read 分页解引用 | 无（换命令重试） | 同工具 offset 续读（行号精确） |
+| 截断提示 | 尾部指针行（artifact id） | 头部 warning（token 数/行数） | 尾部脚注（下一 offset 明示） |
+| 单行超长防护 | ❌ 无 | ✅（middle truncate） | ✅ 2000 字符截断 |
+| 超大文件流式 | ❌ 整文件读入 | 不适用 | ✅ >10MiB 流式 |
+| 二次往返成本 | 高（解引用 1-3 跳） | 高（换命令盲试） | **低（一次续读定位精确）** |
+
+### 10.4 harness 层优化建议（补充第 5 节方案）
+
+基于对比，建议在原 P0-P3 之外增补：
+
+**H-1：view 采用"行协议 + 字节预算内嵌"双保险（吸收 deepseek-harness）**
+
+`readFile` 循环内加字节记账（不只是 P0-1 的 70% 停止条件）：
+- 单行超过 2000 字符 → 行内截断加 `... (line truncated)` 后缀
+- 累计字节超过 `ModelToolTextByteBudget() * 0.8` → 停止收集，但**继续扫描拿 totalLines**
+- `is_truncated` 细分为 `truncated_by_lines` / `truncated_by_bytes`
+- 脚注格式对齐 harness：`(Showing lines N-M. Use offset=M+1 to continue.)`
+  与现有 `suggested_next_offset` 并存（模型读脚注，元数据供 UI）
+
+这比原 P0-1 更进一步：原方案只降默认 limit 到 400 行，H-1 保证**任何**窗口
+（包括显式 limit=2000 的调用）都在字节预算内完整返回可见部分，彻底消除
+"view 层说没截断、回显层截了"的层间竞争。
+
+**H-2：截断警告头部化（吸收 codex）**
+
+当前指针行在输出尾部，head/tail 中间的模型注意力容易被截断内容占据。
+参考 codex 把元信息放头部：
+
+```
+[view] window truncated: showing lines 21-180 of 743 (8.4KiB of 29KiB).
+Continue with offset=181 or read full output via artifact_read(artifact_id=…).
+```
+
+头部一行同时给出**行协议续读**（首选）与**字节协议解引用**（兜底）两条路径，
+并明确优先级——当前尾部指针行只给了 artifact_read 一条路，是模型选择
+artifact_read 而非 view 续读的直接诱导因素。
+
+**H-3：artifact_read 输出加"下一跳"脚注（吸收 harness 脚注模式）**
+
+artifact_read 的窗口 header 已有 `eof=false next_offset=N`，但它是结构化
+元数据，模型看到的是 header 行。建议对齐 harness 脚注风格，在窗口尾部追加：
+
+```
+(Showing bytes A-B of T. Use artifact_read(artifact_id=…, offset=B) to continue.)
+```
+
+消除模型从 `next_offset` 元数据换算调用参数的认知负担。
+
+### 10.5 关键判断：现有方案的二次执行成本风险是否成立
+
+**问题**：优化后"本来一次能处理的工作需要二次执行，成本反而增加"是否存在？
+
+分场景评估：
+
+| 场景 | 现状 | 方案后 | 成本变化 |
+|---|---|---|---|
+| view 读 500 行文件（一次够用） | view 返回 14KiB → L4 截断 → artifact_read 1-2 次 | view 窗口预算内一次返回 | **净节省**（少 1-2 次调用 + 解引用内容重复计费） |
+| view 读 743 行文件（真需要全部） | view 全量 → 截断 → 解引用 2-3 跳读 29KiB | H-1: view 一次给 8.4KiB 可见部分；若模型真需要剩余 → view offset 续读 1 次（11KiB）或解引用 | **持平或节省**：解引用的 8KiB 窗口 × 3 跳 ≈ 24KiB token，vs 续读 11KiB × 1 次 |
+| grep 大结果集 | 截断 → 解引用（中间匹配已丢，解引用也只能看全部） | P0-2: 前 N 条完整匹配 + 明示截断 | **节省 + 质量更高**（head-only 保留完整匹配 vs head/tail 剪中间） |
+| 模型本来就要读整个大文件 | 无差别 | 无论如何都需要多跳 | 无变化（信息论下限） |
+
+**结论：方案不会引入"一次变两次"的回退**，原因有三：
+
+1. **字节预算内嵌（H-1）后，"view 成功且模型看全"的比例上升**，需要恢复
+   路径的调用比例本身下降——恢复路径变便宜了，但更需要恢复的场景也变少了
+2. **续读协议有精确锚点**（suggested_next_offset / totalLines / 脚注明示），
+   现状中模型从 head/tail 猜测续读参数的盲试成本被消除
+3. **解引用内容会随历史重复计费**：artifact_read 的输出进入对话历史后，
+   每一轮 API 调用都重复计费这部分 token。现状的 2-3 跳解引用产生
+   24-32KiB 的历史成本，方案后通常 0-1 跳，多轮会话的累积节省显著
+
+**真正需要警惕的成本风险（补充为方案约束）**：
+
+- ⚠️ P0-1 若只降默认 limit 而不加字节记账，显式 `limit=2000` 的调用仍会
+  触发 L4 截断+解引用——所以 H-1 的字节内嵌是 P0-1 的必要补充，不是可选
+- ⚠️ 续读脚注会小幅增加每次截断输出的固定开销（~100 字节），可接受
+- ⚠️ H-2 头部警告行占用模型注意力头部位置，措辞需紧凑（单行 ≤ 200 字节）
+
+### 10.6 单行截断（H-1 细节）的内容丢失风险与缓解
+
+#### 10.6.1 关键差异：L1 截断与 L4 截断的可恢复性不同
+
+| | L4 回显层截断（现状） | L1 工具内行截断（H-1） |
+|---|---|---|
+| 截断发生位置 | Gateway 渲染模型可见文本时 | view `readFile` 循环内 |
+| Gateway 归档的内容 | **截断前的完整原文** | **截断后的文本** |
+| artifact_read 能否恢复完整行 | ✅ 能（展示层丢失） | ❌ 不能（存储层丢失） |
+| 剩余恢复手段 | 解引用 | 仅 shell 按字节偏移重读（模型难自主想到） |
+
+即：H-1 的行内截断引入了一个**现状不存在的丢失通道**。当前系统里 view 返回的超长行
+虽然会被 L4 剪掉，但完整原文始终在 artifact store 里；H-1 若直接截断，截掉的部分
+彻底不可恢复。
+
+#### 10.6.2 风险场景分级
+
+| 场景 | 超长行常见性 | 丢失影响 |
+|---|---|---|
+| 源代码 | 极低（>2000 字符行本身是坏味道） | 几乎无 |
+| minified JS/CSS、打包产物 | 每行超 | 无（本来不该读，截断省预算） |
+| 单行 JSON / CSV 宽行 | 常见 | **有**——可能恰好截掉目标字段 |
+| lock / 生成文件 | 常见 | 中——哈希、版本号可能被截 |
+| base64 / 长 URL / JWT | 偶尔 | 有——截掉的正是语义载荷 |
+
+deepseek-harness 采用同样的 2000 字符上限且无恢复通道，说明业界接受该损失；
+但本仓库已有 artifact 基础设施，应该做得更好。
+
+#### 10.6.3 缓解设计（三档，可叠加，推荐 1+3 为基线、2 为增强）
+
+**R-1 中段截断（吸收 codex `truncate_middle_chars`）**
+
+行内截断改为保留头尾各 ~1000 字符（或头 1400 + 尾 600）：
+
+```
+<前 1000 字符>...[line truncated, 8432 chars total]...<后 600 字符>
+```
+
+单行 JSON 的键名集中在行首、闭合结构在行尾，两端语义密度远高于中段；
+纯头部截断对"行尾才是关键"的场景（闭合括号、行尾注释）全灭。
+
+**R-2 超长行落盘恢复通道（本仓库特有优势）**
+
+命中行内截断时，将该行**完整内容** `store.Put` 进 artifact store（复用链路 A），
+行尾追加指针：
+
+```
+12345: <前1000字符>...[truncated, full line: art_xxx]...<后600字符>
+```
+
+- 触发频率低（仅超长行），不会重新引入级联（artifact_read 结果已不归档）
+- 把"存储层丢失"降级回"展示层丢失"——解引用即可拿回完整行
+- 实现注意：一行一个 artifact 会让 store 记录碎片化；更优做法是同一文件的所有
+  被截行合并为一个 artifact 记录（每行带行号前缀），单次解引用可恢复全部截断行
+
+**R-3 诚实标记**
+
+- metadata：`line_truncated: true`、`max_line_length_applied: 2000`、被截行的行号列表
+- 行尾提示（deepseek-harness 模式）：`... (line truncated to 2000 chars)`
+- 让模型明确知道"这行不完整"，可自主决定用 shell 精确重读或解引用
+
+#### 10.6.4 结论
+
+- H-1 的单行截断**会**丢内容，且丢失通道是 L1 特有的（现状没有）；
+- 但不截断的代价更差：一条 2MB 的 minified 行会独占整个 50KiB 窗口预算，
+  把同行其他 1999 行全部挤出——deepseek-harness 设此上限正是为防这个；
+- 推荐组合：**R-1（中段截断）+ R-3（诚实标记）为必选基线**，R-2（落盘恢复）
+  作为 P1 增强项——它利用了本仓库已有的 artifact 基础设施，是相对两个参考
+  实现的差异化优势；
+- H-1 实施时必须同步更新 §6.1 测试矩阵：新增"超长行中段截断 + 指针可达 +
+  metadata 标记"的用例。
+
+---
+
+## 11. 观测性方案：artifact 链路指标体系
+
+### 11.1 现有基础设施盘点（本仓库已具备）
+
+| 设施 | 位置 | 可复用点 |
+|---|---|---|
+| 指标注册表 | `internal/observability/metrics.go` | `IncrementCounter` / `RecordDuration`（直方图自动加 `_seconds` 后缀）/ `GetOrCreateHistogram` |
+| 低基数标签纪律 | `tool_efficiency.go` 注释 + 实现 | 标签只用 reason/outcome/error_code/repeat 等泛型值，**禁止工具名进标签**，repeat 分桶 1/2/3+ |
+| 结构化快照 | `tool_efficiency_snapshot.go` | `ToolEfficiencySnapshot` 聚合模式 + `deriveInefficiencyFlags` 派生信号——新指标可挂同一快照暴露到 runtime status |
+| 事件目录 | `internal/runtimeobserve/known_types.go` | 封闭的 `EventToolStarted/Finished/Failed/Progress` 目录 + projector 归一化；`TestKnownEventTypeCatalogCoversLocalLoopEmits` 守卫目录完整性 |
+| 既有采集点 | `toolexec/preflight.go`（preflight）、`agent/loop.go:1023-1108`（doom-loop/disposition-replay） | 埋点位置惯例：在决策点直接调用 `observability.Record*` |
+
+**注意**：`RecordToolOutcome` 目前只有测试调用（生产路径的 outcome 归集尚未接线或经由
+其他通道），artifact 指标埋点时应避免重复该问题——在 gateway/render 这两个**必经
+汇聚点**埋点，而不是散落到各工具。
+
+### 11.2 指标定义（全部低基数，遵循现有标签纪律）
+
+#### 计数器
+
+| 指标名 | 标签 | 含义 | 埋点位置 |
+|---|---|---|---|
+| `tool_output_archive_total` | `layer=gateway\|shell_disk`、`disposition=archived\|skipped_below_threshold\|skipped_read_window\|skipped_empty` | 归档决策分布。P1-1 实施后 skipped_below_threshold 直接可观测 | `gateway.go Process`、`ensureLargeHistoryOutputArtifact` |
+| `tool_output_truncation_total` | `layer=l1_view\|l1_grep\|l4_render\|shell_capture`、`truncated_by=bytes\|lines` | 各层截断发生次数。**L1/L4 截断比值是层间竞争的直接证据** | view `readFile`、grep 收集循环、`formatTruncatedToolTextForModel`、capture |
+| `tool_pointer_notice_total` | `kind=id\|path\|deref_hint` | 指针行/续读脚注追加次数（kind=id 即现状指针行；P2/H-2 落地后 deref_hint 可对比诱导效果） | `renderToolTextForModelHistory` |
+| `tool_artifact_deref_total` | `page=first\|followup` | artifact_read 调用分布。**`page=followup`（offset>0）占比 ≈ 平均解引用跳数**，无需维护跨调用状态 | `artifact_read.go Execute` |
+| `tool_artifact_deref_miss_total` | `reason=not_found\|cross_session\|bad_offset` | 解引用失败（含模型把 id 传错到 task_output 后的错误重试痕迹） | 同上 |
+
+#### 直方图
+
+| 指标名 | 单位 | 含义 |
+|---|---|---|
+| `tool_output_original_bytes` | 字节 | 工具原始输出字节数（L1 出口），按 `layer` 标签分列 |
+| `tool_output_model_visible_bytes` | 字节 | 模型实际可见字节数（L4 出口）——**与上一指标的差值分布即"折叠量"** |
+| `tool_artifact_deref_bytes` | 字节 | 每次解引用返回的字节数——验证 P1-2（一次读完）是否达成 |
+
+#### 快照扩展（`ToolEfficiencySnapshot` 新增字段）
+
+```go
+type ArtifactFlowSnapshot struct {
+    Archives       LabeledSnapshot `json:"archives"`        // by layer/disposition
+    Truncations    LabeledSnapshot `json:"truncations"`     // by layer/truncated_by
+    Deref          DerefSnapshot   `json:"deref"`           // total, followup_ratio, miss_by_reason
+    L1L4GapRatio   float64         `json:"l1_l4_gap_ratio"` // 派生：L4 截断次数 / L1 声称完整次数
+}
+```
+
+`deriveInefficiencyFlags` 新增派生信号（对齐现有 flag 风格）：
+
+- `artifact_deref_heavy`：followup 占比 > 30%（解引用链普遍 >1 跳）
+- `l1_l4_gap_present`：`l1_l4_gap_ratio > 5%`（工具层与回显层预算竞争未消除——
+  这正是 H-1 要消灭的信号，P0-1/H-1 实施前后该 flag 的消失即是效果证据）
+- `archive_skipped_majority`：skipped 占比 > 80%（P1-1 阈值过严的信号）
+
+### 11.3 runtimeobserve 事件扩展
+
+在既有 `EventToolFinished` 的 metadata 上追加（不新增事件类型，避免动封闭目录）：
+
+```
+output_original_bytes, output_model_visible_bytes,
+output_truncated_by_lines, output_truncated_by_bytes,
+artifact_archived, artifact_id, pointer_notice_kind
+```
+
+同时 artifact_read 的 finished 事件带 `deref_source_id, deref_offset, deref_bytes`。
+会话回放与 session-analytics（`docs/plan/session-usage-analytics-and-agent-diagnostics-plan.md`
+的查询面）即可按会话聚合，无需新事件管道。
+
+### 11.4 埋点位置与依赖方向
+
+```
+toolkit/tools/view.go ─┐
+toolkit/tools/grep.go ─┼─→ observability.Record*   （import 方向已成立：
+artifact_read.go ──────┘        toolkit → observability 无环）
+output/gateway.go ─────┤
+output/tool_result_content.go ─┘  （output 包 import observability 需检查：
+                                   目前无依赖，但 observability 无反向依赖，安全）
+```
+
+**约束**：`internal/output` 引入 `observability` 前需确认 observability 不
+（直接或间接）import output——当前 observability 仅依赖标准库与自身，安全；
+若未来环了，退路是在 gateway 返回的 Envelope 上加观测字段、由
+`agent/loop.go` 汇聚点统一上报（loop 已 import 两侧）。
+
+### 11.5 指标与方案效果的映射（验收即读数）
+
+| 方案项 | 验收指标 | 期望变化 |
+|---|---|---|
+| P0-1/H-1 | `truncation_total{layer=l4_render}` / `truncation_total{layer=l1_view}` | L4 截断占比大幅下降，`l1_l4_gap_present` flag 消失 |
+| P0-2 | `truncation_total{layer=l4_render}`（grep 来源需靠事件 metadata 的 tool_name 维度离线聚合，不入标签） | 下降 |
+| P1-1 | `archive_total{disposition=skipped_below_threshold}` | 从 0 上升到真实小结果占比 |
+| P1-2 | `deref_total{page=followup}` 占比 | 从 ~50% 降到 <10% |
+| P2/H-2/H-3 | `deref_total` 绝对值 + `pointer_notice_total{kind}` | 解引用总量下降；deref_hint 类指针的转化率可对比 |
+| §10.5 成本论证 | `output_original_bytes` vs `output_model_visible_bytes` 直方图差 | 多轮会话累计折叠字节（即重复计费风险敞口）可量化 |
+
+### 11.6 实施顺序（独立于 §9 的功能实施，可先行）
+
+1. **O-1（先行，零风险）**：`gateway.go` + `artifact_read.go` 埋点 + 计数器/直方图定义——
+   在**改动前建立基线**，没有基线就无法证明 P0/P1 的效果
+2. **O-2**：`ToolEfficiencySnapshot` 扩展 + runtime status 暴露（对齐现有 snapshot 聚合模式与测试）
+3. **O-3（随功能项同步）**：view/grep/render 埋点随 P0-1/H-1/P0-2 一并落
+4. **O-4**：`runtimeobserve` EventToolFinished metadata 扩展（注意
+   `TestKnownEventTypeCatalogCoversLocalLoopEmits` 与 projector 归一化测试同步更新）
+
+O-1/O-2 预计半天工作量；基线数据采集一个真实工作日后即可支撑 §9 功能项的
+实施决策与验收。
+
+
+## 12. 前端观察页面与 HTTP 接口（usage 页面 + aicli micro web client）
+
+### 12.0 现状结论（先回答"是否已接入"）
+
+**后端已经暴露了观测数据，但两个前端消费面目前都没有使用它。** 具体：
+
+| 面 | 现状 | 证据 |
+|---|---|---|
+| runtime-server `/api/runtime/status` | `runtime_statusSnapshot` 已注入 `"tool_efficiency": observability.SnapshotToolEfficiency()`（handler.go:9765） | grep 实证 |
+| runtime-server `/api/runtime/observe/v1/*` | capabilities/snapshot/sessions/{id}/events 四端点在 `observe_handlers.go` 全部就绪 | handler.go:984 挂载 |
+| frontend `/usage` 页面（usage-analytics） | `analytics.ts` 只消费 `/api/runtime/analytics/*` 与 status 里**区块 A**（usage_analytics 健康）；`tool_efficiency` 快照**无任何消费代码**（全仓 grep `tool_efficiency|toolEfficiency` 在 frontend 下零命中） | grep 实证 |
+| aicli micro web client | 计划文档（aicli-micro-web-client-plan.md）只规划了 observe 平面四端点的透传页面，**未规划 tool_efficiency/artifact 流水视图**；且 micro client 与 frontend 是两套独立 UI，数据面不同（observe 平面 vs /api/runtime/analytics） | 计划文档 grep 实证 |
+| `AnalyticsToolStat`（/usage 工具统计面板数据源） | 现有字段只有 calls/failures/duration 分位/empty_results/retried_calls——**没有 artifact/truncation/deref 维度** | types/runtime/analytics.ts:261-275 |
+
+因此 §11 的指标落地后，若不做本节的消费端工作，观测数据将只存在于 status JSON 里，"看板缺口"会继续存在。
+
+### 12.1 数据通路设计（三条，按投入排序）
+
+**通路 1（推荐首选，改动最小）**：`/usage` 页面读取 status 快照里的 `tool_efficiency.artifact_flow`
+
+- `analytics.ts` 新增 `getToolEfficiencySnapshot()`：复用 `getUsageAnalyticsHealth` 的**静默降级模式**（403/网络失败/缺块一律返回 null，绝不打断主数据渲染——与 analytics.ts:212-218 注释声明的契约一致）。
+- 类型侧在 `types/runtime/analytics.ts` 增加 `AnalyticsArtifactFlow`（对齐 §11.2 的 `ArtifactFlowSnapshot` 字段），用与 `normalizeUsageAnalyticsHealth` 相同的 `readCount` 防御性归一化。
+- **注意**：`/api/runtime/status` 与 `/usage` 其它数据一样受 `authorizeUsageAdmin` 保护——需要 admin token header（`buildAnalyticsHeaders`），缺失时整个面板静默隐藏（与 error-patterns-panel 对 health 缺失的处理一致）。
+
+**通路 2（后端补一个只读分析端点，供 /usage 深页用）**：
+
+- `GET /api/runtime/analytics/artifact-flow?session=&from=&to=`，参数风格对齐 `AnalyticsToolStatsQuery`（session/tool/outcome/from/to/limit）。
+- 数据源二选一（P1 决策点）：
+  - 快路径：直接聚合 GlobalMetrics 计数器/直方图（进程内，重启即失忆——适合"当前状态"视图）；
+  - 慢路径：聚合 usage-analytics SQLite 里 `tool_finished` 事件的 metadata 字段（§11.3 追加的 `output_original_bytes` 等）——**支持跨重启历史窗口**，与 /usage 现有按时间窗查询的语义对齐，推荐此路。
+- 响应 schema 沿用 `schema_version + generated_at` 包络，避免 /usage 各面板各自发明 envelope。
+
+**通路 3（aicli micro web client）**：observe 平面已具备透传能力，micro client 只需在分析页加一个 "Artifact Flow" 卡片，直接 GET observe `/snapshot` 并选取 `tool_efficiency` 子对象渲染。**不新造接口**——aicli 本地 in-process 模式（chat_observe_http.go）与 runtime-server 模式（observe_handlers.go）返回同构快照，一张卡片两端通用。
+
+### 12.2 前端页面方案（/usage）
+
+在 usage-analytics 目录新增 `artifact-flow-panel.tsx`（命名与组件结构对齐 error-patterns-panel / subagent-stats-panel 的既有模式）：
+
+**面板内容（四块）**：
+
+1. **归档决策分布**（`tool_output_archive_total` by disposition）：archived / skipped_below_threshold / skipped_read_window / skipped_empty 横条图，直接回答"归档是否过严/过松"。
+2. **截断层位分布**（`tool_output_truncation_total` by layer）：l1_view / l1_grep / l4_render / shell_capture 四段。**核心看板信号：l1_view 与 l4_render 的比值**——P0-1/H-1 落地前后该比值的变化就是优化效果的直接可视化（对应 §11.5 验收映射）。
+3. **解引用行为**（`tool_artifact_deref_total`）：first vs followup 占比环形图 + `deref_miss` 分原因小表。followup 占比 > 30% 时面板渲染警告样式（对应 §11.2 的 `artifact_deref_heavy` flag）。
+4. **L1→L4 折叠量**（`tool_output_original_bytes` vs `tool_output_model_visible_bytes` 直方图均值差）：以"每工具调用平均折叠字节"单值大字呈现——这是 §10.5 成本论证（重复计费风险敞口）的最终消费指标。
+
+**降级矩阵**（对齐 overview.tsx 现有 health 处理模式）：
+
+| 情况 | 行为 |
+|---|---|
+| status 403 / 无 admin token | 整面板不渲染（非 error 横幅） |
+| snapshot 缺 `tool_efficiency` 块（旧后端） | 显示"后端版本不支持"占位，不报错 |
+| 数值全零 + ingested_total=0 | 显示"暂无数据"空态（对齐 error-patterns-panel 的 empty 态） |
+
+**i18n**：新增 key 全部挂 `observability.artifactFlow.*` 命名空间，与 error-patterns-panel 的 `observability.errors.*` 平级；中英两份 locale 同步补。
+
+**测试**：对齐现有 `observability-panels.test.tsx` 模式——normalize 函数表驱动测试（缺字段/类型错/全零）+ 面板空态/警告态快照。
+
+### 12.3 后端接口改动清单（供 §9 实施排序引用）
+
+| # | 改动 | 位置 | 依赖 |
+|---|---|---|---|
+| F-1 | status 快照 `tool_efficiency` 块扩展 `artifact_flow` 子对象 | `observability/tool_efficiency_snapshot.go` + handler.go:9765 不变（自动透传） | §11.2 O-2 |
+| F-2 | `GET /api/runtime/analytics/artifact-flow` 只读端点 | `internal/api/skills/analytics_handlers.go`（对齐现有 analytics 路由组 + `authorizeUsageAdmin`） | §11.3 事件 metadata 落库 |
+| F-3 | observe `/snapshot` 返回体确认含 `tool_efficiency`（若 observe projector 当前不透传则补一行映射） | `observe_handlers.go` / aicli `chat_observe_http.go` | 无 |
+| F-4 | frontend：`getToolEfficiencySnapshot()` + `AnalyticsArtifactFlow` 类型 + `artifact-flow-panel.tsx` + i18n + 测试 | usage-analytics 目录 | F-1 |
+| F-5 | aicli micro web client：分析页 Artifact Flow 卡片（纯透传渲染） | micro client 分析页 | F-3 |
+
+### 12.4 与既有方案章节的关系
+
+- **不改变 §11 的指标定义与埋点位置**——本节只是消费端，指标语义以 §11.2 为唯一权威。
+- **依赖方向**：O-1/O-2（基线埋点）先行 → F-1/F-3 透传 → F-4/F-5 前端消费。前端可在基线期同步开发（用 mock 快照开发，联调等 O-2 合入）。
+- **§8 遗留问题补充一条**：usage-analytics SQLite 的 `tool_finished` metadata 目前**不落库**（§11.3 的扩展字段需确认 collector→DB 的字段白名单），F-2 慢路径依赖此前置项，若白名单未开，F-2 先走快路径（进程内聚合）降级上线。

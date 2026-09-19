@@ -347,6 +347,63 @@ export const zhUsageAnalytics = {
       lastIngest: "最近写入 {{time}}",
       openLogs: "查看日志",
     },
+    artifactFlow: {
+      title: "Artifact 链路观测",
+      subtitle: "工具输出的归档 / 截断 / 指针提示 / artifact_read 解引用计数（§10.6 三档缓解的运行时证据）",
+      empty: "暂无数据",
+      capturedAt: "采集于 {{time}}",
+      flagsTitle: "效率信号（inefficiency_flags）",
+      noBreakdown: "无细分计数",
+      gapRatio: "L1/L4 竞争比例 {{ratio}}",
+      layerLabels: {
+        l1_model_envelope: "L1 模型信封",
+        l2_tool_result: "L2 工具结果",
+        l3_gateway_archive: "L3 网关归档",
+        l4_render: "L4 渲染层",
+        other: "其他",
+      },
+      dispositionLabels: {
+        inline: "保留内联",
+        archived: "归档",
+        pointer: "指针替换",
+        truncated: "截断",
+        other: "其他",
+      },
+      truncatedByLabels: {
+        model_context: "模型上下文窗口",
+        tool_result_limit: "工具结果上限",
+        render_cap: "渲染截断",
+        other: "其他",
+      },
+      pointerReasonLabels: {
+        archived: "已归档",
+        oversized: "超尺寸",
+        failed: "失败",
+        other: "其他",
+      },
+      derefReasonLabels: {
+        not_found: "未找到",
+        expired: "已过期",
+        too_large: "过大",
+        decode_error: "解码错误",
+        window_mismatch: "窗口不匹配",
+        other: "其他",
+      },
+      archives: {
+        title: "归档",
+      },
+      truncations: {
+        title: "截断",
+        gapRatio: "L1/L4 竞争比例 {{ratio}}",
+      },
+      pointer: {
+        title: "指针提示",
+      },
+      deref: {
+        title: "artifact_read 解引用",
+        followupRatio: "跟进读取比例 {{ratio}}",
+      },
+    },
     tools: {
       title: "工具调用观测",
       subtitle: "本会话按工具聚合的调用、失败与耗时",

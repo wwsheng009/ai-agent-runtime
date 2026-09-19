@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
@@ -16,12 +17,11 @@ import (
 )
 
 const (
-	// artifactReadDefaultLimitBytes keeps a single read comfortably below the
-	// model-visible tool text budget so dereferencing a pointer never triggers
-	// another truncation/pointer cascade.
-	artifactReadDefaultLimitBytes = 8 * 1024
-	// artifactReadHeaderReserveBytes reserves room for the window header plus
-	// the model-history wrapper that surrounds the raw bytes.
+	// artifactReadDefaultLimitBytes is a function (not a const) so the default
+	// window tracks the configured model-visible budget: the max single-window
+	// cap already guarantees window+header stays under the truncation
+	// threshold (no pointer cascade), so defaulting to the cap means a ~12 KiB
+	// artifact is dereferenced in a single read instead of two.
 	artifactReadHeaderReserveBytes = 512
 	// artifactReadMinLimitBytes is the floor used when the configured budget is
 	// unusually small; the tool still returns a useful window.
@@ -54,8 +54,8 @@ func NewArtifactReadTool() *ArtifactReadTool {
 			"limit": map[string]interface{}{
 				"type": "integer",
 				"description": fmt.Sprintf(
-					"本次最多返回的原始字节数，默认 %d；超出模型可见上限会被收敛。单次读取不会再次触发指针替换。",
-					artifactReadDefaultLimitBytes,
+					"本次最多返回的原始字节数，默认与单次上限一致（当前 %d 字节）；超出模型可见上限会被收敛。单次读取不会再次触发指针替换。",
+					artifactReadDefaultLimitBytes(),
 				),
 			},
 		},
@@ -102,25 +102,30 @@ func (a *ArtifactReadTool) Execute(ctx context.Context, params map[string]interf
 
 	id := normalizeArtifactReadID(p.ArtifactID)
 	if id == "" {
+		observability.RecordToolArtifactDerefMiss(observability.DerefMissReasonBadArgs)
 		return artifactReadFailure("artifact_id 不能为空：请传入工具结果末尾指针行中的 art_<32位hex> id"), nil
 	}
 
 	store := toolctx.ArtifactStore(ctx)
 	if store == nil {
+		observability.RecordToolArtifactDerefMiss(observability.DerefMissReasonNoStore)
 		return artifactReadFailure("artifact store 不可用：artifact_read 只能在运行时 agent 循环内执行"), nil
 	}
 
 	record, err := store.Get(ctx, id)
 	if err != nil {
+		observability.RecordToolArtifactDerefMiss(observability.DerefMissReasonNotFound)
 		return artifactReadFailure(fmt.Sprintf("读取 artifact 失败: %v", err)), nil
 	}
 	if record == nil {
+		observability.RecordToolArtifactDerefMiss(observability.DerefMissReasonNotFound)
 		return artifactReadFailure(fmt.Sprintf("artifact not found: %s", id)), nil
 	}
 
 	// Artifact 是会话内数据；指针只会出现在产生它的会话里。跨会话读取直接拒绝，
 	// 避免把另一个会话的原始输出带进当前上下文。
 	if active := toolctx.SessionID(ctx); active != "" && record.SessionID != "" && record.SessionID != active {
+		observability.RecordToolArtifactDerefMiss(observability.DerefMissReasonCrossSession)
 		return artifactReadFailure(fmt.Sprintf(
 			"artifact %s 属于会话 %s，不能在当前会话 %s 中读取",
 			record.ID, record.SessionID, active,
@@ -139,7 +144,7 @@ func (a *ArtifactReadTool) Execute(ctx context.Context, params map[string]interf
 	}
 	limit := p.Limit
 	if limit <= 0 {
-		limit = artifactReadDefaultLimitBytes
+		limit = artifactReadDefaultLimitBytes()
 	}
 	if maxLimit := artifactReadMaxLimitBytes(); limit > maxLimit {
 		limit = maxLimit
@@ -150,6 +155,10 @@ func (a *ArtifactReadTool) Execute(ctx context.Context, params map[string]interf
 	if end < start {
 		end = start
 	}
+	// O-1: dereference call distribution (first vs followup hop) and returned
+	// window size — the followup ratio approximates average dereference hops.
+	observability.RecordToolArtifactDeref(offset > 0)
+	observability.RecordToolOutputBytes(observability.MetricToolArtifactDerefBytes, observability.ArchiveLayerGateway, end-start)
 	// A tiny limit that lands mid-rune can snap back onto the window start and
 	// stall the page chain; always advance at least one full rune.
 	if end <= start && start < total {
@@ -201,6 +210,13 @@ func (a *ArtifactReadTool) Execute(ctx context.Context, params map[string]interf
 		Content:    builder.String(),
 		Metadata:   metadata,
 	}, nil
+}
+
+// artifactReadDefaultLimitBytes resolves the default page size: the full
+// max-window cap. The no-cascade guarantee (window + header <= budget) makes
+// this safe, and it halves the page count for budget-sized artifacts.
+func artifactReadDefaultLimitBytes() int {
+	return artifactReadMaxLimitBytes()
 }
 
 // artifactReadMaxLimitBytes resolves the byte cap for a single window from the

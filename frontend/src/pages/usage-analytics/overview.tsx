@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import {
   getAnalyticsSubagents,
+  getToolEfficiencySnapshot,
   getUsageAnalyticsHealth,
   listAnalyticsErrors,
 } from "@/api/runtime/analytics";
@@ -15,6 +16,7 @@ import type {
   AnalyticsGroupBy,
   AnalyticsSessionRollup,
   AnalyticsSubagentStatsSummary,
+  AnalyticsToolEfficiencySnapshot,
   AnalyticsUsageHealth,
 } from "@/types/runtime";
 import { AlertTriangleIcon, RotateCcwIcon, SearchIcon, ShieldIcon } from "lucide-react";
@@ -23,6 +25,7 @@ import { useTranslation } from "react-i18next";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { adminTokenStorageKey, analyticsFilterKeys, dimensionOptions, errorRate, formatNumber, formatPercent, formatTimestamp, normalizeDimensions, readAdminToken } from "./format";
+import { ArtifactFlowPanel } from "./artifact-flow-panel";
 import { emptyCoverage, emptyDimensions, emptyTotals } from "./defaults";
 import { AnalyticsHeader, FilterInput, FilterSelect, Metric, QualityNotice, UsageAnalyticsChartsFallback } from "./primitives";
 import { UsageQuotaPanel } from "./quota";
@@ -61,6 +64,8 @@ export function UsageOverview() {
   const [failureFilter, setFailureFilter] = useState<string | null>(null);
   const [observabilityError, setObservabilityError] = useState<string | null>(null);
   const [health, setHealth] = useState<AnalyticsUsageHealth | null>(null);
+  // F-4：Artifact Flow 观测快照（runtime.tool_efficiency，静默降级 null）。
+  const [toolEfficiency, setToolEfficiency] = useState<AnalyticsToolEfficiencySnapshot | null>(null);
   // 批次 7.2：Provider & 模型分布（独立于主 group_by 视图）。
   const [providerGroups, setProviderGroups] = useState<AnalyticsGroupBucket[]>([]);
   const [modelGroups, setModelGroups] = useState<AnalyticsGroupBucket[]>([]);
@@ -100,7 +105,7 @@ export function UsageOverview() {
   // 由独立 effect 延迟加载（Phase 4 首屏瘦身）。
   const loadObservability = useCallback(async () => {
     setObservabilityError(null);
-    const [subagents, errors, usageHealth] = await Promise.all([
+    const [subagents, errors, usageHealth, toolEfficiency] = await Promise.all([
       // 子代理摘要用于「子代理失败率」指标卡：summary 由后端按 limit 内记录聚合，
       // 取最大行数（200）保证全局口径，而不是只取 1 行的假摘要。
       getAnalyticsSubagents({ adminToken, limit: 200 }).catch((caught) => {
@@ -112,10 +117,12 @@ export function UsageOverview() {
         return null;
       }),
       getUsageAnalyticsHealth({ adminToken }),
+      getToolEfficiencySnapshot({ adminToken }),
     ]);
     setSubagentSummary(subagents?.summary ?? null);
     setFailurePatterns(errors?.patterns ?? []);
     setHealth(usageHealth);
+    setToolEfficiency(toolEfficiency);
   }, [adminToken]);
 
   const load = useCallback(async () => {
@@ -267,6 +274,8 @@ export function UsageOverview() {
           </section>
 
           <UsageQuotaPanel adminToken={adminToken} />
+
+          <ArtifactFlowPanel snapshot={toolEfficiency} loading={false} />
 
           <Suspense fallback={<UsageAnalyticsChartsFallback />}>
             <UsageAnalyticsCharts

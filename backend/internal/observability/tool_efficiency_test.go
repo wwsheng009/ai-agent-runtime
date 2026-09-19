@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -79,6 +80,43 @@ func TestRecordToolOutcome(t *testing.T) {
 		LabelOutcome:   ToolOutcomeUnknown,
 		LabelErrorCode: "none",
 	}, 1)
+}
+
+func TestRecordToolFailureUsesStructuredBoundedDimensions(t *testing.T) {
+	prev := GlobalMetrics
+	GlobalMetrics = NewRegistry()
+	t.Cleanup(func() { GlobalMetrics = prev })
+
+	RecordToolFailure("edit", "STALE_CONTEXT", "stale_context", false)
+	RecordToolFailure("sourcegraph", "UPSTREAM_RATE_LIMITED", "upstream_rate_limit", true)
+	RecordToolFailure("bad name with spaces", strings.Repeat("X", 100), "free-form-cardinality", false)
+
+	assertCounter(t, MetricToolFailureTotal, map[string]string{
+		LabelToolName:     "edit",
+		LabelErrorCode:    "STALE_CONTEXT",
+		LabelFailureClass: "stale_context",
+		LabelRetryable:    "false",
+	}, 1)
+	assertCounter(t, MetricToolFailureTotal, map[string]string{
+		LabelToolName:     "sourcegraph",
+		LabelErrorCode:    "UPSTREAM_RATE_LIMITED",
+		LabelFailureClass: "upstream_rate_limit",
+		LabelRetryable:    "true",
+	}, 1)
+	assertCounter(t, MetricToolFailureTotal, map[string]string{
+		LabelToolName:     "other",
+		LabelErrorCode:    strings.Repeat("X", 64),
+		LabelFailureClass: "unknown",
+		LabelRetryable:    "false",
+	}, 1)
+
+	snap := SnapshotToolEfficiency()
+	if snap.Failures.Total != 3 ||
+		snap.Failures.ByErrorCode["STALE_CONTEXT"] != 1 ||
+		snap.Failures.ByFailureClass["upstream_rate_limit"] != 1 ||
+		snap.Failures.ByRetryable["true"] != 1 {
+		t.Fatalf("unexpected failure snapshot: %#v", snap.Failures)
+	}
 }
 
 func TestRecordToolDispositionReplay(t *testing.T) {

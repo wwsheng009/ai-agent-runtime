@@ -12,6 +12,8 @@ import (
 	"unicode/utf8"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
+	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -32,12 +34,28 @@ const viewBatchDefaultLimit = 200
 const viewCompactHeadLines = 10
 
 // viewDefaultLimit is the default window size when callers omit limit.
-// Large files should still be segmented with explicit offset/limit.
-const viewDefaultLimit = 2000
+// It is intentionally small: the L4 echo layer folds model-visible text at
+// ModelToolTextByteBudget (12 KiB ≈ 150~300 code lines), so a 2000-line
+// default window was guaranteed to be re-truncated there — pushing models
+// onto the artifact_read byte-paging path and bypassing view's own
+// offset/limit continuation protocol. Large files should still be segmented
+// with explicit offset/limit.
+const viewDefaultLimit = 400
 
 // viewEfficiencyAdvisoryThreshold marks when a default-size leading window is
 // large enough that models should prefer narrower ranges or continue via offset.
 const viewEfficiencyAdvisoryThreshold = 2000
+
+// viewByteBudgetReserveRatio caps accumulated rendered bytes at this fraction
+// of the model-visible tool text budget so a "full" view window never hits
+// the L4 head/tail fold. The remaining budget covers line numbers, the
+// efficiency advisory, and metadata wrapping.
+const viewByteBudgetReserveRatio = 0.7
+
+// viewByteBudgetBytes resolves the in-tool byte stop condition.
+func viewByteBudgetBytes() int {
+	return int(float64(output.ModelToolTextByteBudget()) * viewByteBudgetReserveRatio)
+}
 
 // ViewTool 文件查看工具
 type ViewTool struct {
@@ -63,7 +81,7 @@ func NewViewTool() *ViewTool {
 					"properties": map[string]interface{}{
 						"file_path": map[string]interface{}{"type": "string", "description": "文件路径。"},
 						"offset":    map[string]interface{}{"type": "integer", "description": "0-based 起始行，默认 0。"},
-						"limit":     map[string]interface{}{"type": "integer", "description": "读取行数，默认 2000。"},
+						"limit":     map[string]interface{}{"type": "integer", "description": "读取行数，默认 400。"},
 					},
 					"required":             []string{"file_path"},
 					"additionalProperties": false,
@@ -79,7 +97,7 @@ func NewViewTool() *ViewTool {
 			},
 			"limit": map[string]interface{}{
 				"type":        "integer",
-				"description": "读取行数，默认 2000；结果会标记 eof 和 is_truncated，以及 suggested_next_offset，便于按需继续。大文件优先更小 limit。",
+				"description": "读取行数，默认 400；结果会标记 eof 和 is_truncated，以及 suggested_next_offset，便于按需继续。大文件优先更小 limit。",
 			},
 		},
 		"required": []string{},
@@ -217,7 +235,8 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 		}, nil
 	}
 
-	// 读取文件
+	// 读取 limit 行（字节感知：累计输出超过模型可见预算的预留比例时提前停止，
+	// 避免窗口被回显层 head/tail 折叠、把续读路径架空）
 	content, readMeta, err := v.readFile(resolvedPath, p.Offset, p.Limit)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -257,6 +276,19 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 			"is_truncated": readMeta.HasMore,
 		},
 	}
+	if readMeta.ByteBudgetApplied {
+		result.Metadata["byte_budget_applied"] = true
+	}
+	// §10.6 honest-truncation contract: surface in-line loss instead of a
+	// silent "...", so the model knows what it did not see and can decide
+	// whether a second targeted read is worth the cost.
+	if readMeta.LongLinesTruncated > 0 {
+		result.Metadata["long_lines_truncated"] = readMeta.LongLinesTruncated
+		result.Metadata["hidden_bytes"] = readMeta.HiddenBytes
+	}
+	if readMeta.OriginalBytes > 0 {
+		observability.RecordToolOutputBytes(observability.MetricToolOutputOriginalBytes, observability.TruncationLayerView, readMeta.OriginalBytes)
+	}
 	if readMeta.TotalLinesKnown {
 		result.Metadata["total_lines"] = readMeta.TotalLines
 	}
@@ -277,9 +309,13 @@ func attachViewEfficiencyHints(result *toolkit.ToolResult, request ViewFileReque
 		}
 		result.Metadata["suggested_next_offset"] = nextOffset
 	}
-	// Soft-warn only for default-sized leading windows that still truncated.
-	// Explicit small ranges are already efficient; EOF windows need no advisory.
-	if !readMeta.HasMore || request.Offset != 0 || request.Limit < viewEfficiencyAdvisoryThreshold {
+	// Soft-warn when a leading window still truncated: default-size windows
+	// (or byte-budget-stopped windows) need continuation guidance; explicit
+	// small ranges are already efficient; EOF windows need no advisory.
+	if !readMeta.HasMore || request.Offset != 0 {
+		return
+	}
+	if request.Limit < viewDefaultLimit && !readMeta.ByteBudgetApplied {
 		return
 	}
 	nextOffset, _ := result.Metadata["suggested_next_offset"].(int)
@@ -410,6 +446,43 @@ type viewReadResult struct {
 	LinesRead       int
 	HasMore         bool
 	EOF             bool
+	// ByteBudgetApplied marks windows stopped by the byte budget rather than
+	// the line limit, so callers can distinguish the truncation cause.
+	ByteBudgetApplied bool
+	// LongLinesTruncated counts lines cut by the in-line guard so the honest
+	// truncation contract (plan §10.6) can surface how much was hidden.
+	LongLinesTruncated int
+	// HiddenBytes is the byte size of the hidden remainder of over-limit
+	// in-line-truncated lines within this window.
+	HiddenBytes int
+	// OriginalBytes is the raw window byte size before the in-line guard.
+	OriginalBytes int
+}
+
+// viewMaxLineChars bounds a single rendered line (plan L1).
+const viewMaxLineChars = 2000
+
+// viewLongLineMarker replaces the hidden remainder of an over-limit line.
+// It is honest by construction: the model sees that content was cut and how
+// many characters remain hidden, instead of a bare silent "...".
+const viewLongLineMarker = "…[line truncated: %d more chars]"
+
+// truncateLongLine keeps a rune-safe prefix of an over-limit line and appends
+// the honest marker reporting the hidden rune count. It returns the visible
+// text and the hidden byte count for loss accounting.
+func truncateLongLine(line string) (visible string, hiddenBytes int) {
+	runes := []rune(line)
+	if len(runes) <= viewMaxLineChars {
+		return line, 0
+	}
+	marker := fmt.Sprintf(viewLongLineMarker, len(runes)-viewMaxLineChars)
+	markerRunes := len([]rune(marker))
+	prefixRunes := viewMaxLineChars - markerRunes
+	if prefixRunes < 0 {
+		prefixRunes = 0
+	}
+	visible = string(runes[:prefixRunes]) + marker
+	return visible, len(line) - len(string(runes[:prefixRunes]))
 }
 
 // readFile 读取文件内容
@@ -441,18 +514,37 @@ func (v *ViewTool) readFile(filePath string, offset, limit int) (string, viewRea
 		return fmt.Sprintf("Reached end of file: offset %d is beyond total lines %d.", offset, meta.TotalLines), meta, nil
 	}
 
-	// 读取 limit 行
+	// 读取 limit 行，同时做字节感知提前停止
 	readCount := 0
+	accumulated := 0
+	byteBudget := viewByteBudgetBytes()
 	for readCount < limit && scanner.Scan() {
-		line := scanner.Text()
+		raw := scanner.Text()
 		meta.TotalLines++
+		meta.OriginalBytes += len(raw) + 1 // + newline
 
-		// 跳过过长的行
-		if utf8.RuneCountInString(line) > 2000 {
-			line = string([]rune(line)[:2000]) + "..."
+		// 行内诚实截断：标记隐藏余量并计入丢失字节，而不是静默丢弃。
+		var line string
+		if utf8.RuneCountInString(raw) > viewMaxLineChars {
+			var hidden int
+			line, hidden = truncateLongLine(raw)
+			meta.LongLinesTruncated++
+			meta.HiddenBytes += hidden
+			observability.RecordToolOutputTruncation(observability.TruncationLayerView, observability.TruncatedByBytes)
+		} else {
+			line = raw
+		}
+
+		lineBytes := len(line) + 12 // rendered prefix "<lineNum>: " + newline
+		if readCount > 0 && accumulated+lineBytes > byteBudget {
+			meta.HasMore = true
+			meta.ByteBudgetApplied = true
+			observability.RecordToolOutputTruncation(observability.TruncationLayerView, observability.TruncatedByBytes)
+			break
 		}
 
 		lines = append(lines, line)
+		accumulated += lineBytes
 		readCount++
 	}
 	meta.LinesRead = readCount
@@ -464,6 +556,7 @@ func (v *ViewTool) readFile(filePath string, offset, limit int) (string, viewRea
 	if scanner.Scan() {
 		meta.TotalLines++
 		meta.HasMore = true
+		observability.RecordToolOutputTruncation(observability.TruncationLayerView, observability.TruncatedByLines)
 	}
 	if err := scanner.Err(); err != nil {
 		return "", meta, err

@@ -775,8 +775,8 @@ func TestModelArtifactNotice_NewFormatCarriesTailAndConsumerHint(t *testing.T) {
 	envelope := &Envelope{
 		ArtifactIDs: []string{"art_ef182934f39842729c57899a488a7ea3"},
 		Metadata: map[string]interface{}{
-			"artifact_id": "art_ef182934f39842729c57899a488a7ea3",
-			"raw_bytes":   12345,
+			"artifact_id":          "art_ef182934f39842729c57899a488a7ea3",
+			"raw_bytes":            12345,
 			toolresult.MetadataKey: toolresult.KindText,
 		},
 	}
@@ -854,14 +854,56 @@ func TestFormatTruncatedToolTextForModel_ExtractsFirstErrorLine(t *testing.T) {
 	}
 }
 
+// TestRenderToolTextForModelHistory_EmbedsContinuationHintInFoldMarker pins P2:
+// when a large body is folded head/tail, the fold marker itself must carry the
+// exact artifact_read continuation command so the model never wanders.
+func TestRenderToolTextForModelHistory_EmbedsContinuationHintInFoldMarker(t *testing.T) {
+	const id = "art_ab12cd34ef56ab12cd34ef56ab12cd34"
+	envelope := &Envelope{
+		ToolCallID:  "call-cont-hint",
+		ArtifactIDs: []string{id},
+		Metadata: map[string]interface{}{
+			"artifact_id":          id,
+			"raw_bytes":            60000,
+			toolresult.MetadataKey: toolresult.KindText,
+			toolresult.SourceKey:   toolresult.SourceMCP,
+		},
+	}
+	content := strings.Repeat("x", 2*modelToolTextByteBudget)
+	got := renderToolTextForModelHistory(content, "", envelope)
+	if !strings.Contains(got, "read via artifact_read(artifact_id="+id+", offset=<bytes>, limit=<bytes>)") {
+		t.Fatalf("expected continuation hint with id in fold marker, got tail %q", got[len(got)-400:])
+	}
+	if !strings.Contains(got, "omitted") {
+		t.Fatalf("expected fold marker, got %q", got[len(got)-400:])
+	}
+
+	// Small untruncated successful results must NOT grow the hint.
+	small := strings.Repeat("y", 100)
+	envelope2 := &Envelope{
+		ToolCallID:  "call-cont-hint-small",
+		ArtifactIDs: []string{id},
+		Metadata: map[string]interface{}{
+			"artifact_id":          id,
+			"raw_bytes":            100,
+			toolresult.MetadataKey: toolresult.KindText,
+			toolresult.SourceKey:   toolresult.SourceMCP,
+		},
+	}
+	got2 := renderToolTextForModelHistory(small, "", envelope2)
+	if strings.Contains(got2, "read via artifact_read") {
+		t.Fatalf("untruncated result must not carry continuation hint, got %q", got2)
+	}
+}
+
 func TestRenderToolResultContentForModel_PreservesNoticeAcrossTruncationPaths(t *testing.T) {
 	const id = "art_ef182934f39842729c57899a488a7ea3"
 	envelope := &Envelope{
-		ToolCallID: "call-artifact-trunc",
+		ToolCallID:  "call-artifact-trunc",
 		ArtifactIDs: []string{id},
 		Metadata: map[string]interface{}{
-			"artifact_id": id,
-			"raw_bytes":   60000,
+			"artifact_id":          id,
+			"raw_bytes":            60000,
 			toolresult.MetadataKey: toolresult.KindText,
 		},
 	}
@@ -882,7 +924,7 @@ func TestRenderToolResultContentForModel_PreservesNoticeAcrossTruncationPaths(t 
 	smallEnvelope := &Envelope{
 		ArtifactIDs: []string{id},
 		Metadata: map[string]interface{}{
-			"artifact_id": id,
+			"artifact_id":          id,
 			toolresult.MetadataKey: toolresult.KindText,
 		},
 	}
@@ -890,5 +932,32 @@ func TestRenderToolResultContentForModel_PreservesNoticeAcrossTruncationPaths(t 
 	gotSmall := RenderToolResultContentForModel(smallBody, "", smallEnvelope)
 	if !strings.Contains(gotSmall, "Full raw output artifact_id: "+id) {
 		t.Fatalf("expected artifact notice preserved at budget boundary, got %q", gotSmall)
+	}
+}
+
+// TestFormatTruncatedToolTextForModel_NeverExceedsBudget pins the hard ceiling:
+// header + head + fold marker + tail must stay within the requested budget for
+// every budget size, including ones smaller than the head/tail usability floor
+// and ones where the artifact dereference hint lengthens the fold marker.
+func TestFormatTruncatedToolTextForModel_NeverExceedsBudget(t *testing.T) {
+	const id = "art_ab12cd34ef56ab12cd34ef56ab12cd34"
+	// Single-line content has no line-boundary snapping slack, so head+tail
+	// fill the body budget exactly; that makes any marker-reserve shortfall
+	// show up immediately as an over-budget render.
+	singleLine := strings.Repeat("x", 2*modelToolTextByteBudget)
+	multiLine := "2026-01-01 ERROR failed to process\n" +
+		strings.Repeat("0123456789abcdefghijklmnopqrstuvwxyz\n", 400)
+
+	budgets := []int{1, 64, 256, 512, 1024, 4096, 12 * 1024, 64 * 1024}
+	for _, content := range []string{singleLine, multiLine} {
+		for _, budget := range budgets {
+			for _, pointer := range []string{"", id} {
+				got := formatTruncatedToolTextForModel(content, budget, pointer)
+				if len(got) > budget {
+					t.Fatalf("budget %d (pointer=%q): rendered %d bytes, exceeds budget by %d",
+						budget, pointer, len(got), len(got)-budget)
+				}
+			}
+		}
 	}
 }

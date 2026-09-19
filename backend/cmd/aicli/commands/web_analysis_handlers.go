@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	usageanalytics "github.com/wwsheng009/ai-agent-runtime/internal/usageanalytics"
 )
 
@@ -28,6 +29,9 @@ import (
 //	GET /web/api/analysis/tools      工具维度聚合（ToolStatsResult）
 //	GET /web/api/analysis/subagents  子代理维度聚合（SubagentStatsResult）
 //	GET /web/api/analysis/errors     失败模式 Top-N（ErrorPatternsResult）
+//	GET /web/api/analysis/tool_efficiency  工具效率 / Artifact 链路快照
+//	（observability.ToolEfficiencySnapshot，与 runtime /api/runtime/status 的
+//	runtime.tool_efficiency 块同一结构体、同一 JSON tag —— 契约只定义一次）。
 //
 // 降级（与缓存端点同形，§9.1）：
 //   - 无活动会话 / 分析服务未挂载 → 503 + 稳定码 analytics_disabled；
@@ -67,6 +71,13 @@ func HandleChatWebAPIAnalysis(w http.ResponseWriter, r *http.Request) {
 	// 健康端点先于服务检查：服务缺失不是错误，而是 attached=false 的降级事实。
 	if chatWebAnalysisSubPath(r.URL.Path) == "status" {
 		writeWebAPIJSON(w, http.StatusOK, chatWebAnalysisStatusPayload(session, service))
+		return
+	}
+	// 工具效率快照来自进程内 observability.GlobalMetrics（工具环遥测），不依赖
+	// usageanalytics 服务：与 /status 一样先于 service==nil 检查返回。计数器是
+	// 进程级聚合，scope 过滤不适用（返回全量快照，前端不做会话切片）。
+	if chatWebAnalysisSubPath(r.URL.Path) == "tool_efficiency" {
+		writeWebAPIJSON(w, http.StatusOK, observability.SnapshotToolEfficiency())
 		return
 	}
 	if service == nil {

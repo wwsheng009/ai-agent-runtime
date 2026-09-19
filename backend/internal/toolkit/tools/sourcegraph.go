@@ -4,18 +4,23 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
+
+const sourcegraphErrorBodyPreviewBytes int64 = 4 << 10
 
 // SourcegraphTool 代码搜索工具
 type SourcegraphTool struct {
@@ -174,13 +179,45 @@ query Search($query: String!, $first: Int!) {
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("请求失败: %w", err),
-		}, nil
+		code := string(runtimeerrors.ErrNetworkUnavailable)
+		failureClass := "network"
+		nextAction := "Check Sourcegraph/network availability, then retry with bounded backoff."
+		if errors.Is(err, context.DeadlineExceeded) || isSourcegraphTimeout(err) {
+			code = string(runtimeerrors.ErrNetworkTimeout)
+			failureClass = "timeout"
+			nextAction = "The Sourcegraph request timed out; narrow the query or retry after the upstream recovers."
+		}
+		return toolResultFailureWithCode(
+			fmt.Errorf("Sourcegraph request failed: %w", err),
+			code,
+			nextAction,
+			map[string]interface{}{
+				"failure_class": failureClass,
+				"retryable":     true,
+			},
+		), nil
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		preview, truncated, readErr := readSourcegraphErrorPreview(resp.Body)
+		if readErr != nil {
+			return toolResultFailureWithCode(
+				fmt.Errorf("failed to read Sourcegraph HTTP %d error response: %w", resp.StatusCode, readErr),
+				string(runtimeerrors.ErrNetworkUnavailable),
+				"Retry after checking Sourcegraph/network availability.",
+				sourcegraphHTTPFailureMetadata(resp, "response_read", true, truncated),
+			), nil
+		}
+		code, failureClass, retryable, nextAction := classifySourcegraphHTTPFailure(resp.StatusCode, preview)
+		metadata := sourcegraphHTTPFailureMetadata(resp, failureClass, retryable, truncated)
+		return toolResultFailureWithCode(
+			fmt.Errorf("Sourcegraph HTTP %d: %s", resp.StatusCode, preview),
+			code,
+			nextAction,
+			metadata,
+		), nil
+	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -188,14 +225,6 @@ query Search($query: String!, $first: Int!) {
 			Success:    false,
 			OutputKind: toolresult.KindText,
 			Error:      fmt.Errorf("读取响应失败: %w", err),
-		}, nil
-	}
-
-	if resp.StatusCode != 200 {
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("API 错误 (状态码 %d): %s", resp.StatusCode, string(body)),
 		}, nil
 	}
 
@@ -321,6 +350,84 @@ query Search($query: String!, $first: Int!) {
 		Content:    output.String(),
 		Metadata:   metadata,
 	}, nil
+}
+
+func readSourcegraphErrorPreview(body io.Reader) (preview string, truncated bool, err error) {
+	if body == nil {
+		return "", false, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(body, sourcegraphErrorBodyPreviewBytes+1))
+	if err != nil {
+		return "", false, err
+	}
+	if int64(len(data)) > sourcegraphErrorBodyPreviewBytes {
+		data = data[:sourcegraphErrorBodyPreviewBytes]
+		truncated = true
+	}
+	preview = strings.TrimSpace(string(data))
+	if preview == "" {
+		preview = http.StatusText(http.StatusBadGateway)
+	}
+	if truncated {
+		preview += " … [truncated]"
+	}
+	return preview, truncated, nil
+}
+
+func classifySourcegraphHTTPFailure(statusCode int, preview string) (code, failureClass string, retryable bool, nextAction string) {
+	switch statusCode {
+	case http.StatusUnauthorized:
+		return "UPSTREAM_AUTHENTICATION_FAILED", "upstream_authentication", false,
+			"Verify Sourcegraph credentials before retrying."
+	case http.StatusForbidden:
+		failureClass = "upstream_policy"
+		if strings.Contains(strings.ToLower(preview), "firewall block") {
+			failureClass = "upstream_firewall_block"
+		}
+		return "UPSTREAM_POLICY_DENIED", failureClass, false,
+			"Sourcegraph denied the request by access policy; do not retry unchanged. Use another code-search source or update the network policy."
+	case http.StatusTooManyRequests:
+		return "UPSTREAM_RATE_LIMITED", "upstream_rate_limit", true,
+			"Respect Retry-After/reset when present, then retry once or use another code-search source."
+	default:
+		if statusCode >= http.StatusInternalServerError {
+			return "UPSTREAM_UNAVAILABLE", "upstream_server", true,
+				"Retry with bounded backoff, then use another code-search source if Sourcegraph remains unavailable."
+		}
+		return "UPSTREAM_HTTP_ERROR", "upstream_http", false,
+			"Inspect the HTTP status and bounded response preview; correct the request before retrying."
+	}
+}
+
+func sourcegraphHTTPFailureMetadata(resp *http.Response, failureClass string, retryable, truncated bool) map[string]interface{} {
+	metadata := map[string]interface{}{
+		"failure_class":          failureClass,
+		"retryable":              retryable,
+		"http_status":            resp.StatusCode,
+		"content_type":           strings.TrimSpace(resp.Header.Get("Content-Type")),
+		"body_preview_truncated": truncated,
+	}
+	if requestID := sourcegraphRequestID(resp.Header); requestID != "" {
+		metadata["request_id"] = requestID
+	}
+	if retryAfter := strings.TrimSpace(resp.Header.Get("Retry-After")); retryAfter != "" {
+		metadata["retry_after"] = retryAfter
+	}
+	return metadata
+}
+
+func sourcegraphRequestID(header http.Header) string {
+	for _, key := range []string{"X-Request-ID", "X-Trace-ID", "Traceparent"} {
+		if value := strings.TrimSpace(header.Get(key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func isSourcegraphTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 // buildSearchURL 构建搜索 URL（备用方法，使用 REST API）

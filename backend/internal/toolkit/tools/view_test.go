@@ -217,8 +217,16 @@ func TestViewTool_LongUnicodeLineIsReadableAndTruncatedSafely(t *testing.T) {
 	if !utf8.ValidString(result.Content) {
 		t.Fatalf("expected valid UTF-8 after truncation")
 	}
-	if !strings.HasSuffix(result.Content, "...") {
+	// Honest truncation: the marker reports the hidden remainder instead of
+	// a silent "..." (plan §10.6).
+	if !strings.HasSuffix(result.Content, "]") {
 		t.Fatalf("expected long line truncation marker, got suffix %q", result.Content[len(result.Content)-10:])
+	}
+	if got, _ := result.Metadata["long_lines_truncated"].(int); got != 1 {
+		t.Fatalf("expected long_lines_truncated=1, got %#v", result.Metadata["long_lines_truncated"])
+	}
+	if got, _ := result.Metadata["hidden_bytes"].(int); got <= 0 {
+		t.Fatalf("expected hidden_bytes > 0, got %#v", result.Metadata["hidden_bytes"])
 	}
 }
 
@@ -277,6 +285,43 @@ func TestViewTool_DefaultWindowTruncationEmitsEfficiencyAdvisory(t *testing.T) {
 	}
 	if !strings.Contains(result.Content, "[efficiency]") || !strings.Contains(result.Content, "offset=") {
 		t.Fatalf("expected efficiency advisory text in content, got %q", result.Content)
+	}
+}
+
+// TestViewTool_DefaultWindowStaysWithinByteBudget pins P0-1: a default-size
+// window over a wide-content file must stop inside the model-visible byte
+// budget (byte_budget_applied=true), never relying on the L4 echo layer fold.
+func TestViewTool_DefaultWindowStaysWithinByteBudget(t *testing.T) {
+	root := t.TempDir()
+	budget := viewByteBudgetBytes()
+	var body strings.Builder
+	line := strings.Repeat("a", 300)
+	for i := 0; i < 800; i++ {
+		fmt.Fprintf(&body, "%s\n", line)
+	}
+	if err := os.WriteFile(filepath.Join(root, "wide.txt"), []byte(body.String()), 0o644); err != nil {
+		t.Fatalf("write wide file: %v", err)
+	}
+	tool := NewViewTool()
+	tool.SetBasePath(root)
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"file_path": "wide.txt",
+	})
+	if err != nil || !result.Success {
+		t.Fatalf("expected success, result=%#v err=%v", result, err)
+	}
+	if result.Metadata["is_truncated"] != true {
+		t.Fatalf("expected byte-budget truncated window, got %#v", result.Metadata)
+	}
+	if result.Metadata["byte_budget_applied"] != true {
+		t.Fatalf("expected byte_budget_applied=true, got %#v", result.Metadata)
+	}
+	next, ok := result.Metadata["suggested_next_offset"].(int)
+	if !ok || next <= 0 || next >= 800 {
+		t.Fatalf("expected suggested_next_offset pointing before EOF (line 800), got %#v", result.Metadata["suggested_next_offset"])
+	}
+	if len(result.Content) > budget+4096 { // advisory tail allowance
+		t.Fatalf("content %d bytes exceeds byte budget %d (+advisory)", len(result.Content), budget)
 	}
 }
 

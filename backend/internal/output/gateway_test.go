@@ -20,12 +20,14 @@ func TestGateway_StoresRawOutputAndReturnsReducedEnvelope(t *testing.T) {
 	defer func() { _ = store.Close() }()
 
 	gateway := NewGateway(store, NewTextReducer(80, 3))
+	// Body comfortably above the P1-1 archive tiering threshold (budget/12 ≈ 1 KiB)
+	// so the store path is exercised.
 	rawOutput := strings.Join([]string{
 		"line 1: preparing",
 		"line 2: unique-needle",
 		"line 3: details",
 		"line 4: more details",
-		"line 5: tail",
+		"line 5: tail " + strings.Repeat("pad ", 400),
 	}, "\n")
 
 	envelope, err := gateway.Process(context.Background(), RawToolResult{
@@ -88,6 +90,54 @@ func TestGateway_StoresRawOutputAndReturnsReducedEnvelope(t *testing.T) {
 	}
 }
 
+// TestGateway_SkipsArchiveBelowTieringThreshold pins P1-1: tiny results are
+// fully model-visible and never dereferenced, so archiving them only creates
+// store/search noise. Below-threshold results must not produce artifact ids.
+func TestGateway_SkipsArchiveBelowTieringThreshold(t *testing.T) {
+	store, err := artifact.NewStore(nil)
+	if err != nil {
+		t.Fatalf("create artifact store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	gateway := NewGateway(store)
+	tiny := "no matches found"
+
+	envelope, err := gateway.Process(context.Background(), RawToolResult{
+		SessionID:  "session-1",
+		ToolName:   "grep",
+		ToolCallID: "call-tiny",
+		Content:    tiny,
+	})
+	if err != nil {
+		t.Fatalf("process tiny output: %v", err)
+	}
+	if len(envelope.ArtifactIDs) != 0 {
+		t.Fatalf("expected no artifact id below threshold, got %v", envelope.ArtifactIDs)
+	}
+	if got, _ := envelope.Metadata["artifact_skipped"].(string); got != "below_threshold" {
+		t.Fatalf("expected artifact_skipped=below_threshold, got %#v", envelope.Metadata["artifact_skipped"])
+	}
+
+	// Just above the threshold the archive path must still engage.
+	large := strings.Repeat("z", artifactArchiveMinBytes()+10)
+	envelope2, err := gateway.Process(context.Background(), RawToolResult{
+		SessionID:  "session-1",
+		ToolName:   "grep",
+		ToolCallID: "call-large",
+		Content:    large,
+	})
+	if err != nil {
+		t.Fatalf("process large output: %v", err)
+	}
+	if len(envelope2.ArtifactIDs) != 1 {
+		t.Fatalf("expected artifact id above threshold, got %v", envelope2.ArtifactIDs)
+	}
+	if _, exists := envelope2.Metadata["artifact_skipped"]; exists {
+		t.Fatalf("unexpected artifact_skipped metadata above threshold: %#v", envelope2.Metadata["artifact_skipped"])
+	}
+}
+
 func TestGateway_DefaultReducers_HandleCommonFormats(t *testing.T) {
 	store, err := artifact.NewStore(nil)
 	if err != nil {
@@ -103,17 +153,18 @@ func TestGateway_DefaultReducers_HandleCommonFormats(t *testing.T) {
 	}{
 		{
 			name: "json",
-			content: `{
+			content: fmt.Sprintf(`{
   "status": "ok",
-  "items": [{"id":"a"},{"id":"b"}]
-}`,
+  "items": [{"id":"a"},{"id":"b"}],
+  "pad": %q
+}`, strings.Repeat("x", artifactArchiveMinBytes())),
 			expectedReducer: "json_summary",
 		},
 		{
 			name: "table",
 			content: strings.Join([]string{
 				"NAME\tSTATUS",
-				"job-a\tpassed",
+				"job-a\tpassed " + strings.Repeat("p", artifactArchiveMinBytes()),
 				"job-b\tfailed",
 			}, "\n"),
 			expectedReducer: "table_summary",
@@ -122,7 +173,7 @@ func TestGateway_DefaultReducers_HandleCommonFormats(t *testing.T) {
 			name: "log",
 			content: strings.Join([]string{
 				"2026-03-14 10:00:01 INFO starting worker",
-				"2026-03-14 10:00:02 ERROR failed to fetch artifact",
+				"2026-03-14 10:00:02 ERROR failed to fetch artifact " + strings.Repeat("e", artifactArchiveMinBytes()),
 			}, "\n"),
 			expectedReducer: "log_summary",
 		},

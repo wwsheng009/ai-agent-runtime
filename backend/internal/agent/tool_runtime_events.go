@@ -92,6 +92,7 @@ func toolCompletedEventPayload(result toolExecutionResult, step int, traceID str
 		}
 		copyToolShellMetadata(payload, result.Envelope.Metadata)
 		copyToolReliabilityMetadata(payload, result.Envelope.Metadata)
+		copyToolArtifactFlowMetadata(payload, result.Envelope)
 	}
 	// Promote disposition contracts onto tool.completed / chat-log payloads so
 	// offline analyzers can distinguish success vs empty vs partial vs failed
@@ -156,6 +157,50 @@ func shellDiffToolRenderOutput(result toolExecutionResult) string {
 		return ""
 	}
 	return output
+}
+
+// copyToolArtifactFlowMetadata promotes the plan §11.3 artifact-flow fields
+// onto tool.completed payloads so session analytics can aggregate output
+// sizes, truncation dimensions, archive dispositions, and pointer kinds
+// without a new event pipeline. All fields are numeric/bool/short-enum.
+func copyToolArtifactFlowMetadata(payload map[string]interface{}, envelope *output.Envelope) {
+	if payload == nil || envelope == nil {
+		return
+	}
+	metadata := envelope.Metadata
+	if size := metadataInt64Value(metadata, "raw_bytes"); size > 0 {
+		payload["output_original_bytes"] = size
+	}
+	if visible := len(envelope.Render()); visible > 0 {
+		payload["output_model_visible_bytes"] = visible
+	}
+	if archivedID, ok := metadata["artifact_id"].(string); ok && strings.TrimSpace(archivedID) != "" {
+		payload["artifact_id"] = strings.TrimSpace(archivedID)
+		payload["artifact_archived"] = true
+	} else if skipped, ok := metadata["artifact_skipped"].(string); ok && strings.TrimSpace(skipped) != "" {
+		payload["artifact_skipped"] = strings.TrimSpace(skipped)
+	}
+}
+
+func metadataInt64Value(metadata map[string]interface{}, key string) int64 {
+	if metadata == nil {
+		return 0
+	}
+	switch typed := metadata[key].(type) {
+	case int:
+		return int64(typed)
+	case int32:
+		return int64(typed)
+	case int64:
+		return typed
+	case float64:
+		return int64(typed)
+	case json.Number:
+		if parsed, err := typed.Int64(); err == nil {
+			return parsed
+		}
+	}
+	return 0
 }
 
 func copyToolExecutionDirectory(payload map[string]interface{}, args map[string]interface{}) {

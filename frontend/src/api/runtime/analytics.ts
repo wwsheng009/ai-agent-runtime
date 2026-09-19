@@ -11,6 +11,7 @@ import type {
   AnalyticsSubagentStatsResponse,
   AnalyticsSummaryQuery,
   AnalyticsSummaryResponse,
+  AnalyticsToolEfficiencySnapshot,
   AnalyticsToolStatsQuery,
   AnalyticsToolStatsResponse,
   AnalyticsUsageHealth,
@@ -255,4 +256,141 @@ export function normalizeUsageAnalyticsHealth(
 
 function readCount(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+// ============================================================================
+// F-4a：tool_efficiency 观测快照客户端（挂在 /api/runtime/status 的
+// `runtime.tool_efficiency`，后端 internal/api/skills/handler.go:9765）。
+//
+// 该块是**辅助观测信息**而非页面主数据：端点 403（未填 admin token）/网络失败/
+// 快照缺块时一律返回 null，由调用方静默降级（不显示横幅、不打断主数据渲染），
+// 绝不把「读不到观测快照」伪造成零计数。
+// ============================================================================
+
+export async function getToolEfficiencySnapshot(
+  options: AnalyticsRequestOptions = {},
+): Promise<AnalyticsToolEfficiencySnapshot | null> {
+  try {
+    const payload = await fetchRuntimeJson<AnalyticsRuntimeStatusEnvelope>(
+      buildRuntimeUrlWithQuery("/api/runtime/status", {}),
+      {
+        headers: buildAnalyticsHeaders(options.adminToken),
+      },
+    );
+    return normalizeToolEfficiencySnapshot(payload?.runtime?.tool_efficiency);
+  } catch {
+    return null;
+  }
+}
+
+export function normalizeToolEfficiencySnapshot(
+  raw: unknown,
+): AnalyticsToolEfficiencySnapshot | null {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const source = raw as Record<string, unknown>;
+  if (typeof source.captured_at !== "string") {
+    return null;
+  }
+  const flow = normalizeArtifactFlow(source.artifact_flow);
+  if (!flow) {
+    return null;
+  }
+  return {
+    captured_at: source.captured_at,
+    preflight: normalizePreflight(source.preflight),
+    outcomes: normalizeOutcomes(source.outcomes),
+    disposition_replays: normalizeReplays(source.disposition_replays),
+    artifact_flow: flow,
+    fail_categories: readRateMap(source.fail_categories),
+    inefficiency_flags: readStringArray(source.inefficiency_flags),
+  };
+}
+
+export function normalizeArtifactFlow(raw: unknown): AnalyticsArtifactFlow | null {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  const source = raw as Record<string, unknown>;
+  const archives = isRecord(source.archives) ? source.archives : {};
+  const truncations = isRecord(source.truncations) ? source.truncations : {};
+  const deref = isRecord(source.deref) ? source.deref : {};
+  return {
+    archives: {
+      total: readCount(archives.total),
+      by_layer: readRateMap(archives.by_layer),
+      by_disposition: readRateMap(archives.by_disposition),
+    },
+    truncations: {
+      total: readCount(truncations.total),
+      by_layer: readRateMap(truncations.by_layer),
+      by_truncated_by: readRateMap(truncations.by_truncated_by),
+    },
+    pointer_notice: readRateMap(source.pointer_notice),
+    deref: {
+      total: readCount(deref.total),
+      followup_ratio: readCount(deref.followup_ratio),
+      miss_by_reason: readRateMap(deref.miss_by_reason),
+    },
+    l1_l4_gap_ratio: readCount(source.l1_l4_gap_ratio),
+  };
+}
+
+function normalizePreflight(raw: unknown): AnalyticsToolEfficiencySnapshot["preflight"] {
+  const source = isRecord(raw) ? raw : {};
+  return {
+    total: readCount(source.total),
+    allow: readCount(source.allow),
+    deny: readCount(source.deny),
+    allow_rate: readCount(source.allow_rate),
+    by_reason: readRateMap(source.by_reason),
+    by_decision: readRateMap(source.by_decision),
+  };
+}
+
+function normalizeOutcomes(raw: unknown): AnalyticsToolEfficiencySnapshot["outcomes"] {
+  const source = isRecord(raw) ? raw : {};
+  return {
+    total: readCount(source.total),
+    by_outcome: readRateMap(source.by_outcome),
+    by_error_code: readRateMap(source.by_error_code),
+    success_rate: readCount(source.success_rate),
+    non_fail_rate: readCount(source.non_fail_rate),
+  };
+}
+
+function normalizeReplays(
+  raw: unknown,
+): AnalyticsToolEfficiencySnapshot["disposition_replays"] {
+  const source = isRecord(raw) ? raw : {};
+  return {
+    total: readCount(source.total),
+    by_outcome: readRateMap(source.by_outcome),
+    by_repeat: readRateMap(source.by_repeat),
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function readRateMap(value: unknown): Record<string, number> {
+  if (!isRecord(value)) {
+    return {};
+  }
+  const out: Record<string, number> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry === "number" && Number.isFinite(entry) && entry !== 0) {
+      out[key] = entry;
+    }
+  }
+  return out;
+}
+
+function readStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((entry): entry is string => typeof entry === "string");
 }

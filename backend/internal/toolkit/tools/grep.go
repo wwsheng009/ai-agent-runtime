@@ -17,6 +17,8 @@ import (
 	"unicode"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
+	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	runtimeripgrep "github.com/wwsheng009/ai-agent-runtime/internal/ripgrep"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -5265,7 +5267,22 @@ func requiredRipgrepFeatures(opts *grepOptions) []string {
 	return features
 }
 
+// grepByteBudgetReserveRatio caps joined match output at this fraction of the
+// model-visible tool text budget so a truncated-by-lines match list never
+// falls into the L4 head/tail fold (which cuts the middle of the match list).
+// The remainder covers the truncation notice, stats summary, and metadata.
+const grepByteBudgetReserveRatio = 0.8
+
+// grepByteBudgetBytes resolves the in-tool byte stop condition.
+func grepByteBudgetBytes() int {
+	return int(float64(output.ModelToolTextByteBudget()) * grepByteBudgetReserveRatio)
+}
+
 func buildGrepResult(opts *grepOptions, results []string, matchCount int, truncated bool, stats *grepStats) *toolkit.ToolResult {
+	if truncated {
+		observability.RecordToolOutputTruncation(observability.TruncationLayerGrep, observability.TruncatedByLines)
+	}
+	byteTruncated := false
 	output := "未找到匹配的内容"
 	if opts != nil && opts.jsonOutput {
 		output = ""
@@ -5278,9 +5295,36 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 		}
 	}
 	if len(results) > 0 {
+		joined := strings.Join(results, "\n")
+		if joinedBytes := len([]byte(joined)) + len(results); joinedBytes > grepByteBudgetBytes() {
+			// Byte-budget stop: keep the complete leading matches (never cut a
+			// middle window like the L4 head/tail fold) so "find things" stays
+			// semantically useful without an artifact dereference round-trip.
+			kept := 0
+			used := 0
+			for _, line := range results {
+				lineBytes := len([]byte(line)) + 1
+				if kept > 0 && used+lineBytes > grepByteBudgetBytes() {
+					break
+				}
+				used += lineBytes
+				kept++
+			}
+			if kept < len(results) {
+				results = results[:kept]
+				if !truncated {
+					truncated = true
+				}
+				byteTruncated = true
+				observability.RecordToolOutputTruncation(observability.TruncationLayerGrep, observability.TruncatedByBytes)
+			}
+		}
 		output = strings.Join(results, "\n")
 		if truncated && (opts == nil || !opts.jsonOutput) {
 			output += fmt.Sprintf("\n\n(结果已截断，显示前 %d 个匹配)", len(results))
+			if byteTruncated {
+				output += fmt.Sprintf("\n(输出超过模型可见字节预算 %d 字节，提前停止；next_step: 收窄 pattern、增加 paths/glob 限定，或用 max_count 限制每文件匹配数)", grepByteBudgetBytes())
+			}
 		}
 	}
 	if opts != nil && opts.stats && stats != nil && !opts.jsonOutput {
@@ -5388,6 +5432,11 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 		"match_count":                      matchCount,
 		"truncated":                        truncated,
 		"engine":                           engine,
+	}
+	if byteTruncated {
+		metadata["results_truncated"] = true
+		metadata["truncation_reason"] = "byte_budget"
+		metadata[toolresult.MetadataNextActionKey] = "输出超过模型可见字节预算已提前停止；请收窄 pattern、增加 paths/glob 限定，或用 max_count 限制每文件匹配数。不要原样重试同一查询。"
 	}
 	annotateSearchBackend(metadata, engine, "builtin-walker", "")
 	if stats != nil {

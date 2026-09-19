@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"strconv"
 	"strings"
 )
 
@@ -53,6 +54,20 @@ func RecordToolOutcome(outcome, errorCode string) {
 	IncrementCounter(MetricToolOutcomeTotal, map[string]string{
 		LabelOutcome:   normalized,
 		LabelErrorCode: code,
+	})
+}
+
+// RecordToolFailure counts actual failed/cancelled tool invocations using the
+// structured result contract. Unlike tool_outcome_total, this diagnostic metric
+// intentionally includes the bounded tool name and recovery dimensions required
+// to distinguish bad arguments, stale context, cancellation, upstream policy,
+// and retryable infrastructure failures.
+func RecordToolFailure(toolName, errorCode, failureClass string, retryable bool) {
+	IncrementCounter(MetricToolFailureTotal, map[string]string{
+		LabelToolName:     normalizeToolName(toolName),
+		LabelErrorCode:    normalizeErrorCode(errorCode),
+		LabelFailureClass: normalizeFailureClass(failureClass),
+		LabelRetryable:    strconv.FormatBool(retryable),
 	})
 }
 
@@ -139,6 +154,48 @@ func normalizeErrorCode(code string) string {
 		code = code[:64]
 	}
 	return code
+}
+
+func normalizeToolName(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return "unknown"
+	}
+	if len(name) > 64 {
+		name = name[:64]
+	}
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' {
+			continue
+		}
+		return "other"
+	}
+	return name
+}
+
+func normalizeFailureClass(class string) string {
+	switch strings.ToLower(strings.TrimSpace(class)) {
+	case "stale_context",
+		"invalid_patch_syntax",
+		"invalid_args",
+		"path_not_found",
+		"timeout",
+		"canceled",
+		"permission",
+		"policy",
+		"network",
+		"response_read",
+		"upstream_authentication",
+		"upstream_policy",
+		"upstream_firewall_block",
+		"upstream_rate_limit",
+		"upstream_server",
+		"upstream_http",
+		"tool_error":
+		return strings.ToLower(strings.TrimSpace(class))
+	default:
+		return "unknown"
+	}
 }
 
 func repeatBucket(repeatCount int) string {

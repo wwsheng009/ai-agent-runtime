@@ -155,6 +155,15 @@ export function refreshAnalysis() {
     if (seq !== analysisSeq) { return; }
     renderAnalysisErrors(null);
   });
+  // 工具效率 / Artifact 链路快照（runtime.tool_efficiency 同源；计数器为进程级
+  // 聚合，scope 切换不影响该端点，仍随本页竞态序号一起刷新）。
+  analysisAPI(analysisBase + "/tool_efficiency" + analysisQuery()).then(function (result) {
+    if (seq !== analysisSeq) { return; }
+    renderAnalysisEfficiency(result);
+  }).catch(function () {
+    if (seq !== analysisSeq) { return; }
+    renderAnalysisEfficiency(null);
+  });
 }
 
 // 仅当分析页签当前可见时刷新（后台页签不浪费请求；下次进入按会话不一致重拉）。
@@ -185,11 +194,114 @@ function renderAnalysisLoading() {
   }
   var cardsEl = analysisEl("analysis-cards");
   if (cardsEl) { cardsEl.innerHTML = '<div class="cache-empty">加载中…</div>'; }
-  var sections = ["analysis-tools", "analysis-subagents", "analysis-errors"];
+  var sections = ["analysis-tools", "analysis-subagents", "analysis-errors", "analysis-efficiency"];
   for (var i = 0; i < sections.length; i++) {
     var el = analysisEl(sections[i]);
     if (el) { el.innerHTML = '<div class="cache-empty">加载中…</div>'; }
   }
+}
+
+// ---- 工具效率 / Artifact 链路（runtime.tool_efficiency 同源快照，F-5） ----
+
+// analysisCountMapValues 计数 map → 稳定排序条目（次数倒序、键升序，同 chips 口径）。
+function analysisCountMapValues(counts) {
+  var entries = [];
+  if (counts) {
+    for (var key in counts) {
+      if (Object.prototype.hasOwnProperty.call(counts, key)) {
+        entries.push([key, Number(counts[key]) || 0]);
+      }
+    }
+  }
+  entries.sort(function (a, b) {
+    if (a[1] !== b[1]) { return b[1] - a[1]; }
+    return a[0] < b[0] ? -1 : (a[0] > b[0] ? 1 : 0);
+  });
+  return entries;
+}
+
+// analysisFlowCard 单块卡片：total + 明细 chips；无任何数据 → 不伪造 0。
+function analysisFlowCard(title, total, details) {
+  var chips = analysisCountMapChips(details);
+  var html = '<div class="cache-card"><div class="cache-card-value">' +
+    (total > 0 ? esc(analysisInt(total)) : "--") + '</div><div class="cache-card-label">' +
+    esc(title) + "</div>";
+  if (chips) {
+    html += '<div class="cache-dist" style="margin-top:4px">' + chips + "</div>";
+  }
+  return html + "</div>";
+}
+
+function analysisPercent(value, total) {
+  if (!total || total <= 0 || value === undefined || value === null) { return "--"; }
+  return (Math.round(value / total * 1000) / 10).toFixed(1) + "%";
+}
+
+// analysisRateLabel 比率字段（0~1 的 rate，如 success_rate）：total<=0 时为
+// 「无样本」，绝不把缺省 0 伪造成 0.0%。
+function analysisRateLabel(rate, sampleTotal) {
+  if (rate === undefined || rate === null || !sampleTotal || sampleTotal <= 0) { return "--"; }
+  return analysisPercent(rate, 1);
+}
+
+// renderAnalysisEfficiency 渲染 tool_efficiency 快照（降级矩阵与 /usage TUI、
+// frontend ArtifactFlowPanel 同口径：缺 captured_at 或 artifact_flow → 快照无效，
+// 整块「不可用」；全零 → 「暂无数据」；inefficiency_flags / gap 比例 → 警告条）。
+function renderAnalysisEfficiency(result) {
+  var el = analysisEl("analysis-efficiency");
+  if (!el) { return; }
+  var body = result && result.status === 200 && result.body ? result.body : null;
+  if (!body || !body.captured_at || !body.artifact_flow) {
+    el.innerHTML = analysisUnavailableHTML(result);
+    return;
+  }
+  var flow = body.artifact_flow;
+  var archives = flow.archives || {};
+  var truncations = flow.truncations || {};
+  var deref = flow.deref || {};
+  var total = (archives.total || 0) + (truncations.total || 0) +
+    (deref.total || 0) + flowCountMapTotal(flow.pointer_notice);
+  if (total <= 0) {
+    el.innerHTML = '<div class="cache-empty">暂无数据</div>';
+    return;
+  }
+  var html = '<div class="cache-detail-title" style="margin-top:10px">工具效率 / Artifact 链路' +
+    "（快照 " + esc(analysisTime(body.captured_at)) + "）</div>";
+  html += '<div class="cache-cards">' +
+    analysisFlowCard("Artifact 归档", archives.total, archives.by_layer) +
+    analysisFlowCard("输出截断", truncations.total, truncations.by_truncated_by) +
+    analysisFlowCard("指针提示", flowCountMapTotal(flow.pointer_notice), flow.pointer_notice) +
+    analysisFlowCard("Deref 读取", deref.total, deref.miss_by_reason) +
+    "</div>";
+  // 低效信号：inefficiency_flags 非空 / L1-L4 gap 比例 ≥ 0.5（与 frontend 阈值一致）。
+  var flags = body.inefficiency_flags || [];
+  var gapRatio = Number(flow.l1_l4_gap_ratio);
+  var gapWarning = !isNaN(gapRatio) && gapRatio >= 0.5;
+  if (flags.length > 0 || gapWarning) {
+    html += '<div class="cache-dist">低效信号：' +
+      (flags.length > 0 ? esc(flags.join("、")) : "") +
+      (gapWarning ? " L1/L4 截断比例 " + (Math.round(gapRatio * 1000) / 10).toFixed(1) + "%" : "") +
+      "</div>";
+  }
+  // 派生率：preflight / outcomes / deref followup（未上报 → --，不伪造 0）。
+  var outcomes = body.outcomes || {};
+  var preflight = body.preflight || {};
+  html += '<div class="cache-dist">成功率 ' + analysisRateLabel(outcomes.success_rate, outcomes.total) +
+    " · 非失败率 " + analysisRateLabel(outcomes.non_fail_rate, outcomes.total) +
+    " · Preflight 决策 " + analysisChipsOrDash(analysisCountMapChips(preflight.by_decision)) +
+    " · Deref followup " + (deref.total > 0 ? analysisPercent(deref.followup_ratio, 1) : "--") + "</div>";
+  el.innerHTML = html;
+}
+
+function flowCountMapTotal(counts) {
+  var total = 0;
+  var entries = analysisCountMapValues(counts);
+  for (var i = 0; i < entries.length; i++) { total += entries[i][1]; }
+  return total;
+}
+
+function analysisChipsOrDash(chips) {
+  return chips ? chips : "--";
 }
 
 function showAnalysisHealth(el, text) {

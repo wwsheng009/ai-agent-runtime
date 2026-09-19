@@ -191,6 +191,77 @@ func TestGrepTool_BuiltinWalkerRespectsCancelledContext(t *testing.T) {
 	}
 }
 
+// TestGrepTool_ByteBudgetTruncationKeepsLeadingMatches pins P0-2: match
+// output exceeding the model-visible byte budget stops at complete leading
+// lines (never a head/tail middle cut), stamped with results_truncated.
+func TestGrepTool_ByteBudgetTruncationKeepsLeadingMatches(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool := NewGrepTool()
+
+	var bigOutput strings.Builder
+	line := strings.Repeat("b", 200)
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&bigOutput, "file_%d.go:%d:%s\n", i, i+1, line)
+	}
+	tool.lookPath = func(name string) (string, error) {
+		if name != "rg" {
+			return "", fmt.Errorf("unexpected lookup %q", name)
+		}
+		return "rg", nil
+	}
+	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+		return []byte(bigOutput.String()), nil
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "bbb",
+		"path":    tmpDir,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error %v", result.Error)
+	}
+	if result.Metadata["results_truncated"] != true {
+		t.Fatalf("expected results_truncated=true, got %#v", result.Metadata)
+	}
+	if reason, _ := result.Metadata["truncation_reason"].(string); reason != "byte_budget" {
+		t.Fatalf("expected truncation_reason=byte_budget, got %#v", result.Metadata)
+	}
+	if !strings.Contains(result.Content, "结果已截断") || !strings.Contains(result.Content, "next_step") {
+		t.Fatalf("expected truncation notice with next_step guidance, got tail %q", tailOf(result.Content, 300))
+	}
+	// Leading matches must be intact (no middle cut): first line present.
+	if !strings.HasPrefix(result.Content, "file_0.go:1:") {
+		t.Fatalf("expected first match preserved as prefix, got head %q", headOf(result.Content, 120))
+	}
+	// All kept lines must be complete (no partial line cut).
+	lines := strings.Split(strings.Split(result.Content, "\n\n(结果已截断")[0], "\n")
+	for i, l := range lines {
+		if !strings.HasPrefix(l, "file_") {
+			t.Fatalf("line %d is not a complete match line: %q", i, l)
+		}
+	}
+	if len(lines) >= 200 {
+		t.Fatalf("expected fewer than all 200 matches kept, got %d", len(lines))
+	}
+}
+
+func headOf(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+func tailOf(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
+}
+
 func TestGrepTool_PrefersRipgrepWhenAvailable(t *testing.T) {
 	tmpDir := t.TempDir()
 	tool := NewGrepTool()

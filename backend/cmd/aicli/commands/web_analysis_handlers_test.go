@@ -199,6 +199,32 @@ func TestHandleChatWebAPIAnalysis_NoSessionDisabled(t *testing.T) {
 	if body["attached"] != false || body["degraded"] != true {
 		t.Fatalf("status = %v, want attached=false degraded=true", body)
 	}
+
+	// /tool_efficiency 与 /status 一样先于 service==nil 检查：快照来自进程内
+	// observability.GlobalMetrics（工具环遥测），无分析服务时也返回 200 + 完整
+	// JSON 块（captured_at / artifact_flow / inefficiency_flags 契约字段齐全）。
+	code, body = analysisGetJSON(t, ChatWebAPIAnalysisPath+"/tool_efficiency")
+	if code != http.StatusOK {
+		t.Fatalf("tool_efficiency code = %d, want 200", code)
+	}
+	if _, ok := body["captured_at"]; !ok {
+		t.Fatalf("tool_efficiency missing captured_at: %v", body)
+	}
+	flow, ok := body["artifact_flow"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("tool_efficiency artifact_flow missing: %v", body)
+	}
+	for _, key := range []string{"archives", "truncations", "pointer_notice", "deref"} {
+		if _, ok := flow[key]; !ok {
+			t.Fatalf("artifact_flow missing %s: %v", key, flow)
+		}
+	}
+	if _, ok := body["inefficiency_flags"]; !ok {
+		t.Fatalf("tool_efficiency missing inefficiency_flags: %v", body)
+	}
+
+	// /status 的 schema_version / table_counts 断言保持在其自身响应上。
+	_, body = analysisGetJSON(t, ChatWebAPIAnalysisPath+"/status")
 	if body["schema_version"] != usageanalytics.SchemaVersion {
 		t.Fatalf("schema_version = %v, want %s", body["schema_version"], usageanalytics.SchemaVersion)
 	}

@@ -123,6 +123,13 @@ var payloadAllowKeys = map[string]bool{
 	"elapsed_ms":   true,
 	"budget_level": true,
 	"budget_ratio": true,
+	// §11.4/O-4：tool.completed artifact-flow 指标字段。全部是数值/布尔/
+	// 短枚举；artifact_id 是不透明短 ID（非内容），skipped 是固定枚举值。
+	"output_original_bytes":      true,
+	"output_model_visible_bytes": true,
+	"artifact_archived":          true,
+	"artifact_skipped":           true,
+	"artifact_id":                true,
 }
 
 // ProjectRuntimeEvent 把 bus 事件投影为观测事件。
@@ -195,7 +202,8 @@ func (p *Projector) projectPayload(eventType string, payload map[string]interfac
 			case "provider", "model", "protocol", "status", "state", "phase", "kind",
 				"error_code", "error_category", "usage_source", "aggregation_level",
 				"tool_name", "stream_id", "finish_reason", "reasoning_visibility",
-				"renderer_id", "attempt_id", "turn_id", "budget_level":
+				"renderer_id", "attempt_id", "turn_id", "budget_level",
+				"artifact_skipped", "artifact_id":
 				out[key] = boundUTF8String(typed, 512)
 			default:
 				// 其他字符串（可能的 URL/路径/内容）一律丢弃。

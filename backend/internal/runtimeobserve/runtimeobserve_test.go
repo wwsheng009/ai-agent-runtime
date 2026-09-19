@@ -554,6 +554,17 @@ func TestCollectorRingRetention(t *testing.T) {
 	if res.OldestAvailableSeq != 7 || res.LatestSeq != 10 {
 		t.Fatalf("bounds wrong: oldest=%d latest=%d", res.OldestAvailableSeq, res.LatestSeq)
 	}
+	summary, _ := c.Stats()
+	if summary.RuntimeObserveRingEvictions != 6 {
+		t.Fatalf("runtime_observe_ring_evictions=%d want 6", summary.RuntimeObserveRingEvictions)
+	}
+	blob, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatalf("marshal runtime summary: %v", err)
+	}
+	if !strings.Contains(string(blob), `"runtime_observe_ring_evictions":6`) {
+		t.Fatalf("runtime summary missing ring eviction counter: %s", blob)
+	}
 	// 事件内带 timestamp 且 schema 正确。
 	for _, evt := range res.Events {
 		if evt.SchemaVersion != SchemaVersionEvent {

@@ -20,6 +20,7 @@ import (
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
@@ -1417,6 +1418,8 @@ func ensureLargeHistoryOutputArtifact(capture runtimeexecutor.CombinedOutputCapt
 	if err != nil {
 		return "", err
 	}
+	// O-1: shell-disk artifact landed; count it in the archive mix.
+	observability.RecordToolOutputArchive(observability.ArchiveLayerShellDisk, observability.ArchiveDispositionArchived)
 	return path, nil
 }
 
