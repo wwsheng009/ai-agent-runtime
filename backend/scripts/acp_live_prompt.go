@@ -6,6 +6,9 @@
 // Note: `go run` this file individually (not `go run ./scripts/`) — the
 // scripts directory holds several standalone main programs that would
 // collide on package-level names. Alternatively use `go run scripts/acp_live_prompt.go`.
+
+//go:build ignore
+
 package main
 
 import (

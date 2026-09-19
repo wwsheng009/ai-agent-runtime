@@ -1,5 +1,8 @@
 // Minimal raw ACP trace: initialize -> session/new -> session/prompt,
 // dumping every stdout line verbatim.
+
+//go:build ignore
+
 package main
 
 import (

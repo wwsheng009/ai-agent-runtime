@@ -9,6 +9,9 @@
 //     the upstream request body no longer carries reasoning_effort
 //
 // Run: go run scripts/acp_e2e_thought_level.go <aicli.exe>
+
+//go:build ignore
+
 package main
 
 import (

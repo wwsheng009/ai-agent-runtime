@@ -6,6 +6,9 @@
 //  3. verifies the prompt response reports stopReason "cancelled"
 //
 // Run: go run scripts/acp_e2e_cancel.go <aicli.exe>
+
+//go:build ignore
+
 package main
 
 import (

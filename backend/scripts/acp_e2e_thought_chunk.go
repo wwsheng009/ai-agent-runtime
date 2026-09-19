@@ -15,6 +15,9 @@
 //     (plan 4.6/4.7 replay closure)
 //
 // Run: go run scripts/acp_e2e_thought_chunk.go <aicli.exe>
+
+//go:build ignore
+
 package main
 
 import (
