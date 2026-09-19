@@ -127,10 +127,33 @@ type QuestionRequesterAware interface {
 	SetQuestionRequester(requester QuestionRequester)
 }
 
+// ElicitationRequester asks the client for structured input through the
+// standard ACP v1 elicitation/create method. Hosts must obtain it from
+// Server.ElicitationRequester(), which returns nil for clients that never
+// advertised form-mode elicitation.
+type ElicitationRequester interface {
+	CreateElicitation(ctx context.Context, params ElicitationRequestParams) (ElicitationResult, error)
+}
+
+// ElicitationRequesterAware is an optional SessionBackend extension, the
+// standard-protocol counterpart of QuestionRequesterAware.
+type ElicitationRequesterAware interface {
+	SetElicitationRequester(requester ElicitationRequester)
+}
+
 // ErrClientQuestionsUnsupported reports that the connected client did not
 // advertise the session/request_question extension. Hosts treat it as "no
 // panel available" and fall back to their non-interactive default.
 var ErrClientQuestionsUnsupported = errors.New("acp: client does not support session/request_question")
+
+// ErrClientElicitationUnsupported reports that the connected client did not
+// advertise form-mode elicitation/create.
+var ErrClientElicitationUnsupported = errors.New("acp: client does not support elicitation/create (form mode)")
+
+// ErrClientQuestionUnsupported reports that the client advertised neither
+// form-mode elicitation/create nor the legacy session/request_question
+// extension, so no interactive panel is available at all.
+var ErrClientQuestionUnsupported = errors.New("acp: client does not support elicitation/create (form mode) or session/request_question")
 
 // ServerOptions configures an ACP Server.
 type ServerOptions struct {
@@ -196,6 +219,12 @@ func NewServer(conn *Conn, backend SessionBackend, opts ServerOptions) *Server {
 		// every call instead of being resolved once at construction time.
 		aware.SetQuestionRequester(serverQuestionRequester{server: s})
 	}
+	if aware, ok := backend.(ElicitationRequesterAware); ok && aware != nil {
+		// Same late-binding rationale as the question requester: the client
+		// capabilities that gate elicitation/create are only known after
+		// initialize.
+		aware.SetElicitationRequester(serverElicitationRequester{server: s})
+	}
 	return s
 }
 
@@ -224,7 +253,16 @@ func (s *Server) SupportsQuestions() bool {
 	if s == nil {
 		return false
 	}
-	return s.clientCaps.Questions
+	return s.clientCaps.SupportsQuestions()
+}
+
+// SupportsElicitation reports whether the client advertised ACP v1
+// elicitation/create form mode during initialize.
+func (s *Server) SupportsElicitation() bool {
+	if s == nil {
+		return false
+	}
+	return s.clientCaps.SupportsFormElicitation()
 }
 
 // QuestionRequester returns a requester bound to this server's connection, or
@@ -232,10 +270,19 @@ func (s *Server) SupportsQuestions() bool {
 // requester that always errors) lets hosts pick their non-interactive default
 // without an extra round trip.
 func (s *Server) QuestionRequester() QuestionRequester {
-	if s == nil || s.conn == nil || !s.clientCaps.Questions {
+	if s == nil || s.conn == nil || !s.clientCaps.SupportsQuestions() {
 		return nil
 	}
 	return questionRequester{conn: s.conn}
+}
+
+// ElicitationRequester returns a requester bound to this server's connection,
+// or nil when the client cannot render form elicitations.
+func (s *Server) ElicitationRequester() ElicitationRequester {
+	if s == nil || s.conn == nil || !s.clientCaps.SupportsFormElicitation() {
+		return nil
+	}
+	return elicitationRequester{conn: s.conn}
 }
 
 type questionRequester struct {
@@ -261,6 +308,37 @@ func (q questionRequester) RequestQuestion(ctx context.Context, params RequestQu
 		return result, fmt.Errorf("acp: no connection for question request")
 	}
 	if err := q.conn.Call(ctx, MethodSessionRequestQuestion, params, &result); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+// serverElicitationRequester gates elicitation/create on the negotiated client
+// capabilities and forwards to the live connection when the client opted in.
+type serverElicitationRequester struct {
+	server *Server
+}
+
+func (r serverElicitationRequester) CreateElicitation(ctx context.Context, params ElicitationRequestParams) (ElicitationResult, error) {
+	if r.server == nil || !r.server.SupportsElicitation() {
+		return ElicitationResult{}, ErrClientElicitationUnsupported
+	}
+	return elicitationRequester{conn: r.server.conn}.CreateElicitation(ctx, params)
+}
+
+type elicitationRequester struct {
+	conn *Conn
+}
+
+func (e elicitationRequester) CreateElicitation(ctx context.Context, params ElicitationRequestParams) (ElicitationResult, error) {
+	var result ElicitationResult
+	if e.conn == nil {
+		return result, fmt.Errorf("acp: no connection for elicitation request")
+	}
+	if params.Mode == "" {
+		params.Mode = ElicitationModeForm
+	}
+	if err := e.conn.Call(ctx, MethodElicitationCreate, params, &result); err != nil {
 		return result, err
 	}
 	return result, nil

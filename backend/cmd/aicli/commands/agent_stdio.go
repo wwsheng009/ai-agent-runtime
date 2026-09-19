@@ -115,6 +115,10 @@ type acpSessionHost struct {
 	// session/request_question extension. It is set by the ACP server and
 	// re-checks the client capability on every call.
 	questionRequester acp.QuestionRequester
+	// elicitationRequester is the client-bound requester for the standard ACP v1
+	// elicitation/create method. It is set by the ACP server and re-checks the
+	// client capability on every call.
+	elicitationRequester acp.ElicitationRequester
 	// storeMgr is the lazily opened durable store backing session/list and
 	// session/delete. It is independent from per-session managers so a client
 	// can browse history before creating its first session.
@@ -574,6 +578,7 @@ func (h *acpSessionHost) bootstrapSessionWithIDLocked(ctx context.Context, sessi
 		bridge.SetPermissionRequester(h.perm)
 	}
 	bridge.SetQuestionRequester(h.questionRequester)
+	bridge.SetElicitationRequester(h.elicitationRequester)
 	chatSession.ExecEventBridge = bridge
 
 	// Pre-install runtime bridge hooks for approvals (Prompt re-binds emitters).

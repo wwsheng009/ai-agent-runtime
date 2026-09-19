@@ -3,6 +3,7 @@ package acp
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -45,17 +46,34 @@ const (
 const (
 	MethodSessionUpdate            = "session/update"
 	MethodSessionRequestPermission = "session/request_permission"
-	// MethodSessionRequestQuestion is an agent→client extension used to render
-	// ask_user_question prompts in the client UI. ACP v1 has no question RPC, so
-	// it is gated behind the "questions" client capability: clients that do not
-	// advertise it never receive the call and hosts fall back to their
-	// non-interactive default answer.
+	// MethodElicitationCreate is the ACP v1 standard method for requesting
+	// structured input from the user. ask_user_question prefers it whenever the
+	// client advertises form-mode elicitation; session/request_question stays as
+	// a fallback extension for clients that only advertise "questions".
+	MethodElicitationCreate = "elicitation/create"
+	// MethodSessionRequestQuestion is the legacy aicli agent→client extension
+	// used to render ask_user_question prompts in the client UI. It is gated
+	// behind the "questions" client capability: clients that do not advertise it
+	// never receive the call and hosts fall back to their non-interactive
+	// default answer.
 	MethodSessionRequestQuestion = "session/request_question"
 )
 
 // ClientCapabilityQuestions is the clientCapabilities key a client sets to true
 // when it can display and answer session/request_question prompts.
 const ClientCapabilityQuestions = "questions"
+
+// Elicitation modes and response actions (ACP v1 elicitation/create).
+const (
+	ElicitationModeForm = "form"
+	ElicitationModeURL  = "url"
+
+	ElicitationActionAccept  = "accept"
+	ElicitationActionDecline = "decline"
+	ElicitationActionCancel  = "cancel"
+
+	ElicitationPropertyTypeString = "string"
+)
 
 // Stop reasons returned by session/prompt.
 const (
@@ -157,18 +175,118 @@ type Implementation struct {
 
 // ClientCapabilities is a subset of ACP client capabilities.
 type ClientCapabilities struct {
-	FS          *FileSystemCapabilities `json:"fs,omitempty"`
-	Terminal    bool                    `json:"terminal,omitempty"`
-	Elicitation json.RawMessage         `json:"elicitation,omitempty"`
-	// Questions advertises the session/request_question extension. It is the
-	// only signal that makes the agent route ask_user_question to the client UI.
+	FS       *FileSystemCapabilities `json:"fs,omitempty"`
+	Terminal bool                    `json:"terminal,omitempty"`
+	// Elicitation advertises the ACP v1 elicitation/create modes. Form support
+	// exists only when form is present and non-null ({} advertises support);
+	// omitted or null means the mode is unsupported.
+	Elicitation *ElicitationCapabilities `json:"elicitation,omitempty"`
+	// Questions advertises the legacy session/request_question extension. It is
+	// the fallback signal used when the client has no form-mode elicitation.
 	Questions bool `json:"questions,omitempty"`
+	// Meta carries custom capability advertisements per ACP extensibility. The
+	// legacy questions flag is also accepted here (flat, namespaced or nested)
+	// so spec-conformant clients can opt in without a non-spec top-level key.
+	Meta map[string]json.RawMessage `json:"_meta,omitempty"`
 }
 
 // FileSystemCapabilities describes client fs/* support.
 type FileSystemCapabilities struct {
 	ReadTextFile  bool `json:"readTextFile,omitempty"`
 	WriteTextFile bool `json:"writeTextFile,omitempty"`
+}
+
+// ElicitationCapabilities describes the client's elicitation/create support.
+// A present non-null Form/URL pointer advertises that mode; empty structs are
+// valid capability objects (ACP v1: `{}` means supported).
+type ElicitationCapabilities struct {
+	Form *ElicitationFormCapabilities `json:"form,omitempty"`
+	URL  *ElicitationURLCapabilities  `json:"url,omitempty"`
+	Meta map[string]json.RawMessage   `json:"_meta,omitempty"`
+}
+
+// ElicitationFormCapabilities advertises form-mode elicitation support.
+type ElicitationFormCapabilities struct{}
+
+// ElicitationURLCapabilities advertises URL-mode elicitation support.
+type ElicitationURLCapabilities struct{}
+
+// SupportsQuestions reports whether the client advertised the legacy
+// session/request_question extension, either through the top-level "questions"
+// key or through a "_meta" advertisement.
+func (c ClientCapabilities) SupportsQuestions() bool {
+	if c.Questions {
+		return true
+	}
+	return metaFlag(c.Meta, ClientCapabilityQuestions)
+}
+
+// SupportsFormElicitation reports whether the client advertised ACP v1
+// elicitation/create form mode. Per the ACP v1 schema, support exists only when
+// "form" is present and non-null; an empty object ({}) advertises support,
+// while omitted or null means the mode is unsupported.
+func (c ClientCapabilities) SupportsFormElicitation() bool {
+	return c.Elicitation != nil && c.Elicitation.Form != nil
+}
+
+// metaFlag reports whether a "_meta" map advertises a truthy value under key.
+// It accepts booleans, capability objects with a truthy flag
+// (enabled/supported/available) and one level of namespacing, so all of these
+// opt in: {"questions":true}, {"questions":{"enabled":true}},
+// {"aicli.dev":{"questions":true}}, {"aicli.dev/questions":true}.
+func metaFlag(raw map[string]json.RawMessage, key string) bool {
+	for k, v := range raw {
+		if metaKeyMatches(k, key) {
+			if truthyFlag(v) {
+				return true
+			}
+			continue
+		}
+		var nested map[string]json.RawMessage
+		if json.Unmarshal(v, &nested) != nil {
+			continue
+		}
+		for nk, nv := range nested {
+			if metaKeyMatches(nk, key) && truthyFlag(nv) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// metaKeyMatches reports whether a "_meta" key names the flag directly or via a
+// vendor namespace ("aicli.dev/questions", "aicli.dev.questions").
+func metaKeyMatches(key, flag string) bool {
+	if key == flag {
+		return true
+	}
+	if idx := strings.LastIndexAny(key, "/."); idx >= 0 {
+		return key[idx+1:] == flag
+	}
+	return false
+}
+
+// truthyFlag accepts JSON booleans and capability objects that look like flags.
+func truthyFlag(raw json.RawMessage) bool {
+	var b bool
+	if json.Unmarshal(raw, &b) == nil {
+		return b
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
+		return false
+	}
+	for _, name := range []string{"enabled", "supported", "available", "questions"} {
+		v, ok := obj[name]
+		if !ok {
+			continue
+		}
+		if truthyFlag(v) {
+			return true
+		}
+	}
+	return false
 }
 
 // AgentCapabilities is the MVP agent capability advertisement.
@@ -730,6 +848,114 @@ type RequestQuestionParams struct {
 type RequestQuestionResult struct {
 	Answer   string `json:"answer,omitempty"`
 	Declined bool   `json:"declined,omitempty"`
+}
+
+// ElicitationRequestParams is the params for the ACP v1 elicitation/create
+// method. aicli only issues form mode with a session scope; ToolCallID is part
+// of the schema for completeness.
+type ElicitationRequestParams struct {
+	SessionID       string                     `json:"sessionId"`
+	ToolCallID      string                     `json:"toolCallId,omitempty"`
+	Mode            string                     `json:"mode"`
+	Message         string                     `json:"message"`
+	RequestedSchema ElicitationRequestedSchema `json:"requestedSchema"`
+}
+
+// ElicitationRequestedSchema is the primitive-typed JSON Schema subset that ACP
+// form elicitation accepts.
+type ElicitationRequestedSchema struct {
+	Type       string                               `json:"type"`
+	Title      string                               `json:"title,omitempty"`
+	Properties map[string]ElicitationPropertySchema `json:"properties"`
+	Required   []string                             `json:"required,omitempty"`
+}
+
+// ElicitationPropertySchema describes one form field. Only the string variant
+// is emitted by aicli today.
+type ElicitationPropertySchema struct {
+	Type        string   `json:"type"`
+	Title       string   `json:"title,omitempty"`
+	Description string   `json:"description,omitempty"`
+	Enum        []string `json:"enum,omitempty"`
+}
+
+// ElicitationResult is the client's response to elicitation/create.
+type ElicitationResult struct {
+	Action  string                 `json:"action"`
+	Content map[string]interface{} `json:"content,omitempty"`
+}
+
+// Accepted reports whether the user accepted the elicitation.
+func (r ElicitationResult) Accepted() bool {
+	return r.Action == ElicitationActionAccept
+}
+
+// Answer returns the "answer" form value of an accepted elicitation. Empty
+// means the user declined, cancelled, or submitted no usable text; callers
+// treat that as "no answer" instead of an error.
+func (r ElicitationResult) Answer() string {
+	if !r.Accepted() {
+		return ""
+	}
+	return stringifyElicitationValue(r.Content["answer"])
+}
+
+// NewFormElicitationParams builds a session-scoped form elicitation that asks a
+// single free-form "answer" question. Suggestions are carried in the field
+// description rather than enum/oneOf: ask_user_question treats them as hints,
+// and an enum field would stop clients from submitting anything else.
+func NewFormElicitationParams(sessionID, prompt string, suggestions []string, required bool) ElicitationRequestParams {
+	property := ElicitationPropertySchema{
+		Type:  ElicitationPropertyTypeString,
+		Title: "Answer",
+	}
+	cleaned := make([]string, 0, len(suggestions))
+	for _, s := range suggestions {
+		if s = strings.TrimSpace(s); s != "" {
+			cleaned = append(cleaned, s)
+		}
+	}
+	if len(cleaned) > 0 {
+		property.Description = "Suggestions: " + strings.Join(cleaned, "; ")
+	}
+	params := ElicitationRequestParams{
+		SessionID: strings.TrimSpace(sessionID),
+		Mode:      ElicitationModeForm,
+		Message:   prompt,
+		RequestedSchema: ElicitationRequestedSchema{
+			Type:       "object",
+			Title:      "Question",
+			Properties: map[string]ElicitationPropertySchema{"answer": property},
+		},
+	}
+	if required {
+		params.RequestedSchema.Required = []string{"answer"}
+	}
+	return params
+}
+
+// stringifyElicitationValue converts a form content value to display text.
+func stringifyElicitationValue(v interface{}) string {
+	switch t := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(t)
+	case []string:
+		return strings.TrimSpace(strings.Join(t, ", "))
+	case []interface{}:
+		parts := make([]string, 0, len(t))
+		for _, item := range t {
+			if s, ok := item.(string); ok {
+				parts = append(parts, strings.TrimSpace(s))
+			}
+		}
+		return strings.TrimSpace(strings.Join(parts, ", "))
+	case bool, float64, int, int64:
+		return strings.TrimSpace(fmt.Sprint(t))
+	default:
+		return ""
+	}
 }
 
 // DefaultPermissionOptions returns the MVP allow/reject pair plus allow-always.

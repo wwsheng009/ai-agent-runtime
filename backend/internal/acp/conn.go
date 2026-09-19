@@ -56,6 +56,17 @@ func NewRPCError(code int, message string) *RPCError {
 	return &RPCError{Code: code, Message: message}
 }
 
+// IsMethodNotFound reports whether err is a JSON-RPC method-not-found error.
+// Hosts use it to degrade gracefully when a client advertised a capability it
+// does not actually implement.
+func IsMethodNotFound(err error) bool {
+	var rpcErr *RPCError
+	if errors.As(err, &rpcErr) {
+		return rpcErr.Code == CodeMethodNotFound
+	}
+	return false
+}
+
 // IsNotification reports whether the message has no id (notification).
 func (m Message) IsNotification() bool {
 	return len(m.ID) == 0 || string(m.ID) == "null"
