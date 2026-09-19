@@ -19,9 +19,10 @@ type ReactActEnvironmentGlobal = typeof globalThis & {
   IS_REACT_ACT_ENVIRONMENT?: boolean;
 };
 
-const NEW_CHAT_LABEL = "在该目录下新建会话";
-const RENAME_LABEL = "重命名目录";
-const REMOVE_LABEL = "移除目录";
+// 文案于 2c05eaac 精简（"在该目录下新建会话"→"新建会话" 等），此处与词典保持同步。
+const NEW_CHAT_LABEL = "新建会话";
+const RENAME_LABEL = "重命名";
+const REMOVE_LABEL = "移除";
 
 function flush() {
   return Promise.resolve().then(() => Promise.resolve());

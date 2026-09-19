@@ -12,6 +12,12 @@
 // 键根：`panels.fileBrowser.*`（由 resources/<lang>/workspace/index.ts 组合，本模块不自行挂载）。
 export const zhWorkspacePanelsFileBrowser = {
   ariaLabel: "文件浏览器",
+  // P5：文件浏览器升级为多页签文件管理器（根页签常驻 + 点击文件追加页签）。
+  manager: {
+    tabsAriaLabel: "文件管理器页签",
+    browserTab: "文件浏览器",
+    closeTab: "关闭 {{name}}",
+  },
   scope: {
     label: "作用域",
     selectAria: "切换文件浏览器的作用域",

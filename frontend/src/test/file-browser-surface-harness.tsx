@@ -193,3 +193,71 @@ export function searchPage(overrides: Partial<FsSearchResult> = {}): FsSearchRes
 export function previewFixture(): FsPreview {
   return { kind: "text", path: "deep/nested/found.ts", size: 17, truncated: false, text: "const found = 1;\n" };
 }
+
+// —— P5：多页签文件管理器的查询助手（页签条 / 激活态 / 关闭入口） ——
+
+/** 文件管理器页签条容器（role=tablist）。 */
+export function tabStrip(): Element | null {
+  return document.body.querySelector('[data-testid="file-manager-tab-strip"]');
+}
+
+/** 页签条内全部页签按钮（role=tab），按渲染顺序。 */
+export function tabButtons(): HTMLButtonElement[] {
+  return [
+    ...document.body.querySelectorAll<HTMLButtonElement>(
+      '[data-testid="file-manager-tab-strip"] [role="tab"]',
+    ),
+  ];
+}
+
+export function tabLabels(): string[] {
+  return tabButtons().map((button) => button.textContent?.trim() ?? "");
+}
+
+export function activeTabLabel(): string {
+  return (
+    tabButtons()
+      .find((button) => button.getAttribute("aria-selected") === "true")
+      ?.textContent?.trim() ?? ""
+  );
+}
+
+export function tabButton(label: string): HTMLButtonElement | null {
+  return tabButtons().find((button) => button.textContent?.trim() === label) ?? null;
+}
+
+/** 页签的关闭按钮；非可关页签（根页签）返回 null。 */
+export function tabCloseButton(label: string): HTMLButtonElement | null {
+  const button = tabButton(label);
+  const id = button?.getAttribute("data-testid")?.slice("file-manager-tab-".length) ?? "";
+  return (
+    [...document.body.querySelectorAll<HTMLButtonElement>(
+      '[data-testid="file-manager-tab-strip"] button',
+    )].find((item) => item.getAttribute("data-testid") === `file-manager-tab-close-${id}`) ?? null
+  );
+}
+
+export function clickTab(label: string) {
+  const button = tabButton(label);
+  act(() => {
+    button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+}
+
+export function closeTab(label: string) {
+  const button = tabCloseButton(label);
+  act(() => {
+    button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+}
+
+/** 文件页签正文是否展示指定路径（正文 testid 与旧预览面板同源，见 `file-tab.tsx`）。 */
+export function filePaneShowsPath(path: string): boolean {
+  const pane = document.body.querySelector('[data-testid="file-manager-file-tab"]');
+  return pane !== null && (pane.textContent ?? "").includes(path);
+}
+
+/** 目录树是否在场（根页签激活时为 true；文件页签接管正文时为 false）。 */
+export function browserTreeVisible(): boolean {
+  return document.body.querySelector('[role="tree"]') !== null;
+}

@@ -2,7 +2,7 @@
 // P0-2：右栏宽度状态源（useRightRailWidth）的行为测试。
 //
 // 设计规则（§4.2）：
-// - auto：内容型面（artifacts/plan/checkpoints/usage）= 288px（与改造前逐像素一致，回归红线 ④）；
+// - auto：内容型面（artifacts/plan/checkpoints/sessionDetail）= 288px（与改造前逐像素一致，回归红线 ④）；
 //   宽内容面（files/git）= clamp(0.32 × vw, 416, 672)。
 // - manual：持久化值再过 clampRailWidth()；视口变小只做「显示收窄」，**不回写设置**。
 // - commitWidth / resetToAuto 是唯一写入口：commit 落 manual，reset 落 auto（保留宽度意图）。
@@ -101,7 +101,12 @@ describe("useRightRailWidth", () => {
   });
 
   it("auto + 内容型面恒为 288px（回归红线 ④）", () => {
-    for (const surface of ["artifacts", "plan", "checkpoints", "usage"] as const) {
+    for (const surface of [
+      "artifacts",
+      "plan",
+      "checkpoints",
+      "sessionDetail",
+    ] as const) {
       const current = render(surface);
 
       expect(current.mode).toBe("auto");
@@ -179,7 +184,7 @@ describe("useRightRailWidth", () => {
       ),
     );
 
-    const manual = render("usage");
+    const manual = render("sessionDetail");
     expect(manual.widthPx).toBe(512);
 
     act(() => manual.resetToAuto());

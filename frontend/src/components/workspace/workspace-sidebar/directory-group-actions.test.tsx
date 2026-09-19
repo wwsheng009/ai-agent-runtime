@@ -16,14 +16,17 @@ type ReactActEnvironmentGlobal = typeof globalThis & {
 };
 
 const ACTIONS_LABEL = "目录操作";
-const NEW_CHAT_LABEL = "在该目录下新建会话";
-const RENAME_LABEL = "重命名目录";
-const REMOVE_LABEL = "移除目录";
+// 文案于 2c05eaac 精简（"在该目录下新建会话"→"新建会话" 等），并新增「刷新」菜单项。
+const NEW_CHAT_LABEL = "新建会话";
+const REFRESH_LABEL = "刷新";
+const RENAME_LABEL = "重命名";
+const REMOVE_LABEL = "移除";
 
 const LABELS: Record<string, string> = {
   "sidebar.directories.actions": ACTIONS_LABEL,
   "sidebar.directories.deleteTitle": REMOVE_LABEL,
   "sidebar.directories.newChat": NEW_CHAT_LABEL,
+  "sidebar.directories.refresh": REFRESH_LABEL,
   "sidebar.directories.rename": RENAME_LABEL,
 };
 
@@ -110,7 +113,7 @@ describe("WorkspaceSidebarDirectoryGroupActions", () => {
     expect(menu()).toBeNull();
   });
 
-  it("点击入口展开菜单，三个动作按「新建 / 重命名 / 移除」顺序排列", () => {
+  it("点击入口展开菜单，四个动作按「新建 / 刷新 / 重命名 / 移除」顺序排列", () => {
     render();
     click(trigger());
 
@@ -118,6 +121,7 @@ describe("WorkspaceSidebarDirectoryGroupActions", () => {
     expect(menu()).not.toBeNull();
     expect(menuItems().map((item) => item.textContent)).toEqual([
       NEW_CHAT_LABEL,
+      REFRESH_LABEL,
       RENAME_LABEL,
       REMOVE_LABEL,
     ]);
@@ -127,7 +131,7 @@ describe("WorkspaceSidebarDirectoryGroupActions", () => {
     render();
     click(trigger());
 
-    const [, rename] = menuItems();
+    const [, , rename] = menuItems();
     click(rename ?? null);
     expect(onRename).toHaveBeenCalledTimes(1);
     expect(menu()).toBeNull();
@@ -137,7 +141,7 @@ describe("WorkspaceSidebarDirectoryGroupActions", () => {
     expect(onCreate).toHaveBeenCalledTimes(1);
 
     click(trigger());
-    click(menuItems()[2] ?? null);
+    click(menuItems()[3] ?? null);
     expect(onRemove).toHaveBeenCalledTimes(1);
     expect(menu()).toBeNull();
   });
@@ -146,7 +150,7 @@ describe("WorkspaceSidebarDirectoryGroupActions", () => {
     render(true);
     click(trigger());
 
-    const [newChat, rename] = menuItems();
+    const [newChat, , rename] = menuItems();
     expect(newChat?.disabled).toBe(true);
     expect(
       newChat?.querySelector("svg.animate-spin"),
@@ -173,7 +177,7 @@ describe("WorkspaceSidebarDirectoryGroupActions", () => {
     keyDown(trigger(), "ArrowDown");
 
     expect(menu()).not.toBeNull();
-    // 忙碌时新建项被禁用，焦点落到「重命名目录」。
+    // 忙碌时新建项被禁用，焦点落到下一个可用项「刷新」。
     expect(document.activeElement).toBe(menuItems()[1]);
   });
 });

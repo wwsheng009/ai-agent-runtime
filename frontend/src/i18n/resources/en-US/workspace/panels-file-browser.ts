@@ -8,6 +8,12 @@ import type { zhWorkspacePanelsFileBrowser } from "../../zh-CN/workspace/panels-
 
 export const enWorkspacePanelsFileBrowser = {
   ariaLabel: "File browser",
+  // P5: the file browser is now a multi-tab file manager (persistent root tab + file tabs opened on click).
+  manager: {
+    tabsAriaLabel: "File manager tabs",
+    browserTab: "File browser",
+    closeTab: "Close {{name}}",
+  },
   scope: {
     label: "Scope",
     selectAria: "Switch the file browser scope",

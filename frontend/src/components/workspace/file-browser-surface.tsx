@@ -27,14 +27,16 @@ import { useTranslation } from "react-i18next";
 import { RuntimeApiError } from "@/api/runtime/shared";
 import { fetchFsRoots, isFsRootsUnavailable, pickDefaultRoot } from "@/api/runtime/fs-roots";
 import { fetchGitStatus } from "@/api/runtime/git";
+import { WorkspaceTabStrip } from "@/components/ui/tab-strip";
 import { FileDropTarget } from "@/components/workspace/file-browser/drop-target";
-import { PreviewPane } from "@/components/workspace/file-browser/preview-pane";
+import { FileTabPane } from "@/components/workspace/file-browser/file-tab";
 import { FileRowMenu } from "@/components/workspace/file-browser/row-menu";
 import { ScopeHeader } from "@/components/workspace/file-browser/scope-header";
 import { TransferTray } from "@/components/workspace/file-browser/transfer-tray";
 import { FileTreeList, type FileTreeSelectMode } from "@/components/workspace/file-browser/tree-list";
 import { useBrowserFileActions } from "@/components/workspace/file-browser/use-browser-file-actions";
 import { useDownloadManager } from "@/components/workspace/file-browser/use-download-manager";
+import { useFileManagerTabs } from "@/components/workspace/file-browser/use-file-manager-tabs";
 import { useRowMenuItems } from "@/components/workspace/file-browser/use-row-menu-items";
 import {
   BrowserSearchNotices,
@@ -78,6 +80,9 @@ export function FileBrowserSurface({ sessionId, workspacePath }: FileBrowserSurf
 
   const fallbackRoot = useMemo(() => buildFallbackRoot(sessionId, workspacePath), [sessionId, workspacePath]);
   const scope = activeScope || fallbackRoot.scope;
+  /** 文件管理器页签（根页签常驻 + 文件页签）：状态与开/关/切换语义都在 hook 内。 */
+  const { activeFile, activeId, browserActive, closeTab, openFile, selectTab, tabItems } =
+    useFileManagerTabs(scope);
   /**
    * roots 状态是**派生值**：结果只对本次 `sessionId + fallbackRoot.scope` 生效，key 不匹配即「加载中」，
    * 因此切换会话/工作目录不需要在 effect 体内同步 `setState`（react-hooks/set-state-in-effect）。
@@ -208,7 +213,6 @@ export function FileBrowserSurface({ sessionId, workspacePath }: FileBrowserSurf
     [entriesByPath, primaryPath, searchSelection, selectedPaths],
   );
   // 预览接口不变：仍然只吃 `FsEntry`（来源只决定它是谁选中的）。
-  const selectedEntry = selection?.entry ?? null;
   /** 树选中不得点亮搜索结果行：只有 search 来源才作为结果视图的选中路径。 */
   const searchSelectedPath = selection?.source === "search" ? selection.entry.path : null;
 
@@ -226,16 +230,25 @@ export function FileBrowserSurface({ sessionId, workspacePath }: FileBrowserSurf
 
   /**
    * 结果项动作（§4.7.4 第 2 条）：`dir` 先 `enterDir` 再清查询（回到树视图，沿用既有加载纪律）；
-   * 其余类型只切换预览选中——`symlink/inaccessible/unknown` 的判定在 hook 内，这里不重复写。
+   * 其余类型作为文件页签打开（`symlink/unknown` 走预览分流；`inaccessible` 被 `canOpenFileTab` 拦下）。
    */
   const handleActivateSearchItem = useCallback(
     (item: FsSearchItem) => {
       activateSearchItem(item);
       if (item.type === "dir") {
         setFilterText("");
+        return;
       }
+      openFile({
+        name: item.name,
+        path: item.path,
+        type: item.type,
+        size: item.size,
+        mtime: item.mtime,
+        ext: item.ext,
+      });
     },
-    [activateSearchItem],
+    [activateSearchItem, openFile],
   );
 
   /**
@@ -297,6 +310,8 @@ export function FileBrowserSurface({ sessionId, workspacePath }: FileBrowserSurf
         setSelectedPaths([entry.path]);
         setPrimaryPath(entry.path);
         setSelectionAnchor(entry.path);
+        // 单击文件（含符号链接等可预览项）= 在文件管理器里打开页签；目录只展开不开签。
+        openFile(entry);
         return;
       }
       if (mode === "range" && rangePaths && rangePaths.length > 0) {
@@ -311,7 +326,7 @@ export function FileBrowserSurface({ sessionId, workspacePath }: FileBrowserSurf
       setPrimaryPath(next.length === 0 ? null : next[next.length - 1]);
       setSelectionAnchor(entry.path);
     },
-    [clearSearchSelection, selectedPaths, selectedSet, toggleDir],
+    [clearSearchSelection, openFile, selectedPaths, selectedSet, toggleDir],
   );
 
   const treeState = (() => {
@@ -346,13 +361,31 @@ export function FileBrowserSurface({ sessionId, workspacePath }: FileBrowserSurf
   });
 
   return (
-    // 列必须是 `minmax(0,1fr)`：隐式 `auto` 列的轨道尺寸吃内容最小宽度（实测被撑到 535.7px，
-    // 容器只有 460px），整块面板会右溢出被 `overflow-hidden` 裁掉 —— 表现就是行尾的
-    // 修改时间/大小列被切、树看着「没有滚动条」。显式 0 下限允许列收缩到容器宽度。
     <div
-      className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden"
+      className="flex min-h-0 flex-1 min-w-0 flex-col overflow-hidden"
       data-testid="file-browser-surface"
     >
+
+      <WorkspaceTabStrip
+        activeId={activeId}
+        ariaLabel={t("panels.fileBrowser.manager.tabsAriaLabel")}
+        closeLabel={(item) => t("panels.fileBrowser.manager.closeTab", { name: item.label })}
+        items={tabItems}
+        onClose={closeTab}
+        onSelect={selectTab}
+        testIdBase="file-manager-tab"
+      />
+
+      {browserActive ? (
+      <FileDropTarget
+        className="min-h-0 flex-1"
+        hint={t("panels.fileBrowser.drop.hint", {
+          dir: currentDir ? `${activeRootName}/${currentDir}` : activeRootName,
+        })}
+        onDropFiles={handlePickUpload}
+      >
+      {/* `flex-1` 是必需的：本层是 FileDropTarget（flex 列）的子项，缺它就退回内容高度，
+          `minmax(0,1fr)` 拿不到确定高度 → 树永不溢出（无滚动条）。 */}
       <ScopeHeader
         activeScope={scope}
         canGoUp={currentDir !== ""}
@@ -370,8 +403,8 @@ export function FileBrowserSurface({ sessionId, workspacePath }: FileBrowserSurf
         onRefresh={handleRefresh}
         onRefreshAll={handleRefreshAll}
         onSelectScope={(next) => {
-          setActiveScope(next);
-          browser.enterDir("");
+        setActiveScope(next);
+        browser.enterDir("");
         }}
         onToggleHidden={() => browser.setShowHidden(!browser.showHidden)}
         onToggleTransferTray={() => setTrayOpen((open) => !open)}
@@ -383,17 +416,7 @@ export function FileBrowserSurface({ sessionId, workspacePath }: FileBrowserSurf
         transferCount={transfer.uploads.length + downloadManager.downloads.length}
         transferOpen={trayOpen}
       />
-
-      <FileDropTarget
-        className="min-h-0"
-        hint={t("panels.fileBrowser.drop.hint", {
-          dir: currentDir ? `${activeRootName}/${currentDir}` : activeRootName,
-        })}
-        onDropFiles={handlePickUpload}
-      >
-      {/* `flex-1` 是必需的：本层是 FileDropTarget（flex 列）的子项，缺它就退回内容高度，
-          `minmax(0,3fr/2fr)` 拿不到确定高度 → 树永不溢出（无滚动条）、预览区被裁到区外。 */}
-      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)] grid-rows-[minmax(0,3fr)_minmax(0,2fr)] gap-2 overflow-hidden p-2">
+      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)] grid-rows-[minmax(0,1fr)_auto] gap-2 overflow-hidden p-2">
         <div className="grid min-h-0 grid-cols-[minmax(0,1fr)] grid-rows-[minmax(0,1fr)_auto] gap-1">
           {searchView.viewVisible ? (
             // 结果就绪 → 扁平结果列表接管列表区（§4.7.2-A）；多选/右键/传输不接入（§4.7.4 第 2 条）。
@@ -467,11 +490,8 @@ export function FileBrowserSurface({ sessionId, workspacePath }: FileBrowserSurf
           />
         </div>
 
-        <PreviewPane className="min-h-0 rounded-card border border-border/60" entry={selectedEntry} onDownload={handleDownload} scope={scope} />
-
         {trayOpen ? (
           <TransferTray
-            className="row-span-2"
             downloads={downloadManager.downloads}
             onCancelDownload={downloadManager.cancel}
             onCancelUpload={transfer.cancelUpload}
@@ -487,6 +507,13 @@ export function FileBrowserSurface({ sessionId, workspacePath }: FileBrowserSurf
         ) : null}
       </div>
       </FileDropTarget>
+      ) : activeFile ? (
+        <FileTabPane
+          className="min-h-0 flex-1"
+          onDownload={handleDownload}
+          tab={activeFile}
+        />
+      ) : null}
 
       {rowMenu ? (
         <FileRowMenu items={rowMenuItems} onClose={() => setRowMenu(null)} x={rowMenu.x} y={rowMenu.y} />
