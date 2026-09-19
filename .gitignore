@@ -52,6 +52,8 @@ dist/
 build/
 output/
 artifacts/
+# Local build output (`go build -o bin/...` from the repo root).
+/bin/
 
 # render/output 是源码包（渲染交付中间层），不是构建产物。
 backend/cmd/aicli/ui/render/output/*
@@ -93,6 +95,8 @@ backend/aicli_x_fix4_stderr.txt
 # Debug / scratch artifacts (not source)
 _tmp_*
 tmp_*
+*.err
+*.bak
 backend/check_*.py
 backend/ncrprobe_*.go
 backend/.ncrprobe-bak/
