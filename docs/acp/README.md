@@ -89,10 +89,15 @@ provider/model 的完整解析链（flag → runtime session → workspace 偏�
 | 方法 | 说明 |
 |---|---|
 | `initialize` | 握手。返回 `protocolVersion`、`agentCapabilities`、`agentInfo`（name=`aicli`）、`authMethods` |
-| `session/new` | 创建会话。参数 `{cwd, mcpServers}`（MCP 参数暂不支持，保留字段）；返回 `{sessionId}` |
+| `session/new` | 创建会话。参数 `{cwd, mcpServers}`（MCP 参数暂不支持，保留字段）；返回 `{sessionId, configOptions?}`（`configOptions` 携带模型 / provider 选择器） |
 | `session/prompt` | 运行一轮对话。参数 `{sessionId, prompt: ContentBlock[]}`；阻塞至本轮结束，返回 `{stopReason}`。当前仅 `type=text` 内容块 |
 | `session/cancel` | 取消某 session 的在途 prompt。参数 `{sessionId}`（通知，无响应） |
-| `session/load` | 恢复会话（仅 `loadSession=true` 能力时可用）。agent 通过 `session/update` 回放历史后返回 `null` |
+| `session/set_config_option` | 修改会话选项（模型 / provider 选择）。参数 `{sessionId, configId, value}`，`value` 为 `value_id` 字符串或布尔值；返回**完整的** `{configOptions}` 供客户端刷新选择器。Zed 的模型菜单即通过该方法切换模型，provider 选择器走同一方法（`configId: "provider"`） |
+| `session/load` | 恢复会话（仅 `loadSession=true` 能力时可用）。agent 通过 `session/update` 回放历史后返回空对象 `{}`（`LoadSessionResponse`，字段均可选）。返回 `null` 违反 ACP v1 schema，会导致 Zed 等严格客户端反序列化失败 |
+| `session/list` | 枚举持久化会话（需声明 `sessionCapabilities.list`）。参数 `{cursor?, cwd?}`；返回 `{sessions: [{sessionId, cwd?, title?, updatedAt?}], nextCursor?}`，`sessions` 恒为数组（空时为 `[]`，绝不返回 `null`）。`cursor` 为上一页返回的 `nextCursor`（数字偏移） |
+| `session/delete` | 删除持久化会话（需声明 `sessionCapabilities.delete`）。参数 `{sessionId}`；返回 `{}`。会话仍在内存中时先 detach 再删除存储记录；两者都不存在时返回 not-found |
+| `session/close` | 释放内存中的会话（需声明 `sessionCapabilities.close`）。参数 `{sessionId}`；返回 `{}`。未挂载的会话按幂等处理（不报错），供客户端退出时清理 |
+| `session/set_mode` | legacy 权限模式切换（`{sessionId, modeId}`）。与 `configId: "mode"` 配置项双通道并存，见下节 |
 | `$/cancel_request` | JSON-RPC 标准取消通知。参数 `{requestId}`，按请求 id 取消在途调用（双向） |
 
 ### Agent → 客户端
@@ -107,12 +112,18 @@ provider/model 的完整解析链（flag → runtime session → workspace 偏�
 ```jsonc
 {
   "loadSession": true,
+  "sessionCapabilities": {"list": true, "delete": true, "close": true},
   "promptCapabilities": {"image": false, "audio": false, "embeddedContext": false},
   "mcpCapabilities": {"http": false, "sse": false}
 }
 ```
 
 当前 MVP 仅支持文本 prompt；图片 / 音频 / embeddedContext 暂未开放。
+
+`initialize` 返回前会按后端**实际实现**裁剪 `sessionCapabilities` 的布尔位：
+声明为 `true` 的方法一定可达，未实现的方法既不会被声明、调用时也返回 `-32601`
+（见 `internal/acp/server.go` 的 `effectiveAgentCapabilities`）。aicli 宿主实现了
+`list` / `delete` / `close` 三者。
 
 ### stopReason 取值
 
@@ -137,6 +148,9 @@ provider/model 的完整解析链（flag → runtime session → workspace 偏�
 | `tool_call_update` | 同上 | 工具调用进度 / 终态 |
 | `plan` | `{entries: [{content, priority, status}]}` | 计划面板更新 |
 | `usage_update` | `{used, size, cost?}` | token 用量 |
+| `session_info_update` | `{title, updatedAt}` | 会话标题 / 更新时间变化（自动生成标题后的回合结束、session/load 回放完成后发送） |
+| `available_commands_update` | `{availableCommands: [{name, description?, input?}]}` | 斜杠命令目录（session/new、session/load 后发送；空目录序列化为 `[]`） |
+| `config_option_update` | `{configOptions}` | 会话选项在带外变化（如模型被切换）时的刷新通知 |
 
 工具调用 `status`：`pending` → `in_progress` → `completed` / `failed`。
 
@@ -193,9 +207,80 @@ provider/model 的完整解析链（flag → runtime session → workspace 偏�
 - `--session-dir <dir>`：会话写入持久化 store；跨进程仍可
   `session/load`（capabilities 中 `loadSession=true`）。
 - `session/load` 语义：agent 先通过 `session/update` 回放完整对话历史
-  （user/assistant 消息、工具调用），然后返回 `null` 结果；客户端此后可
+  （user/assistant 消息、工具调用），然后返回空对象 `{}`（`LoadSessionResponse`）；客户端此后可
   直接 `session/prompt` 继续对话。
 - 解析顺序：进程内已附着 session → 持久化 store（非 ephemeral 时）。
+
+## 模型、thinking effort 与 provider 切换（session config options）
+
+`session/new` 与 `session/load` 的响应会带 `configOptions`，最多三个 select
+选项：
+
+- `id: "model"`（`category: "model"`）：模型选择器。客户端（Zed 等）据此
+  渲染模型菜单与 "Change Model" 快捷键。
+- `id: "thought_level"`（`category: "thought_level"`）：reasoning effort
+  选择器。仅当当前模型声明了 reasoning effort 目录
+  （provider 配置的 `model_capabilities`，或协议默认能力）时下发；分类名与
+  ACP 规范一致，Zed 会渲染为 "Change Thinking Effort"。
+- `id: "provider"`（`category: "_provider"`）：provider 选择器。仅当配置中
+  存在 ≥2 个 enabled provider 时下发；分类以 `_` 开头是 ACP 的扩展分类
+  约定，客户端不识别该分类时按普通 select 渲染。
+
+用户切换时发送 `session/set_config_option`，agent 分别复用交互式 `/model`、
+`/reasoning_effort`、`/provider` 的同一套运行时切换逻辑，并返回更新后的完整
+`configOptions`。
+
+```jsonc
+// session/new 响应（片段）
+{"sessionId":"...","configOptions":[
+  {"id":"model","name":"Model","category":"model","type":"select",
+   "currentValue":"gpt-4o",
+   "options":[{"value":"gpt-4o","name":"gpt-4o"},{"value":"gpt-4o-mini","name":"gpt-4o-mini"}]},
+  {"id":"thought_level","name":"Thinking Effort","category":"thought_level","type":"select",
+   "currentValue":"default",
+   "options":[{"value":"default","name":"default",
+               "description":"Use the provider default reasoning effort."},
+              {"value":"low","name":"low"},{"value":"medium","name":"medium"}]},
+  {"id":"provider","name":"Provider","category":"_provider","type":"select",
+   "currentValue":"openai",
+   "options":[{"value":"openai","name":"openai"},{"value":"anthropic","name":"anthropic"}]}]}
+
+// 客户端切换模型
+{"jsonrpc":"2.0","id":7,"method":"session/set_config_option",
+ "params":{"sessionId":"...","configId":"model","value":"gpt-4o-mini"}}
+
+// 客户端切换 provider（自动选中该 provider 的默认模型）
+{"jsonrpc":"2.0","id":8,"method":"session/set_config_option",
+ "params":{"sessionId":"...","configId":"provider","value":"anthropic"}}
+
+// 客户端切换 reasoning effort；"default" 清除会话覆盖、回到 provider 默认值
+{"jsonrpc":"2.0","id":9,"method":"session/set_config_option",
+ "params":{"sessionId":"...","configId":"thought_level","value":"high"}}
+```
+
+实现要点：
+
+- 只发出 select 类型选项：ACP v1 中 select 是基线能力，boolean 选项需
+  客户端额外声明 `session.configOptions.boolean`。
+- 模型列表来自 provider 的 `supported_models`（含当前模型与默认模型，
+  去重后按名称排序），当前模型排在最前，便于客户端预选。
+- provider 列表只含 enabled provider，当前 provider 排在最前并始终可选；
+  切换到当前 provider 是 no-op。切换 provider 会连带选中其
+  `default_model`（缺失默认模型时沿用当前模型名），协议、适配器、HTTP
+  client 与工具表面同步刷新；切换后响应中的 `model` 选项同步更新为新
+  provider 的模型列表。
+- reasoning effort 选项的取值来自当前模型的 effort 目录（去重、按
+  minimal/low/medium/high/max 等既有排序规则排列），当前值排在最前便于
+  客户端预选；目录为空时不下发该选项，避免客户端选择运行时无法识别的值。
+  额外提供合成值 `"default"`：ACP 要求 `currentValue` 必须属于已下发取值，
+  而"未覆盖、用 provider 默认"本身也是一个合法状态，因此需要一个真实取值
+  承载它；选中后清除会话级覆盖。会话中残留的旧值（切换模型/provider 后新
+  目录不再包含它）仍会被列出并可再次选中，避免切换后状态无法表达。
+  不可识别的取值（既不在目录中、也不是当前值）返回 `invalid params`。
+- 三类切换均在**下一轮**生效（不做流式中途切换）；带内 prompt 进行中会
+  返回错误请客户端稍后重试，避免与运行中的 turn 竞争会话状态。
+- 切换后 agent 通过 `config_option_update` 之外的响应回传完整选项集，
+  客户端无需再发 `session/load` 刷新。
 
 ## 端到端自测
 
@@ -221,6 +306,29 @@ go run ./scripts/acp_e2e_cancel.go $env:TEMP\aicli-e2e.exe
 协议层单测：`go test ./internal/acp/ -count=1`，覆盖
 `$/cancel_request` 出站/入站、requestId 归一化、prompt 中止等。
 
+配置项切换（model / thought_level / provider）另有一条全链路脚本，
+断言切换值真的落到上游请求体上：
+
+```powershell
+cd backend
+go build -o $env:TEMP\aicli-e2e.exe ./cmd/aicli/
+go run ./scripts/acp_e2e_thought_level.go $env:TEMP\aicli-e2e.exe
+# 期望输出：
+# OK initialize
+# OK session/new sessionId=session_... thought_level=[low medium high default]
+# OK session/set_config_option thought_level=high
+# OK upstream request carries reasoning_effort=high
+# OK session/set_config_option thought_level=default
+# OK upstream request omits reasoning_effort after clearing
+# OK session/set_config_option rejects unknown effort
+# E2E PASS
+```
+
+脚本流程：initialize → session/new（断言 `thought_level` 选项与 `default`
+当前值）→ 切到 `high` 并发 prompt（断言 mock provider 收到的请求体
+`reasoning_effort == "high"`）→ 切回 `default` 并发 prompt（断言请求体不再
+带该字段）→ 断言未知取值被 `invalid params` 拒绝。
+
 ## 常见问题
 
 **Q: session/new 报 `provider ... not found` / `no provider specified`？**
@@ -241,8 +349,82 @@ provider 解析链全部落空（flag、workspace、`aicli.chat.default_provider
 
 **Q: MCP servers 参数支持吗？**
 `session/new` / `session/load` 的 `mcpServers` 字段目前保留但不生效，
-agent 侧 MCP 能力（http/sse）能力位均为 false。
+agent 侧 MCP 能力（http/sse）能力位均为 false。`additionalDirectories`
+字段已解析但暂不用于额外工作区根目录。
 
 **Q: 为什么 stdout 混入了非协议输出？**
 不应发生。stdout 被保留为纯协议通道；若发现污染，检查是否误用了会写
 stdout 的 hook/plugin，并提交 issue。日志请走 `--log-dir`。
+
+**Q: 如何在 Zed 中添加 aicli 作为 ACP 服务？**
+在 Zed 中添加 aicli ACP 服务（External Agent）：
+
+1. 打开 **Agent Settings** → **External Agents** 页面 → 点击 **Add Agent** →
+   选择 **Add Custom Agent**。Zed 会打开 `~/.config/zed/settings.json`
+   （Windows 为 `%APPDATA%\Zed\settings.json`）并插入 `agent_servers` 模板。
+2. 配置 aicli 二进制路径。推荐使用 `acp` 子命令（或 `--acp` flag，二者等价）：
+
+   ```jsonc
+   // ~/.config/zed/settings.json
+   {
+     "agent_servers": {
+       "aicli": {
+         "type": "custom",
+         "command": "C:/Users/<user>/go/bin/aicli.exe",  // 必须是绝对路径
+         "args": ["acp", "--provider", "openai", "--model", "gpt-4o"],
+         "env": {}
+       }
+     }
+   }
+   ```
+
+   > **Windows 用户**：`command` 必须是 `.exe` 的绝对路径，否则 Zed 无法
+   > 找到可执行文件。`args` 推荐用 `["acp", ...]` 子命令形式；`["--acp", ...]`
+   > flag 形式也支持，但旧版本 aicli 存在 `--acp` 被误写为 `acp chat ...`
+   > 的 bug（已修复），请确保使用最新构建。
+
+   > **会话持久化**：ACP 模式下会话默认持久化到本地会话目录
+   > (`~/.aicli/sessions` 或 `%APPDATA%\aicli\sessions`)，以便
+   > `session/load` 在 Zed 重启后能恢复对话。如需自定义存储位置，
+   > 可添加 `--session-dir` 参数：
+   > ```jsonc
+   > "args": ["acp", "--session-dir", "C:/path/to/sessions"]
+   > ```
+
+3. 保存后无需重启 Zed，新代理会出现在 Agent Panel 的新建线程菜单中。
+4. 如需调试：命令Palette 运行 `dev: open acp logs` 可查看 Zed 与 agent
+   之间的协议消息。
+
+**Q: session/load 报 `session not found`？**
+ACP 会话默认持久化到本地会话目录，`session/load` 会从该目录加载会话。
+请确认：
+- 会话 ID 来自之前 `session/new` 的返回结果（而非手动编造）。
+- `aicli acp` 进程在加载时使用**相同的会话目录**（默认
+  `~/.aicli/sessions` / `%APPDATA%\aicli\sessions`）。如果
+  `session/new` 时指定了 `--session-dir`，加载时也必须使用相同的目录。
+- 会话目录有读写权限。
+- 该会话之前是在**非 ephemeral** 模式下创建的（ACP 默认即为非
+  ephemeral，参见上一问）。历史版本 aicli 可能默认 ephemeral，
+   升级到最新构建即可。
+
+**Q: Zed 侧报 `Parse error: invalid type: null, expected struct LoadSessionResponse`？**
+这是历史版本 aicli 的 `session/load` 响应不符合 ACP v1 schema 导致的：
+schema 将 `LoadSessionResponse` 定义为对象（`modes` / `configOptions` /
+`_meta` 字段均可选），旧实现返回 JSON-RPC `result: null`，Zed 的 Rust
+客户端反序列化到结构体时直接失败，导致会话附加中断（表现为"无法连接会话"）。
+修复后成功加载的响应形如 `{"jsonrpc":"2.0","id":N,"result":{}}`；可运行
+`dev: open acp logs` 确认 `session/load` 的 `result` 是 `{}` 而不是 `null`。
+升级到包含该修复的构建即可恢复。
+
+**Q: Zed 添加后无法启动 / 初始化失败怎么排查？**
+
+- 用 `aicli acp` 手动在终端测试握手：
+  ```powershell
+  aicli acp --provider openai --model gpt-4o < $null
+  ```
+  正确时应在 stderr 输出 `Info: pprof endpoint...` 等启动日志，stdout
+  保持静默（等待 NDJSON）。如果 stdout 有非 JSON 输出，说明存在
+  stdout 污染，需检查是否启用了交互式 surface。
+- 确认 `command` 是绝对路径且可执行；Zed 不会解析 `PATH`。
+- 确认 `--provider` / `--model` 可在该环境解析到可用 provider。
+- 使用 `dev: open acp logs` 检查 Zed 侧的 `initialize` 响应解析错误。

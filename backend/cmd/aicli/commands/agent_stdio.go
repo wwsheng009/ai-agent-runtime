@@ -16,6 +16,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // agentStdioOptions configures the ACP stdio host bootstrap.
@@ -69,13 +70,23 @@ func runAgentStdio(cmd *cobra.Command, cfg *config.Config) error {
 	defer host.Close()
 
 	conn := acp.NewConn(os.Stdin, os.Stdout)
+	// The aicli ACP host implements session/list, session/delete and
+	// session/close; advertise them so clients (e.g. Zed's history panel) enable
+	// the corresponding UI. The server still clears any flag whose method the
+	// backend does not actually implement.
+	agentCaps := acp.DefaultAgentCapabilities()
+	agentCaps.SessionCapabilities = &acp.SessionCapabilities{
+		List:   true,
+		Delete: true,
+		Close:  true,
+	}
 	server := acp.NewServer(conn, host, acp.ServerOptions{
 		AgentInfo: acp.Implementation{
 			Name:    "aicli",
 			Title:   "AICLI",
 			Version: buildinfo.Backend().Version,
 		},
-		AgentCapabilities: acp.DefaultAgentCapabilities(),
+		AgentCapabilities: agentCaps,
 	})
 	host.SetPermissionRequester(server.PermissionRequester())
 
@@ -91,12 +102,25 @@ func runAgentStdio(cmd *cobra.Command, cfg *config.Config) error {
 
 // acpSessionHost implements acp.SessionBackend by bootstrapping chat sessions.
 type acpSessionHost struct {
-	cfg    *config.Config
-	opts   *agentStdioOptions
-	mu     sync.Mutex
-	sess   map[string]*acpHostSession
-	perm   acp.PermissionRequester
-	closed bool
+	cfg  *config.Config
+	opts *agentStdioOptions
+	mu   sync.Mutex
+	sess map[string]*acpHostSession
+	perm acp.PermissionRequester
+	// emit is the connection emitter handed over by the ACP server. It is used
+	// for out-of-band session/update notifications sent between turns (mode
+	// and config option changes), where no prompt-scoped emitter exists.
+	emit acp.Emitter
+	// questionRequester is the client-bound requester for the
+	// session/request_question extension. It is set by the ACP server and
+	// re-checks the client capability on every call.
+	questionRequester acp.QuestionRequester
+	// storeMgr is the lazily opened durable store backing session/list and
+	// session/delete. It is independent from per-session managers so a client
+	// can browse history before creating its first session.
+	storeMgr    *runtimechat.SessionManager
+	storeUserID string
+	closed      bool
 }
 
 type acpHostSession struct {
@@ -133,6 +157,39 @@ func (h *acpSessionHost) SetPermissionRequester(req acp.PermissionRequester) {
 	}
 }
 
+// SetSessionEmitter implements acp.SessionEmitterAware: the ACP server hands
+// over a connection-scoped emitter at construction time so the host can push
+// session/update notifications outside a prompt turn.
+func (h *acpSessionHost) SetSessionEmitter(emit acp.Emitter) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.emit = emit
+}
+
+// broadcastSessionUpdate sends an out-of-band session/update notification.
+// Failing to notify must never fail the state change that triggered it: the
+// client still receives the authoritative option set in the RPC response, so a
+// missed notification only means a stale picker until the next refresh.
+func (h *acpSessionHost) broadcastSessionUpdate(sessionID string, update acp.SessionUpdate) {
+	if h == nil {
+		return
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	h.mu.Lock()
+	emit := h.emit
+	h.mu.Unlock()
+	if emit == nil {
+		return
+	}
+	_ = emit.SessionUpdate(sessionID, update)
+}
+
 // Close finalizes all sessions.
 func (h *acpSessionHost) Close() {
 	if h == nil {
@@ -144,6 +201,10 @@ func (h *acpSessionHost) Close() {
 	for id, s := range h.sess {
 		h.closeSessionLocked(s)
 		delete(h.sess, id)
+	}
+	if h.storeMgr != nil {
+		h.storeMgr.Stop()
+		h.storeMgr = nil
 	}
 }
 
@@ -175,7 +236,24 @@ func (h *acpSessionHost) NewSession(ctx context.Context, req acp.NewSessionReque
 		return acp.NewSessionResponse{}, err
 	}
 	h.sess[hostSess.id] = hostSess
-	return acp.NewSessionResponse{SessionID: hostSess.id}, nil
+	// Record the workspace so session/list?cwd=<workspace> can narrow the
+	// history panel to this project. Best-effort: never fails session/new.
+	recordACPSessionWorkspace(ctx, hostSess, acpResolveSessionWorkspace(cwd))
+	// Advertise the command catalog + initial session_info without waiting for
+	// a prompt: the client renders the slash-command panel from session/new.
+	emitACPSessionCatalog(h.emit, hostSess.id, hostSess.chat)
+	return acp.NewSessionResponse{
+		SessionID: hostSess.id,
+		// Advertise the model selector inline: ACP v1 session/new carries
+		// configOptions, and category=model is what makes clients render the
+		// model picker and route session/set_config_option back to us.
+		ConfigOptions: acpConfigOptionsForChat(hostSess.chat),
+		// Also carry the legacy modes state: ACP v1 supersedes it with the
+		// "mode" config option above, but clients still reading `modes` get a
+		// working permission-mode selector instead of none. Both channels are
+		// driven from the same session state.
+		Modes: acpModesForChat(hostSess.chat),
+	}, nil
 }
 
 func (h *acpSessionHost) Prompt(ctx context.Context, req acp.PromptRequest, emit acp.Emitter) (acp.PromptResponse, error) {
@@ -256,6 +334,15 @@ func (h *acpSessionHost) Prompt(ctx context.Context, req acp.PromptRequest, emit
 		}
 	}
 
+	// An approval persisted by a previous process has no waiter here: nothing
+	// would ever emit session/request_permission for it, so the actor would stay
+	// in waiting_approval and this prompt would fail with the actor-ready
+	// timeout. Re-ask the client (or resolve it locally under yolo) first, then
+	// let the resumed run settle before submitting the new prompt.
+	if reconcileACPRestoredApproval(promptCtx, hostSess, chat) {
+		waitForACPRecoveredRun(promptCtx, chat)
+	}
+
 	response, err := sendMessage(chat, text)
 	if err != nil {
 		// Close any tool calls left open by the cancelled turn so the client
@@ -276,6 +363,10 @@ func (h *acpSessionHost) Prompt(ctx context.Context, req acp.PromptRequest, emit
 			_ = hostSess.bridge.EmitAssistant(trimmed)
 		}
 	}
+	// Refresh the context meter and the (possibly auto-generated) title after
+	// every completed turn so the client never shows stale session metadata.
+	emitACPSessionUsage(emit, sessionID, chat)
+	emitACPSessionInfo(emit, sessionID, chat)
 	return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
 }
 
@@ -319,7 +410,11 @@ func (h *acpSessionHost) LoadSession(ctx context.Context, req acp.LoadSessionReq
 	h.mu.Unlock()
 
 	if existing != nil {
-		return replayACPSessionHistory(sessionID, existing, emit)
+		if err := replayACPSessionHistory(sessionID, existing, emit); err != nil {
+			return err
+		}
+		emitACPSessionCatalog(emit, sessionID, existing.chat)
+		return nil
 	}
 
 	// Apply cwd before durable bootstrap, same as session/new.
@@ -343,7 +438,11 @@ func (h *acpSessionHost) LoadSession(ctx context.Context, req acp.LoadSessionReq
 	}
 	// Re-check under lock in case another load raced in.
 	if existing = h.sess[sessionID]; existing != nil {
-		return replayACPSessionHistory(sessionID, existing, emit)
+		if err := replayACPSessionHistory(sessionID, existing, emit); err != nil {
+			return err
+		}
+		emitACPSessionCatalog(emit, sessionID, existing.chat)
+		return nil
 	}
 
 	hostSess, err := h.bootstrapSessionFromIDLocked(ctx, sessionID)
@@ -351,7 +450,11 @@ func (h *acpSessionHost) LoadSession(ctx context.Context, req acp.LoadSessionReq
 		return err
 	}
 	h.sess[hostSess.id] = hostSess
-	return replayACPSessionHistory(hostSess.id, hostSess, emit)
+	if err := replayACPSessionHistory(hostSess.id, hostSess, emit); err != nil {
+		return err
+	}
+	emitACPSessionCatalog(emit, hostSess.id, hostSess.chat)
+	return nil
 }
 
 func (h *acpSessionHost) bootstrapSessionLocked(ctx context.Context) (*acpHostSession, error) {
@@ -392,18 +495,22 @@ func (h *acpSessionHost) bootstrapSessionWithIDLocked(ctx context.Context, sessi
 	// Clone exec options so session/load can force durable resume without mutating
 	// the host-wide ephemeral defaults used by subsequent session/new calls.
 	execOpts := *opts.ExecOptions
-	if loadExisting {
-		// Durable load path: never open an empty ephemeral store for a known ID.
-		execOpts.Ephemeral = false
-	}
+	// ACP sessions must be durable so session/load can resume them across
+	// process restarts. Force non-ephemeral for both session/new and session/load.
+	execOpts.Ephemeral = false
 	chatOpts := buildExecChatOptions(&execOpts)
 	// ACP never consumes stdin as human input.
 	chatOpts.InputReader = nil
 	chatOpts.NoInteractive = true
 	chatOpts.JSONOutput = false
+	// ACP advertises session/load and must never silently fall back to an
+	// in-memory session when the durable store cannot be opened.  The regular
+	// headless `exec` path intentionally treats session persistence as
+	// optional, but returning an ACP sessionId before it is durable creates a
+	// "ghost" session that Zed will immediately fail to load after a restart.
+	chatOpts.SessionFeaturesRequested = true
 	if loadExisting {
 		chatOpts.SessionIDFlag = strings.TrimSpace(sessionID)
-		chatOpts.SessionFeaturesRequested = true
 	}
 	// Headless ACP: resolve folder trust before profile/plugin discovery.
 	ensureProcessFolderTrust(chatOpts.TrustGrant, false)
@@ -413,14 +520,6 @@ func (h *acpSessionHost) bootstrapSessionWithIDLocked(ctx context.Context, sessi
 		return nil, fmt.Errorf("profile resolve failed: %w", err)
 	}
 	applyProfileDefaultsToChatOptions(chatOpts, profileState)
-	if !loadExisting {
-		chatOpts.SessionFeaturesRequested = strings.TrimSpace(execOpts.SessionDir) != "" ||
-			strings.TrimSpace(execOpts.SessionTitle) != "" ||
-			(profileState != nil && profileState.Active())
-	} else {
-		// Keep features requested even if profile inactive — we must open the store.
-		chatOpts.SessionFeaturesRequested = true
-	}
 
 	persistenceState, err := prepareExecPersistence(h.cfg, chatOpts, &execOpts, profileState)
 	if err != nil {
@@ -444,6 +543,23 @@ func (h *acpSessionHost) bootstrapSessionWithIDLocked(ctx context.Context, sessi
 		return nil, fmt.Errorf("session bootstrap failed: %w", err)
 	}
 
+	// Persist the session to disk immediately so session/load can find it
+	// across process restarts. Without this, a session created via session/new
+	// stays in-memory (runtimeSessionUnpersisted=true) until the first prompt
+	// sync, and Zed will get "session not found" if it restarts before sending
+	// a prompt.
+	if !loadExisting {
+		if err := ensureChatRuntimeSessionPersisted(chatSession); err != nil {
+			if cleanupSession != nil {
+				cleanupSession()
+			}
+			if persistenceState.runtimeSessionManager != nil {
+				persistenceState.runtimeSessionManager.Stop()
+			}
+			return nil, fmt.Errorf("persist ACP session/new before returning sessionId: %w", err)
+		}
+	}
+
 	resolvedID := currentRuntimeSessionID(chatSession)
 	if strings.TrimSpace(resolvedID) == "" {
 		if loadExisting {
@@ -457,6 +573,7 @@ func (h *acpSessionHost) bootstrapSessionWithIDLocked(ctx context.Context, sessi
 	if h.perm != nil {
 		bridge.SetPermissionRequester(h.perm)
 	}
+	bridge.SetQuestionRequester(h.questionRequester)
 	chatSession.ExecEventBridge = bridge
 
 	// Pre-install runtime bridge hooks for approvals (Prompt re-binds emitters).
@@ -464,6 +581,10 @@ func (h *acpSessionHost) bootstrapSessionWithIDLocked(ctx context.Context, sessi
 	if rtBridge != nil {
 		rtBridge.preferInteractiveApprovals = true
 		rtBridge.askApproval = bridge.AskApproval
+		// Headless ACP sessions are NoInteractive, so ask_user_question would
+		// otherwise fail the turn. Route it to the client panel when the client
+		// advertised the extension; the hook itself degrades when it did not.
+		rtBridge.askQuestionHeadless = bridge.AskQuestion
 		silenceChatRuntimeBridgeWriters(rtBridge)
 	}
 
@@ -505,21 +626,26 @@ func replayACPSessionHistory(sessionID string, hostSess *acpHostSession, emit ac
 	if len(messages) == 0 {
 		return nil
 	}
+	toolNames := make(map[string]string)
 
-	for _, message := range messages {
+	for index, message := range messages {
 		role := strings.ToLower(strings.TrimSpace(message.Role))
+		// Replayed chunks carry a message id just like the live path so clients
+		// can group transcript blocks after a session/load refresh. Prefer the
+		// durable metadata id; fall back to a deterministic replay-local id.
+		messageID := replayMessageID(message, index)
 		switch role {
 		case "user":
 			text := strings.TrimSpace(message.Content)
 			if text == "" {
 				continue
 			}
-			if err := emit.SessionUpdate(sessionID, acp.UserMessageChunk(text)); err != nil {
+			if err := emit.SessionUpdate(sessionID, acp.WithMessageID(acp.UserMessageChunk(text), messageID)); err != nil {
 				return err
 			}
 		case "assistant":
 			if text := strings.TrimSpace(message.Content); text != "" {
-				if err := emit.SessionUpdate(sessionID, acp.AgentMessageChunk(text)); err != nil {
+				if err := emit.SessionUpdate(sessionID, acp.WithMessageID(acp.AgentMessageChunk(text), messageID)); err != nil {
 					return err
 				}
 			}
@@ -537,7 +663,8 @@ func replayACPSessionHistory(sessionID string, hostSess *acpHostSession, emit ac
 				if len(call.Args) > 0 {
 					rawInput = call.Args
 				}
-				if err := emit.SessionUpdate(sessionID, acp.ToolCallStarted(callID, title, kind, rawInput)); err != nil {
+				toolNames[callID] = call.Name
+				if err := emit.SessionUpdate(sessionID, acp.ToolCallStarted(callID, call.Name, title, kind, rawInput)); err != nil {
 					return err
 				}
 			}
@@ -564,7 +691,7 @@ func replayACPSessionHistory(sessionID string, hostSess *acpHostSession, emit ac
 					content = []acp.ToolCallContent{acp.TextToolContent(truncateForACP(text, 4000))}
 				}
 			}
-			if err := emit.SessionUpdate(sessionID, acp.ToolCallFinished(callID, status, rawOutput, content)); err != nil {
+			if err := emit.SessionUpdate(sessionID, acp.ToolCallFinished(callID, toolNames[callID], status, rawOutput, content)); err != nil {
 				return err
 			}
 		default:
@@ -572,6 +699,17 @@ func replayACPSessionHistory(sessionID string, hostSess *acpHostSession, emit ac
 		}
 	}
 	return nil
+}
+
+// replayMessageID returns the client-visible message id for a replayed history
+// message. Durable metadata ids keep grouping stable across refreshes; messages
+// persisted before message identity existed fall back to a deterministic id
+// that stays unique within one replay pass.
+func replayMessageID(message runtimetypes.Message, index int) string {
+	if id := strings.TrimSpace(runtimetypes.MessageID(message)); id != "" {
+		return id
+	}
+	return fmt.Sprintf("replay_%d", index)
 }
 
 func (h *acpSessionHost) closeSessionLocked(s *acpHostSession) {
@@ -590,16 +728,11 @@ func (h *acpSessionHost) closeSessionLocked(s *acpHostSession) {
 	}
 }
 
+// isACPCancelError reports whether err is a real cancellation. Detection is
+// typed (context sentinels / runtime cancellation codes); error text is never
+// inspected, so diagnostic errors that merely mention "cancel"/"中断" still
+// surface to the client instead of being silently mapped to stopReason
+// cancelled.
 func isACPCancelError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if err == context.Canceled || err == context.DeadlineExceeded {
-		return true
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "cancel") ||
-		strings.Contains(msg, "中断") ||
-		strings.Contains(msg, "interrupt") ||
-		strings.Contains(msg, "用户中断")
+	return runtimeexecution.IsCancellation(err)
 }

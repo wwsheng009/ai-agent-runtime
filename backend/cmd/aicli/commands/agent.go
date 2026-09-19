@@ -63,7 +63,8 @@ Stdout 仅用于协议消息；日志与诊断写入 stderr / 日志文件。
   session/new
   session/prompt
   session/cancel
-  session/load   (loadSession=true；回放历史后返回 null)
+  session/load   (loadSession=true；回放历史后返回空对象 {}
+                  即 LoadSessionResponse，字段均可选)
   $/cancel_request   (JSON-RPC 标准取消通知；按请求 id 双向取消，
     数字与字符串 id 自动归一化匹配)
 

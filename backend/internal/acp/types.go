@@ -1,6 +1,10 @@
 package acp
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+)
 
 // ProtocolVersion is the major ACP version this agent advertises.
 // Official ACP uses a single integer major version (currently 1).
@@ -13,6 +17,27 @@ const (
 	MethodSessionPrompt = "session/prompt"
 	MethodSessionCancel = "session/cancel"
 	MethodSessionLoad   = "session/load" // advertised only when loadSession=true
+	// MethodSessionSetConfigOption changes one session config option (model
+	// picker, mode, reasoning level, ...). ACP v1 replaced the removed
+	// session/set_model channel with config options; select-type options are
+	// baseline client support (no capability advertisement required).
+	MethodSessionSetConfigOption = "session/set_config_option"
+	// MethodSessionSetMode is the legacy session mode selector channel
+	// (params: {sessionId, modeId}). ACP v1 supersedes it with a config option
+	// whose category is "mode" (see SessionConfigOptionCategoryMode) and notes
+	// the dedicated method "will be removed in a future version of the
+	// protocol". Both are served so clients that still drive the legacy mode
+	// selector keep working; the state is the same session permission mode.
+	MethodSessionSetMode = "session/set_mode"
+	// MethodSessionList enumerates stored sessions for the client's history
+	// panel. Advertised via agentCapabilities.sessionCapabilities.list.
+	MethodSessionList = "session/list"
+	// MethodSessionDelete removes one stored session. Advertised via
+	// agentCapabilities.sessionCapabilities.delete.
+	MethodSessionDelete = "session/delete"
+	// MethodSessionClose releases one live session. Advertised via
+	// agentCapabilities.sessionCapabilities.close.
+	MethodSessionClose  = "session/close"
 	MethodCancelRequest = "$/cancel_request"
 )
 
@@ -20,7 +45,17 @@ const (
 const (
 	MethodSessionUpdate            = "session/update"
 	MethodSessionRequestPermission = "session/request_permission"
+	// MethodSessionRequestQuestion is an agent→client extension used to render
+	// ask_user_question prompts in the client UI. ACP v1 has no question RPC, so
+	// it is gated behind the "questions" client capability: clients that do not
+	// advertise it never receive the call and hosts fall back to their
+	// non-interactive default answer.
+	MethodSessionRequestQuestion = "session/request_question"
 )
+
+// ClientCapabilityQuestions is the clientCapabilities key a client sets to true
+// when it can display and answer session/request_question prompts.
+const ClientCapabilityQuestions = "questions"
 
 // Stop reasons returned by session/prompt.
 const (
@@ -40,6 +75,41 @@ const (
 	SessionUpdateToolCallUpdate    = "tool_call_update"
 	SessionUpdatePlan              = "plan"
 	SessionUpdateUsage             = "usage_update"
+	// SessionUpdateSessionInfo carries session metadata (currently the
+	// auto-generated title) so clients can render session lists and headers.
+	SessionUpdateSessionInfo = "session_info_update"
+	// SessionUpdateAvailableCommands carries the slash-command catalog the
+	// client renders in its "/" menu.
+	SessionUpdateAvailableCommands = "available_commands_update"
+	// SessionUpdateConfigOptionUpdate is the session/update kind agents send
+	// when config options change outside a set_config_option response.
+	SessionUpdateConfigOptionUpdate = "config_option_update"
+	// SessionUpdateCurrentModeUpdate reports an agent-initiated mode change on
+	// the legacy modes channel (update body: {sessionUpdate, currentModeId}).
+	// It is the modes-API counterpart of config_option_update and is only sent
+	// to clients that were offered the legacy `modes` state.
+	SessionUpdateCurrentModeUpdate = "current_mode_update"
+)
+
+// SessionConfigOptionCategory values. category is a client-side UX hint:
+// "model" tells clients (e.g. Zed) to wire the model picker and its
+// "Change Model" keybindings.
+const (
+	SessionConfigOptionCategoryMode         = "mode"
+	SessionConfigOptionCategoryModel        = "model"
+	SessionConfigOptionCategoryModelConfig  = "model_config"
+	SessionConfigOptionCategoryThoughtLevel = "thought_level"
+	SessionConfigOptionCategoryOther        = "other"
+	// SessionConfigOptionCategoryProvider is a custom (non-spec) category:
+	// ACP reserves categories starting with "_" for extensions, so clients
+	// that do not know it still render the option as a generic select.
+	SessionConfigOptionCategoryProvider = "_provider"
+)
+
+// SessionConfigOption type discriminators.
+const (
+	SessionConfigOptionTypeSelect  = "select"
+	SessionConfigOptionTypeBoolean = "boolean"
 )
 
 // Tool call status values.
@@ -60,6 +130,7 @@ const (
 	ToolKindExecute = "execute"
 	ToolKindThink   = "think"
 	ToolKindFetch   = "fetch"
+	ToolKindSwitch  = "switch_mode"
 	ToolKindOther   = "other"
 )
 
@@ -89,6 +160,9 @@ type ClientCapabilities struct {
 	FS          *FileSystemCapabilities `json:"fs,omitempty"`
 	Terminal    bool                    `json:"terminal,omitempty"`
 	Elicitation json.RawMessage         `json:"elicitation,omitempty"`
+	// Questions advertises the session/request_question extension. It is the
+	// only signal that makes the agent route ask_user_question to the client UI.
+	Questions bool `json:"questions,omitempty"`
 }
 
 // FileSystemCapabilities describes client fs/* support.
@@ -99,10 +173,22 @@ type FileSystemCapabilities struct {
 
 // AgentCapabilities is the MVP agent capability advertisement.
 type AgentCapabilities struct {
-	LoadSession         bool                `json:"loadSession,omitempty"`
-	PromptCapabilities  *PromptCapabilities `json:"promptCapabilities,omitempty"`
-	MCPCapabilities     *MCPCapabilities    `json:"mcpCapabilities,omitempty"`
-	SessionCapabilities json.RawMessage     `json:"sessionCapabilities,omitempty"`
+	LoadSession         bool                 `json:"loadSession,omitempty"`
+	PromptCapabilities  *PromptCapabilities  `json:"promptCapabilities,omitempty"`
+	MCPCapabilities     *MCPCapabilities     `json:"mcpCapabilities,omitempty"`
+	SessionCapabilities *SessionCapabilities `json:"sessionCapabilities,omitempty"`
+	Auth                json.RawMessage      `json:"auth,omitempty"`
+}
+
+// SessionCapabilities advertises the session-management methods this agent
+// implements. Each field must match a real backend implementation: the Server
+// only sets the ones the backend actually satisfies, so clients never see a
+// method advertised that would answer method-not-found.
+type SessionCapabilities struct {
+	List   bool `json:"list,omitempty"`
+	Delete bool `json:"delete,omitempty"`
+	Close  bool `json:"close,omitempty"`
+	Resume bool `json:"resume,omitempty"`
 }
 
 // PromptCapabilities advertises which ContentBlock types are accepted.
@@ -142,14 +228,84 @@ type InitializeResponse struct {
 
 // NewSessionRequest is the params for session/new.
 type NewSessionRequest struct {
-	Cwd        string          `json:"cwd"`
-	MCPServers json.RawMessage `json:"mcpServers,omitempty"`
+	Cwd                   string          `json:"cwd"`
+	AdditionalDirectories []string        `json:"additionalDirectories,omitempty"`
+	MCPServers            json.RawMessage `json:"mcpServers,omitempty"`
 }
 
 // NewSessionResponse is the result for session/new.
 type NewSessionResponse struct {
 	SessionID string `json:"sessionId"`
+	// ConfigOptions advertises session configuration (e.g. the model
+	// selector). Select-type options are baseline for ACP v1 clients.
+	ConfigOptions []SessionConfigOption `json:"configOptions,omitempty"`
+	// Modes is the legacy session mode selector state. ACP v1 prefers a
+	// config option with category "mode" (which we also send), but clients
+	// that still read `modes` get a working selector instead of none.
+	Modes *SessionModeState `json:"modes,omitempty"`
 }
+
+// SessionMode is one entry of the legacy `modes` selector state.
+type SessionMode struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+// SessionModeState is the legacy `modes` payload carried by session/new and
+// session/load results and refreshed via current_mode_update.
+type SessionModeState struct {
+	CurrentModeID  string        `json:"currentModeId"`
+	AvailableModes []SessionMode `json:"availableModes"`
+}
+
+// SetSessionModeRequest is the params for the legacy session/set_mode method.
+// ModeID must be one of SessionModeState.AvailableModes ids.
+type SetSessionModeRequest struct {
+	SessionID string `json:"sessionId"`
+	ModeID    string `json:"modeId"`
+}
+
+// SessionListRequest is the params for session/list. Both fields are optional:
+// Cwd narrows the list to sessions created for one workspace, Cursor resumes
+// pagination at the position a previous response returned.
+type SessionListRequest struct {
+	Cursor string `json:"cursor,omitempty"`
+	Cwd    string `json:"cwd,omitempty"`
+}
+
+// SessionSummary is one row of a session/list response. The fields mirror what
+// a client needs to render a history panel without loading each session.
+type SessionSummary struct {
+	SessionID string `json:"sessionId"`
+	Cwd       string `json:"cwd,omitempty"`
+	Title     string `json:"title,omitempty"`
+	UpdatedAt string `json:"updatedAt,omitempty"`
+}
+
+// SessionListResponse is the result for session/list.
+type SessionListResponse struct {
+	Sessions   []SessionSummary `json:"sessions"`
+	NextCursor string           `json:"nextCursor,omitempty"`
+}
+
+// SessionDeleteRequest is the params for session/delete.
+type SessionDeleteRequest struct {
+	SessionID string `json:"sessionId"`
+}
+
+// SessionDeleteResponse is the (empty) result for session/delete. ACP v1 types
+// it as an object with only optional fields; returning {} (never JSON null)
+// keeps strict clients happy.
+type SessionDeleteResponse struct{}
+
+// SessionCloseRequest is the params for session/close.
+type SessionCloseRequest struct {
+	SessionID string `json:"sessionId"`
+}
+
+// SessionCloseResponse is the (empty) result for session/close.
+type SessionCloseResponse struct{}
 
 // PromptRequest is the params for session/prompt.
 type PromptRequest struct {
@@ -174,17 +330,127 @@ type CancelRequestParams struct {
 	RequestID json.RawMessage `json:"requestId,omitempty"`
 }
 
+// SessionConfigSelectOption is one choice of a select-type config option.
+type SessionConfigSelectOption struct {
+	Value       string `json:"value"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+// SessionConfigOption is one configurable session option.
+//
+// ACP v1 types the option as a union discriminated by "type": select options
+// carry {currentValue, options}, boolean options carry {currentValue}. This
+// host only emits select options (the baseline every v1 client supports);
+// boolean options additionally require the client to advertise
+// clientCapabilities.session.configOptions.boolean.
+type SessionConfigOption struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	// Category is a UX hint; "model" marks the model selector.
+	Category string `json:"category,omitempty"`
+	// Type is one of the SessionConfigOptionType* constants.
+	Type string `json:"type"`
+	// CurrentValue is the selected value id for select options.
+	CurrentValue string                      `json:"currentValue"`
+	Options      []SessionConfigSelectOption `json:"options,omitempty"`
+}
+
+// SessionConfigOptionValue is the value_id | boolean union carried by
+// session/set_config_option. ACP encodes the scalar directly (JSON string for
+// value_id, JSON bool for boolean); tagged {"type","value"} objects are also
+// accepted so early client builds stay compatible.
+type SessionConfigOptionValue struct {
+	Type  string          `json:"type,omitempty"`
+	Value json.RawMessage `json:"value,omitempty"`
+}
+
+// UnmarshalJSON accepts "model-id", true, and {"type":"...","value":...}.
+func (v *SessionConfigOptionValue) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	if trimmed[0] == '{' {
+		// Tagged object form; aliasing avoids recursing into this method.
+		type taggedValue SessionConfigOptionValue
+		var aux taggedValue
+		if err := json.Unmarshal(trimmed, &aux); err != nil {
+			return err
+		}
+		*v = SessionConfigOptionValue(aux)
+		return nil
+	}
+	// Scalar form: keep type empty and store the raw scalar.
+	v.Type = ""
+	v.Value = append(v.Value[:0], trimmed...)
+	return nil
+}
+
+// ValueID returns the value_id payload. The type discriminator is optional
+// and defaults to value_id when absent.
+func (v SessionConfigOptionValue) ValueID() (string, bool) {
+	if t := strings.TrimSpace(v.Type); t != "" && t != "value_id" {
+		return "", false
+	}
+	if len(v.Value) == 0 {
+		return "", false
+	}
+	var s string
+	if err := json.Unmarshal(v.Value, &s); err != nil {
+		return "", false
+	}
+	return s, true
+}
+
+// Boolean returns the boolean payload.
+func (v SessionConfigOptionValue) Boolean() (bool, bool) {
+	if t := strings.TrimSpace(v.Type); t != "" && t != "boolean" {
+		return false, false
+	}
+	if len(v.Value) == 0 {
+		return false, false
+	}
+	var b bool
+	if err := json.Unmarshal(v.Value, &b); err != nil {
+		return false, false
+	}
+	return b, true
+}
+
+// SetSessionConfigOptionRequest is the params for session/set_config_option.
+type SetSessionConfigOptionRequest struct {
+	SessionID string                   `json:"sessionId"`
+	ConfigID  string                   `json:"configId"`
+	Value     SessionConfigOptionValue `json:"value"`
+}
+
+// SetSessionConfigOptionResponse is the result for session/set_config_option.
+// ACP requires the full (updated) option set so clients can refresh their UI.
+type SetSessionConfigOptionResponse struct {
+	ConfigOptions []SessionConfigOption `json:"configOptions"`
+}
+
 // LoadSessionRequest is the params for session/load.
 // Spec: agent replays conversation via session/update, then returns null result.
 type LoadSessionRequest struct {
-	SessionID  string          `json:"sessionId"`
-	Cwd        string          `json:"cwd,omitempty"`
-	MCPServers json.RawMessage `json:"mcpServers,omitempty"`
+	SessionID             string          `json:"sessionId"`
+	Cwd                   string          `json:"cwd,omitempty"`
+	AdditionalDirectories []string        `json:"additionalDirectories,omitempty"`
+	MCPServers            json.RawMessage `json:"mcpServers,omitempty"`
 }
 
 // LoadSessionResponse is the result for session/load.
-// ACP returns null; we use an empty struct so Call unmarshals cleanly.
-type LoadSessionResponse struct{}
+// ACP v1 defines it as an object with only optional fields (modes,
+// configOptions, _meta); an empty object is the minimal valid response.
+// Returning JSON null is NOT valid and breaks strict clients such as Zed.
+type LoadSessionResponse struct {
+	ConfigOptions []SessionConfigOption `json:"configOptions,omitempty"`
+	// Modes mirrors NewSessionResponse.Modes so an attached client gets the
+	// legacy mode selector without another round trip.
+	Modes *SessionModeState `json:"modes,omitempty"`
+}
 
 // ContentBlock is a discriminated content unit in prompts / updates.
 // Only type=text is required for the MVP; other types are preserved as raw
@@ -219,6 +485,19 @@ type UsageCost struct {
 	Currency string  `json:"currency"`
 }
 
+// AvailableCommand is one entry of the available_commands_update catalog.
+// Input is the optional argument hint the client renders next to the name.
+type AvailableCommand struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description,omitempty"`
+	Input       *AvailableCommandInput `json:"input,omitempty"`
+}
+
+// AvailableCommandInput describes the free-form argument a command accepts.
+type AvailableCommandInput struct {
+	Hint string `json:"hint,omitempty"`
+}
+
 // SessionUpdate is a flexible session update payload.
 // sessionUpdate discriminates the variant; optional fields are filled per kind.
 type SessionUpdate struct {
@@ -230,6 +509,7 @@ type SessionUpdate struct {
 
 	// tool_call / tool_call_update
 	ToolCallID  string             `json:"toolCallId,omitempty"`
+	Name        string             `json:"name,omitempty"`
 	Title       string             `json:"title,omitempty"`
 	Kind        string             `json:"kind,omitempty"`
 	Status      string             `json:"status,omitempty"`
@@ -245,6 +525,19 @@ type SessionUpdate struct {
 	Used int64      `json:"used,omitempty"`
 	Size int64      `json:"size,omitempty"`
 	Cost *UsageCost `json:"cost,omitempty"`
+
+	// config_option_update
+	ConfigOptions []SessionConfigOption `json:"configOptions,omitempty"`
+
+	// session_info_update (Title is shared with the tool_call variant above;
+	// the custom marshaler picks the right fields per sessionUpdate kind)
+	UpdatedAt string `json:"updatedAt,omitempty"`
+
+	// available_commands_update
+	AvailableCommands []AvailableCommand `json:"availableCommands,omitempty"`
+
+	// current_mode_update (legacy modes API)
+	CurrentModeID string `json:"currentModeId,omitempty"`
 }
 
 // MarshalJSON encodes SessionUpdate with the correct content field shape.
@@ -287,10 +580,55 @@ func (u SessionUpdate) MarshalJSON() ([]byte, error) {
 			Cost:          u.Cost,
 		}
 		return json.Marshal(aux)
+	case SessionUpdateSessionInfo:
+		aux := struct {
+			SessionUpdate string `json:"sessionUpdate"`
+			Title         string `json:"title,omitempty"`
+			UpdatedAt     string `json:"updatedAt,omitempty"`
+		}{
+			SessionUpdate: u.SessionUpdate,
+			Title:         u.Title,
+			UpdatedAt:     u.UpdatedAt,
+		}
+		return json.Marshal(aux)
+	case SessionUpdateAvailableCommands:
+		aux := struct {
+			SessionUpdate     string             `json:"sessionUpdate"`
+			AvailableCommands []AvailableCommand `json:"availableCommands"`
+		}{
+			SessionUpdate:     u.SessionUpdate,
+			AvailableCommands: u.AvailableCommands,
+		}
+		if aux.AvailableCommands == nil {
+			aux.AvailableCommands = []AvailableCommand{}
+		}
+		return json.Marshal(aux)
+	case SessionUpdateConfigOptionUpdate:
+		aux := struct {
+			SessionUpdate string                `json:"sessionUpdate"`
+			ConfigOptions []SessionConfigOption `json:"configOptions"`
+		}{
+			SessionUpdate: u.SessionUpdate,
+			ConfigOptions: u.ConfigOptions,
+		}
+		if aux.ConfigOptions == nil {
+			aux.ConfigOptions = []SessionConfigOption{}
+		}
+		return json.Marshal(aux)
+	case SessionUpdateCurrentModeUpdate:
+		aux := struct {
+			SessionUpdate string `json:"sessionUpdate"`
+			CurrentModeID string `json:"currentModeId"`
+		}{
+			SessionUpdate: u.SessionUpdate,
+			CurrentModeID: u.CurrentModeID,
+		}
+		return json.Marshal(aux)
 	case SessionUpdateToolCall, SessionUpdateToolCallUpdate:
 		aux := struct {
 			SessionUpdate string             `json:"sessionUpdate"`
 			ToolCallID    string             `json:"toolCallId,omitempty"`
+			Name          string             `json:"name,omitempty"`
 			Title         string             `json:"title,omitempty"`
 			Kind          string             `json:"kind,omitempty"`
 			Status        string             `json:"status,omitempty"`
@@ -301,6 +639,7 @@ func (u SessionUpdate) MarshalJSON() ([]byte, error) {
 		}{
 			SessionUpdate: u.SessionUpdate,
 			ToolCallID:    u.ToolCallID,
+			Name:          u.Name,
 			Title:         u.Title,
 			Kind:          u.Kind,
 			Status:        u.Status,
@@ -373,6 +712,26 @@ type PermissionOutcome struct {
 	OptionID string `json:"optionId,omitempty"`
 }
 
+// RequestQuestionParams is the params for the session/request_question
+// extension. Prompt/Suggestions/Required mirror the ask_user_question tool
+// arguments so a client can render the same panel it shows for approvals.
+type RequestQuestionParams struct {
+	SessionID   string   `json:"sessionId"`
+	QuestionID  string   `json:"questionId,omitempty"`
+	Prompt      string   `json:"prompt"`
+	Suggestions []string `json:"suggestions,omitempty"`
+	Required    bool     `json:"required,omitempty"`
+}
+
+// RequestQuestionResult is the client's answer to session/request_question.
+// Declined=true means the user dismissed the panel without answering; Answer
+// then stays empty and the agent must continue with its own best judgment
+// instead of failing the turn.
+type RequestQuestionResult struct {
+	Answer   string `json:"answer,omitempty"`
+	Declined bool   `json:"declined,omitempty"`
+}
+
 // DefaultPermissionOptions returns the MVP allow/reject pair plus allow-always.
 func DefaultPermissionOptions() []PermissionOption {
 	return []PermissionOption{
@@ -420,14 +779,91 @@ func AgentMessageChunk(text string) SessionUpdate {
 	}
 }
 
+// AgentThoughtChunk builds a session update for streamed model reasoning.
+// ACP clients render these as a collapsible "thinking" section instead of the
+// final answer, so reasoning never has to be mixed into agent_message_chunk.
+func AgentThoughtChunk(text string) SessionUpdate {
+	block := TextContent(text)
+	return SessionUpdate{
+		SessionUpdate: SessionUpdateAgentThoughtChunk,
+		Content:       &block,
+	}
+}
+
+// WithMessageID tags a message/thought chunk with a client-visible message id.
+// Clients group consecutive chunks that share an id into one rendered message,
+// which is how they tell a new assistant turn apart from a continuation.
+func WithMessageID(update SessionUpdate, messageID string) SessionUpdate {
+	if strings.TrimSpace(messageID) == "" {
+		return update
+	}
+	switch update.SessionUpdate {
+	case SessionUpdateAgentMessageChunk, SessionUpdateUserMessageChunk, SessionUpdateAgentThoughtChunk:
+		update.MessageID = messageID
+	}
+	return update
+}
+
+// UsageUpdate builds the context-window usage notification clients render as a
+// context meter. used/size are token counts; both are always emitted (even at
+// zero) because the spec marks them required for this variant.
+func UsageUpdate(used, size int64) SessionUpdate {
+	if used < 0 {
+		used = 0
+	}
+	if size < 0 {
+		size = 0
+	}
+	return SessionUpdate{
+		SessionUpdate: SessionUpdateUsage,
+		Used:          used,
+		Size:          size,
+	}
+}
+
+// SessionInfoUpdate builds the session metadata notification used for the
+// client's session header / history list. updatedAt is an RFC3339 timestamp
+// and is omitted when empty.
+func SessionInfoUpdate(title, updatedAt string) SessionUpdate {
+	return SessionUpdate{
+		SessionUpdate: SessionUpdateSessionInfo,
+		Title:         strings.TrimSpace(title),
+		UpdatedAt:     strings.TrimSpace(updatedAt),
+	}
+}
+
+// AvailableCommandsUpdate builds the slash-command catalog notification.
+func AvailableCommandsUpdate(commands []AvailableCommand) SessionUpdate {
+	if commands == nil {
+		commands = []AvailableCommand{}
+	}
+	return SessionUpdate{
+		SessionUpdate:     SessionUpdateAvailableCommands,
+		AvailableCommands: commands,
+	}
+}
+
+// CurrentModeUpdate builds the legacy modes-API notification an agent sends
+// when it changes mode on its own (e.g. entering plan mode). Clients that were
+// offered a `modes` selector use it to refresh the active entry.
+func CurrentModeUpdate(modeID string) SessionUpdate {
+	return SessionUpdate{
+		SessionUpdate: SessionUpdateCurrentModeUpdate,
+		CurrentModeID: modeID,
+	}
+}
+
 // ToolCallStarted builds a pending tool_call update.
-func ToolCallStarted(toolCallID, title, kind string, rawInput interface{}) SessionUpdate {
+// name is the programmatic tool name (e.g. "read_file"); title is a
+// human-readable description shown in the UI.
+func ToolCallStarted(toolCallID, name, title, kind string, rawInput interface{}) SessionUpdate {
 	if kind == "" {
 		kind = ToolKindOther
 	}
 	return SessionUpdate{
 		SessionUpdate: SessionUpdateToolCall,
 		ToolCallID:    toolCallID,
+		Name:          name,
 		Title:         title,
 		Kind:          kind,
 		Status:        ToolCallStatusPending,
@@ -459,10 +895,11 @@ func ToolCallProgressContent(toolCallID, status string, content []ToolCallConten
 }
 
 // ToolCallFinished builds a completed/failed tool_call_update.
-func ToolCallFinished(toolCallID, status string, rawOutput interface{}, content []ToolCallContent) SessionUpdate {
+func ToolCallFinished(toolCallID, name, status string, rawOutput interface{}, content []ToolCallContent) SessionUpdate {
 	return SessionUpdate{
 		SessionUpdate: SessionUpdateToolCallUpdate,
 		ToolCallID:    toolCallID,
+		Name:          name,
 		Status:        status,
 		RawOutput:     rawOutput,
 		ToolContent:   content,
@@ -536,5 +973,11 @@ func DefaultAgentCapabilities() AgentCapabilities {
 			HTTP: false,
 			SSE:  false,
 		},
+		// sessionCapabilities starts empty. The Server fills in exactly the
+		// methods the backend implements (SessionLister / SessionDeleter /
+		// SessionCloser), so the advertisement can never promise a method
+		// that would answer method-not-found.
+		SessionCapabilities: &SessionCapabilities{},
+		Auth:                json.RawMessage("{}"),
 	}
 }

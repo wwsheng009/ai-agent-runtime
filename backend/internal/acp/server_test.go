@@ -1,22 +1,26 @@
 package acp
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 )
 
 type fakeBackend struct {
 	mu sync.Mutex
 
-	newSessionFn func(ctx context.Context, req NewSessionRequest) (NewSessionResponse, error)
-	promptFn     func(ctx context.Context, req PromptRequest, emit Emitter) (PromptResponse, error)
-	cancelFn     func(ctx context.Context, sessionID string) error
+	newSessionFn  func(ctx context.Context, req NewSessionRequest) (NewSessionResponse, error)
+	promptFn      func(ctx context.Context, req PromptRequest, emit Emitter) (PromptResponse, error)
+	cancelFn      func(ctx context.Context, sessionID string) error
 	loadSessionFn func(ctx context.Context, req LoadSessionRequest, emit Emitter) error
 
 	cancelled []string
@@ -77,8 +81,8 @@ func TestServerInitializeSessionPrompt(t *testing.T) {
 				t.Errorf("prompt text = %q, want ping", text)
 			}
 			_ = emit.SessionUpdate(req.SessionID, AgentMessageChunk("pong"))
-			_ = emit.SessionUpdate(req.SessionID, ToolCallStarted("call_1", "Read file", ToolKindRead, map[string]string{"path": "a.go"}))
-			_ = emit.SessionUpdate(req.SessionID, ToolCallFinished("call_1", ToolCallStatusCompleted, map[string]string{"ok": "true"}, nil))
+			_ = emit.SessionUpdate(req.SessionID, ToolCallStarted("call_1", "read_file", "Read file", ToolKindRead, map[string]string{"path": "a.go"}))
+			_ = emit.SessionUpdate(req.SessionID, ToolCallFinished("call_1", "read_file", ToolCallStatusCompleted, map[string]string{"ok": "true"}, nil))
 			return PromptResponse{StopReason: StopReasonEndTurn}, nil
 		},
 	}
@@ -485,8 +489,8 @@ func TestServerSessionLoadReplaysHistory(t *testing.T) {
 		t.Fatal("expected loadSession capability")
 	}
 
-	// session/load result is null; Call with a pointer to interface{} is fine.
-	var loadResult interface{}
+	// session/load result must decode into LoadSessionResponse (never null).
+	var loadResult LoadSessionResponse
 	if err := clientConn.Call(ctx, MethodSessionLoad, LoadSessionRequest{
 		SessionID: "sess_resume",
 		Cwd:       "/tmp/project",
@@ -536,6 +540,57 @@ func TestServerSessionLoadReplaysHistory(t *testing.T) {
 	case <-errCh:
 	case <-time.After(2 * time.Second):
 		t.Fatal("server did not exit")
+	}
+}
+
+// TestServerSessionLoadReturnsObjectResult pins the wire shape of session/load:
+// ACP v1 defines LoadSessionResponse as an object whose fields are all optional.
+// Returning JSON null makes strict clients (e.g. Zed) fail with
+// "invalid type: null, expected struct LoadSessionResponse" and abort attach.
+func TestServerSessionLoadReturnsObjectResult(t *testing.T) {
+	t.Parallel()
+
+	clientReader, agentWriter := io.Pipe()
+	agentReader, clientWriter := io.Pipe()
+	defer clientReader.Close()
+	defer agentWriter.Close()
+	defer agentReader.Close()
+	defer clientWriter.Close()
+
+	backend := &fakeBackend{
+		loadSessionFn: func(ctx context.Context, req LoadSessionRequest, emit Emitter) error {
+			return nil // no replay updates: the RPC response is the first line
+		},
+	}
+	agentConn := NewConn(agentReader, agentWriter)
+	server := NewServer(agentConn, backend, ServerOptions{
+		AgentCapabilities: DefaultAgentCapabilities(),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = server.Serve(ctx) }()
+
+	if _, err := io.WriteString(clientWriter,
+		`{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"sess_resume"}}`+"\n"); err != nil {
+		t.Fatalf("write session/load: %v", err)
+	}
+
+	line, err := bufio.NewReader(clientReader).ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("read session/load response: %v", err)
+	}
+	var resp Message
+	if err := json.Unmarshal(line, &resp); err != nil {
+		t.Fatalf("decode response %q: %v", line, err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("unexpected rpc error: %+v", resp.Error)
+	}
+	if got := strings.TrimSpace(string(resp.Result)); got != "{}" {
+		t.Fatalf("session/load result = %q, want {} (object); null breaks strict clients like Zed", got)
+	}
+	if err := json.Unmarshal(resp.Result, &LoadSessionResponse{}); err != nil {
+		t.Fatalf("result %s must decode into LoadSessionResponse: %v", resp.Result, err)
 	}
 }
 
@@ -623,5 +678,30 @@ func TestIsAllowOption(t *testing.T) {
 	}
 	if !IsRememberOption("allow-always") || IsRememberOption("allow-once") {
 		t.Fatal("remember mapping incorrect")
+	}
+}
+
+func TestIsCancelErrorClassifiesTypedCancellationOnly(t *testing.T) {
+	t.Parallel()
+
+	if isCancelError(nil) {
+		t.Fatal("nil should not match")
+	}
+	if !isCancelError(context.Canceled) {
+		t.Fatal("context.Canceled should match")
+	}
+	if !isCancelError(fmt.Errorf("wrapped: %w", context.Canceled)) {
+		t.Fatal("wrapped context.Canceled should match")
+	}
+	if !isCancelError(runtimeexecution.CancellationError("acp_prompt")) {
+		t.Fatal("typed runtime cancellation should match")
+	}
+	// Regression: a diagnostic that merely mentions 中断/cancel must surface as
+	// an RPC error instead of being rewritten to stopReason=cancelled.
+	if isCancelError(fmt.Errorf("actor 等待就绪超时：可 Ctrl+C 中断后重新 resume")) {
+		t.Fatal("diagnostic mentioning 中断 must not be classified as cancellation")
+	}
+	if isCancelError(fmt.Errorf("execution timed out after 30s")) {
+		t.Fatal("plain timeout error must not be classified as cancellation")
 	}
 }

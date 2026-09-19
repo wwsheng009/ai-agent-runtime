@@ -226,6 +226,56 @@ func applyRuntimeModelSwitch(session *ChatSession, requestedModel string, intera
 	return popupUsed, nil
 }
 
+// applyRuntimeProviderSwitch 把活动会话切换到 requestedProvider，并选中该
+// provider 的默认模型（无默认模型时沿用当前模型名）。切换复用交互式
+// /provider、/model 相同的解析与落地路径（resolveModelCommandExecutionContext
+// + applyChatExecutionContext），因此 protocol/适配器、HTTP client、
+// FunctionBuilder、BaseURL 与请求侧元数据都会同步更新，并从下一个 turn 生效。
+// 与 applyRuntimeModelSwitch 一致，这里不写回全局偏好（避免 ACP 客户端会话
+// 隐式修改用户配置文件），由调用方决定是否持久化。
+//
+// 返回的 bool 表示 provider 是否实际发生变化。
+func applyRuntimeProviderSwitch(session *ChatSession, requestedProvider string) (bool, error) {
+	if session == nil {
+		return false, fmt.Errorf("当前没有活动会话")
+	}
+	requestedProvider = strings.TrimSpace(requestedProvider)
+	if requestedProvider == "" {
+		return false, fmt.Errorf("未指定可切换的 provider")
+	}
+
+	previous := strings.TrimSpace(session.ProviderName)
+	providerCtx, _, err := resolveModelCommandExecutionContext(session, requestedProvider, "")
+	if err != nil {
+		return false, err
+	}
+	if providerCtx == nil {
+		return false, fmt.Errorf("provider %q 解析失败", requestedProvider)
+	}
+
+	reasoning := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort)
+	if err := applyChatExecutionContext(session, providerCtx, reasoning); err != nil {
+		return false, err
+	}
+	session.RequestedProvider = strings.TrimSpace(firstNonEmptyChatValue(providerCtx.ProviderName, requestedProvider))
+	session.RequestedModel = strings.TrimSpace(firstNonEmptyChatValue(providerCtx.RequestedModel, providerCtx.Model))
+	session.RequestedReasoningEffort = reasoning
+	session.RouteWarnings = nil
+	session.FallbackUsed = false
+	session.FallbackReason = ""
+	// provider 变化会改变协议与工具表面，清掉跨轮缓存的工具声明。
+	session.ContextWindowTokenCount = 0
+	resetStableSharedToolSurface(session)
+	warnIfChatSessionSyncFails(session, "switch provider", syncRuntimeSessionFromChat(session))
+	if err := refreshLocalRuntimeAfterModelSelection(session); err != nil {
+		warnIfChatSessionSyncFails(session, "refresh local runtime after provider switch", err)
+	}
+	if session.Interaction != nil {
+		session.Interaction.RefreshStatus("")
+	}
+	return !strings.EqualFold(previous, strings.TrimSpace(session.ProviderName)), nil
+}
+
 func syncChatLoggerModelState(session *ChatSession) {
 	if session == nil || session.Logger == nil || session.Logger.sessionLog == nil {
 		return

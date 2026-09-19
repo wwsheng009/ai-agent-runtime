@@ -3,15 +3,17 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 
-	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/acp"
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -139,6 +141,129 @@ func TestACPEventBridge_RuntimeAssistantDeltaAndMessage(t *testing.T) {
 	}
 	if !bridge.HasEmittedAssistant() {
 		t.Fatal("expected HasEmittedAssistant after deltas")
+	}
+}
+
+func TestACPEventBridge_StreamDeltaKeepsWhitespace(t *testing.T) {
+	t.Parallel()
+
+	bridge := newACPEventBridge("sess_ws")
+	emit := &recordingACPEmitter{}
+	bridge.BeginPrompt("sess_ws", emit)
+	defer bridge.EndPrompt()
+
+	// Whitespace at chunk boundaries is meaningful: clients concatenate deltas
+	// to render the answer, so trimming each chunk would corrupt the text.
+	bridge.HandleRuntimeEvent(runtimeevents.Event{
+		Type:    runtimechat.EventAssistantDelta,
+		Payload: map[string]interface{}{"delta": "hello "},
+	})
+	bridge.HandleRuntimeEvent(runtimeevents.Event{
+		Type:    runtimechat.EventAssistantDelta,
+		Payload: map[string]interface{}{"delta": " chunk"},
+	})
+
+	updates := emit.snapshot()
+	if len(updates) != 2 {
+		t.Fatalf("expected 2 updates, got %d: %+v", len(updates), updates)
+	}
+	var combined strings.Builder
+	for i, update := range updates {
+		if update.Content == nil {
+			t.Fatalf("update %d missing content: %+v", i, update)
+		}
+		combined.WriteString(update.Content.Text)
+	}
+	if got := combined.String(); got != "hello  chunk" {
+		t.Fatalf("streamed text = %q, want chunk whitespace preserved", got)
+	}
+}
+
+func TestACPEventBridge_RuntimeReasoningEmitsThoughtChunk(t *testing.T) {
+	t.Parallel()
+
+	bridge := newACPEventBridge("sess_1")
+	emit := &recordingACPEmitter{}
+	bridge.BeginPrompt("sess_1", emit)
+	defer bridge.EndPrompt()
+
+	// Canonical dotted event with the nested ReasoningBlock payload the agent
+	// loop publishes; stream_delta blocks carry the streamed text in "summary".
+	bridge.HandleRuntimeEvent(runtimeevents.Event{
+		Type: runtimechat.EventAssistantReasoningDelta,
+		Payload: map[string]interface{}{
+			"reasoning": map[string]interface{}{
+				"format":  "stream_delta",
+				"summary": "先梳理需求。",
+			},
+		},
+	})
+	// Legacy underscore alias with a flat payload spelling.
+	bridge.HandleRuntimeEvent(runtimeevents.Event{
+		Type: runtimechat.EventAssistantReasoning,
+		Payload: map[string]interface{}{
+			"delta": "再确认边界。",
+		},
+	})
+	// Answer text streams on its own event and must not absorb reasoning.
+	bridge.HandleRuntimeEvent(runtimeevents.Event{
+		Type: runtimechat.EventAssistantDelta,
+		Payload: map[string]interface{}{
+			"delta": "开始处理。",
+		},
+	})
+
+	updates := emit.snapshot()
+	if len(updates) != 3 {
+		t.Fatalf("expected 3 updates, got %d: %+v", len(updates), updates)
+	}
+
+	first := updates[0]
+	if first.SessionUpdate != acp.SessionUpdateAgentThoughtChunk {
+		t.Fatalf("u0 kind = %q, want %q", first.SessionUpdate, acp.SessionUpdateAgentThoughtChunk)
+	}
+	if first.Content == nil || first.Content.Text != "先梳理需求。" {
+		t.Fatalf("u0 content = %+v", first.Content)
+	}
+	if first.MessageID == "" || !strings.HasSuffix(first.MessageID, "_thought") {
+		t.Fatalf("u0 messageId = %q, want <turn>_thought", first.MessageID)
+	}
+
+	second := updates[1]
+	if second.SessionUpdate != acp.SessionUpdateAgentThoughtChunk ||
+		second.Content == nil || second.Content.Text != "再确认边界。" {
+		t.Fatalf("legacy reasoning update = %+v", second)
+	}
+	if second.MessageID != first.MessageID {
+		t.Fatalf("thought chunks must share one id: %q vs %q", second.MessageID, first.MessageID)
+	}
+
+	answer := updates[2]
+	if answer.SessionUpdate != acp.SessionUpdateAgentMessageChunk {
+		t.Fatalf("u2 kind = %q, want %q", answer.SessionUpdate, acp.SessionUpdateAgentMessageChunk)
+	}
+	if answer.Content == nil || answer.Content.Text != "开始处理。" {
+		t.Fatalf("u2 content = %+v", answer.Content)
+	}
+	if answer.MessageID == "" || answer.MessageID == first.MessageID {
+		t.Fatalf("answer messageId = %q, want a distinct turn id", answer.MessageID)
+	}
+	if strings.Contains(answer.Content.Text, "梳理") || strings.Contains(answer.Content.Text, "边界") {
+		t.Fatalf("answer chunk leaked reasoning text: %q", answer.Content.Text)
+	}
+
+	// Wire format: thought updates must marshal as agent_thought_chunk carrying
+	// their own messageId so clients collapse them separately from the answer.
+	encoded, err := json.Marshal(first)
+	if err != nil {
+		t.Fatalf("marshal thought update: %v", err)
+	}
+	wire := string(encoded)
+	if !strings.Contains(wire, `"sessionUpdate":"agent_thought_chunk"`) {
+		t.Fatalf("thought wire = %s", wire)
+	}
+	if !strings.Contains(wire, `"messageId":"`+first.MessageID+`"`) {
+		t.Fatalf("thought wire missing messageId: %s", wire)
 	}
 }
 
@@ -428,6 +553,25 @@ func TestIsACPCancelError(t *testing.T) {
 	if isACPCancelError(nil) {
 		t.Fatal("nil should not match")
 	}
+	if !isACPCancelError(fmt.Errorf("turn aborted: %w", context.Canceled)) {
+		t.Fatal("wrapped context.Canceled should match")
+	}
+	if !isACPCancelError(runtimeexecution.CancellationError("acp_prompt")) {
+		t.Fatal("typed runtime cancellation should match")
+	}
+	if !isACPCancelError(userInterruptError()) {
+		t.Fatal("typed user interrupt should match")
+	}
+	// Regression: this diagnostic used to contain "中断" and was silently
+	// rewritten to stopReason=cancelled. Diagnostic text must never drive
+	// cancellation classification.
+	diagnostic := fmt.Errorf("actor 等待就绪超时（30s）：status=waiting_approval；resume 可能遗留了上一进程未结束的 turn，可 Ctrl+C 中断后重新 resume")
+	if isACPCancelError(diagnostic) {
+		t.Fatalf("diagnostic error must not be classified as cancellation: %v", diagnostic)
+	}
+	if isACPCancelError(fmt.Errorf("execution timed out after 30s")) {
+		t.Fatal("plain timeout error must not be classified as cancellation")
+	}
 }
 
 func TestNewAgentCommandRegistersStdio(t *testing.T) {
@@ -495,14 +639,57 @@ func TestReplayACPSessionHistory_UserAssistantAndTools(t *testing.T) {
 	if updates[1].SessionUpdate != acp.SessionUpdateAgentMessageChunk {
 		t.Fatalf("u1 = %q", updates[1].SessionUpdate)
 	}
-	if updates[2].SessionUpdate != acp.SessionUpdateToolCall || updates[2].ToolCallID != "call_1" {
+	if updates[2].SessionUpdate != acp.SessionUpdateToolCall || updates[2].ToolCallID != "call_1" || updates[2].Name != "shell" {
 		t.Fatalf("tool start = %+v", updates[2])
 	}
-	if updates[3].SessionUpdate != acp.SessionUpdateToolCallUpdate || updates[3].Status != acp.ToolCallStatusCompleted {
+	if updates[3].SessionUpdate != acp.SessionUpdateToolCallUpdate || updates[3].Status != acp.ToolCallStatusCompleted || updates[3].Name != "shell" {
 		t.Fatalf("tool finish = %+v", updates[3])
 	}
 	if updates[4].SessionUpdate != acp.SessionUpdateAgentMessageChunk {
 		t.Fatalf("u4 = %q", updates[4].SessionUpdate)
+	}
+}
+
+func TestReplayACPSessionHistory_TagsMessageIDs(t *testing.T) {
+	t.Parallel()
+
+	hostSess := &acpHostSession{
+		id: "sess_ids",
+		chat: &ChatSession{
+			Messages: []runtimetypes.Message{
+				{Role: "user", Content: "first", Metadata: runtimetypes.Metadata{"message_id": "msg_u1"}},
+				{Role: "assistant", Content: "answer one", Metadata: runtimetypes.Metadata{"message_id": "msg_a1"}},
+				{Role: "user", Content: "second"},
+				{Role: "assistant", Content: "answer two"},
+			},
+		},
+	}
+	emit := &recordingACPEmitter{}
+	if err := replayACPSessionHistory("sess_ids", hostSess, emit); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	updates := emit.snapshot()
+	if len(updates) != 4 {
+		t.Fatalf("expected 4 updates, got %d: %+v", len(updates), updates)
+	}
+	// Durable metadata ids survive replay verbatim so refresh keeps grouping.
+	if updates[0].MessageID != "msg_u1" || updates[1].MessageID != "msg_a1" {
+		t.Fatalf("metadata ids lost: %q / %q", updates[0].MessageID, updates[1].MessageID)
+	}
+	// Messages without stored identity still get a non-empty replay id, and no
+	// two distinct messages may share one.
+	for i, update := range updates {
+		if strings.TrimSpace(update.MessageID) == "" {
+			t.Fatalf("update %d missing messageId: %+v", i, update)
+		}
+		for j := i + 1; j < len(updates); j++ {
+			if update.MessageID == updates[j].MessageID {
+				t.Fatalf("updates %d and %d share messageId %q", i, j, update.MessageID)
+			}
+		}
+	}
+	if !strings.HasPrefix(updates[2].MessageID, "replay_") {
+		t.Fatalf("fallback replay id = %q, want replay_ prefix", updates[2].MessageID)
 	}
 }
 
@@ -530,14 +717,24 @@ func TestACPSessionHost_LoadSessionInMemoryReplay(t *testing.T) {
 		t.Fatalf("LoadSession: %v", err)
 	}
 	updates := emit.snapshot()
-	if len(updates) != 2 {
-		t.Fatalf("expected 2 updates, got %d: %+v", len(updates), updates)
+	// 2 history chunks + available_commands_update + session_info_update.
+	if len(updates) != 4 {
+		t.Fatalf("expected 4 updates, got %d: %+v", len(updates), updates)
 	}
 	if updates[0].Content == nil || updates[0].Content.Text != "hello" {
 		t.Fatalf("user chunk = %+v", updates[0])
 	}
 	if updates[1].Content == nil || updates[1].Content.Text != "hi there" {
 		t.Fatalf("agent chunk = %+v", updates[1])
+	}
+	if updates[2].SessionUpdate != acp.SessionUpdateAvailableCommands {
+		t.Fatalf("expected available_commands_update, got %q", updates[2].SessionUpdate)
+	}
+	if len(updates[2].AvailableCommands) == 0 {
+		t.Fatalf("available_commands_update must carry a non-empty catalog: %+v", updates[2])
+	}
+	if updates[3].SessionUpdate != acp.SessionUpdateSessionInfo {
+		t.Fatalf("expected session_info_update, got %q", updates[3].SessionUpdate)
 	}
 }
 

@@ -258,7 +258,7 @@ go test ./internal/policy -count=1 -run "TestEngineShellReadOnly|TestEngineTaxon
 
 - client → agent：`initialize`、`session/new`、`session/prompt`、`session/cancel`、`session/load`
 - agent → client：`session/update`、`session/request_permission`
-- capability：`loadSession=true`（`session/load` 回放历史为 `session/update`，结果为 `null`）
+- capability：`loadSession=true`（`session/load` 回放历史为 `session/update`，结果为空对象 `{}`；ACP v1 的 `LoadSessionResponse` 字段均可选，返回 `null` 会被 Zed 拒绝）
 
 `session/load` 解析顺序：
 

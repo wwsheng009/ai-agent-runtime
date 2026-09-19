@@ -32,9 +32,16 @@ type acpEventBridge struct {
 	openToolCalls map[string]bool
 	// emittedAssistant is true once any agent_message_chunk was sent.
 	emittedAssistant bool
+	// messageID groups the chunks of the current prompt turn so clients can tell
+	// a new assistant turn apart from a continuation of the previous one.
+	// Thought chunks reuse it with a "_thought" suffix.
+	messageID string
 	// promptCtx is the in-flight prompt context; permission requests bind to
 	// it so a session cancel also aborts a pending request_permission RPC.
 	promptCtx context.Context
+	// question is the client-bound requester for the session/request_question
+	// extension; nil means the host has no question panel.
+	question acp.QuestionRequester
 }
 
 func newACPEventBridge(sessionID string) *acpEventBridge {
@@ -64,6 +71,7 @@ func (b *acpEventBridge) BeginPrompt(sessionID string, emit acp.Emitter) {
 	}
 	b.emit = emit
 	b.emittedAssistant = false
+	b.messageID = "msg_" + generateItemID()
 	b.toolCallIDs = make(map[string]string)
 	b.openToolCalls = make(map[string]bool)
 }
@@ -223,7 +231,7 @@ func (b *acpEventBridge) HandleRuntimeEvent(event runtimeevents.Event) {
 		id := b.stableToolCallID("runtime_tool:"+toolCallID, toolCallID)
 		rawInput := cloneRuntimeEventLogPayload(event.Payload)
 		kind := acpToolKindForName(toolName)
-		_ = b.sessionUpdate(acp.ToolCallStarted(id, toolName, kind, rawInput))
+		_ = b.sessionUpdate(acp.ToolCallStarted(id, toolName, toolName, kind, rawInput))
 		_ = b.sessionUpdate(acp.ToolCallProgress(id, acp.ToolCallStatusInProgress))
 		b.markToolOpen(id, true)
 
@@ -267,7 +275,7 @@ func (b *acpEventBridge) HandleRuntimeEvent(event runtimeevents.Event) {
 		} else if errMsg := payloadStringValue(event.Payload["error"]); errMsg != "" {
 			content = append(content, acp.TextToolContent(errMsg))
 		}
-		_ = b.sessionUpdate(acp.ToolCallFinished(id, status, rawOutput, content))
+		_ = b.sessionUpdate(acp.ToolCallFinished(id, toolName, status, rawOutput, content))
 		b.markToolOpen(id, false)
 
 	case runtimechat.EventLLMRequestFinished, "llm.request.finished":
@@ -284,12 +292,20 @@ func (b *acpEventBridge) HandleRuntimeEvent(event runtimeevents.Event) {
 		}
 
 	case runtimechat.EventAssistantDelta, "assistant.delta":
-		delta := payloadStringValue(event.Payload["delta"])
+		delta := acpUntrimmedString(event.Payload["delta"])
 		if delta == "" {
-			delta = payloadStringValue(event.Payload["content"])
+			delta = acpUntrimmedString(event.Payload["content"])
 		}
 		if delta != "" {
 			_ = b.sessionUpdate(acp.AgentMessageChunk(delta))
+		}
+
+	case runtimechat.EventAssistantReasoningDelta, runtimechat.EventAssistantReasoning:
+		// Model reasoning streams on its own event family. Map it to
+		// agent_thought_chunk so ACP clients render a collapsible thinking
+		// section instead of mixing reasoning into the final answer text.
+		if text := acpReasoningDeltaText(event.Payload); text != "" {
+			_ = b.sessionUpdate(acp.AgentThoughtChunk(text))
 		}
 
 	case runtimechat.EventAssistantMessage, "assistant.message":
@@ -304,6 +320,39 @@ func (b *acpEventBridge) HandleRuntimeEvent(event runtimeevents.Event) {
 		if content != "" {
 			_ = b.sessionUpdate(acp.AgentMessageChunk(content))
 		}
+	}
+}
+
+// acpReasoningDeltaText extracts the streamable reasoning text of a runtime
+// event. Publishers use a nested ReasoningBlock ("reasoning" -> summary) and a
+// few legacy spellings, so all of them are normalized here.
+func acpReasoningDeltaText(payload map[string]interface{}) string {
+	if payload == nil {
+		return ""
+	}
+	if raw, ok := payload["reasoning"]; ok {
+		if text, ok := chatWebReasoningText(raw); ok {
+			return text
+		}
+	}
+	for _, key := range []string{"delta", "content", "summary"} {
+		if text := acpUntrimmedString(payload[key]); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+// acpUntrimmedString keeps streamed text byte-exact: whitespace at chunk
+// boundaries is meaningful once the client concatenates deltas.
+func acpUntrimmedString(value interface{}) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return typed
+	default:
+		return fmt.Sprintf("%v", typed)
 	}
 }
 
@@ -343,7 +392,7 @@ func (b *acpEventBridge) handleChatCoreToolEvent(event runtimechatcore.ChatEvent
 	kind := acpToolKindForName(event.ToolName)
 	switch event.Stage {
 	case "tool_requested":
-		_ = b.sessionUpdate(acp.ToolCallStarted(id, event.ToolName, kind, event.Arguments))
+		_ = b.sessionUpdate(acp.ToolCallStarted(id, event.ToolName, event.ToolName, kind, event.Arguments))
 		_ = b.sessionUpdate(acp.ToolCallProgress(id, acp.ToolCallStatusInProgress))
 		b.markToolOpen(id, true)
 	case "tool_result":
@@ -362,7 +411,7 @@ func (b *acpEventBridge) handleChatCoreToolEvent(event runtimechatcore.ChatEvent
 		} else if strings.TrimSpace(event.Error) != "" {
 			content = append(content, acp.TextToolContent(event.Error))
 		}
-		_ = b.sessionUpdate(acp.ToolCallFinished(id, status, rawOutput, content))
+		_ = b.sessionUpdate(acp.ToolCallFinished(id, event.ToolName, status, rawOutput, content))
 		b.markToolOpen(id, false)
 	}
 }
@@ -405,6 +454,7 @@ func (b *acpEventBridge) EmitCancelledToolTerminals() {
 	for _, id := range ids {
 		_ = emit.SessionUpdate(sessionID, acp.ToolCallFinished(
 			id,
+			"",
 			acp.ToolCallStatusFailed,
 			"cancelled by user",
 			[]acp.ToolCallContent{acp.TextToolContent("cancelled by user")},
@@ -421,6 +471,14 @@ func (b *acpEventBridge) sessionUpdate(update acp.SessionUpdate) error {
 	sessionID := b.sessionID
 	if update.SessionUpdate == acp.SessionUpdateAgentMessageChunk {
 		b.emittedAssistant = true
+	}
+	// Chunks emitted inside one prompt turn share a message id; thoughts get a
+	// distinct id so clients can collapse them separately from the answer.
+	switch update.SessionUpdate {
+	case acp.SessionUpdateAgentMessageChunk:
+		update = acp.WithMessageID(update, b.messageID)
+	case acp.SessionUpdateAgentThoughtChunk:
+		update = acp.WithMessageID(update, b.messageID+"_thought")
 	}
 	b.mu.Unlock()
 	if emit == nil || strings.TrimSpace(sessionID) == "" {

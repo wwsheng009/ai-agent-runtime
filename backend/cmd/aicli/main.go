@@ -420,7 +420,15 @@ func prependACPFlag(args []string) []string {
 		if !match {
 			continue
 		}
-		rewritten := append([]string{"acp"}, args[:i]...)
+		// Remove the injected "chat" subcommand if present — prependDefaultChatCommand
+		// adds it when no subcommand is specified, and prependACPFlag replaces it
+		// with "acp" rather than nesting "chat" under "acp" (which would fail
+		// because the acp command has Args: cobra.NoArgs).
+		before := args[:i]
+		if len(before) > 0 && before[0] == "chat" {
+			before = before[1:]
+		}
+		rewritten := append([]string{"acp"}, before...)
 		rewritten = append(rewritten, args[i+1:]...)
 		return rewritten
 	}
