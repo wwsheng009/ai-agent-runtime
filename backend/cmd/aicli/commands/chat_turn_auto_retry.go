@@ -102,13 +102,29 @@ func maybeAutoRetryDegenerateTurn(ctx context.Context, session *ChatSession, exe
 	if executor == nil || !shouldAutoRetryTurnError(session, turnErr) {
 		return "", turnErr, false
 	}
+	// A canceled turn context (user interrupt, external cancel, deadline) must
+	// never enter the retry loop: the abort guards below are flag-based and a
+	// remote cancel may not have set the session flag (plan doc P3-9).
+	aborted := func() string {
+		if session.IsInterrupted() {
+			return "interrupted"
+		}
+		if ctx != nil && ctx.Err() != nil {
+			return "context_done"
+		}
+		return ""
+	}
+	if abortReason := aborted(); abortReason != "" {
+		writeSessionDebugInfo(session, fmt.Sprintf("[turn] auto retry skipped reason=%s", abortReason), false)
+		return "", turnErr, false
+	}
 	limit := turnAutoRetryLimit()
 	reason := turnAutoRetryReason(turnErr)
 	lastResponse := ""
 	lastErr := turnErr
 	for attempt := 1; attempt <= limit; attempt++ {
-		if session.IsInterrupted() {
-			writeSessionDebugInfo(session, fmt.Sprintf("[turn] auto retry aborted reason=interrupted attempt=%d", attempt), false)
+		if abortReason := aborted(); abortReason != "" {
+			writeSessionDebugInfo(session, fmt.Sprintf("[turn] auto retry aborted reason=%s attempt=%d", abortReason, attempt), false)
 			return lastResponse, lastErr, true
 		}
 		// 上一次尝试可能已经执行过工具（重跑期间错误类别仍属退化）：再重放只会
@@ -124,8 +140,8 @@ func maybeAutoRetryDegenerateTurn(ctx context.Context, session *ChatSession, exe
 			writeSessionDebugInfo(session, fmt.Sprintf("[turn] auto retry aborted reason=%s attempt=%d", waitErr.Error(), attempt), false)
 			return lastResponse, lastErr, true
 		}
-		if session.IsInterrupted() {
-			writeSessionDebugInfo(session, fmt.Sprintf("[turn] auto retry aborted reason=interrupted attempt=%d", attempt), false)
+		if abortReason := aborted(); abortReason != "" {
+			writeSessionDebugInfo(session, fmt.Sprintf("[turn] auto retry aborted reason=%s attempt=%d", abortReason, attempt), false)
 			return lastResponse, lastErr, true
 		}
 		attemptCtx, cancel := turnAutoRetryAttemptContext(ctx, session)
@@ -136,8 +152,8 @@ func maybeAutoRetryDegenerateTurn(ctx context.Context, session *ChatSession, exe
 			return response, nil, true
 		}
 		lastResponse, lastErr = response, err
-		if session.IsInterrupted() {
-			writeSessionDebugInfo(session, fmt.Sprintf("[turn] auto retry aborted reason=interrupted attempt=%d", attempt), false)
+		if abortReason := aborted(); abortReason != "" {
+			writeSessionDebugInfo(session, fmt.Sprintf("[turn] auto retry aborted reason=%s attempt=%d", abortReason, attempt), false)
 			return lastResponse, lastErr, true
 		}
 		// 错误类别已经变化（例如额度、网络、协议错误）：继续重跑同一轮没有依据，

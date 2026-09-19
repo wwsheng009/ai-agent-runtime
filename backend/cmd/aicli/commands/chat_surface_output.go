@@ -210,6 +210,8 @@ func (o chatPromptOverlay) showPriorityPrompt(lines []string, prompt string) (st
 	if locked {
 		o.session.priorityPromptMu.Lock()
 	}
+	// 阶段 F P0：priority prompt 是 modal 级独占输入（影子登记，不改变行为）。
+	releaseArbitration := beginChatInputShadowLevel(o.session, chatInputOwnerModal)
 	var (
 		handle ui.PopupHandle
 		once   sync.Once
@@ -226,6 +228,7 @@ func (o chatPromptOverlay) showPriorityPrompt(lines []string, prompt string) (st
 			if locked {
 				o.session.priorityPromptMu.Unlock()
 			}
+			releaseArbitration()
 		})
 	}
 
@@ -279,6 +282,8 @@ func (o chatPromptOverlay) showPriorityPromptBody(lines []string) (func(), bool)
 	if locked {
 		o.session.priorityPromptMu.Lock()
 	}
+	// 阶段 F P0：body-only priority prompt 同为 modal 级独占输入（影子登记）。
+	releaseArbitration := beginChatInputShadowLevel(o.session, chatInputOwnerModal)
 	var (
 		handle ui.PopupHandle
 		once   sync.Once
@@ -298,6 +303,7 @@ func (o chatPromptOverlay) showPriorityPromptBody(lines []string) (func(), bool)
 			if locked {
 				o.session.priorityPromptMu.Unlock()
 			}
+			releaseArbitration()
 		})
 	}
 	o.beginDirectOutput()

@@ -159,6 +159,10 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	}
 	previousAssistant := latestAssistantResponseText(session)
 	previousTeamID := activeTeamID(session)
+	// 阶段 C：actor/executor 回合（不限于本地 sendMessage）同样持有 ESC 消费者；
+	// 引用计数与本地 watcher 共享同一消费者，重叠回合不会互相 disarm。
+	stopEscapeConsumer := startChatEscapeInterruptWatcher(session)
+	defer stopEscapeConsumer()
 	if bridge := ensureChatRuntimeEventBridge(session); bridge != nil {
 		bridge.PrepareRunPrompt(prompt)
 		bridge.BeginRun()
@@ -265,6 +269,9 @@ func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *Chat
 	}
 	previousAssistant := latestAssistantResponseText(session)
 	previousTeamID := activeTeamID(session)
+	// 阶段 C：goal 续跑同样由 actor 驱动，必须与前台回合一样可被 ESC 中断。
+	stopEscapeConsumer := startChatEscapeInterruptWatcher(session)
+	defer stopEscapeConsumer()
 	if bridge := ensureChatRuntimeEventBridge(session); bridge != nil {
 		bridge.PrepareRunPrompt("")
 		bridge.BeginRun()

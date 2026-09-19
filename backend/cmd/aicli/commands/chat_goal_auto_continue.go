@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
@@ -25,12 +26,23 @@ func maybeAutoContinueActiveGoal(ctx context.Context, session *ChatSession, exec
 	if session == nil || executor == nil {
 		return nil
 	}
+	// A canceled turn context must not be answered with a fresh continuation
+	// run: remote cancels may not have set the session's interrupted flag
+	// (plan doc P3-9).
+	if ctx != nil && errors.Is(ctx.Err(), context.Canceled) {
+		writeSessionDebugInfo(session, "[goal] auto continuation skipped reason=context_done", false)
+		return nil
+	}
 	continuer, ok := goalAutoContinuationExecutor(executor)
 	if !ok {
 		writeSessionDebugInfo(session, "[goal] auto continuation skipped reason=executor_without_continue_goal", false)
 		return nil
 	}
 	for i := 0; i < defaultGoalAutoContinuationLimit; i++ {
+		if ctx != nil && errors.Is(ctx.Err(), context.Canceled) {
+			writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation stopped reason=context_done attempts_completed=%d", i), false)
+			return nil
+		}
 		decision, err := shouldAutoContinueActiveGoalDecision(session)
 		if err != nil {
 			return err
@@ -68,6 +80,13 @@ func shouldAutoContinueAfterGoalTurnError(session *ChatSession, err error) bool 
 	if err == nil {
 		return false
 	}
+	// Only real cancellation (user interrupt / external cancel) must stop goal
+	// recovery; a deadline-exceeded initial error stays recoverable, which the
+	// continuation path intentionally supports.
+	if errors.Is(err, context.Canceled) {
+		writeSessionDebugInfo(session, fmt.Sprintf("[goal] error recovery skipped reason=context_done turn_error=%q", err.Error()), false)
+		return false
+	}
 	decision, decisionErr := shouldAutoContinueActiveGoalDecision(session)
 	if decisionErr != nil || !decision.Continue {
 		if decisionErr != nil {
@@ -83,10 +102,18 @@ func shouldAutoContinueAfterGoalTurnError(session *ChatSession, err error) bool 
 
 func goalAutoContinuationAttemptContext(ctx context.Context, session *ChatSession) (context.Context, context.CancelFunc) {
 	base := context.Background()
-	if session != nil && session.cancelCtx != nil && session.cancelCtx.Err() == nil {
+	switch {
+	case session != nil && session.cancelCtx != nil && session.cancelCtx.Err() == nil:
 		base = session.cancelCtx
-	} else if ctx != nil && ctx.Err() == nil {
+	case ctx != nil && ctx.Err() == nil:
 		base = ctx
+	case ctx != nil && errors.Is(ctx.Err(), context.Canceled):
+		// The turn context was explicitly canceled (user interrupt / external
+		// cancel): never fall back to a fresh background context, or the
+		// interrupt would resurrect the work it just stopped.
+		return context.WithCancel(ctx)
+	case session != nil && session.cancelCtx != nil && errors.Is(session.cancelCtx.Err(), context.Canceled):
+		return context.WithCancel(session.cancelCtx)
 	}
 	if session != nil && session.RequestTimeout > 0 {
 		return runtimeexecution.WithTimeoutSource(base, session.RequestTimeout, runtimeexecution.TimeoutSourceChatTurnDeadline)

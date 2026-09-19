@@ -851,12 +851,13 @@ func (c *chatInteractionCoordinator) updateSurfaceStatusLocked(s chatSurfaceStat
 	c.updateDynamicStatusClockLocked(s, now)
 	if c.surface != nil {
 		persistentModel := buildChatPersistentStatusModelForWidth(c.session, ui.GetTerminalWidth())
-		dynamicModel := c.appendStatusHintsLocked(buildChatDynamicStatusModelForWidthInputModeAndCompletion(
+		dynamicModel := c.appendStatusHintsLocked(buildChatDynamicStatusModelForWidthInputModeCompletionAndEsc(
 			s,
 			ui.GetTerminalWidth(),
 			c.inputMode,
 			c.dynamicStatusElapsedLocked(now),
 			c.dynamicStatusCompleted,
+			chatEscapeInterruptAvailable(c.session),
 		))
 		c.persistentStatusModel = cloneChatStatusLineModel(persistentModel)
 		c.dynamicStatusModel = cloneChatStatusLineModelPointer(dynamicModel)
@@ -1148,12 +1149,13 @@ func (c *chatInteractionCoordinator) refreshDynamicStatusTick(sequence uint64) {
 	// 用最近一次 updateSurfaceStatusLocked 的结构化状态重建，而不是重新派生：
 	// SetRetrying/SetNotice 写入的状态不反映在 agentStage/activity flags 上，
 	// 重新派生会让 retry 状态行在每秒钟的 tick 中闪回 idle/丢失计时。
-	model := buildChatDynamicStatusModelForWidthInputModeAndCompletion(
+	model := buildChatDynamicStatusModelForWidthInputModeCompletionAndEsc(
 		c.surfaceStatus,
 		ui.GetTerminalWidth(),
 		c.inputMode,
 		c.dynamicStatusElapsedLocked(now),
 		c.dynamicStatusCompleted,
+		chatEscapeInterruptAvailable(c.session),
 	)
 	model = c.appendStatusHintsLocked(model)
 	c.dynamicStatusModel = cloneChatStatusLineModelPointer(model)
@@ -2362,7 +2364,15 @@ func buildChatDynamicStatusModelForWidthAndInputMode(s chatSurfaceStatus, width 
 	return buildChatDynamicStatusModelForWidthInputModeAndCompletion(s, width, inputMode, elapsed, false)
 }
 
+// buildChatDynamicStatusModelForWidthInputModeAndCompletion keeps the legacy
+// pure-render contract (ESC is advertised). Production call sites use
+// buildChatDynamicStatusModelForWidthInputModeCompletionAndEsc so the suffix
+// reflects whether an ESC consumer is actually armed.
 func buildChatDynamicStatusModelForWidthInputModeAndCompletion(s chatSurfaceStatus, width int, inputMode chatInputMode, elapsed time.Duration, completed bool) *style.StatusLineModel {
+	return buildChatDynamicStatusModelForWidthInputModeCompletionAndEsc(s, width, inputMode, elapsed, completed, true)
+}
+
+func buildChatDynamicStatusModelForWidthInputModeCompletionAndEsc(s chatSurfaceStatus, width int, inputMode chatInputMode, elapsed time.Duration, completed bool, escAvailable bool) *style.StatusLineModel {
 	s, width = normalizeChatSurfaceStatusInput(s, width)
 	// 完成摘要只属于已结束（非运行）的状态：supervision auto-wake 可以在前台
 	// turn 的 deferred CompleteWaiting 之前接管状态行，此时 surface state 已经
@@ -2385,7 +2395,14 @@ func buildChatDynamicStatusModelForWidthInputModeAndCompletion(s chatSurfaceStat
 	}
 	suffix := ""
 	if interruptible {
-		suffix = fmt.Sprintf(" (%s • esc to interrupt)", formatChatDynamicStatusElapsed(elapsed))
+		hint := "esc to interrupt"
+		if !escAvailable {
+			// No armed ESC consumer (non-interactive/PTY host, or a turn not
+			// driven by the local sendMessage frame): advertise the interrupt
+			// path that actually exists instead of a dead key.
+			hint = "ctrl+c to stop"
+		}
+		suffix = fmt.Sprintf(" (%s • %s)", formatChatDynamicStatusElapsed(elapsed), hint)
 	}
 	if budget := width - ui.DisplayWidth("◦ "+suffix); budget >= 4 {
 		action = compactStatusValue(action, budget)

@@ -29,6 +29,7 @@ const (
 var (
 	procPeekConsoleInputW          = windows.NewLazySystemDLL("kernel32.dll").NewProc("PeekConsoleInputW")
 	procReadConsoleInputW          = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReadConsoleInputW")
+	procWriteConsoleInputW         = windows.NewLazySystemDLL("kernel32.dll").NewProc("WriteConsoleInputW")
 	procPeekNamedPipe              = windows.NewLazySystemDLL("kernel32.dll").NewProc("PeekNamedPipe")
 	procOpenClipboard              = windows.NewLazySystemDLL("user32.dll").NewProc("OpenClipboard")
 	procCloseClipboard             = windows.NewLazySystemDLL("user32.dll").NewProc("CloseClipboard")
@@ -283,6 +284,57 @@ func consumeConsoleInputRecords(handle windows.Handle, count int) error {
 		if err := readConsoleInputRecord(handle); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// readConsoleInputRecords drains count records from the console input queue.
+// The queue is a FIFO the caller already peeked; drained records are gone.
+func readConsoleInputRecords(handle windows.Handle, count int) ([]consoleInputRecord, error) {
+	if count <= 0 {
+		return nil, nil
+	}
+	records := make([]consoleInputRecord, count)
+	var read uint32
+	ret, _, callErr := procReadConsoleInputW.Call(
+		uintptr(handle),
+		uintptr(unsafe.Pointer(&records[0])),
+		uintptr(count),
+		uintptr(unsafe.Pointer(&read)),
+	)
+	if ret == 0 {
+		if callErr != syscall.Errno(0) {
+			return nil, callErr
+		}
+		return nil, windows.GetLastError()
+	}
+	if int(read) > len(records) {
+		read = uint32(len(records))
+	}
+	return records[:read], nil
+}
+
+// writeConsoleInputRecords re-injects previously drained records so input
+// queued before a consumed ESC survives the interrupt (plan doc P1-4).
+func writeConsoleInputRecords(handle windows.Handle, records []consoleInputRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+	var written uint32
+	ret, _, callErr := procWriteConsoleInputW.Call(
+		uintptr(handle),
+		uintptr(unsafe.Pointer(&records[0])),
+		uintptr(len(records)),
+		uintptr(unsafe.Pointer(&written)),
+	)
+	if ret == 0 {
+		if callErr != syscall.Errno(0) {
+			return callErr
+		}
+		return windows.GetLastError()
+	}
+	if int(written) != len(records) {
+		return errors.New("write console input: short write")
 	}
 	return nil
 }

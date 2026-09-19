@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 	"time"
@@ -13,13 +14,25 @@ import (
 )
 
 const (
-	chatInterruptCleanupTimeout     = 5 * time.Second
-	chatInterruptCleanupWaitTimeout = chatInterruptCleanupTimeout + time.Second
+	chatInterruptCleanupTimeout          = 5 * time.Second
+	chatInterruptCleanupWaitTimeout      = chatInterruptCleanupTimeout + time.Second
+	chatInterruptCleanupIncompleteNotice = "[stop] 停止清理未在时限内完成，运行可能仍在终止；可再次按 Esc 重试或稍候。"
 )
 
-func (h *localChatRuntimeHost) interruptActiveRuns(ctx context.Context, baseSessionID, userID, activeTeamID string) {
+// chatInterruptCleanupOutcome reports what the async interrupt cleanup managed
+// to complete before its deadline. When stopped is false the UI keeps the
+// Stopping stage and appends an explicit retry hint instead of silently
+// pretending the run was stopped (plan doc P2-6/E4).
+type chatInterruptCleanupOutcome struct {
+	stopped      bool
+	actors       int
+	failedActors int
+}
+
+func (h *localChatRuntimeHost) interruptActiveRuns(ctx context.Context, baseSessionID, userID, activeTeamID string) chatInterruptCleanupOutcome {
+	outcome := chatInterruptCleanupOutcome{stopped: true}
 	if h == nil {
-		return
+		return outcome
 	}
 	baseSessionID = strings.TrimSpace(baseSessionID)
 	userID = strings.TrimSpace(userID)
@@ -27,17 +40,27 @@ func (h *localChatRuntimeHost) interruptActiveRuns(ctx context.Context, baseSess
 	// canceled runs, so interrupt is recorded as cancelled rather than failed.
 	teamSessionIDs := h.prepareTeamInterrupt(ctx, baseSessionID, activeTeamID)
 	if baseSessionID != "" {
-		h.interruptActorRun(ctx, baseSessionID)
+		outcome.actors++
+		if !h.interruptActorRun(ctx, baseSessionID) {
+			outcome.failedActors++
+		}
 		h.markRuntimeSessionStopped(ctx, baseSessionID)
 	}
 	for sessionID := range teamSessionIDs {
 		if sessionID == "" || strings.EqualFold(sessionID, baseSessionID) {
 			continue
 		}
-		h.interruptActorRun(ctx, sessionID)
+		outcome.actors++
+		if !h.interruptActorRun(ctx, sessionID) {
+			outcome.failedActors++
+		}
 		h.markRuntimeSessionStopped(ctx, sessionID)
 	}
-	h.interruptChildAgentRuns(ctx, baseSessionID, userID, teamSessionIDs)
+	attempted, failed := h.interruptChildAgentRuns(ctx, baseSessionID, userID, teamSessionIDs)
+	outcome.actors += attempted
+	outcome.failedActors += failed
+	outcome.stopped = outcome.failedActors == 0 && ctx.Err() == nil
+	return outcome
 }
 
 func (h *localChatRuntimeHost) prepareTeamInterrupt(ctx context.Context, baseSessionID, activeTeamID string) map[string]struct{} {
@@ -59,13 +82,13 @@ func (h *localChatRuntimeHost) prepareTeamInterrupt(ctx context.Context, baseSes
 	return sessionIDs
 }
 
-func (h *localChatRuntimeHost) interruptChildAgentRuns(ctx context.Context, baseSessionID, userID string, skip map[string]struct{}) {
-	if h == nil || h.SessionStore == nil || strings.TrimSpace(baseSessionID) == "" || strings.TrimSpace(userID) == "" {
-		return
+func (h *localChatRuntimeHost) interruptChildAgentRuns(ctx context.Context, baseSessionID, userID string, skip map[string]struct{}) (attempted int, failed int) {
+	if h == nil || h.SessionStore == nil || strings.TrimSpace(baseSessionID) == "" {
+		return 0, 0
 	}
-	sessions, err := h.SessionStore.List(ctx, strings.TrimSpace(userID))
+	sessions, err := h.listInterruptCandidateSessions(ctx, userID)
 	if err != nil {
-		return
+		return 0, 0
 	}
 	byID := make(map[string]*runtimechat.Session, len(sessions))
 	for _, item := range sessions {
@@ -91,9 +114,31 @@ func (h *localChatRuntimeHost) interruptChildAgentRuns(ctx context.Context, base
 				continue
 			}
 		}
-		h.interruptActorRun(ctx, sessionID)
+		attempted++
+		if !h.interruptActorRun(ctx, sessionID) {
+			failed++
+		}
 		h.markRuntimeSessionStopped(ctx, sessionID)
 	}
+	return attempted, failed
+}
+
+// listInterruptCandidateSessions resolves the session set used for child-agent
+// cascade interrupts. The interactive host always has a user scope; when it is
+// missing (non-interactive / programmatic hosts) fall back to the optional
+// all-sessions lister so children still get interrupted instead of silently
+// skipping the whole cascade (plan doc P2-7).
+func (h *localChatRuntimeHost) listInterruptCandidateSessions(ctx context.Context, userID string) ([]*runtimechat.Session, error) {
+	userID = strings.TrimSpace(userID)
+	if userID != "" {
+		return h.SessionStore.List(ctx, userID)
+	}
+	lister, ok := h.SessionStore.(runtimechat.SessionStorageAllLister)
+	if !ok {
+		return nil, nil
+	}
+	const interruptCascadeSessionLimit = 500
+	return lister.ListAll(ctx, interruptCascadeSessionLimit, 0)
 }
 
 func (h *localChatRuntimeHost) interruptTargetTeamIDs(ctx context.Context, baseSessionID, activeTeamID string) []string {
@@ -179,14 +224,18 @@ func (h *localChatRuntimeHost) stopTeamLifecycleLoop(teamID string) {
 	}
 }
 
-func (h *localChatRuntimeHost) interruptActorRun(ctx context.Context, sessionID string) {
+// interruptActorRun stops one session actor and reports whether the stop
+// actually completed. Only an expired deadline/cancellation counts as failure:
+// "no active run" / "already stopped" errors are routine and must not turn into
+// a user-visible "cleanup incomplete" notice.
+func (h *localChatRuntimeHost) interruptActorRun(ctx context.Context, sessionID string) bool {
 	if h == nil || h.SessionHub == nil || strings.TrimSpace(sessionID) == "" {
-		return
+		return true
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	actor, ok := h.SessionHub.Get(sessionID)
 	if !ok || actor == nil {
-		return
+		return true
 	}
 	interruptCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 	defer cancel()
@@ -196,6 +245,13 @@ func (h *localChatRuntimeHost) interruptActorRun(ctx context.Context, sessionID 
 	// lease; otherwise a later terminal/process still sees ownership conflict.
 	// The next prompt recreates the actor via SessionHub.GetOrCreate.
 	_ = h.SessionHub.StopContext(ctx, sessionID)
+	if errors.Is(interruptCtx.Err(), context.DeadlineExceeded) || errors.Is(interruptCtx.Err(), context.Canceled) {
+		return false
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.Canceled) {
+		return false
+	}
+	return true
 }
 
 func (h *localChatRuntimeHost) markRuntimeSessionStopped(ctx context.Context, sessionID string) {

@@ -112,39 +112,95 @@ func TestKeyHandlerStart_DoesNotPollSessionInputWhileSuspended(t *testing.T) {
 	}
 }
 
-func TestConsumeLeadingConsoleEscapeConsumesOnlyThroughLeadingEscape(t *testing.T) {
-	originalConsume := windowsConsumeConsoleInputRecordsFn
-	consumed := 0
-	windowsConsumeConsoleInputRecordsFn = func(_ windows.Handle, count int) error {
-		consumed = count
-		return nil
-	}
+// TestConsumeLeadingConsoleEscapePreservesInputQueuedBeforeEscape pins the
+// plan-doc P1-4 behavior: ESC must still interrupt when the user already typed
+// something, and the queued input must be re-injected instead of discarded.
+func TestConsumeLeadingConsoleEscapePreservesInputQueuedBeforeEscape(t *testing.T) {
+	originalRead := windowsReadConsoleInputRecordsFn
+	originalWrite := windowsWriteConsoleInputRecordsFn
 	t.Cleanup(func() {
-		windowsConsumeConsoleInputRecordsFn = originalConsume
+		windowsReadConsoleInputRecordsFn = originalRead
+		windowsWriteConsoleInputRecordsFn = originalWrite
 	})
 
-	records := []consoleInputRecord{
-		{},
-		consoleKeyRecord(true, windowsEscapeVirtualKeyCode, 27),
-	}
-	if !consumeLeadingConsoleEscape(1, records) {
-		t.Fatal("expected leading session ESC to be consumed")
-	}
-	if consumed != 2 {
-		t.Fatalf("expected noise plus ESC record to be consumed, got %d", consumed)
-	}
+	esc := consoleKeyRecord(true, windowsEscapeVirtualKeyCode, 27)
+	noise := consoleInputRecord{}
+	typed := consoleKeyRecord(true, 'A', 'a')
 
-	consumed = 0
-	records = []consoleInputRecord{
-		consoleKeyRecord(true, 'A', 'a'),
-		consoleKeyRecord(true, windowsEscapeVirtualKeyCode, 27),
-	}
-	if consumeLeadingConsoleEscape(1, records) {
-		t.Fatal("expected ordinary queued input before ESC to be preserved")
-	}
-	if consumed != 0 {
-		t.Fatalf("expected no records to be consumed before ordinary input, got %d", consumed)
-	}
+	t.Run("noise before escape", func(t *testing.T) {
+		var readCount int
+		var written []consoleInputRecord
+		windowsReadConsoleInputRecordsFn = func(_ windows.Handle, count int) ([]consoleInputRecord, error) {
+			readCount = count
+			return []consoleInputRecord{noise, esc}, nil
+		}
+		windowsWriteConsoleInputRecordsFn = func(_ windows.Handle, records []consoleInputRecord) error {
+			written = append([]consoleInputRecord(nil), records...)
+			return nil
+		}
+
+		if !consumeLeadingConsoleEscape(1, []consoleInputRecord{noise, esc}) {
+			t.Fatal("expected ESC after queued noise to be consumed")
+		}
+		if readCount != 2 {
+			t.Fatalf("expected to drain noise plus ESC, got %d", readCount)
+		}
+		if len(written) != 1 {
+			t.Fatalf("expected the noise record to be re-injected, got %d records", len(written))
+		}
+	})
+
+	t.Run("typed input before escape", func(t *testing.T) {
+		var written []consoleInputRecord
+		windowsReadConsoleInputRecordsFn = func(_ windows.Handle, count int) ([]consoleInputRecord, error) {
+			if count != 2 {
+				t.Fatalf("expected to drain typed input plus ESC, got %d", count)
+			}
+			return []consoleInputRecord{typed, esc}, nil
+		}
+		windowsWriteConsoleInputRecordsFn = func(_ windows.Handle, records []consoleInputRecord) error {
+			written = append([]consoleInputRecord(nil), records...)
+			return nil
+		}
+
+		if !consumeLeadingConsoleEscape(1, []consoleInputRecord{typed, esc}) {
+			t.Fatal("expected ESC after typed input to interrupt")
+		}
+		if len(written) != 1 {
+			t.Fatalf("expected the typed record to be re-injected, got %d records", len(written))
+		}
+		key := (*consoleKeyEventRecord)(unsafe.Pointer(&written[0].Event[0]))
+		if key.UnicodeChar != 'a' {
+			t.Fatalf("expected re-injected draft rune 'a', got %q", rune(key.UnicodeChar))
+		}
+	})
+
+	t.Run("failed re-injection keeps interrupt", func(t *testing.T) {
+		windowsReadConsoleInputRecordsFn = func(_ windows.Handle, _ int) ([]consoleInputRecord, error) {
+			return []consoleInputRecord{typed, esc}, nil
+		}
+		windowsWriteConsoleInputRecordsFn = func(_ windows.Handle, _ []consoleInputRecord) error {
+			return io.ErrClosedPipe
+		}
+
+		if !consumeLeadingConsoleEscape(1, []consoleInputRecord{typed, esc}) {
+			t.Fatal("expected the ESC interrupt to survive a failed re-injection")
+		}
+	})
+
+	t.Run("no escape queued", func(t *testing.T) {
+		called := false
+		windowsReadConsoleInputRecordsFn = func(_ windows.Handle, _ int) ([]consoleInputRecord, error) {
+			called = true
+			return nil, nil
+		}
+		if consumeLeadingConsoleEscape(1, []consoleInputRecord{typed}) {
+			t.Fatal("expected no interrupt without a queued ESC")
+		}
+		if called {
+			t.Fatal("expected no drain when the queue has no ESC")
+		}
+	})
 }
 
 func TestConsumeLeadingPipeEscapeOnlyConsumesBareEscape(t *testing.T) {

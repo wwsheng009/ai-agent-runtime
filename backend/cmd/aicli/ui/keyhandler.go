@@ -110,6 +110,19 @@ func (kh *KeyHandler) IsEnabled() bool {
 	return kh != nil && kh.enabled.Load()
 }
 
+// Armed reports whether physical-key polling is currently armed. The status
+// line uses it to decide whether "esc to interrupt" is an honest promise: the
+// handler is only armed while a turn-scoped ESC consumer exists.
+func (kh *KeyHandler) Armed() bool {
+	return kh != nil && kh.armed.Load()
+}
+
+// Suspended reports whether polling is temporarily suspended because another
+// component (for example the busy composer capture) owns the session stdin.
+func (kh *KeyHandler) Suspended() bool {
+	return kh != nil && kh.suspended.Load()
+}
+
 // ManualInterrupt 手动触发中断（用于从代码中模拟 ESC 键）
 func (kh *KeyHandler) ManualInterrupt() {
 	kh.Notify()

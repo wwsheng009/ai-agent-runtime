@@ -20,6 +20,8 @@ const (
 var (
 	windowsReadSessionEscapeFunc        = windowsReadSessionEscape
 	windowsConsumeConsoleInputRecordsFn = consumeConsoleInputRecords
+	windowsReadConsoleInputRecordsFn    = readConsoleInputRecords
+	windowsWriteConsoleInputRecordsFn   = writeConsoleInputRecords
 )
 
 // Start 启动键盘监听（Windows 系统）。
@@ -84,23 +86,37 @@ func windowsReadSessionEscape() bool {
 }
 
 func consumeLeadingConsoleEscape(handle windows.Handle, records []consoleInputRecord) bool {
-	noiseRecords := 0
+	escIndex := -1
 	for i := range records {
-		record := records[i]
-		if record.EventType == consoleKeyEventType {
-			key := (*consoleKeyEventRecord)(unsafe.Pointer(&record.Event[0]))
-			if key.KeyDown != 0 && key.VirtualKeyCode == windowsEscapeVirtualKeyCode {
-				return windowsConsumeConsoleInputRecordsFn(handle, noiseRecords+1) == nil
-			}
+		if records[i].EventType != consoleKeyEventType {
+			continue
 		}
-		if consoleInputRecordCanProduceInput(record) {
-			// Preserve ordinary input queued before ESC; consuming through the
-			// escape record would silently discard the user's draft.
-			return false
+		key := (*consoleKeyEventRecord)(unsafe.Pointer(&records[i].Event[0]))
+		if key.KeyDown != 0 && key.VirtualKeyCode == windowsEscapeVirtualKeyCode {
+			escIndex = i
+			break
 		}
-		noiseRecords++
 	}
-	return false
+	if escIndex < 0 {
+		return false
+	}
+	// Drain through the ESC record. Ordinary input queued before it must be
+	// preserved instead of being silently discarded together with the ESC:
+	// re-inject the prefix after the drain so a typed draft survives the
+	// interrupt (plan doc P1-4). A failed re-injection keeps the interrupt
+	// (the ESC was already consumed) at the cost of the prefix bytes.
+	prefix := records[:escIndex]
+	drained, err := windowsReadConsoleInputRecordsFn(handle, escIndex+1)
+	if err != nil {
+		return false
+	}
+	if len(drained) < escIndex+1 {
+		return false
+	}
+	if len(prefix) > 0 {
+		_ = windowsWriteConsoleInputRecordsFn(handle, prefix)
+	}
+	return true
 }
 
 func consumeLeadingPipeEscape(handle windows.Handle, reader *os.File) bool {

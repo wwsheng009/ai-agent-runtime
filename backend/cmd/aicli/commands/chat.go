@@ -80,8 +80,13 @@ type ChatSession struct {
 	composerWakeMu            sync.Mutex                           // 保护 composer 读取唤醒取消
 	composerWakeCancel        context.CancelFunc                   // 当前 composer 读取的唤醒取消
 	interrupted               atomic.Bool                          // 是否被中断（原子操作，避免竞态）
+	escapeStoppingNoticeShown atomic.Bool                          // 重复 Esc 的“停止处理中”提示本中断周期内是否已展示（P2-10）
 	interruptCleanupMu        sync.Mutex                           // 保护当前中断清理完成信号
 	interruptCleanupDone      chan struct{}                        // 阻止下一轮与上一轮异步清理交错
+	escapeConsumerMu          sync.Mutex                           // 保护会话级 ESC 消费者注册表（阶段 C）
+	escapeConsumer            *chatEscapeConsumerState             // 共享 ESC 消费者：按引用计数持有 Arm/goroutine
+	inputArbitrationMu        sync.Mutex                           // 保护阶段 F 影子仲裁器（§12.3 P0）
+	inputArbitration          *chatInputArbitrator                 // 统一输入仲裁器：P0 只观测不改变行为
 	FunctionCatalog           *aicliFunctionCatalog                // 统一管理 builtin tools + skills + schema cache
 	FunctionRegistry          *functions.FunctionRegistry          // Function 注册表
 	FunctionBuilder           functions.FunctionCallBuilder        // 协议对应的 function/tool builder
@@ -277,6 +282,7 @@ func (s *ChatSession) interrupt(preservePendingInput bool) {
 	if s == nil {
 		return
 	}
+	s.escapeStoppingNoticeShown.Store(false)
 	s.interrupted.Store(true)
 	var composerDraft string
 	if preservePendingInput && s.Interaction != nil {
@@ -311,6 +317,7 @@ func (s *ChatSession) interrupt(preservePendingInput bool) {
 func (s *ChatSession) ResetInterrupt() {
 	s.waitForInterruptCleanup()
 	s.interrupted.Store(false)
+	s.escapeStoppingNoticeShown.Store(false)
 	if s.Interaction != nil && s.Interaction.AgentStage() == chatAgentStageStopping {
 		s.Interaction.ClearAgentStage()
 	}
@@ -375,7 +382,8 @@ func (s *ChatSession) runInterruptCleanup(done chan struct{}) {
 	if s == nil {
 		return
 	}
-	defer s.finishInterruptCleanupUI()
+	outcome := chatInterruptCleanupOutcome{stopped: true}
+	defer func() { s.finishInterruptCleanupUIAfter(outcome) }()
 	if s.LocalRuntimeHost == nil {
 		return
 	}
@@ -385,7 +393,7 @@ func (s *ChatSession) runInterruptCleanup(done chan struct{}) {
 	activeTeamID := activeTeamID(s)
 	ctx, cancel := context.WithTimeout(context.Background(), chatInterruptCleanupTimeout)
 	defer cancel()
-	host.interruptActiveRuns(ctx, baseSessionID, userID, activeTeamID)
+	outcome = host.interruptActiveRuns(ctx, baseSessionID, userID, activeTeamID)
 }
 
 func (s *ChatSession) waitForInterruptCleanup() {
@@ -455,8 +463,20 @@ func (s *ChatSession) isInterruptCleanupInFlight() bool {
 
 // finishInterruptCleanupUI leaves the Stopping composer stage once actor stop
 // and lease release have completed, without waiting for the next user input.
+// It is the "assume completed" entry for callers that have no outcome.
 func (s *ChatSession) finishInterruptCleanupUI() {
+	s.finishInterruptCleanupUIAfter(chatInterruptCleanupOutcome{stopped: true})
+}
+
+// finishInterruptCleanupUIAfter only clears Stopping when cleanup actually
+// completed. A timeout keeps the stage and appends an explicit retry hint so
+// the UI never silently claims the run stopped (plan doc P2-6/E4).
+func (s *ChatSession) finishInterruptCleanupUIAfter(outcome chatInterruptCleanupOutcome) {
 	if s == nil || s.Interaction == nil {
+		return
+	}
+	if !outcome.stopped {
+		s.Interaction.RenderLocalSupplement(chatInterruptCleanupIncompleteNotice)
 		return
 	}
 	if s.Interaction.AgentStage() == chatAgentStageStopping {
@@ -637,6 +657,85 @@ func selectProvider(cfg *config.Config) string {
 }
 
 func selectProviderWithReader(cfg *config.Config, reader *bufio.Reader) string {
+	// Prefer the /provider-style searchable full-screen picker (fuzzy search,
+	// arrow navigation) when the terminal supports it; fall back to the
+	// numbered list for pipes/redirects where the alternate-screen UI is
+	// unavailable.
+	if selected, ok := selectProviderFullScreen(cfg); ok {
+		return selected
+	}
+	return selectProviderWithReaderNumeric(cfg, reader)
+}
+
+// selectProviderFullScreen runs the searchable full-screen provider picker —
+// the same interaction the typed /provider command offers. It returns
+// (provider, true) after the user confirms a row, and (_, false) when the
+// full-screen UI is unavailable, no provider is enabled, or the user cancels,
+// so the caller can fall back to the numbered prompt.
+func selectProviderFullScreen(cfg *config.Config) (string, bool) {
+	if cfg == nil {
+		return "", false
+	}
+	terminal := ui.NewTerminal()
+	if !ui.CanUseFullScreenList(terminal) {
+		return "", false
+	}
+	items := buildStartupProviderPickerItems(cfg)
+	if len(items) == 0 {
+		return "", false
+	}
+	// The full-screen picker blocks on stdin, but reads keys through its own
+	// raw-mode loop rather than the tracked reader. Mark the wait so the
+	// startup watchdog treats it as "waiting for user input", not a stall.
+	beginChatInputWait()
+	defer endChatInputWait()
+	result, err := ui.SelectFullScreenList(context.Background(), terminal, ui.FullScreenListOptions{
+		Title:        "选择 Provider",
+		Subtitle:     "↑/↓ 选择 · 输入关键词模糊搜索 · Enter 确认 · Esc 取消",
+		EmptyMessage: "没有匹配的 provider",
+		ConfirmLabel: "使用选中 provider",
+		Items:        items,
+	})
+	if err != nil || result.Cancelled || result.Index < 0 || result.Index >= len(items) {
+		return "", false
+	}
+	return strings.TrimSpace(items[result.Index].Title), true
+}
+
+// buildStartupProviderPickerItems projects the enabled providers into
+// searchable full-screen rows, mirroring the numbered list's descriptions so
+// search matches names, protocols, hosts and default models.
+func buildStartupProviderPickerItems(cfg *config.Config) []ui.FullScreenListItem {
+	if cfg == nil {
+		return nil
+	}
+	var providers []string
+	for name, p := range cfg.Providers.Items {
+		if p.Enabled {
+			providers = append(providers, name)
+		}
+	}
+	sort.Strings(providers)
+	items := make([]ui.FullScreenListItem, 0, len(providers))
+	for _, name := range providers {
+		summary := ""
+		if provider, ok := cfg.Providers.Items[name]; ok {
+			summary = describeProviderSelection(provider)
+		}
+		searchText := name
+		if summary != "" {
+			searchText += " " + summary
+		}
+		items = append(items, ui.FullScreenListItem{
+			Title:      name,
+			Detail:     summary,
+			SearchText: searchText,
+		})
+	}
+	return items
+}
+
+func selectProviderWithReaderNumeric(cfg *config.Config, reader *bufio.Reader) string {
 	printChatSelectionSection("选择 Provider")
 
 	// 列出可用的 providers
@@ -751,6 +850,54 @@ func selectModel(provider config.Provider) string {
 }
 
 func selectModelWithReader(provider config.Provider, reader *bufio.Reader) string {
+	// Mirror the provider stage: prefer the /model-style searchable full-screen
+	// picker (fuzzy search, arrow navigation, default marker) when the terminal
+	// supports it; fall back to the numbered list for pipes/redirects where the
+	// alternate-screen UI is unavailable.
+	if selected, ok := selectModelFullScreen(provider); ok {
+		return selected
+	}
+	return selectModelWithReaderNumeric(provider, reader)
+}
+
+// selectModelFullScreen runs the searchable full-screen model picker — the
+// same interaction the typed /model command offers — so the startup
+// provider→model flow stays consistent. It returns (model, true) after the
+// user confirms a row, and (_, false) when the full-screen UI is unavailable,
+// no model is selectable, or the user cancels, so the caller can fall back to
+// the numbered prompt.
+func selectModelFullScreen(provider config.Provider) (string, bool) {
+	terminal := ui.NewTerminal()
+	if !ui.CanUseFullScreenList(terminal) {
+		return "", false
+	}
+	// The default model is what the session would use without a prompt, so it
+	// anchors the list ordering and the "(当前)" marker.
+	options := modelPickerModelOptions(provider, provider.DefaultModel)
+	if len(options) == 0 {
+		return "", false
+	}
+	// The full-screen picker blocks on stdin, but reads keys through its own
+	// raw-mode loop rather than the tracked reader. Mark the wait so the
+	// startup watchdog treats it as "waiting for user input", not a stall.
+	beginChatInputWait()
+	defer endChatInputWait()
+	result, err := ui.SelectFullScreenList(context.Background(), terminal, ui.FullScreenListOptions{
+		Title:        "选择 Model",
+		Subtitle:     "↑/↓ 选择 · 输入关键词模糊搜索 · Enter 确认 · Esc 取消",
+		EmptyMessage: "没有可用的模型",
+		ConfirmLabel: "使用选中模型",
+		Items:        buildModelPickerModelItems(options, provider.DefaultModel),
+	})
+	if err != nil || result.Cancelled || result.Index < 0 || result.Index >= len(options) {
+		return "", false
+	}
+	// Index back into the normalized option list: the rendered row title
+	// carries a "(当前)" suffix and must not leak into the model name.
+	return options[result.Index], true
+}
+
+func selectModelWithReaderNumeric(provider config.Provider, reader *bufio.Reader) string {
 	printChatSelectionSection("选择 Model")
 
 	if len(provider.SupportedModels) == 0 {

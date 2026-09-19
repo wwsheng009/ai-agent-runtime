@@ -27,19 +27,25 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 	if queue == nil {
 		return func() {}
 	}
-	if session.KeyHandler != nil {
+	// 阶段 F P2b：灰度开关打开时由仲裁器独占驱动 Suspend/Resume。
+	enforced := chatInputArbitrationEnforced()
+	if session.KeyHandler != nil && !enforced {
 		session.KeyHandler.Suspend()
 	}
 	queue.setExternalInputCaptureActive(true)
+	// 阶段 F P0：影子仲裁登记（capture 是 busy 期的独占 stdin 持有者）。
+	releaseShadowCapture := beginChatInputShadowLevel(session, chatInputOwnerBusyCapture)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer func() {
 			queue.setExternalInputCaptureActive(false)
-			if session.KeyHandler != nil {
+			if session.KeyHandler != nil && !enforced {
 				session.KeyHandler.Resume()
 			}
+			// 单写者模式下这里经 syncChatInputArbitration 完成 Resume。
+			releaseShadowCapture()
 			close(done)
 		}()
 		for ctx.Err() == nil {

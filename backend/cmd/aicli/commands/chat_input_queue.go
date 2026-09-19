@@ -242,12 +242,12 @@ type chatInputQueue struct {
 	draftActive bool
 	readyText   string
 
-	queuedMu                  sync.Mutex
-	queuedFront               []chatQueuedInput
-	queuedPreview             []chatQueuedInput
+	queuedMu      sync.Mutex
+	queuedFront   []chatQueuedInput
+	queuedPreview []chatQueuedInput
 
-	commandGate               func(string) bool
-	routeFeedback             func(string, chatInputRouteResult)
+	commandGate   func(string) bool
+	routeFeedback func(string, chatInputRouteResult)
 
 	priorityResolvedElsewhere chan struct{}
 }
@@ -257,12 +257,12 @@ func newChatInputQueue(reader *bufio.Reader) *chatInputQueue {
 		reader = newChatInputReader()
 	}
 	return &chatInputQueue{
-		reader:                reader,
-		lines:                 make(chan chatQueuedInput, 32),
-		priorityLines:         make(chan chatQueuedInput, 4),
-		errs:                  make(chan error, 1),
-		readySignal:           make(chan struct{}, 1),
-		priorityCaptureSignal: make(chan struct{}, 1),
+		reader:                    reader,
+		lines:                     make(chan chatQueuedInput, 32),
+		priorityLines:             make(chan chatQueuedInput, 4),
+		errs:                      make(chan error, 1),
+		readySignal:               make(chan struct{}, 1),
+		priorityCaptureSignal:     make(chan struct{}, 1),
 		priorityResolvedElsewhere: make(chan struct{}, 1),
 	}
 }
@@ -863,7 +863,7 @@ func (q *chatInputQueue) readPriorityLine(ctx context.Context) (string, error) {
 }
 
 // readPriorityLineWithPrompt 等待一行优先级输入，并在等待期间可被外部信号
-//（priorityResolvedElsewhere）中断。调用方负责在哨兵错误上重试/跳过。
+// （priorityResolvedElsewhere）中断。调用方负责在哨兵错误上重试/跳过。
 func (q *chatInputQueue) readPriorityLineWithPrompt(ctx context.Context, prompt string) (string, error) {
 	if q == nil {
 		return "", io.EOF
@@ -1180,7 +1180,7 @@ func chatSlashCommandQueueSafe(text string) bool {
 	switch name {
 	case "queue":
 		return len(fields) < 2 || !strings.EqualFold(fields[1], "clear")
-	case "model", "help", "?", "status", "session", "history", "h":
+	case "provider", "model", "help", "?", "status", "session", "history", "h":
 		return true
 	case "debug":
 		// 只读诊断可排队；on/off/export 变更状态或写文件，忙时拒绝。

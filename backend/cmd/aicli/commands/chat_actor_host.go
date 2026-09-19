@@ -843,7 +843,12 @@ func (h *localChatRuntimeHost) beginWakeTurnRun() func() {
 		// 否则会继承前台 turn 冻结的 "Worked for" 完成摘要，状态行在整个
 		// wake turn 期间显示上一轮完成时间而 transcript 仍在继续输出。
 		bridge.BeginRunKind(chatRunKindInternal)
-		return bridge.EndRun
+		// 阶段 C：监督唤醒回合同样由 actor 驱动，必须像前台回合一样可被 TUI ESC 中断。
+		stopEscapeConsumer := startChatEscapeInterruptWatcher(h.BaseSession)
+		return func() {
+			stopEscapeConsumer()
+			bridge.EndRun()
+		}
 	}
 	return func() {}
 }
