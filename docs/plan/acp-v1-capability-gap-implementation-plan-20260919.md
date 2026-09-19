@@ -103,8 +103,8 @@ E2E PASS
 
 | 能力 | 关键证据（符号名） | 说明 |
 |---|---|---|
-| `agent_thought_chunk` 发射 | `agent_stdio_bridge.go` reasoning 事件分支；`types.go` `AgentThoughtChunk` | 推理流独立成折叠思考区，不再混入正文；**尚无单测/E2E 覆盖** |
-| `messageId`（实时路径） | `types.go` `WithMessageID`；`agent_stdio_bridge.go` `sessionUpdate()` | 同一回合的文本块共享 id，思考块用 `<id>_thought`；**回放路径未打标**（见 §4.7） |
+| `agent_thought_chunk` 发射 | `agent_stdio_bridge.go` reasoning 事件分支；`types.go` `AgentThoughtChunk`；回放路径 | 推理流独立成折叠思考区，不再混入正文；**单测 + E2E 已覆盖**（§4.6/§10.6） |
+| `messageId`（实时 + 回放） | `types.go` `WithMessageID`；`agent_stdio_bridge.go` `sessionUpdate()`；`agent_stdio.go` `replayACPSessionHistory` | 同一回合的文本块共享 id，思考块用 `<id>_thought`；**回放路径已打标**（§4.7/§10.6） |
 | legacy `session/set_mode` | `server.go` `handleSessionSetMode`；`agent_stdio_mode.go` `SetSessionMode` | 与 `mode` 配置项同源；prompt 进行中拒绝；未知取值 `invalid params` |
 | legacy `modes` 状态 | `types.go` `NewSessionResponse.Modes` / `SessionModeState`；`server.go` `handleSessionLoad`；`agent_stdio.go` `NewSession` | `session/new` 内联、`session/load` 经 `SessionModeProvider` 附带 |
 | `mode` category 配置项 | `types.go` `SessionConfigOptionCategoryMode`；`agent_stdio_mode.go` `acpModeConfigOption` | 固定四项（default / accept_edits / plan / bypass_permissions），无需目录 |
@@ -139,9 +139,9 @@ E2E PASS
 | legacy 模式状态 | `modes`（new/load 结果字段） | YES | `types.go` `SessionModeState`；`agent_stdio.go` `NewSession`；`server.go` `handleSessionLoad` | 与 `mode` 配置项同源（§2.5） |
 | 提示词 | `session/prompt` | YES | `server.go`；`agent_stdio.go` | — |
 | 取消 | `$/cancel_request` | YES | 见 `docs/acp/README.md` | — |
-| 通知：agent 文本 | `agent_message_chunk` | YES | bridge 与回放路径 | 实时路径已打 `messageId`；**回放路径未打标**（§4.7） |
+| 通知：agent 文本 | `agent_message_chunk` | YES | bridge 与回放路径 | 实时路径已打 `messageId`；回放路径已打标（§4.7） |
 | 通知：用户文本 | `user_message_chunk` | YES | `types.go` `UserMessageChunk`；`agent_stdio.go` 回放 | 仅用于 `session/load` 回放 |
-| 通知：思考 | `agent_thought_chunk` | YES | `types.go` `AgentThoughtChunk`；`agent_stdio_bridge.go` reasoning 分支 | 无单测/E2E 覆盖（§4.6） |
+| 通知：思考 | `agent_thought_chunk` | YES | `types.go` `AgentThoughtChunk`；bridge reasoning 分支；回放路径 | 单测 + E2E 已覆盖（§4.6/§10.6） |
 | 通知：工具调用 | `tool_call` / `tool_call_update` | YES | bridge | — |
 | 通知：计划 | `agent_plan` | NO | — | 见 §8 |
 | 通知：用量 | `usage_update` | NO | 常量与 marshal 已就绪（`used`/`size`/cost）；runtime 已产 `EventUsageUpdated` | **零发射点**（§4.2） |
@@ -296,12 +296,14 @@ prompt / load 等请求返回明确错误（`invalid params`）；重复 close �
 `agent_stdio_bridge.go` 的 reasoning 事件分支把推理流映射为 `agent_thought_chunk`，
 与正文严格分流（§2.5）。
 
-**剩余动作（验证收口）**：
+**验证收口（已完成，证据见 §10.6）**：
 
 - 命令层单测：reasoning 事件 → `agent_thought_chunk`，正文 chunk 不含推理文本；
   思考块 `messageId` 为 `<回合 id>_thought`。
 - E2E：mock provider 返回带 reasoning 的流，断言收到 `agent_thought_chunk` 且
   `agent_message_chunk` 不含该内容。
+- 回放路径：`agent_stdio.go` `replayACPSessionHistory` 在正文前重放留存推理为
+  `agent_thought_chunk`（id 为回放消息 id + `_thought`）。
 - 若实现与本节分流约定不一致（例如同时发 `assistant.message` 全文），以单测锁定行为。
 
 **成本**：低（仅补测试）。
@@ -313,11 +315,11 @@ prompt / load 等请求返回明确错误（`invalid params`）；重复 close �
 
 **当前代码事实**：`types.go` `WithMessageID`（仅对 user / agent / thought chunk 生效）；
 `agent_stdio_bridge.go` `sessionUpdate()` 在实时路径为同一回合的文本块注入共享 id、
-为思考块注入 `<id>_thought`。**回放路径未打标**：`agent_stdio.go` 的 `session/load`
-回放循环直接使用 `UserMessageChunk` / `AgentMessageChunk`。
+为思考块注入 `<id>_thought`；`agent_stdio.go` `replayACPSessionHistory` 在回放路径复用
+同一归组语义：优先取消息持久化的 canonical `metadata.message_id`，缺失时回退
+`replay_<index>`，思考块为 `<id>_thought`（见 §10.6）。
 
-**改动点**：若产品要求刷新后仍能归组，则为回放消息生成稳定 id（同一消息的多块共享），
-并保证与实时路径的归组语义一致；如需跨刷新稳定，需把 id 与消息存储关联，
+**改动点**：已实施（回放路径打标）；如需跨刷新稳定，需把 id 与消息存储关联，
 否则仅要求会话内稳定。
 
 **验收标准**：E2E：单轮多 chunk 的 assistant 回复中所有 `agent_message_chunk` 共享同一
@@ -510,6 +512,9 @@ gofmt -l <改动文件>                                        # 无输出
   - 收到 `agent_thought_chunk`，拼接文本 = `先确认需求。`，全部共享同一 `..._thought` id；
   - `agent_message_chunk` 拼接文本 = `hello chunk`，全部共享同一 id 且与 thought id 不同；
   - 答案块不包含推理文本。
+- 回放路径发射：`agent_stdio.go` `replayACPSessionHistory` 在正文前重放留存推理
+  （`internal/types/reasoning.go` `GetReasoningBlock` / `DisplayText`）；单测
+  `TestReplayACPSessionHistory_RestoresThoughtChunk` 锁定 user → thought → answer 顺序。
 
 **§4.7 `messageId` 回放路径收口**
 
@@ -520,7 +525,8 @@ gofmt -l <改动文件>                                        # 无输出
 - 单测 `TestReplayACPSessionHistory_TagsMessageIDs` 锁定：metadata id 原样透传、
   无 id 消息获得非空且互不重复的 fallback id。
 - E2E 同一脚本覆盖 `session/load` 回放：用户块与助手块均携带非空且互不相同的 messageId
-  （实测为持久化 metadata id，非 fallback）。
+  （实测为持久化 metadata id，非 fallback）；留存推理在正文前重放为 `agent_thought_chunk`，
+  拼接文本含 `先确认需求。`，共享同一 `<id>_thought` 且与助手块 id 不同。
 
 **顺带修复：流式空白保真**
 

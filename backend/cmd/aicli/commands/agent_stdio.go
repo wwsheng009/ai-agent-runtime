@@ -644,6 +644,16 @@ func replayACPSessionHistory(sessionID string, hostSess *acpHostSession, emit ac
 				return err
 			}
 		case "assistant":
+			// Restore the stored reasoning as a collapsible thought chunk before
+			// the answer text, mirroring the live agent_thought_chunk stream.
+			if block := finalReasoningBlock(&message); block != nil {
+				if reasoning := block.DisplayText(); reasoning != "" {
+					thought := acp.WithMessageID(acp.AgentThoughtChunk(reasoning), messageID+"_thought")
+					if err := emit.SessionUpdate(sessionID, thought); err != nil {
+						return err
+					}
+				}
+			}
 			if text := strings.TrimSpace(message.Content); text != "" {
 				if err := emit.SessionUpdate(sessionID, acp.WithMessageID(acp.AgentMessageChunk(text), messageID)); err != nil {
 					return err

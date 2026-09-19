@@ -9,12 +9,6 @@ import (
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 )
 
-// acpRestoredApprovalWaitTimeout bounds how long a prompt waits for the run a
-// restored approval resumes. That run is a real continuation of the interrupted
-// turn, so it may stream for minutes; the cap only exists so a wedged run cannot
-// block the prompt forever.
-const acpRestoredApprovalWaitTimeout = 5 * time.Minute
-
 // acpRestoredApprovalDecision is how a persisted approval should be resolved.
 type acpRestoredApprovalDecision int
 
@@ -117,30 +111,16 @@ func reconcileACPRestoredApproval(ctx context.Context, hostSess *acpHostSession,
 }
 
 // waitForACPRecoveredRun lets the run started by reconcileACPRestoredApproval
-// finish before the caller submits the user's next prompt. waitForAICLIActorReady
-// keeps its short diagnostic timeout for every other busy case (a control-plane
-// owner, a stale lease), so this wait is deliberately scoped to the recovery
-// this process just started.
+// settle before the caller submits the user's next prompt. The shared
+// actor-ready wait follows a live run instead of failing it on the stale-state
+// budget, so this only forwards cancellation and reports a busy state that no
+// in-process run backs (which the following prompt would fail on anyway).
 func waitForACPRecoveredRun(ctx context.Context, chat *ChatSession) {
 	actor, err := chatActorForSession(ctx, chat)
 	if err != nil || actor == nil {
 		return
 	}
-	deadline := time.Now().Add(acpRestoredApprovalWaitTimeout)
-	ticker := time.NewTicker(aicliActorReadyPollInterval)
-	defer ticker.Stop()
-	for {
-		if state, ok := actor.StateSummary(); !ok || !state.Busy() {
-			return
-		}
-		if !time.Now().Before(deadline) {
-			writeSessionDebugInfo(chat, "[acp-approval] recovered run still busy after "+acpRestoredApprovalWaitTimeout.String(), false)
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
+	if err := waitForAICLIActorReady(ctx, actor); err != nil {
+		writeSessionDebugInfo(chat, "[acp-approval] recovered run wait ended: "+err.Error(), false)
 	}
 }

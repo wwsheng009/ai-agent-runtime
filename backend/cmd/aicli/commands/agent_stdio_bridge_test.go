@@ -693,6 +693,60 @@ func TestReplayACPSessionHistory_TagsMessageIDs(t *testing.T) {
 	}
 }
 
+func TestReplayACPSessionHistory_RestoresThoughtChunk(t *testing.T) {
+	t.Parallel()
+
+	assistant := runtimetypes.Message{
+		Role:     "assistant",
+		Content:  "开始处理。",
+		Metadata: runtimetypes.Metadata{"message_id": "msg_a1"},
+	}
+	runtimetypes.SetReasoningBlock(assistant.Metadata, &runtimetypes.ReasoningBlock{
+		Format:     "stream_delta",
+		Summary:    "先梳理需求。",
+		Visibility: runtimetypes.ReasoningVisibilitySummary,
+	})
+
+	hostSess := &acpHostSession{
+		id: "sess_reason",
+		chat: &ChatSession{
+			Messages: []runtimetypes.Message{
+				{Role: "user", Content: "处理一下"},
+				assistant,
+			},
+		},
+	}
+	emit := &recordingACPEmitter{}
+	if err := replayACPSessionHistory("sess_reason", hostSess, emit); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	updates := emit.snapshot()
+	// user + restored thought + answer text
+	if len(updates) != 3 {
+		t.Fatalf("expected 3 updates, got %d: %+v", len(updates), updates)
+	}
+	thought := updates[1]
+	if thought.SessionUpdate != acp.SessionUpdateAgentThoughtChunk {
+		t.Fatalf("u1 = %q, want %q", thought.SessionUpdate, acp.SessionUpdateAgentThoughtChunk)
+	}
+	if thought.Content == nil || thought.Content.Text != "先梳理需求。" {
+		t.Fatalf("thought text = %+v", thought.Content)
+	}
+	answer := updates[2]
+	if answer.SessionUpdate != acp.SessionUpdateAgentMessageChunk ||
+		answer.Content == nil || answer.Content.Text != "开始处理。" {
+		t.Fatalf("answer = %+v", answer)
+	}
+	// The thought id derives from the answer id exactly like the live stream, so
+	// clients collapse the restored thinking section separately from the answer.
+	if answer.MessageID != "msg_a1" {
+		t.Fatalf("answer messageId = %q, want msg_a1", answer.MessageID)
+	}
+	if thought.MessageID != "msg_a1_thought" {
+		t.Fatalf("thought messageId = %q, want msg_a1_thought", thought.MessageID)
+	}
+}
+
 func TestACPSessionHost_LoadSessionInMemoryReplay(t *testing.T) {
 	t.Parallel()
 

@@ -10,7 +10,9 @@
 //     that it differs from the thought id, and that no answer chunk leaks
 //     reasoning text
 //  4. session/load, asserting replayed user/assistant chunks carry distinct
-//     non-empty messageIds (plan 4.7 replay closure)
+//     non-empty messageIds and that stored reasoning is replayed as
+//     agent_thought_chunk before the answer, with a "<id>_thought" messageId
+//     (plan 4.6/4.7 replay closure)
 //
 // Run: go run scripts/acp_e2e_thought_chunk.go <aicli.exe>
 package main
@@ -118,6 +120,15 @@ func updateText(params map[string]interface{}) string {
 	}
 	text, _ := content["text"].(string)
 	return text
+}
+
+func firstKindIndex(kinds []string, kind string) int {
+	for i, k := range kinds {
+		if k == kind {
+			return i
+		}
+	}
+	return -1
 }
 
 func main() {
@@ -341,12 +352,20 @@ providers:
 		fail("session/load: %v", err)
 	}
 	var replayUserIDs, replayAssistantIDs []string
+	var replayKinds []string
+	var replayThoughtText strings.Builder
+	replayThoughtIDs := map[string]bool{}
 	for _, params := range notifications.snapshot()[before:] {
-		switch updateField(params, "sessionUpdate") {
+		kind := updateField(params, "sessionUpdate")
+		replayKinds = append(replayKinds, kind)
+		switch kind {
 		case "user_message_chunk":
 			replayUserIDs = append(replayUserIDs, updateField(params, "messageId"))
 		case "agent_message_chunk":
 			replayAssistantIDs = append(replayAssistantIDs, updateField(params, "messageId"))
+		case "agent_thought_chunk":
+			replayThoughtText.WriteString(updateText(params))
+			replayThoughtIDs[updateField(params, "messageId")] = true
 		}
 	}
 	if len(replayUserIDs) == 0 {
@@ -363,7 +382,29 @@ providers:
 	if replayUserIDs[0] == replayAssistantIDs[0] {
 		fail("replay user/assistant share messageId %q", replayUserIDs[0])
 	}
-	fmt.Printf("OK session/load replay messageIds user=%v assistant=%v\n", replayUserIDs, replayAssistantIDs)
+	if got := replayThoughtText.String(); !strings.Contains(got, "先确认需求。") {
+		fail("replayed thought text = %q, want to contain 先确认需求。", got)
+	}
+	if strings.Contains(replayThoughtText.String(), "hello") {
+		fail("replayed thought chunk leaked answer text: %q", replayThoughtText.String())
+	}
+	if len(replayThoughtIDs) != 1 {
+		fail("replayed thought messageIds = %v, want one shared id", replayThoughtIDs)
+	}
+	for id := range replayThoughtIDs {
+		if id == "" || !strings.HasSuffix(id, "_thought") {
+			fail("replayed thought messageId = %q, want <turn>_thought", id)
+		}
+		if id == replayAssistantIDs[0] {
+			fail("replayed thought/assistant share messageId %q", id)
+		}
+	}
+	thoughtIdx := firstKindIndex(replayKinds, "agent_thought_chunk")
+	answerIdx := firstKindIndex(replayKinds, "agent_message_chunk")
+	if thoughtIdx < 0 || answerIdx < 0 || thoughtIdx > answerIdx {
+		fail("replayed thought chunk must precede answer (thought=%d answer=%d, kinds=%v)", thoughtIdx, answerIdx, replayKinds)
+	}
+	fmt.Printf("OK session/load replay messageIds user=%v assistant=%v thought=%v\n", replayUserIDs, replayAssistantIDs, replayThoughtIDs)
 
 	fmt.Println("E2E PASS")
 }
