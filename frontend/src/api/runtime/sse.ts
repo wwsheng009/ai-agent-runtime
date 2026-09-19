@@ -85,14 +85,29 @@ function nowMs() {
 /**
  * 让出到宏任务队列。MessageChannel 不受 `setTimeout(0)` 的 4ms 嵌套钳制，
  * 让出本身的代价可忽略；环境不支持时退回 setTimeout。
+ *
+ * 并发正确性（多流共享单例通道）：前台 runtime / 后台 runtime / chat 多个
+ * 消费循环可能同时命中让出预算。旧实现每次调用覆写 `port1.onmessage`，
+ * 后一次调用会顶掉前一次的 resolve —— 被顶掉的流永久停在 `await`（字节仍
+ * 到达、UI 静默停更），且该挂起不可恢复。这里改为等待队列：消息到达统一
+ * 唤醒全部等待者，并发调用互不丢失。
  */
-const yieldToEventLoop = (() => {
+export const yieldToEventLoop = (() => {
   let channel: MessageChannel | null = null;
+  const waiters: Array<() => void> = [];
+  const drainWaiters = () => {
+    for (const wake of waiters.splice(0, waiters.length)) {
+      wake();
+    }
+  };
   return () =>
     new Promise<void>((resolve) => {
       if (typeof MessageChannel === "function") {
-        channel ??= new MessageChannel();
-        channel.port1.onmessage = () => resolve();
+        if (!channel) {
+          channel = new MessageChannel();
+          channel.port1.onmessage = drainWaiters;
+        }
+        waiters.push(resolve);
         channel.port2.postMessage(null);
         return;
       }

@@ -4,6 +4,7 @@ import {
   consumeSseResponse,
   parseSsePayload,
   SseIdleTimeoutError,
+  yieldToEventLoop,
 } from "@/api/runtime/sse";
 
 function createSseResponse(chunks: string[]) {
@@ -209,6 +210,28 @@ describe("runtime sse helpers", () => {
       expect(onEvent).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  // 并发正确性（2026-09-18 现场）：多个 SSE 消费循环（前台 runtime / 后台
+  // runtime / chat）共享单例 MessageChannel 让出通道。旧实现每次调用覆写
+  // `port1.onmessage`，后一次调用顶掉前一次的 resolve——先调用者永久停在
+  // await（字节仍在到达，UI 静默停更）。回归锁：并发让出必须全部被唤醒。
+  it("并发 yieldToEventLoop：所有等待者都被唤醒，无丢唤醒", async () => {
+    const settled: number[] = [];
+    await Promise.all([
+      yieldToEventLoop().then(() => settled.push(1)),
+      yieldToEventLoop().then(() => settled.push(2)),
+      yieldToEventLoop().then(() => settled.push(3)),
+    ]);
+    expect(settled.sort((a, b) => a - b)).toEqual([1, 2, 3]);
+  });
+
+  // 让出通道必须可重入复用：顺序调用（前一次已兑现后再次调用）同样收敛，
+  // 避免「一次性通道」类修复引入第二种挂起。
+  it("yieldToEventLoop 顺序复用：跨多轮让出始终兑现", async () => {
+    for (let round = 0; round < 3; round += 1) {
+      await expect(yieldToEventLoop()).resolves.toBeUndefined();
     }
   });
 });
