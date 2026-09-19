@@ -525,7 +525,10 @@ function Get-ReasoningProjectionEvidence {
     # non-whitespace content while avoiding a false mismatch at those wraps.
     $normalizedDocument = [regex]::Replace($Document, '\s+', '')
     $normalizedMarker = [regex]::Replace($FirstMarker, '\s+', '')
-    $files = @(Get-ChildItem -LiteralPath $LogRoot -Recurse -File -Filter 'chat_*.json' -ErrorAction SilentlyContinue | Sort-Object FullName)
+    # 新布局为 <session-id>/chat/chat.json，兼容旧布局 <session-id>/chat_*.json。
+    $files = @(Get-ChildItem -LiteralPath $LogRoot -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like 'chat_*.json' -or $_.Name -eq 'chat.json' } |
+        Sort-Object FullName)
     foreach ($file in $files) {
         try {
             $payload = Get-Content -LiteralPath $file.FullName -Raw -Encoding utf8 | ConvertFrom-Json

@@ -64,6 +64,46 @@ function Get-LatestPath {
         Select-Object -First 1
 }
 
+# Get-ChatLogFiles 返回会话目录下的 chat 日志文件：新布局 <session-id>/chat/chat.json，
+# 兼容旧布局 <session-id>/chat_*.json 与日期分区扁平布局 <partition>/chat_*.json。
+function Get-ChatLogFiles {
+    param([Parameter(Mandatory = $true)][string]$Directory)
+    $files = @(Get-ChildItem -LiteralPath $Directory -File -Filter "chat_*.json" -ErrorAction SilentlyContinue)
+    $chatDir = Join-Path $Directory "chat"
+    $files += @(Get-ChildItem -LiteralPath $chatDir -File -Filter "chat*.json" -ErrorAction SilentlyContinue)
+    return $files
+}
+
+# Get-LatestChatSessionDir 返回最近写入的会话日志目录：
+# 新布局 chat-logs/YYYY/MM/DD/<session-id>/，兼容更早的嵌套/扁平目录。
+function Get-LatestChatSessionDir {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    if (-not (Test-Path $Root)) {
+        return $null
+    }
+    return Get-ChildItem -LiteralPath $Root -Directory -Recurse -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            $files = @(Get-ChatLogFiles -Directory $_.FullName)
+            if ($files.Count -eq 0) { return }
+            $lastWrite = ($files | Measure-Object -Property LastWriteTime -Maximum).Maximum
+            [pscustomobject]@{ Directory = $_; LastWriteTime = $lastWrite }
+        } |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1 |
+        ForEach-Object { $_.Directory }
+}
+
+# Get-FirstExistingPath 返回第一个存在的候选路径。
+function Get-FirstExistingPath {
+    param([string[]]$Candidates)
+    foreach ($candidate in $Candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+            return $candidate
+        }
+    }
+    return $null
+}
+
 function Invoke-SqliteQuery {
     param(
         [Parameter(Mandatory = $true)][string]$DatabasePath,
@@ -136,8 +176,9 @@ function Get-RecentBlockedEvidence {
     }
     $chatLogRoot = Join-Path $env:USERPROFILE ".aicli\chat-logs"
     if (Test-Path $chatLogRoot) {
-        $debugLogs = @(Get-ChildItem -Path $chatLogRoot -Recurse -Filter "*.debug.log" -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.LastWriteTime -ge $Since } |
+        # 新布局为 <session-id>/debug/debug.log，旧布局为 <session-id>.debug.log / <session-id>/debug.log。
+        $debugLogs = @(Get-ChildItem -Path $chatLogRoot -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { ($_.Name -eq "debug.log" -or $_.Name -like "*.debug.log") -and $_.LastWriteTime -ge $Since } |
             Sort-Object LastWriteTime -Descending)
         foreach ($log in $debugLogs) {
             $found = @(Test-FileContainsAny -Path $log.FullName -Patterns $Patterns)
@@ -286,7 +327,7 @@ function Add-LatestArtifactSummary {
     $chatLogRoot = Join-Path $env:USERPROFILE ".aicli\chat-logs"
     $latestSession = Get-LatestPath -Path $sessionRoot -Filter "session_*.json"
     $sessionHistoryDb = Join-Path $sessionRoot "session_history.sqlite"
-    $latestChatLog = Get-LatestPath -Path $chatLogRoot -Filter "*"
+    $latestChatLog = Get-LatestChatSessionDir -Root $chatLogRoot
     Add-ReportLine -Path $ReportPath -Text ""
     Add-ReportLine -Path $ReportPath -Text "最新 artifact:"
     if ($null -ne $latestSession) {
@@ -300,20 +341,31 @@ function Add-LatestArtifactSummary {
     }
     if ($null -ne $latestChatLog) {
         Add-ReportLine -Path $ReportPath -Text "- Chat Log Dir: $($latestChatLog.FullName)"
-        $chatFile = Get-LatestPath -Path $latestChatLog.FullName -Filter "chat_*.json"
-        if ($null -ne $chatFile) {
-            Add-ReportLine -Path $ReportPath -Text "- Chat Log File: $($chatFile.FullName)"
+        $chatFiles = @(Get-ChatLogFiles -Directory $latestChatLog.FullName | Sort-Object LastWriteTime -Descending)
+        if ($chatFiles.Count -gt 0) {
+            Add-ReportLine -Path $ReportPath -Text "- Chat Log File: $($chatFiles[0].FullName)"
         }
-        $debugFile = Join-Path $latestChatLog.FullName "debug.log"
-        if (Test-Path $debugFile) {
+        $debugFile = Get-FirstExistingPath -Candidates @(
+            (Join-Path (Join-Path $latestChatLog.FullName "debug") "debug.log"),
+            (Join-Path $latestChatLog.FullName "debug.log")
+        )
+        if ($null -ne $debugFile) {
             Add-ReportLine -Path $ReportPath -Text "- Debug Log File: $debugFile"
         }
-        $httpDir = Join-Path $latestChatLog.FullName "runtime-http"
-        if (Test-Path $httpDir) {
+        $httpDir = Get-FirstExistingPath -Candidates @(
+            (Join-Path $latestChatLog.FullName "http"),
+            (Join-Path $latestChatLog.FullName "runtime-http"),
+            "$($latestChatLog.FullName).http"
+        )
+        if ($null -ne $httpDir) {
             Add-ReportLine -Path $ReportPath -Text "- HTTP Artifact Dir: $httpDir"
         }
-        $shellDir = Join-Path $latestChatLog.FullName "local-shell"
-        if (Test-Path $shellDir) {
+        $shellDir = Get-FirstExistingPath -Candidates @(
+            (Join-Path $latestChatLog.FullName "shell"),
+            (Join-Path $latestChatLog.FullName "local-shell"),
+            "$($latestChatLog.FullName).shell"
+        )
+        if ($null -ne $shellDir) {
             Add-ReportLine -Path $ReportPath -Text "- Shell Artifact Dir: $shellDir"
         }
     } else {

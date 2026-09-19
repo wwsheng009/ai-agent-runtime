@@ -15,6 +15,7 @@ import {
   isRuntimeTrajectoryEvent,
   nextRecoveryAfter,
   runtimeEventToTrajectoryPush,
+  runtimeToolEventToTrajectoryPush,
   SUBAGENT_PROGRESS_EVENT_TYPE,
   subagentProgressEventToTrajectoryPush,
   TOOL_PROGRESS_EVENT_TYPE,
@@ -61,14 +62,92 @@ describe("trajectoryEventAction：可渲染 push / 过滤事件 skip 空洞 / �
     }
   });
 
-  it("被过滤但已持久化的事件（tool_started/context.profile.injected）→ skip 空洞", () => {
+  it("ACP 工具生命周期事件（tool_started/tool_finished/tool_receipt_recorded）→ push 工具行（按 tool_call_id 折叠）", () => {
+    // tool_started → tool_start，携带入参。
     const started = trajectoryEventAction({
       type: "tool_started",
       timestamp: "t",
-      payload: { seq: 4 },
+      tool_name: "shell",
+      payload: { seq: 4, tool_call_id: "call-1", input: { command: "ls" } },
     } as SessionRuntimeEvent);
-    expect(started).toEqual({ kind: "skip", seq: 4 });
+    expect(started.kind).toBe("push");
+    if (started.kind === "push") {
+      expect(started.push.kind).toBe("tool_start");
+      expect(started.push.payload.tool_call).toEqual({
+        id: "call-1",
+        name: "shell",
+      });
+      expect(started.push.payload.tool).toEqual({
+        name: "shell",
+        arguments: { command: "ls" },
+      });
+      expect(
+        (started.push.payload._event as { sequence: number }).sequence,
+      ).toBe(4);
+    }
 
+    // tool_finished → tool_end，携带输出。
+    const finished = trajectoryEventAction({
+      type: "tool_finished",
+      timestamp: "t",
+      tool_name: "shell",
+      payload: { seq: 5, tool_call_id: "call-1", output: "package.json" },
+    } as SessionRuntimeEvent);
+    expect(finished.kind).toBe("push");
+    if (finished.kind === "push") {
+      expect(finished.push.kind).toBe("tool_end");
+      expect(finished.push.payload.tool).toEqual({
+        name: "shell",
+        output_summary: "package.json",
+      });
+    }
+
+    // tool_receipt_recorded → tool_end，仅承载回执元信息（折叠进既有行）。
+    const receipt = trajectoryEventAction({
+      type: "tool_receipt_recorded",
+      timestamp: "t",
+      tool_name: "view",
+      payload: {
+        seq: 6,
+        tool_call_id: "call-2",
+        ok: true,
+        receipt: {
+          tool_call_id: "call-2",
+          tool_name: "view",
+          message_bytes: 3266,
+          message_sha256: "abc",
+        },
+      },
+    } as SessionRuntimeEvent);
+    expect(receipt.kind).toBe("push");
+    if (receipt.kind === "push") {
+      expect(receipt.push.kind).toBe("tool_end");
+      expect(receipt.push.payload.tool_call).toEqual({
+        id: "call-2",
+        name: "view",
+      });
+      expect(receipt.push.payload.tool).toEqual({ name: "view" });
+    }
+
+    // 失败回执 → 标记 error。
+    const failed = trajectoryEventAction({
+      type: "tool_receipt_recorded",
+      timestamp: "t",
+      tool_name: "shell",
+      payload: {
+        seq: 7,
+        tool_call_id: "call-3",
+        ok: false,
+        failure_category: "timeout",
+      },
+    } as SessionRuntimeEvent);
+    if (failed.kind === "push") {
+      expect(failed.push.kind).toBe("tool_end");
+      expect(failed.push.payload.tool.error).toBe("timeout");
+    }
+  });
+
+  it("被过滤但不属于工具生命周期的事件（context.profile.injected）→ skip 空洞", () => {
     const profile = trajectoryEventAction({
       type: "context.profile.injected",
       timestamp: "t",

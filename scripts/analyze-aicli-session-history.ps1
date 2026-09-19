@@ -136,31 +136,50 @@ function Convert-ToolResult {
     }
 }
 
+# Get-ChatLogFiles 返回会话目录下的 chat 日志文件：
+# 新布局 <session-id>/chat/chat.json（兼容 chat/chat_*.json 变体），
+# 旧布局 <session-id>/chat_*.json 与日期分区扁平布局 <partition>/chat_*.json。
+function Get-ChatLogFiles {
+    param([Parameter(Mandatory = $true)][string]$Directory)
+    $files = @(Get-ChildItem -LiteralPath $Directory -File -Filter "chat_*.json" -ErrorAction SilentlyContinue)
+    $chatDir = Join-Path $Directory "chat"
+    $files += @(Get-ChildItem -LiteralPath $chatDir -File -Filter "chat*.json" -ErrorAction SilentlyContinue)
+    return $files
+}
+
 if (-not (Test-Path -LiteralPath $Root)) {
     throw "aicli chat log directory does not exist: $Root"
 }
 
 $cutoff = if ($Days -gt 0) { (Get-Date).AddDays(-$Days) } else { [datetime]::MinValue }
 $candidateDirs = Get-ChildItem -LiteralPath $Root -Directory -Recurse -ErrorAction SilentlyContinue |
-    Where-Object {
-        $_.LastWriteTime -ge $cutoff -and
-        $null -ne (Get-ChildItem -LiteralPath $_.FullName -File -Filter "chat_*.json" -ErrorAction SilentlyContinue | Select-Object -First 1)
+    ForEach-Object {
+        $files = @(Get-ChatLogFiles -Directory $_.FullName)
+        if ($files.Count -eq 0) { return }
+        $lastWrite = ($files | Measure-Object -Property LastWriteTime -Maximum).Maximum
+        if ($lastWrite -lt $cutoff) { return }
+        [pscustomobject]@{ Directory = $_; LastWriteTime = $lastWrite; Files = $files }
     } |
     Sort-Object LastWriteTime -Descending
 
 $loadedSessions = [System.Collections.Generic.List[object]]::new()
 $emptySessionCount = 0
-foreach ($directory in $candidateDirs) {
+foreach ($candidate in $candidateDirs) {
+    $directory = $candidate.Directory
     $messages = [System.Collections.Generic.List[object]]::new()
     $statuses = [System.Collections.Generic.List[string]]::new()
     $providers = [System.Collections.Generic.List[string]]::new()
     $parseErrors = 0
-    foreach ($file in (Get-ChildItem -LiteralPath $directory.FullName -File -Filter "chat_*.json")) {
+    $sessionID = ""
+    foreach ($file in $candidate.Files) {
         try {
             $chat = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
         } catch {
             $parseErrors++
             continue
+        }
+        if (-not $sessionID) {
+            $sessionID = [string](Get-PropertyValue $chat "session_id" "")
         }
         $status = [string](Get-PropertyValue $chat "status" "")
         if ($status) { $statuses.Add($status) }
@@ -174,10 +193,11 @@ foreach ($directory in $candidateDirs) {
     $meaningful = @($messages | Where-Object {
         [string](Get-PropertyValue $_ "message_type" "") -in @("request", "response", "tool_call", "tool_result")
     }).Count -gt 0
+    $resolvedID = if ($sessionID) { $sessionID } else { $directory.Name }
     $loaded = [pscustomobject]@{
-        id = $directory.Name
+        id = $resolvedID
         path = $directory.FullName
-        last_write = $directory.LastWriteTime
+        last_write = $candidate.LastWriteTime
         meaningful = $meaningful
         parse_errors = $parseErrors
         statuses = @($statuses | Select-Object -Unique)
