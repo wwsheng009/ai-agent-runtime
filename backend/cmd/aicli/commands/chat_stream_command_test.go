@@ -11,6 +11,7 @@ import (
 
 func newStreamCommandSession(t *testing.T) (*ChatSession, string) {
 	t.Helper()
+	isolateWorkspacePrefsForTest(t)
 
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
@@ -46,14 +47,13 @@ aicli:
 
 func loadStreamPreference(t *testing.T, cfgPath string) *bool {
 	t.Helper()
-	loaded, err := agentconfig.InitGlobalConfig(cfgPath)
-	if err != nil {
-		t.Fatalf("reload config: %v", err)
-	}
-	if loaded.AICLI == nil || loaded.AICLI.Chat == nil {
+	// Workspace-scoped persistence (D5): /stream writes to the workspace
+	// preference file, not the global config.
+	prefs := loadWorkspaceChatPrefsForTest(t)
+	if prefs == nil {
 		return nil
 	}
-	return loaded.AICLI.Chat.Stream
+	return prefs.Stream
 }
 
 func TestParseStreamCommandRequest(t *testing.T) {

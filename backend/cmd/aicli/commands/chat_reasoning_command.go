@@ -242,16 +242,14 @@ func persistReasoningEffortCommandPreference(session *ChatSession) {
 // saveReasoningEffortCommandPreference persists the setting without selecting
 // a terminal projection. Unified command results surface any error in their
 // atomic cell; the legacy wrapper above retains its stderr warning.
+// Persistence is workspace-scoped (decision D5); the in-memory config mirror is
+// kept so the running session keeps consulting the same value.
 func saveReasoningEffortCommandPreference(session *ChatSession) error {
 	if session == nil || session.Config == nil {
 		return nil
 	}
-	configPath, err := ensureWritableAICLIConfigPath(session.Config, session.Config.ConfigFilePath)
-	if err != nil {
-		return fmt.Errorf("保存 /reasoning_effort 偏好失败: %w", err)
-	}
 	value := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort)
-	if _, err := config.UpdateAICLIChatPreferences(configPath, config.AICLIChatPreferenceUpdate{
+	if err := config.SaveWorkspaceChatPreferences(config.AICLIChatPreferenceUpdate{
 		ReasoningEffort: stringValuePtr(value),
 	}); err != nil {
 		return fmt.Errorf("保存 /reasoning_effort 偏好失败: %w", err)

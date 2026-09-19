@@ -135,17 +135,15 @@ func persistFastCommandPreference(session *ChatSession) {
 
 // saveFastCommandPreference persists the setting without emitting terminal
 // output. The structured command path owns diagnostics as a semantic result.
+// Persistence is workspace-scoped (decision D5); the in-memory config mirror is
+// kept so the running session keeps consulting the same value.
 func saveFastCommandPreference(session *ChatSession) error {
 	if session == nil || session.Config == nil {
 		return nil
 	}
-	configPath, err := ensureWritableAICLIConfigPath(session.Config, session.Config.ConfigFilePath)
-	if err != nil {
-		return fmt.Errorf("保存 /fast 偏好失败: %w", err)
-	}
 	value := session.FastMode
 	innerPtr := &value
-	if _, err := config.UpdateAICLIChatPreferences(configPath, config.AICLIChatPreferenceUpdate{
+	if err := config.SaveWorkspaceChatPreferences(config.AICLIChatPreferenceUpdate{
 		FastMode: &innerPtr,
 	}); err != nil {
 		return fmt.Errorf("保存 /fast 偏好失败: %w", err)

@@ -143,6 +143,10 @@ func TestPrepareChatRuntimeState_UsesPersistedStreamPreference(t *testing.T) {
 }
 
 func TestPersistChatStartupPreferences_SavesInteractiveStreamSelection(t *testing.T) {
+	// Isolate the home dir so workspace-scoped persistence never touches the
+	// real $HOME/.aicli/workspace directory when tests run in this repo cwd.
+	isolateWorkspacePrefsForTest(t)
+
 	cfg, cfgPath := testModelCommandConfig(t)
 	// Drop persisted defaults so the resolver triggers interactive prompts only for stream;
 	// provider/model come from config and reasoning is unsupported here, so only stream is interactive.
@@ -172,15 +176,28 @@ func TestPersistChatStartupPreferences_SavesInteractiveStreamSelection(t *testin
 
 	persistChatStartupPreferences(cfg, opts, nil, state)
 
+	// Workspace-scoped persistence (D5): the interactive choice lands in
+	// $HOME/.aicli/workspace/<hash>/chat-prefs.yaml, not the global config.
+	prefs, err := agentconfig.LoadWorkspaceChatPreferences()
+	if err != nil {
+		t.Fatalf("load workspace prefs: %v", err)
+	}
+	if prefs == nil || prefs.Stream == nil {
+		t.Fatalf("expected persisted workspace aicli.chat.stream, got %+v", prefs)
+	}
+	if *prefs.Stream != false {
+		t.Fatalf("expected persisted stream=false, got %v", *prefs.Stream)
+	}
+
 	loaded, err := agentconfig.InitGlobalConfig(cfgPath)
 	if err != nil {
 		t.Fatalf("reload config: %v", err)
 	}
-	if loaded.AICLI == nil || loaded.AICLI.Chat == nil || loaded.AICLI.Chat.Stream == nil {
-		t.Fatalf("expected persisted aicli.chat.stream, got %+v", loaded.AICLI)
+	if loaded.AICLI == nil || loaded.AICLI.Chat == nil {
+		t.Fatalf("expected config to remain loadable, got %+v", loaded.AICLI)
 	}
-	if *loaded.AICLI.Chat.Stream != false {
-		t.Fatalf("expected persisted stream=false, got %v", *loaded.AICLI.Chat.Stream)
+	if loaded.AICLI.Chat.Stream != nil {
+		t.Fatalf("global aicli.chat.stream should stay untouched by workspace-scoped persistence, got %v", *loaded.AICLI.Chat.Stream)
 	}
 }
 
@@ -322,7 +339,8 @@ func TestBootstrapChatSession_DoesNotPersistStartupPreferencesOnFailure(t *testi
 }
 
 func TestHandleCommand_ModelSwitchPersistsProviderModelAndReasoning(t *testing.T) {
-	cfg, cfgPath := testModelCommandConfig(t)
+	isolateWorkspacePrefsForTest(t)
+	cfg, _ := testModelCommandConfig(t)
 
 	session := &ChatSession{
 		ProviderName:    "alpha",
@@ -351,21 +369,18 @@ func TestHandleCommand_ModelSwitchPersistsProviderModelAndReasoning(t *testing.T
 		t.Fatal("expected runtime transport state to be refreshed")
 	}
 
-	loaded, err := agentconfig.InitGlobalConfig(cfgPath)
-	if err != nil {
-		t.Fatalf("reload config: %v", err)
+	loaded := loadWorkspaceChatPrefsForTest(t)
+	if loaded == nil {
+		t.Fatalf("expected persisted workspace aicli.chat preferences, got nil")
 	}
-	if loaded.AICLI == nil || loaded.AICLI.Chat == nil {
-		t.Fatalf("expected persisted aicli.chat section, got %+v", loaded.AICLI)
+	if loaded.DefaultProvider != "beta" {
+		t.Fatalf("expected persisted default_provider beta, got %q", loaded.DefaultProvider)
 	}
-	if loaded.AICLI.Chat.DefaultProvider != "beta" {
-		t.Fatalf("expected persisted default_provider beta, got %q", loaded.AICLI.Chat.DefaultProvider)
+	if loaded.DefaultModel != "beta-model" {
+		t.Fatalf("expected persisted default_model beta-model, got %q", loaded.DefaultModel)
 	}
-	if loaded.AICLI.Chat.DefaultModel != "beta-model" {
-		t.Fatalf("expected persisted default_model beta-model, got %q", loaded.AICLI.Chat.DefaultModel)
-	}
-	if loaded.AICLI.Chat.ReasoningEffort != "medium" {
-		t.Fatalf("expected persisted reasoning_effort medium, got %q", loaded.AICLI.Chat.ReasoningEffort)
+	if loaded.ReasoningEffort != "medium" {
+		t.Fatalf("expected persisted reasoning_effort medium, got %q", loaded.ReasoningEffort)
 	}
 }
 
@@ -569,7 +584,8 @@ func TestReloadChatConfigForModelCommandKeepsPreviousConfigOnParseError(t *testi
 }
 
 func TestHandleCommand_ModelClearReasoningPersistsPreference(t *testing.T) {
-	cfg, cfgPath := testModelCommandConfig(t)
+	isolateWorkspacePrefsForTest(t)
+	cfg, _ := testModelCommandConfig(t)
 
 	session := &ChatSession{
 		ProviderName:    "beta",
@@ -588,15 +604,12 @@ func TestHandleCommand_ModelClearReasoningPersistsPreference(t *testing.T) {
 		t.Fatalf("expected reasoning to be cleared, got %q", session.ReasoningEffort)
 	}
 
-	loaded, err := agentconfig.InitGlobalConfig(cfgPath)
-	if err != nil {
-		t.Fatalf("reload config: %v", err)
+	loaded := loadWorkspaceChatPrefsForTest(t)
+	if loaded == nil {
+		t.Fatalf("expected persisted workspace aicli.chat preferences, got nil")
 	}
-	if loaded.AICLI == nil || loaded.AICLI.Chat == nil {
-		t.Fatalf("expected persisted aicli.chat section, got %+v", loaded.AICLI)
-	}
-	if loaded.AICLI.Chat.ReasoningEffort != "" {
-		t.Fatalf("expected cleared reasoning_effort, got %q", loaded.AICLI.Chat.ReasoningEffort)
+	if loaded.ReasoningEffort != "" {
+		t.Fatalf("expected cleared reasoning_effort, got %q", loaded.ReasoningEffort)
 	}
 }
 

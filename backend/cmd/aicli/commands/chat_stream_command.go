@@ -134,17 +134,15 @@ func persistStreamCommandPreference(session *ChatSession) {
 // saveStreamCommandPreference persists the setting without choosing a terminal
 // projection. Structured commands turn an error into a command-cell warning;
 // the legacy wrapper above preserves the historic stderr projection.
+// Persistence is workspace-scoped (decision D5); the in-memory config mirror is
+// kept so the running session keeps consulting the same value.
 func saveStreamCommandPreference(session *ChatSession) error {
 	if session == nil || session.Config == nil {
 		return nil
 	}
-	configPath, err := ensureWritableAICLIConfigPath(session.Config, session.Config.ConfigFilePath)
-	if err != nil {
-		return fmt.Errorf("保存 /stream 偏好失败: %w", err)
-	}
 	value := session.Stream
 	innerPtr := &value
-	if _, err := config.UpdateAICLIChatPreferences(configPath, config.AICLIChatPreferenceUpdate{
+	if err := config.SaveWorkspaceChatPreferences(config.AICLIChatPreferenceUpdate{
 		Stream: &innerPtr,
 	}); err != nil {
 		return fmt.Errorf("保存 /stream 偏好失败: %w", err)

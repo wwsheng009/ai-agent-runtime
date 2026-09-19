@@ -13,6 +13,7 @@ import (
 
 func newFastCommandSession(t *testing.T, protocol string) (*ChatSession, string) {
 	t.Helper()
+	isolateWorkspacePrefsForTest(t)
 
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
@@ -48,14 +49,13 @@ aicli:
 
 func loadFastModePreference(t *testing.T, cfgPath string) *bool {
 	t.Helper()
-	loaded, err := agentconfig.InitGlobalConfig(cfgPath)
-	if err != nil {
-		t.Fatalf("reload config: %v", err)
-	}
-	if loaded.AICLI == nil || loaded.AICLI.Chat == nil {
+	// Workspace-scoped persistence (D5): /fast writes to the workspace
+	// preference file, not the global config.
+	prefs := loadWorkspaceChatPrefsForTest(t)
+	if prefs == nil {
 		return nil
 	}
-	return loaded.AICLI.Chat.FastMode
+	return prefs.FastMode
 }
 
 func TestParseFastCommandRequest(t *testing.T) {

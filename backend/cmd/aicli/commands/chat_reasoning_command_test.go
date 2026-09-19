@@ -141,7 +141,8 @@ func TestHandleCommand_ReasoningStatusAndInvalidArgument(t *testing.T) {
 }
 
 func TestHandleCommand_ReasoningEffortSetsAndPersistsPreference(t *testing.T) {
-	cfg, cfgPath := testModelCommandConfig(t)
+	isolateWorkspacePrefsForTest(t)
+	cfg, _ := testModelCommandConfig(t)
 	session := &ChatSession{
 		ProviderName:    "beta",
 		Provider:        cfg.Providers.Items["beta"],
@@ -162,12 +163,9 @@ func TestHandleCommand_ReasoningEffortSetsAndPersistsPreference(t *testing.T) {
 		t.Fatalf("expected max status, got %q", output)
 	}
 
-	loaded, err := agentconfig.InitGlobalConfig(cfgPath)
-	if err != nil {
-		t.Fatalf("reload config: %v", err)
-	}
-	if loaded.AICLI == nil || loaded.AICLI.Chat == nil || loaded.AICLI.Chat.ReasoningEffort != "max" {
-		t.Fatalf("expected persisted reasoning_effort max, got %+v", loaded.AICLI)
+	loaded := loadWorkspaceChatPrefsForTest(t)
+	if loaded == nil || loaded.ReasoningEffort != "max" {
+		t.Fatalf("expected persisted workspace reasoning_effort max, got %+v", loaded)
 	}
 	if cfg.AICLI == nil || cfg.AICLI.Chat == nil || cfg.AICLI.Chat.ReasoningEffort != "max" {
 		t.Fatalf("expected in-memory config reasoning_effort max, got %+v", cfg.AICLI)
