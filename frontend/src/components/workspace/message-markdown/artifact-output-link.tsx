@@ -38,9 +38,10 @@ export function ArtifactOutputLink({
 }) {
   const { t } = useTranslation("workspace");
   const [feedback, setFeedback] = useState<"copied" | "failed" | null>(null);
-  const resetTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(
-    null,
-  );
+  // 用 `number`：在 @types/node 与 DOM 的 `window = Window & typeof globalThis` 交叉下，
+  // `typeof window.setTimeout` 会被解析成 Node 的 `Timeout`，而调用点返回 DOM 的 `number`，
+  // 两者不一致会 TS2322；`useRef<number | null>` 与 `use-runtime-sessions-data.ts` 同口径。
+  const resetTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     return () => {

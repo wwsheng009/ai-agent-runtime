@@ -2,7 +2,7 @@
 // 并提供在新窗口打开 /usage/sessions/:sessionId 完整用量明细的链接。
 // 只读展示；数据获取与刷新语义见 hooks/workspace/use-session-usage.ts。
 
-import { AlertTriangleIcon, ArrowUpRightIcon, RefreshCwIcon } from "lucide-react";
+import { AlertTriangleIcon, ArrowUpRightIcon, ChartNoAxesCombinedIcon, RefreshCwIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
@@ -93,8 +93,12 @@ export function SessionUsagePanel({
     >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
+          <h2 className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
+            <ChartNoAxesCombinedIcon size={14} className="text-accent-primary" />
+            {t("usagePanel.title")}
+          </h2>
           <p
-            className="truncate text-xs text-muted-foreground"
+            className="mt-1 truncate text-xs text-muted-foreground"
             title={providerLine || t("usagePanel.unknownProvider")}
           >
             {providerLine || t("usagePanel.unknownProvider")}

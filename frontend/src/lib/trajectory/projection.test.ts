@@ -176,4 +176,31 @@ describe("摘要与双跑校验", () => {
     expect(spy).not.toHaveBeenCalled();
     spy.mockRestore();
   });
+
+  // 2026-09-18 live 实测回归：chat SSE 与 runtime 流是两条独立通道，被过滤
+  // 事件（tool_started/tool_finished 等）造成 seq 空洞、由 runtime 流后到桥接。
+  // 桥接完成前后到的工具帧停在 pending（设计行为），此时双跑校验看到的是
+  // 「轨迹滞后」而不是「投影分歧」——必须跳过告警，否则 finalize 会稳定打出
+  // `tools mismatch: trajectory=[]` 假阳性。
+  it("debugTrajectoryConsistency：乱序缓冲非空（等待桥接）时跳过告警", () => {
+    const snapshot = fullTurnSnapshot();
+    // 构造真实分歧：消息段多出一个轨迹尚未落地的工具行。
+    const mismatchedSegments: Parameters<typeof debugTrajectoryConsistency>[1] = [
+      ...trajectoryItemsToMessageSegments(snapshot.items),
+      {
+        type: "tool",
+        toolCallId: "call-pending",
+        name: "shell",
+        status: "finished",
+      },
+    ];
+    snapshot.pending[99] = makeTrajectoryEvent("tool_start", 99, {
+      type: "tool_call",
+      tool_call: { id: "call-pending", name: "shell" },
+    });
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    debugTrajectoryConsistency(snapshot, mismatchedSegments);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
 });

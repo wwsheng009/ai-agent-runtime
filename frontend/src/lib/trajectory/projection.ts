@@ -160,12 +160,25 @@ export function compareTrajectoryVsSegments(
   return differences;
 }
 
-/** DEV 双跑校验：不一致时 console.warn（幂等、无返回值）。 */
+/**
+ * DEV 双跑校验：不一致时 console.warn（幂等、无返回值）。
+ *
+ * 时序前提（2026-09-18 live 实测）：chat SSE 与 runtime 流是两条独立通道，
+ * 轨迹 store 只消费白名单帧；被过滤事件（tool_started/tool_finished 等）在
+ * seq 链上留下的空洞由 runtime 流后到并以 advanceCursor 桥接。桥接完成前，
+ * 后到的工具帧停留在 `pending` 乱序缓冲里（设计行为，不是丢失）——此时轨迹
+ * 投影天然滞后于消息段，对比只会产出假阳性（实测：finalize 报
+ * `tools mismatch: trajectory=[]`，桥接落地后一致）。因此校验必须等轨迹
+ * 静止（pending 清空）后再做判定。
+ */
 export function debugTrajectoryConsistency(
   snapshot: TrajectorySnapshot,
   segments: MessageSegment[],
 ) {
   if (typeof console === "undefined") {
+    return;
+  }
+  if (Object.keys(snapshot.pending).length > 0) {
     return;
   }
   const differences = compareTrajectoryVsSegments(snapshot, segments);
