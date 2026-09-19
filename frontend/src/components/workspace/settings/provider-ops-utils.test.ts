@@ -8,6 +8,7 @@ import type {
 
 import {
   buildProviderOpsRequestFromDraft,
+  canResolveProviderOpsTarget,
   groupProbeResultsByModel,
   isKnownProviderProtocol,
   joinProviderOpsWarnings,
@@ -25,6 +26,30 @@ import { createProviderDraftInput } from "./runtime-provider-domain-editor/draft
 function draftWith(overrides: Partial<ReturnType<typeof createProviderDraftInput>>) {
   return { ...createProviderDraftInput(null, "openai"), ...overrides };
 }
+
+describe("canResolveProviderOpsTarget", () => {
+  it("allows a saved provider with only a name (snapshot fills the rest)", () => {
+    expect(
+      canResolveProviderOpsTarget({ providerName: "deepseek", baseUrl: "" }),
+    ).toBe(true);
+  });
+
+  it("allows an unsaved draft once base_url is filled", () => {
+    expect(
+      canResolveProviderOpsTarget({
+        providerName: null,
+        baseUrl: " https://api.example.com ",
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects an unsaved draft without base_url (backend would 400)", () => {
+    expect(
+      canResolveProviderOpsTarget({ providerName: null, baseUrl: "   " }),
+    ).toBe(false);
+    expect(canResolveProviderOpsTarget({})).toBe(false);
+  });
+});
 
 describe("buildProviderOpsRequestFromDraft", () => {
   it("prefers the saved provider name and trims blank fields away", () => {

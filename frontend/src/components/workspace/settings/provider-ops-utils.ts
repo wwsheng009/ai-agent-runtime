@@ -39,6 +39,21 @@ export function buildProviderOpsRequestFromDraft(
   });
 }
 
+/**
+ * 是否具备可解析的操作目标（fetch / auto-import / probe 的前置条件）：
+ * 已保存 provider 可只传名称由后端快照补齐；未保存草稿必须给出 base_url，
+ * 否则后端既无快照可查、也无法探测协议，只会返回 "base_url is required"。
+ */
+export function canResolveProviderOpsTarget(input: {
+  baseUrl?: string | null;
+  providerName?: string | null;
+}): boolean {
+  if (String(input.providerName ?? "").trim()) {
+    return true;
+  }
+  return Boolean(String(input.baseUrl ?? "").trim());
+}
+
 /** 解析草稿里的 `headers` JSON；非对象或非法 JSON 时返回 undefined（沿用快照）。 */
 export function parseDraftHeaders(
   headersJson: string,

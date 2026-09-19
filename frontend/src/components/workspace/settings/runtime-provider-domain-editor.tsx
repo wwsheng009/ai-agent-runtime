@@ -30,6 +30,7 @@ import { ProviderTable } from "./runtime-provider-domain-editor/provider-table";
 import { type ProviderDraftInput } from "./runtime-provider-domain-form-utils";
 import {
   buildProviderOpsRequestFromDraft,
+  canResolveProviderOpsTarget,
   joinProviderOpsWarnings,
   normalizeProviderModelIDs,
   parseSupportedModelsText,
@@ -347,7 +348,7 @@ export function RuntimeProviderDomainEditor({
   }
 
   async function handleFetchModels() {
-    if (!draft.baseUrl.trim() && !editingProviderName) {
+    if (!canResolveProviderOpsTarget({ baseUrl: draft.baseUrl, providerName: editingProviderName })) {
       setModelsError(t("editor.providers.models.fetchRequiresBaseUrl"));
       return;
     }
@@ -391,7 +392,7 @@ export function RuntimeProviderDomainEditor({
   }
 
   async function handleAutoImport() {
-    if (!draft.baseUrl.trim() && !editingProviderName) {
+    if (!canResolveProviderOpsTarget({ baseUrl: draft.baseUrl, providerName: editingProviderName })) {
       setModelsError(t("editor.providers.models.autoImportRequiresBaseUrl"));
       return;
     }

@@ -10,6 +10,7 @@ import type { ProviderProbeResult } from "@/types/runtime";
 import { collectProbeSupportedModels } from "@/api/runtime";
 
 import {
+  canResolveProviderOpsTarget,
   groupProbeResultsByModel,
   resolveProbeModels,
   summarizeProbeResults,
@@ -54,7 +55,10 @@ export function ProviderModelsSection({
   const probeTargets = resolveProbeModels(assumedModelIDs, draft);
   // 新 provider（未保存）必须先有 base_url：否则后端既无法从快照补齐、也无法
   // 探测协议。已保存 provider 只传 name 即可，故仅在无名称时要求 base_url。
-  const hasResolvableTarget = Boolean(editingProviderName) || Boolean(draft.baseUrl.trim());
+  const hasResolvableTarget = canResolveProviderOpsTarget({
+    baseUrl: draft.baseUrl,
+    providerName: editingProviderName,
+  });
 
   return (
     <div className="rounded-card border border-border bg-surface-softer p-3">
