@@ -34,7 +34,7 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 		ctx = context.Background()
 	}
 	if session.IsInterrupted() {
-		return nil, fmt.Errorf("用户中断")
+		return nil, userInterruptError()
 	}
 
 	logScope := aicliLogScope{}
@@ -214,7 +214,7 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 	}
 
 	if session.IsInterrupted() {
-		return nil, fmt.Errorf("用户中断")
+		return nil, userInterruptError()
 	}
 	if err != nil {
 		if session.Logger != nil && session.Logger.logDir != "" {

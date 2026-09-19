@@ -23,6 +23,11 @@ type chatCommandOptions struct {
 	// Effective only when the resolved provider protocol is codex.
 	FastFlag               bool
 	FastChanged            bool
+	// Headless 是 --headless：无人值守启动。跳过所有启动期交互选择器
+	// (provider/model/reasoning/stream)，按 flag > 会话 > aicli.chat 配置 >
+	// providers 默认 > 第一个可用 provider 的顺序自动解析；没有任何可用
+	// provider 时直接报错退出而不是阻塞在交互选择器上。不影响 TUI/聊天循环。
+	Headless bool
 	NoInteractive          bool
 	CompatMode             bool   // --compat-mode：强制无 ANSI 的兼容控制台输入路径
 	InputMode              string // --input-mode：auto|system|custom；system 保留 Win7 conhost IME
@@ -137,6 +142,10 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		fastChanged = cmd.Flags().Changed("fast")
 	}
 	noInteractive, _ := cmd.Flags().GetBool("no-interactive")
+	headlessFlag := false
+	if cmd.Flags().Lookup("headless") != nil {
+		headlessFlag, _ = cmd.Flags().GetBool("headless")
+	}
 	compatMode, _ := cmd.Flags().GetBool("compat-mode")
 	inputModeFlag, _ := cmd.Flags().GetString("input-mode")
 	inputMode, err := normalizeChatConsoleInputMode(inputModeFlag)
@@ -238,6 +247,7 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		StreamChanged:          cmd.Flags().Changed("stream"),
 		FastFlag:               fastFlag,
 		FastChanged:            fastChanged,
+		Headless:               headlessFlag,
 		NoInteractive:          noInteractive,
 		CompatMode:             compatMode,
 		InputMode:              inputMode,
@@ -308,7 +318,7 @@ func resolveChatModelName(provider config.Provider, opts *chatCommandOptions, lo
 			modelName = storedModel
 		}
 	}
-	if modelName == "" && !opts.NoInteractive {
+	if modelName == "" && !opts.NoInteractive && !opts.Headless {
 		modelName = selectModelWithReader(provider, chatOptionInputReader(opts))
 	}
 	if modelName == "" {
@@ -323,7 +333,8 @@ func resolveChatStreamMode(opts *chatCommandOptions, loadedRuntimeSession *runti
 }
 
 // resolveChatFastModeChoice restores Fast mode preference.
-// Priority: --fast flag > session metadata > config aicli.chat.fast_mode > default false.
+// Priority: --fast flag > session metadata > workspace chat-prefs (D5) >
+// config aicli.chat.fast_mode > default false.
 // Fast is only effective for protocol=codex; callers gate request/status on protocol.
 func resolveChatFastModeChoice(cfg *config.Config, opts *chatCommandOptions, loadedRuntimeSession *runtimechat.Session) bool {
 	if opts != nil && opts.FastChanged {
@@ -332,6 +343,13 @@ func resolveChatFastModeChoice(cfg *config.Config, opts *chatCommandOptions, loa
 	if loadedRuntimeSession != nil {
 		if stored, ok := runtimeSessionContextBool(loadedRuntimeSession, chatRuntimeContextFastMode); ok {
 			return stored
+		}
+	}
+	// Workspace-scoped preference (D5): /fast persists here, so it must be
+	// restored here too or the write side is dead.
+	if prefs := resolveWorkspaceChatPreferences(); prefs != nil {
+		if saved, ok := workspacePreferenceBool(prefs, prefs.FastMode); ok {
+			return saved
 		}
 	}
 	if cfg != nil && cfg.AICLI != nil && cfg.AICLI.Chat != nil && cfg.AICLI.Chat.FastMode != nil {
@@ -355,11 +373,19 @@ func resolveChatStreamChoice(cfg *config.Config, opts *chatCommandOptions, loade
 		}
 	}
 
+	// Workspace-scoped preference (D5): a saved stream choice stops the
+	// interactive mode prompt from re-firing in this working directory.
+	if prefs := resolveWorkspaceChatPreferences(); prefs != nil {
+		if saved, ok := workspacePreferenceBool(prefs, prefs.Stream); ok {
+			return saved, chatPreferenceSourceWorkspace
+		}
+	}
+
 	if cfg != nil && cfg.AICLI != nil && cfg.AICLI.Chat != nil && cfg.AICLI.Chat.Stream != nil {
 		return *cfg.AICLI.Chat.Stream, chatPreferenceSourceConfig
 	}
 
-	if loadedRuntimeSession == nil && !opts.NoInteractive {
+	if loadedRuntimeSession == nil && !opts.NoInteractive && !opts.Headless {
 		return selectStreamModeWithReader(chatOptionInputReader(opts)), chatPreferenceSourceInteractive
 	}
 

@@ -18,7 +18,7 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 	// SK-3：每回合重置技能调用事件的回合内去重（显式 pin 与点名函数只发一条）。
 	session.resetSkillInvocationObservation()
 	if session.IsInterrupted() {
-		return "", fmt.Errorf("用户中断")
+		return "", userInterruptError()
 	}
 	// Codex-aligned: only notify when the agent is truly waiting for the user.
 	// Queued follow-up input starts the next turn immediately, so a completion

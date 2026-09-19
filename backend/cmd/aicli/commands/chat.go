@@ -540,7 +540,8 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 
 	// Resolve folder trust before profile/plugin discovery so project-scope
 	// plugins/hooks/MCP are gated consistently for this process.
-	ensureProcessFolderTrust(opts.TrustGrant, !opts.NoInteractive)
+	// headless 无人值守启动时不弹交互式信任确认。
+	ensureProcessFolderTrust(opts.TrustGrant, !opts.NoInteractive && !opts.Headless)
 
 	if restoreLogger := suppressChatConsoleLogger(cfg, opts); restoreLogger != nil {
 		defer restoreLogger()

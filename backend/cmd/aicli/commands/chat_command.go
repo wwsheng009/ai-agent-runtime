@@ -88,6 +88,7 @@ func registerChatFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolP("stream", "s", false, "使用流式输出")
 	cmd.Flags().Bool("fast", false, "启用 Codex Fast 模式（service_tier=priority；仅 protocol=codex 生效）")
 	cmd.Flags().Bool("no-interactive", false, "非交互模式（单次请求）")
+	cmd.Flags().Bool("headless", false, "无人值守启动：跳过 provider/model/reasoning/stream 交互选择器，自动按配置解析；无可用 provider 时报错退出（TUI 仍正常运行，适合后台/远程调用场景）")
 	cmd.Flags().Bool("compat-mode", false, "强制兼容模式：不走 TUI，使用原生控制台行输入（无 ANSI 降级路径；Win7 等终端使用）")
 	cmd.Flags().String("input-mode", chatConsoleInputAuto, "兼容控制台输入模式（auto|system|custom；auto 优先 ReadConsoleW，system 保留 Win7 中文输入法）")
 	cmd.Flags().Bool("debug", false, "输出诊断调试信息到 stderr（兼容控制台输入/重绘/按键等）")

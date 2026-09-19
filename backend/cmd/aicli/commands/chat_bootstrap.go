@@ -173,7 +173,7 @@ func prepareChatRuntimeState(cfg *config.Config, opts *chatCommandOptions, loade
 		}
 	}
 
-	requestedModel, modelSource := resolveChatModelChoice(cfg, provider, opts, loadedRuntimeSession)
+	requestedModel, modelSource := resolveChatModelChoice(cfg, provider, providerSource, opts, loadedRuntimeSession)
 	finalContext, details, err := resolveProviderExecutionContext(cfg, providerContext.ProviderName, requestedModel)
 	if err != nil {
 		return nil, details, err
