@@ -13,6 +13,7 @@ const (
 	MethodSessionPrompt = "session/prompt"
 	MethodSessionCancel = "session/cancel"
 	MethodSessionLoad   = "session/load" // advertised only when loadSession=true
+	MethodCancelRequest = "$/cancel_request"
 )
 
 // Client-side methods (agent → client).
@@ -34,6 +35,7 @@ const (
 const (
 	SessionUpdateAgentMessageChunk = "agent_message_chunk"
 	SessionUpdateUserMessageChunk  = "user_message_chunk"
+	SessionUpdateAgentThoughtChunk = "agent_thought_chunk"
 	SessionUpdateToolCall          = "tool_call"
 	SessionUpdateToolCallUpdate    = "tool_call_update"
 	SessionUpdatePlan              = "plan"
@@ -46,7 +48,6 @@ const (
 	ToolCallStatusInProgress = "in_progress"
 	ToolCallStatusCompleted  = "completed"
 	ToolCallStatusFailed     = "failed"
-	ToolCallStatusCancelled  = "cancelled"
 )
 
 // Tool kinds (ACP taxonomy).
@@ -166,6 +167,13 @@ type CancelNotification struct {
 	SessionID string `json:"sessionId"`
 }
 
+// CancelRequestParams is the params for the JSON-RPC $/cancel_request
+// notification used to cancel an in-flight request by id (both directions).
+type CancelRequestParams struct {
+	// RequestID is the raw JSON id of the request being cancelled.
+	RequestID json.RawMessage `json:"requestId,omitempty"`
+}
+
 // LoadSessionRequest is the params for session/load.
 // Spec: agent replays conversation via session/update, then returns null result.
 type LoadSessionRequest struct {
@@ -198,12 +206,25 @@ type SessionUpdateNotification struct {
 	Update    SessionUpdate `json:"update"`
 }
 
+// PlanEntry is one entry of a plan session update.
+type PlanEntry struct {
+	Content  string `json:"content"`
+	Priority string `json:"priority"` // high | medium | low
+	Status   string `json:"status"`   // pending | in_progress | completed
+}
+
+// UsageCost is the optional cost payload of usage_update.
+type UsageCost struct {
+	Amount   float64 `json:"amount"`
+	Currency string  `json:"currency"`
+}
+
 // SessionUpdate is a flexible session update payload.
 // sessionUpdate discriminates the variant; optional fields are filled per kind.
 type SessionUpdate struct {
 	SessionUpdate string `json:"sessionUpdate"`
 
-	// agent_message_chunk / user_message_chunk
+	// agent_message_chunk / user_message_chunk / agent_thought_chunk
 	MessageID string        `json:"messageId,omitempty"`
 	Content   *ContentBlock `json:"content,omitempty"`
 
@@ -217,16 +238,20 @@ type SessionUpdate struct {
 	Locations   []ToolCallLocation `json:"locations,omitempty"`
 	ToolContent []ToolCallContent  `json:"-"` // encoded as "content" for tool updates
 
+	// plan
+	Entries []PlanEntry `json:"entries,omitempty"`
+
 	// usage_update
-	Used int64 `json:"used,omitempty"`
-	Size int64 `json:"size,omitempty"`
+	Used int64      `json:"used,omitempty"`
+	Size int64      `json:"size,omitempty"`
+	Cost *UsageCost `json:"cost,omitempty"`
 }
 
 // MarshalJSON encodes SessionUpdate with the correct content field shape.
 // Message chunks use a single ContentBlock; tool updates use a content array.
 func (u SessionUpdate) MarshalJSON() ([]byte, error) {
 	switch u.SessionUpdate {
-	case SessionUpdateAgentMessageChunk, SessionUpdateUserMessageChunk:
+	case SessionUpdateAgentMessageChunk, SessionUpdateUserMessageChunk, SessionUpdateAgentThoughtChunk:
 		aux := struct {
 			SessionUpdate string        `json:"sessionUpdate"`
 			MessageID     string        `json:"messageId,omitempty"`
@@ -235,6 +260,31 @@ func (u SessionUpdate) MarshalJSON() ([]byte, error) {
 			SessionUpdate: u.SessionUpdate,
 			MessageID:     u.MessageID,
 			Content:       u.Content,
+		}
+		return json.Marshal(aux)
+	case SessionUpdatePlan:
+		aux := struct {
+			SessionUpdate string      `json:"sessionUpdate"`
+			Entries       []PlanEntry `json:"entries"`
+		}{
+			SessionUpdate: u.SessionUpdate,
+			Entries:       u.Entries,
+		}
+		if aux.Entries == nil {
+			aux.Entries = []PlanEntry{}
+		}
+		return json.Marshal(aux)
+	case SessionUpdateUsage:
+		aux := struct {
+			SessionUpdate string     `json:"sessionUpdate"`
+			Used          int64      `json:"used"`
+			Size          int64      `json:"size"`
+			Cost          *UsageCost `json:"cost,omitempty"`
+		}{
+			SessionUpdate: u.SessionUpdate,
+			Used:          u.Used,
+			Size:          u.Size,
+			Cost:          u.Cost,
 		}
 		return json.Marshal(aux)
 	case SessionUpdateToolCall, SessionUpdateToolCallUpdate:

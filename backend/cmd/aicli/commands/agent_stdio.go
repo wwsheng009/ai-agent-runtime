@@ -11,8 +11,8 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
-	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/acp"
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
@@ -100,14 +100,14 @@ type acpSessionHost struct {
 }
 
 type acpHostSession struct {
-	id          string
-	chat        *ChatSession
-	cleanup     func()
-	sessionMgr  *runtimechat.SessionManager
-	bridge      *acpEventBridge
-	mu          sync.Mutex
-	prompting   bool
-	finalError  error
+	id         string
+	chat       *ChatSession
+	cleanup    func()
+	sessionMgr *runtimechat.SessionManager
+	bridge     *acpEventBridge
+	mu         sync.Mutex
+	prompting  bool
+	finalError error
 }
 
 func newACPSessionHost(cfg *config.Config, opts *agentStdioOptions) *acpSessionHost {
@@ -232,6 +232,18 @@ func (h *acpSessionHost) Prompt(ctx context.Context, req acp.PromptRequest, emit
 	defer cancel()
 	chat.cancelCtx = promptCtx
 	chat.cancelFunc = cancel
+	// Cancel may also arrive via $/cancel_request (conn aborts the inbound
+	// handler ctx) without ever calling backend.Cancel; forward that onto the
+	// chat session's interrupt machinery so the in-flight stream actually
+	// aborts instead of running to end_turn.
+	stopInterruptWatch := context.AfterFunc(promptCtx, func() {
+		chat.Interrupt()
+	})
+	defer stopInterruptWatch()
+	// Bind the prompt context so a pending permission RPC is aborted on cancel.
+	if hostSess.bridge != nil {
+		hostSess.bridge.BeginPromptCtx(promptCtx)
+	}
 
 	// Ensure runtime event bridge is live and prefers ACP approvals.
 	// Stdout is reserved for NDJSON; silence console writers for this turn.
@@ -246,6 +258,11 @@ func (h *acpSessionHost) Prompt(ctx context.Context, req acp.PromptRequest, emit
 
 	response, err := sendMessage(chat, text)
 	if err != nil {
+		// Close any tool calls left open by the cancelled turn so the client
+		// never sees a dangling in_progress tool_call.
+		if hostSess.bridge != nil {
+			hostSess.bridge.EmitCancelledToolTerminals()
+		}
 		hostSess.finalError = err
 		if isACPCancelError(err) || chat.IsInterrupted() || promptCtx.Err() != nil {
 			return acp.PromptResponse{StopReason: acp.StopReasonCancelled}, nil

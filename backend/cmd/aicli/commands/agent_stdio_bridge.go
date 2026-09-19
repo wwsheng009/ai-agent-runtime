@@ -27,8 +27,14 @@ type acpEventBridge struct {
 
 	// toolCallIDs maps internal keys -> stable toolCallId for updates.
 	toolCallIDs map[string]string
+	// openToolCalls tracks tool calls that have started but not finished, so
+	// cancellation can emit proper failed terminal updates for them.
+	openToolCalls map[string]bool
 	// emittedAssistant is true once any agent_message_chunk was sent.
 	emittedAssistant bool
+	// promptCtx is the in-flight prompt context; permission requests bind to
+	// it so a session cancel also aborts a pending request_permission RPC.
+	promptCtx context.Context
 }
 
 func newACPEventBridge(sessionID string) *acpEventBridge {
@@ -59,6 +65,17 @@ func (b *acpEventBridge) BeginPrompt(sessionID string, emit acp.Emitter) {
 	b.emit = emit
 	b.emittedAssistant = false
 	b.toolCallIDs = make(map[string]string)
+	b.openToolCalls = make(map[string]bool)
+}
+
+// BeginPromptCtx binds the in-flight prompt context for approval cancellation.
+func (b *acpEventBridge) BeginPromptCtx(ctx context.Context) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.promptCtx = ctx
 }
 
 func (b *acpEventBridge) EndPrompt() {
@@ -68,6 +85,7 @@ func (b *acpEventBridge) EndPrompt() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.emit = nil
+	b.promptCtx = nil
 }
 
 func (b *acpEventBridge) HasEmittedAssistant() bool {
@@ -98,6 +116,7 @@ func (b *acpEventBridge) AskApproval(approval *runtimechat.ApprovalRequest, cont
 	b.mu.Lock()
 	perm := b.perm
 	sessionID := b.sessionID
+	ctx := b.promptCtx
 	b.mu.Unlock()
 	if perm == nil {
 		return chatApprovalAnswer{}, fmt.Errorf("acp permission requester not configured")
@@ -149,7 +168,14 @@ func (b *acpEventBridge) AskApproval(approval *runtimechat.ApprovalRequest, cont
 		Options: acp.DefaultPermissionOptions(),
 	}
 
-	result, err := perm.RequestPermission(context.Background(), params)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	result, err := perm.RequestPermission(ctx, params)
+	if ctx.Err() != nil {
+		// Prompt cancelled while the permission was pending.
+		return chatApprovalAnswer{}, ctx.Err()
+	}
 	if err != nil {
 		return chatApprovalAnswer{}, err
 	}
@@ -199,6 +225,7 @@ func (b *acpEventBridge) HandleRuntimeEvent(event runtimeevents.Event) {
 		kind := acpToolKindForName(toolName)
 		_ = b.sessionUpdate(acp.ToolCallStarted(id, toolName, kind, rawInput))
 		_ = b.sessionUpdate(acp.ToolCallProgress(id, acp.ToolCallStatusInProgress))
+		b.markToolOpen(id, true)
 
 	case toolprotocol.EventTypeProgress:
 		toolName := runtimeEventToolName(event)
@@ -241,6 +268,7 @@ func (b *acpEventBridge) HandleRuntimeEvent(event runtimeevents.Event) {
 			content = append(content, acp.TextToolContent(errMsg))
 		}
 		_ = b.sessionUpdate(acp.ToolCallFinished(id, status, rawOutput, content))
+		b.markToolOpen(id, false)
 
 	case runtimechat.EventAssistantDelta, "assistant.delta":
 		delta := payloadStringValue(event.Payload["delta"])
@@ -274,6 +302,7 @@ func (b *acpEventBridge) handleChatCoreToolEvent(event runtimechatcore.ChatEvent
 	case "tool_requested":
 		_ = b.sessionUpdate(acp.ToolCallStarted(id, event.ToolName, kind, event.Arguments))
 		_ = b.sessionUpdate(acp.ToolCallProgress(id, acp.ToolCallStatusInProgress))
+		b.markToolOpen(id, true)
 	case "tool_result":
 		status := acp.ToolCallStatusCompleted
 		if !event.Success || strings.TrimSpace(event.Error) != "" {
@@ -291,6 +320,52 @@ func (b *acpEventBridge) handleChatCoreToolEvent(event runtimechatcore.ChatEvent
 			content = append(content, acp.TextToolContent(event.Error))
 		}
 		_ = b.sessionUpdate(acp.ToolCallFinished(id, status, rawOutput, content))
+		b.markToolOpen(id, false)
+	}
+}
+
+func (b *acpEventBridge) markToolOpen(toolCallID string, open bool) {
+	if b == nil || toolCallID == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.openToolCalls == nil {
+		b.openToolCalls = make(map[string]bool)
+	}
+	if open {
+		b.openToolCalls[toolCallID] = true
+	} else {
+		delete(b.openToolCalls, toolCallID)
+	}
+}
+
+// EmitCancelledToolTerminals closes any tool calls still open when a prompt is
+// cancelled. ACP has no "cancelled" tool status, so the spec-compliant terminal
+// state is "failed" with a cancellation notice in the content.
+func (b *acpEventBridge) EmitCancelledToolTerminals() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	ids := make([]string, 0, len(b.openToolCalls))
+	for id := range b.openToolCalls {
+		ids = append(ids, id)
+	}
+	b.openToolCalls = make(map[string]bool)
+	emit := b.emit
+	sessionID := b.sessionID
+	b.mu.Unlock()
+	if emit == nil || sessionID == "" {
+		return
+	}
+	for _, id := range ids {
+		_ = emit.SessionUpdate(sessionID, acp.ToolCallFinished(
+			id,
+			acp.ToolCallStatusFailed,
+			"cancelled by user",
+			[]acp.ToolCallContent{acp.TextToolContent("cancelled by user")},
+		))
 	}
 }
 

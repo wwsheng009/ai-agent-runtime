@@ -88,6 +88,11 @@ type Conn struct {
 	pendingMu sync.Mutex
 	pending   map[string]chan Message
 
+	// inboundCancels tracks context cancel funcs for in-flight inbound requests,
+	// keyed by the raw JSON id, so the peer can abort them via $/cancel_request.
+	inboundCancelsMu sync.Mutex
+	inboundCancels   map[string]context.CancelFunc
+
 	nextID atomic.Uint64
 
 	// inFlight tracks async handler goroutines for clean shutdown.
@@ -101,9 +106,10 @@ type Conn struct {
 // NewConn creates a Conn over r/w. w should be stdout for ACP agents.
 func NewConn(r io.Reader, w io.Writer) *Conn {
 	return &Conn{
-		reader:  bufio.NewReader(r),
-		writer:  w,
-		pending: make(map[string]chan Message),
+		reader:         bufio.NewReader(r),
+		writer:         w,
+		pending:        make(map[string]chan Message),
+		inboundCancels: make(map[string]context.CancelFunc),
 	}
 }
 
@@ -189,14 +195,41 @@ func (c *Conn) dispatch(ctx context.Context, msg Message) {
 	// Never block the read loop on handlers. session/prompt can run for a long
 	// time and may itself Call the peer (request_permission); cancel and
 	// response demux must keep flowing on Serve.
+	// $/cancel_request is a notification: match by id and abort the in-flight
+	// inbound request without spawning a handler goroutine.
+	if msg.Method == MethodCancelRequest {
+		var params CancelRequestParams
+		if len(msg.Params) > 0 {
+			_ = json.Unmarshal(msg.Params, &params)
+		}
+		c.cancelInbound(idKey(params.RequestID))
+		return
+	}
 	c.inFlight.Add(1)
 	go func() {
 		defer c.inFlight.Done()
-		c.runHandler(ctx, msg)
+		c.runHandler(ctx, msg, c)
 	}()
 }
 
-func (c *Conn) runHandler(ctx context.Context, msg Message) {
+func (c *Conn) runHandler(parent context.Context, msg Message, conn *Conn) {
+	// Derive a per-request context so the peer can cancel this handler via
+	// $/cancel_request; it is released when the handler finishes.
+	ctx, cancel := context.WithCancel(parent)
+	if !msg.IsNotification() {
+		key := idKey(msg.ID)
+		conn.inboundCancelsMu.Lock()
+		conn.inboundCancels[key] = cancel
+		conn.inboundCancelsMu.Unlock()
+		defer func() {
+			conn.inboundCancelsMu.Lock()
+			delete(conn.inboundCancels, key)
+			conn.inboundCancelsMu.Unlock()
+			cancel()
+		}()
+	} else {
+		defer cancel()
+	}
 	result, rpcErr := c.handler(ctx, msg)
 	if msg.IsNotification() {
 		return
@@ -223,6 +256,18 @@ func (c *Conn) runHandler(ctx context.Context, msg Message) {
 		ID:      msg.ID,
 		Result:  raw,
 	})
+}
+
+func (c *Conn) cancelInbound(key string) {
+	if key == "" || c == nil {
+		return
+	}
+	c.inboundCancelsMu.Lock()
+	cancel, ok := c.inboundCancels[key]
+	c.inboundCancelsMu.Unlock()
+	if ok && cancel != nil {
+		cancel()
+	}
 }
 
 func marshalResult(result interface{}) (json.RawMessage, error) {
@@ -304,6 +349,16 @@ func (c *Conn) Call(ctx context.Context, method string, params interface{}, resu
 
 	select {
 	case <-ctx.Done():
+		// Best-effort, non-blocking: tell the peer to stop working on this
+		// request. Never block the caller on the wire — a stalled peer must
+		// not prevent Call from returning ctx.Err().
+		go func() {
+			_ = c.writeMessage(Message{
+				JSONRPC: JSONRPCVersion,
+				Method:  MethodCancelRequest,
+				Params:  mustJSON(CancelRequestParams{RequestID: idRaw}),
+			})
+		}()
 		return ctx.Err()
 	case msg, ok := <-ch:
 		if !ok {
@@ -322,6 +377,14 @@ func (c *Conn) Call(ctx context.Context, method string, params interface{}, resu
 	}
 }
 
+func mustJSON(v interface{}) json.RawMessage {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return json.RawMessage("null")
+	}
+	return raw
+}
+
 func marshalParams(params interface{}) (json.RawMessage, error) {
 	if params == nil {
 		return nil, nil
@@ -336,8 +399,19 @@ func (c *Conn) allocateID() uint64 {
 	return c.nextID.Add(1)
 }
 
+// idKey normalizes a JSON-RPC id into a match key. JSON-RPC ids may arrive as
+// numbers or strings; peers (and the ACP $/cancel_request notification) must
+// use the same value, but some clients stringify numeric ids. Unquote JSON
+// string forms so `"12"` and `12` resolve to the same in-flight request.
 func idKey(id json.RawMessage) string {
-	return string(bytes.TrimSpace(id))
+	trimmed := string(bytes.TrimSpace(id))
+	if len(trimmed) >= 2 && trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal([]byte(trimmed), &s); err == nil {
+			return s
+		}
+	}
+	return trimmed
 }
 
 func (c *Conn) writeMessage(msg Message) error {
