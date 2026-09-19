@@ -106,8 +106,9 @@ aicli chat --pprof
 - [ ] 名称：编辑已有 provider 时只读，新增时可输入。
 - [ ] API Key：明文不回传，输入框始终为空；状态行按凭据来源显示（Key Store / OAuth / 密钥池 / 内联 / 未配置）+ 掩码回显；已保存时显示"清除"按钮。
 - [ ] Base URL / API Path / 转发 URL / 默认模型：回显与保存一致。
-- [ ] 支持模型 textarea："获取模型列表"按钮调 `POST /web/api/config/providers/fetch-models` 并合并结果。
-- [ ] Reasoning 编辑器：保存模型列表后按模型逐行生成，编辑不丢草稿。
+- [ ] 支持模型 textarea："获取模型列表"按钮调 `POST /web/api/config/providers/fetch-models`，**整体覆盖**原支持模型列表（去重保序）；网关未返回可合并模型时保留原列表并提示。
+- [ ] Reasoning 编辑器：获取模型列表后按 `model_metadata`（`/models` 元数据 → model card → 协议默认值重匹配结果）整体覆盖各模型 reasoning 配置，未命中元数据的模型清空旧配置；保存模型列表后按模型逐行生成。
+- [ ] 覆盖仅作用于表单草稿：获取后不点保存不落盘；旧模型 ID / 旧 reasoning 草稿不再保留。
 - [ ] 保存后 payload 中各字段值与表单一致（可在 DevTools Network 面板检查 `POST /web/api/config/providers`）。
 
 ### 2.5 缓存分析页

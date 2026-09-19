@@ -45,7 +45,7 @@
 
 ## 4. 暴露的工具列表
 
-默认暴露全部 16 个工具。可通过 `-tools` 与 `-exclude` 筛选：
+默认暴露全部 17 个工具。可通过 `-tools` 与 `-exclude` 筛选：
 
 | 工具名 | 说明 |
 |--------|------|
@@ -63,6 +63,7 @@
 | `fetch` | 获取 URL 内容 |
 | `multiedit` | 多替换编辑 |
 | `todos` | 任务列表管理 |
+| `artifact_read` | 读取被截断工具输出的原始 artifact（按字节窗口分页） |
 | `sourcegraph` | Sourcegraph 代码搜索 |
 | `web_search` | 网络搜索 |
 
@@ -91,7 +92,7 @@ aicli mcp tools toolkit-mcp
 ========================================
   Toolkit MCP Server
 ========================================
-已注册工具: 16 个
+已注册工具: 17 个
 工具列表:
   - shell
   - bash

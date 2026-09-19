@@ -2,7 +2,7 @@
 
 > 对应 MCP：`chrome-devtools`（Google 官方 `chrome-devtools-mcp` npm 包，stdio 传输）
 > 作用：把 Chrome / Edge 的 DevTools 能力（导航、页面快照、点击/表单、截图、控制台/网络、性能 trace、Lighthouse 等 29 个工具）通过 MCP 暴露给 aicli 会话及其它 MCP 客户端。
-> 实测环境：Windows 11 + Edge 153 / Chrome 144+，`aicli mcp`（2026-09-18 验证）。
+> 实测环境：Windows 11 + Edge 153.0.4234.32 / Chrome 153.0.8010.48（均 ≥ 144），`aicli mcp`（2026-09-18 验证）。
 
 ---
 
@@ -43,11 +43,13 @@ attach 有三种连接方式：
 
 ## 2. 前置条件
 
-| 项 | 要求 | 检查命令 |
-|----|------|----------|
+| 项 | 要求 | 检查 / 操作 |
+|----|------|-------------|
 | Node.js / npx | 可用（`npx -y chrome-devtools-mcp@latest` 能拉起） | `node -v`、`npx --version` |
-| 浏览器 | 自动连接需 **Chrome/Edge 144+**；手动端口方式无版本要求但受 136+ 安全限制 | `(Get-Item "C:\Program Files\Google\Chrome\Application\chrome.exe").VersionInfo.ProductVersion` |
-| 远程调试开关 | 自动连接模式下需在浏览器中开启（见第 4 节） | — |
+| 浏览器版本 | attach（`--auto-connect`）需 **Chrome/Edge 144+**；低于 144 只能走手动调试端口（3.5）或 launch（3.4） | `(Get-Item "C:\Program Files\Google\Chrome\Application\chrome.exe").VersionInfo.ProductVersion`；Edge 换成 `"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"` |
+| 浏览器侧手动配置 | **必需**：在运行中的浏览器里开启远程调试并允许连接（见 4.2），MCP 侧无法代替 | 打开 `chrome://inspect/#remote-debugging` / `edge://inspect/#remote-debugging` |
+| 目标 profile | `--auto-connect` 只连接 `--user-data-dir` 指向的 profile；Edge、非默认 profile 必须显式指定（见 3.2） | 确认该 profile 目录下已生成 `DevToolsActivePort`（见 4.2 校验清单） |
+| MCP 配置 | attach 需 `--auto-connect`；Edge 需 `--auto-connect` + `--user-data-dir`（见 3.2） | `aicli mcp list` |
 | aicli | 支持 MCP 的版本（`aicli mcp` 子命令可用） | `aicli mcp --help` |
 
 > Node 首次运行 `npx` 会下载 `chrome-devtools-mcp` 包，耗时取决于网络；建议保持 `@latest` 以获取新工具。
@@ -182,22 +184,66 @@ npx -y chrome-devtools-mcp@latest --ws-endpoint "ws://127.0.0.1:9222/devtools/br
 > 因此 **不要**对这种实例使用 `--browser-url`（会报 `Failed to fetch browser webSocket URL ... HTTP Not Found`），
 > 应使用 `--auto-connect`（或已知路径时用 `--ws-endpoint`）。
 
-### 4.2 开启步骤（浏览器侧）
+### 4.2 浏览器侧手动配置（Chrome / Edge，必需）
 
-1. 保持目标浏览器（Edge/Chrome）处于运行状态；
-2. 打开新标签页访问 `chrome://inspect/#remote-debugging`（Edge 为 `edge://inspect/#remote-debugging`）；
-3. 勾选/开启 “允许远程调试”（Enable remote debugging）；
-4. 首次有 MCP 客户端连接时，浏览器会弹出允许调试的确认对话框，点击 **Allow**；
-5. 确认 `DevToolsActivePort` 已生成：
+> 这是 attach 模式**唯一无法由 MCP 侧代劳**的部分：必须在目标浏览器里手动开启远程调试并授权连接，
+> 否则 `--auto-connect` 会报 `Could not find DevToolsActivePort` / `Could not connect to Chrome`。
+
+#### 4.2.1 Chrome（144+）
+
+1. 升级并确认版本 ≥ 144（地址栏打开 `chrome://version`，或菜单「帮助 → 关于 Google Chrome」）；
+2. 保持 Chrome 运行，新标签页打开 `chrome://inspect/#remote-debugging`；
+3. 在页面中勾选/开启 **Enable remote debugging**（允许远程调试）；
+4. 首次有 MCP 客户端连接时，浏览器会弹出授权对话框，点击 **Allow**（拒绝会表现为连接失败/超时，需重连后重新授权）；
+5. 多 profile 场景：在**目标 profile 的窗口**中重复第 2–3 步，并让 MCP 的 `--user-data-dir` 指向该 profile 根目录。
+
+#### 4.2.2 Edge（144+）
+
+1. 同样升级到 ≥ 144（地址栏打开 `edge://version`）；
+2. 保持 Edge 运行，新标签页打开 `edge://inspect/#remote-debugging`，开启 **允许远程调试 / Enable remote debugging**；
+3. 首次连接时同样点击 **Allow**；
+4. Edge 不在官方支持范围内（官方仅保证 Chrome / Chrome for Testing），且 `--channel` 只用于定位 Chrome 通道，
+   因此 MCP 配置**必须显式**传 `--user-data-dir <Edge profile>`（默认 `%LOCALAPPDATA%\Microsoft\Edge\User Data`，本仓库配置见 3.2）。
+
+#### 4.2.3 MCP 侧需要同步更新的配置
+
+| 场景 | 配置改动 |
+|------|----------|
+| 任意 attach | 必须有 `--auto-connect`；缺少它会被当成 launch 模式（报 `The browser is already running ...`） |
+| Edge / 非默认 profile | 必须加 `--user-data-dir <profile 根目录>`（不能只靠 `--channel`） |
+| 浏览器版本 < 144 | 升级浏览器；或按 3.5 手动开调试端口（Chrome 136+ 必须非默认 `--user-data-dir`） |
+| 换机器 / 换用户 / 换浏览器通道 | 更新 `--user-data-dir` 中的用户名与路径（配置模板里的 `<you>` 需替换为真实值） |
+
+#### 4.2.4 校验清单（4 项全过才算完成浏览器侧配置）
+
+1. 浏览器正在运行，且版本 ≥ 144；
+2. `chrome://inspect/#remote-debugging`（Edge：`edge://inspect/#remote-debugging`）中的开关处于开启状态；
+3. 目标 profile 目录下 `DevToolsActivePort` 存在且为两行（端口 + WS 路径）：
 
 ```powershell
 Get-Content "$env:LOCALAPPDATA\Microsoft\Edge\User Data\DevToolsActivePort"   # Edge
 Get-Content "$env:LOCALAPPDATA\Google\Chrome\User Data\DevToolsActivePort"    # Chrome
 ```
 
-> 浏览器重启后端口与 WS 路径会变化；`DevToolsActivePort` 会更新，但已连接的 MCP 客户端需要重连（会话内 `/mcp reload`）。
+4. `aicli mcp list` 显示 `connected`（见 4.4），且 `aicli mcp test chrome-devtools list_pages '{}'` 能列出真实标签页。
 
-### 4.3 验证连接
+> 远程调试开关针对**当前运行的浏览器实例（profile）**生效；浏览器重启/升级后端口与 WS 路径会变化
+> （`DevToolsActivePort` 随之更新）。若连接失败，先回 inspect 页确认开关仍在（必要时重新勾选），
+> 再在会话内执行 `/mcp reload` 重连。
+
+### 4.3 需要更新配置 / 重新手动配置的典型场景
+
+| 场景 | 需要做的事 |
+|------|------------|
+| 浏览器升级、重启或长时间未用后连接失败 | 回 `chrome://inspect/#remote-debugging` / `edge://inspect/#remote-debugging` 确认开关仍开启（被重置则重新勾选）→ 检查 `DevToolsActivePort` 已更新 → 会话内 `/mcp reload` |
+| 换目标浏览器（Chrome ↔ Edge）或换 profile | 更新 `--user-data-dir` 为新 profile 根目录；在**新浏览器/新 profile 窗口**的 inspect 页重新开启开关与授权 |
+| 首次在新机器 / 新用户上部署 | 按 3.2 修改配置模板中的 `<you>` 等占位符；按 4.2 完成浏览器侧配置 |
+| 浏览器低于 144 | 升级到 144+；或改用手动调试端口（3.5）或 launch（3.4） |
+| 从 launch 模式切换为 attach | 在 args 中补 `--auto-connect` 与 `--user-data-dir`，并移除 `--headless` / `--isolated` |
+| 同时运行多个 MCP 客户端 / 多个 agent 会话 | 同一浏览器只保持一个活跃调试连接；新连接会再次弹出 Allow，需在浏览器中确认 |
+| 浏览器标签页很多（尤其冻结/未加载标签） | Chrome ≤ 149 已知问题：连接可能超时（官方 issue #1921）；减少标签页或先关闭不用的窗口 |
+
+### 4.4 验证连接
 
 ```bash
 # 连接状态 + 工具数（应为 connected / 29）
@@ -314,6 +360,7 @@ aicli mcp test chrome-devtools take_screenshot '{"pageId":2,"filePath":"E:/tmp/s
 
 - **不会关闭被连接的浏览器**：`chrome-devtools-mcp` 对 attach 的实例执行 `disconnect()` 而非 `close()`（源码 `build/src/browser.js` 的 `closeBrowser` 分支），MCP 进程退出不会杀掉你的浏览器；浏览器也不会因 MCP 退出而关闭标签页。
 - **浏览器重启后需重连**：`DevToolsActivePort` 的端口/WS 路径会变化，会话内执行 `/mcp reload`（或重启 aicli）后重新读取。
+- **浏览器侧配置需随环境更新**：浏览器升级/重启、切换 profile 或切换浏览器（Chrome ↔ Edge）后，`chrome://inspect/#remote-debugging`（Edge：`edge://inspect/#remote-debugging`）开关可能被重置，需按 4.3 重新检查并授权后再 `/mcp reload`。
 - **attach 模式的工具子集差异**：扩展（extension）与 PWA 相关工具在“连接已有实例”下不可用（Chrome < 149 限制）；需要这些工具时使用 launch 模式。
 - **`aicli mcp test` 的一次性实例**：每次命令都会拉起独立的 MCP server 进程；在 launch 模式下它自己的浏览器会随进程退出而回收，而 attach 模式下则连的是同一个目标浏览器（页面不会丢）。
 - **冷启动耗时**：首次 `new_page`/`navigate_page` 触发浏览器启动或页面首次加载时，默认 10s 导航超时可能不足，建议传 `"timeout":30000`，或先 `list_pages` 预热。
@@ -334,8 +381,11 @@ aicli mcp test chrome-devtools take_screenshot '{"pageId":2,"filePath":"E:/tmp/s
 |-----------|------|------|
 | `Failed to fetch browser webSocket URL from http://127.0.0.1:9222/json/version: HTTP Not Found` | 目标浏览器是 “inspect 远程调试”模式（仅 WS 端点，无 `/json` HTTP 发现接口），却配置了 `--browser-url` | 改用 `--auto-connect --user-data-dir <profile>`（或已知路径时 `--ws-endpoint`）；或按 3.5 以调试端口 + 非默认 profile 重启浏览器后再用 `--browser-url` |
 | `The browser is already running for <user-data-dir>. Use --isolated ...` | 只传了 `--user-data-dir`（缺 `--auto-connect`），MCP 走「自启浏览器」路径与已开实例冲突 | 补上 `--auto-connect`（attach），或加 `--isolated`（自启独立实例） |
-| `Could not connect to Chrome. Check if Chrome is running.` | 浏览器未运行 / 未开远程调试 / profile 路径不对 | 确认浏览器在运行、`chrome://inspect/#remote-debugging` 开关已开、路径与实际 profile 一致 |
+| `Could not connect to Chrome. Check if Chrome is running.` | 浏览器未运行 / 未开远程调试 / profile 路径不对 | 确认浏览器在运行、`chrome://inspect/#remote-debugging`（Edge：`edge://inspect/#remote-debugging`）开关已开、路径与实际 profile 一致 |
 | `Could not find DevToolsActivePort`（或 `Could not connect to Chrome in <dir> ...`） | 目标 profile 从未开启远程调试，目录下无 `DevToolsActivePort` | 在目标浏览器开启开关后重试；确认 `--user-data-dir` 指向 profile 根目录 |
+| inspect 页找不到“允许远程调试 / Enable remote debugging”开关 | 浏览器低于 144，或打开的地址与浏览器不匹配 | 升级到 144+；确认 Edge 用 `edge://inspect/#remote-debugging`、Chrome 用 `chrome://inspect/#remote-debugging` |
+| `ProtocolError: Network.enable timed out` / `The socket connection was closed unexpectedly`（`--auto-connect`） | 与运行中的浏览器握手失败：未开开关、未点 Allow、有其他客户端争抢同一调试连接，或大量冻结/未加载标签页（Chrome ≤ 149 已知问题） | 按官方顺序排查：浏览器已运行 → inspect 开关已开 → 已在弹窗点 Allow → 无其他 MCP/工具连接同一浏览器；并减少标签页/关闭不用的窗口（官方 issue #1921） |
+| 开关已开启但仍无 `DevToolsActivePort` | 开关开在了别的 profile 窗口，或 `--user-data-dir` 指向错误目录 | 在目标 profile 的窗口重新开启；按 4.2.4 的命令逐个 profile 检查文件 |
 | 首次 `new_page` 报 `Navigation timeout of 10000 ms exceeded` | 浏览器/页面冷启动超过默认 10s | 传 `"timeout":30000`；或先调 `list_pages` 预热 |
 | `missing required argument(s): pageId` | 开启了 page-id routing，页面级工具必须带页码 | 先 `list_pages` 取页码，再传 `{"pageId":N}` |
 | 只看到约 9 个工具 | 客户端以只读模式加载该 MCP | 检查客户端的只读/权限设置 |
@@ -363,3 +413,4 @@ aicli mcp test chrome-devtools take_screenshot '{"pageId":2,"filePath":"E:/tmp/s
 | 日期 | 变更 |
 |------|------|
 | 2026-09-18 | `.aicli/mcp.yaml` 的 `chrome-devtools` 由 launch（`--headless --isolated`）切换为 attach（`--auto-connect --user-data-dir <Edge profile>`）；原配置备份于 `.aicli/mcp.yaml.bak-attach-20260918`。实测 Edge 153 连接成功并列出真实标签页。 |
+| 2026-09-18 | 新增「Chrome/Edge 浏览器侧手动配置 / 需要更新配置」内容：4.2 分浏览器步骤（Chrome / Edge）、MCP 配置同步项与 4 项校验清单；4.3 需重新手动配置的典型场景；第 2 节前置条件改为可操作检查项；第 7/8 节补充环境变更重配提示与 inspect 开关缺失、`--auto-connect` 握手超时、profile 选错等排错条目。本机实测：Edge 153.0.4234.32 已生成 `DevToolsActivePort`，Chrome 153.0.8010.48 未开启远程调试（无该文件）。 |
