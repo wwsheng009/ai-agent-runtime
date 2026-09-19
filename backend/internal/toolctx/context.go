@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 )
 
 type contextKey string
@@ -16,6 +18,7 @@ const (
 	generatedImageOutputDirKey contextKey = "generated_image_output_dir"
 	shellOutputArtifactDirKey  contextKey = "shell_output_artifact_dir"
 	workspaceRootKey           contextKey = "tool_workspace_root"
+	artifactStoreKey           contextKey = "tool_artifact_store"
 )
 
 // WithSessionID stores the active session ID in ctx.
@@ -146,6 +149,29 @@ func WorkspaceRoot(ctx context.Context) string {
 		return strings.TrimSpace(value)
 	}
 	return ""
+}
+
+// WithArtifactStore stores the active artifact store in ctx so tools can
+// dereference `Full raw output artifact_id: art_…` pointers (artifact_read).
+// A nil store leaves ctx unchanged: context.WithValue rejects nil values.
+func WithArtifactStore(ctx context.Context, store *artifact.Store) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if store == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, artifactStoreKey, store)
+}
+
+// ArtifactStore retrieves the active artifact store from ctx, or nil when the
+// execution path never bound one.
+func ArtifactStore(ctx context.Context) *artifact.Store {
+	if ctx == nil {
+		return nil
+	}
+	store, _ := ctx.Value(artifactStoreKey).(*artifact.Store)
+	return store
 }
 
 func defaultGeneratedImageRoot() string {

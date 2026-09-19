@@ -12,18 +12,19 @@ import (
 // disappears from the child's tool surface. The constants below are asserted
 // against the real registry by tool_vocabulary_contract_test.go.
 const (
-	toolNameView        = "view"
-	toolNameGrep        = "grep"
-	toolNameGlob        = "glob"
-	toolNameLs          = "ls"
-	toolNameShell       = "shell"
-	toolNameWrite       = "write"
-	toolNameEdit        = "edit"
-	toolNameMultiEdit   = "multiedit"
-	toolNameApplyPatch  = "apply_patch"
-	toolNameAppendWrite = "append_write"
-	toolNameFetch       = "fetch"
-	toolNameWebSearch   = "web_search"
+	toolNameView         = "view"
+	toolNameGrep         = "grep"
+	toolNameGlob         = "glob"
+	toolNameLs           = "ls"
+	toolNameShell        = "shell"
+	toolNameWrite        = "write"
+	toolNameEdit         = "edit"
+	toolNameMultiEdit    = "multiedit"
+	toolNameApplyPatch   = "apply_patch"
+	toolNameAppendWrite  = "append_write"
+	toolNameFetch        = "fetch"
+	toolNameWebSearch    = "web_search"
+	toolNameArtifactRead = "artifact_read"
 )
 
 // normalizeToolWhitelist trims and de-duplicates a requested tool allowlist.

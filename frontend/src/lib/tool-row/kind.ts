@@ -21,6 +21,7 @@ const KIND_BY_NAME: Record<string, ToolCardKind> = {
   fs_read: "read",
   fs_read_file: "read",
   get_file_content: "read",
+  artifact_read: "read",
 
   apply_patch: "diff",
   edit: "diff",

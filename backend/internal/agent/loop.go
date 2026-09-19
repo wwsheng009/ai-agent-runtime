@@ -3875,6 +3875,12 @@ func stripToolSchemaValue(value interface{}) interface{} {
 		}
 		return cleaned
 	case []string:
+		if len(typed) == 0 {
+			// 空数组必须保持为 []：nil slice 会被 JSON 序列化成 null，
+			// 而 required=null 会被上游（OpenAI 兼容中转）判为非法函数参数，
+			// 直接以 "invalid function call parameters" 拒绝整个请求。
+			return []string{}
+		}
 		return append([]string(nil), typed...)
 	default:
 		return typed
@@ -4349,6 +4355,13 @@ func toolCallContext(ctx context.Context, toolCalls []types.ToolCall, currentToo
 	}
 	if outputDir := generatedImageOutputDirForAgentSession(agent, sessionID); strings.TrimSpace(outputDir) != "" {
 		ctx = toolctx.WithGeneratedImageOutputDir(ctx, outputDir)
+	}
+	// Bind the agent's artifact store so artifact_read can dereference
+	// `Full raw output artifact_id: art_…` pointers produced by the output gateway.
+	if agent != nil {
+		if store := agent.GetArtifactStore(); store != nil {
+			ctx = toolctx.WithArtifactStore(ctx, store)
+		}
 	}
 	return ctx
 }

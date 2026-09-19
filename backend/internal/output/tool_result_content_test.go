@@ -791,8 +791,9 @@ func TestModelArtifactNotice_NewFormatCarriesTailAndConsumerHint(t *testing.T) {
 	if !strings.Contains(notice, "kind=text") {
 		t.Fatalf("expected kind= tail, got %q", notice)
 	}
-	// A1: consumer hint + never-pass-to-task_output warning.
-	if !strings.Contains(notice, "artifact read tool") {
+	// A1: consumer hint names the registered reader tool and its id argument,
+	// plus the never-pass-to-task_output warning.
+	if !strings.Contains(notice, "artifact_read(artifact_id=") {
 		t.Fatalf("expected consumer hint, got %q", notice)
 	}
 	if !strings.Contains(notice, "never pass this id to task_output") {

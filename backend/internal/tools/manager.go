@@ -407,6 +407,7 @@ func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexe
 	register(tools.NewFetchTool())
 	register(tools.NewMultieditTool())
 	register(tools.NewTodosTool())
+	register(tools.NewArtifactReadTool())
 	register(tools.NewSourcegraphTool())
 	register(tools.NewWebSearchTool())
 	if shouldRegisterOpenAIImageGenerateTool(runtimeConfig) {

@@ -24,7 +24,7 @@ const (
 	// modelArtifactNoticeReadHint tells the model which consumer understands the
 	// pointer. The id is an artifact record id, not a background job id; models
 	// repeatedly copy it into task_output where it can never resolve.
-	modelArtifactNoticeReadHint = "read the full raw output via the artifact read tool; never pass this id to task_output"
+	modelArtifactNoticeReadHint = "read the full raw output via artifact_read(artifact_id=<id>, offset=<bytes>, limit=<bytes>); never pass this id to task_output"
 )
 
 // modelToolTextByteBudget is the model-visible cap for tool result text entering
@@ -483,9 +483,20 @@ func renderToolTextForModelHistory(content interface{}, toolErr string, envelope
 	if strings.TrimSpace(full) == "" {
 		return appendToolArtifactNotice(full, notice)
 	}
-	withNotice := appendToolArtifactNotice(full, notice)
-	if len(withNotice) <= modelToolTextByteBudget {
-		return withNotice
+	if len(full) <= modelToolTextByteBudget {
+		// The raw body fits the budget. No truncation happened, so a record-id
+		// pointer is dropped unless it still adds value: failed results keep
+		// the recovery hint, and artifact_read windows (artifact_source_id)
+		// must never grow a recursive pointer cascade. Path/file notices
+		// (raw_output_artifact_path) stay unconditional so on-disk artifacts
+		// remain discoverable even when small.
+		if notice == "" {
+			return full
+		}
+		if isIDArtifactNotice(notice) && !failedResult(toolErr, envelope) && !isArtifactReadWindow(envelopeMetadata(envelope)) {
+			return full
+		}
+		return appendToolArtifactNotice(full, notice)
 	}
 	if notice == "" {
 		return formatTruncatedToolTextForModel(full, modelToolTextByteBudget)
@@ -495,6 +506,31 @@ func renderToolTextForModelHistory(content interface{}, toolErr string, envelope
 		return safePrefixByBytes(notice, modelToolTextByteBudget)
 	}
 	return appendToolArtifactNotice(formatTruncatedToolTextForModel(full, bodyBudget), notice)
+}
+
+// isIDArtifactNotice reports whether the notice points at an artifact record
+// id (art_<hex>) rather than an on-disk path artifact.
+func isIDArtifactNotice(notice string) bool {
+	return strings.HasPrefix(strings.TrimSpace(notice), modelArtifactNoticeIDPrefix)
+}
+
+// failedResult reports whether the tool result carries a real failure, in
+// which case the raw-output pointer doubles as the recovery hint and must
+// survive even when the body fits the budget.
+func failedResult(toolErr string, envelope *Envelope) bool {
+	if strings.TrimSpace(toolErr) != "" {
+		return true
+	}
+	if envelope == nil {
+		return false
+	}
+	if strings.TrimSpace(envelope.Error) != "" {
+		return true
+	}
+	if value, ok := envelope.Metadata["tool_error"].(string); ok {
+		return strings.TrimSpace(value) != ""
+	}
+	return false
 }
 
 func envelopeMetadata(envelope *Envelope) map[string]interface{} {

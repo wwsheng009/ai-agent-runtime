@@ -35,6 +35,7 @@ func main() {
 		tools.NewFetchTool(),
 		tools.NewMultieditTool(),
 		tools.NewTodosTool(),
+		tools.NewArtifactReadTool(),
 		tools.NewSourcegraphTool(),
 		tools.NewWebSearchTool(),
 	}

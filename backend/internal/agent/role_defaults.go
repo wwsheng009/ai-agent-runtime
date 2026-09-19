@@ -18,6 +18,7 @@ func DefaultToolsForRole(role string) []string {
 			toolNameShell,
 			toolNameFetch,
 			toolNameWebSearch,
+			toolNameArtifactRead,
 		}
 	case "tester", "test", "verifier", "verification":
 		return []string{
@@ -26,6 +27,7 @@ func DefaultToolsForRole(role string) []string {
 			toolNameGlob,
 			toolNameLs,
 			toolNameShell,
+			toolNameArtifactRead,
 		}
 	case "writer", "implementer", "coder", "developer":
 		return []string{
@@ -39,6 +41,7 @@ func DefaultToolsForRole(role string) []string {
 			toolNameMultiEdit,
 			toolNameApplyPatch,
 			toolNameAppendWrite,
+			toolNameArtifactRead,
 		}
 	default:
 		return nil

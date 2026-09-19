@@ -33,6 +33,12 @@ type RawToolResult struct {
 	Args map[string]interface{}
 }
 
+// artifactSourceIDMetadataKey marks a tool result whose content is a window
+// into an existing artifact record (produced by artifact_read). Re-archiving
+// it would create a pointer whose target itself carries a pointer, growing a
+// recursive pointer cascade on every dereference hop.
+const artifactSourceIDMetadataKey = "artifact_source_id"
+
 // Envelope 是允许进入上下文窗口的压缩信号。
 type Envelope struct {
 	ToolName    string
@@ -127,7 +133,7 @@ func (g *Gateway) Process(ctx context.Context, result RawToolResult) (*Envelope,
 	envelope.Metadata["sha256"] = fmt.Sprintf("%x", sha256.Sum256([]byte(text)))
 
 	var processErrs []string
-	if g.store != nil && strings.TrimSpace(text) != "" {
+	if g.store != nil && strings.TrimSpace(text) != "" && !isArtifactReadWindow(result.Metadata) {
 		artifactID, err := g.store.Put(ctx, artifact.Record{
 			SessionID:  result.SessionID,
 			ToolName:   result.ToolName,
@@ -258,6 +264,25 @@ func (g *Gateway) Process(ctx context.Context, result RawToolResult) (*Envelope,
 	}
 
 	return envelope, joinErrors(processErrs)
+}
+
+// isArtifactReadWindow reports whether the raw result is itself a dereferenced
+// artifact window (metadata carries artifact_source_id). Such results already
+// point at the canonical record; archiving them again would append a second
+// pointer line to the full raw output and grow the cascade hop by hop.
+func isArtifactReadWindow(metadata map[string]interface{}) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	if value, ok := metadata[artifactSourceIDMetadataKey].(string); ok {
+		return strings.TrimSpace(value) != ""
+	}
+	if nested, ok := metadata["tool_metadata"].(map[string]interface{}); ok {
+		if value, ok := nested[artifactSourceIDMetadataKey].(string); ok {
+			return strings.TrimSpace(value) != ""
+		}
+	}
+	return false
 }
 
 func prefersModelSummaryForLargeText(reducerName string) bool {

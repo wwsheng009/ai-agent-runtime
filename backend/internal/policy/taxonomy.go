@@ -64,6 +64,7 @@ var knownToolTaxonomy = map[string]ToolTaxonomy{
 	"report_task_outcome":     {Name: "report_task_outcome", Kind: types.ToolKindControl, ReadOnly: true},
 	"block_current_task":      {Name: "block_current_task", Kind: types.ToolKindControl, ReadOnly: true},
 	"todos":                   {Name: "todos", Kind: types.ToolKindControl, ReadOnly: true},
+	"artifact_read":           {Name: "artifact_read", Kind: types.ToolKindRead, ReadOnly: true},
 	"get_goal":                {Name: "get_goal", Kind: types.ToolKindControl, ReadOnly: true},
 	"update_goal":             {Name: "update_goal", Kind: types.ToolKindControl, ReadOnly: true},
 	"openai_image_generate":   {Name: "openai_image_generate", Kind: types.ToolKindNetwork, RequiresNet: true},
