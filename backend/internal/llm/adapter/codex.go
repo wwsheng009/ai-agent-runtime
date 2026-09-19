@@ -32,6 +32,11 @@ const (
 	codexImageGenerationToolType            = "image_generation"
 	codexImageGenerationCallType            = "image_generation_call"
 	codexSupportsMaxOutputTokensMetadataKey = "supports_max_output_tokens"
+	// codexResponseMetadataKey separates caller-explicit Responses metadata
+	// from RequestConfig.Metadata, which also carries aicli-internal routing,
+	// tracing, and adapter controls. Only values nested under this key may be
+	// emitted as the upstream top-level metadata parameter.
+	codexResponseMetadataKey = "response_metadata"
 	// codexSupportsSamplingMetadataKey 控制是否发送 temperature/top_p。
 	// Codex CLI 协议本身没有采样参数,而官方 Responses API 支持;默认不发送,
 	// 仅当上游确认支持(metadata supports_sampling=true)时才透传,避免破坏
@@ -407,16 +412,20 @@ var codexResponseMetadataReservedKeys = map[string]struct{}{
 	"parallel_tool_calls":        {},
 	"thinking":                   {},
 	"extra_body":                 {},
+	"response_metadata":          {},
 }
 
 // applyCodexResponseMetadata 透传上游 Responses API 官方支持的顶层 metadata。
-// 仅透传字符串值,并过滤适配器内部使用的键,避免把内部开关泄漏给上游。
+// RequestConfig.Metadata 同时承载 aicli 内部的路由、追踪和适配器控制字段，不能
+// 整体视为上游 metadata。只有调用方显式放在 response_metadata 对象中的字符串
+// 值才会透传；默认不发送 metadata，以兼容严格校验的 Codex-compatible 上游。
 func applyCodexResponseMetadata(request map[string]interface{}, config RequestConfig) {
-	if len(config.Metadata) == 0 {
+	explicit, ok := openAICompatibleMetadataObject(config.Metadata, codexResponseMetadataKey)
+	if !ok || len(explicit) == 0 {
 		return
 	}
-	metadata := make(map[string]string, len(config.Metadata))
-	for key, value := range config.Metadata {
+	metadata := make(map[string]string, len(explicit))
+	for key, value := range explicit {
 		if isCodexReservedMetadataKey(key) {
 			continue
 		}

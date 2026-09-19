@@ -270,6 +270,19 @@ func (b *acpEventBridge) HandleRuntimeEvent(event runtimeevents.Event) {
 		_ = b.sessionUpdate(acp.ToolCallFinished(id, status, rawOutput, content))
 		b.markToolOpen(id, false)
 
+	case runtimechat.EventLLMRequestFinished, "llm.request.finished":
+		// ACP clients do not consistently render the JSON-RPC error returned by
+		// session/prompt inside the conversation. Mirror the same structured
+		// model failure shown by the TUI/Web renderer as an agent message before
+		// the prompt RPC terminates, while leaving the RPC error intact.
+		success, hasSuccess := event.Payload["success"].(bool)
+		if !hasSuccess || success {
+			return
+		}
+		if message := acpModelFailureMessage(event.Payload); message != "" {
+			_ = b.sessionUpdate(acp.AgentMessageChunk(message))
+		}
+
 	case runtimechat.EventAssistantDelta, "assistant.delta":
 		delta := payloadStringValue(event.Payload["delta"])
 		if delta == "" {
@@ -292,6 +305,36 @@ func (b *acpEventBridge) HandleRuntimeEvent(event runtimeevents.Event) {
 			_ = b.sessionUpdate(acp.AgentMessageChunk(content))
 		}
 	}
+}
+
+func acpModelFailureMessage(payload map[string]interface{}) string {
+	errText := strings.TrimSpace(payloadStringValue(payload["error"]))
+	if errText == "" {
+		return ""
+	}
+
+	attributes := make([]string, 0, 2)
+	if code := strings.TrimSpace(payloadStringValue(payload["error_code"])); code != "" {
+		attributes = append(attributes, code)
+	}
+	if retryable, ok := payload["retryable"].(bool); ok {
+		attributes = append(attributes, fmt.Sprintf("retryable=%t", retryable))
+	}
+
+	var message strings.Builder
+	message.WriteString("model error")
+	if len(attributes) > 0 {
+		message.WriteString(" [")
+		message.WriteString(strings.Join(attributes, ", "))
+		message.WriteString("]")
+	}
+	message.WriteString(" ")
+	message.WriteString(errText)
+	if action := strings.TrimSpace(payloadStringValue(payload["next_action"])); action != "" {
+		message.WriteString("\n[action] ")
+		message.WriteString(action)
+	}
+	return truncateForACP(message.String(), 12000)
 }
 
 func (b *acpEventBridge) handleChatCoreToolEvent(event runtimechatcore.ChatEvent) {

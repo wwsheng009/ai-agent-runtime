@@ -1842,13 +1842,18 @@ func TestCodexBuildRequest_SamplingParamsOnlyWhenOptedIn(t *testing.T) {
 	}
 }
 
-func TestCodexBuildRequest_ResponseMetadataPassThroughFiltersInternalKeys(t *testing.T) {
+func TestCodexBuildRequest_ResponseMetadataRequiresExplicitEnvelope(t *testing.T) {
 	a := &CodexAdapter{}
 	req := a.BuildRequest(RequestConfig{
 		Model:    "gpt-5.2",
 		Messages: []map[string]interface{}{{"role": "user", "content": "hi"}},
 		Metadata: map[string]interface{}{
 			"session_id":                 "sess_1",
+			"executor_path":              "actor",
+			"llm_request_id":             "llm_req_internal",
+			"logical_turn_id":            "trace_internal",
+			"prompt_layout":              "internal prompt diagnostics",
+			"prompt_fingerprint":         "internal fingerprint",
 			"supports_max_output_tokens": true,
 			"response_format": map[string]interface{}{
 				"type":   "json_schema",
@@ -1856,8 +1861,12 @@ func TestCodexBuildRequest_ResponseMetadataPassThroughFiltersInternalKeys(t *tes
 				"schema": map[string]interface{}{"type": "object"},
 			},
 			"codex_internal_flag": "secret",
-			"user_tracking_id":    "track-123",
-			"non_string_value":    42,
+			"response_metadata": map[string]interface{}{
+				"user_tracking_id":    "track-123",
+				"session_id":          "must-remain-reserved",
+				"codex_internal_flag": "must-remain-reserved",
+				"non_string_value":    42,
+			},
 		},
 	})
 
@@ -1868,10 +1877,45 @@ func TestCodexBuildRequest_ResponseMetadataPassThroughFiltersInternalKeys(t *tes
 	if metadata["user_tracking_id"] != "track-123" {
 		t.Fatalf("expected user_tracking_id passed through, got %#v", metadata)
 	}
-	for _, forbidden := range []string{"session_id", "supports_max_output_tokens", "response_format", "codex_internal_flag", "non_string_value"} {
+	for _, forbidden := range []string{
+		"session_id",
+		"executor_path",
+		"llm_request_id",
+		"logical_turn_id",
+		"prompt_layout",
+		"prompt_fingerprint",
+		"supports_max_output_tokens",
+		"response_format",
+		"codex_internal_flag",
+		"non_string_value",
+		"response_metadata",
+	} {
 		if _, exists := metadata[forbidden]; exists {
 			t.Fatalf("internal key %q leaked into upstream metadata: %#v", forbidden, metadata)
 		}
+	}
+}
+
+func TestCodexBuildRequest_InternalMetadataDoesNotCreateUpstreamMetadata(t *testing.T) {
+	a := &CodexAdapter{}
+	req := a.BuildRequest(RequestConfig{
+		Model:    "gpt-5.6-sol",
+		Messages: []map[string]interface{}{{"role": "user", "content": "hi"}},
+		Metadata: map[string]interface{}{
+			"executor_path":              "actor",
+			"generated_image_output_dir": "C:/tmp/images",
+			"llm_request_id":             "llm_req_1",
+			"logical_turn_id":            "trace_1",
+			"prompt_fingerprint":         "fingerprint",
+			"prompt_layout":              "diagnostic prompt layout",
+			"stream_id":                  "stream_1",
+			"tool_surface_fingerprint":   "tool-fingerprint",
+			"trace_id":                   "trace_1",
+		},
+	})
+
+	if metadata, exists := req["metadata"]; exists {
+		t.Fatalf("internal request metadata leaked to upstream body: %#v", metadata)
 	}
 }
 

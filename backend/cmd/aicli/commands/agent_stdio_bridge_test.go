@@ -142,6 +142,65 @@ func TestACPEventBridge_RuntimeAssistantDeltaAndMessage(t *testing.T) {
 	}
 }
 
+func TestACPEventBridge_RuntimeModelFailureIsVisibleToClient(t *testing.T) {
+	t.Parallel()
+
+	bridge := newACPEventBridge("sess_1")
+	emit := &recordingACPEmitter{}
+	bridge.BeginPrompt("sess_1", emit)
+	defer bridge.EndPrompt()
+
+	bridge.HandleRuntimeEvent(runtimeevents.Event{
+		Type: "llm.request.finished",
+		Payload: map[string]interface{}{
+			"success":     false,
+			"error":       `HTTP 400: {"error":{"message":"Unsupported parameter: metadata"}}`,
+			"error_code":  "UPSTREAM_INVALID_REQUEST",
+			"retryable":   false,
+			"next_action": "Correct the provider request or unsupported parameters before retrying.",
+		},
+	})
+
+	updates := emit.snapshot()
+	if len(updates) != 1 {
+		t.Fatalf("expected one visible model failure update, got %d: %+v", len(updates), updates)
+	}
+	if updates[0].SessionUpdate != acp.SessionUpdateAgentMessageChunk || updates[0].Content == nil {
+		t.Fatalf("unexpected failure update: %+v", updates[0])
+	}
+	text := updates[0].Content.Text
+	for _, want := range []string{
+		"model error [UPSTREAM_INVALID_REQUEST, retryable=false]",
+		"Unsupported parameter: metadata",
+		"[action] Correct the provider request",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("failure update %q does not contain %q", text, want)
+		}
+	}
+}
+
+func TestACPEventBridge_RuntimeSuccessfulModelRequestDoesNotEmitFailure(t *testing.T) {
+	t.Parallel()
+
+	bridge := newACPEventBridge("sess_1")
+	emit := &recordingACPEmitter{}
+	bridge.BeginPrompt("sess_1", emit)
+	defer bridge.EndPrompt()
+
+	bridge.HandleRuntimeEvent(runtimeevents.Event{
+		Type: runtimechat.EventLLMRequestFinished,
+		Payload: map[string]interface{}{
+			"success": true,
+			"error":   "stale diagnostic must not render",
+		},
+	})
+
+	if updates := emit.snapshot(); len(updates) != 0 {
+		t.Fatalf("successful request emitted failure update: %+v", updates)
+	}
+}
+
 func TestACPEventBridge_RuntimeToolStartedFinished(t *testing.T) {
 	t.Parallel()
 
