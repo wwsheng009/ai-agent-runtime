@@ -180,9 +180,17 @@ npx -y chrome-devtools-mcp@latest --ws-endpoint "ws://127.0.0.1:9222/devtools/br
 - `--auto-connect`（配合 `--user-data-dir`）就是读取该文件并连接 `ws://127.0.0.1:<port><path>`。
 
 > 实测（Edge 153 / 2026-09-18）：该模式下调试端口**只暴露 WebSocket 端点**，标准 CDP HTTP 发现接口不可用——
-> `GET http://127.0.0.1:9222/json/version` 返回 `HTTP/1.1 404`，而 WS 握手在其他路径返回 `403`。
+> `GET http://127.0.0.1:9222/json/version` 与 `/json/list` 均返回 `HTTP/1.1 404`（空 body）。
+> 浏览器级路径 `/devtools/browser/<id>` 的 WS 握手正常返回 `101`（2026-09-19 复测；早期测到 403 是连到了错误路径）。
 > 因此 **不要**对这种实例使用 `--browser-url`（会报 `Failed to fetch browser webSocket URL ... HTTP Not Found`），
 > 应使用 `--auto-connect`（或已知路径时用 `--ws-endpoint`）。
+>
+> 实测补充（2026-09-19，Edge 153 / Node 24.14）：绕过 MCP 直接手写脚本连该 WS 端点时，
+> **Node 内置全局 `WebSocket`（undici）会永久挂起**——连接建立后收不到任何帧（握手/消息事件均不触发）；
+> 改用原始 `net.Socket` 手工完成 WebSocket 握手（`Sec-WebSocket-Key` + `101`）后通信正常。
+> 且由于 HTTP 发现接口 404，拿不到 page 级 `webSocketDebuggerUrl`，只能通过浏览器级端点
+> `Target.attachToTarget({flatten:true})` 路由会话，手工实现极易丢事件（attach 后 console/network 常抓不到）。
+> **结论：页面诊断请直接用 MCP 工具（`list_pages` / `take_snapshot` / `list_console_messages` 等），不要手写 CDP 脚本。**
 
 ### 4.2 浏览器侧手动配置（Chrome / Edge，必需）
 
@@ -379,7 +387,9 @@ aicli mcp test chrome-devtools take_screenshot '{"pageId":2,"filePath":"E:/tmp/s
 
 | 现象/报错 | 原因 | 处理 |
 |-----------|------|------|
-| `Failed to fetch browser webSocket URL from http://127.0.0.1:9222/json/version: HTTP Not Found` | 目标浏览器是 “inspect 远程调试”模式（仅 WS 端点，无 `/json` HTTP 发现接口），却配置了 `--browser-url` | 改用 `--auto-connect --user-data-dir <profile>`（或已知路径时 `--ws-endpoint`）；或按 3.5 以调试端口 + 非默认 profile 重启浏览器后再用 `--browser-url` |
+| `/json/version`、`/json/list` 等所有 HTTP 端点返回 404（空 body），但端口在监听 | 目标浏览器是「inspect 远程调试」模式：只暴露浏览器级 WS 端点，无 CDP HTTP 发现接口（非故障，属预期安全行为） | 不用 HTTP 发现：MCP 配置用 `--auto-connect --user-data-dir <profile>`（内部读 `DevToolsActivePort` 直连 WS）；手工脚本可读 `DevToolsActivePort` 第二行拿 WS 路径 |
+| Node ≥ 22 全局 `WebSocket`（undici）连浏览器 WS 端点后无响应/超时 | Node 内置 WebSocket 对该端点兼容性问题：TCP 已连上但握手帧不回 | 用原始 `net.Socket` 手工 WebSocket 握手，或安装 `ws` 包；**更推荐直接改用 MCP 工具，放弃手写 CDP** |
+| `Failed to fetch browser webSocket URL from http://127.0.0.1:9222/json/version: HTTP Not Found` | 同 HTTP 404 问题：inspect 模式实例却配置了 `--browser-url` | 改用 `--auto-connect --user-data-dir <profile>`（或已知路径时 `--ws-endpoint`）；或按 3.5 以调试端口 + 非默认 profile 重启浏览器后再用 `--browser-url` |
 | `The browser is already running for <user-data-dir>. Use --isolated ...` | 只传了 `--user-data-dir`（缺 `--auto-connect`），MCP 走「自启浏览器」路径与已开实例冲突 | 补上 `--auto-connect`（attach），或加 `--isolated`（自启独立实例） |
 | `Could not connect to Chrome. Check if Chrome is running.` | 浏览器未运行 / 未开远程调试 / profile 路径不对 | 确认浏览器在运行、`chrome://inspect/#remote-debugging`（Edge：`edge://inspect/#remote-debugging`）开关已开、路径与实际 profile 一致 |
 | `Could not find DevToolsActivePort`（或 `Could not connect to Chrome in <dir> ...`） | 目标 profile 从未开启远程调试，目录下无 `DevToolsActivePort` | 在目标浏览器开启开关后重试；确认 `--user-data-dir` 指向 profile 根目录 |
@@ -413,4 +423,6 @@ aicli mcp test chrome-devtools take_screenshot '{"pageId":2,"filePath":"E:/tmp/s
 | 日期 | 变更 |
 |------|------|
 | 2026-09-18 | `.aicli/mcp.yaml` 的 `chrome-devtools` 由 launch（`--headless --isolated`）切换为 attach（`--auto-connect --user-data-dir <Edge profile>`）；原配置备份于 `.aicli/mcp.yaml.bak-attach-20260918`。实测 Edge 153 连接成功并列出真实标签页。 |
+| 2026-09-19 | 跨项目复用验证：将本配置复制到 `E:\projects\ai\ai-sites-client\.aicli\mcp.yaml`（workspace 级，已被该仓库 gitignore），会话重启后 MCP 直接生效，用 `list_pages`/`take_snapshot`/`list_console_messages` 一次定位 React 白屏（根因：`useToast` 未包在 `<ToastProvider>` 内）。同时修正 4.1 实测注记（WS 握手实际为 101 而非 403），新增两条排查经验：① inspect 模式下所有 CDP HTTP 发现端点 404 属预期行为；② Node ≥22 内置 WebSocket 连该端点会挂起，手写 CDP 脚本不可靠，页面诊断应直接使用 MCP 工具。已同步到第 4.1 节与第 8 节排查表。 |
+| 2026-09-19 | 可用参考脚本留档：绕过 Node 内置 WebSocket 挂起问题的手工实现归档于本目录 [list-pages.js](list-pages.js)（Node 原始 `net.Socket` + 手工 WebSocket 握手 + 最小帧编解码 + 客户端掩码，经浏览器级 WS 端点调 `Target.getTargets` 成功列出真实标签页）。要点：① 用 `Sec-WebSocket-Key` 随机 16 字节 base64，校验服务端返回 `101`；② 客户端帧必须带掩码（4 字节 XOR）；③ 支持 126/127 扩展长度；④ HTTP 发现接口不可用时，WS 路径从 user-data-dir 下 `DevToolsActivePort` 第二行读取；⑤ 该脚本仅适合拿 target 列表等简单 CDP 调用，attach 后的 console/network 事件路由手工实现仍会丢事件——复杂诊断务必用 MCP 工具。同目录 [probe-devtools.js](probe-devtools.js)（握手探测）与 [debug-page.js](debug-page.js)（失败的反例）仅供参考/留证。注：脚本中的 `DevToolsActivePort` 路径硬编码为作者本机用户目录，复用时需按实际 profile 路径修改。 |
 | 2026-09-18 | 新增「Chrome/Edge 浏览器侧手动配置 / 需要更新配置」内容：4.2 分浏览器步骤（Chrome / Edge）、MCP 配置同步项与 4 项校验清单；4.3 需重新手动配置的典型场景；第 2 节前置条件改为可操作检查项；第 7/8 节补充环境变更重配提示与 inspect 开关缺失、`--auto-connect` 握手超时、profile 选错等排错条目。本机实测：Edge 153.0.4234.32 已生成 `DevToolsActivePort`，Chrome 153.0.8010.48 未开启远程调试（无该文件）。 |

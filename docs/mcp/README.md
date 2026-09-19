@@ -7,6 +7,9 @@
 | [mcp-tool-llm-integration.md](mcp-tool-llm-integration.md) | MCP 工具如何以原生 `tools` 暴露给 LLM API（含多服务重名隔离机制与验证） |
 | [chrome-devtools.md](chrome-devtools.md) | Google 官方 `chrome-devtools-mcp`：浏览器自动化/调试（支持连接已打开的 Chrome/Edge） |
 | [chrome-devtools.mcp.yaml.example](chrome-devtools.mcp.yaml.example) | 可直接拷贝的 `chrome-devtools` MCP 配置模板（attach / launch / browser-url 三种模式） |
+| [list-pages.js](list-pages.js) | 参考脚本：绕过 Node 内置 WebSocket 挂起问题，经 `DevToolsActivePort` 的 WS 端点直接调 CDP `Target.getTargets` 列出标签页（详见 [chrome-devtools.md](chrome-devtools.md) 附录） |
+| [probe-devtools.js](probe-devtools.js) | 参考脚本：裸 socket 探测调试端口的 HTTP/WS 端点可用性（验证「inspect 模式下 `/json/*` 404、WS 握手 101」） |
+| [debug-page.js](debug-page.js) | 反例留证：手工 CDP attach 抓取 console/network 事件的路由实现（实测会丢事件，页面诊断请改用 MCP 工具） |
 
 通用命令与配置约定（`aicli mcp add|list|status|tools|test|reload`、配置文件优先级等）见 [docs/aicli/install.md](../aicli/install.md#mcp-服务器) 与 [docs/user-guide/aicli.md](../user-guide/aicli.md)。
 
