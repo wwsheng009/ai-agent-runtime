@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
@@ -209,10 +210,10 @@ func TestCurrentRunMetaForSession_ForcesNoneCompletionRequirementFromRuntimeCont
 	}
 }
 
-func TestWaitForAICLIActorReady_TimesOutWithDiagnosticWhenActorStaysBusy(t *testing.T) {
-	// Long provider delay keeps the background turn running well past the
-	// wait-for-ready timeout, so the actor stays busy and the poll must give
-	// up with a diagnostic instead of hanging forever.
+func TestWaitForAICLIActorReady_FollowsLiveRunInsteadOfTimingOut(t *testing.T) {
+	// A long provider delay keeps the background turn running well past the
+	// stale-state budget. That run is live in this process, so the wait must
+	// follow it to completion instead of failing the user's prompt.
 	provider := runtimellm.NewMockProvider("mock", 2*time.Second)
 	provider.SetResponse("background", "background complete")
 	hub := buildTestSessionHubWithProvider(t, provider)
@@ -233,11 +234,69 @@ func TestWaitForAICLIActorReady_TimesOutWithDiagnosticWhenActorStaysBusy(t *test
 	aicliActorReadyWaitTimeout = 150 * time.Millisecond
 	defer func() { aicliActorReadyWaitTimeout = origTimeout }()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := waitForAICLIActorReady(ctx, actor); err != nil {
+		t.Fatalf("live run must be followed to completion, got: %v", err)
+	}
+	if state, ok := actor.StateSummary(); ok && state.Busy() {
+		t.Fatalf("actor should be idle once the run finished, got %+v", state)
+	}
+	if err := <-bgDone; err != nil {
+		t.Fatalf("background run failed: %v", err)
+	}
+}
+
+func TestWaitForAICLIActorReady_TimesOutForBusyStateWithoutLiveRun(t *testing.T) {
+	// A busy state with no in-process run is the leftover of a previous process:
+	// nothing will ever finish it, so the poll must give up with a diagnostic
+	// instead of hanging forever.
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{
+		DefaultProvider: "mock",
+		DefaultModel:    "mock-model",
+	})
+	if err := llmRuntime.RegisterProvider("mock", runtimellm.NewMockProvider("mock", 10*time.Millisecond)); err != nil {
+		t.Fatalf("RegisterProvider: %v", err)
+	}
+	stateStore := runtimechat.NewInMemoryRuntimeStore(8)
+	if err := stateStore.SaveState(context.Background(), &runtimechat.RuntimeState{
+		SessionID:     "session-stale",
+		Status:        runtimechat.SessionRunning,
+		CurrentTurnID: "turn-stale",
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "test-actor",
+		Provider: "mock",
+		Model:    "mock-model",
+		MaxSteps: 4,
+	}, nil, llmRuntime)
+	actor, err := runtimechat.NewSessionActor("session-stale", runtimechat.SessionActorConfig{
+		Agent:      apiAgent,
+		LLMRuntime: llmRuntime,
+		StateStore: stateStore,
+	})
+	if err != nil {
+		t.Fatalf("NewSessionActor: %v", err)
+	}
+	if state, ok := actor.StateSummary(); !ok || !state.Busy() {
+		t.Fatalf("pre-seeded running state must stay busy, got %+v", state)
+	}
+	if actor.RunInFlight() {
+		t.Fatal("restored state must not report an in-process run")
+	}
+
+	origTimeout := aicliActorReadyWaitTimeout
+	aicliActorReadyWaitTimeout = 120 * time.Millisecond
+	defer func() { aicliActorReadyWaitTimeout = origTimeout }()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	err = waitForAICLIActorReady(ctx, actor)
 	if err == nil {
-		t.Fatal("expected timeout error while actor stayed busy")
+		t.Fatal("expected timeout error while a busy state has no live run")
 	}
 	if !strings.Contains(err.Error(), "等待就绪超时") {
 		t.Fatalf("expected diagnostic timeout error, got: %v", err)
@@ -245,11 +304,8 @@ func TestWaitForAICLIActorReady_TimesOutWithDiagnosticWhenActorStaysBusy(t *test
 	if !strings.Contains(err.Error(), "status=") {
 		t.Fatalf("expected status diagnostic in error message, got: %v", err)
 	}
-	if state, ok := actor.StateSummary(); !ok || !state.Busy() {
-		t.Fatalf("actor should still be busy after timeout error, got %+v", state)
-	}
-	if err := <-bgDone; err != nil {
-		t.Fatalf("background run failed: %v", err)
+	if isACPCancelError(err) {
+		t.Fatalf("actor readiness timeout must not be classified as cancellation: %v", err)
 	}
 }
 

@@ -837,10 +837,14 @@ func DiagnoseFailure(err error) FailureDiagnostic {
 		}
 	}
 
+	nextAction := llmFailureNextAction(code, decision)
+	if code == "PERMISSION_DENIED" && isCredentialExpiredError(err) {
+		nextAction = "Replace or refresh the expired provider credential, then retry; do not retry with the same credential."
+	}
 	return FailureDiagnostic{
 		ErrorCode:  code,
 		Retryable:  decision.Retryable,
-		NextAction: llmFailureNextAction(code, decision),
+		NextAction: nextAction,
 	}
 }
 
@@ -912,6 +916,9 @@ func classifyLLMFailureCode(err error, decision retryDecision) string {
 	}
 	if isQuotaExhaustionError(err) {
 		return "UPSTREAM_QUOTA_EXHAUSTED"
+	}
+	if isCredentialExpiredError(err) {
+		return "PERMISSION_DENIED"
 	}
 	// 报文里的瞬时故障信号优先于裸状态码：网关可能把 "bad gateway" /
 	// "service unavailable" / 连接中断包在 400/404 里。若按状态码上报成
@@ -985,6 +992,20 @@ func isQuotaExhaustionError(err error) bool {
 		"usage limit exceeded",
 		"usage_limit_reached",
 		"usage_limit_exceeded",
+	)
+}
+
+func isCredentialExpiredError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return containsAny(lower,
+		"api_key_expired",
+		"api key expired",
+		"expired api key",
+		"credential expired",
+		"credentials expired",
 	)
 }
 

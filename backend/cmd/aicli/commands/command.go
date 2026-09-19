@@ -1540,11 +1540,11 @@ func executeShellCommandDetailedMode(session *ChatSession, cmdStr string, stream
 				capture := captureAccumulator.Result()
 				result.Capture = capture
 				result.Output = capture.Output
-				logLocalShellCommandDebug(session, result, fmt.Errorf("用户中断"))
+				logLocalShellCommandDebug(session, result, userInterruptError())
 				if streamOutput {
 					fmt.Println("\n[已中断] 命令执行已停止")
 				}
-				return result, fmt.Errorf("用户中断")
+				return result, userInterruptError()
 			}
 			// 超时
 			cmd.Process.Kill()

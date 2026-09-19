@@ -3591,7 +3591,21 @@ func (s *SQLiteRuntimeStore) repairRuntimeMailboxLocalProjectionRecord(ctx conte
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tx, err := s.db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	// Close may run after the asynchronous bootstrap reconciliation has passed
+	// ensureCtx but before it acquires s.mu. Never dereference the database field
+	// directly across that lifecycle race: Close clears s.db under openMu.
+	s.openMu.RLock()
+	db := s.db
+	closed := s.closed
+	if closed || db == nil {
+		s.openMu.RUnlock()
+		if closed {
+			return false, fmt.Errorf("runtime store is closed")
+		}
+		return false, fmt.Errorf("runtime store is not open")
+	}
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	s.openMu.RUnlock()
 	if err != nil {
 		return false, fmt.Errorf("begin runtime mailbox local projection repair tx: %w", err)
 	}

@@ -4651,6 +4651,7 @@ func TestPublishToolReceiptEventStoresOnlyMessageDiagnostics(t *testing.T) {
 		ToolCallID:  "call-1",
 		ToolName:    "shell",
 		MessageJSON: messageJSON,
+		ArgsJSON:    []byte(`{"command":"echo hi"}`),
 		CreatedAt:   time.Now().UTC(),
 	})
 
@@ -4664,6 +4665,15 @@ func TestPublishToolReceiptEventStoresOnlyMessageDiagnostics(t *testing.T) {
 	assert.Equal(t, fmt.Sprintf("%x", sha256.Sum256(messageJSON)), receiptPayload["message_sha256"])
 	assert.Equal(t, "call-1", receiptPayload["tool_call_id"])
 	assert.Equal(t, "shell", receiptPayload["tool_name"])
+	assert.Equal(t, "trace-1", events[0].Payload["turn_id"])
+	assert.Equal(t, "trace-1", receiptPayload["turn_id"])
+	// TraceID remains a compatibility alias for existing observers. Ownership
+	// is now explicit in payload.turn_id and no consumer should infer it here.
+	assert.Equal(t, "trace-1", events[0].TraceID)
+	// The top-level payload is enriched with args + output so the trajectory can
+	// reconstruct full tool info after recovery.
+	assert.Equal(t, `{"command":"echo hi"}`, events[0].Payload["args"])
+	assert.Equal(t, "large result", events[0].Payload["output"])
 }
 
 func assertRuntimeEvent(t *testing.T, store EventStore, sessionID, eventType string, payload map[string]string) {

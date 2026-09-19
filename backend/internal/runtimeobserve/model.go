@@ -152,6 +152,10 @@ type RuntimeSummary struct {
 	RingCurrentBytes int64             `json:"ring_current_bytes"`
 	RingOldestSeq    int64             `json:"ring_oldest_seq"`
 	RingLatestSeq    int64             `json:"ring_latest_seq"`
+	// RuntimeObserveRingEvictions counts observations evicted from the
+	// runtime-observe retention ring due to capacity or TTL. It is an
+	// observability-history counter and does not imply primary delivery loss.
+	RuntimeObserveRingEvictions uint64 `json:"runtime_observe_ring_evictions"`
 }
 
 // UsageSummary 汇总 token usage（仅计数，不重复求和）。

@@ -717,9 +717,16 @@ func (e *EventEncoder) classify(ev runtimeevents.Event) op {
 	case runtimechat.EventLLMRequestFinished, "llm.request.finished":
 		return opLLMFinished
 
-	case runtimechat.EventToolStarted,
-		runtimechat.EventToolReceiptRecorded:
+	case runtimechat.EventToolStarted:
 		return opToolStarted
+
+	// 持久化回执（tool_receipt_recorded / tool_receipt_replayed）是崩溃恢复
+	// 账本，不是第二次工具调用：它与 started/finished 描述同一次调用，可能晚到
+	// （回合结束后批量落账）或在恢复重放时单独出现，必须复用同一 call 既有的
+	// mutable tool cell（缺失原始事件时才重建一行，而不是降级成 system 行）。
+	case runtimechat.EventToolReceiptRecorded,
+		runtimechat.EventToolReceiptReplayed:
+		return opToolReceipt
 
 	case runtimechat.EventToolFinished:
 		return opToolFinished
@@ -750,8 +757,7 @@ func (e *EventEncoder) classify(ev runtimeevents.Event) op {
 		runtimechat.EventJobOutput,
 		runtimechat.EventJobCancelled,
 		runtimechat.EventJobFinished,
-		runtimechat.EventMailboxReceived,
-		runtimechat.EventToolReceiptReplayed:
+		runtimechat.EventMailboxReceived:
 		return opSystem
 
 	default:
@@ -848,6 +854,7 @@ const (
 	opToolStarted                 // 工具调用发起：append tool_call（分配 CauseID）
 	opToolProgress                // 工具运行进度：upsert 同一 mutable tool_call
 	opToolFinished                // 工具完成：upsert tool_call 终态 + append tool_output
+	opToolReceipt                 // 工具持久化回执：幂等复用既有 tool_call（绝不新建调用行）
 )
 
 // apply 执行一次编码操作。
@@ -879,6 +886,8 @@ func (e *EventEncoder) apply(o op, ev runtimeevents.Event, cs *ChangeSet) {
 		e.applyToolProgress(ev, cs)
 	case opToolFinished:
 		e.applyToolFinished(ev, cs)
+	case opToolReceipt:
+		e.applyToolReceipt(ev, cs)
 	}
 }
 
@@ -2329,6 +2338,42 @@ func (e *EventEncoder) applyToolFinished(ev runtimeevents.Event, cs *ChangeSet) 
 	}
 	out.Status = StatusCompleted // 工具输出一次性完成（终态语义）
 	e.change(cs, OpAppend, out)
+}
+
+// applyToolReceipt 投影一条 durable 工具回执（tool_receipt_recorded /
+// tool_receipt_replayed，两者 payload 同形、语义相同：recorded 是回合末批量
+// 落账，replayed 是崩溃恢复 resume 时的账本重放）。
+//
+// 回执是"该调用的最终结果已持久化"的账本事件，与 tool started/finished 描述
+// 的是同一次调用，只是可能晚到（回合结束后批量落账）或在恢复重放时单独出现。
+// 它因此必须复用既有 mutable tool cell，而不是开启新调用：
+//
+//   - 同 call 已有终态行：幂等跳过（回执只是同一调用的持久化副本；重复投影会
+//     在记录尾部堆出一串没有参数细节的裸 "• Completed <tool>" 行）；
+//   - 同 call 仍运行中：用回执就地补完这一行（终态 + 输出），不新建；
+//   - 没有同 call 的行（原始 started/finished 事件缺失，如崩溃恢复）：以回执
+//     建立一个终态行，输出同 live 路径形态，保证信息不丢。
+//
+// 缺少 call identity / 工具名的回执仍降级为 system（与 applyTool* 一致）。
+func (e *EventEncoder) applyToolReceipt(ev runtimeevents.Event, cs *ChangeSet) {
+	callID := toolCallID(ev)
+	name := payloadString(ev.Payload["tool_name"], payloadString(ev.Payload["logical_tool"], ev.ToolName))
+	if callID == "" || name == "" {
+		e.applySystem(ev, cs)
+		return
+	}
+	if it := e.toolByID[callID]; it != nil {
+		if it.Status.Terminal() {
+			e.stats.DuplicateCount++
+			return
+		}
+		// 运行中的调用：回执就是它的最终结果，就地补完同一行。
+		e.applyToolFinished(ev, cs)
+		return
+	}
+	// 原始 started/finished 缺失的恢复路径：先建立调用身份与单元格，再落终态。
+	e.applyToolStarted(ev, cs)
+	e.applyToolFinished(ev, cs)
 }
 
 // indentToolOutputTree 把工具输出文本行树形化：从第一行到倒数第二行用竖线

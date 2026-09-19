@@ -24,10 +24,11 @@ type aicliActorChatExecutor struct{}
 
 const aicliActorReadyPollInterval = 20 * time.Millisecond
 
-// aicliActorReadyWaitTimeout bounds the wait-for-ready poll. Without a timeout
-// the prompt hangs forever with no LLM request and no user-visible feedback when
-// the actor carries a stale busy state left by a previous process (resume after
-// a crash/kill), e.g. Status=SessionRunning with a turn that will never finish.
+// aicliActorReadyWaitTimeout bounds how long a busy state that no in-process run
+// backs may block a prompt. Such a state is the leftover of a previous process
+// (resume after a crash/kill), e.g. Status=SessionRunning with a turn that will
+// never finish, and it never converges on its own. A busy state backed by a live
+// run is followed instead of failed; see waitForAICLIActorReady.
 var aicliActorReadyWaitTimeout = 30 * time.Second
 
 // submitAICLIActorPrompt serializes an interactive user turn behind an
@@ -81,20 +82,29 @@ func waitForAICLIActorReady(ctx context.Context, actor *runtimechat.SessionActor
 	}
 	ticker := time.NewTicker(aicliActorReadyPollInterval)
 	defer ticker.Stop()
-	timeout := time.NewTimer(aicliActorReadyWaitTimeout)
-	defer timeout.Stop()
+	staleTimeout := time.NewTimer(aicliActorReadyWaitTimeout)
+	defer staleTimeout.Stop()
 	for {
-		if state, ok := actor.StateSummary(); !ok || !state.Busy() {
+		state, ok := actor.StateSummary()
+		if !ok || !state.Busy() {
 			return nil
+		}
+		// A live run in this process owns the busy state (a resumed turn, a long
+		// tool call, a pending approval). It converges on its own, so keep
+		// following it instead of failing the prompt on the stale-state budget:
+		// the run stall watchdog still bounds a wedged run, and ctx cancellation
+		// is honored below.
+		if actor.RunInFlight() {
+			resetAICLIActorReadyTimer(staleTimeout, aicliActorReadyWaitTimeout)
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-timeout.C:
+		case <-staleTimeout.C:
 			state, _ := actor.StateSummary()
 			return fmt.Errorf(
 				"actor 等待就绪超时（%v）：status=%s turn=%s pending_tool=%v pending_approval=%v active_jobs=%d；"+
-					"resume 可能遗留了上一进程未结束的 turn，可 Ctrl+C 中断后重新 resume 或使用 /team 清理",
+					"该忙碌状态没有本进程的运行在支撑，可能是上一进程遗留的 turn，可先 Ctrl+C 结束当前轮次再重新 resume，或使用 /team 清理",
 				aicliActorReadyWaitTimeout,
 				state.Status, state.CurrentTurnID,
 				state.PendingToolName, state.PendingApproval, state.ActiveJobCount,
@@ -102,6 +112,21 @@ func waitForAICLIActorReady(ctx context.Context, actor *runtimechat.SessionActor
 		case <-ticker.C:
 		}
 	}
+}
+
+// resetAICLIActorReadyTimer re-arms the stale-state budget without leaking the
+// previous firing of the timer.
+func resetAICLIActorReadyTimer(timer *time.Timer, d time.Duration) {
+	if timer == nil {
+		return
+	}
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(d)
 }
 
 // prepareAICLIActorRuntimeContext keeps the actor path's output ownership in

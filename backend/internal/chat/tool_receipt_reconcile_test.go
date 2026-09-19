@@ -68,6 +68,13 @@ func TestToolReceiptPersistedOnToolCompletion(t *testing.T) {
 			continue
 		}
 		recordedEvents++
+		if event.Payload["turn_id"] != "turn-1" {
+			t.Fatalf("当前轮回执必须携带显式 turn_id，实际 %#v", event.Payload["turn_id"])
+		}
+		receiptPayload, ok := event.Payload["receipt"].(map[string]interface{})
+		if !ok || receiptPayload["turn_id"] != "turn-1" {
+			t.Fatalf("嵌套回执必须携带相同 turn_id，实际 %#v", event.Payload["receipt"])
+		}
 		if event.Payload["tool_call_id"] == "call-fail" {
 			if ok, exists := event.Payload["ok"]; exists {
 				flag, isBool := ok.(bool)

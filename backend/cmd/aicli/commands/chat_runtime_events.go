@@ -63,6 +63,15 @@ type chatRuntimeEventBridge struct {
 	streamMu                        sync.Mutex
 	pendingStreams                  []chatRuntimeQueuedEvent
 	pendingStreamsBytes             int64
+	streamRetainedEvents            uint64
+	streamRetainedBytes             uint64
+	streamDroppedEvents             uint64
+	streamDroppedBytes              uint64
+	streamRetainedByType            map[string]uint64
+	streamDroppedByType             map[string]uint64
+	streamOverflowLogMu             sync.Mutex
+	streamOverflowLogCount          uint64
+	streamOverflowLogSuppressed     uint64
 	runMu                           sync.Mutex
 	logMu                           sync.Mutex
 	renderMu                        sync.Mutex
@@ -72,6 +81,10 @@ type chatRuntimeEventBridge struct {
 	historySeedSeen                 map[string]struct{}
 	approvalGrants                  map[string]time.Time
 	permissionHintShown             bool
+	// headlessQuestionErr keeps the last transport error of the headless
+	// question hook so the fail-closed message can explain why the panel did
+	// not answer (guarded by renderMu).
+	headlessQuestionErr             string
 	priorityTranscriptTarget        chatRuntimePriorityTranscriptTarget
 	renderedAssistantDelta          bool
 	renderedAssistantDeltaFinalized bool
@@ -157,6 +170,11 @@ type chatRuntimeEventBridge struct {
 	turnBudget     atomic.Pointer[chatEventBridgeTurnBudget]
 	askApproval    func(*runtimechat.ApprovalRequest, []string) (chatApprovalAnswer, error)
 	askQuestion    func(prompt string, suggestions []string, required bool) (string, error)
+	// askQuestionHeadless answers ask_user_question prompts in --no-interactive
+	// runs (ACP clients, exec answer injection). When it is nil, or when it
+	// reports that no panel is available, the run keeps the historical
+	// fail-closed behavior instead of silently inventing an answer.
+	askQuestionHeadless func(prompt string, suggestions []string, required bool) (string, error)
 	approveTool    func(ctx context.Context, sessionID, requestID string, allow bool) error
 	answerQuestion func(ctx context.Context, sessionID, questionID, answer string) error
 	// preferInteractiveApprovals keeps NoInteractive headless hosts (ACP stdio)
@@ -195,7 +213,7 @@ type chatRuntimeEventBridge struct {
 	eventLogCount            uint64 // 已写入事件数
 	eventLogReplayed         uint64 // 启动时重放事件数
 	eventLogFailures         uint64 // 写入/重放失败次数
-	eventLogDirEnsured       bool   // .events 目录已确保存在（惰性 MkdirAll）
+	eventLogDirEnsured       bool   // 会话 events/ 目录已确保存在（惰性 MkdirAll）
 
 	// 渲染层双跑文本对照（切片 9）：coordinator 每个完整块提交后调用
 	// checkTextParity，把旧路径实际写出的行序列与 Scene 快照 RenderText
@@ -221,6 +239,10 @@ type chatRuntimeQueuedEvent struct {
 	event runtimeevents.Event
 	size  int64
 	epoch uint64
+	// queuedAt is set when a stream event first enters pendingStreams. It is
+	// retained across coalescing so diagnostics can report the oldest pending
+	// age without consulting the event payload.
+	queuedAt time.Time
 	// key is the latest-wins identity of a coalescible event (empty for
 	// events that must keep their own slot). Set when the event is deferred
 	// into the overflow queue; it is what makes in-place merging possible.
@@ -303,6 +325,7 @@ const chatAssistantStreamPendingByteLimit int64 = 1 << 20
 const chatStreamCoalescePendingLimit = 128
 const chatStreamCoalescePendingByteLimit int64 = 1 << 20
 const chatStreamCoalesceEventByteLimit int64 = 1 << 20
+const chatStreamOverflowLogInterval = 64
 
 // streamCoalescedFromKey records the first sequence folded into a coalesced
 // stream event. The visible "sequence" field keeps the last sequence so the
@@ -1605,6 +1628,23 @@ type chatDeferredQueueClassStats struct {
 	Degraded            bool
 }
 
+// chatStreamQueueStats is the stream-specific pressure view. Retained and
+// dropped counters are intentionally separate: assistant text is retained
+// beyond the soft budget when no authoritative terminal snapshot exists,
+// whereas reasoning/other stream families may be dropped for liveness.
+type chatStreamQueueStats struct {
+	Pending                int
+	Bytes                  int64
+	OldestPendingAge       time.Duration
+	RetainedEvents         uint64
+	RetainedBytes          uint64
+	DroppedEvents          uint64
+	DroppedBytes           uint64
+	RetainedByType         map[string]uint64
+	DroppedByType          map[string]uint64
+	OverflowLogsSuppressed uint64
+}
+
 // chatEventBridgeDegradation 是给 TUI 状态行读取的无锁降级摘要
 // （docs/plan/ui-event-bridge-drop-hardening.md §6.2 第 3 条）。它只回答
 // "本 run 内是否发生过合并/驱逐/丢弃"，不替代 /debug 的完整真相。
@@ -1736,6 +1776,42 @@ func (b *chatRuntimeEventBridge) deferredQueueClassStats() chatDeferredQueueClas
 	stats.CriticalAtShutdown = b.criticalAtShutdown
 	stats.Degraded = b.eventBridgeDegraded
 	b.progressMu.Unlock()
+	return stats
+}
+
+// streamQueueStats returns a detached snapshot of stream pressure. The
+// per-type maps are bounded by recordChatEventTypeCount and therefore cannot
+// become an unbounded label/cardinality source.
+func (b *chatRuntimeEventBridge) streamQueueStats() chatStreamQueueStats {
+	stats := chatStreamQueueStats{}
+	if b == nil {
+		return stats
+	}
+	b.streamMu.Lock()
+	stats.Pending = len(b.pendingStreams)
+	stats.Bytes = b.pendingStreamsBytes
+	if stats.Pending > 0 {
+		oldest := b.pendingStreams[0].queuedAt
+		if oldest.IsZero() {
+			oldest = b.pendingStreams[0].event.Timestamp
+		}
+		if !oldest.IsZero() {
+			stats.OldestPendingAge = time.Since(oldest)
+			if stats.OldestPendingAge < 0 {
+				stats.OldestPendingAge = 0
+			}
+		}
+	}
+	stats.RetainedEvents = b.streamRetainedEvents
+	stats.RetainedBytes = b.streamRetainedBytes
+	stats.DroppedEvents = b.streamDroppedEvents
+	stats.DroppedBytes = b.streamDroppedBytes
+	stats.RetainedByType = cloneChatEventTypeCounts(b.streamRetainedByType)
+	stats.DroppedByType = cloneChatEventTypeCounts(b.streamDroppedByType)
+	b.streamMu.Unlock()
+	b.streamOverflowLogMu.Lock()
+	stats.OverflowLogsSuppressed = b.streamOverflowLogSuppressed
+	b.streamOverflowLogMu.Unlock()
 	return stats
 }
 
@@ -1893,7 +1969,7 @@ func (b *chatRuntimeEventBridge) enqueueStreamEvent(event runtimeevents.Event, s
 	b.renderMu.Lock()
 	epoch := b.runEpoch
 	b.renderMu.Unlock()
-	q := chatRuntimeQueuedEvent{event: event, size: size, epoch: epoch}
+	q := chatRuntimeQueuedEvent{event: event, size: size, epoch: epoch, queuedAt: time.Now()}
 	// Once any delta is waiting in pendingStreams, every later delta must
 	// append to the same FIFO. The bounded queue can momentarily have room
 	// while run() flushes between consumed events; sending directly then
@@ -1909,12 +1985,14 @@ func (b *chatRuntimeEventBridge) enqueueStreamEvent(event runtimeevents.Event, s
 			if last.size+size > chatStreamCoalesceEventByteLimit ||
 				b.pendingStreamsBytes+size > chatStreamCoalescePendingByteLimit {
 				if !assistantStreamDeltaMustNotDrop(event) {
-					b.logLateRuntimeEvent(event, "coalesced stream payload exceeded byte limit; delta dropped")
+					b.recordStreamDropLocked(event, size)
+					b.logStreamOverflow(event, "coalesced stream payload exceeded byte limit; delta dropped")
 					return
 				}
 				// assistant 文本增量不允许丢弃：中间步骤没有 run 级终稿可复原，
 				// 丢弃一个 delta 就会在 sequence 有序拼接里形成永久空洞。
-				b.logLateRuntimeEvent(event, "coalesced stream payload exceeded byte limit; assistant delta retained")
+				b.recordStreamRetentionLocked(event, size)
+				b.logStreamOverflow(event, "coalesced stream payload exceeded byte limit; assistant delta retained")
 			}
 			last.event = mergeStreamEvents(last.event, event)
 			last.size += size
@@ -1933,10 +2011,12 @@ func (b *chatRuntimeEventBridge) enqueueStreamEvent(event runtimeevents.Event, s
 			if last.size+size > chatStreamCoalesceEventByteLimit ||
 				b.pendingStreamsBytes+size > chatStreamCoalescePendingByteLimit {
 				if !assistantStreamDeltaMustNotDrop(event) {
-					b.logLateRuntimeEvent(event, "coalesced stream payload exceeded byte limit; delta dropped")
+					b.recordStreamDropLocked(event, size)
+					b.logStreamOverflow(event, "coalesced stream payload exceeded byte limit; delta dropped")
 					return
 				}
-				b.logLateRuntimeEvent(event, "coalesced stream payload exceeded byte limit; assistant delta retained")
+				b.recordStreamRetentionLocked(event, size)
+				b.logStreamOverflow(event, "coalesced stream payload exceeded byte limit; assistant delta retained")
 			}
 			lastFrom, hasLastFrom := streamCoalescedFrom(last.event)
 			if !hasLastFrom {
@@ -2002,15 +2082,67 @@ func (b *chatRuntimeEventBridge) appendPendingStreamLocked(q chatRuntimeQueuedEv
 	if len(b.pendingStreams) >= chatStreamCoalescePendingLimit ||
 		b.pendingStreamsBytes+q.size > chatStreamCoalescePendingByteLimit {
 		if !assistantStreamDeltaMustNotDrop(q.event) {
-			b.logLateRuntimeEvent(q.event, "coalesced stream pending budget exceeded; delta dropped")
+			b.recordStreamDropLocked(q.event, q.size)
+			b.logStreamOverflow(q.event, "coalesced stream pending budget exceeded; delta dropped")
 			return
 		}
 		// assistant 文本增量超出软预算也保留：消费端恢复后会排空积压，而丢弃
 		// 会在请求边界前形成 sequence 空洞（中间步骤没有终稿可复原）。
-		b.logLateRuntimeEvent(q.event, "coalesced stream pending budget exceeded; assistant delta retained")
+		b.recordStreamRetentionLocked(q.event, q.size)
+		b.logStreamOverflow(q.event, "coalesced stream pending budget exceeded; assistant delta retained")
 	}
 	b.pendingStreams = append(b.pendingStreams, q)
 	b.pendingStreamsBytes += q.size
+}
+
+func (b *chatRuntimeEventBridge) recordStreamRetentionLocked(event runtimeevents.Event, size int64) {
+	if b == nil {
+		return
+	}
+	if size < 0 {
+		size = 0
+	}
+	b.streamRetainedEvents++
+	b.streamRetainedBytes += uint64(size)
+	b.streamRetainedByType = recordChatEventTypeCount(b.streamRetainedByType, event.Type)
+}
+
+func (b *chatRuntimeEventBridge) recordStreamDropLocked(event runtimeevents.Event, size int64) {
+	if b == nil {
+		return
+	}
+	if size < 0 {
+		size = 0
+	}
+	b.streamDroppedEvents++
+	b.streamDroppedBytes += uint64(size)
+	b.streamDroppedByType = recordChatEventTypeCount(b.streamDroppedByType, event.Type)
+}
+
+// logStreamOverflow forwards every event to the structured late-event path,
+// but rate-limits the human/debug line. A stream storm must not turn the
+// diagnostic sink into another unbounded producer.
+func (b *chatRuntimeEventBridge) logStreamOverflow(event runtimeevents.Event, reason string) {
+	if b == nil {
+		return
+	}
+	b.forwardLateRuntimeEvent(event)
+	b.streamOverflowLogMu.Lock()
+	b.streamOverflowLogCount++
+	count := b.streamOverflowLogCount
+	shouldLog := count == 1 || count%chatStreamOverflowLogInterval == 0
+	if !shouldLog {
+		b.streamOverflowLogSuppressed++
+		b.streamOverflowLogMu.Unlock()
+		return
+	}
+	suppressed := b.streamOverflowLogSuppressed
+	b.streamOverflowLogSuppressed = 0
+	b.streamOverflowLogMu.Unlock()
+	if suppressed > 0 {
+		reason = fmt.Sprintf("%s (suppressed_logs=%d)", reason, suppressed)
+	}
+	b.writeLateRuntimeDebug(event, reason)
 }
 
 // assistantStreamDeltaMustNotDrop reports whether an over-budget stream event
@@ -2148,7 +2280,8 @@ func (b *chatRuntimeEventBridge) flushStreamTailBoundedLocked(entries []chatRunt
 	for i := range entries {
 		for !b.trySendStreamEvent(&entries[i]) {
 			if time.Now().After(deadline) {
-				b.logLateRuntimeEvent(entries[i].event, "coalesced stream tail flush budget exceeded; delta dropped")
+				b.recordStreamDropLocked(entries[i].event, entries[i].size)
+				b.logStreamOverflow(entries[i].event, "coalesced stream tail flush budget exceeded; delta dropped")
 				return
 			}
 			time.Sleep(time.Millisecond)
@@ -2521,6 +2654,11 @@ func (b *chatRuntimeEventBridge) postRuntimeEventToUIActorWithEpoch(event runtim
 			reason := "UI actor mailbox stalled; event dropped"
 			if isMergeableStreamEvent(event.Type) {
 				reason = "UI actor mailbox full; streaming event dropped after bounded wait"
+				b.streamMu.Lock()
+				b.recordStreamDropLocked(event, runtimeevents.ApproximateEventBytes(event))
+				b.streamMu.Unlock()
+				b.logStreamOverflow(event, reason)
+				return false, false
 			}
 			b.logLateRuntimeEvent(event, reason)
 			return false, false
@@ -2880,7 +3018,8 @@ func (b *chatRuntimeEventBridge) eventLogFilePath() string {
 	if b.session == nil || b.session.Logger == nil {
 		return ""
 	}
-	dir := b.session.Logger.RuntimeEventsDir()
+	logger := b.session.Logger
+	dir := logger.RuntimeEventsDir()
 	if dir == "" {
 		return ""
 	}
@@ -2888,28 +3027,16 @@ func (b *chatRuntimeEventBridge) eventLogFilePath() string {
 	if _, err := os.Stat(newPath); err == nil {
 		return newPath
 	}
-	// 兼容旧布局 chat-logs/YYYY/MM/DD/<sessionID>/runtime-events.jsonl，防止事件链断连
-	if legacy := b.legacyRuntimeEventsLogPath(); legacy != "" {
+	// 兼容旧布局（扁平 <session-id>.events/ 与更早的嵌套 <sessionID>/），防止事件链断连。
+	for _, legacy := range logger.LegacyRuntimeEventsLogPaths() {
+		if legacy == "" {
+			continue
+		}
 		if _, err := os.Stat(legacy); err == nil {
 			return legacy
 		}
 	}
 	return newPath
-}
-
-// legacyRuntimeEventsLogPath 返回旧布局下的 runtime 事件文件路径。
-func (b *chatRuntimeEventBridge) legacyRuntimeEventsLogPath() string {
-	l := b.session.Logger
-	if l == nil || strings.TrimSpace(l.sessionID) == "" {
-		return ""
-	}
-	dir := b.session.Logger.RuntimeEventsDir()
-	if dir == "" {
-		return ""
-	}
-	// <sid>.events 的上一级即 YYYY/MM/DD 日期分区
-	partitionDir := filepath.Dir(dir)
-	return filepath.Join(partitionDir, l.sessionID, "runtime-events.jsonl")
 }
 
 // appendEventLog 把事件 JSON 追加到事件日志（best-effort：失败只计数，不阻塞事件循环）。
@@ -3066,7 +3193,7 @@ func (b *chatRuntimeEventBridge) appendEventLogLine(line []byte) {
 	}
 	b.eventLogMu.Lock()
 	defer b.eventLogMu.Unlock()
-	// O_CREATE 只创建文件、不会创建 <session-id>.events 目录：目录缺失时
+	// O_CREATE 只创建文件、不会创建会话 events/ 目录：目录缺失时
 	// 每次 append 都以 ENOENT 失败并被静默计入 eventLogFailures，导致
 	// runtime-events.jsonl 整会话缺失、/resume 无法重放重建渲染模型。
 	// 旧会话（启动早于 ensureSessionArtifactLayout 修复）也依赖这里的惰性创建。
@@ -3796,6 +3923,13 @@ func (b *chatRuntimeEventBridge) logLateRuntimeEvent(event runtimeevents.Event, 
 		return
 	}
 	b.forwardLateRuntimeEvent(event)
+	b.writeLateRuntimeDebug(event, reason)
+}
+
+func (b *chatRuntimeEventBridge) writeLateRuntimeDebug(event runtimeevents.Event, reason string) {
+	if b == nil || b.session == nil {
+		return
+	}
 	payload, _ := json.Marshal(event.Payload)
 	writeSessionDebugInfo(
 		b.session,
@@ -4662,6 +4796,12 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		required, _ := event.Payload["required"].(bool)
 		suggestions := interfaceSliceToStrings(event.Payload["suggestions"])
 		if b.session.NoInteractive {
+			// Headless hosts with a question panel (ACP session/request_question)
+			// answer the prompt through the client instead of failing the turn.
+			if answer, ok := b.answerQuestionHeadless(prompt, suggestions, required); ok {
+				_ = b.resolveQuestion(context.Background(), event.SessionID, questionID, answer)
+				return
+			}
 			b.setRunError(b.nonInteractiveQuestionError(prompt))
 			_ = b.resolveQuestion(context.Background(), event.SessionID, questionID, "")
 			return
@@ -6329,8 +6469,36 @@ func (b *chatRuntimeEventBridge) nonInteractiveQuestionError(prompt string) erro
 	if prompt = strings.TrimSpace(prompt); prompt != "" {
 		parts = append(parts, fmt.Sprintf("prompt=%s", truncateChatRuntimeText(prompt, 160)))
 	}
+	if b != nil {
+		b.renderMu.Lock()
+		reason := b.headlessQuestionErr
+		b.renderMu.Unlock()
+		if reason != "" {
+			parts = append(parts, fmt.Sprintf("panel_error=%s", truncateChatRuntimeText(reason, 160)))
+		}
+	}
 	parts = append(parts, "建议：把必要信息直接写进 exec 输入；纯文本问答使用 `aicli exec --disable-tools \"...\"`；需要交互追问时使用 `aicli chat`")
 	return fmt.Errorf("%s", strings.Join(parts, "；"))
+}
+
+// answerQuestionHeadless routes an ask_user_question prompt through the
+// headless question hook (ACP session/request_question). ok=false means the
+// host has no usable panel, so the caller keeps the fail-closed behavior.
+func (b *chatRuntimeEventBridge) answerQuestionHeadless(prompt string, suggestions []string, required bool) (string, bool) {
+	if b == nil || b.askQuestionHeadless == nil {
+		return "", false
+	}
+	answer, err := b.askQuestionHeadless(prompt, suggestions, required)
+	if err != nil {
+		b.renderMu.Lock()
+		b.headlessQuestionErr = err.Error()
+		b.renderMu.Unlock()
+		return "", false
+	}
+	b.renderMu.Lock()
+	b.headlessQuestionErr = ""
+	b.renderMu.Unlock()
+	return answer, true
 }
 
 func chatRuntimePermissionModeLabel(session *ChatSession) string {

@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -140,15 +141,50 @@ func TimeoutError(budget TimeoutBudget) error {
 	return runtimeerrors.WrapWithContext(code, message, context.DeadlineExceeded, budget.Metadata())
 }
 
+// CancellationError builds a typed cancellation error for the given cancel
+// source. Callers must classify cancellations with IsCancellation (or
+// errors.Is against context.Canceled); the message text is never authoritative.
 func CancellationError(source string) error {
+	return CancellationErrorWithMessage(source, "agent execution was canceled")
+}
+
+// CancellationErrorWithMessage is CancellationError with a caller-supplied
+// user-facing message. The message stays presentation-only: classification
+// relies on the typed cause/metadata, never on this text.
+func CancellationErrorWithMessage(source, message string) error {
 	source = strings.TrimSpace(source)
 	if source == "" {
 		source = "parent_context"
 	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = "agent execution was canceled"
+	}
 	metadata := map[string]interface{}{"cancel_source": source}
-	return runtimeerrors.WrapWithContext(runtimeerrors.ErrAgentRunCanceled, "agent execution was canceled", context.Canceled, metadata)
+	return runtimeerrors.WrapWithContext(runtimeerrors.ErrAgentRunCanceled, message, context.Canceled, metadata)
 }
 
 func ContextCancellationError(ctx context.Context) error {
 	return CancellationError(CancelSource(ctx))
+}
+
+// IsCancellation reports whether err is a cooperative cancellation (canceled
+// context or explicit user interrupt) rather than a timeout or execution
+// failure. Classification is typed on purpose: error strings are never
+// inspected, because diagnostic messages may legitimately mention words such
+// as "cancel"/"interrupt"/"中断" without being cancellations.
+func IsCancellation(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	if runtimeerrors.Is(err, runtimeerrors.ErrAgentRunCanceled) {
+		return true
+	}
+	// Keep the legacy mapping for the bare deadline sentinel. Wrapped deadlines
+	// (e.g. TimeoutError) stay failures and must surface as errors instead of a
+	// silent cancellation.
+	return err == context.DeadlineExceeded
 }

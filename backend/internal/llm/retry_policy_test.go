@@ -118,6 +118,20 @@ func TestDiagnoseFailureSeparatesQuotaAndTransientFailures(t *testing.T) {
 	assert.Contains(t, transient.NextAction, "bounded backoff")
 }
 
+func TestDiagnoseFailureFailsFastForExpiredProviderCredential(t *testing.T) {
+	tests := []error{
+		newProviderHTTPError(http.StatusForbidden, `{"error":{"code":"API_KEY_EXPIRED","message":"API key expired"}}`, nil),
+		fmt.Errorf("provider rejected request: API_KEY_EXPIRED"),
+	}
+	for _, err := range tests {
+		diagnostic := DiagnoseFailure(err)
+		assert.Equal(t, "PERMISSION_DENIED", diagnostic.ErrorCode)
+		assert.False(t, diagnostic.Retryable)
+		assert.Contains(t, strings.ToLower(diagnostic.NextAction), "expired provider credential")
+		assert.Contains(t, strings.ToLower(diagnostic.NextAction), "do not retry with the same credential")
+	}
+}
+
 func TestClassifyRetryableLLMErrorWithRules_ConfiguredStopUsesStructuredCode(t *testing.T) {
 	decision := classifyRetryableLLMErrorWithRules(retryPolicyTestError{
 		message: "provider rejected request",

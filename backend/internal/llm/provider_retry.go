@@ -86,6 +86,10 @@ func isRetryableProviderResponseError(err error) bool {
 		"unexpected parameter",
 		"invalid api key",
 		"incorrect api key",
+		"api_key_expired",
+		"api key expired",
+		"expired api key",
+		"credential expired",
 	} {
 		if strings.Contains(lower, needle) {
 			return false

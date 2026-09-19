@@ -52,6 +52,14 @@ type ToolExecutionReceipt struct {
 	// message_json 为权威内容，因此不需要 schema 变更。
 	OK              *bool  `json:"ok,omitempty"`
 	FailureCategory string `json:"failure_category,omitempty"`
+
+	// ArgsJSON is the tool call arguments (JSON-encoded parameter object).
+	// It is emitted only in the tool_receipt_recorded / tool_receipt_replayed
+	// event payload so the trajectory can reconstruct call arguments after
+	// recovery. It is NOT persisted to the SQLite receipt table (which keeps
+	// message_json as the authoritative column and therefore needs no schema
+	// migration).
+	ArgsJSON json.RawMessage `json:"args_json,omitempty"`
 }
 
 // SessionStatus represents the lifecycle state of a session actor.

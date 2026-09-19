@@ -3,6 +3,8 @@ package execution
 import (
 	"context"
 	stderrors "errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,5 +57,47 @@ func TestContextCancellationErrorIncludesConfiguredSource(t *testing.T) {
 	}
 	if !stderrors.Is(err, context.Canceled) {
 		t.Fatalf("expected context cancellation unwrap, got %v", err)
+	}
+}
+
+func TestCancellationErrorWithMessageKeepsUserFacingTextAndTypedCause(t *testing.T) {
+	err := CancellationErrorWithMessage("user_interrupt", "用户中断")
+	if !strings.Contains(err.Error(), "用户中断") {
+		t.Fatalf("user-facing message lost: %v", err)
+	}
+	if !IsCancellation(err) || !stderrors.Is(err, context.Canceled) {
+		t.Fatalf("typed cancellation lost: %v", err)
+	}
+	var runtimeErr *runtimeerrors.RuntimeError
+	if !stderrors.As(err, &runtimeErr) || runtimeErr.Code != runtimeerrors.ErrAgentRunCanceled {
+		t.Fatalf("expected AGENT_RUN_CANCELED code, got %#v", runtimeErr)
+	}
+}
+
+func TestIsCancellationClassifiesTypedCancellationOnly(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "context canceled", err: context.Canceled, want: true},
+		{name: "wrapped context canceled", err: fmt.Errorf("turn aborted: %w", context.Canceled), want: true},
+		{name: "runtime cancellation error", err: CancellationError("user_interrupt"), want: true},
+		{name: "bare deadline sentinel", err: context.DeadlineExceeded, want: true},
+		{name: "wrapped deadline timeout", err: TimeoutError(TimeoutBudget{Effective: time.Second, Source: TimeoutSourceToolDefault}), want: false},
+		{name: "diagnostic mentioning interrupt", err: fmt.Errorf("actor wait timed out; press Ctrl+C to interrupt and resume"), want: false},
+		{name: "diagnostic mentioning Chinese interrupt", err: fmt.Errorf("actor 等待就绪超时，可 Ctrl+C 中断后重新 resume"), want: false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsCancellation(tc.err); got != tc.want {
+				t.Fatalf("IsCancellation(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }

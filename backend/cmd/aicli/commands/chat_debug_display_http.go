@@ -141,6 +141,7 @@ type chatDebugDisplaySceneInfo struct {
 	TextRows      int                             `json:"text_rows,omitempty"`
 	TextParity    *chatDebugDisplayTextParityInfo `json:"text_parity,omitempty"`
 	DeferredQueue *chatDebugDisplayDeferredInfo   `json:"deferred_queue,omitempty"`
+	StreamQueue   *chatDebugDisplayStreamInfo     `json:"stream_queue,omitempty"`
 	CellsTail     []chatDebugDisplayCellInfo      `json:"cells_tail,omitempty"`
 }
 
@@ -176,6 +177,19 @@ type chatDebugDisplayDeferredInfo struct {
 	Mode                string            `json:"mode,omitempty"`
 }
 
+type chatDebugDisplayStreamInfo struct {
+	Pending                int               `json:"pending"`
+	Bytes                  int64             `json:"bytes,omitempty"`
+	OldestPendingAgeMS     int64             `json:"oldest_pending_age_ms,omitempty"`
+	RetainedEvents         uint64            `json:"retained_events,omitempty"`
+	RetainedBytes          uint64            `json:"retained_bytes,omitempty"`
+	DroppedEvents          uint64            `json:"dropped_events,omitempty"`
+	DroppedBytes           uint64            `json:"dropped_bytes,omitempty"`
+	RetainedByType         map[string]uint64 `json:"retained_by_type,omitempty"`
+	DroppedByType          map[string]uint64 `json:"dropped_by_type,omitempty"`
+	OverflowLogsSuppressed uint64            `json:"overflow_logs_suppressed,omitempty"`
+}
+
 type chatDebugDisplayCellInfo struct {
 	ID       uint64 `json:"id"`
 	Kind     string `json:"kind"`
@@ -199,8 +213,13 @@ type chatDebugDisplayOutputInfo struct {
 	MirrorScheduleDrops uint64 `json:"mirror_schedule_drops"`
 	ObserverDrops       uint64 `json:"observer_drops"`
 	EventJournalDrops   uint64 `json:"event_journal_drops"`
-	DeliverySealed      uint64 `json:"delivery_records_sealed"`
-	LastSequence        uint64 `json:"last_sequence"`
+	// Explicit names distinguish observability-history eviction from primary
+	// delivery loss; legacy fields above remain for old clients.
+	ObserverSubscriberDrops  uint64 `json:"observer_subscriber_drops"`
+	EventJournalEvictions    uint64 `json:"event_journal_evictions"`
+	DeliveryJournalEvictions uint64 `json:"delivery_journal_evictions"`
+	DeliverySealed           uint64 `json:"delivery_records_sealed"`
+	LastSequence             uint64 `json:"last_sequence"`
 	// 高价值 in-flight / abandoned / unsealed 诊断字段。
 	PrimaryInFlight         int           `json:"primary_in_flight,omitempty"`
 	MirrorPending           int           `json:"mirror_pending,omitempty"`
@@ -469,6 +488,22 @@ func BuildChatDebugDisplaySnapshot() *chatDebugDisplaySnapshot {
 				Mode:                classStats.Mode,
 			}
 		}
+		streamStats := bridge.streamQueueStats()
+		if streamStats.Pending > 0 || streamStats.RetainedEvents > 0 || streamStats.DroppedEvents > 0 ||
+			streamStats.OverflowLogsSuppressed > 0 {
+			sc.StreamQueue = &chatDebugDisplayStreamInfo{
+				Pending:                streamStats.Pending,
+				Bytes:                  streamStats.Bytes,
+				OldestPendingAgeMS:     streamStats.OldestPendingAge.Milliseconds(),
+				RetainedEvents:         streamStats.RetainedEvents,
+				RetainedBytes:          streamStats.RetainedBytes,
+				DroppedEvents:          streamStats.DroppedEvents,
+				DroppedBytes:           streamStats.DroppedBytes,
+				RetainedByType:         streamStats.RetainedByType,
+				DroppedByType:          streamStats.DroppedByType,
+				OverflowLogsSuppressed: streamStats.OverflowLogsSuppressed,
+			}
+		}
 		if scn := bridge.sceneSnapshot(); scn != nil {
 			if len(scn.Cells) > 0 {
 				rows := scene.LayoutTranscript(scn.Cells, scn.Revision)
@@ -516,23 +551,26 @@ func BuildChatDebugDisplaySnapshot() *chatDebugDisplaySnapshot {
 	if session.TerminalSession != nil {
 		if out := session.TerminalSession.RenderOutputSnapshot(); out != nil {
 			snap.RenderOutput = &chatDebugDisplayOutputInfo{
-				State:               string(out.State),
-				PrimaryCommitted:    out.PrimaryCommitted,
-				PrimaryDeferred:     out.PrimaryDeferred,
-				PrimaryRejected:     out.PrimaryRejected,
-				AdmissionAccepted:   out.AdmissionAccepted,
-				AdmissionDeferred:   out.AdmissionDeferred,
-				AdmissionRejected:   out.AdmissionRejected,
-				MirrorsApplied:      out.MirrorsApplied,
-				MirrorsFailed:       out.MirrorsFailed,
-				MirrorsSkipped:      out.MirrorsSkipped,
-				MirrorsTimedOut:     out.MirrorsTimedOut,
-				MirrorsLate:         out.MirrorsLate,
-				MirrorScheduleDrops: out.MirrorScheduleDrops,
-				ObserverDrops:       out.ObserverDrops,
-				EventJournalDrops:   out.EventJournalDrops,
-				DeliverySealed:      out.DeliveryRecordsSealed,
-				LastSequence:        out.LastSequence,
+				State:                    string(out.State),
+				PrimaryCommitted:         out.PrimaryCommitted,
+				PrimaryDeferred:          out.PrimaryDeferred,
+				PrimaryRejected:          out.PrimaryRejected,
+				AdmissionAccepted:        out.AdmissionAccepted,
+				AdmissionDeferred:        out.AdmissionDeferred,
+				AdmissionRejected:        out.AdmissionRejected,
+				MirrorsApplied:           out.MirrorsApplied,
+				MirrorsFailed:            out.MirrorsFailed,
+				MirrorsSkipped:           out.MirrorsSkipped,
+				MirrorsTimedOut:          out.MirrorsTimedOut,
+				MirrorsLate:              out.MirrorsLate,
+				MirrorScheduleDrops:      out.MirrorScheduleDrops,
+				ObserverDrops:            out.ObserverDrops,
+				EventJournalDrops:        out.EventJournalDrops,
+				ObserverSubscriberDrops:  out.ObserverSubscriberDrops,
+				EventJournalEvictions:    out.EventJournalEvictions,
+				DeliveryJournalEvictions: out.DeliveryJournalEvictions,
+				DeliverySealed:           out.DeliveryRecordsSealed,
+				LastSequence:             out.LastSequence,
 				// 补充高价值诊断字段：in-flight、abandoned、unsealed
 				PrimaryInFlight:         out.PrimaryInFlight,
 				MirrorPending:           out.MirrorPending,

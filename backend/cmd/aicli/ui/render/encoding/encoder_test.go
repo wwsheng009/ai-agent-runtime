@@ -723,6 +723,144 @@ func TestEncodeLegacyToolLifecycleUsesCallIdentity(t *testing.T) {
 	}
 }
 
+func toolReceipt(callID, name, output string) runtimeevents.Event {
+	return event(runtimechat.EventToolReceiptRecorded, map[string]interface{}{
+		"tool_call_id": callID,
+		"tool_name":    name,
+		"output":       output,
+	})
+}
+
+// TestEncodeToolReceiptDoesNotReopenTerminalToolCell 回归历史缺陷：同一 call 的
+// tool_receipt_recorded 在该工具行已终态后到达时，不得被当作"第二次调用"而
+// append 一个没有参数细节的裸 "• Completed <tool>" 行（恢复会话尾部因此堆出
+// 86 行重复工具行）。回执必须幂等跳过。
+func TestEncodeToolReceiptDoesNotReopenTerminalToolCell(t *testing.T) {
+	e := NewEventEncoder()
+	e.Encode(toolStarted("call-1", "ls"))
+	e.Encode(toolFinished("call-1", "a.txt\nb.txt"))
+	before := e.Snapshot()
+	if len(before.Items) != 2 {
+		t.Fatalf("setup items = %d, want 2", len(before.Items))
+	}
+	beforeIDs := strings.Join(itemIDs(before), ",")
+
+	if cs := e.Encode(toolReceipt("call-1", "ls", "a.txt\nb.txt")); len(cs.Changes) != 0 {
+		t.Fatalf("receipt changes = %+v, want none（回执不得新建工具行）", cs.Changes)
+	}
+	after := e.Snapshot()
+	if got := strings.Join(itemIDs(after), ","); got != beforeIDs {
+		t.Fatalf("item ids = %s, want %s（回执不得新建工具行）", got, beforeIDs)
+	}
+	if after.Items[0].Head != "• Completed ls" || after.Items[0].Status != StatusCompleted {
+		t.Fatalf("terminal cell = %q/%s, want • Completed ls/completed", after.Items[0].Head, after.Items[0].Status)
+	}
+	if e.Stats().DuplicateCount == 0 {
+		t.Fatal("DuplicateCount = 0, want > 0（终态回执应按幂等跳过计数）")
+	}
+}
+
+// TestEncodeToolReceiptCompletesOpenToolCell 验证运行中的调用收到回执时：就地
+// 补完同一行（终态 + 输出），不新建第二个调用行。
+func TestEncodeToolReceiptCompletesOpenToolCell(t *testing.T) {
+	e := NewEventEncoder()
+	e.Encode(toolStarted("call-2", "view"))
+
+	cs := e.Encode(toolReceipt("call-2", "view", "file body"))
+	if len(cs.Changes) != 2 {
+		t.Fatalf("changes = %+v, want finalize + output", cs.Changes)
+	}
+	m := e.Snapshot()
+	if len(m.Items) != 2 || m.Items[0].Kind != KindToolCall || m.Items[1].Kind != KindToolOutput {
+		t.Fatalf("items = %+v, want tool_call + tool_output", m.Items)
+	}
+	if m.Items[0].Status != StatusCompleted || m.Items[0].Head != "• Completed view" {
+		t.Fatalf("cell = %q/%s, want • Completed view/completed", m.Items[0].Head, m.Items[0].Status)
+	}
+	if m.Items[1].Status != StatusCompleted || m.Items[1].CauseID != m.Items[0].ID {
+		t.Fatalf("output = %+v, want completed under %s", m.Items[1], m.Items[0].ID)
+	}
+}
+
+// TestEncodeToolReceiptRecoversWhenLiveToolEventsMissing 验证崩溃恢复路径：
+// 原始 started/finished 缺失时，回执仍建立唯一一个终态工具行（含输出），
+// 而不是留下未完成的调用裸行。
+func TestEncodeToolReceiptRecoversWhenLiveToolEventsMissing(t *testing.T) {
+	e := NewEventEncoder()
+	if cs := e.Encode(toolReceipt("call-3", "grep", "match")); len(cs.Changes) == 0 {
+		t.Fatal("receipt changes = 0, want 恢复出工具行")
+	}
+	m := e.Snapshot()
+	toolCalls := 0
+	for _, it := range m.Items {
+		if it.Kind == KindToolCall {
+			toolCalls++
+		}
+	}
+	if toolCalls != 1 || len(m.Items) != 2 {
+		t.Fatalf("items = %+v, want 唯一 tool_call + tool_output", m.Items)
+	}
+	if m.Items[0].Status != StatusCompleted || m.Items[0].Head != "• Completed grep" {
+		t.Fatalf("cell = %q/%s, want • Completed grep/completed", m.Items[0].Head, m.Items[0].Status)
+	}
+}
+
+// TestEncodeToolReceiptReplayedReusesToolCell 验证崩溃恢复 resume 发出的
+// tool_receipt_replayed 与 recorded 同语义：复用既有 tool cell，而不是新增
+// system / 重复工具行；原始事件缺失时才重建一个终态工具行。
+func TestEncodeToolReceiptReplayedReusesToolCell(t *testing.T) {
+	replayed := event(runtimechat.EventToolReceiptReplayed, map[string]interface{}{
+		"tool_call_id": "call-4",
+		"tool_name":    "view",
+		"output":       "body",
+	})
+
+	e := NewEventEncoder()
+	e.Encode(toolStarted("call-4", "view"))
+	e.Encode(toolFinished("call-4", "body"))
+	before := len(e.Snapshot().Items)
+	if cs := e.Encode(replayed); len(cs.Changes) != 0 {
+		t.Fatalf("changes = %+v, want none（replayed 回执不得新建行）", cs.Changes)
+	}
+	if after := e.Snapshot(); len(after.Items) != before {
+		t.Fatalf("items = %d, want %d", len(after.Items), before)
+	}
+
+	// 崩溃恢复：原始 started/finished 未落盘时，用回执重建唯一一个终态工具行。
+	recovered := NewEventEncoder()
+	if cs := recovered.Encode(replayed); len(cs.Changes) == 0 {
+		t.Fatal("changes = 0, want 恢复出工具行")
+	}
+	m := recovered.Snapshot()
+	if len(m.Items) != 2 || m.Items[0].Kind != KindToolCall || m.Items[0].Status != StatusCompleted {
+		t.Fatalf("items = %+v, want tool_call(completed) + tool_output", m.Items)
+	}
+}
+
+// TestEncodeToolReceiptBatchAfterTurnDoesNotGrowTail 复现缺陷场景：回合结束
+// 后回执批量落账（event log 中 86 条紧跟在 agent.turn.finished 之后），
+// 模型规模必须保持不变，尾部不得出现新的裸工具行。
+func TestEncodeToolReceiptBatchAfterTurnDoesNotGrowTail(t *testing.T) {
+	e := NewEventEncoder()
+	const n = 8
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("call-%d", i)
+		e.Encode(toolStarted(id, "shell"))
+		e.Encode(toolFinished(id, "ok"))
+	}
+	before := len(e.Snapshot().Items)
+	for i := 0; i < n; i++ {
+		e.Encode(toolReceipt(fmt.Sprintf("call-%d", i), "shell", "ok"))
+	}
+	after := e.Snapshot()
+	if len(after.Items) != before {
+		t.Fatalf("items = %d, want %d（回合末回执批量落账不得追加工具行）", len(after.Items), before)
+	}
+	if last := after.Items[len(after.Items)-1]; last.Kind != KindToolOutput {
+		t.Fatalf("tail item = %+v, want 原终态输出行", last)
+	}
+}
+
 // TestEncodeToolCallDisplayHeadRestoresLegacyDetails 验证工具调用前/调用后
 // 渲染细节恢复（对齐旧 compactToolDisplayTextWithSource /
 // compactToolCompletionTitle）：

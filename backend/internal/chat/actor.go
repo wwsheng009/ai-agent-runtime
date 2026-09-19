@@ -834,6 +834,24 @@ func (a *SessionActor) PendingApproval() *ApprovalRequest {
 	return &approval
 }
 
+// RunInFlight reports whether an in-process run currently owns this actor. A
+// busy state backed by such a run converges on its own (bounded by the run
+// stall watchdog); a busy state without one is the leftover of a process that
+// died mid-turn and will never finish, so callers waiting for readiness must
+// not treat both cases the same way.
+func (a *SessionActor) RunInFlight() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	run := a.activeRun
+	if run == nil {
+		return false
+	}
+	return !run.abandoned.Load() && !run.interrupted.Load()
+}
+
 func (a *SessionActor) run() {
 	defer func() {
 		a.runStopHook()
@@ -3686,6 +3704,9 @@ func (a *SessionActor) resumeApprovedPendingTool(ctx context.Context, state *Run
 		return err
 	}
 	storedReceipt := newToolExecutionReceipt(a.id, pending.ToolCallID, pending.ToolName, receipt, time.Now().UTC())
+	if len(pending.ArgsJSON) > 0 {
+		storedReceipt.ArgsJSON = append(json.RawMessage(nil), pending.ArgsJSON...)
+	}
 	if err := a.saveStoredToolReceipt(ctx, storedReceipt); err != nil {
 		return err
 	}
@@ -5113,6 +5134,25 @@ func decodePendingToolResultMessage(payload json.RawMessage) (*runtimetypes.Mess
 	return &message, true
 }
 
+// extractToolOutput decodes the persisted tool result message and returns its
+// content text, bounded to a summary length so the trajectory event store is
+// not bloated by large tool outputs. Returns "" when there is no decodable
+// content.
+func extractToolOutput(messageJSON json.RawMessage) string {
+	if len(messageJSON) == 0 {
+		return ""
+	}
+	message, ok := decodePendingToolResultMessage(messageJSON)
+	if !ok || message == nil {
+		return ""
+	}
+	const maxOutput = 4096
+	if len(message.Content) > maxOutput {
+		return message.Content[:maxOutput]
+	}
+	return message.Content
+}
+
 func (a *SessionActor) toolReceiptStore() ToolReceiptStore {
 	if a == nil || a.stateStore == nil {
 		return nil
@@ -5177,13 +5217,18 @@ func toolExecutionReceiptFromPending(sessionID string, pending *PendingToolInvoc
 	if createdAt.IsZero() {
 		createdAt = pending.CreatedAt
 	}
-	return newToolExecutionReceipt(sessionID, pending.ToolCallID, pending.ToolName, pending.ResultMessageJSON, createdAt)
+	receipt := newToolExecutionReceipt(sessionID, pending.ToolCallID, pending.ToolName, pending.ResultMessageJSON, createdAt)
+	if len(pending.ArgsJSON) > 0 {
+		receipt.ArgsJSON = append(json.RawMessage(nil), pending.ArgsJSON...)
+	}
+	return receipt
 }
 
-func (a *SessionActor) publishToolReceiptEvent(eventType, traceID, source string, receipt ToolExecutionReceipt) {
+func (a *SessionActor) publishToolReceiptEvent(eventType, turnID, source string, receipt ToolExecutionReceipt) {
 	if a == nil {
 		return
 	}
+	turnID = strings.TrimSpace(turnID)
 	messageHash := sha256.Sum256(receipt.MessageJSON)
 	payload := map[string]interface{}{
 		"tool_call_id": receipt.ToolCallID,
@@ -5195,6 +5240,15 @@ func (a *SessionActor) publishToolReceiptEvent(eventType, traceID, source string
 			"message_sha256": fmt.Sprintf("%x", messageHash),
 			"created_at":     receipt.CreatedAt,
 		},
+	}
+	// Receipt callers supply the owning logical turn, not a provider trace ID.
+	// Make that identity explicit so the strict TUI turn fence can admit a
+	// current-turn receipt and still reject a retired-turn receipt. Keep the
+	// legacy Event.TraceID alias below for older observers; new consumers must
+	// read payload.turn_id and must not infer ownership from TraceID.
+	if turnID != "" {
+		payload["turn_id"] = turnID
+		payload["receipt"].(map[string]interface{})["turn_id"] = turnID
 	}
 	if strings.TrimSpace(receipt.ToolName) != "" {
 		payload["tool_name"] = receipt.ToolName
@@ -5210,10 +5264,20 @@ func (a *SessionActor) publishToolReceiptEvent(eventType, traceID, source string
 		payload["failure_category"] = strings.TrimSpace(receipt.FailureCategory)
 		payload["receipt"].(map[string]interface{})["failure_category"] = strings.TrimSpace(receipt.FailureCategory)
 	}
+	// Enrich the payload with call arguments and a bounded result output so the
+	// trajectory can reconstruct full tool info after recovery (P0). Args are
+	// the raw JSON-encoded parameter object; output is the decoded result text
+	// truncated to a summary length.
+	if len(receipt.ArgsJSON) > 0 {
+		payload["args"] = string(receipt.ArgsJSON)
+	}
+	if output := extractToolOutput(receipt.MessageJSON); output != "" {
+		payload["output"] = output
+	}
 	a.publish(runtimeevents.Event{
 		Type:      eventType,
 		SessionID: a.id,
-		TraceID:   strings.TrimSpace(traceID),
+		TraceID:   turnID,
 		ToolName:  receipt.ToolName,
 		Payload:   payload,
 	})

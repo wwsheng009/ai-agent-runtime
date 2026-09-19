@@ -312,9 +312,12 @@ func appendChatDebugRenderOutputLines(builder *chatDebugDocumentBuilder, session
 				m.Policy, m.RequestedApplyMode, m.Applied, m.Skipped, m.Failed,
 				m.TimedOut, m.LateCompleted, m.ScheduleDrops, m.QueueHighWater))
 	}
-	builder.meta("Observer Drops:", strconv.FormatUint(snap.ObserverDrops, 10))
-	builder.meta("Event Journal Drops:", strconv.FormatUint(snap.EventJournalDrops, 10))
-	builder.meta("Delivery Journal Drops:", strconv.FormatUint(snap.DeliveryJournalDrops, 10))
+	builder.meta("Observer Subscriber Drops (observability-only):",
+		strconv.FormatUint(snap.ObserverSubscriberDrops, 10))
+	builder.meta("Event Journal Evictions (observability-only):",
+		strconv.FormatUint(snap.EventJournalEvictions, 10))
+	builder.meta("Delivery Journal Evictions (observability-only):",
+		strconv.FormatUint(snap.DeliveryJournalEvictions, 10))
 	builder.meta("Delivery Records Sealed:", strconv.FormatUint(snap.DeliveryRecordsSealed, 10))
 	// B3：最近 N 笔 DeliveryRecord 摘要。payload 以 hash 呈现（journal 为
 	// hash_only 模式，无明文 bytes）；primary 为 nil 时显示 pre-admission
@@ -634,6 +637,31 @@ func appendChatDebugRenderEncoderLines(builder *chatDebugDocumentBuilder, sessio
 			if classStats.Degraded {
 				builder.meta("Event Bridge Degraded:", "true")
 			}
+		}
+	}
+	if streamStats := bridge.streamQueueStats(); streamStats.Pending > 0 ||
+		streamStats.RetainedEvents > 0 || streamStats.DroppedEvents > 0 ||
+		streamStats.OverflowLogsSuppressed > 0 {
+		// Stream pressure is a render/observability concern. Retained assistant
+		// bytes and dropped reasoning bytes are reported separately so this
+		// section cannot be misread as primary tool-result loss.
+		builder.meta("Stream Queue Pending:", strconv.Itoa(streamStats.Pending))
+		builder.meta("Stream Queue Bytes:", strconv.FormatInt(streamStats.Bytes, 10))
+		if age := streamStats.OldestPendingAge.Milliseconds(); age > 0 {
+			builder.meta("Stream Queue Oldest Pending Age MS:", strconv.FormatInt(age, 10))
+		}
+		if streamStats.RetainedEvents > 0 {
+			builder.meta("Stream Queue Retained:", fmt.Sprintf("events=%d bytes=%d",
+				streamStats.RetainedEvents, streamStats.RetainedBytes))
+		}
+		if streamStats.DroppedEvents > 0 {
+			builder.meta("Stream Queue Dropped:", fmt.Sprintf("events=%d bytes=%d types=%s",
+				streamStats.DroppedEvents, streamStats.DroppedBytes,
+				formatChatEventCountMap(streamStats.DroppedByType)))
+		}
+		if streamStats.OverflowLogsSuppressed > 0 {
+			builder.meta("Stream Queue Suppressed Logs:",
+				strconv.FormatUint(streamStats.OverflowLogsSuppressed, 10))
 		}
 	}
 	startCell := 0

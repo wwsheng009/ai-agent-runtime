@@ -24,6 +24,7 @@ import (
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	llmadapter "github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
@@ -563,9 +564,21 @@ func TestReActLoop_RunWithSession_DoesNotLimitWhenMaxStepsIsNonPositive(t *testi
 	require.False(t, result.LimitReached)
 	require.Equal(t, "已完成分析。", result.Output)
 	require.Len(t, provider.requests, 2)
+	var nextRequestToolResult *types.Message
+	for i := range provider.requests[1].Messages {
+		message := &provider.requests[1].Messages[i]
+		if message.Role == "tool" && message.ToolCallID == "tool_1" {
+			nextRequestToolResult = message
+			break
+		}
+	}
+	require.NotNil(t, nextRequestToolResult, "the request after tool execution must include the persisted tool result")
+	require.NotEmpty(t, nextRequestToolResult.Content)
 
 	messages := session.GetMessages()
 	require.Len(t, messages, 4)
+	require.Equal(t, "tool", messages[2].Role, "tool result must be durable before the terminal assistant message")
+	require.Equal(t, "tool_1", messages[2].ToolCallID)
 	require.Equal(t, "assistant", messages[len(messages)-1].Role)
 	require.Equal(t, "已完成分析。", messages[len(messages)-1].Content)
 }
@@ -1800,6 +1813,10 @@ func TestReActLoop_Run_UsesOutputGatewayForToolResults(t *testing.T) {
 				"frame 2",
 				"frame 3",
 				"frame 4",
+				// P1-1 archive tiering archives only outputs at/above the
+				// below-threshold skip (~1 KiB); pad so this integration test
+				// still exercises the gateway→artifact path.
+				strings.Repeat("pad-context-line\n", 80),
 			}, "\n"),
 		},
 		artifacts:  store,
@@ -1904,7 +1921,10 @@ func TestReActLoop_Run_ContextManagerRecallsArtifacts(t *testing.T) {
 		skillRouter: &skill.Router{},
 		skillExec:   &skill.Executor{},
 		mcpManager: &MockSequenceMCPManager{
-			output: "header\nunique-stack-trace\nframe 1\nframe 2\nframe 3\nframe 4",
+			output: "header\nunique-stack-trace\nframe 1\nframe 2\nframe 3\nframe 4\n" +
+				// P1-1 archive tiering: pad above the ~1 KiB skip threshold so
+				// the context-recall integration still has an artifact to pull.
+				strings.Repeat("recall-pad-line\n", 80),
 		},
 		artifacts: store,
 		contextMgr: contextmgr.NewManager(contextmgr.Budget{
@@ -6257,6 +6277,40 @@ func TestDominantToolResultDisposition(t *testing.T) {
 		},
 	})
 	require.Equal(t, toolresult.OutcomeFailed, mixed)
+}
+
+func TestRecordToolResultMetricsUsesStructuredFailureContract(t *testing.T) {
+	prev := observability.GlobalMetrics
+	observability.GlobalMetrics = observability.NewRegistry()
+	t.Cleanup(func() { observability.GlobalMetrics = prev })
+
+	recordToolResultMetrics([]toolExecutionResult{
+		{
+			Call:  types.ToolCall{ID: "call-stale", Name: "edit"},
+			Error: "old_string not found",
+			Envelope: &output.Envelope{Metadata: map[string]interface{}{
+				toolresult.MetadataErrorCodeKey: string(runtimeerrors.ErrToolStaleContext),
+				toolresult.MetadataRetryableKey: false,
+				toolresult.MetadataOutcomeKey:   toolresult.OutcomeFailed,
+				"failure_class":                 "stale_context",
+			}},
+		},
+		{
+			Call: types.ToolCall{ID: "call-ok", Name: "view"},
+			Envelope: &output.Envelope{Metadata: map[string]interface{}{
+				toolresult.MetadataOutcomeKey: toolresult.OutcomeSuccess,
+			}},
+		},
+	})
+
+	snap := observability.SnapshotToolEfficiency()
+	require.Equal(t, float64(2), snap.Outcomes.Total)
+	require.Equal(t, float64(1), snap.Outcomes.ByOutcome[toolresult.OutcomeFailed])
+	require.Equal(t, float64(1), snap.Failures.Total)
+	require.Equal(t, float64(1), snap.Failures.ByToolName["edit"])
+	require.Equal(t, float64(1), snap.Failures.ByErrorCode[string(runtimeerrors.ErrToolStaleContext)])
+	require.Equal(t, float64(1), snap.Failures.ByFailureClass["stale_context"])
+	require.Equal(t, float64(1), snap.Failures.ByRetryable["false"])
 }
 
 func TestDominantToolResultErrorCodePrefersStaleContext(t *testing.T) {

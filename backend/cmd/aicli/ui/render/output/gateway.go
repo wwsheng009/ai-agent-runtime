@@ -1598,6 +1598,9 @@ func (g *RenderOutputGateway) Snapshot() RenderOutputSnapshot {
 	snap.DeliveryRecordsSealed = g.recordsSealed
 	snap.DeliveryJournalDrops = g.journalDrops
 	g.journalMu.Unlock()
+	snap.ObserverSubscriberDrops = snap.ObserverDrops
+	snap.EventJournalEvictions = snap.EventJournalDrops
+	snap.DeliveryJournalEvictions = snap.DeliveryJournalDrops
 	g.recordsMu.Lock()
 	snap.DeliveryRecordsUnsealed = len(g.recordSlots)
 	g.recordsMu.Unlock()

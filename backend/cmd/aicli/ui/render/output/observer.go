@@ -206,11 +206,16 @@ type RenderOutputSnapshot struct {
 	ObserverDrops           uint64
 	EventJournalDrops       uint64
 	DeliveryJournalDrops    uint64
-	DeliveryRecordsSealed   uint64
-	LastPrimaryDuration     time.Duration
-	Abandoned               uint64
-	AbandonedReason         string // Abandoned 终态原因描述（GatewayAbandoned 时非空）
-	EntrySealCount          uint64
+	// Explicit observability names. The legacy *Drops fields remain as
+	// compatibility aliases for existing callers.
+	ObserverSubscriberDrops  uint64
+	EventJournalEvictions    uint64
+	DeliveryJournalEvictions uint64
+	DeliveryRecordsSealed    uint64
+	LastPrimaryDuration      time.Duration
+	Abandoned                uint64
+	AbandonedReason          string // Abandoned 终态原因描述（GatewayAbandoned 时非空）
+	EntrySealCount           uint64
 }
 
 // ============================================================================

@@ -1173,6 +1173,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 
 			return result, err
 		}
+		recordToolResultMetrics(toolResults)
 		for _, toolResult := range toolResults {
 			if strings.TrimSpace(toolResult.Error) == "" {
 				continue
@@ -4271,6 +4272,61 @@ func toolResultErrorCode(result toolExecutionResult) string {
 		}
 	}
 	return ""
+}
+
+func recordToolResultMetrics(results []toolExecutionResult) {
+	for _, result := range results {
+		var metadata map[string]interface{}
+		if result.Envelope != nil {
+			metadata = result.Envelope.Metadata
+		}
+		diagnostic := toolresult.Diagnose(result.Call.Name, result.Call.ID, result.Error, metadata)
+		outcome := toolresult.NormalizeOutcome(diagnostic.Outcome)
+		if outcome == "" {
+			if strings.TrimSpace(result.Error) != "" {
+				outcome = toolresult.OutcomeFailed
+			} else {
+				outcome = toolresult.OutcomeSuccess
+			}
+		}
+		observability.RecordToolOutcome(outcome, diagnostic.ErrorCode)
+		if strings.TrimSpace(result.Error) == "" {
+			continue
+		}
+		observability.RecordToolFailure(
+			result.Call.Name,
+			diagnostic.ErrorCode,
+			toolFailureClass(metadata, diagnostic.ErrorCode),
+			diagnostic.Retryable,
+		)
+	}
+}
+
+func toolFailureClass(metadata map[string]interface{}, errorCode string) string {
+	if class := strings.TrimSpace(stringValue(metadata["failure_class"])); class != "" {
+		return class
+	}
+	if nested, ok := metadata["tool_metadata"].(map[string]interface{}); ok {
+		if class := strings.TrimSpace(stringValue(nested["failure_class"])); class != "" {
+			return class
+		}
+	}
+	switch strings.ToUpper(strings.TrimSpace(errorCode)) {
+	case string(errors.ErrToolStaleContext):
+		return "stale_context"
+	case string(errors.ErrToolInvalidArgs):
+		return "invalid_args"
+	case string(errors.ErrToolPathNotFound):
+		return "path_not_found"
+	case string(errors.ErrToolTimeout), string(errors.ErrNetworkTimeout):
+		return "timeout"
+	case string(errors.ErrAgentRunCanceled):
+		return "canceled"
+	case string(errors.ErrAgentPermission), string(errors.ErrAgentReadOnly):
+		return "permission"
+	default:
+		return "unknown"
+	}
 }
 
 func nextExplorationStallCount(current int, calls []types.ToolCall) int {
