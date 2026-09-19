@@ -277,8 +277,13 @@ provider/model 的完整解析链（flag → runtime session → workspace 偏�
   承载它；选中后清除会话级覆盖。会话中残留的旧值（切换模型/provider 后新
   目录不再包含它）仍会被列出并可再次选中，避免切换后状态无法表达。
   不可识别的取值（既不在目录中、也不是当前值）返回 `invalid params`。
-- 三类切换均在**下一轮**生效（不做流式中途切换）；带内 prompt 进行中会
-  返回错误请客户端稍后重试，避免与运行中的 turn 竞争会话状态。
+- model / thought_level / provider 三类切换均在**下一轮**生效；带内 prompt
+  进行中会返回错误请客户端稍后重试，避免与运行中的 turn 竞争会话状态。
+- `mode`（权限模式）是例外：权限判定在每次工具调用前重新求值，因此带内
+  prompt 进行中允许切换，从下一次工具调用起对运行中的 turn 立即生效；响应
+  与 `config_option_update` / `current_mode_update` 通知都会带上新值。`plan`
+  是持久生命周期（进入/退出要走 plan 工件流程），prompt 进行中仍返回错误
+  请客户端稍后重试。
 - 切换后 agent 通过 `config_option_update` 之外的响应回传完整选项集，
   客户端无需再发 `session/load` 刷新。
 

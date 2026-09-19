@@ -6,8 +6,8 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/acp"
-	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 )
 
 const (
@@ -186,6 +186,33 @@ func applyRuntimePermissionModeSwitch(chatSession *ChatSession, modeID string) (
 	return mode, nil
 }
 
+// applyRuntimePermissionModeSwitchInFlight applies a permission-mode switch to
+// a session whose turn is already running.
+//
+// Unlike applyRuntimePermissionModeSwitch it never rewrites the durable session
+// snapshot: mid-turn that would replace the stored history while the running
+// turn is still appending to it. The session state written here is persisted by
+// the same turn's end-of-turn sync and is already live for the permission
+// engine, which re-reads the session mode on every tool evaluation.
+//
+// plan is a durable lifecycle with its own artifact and exit flow, which cannot
+// be entered or left safely while a turn is in flight, so plan transitions keep
+// the retry-after-completion contract.
+func applyRuntimePermissionModeSwitchInFlight(chatSession *ChatSession, modeID string) (runtimepolicy.Mode, error) {
+	if chatSession == nil {
+		return runtimepolicy.ModeDefault, fmt.Errorf("no active session")
+	}
+	mode, ok := runtimepolicy.ParseMode(modeID)
+	if !ok {
+		return runtimepolicy.ModeDefault, acp.InvalidParams(fmt.Errorf("permission mode %q is not supported", modeID))
+	}
+	if mode == runtimepolicy.ModePlan || planmode.IsActive(loadChatPlanMode(chatSession)) {
+		return runtimepolicy.ModeDefault, fmt.Errorf("permission mode %q cannot be applied while a prompt is in flight; retry after it completes", modeID)
+	}
+	setChatPermissionMode(chatSession, mode)
+	return mode, nil
+}
+
 // SetSessionMode implements the legacy acp.SessionModeSetter extension for
 // session/set_mode. The dedicated modes API is superseded by the "mode" config
 // option, so the response carries no payload beyond the empty object ACP v1
@@ -210,16 +237,20 @@ func (h *acpSessionHost) SetSessionMode(ctx context.Context, req acp.SetSessionM
 		return resp, acp.InvalidParams(fmt.Errorf("unknown sessionId %q", req.SessionID))
 	}
 
-	// Serialize against Prompt: switching the mode mid-turn would race with
-	// the running turn reading the permission mode, so ask the client to retry
-	// once the turn completes.
+	// Serialize against Prompt: the switch mutates session state while the
+	// running turn may be reading it, so it goes through the host lock.
 	hostSess.mu.Lock()
 	defer hostSess.mu.Unlock()
 	if hostSess.prompting {
-		return resp, fmt.Errorf("session %q has an in-flight prompt; retry after it completes", req.SessionID)
-	}
-
-	if _, err := applyRuntimePermissionModeSwitch(hostSess.chat, modeID); err != nil {
+		// A mode switch is safe mid-turn: the permission engine re-reads the
+		// session mode on every tool evaluation (see
+		// withLivePermissionModeSource), so the change applies from the next
+		// tool call instead of the next turn. Plan transitions still need the
+		// durable lifecycle and are rejected by the in-flight variant.
+		if _, err := applyRuntimePermissionModeSwitchInFlight(hostSess.chat, modeID); err != nil {
+			return resp, err
+		}
+	} else if _, err := applyRuntimePermissionModeSwitch(hostSess.chat, modeID); err != nil {
 		return resp, err
 	}
 	h.broadcastACPModeChange(sessionID, hostSess.chat)

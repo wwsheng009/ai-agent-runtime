@@ -8,6 +8,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/acp"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 )
 
 func newConfigOptionTestHost(sessionID, model string, supported ...string) (*acpSessionHost, *ChatSession) {
@@ -35,8 +36,8 @@ func configOptionTestValue(t *testing.T, raw string) acp.SessionConfigOptionValu
 }
 
 // withoutModeConfigOption drops the permission-mode option so the model and
-// provider assertions keep their historical positions. The mode option has its
-// own tests; here it would only shift indices.
+// provider assertions keep their historical positions. Mode-option behavior is
+// not asserted here; its coverage is tracked in the ACP capability plan (§11-B2).
 func withoutModeConfigOption(options []acp.SessionConfigOption) []acp.SessionConfigOption {
 	filtered := make([]acp.SessionConfigOption, 0, len(options))
 	for _, option := range options {
@@ -46,6 +47,17 @@ func withoutModeConfigOption(options []acp.SessionConfigOption) []acp.SessionCon
 		filtered = append(filtered, option)
 	}
 	return filtered
+}
+
+func findModeConfigOption(t *testing.T, options []acp.SessionConfigOption) acp.SessionConfigOption {
+	t.Helper()
+	for _, option := range options {
+		if option.ID == acpModeConfigOptionID {
+			return option
+		}
+	}
+	t.Fatalf("mode config option missing from %+v", options)
+	return acp.SessionConfigOption{}
 }
 
 func TestACPConfigOptionsForChat_NilSession(t *testing.T) {
@@ -203,6 +215,89 @@ func TestACPHostSetSessionConfigOption_RejectsWhilePrompting(t *testing.T) {
 	}
 	if chat.Model != "m1" {
 		t.Fatalf("session model changed to %q during prompt", chat.Model)
+	}
+}
+
+// The approval mode is evaluated per tool call, so it may be switched while a
+// prompt is in flight; the response must already advertise the new value so the
+// client picker does not wait for the turn to finish.
+func TestACPHostSetSessionConfigOption_AllowsModeWhilePrompting(t *testing.T) {
+	host, chat := newConfigOptionTestHost("sess-1", "m1", "m1", "m2")
+	hostSess := host.sess["sess-1"]
+	hostSess.mu.Lock()
+	hostSess.prompting = true
+	hostSess.mu.Unlock()
+	defer func() {
+		hostSess.mu.Lock()
+		hostSess.prompting = false
+		hostSess.mu.Unlock()
+	}()
+
+	resp, err := host.SetSessionConfigOption(context.Background(), acp.SetSessionConfigOptionRequest{
+		SessionID: "sess-1",
+		ConfigID:  acpModeConfigOptionID,
+		Value:     configOptionTestValue(t, `"bypass_permissions"`),
+	})
+	if err != nil {
+		t.Fatalf("in-flight mode switch failed: %v", err)
+	}
+	if chat.PermissionMode != runtimepolicy.ModeBypassPermissions {
+		t.Fatalf("session permission mode = %q, want %q", chat.PermissionMode, runtimepolicy.ModeBypassPermissions)
+	}
+	if got := findModeConfigOption(t, resp.ConfigOptions).CurrentValue; got != string(runtimepolicy.ModeBypassPermissions) {
+		t.Fatalf("mode option currentValue = %q, want %q", got, runtimepolicy.ModeBypassPermissions)
+	}
+}
+
+// plan is a durable lifecycle with its own artifact/exit flow, so entering it
+// mid-turn keeps the retry-after-completion contract.
+func TestACPHostSetSessionConfigOption_RejectsPlanModeWhilePrompting(t *testing.T) {
+	host, chat := newConfigOptionTestHost("sess-1", "m1", "m1")
+	hostSess := host.sess["sess-1"]
+	hostSess.mu.Lock()
+	hostSess.prompting = true
+	hostSess.mu.Unlock()
+	defer func() {
+		hostSess.mu.Lock()
+		hostSess.prompting = false
+		hostSess.mu.Unlock()
+	}()
+
+	_, err := host.SetSessionConfigOption(context.Background(), acp.SetSessionConfigOptionRequest{
+		SessionID: "sess-1",
+		ConfigID:  acpModeConfigOptionID,
+		Value:     configOptionTestValue(t, `"plan"`),
+	})
+	if err == nil || !strings.Contains(err.Error(), "in flight") {
+		t.Fatalf("err = %v, want plan-in-flight error", err)
+	}
+	if chat.PermissionMode == runtimepolicy.ModePlan {
+		t.Fatal("session entered plan mode while a prompt was in flight")
+	}
+}
+
+// The legacy session/set_mode extension shares the mode switch semantics of the
+// "mode" config option, including the in-flight allowance.
+func TestACPHostSetSessionMode_AllowsModeWhilePrompting(t *testing.T) {
+	host, chat := newConfigOptionTestHost("sess-1", "m1", "m1")
+	hostSess := host.sess["sess-1"]
+	hostSess.mu.Lock()
+	hostSess.prompting = true
+	hostSess.mu.Unlock()
+	defer func() {
+		hostSess.mu.Lock()
+		hostSess.prompting = false
+		hostSess.mu.Unlock()
+	}()
+
+	if _, err := host.SetSessionMode(context.Background(), acp.SetSessionModeRequest{
+		SessionID: "sess-1",
+		ModeID:    string(runtimepolicy.ModeBypassPermissions),
+	}); err != nil {
+		t.Fatalf("in-flight legacy mode switch failed: %v", err)
+	}
+	if chat.PermissionMode != runtimepolicy.ModeBypassPermissions {
+		t.Fatalf("session permission mode = %q, want %q", chat.PermissionMode, runtimepolicy.ModeBypassPermissions)
 	}
 }
 
@@ -364,5 +459,71 @@ func TestACPHostSetSessionConfigOption_CurrentProviderIsNoop(t *testing.T) {
 	resp.ConfigOptions = withoutModeConfigOption(resp.ConfigOptions)
 	if len(resp.ConfigOptions) != 2 || resp.ConfigOptions[1].CurrentValue != "alpha" {
 		t.Fatalf("response configOptions = %+v", resp.ConfigOptions)
+	}
+}
+
+// TestACPModeOptionAllowed_AgreesWithPolicyParser pins the mode validator used
+// by the ACP "mode" config option and the legacy session/set_mode extension to
+// the runtime policy parser. The documented contract is that unknown values are
+// rejected rather than silently falling back to default, so a typo in a client
+// cannot weaken the effective policy.
+func TestACPModeOptionAllowed_AgreesWithPolicyParser(t *testing.T) {
+	candidates := []string{
+		string(runtimepolicy.ModeBypassPermissions),
+		"default",
+		"acceptEdits",
+		"accept_edits",
+		"plan",
+		"bypassPermissions",
+		"",
+		"   ",
+		"bogus",
+		"DEFAULT",
+		"yolo",
+	}
+	for _, candidate := range candidates {
+		_, want := runtimepolicy.ParseMode(candidate)
+		if got := acpModeOptionAllowed(candidate); got != want {
+			t.Fatalf("acpModeOptionAllowed(%q) = %v, want %v (policy parser agreement)", candidate, got, want)
+		}
+	}
+}
+
+// TestACPModeOptionAllowed_RejectsUnknownModeIDs guards the weakening path
+// directly: an unsupported mode id must never be accepted.
+func TestACPModeOptionAllowed_RejectsUnknownModeIDs(t *testing.T) {
+	for _, modeID := range []string{"", "bogus", "yolo", "sess-1"} {
+		if _, known := runtimepolicy.ParseMode(modeID); known {
+			// Skip values that the policy layer itself recognises; the point of
+			// this test is only the negative case.
+			continue
+		}
+		if acpModeOptionAllowed(modeID) {
+			t.Fatalf("acpModeOptionAllowed(%q) = true, want false for an unknown mode", modeID)
+		}
+	}
+}
+
+// TestACPModeOptionAllowed_AcceptsEveryCanonicalModeID walks the canonical mode
+// ids advertised by the mode config option and asserts each one validates.
+func TestACPModeOptionAllowed_AcceptsEveryCanonicalModeID(t *testing.T) {
+	canonical := []string{
+		"default",
+		"acceptEdits",
+		"plan",
+		string(runtimepolicy.ModeBypassPermissions),
+	}
+	accepted := 0
+	for _, modeID := range canonical {
+		if _, known := runtimepolicy.ParseMode(modeID); !known {
+			continue
+		}
+		if !acpModeOptionAllowed(modeID) {
+			t.Fatalf("acpModeOptionAllowed(%q) = false, want true for a canonical mode", modeID)
+		}
+		accepted++
+	}
+	if accepted == 0 {
+		t.Fatal("no canonical mode id validated; mode vocabulary drifted from the policy package")
 	}
 }

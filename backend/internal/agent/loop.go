@@ -6659,6 +6659,15 @@ func optionValue(options map[string]interface{}, key string) interface{} {
 }
 
 func permissionModeFromContext(ctx context.Context) runtimepolicy.Mode {
+	// A live source attached by the control plane wins over the RunMeta
+	// snapshot: the snapshot is frozen at submit time, while the source is
+	// consulted per evaluation so an in-flight session mode switch (ACP
+	// session/set_config_option on "mode") applies to the running turn.
+	if source, ok := team.PermissionModeSourceFromContext(ctx); ok {
+		if mode := strings.TrimSpace(source()); mode != "" {
+			return runtimepolicy.Mode(mode)
+		}
+	}
 	meta, ok := team.GetRunMeta(ctx)
 	if !ok || meta == nil {
 		return ""

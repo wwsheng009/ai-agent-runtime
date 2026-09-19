@@ -211,7 +211,7 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 		}
 		submitOption.TurnPinnedTools = skillPin.PinnedTools
 	}
-	result, err := submitAICLIActorPrompt(ctx, actor, prompt, currentRunMetaForSession(session), submitOption)
+	result, err := submitAICLIActorPrompt(withLivePermissionModeSource(ctx, session), actor, prompt, currentRunMetaForSession(session), submitOption)
 	if err != nil {
 		logActorExecutorFailureIfUnrecorded(session, prompt, err)
 		warnIfChatSessionSyncFails(session, "actor error sync", syncRuntimeSessionBackIntoCLIAfterFailure(session))
@@ -308,7 +308,7 @@ func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *Chat
 	if reporter := newRuntimeHTTPDebugReporter(session); reporter != nil {
 		ctx = runtimellm.WithHTTPDebugReporter(ctx, reporter)
 	}
-	result, err := continueAICLIActorWhenReady(ctx, actor, currentRunMetaForSession(session), runtimechat.ContinueOption{
+	result, err := continueAICLIActorWhenReady(withLivePermissionModeSource(ctx, session), actor, currentRunMetaForSession(session), runtimechat.ContinueOption{
 		ContinuationPrompt: goalAutoContinuationPrompt,
 		ContinuationMetadata: map[string]interface{}{
 			goalContinuationMetadataKey: true,
@@ -490,6 +490,21 @@ func currentRunMetaForSession(session *ChatSession) *team.RunMeta {
 		return nil
 	}
 	return runMeta
+}
+
+// withLivePermissionModeSource lets an in-flight actor turn observe a
+// session-scoped permission-mode switch (for example the ACP
+// session/set_config_option "mode" option) from the next tool evaluation
+// instead of waiting for the next turn. RunMeta.PermissionMode is frozen at
+// submit time, so the resolver reads the session state under its own lock and
+// wins over that snapshot whenever it reports a mode.
+func withLivePermissionModeSource(ctx context.Context, session *ChatSession) context.Context {
+	if session == nil {
+		return ctx
+	}
+	return team.WithPermissionModeSource(ctx, func() string {
+		return string(chatSessionPermissionMode(session))
+	})
 }
 
 func shouldPropagateTeamRunMeta(session *ChatSession, binding *chatTeamBinding) bool {

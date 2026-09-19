@@ -229,3 +229,35 @@ func GetRunMeta(ctx context.Context) (*RunMeta, bool) {
 	meta, ok := ctx.Value(runMetaKey{}).(*RunMeta)
 	return meta, ok
 }
+
+// permissionModeSourceKey is the context key for a live permission-mode
+// resolver attached to a run context.
+type permissionModeSourceKey struct{}
+
+// WithPermissionModeSource attaches a live permission-mode resolver to ctx.
+//
+// RunMeta.PermissionMode is a snapshot frozen at submit time (WithRunMeta
+// clones the meta), so it cannot observe a session-scoped mode switch made
+// while the turn is still running. The resolver is consulted on every
+// permission evaluation instead, which lets a control-plane switch (for
+// example ACP session/set_config_option on the "mode" option) apply to the
+// remainder of an in-flight turn from the next tool call onward.
+func WithPermissionModeSource(ctx context.Context, source func() string) context.Context {
+	if ctx == nil || source == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, permissionModeSourceKey{}, source)
+}
+
+// PermissionModeSourceFromContext returns the live permission-mode resolver
+// attached to ctx, if any.
+func PermissionModeSourceFromContext(ctx context.Context) (func() string, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	source, ok := ctx.Value(permissionModeSourceKey{}).(func() string)
+	if !ok || source == nil {
+		return nil, false
+	}
+	return source, true
+}

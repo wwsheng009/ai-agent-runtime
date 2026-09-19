@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/acp"
@@ -337,12 +338,16 @@ func (h *acpSessionHost) SetSessionConfigOption(ctx context.Context, req acp.Set
 		return resp, acp.InvalidParams(fmt.Errorf("unknown sessionId %q", req.SessionID))
 	}
 
-	// Serialize against Prompt: switching the model mid-turn would race with
-	// the running turn reading session fields, so ask the client to retry once
-	// the turn completes.
+	// Serialize against Prompt. Model, thinking-effort and provider switches
+	// race with the running turn reading session fields, so those keep the
+	// fail-fast retry contract. The permission mode is evaluated per tool call,
+	// so it may be switched mid-turn: the running turn observes it from its
+	// next tool evaluation through the live mode source attached at submit
+	// time.
 	hostSess.mu.Lock()
 	defer hostSess.mu.Unlock()
-	if hostSess.prompting {
+	prompting := hostSess.prompting
+	if prompting && !strings.EqualFold(configID, acpModeConfigOptionID) {
 		return resp, fmt.Errorf("session %q has an in-flight prompt; retry after it completes", req.SessionID)
 	}
 
@@ -351,12 +356,17 @@ func (h *acpSessionHost) SetSessionConfigOption(ctx context.Context, req acp.Set
 		if !acpModeOptionAllowed(valueID) {
 			return resp, acp.InvalidParams(fmt.Errorf("permission mode %q is not supported", valueID))
 		}
-		if _, err := applyRuntimePermissionModeSwitch(hostSess.chat, valueID); err != nil {
+		if prompting {
+			if _, err := applyRuntimePermissionModeSwitchInFlight(hostSess.chat, valueID); err != nil {
+				return resp, err
+			}
+		} else if _, err := applyRuntimePermissionModeSwitch(hostSess.chat, valueID); err != nil {
 			return resp, err
 		}
-		// The response carries the option set, but a client that also shows the
-		// legacy modes selector needs its own notification to stay in sync.
-		h.broadcastSessionUpdate(strings.TrimSpace(req.SessionID), acp.CurrentModeUpdate(acpModeIDForSession(hostSess.chat)))
+		// The response carries the option set, but a client whose pickers are
+		// open needs the out-of-band refresh on both channels (config option +
+		// legacy modes) to stay in sync while the turn is still streaming.
+		h.broadcastACPModeChange(strings.TrimSpace(req.SessionID), hostSess.chat)
 	case strings.EqualFold(configID, acpModelConfigOptionID):
 		if !acpModelOptionAllowed(hostSess.chat, valueID) {
 			return resp, acp.InvalidParams(fmt.Errorf("model %q is not available for this session", valueID))
@@ -386,5 +396,22 @@ func (h *acpSessionHost) SetSessionConfigOption(ctx context.Context, req acp.Set
 		return resp, acp.InvalidParams(fmt.Errorf("unknown configId %q", req.ConfigID))
 	}
 	resp.ConfigOptions = acpConfigOptionsForChat(hostSess.chat)
+	persistACPConfigOptionPreferences(hostSess.chat)
 	return resp, nil
+}
+
+// persistACPConfigOptionPreferences writes provider/model/reasoning-effort
+// changes made through the ACP "session/set_config_option" handler into the
+// workspace-scoped chat preferences file (chat-prefs.yaml).
+//
+// Without this the switch only mutates the in-memory ChatSession, so the very
+// next session (new session/new request, same cwd) is built from the unchanged
+// persisted defaults and clients such as Zed show the selector reset.
+func persistACPConfigOptionPreferences(session *ChatSession) {
+	if session == nil || session.Config == nil {
+		return
+	}
+	if err := persistChatPreferences(session.Config, session.ProviderName, session.Model, session.ReasoningEffort); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: 保存 ACP 配置选项偏好失败: %v\n", err)
+	}
 }
