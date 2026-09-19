@@ -18,7 +18,6 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
-	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 )
@@ -566,7 +565,8 @@ func TestTryExecuteStructuredChatCommandFastAndReasoning(t *testing.T) {
 
 func TestTryExecuteStructuredChatCommandReasoningEffort(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
-	cfg, cfgPath := testModelCommandConfig(t)
+	isolateWorkspacePrefsForTest(t)
+	cfg, _ := testModelCommandConfig(t)
 	session := &ChatSession{
 		ProviderName:    "beta",
 		Provider:        cfg.Providers.Items["beta"],
@@ -585,12 +585,9 @@ func TestTryExecuteStructuredChatCommandReasoningEffort(t *testing.T) {
 	if plain := ui.RenderDocumentPlain(result.Document()); !strings.Contains(plain, "当前 reasoning_effort: max") {
 		t.Fatalf("set document missing status:\n%s", plain)
 	}
-	loaded, err := agentconfig.InitGlobalConfig(cfgPath)
-	if err != nil {
-		t.Fatalf("reload config: %v", err)
-	}
-	if loaded.AICLI == nil || loaded.AICLI.Chat == nil || loaded.AICLI.Chat.ReasoningEffort != "max" {
-		t.Fatalf("structured set did not persist max: %+v", loaded.AICLI)
+	loaded := loadWorkspaceChatPrefsForTest(t)
+	if loaded.ReasoningEffort != "max" {
+		t.Fatalf("structured set did not persist max to workspace prefs: %+v", loaded)
 	}
 
 	result, handled, err = tryExecuteStructuredChatCommand(session, "/reasoning-effort clear")
@@ -1123,7 +1120,8 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_plan_command.go", Func: "exitChatPlanModeCommand", Kind: "fmt.Print", Count: 5},
 		{File: "chat_plan_command.go", Func: "handlePlanCommand", Kind: "fmt.Print", Count: 7},
 		{File: "chat_plan_command.go", Func: "printPlanModeStatus", Kind: "fmt.Print", Count: 1},
-		{File: "chat_preferences.go", Func: "persistChatPreferencesIfNeeded", Kind: "fmt.Fprint(os.Std*)", Count: 2},
+		{File: "chat_preferences.go", Func: "persistChatPreferencesIfNeeded", Kind: "fmt.Fprint(os.Std*)", Count: 1},
+		{File: "chat_preferences.go", Func: "resolveWorkspaceChatPreferences", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_provider_turn.go", Func: "method Complete", Kind: "fmt.Fprint(os.Std*)", Count: 2},
 		{File: "chat_reasoning_command.go", Func: "applyReasoningCommand", Kind: "fmt.Print", Count: 3},
 		{File: "chat_reasoning_command.go", Func: "applyReasoningEffortCommandSelection", Kind: "fmt.Fprint(os.Std*)", Count: 1},
