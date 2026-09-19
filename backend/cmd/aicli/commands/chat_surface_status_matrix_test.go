@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bufio"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,15 @@ import (
 // 核心回归：llm.retry 发布 "retrying step=1 ..." 时，旧实现按字符串匹配
 // chatSurfaceStateIsRunning 判为非运行 → 计时不启动 → "(0s • esc to interrupt)"
 // 永远卡 0s。结构化后语义由 kind 承载，Retrying 必须 isRunning()==true。
+
+// newInterruptibleStatusTestSession 提供带活跃 ESC 消费者标志的会话：阶段 B
+// 之后 "esc to interrupt" 只在真实消费者可用时渲染，状态行测试必须建模这一点，
+// 否则会把“无消费者时的 ctrl+c 提示”误判为缺陷。
+func newInterruptibleStatusTestSession() *ChatSession {
+	queue := newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	queue.setExternalInputCaptureActive(true)
+	return &ChatSession{InputQueue: queue}
+}
 
 func TestChatSurfaceStatusIsRunningMatrix(t *testing.T) {
 	cases := []struct {
@@ -200,7 +210,7 @@ func TestSetRetryingStartsClockAndRendersInterruptibleStatus(t *testing.T) {
 	// 回归核心：SetRetrying 必须启动动态时钟（dynamicStatusStarted 非零），
 	// 否则 elapsed 永远 0s。旧实现 RefreshStatus("retrying ...") 字符串匹配
 	// 失败导致时钟不启动，UI 永远显示 "(0s • esc to interrupt)"。
-	interaction := newTestChatInteractionCoordinator(t, &ChatSession{})
+	interaction := newTestChatInteractionCoordinator(t, newInterruptibleStatusTestSession())
 	t.Cleanup(interaction.Shutdown)
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	surface.EnableForTest(160, 12)
@@ -253,7 +263,7 @@ func TestSetNoticeDoesNotStartClock(t *testing.T) {
 func TestRetryElapsedAdvancesOverRealTime(t *testing.T) {
 	// 端到端时钟验证（无 UI actor）：SetRetrying 后 elapsed 必须随时间真实
 	// 推进，而不是冻结在 0s —— 这是 "0s 卡死" bug 的直接回归。
-	interaction := newTestChatInteractionCoordinator(t, &ChatSession{})
+	interaction := newTestChatInteractionCoordinator(t, newInterruptibleStatusTestSession())
 	t.Cleanup(interaction.Shutdown)
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	surface.EnableForTest(160, 12)

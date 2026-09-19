@@ -611,6 +611,9 @@ type chatWebInputRequest struct {
 	Allow      bool   `json:"allow"`
 	QuestionID string `json:"question_id"`
 	Answer     string `json:"answer"`
+	// DiscardPending 控制中断时是否丢弃已排队的输入。缺省 false 与终端
+	// Esc 语义一致（保留排队输入）；显式 true 还原旧的“停止并清队”行为。
+	DiscardPending bool `json:"discard_pending"`
 }
 
 // HandleChatWebAPIInput 注入用户输入（prompt / 审批决议 / 提问回答）。
@@ -657,7 +660,7 @@ func HandleChatWebAPIInput(w http.ResponseWriter, r *http.Request) {
 	case "question_answer":
 		handleWebQuestionAnswer(w, session, req.QuestionID, req.Answer)
 	case "interrupt":
-		handleWebInterrupt(w, session)
+		handleWebInterrupt(w, session, req.DiscardPending)
 	default:
 		handleWebPrompt(w, session, req.Prompt)
 	}
@@ -665,11 +668,16 @@ func HandleChatWebAPIInput(w http.ResponseWriter, r *http.Request) {
 
 // handleWebInterrupt 中断当前正在执行的 turn（§4.2.4 扩展）。
 //
-// 语义与终端运行期 Esc 一致，但走 ChatSession.Interrupt()（丢弃排队输入，
-// 由 Web 端停止按钮使用）：幂等，无运行中 turn 时也安全（仅置中断标记并
-// 触发一次清理，随后由前端收到的 session_interrupted/turn_end 事件复位）。
-func handleWebInterrupt(w http.ResponseWriter, session *ChatSession) {
-	session.Interrupt()
+// 缺省语义与终端运行期 Esc 完全一致（ChatSession.InterruptPreservePendingInput，
+// 保留排队输入）；discardPending=true 时退回旧的停止并清队行为。两种路径都
+// 幂等，无运行中 turn 时也安全（仅置中断标记并触发一次清理，随后由前端收到
+// 的 session_interrupted/turn_end 事件复位）。
+func handleWebInterrupt(w http.ResponseWriter, session *ChatSession, discardPending bool) {
+	if discardPending {
+		session.Interrupt()
+	} else {
+		session.InterruptPreservePendingInput()
+	}
 	writeWebAPIJSON(w, http.StatusOK, map[string]string{"status": "interrupted"})
 }
 

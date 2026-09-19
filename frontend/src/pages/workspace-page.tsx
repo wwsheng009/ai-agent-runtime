@@ -13,6 +13,7 @@ import { useSessionRefresh } from "@/hooks/workspace/use-session-refresh";
 import { usePendingInteractions } from "@/hooks/workspace/use-pending-interactions";
 import { useRuntimePlanMode } from "@/hooks/workspace/use-runtime-plan-mode";
 import { useSessionRuntimeState } from "@/hooks/workspace/use-session-runtime-state";
+import { useStopResponding } from "@/hooks/workspace/use-stop-responding";
 import { useWorkspaceMultiSessionRuntime } from "@/hooks/workspace/use-workspace-multi-session-runtime";
 import { useWorkspaceSessionSwitchGuard } from "@/hooks/workspace/use-workspace-session-switch-guard";
 import { useTrajectoryRecovery } from "@/hooks/workspace/use-trajectory-recovery";
@@ -226,18 +227,6 @@ export function WorkspacePage() {
     runtimeState: sessionRuntimeState,
     getErrorMessage,
   });
-  // P1-7：用户主动停止 → 未决审批 / 提问立即收敛，不等待（可能缺席的）中断事件，
-  // 避免停止后卡片仍挂在 composer 上沿。
-  function handleStopResponding() {
-    convergePendingInteractions("session_interrupted");
-    if (!activeTurnId) {
-      // P4-刷新续传：刷新后的页面没有本地请求可 abort（停止按钮由会话级
-      // currentSessionResponding 驱动），必须显式把 interrupt 投给服务端；
-      // 本地回合在跑时不走这里——chat-turn hook 已带本地回合身份投递，避免重复。
-      void stopResumedTurn();
-    }
-    stopResponding();
-  }
   // 尾部优先回放：先回放「最近一页」事件，再放行实时流建连。顺序很重要——
   // 若先建连（after=0），后端会把整份事件日志按 SSE dump 重放一遍，窗口化
   // 就失效了；见 use-trajectory-recovery。
@@ -283,6 +272,14 @@ export function WorkspacePage() {
     setThreads,
     trajectoryReady: trajectoryReplay.ready,
     trajectoryStore,
+  });
+  // P1-7 + ESC 阶段 A：停止 = 收敛未决交互 +（刷新后）服务端 interrupt；Esc 与按钮等价。
+  const handleStopResponding = useStopResponding({
+    activeTurnId,
+    convergePendingInteractions,
+    currentSessionResponding,
+    stopResponding,
+    stopResumedTurn,
   });
   // P0-2 + §4.5：切线守卫（确认框 ↔ 后台继续跑）收口在
   // `hooks/workspace/use-workspace-session-switch-guard.ts`。必须排在

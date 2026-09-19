@@ -79,7 +79,8 @@ func TestLLMRetryEventE2E_StartsClockAndAdvancesElapsed(t *testing.T) {
 	if !strings.Contains(initial, "Retrying step=1 attempt=2/3") || !strings.Contains(initial, "reason=rate_limit") {
 		t.Fatalf("unexpected initial retry status: %q", initial)
 	}
-	if !strings.Contains(initial, "(0s • esc to interrupt)") {
+	// 提示语由中断消费者能力决定（esc / ctrl+c），此处只校验时钟从 0s 起。
+	if !strings.Contains(initial, "(0s • ") {
 		t.Fatalf("initial retry status must start at 0s, got: %q", initial)
 	}
 
@@ -101,11 +102,11 @@ func TestLLMRetryEventE2E_StartsClockAndAdvancesElapsed(t *testing.T) {
 		t.Fatal("tick must keep the dynamic model rendered")
 	}
 	afterTick := style.StatusLineDocument(*advanced, 160).PlainText()
-	if strings.Contains(afterTick, "(0s • esc to interrupt)") {
+	if strings.Contains(afterTick, "(0s • ") {
 		t.Fatalf("retry timer stuck at 0s after real time passed: %q", afterTick)
 	}
-	if !strings.Contains(afterTick, "(1s • esc to interrupt)") &&
-		!strings.Contains(afterTick, "(2s • esc to interrupt)") {
+	if !strings.Contains(afterTick, "(1s • ") &&
+		!strings.Contains(afterTick, "(2s • ") {
 		t.Fatalf("retry timer must advance to 1s+, got: %q", afterTick)
 	}
 	if !strings.Contains(afterTick, "Retrying step=1 attempt=2/3") {

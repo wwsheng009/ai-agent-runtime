@@ -992,9 +992,17 @@ func TestRestoreChatStateFromRuntimeSessionRestoresRouteTransparency(t *testing.
 		session.RequestedModel != "friendly-model" || session.EffectiveModel != "canonical-model" {
 		t.Fatalf("unexpected restored provider/model route: %+v", session)
 	}
-	if session.RequestedReasoningEffort != "xhigh" || session.EffectiveReasoningEffort != "high" ||
-		session.RequestedPermissionMode != "plan" || session.EffectivePermissionMode != "plan" || session.PermissionMode != runtimepolicy.ModePlan {
-		t.Fatalf("unexpected restored reasoning/permission route: %+v", session)
+	if session.RequestedReasoningEffort != "xhigh" || session.EffectiveReasoningEffort != "high" {
+		t.Fatalf("unexpected restored reasoning route: %+v", session)
+	}
+	// plan 是 planmode 生命周期状态，不是可恢复的 CLI 权限模式：会话行在
+	// 生命周期活跃期间会合法地写成 "plan"，但把它加载进 session 会让引擎在
+	// exit_plan_mode 重写该行之后仍停留在 plan。因此恢复路由透明度时只保留
+	// 历史请求值，实际权限模式仍以本次 CLI 模式为准。
+	// 见 chat_session_plan_persist_test.go 的对应回归测试。
+	if session.RequestedPermissionMode != "plan" || session.EffectivePermissionMode != string(runtimepolicy.ModeDefault) ||
+		session.PermissionMode != runtimepolicy.ModeDefault {
+		t.Fatalf("unexpected restored permission route: %+v", session)
 	}
 	if !session.FallbackUsed || session.FallbackReason != "route_policy" || len(session.RouteWarnings) != 1 {
 		t.Fatalf("unexpected restored route decision metadata: %+v", session)
