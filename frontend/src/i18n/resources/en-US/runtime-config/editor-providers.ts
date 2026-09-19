@@ -188,5 +188,33 @@ export const enRuntimeConfigEditorProviders = {
       proxyPlaceholder: "http://127.0.0.1:10810 or socks5://127.0.0.1:10810",
       noProxyPlaceholder: "localhost,127.0.0.1,.internal.example.com",
     },
+    import: {
+      action: "Auto import",
+      title: "Auto import provider",
+      description:
+        "Enter a name and Base URL (API key optional). The runtime detects the protocol, fetches models, and builds a provider draft from the result.",
+      note: "Import only fills the current editor draft; save on the page to write it back to config.",
+      submit: "Start import",
+      submitting: "Importing...",
+      failed: "Failed to auto import",
+      requiresNameAndBaseUrl: "Auto import requires both a name and base_url.",
+      success:
+        "Imported provider \"{{name}}\" with {{count}} models; review and save to apply.",
+      nameDescription: "Provider name after import; also used for routing and default selection.",
+      namePlaceholder: "Provider name",
+      protocolDescription: "Defaults to auto detection on the server; you can pin a protocol.",
+      protocolAria: "Auto import protocol",
+      protocolAuto: "Auto detect",
+      baseUrlDescription: "Site root URL used to detect the protocol and fetch the model list.",
+      apiKeyDescription:
+        "Optional. With a key the models are fetched right away; otherwise fill it in the edit form later.",
+      apiKeyPlaceholder: "sk-...",
+      defaultModelDescription: "Optional; empty falls back to the model inferred by the server.",
+      defaultModelPlaceholder: "gpt-5.4",
+      modelsPath: "Models list path",
+      modelsPathDescription:
+        "Optional; empty lets the server infer the /models path from the protocol.",
+      modelsPathPlaceholder: "/v1/models",
+    },
   },
 } satisfies DeepStringShape<typeof zhRuntimeConfigEditorProviders>;

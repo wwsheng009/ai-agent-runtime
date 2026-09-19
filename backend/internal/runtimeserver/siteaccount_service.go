@@ -180,7 +180,8 @@ func (s *LocalSiteAccountService) Fetch(
 	return out, nil
 }
 
-// RefreshProvider detects/fetches using a saved provider and optionally persists the non-sensitive cache.
+// RefreshProvider detects/fetches using a saved provider and, when persist is set,
+// writes the refreshed cache plus any rotated api_key back to the provider config.
 func (s *LocalSiteAccountService) RefreshProvider(
 	ctx context.Context,
 	providerName string,
@@ -370,6 +371,13 @@ func (s *LocalSiteAccountService) RefreshProvider(
 		}
 		if strings.TrimSpace(out.AccountAuthRef) != "" {
 			update.AccountAuthRef = stringPtr(out.AccountAuthRef)
+		}
+		// The provider editor may pass a freshly rotated api_key. Persist it
+		// together with the account snapshot so config.yaml and the reloaded
+		// runtime provider registry pick up the new secret instead of keeping
+		// the stale one.
+		if reqKey := strings.TrimSpace(req.APIKey); reqKey != "" && reqKey != strings.TrimSpace(provider.GetAPIKey()) {
+			update.APIKey = stringPtr(reqKey)
 		}
 		if _, err := agentconfig.UpdateProviderConfig(s.configPath, update); err != nil {
 			return out, fmt.Errorf("persist provider account: %w", err)

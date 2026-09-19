@@ -315,6 +315,7 @@ func TestLocalSiteAccountServiceRefreshTriggersProviderReloader(t *testing.T) {
 	result, err := service.RefreshProvider(context.Background(), "alpha", skillsapi.SiteAccountRefreshRequest{
 		SiteType:   "sub2api",
 		SkipDetect: true,
+		APIKey:     "sk-alpha-rotated",
 	})
 	require.NoError(t, err)
 	require.True(t, result.Persisted)
@@ -324,4 +325,11 @@ func TestLocalSiteAccountServiceRefreshTriggersProviderReloader(t *testing.T) {
 	require.True(t, ok, "reloaded config should still contain the provider")
 	require.Equal(t, "sub2api", item.SiteType)
 	require.NotNil(t, item.Account)
+	require.Equal(t, "sk-alpha-rotated", item.GetAPIKey(),
+		"rotated api_key from the editor request should be written back to the provider config")
+
+	persistedRaw, readErr := os.ReadFile(configPath)
+	require.NoError(t, readErr)
+	require.Contains(t, string(persistedRaw), "sk-alpha-rotated",
+		"config.yaml should contain the rotated api_key")
 }

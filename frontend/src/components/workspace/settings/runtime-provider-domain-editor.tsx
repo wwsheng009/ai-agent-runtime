@@ -2,15 +2,11 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
-  appendProviderModels,
-  autoImportRuntimeProvider,
   buildProviderAccountConfigPatch,
   detectRuntimeSiteAccount,
-  fetchRuntimeProviderModels,
   fetchRuntimeSiteAccount,
   formatProviderAccountCacheLine,
   formatSiteAccountBalanceLine,
-  probeRuntimeProviderModels,
   refreshRuntimeProviderAccount,
 } from "@/api/runtime";
 import type { ProviderProbeResult } from "@/types/runtime";
@@ -25,20 +21,14 @@ import {
   type AccountAction,
 } from "./runtime-provider-domain-editor/draft-utils";
 import { ProviderDialog } from "./runtime-provider-domain-editor/provider-dialog";
+import {
+  ProviderImportDialog,
+  type ProviderImportResultSummary,
+} from "./runtime-provider-domain-editor/provider-import-dialog";
 import { type ProviderModelsAction } from "./runtime-provider-domain-editor/provider-models-section";
 import { ProviderTable } from "./runtime-provider-domain-editor/provider-table";
+import { useProviderModelsActions } from "./runtime-provider-domain-editor/use-provider-models-actions";
 import { type ProviderDraftInput } from "./runtime-provider-domain-form-utils";
-import {
-  buildProviderOpsRequestFromDraft,
-  canResolveProviderOpsTarget,
-  joinProviderOpsWarnings,
-  normalizeProviderModelIDs,
-  parseSupportedModelsText,
-  providerAutoImportPatch,
-  providerModelsPatch,
-  resolveProbeModels,
-  summarizeProbeResults,
-} from "./provider-ops-utils";
 import { SettingsNoticeCard } from "./settings-notice-card";
 
 type RuntimeProviderDomainEditorProps = {
@@ -82,6 +72,7 @@ export function RuntimeProviderDomainEditor({
   const [modelsError, setModelsError] = useState<string | null>(null);
   const [assumedModelIDs, setAssumedModelIDs] = useState<string[]>([]);
   const [probeResult, setProbeResult] = useState<ProviderProbeResult | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
 
   const enabledCount = useMemo(
     () => providers.filter((provider) => provider.enabled).length,
@@ -280,6 +271,12 @@ export function RuntimeProviderDomainEditor({
         save_account_auth: true,
       });
       const patch = buildProviderAccountConfigPatch(result);
+      // The backend persists a rotated api_key during sync; mirror it into the
+      // page draft so a later page-level save cannot write the stale secret back.
+      const draftAPIKey = options?.fromDialog ? draft.apiKey.trim() : "";
+      if (result.persisted && draftAPIKey) {
+        patch.api_key = draftAPIKey;
+      }
       onApplyProviderAccountFields?.(name, patch);
       if (options?.fromDialog) {
         setDraft((current) => ({
@@ -338,139 +335,48 @@ export function RuntimeProviderDomainEditor({
     }
   }
 
-  function describeModelsError(error: unknown, fallback: string) {
-    return describeAccountError(error, fallback);
-  }
+  const {
+    handleAutoImport,
+    handleFetchModels,
+    handleMergeModels,
+    handleProbeModels,
+  } = useProviderModelsActions({
+    assumedModelIDs,
+    draft,
+    editingProviderName,
+    setAssumedModelIDs,
+    setDraft,
+    setModelsBusy,
+    setModelsError,
+    setModelsNotice,
+    setProbeResult,
+  });
 
-  function modelsWarningsSuffix(warnings: string[] | undefined) {
-    const joined = joinProviderOpsWarnings(warnings);
-    return joined ? t("editor.providers.models.warningsSuffix", { warnings: joined }) : "";
-  }
-
-  async function handleFetchModels() {
-    if (!canResolveProviderOpsTarget({ baseUrl: draft.baseUrl, providerName: editingProviderName })) {
-      setModelsError(t("editor.providers.models.fetchRequiresBaseUrl"));
-      return;
+  /**
+   * 「自动导入」保存入口：把探测出的完整草稿交给既有保存链路
+   * （onSaveProvider 只改当前配置状态，落盘仍由页面的保存流程统一处理）。
+   */
+  function handleImportedProvider(
+    _summary: ProviderImportResultSummary,
+    importedDraft: ProviderDraftInput,
+  ): string | null {
+    const error = onSaveProvider(importedDraft, null);
+    if (error) {
+      return error;
     }
-
-    setModelsBusy("fetch");
-    setModelsError(null);
-    setModelsNotice(null);
-    try {
-      const result = await fetchRuntimeProviderModels(
-        buildProviderOpsRequestFromDraft(draft, editingProviderName),
-      );
-      const assumed = normalizeProviderModelIDs(result.assumed_model_ids);
-      const fetched = normalizeProviderModelIDs(result.model_ids);
-      setAssumedModelIDs(assumed);
-      setProbeResult(null);
-      const patch = providerModelsPatch(result);
-      if (patch) {
-        setDraft((current) => ({ ...current, ...patch }));
-      }
-      const warnings = modelsWarningsSuffix(result.warnings);
-      if (fetched.length > 0) {
-        setModelsNotice(
-          t("editor.providers.models.fetchSuccess", {
-            count: fetched.length,
-            endpoint: result.endpoint || "models",
-            warnings,
-          }),
-        );
-      } else {
-        setModelsNotice(
-          `${t("editor.providers.models.fetchEmpty")}${warnings}`.trim(),
-        );
-      }
-    } catch (error) {
-      setModelsError(
-        describeModelsError(error, t("editor.providers.models.fetchFailed")),
-      );
-    } finally {
-      setModelsBusy(null);
-    }
-  }
-
-  async function handleAutoImport() {
-    if (!canResolveProviderOpsTarget({ baseUrl: draft.baseUrl, providerName: editingProviderName })) {
-      setModelsError(t("editor.providers.models.autoImportRequiresBaseUrl"));
-      return;
-    }
-
-    setModelsBusy("auto-import");
-    setModelsError(null);
-    setModelsNotice(null);
-    try {
-      const result = await autoImportRuntimeProvider({
-        ...buildProviderOpsRequestFromDraft(draft, editingProviderName),
-        default_model: draft.defaultModel.trim() || undefined,
-      });
-      setDraft((current) => ({ ...current, ...providerAutoImportPatch(result) }));
-      const imported = normalizeProviderModelIDs(result.supported_models);
-      setAssumedModelIDs(imported);
-      setProbeResult(null);
-      setModelsNotice(
-        t("editor.providers.models.autoImportSuccess", {
-          warnings: modelsWarningsSuffix(result.warnings),
-        }),
-      );
-    } catch (error) {
-      setModelsError(
-        describeModelsError(error, t("editor.providers.models.autoImportFailed")),
-      );
-    } finally {
-      setModelsBusy(null);
-    }
-  }
-
-  function handleMergeModels(modelIDs: string[]) {
-    const current = parseSupportedModelsText(draft.supportedModelsText);
-    const merged = appendProviderModels(current, modelIDs);
-    if (merged.length === current.length) {
-      return;
-    }
-    setDraft((currentDraft) => ({
-      ...currentDraft,
-      supportedModelsText: merged.join("\n"),
-    }));
-    setModelsError(null);
-    setModelsNotice(
-      t("editor.providers.models.mergeAssumedNotice", {
-        count: merged.length - current.length,
+    setDialogError(null);
+    setEditingProviderName(importedDraft.name);
+    setDraft(importedDraft);
+    const modelCount = importedDraft.supportedModelsText
+      .split("\n")
+      .filter((line) => line.trim().length > 0).length;
+    setRowNotice(
+      t("editor.providers.import.success", {
+        name: importedDraft.name,
+        count: modelCount,
       }),
     );
-  }
-
-  async function handleProbeModels() {
-    const models = resolveProbeModels(assumedModelIDs, draft);
-    if (models.length === 0) {
-      setModelsError(t("editor.providers.models.probeRequiresModels"));
-      return;
-    }
-    setModelsBusy("probe");
-    setModelsError(null);
-    setModelsNotice(null);
-    try {
-      const result = await probeRuntimeProviderModels({
-        ...buildProviderOpsRequestFromDraft(draft, editingProviderName),
-        models,
-      });
-      setProbeResult(result);
-      const summary = summarizeProbeResults(result);
-      setModelsNotice(
-        t("editor.providers.models.probeSuccess", {
-          total: String(summary.total),
-          ok: String(summary.ok),
-        }),
-      );
-    } catch (error) {
-      setProbeResult(null);
-      setModelsError(
-        describeModelsError(error, t("editor.providers.models.probeFailed")),
-      );
-    } finally {
-      setModelsBusy(null);
-    }
+    return null;
   }
 
   return (
@@ -488,10 +394,18 @@ export function RuntimeProviderDomainEditor({
         onCreateProvider={openCreateDialog}
         onDeleteProvider={onDeleteProvider}
         onEditProvider={openEditDialog}
+        onImportProvider={() => setImportOpen(true)}
         onRefreshProviderAccount={(name) => void handleRefreshProviderAccount(name)}
         onSetDefaultProvider={onSetDefaultProvider}
         providers={providers}
         rowBusyName={rowBusyName}
+      />
+
+      <ProviderImportDialog
+        defaultProvider={defaultProvider}
+        onClose={() => setImportOpen(false)}
+        onImport={handleImportedProvider}
+        open={importOpen}
       />
 
       <ProviderDialog

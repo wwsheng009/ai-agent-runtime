@@ -17,8 +17,58 @@ import type {
 } from "@/types/runtime";
 
 import { isConfigRecord, normalizeStringArrayInput } from "./runtime-provider-config-utils";
-import { providerProtocolOptions } from "./runtime-provider-domain-editor/draft-utils";
+import {
+  createProviderDraftInput,
+  providerProtocolOptions,
+} from "./runtime-provider-domain-editor/draft-utils";
 import { type ProviderDraftInput } from "./runtime-provider-domain-form-utils";
+
+/**
+ * 「自动导入」对话框的最小输入：名称 + base_url 必填，api_key 可选
+ * （与 micro web client 的弹窗一致，但允许先导入再手填 key）。
+ */
+export type ProviderImportInput = {
+  apiKey: string;
+  baseUrl: string;
+  defaultModel: string;
+  modelsPath: string;
+  name: string;
+  protocol: string;
+  setAsDefault: boolean;
+};
+
+/** 自动导入对话框：协议下拉的「不指定」值，后端按 auto 处理（探测 / 回退已保存协议）。 */
+export const providerImportAutoProtocol = "auto";
+
+/**
+ * 把自动导入结果折算成一份完整草稿：等价于「新建 provider 后把补丁合并进表单」，
+ * 落盘仍走既有保存链路（runtime server 的 auto-import 接口不写配置）。
+ */
+export function buildProviderDraftFromAutoImport(
+  result: ProviderAutoImportResult,
+  fallbackName: string,
+  defaultProvider: string,
+): ProviderDraftInput {
+  const draft = createProviderDraftInput(null, defaultProvider);
+  return {
+    ...draft,
+    ...providerAutoImportPatch(result),
+    name: result.name?.trim() || fallbackName.trim(),
+  };
+}
+
+/** 自动导入表单校验：名称与 base_url 必填，其余可留给后端探测。 */
+export function validateProviderImportInput(input: ProviderImportInput): {
+  baseUrl: string;
+  name: string;
+} | null {
+  const name = input.name.trim();
+  const baseUrl = input.baseUrl.trim();
+  if (!name || !baseUrl) {
+    return null;
+  }
+  return { baseUrl, name };
+}
 
 /**
  * 从编辑草稿构造 provider ops 请求：已保存 provider 用原始名称（改名时后端

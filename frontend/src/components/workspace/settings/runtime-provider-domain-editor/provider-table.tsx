@@ -4,12 +4,14 @@ import {
   CopyIcon,
   PencilIcon,
   RefreshCwIcon,
+  SparklesIcon,
   StarIcon,
   Trash2Icon,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 
 import {
   ConfigDomainSummaryBadge,
@@ -30,6 +32,7 @@ type ProviderTableProps = {
   enabledCount: number;
   onCopyProvider: (provider: RuntimeProviderSummary) => void;
   onCreateProvider: () => void;
+  onImportProvider: () => void;
   onDeleteProvider: (name: string) => void;
   onEditProvider: (provider: RuntimeProviderSummary) => void;
   onRefreshProviderAccount: (name: string) => void;
@@ -44,6 +47,7 @@ export function ProviderTable({
   enabledCount,
   onCopyProvider,
   onCreateProvider,
+  onImportProvider,
   onDeleteProvider,
   onEditProvider,
   onRefreshProviderAccount,
@@ -79,11 +83,17 @@ export function ProviderTable({
           </>
         }
         actions={
-          <SettingsAddButton
-            size="sm"
-            label={t("editor.providers.create")}
-            onClick={onCreateProvider}
-          />
+          <>
+            <Button variant="secondary" size="sm" onClick={onImportProvider}>
+              <SparklesIcon size={14} />
+              {t("editor.providers.import.action")}
+            </Button>
+            <SettingsAddButton
+              size="sm"
+              label={t("editor.providers.create")}
+              onClick={onCreateProvider}
+            />
+          </>
         }
         columns={[
           {
