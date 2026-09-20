@@ -88,6 +88,10 @@ func runAgentStdio(cmd *cobra.Command, cfg *config.Config) error {
 	// the corresponding UI. The server still clears any flag whose method the
 	// backend does not actually implement.
 	agentCaps := acp.DefaultAgentCapabilities()
+	// 置位即承诺：image / embeddedContext 的入站处理已在 Prompt 中落地
+	// （image 块落盘为本轮本地附件，resource 文本内联进 prompt），audio 保持
+	// false，因为运行时没有音频输入链路。
+	agentCaps.PromptCapabilities = acp.FullPromptCapabilities()
 	agentCaps.SessionCapabilities.SetList(true)
 	agentCaps.SessionCapabilities.SetDelete(true)
 	agentCaps.SessionCapabilities.SetResume(true)
@@ -162,6 +166,10 @@ type acpHostSession struct {
 	mu         sync.Mutex
 	prompting  bool
 	finalError error
+	// imageDir is the lazily created per-session staging directory for inbound
+	// ACP image blocks (guarded by mu; removed by closeSessionLocked).
+	imageDir string
+	imageSeq int
 }
 
 func newACPSessionHost(cfg *config.Config, opts *agentStdioOptions) *acpSessionHost {
@@ -324,9 +332,33 @@ func (h *acpSessionHost) Prompt(ctx context.Context, req acp.PromptRequest, emit
 		hostSess.mu.Unlock()
 	}()
 
-	text := strings.TrimSpace(acp.ExtractText(req.Prompt))
+	// ACP v1 prompt payloads may mix text, embedded resources (editor
+	// selection / branch diff) and image blocks. Decode the whole payload
+	// before the turn: silently dropping an advertised content type is exactly
+	// the bug this path exists to prevent.
+	content, err := acp.ExtractPromptContent(req.Prompt)
+	if err != nil {
+		return acp.PromptResponse{}, err
+	}
+	text := acpPromptTextForTurn(content)
 	if text == "" {
 		return acp.PromptResponse{}, fmt.Errorf("prompt has no text content")
+	}
+	if len(content.Images) > 0 {
+		sessionChat := hostSess.chat
+		if !acpModelAcceptsImageInput(sessionChat) {
+			return acp.PromptResponse{}, fmt.Errorf(
+				"model %q does not accept image input; remove the image or switch to a vision-capable model",
+				acpChatResolvedModel(sessionChat),
+			)
+		}
+	}
+	// Stage image blocks as local attachments for this turn. Doing it before
+	// the bridge/permission wiring keeps a malformed payload free of side
+	// effects.
+	imagePaths, err := stageACPPromptImages(hostSess, content.Images)
+	if err != nil {
+		return acp.PromptResponse{}, err
 	}
 
 	// Wire per-prompt emitter + permission requester onto the event bridge.
@@ -369,7 +401,9 @@ func (h *acpSessionHost) Prompt(ctx context.Context, req acp.PromptRequest, emit
 	// Slash commands arrive as ordinary prompt text over ACP. Claim the
 	// advertised ones (available_commands_update) before the turn reaches the
 	// model; unknown "/..." text stays a normal prompt.
-	if h.dispatchACPSlashCommand(promptCtx, sessionID, hostSess, text, emit) {
+	// Slash commands are plain text by contract; when a payload also carries
+	// images, claiming the text would drop them, so it stays a model prompt.
+	if len(content.Images) == 0 && h.dispatchACPSlashCommand(promptCtx, sessionID, hostSess, text, emit) {
 		return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
 	}
 
@@ -400,7 +434,7 @@ func (h *acpSessionHost) Prompt(ctx context.Context, req acp.PromptRequest, emit
 		chat.ACPMCPSession.prepareForPrompt(promptCtx)
 	}
 
-	response, err := sendMessage(chat, text)
+	response, err := sendMessageWithImages(chat, text, imagePaths)
 	if err != nil {
 		// Close any tool calls left open by the cancelled turn so the client
 		// never sees a dangling in_progress tool_call.
@@ -876,6 +910,15 @@ func (h *acpSessionHost) closeSessionLocked(s *acpHostSession) {
 		if s.prompting {
 			s.chat.Interrupt()
 		}
+	}
+	// Drop the session's staged ACP image attachments: history that outlives
+	// the session keeps its own persisted copies (session artifact dir).
+	s.mu.Lock()
+	imageDir := s.imageDir
+	s.imageDir = ""
+	s.mu.Unlock()
+	if imageDir != "" {
+		_ = os.RemoveAll(imageDir)
 	}
 	if s.cleanup != nil {
 		s.cleanup()

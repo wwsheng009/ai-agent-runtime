@@ -2,6 +2,7 @@ package acp
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -1364,13 +1365,50 @@ func TextToolContent(text string) ToolCallContent {
 	return ToolCallContent{Type: "content", Content: &block}
 }
 
-// ExtractText joins text ContentBlocks from a prompt into a single string.
+// PromptImage is one inbound image attachment decoded from a prompt content
+// block: the raw bytes plus the declared media type.
+type PromptImage struct {
+	Data     []byte
+	MIMEType string
+	// Name / URI are best-effort labels carried by embedded resource blobs.
+	Name string
+	URI  string
+}
+
+// PromptContent is the agent-consumable view of a session/prompt payload.
+type PromptContent struct {
+	// Text joins text, resource_link and embedded text resources.
+	Text string
+	// Images holds image content blocks and image-typed embedded resource blobs
+	// in arrival order.
+	Images []PromptImage
+}
+
+// ExtractPromptContent decodes a session/prompt payload according to the
+// advertised promptCapabilities contract:
+//   - text / resource_link / resource(text) blocks flatten into Text;
+//   - image blocks and image-typed embedded resource blobs become Images;
+//   - audio blocks are rejected (the host never advertises audio);
+//   - unknown block types are rejected instead of being silently dropped.
+func ExtractPromptContent(blocks []ContentBlock) (PromptContent, error) {
+	return extractPromptContent(blocks, true)
+}
+
+// ExtractText joins the text-bearing ContentBlocks of a prompt into a single
+// string. Unsupported blocks are skipped: this is the lenient view used by
+// callers that only care about the textual part of a payload.
 func ExtractText(blocks []ContentBlock) string {
+	content, _ := extractPromptContent(blocks, false)
+	return content.Text
+}
+
+func extractPromptContent(blocks []ContentBlock, strict bool) (PromptContent, error) {
+	var content PromptContent
 	if len(blocks) == 0 {
-		return ""
+		return content, nil
 	}
 	parts := make([]string, 0, len(blocks))
-	for _, block := range blocks {
+	for index, block := range blocks {
 		switch block.Type {
 		case "", "text":
 			if block.Text != "" {
@@ -1385,32 +1423,158 @@ func ExtractText(blocks []ContentBlock) string {
 				}
 			}
 		case "resource":
-			if len(block.Resource) > 0 {
-				var embedded struct {
-					Text string `json:"text"`
-					URI  string `json:"uri"`
+			text, image, err := extractEmbeddedPromptResource(block.Resource)
+			if err != nil {
+				if strict {
+					return PromptContent{}, fmt.Errorf("prompt content block %d: %w", index, err)
 				}
-				if err := json.Unmarshal(block.Resource, &embedded); err == nil {
-					if embedded.Text != "" {
-						parts = append(parts, embedded.Text)
-					} else if embedded.URI != "" {
-						parts = append(parts, embedded.URI)
-					}
+				continue
+			}
+			if text != "" {
+				parts = append(parts, text)
+			}
+			if image != nil {
+				content.Images = append(content.Images, *image)
+			}
+		case "image":
+			image, err := decodePromptImage(block.Data, block.MIMEType, block.Name, block.URI)
+			if err != nil {
+				if strict {
+					return PromptContent{}, fmt.Errorf("prompt content block %d: %w", index, err)
 				}
+				continue
+			}
+			content.Images = append(content.Images, *image)
+		case "audio":
+			if strict {
+				return PromptContent{}, fmt.Errorf("prompt content block %d: audio prompts are not supported", index)
+			}
+		default:
+			if strict {
+				return PromptContent{}, fmt.Errorf("prompt content block %d: unsupported content type %q", index, block.Type)
 			}
 		}
 	}
-	if len(parts) == 0 {
-		return ""
-	}
-	out := parts[0]
-	for i := 1; i < len(parts); i++ {
-		out += "\n\n" + parts[i]
-	}
-	return out
+	content.Text = strings.Join(parts, "\n\n")
+	return content, nil
 }
 
-// DefaultAgentCapabilities returns MVP capabilities (text prompts only).
+// embeddedPromptResource mirrors the two EmbeddedResource variants of ACP v1:
+// TextResourceContents (text) and BlobResourceContents (blob + mimeType).
+type embeddedPromptResource struct {
+	URI      string `json:"uri"`
+	MIMEType string `json:"mimeType"`
+	Text     string `json:"text"`
+	Blob     string `json:"blob"`
+}
+
+func extractEmbeddedPromptResource(raw json.RawMessage) (string, *PromptImage, error) {
+	if len(raw) == 0 {
+		return "", nil, nil
+	}
+	var embedded embeddedPromptResource
+	if err := json.Unmarshal(raw, &embedded); err != nil {
+		return "", nil, fmt.Errorf("decode embedded resource: %w", err)
+	}
+	if strings.TrimSpace(embedded.Text) != "" {
+		return embedded.Text, nil, nil
+	}
+	if strings.TrimSpace(embedded.Blob) != "" {
+		if isPromptImageMIMEType(embedded.MIMEType) {
+			image, err := decodePromptImage(embedded.Blob, embedded.MIMEType, "", embedded.URI)
+			if err != nil {
+				return "", nil, err
+			}
+			return "", image, nil
+		}
+		// A binary resource the agent cannot render still has to reach the
+		// model as a labeled placeholder instead of vanishing.
+		label := strings.TrimSpace(embedded.URI)
+		if label == "" {
+			label = strings.TrimSpace(embedded.MIMEType)
+		}
+		if label == "" {
+			label = "binary"
+		}
+		return fmt.Sprintf("[embedded binary resource: %s]", label), nil, nil
+	}
+	if uri := strings.TrimSpace(embedded.URI); uri != "" {
+		return uri, nil, nil
+	}
+	return "", nil, nil
+}
+
+// decodePromptImage validates one image payload. Data is the protocol's base64
+// string; a data URL is tolerated because some clients inline the media type.
+func decodePromptImage(data, mimeType, name, uri string) (*PromptImage, error) {
+	payload := strings.TrimSpace(data)
+	mimeType = strings.TrimSpace(mimeType)
+	if payload == "" {
+		return nil, fmt.Errorf("image block has no data")
+	}
+	if strings.HasPrefix(strings.ToLower(payload), "data:") {
+		comma := strings.Index(payload, ",")
+		if comma < 0 {
+			return nil, fmt.Errorf("image block data URL is malformed")
+		}
+		header := payload[len("data:"):comma]
+		if headerMime := strings.TrimSpace(strings.SplitN(header, ";", 2)[0]); headerMime != "" && mimeType == "" {
+			mimeType = headerMime
+		}
+		payload = payload[comma+1:]
+	}
+	if !isPromptImageMIMEType(mimeType) {
+		return nil, fmt.Errorf("image block mimeType %q is not a supported image type", mimeType)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(stripBase64Whitespace(payload))
+	if err != nil {
+		return nil, fmt.Errorf("image block data is not valid base64: %w", err)
+	}
+	if len(decoded) == 0 {
+		return nil, fmt.Errorf("image block data is empty")
+	}
+	return &PromptImage{Data: decoded, MIMEType: strings.ToLower(mimeType), Name: name, URI: uri}, nil
+}
+
+func stripBase64Whitespace(payload string) string {
+	if !strings.ContainsAny(payload, " \t\r\n") {
+		return payload
+	}
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case ' ', '\t', '\r', '\n':
+			return -1
+		default:
+			return r
+		}
+	}, payload)
+}
+
+func isPromptImageMIMEType(mimeType string) bool {
+	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
+	if semi := strings.Index(mimeType, ";"); semi >= 0 {
+		mimeType = strings.TrimSpace(mimeType[:semi])
+	}
+	return strings.HasPrefix(mimeType, "image/") && mimeType != "image/svg+xml"
+}
+
+// FullPromptCapabilities returns the prompt capabilities the aicli ACP host
+// advertises: inbound image blocks are staged as local attachments for the
+// turn, and embedded context (editor selection / branch diff text resources)
+// is inlined into the prompt text. Audio stays off because the runtime has no
+// audio input path — per the ACP contract a client must not send blocks the
+// agent did not advertise.
+func FullPromptCapabilities() *PromptCapabilities {
+	return &PromptCapabilities{
+		Image:           true,
+		Audio:           false,
+		EmbeddedContext: true,
+	}
+}
+
+// DefaultAgentCapabilities returns the conservative capability baseline (text
+// prompts only). Hosts that consume more content types override
+// PromptCapabilities, e.g. with FullPromptCapabilities.
 func DefaultAgentCapabilities() AgentCapabilities {
 	return AgentCapabilities{
 		// R6: advertise session/load so IDE hosts can resume conversations.
