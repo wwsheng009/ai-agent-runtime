@@ -10,8 +10,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
 // Transport 传输接口 - 封装官方 SDK 的 Transport
@@ -41,6 +44,10 @@ type Config struct {
 	// Env 环境变量
 	Env map[string]string
 
+	// Headers 远程传输的 HTTP 头（streamable / sse / websocket）。
+	// 优先于 Env；Env 仅在 Headers 为空时作为历史兼容的头部来源。
+	Headers map[string]string
+
 	// WorkingDir 工作目录（stdio）
 	WorkingDir string
 
@@ -52,6 +59,13 @@ type Config struct {
 type StdioTransport struct {
 	cfg     *Config
 	emitter lifecycleEmitter
+
+	// mu 保护 cmd / guard：ToMCPSdkTransport 在装配时写入，诊断与测试读取。
+	mu sync.Mutex
+	// cmd 是最近一次装配出的 stdio 命令（进程树守卫的根）。
+	cmd *exec.Cmd
+	// guard 是 stdio 进程树守卫（Windows: Job Object；Unix: 进程组）。
+	guard *executor.ProcessGuard
 }
 
 // NewTransport 创建传输实例（兼容现有接口）
@@ -107,7 +121,17 @@ func (t *StdioTransport) AddLifecycleObserver(observer LifecycleObserver) {
 
 // ToMCPSdkTransport 转换为官方 SDK 的 CommandTransport
 func (t *StdioTransport) ToMCPSdkTransport(ctx context.Context) mcp.Transport {
-	cmd := exec.CommandContext(ctx, t.cfg.Command, t.cfg.Args...)
+	// Windows 垫片（npx.cmd / uvx.cmd）需要 cmd.exe 包装后才能被 exec 执行。
+	command, args := resolveStdioCommand(t.cfg.Command, t.cfg.Args)
+	cmd, guard, guardErr := newStdioCommandGuard(ctx, command, args)
+	if guardErr != nil {
+		// 绑定失败只降级不阻断：仍然启动 server，但失去「父死子亡」兜底，
+		// 因此必须留下可见诊断（计划 §4.11）。
+		t.emitter.emitLifecycleEvent(TraceIDFromContext(ctx), "mcp.stdio.tree_guard_degraded", "stdio", "", map[string]interface{}{
+			"target": strings.TrimSpace(t.cfg.Command),
+			"error":  guardErr.Error(),
+		})
+	}
 
 	// 设置工作目录
 	if t.cfg.WorkingDir != "" {
@@ -137,9 +161,19 @@ func (t *StdioTransport) ToMCPSdkTransport(ctx context.Context) mcp.Transport {
 		cmd.Env = env
 	}
 
-	return newObservedMCPTransport("stdio", strings.TrimSpace(t.cfg.Command), &mcp.CommandTransport{
-		Command: cmd,
-	}, &t.emitter)
+	t.mu.Lock()
+	t.cmd = cmd
+	t.guard = guard
+	t.mu.Unlock()
+
+	inner := &mcp.CommandTransport{Command: cmd}
+	target := strings.TrimSpace(t.cfg.Command)
+	return newObservedMCPTransport(
+		"stdio",
+		target,
+		newStdioTreeGuardTransport(inner, cmd, guard, target, &t.emitter),
+		&t.emitter,
+	)
 }
 
 // SSETransport SSE 传输封装
@@ -169,7 +203,13 @@ func (t *SSETransport) AddLifecycleObserver(observer LifecycleObserver) {
 
 // ToMCPSdkTransport 转换为官方 SDK 的 SSEClientTransport
 func (t *SSETransport) ToMCPSdkTransport(ctx context.Context) mcp.Transport {
-	return newObservedMCPTransport("sse", strings.TrimSpace(t.cfg.URL), &mcp.SSEClientTransport{
+	inner := &mcp.SSEClientTransport{
 		Endpoint: t.cfg.URL,
-	}, &t.emitter)
+	}
+	if headers := buildHeaders(t.cfg.Headers, t.cfg.Env); len(headers) > 0 {
+		inner.HTTPClient = &http.Client{
+			Transport: headerRoundTripper{base: http.DefaultTransport, headers: headers},
+		}
+	}
+	return newObservedMCPTransport("sse", strings.TrimSpace(t.cfg.URL), inner, &t.emitter)
 }

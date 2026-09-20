@@ -103,6 +103,18 @@ type AsyncManager interface {
 	WaitReady(ctx context.Context) error
 }
 
+// ScopedManager 暴露「内存配置快照」加载能力。
+//
+// 会话级 manager（例如 ACP 客户端下发的 server）需要在不为每个会话写临时
+// 配置文件的前提下复用 Manager 的建连/回收/事件机制；文件加载路径
+// （LoadConfig）保持不变，本接口是并行的可选入口。
+type ScopedManager interface {
+	Manager
+	// LoadConfigFromConfig 用内存快照替换待加载配置，语义与 LoadConfig 一致：
+	// 深拷贝 + 补齐默认值，且只允许在 Start 之前调用。
+	LoadConfigFromConfig(cfg *config.Config) error
+}
+
 const (
 	// maxConcurrentMCPStarts 限制后台并行建连的 MCP 数量，避免一次性拉起过多子进程。
 	maxConcurrentMCPStarts = 8
@@ -180,7 +192,26 @@ func (m *manager) LoadConfig(configPath string) error {
 		return fmt.Errorf("加载配置失败: %w", err)
 	}
 
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.started {
+		return fmt.Errorf("管理器已经启动")
+	}
 	m.cfg = cfg
+	return nil
+}
+
+// LoadConfigFromConfig 加载内存配置快照（见 ScopedManager）。
+func (m *manager) LoadConfigFromConfig(cfg *config.Config) error {
+	if cfg == nil {
+		return fmt.Errorf("配置为空")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.started {
+		return fmt.Errorf("管理器已经启动")
+	}
+	m.cfg = config.CloneWithDefaults(cfg)
 	return nil
 }
 

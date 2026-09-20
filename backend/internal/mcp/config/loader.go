@@ -80,6 +80,17 @@ func (l *Loader) GetConfig() *Config {
 
 // setDefaults 设置默认值
 func (l *Loader) setDefaults(config *Config) {
+	ApplyDefaults(config)
+}
+
+// ApplyDefaults 补齐全局与每个 server 的默认值。
+//
+// 与文件加载共用同一套默认值语义，供内存配置入口（会话级 manager）复用，
+// 避免「文件加载有默认值、内存加载没有」的两套行为。
+func ApplyDefaults(config *Config) {
+	if config == nil {
+		return
+	}
 	// 全局配置默认值
 	if config.Global.HealthCheckInterval.Duration == 0 {
 		config.Global.HealthCheckInterval.Duration = time.Minute

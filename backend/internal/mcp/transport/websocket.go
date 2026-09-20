@@ -56,11 +56,27 @@ func (t *WebSocketTransport) ToMCPSdkTransport(ctx context.Context) mcp.Transpor
 	return newObservedMCPTransport("websocket", t.cfg.URL, &WSClientTransport{
 		cfg:     t.cfg,
 		dialer:  websocket.DefaultDialer,
-		headers: buildHeadersFromEnv(t.cfg.Env),
+		headers: buildHeaders(t.cfg.Headers, t.cfg.Env),
 	}, &t.emitter)
 }
 
-// buildHeadersFromEnv 从 env 构建 HTTP 头
+// buildHeaders 构建远程传输的 HTTP 头：Headers 优先，Env 兜底。
+//
+// 历史行为是「把 Env 的每个 key/value 直接当作 HTTP 头」（见
+// buildHeadersFromEnv），保留它以免破坏既有 mcp.yaml 配置；ACP 等新接入方
+// 应使用语义明确的 Headers 字段。
+func buildHeaders(headers map[string]string, env map[string]string) http.Header {
+	if len(headers) > 0 {
+		out := make(http.Header, len(headers))
+		for k, v := range headers {
+			out.Set(k, v)
+		}
+		return out
+	}
+	return buildHeadersFromEnv(env)
+}
+
+// buildHeadersFromEnv 从 env 构建 HTTP 头（历史兼容路径）。
 func buildHeadersFromEnv(env map[string]string) http.Header {
 	if len(env) == 0 {
 		return nil

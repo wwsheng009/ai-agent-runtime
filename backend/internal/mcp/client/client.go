@@ -155,7 +155,8 @@ func (c *mcpClient) Connect(ctx context.Context) error {
 		Args:       c.cfg.Args,
 		URL:        c.cfg.URL,
 		Env:        c.cfg.Env,
-		WorkingDir: ".",
+		Headers:    c.cfg.Headers,
+		WorkingDir: strings.TrimSpace(c.cfg.WorkingDir),
 	}
 
 	t, err := c.newTransport(transportCfg)

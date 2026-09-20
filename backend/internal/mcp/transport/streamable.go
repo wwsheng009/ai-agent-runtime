@@ -44,7 +44,7 @@ func (t *StreamableTransport) ToMCPSdkTransport(_ context.Context) mcp.Transport
 	inner := &mcp.StreamableClientTransport{
 		Endpoint: strings.TrimSpace(t.cfg.URL),
 	}
-	if headers := buildHeadersFromEnv(t.cfg.Env); len(headers) > 0 {
+	if headers := buildHeaders(t.cfg.Headers, t.cfg.Env); len(headers) > 0 {
 		inner.HTTPClient = &http.Client{
 			Transport: headerRoundTripper{base: http.DefaultTransport, headers: headers},
 		}
@@ -52,7 +52,7 @@ func (t *StreamableTransport) ToMCPSdkTransport(_ context.Context) mcp.Transport
 	return newObservedMCPTransport("streamable", t.cfg.URL, inner, &t.emitter)
 }
 
-// headerRoundTripper 为每个请求注入配置的 HTTP 头（来自 env 中的 HEADER_* 项）。
+// headerRoundTripper 为每个请求注入配置的 HTTP 头（Headers 优先，Env 兜底）。
 type headerRoundTripper struct {
 	base    http.RoundTripper
 	headers http.Header

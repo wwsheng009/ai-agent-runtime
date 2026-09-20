@@ -98,6 +98,12 @@ type MCPConfig struct {
 	Args             []string              `yaml:"args" json:"args"`         // 命令参数
 	URL              string                `yaml:"url" json:"url"`           // 连接URL（sse/ws）
 	Env              map[string]string     `yaml:"env" json:"env"`           // 环境变量
+	// Headers 远程传输的 HTTP 头（streamable / sse / websocket）。
+	// 优先于 Env：仅当 Headers 为空时才回退把 Env 整体当作 HTTP 头
+	// （历史行为，见 transport.buildHeadersFromEnv）。
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	// WorkingDir stdio 子进程工作目录；为空时由传输层回退到进程当前目录。
+	WorkingDir       string                `yaml:"workingDir,omitempty" json:"workingDir,omitempty"`
 	Enabled          bool                  `yaml:"enabled" json:"enabled"`   // 是否启用
 	Disabled         bool                  `yaml:"disabled" json:"disabled"` // 是否禁用（与 enabled 相反，用于兼容 MCP 官方格式）
 	Timeout          Duration              `yaml:"timeout" json:"timeout"`   // 超时时间
