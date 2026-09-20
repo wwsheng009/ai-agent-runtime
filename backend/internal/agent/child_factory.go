@@ -160,6 +160,13 @@ func childSubagentSchedulerConfig(parentScheduler *SubagentScheduler, config Sub
 	if parentScheduler == nil || !parentScheduler.NestedDelegationOptIn() {
 		config.DelegationPolicy = DelegationPolicyDisabled
 	}
+	// P1-4/H12: a depth-N fan-out must stay inside the same process-wide
+	// budget as its parent — without inheritance every nested scheduler would
+	// silently get its own ceiling again. The parent's limiter wins unless the
+	// caller already supplied one explicitly.
+	if parentScheduler != nil && config.GlobalLimiter == nil {
+		config.GlobalLimiter = parentScheduler.config.GlobalLimiter
+	}
 	return config
 }
 

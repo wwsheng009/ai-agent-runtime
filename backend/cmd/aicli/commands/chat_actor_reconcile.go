@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 // localRegistryReconcileIntervalEnv / localRegistryReconcileModeEnv override the
@@ -92,19 +94,112 @@ func (h *localChatRuntimeHost) buildLocalRegistryReconciler() *agentcontrol.Reco
 		// outside the configured window (0 → shared default, negative → keep
 		// forever). Only rows that were already terminal can match, so the pass
 		// never touches a child that still holds quota.
+		//
+		// H3 wake governance runs in the same hook: the closed/stale half
+		// converges on a shorter window than the identity rows (default 7 days),
+		// and the active half drains the per-agent backlog that predates the
+		// append-time cap. Observe (the default) only reports the candidates, so
+		// wiring this cannot delete anything before an operator opts into enforce.
 		Purge: func(ctx context.Context, now time.Time) (agentcontrol.TerminalPurgeOutcome, error) {
 			store := registry.localAgentRegistryStore()
 			if store == nil {
 				return agentcontrol.TerminalPurgeOutcome{}, nil
 			}
-			return agentcontrol.PurgeTerminalAgentRecords(ctx, store, agentcontrol.TerminalPurgePolicy{
+			outcome, err := agentcontrol.PurgeTerminalAgentRecords(ctx, store, agentcontrol.TerminalPurgePolicy{
 				Now:       now,
 				Retention: h.localRegistryTerminalRetention(),
 			})
+			if err != nil {
+				return outcome, err
+			}
+			wakeOutcome, wakeErr := agentcontrol.PruneAgentWakeEvents(ctx, store, agentcontrol.AgentWakePrunePolicy{
+				Now:  now,
+				Mode: mode,
+			})
+			outcome.WakePruneMode = wakeOutcome.Mode
+			outcome.WakePruneCandidates = wakeOutcome.ClosedCandidates + wakeOutcome.OverflowCandidates
+			outcome.WakeEvents += wakeOutcome.ClosedDeleted + wakeOutcome.OverflowDeleted
+			if wakeErr != nil {
+				return outcome, wakeErr
+			}
+			if outcome.FirstError == "" {
+				outcome.FirstError = wakeOutcome.FirstError
+			}
+			return outcome, nil
 		},
-		Mode:     mode,
-		Interval: interval,
+		// P1-3 (H11/H15): the worktree base dir drifts independently of the
+		// registry, so the same pass reconciles the directories against the git
+		// registration table and the paths live children still own. Observe
+		// mode only reports; enforce reclaims the provable leaks.
+		Worktrees: registry.reconcileLocalWorktrees,
+		Mode:      mode,
+		Interval:  interval,
 	}
+}
+
+// reconcileLocalWorktrees runs the worktree half of the reconcile pass
+// (isolation/worktree.ReconcileWorktrees, plan P1-3 / findings H11+H15). A
+// directory that is neither git-registered nor owned by a live session is the
+// crashed-child leak; a git registration whose directory vanished is provable
+// drift. Everything else is reported, never reclaimed.
+func (r *localActorRegistry) reconcileLocalWorktrees(ctx context.Context, records []agentcontrol.AgentRecord, enforce bool, now time.Time) (agentcontrol.WorktreeReconcileOutcome, error) {
+	if r == nil || r.Host == nil {
+		return agentcontrol.WorktreeReconcileOutcome{}, nil
+	}
+	repoRoot := resolveLocalWorkspacePath(r.Host.RuntimeConfig, r.Host.BaseSession)
+	if strings.TrimSpace(repoRoot) == "" {
+		return agentcontrol.WorktreeReconcileOutcome{}, nil
+	}
+	mode := worktree.ReconcileModeObserve
+	if enforce {
+		mode = worktree.ReconcileModeEnforce
+	}
+	report, err := worktree.ReconcileWorktrees(ctx, worktree.ReconcileOptions{
+		RepoRoot:        repoRoot,
+		RegisteredPaths: r.liveWorktreePaths(ctx, records),
+		Mode:            mode,
+		Now:             now,
+	})
+	if err != nil {
+		return agentcontrol.WorktreeReconcileOutcome{}, err
+	}
+	return agentcontrol.WorktreeReconcileOutcome{
+		Supported:     true,
+		Dirs:          report.DirsChecked,
+		Orphans:       report.OrphanDirs,
+		StaleGit:      report.StaleGit,
+		StaleRegistry: report.StaleRegistry,
+		Unmanaged:     report.Unmanaged,
+		ReclaimedDirs: report.ReclaimedDirs,
+		ReclaimedGit:  report.ReclaimedGit,
+		Failed:        report.Failed,
+	}, nil
+}
+
+// liveWorktreePaths resolves the worktree paths the live registry still owns.
+// The durable agent rows carry identity, not workspace context, so the session
+// store is what maps a row back to the path a child is still working in.
+func (r *localActorRegistry) liveWorktreePaths(ctx context.Context, records []agentcontrol.AgentRecord) []string {
+	if r == nil || r.Host == nil || r.Host.SessionStore == nil {
+		return nil
+	}
+	seen := make(map[string]bool, len(records))
+	paths := make([]string, 0, len(records))
+	for _, record := range records {
+		sessionID := strings.TrimSpace(record.SessionID)
+		if sessionID == "" || seen[sessionID] {
+			continue
+		}
+		seen[sessionID] = true
+		session, err := r.Host.SessionStore.Load(ctx, sessionID)
+		if err != nil || session == nil {
+			continue
+		}
+		if path := strings.TrimSpace(agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreePath)); path != "" {
+			paths = append(paths, path)
+		}
+	}
+	return paths
 }
 
 // localRegistryReconcileTuning resolves the sweep settings with the precedence

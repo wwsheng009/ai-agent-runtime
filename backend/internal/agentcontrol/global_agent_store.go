@@ -22,6 +22,17 @@ import (
 type GlobalAgentStoreConfig struct {
 	Path string
 	DSN  string
+	// MaxActiveWakeEventsPerAgent caps how many non-terminal wake events one
+	// agent keeps (P1-2/H3): 0 uses DefaultMaxActiveWakeEventsPerAgent, a
+	// negative value disables the append-time cap, a positive value is used
+	// as-is (tests and hosts can lower it).
+	//
+	// Durable semantics: the cap only ever removes the agent's OLDEST
+	// non-terminal wake rows, before a new non-terminal row is appended, so a
+	// hot agent's wake log stays bounded while the newest K events (the ones a
+	// watcher can still catch up on) survive. Terminal (closed/stale) rows are
+	// never touched here — they stay governed by age-based retention.
+	MaxActiveWakeEventsPerAgent int
 }
 
 // SQLiteGlobalAgentRegistryStore persists the AgentControl identity graph in a
@@ -982,6 +993,166 @@ func (s *SQLiteGlobalAgentRegistryStore) PurgeAgentControlAgentWakeEvents(ctx co
 	return count, nil
 }
 
+// Wake-event governance (P1-2/H3), batched half.
+//
+// makeRoomForAgentWakeEvent bounds a single agent as it writes; these
+// statements let one retention pass converge the backlog that already exists
+// (measured: 1.13M closed rows plus active agents that were never capped) with
+// the observe/enforce semantics owned by retention.go. Both halves are
+// deliberately narrower than PurgeAgentControlAgentWakeEvents: the closed half
+// only removes rows whose status snapshot is closed/stale, and the overflow
+// half only removes non-terminal rows beyond the newest K of their agent. The
+// age-based whole-log purge is left untouched.
+//
+// The statements are package constants (like the purge pair above) so a
+// query-plan guard can EXPLAIN the exact SQL the pass executes.
+const countAgentWakeClosedRetentionSQL = `
+		SELECT COUNT(*) FROM (
+			SELECT id FROM agent_control_agent_wake_events
+			WHERE status IN (?, ?)
+				AND created_at < ?
+				AND datetime(created_at) IS NOT NULL
+				AND datetime(created_at) < datetime(?)
+			ORDER BY created_at ASC, id ASC
+			LIMIT ?
+		)
+	`
+
+const deleteAgentWakeClosedRetentionSQL = `
+		DELETE FROM agent_control_agent_wake_events
+		WHERE id IN (
+			SELECT id FROM agent_control_agent_wake_events
+			WHERE status IN (?, ?)
+				AND created_at < ?
+				AND datetime(created_at) IS NOT NULL
+				AND datetime(created_at) < datetime(?)
+			ORDER BY created_at ASC, id ASC
+			LIMIT ?
+		)
+	`
+
+// The overflow pair partitions by agent_id and numbers rows newest-first, so
+// "rn > keep" is exactly "older than the newest keep rows of this agent". A
+// NULL status counts as non-terminal (the column postdates the first wake
+// rows), while closed/stale rows never match. This is a bounded linear pass
+// over the non-terminal slice of the log — it is the retention cadence that
+// bounds it, not an index.
+const countAgentWakeActiveOverflowSQL = `
+		SELECT COUNT(*) FROM (
+			SELECT id FROM (
+				SELECT id, ROW_NUMBER() OVER (PARTITION BY agent_id ORDER BY id DESC) AS rn
+				FROM agent_control_agent_wake_events
+				WHERE status IS NULL OR (status <> ? AND status <> ?)
+			)
+			WHERE rn > ?
+			ORDER BY id ASC
+			LIMIT ?
+		)
+	`
+
+const deleteAgentWakeActiveOverflowSQL = `
+		DELETE FROM agent_control_agent_wake_events
+		WHERE id IN (
+			SELECT id FROM (
+				SELECT id, ROW_NUMBER() OVER (PARTITION BY agent_id ORDER BY id DESC) AS rn
+				FROM agent_control_agent_wake_events
+				WHERE status IS NULL OR (status <> ? AND status <> ?)
+			)
+			WHERE rn > ?
+			ORDER BY id ASC
+			LIMIT ?
+		)
+	`
+
+// CountAgentControlClosedWakeEvents reports how many closed/stale wake rows the
+// matching DeleteAgentControlClosedWakeEvents call would remove, bounded by
+// limit. It is the observe half of closed-row wake retention and never writes.
+func (s *SQLiteGlobalAgentRegistryStore) CountAgentControlClosedWakeEvents(ctx context.Context, createdBefore time.Time, limit int) (int64, error) {
+	return s.countAgentControlWakeRows(ctx, countAgentWakeClosedRetentionSQL, limit,
+		AgentStatusClosed, AgentStatusStale, formatAgentTime(createdBefore), formatAgentTime(createdBefore))
+}
+
+// DeleteAgentControlClosedWakeEvents deletes up to limit closed/stale wake rows
+// older than createdBefore, oldest first. Terminal wake rows are diagnostics
+// whose age window can be shorter than the registry-row window, so a caller can
+// shorten wake retention without touching the identity rows the events describe.
+func (s *SQLiteGlobalAgentRegistryStore) DeleteAgentControlClosedWakeEvents(ctx context.Context, createdBefore time.Time, limit int) (int64, error) {
+	return s.deleteAgentControlWakeRows(ctx, deleteAgentWakeClosedRetentionSQL, limit,
+		AgentStatusClosed, AgentStatusStale, formatAgentTime(createdBefore), formatAgentTime(createdBefore))
+}
+
+// CountAgentControlActiveWakeOverflow reports how many non-terminal wake rows
+// the matching DeleteAgentControlActiveWakeOverflow call would remove, bounded
+// by limit. It is the observe half of the per-agent cap.
+func (s *SQLiteGlobalAgentRegistryStore) CountAgentControlActiveWakeOverflow(ctx context.Context, keepPerAgent int, limit int) (int64, error) {
+	if keepPerAgent < 0 {
+		return 0, nil
+	}
+	return s.countAgentControlWakeRows(ctx, countAgentWakeActiveOverflowSQL, limit,
+		AgentStatusClosed, AgentStatusStale, keepPerAgent)
+}
+
+// DeleteAgentControlActiveWakeOverflow deletes up to limit non-terminal wake
+// rows that are older than the newest keepPerAgent rows of their own agent,
+// oldest first. This converges the backlog of agents that grew before the
+// append-time cap existed; it never touches terminal rows and never removes a
+// row another agent needs.
+func (s *SQLiteGlobalAgentRegistryStore) DeleteAgentControlActiveWakeOverflow(ctx context.Context, keepPerAgent int, limit int) (int64, error) {
+	if keepPerAgent < 0 {
+		return 0, nil
+	}
+	return s.deleteAgentControlWakeRows(ctx, deleteAgentWakeActiveOverflowSQL, limit,
+		AgentStatusClosed, AgentStatusStale, keepPerAgent)
+}
+
+func (s *SQLiteGlobalAgentRegistryStore) countAgentControlWakeRows(ctx context.Context, statement string, limit int, args ...interface{}) (int64, error) {
+	if s == nil {
+		return 0, fmt.Errorf("agent control agent registry store is not initialized")
+	}
+	db, skip, err := s.dbHandleForRead()
+	if err != nil {
+		return 0, err
+	}
+	if skip {
+		return 0, nil
+	}
+	if limit <= 0 {
+		limit = terminalPurgeBatch
+	}
+	var count int64
+	if err := db.QueryRowContext(ctx, statement, append(args, limit)...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count agent control wake rows: %w", err)
+	}
+	return count, nil
+}
+
+func (s *SQLiteGlobalAgentRegistryStore) deleteAgentControlWakeRows(ctx context.Context, statement string, limit int, args ...interface{}) (int64, error) {
+	if s == nil {
+		return 0, fmt.Errorf("agent control agent registry store is not initialized")
+	}
+	// Same lazy-open contract as PurgeAgentControlAgentWakeEvents: pruning an
+	// absent database is a no-op, not a reason to create it.
+	db, skip, err := s.dbHandleForRead()
+	if err != nil {
+		return 0, err
+	}
+	if skip {
+		return 0, nil
+	}
+	if limit <= 0 {
+		limit = terminalPurgeBatch
+	}
+	result, err := db.ExecContext(ctx, statement, append(args, limit)...)
+	if err != nil {
+		return 0, fmt.Errorf("prune agent control wake rows: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("read pruned agent control wake row count: %w", err)
+	}
+	return count, nil
+}
+
 func (s *SQLiteGlobalAgentRegistryStore) getAgentControlAgentByID(ctx context.Context, agentID string) (AgentRecord, error) {
 	db, err := s.dbHandle()
 	if err != nil {
@@ -1100,6 +1271,9 @@ func (s *SQLiteGlobalAgentRegistryStore) appendAgentWakeEvent(ctx context.Contex
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now().UTC()
 	}
+	if err := s.makeRoomForAgentWakeEvent(ctx, event); err != nil {
+		return AgentWakeEvent{}, err
+	}
 	result, err := db.ExecContext(ctx, `
 		INSERT INTO agent_control_agent_wake_events (
 			agent_row_id, agent_id, root_session_id, parent_agent_id, parent_session_id,
@@ -1120,6 +1294,78 @@ func (s *SQLiteGlobalAgentRegistryStore) appendAgentWakeEvent(ctx context.Contex
 	}
 	event.Seq = seq
 	return event.Normalize(), nil
+}
+
+// pruneAgentWakeActiveOverflowSQL trims one agent's OLDEST non-terminal wake
+// rows, keeping the newest `keep` of them. It is the append-time half of the
+// per-agent wake cap (retention.go owns the batched half) and runs before the
+// INSERT so a failed trim can never leave a committed row behind a reported
+// error.
+//
+// The predicate treats a NULL status as non-terminal: the status column was
+// added after the first wake rows, and an unknown status is bounded rather than
+// unbounded. Closed/stale rows never match — they stay governed by age-based
+// retention. The (agent_id, id) index added in init() serves both the predicate
+// and the id-DESC walk, so trimming one hot agent never scans the whole log.
+const pruneAgentWakeActiveOverflowSQL = `
+		DELETE FROM agent_control_agent_wake_events
+		WHERE id IN (
+			SELECT id FROM agent_control_agent_wake_events
+			WHERE agent_id = ?
+				AND (status IS NULL OR (status <> ? AND status <> ?))
+			ORDER BY id DESC
+			LIMIT -1 OFFSET ?
+		)
+	`
+
+// makeRoomForAgentWakeEvent applies the per-agent active wake cap before the
+// append: a non-terminal event trims the agent down to cap-1 non-terminal rows
+// so the insert lands exactly at the cap. Terminal events are left alone (they
+// are not counted by the cap and are pruned by age instead), and a disabled or
+// non-positive cap is a no-op.
+//
+// Durable semantics: this is the write-amplification bound for one hot agent.
+// It only ever removes the agent's own oldest non-terminal rows — never another
+// agent's rows and never terminal rows — so a watcher's catch-up window
+// (LastAgentControlAgentWakeSeq plus the newest K events) stays meaningful.
+func (s *SQLiteGlobalAgentRegistryStore) makeRoomForAgentWakeEvent(ctx context.Context, event AgentWakeEvent) error {
+	if s == nil {
+		return fmt.Errorf("agent control agent registry store is not initialized")
+	}
+	if agentWakeEventTerminal(event.Status) {
+		return nil
+	}
+	keep := NormalizeMaxActiveWakeEventsPerAgent(s.cfg.MaxActiveWakeEventsPerAgent)
+	if keep <= 0 {
+		return nil
+	}
+	return s.pruneAgentWakeActiveOverflow(ctx, event.AgentID, keep-1)
+}
+
+// pruneAgentWakeActiveOverflow deletes the agent's non-terminal wake rows older
+// than the newest keep rows. keep == 0 deletes every non-terminal row of that
+// agent, which is what "cap = 1" means right before its next append.
+func (s *SQLiteGlobalAgentRegistryStore) pruneAgentWakeActiveOverflow(ctx context.Context, agentID string, keep int) error {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" || keep < 0 {
+		return nil
+	}
+	db, err := s.dbHandle()
+	if err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, pruneAgentWakeActiveOverflowSQL, agentID, AgentStatusClosed, AgentStatusStale, keep); err != nil {
+		return fmt.Errorf("prune agent control wake overflow for %s: %w", agentID, err)
+	}
+	return nil
+}
+
+// agentWakeEventTerminal reports whether a wake event row describes an already
+// terminal identity. It mirrors AgentRecord.Closed for the status snapshot the
+// wake row carries.
+func agentWakeEventTerminal(status string) bool {
+	status = strings.TrimSpace(status)
+	return strings.EqualFold(status, AgentStatusClosed) || strings.EqualFold(status, AgentStatusStale)
 }
 
 func (s *SQLiteGlobalAgentRegistryStore) notifyAgentWake(event AgentWakeEvent) {
@@ -1313,6 +1559,10 @@ func (s *SQLiteGlobalAgentRegistryStore) init(ctx context.Context) error {
 			ON agent_control_agent_wake_events(workflow, team_id, teammate_id, id);`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_control_agent_wake_created_at
 			ON agent_control_agent_wake_events(created_at);`,
+		// P1-2/H3: the per-agent wake cap walks one agent's rows newest-first,
+		// so it needs its own index instead of a full scan of the append-only log.
+		`CREATE INDEX IF NOT EXISTS idx_agent_control_agent_wake_agent
+			ON agent_control_agent_wake_events(agent_id, id);`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {

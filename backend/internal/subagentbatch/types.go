@@ -87,15 +87,23 @@ const (
 	TaskRunning   TaskStatus = "running"
 	TaskSucceeded TaskStatus = "succeeded"
 	TaskFailed    TaskStatus = "failed"
-	TaskCanceled  TaskStatus = "canceled"
-	TaskTimedOut  TaskStatus = "timed_out"
-	TaskSkipped   TaskStatus = "skipped"
+	// TaskFailedWithResult is the terminal state of a task that failed overall
+	// but still produced a usable deliverable (a non-empty result capsule was
+	// persisted before the failure). It exists so a parent never has to choose
+	// between "status says failed" and "the payload is retrievable": the status
+	// itself tells the parent to read the result instead of re-dispatching the
+	// same work. Renderers that predate this enum must fall back to "failed"
+	// (see supervision.ReadResultPayload guidance for the model-facing form).
+	TaskFailedWithResult TaskStatus = "failed_with_result"
+	TaskCanceled         TaskStatus = "canceled"
+	TaskTimedOut         TaskStatus = "timed_out"
+	TaskSkipped          TaskStatus = "skipped"
 )
 
 // Terminal reports whether a task status can no longer transition.
 func (s TaskStatus) Terminal() bool {
 	switch s {
-	case TaskSucceeded, TaskFailed, TaskCanceled, TaskTimedOut, TaskSkipped:
+	case TaskSucceeded, TaskFailed, TaskFailedWithResult, TaskCanceled, TaskTimedOut, TaskSkipped:
 		return true
 	default:
 		return false
@@ -270,38 +278,85 @@ type TaskResult struct {
 // BatchSummary is the coalesced digest used at batch terminal time and for
 // parent preflight injection (plan §5.4).
 type BatchSummary struct {
-	BatchID        string            `json:"batch_id,omitempty"`
-	Status         BatchStatus       `json:"status,omitempty"`
-	TaskCount      int               `json:"task_count,omitempty"`
-	CompletedCount int               `json:"completed_count,omitempty"`
-	FailedCount    int               `json:"failed_count,omitempty"`
-	CanceledCount  int               `json:"canceled_count,omitempty"`
-	TimedOutCount  int               `json:"timed_out_count,omitempty"`
-	ElapsedMillis  int64             `json:"elapsed_ms,omitempty"`
-	ErrorClass     string            `json:"error_class,omitempty"`
-	CriticalErrors []string          `json:"critical_errors,omitempty"`
-	TaskStatuses   map[string]string `json:"task_statuses,omitempty"`
-	CreatedAt      time.Time         `json:"created_at,omitempty"`
-	FinishedAt     time.Time         `json:"finished_at,omitempty"`
+	BatchID        string      `json:"batch_id,omitempty"`
+	Status         BatchStatus `json:"status,omitempty"`
+	TaskCount      int         `json:"task_count,omitempty"`
+	CompletedCount int         `json:"completed_count,omitempty"`
+	FailedCount    int         `json:"failed_count,omitempty"`
+	// FailedWithResultCount is a sub-count of FailedCount: tasks that failed
+	// overall but whose result capsule is still retrievable. It is listed
+	// separately so the parent can tell "lost work" from "work to pick up".
+	FailedWithResultCount int               `json:"failed_with_result_count,omitempty"`
+	CanceledCount         int               `json:"canceled_count,omitempty"`
+	TimedOutCount         int               `json:"timed_out_count,omitempty"`
+	ElapsedMillis         int64             `json:"elapsed_ms,omitempty"`
+	ErrorClass            string            `json:"error_class,omitempty"`
+	CriticalErrors        []string          `json:"critical_errors,omitempty"`
+	TaskStatuses          map[string]string `json:"task_statuses,omitempty"`
+	CreatedAt             time.Time         `json:"created_at,omitempty"`
+	FinishedAt            time.Time         `json:"finished_at,omitempty"`
 }
 
-// Counts returns the cohort counts for a set of task records.
-func Counts(tasks []SubagentTaskRecord) (queued, running, completed, failed, canceled, timedOut int) {
+// TaskCounts is the full status breakdown of a task cohort. It is the single
+// source of truth for every count that is surfaced to a parent or written into
+// a batch row: read-side projections must derive counts from task rows through
+// DeriveTaskCounts instead of trusting the batch count columns, which are only
+// refreshed at batch creation and terminal convergence.
+type TaskCounts struct {
+	Total            int
+	Queued           int
+	Running          int
+	Completed        int
+	Failed           int
+	FailedWithResult int
+	Canceled         int
+	TimedOut         int
+	Skipped          int
+}
+
+// FailedTotal is the failure cohort the batch status decision cares about.
+// failed_with_result is still a failure (the task did not do what was asked);
+// it only differs in whether the payload survives.
+func (c TaskCounts) FailedTotal() int { return c.Failed + c.FailedWithResult }
+
+// Terminal returns the number of tasks that can no longer transition.
+func (c TaskCounts) Terminal() int {
+	return c.Completed + c.FailedTotal() + c.Canceled + c.TimedOut + c.Skipped
+}
+
+// DeriveTaskCounts counts every known status so that
+// Queued+Running+Terminal always equals Total for a well-formed cohort. An
+// unrecognized status is counted as queued rather than dropped: silently
+// losing a row is exactly the drift this helper exists to prevent.
+func DeriveTaskCounts(tasks []SubagentTaskRecord) TaskCounts {
+	counts := TaskCounts{Total: len(tasks)}
 	for _, t := range tasks {
 		switch t.Status {
-		case TaskPending, TaskReady:
-			queued++
 		case TaskRunning:
-			running++
+			counts.Running++
 		case TaskSucceeded:
-			completed++
+			counts.Completed++
 		case TaskFailed:
-			failed++
+			counts.Failed++
+		case TaskFailedWithResult:
+			counts.FailedWithResult++
 		case TaskCanceled:
-			canceled++
+			counts.Canceled++
 		case TaskTimedOut:
-			timedOut++
+			counts.TimedOut++
+		case TaskSkipped:
+			counts.Skipped++
+		default: // TaskPending, TaskReady, and any future non-terminal status.
+			counts.Queued++
 		}
 	}
-	return
+	return counts
+}
+
+// Counts returns the cohort counts for a set of task records. It is a
+// compatibility wrapper over DeriveTaskCounts; new code should use
+// DeriveTaskCounts and read the named fields.
+func Counts(tasks []SubagentTaskRecord) (queued, running, completed, failed, canceled, timedOut int) {
+	counts := DeriveTaskCounts(tasks)
+	return counts.Queued, counts.Running, counts.Completed, counts.FailedTotal(), counts.Canceled, counts.TimedOut
 }

@@ -2,6 +2,7 @@ package worktree
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -157,4 +158,118 @@ func initTestRepo(t *testing.T) string {
 	run("add", "README.md")
 	run("commit", "-m", "seed")
 	return dir
+}
+
+// H14: an apply must refuse to overwrite local main-tree changes instead of
+// silently losing them (and must offer an actionable next_action).
+func TestApplyRefusesMainTreeConflicts(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := initTestRepo(t)
+	ctx := context.Background()
+	handle, err := Create(ctx, Options{
+		RepoRoot:  repo,
+		SessionID: "child-conflict",
+		BaseDir:   filepath.Join(repo, ".aicli", "agent-worktrees"),
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Child edits a tracked file and adds a new one.
+	if err := os.WriteFile(filepath.Join(handle.Path, "README.md"), []byte("child-version\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(handle.Path, "child-only.txt"), []byte("child-only\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Main tree has an uncommitted local edit to the same tracked file.
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("main-local-edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := handle.ApplyWithReport(ctx, ApplyOptions{})
+	var conflictErr *ApplyConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("expected *ApplyConflictError, got report=%+v err=%v", report, err)
+	}
+	if len(report.Conflicts) != 1 || report.Conflicts[0].Path != "README.md" {
+		t.Fatalf("expected README.md conflict, got %+v", report.Conflicts)
+	}
+	if report.Applied {
+		t.Fatal("refused apply must not report Applied")
+	}
+	if !strings.Contains(conflictErr.NextAction, "force=true") || !strings.Contains(err.Error(), "README.md") {
+		t.Fatalf("expected actionable error, got next_action=%q err=%q", conflictErr.NextAction, err.Error())
+	}
+	// The local main-tree edit survives the refusal.
+	data, readErr := os.ReadFile(filepath.Join(repo, "README.md"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(data) != "main-local-edit\n" {
+		t.Fatalf("main tree edit was lost: %q", data)
+	}
+	if _, statErr := os.Stat(filepath.Join(repo, "child-only.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("refused apply must not land any path, stat err=%v", statErr)
+	}
+
+	// force=true overwrites deliberately.
+	forced, err := handle.ApplyWithReport(ctx, ApplyOptions{Force: true})
+	if err != nil {
+		t.Fatalf("forced apply: %v", err)
+	}
+	if !forced.Applied || !forced.Forced {
+		t.Fatalf("expected applied+forced report, got %+v", forced)
+	}
+	data, readErr = os.ReadFile(filepath.Join(repo, "README.md"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(data) != "child-version\n" {
+		t.Fatalf("forced apply content=%q want child-version", data)
+	}
+	if err := handle.Remove(ctx); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+}
+
+// H14: a paths-filtered apply reports the branch changes it left behind.
+func TestApplyReportsOutOfScopePaths(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := initTestRepo(t)
+	ctx := context.Background()
+	handle, err := Create(ctx, Options{
+		RepoRoot:  repo,
+		SessionID: "child-scope",
+		BaseDir:   filepath.Join(repo, ".aicli", "agent-worktrees"),
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(handle.Path, "README.md"), []byte("child-readme\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(handle.Path, "child-only.txt"), []byte("child-only\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := handle.ApplyWithReport(ctx, ApplyOptions{Paths: []string{"README.md"}})
+	if err != nil {
+		t.Fatalf("ApplyWithReport: %v", err)
+	}
+	if !report.Applied {
+		t.Fatalf("expected applied report, got %+v", report)
+	}
+	if len(report.SkippedPaths) != 1 || report.SkippedPaths[0] != "child-only.txt" {
+		t.Fatalf("expected child-only.txt to be reported out of scope, got %+v", report.SkippedPaths)
+	}
+	if _, statErr := os.Stat(filepath.Join(repo, "child-only.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("out-of-scope path must not be applied, stat err=%v", statErr)
+	}
+	if err := handle.Remove(ctx); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
 }

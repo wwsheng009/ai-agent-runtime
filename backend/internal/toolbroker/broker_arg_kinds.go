@@ -114,6 +114,7 @@ var brokerToolArgKinds = map[string]map[string]string{
 	},
 	ToolApplyAgentWorktree: {
 		"keep":       toolArgFieldBool,
+		"force":      toolArgFieldBool,
 		"id":         toolArgFieldString,
 		"session_id": toolArgFieldString,
 		"paths":      toolArgFieldStringOrList,
@@ -198,6 +199,8 @@ var brokerToolArgKinds = map[string]map[string]string{
 		"id":        toolArgFieldString,
 		"task_id":   toolArgFieldString,
 		"sections":  toolArgFieldStringOrList,
+		"offset":    toolArgFieldNumber,
+		"limit":     toolArgFieldNumber,
 		"max_chars": toolArgFieldNumber,
 	},
 	ToolAckLifecycle: {

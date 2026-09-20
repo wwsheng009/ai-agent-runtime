@@ -226,6 +226,8 @@ func (c *handlerSupervisionToolController) ReadAgentResult(ctx context.Context, 
 		SessionID: args.SessionID,
 		TaskID:    args.TaskID,
 		Sections:  args.Sections,
+		Offset:    args.Offset,
+		Limit:     args.Limit,
 		MaxChars:  args.MaxChars,
 	}), nil
 }

@@ -142,19 +142,32 @@ func (s *BatchProgressSource) progressGroup(ctx context.Context, batch subagentb
 		Terminal:       batch.Status.Terminal(),
 		LastProgressAt: batchProgressTime(batch),
 	}
+	// 单一事实源（P1-1 / H6+H9）：batch 计数列只在建批与终态收敛时刷新，运行期快照
+	// 会出现「queued=3, running=0」而三行 task 已是 running 的自相矛盾。因此计数一律
+	// 由 task 行派生；只有 task 行读取失败时才退回存储列（best-effort 降级）。
+	tasks, err := s.Store.ListTasks(ctx, batch.BatchID)
+	if err != nil {
+		// 任务级读取失败只降级这一组的运行期明细，批次计数仍然可见：
+		// 进度投影是 best-effort，不能因此让整块进度消失。
+		return group
+	}
+	counts := subagentbatch.DeriveTaskCounts(tasks)
+	if counts.Total > 0 || group.Total == 0 {
+		if group.Total < counts.Total {
+			group.Total = counts.Total
+		}
+		group.Completed = counts.Completed
+		// Failed keeps its existing digest semantics: every non-completed
+		// terminal cohort the parent has to account for.
+		group.Failed = counts.FailedTotal() + counts.Canceled + counts.TimedOut
+		group.Running = counts.Running
+		group.Pending = counts.Queued
+		group.Skipped = counts.Skipped
+	}
 	if group.Terminal {
 		// 终态批次不再逐任务展开：对父 agent 有用的信息就是"已完成/失败"计数，
 		// 任务级细节走 supervision_descendants。
 		return group
-	}
-	tasks, err := s.Store.ListTasks(ctx, batch.BatchID)
-	if err != nil {
-		// 任务级明细读取失败只降级这一组的 running 行，批次计数仍然可见：
-		// 进度投影是 best-effort，不能因此让整块进度消失。
-		return group
-	}
-	if group.Total < len(tasks) {
-		group.Total = len(tasks)
 	}
 	for _, task := range tasks {
 		if task.Status.Terminal() {

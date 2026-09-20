@@ -266,3 +266,103 @@ func TestReconcilerRecordsPurgeFailureWithoutBlankingTheReport(t *testing.T) {
 	require.Contains(t, report.PurgeError, "disk full")
 	require.Contains(t, reconciler.ReconcileSummary(), "purge_error=disk full")
 }
+
+// H3 的第二道界（唤醒事件治理）: closed/stale 行按比身份行更短的窗口收敛，
+// active 行按每 agent 上限收敛。observe 必须报出 enforce 会删掉的同一集合，
+// 且一行都不写；enforce 只删这两类候选。
+func TestPruneAgentWakeEventsObserveReportsAndEnforceDeletes(t *testing.T) {
+	ctx := context.Background()
+	store := newTestGlobalAgentRegistryStore(t)
+	now := time.Now().UTC()
+	aged := now.Add(-30 * 24 * time.Hour)
+
+	// 真实写入一次，既建出表也让热点 agent 有一条自己的非终态事件。
+	_, err := store.UpsertAgentControlAgent(ctx, AgentRecord{
+		AgentID:       "hot-agent",
+		RootSessionID: "root-1",
+		AgentPath:     "/root/hot-agent",
+		SessionID:     "sess-hot-agent",
+		AgentType:     AgentTypeChild,
+		Status:        AgentStatusActive,
+	})
+	require.NoError(t, err)
+
+	insertWake := func(agentID string, status string, createdAt time.Time) {
+		t.Helper()
+		_, execErr := store.db.ExecContext(ctx, `
+			INSERT INTO agent_control_agent_wake_events (agent_id, root_session_id, agent_path, status, event_kind, created_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`, agentID, "root-1", "/root/"+agentID, status, "closed", formatAgentTime(createdAt))
+		require.NoError(t, execErr)
+	}
+
+	// 两条超出 closed 窗口，一条仍在窗口内。
+	insertWake("aged-agent", AgentStatusClosed, aged)
+	insertWake("aged-agent", AgentStatusClosed, aged)
+	insertWake("fresh-agent", AgentStatusClosed, now)
+	// 一个热点 agent：非终态行数超过每 agent 上限（写入期上限生效之前的存量）。
+	const hotRows = DefaultMaxActiveWakeEventsPerAgent + 6
+	for i := 0; i < hotRows; i++ {
+		insertWake("hot-agent", AgentStatusActive, now)
+	}
+
+	countRows := func(where string, args ...interface{}) int {
+		t.Helper()
+		var count int
+		require.NoError(t, store.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM agent_control_agent_wake_events WHERE `+where, args...).Scan(&count))
+		return count
+	}
+	totalBefore := countRows("1=1")
+	activeBefore := countRows("agent_id = ? AND (status IS NULL OR (status <> ? AND status <> ?))",
+		"hot-agent", AgentStatusClosed, AgentStatusStale)
+	overflow := activeBefore - DefaultMaxActiveWakeEventsPerAgent
+	require.Positive(t, overflow, "热点 agent 必须真的超过上限")
+
+	observe, err := PruneAgentWakeEvents(ctx, store, AgentWakePrunePolicy{Now: now})
+	require.NoError(t, err)
+	require.True(t, observe.Supported)
+	require.Equal(t, string(ReconcileModeObserve), observe.Mode)
+	require.EqualValues(t, 2, observe.ClosedCandidates)
+	require.EqualValues(t, overflow, observe.OverflowCandidates)
+	require.Zero(t, observe.ClosedDeleted)
+	require.Zero(t, observe.OverflowDeleted)
+	require.Equal(t, totalBefore, countRows("1=1"), "observe 只报候选，不写任何行")
+
+	enforce, err := PruneAgentWakeEvents(ctx, store, AgentWakePrunePolicy{Now: now, Mode: ReconcileModeEnforce})
+	require.NoError(t, err)
+	require.EqualValues(t, 2, enforce.ClosedDeleted)
+	require.EqualValues(t, overflow, enforce.OverflowDeleted)
+	require.Equal(t, totalBefore-2-overflow, countRows("1=1"))
+	require.Equal(t, 1, countRows("agent_id = ?", "fresh-agent"), "窗口内的 closed 行是诊断，必须保留")
+	require.Equal(t, DefaultMaxActiveWakeEventsPerAgent,
+		countRows("agent_id = ? AND (status IS NULL OR (status <> ? AND status <> ?))",
+			"hot-agent", AgentStatusClosed, AgentStatusStale),
+		"active 半只把热点 agent 收敛到上限，不动其他行")
+}
+
+// 宿主把唤醒治理折进同一趟 retention（H3 的接线点），所以报告里必须出现这一半
+// 的模式与候选数，否则接线等于没接。
+func TestReconcilerFoldsWakePruneIntoReport(t *testing.T) {
+	store := newTestGlobalAgentRegistryStore(t)
+	reconciler := &Reconciler{
+		Store:  store,
+		Lookup: sessionLookupFromSnapshot(nil),
+		Purge: func(context.Context, time.Time) (TerminalPurgeOutcome, error) {
+			return TerminalPurgeOutcome{
+				Supported:           true,
+				WakePruneMode:       string(ReconcileModeObserve),
+				WakePruneCandidates: 7,
+			}, nil
+		},
+	}
+
+	report, err := reconciler.RunOnce(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, string(ReconcileModeObserve), report.WakePruneMode)
+	require.EqualValues(t, 7, report.WakePruneCandidates)
+
+	summary := reconciler.ReconcileSummary()
+	require.Contains(t, summary, "wake_prune_mode=observe")
+	require.Contains(t, summary, "wake_prune_candidates=7")
+}

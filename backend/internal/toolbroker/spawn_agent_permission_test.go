@@ -19,12 +19,14 @@ func hasSpawnAgentRouteWarning(warnings []string, want string) bool {
 
 func TestResolveSpawnAgentPermissionPolicy(t *testing.T) {
 	tests := []struct {
-		name        string
-		parent      string
-		args        SpawnAgentArgs
-		wantMode    string
-		wantRequest string
-		wantWarning string
+		name            string
+		parent          string
+		args            SpawnAgentArgs
+		wantMode        string
+		wantRequest     string
+		wantWarning     string
+		wantWarnings    []string
+		allowEscalation bool
 	}{
 		{
 			name:        "yolo parent is inherited when the child omits the mode",
@@ -84,12 +86,22 @@ func TestResolveSpawnAgentPermissionPolicy(t *testing.T) {
 			wantMode: "plan",
 		},
 		{
-			name:        "escalation stays auditable",
-			parent:      "default",
-			args:        SpawnAgentArgs{PermissionMode: "bypass_permissions"},
-			wantMode:    "bypass_permissions",
-			wantRequest: "bypass_permissions",
-			wantWarning: SpawnAgentRouteWarningPermissionEscalated,
+			name:         "escalation is blocked and pinned to the parent by default",
+			parent:       "accept_edits",
+			args:         SpawnAgentArgs{PermissionMode: "bypass_permissions"},
+			wantMode:     "accept_edits",
+			wantRequest:  "bypass_permissions",
+			wantWarning:  SpawnAgentRouteWarningPermissionEscalated,
+			wantWarnings: []string{SpawnAgentRouteWarningPermissionPinned},
+		},
+		{
+			name:            "explicit opt-in restores the honored escalation",
+			parent:          "accept_edits",
+			args:            SpawnAgentArgs{PermissionMode: "bypass_permissions"},
+			wantMode:        "bypass_permissions",
+			wantRequest:     "bypass_permissions",
+			wantWarning:     SpawnAgentRouteWarningPermissionEscalated,
+			allowEscalation: true,
 		},
 		{
 			name:        "warnings are deduplicated",
@@ -103,6 +115,9 @@ func TestResolveSpawnAgentPermissionPolicy(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.allowEscalation {
+				t.Setenv(SpawnAgentEnvAllowPermissionEscalation, "1")
+			}
 			got := ResolveSpawnAgentPermissionPolicy(tt.args, tt.parent)
 			if got.PermissionMode != tt.wantMode {
 				t.Fatalf("permission mode=%q want %q", got.PermissionMode, tt.wantMode)
@@ -110,29 +125,34 @@ func TestResolveSpawnAgentPermissionPolicy(t *testing.T) {
 			if got.RequestedPermissionMode != tt.wantRequest {
 				t.Fatalf("requested permission mode=%q want %q", got.RequestedPermissionMode, tt.wantRequest)
 			}
-			if tt.wantWarning == "" {
-				for _, warning := range []string{
-					SpawnAgentRouteWarningPermissionInherited,
-					SpawnAgentRouteWarningPermissionPinned,
-					SpawnAgentRouteWarningPermissionEscalated,
-				} {
-					if hasSpawnAgentRouteWarning(got.RouteWarnings, warning) {
-						t.Fatalf("unexpected %s warning: %#v", warning, got.RouteWarnings)
+			// The three route warnings are a closed vocabulary: a case asserts
+			// the exact set, and no warning may be recorded twice.
+			for _, warning := range []string{
+				SpawnAgentRouteWarningPermissionInherited,
+				SpawnAgentRouteWarningPermissionPinned,
+				SpawnAgentRouteWarningPermissionEscalated,
+			} {
+				seen := 0
+				for _, recorded := range got.RouteWarnings {
+					if strings.TrimSpace(recorded) == warning {
+						seen++
 					}
 				}
-				return
-			}
-			if !hasSpawnAgentRouteWarning(got.RouteWarnings, tt.wantWarning) {
-				t.Fatalf("missing %s warning: %#v", tt.wantWarning, got.RouteWarnings)
-			}
-			pinnedCount := 0
-			for _, warning := range got.RouteWarnings {
-				if strings.TrimSpace(warning) == tt.wantWarning {
-					pinnedCount++
+				want := warning == tt.wantWarning
+				for _, extra := range tt.wantWarnings {
+					if extra == warning {
+						want = true
+					}
 				}
-			}
-			if pinnedCount != 1 {
-				t.Fatalf("warning must be recorded exactly once: %#v", got.RouteWarnings)
+				if want && seen == 0 {
+					t.Fatalf("missing %s warning: %#v", warning, got.RouteWarnings)
+				}
+				if !want && seen > 0 {
+					t.Fatalf("unexpected %s warning: %#v", warning, got.RouteWarnings)
+				}
+				if seen > 1 {
+					t.Fatalf("%s must be recorded at most once: %#v", warning, got.RouteWarnings)
+				}
 			}
 		})
 	}
@@ -222,5 +242,55 @@ func TestBroker_Execute_SpawnAgentMarksInheritedPermissionMode(t *testing.T) {
 	warnings, ok := meta["route_warnings"].([]string)
 	if !ok || !hasSpawnAgentRouteWarning(warnings, SpawnAgentRouteWarningPermissionInherited) {
 		t.Fatalf("expected inherited route warning, got %#v", meta["route_warnings"])
+	}
+}
+
+// H13: a child may not widen the parent session mode. The default blocks the
+// escalation, pins the child to the parent mode and hands the caller an
+// actionable next_action instead of a silently narrowed child.
+func TestBroker_Execute_SpawnAgentBlocksPermissionEscalationWithNextAction(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+	ctx := team.WithRunMeta(context.Background(), &team.RunMeta{PermissionMode: "accept_edits"})
+
+	_, meta, err := broker.Execute(ctx, "parent-session", ToolSpawnAgent, map[string]interface{}{
+		"message":         "run with more authority",
+		"permission_mode": "bypass_permissions",
+	})
+	if err != nil {
+		t.Fatalf("spawn_agent failed: %v", err)
+	}
+	if controller.lastSpawn.PermissionMode != "accept_edits" ||
+		controller.lastSpawn.RequestedPermissionMode != "bypass_permissions" {
+		t.Fatalf("escalation must be pinned to the parent mode: %#v", controller.lastSpawn)
+	}
+	if meta["permission_mode"] != "accept_edits" {
+		t.Fatalf("unexpected pinned metadata: %#v", meta)
+	}
+	nextAction, ok := meta["next_action"].(string)
+	if !ok || !strings.Contains(nextAction, "permission_mode=accept_edits") ||
+		!strings.Contains(nextAction, SpawnAgentEnvAllowPermissionEscalation) {
+		t.Fatalf("blocked escalation must return actionable next_action, got %#v", meta["next_action"])
+	}
+}
+
+func TestSpawnAgentPermissionEscalationNextAction(t *testing.T) {
+	// An honored escalation (opt-in) has no pinned warning, so no guidance.
+	if got := SpawnAgentPermissionEscalationNextAction(
+		[]string{SpawnAgentRouteWarningPermissionEscalated}, "bypass_permissions"); got != "" {
+		t.Fatalf("honored escalation must not report blocked guidance, got %q", got)
+	}
+	// A yolo parent pinning an approval-asking child is a narrowing, not an
+	// escalation: it must not be reported as a blocked escalation either.
+	if got := SpawnAgentPermissionEscalationNextAction(
+		[]string{SpawnAgentRouteWarningPermissionPinned}, "bypass_permissions"); got != "" {
+		t.Fatalf("narrowing pin must not report blocked guidance, got %q", got)
+	}
+	got := SpawnAgentPermissionEscalationNextAction(
+		[]string{SpawnAgentRouteWarningPermissionEscalated, SpawnAgentRouteWarningPermissionPinned}, "accept_edits")
+	for _, want := range []string{"blocked", "permission_mode=accept_edits", SpawnAgentEnvAllowPermissionEscalation} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("guidance %q must contain %q", got, want)
+		}
 	}
 }

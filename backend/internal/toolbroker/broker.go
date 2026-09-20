@@ -359,7 +359,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"model":                  map[string]interface{}{"type": "string", "description": "Optional model hint stored on the child session."},
 						"reasoning_effort":       map[string]interface{}{"type": "string", "description": "Optional reasoning effort hint for the child session."},
 						"thinking_effort":        map[string]interface{}{"type": "string", "description": "Compatibility alias for reasoning_effort."},
-						"permission_mode":        map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions"}, "description": "Optional permission mode for the child agent run. Omit it to inherit the parent session's mode. A parent session pinned to bypass_permissions or plan keeps its mode: requests that would re-introduce approval prompts (or delegate writes away from plan) are pinned back to the parent mode and reported in route_warnings. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval."},
+						"permission_mode":        map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions"}, "description": "Optional permission mode for the child agent run. Omit it to inherit the parent session's mode. The parent session mode is the ceiling for the session tree: a parent pinned to bypass_permissions or plan keeps its mode, and a request wider than the parent mode is blocked by default and pinned back to the parent mode, reported in route_warnings plus a next_action. Set AICLI_AGENTS_ALLOW_PERMISSION_ESCALATION=1 to explicitly allow children to request a wider mode for trusted bounded subtasks. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval."},
 						"completion_requirement": map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Optional child completion contract. Ordinary spawn_agent sessions only support none; use spawn_team for complete_task Team workers."},
 						"completionRequirement":  map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Compatibility alias for completion_requirement. Ordinary children only support none."},
 						"isolation":              map[string]interface{}{"type": "string", "enum": []string{"none", "worktree"}, "description": "Optional workspace isolation for the child. worktree creates a dedicated git worktree under .aicli/agent-worktrees; fails closed with no main-tree fallback."},
@@ -492,7 +492,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolApplyAgentWorktree,
-				Description: "Apply a spawn_agent child's worktree isolation changes into the main repository. Default removes the worktree after apply; set keep=true to preserve it. Call this from the parent after reviewing child output; completion does not auto-apply.",
+				Description: "Apply a spawn_agent child's worktree isolation changes into the main repository. Default removes the worktree after apply; set keep=true to preserve it. Call this from the parent after reviewing child output; completion does not auto-apply. Applies only tracked changes reachable from the isolation branch and, when paths is set, only those paths (the rest are reported as skipped_paths); refuses to overwrite local main-tree changes unless force=true.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -500,6 +500,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
 						"paths":      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Optional relative paths to apply. Empty applies all tracked changes from the isolation branch."},
 						"keep":       map[string]interface{}{"type": "boolean", "description": "When true, keep the worktree after apply (default false removes it)."},
+						"force":      map[string]interface{}{"type": "boolean", "description": "When true, overwrite local main-tree changes in the applied paths. Default false refuses the apply and returns conflicts plus next_action instead of losing local edits."},
 					},
 				},
 			},
@@ -536,7 +537,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"model":                  map[string]interface{}{"type": "string", "description": "Optional model hint stored on the child session."},
 						"reasoning_effort":       map[string]interface{}{"type": "string", "description": "Optional reasoning effort hint for the child session."},
 						"thinking_effort":        map[string]interface{}{"type": "string", "description": "Compatibility alias for reasoning_effort."},
-						"permission_mode":        map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions"}, "description": "Optional permission mode for the child agent run. Omit it to inherit the parent session's mode. A parent session pinned to bypass_permissions or plan keeps its mode: requests that would re-introduce approval prompts (or delegate writes away from plan) are pinned back to the parent mode and reported in route_warnings. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval."},
+						"permission_mode":        map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions"}, "description": "Optional permission mode for the child agent run. Omit it to inherit the parent session's mode. The parent session mode is the ceiling for the session tree: a parent pinned to bypass_permissions or plan keeps its mode, and a request wider than the parent mode is blocked by default and pinned back to the parent mode, reported in route_warnings plus a next_action. Set AICLI_AGENTS_ALLOW_PERMISSION_ESCALATION=1 to explicitly allow children to request a wider mode for trusted bounded subtasks. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval."},
 						"completion_requirement": map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Optional child completion contract. Ordinary spawn_agent sessions only support none; use spawn_team for complete_task Team workers."},
 						"completionRequirement":  map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Compatibility alias for completion_requirement. Ordinary children only support none."},
 						"isolation":              map[string]interface{}{"type": "string", "enum": []string{"none", "worktree"}, "description": "Optional workspace isolation for the child. worktree creates a dedicated git worktree under .aicli/agent-worktrees; fails closed with no main-tree fallback."},
@@ -668,7 +669,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolApplyAgentWorktree,
-				Description: "Apply a spawn_agent child's worktree isolation changes into the main repository. Default removes the worktree after apply; set keep=true to preserve it. Call this from the parent after reviewing child output; completion does not auto-apply.",
+				Description: "Apply a spawn_agent child's worktree isolation changes into the main repository. Default removes the worktree after apply; set keep=true to preserve it. Call this from the parent after reviewing child output; completion does not auto-apply. Applies only tracked changes reachable from the isolation branch and, when paths is set, only those paths (the rest are reported as skipped_paths); refuses to overwrite local main-tree changes unless force=true.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -676,6 +677,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
 						"paths":      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Optional relative paths to apply. Empty applies all tracked changes from the isolation branch."},
 						"keep":       map[string]interface{}{"type": "boolean", "description": "When true, keep the worktree after apply (default false removes it)."},
+						"force":      map[string]interface{}{"type": "boolean", "description": "When true, overwrite local main-tree changes in the applied paths. Default false refuses the apply and returns conflicts plus next_action instead of losing local edits."},
 					},
 				},
 			},
@@ -1711,6 +1713,15 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			if len(result.RouteWarnings) > 0 {
 				metadata["route_warnings"] = append([]string(nil), result.RouteWarnings...)
 			}
+			// A child whose permission escalation was blocked is pinned to the
+			// parent session mode: tell the caller how to proceed instead of
+			// leaving a silently narrowed child behind (H13).
+			if nextAction := SpawnAgentPermissionEscalationNextAction(
+				result.RouteWarnings,
+				firstNonEmptyToolValue(result.EffectivePermissionMode, result.PermissionMode),
+			); nextAction != "" {
+				metadata["next_action"] = nextAction
+			}
 		}
 		return aliasedResult, attachCacheSafeSummary(metadata, agentStatusCacheSafeSummary(aliasedResult)), nil
 
@@ -2186,6 +2197,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		request.Paths = coerceStringSlice(args["paths"])
 		if value, ok := args["keep"].(bool); ok {
 			request.Keep = value
+		}
+		if value, ok := args["force"].(bool); ok {
+			request.Force = value
 		}
 		sessionRef := strings.TrimSpace(firstNonEmptyToolValue(request.ID, request.SessionID))
 		if sessionRef == "" {

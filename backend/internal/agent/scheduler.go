@@ -99,6 +99,32 @@ type SubagentSchedulerConfig struct {
 	MaxConcurrent       int  `json:"maxConcurrent" yaml:"maxConcurrent"`
 	MaxDepth            int  `json:"maxDepth" yaml:"maxDepth"`
 	EnforceSingleWriter bool `json:"enforceSingleWriter" yaml:"enforceSingleWriter"`
+	// GlobalLimiter is an optional process-wide admission limiter shared by
+	// every SubagentScheduler a host builds. MaxConcurrent bounds one batch;
+	// GlobalLimiter bounds the sum of all batches running in the process, which
+	// is what removes the historical 4×N overshoot (N background batches each
+	// getting their own 4-slot window). nil = no process-wide ceiling, i.e. the
+	// per-batch MaxConcurrent remains the only limit.
+	//
+	// Durable/concurrency semantics: a slot is held only for the duration of
+	// one child execution and is released by the goroutine that acquired it
+	// (defer, so an error or a cancelled context cannot leak it). A depth-N
+	// delegation chain does not acquire a second slot for its subtree — the
+	// descendant wave detects the slot already held by its ancestor through the
+	// context (see withSubagentGlobalSlot) and runs under it, so a saturated
+	// limiter cannot deadlock against itself.
+	GlobalLimiter *SubagentConcurrencyLimiter `json:"-" yaml:"-"`
+	// MaxQueueDepth is the opt-in backpressure knob for one reader wave: with a
+	// positive value a wave carrying more than MaxConcurrent+MaxQueueDepth
+	// reader tasks is rejected before any child starts, naming both limits and
+	// the agents.maxConcurrentQueueDepth knob. 0 (default) preserves the
+	// historical behavior — unbounded waiting, no queue depth limit.
+	MaxQueueDepth int `json:"maxQueueDepth,omitempty" yaml:"maxQueueDepth,omitempty"`
+	// QueueTimeout is the opt-in bound on how long one task may wait for a
+	// per-batch concurrency slot. 0 (default) waits indefinitely, exactly like
+	// before this knob existed; a positive value fails the batch with an
+	// actionable timeout error instead of queueing forever.
+	QueueTimeout time.Duration `json:"queueTimeout,omitempty" yaml:"queueTimeout,omitempty"`
 	// DelegationPolicy controls whether an agent created by this scheduler may
 	// create another execution node. The empty value is the root/default
 	// policy: the current agent may delegate, but its children are restricted
@@ -132,6 +158,12 @@ type SubagentRunOptions struct {
 	// progress without racing concurrent store writes from wave goroutines.
 	// event is "started" | "completed".
 	OnTaskEvent func(taskID, event string)
+	// OnTaskBound, when set, is invoked once per task as soon as the child
+	// session id exists — i.e. before the child actually runs. It exists so a
+	// durable coordinator can write child_session_id back at runtime instead of
+	// only at terminal settle, which is what makes a running task resolvable by
+	// task_id (wait_agent / read_agent_events) while it is still working.
+	OnTaskBound func(taskID, childSessionID string)
 }
 
 // notifyTaskEvent calls OnTaskEvent when configured. It is best-effort: the
@@ -139,6 +171,14 @@ type SubagentRunOptions struct {
 func (o SubagentRunOptions) notifyTaskEvent(taskID, event string) {
 	if o.OnTaskEvent != nil {
 		o.OnTaskEvent(taskID, event)
+	}
+}
+
+// notifyTaskBound calls OnTaskBound when configured. Same best-effort contract
+// as notifyTaskEvent: a metadata mirror must never fail the run.
+func (o SubagentRunOptions) notifyTaskBound(taskID, childSessionID string) {
+	if o.OnTaskBound != nil {
+		o.OnTaskBound(taskID, childSessionID)
 	}
 }
 
@@ -179,6 +219,119 @@ func NewSubagentScheduler(parent *Agent, config SubagentSchedulerConfig) *Subage
 		scheduler.expertSem = make(chan struct{}, limit)
 	}
 	return scheduler
+}
+
+// SubagentConcurrencyLimiter is the process-wide admission limiter for
+// subagent executions (plan P1-4/H12). One limiter is shared by every
+// SubagentScheduler a host builds, so N background batches can no longer each
+// run their own MaxConcurrent window: the per-batch semaphore bounds one batch,
+// this limiter bounds the sum.
+//
+// Concurrency semantics:
+//   - A slot is acquired before a child execution starts and released when it
+//     finishes, errors or is cancelled (callers must use defer).
+//   - Acquire is context-aware: a cancelled caller fails fast instead of
+//     occupying the queue forever.
+//   - A nil *SubagentConcurrencyLimiter is valid and means "unlimited"; all
+//     methods are nil-safe so an unset GlobalLimiter reproduces the historical
+//     behavior exactly.
+//   - The limiter is not durable state: it lives for the process, and nothing
+//     about it is persisted. Durable lifecycle state stays in the agent
+//     registry/batch store.
+type SubagentConcurrencyLimiter struct {
+	slots chan struct{}
+}
+
+// NewSubagentConcurrencyLimiter returns a limiter with the given ceiling, or
+// nil (unlimited) when limit <= 0. Hosts size it from agents.maxThreads when
+// that is positive; the documented "explicitly unlimited" value (-1) and the
+// unset value both map to nil here.
+func NewSubagentConcurrencyLimiter(limit int) *SubagentConcurrencyLimiter {
+	if limit <= 0 {
+		return nil
+	}
+	return &SubagentConcurrencyLimiter{slots: make(chan struct{}, limit)}
+}
+
+// Limit reports the configured ceiling; 0 means unlimited (nil receiver).
+func (l *SubagentConcurrencyLimiter) Limit() int {
+	if l == nil {
+		return 0
+	}
+	return cap(l.slots)
+}
+
+// Acquire blocks until a slot is free or ctx is done. It returns nil when a
+// slot was taken (the caller must Release exactly once, normally via defer) and
+// ctx.Err() when the caller gave up; no slot is held in the error case.
+func (l *SubagentConcurrencyLimiter) Acquire(ctx context.Context) error {
+	if l == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case l.slots <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Release returns one slot. It is nil-safe and idempotent-guarded: an
+// unbalanced release (no outstanding acquire) is ignored rather than blocking
+// the goroutine, which keeps a defer-based release panic-safe.
+func (l *SubagentConcurrencyLimiter) Release() {
+	if l == nil {
+		return
+	}
+	select {
+	case <-l.slots:
+	default:
+	}
+}
+
+// subagentGlobalSlotKey marks a context whose execution already holds a slot in
+// the named limiter. It is how a depth-N delegation chain stays inside the slot
+// its ancestor acquired instead of deadlocking against a saturated limiter.
+type subagentGlobalSlotKey struct{}
+
+func withSubagentGlobalSlot(ctx context.Context, limiter *SubagentConcurrencyLimiter) context.Context {
+	if limiter == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, subagentGlobalSlotKey{}, limiter)
+}
+
+func subagentGlobalSlotHeld(ctx context.Context, limiter *SubagentConcurrencyLimiter) bool {
+	if ctx == nil || limiter == nil {
+		return false
+	}
+	held, _ := ctx.Value(subagentGlobalSlotKey{}).(*SubagentConcurrencyLimiter)
+	return held == limiter
+}
+
+// acquireGlobalSlot admits one child execution into the process-wide limiter.
+// acquired=false means nothing was taken, either because no limiter is
+// configured or because this execution already runs inside an ancestor's slot.
+func (s *SubagentScheduler) acquireGlobalSlot(ctx context.Context) (bool, error) {
+	limiter := s.config.GlobalLimiter
+	if limiter == nil || subagentGlobalSlotHeld(ctx, limiter) {
+		return false, nil
+	}
+	if err := limiter.Acquire(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// releaseGlobalSlot returns the slot only when this execution acquired it.
+func (s *SubagentScheduler) releaseGlobalSlot(acquired bool) {
+	if !acquired {
+		return
+	}
+	s.config.GlobalLimiter.Release()
 }
 
 const (
@@ -428,6 +581,11 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		_ = childAgent.Close()
 	}()
 	childSessionID := spec.SessionID
+	// Runtime binding (P1-1 / H7): the child session id is known here, before
+	// the child loop runs. Publish it now so a durable coordinator can write
+	// child_session_id back while the task is still running instead of only at
+	// terminal settle.
+	options.notifyTaskBound(task.ID, childSessionID)
 	if hookMgr := s.parent.GetHookManager(); hookMgr != nil {
 		payload := mergeRouteAuditPayload(map[string]interface{}{
 			"subagent_id":         task.ID,
@@ -893,6 +1051,11 @@ func (s *SubagentScheduler) runReaderWave(ctx context.Context, options SubagentR
 	if len(readers) == 0 {
 		return nil
 	}
+	// P1-4/H12 背压（可选，默认关闭）：队列深度上限。MaxQueueDepth=0 时不设限，
+	// 与历史行为完全一致（无限等待）。
+	if err := s.checkQueueDepth(len(readers)); err != nil {
+		return err
+	}
 
 	sem := make(chan struct{}, s.config.MaxConcurrent)
 	errs := make([]error, len(readers))
@@ -906,10 +1069,29 @@ func (s *SubagentScheduler) runReaderWave(ctx context.Context, options SubagentR
 		wg.Add(1)
 		go func(task indexedSubagentTask, prepared SubagentTask) {
 			defer wg.Done()
-			sem <- struct{}{}
+			// 每批窗口（MaxConcurrent）：ctx 取消 / 可选队列超时都会快速失败，
+			// 不会留下永久阻塞的 goroutine。
+			if err := s.acquireBatchSlot(ctx, sem); err != nil {
+				errs[index] = err
+				return
+			}
 			defer func() { <-sem }()
 
-			result, err := s.runChild(ctx, options, prepared)
+			// P1-4/H12：进程级上限。GlobalLimiter 为 nil 时行为与历史一致
+			//（仅受每批 sem 限制）；acquired=false 表示本次执行已运行在祖先
+			// 持有的槽位内（depth-N 递归），不再重复占槽，避免自锁。
+			acquired, err := s.acquireGlobalSlot(ctx)
+			if err != nil {
+				errs[index] = err
+				return
+			}
+			defer s.releaseGlobalSlot(acquired)
+			childCtx := ctx
+			if acquired {
+				childCtx = withSubagentGlobalSlot(ctx, s.config.GlobalLimiter)
+			}
+
+			result, err := s.runChild(childCtx, options, prepared)
 			waveResults[index] = result
 			errs[index] = err
 		}(item, task)
@@ -926,6 +1108,48 @@ func (s *SubagentScheduler) runReaderWave(ctx context.Context, options SubagentR
 		}
 	}
 	return nil
+}
+
+// acquireBatchSlot admits one task into the per-batch concurrency window.
+// Without QueueTimeout it waits until a slot frees or the caller is cancelled
+// (historical behavior); with QueueTimeout it fails the task with an actionable
+// error instead of queueing forever.
+func (s *SubagentScheduler) acquireBatchSlot(ctx context.Context, sem chan struct{}) error {
+	if s.config.QueueTimeout <= 0 {
+		select {
+		case sem <- struct{}{}:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	timer := time.NewTimer(s.config.QueueTimeout)
+	defer timer.Stop()
+	select {
+	case sem <- struct{}{}:
+		return nil
+	case <-timer.C:
+		return fmt.Errorf(
+			"subagent task waited more than %s for a concurrency slot (agents.maxConcurrent=%d, agents.maxConcurrentQueueTimeoutMs=%d); raise agents.maxConcurrent or agents.maxConcurrentQueueTimeoutMs",
+			s.config.QueueTimeout, s.config.MaxConcurrent, s.config.QueueTimeout.Milliseconds(),
+		)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// checkQueueDepth enforces the opt-in backpressure limit for one reader wave:
+// more than MaxConcurrent+MaxQueueDepth tasks are rejected before any child
+// starts. MaxQueueDepth=0 disables the check (unbounded waiting, as before).
+func (s *SubagentScheduler) checkQueueDepth(readers int) error {
+	depth := s.config.MaxQueueDepth
+	if depth <= 0 || readers <= s.config.MaxConcurrent+depth {
+		return nil
+	}
+	return fmt.Errorf(
+		"subagent batch rejected by agents.maxConcurrentQueueDepth=%d: %d reader tasks exceed agents.maxConcurrent=%d + queue depth %d; raise agents.maxConcurrent/agents.maxConcurrentQueueDepth or set agents.maxConcurrentQueueDepth=0 for unbounded waiting",
+		depth, readers, s.config.MaxConcurrent, depth,
+	)
 }
 
 func (s *SubagentScheduler) readyTasks(readers []indexedSubagentTask, writers []indexedSubagentTask, done []bool, completedByID map[string]SubagentResult) ([]indexedSubagentTask, []indexedSubagentTask, error) {

@@ -2698,6 +2698,21 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 						if parentReports.Omitted > 0 {
 							metadata["subagent_reports_omitted"] = parentReports.Omitted
 						}
+						// Omitted children stay retrievable: the pointers let the
+						// parent fetch each stubbed report's body instead of
+						// re-dispatching it (H4).
+						if len(parentReports.OmittedRefs) > 0 {
+							metadata["subagent_reports_omitted_refs"] = parentReports.OmittedRefs
+						}
+						// P2-1 / H5: identical conclusions are folded and
+						// same-claim disagreements are flagged; the counts stay
+						// visible so the parent can tell what was merged.
+						if parentReports.Deduplicated > 0 {
+							metadata["subagent_reports_deduplicated"] = parentReports.Deduplicated
+						}
+						if parentReports.Conflicts > 0 {
+							metadata["subagent_reports_conflicts"] = parentReports.Conflicts
+						}
 					}
 					metadata["execution_mode"] = "wait"
 					metadata["batch_id"] = syncBatchID

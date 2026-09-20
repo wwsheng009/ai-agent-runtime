@@ -909,7 +909,14 @@ func (r *localActorRegistry) ApplyWorktree(ctx context.Context, args toolbroker.
 		return nil, err
 	}
 	diffStat, _ := handle.DiffStat(ctx)
-	if err := handle.Apply(ctx, worktree.ApplyOptions{Paths: append([]string(nil), args.Paths...)}); err != nil {
+	report, err := handle.ApplyWithReport(ctx, worktree.ApplyOptions{
+		Paths: append([]string(nil), args.Paths...),
+		Force: args.Force,
+	})
+	if err != nil {
+		// H14: a refused apply already carries the conflicting paths and the
+		// next_action in its message, so the parent sees what to do instead of
+		// a bare git failure.
 		return nil, err
 	}
 	result := &toolbroker.AgentWorktreeResult{
@@ -924,6 +931,12 @@ func (r *localActorRegistry) ApplyWorktree(ctx context.Context, args toolbroker.
 		Paths:          append([]string(nil), args.Paths...),
 		Applied:        true,
 		Kept:           args.Keep,
+		SkippedPaths: append([]string(nil), report.SkippedPaths...),
+	}
+	if len(report.SkippedPaths) > 0 {
+		result.NextAction = fmt.Sprintf(
+			"%d worktree path(s) are outside the requested paths filter and were not applied: %s",
+			len(report.SkippedPaths), strings.Join(report.SkippedPaths, ", "))
 	}
 	if !args.Keep {
 		if err := handle.Remove(ctx); err != nil {

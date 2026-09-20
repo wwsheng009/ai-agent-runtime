@@ -80,6 +80,11 @@ func newLocalQuotaHarness(t *testing.T, maxThreads int, reclaimIdleMs int) (*loc
 	host.RuntimeConfig = runtimecfg.DefaultRuntimeConfig()
 	host.RuntimeConfig.Agents.MaxThreads = maxThreads
 	host.RuntimeConfig.Agents.ReclaimIdleMs = reclaimIdleMs
+	// Isolate the worktree half of the reconcile pass: an enforce-mode RunOnce
+	// resolves the worktree base dir from the workspace root, and the default
+	// (empty) root falls back to the git root of the test's working directory —
+	// the developer's real checkout. A temp root keeps the sweep inert.
+	host.RuntimeConfig.Workspace.Root = t.TempDir()
 	host.BaseSession = &ChatSession{
 		RuntimeSession: rootSession,
 		SessionUserID:  userID,

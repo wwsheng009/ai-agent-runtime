@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -209,14 +210,82 @@ func (h *Handle) DiffStat(ctx context.Context) (string, error) {
 type ApplyOptions struct {
 	// Paths limits checkout to specific paths relative to the worktree. Empty = all tracked changes.
 	Paths []string
+	// Force overwrites local main-tree modifications instead of refusing
+	// (H14). Default false: a conflicting main-tree path fails the apply.
+	Force bool
 }
 
-// Apply copies committed or staged changes from the worktree branch into the main tree
-// via `git checkout <branch> -- <paths>`. Untracked files are not applied.
-// This never runs when isolation creation failed (caller must only apply a live Handle).
-func (h *Handle) Apply(ctx context.Context, opts ApplyOptions) error {
+const (
+	// maxApplyConflictPaths bounds the conflict list carried by
+	// ApplyConflictError (the count still covers the full set).
+	maxApplyConflictPaths = 8
+	// maxApplySkippedPaths bounds the reported out-of-scope paths.
+	maxApplySkippedPaths = 16
+)
+
+// ApplyConflict is a main-tree path whose local state would be overwritten by
+// an apply.
+type ApplyConflict struct {
+	// Path is repo-relative.
+	Path string `json:"path"`
+	// Status is the `git status --porcelain` status of the main-tree entry
+	// (for example " M" or "??").
+	Status string `json:"status"`
+}
+
+// ApplyConflictError is returned when an apply would overwrite local main-tree
+// changes. It carries the conflicting paths and an actionable NextAction so
+// the parent agent can decide (commit/stash, narrow paths, or force) instead of
+// losing the local edits silently.
+type ApplyConflictError struct {
+	Branch     string          `json:"branch"`
+	Conflicts  []ApplyConflict `json:"conflicts"`
+	NextAction string          `json:"next_action"`
+}
+
+func (e *ApplyConflictError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf(
+		"apply refused: main tree has local changes in %d path(s) that %s would overwrite (%s); %s",
+		len(e.Conflicts),
+		strings.TrimSpace(e.Branch),
+		strings.Join(applyConflictPaths(e.Conflicts), ", "),
+		strings.TrimSpace(e.NextAction),
+	)
+}
+
+// ApplyReport describes what an apply pass did, or — from CheckApply — what it
+// would do.
+type ApplyReport struct {
+	Branch string `json:"branch"`
+	// CandidatePaths are the repo-relative paths whose content differs between
+	// the main tree and the worktree branch: the apply set.
+	CandidatePaths []string `json:"candidate_paths,omitempty"`
+	// Conflicts are candidate paths that carry local main-tree modifications
+	// and would be overwritten by the checkout.
+	Conflicts []ApplyConflict `json:"conflicts,omitempty"`
+	// SkippedPaths are branch changes outside the requested paths filter. They
+	// are never part of the apply set; they are reported so the caller stops
+	// expecting them (untracked worktree files included).
+	SkippedPaths []string `json:"skipped_paths,omitempty"`
+	// Applied reports whether the checkout ran.
+	Applied bool `json:"applied,omitempty"`
+	// Forced reports whether local main-tree changes were overwritten on purpose.
+	Forced bool `json:"forced,omitempty"`
+}
+
+// CheckApply runs the H14 preflight without touching the main tree: it computes
+// the apply set (paths whose content differs between the main tree HEAD and the
+// worktree branch) and the subset that has local main-tree modifications, plus
+// the worktree untracked files that stay outside the apply set.
+//
+// It reflects the branch tip; ApplyWithReport commits the worktree working tree
+// first so uncommitted child edits are included.
+func (h *Handle) CheckApply(ctx context.Context, opts ApplyOptions) (ApplyReport, error) {
 	if h == nil {
-		return errors.New("nil worktree handle")
+		return ApplyReport{}, errors.New("nil worktree handle")
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -224,37 +293,259 @@ func (h *Handle) Apply(ctx context.Context, opts ApplyOptions) error {
 	branch := strings.TrimSpace(h.Branch)
 	repoRoot := strings.TrimSpace(h.RepoRoot)
 	if branch == "" || repoRoot == "" {
-		return errors.New("worktree apply requires branch and repo root")
+		return ApplyReport{}, errors.New("worktree apply requires branch and repo root")
+	}
+	report := ApplyReport{Branch: branch}
+	selected := normalizeApplyPaths(opts.Paths)
+	candidates, err := h.applyCandidatePaths(ctx, selected)
+	if err != nil {
+		return report, err
+	}
+	report.CandidatePaths = candidates
+	if len(selected) > 0 {
+		allChanged, err := h.branchChangedPaths(ctx)
+		if err != nil {
+			return report, err
+		}
+		report.SkippedPaths = outOfScopePaths(allChanged, candidates)
+	}
+	if len(candidates) == 0 {
+		return report, nil
+	}
+	dirty, err := h.mainTreeDirtyPaths(ctx, candidates)
+	if err != nil {
+		return report, err
+	}
+	for _, path := range candidates {
+		if status, ok := dirty[path]; ok {
+			report.Conflicts = append(report.Conflicts, ApplyConflict{Path: path, Status: status})
+		}
+	}
+	return report, nil
+}
+
+// Apply copies committed or staged changes from the worktree branch into the main tree
+// via `git checkout <branch> -- <paths>`. Untracked files are not applied.
+// This never runs when isolation creation failed (caller must only apply a live Handle).
+func (h *Handle) Apply(ctx context.Context, opts ApplyOptions) error {
+	_, err := h.ApplyWithReport(ctx, opts)
+	return err
+}
+
+// ApplyWithReport applies the worktree branch into the main tree and returns
+// what happened. By default (Force=false) it refuses to overwrite main-tree
+// local modifications and returns *ApplyConflictError; the report is still
+// returned so the caller can render the conflicts and next_action.
+func (h *Handle) ApplyWithReport(ctx context.Context, opts ApplyOptions) (ApplyReport, error) {
+	if h == nil {
+		return ApplyReport{}, errors.New("nil worktree handle")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	branch := strings.TrimSpace(h.Branch)
+	repoRoot := strings.TrimSpace(h.RepoRoot)
+	if branch == "" || repoRoot == "" {
+		return ApplyReport{}, errors.New("worktree apply requires branch and repo root")
 	}
 	// Ensure worktree changes are committed enough for checkout from branch tip.
 	// Prefer applying the working tree via path checkout of current worktree index+files:
 	// `git -C repo checkout <worktree-path> -- .` is not valid; use branch after auto-commit optional.
 	// For MVP: stage+commit in worktree when dirty, then checkout branch files into main.
 	if dirty, err := h.isDirty(ctx); err != nil {
-		return err
+		return ApplyReport{}, err
 	} else if dirty {
 		if err := h.autoCommit(ctx, "aicli worktree apply snapshot"); err != nil {
-			return fmt.Errorf("commit worktree changes before apply: %w", err)
+			return ApplyReport{}, fmt.Errorf("commit worktree changes before apply: %w", err)
 		}
 	}
+	report, err := h.CheckApply(ctx, opts)
+	if err != nil {
+		return report, err
+	}
+	if len(report.Conflicts) > 0 && !opts.Force {
+		return report, h.applyConflictError(report)
+	}
+	paths := normalizeApplyPaths(opts.Paths)
 	args := []string{"checkout", branch, "--"}
-	if len(opts.Paths) == 0 {
+	if len(paths) == 0 {
 		args = append(args, ".")
 	} else {
-		for _, p := range opts.Paths {
-			p = strings.TrimSpace(p)
-			if p != "" {
-				args = append(args, p)
-			}
-		}
-		if len(args) == 3 {
-			args = append(args, ".")
-		}
+		args = append(args, paths...)
 	}
 	if err := runGit(ctx, repoRoot, args...); err != nil {
-		return fmt.Errorf("apply worktree changes to main tree: %w", err)
+		return report, fmt.Errorf("apply worktree changes to main tree: %w", err)
 	}
-	return nil
+	report.Applied = true
+	report.Forced = opts.Force && len(report.Conflicts) > 0
+	return report, nil
+}
+
+// applyConflictError builds the actionable refusal from a preflight report.
+func (h *Handle) applyConflictError(report ApplyReport) *ApplyConflictError {
+	capped := report.Conflicts
+	if len(capped) > maxApplyConflictPaths {
+		capped = capped[:maxApplyConflictPaths]
+	}
+	next := "commit or stash those main-tree paths first, re-run apply with a narrower paths list that excludes them, or pass force=true to overwrite them deliberately"
+	if len(report.SkippedPaths) > 0 {
+		next += fmt.Sprintf(
+			"; note: %d worktree path(s) are outside the requested paths filter and were not applied (%s)",
+			len(report.SkippedPaths),
+			strings.Join(report.SkippedPaths, ", "),
+		)
+	}
+	return &ApplyConflictError{Branch: report.Branch, Conflicts: capped, NextAction: next}
+}
+
+// branchChangedPaths lists every path the worktree branch changes relative to
+// the main tree HEAD (the full apply set, before any paths filter).
+func (h *Handle) branchChangedPaths(ctx context.Context) ([]string, error) {
+	out, err := runGitOutput(ctx, h.RepoRoot, "diff", "--name-only", "-z", "HEAD", strings.TrimSpace(h.Branch))
+	if err != nil {
+		return nil, fmt.Errorf("worktree apply preflight (branch diff): %w", err)
+	}
+	paths := make([]string, 0, 8)
+	for _, path := range splitNULPaths(out) {
+		if path != "" {
+			paths = append(paths, path)
+		}
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+// outOfScopePaths returns the changed paths that a paths-filtered apply leaves
+// behind (set difference, capped and sorted).
+func outOfScopePaths(allChanged, candidates []string) []string {
+	if len(allChanged) == 0 {
+		return nil
+	}
+	inScope := make(map[string]bool, len(candidates))
+	for _, path := range candidates {
+		inScope[path] = true
+	}
+	skipped := make([]string, 0, len(allChanged))
+	for _, path := range allChanged {
+		if !inScope[path] {
+			skipped = append(skipped, path)
+		}
+	}
+	if len(skipped) > maxApplySkippedPaths {
+		skipped = skipped[:maxApplySkippedPaths]
+	}
+	return skipped
+}
+
+// applyCandidatePaths lists the paths whose content differs between the main
+// tree HEAD and the worktree branch, optionally limited to paths.
+func (h *Handle) applyCandidatePaths(ctx context.Context, paths []string) ([]string, error) {
+	args := []string{"diff", "--name-only", "-z", "HEAD", strings.TrimSpace(h.Branch)}
+	if len(paths) > 0 {
+		args = append(args, "--")
+		args = append(args, paths...)
+	}
+	out, err := runGitOutput(ctx, h.RepoRoot, args...)
+	if err != nil {
+		return nil, fmt.Errorf("worktree apply preflight (diff): %w", err)
+	}
+	candidates := make([]string, 0, 8)
+	for _, path := range splitNULPaths(out) {
+		if path != "" {
+			candidates = append(candidates, path)
+		}
+	}
+	sort.Strings(candidates)
+	return candidates, nil
+}
+
+// mainTreeDirtyPaths maps repo-relative path to porcelain status for every
+// local main-tree entry inside candidates.
+func (h *Handle) mainTreeDirtyPaths(ctx context.Context, candidates []string) (map[string]string, error) {
+	args := []string{"status", "--porcelain", "-z", "--"}
+	args = append(args, candidates...)
+	out, err := runGitOutput(ctx, h.RepoRoot, args...)
+	if err != nil {
+		return nil, fmt.Errorf("worktree apply preflight (status): %w", err)
+	}
+	dirty := make(map[string]string, len(candidates))
+	for _, entry := range parsePorcelainZ(out) {
+		if entry.Path == "" {
+			continue
+		}
+		dirty[entry.Path] = entry.Status
+		if entry.OrigPath != "" {
+			dirty[entry.OrigPath] = entry.Status
+		}
+	}
+	return dirty, nil
+}
+
+// porcelainEntry is one `git status --porcelain -z` record.
+type porcelainEntry struct {
+	Status   string
+	Path     string
+	OrigPath string
+}
+
+// parsePorcelainZ parses NUL-separated porcelain v1 records. Rename/copy
+// records carry the original path as the next NUL field.
+func parsePorcelainZ(out string) []porcelainEntry {
+	if out == "" {
+		return nil
+	}
+	fields := strings.Split(out, "\x00")
+	entries := make([]porcelainEntry, 0, len(fields))
+	for i := 0; i < len(fields); i++ {
+		raw := fields[i]
+		if len(raw) < 4 {
+			continue
+		}
+		entry := porcelainEntry{Status: raw[:2], Path: raw[3:]}
+		if strings.ContainsAny(entry.Status, "RC") && i+1 < len(fields) {
+			i++
+			entry.OrigPath = fields[i]
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+// splitNULPaths splits `--name-only -z` output into paths.
+func splitNULPaths(out string) []string {
+	if out == "" {
+		return nil
+	}
+	return strings.Split(out, "\x00")
+}
+
+// normalizeApplyPaths trims, dedupes and orders a caller-supplied path filter.
+func normalizeApplyPaths(paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, raw := range paths {
+		path := strings.TrimSpace(raw)
+		if path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		out = append(out, path)
+	}
+	return out
+}
+
+// applyConflictPaths renders the conflicting paths for the error message.
+func applyConflictPaths(conflicts []ApplyConflict) []string {
+	paths := make([]string, 0, len(conflicts))
+	for _, conflict := range conflicts {
+		if strings.TrimSpace(conflict.Path) != "" {
+			paths = append(paths, conflict.Path)
+		}
+	}
+	return paths
 }
 
 func (h *Handle) isDirty(ctx context.Context) (bool, error) {

@@ -473,6 +473,12 @@ func (c *SubagentBatchCoordinator) StartBackground(parentCtx context.Context, op
 			Spec:          specBytes,
 			UpdatedAt:     now,
 			Version:       1,
+			// P1-1 / H7: task_deadline had no producer at all, so the column was
+			// NULL for every row and a stalled task could not be told apart from
+			// one that never had a bound. Each task inherits the batch deadline
+			// (the scheduler enforces the batch clock, so a tighter per-task
+			// guess would time out work that the batch itself still allows).
+			TaskDeadline: deadline,
 		}
 	}
 
@@ -1371,8 +1377,52 @@ func (c *SubagentBatchCoordinator) runTasksWithProgress(ctx context.Context, bat
 		OnTaskEvent: func(taskID, event string) {
 			c.recordTaskEvent(ctx, batchID, taskID, event, progressWriteback)
 		},
+		OnTaskBound: func(taskID, childSessionID string) {
+			c.bindTaskChildSession(ctx, batchID, taskID, childSessionID)
+		},
 	}
 	return executor.RunChildren(ctx, runOpts, tasks)
+}
+
+// bindTaskChildSession writes the child session id onto the task row as soon as
+// the scheduler knows it (P1-1 / H7). The terminal settle path keeps its own
+// backfill as a correction; this is the runtime binding that makes a task
+// resolvable by task_id while it is still running, instead of only after it
+// settled. Strictly best-effort: a conflict or store error must never fail the
+// child run, and an existing binding is never overwritten.
+func (c *SubagentBatchCoordinator) bindTaskChildSession(ctx context.Context, batchID, taskID, childSessionID string) {
+	taskID = strings.TrimSpace(taskID)
+	childSessionID = strings.TrimSpace(childSessionID)
+	if c == nil || c.store == nil || taskID == "" || childSessionID == "" {
+		return
+	}
+	unlockWrite, writable := c.acquireBatchWrite(batchID)
+	if !writable {
+		return
+	}
+	defer unlockWrite()
+	batch, err := c.store.GetBatch(ctx, batchID)
+	if err != nil || batch == nil || batch.Status.Terminal() {
+		return
+	}
+	task, err := c.store.GetTask(ctx, batchID, taskID)
+	if err != nil || task == nil || task.Status.Terminal() {
+		return
+	}
+	if strings.TrimSpace(task.ChildSessionID) == childSessionID {
+		return
+	}
+	if _, err := c.store.UpdateTask(ctx, batchID, taskID, task.Version, func(current *subagentbatch.SubagentTaskRecord) {
+		if current.Status.Terminal() {
+			return
+		}
+		if strings.TrimSpace(current.ChildSessionID) != "" {
+			return
+		}
+		current.ChildSessionID = childSessionID
+	}); err != nil {
+		c.recordTaskProgressWriteError(batchID, taskID, err)
+	}
 }
 
 // recordTaskEvent mirrors a single task lifecycle transition into the store.
@@ -1456,7 +1506,7 @@ func (c *SubagentBatchCoordinator) prepareTaskResult(ctx context.Context, batchI
 	}
 
 	version := task.Version
-	if status == subagentbatch.TaskSucceeded || status == subagentbatch.TaskFailed {
+	if status == subagentbatch.TaskSucceeded || status == subagentbatch.TaskFailed || status == subagentbatch.TaskFailedWithResult {
 		switch task.Status {
 		case subagentbatch.TaskPending, subagentbatch.TaskReady:
 			progressStamped := false
@@ -1568,6 +1618,23 @@ func reportProduced(r SubagentResult) bool {
 		len(r.Findings) > 0 || len(r.Patches) > 0
 }
 
+// resultHasDeliverable reports whether a durable result capsule carries
+// something a parent can actually use (P0-2). The predicate is deliberately
+// about payload, not about Error: a capsule that only carries the failure
+// reason has nothing to hand back, so it must stay a bare failed. SessionID
+// counts because it makes the child transcript retrievable through
+// read_agent_result even when the summary is empty.
+func resultHasDeliverable(res *subagentbatch.TaskResult) bool {
+	if res == nil {
+		return false
+	}
+	return strings.TrimSpace(res.Summary) != "" ||
+		len(res.Findings) > 0 ||
+		len(res.Patches) > 0 ||
+		strings.TrimSpace(res.ArtifactRef) != "" ||
+		strings.TrimSpace(res.SessionID) != ""
+}
+
 // finalizeBatch persists per-task results, computes the terminal batch status
 // and summary, and emits the matching terminal lifecycle event.
 func (c *SubagentBatchCoordinator) finalizeBatch(ctx context.Context, batchID string, opts BatchStartOptions, tasks []SubagentTask, reports []SubagentResult, runErr error) {
@@ -1666,6 +1733,14 @@ func (c *SubagentBatchCoordinator) finalizeBatch(ctx context.Context, batchID st
 			UsageTotal:  result.UsageTotal,
 			ArtifactRef: result.ArtifactRef,
 		}
+		// P0-2: a failure that still produced a deliverable is not a bare
+		// failure. The terminal status must say so, otherwise the parent has to
+		// choose between trusting the status (and re-dispatching work that
+		// already exists) and trusting the payload (which P0-1 made readable).
+		// The zero-report branch above keeps TaskFailed: it has no payload.
+		if ts == subagentbatch.TaskFailed && resultHasDeliverable(taskResult) {
+			ts = subagentbatch.TaskFailedWithResult
+		}
 		alreadyTerminal, prepareErr := c.prepareTaskResult(persistCtx, batchID, taskID, ts, taskResult, progressWriteback)
 		if prepareErr != nil {
 			var conflict *subagentbatch.VersionConflictError
@@ -1719,7 +1794,8 @@ func (c *SubagentBatchCoordinator) finalizeBatch(ctx context.Context, batchID st
 		})
 		return
 	}
-	_, _, completed, failed, canceled, timedOut := subagentbatch.Counts(records)
+	counts := subagentbatch.DeriveTaskCounts(records)
+	completed, failed, canceled, timedOut := counts.Completed, counts.FailedTotal(), counts.Canceled, counts.TimedOut
 	if len(records) != len(tasks) {
 		c.emit("subagent.batch.progress", map[string]interface{}{
 			"batch_id":    batchID,
@@ -1742,19 +1818,20 @@ func (c *SubagentBatchCoordinator) finalizeBatch(ctx context.Context, batchID st
 
 	status, errorClass := c.terminalBatchStatus(ctx, batch, runErr, failed, canceled, timedOut, completed)
 	summary := subagentbatch.BatchSummary{
-		BatchID:        batchID,
-		Status:         status,
-		TaskCount:      len(tasks),
-		CompletedCount: completed,
-		FailedCount:    failed,
-		CanceledCount:  canceled,
-		TimedOutCount:  timedOut,
-		ElapsedMillis:  elapsedMillis(batch.CreatedAt, now),
-		ErrorClass:     errorClass,
-		CriticalErrors: compactStrings(criticalErrors),
-		TaskStatuses:   statuses,
-		CreatedAt:      batch.CreatedAt,
-		FinishedAt:     now,
+		BatchID:               batchID,
+		Status:                status,
+		TaskCount:             len(tasks),
+		CompletedCount:        completed,
+		FailedCount:           failed,
+		FailedWithResultCount: counts.FailedWithResult,
+		CanceledCount:         canceled,
+		TimedOutCount:         timedOut,
+		ElapsedMillis:         elapsedMillis(batch.CreatedAt, now),
+		ErrorClass:            errorClass,
+		CriticalErrors:        compactStrings(criticalErrors),
+		TaskStatuses:          statuses,
+		CreatedAt:             batch.CreatedAt,
+		FinishedAt:            now,
 	}
 	summaryJSON, _ := json.Marshal(summary)
 
@@ -1799,11 +1876,10 @@ func (c *SubagentBatchCoordinator) finalizeBatch(ctx context.Context, batchID st
 		b.HeartbeatAt = now
 		// Keep the durable count columns consistent with the summary so
 		// recovery/dashboards never see a completed batch with zero counts.
-		// Every durable task was verified terminal above. TaskSkipped is a
-		// terminal state too, but it has no dedicated batch counter; therefore
-		// queued_count must still be zero rather than counting skipped rows as
-		// queued work.
-		b.QueuedCount = len(tasks) - (completed + failed + canceled + timedOut)
+		// Every durable task was verified terminal above, so queued is derived
+		// (not "everything the four legacy counters did not cover"): the old
+		// subtraction silently re-labelled skipped rows as queued work.
+		b.QueuedCount = counts.Queued
 		b.RunningCount = 0
 		b.CompletedCount = completed
 		b.FailedCount = failed

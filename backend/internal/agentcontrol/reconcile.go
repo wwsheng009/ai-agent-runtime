@@ -86,6 +86,18 @@ type ReconcileReport struct {
 	PurgedRows       int64  `json:"purged_rows,omitempty"`
 	PurgedWakeEvents int64  `json:"purged_wake_events,omitempty"`
 	PurgeError       string `json:"purge_error,omitempty"`
+	// WakePrune* fold the wake-event governance half of retention (retention.go,
+	// H3) into the same pass: the mode it ran in and the bounded candidate set it
+	// found in observe mode (or removed in enforce). Both stay zero/empty when
+	// the host does not wire that half.
+	WakePruneMode       string `json:"wake_prune_mode,omitempty"`
+	WakePruneCandidates int64  `json:"wake_prune_candidates,omitempty"`
+	// Worktrees* fold the worktree drift pass
+	// (isolation/worktree.ReconcileWorktrees, findings H11/H15) into the same
+	// report: orphan directories and stale git registrations are what an
+	// enforce pass reclaims, and they stay counted in observe mode.
+	Worktrees     WorktreeReconcileOutcome `json:"worktrees,omitempty"`
+	WorktreeError string                   `json:"worktree_error,omitempty"`
 }
 
 // ReconcileAgentSessionConsistency audits the durable identity graph and, in
@@ -258,6 +270,12 @@ func (r ReconcileReport) Summary() string {
 	}
 	if r.PurgedWakeEvents > 0 {
 		parts = append(parts, fmt.Sprintf("purged_wake_events=%d", r.PurgedWakeEvents))
+	}
+	if mode := strings.TrimSpace(r.WakePruneMode); mode != "" {
+		parts = append(parts, "wake_prune_mode="+mode)
+	}
+	if r.WakePruneCandidates > 0 {
+		parts = append(parts, fmt.Sprintf("wake_prune_candidates=%d", r.WakePruneCandidates))
 	}
 	if errText := strings.TrimSpace(r.PurgeError); errText != "" {
 		parts = append(parts, "purge_error="+errText)

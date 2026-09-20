@@ -479,6 +479,7 @@ git diff --check                                                                
 ### 3. 与方案的偏差（以当前代码为准）
 
 1. **`subagentbatch.scanTaskRow` 读投影缺口（实施中发现，必须修复）**：`last_progress_at`/`started_at`/`finished_at`/`task_deadline` 四列写入正常但读回时被丢弃，导致 `LastProgressAt` 永远读不到、M1 节流恒不命中、`batch_progress` 首选分支失效。已按写路径列序对称回填并有往返测试；`getTaskTx` 共用同一扫描因此 `UpdateTask` 回调也能看到真实 `StartedAt`。
+   **更正（2026-09-20 复核）**：「四列写入正常」只对 `started_at`/`finished_at` 成立。取证批次 `batch_42d0a52d2a24e401` 的 `subagent_tasks` 行显示 `task_deadline` / `last_progress_at` 在**写侧**从未被填充（全为 NULL），并非仅读投影丢弃；该写侧缺口已由 `multi-agent-durable-lifecycle-hardening-plan-20260920.md` P1-1（H8）修复。
 2. **broker dispatch 已是分离分支**：现状 `case ToolSendMessage, ToolFollowupTask` 内部已分别调用 `SendMessage`/`FollowupTask`，「拆分」在实施时已无必要；真正的工作在三态语义、返回字段与双宿主一致（已完成）。
 3. **`trigger_turn` 消费标记**：agentcontrol mailbox 无 consumed 字段，方案所述「复用 read model 标记」不可行；实现改为 session events 持久账本（`agent.trigger_turn.consumed` + 高水位/ID 集合），语义等价且父侧可读。
 4. **结果兜底通道**：completion payload 落在父会话 **AgentControl session mailbox**（非 `team.Store.InsertMail`，后者要求 TeamID）；读取器按真实通道实现并做 parent/root scope 二次校验。

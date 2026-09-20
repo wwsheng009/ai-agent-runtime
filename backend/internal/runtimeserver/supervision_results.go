@@ -3,6 +3,7 @@ package runtimeserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -267,18 +268,48 @@ func (s *SupervisionResultSource) LoadAgentResult(ctx context.Context, scope sup
 		if err != nil {
 			return supervision.AgentResultRecord{}, false, err
 		}
+		var pending *supervision.AgentResultRecord
 		for _, ref := range refs {
 			if taskID != "" && !strings.EqualFold(strings.TrimSpace(ref.task.TaskID), taskID) {
 				continue
 			}
 			record, ok := loadBatchTaskResult(ref.task)
 			if !ok {
+				// P1-1 / H7: the durable task row exists but has no result
+				// capsule yet. A task that is still in flight must answer
+				// pending_binding instead of "no result recorded", so the
+				// caller waits for the binding rather than re-dispatching it.
+				if taskID != "" && !ref.task.Status.Terminal() && pending == nil {
+					entry := supervision.AgentResultRecord{
+						Source:    supervision.ResultSourceTaskResult,
+						TaskID:    strings.TrimSpace(ref.task.TaskID),
+						SessionID: taskChildSessionID(ref.task),
+						Status:    supervision.ReadResultStatusPendingBinding,
+						Summary: fmt.Sprintf("task %s is %s; its child session binding/result is not durable yet",
+							strings.TrimSpace(ref.task.TaskID), ref.task.Status),
+					}
+					pending = &entry
+				}
 				continue
 			}
 			if sessionID != "" && !strings.EqualFold(strings.TrimSpace(record.SessionID), sessionID) {
 				continue
 			}
 			return record, true, nil
+		}
+		// A pending task still loses to a real completion payload: the mailbox
+		// fallback below gets its chance first, then we answer pending_binding.
+		if pending != nil {
+			for _, record := range s.completionRecords(ctx, scope) {
+				if sessionID != "" && !strings.EqualFold(strings.TrimSpace(record.SessionID), sessionID) {
+					continue
+				}
+				if taskID != "" && !strings.EqualFold(strings.TrimSpace(record.TaskID), taskID) {
+					continue
+				}
+				return record, true, nil
+			}
+			return *pending, true, nil
 		}
 	}
 	for _, record := range s.completionRecords(ctx, scope) {
@@ -630,6 +661,11 @@ func taskStatusText(status subagentbatch.TaskStatus) string {
 	case subagentbatch.TaskSucceeded:
 		return string(agentresult.StatusSucceeded)
 	case subagentbatch.TaskFailed:
+		return string(agentresult.StatusFailed)
+	case subagentbatch.TaskFailedWithResult:
+		// Backward-compatible rendering (plan §P0-2 风险缓解): renderers that
+		// predate the enum see the familiar "failed" text, while the payload's
+		// result-available guidance is what tells the model not to re-dispatch.
 		return string(agentresult.StatusFailed)
 	case subagentbatch.TaskCanceled:
 		return string(agentresult.StatusCanceled)

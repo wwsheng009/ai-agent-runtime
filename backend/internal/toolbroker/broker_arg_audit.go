@@ -34,7 +34,7 @@ var brokerToolArgKeys = map[string][]string{
 	ToolReadAgentEvents:      {"after_seq", "id", "limit", "session_id", "view", "wait_ms"},
 	ToolCloseAgent:           {"id", "session_id"},
 	ToolResumeAgent:          {"id", "session_id"},
-	ToolApplyAgentWorktree:   {"id", "keep", "paths", "session_id"},
+	ToolApplyAgentWorktree:   {"force", "id", "keep", "paths", "session_id"},
 	ToolDiscardAgentWorktree: {"id", "session_id"},
 	ToolSpawnTeam: {
 		"allow_existing", "auto_start", "lead_session_id", "max_teammates", "max_writers",
@@ -58,7 +58,7 @@ var brokerToolArgKeys = map[string][]string{
 	},
 	ToolSupervisionSnapshot:    {"after_seq", "include_resolved", "limit"},
 	ToolSupervisionDescendants: {"after_seq", "health", "include_results", "include_terminal", "limit", "mode"},
-	ToolReadAgentResult:        {"id", "max_chars", "sections", "task_id"},
+	ToolReadAgentResult:        {"id", "limit", "max_chars", "offset", "sections", "task_id"},
 	ToolAckLifecycle:           {"notification_id", "decision", "note", "reason", "state", "until", "expected_version"},
 	ToolControlDescendant:      {"notification_id", "action", "reason", "cascade", "expected_version"},
 }

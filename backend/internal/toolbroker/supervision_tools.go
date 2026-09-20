@@ -84,6 +84,13 @@ type ReadAgentResultArgs struct {
 	// Sections selects summary | findings | changes | artifacts | errors |
 	// usage; empty means all sections.
 	Sections []string
+	// Offset is the rune offset used to page a long summary; zero starts at the
+	// beginning. Only meaningful together with Limit.
+	Offset int
+	// Limit caps the summary runes returned by this read; zero uses the
+	// max_chars budget. Non-zero values let a caller walk a long result instead
+	// of losing the tail to the 512-rune display cap (P0-1 H4).
+	Limit int
 	// MaxChars bounds the serialized output; zero uses the default 4000.
 	MaxChars int
 }
@@ -194,7 +201,15 @@ func supervisionToolDefinitions() []types.ToolDefinition {
 					"sections": map[string]interface{}{
 						"type":        "array",
 						"items":       map[string]interface{}{"type": "string"},
-						"description": "Optional subset of summary | findings | changes | artifacts | errors | usage (default: all). An unknown section is rejected instead of widening the read.",
+						"description": "Optional subset of summary | output | findings | changes | artifacts | errors | usage (default: all). \"output\" is accepted as an alias of summary. An unknown section is rejected instead of widening the read.",
+					},
+					"offset": map[string]interface{}{
+						"type":        "integer",
+						"description": "Optional rune offset into the summary section; use the previous next_offset to continue. Non-zero offsets page a long result instead of re-reading the head.",
+					},
+					"limit": map[string]interface{}{
+						"type":        "integer",
+						"description": "Optional summary rune cap for this read (default: the max_chars budget). eof=false plus next_offset means more text remains.",
 					},
 					"max_chars": map[string]interface{}{
 						"type":        "integer",
@@ -359,6 +374,16 @@ func parseReadAgentResultArgs(args map[string]interface{}) (ReadAgentResultArgs,
 		return parsed, err
 	}
 	parsed.Sections = sections
+	if value, ok, err := brokerToolArgInt(ToolReadAgentResult, args, "offset"); err != nil {
+		return parsed, err
+	} else if ok && value > 0 {
+		parsed.Offset = value
+	}
+	if value, ok, err := brokerToolArgInt(ToolReadAgentResult, args, "limit"); err != nil {
+		return parsed, err
+	} else if ok && value > 0 {
+		parsed.Limit = value
+	}
 	if value, ok, err := brokerToolArgInt(ToolReadAgentResult, args, "max_chars"); err != nil {
 		return parsed, err
 	} else if ok && value > 0 {

@@ -34,10 +34,12 @@ func runningAPIBatch(t *testing.T, store subagentbatch.BatchStore, batchID, pare
 		ParentSessionID: parentSessionID,
 		ExecutionMode:   subagentbatch.ExecutionModeBackground,
 		Status:          subagentbatch.BatchRunning,
+		// 计数以 task 行为单一事实源：这里只有 1 行 running 任务，
+		// 因此存储列也必须写成 0 完成 / 1 运行 / 2 待跑。
 		TaskCount:       3,
-		CompletedCount:  1,
+		CompletedCount:  0,
 		RunningCount:    1,
-		QueuedCount:     1,
+		QueuedCount:     2,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 		HeartbeatAt:     now,
@@ -67,7 +69,7 @@ func TestAPIInjectSupervisionPreflight_ProgressRollup(t *testing.T) {
 	prompt, err := handler.InjectSupervisionPreflight(ctx, "sess_progress", "USER PROMPT", nil)
 	require.NoError(t, err)
 	require.Contains(t, prompt, "progress:", "an active batch must reach the parent turn")
-	require.Contains(t, prompt, "batch_api_progress: 1/3 completed")
+	require.Contains(t, prompt, "batch_api_progress: 0/3 completed")
 	require.Contains(t, prompt, "1 running")
 	require.Contains(t, prompt, "child_session_1")
 	require.Contains(t, prompt, "USER PROMPT")

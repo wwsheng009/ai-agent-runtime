@@ -10,6 +10,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
 )
 
 // P2-9 生命周期回收与一致性对账（API 宿主）。
@@ -70,14 +71,43 @@ func (h *Handler) ensureAgentRegistryReconciler() *agentcontrol.Reconciler {
 		// their wake events once they fall outside the configured window
 		// (0 → shared default, negative → keep forever). Only already-terminal
 		// rows can match, so a purge never races a quota-holding child.
+		//
+		// H3 wake governance rides the same hook, exactly like the CLI host: the
+		// closed/stale half uses the shorter wake window and the active half
+		// drains the per-agent backlog. Observe (the default) reports candidates
+		// only, so this stays inert until an operator opts into enforce.
 		Purge: func(ctx context.Context, now time.Time) (agentcontrol.TerminalPurgeOutcome, error) {
-			return agentcontrol.PurgeTerminalAgentRecords(ctx, store, agentcontrol.TerminalPurgePolicy{
+			outcome, err := agentcontrol.PurgeTerminalAgentRecords(ctx, store, agentcontrol.TerminalPurgePolicy{
 				Now:       now,
 				Retention: h.agentRegistryTerminalRetention(),
 			})
+			if err != nil {
+				return outcome, err
+			}
+			wakeOutcome, wakeErr := agentcontrol.PruneAgentWakeEvents(ctx, store, agentcontrol.AgentWakePrunePolicy{
+				Now:  now,
+				Mode: mode,
+			})
+			outcome.WakePruneMode = wakeOutcome.Mode
+			outcome.WakePruneCandidates = wakeOutcome.ClosedCandidates + wakeOutcome.OverflowCandidates
+			outcome.WakeEvents += wakeOutcome.ClosedDeleted + wakeOutcome.OverflowDeleted
+			if wakeErr != nil {
+				return outcome, wakeErr
+			}
+			if outcome.FirstError == "" {
+				outcome.FirstError = wakeOutcome.FirstError
+			}
+			return outcome, nil
 		},
-		Mode:     mode,
-		Interval: interval,
+		// P1-3 (H11/H15): worktree drift is host-owned, so the API host folds
+		// the same pass in as the CLI host. Registered paths stay empty here on
+		// purpose: the reconciler never reclaims a git-registered worktree, so a
+		// live child cannot be deleted, and the API host has no cheap mapping
+		// from a durable row back to its session context. A live worktree is
+		// therefore reported as an unmanaged registration rather than skipped.
+		Worktrees: h.reconcileAgentWorktrees,
+		Mode:      mode,
+		Interval:  interval,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h.agentControlReconciler = reconciler
@@ -130,6 +160,46 @@ func (h *Handler) reclaimAgentControlAgentQuota(ctx context.Context, records []a
 			controller.publishAgentReclaimEvent(rootSessionID, rootSessionID, agentcontrol.ReclaimSourceReconcile, pass)
 		},
 	)
+}
+
+// reconcileAgentWorktrees runs the worktree half of the reconcile pass
+// (isolation/worktree.ReconcileWorktrees, plan P1-3 / findings H11+H15) for the
+// API host. The workspace root comes from the same runtime config the spawn
+// isolation uses, so both surfaces agree on where worktrees live.
+func (h *Handler) reconcileAgentWorktrees(ctx context.Context, _ []agentcontrol.AgentRecord, enforce bool, now time.Time) (agentcontrol.WorktreeReconcileOutcome, error) {
+	if h == nil {
+		return agentcontrol.WorktreeReconcileOutcome{}, nil
+	}
+	repoRoot := ""
+	if runtimeConfig := h.resolveRuntimeConfig(UsageScope{}); runtimeConfig != nil {
+		repoRoot = strings.TrimSpace(runtimeConfig.Workspace.Root)
+	}
+	if repoRoot == "" {
+		return agentcontrol.WorktreeReconcileOutcome{}, nil
+	}
+	mode := worktree.ReconcileModeObserve
+	if enforce {
+		mode = worktree.ReconcileModeEnforce
+	}
+	report, err := worktree.ReconcileWorktrees(ctx, worktree.ReconcileOptions{
+		RepoRoot: repoRoot,
+		Mode:     mode,
+		Now:      now,
+	})
+	if err != nil {
+		return agentcontrol.WorktreeReconcileOutcome{}, err
+	}
+	return agentcontrol.WorktreeReconcileOutcome{
+		Supported:     true,
+		Dirs:          report.DirsChecked,
+		Orphans:       report.OrphanDirs,
+		StaleGit:      report.StaleGit,
+		StaleRegistry: report.StaleRegistry,
+		Unmanaged:     report.Unmanaged,
+		ReclaimedDirs: report.ReclaimedDirs,
+		ReclaimedGit:  report.ReclaimedGit,
+		Failed:        report.Failed,
+	}, nil
 }
 
 // agentRegistryReconcileSummary renders the cached pass outcome for the

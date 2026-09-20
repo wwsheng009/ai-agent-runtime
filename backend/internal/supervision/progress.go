@@ -61,7 +61,11 @@ type ProgressGroup struct {
 	Failed    int
 	Running   int
 	Pending   int
-	Terminal  bool
+	// Skipped counts terminal tasks that were never run (dependency failed,
+	// upstream task failed, or an explicit skip). It is separate from Failed so
+	// "4 tasks: 1 done, 1 failed, 2 skipped" does not read as two failures.
+	Skipped  int
+	Terminal bool
 	// LastProgressAt is the newest progress/heartbeat stamp the host knows for
 	// this group.
 	LastProgressAt time.Time
@@ -78,6 +82,7 @@ type ProgressSummary struct {
 	Failed        int            `json:"failed"`
 	Running       int            `json:"running"`
 	Pending       int            `json:"pending,omitempty"`
+	Skipped       int            `json:"skipped,omitempty"`
 	Terminal      bool           `json:"terminal,omitempty"`
 	ProgressAgeMs int64          `json:"progress_age_ms,omitempty"`
 	RunningTasks  []ProgressTask `json:"running_tasks,omitempty"`
@@ -141,6 +146,7 @@ func BuildProgressSummary(ctx context.Context, source ProgressSource, req Progre
 			Failed:    group.Failed,
 			Running:   group.Running,
 			Pending:   group.Pending,
+			Skipped:   group.Skipped,
 			Terminal:  group.Terminal,
 		}
 		if !group.LastProgressAt.IsZero() {
@@ -208,6 +214,9 @@ func formatProgressText(digest *Digest, now time.Time) string {
 		}
 		if group.Running > 0 {
 			fmt.Fprintf(&b, ", %d running", group.Running)
+		}
+		if group.Skipped > 0 {
+			fmt.Fprintf(&b, ", %d skipped", group.Skipped)
 		}
 		if group.Terminal {
 			// The batch-done row is resolution=closed, so the evaluator only

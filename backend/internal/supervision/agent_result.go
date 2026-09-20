@@ -40,6 +40,12 @@ const (
 	ResultSourceTaskResult        = "task_result"
 	ResultSourceCompletionPayload = "completion_payload"
 	ResultSourceNone              = "none"
+
+	// ReadResultStatusPendingBinding is the status of a task that is durable but
+	// has not bound a child session / produced a result capsule yet. It is a
+	// distinct status rather than an error so the caller can wait instead of
+	// treating the target as missing.
+	ReadResultStatusPendingBinding = "pending_binding"
 )
 
 // DescendantResult is the bounded result projection attached to one snapshot
@@ -176,11 +182,22 @@ type ReadResultArgs struct {
 	TaskID    string
 	Sections  []string
 	MaxChars  int
+	// Offset/Limit page the summary text in runes, with artifact_read's
+	// offset/limit/eof semantics (H4). Both zero keeps the bounded default
+	// view (MaxSnapshotResultSummaryRunes) but still reports how to page the
+	// remainder, so the 512-rune cap is a default view instead of the only
+	// exit.
+	Offset int
+	Limit  int
 }
 
 // ReadResultSection vocabulary.
 const (
-	ReadResultSectionSummary   = "summary"
+	ReadResultSectionSummary = "summary"
+	// ReadResultSectionOutput is the alias the model most often reaches for
+	// when it wants the deliverable body. It resolves to summary instead of
+	// being rejected (H1: sections=["output"] failed the whole call).
+	ReadResultSectionOutput    = "output"
 	ReadResultSectionFindings  = "findings"
 	ReadResultSectionChanges   = "changes"
 	ReadResultSectionArtifacts = "artifacts"
@@ -204,6 +221,22 @@ type ReadResultPayload struct {
 	Source     string              `json:"source"`
 	ErrorCode  string              `json:"error_code,omitempty"`
 	NextAction string              `json:"next_action,omitempty"`
+	// ArtifactNextActions carries one artifact_read(id=...) dereference per
+	// entry in Artifacts, so an artifacts-only read is actionable instead of
+	// a list of opaque refs (H4).
+	ArtifactNextActions []string `json:"artifact_next_actions,omitempty"`
+	// Offset/Limit/EOF/NextOffset/TotalRunes expose summary pagination with
+	// artifact_read's semantics (H4). EOF is nil unless a summary was read.
+	Offset     int   `json:"offset,omitempty"`
+	Limit      int   `json:"limit,omitempty"`
+	EOF        *bool `json:"eof,omitempty"`
+	NextOffset int   `json:"next_offset,omitempty"`
+	TotalRunes int   `json:"total_runes,omitempty"`
+	// ResultAvailable reports that a failed/canceled task still carries a
+	// usable deliverable, so the parent must read it instead of re-dispatching
+	// (H10).
+	ResultAvailable bool `json:"result_available,omitempty"`
+	DoNotRetry      bool `json:"do_not_retry,omitempty"`
 	// FinishedAt is the durable completion time when the source recorded one.
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
 }
@@ -218,6 +251,7 @@ func NormalizeReadResultSections(sections []string) ([]string, error) {
 	}
 	valid := map[string]bool{
 		ReadResultSectionSummary:   true,
+		ReadResultSectionOutput:    true,
 		ReadResultSectionFindings:  true,
 		ReadResultSectionChanges:   true,
 		ReadResultSectionArtifacts: true,
@@ -233,6 +267,11 @@ func NormalizeReadResultSections(sections []string) ([]string, error) {
 		}
 		if !valid[section] {
 			return nil, &UnknownReadResultSectionError{Section: section}
+		}
+		// "output" is an accepted alias for the deliverable body; normalize it
+		// so every downstream switch keeps a single canonical key.
+		if section == ReadResultSectionOutput {
+			section = ReadResultSectionSummary
 		}
 		if seen[section] {
 			continue
@@ -252,7 +291,15 @@ type UnknownReadResultSectionError struct {
 }
 
 func (e *UnknownReadResultSectionError) Error() string {
-	return "unsupported section " + e.Section + " (want summary|findings|changes|artifacts|errors|usage)"
+	return "unsupported section " + e.Section + " (want summary|output|findings|changes|artifacts|errors|usage)"
+}
+
+// NextAction states the single next step for a rejected sections value, so the
+// model can recover in one turn instead of retrying the same call (main plan
+// P1-7 collaboration guidance).
+func (e *UnknownReadResultSectionError) NextAction() string {
+	return "retry read_agent_result with sections=[\"summary\"] (alias: \"output\") for the deliverable body, " +
+		"or sections=[\"artifacts\"] then artifact_read(id=<ref>, offset, limit) to page a large artifact"
 }
 
 // ReadResultMaxChars resolves the caller budget: zero falls back to the
@@ -310,9 +357,19 @@ func BuildReadResultPayload(record AgentResultRecord, args ReadResultArgs) ReadR
 		}
 	}
 	payload.Status = status
+	// P1-1 / H7: a task that exists but whose child-session binding (or result)
+	// is not durable yet is not "missing". Without this branch the model sees a
+	// successful read with no status and falls back to re-dispatching work that
+	// is already in flight.
+	if status == ReadResultStatusPendingBinding {
+		payload.ErrorCode = ReadResultStatusPendingBinding
+		payload.NextAction = "the task is still in flight and no durable result exists yet: " +
+			"call wait_agent (or read_agent_events) to observe it, then retry read_agent_result after it settles; " +
+			"do not re-dispatch the same task"
+	}
 
 	if wants(ReadResultSectionSummary) {
-		payload.Summary, payload.Truncated = truncateReadResultText(record.Summary, MaxSnapshotResultSummaryRunes, payload.Truncated)
+		applyReadResultSummaryPage(&payload, record.Summary, args)
 	}
 	if wants(ReadResultSectionFindings) {
 		for _, finding := range record.Findings {
@@ -353,6 +410,7 @@ func BuildReadResultPayload(record AgentResultRecord, args ReadResultArgs) ReadR
 		refs := BoundReadResultArtifacts(record.Artifacts)
 		if len(refs) > 0 {
 			payload.Artifacts = refs
+			payload.ArtifactNextActions = artifactDereferenceActions(refs)
 		}
 	}
 	if wants(ReadResultSectionErrors) {
@@ -381,8 +439,106 @@ func BuildReadResultPayload(record AgentResultRecord, args ReadResultArgs) ReadR
 			payload.Usage = &usage
 		}
 	}
+	applyFailedWithResultGuidance(&payload, record)
 	enforceReadResultBudget(&payload, ReadResultMaxChars(args.MaxChars))
 	return payload
+}
+
+// applyReadResultSummaryPage renders the summary either as the bounded default
+// view or as one explicit offset/limit page. Both modes report eof/next_offset
+// so the caller always learns how to reach the rest of the deliverable (H4:
+// the 512-rune cap used to be the only exit and the remainder was unreachable).
+func applyReadResultSummaryPage(payload *ReadResultPayload, summary string, args ReadResultArgs) {
+	if payload == nil {
+		return
+	}
+	summary = strings.TrimSpace(summary)
+	total := utf8.RuneCountInString(summary)
+	payload.TotalRunes = total
+	paging := args.Offset > 0 || args.Limit > 0
+	if !paging {
+		payload.Summary, payload.Truncated = truncateReadResultText(summary, MaxSnapshotResultSummaryRunes, payload.Truncated)
+		eof := total <= MaxSnapshotResultSummaryRunes
+		payload.EOF = &eof
+		payload.Offset = 0
+		payload.Limit = MaxSnapshotResultSummaryRunes
+		if !eof {
+			payload.NextOffset = MaxSnapshotResultSummaryRunes
+		}
+		return
+	}
+	offset := args.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	limit := args.Limit
+	if limit <= 0 {
+		limit = DefaultReadResultMaxChars
+	}
+	runes := []rune(summary)
+	if offset > len(runes) {
+		offset = len(runes)
+	}
+	end := offset + limit
+	if end > len(runes) {
+		end = len(runes)
+	}
+	payload.Summary = strings.TrimSpace(string(runes[offset:end]))
+	payload.Offset = offset
+	payload.Limit = limit
+	eof := end >= len(runes)
+	payload.EOF = &eof
+	if !eof {
+		payload.NextOffset = end
+		payload.Truncated = true
+	}
+}
+
+// artifactDereferenceActions turns each artifact ref into the concrete
+// artifact_read call that resolves it, so an artifacts-only read is a pointer
+// the model can follow instead of a dead-end list (H4).
+func artifactDereferenceActions(refs []string) []string {
+	if len(refs) == 0 {
+		return nil
+	}
+	actions := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			continue
+		}
+		actions = append(actions, "artifact_read(id="+ref+", offset=0, limit=20000)")
+	}
+	if len(actions) == 0 {
+		return nil
+	}
+	return actions
+}
+
+// applyFailedWithResultGuidance marks a failed/canceled read that still carries
+// a deliverable. Without it the parent sees a bare failure status and redoes
+// work that already exists (H10: 6817/6113-character deliverables were hidden
+// behind status=failed).
+func applyFailedWithResultGuidance(payload *ReadResultPayload, record AgentResultRecord) {
+	if payload == nil {
+		return
+	}
+	if record.Success {
+		return
+	}
+	hasDeliverable := strings.TrimSpace(record.Summary) != "" || len(record.Findings) > 0 || len(record.Artifacts) > 0
+	if !hasDeliverable {
+		return
+	}
+	payload.ResultAvailable = true
+	payload.DoNotRetry = true
+	note := "⚠ this task reported failure but already produced a deliverable: read the summary/artifacts above " +
+		"and do NOT re-dispatch the same task"
+	if payload.NextAction == "" {
+		payload.NextAction = note
+	} else {
+		payload.NextAction = note + "; " + payload.NextAction
+	}
 }
 
 // BoundReadResultArtifacts caps the read tool's artifacts list (≤8 items, each
@@ -420,7 +576,14 @@ func sectionSet(sections []string) map[string]bool {
 		return set
 	}
 	for _, section := range sections {
-		set[strings.ToLower(strings.TrimSpace(section))] = true
+		section = strings.ToLower(strings.TrimSpace(section))
+		// Accept the "output" alias even when a caller bypassed
+		// NormalizeReadResultSections, so the alias can never silently select
+		// an empty section set.
+		if section == ReadResultSectionOutput {
+			section = ReadResultSectionSummary
+		}
+		set[section] = true
 	}
 	return set
 }
@@ -492,6 +655,11 @@ func dropTrailingReadResultEntry(payload *ReadResultPayload) bool {
 		payload.Changes = payload.Changes[:len(payload.Changes)-1]
 	case len(payload.Artifacts) > 0:
 		payload.Artifacts = payload.Artifacts[:len(payload.Artifacts)-1]
+		// ArtifactNextActions is the parallel dereference list: dropping one
+		// without the other would leave pointers that name no ref.
+		if len(payload.ArtifactNextActions) > len(payload.Artifacts) {
+			payload.ArtifactNextActions = payload.ArtifactNextActions[:len(payload.Artifacts)]
+		}
 	case len(payload.Errors) > 0:
 		payload.Errors = payload.Errors[:len(payload.Errors)-1]
 	case payload.Usage != nil:

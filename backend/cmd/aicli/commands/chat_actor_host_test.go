@@ -4341,7 +4341,7 @@ func TestLocalChatPrepareRunHookFreezesSystemPromptAcrossRuns(t *testing.T) {
 
 	// First prepare anchors the outbound head while the workspace root is not
 	// resolved yet (the observed turn-1 state).
-	hook := localChatPrepareRunHook(apiAgent, session, "", true)
+	hook := localChatPrepareRunHook(apiAgent, session, "", true, nil)
 	if hook == nil {
 		t.Fatal("expected prepare hook for base session")
 	}
@@ -4361,7 +4361,7 @@ func TestLocalChatPrepareRunHookFreezesSystemPromptAcrossRuns(t *testing.T) {
 	// instruction head must stay byte-identical: rewriting messages[0] here is
 	// exactly the turn-boundary prefix break that invalidated the provider
 	// prompt cache mid-session.
-	hook2 := localChatPrepareRunHook(apiAgent, session, `E:\projects\ai\ai-gateway`, true)
+	hook2 := localChatPrepareRunHook(apiAgent, session, `E:\projects\ai\ai-gateway`, true, nil)
 	if err := hook2(ctx, runtimeSession, true); err != nil {
 		t.Fatalf("second prepare: %v", err)
 	}

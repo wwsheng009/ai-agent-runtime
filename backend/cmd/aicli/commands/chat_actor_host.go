@@ -171,6 +171,12 @@ type localChatRuntimeHost struct {
 	progressCheckStop    context.CancelFunc
 	cleanupFns           []func()
 	closeOnce            sync.Once
+	// subagentLimiterMu / subagentLimiter 缓存进程级子代理并发上限
+	//（P1-4/H12）：同一 host 构建的每个 scheduler 共用同一 limiter 实例，
+	// 使 agents.maxThreads 成为「全部 batch 合计」的上限，而不是每个 batch
+	// 各自一份。首次构建后不再随配置热重载重建（见 subagentGlobalLimiter）。
+	subagentLimiterMu    sync.Mutex
+	subagentLimiter      *agent.SubagentConcurrencyLimiter
 	subagentMu           sync.Mutex
 	subagentCoordinators map[*agent.SubagentBatchCoordinator]struct{}
 	subagentOps          int
@@ -1381,7 +1387,7 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		TriggerTurnRunMeta: func(_ context.Context, session *runtimechat.Session) *team.RunMeta {
 			return toolbroker.SpawnAgentRunMetaFromContext(session)
 		},
-		PrepareRun:  localChatPrepareRunHook(apiAgent, session, workspaceRoot, isBaseSession),
+		PrepareRun:  localChatPrepareRunHook(apiAgent, session, workspaceRoot, isBaseSession, h.ToolSurface),
 		PersistHook: localGoalPersistHook(sessionStore),
 		// Phase 2 自愈钩子：仅基础会话启用，子会话不得以子 ID 复活基础会话行。
 		EnsureSession: localChatActorEnsureSession(session, isBaseSession),
@@ -1640,6 +1646,37 @@ func sanitizeLocalChatLeaseOwnerPart(value string) string {
 	return value
 }
 
+// subagentGlobalLimiter returns the ONE process-wide subagent concurrency
+// limiter shared by every scheduler this host builds (P1-4/H12).
+//
+// Precedence (documented, and mirrored by the API host):
+//   - agents.maxThreads > 0 → the limiter is sized maxThreads, so the total
+//     number of children running at once across all batches never exceeds it;
+//     agents.maxConcurrent (per batch) still applies on top, so a single batch
+//     cannot consume more than its own share of that budget.
+//   - agents.maxThreads ≤ 0, including the documented -1 "explicitly
+//     unlimited" → nil, i.e. no process-wide ceiling and only the per-batch
+//     agents.maxConcurrent remains in force (today's behavior for those
+//     configurations).
+//
+// The limiter is created on first use and kept for the life of the host: a
+// later config reload must not strand goroutines waiting on a retired limiter
+// or transiently double the budget with two live limiters.
+func (h *localChatRuntimeHost) subagentGlobalLimiter(maxThreads int) *agent.SubagentConcurrencyLimiter {
+	if maxThreads <= 0 {
+		return nil
+	}
+	if h == nil {
+		return agent.NewSubagentConcurrencyLimiter(maxThreads)
+	}
+	h.subagentLimiterMu.Lock()
+	defer h.subagentLimiterMu.Unlock()
+	if h.subagentLimiter == nil {
+		h.subagentLimiter = agent.NewSubagentConcurrencyLimiter(maxThreads)
+	}
+	return h.subagentLimiter
+}
+
 func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runtimeConfig *runtimecfg.RuntimeConfig, workspaceRoot string, childAgentType string, requestedModel string, requestedRoute ...string) *agent.Agent {
 	requestedProvider := ""
 	requestedReasoningEffort := ""
@@ -1739,8 +1776,20 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 
 	apiAgent := agent.NewAgentWithLLM(agentConfig, host.ToolSurface, host.Bootstrap.LLMRuntime())
 	apiAgent.SetBatchLifecycleProjector(localSubagentBatchLifecycleProjector(host))
+	// P1-4/H12：并发上限透传（过去只透传 Routing，导致每个 background batch
+	// 各自拿到默认 4 路窗口 → 实际并发 4×N）。每批上限 = agents.maxConcurrent
+	//（默认 4，与调度器内建默认一致）；进程级上限 = agents.maxThreads（>0 时
+	// 生效，全部 batch 共用同一 limiter）；背压默认关闭。
+	agentsConfig := runtimecfg.DefaultAgentsConfig()
+	if runtimeConfig != nil {
+		agentsConfig = runtimecfg.NormalizeAgentsConfig(runtimeConfig.Agents)
+	}
 	scheduler := agent.NewSubagentScheduler(apiAgent, agent.SubagentSchedulerConfig{
-		Routing: localChatSubagentRoutingConfig(session),
+		Routing:       localChatSubagentRoutingConfig(session),
+		MaxConcurrent: agentsConfig.MaxConcurrent,
+		GlobalLimiter: host.subagentGlobalLimiter(agentsConfig.MaxThreads),
+		MaxQueueDepth: agentsConfig.MaxConcurrentQueueDepth,
+		QueueTimeout:  time.Duration(agentsConfig.MaxConcurrentQueueTimeoutMs) * time.Millisecond,
 	})
 	apiAgent.SetSubagentScheduler(scheduler)
 	var batchCoordinator *agent.SubagentBatchCoordinator
@@ -1893,11 +1942,19 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	return apiAgent
 }
 
-func localChatPrepareRunHook(apiAgent *agent.Agent, session *ChatSession, workspaceRoot string, isBaseSession bool) func(context.Context, *runtimechat.Session, bool) error {
+func localChatPrepareRunHook(apiAgent *agent.Agent, session *ChatSession, workspaceRoot string, isBaseSession bool, surface runtimeskill.MCPManager) func(context.Context, *runtimechat.Session, bool) error {
 	if apiAgent == nil || session == nil || !isBaseSession {
 		return nil
 	}
 	return func(ctx context.Context, runtimeSession *runtimechat.Session, resume bool) error {
+		// turn 边界：合成 allowlist 是 agent 构建期的工具面快照，MCP 服务器
+		// （客户端下发 / 本地配置链）总在会话引导之后才握手完成，迟到的工具
+		// 会被 AllowToolInfo 拒绝，从而既进不了模型工具面、也无法触发冻结面
+		// 重建。这里在每次 run 开始前把新工具补进同一份策略（§4.7 R1 / §4.10）。
+		if added := syncLocalChatToolPolicyAllowlist(session, surface, apiAgent.GetToolBroker(), apiAgent.GetToolExecutionPolicy()); len(added) > 0 {
+			logpkg.Infof("AICLI tool policy allowlist synced with live tool surface: +%d (%s)",
+				len(added), strings.Join(added, ", "))
+		}
 		ensureChatSystemPromptMessage(session)
 		if cfg := apiAgent.GetConfig(); cfg != nil {
 			// Provider prompt caching requires the outbound instruction head

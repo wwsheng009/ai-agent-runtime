@@ -1,6 +1,7 @@
 package toolbroker
 
 import (
+	"os"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
@@ -21,10 +22,19 @@ const (
 	// prompts, and plan must not delegate writes to children.
 	SpawnAgentRouteWarningPermissionPinned = "permission_mode_pinned_to_parent"
 	// SpawnAgentRouteWarningPermissionEscalated marks a child that asked for a
-	// wider mode than its parent. The request is still honored (trusted
-	// bounded subtasks may opt into bypass_permissions) but stays auditable.
+	// wider mode than its parent. The request is blocked by default and the
+	// child is pinned back to the parent mode (the session tree's ceiling);
+	// the warning keeps the attempt auditable. Trusted bounded subtasks can
+	// restore the legacy honor-with-warning behavior through
+	// SpawnAgentEnvAllowPermissionEscalation.
 	SpawnAgentRouteWarningPermissionEscalated = "permission_mode_escalated_from_parent"
 )
+
+// SpawnAgentEnvAllowPermissionEscalation is the explicit opt-in that restores
+// honoring a child permission_mode wider than the parent session mode (H13).
+// Default off: the parent session mode is the ceiling for the whole session
+// tree, so a child cannot widen its own authority.
+const SpawnAgentEnvAllowPermissionEscalation = "AICLI_AGENTS_ALLOW_PERMISSION_ESCALATION"
 
 // ParentSessionPermissionMode reads the permission mode a spawned child
 // inherits from its parent session. The session-level effective mode
@@ -58,8 +68,11 @@ func ParentSessionPermissionMode(session agentcontrol.ContextGetter) string {
 //     the parent mode.
 //  4. A plan parent pins every other mode back to plan: plan mode is
 //     read-only, so it must not delegate writes to a child.
-//  5. Any remaining escalation above the parent mode is preserved for trusted
-//     bounded subtasks, but recorded as a route warning for audit.
+//  5. Any remaining escalation above the parent mode is blocked by default:
+//     the parent mode is the ceiling for the session tree, so the child is
+//     pinned back to it and the attempt is recorded as a route warning. The
+//     legacy honor-with-warning behavior is preserved for trusted bounded
+//     subtasks behind the SpawnAgentEnvAllowPermissionEscalation opt-in.
 //
 // Callers set EffectivePermissionMode after this function returns.
 func ResolveSpawnAgentPermissionPolicy(args SpawnAgentArgs, parentPermissionMode string) SpawnAgentArgs {
@@ -93,6 +106,10 @@ func ResolveSpawnAgentPermissionPolicy(args SpawnAgentArgs, parentPermissionMode
 			args.RequestedPermissionMode = requested
 		}
 		args.RouteWarnings = appendSpawnAgentRouteWarning(args.RouteWarnings, SpawnAgentRouteWarningPermissionEscalated)
+		if !spawnAgentPermissionEscalationAllowed() {
+			args.PermissionMode = parent
+			args.RouteWarnings = appendSpawnAgentRouteWarning(args.RouteWarnings, SpawnAgentRouteWarningPermissionPinned)
+		}
 	}
 	return args
 }
@@ -157,4 +174,44 @@ func appendSpawnAgentRouteWarning(warnings []string, warning string) []string {
 		}
 	}
 	return append(warnings, warning)
+}
+
+// SpawnAgentPermissionEscalationNextAction returns the actionable guidance for
+// a spawn whose child permission escalation was blocked and pinned back to the
+// parent session mode. It returns "" when no escalation was blocked (honored
+// request, opt-in enabled, or no escalation at all), so callers attach it as
+// next_action only for the blocked case.
+func SpawnAgentPermissionEscalationNextAction(routeWarnings []string, effectivePermissionMode string) string {
+	if !spawnAgentRouteWarningListed(routeWarnings, SpawnAgentRouteWarningPermissionEscalated) ||
+		!spawnAgentRouteWarningListed(routeWarnings, SpawnAgentRouteWarningPermissionPinned) {
+		return ""
+	}
+	mode := normalizeKnownSpawnAgentPermissionMode(effectivePermissionMode)
+	if mode == "" {
+		mode = "the parent session mode"
+	}
+	return "permission escalation was blocked: the child runs with " + mode +
+		" because a child cannot widen the parent session mode. Re-spawn with permission_mode=" + mode +
+		" (or omit permission_mode to inherit it), or set " + SpawnAgentEnvAllowPermissionEscalation +
+		"=1 to explicitly allow escalation."
+}
+
+// spawnAgentPermissionEscalationAllowed reports whether the explicit opt-in is
+// enabled. Only an explicit truthy value enables the legacy behavior, so an
+// empty or malformed value keeps the fail-closed default.
+func spawnAgentPermissionEscalationAllowed() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(SpawnAgentEnvAllowPermissionEscalation))) {
+	case "1", "true", "yes", "on", "enabled":
+		return true
+	}
+	return false
+}
+
+func spawnAgentRouteWarningListed(warnings []string, want string) bool {
+	for _, warning := range warnings {
+		if strings.TrimSpace(warning) == want {
+			return true
+		}
+	}
+	return false
 }

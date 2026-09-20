@@ -126,7 +126,9 @@ func TestSupervisionE2E_ThreeBackgroundChildrenOneCallAndProgressLine(t *testing
 	})
 	require.NoError(t, err)
 
-	// batch 控制面：3 个任务，2 完成 1 运行 → progress 行 "2/3 completed, 1 running"。
+	// batch 控制面：3 个任务，1 完成 2 运行 → progress 行 "1/3 completed, 2 running"。
+	// 计数以 task 行为单一事实源（batch 计数列只在建批与终态收敛时刷新），
+	// 因此这里的存储列必须与 task 行一致，否则快照自相矛盾。
 	batch := &subagentbatch.SubagentBatch{
 		BatchID:         subagentbatch.NewID("batch"),
 		RootScopeID:     supervisionE2EParent,
@@ -134,8 +136,8 @@ func TestSupervisionE2E_ThreeBackgroundChildrenOneCallAndProgressLine(t *testing
 		ExecutionMode:   subagentbatch.ExecutionModeBackground,
 		Status:          subagentbatch.BatchRunning,
 		TaskCount:       3,
-		RunningCount:    1,
-		CompletedCount:  2,
+		RunningCount:    2,
+		CompletedCount:  1,
 		HeartbeatAt:     now,
 		CreatedAt:       now,
 		UpdatedAt:       now,
@@ -185,7 +187,7 @@ func TestSupervisionE2E_ThreeBackgroundChildrenOneCallAndProgressLine(t *testing
 	prompt, err := injectLocalSupervisionPreflight(ctx, host, supervisionE2EParent, "USER PROMPT", nil)
 	require.NoError(t, err)
 	require.Contains(t, prompt, "progress:")
-	require.Contains(t, prompt, "2/3 completed, 1 running")
+	require.Contains(t, prompt, "1/3 completed, 2 running")
 	require.Contains(t, prompt, "worker-timeout")
 	require.Contains(t, prompt, "USER PROMPT")
 }

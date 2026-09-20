@@ -154,6 +154,12 @@ type Handler struct {
 	runtimeConfig               *runtimecfg.RuntimeConfig
 	runtimeConfigFile           string
 	runtimeConfigResolver       func(UsageScope) *runtimecfg.RuntimeConfig
+	// subagentLimiterMu / subagentLimiter 缓存进程级子代理并发上限
+	//（P1-4/H12）：与 CLI 宿主同口径——agents.maxThreads > 0 时本进程构建的
+	// 全部 scheduler 共用同一 limiter；≤0（含 -1 显式不限）时为 nil，只保留
+	// 每批 agents.maxConcurrent。首次构建后不再重建（见 subagentGlobalLimiter）。
+	subagentLimiterMu           sync.Mutex
+	subagentLimiter             *agent.SubagentConcurrencyLimiter
 	aicliConfigMu               sync.RWMutex
 	aicliConfig                 *agentconfig.Config
 	siteAccountService          SiteAccountService
@@ -4004,6 +4010,29 @@ func (h *Handler) newAPIAgent(cfg *agent.Config) *agent.Agent {
 	return h.newAPIAgentWithRuntime(cfg, nil)
 }
 
+// subagentGlobalLimiter returns the ONE process-wide subagent concurrency
+// limiter shared by every scheduler this handler builds (P1-4/H12). Precedence
+// mirrors the CLI host: agents.maxThreads > 0 sizes the shared limiter so total
+// concurrent children across all batches ≤ maxThreads, while agents.maxConcurrent
+// keeps bounding a single batch; maxThreads ≤ 0 (including -1 "explicitly
+// unlimited") yields nil, leaving only the per-batch ceiling. The limiter is
+// created on first use and kept for the process lifetime so a config change
+// cannot strand waiters on a retired limiter or double the budget.
+func (h *Handler) subagentGlobalLimiter(maxThreads int) *agent.SubagentConcurrencyLimiter {
+	if maxThreads <= 0 {
+		return nil
+	}
+	if h == nil {
+		return agent.NewSubagentConcurrencyLimiter(maxThreads)
+	}
+	h.subagentLimiterMu.Lock()
+	defer h.subagentLimiterMu.Unlock()
+	if h.subagentLimiter == nil {
+		h.subagentLimiter = agent.NewSubagentConcurrencyLimiter(maxThreads)
+	}
+	return h.subagentLimiter
+}
+
 type agentRuntimeComponents struct {
 	registry        *skill.Registry
 	embeddingRouter *skill.SemanticEmbeddingRouter
@@ -4038,8 +4067,17 @@ func (h *Handler) newAPIAgentWithRuntime(cfg *agent.Config, runtime *agentRuntim
 	} else {
 		apiAgent = agent.NewAgent(cfg, mcpManager)
 	}
+	// P1-4/H12：并发上限透传 + 进程级共享 limiter（过去只透传 Routing，每个
+	// batch 各自拿到默认 4 路窗口 → 实际并发 4×N）。agents.maxThreads > 0 时
+	// 全部 scheduler 共用同一 limiter；agents.maxConcurrent 仍是每批上限；
+	// 背压队列默认关闭（0），保持 P2-8 的快速失败语义。
+	agentsConfig := (&sessionAgentController{handler: h}).agentsConfig()
 	subagentScheduler := agent.NewSubagentScheduler(apiAgent, agent.SubagentSchedulerConfig{
-		Routing: h.subagentRoutingConfig(),
+		Routing:       h.subagentRoutingConfig(),
+		MaxConcurrent: agentsConfig.MaxConcurrent,
+		GlobalLimiter: h.subagentGlobalLimiter(agentsConfig.MaxThreads),
+		MaxQueueDepth: agentsConfig.MaxConcurrentQueueDepth,
+		QueueTimeout:  time.Duration(agentsConfig.MaxConcurrentQueueTimeoutMs) * time.Millisecond,
 	})
 	apiAgent.SetSubagentScheduler(subagentScheduler)
 	// Batch 终态投影：只有 durable 控制面就绪时才装（与 supervision 工具门控同

@@ -202,7 +202,11 @@ func TestBatchProgressSource_KeepsRecentTerminalButDropsOldOnes(t *testing.T) {
 	require.Equal(t, "batch-recent", groups[0].GroupID)
 	require.True(t, groups[0].Terminal)
 	require.Equal(t, 3, groups[0].Completed)
-	require.Empty(t, store.taskCalls, "terminal batches are not expanded task-by-task")
+	// P1-1: counts are derived from the task rows for every listed batch, so a
+	// terminal read does hit ListTasks — but only to count, never to expand.
+	require.Empty(t, groups[0].RunningTasks, "terminal batches are not expanded task-by-task")
+	require.Equal(t, []string{"batch-recent"}, store.taskCalls,
+		"only the listed batches may be read, and each exactly once")
 
 	// The wait-mode batch is synchronous by contract: it is never a patrol
 	// subject, so the rollup must not list it (scope discipline).
@@ -286,4 +290,96 @@ func TestMirrorProgressMessages_ReadsLatestStamp(t *testing.T) {
 
 	_, _, _, ok = mirror.Latest("")
 	require.False(t, ok)
+}
+
+// P1-1 / H6+H9 regression: the batch count columns are only refreshed at batch
+// creation and terminal convergence, so a live snapshot can carry
+// queued=3/running=0 while every task row already says running (the exact drift
+// observed in the live batch DB). Counts must be derived from the task rows.
+func TestBatchProgressSource_DerivesCountsFromTaskRows(t *testing.T) {
+	now := time.Now().UTC()
+	lastProgress := now.Add(-5 * time.Second)
+	store := &fakeBatchStore{
+		batches: []subagentbatch.SubagentBatch{{
+			BatchID:         "batch-drift",
+			ParentSessionID: "root-session-1",
+			RootScopeID:     "root-session-1",
+			ExecutionMode:   subagentbatch.ExecutionModeBackground,
+			Status:          subagentbatch.BatchRunning,
+			// Deliberately stale: creation-time counts that were never refreshed.
+			TaskCount:      3,
+			QueuedCount:    3,
+			RunningCount:   0,
+			CompletedCount: 0,
+			HeartbeatAt:    lastProgress,
+			UpdatedAt:      lastProgress,
+		}},
+		tasks: map[string][]subagentbatch.SubagentTaskRecord{
+			"batch-drift": {
+				{TaskID: "w1", BatchID: "batch-drift", Status: subagentbatch.TaskRunning, LastProgressAt: &lastProgress},
+				{TaskID: "w2", BatchID: "batch-drift", Status: subagentbatch.TaskRunning, LastProgressAt: &lastProgress},
+				{TaskID: "w3", BatchID: "batch-drift", Status: subagentbatch.TaskRunning, LastProgressAt: &lastProgress},
+			},
+		},
+	}
+	source := &BatchProgressSource{Store: store}
+
+	groups, err := source.ListProgress(context.Background(), ProgressRequest{ParentSessionID: "root-session-1", RootScopeID: "root-session-1"})
+	require.NoError(t, err)
+	require.Len(t, groups, 1)
+
+	group := groups[0]
+	require.Equal(t, 3, group.Total)
+	require.Equal(t, 3, group.Running, "running must equal count(tasks where status='running')")
+	require.Zero(t, group.Pending, "the stale queued_count must not survive the derive")
+	require.Zero(t, group.Completed)
+	require.Zero(t, group.Failed)
+	require.Len(t, group.RunningTasks, 3)
+}
+
+// P1-1 acceptance: every durable task row is accounted for in the digest, and
+// failed_with_result is surfaced as a failure cohort rather than silently
+// dropped (the pre-hardening Counts() ignored skipped rows entirely).
+func TestBatchProgressSource_AccountsForSkippedAndFailedWithResult(t *testing.T) {
+	now := time.Now().UTC()
+	finished := now.Add(-time.Minute)
+	store := &fakeBatchStore{
+		batches: []subagentbatch.SubagentBatch{{
+			BatchID:         "batch-cohort",
+			ParentSessionID: "root-session-1",
+			RootScopeID:     "root-session-1",
+			ExecutionMode:   subagentbatch.ExecutionModeBackground,
+			Status:          subagentbatch.BatchFailed,
+			TaskCount:       4,
+			CompletedCount:  1,
+			FailedCount:     1,
+			FinishedAt:      &finished,
+			UpdatedAt:       finished,
+			HeartbeatAt:     finished,
+		}},
+		tasks: map[string][]subagentbatch.SubagentTaskRecord{
+			"batch-cohort": {
+				{TaskID: "w1", BatchID: "batch-cohort", Status: subagentbatch.TaskSucceeded},
+				{TaskID: "w2", BatchID: "batch-cohort", Status: subagentbatch.TaskFailedWithResult},
+				{TaskID: "w3", BatchID: "batch-cohort", Status: subagentbatch.TaskSkipped},
+				{TaskID: "w4", BatchID: "batch-cohort", Status: subagentbatch.TaskSkipped},
+			},
+		},
+	}
+	source := &BatchProgressSource{Store: store}
+
+	groups, err := source.ListProgress(context.Background(), ProgressRequest{ParentSessionID: "root-session-1", RootScopeID: "root-session-1"})
+	require.NoError(t, err)
+	require.Len(t, groups, 1)
+
+	group := groups[0]
+	require.True(t, group.Terminal)
+	require.Equal(t, 4, group.Total)
+	require.Equal(t, 1, group.Completed)
+	require.Equal(t, 1, group.Failed, "failed_with_result still counts as a failure")
+	require.Equal(t, 2, group.Skipped)
+	require.Equal(t,
+		group.Total,
+		group.Completed+group.Failed+group.Skipped+group.Running+group.Pending,
+		"every durable task row must be accounted for exactly once")
 }

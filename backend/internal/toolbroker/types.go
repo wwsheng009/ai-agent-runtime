@@ -989,6 +989,10 @@ type ApplyAgentWorktreeArgs struct {
 	Paths []string `json:"paths,omitempty"`
 	// Keep preserves the worktree after apply (default false removes it).
 	Keep bool `json:"keep,omitempty"`
+	// Force overwrites local main-tree modifications instead of refusing the
+	// apply (H14 preflight). Default false: conflicts fail the call with a
+	// next_action instead of silently losing local edits.
+	Force bool `json:"force,omitempty"`
 }
 
 // DiscardAgentWorktreeArgs discards a child's worktree isolation without applying changes.
@@ -999,20 +1003,28 @@ type DiscardAgentWorktreeArgs struct {
 
 // AgentWorktreeResult reports apply/discard outcomes for worktree isolation.
 type AgentWorktreeResult struct {
-	ID             string             `json:"id,omitempty"`
-	SessionID      string             `json:"session_id,omitempty"`
-	Action         string             `json:"action"` // apply | discard
-	Isolation      string             `json:"isolation,omitempty"`
-	WorktreePath   string             `json:"worktree_path,omitempty"`
-	WorktreeBranch string             `json:"worktree_branch,omitempty"`
-	RepoRoot       string             `json:"repo_root,omitempty"`
-	DiffStat       string             `json:"diff_stat,omitempty"`
-	Paths          []string           `json:"paths,omitempty"`
-	Applied        bool               `json:"applied,omitempty"`
-	Discarded      bool               `json:"discarded,omitempty"`
-	Removed        bool               `json:"removed,omitempty"`
-	Kept           bool               `json:"kept,omitempty"`
-	Status         *AgentStatusResult `json:"status,omitempty"`
+	ID             string   `json:"id,omitempty"`
+	SessionID      string   `json:"session_id,omitempty"`
+	Action         string   `json:"action"` // apply | discard
+	Isolation      string   `json:"isolation,omitempty"`
+	WorktreePath   string   `json:"worktree_path,omitempty"`
+	WorktreeBranch string   `json:"worktree_branch,omitempty"`
+	RepoRoot       string   `json:"repo_root,omitempty"`
+	DiffStat       string   `json:"diff_stat,omitempty"`
+	Paths          []string `json:"paths,omitempty"`
+	Applied        bool     `json:"applied,omitempty"`
+	Discarded      bool     `json:"discarded,omitempty"`
+	Removed        bool     `json:"removed,omitempty"`
+	Kept           bool     `json:"kept,omitempty"`
+	// Conflicts lists main-tree paths whose local changes blocked the apply
+	// (H14 preflight, force=false).
+	Conflicts []string `json:"conflicts,omitempty"`
+	// SkippedPaths lists worktree changes outside the requested paths filter,
+	// which this call did not apply.
+	SkippedPaths []string `json:"skipped_paths,omitempty"`
+	// NextAction carries the actionable guidance for a refused apply.
+	NextAction string             `json:"next_action,omitempty"`
+	Status     *AgentStatusResult `json:"status,omitempty"`
 }
 
 // AgentSessionController provides lightweight child-agent lifecycle operations.

@@ -63,11 +63,32 @@ type Reconciler struct {
 	// events. A nil hook keeps the pass from deleting anything, and a disabled
 	// window inside the hook is a no-op, so hosts can wire it unconditionally.
 	Purge func(ctx context.Context, now time.Time) (TerminalPurgeOutcome, error)
+	// Worktrees is the host-side half of worktree drift reconciliation
+	// (isolation/worktree.ReconcileWorktrees, findings H11/H15): the host
+	// resolves the repo root plus the worktree paths its live registry still
+	// owns, then reports (and, in enforce mode, reclaims) orphan directories
+	// and stale git registrations. A nil hook keeps the pass unchanged.
+	Worktrees func(ctx context.Context, records []AgentRecord, enforce bool, now time.Time) (WorktreeReconcileOutcome, error)
 
 	mu      sync.Mutex
 	running bool
 	last    ReconcileReport
 	lastErr string
+}
+
+// WorktreeReconcileOutcome is the host-side summary of one worktree drift pass.
+// Supported=false means the host has no worktree surface (no git repo, no
+// durable store); the counters then mirror isolation/worktree.ReconcileReport.
+type WorktreeReconcileOutcome struct {
+	Supported     bool `json:"supported,omitempty"`
+	Dirs          int  `json:"dirs,omitempty"`
+	Orphans       int  `json:"orphans,omitempty"`
+	StaleGit      int  `json:"stale_git,omitempty"`
+	StaleRegistry int  `json:"stale_registry,omitempty"`
+	Unmanaged     int  `json:"unmanaged,omitempty"`
+	ReclaimedDirs int  `json:"reclaimed_dirs,omitempty"`
+	ReclaimedGit  int  `json:"reclaimed_git,omitempty"`
+	Failed        int  `json:"failed,omitempty"`
 }
 
 // IntervalOrDefault returns the effective cadence.
@@ -150,7 +171,25 @@ func (r *Reconciler) runPass(ctx context.Context) (ReconcileReport, error) {
 	}
 	r.runReclaimPass(ctx, &report, records)
 	r.runPurgePass(ctx, &report)
+	r.runWorktreePass(ctx, &report, records)
 	return report, nil
+}
+
+// runWorktreePass folds one host worktree drift sweep into the report. Like the
+// reclaim/purge passes its failure is recorded instead of returned: a worktree
+// base dir that cannot be read must not blank the identity-graph audit the
+// hosts surface through /debug.
+func (r *Reconciler) runWorktreePass(ctx context.Context, report *ReconcileReport, records []AgentRecord) {
+	if r == nil || r.Worktrees == nil || report == nil {
+		return
+	}
+	enforce := r.ModeOrDefault() == ReconcileModeEnforce
+	outcome, err := r.Worktrees(ctx, records, enforce, time.Now().UTC())
+	if err != nil {
+		report.WorktreeError = err.Error()
+		return
+	}
+	report.Worktrees = outcome
 }
 
 // runReclaimPass folds one host eviction sweep into the report. Its failure is
@@ -186,6 +225,8 @@ func (r *Reconciler) runPurgePass(ctx context.Context, report *ReconcileReport) 
 	outcome, err := r.Purge(ctx, time.Now().UTC())
 	report.PurgedRows = outcome.Rows
 	report.PurgedWakeEvents = outcome.WakeEvents
+	report.WakePruneMode = outcome.WakePruneMode
+	report.WakePruneCandidates = outcome.WakePruneCandidates
 	switch {
 	case err != nil:
 		report.PurgeError = err.Error()

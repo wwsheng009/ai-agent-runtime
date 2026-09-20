@@ -57,17 +57,19 @@ var taskTransitions = map[TaskStatus]map[TaskStatus]bool{
 		TaskTimedOut: true,
 	},
 	TaskRunning: {
-		TaskRunning:   true, // progress refresh
-		TaskSucceeded: true,
-		TaskFailed:    true,
-		TaskCanceled:  true,
-		TaskTimedOut:  true,
+		TaskRunning:          true, // progress refresh
+		TaskSucceeded:        true,
+		TaskFailed:           true,
+		TaskFailedWithResult: true, // failed overall, but the payload survives
+		TaskCanceled:         true,
+		TaskTimedOut:         true,
 	},
-	TaskSucceeded: {},
-	TaskFailed:    {},
-	TaskCanceled:  {},
-	TaskTimedOut:  {},
-	TaskSkipped:   {},
+	TaskSucceeded:        {},
+	TaskFailed:           {},
+	TaskFailedWithResult: {},
+	TaskCanceled:         {},
+	TaskTimedOut:         {},
+	TaskSkipped:          {},
 }
 
 // ValidateBatchTransition returns an error when from->to is not allowed.

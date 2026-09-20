@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,6 +73,13 @@ func TestLocalRegistryReconcileEnforcesAndStops(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Setenv(localRegistryReconcileModeEnv, "enforce")
+	// Isolate the worktree half of the pass: the sweep resolves the workspace
+	// root from the runtime config, and a nil config falls back to the git root
+	// of the test's working directory — an enforce pass would then reclaim
+	// directories in the developer's real checkout.
+	host.RuntimeConfig = &runtimecfg.RuntimeConfig{
+		Workspace: runtimecfg.WorkspaceConfig{Root: t.TempDir()},
+	}
 	reconciler := host.startLocalRegistryReconcile()
 	require.NotNil(t, reconciler)
 	require.Same(t, reconciler, host.startLocalRegistryReconcile(), "reconciler is built once")
@@ -79,18 +87,29 @@ func TestLocalRegistryReconcileEnforcesAndStops(t *testing.T) {
 
 	// The startup pass runs immediately, so the dead binding converges without
 	// waiting a full interval (the session store is empty, so it is missing).
+	// The cached report is published only when the whole pass returns (the
+	// worktree sweep runs last), so wait on the summary: the store row
+	// converges mid-pass, and reading the summary at that instant would race
+	// the report cache and see "not_run".
 	require.Eventually(t, func() bool {
-		records, listErr := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
-			RootSessionID: "root-1",
-			IncludeClosed: true,
-		})
-		return listErr == nil && len(records) == 1 && records[0].Closed()
-	}, 10*time.Second, 20*time.Millisecond, "startup pass must converge the missing session")
+		return strings.Contains(host.localRegistryReconcileSummary(), "reconcile=enforce")
+	}, 10*time.Second, 20*time.Millisecond, "startup pass must publish the enforce report")
+
+	records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+		RootSessionID: "root-1",
+		IncludeClosed: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.True(t, records[0].Closed(), "startup pass must converge the missing session")
 
 	summary := host.localRegistryReconcileSummary()
 	require.Contains(t, summary, "reconcile=enforce")
 	require.Contains(t, summary, "converged=1")
 	require.Contains(t, summary, "last_reconcile=")
+	// H3 的唤醒治理必须搭同一趟 pass 跑（retention.go 的接线点），否则
+	// closed 行只能等身份行的 30 天窗口，active 行的存量也无人收敛。
+	require.Contains(t, summary, "wake_prune_mode=enforce")
 
 	host.Close()
 	require.ErrorIs(t, host.lifecycleCtx.Err(), context.Canceled)
