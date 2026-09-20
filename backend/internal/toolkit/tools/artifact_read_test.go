@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
-	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -77,6 +76,27 @@ func TestArtifactReadReturnsFullContentForSmallRecord(t *testing.T) {
 	require.Contains(t, result.Content, "total_bytes="+strconv.Itoa(len(content)))
 	require.Contains(t, result.Content, "eof=true")
 	require.NotContains(t, result.Content, "next_offset=")
+}
+
+// TestArtifactReadOwnsItsWindow pins the L4 contract for the artifact pager:
+// like view, artifact_read sizes every page against the model-visible byte
+// budget and publishes its own continuation metadata (artifact_eof /
+// artifact_next_offset), so it must declare the render-layer opt-out
+// explicitly instead of relying on the budget arithmetic alone.
+func TestArtifactReadOwnsItsWindow(t *testing.T) {
+	store := newArtifactReadTestStore(t)
+	content := strings.Repeat("x", artifactOutputBudgetBytes*2)
+	id := putArtifactForRead(t, store, "sess-1", "shell", content)
+
+	result := executeArtifactRead(t, artifactReadContext(store, "sess-1"), map[string]interface{}{
+		"artifact_id": id,
+	})
+
+	require.True(t, result.Success, result.Error)
+	require.Equal(t, false, result.Metadata["artifact_eof"], "precondition: expect a paged window, got %#v", result.Metadata)
+	require.True(t, toolresult.SkipsRenderTruncation(result.Metadata),
+		"artifact_read must declare the render-layer opt-out: %#v", result.Metadata)
+	require.Equal(t, true, result.Metadata[toolresult.MetadataSkipRenderTruncationKey])
 }
 
 func TestArtifactReadPagesThroughByteWindows(t *testing.T) {
@@ -176,8 +196,8 @@ func TestArtifactReadAcceptsPastedPointerTail(t *testing.T) {
 	}
 }
 
-func TestArtifactReadWindowStaysUnderModelBudget(t *testing.T) {
-	budget := output.ModelToolTextByteBudget()
+func TestArtifactReadWindowStaysWithinToolBudget(t *testing.T) {
+	budget := artifactOutputBudgetBytes
 	if budget <= artifactReadMinLimitBytes+artifactReadHeaderReserveBytes {
 		t.Skipf("configured budget %d is too small for the no-cascade guarantee", budget)
 	}
@@ -192,8 +212,9 @@ func TestArtifactReadWindowStaysUnderModelBudget(t *testing.T) {
 	})
 
 	require.True(t, result.Success, result.Error)
-	require.LessOrEqual(t, len(result.Content), budget, "a max-size window must not re-trigger truncation")
+	require.LessOrEqual(t, len(result.Content), budget, "a max-size window must stay inside the tool's own budget")
 	require.Contains(t, result.Content, "eof=false")
+	require.True(t, toolresult.SkipsRenderTruncation(result.Metadata))
 }
 
 // TestArtifactReadDefaultWindowEqualsMaxLimit pins P1-2: the default page size

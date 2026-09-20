@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,11 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
+
+// errLsLimitReached is the internal walk sentinel used to stop the traversal
+// once the tool's own entry limit is reached. It is not a user-visible error:
+// the truncation is reported through metadata and an honest content notice.
+var errLsLimitReached = errors.New("ls entry limit reached")
 
 // LsTool 列出目录工具
 type LsTool struct {
@@ -136,6 +142,7 @@ func (l *LsTool) Execute(ctx context.Context, params map[string]interface{}) (*t
 	entries := make([]lsEntry, 0)
 	fileCount := 0
 	dirCount := 0
+	limitReached := false
 
 	err = filepath.Walk(resolvedPath, func(walkPath string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -174,14 +181,15 @@ func (l *LsTool) Execute(ctx context.Context, params map[string]interface{}) (*t
 
 		// 检查限制
 		if len(entries) >= l.limit {
-			return fmt.Errorf("limit reached")
+			limitReached = true
+			return errLsLimitReached
 		}
 
 		return nil
 	})
 
-	// 如果是限制错误，忽略
-	if err != nil && err.Error() != "limit reached" {
+	// 达到条目上限不是错误：记录标记，由输出层如实标注截断。
+	if err != nil && !errors.Is(err, errLsLimitReached) {
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
@@ -200,45 +208,64 @@ func (l *LsTool) Execute(ctx context.Context, params map[string]interface{}) (*t
 		return entries[i].relPath < entries[j].relPath
 	})
 
-	// 格式化输出
+	// 格式化输出。条目同时受 l.limit 与 ls 自身字节预算约束：任一命中都标记
+	// truncated 并声明 L4 opt-out，避免已定形的列表被二次折叠。
 	var output strings.Builder
 	output.WriteString(fmt.Sprintf("目录: %s\n\n", path))
 
+	rendered := 0
+	used := 0
+	byteBudgetHit := false
 	if len(entries) == 0 {
 		output.WriteString("(空目录)")
 	} else {
 		for _, entry := range entries {
 			prefix := strings.Repeat("  ", entry.depth)
+			line := fmt.Sprintf("%s📄 %s\n", prefix, entry.relPath)
 			if entry.isDir {
-				output.WriteString(fmt.Sprintf("%s📁 %s/\n", prefix, entry.relPath))
-			} else {
-				output.WriteString(fmt.Sprintf("%s📄 %s\n", prefix, entry.relPath))
+				line = fmt.Sprintf("%s📁 %s/\n", prefix, entry.relPath)
 			}
+			if rendered > 0 && used+len(line) > lsOutputBudgetBytes {
+				byteBudgetHit = true
+				break
+			}
+			used += len(line)
+			rendered++
+			output.WriteString(line)
 		}
 	}
 
 	output.WriteString(fmt.Sprintf("\n统计: %d 个文件, %d 个目录", fileCount, dirCount))
+	if limitReached || byteBudgetHit {
+		output.WriteString(fmt.Sprintf("\n(已截断，显示前 %d 个条目，共 %d 个)", rendered, len(entries)))
+	}
 
 	// Directory listing with zero entries is a true empty success (empty dir),
 	// not a tool failure. Stamp empty disposition so models do not retry the
 	// same path unchanged.
+	truncated := limitReached || byteBudgetHit
 	metadata := map[string]interface{}{
 		"path":           path,
 		"depth":          depth,
 		"file_count":     fileCount,
 		"dir_count":      dirCount,
 		"total":          len(entries),
-		"returned_count": len(entries),
-		"result_count":   len(entries),
+		"returned_count": rendered,
+		"result_count":   rendered,
+		"truncated":      truncated,
+		"limit_hit":      truncated,
+	}
+	if truncated {
+		metadata[toolresult.MetadataNextActionKey] = "目录条目超过 ls 预算已截断；请缩小 depth、分目录查看，或用 glob/grep 精确定位。不要原样重试同一路径。"
 	}
 	if len(entries) == 0 {
 		toolresult.MarkEmptySuccess(metadata)
 	}
 
-	return &toolkit.ToolResult{
+	return stampToolOwnsOutput(&toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,
 		Content:    output.String(),
 		Metadata:   metadata,
-	}, nil
+	}), nil
 }

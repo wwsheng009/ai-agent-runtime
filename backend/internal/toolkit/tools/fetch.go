@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
@@ -198,18 +199,44 @@ func (f *FetchTool) Execute(ctx context.Context, params map[string]interface{}) 
 		result = f.extractText(result, contentType)
 	}
 
-	return &toolkit.ToolResult{
+	// fetch 拥有自己的文档预算：超出部分诚实标注并提示改用 download，
+	// 绝不依赖 L4 的一刀切折叠。
+	returned, hiddenBytes := truncateFetchOutput(result, fetchOutputBudgetBytes)
+	metadata := map[string]interface{}{
+		"url":            url,
+		"format":         format,
+		"size":           len(content),
+		"status":         resp.Status,
+		"content_type":   contentType,
+		"returned_bytes": len(returned),
+		"truncated":      hiddenBytes > 0,
+	}
+	if hiddenBytes > 0 {
+		metadata[toolresult.MetadataNextActionKey] = "内容超过 fetch 工具预算已截断；如需全文请改用 download 工具落盘，再分段查看。"
+	}
+
+	return stampToolOwnsOutput(&toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,
-		Content:    result,
-		Metadata: map[string]interface{}{
-			"url":          url,
-			"format":       format,
-			"size":         len(content),
-			"status":       resp.Status,
-			"content_type": contentType,
-		},
-	}, nil
+		Content:    returned,
+		Metadata:   metadata,
+	}), nil
+}
+
+// truncateFetchOutput keeps the leading rune-safe prefix of text within budget
+// and appends an honest marker reporting how many bytes were hidden. It returns
+// the rendered text and the number of hidden bytes (0 when nothing was cut).
+func truncateFetchOutput(text string, budget int) (string, int) {
+	if budget <= 0 || len(text) <= budget {
+		return text, 0
+	}
+	cut := budget
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	hidden := len(text) - cut
+	marker := fmt.Sprintf("\n\n…[fetch 输出超出工具预算 %d 字节，已截断 %d 字节；如需完整内容请用 download 落盘]", budget, hidden)
+	return text[:cut] + marker, hidden
 }
 
 // extractText 提取纯文本内容

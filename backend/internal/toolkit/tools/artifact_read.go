@@ -9,7 +9,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
-	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -17,11 +16,9 @@ import (
 )
 
 const (
-	// artifactReadDefaultLimitBytes is a function (not a const) so the default
-	// window tracks the configured model-visible budget: the max single-window
-	// cap already guarantees window+header stays under the truncation
-	// threshold (no pointer cascade), so defaulting to the cap means a ~12 KiB
-	// artifact is dereferenced in a single read instead of two.
+	// artifactReadHeaderReserveBytes covers the window header, tool_call_id and
+	// separator that wrap every page, so the payload stays inside the tool's own
+	// budget (artifactOutputBudgetBytes).
 	artifactReadHeaderReserveBytes = 512
 	// artifactReadMinLimitBytes is the floor used when the configured budget is
 	// unusually small; the tool still returns a useful window.
@@ -196,6 +193,11 @@ func (a *ArtifactReadTool) Execute(ctx context.Context, params map[string]interf
 		"artifact_window_bytes":   len(window),
 		"artifact_eof":            eof,
 		"artifact_has_full_bytes": true,
+		// This tool owns its window: every page is sized against
+		// artifactOutputBudgetBytes (window+header <= budget) and it publishes
+		// its own continuation contract (artifact_eof / artifact_next_offset).
+		// Declare the render-layer (L4) opt-out so the window is never folded.
+		toolresult.MetadataSkipRenderTruncationKey: true,
 	}
 	if !eof {
 		metadata["artifact_next_offset"] = end
@@ -213,17 +215,16 @@ func (a *ArtifactReadTool) Execute(ctx context.Context, params map[string]interf
 }
 
 // artifactReadDefaultLimitBytes resolves the default page size: the full
-// max-window cap. The no-cascade guarantee (window + header <= budget) makes
-// this safe, and it halves the page count for budget-sized artifacts.
+// max-window cap, so a budget-sized artifact is dereferenced in a single read.
 func artifactReadDefaultLimitBytes() int {
 	return artifactReadMaxLimitBytes()
 }
 
 // artifactReadMaxLimitBytes resolves the byte cap for a single window from the
-// configurable model-visible tool text budget, so a full-window read stays under
-// the truncation threshold (and never produces a new artifact pointer).
+// tool's own budget. Every result stamps skip_render_truncation, so a page can
+// never grow a second artifact pointer regardless of the render-layer budget.
 func artifactReadMaxLimitBytes() int {
-	limit := output.ModelToolTextByteBudget() - artifactReadHeaderReserveBytes
+	limit := artifactOutputBudgetBytes - artifactReadHeaderReserveBytes
 	if limit < artifactReadMinLimitBytes {
 		limit = artifactReadMinLimitBytes
 	}

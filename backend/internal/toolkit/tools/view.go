@@ -13,7 +13,6 @@ import (
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
-	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -33,28 +32,26 @@ const viewBatchDefaultLimit = 200
 // is_truncated / suggested_next_offset / total_lines for follow-up reads.
 const viewCompactHeadLines = 10
 
-// viewDefaultLimit is the default window size when callers omit limit.
-// It is intentionally small: the L4 echo layer folds model-visible text at
-// ModelToolTextByteBudget (12 KiB ≈ 150~300 code lines), so a 2000-line
-// default window was guaranteed to be re-truncated there — pushing models
-// onto the artifact_read byte-paging path and bypassing view's own
-// offset/limit continuation protocol. Large files should still be segmented
-// with explicit offset/limit.
+// viewDefaultLimit is the default window size when callers omit limit. It stays
+// deliberately small for context economy; view owns its own 32 KiB byte budget
+// and stamps skip_render_truncation, so callers that need more page with
+// offset/limit instead of pulling a whole file.
 const viewDefaultLimit = 400
+
+// viewMaxLimit is the hard cap for an explicitly requested line window. Beyond
+// it the model must page with offset: view publishes
+// is_truncated/suggested_next_offset for exactly that continuation.
+const viewMaxLimit = 2000
 
 // viewEfficiencyAdvisoryThreshold marks when a default-size leading window is
 // large enough that models should prefer narrower ranges or continue via offset.
 const viewEfficiencyAdvisoryThreshold = 2000
 
-// viewByteBudgetReserveRatio caps accumulated rendered bytes at this fraction
-// of the model-visible tool text budget so a "full" view window never hits
-// the L4 head/tail fold. The remaining budget covers line numbers, the
-// efficiency advisory, and metadata wrapping.
-const viewByteBudgetReserveRatio = 0.7
-
-// viewByteBudgetBytes resolves the in-tool byte stop condition.
+// viewByteBudgetBytes resolves the in-tool byte stop condition. view owns its
+// own 32 KiB window (independent of the render-layer budget) and stamps
+// skip_render_truncation on every result, so the window is never re-folded.
 func viewByteBudgetBytes() int {
-	return int(float64(output.ModelToolTextByteBudget()) * viewByteBudgetReserveRatio)
+	return viewOutputBudgetBytes
 }
 
 // ViewTool 文件查看工具
@@ -145,11 +142,11 @@ func (v *ViewTool) Execute(ctx context.Context, params map[string]interface{}) (
 	var p ViewParams
 	encoded, err := json.Marshal(params)
 	if err != nil || json.Unmarshal(encoded, &p) != nil {
-		return &toolkit.ToolResult{
+		return stampToolOwnsOutput(&toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
 			Error:      fmt.Errorf("view 参数格式无效"),
-		}, nil
+		}), nil
 	}
 	requests := make([]ViewFileRequest, 0, len(p.Files)+1)
 	if strings.TrimSpace(p.FilePath) != "" {
@@ -157,18 +154,24 @@ func (v *ViewTool) Execute(ctx context.Context, params map[string]interface{}) (
 	}
 	requests = append(requests, p.Files...)
 	if len(requests) == 0 {
-		return &toolkit.ToolResult{
+		return stampToolOwnsOutput(&toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
 			Error:      fmt.Errorf("file_path 或 files 参数至少需要一个"),
-		}, nil
+		}), nil
 	}
 	// files 数组（即使只有 1 项）表达批量意图：应用批量默认 limit 与
 	// compact 语义；仅 file_path 入参才是真正的单文件读取。
+	var (
+		result  *toolkit.ToolResult
+		execErr error
+	)
 	if len(requests) == 1 && len(p.Files) == 0 {
-		return v.executeSingle(ctx, requests[0])
+		result, execErr = v.executeSingle(ctx, requests[0])
+	} else {
+		result, execErr = v.executeBatch(ctx, requests, p.Compact)
 	}
-	return v.executeBatch(ctx, requests, p.Compact)
+	return stampToolOwnsOutput(result), execErr
 }
 
 func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolkit.ToolResult, error) {
@@ -180,6 +183,9 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 	}
 	if p.Limit <= 0 {
 		p.Limit = viewDefaultLimit
+	}
+	if p.Limit > viewMaxLimit {
+		p.Limit = viewMaxLimit
 	}
 	resolvedPath := v.resolvePathWithContext(ctx, p.FilePath)
 
@@ -344,6 +350,9 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest,
 		if request.Limit <= 0 {
 			request.Limit = viewBatchDefaultLimit
 			defaulted = append(defaulted, index)
+		}
+		if request.Limit > viewMaxLimit {
+			request.Limit = viewMaxLimit
 		}
 		if compact && request.Limit > viewCompactHeadLines {
 			request.Limit = viewCompactHeadLines
