@@ -205,7 +205,7 @@ func TestRenderToolResultContentForModel_TruncatesLargeToolkitTextForHistory(t *
 	if got == content {
 		t.Fatal("expected large toolkit text to be truncated for model history")
 	}
-	if !strings.Contains(got, "Total output lines: 600") {
+	if !strings.Contains(got, "Tool result lines: 600") {
 		t.Fatalf("expected total line count header, got %q", got)
 	}
 	if !strings.Contains(got, "output truncated for history safety") {
@@ -849,7 +849,7 @@ func TestFormatTruncatedToolTextForModel_ExtractsFirstErrorLine(t *testing.T) {
 	if strings.Contains(cleanGot, "First error line:") {
 		t.Fatalf("did not expect First error line without failure markers, got %q", cleanGot)
 	}
-	if !strings.Contains(cleanGot, "Total output lines: 300") {
+	if !strings.Contains(cleanGot, "Tool result lines: 300") {
 		t.Fatalf("expected total line header, got %q", cleanGot)
 	}
 }

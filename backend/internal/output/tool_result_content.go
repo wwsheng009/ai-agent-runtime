@@ -672,7 +672,12 @@ func formatTruncatedToolTextForModel(content string, budget int, artifactID ...s
 
 	totalLines := countTextLines(content)
 	totalBytes := len(content)
-	header := fmt.Sprintf("Total output lines: %d\nTotal output bytes: %d\n\n", totalLines, totalBytes)
+	// These counts describe the tool-result text being folded here, which may
+	// already have been truncated by the executor capture layer. The executor
+	// keeps the raw "Total output lines/bytes" labels for the process output
+	// (see internal/executor/output_capture.go), so use a distinct label to
+	// avoid two different totals appearing under the same name.
+	header := fmt.Sprintf("Tool result lines: %d\nTool result bytes: %d\n\n", totalLines, totalBytes)
 	if firstErr := firstFailureLine(content); firstErr != "" {
 		header += "First error line: " + firstErr + "\n\n"
 	}
