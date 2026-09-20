@@ -27,6 +27,9 @@ ACP 与 MCP 的集成现状是**三层分离**，三层状态各不相同：
 | 能力声明层 | **诚实声明不支持** | `initialize` 返回 `mcpCapabilities: {http:false, sse:false}` | `internal/acp/types.go:1424-1427` |
 | 运行时 MCP 层 | **已就绪，且 ACP 会话实际在用** | ACP 宿主复用 `bootstrapChatSession` → 初始化 MCP 管理器并把 MCP 工具注册进函数目录 | `agent_stdio.go:622` → `chat_setup.go:511` → `:408`、`:414-418` |
 
+> 注：上表是**开工前基线**（P0 立项时口径，写于第三轮落地之前）。落地后的真实状态见 §13.1
+> ——`mcpServers` 已被消费并生效（P0–P2 已落地）。
+
 由此得到三条此前容易被误读的结论：
 
 1. **客户端下发的 MCP server（`session/new.mcpServers`）完全没有接**——字段解析后即丢弃，
@@ -126,6 +129,10 @@ schema 对这三个字段统一带 `x-deserialize-skip-invalid-items: true`。�
 ## 3. 现状盘点
 
 ### 3.1 协议字段层：已解析、零消费
+
+> **本节是改造前基线**（第三轮落地之前的口径）。当前实现见 §13.1：`MCPServers` 已有消费点
+> （`agent_stdio_mcp.go` 的 `toMCPConfig` + `acp_mcp_host.go` 的装配/门控）。原文保留，
+> 用于对照「集成前无存量行为需要兼容」这一判断。
 
 | 位置 | 内容 |
 |---|---|
@@ -337,6 +344,16 @@ type HTTPHeader  struct{ Name, Value string }
 | `session/close` | 停止该会话私有 manager；全局 manager 不受影响 |
 | `session/delete` | 先 close 语义，再删存储（与既有顺序一致） |
 | 进程退出 | 统一 Stop（复用既有 `StopMCPManager` 路径 + 会话私有实例的 Stop） |
+
+**协议依据（ACP v1 schema 原文，`.tmp/acp-schema.json`）**：`session/close` 是**唯一**能承载
+MCP 回收的协议钩子——`CloseSessionRequest` 的描述是「the agent **must** cancel any ongoing
+work related to the session (treat it as if `session/cancel` was called) and then free up any
+resources associated with the session」。协议**没有**「关闭/停止某个 MCP server」的方法，也没有
+MCP 连接状态通知：`mcpServers` 只在 `session/new`（必填）、`session/load`（必填）与
+`session/resume`（可选）各下发一次，语义仅「servers the agent should connect to for this
+session」。因此回收时机**完全由 agent 自主决定**；客户端能表达「不再需要」的手段只有
+`session/close` / `session/delete` / 关掉 agent 进程。`session/cancel` 只取消在途 prompt，
+**不是**回收信号（我们据此保持 MCP 连接不动）。
 
 Windows 注意：stdio server 是**子进程树**，Stop 时必须确保子进程被回收（现有 manager 的
 `Stop()` 已有该职责，会话私有实例需复用同一实现而非另写一套）。
@@ -667,6 +684,63 @@ P1 会改动同一条引导路径，没有基线断言就无法区分「我改�
    注意项目级 `.zed/settings.json` 也参与合并（Z11），样本应覆盖「用户级配置」与
    「项目级配置」两种来源。
 
+#### 7.3.1 实机报文回填（2026-09-20，已获得）
+
+Zed 初始化会话时实际下发的 `session/load` 报文（用户从实机抓取，原样摘录）：
+
+```json
+{
+  "mcpServers": [
+    {
+      "name": "mcp-server-context7",
+      "command": "C:\\Program Files\\nodejs\\node.exe",
+      "args": ["C:/Users/vince/AppData/Local/Zed/extensions/work/mcp-server-context7/node_modules/@upstash/context7-mcp/dist/index.js"],
+      "env": []
+    }
+  ],
+  "cwd": "E:\\projects\\ai\\ai-agent-runtime",
+  "sessionId": "session_20260920123337_5Xjh3A0e"
+}
+```
+
+形状特征与逐条核对结论（每条都有测试固化，见 §13.3）：
+
+| 特征 | 结论 | 落点 |
+|---|---|---|
+| 条目**无 `type` 字段** | 按**隐式 stdio** 识别（`TransportKind()` 空值 → stdio），不依赖显式标签 | `internal/acp/mcp_types.go` `decodeMCPServerEntry` 的 `case "", MCPTransportStdio`；单测 `TestDecodeMCPServersZedLoadSampleShape` |
+| `env` 是**空数组** `[]`（既不是 map 也不是 `[{name,value}]`） | **正常条目**，不触发「非法条目跳过」；映射为「无环境变量」（`Env=nil`） | `decodeKeyValueList`（`trimmed[0]=='['` → 直接返回列表）+ `keyValueMap`（空 → nil）；单测 `TestZedLoadSampleShapeIsRecognized` |
+| 走 **`session/load`**（不是 `session/new`） | 与 `session/new` **共用同一装配路径**：`LoadSession` → `withACPMCPClientPlan` → `bootstrapSessionWithIDLocked` → `chatOpts.ACPMCPClientPlan` → `buildACPSessionMCP` | `cmd/aicli/commands/agent_stdio.go:460` / `:510` / `:632`、`chat_setup.go:428`；E2E `acp_e2e_mcp_session_load.go`（**已改为 Zed 同形状下发**：去掉 `type`、加 `env: []`） |
+| `sessionId` 形如 `session_<ts>_<rand>` | 正是 aicli 自己铸造的 id 格式（`internal/chat/session.go:1082`），durable store 能按该 id 命中，不需要额外映射 | 同上 E2E 的 `session/new → close → load` 路径 |
+| `command` 是 Windows 绝对路径、`args` 用正斜杠 | 原样保留，不做路径归一化；stdio 建连直接使用 | `acpMCPServerToConfig`（`WorkingDir` 取会话 `cwd`）；单测同上 |
+
+实测（报文形状与上表完全一致：无 `type`、`env: []`）：
+
+```
+OK session/load assembled the client-supplied server (pid=19876 marker=present(started))
+OK prompt #1 upstream_tools=46 load_tool_visible=true callable=true
+OK session/load server pid=19876 reaped after session/close (tasklist/proc probe)
+E2E PASS acp_e2e_mcp_session_load
+```
+
+#### 7.3.2 实机实证（2026-09-20，本机正在运行的 Zed 会话）
+
+上表的协议级结论已由**生产进程树 + durable 记录**独立确认，不再依赖人工 GUI 步骤：
+
+| 观察 | 证据 |
+|---|---|
+| Zed 以 ACP 模式启动本 agent | `Zed.exe`(32628) → `aicli-5x.exe acp`(35408)，启动于 12:56:48 |
+| **我方 agent 真的拉起了报文里的 context7 server** | `node.exe`(35508) 的 `ParentProcessId = 35408`，命令行即报文中的 `@upstash/context7-mcp/dist/index.js` |
+| 对照：另一个 context7 进程不属于我们 | `node.exe`(32492) 的父进程是 Zed 侧进程（25880），非本 agent |
+| `session/load` 能命中 durable 记录 | `backend/data/runtime/session_runtime.sqlite` 中 `session_20260920123337_5Xjh3A0e` **存在**（`status=idle`，171 条事件） |
+
+注：该 store 由 `backend/configs/runtime.yaml` 的
+`sessionRuntime.storePath: ../data/runtime/session_runtime.sqlite` 决定；
+`~/.aicli/sessions/runtime/session_runtime.sqlite` 是**另一个**库（CLI 侧），排查时勿混淆。
+
+**仍未关闭**：Zed GUI 内**实际调用**该工具（需在 agent 面板发一次会触发 context7 的提问）
+与 §7.4 第 2 条（Restricted Mode 是否过滤转发列表）——这两项需要一次人工 GUI 会话，
+协议级与进程级证据均不能替代。
+
 ### 7.4 待实测清单（不得当作已核实结论引用）
 
 | # | 待确认项 | 现状 | 关闭时点 |
@@ -808,6 +882,10 @@ rg -n -i "mcp" cmd/aicli/commands/agent_stdio*_test.go
   - `:2884-2892` — `McpServerStdio` 字段（**无 cwd**）
   - `:1117-1120` — `ForkSessionRequest` 由 `unstable_session_fork` 门控
 
+**实机报文样本（2026-09-20，用户从 Zed 实机抓取）**：Zed 初始化会话时发的是
+`session/load`，条目**无 `type` 标签**（隐式 stdio）且 **`env` 为空数组**——这两点
+是源码快照看不出的编码细节，已回填 §7.3.1 并固化为单测 + E2E 形状。
+
 **外部文档与上游 PR**（子代理核实，2026-09-20；用于交叉验证本地快照结论）：
 
 | 来源 | 关键内容 | 支撑 |
@@ -896,7 +974,9 @@ Select-String -Path .tmp/zed_agent_servers_acp.rs,.tmp/zed_acp_thread.rs -Patter
 
 ## 12. 一页速览（给评审）
 
-- **现在**：`mcpServers` 解析但不生效（协议合法降级）；本地配置链 MCP 在 ACP 会话**已经可用**但无测试。
+- **现在（已实施，证据见 §13）**：`mcpServers` 已按协议生效——三入口同一装配路径、逐条容错、
+  信任门控 + 可见诊断 + 审计；回收三条路径（`session/close`、`session/delete`、强杀时的 Job Object
+  兜底）均有实测。开工前基线「解析但不生效 + 零测试覆盖」见 §1 / §3.1 的注。
 - **Zed 侧要实现的只有一件事**：把 `context_servers` 收集成 `mcpServers` 下发
   （客户端侧**不存在** MCP 工具路由；`McpServer::Acp` 由 `unstable_mcp_over_acp` 门控，未启用）。
 - **客户端现实（已核实）**：Zed 把 `context_servers`（含**仓库级 `.zed/settings.json`** 来源）转成
@@ -956,8 +1036,19 @@ Select-String -Path .tmp/zed_agent_servers_acp.rs,.tmp/zed_acp_thread.rs -Patter
 
 日志：`backend/e2e-local-run2.log`、`backend/e2e-client-run2.log`。
 
+**第四轮（2026-09-20，Zed 实机报文核对）**：
+
+| 验证 | 结果 |
+|---|---|
+| `go test ./internal/acp/ -run "DecodeMCPServers" -count=1` | `ok`：新增 `TestDecodeMCPServersZedLoadSampleShape`（无 `type` → stdio；`env: []` → 0 issue、空列表） |
+| `go test ./cmd/aicli/commands/ -run "ZedLoadSampleShape\|ACPMCPServerToConfigMapping\|KeyValueMap\|PlanACPSessionMCPGating" -count=1` | `ok`：新增 `TestZedLoadSampleShapeIsRecognized`（Zed 原文 → 1 server / 0 issue / stdio / `Env=nil` / `WorkingDir=cwd` / `TrustLevel=local`） |
+| `go run ./scripts/acp_e2e_mcp_session_load.go bin/aicli-e2e.exe`（**载荷改为 Zed 同形状**：无 `type`、`env: []`） | PASS：`session/load assembled (pid=19876)` → `prompt #1 upstream_tools=46 load_tool_visible=true callable=true` → `session/close` 后回收 |
+| `gofmt -l`（改动的 3 个文件） | 干净 |
+
 ### 13.4 仍未完成
 
-- P3：Zed 实机验证与报文回填（§7.3；本机已安装 Zed，但需要一次真实交互会话才能抓报文）；
-  §7.4 第 2 条（Zed Restricted Mode 是否过滤转发列表）仍开放——第 4 / 5 条已由本轮脚本关闭（Unix 侧的 #5 例外）。
+- P3：**报文回填已完成**（§7.3.1，2026-09-20 实机样本 + 单测 + E2E 同形状复跑）；
+  仍开放的是「Zed GUI 内真实交互」（在 agent 面板实际调用该工具，需要一次人工会话）。
+- §7.4 第 2 条（Zed Restricted Mode 是否过滤转发列表）仍开放；第 1 / 3 / 4 / 6 条已关闭，
+  第 5 条 Windows 侧已关闭（Unix 例外）。
 - §11.3 的其余缺口（O1 / O2 / O4 / O5 / O9 等）按原结论保留。

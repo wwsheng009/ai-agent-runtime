@@ -129,3 +129,45 @@ func TestMCPDecodeIssueString(t *testing.T) {
 		t.Fatalf("field-level issue string = %q", got)
 	}
 }
+
+// TestDecodeMCPServersZedLoadSampleShape 复现 Zed 实机 session/load 报文形状
+// （2026-09-20 抓取）：
+//   - 条目无 "type" 字段 -> 必须按隐式 stdio 识别（而不是当作未知传输跳过）；
+//   - "env": [] 是空数组，既不是 map 形态也不是 [{name,value}] 列表
+//     -> 必须被当作「没有环境变量」的正常条目，而不是非法条目。
+func TestDecodeMCPServersZedLoadSampleShape(t *testing.T) {
+	raw := json.RawMessage(`[
+		{
+			"name": "mcp-server-context7",
+			"command": "C:\\Program Files\\nodejs\\node.exe",
+			"args": [
+				"C:/Users/vince/AppData/Local/Zed/extensions/work/mcp-server-context7/node_modules/@upstash/context7-mcp/dist/index.js"
+			],
+			"env": []
+		}
+	]`)
+
+	servers, issues := DecodeMCPServers(raw)
+	if len(issues) != 0 {
+		t.Fatalf(`env=[] must not be treated as an illegal entry, issues = %+v`, issues)
+	}
+	if len(servers) != 1 {
+		t.Fatalf("servers = %+v", servers)
+	}
+	server := servers[0]
+	if server.TransportKind() != MCPTransportStdio {
+		t.Fatalf(`missing "type" must decode as stdio, got %q`, server.TransportKind())
+	}
+	if server.Name != "mcp-server-context7" {
+		t.Fatalf("name = %q", server.Name)
+	}
+	if server.Command != `C:\Program Files\nodejs\node.exe` {
+		t.Fatalf("command = %q", server.Command)
+	}
+	if len(server.Args) != 1 || !strings.HasSuffix(server.Args[0], "context7-mcp/dist/index.js") {
+		t.Fatalf("args = %+v", server.Args)
+	}
+	if len(server.Env) != 0 {
+		t.Fatalf("env = %+v, want an empty list", server.Env)
+	}
+}

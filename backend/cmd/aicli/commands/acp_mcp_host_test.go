@@ -167,6 +167,72 @@ func TestACPMCPServerToConfigMapping(t *testing.T) {
 	}
 }
 
+// TestZedLoadSampleShapeIsRecognized 用 Zed 实机 session/load 报文（2026-09-20 抓取）
+// 走完整识别链路：DecodeMCPServers -> newACPMCPClientPlan -> planACPSessionMCP。
+//
+// 报文形状的三个易错点：
+//  1. 条目无 "type" 字段 -> 必须按隐式 stdio 识别；
+//  2. "env": [] 空数组 -> 必须被当作「无环境变量」而不是非法条目；
+//  3. Windows 绝对路径 command + 正斜杠 args -> 必须原样保留（不做路径归一化）。
+func TestZedLoadSampleShapeIsRecognized(t *testing.T) {
+	raw := json.RawMessage(`[{
+		"name": "mcp-server-context7",
+		"command": "C:\\Program Files\\nodejs\\node.exe",
+		"args": ["C:/Users/vince/AppData/Local/Zed/extensions/work/mcp-server-context7/node_modules/@upstash/context7-mcp/dist/index.js"],
+		"env": []
+	}]`)
+
+	plan := newACPMCPClientPlan(raw)
+	if plan == nil {
+		t.Fatal("Zed sample must decode into a plan, got nil")
+	}
+	if len(plan.Issues) != 0 {
+		t.Fatalf("Zed sample must not be skipped, issues = %+v", plan.Issues)
+	}
+	if len(plan.Servers) != 1 {
+		t.Fatalf("servers = %+v", plan.Servers)
+	}
+	server := plan.Servers[0]
+	if server.TransportKind() != acp.MCPTransportStdio {
+		t.Fatalf(`missing "type" must decode as stdio, got %q`, server.TransportKind())
+	}
+	if server.Command != `C:\Program Files\nodejs\node.exe` {
+		t.Fatalf("command = %q", server.Command)
+	}
+	if len(server.Args) != 1 || !strings.HasSuffix(server.Args[0], "context7-mcp/dist/index.js") {
+		t.Fatalf("args = %+v", server.Args)
+	}
+	if len(server.Env) != 0 {
+		t.Fatalf("env=[] must decode to an empty list, got %+v", server.Env)
+	}
+
+	// 同一份报文必须通过 stdio 门控（不需要任何能力位）并映射成可直接建连的配置。
+	cwd := `E:\projects\ai\ai-agent-runtime`
+	planned, diagnostics := planACPSessionMCP(plan, acpMCPModeMerge, acp.MCPCapabilities{}, true, cwd)
+	if len(diagnostics) != 0 {
+		t.Fatalf("diagnostics = %+v", diagnostics)
+	}
+	if len(planned) != 1 {
+		t.Fatalf("planned = %+v", planned)
+	}
+	cfg := planned[0].Config
+	if cfg.Name != "mcp-server-context7" || cfg.Type != "stdio" || !cfg.Enabled {
+		t.Fatalf("config = %+v", cfg)
+	}
+	if cfg.Command != `C:\Program Files\nodejs\node.exe` || len(cfg.Args) != 1 {
+		t.Fatalf("config command/args = %+v", cfg)
+	}
+	if cfg.Env != nil {
+		t.Fatalf("env=[] must map to a nil env map, got %+v", cfg.Env)
+	}
+	if cfg.WorkingDir != cwd {
+		t.Fatalf("working dir = %q, want %q", cfg.WorkingDir, cwd)
+	}
+	if cfg.TrustLevel != config.MCPTrustLevelLocal {
+		t.Fatalf("trust level = %q", cfg.TrustLevel)
+	}
+}
+
 func TestKeyValueMapLastWinsAndRedaction(t *testing.T) {
 	mapped := keyValueMap([]acp.MCPKeyValue{
 		{Name: "TOKEN", Value: "first"},
@@ -224,13 +290,13 @@ type stubMCPManager struct {
 	stopCalls int
 }
 
-func (s *stubMCPManager) LoadConfig(string) error                     { return nil }
-func (s *stubMCPManager) Start(context.Context) error                 { return nil }
-func (s *stubMCPManager) Stop() error                                 { s.stopCalls++; return nil }
-func (s *stubMCPManager) ListTools() []*registry.ToolInfo             { return s.tools }
-func (s *stubMCPManager) ListMCPs() []*config.MCPStatus               { return nil }
-func (s *stubMCPManager) ReloadConfig() error                         { return nil }
-func (s *stubMCPManager) SetMCPEnabled(string, bool) error            { return nil }
+func (s *stubMCPManager) LoadConfig(string) error          { return nil }
+func (s *stubMCPManager) Start(context.Context) error      { return nil }
+func (s *stubMCPManager) Stop() error                      { s.stopCalls++; return nil }
+func (s *stubMCPManager) ListTools() []*registry.ToolInfo  { return s.tools }
+func (s *stubMCPManager) ListMCPs() []*config.MCPStatus    { return nil }
+func (s *stubMCPManager) ReloadConfig() error              { return nil }
+func (s *stubMCPManager) SetMCPEnabled(string, bool) error { return nil }
 func (s *stubMCPManager) ListResources(context.Context, string, *string) (*protocol.ListResourcesResult, error) {
 	return nil, nil
 }
