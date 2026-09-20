@@ -226,17 +226,41 @@ func (f *FetchTool) Execute(ctx context.Context, params map[string]interface{}) 
 // truncateFetchOutput keeps the leading rune-safe prefix of text within budget
 // and appends an honest marker reporting how many bytes were hidden. It returns
 // the rendered text and the number of hidden bytes (0 when nothing was cut).
+//
+// The marker is part of the payload, so its worst-case length is charged against
+// the same budget as the body (the output gateway reserves its fold marker the
+// same way). Without that reservation the returned text overshoots the declared
+// fetch window by exactly the marker length.
 func truncateFetchOutput(text string, budget int) (string, int) {
 	if budget <= 0 || len(text) <= budget {
 		return text, 0
 	}
-	cut := budget
+	cut := budget - len(fetchTruncationMarker(budget, len(text)))
+	if cut < 0 {
+		cut = 0
+	}
 	for cut > 0 && !utf8.RuneStart(text[cut]) {
 		cut--
 	}
 	hidden := len(text) - cut
-	marker := fmt.Sprintf("\n\n…[fetch 输出超出工具预算 %d 字节，已截断 %d 字节；如需完整内容请用 download 落盘]", budget, hidden)
+	marker := fetchTruncationMarker(budget, hidden)
+	if len(marker) > budget {
+		// Degenerate budget: the honest marker alone does not fit. Keep a
+		// rune-safe marker prefix rather than emitting a payload over budget.
+		markerCut := budget
+		for markerCut > 0 && !utf8.RuneStart(marker[markerCut]) {
+			markerCut--
+		}
+		return marker[:markerCut], hidden
+	}
 	return text[:cut] + marker, hidden
+}
+
+// fetchTruncationMarker renders the honest "content was cut" notice. The marker
+// length only grows with the digit count of its numbers, so passing the total
+// text length as the hidden count yields a valid byte ceiling for any cut.
+func fetchTruncationMarker(budget, hidden int) string {
+	return fmt.Sprintf("\n\n…[fetch 输出超出工具预算 %d 字节，已截断 %d 字节；如需完整内容请用 download 落盘]", budget, hidden)
 }
 
 // extractText 提取纯文本内容

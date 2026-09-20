@@ -180,11 +180,17 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 	if len(matches) == 0 {
 		output = "未找到匹配项" + braceHint
 	} else {
+		// 截断提示与文件列表同属 glob 的字节预算：先按最坏情况预留提示长度，
+		// 列表只在剩余额度内写入，payload 才真正不超过 globOutputBudgetBytes。
+		listingBudget := globOutputBudgetBytes - len(globTruncationNotice(len(matches)))
+		if listingBudget < 0 {
+			listingBudget = 0
+		}
 		used := 0
 		kept := 0
 		for _, match := range matches {
 			lineBytes := len(match) + 1
-			if kept > 0 && used+lineBytes > globOutputBudgetBytes {
+			if kept > 0 && used+lineBytes > listingBudget {
 				break
 			}
 			used += lineBytes
@@ -196,7 +202,7 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 		}
 		output = strings.Join(rendered, "\n")
 		if truncated {
-			output += fmt.Sprintf("\n\n(结果已截断，显示前 %d 个文件)", len(rendered))
+			output += globTruncationNotice(len(rendered))
 		}
 	}
 
@@ -246,6 +252,14 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 		Content:    output,
 		Metadata:   metadata,
 	}), nil
+}
+
+// globTruncationNotice renders the notice glob appends after a truncated file
+// list. The entry count only grows with its digit count, so the total match
+// count is a valid byte ceiling when reserving room for the notice inside the
+// glob window.
+func globTruncationNotice(total int) string {
+	return fmt.Sprintf("\n\n(结果已截断，显示前 %d 个文件)", total)
 }
 
 // findMatchesMulti unions results across expanded brace patterns while

@@ -5273,6 +5273,15 @@ func grepByteBudgetBytes() int {
 	return grepOutputBudgetBytes
 }
 
+// grepTruncationNoticeReserve is the worst-case byte length of the lines grep
+// appends after a truncated match list: the truncation notice plus the
+// byte-budget hint. Both print counts bounded by the total match count, so the
+// reserve is an upper bound rather than a guess.
+func grepTruncationNoticeReserve(total, budget int) int {
+	return len(fmt.Sprintf("\n\n(结果已截断，显示前 %d 个匹配)", total)) +
+		len(fmt.Sprintf("\n(输出超过 grep 字节预算 %d 字节，提前停止；next_step: 收窄 pattern、增加 paths/glob 限定，或用 max_count 限制每文件匹配数)", budget))
+}
+
 func buildGrepResult(opts *grepOptions, results []string, matchCount int, truncated bool, stats *grepStats) *toolkit.ToolResult {
 	if truncated {
 		observability.RecordToolOutputTruncation(observability.TruncationLayerGrep, observability.TruncatedByLines)
@@ -5291,7 +5300,14 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 	}
 	if len(results) > 0 {
 		joined := strings.Join(results, "\n")
-		if joinedBytes := len([]byte(joined)) + len(results); joinedBytes > grepByteBudgetBytes() {
+		// 截断提示与匹配行同属 grep 的字节预算：先按最坏情况预留提示长度，
+		// 匹配行只在剩余额度内保留，payload 才真正不超过 grepOutputBudgetBytes。
+		budget := grepByteBudgetBytes()
+		listingBudget := budget - grepTruncationNoticeReserve(len(results), budget)
+		if listingBudget < 0 {
+			listingBudget = 0
+		}
+		if joinedBytes := len([]byte(joined)) + len(results); joinedBytes > listingBudget {
 			// Byte-budget stop: keep the complete leading matches (never cut a
 			// middle window like the L4 head/tail fold) so "find things" stays
 			// semantically useful without an artifact dereference round-trip.
@@ -5299,7 +5315,7 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 			used := 0
 			for _, line := range results {
 				lineBytes := len([]byte(line)) + 1
-				if kept > 0 && used+lineBytes > grepByteBudgetBytes() {
+				if kept > 0 && used+lineBytes > listingBudget {
 					break
 				}
 				used += lineBytes

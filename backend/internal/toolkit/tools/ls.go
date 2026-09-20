@@ -210,8 +210,16 @@ func (l *LsTool) Execute(ctx context.Context, params map[string]interface{}) (*t
 
 	// 格式化输出。条目同时受 l.limit 与 ls 自身字节预算约束：任一命中都标记
 	// truncated 并声明 L4 opt-out，避免已定形的列表被二次折叠。
+	// 头部、统计行与截断提示同属这份预算：先按最坏情况预留其长度，列表行只在
+	// 剩余额度内写入，最终 payload 才真正不超过 lsOutputBudgetBytes。
+	header := fmt.Sprintf("目录: %s\n\n", path)
+	listingBudget := lsOutputBudgetBytes - len(header) - lsTrailerReserve(fileCount, dirCount, len(entries))
+	if listingBudget < 0 {
+		listingBudget = 0
+	}
+
 	var output strings.Builder
-	output.WriteString(fmt.Sprintf("目录: %s\n\n", path))
+	output.WriteString(header)
 
 	rendered := 0
 	used := 0
@@ -225,7 +233,7 @@ func (l *LsTool) Execute(ctx context.Context, params map[string]interface{}) (*t
 			if entry.isDir {
 				line = fmt.Sprintf("%s📁 %s/\n", prefix, entry.relPath)
 			}
-			if rendered > 0 && used+len(line) > lsOutputBudgetBytes {
+			if rendered > 0 && used+len(line) > listingBudget {
 				byteBudgetHit = true
 				break
 			}
@@ -268,4 +276,13 @@ func (l *LsTool) Execute(ctx context.Context, params map[string]interface{}) (*t
 		Content:    output.String(),
 		Metadata:   metadata,
 	}), nil
+}
+
+// lsTrailerReserve is the worst-case byte length of the lines ls appends after
+// the listing itself (statistics + truncation notice). The notice prints the
+// rendered and total entry counts, and the total count is a valid ceiling for
+// both, so the reserve is an upper bound rather than a guess.
+func lsTrailerReserve(fileCount, dirCount, total int) int {
+	return len(fmt.Sprintf("\n统计: %d 个文件, %d 个目录", fileCount, dirCount)) +
+		len(fmt.Sprintf("\n(已截断，显示前 %d 个条目，共 %d 个)", total, total))
 }
