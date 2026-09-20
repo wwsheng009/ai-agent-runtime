@@ -119,3 +119,51 @@ func cloneMap(input map[string]interface{}) map[string]interface{} {
 	}
 	return cloned
 }
+
+// MetadataSkipRenderTruncationKey is the declared opt-out for render-layer (L4)
+// truncation management.
+//
+// A tool that sets this key to true on its result metadata states that it
+// already folded its own payload, published its own continuation metadata
+// (offset/limit/eof/artifact_id) and owns the final shape of the body. The
+// render layer must therefore leave the body untouched: folding it again would
+// charge the byte budget twice, emit a duplicate "middle omitted" marker and
+// contradict the tool's own continuation notice.
+//
+// The flag may be set either flat on the result metadata or nested inside
+// "tool_metadata".
+const MetadataSkipRenderTruncationKey = "skip_render_truncation"
+
+// SkipsRenderTruncation reports whether metadata declares that the producing
+// tool manages truncation itself, so the render layer must not fold the body
+// again. Both a flat key and the nested tool_metadata map are honored.
+func SkipsRenderTruncation(metadata map[string]interface{}) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	if truthyMetadataFlag(metadata, MetadataSkipRenderTruncationKey) {
+		return true
+	}
+	if nested, ok := metadata["tool_metadata"].(map[string]interface{}); ok {
+		return truthyMetadataFlag(nested, MetadataSkipRenderTruncationKey)
+	}
+	return false
+}
+
+func truthyMetadataFlag(metadata map[string]interface{}, key string) bool {
+	if metadata == nil {
+		return false
+	}
+	switch value := metadata[key].(type) {
+	case bool:
+		return value
+	case string:
+		return value == "1" || value == "true" || value == "yes" || value == "on"
+	case int:
+		return value != 0
+	case float64:
+		return value != 0
+	default:
+		return false
+	}
+}

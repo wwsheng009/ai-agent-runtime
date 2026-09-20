@@ -448,6 +448,67 @@ func isExternalMCPToolResult(envelope *Envelope) bool {
 	return !strings.EqualFold(mcpName, "toolkit")
 }
 
+// toolTruncationMetadataKeys is the unified vocabulary for "the producing tool
+// already folded its own output". Controlled tools publish at least one of
+// these keys together with their continuation metadata (offset/limit/eof/
+// artifact_id); every downstream layer must treat the body as final and must
+// not fold it a second time.
+//
+// Canonical key: "is_truncated" (controls tools that own their paging window).
+// Legacy aliases kept readable so existing emitters stay compatible:
+// "results_truncated" (grep byte budget), "output_truncated", "truncated".
+// toolresult.MetadataSkipRenderTruncationKey ("skip_render_truncation") is part
+// of this vocabulary: a tool that sets it opts out of render-layer (L4)
+// truncation management entirely and owns its own paging window.
+var toolTruncationMetadataKeys = []string{
+	"skip_render_truncation",
+	"is_truncated",
+	"results_truncated",
+	"output_truncated",
+	"truncated",
+}
+
+// toolTruncatedUpstream reports whether the controlled tool already truncated
+// its own output. This is the single source of truth that stops the truncation
+// cascade: once a tool has folded its output and published continuation
+// metadata, the render layer must not fold it again (a second fold would charge
+// the byte budget twice, emit a duplicate "middle omitted" marker and
+// contradict the tool's own continuation guidance).
+func toolTruncatedUpstream(metadata map[string]interface{}) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	// A producing tool that declares it owns truncation
+	// (skip_render_truncation, flat or nested under "tool_metadata") decides
+	// the final shape of its payload. This explicit marker is checked before
+	// the inferred vocabulary scan below.
+	if toolresult.SkipsRenderTruncation(metadata) {
+		return true
+	}
+	for _, key := range toolTruncationMetadataKeys {
+		switch value := metadata[key].(type) {
+		case bool:
+			if value {
+				return true
+			}
+		case string:
+			switch strings.ToLower(strings.TrimSpace(value)) {
+			case "true", "1", "yes", "y":
+				return true
+			}
+		case int:
+			if value != 0 {
+				return true
+			}
+		case float64:
+			if value != 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func metadataString(metadata map[string]interface{}, key string) string {
 	if len(metadata) == 0 {
 		return ""
@@ -486,6 +547,14 @@ func renderToolTextForModelHistory(content interface{}, toolErr string, envelope
 		}
 	}
 	notice := modelArtifactNotice(envelope)
+	// Controlled tool that already truncated its own output owns the final shape
+	// of its payload: it folded to its own limit, published continuation metadata
+	// (offset/limit/eof/artifact) and told the model how to page through the rest.
+	// Folding again here would charge the byte budget twice, emit a duplicate
+	// "middle omitted" marker and contradict the tool's own continuation notice.
+	if toolTruncatedUpstream(envelopeMetadata(envelope)) {
+		return appendToolArtifactNotice(full, notice)
+	}
 	if strings.TrimSpace(full) == "" {
 		return appendToolArtifactNotice(full, notice)
 	}
@@ -645,10 +714,17 @@ func appendToolArtifactNotice(body string, notice string) string {
 // helper so the charged bytes can never drift from the rendered bytes.
 func truncationMarker(artifactID string, omittedBytes int) string {
 	marker := fmt.Sprintf("\n\n[output truncated for history safety: omitted %d bytes from the middle]", omittedBytes)
-	// P2 continuation guidance: embed the exact dereference command in the
-	// fold marker so the model never wanders (e.g. re-calling the same tool).
 	if id := strings.TrimSpace(artifactID); id != "" {
+		// P2 continuation guidance: embed the exact dereference command in the
+		// fold marker so the model never wanders (e.g. re-calling the same tool).
 		marker += fmt.Sprintf("; read via artifact_read(artifact_id=%s, offset=<bytes>, limit=<bytes>)", id)
+	} else {
+		// A bare omit count is a dead end when no artifact id was captured: the
+		// model knows bytes are missing but not how to reach them, so it either
+		// re-calls the tool blindly or abandons the read. For the paged readers
+		// (view/grep/shell) the cheap recovery is re-issuing the same call with a
+		// narrower window, so name that path in the marker itself.
+		marker += "; recovery: re-issue the same call with a narrower offset/limit (or a tighter pattern) to read the omitted region"
 	}
 	return marker + "\n\n"
 }

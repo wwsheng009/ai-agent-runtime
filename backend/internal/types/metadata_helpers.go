@@ -45,6 +45,39 @@ const (
 // BoolMetadataValue extracts a boolean metadata value from a generic tool
 // metadata map. The second return value reports whether the key existed and
 // could be parsed.
+// ToolMetadataSkipRenderTruncationKey is the tool-authoring surface for the
+// render-layer (L4) truncation opt-out.
+//
+// Set it to true on a tool result's metadata (or inside "tool_metadata") when
+// the tool truncates its own output and therefore manages its own paging window
+// (offset/limit/eof/artifact_id). The render layer then treats the body as
+// final and does not fold it a second time.
+const ToolMetadataSkipRenderTruncationKey = "skip_render_truncation"
+
+// SkipRenderTruncationMetadata returns the metadata fragment a tool embeds into
+// its ToolResult to declare that it manages its own truncation and must be
+// exempt from render-layer (L4) folding.
+func SkipRenderTruncationMetadata() map[string]interface{} {
+	return map[string]interface{}{ToolMetadataSkipRenderTruncationKey: true}
+}
+
+// ToolManagesOwnTruncation reports whether metadata declares the render-layer
+// truncation opt-out, either flat or nested inside "tool_metadata".
+func ToolManagesOwnTruncation(metadata map[string]interface{}) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	if flag, ok := BoolMetadataValue(metadata, ToolMetadataSkipRenderTruncationKey); ok {
+		return flag
+	}
+	if nested, ok := metadata["tool_metadata"].(map[string]interface{}); ok {
+		if flag, ok := BoolMetadataValue(nested, ToolMetadataSkipRenderTruncationKey); ok {
+			return flag
+		}
+	}
+	return false
+}
+
 func BoolMetadataValue(metadata map[string]interface{}, key string) (bool, bool) {
 	if len(metadata) == 0 {
 		return false, false
