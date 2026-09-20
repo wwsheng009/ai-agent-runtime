@@ -31,6 +31,11 @@ import {
 
 const sorted = (values: readonly string[]) => [...values].sort();
 
+// 双通道白名单：生产者自行落盘、同时靠尾巴帧补发的类型（后端 contract.go 里
+// ChannelSessionStore | ChannelTailOnly，写侧由 ProducerPersistedEvent 去重）。
+// 除此之外，落盘类型与 live-only / tail-only 仍互斥。
+const DUAL_CHANNEL_TAIL_TYPES = new Set<string>(["subagent.completed"]);
+
 describe("runtime 事件契约（前端消费路径覆盖）", () => {
   it("每个落盘类型都有且只有一条前端消费路径（不静默丢弃）", () => {
     const uncovered: string[] = [];
@@ -108,12 +113,16 @@ describe("runtime 事件契约（前端消费路径覆盖）", () => {
     }
   });
 
-  it("通道分层互斥：落盘类型不会同时声明 live-only / tail-only", () => {
+  it("通道分层互斥：落盘类型不会同时声明 live-only / tail-only（双通道白名单除外）", () => {
     const persisted = new Set(RUNTIME_EVENT_PERSISTED_TYPES);
     for (const type of RUNTIME_EVENT_LIVE_ONLY_TYPES) {
       expect(persisted.has(type), `${type} 同时声明落盘与 live-only`).toBe(false);
     }
     for (const type of RUNTIME_EVENT_TAIL_ONLY_TYPES) {
+      if (DUAL_CHANNEL_TAIL_TYPES.has(type)) {
+        expect(persisted.has(type), `${type} 双通道白名单必须同时落盘`).toBe(true);
+        continue;
+      }
       expect(persisted.has(type), `${type} 同时声明落盘与 tail-only`).toBe(false);
     }
   });
@@ -132,6 +141,7 @@ describe("runtime 事件契约（前端消费路径覆盖）", () => {
       "session_end",
       "session_interrupted",
       "session_start",
+      "subagent.completed",
     ]);
     expect(sorted([...ASSISTANT_RUNTIME_EVENT_TYPES])).toEqual([
       "assistant.image_progress",

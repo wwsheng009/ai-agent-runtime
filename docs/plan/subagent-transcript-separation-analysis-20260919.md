@@ -343,10 +343,13 @@ src/components/workspace/session-agents-panel-shared.test.ts src/components/work
   `components/workspace/message-markdown.test.tsx` 515、
   `components/workspace/workspace-sidebar/directories-section.tsx` 509）；
   `npx tsc -b` 有 6 个既有类型错误（`api/runtime/analytics.ts`、`lib/trajectory/recovery.test.ts`、
-  `pages/usage-analytics/artifact-flow-panel.tsx`）；前端全量 vitest 3 例失败，其中
-  `use-workspace-live.test.tsx` 在纯 HEAD（本轮改动全部 stash 后）同样失败，
-  `event-contract.test.ts` 2 例由工作区未提交的 `event-contract.ts` 编辑（新增
-  `subagent.completed` 落盘声明）引起，均不在 G8 改动面内。
+  `pages/usage-analytics/artifact-flow-panel.tsx`）；前端全量 vitest 尚有 1 例既有失败
+  （`use-workspace-live.test.tsx`，在纯 HEAD —— 本轮改动全部 stash 后 —— 同样失败，
+  与本轮 G8 无关）。`event-contract.test.ts` 的 2 例曾因前端 `event-contract.ts` 未与
+  后端 `ChannelSessionStore | ChannelTailOnly`（A+D 双通道，见
+  `backend/internal/events/contract.go:112-117`）对齐而红，已按后端契约补齐前端落盘
+  声明与双通道白名单断言（`npx vitest run src/types/runtime/event-contract.test.ts`
+  → 6 passed）。
 
 ---
 
