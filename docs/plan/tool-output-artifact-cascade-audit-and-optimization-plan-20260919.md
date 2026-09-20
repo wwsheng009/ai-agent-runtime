@@ -62,6 +62,37 @@ L4（`internal/output/tool_result_content.go` 的 `formatTruncatedToolTextForMod
 
 验证（2026-09-20）：`go build ./...`、`go vet ./internal/output/ ./internal/toolkit/tools/` 通过；`go test -count=1 -p 2 ./internal/output/... ./internal/toolkit/tools/ ./internal/agent/ ./internal/observability/ ./internal/toolresult/` 全绿。
 
+## 0.2 行中截断（单行超预算）的诚实提示（2026-09-20 增量）
+
+§0.1 的 head-only 折叠在多行载荷上按行边界收尾，但保留了一个回退分支：当**首行本身**就超出 body 预算（或窗口内最后一个换行过早、不足预算一半）时，`headLinesWithinBudget` 只能返回字节前缀，窗口停在**行中**。此时按行计数渲染的通知会自相矛盾：
+
+```
+[output truncated for history safety: showing the first 9 of 9 lines; omitted 0 lines (28505 bytes) from the end]   ← 修复前（真实会话实测）
+[next step: … view: offset=<next line, 0-based> …]                                                                 ← 行偏移无法恢复行中截断
+```
+
+修复：`partialLineBytes` 识别「head 不以换行结尾」，改走 `truncationMarkerPartial`，用字节口径描述损失并指向字节区间恢复：
+
+```
+[output truncated for history safety: showing 8 complete lines plus the first 11692 bytes of line 9; omitted 28308 bytes from the end]
+[next step: this window stops mid-line, so a line offset cannot resume it — read the raw output pointer below by byte range (artifact_read with offset=<byte offset>) or re-issue a narrower call instead of repeating the identical one]
+```
+
+`truncationMarkerReserve` 取两种通知在上界位数下的较大者，`header + head + notice ≤ budget` 不变式不变（实测 40174 字节单行载荷 → 渲染 12287 / 预算 12288，且 shown + omitted 与原文逐字节闭合）。
+
+### 0.2.1 同批线上实测（本仓库工作会话的真实工具调用）
+
+| 路径 | 实测输入 | 结果 |
+|---|---|---|
+| `shell` | `git log --oneline -n 500` → 508 行 / 45208 字节 | 渲染为首 138 行 + `omitted 370 lines (33705 bytes) from the end` + 下一步指引；无中间挖空 |
+| `shell`（按指引收窄重发） | `Select-Object -Skip 138 -First 80` | 完整拿到被省略的尾部，无二次折叠 —— 「下一步」可执行 |
+| `view`（预算自持） | 461 KB 文件，`limit=2000, offset=0` | 自有 32 KiB 窗口 + `[efficiency] File continues past this window (is_truncated=true, lines_read=634) … continue with offset=634 limit<=400`；**无** L4 折叠标记（`skip_render_truncation` 生效） |
+| `view`（定点续读） | `offset=632 limit=120` | 返回 633–752 行，无折叠、无指针行 —— 行偏移续读可用 |
+| `artifact_read`（分页） | `offset=33000 limit=6000` | `window=[33000,39000) | next_offset=39000 | eof=false` —— 原始输出可按字节区间分页，不再是「无法分页」 |
+| `shell`（单行超长） | `python -c "print('abcdefghij'*4000)"` → 40174 字节单行 | 暴露 §0.2 缺陷（`showing the first 9 of 9 lines; omitted 0 lines (28505 bytes)`），已修 |
+
+验证（2026-09-20）：`go vet ./internal/output/ ./internal/toolkit/tools/` 通过；`go build -p 1 ./internal/... ./cmd/...` 通过（`tmp/prune_probe` 为本地未跟踪临时包，编译期 OOM 属环境内存不足）；`go test -count=1 -p 2 ./internal/output/... ./internal/toolkit/tools/ ./internal/agent/ ./internal/toolresult/` 全绿；新增 `TestFormatTruncatedToolTextForModel_PartialLineNoticeReportsByteCut` 以「8 行头 + 40000 字节单行」复现该形状，交叉核对完整行数 / 部分行字节 / 省略字节与渲染字节闭合。
+
 ---
 
 ## 1. 背景：artifact_read 为何被频繁调用

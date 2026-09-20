@@ -1044,3 +1044,68 @@ func TestFormatTruncatedToolTextForModel_HeadOnlyNoticeReportsShownAndOmittedLin
 	t.Logf("head-only fold: rendered=%d bytes (budget 4096); shown=%d omittedLines=%d omittedBytes=%d; notice=%q",
 		len(got), shown, omittedLines, omittedBytes, got[noticeStart:noticeStart+noticeEnd+1])
 }
+
+// TestFormatTruncatedToolTextForModel_PartialLineNoticeReportsByteCut pins the
+// mid-line cut case: when the first line alone overflows the body budget the
+// head can only be a byte prefix, and the notice must describe that cut in
+// bytes. A line-count notice would contradict itself here ("0 lines omitted"
+// next to thousands of dropped bytes) and its line-offset recovery cannot
+// resume a mid-line cut.
+func TestFormatTruncatedToolTextForModel_PartialLineNoticeReportsByteCut(t *testing.T) {
+	var builder strings.Builder
+	for i := 0; i < 8; i++ {
+		fmt.Fprintf(&builder, "header line %02d\n", i)
+	}
+	builder.WriteString(strings.Repeat("abcdefghij", 4000)) // 40000 bytes on a single line
+	content := builder.String()
+
+	got := formatTruncatedToolTextForModel(content, 4*1024)
+	if strings.Contains(got, "of 9 lines") {
+		t.Fatalf("mid-line cut must not be reported with a line-count notice, got %q", got)
+	}
+
+	match := regexp.MustCompile(
+		`showing (\d+) complete lines plus the first (\d+) bytes of line (\d+); omitted (\d+) bytes from the end`,
+	).FindStringSubmatch(got)
+	if match == nil {
+		t.Fatalf("expected partial-line notice, got %q", got)
+	}
+	completeLines, _ := strconv.Atoi(match[1])
+	partialBytes, _ := strconv.Atoi(match[2])
+	cutLine, _ := strconv.Atoi(match[3])
+	omittedBytes, _ := strconv.Atoi(match[4])
+	if completeLines != 8 {
+		t.Fatalf("complete lines = %d, want the 8 header lines", completeLines)
+	}
+	if cutLine != 9 {
+		t.Fatalf("cut line = %d, want line 9 (the single long line)", cutLine)
+	}
+	if partialBytes <= 0 || partialBytes >= 40000 {
+		t.Fatalf("partial bytes = %d, want a strict prefix of the 40000-byte line", partialBytes)
+	}
+
+	// Cross-check both notices against the bytes actually rendered.
+	noticeStart := strings.Index(got, "[output truncated for history safety")
+	headStart := strings.Index(got, "header line 00")
+	if noticeStart < 0 || headStart < 0 || headStart > noticeStart {
+		t.Fatalf("unexpected notice/head layout, got %q", got)
+	}
+	head := strings.TrimSuffix(got[headStart:noticeStart], "\n\n")
+	if lines := strings.Count(head, "\n"); lines != completeLines {
+		t.Fatalf("notice claims %d complete lines but rendered %d", completeLines, lines)
+	}
+	if idx := strings.LastIndex(head, "\n"); len(head)-idx-1 != partialBytes {
+		t.Fatalf("notice claims %d partial bytes but rendered %d", partialBytes, len(head)-idx-1)
+	}
+	if len(head)+omittedBytes != len(content) {
+		t.Fatalf("shown head %d + omitted %d != %d bytes", len(head), omittedBytes, len(content))
+	}
+	if !strings.Contains(got, "byte range") || !strings.Contains(got, "artifact_read") {
+		t.Fatalf("expected byte-range recovery guidance, got %q", got)
+	}
+	if len(got) > 4*1024 {
+		t.Fatalf("rendered %d bytes, exceeds the 4096-byte budget", len(got))
+	}
+	t.Logf("partial-line fold: rendered=%d bytes (budget 4096); completeLines=%d partialBytes=%d omittedBytes=%d",
+		len(got), completeLines, partialBytes, omittedBytes)
+}

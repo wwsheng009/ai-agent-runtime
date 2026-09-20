@@ -737,7 +737,38 @@ func truncationMarkerReserve(totalLines, totalBytes int) int {
 	if totalBytes < 0 {
 		totalBytes = 0
 	}
-	return len(truncationMarker(totalLines, totalLines, totalBytes))
+	reserve := len(truncationMarker(totalLines, totalLines, totalBytes))
+	if partial := len(truncationMarkerPartial(totalLines, totalBytes, totalBytes)); partial > reserve {
+		reserve = partial
+	}
+	return reserve
+}
+
+// truncationMarkerPartial renders the fold notice for a head that stops in the
+// middle of a line (the first line alone overflowed the body budget). Line
+// arithmetic cannot describe that loss: the clean-cut notice would claim "0
+// lines omitted" while thousands of bytes were dropped from the same line, and
+// its line-offset recovery cannot resume a mid-line cut. This variant states
+// the shown lines, the shown bytes of the cut line, and points at byte-range
+// recovery instead.
+func truncationMarkerPartial(completeLines, partialBytes, omittedBytes int) string {
+	if completeLines < 0 {
+		completeLines = 0
+	}
+	if partialBytes < 0 {
+		partialBytes = 0
+	}
+	if omittedBytes < 0 {
+		omittedBytes = 0
+	}
+	marker := fmt.Sprintf(
+		"\n\n[output truncated for history safety: showing %d complete lines plus the first %d bytes of line %d; omitted %d bytes from the end]",
+		completeLines, partialBytes, completeLines+1, omittedBytes,
+	)
+	marker += "\n[next step: this window stops mid-line, so a line offset cannot resume it — " +
+		"read the raw output pointer below by byte range (artifact_read with offset=<byte offset>) " +
+		"or re-issue a narrower call instead of repeating the identical one]"
+	return marker + "\n\n"
 }
 
 // formatTruncatedToolTextForModel folds oversized tool text to a head-only
@@ -773,13 +804,20 @@ func formatTruncatedToolTextForModel(content string, budget int) string {
 	}
 
 	head := headLinesWithinBudget(content, bodyBudget)
-	shownLines := countShownLines(head)
-	if shownLines > totalLines {
-		shownLines = totalLines
-	}
 	omittedBytes := totalBytes - len(head)
 	if omittedBytes < 0 {
 		omittedBytes = 0
+	}
+	// A head that stops mid-line means the first line alone overflowed the body
+	// budget (headLinesWithinBudget only cuts mid-line in that fallback), so the
+	// line-count notice would contradict itself; report the partial line and
+	// the byte-range recovery path instead.
+	if partialBytes := partialLineBytes(head); partialBytes > 0 {
+		return header + head + truncationMarkerPartial(countShownLines(head)-1, partialBytes, omittedBytes)
+	}
+	shownLines := countShownLines(head)
+	if shownLines > totalLines {
+		shownLines = totalLines
 	}
 	return header + head + truncationMarker(shownLines, totalLines, omittedBytes)
 }
@@ -804,7 +842,9 @@ func headLinesWithinBudget(content string, maxBytes int) string {
 }
 
 // countShownLines counts the content lines visible in a head segment. A head
-// that ends mid-line still shows that partial line, so it is counted too.
+// that ends mid-line still shows that partial line, so it is counted too;
+// callers that must not conflate a partial line with a complete one use
+// partialLineBytes to detect that case first.
 func countShownLines(head string) int {
 	if head == "" {
 		return 0
@@ -814,6 +854,20 @@ func countShownLines(head string) int {
 		lines++
 	}
 	return lines
+}
+
+// partialLineBytes returns how many bytes of a mid-line cut the head shows, or 0
+// when the head is empty or ends exactly on a line boundary. The result is the
+// length of the head's last, unterminated segment (the whole head when it holds
+// no newline at all).
+func partialLineBytes(head string) int {
+	if head == "" || strings.HasSuffix(head, "\n") {
+		return 0
+	}
+	if idx := strings.LastIndex(head, "\n"); idx >= 0 {
+		return len(head) - idx - 1
+	}
+	return len(head)
 }
 
 // firstFailureLine returns the first content line that looks like a failure
