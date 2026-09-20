@@ -326,8 +326,8 @@ func JoinDatePartition(root string, t time.Time, elems ...string) string {
 }
 
 // ParseTimestampedSessionIDTime extracts a local timestamp from common session IDs:
-//   - chat log: 20060102_150405.000_<suffix>
-//   - file session: session_20060102150405_<suffix>
+//   - session id: session_20060102150405_<suffix> (runtime + chat log)
+//   - legacy chat log: 20060102_150405.000_<suffix>
 func ParseTimestampedSessionIDTime(sessionID string) (time.Time, bool) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
