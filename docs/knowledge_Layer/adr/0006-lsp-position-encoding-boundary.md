@@ -289,3 +289,6 @@ cache_key = H(file_id, document_version, canonical_start, canonical_end, adapter
 | 与 `03` §6.2 版本向量中 `lsp_server_version` 的联动 | `Phase4-start` |
 | `03.lsp_servers` / `lsp_documents` / `lsp_diagnostics` 从 v2+ 提前到 v1 的取舍 | `Phase4-start` |
 | `supplement/05` 附录 F 中"UTF-16 position 映射"高风险条目的状态更新 | `Phase4-start` |
+
+> **实现侧落点**：进程生命周期、能力协商、工具面与降级语义、验收清单见 [`../../lsp/README.md`](../../lsp/README.md)（`02` 设计 / `03` 验收）。
+> 边界：`../../lsp/` 只承接本 ADR 的已定结论，**不重复定义**位置编码转换边界与缓存键——该口径的唯一事实源仍是本文件。

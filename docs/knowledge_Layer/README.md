@@ -21,6 +21,8 @@
 | `adr/` | 决策记录（`0000` 模板 + `0001`–`0007`） | **已建立**（2026-09-20，全部 `Proposed`） | **决策唯一事实源** |
 | `06_implementation_index_and_guidance.md` | 方案实施索引与指引（实施入口） | **已建立**（2026-09-20） | 实施索引（**非**事实源） |
 
+> **跨目录入口**：本目录 LSP 规格（`03_agent_harness_supplement.md` 的 LSP 章节、[`supplement/05_runtime_integration_project_detection_and_lsp.md`](supplement/05_runtime_integration_project_detection_and_lsp.md)）的**落地实施文档**位于 [`../lsp/`](../lsp/README.md)（参考实现分析 → runtime 集成设计 → 实施顺序与验收）。该目录仅为**实施方案**，不改变本目录的事实源边界。
+
 ---
 
 ## 2. 推荐阅读顺序
@@ -60,6 +62,7 @@
 | 术语 | `GLOSSARY.md` | 所有文档使用规范名 |
 | 决策 | `adr/*.md` | 推翻既有设计必须先写 ADR |
 | 落地计划与验收 | `04` | Phase 状态与本 README 同步 |
+| LSP 落地实施方案 | [`../lsp/`](../lsp/README.md) | 只引用，不复制 LSP 规格；与 `03` / `supplement/05` 冲突时以本目录为准 |
 | 变更历史 | `CHANGELOG.md` | — |
 
 **已裁决的关键决策（决策唯一事实源：[`adr/`](adr/README.md)；下列为摘要，`04` 附录 B 已不再是决策依据）**

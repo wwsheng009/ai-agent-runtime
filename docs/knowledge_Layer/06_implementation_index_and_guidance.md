@@ -56,6 +56,7 @@
 | `02_agent_harness_technical_design_spec_sqlite.md` | core schema 的 DDL（最全） | 写 store / 迁移时 | **core schema 唯一事实源** |
 | `03_agent_harness_supplement.md` | 补充规格（稳定 ID / 类型 / LSP / 安全 / 评估） | 写 extension schema 时 | **extension schema 事实源** |
 | `supplement/05_runtime_integration_project_detection_and_lsp.md` | runtime 集成 / 项目类型感知 / LSP 接入 | Phase 0、Phase 4 前 | 集成规格（不复制 DDL） |
+| [`../lsp/`](../lsp/README.md) | LSP 实施方案：crush 参考分析 / runtime 集成设计 / 实施顺序与验收（A1–A11） | Phase 0 末、Phase 4 开工前 | 实施方案（**非**事实源） |
 | `04_completeness_review_and_optimized_plan.md` | 完整性评审 + v1 方案 + Phase 路线 + 验收 | 实施与验收全程 | **落地计划与验收事实源** |
 | `GLOSSARY.md` | 术语规范名 | 任何命名之前 | **术语唯一事实源** |
 | `CHANGELOG.md` | 变更历史 | 改动前后 | 变更历史 |
@@ -377,7 +378,7 @@ Phase 3 (Code API / 工具面)  ◄────────────  Phase 5
 | 相邻计划 | 边界 |
 |---|---|
 | `docs/plan/aicli-tool-capability-convergence-plan.md` | 工具命名与优先级以其为准；本方案只补 `code.*` 的索引侧语义与降级协议 |
-| `docs/plan/tool-output-artifact-cascade-audit-and-optimization-plan-20260919.md` | 工具输出归档 / 截断以其为准；本方案复用 `internal/artifact` |
+| `docs/plan/tool-output-artifact-cascade-audit-and-optimization-plan-20260919.md` | 工具输出归档 / 截断以其为准；本方案复用 `internal/artifact`。**L4 ↔ `view` 契约（已实现）**：`view` 的默认窗口 `viewDefaultLimit` 已刻意收窄，避免 L4 按其 `ModelToolTextByteBudget`（默认 12 KiB）静默二次截断 `view` 文本、把模型推去 `artifact_read` 字节分页而绕过 `view` 自身的 `offset`/`limit` 续读协议；`view` 用 `is_truncated` / `long_lines_truncated` 声明"还有更多"，`agent/tool_runtime_events.go` 经 `truncatedToolMetadata(metadata["is_truncated"])` 透传。 |
 | `docs/plan/composer-at-file-reference-workspace-search-plan.md` | 工作区搜索 UI / 交互以其为准；本方案提供可选索引后端 |
 | `docs/plan/llm-cache-analytics-unified-plan.md` | 缓存与分析口径以其为准；`cache_entries` 需对齐其 cache key 规范 |
 | `docs/plan/session-usage-analytics-and-agent-diagnostics-plan.md` | 指标埋点与展示以其为准；本方案只新增探索归因字段 |
