@@ -49,6 +49,19 @@ L4（`internal/output/tool_result_content.go` 的 `formatTruncatedToolTextForMod
 
 本轮验证（2026-09-20）：`go vet ./internal/toolkit/tools/` 通过；`go test -count=1 ./internal/toolkit/tools/ ./internal/output/... ./internal/toolresult/... ./internal/agent/ ./internal/observability/` 全绿（`internal/knowledge` 为既有构建破损，与本轮无关）。
 
+## 0.1 L4 兜底折叠改为 head-only（2026-09-20 增量）
+
+`formatTruncatedToolTextForModel` 不再做 head/tail「中间挖空」：超出 `modelToolTextByteBudget`（默认 12 KiB）的文本只保留**前 N 行**，随后是显式提示：
+
+```
+[output truncated for history safety: showing the first 118 of 600 lines; omitted 482 lines (18320 bytes) from the end]
+[next step: re-issue the same call with a narrower window to read the omitted tail — view: offset=<next line, 0-based> plus a smaller limit; grep/shell: narrow the pattern, path or command output instead of repeating the identical call]
+```
+
+原因：模型无法对「文本中间的洞」分页，`artifact_read` 自身的输出在真实会话里也会被预算折叠，不能作为唯一恢复路径。因此改为「首 N 行 + 省略行数/字节数 + 下一步收窄指引」的契约；`truncationMarkerReserve` 仍按位数上界精确预留（header + head + notice ≤ budget），`firstFailureLine` 继续把被丢弃尾部里的最早错误行提升到 header。折叠提示不再承诺 `artifact_read` 分页；artifact 指针行（`Full raw output artifact_id: …`）保持不变。
+
+验证（2026-09-20）：`go build ./...`、`go vet ./internal/output/ ./internal/toolkit/tools/` 通过；`go test -count=1 -p 2 ./internal/output/... ./internal/toolkit/tools/ ./internal/agent/ ./internal/observability/ ./internal/toolresult/` 全绿。
+
 ---
 
 ## 1. 背景：artifact_read 为何被频繁调用

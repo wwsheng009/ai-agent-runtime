@@ -18,9 +18,9 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
-// l4FoldMarker is the exact text the render layer (L4) inserts between the head
-// and tail segments when it folds an oversized tool payload.
-const l4FoldMarker = "[output truncated for history safety: omitted "
+// l4FoldMarker is the exact text the render layer (L4) appends after the shown
+// head when it folds an oversized tool payload.
+const l4FoldMarker = "[output truncated for history safety: showing the first "
 
 // renderBudgetForBudgetTests holds the render-layer budget far below the
 // smallest per-tool budget (glob/ls = 16 KiB) so every budget-owning payload in

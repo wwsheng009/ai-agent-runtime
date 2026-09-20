@@ -2,6 +2,8 @@ package output
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -214,11 +216,23 @@ func TestRenderToolResultContentForModel_TruncatesLargeToolkitTextForHistory(t *
 	if !strings.Contains(got, "line-000-") {
 		t.Fatalf("expected output head to be preserved, got %q", got)
 	}
-	if !strings.Contains(got, "line-599-") {
-		t.Fatalf("expected output tail to be preserved, got %q", got)
+	// Head-only fold: the tail is intentionally dropped (a hole in the middle
+	// of the text cannot be paged), and the notice must say how much was
+	// omitted plus what to do next.
+	if strings.Contains(got, "line-599-") {
+		t.Fatalf("head-only fold must not keep the tail, got %q", got)
+	}
+	if !strings.Contains(got, "showing the first ") || !strings.Contains(got, "of 600 lines") {
+		t.Fatalf("expected first-N-of-M line notice, got %q", got)
+	}
+	if !strings.Contains(got, "next step:") {
+		t.Fatalf("expected next-step guidance in the fold notice, got %q", got)
+	}
+	if len(got) > modelToolTextByteBudget {
+		t.Fatalf("folded payload must fit the %d-byte budget, got %d bytes", modelToolTextByteBudget, len(got))
 	}
 	if len(got) <= modelToolTextByteBudget/2 {
-		t.Fatalf("expected meaningful head/tail payload, got only %d bytes", len(got))
+		t.Fatalf("expected meaningful head payload, got only %d bytes", len(got))
 	}
 }
 
@@ -243,11 +257,18 @@ func TestRenderToolResultContentForModel_TruncatesLargeEditingToolOutput(t *test
 	if got == content {
 		t.Fatal("expected large editing output to be truncated for model history")
 	}
-	if !strings.Contains(got, "@@ hunk-699 @@") || !strings.Contains(got, "+new-699") {
-		t.Fatalf("expected tail diff lines to be preserved, got %q", got)
+	// Head-only fold keeps the beginning of the diff and drops the tail.
+	if !strings.Contains(got, "@@ hunk-000 @@") || !strings.Contains(got, "+new-000") {
+		t.Fatalf("expected head diff lines to be preserved, got %q", got)
+	}
+	if strings.Contains(got, "@@ hunk-699 @@") {
+		t.Fatalf("head-only fold must not keep the tail diff, got %q", got)
 	}
 	if !strings.Contains(got, "output truncated for history safety") {
 		t.Fatalf("expected editing output truncation marker, got %q", got)
+	}
+	if !strings.Contains(got, "next step:") {
+		t.Fatalf("expected next-step guidance, got %q", got)
 	}
 }
 
@@ -854,10 +875,13 @@ func TestFormatTruncatedToolTextForModel_ExtractsFirstErrorLine(t *testing.T) {
 	}
 }
 
-// TestRenderToolTextForModelHistory_EmbedsContinuationHintInFoldMarker pins P2:
-// when a large body is folded head/tail, the fold marker itself must carry the
-// exact artifact_read continuation command so the model never wanders.
-func TestRenderToolTextForModelHistory_EmbedsContinuationHintInFoldMarker(t *testing.T) {
+// TestRenderToolTextForModelHistory_FoldNoticeCarriesNextStepGuidance pins the
+// head-only fold contract: the notice must state how many lines were shown and
+// omitted and how to read the rest with a narrower call, so a folded result is
+// never a dead end. The notice deliberately does not promise artifact_read
+// paging — that read is itself budget-folded in practice — while the separate
+// artifact pointer notice stays untouched.
+func TestRenderToolTextForModelHistory_FoldNoticeCarriesNextStepGuidance(t *testing.T) {
 	const id = "art_ab12cd34ef56ab12cd34ef56ab12cd34"
 	envelope := &Envelope{
 		ToolCallID:  "call-cont-hint",
@@ -869,16 +893,24 @@ func TestRenderToolTextForModelHistory_EmbedsContinuationHintInFoldMarker(t *tes
 			toolresult.SourceKey:   toolresult.SourceMCP,
 		},
 	}
-	content := strings.Repeat("x", 2*modelToolTextByteBudget)
+	content := strings.Repeat("fold notice line\n", modelToolTextByteBudget/8)
 	got := renderToolTextForModelHistory(content, "", envelope)
-	if !strings.Contains(got, "read via artifact_read(artifact_id="+id+", offset=<bytes>, limit=<bytes>)") {
-		t.Fatalf("expected continuation hint with id in fold marker, got tail %q", got[len(got)-400:])
+	if !strings.Contains(got, "showing the first ") || !strings.Contains(got, "next step:") {
+		t.Fatalf("expected first-N-lines notice with next-step guidance, got tail %q", got[len(got)-500:])
 	}
-	if !strings.Contains(got, "omitted") {
-		t.Fatalf("expected fold marker, got %q", got[len(got)-400:])
+	start := strings.Index(got, "[output truncated for history safety")
+	if start < 0 {
+		t.Fatalf("expected fold notice, got tail %q", got[len(got)-500:])
+	}
+	foldNotice := got[start:]
+	if end := strings.Index(foldNotice, "]\n\n"); end >= 0 {
+		foldNotice = foldNotice[:end+1]
+	}
+	if strings.Contains(foldNotice, "artifact_read") {
+		t.Fatalf("fold notice must not instruct artifact_read paging, got %q", foldNotice)
 	}
 
-	// Small untruncated successful results must NOT grow the hint.
+	// Small untruncated successful results must NOT grow the notice.
 	small := strings.Repeat("y", 100)
 	envelope2 := &Envelope{
 		ToolCallID:  "call-cont-hint-small",
@@ -891,8 +923,8 @@ func TestRenderToolTextForModelHistory_EmbedsContinuationHintInFoldMarker(t *tes
 		},
 	}
 	got2 := renderToolTextForModelHistory(small, "", envelope2)
-	if strings.Contains(got2, "read via artifact_read") {
-		t.Fatalf("untruncated result must not carry continuation hint, got %q", got2)
+	if strings.Contains(got2, "output truncated for history safety") {
+		t.Fatalf("untruncated result must not carry the fold notice, got %q", got2)
 	}
 }
 
@@ -936,13 +968,11 @@ func TestRenderToolResultContentForModel_PreservesNoticeAcrossTruncationPaths(t 
 }
 
 // TestFormatTruncatedToolTextForModel_NeverExceedsBudget pins the hard ceiling:
-// header + head + fold marker + tail must stay within the requested budget for
-// every budget size, including ones smaller than the head/tail usability floor
-// and ones where the artifact dereference hint lengthens the fold marker.
+// header + shown head + fold notice must stay within the requested budget for
+// every budget size, including ones too small to afford the notice at all.
 func TestFormatTruncatedToolTextForModel_NeverExceedsBudget(t *testing.T) {
-	const id = "art_ab12cd34ef56ab12cd34ef56ab12cd34"
-	// Single-line content has no line-boundary snapping slack, so head+tail
-	// fill the body budget exactly; that makes any marker-reserve shortfall
+	// Single-line content has no line-boundary snapping slack, so the head fills
+	// the body budget down to the byte; that makes any notice-reserve shortfall
 	// show up immediately as an over-budget render.
 	singleLine := strings.Repeat("x", 2*modelToolTextByteBudget)
 	multiLine := "2026-01-01 ERROR failed to process\n" +
@@ -951,13 +981,66 @@ func TestFormatTruncatedToolTextForModel_NeverExceedsBudget(t *testing.T) {
 	budgets := []int{1, 64, 256, 512, 1024, 4096, 12 * 1024, 64 * 1024}
 	for _, content := range []string{singleLine, multiLine} {
 		for _, budget := range budgets {
-			for _, pointer := range []string{"", id} {
-				got := formatTruncatedToolTextForModel(content, budget, pointer)
-				if len(got) > budget {
-					t.Fatalf("budget %d (pointer=%q): rendered %d bytes, exceeds budget by %d",
-						budget, pointer, len(got), len(got)-budget)
-				}
+			got := formatTruncatedToolTextForModel(content, budget)
+			if len(got) > budget {
+				t.Fatalf("budget %d: rendered %d bytes, exceeds budget by %d",
+					budget, len(got), len(got)-budget)
 			}
 		}
 	}
+}
+
+// TestFormatTruncatedToolTextForModel_HeadOnlyNoticeReportsShownAndOmittedLines
+// pins the replacement for the middle-fold algorithm: the rendered text keeps
+// only the first lines, and the notice states exactly how many lines are shown
+// and omitted plus how to continue, so nothing is hidden mid-text.
+func TestFormatTruncatedToolTextForModel_HeadOnlyNoticeReportsShownAndOmittedLines(t *testing.T) {
+	var builder strings.Builder
+	for i := 0; i < 2000; i++ {
+		fmt.Fprintf(&builder, "payload line %04d\n", i)
+	}
+	content := builder.String()
+
+	got := formatTruncatedToolTextForModel(content, 4*1024)
+	if strings.Contains(got, "from the middle") {
+		t.Fatalf("middle fold must be gone, got %q", got)
+	}
+	if !strings.Contains(got, "payload line 0000") {
+		t.Fatalf("expected head lines to be shown, got %q", got)
+	}
+	if strings.Contains(got, "payload line 1999") {
+		t.Fatalf("head-only fold must not keep the tail, got %q", got)
+	}
+
+	match := regexp.MustCompile(
+		`showing the first (\d+) of 2000 lines; omitted (\d+) lines \((\d+) bytes\) from the end`,
+	).FindStringSubmatch(got)
+	if match == nil {
+		t.Fatalf("expected first-N-of-M notice, got %q", got)
+	}
+	shown, _ := strconv.Atoi(match[1])
+	omittedLines, _ := strconv.Atoi(match[2])
+	omittedBytes, _ := strconv.Atoi(match[3])
+	if shown <= 0 || shown >= 2000 {
+		t.Fatalf("shown lines = %d, want a strict prefix of 2000", shown)
+	}
+	if shown+omittedLines != 2000 {
+		t.Fatalf("shown %d + omitted %d != 2000 lines", shown, omittedLines)
+	}
+	if rendered := strings.Count(got, "payload line "); rendered != shown {
+		t.Fatalf("notice claims %d shown lines but rendered %d", shown, rendered)
+	}
+	if omittedBytes <= 0 || omittedBytes >= len(content) {
+		t.Fatalf("omitted bytes = %d, want 0 < omitted < %d", omittedBytes, len(content))
+	}
+	if !strings.Contains(got, "next step:") || !strings.Contains(got, "narrower window") {
+		t.Fatalf("expected next-step guidance, got %q", got)
+	}
+	if len(got) > 4*1024 {
+		t.Fatalf("rendered %d bytes, exceeds the 4096-byte budget", len(got))
+	}
+	noticeStart := strings.Index(got, "[output truncated for history safety")
+	noticeEnd := strings.Index(got[noticeStart:], "]\n\n")
+	t.Logf("head-only fold: rendered=%d bytes (budget 4096); shown=%d omittedLines=%d omittedBytes=%d; notice=%q",
+		len(got), shown, omittedLines, omittedBytes, got[noticeStart:noticeStart+noticeEnd+1])
 }

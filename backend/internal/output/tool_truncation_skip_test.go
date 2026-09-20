@@ -51,8 +51,8 @@ func TestViewStyleMetadataIsNotDoubleTruncated(t *testing.T) {
 // TestSkipRenderTruncationKeepsOversizedToolPayloadVerbatim pins the point of
 // the opt-out: a tool that owns its own budget (view/grep/glob/ls/fetch/
 // artifact_read) publishes a payload larger than the render-layer budget, and
-// the render layer must pass it through exactly as produced — no head/tail
-// fold, no duplicated "middle omitted" marker contradicting the tool's own
+// the render layer must pass it through exactly as produced — no head-only
+// fold, no duplicated truncation notice contradicting the tool's own
 // continuation guidance.
 func TestSkipRenderTruncationKeepsOversizedToolPayloadVerbatim(t *testing.T) {
 	content := strings.TrimSpace(strings.Repeat("file_1.go:1:match line\n", modelToolTextByteBudget/8))
