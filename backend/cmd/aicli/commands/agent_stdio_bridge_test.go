@@ -469,6 +469,77 @@ func TestACPEventBridge_RuntimeToolProgressStream(t *testing.T) {
 	}
 }
 
+func TestACPEventBridge_SubagentProgressRendersPerChildToolRows(t *testing.T) {
+	t.Parallel()
+
+	bridge := newACPEventBridge("sess_1")
+	emit := &recordingACPEmitter{}
+	bridge.BeginPrompt("sess_1", emit)
+	defer bridge.EndPrompt()
+
+	progress := func(agentID, message string) runtimeevents.Event {
+		return runtimeevents.Event{
+			Type:      "subagent.progress",
+			SessionID: "sess_1", // 镜像事件已归父会话
+			TraceID:   "trace-" + agentID,
+			Payload: map[string]interface{}{
+				"agent_id":  agentID,
+				"path":      "/root/" + agentID,
+				"role":      "researcher",
+				"state":     "progress",
+				"tool_name": "shell",
+				"message":   message,
+			},
+		}
+	}
+	bridge.HandleRuntimeEvent(progress("child-a", "step 1"))
+	bridge.HandleRuntimeEvent(progress("child-a", "step 2"))
+	bridge.HandleRuntimeEvent(progress("child-b", "booting"))
+	bridge.HandleRuntimeEvent(runtimeevents.Event{
+		Type:      "subagent.completed",
+		SessionID: "sess_1",
+		Payload: map[string]interface{}{
+			"agent_id": "child-a",
+			"status":   "completed",
+			"success":  true,
+		},
+	})
+
+	updates := emit.snapshot()
+	// child-a: tool_call + 2×progress；child-b: tool_call + progress；child-a: 终态。
+	if len(updates) != 6 {
+		t.Fatalf("expected 6 updates, got %d: %+v", len(updates), updates)
+	}
+	// 每个子代理一行：并发子代理绝不折叠到同一 toolCallId。
+	if updates[0].SessionUpdate != acp.SessionUpdateToolCall {
+		t.Fatalf("first update kind = %q, want tool_call", updates[0].SessionUpdate)
+	}
+	rowA := updates[0].ToolCallID
+	if rowA == "" || updates[1].ToolCallID != rowA || updates[2].ToolCallID != rowA {
+		t.Fatalf("child-a row not stable: %q / %q / %q", updates[0].ToolCallID, updates[1].ToolCallID, updates[2].ToolCallID)
+	}
+	if updates[3].SessionUpdate != acp.SessionUpdateToolCall || updates[3].ToolCallID == "" || updates[3].ToolCallID == rowA {
+		t.Fatalf("concurrent child must get its own row: %+v (child-a=%q)", updates[3], rowA)
+	}
+	if updates[4].ToolCallID != updates[3].ToolCallID {
+		t.Fatalf("child-b row not stable: %q / %q", updates[3].ToolCallID, updates[4].ToolCallID)
+	}
+	if !strings.Contains(updates[0].Title, "/root/child-a") {
+		t.Fatalf("row title = %q, want child path", updates[0].Title)
+	}
+	if len(updates[1].ToolContent) == 0 || updates[1].ToolContent[0].Content == nil ||
+		!strings.Contains(updates[1].ToolContent[0].Content.Text, "step 1") {
+		t.Fatalf("progress content = %+v", updates[1].ToolContent)
+	}
+	if len(updates[2].ToolContent) == 0 || updates[2].ToolContent[0].Content == nil ||
+		!strings.Contains(updates[2].ToolContent[0].Content.Text, "step 2") {
+		t.Fatalf("second progress content = %+v", updates[2].ToolContent)
+	}
+	if updates[5].ToolCallID != rowA || updates[5].SessionUpdate != acp.SessionUpdateToolCallUpdate || updates[5].Status != acp.ToolCallStatusCompleted {
+		t.Fatalf("completion update = %+v", updates[5])
+	}
+}
+
 func TestACPEventBridge_AskApprovalAllowOnce(t *testing.T) {
 	t.Parallel()
 
@@ -797,10 +868,14 @@ func TestACPSessionHost_LoadSessionInMemoryReplay(t *testing.T) {
 	defer host.Close()
 
 	sessionID := "acp_mem_1"
+	runtimeSession := runtimechat.NewSession("tester")
+	runtimeSession.ID = sessionID
+	runtimeSession.Metadata.Title = "replayed session"
 	host.mu.Lock()
 	host.sess[sessionID] = &acpHostSession{
 		id: sessionID,
 		chat: &ChatSession{
+			RuntimeSession: runtimeSession,
 			Messages: []runtimetypes.Message{
 				{Role: "user", Content: "hello"},
 				{Role: "assistant", Content: "hi there"},
@@ -814,7 +889,8 @@ func TestACPSessionHost_LoadSessionInMemoryReplay(t *testing.T) {
 		t.Fatalf("LoadSession: %v", err)
 	}
 	updates := emit.snapshot()
-	// 2 history chunks + available_commands_update + session_info_update.
+	// 2 history chunks + available_commands_update + session_info_update (the
+	// title exists, so load must re-push it; a titleless session stays silent).
 	if len(updates) != 4 {
 		t.Fatalf("expected 4 updates, got %d: %+v", len(updates), updates)
 	}
@@ -832,6 +908,12 @@ func TestACPSessionHost_LoadSessionInMemoryReplay(t *testing.T) {
 	}
 	if updates[3].SessionUpdate != acp.SessionUpdateSessionInfo {
 		t.Fatalf("expected session_info_update, got %q", updates[3].SessionUpdate)
+	}
+	if updates[3].Title != "replayed session" {
+		t.Fatalf("session_info title = %q, want replayed session", updates[3].Title)
+	}
+	if updates[3].UpdatedAt == "" {
+		t.Fatalf("session_info_update must carry updatedAt: %+v", updates[3])
 	}
 }
 

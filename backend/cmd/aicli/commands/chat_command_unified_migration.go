@@ -26,6 +26,17 @@ func executeStructuredClearCommand(session *ChatSession, command string) Command
 		}
 		return commandTextResult(message)
 	}
+	return applyStructuredClear(session)
+}
+
+// applyStructuredClear performs the destructive /clear mutation itself, without
+// the interactive confirmation. Headless callers (the ACP host) use it after the
+// user explicitly typed /clear in the client: there is no TTY to confirm on, and
+// the typed command is the confirmation.
+func applyStructuredClear(session *ChatSession) CommandResult {
+	if session == nil {
+		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
+	}
 	if err := replaceRuntimeMessages(session, nil); err != nil {
 		return commandErrorResult(err)
 	}

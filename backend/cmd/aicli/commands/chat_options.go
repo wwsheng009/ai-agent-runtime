@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/wwsheng009/ai-agent-runtime/internal/acp"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -82,6 +83,16 @@ type chatCommandOptions struct {
 	RenderOutputFile         string // --render-output-file：交互聊天终端镜像落盘路径
 	// BudgetTokens 是 --budget-tokens 的单轮 token 预算（PR-4 §6.4）；0 表示不限制。
 	BudgetTokens int
+	// ACPMCPMode / ACPMCPClientPlan / ACPMCPCapabilities 是 ACP 宿主专用的
+	// MCP 装配输入：模式来自 --acp-mcp，计划来自 session/new|load|resume 的
+	// mcpServers 快照，能力位来自本次 initialize 实际通告的 mcpCapabilities。
+	// 其它入口保持零值：模式零值等价 merge，计划为 nil 时不装配会话级 MCP。
+	ACPMCPMode         acpMCPMode
+	ACPMCPClientPlan   *acpMCPClientPlan
+	ACPMCPCapabilities acp.MCPCapabilities
+	// ACPHost 标记该会话由 ACP 宿主（agent stdio）创建，用于开启只有 ACP 才需要
+	// 的收口行为（如本地配置链 MCP 的 turn 边界工具面刷新）。其它入口保持 false。
+	ACPHost bool
 }
 
 func resolveChatInitialPrompt(cmd *cobra.Command) (string, error) {

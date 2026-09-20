@@ -129,13 +129,13 @@ E2E PASS
 | 登出 | `logout` | NO | ACP 目录内无字面量 | — |
 | 会话创建 | `session/new` | YES | `server.go`；`agent_stdio.go` | `additionalDirectories` / `mcpServers` 字段已解析但被忽略；`os.Chdir(cwd)` 是进程级副作用；legacy `modes` 已内联附带 |
 | 会话加载 | `session/load` | YES | `server.go` `handleSessionLoad`；`agent_stdio.go` 回放 | 回放只覆盖 user/agent 文本与工具调用（无权限请求）；configOptions 与 modes 已随响应附带 |
-| 会话恢复 | `session/resume` | NO | 协议文档 `sessionCapabilities.resume`；无 dispatch | 与 `session/load` 的边界未定义（见 §8） |
-| 会话关闭 | `session/close` | YES | `server.go` `handleSessionClose`；`agent_stdio_session_mgmt.go` `CloseSession`；`session_management_test.go` | 幂等；进行中 prompt 的取消语义与 E2E 未收口（§11-B1/B3） |
-| 会话列举 | `session/list` | YES | `types.go` `SessionListRequest/Response`；`server.go` `handleSessionList` + `SessionLister`；`agent_stdio_session_mgmt.go` `ListSessions` | 数字游标分页（页 50）+ cwd 过滤；E2E 未收口（§11-B1） |
-| 会话删除 | `session/delete` | YES | `server.go` `handleSessionDelete` + `SessionDeleter`；`agent_stdio_session_mgmt.go` `DeleteSession` | 先 detach 再删存储；not-found 语义见 §10.1；E2E 未收口（§11-B1） |
+| 会话恢复 | `session/resume` | YES | `types.go` `ResumeSessionRequest/Response`；`server.go` `handleSessionResume` + `SessionResumer`；宿主 `ResumeSession`；`resume_test.go` | 边界已定：重连不重放（对照 `session/load` 重放）；能力位按后端接口置位（`{}`） |
+| 会话关闭 | `session/close` | YES | `server.go` `handleSessionClose`；`agent_stdio_session_mgmt.go` `CloseSession`；`session_management_test.go` | 幂等；进行中 prompt 的取消语义已由 E2E A8a/A8b 收口（`scripts/acp_e2e_session_mgmt.go`） |
+| 会话列举 | `session/list` | YES | `types.go` `SessionListRequest/Response`；`server.go` `handleSessionList` + `SessionLister`；`agent_stdio_session_mgmt.go` `ListSessions` | 数字游标分页（页 50）+ cwd 过滤；E2E A3a/A3b/A4a/A4b 已收口 |
+| 会话删除 | `session/delete` | YES | `server.go` `handleSessionDelete` + `SessionDeleter`；`agent_stdio_session_mgmt.go` `DeleteSession` | 先 detach 再删存储；重复 / 不存在均幂等成功（§10.1、§11.4-D4）；E2E A5a–A7 已收口 |
 | 配置项 | `session/set_config_option` | YES | `server.go`；`agent_stdio_config_option.go` | 四类：`mode` / `model` / `thought_level` / `provider` |
-| 配置项广播 | `config_option_update` | YES | `agent_stdio_mode.go` `broadcastACPModeChange`；`types.go` 类型与 marshal | 仅模式切换路径有发射；其余选项经 `set_config_option` 响应回传（符合协议）；marshal 有单测，发射路径无单测（§11-B2） |
-| legacy 模式切换 | `session/set_mode` | YES | `server.go` `handleSessionSetMode`；`agent_stdio_mode.go` `SetSessionMode` | prompt 进行中拒绝；无单测覆盖（§11-B2） |
+| 配置项广播 | `config_option_update` | YES | `agent_stdio_mode.go` `broadcastACPModeChange`；`types.go` 类型与 marshal | 模式切换路径发射（双通道）；其余选项经 `set_config_option` 响应回传（符合协议）；marshal + 发射路径单测均已覆盖（§11.2-B2） |
+| legacy 模式切换 | `session/set_mode` | YES | `server.go` `handleSessionSetMode`；`agent_stdio_mode.go` `SetSessionMode` | prompt 进行中允许切换（权限按工具调用求值），响应恒为 `{}`，状态经双通道通知回传；单测见 §11.2-B2 |
 | legacy 模式状态 | `modes`（new/load 结果字段） | YES | `types.go` `SessionModeState`；`agent_stdio.go` `NewSession`；`server.go` `handleSessionLoad` | 与 `mode` 配置项同源（§2.5） |
 | 提示词 | `session/prompt` | YES | `server.go`；`agent_stdio.go` | — |
 | 取消 | `$/cancel_request` | YES | 见 `docs/acp/README.md` | — |
@@ -143,11 +143,11 @@ E2E PASS
 | 通知：用户文本 | `user_message_chunk` | YES | `types.go` `UserMessageChunk`；`agent_stdio.go` 回放 | 仅用于 `session/load` 回放 |
 | 通知：思考 | `agent_thought_chunk` | YES | `types.go` `AgentThoughtChunk`；bridge reasoning 分支；回放路径 | 单测 + E2E 已覆盖（§4.6/§10.6） |
 | 通知：工具调用 | `tool_call` / `tool_call_update` | YES | bridge | — |
-| 通知：计划 | `agent_plan` | NO | — | 见 §8 |
-| 通知：用量 | `usage_update` | YES | `types.go` `UsageUpdate` + marshal；`agent_stdio_session_mgmt.go` `emitACPSessionUsage`；`agent_stdio.go` 回合结束后发射 | 窗口未知时不发；仅回合结束发射（§4.2 曾建议回合开始/结束各一次，以 §10.2 为准）；E2E 未收口（§11-B1） |
-| 通知：会话信息 | `session_info_update` | YES | `types.go` `SessionInfoUpdate`；`emitACPSessionInfo`；session/new、load 回放后、回合结束 | 空 title 经 omitempty 省略；未做「同标题去重」（§11-B4）；E2E 未收口（§11-B1） |
-| 通知：可用命令 | `available_commands_update` | YES | `types.go` `AvailableCommandsUpdate`；`agent_stdio_session_mgmt.go` `acpAvailableCommands`；session/new、load | 静态目录（help/status/clear/compact/model/mode）；E2E 未收口（§11-B1） |
-| 通知：模式 | `current_mode_update` | YES | `agent_stdio_mode.go` `broadcastACPModeChange`；`agent_stdio_config_option.go` 模式分支 | 无单测覆盖（§11-B2） |
+| 通知：计划 | `plan` | YES | `types.go` `PlanUpdate`；bridge `acpPlanEntriesFromRuntimeEvent`（todos 终态）；`agent_stdio.go` `lastReplayPlanEntries` 回放重建 | 由 todos 工具终态快照驱动，全量替换语义；相同快照去重；`priority` 恒为 medium；单测 + E2E（`scripts/acp_e2e_plan.go`）已覆盖 |
+| 通知：用量 | `usage_update` | YES | `types.go` `UsageUpdate` + marshal；`agent_stdio_session_mgmt.go` `emitACPSessionUsage`；`agent_stdio.go` 回合结束后发射 | 窗口未知时不发；仅回合结束发射（§4.2 曾建议回合开始/结束各一次，以 §10.2 为准）；E2E 已收口（A2：used=1208 ≤ size=200000） |
+| 通知：会话信息 | `session_info_update` | YES | `types.go` `SessionInfoUpdate`；`agent_stdio_session_mgmt.go` `emitSessionInfo` + `acpSessionInfoCache`；session/new、load 回放后、回合结束 | 空 title 经 omitempty 省略；同标题去重（load 重新 attach 时 reset），单测 + E2E 已收口（A3） |
+| 通知：可用命令 | `available_commands_update` | YES | `types.go` `AvailableCommandsUpdate`；`agent_stdio_session_mgmt.go` `acpAvailableCommands`；session/new、load | 静态目录（help/status/clear/model/mode/provider/reasoning_effort）；E2E 已收口（A1：7 命令、name 无前导 `/`） |
+| 通知：模式 | `current_mode_update` | YES | `agent_stdio_mode.go` `broadcastACPModeChange`；`agent_stdio_config_option.go` 模式分支 | 单测已收口（`agent_stdio_mode_channel_test.go`，§11.2-B2） |
 | 权限请求（server→client） | `session/request_permission` | YES | `server.go` `PermissionRequester`；bridge 审批桥 | — |
 | 未知方法处理 | — | YES | dispatch 默认分支 | 请求 → `-32601`；通知 → 静默忽略，符合规范 |
 | `_meta` | — | PARTIAL | `types.go` `ContentBlock.Meta`（内容块级） | 请求/响应级 `_meta` 未保留（initialize 的 trace context 被丢弃；`LoadSessionResponse` 无 `Meta` 字段） |
@@ -184,7 +184,7 @@ E2E PASS
 `runtimechat.SessionManager` 实现枚举/删除（数字游标分页、cwd 过滤、先 detach 再删存储）；
 能力位经 `effectiveAgentCapabilities` 按后端实现裁剪。
 与下方原验收标准的差异：实现选择「删除活动会话 = 先 detach 再删存储」而非「明确拒绝」
-（以 §10.1 为准）；E2E 部分未收口（§11-B1）。
+（以 §10.1 为准，§11.4-D4 固化）；E2E 已收口（`scripts/acp_e2e_session_mgmt.go` A5a–A7）。
 
 **改动点**：
 
@@ -221,7 +221,7 @@ E2E PASS
 **落地现状（已实现，见 §10.2）**：`types.go` `UsageUpdate` + marshal；宿主在每轮 prompt
 成功后经 `emitACPSessionUsage` 发射（`used=ContextTokenCount`、`size=ContextWindowTokenCount`），
 窗口未知时跳过。实现收窄为「仅回合结束发射」（原建议回合开始/结束各一次，以 §10.2 为准）；
-E2E 未收口（§11-B1）。
+E2E 已收口（`scripts/acp_e2e_notifications.go` A2：used=1208 ≤ size=200000）。
 
 **改动点**：在事件桥（`agent_stdio_bridge.go`）中新增 `EventUsageUpdated` →
 `session/update`(`usage_update`) 的转换与发射；回合开始/结束时各推一次，回合中增量按
@@ -239,10 +239,11 @@ runtime 既有节流策略；**无用量信息时不发**（不要发 `size=0` �
 `additionalDirectories`（这些属于 `session/list` 的 `SessionInfo`）。
 
 **落地现状（已实现，见 §10.2）**：`types.go` `SessionInfoUpdate`；宿主在 session/new、
-session/load 回放后与每轮 prompt 结束经 `emitACPSessionInfo` 发射（数据源为
+session/load 回放后与每轮 prompt 结束经 `emitSessionInfo` 发射（数据源为
 `Session.Metadata` 标题与最近活动时间；空 title 经 omitempty 省略）。
-与下方验收标准的差异：未做「同一标题只发一次」去重，当前每轮重发（§11-B4）；
-E2E 未收口（§11-B1）。
+与下方验收标准的差异已消除：`acpSessionInfoCache` 做 last-title 去重，`session/load`
+重新 attach 时 `resetSessionInfoDedupe` 再推一次（§11.2-B4）；单测
+（`TestACPSessionHostSessionInfoDedupe`）+ E2E A3（第二轮 0 frames）已收口。
 
 **改动点**：在标题首次生成/变更时发射 `session_info_update`；数据源直接用
 `Session.Metadata` 的有效标题；`updatedAt` 取会话最近活动时间（与 §4.1 的
@@ -261,9 +262,9 @@ E2E 未收口（§11-B1）。
 可在会话创建后任意时刻发送；命令以普通 prompt 文本（`/name args`）触发。
 
 **落地现状（已实现，见 §10.2）**：`types.go` `AvailableCommandsUpdate`；宿主在 session/new、
-session/load 经 `emitACPSessionCatalog` 发射静态目录（help/status/clear/compact/model/mode，
-`acpAvailableCommands`），name 不带前导 `/`，空目录序列化为 `[]`。
-E2E 未收口（§11-B1）。
+session/load 经 `emitACPSessionCatalog` 发射静态目录（help/status/clear/model/mode/provider/
+reasoning_effort，`acpAvailableCommands`），name 不带前导 `/`，空目录序列化为 `[]`。
+E2E 已收口（`scripts/acp_e2e_notifications.go` A1：7 命令且均含 name/description）。
 
 **改动点**：把注册表投影为协议结构（`name` 去掉前导 `/`；`description` 用 summary；
 `input.hint` 可用 args 描述），在 `session/new` 完成后与命令集变化时各发射一次；
@@ -283,13 +284,13 @@ E2E 未收口（§11-B1）。
 
 **落地现状（已实现，见 §10.1）**：`server.go` `handleSessionClose` + `SessionCloser` 可选接口；
 宿主 `CloseSession` 幂等（未挂载会话返回成功），对已挂载会话调用 `closeSessionLocked`
-（复用 prompt 取消路径）并释放内存状态。与进行中 prompt 的竞态语义与 E2E 未收口
-（§11-B1/B3）。
+（复用 prompt 取消路径）并释放内存状态。进行中 prompt 的竞态已由 E2E A8a/A8b 固化
+（close 返回 `{}` → 原 prompt 以 `stopReason=cancelled` 收敛，§11.2-B3）。
 
 **改动点**：新增 dispatch case 与 `SessionCloser` 可选接口；关闭时先取消该会话进行中的
 prompt（复用现有 prompt 取消路径），再清理 host 侧会话状态并释放资源；关闭后对该会话的
-prompt / load 等请求返回明确错误（`invalid params`）；重复 close 语义明确（建议幂等，
-或 `invalid params`，写入文档）；能力声明加入 `close`；进程退出路径行为不回归。
+prompt 返回 `-32002 Resource not found`（`sessionLookupRPCError`，§11.4-D5），`session/load`
+仍可重放历史；重复 close 幂等（写入文档）；能力声明加入 `close`；进程退出路径行为不回归。
 
 **验收标准**：E2E：`session/new` → 发起长 prompt → `session/close`（断言 prompt 被取消、
 无悬挂 goroutine）→ 对该会话再发 prompt 被拒；close 后 `session/load` 仍可恢复历史；
@@ -343,7 +344,7 @@ prompt / load 等请求返回明确错误（`invalid params`）；重复 close �
 | **B** | 4.1 `session/list` + `session/delete` | 价值最高但需要新增接口 + 能力协商 + 存储枚举，且与 4.3 的标题数据有依赖（4.3 先落地可为 B 复用） | 独立一批 |
 
 批次 A 内部建议逐项独立提交、逐项跑 E2E，便于定位回归；批次 A 全部完成后再启动批次 B。
-（历史建议：批次 A / B 均已落地，见 §10；其中 4.1–4.5 的 E2E 部分尚未补齐，见 §11-B1。）
+（历史建议：批次 A / B 均已落地，见 §10；4.1–4.5 的 E2E 已补齐，见 §11.2-B1。）
 
 ## 6. 约束与红线
 
@@ -404,13 +405,14 @@ go run ./scripts/acp_e2e_<feature>.go $env:TEMP\aicli-e2e.exe
 
 以下项对 Zed 体感影响较小或需要更大范围改动，记录备查，不在本计划范围内：
 
-- **鉴权族**：`authMethods` 声明、`authenticate`、`logout`（当前恒返回空数组，无鉴权流程）。
-- **`session/resume`**：与 `session/load` 语义重叠（重连不重放 vs 重放），需先明确边界；
-  `sessionCapabilities.resume` 目前未声明。
+- **鉴权族**：`authMethods` 声明、`authenticate`、`logout`（当前恒返回空数组，无鉴权流程）；
+  已裁定保持不实现，理由与红线见 §11.4-D1。
+- **`session/resume`**：**已实施**（2026-09-19/20）。边界已定义：`session/resume` 重连不重放，
+  `session/load` 重放历史；`sessionCapabilities.resume` 按后端接口能力声明为 `{}`。见 §11.1-A2。
 - **客户端宿主能力族（`fs/*`、`terminal/*`、`elicitation`）**：当前 agent 直连本地
   fs/terminal，不使用客户端宿主能力，故为 N/A（§3 范围说明）；远程/沙箱宿主场景再评估。
-- **`clientCapabilities` 解析与协商**：当前解析后即丢弃，导致无法做 boolean 选项门控、
-  无法感知客户端 fs/terminal/elicitation 能力。是多项能力的前置依赖，宜作为独立议题。
+- **`clientCapabilities` 解析与协商**：boolean 选项门控**已实施**（2026-09-20，见 §11.1-A3 与
+  §11.4-D3）；客户端 fs/terminal/elicitation 能力感知仍未做（本 agent 直连本地，暂无消费点）。
 - **`promptCapabilities`（image / audio / embeddedContext）**：当前全 false（文本-only 属预期），
   开放需先补齐多模态输入链路。
 - **`mcpCapabilities`**：MCP 相关能力未声明。
@@ -419,7 +421,9 @@ go run ./scripts/acp_e2e_<feature>.go $env:TEMP\aicli-e2e.exe
   多会话并发时不安全，需改为会话级路径解析。
 - **请求/响应级 `_meta`**：initialize 请求中的 `_meta`（如 trace context）被丢弃；
   内容块级 `ContentBlock.Meta` 已保留。
-- **`agent_plan`**：计划展示通知无发射点（低优先级；Zed 侧已有工具调用/计划模式 UI 兜底）。
+- **`plan`（原 `agent_plan`）**：已由 `todos` 工具终态快照驱动发射（`internal/acp.PlanUpdate`
+  归一化 + bridge 实时路径 + `session/load` 回放重建）；单测 + 真实二进制 E2E
+  （`scripts/acp_e2e_plan.go`，实时与回放两路）已覆盖；Zed 实机渲染仍未验证。
 - **legacy modes 清理**：`mode` 配置项 + legacy `modes` / `set_mode` 双通道已落地（§2.5）；
   协议声明专用 modes API 未来将移除，后续不得新增对 legacy 通道的依赖，
   待客户端生态切换后再评估删除死面。
@@ -456,9 +460,9 @@ go run ./scripts/acp_e2e_<feature>.go $env:TEMP\aicli-e2e.exe
 
 行为契约（测试固化）：
 
-- 能力位为 `true` ⇔ 方法可达；后端未实现对应接口时调用返回 `-32601`（`session_management_test.go`）。
+- 能力位为**对象**（`{}` = 可用，键缺失 = 不可用，ACP v1 不接受布尔 `true`）；后端未实现对应接口时调用返回 `-32601`（`session_management_test.go`、`resume_test.go`）。
 - `sessions` 恒为数组；空命令目录序列化为 `[]`（不返回 `null`）。
-- `session/delete` 对「内存与存储都不存在」返回 not-found；`session/close` 对未挂载会话返回成功。
+- `session/delete` 对「内存与存储都不存在」**幂等成功**（客户端重连后重试删除不应看到假失败）；`session/close` 对未挂载会话返回成功。
 
 ### 10.2 通知面补齐
 
@@ -566,29 +570,70 @@ gofmt -l <改动文件>                                     # 无输出
 
 | # | 项 | 状态 | 证据 / 缺口 |
 |---|---|---|---|
-| A1 | 鉴权族 `authMethods` / `authenticate` / `logout` | NO | `server.go` 恒返回空数组；无 dispatch 分支 |
-| A2 | `session/resume` | NO | 无 dispatch；`SessionCapabilities.Resume` 未声明；与 `session/load` 边界未定义 |
-| A3 | `clientCapabilities` 协商 | PARTIAL | 仅 `Questions` 扩展消费（`server.go`）；boolean 门控、fs/terminal/elicitation 感知未做 |
-| A4 | `session/new` 的 `additionalDirectories` / `mcpServers` | PARTIAL | 字段已解析、未使用（README 已注明） |
+| A1 | 鉴权族 `authMethods` / `authenticate` / `logout` | NO（已裁定，见 §11.4-D1） | `server.go` 恒返回空数组；`authMethods` 为对象数组形状（P0 已修）；无 dispatch 分支 |
+| A2 | `session/resume` | YES | `server.go` `handleSessionResume` + host `ResumeSession`（重连不重放）；`SessionCapabilities.Resume` 由 `effectiveAgentCapabilities` 按后端接口能力置位（`{}` 而非 `true`）；`internal/acp/resume_test.go` 5 例 + 能力门控单测 |
+| A3 | `clientCapabilities` 协商 | PARTIAL | boolean 门控已做：`clientCapabilities()`（读写加锁）、`allowsBooleanConfigOptions()`、`filterClientConfigOptions()`、`serverConfigOptionEmitter` 延迟绑定 + 全 boolean 通知丢弃，覆盖 `session/new` / `load` / `resume` / `set_config_option` 响应与 `session/update` 发射（`internal/acp/client_capability_test.go`）；fs/terminal/elicitation 感知仍未做（本 agent 直连本地，见 §8） |
+| A4 | `session/new` 的 `additionalDirectories` / `mcpServers` | DONE（`mcpServers`）／PARTIAL（`additionalDirectories`，见 §11.4-D2） | `mcpServers` 已全链路生效：解析 `internal/acp/mcp.go` → 映射 `agent_stdio_mcp.go` → 会话级 manager + 信任门控/审计 `acp_mcp_host.go` → 工具面 `chat_tool_policy_sync.go`；`--acp-mcp` 四态开关；E2E 证据见 `acp-mcp-integration-implementation-plan-20260920.md` §13 |
 | A5 | `os.Chdir(cwd)` 进程级副作用 | PARTIAL | `session/new` / `session/load` 改进程工作目录，多会话并发不安全 |
 | A6 | 请求/响应级 `_meta` | PARTIAL | initialize trace context 丢弃；仅内容块级保留 |
-| A7 | `agent_plan` | NO | 无发射点 |
-| A8 | `promptCapabilities` / `mcpCapabilities` | NO | 全 false（文本-only 属预期） |
+| A7 | `plan`（原 `agent_plan`） | YES | `internal/acp.PlanUpdate`（枚举归一化 + 空列表 marshal 为 `[]`）；bridge `acpPlanEntriesFromRuntimeEvent`（todos 终态快照，含去重）；`lastReplayPlanEntries` 回放重建；单测 + E2E 覆盖 |
+| A8 | `promptCapabilities` / `mcpCapabilities` | DONE（`mcpCapabilities`）／NO（`promptCapabilities` 仍文本-only） | `mcpCapabilities` 随 P2 置 `{http:true, sse:true}`（stdio 是 ACP v1 强制项、不体现在能力位）；「置位即承诺」：实现与测试同一提交落地（`internal/acp/types.go`、`internal/mcp/config/types.go` 的 `Headers`） |
 | A9 | legacy modes 清理 | N/A（未来） | 待客户端生态切换后再评估删除死面 |
 
-### 11.2 验证收口类（实现已做，验证未闭环；§7 三层验证不完整）
+### 11.2 验证收口类（2026-09-20 已全部收口；B5 为语义裁定）
 
 | # | 项 | 现状 | 缺口与建议 |
 |---|---|---|---|
-| B1 | 4.1–4.5 真实二进制 E2E 缺失 | `scripts/` 仅 `acp_e2e_cancel.go` / `acp_e2e_thought_chunk.go` / `acp_e2e_thought_level.go` | §4.1–4.5 验收标准点名的 E2E 断言（分页 `nextCursor`、delete→list 消失、usage `used≤size`、title 非空且不含 sessionId/cwd、命令无前导 `/`、close 取消进行中 prompt）均未覆盖。建议新增 `scripts/acp_e2e_session_mgmt.go` 与 `scripts/acp_e2e_notifications.go` |
-| B2 | mode 通道单测缺失 | 测试中 `acpModeConfigOptionID` 仅被 `withoutModeConfigOption` 过滤；`broadcastACPModeChange` / `SetSessionMode` / `handleSessionSetMode` 零引用 | `current_mode_update` 发射、legacy `session/set_mode`、mode 配置项行为、`config_option_update` 发射路径均无测试（`internal/acp/config_option_test.go` 仅覆盖 marshal 形状） |
-| B3 | `session/close` × 进行中 prompt 竞态无测试 | 单测仅覆盖幂等 / 未挂载 | §4.5 验收要求「长 prompt → close → 断言取消」；需单测或 E2E 固化 |
-| B4 | `session_info_update` 未去重 | 每轮 prompt 结束无条件重发（`agent_stdio.go`） | 与 §4.3 验收「同一标题只发一次」不符；wire 层空 title 被 omitempty 省略，无实际破坏；建议实现 last-title 去重，或在 §4.3 明确接受重发 |
-| B5 | §4.1 删除活动会话语义分歧 | 实现「先 detach 再删存储」（§10.1） | 原验收写「明确拒绝」；§4.1 已按实现同步为落地现状，如需改为拒绝需产品裁定 |
-
+| B1 | 4.1–4.5 真实二进制 E2E 缺失 | **已收口（2026-09-20）**：新增 `scripts/acp_e2e_session_mgmt.go`（22/22 PASS：能力对象形状、`session/list` 分页与 `cursor=abc` 负例、delete→list 消失→load 报 -32002、close 取消进行中 prompt、close 后 load 仍成功）与 `scripts/acp_e2e_notifications.go`（A1–A4 PASS：命令目录无前导 `/`、usage `used≤size`、title 非空且不含 sessionId/cwd + 去重、plan 条目） | 两者均对真实编译产物（`go build ./cmd/aicli/`）跑 stdio 全链路；`go run ./scripts/acp_e2e_session_mgmt.go <aicli.exe>` 可复现 |
+| B2 | mode 通道单测缺失 | **已收口（2026-09-20）**：`cmd/aicli/commands/agent_stdio_mode_channel_test.go` 6 例覆盖 `broadcastACPModeChange` 双通道、legacy `session/set_mode`（在途 prompt 变体 + 响应恒为 `{}`）、未知 mode 拒绝且不发射、`/mode <id>` 走双通道、`/model <id>` 只发 `config_option_update`、裸 `/mode` 只回可选值不改状态 | 剩余的 `handleSessionSetMode` 协议层（`internal/acp`）分支仍由既有 `config_option_test.go` 的 marshal 用例间接覆盖；如需协议层负例可另立条目 |
+| B3 | `session/close` × 进行中 prompt 竞态无测试 | **已收口（2026-09-20）**：E2E A8/A8a/A8b 覆盖「慢 prompt 在途 → close 返回 `{}` → 原 prompt 以 `stopReason=cancelled` 收敛」，A8d 覆盖 close 后 `session/load` 仍成功 | 单测层仍只覆盖幂等 / 未挂载；竞态由真实二进制 E2E 固化 |
+| B4 | `session_info_update` 未去重 | **已收口（2026-09-20）**：`agent_stdio_session_mgmt.go` 的 `infoTitles.record` 做 last-title 去重（`resetSessionInfoDedupe` 在 `session/load` attach 时重置），E2E A3 断言第二轮未重发（0 frames） | 无遗留 |
+| B5 | §4.1 删除活动会话语义分歧 | **已裁定（2026-09-20，§11.4-D4）**：保留「先 detach 再删存储」，且删除对不存在的 sessionId 幂等成功；原验收「明确拒绝」作废 | 文档已同步：`docs/acp/README.md` 与 §10.1 |
 ### 11.3 文档同步记录（本轮）
 
+- `plan` 通知落地并收口验证：A7 由 NO → YES，单测（`internal/acp/plan_test.go`、
+  `cmd/aicli/commands/agent_stdio_plan_test.go`）+ 真实二进制 E2E（`scripts/acp_e2e_plan.go`，
+  实时与 `session/load` 回放两路）已过；`docs/acp/README.md` 补充发射语义。
 - §1 第 3 / 6 条、§3 状态说明与矩阵 6 行、§3 一句话总结、§4.1–4.5「当前代码事实」、§5 注记已对齐工作树。
 - `agent_stdio_config_option_test.go` 中「The mode option has its own tests」注释不属实，已修正为指向本节 B2。
 - 关联文档 `docs/acp/README.md` 经核对无陈旧表述（`session/list` / `delete` / `close`、三项通知、
   `agent_thought_chunk`、`messageId` 均已收录；MCP / `additionalDirectories` 的「暂不支持」说明与实现一致）。
+
+### 11.4 决策记录（2026-09-20）
+
+> 本节把 §8「暂不实施」清单中与协议面直接相关的条目固化为**已裁定**结论，避免后续重复评估；
+> 结论一旦需要变更，应先改本节再动代码。
+
+- **D1 — 鉴权族（`authMethods` / `authenticate` / `logout`）保持不实现。**
+  理由：本 agent 的凭据由本地 `aicli login` / provider 配置管理，不通过 ACP 客户端中转；
+  在 stdio 本机场景下 `authenticate` 无对端语义。约束：`initialize` 必须继续返回**非 nil 空数组**
+  `authMethods: []`（P0 已修形状），且不得声明 `auth.logout` —— 声明即等于承诺可实现 `logout`
+  （`internal/acp/types.go` 的 `AgentAuthCapabilities` 注释已固化该红线）。
+  重评触发条件：出现远程/沙箱宿主需要客户端代持凭据时。
+
+- **D2 — `session/new` 的 `additionalDirectories` 继续解析但不生效（`mcpServers` 部分已由 20260920 计划接管并落地）。**
+  理由：`additionalDirectories` 需要会话级路径白名单（与 A5 的 `os.Chdir` 副作用同源，需一并改造）；
+  `mcpServers` 需要 MCP 客户端链路，当前 runtime 的 MCP 支持面未就绪。字段保留解析是为了
+  在客户端下发时**不报错**（前向兼容），文档口径统一为「已接受、暂不生效」。
+  重评触发条件：A5 改造为会话级路径解析时一并处理 `additionalDirectories`。
+  **更新（2026-09-20）**：`mcpServers` 部分**已由
+  `acp-mcp-integration-implementation-plan-20260920.md` 接管并实施**（P0–P2 落地，A4 相应转为 DONE）；
+  本条目剩余约束只覆盖 `additionalDirectories`。
+
+- **D3 — `clientCapabilities` 的 fs/terminal/elicitation 感知暂不实施，但 boolean 门控必须保持。**
+  理由：本 agent 直连本地 fs/terminal，不使用客户端宿主能力（§8）；但 config options 的 boolean
+  门控是**协议合规项**（客户端未声明即不得下发 boolean 选项），已实现并有单测锁定
+  （`internal/acp/client_capability_test.go`）。后续新增任何 `clientCapabilities` 消费点都必须走
+  加锁的 `clientCapabilities()` 快照，不得直接读字段。
+
+- **D4 — `session/delete` 语义：先 detach 再删存储，且对不存在的 sessionId 幂等成功。**
+  理由：客户端在断线重连后会重试删除，对「已经不在」的会话报错只会产生假失败；删除活动会话
+  时先 detach 再删记录，可保证内存态与存储态一致（§10.1）。§4.1 原验收写「删除活动会话应明确
+  拒绝」**作废**——如需改为拒绝必须先改本节。已由 E2E A5a/A5b/A5c/A6/A7 固化（重复删除成功、
+  list 不再包含、load 报 -32002）。
+
+- **D5 — 会话作用域请求的「会话不存在」统一返回 `-32002 Resource not found`（不是 `-32602`）。**
+  理由：ACP v1 在标准错误码之外专门定义了 `-32002 Resource not found`；`sessionId` 语法合法但
+  资源已不存在，属于资源缺失而非参数非法（`-32602` 的定义是 "Invalid method parameter(s)"）。
+  实现侧由 `acp.NotFound(err)` + `sessionLookupRPCError` 统一归类（`internal/acp/server.go`），
+  `session/load`、`session/resume`、`session/prompt`（关闭后）均一致；E2E A7/A8c 断言固化。

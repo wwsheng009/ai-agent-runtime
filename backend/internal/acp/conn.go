@@ -19,6 +19,13 @@ const (
 	CodeMethodNotFound = -32601
 	CodeInvalidParams  = -32602
 	CodeInternalError  = -32603
+	// ACP-specific codes from the v1 ErrorCode enum. They deliberately live
+	// outside the JSON-RPC -326xx band: a client must be able to tell "this
+	// request is malformed" (-32602) apart from "this request is fine but the
+	// resource behind it does not exist" (-32002), or from "this agent does not
+	// do authentication" (-32000).
+	CodeAuthenticationRequired = -32000
+	CodeResourceNotFound       = -32002
 )
 
 // JSONRPCVersion is the fixed JSON-RPC version string.

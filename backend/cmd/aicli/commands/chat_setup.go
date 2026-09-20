@@ -405,17 +405,57 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 	if session.DisableTools {
 		logpkg.Info("AICLI chat tools exposure disabled by flag")
 	} else {
-		if err := prepareChatMCPManager(cfg, session); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: 初始化 MCP 失败: %v\n", err)
-			logpkg.Warnf("AICLI MCP init failed: %v", err)
+		// ACP 会话的 MCP 装配模式：off/client 不初始化本地配置链（会话级
+		// 客户端下发由下面的 buildACPSessionMCP 负责），merge/local 保持旧行为。
+		mcpMode := opts.ACPMCPMode.normalized()
+		useLocalMCP := mcpMode.allowsLocal()
+		if useLocalMCP {
+			if err := prepareChatMCPManager(cfg, session); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: 初始化 MCP 失败: %v\n", err)
+				logpkg.Warnf("AICLI MCP init failed: %v", err)
+			}
+		} else {
+			logpkg.Infof("AICLI local MCP config chain disabled (acp-mcp=%s)", mcpMode)
 		}
 		markChatStartup("capabilities_mcp")
 
-		toolManager = runtimetools.NewDefaultManagerWithRuntimeConfig(MCPManagerInstance, loadRuntimeToolConfig(cfg, session))
+		var globalMCP mcpmanager.Manager
+		if useLocalMCP {
+			globalMCP = MCPManagerInstance
+		}
+		// 会话级 MCP（ACP 客户端下发）优先于进程级配置链：同名工具在合并管理器
+		// 里去重时保留会话级实现。
+		sessionMCP := buildACPSessionMCP(context.Background(), acpMCPSessionLabel(session), session, mcpMode, opts.ACPMCPClientPlan, opts.ACPMCPCapabilities)
+		mcpForTools := globalMCP
+		if sessionMCP != nil {
+			mcpForTools = mcpmanager.NewMergedManager(sessionMCP.manager, globalMCP)
+		}
+
+		toolManager = runtimetools.NewDefaultManagerWithRuntimeConfig(mcpForTools, loadRuntimeToolConfig(cfg, session))
 		toolDescs := toolManager.ListTools()
 		for _, desc := range toolDescs {
 			session.FunctionCatalog.RegisterBuiltinToolFunction(functions.NewRuntimeToolFunction(toolManager, desc), desc)
 		}
+
+		// 工具面刷新器：会话私有与本地配置链两条来源都是异步建连，迟到的工具
+		// 只能在 turn 边界增量登记（§4.7 R1 / D5）。非 ACP 入口不装，保持既有行为。
+		refresher := sessionMCP
+		if refresher == nil && opts.ACPHost && useLocalMCP && globalMCP != nil {
+			refresher = newACPSessionMCPSurface(acpMCPSessionLabel(session), session.FunctionCatalog, globalMCP)
+		}
+		if refresher != nil {
+			if useLocalMCP {
+				refresher.localManager = globalMCP
+			}
+			refresher.toolManager = toolManager
+			// 建连期间已经就绪的工具在这里补登记；迟到的工具在首个 prompt 边界
+			// 由 acpSessionMCP.prepareForPrompt 增量登记。
+			refresher.registered = registeredMCPToolNames(toolDescs)
+			// 目录变化后必须让本会话的稳定工具面失效，否则新工具进不了模型
+			// 工具面（既有失效通道只覆盖 chatWebSession）。
+			refresher.invalidateSurface = func() int { return invalidateACPSessionToolSurface(session) }
+		}
+		session.ACPMCPSession = refresher
 		if MCPManagerInstance != nil {
 			session.MCPStatus = Status()
 			session.MCPEnabled = session.MCPStatus.Enabled

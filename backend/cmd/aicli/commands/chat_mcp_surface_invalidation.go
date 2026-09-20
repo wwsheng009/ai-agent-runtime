@@ -46,3 +46,17 @@ func invalidateChatSessionToolSurfaces() int {
 	defer cancel()
 	return session.LocalRuntimeHost.SessionHub.InvalidateStableToolSurfaces(ctx)
 }
+
+// invalidateACPSessionToolSurface 清除单个 ACP 会话的稳定工具面缓存。
+//
+// ACP 会话不在 chatWebSession() 覆盖范围内，而 MCP 工具（客户端下发或本地
+// 配置链）总是在 session/new 之后才连上；没有这一步，迟到的工具会一直停在
+// 首个 turn 冻结的旧工具面之外（§4.7 R1 / §4.10）。
+func invalidateACPSessionToolSurface(session *ChatSession) int {
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.SessionHub == nil {
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return session.LocalRuntimeHost.SessionHub.InvalidateStableToolSurfaces(ctx)
+}

@@ -38,7 +38,11 @@ const (
 	MethodSessionDelete = "session/delete"
 	// MethodSessionClose releases one live session. Advertised via
 	// agentCapabilities.sessionCapabilities.close.
-	MethodSessionClose  = "session/close"
+	MethodSessionClose = "session/close"
+	// MethodSessionResume reattaches to a stored session WITHOUT replaying its
+	// history (the difference from session/load). Advertised via
+	// agentCapabilities.sessionCapabilities.resume.
+	MethodSessionResume = "session/resume"
 	MethodCancelRequest = "$/cancel_request"
 )
 
@@ -152,6 +156,19 @@ const (
 	ToolKindOther   = "other"
 )
 
+// Plan entry priorities and statuses (ACP plan session update).
+// priority is required by the schema, so entries always carry one of the three
+// enum values; status reuses the todos tool vocabulary.
+const (
+	PlanPriorityHigh   = "high"
+	PlanPriorityMedium = "medium"
+	PlanPriorityLow    = "low"
+
+	PlanStatusPending    = "pending"
+	PlanStatusInProgress = "in_progress"
+	PlanStatusCompleted  = "completed"
+)
+
 // Permission option kinds.
 const (
 	PermissionKindAllowOnce    = "allow_once"
@@ -184,6 +201,10 @@ type ClientCapabilities struct {
 	// Questions advertises the legacy session/request_question extension. It is
 	// the fallback signal used when the client has no form-mode elicitation.
 	Questions bool `json:"questions,omitempty"`
+	// Session carries session-scoped client capabilities. Boolean config
+	// options are gated on Session.ConfigOptions.Boolean: select options are
+	// baseline, boolean ones are not.
+	Session *ClientSessionCapabilities `json:"session,omitempty"`
 	// Meta carries custom capability advertisements per ACP extensibility. The
 	// legacy questions flag is also accepted here (flat, namespaced or nested)
 	// so spec-conformant clients can opt in without a non-spec top-level key.
@@ -195,6 +216,24 @@ type FileSystemCapabilities struct {
 	ReadTextFile  bool `json:"readTextFile,omitempty"`
 	WriteTextFile bool `json:"writeTextFile,omitempty"`
 }
+
+// ClientSessionCapabilities is the ACP v1 `clientCapabilities.session` object.
+type ClientSessionCapabilities struct {
+	ConfigOptions *SessionConfigOptionsCapabilities `json:"configOptions,omitempty"`
+	Meta          map[string]json.RawMessage        `json:"_meta,omitempty"`
+}
+
+// SessionConfigOptionsCapabilities advertises which session config-option
+// types the client can render. Select options are baseline; boolean options
+// require an explicit advertisement.
+type SessionConfigOptionsCapabilities struct {
+	Boolean *BooleanConfigOptionCapabilities `json:"boolean,omitempty"`
+}
+
+// BooleanConfigOptionCapabilities advertises boolean config-option rendering.
+// ACP v1: supplying `{}` means the agent may include `type: "boolean"` options
+// in configOptions payloads.
+type BooleanConfigOptionCapabilities struct{}
 
 // ElicitationCapabilities describes the client's elicitation/create support.
 // A present non-null Form/URL pointer advertises that mode; empty structs are
@@ -227,6 +266,15 @@ func (c ClientCapabilities) SupportsQuestions() bool {
 // while omitted or null means the mode is unsupported.
 func (c ClientCapabilities) SupportsFormElicitation() bool {
 	return c.Elicitation != nil && c.Elicitation.Form != nil
+}
+
+// SupportsBooleanConfigOptions reports whether the client may be sent
+// `type: "boolean"` session config options (ACP v1 client capability
+// `session.configOptions.boolean`). Omitted or null at any level means the
+// client does not advertise support, so agents must fall back to a select
+// option instead of sending a boolean one.
+func (c ClientCapabilities) SupportsBooleanConfigOptions() bool {
+	return c.Session != nil && c.Session.ConfigOptions != nil && c.Session.ConfigOptions.Boolean != nil
 }
 
 // metaFlag reports whether a "_meta" map advertises a truthy value under key.
@@ -295,18 +343,92 @@ type AgentCapabilities struct {
 	PromptCapabilities  *PromptCapabilities  `json:"promptCapabilities,omitempty"`
 	MCPCapabilities     *MCPCapabilities     `json:"mcpCapabilities,omitempty"`
 	SessionCapabilities *SessionCapabilities `json:"sessionCapabilities,omitempty"`
-	Auth                json.RawMessage      `json:"auth,omitempty"`
+	// Auth advertises authentication-related capabilities. ACP v1 types the
+	// object and each flag inside it as capability objects, not booleans.
+	Auth *AgentAuthCapabilities `json:"auth,omitempty"`
 }
 
-// SessionCapabilities advertises the session-management methods this agent
-// implements. Each field must match a real backend implementation: the Server
-// only sets the ones the backend actually satisfies, so clients never see a
-// method advertised that would answer method-not-found.
+// AgentAuthCapabilities is the ACP v1 `agentCapabilities.auth` object. Only the
+// members that are present count as advertised: a client MUST NOT call logout
+// unless Logout is non-nil.
+type AgentAuthCapabilities struct {
+	// Logout is the `logout` capability object. Nil means the method is not
+	// available, which is the case for this agent: it has no login state.
+	Logout *LogoutCapabilities        `json:"logout,omitempty"`
+	Meta   map[string]json.RawMessage `json:"_meta,omitempty"`
+}
+
+// LogoutCapabilities advertises the logout method. ACP v1 requires a
+// capability object (`{}` means supported), never a boolean.
+type LogoutCapabilities struct{}
+
+// SessionCapabilities advertises the session-lifecycle methods this agent
+// implements. ACP v1 types every entry as a capability OBJECT: the key is
+// present (serialized as {}) only when the method is implemented, so a client
+// never sees a method advertised that would answer method-not-found.
 type SessionCapabilities struct {
-	List   bool `json:"list,omitempty"`
-	Delete bool `json:"delete,omitempty"`
-	Close  bool `json:"close,omitempty"`
-	Resume bool `json:"resume,omitempty"`
+	List   *SessionListCapabilities   `json:"list,omitempty"`
+	Delete *SessionDeleteCapabilities `json:"delete,omitempty"`
+	Resume *SessionResumeCapabilities `json:"resume,omitempty"`
+	Close  *SessionCloseCapabilities  `json:"close,omitempty"`
+}
+
+// The per-method capability objects are empty structs: their presence is the
+// advertisement. ACP v1 spells an advertised method as an empty object, which
+// is also why these cannot be booleans.
+type (
+	SessionListCapabilities   struct{}
+	SessionDeleteCapabilities struct{}
+	SessionResumeCapabilities struct{}
+	SessionCloseCapabilities  struct{}
+)
+
+// SupportsList reports whether session/list is advertised.
+func (c SessionCapabilities) SupportsList() bool { return c.List != nil }
+
+// SupportsDelete reports whether session/delete is advertised.
+func (c SessionCapabilities) SupportsDelete() bool { return c.Delete != nil }
+
+// SupportsResume reports whether session/resume is advertised.
+func (c SessionCapabilities) SupportsResume() bool { return c.Resume != nil }
+
+// SupportsClose reports whether session/close is advertised.
+func (c SessionCapabilities) SupportsClose() bool { return c.Close != nil }
+
+// SetList advertises (on) or withdraws (off) session/list.
+func (c *SessionCapabilities) SetList(on bool) {
+	if on {
+		c.List = &SessionListCapabilities{}
+		return
+	}
+	c.List = nil
+}
+
+// SetDelete advertises (on) or withdraws (off) session/delete.
+func (c *SessionCapabilities) SetDelete(on bool) {
+	if on {
+		c.Delete = &SessionDeleteCapabilities{}
+		return
+	}
+	c.Delete = nil
+}
+
+// SetResume advertises (on) or withdraws (off) session/resume.
+func (c *SessionCapabilities) SetResume(on bool) {
+	if on {
+		c.Resume = &SessionResumeCapabilities{}
+		return
+	}
+	c.Resume = nil
+}
+
+// SetClose advertises (on) or withdraws (off) session/close.
+func (c *SessionCapabilities) SetClose(on bool) {
+	if on {
+		c.Close = &SessionCloseCapabilities{}
+		return
+	}
+	c.Close = nil
 }
 
 // PromptCapabilities advertises which ContentBlock types are accepted.
@@ -322,11 +444,22 @@ type MCPCapabilities struct {
 	SSE  bool `json:"sse,omitempty"`
 }
 
-// AuthMethod is advertised during initialize (empty for MVP).
+// AuthMethod is one entry of initialize's authMethods. ACP v1 defines a tagged
+// union: the default (no Type) is an "agent" method whose flow runs through
+// `authenticate`; Type="terminal" tells the client to run the agent program
+// interactively instead. Name is required for agent methods, so it is only
+// omitted when empty (which only happens for never-sent placeholders).
+//
+// This agent advertises no methods: credentials come from the local provider
+// configuration, so there is no login flow for a client to drive.
 type AuthMethod struct {
-	ID          string `json:"id"`
-	Name        string `json:"name,omitempty"`
-	Description string `json:"description,omitempty"`
+	ID          string                     `json:"id"`
+	Name        string                     `json:"name,omitempty"`
+	Description string                     `json:"description,omitempty"`
+	Type        string                     `json:"type,omitempty"`
+	Args        []string                   `json:"args,omitempty"`
+	Env         map[string]string          `json:"env,omitempty"`
+	Meta        map[string]json.RawMessage `json:"_meta,omitempty"`
 }
 
 // InitializeRequest is the params for initialize.
@@ -394,9 +527,13 @@ type SessionListRequest struct {
 
 // SessionSummary is one row of a session/list response. The fields mirror what
 // a client needs to render a history panel without loading each session.
+//
+// Cwd is REQUIRED by ACP v1 and must be an absolute path, so it is never
+// omitted: a producer that cannot recover a session's recorded workspace must
+// fall back to the agent's own working directory instead of sending "".
 type SessionSummary struct {
 	SessionID string `json:"sessionId"`
-	Cwd       string `json:"cwd,omitempty"`
+	Cwd       string `json:"cwd"`
 	Title     string `json:"title,omitempty"`
 	UpdatedAt string `json:"updatedAt,omitempty"`
 }
@@ -522,6 +659,18 @@ func (v SessionConfigOptionValue) ValueID() (string, bool) {
 	return s, true
 }
 
+// ValueIDValue builds the session/set_config_option payload for a value_id
+// (every select-type option). Hosts use it when the agent itself applies a
+// config change, e.g. a slash command carried as prompt text.
+func ValueIDValue(id string) SessionConfigOptionValue {
+	encoded, err := json.Marshal(id)
+	if err != nil {
+		// json.Marshal only fails on unsupported types; a string never does.
+		encoded = []byte(`""`)
+	}
+	return SessionConfigOptionValue{Value: encoded}
+}
+
 // Boolean returns the boolean payload.
 func (v SessionConfigOptionValue) Boolean() (bool, bool) {
 	if t := strings.TrimSpace(v.Type); t != "" && t != "boolean" {
@@ -568,6 +717,23 @@ type LoadSessionResponse struct {
 	// Modes mirrors NewSessionResponse.Modes so an attached client gets the
 	// legacy mode selector without another round trip.
 	Modes *SessionModeState `json:"modes,omitempty"`
+}
+
+// ResumeSessionRequest is the params for session/resume. It mirrors
+// session/load, but the agent MUST NOT replay the conversation history before
+// responding: resume reattaches a client that still owns the transcript.
+type ResumeSessionRequest struct {
+	SessionID             string          `json:"sessionId"`
+	Cwd                   string          `json:"cwd"`
+	AdditionalDirectories []string        `json:"additionalDirectories,omitempty"`
+	MCPServers            json.RawMessage `json:"mcpServers,omitempty"`
+}
+
+// ResumeSessionResponse is the result for session/resume: ACP allows the
+// initial modes / configOptions state and nothing else (no replay payload).
+type ResumeSessionResponse struct {
+	ConfigOptions []SessionConfigOption `json:"configOptions,omitempty"`
+	Modes         *SessionModeState     `json:"modes,omitempty"`
 }
 
 // ContentBlock is a discriminated content unit in prompts / updates.
@@ -1040,6 +1206,13 @@ func UsageUpdate(used, size int64) SessionUpdate {
 	if size < 0 {
 		size = 0
 	}
+	// The spec requires used <= size. Token counters can momentarily overshoot
+	// the configured window (e.g. right after a model switch to a smaller
+	// context), and a client that renders the raw pair would show a >100% meter,
+	// so clamp the pair here, at the single wire-shaping choke point.
+	if used > size {
+		used = size
+	}
 	return SessionUpdate{
 		SessionUpdate: SessionUpdateUsage,
 		Used:          used,
@@ -1069,6 +1242,20 @@ func AvailableCommandsUpdate(commands []AvailableCommand) SessionUpdate {
 	}
 }
 
+// ConfigOptionUpdate builds the out-of-band refresh a client needs when the
+// agent (not the client) changed a config option: the change has no RPC
+// response to carry the authoritative option set, so the full set is pushed as
+// a notification. options must already contain every advertised option.
+func ConfigOptionUpdate(options []SessionConfigOption) SessionUpdate {
+	if options == nil {
+		options = []SessionConfigOption{}
+	}
+	return SessionUpdate{
+		SessionUpdate: SessionUpdateConfigOptionUpdate,
+		ConfigOptions: options,
+	}
+}
+
 // CurrentModeUpdate builds the legacy modes-API notification an agent sends
 // when it changes mode on its own (e.g. entering plan mode). Clients that were
 // offered a `modes` selector use it to refresh the active entry.
@@ -1076,6 +1263,45 @@ func CurrentModeUpdate(modeID string) SessionUpdate {
 	return SessionUpdate{
 		SessionUpdate: SessionUpdateCurrentModeUpdate,
 		CurrentModeID: modeID,
+	}
+}
+
+// PlanUpdate builds a plan session update: the agent's current task list.
+//
+// ACP replaces the client-side plan wholesale on every update, so the full list
+// is always sent and no diffing is needed. Entries are normalized to the schema
+// enums: blank content and unknown statuses are dropped, unknown priorities
+// fall back to medium (priority is a required field). An empty list is still a
+// valid update and clears the client-side plan, because MarshalJSON emits
+// "entries": [] instead of omitting or nulling the field.
+func PlanUpdate(entries []PlanEntry) SessionUpdate {
+	normalized := make([]PlanEntry, 0, len(entries))
+	for _, entry := range entries {
+		content := strings.TrimSpace(entry.Content)
+		if content == "" {
+			continue
+		}
+		status := strings.ToLower(strings.TrimSpace(entry.Status))
+		switch status {
+		case PlanStatusPending, PlanStatusInProgress, PlanStatusCompleted:
+		default:
+			continue
+		}
+		priority := strings.ToLower(strings.TrimSpace(entry.Priority))
+		switch priority {
+		case PlanPriorityHigh, PlanPriorityMedium, PlanPriorityLow:
+		default:
+			priority = PlanPriorityMedium
+		}
+		normalized = append(normalized, PlanEntry{
+			Content:  content,
+			Status:   status,
+			Priority: priority,
+		})
+	}
+	return SessionUpdate{
+		SessionUpdate: SessionUpdatePlan,
+		Entries:       normalized,
 	}
 }
 
@@ -1204,6 +1430,8 @@ func DefaultAgentCapabilities() AgentCapabilities {
 		// SessionCloser), so the advertisement can never promise a method
 		// that would answer method-not-found.
 		SessionCapabilities: &SessionCapabilities{},
-		Auth:                json.RawMessage("{}"),
+		// Auth is an empty capability object: the agent accepts no
+		// authenticate/login state, so it must not advertise logout either.
+		Auth: &AgentAuthCapabilities{},
 	}
 }

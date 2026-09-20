@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -31,6 +32,21 @@ type SessionBackend interface {
 // fail deserialization.
 type SessionLoader interface {
 	LoadSession(ctx context.Context, req LoadSessionRequest, emit Emitter) error
+}
+
+// SessionResumer is an optional SessionBackend extension for session/resume.
+//
+// Resume and load share the same request shape, but the contract differs in the
+// one place that matters: resume MUST NOT replay the conversation. A resuming
+// client still holds the transcript locally (it was detached, not restarted),
+// so replaying would duplicate every message in its UI. The backend therefore
+// reattaches to the stored session and stays silent; the Server answers with
+// the optional state the client cannot derive locally (modes / configOptions).
+//
+// session/resume is advertised only when the backend implements this interface,
+// so an unimplemented method is never promised.
+type SessionResumer interface {
+	ResumeSession(ctx context.Context, req ResumeSessionRequest) error
 }
 
 // SessionConfigOptionSetter is an optional SessionBackend extension for
@@ -173,7 +189,10 @@ type Server struct {
 	// clientCaps keeps the negotiated client capabilities so extension RPCs
 	// (session/request_question) are only attempted with clients that
 	// advertised support for them.
-	clientCaps ClientCapabilities
+	// initialize runs on the Serve goroutine while backends may emit
+	// out-of-band updates from their own goroutines, so the field is guarded.
+	clientCapsMu sync.RWMutex
+	clientCaps   ClientCapabilities
 
 	// promptCancels maps sessionID -> *promptCancelEntry.
 	// Entries use a pointer so we can CompareAndDelete without comparing funcs.
@@ -244,7 +263,69 @@ func (s *Server) PermissionRequester() PermissionRequester {
 // SessionEmitter returns an emitter bound to this server's connection for
 // session/update notifications sent outside a prompt turn.
 func (s *Server) SessionEmitter() Emitter {
-	return connEmitter{conn: s.conn}
+	return serverConfigOptionEmitter{server: s}
+}
+
+// clientCapabilities returns the client capabilities negotiated during
+// initialize. It is a copy, so callers cannot mutate the stored value.
+func (s *Server) clientCapabilities() ClientCapabilities {
+	if s == nil {
+		return ClientCapabilities{}
+	}
+	s.clientCapsMu.RLock()
+	defer s.clientCapsMu.RUnlock()
+	return s.clientCaps
+}
+
+// allowsBooleanConfigOptions reports whether the client advertised
+// clientCapabilities.session.configOptions.boolean. ACP makes boolean config
+// options opt-in: select options are the baseline every v1 client renders, but
+// a boolean option sent to a client that did not claim support may be dropped
+// or rejected by its UI layer.
+func (s *Server) allowsBooleanConfigOptions() bool {
+	return s.clientCapabilities().SupportsBooleanConfigOptions()
+}
+
+// filterClientConfigOptions drops option kinds the negotiated client
+// capabilities do not cover. Nil stays nil so existing "advertised nothing"
+// handling (which marshals to an empty array) is unaffected.
+func (s *Server) filterClientConfigOptions(options []SessionConfigOption) []SessionConfigOption {
+	if len(options) == 0 || s.allowsBooleanConfigOptions() {
+		return options
+	}
+	filtered := make([]SessionConfigOption, 0, len(options))
+	for _, option := range options {
+		if option.Type == SessionConfigOptionTypeBoolean {
+			continue
+		}
+		filtered = append(filtered, option)
+	}
+	return filtered
+}
+
+// serverConfigOptionEmitter forwards session/update notifications to the
+// connection while enforcing the config-option client capability. The
+// capability is resolved per emission (not at construction time) because the
+// backend receives its emitter before initialize has been answered.
+type serverConfigOptionEmitter struct {
+	server *Server
+}
+
+func (e serverConfigOptionEmitter) SessionUpdate(sessionID string, update SessionUpdate) error {
+	if e.server == nil {
+		return fmt.Errorf("acp: no server for session update")
+	}
+	if update.SessionUpdate == SessionUpdateConfigOptionUpdate && !e.server.allowsBooleanConfigOptions() {
+		filtered := e.server.filterClientConfigOptions(update.ConfigOptions)
+		if len(filtered) == 0 && len(update.ConfigOptions) > 0 {
+			// Every advertised option was boolean and the client never claimed
+			// support for the kind: emitting an empty set would wipe the
+			// client's catalog, so the update is dropped instead.
+			return nil
+		}
+		update.ConfigOptions = filtered
+	}
+	return connEmitter{conn: e.server.conn}.SessionUpdate(sessionID, update)
 }
 
 // SupportsQuestions reports whether the client advertised the
@@ -253,7 +334,7 @@ func (s *Server) SupportsQuestions() bool {
 	if s == nil {
 		return false
 	}
-	return s.clientCaps.SupportsQuestions()
+	return s.clientCapabilities().SupportsQuestions()
 }
 
 // SupportsElicitation reports whether the client advertised ACP v1
@@ -262,7 +343,7 @@ func (s *Server) SupportsElicitation() bool {
 	if s == nil {
 		return false
 	}
-	return s.clientCaps.SupportsFormElicitation()
+	return s.clientCapabilities().SupportsFormElicitation()
 }
 
 // QuestionRequester returns a requester bound to this server's connection, or
@@ -270,7 +351,7 @@ func (s *Server) SupportsElicitation() bool {
 // requester that always errors) lets hosts pick their non-interactive default
 // without an extra round trip.
 func (s *Server) QuestionRequester() QuestionRequester {
-	if s == nil || s.conn == nil || !s.clientCaps.SupportsQuestions() {
+	if s == nil || s.conn == nil || !s.SupportsQuestions() {
 		return nil
 	}
 	return questionRequester{conn: s.conn}
@@ -279,7 +360,7 @@ func (s *Server) QuestionRequester() QuestionRequester {
 // ElicitationRequester returns a requester bound to this server's connection,
 // or nil when the client cannot render form elicitations.
 func (s *Server) ElicitationRequester() ElicitationRequester {
-	if s == nil || s.conn == nil || !s.clientCaps.SupportsFormElicitation() {
+	if s == nil || s.conn == nil || !s.SupportsElicitation() {
 		return nil
 	}
 	return elicitationRequester{conn: s.conn}
@@ -386,6 +467,8 @@ func (s *Server) handle(ctx context.Context, msg Message) (interface{}, *RPCErro
 		return s.handleSessionCancel(ctx, msg)
 	case MethodSessionLoad:
 		return s.handleSessionLoad(ctx, msg)
+	case MethodSessionResume:
+		return s.handleSessionResume(ctx, msg)
 	case MethodSessionSetConfigOption:
 		return s.handleSessionSetConfigOption(ctx, msg)
 	case MethodSessionSetMode:
@@ -423,7 +506,9 @@ func (s *Server) handleInitialize(msg Message) (interface{}, *RPCError) {
 	}
 	s.initOnce = true
 	s.client = req.ClientInfo
+	s.clientCapsMu.Lock()
 	s.clientCaps = req.ClientCapabilities
+	s.clientCapsMu.Unlock()
 	authMethods := []AuthMethod{}
 	return InitializeResponse{
 		ProtocolVersion:   version,
@@ -445,13 +530,16 @@ func (s *Server) effectiveAgentCapabilities() AgentCapabilities {
 		sessionCaps = *caps.SessionCapabilities
 	}
 	if _, ok := s.backend.(SessionLister); !ok {
-		sessionCaps.List = false
+		sessionCaps.List = nil
 	}
 	if _, ok := s.backend.(SessionDeleter); !ok {
-		sessionCaps.Delete = false
+		sessionCaps.Delete = nil
 	}
 	if _, ok := s.backend.(SessionCloser); !ok {
-		sessionCaps.Close = false
+		sessionCaps.Close = nil
+	}
+	if _, ok := s.backend.(SessionResumer); !ok {
+		sessionCaps.Resume = nil
 	}
 	caps.SessionCapabilities = &sessionCaps
 	return caps
@@ -472,6 +560,9 @@ func (s *Server) handleSessionNew(ctx context.Context, msg Message) (interface{}
 	if strings.TrimSpace(resp.SessionID) == "" {
 		return nil, NewRPCError(CodeInternalError, "backend returned empty sessionId")
 	}
+	// Boolean config options are opt-in for the client; filter before they
+	// reach a UI that never claimed support for the kind.
+	resp.ConfigOptions = s.filterClientConfigOptions(resp.ConfigOptions)
 	return resp, nil
 }
 
@@ -502,14 +593,20 @@ func (s *Server) handleSessionPrompt(ctx context.Context, msg Message) (interfac
 		s.promptCancels.CompareAndDelete(req.SessionID, entry)
 	}()
 
-	emit := connEmitter{conn: s.conn}
+	// The server-scoped emitter also enforces the config-option client
+	// capability, so a backend cannot leak a boolean option to a client that
+	// never advertised support for the kind.
+	emit := s.SessionEmitter()
 	resp, err := s.backend.Prompt(promptCtx, req, emit)
 	if err != nil {
 		// Cancellation must surface as stopReason=cancelled, not a JSON-RPC error.
 		if isCancelError(err) {
 			return PromptResponse{StopReason: StopReasonCancelled}, nil
 		}
-		return nil, NewRPCError(CodeInternalError, err.Error())
+		// A prompt for a session that was closed or deleted in the meantime is a
+		// resource lookup failure (-32002), not an agent bug; genuine backend
+		// failures still map to -32603 through the same classifier.
+		return nil, sessionLookupRPCError(err)
 	}
 	if strings.TrimSpace(resp.StopReason) == "" {
 		resp.StopReason = StopReasonEndTurn
@@ -567,6 +664,7 @@ func (s *Server) handleSessionSetConfigOption(ctx context.Context, msg Message) 
 		// clients (e.g. Zed deserializes it into Vec<SessionConfigOption>).
 		resp.ConfigOptions = []SessionConfigOption{}
 	}
+	resp.ConfigOptions = s.filterClientConfigOptions(resp.ConfigOptions)
 	return resp, nil
 }
 
@@ -617,7 +715,7 @@ func (s *Server) handleSessionLoad(ctx context.Context, msg Message) (interface{
 	if strings.TrimSpace(req.SessionID) == "" {
 		return nil, NewRPCError(CodeInvalidParams, "sessionId is required")
 	}
-	emit := connEmitter{conn: s.conn}
+	emit := s.SessionEmitter()
 	if err := loader.LoadSession(ctx, req, emit); err != nil {
 		if isCancelError(err) {
 			return nil, NewRPCError(CodeInternalError, "session load cancelled")
@@ -634,12 +732,64 @@ func (s *Server) handleSessionLoad(ctx context.Context, msg Message) (interface{
 		// Config options are a client-side nicety; failing to list them must
 		// not fail the load after the history replay already succeeded.
 		if options, err := provider.SessionConfigOptions(ctx, req.SessionID); err == nil {
-			resp.ConfigOptions = options
+			resp.ConfigOptions = s.filterClientConfigOptions(options)
 		}
 	}
 	if provider, ok := s.backend.(SessionModeProvider); ok && provider != nil {
 		// Same contract as config options: a missing mode list degrades the
 		// picker, it must not fail an otherwise successful attach.
+		if modes, err := provider.SessionModes(ctx, req.SessionID); err == nil {
+			resp.Modes = modes
+		}
+	}
+	return resp, nil
+}
+
+// handleSessionResume serves session/resume. It mirrors session/load but never
+// replays history: the backend reattaches silently and the response carries
+// only the state a resuming client cannot derive locally (configOptions /
+// modes). Emitting the transcript here would duplicate every message in a
+// client that only detached, which is exactly what ACP forbids.
+func (s *Server) handleSessionResume(ctx context.Context, msg Message) (interface{}, *RPCError) {
+	resumer, ok := s.backend.(SessionResumer)
+	if !ok || resumer == nil {
+		return nil, NewRPCError(CodeMethodNotFound, "method not found: "+MethodSessionResume)
+	}
+	var req ResumeSessionRequest
+	if err := DecodeParams(msg, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.SessionID) == "" {
+		return nil, NewRPCError(CodeInvalidParams, "sessionId is required")
+	}
+	// Unlike session/load, ACP v1 makes cwd required for session/resume and
+	// types it as an absolute path. A relative value cannot be matched against
+	// the recorded workspace, so it is rejected before the backend sees it.
+	if strings.TrimSpace(req.Cwd) == "" {
+		return nil, NewRPCError(CodeInvalidParams, "cwd is required")
+	}
+	if !filepath.IsAbs(req.Cwd) {
+		return nil, NewRPCError(CodeInvalidParams, "cwd must be an absolute path")
+	}
+	if err := resumer.ResumeSession(ctx, req); err != nil {
+		if isCancelError(err) {
+			return nil, NewRPCError(CodeInternalError, "session resume cancelled")
+		}
+		return nil, sessionLookupRPCError(err)
+	}
+	// Never JSON null: ACP types ResumeSessionResponse as an object with only
+	// optional fields, and strict clients fail to deserialize null.
+	resp := ResumeSessionResponse{}
+	if provider, ok := s.backend.(SessionConfigOptionProvider); ok && provider != nil {
+		// Config options are a client-side nicety; failing to list them must
+		// not fail the resume after the session was already reattached.
+		if options, err := provider.SessionConfigOptions(ctx, req.SessionID); err == nil {
+			resp.ConfigOptions = s.filterClientConfigOptions(options)
+		}
+	}
+	if provider, ok := s.backend.(SessionModeProvider); ok && provider != nil {
+		// Same contract as config options: a missing mode list degrades the
+		// picker, it must not fail an otherwise successful reattach.
 		if modes, err := provider.SessionModes(ctx, req.SessionID); err == nil {
 			resp.Modes = modes
 		}
@@ -661,7 +811,9 @@ func (s *Server) handleSessionList(ctx context.Context, msg Message) (interface{
 	}
 	resp, err := lister.ListSessions(ctx, req)
 	if err != nil {
-		return nil, NewRPCError(CodeInternalError, err.Error())
+		// A malformed cursor is a client error (the host wraps it with
+		// acp.InvalidParams); a broken store stays an internal error.
+		return nil, sessionLookupRPCError(err)
 	}
 	if resp.Sessions == nil {
 		// The spec types sessions as an array; emit [] rather than null.
@@ -738,13 +890,55 @@ func InvalidParams(err error) error {
 	return &InvalidParamsError{Err: err}
 }
 
+// NotFoundError marks a backend error as "the resource behind a well-formed
+// request does not exist", which is an ACP-specific error class rather than a
+// JSON-RPC parse/param failure.
+type NotFoundError struct {
+	Err error
+}
+
+func (e *NotFoundError) Error() string {
+	if e == nil || e.Err == nil {
+		return "not found"
+	}
+	return e.Err.Error()
+}
+
+func (e *NotFoundError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// NotFound wraps err so sessionLookupRPCError classifies it as
+// CodeResourceNotFound (-32002). Hosts use it when a session-scoped request
+// names a session that is unknown, closed or deleted: the request itself is
+// well-formed, the resource is gone.
+func NotFound(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &NotFoundError{Err: err}
+}
+
 // sessionLookupRPCError maps backend errors to a stable RPC error class.
-// Explicit InvalidParamsError wrappers win; otherwise "session not found"
-// style messages map to invalid params so clients can distinguish missing
-// sessions from agent bugs.
+// Explicit wrappers win in this order, so a host that wraps a message with
+// NotFound/InvalidParams is never reclassified by substring heuristics:
+//
+//   - NotFoundError (and legacy "session not found" style messages) →
+//     CodeResourceNotFound, so clients can tell a missing session apart from a
+//     malformed request;
+//   - InvalidParamsError → CodeInvalidParams (bad cursor, unsupported config
+//     value, ...);
+//   - everything else → CodeInternalError (an agent bug, not a client error).
 func sessionLookupRPCError(err error) *RPCError {
 	if err == nil {
 		return nil
+	}
+	var notFound *NotFoundError
+	if errors.As(err, &notFound) {
+		return NewRPCError(CodeResourceNotFound, err.Error())
 	}
 	var invalid *InvalidParamsError
 	if errors.As(err, &invalid) {
@@ -754,7 +948,7 @@ func sessionLookupRPCError(err error) *RPCError {
 	if strings.Contains(msgText, "not found") ||
 		strings.Contains(msgText, "unknown session") ||
 		strings.Contains(msgText, "no such session") {
-		return NewRPCError(CodeInvalidParams, err.Error())
+		return NewRPCError(CodeResourceNotFound, err.Error())
 	}
 	return NewRPCError(CodeInternalError, err.Error())
 }

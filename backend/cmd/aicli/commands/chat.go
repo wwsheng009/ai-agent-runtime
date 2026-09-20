@@ -127,6 +127,9 @@ type ChatSession struct {
 	KeyHandler                      *ui.KeyHandler               // 键盘事件处理器（ESC 键中断）
 	MCPEnabled                      bool                         // 是否启用 MCP
 	MCPStatus                       *MCPStatus                   // MCP 状态
+	// ACPMCPSession 是 ACP 会话私有的 MCP 运行时（客户端下发来源）。
+	// 非 ACP 会话恒为 nil；会话关闭/删除时负责回收其子进程。
+	ACPMCPSession *acpSessionMCP
 	SkillsBinding                   *skillsRuntimeBinding        // Skills 运行时绑定
 	SkillsMode                      string                       // Skills 暴露模式
 	SkillsDebug                     bool                         // Skills 调试输出

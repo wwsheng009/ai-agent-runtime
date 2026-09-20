@@ -44,7 +44,9 @@ func newServerForSessionMgmtTest(backend SessionBackend) *Server {
 	caps := DefaultAgentCapabilities()
 	// Advertise every session-management flag: effectiveAgentCapabilities must
 	// clear the ones the backend does not implement.
-	caps.SessionCapabilities = &SessionCapabilities{List: true, Delete: true, Close: true}
+	caps.SessionCapabilities.SetList(true)
+	caps.SessionCapabilities.SetDelete(true)
+	caps.SessionCapabilities.SetClose(true)
 	return NewServer(conn, backend, ServerOptions{
 		AgentInfo:         Implementation{Name: "aicli", Version: "test"},
 		AgentCapabilities: caps,
@@ -75,14 +77,17 @@ func TestEffectiveAgentCapabilitiesGatesSessionMethods(t *testing.T) {
 	if caps.SessionCapabilities == nil {
 		t.Fatal("sessionCapabilities must be present in initialize result")
 	}
-	if caps.SessionCapabilities.List || caps.SessionCapabilities.Delete || caps.SessionCapabilities.Close {
+	if caps.SessionCapabilities.SupportsList() || caps.SessionCapabilities.SupportsDelete() || caps.SessionCapabilities.SupportsClose() {
 		t.Fatalf("unimplemented session methods must not be advertised: %+v", caps.SessionCapabilities)
 	}
 
 	full := newServerForSessionMgmtTest(&sessionMgmtBackend{fakeBackend: &fakeBackend{}})
 	caps = full.effectiveAgentCapabilities()
-	if !caps.SessionCapabilities.List || !caps.SessionCapabilities.Delete || !caps.SessionCapabilities.Close {
+	if !caps.SessionCapabilities.SupportsList() || !caps.SessionCapabilities.SupportsDelete() || !caps.SessionCapabilities.SupportsClose() {
 		t.Fatalf("implemented session methods must be advertised: %+v", caps.SessionCapabilities)
+	}
+	if caps.SessionCapabilities.SupportsResume() {
+		t.Fatalf("sessionMgmtBackend does not implement SessionResumer, so resume must stay unadvertised: %+v", caps.SessionCapabilities)
 	}
 }
 

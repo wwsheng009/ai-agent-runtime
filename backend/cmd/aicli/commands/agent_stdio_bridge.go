@@ -36,6 +36,17 @@ type acpEventBridge struct {
 	// a new assistant turn apart from a continuation of the previous one.
 	// Thought chunks reuse it with a "_thought" suffix.
 	messageID string
+	// subagentToolCalls maps a child-subagent identity (agent_id/session_id) to
+	// the synthetic toolCallId of its conversation row. ACP has no native
+	// subagent concept, so each child renders as its own tool_call_update row;
+	// concurrent children must never collapse onto one row. Reset per prompt,
+	// like toolCallIDs (children are spawned inside the turn that called
+	// spawn_agent).
+	subagentToolCalls map[string]string
+	// lastPlanFingerprint is the most recent plan payload sent on this session.
+	// Identical repeats are suppressed because clients replace the whole plan on
+	// every update; the fingerprint is session-scoped, not per-prompt.
+	lastPlanFingerprint string
 	// promptCtx is the in-flight prompt context; permission requests bind to
 	// it so a session cancel also aborts a pending request_permission RPC.
 	promptCtx context.Context
@@ -77,6 +88,7 @@ func (b *acpEventBridge) BeginPrompt(sessionID string, emit acp.Emitter) {
 	b.messageID = "msg_" + generateItemID()
 	b.toolCallIDs = make(map[string]string)
 	b.openToolCalls = make(map[string]bool)
+	b.subagentToolCalls = make(map[string]string)
 }
 
 // BeginPromptCtx binds the in-flight prompt context for approval cancellation.
@@ -280,6 +292,11 @@ func (b *acpEventBridge) HandleRuntimeEvent(event runtimeevents.Event) {
 		}
 		_ = b.sessionUpdate(acp.ToolCallFinished(id, toolName, status, rawOutput, content))
 		b.markToolOpen(id, false)
+		// The todos tool result carries the session task list; mirror it as a
+		// plan update so ACP clients render the same todo panel as the web UI.
+		if entries, ok := acpPlanEntriesFromRuntimeEvent(event); ok {
+			_ = b.emitPlanUpdate(acp.PlanUpdate(entries))
+		}
 
 	case runtimechat.EventLLMRequestFinished, "llm.request.finished":
 		// ACP clients do not consistently render the JSON-RPC error returned by
@@ -311,6 +328,16 @@ func (b *acpEventBridge) HandleRuntimeEvent(event runtimeevents.Event) {
 			_ = b.sessionUpdate(acp.AgentThoughtChunk(text))
 		}
 
+	case "subagent.progress":
+		// 子代理进度镜像（live-only，SessionID 已归父会话）：映射为一条合成的
+		// tool_call_update 行，ACP 客户端因此能看到每个并发子代理各自的进展，
+		// 而不是把它们混进父回合正文。
+		b.handleSubagentProgressRuntimeEvent(event)
+
+	case "subagent.completed":
+		// 终态摘要（生产者已落父库，总线帧供 live 消费）：收束对应的合成行。
+		b.handleSubagentCompletedRuntimeEvent(event)
+
 	case runtimechat.EventAssistantMessage, "assistant.message":
 		// Prefer streaming deltas; only emit full content if nothing streamed yet.
 		b.mu.Lock()
@@ -324,6 +351,135 @@ func (b *acpEventBridge) HandleRuntimeEvent(event runtimeevents.Event) {
 			_ = b.sessionUpdate(acp.AgentMessageChunk(content))
 		}
 	}
+}
+
+// handleSubagentProgressRuntimeEvent renders one parent-stream
+// subagent.progress mirror as a synthetic tool_call_update row (P2)：ACP 没有
+// 原生子代理概念，用「每个子代理一行」把并发进展可视化，且避免与父回合
+// 的正文/工具行争用同一个 toolCallId。
+func (b *acpEventBridge) handleSubagentProgressRuntimeEvent(event runtimeevents.Event) {
+	if b == nil {
+		return
+	}
+	agentKey := acpSubagentEventIdentity(event)
+	if agentKey == "" {
+		return
+	}
+	b.mu.Lock()
+	if b.subagentToolCalls == nil {
+		b.subagentToolCalls = make(map[string]string)
+	}
+	id := b.subagentToolCalls[agentKey]
+	b.mu.Unlock()
+	if id == "" {
+		id = b.stableToolCallID("runtime_subagent:"+agentKey, "subagent_"+agentKey)
+		b.mu.Lock()
+		b.subagentToolCalls[agentKey] = id
+		b.mu.Unlock()
+		_ = b.sessionUpdate(acp.ToolCallStarted(id, "subagent", acpSubagentEventTitle(event, agentKey), acp.ToolKindOther, nil))
+	}
+	if text := acpSubagentProgressText(event); text != "" {
+		_ = b.sessionUpdate(acp.ToolCallProgressContent(id, acp.ToolCallStatusInProgress, []acp.ToolCallContent{
+			acp.TextToolContent(text),
+		}))
+		return
+	}
+	_ = b.sessionUpdate(acp.ToolCallProgress(id, acp.ToolCallStatusInProgress))
+}
+
+// handleSubagentCompletedRuntimeEvent closes the synthetic row opened by a
+// progress mirror (or opens+closes it when progress was throttled away).
+func (b *acpEventBridge) handleSubagentCompletedRuntimeEvent(event runtimeevents.Event) {
+	if b == nil {
+		return
+	}
+	agentKey := acpSubagentEventIdentity(event)
+	if agentKey == "" {
+		return
+	}
+	b.mu.Lock()
+	id := ""
+	if b.subagentToolCalls != nil {
+		id = b.subagentToolCalls[agentKey]
+		delete(b.subagentToolCalls, agentKey)
+	}
+	b.mu.Unlock()
+	if id == "" {
+		id = b.stableToolCallID("runtime_subagent:"+agentKey, "subagent_"+agentKey)
+		_ = b.sessionUpdate(acp.ToolCallStarted(id, "subagent", acpSubagentEventTitle(event, agentKey), acp.ToolKindOther, nil))
+	}
+	status := acp.ToolCallStatusCompleted
+	if !acpSubagentEventSucceeded(event) {
+		status = acp.ToolCallStatusFailed
+	}
+	_ = b.sessionUpdate(acp.ToolCallFinished(id, "subagent", status, acpSubagentRawSummary(event), nil))
+}
+
+// acpSubagentRawSummary keeps the lifecycle subset an ACP client may render in
+// the row details (identity, routing, terminal status).
+func acpSubagentRawSummary(event runtimeevents.Event) map[string]interface{} {
+	keys := []string{
+		"agent_id", "subagent_id", "session_id", "path", "role", "agent_type",
+		"status", "success", "summary", "error", "duration_ms", "parent_tool_call_id",
+	}
+	out := make(map[string]interface{}, len(keys))
+	for _, key := range keys {
+		if value, ok := event.Payload[key]; ok && value != nil {
+			out[key] = value
+		}
+	}
+	return out
+}
+
+func acpSubagentEventIdentity(event runtimeevents.Event) string {
+	return firstNonEmptyChatValue(
+		payloadStringValue(event.Payload["agent_id"]),
+		payloadStringValue(event.Payload["subagent_id"]),
+		payloadStringValue(event.Payload["session_id"]),
+	)
+}
+
+func acpSubagentEventTitle(event runtimeevents.Event, fallback string) string {
+	role := firstNonEmptyChatValue(payloadStringValue(event.Payload["role"]), payloadStringValue(event.Payload["agent_type"]))
+	path := payloadStringValue(event.Payload["path"])
+	switch {
+	case path != "" && role != "":
+		return truncateForACP(path+" · "+role, 120)
+	case path != "":
+		return truncateForACP(path, 120)
+	case role != "":
+		return truncateForACP(role, 120)
+	default:
+		return truncateForACP(fallback, 120)
+	}
+}
+
+func acpSubagentProgressText(event runtimeevents.Event) string {
+	parts := make([]string, 0, 3)
+	if state := payloadStringValue(event.Payload["state"]); state != "" {
+		parts = append(parts, state)
+	}
+	if tool := payloadStringValue(event.Payload["tool_name"]); tool != "" {
+		parts = append(parts, tool)
+	}
+	if message := firstNonEmptyChatValue(payloadStringValue(event.Payload["message"]), payloadStringValue(event.Payload["partial"])); message != "" {
+		parts = append(parts, message)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return truncateForACP(strings.Join(parts, " · "), 400)
+}
+
+func acpSubagentEventSucceeded(event runtimeevents.Event) bool {
+	if success, ok := event.Payload["success"].(bool); ok {
+		return success
+	}
+	switch strings.ToLower(payloadStringValue(event.Payload["status"])) {
+	case "failed", "error", "interrupted", "stopped", "cancelled", "canceled":
+		return false
+	}
+	return true
 }
 
 // acpReasoningDeltaText extracts the streamable reasoning text of a runtime

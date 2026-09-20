@@ -77,7 +77,12 @@ docs/acp/README.md。
 
 session/load 解析顺序：先内存中已附着的 session，再按 --session-dir
 等非 ephemeral 配置从持久化存储恢复。默认 --ephemeral 时仅支持进程内
-session/new 后再 load 同一 id。MCPServers 参数暂不支持。
+session/new 后再 load 同一 id。
+
+MCP：session/new|load|resume 的 mcpServers 会被逐条容错解析并装配成会话级
+MCP（stdio/http/sse），生命周期与会话一致；非法条目只产生诊断，不会让请求失败。
+装配策略见 --acp-mcp（默认 merge：本地配置链 + 客户端下发）。未信任工作区会
+拒绝启动客户端下发的 server 并在 stderr 给出原因。
 
 stdin 是协议流，不是 prompt 文本。模型/权限等通过 flags 配置。
 权限 / profile / agent 相关概念见 docs/aicli/agents.md 与 docs/aicli/exec.md。`,
@@ -122,4 +127,6 @@ func registerAgentStdioFlags(cmd *cobra.Command) {
 		_ = f.Value.Set("true")
 		f.Usage = "不持久化会话文件（agent stdio 默认 true）"
 	}
+	cmd.Flags().String("acp-mcp", "merge",
+		"客户端下发 mcpServers 的装配策略：merge=本地配置链+客户端下发（默认）|local=仅本地|client=仅客户端|off=全部关闭")
 }

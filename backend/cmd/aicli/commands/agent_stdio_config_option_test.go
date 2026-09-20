@@ -37,7 +37,8 @@ func configOptionTestValue(t *testing.T, raw string) acp.SessionConfigOptionValu
 
 // withoutModeConfigOption drops the permission-mode option so the model and
 // provider assertions keep their historical positions. Mode-option behavior is
-// not asserted here; its coverage is tracked in the ACP capability plan (§11-B2).
+// asserted in agent_stdio_mode_channel_test.go (both mode channels + the
+// legacy session/set_mode path).
 func withoutModeConfigOption(options []acp.SessionConfigOption) []acp.SessionConfigOption {
 	filtered := make([]acp.SessionConfigOption, 0, len(options))
 	for _, option := range options {

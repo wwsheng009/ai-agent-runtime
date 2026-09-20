@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/acp"
@@ -134,7 +135,9 @@ func (h *acpSessionHost) ListSessions(ctx context.Context, req acp.SessionListRe
 }
 
 // DeleteSession implements acp.SessionDeleter (session/delete): the live
-// session is detached first, then the durable record is removed.
+// session is detached first, then the durable record is removed. Deleting a
+// session that is already gone is a silent success (ACP v1 marks it SHOULD):
+// clients retry deletes after reconnect and must not see a spurious failure.
 func (h *acpSessionHost) DeleteSession(ctx context.Context, req acp.SessionDeleteRequest) error {
 	sessionID := strings.TrimSpace(req.SessionID)
 	if sessionID == "" {
@@ -173,7 +176,7 @@ func (h *acpSessionHost) DeleteSession(ctx context.Context, req acp.SessionDelet
 		// A live-only session (never persisted) is fully removed by detaching.
 		return nil
 	}
-	return fmt.Errorf("session %q not found", sessionID)
+	return nil
 }
 
 // CloseSession implements acp.SessionCloser (session/close). Closing a session
@@ -332,23 +335,64 @@ func acpSessionSummaryForChat(sessionID string, chat *ChatSession) acp.SessionSu
 }
 
 // acpAvailableCommands is the static slash-command catalog advertised through
-// available_commands_update. Only commands a headless ACP client can actually
-// trigger are listed.
+// available_commands_update. Only commands the headless ACP host can actually
+// serve are listed: TUI-only entries (pickers, alternate-screen viewers and the
+// interactive-confirmation /compact) are filtered out, and every listed command
+// is claimed by dispatchACPSlashCommand before the text could reach the model.
 func acpAvailableCommands() []acp.AvailableCommand {
 	return []acp.AvailableCommand{
 		{Name: "help", Description: "显示可用命令与帮助信息"},
 		{Name: "status", Description: "显示当前会话、模型与 token 状态"},
-		{Name: "clear", Description: "清空当前会话上下文"},
-		{Name: "compact", Description: "压缩当前会话上下文", Input: &acp.AvailableCommandInput{Hint: "[保留轮数]"}},
+		{Name: "clear", Description: "清空当前会话上下文（输入即确认）"},
 		{Name: "model", Description: "切换模型", Input: &acp.AvailableCommandInput{Hint: "<model-id>"}},
+		{Name: "provider", Description: "切换模型提供方", Input: &acp.AvailableCommandInput{Hint: "<provider-id>"}},
+		{Name: "reasoning_effort", Description: "切换推理强度", Input: &acp.AvailableCommandInput{Hint: "<level|default>"}},
 		{Name: "mode", Description: "切换权限模式（default/accept_edits/plan/bypass_permissions）", Input: &acp.AvailableCommandInput{Hint: "<mode>"}},
 	}
 }
 
-// emitACPSessionCatalog pushes the command catalog plus a first session_info
+// acpSessionInfoCache remembers the last session_info_update title pushed to the
+// client. The title is regenerated after every turn, but §4.3 requires the wire
+// notification to stay stable: only a changed (or newly known) title is worth a
+// push, otherwise the client's history panel flickers on every prompt.
+type acpSessionInfoCache struct {
+	mu     sync.Mutex
+	titles map[string]string
+}
+
+// record stores title and reports whether it differs from the last one.
+func (c *acpSessionInfoCache) record(sessionID, title string) bool {
+	if c == nil {
+		return true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.titles == nil {
+		c.titles = make(map[string]string)
+	}
+	if last, ok := c.titles[sessionID]; ok && last == title {
+		return false
+	}
+	c.titles[sessionID] = title
+	return true
+}
+
+// forget drops the recorded title so the next update is emitted again. Used
+// when a client (re)attaches through session/load: the freshly attached client
+// needs the current title even though this process already pushed it once.
+func (c *acpSessionInfoCache) forget(sessionID string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.titles, sessionID)
+}
+
+// emitSessionCatalog pushes the command catalog plus the current session_info
 // snapshot. Failures are ignored: the catalog is advisory and must never fail
 // session creation.
-func emitACPSessionCatalog(emit acp.Emitter, sessionID string, chat *ChatSession) {
+func (h *acpSessionHost) emitSessionCatalog(emit acp.Emitter, sessionID string, chat *ChatSession) {
 	if emit == nil {
 		return
 	}
@@ -357,19 +401,45 @@ func emitACPSessionCatalog(emit acp.Emitter, sessionID string, chat *ChatSession
 		return
 	}
 	_ = emit.SessionUpdate(sessionID, acp.AvailableCommandsUpdate(acpAvailableCommands()))
-	emitACPSessionInfo(emit, sessionID, chat)
+	h.emitSessionInfo(emit, sessionID, chat)
 }
 
-// emitACPSessionInfo reports the current session title/updatedAt so the client
-// history panel stays in sync after auto-title generation.
-func emitACPSessionInfo(emit acp.Emitter, sessionID string, chat *ChatSession) {
-	if emit == nil {
+// emitSessionInfo reports the current session title/updatedAt so the client
+// history panel stays in sync after auto-title generation. §4.3: a session
+// whose title has not been generated yet sends nothing (title/updatedAt are
+// optional on the wire, and an empty-title push is pure noise), and an
+// unchanged title is never pushed twice.
+func (h *acpSessionHost) emitSessionInfo(emit acp.Emitter, sessionID string, chat *ChatSession) {
+	if emit == nil || h == nil {
 		return
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return
 	}
+	title, updatedAt := acpSessionInfoValues(chat)
+	if title == "" {
+		return
+	}
+	if !h.infoTitles.record(sessionID, title) {
+		return
+	}
+	_ = emit.SessionUpdate(sessionID, acp.SessionInfoUpdate(title, updatedAt))
+}
+
+// resetSessionInfoDedupe lets the next emitSessionInfo push the current title
+// again (session/load attach).
+func (h *acpSessionHost) resetSessionInfoDedupe(sessionID string) {
+	if h == nil {
+		return
+	}
+	h.infoTitles.forget(strings.TrimSpace(sessionID))
+}
+
+// acpSessionInfoValues projects the runtime session metadata onto the
+// session_info_update payload. updatedAt falls back to "now" so a title change
+// always carries a fresh timestamp.
+func acpSessionInfoValues(chat *ChatSession) (string, string) {
 	title := ""
 	updatedAt := time.Now().UTC().Format(time.RFC3339)
 	if chat != nil && chat.RuntimeSession != nil {
@@ -380,7 +450,7 @@ func emitACPSessionInfo(emit acp.Emitter, sessionID string, chat *ChatSession) {
 			updatedAt = chat.RuntimeSession.UpdatedAt.UTC().Format(time.RFC3339)
 		}
 	}
-	_ = emit.SessionUpdate(sessionID, acp.SessionInfoUpdate(title, updatedAt))
+	return title, updatedAt
 }
 
 // emitACPSessionUsage reports context-window consumption after a turn.

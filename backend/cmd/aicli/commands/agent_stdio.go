@@ -23,6 +23,8 @@ import (
 // It reuses ExecOptions parsing so provider/model/profile flags stay aligned.
 type agentStdioOptions struct {
 	*ExecOptions
+	// MCPMode 是 --acp-mcp 的装配策略（merge|local|client|off），零值等价 merge。
+	MCPMode acpMCPMode
 }
 
 func runAgentStdio(cmd *cobra.Command, cfg *config.Config) error {
@@ -49,6 +51,17 @@ func runAgentStdio(cmd *cobra.Command, cfg *config.Config) error {
 		}
 	}
 	opts := &agentStdioOptions{ExecOptions: execOpts}
+	if cmd.Flags().Lookup("acp-mcp") != nil {
+		raw, err := cmd.Flags().GetString("acp-mcp")
+		if err != nil {
+			return err
+		}
+		mode, err := parseACPMCPMode(raw)
+		if err != nil {
+			return err
+		}
+		opts.MCPMode = mode
+	}
 
 	if len(opts.ConfigOverrides) > 0 {
 		if err := applyConfigOverrides(cfg, opts.ConfigOverrides); err != nil {
@@ -75,11 +88,17 @@ func runAgentStdio(cmd *cobra.Command, cfg *config.Config) error {
 	// the corresponding UI. The server still clears any flag whose method the
 	// backend does not actually implement.
 	agentCaps := acp.DefaultAgentCapabilities()
-	agentCaps.SessionCapabilities = &acp.SessionCapabilities{
-		List:   true,
-		Delete: true,
-		Close:  true,
+	agentCaps.SessionCapabilities.SetList(true)
+	agentCaps.SessionCapabilities.SetDelete(true)
+	agentCaps.SessionCapabilities.SetResume(true)
+	agentCaps.SessionCapabilities.SetClose(true)
+	// 能力位「置位即承诺」：mcpCapabilities 同时驱动 initialize 通告与会话级
+	// MCP 的传输门控，两者永远取同一份值。
+	if agentCaps.MCPCapabilities != nil {
+		agentCaps.MCPCapabilities.HTTP = true
+		agentCaps.MCPCapabilities.SSE = true
 	}
+	host.SetMCPCapabilities(agentCaps.MCPCapabilities)
 	server := acp.NewServer(conn, host, acp.ServerOptions{
 		AgentInfo: acp.Implementation{
 			Name:    "aicli",
@@ -125,6 +144,13 @@ type acpSessionHost struct {
 	storeMgr    *runtimechat.SessionManager
 	storeUserID string
 	closed      bool
+	// mcpCaps 是本次 initialize 实际通告的 mcpCapabilities。它同时用于客户端
+	// 下发 server 的传输门控：未通告的传输零连接尝试地跳过。仅在 Serve 之前
+	// 写入一次，之后只读，因此不需要加锁（bootstrap 路径已持有 h.mu）。
+	mcpCaps acp.MCPCapabilities
+	// infoTitles dedupes session_info_update per session: §4.3 requires the same
+	// title to be pushed once, and a fresh session/load attach to push it again.
+	infoTitles acpSessionInfoCache
 }
 
 type acpHostSession struct {
@@ -159,6 +185,16 @@ func (h *acpSessionHost) SetPermissionRequester(req acp.PermissionRequester) {
 			s.bridge.SetPermissionRequester(req)
 		}
 	}
+}
+
+// SetMCPCapabilities records the mcpCapabilities advertised by initialize so the
+// session MCP gate and the advertisement can never diverge. Call it before
+// Serve; the field is read-only afterwards.
+func (h *acpSessionHost) SetMCPCapabilities(caps *acp.MCPCapabilities) {
+	if h == nil || caps == nil {
+		return
+	}
+	h.mcpCaps = *caps
 }
 
 // SetSessionEmitter implements acp.SessionEmitterAware: the ACP server hands
@@ -216,6 +252,9 @@ func (h *acpSessionHost) NewSession(ctx context.Context, req acp.NewSessionReque
 	if h == nil {
 		return acp.NewSessionResponse{}, fmt.Errorf("acp host is nil")
 	}
+	// mcpServers 是 per-request 输入：解析成快照后随 ctx 传给 bootstrap，
+	// 避免写 host 级共享状态（多会话并发时会产生竞态）。
+	ctx = withACPMCPClientPlan(ctx, newACPMCPClientPlan(req.MCPServers))
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
@@ -245,7 +284,7 @@ func (h *acpSessionHost) NewSession(ctx context.Context, req acp.NewSessionReque
 	recordACPSessionWorkspace(ctx, hostSess, acpResolveSessionWorkspace(cwd))
 	// Advertise the command catalog + initial session_info without waiting for
 	// a prompt: the client renders the slash-command panel from session/new.
-	emitACPSessionCatalog(h.emit, hostSess.id, hostSess.chat)
+	h.emitSessionCatalog(h.emit, hostSess.id, hostSess.chat)
 	return acp.NewSessionResponse{
 		SessionID: hostSess.id,
 		// Advertise the model selector inline: ACP v1 session/new carries
@@ -327,6 +366,13 @@ func (h *acpSessionHost) Prompt(ctx context.Context, req acp.PromptRequest, emit
 		hostSess.bridge.BeginPromptCtx(promptCtx)
 	}
 
+	// Slash commands arrive as ordinary prompt text over ACP. Claim the
+	// advertised ones (available_commands_update) before the turn reaches the
+	// model; unknown "/..." text stays a normal prompt.
+	if h.dispatchACPSlashCommand(promptCtx, sessionID, hostSess, text, emit) {
+		return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
+	}
+
 	// Ensure runtime event bridge is live and prefers ACP approvals.
 	// Stdout is reserved for NDJSON; silence console writers for this turn.
 	rtBridge := ensureChatRuntimeEventBridge(chat)
@@ -345,6 +391,13 @@ func (h *acpSessionHost) Prompt(ctx context.Context, req acp.PromptRequest, emit
 	// let the resumed run settle before submitting the new prompt.
 	if reconcileACPRestoredApproval(promptCtx, hostSess, chat) {
 		waitForACPRecoveredRun(promptCtx, chat)
+	}
+
+	// 会话级 MCP 的 turn 边界：首次 prompt 前等待建连（有界 2s），并增量登记
+	// 建连期间到达的工具。登记必须发生在本会话的 turn goroutine 上，避免与
+	// 正在执行的 turn 并发写 FunctionCatalog。
+	if chat.ACPMCPSession != nil {
+		chat.ACPMCPSession.prepareForPrompt(promptCtx)
 	}
 
 	response, err := sendMessage(chat, text)
@@ -370,7 +423,7 @@ func (h *acpSessionHost) Prompt(ctx context.Context, req acp.PromptRequest, emit
 	// Refresh the context meter and the (possibly auto-generated) title after
 	// every completed turn so the client never shows stale session metadata.
 	emitACPSessionUsage(emit, sessionID, chat)
-	emitACPSessionInfo(emit, sessionID, chat)
+	h.emitSessionInfo(emit, sessionID, chat)
 	return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
 }
 
@@ -404,6 +457,7 @@ func (h *acpSessionHost) LoadSession(ctx context.Context, req acp.LoadSessionReq
 	if sessionID == "" {
 		return fmt.Errorf("sessionId is required")
 	}
+	ctx = withACPMCPClientPlan(ctx, newACPMCPClientPlan(req.MCPServers))
 
 	h.mu.Lock()
 	if h.closed {
@@ -417,7 +471,10 @@ func (h *acpSessionHost) LoadSession(ctx context.Context, req acp.LoadSessionReq
 		if err := replayACPSessionHistory(sessionID, existing, emit); err != nil {
 			return err
 		}
-		emitACPSessionCatalog(emit, sessionID, existing.chat)
+		// A client attaching (or re-attaching after close) needs the current
+		// title even if this process already pushed it once.
+		h.resetSessionInfoDedupe(sessionID)
+		h.emitSessionCatalog(emit, sessionID, existing.chat)
 		return nil
 	}
 
@@ -445,7 +502,8 @@ func (h *acpSessionHost) LoadSession(ctx context.Context, req acp.LoadSessionReq
 		if err := replayACPSessionHistory(sessionID, existing, emit); err != nil {
 			return err
 		}
-		emitACPSessionCatalog(emit, sessionID, existing.chat)
+		h.resetSessionInfoDedupe(sessionID)
+		h.emitSessionCatalog(emit, sessionID, existing.chat)
 		return nil
 	}
 
@@ -457,7 +515,72 @@ func (h *acpSessionHost) LoadSession(ctx context.Context, req acp.LoadSessionReq
 	if err := replayACPSessionHistory(hostSess.id, hostSess, emit); err != nil {
 		return err
 	}
-	emitACPSessionCatalog(emit, hostSess.id, hostSess.chat)
+	h.resetSessionInfoDedupe(hostSess.id)
+	h.emitSessionCatalog(emit, hostSess.id, hostSess.chat)
+	return nil
+}
+
+// ResumeSession implements acp.SessionResumer: it reattaches a client to a
+// stored session WITHOUT replaying the transcript. ACP reserves history replay
+// for session/load; a resuming client still owns the conversation locally, so
+// emitting it again would duplicate every message in its UI. The observable
+// state a client cannot derive locally (configOptions / modes) is attached to
+// the response by the ACP Server, not pushed here.
+//
+// Validation mirrors session/load, except that both sessionId and an absolute
+// cwd are mandatory: the Server already rejects empty/relative values, and the
+// checks are repeated because this method is also reachable from Go callers.
+func (h *acpSessionHost) ResumeSession(ctx context.Context, req acp.ResumeSessionRequest) error {
+	if h == nil {
+		return fmt.Errorf("acp host is nil")
+	}
+	sessionID := strings.TrimSpace(req.SessionID)
+	if sessionID == "" {
+		return fmt.Errorf("sessionId is required")
+	}
+	cwd := strings.TrimSpace(req.Cwd)
+	if cwd == "" {
+		return fmt.Errorf("cwd is required")
+	}
+	if !filepath.IsAbs(cwd) {
+		return fmt.Errorf("cwd %q must be an absolute path", req.Cwd)
+	}
+	ctx = withACPMCPClientPlan(ctx, newACPMCPClientPlan(req.MCPServers))
+
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return fmt.Errorf("acp host is closed")
+	}
+	existing := h.sess[sessionID]
+	h.mu.Unlock()
+	if existing != nil {
+		// Already attached in this process: resume is a no-op, and above all it
+		// must not re-emit the catalog/history the client already has.
+		return nil
+	}
+
+	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
+		return fmt.Errorf("invalid cwd %q: must be an existing directory", req.Cwd)
+	}
+	if err := os.Chdir(cwd); err != nil {
+		return fmt.Errorf("chdir to cwd %q: %w", cwd, err)
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return fmt.Errorf("acp host is closed")
+	}
+	// Re-check under lock in case another resume/load raced in.
+	if h.sess[sessionID] != nil {
+		return nil
+	}
+	hostSess, err := h.bootstrapSessionFromIDLocked(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	h.sess[hostSess.id] = hostSess
 	return nil
 }
 
@@ -476,7 +599,7 @@ func (h *acpSessionHost) bootstrapSessionFromIDLocked(ctx context.Context, sessi
 }
 
 func (h *acpSessionHost) bootstrapSessionWithIDLocked(ctx context.Context, sessionID string) (*acpHostSession, error) {
-	_ = ctx
+	clientPlan := acpMCPClientPlanFromContext(ctx)
 	opts := h.opts
 	if opts == nil || opts.ExecOptions == nil {
 		return nil, fmt.Errorf("agent stdio options are nil")
@@ -503,6 +626,12 @@ func (h *acpSessionHost) bootstrapSessionWithIDLocked(ctx context.Context, sessi
 	// process restarts. Force non-ephemeral for both session/new and session/load.
 	execOpts.Ephemeral = false
 	chatOpts := buildExecChatOptions(&execOpts)
+	// 会话级 MCP 装配输入：模式（--acp-mcp）、本次请求下发的 server 快照、
+	// 以及 initialize 实际通告的能力位。
+	chatOpts.ACPMCPMode = opts.MCPMode.normalized()
+	chatOpts.ACPMCPClientPlan = clientPlan
+	chatOpts.ACPMCPCapabilities = h.mcpCaps
+	chatOpts.ACPHost = true
 	// ACP never consumes stdin as human input.
 	chatOpts.InputReader = nil
 	chatOpts.NoInteractive = true
@@ -615,7 +744,8 @@ func (h *acpSessionHost) bootstrapSessionWithIDLocked(ctx context.Context, sessi
 
 // replayACPSessionHistory emits prior turns as session/update notifications so an
 // IDE host can reconstruct the transcript before the next session/prompt.
-// MCPServers on load requests are ignored (not supported by this host).
+// mcpServers on load requests are applied by LoadSession before the replay runs
+// (same assembly path as session/new: acp_mcp_host.go / agent_stdio_mcp.go).
 func replayACPSessionHistory(sessionID string, hostSess *acpHostSession, emit acp.Emitter) error {
 	if hostSess == nil {
 		return fmt.Errorf("session %q not found", sessionID)
@@ -713,6 +843,16 @@ func replayACPSessionHistory(sessionID string, hostSess *acpHostSession, emit ac
 			// system / unknown roles are not part of the ACP transcript surface.
 		}
 	}
+	// Rebuild the session task list last: plan state has no durable record, so a
+	// freshly attached client gets the newest todos snapshot in the transcript
+	// (clients replace the whole plan on every update).
+	if entries, ok := lastReplayPlanEntries(messages); ok {
+		if update := acp.PlanUpdate(entries); len(update.Entries) > 0 {
+			if err := emit.SessionUpdate(sessionID, update); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
@@ -740,6 +880,11 @@ func (h *acpSessionHost) closeSessionLocked(s *acpHostSession) {
 	if s.cleanup != nil {
 		s.cleanup()
 		s.cleanup = nil
+	}
+	// 回收会话级 MCP：session/close、session/delete 与宿主关闭都会走到这里，
+	// 保证客户端下发的 server 子进程不会泄漏到会话生命周期之外。
+	if s.chat != nil && s.chat.ACPMCPSession != nil {
+		s.chat.ACPMCPSession.close()
 	}
 }
 

@@ -71,9 +71,15 @@ func TestACPSessionHostListDeleteClose(t *testing.T) {
 		t.Fatalf("CloseSession(unknown) = %v, want nil", err)
 	}
 
-	// Deleting a session that exists neither live nor on disk is an error.
-	if err := host.DeleteSession(ctx, acp.SessionDeleteRequest{SessionID: "missing"}); err == nil {
-		t.Fatal("expected error deleting unknown session")
+	// Deleting a session that exists neither live nor on disk is a silent
+	// success: ACP v1 defines delete as idempotent, so a client retrying after
+	// a reconnect must not see a spurious not-found failure.
+	if err := host.DeleteSession(ctx, acp.SessionDeleteRequest{SessionID: "missing"}); err != nil {
+		t.Fatalf("DeleteSession(unknown) = %v, want nil", err)
+	}
+	// An empty sessionId is still a client error: it can never name a session.
+	if err := host.DeleteSession(ctx, acp.SessionDeleteRequest{SessionID: "  "}); err == nil {
+		t.Fatal("expected invalid params for empty sessionId")
 	}
 
 	if err := host.DeleteSession(ctx, acp.SessionDeleteRequest{SessionID: created.ID}); err != nil {
@@ -212,5 +218,51 @@ func TestACPSessionHostListFiltersByWorkspace(t *testing.T) {
 	}
 	if len(resp.Sessions) != 0 {
 		t.Fatalf("different-workspace session leaked into list: %+v", resp.Sessions)
+	}
+}
+
+// TestACPSessionHostSessionInfoDedupe pins §4.3/§11-B4: an unchanged title is
+// pushed once, a changed title is pushed again, and session/load (which calls
+// resetSessionInfoDedupe) lets the same title reach a freshly attached client.
+func TestACPSessionHostSessionInfoDedupe(t *testing.T) {
+	t.Parallel()
+
+	host := newSessionMgmtTestHost(t)
+	chat := &ChatSession{RuntimeSession: &runtimechat.Session{
+		ID:       "sess-info",
+		Metadata: runtimechat.SessionMetadata{Title: "hello title"},
+	}}
+	emit := &recordingACPEmitter{}
+
+	host.emitSessionInfo(emit, "sess-info", chat)
+	host.emitSessionInfo(emit, "sess-info", chat)
+	if got := len(emit.snapshot()); got != 1 {
+		t.Fatalf("unchanged title pushed %d times, want 1", got)
+	}
+
+	// An auto-generated title change must reach the client.
+	chat.RuntimeSession.Metadata.Title = "generated title"
+	host.emitSessionInfo(emit, "sess-info", chat)
+	if got := len(emit.snapshot()); got != 2 {
+		t.Fatalf("changed title pushed %d times total, want 2", got)
+	}
+
+	// A (re)attaching client needs the current title even when unchanged.
+	host.resetSessionInfoDedupe("sess-info")
+	host.emitSessionInfo(emit, "sess-info", chat)
+	updates := emit.snapshot()
+	if len(updates) != 3 {
+		t.Fatalf("after reset the title must be re-emitted: total %d, want 3", len(updates))
+	}
+	if last := updates[len(updates)-1]; last.SessionUpdate != acp.SessionUpdateSessionInfo || last.Title != "generated title" {
+		t.Fatalf("last update = %+v, want session_info_update with the current title", last)
+	}
+
+	// An empty title must never hit the wire: omitempty would leave a noise
+	// frame that strict clients render as a blank header.
+	empty := &ChatSession{RuntimeSession: &runtimechat.Session{ID: "sess-empty"}}
+	host.emitSessionInfo(emit, "sess-empty", empty)
+	if got := len(emit.snapshot()); got != 3 {
+		t.Fatalf("empty title must not emit: total %d, want 3", got)
 	}
 }

@@ -18,7 +18,8 @@ ACP 客户端侧的编辑器 / IDE（如 Zed 类 host）作为外部 Agent 驱�
 7. [取消语义（$/cancel_request 与 session/cancel）](#取消语义)
 8. [session 持久化与恢复](#session-持久化与恢复)
 9. [端到端自测](#端到端自测)
-10. [常见问题](#常见问题)
+10. [MCP 集成](#mcp-集成)
+11. [常见问题](#常见问题)
 
 ## 快速开始
 
@@ -88,14 +89,15 @@ provider/model 的完整解析链（flag → runtime session → workspace 偏�
 
 | 方法 | 说明 |
 |---|---|
-| `initialize` | 握手。返回 `protocolVersion`、`agentCapabilities`、`agentInfo`（name=`aicli`）、`authMethods` |
-| `session/new` | 创建会话。参数 `{cwd, mcpServers}`（MCP 参数暂不支持，保留字段）；返回 `{sessionId, configOptions?}`（`configOptions` 携带模型 / provider 选择器） |
+| `initialize` | 握手。返回 `protocolVersion`、`agentCapabilities`、`agentInfo`（name=`aicli`）、`authMethods`。`authMethods` 恒为**非 nil 空数组** `[]`：本 agent 凭据由本地 `aicli login` 管理，不实现 `authenticate` / `logout`（裁定见实施计划 §11.4-D1） |
+| `session/new` | 创建会话。参数 `{cwd, mcpServers}`（`mcpServers` 逐条容错解析并装配为会话级 MCP，见 [MCP 集成](#mcp-集成)）；返回 `{sessionId, configOptions?}`（`configOptions` 携带模型 / provider 选择器） |
 | `session/prompt` | 运行一轮对话。参数 `{sessionId, prompt: ContentBlock[]}`；阻塞至本轮结束，返回 `{stopReason}`。当前仅 `type=text` 内容块 |
 | `session/cancel` | 取消某 session 的在途 prompt。参数 `{sessionId}`（通知，无响应） |
 | `session/set_config_option` | 修改会话选项（模型 / provider 选择）。参数 `{sessionId, configId, value}`，`value` 为 `value_id` 字符串或布尔值；返回**完整的** `{configOptions}` 供客户端刷新选择器。Zed 的模型菜单即通过该方法切换模型，provider 选择器走同一方法（`configId: "provider"`） |
 | `session/load` | 恢复会话（仅 `loadSession=true` 能力时可用）。agent 通过 `session/update` 回放历史后返回空对象 `{}`（`LoadSessionResponse`，字段均可选）。返回 `null` 违反 ACP v1 schema，会导致 Zed 等严格客户端反序列化失败 |
+| `session/resume` | 重连到持久化会话（需声明 `sessionCapabilities.resume`）。参数 `{sessionId, cwd?, mcpServers?}`；与 `session/load` 的区别是**不重放历史**——客户端已持有 transcript 时用它重连，返回 `{}`。provider 恢复失败不阻塞重连（会话仍挂载） |
 | `session/list` | 枚举持久化会话（需声明 `sessionCapabilities.list`）。参数 `{cursor?, cwd?}`；返回 `{sessions: [{sessionId, cwd?, title?, updatedAt?}], nextCursor?}`，`sessions` 恒为数组（空时为 `[]`，绝不返回 `null`）。`cursor` 为上一页返回的 `nextCursor`（数字偏移） |
-| `session/delete` | 删除持久化会话（需声明 `sessionCapabilities.delete`）。参数 `{sessionId}`；返回 `{}`。会话仍在内存中时先 detach 再删除存储记录；两者都不存在时返回 not-found |
+| `session/delete` | 删除持久化会话（需声明 `sessionCapabilities.delete`）。参数 `{sessionId}`；返回 `{}`。会话仍在内存中时先 detach 再删除存储记录；sessionId 已不存在（内存与存储都没有）时**幂等成功**——客户端重连后会重试删除，不该看到假失败。删除后 `session/load` 该 id 返回 `-32002`（资源不存在） |
 | `session/close` | 释放内存中的会话（需声明 `sessionCapabilities.close`）。参数 `{sessionId}`；返回 `{}`。未挂载的会话按幂等处理（不报错），供客户端退出时清理 |
 | `session/set_mode` | legacy 权限模式切换（`{sessionId, modeId}`）。与 `configId: "mode"` 配置项双通道并存，见下节 |
 | `$/cancel_request` | JSON-RPC 标准取消通知。参数 `{requestId}`，按请求 id 取消在途调用（双向） |
@@ -112,18 +114,24 @@ provider/model 的完整解析链（flag → runtime session → workspace 偏�
 ```jsonc
 {
   "loadSession": true,
-  "sessionCapabilities": {"list": true, "delete": true, "close": true},
+  "sessionCapabilities": {"list": {}, "delete": {}, "resume": {}, "close": {}},
   "promptCapabilities": {"image": false, "audio": false, "embeddedContext": false},
-  "mcpCapabilities": {"http": false, "sse": false}
+  "mcpCapabilities": {"http": true, "sse": true}
 }
 ```
 
 当前 MVP 仅支持文本 prompt；图片 / 音频 / embeddedContext 暂未开放。
 
-`initialize` 返回前会按后端**实际实现**裁剪 `sessionCapabilities` 的布尔位：
-声明为 `true` 的方法一定可达，未实现的方法既不会被声明、调用时也返回 `-32601`
-（见 `internal/acp/server.go` 的 `effectiveAgentCapabilities`）。aicli 宿主实现了
-`list` / `delete` / `close` 三者。
+`mcpCapabilities.http/sse = true` 是**置位即承诺**：置位的传输必须真的能连（见
+[MCP 集成](#mcp-集成)），未置位的传输会被「跳过 + 可见诊断」。stdio 是 ACP v1
+要求所有 agent 必须支持的传输，规范里没有对应开关，因此**不由能力位表达**。
+
+ACP v1 把 `sessionCapabilities` 的每一项定型为**能力对象**（不是布尔值）：键存在
+（序列化为 `{}`）才代表方法可用，布尔 `true` 会被严格客户端判为 schema 违规。
+
+`initialize` 返回前会按后端**实际实现**裁剪这些键：声明的方法一定可达，未实现的方法
+既不会被声明、调用时也返回 `-32601`（见 `internal/acp/server.go` 的
+`effectiveAgentCapabilities`）。aicli 宿主实现了 `list` / `delete` / `resume` / `close` 四者。
 
 ### stopReason 取值
 
@@ -156,6 +164,11 @@ provider/model 的完整解析链（flag → runtime session → workspace 偏�
 
 工具 `kind` 映射 ACP 分类：`read` / `edit` / `delete` / `move` / `search` /
 `execute` / `think` / `fetch` / `other`。
+
+`plan` 由 `todos` 工具的终态快照驱动（`payload.protocol_result.metadata.todo_snapshot`，
+与 Web 任务面板同源）：每次发送全量列表，客户端整体替换；条目 `priority` 恒为 `medium`
+（todos 无优先级字段），`status` 与工具状态一致；`session/load` 回放时用历史中最新的
+todos 快照重建任务列表，重复快照不再重发。
 
 ## 权限请求流程
 
@@ -260,8 +273,13 @@ provider/model 的完整解析链（flag → runtime session → workspace 偏�
 
 实现要点：
 
-- 只发出 select 类型选项：ACP v1 中 select 是基线能力，boolean 选项需
-  客户端额外声明 `session.configOptions.boolean`。
+- 选项按客户端能力门控：select 是 ACP v1 基线能力，始终下发；boolean 选项
+  只有在客户端 `initialize` 声明了 `clientCapabilities.session.configOptions.boolean`
+  时才下发（`internal/acp/server.go` 的 `allowsBooleanConfigOptions` /
+  `filterClientConfigOptions`）。门控同时作用于 `session/new` / `load` /
+  `resume` / `set_config_option` 的响应与 `config_option_update` 通知；
+  若某次通知的选项**全部**是 boolean 且客户端不支持，则整条通知被丢弃
+  （发空数组会把客户端的选项目录清空）。
 - 模型列表来自 provider 的 `supported_models`（含当前模型与默认模型，
   去重后按名称排序），当前模型排在最前，便于客户端预选。
 - provider 列表只含 enabled provider，当前 provider 排在最前并始终可选；
@@ -334,6 +352,84 @@ go run ./scripts/acp_e2e_thought_level.go $env:TEMP\aicli-e2e.exe
 `reasoning_effort == "high"`）→ 切回 `default` 并发 prompt（断言请求体不再
 带该字段）→ 断言未知取值被 `invalid params` 拒绝。
 
+其余全链路脚本（同样先 `go build -o $env:TEMP\aicli-e2e.exe ./cmd/aicli/`，
+再 `go run ./scripts/<脚本> $env:TEMP\aicli-e2e.exe`）：
+
+| 脚本 | 断言要点 |
+|---|---|
+| `acp_e2e_session_mgmt.go` | 能力对象形状（`list/delete/close` 为 `{}`）；`session/list` 的 cwd 过滤、空结果 `[]`、`cursor=abc` 负例；delete 幂等 + list 消失 + load 报 `-32002`；close 取消在途 prompt 且保留历史（22 项断言） |
+| `acp_e2e_notifications.go` | `available_commands_update` 名称无前导 `/`；`usage_update` 的 `used ≤ size`；`session_info_update` 标题非空、不含 sessionId/cwd、同标题去重；`plan` 条目与 todos 快照一致 |
+| `acp_e2e_plan.go` | `plan` 通知（实时）与 `session/load` 回放重建的条目一致性 |
+| `acp_e2e_thought_chunk.go` | `agent_thought_chunk` 与 `messageId` 分组（实时 + 回放） |
+| `acp_e2e_thought_toolcall.go` | 同一 SSE delta 内的 reasoning + tool_calls 仍产出 thought 事件 |
+
+## MCP 集成
+
+### 三层口径（先看这里）
+
+| 层 | 现状 |
+|---|---|
+| **本地配置链 MCP** | 可用。`~/.aicli/mcp.yaml` 里的 server 由全局 manager 连接，ACP 会话直接可用其工具（与交互式 chat 共用同一条引导路径） |
+| **客户端下发 MCP**（`session/new` / `session/load` / `session/resume` 的 `mcpServers`） | 可用：stdio / http / sse 均支持，逐条容错解析 + 会话级生命周期 |
+| **`additionalDirectories`** | 字段解析但**不生效**（未声明对应能力位，Zed 因此恒发 `[]`，无行为差异） |
+
+因此「ACP 不支持 MCP」的旧口径已作废；准确说法是上面三层。
+
+### 装配策略：`--acp-mcp`
+
+| 取值 | 行为 |
+|---|---|
+| `merge`（默认） | 本地配置链 + 客户端下发 |
+| `local` | 仅本地配置链 |
+| `client` | 仅客户端下发 |
+| `off` | 全部关闭 |
+
+### 安全模型
+
+- **folder trust 门控**：工作区未受信任时，客户端下发的 stdio server **不启动**，
+  stderr 给出拒绝原因与 server 名；`session/new` 仍正常返回 `sessionId`。
+  （下发来源包含仓库级 `.zed/settings.json`，所以门控不能外包给客户端。）
+- **审计**：每次因客户端下发而启动的 server 都写一条 `acp.mcp.audit` 日志
+  （来源、会话、server 名、传输类型、命令/cwd 或 url）。
+- **凭据不入日志**：`env` / `headers` 只记录**键名**（`env_keys=` / `header_keys=`），
+  值永不落盘、永不出现在 stderr。
+- **回收**：会话私有 server 随 `session/close` / `session/delete` 回收；宿主进程被
+  客户端强杀（Zed 的 `Drop` → `child.kill()`，不走协议关闭）时，stdio 子进程树由
+  Windows Job Object（`KILL_ON_JOB_CLOSE`）连带回收，不留孤儿进程。
+
+### 会话语义
+
+- 三个入口（`session/new`、`session/load`、`session/resume`）共用同一条
+  解析 → 映射 → 建连 → 去重路径，不存在「只有 new 生效」的分叉。
+- 工具在**首个 prompt 前**最多等 2s（`WaitReady` 短超时），超时放行、不阻塞会话。
+- 同名 server：客户端下发优先；工具名冲突走规范名 `mcp__<server>__<tool>`。
+- 单条形状非法 / 未知 `type` / 缺必填字段：跳过该条 + 可见诊断，其余照常，
+  `session/new` 不报错。
+- 未声明传输（能力位为 `false` 的 http/sse）：跳过该条 + 诊断，**不产生连接尝试**。
+
+### 报文示例
+
+```jsonc
+{"jsonrpc":"2.0","id":2,"method":"session/new","params":{
+  "cwd":"E:\\demo",
+  "mcpServers":[
+    {"name":"echo","command":"C:/tools/echo-mcp-server.exe","args":["--stdio"],
+     "env":[{"name":"TOKEN","value":"<secret>"}]},
+    {"name":"remote","type":"http","url":"https://example.com/mcp",
+     "headers":[{"name":"Authorization","value":"Bearer <token>"}]},
+    {"name":"events","type":"sse","url":"https://example.com/sse"}
+  ]}}
+```
+
+注意 `env` / `headers` 是 `[{name,value}]` **数组**（ACP v1 联合类型）；
+对象形式会被判为解码失败并跳过该条。
+
+### 诊断
+
+- 会话级 MCP 状态与跳过原因走 stderr 诊断行（含 server 名与原因）；
+- 传输生命周期事件复用 manager 的 observer（`mcp.transport.*`、
+  `mcp.stdio.tree_guard_*`），便于定位「连没连上」「树收没收回」。
+
 ## 常见问题
 
 **Q: session/new 报 `provider ... not found` / `no provider specified`？**
@@ -353,9 +449,12 @@ provider 解析链全部落空（flag、workspace、`aicli.chat.default_provider
 进程退出本身会断开连接，客户端应按断连清理 UI 状态。
 
 **Q: MCP servers 参数支持吗？**
-`session/new` / `session/load` 的 `mcpServers` 字段目前保留但不生效，
-agent 侧 MCP 能力（http/sse）能力位均为 false。`additionalDirectories`
-字段已解析但暂不用于额外工作区根目录。
+支持。`session/new` / `session/load` / `session/resume` 的 `mcpServers` 会被逐条
+容错解析并装配成会话级 MCP（stdio / http / sse），能力位 `mcpCapabilities` 为
+`{http:true, sse:true}`。本地配置链（`~/.aicli/mcp.yaml`）不受影响、照旧可用。
+装配范围由 `--acp-mcp=off|client|local|merge`（默认 `merge`）控制，未信任工作区
+拒绝启动客户端下发的 server。细节见 [MCP 集成](#mcp-集成)。
+`additionalDirectories` 仍解析但不生效。
 
 **Q: 为什么 stdout 混入了非协议输出？**
 不应发生。stdout 被保留为纯协议通道；若发现污染，检查是否误用了会写

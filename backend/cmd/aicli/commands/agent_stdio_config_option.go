@@ -360,44 +360,65 @@ func (h *acpSessionHost) SetSessionConfigOption(ctx context.Context, req acp.Set
 			if _, err := applyRuntimePermissionModeSwitchInFlight(hostSess.chat, valueID); err != nil {
 				return resp, err
 			}
-		} else if _, err := applyRuntimePermissionModeSwitch(hostSess.chat, valueID); err != nil {
+		} else if err := applyACPConfigOptionSwitch(hostSess.chat, configID, valueID); err != nil {
 			return resp, err
 		}
 		// The response carries the option set, but a client whose pickers are
 		// open needs the out-of-band refresh on both channels (config option +
 		// legacy modes) to stay in sync while the turn is still streaming.
 		h.broadcastACPModeChange(strings.TrimSpace(req.SessionID), hostSess.chat)
-	case strings.EqualFold(configID, acpModelConfigOptionID):
-		if !acpModelOptionAllowed(hostSess.chat, valueID) {
-			return resp, acp.InvalidParams(fmt.Errorf("model %q is not available for this session", valueID))
-		}
-		if _, err := applyRuntimeModelSwitch(hostSess.chat, valueID, false); err != nil {
-			return resp, err
-		}
-	case strings.EqualFold(configID, acpThoughtLevelConfigOptionID):
-		if !acpThoughtLevelOptionAllowed(hostSess.chat, valueID) {
-			return resp, acp.InvalidParams(fmt.Errorf("reasoning effort %q is not available for this session", valueID))
-		}
-		if _, err := applyRuntimeReasoningEffortSwitch(hostSess.chat, valueID); err != nil {
-			return resp, err
-		}
-	case strings.EqualFold(configID, acpProviderConfigOptionID):
-		if !acpProviderOptionAllowed(hostSess.chat, valueID) {
-			return resp, acp.InvalidParams(fmt.Errorf("provider %q is not available for this session", valueID))
-		}
-		// Re-selecting the current provider is a no-op; skip re-resolution so a
-		// disabled-but-current provider still yields a usable response.
-		if !strings.EqualFold(acpCurrentProvider(hostSess.chat), valueID) {
-			if _, err := applyRuntimeProviderSwitch(hostSess.chat, valueID); err != nil {
-				return resp, err
-			}
-		}
 	default:
-		return resp, acp.InvalidParams(fmt.Errorf("unknown configId %q", req.ConfigID))
+		if err := applyACPConfigOptionSwitch(hostSess.chat, configID, valueID); err != nil {
+			return resp, err
+		}
 	}
 	resp.ConfigOptions = acpConfigOptionsForChat(hostSess.chat)
 	persistACPConfigOptionPreferences(hostSess.chat)
 	return resp, nil
+}
+
+// applyACPConfigOptionSwitch validates one config option and performs its
+// runtime switch. It deliberately does not gate on an in-flight prompt: callers
+// own that decision (session/set_config_option rejects mid-turn model/provider
+// switches, while an ACP slash command is itself the running turn). Callers also
+// own the post-change broadcasts and preference persistence.
+func applyACPConfigOptionSwitch(chat *ChatSession, configID, valueID string) error {
+	if chat == nil {
+		return fmt.Errorf("no active session")
+	}
+	switch {
+	case strings.EqualFold(configID, acpModeConfigOptionID):
+		if !acpModeOptionAllowed(valueID) {
+			return acp.InvalidParams(fmt.Errorf("permission mode %q is not supported", valueID))
+		}
+		_, err := applyRuntimePermissionModeSwitch(chat, valueID)
+		return err
+	case strings.EqualFold(configID, acpModelConfigOptionID):
+		if !acpModelOptionAllowed(chat, valueID) {
+			return acp.InvalidParams(fmt.Errorf("model %q is not available for this session", valueID))
+		}
+		_, err := applyRuntimeModelSwitch(chat, valueID, false)
+		return err
+	case strings.EqualFold(configID, acpThoughtLevelConfigOptionID):
+		if !acpThoughtLevelOptionAllowed(chat, valueID) {
+			return acp.InvalidParams(fmt.Errorf("reasoning effort %q is not available for this session", valueID))
+		}
+		_, err := applyRuntimeReasoningEffortSwitch(chat, valueID)
+		return err
+	case strings.EqualFold(configID, acpProviderConfigOptionID):
+		if !acpProviderOptionAllowed(chat, valueID) {
+			return acp.InvalidParams(fmt.Errorf("provider %q is not available for this session", valueID))
+		}
+		// Re-selecting the current provider is a no-op; skip re-resolution so a
+		// disabled-but-current provider still yields a usable response.
+		if strings.EqualFold(acpCurrentProvider(chat), valueID) {
+			return nil
+		}
+		_, err := applyRuntimeProviderSwitch(chat, valueID)
+		return err
+	default:
+		return acp.InvalidParams(fmt.Errorf("unknown configId %q", configID))
+	}
 }
 
 // persistACPConfigOptionPreferences writes provider/model/reasoning-effort
