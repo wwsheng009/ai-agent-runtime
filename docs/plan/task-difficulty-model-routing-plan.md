@@ -2881,6 +2881,7 @@ P1/P2 再升级：
 - `spawn_agent` schema 已暴露 `difficulty`、`difficulty_rationale`、`provider`、`model`、`reasoning_effort` / `thinking_effort`、`permission_mode`。
 - child session 会持久化 route metadata，并在 status、completion event、hook payload、TUI timeline 中回显 provider/model/reasoning/difficulty/permission 信息。
 - child 首轮 prompt 和后续 follow-up run 会携带 `RunMeta.PermissionMode`，因此可信 bounded 子任务可显式使用 `permission_mode="bypass_permissions"`，父会话自身为 bypass 时也可继承。
+  **修订（2026-09-20）**：子代理请求高于父级的权限模式**默认被拒绝并钉住父级**——`permission_mode_escalated_from_parent` 已由「仅告警」升级为「默认阻断 + 告警」（见 `multi-agent-durable-lifecycle-hardening-plan-20260920.md` P1-4 / H13）；只有显式 opt-in 开关才保留旧的继承/提权行为。提权不再被视为预期能力。
 - `wait_agent` / `read_agent_events` 已把 `waiting_approval` 作为 ready state，并暴露 pending approval 的 id/reason/risk 信息，避免父 agent 无意义轮询。
 - 新增 broker 工具 `resolve_agent_approval`，用于父 agent 对 `spawn_agent` child 的 pending tool approval 执行 approve/deny。输入 child `id` / `session_id` / path、`request_id`、`allow`，可选 `patched_args`；执行后返回 child 最新状态。
 - 系统提示已明确：简单单命令检查应优先在父会话执行；如果 child 进入 `waiting_approval`，应调用 `resolve_agent_approval`，不要重复 wait/poll，也不要在父会话重跑同一个工具作为 fallback。

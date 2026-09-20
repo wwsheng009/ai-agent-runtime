@@ -84,7 +84,27 @@ type AgentConfig struct {
 type AgentsConfig struct {
 	MaxThreads           int `yaml:"maxThreads" json:"maxThreads"`
 	MaxDepth             int `yaml:"maxDepth" json:"maxDepth"`
-	DefaultWaitTimeoutMs int `yaml:"defaultWaitTimeoutMs,omitempty" json:"defaultWaitTimeoutMs,omitempty"`
+	// MaxConcurrent caps how many child agents one subagent batch may execute
+	// at the same time (the per-batch ceiling handed to
+	// agent.SubagentSchedulerConfig.MaxConcurrent). 0 = unset → the built-in
+	// default (4, the historical scheduler default). This is the per-batch
+	// knob; the process-wide ceiling is MaxThreads, which the hosts apply as
+	// one shared concurrency limiter across every scheduler they build (total
+	// concurrent children ≤ maxThreads whenever maxThreads > 0; -1 stays
+	// "explicitly unlimited" and leaves only the per-batch ceiling in force).
+	MaxConcurrent int `yaml:"maxConcurrent,omitempty" json:"maxConcurrent,omitempty"`
+	// MaxConcurrentQueueDepth / MaxConcurrentQueueTimeoutMs are the opt-in
+	// backpressure knobs for a reader wave (plan P1-4 §2). Both default to 0,
+	// which preserves the historical behavior: unbounded waiting for a
+	// concurrency slot with no queue timeout (P2-8's fail-fast spawn gate is a
+	// separate path and is unaffected). When MaxConcurrentQueueDepth > 0, a
+	// wave with more than MaxConcurrent+MaxConcurrentQueueDepth reader tasks is
+	// rejected before any child starts. When MaxConcurrentQueueTimeoutMs > 0, a
+	// task that waits longer than that for a slot fails the batch with a
+	// timeout error instead of waiting forever.
+	MaxConcurrentQueueDepth     int `yaml:"maxConcurrentQueueDepth,omitempty" json:"maxConcurrentQueueDepth,omitempty"`
+	MaxConcurrentQueueTimeoutMs int `yaml:"maxConcurrentQueueTimeoutMs,omitempty" json:"maxConcurrentQueueTimeoutMs,omitempty"`
+	DefaultWaitTimeoutMs        int `yaml:"defaultWaitTimeoutMs,omitempty" json:"defaultWaitTimeoutMs,omitempty"`
 	// MinWaitTimeoutMs / MaxWaitTimeoutMs bound every model-issued wait window
 	// (wait_agent, read_agent_events, and wait_team): no wait path may block
 	// longer than MaxWaitTimeoutMs. Timeouts outside the bounds are clamped or
@@ -412,6 +432,10 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 		Agents: AgentsConfig{
 			MaxThreads:           6,
 			MaxDepth:             1,
+			// P1-4/H12: the per-batch subagent ceiling keeps its historical
+			// scheduler default (4) so an absent config changes nothing. The
+			// queue knobs stay 0 = backpressure disabled (fail-fast default).
+			MaxConcurrent:        4,
 			DefaultWaitTimeoutMs: int((30 * time.Second).Milliseconds()),
 			MinWaitTimeoutMs:     int((10 * time.Second).Milliseconds()),
 			MaxWaitTimeoutMs:     int(time.Hour.Milliseconds()),
@@ -1197,6 +1221,17 @@ func ValidateAgentsConfig(config *AgentsConfig) error {
 	}
 	if config.MaxDepth < 0 {
 		return errors.New(errors.ErrValidationFailed, "agents.maxDepth cannot be negative")
+	}
+	// P1-4/H12: 0 = 未设置（回退默认 4），正数 = 每个 batch 的并发上限。
+	if config.MaxConcurrent < 0 {
+		return errors.New(errors.ErrValidationFailed, "agents.maxConcurrent must be 0 (default) or a positive integer")
+	}
+	// 背压是可选项：0 = 关闭（保持「无限等待、无队列超时」的既有行为）。
+	if config.MaxConcurrentQueueDepth < 0 {
+		return errors.New(errors.ErrValidationFailed, "agents.maxConcurrentQueueDepth cannot be negative")
+	}
+	if config.MaxConcurrentQueueTimeoutMs < 0 {
+		return errors.New(errors.ErrValidationFailed, "agents.maxConcurrentQueueTimeoutMs cannot be negative")
 	}
 	if config.DefaultWaitTimeoutMs < 0 {
 		return errors.New(errors.ErrValidationFailed, "agents.defaultWaitTimeoutMs cannot be negative")

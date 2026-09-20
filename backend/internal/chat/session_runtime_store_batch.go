@@ -74,6 +74,8 @@ func (s *SQLiteRuntimeStore) AppendEvents(ctx context.Context, events []runtimee
 		if err != nil {
 			return nil, fmt.Errorf("marshal event payload: %w", err)
 		}
+		// P1-2/H2：批量路径与单条路径共用同一字节上限，行为一致。
+		payloadJSON = boundSessionEventPayload(payloadJSON, s.sessionEventPayloadByteCap())
 		prepared[index] = preparedAppendEvent{event: event, payloadJSON: payloadJSON}
 	}
 

@@ -33,6 +33,18 @@ func NormalizeAgentsConfig(cfg AgentsConfig) AgentsConfig {
 	if cfg.MaxDepth == 0 {
 		cfg.MaxDepth = defaults.MaxDepth
 	}
+	// P1-4/H12: per-batch subagent ceiling. 0 是「未设置」→ 默认 4（与调度器
+	// 内建默认一致，保证缺失配置时行为不变）；正数是显式上限。
+	if cfg.MaxConcurrent == 0 {
+		cfg.MaxConcurrent = defaults.MaxConcurrent
+	}
+	// 背压默认关闭：0 归一化后仍是 0，不会把「无限等待」意外变成有界队列。
+	if cfg.MaxConcurrentQueueDepth == 0 {
+		cfg.MaxConcurrentQueueDepth = defaults.MaxConcurrentQueueDepth
+	}
+	if cfg.MaxConcurrentQueueTimeoutMs == 0 {
+		cfg.MaxConcurrentQueueTimeoutMs = defaults.MaxConcurrentQueueTimeoutMs
+	}
 	if cfg.DefaultWaitTimeoutMs == 0 {
 		cfg.DefaultWaitTimeoutMs = defaults.DefaultWaitTimeoutMs
 	}

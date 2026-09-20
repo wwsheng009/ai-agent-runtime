@@ -287,6 +287,12 @@ type RuntimeStoreConfig struct {
 	// ReadOperationTimeout 单个读操作上限（P1.7/D6）；<=0 取默认 3s。
 	// 读事务过长会拖住 WAL checkpoint，故独立于写侧 OperationTimeout。
 	ReadOperationTimeout time.Duration
+	// MaxEventPayloadBytes 单条 session_events 行的 payload_json 字节上限
+	// （P1-2/H2）：0 取 DefaultMaxSessionEventPayloadBytes，负值关闭上限
+	// （回退到无界写入），正值按配置生效（测试/宿主可下调）。
+	// 超限载荷不会丢行：持久化为带 payload_truncated / payload_bytes /
+	// payload_cap 标记的有界 stub，见 boundSessionEventPayload。
+	MaxEventPayloadBytes int
 }
 
 const (
@@ -2615,6 +2621,9 @@ func (s *SQLiteRuntimeStore) AppendEvent(ctx context.Context, event runtimeevent
 	if err != nil {
 		return 0, fmt.Errorf("marshal event payload: %w", err)
 	}
+	// P1-2/H2：载荷字节上限在写入路径上生效；超限载荷持久化为有界 stub
+	// （行、type、seq、timestamp 不变），事件通知仍携带原始载荷。
+	payloadJSON = boundSessionEventPayload(payloadJSON, s.sessionEventPayloadByteCap())
 	start := time.Now()
 	var seq int64
 	err = sqliteutil.RetryWriteTx(ctx, s.trackWriteRetry, func(attemptCtx context.Context) error {
@@ -3208,6 +3217,8 @@ func (s *SQLiteRuntimeStore) appendMailboxTx(ctx context.Context, tx *sql.Tx, se
 		result.controlSeq = controlSeq
 		return result, fmt.Errorf("marshal mailbox event payload: %w", err)
 	}
+	// P1-2/H2：mailbox 事件同样走 session_events，共用同一字节上限。
+	payloadJSON = boundSessionEventPayload(payloadJSON, s.sessionEventPayloadByteCap())
 	var eventSeq int64
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(seq), 0) + 1 FROM session_events WHERE session_id = ?
@@ -3288,6 +3299,8 @@ func (s *SQLiteRuntimeStore) appendAgentControlMailboxPrimaryTx(ctx context.Cont
 		result.controlSeq = recordSeq
 		return result, fmt.Errorf("marshal mailbox event payload: %w", err)
 	}
+	// P1-2/H2：AgentControl mailbox 主写入路径共用同一字节上限。
+	payloadJSON = boundSessionEventPayload(payloadJSON, s.sessionEventPayloadByteCap())
 	var eventSeq int64
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(seq), 0) + 1 FROM session_events WHERE session_id = ?

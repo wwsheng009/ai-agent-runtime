@@ -376,12 +376,18 @@ func isTaskOutputToolResult(envelope *Envelope) bool {
 	return strings.EqualFold(strings.TrimSpace(envelope.ToolName), "task_output")
 }
 
+// isCollaborationResult reports whether the tool result carries the parent's
+// collaboration output verbatim. Every supervision/collaboration tool must be
+// listed here: the generic structured path renders only
+// "Structured output summary: kind=structured size=N" and drops the body, so a
+// missing entry is a silent content loss (H1:
+// read_agent_result was missing and the child deliverable became unreadable).
 func isCollaborationResult(envelope *Envelope) bool {
 	if envelope == nil {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(envelope.ToolName)) {
-	case "wait_agent", "read_agent_events", "list_agents", "spawn_agent", "send_message", "followup_task",
+	case "wait_agent", "read_agent_events", "read_agent_result", "list_agents", "spawn_agent", "send_message", "followup_task",
 		"send_input", "resolve_agent_approval", "close_agent", "resume_agent":
 		return true
 	default:
