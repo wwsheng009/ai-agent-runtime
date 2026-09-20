@@ -1,15 +1,17 @@
 package commands
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io/fs"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 )
 
@@ -124,18 +126,47 @@ func NewChatLogger(provider, protocol, model string, stream bool, baseURL string
 	}
 }
 
+// newChatLogSessionID 生成 chat 日志会话 ID，格式与运行时会话库一致：
+// session_YYYYMMDDHHMMSS_<8 位大小写字母数字后缀>。
+// 该 ID 同时作为 chat-logs/YYYY/MM/DD/<session-id>/ 的目录名，
+// 使目录可按会话 ID 检索，并与 sessions/ 下的运行时会话命名对齐。
 func newChatLogSessionID() string {
-	shortID := strings.ReplaceAll(uuid.NewString(), "-", "")
-	if len(shortID) > 8 {
-		shortID = shortID[:8]
+	return "session_" + time.Now().Format("20060102150405") + "_" + randomChatLogSessionSuffix(8)
+}
+
+// randomChatLogSessionSuffix 生成 a-zA-Z0-9 随机后缀，
+// 字符集与 internal/chat.generateSessionID 保持一致。
+func randomChatLogSessionSuffix(length int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	if length <= 0 {
+		return ""
 	}
-	return time.Now().Format("20060102_150405.000") + "_" + shortID
+	b := make([]byte, length)
+	for i := range b {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		if err != nil {
+			// crypto/rand 不可用时退化为纳秒低位，仍保证后缀非空。
+			n = big.NewInt(time.Now().UnixNano())
+		}
+		b[i] = charset[n.Int64()%int64(len(charset))]
+	}
+	return string(b)
 }
 
 // RotateSession ends the current chat-log session (best effort) and starts a
-// fresh log/artifact session while keeping the same log root and provider
-// metadata. Used by /new so diagnostic paths match the new runtime conversation.
+// fresh log/artifact session with a provisional chat-log ID. Prefer
+// RotateSessionWithID when the runtime session ID is already known.
 func (cl *ChatLogger) RotateSession() error {
+	return cl.RotateSessionWithID("")
+}
+
+// RotateSessionWithID ends the current chat-log session (best effort) and
+// starts a fresh log/artifact session under sessionID while keeping the same
+// log root and provider metadata. The ID becomes the
+// chat-logs/YYYY/MM/DD/<session-id> directory name, so /new diagnostic paths
+// follow the new runtime conversation instead of a throwaway chat-log ID. An
+// empty sessionID falls back to a provisional generated ID.
+func (cl *ChatLogger) RotateSessionWithID(sessionID string) error {
 	if cl == nil {
 		return nil
 	}
@@ -159,7 +190,10 @@ func (cl *ChatLogger) RotateSession() error {
 		}
 	}
 
-	sessionID := newChatLogSessionID()
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		sessionID = newChatLogSessionID()
+	}
 	now := time.Now()
 	workingDirectory, projectPath := currentChatProjectContext()
 	cl.sessionID = sessionID
@@ -520,13 +554,101 @@ func (cl *ChatLogger) SetInitialMessage(msg string) {
 	cl.sessionLog.InitialMessage = truncateUTF8Bytes(msg, chatLogContentMaxBytes)
 }
 
-// SetRuntimeSessionMetadata links diagnostics to the durable conversation.
+// SetRuntimeSessionMetadata links diagnostics to the durable conversation and
+// adopts the runtime session ID as the chat-log directory name
+// (chat-logs/YYYY/MM/DD/<session-id>). Layout errors are best-effort: artifact
+// writers recreate their directories on demand.
 func (cl *ChatLogger) SetRuntimeSessionMetadata(sessionID, title string) {
 	if cl == nil || cl.sessionLog == nil {
 		return
 	}
-	cl.sessionLog.RuntimeSessionID = strings.TrimSpace(sessionID)
+	sessionID = strings.TrimSpace(sessionID)
+	cl.sessionLog.RuntimeSessionID = sessionID
 	cl.sessionLog.Title = truncateUTF8Bytes(strings.Join(strings.Fields(title), " "), 512)
+	if err := cl.SetSessionID(sessionID); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to adopt runtime session id as chat log dir: %v\n", err)
+	}
+}
+
+// SetSessionID repoints the chat-log/artifact layout at sessionID. The ID is
+// used verbatim as the chat-logs/YYYY/MM/DD/<session-id> directory name, so
+// diagnostics stay addressable by the durable conversation ID instead of a
+// separately generated chat-log ID. It is a no-op for an empty or unchanged ID.
+// When a provisional layout was already materialized (for example via
+// SetLogDir) the new layout is created and the provisional directory is pruned
+// if it never held any recorded content.
+func (cl *ChatLogger) SetSessionID(sessionID string) error {
+	if cl == nil {
+		return nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || sessionID == cl.sessionID {
+		return nil
+	}
+	previousDir := cl.SessionDirPath()
+	layoutEstablished := false
+	if previousDir != "" {
+		if info, err := os.Stat(previousDir); err == nil && info.IsDir() {
+			layoutEstablished = true
+		}
+	}
+	cl.sessionID = sessionID
+	if cl.sessionLog != nil {
+		cl.sessionLog.SessionID = sessionID
+	}
+	if strings.TrimSpace(cl.logDir) == "" || !layoutEstablished {
+		return nil
+	}
+	if err := cl.ensureSessionArtifactLayout(); err != nil {
+		return err
+	}
+	if cl.hasNoRecordedContent() {
+		pruneEmptyChatArtifactDir(previousDir, cl.SessionDirPath())
+	}
+	return nil
+}
+
+// hasNoRecordedContent reports whether the chat-log session still holds only
+// its empty artifact shell (no messages and no call counters).
+func (cl *ChatLogger) hasNoRecordedContent() bool {
+	if cl == nil || cl.sessionLog == nil {
+		return true
+	}
+	if len(cl.sessionLog.Messages) > 0 {
+		return false
+	}
+	return cl.totalRequests == 0 && cl.totalResponses == 0 && cl.totalToolCalls == 0
+}
+
+// pruneEmptyChatArtifactDir removes a provisional session directory that only
+// ever held empty files, so adopting the real session ID does not leave orphan
+// chat-logs/YYYY/MM/DD/<provisional-id> entries behind. Any file with content
+// (for example early debug lines) makes the directory survive.
+func pruneEmptyChatArtifactDir(dir, keepDir string) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" || dir == strings.TrimSpace(keepDir) {
+		return
+	}
+	hasContent := false
+	_ = filepath.WalkDir(dir, func(_ string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			hasContent = true
+			return fs.SkipAll
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil || info.Size() > 0 {
+			hasContent = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	if hasContent {
+		return
+	}
+	_ = os.RemoveAll(dir)
 }
 
 // EndSession 结束会话
@@ -793,8 +915,10 @@ func (cl *ChatLogger) calculateSummary() *ChatSessionSummary {
 }
 
 // sessionDirName 返回会话目录名：
-// 仅将 sessionID 中的点号/空格替换为下划线，避免 Windows 路径歧义，
-// 保留日期分区可解析前缀（YYYYMMDD_HHMMSS）。
+// 新会话 ID 已是 session_YYYYMMDDHHMMSS_<suffix> 形式（运行时会话与 chat log
+// 共用同一 ID），可直接作为目录名；
+// 这里仅把点号/空格替换为下划线，兼容历史 <YYYYMMDD_HHMMSS_mmm_suffix>
+// 会话 ID，避免 Windows 路径歧义。
 func (cl *ChatLogger) sessionDirName() string {
 	if cl == nil {
 		return ""
@@ -803,14 +927,16 @@ func (cl *ChatLogger) sessionDirName() string {
 }
 
 // partitionAt 返回会话的日期分区基准时间。
+// 会话 ID 内嵌的创建时间优先，保证同一会话（含恢复续跑）始终落在同一个
+// chat-logs/YYYY/MM/DD/<session-id> 分区下；无内嵌时间时退回会话开始时间。
 func (cl *ChatLogger) partitionAt() time.Time {
-	if cl != nil && cl.sessionLog != nil && !cl.sessionLog.StartTime.IsZero() {
-		return cl.sessionLog.StartTime
-	}
 	if cl != nil {
 		if parsed, ok := aiclipaths.ParseTimestampedSessionIDTime(cl.sessionID); ok {
 			return parsed
 		}
+	}
+	if cl != nil && cl.sessionLog != nil && !cl.sessionLog.StartTime.IsZero() {
+		return cl.sessionLog.StartTime
 	}
 	return time.Now()
 }
