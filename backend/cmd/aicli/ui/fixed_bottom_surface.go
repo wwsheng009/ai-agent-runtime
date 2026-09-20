@@ -4858,7 +4858,22 @@ func cloneAndSanitizePopupLines(lines []string) []string {
 			out = append(out, "")
 			continue
 		}
-		out = append(out, line)
+		// popup 行是“一条 = 一个物理行”的契约：正文里的硬换行必须切成多条。
+		// 行内换行只被 TrimRight 掉尾部、宽度测量又把它记为 0 列，于是提问正文
+		// （LLM 给出的多段文本）会以“一行”进入底区行计划，终端却把它渲染成
+		// 多行——盒子边框只出现在折行首/尾，盒子高度与下方 Running/Waiting/
+		// prompt 行整体错位，卡片在物理屏上无法成形。
+		if !strings.ContainsAny(line, "\r\n") {
+			out = append(out, line)
+			continue
+		}
+		for _, segment := range strings.Split(strings.ReplaceAll(line, "\r\n", "\n"), "\n") {
+			if strings.TrimSpace(segment) == "" {
+				out = append(out, "")
+				continue
+			}
+			out = append(out, segment)
+		}
 	}
 	return out
 }
