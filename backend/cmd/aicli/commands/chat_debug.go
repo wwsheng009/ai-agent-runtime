@@ -232,6 +232,29 @@ func handleChatAgentsCommand(session *ChatSession, command string) {
 		}
 	case "panel", "pane", "dashboard":
 		printChatAgentPanel(session, arg)
+	case "view", "open", "transcript":
+		// 只读子会话 transcript：与 /agent <target> 等价（数据源为子会话事件流）。
+		handleChatAgentTranscriptCommand(session, command)
+	case "approve", "allow", "yes":
+		// G5：审批闭环走既有 supervision 审批链（localActorRegistry.ResolveApproval）。
+		// legacy 输出经统一边界 printChatCommandOutput，不新增直接 writer。
+		if text, err := handleChatAgentApprovalCommand(session, arg, true); err != nil {
+			printChatCommandOutput(session, fmt.Sprintf("错误: %v", err))
+		} else {
+			printChatCommandOutput(session, text)
+		}
+	case "deny", "reject", "no":
+		if text, err := handleChatAgentApprovalCommand(session, arg, false); err != nil {
+			printChatCommandOutput(session, fmt.Sprintf("错误: %v", err))
+		} else {
+			printChatCommandOutput(session, text)
+		}
+	case "answer":
+		if text, err := handleChatAgentAnswerCommand(session, arg); err != nil {
+			printChatCommandOutput(session, fmt.Sprintf("错误: %v", err))
+		} else {
+			printChatCommandOutput(session, text)
+		}
 	case "routing", "route":
 		if err := handleChatAgentRoutingCommand(session, arg); err != nil {
 			fmt.Printf("错误: %v\n", err)
@@ -270,12 +293,32 @@ func executeStructuredAgentsCommand(session *ChatSession, command string) Comman
 		return executeStructuredAgentTargetCommand(session, arg)
 	case "panel", "pane", "dashboard":
 		return executeStructuredAgentPanelCommand(session, arg)
+	case "view", "open", "transcript":
+		return executeStructuredAgentTranscriptCommand(session, command)
+	case "approve", "allow", "yes":
+		if text, err := handleChatAgentApprovalCommand(session, arg, true); err != nil {
+			return commandErrorResult(err)
+		} else {
+			return commandTextResult(text)
+		}
+	case "deny", "reject", "no":
+		if text, err := handleChatAgentApprovalCommand(session, arg, false); err != nil {
+			return commandErrorResult(err)
+		} else {
+			return commandTextResult(text)
+		}
+	case "answer":
+		if text, err := handleChatAgentAnswerCommand(session, arg); err != nil {
+			return commandErrorResult(err)
+		} else {
+			return commandTextResult(text)
+		}
 	case "routing", "route":
 		return executeStructuredAgentRoutingCommand(session, arg)
 	case "cleanup", "prune", "gc":
 		return executeStructuredAgentCleanupCommand(session, arg)
 	default:
-		return commandTextResult("用法: /agents [pick|select|send|followup|target|panel|routing|cleanup]")
+		return commandTextResult("用法: /agents [pick|select|send|followup|target|panel|view|approve|deny|answer|routing|cleanup]；/agent [target] 查看子 agent transcript")
 	}
 }
 

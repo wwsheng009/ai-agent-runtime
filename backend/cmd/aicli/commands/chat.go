@@ -170,6 +170,10 @@ type ChatSession struct {
 	ActorFirstReady     bool                    // actor-first executor established for this session
 	ChatExecutor        aicliChatExecutor       // 当前会话的统一 turn executor
 	LocalRuntimeHost    *localChatRuntimeHost   // actor-first local runtime host
+	// agentTranscriptFollow 是 /agent follow 的 popup live 订阅状态（G4）。
+	// 指针类型：互斥量随指针传递，避免 ChatSession 值拷贝复制锁；订阅只由
+	// start/stopChatAgentTranscriptFollow 与 clearChatAgentTranscriptPopup 收口。
+	agentTranscriptFollow *chatAgentTranscriptFollowState
 	// resumeTeamNotice is the one-shot user notice produced when resume parks a
 	// team that a previous process left running (see
 	// suspendRestoredAmbientTeamForInteractiveResume). It is rendered by the

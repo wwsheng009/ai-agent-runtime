@@ -344,6 +344,11 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		handleChatAgentsCommand(session, command)
 		return false
 	}
+	if commandMatches(cmdLower, "/agent") {
+		// 单数入口：查看指定子 agent 的只读 transcript（/agents view 的等价形式）。
+		handleChatAgentTranscriptCommand(session, command)
+		return false
+	}
 	if commandMatches(cmdLower, "/timeline") {
 		printChatTimeline(session, command)
 		return false
@@ -429,6 +434,9 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 
 	case "/agents":
 		handleChatAgentsCommand(session, command)
+
+	case "/agent":
+		handleChatAgentTranscriptCommand(session, command)
 
 	case "/timeline":
 		printChatTimeline(session, command)

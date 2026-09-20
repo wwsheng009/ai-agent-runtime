@@ -193,12 +193,18 @@ func TestAICLIChatActorExecutor_DocsPromptRegression_CoversWorkspaceToolPriority
 	snapshot := append([]string(nil), lines...)
 	linesMu.Unlock()
 	followupCompletedLine := fmt.Sprintf("[task] completed %s @docs_api docs/guides/getting-started.md explains how to start using the docs toolkit", followupTask.ID)
-	if !containsChatTimelinePrefix(snapshot, "[tool] ls") ||
-		!containsChatTimelinePrefix(snapshot, "[tool] view") ||
-		!containsAllChatTimelineLines(snapshot,
-			"[task] blocked task_docs_root @docs_arch waiting on focused API guide summary",
-			followupCompletedLine,
-		) {
+	// 子会话隔离：teammate 的 tool 行是子会话内容，绝不能渲染进父（lead）
+	// timeline（见 chat_runtime_events.go handleEvent 的
+	// isForeignSessionContentEvent 守卫）。父 timeline 只保留控制面投影
+	// （task/team 生命周期），工具优先级仍由下面的 provider.toolOutput
+	// 断言（ls/view 输出内容）覆盖。
+	if containsChatTimelinePrefix(snapshot, "[tool] ls") || containsChatTimelinePrefix(snapshot, "[tool] view") {
+		t.Fatalf("expected teammate tool lines to stay out of the lead timeline, got %v", snapshot)
+	}
+	if !containsAllChatTimelineLines(snapshot,
+		"[task] blocked task_docs_root @docs_arch waiting on focused API guide summary",
+		followupCompletedLine,
+	) {
 		t.Fatalf("expected timeline lines not found, got %v", snapshot)
 	}
 	if !containsOrderedChatTimelineLines(snapshot,

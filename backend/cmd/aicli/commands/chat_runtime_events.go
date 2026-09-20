@@ -4665,6 +4665,25 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	if b.shouldSuppressTimelineDuringAssistantStream(event) {
 		return
 	}
+	// 子会话（spawn_agent）的 tool.* / assistant.* 流绝不能渲染进父会话
+	// timeline：renderChatRuntimeTimelineEvent 会把 tool.requested 渲染成
+	// "• Running …"、tool.completed 渲染成 "[tool] …"，而本桥以
+	// Subscribe("", …) 订阅全总线（子代理与父代理共用 EventBus，见
+	// isForeignSessionContentEvent 的注释），此前只有编码数据面
+	// （encodeRenderModelEvent）与 headless 桥做了身份过滤，交互式 timeline
+	// 仍会把子代理工具行串进父回合。控制面投影（team/task 生命周期、mailbox、
+	// subagent 终态、子会话 session_end）由 isForeignSessionContentEvent 放行，
+	// 父侧标题与工具行清理依赖这些事件在此前已处理完毕。
+	//
+	// 例外：approval/question 交互即使来自子会话也必须放行到下方的交互处理，
+	// 否则子代理等待用户输入会永久阻塞（父 console 是唯一输入面，见
+	// TestChatRuntimeEvents_SerializesConcurrentApprovalsAndQuestions）。其
+	// 渲染仍受隔离约束：下方在渲染前把 rendered 置空，子会话的 prompt 正文
+	// 不会进入父 transcript；子会话交互的审计视图走 /agent <id> 独立视图。
+	foreignContent := b.isForeignSessionContentEvent(event)
+	if foreignContent && !runtimeEventRequiresLegacyInteraction(event) {
+		return
+	}
 	suppressApprovalTimeline := false
 	if event.Type == runtimechat.EventApprovalRequested {
 		suppressApprovalTimeline = b.shouldSuppressApprovalTimeline(event)
@@ -4726,6 +4745,12 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		// the system fallback above so incomplete events remain observable.
 		rendered = chatRuntimeTimelineEvent{}
 		renderedSomething = true
+	}
+	// 子会话的 approval/question 已在上面放行到交互处理，但子会话内容绝不
+	// 渲染进父 timeline/transcript：交互提示本身由 askQuestion/审批 UI 呈现
+	// （那是输入面，不是历史），审计回放走 /agent <id> 独立视图。
+	if foreignContent {
+		rendered = chatRuntimeTimelineEvent{}
 	}
 	if rendered.Line != "" && shouldRenderInteractiveOutput(b.session) && b.shouldRenderTimelineEvent(rendered) {
 		b.emitTimelineEvent(rendered)

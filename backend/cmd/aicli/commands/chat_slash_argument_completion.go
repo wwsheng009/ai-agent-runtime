@@ -182,6 +182,9 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 		})
 	case "/agents":
 		return completeAgentsSlashArgs(session, argsText, cursor)
+	case "/agent":
+		ctx := parseSlashArgumentContext(argsText, cursor)
+		return matchSlashArgumentCandidates(agentTargetArgumentCandidates(session, false, true), activeSlashArgumentQuery(ctx))
 	case "/function", "/describe", "/call", "/tool":
 		return completeCatalogFunctionArgs(session, argsText, cursor, command)
 	case "/skill", "/skills":
@@ -247,6 +250,10 @@ func completeAgentsSlashArgs(session *ChatSession, argsText string, cursor int) 
 		return nil
 	case "target":
 		return matchSlashArgumentCandidates(agentTargetArgumentCandidates(session, false, true), query)
+	case "view", "open", "transcript":
+		return matchSlashArgumentCandidates(agentTargetArgumentCandidates(session, false, true), query)
+	case "approve", "allow", "deny", "reject", "answer":
+		return completeAgentsApprovalTargetSlashArgs(session, ctx, query)
 	case "send":
 		return completeAgentsMessageTargetSlashArgs(session, ctx, query)
 	case "followup", "task":
@@ -299,12 +306,27 @@ func completeAgentsMessageTargetSlashArgs(session *ChatSession, ctx slashArgumen
 	return nil
 }
 
+// completeAgentsApprovalTargetSlashArgs 补全 /agents approve|deny|answer 的 target
+// 位（request_id / question_id 是运行期值，不做枚举）。
+func completeAgentsApprovalTargetSlashArgs(session *ChatSession, ctx slashArgumentContext, query string) []chatSlashCompletionCandidate {
+	if slashArgumentTokenText(ctx, 1) == "" || slashArgumentCursorInToken(ctx, 1) {
+		return matchSlashArgumentCandidates(agentTargetArgumentCandidates(session, true, false), query)
+	}
+	return nil
+}
+
 func agentTopLevelArgumentCandidates() []chatSlashCompletionCandidate {
 	return []chatSlashCompletionCandidate{
 		{Command: "panel", Summary: "显示多 agent 富交互面板", Group: string(chatSlashCommandGroupSession)},
 		{Command: "dashboard", Summary: "panel 的别名", Group: string(chatSlashCommandGroupSession)},
 		{Command: "pick", Summary: "弹出 agent picker", Group: string(chatSlashCommandGroupSession)},
 		{Command: "target", Summary: "设置或列出默认 agent 消息目标", Group: string(chatSlashCommandGroupSession)},
+		{Command: "view", Summary: "只读查看子 agent transcript", Group: string(chatSlashCommandGroupSession)},
+		{Command: "open", Summary: "view 的别名", Group: string(chatSlashCommandGroupSession)},
+		{Command: "transcript", Summary: "view 的别名", Group: string(chatSlashCommandGroupSession)},
+		{Command: "approve", Summary: "批准子 agent 待审批工具调用（复用 supervision 审批链）", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+		{Command: "deny", Summary: "拒绝子 agent 待审批工具调用", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
+		{Command: "answer", Summary: "回答子 agent 的待回答问题", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
 		{Command: "send", Summary: "向目标 agent 投递 mailbox 消息", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
 		{Command: "followup", Summary: "向目标 agent 投递或触发 follow-up task", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
 		{Command: "select", Summary: "pick 的别名", Group: string(chatSlashCommandGroupSession)},

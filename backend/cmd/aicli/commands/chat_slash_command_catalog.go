@@ -119,7 +119,7 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/agents",
-			Usage:       "/agents [panel [full|follow|target <target>|next|prev|close]|pick|target <target>|send [target] <message>|followup [target] <message>|routing test [--scope auto|subagent|team] --role <role> --difficulty <level>|cleanup [--dry-run] [--idle <duration>]]",
+			Usage:       "/agents [panel [full|follow|target <target>|next|prev|close]|pick|target <target>|view [target]|send [target] <message>|followup [target] <message>|routing test [--scope auto|subagent|team] --role <role> --difficulty <level>|cleanup [--dry-run] [--idle <duration>]]",
 			Summary:     "显示、选择或发送 agent 协作消息",
 			Group:       string(chatSlashCommandGroupSession),
 			AcceptsArgs: true,
@@ -129,6 +129,9 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 				{Token: "close", Summary: "关闭当前固定面板"},
 				{Token: "pane", Summary: "panel 的别名"},
 				{Token: "dashboard", Summary: "panel 的别名"},
+				{Token: "view", Summary: "只读查看子 agent transcript（默认当前选中 target）"},
+				{Token: "open", Summary: "view 的别名"},
+				{Token: "transcript", Summary: "view 的别名"},
 				{Token: "follow", Summary: "进入 fixed-bottom 面板跟随模式，legacy 终端等待 mailbox 更新后刷新一次"},
 				{Token: "watch", Summary: "follow 的别名"},
 				{Token: "next", Summary: "切换 panel 到下一个 agent target"},
@@ -154,6 +157,18 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 				{Token: "gc", Summary: "cleanup 的别名"},
 				{Token: "--dry-run", Summary: "只预览可回收对象，不执行回收"},
 				{Token: "--idle", Summary: "额外回收空闲超过给定时长的子 agent（如 30m）"},
+			},
+		},
+		{
+			Name:        "/agent",
+			Usage:       "/agent [target] [limit=N]",
+			Summary:     "只读查看子 agent 的会话 transcript（/agents view 的等价入口）",
+			Group:       string(chatSlashCommandGroupSession),
+			AcceptsArgs: true,
+			Args: []chatSlashCommandArgSpec{
+				{Token: "target", Summary: "agent path 或 session id；缺省用 /agents target 选中的目标"},
+				{Token: "limit=N", Summary: "只显示最近 N 条事件（默认 200，上限 2000）"},
+				{Token: "close", Summary: "关闭固定 transcript 面板"},
 			},
 		},
 		{

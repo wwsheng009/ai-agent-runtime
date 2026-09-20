@@ -343,6 +343,9 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 	if commandMatches(cmdLower, "/agents") && unifiedDirectInteractiveOutput(session) {
 		return executeStructuredAgentsCommand(session, command), true, nil
 	}
+	if commandMatches(cmdLower, "/agent") && unifiedDirectInteractiveOutput(session) {
+		return executeStructuredAgentTranscriptCommand(session, command), true, nil
+	}
 	if commandMatches(cmdLower, "/compact") && unifiedDirectInteractiveOutput(session) {
 		return executeStructuredCompactCommand(session, command), true, nil
 	}
