@@ -929,10 +929,11 @@ func (h *localChatRuntimeHost) bindRuntimeEventPersistence() {
 			if strings.TrimSpace(event.SessionID) == "" {
 				return
 			}
-			if event.Payload != nil {
-				if _, persisted := event.Payload["seq"]; persisted {
-					return
-				}
+			// 生产者已自行落盘的事件（AppendEvent 后回填 payload["seq"]）不再重复
+			// append；判定收敛在 internal/events.ProducerPersistedEvent，与 runtime
+			// server 的 A 通道桥（api/skills/handler.go）共用同一实现。
+			if runtimeevents.ProducerPersistedEvent(event) {
+				return
 			}
 			if !runtimeevents.IsPersistedEventType(event.Type) {
 				return

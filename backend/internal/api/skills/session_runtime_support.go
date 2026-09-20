@@ -575,6 +575,12 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 		return nil, err
 	}
 	childSession.SetContext(toolbroker.AgentSessionContextParentSessionID, strings.TrimSpace(parentSessionID))
+	// 父侧工具调用归位（D）：broker 在 spawn_agent 执行上下文注入
+	// ParentToolCallID，宿主落进子会话上下文，进度镜像据此回填
+	// parent_tool_call_id（见 subscribeAgentCompletion）。
+	if parentToolCallID := strings.TrimSpace(args.ParentToolCallID); parentToolCallID != "" {
+		childSession.SetContext(toolbroker.AgentSessionContextParentToolCallID, parentToolCallID)
+	}
 	childSession.SetContext(toolbroker.AgentSessionContextRootSessionID, apiAgentRootSessionID(parentSession, parentSessionID))
 	childSession.SetContext(toolbroker.AgentSessionContextPath, apiAgentChildPath(parentSession, sessionID))
 	childSession.SetContext(toolbroker.AgentSessionContextDepth, childDepth)
@@ -964,12 +970,21 @@ func (c *sessionAgentController) subscribeAgentCompletion(parentSessionID string
 	// hosts enrich last_message identically); per-child state is dropped via
 	// Forget on session end. It never writes to the event store, so the parent
 	// transcript/replay cannot be polluted by child progress.
+	// 父侧工具调用归位（D）：spawn_agent 的 tool_call_id 由 broker 注入 spawn 参数，
+	// 宿主写入子会话上下文；镜像回填后前端/ACP 能把进度挂到对应 spawn_agent 行。
+	parentToolCallID := ""
+	if value, ok := childSession.GetContext(toolbroker.AgentSessionContextParentToolCallID); ok {
+		if text, ok := value.(string); ok {
+			parentToolCallID = strings.TrimSpace(text)
+		}
+	}
 	progressTarget := supervision.SubagentProgressTarget{
-		ParentSessionID: parentSessionID,
-		ChildSessionID:  childSessionID,
-		Path:            childPath,
-		Depth:           childDepth,
-		AgentType:       childType,
+		ParentSessionID:  parentSessionID,
+		ChildSessionID:   childSessionID,
+		Path:             childPath,
+		Depth:            childDepth,
+		AgentType:        childType,
+		ParentToolCallID: parentToolCallID,
 	}
 	progressMirror := c.handler.subagentProgressMirror()
 	handler := func(event runtimeevents.Event) {

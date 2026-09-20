@@ -127,6 +127,37 @@ func TestSubagentProgressMirrorPayloadShapeAndSourceIsolation(t *testing.T) {
 	assert.Equal(t, "ignored-because-present", source.Payload["metadata"].(map[string]interface{})["tool_name"])
 }
 
+func TestSubagentProgressMirrorCarriesParentToolCallID(t *testing.T) {
+	mirror := NewSubagentProgressMirror(time.Second)
+	now := time.Date(2026, 9, 13, 14, 0, 0, 0, time.UTC)
+
+	// 归位主路径：宿主从 spawn_agent 请求继承的父侧 tool_call_id 进载荷，
+	// 前端/ACP 据此把子代理进度挂到对应 spawn_agent 行。
+	target := SubagentProgressTarget{
+		ParentSessionID:  "parent-1",
+		ChildSessionID:   "child-1",
+		Path:             "/root/child-1",
+		Depth:            1,
+		AgentType:        "worker",
+		ParentToolCallID: "call-spawn-1",
+	}
+	mirrored, ok := mirror.Observe(target, progressSourceEvent("progress", "call-1", "step 1", 10), now)
+	require.True(t, ok)
+	assert.Equal(t, "call-spawn-1", mirrored.Payload["parent_tool_call_id"])
+
+	// 兼容路径：源事件已带该键（历史/外部生产者）时同样透传。
+	source := progressSourceEvent("progress", "call-2", "step 2", 20)
+	source.Payload["parent_tool_call_id"] = "call-spawn-2"
+	mirrored, ok = mirror.Observe(SubagentProgressTarget{ParentSessionID: "parent-1", ChildSessionID: "child-2"}, source, now)
+	require.True(t, ok)
+	assert.Equal(t, "call-spawn-2", mirrored.Payload["parent_tool_call_id"])
+
+	// 缺省（旧路径/降级）保持既有载荷形状，不引入空键。
+	mirrored, ok = mirror.Observe(SubagentProgressTarget{ParentSessionID: "parent-1", ChildSessionID: "child-3"}, progressSourceEvent("progress", "call-3", "step 3", 30), now)
+	require.True(t, ok)
+	assert.NotContains(t, mirrored.Payload, "parent_tool_call_id")
+}
+
 func TestSubagentProgressMirrorRejectsUnmirrorableEvents(t *testing.T) {
 	mirror := NewSubagentProgressMirror(time.Second)
 	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)

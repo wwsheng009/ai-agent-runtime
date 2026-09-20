@@ -116,6 +116,23 @@ func TestLocalProgressMirrorMergesRepeatedFramesAndKeepsStateChanges(t *testing.
 	}
 }
 
+func TestLocalProgressMirrorCarriesParentToolCallID(t *testing.T) {
+	host, bus, _ := newLocalProgressMirrorTestHost(t)
+	registry := newLocalActorRegistry(host)
+	child := newLocalMirrorTestChild(t, localMirrorTestChild)
+	// 父侧工具调用归位（D）：broker 注入 → Spawn 落上下文 → 镜像回填。
+	child.SetContext(toolbroker.AgentSessionContextParentToolCallID, "call-spawn-7")
+	registry.subscribeLocalAgentCompletion(localMirrorTestParent, child)
+
+	mirrors, unsubscribe := collectLocalMirrorProgress(bus)
+	defer unsubscribe()
+
+	publishLocalMirrorProgress(bus, localMirrorTestChild, "progress", "step 1")
+	frames := mirrors()
+	require.Len(t, frames, 1)
+	require.Equal(t, "call-spawn-7", frames[0].Payload["parent_tool_call_id"])
+}
+
 func TestLocalBatchProgressSourceEnrichesLastMessageFromHostMirror(t *testing.T) {
 	host, bus, _ := newLocalProgressMirrorTestHost(t)
 	host.SubagentBatches = newTestSubagentBatchStore(t)

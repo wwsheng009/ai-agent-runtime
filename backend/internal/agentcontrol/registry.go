@@ -6,7 +6,11 @@ import (
 )
 
 const (
-	SessionContextParentSessionID     = "agent_parent_session_id"
+	SessionContextParentSessionID = "agent_parent_session_id"
+	// SessionContextParentToolCallID 记录发起该子会话的父侧 tool_call_id
+	// （spawn_agent 工具调用的 id）：subagent.progress 镜像据此回填
+	// parent_tool_call_id，前端/ACP 能把子代理进度挂到对应的 spawn_agent 行上。
+	SessionContextParentToolCallID    = "agent_parent_tool_call_id"
 	SessionContextRootSessionID       = "agent_root_session_id"
 	SessionContextAgentType           = "agent_type"
 	SessionContextRequestedModel      = "agent_requested_model"

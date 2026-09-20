@@ -13,6 +13,7 @@ import (
 
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type fakeAgentSessionController struct {
@@ -435,6 +436,31 @@ func TestBroker_Execute_SpawnAgentParsesRouteHints(t *testing.T) {
 	}
 	if meta["provider"] != "codex" || meta["model"] != "gpt-5.4" || meta["difficulty"] != "hard" || meta["permission_mode"] != "bypass_permissions" {
 		t.Fatalf("unexpected route metadata: %#v", meta)
+	}
+}
+
+func TestBroker_ExecuteToolCall_SpawnAgentInjectsParentToolCallID(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+
+	_, _, err := broker.ExecuteToolCall(context.Background(), "parent-session", types.ToolCall{
+		ID:   "call-spawn-42",
+		Name: ToolSpawnAgent,
+		Args: map[string]interface{}{"message": "inspect"},
+	})
+	if err != nil {
+		t.Fatalf("spawn_agent failed: %v", err)
+	}
+	if controller.lastSpawn.ParentToolCallID != "call-spawn-42" {
+		t.Fatalf("ParentToolCallID = %q, want call-spawn-42", controller.lastSpawn.ParentToolCallID)
+	}
+
+	// 旧入口（无 tool call id）不得伪造归位信息。
+	if _, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{"message": "inspect"}); err != nil {
+		t.Fatalf("spawn_agent failed: %v", err)
+	}
+	if controller.lastSpawn.ParentToolCallID != "" {
+		t.Fatalf("ParentToolCallID = %q, want empty for legacy Execute", controller.lastSpawn.ParentToolCallID)
 	}
 }
 

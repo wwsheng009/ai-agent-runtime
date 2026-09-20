@@ -128,12 +128,20 @@ func streamCoalescePayloadText(payload map[string]interface{}, key string) (stri
 	return text, ok
 }
 
-// streamCoalesceIdentity 是「同一段流」的判据：类型 + trace + turn + stream。
-// turn/stream 键允许缺省（部分总线事件只带 trace）——两边都缺省时视为同段，
-// 与 CLI 侧 assistantEventIdentity 的空值口径一致。
+// streamCoalesceIdentity 是「同一段流」的判据：类型 + 会话/代理身份 + trace +
+// turn + stream。turn/stream 键允许缺省（部分总线事件只带 trace）——两边都缺省
+// 时视为同段，与 CLI 侧 assistantEventIdentity 的空值口径一致。
+//
+// 会话/代理身份并入身份键是纵深防御：当前调用方已按单会话查询（合帧页来自
+// store.ListEvents(sessionID) 或按 sessionID 过滤的 live 订阅），跨会话折叠不
+// 成立；但一旦未来某条路径把多会话事件混进同一页，增量正文折叠会把两个会话的
+// 文本拼成一段（串流）。身份键带上 SessionID/AgentName 后，这种拼接在合帧层就
+// 被拒绝，而不是只靠上游过滤。
 func streamCoalesceIdentity(event runtimeevents.Event) string {
 	return strings.Join([]string{
 		event.Type,
+		strings.TrimSpace(event.SessionID),
+		strings.TrimSpace(event.AgentName),
 		event.TraceID,
 		streamCoalesceFirstPayloadString(event.Payload, "turn_id", "turnId", "turn"),
 		streamCoalesceFirstPayloadString(event.Payload, "stream_id", "streamId"),

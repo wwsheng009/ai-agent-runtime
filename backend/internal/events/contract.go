@@ -109,7 +109,12 @@ var runtimeEventContracts = []Contract{
 	{Type: "subagent.task.started", Channels: ChannelTailOnly},
 	{Type: "subagent.task.completed", Channels: ChannelTailOnly},
 	{Type: "subagent.started", Channels: ChannelTailOnly},
-	{Type: "subagent.completed", Channels: ChannelTailOnly},
+	// subagent.completed 是**摘要落盘**：agent-controller 在子会话终态时把
+	// 生命周期摘要（agent_id/path/status/usage，无子正文）直接 AppendEvent 写进
+	// 父会话库（session_runtime_support.go），同时经总线发布供尾巴帧消费。
+	// 因此它既是 D 通道（尾巴）也是 A 通道（事件库）——落盘由生产者完成，
+	// A 通道桥靠 ProducerPersistedEvent 跳过，避免同一摘要写两遍。
+	{Type: "subagent.completed", Channels: ChannelSessionStore | ChannelTailOnly},
 
 	// ---- 已登记、当前无 chat 侧通道 ----
 	// chat/events.go 常量（其中 tool_started/tool_finished 是 tool.requested/
@@ -192,6 +197,25 @@ func IsPersistCriticalEventType(eventType string) bool {
 		return false
 	}
 	return contract.PersistCritical && contract.Channels&ChannelSessionStore != 0
+}
+
+// ProducerPersistedEvent 判断事件是否**已由生产者写入会话事件库**：生产者
+// AppendEvent 成功后会回填 payload["seq"]，随后才把同一事件发布到总线。
+//
+// A 通道（总线 → 事件库）据此跳过，避免「生产者已写 + 桥再写」的双份行。
+// 当前唯一生产者是 agent-controller 的 subagent.completed 摘要行
+// （api/skills/session_runtime_support.go）；CLI 本地 A 通道桥自始就有同样的
+// 判据（cmd/aicli/commands/chat_actor_host.go），本函数把它收敛成单一实现。
+// 判定刻意保持宽松（键存在即可，不校验数值）：与 CLI 侧既有行为一致，且 seq
+// 只可能由 AppendEvent 回填路径写入。
+func ProducerPersistedEvent(event Event) bool {
+	if event.Payload == nil {
+		return false
+	}
+	if _, persisted := event.Payload["seq"]; persisted {
+		return true
+	}
+	return false
 }
 
 // IsLiveOnlyEventType 判断类型是否走 B 通道（仅实时、不落盘）。

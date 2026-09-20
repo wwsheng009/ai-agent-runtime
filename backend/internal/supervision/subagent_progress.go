@@ -45,6 +45,10 @@ type SubagentProgressTarget struct {
 	Path            string
 	Depth           int
 	AgentType       string
+	// ParentToolCallID 是发起该子会话的父侧 tool_call_id（spawn_agent 调用的 id）。
+	// 非空时随镜像回填 parent_tool_call_id，前端/ACP 可把子代理进度挂到对应的
+	// spawn_agent 行上；缺省为空（旧路径/降级时保持既有载荷形状）。
+	ParentToolCallID string
 }
 
 // SubagentProgressMirror throttles child tool progress into parent-stream
@@ -166,6 +170,10 @@ func (m *SubagentProgressMirror) Observe(target SubagentProgressTarget, source r
 		"source_event_type": toolprotocol.EventTypeProgress,
 		"state":             state,
 		"live":              true,
+	}
+	// 父侧工具调用归位：目标上下文优先，其次兼容源事件载荷里已带该键的路径。
+	if parentToolCallID := firstNonEmptyText(strings.TrimSpace(target.ParentToolCallID), stringPayloadText(payload, "parent_tool_call_id")); parentToolCallID != "" {
+		mirroredPayload["parent_tool_call_id"] = parentToolCallID
 	}
 	if toolCallID != "" {
 		mirroredPayload["tool_call_id"] = toolCallID

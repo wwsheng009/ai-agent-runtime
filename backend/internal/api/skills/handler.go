@@ -4242,6 +4242,14 @@ func shouldPersistRuntimeSessionEvent(event runtimeevents.Event) bool {
 	if strings.TrimSpace(event.SessionID) == "" {
 		return false
 	}
+	// 生产者已自行落盘的事件（如 agent-controller 的 subagent.completed 摘要行，
+	// 见 session_runtime_support.go 的 store.AppendEvent + payload["seq"] 回填）
+	// 不再经 A 通道重复 append：契约里 subagent.completed 带 session_store 位，
+	// 但该类型的「父库摘要行」所有权在生产者，桥只负责其余路径。
+	// 判定收敛在 internal/events.ProducerPersistedEvent（CLI 本地桥共用）。
+	if runtimeevents.ProducerPersistedEvent(event) {
+		return false
+	}
 	return isPersistedRuntimeEventType(event.Type)
 }
 

@@ -355,6 +355,11 @@ type SpawnAgentArgs struct {
 	ReadOnly    bool   `json:"read_only,omitempty"`
 	ForkContext *bool  `json:"fork_context,omitempty"`
 	ForkTurns   string `json:"fork_turns,omitempty"`
+	// ParentToolCallID 是发起本次 spawn 的父侧 tool_call_id，由 broker 在执行
+	// spawn_agent 工具调用时内部注入（不来自模型入参，json:"-" 不落地/不回显）。
+	// 宿主把它写进子会话上下文，subagent.progress 镜像据此回填
+	// parent_tool_call_id，供前端/ACP 把进度归位到 spawn_agent 行。
+	ParentToolCallID string `json:"-"`
 	// Execution supervision timeouts (doc 7.2). Zero means "use operator
 	// default"; a negative value is rejected by the broker.
 	TimeoutSec               int64    `json:"timeout_sec,omitempty"`
@@ -1034,6 +1039,7 @@ const (
 	AgentSessionContextModel                 = "model"
 	AgentSessionContextReasoningEffort       = "reasoning_effort"
 	AgentSessionContextParentSessionID       = agentcontrol.SessionContextParentSessionID
+	AgentSessionContextParentToolCallID      = agentcontrol.SessionContextParentToolCallID
 	AgentSessionContextRootSessionID         = agentcontrol.SessionContextRootSessionID
 	AgentSessionContextAgentType             = agentcontrol.SessionContextAgentType
 	AgentSessionContextRequestedModel        = agentcontrol.SessionContextRequestedModel

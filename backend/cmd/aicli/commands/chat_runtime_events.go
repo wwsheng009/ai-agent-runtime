@@ -60,27 +60,27 @@ type chatRuntimeEventBridge struct {
 	// non-blockingly as soon as the consumer catches up; ordering is
 	// preserved by flushing pending streams before any non-streaming event
 	// is enqueued.
-	streamMu                        sync.Mutex
-	pendingStreams                  []chatRuntimeQueuedEvent
-	pendingStreamsBytes             int64
-	streamRetainedEvents            uint64
-	streamRetainedBytes             uint64
-	streamDroppedEvents             uint64
-	streamDroppedBytes              uint64
-	streamRetainedByType            map[string]uint64
-	streamDroppedByType             map[string]uint64
-	streamOverflowLogMu             sync.Mutex
-	streamOverflowLogCount          uint64
-	streamOverflowLogSuppressed     uint64
-	runMu                           sync.Mutex
-	logMu                           sync.Mutex
-	renderMu                        sync.Mutex
-	progressMu                      sync.Mutex
-	runErr                          error
-	rendered                        map[string]struct{}
-	historySeedSeen                 map[string]struct{}
-	approvalGrants                  map[string]time.Time
-	permissionHintShown             bool
+	streamMu                    sync.Mutex
+	pendingStreams              []chatRuntimeQueuedEvent
+	pendingStreamsBytes         int64
+	streamRetainedEvents        uint64
+	streamRetainedBytes         uint64
+	streamDroppedEvents         uint64
+	streamDroppedBytes          uint64
+	streamRetainedByType        map[string]uint64
+	streamDroppedByType         map[string]uint64
+	streamOverflowLogMu         sync.Mutex
+	streamOverflowLogCount      uint64
+	streamOverflowLogSuppressed uint64
+	runMu                       sync.Mutex
+	logMu                       sync.Mutex
+	renderMu                    sync.Mutex
+	progressMu                  sync.Mutex
+	runErr                      error
+	rendered                    map[string]struct{}
+	historySeedSeen             map[string]struct{}
+	approvalGrants              map[string]time.Time
+	permissionHintShown         bool
 	// headlessQuestionErr keeps the last transport error of the headless
 	// question hook so the fail-closed message can explain why the panel did
 	// not answer (guarded by renderMu).
@@ -167,16 +167,16 @@ type chatRuntimeEventBridge struct {
 	// 80% 收尾水位注入 durable 提醒时携带 turn_budget_line，桥只把它镜像成
 	// "本 run 可见进度"，不参与任何业务判决。BeginRunKind 清空上一轮的值，
 	// 保证状态行不会把上一轮的收尾提示带进新一轮。
-	turnBudget     atomic.Pointer[chatEventBridgeTurnBudget]
-	askApproval    func(*runtimechat.ApprovalRequest, []string) (chatApprovalAnswer, error)
-	askQuestion    func(prompt string, suggestions []string, required bool) (string, error)
+	turnBudget  atomic.Pointer[chatEventBridgeTurnBudget]
+	askApproval func(*runtimechat.ApprovalRequest, []string) (chatApprovalAnswer, error)
+	askQuestion func(prompt string, suggestions []string, required bool) (string, error)
 	// askQuestionHeadless answers ask_user_question prompts in --no-interactive
 	// runs (ACP clients, exec answer injection). When it is nil, or when it
 	// reports that no panel is available, the run keeps the historical
 	// fail-closed behavior instead of silently inventing an answer.
 	askQuestionHeadless func(prompt string, suggestions []string, required bool) (string, error)
-	approveTool    func(ctx context.Context, sessionID, requestID string, allow bool) error
-	answerQuestion func(ctx context.Context, sessionID, questionID, answer string) error
+	approveTool         func(ctx context.Context, sessionID, requestID string, allow bool) error
+	answerQuestion      func(ctx context.Context, sessionID, questionID, answer string) error
 	// preferInteractiveApprovals keeps NoInteractive headless hosts (ACP stdio)
 	// from auto-denying tools so askApproval can RPC to an external client.
 	preferInteractiveApprovals bool
@@ -2677,6 +2677,12 @@ func (b *chatRuntimeEventBridge) encodeRenderModelEvent(event runtimeevents.Even
 	if b == nil || b.renderEncoder == nil {
 		return
 	}
+	// 子会话（spawn_agent）内容绝不进入父会话的 Scene/事件日志数据面：
+	// 编码器按事件类型兜底 append，会把子代理的正文/思考/工具行写进父会话
+	// 的 canonical Scene 与 replay 日志（见 isForeignSessionContentEvent）。
+	if b.isForeignSessionContentEvent(event) {
+		return
+	}
 	b.renderMu.Lock()
 	defer b.renderMu.Unlock()
 	// 本地诊断/镜像事件（input.queue.*、aicli.chat.dynamic_status）只进
@@ -3915,6 +3921,9 @@ func (b *chatRuntimeEventBridge) forwardLateRuntimeEvent(event runtimeevents.Eve
 	if b == nil || b.session == nil || b.session.ExecEventBridge == nil {
 		return
 	}
+	if b.isForeignSessionContentEvent(event) {
+		return
+	}
 	b.session.ExecEventBridge.HandleRuntimeEvent(event)
 }
 
@@ -4611,7 +4620,7 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		)
 		return
 	}
-	if b.session.ExecEventBridge != nil {
+	if b.session.ExecEventBridge != nil && !b.isForeignSessionContentEvent(event) {
 		b.session.ExecEventBridge.HandleRuntimeEvent(event)
 	}
 	b.applyLLMRequestStatus(event)
@@ -4680,6 +4689,7 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		// status line: it would wipe the frozen "Worked for ..." completion
 		// summary and flip the state icon back to running.
 		if parts := chatLLMRetryParts(event); len(parts) > 0 &&
+			!b.isForeignSessionContentEvent(event) &&
 			shouldRenderInteractiveOutput(b.session) && b.session.Interaction != nil {
 			b.session.Interaction.SetRetrying(strings.Join(parts, " "))
 		}
@@ -5655,8 +5665,33 @@ func (b *chatRuntimeEventBridge) shouldSuppressTimelineDuringAssistantStream(eve
 	}
 }
 
+// isForeignSessionTerminalEvent reports whether a session terminal event is
+// confirmed to belong to another session than the bridge's primary one.
+//
+// 子会话的 session_end / session_interrupted 会被 isForeignSessionContentEvent
+// 放行（父侧 TitleNotifier 需要按会话清理工具行），但它绝不能关闭父回合正在
+// 进行的思考块/流式正文单元格——否则任一子代理结束都会把父会话的输出截断成
+// 多段（串流）。任一侧身份缺失时保持旧行为，避免误伤身份不明的事件。
+func (b *chatRuntimeEventBridge) isForeignSessionTerminalEvent(event runtimeevents.Event) bool {
+	if b == nil {
+		return false
+	}
+	primarySessionID := b.primaryRuntimeSessionID()
+	if primarySessionID == "" {
+		return false
+	}
+	sessionID := firstNonEmptyChatValue(strings.TrimSpace(event.SessionID), payloadStringValue(event.Payload["session_id"]))
+	if sessionID == "" {
+		return false
+	}
+	return sessionID != primarySessionID
+}
+
 func (b *chatRuntimeEventBridge) shouldFlushReasoningOnSessionEnd(event runtimeevents.Event) bool {
 	if b == nil || b.session == nil || event.Type != runtimechat.EventSessionEnd {
+		return false
+	}
+	if b.isForeignSessionTerminalEvent(event) {
 		return false
 	}
 	key := b.activeReasoningRenderKey()
@@ -5680,6 +5715,9 @@ func (b *chatRuntimeEventBridge) shouldFlushReasoningOnSessionEnd(event runtimee
 // may therefore finalize the coordinator immediately.
 func (b *chatRuntimeEventBridge) shouldFinalizeAssistantDeltaOnTerminalEvent(event runtimeevents.Event) bool {
 	if b == nil || b.session == nil {
+		return false
+	}
+	if b.isForeignSessionTerminalEvent(event) {
 		return false
 	}
 	switch event.Type {
@@ -7082,6 +7120,43 @@ func (b *chatRuntimeEventBridge) isPrimarySessionEvent(event runtimeevents.Event
 		return false
 	}
 	return b.matchesPrimarySessionID(event.SessionID)
+}
+
+// isForeignSessionContentEvent 判定事件是否是"别的会话（子代理/子会话）的内容"，
+// 这些内容绝不能出现在父会话的输出面（ACP agent_message_chunk /
+// agent_thought_chunk、exec JSONL、Scene/事件日志/replay）上。
+//
+// 背景：子代理与父代理共用同一条 EventBus（internal/agent/child_factory.go
+// 的 childAgent.SetEventBus(parent.GetEventBus())），而本桥以
+// Subscribe("", b.Handle) 订阅全总线，因此父会话桥会收到每个子会话的
+// assistant.delta / assistant.reasoning / tool.* 流。多数渲染入口已经用
+// isPrimarySessionEvent 自我守卫，但 headless（ACP/exec）桥与 Scene/事件日志
+// 数据面没有，导致子代理正文/思考被当作父回合输出（串流）。
+//
+// 例外：跨会话的控制面投影必须继续放行——team/task 生命周期、mailbox 投递、
+// subagent 终态（含 subagent.progress 镜像，其 SessionID 已归父会话）以及
+// 子会话 session_end（父侧 TitleNotifier 需要按会话清理工具行）。
+func (b *chatRuntimeEventBridge) isForeignSessionContentEvent(event runtimeevents.Event) bool {
+	if b == nil {
+		return false
+	}
+	sessionID := strings.TrimSpace(event.SessionID)
+	// 桥尚未绑定主会话身份时（纯 Scene/编码器单测、启动早期）没有可比对的
+	// 归属，保持旧行为放行，避免把无法判定的事件当成外部会话内容丢弃。
+	if sessionID == "" || b.primaryRuntimeSessionID() == "" || b.matchesPrimarySessionID(sessionID) {
+		return false
+	}
+	if isTeamLifecycleRuntimeEvent(event.Type) ||
+		event.Type == runtimechat.EventMailboxReceived ||
+		isCriticalSubagentLifecycleEvent(event.Type) {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(event.Type)) {
+	case "subagent.progress", "agent.reclaimed",
+		runtimechat.EventSessionEnd, runtimechat.EventSessionInterrupted:
+		return false
+	}
+	return true
 }
 
 // setPrimarySessionID updates the event bridge's immutable routing identity

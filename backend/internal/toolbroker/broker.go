@@ -1454,7 +1454,11 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if err := validateSpawnAgentArgTypes(args); err != nil {
 			return nil, nil, err
 		}
-		request := SpawnAgentArgs{Message: message}
+		// 父侧工具调用归位（D）：spawn_agent 调用的 tool_call_id 只存在于
+		// broker 执行上下文（不来自模型入参），在此注入请求，宿主随子会话
+		// 上下文持久化；subagent.progress 镜像据此回填 parent_tool_call_id，
+		// 前端/ACP 才能把子代理进度挂到对应的 spawn_agent 行上。
+		request := SpawnAgentArgs{Message: message, ParentToolCallID: strings.TrimSpace(toolCallID)}
 		if value, ok := args["id"].(string); ok {
 			request.ID = strings.TrimSpace(value)
 			if err := rejectRenderedPlaceholderID(ToolSpawnAgent, "id", request.ID); err != nil {

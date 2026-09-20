@@ -696,6 +696,12 @@ func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, 
 		return nil, err
 	}
 	childSession.SetContext(toolbroker.AgentSessionContextParentSessionID, parentSessionID)
+	// 父侧工具调用归位（D）：broker 在 spawn_agent 执行上下文注入
+	// ParentToolCallID，宿主落进子会话上下文，进度镜像据此回填
+	// parent_tool_call_id（见 subscribeLocalAgentCompletion）。
+	if parentToolCallID := strings.TrimSpace(args.ParentToolCallID); parentToolCallID != "" {
+		childSession.SetContext(toolbroker.AgentSessionContextParentToolCallID, parentToolCallID)
+	}
 	childSession.SetContext(toolbroker.AgentSessionContextRootSessionID, localAgentRootSessionID(parentSession, parentSessionID))
 	childSession.SetContext(toolbroker.AgentSessionContextPath, localAgentChildPath(parentSession, sessionID))
 	childSession.SetContext(toolbroker.AgentSessionContextDepth, childDepth)
@@ -1127,12 +1133,21 @@ func (r *localActorRegistry) subscribeLocalAgentCompletion(parentSessionID strin
 
 	// P0-1c: 子会话 tool.progress → live-only 父侧镜像（与 API 宿主
 	// session_runtime_support.go 的接线对等）。目标身份与完成投影同一口径。
+	// 父侧工具调用归位（D）：spawn_agent 的 tool_call_id 由 broker 注入 spawn 参数，
+	// 宿主写入子会话上下文；镜像回填后前端/ACP 能把进度挂到对应 spawn_agent 行。
+	parentToolCallID := ""
+	if value, ok := childSession.GetContext(toolbroker.AgentSessionContextParentToolCallID); ok {
+		if text, ok := value.(string); ok {
+			parentToolCallID = strings.TrimSpace(text)
+		}
+	}
 	progressTarget := supervision.SubagentProgressTarget{
-		ParentSessionID: parentSessionID,
-		ChildSessionID:  childSessionID,
-		Path:            childPath,
-		Depth:           childDepth,
-		AgentType:       childType,
+		ParentSessionID:  parentSessionID,
+		ChildSessionID:   childSessionID,
+		Path:             childPath,
+		Depth:            childDepth,
+		AgentType:        childType,
+		ParentToolCallID: parentToolCallID,
 	}
 
 	var unsubscribe func()
