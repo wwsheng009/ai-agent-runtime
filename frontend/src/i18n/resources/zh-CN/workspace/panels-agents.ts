@@ -31,6 +31,8 @@ export const zhWorkspacePanelsAgents = {
   resuming: "恢复中…",
   stopLabel: "停止子代理 {{name}}",
   resumeLabel: "恢复子代理 {{name}}",
+  transcript: "会话记录",
+  transcriptLabel: "查看子代理 {{name}} 的会话记录（只读）",
   unknownAction: "状态未知，不提供操作",
   actionErrorTitle: "操作失败",
   updatedAt: "更新于 {{time}}",

@@ -13,7 +13,7 @@ import {
 import { RuntimeApiError } from "@/api/runtime/shared";
 import type { RuntimeAgentCatalog, RuntimeAgentRecord } from "@/types/runtime";
 
-import { SessionAgentsPanel } from "./session-agents-panel";
+import { SessionAgentsPanel, type SessionAgentsPanelProps } from "./session-agents-panel";
 
 type ReactActEnvironmentGlobal = typeof globalThis & {
   IS_REACT_ACT_ENVIRONMENT?: boolean;
@@ -152,10 +152,13 @@ describe("SessionAgentsPanel", () => {
     delete (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  async function renderPanel(result: UseSessionAgentsResult) {
+  async function renderPanel(
+    result: UseSessionAgentsResult,
+    props: Pick<SessionAgentsPanelProps, "onOpenTranscript"> | Record<string, never> = {},
+  ) {
     await act(async () => {
       root?.render(
-        <SessionAgentsPanel agents={result} onClose={onClose} open />,
+        <SessionAgentsPanel agents={result} onClose={onClose} open {...props} />,
       );
     });
     await act(flush);
@@ -226,6 +229,36 @@ describe("SessionAgentsPanel", () => {
     expect(runningRow?.textContent).toContain("停止");
     const closedRow = document.body.querySelector('[data-agent-id="worker-2"]');
     expect(closedRow?.textContent).toContain("恢复");
+  });
+
+  it("G8 下钻：有会话键的行渲染只读入口并回传 target，无会话键的行不给入口", async () => {
+    const onOpenTranscript = vi.fn();
+    await renderPanel(makeResult([rootAgent, currentAgent, runningChild, closedGrand]), {
+      onOpenTranscript,
+    });
+
+    const entry = document.body.querySelector(
+      '[data-agent-id="worker-1"] [data-testid="agent-transcript"]',
+    );
+    expect(entry).not.toBeNull();
+    expect(entry?.textContent).toContain("会话记录");
+
+    await act(async () => {
+      entry?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(onOpenTranscript).toHaveBeenCalledTimes(1);
+    expect(onOpenTranscript).toHaveBeenCalledWith({
+      sessionId: "sess-worker-1",
+      agentId: "/root/child-1/worker-1",
+      role: "child",
+      status: "active",
+    });
+
+    // 没有后端会话键的行（这里 closedGrand.sessionId 为 null）：宁可不给入口，
+    // 也不拿 agentId / agentPath 冒充 runtime/events 的会话键。
+    expect(
+      document.body.querySelector('[data-agent-id="worker-2"] [data-testid="agent-transcript"]'),
+    ).toBeNull();
   });
 
   it("unknown 状态不给动作并说明原因", async () => {

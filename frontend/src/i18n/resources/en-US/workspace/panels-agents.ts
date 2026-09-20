@@ -31,6 +31,8 @@ export const enWorkspacePanelsAgents = {
   resuming: "Resuming…",
   stopLabel: "Stop subagent {{name}}",
   resumeLabel: "Resume subagent {{name}}",
+  transcript: "Transcript",
+  transcriptLabel: "View the session transcript of subagent {{name}} (read-only)",
   unknownAction: "Unknown status — no action offered",
   actionErrorTitle: "Action failed",
   updatedAt: "Updated {{time}}",

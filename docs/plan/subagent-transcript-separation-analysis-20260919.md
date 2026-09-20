@@ -2,7 +2,7 @@
 
 - 日期：2026-09-19
 - 状态：分析已定稿；P0/P1 已实施（G1 父侧隔离 + G2/G3 只读子会话视图 + G4/G5/G7 实时与交互），
-  P2 部分落地（G9 历史回放 + `/export` 提示），G8 前端第二入口未开始（见 §8）
+  P2 已落地三项（G9 历史回放 + `/export` 提示 + G8 前端第二入口），其余 P2 项见 §8.3
 - 范围：`backend/cmd/aicli`（TUI/console）+ `frontend/`（Workspace Chat）+ 事件桥隔离面
 - 需求原文（三条）：
   - (a) 主界面只能查看**主 agent** 的会话 transcript；
@@ -184,12 +184,14 @@ critical subagent 终态、子会话 `session_end`（父侧 TitleNotifier 按会
 
 验收：子会话运行中视图可实时更新；审批可在视图内闭环；视图不产生父状态行变更。
 
-### P2（可选）—— 部分落地（2026-09-19：G9 + 导出提示，证据见 §8.5）
+### P2（可选）—— 已落地三项（2026-09-19：G9 + 导出提示 + G8，证据见 §8.5/§8.6）
 
 - [x] G9：历史子会话回放（SessionStore messages 回退）—— 事件窗口为空时回退 canonical
       messages（`source=messages` + `ended=true`），事件流有覆盖时仍以事件流为准（Q2）；
       回放不建立 live 订阅（follow 语义只在事件流上成立）；
-- [ ] G8：前端下钻入口扩展（session-agents-panel）；
+- [x] G8：前端下钻入口扩展（session-agents-panel）—— 面板行在**后端上报会话键**
+      （`sessionId`）存在时提供只读「会话记录」入口，复用既有 `SubagentSessionDialog`；
+      无会话键的行不给入口（不以 `agentId`/`agentPath` 冒充 `runtime/events` 会话键）；
 - [ ] 主 transcript 中 `subagent.progress` 镜像行作为跳转锚点（`/agents view` 快捷进入）——
       现状核查：CLI 父桥不渲染该镜像行（`subagent.progress` 为 live-only，仅 ACP 桥
       `agent_stdio_bridge.go` 合成 tool_call_update 行），无行可挂锚点，归入前端/ACP 面；
@@ -235,9 +237,10 @@ P1（G4 follow / G5 审批闭环 / G7 映射一致性 + 400 行上限）同日�
 `cd backend; go test ./cmd/aicli/commands -count=1` → `ok … 97.664s`；`go build ./...`、
 `go vet ./cmd/aicli/commands` 通过（变更与证据见 §8.1、§8.4）。
 
-P2 部分落地：G9 历史子会话回放（事件窗口为空时回退 SessionStore canonical messages，
-`source=messages`）与 `/export <session-id>` 可复制提示（见 §8.5）。`subagent.progress`
-锚点经核查归入前端/ACP 面（CLI 父桥不渲染该 live-only 镜像行），G8 未开始。
+P2 三项落地：G9 历史子会话回放（事件窗口为空时回退 SessionStore canonical messages，
+`source=messages`）、`/export <session-id>` 可复制提示（见 §8.5）、G8 前端第二入口
+（agents 面板行 → 只读 transcript 对话框，见 §8.6）。`subagent.progress` 锚点经核查
+归入前端/ACP 面（CLI 父桥不渲染该 live-only 镜像行），CLI 侧无可挂锚点的行。
 
 ### 8.1 已落地变更
 
@@ -298,9 +301,29 @@ P1 全量回归：`cd backend; go test ./cmd/aicli/commands -count=1` → `ok �
 | 回放不建立 live 订阅 | ✅ | 代码口径：`buildChatAgentTranscriptView` 仅空事件窗口回退，follow 分支对 `source=messages` 直接 `stopChatAgentTranscriptFollow` |
 | 导出提示可复制 | ✅ | 同上：header `[hint] export: /export replay-child-session`；命令目录既有 `/export [current\|latest\|<session-id>]` |
 | `subagent.progress` 锚点 | ⏸ 归入 G8 批次 | 现状核查：CLI 父桥不渲染该镜像行（live-only；仅 ACP 桥合成 `tool_call_update`），无可挂锚点的行 |
-| G8 前端第二入口 | ⏳ 未开始 | — |
+| G8 前端第二入口 | ✅ | 见 §8.6（前端改动、验证命令与证据单列） |
 
 复现命令：`cd backend; go test ./cmd/aicli/commands -run 'AgentTranscript' -count=1`。
+
+### 8.6 验收对照（§5 P2-G8，前端第二入口）
+
+| 验收项 | 结果 | 证据 |
+|---|---|---|
+| 面板行内出现只读 transcript 入口 | ✅ | `session-agents-panel.test.tsx`：`worker-1` 行渲染 `[data-testid="agent-transcript"]`（文案「会话记录」）并回传 target |
+| 入口只认后端上报的会话键 | ✅ | `session-agents-panel-shared.test.ts: agentTranscriptTarget`（3 例）：`sessionId` 原样透传；无 `agent_path` 时标题回退 `agentId`；`sessionId` 缺失/空白 → `null` |
+| 无会话键的行不给入口 | ✅ | `session-agents-panel.test.tsx`：`worker-2`（`sessionId=null`）行内无 `agent-transcript` 节点，不拿 `agentId` 冒充会话键 |
+| 复用既有只读视图，不新造对话框 | ✅ | `workspace-shell/main-section.tsx` 挂载既有 `SubagentSessionDialog`（与轨迹页同源）；打开前先收起 agents 面板（避免两层 modal 的 Esc 竞态），面板数据有缓存、重开不重复拉取 |
+| 展示状态沿用既有收敛口径 | ✅ | `agentTranscriptTarget` 的 `status` 取 `agentDisplayStatus`（`runtimeState=idle` → `ended`），与面板 Badge 同源 |
+| i18n 双语文案齐备 | ✅ | `zh-CN/en-US/workspace/panels-agents.ts` 增 `transcript` / `transcriptLabel`；`node scripts/verify-frontend-i18n.ts` → `scanned=840, violations=0` |
+| 行数预算不被破坏 | ✅ | 本轮 8 个改动文件非空行：`session-agents-panel-shared.ts` 440、`.test.ts` 397、`session-agents-tree.tsx` 321、`session-agents-panel.tsx` 279、`.test.tsx` 301、`main-section.tsx` 468（均 ≤ 500） |
+
+改动文件：`frontend/src/components/workspace/session-agents-panel-shared.ts`（`agentTranscriptTarget`）、
+`session-agents-tree.tsx`（行内入口）、`session-agents-panel.tsx`（prop 透传）、
+`workspace-shell/main-section.tsx`（对话框接线 + 面板收起）、`i18n/resources/{zh-CN,en-US}/workspace/panels-agents.ts`。
+
+复现命令：`cd frontend; npx vitest run src/components/workspace/session-agents-panel.test.tsx
+src/components/workspace/session-agents-panel-shared.test.ts src/components/workspace/session-agents-tree.test.tsx`
+→ `Test Files 3 passed / Tests 47 passed`；`npx eslint <8 个改动文件>` → exit 0。
 
 ### 8.3 未落地（按 §5 排期）
 
@@ -310,10 +333,20 @@ P1 全量回归：`cd backend; go test ./cmd/aicli/commands -count=1` → `ok �
   需要 raw-mode 输入层，不在本视图范围内；
 - unified 一次性单元格路径的 follow 只给出 `follow=unavailable` 说明（设计口径，见
   `executeStructuredAgentTranscriptCommand`）；"picker 内 Enter 直接下钻 transcript"的交互细化；
-- P2 剩余：前端下钻入口扩展（G8）；`subagent.progress` 镜像行锚点（随 G8 的前端批次，
-  CLI 侧无可挂锚点的行）。
+- P2 剩余：`subagent.progress` 镜像行锚点（CLI 侧无可挂锚点的行；前端/ACP 面需先有该 live
+  镜像行的可渲染行，再谈跳转）；
 - 已知边界（P0 明确不承诺，P1 已收口 live 部分）：`/agent` 无 target 时复用现有 picker 选中态
   （`chatSessionSelectedAgentTarget`）。
+- 既有红项（非本轮 G8 引入，供后续排期）：`npm run verify:lines` 仍有 6 个既有超限文件
+  （`lib/trajectory/recovery.ts` 571、`lib/thread-state/chat-sse-bridge.test.ts` 530、
+  `api/runtime/skills.ts` 521、`lib/trajectory/recovery.test.ts` 520、
+  `components/workspace/message-markdown.test.tsx` 515、
+  `components/workspace/workspace-sidebar/directories-section.tsx` 509）；
+  `npx tsc -b` 有 6 个既有类型错误（`api/runtime/analytics.ts`、`lib/trajectory/recovery.test.ts`、
+  `pages/usage-analytics/artifact-flow-panel.tsx`）；前端全量 vitest 3 例失败，其中
+  `use-workspace-live.test.tsx` 在纯 HEAD（本轮改动全部 stash 后）同样失败，
+  `event-contract.test.ts` 2 例由工作区未提交的 `event-contract.ts` 编辑（新增
+  `subagent.completed` 落盘声明）引起，均不在 G8 改动面内。
 
 ---
 

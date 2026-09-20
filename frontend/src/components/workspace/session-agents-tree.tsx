@@ -25,6 +25,7 @@ import {
   agentReadOnlyReason,
   agentStatusLabelKey,
   agentStatusToneClass,
+  agentTranscriptTarget,
   buildAgentForest,
   canResumeAgent,
   canStopAgent,
@@ -34,6 +35,7 @@ import {
   type AgentDurationLabel,
   type AgentTreeRow,
 } from "@/components/workspace/session-agents-panel-shared";
+import type { SubagentSessionTarget } from "@/components/workspace/trajectory/subagent-session-target";
 import type { RuntimeAgentRecord } from "@/types/runtime";
 import { cn } from "@/lib/utils";
 
@@ -42,6 +44,8 @@ export type SessionAgentsTreeProps = {
   actionErrorAgentId: string | null;
   agents: RuntimeAgentRecord[];
   onClose: (agentId: string) => void;
+  /** G8 可选入口：提供时，带 `sessionId` 的行渲染只读「会话记录」下钻按钮。 */
+  onOpenTranscript?: (target: SubagentSessionTarget) => void;
   onResume: (agentId: string) => void;
   pendingAgentId: string | null;
 };
@@ -81,6 +85,7 @@ export function SessionAgentsTree({
   actionErrorAgentId,
   agents,
   onClose,
+  onOpenTranscript,
   onResume,
   pendingAgentId,
 }: SessionAgentsTreeProps) {
@@ -110,6 +115,7 @@ export function SessionAgentsTree({
           collapsed={collapsedIds.has(row.agent.agentId)}
           key={row.agent.agentId}
           onClose={onClose}
+          onOpenTranscript={onOpenTranscript}
           onResume={onResume}
           onToggle={toggle}
           pendingAgentId={pendingAgentId}
@@ -125,6 +131,7 @@ function AgentTreeRowItem({
   actionErrorAgentId,
   collapsed,
   onClose,
+  onOpenTranscript,
   onResume,
   onToggle,
   pendingAgentId,
@@ -134,6 +141,7 @@ function AgentTreeRowItem({
   actionErrorAgentId: string | null;
   collapsed: boolean;
   onClose: (agentId: string) => void;
+  onOpenTranscript?: (target: SubagentSessionTarget) => void;
   onResume: (agentId: string) => void;
   onToggle: (agentId: string) => void;
   pendingAgentId: string | null;
@@ -167,6 +175,10 @@ function AgentTreeRowItem({
       : readOnly === "closed-record"
         ? t("panels.agents.readonly.closedRecord")
         : null;
+
+  // G8：下钻入口只认后端上报的 sessionId（无会话键的行不给入口，见
+  // `agentTranscriptTarget` 的数据边界说明）。
+  const transcriptTarget = agentTranscriptTarget(agent);
 
   return (
     <li
@@ -251,6 +263,18 @@ function AgentTreeRowItem({
               </div>
             </div>
           </div>
+          {transcriptTarget && onOpenTranscript ? (
+            <Button
+              aria-label={t("panels.agents.transcriptLabel", { name: displayName })}
+              className="shrink-0"
+              data-testid="agent-transcript"
+              onClick={() => onOpenTranscript(transcriptTarget)}
+              size="sm"
+              variant="ghost"
+            >
+              {t("panels.agents.transcript")}
+            </Button>
+          ) : null}
           {canStopAgent(agent.status) ? (
             <Button
               aria-label={t("panels.agents.stopLabel", { name: displayName })}

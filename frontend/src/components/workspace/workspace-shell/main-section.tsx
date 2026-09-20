@@ -14,6 +14,8 @@ import { JobsPanel } from "@/components/workspace/jobs-panel";
 import { SessionAgentsPanel } from "@/components/workspace/session-agents-panel";
 import { agentDisplayName } from "@/components/workspace/session-agents-panel-shared";
 import { FilePreviewDialog } from "@/components/workspace/file-preview-dialog";
+import { SubagentSessionDialog } from "@/components/workspace/trajectory/subagent-session-dialog";
+import type { SubagentSessionTarget } from "@/components/workspace/trajectory/subagent-session-target";
 import {
   TrajectoryView,
   WorkspaceSkillsSurface,
@@ -165,6 +167,10 @@ export function WorkspaceMainSection({
   const agentsSessionId = selectedThread.sessionId?.trim() ?? "";
   const sessionAgents = useSessionAgents({ sessionId: agentsSessionId });
   const [agentsPanelOpen, setAgentsPanelOpen] = useState(false);
+  // G8：会话 agents 面板的只读下钻目标（复用子会话 transcript 对话框）。
+  const [agentTranscriptTarget, setAgentTranscriptTarget] = useState<SubagentSessionTarget | null>(
+    null,
+  );
   const agentBreadcrumb = useMemo(
     () =>
       sessionAgents.tree.lineage.map((agent) => ({
@@ -252,11 +258,23 @@ export function WorkspaceMainSection({
         <SessionAgentsPanel
           agents={sessionAgents}
           onClose={() => setAgentsPanelOpen(false)}
+          onOpenTranscript={(target) => {
+            // 下钻时先收起控制面弹层：两个弹层各自持有 Esc 生命周期
+            // （useDialogLifecycle），叠加会出现「一次 Esc 关两层」的竞态；
+            // 目录数据由 useSessionAgents 缓存，重开面板不会重复拉取。
+            setAgentsPanelOpen(false);
+            setAgentTranscriptTarget(target);
+          }}
           open={agentsPanelOpen}
         />
       ) : null}
 
       <FilePreviewDialog composerInsetPx={composerOverlayHeight} preview={filePreview} />
+
+      <SubagentSessionDialog
+        onClose={() => setAgentTranscriptTarget(null)}
+        target={agentTranscriptTarget}
+      />
 
       <div
         className={cn(

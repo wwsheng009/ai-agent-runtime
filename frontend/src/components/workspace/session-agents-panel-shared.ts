@@ -6,6 +6,7 @@
 //     `closed` 可恢复，`unknown` **不提供任何动作**（不知道就别动）；
 //   * 分区沿用 jobs 面板口径（运行中 / 已结束），不按数组下标分页。
 
+import type { SubagentSessionTarget } from "@/components/workspace/trajectory/subagent-session-target";
 import type {
   RuntimeAgentDisplayStatus,
   RuntimeAgentRecord,
@@ -79,6 +80,27 @@ export function agentDisplayStatus(agent: RuntimeAgentRecord): RuntimeAgentDispl
     return "ended";
   }
   return agent.status;
+}
+
+/**
+ * 身份行 → 子会话下钻目标（G8：会话 agents 面板的第二下钻入口）。
+ *
+ * 数据边界：只有后端上报了 `sessionId` 的行才给入口——`agentId` / `agentPath`
+ * 是身份图的键，不是 `runtime/events` 的会话键，缺失时宁可不显示入口。
+ * 标题栏口径与轨迹入口一致：优先稳定身份路径，回退 agentId；role 取身份类型；
+ * status 用展示状态（含 `ended` 收敛），仅作标题栏兜底，不参与数据请求。
+ */
+export function agentTranscriptTarget(agent: RuntimeAgentRecord): SubagentSessionTarget | null {
+  const sessionId = agent.sessionId?.trim();
+  if (!sessionId) {
+    return null;
+  }
+  return {
+    sessionId,
+    agentId: agent.agentPath?.trim() || agent.agentId,
+    role: agent.agentType?.trim() || undefined,
+    status: agentDisplayStatus(agent),
+  };
 }
 
 /** 只有精确的 active / stale 才允许 Stop；unknown 不给动作。 */

@@ -10,6 +10,7 @@ import {
   agentPathSegments,
   agentReadOnlyReason,
   agentStatusLabelKey,
+  agentTranscriptTarget,
   buildAgentForest,
   canResumeAgent,
   canStopAgent,
@@ -395,5 +396,51 @@ describe("agentReadOnlyReason（只回答能证实的两种原因）", () => {
         agent({ agentId: "p1", status: "closed" }),
       ),
     ).toBe("closed-record");
+  });
+});
+
+describe("agentTranscriptTarget（G8 下钻目标：只认后端上报的 sessionId）", () => {
+  it("有会话键：sessionId 原样、标题用身份路径、role 取身份类型", () => {
+    expect(
+      agentTranscriptTarget(
+        agent({
+          agentId: "c1",
+          sessionId: "sess-c1",
+          agentPath: "/root/c1",
+          agentType: "child",
+          status: "active",
+          runtimeState: "running",
+        }),
+      ),
+    ).toEqual({
+      sessionId: "sess-c1",
+      agentId: "/root/c1",
+      role: "child",
+      status: "active",
+    });
+  });
+
+  it("无 agent_path 时标题回退 agentId；状态用展示状态（含 ended 收敛）", () => {
+    expect(
+      agentTranscriptTarget(
+        agent({
+          agentId: "c2",
+          sessionId: "sess-c2",
+          agentType: "child",
+          status: "active",
+          runtimeState: "idle",
+        }),
+      ),
+    ).toEqual({
+      sessionId: "sess-c2",
+      agentId: "c2",
+      role: "child",
+      status: "ended",
+    });
+  });
+
+  it("sessionId 缺失 / 空白 → null（不用 agentId 冒充会话键）", () => {
+    expect(agentTranscriptTarget(agent({ agentId: "c3" }))).toBeNull();
+    expect(agentTranscriptTarget(agent({ agentId: "c4", sessionId: "   " }))).toBeNull();
   });
 });

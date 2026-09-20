@@ -33,6 +33,7 @@ import {
   splitSessionAgents,
 } from "@/components/workspace/session-agents-panel-shared";
 import { SessionAgentsTree } from "@/components/workspace/session-agents-tree";
+import type { SubagentSessionTarget } from "@/components/workspace/trajectory/subagent-session-target";
 import { useFocusRestore } from "@/hooks/workspace/use-focus-restore";
 import type { UseSessionAgentsResult } from "@/hooks/use-session-agents";
 import { cn } from "@/lib/utils";
@@ -40,6 +41,8 @@ import { cn } from "@/lib/utils";
 export type SessionAgentsPanelProps = {
   agents: UseSessionAgentsResult;
   onClose: () => void;
+  /** G8 可选入口：透传给子代理树，用于打开子会话 transcript 对话框。 */
+  onOpenTranscript?: (target: SubagentSessionTarget) => void;
   open: boolean;
 };
 
@@ -47,7 +50,12 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function SessionAgentsPanel({ agents, onClose, open }: SessionAgentsPanelProps) {
+export function SessionAgentsPanel({
+  agents,
+  onClose,
+  onOpenTranscript,
+  open,
+}: SessionAgentsPanelProps) {
   const { t } = useTranslation("workspace");
   const {
     actionError,
@@ -268,6 +276,7 @@ export function SessionAgentsPanel({ agents, onClose, open }: SessionAgentsPanel
                       onClose={(agentId) => {
                         void closeAgent(agentId);
                       }}
+                      onOpenTranscript={onOpenTranscript}
                       onResume={(agentId) => {
                         void resumeAgent(agentId);
                       }}
