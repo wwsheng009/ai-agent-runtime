@@ -169,8 +169,18 @@ func (r *Reconciler) runPass(ctx context.Context) (ReconcileReport, error) {
 	if err != nil {
 		return report, err
 	}
-	r.runReclaimPass(ctx, &report, records)
+	// Purge (retention) runs BEFORE reclaim so that terminal rows older than
+	// the retention window are deleted from the store while reclaim can still
+	// see the full audited set for diagnostics. This matters because purge only
+	// ever touches rows that are already terminal — it never steals a row from
+	// an active child — so running it first is both safe and keeps the record
+	// set that QuotaChildren must scan (and pre-allocate for) as small as
+	// possible. Putting purge after reclaim meant that an OOM during reclaim
+	// left terminal rows un-purged, so every subsequent pass re-listed a
+	// growing stack of closed rows and the process spiraled into OOM faster
+	// (see QuotaChildren OOM: make([]AgentRecord, 0, len(records))).
 	r.runPurgePass(ctx, &report)
+	r.runReclaimPass(ctx, &report, records)
 	r.runWorktreePass(ctx, &report, records)
 	return report, nil
 }

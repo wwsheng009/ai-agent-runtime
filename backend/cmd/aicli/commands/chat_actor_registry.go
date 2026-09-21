@@ -1670,12 +1670,22 @@ func (r *localActorRegistry) materializeLocalAgentRegistry(ctx context.Context) 
 	if err != nil {
 		return err
 	}
-	if err := r.sweepStaleLocalAgentRegistry(ctx, store); err != nil {
+	// One listing feeds both the stale sweep and the upsert index, avoiding a
+	// second full-table scan of the registry (was 3 scans per materialize:
+	// sweep, index, and the List callback). The sweep only closes/stales rows
+	// that are already terminal, and the upsert loop re-confirms those statuses
+	// from the projected session state, so a slightly stale index entry for a
+	// swept row is always corrected by the follow-up UpsertAgentControlAgent.
+	existing, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{IncludeClosed: true})
+	if err != nil {
+		return err
+	}
+	if err := r.sweepStaleLocalAgentRegistry(ctx, store, existing); err != nil {
 		return err
 	}
 	// One listing answers every existence check below (was one point query per
 	// projected record).
-	index, err := newLocalAgentRecordIndex(ctx, store)
+	index, err := newLocalAgentRecordIndex(ctx, store, existing)
 	if err != nil {
 		return err
 	}
@@ -1710,19 +1720,19 @@ type localAgentRecordIndex struct {
 	byPath    map[string]agentcontrol.AgentRecord
 }
 
-func newLocalAgentRecordIndex(ctx context.Context, store agentcontrol.AgentRegistryStore) (*localAgentRecordIndex, error) {
+func newLocalAgentRecordIndex(ctx context.Context, store agentcontrol.AgentRegistryStore, existing []agentcontrol.AgentRecord) (*localAgentRecordIndex, error) {
 	index := &localAgentRecordIndex{
 		byAgentID: map[string]agentcontrol.AgentRecord{},
 		byPath:    map[string]agentcontrol.AgentRecord{},
 	}
-	if store == nil {
-		return index, nil
+	if len(existing) == 0 && store != nil {
+		var err error
+		existing, err = store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{IncludeClosed: true})
+		if err != nil {
+			return nil, err
+		}
 	}
-	records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{IncludeClosed: true})
-	if err != nil {
-		return nil, err
-	}
-	for _, record := range records {
+	for _, record := range existing {
 		index.store(record)
 	}
 	return index, nil
@@ -1820,13 +1830,16 @@ func (r *localActorRegistry) localAgentSessionBindingLookup() agentcontrol.Sessi
 	}
 }
 
-func (r *localActorRegistry) sweepStaleLocalAgentRegistry(ctx context.Context, store agentcontrol.AgentRegistryStore) error {
+func (r *localActorRegistry) sweepStaleLocalAgentRegistry(ctx context.Context, store agentcontrol.AgentRegistryStore, existing []agentcontrol.AgentRecord) error {
 	if store == nil {
 		return nil
 	}
-	existing, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{IncludeClosed: true})
-	if err != nil {
-		return err
+	if existing == nil {
+		var err error
+		existing, err = store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{IncludeClosed: true})
+		if err != nil {
+			return err
+		}
 	}
 	markedRoots := map[string]bool{}
 	terminalChildren := make([]agentcontrol.AgentRecord, 0, len(existing))

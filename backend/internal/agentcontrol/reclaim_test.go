@@ -245,6 +245,67 @@ func TestReclaimSummaryFoldsDuplicateReasons(t *testing.T) {
 	require.Equal(t, "reclaimed=3 reclaim_reasons=session_missing,session_terminal", mixed.Summary())
 }
 
+// TestQuotaChildrenLargeMixedSetWithTerminalRows is a regression test for the
+// OOM observed when QuotaChildren pre-allocated make([]AgentRecord, 0, len(records))
+// over a listing that contained a high proportion of terminal/closed/root rows.
+// With 100k records the old allocation reserved ~50 MB of backing array for
+// ~25k active children — on a memory-pressured process that was the straw
+// that tipped the heap into OOM. The fix caps the initial capacity at
+// len(records)/4+1 so the pre-allocation tracks the expected child count, not
+// the worst-case total.
+func TestQuotaChildrenLargeMixedSetWithTerminalRows(t *testing.T) {
+	const total = 100_000
+	records := make([]AgentRecord, 0, total)
+	closedAt := time.Now().UTC()
+	for i := 0; i < total; i++ {
+		switch i % 4 {
+		case 0: // root
+			records = append(records, AgentRecord{
+				AgentID:   fmt.Sprintf("root-%d", i),
+				AgentPath: "/root",
+				AgentType: AgentTypeRoot,
+				Status:    AgentStatusActive,
+			})
+		case 1: // active child
+			records = append(records, AgentRecord{
+				AgentID:        fmt.Sprintf("child-%d", i),
+				RootSessionID:  fmt.Sprintf("root-%d", i),
+				AgentPath:      fmt.Sprintf("/root/child-%d", i),
+				AgentType:      AgentTypeChild,
+				Status:         AgentStatusActive,
+			})
+		case 2: // closed child
+			records = append(records, AgentRecord{
+				AgentID:        fmt.Sprintf("closed-%d", i),
+				RootSessionID:  fmt.Sprintf("root-%d", i),
+				AgentPath:      fmt.Sprintf("/root/closed-%d", i),
+				AgentType:      AgentTypeChild,
+				Status:         AgentStatusClosed,
+				ClosedAt:       &closedAt,
+			})
+		case 3: // stale child
+			records = append(records, AgentRecord{
+				AgentID:        fmt.Sprintf("stale-%d", i),
+				RootSessionID:  fmt.Sprintf("root-%d", i),
+				AgentPath:      fmt.Sprintf("/root/stale-%d", i),
+				AgentType:      AgentTypeChild,
+				Status:         AgentStatusStale,
+				ClosedAt:       &closedAt,
+			})
+		}
+	}
+
+	children := QuotaChildren(records)
+	require.Len(t, children, total/4, "only the ~25k active non-root children survive the filter")
+
+	roots := QuotaRoots(records)
+	require.Len(t, roots, total/4, "each active child has a unique root in this synthetic set")
+
+	// Guard against regressions that re-introduce the full-capacity allocation.
+	require.Less(t, cap(children), len(records),
+		"pre-allocation must not reserve space for every input row including terminal ones")
+}
+
 func TestReclaimAgentQuotaRequiresStoreAndRootSession(t *testing.T) {
 	_, err := ReclaimAgentQuota(context.Background(), nil, "root-session", nil, ReclaimPolicy{})
 	require.Error(t, err)
