@@ -5,6 +5,7 @@ import { hideApproval, showApproval, showQuestion } from "./approvals.js";
 import { clearPendingPrompts, getUiState, refreshScreen, setUI, updateTitle } from "./chat.js";
 import { handleCacheSSEEvent } from "./cache.js";
 import { loadRuntimeMeta } from "./runtime.js";
+import { loadStatusBar } from "./statusbar.js";
 import { loadSessions } from "./sessions.js";
 import { addStreamImage, appendStreamReasoning, appendStreamText, beginStream, endStream, isStreamActive, renderStream, setStreamText, setStreamTool, startTypeTimer } from "./stream.js";
 
@@ -109,17 +110,21 @@ function onSSEEvent(eventName, data) {
       if (data.pending_question) { showQuestion(data.pending_question); }
       if (data.session_busy) {
         beginStream();
-        setUI("busy", "执行中…");
+        // 运行态只由顶栏 #turn-status 呈现（#send-status 只承载发送/排队/
+        // 停止等瞬态提示），避免同一执行状态在顶栏重复出现两次。
+        setUI("busy", "");
       } else {
         refreshScreen();
         // 若正在等待自己刚发送的 prompt 的 turn_start，保持 posting
         if (getUiState() !== "posting") { setUI("idle", ""); }
       }
       loadSessions(); // 重连后刷新会话列表
+      loadStatusBar(); // 重连后刷新底部状态栏
       break;
     case "turn_start":
-      setTurn("处理中 " + (data.model ? "(" + data.model + ")" : ""));
-      setUI("busy", "执行中…");
+      // 顶栏不再附带 provider/model（当前配置见底部配置栏 / 状态栏）。
+      setTurn("处理中");
+      setUI("busy", "");
       beginStream();
       break;
     case "reasoning_delta":
@@ -170,6 +175,7 @@ function onSSEEvent(eventName, data) {
       setTurn("就绪");
       setUI("idle", "");
       endStream();
+      loadStatusBar(); // 回合结束后刷新上下文/balance 状态
       break;
     case "approval_requested":
       showApproval(data);
@@ -199,6 +205,7 @@ function onSSEEvent(eventName, data) {
       renderDynamicStatus();
       clearPendingPrompts(); // 旧会话的本地回显不带到新会话
       loadSessions();
+      loadStatusBar(); // 会话切换后刷新状态栏
       endStream();
       refreshScreen(true);
       break;
@@ -222,6 +229,7 @@ function onSSEEvent(eventName, data) {
       // model_selection_changed）：重新拉取权威 runtime 状态刷新底部栏。
       // web 自己切换期间 cfgUiDirty 会防止本处刷新覆盖用户正在确认的值。
       loadRuntimeMeta();
+      loadStatusBar();
       break;
     case "cache_request_finished":
       // LLM 缓存请求记录终态（cache.analytics.v1）：缓存页签防抖增量刷新。
@@ -238,7 +246,18 @@ function onSSEEvent(eventName, data) {
 
 function openEventSource() {
   setStatus("连接中…", false);
-  var es = new EventSource("/web/api/events");
+  // EventSource 无法设置请求头：在非回环模式下，将写令牌追加到 URL 查询参数。
+  // 优先从 sessionStorage 读取浏览器缓存的 Token（避免每次需要 ?token=），
+  // 回退到 meta 标签注入的 Token。
+  var token = sessionStorage.getItem('aicli-web-token');
+  if (!token) {
+    var meta = document.querySelector('meta[name="aicli-web-token"]');
+    token = meta && meta.content ? String(meta.content).trim() : "";
+    if (token) { sessionStorage.setItem('aicli-web-token', token); }
+  }
+  var eventsUrl = "/web/api/events";
+  if (token) { eventsUrl += "?token=" + encodeURIComponent(token); }
+  var es = new EventSource(eventsUrl);
   es.onopen = function () { setStatus("已连接", true); };
   es.onerror = function () {
     setStatus("已断开，重连中…", false);

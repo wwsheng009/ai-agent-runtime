@@ -16,10 +16,10 @@
     <span id="turn-status">-</span>
     <span id="send-status"></span>
   </div>
-  <!-- 居中：当前会话标题 + 会话 ID（sessions.js updateHeaderSession 更新） -->
+  <!-- 居中：当前会话标题（sessions.js updateSessionIdentity 更新）；
+       会话 ID 不占顶栏，改在「关于」页签展示 -->
   <div id="header-session">
     <span id="header-session-title">未选择会话</span>
-    <span id="header-session-id"></span>
   </div>
   <!-- 右侧占位：与左侧同宽，保证会话信息在整栏中精确居中 -->
   <span class="header-right" aria-hidden="true"></span>
@@ -594,6 +594,19 @@
           <dd>「调试」页签展示的内容与 <code>aicli /debug</code> 命令一致（<code>GET /web/api/status?format=text</code>）。</dd>
           <dt>页签</dt>
           <dd>对话 / 技能 / MCP / 日志 / 配置 / 缓存 / 分析 / 调试 / 关于</dd>
+          <dt>当前会话</dt>
+          <dd>
+            <div class="about-token">
+              <code id="about-session-id" class="about-token-value">（未选择会话）</code>
+              <button id="about-session-copy" type="button" class="about-token-copy">复制</button>
+            </div>
+            <p class="about-endpoints-hint">
+              当前会话 ID（<code>GET /web/api/sessions</code> 的 <code>current_session_id</code>，
+              与终端 TUI 共享同一会话）：切换 / 新建 / 恢复会话后自动更新；
+              终端 TUI 内可用 <code>/resume &lt;会话 ID&gt;</code> 回到该会话，
+              脚本可用 <code>aicli exec resume &lt;会话 ID&gt;</code>。
+            </p>
+          </dd>
           <dt>写令牌</dt>
           <dd>
             <div class="about-token">
@@ -605,6 +618,8 @@
               状态变更请求（POST/PUT/PATCH/DELETE）需携带 <code>X-AICLI-Token: &lt;令牌&gt;</code>
               或 <code>?token=&lt;令牌&gt;</code>；令牌每进程随机生成、<strong>重启即轮换</strong>，
               仅本机回环同源可读（页面已自动注入，手工调用脚本可读该端点或启动行）。
+              本地开发时回环地址（127.0.0.1/localhost）自动跳过令牌校验，
+              监听在 0.0.0.0 时回环 IP 始终免令牌，本地网络 IP 与远程 IP 需令牌。
             </p>
           </dd>
           <dt>远程调用端点</dt>
@@ -634,9 +649,10 @@
 </div>
 
     <div id="footer">
-      <span id="footer-endpoints"><a href="/debug/endpoints" target="_blank" rel="noopener">/debug/endpoints</a></span>
-      <span class="sep">|</span>
-      <span id="footer-web"><a href="/web/" target="_blank" rel="noopener">/web/</a></span>
+      <span id="status-bar-container">
+        <span id="status-bar" class="status-bar" title="点击刷新底部状态栏" aria-live="polite"></span>
+        <button id="status-bar-refresh" type="button" class="status-bar-refresh" title="刷新底部状态栏">⟳</button>
+      </span>
     </div>
     <div id="toast-container"></div>
     <div id="shortcut-help" style="display:none">

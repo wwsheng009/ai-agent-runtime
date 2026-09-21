@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands"
 )
 
 func TestStartPprofServerRandomPort(t *testing.T) {
@@ -94,5 +96,74 @@ func TestStartPprofServerExplicitAddr(t *testing.T) {
 	}
 	if !strings.HasPrefix(handle.URL(), "http://127.0.0.1:") {
 		t.Fatalf("URL() = %q, want http://127.0.0.1: prefix", handle.URL())
+	}
+}
+
+// TestStartPprofServerRootRedirect 验证根路径 "/" 重定向到 /debug/endpoints?format=text。
+func TestStartPprofServerRootRedirect(t *testing.T) {
+	handle, err := startPprofServer("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("startPprofServer() error = %v", err)
+	}
+	defer handle.Close()
+
+	// 不跟进重定向，直接验证 303 + Location。
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Get("http://" + handle.Addr() + "/")
+	if err != nil {
+		t.Fatalf("GET / error: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("GET / status = %d, want %d (See Other)", resp.StatusCode, http.StatusSeeOther)
+	}
+	loc := resp.Header.Get("Location")
+	if !strings.Contains(loc, "/debug/endpoints?format=text") {
+		t.Fatalf("Location = %q, want /debug/endpoints?format=text", loc)
+	}
+}
+
+// TestStartPprofServerWebPort 验证 WebPort() 方法能正确提取端口号。
+func TestStartPprofServerWebPort(t *testing.T) {
+	handle, err := startPprofServer("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("startPprofServer() error = %v", err)
+	}
+	defer handle.Close()
+
+	port := handle.WebPort()
+	if port == "" {
+		t.Fatalf("WebPort() = empty, want non-empty port")
+	}
+	if !strings.HasSuffix(handle.Addr(), port) {
+		t.Fatalf("Addr() = %q, WebPort() = %q (mismatch)", handle.Addr(), port)
+	}
+}
+
+// TestStartPprofServerTokenQueryParam 验证 TokenQueryParam() 在回环模式下返回空。
+func TestStartPprofServerTokenQueryParam(t *testing.T) {
+	// 保存并恢复状态
+	wasLoopback := commands.IsChatWebLoopbackMode()
+	wasToken := commands.ChatWebAuthToken()
+	t.Cleanup(func() {
+		commands.SetChatWebLoopbackMode(wasLoopback)
+		commands.SetChatWebAuthToken(wasToken)
+	})
+
+	// 回环模式（127.0.0.1）：TokenQueryParam 应返回空
+	commands.SetChatWebLoopbackMode(true)
+	commands.SetChatWebAuthToken("loopback-token")
+	handle, err := startPprofServer("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("startPprofServer() error = %v", err)
+	}
+	defer handle.Close()
+
+	if handle.TokenQueryParam() != "" {
+		t.Fatalf("loopback TokenQueryParam() = %q, want empty", handle.TokenQueryParam())
 	}
 }

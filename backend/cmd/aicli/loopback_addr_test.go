@@ -12,6 +12,7 @@ func TestResolveLoopbackServerAddr(t *testing.T) {
 		debugFlag  bool
 		webPort    int
 		webPortSet bool
+		webHost    string
 		pprofEnv   string
 		wantAddr   string
 		wantErr    bool
@@ -34,7 +35,11 @@ func TestResolveLoopbackServerAddr(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := resolveLoopbackServerAddr(tc.pprofFlag, tc.debugFlag, tc.webPort, tc.webPortSet, tc.pprofEnv)
+			webHost := tc.webHost
+			if webHost == "" {
+				webHost = "127.0.0.1"
+			}
+			got, err := resolveLoopbackServerAddr(tc.pprofFlag, tc.debugFlag, tc.webPort, tc.webPortSet, webHost, tc.pprofEnv)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("resolveLoopbackServerAddr() err = nil, want error (addr=%q)", got)

@@ -98,10 +98,70 @@ export function chatMsgRowHtml(role, content, pending) {
       '</details>' +
       '</div>';
   }
+  if (role === "tool") {
+    // 工具输出：默认折叠（最多显示约 5 行）。
+    // 展开/收起控件并入「工具」抬头行（文字 + ▼/▲ 图标），仅内容溢出时可用；
+    // 完整文本始终渲染在 DOM 中（CSS 截断），会话复制可获取全文。
+    return '<div class="' + cls + '">' +
+      '<div class="msg-label tool-toggle" data-tool-toggle="1" role="button" tabindex="0" aria-expanded="false">' +
+      '<span class="tool-toggle-text">' + esc(label) + '</span>' +
+      '<span class="tool-toggle-action">展开</span>' +
+      '<span class="tool-toggle-icon" aria-hidden="true">▼</span>' +
+      '</div>' +
+      '<div class="msg-body">' +
+      '<div class="tool-output tool-collapsed" data-tool-output="1">' + esc(content) + '</div>' +
+      '</div>' +
+      '</div>';
+  }
   return '<div class="' + cls + '">' +
     '<div class="msg-label">' + esc(label) + '</div>' +
     '<div class="msg-body">' + esc(content) + '</div>' +
     '</div>';
+}
+
+// 检测工具输出是否溢出折叠高度：溢出时保留折叠并启用抬头控件；
+// 内容未溢出时直接展示全文，并隐藏抬头控件（tool-toggle-off，不可点击）。
+export function refreshToolOutputToggles() {
+  if (!screenEl) { return; }
+  var outputs = screenEl.querySelectorAll(".tool-output");
+  if (!outputs.length) { return; }
+  outputs.forEach(function (el) {
+    var rowEl = el.closest ? el.closest(".msg-row") : null;
+    if (!rowEl) { return; }
+    var labelEl = rowEl.querySelector(".tool-toggle");
+    if (!labelEl) { return; }
+    if (el.scrollHeight > el.clientHeight) {
+      labelEl.classList.remove("tool-toggle-off");
+      labelEl.setAttribute("aria-expanded", "false");
+    } else {
+      labelEl.classList.add("tool-toggle-off");
+      el.classList.remove("tool-collapsed");
+      el.classList.add("tool-expanded");
+      labelEl.setAttribute("aria-expanded", "true");
+    }
+  });
+}
+
+// 切换单条工具行的展开/收起（抬头控件点击/键盘触发）。
+function toggleToolOutput(labelEl) {
+  if (!labelEl || labelEl.classList.contains("tool-toggle-off")) { return; }
+  var rowEl = labelEl.parentNode;
+  if (!rowEl) { return; }
+  var output = rowEl.querySelector(".tool-output");
+  if (!output) { return; }
+  var actionEl = labelEl.querySelector(".tool-toggle-action");
+  var iconEl = labelEl.querySelector(".tool-toggle-icon");
+  var collapsed = output.classList.contains("tool-collapsed");
+  if (collapsed) {
+    output.classList.remove("tool-collapsed");
+    output.classList.add("tool-expanded");
+  } else {
+    output.classList.remove("tool-expanded");
+    output.classList.add("tool-collapsed");
+  }
+  if (actionEl) { actionEl.textContent = collapsed ? "收起" : "展开"; }
+  if (iconEl) { iconEl.textContent = collapsed ? "▲" : "▼"; }
+  labelEl.setAttribute("aria-expanded", collapsed ? "true" : "false");
 }
 
 // 用服务端 messages 重建对话区；未确认的本地 prompt 保留为 pending 气泡。
@@ -122,6 +182,7 @@ function renderConversationMessages(messages) {
     return true;
   });
   screenEl.innerHTML = html || "(empty)";
+  refreshToolOutputToggles();
 }
 
 // 立即追加一条本地 user pending 气泡（乐观回显，不等服务端回合）。
@@ -369,6 +430,18 @@ export function initChat() {
       userScrolledAway = !atBottom;
       updateScrollBtn();
     });
+    // ---- 工具输出展开/收起（「工具」抬头行控件，事件委托 + 键盘可达）----
+    conversationEl.addEventListener("click", function (e) {
+      var labelEl = (e.target && e.target.closest) ? e.target.closest(".tool-toggle") : null;
+      if (labelEl) { toggleToolOutput(labelEl); }
+    });
+    conversationEl.addEventListener("keydown", function (e) {
+      if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") { return; }
+      var labelEl = (e.target && e.target.closest) ? e.target.closest(".tool-toggle") : null;
+      if (!labelEl) { return; }
+      if (e.preventDefault) { e.preventDefault(); }
+      toggleToolOutput(labelEl);
+    });
   }
   // 浮动回底按钮
   if (scrollBottomBtn) {
@@ -387,10 +460,16 @@ export function initChat() {
         var parts = [];
         rows.forEach(function (row) {
           // 推理内容在折叠面板内（.reasoning-content），加前缀保留语义；
+          // 工具输出取 .tool-output 内容（排除 toggle 按钮文字）；
           // 其余角色取 .msg-body 正文。按 DOM 顺序（= 对话时序）收集。
           var reasoningEl = row.querySelector(".reasoning-content");
           if (reasoningEl) {
             parts.push("[推理] " + reasoningEl.textContent);
+            return;
+          }
+          var toolOutputEl = row.querySelector(".tool-output");
+          if (toolOutputEl) {
+            parts.push(toolOutputEl.textContent);
             return;
           }
           var bodyEl = row.querySelector(".msg-body");

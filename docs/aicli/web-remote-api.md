@@ -12,7 +12,7 @@ TUI 启动时会打印会话行与写令牌：
 
 ```text
 session_20260917202752_xxoO88dG  endpoints: http://127.0.0.1:61772/debug/endpoints  web: http://127.0.0.1:61772/web/
-Info: web write token (X-AICLI-Token): 3f9c8a...  (POST /web/api/* 必需)
+Info: web write token (X-AICLI-Token): 3f9c8a...  (开发模式: 回环地址跳过校验)
 ```
 
 `/debug/endpoints` 清单包含完整 `web` 分组（页面 / 渲染 / 事件 / 输入 / invoke / turn /
@@ -43,6 +43,14 @@ web  (aicli 微型 Web 客户端 / 远程调用 API)
 ```
 
 ### 鉴权（Host / Origin / 写令牌）
+
+**开发模式**（`--web-dev`，默认在 `127.0.0.1`/`localhost` 回环地址自动开启）：本机开发
+调试时跳过写令牌校验，POST/PUT/DELETE 无需携带 `X-AICLI-Token`。可加 `--web-dev=false`
+显式关闭。**注意**：开发模式**不影响** Host/Origin 校验，仍防止 DNS rebinding 与跨站写请求。
+
+监听在 `0.0.0.0`（所有接口）时，**从回环 IP（`127.0.0.1`/`localhost`/`[::1]`）发起的请求
+始终跳过令牌校验**，便于本地浏览器调试，无需 `--web-dev`。本地私有网段 IP
+（`10.x`、`172.16-31.x`、`192.168.x`）与远程 IP 均需令牌。
 
 1. **Host 校验**：请求 Host 必须是回环地址（`127.0.0.1` / `localhost` / `[::1]`），否则 `403`
    （挡 DNS rebinding 与反向代理转发）。
@@ -86,6 +94,7 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
 | GET | `/web/api/turn` | turn 后验查询：`?id={turn_id}` 取单条（含耗时/步数/`assistant_preview`/`usage`+`usage_scope`/`usage_source`），无参数返回当前 turn + 最近 20 条 |
 | GET | `/web/api/screen` | 当前渲染：默认完整 transcript（`messages` 结构化）；`?view=tui` 返回 TUI 合成帧；`?format=json` 结构化；`?tail=N` 只取末尾 N 行（≤2000） |
 | GET | `/web/api/status` | 渲染器/显示状态快照（等价 `/debug/chat/status`） |
+| GET | `/web/api/statusbar` | 底部状态栏快照（balance / context used / directory / git branch / window 等段，与 TUI 底部状态行同源；provider/model 见底部 cfg-bar，不在此重复） |
 | GET | `/web/api/runtime` | 运行时元数据（provider/model/reasoning 权威值） |
 | GET | `/web/api/events` | SSE 实时事件流（turn/工具/审批/提问…） |
 | GET | `/web/api/events/schema` | SSE 事件类型定义 |
@@ -345,6 +354,11 @@ curl -N -X POST http://127.0.0.1:61772/web/api/invoke \
 
 - 仅 loopback（`127.0.0.1`）监听；Host/Origin 校验挡浏览器跨站与 DNS rebinding，写令牌挡本机
   非授权进程/误配置客户端。**不要做端口转发或公网暴露。**
+- 开发模式（`--web-dev`，默认在 `127.0.0.1`/`localhost` 自动开启）跳过写令牌校验，便于本地
+  调试。监听在 `0.0.0.0` 时，回环 IP（`127.0.0.1/localhost/[::1]`）的请求始终
+  跳过令牌校验（无需 `--web-dev`）；本地网络 IP 与远程 IP 均需令牌。生产环境
+  （`--web-host 0.0.0.0` 等非回环）时务必确保 `--web-dev=false`，此时除回环 IP 外
+  所有请求（含 GET/SSE/页面加载）都需要令牌。
 - 令牌在进程启动时随机生成、不落盘；重启后失效，需要重新从启动行获取。
 - 请求体上限 1 MiB；`timeout_ms` 钳制到 `[1000, 600000]`。
 - `/web/api/invoke` 单飞（single-flight）：并发 invoke 返回 409，避免多个远程调用方互相等待。

@@ -5,6 +5,7 @@
 // aicli micro web client 前端模块(无构建步骤,由 app.js 入口聚合)。
 
 import { esc } from "./util.js";
+import { getCurrentSessionID } from "./sessions.js";
 
 var analysisBase = "/web/api/analysis";
 
@@ -37,12 +38,10 @@ function analysisAPI(path) {
   });
 }
 
-// 当前会话 id：sessions.js 未导出该值（本批次改动范围不含 sessions.js），
-// 顶栏 #header-session-id 由其 updateHeaderSession 写入完整会话 id，直接读取。
+// 当前会话 id：由 sessions.js 随会话列表响应同步并导出（唯一来源），
+// 本模块不再从 DOM 反查，避免两处状态各说各话。
 function analysisCurrentSessionID() {
-  var el = analysisEl("header-session-id");
-  if (!el) { return ""; }
-  return (el.textContent || "").trim();
+  return getCurrentSessionID();
 }
 
 // analysisQuery 拼装查询串：范围开关 + 额外过滤（均由后端归一/校验）。

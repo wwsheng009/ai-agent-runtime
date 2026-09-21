@@ -86,17 +86,39 @@ func main() {
 		// --web-port > AICLI_PPROF > --pprof/--debug 的随机空闲端口，
 		// 实际地址打印到 stderr。当 --debug 开启时也自动启动（内置
 		// /debug/chat/status 端点提供会话渲染/显示状态 JSON 快照）。
+		// --web-host / AICLI_WEB_HOST 控制监听地址（默认 127.0.0.1；
+		// 设为 0.0.0.0 可在局域网访问，同时所有请求需携带写令牌）。
 		pprofFlag, _ := rootCmd.Flags().GetBool("pprof")
 		pprofEnv := strings.TrimSpace(os.Getenv("AICLI_PPROF"))
 		webPortFlag, _ := rootCmd.Flags().GetInt("web-port")
 		webPortSet := rootCmd.Flags().Changed("web-port")
+		webHostFlag, _ := rootCmd.Flags().GetString("web-host")
+		webHost := strings.TrimSpace(webHostFlag)
+		if webHost == "" {
+			webHost = strings.TrimSpace(os.Getenv("AICLI_WEB_HOST"))
+		}
+		if webHost == "" {
+			webHost = "127.0.0.1"
+		}
+		// --web-dev：开发模式，跳过回环模式下的写令牌校验。
+		// 回环地址（127.0.0.1/localhost）下自动开启；
+		// 非回环地址（0.0.0.0）下，回环 IP 始终免令牌，--web-dev 无效（warn 提示）。
+		webDevFlag, _ := rootCmd.Flags().GetBool("web-dev")
+		if rootCmd.Flags().Changed("web-dev") {
+			commands.SetChatWebDevMode(webDevFlag)
+			if !commands.ChatWebHostIsLoopback(webHost) && webDevFlag {
+				fmt.Fprintln(os.Stderr, "WARN: --web-dev 在非回环模式（--web-host 0.0.0.0）下无效：回环 IP 已始终跳过令牌校验，本地网络 IP 与远程 IP 仍需令牌。")
+			}
+		} else if commands.ChatWebHostIsLoopback(webHost) {
+			commands.SetChatWebDevMode(true)
+		}
 		debugFlag := false
 		if cmd != nil {
 			if f := cmd.Flags().Lookup("debug"); f != nil {
 				debugFlag, _ = cmd.Flags().GetBool("debug")
 			}
 		}
-		pprofAddr, addrErr := resolveLoopbackServerAddr(pprofFlag, debugFlag, webPortFlag, webPortSet, pprofEnv)
+		pprofAddr, addrErr := resolveLoopbackServerAddr(pprofFlag, debugFlag, webPortFlag, webPortSet, webHost, pprofEnv)
 		if addrErr != nil {
 			return addrErr
 		}
@@ -106,17 +128,60 @@ func main() {
 				return fmt.Errorf("failed to start pprof server: %w", err)
 			}
 			pprofHandle = handle
-			fmt.Fprintf(os.Stderr, "Info: pprof endpoint enabled: %s\n", handle.URL())
-			fmt.Fprintf(os.Stderr, "Info: chat render status endpoint: %s (JSON; ?format=text for plain text)\n", handle.DisplayURL())
-			fmt.Fprintf(os.Stderr, "Info: chat screen content endpoint: %s (JSON; ?format=text for plain text)\n", handle.ScreenURL())
-			fmt.Fprintf(os.Stderr, "Info: chat debug endpoints list: %s (JSON; ?format=text for plain text)\n", handle.EndpointsURL())
+			tq := handle.TokenQueryParam()
+			nonLoopback := tq != ""
+			if nonLoopback {
+				listenAddr := handle.Addr()
+				lanAddrs := commands.ChatWebLocalAddresses()
+				if len(lanAddrs) > 0 {
+					// 展示实际局域网地址（0.0.0.0 在浏览器中不可直接访问）。
+					// URL 直接指向 /debug/endpoints?format=text，粘贴即看调试信息。
+					var addrURLs []string
+					// tq 形如 "?token=xxx"，转换为 "&token=xxx" 拼到已有查询参数上。
+					tqParam := strings.Replace(tq, "?", "&", 1)
+					for _, ip := range lanAddrs {
+						addrURLs = append(addrURLs, ip+":"+handle.WebPort()+"/debug/endpoints?format=text"+tqParam)
+					}
+					fmt.Fprintf(os.Stderr, "Info: pprof endpoint enabled (non-loopback listen: %s, all requests require token)\n", listenAddr)
+					fmt.Fprintf(os.Stderr, "Info: LAN access URLs (paste in browser):\n")
+					for _, u := range addrURLs {
+						fmt.Fprintf(os.Stderr, "  http://%s\n", u)
+					}
+					fmt.Fprintf(os.Stderr, "  (fallback: http://0.0.0.0:%s/debug/endpoints?format=text%s)\n", handle.WebPort(), tqParam)
+				} else {
+					fmt.Fprintf(os.Stderr, "Info: pprof endpoint enabled (non-loopback listen: %s, all requests require token): %s\n", listenAddr, handle.URL()+tq)
+					fmt.Fprintf(os.Stderr, "Info: use the actual LAN IP with the same port\n")
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "Info: pprof endpoint enabled: %s\n", handle.URL())
+			}
+			fmt.Fprintf(os.Stderr, "Info: chat render status endpoint: %s%s (JSON; ?format=text for plain text)\n", handle.DisplayURL(), tq)
+			fmt.Fprintf(os.Stderr, "Info: chat screen content endpoint: %s%s (JSON; ?format=text for plain text)\n", handle.ScreenURL(), tq)
+			fmt.Fprintf(os.Stderr, "Info: chat debug endpoints list: %s%s (JSON; ?format=text for plain text)\n", handle.EndpointsURL(), tq)
 			fmt.Fprintf(os.Stderr, "Info: chat web client / remote invoke endpoint: %s (POST %s)\n", handle.WebURL(), handle.InvokeURL())
+			if nonLoopback {
+				fmt.Fprintf(os.Stderr, "Info: web client URL (include ?token= for LAN access): %s\n", handle.WebURL())
+			}
 			tokenHint := "POST /web/api/* 必需"
+			if nonLoopback {
+				tokenHint = "ALL requests 必需"
+			}
+			if commands.IsChatWebDevMode() {
+				if nonLoopback {
+					tokenHint = "开发模式 (回环 IP 跳过校验)"
+				} else {
+					tokenHint = "开发模式 (回环地址跳过校验)"
+				}
+			}
 			if webTokenSource != "" {
 				tokenHint += "; 来自 " + webTokenSource + "（固定令牌，重启不轮换，注意保管）"
 			}
 			fmt.Fprintf(os.Stderr, "Info: web write token (%s): %s (%s)\n", commands.ChatWebAuthTokenHeader, commands.EnsureChatWebAuthToken(), tokenHint)
-			fmt.Fprintf(os.Stderr, "Info: runtime observe plane: %s (local in-process; capabilities/snapshot/sessions/events)\n", handle.Addr()+strings.TrimRight(commands.ChatDebugObservePrefix(), "/"))
+			if nonLoopback {
+				fmt.Fprintf(os.Stderr, "Info: runtime observe plane: %s (local in-process; capabilities/snapshot/sessions/events; token required)\n", handle.Addr()+strings.TrimRight(commands.ChatDebugObservePrefix(), "/"))
+			} else {
+				fmt.Fprintf(os.Stderr, "Info: runtime observe plane: %s (local in-process; capabilities/snapshot/sessions/events)\n", handle.Addr()+strings.TrimRight(commands.ChatDebugObservePrefix(), "/"))
+			}
 		}
 
 		if !shouldBootstrapConfigForCommand(cmd, args) {
@@ -208,9 +273,11 @@ func main() {
 	rootCmd.PersistentFlags().String("theme", "", "输出主题配色或明暗（classic|focus|contrast|mono 或 auto|dark|light；优先级: --theme > AICLI_THEME/AICLI_THEME_MODE > 配置）")
 	rootCmd.PersistentFlags().String("syntax-theme", "", "代码语法高亮主题（auto 或 Chroma 主题名；优先级: --syntax-theme > 环境变量 > 配置）")
 	rootCmd.PersistentFlags().Bool("envelope", false, "JSON 输出时使用统一 envelope 结构（ok/command/data 或 ok/command/error）")
-	rootCmd.PersistentFlags().Bool("pprof", false, "启用 pprof 诊断端点（监听 127.0.0.1 随机空闲端口；可用 AICLI_PPROF 环境变量指定地址）")
+	rootCmd.PersistentFlags().Bool("pprof", false, "启用 pprof 诊断端点（默认监听 127.0.0.1 随机空闲端口；可用 AICLI_PPROF 指定地址或 --web-host 0.0.0.0 在 IPv4 局域网访问、--web-host :: 在 IPv6；0.0.0.0 时回环 IP 免令牌，本地网络 IP 与远程 IP 需令牌）")
 	rootCmd.PersistentFlags().Int("web-port", 0, "指定 loopback 服务器（Web 客户端 / /debug 端点）监听端口（1-65535；等价于 AICLI_PPROF=127.0.0.1:<port> 且优先级更高；默认随机空闲端口）")
+	rootCmd.PersistentFlags().String("web-host", "", "指定 loopback 服务器监听地址（默认 127.0.0.1；设为 0.0.0.0 在 IPv4 局域网访问，设为 :: 在 IPv6；0.0.0.0 时回环 IP 始终免令牌，本地网络 IP 与远程 IP 需令牌；也可用 AICLI_WEB_HOST 环境变量指定）")
 	rootCmd.PersistentFlags().String("web-token", "", "预设 Web 写令牌（默认每进程随机；也可用 AICLI_WEB_TOKEN；至少 16 位，字符集 A-Za-z0-9-._~）")
+	rootCmd.PersistentFlags().Bool("web-dev", false, "开发模式：在回环模式下跳过写令牌校验（POST/PUT/DELETE 无需 token）；默认在 127.0.0.1/localhost 自动开启。非回环模式下（0.0.0.0）回环 IP 始终免令牌，此旗仅影响回环模式 POST 校验")
 	rootCmd.PersistentFlags().Bool("console-host", false, "Windows：当前 stdin/stdout 为 PTY/pipe 时，在新的原生 Console 窗口中重启 aicli")
 
 	// config 子命令

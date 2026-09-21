@@ -58,12 +58,15 @@ Info: chat render status endpoint: http://127.0.0.1:50679/debug/chat/status (JSO
 Info: chat screen content endpoint: http://127.0.0.1:50679/debug/chat/screen (JSON; ?format=text for plain text)
 Info: chat debug endpoints list: http://127.0.0.1:50679/debug/endpoints (JSON; ?format=text for plain text)
 Info: chat web client / remote invoke endpoint: http://127.0.0.1:50679/web/ (POST http://127.0.0.1:50679/web/api/invoke)
-Info: web write token (X-AICLI-Token): 3f9c8a... (POST /web/api/* 必需)
+Info: web write token (X-AICLI-Token): 3f9c8a... (开发模式: 回环地址跳过校验)
 Info: runtime observe plane: http://127.0.0.1:50679/api/runtime/observe/v1 (local in-process; capabilities/snapshot/sessions/events)
 ```
 
 > `/web/*` 与 `/debug/*` 端点叠加 Host/Origin 校验：Host 必须是回环地址、携带 Origin 的请求
 > 必须同源，非 GET 写请求必须携带 `X-AICLI-Token`（内置 Web 页面自动注入并附加）。
+> **开发模式**（`--web-dev`，默认在 `127.0.0.1`/`localhost` 回环地址自动开启，`--web-dev=false`
+> 关闭）下跳过写令牌校验，便于本地开发调试；监听在 `--web-host 0.0.0.0` 时，回环 IP
+>（`127.0.0.1`/`localhost`）始终跳过校验，本地网络 IP 与远程 IP 仍需令牌。
 > `/debug display` 的「HTTP 调试端点」区块在 web 分组下额外打印 `Token:` 行（当前写令牌，
 > 等价于 `GET /web/api/token`；该指令的 HTTP JSON/text 输出**不含**令牌原文）。
 > 详见 `docs/aicli/web-remote-api.md`。

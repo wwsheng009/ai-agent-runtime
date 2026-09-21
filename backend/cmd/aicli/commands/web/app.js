@@ -14,14 +14,16 @@ import { initSkills } from "./js/skills.js";
 import { initMCP } from "./js/mcp.js";
 import { initSSE } from "./js/sse.js";
 import { initStream } from "./js/stream.js";
-import { initAboutToken, initFooter, initShortcutHelp, initTabs, initTheme } from "./js/ui.js";
+import { initAboutSessionCopy, initAboutToken, initShortcutHelp, initTabs, initTheme } from "./js/ui.js";
+import { initStatusBar, loadStatusBar } from "./js/statusbar.js";
 
 // ---- 事件绑定(原 IIFE 尾部,按组件归属拆分到各模块) ----
 initTabs();
 initTheme();
 initAboutToken(); // 关于页签的写令牌显示（读页面注入 meta，回退 /web/api/token）
+initAboutSessionCopy(); // 关于页签的当前会话 ID 复制（值由 sessions.js 同步写入）
 initShortcutHelp();
-initFooter();
+initStatusBar();
 initStream();
 initChat();
 initRuntimeBar();
@@ -36,6 +38,7 @@ initAnalysis();
 
 // ---- 启动序列(原文件尾部) ----
 loadRuntimeMeta(); // 权威 provider/model/reasoning 值同步到底部选择器
+loadStatusBar();    // 底部状态栏: balance / context / directory / git branch / window
 initSSE();         // EventSource 连接 + 动态状态栏时钟
 refreshScreen();
 loadSessions();
