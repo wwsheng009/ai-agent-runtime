@@ -505,6 +505,46 @@ func TestClassifyRetryableLLMErrorWithRules_MatchesErrorCodeRule(t *testing.T) {
 	assert.Equal(t, 10, decision.MaxAttempts)
 }
 
+// TestReasoningOnlyStopVsBudgetSplit 固化「只输出思维链」的两条处置路径：stop 型
+// （模型自认为已答完）不再由 provider 内层做同 prompt 重采样，改由 agent loop 用
+// 反馈回注改写 prompt 后再请求；length 型保留重采样 + 预算升级（8k→16k→32k→64k）。
+// 分类本身必须保持可重试：外层 runtime 重试与 turn 级重跑的杠杆不能被削弱。
+func TestReasoningOnlyStopVsBudgetSplit(t *testing.T) {
+	stopErr := fmt.Errorf("reasoning_only_empty_reply: stream ended with reasoning only and no substantive output: finish_reason=stop")
+	require.True(t, IsReasoningOnlyReplyError(stopErr))
+	require.Equal(t, "stop", ReasoningOnlyReplyFinishReason(stopErr))
+	require.True(t, isReasoningOnlyStopReply(stopErr))
+	require.False(t, isReasoningOnlyEmptyReplyRetryable(stopErr))
+	decision := classifyRetryableLLMError(stopErr)
+	require.True(t, decision.Retryable, "分类保持可重试：外层 runtime 重试与 turn 级重跑不能被削弱")
+	require.Equal(t, "reasoning_only_empty_reply", decision.Reason)
+
+	lengthErr := fmt.Errorf("reasoning_only_empty_reply: stream ended with reasoning only and no substantive output: finish_reason=length")
+	require.True(t, IsReasoningOnlyReplyError(lengthErr))
+	require.False(t, isReasoningOnlyStopReply(lengthErr))
+	require.True(t, isReasoningOnlyEmptyReplyRetryable(lengthErr), "length 型继续吃重采样与预算升级")
+
+	// 没有 finish_reason 取证（旧路径 / 聚合层未记录）时保持既有行为：仍可重采样，
+	// 避免把「无取证」误判成「模型已答完」。
+	unknownErr := fmt.Errorf("reasoning_only_empty_reply: stream ended with reasoning only and no substantive output")
+	require.True(t, IsReasoningOnlyReplyError(unknownErr))
+	require.Empty(t, ReasoningOnlyReplyFinishReason(unknownErr))
+	require.False(t, isReasoningOnlyStopReply(unknownErr))
+	require.True(t, isReasoningOnlyEmptyReplyRetryable(unknownErr))
+
+	// 非流式的类型化错误走 finishReason 字段，且 wrap 链逐层判定（runtime 的
+	// retryExhaustedError 会吞掉内层分类）。
+	typed := &reasoningOnlyEmptyReplyError{finishReason: "stop"}
+	wrapped := fmt.Errorf("LLM call failed after retries: %w", typed)
+	require.Equal(t, "stop", ReasoningOnlyReplyFinishReason(wrapped))
+	require.True(t, isReasoningOnlyStopReply(wrapped))
+	require.Contains(t, wrapped.Error(), "finish_reason=stop")
+
+	// 其它退化类别不受影响。
+	require.False(t, IsReasoningOnlyReplyError(fmt.Errorf("empty_reply: stream ended without substantive output")))
+	require.False(t, isReasoningOnlyStopReply(fmt.Errorf("truncated_tool_call: incomplete tool call markup")))
+}
+
 func TestValidateStreamingAggregateResponse_ClassifiesReasoningOnlyContentInspectionAndEmptyReply(t *testing.T) {
 	reasoningOnlyErr := validateStreamingAggregateResponse("openai", []byte(strings.Join([]string{
 		`data: {"choices":[{"index":0,"delta":{"reasoning_content":"先确认上下文。"},"finish_reason":"stop"}]}`,

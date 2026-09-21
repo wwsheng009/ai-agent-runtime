@@ -812,6 +812,98 @@ func IsEmptyReplyError(err error) bool {
 	return false
 }
 
+// IsReasoningOnlyReplyError reports whether err belongs to the
+// reasoning_only_empty_reply class: the provider returned a non-empty reasoning
+// (思维链) but no visible content and no tool call at all.
+//
+// 与 IsEmptyReplyError 的区别是这里**有** reasoning：对用户而言两者同样"没有
+// 任何实质输出"，因为 streamEmissionState.emittedAnything 只统计正文与图片
+// （reasoning 明确不计入），所以上层可以安全地用反馈回注 / 有界重跑恢复，
+// 而不会重复展示半截输出。wrap 链要逐层判定：runtime 的
+// retryExhaustedError 会吞掉内层分类。
+func IsReasoningOnlyReplyError(err error) bool {
+	for candidate := err; candidate != nil; candidate = stderrs.Unwrap(candidate) {
+		if classifyRetryableLLMError(candidate).Reason == "reasoning_only_empty_reply" {
+			return true
+		}
+	}
+	return false
+}
+
+// ReasoningOnlyReplyFinishReason extracts the finish_reason evidence recorded on
+// a reasoning-only failure ("" when the producing layer had none).
+//
+// 调用方用它区分两种根因：正常 stop（模型自认为已经答完，同样的 prompt 重放
+// 只会抽到同一个退化样本）与 length/budget 截断（扩大 max_tokens 才是杠杆）。
+func ReasoningOnlyReplyFinishReason(err error) string {
+	for candidate := err; candidate != nil; candidate = stderrs.Unwrap(candidate) {
+		if typed, ok := candidate.(*reasoningOnlyEmptyReplyError); ok {
+			return strings.TrimSpace(typed.finishReason)
+		}
+	}
+	// 流式聚合错误由 fmt.Errorf 构造（没有类型可断言），只能从取证后缀还原。
+	return finishReasonFromErrorMessage(err)
+}
+
+// finishReasonFromErrorMessage parses the "finish_reason=<value>" forensics
+// suffix that reasoning-only errors carry in their message text.
+func finishReasonFromErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	const marker = "finish_reason="
+	text := err.Error()
+	index := strings.Index(text, marker)
+	if index < 0 {
+		return ""
+	}
+	value := text[index+len(marker):]
+	if end := strings.IndexAny(value, ":,; \t\r\n"); end >= 0 {
+		value = value[:end]
+	}
+	return strings.TrimSpace(value)
+}
+
+// isNormalStopFinishReason reports whether a provider finish reason describes a
+// deliberate model stop rather than an exhausted/truncated completion budget.
+// 只有显式的正常停止值才返回 true：未知/空值必须保持旧行为，避免把"没有取证"
+// 误判成"模型已答完"。
+func isNormalStopFinishReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "stop", "end_turn", "eos", "stop_sequence", "completed":
+		return true
+	default:
+		return false
+	}
+}
+
+// isReasoningOnlyEmptyReplyRetryable reports whether a reasoning-only reply is
+// worth re-sampling *inside the provider retry loop*.
+//
+// 正常 stop 的 reasoning-only 是"模型认为已经答完"：同一条 prompt 重放大概率
+// 抽到同一个退化样本，只会把 attempt 预算烧在相同请求上（线上事故里连续 3 次
+// 退化后直接终态报错）。这类失败必须交回 agent loop，由反馈回注改变 prompt 后
+// 再请求，所以这里返回 false。length 型保留可重试：扩大 max_tokens 是真实杠杆
+// （配合 escalateOutputBudgetForDegenerateReply 的 8k→16k→32k→64k）。
+// 没有 finish_reason 取证（旧路径、聚合层未记录）时按可重试处理，保持既有行为。
+func isReasoningOnlyEmptyReplyRetryable(err error) bool {
+	reason := ReasoningOnlyReplyFinishReason(err)
+	if reason == "" {
+		return true
+	}
+	return !isNormalStopFinishReason(reason)
+}
+
+// isReasoningOnlyStopReply reports whether err is a reasoning-only failure whose
+// finish_reason is a deliberate normal stop. These must not be re-sampled
+// identically by the provider inner loop: the model already considered the turn
+// finished, so the same prompt reproduces the same degenerate sample. The
+// recovery lever is a changed prompt (agent-loop feedback re-prompt), not
+// another attempt.
+func isReasoningOnlyStopReply(err error) bool {
+	return IsReasoningOnlyReplyError(err) && !isReasoningOnlyEmptyReplyRetryable(err)
+}
+
 // DiagnoseFailure classifies an LLM failure and explains the safe recovery
 // action. Retryable describes whether a fresh bounded attempt can help; it is
 // false after retry exhaustion and for account, permission, and request errors.
@@ -1836,7 +1928,10 @@ func validateStreamingAggregateResponse(protocol string, responseBody []byte, as
 	}
 
 	if assistantMessageHasReasoningOnlyOutput(assistantMsg) {
-		return fmt.Errorf("reasoning_only_empty_reply: stream ended with reasoning only and no substantive output")
+		// 取证后缀（finish_reason）决定 provider 内层是否还值得重采样：
+		// stop 型交给 agent loop 做反馈回注，length 型继续吃预算升级。
+		return fmt.Errorf("reasoning_only_empty_reply: stream ended with reasoning only and no substantive output%s",
+			reasoningOnlyStreamForensics(assistantMsg))
 	}
 
 	if assistantMessageHasTruncatedToolCall(assistantMsg) {
@@ -2063,6 +2158,31 @@ func hasIncompleteToolCallMarkup(content string) bool {
 		return false
 	}
 	return !strings.Contains(content, "</tool_call>")
+}
+
+// assistantMessageExplicitFinishReason returns the finish reason the aggregator
+// actually carried, without the "stop" default that assistantMessageFinishReason
+// applies. A defaulted value must never masquerade as evidence: the stop/truncation
+// split downstream depends on distinguishing "the provider said stop" from
+// "nobody recorded a finish reason".
+func assistantMessageExplicitFinishReason(assistantMsg map[string]interface{}) string {
+	for _, key := range []string{"finish_reason", "stop_reason"} {
+		if value, ok := assistantMsg[key].(string); ok {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
+// reasoningOnlyStreamForensics renders the optional "finish_reason=<value>"
+// suffix for the streaming reasoning-only error.
+func reasoningOnlyStreamForensics(assistantMsg map[string]interface{}) string {
+	if reason := assistantMessageExplicitFinishReason(assistantMsg); reason != "" {
+		return fmt.Sprintf(": finish_reason=%s", reason)
+	}
+	return ""
 }
 
 func assistantMessageHasReasoningOnlyOutput(assistantMsg map[string]interface{}) bool {

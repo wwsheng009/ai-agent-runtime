@@ -124,7 +124,8 @@ func ResolveModelMaxOutputTokens(
 // Claude Code-style precedence:
 //  1. explicit request budget (if > 0), clamped to upperLimit
 //  2. env override CLAUDE_CODE_MAX_OUTPUT_TOKENS / AICLI_MAX_OUTPUT_TOKENS
-//  3. min(modelDefault, CappedDefaultMaxTokens) when cap enabled
+//  3. min(modelDefault, CappedDefaultMaxTokens) when cap enabled, unless the
+//     model is a reasoning model (思维链 token 计入 completion 预算)
 //  4. model default otherwise
 func ResolveRequestMaxTokens(
 	protocol string,
@@ -149,7 +150,12 @@ func ResolveRequestMaxTokens(
 	}
 
 	defaultTokens := resolved.Default
-	if isMaxTokensCapEnabled() {
+	// reasoning 模型不套用付费 8k 槽位预留：思维链 token 与正文共用 completion
+	// 预算，8k 会让模型把预算全部花在推理上、以 finish_reason=length 返回
+	// reasoning-only（正文为空），这既不是模型退化也不是用户要的答案。显式请求
+	// 预算与 env 覆盖仍然优先，cap 只影响"未指定预算"的默认值；能力表未声明
+	// ReasoningModel 时保持原行为。
+	if isMaxTokensCapEnabled() && !(hasCapability && capability.ReasoningModel) {
 		capped := minPositive(defaultTokens, CappedDefaultMaxTokens)
 		if capped < defaultTokens {
 			resolved.Capped = true

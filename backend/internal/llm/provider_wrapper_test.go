@@ -2066,13 +2066,52 @@ func TestProviderWrapper_CallWithStream_RetriesSSEErrorBeforeOutput(t *testing.T
 	assert.Equal(t, 2, requests)
 }
 
-func TestProviderWrapper_CallWithStream_RetriesAfterReasoningOnlyDeltaWithoutContent(t *testing.T) {
+// TestProviderWrapper_CallWithStream_ReasoningOnlyStopIsNotResampled 固化 stop 型
+// 分流：模型只输出思维链且 finish_reason=stop（自认为已答完）时，provider 内层不再
+// 做同 prompt 重采样（重放只会复现同一个退化样本、把 attempt 预算烧在相同请求上），
+// 原始错误连同 finish_reason 取证直接交回上层，由 agent loop 的反馈回注改写 prompt
+// 后再请求。
+func TestProviderWrapper_CallWithStream_ReasoningOnlyStopIsNotResampled(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"reasoning_content":"先确认上下文。"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:       "openai",
+		BaseURL:    server.URL,
+		MaxRetries: 2,
+	})
+	require.NoError(t, err)
+
+	resp, err := provider.Call(context.Background(), &LLMRequest{
+		Model: "gpt-4o-mini",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "retry reasoning only",
+		}},
+		Stream: true,
+	})
+	require.Error(t, err)
+	require.Nil(t, resp)
+	require.Contains(t, err.Error(), "reasoning_only_empty_reply")
+	require.Contains(t, err.Error(), "finish_reason=stop")
+	assert.Equal(t, 1, requests, "stop 型不再由 provider 内层重采样")
+}
+
+// TestProviderWrapper_CallWithStream_RetriesAfterReasoningOnlyLengthDelta 固化 length
+// 型仍走重采样：预算被思维链吃满时，换一次采样 + 扩大 max_tokens 才是杠杆。
+func TestProviderWrapper_CallWithStream_RetriesAfterReasoningOnlyLengthDelta(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
 		w.Header().Set("Content-Type", "text/event-stream")
 		if requests == 1 {
-			fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"reasoning_content":"先确认上下文。"},"finish_reason":"stop"}]}`+"\n\n")
+			fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"reasoning_content":"先确认上下文。"},"finish_reason":"length"}]}`+"\n\n")
 			fmt.Fprint(w, "data: [DONE]\n\n")
 			return
 		}
@@ -2166,6 +2205,58 @@ func TestProviderWrapper_Call_RetriesAfterReasoningOnlyEmptyReplyWithoutContent(
 	require.NotNil(t, resp)
 	assert.Equal(t, "ok", resp.Content)
 	assert.Equal(t, 2, requests)
+}
+
+// TestProviderWrapper_Call_ReasoningOnlyStopIsNotResampled 固化非流式路径的同一条
+// 分流：finish_reason=stop 的 reasoning-only 只发一次请求就带着取证冒泡（不再由内层
+// 重采样），错误文本同时携带 token 记账，供上层在「扩预算」与「改写 prompt」之间
+// 选择恢复杠杆。
+func TestProviderWrapper_Call_ReasoningOnlyStopIsNotResampled(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+			"id":"chatcmpl-reasoning-only-stop",
+			"object":"chat.completion",
+			"created":1,
+			"model":"deepseek-v4-pro",
+			"choices":[
+				{
+					"index":0,
+					"message":{
+						"role":"assistant",
+						"content":"",
+						"reasoning_content":"先整理上下文。"
+					},
+					"finish_reason":"stop"
+				}
+			],
+			"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}
+		}`)
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:       "openai",
+		BaseURL:    server.URL,
+		MaxRetries: 2,
+	})
+	require.NoError(t, err)
+
+	resp, err := provider.Call(context.Background(), &LLMRequest{
+		Model: "deepseek-v4-pro",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "retry reasoning only",
+		}},
+	})
+	require.Error(t, err)
+	require.Nil(t, resp)
+	require.Contains(t, err.Error(), "reasoning_only_empty_reply")
+	require.Contains(t, err.Error(), "finish_reason=stop")
+	require.Contains(t, err.Error(), "completion_tokens=4")
+	assert.Equal(t, 1, requests, "stop 型不再由 provider 内层重采样")
 }
 
 // TestProviderWrapper_Call_StopsAfterConsecutiveDegenerateReplies pins the
