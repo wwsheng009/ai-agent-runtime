@@ -168,8 +168,13 @@ func (t *StdioTransport) stdioProcessPID() int {
 // newStdioCommandGuard 构造 stdio 命令并绑定进程树守卫。
 //
 // 返回的 cleanup 用于「进程未启动」的失败路径（释放 job handle，避免句柄泄漏）。
-func newStdioCommandGuard(ctx context.Context, command string, args []string) (*exec.Cmd, *executor.ProcessGuard, error) {
-	cmd := exec.CommandContext(ctx, command, args...)
+func newStdioCommandGuard(ctx context.Context, rc stdioCommand) (*exec.Cmd, *executor.ProcessGuard, error) {
+	cmd := exec.CommandContext(ctx, rc.Path, rc.Args...)
+	// Windows 垫片：整条命令行由 resolveStdioCommand 拼好，必须原样下发；
+	// 若交给 os/exec 拼装，参数含空格时会被 cmd.exe 截断（计划 §5.1）。
+	if rc.RawCmdLineExplicit() {
+		applyRawCmdLine(cmd, rc.RawCmdLine)
+	}
 	guard := executor.NewProcessGuard()
 	if err := guard.Bind(cmd); err != nil {
 		guard.Close()

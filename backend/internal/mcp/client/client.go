@@ -10,11 +10,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/transport"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Client MCP 客户端接口
@@ -200,10 +200,22 @@ func (c *mcpClient) Connect(ctx context.Context) error {
 	session, err := c.connectSession(sessionCtx, mcpTransport)
 	if err != nil {
 		cancel()
-		c.emitLifecycleEvent(traceID, "mcp.client.session.connect_failed", t.Type(), map[string]interface{}{
+		// P1 诊断：stdio 子进程可能已经带着真实报错退出（例如 cmd.exe 的
+		// "'C:\Program' is not recognized…"），把 stderr 尾部与进程状态带上，
+		// 避免用户只看到裸 EOF（计划 §5.3）。
+		diagnostics := transport.StderrDiagnosticsOf(t)
+		if diagnostics != "" {
+			err = fmt.Errorf("%w\n%s", err, diagnostics)
+		}
+		payload := map[string]interface{}{
 			"error":  err.Error(),
 			"target": c.connectionTarget(),
-		})
+		}
+		if diagnostics != "" {
+			payload["stderr_tail"] = diagnostics
+		}
+		c.emitLifecycleEvent(traceID, "mcp.client.session.connect_failed", t.Type(), payload)
+		logger.Errorf("[Client] Connect to MCP %s failed: %v", c.name, err)
 		return fmt.Errorf("连接 MCP Server 失败: %w", err)
 	}
 	if session == nil {
