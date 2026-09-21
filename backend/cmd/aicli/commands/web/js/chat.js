@@ -295,9 +295,22 @@ function updateWelcome() {
 function updateScrollBtn() {
   if (!scrollBottomBtn || !conversationEl) { return; }
   scrollBottomBtn.style.display = userScrolledAway ? "inline-block" : "none";
-  // 定位在输入区上方，输入区多行增高时自动跟随
-  var ir = document.getElementById("input-row");
-  if (ir) { scrollBottomBtn.style.bottom = (ir.offsetHeight + 12) + "px"; }
+  positionScrollBtn();
+}
+
+// 锚定到信息流可视区右下角：以信息流下沿为基准反推它与面板下沿的距离，
+// 底部区域（动态状态条 / 输入区 / 配置栏）任意高度变化都自动跟随。
+// 旧实现只减输入区高度、漏了其下的配置栏，按钮落进输入行里压住发送/结束按钮。
+function positionScrollBtn() {
+  if (!scrollBottomBtn || !conversationEl) { return; }
+  var panel = document.getElementById("tab-main");
+  if (!panel) { return; }
+  // 面板隐藏（非「对话」页签）时几何全为 0，跳过以免写入错误位置；切回后
+  // 由滚动事件或下一次 updateScrollBtn 重新锚定。
+  if (!panel.clientHeight) { return; }
+  var streamBottom = (conversationEl.offsetTop || 0) + (conversationEl.offsetHeight || 0);
+  var below = (panel.clientHeight || 0) - streamBottom;
+  scrollBottomBtn.style.bottom = (Math.max(0, below) + 12) + "px";
 }
 
 // ---- 跨模块状态访问接口(拆分引入) ----
@@ -451,6 +464,17 @@ export function initChat() {
       updateScrollBtn();
     });
   }
+  // 信息流右下角锚定：多行输入增高 / 窄屏配置栏换行 / 动态状态条显隐都会
+  // 改变信息流下沿，必须重算，否则「最新」按钮可能再次压回发送/结束按钮。
+  window.addEventListener("resize", positionScrollBtn);
+  if (typeof ResizeObserver === "function") {
+    var bottomObserver = new ResizeObserver(function () { positionScrollBtn(); });
+    ["dynamic-status", "input-row", "cfg-bar"].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) { bottomObserver.observe(el); }
+    });
+  }
+  updateScrollBtn();
   // 会话复制按钮
   if (screenCopyBtn) {
     screenCopyBtn.addEventListener("click", function () {
