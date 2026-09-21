@@ -386,7 +386,10 @@ function Restore-EmbeddedWebUI {
 function Invoke-FrontendBuild {
     param(
         [Parameter(Mandatory = $true)][string]$FrontendDir,
-        [Parameter(Mandatory = $true)][string]$ApiBaseUrl
+        # 空字符串是合法值（内嵌前端默认同源相对 /api），但 Mandatory 参数默认拒绝空串：
+        # 顶层 -ApiBaseUrl 的默认值就是 ""，不加 [AllowEmptyString()] 会让
+        # -BuildFrontend 在进入前端构建前就绑定失败。
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$ApiBaseUrl
     )
     foreach ($cmd in @("node", "pnpm")) {
         if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
@@ -394,6 +397,12 @@ function Invoke-FrontendBuild {
         }
     }
     $oldApiBaseUrl = $env:VITE_API_BASE_URL
+    # tsc -b 在本仓库规模下会顶到 Node 默认堆上限（实测 exit 134，RSS 约 980MB）。
+    # 调用者若已自带 --max-old-space-size 则原样尊重，否则补一个下限，避免构建中途死亡。
+    $oldNodeOptions = $env:NODE_OPTIONS
+    if ([string]::IsNullOrWhiteSpace($oldNodeOptions) -or $oldNodeOptions -notmatch "max-old-space-size") {
+        $env:NODE_OPTIONS = ("{0} --max-old-space-size=4096" -f $oldNodeOptions).Trim()
+    }
     Push-Location -LiteralPath $FrontendDir
     try {
         $env:VITE_API_BASE_URL = $ApiBaseUrl.Trim()
@@ -406,6 +415,7 @@ function Invoke-FrontendBuild {
     }
     finally {
         $env:VITE_API_BASE_URL = $oldApiBaseUrl
+        $env:NODE_OPTIONS = $oldNodeOptions
         Pop-Location
     }
 }
