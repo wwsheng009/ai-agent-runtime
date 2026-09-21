@@ -129,6 +129,14 @@ type CommandResult struct {
 	// rendered on its own screen (like /resume list and /history), never as a
 	// Scene command cell in the main message stream.
 	OpenDebugOverlay bool
+	// OpenWebEndpointsScreen requests the lease-bound alternate-screen viewer
+	// for /web endpoints. Like OpenDebugOverlay it has no document payload in
+	// the unified interactive projection: the endpoint text is captured once
+	// after the command result crosses the dispatch boundary and rendered on
+	// its own screen (reusing the same debug overlay), never as a Scene command
+	// cell in the main message stream. Plain/JSON/noninteractive projections
+	// keep the §6.4 document cell as a fallback.
+	OpenWebEndpointsScreen bool
 	// OpenUsageScreen requests the lease-bound alternate-screen usage viewer
 	// for /usage. Like OpenDebugOverlay it has no document payload in the
 	// unified interactive projection: the cache overview and the session cache
@@ -372,7 +380,7 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		!commandMatches(cmdLower, "/permission-mode") && !commandMatches(cmdLower, "/mode") &&
 		!commandMatches(cmdLower, "/approval-reuse") && !commandMatches(cmdLower, "/plan") &&
 		!commandMatches(cmdLower, "/timeline") && !commandMatches(cmdLower, "/collab") &&
-		!commandMatches(cmdLower, "/mcp") {
+		!commandMatches(cmdLower, "/mcp") && !commandMatches(cmdLower, "/web") {
 		return CommandResult{}, false, nil
 	}
 
@@ -420,6 +428,10 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 
 	if commandMatches(cmdLower, "/mcp") {
 		return executeStructuredMCPCommand(session, command), true, nil
+	}
+
+	if commandMatches(cmdLower, "/web") {
+		return executeStructuredWebCommand(session, command), true, nil
 	}
 
 	if commandMatches(cmdLower, "/function") || commandMatches(cmdLower, "/describe") {

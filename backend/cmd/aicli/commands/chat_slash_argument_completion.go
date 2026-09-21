@@ -199,6 +199,13 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 			{Command: "remove", Summary: "删除并热重载", Group: string(chatSlashCommandGroupFunctions), AcceptsArgs: true},
 			{Command: "reload", Summary: "重新加载配置并重连", Group: string(chatSlashCommandGroupFunctions)},
 		})
+	case "/web":
+		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
+			{Command: "status", Summary: "显示 Web 服务器状态", Group: string(chatSlashCommandGroupWeb)},
+			{Command: "token", Summary: "显示当前 Web 写令牌", Group: string(chatSlashCommandGroupWeb)},
+			{Command: "endpoints", Summary: "显示全部 Web 调试端点清单", Group: string(chatSlashCommandGroupWeb)},
+			{Command: "open", Summary: "在浏览器中打开 Web 客户端", Group: string(chatSlashCommandGroupWeb)},
+		})
 	case "/export":
 		return p.completeExportArgs(session, argsText, cursor)
 	case "/resume":
