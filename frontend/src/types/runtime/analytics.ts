@@ -29,6 +29,9 @@ export type AnalyticsGlobalTotals = AnalyticsTokenTotals & {
   tool_errors: number;
   total_duration_ms: number;
   average_response_time_ms?: number;
+  /** 已观测首字时间（TTFT）的均值与样本数；样本数为 0/缺省 = 未采集。 */
+  average_first_token_ms?: number;
+  first_token_samples?: number;
 };
 
 export type AnalyticsSessionRollup = {
@@ -67,6 +70,9 @@ export type AnalyticsSessionRollup = {
   tool_errors: number;
   average_response_time_ms?: number;
   total_duration_ms?: number;
+  /** 会话内已观测请求的首字时间均值（样本加权）；缺省 = 未采集。 */
+  average_first_token_ms?: number;
+  first_token_samples?: number;
   has_debug_usage?: boolean;
   source?: string;
   usage_quality: string;
@@ -95,6 +101,8 @@ export type AnalyticsGroupBucket = AnalyticsTokenTotals & {
   tool_errors: number;
   total_duration_ms: number;
   average_response_time_ms?: number;
+  average_first_token_ms?: number;
+  first_token_samples?: number;
 };
 
 export type AnalyticsSessionsQuery = {
@@ -201,6 +209,8 @@ export type AnalyticsStepUsage = {
   usage_available: boolean;
   error_category?: string;
   duration_ms?: number;
+  /** 首字时间（TTFT，毫秒）。0/缺省 = 未采集（非流式/历史/首字前失败）。 */
+  first_token_ms?: number;
   context_prompt_tokens?: number;
   context_window_tokens?: number;
   prompt_budget?: number;
@@ -214,6 +224,9 @@ export type AnalyticsTurnUsage = {
   started_at?: string;
   ended_at?: string;
   duration_ms: number;
+  /** 该 turn 内已观测请求的首字时间均值与样本数；缺省 = 该轮次无首字观测。 */
+  first_token_ms?: number;
+  first_token_samples?: number;
   outcome: "success" | "recovered" | "failed" | "cancelled" | string;
   error_category?: string;
   llm_requests: number;

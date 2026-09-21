@@ -1850,6 +1850,24 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	var streamedReasoningText strings.Builder
 	var assistantSequence atomic.Uint64
 	var reasoningSequence atomic.Uint64
+	// 首字时间（TTFT）采集：每次尝试（含降级/预算升级重试）重置起点，首个
+	// 流式增量（文本/思考/图片进度）到达时记一次。非流式请求观测不到首字，
+	// 保持缺省（前端显示"未采集"，而不是把总耗时冒充首字）。
+	var attemptStartedNano atomic.Int64
+	var firstTokenNano atomic.Int64
+	markFirstToken := func() {
+		if attemptStartedNano.Load() == 0 {
+			return
+		}
+		firstTokenNano.CompareAndSwap(0, time.Now().UnixNano())
+	}
+	firstTokenMs := func() int64 {
+		started, first := attemptStartedNano.Load(), firstTokenNano.Load()
+		if started == 0 || first == 0 || first < started {
+			return 0
+		}
+		return (first - started) / int64(time.Millisecond)
+	}
 	reportSink := func(chunk llm.StreamChunk, sequence uint64) {
 		if loop.config == nil || loop.config.StreamSink == nil {
 			return
@@ -1870,6 +1888,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 				if chunk.Content == "" {
 					return
 				}
+				markFirstToken()
 				sequence := assistantSequence.Add(1)
 				payload := map[string]interface{}{
 					"trace_id":        traceID,
@@ -1892,6 +1911,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 				if chunk.Content == "" {
 					return
 				}
+				markFirstToken()
 				streamedReasoning = true
 				streamedReasoningText.WriteString(chunk.Content)
 				sequence := reasoningSequence.Add(1)
@@ -1924,6 +1944,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 				if len(chunk.Metadata) == 0 {
 					return
 				}
+				markFirstToken()
 				sequence := assistantSequence.Add(1)
 				imagePayload := map[string]interface{}{
 					"trace_id":  traceID,
@@ -2066,7 +2087,17 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		}
 	}
 	loop.emitRuntimeEvent("llm.request.started", sessionID, "", requestPayload)
-	response, err := loop.llmRuntime.Call(callCtx, req)
+	// 每次真正发起调用前重置首字计时起点：降级/预算升级重试是新的尝试，
+	// 上一轮的增量不应计入本轮 TTFT。
+	beginAttempt := func() {
+		attemptStartedNano.Store(time.Now().UnixNano())
+		firstTokenNano.Store(0)
+	}
+	callModel := func() (*llm.LLMResponse, error) {
+		beginAttempt()
+		return loop.llmRuntime.Call(callCtx, req)
+	}
+	response, err := callModel()
 	for err != nil {
 		parameter := loop.downgradeUnsupportedProviderRequest(req, err)
 		if parameter == "" {
@@ -2081,7 +2112,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			"step": step, "provider": req.Provider, "model": req.Model,
 			"parameter": parameter, "error": err.Error(),
 		})
-		response, err = loop.llmRuntime.Call(callCtx, req)
+		response, err = callModel()
 	}
 	// 参数被输出预算截断（invalid_tool_arguments + finish_reason=length）或整条
 	// 响应因工具调用未闭合被丢弃（truncated_tool_call）都走不到下面那条成功路径：
@@ -2115,7 +2146,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 				"finish_reason":   truncatedFinishReason,
 				"reason":          "truncated_tool_call",
 			})
-			response, err = loop.llmRuntime.Call(callCtx, req)
+			response, err = callModel()
 		}
 	}
 	// Claude Code-style one-shot escalate: capped 8k default hit max_tokens → retry at 64k.
@@ -2140,7 +2171,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 				"to_max_tokens":   escalated,
 				"finish_reason":   responseFinishReason(response),
 			})
-			response, err = loop.llmRuntime.Call(callCtx, req)
+			response, err = callModel()
 		}
 	}
 	if err != nil {
@@ -2175,6 +2206,10 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		}
 		if streamID := strings.TrimSpace(stringValue(req.Metadata["stream_id"])); streamID != "" {
 			finishedPayload["stream_id"] = streamID
+		}
+		// 失败前若已收到过增量，首字时间同样是有效事实（例如首字后中断/超时）。
+		if ms := firstTokenMs(); ms > 0 {
+			finishedPayload["first_token_ms"] = ms
 		}
 		if totalMessageTokens > 0 {
 			finishedPayload["context_prompt_tokens"] = totalMessageTokens
@@ -2223,6 +2258,10 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	}
 	if streamID := strings.TrimSpace(stringValue(req.Metadata["stream_id"])); streamID != "" {
 		finishedPayload["stream_id"] = streamID
+	}
+	// 首字时间：仅流式请求可观测；非流式请求缺省不写，前端据此显示"未采集"。
+	if ms := firstTokenMs(); ms > 0 {
+		finishedPayload["first_token_ms"] = ms
 	}
 	if totalMessageTokens > 0 {
 		finishedPayload["context_prompt_tokens"] = totalMessageTokens

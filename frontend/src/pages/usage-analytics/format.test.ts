@@ -1,6 +1,24 @@
 import { describe, expect, it } from "vitest";
 
-import { dimensionOptions, normalizeDimensions } from "./format";
+import { dimensionOptions, formatFirstToken, normalizeDimensions } from "./format";
+
+describe("formatFirstToken", () => {
+  // 契约：0/缺省 = 未采集（非流式请求、历史记录或首个增量前失败），返回 null
+  // 让调用方显示本地化「未采集」，不得把 0 ms 当成有效首字时间。
+  it("returns null when the first token was never observed", () => {
+    expect(formatFirstToken(undefined)).toBeNull();
+    expect(formatFirstToken(null)).toBeNull();
+    expect(formatFirstToken(0)).toBeNull();
+    expect(formatFirstToken(-5)).toBeNull();
+    expect(formatFirstToken(Number.NaN)).toBeNull();
+  });
+
+  it("formats observed first-token latencies with the shared duration scale", () => {
+    expect(formatFirstToken(1)).toBe("1 ms");
+    expect(formatFirstToken(420)).toBe("420 ms");
+    expect(formatFirstToken(1230)).toBe("1.2 s");
+  });
+});
 
 describe("normalizeDimensions", () => {
   it("tolerates an empty object payload", () => {

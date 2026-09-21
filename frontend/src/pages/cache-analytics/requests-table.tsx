@@ -12,6 +12,7 @@ import type { CacheRequestRecord } from "@/types/runtime";
 
 import { cacheStatusKey, cacheStatusTone } from "./cache-status";
 import {
+  formatCacheLatency,
   formatCacheNumber,
   formatCacheRatio,
   formatCacheReportedNumber,
@@ -64,7 +65,7 @@ export function RequestsTable({ requests, total, offset, pageSize, loading, onPa
       </div>
 
       <div className="mt-2 w-full max-w-full overflow-x-auto">
-        <table className="w-full min-w-[1320px] border-collapse text-left text-sm">
+        <table className="w-full min-w-[1440px] border-collapse text-left text-sm">
           <thead className="text-xs text-muted-foreground">
             <tr className="border-b border-border">
               <th className="px-2 py-2 font-medium">{t("cache.columns.time")}</th>
@@ -77,13 +78,14 @@ export function RequestsTable({ requests, total, offset, pageSize, loading, onPa
               <th className="px-2 py-2 text-right font-medium">{t("cache.columns.hitRatio")}</th>
               <th className="px-2 py-2 font-medium">{t("cache.columns.cacheStatus")}</th>
               <th className="px-2 py-2 text-right font-medium">{t("cache.columns.duration")}</th>
+              <th className="px-2 py-2 text-right font-medium">{t("cache.columns.firstToken")}</th>
               <th className="px-2 py-2 font-medium">{t("cache.columns.outcome")}</th>
             </tr>
           </thead>
           <tbody>
             {requests.length === 0 && !loading ? (
               <tr>
-                <td colSpan={11} className="px-2 py-8 text-center text-sm text-muted-foreground">
+                <td colSpan={12} className="px-2 py-8 text-center text-sm text-muted-foreground">
                   {t("cache.emptyRequests")}
                 </td>
               </tr>
@@ -139,6 +141,9 @@ export function RequestsTable({ requests, total, offset, pageSize, loading, onPa
                   </td>
                   <td className="whitespace-nowrap px-2 py-2.5 text-right tabular-nums">
                     {typeof record.duration_ms === "number" ? formatDuration(record.duration_ms) : "—"}
+                  </td>
+                  <td className="whitespace-nowrap px-2 py-2.5 text-right tabular-nums">
+                    {formatCacheLatency(record.first_token_ms, t("cache.metrics.notCollected"))}
                   </td>
                   <td className="px-2 py-2.5">
                     <Badge className={requestOutcomeTone(outcome)}>{outcomeLabel}</Badge>

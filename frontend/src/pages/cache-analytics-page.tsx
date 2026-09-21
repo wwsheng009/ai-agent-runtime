@@ -23,6 +23,7 @@ import type {
 import { CacheMetric } from "./cache-analytics/cache-metric";
 import { DistributionChip } from "./cache-analytics/distribution-chip";
 import {
+  formatCacheLatency,
   formatCacheNumber,
   formatCacheRatio,
   formatCacheTime,
@@ -143,6 +144,8 @@ export function CacheAnalyticsPanel({ sessionId }: { sessionId: string }) {
             <CacheMetric label={t("cache.metrics.cacheRead")} value={formatCacheNumber(overview?.tokens.cache_read_tokens ?? 0)} detail={t("cache.metrics.cacheWrite", { value: formatCacheNumber(overview?.tokens.cache_creation_tokens ?? 0) })} />
             <CacheMetric label={t("cache.metrics.tokens")} value={formatCacheNumber(overview?.tokens.total_tokens ?? 0)} detail={t("cache.metrics.tokenBreakdown", { prompt: formatCacheNumber(overview?.tokens.prompt_tokens ?? 0), completion: formatCacheNumber(overview?.tokens.completion_tokens ?? 0) })} />
             <CacheMetric label={t("cache.metrics.reasoning")} value={formatCacheNumber(overview?.tokens.reasoning_tokens ?? 0)} detail={t("cache.metrics.cacheReported", { count: overview?.requests_cache_reported ?? 0 })} />
+            <CacheMetric label={t("cache.metrics.duration")} value={formatCacheLatency(overview?.average_duration_ms, t("cache.metrics.notCollected"))} detail={t("cache.metrics.samples", { count: overview?.duration_samples ?? 0 })} />
+            <CacheMetric label={t("cache.metrics.firstToken")} value={formatCacheLatency(overview?.average_first_token_ms, t("cache.metrics.notCollected"))} detail={t("cache.metrics.samples", { count: overview?.first_token_samples ?? 0 })} />
             <CacheMetric label={t("cache.metrics.generatedAt")} value={formatCacheTime(overview?.generated_at)} detail={t("cache.metrics.dataSourceLive")} />
           </section>
 

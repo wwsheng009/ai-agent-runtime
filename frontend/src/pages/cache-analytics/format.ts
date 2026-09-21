@@ -22,3 +22,14 @@ export function formatCacheTime(value: string | undefined) {
   if (!Number.isFinite(parsed)) return value;
   return new Date(parsed).toLocaleString();
 }
+
+/**
+ * 延迟展示（总耗时 / 首字时间）：0/缺省 = 未采集（非流式请求、历史记录或首个
+ * 增量前就失败），返回 fallback 由调用方显示本地化「未采集」，不得回退成 0 ms。
+ */
+export function formatCacheLatency(value: number | undefined, fallback = "—") {
+  if (value === undefined || value === null || !Number.isFinite(value) || value <= 0) return fallback;
+  if (value < 1000) return `${value} ms`;
+  if (value < 60_000) return `${(value / 1000).toFixed(1)} s`;
+  return `${(value / 60_000).toFixed(1)} min`;
+}

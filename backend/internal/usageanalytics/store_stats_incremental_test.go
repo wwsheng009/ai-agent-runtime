@@ -9,21 +9,23 @@ import (
 
 // storedStats 是 usage_sessions 预聚合列的测试快照。
 type storedStats struct {
-	totalRequests    int
-	successes        int
-	errors           int
-	withUsage        int
-	totalTokens      int
-	promptTokens     int
-	completionTokens int
-	cachedTokens     int
-	reasoningTokens  int
-	totalDuration    int64
-	durationSamples  int64
-	turnCount        int
-	failedTurns      int
-	firstStarted     int64
-	lastStarted      int64
+	totalRequests     int
+	successes         int
+	errors            int
+	withUsage         int
+	totalTokens       int
+	promptTokens      int
+	completionTokens  int
+	cachedTokens      int
+	reasoningTokens   int
+	totalDuration     int64
+	durationSamples   int64
+	totalFirstToken   int64
+	firstTokenSamples int64
+	turnCount         int
+	failedTurns       int
+	firstStarted      int64
+	lastStarted       int64
 }
 
 func readStoredStats(t *testing.T, store *Store, sessionID string) storedStats {
@@ -32,12 +34,14 @@ func readStoredStats(t *testing.T, store *Store, sessionID string) storedStats {
 	err := store.db.QueryRow(`SELECT
   c_total_requests, c_llm_successes, c_llm_errors, c_requests_with_usage,
   c_total_tokens, c_prompt_tokens, c_completion_tokens, c_cached_tokens, c_reasoning_tokens,
-  c_total_duration_ms, c_duration_samples, c_turn_count, c_failed_turns,
+  c_total_duration_ms, c_duration_samples, c_total_first_token_ms, c_first_token_samples,
+  c_turn_count, c_failed_turns,
   c_first_started_at, c_last_started_at
 FROM usage_sessions WHERE session_id = ?`, sessionID).Scan(
 		&stats.totalRequests, &stats.successes, &stats.errors, &stats.withUsage,
 		&stats.totalTokens, &stats.promptTokens, &stats.completionTokens, &stats.cachedTokens, &stats.reasoningTokens,
-		&stats.totalDuration, &stats.durationSamples, &stats.turnCount, &stats.failedTurns,
+		&stats.totalDuration, &stats.durationSamples, &stats.totalFirstToken, &stats.firstTokenSamples,
+		&stats.turnCount, &stats.failedTurns,
 		&stats.firstStarted, &stats.lastStarted,
 	)
 	require.NoError(t, err)

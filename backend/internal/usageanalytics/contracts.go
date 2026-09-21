@@ -75,26 +75,29 @@ type SessionRollup struct {
 	ToolResultsObserved  int       `json:"tool_results_observed"`
 	ToolErrors           int       `json:"tool_errors"`
 	// schema v2（方案 §4 批次 1.3）：工具/子代理维度增量字段，仅增不改。
-	ToolCallsObserved     int      `json:"tool_calls_observed,omitempty"`
-	ToolFailures          int      `json:"tool_failures,omitempty"`
-	ToolFailureRate       float64  `json:"tool_failure_rate,omitempty"`
-	SubagentRuns          int      `json:"subagent_runs,omitempty"`
-	SubagentFailures      int      `json:"subagent_failures,omitempty"`
-	SubagentFailureRate   float64  `json:"subagent_failure_rate,omitempty"`
-	SubagentTimeouts      int      `json:"subagent_timeouts,omitempty"`
-	RetryRecoveredTurns   int      `json:"retry_recovered_turns,omitempty"`
-	AverageResponseTimeMs int64    `json:"average_response_time_ms,omitempty"`
-	TotalDurationMs       int64    `json:"total_duration_ms,omitempty"`
-	HasDebugUsage         bool     `json:"has_debug_usage,omitempty"`
-	Source                string   `json:"source,omitempty"` // live（数据库实时写入）
-	UsageQuality          string   `json:"usage_quality"`
-	UsageComplete         bool     `json:"usage_complete"`
-	UsageCoverage         float64  `json:"usage_coverage"`
-	Partial               bool     `json:"partial"`
-	PartialReasons        []string `json:"partial_reasons"`
-	DroppedMessages       int      `json:"dropped_messages"`
-	ReconciliationStatus  string   `json:"reconciliation_status"`
-	ReconciliationDelta   int      `json:"reconciliation_delta"`
+	ToolCallsObserved     int     `json:"tool_calls_observed,omitempty"`
+	ToolFailures          int     `json:"tool_failures,omitempty"`
+	ToolFailureRate       float64 `json:"tool_failure_rate,omitempty"`
+	SubagentRuns          int     `json:"subagent_runs,omitempty"`
+	SubagentFailures      int     `json:"subagent_failures,omitempty"`
+	SubagentFailureRate   float64 `json:"subagent_failure_rate,omitempty"`
+	SubagentTimeouts      int     `json:"subagent_timeouts,omitempty"`
+	RetryRecoveredTurns   int     `json:"retry_recovered_turns,omitempty"`
+	AverageResponseTimeMs int64   `json:"average_response_time_ms,omitempty"`
+	TotalDurationMs       int64   `json:"total_duration_ms,omitempty"`
+	// AverageFirstTokenMs 会话内已观测请求的首字时间均值（样本加权）。
+	AverageFirstTokenMs  int64    `json:"average_first_token_ms,omitempty"`
+	FirstTokenSamples    int      `json:"first_token_samples,omitempty"`
+	HasDebugUsage        bool     `json:"has_debug_usage,omitempty"`
+	Source               string   `json:"source,omitempty"` // live（数据库实时写入）
+	UsageQuality         string   `json:"usage_quality"`
+	UsageComplete        bool     `json:"usage_complete"`
+	UsageCoverage        float64  `json:"usage_coverage"`
+	Partial              bool     `json:"partial"`
+	PartialReasons       []string `json:"partial_reasons"`
+	DroppedMessages      int      `json:"dropped_messages"`
+	ReconciliationStatus string   `json:"reconciliation_status"`
+	ReconciliationDelta  int      `json:"reconciliation_delta"`
 }
 
 // TokenTotals aggregates token counters.
@@ -122,6 +125,8 @@ type GlobalTotals struct {
 	ToolErrors            int   `json:"tool_errors"`
 	TotalDurationMs       int64 `json:"total_duration_ms"`
 	AverageResponseTimeMs int64 `json:"average_response_time_ms,omitempty"`
+	AverageFirstTokenMs   int64 `json:"average_first_token_ms,omitempty"`
+	FirstTokenSamples     int   `json:"first_token_samples,omitempty"`
 	TokenTotals
 }
 
@@ -142,6 +147,8 @@ type GroupBucket struct {
 	ToolErrors            int    `json:"tool_errors"`
 	TotalDurationMs       int64  `json:"total_duration_ms"`
 	AverageResponseTimeMs int64  `json:"average_response_time_ms,omitempty"`
+	AverageFirstTokenMs   int64  `json:"average_first_token_ms,omitempty"`
+	FirstTokenSamples     int    `json:"first_token_samples,omitempty"`
 	TokenTotals
 }
 
@@ -209,39 +216,46 @@ type DimensionsResult struct {
 
 // StepUsage is one LLM request step (derived from usage_requests).
 type StepUsage struct {
-	StartedAt           time.Time `json:"started_at,omitempty"`
-	Timestamp           time.Time `json:"timestamp,omitempty"`
-	TraceID             string    `json:"trace_id,omitempty"`
-	Step                int       `json:"step,omitempty"`
-	Success             bool      `json:"success"`
-	PromptTokens        int       `json:"prompt_tokens,omitempty"`
-	CompletionTokens    int       `json:"completion_tokens,omitempty"`
-	TotalTokens         int       `json:"total_tokens,omitempty"`
-	CachedTokens        int       `json:"cached_tokens,omitempty"`
-	CacheReadTokens     int       `json:"cache_read_tokens,omitempty"`
-	CacheReadReported   bool      `json:"cache_read_reported,omitempty"`
-	CacheHitRatio       float64   `json:"cache_hit_ratio,omitempty"`
-	CacheStatus         string    `json:"cache_status,omitempty"`
-	ReasoningTokens     int       `json:"reasoning_tokens,omitempty"`
-	UsageSource         string    `json:"usage_source,omitempty"`
-	UsageAvailable      bool      `json:"usage_available"`
-	ErrorCategory       string    `json:"error_category,omitempty"`
-	DurationMs          int64     `json:"duration_ms,omitempty"`
-	ContextPromptTokens int       `json:"context_prompt_tokens,omitempty"`
-	ContextWindowTokens int       `json:"context_window_tokens,omitempty"`
-	PromptBudget        int       `json:"prompt_budget,omitempty"`
-	ContextUtilization  float64   `json:"context_utilization,omitempty"`
+	StartedAt         time.Time `json:"started_at,omitempty"`
+	Timestamp         time.Time `json:"timestamp,omitempty"`
+	TraceID           string    `json:"trace_id,omitempty"`
+	Step              int       `json:"step,omitempty"`
+	Success           bool      `json:"success"`
+	PromptTokens      int       `json:"prompt_tokens,omitempty"`
+	CompletionTokens  int       `json:"completion_tokens,omitempty"`
+	TotalTokens       int       `json:"total_tokens,omitempty"`
+	CachedTokens      int       `json:"cached_tokens,omitempty"`
+	CacheReadTokens   int       `json:"cache_read_tokens,omitempty"`
+	CacheReadReported bool      `json:"cache_read_reported,omitempty"`
+	CacheHitRatio     float64   `json:"cache_hit_ratio,omitempty"`
+	CacheStatus       string    `json:"cache_status,omitempty"`
+	ReasoningTokens   int       `json:"reasoning_tokens,omitempty"`
+	UsageSource       string    `json:"usage_source,omitempty"`
+	UsageAvailable    bool      `json:"usage_available"`
+	ErrorCategory     string    `json:"error_category,omitempty"`
+	DurationMs        int64     `json:"duration_ms,omitempty"`
+	// FirstTokenMs 首字时间（TTFT，毫秒）。0 表示未采集（非流式请求、历史记录
+	// 或首个增量前就失败），UI 必须显示"未采集"而不是 0ms。
+	FirstTokenMs        int64   `json:"first_token_ms,omitempty"`
+	ContextPromptTokens int     `json:"context_prompt_tokens,omitempty"`
+	ContextWindowTokens int     `json:"context_window_tokens,omitempty"`
+	PromptBudget        int     `json:"prompt_budget,omitempty"`
+	ContextUtilization  float64 `json:"context_utilization,omitempty"`
 }
 
 // TurnUsage is a turn-level fact derived by grouping usage_requests on
 // (session_id, trace_id, turn_id) — no separate turns table exists.
 type TurnUsage struct {
-	TurnID                string      `json:"turn_id"`
-	TraceID               string      `json:"trace_id"`
-	Ordinal               int         `json:"ordinal"`
-	StartedAt             time.Time   `json:"started_at,omitempty"`
-	EndedAt               time.Time   `json:"ended_at,omitempty"`
-	DurationMs            int64       `json:"duration_ms"`
+	TurnID     string    `json:"turn_id"`
+	TraceID    string    `json:"trace_id"`
+	Ordinal    int       `json:"ordinal"`
+	StartedAt  time.Time `json:"started_at,omitempty"`
+	EndedAt    time.Time `json:"ended_at,omitempty"`
+	DurationMs int64     `json:"duration_ms"`
+	// FirstTokenMs 该 turn 内已观测请求的首字时间均值；FirstTokenSamples 是
+	// 参与平均的请求数（0 表示该 turn 没有首字观测）。
+	FirstTokenMs          int64       `json:"first_token_ms,omitempty"`
+	FirstTokenSamples     int         `json:"first_token_samples,omitempty"`
 	Outcome               string      `json:"outcome"`
 	ErrorCategory         string      `json:"error_category,omitempty"`
 	LLMRequests           int         `json:"llm_requests"`

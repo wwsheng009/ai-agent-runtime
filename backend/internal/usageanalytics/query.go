@@ -121,6 +121,11 @@ func escapeLike(value string) string {
 }
 
 // sessionSelect 是全部列表/汇总查询共用的会话聚合 SELECT（会话行 LEFT JOIN 请求聚合）。
+// 列序与 sessionStatsSelect 严格一致（scanSessionRows 按下标扫描，两条路径必须同列数）。
+// 注意：c_total_first_token_ms / c_avg_first_token_ms / c_first_token_samples 在这里
+// 恒为 0——首字时间是 v4 增量列，旧库（只读/未迁移）可能没有
+// usage_requests.first_token_ms，旧读路径引用它会让整个列表查询报错。
+// 真实值走 v4 的 sessionStatsSelect（默认路径）；0 一律表示"未采集"。
 const sessionSelect = `WITH req AS (
   SELECT session_id,
          COUNT(*) AS total_requests,
@@ -134,6 +139,8 @@ const sessionSelect = `WITH req AS (
          COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
          COALESCE(SUM(duration_ms), 0) AS total_duration_ms,
          COALESCE(CAST(AVG(NULLIF(duration_ms, 0)) AS INTEGER), 0) AS avg_duration_ms,
+         0 AS c_total_first_token_ms,
+         0 AS c_first_token_samples,
          MIN(NULLIF(started_at_unix_nano, 0)) AS first_started,
          MAX(started_at_unix_nano) AS last_started,
          COUNT(DISTINCT COALESCE(NULLIF(trace_id, ''), NULLIF(turn_id, ''), llm_request_id)) AS turn_count,
@@ -164,6 +171,9 @@ SELECT
   COALESCE(req.reasoning_tokens, 0) AS c_reasoning_tokens,
   COALESCE(req.total_duration_ms, 0) AS c_total_duration_ms,
   COALESCE(req.avg_duration_ms, 0) AS c_avg_duration_ms,
+  COALESCE(req.c_total_first_token_ms, 0) AS c_total_first_token_ms,
+  0 AS c_avg_first_token_ms,
+  COALESCE(req.c_first_token_samples, 0) AS c_first_token_samples,
   COALESCE(req.turn_count, 0) AS c_turn_count,
   COALESCE(req.failed_turns, 0) AS c_failed_turns,
   ` + sessionStartExpr + ` AS session_start,
@@ -197,6 +207,9 @@ const sessionStatsSelect = `SELECT
   s.c_reasoning_tokens,
   s.c_total_duration_ms,
   CASE WHEN s.c_duration_samples > 0 THEN s.c_total_duration_ms / s.c_duration_samples ELSE 0 END AS c_avg_duration_ms,
+  s.c_total_first_token_ms,
+  CASE WHEN s.c_first_token_samples > 0 THEN s.c_total_first_token_ms / s.c_first_token_samples ELSE 0 END AS c_avg_first_token_ms,
+  s.c_first_token_samples,
   s.c_turn_count,
   s.c_failed_turns,
   ` + statsSessionStartExpr + ` AS session_start,
@@ -231,6 +244,10 @@ func scanSessionRows(rows *sql.Rows) ([]SessionRollup, error) {
 			totalTokens, promptTokens          int
 			completionTokens, cached, reason   int
 			totalDurationMs, avgDurationMs     int64
+			// totalFirstTokenMs 只参与列序对齐（汇总/分组 SQL 直接 SUM 该列），
+			// Go 侧只用平均值与样本数，避免把总量误当展示值。
+			totalFirstTokenMs, avgFirstTokenMs int64
+			firstTokenSamples                  int
 			turnCount, failedTurns             int
 		)
 		if err := rows.Scan(
@@ -239,7 +256,8 @@ func scanSessionRows(rows *sql.Rows) ([]SessionRollup, error) {
 			&startedNano, &endedNano, &updated,
 			&totalRequests, &successes, &failures, &requestsWithUsage,
 			&totalTokens, &promptTokens, &completionTokens, &cached, &reason,
-			&totalDurationMs, &avgDurationMs, &turnCount, &failedTurns,
+			&totalDurationMs, &avgDurationMs, &totalFirstTokenMs, &avgFirstTokenMs, &firstTokenSamples,
+			&turnCount, &failedTurns,
 			&sessionStart, &sessionLast,
 		); err != nil {
 			return nil, err
@@ -259,6 +277,8 @@ func scanSessionRows(rows *sql.Rows) ([]SessionRollup, error) {
 		rollup.ReasoningTokens = reason
 		rollup.TotalDurationMs = totalDurationMs
 		rollup.AverageResponseTimeMs = avgDurationMs
+		rollup.AverageFirstTokenMs = avgFirstTokenMs
+		rollup.FirstTokenSamples = firstTokenSamples
 		rollup.StartTime = timeFromUnixNano(sessionStart)
 		if endedNano > 0 {
 			rollup.EndTime = timeFromUnixNano(endedNano)
@@ -488,6 +508,8 @@ func (s *Store) aggregateTotals(sessionQuery string, args []interface{}) (Global
   COALESCE(SUM(c_failed_turns), 0),
   COALESCE(SUM(c_total_duration_ms), 0),
   COALESCE(SUM(c_avg_duration_ms), 0),
+  COALESCE(SUM(c_total_first_token_ms), 0),
+  COALESCE(SUM(c_first_token_samples), 0),
   COALESCE(SUM(c_total_tokens), 0),
   COALESCE(SUM(c_prompt_tokens), 0),
   COALESCE(SUM(c_completion_tokens), 0),
@@ -518,6 +540,8 @@ FROM (` + sessionQuery + `)`
 		sessions, requests, successes, failures int
 		turns, failedTurns                      int
 		totalDuration, avgDuration              int64
+		totalFirstToken                         int64
+		firstTokenSamples                       int
 		totalTokens, promptTokens, completion   int
 		cachedTokens, reasoningTokens           int
 		requestsWithUsage, sessionsWithUsage    int
@@ -526,6 +550,7 @@ FROM (` + sessionQuery + `)`
 	if err := rows.Scan(
 		&sessions, &requests, &successes, &failures, &turns, &failedTurns,
 		&totalDuration, &avgDuration,
+		&totalFirstToken, &firstTokenSamples,
 		&totalTokens, &promptTokens, &completion, &cachedTokens, &reasoningTokens,
 		&requestsWithUsage, &sessionsWithUsage, &windowFrom, &windowTo,
 	); err != nil {
@@ -545,6 +570,12 @@ FROM (` + sessionQuery + `)`
 	totals.FailedTurns = failedTurns
 	totals.TotalDurationMs = totalDuration
 	totals.AverageResponseTimeMs = avgDuration
+	// 首字时间按样本加权（Σ总量/Σ样本数），不沿用 avg 列求和的口径：
+	// 没有样本的会话不参与平均，避免把"未采集"摊平成 0ms。
+	if firstTokenSamples > 0 {
+		totals.AverageFirstTokenMs = totalFirstToken / int64(firstTokenSamples)
+	}
+	totals.FirstTokenSamples = firstTokenSamples
 	totals.TotalTokens = totalTokens
 	totals.PromptTokens = promptTokens
 	totals.CompletionTokens = completion
@@ -601,6 +632,8 @@ func (s *Store) Summarize(q Query) (SummaryResult, error) {
   COALESCE(SUM(c_failed_turns), 0),
   COALESCE(SUM(c_total_duration_ms), 0),
   COALESCE(SUM(c_avg_duration_ms), 0),
+  COALESCE(SUM(c_total_first_token_ms), 0),
+  COALESCE(SUM(c_first_token_samples), 0),
   COALESCE(SUM(c_total_tokens), 0),
   COALESCE(SUM(c_prompt_tokens), 0),
   COALESCE(SUM(c_completion_tokens), 0),
@@ -624,6 +657,8 @@ LIMIT ?`
 				successes, failures      int
 				turns, failedTurns       int
 				totalDuration, avgDur    int64
+				totalFirstToken          int64
+				firstTokenSamples        int
 				totalTokens, promptTok   int
 				completionTok, cachedTok int
 				reasoningTok             int
@@ -631,6 +666,7 @@ LIMIT ?`
 			if err := rows.Scan(
 				&bucket.Key, &sessions, &requests, &successes, &failures,
 				&turns, &failedTurns, &totalDuration, &avgDur,
+				&totalFirstToken, &firstTokenSamples,
 				&totalTokens, &promptTok, &completionTok, &cachedTok, &reasoningTok,
 			); err != nil {
 				return SummaryResult{}, fmt.Errorf("scan analytics groups: %w", err)
@@ -645,6 +681,10 @@ LIMIT ?`
 			bucket.FailedTurns = failedTurns
 			bucket.TotalDurationMs = totalDuration
 			bucket.AverageResponseTimeMs = avgDur
+			if firstTokenSamples > 0 {
+				bucket.AverageFirstTokenMs = totalFirstToken / int64(firstTokenSamples)
+			}
+			bucket.FirstTokenSamples = firstTokenSamples
 			bucket.TotalTokens = totalTokens
 			bucket.PromptTokens = promptTok
 			bucket.CompletionTokens = completionTok
@@ -701,9 +741,9 @@ func (s *Store) Dimensions(q Query) (DimensionsResult, error) {
 	// 5 个维度合并为一次 base 扫描（§8.1）：每段独立 ORDER BY + LIMIT，
 	// UNION ALL 后按维度标签分发，最后在 Go 内按值排序保证输出稳定。
 	dimensions := []struct {
-		key   string
-		out   *[]string
-		expr  string
+		key  string
+		out  *[]string
+		expr string
 	}{
 		{"provider", &result.Providers, "provider"},
 		{"model", &result.Models, "model"},
@@ -920,6 +960,10 @@ LIMIT ?`
 			step.ContextWindowTokens = facts.windowTokens
 			step.PromptBudget = facts.budget
 		}
+		// 首字时间从 record_json 回放：详情路径不依赖 v4 列，旧库同样可读。
+		if ms := firstTokenMsFromRecord(raw); ms > 0 {
+			step.FirstTokenMs = ms
+		}
 		steps = append(steps, row)
 	}
 	if err := rows.Err(); err != nil {
@@ -958,6 +1002,10 @@ func rollupFromSteps(sessionID string, rows []sessionStep) SessionRollup {
 		rollup.CachedTokens += step.CachedTokens
 		rollup.ReasoningTokens += step.ReasoningTokens
 		rollup.TotalDurationMs += step.DurationMs
+		if step.FirstTokenMs > 0 {
+			rollup.AverageFirstTokenMs += step.FirstTokenMs
+			rollup.FirstTokenSamples++
+		}
 		if rollup.StartTime.IsZero() || (!step.StartedAt.IsZero() && step.StartedAt.Before(rollup.StartTime)) {
 			rollup.StartTime = step.StartedAt
 		}
@@ -968,6 +1016,9 @@ func rollupFromSteps(sessionID string, rows []sessionStep) SessionRollup {
 	rollup.TotalResponses = rollup.TotalRequests
 	if rollup.TotalRequests > 0 {
 		rollup.AverageResponseTimeMs = rollup.TotalDurationMs / int64(rollup.TotalRequests)
+	}
+	if rollup.FirstTokenSamples > 0 {
+		rollup.AverageFirstTokenMs /= int64(rollup.FirstTokenSamples)
 	}
 	rollup.TurnCount = len(buildTurns(rows))
 	rollup.UsageQuality = usageQualityFor(rollup.TotalRequests, rollup.LLMRequestsWithUsage, rollup.TotalTokens)
@@ -1025,6 +1076,8 @@ func buildTurns(rows []sessionStep) []TurnUsage {
 	index := make(map[string]int, 8)
 	turns := make([]TurnUsage, 0, 8)
 	withUsage := make([]int, 0, 8)
+	firstTokenSums := make([]int64, 0, 8)
+	firstTokenCounts := make([]int, 0, 8)
 	for _, row := range rows {
 		step := row.usage
 		key := stepTurnKey(row)
@@ -1039,6 +1092,8 @@ func buildTurns(rows []sessionStep) []TurnUsage {
 				UsageQuality: "missing",
 			})
 			withUsage = append(withUsage, 0)
+			firstTokenSums = append(firstTokenSums, 0)
+			firstTokenCounts = append(firstTokenCounts, 0)
 		}
 		turn := &turns[idx]
 		turn.LLMRequests++
@@ -1064,6 +1119,10 @@ func buildTurns(rows []sessionStep) []TurnUsage {
 		turn.Usage.CompletionTokens += step.CompletionTokens
 		turn.Usage.CachedTokens += step.CachedTokens
 		turn.Usage.ReasoningTokens += step.ReasoningTokens
+		if step.FirstTokenMs > 0 {
+			firstTokenSums[idx] += step.FirstTokenMs
+			firstTokenCounts[idx]++
+		}
 	}
 	for i := range turns {
 		turn := &turns[i]
@@ -1082,6 +1141,11 @@ func buildTurns(rows []sessionStep) []TurnUsage {
 		}
 		turn.UsageQuality = usageQualityFor(turn.LLMRequests, withUsage[i], turn.Usage.TotalTokens)
 		turn.UsageCoverage = coverageRatio(turn.LLMRequests, withUsage[i])
+		// 首字时间：turn 内已观测请求的均值 + 样本数（0 样本表示未采集）。
+		if firstTokenCounts[i] > 0 {
+			turn.FirstTokenMs = firstTokenSums[i] / int64(firstTokenCounts[i])
+			turn.FirstTokenSamples = firstTokenCounts[i]
+		}
 		turn.ToolResultsObserved = 0
 		turn.ToolErrors = 0
 	}
@@ -1138,6 +1202,18 @@ func cacheHitRatioFromRecord(raw []byte) *float64 {
 		return nil
 	}
 	return record.CacheHitRatio
+}
+
+// firstTokenMsFromRecord 从 record_json 回放首字时间（best-effort）。
+// 详情路径不依赖 v4 列：旧库缺列时仍能回放已写入的事实，缺字段返回 0。
+func firstTokenMsFromRecord(raw []byte) int64 {
+	var record struct {
+		FirstTokenMS int64 `json:"first_token_ms"`
+	}
+	if err := jsonUnmarshalRecord(raw, &record); err != nil {
+		return 0
+	}
+	return record.FirstTokenMS
 }
 
 // usageSourceFromRecord 从 record_json 回放用量来源（best-effort）。

@@ -107,6 +107,11 @@ type CacheRequestRecord struct {
 	StartedAt     time.Time  `json:"started_at"`
 	FinishedAt    *time.Time `json:"finished_at,omitempty"`
 	DurationMS    int64      `json:"duration_ms,omitempty"`
+	// FirstTokenMS 首字时间（TTFT）：从本次尝试发起（llm.request.started）到
+	// 第一个流式增量（文本/思考/图片进度）到达的毫秒数。仅流式请求可观测；
+	// 0 表示未采集（非流式、历史记录或首个增量前就失败），前端必须显示
+	// "未采集"而不是把 DurationMS 当成首字。
+	FirstTokenMS int64 `json:"first_token_ms,omitempty"`
 	// ContextPromptTokens/ContextWindowTokens/PromptBudget 是出站上下文的运行时事实
 	// （来自 llm.request.finished 载荷）：出站消息总 token / 模型上下文窗口 /
 	// 本次请求的 prompt 预算。0 表示未观测（历史记录或 provider 未提供能力信息），
@@ -160,6 +165,12 @@ type CacheOverview struct {
 	CacheWriteRatio         *float64                `json:"cache_write_ratio,omitempty"`
 	CacheStatusDistribution CacheStatusDistribution `json:"cache_status_distribution"`
 	Coverage                CoverageInfo            `json:"coverage"`
+	// 延迟事实（schema 增量字段）：总耗时与首字时间的会话级均值。
+	// 样本数为 0 时均值为 0，UI 必须显示"未采集"而不是 0ms。
+	DurationSamples     int   `json:"duration_samples"`
+	AverageDurationMS   int64 `json:"average_duration_ms,omitempty"`
+	FirstTokenSamples   int   `json:"first_token_samples"`
+	AverageFirstTokenMS int64 `json:"average_first_token_ms,omitempty"`
 }
 
 // CacheOverviewTokens 总览 token 聚合。

@@ -24,7 +24,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react
 import { useTranslation } from "react-i18next";
 import { Link, useSearchParams } from "react-router-dom";
 
-import { adminTokenStorageKey, analyticsFilterKeys, dimensionOptions, errorRate, formatNumber, formatPercent, formatTimestamp, normalizeDimensions, readAdminToken } from "./format";
+import { adminTokenStorageKey, analyticsFilterKeys, dimensionOptions, errorRate, formatFirstToken, formatNumber, formatPercent, formatTimestamp, normalizeDimensions, readAdminToken } from "./format";
 import { ArtifactFlowPanel } from "./artifact-flow-panel";
 import { emptyCoverage, emptyDimensions, emptyTotals } from "./defaults";
 import { AnalyticsHeader, FilterInput, FilterSelect, Metric, QualityNotice, UsageAnalyticsChartsFallback } from "./primitives";
@@ -251,13 +251,14 @@ export function UsageOverview() {
             </div>
           ) : null}
 
-          <section aria-label={t("metrics.title")} className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 2xl:grid-cols-7">
+          <section aria-label={t("metrics.title")} className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-8">
             <Metric label={t("metrics.sessions")} value={formatNumber(totals.sessions)} detail={t("metrics.turns", { count: totals.turns })} />
             <Metric label={t("metrics.tokens")} value={formatNumber(totals.total_tokens)} detail={t("metrics.tokenBreakdown", { prompt: formatNumber(totals.prompt_tokens), completion: formatNumber(totals.completion_tokens) })} />
             <Metric label={t("metrics.requests")} value={formatNumber(totals.llm_requests || totals.total_requests)} detail={t("metrics.coveredRequests", { count: coverage.llm_requests_with_usage })} />
             <Metric label={t("metrics.llmErrorRate")} value={formatPercent(errorRate(totals.llm_errors, totals.llm_requests))} detail={t("metrics.llmErrors", { count: totals.llm_errors })} tone={totals.llm_errors > 0 ? "warning" : "default"} />
             <Metric label={t("metrics.failedTurns")} value={formatNumber(totals.failed_turns)} detail={t("metrics.recoveredTurns", { count: totals.recovered_turns })} tone={totals.failed_turns > 0 ? "danger" : "default"} />
             <Metric label={t("metrics.toolErrorRate")} value={formatPercent(errorRate(totals.tool_errors, totals.tool_results_observed))} detail={t("metrics.observedTools", { count: totals.tool_results_observed })} tone={totals.tool_errors > 0 ? "warning" : "default"} />
+            <Metric label={t("metrics.firstToken")} value={formatFirstToken(totals.average_first_token_ms) ?? t("metrics.notCollected")} detail={t("metrics.firstTokenDetail", { count: totals.first_token_samples ?? 0 })} />
             <Metric
               label={t("metrics.subagentFailureRate")}
               value={subagentSummary ? formatPercent(subagentSummary.failure_rate) : "--"}

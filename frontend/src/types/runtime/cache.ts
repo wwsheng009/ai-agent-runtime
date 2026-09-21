@@ -31,6 +31,11 @@ export type CacheRequestRecord = {
   started_at: string;
   finished_at?: string;
   duration_ms?: number;
+  /**
+   * 首字时间（TTFT，毫秒）。0/缺省 = 未采集（非流式请求、历史记录或首个增量
+   * 前就失败）；展示层必须显示「未采集」而不是 0ms（总耗时不可冒充首字）。
+   */
+  first_token_ms?: number;
   usage?: CacheUsage;
   cache_hit_ratio?: number;
   cache_write_ratio?: number;
@@ -83,6 +88,11 @@ export type CacheOverview = {
   cache_write_ratio?: number;
   cache_status_distribution: CacheStatusDistribution;
   coverage: CacheCoverageInfo;
+  /** 延迟事实：总耗时与首字时间的会话级均值（样本数为 0 时均值不可用）。 */
+  duration_samples?: number;
+  average_duration_ms?: number;
+  first_token_samples?: number;
+  average_first_token_ms?: number;
 };
 
 export type CacheRequestListResponse = {

@@ -374,9 +374,9 @@ func (c *collector) requestUpsertStatement(record cacheanalytics.CacheRequestRec
 	const statement = `
 INSERT INTO usage_requests (
   llm_request_id, session_id, trace_id, turn_id, step, provider, model, status, cache_status,
-  success, error_category, started_at_unix_nano, duration_ms, prompt_tokens, completion_tokens,
+  success, error_category, started_at_unix_nano, duration_ms, first_token_ms, prompt_tokens, completion_tokens,
   cache_read_tokens, cache_creation_tokens, reasoning_tokens, total_tokens, usage_available, record_json
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(llm_request_id) DO UPDATE SET
   session_id = excluded.session_id,
   trace_id = excluded.trace_id,
@@ -390,6 +390,7 @@ ON CONFLICT(llm_request_id) DO UPDATE SET
   error_category = excluded.error_category,
   started_at_unix_nano = CASE WHEN usage_requests.started_at_unix_nano = 0 THEN excluded.started_at_unix_nano ELSE usage_requests.started_at_unix_nano END,
   duration_ms = excluded.duration_ms,
+  first_token_ms = CASE WHEN excluded.first_token_ms <> 0 THEN excluded.first_token_ms ELSE usage_requests.first_token_ms END,
   prompt_tokens = excluded.prompt_tokens,
   completion_tokens = excluded.completion_tokens,
   cache_read_tokens = excluded.cache_read_tokens,
@@ -412,6 +413,7 @@ ON CONFLICT(llm_request_id) DO UPDATE SET
 		record.ErrorCategory,
 		startedAt.UnixNano(),
 		record.DurationMS,
+		record.FirstTokenMS,
 		promptTokens,
 		completionTokens,
 		cacheRead,

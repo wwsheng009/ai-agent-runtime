@@ -302,6 +302,7 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
   error_category TEXT NOT NULL DEFAULT '',
   started_at_unix_nano INTEGER NOT NULL DEFAULT 0,
   duration_ms INTEGER NOT NULL DEFAULT 0,
+  first_token_ms INTEGER NOT NULL DEFAULT 0,
   prompt_tokens INTEGER NOT NULL DEFAULT 0,
   completion_tokens INTEGER NOT NULL DEFAULT 0,
   cache_read_tokens INTEGER NOT NULL DEFAULT 0,
@@ -413,6 +414,18 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 	for _, statement := range statements {
 		if _, err := s.db.Exec(statement); err != nil {
 			return fmt.Errorf("migrate usage analytics db: %w", err)
+		}
+	}
+	// v4 增量列：旧库（v1/v2/v3）缺 first_token_ms 时补齐（SQLite 无
+	// ADD COLUMN IF NOT EXISTS）。只读库不改库：读路径按列存在性退化，
+	// 显示"未采集"而不是报错。
+	if !s.readOnly {
+		if hasFirstToken, err := s.hasColumn("usage_requests", "first_token_ms"); err != nil {
+			return err
+		} else if !hasFirstToken {
+			if _, err := s.db.Exec("ALTER TABLE usage_requests ADD COLUMN first_token_ms INTEGER NOT NULL DEFAULT 0"); err != nil {
+				return fmt.Errorf("migrate usage analytics db: %w", err)
+			}
 		}
 	}
 	// 可选索引：旧库可能缺少 error_category 列（v1 部分 schema），先探测再建。

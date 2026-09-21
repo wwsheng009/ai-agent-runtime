@@ -53,6 +53,7 @@ func TestChatWebSSECacheRequestFinishedMapping(t *testing.T) {
 			"cache_status":         "hit",
 			"cache_hit_ratio":      0.8,
 			"duration_ms":          int64(1230),
+			"first_token_ms":       int64(420),
 			"assistant_message_id": "msg-a1",
 			"correlation_source":   "event",
 			"usage":                map[string]interface{}{"prompt_tokens": float64(1000)},
@@ -64,6 +65,11 @@ func TestChatWebSSECacheRequestFinishedMapping(t *testing.T) {
 	}
 	if _, ok := data["usage"].(map[string]interface{}); !ok {
 		t.Fatalf("usage field missing: %v", data["usage"])
+	}
+	// 首字时间（TTFT）必须随 SSE 增量投影透传：0=未采集的语义由前端负责展示，
+	// 后端只保证观测值不被投影丢弃。
+	if got, ok := data["first_token_ms"].(int64); !ok || got != 420 {
+		t.Fatalf("first_token_ms = %v, want 420", data["first_token_ms"])
 	}
 
 	var found bool

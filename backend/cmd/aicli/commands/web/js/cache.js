@@ -38,6 +38,25 @@ function fmtPct(ratio) {
   return (Math.round(ratio * 1000) / 10).toFixed(1) + "%";
 }
 
+// fmtMillis 毫秒展示（>=1s 折算为秒，保留 1 位小数）。
+function fmtMillis(ms) {
+  if (ms >= 1000) { return (Math.round(ms / 100) / 10).toFixed(1) + " s"; }
+  return ms + " ms";
+}
+
+// fmtLatency 单请求延迟展示：0/缺省 = 未采集（非流式请求、历史记录或首个
+// 增量前就失败）。总耗时不可冒充首字时间，必须显示"未采集"而不是 0ms。
+function fmtLatency(ms) {
+  if (ms === undefined || ms === null || ms <= 0) { return "未采集"; }
+  return fmtMillis(ms);
+}
+
+// fmtAverageLatency 会话级均值展示：样本数为 0 时均值不可用（缺省 0 不摊平）。
+function fmtAverageLatency(avg, samples) {
+  if (!samples || avg === undefined || avg === null || avg <= 0) { return "未采集"; }
+  return fmtMillis(avg) + " · " + fmtInt(samples) + " 次";
+}
+
 function fmtTime(iso) {
   if (!iso) { return "-"; }
   try {
@@ -181,6 +200,8 @@ function renderOverviewCards(overview) {
   cards.push(card("输出 tokens", fmtInt(tokens.completion_tokens)));
   cards.push(card("合计 tokens", fmtInt(tokens.total_tokens)));
   cards.push(card("推理 tokens", fmtInt(tokens.reasoning_tokens)));
+  cards.push(card("平均耗时", fmtAverageLatency(overview.average_duration_ms, overview.duration_samples)));
+  cards.push(card("平均首字（TTFT）", fmtAverageLatency(overview.average_first_token_ms, overview.first_token_samples)));
   var distParts = [];
   distParts.push("命中 " + fmtInt(dist.hit));
   distParts.push("写入 " + fmtInt(dist.write));
@@ -232,6 +253,8 @@ function renderRequestsTable(requests) {
       + "<td>" + esc(r.status || "-") + "</td>"
       + '<td><span class="cache-badge ' + statusBadgeClass(r.cache_status) + '">' + esc(statusLabel(r.cache_status)) + "</span></td>"
       + "<td>" + esc(fmtPct(r.cache_hit_ratio)) + "</td>"
+      + "<td>" + esc(fmtLatency(r.duration_ms)) + "</td>"
+      + "<td>" + esc(fmtLatency(r.first_token_ms)) + "</td>"
       + "<td>" + esc(fmtInt(usage.prompt_tokens)) + "</td>"
       + "<td>" + esc(fmtInt(usage.completion_tokens)) + "</td>"
       + "<td>" + esc(fmtInt(usage.cache_read_tokens)) + "</td>"
@@ -239,9 +262,10 @@ function renderRequestsTable(requests) {
       + "</tr>";
   }
   return '<table class="cache-table"><thead><tr>'
-    + "<th>时间</th><th>provider/model</th><th>step</th><th>状态</th><th>缓存</th><th>命中率</th><th>prompt</th><th>输出</th><th>读缓存</th><th>写缓存</th>"
+    + "<th>时间</th><th>provider/model</th><th>step</th><th>状态</th><th>缓存</th><th>命中率</th><th>耗时</th><th>首字</th><th>prompt</th><th>输出</th><th>读缓存</th><th>写缓存</th>"
     + "</tr></thead><tbody>" + rows + "</tbody></table>"
     + '<div class="cache-hint">点击行查看请求详情与消息追溯（trace_id / turn_id / 关联消息）</div>'
+    + '<div class="cache-hint">首字/耗时显示"未采集"表示该请求没有观测到（非流式请求、历史记录或首个增量前失败），不代表 0ms。</div>'
     + '<div id="cache-request-detail"></div>';
 }
 
@@ -280,6 +304,8 @@ function renderRequestDetail(record) {
   lines.push(kv("prompt_fingerprint", record.prompt_fingerprint));
   lines.push(kv("命中率", fmtPct(record.cache_hit_ratio)));
   lines.push(kv("写入率", fmtPct(record.cache_write_ratio)));
+  lines.push(kv("总耗时", fmtLatency(record.duration_ms)));
+  lines.push(kv("首字时间（TTFT）", fmtLatency(record.first_token_ms)));
   lines.push(kv("prompt tokens", fmtInt(usage.prompt_tokens)));
   lines.push(kv("completion tokens", fmtInt(usage.completion_tokens)));
   lines.push(kv("total tokens", fmtInt(usage.total_tokens)));

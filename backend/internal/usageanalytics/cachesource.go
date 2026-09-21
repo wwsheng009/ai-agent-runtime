@@ -76,6 +76,14 @@ func (s *CacheSource) Overview(sessionID string) (cacheanalytics.CacheOverview, 
 		return overview, cacheanalytics.ErrSessionNotFound
 	}
 
+	// 首字时间列是 v4 增量列：旧库（只读/未迁移）缺列时退化为 0（未采集），
+	// 而不是让整个总览查询报错。
+	firstTokenAvgExpr := "0"
+	firstTokenSampleExpr := "0"
+	if hasFirstToken, err := s.store.hasColumn("usage_requests", "first_token_ms"); err == nil && hasFirstToken {
+		firstTokenAvgExpr = "COALESCE(CAST(AVG(NULLIF(first_token_ms, 0)) AS INTEGER), 0)"
+		firstTokenSampleExpr = "COALESCE(SUM(CASE WHEN first_token_ms <> 0 THEN 1 ELSE 0 END), 0)"
+	}
 	query := `SELECT
   COUNT(*),
   COALESCE(SUM(usage_available), 0),
@@ -93,7 +101,11 @@ func (s *CacheSource) Overview(sessionID string) (cacheanalytics.CacheOverview, 
   COALESCE(SUM(CASE WHEN cache_status = 'reported_zero' THEN 1 ELSE 0 END), 0),
   COALESCE(SUM(CASE WHEN cache_status = 'not_reported' THEN 1 ELSE 0 END), 0),
   COALESCE(SUM(CASE WHEN cache_status = 'error' THEN 1 ELSE 0 END), 0),
-  COALESCE(SUM(cache_read_tokens), 0) * 1.0 / NULLIF(SUM(CASE WHEN usage_available = 1 THEN prompt_tokens ELSE 0 END), 0)
+  COALESCE(SUM(cache_read_tokens), 0) * 1.0 / NULLIF(SUM(CASE WHEN usage_available = 1 THEN prompt_tokens ELSE 0 END), 0),
+  COALESCE(CAST(AVG(NULLIF(duration_ms, 0)) AS INTEGER), 0),
+  COALESCE(SUM(CASE WHEN duration_ms <> 0 THEN 1 ELSE 0 END), 0),
+  ` + firstTokenAvgExpr + `,
+  ` + firstTokenSampleExpr + `
 FROM usage_requests WHERE session_id = ?`
 
 	rows, ok, err := s.store.query(query, sessionID)
@@ -117,6 +129,10 @@ FROM usage_requests WHERE session_id = ?`
 		windowFrom, windowTo                          int64
 		hit, write, reportedZero, notReported, errCnt int
 		hitRatio                                      sql.NullFloat64
+		avgDurationMS                                 int64
+		durationSamples                               int
+		avgFirstTokenMS                               int64
+		firstTokenSamples                             int
 	)
 	if err := rows.Scan(
 		&total, &withUsage, &cacheReported,
@@ -125,6 +141,8 @@ FROM usage_requests WHERE session_id = ?`
 		&windowFrom, &windowTo,
 		&hit, &write, &reportedZero, &notReported, &errCnt,
 		&hitRatio,
+		&avgDurationMS, &durationSamples,
+		&avgFirstTokenMS, &firstTokenSamples,
 	); err != nil {
 		return overview, cacheanalytics.ErrInternal
 	}
@@ -164,6 +182,10 @@ FROM usage_requests WHERE session_id = ?`
 		NotReported:  notReported,
 		Error:        errCnt,
 	}
+	overview.DurationSamples = durationSamples
+	overview.AverageDurationMS = avgDurationMS
+	overview.FirstTokenSamples = firstTokenSamples
+	overview.AverageFirstTokenMS = avgFirstTokenMS
 	coverage := cacheanalytics.CoverageInfo{Partial: false, PartialReasons: []string{}}
 	if total > 0 {
 		usageRate := float64(withUsage) / float64(total)

@@ -25,7 +25,8 @@ import (
 // ============================================================================
 
 // statsSchemaVersion 预聚合计数列的 schema 版本。
-const statsSchemaVersion = 3
+// v4 追加首字时间聚合列（c_total_first_token_ms / c_first_token_samples）。
+const statsSchemaVersion = 4
 
 // EnvDisableStats 逃生开关：置为 1/true/yes/on 时读路径强制走旧 sessionSelect。
 // 仅影响读路径；schema v3 库的写入侧仍维护计数，避免回退期数据腐化。
@@ -59,6 +60,8 @@ var statsColumnDefs = []statsColumnDef{
 	{"c_reasoning_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	{"c_total_duration_ms", "INTEGER NOT NULL DEFAULT 0"},
 	{"c_duration_samples", "INTEGER NOT NULL DEFAULT 0"},
+	{"c_total_first_token_ms", "INTEGER NOT NULL DEFAULT 0"},
+	{"c_first_token_samples", "INTEGER NOT NULL DEFAULT 0"},
 	{"c_turn_count", "INTEGER NOT NULL DEFAULT 0"},
 	{"c_failed_turns", "INTEGER NOT NULL DEFAULT 0"},
 	{"c_first_started_at", "INTEGER NOT NULL DEFAULT 0"},
@@ -205,7 +208,7 @@ func (s *Store) requestsStatsColumnsComplete() (bool, error) {
 	required := []string{
 		"session_id", "trace_id", "turn_id", "success", "usage_available",
 		"total_tokens", "prompt_tokens", "completion_tokens", "cache_read_tokens",
-		"reasoning_tokens", "duration_ms", "started_at_unix_nano", "llm_request_id",
+		"reasoning_tokens", "duration_ms", "first_token_ms", "started_at_unix_nano", "llm_request_id",
 	}
 	for _, column := range required {
 		ok, err := s.hasColumn("usage_requests", column)
@@ -354,6 +357,8 @@ GROUP BY session_id, ` + statsTurnKeyExpr
   c_reasoning_tokens    = COALESCE((SELECT SUM(r.reasoning_tokens) FROM usage_requests r WHERE r.session_id = usage_sessions.session_id), 0),
   c_total_duration_ms   = COALESCE((SELECT SUM(r.duration_ms) FROM usage_requests r WHERE r.session_id = usage_sessions.session_id), 0),
   c_duration_samples    = COALESCE((SELECT SUM(CASE WHEN r.duration_ms <> 0 THEN 1 ELSE 0 END) FROM usage_requests r WHERE r.session_id = usage_sessions.session_id), 0),
+  c_total_first_token_ms = COALESCE((SELECT SUM(r.first_token_ms) FROM usage_requests r WHERE r.session_id = usage_sessions.session_id), 0),
+  c_first_token_samples  = COALESCE((SELECT SUM(CASE WHEN r.first_token_ms <> 0 THEN 1 ELSE 0 END) FROM usage_requests r WHERE r.session_id = usage_sessions.session_id), 0),
   c_turn_count          = (SELECT COUNT(*) FROM ` + statsTurnKeysTable + ` k WHERE k.session_id = usage_sessions.session_id),
   c_failed_turns        = (SELECT COUNT(*) FROM ` + statsTurnKeysTable + ` k WHERE k.session_id = usage_sessions.session_id AND k.failed = 1),
   c_first_started_at    = COALESCE((SELECT MIN(NULLIF(r.started_at_unix_nano, 0)) FROM usage_requests r WHERE r.session_id = usage_sessions.session_id), 0),

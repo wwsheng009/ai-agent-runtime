@@ -55,6 +55,7 @@ type requestStatsValues struct {
 	cacheReadTokens  int64
 	reasoningTokens  int64
 	durationMS       int64
+	firstTokenMS     int64
 	startedAtNano    int64
 }
 
@@ -63,6 +64,7 @@ func requestStatsValuesFromRecord(record cacheanalytics.CacheRequestRecord, star
 	values := requestStatsValues{
 		sessionID:     record.SessionID,
 		durationMS:    record.DurationMS,
+		firstTokenMS:  record.FirstTokenMS,
 		startedAtNano: startedAt.UnixNano(),
 	}
 	if record.Status == cacheanalytics.RequestStatusSuccess {
@@ -83,7 +85,7 @@ func requestStatsValuesFromRecord(record cacheanalytics.CacheRequestRecord, star
 func readRequestStatsTx(tx *sql.Tx, llmRequestID string) (requestStatsValues, bool, error) {
 	var values requestStatsValues
 	err := tx.QueryRow(`SELECT session_id, trace_id, turn_id, success, usage_available, prompt_tokens, completion_tokens,
-       total_tokens, cache_read_tokens, reasoning_tokens, duration_ms, started_at_unix_nano
+       total_tokens, cache_read_tokens, reasoning_tokens, duration_ms, first_token_ms, started_at_unix_nano
 FROM usage_requests WHERE llm_request_id = ?`, llmRequestID).Scan(
 		&values.sessionID,
 		&values.traceID,
@@ -96,6 +98,7 @@ FROM usage_requests WHERE llm_request_id = ?`, llmRequestID).Scan(
 		&values.cacheReadTokens,
 		&values.reasoningTokens,
 		&values.durationMS,
+		&values.firstTokenMS,
 		&values.startedAtNano,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -180,6 +183,8 @@ const sessionDeltaSQL = `UPDATE usage_sessions SET
   c_reasoning_tokens    = c_reasoning_tokens + ?,
   c_total_duration_ms   = c_total_duration_ms + ?,
   c_duration_samples    = c_duration_samples + ?,
+  c_total_first_token_ms = c_total_first_token_ms + ?,
+  c_first_token_samples  = c_first_token_samples + ?,
   c_first_started_at    = CASE
     WHEN ? = 0 THEN c_first_started_at
     WHEN c_first_started_at = 0 THEN ?
@@ -203,6 +208,8 @@ func applySessionStatsDeltaTx(tx *sql.Tx, sessionID string, old requestStatsValu
 	reasoningDelta := newValues.reasoningTokens
 	durationDelta := newValues.durationMS
 	samplesDelta := nonZeroSample(newValues.durationMS)
+	firstTokenDelta := newValues.firstTokenMS
+	firstTokenSamplesDelta := nonZeroSample(newValues.firstTokenMS)
 	firstCandidate := newValues.startedAtNano
 	if found {
 		successDelta -= old.success
@@ -215,6 +222,15 @@ func applySessionStatsDeltaTx(tx *sql.Tx, sessionID string, old requestStatsValu
 		reasoningDelta -= old.reasoningTokens
 		durationDelta -= old.durationMS
 		samplesDelta -= nonZeroSample(old.durationMS)
+		// 首字时间：明细列的 UPSERT 对已有非零观测有保护（新终态为 0 时不覆盖，
+		// 见 requestUpsertStatement），增量必须同语义——否则失败终态会把明细行
+		// 仍在的首字观测从 c_total_first_token_ms 里减掉，列值与计数互相漂移。
+		effectiveFirstToken := newValues.firstTokenMS
+		if effectiveFirstToken == 0 {
+			effectiveFirstToken = old.firstTokenMS
+		}
+		firstTokenDelta = effectiveFirstToken - old.firstTokenMS
+		firstTokenSamplesDelta = nonZeroSample(effectiveFirstToken) - nonZeroSample(old.firstTokenMS)
 		if old.startedAtNano != 0 {
 			// UPSERT 对已有非零 started_at 保持原值（见 requestUpsertStatement）。
 			firstCandidate = old.startedAtNano
@@ -224,6 +240,7 @@ func applySessionStatsDeltaTx(tx *sql.Tx, sessionID string, old requestStatsValu
 		totalDelta, successDelta, errorDelta, usageDelta,
 		totalTokensDelta, promptDelta, completionDelta, cachedDelta, reasoningDelta,
 		durationDelta, samplesDelta,
+		firstTokenDelta, firstTokenSamplesDelta,
 		firstCandidate, firstCandidate, firstCandidate,
 		firstCandidate,
 		sessionID,
@@ -247,11 +264,14 @@ func rollbackSessionStatsTx(tx *sql.Tx, old requestStatsValues, llmRequestID str
   c_cached_tokens       = MAX(c_cached_tokens - ?, 0),
   c_reasoning_tokens    = MAX(c_reasoning_tokens - ?, 0),
   c_total_duration_ms   = MAX(c_total_duration_ms - ?, 0),
-  c_duration_samples    = MAX(c_duration_samples - ?, 0)
+  c_duration_samples    = MAX(c_duration_samples - ?, 0),
+  c_total_first_token_ms = MAX(c_total_first_token_ms - ?, 0),
+  c_first_token_samples  = MAX(c_first_token_samples - ?, 0)
 WHERE session_id = ?`,
 		old.success, 1-old.success, old.usageAvailable,
 		old.totalTokens, old.promptTokens, old.completionTokens, old.cacheReadTokens, old.reasoningTokens,
 		old.durationMS, nonZeroSample(old.durationMS),
+		old.firstTokenMS, nonZeroSample(old.firstTokenMS),
 		old.sessionID,
 	); err != nil {
 		return fmt.Errorf("rollback old session stats: %w", err)
@@ -367,7 +387,7 @@ WHERE session_id = ? AND success = 0 AND `+statsTurnKeyExpr+` = ?`, sessionID, t
 	return count, nil
 }
 
-// turnKeyForRecord 与旧 sessionSelect 的 COALESCE(NULLIF(trace_id,''),NULLIF(turn_id,''),llm_request_id) 对齐。
+// turnKeyForRecord 与旧 sessionSelect 的 COALESCE(NULLIF(trace_id,”),NULLIF(turn_id,”),llm_request_id) 对齐。
 func turnKeyForRecord(record cacheanalytics.CacheRequestRecord) string {
 	return turnKeyForParts(record.TraceID, record.TurnID, record.LLMRequestID)
 }

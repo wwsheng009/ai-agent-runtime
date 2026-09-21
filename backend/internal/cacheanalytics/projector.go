@@ -255,6 +255,13 @@ func (p *Projector) overview(sessionID string) CacheOverview {
 	}
 	overview.CacheStatusDistribution = agg.dist
 	overview.Coverage = buildCoverage(agg, state)
+	// 延迟均值：按记录线性扫描（与会话窗口 min/max 同量级），不新增增量状态。
+	overview.DurationSamples, overview.AverageDurationMS = averageLatency(state.records, func(record *CacheRequestRecord) int64 {
+		return record.DurationMS
+	})
+	overview.FirstTokenSamples, overview.AverageFirstTokenMS = averageLatency(state.records, func(record *CacheRequestRecord) int64 {
+		return record.FirstTokenMS
+	})
 	if len(state.records) > 0 {
 		// 窗口取 min/max 而非 records[0]/last：镜像回放与在线事件交错时
 		// 追加序可能短暂非时间序，min/max 扫描使窗口与顺序无关（O(n)，
@@ -273,6 +280,28 @@ func (p *Projector) overview(sessionID string) CacheOverview {
 		overview.WindowTo = &to
 	}
 	return overview
+}
+
+// averageLatency 计算会话内延迟均值：0/负值视为"未采集"，不计入样本，
+// 避免把缺省值摊平成一个看起来真实存在的 0ms。
+func averageLatency(records []*CacheRequestRecord, pick func(*CacheRequestRecord) int64) (int, int64) {
+	var samples int
+	var sum int64
+	for _, record := range records {
+		if record == nil || pick == nil {
+			continue
+		}
+		value := pick(record)
+		if value <= 0 {
+			continue
+		}
+		samples++
+		sum += value
+	}
+	if samples == 0 {
+		return 0, 0
+	}
+	return samples, sum / int64(samples)
 }
 
 func buildCoverage(agg projectorAggregates, state *sessionState) CoverageInfo {

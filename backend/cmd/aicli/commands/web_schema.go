@@ -310,6 +310,8 @@ func chatWebSSEDataForEvent(ev runtimeevents.Event) map[string]interface{} {
 		pickField(data, payload, "cache_hit_ratio")
 		pickField(data, payload, "cache_write_ratio")
 		pickField(data, payload, "duration_ms")
+		// first_token_ms：首字时间（TTFT），0=未采集（非流式/历史/首字前失败）。
+		pickField(data, payload, "first_token_ms")
 		pickField(data, payload, "error_category")
 		pickField(data, payload, "user_message_id")
 		pickField(data, payload, "assistant_message_id")

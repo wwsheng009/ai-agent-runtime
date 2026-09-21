@@ -63,6 +63,8 @@ func BuildTerminalRecord(in TerminalRecordInput) CacheRequestRecord {
 	record.ContextPromptTokens = payloadInt(payload, "context_prompt_tokens")
 	record.ContextWindowTokens = payloadInt(payload, "context_window_tokens")
 	record.PromptBudget = payloadInt(payload, "prompt_budget")
+	// 首字时间与上下文事实同层：失败请求（首字后中断/超时）同样保留该观测。
+	record.FirstTokenMS = payloadInt64OrZero(payload, "first_token_ms")
 
 	if in.Interrupted {
 		record.Status = RequestStatusError

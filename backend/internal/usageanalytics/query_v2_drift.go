@@ -23,8 +23,8 @@ type StatsDriftSample struct {
 
 // StatsDrift 预聚合列抽样对账结果。
 type StatsDrift struct {
-	Checked int               `json:"checked"`
-	Drifted int               `json:"drifted"`
+	Checked int                `json:"checked"`
+	Drifted int                `json:"drifted"`
 	Samples []StatsDriftSample `json:"samples"`
 }
 
@@ -45,6 +45,8 @@ var statsDriftFields = []struct {
 	{"c_reasoning_tokens", "s.c_reasoning_tokens", "COALESCE(l.reasoning_tokens, 0)"},
 	{"c_total_duration_ms", "s.c_total_duration_ms", "COALESCE(l.total_duration_ms, 0)"},
 	{"c_duration_samples", "s.c_duration_samples", "COALESCE(l.duration_samples, 0)"},
+	{"c_total_first_token_ms", "s.c_total_first_token_ms", "COALESCE(l.total_first_token_ms, 0)"},
+	{"c_first_token_samples", "s.c_first_token_samples", "COALESCE(l.first_token_samples, 0)"},
 	{"c_turn_count", "s.c_turn_count", "COALESCE(l.turn_count, 0)"},
 	{"c_failed_turns", "s.c_failed_turns", "COALESCE(l.failed_turns, 0)"},
 	{"c_first_started_at", "s.c_first_started_at", "COALESCE(l.first_started, 0)"},
@@ -64,6 +66,8 @@ const liveSessionStatsSelect = `SELECT
   COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
   COALESCE(SUM(duration_ms), 0) AS total_duration_ms,
   SUM(CASE WHEN duration_ms <> 0 THEN 1 ELSE 0 END) AS duration_samples,
+  COALESCE(SUM(first_token_ms), 0) AS total_first_token_ms,
+  SUM(CASE WHEN first_token_ms <> 0 THEN 1 ELSE 0 END) AS first_token_samples,
   COUNT(DISTINCT ` + statsTurnKeyExpr + `) AS turn_count,
   COUNT(DISTINCT CASE WHEN success = 0 THEN ` + statsTurnKeyExpr + ` END) AS failed_turns,
   COALESCE(MIN(NULLIF(started_at_unix_nano, 0)), 0) AS first_started,

@@ -26,6 +26,16 @@ export function formatDuration(value?: number | null) {
   return `${(milliseconds / 3_600_000).toFixed(1)} h`;
 }
 
+/**
+ * 首字时间（TTFT）展示：0/缺省 = 未采集（非流式请求、历史记录或首个增量前
+ * 就失败），返回 null 由调用方显示本地化「未采集」，不得回退成 0 ms。
+ */
+export function formatFirstToken(value?: number | null) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? formatDuration(value)
+    : null;
+}
+
 export function formatTimestamp(value?: string) {
   if (!value) return "-";
   const date = new Date(value);
