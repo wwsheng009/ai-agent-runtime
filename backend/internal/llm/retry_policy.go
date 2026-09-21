@@ -1129,6 +1129,23 @@ func classifyRetryableLLMErrorWithRules(err error, rules []RetryRule) retryDecis
 	}
 
 	lower := strings.ToLower(err.Error())
+	// 上游网关把「工具调用被 max_tokens 截断」包装成流内错误：OpenAI 兼容网关
+	// （commandgo 等）在 SSE error 事件里塞 "HttpError: HTTP 400: Tool calls
+	// cutoff by max_tokens"，外层再套一层 stream_interrupted。报文里的 400 是
+	// 网关对截断的转述，不是请求参数缺陷；判定必须放在状态码分支之前，否则会
+	// 落到 http_400 终态，既不重试也不扩容。归类为 truncated_tool_call 后即可
+	// 复用既有恢复通道：输出预算升级（isOutputBudgetEscalationReason →
+	// escalateOutputBudgetForDegenerateReply，8k→16k→32k→64k）、退化短退避与
+	// 连续退化上限（isDegenerateOutputRetryReason / trackDegenerateOutputReply），
+	// 以及 caller 侧一次性升级（IsTruncatedToolCallError →
+	// shouldEscalateTruncatedToolCallBudget）。
+	if isMaxTokensToolCallCutoffText(lower) {
+		return retryDecision{
+			Retryable: true,
+			Delay:     decisionDelayFromServerHint(err),
+			Reason:    "truncated_tool_call",
+		}
+	}
 	if statusCode, ok := providerCallHTTPStatus(err); ok {
 		switch statusCode {
 		case http.StatusRequestTimeout, http.StatusConflict, http.StatusTooEarly:
@@ -1737,6 +1754,22 @@ func transientUpstreamTextHint(lower string) bool {
 		"broken pipe",
 		"goaway",
 		"internal server error",
+	)
+}
+
+// isMaxTokensToolCallCutoffText reports whether a provider message describes a
+// tool call cut off by the exhausted completion budget. OpenAI-compatible
+// gateways report that inside the stream (SSE error event) as an HTTP 400 body
+// ("Tool calls cutoff by max_tokens"), so the text is the only budget-bound
+// signal available and the caller must classify it before the HTTP status
+// switch turns the embedded 400 into a terminal request defect.
+func isMaxTokensToolCallCutoffText(lower string) bool {
+	return containsAny(lower,
+		"cutoff by max",
+		"cut off by max",
+		"truncated by max",
+		"tool_calls_cutoff",
+		"tool_call_cutoff",
 	)
 }
 

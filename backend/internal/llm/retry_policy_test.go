@@ -1006,6 +1006,42 @@ func TestIsTruncatedToolCallError(t *testing.T) {
 		"the adapter class is matched by its Truncated field, not by reason")
 }
 
+// TestUpstreamMaxTokensToolCallCutoffClassification pins the commandgo incident
+// signature: the gateway reports the truncation inside the SSE stream as
+// "HttpError: HTTP 400: Tool calls cutoff by max_tokens" wrapped in a
+// stream_interrupted error. The embedded 400 must not turn a budget-bound
+// truncation into a terminal http_400 request defect — it has to classify as
+// truncated_tool_call so the retry loop widens the completion budget and the
+// caller-side one-shot escalation stays reachable.
+func TestUpstreamMaxTokensToolCallCutoffClassification(t *testing.T) {
+	upstream := fmt.Errorf("stream_interrupted: openai stream error (type=internal_server_error, code=500): HttpError: HTTP 400: Tool calls cutoff by max_tokens")
+
+	decision := classifyRetryableLLMError(upstream)
+	require.True(t, decision.Retryable, "an embedded 400 must not make the truncation terminal")
+	require.Equal(t, "truncated_tool_call", decision.Reason)
+	require.True(t, IsTruncatedToolCallError(upstream))
+	require.True(t, isOutputBudgetEscalationReason(decision.Reason))
+	require.True(t, isDegenerateOutputRetryReason(decision.Reason))
+
+	maxTokens := 8000
+	require.True(t, escalateOutputBudgetForDegenerateReply(&maxTokens, 0, upstream))
+	require.Equal(t, 16000, maxTokens)
+
+	// The same wording on a bare provider 400 (no stream wrapper) classifies
+	// the same way.
+	bare := newProviderHTTPError(http.StatusBadRequest, "Tool calls cutoff by max_tokens", nil)
+	bareDecision := classifyRetryableLLMError(bare)
+	require.True(t, bareDecision.Retryable)
+	require.Equal(t, "truncated_tool_call", bareDecision.Reason)
+
+	// A real request defect stays terminal: the matcher only fires on the
+	// budget-truncation wording, not on every 400 mentioning max_tokens.
+	defect := newProviderHTTPError(http.StatusBadRequest, "invalid_request_error: unknown parameter max_tokens", nil)
+	defectDecision := classifyRetryableLLMError(defect)
+	require.False(t, defectDecision.Retryable)
+	require.NotEqual(t, "truncated_tool_call", defectDecision.Reason)
+}
+
 // TestTrackDegenerateOutputReplyBoundsConsecutiveStreak pins the fast-fail
 // bound added after the live incident: a call whose every sample returned
 // reasoning only kept retrying for the whole attempt budget (10 attempts x
