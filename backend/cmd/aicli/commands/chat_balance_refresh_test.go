@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -52,9 +53,17 @@ func TestPrepareProviderForPeriodicBalanceRefresh(t *testing.T) {
 			want: true,
 		},
 		{
-			name:     "ordinary openai provider",
+			name:     "ordinary openai provider auto-detects on first cycle",
 			provider: config.Provider{Protocol: "openai"},
-			want:     false,
+			want:     true,
+		},
+		{
+			name: "unknown site type already probed once is not re-probed",
+			provider: config.Provider{
+				Protocol:          "openai",
+				SiteTypeDetectedAt: "2026-01-01T00:00:00Z",
+			},
+			want: false,
 		},
 	}
 
@@ -421,5 +430,114 @@ func TestRefreshChatAccountBalanceStatusModelUsesCanonicalOrderAndResponsiveLabe
 	if got, want := style.StatusLineDocument(refreshed, 0).PlainText(),
 		"Plan OFF · gpt-5.6-sol xhigh · mdkj · Balance 170.52 USD · Context 42% used"; got != want {
 		t.Fatalf("incremental refresh changed the existing label or order:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestChatAccountBalanceRefresherAutoDetectsUnknownProviderOnce(t *testing.T) {
+	// An openai-protocol provider with no site_type and no cached account
+	// represents the "why is there no DeepSeek balance?" case: the periodic
+	// refresh must auto-detect the site type on the first cycle.
+	session := &ChatSession{}
+	initialProvider := config.Provider{Protocol: "openai"}
+	session.setAccountBalanceProvider("deepseek_openai", initialProvider)
+
+	var calls atomic.Int32
+	refresh := func(
+		_ context.Context,
+		_ *siteaccount.Client,
+		providerName string,
+		provider *config.Provider,
+		_ time.Duration,
+	) (liveBalanceOutcome, error) {
+		calls.Add(1)
+		if provider.SiteType != "" && provider.SiteType != string(siteaccount.SiteTypeUnknown) {
+			t.Fatalf("first probe should run before site type is stabilized, got %q", provider.SiteType)
+		}
+		// Simulate DetectSiteType classifying the upstream and a fetch returning
+		// no account (e.g. unsupported / transient). Detection metadata is
+		// returned so it can be cached.
+		return liveBalanceOutcome{
+			Status:             "unsupported",
+			SiteType:           string(siteaccount.SiteTypeUnknown),
+			SiteTypeDetectedAt: time.Now().UTC().Format(time.RFC3339),
+			Warning:            "no supported site account API",
+		}, fmt.Errorf("unsupported site type")
+	}
+	refresher := newChatAccountBalanceRefresher(session, time.Minute, refresh)
+	refresher.setTarget("deepseek_openai", initialProvider, false)
+	session.accountBalanceMu.Lock()
+	session.accountBalanceRefresher = refresher
+	session.accountBalanceMu.Unlock()
+	t.Cleanup(refresher.cancel)
+
+	// First cycle: gate allows the one-time detection probe.
+	refresher.refreshOnce()
+	if calls.Load() != 1 {
+		t.Fatalf("expected first-cycle detection probe, got %d call(s)", calls.Load())
+	}
+
+	_, provider, _ := refresher.target()
+	if provider.SiteTypeDetectedAt == "" {
+		t.Fatalf("expected detection metadata cached on refresher target, got SiteType=%q SiteTypeDetectedAt=%q", provider.SiteType, provider.SiteTypeDetectedAt)
+	}
+
+	// Second cycle: detection was already recorded, so the endpoint must NOT be
+	// re-probed.
+	refresher.refreshOnce()
+	if calls.Load() != 1 {
+		t.Fatalf("expected re-probe to be suppressed after one detection, got %d call(s)", calls.Load())
+	}
+}
+
+func TestChatAccountBalanceRefresherDeepSeekOpenAIProtocolDisplaysBalance(t *testing.T) {
+	// End-to-end: openai-protocol DeepSeek provider with no site_type and no
+	// cached account. First cycle auto-detects DeepSeek and fetches the balance;
+	// the session snapshot then carries the wallet balance for the TUI footer.
+	balance := 110.0
+	available := true
+	session := &ChatSession{}
+	initialProvider := config.Provider{Protocol: "openai"}
+	session.setAccountBalanceProvider("deepseek_openai", initialProvider)
+
+	refresh := func(
+		_ context.Context,
+		_ *siteaccount.Client,
+		providerName string,
+		provider *config.Provider,
+		_ time.Duration,
+	) (liveBalanceOutcome, error) {
+		return liveBalanceOutcome{
+			Status:             "ok",
+			SiteType:           string(siteaccount.SiteTypeDeepSeek),
+			SiteTypeConfidence: string(siteaccount.ConfidenceHigh),
+			SiteTypeDetectedAt: time.Now().UTC().Format(time.RFC3339),
+			Account: &config.ProviderAccountSnapshot{
+				Source:        "deepseek_user_balance",
+				Mode:          "wallet",
+				Currency:      "CNY",
+				WalletBalance: &balance,
+				IsAvailable:   &available,
+			},
+		}, nil
+	}
+	refresher := newChatAccountBalanceRefresher(session, time.Minute, refresh)
+	refresher.setTarget("deepseek_openai", initialProvider, false)
+	session.accountBalanceMu.Lock()
+	session.accountBalanceRefresher = refresher
+	session.accountBalanceMu.Unlock()
+	t.Cleanup(refresher.cancel)
+
+	refresher.refreshOnce()
+
+	_, provider, ok := session.accountBalanceSnapshot()
+	if !ok || provider.Account == nil || provider.Account.WalletBalance == nil {
+		t.Fatalf("expected DeepSeek wallet balance cached on session, got %+v", provider.Account)
+	}
+	if provider.SiteType != string(siteaccount.SiteTypeDeepSeek) {
+		t.Fatalf("site type = %q, want deepseek", provider.SiteType)
+	}
+	line := formatProviderAccountBalanceLine(provider.Account, provider.SiteType, provider.SiteTypeConfidence)
+	if !strings.Contains(line, "110.00 CNY") {
+		t.Fatalf("expected DeepSeek balance line, got %q", line)
 	}
 }
