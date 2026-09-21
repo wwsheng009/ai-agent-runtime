@@ -142,11 +142,17 @@ func resolveDefaultConfigPathFromBase(baseDir, filename string, searchPaths []st
 	return ""
 }
 
-// DefaultRuntimeConfigSearchPaths returns the relative runtime config
-// filenames tried during upward directory search, most specific first.
-// The ./.aicli/ project-level path is added automatically by
-// resolveDefaultConfigPathFromBase; these are the additional repository-layout
-// compatibility paths.
+// DefaultRuntimeConfigSearchPaths returns the legacy repository/bundle layouts
+// that older templates used to name runtime.yaml:
+//
+//	configs/runtime.yaml
+//	backend/configs/runtime.yaml
+//
+// They are listed here so convention values can still be *recognized* (see
+// IsRuntimeConfigConventionPath): a config.yaml carrying one of these values
+// must not shadow the .aicli layers, and must not be reported as a missing
+// user-configured file. They are never searched or loaded — the development
+// directory is not a configuration source for aicli processes.
 func DefaultRuntimeConfigSearchPaths() []string {
 	return []string{
 		filepath.FromSlash(DefaultRuntimeConfigRelativePath),
@@ -154,13 +160,61 @@ func DefaultRuntimeConfigSearchPaths() []string {
 	}
 }
 
-// ResolveRuntimeConfigBootstrapPath locates the active profile's default
-// runtime config. It delegates to ResolveConfigFilePath with the runtime
-// config filename and search paths.
+// ResolveRuntimeConfigBootstrapPath locates the runtime.yaml aicli loads at
+// startup (chat runtime tools, skills runtime, runtime-server), highest
+// priority first:
+//
+//  1. an explicit, non-convention override — returned even when the file does
+//     not exist so callers can report the misconfiguration;
+//  2. ./.aicli/runtime.yaml — project layer of the current workspace;
+//  3. ~/.aicli/runtime.yaml — user layer.
+//
+// The repository layouts (configs/runtime.yaml, backend/configs/runtime.yaml)
+// are deliberately NOT searched: they are development-directory artifacts, and
+// auto-loading them let a dev checkout silently drive user processes. Values
+// naming those layouts are still treated as convention values (see
+// IsRuntimeConfigConventionPath) so they fall through to the .aicli layers.
+//
+// Returns "" when no layer exists on disk; callers then use the built-in
+// defaults without reporting a missing optional config.
 func ResolveRuntimeConfigBootstrapPath(configPath string) string {
-	return ResolveConfigFilePath(
-		DefaultRuntimeConfigFileName,
+	configPath = expandExplicitConfigPath(configPath)
+	if configPath != "" && !IsRuntimeConfigConventionPath(configPath) {
+		return configPath
+	}
+
+	// Project-level layer: ./.aicli/runtime.yaml in CWD
+	if cwd, err := os.Getwd(); err == nil {
+		projectConfig := filepath.Join(cwd, ".aicli", DefaultRuntimeConfigFileName)
+		if info, err := os.Stat(projectConfig); err == nil && !info.IsDir() {
+			return filepath.Clean(projectConfig)
+		}
+	}
+
+	// User-level layer: $HOME/.aicli/runtime.yaml
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		userConfig := filepath.Join(home, ".aicli", DefaultRuntimeConfigFileName)
+		if info, err := os.Stat(userConfig); err == nil && !info.IsDir() {
+			return filepath.Clean(userConfig)
+		}
+	}
+
+	return ""
+}
+
+// IsRuntimeConfigConventionPath reports whether a configured
+// skills_runtime.config_file value is one of the conventional runtime.yaml
+// locations (bare filename, configs/runtime.yaml, backend/configs/runtime.yaml,
+// or ".") instead of a deliberate user override.
+//
+// Convention values are source-tree layouts: they are only meaningful when a
+// matching file exists on disk (typically a development checkout). Callers
+// must not treat a missing convention value as a missing required config, and
+// must not report it as a user-configured path that failed to load.
+func IsRuntimeConfigConventionPath(configPath string) bool {
+	return isConventionConfigPath(
 		configPath,
+		DefaultRuntimeConfigFileName,
 		DefaultRuntimeConfigRelativePath,
 		DefaultRuntimeConfigSearchPaths(),
 	)

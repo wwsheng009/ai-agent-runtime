@@ -631,10 +631,22 @@ func loadRuntimeToolConfig(cfg *config.Config, session *ChatSession) *runtimecfg
 	configPath := ""
 	if session != nil && strings.TrimSpace(session.RuntimeConfigPath) != "" {
 		configPath = strings.TrimSpace(session.RuntimeConfigPath)
+		// Session/profile paths may still be relative (stored in resumed
+		// session metadata or written by an older profile). Anchor them against
+		// the CWD/executable search before treating them as missing, so a
+		// valid in-tree runtime.yaml is not reported as "未找到配置文件".
+		if resolved := resolveExistingPathValue(configPath, false); resolved != "" {
+			configPath = resolved
+		}
 	} else if cfg != nil && cfg.SkillsRuntime != nil && strings.TrimSpace(cfg.SkillsRuntime.ConfigFile) != "" {
 		configPath = resolveGlobalRuntimeConfigPath(cfg)
 	}
 	if configPath == "" {
+		// No runtime.yaml in the .aicli layers (./.aicli/ > ~/.aicli/). The
+		// development layouts (backend/configs) are never consulted. A missing
+		// optional config is not an error: use the built-in defaults without
+		// printing a warning.
+		logpkg.Debugf("AICLI runtime tools config not found in ./.aicli or ~/.aicli; using built-in defaults")
 		resolved := runtimecfg.DefaultRuntimeConfig()
 		resolved.Workspace.Root = resolveLocalWorkspacePath(resolved, session)
 		return resolved

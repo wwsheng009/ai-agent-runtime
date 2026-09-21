@@ -187,85 +187,89 @@ func TestResolveChatProfileState_UnknownAgentWithoutProfileErrors(t *testing.T) 
 	}
 }
 
-func TestResolveGlobalRuntimeConfigPath_UsesBuildProfileDefault(t *testing.T) {
-	got := resolveGlobalRuntimeConfigPath(nil)
-	if filepath.Base(got) != aiclipaths.DefaultRuntimeConfigFileName {
-		t.Fatalf("default runtime config path = %q, want profile file %s", got, aiclipaths.DefaultRuntimeConfigFileName)
-	}
-	if _, err := os.Stat(got); err != nil {
-		t.Fatalf("default runtime config path should resolve to the packaged/repository asset: %q: %v", got, err)
-	}
-}
+// TestResolveGlobalRuntimeConfigPath_NoLayerResolvesEmpty pins the policy: with
+// no .aicli layer on disk chat uses the built-in defaults, so resolution must
+// report "no runtime config" instead of handing callers a path inside the
+// development directory.
+func TestResolveGlobalRuntimeConfigPath_NoLayerResolvesEmpty(t *testing.T) {
+	home := isolateInitHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Chdir(t.TempDir())
 
-func TestResolveGlobalRuntimeConfigPath_ResolvesUpwardRelativePath(t *testing.T) {
-	root := t.TempDir()
-	runtimeConfig := filepath.Join(root, "backend", "configs", "runtime.yaml")
-	writeTestFile(t, runtimeConfig, "agent:\n  defaultModel: custom\n")
-
-	backendDir := filepath.Join(root, "backend")
-	originalWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
+	if got := resolveGlobalRuntimeConfigPath(nil); got != "" {
+		t.Fatalf("no-layer resolution = %q, want empty", got)
 	}
-	if err := os.Chdir(backendDir); err != nil {
-		t.Fatalf("chdir: %v", err)
+	conventionCfg := &config.Config{
+		SkillsRuntime: &config.SkillsRuntimeConfig{ConfigFile: aiclipaths.DefaultRuntimeConfigRelativePath},
 	}
-	t.Cleanup(func() {
-		if err := os.Chdir(originalWD); err != nil {
-			t.Fatalf("restore wd: %v", err)
-		}
-	})
-
-	cfg := &config.Config{
-		SkillsRuntime: &config.SkillsRuntimeConfig{
-			ConfigFile: "backend/configs/runtime.yaml",
-		},
+	if got := resolveGlobalRuntimeConfigPath(conventionCfg); got != "" {
+		t.Fatalf("convention value resolution = %q, want empty", got)
 	}
 
-	got := resolveGlobalRuntimeConfigPath(cfg)
-	if got != runtimeConfig {
-		t.Fatalf("unexpected runtime config path: %q", got)
+	// A real override that does not exist keeps its path so the caller can still
+	// report the misconfiguration.
+	override := filepath.Join(t.TempDir(), "custom-runtime.yaml")
+	overrideCfg := &config.Config{
+		SkillsRuntime: &config.SkillsRuntimeConfig{ConfigFile: override},
+	}
+	if got := resolveGlobalRuntimeConfigPath(overrideCfg); got != override {
+		t.Fatalf("missing override = %q, want %q", got, override)
 	}
 }
 
-func TestResolveGlobalRuntimeConfigPath_ResolvesFromExecutableDir(t *testing.T) {
-	root := t.TempDir()
-	runtimeConfig := filepath.Join(root, "backend", "configs", "runtime.yaml")
-	writeTestFile(t, runtimeConfig, "agent:\n  defaultModel: from-exe\n")
+// TestResolveGlobalRuntimeConfigPath_IgnoresDevelopmentDirectory pins the
+// "backend/configs is a development directory" rule: a runtime.yaml there is
+// never used implicitly, from the CWD upward search or from the executable
+// directory, and a real .aicli layer still wins.
+func TestResolveGlobalRuntimeConfigPath_IgnoresDevelopmentDirectory(t *testing.T) {
+	home := isolateInitHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 
-	// Place a fake executable under backend/ so resolution walks up to root.
-	fakeExe := filepath.Join(root, "backend", "aicli-test-bin")
-	writeTestFile(t, fakeExe, "#!/bin/sh\n")
-	outside := t.TempDir()
+	repoDir := t.TempDir()
+	writeTestFile(t, filepath.Join(repoDir, "backend", "configs", aiclipaths.DefaultRuntimeConfigFileName), "agent:\n  defaultModel: dev-only\n")
+	writeTestFile(t, filepath.Join(repoDir, "configs", aiclipaths.DefaultRuntimeConfigFileName), "agent:\n  defaultModel: dev-only\n")
+	t.Chdir(repoDir)
 
-	originalWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(outside); err != nil {
-		t.Fatalf("chdir outside repo: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chdir(originalWD); err != nil {
-			t.Fatalf("restore wd: %v", err)
-		}
-	})
-
+	// Even an executable sitting inside the development directory must not make
+	// resolution walk up into it.
 	originalExe := executablePathForTest
-	executablePathForTest = fakeExe
-	t.Cleanup(func() {
-		executablePathForTest = originalExe
-	})
+	executablePathForTest = filepath.Join(repoDir, "backend", "aicli-test-bin")
+	writeTestFile(t, executablePathForTest, "#!/bin/sh\n")
+	t.Cleanup(func() { executablePathForTest = originalExe })
 
-	cfg := &config.Config{
-		SkillsRuntime: &config.SkillsRuntimeConfig{
-			ConfigFile: "backend/configs/runtime.yaml",
-		},
+	for name, cfg := range map[string]*config.Config{
+		"backend/configs convention value": {SkillsRuntime: &config.SkillsRuntimeConfig{ConfigFile: "backend/configs/runtime.yaml"}},
+		"configs convention value":         {SkillsRuntime: &config.SkillsRuntimeConfig{ConfigFile: "configs/runtime.yaml"}},
+		"no skills runtime section":        nil,
+	} {
+		if got := resolveGlobalRuntimeConfigPath(cfg); got != "" {
+			t.Fatalf("%s: development layout must not resolve, got %q", name, got)
+		}
 	}
 
-	got := resolveGlobalRuntimeConfigPath(cfg)
-	if got != runtimeConfig {
-		t.Fatalf("unexpected runtime config path: got %q want %q", got, runtimeConfig)
+	// A real .aicli layer still wins over the development file.
+	projectConfig := filepath.Join(repoDir, ".aicli", aiclipaths.DefaultRuntimeConfigFileName)
+	writeTestFile(t, projectConfig, "agent:\n  defaultModel: project\n")
+	if got := resolveGlobalRuntimeConfigPath(nil); got != projectConfig {
+		t.Fatalf("project layer = %q, want %q", got, projectConfig)
+	}
+}
+
+// TestResolveGlobalRuntimeConfigPath_PrefersUserLayerOverNothing keeps the user
+// layer reachable when the workspace has no .aicli directory of its own.
+func TestResolveGlobalRuntimeConfigPath_PrefersUserLayerOverNothing(t *testing.T) {
+	home := isolateInitHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	userConfig := filepath.Join(home, ".aicli", aiclipaths.DefaultRuntimeConfigFileName)
+	writeTestFile(t, userConfig, "agent:\n  defaultModel: user\n")
+	t.Chdir(t.TempDir())
+
+	if got := resolveGlobalRuntimeConfigPath(nil); got != userConfig {
+		t.Fatalf("user layer = %q, want %q", got, userConfig)
 	}
 }
 
@@ -358,6 +362,106 @@ func TestComposeChatSystemPromptWithGuidance_IncludesParallelToolGuidance(t *tes
 	}
 	if !strings.Contains(prompt, "include difficulty and difficulty_rationale for every child task") {
 		t.Fatalf("expected subagent difficulty schema guidance, got:\n%s", prompt)
+	}
+}
+
+// TestResolveGlobalRuntimeConfigPath_NeverReturnsMissingPath pins the fix for
+// the misleading startup warning "未找到配置文件: backend/configs/runtime.yaml".
+// Resolution must not hand callers a CWD-relative path that is then stat-ed and
+// reported as a missing config. The result is either a real file from the .aicli
+// layers (workspace ./.aicli > ~/.aicli) or "" meaning "no runtime.yaml, use the
+// built-in defaults".
+func TestResolveGlobalRuntimeConfigPath_NeverReturnsMissingPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	outside := t.TempDir()
+	fakeExe := filepath.Join(outside, "bin", "aicli-test-bin")
+	writeTestFile(t, fakeExe, "#!/bin/sh\n")
+	t.Chdir(outside)
+
+	originalExe := executablePathForTest
+	executablePathForTest = fakeExe
+	t.Cleanup(func() { executablePathForTest = originalExe })
+
+	cfg := &config.Config{
+		SkillsRuntime: &config.SkillsRuntimeConfig{
+			ConfigFile: filepath.FromSlash(filepath.Join("backend", "configs", aiclipaths.DefaultRuntimeConfigFileName)),
+		},
+	}
+
+	for name, got := range map[string]string{
+		"configured convention path": resolveGlobalRuntimeConfigPath(cfg),
+		"no skills runtime section":  resolveGlobalRuntimeConfigPath(nil),
+	} {
+		if got == "" {
+			continue
+		}
+		if !filepath.IsAbs(got) {
+			t.Fatalf("%s: resolved runtime config must be absolute, got %q", name, got)
+		}
+		if _, err := os.Stat(got); err != nil {
+			t.Fatalf("%s: resolved runtime config must exist, got %q: %v", name, got, err)
+		}
+	}
+}
+
+// TestResolveGlobalRuntimeConfigPath_PrefersWorkspaceDotAICLI keeps the layer
+// order explicit: the workspace ./.aicli/runtime.yaml wins, and a
+// backend/configs/runtime.yaml next to it is ignored (development directory).
+func TestResolveGlobalRuntimeConfigPath_PrefersWorkspaceDotAICLI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	workspace := t.TempDir()
+	workspaceConfig := filepath.Join(workspace, ".aicli", aiclipaths.DefaultRuntimeConfigFileName)
+	writeTestFile(t, workspaceConfig, "agent:\n  defaultModel: workspace\n")
+	writeTestFile(t, filepath.Join(workspace, "backend", "configs", aiclipaths.DefaultRuntimeConfigFileName), "agent:\n  defaultModel: portable\n")
+	t.Chdir(workspace)
+
+	cfg := &config.Config{
+		SkillsRuntime: &config.SkillsRuntimeConfig{ConfigFile: "backend/configs/runtime.yaml"},
+	}
+	if got := resolveGlobalRuntimeConfigPath(cfg); got != workspaceConfig {
+		t.Fatalf("expected workspace .aicli config %q, got %q", workspaceConfig, got)
+	}
+}
+
+// TestLoadRuntimeToolConfig_MissingConventionPathStaysSilent verifies a missing
+// optional runtime.yaml no longer prints the runtime tools warning: chat
+// silently uses the built-in defaults instead.
+func TestLoadRuntimeToolConfig_MissingConventionPathStaysSilent(t *testing.T) {
+	resetChatRuntimeConfigCacheForTest()
+	t.Cleanup(resetChatRuntimeConfigCacheForTest)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	outside := t.TempDir()
+	fakeExe := filepath.Join(outside, "bin", "aicli-test-bin")
+	writeTestFile(t, fakeExe, "#!/bin/sh\n")
+	t.Chdir(outside)
+
+	originalExe := executablePathForTest
+	executablePathForTest = fakeExe
+	t.Cleanup(func() { executablePathForTest = originalExe })
+
+	cfg := &config.Config{
+		SkillsRuntime: &config.SkillsRuntimeConfig{ConfigFile: "backend/configs/runtime.yaml"},
+	}
+
+	var cfgLoaded bool
+	stderr := captureStderr(t, func() {
+		cfgLoaded = loadRuntimeToolConfig(cfg, nil) != nil
+	})
+	if !cfgLoaded {
+		t.Fatal("expected a runtime config (defaults or a real file)")
+	}
+	if strings.Contains(stderr, "加载 runtime tools 配置失败") {
+		t.Fatalf("missing convention runtime.yaml must not warn, got %q", stderr)
 	}
 }
 

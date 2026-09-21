@@ -968,11 +968,14 @@ type runtimeServerApp struct {
 
 // loadRuntimeServerManager 通过分层栈加载 runtime.yaml（P2）：
 //
-//   - 用户级 $HOME/.aicli/runtime.yaml 与项目级 ./.aicli/runtime.yaml 覆盖只读的
-//     portable 层（开发仓库里的 configs/runtime.yaml / backend/configs/runtime.yaml）；
+//   - 层栈只有用户级 $HOME/.aicli/runtime.yaml 与项目级 ./.aicli/runtime.yaml
+//     （高层只覆盖它显式写的键）；开发仓库布局（configs/runtime.yaml /
+//     backend/configs/runtime.yaml）**不是**隐式来源，只有调用方显式传入
+//     （如 --config backend/configs/runtime.yaml）时才会被读取；
 //   - 读取路径（RuntimeManager.GetFilePath）取「生效来源」= 最高存在层，未改动既有语义
-//     （sessions 目录仍相对它解析）；全新安装（任何层都不存在）时取用户级写入目标；
-//   - 写回不在这里：agent.maxSteps 由分层版 persister 按层分摊，只读层永不被改写。
+//     （sessions 目录仍相对它解析）；全新安装（任何层都不存在）时回落内置默认
+//     （RuntimeManager.Load 对空路径直接返回默认值）；
+//   - 写回不在这里：agent.maxSteps 由分层版 persister 按层分摊，仓库布局文件永不被改写。
 func loadRuntimeServerManager(runtimeManager *runtimecfg.RuntimeManager) error {
 	merged, err := config.LoadMergedRuntimeConfigDocument()
 	if err != nil {

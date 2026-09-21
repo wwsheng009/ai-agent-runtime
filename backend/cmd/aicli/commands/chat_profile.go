@@ -185,16 +185,45 @@ func applyProfileDefaultsToChatOptions(opts *chatCommandOptions, state *chatProf
 	opts.SessionFeaturesRequested = true
 }
 
+// resolveGlobalRuntimeConfigPath resolves the runtime.yaml source for chat
+// startup, in the documented layer order:
+//
+//  1. an explicit, non-convention override (absolute path or custom file name)
+//  2. ./.aicli/runtime.yaml — project layer of the current workspace
+//  3. ~/.aicli/runtime.yaml — user layer
+//
+// The repository/development layouts (configs/runtime.yaml,
+// backend/configs/runtime.yaml) are never used: backend/configs is a
+// development directory, so a dev checkout must not silently drive chat.
+// Values copied from older templates are still recognized as convention values,
+// so they fall through to the .aicli layers instead of being reported missing.
+//
+// The returned path is the *effective source* — the highest present layer. The
+// layers themselves are merged when loaded (see loadCachedRuntimeConfig): a
+// project file overrides only the keys it writes, keeping the user layer's
+// remaining settings.
+//
+// It returns "" when no layer exists, so callers fall back to the built-in
+// defaults without warning.
 func resolveGlobalRuntimeConfigPath(cfg *config.Config) string {
-	configPath := aiclipaths.DefaultRuntimeConfigRelativePath
+	configured := ""
 	if cfg != nil && cfg.SkillsRuntime != nil && strings.TrimSpace(cfg.SkillsRuntime.ConfigFile) != "" {
-		configPath = strings.TrimSpace(cfg.SkillsRuntime.ConfigFile)
+		configured = strings.TrimSpace(cfg.SkillsRuntime.ConfigFile)
 	}
-	configPath = aiclipaths.ResolveRuntimeConfigBootstrapPath(configPath)
-	if resolved := resolveExistingPathValue(configPath, false); resolved != "" {
+	resolved := aiclipaths.ResolveRuntimeConfigBootstrapPath(configured)
+	if resolved == "" {
+		return ""
+	}
+	if existing := resolveExistingPathValue(resolved, false); existing != "" {
+		return existing
+	}
+	// Nothing on disk. A real override keeps its path so the caller can still
+	// surface the misconfiguration; a convention value (or no value at all)
+	// means "no runtime config", which is not an error.
+	if configured != "" && !aiclipaths.IsRuntimeConfigConventionPath(configured) {
 		return resolved
 	}
-	return configPath
+	return ""
 }
 
 func resolveConfiguredMCPConfigPath(cfg *config.Config) string {
