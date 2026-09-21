@@ -196,8 +196,11 @@ func (a *ArtifactReadTool) Execute(ctx context.Context, params map[string]interf
 		// This tool owns its window: every page is sized against
 		// artifactOutputBudgetBytes (window+header <= budget) and it publishes
 		// its own continuation contract (artifact_eof / artifact_next_offset).
-		// Declare the render-layer (L4) opt-out so the window is never folded.
+		// Declare both the render-layer (L4) opt-out and the window itself, so
+		// the page is never folded - and if the opt-out is ever lost, L4 still
+		// folds at this tool's window instead of the layer backstop.
 		toolresult.MetadataSkipRenderTruncationKey: true,
+		toolresult.MetadataModelVisibleBudgetKey:   artifactOutputBudgetBytes,
 	}
 	if !eof {
 		metadata["artifact_next_offset"] = end
@@ -267,9 +270,12 @@ func artifactReadToolLabel(toolName string) string {
 }
 
 func artifactReadFailure(message string) *toolkit.ToolResult {
-	return &toolkit.ToolResult{
+	// Failures page nothing, but they must still own their output: an error
+	// body folded by the render layer would hide the reason the read failed
+	// behind a truncation notice.
+	return stampToolOwnsOutputWithBudget(&toolkit.ToolResult{
 		Success:    false,
 		OutputKind: toolresult.KindText,
 		Error:      fmt.Errorf("%s", message),
-	}
+	}, artifactOutputBudgetBytes)
 }

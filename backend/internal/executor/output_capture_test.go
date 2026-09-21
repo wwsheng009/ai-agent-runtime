@@ -65,7 +65,7 @@ func TestCaptureCombinedOutputWithMirror_TeesLiveOutputAndRetainsCapture(t *test
 	}
 }
 
-func TestCaptureCombinedOutput_TruncatesLargeOutputAndKeepsHeadTail(t *testing.T) {
+func TestCaptureCombinedOutput_TruncatesLargeOutputAndKeepsHeadOnly(t *testing.T) {
 	var cmd *exec.Cmd
 	if IsWindows() {
 		shell := DefaultUserShell()
@@ -92,8 +92,11 @@ func TestCaptureCombinedOutput_TruncatesLargeOutputAndKeepsHeadTail(t *testing.T
 	if !strings.Contains(capture.Output, "line-0-") {
 		t.Fatalf("expected head to be preserved, got %q", capture.Output)
 	}
-	if !strings.Contains(capture.Output, "line-599-") {
-		t.Fatalf("expected tail to be preserved, got %q", capture.Output)
+	if strings.Contains(capture.Output, "line-599-") {
+		t.Fatalf("expected tail to be dropped from the head-only window, got %q", capture.Output)
+	}
+	if !strings.Contains(capture.Output, "from the end") {
+		t.Fatalf("expected end-truncation wording, got %q", capture.Output)
 	}
 	if capture.CaptureLimitDisabled {
 		t.Fatalf("did not expect capture limit disabled, got %+v", capture)
@@ -152,7 +155,7 @@ func TestOutputCaptureAccumulator_UsesSameTruncationPolicy(t *testing.T) {
 	chunks := [][]byte{
 		[]byte("hello\n"),
 		[]byte("middle-content-that-should-be-partially-omitted\n"),
-		[]byte("tail\n"),
+		[]byte("zz-tail-sentinel\n"),
 	}
 	for _, chunk := range chunks {
 		if _, err := accumulator.Write(chunk); err != nil {
@@ -173,8 +176,11 @@ func TestOutputCaptureAccumulator_UsesSameTruncationPolicy(t *testing.T) {
 	if !strings.Contains(capture.Output, "exec output truncated at capture limit") {
 		t.Fatalf("expected truncation marker, got %q", capture.Output)
 	}
-	if !strings.Contains(capture.Output, "hello") || !strings.Contains(capture.Output, "tail") {
-		t.Fatalf("expected head and tail to be preserved, got %q", capture.Output)
+	if !strings.Contains(capture.Output, "hello") {
+		t.Fatalf("expected head to be preserved, got %q", capture.Output)
+	}
+	if strings.Contains(capture.Output, "zz-tail-sentinel") {
+		t.Fatalf("expected tail to be dropped from the head-only window, got %q", capture.Output)
 	}
 }
 

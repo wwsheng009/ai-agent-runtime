@@ -246,12 +246,12 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 		}
 	}
 
-	return stampToolOwnsOutput(&toolkit.ToolResult{
+	return stampToolOwnsOutputWithBudget(&toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,
 		Content:    output,
 		Metadata:   metadata,
-	}), nil
+	}, globOutputBudgetBytes), nil
 }
 
 // globTruncationNotice renders the notice glob appends after a truncated file

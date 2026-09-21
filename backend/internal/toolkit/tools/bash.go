@@ -695,6 +695,9 @@ func buildBashBatchResult(ctx context.Context, parent map[string]interface{}, co
 		"parallel": parallelism > 1, "parallelism": parallelism,
 		"command": strings.Join(commandTexts, "\n"), "commands": commandTexts,
 	}
+	// Batch output declares the shell's own model-visible window (see
+	// buildCommandExecutionMetadata); the render layer folds head-only beyond it.
+	metadata[toolresult.MetadataModelVisibleBudgetKey] = shellOutputBudgetBytes
 	if nonZeroExit > 0 {
 		metadata["non_zero_exit_count"] = nonZeroExit
 		metadata["has_non_zero_exit"] = true
@@ -1346,6 +1349,12 @@ func buildCommandExecutionMetadata(command string, mutatedPaths []string, result
 		"output_capture_limit_disabled": result.CaptureLimitDisabled,
 		"executed_at":                   time.Now().Unix(),
 	}
+	// Shell output owns its model-visible window instead of relying on the
+	// render-layer backstop: the capture limit (256 KiB default) bounds memory,
+	// but the model sees at most shellOutputBudgetBytes, head-only, with the
+	// omitted tail recoverable through artifact_read. Declaring the budget (not
+	// folding here) keeps the archived record complete for that paging.
+	metadata[toolresult.MetadataModelVisibleBudgetKey] = shellOutputBudgetBytes
 	if !result.CaptureLimitDisabled && result.CaptureLimitBytes > 0 {
 		metadata["output_capture_limit_bytes"] = result.CaptureLimitBytes
 	}

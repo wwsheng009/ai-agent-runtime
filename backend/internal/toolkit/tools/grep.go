@@ -5448,6 +5448,9 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 	// refinement guidance, so the render layer (L4) must never fold the payload
 	// again - unconditionally, not only when a truncation flag happens to be set.
 	metadata[toolresult.MetadataSkipRenderTruncationKey] = true
+	// Declare grep's own window too: archive tiering and any fallback fold then
+	// follow grepOutputBudgetBytes instead of the layer backstop.
+	metadata[toolresult.MetadataModelVisibleBudgetKey] = grepOutputBudgetBytes
 	if byteTruncated {
 		metadata["results_truncated"] = true
 		metadata["truncation_reason"] = "byte_budget"

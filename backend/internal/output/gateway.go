@@ -139,7 +139,7 @@ func (g *Gateway) Process(ctx context.Context, result RawToolResult) (*Envelope,
 	// §6.1 contract: failed results keep the raw-output pointer (recovery
 	// hint), so the P1-1 below-threshold skip only applies to successes.
 	failedResult := strings.TrimSpace(result.Error) != ""
-	belowArchiveThreshold := input.ByteCount < artifactArchiveMinBytes()
+	belowArchiveThreshold := input.ByteCount < artifactArchiveMinBytes(result.Metadata)
 	if g.store != nil && strings.TrimSpace(text) != "" && !isArtifactReadWindow(result.Metadata) {
 		if !failedResult && belowArchiveThreshold {
 			// P1-1 archive tiering: tiny results (model already sees the full
@@ -314,16 +314,24 @@ func isArtifactReadWindow(metadata map[string]interface{}) bool {
 
 // artifactArchiveMinBytes resolves the P1-1 archive tiering threshold: text
 // below this size is skipped by the session archive (metadata records
-// artifact_skipped=below_threshold). Tied to the model-visible tool text
-// budget (budget/12 ≈ 1 KiB) so the tier moves with the budget knob: results
-// this small are fully visible to the model, never dereferenced, and only
-// add store/search-index noise.
-func artifactArchiveMinBytes() int {
-	min := modelToolTextByteBudget / 12
-	if min < 256 {
-		return 256
+// artifact_skipped=below_threshold).
+//
+// The threshold is the model-visible window of the producing tool - its
+// declared budget when it has one (shell 32 KiB, view/grep 32 KiB, glob/ls
+// 16 KiB), the render-layer backstop otherwise - because that is exactly the
+// line below which the model already sees the whole body: a pointer would
+// never be dereferenced and only adds store/search-index noise. A fixed
+// fraction of the backstop (the old budget/12 ≈ 1 KiB) archived bodies the
+// model could read end to end and attached pointers for them.
+func artifactArchiveMinBytes(metadata map[string]interface{}) int {
+	window := modelToolTextByteBudget
+	if declared := toolresult.ModelVisibleBudgetBytes(metadata); declared > window {
+		window = declared
 	}
-	return min
+	if window > modelToolTextBudgetCeilingBytes {
+		window = modelToolTextBudgetCeilingBytes
+	}
+	return window
 }
 
 func prefersModelSummaryForLargeText(reducerName string) bool {

@@ -1109,3 +1109,178 @@ func TestFormatTruncatedToolTextForModel_PartialLineNoticeReportsByteCut(t *test
 	t.Logf("partial-line fold: rendered=%d bytes (budget 4096); completeLines=%d partialBytes=%d omittedBytes=%d",
 		len(got), completeLines, partialBytes, omittedBytes)
 }
+
+// TestRenderToolTextForModelHistory_HonorsDeclaredModelVisibleBudget pins the
+// tool-owned window contract: a tool that declares
+// toolresult.MetadataModelVisibleBudgetKey keeps that window in history instead
+// of being folded to the render-layer backstop, while the same body without a
+// declaration is folded as before.
+func TestRenderToolTextForModelHistory_HonorsDeclaredModelVisibleBudget(t *testing.T) {
+	body := strings.Repeat("declared budget line for shell output\n", 600)
+	if len(body) <= modelToolTextByteBudget {
+		t.Fatalf("precondition: body must exceed the layer backstop, got %d bytes", len(body))
+	}
+
+	declared := &Envelope{
+		ToolCallID: "call-declared-budget",
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey:                   toolresult.KindText,
+			toolresult.MetadataModelVisibleBudgetKey: 32 * 1024,
+		},
+	}
+	got := renderToolTextForModelHistory(body, "", declared)
+	// Every tool result is whitespace-normalized before rendering (TrimSpace),
+	// so "intact" means the whole body minus that pre-existing trim: a fold
+	// would drop thousands of bytes and add the fold notice.
+	if got != strings.TrimSpace(body) {
+		t.Fatalf("declared window must keep the body intact, got %d of %d bytes", len(got), len(body))
+	}
+	if strings.Contains(got, "output truncated for history safety") {
+		t.Fatalf("declared window must not be folded, got %q", got)
+	}
+
+	// The declaration must also move the fold point itself: the same tool's
+	// oversized body folds at the declared 32 KiB window instead of the layer
+	// backstop that the undeclared body below still falls back to.
+	oversized := strings.Repeat("declared budget line for shell output\n", 1200)
+	gotOversized := renderToolTextForModelHistory(oversized, "", declared)
+	if !strings.Contains(gotOversized, "output truncated for history safety") {
+		t.Fatalf("oversized body must still be folded, got %d bytes", len(gotOversized))
+	}
+	if len(gotOversized) > 32*1024 {
+		t.Fatalf("declared window must bound the folded payload, got %d bytes", len(gotOversized))
+	}
+	if len(gotOversized) < 24*1024 {
+		t.Fatalf("declared window must not collapse to the layer backstop, got %d bytes", len(gotOversized))
+	}
+
+	undeclared := &Envelope{
+		ToolCallID: "call-undeclared-budget",
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey: toolresult.KindText,
+		},
+	}
+	gotUndeclared := renderToolTextForModelHistory(body, "", undeclared)
+	if !strings.Contains(gotUndeclared, "output truncated for history safety") {
+		t.Fatalf("expected the undeclared body to be folded, got %d bytes", len(gotUndeclared))
+	}
+	if len(gotUndeclared) > modelToolTextByteBudget {
+		t.Fatalf("folded payload must fit the %d-byte backstop, got %d bytes", modelToolTextByteBudget, len(gotUndeclared))
+	}
+}
+
+// TestEffectiveModelToolTextBudget_ClampsDeclaredWindow pins the clamp around a
+// declared window: a bogus tiny value cannot starve the model window and a huge
+// one cannot blow up history.
+func TestEffectiveModelToolTextBudget_ClampsDeclaredWindow(t *testing.T) {
+	if got := effectiveModelToolTextBudget(nil); got != modelToolTextByteBudget {
+		t.Fatalf("no declaration must use the layer budget, got %d", got)
+	}
+	if got := effectiveModelToolTextBudget(map[string]interface{}{
+		toolresult.MetadataModelVisibleBudgetKey: 0,
+	}); got != modelToolTextByteBudget {
+		t.Fatalf("zero declaration must use the layer budget, got %d", got)
+	}
+	if got := effectiveModelToolTextBudget(map[string]interface{}{
+		toolresult.MetadataModelVisibleBudgetKey: 1,
+	}); got != modelToolTextByteBudget {
+		t.Fatalf("tiny declaration must fall back to the layer budget, got %d", got)
+	}
+	if got := effectiveModelToolTextBudget(map[string]interface{}{
+		toolresult.MetadataModelVisibleBudgetKey: 32 * 1024,
+	}); got != 32*1024 {
+		t.Fatalf("32 KiB declaration must be honored, got %d", got)
+	}
+	if got := effectiveModelToolTextBudget(map[string]interface{}{
+		toolresult.MetadataModelVisibleBudgetKey: 1024 * 1024,
+	}); got != modelToolTextBudgetCeilingBytes {
+		t.Fatalf("huge declaration must clamp to the ceiling %d, got %d", modelToolTextBudgetCeilingBytes, got)
+	}
+	if got := effectiveModelToolTextBudget(map[string]interface{}{
+		"tool_metadata": map[string]interface{}{
+			toolresult.MetadataModelVisibleBudgetKey: 32 * 1024,
+		},
+	}); got != 32*1024 {
+		t.Fatalf("nested declaration must be honored, got %d", got)
+	}
+}
+
+// TestRenderToolTextForModelHistory_DropsPointerForIntactOwnedWindow pins the
+// pointer gate for tools that own their window: an intact body carries no
+// record-id pointer (nothing was omitted, so nothing can be dereferenced),
+// while a folded body, a failed call and an artifact_read window keep it.
+func TestRenderToolTextForModelHistory_DropsPointerForIntactOwnedWindow(t *testing.T) {
+	const id = "art_9f8e7d6c5b4a39281706f5e4d3c2b1a0"
+	newEnvelope := func(meta map[string]interface{}) *Envelope {
+		merged := map[string]interface{}{
+			"artifact_id":          id,
+			"raw_bytes":            4096,
+			toolresult.MetadataKey: toolresult.KindText,
+		}
+		for key, value := range meta {
+			merged[key] = value
+		}
+		return &Envelope{ToolCallID: "call-pointer-gate", ArtifactIDs: []string{id}, Metadata: merged}
+	}
+	body := strings.Repeat("intact owned window body\n", 40)
+	pointer := "Full raw output artifact_id: " + id
+
+	intact := renderToolTextForModelHistory(body, "", newEnvelope(map[string]interface{}{
+		toolresult.MetadataSkipRenderTruncationKey: true,
+		"is_truncated": false,
+	}))
+	if strings.Contains(intact, pointer) {
+		t.Fatalf("intact owned window must not carry a pointer, got %q", intact)
+	}
+
+	folded := renderToolTextForModelHistory(body, "", newEnvelope(map[string]interface{}{
+		toolresult.MetadataSkipRenderTruncationKey: true,
+		"is_truncated": true,
+	}))
+	if !strings.Contains(folded, pointer) {
+		t.Fatalf("folded owned window must keep the pointer, got %q", folded)
+	}
+
+	failedWithErr := renderToolTextForModelHistory(body, "boom", newEnvelope(map[string]interface{}{
+		toolresult.MetadataSkipRenderTruncationKey: true,
+		"is_truncated": false,
+	}))
+	if !strings.Contains(failedWithErr, pointer) {
+		t.Fatalf("failed call must keep the pointer as recovery hint, got %q", failedWithErr)
+	}
+
+	window := renderToolTextForModelHistory(body, "", newEnvelope(map[string]interface{}{
+		toolresult.MetadataSkipRenderTruncationKey: true,
+		"is_truncated":       false,
+		"artifact_source_id": id,
+	}))
+	if !strings.Contains(window, pointer) {
+		t.Fatalf("artifact_read window must keep the pointer, got %q", window)
+	}
+}
+
+// TestRenderToolTextForModelHistory_FoldsCaptureTruncatedOutput pins the fix
+// for the capture-flag leak: output_truncated only reports that the raw stream
+// hit the retention limit, so the render layer must still fold and size the
+// payload instead of forwarding the whole capture to history.
+func TestRenderToolTextForModelHistory_FoldsCaptureTruncatedOutput(t *testing.T) {
+	body := strings.Repeat("capture truncated shell output line\n", 700)
+	if len(body) <= modelToolTextByteBudget {
+		t.Fatalf("precondition: body must exceed the layer backstop, got %d bytes", len(body))
+	}
+	envelope := &Envelope{
+		ToolCallID: "call-capture-truncated",
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey:  toolresult.KindText,
+			"output_truncated":      true,
+			"capture_limit_reached": true,
+		},
+	}
+	got := renderToolTextForModelHistory(body, "", envelope)
+	if !strings.Contains(got, "output truncated for history safety") {
+		t.Fatalf("capture-truncated output must still be folded for history, got %d bytes", len(got))
+	}
+	if len(got) > modelToolTextByteBudget {
+		t.Fatalf("folded payload must fit the %d-byte backstop, got %d bytes", modelToolTextByteBudget, len(got))
+	}
+}

@@ -215,12 +215,12 @@ func (f *FetchTool) Execute(ctx context.Context, params map[string]interface{}) 
 		metadata[toolresult.MetadataNextActionKey] = "内容超过 fetch 工具预算已截断；如需全文请改用 download 工具落盘，再分段查看。"
 	}
 
-	return stampToolOwnsOutput(&toolkit.ToolResult{
+	return stampToolOwnsOutputWithBudget(&toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,
 		Content:    returned,
 		Metadata:   metadata,
-	}), nil
+	}, fetchOutputBudgetBytes), nil
 }
 
 // truncateFetchOutput keeps the leading rune-safe prefix of text within budget

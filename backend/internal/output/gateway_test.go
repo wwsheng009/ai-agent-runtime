@@ -20,14 +20,14 @@ func TestGateway_StoresRawOutputAndReturnsReducedEnvelope(t *testing.T) {
 	defer func() { _ = store.Close() }()
 
 	gateway := NewGateway(store, NewTextReducer(80, 3))
-	// Body comfortably above the P1-1 archive tiering threshold (budget/12 ≈ 1 KiB)
-	// so the store path is exercised.
+	// Body comfortably above the P1-1 archive tiering threshold (the render-layer
+	// backstop, 12 KiB) so the store path is exercised.
 	rawOutput := strings.Join([]string{
 		"line 1: preparing",
 		"line 2: unique-needle",
 		"line 3: details",
 		"line 4: more details",
-		"line 5: tail " + strings.Repeat("pad ", 400),
+		"line 5: tail " + strings.Repeat("pad ", 4000),
 	}, "\n")
 
 	envelope, err := gateway.Process(context.Background(), RawToolResult{
@@ -120,7 +120,7 @@ func TestGateway_SkipsArchiveBelowTieringThreshold(t *testing.T) {
 	}
 
 	// Just above the threshold the archive path must still engage.
-	large := strings.Repeat("z", artifactArchiveMinBytes()+10)
+	large := strings.Repeat("z", artifactArchiveMinBytes(nil)+10)
 	envelope2, err := gateway.Process(context.Background(), RawToolResult{
 		SessionID:  "session-1",
 		ToolName:   "grep",
@@ -157,14 +157,14 @@ func TestGateway_DefaultReducers_HandleCommonFormats(t *testing.T) {
   "status": "ok",
   "items": [{"id":"a"},{"id":"b"}],
   "pad": %q
-}`, strings.Repeat("x", artifactArchiveMinBytes())),
+}`, strings.Repeat("x", artifactArchiveMinBytes(nil))),
 			expectedReducer: "json_summary",
 		},
 		{
 			name: "table",
 			content: strings.Join([]string{
 				"NAME\tSTATUS",
-				"job-a\tpassed " + strings.Repeat("p", artifactArchiveMinBytes()),
+				"job-a\tpassed " + strings.Repeat("p", artifactArchiveMinBytes(nil)),
 				"job-b\tfailed",
 			}, "\n"),
 			expectedReducer: "table_summary",
@@ -173,7 +173,7 @@ func TestGateway_DefaultReducers_HandleCommonFormats(t *testing.T) {
 			name: "log",
 			content: strings.Join([]string{
 				"2026-03-14 10:00:01 INFO starting worker",
-				"2026-03-14 10:00:02 ERROR failed to fetch artifact " + strings.Repeat("e", artifactArchiveMinBytes()),
+				"2026-03-14 10:00:02 ERROR failed to fetch artifact " + strings.Repeat("e", artifactArchiveMinBytes(nil)),
 			}, "\n"),
 			expectedReducer: "log_summary",
 		},
@@ -849,5 +849,58 @@ func TestGateway_RecordsOutcomeTelemetry(t *testing.T) {
 		observability.LabelErrorCode: "TOOL_INVALID_ARGS",
 	}).Get(); got != 1 {
 		t.Fatalf("failed outcome counter=%v", got)
+	}
+}
+
+// TestGateway_ArchiveTierFollowsDeclaredToolWindow pins the P1-1 archive floor
+// to the producing tool's own model-visible window: a body the model already
+// reads end to end (declared window, e.g. shell 32 KiB) needs no archived record
+// and no pointer, while a body beyond that window must be archived so the
+// omitted remainder stays recoverable.
+func TestGateway_ArchiveTierFollowsDeclaredToolWindow(t *testing.T) {
+	store, err := artifact.NewStore(nil)
+	if err != nil {
+		t.Fatalf("create artifact store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	gateway := NewGateway(store)
+	const shellWindow = 32 * 1024
+	metadata := map[string]interface{}{
+		toolresult.MetadataModelVisibleBudgetKey: shellWindow,
+	}
+
+	inside, err := gateway.Process(context.Background(), RawToolResult{
+		SessionID:  "session-1",
+		ToolName:   "run_command",
+		ToolCallID: "call-inside-window",
+		Content:    strings.Repeat("i", shellWindow-1024),
+		Metadata:   metadata,
+	})
+	if err != nil {
+		t.Fatalf("process in-window output: %v", err)
+	}
+	if len(inside.ArtifactIDs) != 0 {
+		t.Fatalf("expected no artifact id inside the declared window, got %v", inside.ArtifactIDs)
+	}
+	if got, _ := inside.Metadata["artifact_skipped"].(string); got != "below_threshold" {
+		t.Fatalf("expected artifact_skipped=below_threshold inside the window, got %#v", inside.Metadata["artifact_skipped"])
+	}
+
+	outside, err := gateway.Process(context.Background(), RawToolResult{
+		SessionID:  "session-1",
+		ToolName:   "run_command",
+		ToolCallID: "call-beyond-window",
+		Content:    strings.Repeat("o", shellWindow+1024),
+		Metadata:   metadata,
+	})
+	if err != nil {
+		t.Fatalf("process beyond-window output: %v", err)
+	}
+	if len(outside.ArtifactIDs) != 1 {
+		t.Fatalf("expected the beyond-window body to be archived, got %v", outside.ArtifactIDs)
+	}
+	if _, exists := outside.Metadata["artifact_skipped"]; exists {
+		t.Fatalf("unexpected artifact_skipped beyond the declared window: %#v", outside.Metadata["artifact_skipped"])
 	}
 }

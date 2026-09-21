@@ -33,6 +33,17 @@ const (
 	fetchOutputBudgetBytes = 32 * 1024
 	// artifactOutputBudgetBytes: raw archived bytes served per artifact_read page.
 	artifactOutputBudgetBytes = 32 * 1024
+	// shellOutputBudgetBytes: one shell command's model-visible window.
+	//
+	// Shell output is the one large payload whose *full* text must survive into
+	// the archive (there is no offset/limit continuation for a command; the
+	// omitted tail is recovered with artifact_read). The shell therefore keeps
+	// its captured output intact, declares this budget via
+	// toolresult.MetadataModelVisibleBudgetKey, and lets the render layer (L4)
+	// fold head-only beyond it. Declaring the budget (instead of folding here)
+	// is what keeps the archived record complete: the gateway archives the
+	// tool's content before the render layer folds it.
+	shellOutputBudgetBytes = 32 * 1024
 )
 
 // stampToolOwnsOutput declares that a tool already shaped its own payload and
@@ -48,5 +59,36 @@ func stampToolOwnsOutput(result *toolkit.ToolResult) *toolkit.ToolResult {
 		result.Metadata = map[string]interface{}{}
 	}
 	result.Metadata[toolresult.MetadataSkipRenderTruncationKey] = true
+	return result
+}
+
+// stampToolOwnsOutputWithBudget stamps a tool that owns its window AND declares
+// that window as its model-visible budget.
+//
+// The declared window is what keeps the rest of the pipeline aligned with the
+// tool's real contract: the gateway's archive tiering floor (a result the model
+// can read end to end needs no archived record) and the render-layer fold
+// budget both follow it, so neither falls back to a fraction of, or the whole,
+// one-size-fits-all backstop.
+func stampToolOwnsOutputWithBudget(result *toolkit.ToolResult, bytes int) *toolkit.ToolResult {
+	return declareModelVisibleBudget(stampToolOwnsOutput(result), bytes)
+}
+
+// declareModelVisibleBudget attaches a declared model-visible budget to a
+// result without folding its content.
+//
+// Unlike stampToolOwnsOutput this does NOT opt out of render-layer folding: the
+// tool keeps its payload intact (so the archive and artifact_read keep the full
+// output) and the render layer folds head-only at the declared budget, emitting
+// the raw-output pointer for the omitted tail. Used by shell output, where the
+// capture limit bounds memory but the model window is the shell's own budget.
+func declareModelVisibleBudget(result *toolkit.ToolResult, bytes int) *toolkit.ToolResult {
+	if result == nil || bytes <= 0 {
+		return result
+	}
+	if result.Metadata == nil {
+		result.Metadata = map[string]interface{}{}
+	}
+	result.Metadata[toolresult.MetadataModelVisibleBudgetKey] = bytes
 	return result
 }

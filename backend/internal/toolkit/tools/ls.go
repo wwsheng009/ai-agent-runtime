@@ -270,12 +270,12 @@ func (l *LsTool) Execute(ctx context.Context, params map[string]interface{}) (*t
 		toolresult.MarkEmptySuccess(metadata)
 	}
 
-	return stampToolOwnsOutput(&toolkit.ToolResult{
+	return stampToolOwnsOutputWithBudget(&toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,
 		Content:    output.String(),
 		Metadata:   metadata,
-	}), nil
+	}, lsOutputBudgetBytes), nil
 }
 
 // lsTrailerReserve is the worst-case byte length of the lines ls appends after

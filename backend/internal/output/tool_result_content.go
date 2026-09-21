@@ -48,6 +48,47 @@ func ModelToolTextByteBudget() int {
 	return modelToolTextByteBudget
 }
 
+const (
+	// modelToolTextBudgetFloorBytes bounds a tool-declared window from below: a
+	// declared budget smaller than this would starve the model of the very
+	// output the tool produced, so the layer budget stays the effective floor.
+	modelToolTextBudgetFloorBytes = 4 * 1024
+	// modelToolTextBudgetCeilingBytes bounds a tool-declared window from above:
+	// history must stay bounded even if a tool asks for a wider window.
+	modelToolTextBudgetCeilingBytes = 64 * 1024
+)
+
+// effectiveModelToolTextBudget resolves the byte budget the render layer folds
+// a tool result to.
+//
+// A tool may declare its own model-visible window through
+// toolresult.MetadataModelVisibleBudgetKey (shell output does) without opting
+// out of render-layer folding. Honoring the declaration is what gives the tool
+// "its own budget": the payload stays intact for the archive and artifact_read,
+// while the model-visible head is sized by the tool's own contract instead of
+// the one-size-fits-all backstop. The declared value is clamped to
+// [modelToolTextByteBudget, modelToolTextBudgetCeilingBytes]; without a
+// declaration the layer budget applies.
+func effectiveModelToolTextBudget(metadata map[string]interface{}) int {
+	declared := toolresult.ModelVisibleBudgetBytes(metadata)
+	if declared <= 0 {
+		return modelToolTextByteBudget
+	}
+	// The declared window is honored both ways, but never below the layer
+	// backstop (nor below the sanity floor) and never above the ceiling.
+	floor := modelToolTextByteBudget
+	if floor < modelToolTextBudgetFloorBytes {
+		floor = modelToolTextBudgetFloorBytes
+	}
+	if declared < floor {
+		return floor
+	}
+	if declared > modelToolTextBudgetCeilingBytes {
+		return modelToolTextBudgetCeilingBytes
+	}
+	return declared
+}
+
 // RenderFullToolResultContent builds the full tool_result text that should be
 // sent back to the model. It preserves the original tool output instead of the
 // reduced envelope summary used for CLI/event rendering.
@@ -455,7 +496,13 @@ func isExternalMCPToolResult(envelope *Envelope) bool {
 //
 // Canonical key: "is_truncated" (controls tools that own their paging window).
 // Legacy aliases kept readable so existing emitters stay compatible:
-// "results_truncated" (grep byte budget), "output_truncated", "truncated".
+// "results_truncated" (grep byte budget), "truncated".
+//
+// "output_truncated" is deliberately NOT part of this vocabulary: it is a
+// capture-layer fact ("the raw stream exceeded the retention limit"), not a
+// statement that the payload was folded to a model-visible window. Treating it
+// as tool-owned truncation is what let 256 KiB exec captures bypass the render
+// layer entirely.
 // toolresult.MetadataSkipRenderTruncationKey ("skip_render_truncation") is part
 // of this vocabulary: a tool that sets it opts out of render-layer (L4)
 // truncation management entirely and owns its own paging window.
@@ -463,8 +510,24 @@ var toolTruncationMetadataKeys = []string{
 	"skip_render_truncation",
 	"is_truncated",
 	"results_truncated",
-	"output_truncated",
 	"truncated",
+}
+
+// toolFoldedOwnWindowKeys is the subset of the truncation vocabulary that means
+// "this payload was actually folded to the producing tool's own window". It is
+// the gate for attaching a raw-output pointer to a payload whose tool owns its
+// window: an intact body needs no pointer, a folded one does.
+var toolFoldedOwnWindowKeys = []string{
+	"is_truncated",
+	"results_truncated",
+	"truncated",
+}
+
+// toolFoldedOwnWindow reports whether the producing tool published fold
+// metadata for this result, i.e. whether bytes are missing from the body the
+// model is about to see.
+func toolFoldedOwnWindow(metadata map[string]interface{}) bool {
+	return metadataFlagTruthy(metadata, toolFoldedOwnWindowKeys)
 }
 
 // toolTruncatedUpstream reports whether the controlled tool already truncated
@@ -484,7 +547,27 @@ func toolTruncatedUpstream(metadata map[string]interface{}) bool {
 	if toolresult.SkipsRenderTruncation(metadata) {
 		return true
 	}
-	for _, key := range toolTruncationMetadataKeys {
+	return metadataFlagTruthy(metadata, toolTruncationMetadataKeys)
+}
+
+// metadataFlagTruthy scans metadata (flat or nested under "tool_metadata") for
+// the first truthy value among keys, tolerating the bool/string/number
+// encodings that tool emitters and JSON round-trips produce.
+func metadataFlagTruthy(metadata map[string]interface{}, keys []string) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	if flagsTruthyIn(metadata, keys) {
+		return true
+	}
+	if nested, ok := metadata["tool_metadata"].(map[string]interface{}); ok {
+		return flagsTruthyIn(nested, keys)
+	}
+	return false
+}
+
+func flagsTruthyIn(metadata map[string]interface{}, keys []string) bool {
+	for _, key := range keys {
 		switch value := metadata[key].(type) {
 		case bool:
 			if value {
@@ -546,18 +629,22 @@ func renderToolTextForModelHistory(content interface{}, toolErr string, envelope
 		}
 	}
 	notice := modelArtifactNotice(envelope)
+	// A tool may declare its own model-visible window (shell output does): the
+	// fold budget below then follows the tool's contract instead of the
+	// one-size-fits-all backstop.
+	budget := effectiveModelToolTextBudget(envelopeMetadata(envelope))
 	// Controlled tool that already truncated its own output owns the final shape
 	// of its payload: it folded to its own limit, published continuation metadata
 	// (offset/limit/eof/artifact) and told the model how to page through the rest.
 	// Folding again here would charge the byte budget twice, emit a duplicate
 	// "middle omitted" marker and contradict the tool's own continuation notice.
 	if toolTruncatedUpstream(envelopeMetadata(envelope)) {
-		return appendToolArtifactNotice(full, notice)
+		return attachOwnedWindowPointer(full, toolErr, envelope, notice)
 	}
 	if strings.TrimSpace(full) == "" {
 		return appendToolArtifactNotice(full, notice)
 	}
-	if len(full) <= modelToolTextByteBudget {
+	if len(full) <= budget {
 		// The raw body fits the budget. No truncation happened, so a record-id
 		// pointer is dropped unless it still adds value: failed results keep
 		// the recovery hint, and artifact_read windows (artifact_source_id)
@@ -583,13 +670,39 @@ func renderToolTextForModelHistory(content interface{}, toolErr string, envelope
 	// next step" contract, so no artifact id is threaded through this path. The
 	// artifact notice (when one exists) is still appended below.
 	if notice == "" {
-		return formatTruncatedToolTextForModel(full, modelToolTextByteBudget)
+		return formatTruncatedToolTextForModel(full, budget)
 	}
-	bodyBudget := modelToolTextByteBudget - len(notice) - len("\n\n")
+	bodyBudget := budget - len(notice) - len("\n\n")
 	if bodyBudget <= 0 {
-		return safePrefixByBytes(notice, modelToolTextByteBudget)
+		return safePrefixByBytes(notice, budget)
 	}
 	return appendToolArtifactNotice(formatTruncatedToolTextForModel(full, bodyBudget), notice)
+}
+
+// attachOwnedWindowPointer decides the raw-output pointer for a payload whose
+// producing tool already owns its window (skip_render_truncation).
+//
+// The pointer is a recovery aid, not decoration: it is attached only when it
+// can be acted on. A body that was really folded (the tool published fold
+// metadata), a failed call (the pointer doubles as the recovery hint) and an
+// artifact_read window (the pointer is the paging contract itself) keep it;
+// an intact body that the model can already read in full does not, because a
+// pointer there only invites a pointless dereference.
+func attachOwnedWindowPointer(full string, toolErr string, envelope *Envelope, notice string) string {
+	metadata := envelopeMetadata(envelope)
+	if notice == "" {
+		return full
+	}
+	if !isIDArtifactNotice(notice) {
+		// On-disk path artifacts stay discoverable even for complete bodies.
+		observability.RecordToolPointerNotice(observability.PointerNoticeKindPath)
+		return appendToolArtifactNotice(full, notice)
+	}
+	if !toolFoldedOwnWindow(metadata) && !failedResult(toolErr, envelope) && !isArtifactReadWindow(metadata) {
+		return full
+	}
+	observability.RecordToolPointerNotice(observability.PointerNoticeKindID)
+	return appendToolArtifactNotice(full, notice)
 }
 
 // isIDArtifactNotice reports whether the notice points at an artifact record

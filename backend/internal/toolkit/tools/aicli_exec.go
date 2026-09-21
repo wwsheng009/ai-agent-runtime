@@ -504,6 +504,10 @@ func buildAICLIExecMetadata(command []string, cwd string, req aicliExecRequest, 
 		"executed_at":                   time.Now().Unix(),
 		"nested_depth":                  currentAICLIExecDepth(),
 	}
+	// aicli_exec runs a command like shell does, so its output declares the same
+	// model-visible window: the capture limit bounds memory, the render layer
+	// folds head-only beyond this budget, and the archived stream stays pageable.
+	metadata[toolresult.MetadataModelVisibleBudgetKey] = shellOutputBudgetBytes
 	if !capture.CaptureLimitDisabled && capture.CaptureLimitBytes > 0 {
 		metadata["output_capture_limit_bytes"] = capture.CaptureLimitBytes
 	}

@@ -171,7 +171,7 @@ func (v *ViewTool) Execute(ctx context.Context, params map[string]interface{}) (
 	} else {
 		result, execErr = v.executeBatch(ctx, requests, p.Compact)
 	}
-	return stampToolOwnsOutput(result), execErr
+	return stampToolOwnsOutputWithBudget(result, viewOutputBudgetBytes), execErr
 }
 
 func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolkit.ToolResult, error) {
