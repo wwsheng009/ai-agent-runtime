@@ -12,6 +12,7 @@ const (
 	chatSlashCommandGroupPermission chatSlashCommandGroup = "permission"
 	chatSlashCommandGroupFunctions  chatSlashCommandGroup = "functions"
 	chatSlashCommandGroupShell      chatSlashCommandGroup = "shell"
+	chatSlashCommandGroupWeb        chatSlashCommandGroup = "web"
 	chatSlashCommandGroupHelp       chatSlashCommandGroup = "help"
 )
 
@@ -624,6 +625,19 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 				{Token: "disable", Summary: "停用并热重载（disable <name>）"},
 				{Token: "remove", Summary: "删除并热重载（remove <name>）"},
 				{Token: "reload", Summary: "重新加载配置并重连"},
+			},
+		},
+		{
+			Name:        "/web",
+			Usage:       "/web [token|endpoints|open|status]",
+			Summary:     "管理微型 Web 客户端（显示 URL/令牌、列出端点、打开浏览器）",
+			Group:       string(chatSlashCommandGroupWeb),
+			AcceptsArgs: true,
+			Args: []chatSlashCommandArgSpec{
+				{Token: "token", Summary: "显示当前 Web 写令牌"},
+				{Token: "endpoints", Summary: "显示全部 Web 调试端点清单"},
+				{Token: "open", Summary: "在浏览器中打开 Web 客户端页面（非回环模式则附加令牌参数）"},
+				{Token: "status", Summary: "显示 Web 服务器状态（默认）"},
 			},
 		},
 		{

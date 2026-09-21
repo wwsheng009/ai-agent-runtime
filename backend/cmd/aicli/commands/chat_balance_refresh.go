@@ -278,8 +278,17 @@ func (r *chatAccountBalanceRefresher) refreshOnce() {
 		&provider,
 		chatAccountBalanceRefreshTimeout,
 	)
+	// Cache any freshly-detected site-type metadata on the refresher's target
+	// copy so the gate (prepareProviderForPeriodicBalanceRefresh), which reads
+	// the target via r.target(), does not re-probe the same upstream every
+	// cycle, and a subsequent refresh can skip re-detection. Applied even on
+	// fetch failure (transient / unsupported) to suppress repeated probing; it
+	// only tags the target and never overwrites a cached account snapshot.
+	r.cacheDetectedSiteType(outcome, generation)
+
 	if err != nil || outcome.Account == nil {
-		// Keep the last successful/cached value on transient refresh failures.
+		// No balance to display this cycle: keep the last successful/cached
+		// value on transient refresh failures.
 		return
 	}
 	provider.Account = cloneProviderAccountSnapshot(outcome.Account)
@@ -298,15 +307,54 @@ func (r *chatAccountBalanceRefresher) refreshOnce() {
 	r.session.applyAccountBalanceRefresh(providerName, provider, generation, r)
 }
 
+// cacheDetectedSiteType persists site-type detection metadata from a refresh
+// outcome onto the refresher's target provider. The target copy is what the
+// periodic-refresh gate reads on subsequent cycles, so caching here is what
+// suppresses re-probing unsupported/generic upstreams (e.g. a generic openai
+// gateway) and lets a successful DeepSeek detection skip re-detection on the
+// next tick. It never touches the cached account snapshot. Stale outcomes
+// (emitted by a refresh that finished after a provider switch) are dropped via
+// the generation guard, mirroring applyAccountBalanceRefresh.
+func (r *chatAccountBalanceRefresher) cacheDetectedSiteType(outcome liveBalanceOutcome, generation uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.generation != generation {
+		return
+	}
+	if outcome.SiteType != "" {
+		r.provider.SiteType = outcome.SiteType
+	}
+	if outcome.SiteTypeConfidence != "" {
+		r.provider.SiteTypeConfidence = outcome.SiteTypeConfidence
+	}
+	if outcome.SiteTypeDetectedAt != "" {
+		r.provider.SiteTypeDetectedAt = outcome.SiteTypeDetectedAt
+	}
+}
+
 func prepareProviderForPeriodicBalanceRefresh(provider *config.Provider) bool {
 	if provider == nil {
 		return false
 	}
 	siteType := siteaccount.NormalizeSiteType(provider.SiteType)
-	if (siteType == "" || siteType == siteaccount.SiteTypeUnknown) && provider.Account != nil {
-		siteType = siteaccount.SiteTypeFromAccountSource(provider.Account.Source)
-		if siteaccount.SupportsAccountFetch(siteType) {
-			provider.SiteType = string(siteType)
+	if siteType == "" || siteType == siteaccount.SiteTypeUnknown {
+		if provider.Account != nil {
+			// Older caches may predate the site_type field; recover it from the
+			// persisted account source.
+			recovered := siteaccount.SiteTypeFromAccountSource(provider.Account.Source)
+			if siteaccount.SupportsAccountFetch(recovered) {
+				provider.SiteType = string(recovered)
+				siteType = recovered
+			}
+		}
+		if siteType == siteaccount.SiteTypeUnknown {
+			// Generic / openai-protocol providers do not declare a site_type.
+			// Allow a single auto-detection probe so a supported upstream (e.g.
+			// DeepSeek) can be discovered without an explicit login or
+			// `aicli balance --refresh`. Once a detection has been recorded,
+			// stop probing so unsupported/generic endpoints are not hit every
+			// refresh cycle.
+			return provider.SiteTypeDetectedAt == ""
 		}
 	}
 	return siteaccount.SupportsAccountFetch(siteType)

@@ -249,3 +249,4 @@ default: off
 | editor 侧是否存在可用的"我已启动 gopls"信号（需调研 Zed/VS Code 扩展面） | `Phase4-start` |
 | ACP 默认值是否应随 `clientCapabilities` 变化 | `Phase5-start` |
 | 多 workspace 窗口共享一个 project 时的 LSP 复用策略 | `Phase4-start` |
+| [`../../lsp/03`](../../lsp/03-implementation-plan-and-acceptance.md) 的验收项 A1–A11 逐条关闭（含 A10 等待上限、A11 刻意差异承认） | `Phase4-start` |

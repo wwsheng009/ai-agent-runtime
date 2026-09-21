@@ -40,12 +40,12 @@ type Config struct {
 	// ConfigLayers, ConfigOrigins and ConfigMergeMode describe how this config
 	// was assembled when layered merging is active. They are diagnostics only
 	// and never participate in YAML decoding.
-	ConfigLayers    []ConfigLayer     `yaml:"-" mapstructure:"-"`
-	ConfigOrigins   map[string]string `yaml:"-" mapstructure:"-"`
+	ConfigLayers  []ConfigLayer     `yaml:"-" mapstructure:"-"`
+	ConfigOrigins map[string]string `yaml:"-" mapstructure:"-"`
 	// ConfigOriginFiles maps the same key paths to the layer file that supplied
 	// them, which is what write routing (see config_write_route.go) needs.
 	ConfigOriginFiles map[string]string `yaml:"-" mapstructure:"-"`
-	ConfigMergeMode MergeMode         `yaml:"-" mapstructure:"-"`
+	ConfigMergeMode   MergeMode         `yaml:"-" mapstructure:"-"`
 }
 
 // ProvidersConfig holds the provider collection configuration.
@@ -171,7 +171,17 @@ type ModelCapabilitySpec struct {
 	NativeTools     NativeToolCapabilities `yaml:"native_tools" mapstructure:"native_tools" json:"native_tools"`
 	// ReasoningModel 显式声明该模型是否属于 reasoning/thinking 模型。
 	// 运行时不再根据 reasoning_efforts / budgets 做隐式推断。
-	ReasoningModel         bool           `yaml:"reasoning_model" mapstructure:"reasoning_model" json:"reasoning_model"`
+	ReasoningModel bool `yaml:"reasoning_model" mapstructure:"reasoning_model" json:"reasoning_model"`
+	// ReplayReasoningContent 显式声明该 (provider, model) 端点是否要求把
+	// assistant 消息的 reasoning_content 回传给 API（thinking 模式的回传契约）。
+	//
+	// 该契约属于端点行为而不是厂商身份：第三方网关/聚合站即使名字和域名都
+	// 不含 deepseek，只要后端是 thinking 模式，同样会因为缺少该字段而返回
+	// HTTP 400。因此这里提供显式声明，优先级高于内置的名称启发式：
+	//   - nil   = 未声明，回退到 provider/model 名称启发式（保持既有行为）；
+	//   - true  = 强制回传（用于名字里不含 deepseek 的第三方站点）；
+	//   - false = 禁止注入（用于名字里含 deepseek 但并不强制该契约的站点）。
+	ReplayReasoningContent *bool          `yaml:"replay_reasoning_content" mapstructure:"replay_reasoning_content" json:"replay_reasoning_content,omitempty"`
 	ReasoningEfforts       []string       `yaml:"reasoning_efforts" mapstructure:"reasoning_efforts" json:"reasoning_efforts"`
 	ReasoningEffortBudgets map[string]int `yaml:"reasoning_effort_budgets" mapstructure:"reasoning_effort_budgets" json:"reasoning_effort_budgets"`
 	// DefaultReasoningEffort 保留兼容字段；当前运行时不再依赖它做默认推断。
@@ -767,7 +777,7 @@ type SkillsRuntimeConfig struct {
 	//   - "auto"：按 IsDocumentMode() 规则（Codex 格式、无 handler/workflow → 文档模式）；
 	//   - "off"（默认）：保持现状，Codex 技能走 executeDefault 子调用。
 	// 显式声明 execution_mode: document 的技能始终为文档模式，与本开关无关。
-	DocumentMode       string `yaml:"document_mode" mapstructure:"document_mode" env:"SKILLS_RUNTIME_DOCUMENT_MODE"`
+	DocumentMode string `yaml:"document_mode" mapstructure:"document_mode" env:"SKILLS_RUNTIME_DOCUMENT_MODE"`
 	// CatalogBudgetChars 约束 catalog（技能目录）在上下文中的字符开销。
 	// 默认 8000（镜像 Codex min(8000 字符, 上下文 2%)），0 表示使用默认。
 	CatalogBudgetChars int `yaml:"catalog_budget_chars" mapstructure:"catalog_budget_chars" env:"SKILLS_RUNTIME_CATALOG_BUDGET_CHARS"`

@@ -95,19 +95,14 @@ func (s *ShellFeedback) Document() render.Document {
 
 	// Output — Phase 3 head/tail preview via cell; never pass raw ESC/OSC.
 	if strings.TrimSpace(s.output) != "" {
-		opts := cell.DefaultPreviewOptions()
+		opts := cell.ToolDisplayPreviewOptions()
 		opts.AllowANSI = false
+		// The fold is display-only: the complete text stays in the session, and
+		// Ctrl+T is the owned interactive transcript view that shows it. Without
+		// the hint the marker is a dead end.
+		opts.Hint = "Ctrl+T 查看完整文本"
 		if s.showFull {
-			opts.MaxLines = 10000
-			opts.HeadLines = 10000
-			opts.TailLines = 0
-			opts.MaxBytes = 0
-		} else {
-			opts.MaxLines = 8
-			opts.HeadLines = 4
-			opts.TailLines = 2
-			opts.MaxBytes = 4096
-			opts.MaxLineWidth = 200
+			opts.Expanded = true
 		}
 		preview := cell.BuildPreview(s.output, opts)
 		for _, line := range preview.Lines {
@@ -125,7 +120,9 @@ func (s *ShellFeedback) Document() render.Document {
 		if preview.OmittedLines > 0 || preview.ByteTruncated {
 			lines = append(lines, render.Line{Spans: []render.Span{
 				{Text: "  ╰─ ", Style: render.Style{Role: string(style.RoleTextMuted), Dim: true}},
-				{Text: fmt.Sprintf("(%d 行, 已截断)", preview.TotalLines), Style: render.Style{Role: string(style.RoleInfo)}},
+				// Same wording rule as cell preview markers: this fold is a
+				// rendering choice, so it must not read as "the output is gone".
+				{Text: fmt.Sprintf("(共 %d 行, 此处仅显示预览; Ctrl+T 查看完整文本)", preview.TotalLines), Style: render.Style{Role: string(style.RoleInfo)}},
 			}})
 		}
 	}

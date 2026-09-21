@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 )
 
 func TestLoadCachedRuntimeConfig_ReusesSamePath(t *testing.T) {
@@ -74,6 +77,97 @@ func TestLoadCachedRuntimeConfig_MissingFileIsSoftMiss(t *testing.T) {
 	}
 	if loadedPath != missing {
 		t.Fatalf("expected loaded path %q, got %q", missing, loadedPath)
+	}
+}
+
+// TestLoadCachedRuntimeConfig_MergesUserAndProjectLayers pins the merge
+// semantics for the .aicli runtime.yaml layers: the project layer overrides only
+// the keys it writes, so the user layer's remaining settings survive.
+func TestLoadCachedRuntimeConfig_MergesUserAndProjectLayers(t *testing.T) {
+	resetChatRuntimeConfigCacheForTest()
+	t.Cleanup(resetChatRuntimeConfigCacheForTest)
+
+	home := isolateInitHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	workspace := t.TempDir()
+	t.Chdir(workspace)
+
+	userConfig := filepath.Join(home, ".aicli", aiclipaths.DefaultRuntimeConfigFileName)
+	writeTestFile(t, userConfig, "agent:\n  maxSteps: 7\n  defaultModel: user-model\n")
+	projectConfig := filepath.Join(workspace, ".aicli", aiclipaths.DefaultRuntimeConfigFileName)
+	writeTestFile(t, projectConfig, "agent:\n  defaultModel: project-model\n")
+
+	merged, loadedPath, err := loadCachedRuntimeConfig(projectConfig)
+	if err != nil {
+		t.Fatalf("merged load: %v", err)
+	}
+	if merged == nil {
+		t.Fatal("expected merged config")
+	}
+	if merged.Agent.MaxMaxSteps != 7 {
+		t.Fatalf("user-layer key lost in merge: maxSteps = %d, want 7", merged.Agent.MaxMaxSteps)
+	}
+	if merged.Agent.DefaultModel != "project-model" {
+		t.Fatalf("project layer must override the user layer: model = %q", merged.Agent.DefaultModel)
+	}
+	if filepath.Clean(loadedPath) != filepath.Clean(projectConfig) {
+		t.Fatalf("effective source = %q, want the highest present layer %q", loadedPath, projectConfig)
+	}
+
+	// Both layer paths name the same merged stack: entering through the user
+	// layer must still see the project override.
+	viaUser, userPath, err := loadCachedRuntimeConfig(userConfig)
+	if err != nil {
+		t.Fatalf("user-layer entry point: %v", err)
+	}
+	if viaUser == nil || viaUser.Agent.DefaultModel != "project-model" {
+		t.Fatalf("user-layer entry point must load the merged stack, got %#v", viaUser)
+	}
+	if filepath.Clean(userPath) != filepath.Clean(projectConfig) {
+		t.Fatalf("user-layer entry point source = %q, want %q", userPath, projectConfig)
+	}
+
+	// Editing a layer must invalidate the merged cache.
+	writeTestFile(t, userConfig, "agent:\n  maxSteps: 11\n  defaultModel: user-model\n")
+	reloaded, _, err := loadCachedRuntimeConfig(projectConfig)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Agent.MaxMaxSteps != 11 {
+		t.Fatalf("merged cache not invalidated: maxSteps = %d, want 11", reloaded.Agent.MaxMaxSteps)
+	}
+}
+
+// TestLoadCachedRuntimeConfig_ExplicitPathIsNotMerged: an explicit (non-layer)
+// path is a deliberate single-file selection, so .aicli layers must not leak in.
+func TestLoadCachedRuntimeConfig_ExplicitPathIsNotMerged(t *testing.T) {
+	resetChatRuntimeConfigCacheForTest()
+	t.Cleanup(resetChatRuntimeConfigCacheForTest)
+
+	home := isolateInitHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Chdir(t.TempDir())
+
+	writeTestFile(t, filepath.Join(home, ".aicli", aiclipaths.DefaultRuntimeConfigFileName), "agent:\n  maxSteps: 7\n")
+
+	explicit := filepath.Join(t.TempDir(), "explicit-runtime.yaml")
+	writeTestFile(t, explicit, "agent:\n  defaultModel: explicit-model\n")
+
+	cfg, loadedPath, err := loadCachedRuntimeConfig(explicit)
+	if err != nil {
+		t.Fatalf("explicit load: %v", err)
+	}
+	if cfg == nil || cfg.Agent.DefaultModel != "explicit-model" {
+		t.Fatalf("explicit config = %#v, want defaultModel=explicit-model", cfg)
+	}
+	if want := runtimecfg.DefaultRuntimeConfig().Agent.MaxMaxSteps; cfg.Agent.MaxMaxSteps != want {
+		t.Fatalf("explicit path must not merge .aicli layers: maxSteps = %d, want %d", cfg.Agent.MaxMaxSteps, want)
+	}
+	if filepath.Clean(loadedPath) != filepath.Clean(explicit) {
+		t.Fatalf("loaded path = %q, want %q", loadedPath, explicit)
 	}
 }
 

@@ -203,6 +203,13 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			model, width, rows := transcriptOverlayPagerInputs(state)
 			state.TranscriptOverlay.Pager.SetFollowBottom(model, width, rows, a.Follow)
 		}
+	case TranscriptPagerSetExpand:
+		if state.TranscriptOverlay.Active && transcriptPagerLeaseMatches(state.TranscriptOverlay, a.LeaseID) {
+			model, width, rows := transcriptOverlayPagerInputs(state)
+			model.ExpandAll = a.Expand
+			state.TranscriptOverlay.Pager.ExpandAll = a.Expand
+			state.TranscriptOverlay.Pager.Reconcile(model, width, rows)
+		}
 	case EffectResult:
 		state.Effects.Count++
 		state.Effects.Last = a
@@ -1107,10 +1114,12 @@ func transcriptOverlayPagerInputs(state UIControllerState) (TranscriptPagerModel
 	if height < 1 {
 		height = minFullScreenListHeight
 	}
-	return NewTranscriptPagerModel(TranscriptPagerSnapshot{
+	model := NewTranscriptPagerModel(TranscriptPagerSnapshot{
 		Transcript: state.Transcript,
 		Active:     state.Active,
-	}), width, transcriptPagerViewportRows(height)
+	})
+	model.ExpandAll = state.TranscriptOverlay.Pager.ExpandAll
+	return model, width, transcriptPagerViewportRows(height)
 }
 
 // transcriptPagerLeaseMatches accepts a zero lease only for migration tests

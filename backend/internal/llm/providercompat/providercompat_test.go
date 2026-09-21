@@ -571,6 +571,85 @@ func TestReplayableOpenAIReasoningContent(t *testing.T) {
 	}
 }
 
+// The reasoning_content replay contract is a property of the endpoint's
+// behavior, not of the vendor's identity: a third-party gateway that fronts a
+// thinking-mode backend enforces the same "reasoning_content must be passed
+// back" rule while matching none of the DeepSeek name/base-URL/model
+// substrings. A declared capability must decide the contract instead.
+func TestReplayableOpenAIReasoningContentHonorsDeclaredCapability(t *testing.T) {
+	reasoning := &types.ReasoningBlock{
+		Provider:       "sub.aiok.club",
+		Summary:        "think",
+		ReplayRequired: false,
+	}
+	declaredTrue := true
+	capabilities := map[string]agentconfig.ModelCapabilitySpec{
+		"ds-v4": {ReplayReasoningContent: &declaredTrue},
+	}
+
+	// Baseline: with nothing declared the name heuristic misses the endpoint
+	// entirely, which is exactly the gap the declaration closes.
+	if got, ok := ReplayableOpenAIReasoningContent(Context{ProviderName: "sub.aiok.club", Model: "ds-v4"}, nil, reasoning); ok {
+		t.Fatalf("undeclared non-deepseek endpoint must not replay reasoning content, got (%q, %v)", got, ok)
+	}
+
+	declaredCtx := Context{
+		ProviderName:           "sub.aiok.club",
+		Model:                  "ds-v4",
+		ConfiguredCapabilities: capabilities,
+	}
+	got, ok := ReplayableOpenAIReasoningContent(declaredCtx, nil, reasoning)
+	if !ok {
+		t.Fatal("declared replay contract must replay reasoning content")
+	}
+	if got != "think" {
+		t.Fatalf("expected raw reasoning text to be replayed, got %q", got)
+	}
+
+	// A keyless assistant turn (no reasoning, no tool calls) must also carry
+	// the key once the endpoint declares the contract.
+	got, ok = ReplayableOpenAIReasoningContent(declaredCtx, nil, nil)
+	if !ok {
+		t.Fatal("declared replay contract must emit a key for keyless turns")
+	}
+	if got != "" {
+		t.Fatalf("expected an empty replayed key, got %q", got)
+	}
+}
+
+// A provider whose name matches the heuristic but whose endpoint does not
+// enforce the contract can opt out, including provider-wide via the wildcard.
+func TestReplayableOpenAIReasoningContentDeclaredFalseOverridesDeepSeekName(t *testing.T) {
+	declaredFalse := false
+	ctx := Context{
+		ProviderName: "deepseek-mirror",
+		Model:        "deepseek-v4-flash",
+		ConfiguredCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"*": {ReplayReasoningContent: &declaredFalse},
+		},
+	}
+	if got, ok := ReplayableOpenAIReasoningContent(ctx, nil, nil); ok {
+		t.Fatalf("declared false must suppress the injected key, got (%q, %v)", got, ok)
+	}
+}
+
+// A per-model entry that leaves the field unset must not shadow a
+// provider-wide declaration.
+func TestReplayableOpenAIReasoningContentWildcardCoversUndeclaredModel(t *testing.T) {
+	declaredTrue := true
+	ctx := Context{
+		ProviderName: "sub.aiok.club",
+		Model:        "ds-v4",
+		ConfiguredCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"ds-v4": {ReasoningModel: true},
+			"*":     {ReplayReasoningContent: &declaredTrue},
+		},
+	}
+	if _, ok := ReplayableOpenAIReasoningContent(ctx, nil, nil); !ok {
+		t.Fatal("wildcard declaration must apply when the per-model entry leaves the field unset")
+	}
+}
+
 func TestLooksLikeOpenAIReasoningModel(t *testing.T) {
 	if !LooksLikeOpenAIReasoningModel("gpt-5.4-mini") {
 		t.Fatal("expected gpt-5 model to look like an openai reasoning model")

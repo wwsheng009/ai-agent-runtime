@@ -591,12 +591,15 @@ Go 特有注意点：
 
 > 本节原为"待裁决问题（需 ADR）"。**下列 5 项均已裁决**，决策唯一事实源在 [`adr/`](../adr/README.md)。
 > 本节**不再新增散文条目**：新问题先写 ADR，再回填到下表（见 [`adr/README.md`](../adr/README.md) §1 的反模式清单）。
+>
+> LSP 的**实现侧**（crush 参考实现分析、进程生命周期与能力协商、工具面、降级语义、验收清单）见 [`../../lsp/`](../../lsp/README.md)。
+> 边界：`../../lsp/` 只承接本文件与 ADR 的已定结论，**不重复定义** schema / 表结构 / 编码转换边界。
 
 | # | 原提问摘要 | 裁决 | Status | Gate |
 |---|---|---|---|---|
 | 1 | `03` 的 `projects/modules` 与 `02` 的 `language_projects` 如何收敛为本文的 Project/Module 层 | [ADR-0001](../adr/0001-project-module-language-schema.md) | Proposed | `Phase1-start` |
 | 2 | ACP 场景 LSP 归属：`external_preferred` 具体探测什么信号 | [ADR-0002](../adr/0002-acp-lsp-ownership.md) | Proposed | `Phase4-start` |
-| 3 | `shadow` 模式的差异率分母定义：按 turn / 按 `grep/view` 调用次数 / 按 token | [ADR-0003](../adr/0003-exploration-attribution-metrics.md) | Proposed | `Phase0-baseline`（阈值）/ `Phase1-start`（口径） |
+| 3 | `shadow` 模式的差异率分母定义：按 turn / 按 `grep/view` 调用次数 / 按 token | [ADR-0003](../adr/0003-exploration-attribution-metrics.md) | Proposed | **`Phase1-shadow`**（阈值，2026-09-21 修订）/ `Phase1-start`（口径） |
 | 4 | reader 模式下 `code.*` 是否仍注册给模型 | [ADR-0004](../adr/0004-stale-index-tool-surface.md) | Proposed | `Phase2-start` |
 | 5 | Windows 进程树清理用 Job Object 还是 `taskkill /T` | [ADR-0005](../adr/0005-windows-child-process-lifecycle.md) | Proposed | `Phase4-start` |
 

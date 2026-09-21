@@ -187,7 +187,13 @@ func (t *AICLIExecTool) DefinitionMetadata() map[string]interface{} {
 	}
 }
 
-func (t *AICLIExecTool) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
+// Execute runs one aicli process and hands its output to the shared shell
+// window contract: the tool folds the captured stream to shellOutputBudgetBytes
+// head-only, archives the complete capture first, and stamps
+// skip_render_truncation so the render layer never folds it again.
+func (t *AICLIExecTool) Execute(ctx context.Context, params map[string]interface{}) (result *toolkit.ToolResult, err error) {
+	defer func() { result = ownShellOutputWindow(ctx, "aicli_exec", result) }()
+
 	req, err := parseAICLIExecRequest(params)
 	if err != nil {
 		return &toolkit.ToolResult{Success: false, OutputKind: toolresult.KindText, Error: err}, nil
@@ -504,6 +510,11 @@ func buildAICLIExecMetadata(command []string, cwd string, req aicliExecRequest, 
 		"executed_at":                   time.Now().Unix(),
 		"nested_depth":                  currentAICLIExecDepth(),
 	}
+	// aicli_exec runs a command like shell does, so its output declares the same
+	// model-visible window: the capture limit bounds memory, Execute folds the
+	// body to this budget after archiving the complete capture, and the omitted
+	// tail stays pageable with artifact_read.
+	metadata[toolresult.MetadataModelVisibleBudgetKey] = shellOutputBudgetBytes
 	if !capture.CaptureLimitDisabled && capture.CaptureLimitBytes > 0 {
 		metadata["output_capture_limit_bytes"] = capture.CaptureLimitBytes
 	}

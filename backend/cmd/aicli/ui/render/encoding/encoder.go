@@ -436,6 +436,96 @@ func (e *EventEncoder) SubmitReasoningWithBoundaryGroup(text, boundaryGroupKey s
 	return cs
 }
 
+// SubmitPersistedHistoryCellBefore 提交一个规范历史终态单元格，并在锚点存在时
+// 插入到该锚点之前（resume / history 种子路径专用）。
+//
+// 为什么需要锚定插入：事件日志不是权威转录。当重放已经覆盖了规范历史的后半段
+// 时，缺失的规范 unit 若追加到模型尾部，就会排在“规范上更晚”的内容之后——
+// resume 后尾部出现一整块旧内容、最后一条消息被顶到中间，正是这个顺序倒置。
+// 锚点由 reconcile 层计算（下一条已经存在于模型中的规范 unit 对应的 item），
+// 因此插入后的模型顺序与 canonical 顺序一致。
+//
+// 语义与 Submit* 家族一致：时钟递增、统计计入、一次性终态（StatusCompleted，
+// INV-SCENE-04）。锚点为空或已不存在时退化为 append，与 insertItemBefore /
+// SubmitUserInteraction 相同的幂等退化哲学。插入不推进模型尾部：尾部仍是模型
+// 数组最后一个 item。
+func (e *EventEncoder) SubmitPersistedHistoryCellBefore(kind ItemKind, text, boundaryGroupKey, beforeID string) *ChangeSet {
+	if e == nil {
+		return nil
+	}
+	switch kind {
+	case KindUser, KindAssistant, KindReasoning, KindSupplement:
+	default:
+		return nil
+	}
+	e.clock++
+	e.stats.EncodeCount++
+	cs := &ChangeSet{}
+	it, inserted := e.insertPersistedHistoryItem(kind, text, beforeID)
+	it.BoundaryGroupKey = boundaryGroupKey
+	switch kind {
+	case KindAssistant:
+		setAssistantPresentation(it)
+	case KindReasoning:
+		setReasoningPresentation(it)
+	}
+	it.Status = StatusCompleted
+	if inserted {
+		e.changeBefore(cs, OpAppend, it, strings.TrimSpace(beforeID))
+	} else {
+		e.change(cs, OpAppend, it)
+	}
+	e.updateTail(cs)
+	return cs
+}
+
+// SubmitPersistedHistoryToolCallBefore 提交历史种子的工具调用单元格并锚定插入。
+//
+// 与 SubmitToolCall 的差别：历史种子没有 runtime 事件，因此这里直接构造与
+// Encode(tool.requested) 同形的头部（"• Running <name>"）并登记 callID；后续
+// SubmitToolResultDisplay / SubmitToolResult 仍按 callID 归并到同一单元格，
+// 与 append 路径完全一致（applyToolFinished 按 toolByID 就地 upsert）。
+func (e *EventEncoder) SubmitPersistedHistoryToolCallBefore(toolCallID, toolName, beforeID string) *ChangeSet {
+	if e == nil {
+		return nil
+	}
+	callID := strings.TrimSpace(toolCallID)
+	name := strings.TrimSpace(toolName)
+	if callID == "" || name == "" {
+		return nil
+	}
+	e.clock++
+	e.stats.EncodeCount++
+	cs := &ChangeSet{}
+	it, inserted := e.insertPersistedHistoryItem(KindToolCall, "• Running "+name, beforeID)
+	e.toolByID[callID] = it
+	if inserted {
+		e.changeBefore(cs, OpAppend, it, strings.TrimSpace(beforeID))
+	} else {
+		e.change(cs, OpAppend, it)
+	}
+	e.updateTail(cs)
+	return cs
+}
+
+// insertPersistedHistoryItem 在锚点存在时把新 Item 插到锚点之前，否则追加到
+// 末尾；返回 (item, inserted)。
+//
+// 锚点必须是模型中真实存在的 Item：insertItemBefore 对未知锚点会静默退化为
+// append，调用方必须知道实际走的是哪条路径，才能发出与模型数组一致的
+// ItemChange（BeforeID 指向不存在的 Item 时渲染层无法定位插入位置）。
+func (e *EventEncoder) insertPersistedHistoryItem(kind ItemKind, head, beforeID string) (*Item, bool) {
+	beforeID = strings.TrimSpace(beforeID)
+	if beforeID != "" {
+		for _, existing := range e.model.Items {
+			if existing != nil && existing.ID == beforeID {
+				return e.insertItemBefore(beforeID, kind, head), true
+			}
+		}
+	}
+	return e.appendItem(kind, "", head), false
+}
+
 // SubmitPriorityPromptTranscript commits the one retained semantic item for a
 // previously observed approval/question request. The request itself is only
 // pending interaction identity and never occupies a RenderModel position.

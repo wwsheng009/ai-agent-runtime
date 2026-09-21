@@ -2,6 +2,8 @@ package output
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -205,7 +207,7 @@ func TestRenderToolResultContentForModel_TruncatesLargeToolkitTextForHistory(t *
 	if got == content {
 		t.Fatal("expected large toolkit text to be truncated for model history")
 	}
-	if !strings.Contains(got, "Total output lines: 600") {
+	if !strings.Contains(got, "Tool result lines: 600") {
 		t.Fatalf("expected total line count header, got %q", got)
 	}
 	if !strings.Contains(got, "output truncated for history safety") {
@@ -214,11 +216,23 @@ func TestRenderToolResultContentForModel_TruncatesLargeToolkitTextForHistory(t *
 	if !strings.Contains(got, "line-000-") {
 		t.Fatalf("expected output head to be preserved, got %q", got)
 	}
-	if !strings.Contains(got, "line-599-") {
-		t.Fatalf("expected output tail to be preserved, got %q", got)
+	// Head-only fold: the tail is intentionally dropped (a hole in the middle
+	// of the text cannot be paged), and the notice must say how much was
+	// omitted plus what to do next.
+	if strings.Contains(got, "line-599-") {
+		t.Fatalf("head-only fold must not keep the tail, got %q", got)
+	}
+	if !strings.Contains(got, "showing the first ") || !strings.Contains(got, "of 600 lines") {
+		t.Fatalf("expected first-N-of-M line notice, got %q", got)
+	}
+	if !strings.Contains(got, "next step:") {
+		t.Fatalf("expected next-step guidance in the fold notice, got %q", got)
+	}
+	if len(got) > modelToolTextByteBudget {
+		t.Fatalf("folded payload must fit the %d-byte budget, got %d bytes", modelToolTextByteBudget, len(got))
 	}
 	if len(got) <= modelToolTextByteBudget/2 {
-		t.Fatalf("expected meaningful head/tail payload, got only %d bytes", len(got))
+		t.Fatalf("expected meaningful head payload, got only %d bytes", len(got))
 	}
 }
 
@@ -243,11 +257,18 @@ func TestRenderToolResultContentForModel_TruncatesLargeEditingToolOutput(t *test
 	if got == content {
 		t.Fatal("expected large editing output to be truncated for model history")
 	}
-	if !strings.Contains(got, "@@ hunk-699 @@") || !strings.Contains(got, "+new-699") {
-		t.Fatalf("expected tail diff lines to be preserved, got %q", got)
+	// Head-only fold keeps the beginning of the diff and drops the tail.
+	if !strings.Contains(got, "@@ hunk-000 @@") || !strings.Contains(got, "+new-000") {
+		t.Fatalf("expected head diff lines to be preserved, got %q", got)
+	}
+	if strings.Contains(got, "@@ hunk-699 @@") {
+		t.Fatalf("head-only fold must not keep the tail diff, got %q", got)
 	}
 	if !strings.Contains(got, "output truncated for history safety") {
 		t.Fatalf("expected editing output truncation marker, got %q", got)
+	}
+	if !strings.Contains(got, "next step:") {
+		t.Fatalf("expected next-step guidance, got %q", got)
 	}
 }
 
@@ -849,15 +870,18 @@ func TestFormatTruncatedToolTextForModel_ExtractsFirstErrorLine(t *testing.T) {
 	if strings.Contains(cleanGot, "First error line:") {
 		t.Fatalf("did not expect First error line without failure markers, got %q", cleanGot)
 	}
-	if !strings.Contains(cleanGot, "Total output lines: 300") {
+	if !strings.Contains(cleanGot, "Tool result lines: 300") {
 		t.Fatalf("expected total line header, got %q", cleanGot)
 	}
 }
 
-// TestRenderToolTextForModelHistory_EmbedsContinuationHintInFoldMarker pins P2:
-// when a large body is folded head/tail, the fold marker itself must carry the
-// exact artifact_read continuation command so the model never wanders.
-func TestRenderToolTextForModelHistory_EmbedsContinuationHintInFoldMarker(t *testing.T) {
+// TestRenderToolTextForModelHistory_FoldNoticeCarriesNextStepGuidance pins the
+// head-only fold contract: the notice must state how many lines were shown and
+// omitted and how to read the rest with a narrower call, so a folded result is
+// never a dead end. The notice deliberately does not promise artifact_read
+// paging — that read is itself budget-folded in practice — while the separate
+// artifact pointer notice stays untouched.
+func TestRenderToolTextForModelHistory_FoldNoticeCarriesNextStepGuidance(t *testing.T) {
 	const id = "art_ab12cd34ef56ab12cd34ef56ab12cd34"
 	envelope := &Envelope{
 		ToolCallID:  "call-cont-hint",
@@ -869,16 +893,24 @@ func TestRenderToolTextForModelHistory_EmbedsContinuationHintInFoldMarker(t *tes
 			toolresult.SourceKey:   toolresult.SourceMCP,
 		},
 	}
-	content := strings.Repeat("x", 2*modelToolTextByteBudget)
+	content := strings.Repeat("fold notice line\n", modelToolTextByteBudget/8)
 	got := renderToolTextForModelHistory(content, "", envelope)
-	if !strings.Contains(got, "read via artifact_read(artifact_id="+id+", offset=<bytes>, limit=<bytes>)") {
-		t.Fatalf("expected continuation hint with id in fold marker, got tail %q", got[len(got)-400:])
+	if !strings.Contains(got, "showing the first ") || !strings.Contains(got, "next step:") {
+		t.Fatalf("expected first-N-lines notice with next-step guidance, got tail %q", got[len(got)-500:])
 	}
-	if !strings.Contains(got, "omitted") {
-		t.Fatalf("expected fold marker, got %q", got[len(got)-400:])
+	start := strings.Index(got, "[output truncated for history safety")
+	if start < 0 {
+		t.Fatalf("expected fold notice, got tail %q", got[len(got)-500:])
+	}
+	foldNotice := got[start:]
+	if end := strings.Index(foldNotice, "]\n\n"); end >= 0 {
+		foldNotice = foldNotice[:end+1]
+	}
+	if strings.Contains(foldNotice, "artifact_read") {
+		t.Fatalf("fold notice must not instruct artifact_read paging, got %q", foldNotice)
 	}
 
-	// Small untruncated successful results must NOT grow the hint.
+	// Small untruncated successful results must NOT grow the notice.
 	small := strings.Repeat("y", 100)
 	envelope2 := &Envelope{
 		ToolCallID:  "call-cont-hint-small",
@@ -891,8 +923,8 @@ func TestRenderToolTextForModelHistory_EmbedsContinuationHintInFoldMarker(t *tes
 		},
 	}
 	got2 := renderToolTextForModelHistory(small, "", envelope2)
-	if strings.Contains(got2, "read via artifact_read") {
-		t.Fatalf("untruncated result must not carry continuation hint, got %q", got2)
+	if strings.Contains(got2, "output truncated for history safety") {
+		t.Fatalf("untruncated result must not carry the fold notice, got %q", got2)
 	}
 }
 
@@ -936,13 +968,11 @@ func TestRenderToolResultContentForModel_PreservesNoticeAcrossTruncationPaths(t 
 }
 
 // TestFormatTruncatedToolTextForModel_NeverExceedsBudget pins the hard ceiling:
-// header + head + fold marker + tail must stay within the requested budget for
-// every budget size, including ones smaller than the head/tail usability floor
-// and ones where the artifact dereference hint lengthens the fold marker.
+// header + shown head + fold notice must stay within the requested budget for
+// every budget size, including ones too small to afford the notice at all.
 func TestFormatTruncatedToolTextForModel_NeverExceedsBudget(t *testing.T) {
-	const id = "art_ab12cd34ef56ab12cd34ef56ab12cd34"
-	// Single-line content has no line-boundary snapping slack, so head+tail
-	// fill the body budget exactly; that makes any marker-reserve shortfall
+	// Single-line content has no line-boundary snapping slack, so the head fills
+	// the body budget down to the byte; that makes any notice-reserve shortfall
 	// show up immediately as an over-budget render.
 	singleLine := strings.Repeat("x", 2*modelToolTextByteBudget)
 	multiLine := "2026-01-01 ERROR failed to process\n" +
@@ -951,13 +981,306 @@ func TestFormatTruncatedToolTextForModel_NeverExceedsBudget(t *testing.T) {
 	budgets := []int{1, 64, 256, 512, 1024, 4096, 12 * 1024, 64 * 1024}
 	for _, content := range []string{singleLine, multiLine} {
 		for _, budget := range budgets {
-			for _, pointer := range []string{"", id} {
-				got := formatTruncatedToolTextForModel(content, budget, pointer)
-				if len(got) > budget {
-					t.Fatalf("budget %d (pointer=%q): rendered %d bytes, exceeds budget by %d",
-						budget, pointer, len(got), len(got)-budget)
-				}
+			got := formatTruncatedToolTextForModel(content, budget)
+			if len(got) > budget {
+				t.Fatalf("budget %d: rendered %d bytes, exceeds budget by %d",
+					budget, len(got), len(got)-budget)
 			}
 		}
+	}
+}
+
+// TestFormatTruncatedToolTextForModel_HeadOnlyNoticeReportsShownAndOmittedLines
+// pins the replacement for the middle-fold algorithm: the rendered text keeps
+// only the first lines, and the notice states exactly how many lines are shown
+// and omitted plus how to continue, so nothing is hidden mid-text.
+func TestFormatTruncatedToolTextForModel_HeadOnlyNoticeReportsShownAndOmittedLines(t *testing.T) {
+	var builder strings.Builder
+	for i := 0; i < 2000; i++ {
+		fmt.Fprintf(&builder, "payload line %04d\n", i)
+	}
+	content := builder.String()
+
+	got := formatTruncatedToolTextForModel(content, 4*1024)
+	if strings.Contains(got, "from the middle") {
+		t.Fatalf("middle fold must be gone, got %q", got)
+	}
+	if !strings.Contains(got, "payload line 0000") {
+		t.Fatalf("expected head lines to be shown, got %q", got)
+	}
+	if strings.Contains(got, "payload line 1999") {
+		t.Fatalf("head-only fold must not keep the tail, got %q", got)
+	}
+
+	match := regexp.MustCompile(
+		`showing the first (\d+) of 2000 lines; omitted (\d+) lines \((\d+) bytes\) from the end`,
+	).FindStringSubmatch(got)
+	if match == nil {
+		t.Fatalf("expected first-N-of-M notice, got %q", got)
+	}
+	shown, _ := strconv.Atoi(match[1])
+	omittedLines, _ := strconv.Atoi(match[2])
+	omittedBytes, _ := strconv.Atoi(match[3])
+	if shown <= 0 || shown >= 2000 {
+		t.Fatalf("shown lines = %d, want a strict prefix of 2000", shown)
+	}
+	if shown+omittedLines != 2000 {
+		t.Fatalf("shown %d + omitted %d != 2000 lines", shown, omittedLines)
+	}
+	if rendered := strings.Count(got, "payload line "); rendered != shown {
+		t.Fatalf("notice claims %d shown lines but rendered %d", shown, rendered)
+	}
+	if omittedBytes <= 0 || omittedBytes >= len(content) {
+		t.Fatalf("omitted bytes = %d, want 0 < omitted < %d", omittedBytes, len(content))
+	}
+	if !strings.Contains(got, "next step:") || !strings.Contains(got, "narrower window") {
+		t.Fatalf("expected next-step guidance, got %q", got)
+	}
+	if len(got) > 4*1024 {
+		t.Fatalf("rendered %d bytes, exceeds the 4096-byte budget", len(got))
+	}
+	noticeStart := strings.Index(got, "[output truncated for history safety")
+	noticeEnd := strings.Index(got[noticeStart:], "]\n\n")
+	t.Logf("head-only fold: rendered=%d bytes (budget 4096); shown=%d omittedLines=%d omittedBytes=%d; notice=%q",
+		len(got), shown, omittedLines, omittedBytes, got[noticeStart:noticeStart+noticeEnd+1])
+}
+
+// TestFormatTruncatedToolTextForModel_PartialLineNoticeReportsByteCut pins the
+// mid-line cut case: when the first line alone overflows the body budget the
+// head can only be a byte prefix, and the notice must describe that cut in
+// bytes. A line-count notice would contradict itself here ("0 lines omitted"
+// next to thousands of dropped bytes) and its line-offset recovery cannot
+// resume a mid-line cut.
+func TestFormatTruncatedToolTextForModel_PartialLineNoticeReportsByteCut(t *testing.T) {
+	var builder strings.Builder
+	for i := 0; i < 8; i++ {
+		fmt.Fprintf(&builder, "header line %02d\n", i)
+	}
+	builder.WriteString(strings.Repeat("abcdefghij", 4000)) // 40000 bytes on a single line
+	content := builder.String()
+
+	got := formatTruncatedToolTextForModel(content, 4*1024)
+	if strings.Contains(got, "of 9 lines") {
+		t.Fatalf("mid-line cut must not be reported with a line-count notice, got %q", got)
+	}
+
+	match := regexp.MustCompile(
+		`showing (\d+) complete lines plus the first (\d+) bytes of line (\d+); omitted (\d+) bytes from the end`,
+	).FindStringSubmatch(got)
+	if match == nil {
+		t.Fatalf("expected partial-line notice, got %q", got)
+	}
+	completeLines, _ := strconv.Atoi(match[1])
+	partialBytes, _ := strconv.Atoi(match[2])
+	cutLine, _ := strconv.Atoi(match[3])
+	omittedBytes, _ := strconv.Atoi(match[4])
+	if completeLines != 8 {
+		t.Fatalf("complete lines = %d, want the 8 header lines", completeLines)
+	}
+	if cutLine != 9 {
+		t.Fatalf("cut line = %d, want line 9 (the single long line)", cutLine)
+	}
+	if partialBytes <= 0 || partialBytes >= 40000 {
+		t.Fatalf("partial bytes = %d, want a strict prefix of the 40000-byte line", partialBytes)
+	}
+
+	// Cross-check both notices against the bytes actually rendered.
+	noticeStart := strings.Index(got, "[output truncated for history safety")
+	headStart := strings.Index(got, "header line 00")
+	if noticeStart < 0 || headStart < 0 || headStart > noticeStart {
+		t.Fatalf("unexpected notice/head layout, got %q", got)
+	}
+	head := strings.TrimSuffix(got[headStart:noticeStart], "\n\n")
+	if lines := strings.Count(head, "\n"); lines != completeLines {
+		t.Fatalf("notice claims %d complete lines but rendered %d", completeLines, lines)
+	}
+	if idx := strings.LastIndex(head, "\n"); len(head)-idx-1 != partialBytes {
+		t.Fatalf("notice claims %d partial bytes but rendered %d", partialBytes, len(head)-idx-1)
+	}
+	if len(head)+omittedBytes != len(content) {
+		t.Fatalf("shown head %d + omitted %d != %d bytes", len(head), omittedBytes, len(content))
+	}
+	if !strings.Contains(got, "byte range") || !strings.Contains(got, "artifact_read") {
+		t.Fatalf("expected byte-range recovery guidance, got %q", got)
+	}
+	if len(got) > 4*1024 {
+		t.Fatalf("rendered %d bytes, exceeds the 4096-byte budget", len(got))
+	}
+	t.Logf("partial-line fold: rendered=%d bytes (budget 4096); completeLines=%d partialBytes=%d omittedBytes=%d",
+		len(got), completeLines, partialBytes, omittedBytes)
+}
+
+// TestRenderToolTextForModelHistory_HonorsDeclaredModelVisibleBudget pins the
+// tool-owned window contract: a tool that declares
+// toolresult.MetadataModelVisibleBudgetKey keeps that window in history instead
+// of being folded to the render-layer backstop, while the same body without a
+// declaration is folded as before.
+func TestRenderToolTextForModelHistory_HonorsDeclaredModelVisibleBudget(t *testing.T) {
+	body := strings.Repeat("declared budget line for shell output\n", 600)
+	if len(body) <= modelToolTextByteBudget {
+		t.Fatalf("precondition: body must exceed the layer backstop, got %d bytes", len(body))
+	}
+
+	declared := &Envelope{
+		ToolCallID: "call-declared-budget",
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey:                   toolresult.KindText,
+			toolresult.MetadataModelVisibleBudgetKey: 32 * 1024,
+		},
+	}
+	got := renderToolTextForModelHistory(body, "", declared)
+	// Every tool result is whitespace-normalized before rendering (TrimSpace),
+	// so "intact" means the whole body minus that pre-existing trim: a fold
+	// would drop thousands of bytes and add the fold notice.
+	if got != strings.TrimSpace(body) {
+		t.Fatalf("declared window must keep the body intact, got %d of %d bytes", len(got), len(body))
+	}
+	if strings.Contains(got, "output truncated for history safety") {
+		t.Fatalf("declared window must not be folded, got %q", got)
+	}
+
+	// The declaration must also move the fold point itself: the same tool's
+	// oversized body folds at the declared 32 KiB window instead of the layer
+	// backstop that the undeclared body below still falls back to.
+	oversized := strings.Repeat("declared budget line for shell output\n", 1200)
+	gotOversized := renderToolTextForModelHistory(oversized, "", declared)
+	if !strings.Contains(gotOversized, "output truncated for history safety") {
+		t.Fatalf("oversized body must still be folded, got %d bytes", len(gotOversized))
+	}
+	if len(gotOversized) > 32*1024 {
+		t.Fatalf("declared window must bound the folded payload, got %d bytes", len(gotOversized))
+	}
+	if len(gotOversized) < 24*1024 {
+		t.Fatalf("declared window must not collapse to the layer backstop, got %d bytes", len(gotOversized))
+	}
+
+	undeclared := &Envelope{
+		ToolCallID: "call-undeclared-budget",
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey: toolresult.KindText,
+		},
+	}
+	gotUndeclared := renderToolTextForModelHistory(body, "", undeclared)
+	if !strings.Contains(gotUndeclared, "output truncated for history safety") {
+		t.Fatalf("expected the undeclared body to be folded, got %d bytes", len(gotUndeclared))
+	}
+	if len(gotUndeclared) > modelToolTextByteBudget {
+		t.Fatalf("folded payload must fit the %d-byte backstop, got %d bytes", modelToolTextByteBudget, len(gotUndeclared))
+	}
+}
+
+// TestEffectiveModelToolTextBudget_ClampsDeclaredWindow pins the clamp around a
+// declared window: a bogus tiny value cannot starve the model window and a huge
+// one cannot blow up history.
+func TestEffectiveModelToolTextBudget_ClampsDeclaredWindow(t *testing.T) {
+	if got := effectiveModelToolTextBudget(nil); got != modelToolTextByteBudget {
+		t.Fatalf("no declaration must use the layer budget, got %d", got)
+	}
+	if got := effectiveModelToolTextBudget(map[string]interface{}{
+		toolresult.MetadataModelVisibleBudgetKey: 0,
+	}); got != modelToolTextByteBudget {
+		t.Fatalf("zero declaration must use the layer budget, got %d", got)
+	}
+	if got := effectiveModelToolTextBudget(map[string]interface{}{
+		toolresult.MetadataModelVisibleBudgetKey: 1,
+	}); got != modelToolTextByteBudget {
+		t.Fatalf("tiny declaration must fall back to the layer budget, got %d", got)
+	}
+	if got := effectiveModelToolTextBudget(map[string]interface{}{
+		toolresult.MetadataModelVisibleBudgetKey: 32 * 1024,
+	}); got != 32*1024 {
+		t.Fatalf("32 KiB declaration must be honored, got %d", got)
+	}
+	if got := effectiveModelToolTextBudget(map[string]interface{}{
+		toolresult.MetadataModelVisibleBudgetKey: 1024 * 1024,
+	}); got != modelToolTextBudgetCeilingBytes {
+		t.Fatalf("huge declaration must clamp to the ceiling %d, got %d", modelToolTextBudgetCeilingBytes, got)
+	}
+	if got := effectiveModelToolTextBudget(map[string]interface{}{
+		"tool_metadata": map[string]interface{}{
+			toolresult.MetadataModelVisibleBudgetKey: 32 * 1024,
+		},
+	}); got != 32*1024 {
+		t.Fatalf("nested declaration must be honored, got %d", got)
+	}
+}
+
+// TestRenderToolTextForModelHistory_DropsPointerForIntactOwnedWindow pins the
+// pointer gate for tools that own their window: an intact body carries no
+// record-id pointer (nothing was omitted, so nothing can be dereferenced),
+// while a folded body, a failed call and an artifact_read window keep it.
+func TestRenderToolTextForModelHistory_DropsPointerForIntactOwnedWindow(t *testing.T) {
+	const id = "art_9f8e7d6c5b4a39281706f5e4d3c2b1a0"
+	newEnvelope := func(meta map[string]interface{}) *Envelope {
+		merged := map[string]interface{}{
+			"artifact_id":          id,
+			"raw_bytes":            4096,
+			toolresult.MetadataKey: toolresult.KindText,
+		}
+		for key, value := range meta {
+			merged[key] = value
+		}
+		return &Envelope{ToolCallID: "call-pointer-gate", ArtifactIDs: []string{id}, Metadata: merged}
+	}
+	body := strings.Repeat("intact owned window body\n", 40)
+	pointer := "Full raw output artifact_id: " + id
+
+	intact := renderToolTextForModelHistory(body, "", newEnvelope(map[string]interface{}{
+		toolresult.MetadataSkipRenderTruncationKey: true,
+		"is_truncated": false,
+	}))
+	if strings.Contains(intact, pointer) {
+		t.Fatalf("intact owned window must not carry a pointer, got %q", intact)
+	}
+
+	folded := renderToolTextForModelHistory(body, "", newEnvelope(map[string]interface{}{
+		toolresult.MetadataSkipRenderTruncationKey: true,
+		"is_truncated": true,
+	}))
+	if !strings.Contains(folded, pointer) {
+		t.Fatalf("folded owned window must keep the pointer, got %q", folded)
+	}
+
+	failedWithErr := renderToolTextForModelHistory(body, "boom", newEnvelope(map[string]interface{}{
+		toolresult.MetadataSkipRenderTruncationKey: true,
+		"is_truncated": false,
+	}))
+	if !strings.Contains(failedWithErr, pointer) {
+		t.Fatalf("failed call must keep the pointer as recovery hint, got %q", failedWithErr)
+	}
+
+	window := renderToolTextForModelHistory(body, "", newEnvelope(map[string]interface{}{
+		toolresult.MetadataSkipRenderTruncationKey: true,
+		"is_truncated":       false,
+		"artifact_source_id": id,
+	}))
+	if !strings.Contains(window, pointer) {
+		t.Fatalf("artifact_read window must keep the pointer, got %q", window)
+	}
+}
+
+// TestRenderToolTextForModelHistory_FoldsCaptureTruncatedOutput pins the fix
+// for the capture-flag leak: output_truncated only reports that the raw stream
+// hit the retention limit, so the render layer must still fold and size the
+// payload instead of forwarding the whole capture to history.
+func TestRenderToolTextForModelHistory_FoldsCaptureTruncatedOutput(t *testing.T) {
+	body := strings.Repeat("capture truncated shell output line\n", 700)
+	if len(body) <= modelToolTextByteBudget {
+		t.Fatalf("precondition: body must exceed the layer backstop, got %d bytes", len(body))
+	}
+	envelope := &Envelope{
+		ToolCallID: "call-capture-truncated",
+		Metadata: map[string]interface{}{
+			toolresult.MetadataKey:  toolresult.KindText,
+			"output_truncated":      true,
+			"capture_limit_reached": true,
+		},
+	}
+	got := renderToolTextForModelHistory(body, "", envelope)
+	if !strings.Contains(got, "output truncated for history safety") {
+		t.Fatalf("capture-truncated output must still be folded for history, got %d bytes", len(got))
+	}
+	if len(got) > modelToolTextByteBudget {
+		t.Fatalf("folded payload must fit the %d-byte backstop, got %d bytes", modelToolTextByteBudget, len(got))
 	}
 }

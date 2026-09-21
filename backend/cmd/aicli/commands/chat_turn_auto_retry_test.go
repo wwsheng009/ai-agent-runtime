@@ -152,19 +152,22 @@ func TestTurnAutoRetryDelayIsExponentialAndCapped(t *testing.T) {
 	require.Equal(t, 800*time.Millisecond, turnAutoRetryDelay(0))
 }
 
-// TestTurnAutoRetryReasonCoversEmptyReplyOnly 固化错误类别判据：empty_reply 是
-// 唯一「既没有渲染过输出、又不在输出预算升级集合里」的退化类别，因此纳入自动
-// 重跑；可能已渲染半截输出的类别（truncated_tool_call、reasoning_only_empty_reply）
-// 必须保持排除（分类器先判 reasoning/truncated，再判 empty_reply）。
-func TestTurnAutoRetryReasonCoversEmptyReplyOnly(t *testing.T) {
+// TestTurnAutoRetryReasonCoversDegenerateReplies 固化错误类别判据：empty_reply 与
+// reasoning_only_reply 都属于「本轮没有任何用户可见输出」的退化类别（后者只有思维
+// 链：正文为空、tool_calls=0，思维链不计入 emittedAnything，重跑不会重复展示半截
+// 输出），因此纳入自动重跑；truncated_tool_call 仍排除（可能已渲染半截工具调用
+// 标记，重跑会重复展示）。分类器先判 reasoning/truncated，再判 empty_reply。
+func TestTurnAutoRetryReasonCoversDegenerateReplies(t *testing.T) {
 	emptyReply := errors.New("empty_reply: stream ended without substantive output")
+	reasoningOnly := errors.New("reasoning_only_empty_reply: stream ended with reasoning only and no substantive output: finish_reason=stop")
 
 	require.Equal(t, "invalid_tool_arguments", turnAutoRetryReason(newMalformedTurnError()))
 	require.Equal(t, "empty_reply", turnAutoRetryReason(emptyReply))
 	require.Equal(t, "empty_reply", turnAutoRetryReason(fmt.Errorf("LLM call failed after retries: %w", emptyReply)))
+	require.Equal(t, "reasoning_only_reply", turnAutoRetryReason(reasoningOnly))
+	require.Equal(t, "reasoning_only_reply", turnAutoRetryReason(fmt.Errorf("LLM call failed after retries: %w", reasoningOnly)))
 
 	require.Empty(t, turnAutoRetryReason(errors.New("truncated_tool_call: incomplete tool call markup in aggregated assistant response")))
-	require.Empty(t, turnAutoRetryReason(errors.New("reasoning_only_empty_reply: stream ended with reasoning only and no substantive output")))
 	require.Empty(t, turnAutoRetryReason(errors.New("provider http error: 429 too many requests")))
 	require.Empty(t, turnAutoRetryReason(nil))
 }

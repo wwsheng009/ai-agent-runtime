@@ -1022,6 +1022,8 @@ func actionClassString(action UIAction) string {
 		return "TranscriptPagerScroll"
 	case TranscriptPagerSetFollowBottom:
 		return "TranscriptPagerSetFollowBottom"
+	case TranscriptPagerSetExpand:
+		return "TranscriptPagerSetExpand"
 	case EffectResult:
 		return "EffectResult"
 	case BeginHistoryCommit:

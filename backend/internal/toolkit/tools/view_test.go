@@ -421,6 +421,57 @@ func TestViewTool_OffsetBeyondEOFReturnsExplicitMessage(t *testing.T) {
 	}
 }
 
+// TestViewTool_AlwaysOptsOutOfRenderTruncation pins the L4 contract: every view
+// result declares the render-layer opt-out unconditionally - including a
+// complete read where is_truncated=false - so the render layer never folds a
+// payload the tool already shaped (no second truncation, no double byte charge).
+func TestViewTool_AlwaysOptsOutOfRenderTruncation(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "small.txt"), []byte("alpha\nbeta\n"), 0o644); err != nil {
+		t.Fatalf("write small: %v", err)
+	}
+
+	tool := NewViewTool()
+	tool.SetBasePath(root)
+
+	single, err := tool.Execute(context.Background(), map[string]interface{}{"file_path": "small.txt"})
+	if err != nil || single == nil || !single.Success {
+		t.Fatalf("single read failed: result=%#v err=%v", single, err)
+	}
+	if single.Metadata["is_truncated"] != false {
+		t.Fatalf("precondition: expected complete read (is_truncated=false), got %#v", single.Metadata["is_truncated"])
+	}
+	if skip, _ := single.Metadata[toolresult.MetadataSkipRenderTruncationKey].(bool); !skip {
+		t.Fatalf("single result must opt out of render truncation regardless of is_truncated, got %#v", single.Metadata)
+	}
+
+	batch, err := tool.Execute(context.Background(), map[string]interface{}{
+		"files": []interface{}{
+			map[string]interface{}{"file_path": "small.txt"},
+			map[string]interface{}{"file_path": "missing.txt"},
+		},
+	})
+	if err != nil || batch == nil || !batch.Success {
+		t.Fatalf("batch read failed: result=%#v err=%v", batch, err)
+	}
+	if skip, _ := batch.Metadata[toolresult.MetadataSkipRenderTruncationKey].(bool); !skip {
+		t.Fatalf("batch result must opt out of render truncation, got %#v", batch.Metadata)
+	}
+	// The render layer consumes the opt-out through this predicate; keep both
+	// sides pinned together so a rename on either side fails loudly.
+	if !toolresult.SkipsRenderTruncation(batch.Metadata) {
+		t.Fatalf("batch metadata must be honored by toolresult.SkipsRenderTruncation, got %#v", batch.Metadata)
+	}
+
+	invalid, err := tool.Execute(context.Background(), map[string]interface{}{})
+	if err != nil || invalid == nil {
+		t.Fatalf("empty params should return a result, got result=%#v err=%v", invalid, err)
+	}
+	if skip, _ := invalid.Metadata[toolresult.MetadataSkipRenderTruncationKey].(bool); !skip {
+		t.Fatalf("error result must also opt out, got %#v", invalid.Metadata)
+	}
+}
+
 func TestViewTool_TruncatedReadDoesNotRequireTotalLineCount(t *testing.T) {
 	root := t.TempDir()
 	filePath := filepath.Join(root, "notes.txt")

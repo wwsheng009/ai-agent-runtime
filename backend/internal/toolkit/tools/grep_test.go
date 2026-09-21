@@ -192,14 +192,18 @@ func TestGrepTool_BuiltinWalkerRespectsCancelledContext(t *testing.T) {
 }
 
 // TestGrepTool_ByteBudgetTruncationKeepsLeadingMatches pins P0-2: match
-// output exceeding the model-visible byte budget stops at complete leading
-// lines (never a head/tail middle cut), stamped with results_truncated.
+// output exceeding the grep-owned byte budget stops at complete leading
+// lines (never a head/tail middle cut), stamped with results_truncated and
+// skip_render_truncation so the render layer never folds it again.
 func TestGrepTool_ByteBudgetTruncationKeepsLeadingMatches(t *testing.T) {
 	tmpDir := t.TempDir()
 	tool := NewGrepTool()
 
+	// Lines must be long enough that the normalized match list (capped by the
+	// tool's maxMatches) still exceeds grepByteBudgetBytes().
+	lineBytes := grepByteBudgetBytes()/10 + 64
 	var bigOutput strings.Builder
-	line := strings.Repeat("b", 200)
+	line := strings.Repeat("b", lineBytes)
 	for i := 0; i < 200; i++ {
 		fmt.Fprintf(&bigOutput, "file_%d.go:%d:%s\n", i, i+1, line)
 	}
@@ -225,6 +229,9 @@ func TestGrepTool_ByteBudgetTruncationKeepsLeadingMatches(t *testing.T) {
 	}
 	if result.Metadata["results_truncated"] != true {
 		t.Fatalf("expected results_truncated=true, got %#v", result.Metadata)
+	}
+	if !toolresult.SkipsRenderTruncation(result.Metadata) {
+		t.Fatalf("expected skip_render_truncation stamp, got %#v", result.Metadata)
 	}
 	if reason, _ := result.Metadata["truncation_reason"].(string); reason != "byte_budget" {
 		t.Fatalf("expected truncation_reason=byte_budget, got %#v", result.Metadata)

@@ -334,6 +334,21 @@ func (TranscriptPagerSetFollowBottom) isUIAction()         {}
 func (TranscriptPagerSetFollowBottom) Class() ActionClass  { return ClassDurable }
 func (TranscriptPagerSetFollowBottom) CoalesceKey() string { return "" }
 
+// TranscriptPagerSetExpand toggles the pager's "show every fold in full" state.
+// The pager is read-only, so the expanded row set stays derived reducer-side
+// from semantic cells instead of becoming view-local state that the next
+// snapshot would overwrite.
+type TranscriptPagerSetExpand struct {
+	// LeaseID fences a delayed pager input against a later overlay opened with
+	// a different alternate-screen lease.
+	LeaseID uint64
+	Expand  bool
+}
+
+func (TranscriptPagerSetExpand) isUIAction()         {}
+func (TranscriptPagerSetExpand) Class() ActionClass  { return ClassDurable }
+func (TranscriptPagerSetExpand) CoalesceKey() string { return "" }
+
 // EffectResult 是 terminal effect 的结果回投（实施指南 §3）：
 // Err == nil 视为 Ack（Token 成功），Err != nil 视为 Failed；
 // MayHavePartiallyWritten=true 时不得盲目重放同一 batch，投影进入

@@ -44,6 +44,9 @@ type chatDebugEndpointsSnapshot struct {
 	LoopbackBaseURL string `json:"loopback_base_url,omitempty"` // loopback 组基础地址
 	WebBaseURL      string `json:"web_base_url,omitempty"`      // web 远程调用端点组基础地址
 	ObserveBaseURL  string `json:"observe_base_url,omitempty"`  // runtime-observe 组基础地址
+	// ListenMode 描述鉴权模式："loopback"（Host/Origin + 写令牌）或"non-loopback"
+	// （所有请求需令牌，Host/Origin 放宽）。供脚本判断是否需要附加 token。
+	ListenMode string `json:"listen_mode,omitempty"`
 	// Version / BuildTime 与 aicli version、/status 同源（ldflags 注入）；
 	// StartedAt / UptimeSec 标识**本进程实例**——脚本据此判断"远端进程是不是
 	// 旧构建/未重启"，避免按新契约调用旧实例。
@@ -88,6 +91,7 @@ var webDebugEndpoints = []struct {
 	{Method: "GET", Path: "/web/", Note: "微型 Web 客户端页面（浏览器交互入口）"},
 	{Method: "GET", Path: "/web/api/screen", Note: "当前渲染快照（默认完整 transcript；?view=tui TUI 合成帧；?format=json 结构化）"},
 	{Method: "GET", Path: "/web/api/status", Note: "渲染/显示状态快照（JSON / ?format=text）"},
+	{Method: "GET", Path: "/web/api/statusbar", Note: "底部状态栏快照（JSON；balance/context used/directory/git branch/window 等段），与 TUI 底部状态行同源"},
 	{Method: "GET", Path: "/web/api/runtime", Note: "运行时元数据（provider/model/reasoning 权威值）"},
 	{Method: "GET", Path: "/web/api/events", Note: "SSE 事件流（实时 turn 事件，可续传）"},
 	{Method: "POST", Path: "/web/api/input", Note: "异步注入 prompt / 审批决议 / 提问回答 / interrupt（立即返回 queued）"},
@@ -152,6 +156,8 @@ func buildChatDebugEndpointList(session *ChatSession) *chatDebugEndpointsSnapsho
 	// === Loopback 本机端点（aicli --pprof HTTP 服务器）===
 	loopbackBase := chatDebugPprofBaseURL()
 	loopbackActive := loopbackBase != ""
+	// 非回环模式下，端点 URL 也需要 token，但为避免在 JSON /debug/endpoints
+	// 响应中泄露令牌，token 不写入 info.URL；而是在 TUI 显示区单独展示。
 	if loopbackActive {
 		snap.BaseURL = loopbackBase
 		snap.LoopbackBaseURL = loopbackBase
@@ -165,17 +171,29 @@ func buildChatDebugEndpointList(session *ChatSession) *chatDebugEndpointsSnapsho
 			Note:    ep.Note,
 		}
 		if loopbackActive {
+			// JSON 响应中不带 token；TUI 文字渲染时补充。
 			info.URL = loopbackBase + ep.Path
 		}
 		snap.Endpoints = append(snap.Endpoints, info)
 	}
 
+	// 监听模式
+	if IsChatWebLoopbackMode() {
+		snap.ListenMode = "loopback"
+	} else {
+		snap.ListenMode = "non-loopback"
+	}
 	// === Web 远程调用端点（/web/*，与 loopback 同服务器同源）===
 	if loopbackActive {
 		snap.WebBaseURL = loopbackBase + "/web"
 		snap.WriteAuthHeader = ChatWebAuthTokenHeader
-		snap.WriteAuthHint = "POST 请求需携带 " + ChatWebAuthTokenHeader +
-			"（或 ?token=）；令牌可由 GET /web/api/token 读取（或见 aicli 启动行 web write token），内置页面自动注入"
+		if IsChatWebLoopbackMode() {
+			snap.WriteAuthHint = "POST 请求需携带 " + ChatWebAuthTokenHeader +
+				"（或 ?token=）；令牌可由 GET /web/api/token 读取（或见 aicli 启动行 web write token），内置页面自动注入"
+		} else {
+			snap.WriteAuthHint = "ALL 请求（含 GET/SSE）需携带 " + ChatWebAuthTokenHeader +
+				"（或 ?token=）；令牌可由 aicli 启动行读取，内置页面自动注入"
+		}
 		// 终端内显示：本机交互式输出，便于人工复制（不进入 HTTP 响应）。
 		snap.WriteAuthToken = ChatWebAuthToken()
 	}
@@ -188,6 +206,7 @@ func buildChatDebugEndpointList(session *ChatSession) *chatDebugEndpointsSnapsho
 			Note:    ep.Note,
 		}
 		if loopbackActive {
+			// JSON 响应中不带 token；TUI 文字渲染时补充。
 			info.URL = loopbackBase + ep.Path
 		}
 		snap.Endpoints = append(snap.Endpoints, info)
@@ -288,8 +307,26 @@ func BuildChatDebugEndpointsText() string {
 		fmt.Fprintf(&sb, "  Build: %s\n", build)
 		fmt.Fprintf(&sb, "  Uptime: %s\n", (time.Duration(snap.UptimeSec) * time.Second).String())
 	}
+	// 非回环模式下：显示局域网 IP 列表（0.0.0.0 不可直接浏览器访问）。
+	if snap.ListenMode == "non-loopback" && snap.WebBaseURL != "" {
+		// ChatWebTokenQueryParam 返回 "?token=xxx"，在已有查询参数后用 & 拼接。
+		tqParam := strings.Replace(ChatWebTokenQueryParam(), "?", "&", 1)
+		port := chatDebugListenPort()
+		lanAddrs := ChatWebLocalAddresses()
+		if len(lanAddrs) > 0 {
+			fmt.Fprintf(&sb, "  LAN access (paste in browser):\n")
+			for _, ip := range lanAddrs {
+				// 构造局域网 IP:port + /debug/endpoints?format=text&token=xxx
+				fmt.Fprintf(&sb, "    http://%s:%s/debug/endpoints?format=text%s\n", ip, port, tqParam)
+			}
+		}
+	}
 	for _, scheme := range []string{"loopback", "web", "runtime-observe"} {
-		sb.WriteString(chatDebugEndpointSchemeLabel(scheme))
+		schemeLabel := chatDebugEndpointSchemeLabel(scheme)
+		if scheme == "loopback" && snap.ListenMode == "non-loopback" {
+			schemeLabel += " (non-loopback)"
+		}
+		sb.WriteString(schemeLabel)
 		sb.WriteString("\n")
 		var base string
 		switch scheme {
@@ -380,14 +417,17 @@ func appendChatDebugEndpointSubgroupLines(builder *chatDebugDocumentBuilder, sna
 	} else if scheme == "runtime-observe" {
 		builder.meta("Base:", "<route-only>")
 	}
-	if scheme == "web" && strings.TrimSpace(snap.WriteAuthHint) != "" {
-		builder.meta("Auth:", strings.TrimSpace(snap.WriteAuthHint))
+	// 令牌提示
+	hint := strings.TrimSpace(snap.WriteAuthHint)
+	if hint != "" && (scheme == "web" || (scheme == "loopback" && !IsChatWebLoopbackMode())) {
+		builder.meta("Auth:", hint)
 	}
 	// 令牌原文只在 TUI（/debug display）输出：与 Auth 提示相邻便于复制；
 	// HTTP 侧 /debug/endpoints 用 WriteAuthToken(json:"-") 排除，改走
 	// GET /web/api/token，避免清单被转发时连带泄露。
-	if scheme == "web" && strings.TrimSpace(snap.WriteAuthToken) != "" {
-		builder.meta("Token:", strings.TrimSpace(snap.WriteAuthToken)+"  (GET /web/api/token)")
+	token := strings.TrimSpace(snap.WriteAuthToken)
+	if token != "" && (scheme == "web" || (scheme == "loopback" && !IsChatWebLoopbackMode())) {
+		builder.meta("Token:", token+"  (GET /web/api/token)")
 	}
 	for _, info := range snap.Endpoints {
 		if info.Scheme != scheme {

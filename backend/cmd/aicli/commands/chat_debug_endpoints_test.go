@@ -182,7 +182,7 @@ func TestChatDebugEndpointListWebFamily(t *testing.T) {
 
 	wantPaths := []string{
 		"/web/",
-		"/web/api/screen", "/web/api/status", "/web/api/runtime",
+		"/web/api/screen", "/web/api/status", "/web/api/statusbar", "/web/api/runtime",
 		"/web/api/events", "/web/api/events/schema",
 		"/web/api/input", "/web/api/invoke", "/web/api/turn",
 		"/web/api/sessions", "/web/api/sessions/new", "/web/api/sessions/resume",

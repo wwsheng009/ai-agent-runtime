@@ -1710,7 +1710,7 @@ func TestRestoreLocalRuntimeHostTeamState_ReplaysTerminalTeamStateWithoutDuplica
 
 func TestComposeLocalChatSystemPrompt_IncludesWorkspaceGuidance(t *testing.T) {
 	session := &ChatSession{SystemPromptText: "Base prompt."}
-	got := composeLocalChatSystemPrompt(session, `E:\projects\ai\ai-gateway`)
+	got := composeLocalChatSystemPrompt(session, nil, `E:\projects\ai\ai-gateway`)
 
 	for _, want := range []string{
 		"Base prompt.",

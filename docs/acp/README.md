@@ -115,12 +115,20 @@ provider/model 的完整解析链（flag → runtime session → workspace 偏�
 {
   "loadSession": true,
   "sessionCapabilities": {"list": {}, "delete": {}, "resume": {}, "close": {}},
-  "promptCapabilities": {"image": false, "audio": false, "embeddedContext": false},
+  "promptCapabilities": {"image": true, "audio": false, "embeddedContext": true},
   "mcpCapabilities": {"http": true, "sse": true}
 }
 ```
 
-当前 MVP 仅支持文本 prompt；图片 / 音频 / embeddedContext 暂未开放。
+`promptCapabilities.image` / `embeddedContext` 同样是**置位即承诺**：
+
+- `image`：`session/prompt` 里的 `image` 块（Zed 粘贴 / 拖入的截图）按 base64 落盘为本轮
+  本地图片附件，随该 turn 进入 provider 请求。会话模型若显式声明为 text-only
+  （`model_capabilities.<model>.input_modalities` 不含 `image`），该 turn 返回明确错误而
+  不是静默丢图；只有图片、没有文本的 prompt 由占位文案承载（运行时只给非空用户消息挂图）。
+- `embeddedContext`：`resource` 块（Zed 的编辑器选区 / branch diff）按文本内联进 prompt；
+  图片型 blob 同样转成图片附件，无法渲染的二进制 blob 以带标签的占位文本进入 prompt。
+- `audio` 保持 false：运行时没有音频输入链路，客户端不应发送 `audio` 块；真收到会明确报错。
 
 `mcpCapabilities.http/sse = true` 是**置位即承诺**：置位的传输必须真的能连（见
 [MCP 集成](#mcp-集成)），未置位的传输会被「跳过 + 可见诊断」。stdio 是 ACP v1

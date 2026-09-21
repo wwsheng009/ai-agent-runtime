@@ -3,7 +3,7 @@
 - **Status**: Proposed | Accepted | Rejected | Superseded by ADR-YYYY | Deprecated
 - **Date**: YYYY-MM-DD
 - **Deciders**: <角色，非个人真名>
-- **Gate**: `none` | `Phase0-baseline` | `Phase1-start` | `PhaseN-start`
+- **Gate**: `none` | `Phase0-baseline` | `Phase1-shadow` | `Phase1-start` | `PhaseN-start`
 - **Reversibility**: cheap | moderate | expensive
 - **Supersedes**: —
 - **Related**: `04` §x / `supplement/NN` §y / 代码路径

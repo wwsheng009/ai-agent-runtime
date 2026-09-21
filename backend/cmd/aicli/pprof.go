@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,9 +18,14 @@ import (
 // pprofServerHandle 持有按需启动的 pprof HTTP 服务器。
 // 默认监听 127.0.0.1 上的随机空闲端口；仅本机可访问，
 // 避免把可触发 GC / 执行分析代码的端点暴露到网络上。
+// 当 --web-host 指定非回环地址（如 0.0.0.0）时，监听所有接口并
+// 启用非回环鉴权模式（所有请求需令牌）。
 type pprofServerHandle struct {
 	server *http.Server
 	addr   string
+	// tokenQueryParam 是非回环模式下的 token 查询参数后缀（?token=xxxxx），
+	// 回环模式下为空串。用于构造带令牌的访问 URL。
+	tokenQueryParam string
 }
 
 // chatDisplayPath 是会话渲染/显示状态快照端点的独立路径。
@@ -37,7 +44,8 @@ const chatScreenPath = "/debug/chat/screen"
 // 纯文本清单。该端点服务于"一次性发现全部调试入口"的场景。
 const chatEndpointsPath = "/debug/endpoints"
 
-// Addr 返回实际绑定地址（host:port）。
+// Addr 返回服务器的监听地址（host:port）。
+// 例如 0.0.0.0:54321（tcp4）或 [::]:54321（tcp6）。
 func (h *pprofServerHandle) Addr() string {
 	if h == nil {
 		return ""
@@ -45,7 +53,22 @@ func (h *pprofServerHandle) Addr() string {
 	return h.addr
 }
 
-// URL 返回 pprof 索引页面的完整 URL。
+// WebPort 返回服务器的监听端口号（字符串形式）。
+func (h *pprofServerHandle) WebPort() string {
+	if h == nil || h.addr == "" {
+		return ""
+	}
+	// Addr 形如 "0.0.0.0:54321" 或 "[::]:54321"，提取端口部分。
+	_, portStr, err := net.SplitHostPort(h.addr)
+	if err != nil {
+		// 没有端口号的兑换失败情况
+		return ""
+	}
+	return portStr
+}
+
+// URL 返回 pprof 索引页面的完整 URL（不含 token 查询参数；
+// 非回环模式下 URL 构造处会附加 ChatWebTokenQueryParam()）。
 func (h *pprofServerHandle) URL() string {
 	addr := h.Addr()
 	if addr == "" {
@@ -82,12 +105,13 @@ func (h *pprofServerHandle) EndpointsURL() string {
 }
 
 // WebURL 返回微型 Web 客户端页面（/web/）的完整 URL。
+// 非回环模式下附加 ?token= 便于直接从局域网访问。
 func (h *pprofServerHandle) WebURL() string {
 	addr := h.Addr()
 	if addr == "" {
 		return ""
 	}
-	return "http://" + addr + commands.ChatWebPath
+	return "http://" + addr + commands.ChatWebPath + h.tokenQueryParam
 }
 
 // InvokeURL 返回同步远程调用端点（POST /web/api/invoke）的完整 URL。
@@ -96,7 +120,12 @@ func (h *pprofServerHandle) InvokeURL() string {
 	if addr == "" {
 		return ""
 	}
-	return "http://" + addr + commands.ChatWebAPIInvokePath
+	return "http://" + addr + commands.ChatWebAPIInvokePath + h.tokenQueryParam
+}
+
+// TokenQueryParam 返回非回环模式下的 token 查询参数后缀。
+func (h *pprofServerHandle) TokenQueryParam() string {
+	return h.tokenQueryParam
 }
 
 // Close 关闭服务器并释放监听端口。
@@ -109,37 +138,88 @@ func (h *pprofServerHandle) Close() error {
 
 // resolveLoopbackServerAddr 解析 loopback 服务器（Web 客户端 / /debug 端点）的监听地址。
 // 优先级（高 → 低）：
-//  1. --web-port <port>：显式端口，展开为 127.0.0.1:<port>；端口越界直接报错，
+//  1. --web-port <port>：显式端口，展开为 <webHost>:<port>；端口越界直接报错，
 //     避免"手滑写成 70000"这类笔误静默退化成随机端口；
 //  2. AICLI_PPROF 环境变量：非空即启用，并按原样作为地址（可含自定义 host，保持既有语义）；
-//  3. --pprof / --debug：127.0.0.1:0，随机空闲端口；
+//  3. --pprof / --debug：<webHost>:0，随机空闲端口；
 //  4. 都未设置：返回空串，不启动服务器。
-func resolveLoopbackServerAddr(pprofFlag, debugFlag bool, webPort int, webPortSet bool, pprofEnv string) (string, error) {
+//
+// webHost 默认为 127.0.0.1；--web-host 0.0.0.0 或 AICLI_WEB_HOST=0.0.0.0 时监听
+// 所有接口，进入非回环鉴权模式（所有请求需 token）。--web-host :: 使用 IPv6 双栈。
+func resolveLoopbackServerAddr(pprofFlag, debugFlag bool, webPort int, webPortSet bool, webHost, pprofEnv string) (string, error) {
 	if webPortSet {
 		if webPort < 1 || webPort > 65535 {
 			return "", fmt.Errorf("invalid --web-port %d: must be between 1 and 65535", webPort)
 		}
-		return fmt.Sprintf("127.0.0.1:%d", webPort), nil
+		return webHost + ":" + strconv.Itoa(webPort), nil
 	}
 	if env := strings.TrimSpace(pprofEnv); env != "" {
 		return env, nil
 	}
 	if pprofFlag || debugFlag {
-		return "127.0.0.1:0", nil
+		return webHost + ":0", nil
 	}
 	return "", nil
 }
 
+// resolveLoopbackServerNetwork 根据监听地址确定网络类型。
+// 显式 IPv4 地址（如 0.0.0.0）→ "tcp4"，确保 Addr().String() 显示为 IPv4 格式；
+// 显式 IPv6 地址（如 ::）→ "tcp6"；回环/其他 → "tcp"（Go 自动选择）。
+func resolveLoopbackServerNetwork(addr string) string {
+	if addr == "" {
+		return "tcp"
+	}
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
+	host = strings.TrimSpace(host)
+	// IPv6 地址可能被 [:] 包裹
+	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+		host = host[1 : len(host)-1]
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		// 显式 IPv4 地址 → 强制 tcp4，避免 dual-stack 返回 [::]
+		if ip.To4() != nil {
+			return "tcp4"
+		}
+		// IPv6 地址 → tcp6
+		return "tcp6"
+	}
+	// hostname（如 localhost）→ 交由 Go 自动解析
+	return "tcp"
+}
+
 // startPprofServer 启动 pprof HTTP 服务器。
-// addr 为空时使用 127.0.0.1:0（随机空闲端口）；传入其他地址时按原样监听，
-// 但调用方应保证其绑定在 loopback 上。
+// addr 为空时使用 127.0.0.1:0（随机空闲端口）；传入其他地址时按原样监听。
+// 当 addr 绑定在非回环地址（如 0.0.0.0）时，自动开启非回环鉴权模式
+// （所有请求需携带写令牌），并在 URL 方法中附加 ?token= 供局域网访问。
 func startPprofServer(addr string) (*pprofServerHandle, error) {
 	if strings.TrimSpace(addr) == "" {
 		addr = "127.0.0.1:0"
 	}
-	ln, err := net.Listen("tcp", addr)
+	// 根据地址确定网络类型：显式 IPv4（如 0.0.0.0）用 tcp4 避免 dual-stack
+	// 返回 [::] 格式，显式 IPv6（如 ::）用 tcp6。
+	network := resolveLoopbackServerNetwork(addr)
+	ln, err := net.Listen(network, addr)
 	if err != nil {
 		return nil, fmt.Errorf("pprof listen on %s: %w", addr, err)
+	}
+
+	// 确保写令牌已初始化（用于非回环模式的 URL 构造与鉴权）。
+	commands.EnsureChatWebAuthToken()
+
+	// 非回环地址 → 开启非回环鉴权模式（所有请求需令牌）。
+	// tokenQueryParam 由鉴权模式决定，而非监听地址：
+	// 非回环模式下 URL 需附加 ?token=（浏览器无法通过 Header 访问）。
+	if !commands.ChatWebHostIsLoopback(ln.Addr().String()) {
+		commands.SetChatWebLoopbackMode(false)
+	} else {
+		commands.SetChatWebLoopbackMode(true)
+	}
+	tokenQueryParam := ""
+	if !commands.IsChatWebLoopbackMode() {
+		tokenQueryParam = commands.ChatWebTokenQueryParam()
 	}
 
 	mux := http.NewServeMux()
@@ -262,6 +342,7 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	mux.HandleFunc(commands.ChatWebPath, commands.HandleChatWebPage)
 	mux.HandleFunc(commands.ChatWebAPIScreenPath, commands.HandleChatWebAPIScreen)
 	mux.HandleFunc(commands.ChatWebAPIStatusPath, commands.HandleChatWebAPIStatus)
+	mux.HandleFunc(commands.ChatWebAPIStatusBarPath, commands.HandleChatWebAPIStatusLine)
 	mux.HandleFunc(commands.ChatWebAPIRuntimePath, commands.HandleChatWebAPIRuntime)
 	mux.HandleFunc(commands.ChatWebAPIEventsPath, commands.HandleChatWebAPIEvents)
 	mux.HandleFunc(commands.ChatWebAPIInputPath, commands.HandleChatWebAPIInput)
@@ -309,8 +390,19 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	// （go:embed 嵌入 web/ 目录，按文件名 + 扩展名 Content-Type 返回）。
 
 	// 写令牌：本机 Web/调试端点统一鉴权（Host/Origin 校验 + 写操作令牌）。
-	// 令牌在服务器启动时生成一次，页面通过 meta 注入，外部脚本从启动行读取。
-	commands.EnsureChatWebAuthToken()
+	// 服务器开始对外服务：Handler 已通过 EnsureChatWebAuthToken() 在
+	// startPprofServer 开始时同步初始化过，此处无需重复。
+	// 根路径 "/" 重定向到 /debug/endpoints?format=text，便于浏览器粘贴
+	// 包含 token 的基础 URL 直接看到调试信息。
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		target := chatEndpointsPath + "?format=text"
+		if r.URL.Query().Get("token") != "" {
+			target += "&token=" + url.QueryEscape(r.URL.Query().Get("token"))
+		} else if tokenQueryParam != "" {
+			target += tokenQueryParam
+		}
+		http.Redirect(w, r, target, http.StatusSeeOther)
+	})
 	server := &http.Server{
 		Handler: commands.ChatWebAuthGuard(mux.ServeHTTP),
 		// 本地诊断端点：读请求头超时收紧，避免残留连接占用；
@@ -321,5 +413,5 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 		_ = server.Serve(ln)
 	}()
 
-	return &pprofServerHandle{server: server, addr: ln.Addr().String()}, nil
+	return &pprofServerHandle{server: server, addr: ln.Addr().String(), tokenQueryParam: tokenQueryParam}, nil
 }

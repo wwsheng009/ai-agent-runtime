@@ -19,6 +19,7 @@ const (
 	ChatWebPath          = "/web/"
 	ChatWebAPIScreenPath = "/web/api/screen"
 	ChatWebAPIStatusPath = "/web/api/status"
+	ChatWebAPIStatusBarPath = "/web/api/statusbar"
 	ChatWebAPIEventsPath = "/web/api/events"
 	ChatWebAPIInputPath  = "/web/api/input"
 	// ChatWebAPIInvokePath 是同步远程调用端点：一次请求内完成

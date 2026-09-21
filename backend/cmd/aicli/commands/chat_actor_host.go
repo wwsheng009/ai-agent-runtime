@@ -42,6 +42,7 @@ import (
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/usageanalytics"
+	"github.com/wwsheng009/ai-agent-runtime/internal/usageledger"
 )
 
 const (
@@ -167,10 +168,10 @@ type localChatRuntimeHost struct {
 	// progressCheckOnce / progressCheckStop 是 P2-D 的 opt-in 周期巡查
 	//（supervision.progress_check_interval，默认 0 关闭）：与其它后台循环
 	// 一样随 lifecycleCtx + asyncWG 停止，见 chat_actor_progress_check.go。
-	progressCheckOnce    sync.Once
-	progressCheckStop    context.CancelFunc
-	cleanupFns           []func()
-	closeOnce            sync.Once
+	progressCheckOnce sync.Once
+	progressCheckStop context.CancelFunc
+	cleanupFns        []func()
+	closeOnce         sync.Once
 	// subagentLimiterMu / subagentLimiter 缓存进程级子代理并发上限
 	//（P1-4/H12）：同一 host 构建的每个 scheduler 共用同一 limiter 实例，
 	// 使 agents.maxThreads 成为「全部 batch 合计」的上限，而不是每个 batch
@@ -206,6 +207,16 @@ type localChatRuntimeHost struct {
 	// 用互斥锁而非 sync.Once：构建失败不缓存，后续调用可重试。
 	usageMu  sync.Mutex
 	usageSvc *usageanalytics.Service
+
+	// ledgerSvc / ledgerDriver / ledgerDSN / ledgerEnabled 是本地用量账本
+	//（token_usage_history）记录器：挂载在 EventBus 的 Service，捕获 agent loop
+	// 发出的 llm.request.finished 事件，与 runtime-server 的
+	// skillsapi.Handler.appendUsageLedger 形成统一的通用账本能力
+	//（docs §04:69 / §1064 / 06 §338）。
+	ledgerSvc     *usageledger.Service
+	ledgerDriver  string
+	ledgerDSN     string
+	ledgerEnabled bool
 
 	// P0-1c: CLI 宿主与 API 宿主对等的 live-only 子代理进度镜像。
 	// 一个 host 一个实例（Once + 值），既服务子会话 tool.progress 订阅，
@@ -1135,6 +1146,9 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		Supervision:        supervisionPlane,
 		SubagentBatches:    batchStore,
 		supervisionConfig:  supervisionConfig,
+		ledgerDriver:       strings.TrimSpace(cfg.Database.Driver),
+		ledgerDSN:          strings.TrimSpace(cfg.Database.DSN),
+		ledgerEnabled:      cfg.SkillsRuntime != nil && cfg.SkillsRuntime.UsageLedgerEnabled,
 	}
 	host.lifecycleCtx, host.lifecycleCancel = context.WithCancel(context.Background())
 	// Recover only rows whose heartbeat is older than the restart grace period.
@@ -1690,7 +1704,7 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 		Name:         firstNonEmptyChatValue(strings.TrimSpace(childAgentType), "aicli-chat"),
 		Provider:     resolveLocalChatAgentProvider(session, host),
 		Model:        resolveLocalChatAgentModel(session, host),
-		SystemPrompt: composeLocalChatSystemPrompt(session, workspaceRoot),
+		SystemPrompt: composeLocalChatSystemPrompt(session, nil, workspaceRoot),
 		MaxSteps:     0,
 	}
 	if session != nil {
@@ -1965,12 +1979,7 @@ func localChatPrepareRunHook(apiAgent *agent.Agent, session *ChatSession, worksp
 			// differently from session start. Session-scoped changes belong in
 			// turn-context form (e.g. active_goal_guidance below), never in the
 			// frozen instruction head.
-			composed := loadFrozenChatSystemPrompt(runtimeSession, session)
-			if composed == "" {
-				composed = composeLocalChatSystemPrompt(session, workspaceRoot)
-				storeFrozenChatSystemPrompt(runtimeSession, session, composed)
-			}
-			cfg.SystemPrompt = composed
+			cfg.SystemPrompt = composeLocalChatSystemPrompt(session, runtimeSession, workspaceRoot)
 			if cfg.Options == nil {
 				cfg.Options = make(map[string]interface{})
 			}
@@ -2084,7 +2093,33 @@ func resolveLocalChatWorkspaceMode(runtimeConfig *runtimecfg.RuntimeConfig) stri
 	return ""
 }
 
-func composeLocalChatSystemPrompt(session *ChatSession, workspaceRoot string) string {
+// composeLocalChatSystemPrompt returns the outbound instruction head for the
+// session.
+//
+// Provider prompt caching requires messages[0] to stay byte-identical for the
+// whole session, so the composed head is anchored on first compose and reused
+// afterwards. The anchor lives here rather than at the call sites because the
+// head has more than one caller (agent construction and the per-run prepare
+// hook); freezing only the prepare hook left agent construction free to emit a
+// differently-composed head, which is exactly how a later workspace-root
+// resolution rewrote the cached prefix mid-session.
+//
+// runtimeSession, when non-nil, is the durable session handed to the prepare
+// hook; it is preferred over session.RuntimeSession for anchoring so the
+// prepared head and the anchored head never diverge.
+func composeLocalChatSystemPrompt(session *ChatSession, runtimeSession *runtimechat.Session, workspaceRoot string) string {
+	if frozen := loadFrozenChatSystemPrompt(runtimeSession, session); frozen != "" {
+		return frozen
+	}
+	composed := buildLocalChatSystemPrompt(session, workspaceRoot)
+	storeFrozenChatSystemPrompt(runtimeSession, session, composed)
+	return composed
+}
+
+// buildLocalChatSystemPrompt performs one unfrozen composition pass. Callers
+// must go through composeLocalChatSystemPrompt so the session keeps a single
+// stable instruction head.
+func buildLocalChatSystemPrompt(session *ChatSession, workspaceRoot string) string {
 	promptCWD := strings.TrimSpace(workspaceRoot)
 	if promptCWD == "" {
 		promptCWD, _ = os.Getwd()

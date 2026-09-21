@@ -59,6 +59,8 @@ var tabAboutBtn = document.getElementById("tab-about-btn");
 var tabAboutEl = document.getElementById("tab-about");
 var aboutEndpointsEl = document.getElementById("about-endpoints");
 var aboutTokenValueEl = document.getElementById("about-token-value");
+// 当前会话 ID（值由 sessions.js 写入，见 updateSessionIdentity）
+var aboutSessionIDEl = document.getElementById("about-session-id");
 
 function activateTab(tabName) {
   var isMain = tabName === "main";
@@ -118,8 +120,12 @@ var aboutEndpointsLoading = false;
 // meta 缺失（例如手工用其它服务器托管静态页）才回退到服务端端点。
 export function initAboutToken() {
   if (!aboutTokenValueEl) { return; }
-  var meta = document.querySelector('meta[name="aicli-web-token"]');
-  var token = meta && meta.content ? String(meta.content).trim() : "";
+  // 优先从 sessionStorage 读取浏览器缓存的 Token，回退到 meta 标签。
+  var token = sessionStorage.getItem('aicli-web-token');
+  if (!token) {
+    var meta = document.querySelector('meta[name="aicli-web-token"]');
+    token = meta && meta.content ? String(meta.content).trim() : "";
+  }
   if (token) {
     aboutTokenValueEl.textContent = token;
   } else {
@@ -131,16 +137,27 @@ export function initAboutToken() {
       })
       .catch(function () { /* 保留「不可用」占位 */ });
   }
-  var copyBtn = document.getElementById("about-token-copy");
-  if (!copyBtn) { return; }
-  copyBtn.addEventListener("click", function () {
-    var text = aboutTokenValueEl.textContent || "";
-    if (!text || text === "（不可用）" || !navigator.clipboard) {
+  bindAboutCopyButton(document.getElementById("about-token-copy"), aboutTokenValueEl, "（不可用）", "写令牌已复制");
+}
+
+// ---- 关于页签：当前会话 ID 复制（值来自 sessions.js 的会话身份同步） ----
+// 未选择会话时元素为占位文案，不复制（避免把「（未选择会话）」贴到终端）。
+export function initAboutSessionCopy() {
+  bindAboutCopyButton(document.getElementById("about-session-copy"), aboutSessionIDEl, "（未选择会话）", "会话 ID 已复制");
+}
+
+// bindAboutCopyButton：关于页签「值 + 复制按钮」共用交互（写令牌 / 当前会话 ID）。
+// 空值、占位文案、无剪贴板权限统一按失败提示，不做静默降级。
+function bindAboutCopyButton(btn, valueEl, placeholder, okText) {
+  if (!btn || !valueEl) { return; }
+  btn.addEventListener("click", function () {
+    var text = (valueEl.textContent || "").trim();
+    if (!text || text === placeholder || !navigator.clipboard) {
       showToast("复制失败", "error");
       return;
     }
     navigator.clipboard.writeText(text).then(function () {
-      showToast("写令牌已复制", "ok");
+      showToast(okText, "ok");
     }).catch(function () {
       showToast("复制失败", "error");
     });
@@ -284,10 +301,6 @@ export function initShortcutHelp() {
   }
 }
 
-export function initFooter() {
-  // 底部栏显示完整 URL
-  var origin = window.location.origin;
-  document.getElementById("footer-endpoints").innerHTML = '<a href="' + origin + '/debug/endpoints" target="_blank" rel="noopener">' + origin + '/debug/endpoints</a>';
-  document.getElementById("footer-web").innerHTML = '<a href="' + origin + '/web/" target="_blank" rel="noopener">' + origin + '/web/</a>';
-
-}
+// 底部栏不再渲染 /debug/endpoints 与 /web/ 链接（原 initFooter 已移除）：
+// 底部只保留 js/statusbar.js 的状态段；调试端点入口见「关于」页签与
+// GET /debug/endpoints。

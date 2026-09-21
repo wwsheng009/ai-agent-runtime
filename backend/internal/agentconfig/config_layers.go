@@ -78,27 +78,29 @@ type ConfigLayer struct {
 	Present bool
 	// ReadOnly marks a layer that ships with the bundle/repository: it supplies
 	// defaults but never receives writes; edits are routed to the highest
-	// writable layer instead (runtime.yaml's portable layers).
+	// writable layer instead. runtime.yaml no longer has such a layer — its
+	// stack is user + project only (see RuntimeConfigLayerStack) — but the flag
+	// stays part of the layer contract for bundle-style stacks.
 	ReadOnly bool
 }
 
 // RuntimeConfigLayerStack returns the runtime.yaml candidates ordered from the
 // lowest precedence to the highest:
 //
-//	1. configs/runtime.yaml        portable bundle (dev/repo layout, read-only)
-//	2. backend/configs/runtime.yaml portable bundle (dev/repo layout, read-only)
-//	3. $HOME/.aicli/runtime.yaml   user level (created on first write)
-//	4. ./.aicli/runtime.yaml       project level
+//  1. $HOME/.aicli/runtime.yaml   user level (created on first write)
+//  2. ./.aicli/runtime.yaml       project level
 //
-// The portable layers only exist in a development checkout; a user installation
-// has just the user/project candidates, so the effective path becomes the
-// user-level file instead of a repository file.
+// The repository/development layouts (configs/runtime.yaml,
+// backend/configs/runtime.yaml) are deliberately absent: backend/configs is a
+// development directory, so it must never act as an implicit configuration
+// source for aicli processes. A file there is only read when a caller passes it
+// explicitly (for example `runtime-server --config backend/configs/runtime.yaml`).
+//
+// Both layers are merged (a higher layer only overrides the keys it explicitly
+// writes); see LoadMergedRuntimeConfigDocument.
 func RuntimeConfigLayerStack() []ConfigLayer {
 	name := aiclipaths.DefaultRuntimeConfigFileName
-	layers := []ConfigLayer{
-		{Kind: LayerKindPortable, Path: filepath.Join("configs", name), ReadOnly: true},
-		{Kind: LayerKindPortable, Path: filepath.Join("backend", "configs", name), ReadOnly: true},
-	}
+	layers := make([]ConfigLayer, 0, 2)
 	if home, err := userHomeDir(); err == nil && strings.TrimSpace(home) != "" {
 		layers = append(layers, ConfigLayer{Kind: LayerKindUser, Path: filepath.Join(home, ".aicli", name)})
 	} else {
@@ -155,11 +157,11 @@ func RuntimeConfigWriteTarget() (string, ConfigLayerKind) {
 // ConfigLayerStack returns every bootstrap config candidate ordered from the
 // lowest precedence to the highest:
 //
-//	1. ./configs/<name>      portable bundle (also the repository layout)
-//	2. ./<name>              loose current-directory config
-//	3. ./aicli.yaml          legacy aicli config name
-//	4. $HOME/.aicli/<name>   user level
-//	5. ./.aicli/<name>       project level
+//  1. ./configs/<name>      portable bundle (also the repository layout)
+//  2. ./<name>              loose current-directory config
+//  3. ./aicli.yaml          legacy aicli config name
+//  4. $HOME/.aicli/<name>   user level
+//  5. ./.aicli/<name>       project level
 //
 // aicli and runtime-server must both derive their candidate list from this
 // function; otherwise the CLI and the server disagree about precedence.

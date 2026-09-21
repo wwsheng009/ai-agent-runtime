@@ -359,7 +359,11 @@ func sharedChatToolResultPreviewLimits(toolName string) (int, int) {
 	if strings.EqualFold(strings.TrimSpace(toolName), "todos") {
 		return 32, 4096
 	}
-	return 3, 360
+	// A 3-line / 360-byte body is below what a single grep/view/shell result
+	// needs to be usable: it folds almost every real tool result and makes the
+	// omission suffix the dominant line of the block. Keep the cap meaningful
+	// (12 lines / 4 KiB) so it only applies to genuinely large dumps.
+	return 12, 4096
 }
 
 func summarizeSharedShellToolCommand(toolName string, args map[string]interface{}) string {

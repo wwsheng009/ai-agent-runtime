@@ -13,13 +13,30 @@ import (
 	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
 )
 
-func TestNormalizeSkillsRuntimeConfigForHotReloadUsesProfileDefaultAndPreservesExplicitPath(t *testing.T) {
+// TestNormalizeSkillsRuntimeConfigForHotReloadIgnoresDevelopmentLayout 固定新策略：
+// backend/configs 是开发目录，不再作为隐式配置来源；没有 .aicli 层时空路径表示
+// 使用内置默认值，显式路径仍然原样保留。
+func TestNormalizeSkillsRuntimeConfigForHotReloadIgnoresDevelopmentLayout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Chdir(t.TempDir())
+
 	defaults := normalizeSkillsRuntimeConfigForHotReload(&agentconfig.Config{})
-	if filepath.Base(defaults.ConfigFile) != aiclipaths.DefaultRuntimeConfigFileName {
-		t.Fatalf("default runtime config = %q, want profile file %s", defaults.ConfigFile, aiclipaths.DefaultRuntimeConfigFileName)
+	if defaults.ConfigFile != "" {
+		t.Fatalf("default runtime config = %q, want empty (development layout must be ignored)", defaults.ConfigFile)
 	}
-	if _, err := os.Stat(defaults.ConfigFile); err != nil {
-		t.Fatalf("default runtime config should resolve to an existing asset: %q: %v", defaults.ConfigFile, err)
+
+	userConfig := filepath.Join(home, ".aicli", aiclipaths.DefaultRuntimeConfigFileName)
+	if err := os.MkdirAll(filepath.Dir(userConfig), 0o755); err != nil {
+		t.Fatalf("mkdir user layer: %v", err)
+	}
+	if err := os.WriteFile(userConfig, []byte("version: v1\n"), 0o644); err != nil {
+		t.Fatalf("write user layer: %v", err)
+	}
+	defaults = normalizeSkillsRuntimeConfigForHotReload(&agentconfig.Config{})
+	if filepath.Clean(defaults.ConfigFile) != filepath.Clean(userConfig) {
+		t.Fatalf("user layer runtime config = %q, want %q", defaults.ConfigFile, userConfig)
 	}
 
 	explicit := filepath.Join(t.TempDir(), "custom-runtime.yaml")

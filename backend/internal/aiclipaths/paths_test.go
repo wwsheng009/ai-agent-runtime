@@ -121,10 +121,11 @@ func TestResolveRuntimeConfigBootstrapPathPreservesExplicitPath(t *testing.T) {
 }
 
 // A value copied from an older template (backend/configs/runtime.yaml) is a
-// convention path, not an explicit override: it must not short-circuit the
-// .aicli lookups, while the repository-layout compatibility path stays
-// reachable when no .aicli config exists.
-func TestResolveRuntimeConfigBootstrapPathTreatsLegacyLayoutValueAsConvention(t *testing.T) {
+// convention value, not an explicit override, and the repository/development
+// layout is never searched: backend/configs is a development directory. With no
+// .aicli layer on disk the resolver reports "no runtime config" so callers use
+// the built-in defaults instead of loading a dev file.
+func TestResolveRuntimeConfigBootstrapPathIgnoresRepositoryLayout(t *testing.T) {
 	home := t.TempDir()
 	isolateHome(t, home)
 
@@ -139,8 +140,23 @@ func TestResolveRuntimeConfigBootstrapPathTreatsLegacyLayoutValueAsConvention(t 
 	t.Chdir(repoDir)
 
 	legacyValue := filepath.FromSlash(filepath.Join("backend", "configs", DefaultRuntimeConfigFileName))
-	if got := ResolveRuntimeConfigBootstrapPath(legacyValue); got != legacy {
-		t.Fatalf("legacy convention value = %q, want repo-layout search hit %q", got, legacy)
+	if got := ResolveRuntimeConfigBootstrapPath(legacyValue); got != "" {
+		t.Fatalf("repository layout must not be resolved implicitly, got %q", got)
+	}
+	if got := ResolveRuntimeConfigBootstrapPath(""); got != "" {
+		t.Fatalf("no .aicli layer must resolve to empty, got %q", got)
+	}
+
+	// The dev file must not shadow a real .aicli layer either.
+	projectConfig := filepath.Join(repoDir, ".aicli", DefaultRuntimeConfigFileName)
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o755); err != nil {
+		t.Fatalf("create project config dir: %v", err)
+	}
+	if err := os.WriteFile(projectConfig, []byte("version: project\n"), 0o644); err != nil {
+		t.Fatalf("write project runtime config: %v", err)
+	}
+	if got := ResolveRuntimeConfigBootstrapPath(legacyValue); got != projectConfig {
+		t.Fatalf("legacy convention value = %q, want project layer %q", got, projectConfig)
 	}
 }
 
@@ -194,17 +210,10 @@ func TestResolveMCPConfigPathPrefersProjectThenUserAICLIDirs(t *testing.T) {
 	}
 }
 
-func TestResolveMCPConfigPathExpandsTildeAndFallsBackToPortableDefault(t *testing.T) {
+func TestResolveMCPConfigPathExpandsTildeToUserHome(t *testing.T) {
 	home := t.TempDir()
 	isolateHome(t, home)
-	emptyDir := t.TempDir()
-	t.Chdir(emptyDir)
-
-	// No .aicli candidate anywhere: the portable default is returned unchanged
-	// (never a bare "mcp.yaml" that only looks in the process working directory).
-	if got := ResolveMCPConfigPath(DefaultMCPConfigRelativePath); got != DefaultMCPConfigRelativePath {
-		t.Fatalf("portable fallback = %q, want %q", got, DefaultMCPConfigRelativePath)
-	}
+	t.Chdir(t.TempDir())
 
 	// Tilde values must expand to the user home instead of being passed through
 	// literally to the MCP loader.
@@ -217,6 +226,51 @@ func TestResolveMCPConfigPathExpandsTildeAndFallsBackToPortableDefault(t *testin
 	}
 	if got := ResolveMCPConfigPath("~/.aicli/" + DefaultMCPConfigFileName); got != tildeConfig {
 		t.Fatalf("tilde mcp config = %q, want %q", got, tildeConfig)
+	}
+}
+
+func TestResolveMCPConfigPathFallsBackToPortableDefault(t *testing.T) {
+	home := t.TempDir()
+	isolateHome(t, home)
+	emptyDir := t.TempDir()
+	t.Chdir(emptyDir)
+
+	// resolver 会从 cwd 逐级向上搜索（docs/aicli/install.md：每级先 .aicli/mcp.yaml，
+	// 再 configs/mcp.yaml）。开发机上 %TEMP% 位于用户主目录之下时，祖先链上真实的
+	// ~/.aicli/mcp.yaml 会先命中，此时不存在“任何候选都不存在”的前提 —— 这是环境
+	// 事实而非缺陷（干净环境如 CI 仍会执行下面的断言），跳过而不是误报失败。
+	if leaked := ancestorMCPConfigPath(emptyDir); leaked != "" {
+		t.Skipf("环境提供祖先 mcp.yaml：%s（向上搜索按文档命中），跳过 portable 兜底断言", leaked)
+	}
+
+	// No .aicli candidate anywhere: the portable default is returned unchanged
+	// (never a bare "mcp.yaml" that only looks in the process working directory).
+	if got := ResolveMCPConfigPath(DefaultMCPConfigRelativePath); got != DefaultMCPConfigRelativePath {
+		t.Fatalf("portable fallback = %q, want %q", got, DefaultMCPConfigRelativePath)
+	}
+}
+
+// ancestorMCPConfigPath 返回 dir 祖先链上第一个 mcp.yaml 候选（每级先 .aicli，
+// 再 configs，与 resolver 的向上搜索同序），用于识别测试环境自带的真实配置。
+func ancestorMCPConfigPath(dir string) string {
+	if absolute, err := filepath.Abs(dir); err == nil {
+		dir = absolute
+	}
+	for {
+		for _, relative := range []string{
+			filepath.Join(".aicli", DefaultMCPConfigFileName),
+			filepath.FromSlash(DefaultMCPConfigRelativePath),
+		} {
+			candidate := filepath.Join(dir, relative)
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+				return candidate
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
 	}
 }
 
@@ -395,4 +449,31 @@ func isolateHome(t *testing.T, home string) {
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("HOMEDRIVE", "")
 	t.Setenv("HOMEPATH", "")
+}
+
+func TestIsRuntimeConfigConventionPath(t *testing.T) {
+	convention := []string{
+		"",
+		".",
+		DefaultRuntimeConfigFileName,
+		DefaultRuntimeConfigRelativePath,
+		"./" + filepath.FromSlash(DefaultRuntimeConfigRelativePath),
+		filepath.FromSlash(filepath.Join("backend", "configs", DefaultRuntimeConfigFileName)),
+	}
+	for _, candidate := range convention {
+		if !IsRuntimeConfigConventionPath(candidate) {
+			t.Fatalf("expected %q to be treated as a convention path", candidate)
+		}
+	}
+
+	overrides := []string{
+		filepath.Join(t.TempDir(), "custom-runtime.yaml"),
+		filepath.FromSlash(filepath.Join("my-org", "runtime.yaml")),
+		filepath.FromSlash(filepath.Join("configs", "runtime.win7.yaml")),
+	}
+	for _, candidate := range overrides {
+		if IsRuntimeConfigConventionPath(candidate) {
+			t.Fatalf("expected %q to be treated as an explicit override", candidate)
+		}
+	}
 }

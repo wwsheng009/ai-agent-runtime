@@ -18,7 +18,6 @@ import (
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
-	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	runtimeripgrep "github.com/wwsheng009/ai-agent-runtime/internal/ripgrep"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -5267,15 +5266,20 @@ func requiredRipgrepFeatures(opts *grepOptions) []string {
 	return features
 }
 
-// grepByteBudgetReserveRatio caps joined match output at this fraction of the
-// model-visible tool text budget so a truncated-by-lines match list never
-// falls into the L4 head/tail fold (which cuts the middle of the match list).
-// The remainder covers the truncation notice, stats summary, and metadata.
-const grepByteBudgetReserveRatio = 0.8
-
-// grepByteBudgetBytes resolves the in-tool byte stop condition.
+// grepByteBudgetBytes resolves the in-tool byte stop condition. grep owns its
+// own 32 KiB window and stamps skip_render_truncation on every result, so a
+// long match list is never folded again by the render layer (L4).
 func grepByteBudgetBytes() int {
-	return int(float64(output.ModelToolTextByteBudget()) * grepByteBudgetReserveRatio)
+	return grepOutputBudgetBytes
+}
+
+// grepTruncationNoticeReserve is the worst-case byte length of the lines grep
+// appends after a truncated match list: the truncation notice plus the
+// byte-budget hint. Both print counts bounded by the total match count, so the
+// reserve is an upper bound rather than a guess.
+func grepTruncationNoticeReserve(total, budget int) int {
+	return len(fmt.Sprintf("\n\n(结果已截断，显示前 %d 个匹配)", total)) +
+		len(fmt.Sprintf("\n(输出超过 grep 字节预算 %d 字节，提前停止；next_step: 收窄 pattern、增加 paths/glob 限定，或用 max_count 限制每文件匹配数)", budget))
 }
 
 func buildGrepResult(opts *grepOptions, results []string, matchCount int, truncated bool, stats *grepStats) *toolkit.ToolResult {
@@ -5296,7 +5300,14 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 	}
 	if len(results) > 0 {
 		joined := strings.Join(results, "\n")
-		if joinedBytes := len([]byte(joined)) + len(results); joinedBytes > grepByteBudgetBytes() {
+		// 截断提示与匹配行同属 grep 的字节预算：先按最坏情况预留提示长度，
+		// 匹配行只在剩余额度内保留，payload 才真正不超过 grepOutputBudgetBytes。
+		budget := grepByteBudgetBytes()
+		listingBudget := budget - grepTruncationNoticeReserve(len(results), budget)
+		if listingBudget < 0 {
+			listingBudget = 0
+		}
+		if joinedBytes := len([]byte(joined)) + len(results); joinedBytes > listingBudget {
 			// Byte-budget stop: keep the complete leading matches (never cut a
 			// middle window like the L4 head/tail fold) so "find things" stays
 			// semantically useful without an artifact dereference round-trip.
@@ -5304,7 +5315,7 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 			used := 0
 			for _, line := range results {
 				lineBytes := len([]byte(line)) + 1
-				if kept > 0 && used+lineBytes > grepByteBudgetBytes() {
+				if kept > 0 && used+lineBytes > listingBudget {
 					break
 				}
 				used += lineBytes
@@ -5323,7 +5334,7 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 		if truncated && (opts == nil || !opts.jsonOutput) {
 			output += fmt.Sprintf("\n\n(结果已截断，显示前 %d 个匹配)", len(results))
 			if byteTruncated {
-				output += fmt.Sprintf("\n(输出超过模型可见字节预算 %d 字节，提前停止；next_step: 收窄 pattern、增加 paths/glob 限定，或用 max_count 限制每文件匹配数)", grepByteBudgetBytes())
+				output += fmt.Sprintf("\n(输出超过 grep 字节预算 %d 字节，提前停止；next_step: 收窄 pattern、增加 paths/glob 限定，或用 max_count 限制每文件匹配数)", grepByteBudgetBytes())
 			}
 		}
 	}
@@ -5433,10 +5444,17 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 		"truncated":                        truncated,
 		"engine":                           engine,
 	}
+	// grep owns its own byte/line window and publishes its own truncation and
+	// refinement guidance, so the render layer (L4) must never fold the payload
+	// again - unconditionally, not only when a truncation flag happens to be set.
+	metadata[toolresult.MetadataSkipRenderTruncationKey] = true
+	// Declare grep's own window too: archive tiering and any fallback fold then
+	// follow grepOutputBudgetBytes instead of the layer backstop.
+	metadata[toolresult.MetadataModelVisibleBudgetKey] = grepOutputBudgetBytes
 	if byteTruncated {
 		metadata["results_truncated"] = true
 		metadata["truncation_reason"] = "byte_budget"
-		metadata[toolresult.MetadataNextActionKey] = "输出超过模型可见字节预算已提前停止；请收窄 pattern、增加 paths/glob 限定，或用 max_count 限制每文件匹配数。不要原样重试同一查询。"
+		metadata[toolresult.MetadataNextActionKey] = "输出超过 grep 字节预算已提前停止；请收窄 pattern、增加 paths/glob 限定，或用 max_count 限制每文件匹配数。不要原样重试同一查询。"
 	}
 	annotateSearchBackend(metadata, engine, "builtin-walker", "")
 	if stats != nil {

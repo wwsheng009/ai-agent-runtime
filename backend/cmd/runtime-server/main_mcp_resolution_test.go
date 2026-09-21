@@ -6,13 +6,15 @@ import (
 	"testing"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 )
 
-func isolateMCPResolutionHome(t *testing.T) {
+func isolateMCPResolutionHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	return home
 }
 
 func TestResolveRuntimeMCPConfigResolutionPrefersProjectFile(t *testing.T) {
@@ -39,16 +41,55 @@ func TestResolveRuntimeMCPConfigResolutionPrefersProjectFile(t *testing.T) {
 }
 
 func TestResolveRuntimeMCPConfigResolutionFallsBackToUserLevel(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	home := isolateMCPResolutionHome(t)
 	t.Chdir(t.TempDir())
+
+	// resolver 会从 cwd 逐级向上搜索（docs/aicli/install.md：每级先 .aicli/mcp.yaml，
+	// 再 configs/mcp.yaml）。开发机上 %TEMP% 位于用户主目录之下时，祖先链上真实的
+	// ~/.aicli/mcp.yaml 会先命中，此时不存在“任何候选都不存在”的前提 —— 这是环境
+	// 事实而非缺陷（干净环境如 CI 仍会执行下面的断言），跳过而不是误报失败。
+	if probe := aiclipaths.ResolveMCPConfigPath(aiclipaths.DefaultMCPConfigRelativePath); filepath.ToSlash(probe) != aiclipaths.DefaultMCPConfigRelativePath {
+		t.Skipf("环境提供祖先 mcp.yaml：解析到 %s（向上搜索按文档命中），跳过 user-fallback 断言", probe)
+	}
 
 	cfg := &config.Config{AICLI: &config.AICLIConfig{MCP: &config.AICLIMCPConfig{ConfigFile: "configs/mcp.yaml"}}}
 	resolution := resolveRuntimeMCPConfigResolution(cfg)
 	want := filepath.Join(home, ".aicli", "mcp.yaml")
 	if resolution.Path != want || resolution.Source != "user-fallback" {
 		t.Fatalf("resolution = %+v, want path=%q source=user-fallback", resolution, want)
+	}
+}
+
+// user-fallback 规则本身：约定默认值（相对 configs/mcp.yaml）不存在时改落用户级，
+// 已存在的路径与其它显式路径原样返回。该规则不依赖向上搜索，任何环境都可确定断言。
+func TestApplyMCPUserFallbackRewritesConventionDefaultOnly(t *testing.T) {
+	home := isolateMCPResolutionHome(t)
+	t.Chdir(t.TempDir())
+	want := filepath.Join(home, ".aicli", "mcp.yaml")
+
+	got := applyMCPUserFallback(aiclipaths.MCPConfigResolution{
+		Path:   aiclipaths.DefaultMCPConfigRelativePath,
+		Source: "explicit",
+	})
+	if got.Path != want || got.Source != "user-fallback" {
+		t.Fatalf("convention default = %+v, want path=%q source=user-fallback", got, want)
+	}
+
+	existing := filepath.Join(t.TempDir(), "mcp.yaml")
+	if err := os.WriteFile(existing, []byte("mcpServers: {}\n"), 0o644); err != nil {
+		t.Fatalf("write existing mcp config: %v", err)
+	}
+	if got := applyMCPUserFallback(aiclipaths.MCPConfigResolution{Path: existing, Source: "explicit"}); got.Path != existing || got.Source != "explicit" {
+		t.Fatalf("existing path = %+v, want path=%q source=explicit", got, existing)
+	}
+
+	override := filepath.Join("custom", "mcp.yaml")
+	if got := applyMCPUserFallback(aiclipaths.MCPConfigResolution{Path: override, Source: "explicit"}); got.Path != override || got.Source != "explicit" {
+		t.Fatalf("non-convention relative path = %+v, want path=%q source=explicit", got, override)
+	}
+
+	if got := applyMCPUserFallback(aiclipaths.MCPConfigResolution{}); got.Path != "" || got.Source != "" {
+		t.Fatalf("empty resolution = %+v, want empty", got)
 	}
 }
 

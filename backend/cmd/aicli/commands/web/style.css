@@ -155,10 +155,11 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
 }
 #theme-toggle { flex: 0 0 auto; padding: 2px 8px; font-size: 12px; cursor: pointer; background: var(--bg3); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; }
 #theme-toggle:hover { background: var(--hoverBg); }
-/* ---- 顶栏当前会话信息（标题 + 会话 ID）：由 sessions.js 在会话列表/切换/新建后更新 ---- */
+/* ---- 顶栏当前会话标题：由 sessions.js 在会话列表/切换/新建后更新 ----
+   会话 ID 不占顶栏（长 ID 会挤掉标题），改在「关于」页签完整展示并可复制。 */
 #header-session {
   grid-column: 2; justify-self: center;
-  display: flex; align-items: baseline; justify-content: center; gap: 8px;
+  display: flex; align-items: baseline; justify-content: center;
   min-width: 0; max-width: 100%; overflow: hidden;
   text-align: center;
 }
@@ -166,12 +167,6 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
   font-size: 13px; font-weight: 600; color: var(--fg2);
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-#header-session-id {
-  font-size: 11px; color: var(--fg3);
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-/* 标题与 ID 之间的分隔点：未选择会话（ID 为空）时不渲染 */
-#header-session-id:not(:empty)::before { content: "·"; margin-right: 8px; color: var(--fg3); }
 #conversation {
   flex: 1; min-height: 0; overflow: auto;
   margin: 8px 0;
@@ -246,6 +241,67 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
   border: 1px solid var(--border); border-left: 3px solid var(--accent);
   border-radius: 4px; font-size: 12px;
   font-family: Consolas, "Cascadia Mono", "Courier New", monospace;
+}
+
+/* ---- 工具输出折叠/展开 ---- */
+/* 工具输出容器：继承 .msg-body 的字体/颜色等样式 */
+#screen .msg-row.msg-tool .tool-output {
+  position: relative;
+  line-height: inherit;
+}
+
+/* 折叠状态：限制最大高度（约 5 行），隐藏溢出内容 */
+#screen .msg-row.msg-tool .tool-output.tool-collapsed {
+  max-height: 8em;
+  overflow: hidden;
+}
+
+/* 折叠时底部渐变遮罩，提示存在更多内容 */
+#screen .msg-row.msg-tool .tool-output.tool-collapsed::after {
+  content: "";
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  height: 1.5em;
+  background: linear-gradient(to bottom, transparent, var(--codeBg));
+  pointer-events: none;
+}
+
+/* 展开状态：显示全部内容 */
+#screen .msg-row.msg-tool .tool-output.tool-expanded {
+  max-height: none;
+}
+#screen .msg-row.msg-tool .tool-output.tool-expanded::after {
+  display: none;
+}
+
+/* 展开/收起控件：并入「工具」抬头行（文字 + ▼ 展开 / ▲ 收起 图标） */
+#screen .msg-row.msg-tool .msg-label.tool-toggle {
+  display: inline-flex; align-items: center; gap: 4px;
+  cursor: pointer; user-select: none;
+}
+#screen .msg-row.msg-tool .msg-label.tool-toggle:hover { color: var(--accent2); }
+#screen .msg-row.msg-tool .msg-label.tool-toggle:focus-visible {
+  outline: 1px solid var(--accent); outline-offset: 1px; border-radius: 3px;
+}
+#screen .msg-row.msg-tool .msg-label.tool-toggle .tool-toggle-action {
+  padding: 0 5px; font-size: 10px; line-height: 1.5;
+  color: var(--accent); background: var(--bg3);
+  border: 1px solid var(--border); border-radius: 3px;
+  transition: background-color 0.15s, color 0.15s;
+}
+#screen .msg-row.msg-tool .msg-label.tool-toggle:hover .tool-toggle-action {
+  background: var(--hoverBg); color: var(--accent2);
+}
+#screen .msg-row.msg-tool .msg-label.tool-toggle .tool-toggle-icon {
+  font-size: 9px; line-height: 1; color: var(--accent);
+}
+
+/* 内容不溢出：隐藏控件（文字/图标），抬头恢复纯文本且不可点击 */
+#screen .msg-row.msg-tool .msg-label.tool-toggle.tool-toggle-off { cursor: default; }
+#screen .msg-row.msg-tool .msg-label.tool-toggle.tool-toggle-off:hover { color: var(--toolFg); }
+#screen .msg-row.msg-tool .msg-label.tool-toggle.tool-toggle-off .tool-toggle-action,
+#screen .msg-row.msg-tool .msg-label.tool-toggle.tool-toggle-off .tool-toggle-icon {
+  display: none;
 }
 
 /* 命令：终端代码块样式（等宽、代码底色） */
@@ -540,6 +596,47 @@ button.sending-btn:not(.stop-btn) { animation: pulse 1.2s ease-in-out infinite; 
 #footer a:hover { text-decoration: underline; color: var(--accent2); }
 #footer .sep { color: var(--fg4); }
 
+/* ---- 底部状态栏（micro web client 版 ChatBar） ---- */
+/* 与 TUI 底部状态行同源：balance · context · directory · git branch · window
+   （provider/model/reasoning 见底部 cfg-bar，不在此重复）。*/
+#status-bar-container {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-family: var(--font-mono, "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace);
+  font-size: 11px; color: var(--fg2);
+  cursor: default; user-select: text;
+}
+#status-bar-refresh {
+  opacity: 0.4; border: none; background: none; cursor: pointer;
+  font-size: 11px; padding: 0 2px; line-height: 1.2;
+  color: var(--fg3);
+}
+#status-bar-refresh:hover { opacity: 0.9; color: var(--fg); }
+.status-bar {
+  display: inline-flex; flex-wrap: wrap; align-items: center; gap: 2px 6px;
+  padding: 0 4px; line-height: 1.6;
+}
+.status-bar .seg {
+  display: inline-flex; align-items: center;
+  padding: 0 6px; border-radius: 3px 0 0 3px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 30vw;
+}
+.status-bar .seg.kind-balance  { color: var(--warning, #d8b040); }
+.status-bar .seg.kind-context_used { color: var(--info, #5fa3f0); font-weight: 600; }
+.status-bar .seg.kind-directory  { color: var(--fg2); }
+.status-bar .seg.kind-project    { color: var(--fg3); font-style: italic; }
+.status-bar .seg.kind-git_branch { color: var(--success, #50a050); font-weight: 600; }
+.status-bar .seg.kind-window     { color: var(--fg3); }
+.status-bar .seg.kind-input_tokens  { color: var(--fg3); }
+.status-bar .seg.kind-output_tokens { color: var(--fg3); }
+.status-bar .seg + .seg { margin-inline-start: 2px; }
+.status-bar .sep {
+  color: var(--fg4); margin: 0 2px;
+  font-weight: bold;
+}
+.status-bar.empty { color: var(--fg4); font-style: italic; }
+
+
 /* ---- 左侧会话列表侧边栏 ---- */
 .layout { display: flex; flex: 1; min-height: 0; }
 #sidebar {
@@ -807,7 +904,7 @@ body.sidebar-collapsed #sidebar {
 /* ---- 移动端响应式（<768px） ---- */
 @media (max-width: 767px) {
   body { padding: 8px; }
-  /* 窄屏改为两行：第一行左侧工具/状态，第二行整行居中会话标题 + ID */
+  /* 窄屏改为两行：第一行左侧工具/状态，第二行整行居中会话标题 */
   header { grid-template-columns: minmax(0, 1fr); row-gap: 6px; }
   .header-left { grid-column: 1; grid-row: 1; flex-wrap: wrap; }
   #header-session { grid-column: 1; grid-row: 2; max-width: 100%; }
@@ -1182,12 +1279,13 @@ body.sidebar-collapsed #sidebar {
 .about-facts a { color: var(--accent); text-decoration: none; }
 .about-facts a:hover { text-decoration: underline; }
 
-/* 关于页签：写令牌（页面注入的 meta 值，供人工复制；每进程随机、重启轮换） */
+/* 关于页签：可复制值行（写令牌 / 当前会话 ID 共用；值可整段选中，按钮写剪贴板） */
 .about-token { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .about-token-value {
   padding: 2px 6px; border-radius: 3px; user-select: all;
   background: var(--codeBg); color: var(--codeFg); font-size: 11px;
   font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  overflow-wrap: anywhere; /* 会话 ID 偏长时换行，不撑破关于面板 */
 }
 .about-token-copy {
   padding: 2px 8px; border-radius: 3px; cursor: pointer; font-size: 11px;

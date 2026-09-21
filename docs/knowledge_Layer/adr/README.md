@@ -57,7 +57,8 @@ Proposed ──(owner 接受)──→ Accepted ──(被新 ADR 取代)──�
 
 | Gate | 含义 |
 |---|---|
-| `Phase0-baseline` | 必须在 Phase 0 基线跑完、拿到数据后才能定阈值部分 |
+| `Phase0-baseline` | 必须在 Phase 0 基线跑完、拿到数据后才能定阈值部分。**仅适用于 Phase 0 能产出的数据**（`mode=off` 下的 token / 延迟 / 索引构建成本） |
+| `Phase1-shadow` | 必须在 **Phase 1 shadow 实测**后才能定阈值部分。适用于**需要 shadow 对比数据**的阈值（如 ADR-0003 的 α）——Phase 0 为 `mode=off`，**结构上产不出**该类数据（2026-09-21 新增，见 ADR-0003 §10） |
 | `Phase1-start` | 阻塞 Phase 1 开工，必须在此之前 Accepted |
 | `PhaseN-start` | 阻塞对应 Phase |
 | `none` | 无阻塞，可随时定 |
@@ -70,8 +71,10 @@ Proposed ──(owner 接受)──→ Accepted ──(被新 ADR 取代)──�
 |---|---|---|---|---|---|
 | [0001](0001-project-module-language-schema.md) | Project/Module/Language 模型收敛 | Proposed | expensive（但当前零迁移成本） | **Phase1-start** | `02` 的 `language_projects` |
 | [0002](0002-acp-lsp-ownership.md) | ACP 下 LSP 归属与能力面 | Proposed | cheap | Phase4-start | `supplement/05` §2.3 的 `external_preferred` |
-| [0003](0003-exploration-attribution-metrics.md) | 探索归因与 shadow 差异率度量 | Proposed | cheap（仅测量） | Phase0-baseline（阈值）/ Phase1-start（口径） | `supplement/05` §9.3 |
+| [0003](0003-exploration-attribution-metrics.md) | 探索归因与 shadow 差异率度量 | Proposed | cheap（仅测量） | **Phase1-shadow**（阈值）/ Phase1-start（口径） | `supplement/05` §9.3 |
 | [0004](0004-stale-index-tool-surface.md) | 陈旧索引下的 `code.*` 工具面 | Proposed | cheap | Phase2-start | `supplement/05` §9.4 |
+
+> **Gate 可达性修订（2026-09-21）**：`0004` §10 的 `S_fresh` / `S_max` 取值 Gate 由 `Phase0-baseline` 改为 **`Phase2-start`**——二者是 **reader 观测到的陈旧度**阈值，需要索引 + 多进程仲裁 + 心跳数据，Phase 0（`mode=off`、无索引、无 reader）**结构上产不出**。注意：`0004` 的 Accept **本来就不被该值阻塞**（§4.1 已声明 60s / 15min 为初始值），此处仅修正 Gate 指向。
 | [0005](0005-windows-child-process-lifecycle.md) | Windows 子进程树生命周期与复用既有 process guard | Proposed | moderate | Phase4-start | `supplement/05` §9.5 |
 | [0006](0006-lsp-position-encoding-boundary.md) | LSP 位置编码转换边界与缓存键 | Proposed | moderate | Phase4-start | 澄清并补齐 `03` §5.3 |
 | [0007](0007-phantom-tables-and-doc-invariants.md) | 幽灵表清理与文档不变量 | Proposed | cheap | Phase1-start | `02` §8 的 6 个无 DDL 表名；`04` L546 的 `index_jobs` DDL 落点 |
@@ -119,6 +122,6 @@ Proposed ──(owner 接受)──→ Accepted ──(被新 ADR 取代)──�
 
 | 附录 B 条目 | 对应 ADR | 状态 |
 |---|---|---|
-| B3（阈值是否写死） | [0003](0003-exploration-attribution-metrics.md) | 口径已定，阈值待 `Phase0-baseline` |
+| B3（阈值是否写死） | [0003](0003-exploration-attribution-metrics.md) | 口径已定，阈值待 `Phase1-shadow`（2026-09-21 修订，原为 `Phase0-baseline`） |
 | B6（项目模型重叠） | [0001](0001-project-module-language-schema.md) | Proposed |
 | B15（schema 应用顺序） | 待转 ADR（与 [0007](0007-phantom-tables-and-doc-invariants.md) 的 I2 相关） | 未开始 |

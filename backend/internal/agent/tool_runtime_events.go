@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
@@ -82,6 +83,8 @@ func toolCompletedEventPayload(result toolExecutionResult, step int, traceID str
 		payload["render_output"] = output
 		payload["render_output_format"] = "diff"
 		payload["render_output_untruncated"] = true
+	} else if output := toolCompletedDisplayOutput(result); output != "" {
+		payload["output"] = output
 	}
 	if result.Envelope != nil {
 		if source := toolresult.SourceFromMetadata(result.Envelope.Metadata); source != "" {
@@ -157,6 +160,55 @@ func shellDiffToolRenderOutput(result toolExecutionResult) string {
 		return ""
 	}
 	return output
+}
+
+// toolCompletedDisplayOutputMaxBytes bounds the plain-text tool output promoted
+// onto tool.completed for the transcript.
+//
+// 这个上界约束的是 cell 源文本，也就是 pager「展开完整输出」读到的内容；折叠
+// 本身是显示层的选择（ui/cell.ToolDisplayPreviewOptions: 5 行 / 8 KiB，超出
+// 才出现「仅显示」标记），因此这里必须宽于折叠预算，否则展开看到的尾部会比
+// 折叠前更少。16 KiB 覆盖模型可见正文（L4 echo 上限约 10 KiB）后仍留有界。
+const toolCompletedDisplayOutputMaxBytes = 16 * 1024
+
+// toolCompletedDisplayOutput returns the bounded plain-text output of a
+// non-editing tool (shell/view/grep/…) for the tool.completed payload.
+//
+// 背景：tool.completed 此前只为编辑类工具与 git diff 提供 render_output，
+// 其余工具的载荷里只剩 summarizeToolExecutionLines 的 3 行摘要。编码器的
+// toolFinishedText 优先级（render_output → output → result → summary）因此
+// 永远落到 summary 上：live 单元格固定 3 行、既不触发折叠也不显示任何省略
+// 标记，pager 展开读到的仍是同一份 3 行（展开渲染的是整份 cell 源文本）。
+// 这里把工具输出本身（有界、UTF-8 安全）提升为 output，让既有优先级真正
+// 生效；live 与 replay 共用同一载荷，因此两条路径同时修复。
+//
+// 不复用 truncateToolEventText：它会 normalize 空白，破坏 view/grep 的行号
+// 缩进与 shell 输出排版。
+func toolCompletedDisplayOutput(result toolExecutionResult) string {
+	output := extractToolTextOutput(result.Output)
+	if strings.TrimSpace(output) == "" {
+		return ""
+	}
+	if len(output) <= toolCompletedDisplayOutputMaxBytes {
+		return output
+	}
+	// 折叠标记留在载荷文本内，而不是留给显示层推断：pager 展开渲染的是整份
+	// cell 源文本，若在这里静默截断，展开后的尾部会凭空结束而无任何解释。
+	return truncateToolOutputBytes(output, toolCompletedDisplayOutputMaxBytes) +
+		fmt.Sprintf("\n… display copy limited to the first %d bytes (display only)", toolCompletedDisplayOutputMaxBytes)
+}
+
+// truncateToolOutputBytes cuts text to at most maxBytes without splitting a
+// UTF-8 rune, keeping the caller's own formatting intact.
+func truncateToolOutputBytes(text string, maxBytes int) string {
+	if maxBytes <= 0 || len(text) <= maxBytes {
+		return text
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.ValidString(text[:cut]) {
+		cut--
+	}
+	return text[:cut]
 }
 
 // copyToolArtifactFlowMetadata promotes the plan §11.3 artifact-flow fields

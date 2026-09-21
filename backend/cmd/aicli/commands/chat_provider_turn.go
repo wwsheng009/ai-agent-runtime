@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
@@ -299,6 +300,18 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 	if reasoning != "" {
 		runtimeMessage.Metadata.Set(chatcoreReasoningMetadataKey, reasoning)
 	}
+	// Persist the provider-dependent reasoning replay decision with the message.
+	// The producing provider is only known here, at record time; deciding it
+	// later during serialization made the same history serialize differently
+	// after a provider switch and invalidated the prompt-cache prefix.
+	if strings.EqualFold(strings.TrimSpace(runtimeMessage.Role), "assistant") {
+		runtimellm.RecordOpenAIReasoningReplayDecisionWithCapabilities(
+			runtimeMessage.Metadata,
+			session.ProviderName,
+			acpChatResolvedModel(session),
+			chatSessionModelCapabilities(session),
+		)
+	}
 
 	applyChatTokenUsage(session, usage)
 	if applied := applyChatContextTokensFromUsage(session, usage, 0, true); applied <= 0 && requestContextTokens > 0 {
@@ -309,6 +322,25 @@ func (e *aicliProviderTurnExecutor) Complete(ctx context.Context, req runtimecha
 		Message: &runtimeMessage,
 		Usage:   usage,
 	}, nil
+}
+
+// chatSessionModelCapabilities returns the configured per-model capabilities of
+// the provider the session is currently routed to.
+//
+// It mirrors the provider resolution used by acpModelAcceptsImageInput: the
+// session's own Provider snapshot wins, and a session that never carried one
+// falls back to the loaded config by provider name.
+func chatSessionModelCapabilities(session *ChatSession) map[string]config.ModelCapabilitySpec {
+	if session == nil {
+		return nil
+	}
+	provider := session.Provider
+	if len(provider.ModelCapabilities) == 0 && session.Config != nil {
+		if named, ok := session.Config.Providers.Items[strings.TrimSpace(session.ProviderName)]; ok {
+			provider = named
+		}
+	}
+	return provider.ModelCapabilities
 }
 
 func responseHasTruncatedToolCalls(msg map[string]interface{}) bool {

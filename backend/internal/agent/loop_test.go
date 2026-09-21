@@ -1813,10 +1813,11 @@ func TestReActLoop_Run_UsesOutputGatewayForToolResults(t *testing.T) {
 				"frame 2",
 				"frame 3",
 				"frame 4",
-				// P1-1 archive tiering archives only outputs at/above the
-				// below-threshold skip (~1 KiB); pad so this integration test
-				// still exercises the gateway→artifact path.
-				strings.Repeat("pad-context-line\n", 80),
+				// P1-1 archive tiering skips outputs below the producing tool's
+				// model-visible window (the 12 KiB layer backstop when the tool
+				// declares none); pad past it so this integration test still
+				// exercises the gateway→artifact path.
+				strings.Repeat("pad-context-line\n", 900),
 			}, "\n"),
 		},
 		artifacts:  store,
@@ -1922,9 +1923,10 @@ func TestReActLoop_Run_ContextManagerRecallsArtifacts(t *testing.T) {
 		skillExec:   &skill.Executor{},
 		mcpManager: &MockSequenceMCPManager{
 			output: "header\nunique-stack-trace\nframe 1\nframe 2\nframe 3\nframe 4\n" +
-				// P1-1 archive tiering: pad above the ~1 KiB skip threshold so
-				// the context-recall integration still has an artifact to pull.
-				strings.Repeat("recall-pad-line\n", 80),
+				// P1-1 archive tiering: pad above the 12 KiB skip threshold (the
+				// model-visible window of an undeclared tool) so the
+				// context-recall integration still has an artifact to pull.
+				strings.Repeat("recall-pad-line\n", 900),
 		},
 		artifacts: store,
 		contextMgr: contextmgr.NewManager(contextmgr.Budget{

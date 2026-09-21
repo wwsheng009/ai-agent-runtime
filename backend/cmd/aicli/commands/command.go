@@ -86,6 +86,13 @@ func dispatchChatCommand(session *ChatSession, command string, noInteractive boo
 				// committed as a Scene command cell in the main message stream.
 				openChatDebugOverlay(session)
 			}
+			if renderErr == nil && result.OpenWebEndpointsScreen && session != nil {
+				// /web endpoints renders on a dedicated alternate screen
+				// (reusing the debug overlay viewer) instead of the main
+				// message stream: no Scene cell is committed, and the endpoint
+				// text is captured once before the lease-bound screen enters.
+				openChatWebEndpointsScreen(session)
+			}
 			if renderErr == nil && result.OpenUsageScreen != nil && session != nil {
 				// /usage is a lease-bound alternate-screen viewer (like /debug
 				// display): the cache overview and the session cache request
@@ -209,6 +216,12 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		// /mcp 是结构化命令：非 JSON 模式由 dispatchChatCommand 提前认领；
 		// 这里为 JSON 输出保留同一份命令单元的渲染路径，不引入新的原始终端写入。
 		_ = renderChatCommandResult(session, executeStructuredMCPCommand(session, command), false)
+		return false
+	}
+	if commandMatches(cmdLower, "/web") {
+		// /web 是结构化命令：非 JSON 模式由 dispatchChatCommand 提前认领；
+		// 这里为 JSON 输出保留同一份命令单元的渲染路径，不引入新的原始终端写入。
+		_ = renderChatCommandResult(session, executeStructuredWebCommand(session, command), false)
 		return false
 	}
 	if commandMatches(cmdLower, "/sessions") {

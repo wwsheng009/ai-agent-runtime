@@ -12,7 +12,6 @@ import (
 )
 
 const (
-	modelToolTextMinSegmentBytes = 1024
 	// modelArtifactNoticeIDPrefix marks a pointer to a persisted artifact record
 	// (art_<uuid32>). The prefix is the stable span that splitTrailingArtifactNotice
 	// and the frontend renderer match on; keep it byte-identical everywhere.
@@ -47,6 +46,47 @@ func SetModelToolTextByteBudget(bytes int) {
 // the same configurable cap.
 func ModelToolTextByteBudget() int {
 	return modelToolTextByteBudget
+}
+
+const (
+	// modelToolTextBudgetFloorBytes bounds a tool-declared window from below: a
+	// declared budget smaller than this would starve the model of the very
+	// output the tool produced, so the layer budget stays the effective floor.
+	modelToolTextBudgetFloorBytes = 4 * 1024
+	// modelToolTextBudgetCeilingBytes bounds a tool-declared window from above:
+	// history must stay bounded even if a tool asks for a wider window.
+	modelToolTextBudgetCeilingBytes = 64 * 1024
+)
+
+// effectiveModelToolTextBudget resolves the byte budget the render layer folds
+// a tool result to.
+//
+// A tool may declare its own model-visible window through
+// toolresult.MetadataModelVisibleBudgetKey (shell output does) without opting
+// out of render-layer folding. Honoring the declaration is what gives the tool
+// "its own budget": the payload stays intact for the archive and artifact_read,
+// while the model-visible head is sized by the tool's own contract instead of
+// the one-size-fits-all backstop. The declared value is clamped to
+// [modelToolTextByteBudget, modelToolTextBudgetCeilingBytes]; without a
+// declaration the layer budget applies.
+func effectiveModelToolTextBudget(metadata map[string]interface{}) int {
+	declared := toolresult.ModelVisibleBudgetBytes(metadata)
+	if declared <= 0 {
+		return modelToolTextByteBudget
+	}
+	// The declared window is honored both ways, but never below the layer
+	// backstop (nor below the sanity floor) and never above the ceiling.
+	floor := modelToolTextByteBudget
+	if floor < modelToolTextBudgetFloorBytes {
+		floor = modelToolTextBudgetFloorBytes
+	}
+	if declared < floor {
+		return floor
+	}
+	if declared > modelToolTextBudgetCeilingBytes {
+		return modelToolTextBudgetCeilingBytes
+	}
+	return declared
 }
 
 // RenderFullToolResultContent builds the full tool_result text that should be
@@ -448,6 +488,109 @@ func isExternalMCPToolResult(envelope *Envelope) bool {
 	return !strings.EqualFold(mcpName, "toolkit")
 }
 
+// toolTruncationMetadataKeys is the unified vocabulary for "the producing tool
+// already folded its own output". Controlled tools publish at least one of
+// these keys together with their continuation metadata (offset/limit/eof/
+// artifact_id); every downstream layer must treat the body as final and must
+// not fold it a second time.
+//
+// Canonical key: "is_truncated" (controls tools that own their paging window).
+// Legacy aliases kept readable so existing emitters stay compatible:
+// "results_truncated" (grep byte budget), "truncated".
+//
+// "output_truncated" is deliberately NOT part of this vocabulary: it is a
+// capture-layer fact ("the raw stream exceeded the retention limit"), not a
+// statement that the payload was folded to a model-visible window. Treating it
+// as tool-owned truncation is what let 256 KiB exec captures bypass the render
+// layer entirely.
+// toolresult.MetadataSkipRenderTruncationKey ("skip_render_truncation") is part
+// of this vocabulary: a tool that sets it opts out of render-layer (L4)
+// truncation management entirely and owns its own paging window.
+var toolTruncationMetadataKeys = []string{
+	"skip_render_truncation",
+	"is_truncated",
+	"results_truncated",
+	"truncated",
+}
+
+// toolFoldedOwnWindowKeys is the subset of the truncation vocabulary that means
+// "this payload was actually folded to the producing tool's own window". It is
+// the gate for attaching a raw-output pointer to a payload whose tool owns its
+// window: an intact body needs no pointer, a folded one does.
+var toolFoldedOwnWindowKeys = []string{
+	"is_truncated",
+	"results_truncated",
+	"truncated",
+}
+
+// toolFoldedOwnWindow reports whether the producing tool published fold
+// metadata for this result, i.e. whether bytes are missing from the body the
+// model is about to see.
+func toolFoldedOwnWindow(metadata map[string]interface{}) bool {
+	return metadataFlagTruthy(metadata, toolFoldedOwnWindowKeys)
+}
+
+// toolTruncatedUpstream reports whether the controlled tool already truncated
+// its own output. This is the single source of truth that stops the truncation
+// cascade: once a tool has folded its output and published continuation
+// metadata, the render layer must not fold it again (a second fold would charge
+// the byte budget twice, emit a duplicate truncation notice and contradict the
+// tool's own continuation guidance).
+func toolTruncatedUpstream(metadata map[string]interface{}) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	// A producing tool that declares it owns truncation
+	// (skip_render_truncation, flat or nested under "tool_metadata") decides
+	// the final shape of its payload. This explicit marker is checked before
+	// the inferred vocabulary scan below.
+	if toolresult.SkipsRenderTruncation(metadata) {
+		return true
+	}
+	return metadataFlagTruthy(metadata, toolTruncationMetadataKeys)
+}
+
+// metadataFlagTruthy scans metadata (flat or nested under "tool_metadata") for
+// the first truthy value among keys, tolerating the bool/string/number
+// encodings that tool emitters and JSON round-trips produce.
+func metadataFlagTruthy(metadata map[string]interface{}, keys []string) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	if flagsTruthyIn(metadata, keys) {
+		return true
+	}
+	if nested, ok := metadata["tool_metadata"].(map[string]interface{}); ok {
+		return flagsTruthyIn(nested, keys)
+	}
+	return false
+}
+
+func flagsTruthyIn(metadata map[string]interface{}, keys []string) bool {
+	for _, key := range keys {
+		switch value := metadata[key].(type) {
+		case bool:
+			if value {
+				return true
+			}
+		case string:
+			switch strings.ToLower(strings.TrimSpace(value)) {
+			case "true", "1", "yes", "y":
+				return true
+			}
+		case int:
+			if value != 0 {
+				return true
+			}
+		case float64:
+			if value != 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func metadataString(metadata map[string]interface{}, key string) string {
 	if len(metadata) == 0 {
 		return ""
@@ -486,10 +629,22 @@ func renderToolTextForModelHistory(content interface{}, toolErr string, envelope
 		}
 	}
 	notice := modelArtifactNotice(envelope)
+	// A tool may declare its own model-visible window (shell output does): the
+	// fold budget below then follows the tool's contract instead of the
+	// one-size-fits-all backstop.
+	budget := effectiveModelToolTextBudget(envelopeMetadata(envelope))
+	// Controlled tool that already truncated its own output owns the final shape
+	// of its payload: it folded to its own limit, published continuation metadata
+	// (offset/limit/eof/artifact) and told the model how to page through the rest.
+	// Folding again here would charge the byte budget twice, emit a duplicate
+	// "middle omitted" marker and contradict the tool's own continuation notice.
+	if toolTruncatedUpstream(envelopeMetadata(envelope)) {
+		return attachOwnedWindowPointer(full, toolErr, envelope, notice)
+	}
 	if strings.TrimSpace(full) == "" {
 		return appendToolArtifactNotice(full, notice)
 	}
-	if len(full) <= modelToolTextByteBudget {
+	if len(full) <= budget {
 		// The raw body fits the budget. No truncation happened, so a record-id
 		// pointer is dropped unless it still adds value: failed results keep
 		// the recovery hint, and artifact_read windows (artifact_source_id)
@@ -509,29 +664,45 @@ func renderToolTextForModelHistory(content interface{}, toolErr string, envelope
 		}
 		return appendToolArtifactNotice(full, notice)
 	}
-	// O-1: L4 head/tail fold happened at the render layer.
+	// O-1: L4 head-only fold happened at the render layer.
 	observability.RecordToolOutputTruncation(observability.TruncationLayerRender, observability.TruncatedByBytes)
-	// Truncation happened: thread the artifact id into the fold marker so the
-	// head/tail view itself carries an explicit continuation command.
-	artifactID := strings.TrimSpace(metadataString(envelopeMetadata(envelope), "artifact_id"))
-	if artifactID == "" && len(envelopeArtifactIDs(envelope)) > 0 {
-		artifactID = envelopeArtifactIDs(envelope)[0]
-	}
+	// Truncation happened: the fold notice itself carries the "first N lines +
+	// next step" contract, so no artifact id is threaded through this path. The
+	// artifact notice (when one exists) is still appended below.
 	if notice == "" {
-		return formatTruncatedToolTextForModel(full, modelToolTextByteBudget, artifactID)
+		return formatTruncatedToolTextForModel(full, budget)
 	}
-	bodyBudget := modelToolTextByteBudget - len(notice) - len("\n\n")
+	bodyBudget := budget - len(notice) - len("\n\n")
 	if bodyBudget <= 0 {
-		return safePrefixByBytes(notice, modelToolTextByteBudget)
+		return safePrefixByBytes(notice, budget)
 	}
-	return appendToolArtifactNotice(formatTruncatedToolTextForModel(full, bodyBudget, artifactID), notice)
+	return appendToolArtifactNotice(formatTruncatedToolTextForModel(full, bodyBudget), notice)
 }
 
-func envelopeArtifactIDs(envelope *Envelope) []string {
-	if envelope == nil {
-		return nil
+// attachOwnedWindowPointer decides the raw-output pointer for a payload whose
+// producing tool already owns its window (skip_render_truncation).
+//
+// The pointer is a recovery aid, not decoration: it is attached only when it
+// can be acted on. A body that was really folded (the tool published fold
+// metadata), a failed call (the pointer doubles as the recovery hint) and an
+// artifact_read window (the pointer is the paging contract itself) keep it;
+// an intact body that the model can already read in full does not, because a
+// pointer there only invites a pointless dereference.
+func attachOwnedWindowPointer(full string, toolErr string, envelope *Envelope, notice string) string {
+	metadata := envelopeMetadata(envelope)
+	if notice == "" {
+		return full
 	}
-	return envelope.ArtifactIDs
+	if !isIDArtifactNotice(notice) {
+		// On-disk path artifacts stay discoverable even for complete bodies.
+		observability.RecordToolPointerNotice(observability.PointerNoticeKindPath)
+		return appendToolArtifactNotice(full, notice)
+	}
+	if !toolFoldedOwnWindow(metadata) && !failedResult(toolErr, envelope) && !isArtifactReadWindow(metadata) {
+		return full
+	}
+	observability.RecordToolPointerNotice(observability.PointerNoticeKindID)
+	return appendToolArtifactNotice(full, notice)
 }
 
 // isIDArtifactNotice reports whether the notice points at an artifact record
@@ -593,7 +764,15 @@ func artifactNoticeTail(envelope *Envelope) string {
 		return ""
 	}
 	parts := make([]string, 0, 2)
-	if size := metadataInt(envelope.Metadata, "raw_bytes", "byte_count"); size > 0 {
+	size := metadataInt(envelope.Metadata, "raw_bytes", "byte_count")
+	if window := metadataInt(envelope.Metadata, "output_window_total_bytes"); window > size {
+		// A tool that owns its model-visible window (shell) archives the complete
+		// capture and hands the model only a head, so the pointer must describe
+		// the record rather than the folded body the model already has. Reporting
+		// the folded size here would understate what artifact_read can page back.
+		size = window
+	}
+	if size > 0 {
 		parts = append(parts, "size="+strconv.Itoa(size))
 	}
 	kind := strings.TrimSpace(toolresult.KindFromMetadata(envelope.Metadata))
@@ -640,31 +819,86 @@ func appendToolArtifactNotice(body string, notice string) string {
 	}
 }
 
-// truncationMarker renders the fold marker inserted between the head and tail
-// segments. Both the emitted marker and the budget reserve go through this
-// helper so the charged bytes can never drift from the rendered bytes.
-func truncationMarker(artifactID string, omittedBytes int) string {
-	marker := fmt.Sprintf("\n\n[output truncated for history safety: omitted %d bytes from the middle]", omittedBytes)
-	// P2 continuation guidance: embed the exact dereference command in the
-	// fold marker so the model never wanders (e.g. re-calling the same tool).
-	if id := strings.TrimSpace(artifactID); id != "" {
-		marker += fmt.Sprintf("; read via artifact_read(artifact_id=%s, offset=<bytes>, limit=<bytes>)", id)
+// truncationMarker renders the head-only fold notice appended after the shown
+// lines. It names how many lines are visible, how many were dropped from the
+// end, and what the model should do next, so a folded result is never a dead
+// end. Both the emitted notice and the budget reserve go through this helper so
+// the charged bytes can never drift from the rendered bytes.
+func truncationMarker(shownLines, totalLines, omittedBytes int) string {
+	if shownLines < 0 {
+		shownLines = 0
 	}
+	if totalLines < shownLines {
+		totalLines = shownLines
+	}
+	omittedLines := totalLines - shownLines
+	marker := fmt.Sprintf(
+		"\n\n[output truncated for history safety: showing the first %d of %d lines; omitted %d lines (%d bytes) from the end]",
+		shownLines, totalLines, omittedLines, omittedBytes,
+	)
+	// Next-step guidance: the omitted tail is not reachable by re-issuing the
+	// identical call (it would fold the same way), so name the cheapest
+	// narrower-window recovery per tool family instead of leaving the model to
+	// guess or abandon the read.
+	marker += "\n[next step: re-issue the same call with a narrower window to read the omitted tail — " +
+		"view: offset=<next line, 0-based> plus a smaller limit; " +
+		"grep/shell: narrow the pattern, path or command output instead of repeating the identical call]"
 	return marker + "\n\n"
 }
 
-// truncationMarkerReserve returns the exact number of bytes the fold marker can
-// occupy for a result whose omitted middle is at most maxOmittedBytes. Omitted
-// bytes never exceed the total content length, so digit-counting on that upper
-// bound makes the reserve an exact ceiling rather than a guess.
-func truncationMarkerReserve(artifactID string, maxOmittedBytes int) int {
-	if maxOmittedBytes < 0 {
-		maxOmittedBytes = 0
+// truncationMarkerReserve returns the exact number of bytes the fold notice can
+// occupy for a result with totalLines lines and totalBytes bytes. The shown line
+// count is at most totalLines and the omitted line/byte counts are at most those
+// totals, so digit-counting on the upper bound makes the reserve an exact
+// ceiling rather than a guess.
+func truncationMarkerReserve(totalLines, totalBytes int) int {
+	if totalLines < 0 {
+		totalLines = 0
 	}
-	return len(truncationMarker(artifactID, maxOmittedBytes))
+	if totalBytes < 0 {
+		totalBytes = 0
+	}
+	reserve := len(truncationMarker(totalLines, totalLines, totalBytes))
+	if partial := len(truncationMarkerPartial(totalLines, totalBytes, totalBytes)); partial > reserve {
+		reserve = partial
+	}
+	return reserve
 }
 
-func formatTruncatedToolTextForModel(content string, budget int, artifactID ...string) string {
+// truncationMarkerPartial renders the fold notice for a head that stops in the
+// middle of a line (the first line alone overflowed the body budget). Line
+// arithmetic cannot describe that loss: the clean-cut notice would claim "0
+// lines omitted" while thousands of bytes were dropped from the same line, and
+// its line-offset recovery cannot resume a mid-line cut. This variant states
+// the shown lines, the shown bytes of the cut line, and points at byte-range
+// recovery instead.
+func truncationMarkerPartial(completeLines, partialBytes, omittedBytes int) string {
+	if completeLines < 0 {
+		completeLines = 0
+	}
+	if partialBytes < 0 {
+		partialBytes = 0
+	}
+	if omittedBytes < 0 {
+		omittedBytes = 0
+	}
+	marker := fmt.Sprintf(
+		"\n\n[output truncated for history safety: showing %d complete lines plus the first %d bytes of line %d; omitted %d bytes from the end]",
+		completeLines, partialBytes, completeLines+1, omittedBytes,
+	)
+	marker += "\n[next step: this window stops mid-line, so a line offset cannot resume it — " +
+		"read the raw output pointer below by byte range (artifact_read with offset=<byte offset>) " +
+		"or re-issue a narrower call instead of repeating the identical one]"
+	return marker + "\n\n"
+}
+
+// formatTruncatedToolTextForModel folds oversized tool text to a head-only
+// window: the first lines that fit the budget, followed by an explicit notice
+// that reports how many lines were shown and omitted plus how to read the rest
+// with a narrower call. The tail is intentionally not kept — a hole in the
+// middle of the text cannot be paged by the model, while a "first N lines +
+// next step" contract can.
+func formatTruncatedToolTextForModel(content string, budget int) string {
 	content = strings.TrimSpace(strings.ReplaceAll(content, "\r\n", "\n"))
 	if content == "" || budget <= 0 || len(content) <= budget {
 		return content
@@ -672,72 +906,96 @@ func formatTruncatedToolTextForModel(content string, budget int, artifactID ...s
 
 	totalLines := countTextLines(content)
 	totalBytes := len(content)
-	header := fmt.Sprintf("Total output lines: %d\nTotal output bytes: %d\n\n", totalLines, totalBytes)
+	// These counts describe the tool-result text being folded here, which may
+	// already have been truncated by the executor capture layer. The executor
+	// keeps the raw "Total output lines/bytes" labels for the process output
+	// (see internal/executor/output_capture.go), so use a distinct label to
+	// avoid two different totals appearing under the same name.
+	header := fmt.Sprintf("Tool result lines: %d\nTool result bytes: %d\n\n", totalLines, totalBytes)
 	if firstErr := firstFailureLine(content); firstErr != "" {
 		header += "First error line: " + firstErr + "\n\n"
 	}
 
-	var pointerID string
-	if len(artifactID) > 0 {
-		pointerID = strings.TrimSpace(artifactID[0])
-	}
-	reserve := truncationMarkerReserve(pointerID, totalBytes)
-
-	// The budget is a hard ceiling: header + head + marker + tail must never
-	// exceed it. Reserve the header and the (exact, upper-bound) marker first,
-	// then split whatever remains between head and tail.
-	bodyBudget := budget - len(header) - reserve
+	// The budget is a hard ceiling: header + shown head + notice must never
+	// exceed it. Reserve the header and the (exact, upper-bound) notice first,
+	// then spend whatever remains on the head.
+	bodyBudget := budget - len(header) - truncationMarkerReserve(totalLines, totalBytes)
 	if bodyBudget <= 0 {
 		return safePrefixByBytes(content, budget)
 	}
 
-	if bodyBudget >= totalBytes {
-		bodyBudget = totalBytes - 1
-	}
-	if bodyBudget <= 0 {
-		return safePrefixByBytes(content, budget)
-	}
-
-	headBudget := bodyBudget * 2 / 3
-	tailBudget := bodyBudget - headBudget
-	// The minimum segment size is a usability floor, not a budget override:
-	// apply it only when the remaining body budget can actually afford it.
-	if bodyBudget >= modelToolTextMinSegmentBytes*2 {
-		if headBudget < modelToolTextMinSegmentBytes {
-			headBudget = modelToolTextMinSegmentBytes
-			tailBudget = bodyBudget - headBudget
-		}
-		if tailBudget < modelToolTextMinSegmentBytes {
-			tailBudget = modelToolTextMinSegmentBytes
-			headBudget = bodyBudget - tailBudget
-		}
-	}
-
-	head := safePrefixByBytes(content, headBudget)
-	tail := safeSuffixByBytes(content, tailBudget)
-	if len(head)+len(tail) >= totalBytes {
-		// head+tail already span the whole content, so there is no middle to
-		// omit; take a deterministic split inside the body budget instead.
-		head = safePrefixByBytes(content, bodyBudget*2/3)
-		tail = safeSuffixByBytes(content, bodyBudget/3)
-	}
-
-	omittedBytes := totalBytes - len(head) - len(tail)
+	head := headLinesWithinBudget(content, bodyBudget)
+	omittedBytes := totalBytes - len(head)
 	if omittedBytes < 0 {
 		omittedBytes = 0
 	}
-	marker := truncationMarker(pointerID, omittedBytes)
-	if pointerID != "" {
-		observability.RecordToolPointerNotice(observability.PointerNoticeKindDerefHint)
+	// A head that stops mid-line means the first line alone overflowed the body
+	// budget (headLinesWithinBudget only cuts mid-line in that fallback), so the
+	// line-count notice would contradict itself; report the partial line and
+	// the byte-range recovery path instead.
+	if partialBytes := partialLineBytes(head); partialBytes > 0 {
+		return header + head + truncationMarkerPartial(countShownLines(head)-1, partialBytes, omittedBytes)
 	}
-	return header + head + marker + tail
+	shownLines := countShownLines(head)
+	if shownLines > totalLines {
+		shownLines = totalLines
+	}
+	return header + head + truncationMarker(shownLines, totalLines, omittedBytes)
+}
+
+// headLinesWithinBudget keeps the longest prefix of content that fits maxBytes,
+// snapping down to the last line boundary while that still uses at least half
+// the budget. Snapping keeps the "showing the first N lines" count exact and
+// never hands the model a half line; content whose first line alone overflows
+// the budget falls back to a byte prefix because no earlier boundary exists.
+func headLinesWithinBudget(content string, maxBytes int) string {
+	if maxBytes <= 0 || content == "" {
+		return ""
+	}
+	if len(content) <= maxBytes {
+		return content
+	}
+	head := safePrefixByBytes(content, maxBytes)
+	if idx := strings.LastIndex(head, "\n"); idx >= 0 && idx+1 >= maxBytes/2 {
+		return head[:idx+1]
+	}
+	return head
+}
+
+// countShownLines counts the content lines visible in a head segment. A head
+// that ends mid-line still shows that partial line, so it is counted too;
+// callers that must not conflate a partial line with a complete one use
+// partialLineBytes to detect that case first.
+func countShownLines(head string) int {
+	if head == "" {
+		return 0
+	}
+	lines := strings.Count(head, "\n")
+	if !strings.HasSuffix(head, "\n") {
+		lines++
+	}
+	return lines
+}
+
+// partialLineBytes returns how many bytes of a mid-line cut the head shows, or 0
+// when the head is empty or ends exactly on a line boundary. The result is the
+// length of the head's last, unterminated segment (the whole head when it holds
+// no newline at all).
+func partialLineBytes(head string) int {
+	if head == "" || strings.HasSuffix(head, "\n") {
+		return 0
+	}
+	if idx := strings.LastIndex(head, "\n"); idx >= 0 {
+		return len(head) - idx - 1
+	}
+	return len(head)
 }
 
 // firstFailureLine returns the first content line that looks like a failure
 // (error/failed/fatal/panic/exception or Chinese equivalents). Failures often
-// live at the tail of a large output that head/tail truncation can still miss
-// (or that lands inside the omitted middle), so the truncated summary carries
-// the earliest signal line explicitly. Returns "" when nothing matches.
+// live at the tail of a large output that the head-only fold drops entirely, so
+// the truncated summary carries the earliest signal line explicitly. Returns ""
+// when nothing matches.
 func firstFailureLine(text string) string {
 	markers := []string{"error", "failed", "failure", "fatal", "panic", "exception", "错误", "失败"}
 	for _, raw := range strings.Split(text, "\n") {
@@ -812,24 +1070,4 @@ func safePrefixByBytes(text string, maxBytes int) string {
 		index += size
 	}
 	return text[:index]
-}
-
-func safeSuffixByBytes(text string, maxBytes int) string {
-	if maxBytes <= 0 || text == "" {
-		return ""
-	}
-	if len(text) <= maxBytes {
-		return text
-	}
-	start := len(text)
-	used := 0
-	for start > 0 {
-		_, size := utf8.DecodeLastRuneInString(text[:start])
-		if size <= 0 || used+size > maxBytes {
-			break
-		}
-		start -= size
-		used += size
-	}
-	return text[start:]
 }

@@ -968,11 +968,14 @@ type runtimeServerApp struct {
 
 // loadRuntimeServerManager 通过分层栈加载 runtime.yaml（P2）：
 //
-//   - 用户级 $HOME/.aicli/runtime.yaml 与项目级 ./.aicli/runtime.yaml 覆盖只读的
-//     portable 层（开发仓库里的 configs/runtime.yaml / backend/configs/runtime.yaml）；
+//   - 层栈只有用户级 $HOME/.aicli/runtime.yaml 与项目级 ./.aicli/runtime.yaml
+//     （高层只覆盖它显式写的键）；开发仓库布局（configs/runtime.yaml /
+//     backend/configs/runtime.yaml）**不是**隐式来源，只有调用方显式传入
+//     （如 --config backend/configs/runtime.yaml）时才会被读取；
 //   - 读取路径（RuntimeManager.GetFilePath）取「生效来源」= 最高存在层，未改动既有语义
-//     （sessions 目录仍相对它解析）；全新安装（任何层都不存在）时取用户级写入目标；
-//   - 写回不在这里：agent.maxSteps 由分层版 persister 按层分摊，只读层永不被改写。
+//     （sessions 目录仍相对它解析）；全新安装（任何层都不存在）时回落内置默认
+//     （RuntimeManager.Load 对空路径直接返回默认值）；
+//   - 写回不在这里：agent.maxSteps 由分层版 persister 按层分摊，仓库布局文件永不被改写。
 func loadRuntimeServerManager(runtimeManager *runtimecfg.RuntimeManager) error {
 	merged, err := config.LoadMergedRuntimeConfigDocument()
 	if err != nil {
@@ -1620,16 +1623,21 @@ func resolveRuntimeMCPConfigResolution(cfg *config.Config) aiclipaths.MCPConfigR
 	if strings.TrimSpace(cfg.AICLI.MCP.ConfigFile) == "" {
 		return aiclipaths.MCPConfigResolution{}
 	}
-	resolution := aiclipaths.ResolveMCPConfigPathDetailed(cfg.AICLI.MCP.ConfigFile)
+	return applyMCPUserFallback(aiclipaths.ResolveMCPConfigPathDetailed(cfg.AICLI.MCP.ConfigFile))
+}
+
+// applyMCPUserFallback 在解析结果不存在时把模板约定默认值（相对 configs/mcp.yaml）
+// 改落用户级 ~/.aicli/mcp.yaml（由 admin 包自动创建），避免 runtime-server 在任意
+// 工作目录下生成 configs/mcp.yaml；其它非默认路径（含显式覆盖）按用户指定位置创建。
+//
+// 该规则不依赖文件系统层级，可脱离向上搜索单独验证。
+func applyMCPUserFallback(resolution aiclipaths.MCPConfigResolution) aiclipaths.MCPConfigResolution {
 	if resolution.Path == "" {
 		return resolution
 	}
 	if _, err := os.Stat(resolution.Path); err == nil {
 		return resolution
 	}
-	// 模板默认值（相对 configs/mcp.yaml）不代表用户显式指定位置：改落用户级目录，
-	// 避免 runtime-server 在任意工作目录下生成 configs/mcp.yaml；
-	// 其它非默认路径（含显式覆盖）按用户指定位置创建。
 	if !filepath.IsAbs(resolution.Path) && filepath.ToSlash(resolution.Path) == aiclipaths.DefaultMCPConfigRelativePath {
 		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
 			resolution.Path = filepath.Join(home, ".aicli", "mcp.yaml")

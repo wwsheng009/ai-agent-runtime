@@ -413,8 +413,14 @@ go run ./scripts/acp_e2e_<feature>.go $env:TEMP\aicli-e2e.exe
   fs/terminal，不使用客户端宿主能力，故为 N/A（§3 范围说明）；远程/沙箱宿主场景再评估。
 - **`clientCapabilities` 解析与协商**：boolean 选项门控**已实施**（2026-09-20，见 §11.1-A3 与
   §11.4-D3）；客户端 fs/terminal/elicitation 能力感知仍未做（本 agent 直连本地，暂无消费点）。
-- **`promptCapabilities`（image / audio / embeddedContext）**：当前全 false（文本-only 属预期），
-  开放需先补齐多模态输入链路。
+- **`promptCapabilities`（image / audio / embeddedContext）**：**image 与 embeddedContext
+  已实施**（2026-09-20）。`initialize` 声明 `{image: true, audio: false, embeddedContext: true}`；
+  `session/prompt` 的 `image` 块按 base64 落盘为本轮本地图片附件，`resource` 文本
+  （Zed 选区 / branch diff）内联进 prompt，图片型 blob 转图片、其它二进制 blob 转占位文本。
+  text-only 模型（`input_modalities` 未声明 `image`）收到图片时返回明确错误；`audio` 无运行时
+  输入链路，保持 false 且收到即报错。单测见 `internal/acp/prompt_content_test.go`、
+  `cmd/aicli/commands/agent_stdio_multimodal_test.go`，真实二进制 E2E 见
+  `scripts/acp_e2e_image.go`（断言上游请求携带图片 data URL 与内联选区文本）。
 - **`mcpCapabilities`**：MCP 相关能力未声明。
 - **`session/new` 的 `additionalDirectories` / `mcpServers`**：字段已解析但被忽略。
 - **`os.Chdir(cwd)` 进程级副作用**：`session/new` 会改整个进程的工作目录，
@@ -577,7 +583,7 @@ gofmt -l <改动文件>                                     # 无输出
 | A5 | `os.Chdir(cwd)` 进程级副作用 | PARTIAL | `session/new` / `session/load` 改进程工作目录，多会话并发不安全 |
 | A6 | 请求/响应级 `_meta` | PARTIAL | initialize trace context 丢弃；仅内容块级保留 |
 | A7 | `plan`（原 `agent_plan`） | YES | `internal/acp.PlanUpdate`（枚举归一化 + 空列表 marshal 为 `[]`）；bridge `acpPlanEntriesFromRuntimeEvent`（todos 终态快照，含去重）；`lastReplayPlanEntries` 回放重建；单测 + E2E 覆盖 |
-| A8 | `promptCapabilities` / `mcpCapabilities` | DONE（`mcpCapabilities`）／NO（`promptCapabilities` 仍文本-only） | `mcpCapabilities` 随 P2 置 `{http:true, sse:true}`（stdio 是 ACP v1 强制项、不体现在能力位）；「置位即承诺」：实现与测试同一提交落地（`internal/acp/types.go`、`internal/mcp/config/types.go` 的 `Headers`） |
+| A8 | `promptCapabilities` / `mcpCapabilities` | DONE（`mcpCapabilities`；`promptCapabilities` 的 image / embeddedContext 于 2026-09-20 落地，audio 保持 false） | `mcpCapabilities` 随 P2 置 `{http:true, sse:true}`（stdio 是 ACP v1 强制项、不体现在能力位）；`promptCapabilities` 置 `{image:true, audio:false, embeddedContext:true}`：`internal/acp.ExtractPromptContent` 解析 `image` / `resource` 块，图片按 base64 落盘走本地附件链路（text-only 模型与 `audio` 块显式报错）；「置位即承诺」：实现与测试同一提交落地（`internal/acp/types.go`、`internal/mcp/config/types.go` 的 `Headers`、`internal/acp/prompt_content_test.go`、`cmd/aicli/commands/agent_stdio_multimodal_test.go`、`scripts/acp_e2e_image.go`） |
 | A9 | legacy modes 清理 | N/A（未来） | 待客户端生态切换后再评估删除死面 |
 
 ### 11.2 验证收口类（2026-09-20 已全部收口；B5 为语义裁定）
@@ -594,6 +600,9 @@ gofmt -l <改动文件>                                     # 无输出
 - `plan` 通知落地并收口验证：A7 由 NO → YES，单测（`internal/acp/plan_test.go`、
   `cmd/aicli/commands/agent_stdio_plan_test.go`）+ 真实二进制 E2E（`scripts/acp_e2e_plan.go`，
   实时与 `session/load` 回放两路）已过；`docs/acp/README.md` 补充发射语义。
+- `promptCapabilities` 多模态入站落地：A8 的 `promptCapabilities` 由 NO → DONE（image /
+  embeddedContext），`audio` 维持 false 并新增显式拒绝路径；`docs/acp/README.md` 能力协商段与
+  §8 条目已同步，E2E 证据 `scripts/acp_e2e_image.go`。
 - §1 第 3 / 6 条、§3 状态说明与矩阵 6 行、§3 一句话总结、§4.1–4.5「当前代码事实」、§5 注记已对齐工作树。
 - `agent_stdio_config_option_test.go` 中「The mode option has its own tests」注释不属实，已修正为指向本节 B2。
 - 关联文档 `docs/acp/README.md` 经核对无陈旧表述（`session/list` / `delete` / `close`、三项通知、

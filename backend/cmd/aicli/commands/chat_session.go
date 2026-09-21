@@ -305,7 +305,10 @@ func rotateChatSessionDiagnostics(session *ChatSession) error {
 		return nil
 	}
 	if session.Logger != nil {
-		if err := session.Logger.RotateSession(); err != nil {
+		// /new 之后目录名必须等于新运行时会话 ID：此处 session.RuntimeSession
+		// 已在 createNewRuntimeConversation 中替换为新会话，直接采用其 ID，
+		// 避免先生成一个临时 chat log ID 再改名。
+		if err := session.Logger.RotateSessionWithID(currentRuntimeSessionID(session)); err != nil {
 			return fmt.Errorf("rotate chat log session: %w", err)
 		}
 	}

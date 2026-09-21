@@ -55,8 +55,16 @@ func (r AgentRecord) HoldsQuota() bool {
 
 // QuotaChildren filters a registry listing down to the rows that hold active
 // thread quota: every non-root identity that is not already terminal.
+//
+// Pre-allocation uses len(records)/4 instead of len(records) because the input
+// typically carries ~75% terminal/closed/root rows that are filtered out.
+// Allocating the full worst-case backing array here (sizeof(AgentRecord) is
+// several hundred bytes) doubles peak heap during the reclaim pass and has been
+// observed to tip an already-pressured process into OOM (see reclaim.go
+// QuotaChildren OOM). A quarter is a conservative lower bound for the active
+// child fraction; append grows the slice naturally if the real count is higher.
 func QuotaChildren(records []AgentRecord) []AgentRecord {
-	children := make([]AgentRecord, 0, len(records))
+	children := make([]AgentRecord, 0, len(records)/4+1)
 	for _, record := range records {
 		if record.AgentPath == "/root" || strings.EqualFold(record.AgentType, AgentTypeRoot) {
 			continue
@@ -572,9 +580,10 @@ type QuotaRoot struct {
 // stable root-id order (so a sweep reports the same reasons in the same
 // sequence on every host).
 func QuotaRoots(records []AgentRecord) []QuotaRoot {
-	byRoot := make(map[string][]AgentRecord, len(records))
-	roots := make([]string, 0, len(records))
-	for _, child := range QuotaChildren(records) {
+	children := QuotaChildren(records)
+	byRoot := make(map[string][]AgentRecord, len(children)/4+1)
+	roots := make([]string, 0, len(children)/4+1)
+	for _, child := range children {
 		root := strings.TrimSpace(child.RootSessionID)
 		if root == "" {
 			continue

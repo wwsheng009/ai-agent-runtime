@@ -1203,6 +1203,14 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 			return nil, retryErr
 		}
 		activeMaxAttempts = retryResult.MaxAttempts
+		if isReasoningOnlyStopReply(err) {
+			// 正常 stop 的 reasoning-only（模型只输出了思维链就结束）：同一条
+			// prompt 重采样只会复现同一个退化样本，继续循环只会把 attempt
+			// 预算烧在相同请求上（线上事故里连续 3 次退化后直接终态报错）。
+			// 直接交回上层：agent loop 的反馈回注会改写 prompt 后再请求，
+			// 而 length 型仍留在循环里吃预算升级（8k→16k→32k→64k）。
+			return nil, err
+		}
 		if !retryResult.Decision.Retryable {
 			return nil, err
 		}
@@ -1281,6 +1289,7 @@ func stringFromRawJSON(raw json.RawMessage) string {
 
 type reasoningOnlyEmptyReplyError struct {
 	finishReason string
+	usage        Usage
 }
 
 func (e *reasoningOnlyEmptyReplyError) Error() string {
@@ -1292,6 +1301,9 @@ func (e *reasoningOnlyEmptyReplyError) Error() string {
 		parts = append(parts, fmt.Sprintf("finish_reason=%s", reason))
 	}
 	parts = append(parts, "reasoning_present=true", "content_empty=true", "tool_calls=0")
+	if usage := reasoningOnlyUsageForensics(e.usage); usage != "" {
+		parts = append(parts, usage)
+	}
 	return strings.Join(parts, ": ")
 }
 
@@ -1324,7 +1336,26 @@ func newReasoningOnlyEmptyReplyError(resp *ChatResponse) error {
 	if finishReason == "" {
 		finishReason = strings.TrimSpace(resp.FinishReason)
 	}
-	return &reasoningOnlyEmptyReplyError{finishReason: finishReason}
+	return &reasoningOnlyEmptyReplyError{finishReason: finishReason, usage: resp.Usage}
+}
+
+// reasoningOnlyUsageForensics renders the token accounting that separates the two
+// root causes of a reasoning-only reply: "the model spent the completion budget on
+// reasoning" (completion_tokens 与 reasoning_tokens 接近，常伴 finish_reason=length)
+// versus "the provider reported no budget pressure" (finish_reason=stop 下的主动
+// 空答复)。上层据此在"扩大 max_tokens"与"改写 prompt 重新提问"之间选择。
+func reasoningOnlyUsageForensics(usage Usage) string {
+	parts := make([]string, 0, 3)
+	if usage.PromptTokens > 0 {
+		parts = append(parts, fmt.Sprintf("prompt_tokens=%d", usage.PromptTokens))
+	}
+	if usage.CompletionTokens > 0 {
+		parts = append(parts, fmt.Sprintf("completion_tokens=%d", usage.CompletionTokens))
+	}
+	if usage.ReasoningTokens > 0 {
+		parts = append(parts, fmt.Sprintf("reasoning_tokens=%d", usage.ReasoningTokens))
+	}
+	return strings.Join(parts, " ")
 }
 
 func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRequest) (*LLMResponse, error) {
@@ -1670,6 +1701,17 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 			})
 			if retryErr != nil {
 				return nil, retryErr
+			}
+			if isReasoningOnlyStopReply(lastErr) {
+				// 与 callChat 的非流式门控一致：stop 型 reasoning-only 不在内层
+				// 重采样（同 prompt 只会复现同一个退化样本），交回 agent loop 由
+				// 反馈回注改写 prompt 后再请求。这里不走 handoff / 退化熔断，
+				// 让原始错误分类完整到达上层；reasoning 不计入 emittedAnything，
+				// 因此正常不会带上"部分输出"标记。
+				if emissionState.emittedAnything() {
+					lastErr = withPartialOutputMarker(lastErr)
+				}
+				return nil, lastErr
 			}
 			activeMaxAttempts = retryResult.MaxAttempts
 			if retryResult.Retry {

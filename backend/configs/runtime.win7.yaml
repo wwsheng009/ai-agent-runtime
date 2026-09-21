@@ -73,3 +73,8 @@ observe:
   # 启用后注册 /api/runtime/observe/v1/*（capabilities / snapshot /
   # sessions/{session_id} / events）。SSE 与 renderer 依赖 Phase 3/4，v1 不注册。
   enabled: true
+
+knowledge:
+  # 知识层（docs/knowledge_Layer）总开关；默认 off，且 Phase 0 只允许 off。
+  # 取值：off（关闭）/ shadow（只索引不注入）/ on（索引 + 注入，需 ADR 门禁）。
+  mode: off

@@ -557,6 +557,10 @@
 
 **与既有失败的区分**：`cmd/runtime-server`（`TestResolveRuntimeMCPConfigResolutionFallsBackToUserLevel`）与 `internal/aiclipaths`（`TestResolveMCPConfigPathExpandsTildeAndFallsBackToPortableDefault`）在本轮改动前即为红，属环境相关既有失败，不计入本次回归。
 
+**已于 2026-09-21 修复**：两者的“祖先链上没有 `mcp.yaml`”前提在开发机上不成立 —— `%TEMP%` 位于用户主目录之下，向上搜索会按 `docs/aicli/install.md` 的层级（每级先 `.aicli/mcp.yaml`，再 `configs/mcp.yaml`）命中真实的 `~/.aicli/mcp.yaml`，属规定行为而非解析器缺陷。修法：把 portable 兜底断言拆为 `TestResolveMCPConfigPathFallsBackToPortableDefault`（带祖先链前提守卫，干净环境仍断言）、无环境依赖的 `TestResolveMCPConfigPathExpandsTildeToUserHome`，并把 user-fallback 规则抽为 `applyMCPUserFallback` 由 `TestApplyMCPUserFallbackRewritesConventionDefaultOnly` 做确定性覆盖；同时修掉 `scripts/build.ps1` 的 `-ApiBaseUrl` 空串绑定 bug（`[AllowEmptyString()]`），使 `-BuildFrontend` 恢复可用。
+
+**重新打包与上线（2026-09-21 11:25–11:31）**：`pwsh -File ./scripts/build.ps1 -Tools runtime-server -Target windows -BuildFrontend` 端到端跑通（pnpm install → `tsc -b` → `vite build` → `go test ./cmd/runtime-server ./internal/webui` → 暂存内嵌前端 → `go build` → 还原 `backend/internal/webui/dist`），`Invoke-FrontendBuild` 另补了 Node 堆下限（仅在调用者未自带 `--max-old-space-size` 时注入 4096，构建后还原），避免 `tsc -b` 再次触顶（历史 exit 134）。产物 `backend/dist/runtime-server.exe`（33,978,368 B，sha256 `a5e7fd180806c024222e6851de3b2f961c4cb460acbad227af05758f418e9725`）已原地替换 `backend/runtime-server.exe` 并 `start`（pid 16340，`127.0.0.1:58314` + pprof 58315；旧件备份 `backend/runtime-server.exe.bak-20260921-1127`）。线上校验：`/` 与 `frontend/dist/index.html` 逐字节一致，`/assets/events-live-ZfgGaa-j.js` 200 / 44,097 B 且含 O(n) 修复标记 `normalizedSessionId`，`/api/runtime/sessions` 与 `/api/runtime/health` 均 200。
+
 ### 10.3 本次取证的产物（已落盘，可作为实施后的对照基线）
 
 | 产物 | 路径 | 用途 |

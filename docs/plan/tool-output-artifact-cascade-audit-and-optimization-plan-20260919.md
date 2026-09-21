@@ -9,8 +9,11 @@
 
 | 项 | 状态 | 落点 |
 | --- | --- | --- |
-| P0-1 view 默认窗口字节感知 | 已实施 | `internal/toolkit/tools/view.go`（`viewDefaultLimit=400`、`viewByteBudgetReserveRatio=0.7`） |
-| P0-2 grep 字节预算硬上限 | 已实施 | `internal/toolkit/tools/grep.go`（`grepByteBudgetReserveRatio=0.8`、`results_truncated`/`truncation_reason`） |
+| P0-1 view 默认窗口字节感知 | 已实施 | `internal/toolkit/tools/view.go`（`viewDefaultLimit=400`、`viewMaxLimit=2000`、`viewOutputBudgetBytes=32KiB`；2026-09-20 起不再派生自 `output.ModelToolTextByteBudget()`） |
+| P0-2 grep 字节预算硬上限 | 已实施 | `internal/toolkit/tools/grep.go`（`grepOutputBudgetBytes=32KiB`、`results_truncated`/`truncation_reason`；2026-09-20 起不再派生自 `output.ModelToolTextByteBudget()`） |
+| R-1 工具自持输出预算（2026-09-20 增量） | 已实施 | 新增 `internal/toolkit/tools/tool_output_budget.go`：`view/grep/fetch/artifact_read=32KiB`、`glob/ls=16KiB`；view 另有 2000 行硬上限 |
+| R-2 `skip_render_truncation` 统一契约（2026-09-20 增量） | 已实施 | 自持预算工具经 `stampToolOwnsOutput` **无条件** stamp `toolresult.MetadataSkipRenderTruncationKey`（不再依赖语义不准的 `truncated`），L4 对这类结果不再二次折叠 |
+| R-3 shell 输出窗口自持（2026-09-20 增量） | 已实施 | `internal/toolkit/tools/tool_output_budget.go` 的 `ownShellOutputWindow`：`bash`（单命令/批次）与 `aicli_exec` **先归档完整 capture、再 head-only 折叠到 `shellOutputBudgetBytes=32 KiB`、最后 stamp** `skip_render_truncation`；L4 不再折叠 shell 输出（见 §0.3） |
 | P1-1 Gateway 归档分级 | 已实施 | `internal/output/gateway.go`（`artifactArchiveMinBytes()`、`artifact_skipped=below_threshold`） |
 | P1-2 artifact_read 默认窗口对齐上界 | 已实施 | `internal/toolkit/tools/artifact_read.go`（`artifactReadDefaultLimitBytes()` = max limit） |
 | P2 截断视图续读指引 | 已实施 | `internal/output/tool_result_content.go`（`formatTruncatedToolTextForModel`） |
@@ -27,6 +30,83 @@
 前端 `tsc -b`、`eslint`、i18n gate、`vite build`、`vitest run`（313 文件 / 2584 测试）全绿。
 
 本轮增量验证（2026-09-19）：`go build ./...` 通过；`go test ./internal/observability/ ./internal/output/ ./internal/toolkit/tools/ ./internal/agent/ -count=1` 全绿。
+
+## 0. 工具自持输出预算与 skip_render_truncation 契约（2026-09-20 增量）
+
+L4（`internal/output/tool_result_content.go` 的 `formatTruncatedToolTextForModel`）是一刀切兜底：任何超预算文本都被 head/tail 折叠。本轮把「窗口所有权」下放到工具本身——工具用自己的预算截断、在 metadata 里给出续读/收窄指引，并 **无条件** stamp `skip_render_truncation`，L4 只对未 stamp 的结果做兜底折叠。
+
+| 工具 | 自持预算 | 截断语义（metadata / 正文标记） | stamp |
+| --- | --- | --- | --- |
+| `view` | 32 KiB + 2000 行 | 行窗口 + 字节窗口；单行超长 `…[line truncated: N more chars]`；`long_lines_truncated`/`hidden_bytes` | ✅ |
+| `grep` | 32 KiB | 保留完整前导匹配（绝不切中间）；`results_truncated`/`truncation_reason=byte_budget` + 收窄 next_step | ✅ |
+| `artifact_read` | 32 KiB（扣除 header reserve） | 字节窗口 + `next_offset`/`artifact_eof` 续读 | ✅ |
+| `glob` | 16 KiB | 保留前导路径；`truncated`/`next_action` | ✅ |
+| `ls` | 16 KiB | 保留前导条目；`truncated`/`limit_hit`/`next_action`（不再用 error 表达截断） | ✅ |
+| `fetch` | 32 KiB | rune 安全前缀截断 + `returned_bytes`/`truncated`/`next_action`（完整内容走 `download`） | ✅ |
+| `bash` / `aicli_exec` | 32 KiB 模型窗口（executor capture 上限 256 KiB）+ 磁盘 artifact | 工具自身 head-only 折叠：正文 `[output window: showing the first N of M bytes …]`，metadata `truncated`/`output_window_bytes`/`output_window_total_bytes`；完整 capture 先入 artifact store（`artifact_id`=`artifact_source_id`，`artifact_read` 可按字节翻页），磁盘路径仍发布 | ✅ |
+| 其它（`write`/`edit`/`multiedit`/`apply_patch`/`append_write`/`todos`/`web_search`/`download`/`git_worktree`/…） | 无自持预算 | — | ❌ L4 是唯一安全网 |
+
+设计边界：只有「自持预算 + 提供续读/收窄契约」的工具才允许 stamp；没有自持预算的工具若也 stamp，L4 兜底将失效，超长输出会直接灌进上下文。
+
+本轮验证（2026-09-20）：`go vet ./internal/toolkit/tools/` 通过；`go test -count=1 ./internal/toolkit/tools/ ./internal/output/... ./internal/toolresult/... ./internal/agent/ ./internal/observability/` 全绿（`internal/knowledge` 为既有构建破损，与本轮无关）。
+
+## 0.1 L4 兜底折叠改为 head-only（2026-09-20 增量）
+
+`formatTruncatedToolTextForModel` 不再做 head/tail「中间挖空」：超出 `modelToolTextByteBudget`（默认 12 KiB）的文本只保留**前 N 行**，随后是显式提示：
+
+```
+[output truncated for history safety: showing the first 118 of 600 lines; omitted 482 lines (18320 bytes) from the end]
+[next step: re-issue the same call with a narrower window to read the omitted tail — view: offset=<next line, 0-based> plus a smaller limit; grep/shell: narrow the pattern, path or command output instead of repeating the identical call]
+```
+
+原因：模型无法对「文本中间的洞」分页，`artifact_read` 自身的输出在真实会话里也会被预算折叠，不能作为唯一恢复路径。因此改为「首 N 行 + 省略行数/字节数 + 下一步收窄指引」的契约；`truncationMarkerReserve` 仍按位数上界精确预留（header + head + notice ≤ budget），`firstFailureLine` 继续把被丢弃尾部里的最早错误行提升到 header。折叠提示不再承诺 `artifact_read` 分页；artifact 指针行（`Full raw output artifact_id: …`）保持不变。
+
+验证（2026-09-20）：`go build ./...`、`go vet ./internal/output/ ./internal/toolkit/tools/` 通过；`go test -count=1 -p 2 ./internal/output/... ./internal/toolkit/tools/ ./internal/agent/ ./internal/observability/ ./internal/toolresult/` 全绿。
+
+## 0.2 行中截断（单行超预算）的诚实提示（2026-09-20 增量）
+
+§0.1 的 head-only 折叠在多行载荷上按行边界收尾，但保留了一个回退分支：当**首行本身**就超出 body 预算（或窗口内最后一个换行过早、不足预算一半）时，`headLinesWithinBudget` 只能返回字节前缀，窗口停在**行中**。此时按行计数渲染的通知会自相矛盾：
+
+```
+[output truncated for history safety: showing the first 9 of 9 lines; omitted 0 lines (28505 bytes) from the end]   ← 修复前（真实会话实测）
+[next step: … view: offset=<next line, 0-based> …]                                                                 ← 行偏移无法恢复行中截断
+```
+
+修复：`partialLineBytes` 识别「head 不以换行结尾」，改走 `truncationMarkerPartial`，用字节口径描述损失并指向字节区间恢复：
+
+```
+[output truncated for history safety: showing 8 complete lines plus the first 11692 bytes of line 9; omitted 28308 bytes from the end]
+[next step: this window stops mid-line, so a line offset cannot resume it — read the raw output pointer below by byte range (artifact_read with offset=<byte offset>) or re-issue a narrower call instead of repeating the identical one]
+```
+
+`truncationMarkerReserve` 取两种通知在上界位数下的较大者，`header + head + notice ≤ budget` 不变式不变（实测 40174 字节单行载荷 → 渲染 12287 / 预算 12288，且 shown + omitted 与原文逐字节闭合）。
+
+### 0.2.1 同批线上实测（本仓库工作会话的真实工具调用）
+
+| 路径 | 实测输入 | 结果 |
+|---|---|---|
+| `shell` | `git log --oneline -n 500` → 508 行 / 45208 字节 | 渲染为首 138 行 + `omitted 370 lines (33705 bytes) from the end` + 下一步指引；无中间挖空 |
+| `shell`（按指引收窄重发） | `Select-Object -Skip 138 -First 80` | 完整拿到被省略的尾部，无二次折叠 —— 「下一步」可执行 |
+| `view`（预算自持） | 461 KB 文件，`limit=2000, offset=0` | 自有 32 KiB 窗口 + `[efficiency] File continues past this window (is_truncated=true, lines_read=634) … continue with offset=634 limit<=400`；**无** L4 折叠标记（`skip_render_truncation` 生效） |
+| `view`（定点续读） | `offset=632 limit=120` | 返回 633–752 行，无折叠、无指针行 —— 行偏移续读可用 |
+| `artifact_read`（分页） | `offset=33000 limit=6000` | `window=[33000,39000) | next_offset=39000 | eof=false` —— 原始输出可按字节区间分页，不再是「无法分页」 |
+| `shell`（单行超长） | `python -c "print('abcdefghij'*4000)"` → 40174 字节单行 | 暴露 §0.2 缺陷（`showing the first 9 of 9 lines; omitted 0 lines (28505 bytes)`），已修 |
+
+验证（2026-09-20）：`go vet ./internal/output/ ./internal/toolkit/tools/` 通过；`go build -p 1 ./internal/... ./cmd/...` 通过（`tmp/prune_probe` 为本地未跟踪临时包，编译期 OOM 属环境内存不足）；`go test -count=1 -p 2 ./internal/output/... ./internal/toolkit/tools/ ./internal/agent/ ./internal/toolresult/` 全绿；新增 `TestFormatTruncatedToolTextForModel_PartialLineNoticeReportsByteCut` 以「8 行头 + 40000 字节单行」复现该形状，交叉核对完整行数 / 部分行字节 / 省略字节与渲染字节闭合。
+
+---
+
+## 0.3 shell 输出窗口自持：`bash` / `aicli_exec`（2026-09-20 增量）
+
+§0 表格里 shell 是最后一个「只声明预算、由 L4 折叠」的工具。本轮把窗口所有权彻底下放：`bash`（单命令 + `commands` 批次）与 `aicli_exec` 的**每个返回路径**都经过 `ownShellOutputWindow`（`internal/toolkit/tools/tool_output_budget.go`，由 `Execute` 的 defer 统一收口），顺序固定为「先归档、后折叠、再 stamp」：
+
+1. **先归档**：折叠前把**完整** capture 写入 session artifact store（`artifact_id`，归档层指标 `tool_window`）。因此 `artifact_read` 翻页拿到的是完整流，而不是模型已经看过的头部；
+2. **后折叠**：正文按 `shellOutputBudgetBytes = 32 KiB` head-only 折叠（rune 边界安全，通知计入同一预算），正文标记 `[output window: showing the first N of M bytes of the captured output; omitted X bytes (L lines) …]`，metadata 记 `truncated` / `output_window_bytes` / `output_window_total_bytes`；
+3. **再 stamp**：`artifact_source_id = artifact_id`（该结果就是这条记录的窗口，gateway 的 no-cascade 守卫因此不再重复归档折叠体）+ `skip_render_truncation=true` + `model_visible_budget_bytes=32 KiB`，L4 对 shell 输出不再折叠。
+
+磁盘 artifact（`raw_output_artifact_path`，> 12 KiB 落盘）保持不变，作为第二条恢复路径。capture 上限（默认 256 KiB）语义不变：capture 仍是内存上界，模型可见窗口只由工具自己的 32 KiB 决定；capture 本身超限时仍以 capture 通知说明丢失区间。
+
+验证（2026-09-20）：`go build ./...` 通过；`go test -count=1 ./internal/toolkit/... ./internal/output/... ./internal/toolresult/... ./internal/executor/... ./internal/agent/...` 全绿。新增 `TestShellToolsOwnTheirOutputWindow`（折叠算术 + `artifact_read(offset=32768)` 逐字节取回被省略尾部 + 渲染无 L4 折叠标记 + `l4_render` 计数零增量）、`TestShellToolsStampOwnershipOnEveryExecutePath`（真实 `echo` 单命令 / 批次 / `aicli_exec` 失败路径均带 stamp），并把 `bash`（真实 39 KiB 输出）与 `aicli_exec` 加入 `TestBudgetOwningToolsDoNotTriggerRenderLayerTruncation` 用例表。
 
 ---
 
@@ -143,7 +223,7 @@ denied/soft-empty 终态 L2929/L2950）的非空文本输出。
 | `bash` | `bash.go:862-911` + `ensureLargeHistoryOutputArtifact` (L1409-1421) | `capture.TotalBytes > ModelToolTextByteBudget()` | capture 未截断（Truncated=false）但总量超阈值时落盘 |
 | `execute_shell_command` | 同 bash 底层 | 同上 | 复用同一执行器 |
 | `aicli_exec` | `aicli_exec.go:245` | 同上 | 子 CLI 输出同样落盘 |
-| `cmd/aicli/functions/shell.go:393` | CLI 函数层 | **硬编码 12 KiB**（L24） | 与 budget 常量重复定义，见 §5.4 |
+| `cmd/aicli/functions/shell.go` | CLI 函数层 | `modelHistoryArtifactThresholdBytes()` → `output.ModelToolTextByteBudget()`（L27-29） | P3 已完成：与 toolkit 侧 `bash.go:76-78` 同源，不再硬编码 |
 | bash 批量模式 | `bash.go:710` | `len(batchOutput) > threshold` | 批量输出整体超阈值时归档合并输出 |
 
 **落盘位置**：`toolctx.ShellOutputArtifactDir(ctx)` 下的 scope 目录（如
@@ -179,6 +259,18 @@ denied/soft-empty 终态 L2929/L2950）的非空文本输出。
 | L2 shell capture | `CaptureCombinedOutputGuarded.MaxBytes` | 字节 | 256 KB | 无恢复（head/middle/tail 保真压缩） |
 | L3 shell 落盘 | `ensureLargeHistoryOutputArtifact` | 字节 | 12 KiB | `raw_output_artifact_path` → 模型需自行读文件（或 artifact_read 不了——这是 path 不是 store id） |
 | L4 回显层 | `modelToolTextByteBudget` | 字节 | 12 KiB | `artifact_read(artifact_id=…, offset, limit)` 分页 |
+
+**L4 兜底口径（2026-09-20 核查，`tool_result_content.go`）**：
+
+- 默认值 `modelToolTextByteBudget = 12 * 1024`（L33，= 12288 B）；唯一改动入口
+  `output.SetModelToolTextByteBudget`（L38，非正值忽略）。仓库内**无生产调用点**
+  （仅 `tool_budget_l4_render_test.go` 调用），故运行时实际生效值就是 12288 B。
+- 仅作用于**未声明自持窗口**的工具：声明了 `model_visible_budget_bytes` 的工具按声明值，
+  被夹在 `[max(12288, 4096), 65536]`（L55/L58/L79-88）；带 `skip_render_truncation`
+  的工具（`bash`/`aicli_exec`/`view`/`grep`/`glob`/`ls`/`fetch`/`artifact_read`）直接绕过 L4 折叠。
+- 12288 B 是**渲染结果硬上限**：`header + head + notice ≤ budget`（L922）；存在 artifact
+  指针时先扣指针（L675）。按 `truncationMarker`/`truncationMarkerPartial` 模板复算：
+  `header ≈ 47-51 B`、通知预留 `≈ 375-382 B` → 模型可见正文 `≈ 11855-11866 B`（≈11.6 KiB）。
 
 **核心错位**：L1 用行、L2-L4 用字节，且 L1 的 2000 行远超 L4 的 12 KiB
 （12 KiB ≈ 150~300 行代码 / 300~600 行日志）。L1 层返回
@@ -357,6 +449,10 @@ view→artifact_read 占解引用来源的比例估算）。
 - 硬编码 `modelHistoryArtifactThresholdBytes = 12 * 1024` 改为引用
   `output.ModelToolTextByteBudget()`（与 toolkit 侧 `bash.go:75-77` 对齐）
 - 消除"调整 budget 后 CLI 函数层不同步"的隐患
+
+**状态（2026-09-20 核查）：已完成** —— `shell.go:27-29` 现为
+`return output.ModelToolTextByteBudget()`，L400 阈值判定与 toolkit 侧同源；
+仓库内已无 `12 * 1024` 的重复定义。
 
 ### 方案优先级与依赖关系
 
@@ -831,3 +927,45 @@ O-1/O-2 预计半天工作量；基线数据采集一个真实工作日后即可
 - **不改变 §11 的指标定义与埋点位置**——本节只是消费端，指标语义以 §11.2 为唯一权威。
 - **依赖方向**：O-1/O-2（基线埋点）先行 → F-1/F-3 透传 → F-4/F-5 前端消费。前端可在基线期同步开发（用 mock 快照开发，联调等 O-2 合入）。
 - **§8 遗留问题补充一条**：usage-analytics SQLite 的 `tool_finished` metadata 目前**不落库**（§11.3 的扩展字段需确认 collector→DB 的字段白名单），F-2 慢路径依赖此前置项，若白名单未开，F-2 先走快路径（进程内聚合）降级上线。
+
+---
+
+## 逐工具截断归属审计（per-tool truncation ownership audit）
+
+审计目标：确认哪些工具**已经自带截断/预算**（受控工具，自己决定是否截断），
+哪些工具**依赖 L4 兜底**（需要补齐）。原则：**工具自控，L4 只兜底、不做上限**。
+
+### 分类结果
+
+| 工具 | 现状证据 | 类别 |
+| --- | --- | --- |
+| `view` | 行协议默认 2000 行 + 字节预算；长行行内截断（`LongLinesTruncated`）；artifact 续读；`observability.TruncationLayerView` 指标 | **A 已自控** |
+| `grep` | 结果条数/字节双预算 + 截断标记 + 续读提示 | **A 已自控** |
+| `glob` | `partTruncated` 分片 + 截断标记 | **A 已自控** |
+| `bash` | capture limit；`output_truncated` / `capture_limit_reached`；artifact 回退 | **A 已自控** |
+| `aicli_exec` | `capture.Truncated` 判定 | **A 已自控** |
+| `artifact_read` | 分页窗口（offset/limit）+ 明确契约，天然有界 | **A 已自控** |
+| `sourcegraph` | 已有多处截断逻辑（粒度为条数） | **A 已自控** |
+| `apply_patch` / `edit` / `multiedit` / `append_write` / `write` / `write_idempotency` | 只回 `toolresult.MutationSummary` 变更摘要，天然小输出 | **B 天然小** |
+| `file_mutation_guard` | 单行守卫提示 | **B 天然小** |
+| `download` | 读取上限 `maxSize = 100MB`，但 `Content` 只回**落地路径 + 字节数** | **B 天然小** |
+| `fetch` | 仅 `io.LimitReader(resp.Body, f.maxSize+1)` 限制**读取**；提取后的正文**全量**进 `Content`，无截断、无 artifact 回退 | **C 需优化** |
+| `ls` | 未见条目数/字节上限 | **C 待确认** |
+| `web_search` | 未见条数/正文长度上限 | **C 待确认** |
+| `todos` | 未见列表大小上限 | **C 待确认** |
+| `openai_image_generate` | 返回体大小未设上限 | **C 待确认** |
+
+### 改造方向（C 类统一模式）
+
+复用 `view.go` / `bash.go` 已有模式，而不是在 L4 加压：
+
+1. **工具内预算**：工具返回前按字节（必要时叠加条目数）预算裁剪，优先保留 head + tail。
+2. **结构化截断标记**：写出 `output_truncated` / `truncated_by`（bytes|entries|lines）等字段，供模型与下游识别。
+3. **artifact 落盘回退**：超预算内容写入 artifact 文件，`Content` 保留窗口 + 明确续读指令（`artifact_read`）。
+4. **分层指标**：`observability.RecordToolOutputBytes` / `RecordToolOutputTruncation` 携带 layer 与 tool 名，避免"谁截断的"不可追溯。
+
+### L4 约束（兜底而非上限）
+
+- L4 仅当**工具未声明自控**（无截断标记 / 无 artifact 引用）且超出自身预算时才截断；
+- 对已带自控标记的输出，L4 **不得二次压缩**（否则受控工具的窗口会被再次削小）；
+- L4 自身截断必须记录 layer 指标，便于区分「工具截断」与「L4 兜底截断」。

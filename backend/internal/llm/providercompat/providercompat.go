@@ -266,6 +266,20 @@ func (c Chain) NormalizeAssistantMessage(message map[string]interface{}) map[str
 // ReplayableOpenAIReasoningContent returns the reasoning content that should
 // be replayed into an OpenAI-compatible request transcript.
 func (c Chain) ReplayableOpenAIReasoningContent(toolCalls []map[string]interface{}, reasoning *types.ReasoningBlock) (string, bool) {
+	// An explicitly declared contract outranks every name heuristic. The
+	// requirement belongs to the endpoint's behavior, not to the vendor's
+	// identity: third-party gateways and aggregators that front a thinking-mode
+	// backend enforce the same "reasoning_content must be passed back" rule
+	// while matching none of the provider-name / base-URL / model substrings.
+	if required, declared := c.configuredReplayReasoningContent(); declared {
+		if !required {
+			return "", false
+		}
+		if reasoning != nil {
+			return reasoning.RawDisplayText(), true
+		}
+		return "", true
+	}
 	for _, adapter := range c.adapters {
 		if content, ok := adapter.ReplayableOpenAIReasoningContent(c.ctx, toolCalls, reasoning); ok {
 			return content, true
@@ -438,6 +452,33 @@ func NormalizeAssistantMessage(ctx Context, message map[string]interface{}) map[
 // be replayed into an OpenAI-compatible request transcript.
 func ReplayableOpenAIReasoningContent(ctx Context, toolCalls []map[string]interface{}, reasoning *types.ReasoningBlock) (string, bool) {
 	return NewChain(ctx).ReplayableOpenAIReasoningContent(toolCalls, reasoning)
+}
+
+// configuredReplayReasoningContent resolves the explicitly declared
+// reasoning_content replay contract for the context's effective model.
+func (c Chain) configuredReplayReasoningContent() (bool, bool) {
+	return resolveConfiguredReplayReasoningContent(c.ctx.ConfiguredCapabilities, c.ctx.Model)
+}
+
+// resolveConfiguredReplayReasoningContent looks the declaration up by exact
+// model name first and then falls back to the wildcard entry, mirroring
+// llm.ResolveModelCapabilitySpec (providercompat cannot import llm). An entry
+// that leaves the field unset falls through to the wildcard, so a provider-wide
+// declaration is not shadowed by an unrelated per-model entry.
+func resolveConfiguredReplayReasoningContent(
+	capabilities map[string]agentconfig.ModelCapabilitySpec,
+	model string,
+) (bool, bool) {
+	if len(capabilities) == 0 {
+		return false, false
+	}
+	if exact, ok := capabilities[strings.TrimSpace(model)]; ok && exact.ReplayReasoningContent != nil {
+		return *exact.ReplayReasoningContent, true
+	}
+	if wildcard, ok := capabilities["*"]; ok && wildcard.ReplayReasoningContent != nil {
+		return *wildcard.ReplayReasoningContent, true
+	}
+	return false, false
 }
 
 // SupportsMaxOutputTokens reports whether a provider/backend should allow the

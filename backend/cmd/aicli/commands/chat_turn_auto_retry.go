@@ -32,19 +32,23 @@ var (
 )
 
 // turnAutoRetryReason 判定本轮错误是否属于「无副作用、可自动重跑」的退化采样，
-// 返回非空 reason 表示允许自动重跑。两类：
+// 返回非空 reason 表示允许自动重跑。三类：
 //
 //   - invalid_tool_arguments（*MalformedToolCallError）：模型返回的工具参数不是
 //     JSON 对象，该次调用从未执行。
+//   - reasoning_only_reply：模型只输出了思维链（reasoning），正文为空、工具调用
+//     为 0。reasoning 不计入 streamEmissionState.emittedAnything（只统计正文与
+//     图片），所以没有渲染过任何实质内容、也没有可执行的调用；agent loop 的
+//     反馈回注耗尽后，turn 级有界重跑是最后的恢复通道（重放会重新展示思维链
+//     投影，代价可接受且有界）。
 //   - empty_reply：聚合校验层在确认「无 content、无 tool_calls、无 reasoning」后
 //     才丢弃响应（reasoning_only_empty_reply 与 truncated_tool_call 都在它之前
 //     分流），所以既没有渲染过任何内容、也没有可执行的调用；它又不在输出预算
 //     升级集合里（isOutputBudgetEscalationReason），重采样没有可用的杠杆，
 //     turn 级有界重跑是唯一的恢复通道。
 //
-// 其它退化类别（reasoning_only_empty_reply、truncated_tool_call、
-// stream_interrupted）可能已经渲染过部分流式输出，仍交给内层重采样与 /retry
-// 处理，避免自动重跑重复展示半截输出。
+// 其它退化类别（truncated_tool_call、stream_interrupted）可能已经渲染过部分
+// 流式输出，仍交给内层重采样与 /retry 处理，避免自动重跑重复展示半截输出。
 //
 // 注意：本判据只回答「这类错误是否无副作用」，是否真的可以重放还要看
 // shouldAutoRetryTurnError 里的工具执行计数——整轮重放会重放已执行过的工具。
@@ -52,6 +56,9 @@ func turnAutoRetryReason(err error) string {
 	var malformed *llmadapter.MalformedToolCallError
 	if errors.As(err, &malformed) {
 		return "invalid_tool_arguments"
+	}
+	if llm.IsReasoningOnlyReplyError(err) {
+		return "reasoning_only_reply"
 	}
 	if llm.IsEmptyReplyError(err) {
 		return "empty_reply"
@@ -229,7 +236,9 @@ func turnAutoRetryAttemptContext(ctx context.Context, session *ChatSession) (con
 
 func renderTurnAutoRetryNotice(session *ChatSession, reason string, attempt, limit int, delay time.Duration) {
 	detail := "模型本轮工具参数非法（工具未执行，无副作用）"
-	if reason == "empty_reply" {
+	if reason == "reasoning_only_reply" {
+		detail = "模型本轮只输出了思维链（正文为空、未执行工具）"
+	} else if reason == "empty_reply" {
 		detail = "模型本轮回复为空（未渲染内容、未执行工具）"
 	}
 	message := fmt.Sprintf("[turn] %s，自动重跑 %d/%d（退避 %.1fs；Esc 可取消）", detail, attempt, limit, delay.Seconds())

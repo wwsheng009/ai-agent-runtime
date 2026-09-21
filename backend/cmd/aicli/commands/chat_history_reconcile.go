@@ -135,7 +135,16 @@ func (b *chatRuntimeEventBridge) seedPersistedHistoryLocked(units []persistedHis
 			}
 		}
 	}
-	for _, unit := range units {
+	// representedItemIDs 按 canonical 顺序记录已匹配 unit 的 item 身份。缺失
+	// unit 的插入锚点由它计算（见下方 import 循环）：锚点 = 下一条已经存在于
+	// 模型中的规范 unit。
+	representedItemIDs := make([]string, len(units))
+	for index, unit := range units {
+		if item := matchedUnits[unit.identity]; item != nil {
+			representedItemIDs[index] = item.ID
+		}
+	}
+	for index, unit := range units {
 		if _, alreadySeeded := b.historySeedSeen[unit.identity]; alreadySeeded {
 			continue
 		}
@@ -145,6 +154,14 @@ func (b *chatRuntimeEventBridge) seedPersistedHistoryLocked(units []persistedHis
 		}
 		if alias := groupAliases[unit.boundaryGroupKey]; alias != "" {
 			unit.boundaryGroupKey = alias
+		}
+		// 事件日志重放把同一请求的 reasoning 增量累积进一个单元格，canonical
+		// 的单个推理块是该单元格正文的子集。内容已经在屏幕上（只是与同请求的
+		// 其它片段合并），再导入会渲染成第二个推理单元格，因此按“已表达”处理。
+		if unit.kind == persistedHistorySeedSupplement && unit.boundaryGroupKey != "" &&
+			persistedHistoryReasoningRepresented(snapshot, unit.content) {
+			b.historySeedSeen[unit.identity] = struct{}{}
+			continue
 		}
 		if unit.kind == persistedHistorySeedTool && strings.TrimSpace(unit.toolCallID) != "" {
 			// 同一调用身份已经拥有终态工具单元格（live 总线投影，或事件日志
@@ -157,7 +174,12 @@ func (b *chatRuntimeEventBridge) seedPersistedHistoryLocked(units []persistedHis
 				continue
 			}
 		}
-		unit.apply(b)
+		// 缺失 unit 的位置：模型已经含有规范上更晚的内容时（重放覆盖了会话
+		// 后半段，例如 resume 时事件日志已包含整场会话），追加到尾部会把旧内容
+		// 排到新内容之后——用户看到的“尾部重复块、最后一条消息被顶到中间”正是
+		// 这个顺序倒置。此时插入到下一条已表达 unit 之前，保持 canonical 顺序；
+		// 模型里没有更晚的规范内容时（事件日志只覆盖前缀）仍追加到尾部。
+		unit.applyBefore(b, persistedHistorySuccessorAnchor(representedItemIDs, index))
 		b.historySeedSeen[unit.identity] = struct{}{}
 		seededAny = true
 	}
@@ -306,12 +328,12 @@ func buildPersistedHistorySeedUnits(messages []runtimetypes.Message) []persisted
 				continue
 			}
 			appendUnit(persistedHistorySeedUnit{
-				kind:       persistedHistorySeedTool,
-				toolCallID: callID,
-				toolName:   name,
-				toolOutput: output,
-				toolError:  toolErr,
-				success:    strings.TrimSpace(toolErr) == "",
+				kind:        persistedHistorySeedTool,
+				toolCallID:  callID,
+				toolName:    name,
+				toolOutput:  output,
+				toolError:   toolErr,
+				success:     strings.TrimSpace(toolErr) == "",
 				toolDisplay: chatHistoryToolDisplay(message, name, call.Args),
 			})
 		case "system":
@@ -411,18 +433,82 @@ func persistedReasoningContentMatches(head, content string) bool {
 	if head == content {
 		return true
 	}
+	if strings.TrimSpace(content) == "" {
+		return false
+	}
+	return persistedReasoningBody(head) == persistedReasoningContentBody(content)
+}
+
+// persistedReasoningContentBody 归一化 canonical 推理正文。
+func persistedReasoningContentBody(content string) string {
+	return strings.TrimLeft(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+}
+
+// persistedReasoningBody 返回 reasoning 单元格的语义正文：去掉首行分隔线
+// （"…… reasoning ……"）与尾部 "end reasoning" 分隔线。重放建立的单元格头部
+// 可能带展示分隔线，canonical 块不带。
+func persistedReasoningBody(head string) string {
 	head = strings.ReplaceAll(head, "\r\n", "\n")
-	content = strings.ReplaceAll(content, "\r\n", "\n")
 	firstLF := strings.IndexByte(head, '\n')
 	if firstLF < 0 {
-		return false
+		return ""
 	}
 	body := strings.TrimLeft(head[firstLF+1:], "\n")
 	if lastLF := strings.LastIndexByte(body, '\n'); lastLF >= 0 &&
 		strings.Contains(strings.ToLower(body[lastLF+1:]), "end reasoning") {
 		body = body[:lastLF]
 	}
-	return body == strings.TrimLeft(content, "\n")
+	return body
+}
+
+// persistedHistoryReasoningContainmentMinBytes 是“正文包含即已表达”判定的最小
+// 长度：过短的正文（分隔线残留、占位文本）可能在无关的长推理里偶然出现，从而
+// 让一条真正缺失的推理块被误判为已表达。真实的 canonical 推理块远超此阈值。
+const persistedHistoryReasoningContainmentMinBytes = 64
+
+// persistedReasoningBodyContains 报告重放累积出的推理单元格是否已经表达了这条
+// canonical 推理块。事件日志把同一请求的 reasoning 记为增量片段，重放把它们
+// 累积成一个单元格，其正文是 canonical 单块正文的超集（多片段合并）。
+func persistedReasoningBodyContains(head, content string) bool {
+	needle := persistedReasoningContentBody(content)
+	if len(needle) < persistedHistoryReasoningContainmentMinBytes {
+		return false
+	}
+	if strings.Contains(strings.ReplaceAll(head, "\r\n", "\n"), needle) {
+		return true
+	}
+	body := persistedReasoningBody(head)
+	return body != "" && strings.Contains(body, needle)
+}
+
+// persistedHistoryReasoningRepresented 报告模型里是否已经存在表达了该推理块的
+// 终态 reasoning 单元格（精确相等，或累积单元格包含该块正文）。
+func persistedHistoryReasoningRepresented(snapshot *encoding.RenderModel, content string) bool {
+	if snapshot == nil || strings.TrimSpace(content) == "" {
+		return false
+	}
+	for _, item := range snapshot.Items {
+		if item == nil || !item.Status.Terminal() || item.Kind != encoding.KindReasoning {
+			continue
+		}
+		if persistedReasoningContentMatches(item.Head, content) ||
+			persistedReasoningBodyContains(item.Head, content) {
+			return true
+		}
+	}
+	return false
+}
+
+// persistedHistorySuccessorAnchor 返回 index 之后第一条已表达 unit 的 item
+// 身份，用作缺失 unit 的插入锚点。空字符串表示模型里没有更晚的规范内容，缺失
+// unit 可以安全追加到模型尾部。
+func persistedHistorySuccessorAnchor(representedItemIDs []string, index int) string {
+	for next := index + 1; next < len(representedItemIDs); next++ {
+		if id := representedItemIDs[next]; id != "" {
+			return id
+		}
+	}
+	return ""
 }
 
 func (u persistedHistorySeedUnit) toolHead() string {
@@ -465,6 +551,54 @@ func (u persistedHistorySeedUnit) apply(b *chatRuntimeEventBridge) {
 			// 与实时链路同源：live 通过 SubmitToolResultDisplay 注入
 			// compact 摘要，历史种子必须复用同一入口，否则 resume 会把
 			// 原文当作工具输出再渲染一份未摘要单元格。
+			b.applyChangeSet(b.renderEncoder.SubmitToolResultDisplay(u.toolCallID, u.toolDisplay))
+			return
+		}
+		b.applyChangeSet(b.renderEncoder.SubmitToolResult(
+			u.toolCallID, u.toolName, u.toolOutput, u.toolError, u.success,
+		))
+	}
+}
+
+// applyBefore 与 apply 语义相同，但把缺失单元格插入到 anchorItemID 之前；
+// 锚点为空时退化为 apply（追加到模型尾部）。
+//
+// resume 时事件日志可能已经重放会话后半段，缺失的规范 unit 必须插到下一条已
+// 表达 unit 之前，模型顺序才与 canonical 顺序一致（否则旧内容被追加到新内容
+// 之后，最后一条消息被顶到中间）。锚定路径复用与 apply 相同的终态构造，只有
+// 工具单元格需要额外登记 callID，后续 SubmitToolResult* 才能就地归并。
+func (u persistedHistorySeedUnit) applyBefore(b *chatRuntimeEventBridge, anchorItemID string) {
+	if b == nil || b.renderEncoder == nil {
+		return
+	}
+	if strings.TrimSpace(anchorItemID) == "" {
+		u.apply(b)
+		return
+	}
+	switch u.kind {
+	case persistedHistorySeedUser:
+		b.applyChangeSet(b.renderEncoder.SubmitPersistedHistoryCellBefore(
+			encoding.KindUser, u.content, "", anchorItemID,
+		))
+	case persistedHistorySeedAssistant:
+		b.applyChangeSet(b.renderEncoder.SubmitPersistedHistoryCellBefore(
+			encoding.KindAssistant, u.content, u.boundaryGroupKey, anchorItemID,
+		))
+	case persistedHistorySeedSupplement:
+		kind := encoding.KindSupplement
+		if u.boundaryGroupKey != "" {
+			// 带请求身份的 supplement 是重建的 reasoning，必须与 live 路径
+			// 一致地导入为 KindReasoning + divider Head（见 apply）。
+			kind = encoding.KindReasoning
+		}
+		b.applyChangeSet(b.renderEncoder.SubmitPersistedHistoryCellBefore(
+			kind, u.content, u.boundaryGroupKey, anchorItemID,
+		))
+	case persistedHistorySeedTool:
+		b.applyChangeSet(b.renderEncoder.SubmitPersistedHistoryToolCallBefore(
+			u.toolCallID, u.toolName, anchorItemID,
+		))
+		if strings.TrimSpace(u.toolDisplay) != "" {
 			b.applyChangeSet(b.renderEncoder.SubmitToolResultDisplay(u.toolCallID, u.toolDisplay))
 			return
 		}

@@ -12,6 +12,8 @@
 //     but detaches the live session, so session/load takes the durable path
 //     (agent_stdio.go LoadSession: existing == nil -> bootstrap from store)
 //  5. session/load { sessionId: S, cwd, mcpServers: [stdio helper] }
+//     the entry is sent in the exact shape a real Zed sends it (no "type" tag,
+//     "env": []), so the run also covers Zed's implicit-stdio encoding
 //     - the helper must really be spawned (marker + pid file)
 //  6. session/prompt -> the tool must be in the FIRST prompt tool surface and
 //     its echo result must reach the provider (callable)
@@ -708,15 +710,19 @@ providers:
 	fmt.Println("OK session/close returned; no server was spawned by session/new")
 
 	// --- session/load WITH the client-supplied stdio server ---
+	// Payload shape copied from a real Zed session/load request (2026-09-20):
+	// no "type" field (implicit stdio) and "env": [] (empty array, not a map).
+	// Zed really sends both, so the load path must not depend on an explicit
+	// "type":"stdio" tag nor reject an empty env array.
 	servers := []interface{}{map[string]interface{}{
 		"name":    loadServerName,
-		"type":    "stdio",
 		"command": helper,
 		"args": []string{
 			"-tool", loadTool,
 			"-marker", markerPath,
 			"-pidfile", pidPath,
 		},
+		"env": []interface{}{},
 	}}
 	if _, err := a.call("session/load", map[string]interface{}{
 		"sessionId":  sessionID,

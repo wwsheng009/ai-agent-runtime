@@ -28,18 +28,25 @@ func writeRuntimeLayerFile(t *testing.T, path, body string) {
 	require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
 }
 
-// 分层层栈快照：portable 层标记只读，用户/项目层可写，路径按存在性给出绝对路径。
-func TestRuntimeConfigLayersProviderMarksPortableReadOnly(t *testing.T) {
+// 分层层栈快照：开发目录（configs/runtime.yaml、backend/configs/runtime.yaml）
+// 不再是配置层，用户/项目层可写，路径按存在性给出绝对路径。
+func TestRuntimeConfigLayersProviderOmitsDevelopmentDirectory(t *testing.T) {
 	home := isolateRuntimeLayerHome(t)
 	projectDir := t.TempDir()
 	t.Chdir(projectDir)
 
-	portable := filepath.Join(projectDir, "configs", aiclipaths.DefaultRuntimeConfigFileName)
-	writeRuntimeLayerFile(t, portable, "agent:\n  maxSteps: 1\n")
+	devConfig := filepath.Join(projectDir, "configs", aiclipaths.DefaultRuntimeConfigFileName)
+	writeRuntimeLayerFile(t, devConfig, "agent:\n  maxSteps: 1\n")
 	userConfig := filepath.Join(home, ".aicli", aiclipaths.DefaultRuntimeConfigFileName)
 	writeRuntimeLayerFile(t, userConfig, "agent:\n  maxSteps: 7\n")
 
 	layers := NewRuntimeConfigLayersProvider()()
+	for _, layer := range layers {
+		require.NotEqual(t, "portable", layer.Kind, "development layout must not be a layer: %#v", layers)
+		require.NotEqual(t, filepath.Clean(devConfig), filepath.Clean(layer.Path),
+			"development layout must not be a layer: %#v", layers)
+	}
+
 	find := func(kind string, present bool) (skillsapi.ConfigDocumentLayer, bool) {
 		for _, layer := range layers {
 			if layer.Kind == kind && layer.Present == present {
@@ -48,11 +55,6 @@ func TestRuntimeConfigLayersProviderMarksPortableReadOnly(t *testing.T) {
 		}
 		return skillsapi.ConfigDocumentLayer{}, false
 	}
-
-	portableLayer, ok := find("portable", true)
-	require.True(t, ok, "the present portable layer must appear: %#v", layers)
-	require.True(t, portableLayer.ReadOnly)
-	require.Equal(t, filepath.Clean(portable), filepath.Clean(portableLayer.Path))
 
 	userLayer, ok := find("user", true)
 	require.True(t, ok, "the present user layer must appear: %#v", layers)

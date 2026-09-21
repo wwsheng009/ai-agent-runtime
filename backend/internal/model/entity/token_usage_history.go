@@ -160,6 +160,30 @@ type TokenUsageHistory struct {
 	StatusCode   int     `json:"status_code"`
 	Metadata     JSONMap `json:"metadata,omitempty"`
 	CreatedAt    Time    `json:"created_at"`
+
+	// 知识层度量（Phase 0 交付 2，04 §5）。零值表示该请求没有知识层参与，
+	// 因此 `mode=off` 时这些字段在 JSON 里不出现（omitempty），响应与改动前
+	// 逐字节一致。
+	//
+	// 语义（04 §7.2 / §7.3）：
+	//   ExplorationTokens  花在“找路”上的 token（搜索/列举/重复打开）
+	//   ReuseTokens        复用既有结论（索引命中、缓存）省下的 token
+	//   IndexLookupCount   查询知识库的次数（分母）
+	//   IndexHit           其中命中并可直接使用的次数（分子）
+	//   FallbackCount      知识库不可用/未命中而回退到既有工具的调用次数
+	//   UnsafeReuseCount   复用 stale 或低置信内容的次数（硬门槛 = 0）
+	//   ToolCallsPerTask   该任务的工具调用数（护栏：不得增加）
+	//   RepeatedReadCount  同一 session 内对同一 file/symbol 的重复读取次数
+	//   KnowledgeVersionMismatchCount 版本不一致却仍被使用的次数（硬门槛 = 0）
+	ExplorationTokens             int `json:"exploration_tokens,omitempty"`
+	ReuseTokens                   int `json:"reuse_tokens,omitempty"`
+	IndexLookupCount              int `json:"index_lookup_count,omitempty"`
+	IndexHit                      int `json:"index_hit,omitempty"`
+	FallbackCount                 int `json:"fallback_count,omitempty"`
+	UnsafeReuseCount              int `json:"unsafe_reuse_count,omitempty"`
+	ToolCallsPerTask              int `json:"tool_calls_per_task,omitempty"`
+	RepeatedReadCount             int `json:"repeated_read_count,omitempty"`
+	KnowledgeVersionMismatchCount int `json:"knowledge_version_mismatch_count,omitempty"`
 }
 
 // TableName keeps compatibility with optional SQL-backed implementations.

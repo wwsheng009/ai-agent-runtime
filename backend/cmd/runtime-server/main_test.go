@@ -89,13 +89,30 @@ func TestResolveRuntimeServerSessionDir_ResolvesConfiguredRelativePathFromConfig
 	}
 }
 
-func TestNormalizeSkillsRuntimeConfigUsesBuildProfileRuntimeConfig(t *testing.T) {
+// TestNormalizeSkillsRuntimeConfigIgnoresDevelopmentLayout 固定新策略：
+// backend/configs 是开发目录，不再作为隐式配置来源。没有 .aicli 层时 skills
+// runtime 使用内置默认值（空路径），只有真实存在的 .aicli 层才会被采用。
+func TestNormalizeSkillsRuntimeConfigIgnoresDevelopmentLayout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Chdir(t.TempDir())
+
 	skills := normalizeSkillsRuntimeConfig(&config.Config{})
-	if got := filepath.Base(skills.ConfigFile); got != aiclipaths.DefaultRuntimeConfigFileName {
-		t.Fatalf("default runtime config = %q, want %s", skills.ConfigFile, aiclipaths.DefaultRuntimeConfigFileName)
+	if skills.ConfigFile != "" {
+		t.Fatalf("default runtime config = %q, want empty (development layout must be ignored)", skills.ConfigFile)
 	}
-	if _, err := os.Stat(skills.ConfigFile); err != nil {
-		t.Fatalf("default runtime config should resolve to an existing asset: %q: %v", skills.ConfigFile, err)
+
+	userConfig := filepath.Join(home, ".aicli", aiclipaths.DefaultRuntimeConfigFileName)
+	if err := os.MkdirAll(filepath.Dir(userConfig), 0o755); err != nil {
+		t.Fatalf("mkdir user layer: %v", err)
+	}
+	if err := os.WriteFile(userConfig, []byte("version: v1\n"), 0o644); err != nil {
+		t.Fatalf("write user layer: %v", err)
+	}
+	skills = normalizeSkillsRuntimeConfig(&config.Config{})
+	if filepath.Clean(skills.ConfigFile) != filepath.Clean(userConfig) {
+		t.Fatalf("user layer runtime config = %q, want %q", skills.ConfigFile, userConfig)
 	}
 }
 

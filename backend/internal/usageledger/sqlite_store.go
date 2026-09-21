@@ -89,8 +89,11 @@ func (s *SQLiteStore) Create(history *entity.TokenUsageHistory) error {
 	_, err := s.db.ExecContext(context.Background(), `
 		INSERT INTO token_usage_history (
 			id, request_id, model_id, provider_id, input_tokens, output_tokens, total_tokens,
-			message_count, max_tokens, success, status_code, metadata_json, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			message_count, max_tokens, success, status_code, metadata_json, created_at,
+			exploration_tokens, reuse_tokens, index_lookup_count, index_hit, fallback_count,
+			unsafe_reuse_count, tool_calls_per_task, repeated_read_count,
+			knowledge_version_mismatch_count
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		record.ID,
 		nullIfEmpty(record.RequestID),
@@ -105,6 +108,15 @@ func (s *SQLiteStore) Create(history *entity.TokenUsageHistory) error {
 		record.StatusCode,
 		metadataJSON,
 		time.Time(record.CreatedAt).UTC().Format(time.RFC3339Nano),
+		record.ExplorationTokens,
+		record.ReuseTokens,
+		record.IndexLookupCount,
+		record.IndexHit,
+		record.FallbackCount,
+		record.UnsafeReuseCount,
+		record.ToolCallsPerTask,
+		record.RepeatedReadCount,
+		record.KnowledgeVersionMismatchCount,
 	)
 	if err != nil {
 		return fmt.Errorf("insert usage ledger record: %w", err)
@@ -123,7 +135,10 @@ func (s *SQLiteStore) GetSince(since time.Time, limit int) ([]*entity.TokenUsage
 
 	query := `
 		SELECT id, request_id, model_id, provider_id, input_tokens, output_tokens, total_tokens,
-		       message_count, max_tokens, success, status_code, metadata_json, created_at
+		       message_count, max_tokens, success, status_code, metadata_json, created_at,
+		       exploration_tokens, reuse_tokens, index_lookup_count, index_hit, fallback_count,
+		       unsafe_reuse_count, tool_calls_per_task, repeated_read_count,
+		       knowledge_version_mismatch_count
 		FROM token_usage_history
 	`
 	args := make([]interface{}, 0, 2)
@@ -164,6 +179,15 @@ func (s *SQLiteStore) GetSince(since time.Time, limit int) ([]*entity.TokenUsage
 			&record.StatusCode,
 			&metadata,
 			&record.CreatedAt,
+			&record.ExplorationTokens,
+			&record.ReuseTokens,
+			&record.IndexLookupCount,
+			&record.IndexHit,
+			&record.FallbackCount,
+			&record.UnsafeReuseCount,
+			&record.ToolCallsPerTask,
+			&record.RepeatedReadCount,
+			&record.KnowledgeVersionMismatchCount,
 		); err != nil {
 			return nil, fmt.Errorf("scan usage ledger record: %w", err)
 		}
@@ -208,7 +232,16 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 			success INTEGER NOT NULL DEFAULT 0,
 			status_code INTEGER NOT NULL DEFAULT 0,
 			metadata_json BLOB,
-			created_at TEXT NOT NULL
+			created_at TEXT NOT NULL,
+			exploration_tokens INTEGER NOT NULL DEFAULT 0,
+			reuse_tokens INTEGER NOT NULL DEFAULT 0,
+			index_lookup_count INTEGER NOT NULL DEFAULT 0,
+			index_hit INTEGER NOT NULL DEFAULT 0,
+			fallback_count INTEGER NOT NULL DEFAULT 0,
+			unsafe_reuse_count INTEGER NOT NULL DEFAULT 0,
+			tool_calls_per_task INTEGER NOT NULL DEFAULT 0,
+			repeated_read_count INTEGER NOT NULL DEFAULT 0,
+			knowledge_version_mismatch_count INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_token_usage_history_created_at
 			ON token_usage_history(created_at DESC, id DESC)`,
@@ -218,7 +251,71 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 			return fmt.Errorf("initialize usage ledger store: %w", err)
 		}
 	}
+	return s.ensureLedgerMetricColumns(ctx)
+}
+
+// ledgerMetricColumns 是 Phase 0（04 §5 交付 2）新增的 9 个知识层度量列。
+//
+// 它们必须对既有库幂等补齐：老库只有 13 列，缺列时 Create 会直接报
+// "no such column"，而 ADD COLUMN 是元数据级变更，历史行取 DEFAULT 0，
+// 旧数据的语义与改动前完全一致（mode=off 时新列恒为 0）。
+var ledgerMetricColumns = []string{
+	"exploration_tokens",
+	"reuse_tokens",
+	"index_lookup_count",
+	"index_hit",
+	"fallback_count",
+	"unsafe_reuse_count",
+	"tool_calls_per_task",
+	"repeated_read_count",
+	"knowledge_version_mismatch_count",
+}
+
+// ensureLedgerMetricColumns 为既有库补齐 Phase 0 新增列。
+func (s *SQLiteStore) ensureLedgerMetricColumns(ctx context.Context) error {
+	existing, err := s.ledgerColumns(ctx)
+	if err != nil {
+		return err
+	}
+	for _, column := range ledgerMetricColumns {
+		if existing[column] {
+			continue
+		}
+		statement := `ALTER TABLE token_usage_history ADD COLUMN ` + column + ` INTEGER NOT NULL DEFAULT 0`
+		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("add usage ledger column %s: %w", column, err)
+		}
+	}
 	return nil
+}
+
+// ledgerColumns 返回 token_usage_history 现有列名集合。
+func (s *SQLiteStore) ledgerColumns(ctx context.Context) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(token_usage_history)`)
+	if err != nil {
+		return nil, fmt.Errorf("inspect usage ledger schema: %w", err)
+	}
+	defer rows.Close()
+
+	columns := make(map[string]bool)
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			ctype     string
+			notNull   int
+			dfltValue sql.NullString
+			primary   int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &primary); err != nil {
+			return nil, fmt.Errorf("scan usage ledger schema: %w", err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return columns, nil
 }
 
 func resolveSQLiteDSN(dsn string) (string, error) {

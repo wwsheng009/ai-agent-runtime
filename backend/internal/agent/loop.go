@@ -114,6 +114,11 @@ type ReActLoop struct {
 	// 跨步骤的历史累计误触护栏；连续非法达到上限才放弃，避免模型反复生成非法参数
 	// 导致死循环烧 token（参照 Reasonix repeat_failure_guard）。
 	malformedToolCallRecoveries map[string]int
+	// reasoningOnlyRecoveries 记录本 run 内「只输出思维链、正文为空且没有工具调用」
+	// 的反馈回注次数；下一次成功产出实质输出（正文或工具调用）即清零，与
+	// malformedToolCallRecoveries 的「连续」语义一致。连续退化达到上限才放弃，
+	// 避免把 prompt 改写重试变成新的死循环。
+	reasoningOnlyRecoveries int
 	// readOnlyDenyStreak 记录本 run 内「连续」被只读策略拒绝的次数；一旦某个
 	// 工具执行成功（说明模型已理解边界）即清零，防止跨阶段的累计误触熔断。
 	// M6 在 Escalate 阈值（3）时向父会话邮箱发 subagent.requires_write 事件，
@@ -769,6 +774,12 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			if loop.tryRecoverMalformedToolCall(currentCtx, traceID, sessionID, step, prompt, builder, promptBuilder, options, err) {
 				continue
 			}
+			// 模型只输出思维链（reasoning-only）：正文为空、工具调用为 0，用户看不到
+			// 任何实质输出。provider 内层对 stop 型已不再做同 prompt 重采样，这里用
+			// 反馈回注改写 prompt 后再请求（与 malformed 恢复同构、有界）。
+			if loop.tryRecoverReasoningOnlyReply(traceID, sessionID, step, builder, promptBuilder, options, err) {
+				continue
+			}
 			recoveryHistory := builder.Messages()
 			recoveryMetadata := map[string]interface{}(nil)
 			recoveryKind := ""
@@ -839,6 +850,9 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			result.State = loop.agent.GetState()
 			return result, err
 		}
+		// 成功产出实质输出（正文或工具调用）即清零连续退化计数：与 malformed
+		// 恢复的收敛规则一致，避免跨步骤的历史累计提前耗尽恢复预算。
+		loop.reasoningOnlyRecoveries = 0
 		totalUsage.Add(usage)
 		result.Usage = totalUsage.Clone()
 		if len(action.promptHistory) > 0 {
@@ -1439,6 +1453,69 @@ func (loop *ReActLoop) tryRecoverMalformedToolCall(ctx context.Context, traceID,
 		"max_recoveries": maxMalformedToolCallRecoveries,
 	})
 	return true
+}
+
+// maxReasoningOnlyRecoveries 控制「只输出思维链」的反馈回注次数上限。与
+// maxMalformedToolCallRecoveries 同构：连续退化达到上限即放弃、交回原有错误
+// 路径，避免把"改写 prompt 重试"变成新的死循环烧 token。
+const maxReasoningOnlyRecoveries = 2
+
+// tryRecoverReasoningOnlyReply 处理 reasoning-only 退化：模型返回了非空思维链，
+// 但正文为空、工具调用为 0，用户看不到任何实质输出。
+//
+// 这类失败不能靠"同 prompt 重采样"恢复——线上事故里 provider 内层连续重采样只会
+// 复现同一个退化样本，最终以 degenerate 熔断直接报错。真正的杠杆是改变 prompt，
+// 因此这里按 finish_reason 分流注入一条反馈消息后重新请求：
+//   - stop 型：模型自认为已经答完，明确告知"思维链没有展示给用户"，要求直接给出
+//     最终答复或完整的工具调用；
+//   - length 型：输出预算被思维链吃满（provider 内层仍会扩容 8k→16k→32k→64k），
+//     要求直接给结论、不要复述推理过程。
+//
+// 返回 true 表示已注入反馈并应继续循环。与 malformed 恢复保持一致：两侧 builder
+// 同步注入、持久化历史、发运行时事件，且计数在成功产出实质输出后清零。
+func (loop *ReActLoop) tryRecoverReasoningOnlyReply(traceID, sessionID string, step int, builder, promptBuilder *MessageBuilder, options loopRunOptions, err error) bool {
+	if loop == nil || builder == nil || promptBuilder == nil {
+		return false
+	}
+	if !llm.IsReasoningOnlyReplyError(err) {
+		return false
+	}
+	finishReason := llm.ReasoningOnlyReplyFinishReason(err)
+	if loop.reasoningOnlyRecoveries >= maxReasoningOnlyRecoveries {
+		loop.emitRuntimeEvent("llm.reasoning_only.guardrail_hit", sessionID, "", map[string]interface{}{
+			"trace_id":       traceID,
+			"step":           step,
+			"finish_reason":  finishReason,
+			"recoveries":     loop.reasoningOnlyRecoveries,
+			"max_recoveries": maxReasoningOnlyRecoveries,
+		})
+		return false
+	}
+
+	loop.reasoningOnlyRecoveries++
+	message := reasoningOnlyRecoveryMessage(finishReason)
+	builder.Add(*types.NewUserMessage(message))
+	promptBuilder.Add(*types.NewUserMessage(message))
+	if persistErr := persistBuilderHistory(builder, options.PersistHistory); persistErr != nil {
+		return false
+	}
+	loop.emitRuntimeEvent("llm.reasoning_only.recovered", sessionID, "", map[string]interface{}{
+		"trace_id":       traceID,
+		"step":           step,
+		"finish_reason":  finishReason,
+		"recoveries":     loop.reasoningOnlyRecoveries,
+		"max_recoveries": maxReasoningOnlyRecoveries,
+	})
+	return true
+}
+
+// reasoningOnlyRecoveryMessage 生成 reasoning-only 的反馈回注文本：同时说明
+// "思维链没有展示给用户"与"请给出正文或完整工具调用"，避免模型再次只输出思维链。
+func reasoningOnlyRecoveryMessage(finishReason string) string {
+	if llm.IsMaxOutputTokensStop(finishReason) {
+		return "上一轮只输出了思维链：输出预算被思维链耗尽，正文为空且没有工具调用，用户看不到任何内容（思维链不会展示给用户）。请直接给出最终答复，不要复述推理过程；如果需要调用工具，请给出完整、参数合法的工具调用。"
+	}
+	return "上一轮只输出了思维链就结束了：正文为空且没有工具调用，用户看不到任何内容（思维链不会展示给用户）。请现在直接给出最终答复；如果需要调用工具，请给出完整、参数合法的工具调用。"
 }
 
 // resetMalformedToolCallRecoveriesOnSuccess 把「参数非法」降级计数收敛为连续

@@ -1162,7 +1162,8 @@ skills_runtime:
         - X-Skills-Auth-Tenant
         - X-Tenant-ID
         - X-Authenticated-Tenant
-    usage_ledger_enabled: ${SKILLS_RUNTIME_USAGE_LEDGER_ENABLED:-false}
+    # Phase 0 任务侧基线前置开关（docs/knowledge_Layer reports/phase0_baseline_report.md §6）。
+     usage_ledger_enabled: ${SKILLS_RUNTIME_USAGE_LEDGER_ENABLED:-true}
     usage_tracking_enabled: ${SKILLS_RUNTIME_USAGE_TRACKING_ENABLED:-true}
     user_claims:
         - user_id

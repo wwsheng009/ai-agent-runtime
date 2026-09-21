@@ -915,7 +915,7 @@ func newWorkspaceLocalOrchestrationTestHost(t *testing.T, session *ChatSession, 
 			Name:         "workspace-local-orchestration-test",
 			Provider:     "test-provider",
 			Model:        "test-model",
-			SystemPrompt: composeLocalChatSystemPrompt(session, workspaceRoot),
+			SystemPrompt: composeLocalChatSystemPrompt(session, nil, workspaceRoot),
 			MaxSteps:     10,
 		}
 		if strings.TrimSpace(workspaceRoot) != "" {

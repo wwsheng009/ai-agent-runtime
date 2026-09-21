@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/providercompat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -985,8 +986,15 @@ func buildOpenAIProtocolMessage(role, content string, toolCalls []map[string]int
 		}
 		if reasoningContent, ok := stringMetadataValueAllowEmpty(messageMetadata, "reasoning_content"); ok {
 			message["reasoning_content"] = reasoningContent
-		} else if reasoningContent, ok := replayableOpenAIReasoningContent(toolCalls, reasoning, providerHint, modelHint); ok {
-			message["reasoning_content"] = reasoningContent
+		} else if _, recorded := messageMetadata[ReasoningReplayRecordedMetadataKey]; !recorded {
+			// The message carries no recorded replay decision (a history
+			// written before decisions were persisted). Fall back to the
+			// active provider so those histories keep working; messages that
+			// do record a decision are serialized from the message alone, so
+			// switching providers cannot rewrite them.
+			if reasoningContent, ok := replayableOpenAIReasoningContent(toolCalls, reasoning, providerHint, modelHint); ok {
+				message["reasoning_content"] = reasoningContent
+			}
 		}
 	}
 	return message
@@ -1560,6 +1568,61 @@ func boolMetadataValue(metadata map[string]interface{}, key string) (bool, bool)
 		return false, false
 	}
 	return value, true
+}
+
+// ReasoningReplayRecordedMetadataKey marks an assistant message whose
+// reasoning_content replay decision was already persisted at record time, so
+// serialization must not re-derive it from the currently active provider.
+const ReasoningReplayRecordedMetadataKey = "reasoning_replay_recorded"
+
+// RecordOpenAIReasoningReplayDecision persists the provider-dependent
+// reasoning_content replay decision onto a recorded assistant message.
+//
+// The decision belongs to the provider that produced the message: DeepSeek
+// thinking mode rejects a replayed assistant turn that omits reasoning_content
+// entirely. Deciding it at serialization time instead made the same history
+// serialize differently depending on which provider was active, which rewrites
+// the provider prompt-cache prefix on every provider switch. Recording the
+// decision here keeps serialization a pure function of the message.
+//
+// The decision is derived from the message's own persisted state: when the
+// record path already stored non-empty reasoning_content, only the marker is
+// added.
+func RecordOpenAIReasoningReplayDecision(metadata map[string]interface{}, providerHint string, modelHints ...string) {
+	RecordOpenAIReasoningReplayDecisionWithCapabilities(metadata, providerHint, firstNonEmptyHint(modelHints), nil)
+}
+
+// RecordOpenAIReasoningReplayDecisionWithCapabilities is
+// RecordOpenAIReasoningReplayDecision with the provider's configured model
+// capabilities attached.
+//
+// The replay contract belongs to the endpoint, not to the vendor name: a
+// third-party gateway whose name, host and model id all miss the built-in
+// DeepSeek substrings can still enforce "reasoning_content must be passed
+// back" and reject a keyless assistant turn with HTTP 400. Attaching the
+// configured capabilities here lets
+// model_capabilities.<model>.replay_reasoning_content decide the recorded
+// decision, which is the only place the producing endpoint is still known.
+func RecordOpenAIReasoningReplayDecisionWithCapabilities(
+	metadata map[string]interface{},
+	providerHint string,
+	modelHint string,
+	capabilities map[string]agentconfig.ModelCapabilitySpec,
+) {
+	if metadata == nil {
+		return
+	}
+	metadata[ReasoningReplayRecordedMetadataKey] = true
+	if content, ok := stringMetadataValueAllowEmpty(metadata, "reasoning_content"); ok && strings.TrimSpace(content) != "" {
+		return
+	}
+	if content, ok := providercompat.ReplayableOpenAIReasoningContent(providercompat.Context{
+		ProviderName:           providerHint,
+		Model:                  modelHint,
+		ConfiguredCapabilities: capabilities,
+	}, nil, nil); ok {
+		metadata["reasoning_content"] = content
+	}
 }
 
 func replayableOpenAIReasoningContent(toolCalls []map[string]interface{}, reasoning *types.ReasoningBlock, providerHint string, modelHint string) (string, bool) {

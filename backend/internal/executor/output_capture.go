@@ -18,8 +18,9 @@ const (
 	DefaultRetainedOutputBytes = 256 * 1024
 	DisableRetainedOutputLimit = -1
 
-	captureOutputMarkerReserve  = 192
-	captureOutputMinSegmentSize = 4 * 1024
+	// Reserve for the "Total output lines/bytes" header plus the truncation
+	// marker so the retained head still fits inside the capture limit.
+	captureOutputMarkerReserve = 256
 )
 
 type CombinedOutputCapture struct {
@@ -364,10 +365,8 @@ type cappedCombinedWriter struct {
 	mu        sync.Mutex
 	maxBytes  int
 	headLimit int
-	tailLimit int
 
 	head []byte
-	tail []byte
 
 	totalBytes      int
 	newlineCount    int
@@ -406,25 +405,18 @@ func newCappedCombinedWriter(maxBytes int) *cappedCombinedWriter {
 	if maxBytes <= 0 {
 		maxBytes = DefaultRetainedOutputBytes
 	}
-	headLimit := maxBytes * 2 / 3
-	tailLimit := maxBytes - headLimit
-	if maxBytes >= captureOutputMinSegmentSize*2 {
-		if headLimit < captureOutputMinSegmentSize {
-			headLimit = captureOutputMinSegmentSize
-			tailLimit = maxBytes - headLimit
-		}
-		if tailLimit < captureOutputMinSegmentSize {
-			tailLimit = captureOutputMinSegmentSize
-			headLimit = maxBytes - tailLimit
-		}
-	} else {
-		headLimit = maxBytes / 2
-		tailLimit = maxBytes - headLimit
+	// Head-only window: keep the beginning of the stream up to the capture
+	// limit (minus room for the header/marker) and drop everything after it.
+	// The tail is deliberately not retained: the complete stream is archived
+	// separately, so the omitted remainder stays reachable through
+	// artifact_read paging instead of a lossy two-ended window.
+	headLimit := maxBytes - captureOutputMarkerReserve
+	if headLimit < 1 {
+		headLimit = maxBytes
 	}
 	return &cappedCombinedWriter{
 		maxBytes:  maxBytes,
 		headLimit: headLimit,
-		tailLimit: tailLimit,
 	}
 }
 
@@ -461,7 +453,7 @@ func (w *cappedCombinedWriter) Write(p []byte) (int, error) {
 	w.newlineCount += bytes.Count(p, []byte{'\n'})
 	w.endsWithNewline = len(p) > 0 && p[len(p)-1] == '\n'
 
-	w.appendHeadTail(p)
+	w.appendHead(p)
 	return len(p), nil
 }
 
@@ -525,44 +517,22 @@ func flushOutputMirror(writer io.Writer) {
 	}
 }
 
-func (w *cappedCombinedWriter) appendHeadTail(p []byte) {
-	if w.headLimit > len(w.head) {
-		headRoom := w.headLimit - len(w.head)
-		if headRoom > len(p) {
-			headRoom = len(p)
-		}
-		w.head = append(w.head, p[:headRoom]...)
-		p = p[headRoom:]
-	}
-
-	if len(p) == 0 || w.tailLimit <= 0 {
+func (w *cappedCombinedWriter) appendHead(p []byte) {
+	if len(p) == 0 || w.headLimit <= len(w.head) {
 		return
 	}
-	if len(p) >= w.tailLimit {
-		w.tail = append([]byte(nil), p[len(p)-w.tailLimit:]...)
-		return
+	headRoom := w.headLimit - len(w.head)
+	if headRoom > len(p) {
+		headRoom = len(p)
 	}
-	if len(w.tail)+len(p) <= w.tailLimit {
-		w.tail = append(w.tail, p...)
-		return
-	}
-
-	overflow := len(w.tail) + len(p) - w.tailLimit
-	if overflow >= len(w.tail) {
-		w.tail = append([]byte(nil), p[len(p)-w.tailLimit:]...)
-		return
-	}
-	next := make([]byte, 0, w.tailLimit)
-	next = append(next, w.tail[overflow:]...)
-	next = append(next, p...)
-	w.tail = next
+	w.head = append(w.head, p[:headRoom]...)
 }
 
 func (w *cappedCombinedWriter) Result() CombinedOutputCapture {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	output := string(w.head) + string(w.tail)
+	output := string(w.head)
 	truncated := w.totalBytes > len(output)
 	totalLines := 0
 	if w.totalBytes > 0 {
@@ -572,17 +542,17 @@ func (w *cappedCombinedWriter) Result() CombinedOutputCapture {
 		}
 	}
 	if truncated {
-		omitted := w.totalBytes - len(w.head) - len(w.tail)
+		omitted := w.totalBytes - len(w.head)
 		if omitted < 0 {
 			omitted = 0
 		}
 		output = fmt.Sprintf(
-			"Total output lines: %d\nTotal output bytes: %d\n\n%s\n\n[exec output truncated at capture limit: omitted %d bytes from the middle]\n\n%s",
+			"Total output lines: %d\nTotal output bytes: %d\n\n%s\n\n[exec output truncated at capture limit: kept the first %d bytes; omitted %d bytes from the end; page the remainder with artifact_read]\n",
 			totalLines,
 			w.totalBytes,
 			string(w.head),
+			len(w.head),
 			omitted,
-			string(w.tail),
 		)
 	}
 
@@ -591,8 +561,8 @@ func (w *cappedCombinedWriter) Result() CombinedOutputCapture {
 		Truncated:         truncated,
 		TotalBytes:        w.totalBytes,
 		TotalLines:        totalLines,
-		RetainedBytes:     len(w.head) + len(w.tail),
-		OmittedBytes:      omittedBytes(w.totalBytes, len(w.head), len(w.tail)),
+		RetainedBytes:     len(w.head),
+		OmittedBytes:      omittedBytes(w.totalBytes, len(w.head), 0),
 		CaptureLimitBytes: w.maxBytes,
 	}
 }

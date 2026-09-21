@@ -127,6 +127,30 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 	return response, nil
 }
 
+// sendMessageWithImages runs one chat turn with additional explicit local image
+// attachments. ACP image blocks arrive as in-band base64 and are staged to
+// local files by the ACP host; they are merged into the session's attachment
+// list for this turn only, so no cross-turn attachment state leaks.
+func sendMessageWithImages(session *ChatSession, userMessage string, imagePaths []string) (string, error) {
+	if session == nil {
+		return "", fmt.Errorf("chat session is nil")
+	}
+	if len(imagePaths) == 0 {
+		return sendMessage(session, userMessage)
+	}
+	previous := session.ImagePaths
+	merged := make([]string, 0, len(previous)+len(imagePaths))
+	merged = append(merged, previous...)
+	merged = append(merged, imagePaths...)
+	session.ImagePaths = merged
+	defer func() {
+		// sendMessage clears ImagePaths on success; restore whatever the
+		// session carried before this turn (nil on the ACP path).
+		session.ImagePaths = previous
+	}()
+	return sendMessage(session, userMessage)
+}
+
 func finishSuccessfulChatSend(session *ChatSession, response string, noInteractive bool) {
 	if session == nil {
 		return

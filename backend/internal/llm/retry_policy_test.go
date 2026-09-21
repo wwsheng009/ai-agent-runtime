@@ -505,6 +505,46 @@ func TestClassifyRetryableLLMErrorWithRules_MatchesErrorCodeRule(t *testing.T) {
 	assert.Equal(t, 10, decision.MaxAttempts)
 }
 
+// TestReasoningOnlyStopVsBudgetSplit 固化「只输出思维链」的两条处置路径：stop 型
+// （模型自认为已答完）不再由 provider 内层做同 prompt 重采样，改由 agent loop 用
+// 反馈回注改写 prompt 后再请求；length 型保留重采样 + 预算升级（8k→16k→32k→64k）。
+// 分类本身必须保持可重试：外层 runtime 重试与 turn 级重跑的杠杆不能被削弱。
+func TestReasoningOnlyStopVsBudgetSplit(t *testing.T) {
+	stopErr := fmt.Errorf("reasoning_only_empty_reply: stream ended with reasoning only and no substantive output: finish_reason=stop")
+	require.True(t, IsReasoningOnlyReplyError(stopErr))
+	require.Equal(t, "stop", ReasoningOnlyReplyFinishReason(stopErr))
+	require.True(t, isReasoningOnlyStopReply(stopErr))
+	require.False(t, isReasoningOnlyEmptyReplyRetryable(stopErr))
+	decision := classifyRetryableLLMError(stopErr)
+	require.True(t, decision.Retryable, "分类保持可重试：外层 runtime 重试与 turn 级重跑不能被削弱")
+	require.Equal(t, "reasoning_only_empty_reply", decision.Reason)
+
+	lengthErr := fmt.Errorf("reasoning_only_empty_reply: stream ended with reasoning only and no substantive output: finish_reason=length")
+	require.True(t, IsReasoningOnlyReplyError(lengthErr))
+	require.False(t, isReasoningOnlyStopReply(lengthErr))
+	require.True(t, isReasoningOnlyEmptyReplyRetryable(lengthErr), "length 型继续吃重采样与预算升级")
+
+	// 没有 finish_reason 取证（旧路径 / 聚合层未记录）时保持既有行为：仍可重采样，
+	// 避免把「无取证」误判成「模型已答完」。
+	unknownErr := fmt.Errorf("reasoning_only_empty_reply: stream ended with reasoning only and no substantive output")
+	require.True(t, IsReasoningOnlyReplyError(unknownErr))
+	require.Empty(t, ReasoningOnlyReplyFinishReason(unknownErr))
+	require.False(t, isReasoningOnlyStopReply(unknownErr))
+	require.True(t, isReasoningOnlyEmptyReplyRetryable(unknownErr))
+
+	// 非流式的类型化错误走 finishReason 字段，且 wrap 链逐层判定（runtime 的
+	// retryExhaustedError 会吞掉内层分类）。
+	typed := &reasoningOnlyEmptyReplyError{finishReason: "stop"}
+	wrapped := fmt.Errorf("LLM call failed after retries: %w", typed)
+	require.Equal(t, "stop", ReasoningOnlyReplyFinishReason(wrapped))
+	require.True(t, isReasoningOnlyStopReply(wrapped))
+	require.Contains(t, wrapped.Error(), "finish_reason=stop")
+
+	// 其它退化类别不受影响。
+	require.False(t, IsReasoningOnlyReplyError(fmt.Errorf("empty_reply: stream ended without substantive output")))
+	require.False(t, isReasoningOnlyStopReply(fmt.Errorf("truncated_tool_call: incomplete tool call markup")))
+}
+
 func TestValidateStreamingAggregateResponse_ClassifiesReasoningOnlyContentInspectionAndEmptyReply(t *testing.T) {
 	reasoningOnlyErr := validateStreamingAggregateResponse("openai", []byte(strings.Join([]string{
 		`data: {"choices":[{"index":0,"delta":{"reasoning_content":"先确认上下文。"},"finish_reason":"stop"}]}`,
@@ -1004,6 +1044,42 @@ func TestIsTruncatedToolCallError(t *testing.T) {
 	require.False(t, IsTruncatedToolCallError(fmt.Errorf(
 		"openai_stream_protocol_error: code=invalid_tool_arguments: tool call 0 (write) has incomplete or non-object JSON arguments")),
 		"the adapter class is matched by its Truncated field, not by reason")
+}
+
+// TestUpstreamMaxTokensToolCallCutoffClassification pins the commandgo incident
+// signature: the gateway reports the truncation inside the SSE stream as
+// "HttpError: HTTP 400: Tool calls cutoff by max_tokens" wrapped in a
+// stream_interrupted error. The embedded 400 must not turn a budget-bound
+// truncation into a terminal http_400 request defect — it has to classify as
+// truncated_tool_call so the retry loop widens the completion budget and the
+// caller-side one-shot escalation stays reachable.
+func TestUpstreamMaxTokensToolCallCutoffClassification(t *testing.T) {
+	upstream := fmt.Errorf("stream_interrupted: openai stream error (type=internal_server_error, code=500): HttpError: HTTP 400: Tool calls cutoff by max_tokens")
+
+	decision := classifyRetryableLLMError(upstream)
+	require.True(t, decision.Retryable, "an embedded 400 must not make the truncation terminal")
+	require.Equal(t, "truncated_tool_call", decision.Reason)
+	require.True(t, IsTruncatedToolCallError(upstream))
+	require.True(t, isOutputBudgetEscalationReason(decision.Reason))
+	require.True(t, isDegenerateOutputRetryReason(decision.Reason))
+
+	maxTokens := 8000
+	require.True(t, escalateOutputBudgetForDegenerateReply(&maxTokens, 0, upstream))
+	require.Equal(t, 16000, maxTokens)
+
+	// The same wording on a bare provider 400 (no stream wrapper) classifies
+	// the same way.
+	bare := newProviderHTTPError(http.StatusBadRequest, "Tool calls cutoff by max_tokens", nil)
+	bareDecision := classifyRetryableLLMError(bare)
+	require.True(t, bareDecision.Retryable)
+	require.Equal(t, "truncated_tool_call", bareDecision.Reason)
+
+	// A real request defect stays terminal: the matcher only fires on the
+	// budget-truncation wording, not on every 400 mentioning max_tokens.
+	defect := newProviderHTTPError(http.StatusBadRequest, "invalid_request_error: unknown parameter max_tokens", nil)
+	defectDecision := classifyRetryableLLMError(defect)
+	require.False(t, defectDecision.Retryable)
+	require.NotEqual(t, "truncated_tool_call", defectDecision.Reason)
 }
 
 // TestTrackDegenerateOutputReplyBoundsConsecutiveStreak pins the fast-fail

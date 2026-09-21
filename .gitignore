@@ -109,3 +109,10 @@ backend/configs/backend/
 terminal-output-inventory.json
 .scratch/
 .cache/
+.tmp_view/
+.build-*
+.build_*
+.kb_*
+.tmp*
+backend/runtime-server.exe.bak-*
+/data/

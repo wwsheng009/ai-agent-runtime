@@ -2,6 +2,7 @@ package llm
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
@@ -28,6 +29,50 @@ func TestResolveRequestMaxTokens_CapsDefaultTo8k(t *testing.T) {
 	}
 	if resolved.UpperLimit != 128000 {
 		t.Fatalf("expected upperLimit 128000 from capability, got %d", resolved.UpperLimit)
+	}
+}
+
+// TestResolveRequestMaxTokens_ReasoningModelsSkipPaidCap 固化 reasoning 模型的预算
+// 例外：思维链 token 与正文共用 completion 预算，付费 8k 槽位预留会让模型把预算
+// 全部花在推理上、以 finish_reason=length 返回 reasoning-only（正文为空）。显式
+// 请求预算与 env 覆盖仍然优先，未声明 ReasoningModel 时保持原行为。
+func TestResolveRequestMaxTokens_ReasoningModelsSkipPaidCap(t *testing.T) {
+	t.Setenv(EnvDisableMaxTokensCap, "")
+	t.Setenv(EnvMaxOutputTokens, "")
+	t.Setenv(EnvAICLIMaxOutputTokens, "")
+
+	resolved := ResolveRequestMaxTokens(
+		"anthropic",
+		"claude-opus-4-7",
+		0,
+		agentconfig.ModelCapabilitySpec{MaxTokens: 128000, ReasoningModel: true},
+		true,
+		131072,
+	)
+	if resolved.Default <= CappedDefaultMaxTokens {
+		t.Fatalf("expected reasoning model default above the %d paid cap, got %d (source=%s)", CappedDefaultMaxTokens, resolved.Default, resolved.Source)
+	}
+	if resolved.Capped {
+		t.Fatalf("expected Capped=false for reasoning model, got %#v", resolved)
+	}
+	if strings.Contains(resolved.Source, "capped_default") {
+		t.Fatalf("expected no capped_default source for reasoning model, got %s", resolved.Source)
+	}
+
+	// 未声明 ReasoningModel 的模型保持 8k 上限（付费槽位预留）。
+	capped := ResolveRequestMaxTokens(
+		"anthropic",
+		"claude-opus-4-7",
+		0,
+		agentconfig.ModelCapabilitySpec{MaxTokens: 128000},
+		true,
+		131072,
+	)
+	if capped.Default != CappedDefaultMaxTokens {
+		t.Fatalf("expected non-reasoning default %d, got %d", CappedDefaultMaxTokens, capped.Default)
+	}
+	if !capped.Capped {
+		t.Fatalf("expected Capped=true for non-reasoning model, got %#v", capped)
 	}
 }
 

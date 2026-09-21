@@ -10,6 +10,7 @@ import (
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/usageanalytics"
+	"github.com/wwsheng009/ai-agent-runtime/internal/usageledger"
 )
 
 // ============================================================================
@@ -152,6 +153,29 @@ func buildLocalCacheService(host *localChatRuntimeHost) *cacheanalytics.Service 
 		return nil
 	}
 	host.cleanupFns = append(host.cleanupFns, service.Close)
+
+	// Generic usage ledger: EventBus-attached recorder for token_usage_history,
+	// shared with runtime-server (docs §04:69 / §1064 / 06 §338). Captures
+	// llm.request.finished events from the agent loop that the skillsapi handler
+	// path does not see.
+	if host.ledgerEnabled && host.ledgerDSN != "" {
+		if ledgerStore, lerr := usageledger.NewSQLiteStore(&usageledger.Config{
+			Driver: host.ledgerDriver,
+			DSN:    host.ledgerDSN,
+		}); lerr == nil {
+			ledgerSvc := usageledger.NewService(ledgerStore)
+			if ledgerSvc != nil {
+				ledgerSvc.Attach(host.EventBus)
+				host.ledgerSvc = ledgerSvc
+				host.cleanupFns = append(host.cleanupFns, ledgerSvc.Close)
+			} else {
+				_ = ledgerStore.Close()
+			}
+		} else {
+			usageAttachWarn("本地用量账本服务初始化失败（dsn=%s），token_usage_history 不记录：%v", host.ledgerDSN, lerr)
+		}
+	}
+
 	return service
 }
 

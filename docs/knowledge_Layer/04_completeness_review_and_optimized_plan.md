@@ -817,16 +817,22 @@ knowledge:
 4. `docs/knowledge_Layer/README.md` 索引 + 本文档落盘。
 5. v1 DDL（§4.3）+ `schema_migrations` + 迁移脚本骨架（接入 `internal/migrate`）。
 6. 一次与相邻计划的交叉评审：`aicli-tool-capability-convergence-plan.md`、`tool-output-artifact-cascade-audit-and-optimization-plan-20260919.md`、`composer-at-file-reference-workspace-search-plan.md`、`llm-cache-analytics-unified-plan.md`。
+7. `exploration_attribution` 表（ADR-0003 §4.1）：追加到 `usageledger` `init()` 的 statements 切片（含两个索引）。**Phase 0 只建表与埋点骨架，不产生数据**（`mode=off` 下不存在 shadow 调用）；M1–M4 的计算入口同时就位。
+   - 归属理由（2026-09-21 补入）：该表此前只写在 ADR-0003 §4.1，`04` / `06` 均未列 Phase，形成"**M1（Phase 1 主门槛）由一张没有 Phase 归属的表计算**"。ADR-0003 §6.1 要求 Phase 0 结束时它已存在，故归 Phase 0。
 
 **验收门槛**
 
 - 能回答"当前每个任务平均多少 token 花在探索/重复读取"，且数字可由 ledger 复算（同一份数据两次计算结果一致）。
 - `knowledge.mode=off` 下全量回归测试与改动前一致。
 - schema 能被 `sqliteutil.OpenFileCtx` 打开，无 `database is locked`、无 `PRAGMA` 报错。
+- `exploration_attribution` 表可被 `sqliteutil.OpenFileCtx` 打开；重复 init 幂等、不重复建表（ADR-0003 §8）。
 
 **回滚**：删除 knowledge 包与配置项，零行为影响。
 
-**状态**：未开始
+**状态**：**核心交付已完成**（2026-09-20）——`mode=off` 默认、`usageledger` 9 个归因字段、v1 DDL + 迁移骨架、基线报告（3 个仓库 + 5 个真实任务）、相邻计划交叉评审（详见 `06` §4 Phase 0 与 [`reports/phase0_baseline_report.md`](reports/phase0_baseline_report.md)）。
+**A/B（off vs shadow）延期至 Phase 1**——知识层未接入任何进程，shadow 为 no-op。
+**交付 7（`exploration_attribution`）为 2026-09-21 补入的归属，尚未落地**，与 Phase 1 的 shadow 一起实现。
+文档治理尾项（`06` §9 条目 8 / 9）仍挂起，属文档维护，不影响工程验收。
 
 ### Phase 1 — 索引 MVP（只读，影子模式）
 
@@ -840,16 +846,21 @@ knowledge:
    - 输出 `content_hash`、`is_generated`、`language`、`size`、`mtime_ns`。
 2. `knowledge/store`：§4.3 的 v1 表 + `symbols_fts` 同步触发器。
 3. 增量：仅 `content_hash` 变化才重解析；删除文件标记 `deleted_at` 而不是立即物理删除。
-4. `knowledge.mode=shadow`：`code.search` 内部同时算索引结果与 grep 结果，**返回 grep 结果**，把差异写入对比日志与 `invalidation_events`。
+4. `knowledge.mode=shadow`：在**既有 `grep` / `view` 工具的执行路径上做拦截**（ADR-0003 §4.3 拦截范围、§4.4 候选查询映射），索引侧同时算候选结果，**仍返回 `grep` / `view` 的原结果**，把逐调用对比写入 `exploration_attribution` 与 `invalidation_events`。
+   - **注意（2026-09-21 修订）**：`code.search` 是 **Phase 3** 交付（见下 Phase 3 交付 1）。Phase 1 **不新增任何工具**，只拦截既有工具；原表述用 `code.search` 定义 Phase 1 shadow，会让 Phase 1 依赖 Phase 3 产物而无法开工。
 5. `knowledge.status` CLI / HTTP：索引状态、文件数、符号数、DB 大小、最近 job、锁等待 p95。
+6. **接入（激活）——三个入口**：`knowledge.Open` 接入 `cmd/runtime-server`（启动阶段调用 + 向 `internal/background` 注册索引任务，默认 writer owner）、`cmd/aicli` cmd/tui（`commands/chat.go` 解析 workspace 后调用）、`cmd/aicli` acp。规格见 `supplement/05` §2、§8。
+   - **归属理由（2026-09-21 补入）**：本项此前只写在 `supplement/05`，`04` 与 `06` §5.2 均未列。**没有这一项，Phase 1 的 shadow 没有任何进程会打开知识层，验收无法进行**——本次 A/B（off vs shadow）延期即此因。
 
 **验收门槛**
 
+- **主门槛（唯一 Pass/Fail 判据）**：ADR-0003 §4.5 的 **M1 调用级可用率**——在 `baseline_n > 0` 的被拦截调用上，`usable = (coverage ≥ α) AND (economy ≤ 1.0)` 的均值达标。**α 由本 Phase 的 shadow 实测校准后写入 config**（ADR-0003 §10，Gate = `Phase1-shadow`）。
+- **诊断指标（不判 Pass/Fail，用于定位失败）**：M2 覆盖度、M3 经济性、M4 token 收益（ADR-0003 §4.5）；以及 `code.search` 与 `grep` 的 top-10 文件集合差异率 < 15%——差异率**保留为可解释性诊断**，不再是验收口径（2026-09-21 修订，消除与 ADR-0003 §4.5 的双口径冲突）。
 - 本仓库（排除 `node_modules`/`dist`/`.aicli`）首次全量索引耗时 ≤ 实测基线（建议先测后定，初值 ≤ 120s）；单文件增量 < 50ms。
 - DB 大小 ≤ 200MB（对本仓库规模）；`max_db_size_mb` 生效时可触发 GC。
-- shadow 模式下 `code.search` 与 `grep` 的 top-10 文件集合差异率 < 15%，且每条差异可解释（符号精确匹配 vs 文本匹配）。
 - `files.content_hash` 与磁盘一致率 100%（抽样 ≥ 200 文件）。
 - 锁等待 p95 < 50ms。
+- **接入验证**：三个入口（runtime-server / aicli cmd+tui / aicli acp）在 `mode=off` 下行为与改动前完全一致；`mode=shadow` 下 `exploration_attribution` 有数据落库，且 M1 可复算（同批记录两次计算结果一致）。
 
 **回滚**：`mode=off` + 删除 `knowledge.db`。
 
@@ -1119,11 +1130,13 @@ Phase 3 (Code API / 工具面)  ◄────────────  Phase 5
 ### 7.6 阈值校准流程
 
 ```text
-Phase 0：测量基线（无知识层）
+Phase 0：测量基线（无知识层；mode=off）
    ↓
-设定初始阈值（本文档 §4.4 的默认值，仅作起步）
+设定初始探索值（本文档 §4.4 的默认值，仅用于管线联调；不得作为验收门槛）
    ↓
-Phase 1/2：shadow 与 on 模式实测
+Phase 1：shadow 实测 → 校准 α 与 Phase 1 门槛数值   [Gate: Phase1-shadow]
+   ↓
+Phase 2：on 模式实测 → 校准收益类阈值（含 M4）
    ↓
 用中位数 + 95% CI 校准阈值（写入 config 默认值）
    ↓
@@ -1131,6 +1144,9 @@ Phase 3–6：每 Phase 复测，阈值随真实分布更新
    ↓
 每季度重采样 golden set 与任务集，防止分布漂移
 ```
+
+> **2026-09-21 修订（Gate 可达性）**：原流程把 α 与 Phase 1 门槛数值的产出点写作 `Phase0-baseline`。但 α 是 shadow 覆盖率阈值，需要 `grep` 与索引的逐调用对比数据；Phase 0 是 `mode=off` 且知识层未接入任何进程——**该 Gate 结构性不可达，会自锁 Phase 1**。
+> 现明确：**Phase 0 只产出"无知识层"的基线数值与偏差警告；α 与 Phase 1 门槛数值的 Gate 是 `Phase1-shadow`**（ADR-0003 §10）。这与 §7.1"没有基线就不要写死阈值"不冲突——被推迟的是**阈值**，不是**口径**。
 
 ### 7.7 验收报告模板（每个 Phase 必须产出）
 
