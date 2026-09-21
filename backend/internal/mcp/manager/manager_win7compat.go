@@ -146,6 +146,10 @@ func (disabledManager) ListMCPs() []*config.MCPStatus { return nil }
 
 func (disabledManager) ReloadConfig() error { return errMCPDisabled }
 
+// StderrDiagnostics 实现 StderrDiagnosticsProvider：Win7 兼容构建下 MCP 整体
+// 禁用、不存在 stdio 子进程，恒返回空串。
+func (disabledManager) StderrDiagnostics(name string) string { return "" }
+
 // NewManager 创建管理器（Win7 兼容构建返回禁用实现）。
 func NewManager() Manager { return disabledManager{} }
 

@@ -30,6 +30,9 @@ var (
 	addDescription string
 	headers        []string
 	authType       string
+
+	// test-server 命令参数
+	testServerShowStderr bool
 )
 
 // MCPManager 全局 MCP 管理器实例
@@ -143,6 +146,8 @@ func MCPCommand() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		Run:   testServer,
 	}
+	testServerCmd.Flags().BoolVar(&testServerShowStderr, "show-stderr", false,
+		"显示 stdio 子进程 stderr 尾部（诊断启动失败或子进程噪声）")
 
 	// 重新加载配置
 	reloadCmd := &cobra.Command{
@@ -291,6 +296,8 @@ type mcpServerCommandResult struct {
 	Status  *config.MCPStatus `json:"status,omitempty"`
 	Tools   []mcpToolOutput   `json:"tools,omitempty"`
 	Success bool              `json:"success"`
+	// StderrTail 仅在 --show-stderr 时填充：stdio 子进程 stderr 尾部诊断。
+	StderrTail string `json:"stderr_tail,omitempty"`
 }
 
 type mcpCommandOptions struct {
@@ -416,7 +423,7 @@ func runMCPTestToolCommand(mcpName, toolName, jsonArg string) (*mcpToolCommandRe
 	}, nil
 }
 
-func runMCPTestServerCommand(name string) (*mcpServerCommandResult, error) {
+func runMCPTestServerCommand(name string, showStderr bool) (*mcpServerCommandResult, error) {
 	configPath := getMCPConfigPath()
 	if configPath == "" {
 		return nil, fmt.Errorf("找不到 MCP 配置文件")
@@ -441,6 +448,9 @@ func runMCPTestServerCommand(name string) (*mcpServerCommandResult, error) {
 		return nil, fmt.Errorf("加载配置失败: %w", err)
 	}
 	if err := testManager.Start(context.Background()); err != nil {
+		if tail := mcpStderrDiagnostics(testManager, name); showStderr && tail != "" && !strings.Contains(err.Error(), tail) {
+			return nil, fmt.Errorf("连接失败: %w\n%s", err, tail)
+		}
 		return nil, fmt.Errorf("连接失败: %w", err)
 	}
 	defer testManager.Stop()
@@ -464,12 +474,26 @@ func runMCPTestServerCommand(name string) (*mcpServerCommandResult, error) {
 	}
 	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
 
-	return &mcpServerCommandResult{
+	result := &mcpServerCommandResult{
 		Config:  mcpCfg,
 		Status:  status,
 		Tools:   tools,
 		Success: status != nil && status.Connected,
-	}, nil
+	}
+	if showStderr {
+		result.StderrTail = mcpStderrDiagnostics(testManager, name)
+	}
+	return result, nil
+}
+
+// mcpStderrDiagnostics 读取 manager 的可选 stdio 诊断能力（计划 §11.5）。
+// 不支持该能力时（Win7 兼容构建、测试替身）返回空串。
+func mcpStderrDiagnostics(mgr manager.Manager, name string) string {
+	provider, ok := mgr.(manager.StderrDiagnosticsProvider)
+	if !ok || provider == nil {
+		return ""
+	}
+	return strings.TrimSpace(provider.StderrDiagnostics(name))
 }
 
 func runMCPSetEnabledCommand(name string, enabled bool) (*mcpActionCommandResult, error) {
@@ -733,7 +757,7 @@ func removeMCP(cmd *cobra.Command, args []string) {
 func testServer(cmd *cobra.Command, args []string) {
 	withMCPCommand(cmd, func(options mcpCommandOptions) {
 		name := args[0]
-		payload, err := runMCPTestServerCommand(name)
+		payload, err := runMCPTestServerCommand(name, testServerShowStderr)
 		if err != nil {
 			exitCommandError("mcp", options.OutputFormat, err, map[string]interface{}{"subcommand": "test-server", "mcpName": name})
 		}
@@ -942,5 +966,13 @@ func renderMCPTestServerResult(name string, payload *mcpServerCommandResult, opt
 		}
 	} else {
 		fmt.Printf("  ❌ 连接失败\n")
+		if status != nil && strings.TrimSpace(status.LastError) != "" {
+			fmt.Printf("  错误: %s\n", status.LastError)
+		}
+	}
+	if strings.TrimSpace(payload.StderrTail) != "" {
+		fmt.Println("\nstderr 诊断:")
+		fmt.Println("─────────────────────────────────────────")
+		fmt.Println(payload.StderrTail)
 	}
 }

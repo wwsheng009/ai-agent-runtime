@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
@@ -215,6 +216,23 @@ func (m *mergedManager) GetMCPStatus(name string) (*config.MCPStatus, error) {
 	return nil, errors.New("mcp manager is nil")
 }
 
+// StderrDiagnostics 诊断查询：primary 有内容优先，其次 secondary（可选能力）。
+func (m *mergedManager) StderrDiagnostics(name string) string {
+	if m.primary != nil {
+		if provider, ok := m.primary.(StderrDiagnosticsProvider); ok && provider != nil {
+			if diag := strings.TrimSpace(provider.StderrDiagnostics(name)); diag != "" {
+				return diag
+			}
+		}
+	}
+	if m.secondary != nil {
+		if provider, ok := m.secondary.(StderrDiagnosticsProvider); ok && provider != nil {
+			return strings.TrimSpace(provider.StderrDiagnostics(name))
+		}
+	}
+	return ""
+}
+
 // ListMCPs 返回两边的状态并集（primary 优先，同名去重）。
 func (m *mergedManager) ListMCPs() []*config.MCPStatus {
 	if m.primary == nil {
@@ -329,4 +347,3 @@ func ownsMCP(mgr Manager, mcpName string) bool {
 	}
 	return false
 }
-

@@ -66,6 +66,8 @@ type StdioTransport struct {
 	cmd *exec.Cmd
 	// guard 是 stdio 进程树守卫（Windows: Job Object；Unix: 进程组）。
 	guard *executor.ProcessGuard
+	// stderr 是有界环形缓冲：连接失败时暴露子进程 stderr 尾部（计划 §5.3）。
+	stderr *stderrTailBuffer
 }
 
 // NewTransport 创建传输实例（兼容现有接口）
@@ -121,9 +123,10 @@ func (t *StdioTransport) AddLifecycleObserver(observer LifecycleObserver) {
 
 // ToMCPSdkTransport 转换为官方 SDK 的 CommandTransport
 func (t *StdioTransport) ToMCPSdkTransport(ctx context.Context) mcp.Transport {
-	// Windows 垫片（npx.cmd / uvx.cmd）需要 cmd.exe 包装后才能被 exec 执行。
-	command, args := resolveStdioCommand(t.cfg.Command, t.cfg.Args)
-	cmd, guard, guardErr := newStdioCommandGuard(ctx, command, args)
+	// Windows 垫片（npx.cmd / uvx.cmd）需要 cmd.exe 包装后才能被 exec 执行；
+	// 包装用的整条命令行由 resolveStdioCommand 拼好并经 SysProcAttr.CmdLine 下发。
+	rc := resolveStdioCommand(t.cfg.Command, t.cfg.Args)
+	cmd, guard, guardErr := newStdioCommandGuard(ctx, rc)
 	if guardErr != nil {
 		// 绑定失败只降级不阻断：仍然启动 server，但失去「父死子亡」兜底，
 		// 因此必须留下可见诊断（计划 §4.11）。
@@ -132,6 +135,12 @@ func (t *StdioTransport) ToMCPSdkTransport(ctx context.Context) mcp.Transport {
 			"error":  guardErr.Error(),
 		})
 	}
+
+	// 子进程 stderr 默认会被 os/exec 接到 null device（go-sdk 的 CommandTransport
+	// 不接管 Stderr），导致「进程没起来」时用户只看到 EOF。这里改接到有界环形
+	// 缓冲，连接失败时由 client 拼进错误信息（计划 §5.3）。
+	stderrTail := newStderrTailBuffer(stdioStderrTailLimit)
+	cmd.Stderr = stderrTail
 
 	// 设置工作目录
 	if t.cfg.WorkingDir != "" {
@@ -164,6 +173,7 @@ func (t *StdioTransport) ToMCPSdkTransport(ctx context.Context) mcp.Transport {
 	t.mu.Lock()
 	t.cmd = cmd
 	t.guard = guard
+	t.stderr = stderrTail
 	t.mu.Unlock()
 
 	inner := &mcp.CommandTransport{Command: cmd}

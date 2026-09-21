@@ -147,6 +147,7 @@ type manager struct {
 	generation  uint64
 	connecting  map[string]struct{}
 	pending     map[string]client.Client
+	lastStderr  map[string]string
 	mu          sync.RWMutex
 }
 
@@ -160,6 +161,7 @@ func NewManager() Manager {
 		observers:  make([]LifecycleObserver, 0),
 		connecting: make(map[string]struct{}),
 		pending:    make(map[string]client.Client),
+		lastStderr: make(map[string]string),
 	}
 }
 
@@ -343,6 +345,8 @@ func (m *manager) connectMCP(ctx context.Context, gen uint64, name string, mcpCf
 	connectErr := m.connectClient(ctx, cli, mcpCfg)
 	m.untrackPending(name, cli)
 	if connectErr != nil {
+		// 客户端随后会被 Close，先把 stdio 诊断留存下来供 --show-stderr 读取。
+		m.rememberStderrDiagnostics(name, cli)
 		_ = cli.Close()
 		m.recordConnectFailure(ctx, name, mcpCfg, connectErr)
 		return
@@ -360,6 +364,7 @@ func (m *manager) connectMCP(ctx context.Context, gen uint64, name string, mcpCf
 	status.LastConnect = time.Now()
 	status.LastError = ""
 	m.mu.Unlock()
+	m.clearStderrDiagnostics(name)
 
 	m.emitLifecycleEvent(ctx, "mcp.connected", name, map[string]interface{}{
 		"execution_mode": mcpCfg.ExecutionMode(),
@@ -602,6 +607,7 @@ func (m *manager) Stop() error {
 	pending := m.pending
 	m.clients = make(map[string]client.Client)
 	m.pending = make(map[string]client.Client)
+	m.lastStderr = make(map[string]string)
 	m.registry.Clear()
 	m.started = false
 	m.generation++
@@ -868,6 +874,7 @@ func (m *manager) ReloadConfig() error {
 	pending := m.pending
 	m.clients = make(map[string]client.Client)
 	m.pending = make(map[string]client.Client)
+	m.lastStderr = make(map[string]string)
 	m.registry.Clear()
 	wasStarted := m.started
 	m.started = false
@@ -1211,6 +1218,57 @@ func (m *manager) getClient(name string) client.Client {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.clients[name]
+}
+
+// StderrDiagnostics 返回指定 MCP 最近一次连接尝试的 stdio 子进程诊断（无则空串）。
+//
+// 实现 StderrDiagnosticsProvider（可选能力，不进入 Manager 接口，避免测试替身
+// 连锁改动）：优先读在线客户端，失败时回退到建连失败阶段留存的快照。
+func (m *manager) StderrDiagnostics(name string) string {
+	if m == nil {
+		return ""
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	if cli := m.getClient(name); cli != nil {
+		if diag := client.StderrDiagnosticsOf(cli); diag != "" {
+			return diag
+		}
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.lastStderr[name]
+}
+
+// rememberStderrDiagnostics 留存建连失败时的 stdio 诊断：客户端马上会被 Close，
+// 之后无法再从它读取。诊断为空时清除旧值，避免展示过期内容。
+func (m *manager) rememberStderrDiagnostics(name string, cli client.Client) {
+	if m == nil {
+		return
+	}
+	diag := client.StderrDiagnosticsOf(cli)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if diag == "" {
+		delete(m.lastStderr, name)
+		return
+	}
+	if m.lastStderr == nil {
+		m.lastStderr = make(map[string]string)
+	}
+	m.lastStderr[name] = diag
+}
+
+// clearStderrDiagnostics 在建连成功后清除历史失败诊断。
+func (m *manager) clearStderrDiagnostics(name string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.lastStderr, name)
 }
 
 func (m *manager) resolveHealthCheckConfig(mcpCfg *config.MCPConfig) *config.MCPHealthCheckConfig {
