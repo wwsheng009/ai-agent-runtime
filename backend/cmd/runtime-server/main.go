@@ -1620,16 +1620,21 @@ func resolveRuntimeMCPConfigResolution(cfg *config.Config) aiclipaths.MCPConfigR
 	if strings.TrimSpace(cfg.AICLI.MCP.ConfigFile) == "" {
 		return aiclipaths.MCPConfigResolution{}
 	}
-	resolution := aiclipaths.ResolveMCPConfigPathDetailed(cfg.AICLI.MCP.ConfigFile)
+	return applyMCPUserFallback(aiclipaths.ResolveMCPConfigPathDetailed(cfg.AICLI.MCP.ConfigFile))
+}
+
+// applyMCPUserFallback 在解析结果不存在时把模板约定默认值（相对 configs/mcp.yaml）
+// 改落用户级 ~/.aicli/mcp.yaml（由 admin 包自动创建），避免 runtime-server 在任意
+// 工作目录下生成 configs/mcp.yaml；其它非默认路径（含显式覆盖）按用户指定位置创建。
+//
+// 该规则不依赖文件系统层级，可脱离向上搜索单独验证。
+func applyMCPUserFallback(resolution aiclipaths.MCPConfigResolution) aiclipaths.MCPConfigResolution {
 	if resolution.Path == "" {
 		return resolution
 	}
 	if _, err := os.Stat(resolution.Path); err == nil {
 		return resolution
 	}
-	// 模板默认值（相对 configs/mcp.yaml）不代表用户显式指定位置：改落用户级目录，
-	// 避免 runtime-server 在任意工作目录下生成 configs/mcp.yaml；
-	// 其它非默认路径（含显式覆盖）按用户指定位置创建。
 	if !filepath.IsAbs(resolution.Path) && filepath.ToSlash(resolution.Path) == aiclipaths.DefaultMCPConfigRelativePath {
 		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
 			resolution.Path = filepath.Join(home, ".aicli", "mcp.yaml")

@@ -194,17 +194,10 @@ func TestResolveMCPConfigPathPrefersProjectThenUserAICLIDirs(t *testing.T) {
 	}
 }
 
-func TestResolveMCPConfigPathExpandsTildeAndFallsBackToPortableDefault(t *testing.T) {
+func TestResolveMCPConfigPathExpandsTildeToUserHome(t *testing.T) {
 	home := t.TempDir()
 	isolateHome(t, home)
-	emptyDir := t.TempDir()
-	t.Chdir(emptyDir)
-
-	// No .aicli candidate anywhere: the portable default is returned unchanged
-	// (never a bare "mcp.yaml" that only looks in the process working directory).
-	if got := ResolveMCPConfigPath(DefaultMCPConfigRelativePath); got != DefaultMCPConfigRelativePath {
-		t.Fatalf("portable fallback = %q, want %q", got, DefaultMCPConfigRelativePath)
-	}
+	t.Chdir(t.TempDir())
 
 	// Tilde values must expand to the user home instead of being passed through
 	// literally to the MCP loader.
@@ -217,6 +210,51 @@ func TestResolveMCPConfigPathExpandsTildeAndFallsBackToPortableDefault(t *testin
 	}
 	if got := ResolveMCPConfigPath("~/.aicli/" + DefaultMCPConfigFileName); got != tildeConfig {
 		t.Fatalf("tilde mcp config = %q, want %q", got, tildeConfig)
+	}
+}
+
+func TestResolveMCPConfigPathFallsBackToPortableDefault(t *testing.T) {
+	home := t.TempDir()
+	isolateHome(t, home)
+	emptyDir := t.TempDir()
+	t.Chdir(emptyDir)
+
+	// resolver 会从 cwd 逐级向上搜索（docs/aicli/install.md：每级先 .aicli/mcp.yaml，
+	// 再 configs/mcp.yaml）。开发机上 %TEMP% 位于用户主目录之下时，祖先链上真实的
+	// ~/.aicli/mcp.yaml 会先命中，此时不存在“任何候选都不存在”的前提 —— 这是环境
+	// 事实而非缺陷（干净环境如 CI 仍会执行下面的断言），跳过而不是误报失败。
+	if leaked := ancestorMCPConfigPath(emptyDir); leaked != "" {
+		t.Skipf("环境提供祖先 mcp.yaml：%s（向上搜索按文档命中），跳过 portable 兜底断言", leaked)
+	}
+
+	// No .aicli candidate anywhere: the portable default is returned unchanged
+	// (never a bare "mcp.yaml" that only looks in the process working directory).
+	if got := ResolveMCPConfigPath(DefaultMCPConfigRelativePath); got != DefaultMCPConfigRelativePath {
+		t.Fatalf("portable fallback = %q, want %q", got, DefaultMCPConfigRelativePath)
+	}
+}
+
+// ancestorMCPConfigPath 返回 dir 祖先链上第一个 mcp.yaml 候选（每级先 .aicli，
+// 再 configs，与 resolver 的向上搜索同序），用于识别测试环境自带的真实配置。
+func ancestorMCPConfigPath(dir string) string {
+	if absolute, err := filepath.Abs(dir); err == nil {
+		dir = absolute
+	}
+	for {
+		for _, relative := range []string{
+			filepath.Join(".aicli", DefaultMCPConfigFileName),
+			filepath.FromSlash(DefaultMCPConfigRelativePath),
+		} {
+			candidate := filepath.Join(dir, relative)
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+				return candidate
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
 	}
 }
 
