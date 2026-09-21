@@ -34,7 +34,9 @@
 5. ./.aicli/<name>         project 层（最高）
 ```
 
-`runtime.yaml` 有独立层栈（`RuntimeConfigLayerStack()`）：两份只读 portable（`configs/`、`backend/configs/`）→ user → project；portable 层只供默认值、永不接收写入。
+`runtime.yaml` 有独立层栈（`RuntimeConfigLayerStack()`）：`~/.aicli/runtime.yaml`（user）→ `./.aicli/runtime.yaml`（project，最高）。两层**合并**读取（`LoadMergedRuntimeConfigDocument`）：高层只覆盖其显式写的 key，低层其余设置保留；生效来源 = 最高存在层，写回落在最高可写层（全新安装创建 user 层）。
+
+`configs/runtime.yaml` / `backend/configs/runtime.yaml` 是**开发目录布局，不再是隐式配置层**：CLI 解析顺序为「显式非约定覆盖 → `./.aicli/runtime.yaml` → `~/.aicli/runtime.yaml` → 空」，空表示使用内置默认值且不告警。只有调用方显式传入该文件时才读取（例如 runtime-server 的 `--config`）；旧模板里遗留的这两个约定值会被识别并忽略，不会报"未找到配置文件"。
 
 ### `.env` 发现（`bootstrap.go`）
 

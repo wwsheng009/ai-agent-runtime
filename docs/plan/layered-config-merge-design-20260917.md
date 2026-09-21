@@ -40,7 +40,7 @@
 非目标（v1 明确不做）：
 
 - **N1 列表不做元素级合并**：所有 slice 按"整表替换"处理（与现有 `mergeMergeMaps` 一致），不做 append / merge-by-key。理由：顺序与身份语义不明确，易产生"删不掉的值"。
-- **N2 不改 `runtime.yaml` / `mcp.yaml` 语义**：v1 只覆盖 `config.yaml`；`runtime.yaml` 已在 P2-7 按同一套层模型接入（只读 portable 层 + 用户/项目可写层），`mcp.yaml` 仍待 P2。
+- **N2 不改 `runtime.yaml` / `mcp.yaml` 语义**：v1 只覆盖 `config.yaml`；`runtime.yaml` 已在 P2-7 按同一套层模型接入（**2026-09-21 修订**：层栈只含用户层 < 项目层；开发仓库布局 `configs/runtime.yaml` / `backend/configs/runtime.yaml` 不再是隐式层），`mcp.yaml` 仍待 P2。
 - **N3 不改环境变量契约**：`${VAR:-default}` 仍在**解码前**展开（`config.go:1034` → `expandEnvVars` `config.go:1093-1108`），写回仍保留字面量（`provider_persistence_test.go:226,246,257` 已断言）。
 - **N4 不引入新依赖**：仓库当前无 viper / koanf / mapstructure（结构体上的 `mapstructure:"..."` 标签是惰性的，无解码器消费），本设计沿用 `gopkg.in/yaml.v3` + 现有合并函数。
 
@@ -191,11 +191,12 @@
 **P2**
 
 7. ✅ `runtime.yaml` 同构接入（2026-09-17 完成）：
-   - 层栈 `agentconfig.RuntimeConfigLayerStack()`：`configs/runtime.yaml` / `backend/configs/runtime.yaml`（**只读** portable，仅开发仓库存在）< `$HOME/.aicli/runtime.yaml`（user）< `./.aicli/runtime.yaml`（project）。
-   - 合并读取：`LoadMergedRuntimeConfigDocument()`（复用 `loadLayeredDocumentFor`，与 config.yaml 同一套 origins/layers 元数据）；runtime-server 启动经 `loadRuntimeServerManager()` 注入合并文档（`RuntimeManager.LoadDocument`），无任何层存在时回落内置默认并把路径指向用户级写入目标。
-   - 按层写回：`ApplyDocumentPathChange`；只读 portable 层永不写入（新键/只读来源改道可写层），首次写入自动创建 `$HOME/.aicli`。`agent.maxSteps` 的读写已切换到分层版 persister/reader。
-   - 接口：`ConfigDocumentLayer` 增加 `read_only`；`GET/PUT /api/runtime/config/agent/max-steps` 返回 `layers`（候选栈快照）；前端在该卡片渲染层栈（`layerSummary/layerReadOnly/layerWritable/layerCandidate`，zh/en）。
-   - 测试：`agentconfig/config_runtime_layers_test.go`（只读层归因、写用户层且 portable 零改动、全新安装落用户级）、`runtimeserver/runtime_config_layers_test.go`（provider 快照、persister 端到端、幂等不重写）、`api/skills/agent_max_steps_test.go`（layers 字段）、`cmd/runtime-server/runtime_manager_layered_test.go`（启动接线）、前端卡片测试（层栈文案）。
+   - 层栈 `agentconfig.RuntimeConfigLayerStack()`：`$HOME/.aicli/runtime.yaml`（user）< `./.aicli/runtime.yaml`（project）。
+     **2026-09-21 修订**：原设计把 `configs/runtime.yaml` / `backend/configs/runtime.yaml` 当作「只读 portable 层」纳入栈；实测该目录是**开发仓库布局**，会让 dev checkout 隐式驱动用户进程，故已移出层栈——这两个路径只在调用方**显式传入**时读取（如 `runtime-server --config backend/configs/runtime.yaml`），且 `config.yaml` 里遗留的同名字面值被识别为「约定值」而非「用户配置的文件缺失」，不再产生告警。
+   - 合并读取：`LoadMergedRuntimeConfigDocument()`（复用 `loadLayeredDocumentFor`，与 config.yaml 同一套 origins/layers 元数据）；runtime-server 启动经 `loadRuntimeServerManager()` 注入合并文档（`RuntimeManager.LoadDocument`），无任何层存在时回落内置默认（`RuntimeManager.Load()` 对空路径直接返回默认值，不报错）。
+   - 按层写回：`ApplyDocumentPathChange`；新键与无来源的写改道 `RuntimeConfigWriteTarget()`（= 最高存在的可写层，一层都没有时用用户级 `$HOME/.aicli/runtime.yaml`，首次写入自动创建该目录）。`agent.maxSteps` 的读写已切换到分层版 persister/reader。
+   - 接口：`ConfigDocumentLayer` 保留 `read_only`（层契约字段；runtime.yaml 当前两层都不置位）；`GET/PUT /api/runtime/config/agent/max-steps` 返回 `layers`（候选栈快照）；前端在该卡片渲染层栈（`layerSummary/layerReadOnly/layerWritable/layerCandidate`，zh/en）。
+   - 测试：`agentconfig/config_runtime_layers_test.go`（写用户层、全新安装落用户级）、`runtimeserver/runtime_config_layers_test.go`（provider 快照、persister 端到端、幂等不重写、**栈中不含开发目录**）、`cmd/runtime-server/main_test.go`（`TestNormalizeSkillsRuntimeConfigIgnoresDevelopmentLayout`：仓库布局不是隐式来源、用户层存在时仍被解析）、`runtimeserver/config_document_runtime_test.go`（热加载同样忽略开发布局）、`api/skills/agent_max_steps_test.go`（layers 字段）、`cmd/runtime-server/runtime_manager_layered_test.go`（启动接线）、前端卡片测试（层栈文案）。
    - 仍待 P2：`mcp.yaml` 同构（清单类字段需单独迁移说明，见 Q4/D5）。
 8. `aicli config doctor`：打印层栈、每个键来源、被覆盖值清单。
 9. 前端：来源徽标 + 冲突提示 + "提升到项目级"显式操作。
@@ -246,7 +247,7 @@
 | D4 | 新建配置落点 | 用户级 `~/.aicli/config.yaml`；项目级由 `aicli init --project` 显式创建 | 与 `EnsureStarterConfigFile` 收敛；避免在任意目录就地生成配置 | 已定稿，P1 实施 |
 | D5 | 是否扩展到 `runtime.yaml` / `mcp.yaml` | 本轮不做，留 P2 | 清单类字段语义与 MCP 遮蔽直觉不同，需单独迁移说明 | 已定稿（不在本轮范围） |
 
-> **开启 `on` 的门槛（2026-09-17 更新）**：CLI 与 runtime-server 的读取与写回均已按层分摊，`on` 在两条链路上语义一致，可按 §10 的灰度范围开启。开启前请确认以下已知缺口可接受：① 批量 provider 删除/启用只覆盖优先级最高的一层（其余层条目报 `NotFound`，安全但不完整）；② 目标层文件按 map 级改写，注释/键序不保证保留（未改动文件不受影响）；③ 分层模式下快照不参与读写；④ 热加载 diff 现已带层归因（`ConfigDocumentRuntimeImpact.PathLayers`）；⑤ `runtime.yaml` 的 portable 层只读——开发态编辑 `agent.maxSteps` 会写入用户级文件而非仓库文件（预期行为）；`on` 下建议先跑 `dry-run` 观测一个周期再全量。
+> **开启 `on` 的门槛（2026-09-17 更新，2026-09-21 修订层栈口径）**：CLI 与 runtime-server 的读取与写回均已按层分摊，`on` 在两条链路上语义一致，可按 §10 的灰度范围开启。开启前请确认以下已知缺口可接受：① 批量 provider 删除/启用只覆盖优先级最高的一层（其余层条目报 `NotFound`，安全但不完整）；② 目标层文件按 map 级改写，注释/键序不保证保留（未改动文件不受影响）；③ 分层模式下快照不参与读写；④ 热加载 diff 现已带层归因（`ConfigDocumentRuntimeImpact.PathLayers`）；⑤ `runtime.yaml` 已无「开发仓库 portable 层」（2026-09-21 修订）：`configs/runtime.yaml` / `backend/configs/runtime.yaml` 仅在显式传入时读取，默认只读用户层与项目层——开发态编辑 `agent.maxSteps` 会写入用户级文件而非仓库文件（预期行为）；`on` 下建议先跑 `dry-run` 观测一个周期再全量。
 
 ---
 
@@ -278,7 +279,7 @@
 |------|----------|--------------|------|
 | `config.yaml` | `InitGlobalConfig`（`config.go:1022`）+ `yaml.v3` | 解码前，自研 `expandEnvVars`（`config.go:1093`） | 本设计 P0 目标 |
 | `config.yaml`（runtime-server） | `LoadRuntimeAgentConfig`（`internal/runtimeserver/config_snapshot.go:30`）→ `loadEffectiveConfigDocument`（`config_effective_document.go:18`） | 解码前，`expandConfigDocumentEnvVars`（`config_document.go:438-451`） | 同一文件、第二条实现路径，层栈必须与 CLI 对齐 |
-| `runtime.yaml`（skills_runtime） | `agentconfig.LoadMergedRuntimeConfigDocument`（分层，P2-7 已实施）→ `RuntimeManager.LoadDocument` | 解码前（层内展开，复用 bootstrap 的 `expandEnvVars`） | 只读 portable 层 + 用户/项目可写层；写回走 `ApplyDocumentPathChange`（只读层改道） |
+| `runtime.yaml`（skills_runtime） | `agentconfig.LoadMergedRuntimeConfigDocument`（分层，P2-7 已实施）→ `RuntimeManager.LoadDocument` | 解码前（层内展开，复用 bootstrap 的 `expandEnvVars`） | 用户层 < 项目层两层合并（2026-09-21 修订：开发仓库的 `configs/runtime.yaml` 仅显式传入时读取）；写回走 `ApplyDocumentPathChange`，新键改道最高可写层（`RuntimeConfigWriteTarget`） |
 | `mcp.yaml` | `internal/mcp/config/loader.go:63,121-134`：先解码、后**字段级** `os.ExpandEnv` | 字段级 | 与 bootstrap 语义不同，P2 需单独说明（见 Q4） |
 | `presets.yaml` | `preset.go:170/195/209` | 解码前 | 已在分层内（L0），无需改动 |
 
