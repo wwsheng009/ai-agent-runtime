@@ -114,3 +114,5 @@ terminal-output-inventory.json
 .build_*
 .kb_*
 .tmp*
+backend/runtime-server.exe.bak-*
+/data/
