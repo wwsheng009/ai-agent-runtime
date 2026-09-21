@@ -3,7 +3,7 @@
 - **Status**: Proposed
 - **Date**: 2026-09-20
 - **Deciders**: 项目 owner
-- **Gate**: `Phase1-start`（口径）/ `Phase0-baseline`（阈值）
+- **Gate**: `Phase1-start`（口径）/ **`Phase1-shadow`**（阈值：α 与 Phase 1 门槛数值，2026-09-21 由 `Phase0-baseline` 改，见 §10）
 - **Reversibility**: cheap（仅测量，不改产品行为）
 - **Supersedes**: `supplement/05` §9.3 的"分母定义"提问
 - **Related**: `backend/internal/usageledger/sqlite_store.go` L193–222；`04` §7.6、§7.1、§7.2；`supplement/05` §1.4
@@ -66,7 +66,8 @@ shadow 差异率的观测单元是**一次代码检索工具调用**（`grep` / 
 这个问题**混合了两件不同的事**：
 
 1. **度量口径**（instrument）——现在就能定，且必须现在定，否则 Phase 0 收集的数据不可比。
-2. **阈值**（threshold）——**现在不能定**，必须等 Phase 0 基线（`04` §7.6）。
+2. **阈值**（threshold）——**现在不能定**，必须等基线数据（`04` §7.6）。
+   > 2026-09-21 修订：原文写"等 Phase 0 基线"。但 α 需要 **shadow 对比数据**，而 Phase 0 是 `mode=off`——该 Gate 结构性不可达。产出 Gate 改为 `Phase1-shadow`，见 §10。
 
 把它们混在一个"待裁决"里，会导致两种失败：
 要么草率定了阈值（违反 `04` §7.6），要么因为阈值不能定而连口径也不定（Phase 0 白跑）。
@@ -82,7 +83,7 @@ shadow 差异率的观测单元是**一次代码检索工具调用**（`grep` / 
 | D1 | 口径必须可复算 | 给定同一批调用记录，任何人算出同一个数 |
 | D2 | 必须有明确分母，且分母排除无真值样本 | 零结果调用不计入主指标，单独计数 |
 | D3 | 不得污染既有 token 统计 | `token_usage_history` 行数与语义不变 |
-| D4 | 阈值不得现在写死 | 主指标阈值标注为 Phase 0 产出 |
+| D4 | 阈值不得现在写死 | 主指标阈值标注为**由基线数据产出**（Gate = `Phase1-shadow`，见 §10） |
 | D5 | 不得存储用户查询明文 | 只存 hash |
 | D6 | 必须能定位"索引在哪种查询上失败" | 记录 tool / project / source 维度 |
 | D7 | 扩展方式必须符合既有代码习惯 | 追加到 `init()` 的 statements 列表 |
@@ -158,7 +159,11 @@ CREATE INDEX IF NOT EXISTS idx_exploration_attribution_tool_time
 ```
 
 - 追加到既有 `statements` 切片，复用 `CREATE TABLE IF NOT EXISTS` 幂等语义（D7）。
-- `token_usage_history` **一列不改、一行不变**（D3）。
+- **D3 的准确含义（2026-09-21 修订）**：不得**污染** `token_usage_history` 的既有统计口径。可检验形式为三条同时成立：
+  1. **不新增行**——本表数据不得以任何形式写入 `token_usage_history`（这是 §3.1 选项 B 被否决的实质原因）；
+  2. **不改变既有聚合结果**——对既有列的任意 `SUM` / `COUNT` / `AVG`，在追加列前后结果一致；
+  3. **不改变历史行语义**——追加列必须可空或带非破坏 `DEFAULT`，历史行取默认值即等价于改动前。
+  > 原措辞"`token_usage_history` 一列不改、一行不变"是**字面**约束，与 Phase 0 交付 2 已实现的 `ALTER TABLE … ADD COLUMN`（9 列，`INTEGER NOT NULL DEFAULT 0`，见 `backend/internal/usageledger/sqlite_store.go` L257–290）冲突。按上述三条，该实现**满足** D3 的实质要求（请求级粒度、历史行语义不变、`mode=off` 时新列恒为 0）。本次修订是**把 D3 写成它本来的意思**，不是放宽它。
 
 ### 4.2 判定规则
 
@@ -170,8 +175,9 @@ economy  := candidate_tokens / baseline_tokens
 usable   := (coverage >= α) AND (economy <= 1.0)
 ```
 
-- **α 不在本 ADR 决定。** α 是 Phase 0 的产出（D4）。
-  初始探索值 0.8，仅用于 Phase 0 跑通管线，**不得作为验收门槛**。
+- **α 不在本 ADR 决定。** α 由 **Phase 1 shadow 实测**产出（D4）。
+  初始探索值 0.8，仅用于管线联调，**不得作为验收门槛**。
+  > 2026-09-21 修订：原写"α 是 Phase 0 的产出"。α 是 shadow 覆盖率阈值，需要 `grep` vs 索引的**逐调用对比数据**；Phase 0 为 `mode=off` 且知识层未接入任何进程，**结构上不可能产出该数据**。产出 Gate 改为 `Phase1-shadow`，见 §10。
 
 ### 4.3 拦截范围（明确边界）
 
@@ -217,7 +223,7 @@ usable   := (coverage >= α) AND (economy <= 1.0)
 - **D1/D7**：口径完全由列定义决定，任意人可复算；扩展方式就是往 `init()` 的切片里加一条，与既有代码完全一致。
 - **D2**：零结果调用没有真值——把"索引返回空"和"grep 也没找到"混在一起，会让一个完全失效的索引看起来命中率很高。因此显式排除并单独计数。
 - **D3**：选项 B 被否决的**真实缺陷**不只是"不优雅"：`token_usage_history` 是 `04` §7.2 收益指标的**输入表**，往里塞工具调用行会让"M4 token 收益"的分子分母同时失真。这是**测量污染**，比多一张表贵得多。
-- **D4**：α 与门槛显式标注为 Phase 0 产出。这是本 ADR 与 `04` §7.6 的一致性要求。
+- **D4**：α 与门槛显式标注为**由基线数据产出**、不写死。这是本 ADR 与 `04` §7.6 的一致性要求。（2026-09-21：产出 Gate 由 `Phase0-baseline` 修正为 `Phase1-shadow`，理由见 §10。）
 - **D5**：`query_hash` 取代明文。
 - **D6**：`tool` / `project_id` / `source` 三维可下钻，直接回答"索引在哪种查询上失败"。
 - **D8**：选项"只看 token"被否决的**真实缺陷**是它可以被"返回空结果"刷到最优——经济性必须与覆盖度同时成立才有意义。这正是 §4.2 用 AND 而不是加权和的原因：加权和会让"极便宜但漏一半"和"完整但略贵"得到相近分数，掩盖两种完全不同的失败。
@@ -233,7 +239,7 @@ usable   := (coverage >= α) AND (economy <= 1.0)
 
 ### 6.1 Positive
 
-- Phase 0 一跑完即可算 M1–M4，无需返工。
+- 表与口径在 Phase 0 落地（DDL + 埋点骨架），Phase 1 shadow 一开始产生数据即可算 M1–M4，无需返工。
 - 定位能力：可直接查询"哪个 tool / 哪个 project / 哪种 source 下 coverage 最低"。
 - 与 `04` §7.6 的校准流程天然衔接。
 - 零 schema 迁移风险（追加 `IF NOT EXISTS`）。
@@ -260,7 +266,7 @@ usable   := (coverage >= α) AND (economy <= 1.0)
 | 检查 | 形式 | 门槛 |
 |---|---|---|
 | 可复算 | 同一批记录重算 M1–M4，结果一致 | 必须通过 |
-| 不污染 | `token_usage_history` 行数与 `04` §7.2 口径不变 | 必须通过 |
+| 不污染 | `token_usage_history` **行数不变**，且既有列的 `SUM` / `COUNT` 与追加列前一致（D3 三条，见 §4.1） | 必须通过 |
 | 零结果排除 | 构造 `baseline_n = 0` 样本，确认不进 M1 分母 | 必须通过 |
 | 无明文 | 全表扫描确认无 pattern 原文 | 必须通过 |
 | 幂等 | 重复 init 不报错、不重复建表 | 必须通过 |
@@ -288,9 +294,16 @@ usable   := (coverage >= α) AND (economy <= 1.0)
 
 | 项 | Gate |
 |---|---|
-| α 的取值与 Phase 1 门槛数值 | `Phase0-baseline` |
-| `coverage` 低估问题的抽样核对报告 | `Phase0-baseline` |
+| α 的取值与 Phase 1 门槛数值 | **`Phase1-shadow`**（2026-09-21 由 `Phase0-baseline` 改，见下） |
+| `coverage` 低估问题的**警告写入 Phase 0 报告** | `Phase0-baseline`（**已完成**，见 `reports/phase0_baseline_report.md` §7） |
+| `coverage` 低估问题的**抽样核对报告**（`candidate_n < baseline_n` 样本人工核对） | `Phase1-shadow`（Phase 0 无 shadow 数据，无法抽样） |
 | `view` 区间与 chunk 边界的对齐精度 | `Phase1-start` |
 | 是否需要 `per-file` / `per-symbol` 归因层 | `Phase2-start` |
 | 是否把本表提升为正式 analytics schema | `Phase3-start` |
 | 与 `docs/plan/session-usage-analytics-and-agent-diagnostics-plan.md` 的字段对齐 | `Phase1-start` |
+
+**Gate 变更说明（2026-09-21）**：原 Gate `Phase0-baseline` 被理解为"Phase 0 基线跑完即可定 α"。但 α 是 **shadow 覆盖率阈值**，其取值必须由 `grep` 与索引的**逐调用对比数据**校准；而 Phase 0 是 `mode=off`，且知识层此前未接入任何进程（`04` §5 Phase 1 交付 6 于同日补入）。后果是：
+
+- Phase 0 **结构上不可能**产出 α → 原 Gate 永远无法满足 → 本 ADR 无法 Accept → **Phase 1 被自锁**。
+- 现拆为两个 Gate：`Phase0-baseline` 负责**基线与偏差警告**（可达成，已完成）；`Phase1-shadow` 负责 **α 与门槛数值**（shadow 数据积累后达成）。
+- 因此**本 ADR 的 Accept 不再被阈值阻塞**：口径部分按 `Phase1-start` 生效，阈值部分显式标注为 `Phase1-shadow` 产出——这与 §4.2"α 不在本 ADR 决定"完全一致。

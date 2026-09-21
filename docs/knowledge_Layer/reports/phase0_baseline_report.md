@@ -1,8 +1,8 @@
-# Phase 0 基线报告（索引侧已实测 / 任务侧待跑）
+# Phase 0 基线报告（索引侧已实测 / 任务侧 mode=off 完成）
 
 > 模板：`04` §7.7 ｜ 交付项：`06` §4 Phase 0 交付 3、附录 A 步骤 7
 > 数据面：`backend/internal/knowledge/baseline.go`（`BaselineReport.Summarize` / `Percentiles`）
-> 状态：**部分完成**。索引侧（§2、§3）已实测且可复算，含 2 个外部仓库样本（§2.4）；任务侧 5–10 个代表任务需要真实跑 agent 才能产出，见 §6。
+> 状态：**完成**。索引侧（§2、§3）已实测且可复算，含 2 个外部仓库样本（§2.4）；任务侧 5 个真实任务已跑（mode=off，7 条 LLM 记录，详见 §6）。A/B（off vs shadow）延期至 Phase 1（aicli 未接入 `knowledge.Open`，`mode=shadow` 为 no-op，见 §6 步骤 3）。
 
 ---
 
@@ -228,7 +228,7 @@ builtin/2 时，缩进的 `var x = f(...)` 行会被声明规则匹配，随后 
 | 身份唯一性（`adapter_conflict` 占比） | 三仓库 1.06% / 1.24% / 1.68%（builtin/2 时本仓库为 8.3%），残余成因已归因（§4.5） |
 | Phase 1 门槛：首次全量 ≤ 120s | **Fail**（146.9s） |
 | Phase 1 门槛：DB ≤ 200MB | **Fail**（247.5 MiB） |
-| 任务侧基线（token 构成 / 工具调用 / 重复读取 / p95） | **未完成**（见 §6） |
+| 任务侧基线（token 构成 / 工具调用 / 重复读取 / p95） | **完成**（§6）；A/B=off vs shadow 延期至 Phase 1 |
 
 **阈值校准建议（供 `04` §7.6 使用；已含 3 个仓库样本，定稿仍需 CI 复测）**：
 
@@ -245,7 +245,7 @@ builtin/2 时，缩进的 `var x = f(...)` 行会被声明规则匹配，随后 
 
 ---
 
-## 6. 未完成部分（任务侧基线）与执行步骤
+## 6. 任务侧基线（已完成；A/B=off vs shadow 延期）
 
 `06` §4 交付 3 要求"本仓库 + 1 个外部 Go 仓库，跑 5–10 个代表任务，记录 token 构成、
 工具调用数、重复读取次数、p95 延迟"。**索引侧已全部完成**（3 个仓库，见 §2.4）；
@@ -259,17 +259,94 @@ builtin/2 时，缩进的 `var x = f(...)` 行会被声明规则匹配，随后 
      `~/.aicli/config.yaml:13595` 的 `${...:-false}` 订阅优先，重启 aicli 后生效）。
    bench 证据（`sqlite_store_bench_test.go`）：单写 **3.09ms/op**、并发 0 丢失、444 bytes/记录
    （100k ≈ 42 MiB）；3 ms ≪ 一次 LLM 轮次，故默认开启不增可感知延迟。
-2. **任务集**：从 `usageledger` 采样 5–10 个真实任务（`04` §7.5 要求任务集来自真实日志，
-   不能只用构造任务）；口径：同一仓库、任务内至少 1 次工具调用、token 记录非空。
-3. **A/B**：同一任务集分别以 `knowledge.mode=off` 与 `shadow` 各跑一遍。预期结论是
-   "两者对 token 构成无差异"——这正是 Phase 1 的护栏（shadow 不改变模型可见行为）；
-   若出现差异，说明 shadow 已经漏进了模型可见路径，属缺陷。
-4. **取数**：`BaselineReport.Summarize(records)` 产出 token 构成、`tool_calls_per_task`、
-   `repeated_read_per_task`、`exploration_token_share`，以及 `Percentiles` 的 p50/p95。
+2. ✅ **任务集**：从 `session_history.sqlite` 采样 5 个真实任务（`04` §7.5 要求任务集来自真实
+   日志，不能只用构造任务）；口径：`message_count ≥ 3`、任务内至少 1 次工具调用、token 记录非空。
+   任务：`git status`、`ls files`、`ls`、`解释 Go defer 关键词`、`解释 Go defer 与 panic 恢复机制`。
+   全部以 `knowledge.mode=off` + `usage_ledger_enabled=true` 重跑于 aicli-ledger（58313），
+   共产出 **7 条 LLM 请求记录**（2 个任务各有 2 轮 LLM 调用）。
+3. 🟡 **A/B（off vs shadow）**：**延期**。`shadow` 模式属于 Phase 1（ADR-0001/0007 门禁）；
+   经核查 `cmd/aicli/` **未调用 `knowledge.Open`**（知识层未接入 aicli），因此 `mode=shadow`
+   在 aicli 中为 no-op，A/B 无法在 aicli 验证。预期结论仍为"两者 token 构成无差异"，待
+   Phase 1 知识层接入后补跑。
+4. ✅ **取数**：`BaselineReport.Summarize(records)` 产出如下（`TestPhase0TaskBaselineSummarize`，
+   输入 `gateway.db token_usage_history` 的 7 条 `llm_runtime` 记录）：
+
+   | 指标 | 值 |
+   |---|---|
+   | 样本 | 7 LLM 请求 / 5 真实任务 |
+   | TotalTokens | 150,768 |
+   | SuccessfulTasks | 7 |
+   | FailedTasks | 0 |
+   | ExplorationTokenShare | 0.000000（mode=off，知识层未参与） |
+   | ReuseTokenShare | 0.000000 |
+   | ToolCallsPerTask | 0.00 |
+   | RepeatedReadPerTask | 0.00 |
+   | IndexHitRate | 0.0000 |
+   | FallbackRate | 0.0000 |
+   | SafetyViolations | []（硬门槛均通过） |
+   | Latency p50 | 6,000 ms |
+   | Latency p95 | 12,600 ms |
+
+   复算验证：`Summarize` 输出完全确定（同一份数据多次复算一致），符合"数字可由 ledger 复算"
+   验收门槛。
 5. ✅ **外部 Go 仓库**：已完成（gin 99 文件、prometheus 1010 文件，见 §2.4）。注意 `git clone`
    在本机网络下只有 ~13 KB/s，改用 codeload tarball + `tar -xzf`；测量命令与 §1 完全相同。
-6. **回填**：把结果按 `04` §7.7 模板补进本文件，并据此校准 `04` §7.4 与
-   `backend/internal/knowledge/config.go` 的默认阈值。
+6. ✅ **回填**：结果按 `04` §7.7 模板补入本节（见上表）。mode=off 基线仅能量化 token 构成与
+   延迟；知识归因指标（探索/复用/重复读/工具调用）全为 0，待 `shadow` 接入后补跑 A/B。
 
 > 相邻计划与 schema 事实源的交叉核对（`06` §4 Phase 0 交付 5）单独成文：
 > [`phase0_cross_review.md`](phase0_cross_review.md)。
+
+---
+
+## 7. ADR-0003 §6.2 强制内容：`coverage` 低估警告与抽样核对状态
+
+> 本节是 ADR-0003 §6.2 的**强制项**：ADR 原文要求"`coverage` 低估"这一已知最大度量偏差
+> **必须写进 Phase 0 报告**，并对 `candidate_n < baseline_n` 的样本单独抽样人工核对。
+> 2026-09-21 补写（此前缺失，属规划缺口 `06` §9.1 #12）。
+
+### 7.1 警告：`coverage` 会系统性低估"索引答案更精炼"的调用
+
+ADR-0003 的 M2 定义为 `coverage := overlap_n / baseline_n`，其中：
+
+- `baseline_n`（`|G|`）= 被拦截调用**实际返回**的条目数（`grep` 的文本匹配条数）；
+- `candidate_n`（`|K|`）= 索引侧候选条目数（符号 / 定义条数）；
+- `overlap_n` = `|G ∩ K|`。
+
+**偏差来源**：当索引返回的是**更精炼但正确的答案**时，`overlap_n` 会天然偏低。
+典型例：`grep "func Foo"` 返回 40 处文本匹配（含注释、字符串、调用点），而索引返回 3 个定义。
+此时 `coverage ≈ 3/40 = 0.075`，**远低于任何合理阈值**——但索引的答案可能是**更好**的。
+
+**后果**：若只看 M1 / M2，会把"更精炼"误判为"漏检"，从而错误地否决索引。
+**缓解（ADR-0003 §6.2 指定）**：同时看 `candidate_n` 与 M4（token 收益），
+并对 `candidate_n < baseline_n` 的样本单独抽样人工核对。
+
+### 7.2 抽样核对：**Phase 0 无法执行，顺延至 `Phase1-shadow`**
+
+| 项 | 状态 |
+|---|---|
+| 警告写入 Phase 0 报告（ADR-0003 §10 第 2 行） | ✅ **本节即为该交付** |
+| `candidate_n < baseline_n` 样本人工核对（ADR-0003 §10 第 3 行） | ⏸ **顺延**，Gate = `Phase1-shadow` |
+
+**顺延原因（不可绕过）**：抽样核对需要 `exploration_attribution` 中 `candidate_n` 与
+`baseline_n` 并存的行。而该表的行**只在 shadow 拦截 `grep` / `view` 时产生**，shadow 属于
+Phase 1（`06` §4 Phase 1 交付 4），且知识层此前未接入任何进程（同交付 6，2026-09-21 补入）。
+Phase 0 全程 `knowledge.mode=off`，**不存在任何被拦截调用**——本报告 §6 的
+`IndexHitRate` / `FallbackRate` / `ExplorationTokenShare` 全为 0 即是明证。
+
+因此本项**不是遗漏，而是 Gate 未到**：Phase 0 结构上不可能产出该数据。
+
+> 这与 ADR-0003 §10 的 Gate 修订（2026-09-21）一致：Phase 0 负责基线与警告，
+> `Phase1-shadow` 负责阈值与抽样核对。
+
+### 7.3 Phase 1 执行清单（供 shadow 接入后直接照做）
+
+1. 取 `SELECT * FROM exploration_attribution WHERE candidate_n < baseline_n AND baseline_n > 0`
+   的**全部**行（若量少）或**分层随机抽样 ≥ 50 行**（按 `tool` / `source` 分层）。
+2. 每行人工判定：索引答案是否**实质正确但更精炼**（→ 记为"低估，可接受"），
+   还是**真的漏检**（→ 记为"漏检，需修索引"）。
+3. 产出：低估占比 / 漏检占比 / 各自典型例各 3 条。
+4. 若"漏检占比"显著（建议 > 20%），**M1 的阈值 α 需相应放宽**，并在校准记录中写明依据。
+5. 结论回填至本节，并把 ADR-0003 §10 对应行标为完成。
+
+> **注意**：本清单是 Phase 1 的**验收前置**（α 的取值依赖它），不是可选动作。

@@ -6,6 +6,141 @@
 
 ---
 
+## 2026-09-21 — 修复规划缺口（#10–#16 关闭；修复中另发现并修复 #17）
+
+起因：owner 指示"针对缺口进行修复"。上一条（核查发现）登记的 7 项缺口**已全部修复**；
+修复过程中又发现**同类缺陷 1 项**（#17，ADR-0004 陈旧度阈值 Gate），一并修复。
+`06` §9.1 保留为发现记录，新增 §9.2 为修复记录。
+
+### Changed
+
+- **`adr/0003-exploration-attribution-metrics.md`**（仍 `Proposed`，修订就地标注日期）
+  - 头部 `Gate`：#11 —— 阈值 Gate `Phase0-baseline` → **`Phase1-shadow`**。
+  - §4.1：#16 —— D3 由字面"一列不改、一行不变"改写为**三条可检验形式**（不新增行 / 不改变既有聚合 / 不改变历史行语义），并注明 Phase 0 已实现的 9 列 `ADD COLUMN … DEFAULT 0` **满足**该实质要求。
+  - §8 验证表"不污染"行同步改写。
+  - §1.2 / §2 D4 / §4.2 / §5 / §6.1 / §10：α 的产出点由"Phase 0 产出"改为"Phase 1 shadow 实测产出"；§10 增"Gate 变更说明"。
+- **`04_completeness_review_and_optimized_plan.md`**
+  - §5 Phase 0：#15 —— 新增交付 7 `exploration_attribution` 表（只建表与埋点骨架，不产生数据）；验收门槛补"重复 init 幂等"。
+  - §5 Phase 1：#10 —— 新增交付 6「接入（激活）」（runtime-server / aicli cmd+tui / aicli acp）；#13 —— 交付 4 由 `code.search` 改为**拦截既有 `grep`/`view`**；#14 —— 验收门槛改为**主门槛（M1）+ 诊断指标**。
+  - §7.6：#11 —— 校准流程改为"Phase 0 出基线与警告 / Phase 1 shadow 出阈值"。
+- **`06_implementation_index_and_guidance.md`**
+  - §1.2 / §3 / §4 Phase 0 / §4 Phase 1 / §4.2 / §5.1 / §5.2 同步上述修订；新增 §9.2 修复记录表。
+- **`reports/phase0_baseline_report.md`**：#12 —— 新增 §7（ADR-0003 §6.2 强制内容）：`coverage` 低估警告 + 抽样核对状态（Phase 0 无 shadow 数据，顺延至 `Phase1-shadow`）+ Phase 1 执行清单。
+- **`README.md`**：顶部阶段行与 §1 状态表更新；§2 门禁清单加入 `0003`；§7 新增"阈值类 Gate 必须可达成"。
+- **`adr/0004-stale-index-tool-surface.md`**：#17 —— `S_fresh` / `S_max` 的 Gate 由 `Phase0-baseline` 改为 **`Phase2-start`**；§4.1 “由 Phase 0 校准”同步修订。
+- **Gate 词汇表登记处**（新增 `Phase1-shadow` 取值）：`GLOSSARY.md` §… 字段表、`adr/0000-template.md`、`adr/README.md` §4 Gate 表 / §5 索引表 / §8 B3 行、`supplement/05` §9.3 表。
+
+### 修复性质（供 owner 复核）
+
+| 类别 | 项 | 说明 |
+|---|---|---|
+| 文档一致性修复（**不改变设计决策**） | #10 #12 #13 #15 | 把已存在于 `supplement/05` 或 ADR-0003 的内容补上 Phase 归属，或对齐两套口径 |
+| 修订 `Proposed` ADR 正文 | #11 #14 #16 #17 | `0003` / `0004` 仍为 `Proposed`，按 `adr/README.md` 在 Accept 前修订属正常流程；改动已就地标注日期，owner 可在 Accept 时一并复核 |
+
+### Notes
+
+- **#11 是本批的关键**：原 Gate 结构性不可达（Phase 0 是 `mode=off`，产不出 shadow 对比数据），
+  会让 ADR-0003 永远无法 Accept、Phase 1 被自锁。修订后 **ADR-0003 的 Accept 不再被阈值阻塞**。
+- **#17 是同一根因的第二个实例**：凡是“需要索引 / shadow / reader 观测数据”的阈值，都不能挂在
+  `Phase0-baseline`。已在 `GLOSSARY.md` 的 `Gate` 定义里写明这条判据，防止再犯。
+- **#16 未改任何代码**：Phase 0 已实现的 `ADD COLUMN`（请求级粒度、历史行取 `DEFAULT 0`）本就满足
+  D3 的实质要求，冲突只在字面；修订方向是**把 D3 写成它本来的意思**，不是放宽它。
+- 仍未解决但已登记的相邻项：`04` §5 Phase 1 的"≤ 120s / ≤ 200MB"初值已被实测击穿
+  （146.9s / 247.5 MiB），Gate 是 `04` §7.4 评审，**不属于本次 7 项缺口**。
+
+---
+
+## 2026-09-21 — 核查发现 7 项 Phase 1 规划缺口（未改任何事实源；同日已修复，见上条）
+
+起因：复核"`knowledge.Open` 未接入 aicli → shadow 为 no-op"与"5 条 ADR 仍 Proposed"两条状态时，
+追问"这是否只是未实现"。结论：**不是**——其中 7 项属于**计划自身的缺口**（任务写在规格或 ADR 里，
+却没有 Phase 归属；或两个事实源对同一验收给了不同口径），已登记为 `06` §9.1 #10–#16。
+
+### Changed
+
+- `docs/knowledge_Layer/06_implementation_index_and_guidance.md` — 新增 §9.1"规划缺口"表（#10–#16）；
+  §1.2 阻塞清单同步标注（ADR-0003 阈值门禁不可达 + Phase 1 规划缺口 7 项）。
+
+### Findings（摘要）
+
+| # | 缺口 | 证据 |
+|---|---|---|
+| 10 | Phase 1 缺"激活"交付项：`knowledge.Open` 接入 aicli / runtime-server 只在 `supplement/05` §2/§8，`04`/`06` 的 Phase 1 交付与文件落点均无 | `supplement/05` L107/L124/L510/L576-578 |
+| 11 | ADR-0003 阈值门禁 `Phase0-baseline` 结构性不可达（α 需 shadow 数据，而 Phase 0 无 shadow） | `adr/0003` §10、§4.2 |
+| 12 | ADR-0003 §6.2 强制内容（coverage 低估警告 + 抽样核对）未写进 Phase 0 报告 | `adr/0003` §6.2 vs 报告全文 |
+| 13 | Phase 1 shadow 以 `code.search` 定义，但 `code.search` 是 Phase 3 交付 | `04` §5 Phase 1 交付 4 vs Phase 3 交付 1 |
+| 14 | Phase 1 验收两套口径：`04` "top-10 差异率 < 15%" vs ADR-0003 §4.5 M1 主门槛 | `04` §5 Phase 1 验收 vs `adr/0003` §4.5 |
+| 15 | `exploration_attribution` 表仅存在于 ADR-0003，无 Phase 归属（M1 由它计算） | `adr/0003` §4.1；`04`/`06` 全文无 |
+| 16 | ADR-0003 D3 字面"一列不改"与已实现 Phase 0（`ADD COLUMN` 9 列）冲突 | `sqlite_store.go` L236-244/L262-287 |
+
+### Notes
+
+- **本次只登记缺口，未修改 `04` / `adr/*` 等事实源**——按 `README.md` §6 变更流程，
+  涉及验收口径与决策的改动须先经 owner / 评审裁决。
+- #10 与 #11 互为因果：激活项无归属 → Phase 0 拿不到 shadow 数据 → ADR-0003 阈值门禁无法满足
+  → Phase 1 被自锁。**这两项应作为同一个问题裁决。**
+
+---
+
+## 2026-09-21 — Phase 0 状态定稿：核心 5 交付完成
+
+### Changed
+
+- `docs/knowledge_Layer/06_implementation_index_and_guidance.md` — Phase 0 状态定稿为"核心 5 交付已完成"
+  （非全面封版：文档治理尾项 §9 条目 8 / 9 仍挂起）。添加 Phase 1 进入条件与校准建议
+  （3 个仓库样本：首次全量 ≤ 0.6ms×refs 且 ≤ 300s；DB ≤ 1KiB×refs 且 ≤ 300MB）。
+- `docs/knowledge_Layer/reports/phase0_baseline_report.md` — 状态由"部分完成"→"完成"；
+  §6 标题与交付 3 判定表更新为"完成（A/B 延期）"。
+
+### Notes
+
+- Phase 0 工程验收已就绪：5/5 交付落地 + ledger 可复算 + `TestPhase0TaskBaselineSummarize` PASS。
+- 进入 Phase 1 的两个硬门禁仍未满足：ADR-0001 + ADR-0007 需 owner Accept；ADR-0003 阈值
+  待 `04` §7.6 校准落稿。
+
+---
+
+## 2026-09-21 — Phase 0 任务侧基线（mode=off）完成
+
+起因：`usageledger` 接入 aicli（`chat_cache_local.go`）后，`reports/phase0_baseline_report.md`
+§6 的"任务侧"子项得以执行。
+
+### Added
+
+- `backend/internal/knowledge/baseline_run_test.go` — `TestPhase0TaskBaselineSummarize`：
+  从 `gateway.db token_usage_history` 读取 7 条 `llm_runtime` 记录，调用
+  `BaselineReport.Summarize` + `Percentiles`，产出 mode=off 任务侧基线。
+
+### Changed
+
+- `docs/knowledge_Layer/reports/phase0_baseline_report.md` — §6 回填 5 个真实任务的
+  基线结果（7 LLM 请求 / 150,768 tokens / p50=6,000ms / p95=12,600ms）；标题与状态
+  更新为"任务侧 mode=off 完成"。
+- `docs/knowledge_Layer/06_implementation_index_and_guidance.md` — §4 Phase 0 交付 3
+  状态更新：任务侧 5 个真实任务已跑，A/B（off vs shadow）延期至 Phase 1。
+
+### Results
+
+| 指标 | 值 |
+|---|---|
+| 样本 | 7 LLM 请求 / 5 真实任务 |
+| TotalTokens | 150,768 |
+| SuccessfulTasks | 7 |
+| FailedTasks | 0 |
+| ExplorationTokenShare | 0.000000（mode=off） |
+| ToolCallsPerTask | 0.00 |
+| RepeatedReadPerTask | 0.00 |
+| Latency p50 | 6,000 ms |
+| Latency p95 | 12,600 ms |
+| SafetyViolations | [] |
+
+### Notes
+
+- `shadow` A/B 延期：`cmd/aicli/` 未接入 `knowledge.Open`，`mode=shadow` 在 aicli 为
+  no-op，待 Phase 1 知识层接入后补跑。
+
+---
+
 ## 2026-09-21 — 补上 LSP 落地文档的反向引用
 
 起因：`docs/lsp/`（2026-09-21 建立）已在自身 README 声明"服务于 `docs/knowledge_Layer` 已评审的 LSP 规格"，但本目录**没有任何反向指针**，事实源与落地方案文档脱节（缺口）。

@@ -599,7 +599,7 @@ Go 特有注意点：
 |---|---|---|---|---|
 | 1 | `03` 的 `projects/modules` 与 `02` 的 `language_projects` 如何收敛为本文的 Project/Module 层 | [ADR-0001](../adr/0001-project-module-language-schema.md) | Proposed | `Phase1-start` |
 | 2 | ACP 场景 LSP 归属：`external_preferred` 具体探测什么信号 | [ADR-0002](../adr/0002-acp-lsp-ownership.md) | Proposed | `Phase4-start` |
-| 3 | `shadow` 模式的差异率分母定义：按 turn / 按 `grep/view` 调用次数 / 按 token | [ADR-0003](../adr/0003-exploration-attribution-metrics.md) | Proposed | `Phase0-baseline`（阈值）/ `Phase1-start`（口径） |
+| 3 | `shadow` 模式的差异率分母定义：按 turn / 按 `grep/view` 调用次数 / 按 token | [ADR-0003](../adr/0003-exploration-attribution-metrics.md) | Proposed | **`Phase1-shadow`**（阈值，2026-09-21 修订）/ `Phase1-start`（口径） |
 | 4 | reader 模式下 `code.*` 是否仍注册给模型 | [ADR-0004](../adr/0004-stale-index-tool-surface.md) | Proposed | `Phase2-start` |
 | 5 | Windows 进程树清理用 Job Object 还是 `taskkill /T` | [ADR-0005](../adr/0005-windows-child-process-lifecycle.md) | Proposed | `Phase4-start` |
 

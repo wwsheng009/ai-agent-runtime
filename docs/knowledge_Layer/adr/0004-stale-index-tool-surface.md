@@ -112,7 +112,10 @@ type ToolDefinitionMetadataProvider interface { ... }
 ### 4.1 分级注册表
 
 设 `S = staleness_seconds`，两档边界 `S_fresh`（初始 60s）、`S_max`（初始 15min），
-**两者均为初始值，由 Phase 0 校准（D7）**：
+**两者均为初始值，由 Phase 2 校准（D7）**：
+
+> **2026-09-21 修订（Gate 可达性）**：原文写"由 Phase 0 校准"。但 `S` 是 **reader 观测到的陈旧度**，其分布需要索引 + 多进程仲裁 + 心跳数据；Phase 0 是 `mode=off`、无索引、无 reader，**结构上产不出**该类数据。Gate 改为 `Phase2-start`（见 §10）。
+> 注意：本 ADR 的 Accept **本来就不被该值阻塞**——本节已声明 60s / 15min 只是初始值，D7 只要求"标注为初始值"。本次修订仅修正 Gate 指向，避免校准永久悬空。
 
 | 条件 | writer | reader，`S ≤ S_fresh` | reader，`S_fresh < S ≤ S_max` | reader，`S > S_max` |
 |---|---|---|---|---|
@@ -252,7 +255,7 @@ type ToolDefinitionMetadataProvider interface { ... }
 
 | 项 | Gate |
 |---|---|
-| `S_fresh` / `S_max` 的实际取值 | `Phase0-baseline` |
+| `S_fresh` / `S_max` 的实际取值 | **`Phase2-start`**（2026-09-21 由 `Phase0-baseline` 改，理由见 §4.1） |
 | 是否需要对 `code.impact` 单独设更严的档位 | `Phase2-start` |
 | writer 提交后 reader 的通知机制（心跳轮询 vs 通知） | `Phase2-start` |
 | 与 `04` §4.6 工具命名/优先级表的最终对齐 | `Phase2-start` |

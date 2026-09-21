@@ -1,8 +1,8 @@
 # Code Knowledge Runtime（知识层）文档索引
 
-> 最后更新：2026-09-20
+> 最后更新：2026-09-21
 > 本目录描述"代码知识运行时"（Code Knowledge Runtime）的设计与落地计划。
-> 当前阶段：**Phase 0 进行中**（4/5 交付完成；索引侧基线已实测，任务侧基线与 ADR 签署待办）。
+> 当前阶段：**Phase 0 核心 5 交付已完成**（2026-09-20）；**Phase 1 规划缺口 7 项已于 2026-09-21 修复**（`06` §9.2），待 ADR-0001 / 0003 / 0007 由 owner Accept 后开工。
 
 ---
 
@@ -18,7 +18,7 @@
 | `04_completeness_review_and_optimized_plan.md` | 完整性评审 + 优化落地计划 | **已完成，执行中** | 落地计划与验收事实源 |
 | `GLOSSARY.md` | 术语表 | **已建立**（2026-09-20） | **术语唯一事实源** |
 | `CHANGELOG.md` | 变更日志 | **已建立**（2026-09-20） | 变更历史 |
-| `adr/` | 决策记录（`0000` 模板 + `0001`–`0007`） | **已建立**（2026-09-20，全部 `Proposed`） | **决策唯一事实源** |
+| `adr/` | 决策记录（`0000` 模板 + `0001`–`0007`） | **已建立**（2026-09-20，全部 `Proposed`）；`0003` 于 2026-09-21 修订 Gate 与 D3（仍 `Proposed`，待 owner Accept） | **决策唯一事实源** |
 | `06_implementation_index_and_guidance.md` | 方案实施索引与指引（实施入口） | **已建立**（2026-09-20） | 实施索引（**非**事实源） |
 
 > **跨目录入口**：本目录 LSP 规格（`03_agent_harness_supplement.md` 的 LSP 章节、[`supplement/05_runtime_integration_project_detection_and_lsp.md`](supplement/05_runtime_integration_project_detection_and_lsp.md)）的**落地实施文档**位于 [`../lsp/`](../lsp/README.md)（参考实现分析 → runtime 集成设计 → 实施顺序与验收）。该目录仅为**实施方案**，不改变本目录的事实源边界。
@@ -36,7 +36,7 @@
 **实施者（准备动手）**
 
 > **先读 [`06`](06_implementation_index_and_guidance.md)（实施索引：顺序 / 门禁 / 文件落点）与 [`adr/`](adr/README.md)（决策）。**
-> 凡 `Gate` 为 `Phase1-start` 的 ADR（当前为 `0001`、`0007`）必须在动手前被 owner Accept；
+> 凡 `Gate` 为 `Phase1-start` 的 ADR（当前为 `0001`、`0003`、`0007`）必须在动手前被 owner Accept；
 > `04` 附录 B 只是历史散文列表，**不是**决策依据。
 
 0. `06_implementation_index_and_guidance.md` —— 实施顺序、ADR 门禁、每 Phase 文件落点与验收
@@ -134,6 +134,7 @@
 - 不要在本目录新增"第 5 份并列设计文档"；新内容应归入 `supplement/` 或 `adr/`。
 - 不要在 `02` 之外复制 DDL（extension schema 例外，落点是 `03`/`supplement/*`）。**`04` 不得含 `CREATE TABLE`**——见 ADR-0007 §4.3，现存 `index_jobs` DDL 待迁移。
 - 不要在没有基线的情况下写死阈值。
+- **阈值类 Gate 必须可达成**：α 与 Phase 1 门槛数值的 Gate 是 `Phase1-shadow`，**不是** `Phase0-baseline`（Phase 0 为 `mode=off`，结构上产不出 shadow 对比数据）——见 ADR-0003 §10。
 - 不要让 `knowledge.mode=off` 时的行为发生任何改变。
 - 任何新增表都必须回答"没有它哪个 Phase 会失败"，否则推迟。
 - `06_implementation_index_and_guidance.md` 是**实施索引 / 指引**，不是"第 5 份并列设计文档"；新增此类元文档需同步更新 §1 状态表与 `CHANGELOG.md`。

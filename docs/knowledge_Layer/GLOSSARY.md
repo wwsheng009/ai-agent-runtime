@@ -28,7 +28,7 @@
 |---|---|---|
 | `Status` | `Proposed` / `Accepted` / `Rejected` / `Superseded by ADR-YYYY` / `Deprecated` | **只有项目 owner 能把 `Proposed` 改为 `Accepted`**；`Accepted` 之后正文不可改 |
 | `Reversibility` | `cheap` / `moderate` / `expensive` | 回退成本分级。`cheap` 现在决定；`expensive` 只在**无部署数据**时允许现在决定 |
-| `Gate` | `Phase0-baseline` / `Phase1-start` / `PhaseN-start` / `none` | 该 ADR 必须在哪个时点之前被 Accept，防止决策永久悬空 |
+| `Gate` | `Phase0-baseline` / `Phase1-shadow` / `Phase1-start` / `PhaseN-start` / `none` | 该 ADR 必须在哪个时点之前被 Accept，防止决策永久悬空。**阈值类 Gate 必须可达成**：需 shadow 对比数据的阈值用 `Phase1-shadow`，不能用 `Phase0-baseline`（2026-09-21 增补） |
 | `Supersedes` | ADR 号或文档锚点 | 本 ADR 取代的对象 |
 | `Deciders` | 角色 | 有权 Accept 的人；当前为"项目 owner" |
 | Decided-by gate | — | 即 `Gate` 字段的机制名 | `adr/README.md` §4 |
