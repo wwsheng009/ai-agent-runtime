@@ -181,3 +181,61 @@ func rebuildMessagesWithoutIdentities(messages []types.Message) []types.Message 
 	}
 	return rebuilt
 }
+
+// Regression test for the duplicated user prompts of compacted sessions. Real
+// transcript rows 4089/4091/4092 of session_20260920192824_cQCsPhUr stored the
+// same prompt three times under three turn ids: a pre-turn compaction rebuilds
+// the transcript without identities, re-emits the prompt of the turn that is
+// still being answered, and the storage layer appended the fresh copy as a new
+// canonical row. The rebuilt copy must anchor on the stored open turn instead.
+func TestUpdateDoesNotAppendRebuiltPromptOfOpenTurn(t *testing.T) {
+	ctx := context.Background()
+	store := newTestSQLiteSessionStorage(t, nil)
+	session := NewSession("open-turn-user")
+	session.AddMessage(*types.NewUserMessage("L4的兜底大小是多少"))
+	correction := *types.NewAssistantMessage("Authoritative context correction: {\"run\":{\"status\":\"running\"}}")
+	correction.Metadata.Set(types.MetadataKeyContextStage, "correction")
+	session.AddMessage(correction)
+	require.NoError(t, store.Save(ctx, session))
+	require.Equal(t, 2, canonicalRowCount(t, store, session.ID))
+
+	loaded, err := store.Load(ctx, session.ID)
+	require.NoError(t, err)
+	rebuilt := append(rebuildMessagesWithoutIdentities(loaded.GetMessages()),
+		*types.NewUserMessage("L4的兜底大小是多少"),
+	)
+	loaded.ReplaceHistory(rebuilt)
+	require.NoError(t, store.Update(ctx, loaded))
+
+	require.Equal(t, 2, canonicalRowCount(t, store, session.ID),
+		"re-emitting the prompt of the open turn must not append a second canonical row")
+	require.Equal(t,
+		[]string{
+			"L4的兜底大小是多少",
+			"Authoritative context correction: {\"run\":{\"status\":\"running\"}}",
+		},
+		renderedTail(t, store, session.ID, 2),
+		"the request-scoped correction layer does not answer the turn it follows")
+}
+
+// The open-turn anchor must not swallow a genuine repetition: once the first
+// prompt was answered, the same text sent again is a new turn and is stored.
+func TestUpdateAppendsRepeatedPromptAfterReply(t *testing.T) {
+	ctx := context.Background()
+	store := newTestSQLiteSessionStorage(t, nil)
+	session := NewSession("repeat-user")
+	session.AddMessage(*types.NewUserMessage("继续"))
+	session.AddMessage(*types.NewAssistantMessage("继续处理"))
+	require.NoError(t, store.Save(ctx, session))
+
+	loaded, err := store.Load(ctx, session.ID)
+	require.NoError(t, err)
+	rebuilt := append(rebuildMessagesWithoutIdentities(loaded.GetMessages()),
+		*types.NewUserMessage("继续"),
+	)
+	loaded.ReplaceHistory(rebuilt)
+	require.NoError(t, store.Update(ctx, loaded))
+
+	require.Equal(t, 3, canonicalRowCount(t, store, session.ID),
+		"a repeat of the same text after a reply is a new turn")
+}

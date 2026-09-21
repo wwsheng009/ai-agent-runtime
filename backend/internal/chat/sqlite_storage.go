@@ -1036,9 +1036,26 @@ func identityAlignedAppendStart(history, canonicalTail []types.Message) (int, bo
 		}
 		storedContent[canonicalMessageSubstanceKey(canonicalTail[index])] = struct{}{}
 	}
+	incomingIDs := make(map[string]struct{}, len(history))
+	for index := range history {
+		if id := canonicalMessageID(history[index]); id != "" {
+			incomingIDs[id] = struct{}{}
+		}
+	}
+	openUserTurns := openUserTurnSubstance(canonicalTail, incomingIDs)
 	for index := len(history) - 1; index >= 0; index-- {
 		if messageStoredInCanonical(history[index], storedIDs, storedContent) {
 			return index + 1, true
+		}
+		// A rebuilt transcript re-emits the prompt of the turn that is still
+		// being persisted with a freshly minted identity (pre-turn compaction,
+		// resume seed, retry). The id no longer matches the stored row, but the
+		// turn it belongs to is still open, so appending it would store the same
+		// user turn twice.
+		if isUserTurnMessage(history[index]) {
+			if _, ok := openUserTurns[canonicalMessageSubstanceKey(history[index])]; ok {
+				return index + 1, true
+			}
 		}
 	}
 	// Counted substance pass: every canonical row backs at most one history
@@ -1062,6 +1079,47 @@ func identityAlignedAppendStart(history, canonicalTail []types.Message) (int, bo
 		return len(history), false
 	}
 	return lastStored + 1, true
+}
+
+// openUserTurnSubstance returns the substance keys of canonical user turns that
+// are still unanswered: every message stored after them is a request-scoped
+// context layer (fact ledger, recall, correction, ...) that the context manager
+// rebuilds for each provider request, so no substantive reply was recorded.
+//
+// Only turns whose identity the caller's transcript no longer carries are
+// reported. When the caller still sends the stored message id, the alignment
+// already anchors on that row and a second message with the same content is a
+// deliberate repeat (the new turn the user just sent); when the id is gone
+// instead, the content is a rebuild artifact of the turn that is still being
+// persisted (pre-turn compaction, resume seed, retry), and appending it would
+// store the same user turn twice.
+//
+// A genuine repetition after a reply is unaffected either way: the reply is a
+// substantive message and closes the turn before it.
+func openUserTurnSubstance(canonicalTail []types.Message, incomingIDs map[string]struct{}) map[string]struct{} {
+	open := make(map[string]struct{})
+	for index := len(canonicalTail) - 1; index >= 0; index-- {
+		message := canonicalTail[index]
+		if isUserTurnMessage(message) {
+			if _, retained := incomingIDs[canonicalMessageID(message)]; retained && canonicalMessageID(message) != "" {
+				continue
+			}
+			open[canonicalMessageSubstanceKey(message)] = struct{}{}
+			continue
+		}
+		if types.IsRequestScopedContextMessage(message) {
+			// Request-scoped layers never answer the turn they follow.
+			continue
+		}
+		// A substantive message (assistant reply, tool result, ...) answers every
+		// turn before it, so nothing older can still be open.
+		break
+	}
+	return open
+}
+
+func isUserTurnMessage(message types.Message) bool {
+	return strings.EqualFold(strings.TrimSpace(message.Role), "user")
 }
 
 func messageStoredInCanonical(message types.Message, storedIDs, storedContent map[string]struct{}) bool {
@@ -1168,6 +1226,11 @@ func (s *SQLiteSessionStorage) loadCanonicalTailMessagesTx(ctx context.Context, 
 // substance): a rewritten retry keeps its identity but must stay visible, and
 // rows without a message id are never collapsed at all because identical
 // content can be a legitimate repetition.
+//
+// The rebuilt-prompt duplicates are not repaired here: a deliberate repetition
+// carries distinct identities just like the rebuild artifact does, so a reader
+// cannot tell them apart. The write path prevents the artifact instead (see
+// openUserTurnSubstance).
 func collapseDuplicateTranscriptRows(messages []types.Message, sequences []int) ([]types.Message, []int) {
 	if len(messages) < 2 {
 		return messages, sequences
