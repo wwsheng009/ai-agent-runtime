@@ -54,7 +54,7 @@ func TestFormatStderrDiagnosticsIncludesTailAndTruncation(t *testing.T) {
 	_, _ = buf.Write([]byte("0123456789"))
 
 	// pid=0：跳过进程状态探测，只验证文本渲染。
-	out := formatStderrDiagnostics(buf, 0)
+	out := formatStderrDiagnostics(buf, 0, true)
 	if !strings.Contains(out, "[stdio 子进程诊断]") {
 		t.Fatalf("missing header: %q", out)
 	}
@@ -63,6 +63,27 @@ func TestFormatStderrDiagnosticsIncludesTailAndTruncation(t *testing.T) {
 	}
 	if !strings.Contains(out, "已丢弃较早的 2 字节") {
 		t.Fatalf("missing truncation info: %q", out)
+	}
+}
+
+func TestStderrTailForDisplayKeepsTailWithoutFailureHints(t *testing.T) {
+	tr := NewStdioTransport(&Config{Type: "stdio", Command: "noop"})
+	tr.stderr = newStderrTailBuffer(256)
+	_, _ = tr.stderr.Write([]byte("DevTools listening on ws://127.0.0.1:9222\n"))
+
+	display := tr.StderrTailForDisplay()
+	if !strings.Contains(display, "DevTools listening on ws://127.0.0.1:9222") {
+		t.Fatalf("display diagnostics lost the tail: %q", display)
+	}
+	if strings.Contains(display, "通常说明启动命令本身失败") ||
+		strings.Contains(display, "连接失败可能只是握手超时") {
+		t.Fatalf("display diagnostics must not carry failure hints: %q", display)
+	}
+
+	// 失败路径文案保持不变（既有断言依赖它）。
+	failure := tr.StderrDiagnostics()
+	if !strings.Contains(failure, "DevTools listening on ws://127.0.0.1:9222") {
+		t.Fatalf("failure diagnostics lost the tail: %q", failure)
 	}
 }
 

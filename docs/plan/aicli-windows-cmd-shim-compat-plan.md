@@ -339,6 +339,21 @@ aicli mcp -C "$env:TEMP\diag-ws.yaml" status --output json
 aicli mcp -C "$env:TEMP\diag-autoc.yaml" status --output json
 ```
 
+### 8.1 验收实测结果（2026-09-21，`e41fed46` 之后本机复跑）
+
+| # | 标准 | 结果 | 关键证据 |
+|---|------|------|----------|
+| 1 | 功能：`npx` + 含空格参数 → `connected: true` | ✅ | `diag-ws.yaml` → `connected:true, toolCount:29`（`--wsEndpoint ws://127.0.0.1:9222/devtools/browser/...`） |
+| 2 | 回归：既有/新增测试全绿 | ✅ | `go test ./cmd/aicli/commands/ ./internal/mcp/...` 全部通过；`-tags win7compat` 下 `manager`/`transport` 编译通过（全树 win7compat 构建受离线缓存缺 `jsonschema/v5` 限制，与本改动无关） |
+| 3 | 诊断：失败含 `exit code` + stderr 尾部 | ✅ | `diag-env`：`子进程已退出（PID 10444，exit code = 3）` + `stderr 尾部（共 19 字节）：[env-probe] dumped` |
+| 4 | 安全：包装带 `/d` | ✅ | 运行期采样：`cmd.exe /d /s /c "npx -y chrome-devtools-mcp@latest --autoConnect --userDataDir C:\...\Edge\User Data ..."`（整条命令行在引号内，含空格路径未被截断） |
+| 5 | 自测命令 | ✅（含一处预期变化） | `diag-ws` / `diag-space` → `connected:true, toolCount:29`；`diag-autoc` 修复后**直接连通**（原「期望失败」场景随缺陷修复消失） |
+
+补充观测：
+
+- 成功场景的 stderr 亦可主动查看：`test-server --show-stderr`（2026-09-21 追加，见 §11.6）对 `diag-stderr` 输出 518 字节 stderr 尾部（DEP0190 警告 + 内容安全提示），JSON 字段 `stderr_tail`。
+- 每次运行结束无残留 `cmd.exe` / `node` 子进程（Job Object 回收正常）；机器上另有 18:33/18:37 两批历史遗留进程（修复前早期试验产物，非本轮产生）。
+
 ---
 
 ## 9. 附录
@@ -525,7 +540,44 @@ go test ./internal/mcp/... -count=1               # 全部 ok（admin/catalog/cl
 
 ### 11.5 未落地项与后续建议
 
-1. **P1.3 `--show-stderr` / JSON `stderrTail`**：`client.Client` 接口目前没有诊断出口，而该接口在 `registry` / `manager` 各有一份 `win7compat` 实现，扩展面比本缺陷本身大。建议单独立项：在 `client.Client` 增加 `StderrDiagnostics() string`（win7compat 返回空串），再经 `registry.GetClient` 打通到 `aicli mcp test-server`。
-2. **`aicli` 二进制级验收**（文档 §8 的 `connected = true, toolCount = 29`）：本机离线缓存缺少 `go-winio` / `ssh_config` / `sftp` / `jsonschema` 等模块，`go build ./cmd/aicli` 与 `./...` 无法完成（与本改动无关）。恢复网络或在有依赖缓存的机器上，建议按 §8 复跑一次真实 `chrome-devtools-mcp` 场景。
+1. ~~**P1.3 `--show-stderr` / JSON `stderrTail`**~~ → ✅ **已落地（2026-09-21，见 §11.6）**：采用「可选能力接口 + 管理器快照留存」，未扩大 `client.Client` / `Manager` 主接口，`win7compat` 与测试替身零破坏。
+2. ~~**`aicli` 二进制级验收**~~ → ✅ **已完成（2026-09-21，见 §8.1）**：`go build ./cmd/aicli` 可执行（默认构建依赖已齐备），§8 全部复跑通过；仅 `-tags win7compat` 全树构建仍受离线缓存缺 `jsonschema/v5` 限制（与本改动无关，涉及包 `manager`/`transport` 已单独验证通过）。
 3. **方案 C（直连解释器解析 `npx.cmd`）** 仍建议作为后续加固，可彻底绕开 cmd.exe 层；当前 P0 已消除缺陷。
 4. CI 建议新增 `windows-latest` 上运行 `go test ./internal/mcp/transport/ -run 'TestStdioShim|TestWindowsShim'`。
+
+### 11.6 追加落地：`mcp test-server --show-stderr`（2026-09-21）
+
+**动机**：P1 只覆盖「连接失败」的错误信息；成功与排查场景还需要主动查看子进程 stderr（如 `chrome-devtools-mcp` 启动横幅、Node 弃用警告）。
+
+**实现要点**：
+
+| 文件 | 内容 |
+|------|------|
+| `internal/mcp/transport/stdio_stderr.go` | 新增 `StderrDisplayProvider`（`StderrTailForDisplay()`）；渲染抽公共 `stderrDiagnostics(failureHint bool)`，归因提示（「通常说明启动命令本身失败…」）仅保留在失败路径 |
+| `internal/mcp/client/client.go` | 新增可选接口 `StderrDiagnosticsClient` 与 `StderrDiagnosticsOf` 探测；`mcpClient` 记录 `activeTransport` 供读取 |
+| `internal/mcp/manager/stderr_diagnostics.go` | 新增可选接口 `StderrDiagnosticsProvider`（不进入 `Manager` 主接口） |
+| `internal/mcp/manager/manager.go` | `lastStderr` 快照：建连失败在 `Close()` 前留存；成功 / `Stop` / `ReloadConfig` 清理；查询优先在线客户端 |
+| `internal/mcp/manager/manager_win7compat.go`、`merged.go` | 禁用实现返回空串；merged 先 primary 后 secondary |
+| `cmd/aicli/commands/mcp.go` | `test-server` 增 `--show-stderr`；JSON 增 `stderr_tail`；text 增 `stderr 诊断:` 段落；失败时补印 `LastError` |
+| 测试 | `mcp_stderr_flag_test.go`（4 例）、`manager_stderr_diagnostics_test.go`（4 例）、`stdio_stderr_test.go`（展示文案断言） |
+
+**实测**：
+
+```text
+# 失败场景（diag-env：node 立即退出）
+$ aicli mcp -C %TEMP%\diag-env-stderr.yaml test-server diag-env --show-stderr
+  ❌ 连接失败
+  错误: 连接 MCP Server 失败: calling "initialize": EOF
+[stdio 子进程诊断]
+子进程已退出（PID 15400，exit code = 3）
+stderr 尾部（共 19 字节）：
+[env-probe] dumped
+
+stderr 诊断:
+─────────────────────────────────────────
+（同上诊断文本；该段落由 --show-stderr 独立渲染，成败皆可用）
+
+# 成功场景（diag-stderr：chrome-devtools-mcp）
+$ aicli mcp -C %TEMP%\diag-env-stderr.yaml test-server diag-stderr --show-stderr --output json
+... "success":true, "stderr_tail":"[stdio 子进程诊断]\n子进程 PID 416 仍在运行\nstderr 尾部（共 518 字节）..."
+```

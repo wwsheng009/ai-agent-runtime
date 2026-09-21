@@ -63,6 +63,25 @@ type ObservableClient interface {
 	AddLifecycleObserver(LifecycleObserver)
 }
 
+// StderrDiagnosticsClient 暴露可选的 stdio 子进程诊断能力。
+//
+// 只有 stdio 传输的客户端会实现它；HTTP/WebSocket 以及 Win7 兼容构建不提供，
+// 调用方用 StderrDiagnosticsOf 安全探测（计划 §11.5）。返回文本面向交互式展示，
+// 不含「连接失败」归因提示——错误信息里的归因由 transport.EnrichConnectError 提供。
+type StderrDiagnosticsClient interface {
+	// StderrDiagnostics 返回最近一次连接尝试的子进程 stderr 诊断（无则空串）。
+	StderrDiagnostics() string
+}
+
+// StderrDiagnosticsOf 返回客户端携带的 stdio 诊断文本（无则空串）。
+func StderrDiagnosticsOf(target interface{}) string {
+	provider, ok := target.(StderrDiagnosticsClient)
+	if !ok || provider == nil {
+		return ""
+	}
+	return strings.TrimSpace(provider.StderrDiagnostics())
+}
+
 type traceIDContextKey struct{}
 
 type mcpSession interface {
@@ -86,6 +105,11 @@ type mcpClient struct {
 	connectSession func(ctx context.Context, mcpTransport mcp.Transport) (mcpSession, error)
 	observerMu     sync.RWMutex
 	observers      []LifecycleObserver
+
+	// activeTransport 记录最近一次连接尝试的传输层，供 stdio 诊断
+	// （`aicli mcp test-server --show-stderr`）读取子进程 stderr。
+	transportMu     sync.RWMutex
+	activeTransport transport.Transport
 }
 
 // NewClient 创建 MCP 客户端
@@ -173,6 +197,7 @@ func (c *mcpClient) Connect(ctx context.Context) error {
 			c.emitLifecycleEventWithSession(event.TraceID, event.Type, event.TransportType, event.SessionID, event.Payload)
 		})
 	}
+	c.setActiveTransport(t)
 	c.emitLifecycleEvent(traceID, "mcp.client.transport.created", t.Type(), map[string]interface{}{
 		"target": c.connectionTarget(),
 	})
@@ -362,6 +387,36 @@ func (c *mcpClient) Close() error {
 // IsConnected 检查是否已连接
 func (c *mcpClient) IsConnected() bool {
 	return c.connected
+}
+
+// setActiveTransport 记录最近一次连接尝试的传输层，供诊断读取。
+func (c *mcpClient) setActiveTransport(t transport.Transport) {
+	if c == nil {
+		return
+	}
+	c.transportMu.Lock()
+	c.activeTransport = t
+	c.transportMu.Unlock()
+}
+
+// StderrDiagnostics 返回最近一次连接尝试的 stdio 子进程诊断（无则空串）。
+//
+// 实现 StderrDiagnosticsClient，供 `aicli mcp test-server --show-stderr` 使用；
+// 非 stdio 传输或传输未实现展示接口时返回空串。
+func (c *mcpClient) StderrDiagnostics() string {
+	if c == nil {
+		return ""
+	}
+	c.transportMu.RLock()
+	t := c.activeTransport
+	c.transportMu.RUnlock()
+	if t == nil {
+		return ""
+	}
+	if display, ok := t.(transport.StderrDisplayProvider); ok && display != nil {
+		return strings.TrimSpace(display.StderrTailForDisplay())
+	}
+	return transport.StderrDiagnosticsOf(t)
 }
 
 func (c *mcpClient) emitLifecycleEvent(traceID, eventType, transportType string, payload map[string]interface{}) {

@@ -78,6 +78,12 @@ type StderrDiagnosticsProvider interface {
 	StderrDiagnostics() string
 }
 
+// StderrDisplayProvider 由 stdio 传输实现：面向交互式展示的子进程诊断
+// （不含失败归因提示），供 `aicli mcp test-server --show-stderr` 等场景读取。
+type StderrDisplayProvider interface {
+	StderrTailForDisplay() string
+}
+
 // EnrichConnectError 尽力为连接失败补充 stdio 子进程诊断。
 // 没有可用诊断（非 stdio、无缓冲、无法判断）时原样返回 err。
 func EnrichConnectError(target interface{}, err error) error {
@@ -101,7 +107,19 @@ func StderrDiagnosticsOf(target interface{}) string {
 }
 
 // StderrDiagnostics 返回最近一次 stdio 装配的子进程 stderr 尾部诊断。
+// 文本面向「连接失败」场景，包含失败归因提示（供 EnrichConnectError 使用）。
 func (t *StdioTransport) StderrDiagnostics() string {
+	return t.stderrDiagnostics(true)
+}
+
+// StderrTailForDisplay 返回面向交互式展示的 stdio 诊断（例如
+// `aicli mcp test-server --show-stderr`）：保留进程状态与 stderr 尾部，
+// 但不附加「连接失败」归因，连接成功时同样可读。
+func (t *StdioTransport) StderrTailForDisplay() string {
+	return t.stderrDiagnostics(false)
+}
+
+func (t *StdioTransport) stderrDiagnostics(failureHint bool) string {
 	if t == nil {
 		return ""
 	}
@@ -115,11 +133,12 @@ func (t *StdioTransport) StderrDiagnostics() string {
 	if buf == nil {
 		return ""
 	}
-	return formatStderrDiagnostics(buf, pid)
+	return formatStderrDiagnostics(buf, pid, failureHint)
 }
 
 // formatStderrDiagnostics 把缓冲内容与进程状态渲染成多行诊断文本。
-func formatStderrDiagnostics(buf *stderrTailBuffer, pid int) string {
+// failureHint 为 true 时附加「启动命令本身失败 / 握手超时」一类归因提示。
+func formatStderrDiagnostics(buf *stderrTailBuffer, pid int, failureHint bool) string {
 	if buf == nil {
 		return ""
 	}
@@ -145,13 +164,18 @@ func formatStderrDiagnostics(buf *stderrTailBuffer, pid int) string {
 
 	var b strings.Builder
 	b.WriteString("[stdio 子进程诊断]")
-	if status := describeProcessStatus(pid); status != "" {
+	if status := describeProcessStatus(pid, failureHint); status != "" {
 		b.WriteString("\n")
 		b.WriteString(status)
 	}
 	if tail == "" {
 		if total == 0 {
-			b.WriteString("\n子进程 stderr 为空（可能在写出任何内容前就退出，或尚未启动）")
+			b.WriteString("\n子进程 stderr 为空")
+			if failureHint {
+				b.WriteString("（可能在写出任何内容前就退出，或尚未启动）")
+			} else {
+				b.WriteString("（尚未写出任何内容）")
+			}
 		}
 		return strings.TrimRight(b.String(), "\n")
 	}
@@ -165,7 +189,8 @@ func formatStderrDiagnostics(buf *stderrTailBuffer, pid int) string {
 }
 
 // describeProcessStatus 渲染进程存活状态；未知时返回空串。
-func describeProcessStatus(pid int) string {
+// failureHint 为 true 时附加失败归因提示（仅用于连接失败的错误信息）。
+func describeProcessStatus(pid int, failureHint bool) string {
 	if pid <= 0 {
 		return ""
 	}
@@ -174,12 +199,23 @@ func describeProcessStatus(pid int) string {
 		return fmt.Sprintf("子进程 PID %d 状态未知", pid)
 	}
 	if !exited {
-		return fmt.Sprintf("子进程 PID %d 仍在运行（连接失败可能只是握手超时，可结合 stderr 判断）", pid)
+		if failureHint {
+			return fmt.Sprintf("子进程 PID %d 仍在运行（连接失败可能只是握手超时，可结合 stderr 判断）", pid)
+		}
+		return fmt.Sprintf("子进程 PID %d 仍在运行", pid)
 	}
 	if !hasCode {
-		return fmt.Sprintf("子进程已退出（PID %d，退出码已随进程对象回收而不可得）：通常说明启动命令本身失败（如路径不存在、引号被截断、缺少依赖）", pid)
+		status := fmt.Sprintf("子进程已退出（PID %d，退出码已随进程对象回收而不可得）", pid)
+		if failureHint {
+			status += "：通常说明启动命令本身失败（如路径不存在、引号被截断、缺少依赖）"
+		}
+		return status
 	}
-	return fmt.Sprintf("子进程已退出（PID %d，exit code = %d）：通常说明启动命令本身失败（如路径不存在、引号被截断、缺少依赖）", pid, code)
+	status := fmt.Sprintf("子进程已退出（PID %d，exit code = %d）", pid, code)
+	if failureHint {
+		status += "：通常说明启动命令本身失败（如路径不存在、引号被截断、缺少依赖）"
+	}
+	return status
 }
 
 // tailLines 取末尾至多 maxLines 行、且不超过 maxBytes 字节的文本。
