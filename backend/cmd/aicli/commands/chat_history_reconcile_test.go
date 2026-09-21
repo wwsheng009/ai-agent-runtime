@@ -1084,3 +1084,82 @@ func TestSeedPersistedHistory_ImportsFinalToolChainOnce(t *testing.T) {
 		t.Fatalf("second seed duplicated tool chain: cells=%d", count)
 	}
 }
+
+// resume 时事件日志可能只覆盖会话后半段（例如 runtime 事件日志已包含整场会话，
+// 而 canonical 历史里仍有事件日志没有的早期单元）。缺失单元必须插到它规范上
+// 应该出现的位置——下一条已表达 unit 之前——而不是追加到模型尾部：追加会让
+// 旧答案排在最终答案之后，用户看到的“尾部一整块旧内容、最后一条消息被顶到
+// 中间”正是这个顺序倒置。
+func TestSeedPersistedHistoryInsertsMissingUnitBeforeReplayedTail(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{})
+	// 事件日志重放已经建立的模型尾部：第二轮提问与最终答案。
+	bridge.renderMu.Lock()
+	bridge.applyChangeSet(bridge.renderEncoder.SubmitUserInput("second question"))
+	bridge.applyChangeSet(bridge.renderEncoder.SubmitAssistantWithBoundaryGroup(
+		"final answer", "runtime-request-group",
+	))
+	bridge.renderMu.Unlock()
+
+	// canonical 历史比事件日志更长：第一轮答案缺失，且规范上排在重放内容之前。
+	messages := []runtimetypes.Message{
+		*runtimetypes.NewAssistantMessage("first answer"),
+		*runtimetypes.NewUserMessage("second question"),
+		*runtimetypes.NewAssistantMessage("final answer"),
+	}
+
+	bridge.seedPersistedHistory(messages, "")
+	snapshot := bridge.sceneSnapshot()
+	if snapshot == nil {
+		t.Fatal("seeded Scene is nil")
+	}
+	got := make([]string, 0, len(snapshot.Cells))
+	for _, cell := range snapshot.Cells {
+		got = append(got, cell.Source)
+	}
+	const want = "first answer|second question|final answer"
+	if strings.Join(got, "|") != want {
+		t.Fatalf("resume cell order = %q, want %q", strings.Join(got, "|"), want)
+	}
+	if last := snapshot.Cells[len(snapshot.Cells)-1]; last.Source != "final answer" {
+		t.Fatalf("last resumed cell = %q, want the final canonical answer", last.Source)
+	}
+
+	// 再次 resume 必须幂等：锚定插入不产生第二份单元格。
+	bridge.seedPersistedHistory(messages, "")
+	if again := bridge.sceneSnapshot(); again == nil || len(again.Cells) != len(snapshot.Cells) {
+		t.Fatalf("repeated seed duplicated cells: %+v", again)
+	}
+}
+
+// 事件日志把同一请求的 reasoning 记为增量片段，重放把它们累积成一个单元格：
+// canonical 的单个推理块是该单元格正文的子集。此时推理内容已经在屏幕上（只是
+// 与同请求的其它片段合并），历史种子必须按“已表达”跳过，否则 resume 会渲染出
+// 第二个推理单元格。
+func TestSeedPersistedHistorySkipsReasoningAccumulatedByReplay(t *testing.T) {
+	const canonicalReasoning = "canonical reasoning block that the event log already accumulated into one replayed cell"
+	accumulated := canonicalReasoning + "\nlater reasoning deltas from the same request"
+
+	bridge := newChatRuntimeEventBridge(&ChatSession{})
+	bridge.renderMu.Lock()
+	bridge.applyChangeSet(bridge.renderEncoder.SubmitReasoningWithBoundaryGroup(
+		accumulated, "runtime-request-group",
+	))
+	bridge.renderMu.Unlock()
+
+	assistant := runtimetypes.NewAssistantMessage("final answer")
+	runtimetypes.SetReasoningBlock(assistant.Metadata, &runtimetypes.ReasoningBlock{
+		Summary: canonicalReasoning, Visibility: runtimetypes.ReasoningVisibilitySummary,
+	})
+
+	bridge.seedPersistedHistory([]runtimetypes.Message{*assistant}, "")
+	snapshot := bridge.sceneSnapshot()
+	if snapshot == nil || len(snapshot.Cells) != 2 {
+		t.Fatalf("resume re-imported accumulated reasoning: %+v", snapshot)
+	}
+	if reasoning := snapshot.Cells[0]; reasoning.Kind != scene.KindReasoning || reasoning.Source != accumulated {
+		t.Fatalf("accumulated replay reasoning cell was rewritten: %+v", reasoning)
+	}
+	if answer := snapshot.Cells[1]; answer.Source != "final answer" {
+		t.Fatalf("missing assistant unit = %q, want final answer", answer.Source)
+	}
+}
