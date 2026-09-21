@@ -4381,6 +4381,62 @@ func TestLocalChatPrepareRunHookFreezesSystemPromptAcrossRuns(t *testing.T) {
 	}
 }
 
+// TestComposeLocalChatSystemPrompt_FreezesHeadAcrossWorkspaceRootResolution
+// covers the agent-construction path rather than the prepare hook: the head is
+// anchored inside the composer, so every caller reuses identical bytes once the
+// first compose has happened. Freezing only the prepare hook left construction
+// free to append the workspace paragraph after the root was resolved, which
+// rewrote messages[0] mid-session and invalidated the provider prompt cache.
+func TestComposeLocalChatSystemPrompt_FreezesHeadAcrossWorkspaceRootResolution(t *testing.T) {
+	root := `E:\projects\ai\ai-gateway`
+
+	// The two compositions genuinely differ when the freeze is bypassed; this
+	// appended paragraph is the observed +2543-byte variant.
+	unfrozen := &ChatSession{SystemPromptText: "Base prompt."}
+	withoutRoot := buildLocalChatSystemPrompt(unfrozen, "")
+	withRoot := buildLocalChatSystemPrompt(unfrozen, root)
+	if withoutRoot == withRoot {
+		t.Fatal("expected a resolved workspace root to change the composition")
+	}
+	if strings.Contains(withoutRoot, "Current workspace root:") {
+		t.Fatalf("unresolved root must not carry the workspace paragraph, got %q", withoutRoot)
+	}
+	if !strings.Contains(withRoot, "Current workspace root: "+root) {
+		t.Fatalf("resolved root must carry the workspace paragraph, got %q", withRoot)
+	}
+
+	runtimeSession := &runtimechat.Session{ID: "compose-freeze-session"}
+	session := &ChatSession{
+		RuntimeSession:   runtimeSession,
+		SystemPromptText: "Base prompt.",
+	}
+
+	// Turn 1 composes while the workspace root is not resolved yet.
+	first := composeLocalChatSystemPrompt(session, nil, "")
+	if first != withoutRoot {
+		t.Fatalf("first compose must match the unfrozen composition: got %q want %q", first, withoutRoot)
+	}
+
+	// A later construction resolves the root. The head must stay byte-identical.
+	second := composeLocalChatSystemPrompt(session, nil, root)
+	if second != first {
+		t.Fatalf("later workspace resolution must not rewrite the frozen head: first=%q second=%q", first, second)
+	}
+	if strings.Contains(second, "Current workspace root:") {
+		t.Fatalf("later workspace resolution must not inject the workspace paragraph, got %q", second)
+	}
+
+	// The prepare hook anchors on the same value, so both call paths agree.
+	viaHook := composeLocalChatSystemPrompt(session, runtimeSession, root)
+	if viaHook != first {
+		t.Fatalf("prepare-hook path diverged from the construction path: hook=%q constructed=%q", viaHook, first)
+	}
+	anchored := sessionmeta.String(runtimeSession.Metadata.Context, sessionmeta.SystemPromptFrozen)
+	if anchored != first {
+		t.Fatalf("expected the frozen head to be anchored on the session, got %q want %q", anchored, first)
+	}
+}
+
 func TestLocalChatRuntimeHostActorTurnGateSerializesSameSession(t *testing.T) {
 	host := &localChatRuntimeHost{}
 	releaseFirst, err := host.acquireActorTurnGate(context.Background(), "session-1")

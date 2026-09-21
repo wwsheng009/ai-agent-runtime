@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -832,8 +833,8 @@ func TestRuntimeMessagesToProtocolMessages_AnthropicKeepsCompleteMultiToolReplay
 // 残缺块——后者会被严格网关以 "thinking.thinking: Field required" 拒绝。
 func TestRuntimeMessagesToProtocolMessages_AnthropicOpaqueThinkingReplaysAsRedactedThinking(t *testing.T) {
 	assistant := types.Message{
-		Role:    "assistant",
-		Content: "我看一下。",
+		Role:     "assistant",
+		Content:  "我看一下。",
 		Metadata: types.NewMetadata(),
 	}
 	types.SetReasoningBlock(assistant.Metadata, &types.ReasoningBlock{
@@ -875,8 +876,8 @@ func TestRuntimeMessagesToProtocolMessages_AnthropicOpaqueThinkingReplaysAsRedac
 // 有可见文本 + signature 的 reasoning 重放时保持 thinking 块（text+signature）。
 func TestRuntimeMessagesToProtocolMessages_AnthropicThinkingWithTextAndSignature(t *testing.T) {
 	assistant := types.Message{
-		Role:    "assistant",
-		Content: "结论。",
+		Role:     "assistant",
+		Content:  "结论。",
 		Metadata: types.NewMetadata(),
 	}
 	types.SetReasoningBlock(assistant.Metadata, &types.ReasoningBlock{
@@ -1089,5 +1090,101 @@ func TestEncodeRuntimeToolCalls_PreservesCustomInput(t *testing.T) {
 	fnNull, ok := encoded[4]["function"].(map[string]interface{})
 	if !ok || fnNull["arguments"] != `{"value":null}` {
 		t.Errorf("expected null field preserved as-is, got %#v", encoded[4])
+	}
+}
+
+// TestRuntimeMessagesToProtocolMessages_RecordedReplayDecisionSurvivesProviderSwitch
+// pins the prefix-stability contract: once an assistant message records its
+// reasoning_content replay decision at write time, serializing it must be a
+// pure function of the message. Re-deriving the decision from the active
+// provider rewrote the prompt-cache prefix on every provider switch.
+func TestRuntimeMessagesToProtocolMessages_RecordedReplayDecisionSurvivesProviderSwitch(t *testing.T) {
+	assistant := types.Message{
+		Role: "assistant",
+		ToolCalls: []types.ToolCall{
+			{ID: "call_view", Name: "view"},
+		},
+		Metadata: types.NewMetadata(),
+	}
+	// Recorded while a DeepSeek-style provider produced the turn.
+	RecordOpenAIReasoningReplayDecision(assistant.Metadata, "deepseek-v4-flash")
+
+	underDeepSeek := RuntimeMessagesToProtocolMessages([]types.Message{assistant}, "openai", "deepseek-v4-flash")
+	underOther := RuntimeMessagesToProtocolMessages([]types.Message{assistant}, "openai", "sub.aiok.club", "deepseek-v4-flash")
+	if len(underDeepSeek) != 1 || len(underOther) != 1 {
+		t.Fatalf("expected 1 protocol message each, got %d and %d", len(underDeepSeek), len(underOther))
+	}
+
+	deepSeekValue, deepSeekExists := underDeepSeek[0]["reasoning_content"]
+	otherValue, otherExists := underOther[0]["reasoning_content"]
+	if !deepSeekExists || deepSeekValue != "" {
+		t.Fatalf("expected the recorded DeepSeek placeholder to survive, got exists=%v value=%#v", deepSeekExists, deepSeekValue)
+	}
+	if otherExists != deepSeekExists || otherValue != deepSeekValue {
+		t.Fatalf(
+			"serialization must not depend on the active provider: deepseek exists=%v value=%#v, other exists=%v value=%#v",
+			deepSeekExists, deepSeekValue, otherExists, otherValue,
+		)
+	}
+}
+
+// TestRuntimeMessagesToProtocolMessages_NonDeepSeekRecordedTurnStaysKeylessUnderDeepSeekHint
+// is the mirror case that produced the observed prefix flip: a turn recorded
+// under a non-DeepSeek provider must not gain an empty reasoning_content key
+// merely because the newly selected provider resolves to a DeepSeek model.
+func TestRuntimeMessagesToProtocolMessages_NonDeepSeekRecordedTurnStaysKeylessUnderDeepSeekHint(t *testing.T) {
+	assistant := types.Message{
+		Role: "assistant",
+		ToolCalls: []types.ToolCall{
+			{ID: "call_view", Name: "view"},
+		},
+		Metadata: types.NewMetadata(),
+	}
+	// Recorded while a non-DeepSeek provider produced the turn.
+	RecordOpenAIReasoningReplayDecision(assistant.Metadata, "commandgo")
+
+	messages := RuntimeMessagesToProtocolMessages([]types.Message{assistant}, "openai", "sub.aiok.club", "deepseek-v4-flash")
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 protocol message, got %d", len(messages))
+	}
+	if value, exists := messages[0]["reasoning_content"]; exists {
+		t.Fatalf("a recorded non-DeepSeek turn must stay keyless under a DeepSeek hint, got %#v", value)
+	}
+}
+
+// A third-party gateway whose name, host and model id all miss the DeepSeek
+// substrings still enforces the replay contract. The decision is recorded at
+// write time from the endpoint's declared capability, so the key must survive
+// a later provider switch.
+func TestRecordOpenAIReasoningReplayDecisionWithCapabilitiesHonorsDeclaredContract(t *testing.T) {
+	declaredTrue := true
+	assistant := types.Message{
+		Role: "assistant",
+		ToolCalls: []types.ToolCall{
+			{ID: "call_view", Name: "view"},
+		},
+		Metadata: types.NewMetadata(),
+	}
+	RecordOpenAIReasoningReplayDecisionWithCapabilities(
+		assistant.Metadata,
+		"sub.aiok.club",
+		"ds-v4",
+		map[string]agentconfig.ModelCapabilitySpec{
+			"ds-v4": {ReplayReasoningContent: &declaredTrue},
+		},
+	)
+
+	// Serialized under an unrelated provider: the recorded decision, not the
+	// active provider, decides the payload.
+	messages := RuntimeMessagesToProtocolMessages([]types.Message{assistant}, "openai", "commandgo", "glm-4.6")
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 protocol message, got %d", len(messages))
+	}
+	value, exists := messages[0]["reasoning_content"]
+	if !exists {
+		t.Fatal("a turn recorded under a declared replay contract must keep the key")
+	}
+	if value != "" {
+		t.Fatalf("expected an empty replayed key, got %#v", value)
 	}
 }

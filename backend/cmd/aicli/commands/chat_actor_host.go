@@ -1704,7 +1704,7 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 		Name:         firstNonEmptyChatValue(strings.TrimSpace(childAgentType), "aicli-chat"),
 		Provider:     resolveLocalChatAgentProvider(session, host),
 		Model:        resolveLocalChatAgentModel(session, host),
-		SystemPrompt: composeLocalChatSystemPrompt(session, workspaceRoot),
+		SystemPrompt: composeLocalChatSystemPrompt(session, nil, workspaceRoot),
 		MaxSteps:     0,
 	}
 	if session != nil {
@@ -1979,12 +1979,7 @@ func localChatPrepareRunHook(apiAgent *agent.Agent, session *ChatSession, worksp
 			// differently from session start. Session-scoped changes belong in
 			// turn-context form (e.g. active_goal_guidance below), never in the
 			// frozen instruction head.
-			composed := loadFrozenChatSystemPrompt(runtimeSession, session)
-			if composed == "" {
-				composed = composeLocalChatSystemPrompt(session, workspaceRoot)
-				storeFrozenChatSystemPrompt(runtimeSession, session, composed)
-			}
-			cfg.SystemPrompt = composed
+			cfg.SystemPrompt = composeLocalChatSystemPrompt(session, runtimeSession, workspaceRoot)
 			if cfg.Options == nil {
 				cfg.Options = make(map[string]interface{})
 			}
@@ -2098,7 +2093,33 @@ func resolveLocalChatWorkspaceMode(runtimeConfig *runtimecfg.RuntimeConfig) stri
 	return ""
 }
 
-func composeLocalChatSystemPrompt(session *ChatSession, workspaceRoot string) string {
+// composeLocalChatSystemPrompt returns the outbound instruction head for the
+// session.
+//
+// Provider prompt caching requires messages[0] to stay byte-identical for the
+// whole session, so the composed head is anchored on first compose and reused
+// afterwards. The anchor lives here rather than at the call sites because the
+// head has more than one caller (agent construction and the per-run prepare
+// hook); freezing only the prepare hook left agent construction free to emit a
+// differently-composed head, which is exactly how a later workspace-root
+// resolution rewrote the cached prefix mid-session.
+//
+// runtimeSession, when non-nil, is the durable session handed to the prepare
+// hook; it is preferred over session.RuntimeSession for anchoring so the
+// prepared head and the anchored head never diverge.
+func composeLocalChatSystemPrompt(session *ChatSession, runtimeSession *runtimechat.Session, workspaceRoot string) string {
+	if frozen := loadFrozenChatSystemPrompt(runtimeSession, session); frozen != "" {
+		return frozen
+	}
+	composed := buildLocalChatSystemPrompt(session, workspaceRoot)
+	storeFrozenChatSystemPrompt(runtimeSession, session, composed)
+	return composed
+}
+
+// buildLocalChatSystemPrompt performs one unfrozen composition pass. Callers
+// must go through composeLocalChatSystemPrompt so the session keeps a single
+// stable instruction head.
+func buildLocalChatSystemPrompt(session *ChatSession, workspaceRoot string) string {
 	promptCWD := strings.TrimSpace(workspaceRoot)
 	if promptCWD == "" {
 		promptCWD, _ = os.Getwd()
