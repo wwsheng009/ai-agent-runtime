@@ -89,7 +89,7 @@ var webDebugEndpoints = []struct {
 	Note   string
 }{
 	{Method: "GET", Path: "/web/", Note: "微型 Web 客户端页面（浏览器交互入口）"},
-	{Method: "GET", Path: "/web/api/screen", Note: "当前渲染快照（默认完整 transcript；?view=tui TUI 合成帧；?format=json 结构化）"},
+	{Method: "GET", Path: "/web/api/screen", Note: "当前渲染快照（默认完整 transcript；?view=tui TUI 合成帧；?format=json 结构化；?msg_limit=N&msg_before=M 消息窗口）"},
 	{Method: "GET", Path: "/web/api/status", Note: "渲染/显示状态快照（JSON / ?format=text）"},
 	{Method: "GET", Path: "/web/api/statusbar", Note: "底部状态栏快照（JSON；balance/context used/directory/git branch/window 等段），与 TUI 底部状态行同源"},
 	{Method: "GET", Path: "/web/api/runtime", Note: "运行时元数据（provider/model/reasoning 权威值）"},

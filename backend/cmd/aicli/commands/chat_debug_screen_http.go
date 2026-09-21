@@ -6,6 +6,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // ============================================================================
@@ -39,6 +40,33 @@ type chatDebugScreenSnapshot struct {
 	// Messages 是结构化消息列表（仅 buildChatWebScreenSnapshot 填充；
 	// 调试端点保持纯文本语义，不设置该字段）。前端据此做角色气泡渲染。
 	Messages []chatWebScreenMessage `json:"messages,omitempty"`
+	// MessageWindow 是结构化 messages 的分页元信息（windowChatWebMessages
+	// 填充）。前端据此判断是否还有更早消息，以及下次上滚加载的游标。
+	MessageWindow *chatWebMessageWindowInfo `json:"message_window,omitempty"`
+}
+
+// chatWebMessageWindow 描述结构化 messages 的分页窗口（绝对索引，左闭右开），
+// 与 /web/api/screen 的 msg_limit / msg_before 查询参数一一对应：
+//   - 两个字段都缺省（<=0）：不分页，返回完整 messages（历史行为，兼容既有调用方）；
+//   - Limit>0：最多返回 Limit 条；Before<=0 时归一为消息总数（取最新一页）；
+//   - Before>0：窗口右边界（排他），用于「加载更早消息」（配合前端已加载起始索引）。
+type chatWebMessageWindow struct {
+	Before int
+	Limit  int
+}
+
+// active 报告窗口参数是否由调用方显式指定（用于决定是否重建 lines/text）。
+func (w chatWebMessageWindow) active() bool { return w.Before > 0 || w.Limit > 0 }
+
+// chatWebMessageWindowInfo 是 JSON 响应中的分页元信息：
+// Start 为本次返回的第一条消息的绝对索引（>0 表示还有更早消息，上滚加载时
+// 以 msg_before=Start 作为游标）；End 为排他右边界；Total 为消息总数。
+type chatWebMessageWindowInfo struct {
+	Total   int  `json:"total"`
+	Start   int  `json:"start"`
+	End     int  `json:"end"`
+	Limit   int  `json:"limit,omitempty"`
+	HasMore bool `json:"has_more"`
 }
 
 // BuildChatDebugScreenSnapshot 返回当前屏幕合成帧的结构化快照。
@@ -154,13 +182,7 @@ func BuildChatDebugScreenSnapshot() *chatDebugScreenSnapshot {
 // 历史消息未注入 bridge 的场景；与 transcriptFallbackCells 的输出格式保持
 // 一致（user>/[system]/[tool] 前缀，正文直出）。
 func sessionTranscriptFallbackLines(session *ChatSession) []string {
-	if session == nil {
-		return nil
-	}
-	messages := session.Messages
-	if len(messages) == 0 && session.RuntimeSession != nil {
-		messages = session.RuntimeSession.History
-	}
+	messages := sessionTranscriptMessages(session)
 	if len(messages) == 0 {
 		return nil
 	}
@@ -271,6 +293,22 @@ func MarshalChatDebugScreenJSON() ([]byte, error) {
 //
 // 全部为空时返回 available=false（前端保留现有内容，不覆盖为空）。
 func buildChatWebScreenSnapshot() *chatDebugScreenSnapshot {
+	return buildChatWebScreenSnapshotFull()
+}
+
+// buildChatWebScreenSnapshotFor 按窗口参数返回快照：
+//   - 窗口激活（调用方显式指定 msg_limit / msg_before）→ 窗口化提取，只物化
+//     窗口内的结构化消息（O(窗口) 而非 O(总量)，见 buildChatWebScreenSnapshotWindowed）；
+//   - 窗口未激活 → 完整 transcript（历史行为逐字节兼容）。
+func buildChatWebScreenSnapshotFor(window chatWebMessageWindow) *chatDebugScreenSnapshot {
+	if window.active() {
+		return buildChatWebScreenSnapshotWindowed(window)
+	}
+	return buildChatWebScreenSnapshotFull()
+}
+
+// buildChatWebScreenSnapshotFull 返回完整 transcript 快照（历史行为）。
+func buildChatWebScreenSnapshotFull() *chatDebugScreenSnapshot {
 	snap := &chatDebugScreenSnapshot{}
 	session := chatDebugDisplaySession()
 	if session == nil {
@@ -311,9 +349,167 @@ func buildChatWebScreenSnapshot() *chatDebugScreenSnapshot {
 	return snap
 }
 
+// buildChatWebScreenSnapshotWindowed 只物化窗口内的结构化消息：先计数确定窗口
+// 边界，再按区间提取，避免长会话每轮刷新都构造全量 messages / lines（O(总量)
+// → O(窗口)）。三个内容源的优先级与 buildChatWebScreenSnapshotFull 一致，且
+// 计数与提取共用同一套过滤/投影规则，结果与「先取全量再切片」逐字节一致
+// （等价性由 chat_debug_screen_window_test.go 的用例守住）。
+func buildChatWebScreenSnapshotWindowed(window chatWebMessageWindow) *chatDebugScreenSnapshot {
+	snap := &chatDebugScreenSnapshot{}
+	session := chatDebugDisplaySession()
+	if session == nil {
+		snap.Available = false
+		snap.Reason = "no active chat session"
+		return snap
+	}
+	if session.Interaction != nil && session.Interaction.uiActor != nil {
+		cells := session.Interaction.uiActor.AppState().Transcript.Cells
+		if total := countTranscriptCellMessages(cells); total > 0 {
+			return snap.fillWindowedMessages(total, window, func(start, end int) []chatWebScreenMessage {
+				return transcriptFallbackMessagesRange(cells, start, end)
+			})
+		}
+	}
+	if session.RuntimeEventBridge != nil {
+		if sceneSnap := session.RuntimeEventBridge.sceneSnapshot(); sceneSnap != nil {
+			if total := countTranscriptSnapshotMessages(sceneSnap); total > 0 {
+				return snap.fillWindowedMessages(total, window, func(start, end int) []chatWebScreenMessage {
+					return transcriptFallbackSnapshotMessagesRange(sceneSnap, start, end)
+				})
+			}
+		}
+	}
+	messages := sessionTranscriptMessages(session)
+	if total := countSessionTranscriptMessages(messages); total > 0 {
+		return snap.fillWindowedMessages(total, window, func(start, end int) []chatWebScreenMessage {
+			return sessionTranscriptMessagesRange(messages, start, end)
+		})
+	}
+	snap.Available = false
+	snap.Reason = "no conversation content"
+	return snap
+}
+
+// fillWindowedMessages 写入窗口内消息、分页元信息，并按窗口消息重建 lines/text。
+// 窗口归一与行前缀规则与 windowChatWebMessages 相同，保证窗口化提取与
+// 「先取全量再切片」的结果一致。
+func (s *chatDebugScreenSnapshot) fillWindowedMessages(total int, window chatWebMessageWindow, extract func(start, end int) []chatWebScreenMessage) *chatDebugScreenSnapshot {
+	start, end := resolveChatWebMessageWindow(total, window)
+	msgs := extract(start, end)
+	s.Available = true
+	s.Messages = msgs
+	s.MessageWindow = &chatWebMessageWindowInfo{
+		Total:   total,
+		Start:   start,
+		End:     end,
+		Limit:   window.Limit,
+		HasMore: start > 0,
+	}
+	lines := chatWebLinesForMessages(msgs)
+	s.Lines = lines
+	s.Text = strings.Join(lines, "\n")
+	return s
+}
+
 // marshalChatWebScreenJSON 返回 web 屏幕快照的缩进 JSON 字节。
 func marshalChatWebScreenJSON() ([]byte, error) {
 	return json.MarshalIndent(buildChatWebScreenSnapshot(), "", "  ")
+}
+
+// marshalChatWebScreenJSONWindow 返回按窗口裁剪后的 web 屏幕快照 JSON 字节。
+func marshalChatWebScreenJSONWindow(window chatWebMessageWindow) ([]byte, error) {
+	snap := buildChatWebScreenSnapshotFor(window)
+	if !window.active() {
+		// 未指定窗口：仍写入分页元信息（Total/Start/End/HasMore），
+		// 便于调用方统一处理响应形状；messages 保持全量。
+		windowChatWebMessages(snap, window)
+	}
+	return json.MarshalIndent(snap, "", "  ")
+}
+
+// chatWebMessageWindowMaxLimit 限制 msg_limit 的上限：单次响应最多搬运的
+// 消息条数，避免调用方用超大 limit 绕过窗口化意图（完整 transcript 仍可
+// 不传参数获取）。
+const chatWebMessageWindowMaxLimit = 500
+
+// resolveChatWebMessageWindow 把请求窗口归一为绝对索引区间 [start, end)：
+// 默认取最新一页（before<=0 视为总量），before 超出总量时钳到总量，limit 超出
+// before 时钳到 before。全量提取（windowChatWebMessages）与窗口化提取
+// （fillWindowedMessages）共用同一套规则，保证两条路径窗口边界一致。
+func resolveChatWebMessageWindow(total int, window chatWebMessageWindow) (start, end int) {
+	if total <= 0 {
+		return 0, 0
+	}
+	before := window.Before
+	if before <= 0 || before > total {
+		before = total
+	}
+	limit := window.Limit
+	if limit <= 0 || limit > before {
+		limit = before
+	}
+	return before - limit, before
+}
+
+// windowChatWebMessages 按窗口裁剪结构化 messages，并写入分页元信息。
+//
+// 窗口激活时同步以窗口内消息重建 Lines/Text：否则长会话下会出现「裁掉了
+// messages 却仍把全量 lines/text 塞进响应」的假优化。未显式分页时保持
+// 既有 lines/text 派生路径不变（历史行为逐字节兼容）。
+func windowChatWebMessages(snap *chatDebugScreenSnapshot, window chatWebMessageWindow) {
+	if snap == nil || len(snap.Messages) == 0 {
+		return
+	}
+	total := len(snap.Messages)
+	start, end := resolveChatWebMessageWindow(total, window)
+	snap.Messages = snap.Messages[start:end]
+	snap.MessageWindow = &chatWebMessageWindowInfo{
+		Total:   total,
+		Start:   start,
+		End:     end,
+		Limit:   window.Limit,
+		HasMore: start > 0,
+	}
+	if !window.active() {
+		return
+	}
+	lines := chatWebLinesForMessages(snap.Messages)
+	snap.Lines = lines
+	snap.Text = strings.Join(lines, "\n")
+}
+
+// chatWebLinesForMessages 由结构化消息重建纯文本行，前缀规则与
+// transcriptFallbackCells / sessionTranscriptFallbackLines 保持一致。
+func chatWebLinesForMessages(msgs []chatWebScreenMessage) []string {
+	if len(msgs) == 0 {
+		return nil
+	}
+	lines := make([]string, 0, len(msgs))
+	for i := range msgs {
+		lines = append(lines, chatWebLineForMessage(msgs[i]))
+	}
+	return lines
+}
+
+// chatWebLineForMessage 按 role 生成与语义 transcript 一致的纯文本行。
+func chatWebLineForMessage(msg chatWebScreenMessage) string {
+	switch msg.Role {
+	case "user":
+		return "user> " + msg.Content
+	case "system":
+		return "[system] " + msg.Content
+	case "tool":
+		return "[tool] " + msg.Content
+	case "reasoning":
+		return "[reasoning] " + msg.Content
+	case "command":
+		return "cmd> " + msg.Content
+	case "diagnostic":
+		return "[diag] " + msg.Content
+	default:
+		// assistant / runtime：正文直出。
+		return msg.Content
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -348,19 +544,46 @@ func chatWebRoleForCellKind(kind scene.CellKind) string {
 
 // transcriptFallbackMessages 从语义 transcript cells 派生结构化消息列表。
 func transcriptFallbackMessages(cells []scene.TranscriptCell) []chatWebScreenMessage {
-	if len(cells) == 0 {
+	return transcriptFallbackMessagesRange(cells, 0, len(cells))
+}
+
+// countTranscriptCellMessages 统计 cells 中可展示的消息条数（Source 非空）。
+// 只计数不分配：窗口化路径先据此确定窗口边界，再按区间提取窗口内消息，
+// 避免长会话每次刷新都构造全量消息切片。
+func countTranscriptCellMessages(cells []scene.TranscriptCell) int {
+	count := 0
+	for i := range cells {
+		if cells[i].Source != "" {
+			count++
+		}
+	}
+	return count
+}
+
+// transcriptFallbackMessagesRange 只提取 cells 过滤后 [start, end) 区间的消息。
+// 过滤规则与 countTranscriptCellMessages 完全一致（Source 为空不计入索引空间），
+// 因此 [0, len(cells)) 等价于全量提取。
+func transcriptFallbackMessagesRange(cells []scene.TranscriptCell, start, end int) []chatWebScreenMessage {
+	if len(cells) == 0 || start < 0 || end <= start {
 		return nil
 	}
-	msgs := make([]chatWebScreenMessage, 0, len(cells))
+	msgs := make([]chatWebScreenMessage, 0, end-start)
+	idx := 0
 	for i := range cells {
 		cell := &cells[i]
 		if cell.Source == "" {
 			continue
 		}
-		msgs = append(msgs, chatWebScreenMessage{
-			Role:    chatWebRoleForCellKind(cell.Kind),
-			Content: cell.Source,
-		})
+		if idx >= end {
+			break
+		}
+		if idx >= start {
+			msgs = append(msgs, chatWebScreenMessage{
+				Role:    chatWebRoleForCellKind(cell.Kind),
+				Content: cell.Source,
+			})
+		}
+		idx++
 	}
 	if len(msgs) == 0 {
 		return nil
@@ -374,62 +597,150 @@ func transcriptFallbackSnapshotMessages(snap *scene.Snapshot) []chatWebScreenMes
 	if snap == nil || len(snap.Cells) == 0 {
 		return nil
 	}
-	cells := make([]scene.TranscriptCell, 0, len(snap.Cells))
+	return transcriptFallbackSnapshotMessagesRange(snap, 0, len(snap.Cells))
+}
+
+// countTranscriptSnapshotMessages 统计 Scene 快照中可展示的消息条数（跳过 nil
+// 与 Source 为空的 cell），口径与 transcriptFallbackSnapshotMessagesRange 一致。
+func countTranscriptSnapshotMessages(snap *scene.Snapshot) int {
+	if snap == nil {
+		return 0
+	}
+	count := 0
 	for _, cell := range snap.Cells {
-		if cell == nil {
+		if cell != nil && cell.Source != "" {
+			count++
+		}
+	}
+	return count
+}
+
+// transcriptFallbackSnapshotMessagesRange 只提取 Scene 快照过滤后 [start, end)
+// 区间的消息；不再先复制整份指针切片到值切片。
+func transcriptFallbackSnapshotMessagesRange(snap *scene.Snapshot, start, end int) []chatWebScreenMessage {
+	if snap == nil || len(snap.Cells) == 0 || start < 0 || end <= start {
+		return nil
+	}
+	msgs := make([]chatWebScreenMessage, 0, end-start)
+	idx := 0
+	for _, cell := range snap.Cells {
+		if cell == nil || cell.Source == "" {
 			continue
 		}
-		cells = append(cells, *cell)
+		if idx >= end {
+			break
+		}
+		if idx >= start {
+			msgs = append(msgs, chatWebScreenMessage{
+				Role:    chatWebRoleForCellKind(cell.Kind),
+				Content: cell.Source,
+			})
+		}
+		idx++
 	}
-	return transcriptFallbackMessages(cells)
+	if len(msgs) == 0 {
+		return nil
+	}
+	return msgs
 }
 
 // sessionTranscriptFallbackMessages 直接从会话 transcript（session.Messages /
 // session.RuntimeSession.History）派生结构化消息列表，不依赖 surface / uiActor。
 func sessionTranscriptFallbackMessages(session *ChatSession) []chatWebScreenMessage {
-	if session == nil {
-		return nil
-	}
-	messages := session.Messages
-	if len(messages) == 0 && session.RuntimeSession != nil {
-		messages = session.RuntimeSession.History
-	}
+	messages := sessionTranscriptMessages(session)
 	if len(messages) == 0 {
 		return nil
 	}
+	return sessionTranscriptMessagesRange(messages, 0, len(messages))
+}
+
+// sessionTranscriptMessages 返回会话 transcript 消息列表：优先 session.Messages，
+// 为空时回退 RuntimeSession.History。
+func sessionTranscriptMessages(session *ChatSession) []runtimetypes.Message {
+	if session == nil {
+		return nil
+	}
+	if len(session.Messages) > 0 {
+		return session.Messages
+	}
+	if session.RuntimeSession != nil {
+		return session.RuntimeSession.History
+	}
+	return nil
+}
+
+// chatWebMessageForHistoryEntry 把单条会话消息投影为结构化消息；ok=false 表示
+// 该条内容为空、不计入消息索引空间。计数（countSessionTranscriptMessages）与
+// 区间提取（sessionTranscriptMessagesRange）共用它，保证两者口径完全一致。
+func chatWebMessageForHistoryEntry(msg *runtimetypes.Message, toolCalls map[string]runtimetypes.ToolCall) (chatWebScreenMessage, bool) {
+	text := strings.TrimSpace(msg.Content)
+	role := "assistant"
+	switch msg.Role {
+	case "user":
+		role = "user"
+	case "system":
+		role = "system"
+	case "tool":
+		role = "tool"
+	}
+	if role == "tool" {
+		// 兜底路径（无 surface/uiActor/Scene，例如非 TTY resume 或启动早期）
+		// 也必须使用与实时一致的 compact 工具投影：直接输出模型面向原文
+		// 会把 artifact 指针等内部细节当作历史单元格展示。
+		call := toolCalls[strings.TrimSpace(msg.ToolCallID)]
+		name := firstNonEmptyChatValue(
+			strings.TrimSpace(call.Name),
+			chatHistoryToolNameFromMetadata(msg.Metadata),
+			strings.TrimSpace(msg.ToolCallID),
+			"tool",
+		)
+		if display := chatHistoryToolDisplay(*msg, name, call.Args); display != "" {
+			text = display
+		}
+	}
+	if text == "" {
+		return chatWebScreenMessage{}, false
+	}
+	return chatWebScreenMessage{Role: role, Content: text}, true
+}
+
+// countSessionTranscriptMessages 统计可展示的消息条数。工具消息的 compact 投影
+// 兜底（正文为空但投影非空）同样计入索引空间，口径与区间提取一致。
+func countSessionTranscriptMessages(messages []runtimetypes.Message) int {
+	if len(messages) == 0 {
+		return 0
+	}
 	toolCalls := indexChatHistoryToolCalls(messages)
-	msgs := make([]chatWebScreenMessage, 0, len(messages))
+	count := 0
 	for i := range messages {
-		msg := &messages[i]
-		text := strings.TrimSpace(msg.Content)
-		role := "assistant"
-		switch msg.Role {
-		case "user":
-			role = "user"
-		case "system":
-			role = "system"
-		case "tool":
-			role = "tool"
+		if _, ok := chatWebMessageForHistoryEntry(&messages[i], toolCalls); ok {
+			count++
 		}
-		if role == "tool" {
-			// 兜底路径（无 surface/uiActor/Scene，例如非 TTY resume 或启动早期）
-			// 也必须使用与实时一致的 compact 工具投影：直接输出模型面向原文
-			// 会把 artifact 指针等内部细节当作历史单元格展示。
-			call := toolCalls[strings.TrimSpace(msg.ToolCallID)]
-			name := firstNonEmptyChatValue(
-				strings.TrimSpace(call.Name),
-				chatHistoryToolNameFromMetadata(msg.Metadata),
-				strings.TrimSpace(msg.ToolCallID),
-				"tool",
-			)
-			if display := chatHistoryToolDisplay(*msg, name, call.Args); display != "" {
-				text = display
-			}
-		}
-		if text == "" {
+	}
+	return count
+}
+
+// sessionTranscriptMessagesRange 只提取会话 transcript 过滤后 [start, end) 区间
+// 的结构化消息：不构造全量消息切片，窗口外消息也不做展示文本投影。
+func sessionTranscriptMessagesRange(messages []runtimetypes.Message, start, end int) []chatWebScreenMessage {
+	if len(messages) == 0 || start < 0 || end <= start {
+		return nil
+	}
+	toolCalls := indexChatHistoryToolCalls(messages)
+	msgs := make([]chatWebScreenMessage, 0, end-start)
+	idx := 0
+	for i := range messages {
+		msg, ok := chatWebMessageForHistoryEntry(&messages[i], toolCalls)
+		if !ok {
 			continue
 		}
-		msgs = append(msgs, chatWebScreenMessage{Role: role, Content: text})
+		if idx >= end {
+			break
+		}
+		if idx >= start {
+			msgs = append(msgs, msg)
+		}
+		idx++
 	}
 	if len(msgs) == 0 {
 		return nil

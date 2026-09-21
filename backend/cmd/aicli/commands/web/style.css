@@ -177,6 +177,15 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
   background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
 }
 
+/* ---- 长会话窗口化：顶部「更早消息」提示行 ---- */
+/* 上滚懒加载的提示/加载态；已到达最早一条时由 JS 移除。 */
+#screen .conv-load-older {
+  margin: 0 0 10px 0; padding: 4px 8px;
+  font-size: 11px; color: var(--fg4); text-align: center;
+  border: 1px dashed var(--border); border-radius: 6px;
+  white-space: normal;
+}
+
 /* ---- 结构化对话消息（role-based 气泡） ---- */
 #screen .msg-row {
   display: flex; flex-direction: column;

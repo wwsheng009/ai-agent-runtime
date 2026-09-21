@@ -35,7 +35,7 @@ web  (aicli 微型 Web 客户端 / 远程调用 API)
   Base: http://127.0.0.1:61772/web
   Auth: POST 请求需携带 X-AICLI-Token（或 ?token=）；令牌可由 GET /web/api/token 读取（或见 aicli 启动行 web write token），内置页面自动注入
   GET http://127.0.0.1:61772/web/  [enabled]  微型 Web 客户端页面（浏览器交互入口）
-  GET  .../web/api/screen          [enabled]  当前渲染快照（默认完整 transcript；?view=tui TUI 合成帧；?format=json 结构化）
+  GET  .../web/api/screen          [enabled]  当前渲染快照（默认完整 transcript；?view=tui TUI 合成帧；?format=json 结构化；?msg_limit=N&msg_before=M 只取窗口）
   POST .../web/api/invoke          [enabled]  同步远程调用（wait_only/timeout_ms/client_request_id）
   GET  .../web/api/turn            [enabled]  turn 后验查询（?id={turn_id}，含 started/finished/usage）
   GET  .../web/api/sessions        [enabled]  会话列表（current_session_id + 候选会话）
@@ -92,7 +92,7 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
 | POST | `/web/api/invoke` | **同步远程调用**：注入 prompt（或 `wait_only`），等待 turn 结束，一次响应返回最终状态 + assistant 回复 + TUI 渲染 + token 用量；`Accept: text/event-stream` 时改为流式 delta + 最终 result |
 | POST | `/web/api/input` | 异步注入：prompt / 审批决议 / 提问回答 / 中断，立即返回 `queued` |
 | GET | `/web/api/turn` | turn 后验查询：`?id={turn_id}` 取单条（含耗时/步数/`assistant_preview`/`usage`+`usage_scope`/`usage_source`），无参数返回当前 turn + 最近 20 条 |
-| GET | `/web/api/screen` | 当前渲染：默认完整 transcript（`messages` 结构化）；`?view=tui` 返回 TUI 合成帧；`?format=json` 结构化；`?tail=N` 只取末尾 N 行（≤2000） |
+| GET | `/web/api/screen` | 当前渲染：默认完整 transcript（`messages` 结构化）；`?view=tui` 返回 TUI 合成帧；`?format=json` 结构化；`?tail=N` 只取末尾 N 行（≤2000）；`?msg_limit=N&msg_before=M` 只取结构化消息的一段窗口（附 `message_window` 分页元信息，见 §5.1） |
 | GET | `/web/api/status` | 渲染器/显示状态快照（等价 `/debug/chat/status`） |
 | GET | `/web/api/statusbar` | 底部状态栏快照（balance / context used / directory / git branch / window 等段，与 TUI 底部状态行同源；provider/model 见底部 cfg-bar，不在此重复） |
 | GET | `/web/api/runtime` | 运行时元数据（provider/model/reasoning 权威值） |
@@ -300,6 +300,56 @@ curl -s 'http://127.0.0.1:61772/web/api/screen?format=json' | jq '.messages[-1]'
 # 渲染器内部状态（编码/提交/门控诊断）
 curl -s 'http://127.0.0.1:61772/web/api/status?format=text'
 ```
+
+### 5.1 长会话窗口化：`?msg_limit=N&msg_before=M`
+
+会话很长时（几千个 turn），一次返回完整 transcript 会让响应体、前端 DOM 与内存随会话线性增长。
+`/web/api/screen?format=json` 支持只取一段窗口：
+
+| 参数 | 含义 |
+|------|------|
+| `msg_limit=N` | 最多返回 N 条结构化消息（钳制到 `[1, 500]`） |
+| `msg_before=M` | 窗口右边界（排他，绝对消息索引）；缺省或 > 总数时归一为消息总数，即「最新一页」 |
+
+两个参数都缺省时行为与历史完全一致：返回完整 `messages`（兼容既有调用方，`message_window` 也不出现）。
+窗口激活时，`messages` 之外的 `lines` / `text` 同步按窗口内消息重建，避免「裁了 `messages`
+却仍回传全量文本」的假优化。
+
+服务端同样是窗口化的：窗口激活时先统计消息条数、再按区间提取窗口内消息
+（`buildChatWebScreenSnapshotWindowed`），不再「先构造全量 transcript 再切片」，
+因此单次刷新的内存开销只与窗口大小相关。5000 条消息取 40 条的一页（本机
+`go test ./cmd/aicli/commands/ -run '^$' -bench WindowVsFull -benchmem`）：
+
+| 路径 | ns/op | B/op | allocs/op |
+|------|-------|------|-----------|
+| 窗口化提取（现实现） | ≈229µs | ≈7.7 KB | 28 |
+| 全量后切片（历史实现） | ≈453µs | ≈588 KB | 2529 |
+
+两条路径的输出逐字段一致（`messages` / `lines` / `text` / `message_window`），
+由 `chat_debug_screen_window_test.go` 的等价性用例守住。
+
+响应中的 `message_window` 是分页元信息：
+
+```json
+{ "message_window": { "total": 4210, "start": 4170, "end": 4210, "limit": 40, "has_more": true } }
+```
+
+- `start` 是本次第一条消息的绝对索引（左闭），`end` 是排他右边界；
+- `has_more=true` 表示还有更早的消息：以 `msg_before={start}` 作为游标取下一页，直到 `has_more=false`（`start=0`）；
+- `total` 不受窗口影响，可用于显示进度（如「已加载 4170 / 4210」）。
+
+```bash
+# 最新 40 条（首屏）
+curl -s 'http://127.0.0.1:61772/web/api/screen?format=json&msg_limit=40' | jq .message_window
+
+# 再往前 40 条（用上一页的 start 作为游标）
+curl -s 'http://127.0.0.1:61772/web/api/screen?format=json&msg_limit=40&msg_before=4170' \
+  | jq '.messages[0].role, .message_window'
+```
+
+> 微型 Web 客户端页面已默认使用该窗口：首屏只拉 `msg_limit=40`（最新一页），
+> 用户向上滚动到顶部时自动以 `msg_before` 前插更早的消息。因此浏览器侧的内存 / DOM
+> 规模只与「已加载的页数」相关，不再随会话总 turn 数增长。
 
 ## 6. 实时事件：`GET /web/api/events`（SSE）
 

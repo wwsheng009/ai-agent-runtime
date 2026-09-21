@@ -24,6 +24,22 @@ var userScrolledAway = false;    // 用户上滚阅读历史：暂停自动跟�
 // messages 后按内容去重确认（服务端已包含则移除，未包含则保留 pending）。
 var localPendingPrompts = [];
 
+// ---- 长会话窗口化渲染（懒加载更早消息）----
+// 服务端 /web/api/screen?format=json 支持消息窗口（msg_limit/msg_before，绝对
+// 索引，左闭右开）。首屏与实时刷新只取最新一页；用户上滚到顶部附近时按
+// msg_before 游标向前逐页加载。这样 DOM 节点数、HTML 解析量与 JSON 体积都
+// 不再随会话总 turn 数线性增长（长会话下 CPU/内存占用显著下降）。
+var MSG_WINDOW_LIMIT = 40;        // 首屏 / 实时刷新：最新 N 条
+var MSG_OLDER_PAGE_LIMIT = 40;    // 上滚一次加载的更早 N 条
+var SCROLL_LOAD_THRESHOLD = 160;  // 距顶部多少像素触发加载更早消息
+var loadedStart = 0;              // 已渲染窗口在服务端消息数组中的起始索引（左闭）
+var loadedEnd = 0;                // 已渲染窗口的结束索引（右开）
+var serverMessageTotal = 0;       // 服务端最近一次返回的消息总数
+var loadingOlder = false;         // 更早消息请求进行中（防重入）
+var olderExhausted = true;        // 已到达最早一条（loadedStart == 0）
+var screenReqSeq = 0;             // refreshScreen 请求序号：丢弃过期响应
+var convLoadOlderEl = null;       // 顶部「加载更早消息…」指示行（懒创建）
+
 // ---- 发送/停止按钮状态机 ----
 // idle        就绪：按钮为「发送」，输入为空时禁用
 // posting     POST 已发出，等待队列确认：按钮为「发送中…」禁用（脉冲）
@@ -86,12 +102,15 @@ var MSG_LABELS = {
 };
 
 // 单条消息 HTML：label（角色）+ body（内容），支持 pending 态。
-export function chatMsgRowHtml(role, content, pending) {
+// index 为消息在服务端消息数组中的绝对索引（窗口化渲染用，写入 data-msg-index）：
+// 带索引的行属于「服务端窗口」，上滚加载/增量替换据此定位；pending 行无索引。
+export function chatMsgRowHtml(role, content, pending, index) {
   var label = MSG_LABELS[role] || "消息";
   var cls = "msg-row msg-" + role + (pending ? " msg-pending" : "");
+  var idxAttr = (typeof index === "number" && index >= 0) ? ' data-msg-index="' + index + '"' : "";
   if (role === "reasoning") {
     // 推理过程：折叠面板（与流式渲染 #stream-msg .reasoning-block 视觉一致）
-    return '<div class="' + cls + '">' +
+    return '<div class="' + cls + '"' + idxAttr + '>' +
       '<details class="reasoning-block">' +
       '<summary>' + esc(label) + '</summary>' +
       '<div class="reasoning-content">' + esc(content) + '</div>' +
@@ -102,7 +121,7 @@ export function chatMsgRowHtml(role, content, pending) {
     // 工具输出：默认折叠（最多显示约 5 行）。
     // 展开/收起控件并入「工具」抬头行（文字 + ▼/▲ 图标），仅内容溢出时可用；
     // 完整文本始终渲染在 DOM 中（CSS 截断），会话复制可获取全文。
-    return '<div class="' + cls + '">' +
+    return '<div class="' + cls + '"' + idxAttr + '>' +
       '<div class="msg-label tool-toggle" data-tool-toggle="1" role="button" tabindex="0" aria-expanded="false">' +
       '<span class="tool-toggle-text">' + esc(label) + '</span>' +
       '<span class="tool-toggle-action">展开</span>' +
@@ -113,7 +132,7 @@ export function chatMsgRowHtml(role, content, pending) {
       '</div>' +
       '</div>';
   }
-  return '<div class="' + cls + '">' +
+  return '<div class="' + cls + '"' + idxAttr + '>' +
     '<div class="msg-label">' + esc(label) + '</div>' +
     '<div class="msg-body">' + esc(content) + '</div>' +
     '</div>';
@@ -121,13 +140,17 @@ export function chatMsgRowHtml(role, content, pending) {
 
 // 检测工具输出是否溢出折叠高度：溢出时保留折叠并启用抬头控件；
 // 内容未溢出时直接展示全文，并隐藏抬头控件（tool-toggle-off，不可点击）。
-export function refreshToolOutputToggles() {
-  if (!screenEl) { return; }
-  var outputs = screenEl.querySelectorAll(".tool-output");
+// root 省略时扫描整个对话区；已测量过的行（tool-toggle-ready）跳过——窗口化
+// 渲染下每次刷新只新增尾部若干行，避免每轮都全量重排/重测量。
+export function refreshToolOutputToggles(root) {
+  var scope = root || screenEl;
+  if (!scope || !scope.querySelectorAll) { return; }
+  var outputs = scope.querySelectorAll(".tool-output");
   if (!outputs.length) { return; }
   outputs.forEach(function (el) {
     var rowEl = el.closest ? el.closest(".msg-row") : null;
     if (!rowEl) { return; }
+    if (rowEl.classList.contains("tool-toggle-ready")) { return; }
     var labelEl = rowEl.querySelector(".tool-toggle");
     if (!labelEl) { return; }
     if (el.scrollHeight > el.clientHeight) {
@@ -139,6 +162,9 @@ export function refreshToolOutputToggles() {
       el.classList.add("tool-expanded");
       labelEl.setAttribute("aria-expanded", "true");
     }
+    // 布局不可用时（面板隐藏 / 尚未排版：clientHeight 为 0）不打标记，
+    // 下次刷新会重新测量，避免控件永久停在「未溢出」的错误状态。
+    if (el.clientHeight > 0) { rowEl.classList.add("tool-toggle-ready"); }
   });
 }
 
@@ -164,25 +190,285 @@ function toggleToolOutput(labelEl) {
   labelEl.setAttribute("aria-expanded", collapsed ? "true" : "false");
 }
 
-// 用服务端 messages 重建对话区；未确认的本地 prompt 保留为 pending 气泡。
-function renderConversationMessages(messages) {
-  if (!screenEl) { return; }
+// ---- 服务端消息窗口渲染 ----
+
+// 归一化服务端 message_window（缺字段/未分页时按「全量 = 一个窗口」处理）。
+export function parseMessageWindow(win, fallbackLen) {
+  var len = fallbackLen || 0;
+  var out = { start: 0, end: len, total: len, hasMore: false };
+  if (!win) { return out; }
+  if (typeof win.total === "number" && win.total >= 0) { out.total = win.total; }
+  if (typeof win.start === "number" && win.start >= 0) { out.start = win.start; }
+  // end 缺失/非法时按「窗口长度 = 本次返回的消息条数」推算，避免 end < start 的空窗口。
+  out.end = (typeof win.end === "number" && win.end >= out.start) ? win.end : (out.start + len);
+  out.hasMore = (typeof win.has_more === "boolean") ? win.has_more : (out.start > 0);
+  return out;
+}
+
+// 是否需要整体重建：首次渲染 / 窗口左移 / 窗口收缩（会话切换、上下文压缩、
+// 分支回退）/ 新窗口与已渲染区间断开（中间消息缺失，增量会留下空洞）。
+// 其余情况只替换尾部（增量 append），避免整块 DOM 重建。
+export function shouldRebuildForWindow(prevStart, prevEnd, nextStart, nextEnd) {
+  if (prevEnd <= prevStart) { return true; }
+  if (nextStart < prevStart) { return true; }
+  if (nextEnd < prevEnd) { return true; }
+  if (nextStart > prevEnd) { return true; }
+  return false;
+}
+
+// 服务端消息 → 行 HTML；startIdx 为窗口起始绝对索引（写入 data-msg-index）。
+export function serverMessagesHtml(messages, startIdx) {
   var html = "";
-  var seenUser = {};
-  (messages || []).forEach(function (m) {
+  (messages || []).forEach(function (m, i) {
     var role = m.role || "assistant";
     var content = (m.content || "").replace(/\s+$/, "");
-    if (role === "user") { seenUser[content] = true; }
-    html += chatMsgRowHtml(role, content, false);
+    html += chatMsgRowHtml(role, content, false, (startIdx || 0) + i);
   });
-  // 服务端尚未包含的本地 prompt → pending 气泡（发送中态），保留待确认。
+  return html;
+}
+
+// HTML 字符串 → DocumentFragment（insertBefore 需要节点，不能直接插字符串）。
+function htmlToFragment(html) {
+  var holder = document.createElement("div");
+  holder.innerHTML = html;
+  var frag = document.createDocumentFragment();
+  while (holder.firstChild) { frag.appendChild(holder.firstChild); }
+  return frag;
+}
+
+// 第一条 pending 气泡：服务端行必须插在它之前（保持「历史 → 最新 → 待确认」）。
+function firstPendingRow() {
+  if (!screenEl || !screenEl.querySelector) { return null; }
+  return screenEl.querySelector(".msg-row.msg-pending");
+}
+
+// 移除绝对索引 >= startIdx 的服务端行（增量尾部替换；pending 行无索引不受影响）。
+function removeServerRowsFrom(startIdx) {
+  if (!screenEl || !screenEl.querySelectorAll) { return; }
+  var rows = screenEl.querySelectorAll("[data-msg-index]");
+  rows.forEach(function (el) {
+    var idx = parseInt(el.getAttribute("data-msg-index"), 10);
+    if (!isNaN(idx) && idx >= startIdx) { el.remove(); }
+  });
+}
+
+// 未确认的本地 prompt → pending 气泡（服务端窗口内已确认的丢弃）。
+function renderPendingPrompts(seenUser) {
+  if (!screenEl) { return; }
   localPendingPrompts = localPendingPrompts.filter(function (text) {
-    if (seenUser[text]) { return false; } // 已被服务端确认
-    html += chatMsgRowHtml("user", text, true);
-    return true;
+    return !seenUser[text];
   });
-  screenEl.innerHTML = html || "(empty)";
+  var stale = screenEl.querySelectorAll(".msg-row.msg-pending");
+  stale.forEach(function (el) { el.remove(); });
+  if (!localPendingPrompts.length) { return; }
+  // 首条消息时先清除占位符 "(empty)"，避免气泡混在占位文本后。
+  if (screenEl.textContent === "(empty)" && !screenEl.querySelector(".msg-row")) {
+    screenEl.innerHTML = "";
+  }
+  localPendingPrompts.forEach(function (text) {
+    screenEl.insertAdjacentHTML("beforeend", chatMsgRowHtml("user", text, true));
+  });
+}
+
+// 重置窗口状态（会话切换 / 回退到纯文本快照时）。
+function resetConversationWindow() {
+  loadedStart = 0;
+  loadedEnd = 0;
+  serverMessageTotal = 0;
+  olderExhausted = true;
+  loadingOlder = false;
+  syncOlderHint();
+}
+
+// 应用服务端窗口：需要时整体重建，否则只替换尾部新增/变更部分。
+function applyServerWindow(messages, win) {
+  if (!screenEl) { return; }
+  var seenUser = {};
+  (messages || []).forEach(function (m) {
+    if ((m.role || "assistant") === "user") {
+      seenUser[(m.content || "").replace(/\s+$/, "")] = true;
+    }
+  });
+  var w = parseMessageWindow(win, (messages || []).length);
+  if (shouldRebuildForWindow(loadedStart, loadedEnd, w.start, w.end)) {
+    screenEl.innerHTML = serverMessagesHtml(messages, w.start) || "(empty)";
+    loadedStart = w.start;
+    loadedEnd = w.end;
+  } else {
+    // 增量尾部替换：窗口右移时保留已渲染的更早部分（用户上滚加载过的内容
+    // 不能因实时刷新丢失），因此渲染范围取并集 —— 否则游标前移后再上滚会
+    // 把已存在的旧消息重复插入。
+    removeServerRowsFrom(w.start);
+    screenEl.insertBefore(htmlToFragment(serverMessagesHtml(messages, w.start)), firstPendingRow());
+    loadedStart = Math.min(loadedStart, w.start);
+    loadedEnd = Math.max(loadedEnd, w.end);
+  }
+  serverMessageTotal = w.total;
+  olderExhausted = loadedStart <= 0;
+  syncOlderHint();
+  renderPendingPrompts(seenUser);
   refreshToolOutputToggles();
+}
+
+// 顶部提示行：请求进行中显示「加载更早消息…」；空闲但仍存在更早消息时提示
+// 「上滚加载更早消息」（否则用户不知道上方还有历史）；已到最早一条时移除。
+function updateOlderHint(mode) { // mode: "loading" | "idle" | "none"
+  if (!screenEl || !screenEl.insertBefore) { return; }
+  if (mode === "none") {
+    if (convLoadOlderEl && convLoadOlderEl.parentNode) {
+      convLoadOlderEl.parentNode.removeChild(convLoadOlderEl);
+    }
+    return;
+  }
+  if (!convLoadOlderEl) {
+    convLoadOlderEl = document.createElement("div");
+    convLoadOlderEl.className = "conv-load-older";
+  }
+  convLoadOlderEl.textContent = (mode === "loading") ? "加载更早消息…" : "↑ 上滚加载更早消息";
+  if (!convLoadOlderEl.parentNode) {
+    screenEl.insertBefore(convLoadOlderEl, screenEl.firstChild);
+  }
+}
+
+// 依据窗口状态刷新顶部提示行（每次窗口变化后调用）。
+function syncOlderHint() {
+  if (loadingOlder) { updateOlderHint("loading"); }
+  else if (!olderExhausted && loadedStart > 0) { updateOlderHint("idle"); }
+  else { updateOlderHint("none"); }
+}
+
+// 更早一页插到窗口前部（指示行之后、已有服务端/pending 行之前）。
+function insertOlderRows(messages, startIdx) {
+  if (!screenEl) { return; }
+  var anchor = null;
+  if (screenEl.querySelector) {
+    anchor = screenEl.querySelector("[data-msg-index]") || firstPendingRow();
+  }
+  if (!anchor && screenEl.textContent === "(empty)") { screenEl.innerHTML = ""; }
+  screenEl.insertBefore(htmlToFragment(serverMessagesHtml(messages, startIdx)), anchor);
+}
+
+// 上滚加载更早一页：以 loadedStart 为游标（msg_before），返回后前插并补偿
+// scrollTop（插入前后 scrollHeight 差值），保持用户当前阅读位置不跳动。
+export function loadOlderMessages() {
+  if (!screenEl || loadingOlder || olderExhausted || loadedStart <= 0) { return; }
+  loadingOlder = true;
+  syncOlderHint();
+  var cursor = loadedStart;
+  var url = "/web/api/screen?format=json&msg_limit=" + MSG_OLDER_PAGE_LIMIT +
+    "&msg_before=" + cursor;
+  fetch(url, { cache: "no-store" })
+    .then(function (res) { return res.ok ? res.json() : null; })
+    .then(function (data) {
+      loadingOlder = false;
+      if (!data || !data.available || !Array.isArray(data.messages) || !data.messages.length) {
+        olderExhausted = true; // 无更早内容（会话被压缩/清空）：停止继续请求
+        syncOlderHint();
+        return;
+      }
+      var w = parseMessageWindow(data.message_window, data.messages.length);
+      // 只接受「严格更早、且与已渲染区间相邻」的一页：
+      //   w.start >= cursor → 没有更早内容（游标未前进）
+      //   w.end !== cursor  → 与已渲染区间重叠（会重复）或断开（会话被压缩/重写）
+      // 异常情况一律停止继续上滚，交给下一次 refreshScreen 整体重建。
+      if (w.start >= cursor || w.end !== cursor) {
+        olderExhausted = true;
+        syncOlderHint();
+        return;
+      }
+      var prevTop = conversationEl ? conversationEl.scrollTop : 0;
+      var prevHeight = conversationEl ? conversationEl.scrollHeight : 0;
+      insertOlderRows(data.messages, w.start);
+      loadedStart = w.start;
+      if (w.total > 0) { serverMessageTotal = w.total; }
+      olderExhausted = w.start <= 0;
+      syncOlderHint();
+      if (conversationEl) {
+        // 前插内容把下方内容整体下移：补偿等量 scrollTop，视野停留在原处。
+        conversationEl.scrollTop = prevTop + (conversationEl.scrollHeight - prevHeight);
+      }
+      refreshToolOutputToggles();
+      updateScrollBtn();
+      maybeFillViewport(); // 一页仍不足一屏时继续向上取
+    })
+    .catch(function (err) {
+      loadingOlder = false;
+      syncOlderHint();
+      console.error("older messages fetch failed:", err);
+    });
+}
+
+// 上滚接近顶部（阈值内）时自动加载更早消息。
+function maybeLoadOlderOnScroll() {
+  if (!conversationEl) { return; }
+  if (conversationEl.scrollTop > SCROLL_LOAD_THRESHOLD) { return; }
+  loadOlderMessages();
+}
+
+// 窗口内容不足一屏时（无滚动条，用户无法上滚触发加载）继续向上取，
+// 直到填满视口或取完最早一条。
+function maybeFillViewport() {
+  if (!conversationEl || loadingOlder || olderExhausted || loadedStart <= 0) { return; }
+  if (conversationEl.scrollHeight <= conversationEl.clientHeight + 8) {
+    loadOlderMessages();
+  }
+}
+
+// ---- 会话复制 ----
+
+// 已渲染行 → 文本（按 DOM 顺序 = 对话时序）。推理内容在折叠面板内
+// （.reasoning-content），加前缀保留语义；工具输出取 .tool-output 内容
+// （排除 toggle 控件文字）；其余角色取 .msg-body 正文。
+function domConversationText() {
+  var rows = screenEl.querySelectorAll(".msg-row");
+  if (!rows.length) { return screenEl.textContent || ""; }
+  var parts = [];
+  rows.forEach(function (row) {
+    var reasoningEl = row.querySelector(".reasoning-content");
+    if (reasoningEl) {
+      parts.push("[推理] " + reasoningEl.textContent);
+      return;
+    }
+    var toolOutputEl = row.querySelector(".tool-output");
+    if (toolOutputEl) {
+      parts.push(toolOutputEl.textContent);
+      return;
+    }
+    var bodyEl = row.querySelector(".msg-body");
+    if (bodyEl) { parts.push(bodyEl.textContent); }
+  });
+  return parts.join("\n\n");
+}
+
+// 本地窗口是否只覆盖会话的一部分（长会话首屏 / 未一直上滚到最早一条）。
+function isWindowPartial() {
+  if (loadedStart > 0) { return true; }
+  return serverMessageTotal > 0 && loadedEnd < serverMessageTotal;
+}
+
+// 复制用文本：窗口完整时按 DOM 收集（保留 [推理] 前缀等既有格式）；
+// 窗口只覆盖一部分时改取服务端完整 transcript（不传窗口参数 = 全量），
+// 否则「复制」在长会话下只会复制到已加载的一页。取回前仍以 DOM 文本兜底。
+function copyConversationText(done) {
+  if (!isWindowPartial()) { done(domConversationText()); return; }
+  fetch("/web/api/screen?format=json", { cache: "no-store" })
+    .then(function (res) { return res.ok ? res.json() : null; })
+    .then(function (data) {
+      var full = (data && typeof data.text === "string") ? data.text : "";
+      done(full || domConversationText());
+    })
+    .catch(function () { done(domConversationText()); });
+}
+
+// 写剪贴板 + toast 反馈。
+function writeClipboardText(text) {
+  if (!text || text === "(empty)") { return; }
+  if (!navigator.clipboard) { showToast("复制失败", "error"); return; }
+  navigator.clipboard.writeText(text).then(function () {
+    showToast("会话内容已复制", "ok");
+  }).catch(function () {
+    showToast("复制失败", "error");
+  });
 }
 
 // 立即追加一条本地 user pending 气泡（乐观回显，不等服务端回合）。
@@ -219,9 +505,12 @@ export function dropPendingUserPrompt(text) {
 // 正在显示的流式气泡（hideStreamMessage 会终止实时渲染视图）。
 export function refreshScreen(forceClear, options) {
   var keepStream = !!(options && options.keepStream);
-  fetch("/web/api/screen?format=json", { cache: "no-store" })
+  var seq = ++screenReqSeq;
+  // 只取最新一页（msg_limit）；更早的消息由上滚懒加载（loadOlderMessages）。
+  fetch("/web/api/screen?format=json&msg_limit=" + MSG_WINDOW_LIMIT, { cache: "no-store" })
     .then(function (res) { return res.ok ? res.json() : null; })
     .then(function (data) {
+      if (seq !== screenReqSeq) { return; } // 过期响应（会话已切换/已有更新请求）丢弃
       loadRuntimeMeta(); // 会话切换/命令执行后同步 provider/model/reasoning 权威值
       if (!data || !data.available) {
         // 无可用屏幕快照（无 surface / 空帧）：保留 screenEl 已有内容
@@ -229,24 +518,29 @@ export function refreshScreen(forceClear, options) {
         // 会话切换（新建/恢复）后旧会话内容不应残留：forceClear 时清空。
         if (forceClear) {
           screenEl.textContent = "";
+          resetConversationWindow();
+          userScrolledAway = false; // 新会话：从最新处开始
           hideStreamMessage();
         }
-        scrollToBottom();
+        scrollToBottom(forceClear);
         updateWelcome();
         return;
       }
       // 结构化消息可用（推荐路径）：角色气泡渲染；否则回退纯文本快照。
       if (Array.isArray(data.messages) && data.messages.length > 0) {
-        renderConversationMessages(data.messages);
+        applyServerWindow(data.messages, data.message_window);
       } else {
         screenEl.textContent = data.text || "";
+        resetConversationWindow();
       }
       if (!keepStream) {
         hideStreamMessage();
       }
-      // 尊重用户滚动位置：若用户上滚阅读历史，不强制拉底（G3）。
-      scrollToBottom();
+      // 尊重用户滚动位置：若用户上滚阅读历史，不强制拉底（G3）；
+      // 会话切换（forceClear）后强制回到最新。
+      scrollToBottom(forceClear);
       updateWelcome();
+      maybeFillViewport(); // 窗口不足一屏时继续向上补，直到可滚动或取完
     })
     .catch(function (err) {
       // 网络错误：保留现有内容，不覆盖。
@@ -407,6 +701,8 @@ export function initChat() {
       e.preventDefault();
       screenEl.textContent = "";
       localPendingPrompts = [];
+      resetConversationWindow();
+      userScrolledAway = false;
       clearStreamMessage();
       updateWelcome();
       scrollToBottom(true);
@@ -442,6 +738,7 @@ export function initChat() {
       var atBottom = conversationEl.scrollHeight - conversationEl.scrollTop - conversationEl.clientHeight < 40;
       userScrolledAway = !atBottom;
       updateScrollBtn();
+      maybeLoadOlderOnScroll(); // 上滚接近顶部：懒加载更早消息
     });
     // ---- 工具输出展开/收起（「工具」抬头行控件，事件委托 + 键盘可达）----
     conversationEl.addEventListener("click", function (e) {
@@ -478,38 +775,8 @@ export function initChat() {
   // 会话复制按钮
   if (screenCopyBtn) {
     screenCopyBtn.addEventListener("click", function () {
-      var text = "";
-      var rows = screenEl.querySelectorAll(".msg-row");
-      if (rows.length) {
-        var parts = [];
-        rows.forEach(function (row) {
-          // 推理内容在折叠面板内（.reasoning-content），加前缀保留语义；
-          // 工具输出取 .tool-output 内容（排除 toggle 按钮文字）；
-          // 其余角色取 .msg-body 正文。按 DOM 顺序（= 对话时序）收集。
-          var reasoningEl = row.querySelector(".reasoning-content");
-          if (reasoningEl) {
-            parts.push("[推理] " + reasoningEl.textContent);
-            return;
-          }
-          var toolOutputEl = row.querySelector(".tool-output");
-          if (toolOutputEl) {
-            parts.push(toolOutputEl.textContent);
-            return;
-          }
-          var bodyEl = row.querySelector(".msg-body");
-          if (bodyEl) { parts.push(bodyEl.textContent); }
-        });
-        text = parts.join("\n\n");
-      } else {
-        text = screenEl.textContent || "";
-      }
-      if (!text || text === "(empty)") { return; }
-      if (!navigator.clipboard) { showToast("复制失败", "error"); return; }
-      navigator.clipboard.writeText(text).then(function () {
-        showToast("会话内容已复制", "ok");
-      }).catch(function () {
-        showToast("复制失败", "error");
-      });
+      // 窗口只覆盖一部分时先取回完整 transcript（见 copyConversationText）。
+      copyConversationText(writeClipboardText);
     });
   }
   // 欢迎页示例按钮

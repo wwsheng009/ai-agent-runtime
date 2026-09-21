@@ -66,12 +66,16 @@ func writeWebAPIJSON(w http.ResponseWriter, statusCode int, data interface{}) {
 //   - ?format=text（默认）：纯文本面板内容
 //   - ?format=json：结构化 JSON 快照
 //   - ?tail=N：只返回末尾 N 行（长会话下避免整屏搬运；N 钳制到 [1, 2000]）
+//   - ?msg_limit=N / ?msg_before=M：只物化窗口内的结构化消息（分页拉取历史，
+//     O(窗口) 而非 O(总量)；响应含 message_window 元信息）
 //
 // web 客户端展示的是完整聊天历史，而非终端视口帧：使用
-// buildChatWebScreenSnapshot（完整语义 transcript 派生），避免 resume
+// buildChatWebScreenSnapshotFor（完整语义 transcript 派生，窗口激活时只提取
+// 窗口内消息），避免 resume
 // 历史会话后视口裁剪导致只显示最后一个 turn。
 func HandleChatWebAPIScreen(w http.ResponseWriter, r *http.Request) {
 	tail := chatWebScreenTailParam(r)
+	window := chatWebMessageWindowParam(r)
 	// view=tui：返回终端视口的真实合成帧（与 /debug/chat/screen 同源），
 	// 供远程调用方获取"用户当前实际看到的 TUI 界面渲染"，而不是 web 客户端
 	// 使用的完整语义 transcript（默认视图，见下方注释）。
@@ -99,7 +103,7 @@ func HandleChatWebAPIScreen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Query().Get("format") == "json" {
-		body, err := marshalChatWebScreenJSON()
+		body, err := marshalChatWebScreenJSONWindow(window)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusInternalServerError)
@@ -111,7 +115,7 @@ func HandleChatWebAPIScreen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	snap := buildChatWebScreenSnapshot()
+	snap := buildChatWebScreenSnapshotFor(window)
 	if !snap.Available {
 		_, _ = w.Write([]byte("Debug Screen: " + snap.Reason + "\n"))
 		return
@@ -151,6 +155,31 @@ func chatWebApplyScreenTail(snap *chatDebugScreenSnapshot, n int) {
 	}
 	snap.Lines = snap.Lines[len(snap.Lines)-n:]
 	snap.Text = strings.Join(snap.Lines, "\n")
+}
+
+// chatWebMessageWindowParam 解析 ?msg_limit=N&msg_before=M（结构化 messages
+// 分页窗口）。缺省/非法值按"未指定"处理（保持完整 transcript 的历史行为）；
+// msg_limit 钳制到 [1, chatWebMessageWindowMaxLimit]。
+func chatWebMessageWindowParam(r *http.Request) chatWebMessageWindow {
+	var window chatWebMessageWindow
+	if r == nil {
+		return window
+	}
+	query := r.URL.Query()
+	if raw := strings.TrimSpace(query.Get("msg_limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			if n > chatWebMessageWindowMaxLimit {
+				n = chatWebMessageWindowMaxLimit
+			}
+			window.Limit = n
+		}
+	}
+	if raw := strings.TrimSpace(query.Get("msg_before")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			window.Before = n
+		}
+	}
+	return window
 }
 
 // chatWebTailTextLines 返回文本末尾 n 行（n<=0 或行数不足时原样返回）。

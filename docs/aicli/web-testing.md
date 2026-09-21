@@ -96,6 +96,12 @@ aicli chat --pprof
       `Enter`/`Space` 等效。内容过短（不溢出）时抬头只显示「工具」纯文本，控件隐藏且不可点击。
       会话复制（⧉ 复制）提取完整工具输出文本，不含抬头控件文字与 ▼/▲ 图标。
 
+- [ ] **长会话窗口化**（消息懒加载）：会话超过 40 条消息时，首屏只渲染最新一页（`msg_limit=40`），
+      对话区顶部出现「↑ 上滚加载更早消息」提示行；上滚到顶部附近自动加载更早一页（`msg_before` 游标，
+      请求中提示变「加载更早消息…」），插入后视野停在原处不跳动；加载到最早一条后提示行消失，
+      再上滚不再发请求。实时刷新/流式回合结束后已加载的更早内容不丢失、不重复。
+      会话复制（⧉ 复制）在只加载了部分消息时仍复制**完整**会话（服务端全量 transcript）。
+
 - [ ] Provider / Reasoning 原生 `<select>` 可切换，当前生效配置（`openai · gpt-4o`）随之更新。
 - [ ] Model 字段：直接输入自定义模型名可生效；点 ▼ 弹出全量模型列表，**向上展开**（`bottom: calc(100% + 4px)`），当前模型高亮 + "当前"徽标、默认模型带"默认"徽标；徽标显示"共 N 个"。
 - [ ] Model 输入框聚焦/输入时**不应**出现原生 datalist 下拉（`list` 属性已移除，避免与自定义 popup 叠成双层）。
@@ -194,6 +200,7 @@ node --check backend/cmd/aicli/commands/web/app.js
 # 4. 页签行为沙盒（Node，stub document/fetch，无需浏览器；在仓库根目录运行）：
 node scripts/verify-micro-web-skills-tab.mjs   # 技能页签：列表/会话感知/详情分组页签与键盘导航/错误/竞态/页签接线
 node scripts/verify-micro-web-tool-output.mjs  # 工具输出折叠/展开：抬头控件（文字 + ▼/▲ 图标）在「工具」行内、默认折叠（≤5 行）、溢出判定、点击/键盘切换、控件隐藏时不响应、复制不含控件文字
+node scripts/verify-micro-web-msg-window.mjs   # 长会话窗口化：首屏只渲染最新一页、尾部增量替换与窗口右移保留历史、上滚以 msg_before 前插并补偿 scrollTop、到顶停止、pending 气泡确认、游标异常守卫
 ```
 
 模块化后另有一层静态检查：用带 DOM stub 的 Node 脚本对 `app.js` 入口做动态 `import()`，可在不启浏览器的情况下抓出语法错误、缺失导出、模块求值期错误（拆分落地时即靠它在浏览器回归前拦截了两处问题）。检查思路：stub `document/window/localStorage/fetch/EventSource` 后 `await import("./app.js")`，任何模块图断裂都会在这里抛错。
@@ -201,6 +208,8 @@ node scripts/verify-micro-web-tool-output.mjs  # 工具输出折叠/展开：抬
 页签栏「上下滚动条」这类纯布局问题在沙盒里量不出来，本地改用真实 Chromium 量盒模型：`web/tmp/measure-skill-tabs-scroll.mjs`（同目录已 gitignore、不随仓库发布）把 `style.css` 内联进 `index.html`，注入页签后打印页签栏的 `clientHeight` / `scrollHeight` 与滚动条占位像素，并扫描整个详情弹层找出所有纵向滚动容器；脚本尾部还会把旧写法注入回来做对照，确认测量方法本身捕捉得到这条滚动条。
 
 `scripts/verify-micro-web-skills-tab.mjs` 即按此思路写成：它 stub `document`（含 `documentElement` / `body` / 元素 `classList` / `querySelector(All)`）与 `fetch`，先单测 `js/skills.js` 的行为（含详情分组页签：只生成非空分组、只渲染当前页签、点击与 `← → Home End` 导航、打开聚焦选中页签、关闭把焦点还给列表条目、缺字段不补默认值），最后 `import` `js/ui.js` 并点一次 `#tab-skills-btn`，验证按钮 → 激活面板 → 拉取目录的接线。缓存页签有同思路的本地沙盒脚本（`web/tmp/cache-session-aware.verify.cjs`，该目录已 gitignore、不随仓库发布）。
+
+`scripts/verify-micro-web-msg-window.mjs` 自带一套迷你 DOM（含 `className` ↔ `class` 映射、`scrollHeight` / `clientHeight` 与插入后撑高容器的高度记账），用来验证 `js/chat.js` 的消息窗口状态机：行索引与 `serverMessagesHtml` 的绝对索引、`parseMessageWindow` / `shouldRebuildForWindow` 的分支判定、首屏只渲染最新一页（不随会话总 turn 数增长）、尾部增量替换不重建既有节点（以节点身份断言）、窗口右移时保留已加载的早期节点、上滚以 `msg_before` 前插且按插入高度补偿 `scrollTop`、到达最早一条后停止、实时刷新不与已加载历史重复、pending 气泡随服务端窗口确认释放、服务端返回重叠/断开一页时的游标守卫（不重复插入且停止继续上滚），以及会话复制的取材：窗口不完整时取服务端全量 transcript，窗口已覆盖全部消息时不发额外请求、仍按 DOM 顺序收集（保留 `[推理]` 前缀等既有格式）。`fetch` 在该沙盒里是同步消费预置队列的，因此任何会触发请求的操作前必须先 `screenQueue.push(...)`。
 
 ## 5. 已知问题（拆分时保持原行为，未修）
 
