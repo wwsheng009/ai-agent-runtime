@@ -15,7 +15,6 @@ import {
   isRuntimeTrajectoryEvent,
   nextRecoveryAfter,
   runtimeEventToTrajectoryPush,
-  runtimeToolEventToTrajectoryPush,
   SUBAGENT_PROGRESS_EVENT_TYPE,
   subagentProgressEventToTrajectoryPush,
   TOOL_PROGRESS_EVENT_TYPE,
@@ -143,7 +142,7 @@ describe("trajectoryEventAction：可渲染 push / 过滤事件 skip 空洞 / �
     } as SessionRuntimeEvent);
     if (failed.kind === "push") {
       expect(failed.push.kind).toBe("tool_end");
-      expect(failed.push.payload.tool.error).toBe("timeout");
+      expect(failed.push.payload.tool).toMatchObject({ error: "timeout" });
     }
   });
 

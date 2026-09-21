@@ -119,9 +119,6 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "subagent.batch.completed": ["tail_only"],
   "subagent.batch.progress": ["live_only"],
   "subagent.batch.started": ["tail_only"],
-  // 生产者落盘 + 尾巴补发（A+D 双通道）：agent-controller 在子会话终态时把生命周期
-  // 摘要直接写进父会话库，同时经总线发布供尾巴帧消费；写侧由 ProducerPersistedEvent
-  // 去重（同 backend/internal/events/contract.go 的 subagent.completed 说明）。
   "subagent.completed": ["session_store", "tail_only"],
   "subagent.progress": ["live_only"],
   "subagent.started": ["tail_only"],

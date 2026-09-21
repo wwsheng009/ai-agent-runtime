@@ -207,7 +207,9 @@ function FlowCard({
         <ul className="mt-2 space-y-1">
           {rows.map((row) => {
             // 已知 label key 走 i18n 映射；未知 key 由 missingKeyHandler 回显原文。
-            const label = row.label.includes(".") ? t(row.label) : row.label;
+            const label = row.label.includes(".")
+              ? (t(row.label as never) as string)
+              : row.label;
             return (
               <li
                 key={row.key}
