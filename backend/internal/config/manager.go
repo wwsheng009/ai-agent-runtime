@@ -14,6 +14,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
+	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	runtimeobserve "github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
 	"gopkg.in/yaml.v3"
 )
@@ -56,6 +57,11 @@ type RuntimeConfig struct {
 	// Observe Runtime Observation Plane 配置（默认关闭；启用后注册
 	// /api/runtime/observe/v1 观测路由并订阅 runtime event bus）。
 	Observe runtimeobserve.Config `yaml:"observe" json:"observe"`
+
+	// Knowledge 知识层配置（Phase 0 交付 1）。默认 mode=off：知识层代码可以
+	// 存在，但完全不参与任何路径（04 §5 排期铁律 ③）。Workspace 由运行时按
+	// 当前工作区注入，不出现在配置文件里。
+	Knowledge knowledge.Config `yaml:"knowledge" json:"knowledge"`
 }
 
 // AgentConfig Agent 配置
@@ -554,7 +560,8 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 			Mode:    "canary",
 			Percent: 0,
 		},
-		Observe: runtimeobserve.DefaultConfig(),
+		Observe:   runtimeobserve.DefaultConfig(),
+		Knowledge: knowledge.DefaultConfig(),
 	}
 }
 
@@ -925,6 +932,27 @@ func ValidateRuntimeConfig(config *RuntimeConfig) error {
 	}
 	if err := ValidateRolloutConfig(&config.Rollout, config.Version); err != nil {
 		return err
+	}
+	if err := ValidateKnowledgeConfig(&config.Knowledge); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ValidateKnowledgeConfig 校验知识层配置。
+//
+// 只校验能从配置文件读到的部分：mode 必须可解析、限额不能为负。workspace 由
+// 运行时注入（knowledge.Config.Workspace 带 `yaml:"-"`），因此不在这里要求；
+// mode != off 却没有 workspace 的错误由 knowledge.Open 在真正启用时报出。
+func ValidateKnowledgeConfig(config *knowledge.Config) error {
+	if config == nil {
+		return nil
+	}
+	if _, err := knowledge.ParseMode(string(config.Mode)); err != nil {
+		return errors.New(errors.ErrValidationFailed, "knowledge mode must be off, shadow, or on")
+	}
+	if config.MaxFileBytes < 0 || config.MaxDBSizeMB < 0 {
+		return errors.New(errors.ErrValidationFailed, "knowledge limits cannot be negative")
 	}
 	return nil
 }

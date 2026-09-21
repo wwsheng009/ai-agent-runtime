@@ -16,7 +16,7 @@
 | 评审者 | `04` §2 / §6 / 附录 B，配合本文 §3 |
 | 新人 | `README.md` §2 → 本文 §1、§2 |
 
-**一句话状态**：评审完成，**尚未开工**（Phase 0 未开始）；7 条 ADR 全部 `Proposed`，其中 `0001`、`0007` 是 Phase 1 的硬门禁。
+**一句话状态**：Phase 0 **进行中**（2026-09-20 起）——5 项交付里 1 / 2 / 4 已落地，3（基线报告）索引侧已实测、任务侧待跑，5 未开始；7 条 ADR 仍全部 `Proposed`，其中 `0001`、`0007` 是 Phase 1 的硬门禁。
 
 ---
 
@@ -26,7 +26,7 @@
 
 | Phase | 内容 | 状态 | 进入条件 |
 |---|---|---|---|
-| 0 | 基线与契约 | 未开始 | 无（可立即开工） |
+| 0 | 基线与契约 | **进行中** | 无（可立即开工） |
 | 1 | 索引 MVP（shadow） | 未开始 | ADR-0001、ADR-0003（口径）、ADR-0007 被 Accept |
 | 2 | Exploration Memory + Planner | 未开始 | ADR-0004 Accept；Phase 1 验收通过 |
 | 3 | Code API 与工具面收敛 | 未开始 | Phase 2 验收通过 |
@@ -108,11 +108,19 @@
   2. `usageledger` 扩展 9 个字段：`exploration_tokens`、`reuse_tokens`、`index_lookup_count`、`index_hit`、`fallback_count`、`unsafe_reuse_count`、`tool_calls_per_task`、`repeated_read_count`、`knowledge_version_mismatch_count`。
   3. 基线报告：本仓库（排除 `node_modules` / `dist` / `.aicli`）+ 1 个外部 Go 仓库，跑 5–10 个代表任务，记录 token 构成、工具调用数、重复读取次数、p95 延迟。
   4. v1 DDL（`04` §4.3）+ `schema_migrations` + 迁移脚本骨架（接入 `internal/migrate`）。
-  5. 与 4 份相邻计划的交叉评审（见 §8）。
+  5. 与相邻计划的交叉评审（见 §8；§8 表列 5 行）。
 - **文件落点**：新增 `backend/internal/knowledge/{models,config,version,store,telemetry}.go`、`migrations/0001_init.sql`；修改 `backend/internal/usageledger/sqlite_store.go`、`backend/internal/usageanalytics/*`、`backend/internal/sqliteutil/sqliteutil.go`、`backend/internal/migrate/*`、`backend/configs/*.yaml`；文档治理 `00` / `01` / `02` / `03`。
 - **验收门槛**：能回答"每个任务平均多少 token 花在探索 / 重复读取"，且数字可由 ledger **复算**（同一份数据两次计算结果一致）；`mode=off` 下全量回归与改动前一致；schema 能被 `sqliteutil.OpenFileCtx` 打开，无 `database is locked`、无 `PRAGMA` 报错。
 - **回滚**：删除 knowledge 包与配置项，零行为影响。
-- **状态**：未开始。
+- **状态**：**进行中**（2026-09-20）。
+  1. ✅ `knowledge.mode = "off"` 默认值 —— `knowledge/config.go` + `configs/*.yaml`，用例 `knowledge_config_test.go`。
+  2. ✅ `usageledger` 9 个归因字段 —— `sqlite_store.go` 幂等补列（旧库兼容）+ `entity.TokenUsageHistory` + `knowledge/telemetry.go` 采集器。
+  3. 🟡 基线报告 —— **索引侧已完成**（[`reports/phase0_baseline_report.md`](reports/phase0_baseline_report.md)：本仓库 3860 文件 / 146.9s / 247.5 MiB / 覆盖率 100%；外部 gin 99 文件、prometheus 1010 文件，见报告 §2.4）；任务侧 5–10 个代表任务待跑（原因与步骤见报告 §6）。
+  4. ✅ v1 DDL + `schema_migrations` + 迁移骨架 —— `knowledge/migrations/0001_init.sql`（`internal/migrate/*` 无需改动）。
+  5. ✅ 与相邻计划的交叉评审 —— 完成，见 [`reports/phase0_cross_review.md`](reports/phase0_cross_review.md)。结论：4 份计划均无实现层冲突（composer 计划已显式把"内容检索/索引"划给本方案）；发现 1 处**命名撞车**（`cache_entries`，见 §8 已修）与 1 处**跨文档 schema 命名漂移**（`refs`/`references`、`symbols_fts`/`symbol_fts`，属 ADR-0001/0007 的 Phase 1 硬门禁）。
+
+  实测副产物：修掉两个会让索引"少干活却看起来达标"的缺陷——`stable_key` 缺 `namespace`（35% 文件的符号与引用整份丢失）与**局部变量被当成符号**（5080 行身份合并；builtin/3 起降到 732 行）。见 `CHANGELOG.md` 2026-09-20 两条与报告 §4.1 / §4.4。
+  门槛预判：Phase 1 的"首次全量 ≤ 120s""DB ≤ 200MB"两条**初值已被本仓库实测击穿**（146.9s / 247.5 MiB）；3 个仓库对照（报告 §2.4）显示成本应按"每 ref"表达，§5 建议改为"≤ 0.6ms × refs 且 ≤ 300s""≤ 1 KiB × refs 且 ≤ 300MB"，定稿需 `04` §7.4 评审。
 
 ### Phase 1 — 索引 MVP（只读，影子模式）
 
@@ -380,7 +388,7 @@ Phase 3 (Code API / 工具面)  ◄────────────  Phase 5
 | `docs/plan/aicli-tool-capability-convergence-plan.md` | 工具命名与优先级以其为准；本方案只补 `code.*` 的索引侧语义与降级协议 |
 | `docs/plan/tool-output-artifact-cascade-audit-and-optimization-plan-20260919.md` | 工具输出归档 / 截断以其为准；本方案复用 `internal/artifact`。**L4 ↔ `view` 契约（已实现）**：`view` 的默认窗口 `viewDefaultLimit` 已刻意收窄，避免 L4 按其 `ModelToolTextByteBudget`（默认 12 KiB）静默二次截断 `view` 文本、把模型推去 `artifact_read` 字节分页而绕过 `view` 自身的 `offset`/`limit` 续读协议；`view` 用 `is_truncated` / `long_lines_truncated` 声明"还有更多"，`agent/tool_runtime_events.go` 经 `truncatedToolMetadata(metadata["is_truncated"])` 透传。 |
 | `docs/plan/composer-at-file-reference-workspace-search-plan.md` | 工作区搜索 UI / 交互以其为准；本方案提供可选索引后端 |
-| `docs/plan/llm-cache-analytics-unified-plan.md` | 缓存与分析口径以其为准；`cache_entries` 需对齐其 cache key 规范 |
+| `docs/plan/llm-cache-analytics-unified-plan.md` | 缓存与分析口径以其为准。**注意**：该计划定义的是 LLM prompt cache（`prompt_cache_key` / `prompt_cache_epoch` / `prompt_fingerprint`，均为事件载荷字段），**不定义任何表**；知识层的 `cache_entries`（`cache_type ∈ retrieval\|compile\|summary`，键含 `knowledge_version`）是另一个概念、另一个 DB、另一套失效规则，不得绑到 prompt cache 代际语义上（见 `reports/phase0_cross_review.md` §2.4） |
 | `docs/plan/session-usage-analytics-and-agent-diagnostics-plan.md` | 指标埋点与展示以其为准；本方案只新增探索归因字段 |
 | `docs/plan/codex-compact-token-usage-observation-analysis.md` | 压缩策略以其为准；本方案复用 `compactruntime` |
 | `docs/plan/agent-trajectory-view-implementation-plan.md` | 轨迹展示以其为准；`exploration_*` 表可作为其数据源 |

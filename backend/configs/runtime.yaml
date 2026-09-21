@@ -79,3 +79,12 @@ sessionRuntime:
   #   size: 4              # 读连接上限；仅文件库（WAL）生效，<=0 取默认 4
   #   busyTimeout: 5s      # 读连接 busy_timeout；缺省继承 store 的 busyTimeout
   #   operationTimeout: 3s # 单次读操作上限；应小于写侧默认 10s（长读会拖住 WAL checkpoint）
+
+knowledge:
+  # 知识层（docs/knowledge_Layer）总开关。mode=off 是默认值，也是唯一被允许
+  # 出现在本文件里的值：Phase 0 只冻结契约，知识层代码不参与任何路径。
+  # mode: off   —— 关闭（默认；索引不构建、工具面不注册、上下文不注入）
+  # mode: shadow —— 只构建索引与统计，绝不注入 prompt（Phase 1 起）
+  # mode: on    —— 索引 + code.* 工具面 + 上下文注入（Phase 2 起，需 ADR 门禁）
+  # db_path 缺省为 <workspace>/.aicli/knowledge/knowledge.db。
+  mode: off

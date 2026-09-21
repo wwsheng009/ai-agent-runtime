@@ -1297,7 +1297,10 @@ skills_runtime:
     - X-Skills-Auth-Tenant
     - X-Tenant-ID
     - X-Authenticated-Tenant
-  usage_ledger_enabled: ${SKILLS_RUNTIME_USAGE_LEDGER_ENABLED:-false}
+  # Phase 0 任务侧基线前置开关（docs/knowledge_Layer reports/phase0_baseline_report.md §6）；
+  # 默认自身开启。fsync/INSERT 开销见 sqlite_store_bench_test.go；如需关闭设
+  # SKILLS_RUNTIME_USAGE_LEDGER_ENABLED=false。
+  usage_ledger_enabled: ${SKILLS_RUNTIME_USAGE_LEDGER_ENABLED:-true}
   usage_tracking_enabled: ${SKILLS_RUNTIME_USAGE_TRACKING_ENABLED:-true}
   user_claims:
     - user_id
