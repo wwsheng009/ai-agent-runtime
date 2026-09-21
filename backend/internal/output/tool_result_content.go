@@ -764,7 +764,15 @@ func artifactNoticeTail(envelope *Envelope) string {
 		return ""
 	}
 	parts := make([]string, 0, 2)
-	if size := metadataInt(envelope.Metadata, "raw_bytes", "byte_count"); size > 0 {
+	size := metadataInt(envelope.Metadata, "raw_bytes", "byte_count")
+	if window := metadataInt(envelope.Metadata, "output_window_total_bytes"); window > size {
+		// A tool that owns its model-visible window (shell) archives the complete
+		// capture and hands the model only a head, so the pointer must describe
+		// the record rather than the folded body the model already has. Reporting
+		// the folded size here would understate what artifact_read can page back.
+		size = window
+	}
+	if size > 0 {
 		parts = append(parts, "size="+strconv.Itoa(size))
 	}
 	kind := strings.TrimSpace(toolresult.KindFromMetadata(envelope.Metadata))

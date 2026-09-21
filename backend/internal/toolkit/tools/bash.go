@@ -224,7 +224,14 @@ type bashCommandBatchItem struct {
 }
 
 // Execute 实现 Tool 接口
-func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
+//
+// Every return path (single command, batch, hard failure) passes through
+// ownShellOutputWindow: the shell owns its model-visible window, archives the
+// complete capture before folding it, and stamps skip_render_truncation so the
+// render layer never folds shell output a second time.
+func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (result *toolkit.ToolResult, err error) {
+	defer func() { result = ownShellOutputWindow(ctx, "bash", result) }()
+
 	commands, batchRequested, err := parseBashCommandBatch(params)
 	if err != nil {
 		return &toolkit.ToolResult{Success: false, OutputKind: toolresult.KindText, Error: err}, nil
@@ -696,7 +703,9 @@ func buildBashBatchResult(ctx context.Context, parent map[string]interface{}, co
 		"command": strings.Join(commandTexts, "\n"), "commands": commandTexts,
 	}
 	// Batch output declares the shell's own model-visible window (see
-	// buildCommandExecutionMetadata); the render layer folds head-only beyond it.
+	// buildCommandExecutionMetadata). Execute folds the batch body to that window
+	// and stamps the render-layer opt-out before the result leaves the tool, so
+	// this number describes the window the model really gets.
 	metadata[toolresult.MetadataModelVisibleBudgetKey] = shellOutputBudgetBytes
 	if nonZeroExit > 0 {
 		metadata["non_zero_exit_count"] = nonZeroExit
@@ -1351,9 +1360,10 @@ func buildCommandExecutionMetadata(command string, mutatedPaths []string, result
 	}
 	// Shell output owns its model-visible window instead of relying on the
 	// render-layer backstop: the capture limit (256 KiB default) bounds memory,
-	// but the model sees at most shellOutputBudgetBytes, head-only, with the
-	// omitted tail recoverable through artifact_read. Declaring the budget (not
-	// folding here) keeps the archived record complete for that paging.
+	// and ownShellOutputWindow folds the body to shellOutputBudgetBytes
+	// head-only after archiving the complete capture, so the omitted tail stays
+	// pageable with artifact_read. The budget is declared here as well because
+	// the window is a property of the result, not of the fold path.
 	metadata[toolresult.MetadataModelVisibleBudgetKey] = shellOutputBudgetBytes
 	if !result.CaptureLimitDisabled && result.CaptureLimitBytes > 0 {
 		metadata["output_capture_limit_bytes"] = result.CaptureLimitBytes

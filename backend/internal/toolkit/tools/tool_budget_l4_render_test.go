@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -120,6 +122,34 @@ func TestBudgetOwningToolsDoNotTriggerRenderLayerTruncation(t *testing.T) {
 				})
 			},
 		},
+		{
+			// Real execution: the platform shell prints a ~39 KiB fixture file,
+			// which is more than the shell's own 32 KiB window. The payload
+			// lives on disk because passing it on the command line would exceed
+			// the Windows command line limit.
+			name:   "bash",
+			budget: shellOutputBudgetBytes,
+			run: func(t *testing.T) *toolkit.ToolResult {
+				return executeBudgetTool(t, NewBashTool(), map[string]interface{}{
+					"command": shellPrintFileCommand(t, workspace),
+				})
+			},
+		},
+		{
+			// aicli_exec shares ownShellOutputWindow with bash but cannot run a
+			// real child process in a unit test, so the window contract is
+			// exercised through the same entry point the tool's Execute uses.
+			name:   "aicli_exec",
+			budget: shellOutputBudgetBytes,
+			run: func(t *testing.T) *toolkit.ToolResult {
+				return ownShellOutputWindow(context.Background(), "aicli_exec", &toolkit.ToolResult{
+					Success:    true,
+					OutputKind: toolresult.KindText,
+					Content:    strings.Repeat("aicli child output line for budget proof\n", 4*1024),
+					Metadata:   map[string]interface{}{"command": "aicli exec"},
+				})
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -178,6 +208,123 @@ func TestRenderLayerStillFoldsUnstampedOversizedPayload(t *testing.T) {
 		"folded payload must fit the render budget")
 	require.Equal(t, before+1, renderLayerTruncations(),
 		"the fold must be counted exactly once at l4_render")
+}
+
+// TestShellToolsOwnTheirOutputWindow pins the shell window contract end to end:
+// the tool - not the render layer - folds the captured stream, the fold notice
+// states the arithmetic, the complete capture is archived *before* the fold so
+// artifact_read can page the omitted tail, and the result is marked as a window
+// of that record (artifact_source_id) so nothing archives it twice.
+func TestShellToolsOwnTheirOutputWindow(t *testing.T) {
+	store := newArtifactReadTestStore(t)
+	sessionID := "sess-shell-window"
+	ctx := artifactReadContext(store, sessionID)
+	full := strings.Repeat("shell capture line for the window proof\n", 4096) // ~164 KiB
+
+	for _, toolName := range []string{"bash", "aicli_exec"} {
+		t.Run(toolName, func(t *testing.T) {
+			before := renderLayerTruncations()
+
+			result := ownShellOutputWindow(ctx, toolName, &toolkit.ToolResult{
+				Success:    true,
+				OutputKind: toolresult.KindText,
+				Content:    full,
+				Metadata:   map[string]interface{}{"command": "echo fixture"},
+			})
+
+			require.NotNil(t, result)
+			require.True(t, result.Success)
+			require.True(t, toolresult.SkipsRenderTruncation(result.Metadata),
+				"shell output must opt out of render-layer folding: %#v", result.Metadata)
+			require.Equal(t, shellOutputBudgetBytes, result.Metadata[toolresult.MetadataModelVisibleBudgetKey])
+
+			// The tool folded head-only at its own window...
+			require.LessOrEqual(t, len(result.Content), shellOutputBudgetBytes)
+			require.Greater(t, len(result.Content), renderBudgetForBudgetTests)
+			require.True(t, strings.HasPrefix(result.Content, full[:1024]),
+				"the folded body must start with the head of the capture")
+			require.Contains(t, result.Content, "[output window: showing the first ")
+			require.Contains(t, result.Content, "of "+strconv.Itoa(len(full))+" bytes of the captured output")
+			require.Equal(t, true, result.Metadata["truncated"])
+			require.Equal(t, len(full), result.Metadata["output_window_total_bytes"])
+
+			// ...and published the record that holds the rest.
+			id, _ := result.Metadata["artifact_id"].(string)
+			require.True(t, strings.HasPrefix(id, "art_"), "folded shell output must be archived: %#v", result.Metadata)
+			require.Equal(t, id, result.Metadata["artifact_source_id"],
+				"the folded body is a window of its own record, so the gateway must not re-archive it")
+
+			read := executeArtifactRead(t, ctx, map[string]interface{}{
+				"artifact_id": id,
+				"offset":      shellOutputBudgetBytes,
+				"limit":       2048,
+			})
+			require.True(t, read.Success, read.Error)
+			require.Equal(t, full[shellOutputBudgetBytes:shellOutputBudgetBytes+2048],
+				splitArtifactReadWindow(t, read.Content),
+				"artifact_read must page the bytes the fold omitted")
+
+			// The render layer sees a tool-owned payload: no second fold, no
+			// l4_render truncation, and the pointer to the archived capture.
+			rendered := output.RenderToolResultContentForModel(result.Content, "",
+				&output.Envelope{ToolName: toolName, Metadata: result.Metadata})
+			require.NotContains(t, rendered, l4FoldMarker)
+			require.Contains(t, rendered, id)
+			require.Contains(t, rendered, "size="+strconv.Itoa(len(full)),
+				"the pointer must describe the archived capture, not the folded body")
+			require.Equal(t, before, renderLayerTruncations())
+		})
+	}
+}
+
+// TestShellToolsStampOwnershipOnEveryExecutePath proves the wiring: the
+// ownership stamp comes from the tool's own Execute, so no shell return path
+// (single command, batch, or a failed aicli_exec call) can fall back to
+// render-layer folding.
+func TestShellToolsStampOwnershipOnEveryExecutePath(t *testing.T) {
+	t.Run("bash single command", func(t *testing.T) {
+		result := executeBudgetTool(t, NewBashTool(), map[string]interface{}{
+			"command": "echo shell-window-wiring",
+		})
+		require.True(t, toolresult.SkipsRenderTruncation(result.Metadata),
+			"bash single-command path must stamp the opt-out: %#v", result.Metadata)
+	})
+
+	t.Run("bash batch", func(t *testing.T) {
+		result := executeBudgetTool(t, NewBashTool(), map[string]interface{}{
+			"commands": []interface{}{
+				map[string]interface{}{"command": "echo one"},
+				map[string]interface{}{"command": "echo two"},
+			},
+		})
+		require.True(t, toolresult.SkipsRenderTruncation(result.Metadata),
+			"bash batch path must stamp the opt-out: %#v", result.Metadata)
+	})
+
+	t.Run("aicli_exec failure path", func(t *testing.T) {
+		result := executeBudgetTool(t, NewAICLIExecTool(), map[string]interface{}{
+			"prompt":          "noop",
+			"executable_path": filepath.Join(t.TempDir(), "missing-aicli"),
+		})
+		require.False(t, result.Success, "precondition: the missing executable must fail the call")
+		require.True(t, toolresult.SkipsRenderTruncation(result.Metadata),
+			"aicli_exec failure path must stamp the opt-out: %#v", result.Metadata)
+	})
+}
+
+// shellPrintFileCommand writes a payload larger than the shell window into a
+// fixture file and returns the short platform-appropriate command that prints
+// it. The payload lives on disk because handing ~39 KiB to PowerShell on the
+// command line exceeds the Windows command line limit.
+func shellPrintFileCommand(t *testing.T, dir string) string {
+	t.Helper()
+	path := filepath.Join(dir, "shell-window-fixture.txt")
+	payload := strings.Repeat("shell-budget-fixture-line\n", 1500) // ~39 KiB
+	require.NoError(t, os.WriteFile(path, []byte(payload), 0o644))
+	if runtime.GOOS == "windows" {
+		return "Get-Content " + path
+	}
+	return "cat " + path
 }
 
 // renderLayerTruncations reads the l4_render counter from the tool-efficiency

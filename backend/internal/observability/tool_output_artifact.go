@@ -37,6 +37,10 @@ const (
 const (
 	ArchiveLayerGateway   = "gateway"
 	ArchiveLayerShellDisk = "shell_disk"
+	// ArchiveLayerToolWindow counts records a tool stored for its own
+	// model-visible window (the complete capture behind a folded shell payload),
+	// which keeps tool-side archiving visible next to the gateway layer.
+	ArchiveLayerToolWindow = "tool_window"
 
 	TruncationLayerView         = "l1_view"
 	TruncationLayerGrep         = "l1_grep"
