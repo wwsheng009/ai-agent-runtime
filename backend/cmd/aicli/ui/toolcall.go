@@ -27,11 +27,21 @@ type ToolCallDisplay struct {
 	Status       ToolCallStatus
 	Error        error
 	Result       string
+	// Expanded renders the full result body instead of the head/tail display
+	// preview. The caller must still treat Result as untrusted output.
+	Expanded bool
 }
 
 const (
+	// Display budget for a collapsed tool result. These stay in sync with
+	// cell.ToolDisplayPreviewOptions: the transcript fold is a display choice,
+	// and the whole projection is capped at four content lines (the truncation
+	// notice rides on the last of them instead of taking a row of its own).
+	// Keeping the live block at the same height as the committed fold stops a
+	// finished tool call from changing height — or reappearing pre-folded —
+	// when its cell commits to the transcript.
 	toolResultPreviewLines   = 4
-	toolResultPreviewBytes   = 1024
+	toolResultPreviewBytes   = 8 * 1024
 	toolResultPreviewLineLen = 200
 )
 
@@ -78,14 +88,13 @@ func toolDisplayToCell(display *ToolCallDisplay) cell.ToolCell {
 		Status:       st,
 		Error:        display.Error,
 		Result:       display.Result,
-		Preview: cell.PreviewOptions{
-			MaxLines:     6,
-			HeadLines:    4,
-			TailLines:    2,
-			MaxLineWidth: toolResultPreviewLineLen,
-			MaxBytes:     toolResultPreviewBytes,
-			AllowANSI:    false, // untrusted tool/MCP output: never keep raw CSI
-		},
+		Preview: func() cell.PreviewOptions {
+			opts := cell.ToolDisplayPreviewOptions()
+			opts.MaxLineWidth = toolResultPreviewLineLen
+			opts.AllowANSI = false // untrusted tool/MCP output: never keep raw CSI
+			opts.Expanded = display.Expanded
+			return opts
+		}(),
 	}
 }
 

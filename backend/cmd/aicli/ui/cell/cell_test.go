@@ -151,6 +151,49 @@ func TestBuildPreviewHeadTail(t *testing.T) {
 	}
 }
 
+// TestBuildPreviewMarkersAreScopedToTheDisplay pins the wording contract: the
+// head/tail split is a transcript rendering choice, not a tool-result
+// truncation, so both markers must say they describe this preview only. An
+// unqualified "N lines omitted" / "(byte limit)" reads like the model-visible
+// fold notice ("output truncated for history safety") and has already been
+// misdiagnosed as the tool result being cut.
+func TestBuildPreviewMarkersAreScopedToTheDisplay(t *testing.T) {
+	var b strings.Builder
+	for i := 1; i <= 20; i++ {
+		b.WriteString(strings.Repeat("x", 3))
+		b.WriteByte('\n')
+	}
+	lineRes := BuildPreview(b.String(), PreviewOptions{
+		MaxLines:  6,
+		HeadLines: 3,
+		TailLines: 2,
+		MaxBytes:  0,
+	})
+	linePlain := render.PlainBackend{}.Render(render.Document{
+		Blocks: []render.Block{{Lines: lineRes.Lines}},
+	})
+	if !strings.Contains(linePlain, "omitted from this preview (display only)") {
+		t.Fatalf("line marker is not display-scoped: %q", linePlain)
+	}
+
+	byteRes := BuildPreview(strings.Repeat("y", 4096), PreviewOptions{
+		MaxLines:     6,
+		HeadLines:    3,
+		TailLines:    2,
+		MaxLineWidth: 200,
+		MaxBytes:     1024,
+	})
+	if !byteRes.ByteTruncated {
+		t.Fatalf("expected byte truncation, got %+v", byteRes)
+	}
+	bytePlain := render.PlainBackend{}.Render(render.Document{
+		Blocks: []render.Block{{Lines: byteRes.Lines}},
+	})
+	if !strings.Contains(bytePlain, "preview limited to the first 1024 bytes (display only)") {
+		t.Fatalf("byte marker is not display-scoped: %q", bytePlain)
+	}
+}
+
 func TestBuildPreviewUsesTerminalCellWidth(t *testing.T) {
 	res := BuildPreview("中文中文abc", PreviewOptions{
 		MaxLines:     2,
@@ -162,6 +205,39 @@ func TestBuildPreviewUsesTerminalCellWidth(t *testing.T) {
 	}
 	if width := render.LineWidth(res.Lines[0]); width > 6 {
 		t.Fatalf("preview width=%d: %+v", width, res.Lines[0])
+	}
+}
+
+// TestBuildPreviewOmissionMarkerRidesOnTheLastLine pins where the display-only
+// notice belongs: at the end of the last kept line, not on a row of its own
+// between head and tail. A standalone marker row reads as "the result broke off
+// in the middle" instead of "N more lines follow this one", and it also costs
+// the folded block an extra row.
+func TestBuildPreviewOmissionMarkerRidesOnTheLastLine(t *testing.T) {
+	res := BuildPreview(numberedPreviewSource(20), PreviewOptions{
+		MaxLines:     4,
+		HeadLines:    3,
+		TailLines:    1,
+		MaxLineWidth: 200,
+		Hint:         "Ctrl+T 查看完整文本",
+	})
+	if res.OmittedLines == 0 {
+		t.Fatalf("20 lines did not fold under a 4-line budget: %#v", res)
+	}
+	if len(res.Lines) != 4 {
+		t.Fatalf("folded projection = %d rows, want 4 (3 head + 1 tail):\n%s",
+			len(res.Lines), previewPlainText(t, res))
+	}
+	last := previewPlainText(t, PreviewResult{Lines: res.Lines[len(res.Lines)-1:]})
+	for _, want := range []string{"line-19", "omitted from this preview (display only)", "Ctrl+T 查看完整文本"} {
+		if !strings.Contains(last, want) {
+			t.Fatalf("tail row lost %q: %q", want, last)
+		}
+	}
+	for index, line := range res.Lines[:len(res.Lines)-1] {
+		if text := previewPlainText(t, PreviewResult{Lines: []render.Line{line}}); strings.Contains(text, "omitted") {
+			t.Fatalf("omission marker leaked onto row %d instead of the tail row: %q", index, text)
+		}
 	}
 }
 

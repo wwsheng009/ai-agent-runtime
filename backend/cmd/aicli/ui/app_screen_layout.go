@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
 	uidiff "github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/diff"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
@@ -190,6 +191,8 @@ func layoutTranscriptScreenRows(rows []scene.LayoutRow, cells map[scene.CellID]s
 	}
 	fp := themeFingerprint(theme)
 	cache := sharedCellRows
+	// 最近一次折叠：首屏只有它带 Ctrl+T 提示，pager 初始帧也只有它展开。
+	foldTarget := toolFoldTargetRows(rows, cells, mutable)
 	for index := 0; index < len(rows); index++ {
 		row := rows[index]
 		if _, excluded := mutable[row.CellID]; excluded {
@@ -211,6 +214,22 @@ func layoutTranscriptScreenRows(rows []scene.LayoutRow, cells map[scene.CellID]s
 			continue
 		}
 		if _, rendered := renderedStructured[row.CellID]; rendered {
+			continue
+		}
+		if toolCell, found := cells[row.CellID]; found && cellUsesFoldedToolPresentation(toolCell) {
+			// 带提示与不带提示是两种投影内容，必须各自占用缓存条目：否则
+			// 同一份 source 的复用会把提示泄漏到更早的折叠上（或反过来把
+			// 最近一次折叠的提示吃掉）。
+			showHint := row.CellID == foldTarget
+			key := cellLayoutKeyFor(toolCell, width, fp)
+			key.foldHint = showHint
+			cached := cache.get(key)
+			if cached == nil {
+				cached = foldedToolChainScreenRows(toolCell, width, theme, showHint)
+				cache.put(key, cached)
+			}
+			result = appendCachedCellRows(result, row.CellID, cached)
+			renderedStructured[row.CellID] = struct{}{}
 			continue
 		}
 		if cell, found := cells[row.CellID]; found && cellUsesStructuredPresentation(cell) {
@@ -302,6 +321,53 @@ func cellUsesStructuredPresentation(cell scene.TranscriptCell) bool {
 		return markdown.LooksLikeMarkdown(cell.Source)
 	}
 	return cell.Kind == scene.KindAssistant && markdown.LooksLikeMarkdown(cell.Source)
+}
+
+// cellUsesFoldedToolPresentation 判定一个已提交单元格是否为「纯文本工具链」
+// ——工具结果正文直接存在 cell.Source 里的那种形态。这类单元格必须经过显示
+// 预算投影，否则超长结果会把整段正文原样铺进 transcript：既没有折叠标记，
+// 也没有任何「其余内容还在」的提示。
+func cellUsesFoldedToolPresentation(toolCell scene.TranscriptCell) bool {
+	return toolCell.Kind == scene.KindToolChain && toolCell.Presentation.Kind == scene.PresentationPlain
+}
+
+// foldedToolChainScreenRows 用 cell.ToolDisplayPreviewOptions 投影一个已提交
+// 的工具结果单元格（head/tail 折叠 + 仅显示标记）。整个投影最多 4 行（3 行头 +
+// 1 行尾），省略标记贴在尾行行尾，不额外占一行。
+//
+// 折叠是纯显示层的选择：cell.Source 始终保留完整正文，pager（Ctrl+T）渲染
+// 整份 source，因此标记不会变成结果的唯一副本。
+//
+// showHint 只有在 toolCell 是最近一次折叠时才为 true：Ctrl+T 的提示必须与
+// Ctrl+T 的实际行为一致，否则每个折叠都承诺一次「查看完整文本」，而 pager
+// 只会展开其中最新的一次。
+func foldedToolChainScreenRows(toolCell scene.TranscriptCell, width int, theme style.ThemeContext, showHint bool) []AppScreenRow {
+	hint := ""
+	if showHint {
+		hint = toolFoldHint
+	}
+	preview := cell.BuildPreview(toolCell.Source, toolFoldOptions(hint))
+	if len(preview.Lines) == 0 {
+		return nil
+	}
+	// BuildPreview 的消毒路径把每行统一成 RoleTextMuted：正文需要回到工具
+	// 角色（与未折叠时一致），只有折叠标记保持弱化斜体。
+	lines := make([]render.Line, 0, len(preview.Lines))
+	for _, line := range preview.Lines {
+		styled := render.Line{Spans: make([]render.Span, 0, len(line.Spans))}
+		for _, span := range line.Spans {
+			if !span.Style.Italic {
+				span.Style = render.Style{Role: string(style.RoleTool)}
+			}
+			styled.Spans = append(styled.Spans, span)
+		}
+		lines = append(lines, styled)
+	}
+	doc := render.Document{Blocks: []render.Block{{
+		Kind:  render.BlockParagraph,
+		Lines: lines,
+	}}}
+	return documentScreenRows(doc, toolCell, width, theme)
 }
 
 func structuredTranscriptScreenRows(cell scene.TranscriptCell, width int, theme style.ThemeContext) []AppScreenRow {

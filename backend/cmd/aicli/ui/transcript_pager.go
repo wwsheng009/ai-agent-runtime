@@ -55,6 +55,12 @@ type TranscriptPagerModel struct {
 	Revision uint64
 	Cells    []scene.TranscriptCell
 	LiveTail *TranscriptPagerLiveTail
+	// ExpandAll is the user-owned "show every fold in full" view state. The
+	// pager opens with ExpandAll=false: the transcript keeps its display folds
+	// and only the most recent fold is expanded, so Ctrl+T is not an
+	// "expand every message" command. 'e' toggles it, which keeps older folds
+	// reachable instead of turning them into dead ends.
+	ExpandAll bool
 }
 
 type TranscriptPagerLiveTail struct {
@@ -132,6 +138,10 @@ type TranscriptPagerState struct {
 	Anchor       TranscriptPagerAnchor
 	FollowBottom bool
 	Width        int
+	// ExpandAll is the user-owned "show every fold in full" flag, part of the
+	// same durable view state as the anchor. The pager opens with only the most
+	// recent fold expanded; 'e' toggles the rest so older folds stay reachable.
+	ExpandAll bool
 }
 
 func NewTranscriptPagerState() TranscriptPagerState {
@@ -156,13 +166,14 @@ func (m TranscriptPagerModel) Rows(width int) []TranscriptPagerRow {
 		width = 1
 	}
 	rows := make([]TranscriptPagerRow, 0, len(m.Cells)*3)
+	target := toolFoldTarget(m.Cells)
 	var previous *scene.TranscriptCell
 	for index := range m.Cells {
 		cell := &m.Cells[index]
 		if previous != nil && boundary.ResolveGap(previous.BoundaryMeta(), cell.BoundaryMeta()) == boundary.GapOne {
 			rows = append(rows, TranscriptPagerRow{Text: ""})
 		}
-		rows = appendTranscriptPagerCellRows(rows, *cell, width, false)
+		rows = appendTranscriptPagerCellRows(rows, *cell, width, false, m.expandCell(*cell, target))
 		previous = cell
 	}
 	if m.LiveTail != nil {
@@ -175,12 +186,21 @@ func (m TranscriptPagerModel) Rows(width int) []TranscriptPagerRow {
 		if previous != nil && boundary.ResolveGap(previous.BoundaryMeta(), liveCell.BoundaryMeta()) == boundary.GapOne {
 			rows = append(rows, TranscriptPagerRow{Text: ""})
 		}
-		rows = appendTranscriptPagerCellRows(rows, liveCell, width, true)
+		rows = appendTranscriptPagerCellRows(rows, liveCell, width, true, true)
 	}
 	return rows
 }
 
-func appendTranscriptPagerCellRows(rows []TranscriptPagerRow, cell scene.TranscriptCell, width int, live bool) []TranscriptPagerRow {
+// expandCell 决定一个已提交 cell 在 pager 里是否铺开正文。只有最近一次折叠
+// 默认展开；其余折叠保持与首屏一致的收起投影，除非用户显式展开全部。
+func (m TranscriptPagerModel) expandCell(cell scene.TranscriptCell, target scene.CellID) bool {
+	if m.ExpandAll || !cellUsesFoldedToolPresentation(cell) {
+		return true
+	}
+	return cell.ID == target
+}
+
+func appendTranscriptPagerCellRows(rows []TranscriptPagerRow, cell scene.TranscriptCell, width int, live bool, expanded bool) []TranscriptPagerRow {
 	cellRow := 0
 	header := transcriptPagerCellLabel(cell.Kind)
 	if live {
@@ -191,6 +211,20 @@ func appendTranscriptPagerCellRows(rows []TranscriptPagerRow, cell scene.Transcr
 		Text: header,
 	})
 	cellRow++
+	if !expanded {
+		// 收起投影：与首屏同源（head + 带标记的 tail，标记贴在尾行末尾）。
+		// pager 因此不会把每条消息都展开；标记自己给出 pager 的展开键。
+		for _, text := range toolFoldPlainLines(cell.Source, transcriptPagerFoldHint) {
+			for _, part := range wrapTranscriptPagerText(text, max(1, width-2)) {
+				rows = append(rows, TranscriptPagerRow{
+					CellID: cell.ID, CellRevision: cell.Revision, CellRow: cellRow, Live: live,
+					Text: "  " + part,
+				})
+				cellRow++
+			}
+		}
+		return rows
+	}
 	source := strings.ReplaceAll(SanitizeTerminalText(cell.Source), "\r\n", "\n")
 	for _, logical := range strings.Split(source, "\n") {
 		parts := wrapTranscriptPagerText(logical, max(1, width-2))
@@ -408,6 +442,13 @@ func renderTranscriptPagerFrame(model TranscriptPagerModel, state TranscriptPage
 			position = "bottom"
 		}
 		lines[height-1] = "" + position + "  " + transcriptPagerPosition(start, len(rows))
+		// 折叠存在时给出展开键：pager 默认只展开最近一次折叠，更早的折叠
+		// 必须有可达的恢复路径（标记本身只说明「其余内容还在」）。
+		if model.ExpandAll {
+			lines[height-1] += "  e 收起全部"
+		} else if toolFoldTarget(model.Cells) != 0 {
+			lines[height-1] += "  e 展开全部"
+		}
 	}
 	var builder strings.Builder
 	builder.WriteString("\x1b[H")
@@ -597,6 +638,9 @@ func runTranscriptPagerLoop(ctx context.Context, hooks transcriptPagerLoopHooks)
 		if hasViewState {
 			state = viewState
 		}
+		// 展开状态属于视图（用户）而非 transcript：pager 的行集与 reducer
+		// 侧的滚动上限必须由同一份状态导出，否则滚动会按另一个行集夹取。
+		model.ExpandAll = state.ExpandAll
 		viewStateChanged := hasViewState != hasLastViewState ||
 			(hasViewState && viewState != lastViewState)
 		liveID, liveRevision, liveSource := transcriptPagerLiveTailKey(model.LiveTail)
@@ -679,6 +723,10 @@ func transcriptPagerIntentForKey(leaseID uint64, model TranscriptPagerModel, wid
 			return TranscriptPagerScroll{LeaseID: leaseID, Delta: -len(model.Rows(max(1, width)))}
 		case 'G':
 			return TranscriptPagerSetFollowBottom{LeaseID: leaseID, Follow: true}
+		case 'e':
+			// 默认只展开最近一次折叠；这是显式展开/收起全部折叠的入口，
+			// 保证更早的折叠仍然可达。
+			return TranscriptPagerSetExpand{LeaseID: leaseID, Expand: !model.ExpandAll}
 		}
 	}
 	return nil
@@ -727,6 +775,10 @@ func applyTranscriptPagerKey(state *TranscriptPagerState, model TranscriptPagerM
 			state.Scroll(model, width, viewportRows, -len(model.Rows(max(1, width))))
 		case 'G':
 			state.SetFollowBottom(model, width, viewportRows, true)
+		case 'e':
+			// 独立调用方没有 actor 视图状态，展开标志留在本地 pager 状态里。
+			state.ExpandAll = !model.ExpandAll
+			state.Reconcile(model, width, viewportRows)
 		}
 	}
 	return false

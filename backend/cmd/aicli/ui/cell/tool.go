@@ -103,13 +103,10 @@ func (t ToolCell) Document() render.Document {
 	// Success/error body: head/tail preview of result
 	if t.Status == StatusSuccess || (t.Status == StatusError && t.Error == nil && strings.TrimSpace(t.Result) != "") {
 		opts := t.Preview
-		if opts.MaxLines == 0 {
-			opts = DefaultPreviewOptions()
-			// Keep compact tool summaries closer to legacy 4-line default.
-			opts.MaxLines = 6
-			opts.HeadLines = 4
-			opts.TailLines = 2
-			opts.MaxBytes = 1024
+		if opts.MaxLines == 0 && !opts.Expanded {
+			// No explicit budget: fall back to the production display budget so
+			// a folded cell and an expanded cell agree on the fold boundary.
+			opts = ToolDisplayPreviewOptions()
 		}
 		opts.AllowANSI = t.AllowANSIResult
 		preview := BuildPreview(t.Result, opts)

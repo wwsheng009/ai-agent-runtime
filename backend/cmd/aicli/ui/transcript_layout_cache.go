@@ -36,6 +36,9 @@ type cellLayoutKey struct {
 	document         string
 	width            int
 	themeFp          string
+	// foldHint 区分「最近一次折叠」（标记携带 Ctrl+T 恢复提示）与更早的
+	// 折叠（纯标记）。两者正文相同但投影内容不同，必须各自占用缓存条目。
+	foldHint bool
 }
 
 type cachedCellRows struct {
