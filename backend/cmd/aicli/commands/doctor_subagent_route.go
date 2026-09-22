@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
+	"github.com/wwsheng009/ai-agent-runtime/internal/providerhealth"
 )
 
 type doctorSubagentRouteOptions struct {
@@ -43,6 +44,16 @@ type doctorSubagentRouteReport struct {
 	Decision       doctorSubagentRouteDecisionReport  `json:"decision"`
 	Warnings       []string                           `json:"warnings,omitempty"`
 	Providers      []doctorSubagentRouteProviderBrief `json:"providers,omitempty"`
+	// Preflight 是配置层的预检结论（G5 别名冲突 / G6 expert 限流语义 / G3 提升
+	// 三态）：这些结论与具体某次路由请求无关，因此单独成段，避免被 decision 的
+	// 候选链细节淹没。
+	Preflight doctorSubagentRoutePreflightReport `json:"preflight"`
+}
+
+type doctorSubagentRoutePreflightReport struct {
+	PromoteExplicitDifficulty string   `json:"promote_explicit_difficulty,omitempty"`
+	ExpertLimit               string   `json:"expert_limit,omitempty"`
+	ConfigWarnings            []string `json:"config_warnings,omitempty"`
 }
 
 type doctorSubagentRouteRequestReport struct {
@@ -72,18 +83,19 @@ type doctorSubagentRouteParentReport struct {
 }
 
 type doctorSubagentRouteDecisionReport struct {
-	Difficulty          string   `json:"difficulty,omitempty"`
-	DifficultySource    string   `json:"difficulty_source,omitempty"`
-	DifficultyRationale string   `json:"difficulty_rationale,omitempty"`
-	Provider            string   `json:"provider,omitempty"`
-	Model               string   `json:"model,omitempty"`
-	ReasoningEffort     string   `json:"reasoning_effort,omitempty"`
-	MaxTokens           int      `json:"max_tokens,omitempty"`
-	Timeout             string   `json:"timeout,omitempty"`
-	Source              string   `json:"source,omitempty"`
-	Warnings            []string `json:"warnings,omitempty"`
-	FallbackUsed        bool     `json:"fallback_used,omitempty"`
-	FallbackReason      string   `json:"fallback_reason,omitempty"`
+	Difficulty          string                                  `json:"difficulty,omitempty"`
+	DifficultySource    string                                  `json:"difficulty_source,omitempty"`
+	DifficultyRationale string                                  `json:"difficulty_rationale,omitempty"`
+	Provider            string                                  `json:"provider,omitempty"`
+	Model               string                                  `json:"model,omitempty"`
+	ReasoningEffort     string                                  `json:"reasoning_effort,omitempty"`
+	MaxTokens           int                                     `json:"max_tokens,omitempty"`
+	Timeout             string                                  `json:"timeout,omitempty"`
+	Source              string                                  `json:"source,omitempty"`
+	Warnings            []string                                `json:"warnings,omitempty"`
+	FallbackUsed        bool                                    `json:"fallback_used,omitempty"`
+	FallbackReason      string                                  `json:"fallback_reason,omitempty"`
+	Candidates          []modelrouting.RouteCandidateEvaluation `json:"candidates,omitempty"`
 }
 
 type doctorSubagentRouteProviderBrief = modelrouting.ProviderBrief
@@ -181,10 +193,25 @@ func runDoctorSubagentRoute(cfg *config.Config, opts doctorSubagentRouteOptions)
 	decision, err := (modelrouting.Resolver{
 		Config:  routing,
 		Catalog: catalog,
+		// doctor 是排障入口：必须看到与真实子 Agent 相同的健康门禁结果，
+		// 否则"配置没问题但实际被熔断摘走"这类故障在 doctor 里不可见。
+		Health: providerhealth.Default(),
 	}).Resolve(parent, task)
 	if err != nil {
 		details["role"] = task.Role
 		details["difficulty"] = task.Difficulty
+		return nil, details, err
+	}
+
+	// 配置层预检：别名撞车与 expert 限流语义在这里给出明确结论（G5/G6），
+	// 而不是等用户从 decision.Warnings 里逐条猜。
+	routingConfigPath := "aicli.subagents.routing"
+	if scope == "team" {
+		routingConfigPath = "aicli.teams.routing"
+	}
+	configWarnings, err := config.ValidateSubagentRoutingConfig(routingConfigPath, routing)
+	if err != nil {
+		details["scope"] = scope
 		return nil, details, err
 	}
 
@@ -230,11 +257,31 @@ func runDoctorSubagentRoute(cfg *config.Config, opts doctorSubagentRouteOptions)
 			Warnings:            append([]string(nil), decision.Warnings...),
 			FallbackUsed:        decision.FallbackUsed,
 			FallbackReason:      decision.FallbackReason,
+			Candidates:          append([]modelrouting.RouteCandidateEvaluation(nil), decision.Candidates...),
 		},
 		Warnings:  append([]string(nil), decision.Warnings...),
 		Providers: catalog.ProviderBriefs(),
+		Preflight: doctorSubagentRoutePreflightReport{
+			PromoteExplicitDifficulty: modelrouting.PromoteExplicitMode(routing),
+			ExpertLimit:               modelrouting.ExpertLimitLabel(routing),
+			ConfigWarnings:            append([]string(nil), configWarnings...),
+		},
+	}
+	for _, warning := range configWarnings {
+		if !hasStringValue(report.Warnings, warning) {
+			report.Warnings = append(report.Warnings, warning)
+		}
 	}
 	return report, nil, nil
+}
+
+func hasStringValue(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeDoctorRouteWorkflow(workflow string) string {
@@ -355,6 +402,42 @@ func doctorSubagentRouteReportText(report *doctorSubagentRouteReport) string {
 	}
 	if report.Decision.Timeout != "" {
 		fmt.Fprintf(&b, "  Timeout:       %s\n", report.Decision.Timeout)
+	}
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "[Preflight]")
+	fmt.Fprintf(&b, "  Promote:       %s\n", emptyIfBlank(report.Preflight.PromoteExplicitDifficulty))
+	fmt.Fprintf(&b, "  Expert limit:  %s\n", emptyIfBlank(report.Preflight.ExpertLimit))
+	if len(report.Preflight.ConfigWarnings) > 0 {
+		for _, warning := range report.Preflight.ConfigWarnings {
+			fmt.Fprintf(&b, "  - %s\n", warning)
+		}
+	}
+	if len(report.Decision.Candidates) > 0 {
+		fmt.Fprintln(&b)
+		fmt.Fprintln(&b, "[Route Chain]")
+		for _, candidate := range report.Decision.Candidates {
+			marker := " "
+			if candidate.Provider == report.Decision.Provider && candidate.Model == report.Decision.Model {
+				marker = ">"
+			}
+			role := "fallback"
+			if candidate.Primary {
+				role = "primary"
+			}
+			status := "eligible"
+			if !candidate.Eligible {
+				status = "SKIP " + emptyIfBlank(candidate.SkipReason)
+			}
+			line := fmt.Sprintf("  %s %-30s %-8s %s", marker,
+				emptyIfBlank(candidate.Provider)+"/"+emptyIfBlank(candidate.Model), role, status)
+			if candidate.Availability != "" && candidate.Availability != modelrouting.AvailabilityAvailable {
+				line += fmt.Sprintf("  [%s]", candidate.Availability)
+			}
+			if candidate.PromptCache != nil && !*candidate.PromptCache {
+				line += "  [no prompt cache]"
+			}
+			fmt.Fprintln(&b, line)
+		}
 	}
 	if len(report.Warnings) > 0 {
 		fmt.Fprintln(&b)

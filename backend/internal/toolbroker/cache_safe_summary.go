@@ -204,7 +204,47 @@ func agentStatusCacheSafeSummary(result *AgentStatusResult) string {
 	if errText := truncateCacheSafeSummary(result.Error, 180); errText != "" {
 		lines = append(lines, "Error: "+errText)
 	}
+	// G7：与 agent 侧 renderSubagentResults 同格式的一行路由回执，让
+	// spawn_agent 的决策者也能直接看到实际档位/模型/告警数。
+	if line := agentRouteReceiptLine(result); line != "" {
+		lines = append(lines, line)
+	}
 	return strings.Join(lines, "\n")
+}
+
+// agentRouteReceiptLine 渲染 spawn_agent 的单行路由回执。未路由时返回空串
+// （未启用路由是常态，不制造噪音），格式与 agent 包的
+// renderSubagentRouteReceipts 保持一致：
+//
+//	route: <id> · <difficulty>(<source>) · provider/model · effort=… · warnings=N
+func agentRouteReceiptLine(result *AgentStatusResult) string {
+	if result == nil {
+		return ""
+	}
+	difficulty := strings.TrimSpace(result.Difficulty)
+	provider := strings.TrimSpace(result.Provider)
+	model := strings.TrimSpace(result.Model)
+	if difficulty == "" && provider == "" && model == "" {
+		return ""
+	}
+	label := firstNonEmptyString(strings.TrimSpace(result.SessionID), strings.TrimSpace(result.ID), "child_agent")
+	if difficulty == "" {
+		difficulty = "unrouted"
+	} else if source := strings.TrimSpace(result.RouteSource); source != "" {
+		difficulty += "(" + source + ")"
+	}
+	target := "unrouted"
+	if provider != "" || model != "" {
+		target = strings.Trim(provider+"/"+model, "/")
+	}
+	parts := []string{"route: " + label, difficulty, target}
+	if effort := strings.TrimSpace(result.ReasoningEffort); effort != "" {
+		parts = append(parts, "effort="+effort)
+	}
+	if count := len(result.RouteWarnings); count > 0 {
+		parts = append(parts, fmt.Sprintf("warnings=%d", count))
+	}
+	return strings.Join(parts, " · ")
 }
 
 func agentApprovalCacheSafeSummary(result *AgentApprovalResult) string {

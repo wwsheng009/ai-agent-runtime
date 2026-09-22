@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/uniqid"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 )
@@ -1374,6 +1375,7 @@ func (c *SubagentBatchCoordinator) runTasksWithProgress(ctx context.Context, bat
 		ParentSessionID:  opts.ParentSessionID,
 		ParentToolCallID: opts.ParentToolCallID,
 		Depth:            opts.Depth,
+		BatchID:          batchID,
 		OnTaskEvent: func(taskID, event string) {
 			c.recordTaskEvent(ctx, batchID, taskID, event, progressWriteback)
 		},
@@ -2033,7 +2035,7 @@ func terminalPayload(batch *subagentbatch.SubagentBatch, batchID string, status 
 
 func terminalNotificationFromBatch(batch *subagentbatch.SubagentBatch) (string, string, map[string]interface{}) {
 	if batch == nil {
-		return "subagent.batch.failed", "", map[string]interface{}{}
+		return runtimeevents.EventSubagentBatchFailed, "", map[string]interface{}{}
 	}
 	var summary subagentbatch.BatchSummary
 	if len(batch.ResultSummary) > 0 {
@@ -2152,13 +2154,13 @@ func (c *SubagentBatchCoordinator) projectTerminalLifecycle(ctx context.Context,
 func batchTerminalEventType(status subagentbatch.BatchStatus) string {
 	switch status {
 	case subagentbatch.BatchFailed:
-		return "subagent.batch.failed"
+		return runtimeevents.EventSubagentBatchFailed
 	case subagentbatch.BatchCanceled:
-		return "subagent.batch.canceled"
+		return runtimeevents.EventSubagentBatchCanceled
 	case subagentbatch.BatchTimedOut:
-		return "subagent.batch.timed_out"
+		return runtimeevents.EventSubagentBatchTimedOut
 	case subagentbatch.BatchOrphaned:
-		return "subagent.batch.orphaned"
+		return runtimeevents.EventSubagentBatchOrphaned
 	default:
 		return "subagent.batch.completed"
 	}

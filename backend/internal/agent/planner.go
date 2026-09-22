@@ -323,6 +323,7 @@ Rules:
 9. If content could exceed one tool-call payload, explicitly split it into multiple chunked append_write steps
 10. Assign each step a difficulty of easy, normal, hard, or expert with a short difficulty_rationale
 11. Do not assign provider, model, or reasoning_effort in the plan; runtime routing maps difficulty to local policy
+12. An explicit difficulty is NOT a free pass: runtime heuristics still promote a step whose goal touches security, permissions, migration, architecture, provider/protocol changes or cross-system consistency. Declare the honest difficulty (a too-low value is only corrected upward, never downward) and expect the audit to record it
 `, goal, strings.Join(toolDescriptions, "\n"))
 }
 

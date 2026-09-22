@@ -27,6 +27,21 @@ aicli:
       validate_model_capabilities: true
       unsupported_reasoning_policy: downgrade
       max_expert_concurrency: 1
+      # 显式难度与启发式提升的交互（三态，默认 enforce）：
+      #   enforce —— 显式声明的难度仍可被高风险关键词/角色规则提升（单调，永不降级）；
+      #   warn    —— 不提升，只把「本该提升」写进 route_warnings，用于先观测误报；
+      #   off     —— 回到历史行为：显式声明短路启发式，且不产生任何提升告警。
+      # promote_explicit_difficulty: enforce
+      # 关键词启发式词表（追加语义：内置词表始终生效，这里只做补充）：
+      #   promote_keywords       高信号，单命中即升 hard
+      #   promote_keywords_combo 弱信号，需 ≥2 命中，或 1 命中 + 非只读 writer
+      #   disabled               关闭全部关键词启发式（角色提升仍生效）
+      # 英文词条带词形归一：migrate / migrating / migrated 都能命中词表里的
+      # migration；中文与多词条目仍为子串匹配。
+      # heuristics:
+      #   disabled: false
+      #   promote_keywords: ["kafka", "分库分表"]
+      #   promote_keywords_combo: ["压测", "容量规划"]
       levels:
         easy: {}
         normal: {}
@@ -1331,6 +1346,14 @@ special_apis:
     namespace: ai_gateway
     subsystem: special_apis
 supervision:
+  # 2026-09-22 调整（docs/plan/supervision-manual-audit-plan-20260922.md）：
+  # turn 结束后的技术核查默认关闭（nil/false 等价）。关闭时父会话 turn 结束
+  # 不再 drain durable wake、不再触发 digest-only self-check，业务回合槽完全
+  # 交还用户；积压事件由下一次自然 turn 的 preflight digest 被动注入，或由
+  # 用户显式执行 aicli `/supervision audit`（只读核查）/ `/supervision wake`
+  # （显式投递）处理。显式 true 恢复 2026-09-16 §6.5 规则 2 的自动闭合语义，
+  # 用于灰度回退；该开关不影响事件驱动（子会话完成/审批）的异常投递。
+  # turn_end_check: false
   # P0-2（2026-09-17）周期巡查是显式 opt-in，出厂 0 = 关闭：不注册 ticker、
   # 不新增 goroutine，宿主行为与引入该开关前完全一致。
   # 开启后（正数间隔）仅在「存在 running background batch + 父会话空闲 +

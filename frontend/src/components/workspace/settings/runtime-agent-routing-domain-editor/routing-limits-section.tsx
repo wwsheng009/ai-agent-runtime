@@ -31,7 +31,7 @@ export function RoutingLimitsSection({
           <input
             className={editorControlClassName}
             disabled={inherited}
-            min={0}
+            min={-1}
             type="number"
             value={config.maxExpertConcurrency}
             onChange={(event) =>

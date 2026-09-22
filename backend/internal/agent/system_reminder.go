@@ -43,6 +43,11 @@ const (
 	// model can resume instead of the turn being silently truncated.
 	ReminderKindTurnBudget      = "turn_budget"
 	ReminderKindRuntimeAdvisory = "runtime_advisory"
+	// ReminderKindMainAgentRouting marks the §5.4 main-agent routing guidance
+	// fragment. It is prompt-only: the text is stable for the whole turn and is
+	// stripped before session persist (Durable=false), so it never rewrites an
+	// already-sent message and never accumulates across turns.
+	ReminderKindMainAgentRouting = "main_agent_routing"
 
 	// Runtime events for hosts/telemetry.
 	EventSystemReminderInjected = "system_reminder.injected"
@@ -73,6 +78,7 @@ func NormalizeReminderKind(kind string) string {
 		ReminderKindPollingBackoff,
 		ReminderKindPlanMode,
 		ReminderKindTurnBudget,
+		ReminderKindMainAgentRouting,
 		ReminderKindRuntimeAdvisory:
 		return kind
 	case "":

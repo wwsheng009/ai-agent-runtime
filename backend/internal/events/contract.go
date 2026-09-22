@@ -98,6 +98,25 @@ var runtimeEventContracts = []Contract{
 	{Type: "assistant.reasoning", Channels: ChannelSessionStore},
 	{Type: "assistant.image_progress", Channels: ChannelSessionStore},
 
+	// ---- A 通道：主 Agent 动态 route 治理事件（方案 §6.2；MG3 的修复）----
+	// 全部走 A 通道：成本归因、失败/降级路径与「还原到基线」的证据都必须在事后
+	// 查得到，否则「主 Agent 路由可审计」这一治理价值不成立。代价是每 turn 多出
+	// 1–3 行事件（相对 assistant_delta 量级可忽略，记入方案 §10 风险 R2）。
+	{Type: EventMainAgentRouteApplied, Channels: ChannelSessionStore},
+	{Type: EventMainAgentRoutePredictionInvalid, Channels: ChannelSessionStore},
+	{Type: EventMainAgentRoutePredictionUnresolvable, Channels: ChannelSessionStore},
+	{Type: EventMainAgentRouteDisabledForTurn, Channels: ChannelSessionStore},
+	{Type: EventMainAgentRouteCostGuardTripped, Channels: ChannelSessionStore, PersistCritical: true},
+	{Type: EventMainAgentRouteCleared, Channels: ChannelSessionStore},
+
+	// ---- A 通道：在途健康门禁已泄漏的信号（方案 §6.2 第 4 步补登记）----
+	// 两者此前以裸字面量发射且未登记 ⇒ ChannelsFor 返回 0 ⇒ 不落盘、不下帧、
+	// 不进尾巴帧，「唯一对外信号完全不可见」。登记后它们是主 Agent 健康维度
+	// 切换与 prompt cache 熔断的证据链。两者都是边沿触发（只在状态真正翻转时
+	// 发一次），落盘量有天然上界。
+	{Type: EventLLMProviderHealthOpened, Channels: ChannelSessionStore},
+	{Type: EventLLMPromptCacheBreakerTripped, Channels: ChannelSessionStore},
+
 	// ---- B 通道：live-only（不落盘，刷新即丢）----
 	{Type: "tool.progress", Channels: ChannelLiveOnly},
 	{Type: "subagent.progress", Channels: ChannelLiveOnly},
@@ -115,6 +134,20 @@ var runtimeEventContracts = []Contract{
 	// 因此它既是 D 通道（尾巴）也是 A 通道（事件库）——落盘由生产者完成，
 	// A 通道桥靠 ProducerPersistedEvent 跳过，避免同一摘要写两遍。
 	{Type: "subagent.completed", Channels: ChannelSessionStore | ChannelTailOnly},
+
+	// ---- A 通道：子代理路由审计与批次失败态终态（SA-G1/SA-G2 的修复）----
+	// 新增类型（常量见 subagent_audit_events.go，发射点只引用常量）：
+	//   subagent.route.resolved：开工时刻的路由决策，归属**父会话**落盘，让取消/
+	//   超时/孤儿/崩溃的子代理也能反查「当时被路由到哪个模型」；
+	//   4 个批次失败态此前未登记 ⇒ ChannelsFor 返回 0 ⇒ 不下帧、不落盘、不进尾巴帧，
+	//   被取消或超时的批次在 chat 侧完全没有终态信号（§3.5 实测 15 个 timed_out 批次）。
+	// 失败态比成功态更重（成功态有 subagent.completed 与批次账本兜底），故走 A+D；
+	// 与 batch.started/completed 的纯 D 不一致是**已记录的取舍**（方案 §9 R3）。
+	{Type: EventSubagentRouteResolved, Channels: ChannelSessionStore | ChannelTailOnly},
+	{Type: EventSubagentBatchFailed, Channels: ChannelSessionStore | ChannelTailOnly},
+	{Type: EventSubagentBatchCanceled, Channels: ChannelSessionStore | ChannelTailOnly},
+	{Type: EventSubagentBatchTimedOut, Channels: ChannelSessionStore | ChannelTailOnly},
+	{Type: EventSubagentBatchOrphaned, Channels: ChannelSessionStore | ChannelTailOnly},
 
 	// ---- 已登记、当前无 chat 侧通道 ----
 	// chat/events.go 常量（其中 tool_started/tool_finished 是 tool.requested/
@@ -144,6 +177,37 @@ var runtimeEventContracts = []Contract{
 	{Type: "tool.malformed_arguments.guardrail_hit"},
 	{Type: "tool.malformed_arguments.recovered"},
 	{Type: "session.checkpoint_persist_error"},
+
+	// ---- 已登记、当前无 chat 侧通道：SA-G2 扫描门禁收编的历史裸字面量 ----
+	// 这些类型由 internal/agent 的 emitRuntimeEvent("<literal>") 真实发射，此前
+	// 既不在注册表也不在 runtimeobserve 目录 ⇒ 与「完全未知类型」不可区分（三分法
+	// 失效）。登记为 0 通道 = 显式表态「当前无 chat 侧交付通道」，**不改变任何投递
+	// 行为**；是否给某条通道需单独评审（方案 §6.1 第 6 条的说明）。
+	{Type: "agent.turn.started"},                   // loop.go
+	{Type: "agent.turn.finished"},                  // loop.go
+	{Type: "completion.requirement_recovery"},      // loop.go
+	{Type: "context.preflight.started"},            // loop.go
+	{Type: "context.preflight.compacted"},          // loop.go
+	{Type: "context.preflight.failed"},             // loop.go
+	{Type: "context.tool_schema.compacted"},        // loop.go
+	{Type: "context.tool_schema.frozen"},           // loop.go
+	{Type: "hooks.stop_blocked"},                   // loop.go
+	{Type: "llm.request.started"},                  // loop.go（点分隔形；下划线形见上）
+	{Type: "llm.request.finished"},                 // loop.go（点分隔形；下划线形见上）
+	{Type: "llm.retry"},                            // loop.go
+	{Type: "llm.retry.aggregated"},                 // loop.go
+	{Type: "llm.max_output_tokens.escalated"},      // loop.go
+	{Type: "llm.prompt_cache.backoff_applied"},     // loop.go
+	{Type: "llm.reasoning_only.guardrail_hit"},     // loop.go
+	{Type: "llm.reasoning_only.recovered"},         // loop.go
+	{Type: "patch.decision"},                       // orchestrator.go
+	{Type: "patch.applied"},                        // scheduler.go
+	{Type: "subagent.batch.created"},               // loop.go（批次创建里程碑）
+	{Type: "subagent.batch.circuit_open"},          // scheduler.go（熔断治理信号）
+	{Type: "subagent.denied"},                      // scheduler.go
+	{Type: "subagent.requires_write"},              // loop.go
+	{Type: "tool_loop.exploration_stall_observed"}, // loop.go
+	{Type: "tool_loop.repeated_prompt_observed"},   // loop.go
 }
 
 var runtimeEventContractByType = buildRuntimeEventContractIndex()

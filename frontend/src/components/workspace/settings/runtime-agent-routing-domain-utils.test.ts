@@ -84,6 +84,40 @@ describe("runtime agent routing domain utils", () => {
     });
   });
 
+  it("normalizes the expert concurrency tri-state on write", () => {
+    const cases: Array<[string, number]> = [
+      ["3", 3],
+      ["-1", -1],
+      ["0", -1],
+      ["", -1],
+      ["not-a-number", -1],
+    ];
+
+    for (const [input, expected] of cases) {
+      const config = getRuntimeAgentRoutingSettings({
+        aicli: { subagents: { routing: { enabled: true } } },
+      }).subagents;
+      config.maxExpertConcurrency = input;
+
+      expect(buildRuntimeAgentRoutingRecord(config).max_expert_concurrency).toBe(
+        expected,
+      );
+    }
+  });
+
+  it("keeps a stored explicit unlimited value readable and editable", () => {
+    const settings = getRuntimeAgentRoutingSettings({
+      aicli: {
+        subagents: { routing: { enabled: true, max_expert_concurrency: -1 } },
+      },
+    });
+
+    expect(settings.subagents.maxExpertConcurrency).toBe("-1");
+    expect(
+      buildRuntimeAgentRoutingRecord(settings.subagents).max_expert_concurrency,
+    ).toBe(-1);
+  });
+
   it("builds model options from provider defaults and supported models", () => {
     const options = providerModelOptions(
       [provider("strong", "model-a", ["model-a", "model-b"])],

@@ -1713,6 +1713,10 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			if len(result.RouteWarnings) > 0 {
 				metadata["route_warnings"] = append([]string(nil), result.RouteWarnings...)
 			}
+			// G7：结构化回执（与 cache-safe 摘要同源），供 UI / 二次消费读取。
+			if line := agentRouteReceiptLine(result); line != "" {
+				metadata["route_receipt"] = line
+			}
 			// A child whose permission escalation was blocked is pinned to the
 			// parent session mode: tell the caller how to proceed instead of
 			// leaving a silently narrowed child behind (H13).

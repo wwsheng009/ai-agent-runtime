@@ -167,7 +167,15 @@ func semanticToolCallRepeatExempt(name string) bool {
 	if supervisionInspectTool(name) {
 		return true
 	}
-	switch strings.ToLower(strings.TrimSpace(name)) {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	// §5.4：难度上报是 meta 工具。模型重复上报同一档位是合法且无害的（引擎侧闩锁，
+	// route 不会因此再次改写），所以它不参与语义重复指纹——否则一个多步 turn 里的
+	// 重复上报会累计到 MaxRepeatedToolCalls，把正常 turn 判成 doom loop 并硬停。
+	// 预算维度不在这里豁免：真实工具调用预算仍由 MaxToolCalls / MaxSteps 兜底。
+	if normalized == predictTaskDifficultyToolName {
+		return true
+	}
+	switch normalized {
 	case "background_task",
 		"task_output",
 		"wait_agent",

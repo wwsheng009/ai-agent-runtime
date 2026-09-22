@@ -23,6 +23,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
+	"github.com/wwsheng009/ai-agent-runtime/internal/providerhealth"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -337,6 +338,7 @@ func (r *localActorRegistry) resolveSpawnAgentRoute(parentSession *runtimechat.S
 	decision, err := (modelrouting.Resolver{
 		Config:  routingConfig,
 		Catalog: catalog,
+		Health:  providerhealth.Default(),
 	}).Resolve(parent, task)
 	if err != nil {
 		return args, err
@@ -483,6 +485,7 @@ func (r *localTeamTaskRouteResolver) ResolveTaskRoute(ctx context.Context, reque
 	decision, err := (modelrouting.Resolver{
 		Config:  routingConfig,
 		Catalog: r.providerCatalog(),
+		Health:  providerhealth.Default(),
 	}).Resolve(parent, task)
 	if err != nil {
 		resolution.Route = localTeamTaskFallbackRoute(parent, request.Task, request.Attempt, routingConfig, err)

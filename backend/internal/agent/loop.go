@@ -15,10 +15,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimecheckpoint "github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/historyguard"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
@@ -28,6 +30,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
+	"github.com/wwsheng009/ai-agent-runtime/internal/providerhealth"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -74,8 +77,12 @@ type LoopReActConfig struct {
 	Model                string                `yaml:"model"`
 	ReasoningEffort      string                `yaml:"reasoningEffort"`
 	Thinking             *types.ThinkingConfig `yaml:"thinking"`
-	StopOnSuccess        bool                  `yaml:"stopOnSuccess"`
-	MaxIterations        int                   `yaml:"maxIterations"`
+	// MainAgentRouting 是主 Agent 的动态 route 配置（方案 §6.1）。nil 或
+	// enabled=false 时零行为变化：不解析 route、不注册难度上报工具、不改写
+	// provider/model/reasoning_effort。
+	MainAgentRouting *agentconfig.AICLIMainAgentRoutingConfig `yaml:"-"`
+	StopOnSuccess    bool                                     `yaml:"stopOnSuccess"`
+	MaxIterations    int                                      `yaml:"maxIterations"`
 	// CompletionRequirement is none|complete_task (worker harness constraint).
 	CompletionRequirement string `yaml:"completionRequirement"`
 	// MaxCompletionRecoveryTurns limits recovery turns when complete_task is missing.
@@ -109,6 +116,10 @@ type ReActLoop struct {
 	reasoningEffortUnsupported   atomic.Bool
 	thinkingUnsupported          atomic.Bool
 	temperatureUnsupported       atomic.Bool
+	// mainAgentRoute 是本 run 的动态 route 状态（§5.2）。生命周期严格等于一次
+	// run()：入口重置、defer 写回基线，任何退出路径都不允许把 route 泄漏到
+	// 下一个 turn（MG3）。
+	mainAgentRoute mainAgentRouteState
 	// malformedToolCallRecoveries 记录同一工具名「连续」被「参数非法」降级重发的
 	// 次数：工具一旦成功执行（说明模型已能按 schema 产出合法参数）即清零，防止
 	// 跨步骤的历史累计误触护栏；连续非法达到上限才放弃，避免模型反复生成非法参数
@@ -188,6 +199,13 @@ func NewReActLoop(agent *Agent, llmRuntime *llm.LLMRuntime, config *LoopReActCon
 	if config == nil {
 		config = DefaultLoopReActConfig()
 	}
+	// §5.2：值拷贝 + 嵌套深拷贝后再改字段。动态 route 会改写 provider/model/
+	// reasoning_effort，若直接改宿主传入的对象，route 既会跨 turn 泄漏，也会污染
+	// 宿主持有的同一份配置（子 Agent 复用父配置时尤其危险）。
+	cfg := *config
+	cfg.Thinking = types.CloneThinkingConfig(config.Thinking)
+	cfg.MainAgentRouting = cloneMainAgentRoutingConfig(config.MainAgentRouting)
+	config = &cfg
 	config.MaxSteps = NormalizeMaxSteps(config.MaxSteps)
 	config.CompletionRequirement = NormalizeCompletionRequirement(config.CompletionRequirement)
 	if config.MaxParallelToolCalls <= 0 {
@@ -576,6 +594,13 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	// 回合级 system 注入（如 /skill 的 ProgramGuide）：只进入本次 run 的请求
 	// 历史，跟随 ctx 生命周期，不被写入会话持久历史。
 	history = append(history, turnSystemMessagesFromContext(ctx)...)
+	// §5.4 / §7.3：主 Agent 路由启用时追加一次性引导片段。它与 /skill 的
+	// ProgramGuide 同属「回合级 system 注入」通道：只进入本次 run 的请求历史，
+	// 落盘前被剥掉（Durable=false），因此不改写任何已发送消息（INV-1）；文本只
+	// 依赖冻结后的 loop 配置，turn 内逐字节稳定（INV-2）。
+	if routingMessage := mainAgentRoutingSystemMessage(loop.mainAgentRouteConfig()); routingMessage != nil {
+		history = append(history, *routingMessage)
+	}
 	history = mergeConfiguredSystemPrompt(history, loop.agent.config.SystemPrompt)
 	if options.IncludePrompt {
 		history = append(history, *types.NewUserMessage(prompt))
@@ -606,6 +631,10 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		"max_steps":    NormalizeMaxSteps(loop.config.MaxSteps),
 		"budget_level": turnBudgetState.Level,
 	})
+	// §5.2/§5.10：在第一个 step 之前冻结 turn 基线（含健康门禁闩锁），并用 defer
+	// 保证取消、预算硬停、panic 等任何退出路径都写回基线，不把 route 泄漏出去。
+	loop.beginTurnRoute(turnEventSessionID, traceID)
+	defer loop.endTurnRoute(turnEventSessionID, traceID)
 	if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
 		return nil, err
 	}
@@ -635,6 +664,9 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	lastDispositionErrorCode := ""
 	consecutiveExplorationSteps := 0
 	totalToolCalls := 0
+	// meta-only 上报的连续免计 step 额度（§5.4 R2）：run 内累计，遇到真实工具批次
+	// 归零。额度用尽后上报恢复消耗 step，保证循环收敛（见 mainAgentMetaOnlyStepCredit）。
+	metaOnlyFreeSteps := 0
 	// 只读拒绝熔断按 run 独立计数：每次 run 开始时清零，避免上个 run 的历史
 	// 拒绝数泄漏进新的 do-loop（M6）。并发工具调用导致的并排拒绝仍计入同一
 	// streak，只有真正理解边界（某工具执行成功）才会重置。
@@ -666,6 +698,9 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	// ReAct 循环：Think - Act - Observe
 	for step := 1; !stepExceedsLimit(loop.config.MaxSteps, step); step++ {
 		loop.agent.state.CurrentStep = step
+		// §5.7：step 边界的 route 记账与成本护栏。route 变更只来自难度上报，这里
+		// 不重新解析 route（健康维度在 turn 入口已闩锁，§5.10 规则 1）。
+		loop.onStepBoundary(turnEventSessionID, traceID, step)
 		turnBudgetUsage.CompletedSteps = step - 1
 		turnBudgetUsage.TokensSpent = TokensSpentFromBudget(options.BudgetTokens, remainingBudget)
 		if !startTime.Start.IsZero() {
@@ -1009,7 +1044,9 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 
 			return result, nil
 		}
-		if loop.config.MaxToolCalls > 0 && totalToolCalls+len(action.ToolCalls) > loop.config.MaxToolCalls {
+		// §5.4 R2：难度上报不计入工具预算——预算是「真实动作」的配额，把零副作用的
+		// 自我描述算进去会让模型倾向不报（上报有代价）。
+		if loop.config.MaxToolCalls > 0 && totalToolCalls+budgetedToolCallCount(action.ToolCalls) > loop.config.MaxToolCalls {
 			result.Success = false
 			result.LimitReached = true
 			result.LimitReason = "tool_calls"
@@ -1135,7 +1172,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			}
 			return result, nil
 		}
-		totalToolCalls += len(action.ToolCalls)
+		totalToolCalls += budgetedToolCallCount(action.ToolCalls)
 		if fingerprint := actionPromptFingerprint(action); fingerprint != "" {
 			if fingerprint == lastToolPromptFingerprint {
 				repeatedToolPromptFingerprint++
@@ -1275,6 +1312,19 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			if options.BudgetTokens > 0 && compactUsage != nil {
 				remainingBudget -= compactUsage.TotalTokens
 			}
+		}
+
+		// §5.4 R2/R4：meta-only 响应不消耗 step。上报是「无代价的自我描述」——若它
+		// 吃掉 step 预算，模型的最优策略就是不报。这里把 step 计数回退一格（与上面
+		// 上下文压缩恢复的 step-- 同一手法），并用连续额度封顶：额度用尽后上报恢复
+		// 消耗 step，run() 必然终止。
+		if metaOnlyToolBatch(normalizedCalls) {
+			if metaOnlyFreeSteps < mainAgentMetaOnlyStepCredit {
+				metaOnlyFreeSteps++
+				step--
+			}
+		} else {
+			metaOnlyFreeSteps = 0
 		}
 
 		if loop.config.Verbose {
@@ -1705,6 +1755,12 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		// 回合级工具 pin（如 /skill 注入的 skill 函数与声明的程序）在稳定工具面
 		// 冻结/落盘之后叠加：既不写回会话级快照，又能进入本回合的请求与 preflight。
 		availableTools = overlayTurnPinnedTools(availableTools, turnPinnedToolsFromContext(ctx))
+		// §5.4：难度上报工具在稳定工具面冻结之后叠加。它是 meta 工具，必须与真实
+		// 工具并存（R3），因此不参与白名单裁剪；schema 由排序后的档位生成，turn 内
+		// 逐字节稳定（INV-2）。
+		if def, ok := loop.mainAgentRoutingToolDefinition(); ok {
+			availableTools = append(availableTools, def)
+		}
 	}
 	var preflightMetadata map[string]interface{}
 	managedHistory, preflightMetadata, err = loop.enforcePromptPreflightWithTools(traceID, sessionID, step, managedHistory, availableTools, remainingBudget)
@@ -2176,10 +2232,29 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	}
 	if err != nil {
 		failureDiagnostic := llm.DiagnoseFailure(err)
+		// provider 级动态健康：与上面的指纹熔断并列，但归因粒度不同——它记的是
+		// 「这个后端现在还能不能用」，供子 Agent 路由在构造时读取。只有 provider
+		// 归因的失败才计入（工具报错、预算超限、上下文溢出是我们自己的问题），
+		// 否则会在自身 bug 上熔断健康后端，反而在最需要路由时把候选摘光。
+		// 边沿触发：只在电路真正打开的那一次对外通告。
+		if observed := providerhealth.Default().Observe(req.Provider, req.Model, failureDiagnostic.ErrorCode, time.Now()); observed.Opened {
+			loop.emitRuntimeEvent(events.EventLLMProviderHealthOpened, sessionID, "", map[string]interface{}{
+				"trace_id":             traceID,
+				"logical_turn_id":      logicalTurnID,
+				"llm_request_id":       llmRequestID,
+				"step":                 step,
+				"provider":             req.Provider,
+				"model":                req.Model,
+				"error_code":           failureDiagnostic.ErrorCode,
+				"consecutive_failures": observed.Health.ConsecutiveFailures,
+				"failure_rate":         observed.Health.FailureRate,
+				"samples":              observed.Health.Samples,
+			})
+		}
 		// 同指纹连续失败计数：跨过阈值的那一次对外通告一次熔断（边沿触发），
 		// 之后由 PendingBackoff 在请求前退避，而不是每步都重复通告。
 		if decision := cacheBreaker.ObserveFailure(promptFingerprintFromRequest(req), failureDiagnostic.ErrorCode, time.Now()); decision.Tripped {
-			loop.emitRuntimeEvent("llm.prompt_cache.breaker_tripped", sessionID, "", map[string]interface{}{
+			loop.emitRuntimeEvent(events.EventLLMPromptCacheBreakerTripped, sessionID, "", map[string]interface{}{
 				"trace_id":             traceID,
 				"logical_turn_id":      logicalTurnID,
 				"llm_request_id":       llmRequestID,
@@ -2246,6 +2321,10 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	}
 	// 成功即恢复：该指纹的连续失败计数清零，历史抖动不会累积成熔断。
 	cacheBreaker.ObserveSuccess(promptFingerprintFromRequest(req))
+	// 同一时刻恢复 provider 健康。成功只在半开探测期才真正闭合电路（见
+	// providerhealth 的状态机），所以这里无条件上报是安全的：故障期的零星成功
+	// 不会把已经打开的电路又放回去。
+	providerhealth.Default().ObserveSuccess(req.Provider, req.Model, time.Now())
 	finishedPayload := map[string]interface{}{
 		"trace_id":        traceID,
 		"logical_turn_id": logicalTurnID,
@@ -2674,6 +2753,28 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			continue
 		}
 
+		if tc.Name == predictTaskDifficultyToolName {
+			// §5.4：难度上报是 meta 工具——不消耗 step、不进权限引擎、与真实工具
+			// 并存（R1/R3）；返回给模型的只有占位行，不披露 provider/model（INV-3）。
+			output, routeErr := loop.reportPredictedDifficulty(sessionID, traceID, step, tc.Args)
+			if routeErr != nil {
+				result.Error = routeErr.Error()
+			} else {
+				result.Output = output
+			}
+			envelope, gatewayErr := gateway.Process(ctx, newRawToolResult(sessionID, tc, step, result.Output, result.Error, metadata))
+			if gatewayErr != nil && envelope != nil {
+				envelope.Metadata["gateway_error"] = gatewayErr.Error()
+			}
+			result.Envelope = envelope
+			loop.emitRuntimeEvent("tool.completed", sessionID, tc.Name, toolCompletedEventPayload(result, step, traceID, map[string]interface{}{
+				"awaiting_model": i == len(toolCalls)-1 && hasRemainingStepBudget(loop.config.MaxSteps, step),
+			}))
+			results[i] = result
+			loop.agent.runPostToolUseHooks(ctx, sessionID, result)
+			continue
+		}
+
 		if tc.Name == "spawn_subagents" {
 			if engine != nil {
 				decision, evalErr := engine.Evaluate(callCtx, runtimepolicy.EvalRequest{
@@ -2775,6 +2876,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 						ParentSessionID:  sessionID,
 						ParentToolCallID: tc.ID,
 						Depth:            depth + 1,
+						BatchID:          syncBatchID,
 					}, subtasks)
 					completedCount, failedCount := subagentResultCounts(reports)
 					terminalLifecycle := waitBatchTerminalLifecycle(syncBatchID, sessionID, tc.ID, traceID, len(subtasks), reports, runErr, ctx)
@@ -6691,6 +6793,9 @@ func renderSubagentResults(results []SubagentResult) string {
 			lines = append(lines, "  read-only boundary source: "+source+"; re-spawn with read_only=false only if the goal requires writes.")
 		}
 	}
+	// G7：路由回执行（≤8 行 / ≤1 KB）。只在批次确实携带路由信息时追加，
+	// 未启用路由的批次输出保持与历史一致。
+	lines = append(lines, renderSubagentRouteReceipts(results)...)
 	return strings.Join(lines, "\n")
 }
 

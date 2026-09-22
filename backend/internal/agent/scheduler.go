@@ -92,6 +92,9 @@ type SubagentResult struct {
 	MaxAttempts     int    `json:"max_attempts,omitempty" yaml:"max_attempts,omitempty"`
 	RetryReason     string `json:"retry_reason,omitempty" yaml:"retry_reason,omitempty"`
 	RetryAdvice     string `json:"retry_advice,omitempty" yaml:"retry_advice,omitempty"`
+	// Route 是父代理可见的一行路由回执（G7）。不参与序列化：它只用于
+	// renderSubagentResults 的文本回执，避免改变既有 payload 契约。
+	Route subagentRouteReceipt `json:"-" yaml:"-"`
 }
 
 // SubagentSchedulerConfig 控制子代理并发与递归深度。
@@ -153,6 +156,10 @@ type SubagentRunOptions struct {
 	ParentSessionID  string
 	ParentToolCallID string
 	Depth            int
+	// BatchID 是 durable 批次的 id（sync 路径为本次调用的批次 id；无批次上下文时
+	// 为空）。仅用于 subagent.route.resolved 的审计载荷，使路由决策可按批次归集；
+	// 不影响调度、限流或投递语义。
+	BatchID string
 	// OnTaskEvent, when set, is invoked serially as child tasks transition
 	// between running and finished so a durable coordinator can mirror
 	// progress without racing concurrent store writes from wave goroutines.
@@ -364,6 +371,14 @@ func (s *SubagentScheduler) NestedDelegationOptIn() bool {
 	return s != nil && s.delegationAllowed && s.nestedDelegationOptIn
 }
 
+// subagentExpertConcurrencyLimit 返回 expert 并发闸门的槽位数，0 表示不建闸门。
+// 语义（G6）：
+//   - 正数：闸门生效，expert 子任务排队等待；
+//   - 0：历史遗留的"不限流"写法，仍按不限处理，但配置校验会给出告警，
+//     路由审计载荷里的 expert_limit 会显示 unlimited；
+//   - -1：显式不限（推荐写法），与 0 的运行时行为一致。
+//
+// 三种取值都只在路由启用时生效；路由未启用时不存在 expert 档位概念。
 func subagentExpertConcurrencyLimit(cfg *agentconfig.AICLISubagentRoutingConfig) int {
 	if cfg == nil || cfg.Enabled == nil || !*cfg.Enabled || cfg.MaxExpertConcurrency <= 0 {
 		return 0
@@ -498,7 +513,12 @@ func (s *SubagentScheduler) runChild(ctx context.Context, options SubagentRunOpt
 	return report, err
 }
 
-func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options SubagentRunOptions, task SubagentTask) (SubagentResult, error) {
+func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options SubagentRunOptions, task SubagentTask) (report SubagentResult, err error) {
+	// G7：每个返回点共享同一条路由回执——先按请求侧提示兜底，解析出
+	// RouteDecision 后换成权威值。defer 保证校验/构建/闸门等早退路径也带上
+	// 回执，父代理不必回查事件库才知道孩子被路由到哪。
+	route := subagentRouteReceiptFromTask(task)
+	defer func() { report.Route = route }()
 	if s.parent == nil {
 		return SubagentResult{}, fmt.Errorf("parent agent is nil")
 	}
@@ -545,6 +565,7 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			Summary:               err.Error(),
 		}, nil
 	}
+	route = subagentRouteReceiptFromDecision(spec.Decision)
 	releaseExpertSlot, err := s.acquireExpertSlot(ctx, spec.Decision.Difficulty)
 	if err != nil {
 		s.emitSubagentDenied(options, task.ID, "expert_concurrency", err.Error(), map[string]interface{}{
@@ -630,6 +651,9 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		disposition SubagentFailureDisposition
 	)
 	for attempt = 1; attempt <= maxAttempts; attempt++ {
+		// 开工路由审计（G1）：每次 attempt 一行、归属父会话、带 attempt 序号。
+		// 发射点在 loop.run 之前，保证「跑没跑到终态」都有账。
+		s.emitSubagentRouteResolved(options, task, spec, childSessionID, childConfig.Name, attempt, maxAttempts)
 		result, runErr = loop.run(childCtx, task.Goal, loopRunOptions{
 			TraceID:       options.TraceID,
 			SessionID:     childSessionID,
@@ -729,7 +753,7 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		return report, nil
 	}
 
-	report := SubagentResult{
+	report = SubagentResult{
 		ID:                    task.ID,
 		Role:                  task.Role,
 		SessionID:             childSessionID,

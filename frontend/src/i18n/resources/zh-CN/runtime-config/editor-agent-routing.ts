@@ -85,7 +85,8 @@ export const zhRuntimeConfigEditorAgentRouting = {
     },
     maxExpertConcurrency: {
       label: "专家任务最大并发",
-      description: "限制 expert 档位的同时执行数；0 表示不额外限制。",
+      description:
+        "限制 expert 档位的同时执行数；正数为上限，-1 表示显式不限（0 与 -1 同义，保存时会写成 -1）。",
     },
     reasoningPolicy: {
       label: "不支持 Reasoning 时",

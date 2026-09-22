@@ -89,7 +89,8 @@ export const enRuntimeConfigEditorAgentRouting = {
     },
     maxExpertConcurrency: {
       label: "Max expert concurrency",
-      description: "Limits concurrent expert tasks; 0 adds no extra limit.",
+      description:
+        "Limits concurrent expert tasks; a positive number is the limit and -1 means explicitly unlimited (0 is an alias of -1 and is saved as -1).",
     },
     reasoningPolicy: {
       label: "Unsupported reasoning policy",

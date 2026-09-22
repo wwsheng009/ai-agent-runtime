@@ -7,6 +7,7 @@ import (
 
 	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
+	"github.com/wwsheng009/ai-agent-runtime/internal/providerhealth"
 )
 
 func (s *LocalConfigDocumentService) PreviewAgentRoute(
@@ -69,6 +70,9 @@ func (s *LocalConfigDocumentService) PreviewAgentRoute(
 	decision, err := (modelrouting.Resolver{
 		Config:  routing,
 		Catalog: catalog,
+		// 预览要反映真实路由结果，因此同样接入动态健康源：否则运维看到的
+		// 是一条"应该走 A"的预览，而实际子 Agent 已经被熔断摘到 B 了。
+		Health: providerhealth.Default(),
 	}).Resolve(parent, modelrouting.TaskHint{
 		Role:                strings.TrimSpace(req.Task.Role),
 		Goal:                strings.TrimSpace(req.Task.Goal),

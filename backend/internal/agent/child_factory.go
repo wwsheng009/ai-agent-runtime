@@ -6,6 +6,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
+	"github.com/wwsheng009/ai-agent-runtime/internal/providerhealth"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -37,6 +38,9 @@ func (f ChildAgentFactory) Build(ctx context.Context, req ChildBuildRequest) (Ch
 	resolver := modelrouting.Resolver{
 		Config:  req.Config.Routing,
 		Catalog: modelrouting.NewRuntimeCatalog(parent.llmRuntime),
+		// 动态健康源：与本进程记录 LLM 成败的注册表是同一份（见 agent.loop），
+		// 因此这里读到的是真实的上游表现，而不是配置里手写的标注。
+		Health: providerhealth.Default(),
 	}
 	parentReasoning := ""
 	if modelrouting.RoutingEnabled(req.Config.Routing) {

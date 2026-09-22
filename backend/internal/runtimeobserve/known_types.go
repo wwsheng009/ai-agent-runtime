@@ -54,6 +54,25 @@ import "strings"
 //     登记为 tail-only）。这些类型此前只出现在交付侧白名单里、不在本目录内，
 //     导致「已知但被通道裁掉」与「完全未知」三分法对它们失效（由
 //     internal/events/contract_test.go 的注册表 ↔ 目录双向一致门禁暴露）。
+//  8. 主 Agent 动态 route 治理事件与在途健康门禁信号（internal/events/
+//     main_agent_routing.go 的常量；方案 main-agent-dynamic-provider-model-switching-
+//     plan-20260921.md §6.2）：main_agent.route_applied / _prediction_invalid /
+//     _prediction_unresolvable / _disabled_for_turn / _cost_guard_tripped /
+//     _cleared（发射点 internal/agent/loop.go 的 emitRuntimeEvent），以及
+//     llm.provider.health_opened（loop.go:2186）、llm.prompt_cache.breaker_tripped
+//     （loop.go:2202）。后两者此前是**裸字面量 + 未登记**：事件在总线上真实存在，
+//     却不在任何清单里，导致三分法把它们当成「完全未知」——这正是「在途特性唯一
+//     对外信号完全不可见」的成因，故在此显式收编。
+//  9. 子代理路由审计与批次失败态终态，以及 SA-G2 扫描门禁收编的历史裸字面量
+//     （方案 task-difficulty-routing-audit-hardening-plan-20260921.md §6.1）：
+//     subagent.route.resolved 与 4 个批次失败态终态（常量定义在
+//     internal/events/subagent_audit_events.go，发射点 internal/agent/
+//     subagent_route_audit.go 与 subagent_batch_coordinator.go），以及 20 个由
+//     internal/agent 以 emitRuntimeEvent("<literal>") 真实发射、此前既不在交付
+//     注册表也不在本目录的类型。后者在注册表里登记为 0 通道（= 书面表态「当前
+//     无 chat 侧交付通道」，不改变任何投递行为），否则三分法无法把「已知但无
+//     通道」与「完全未知」区分开。收编范围由 internal/events/contract_test.go
+//     的扫描门禁锁定：新增未登记的裸字面量发射点即测试失败。
 //
 // 匹配规则与 Projector 保持一致：TrimSpace 后精确匹配；仅大小写不同按未知处理，
 // 以保留异常语义（见 normalizeEventType）。
@@ -176,6 +195,52 @@ func buildKnownEventTypes() map[string]bool {
 		"subagent.completed",       // agent/scheduler.go:454
 		"subagent.task.started",    // agent/subagent_batch_coordinator.go:1184（events/contract.go 登记为 tail-only）
 		"subagent.task.completed",  // agent/subagent_batch_coordinator.go:1399（events/contract.go 登记为 tail-only）
+	)
+
+	// 来源 8：主 Agent 动态 route 治理事件 + 在途健康门禁信号（见文件头说明）。
+	// 常量定义在 internal/events/main_agent_routing.go；此处按同一份字面量收编，
+	// 由 internal/events/contract_test.go 的三方一致门禁断言「常量 ↔ 注册表 ↔ 目录」
+	// 不会漂移。
+	add(
+		"main_agent.route_applied",                 // events.EventMainAgentRouteApplied
+		"main_agent.route_prediction_invalid",      // events.EventMainAgentRoutePredictionInvalid
+		"main_agent.route_prediction_unresolvable", // events.EventMainAgentRoutePredictionUnresolvable
+		"main_agent.route_disabled_for_turn",       // events.EventMainAgentRouteDisabledForTurn
+		"main_agent.route_cost_guard_tripped",      // events.EventMainAgentRouteCostGuardTripped
+		"main_agent.route_cleared",                 // events.EventMainAgentRouteCleared
+		"llm.provider.health_opened",               // events.EventLLMProviderHealthOpened（agent/loop.go:2186）
+		"llm.prompt_cache.breaker_tripped",         // events.EventLLMPromptCacheBreakerTripped（agent/loop.go:2202）
+	)
+
+	// 来源 9：子代理路由审计与批次失败态终态，以及扫描门禁收编的历史裸字面量
+	// （见文件头说明）。前 5 条的常量定义在 internal/events/subagent_audit_events.go；
+	// 其余 20 条是 internal/agent 里以裸字面量发射、经 SA-G2 门禁强制登记的类型。
+	add(
+		"subagent.route.resolved",              // events.EventSubagentRouteResolved（agent/subagent_route_audit.go）
+		"subagent.batch.failed",                // events.EventSubagentBatchFailed（agent/subagent_batch_coordinator.go）
+		"subagent.batch.canceled",              // events.EventSubagentBatchCanceled
+		"subagent.batch.timed_out",             // events.EventSubagentBatchTimedOut
+		"subagent.batch.orphaned",              // events.EventSubagentBatchOrphaned
+		"completion.requirement_recovery",      // agent/loop.go
+		"context.preflight.started",            // agent/loop.go
+		"context.preflight.compacted",          // agent/loop.go
+		"context.preflight.failed",             // agent/loop.go
+		"context.tool_schema.compacted",        // agent/loop.go
+		"context.tool_schema.frozen",           // agent/loop.go
+		"hooks.stop_blocked",                   // agent/loop.go
+		"llm.max_output_tokens.escalated",      // agent/loop.go
+		"llm.prompt_cache.backoff_applied",     // agent/loop.go
+		"llm.reasoning_only.guardrail_hit",     // agent/loop.go
+		"llm.reasoning_only.recovered",         // agent/loop.go
+		"llm.retry.aggregated",                 // agent/loop.go
+		"patch.applied",                        // agent/scheduler.go
+		"patch.decision",                       // agent/orchestrator.go
+		"subagent.batch.created",               // agent/loop.go（批次创建里程碑）
+		"subagent.batch.circuit_open",          // agent/scheduler.go（熔断治理信号）
+		"subagent.denied",                      // agent/scheduler.go
+		"subagent.requires_write",              // agent/loop.go
+		"tool_loop.exploration_stall_observed", // agent/loop.go
+		"tool_loop.repeated_prompt_observed",   // agent/loop.go
 	)
 
 	return out

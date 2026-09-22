@@ -8,7 +8,7 @@ import { isConfigRecord } from "../runtime-provider-config-utils";
 
 import { getRuntimeAgentRoutingSettings } from "./summary";
 import {
-  parseNonNegativeInteger,
+  parseExpertConcurrency,
   readText,
   setOptionalText,
 } from "./text-utils";
@@ -47,7 +47,7 @@ export function buildRuntimeAgentRoutingRecord(
     validate_model_capabilities: config.validateModelCapabilities,
     unsupported_reasoning_policy:
       config.unsupportedReasoningPolicy || "downgrade",
-    max_expert_concurrency: parseNonNegativeInteger(config.maxExpertConcurrency),
+    max_expert_concurrency: parseExpertConcurrency(config.maxExpertConcurrency),
     levels,
   };
 }
