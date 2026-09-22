@@ -511,15 +511,31 @@ describe("刷新后续传（runtime/stream 增量接续到被认领的消息）"
     });
     store.flush();
     expect(store.getSnapshot().items).toHaveLength(1);
+    expect(store.getSnapshot().lastEventSeq).toBe(1);
 
+    // tool_started 已是可渲染事件（runtimeToolEventToTrajectoryPush → 工具行），
+    // 因此走 push 批处理：冲刷后落地工具行并把游标推到 2。
     act(() => {
       calls[0].handlers.onEvent?.({
         type: "tool_started",
         timestamp: "t",
-        payload: { seq: 2 },
+        payload: { seq: 2, tool_call_id: "tool-1", tool_name: "bash" },
       } as SessionRuntimeEvent);
     });
-    // skip 也必须前移游标：否则后续事件的空洞会让轨迹永久卡 pending。
+    store.flush();
+    expect(store.getSnapshot().items).toHaveLength(2);
     expect(store.getSnapshot().lastEventSeq).toBe(2);
+
+    // 过滤事件（不建行的 tail-only 生命周期类型）没有 push 分支：不产生轨迹行，
+    // 但游标必须同步前移——否则后续事件的空洞会让轨迹永久卡 pending。
+    act(() => {
+      calls[0].handlers.onEvent?.({
+        type: "subagent.started",
+        timestamp: "t",
+        payload: { seq: 3 },
+      } as SessionRuntimeEvent);
+    });
+    expect(store.getSnapshot().items).toHaveLength(2);
+    expect(store.getSnapshot().lastEventSeq).toBe(3);
   });
 });

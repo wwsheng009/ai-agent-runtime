@@ -226,9 +226,11 @@ export function useWorkspaceLive({
     getReplayCursor: () => trajectoryStore.getSnapshot().lastEventSeq,
     onTrajectoryEvent: (event) => {
       // Q4：runtime 生命周期事件实时投递到轨迹，与恢复路径共用同一转换
-      // （幂等：reducer 按 seq 去重）。被过滤的事件（tool_started/
-      // tool_finished 等与 chat.sse 共享同一 EventStore 全局 seq）已持久化
-      // 但不会渲染——advanceCursor 跳过其空洞，避免后续事件永久卡 pending。
+      // （幂等：reducer 按 seq 去重）。工具生命周期（tool_started/
+      // tool_finished/tool_receipt_recorded）已转为可渲染的工具行；不建行的
+      // tail-only / provenance 事件（如 subagent.started、recall.performed）
+      // 与 chat.sse 共享同一 EventStore 全局 seq，已持久化但不会渲染——
+      // advanceCursor 跳过其空洞，避免后续事件永久卡 pending。
       const action = trajectoryEventAction(event);
       if (action.kind === "push") {
         trajectoryStore.push(action.push.kind, action.push.payload);
