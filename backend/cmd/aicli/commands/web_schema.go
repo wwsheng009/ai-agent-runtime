@@ -35,8 +35,8 @@ const (
 	ChatWebAPISessionsRenamePath = "/web/api/sessions/rename"
 	// ChatWebAPIAnalysisPath 「分析」页签端点前缀（runtime.analytics.v1 契约，
 	// 与 runtime-server /api/runtime/analytics/* 同一查询层、同一字段名）。
-	// 子路径：/status、/tools、/subagents、/errors；v1 不新增 SSE 事件
-	// （页签激活时按需拉取，见 web/js/analysis.js）。
+	// 子路径：/status、/tools、/subagents、/errors、/routing、/routing/events；
+	// v1 不新增 SSE 事件（页签激活时按需拉取，见 web/js/analysis.js）。
 	ChatWebAPIAnalysisPath = "/web/api/analysis"
 	// ChatWebAPIMCPsPath MCP 管理端点前缀（MCP 页签）：
 	//   GET/POST /web/api/mcps

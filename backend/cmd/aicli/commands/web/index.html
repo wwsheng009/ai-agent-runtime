@@ -563,6 +563,12 @@
            archives / truncations / pointer / deref 四块 + 低效信号警告。 -->
       <div id="analysis-efficiency" class="cache-requests"><div class="cache-empty">加载中…</div></div>
 
+      <!-- 路由切换观测（与 runtime-server /api/runtime/analytics/routing 同源）：
+           指标卡 + 10 维分布桶 + 明细表（分页加载）；由 js/analysis.js 在路由
+           数据返回后渲染，复用 cache-* 样式类，不新增 style.css。 -->
+      <div id="analysis-routing" class="cache-requests"><div class="cache-empty">加载中…</div></div>
+      <div id="analysis-routing-events" class="cache-requests"><div class="cache-empty">加载中…</div></div>
+
       <!-- 行下钻弹层：工具行 / 子代理行点击后展开明细（Esc / 遮罩 / ✕ 关闭）。 -->
       <div id="analysis-detail-overlay" style="display:none;position:fixed;z-index:1200;inset:0;background:var(--overlayBg);padding:16px;justify-content:center;align-items:center">
         <div style="position:relative;width:min(680px,calc(100vw - 32px));max-height:min(86vh,760px);overflow:hidden;background:var(--modalBg);border:1px solid var(--border2);border-radius:12px;display:flex;flex-direction:column;box-shadow:0 12px 40px var(--shadow)">
@@ -593,7 +599,7 @@
           <dt>状态文档</dt>
           <dd>「调试」页签展示的内容与 <code>aicli /debug</code> 命令一致（<code>GET /web/api/status?format=text</code>）。</dd>
           <dt>页签</dt>
-          <dd>对话 / 技能 / MCP / 日志 / 配置 / 缓存 / 分析 / 调试 / 关于</dd>
+          <dd>对话 / 技能 / MCP / 日志 / 配置 / 缓存 / 分析（含路由观测） / 调试 / 关于</dd>
           <dt>当前会话</dt>
           <dd>
             <div class="about-token">

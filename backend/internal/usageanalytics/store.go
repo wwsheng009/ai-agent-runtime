@@ -410,6 +410,45 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
   PRIMARY KEY (session_id, turn_id)
 )`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_turns_time ON usage_turns(session_id, ended_at_unix_nano DESC)`,
+		// ---- 路由切换观测（主 Agent / 子 Agent）：统一表 + 维度索引 ----
+		// 幂等 DDL：老库打开时自动补表，无需单独版本迁移（与 v2 三表同策略）。
+		`CREATE TABLE IF NOT EXISTS usage_routes (
+  route_event_id          TEXT PRIMARY KEY,
+  session_id              TEXT NOT NULL DEFAULT '',
+  parent_session_id       TEXT NOT NULL DEFAULT '',
+  child_session_id        TEXT NOT NULL DEFAULT '',
+  trace_id                TEXT NOT NULL DEFAULT '',
+  scope                   TEXT NOT NULL DEFAULT '',
+  kind                    TEXT NOT NULL DEFAULT '',
+  agent_id                TEXT NOT NULL DEFAULT '',
+  role                    TEXT NOT NULL DEFAULT '',
+  goal                    TEXT NOT NULL DEFAULT '',
+  step                    INTEGER NOT NULL DEFAULT 0,
+  reason                  TEXT NOT NULL DEFAULT '',
+  source                  TEXT NOT NULL DEFAULT '',
+  difficulty              TEXT NOT NULL DEFAULT '',
+  difficulty_source       TEXT NOT NULL DEFAULT '',
+  provider                TEXT NOT NULL DEFAULT '',
+  model                   TEXT NOT NULL DEFAULT '',
+  reasoning_effort        TEXT NOT NULL DEFAULT '',
+  route_changed           INTEGER,
+  fallback_used           INTEGER,
+  fallback_reason         TEXT NOT NULL DEFAULT '',
+  candidate_count         INTEGER NOT NULL DEFAULT 0,
+  warning_count           INTEGER NOT NULL DEFAULT 0,
+  attempt                 INTEGER NOT NULL DEFAULT 0,
+  max_attempts            INTEGER NOT NULL DEFAULT 0,
+  batch_id                TEXT NOT NULL DEFAULT '',
+  recorded_at_unix_nano   INTEGER NOT NULL DEFAULT 0,
+  warnings_json           TEXT NOT NULL DEFAULT '',
+  candidates_json         TEXT NOT NULL DEFAULT '',
+  record_json             BLOB
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_routes_session ON usage_routes(session_id, recorded_at_unix_nano DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_routes_time ON usage_routes(recorded_at_unix_nano DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_routes_scope ON usage_routes(scope, kind, recorded_at_unix_nano DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_routes_route ON usage_routes(provider, model)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_routes_source ON usage_routes(source, difficulty)`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.Exec(statement); err != nil {
@@ -429,6 +468,17 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 		}
 	}
 	// 可选索引：旧库可能缺少 error_category 列（v1 部分 schema），先探测再建。
+	// v5 增量列：usage_routes.goal（子代理任务目标）。旧库缺列时补齐；只读库不改库，
+	// 读路径按列存在性退化（见 query_routes.go 的 goalExpr）。
+	if !s.readOnly {
+		if hasGoal, err := s.hasColumn("usage_routes", "goal"); err != nil {
+			return err
+		} else if !hasGoal {
+			if _, err := s.db.Exec("ALTER TABLE usage_routes ADD COLUMN goal TEXT NOT NULL DEFAULT ''"); err != nil {
+				return fmt.Errorf("migrate usage analytics db: %w", err)
+			}
+		}
+	}
 	// 错误模式部分索引（Phase 4）只服务 usage_requests(error_category)。
 	if hasErrorCategory, err := s.hasColumn("usage_requests", "error_category"); err != nil {
 		return err

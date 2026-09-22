@@ -299,6 +299,35 @@ func TestHandleChatWebAPIAnalysis_EmptyDatabase(t *testing.T) {
 	if path, _ := body["db_path"].(string); path == "" {
 		t.Fatal("db_path should expose the analytics database path")
 	}
+
+	// 路由端点空库：200 + 零值 totals + 空桶 + 空事件数组。
+	code, body = analysisGetJSON(t, ChatWebAPIAnalysisPath+"/routing")
+	if code != http.StatusOK {
+		t.Fatalf("routing status = %d, want 200; body: %v", code, body)
+	}
+	totals, ok := body["totals"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("routing totals missing: %v", body)
+	}
+	if totals["total"] != float64(0) || totals["main_agent"] != float64(0) || totals["subagent"] != float64(0) {
+		t.Fatalf("routing totals = %v, want zero counts", totals)
+	}
+	for _, dim := range []string{"by_scope", "by_kind", "by_reason", "by_source", "by_difficulty", "by_difficulty_source", "by_role", "by_provider", "by_model", "warnings"} {
+		if items := analysisArray(t, body, dim); len(items) != 0 {
+			t.Fatalf("routing %s = %v, want empty array", dim, body[dim])
+		}
+	}
+
+	code, body = analysisGetJSON(t, ChatWebAPIAnalysisPath+"/routing/events")
+	if code != http.StatusOK {
+		t.Fatalf("routing/events status = %d, want 200; body: %v", code, body)
+	}
+	if items := analysisArray(t, body, "events"); len(items) != 0 {
+		t.Fatalf("routing events = %v, want empty array", body["events"])
+	}
+	if body["count"] != float64(0) {
+		t.Fatalf("routing events count = %v, want 0", body["count"])
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -489,6 +518,130 @@ func TestHandleChatWebAPIAnalysis_ScopeAndSessionFilter(t *testing.T) {
 // 参数与路由边界：非法时间窗 400、limit 拼写失败归一、未知子路径 404、非 GET 405
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 路由观测：事件经 collector 落库后通过 /routing 与 /routing/events 读回
+// ---------------------------------------------------------------------------
+
+func publishAnalysisRouteEvent(t *testing.T, bus *runtimeevents.Bus, eventType, sessionID string, payload map[string]interface{}) {
+	t.Helper()
+	bus.Publish(runtimeevents.Event{
+		Type:      eventType,
+		SessionID: sessionID,
+		Payload:   payload,
+		Timestamp: nextAnalysisTestTimestamp(),
+	})
+}
+
+func TestHandleChatWebAPIAnalysis_Routing(t *testing.T) {
+	session, bus := newAnalysisTestSession(t)
+	sessionID := session.RuntimeSession.ID
+
+	// 子代理路由决策。
+	publishAnalysisRouteEvent(t, bus, runtimeevents.EventSubagentRouteResolved, sessionID, map[string]interface{}{
+		"subagent_id":       "sub-1",
+		"role":              "writer",
+		"goal":              "改一个文件",
+		"parent_session_id": sessionID,
+		"child_session_id":  "child-1",
+		"attempt":           1,
+		"max_attempts":      2,
+		"trace_id":          "trace-web",
+		"difficulty":        "hard",
+		"difficulty_source": "explicit",
+		"route_provider":    "remote",
+		"route_model":       "strong-model",
+		"route_source":      "difficulty_level",
+		"fallback_used":     true,
+		"fallback_reason":   "health_gate",
+		"route_warnings":    []interface{}{"provider_fallback_parent"},
+	})
+	// 主 Agent 改道。
+	publishAnalysisRouteEvent(t, bus, runtimeevents.EventMainAgentRouteApplied, sessionID, map[string]interface{}{
+		"trace_id":       "trace-main-web",
+		"step":           1,
+		"route_source":   "difficulty_level",
+		"route_provider": "local",
+		"route_model":    "fast-model",
+	})
+	// 主 Agent 告警。
+	publishAnalysisRouteEvent(t, bus, runtimeevents.EventMainAgentRouteCostGuardTripped, sessionID, map[string]interface{}{
+		"trace_id": "trace-main-web",
+		"step":     1,
+	})
+
+	// stats 端点读回。
+	code, body := analysisGetJSON(t, ChatWebAPIAnalysisPath+"/routing")
+	if code != http.StatusOK {
+		t.Fatalf("routing status = %d, want 200; body: %v", code, body)
+	}
+	totals, ok := body["totals"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("routing totals missing: %v", body)
+	}
+	// 子代理 1 + 主 Agent applied 1 + 主 Agent warning 1 = 3。
+	if totals["total"] != float64(3) {
+		t.Fatalf("routing total = %v, want 3", totals["total"])
+	}
+	if totals["main_agent"] != float64(2) {
+		t.Fatalf("routing main_agent = %v, want 2", totals["main_agent"])
+	}
+	if totals["subagent"] != float64(1) {
+		t.Fatalf("routing subagent = %v, want 1", totals["subagent"])
+	}
+	if totals["warnings"] != float64(1) {
+		t.Fatalf("routing warnings = %v, want 1", totals["warnings"])
+	}
+	if totals["fallback_used"] != float64(1) {
+		t.Fatalf("routing fallback_used = %v, want 1", totals["fallback_used"])
+	}
+	// 分布桶非空。
+	if items := analysisArray(t, body, "by_scope"); len(items) != 2 {
+		t.Fatalf("by_scope = %d items, want 2", len(items))
+	}
+	if items := analysisArray(t, body, "by_difficulty_source"); len(items) != 1 {
+		t.Fatalf("by_difficulty_source = %d items, want 1", len(items))
+	}
+
+	// events 端点读回。
+	code, body = analysisGetJSON(t, ChatWebAPIAnalysisPath+"/routing/events?limit=10")
+	if code != http.StatusOK {
+		t.Fatalf("routing/events status = %d, want 200; body: %v", code, body)
+	}
+	if body["count"] != float64(3) {
+		t.Fatalf("routing events count = %v, want 3", body["count"])
+	}
+	events := analysisArray(t, body, "events")
+	if len(events) != 3 {
+		t.Fatalf("routing events = %d, want 3", len(events))
+	}
+	// 第一条事件（时间倒序）应该是最后发布的告警。
+	first, ok := events[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("first event not a map: %T", events[0])
+	}
+	if first["kind"] != "warning" {
+		t.Fatalf("first event kind = %v, want warning", first["kind"])
+	}
+
+	// events 端点 scope 过滤。
+	code, body = analysisGetJSON(t, ChatWebAPIAnalysisPath+"/routing/events?scope=subagent")
+	if code != http.StatusOK {
+		t.Fatalf("routing/events scope=subagent status = %d, want 200", code)
+	}
+	if body["count"] != float64(1) {
+		t.Fatalf("routing/events scope=subagent count = %v, want 1", body["count"])
+	}
+
+	// events 端点 warnings_only 过滤。
+	code, body = analysisGetJSON(t, ChatWebAPIAnalysisPath+"/routing/events?warnings_only=true")
+	if code != http.StatusOK {
+		t.Fatalf("routing/events warnings_only status = %d, want 200", code)
+	}
+	if body["count"] != float64(1) {
+		t.Fatalf("routing/events warnings_only count = %v, want 1", body["count"])
+	}
+}
+
 func TestHandleChatWebAPIAnalysis_RequestBoundaries(t *testing.T) {
 	newAnalysisTestSession(t)
 
@@ -554,6 +707,8 @@ func TestHandleChatWebPage_AnalysisModule(t *testing.T) {
 		"attached=false",     // 未挂载 → 顶部健康条（§9.1 降级）
 		"暂无数据",               // 空库渲染
 		"data-analysis-tool", // 工具行下钻
+		"routing",            // 路由观测
+		"loadMoreRoutingEvents", // 路由分页加载
 	} {
 		if !strings.Contains(body, needle) {
 			t.Fatalf("analysis.js missing %q", needle)

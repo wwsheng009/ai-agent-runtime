@@ -19,6 +19,13 @@ var analysisScope = "session";
 var analysisToolsData = null;
 var analysisSubagentsData = null;
 
+// 路由观测快照（stats + events 分页状态）。
+var analysisRoutingData = null;
+var analysisRoutingEvents = [];
+var analysisRoutingEventsTotal = 0;
+var analysisRoutingEventsOffset = 0;
+var analysisRoutingEventsLoading = false;
+
 // 各区块请求序号：丢弃会话切换 / 手动刷新竞态下迟到的过期响应。
 var analysisSeq = 0;
 // 自动刷新（页签可见时每 15 秒重拉一次，离开页签即停）。
@@ -120,7 +127,7 @@ export function loadAnalysis() {
 
 // refreshAnalysis 重拉全部区块（状态 + 工具 + 子代理 + 失败模式）。
 export function refreshAnalysis() {
-  if (!analysisEl("analysis-tools") && !analysisEl("analysis-subagents") && !analysisEl("analysis-errors")) { return; }
+  if (!analysisEl("analysis-tools") && !analysisEl("analysis-subagents") && !analysisEl("analysis-errors") && !analysisEl("analysis-routing")) { return; }
   var seq = ++analysisSeq;
   analysisLoadedSessionID = analysisCurrentSessionID();
   analysisToolsData = null;
@@ -163,6 +170,32 @@ export function refreshAnalysis() {
     if (seq !== analysisSeq) { return; }
     renderAnalysisEfficiency(null);
   });
+  // 路由观测：stats + events 首页（offset=0，每次刷新重置分页状态）。
+  analysisRoutingEvents = [];
+  analysisRoutingEventsOffset = 0;
+  analysisRoutingEventsTotal = 0;
+  analysisRoutingData = null;
+  analysisAPI(analysisBase + "/routing" + analysisQuery()).then(function (result) {
+    if (seq !== analysisSeq) { return; }
+    renderAnalysisRouting(result);
+  }).catch(function () {
+    if (seq !== analysisSeq) { return; }
+    renderAnalysisRouting(null);
+  });
+  analysisRoutingEventsLoading = true;
+  analysisAPI(analysisBase + "/routing/events" + analysisQuery() + "&limit=50").then(function (result) {
+    if (seq !== analysisSeq) { return; }
+    analysisRoutingEventsLoading = false;
+    var body = result && result.status === 200 && result.body ? result.body : null;
+    analysisRoutingEvents = (body && body.events) ? body.events : [];
+    analysisRoutingEventsTotal = (body && body.count) ? body.count : analysisRoutingEvents.length;
+    analysisRoutingEventsOffset = analysisRoutingEvents.length;
+    renderAnalysisRoutingEvents(false);
+  }).catch(function () {
+    if (seq !== analysisSeq) { return; }
+    analysisRoutingEventsLoading = false;
+    renderAnalysisRoutingEvents(false);
+  });
 }
 
 // 仅当分析页签当前可见时刷新（后台页签不浪费请求；下次进入按会话不一致重拉）。
@@ -193,7 +226,7 @@ function renderAnalysisLoading() {
   }
   var cardsEl = analysisEl("analysis-cards");
   if (cardsEl) { cardsEl.innerHTML = '<div class="cache-empty">加载中…</div>'; }
-  var sections = ["analysis-tools", "analysis-subagents", "analysis-errors", "analysis-efficiency"];
+  var sections = ["analysis-tools", "analysis-subagents", "analysis-errors", "analysis-efficiency", "analysis-routing", "analysis-routing-events"];
   for (var i = 0; i < sections.length; i++) {
     var el = analysisEl(sections[i]);
     if (el) { el.innerHTML = '<div class="cache-empty">加载中…</div>'; }
@@ -522,6 +555,187 @@ function renderAnalysisErrors(result) {
     '<table class="cache-table"><thead><tr>' +
     "<th>来源</th><th>错误码</th><th>失败分类</th><th>次数</th>" +
     "</tr></thead><tbody>" + rows.join("") + "</tbody></table>";
+}
+
+// ---- 路由观测区块 ----
+
+// 路由维度标签（对齐 frontend i18n，微 web 客户端无 i18n 框架，直接中文映射）。
+var routingScopeLabels = { main_agent: "主 Agent", subagent: "子代理" };
+var routingKindLabels = { applied: "改道", cleared: "还原", warning: "告警" };
+var routingSourceLabels = {
+  parent_inherit: "父级继承", fallback: "降级回退", role_override: "角色覆盖",
+  difficulty_level: "难度路由", explicit: "显式声明", explicit_promoted: "显式提升",
+  heuristic: "启发式", default: "默认", inferred: "推断",
+};
+var routingFlagLabels = { routeChanged: "路由已变", routeUnchanged: "路由未变", fallbackUsed: "降级已用", fallbackUnused: "降级未用" };
+
+function routingLabel(map, raw) {
+  var key = (raw || "").trim().toLowerCase();
+  return map[key] || (raw || "").trim() || "未记录";
+}
+
+function triStateLabel(value, trueLabel, falseLabel) {
+  if (value === true) { return trueLabel; }
+  if (value === false) { return falseLabel; }
+  return "未记录";
+}
+
+// renderAnalysisRouting 渲染路由总览：指标卡 + 10 维分布桶。
+function renderAnalysisRouting(result) {
+  var el = analysisEl("analysis-routing");
+  if (!el) { return; }
+  if (!result || result.status !== 200 || !result.body) {
+    analysisRoutingData = null;
+    el.innerHTML = analysisUnavailableHTML(result);
+    return;
+  }
+  analysisRoutingData = result.body;
+  var totals = result.body.totals || {};
+  var html = '<div class="cache-detail-title" style="margin-top:10px">路由切换观测</div>';
+  // 指标卡
+  html += '<div class="cache-cards">' +
+    analysisCard(analysisInt(totals.total), "总事件（改道 " + analysisInt(totals.applied) + " · 还原 " + analysisInt(totals.cleared) + "）") +
+    analysisCard(analysisInt(totals.main_agent), "主 Agent（候选 " + analysisInt(totals.candidate_total) + "）") +
+    analysisCard(analysisInt(totals.subagent), "子代理（会话 " + analysisInt(totals.distinct_sessions) + "）") +
+    analysisCard(analysisInt(totals.route_changed), "路由变更（模型 " + analysisInt(totals.distinct_models) + "）") +
+    analysisCard(analysisInt(totals.fallback_used), "降级使用") +
+    analysisCard(analysisInt(totals.warnings), "告警") +
+    "</div>";
+  // 分布桶
+  var bucketGroups = [
+    { title: "范围", buckets: result.body.by_scope, label: function (k) { return routingLabel(routingScopeLabels, k); } },
+    { title: "类型", buckets: result.body.by_kind, label: function (k) { return routingLabel(routingKindLabels, k); } },
+    { title: "原因", buckets: result.body.by_reason, label: function (k) { return routingLabel(routingSourceLabels, k); } },
+    { title: "来源", buckets: result.body.by_source, label: function (k) { return routingLabel(routingSourceLabels, k); } },
+    { title: "难度", buckets: result.body.by_difficulty, label: function (k) { return routingLabel({}, k); } },
+    { title: "难度来源", buckets: result.body.by_difficulty_source, label: function (k) { return routingLabel(routingSourceLabels, k); } },
+    { title: "角色", buckets: result.body.by_role, label: function (k) { return routingLabel({}, k); } },
+    { title: "Provider", buckets: result.body.by_provider, label: function (k) { return routingLabel({}, k); } },
+    { title: "Model", buckets: result.body.by_model, label: function (k) { return routingLabel({}, k); } },
+    { title: "告警词", buckets: result.body.warnings, label: function (k) { return routingLabel({}, k); } },
+  ];
+  html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px;margin-top:8px">';
+  for (var g = 0; g < bucketGroups.length; g++) {
+    html += renderRoutingBucketGroup(bucketGroups[g]);
+  }
+  html += "</div>";
+  el.innerHTML = html;
+}
+
+function renderRoutingBucketGroup(group) {
+  var buckets = group.buckets || [];
+  if (buckets.length === 0) {
+    return '<div class="cache-card" style="min-height:60px"><div class="cache-card-label">' +
+      esc(group.title) + '</div><div class="cache-empty" style="font-size:11px">暂无数据</div></div>';
+  }
+  var max = 0;
+  for (var i = 0; i < buckets.length; i++) {
+    if (buckets[i].count > max) { max = buckets[i].count; }
+  }
+  var html = '<div class="cache-card" style="min-height:60px"><div class="cache-card-label" style="margin-bottom:4px">' +
+    esc(group.title) + "</div>";
+  for (var j = 0; j < buckets.length; j++) {
+    var b = buckets[j];
+    var label = group.label(b.key);
+    var pct = max > 0 ? Math.max(4, Math.round(b.count / max * 100)) : 0;
+    html += '<div style="display:flex;align-items:center;gap:4px;margin:2px 0;font-size:11px">' +
+      '<span style="min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' +
+      esc(label) + '">' + esc(label) + "</span>" +
+      '<span style="flex-shrink:0;color:var(--fg3)">' + analysisInt(b.count) + "</span></div>" +
+      '<div style="height:3px;border-radius:2px;background:var(--bg3);margin-bottom:2px">' +
+      '<div style="height:100%;border-radius:2px;background:var(--accent2);width:' + pct + '%"></div></div>';
+  }
+  return html + "</div>";
+}
+
+// renderAnalysisRoutingEvents 渲染路由明细表（首次 + 加载更多追加）。
+function renderAnalysisRoutingEvents(append) {
+  var el = analysisEl("analysis-routing-events");
+  if (!el) { return; }
+  if (analysisRoutingEventsLoading && !append) {
+    el.innerHTML = '<div class="cache-empty">加载中…</div>';
+    return;
+  }
+  if (analysisRoutingEvents.length === 0) {
+    el.innerHTML = '<div class="cache-detail-title" style="margin-top:10px">路由事件明细</div>' +
+      '<div class="cache-empty">暂无数据</div>';
+    return;
+  }
+  var html = '<div class="cache-detail-title" style="margin-top:10px">路由事件明细' +
+    '（' + analysisInt(analysisRoutingEvents.length) + " / " + analysisInt(analysisRoutingEventsTotal) + "）</div>";
+  html += '<div style="overflow-x:auto"><table class="cache-table"><thead><tr>' +
+    "<th>时间</th><th>范围</th><th>类型</th><th>Agent</th><th>目标</th>" +
+    "<th>难度</th><th>路由</th><th>标记</th><th>告警</th><th>尝试</th>" +
+    "</tr></thead><tbody>";
+  for (var i = 0; i < analysisRoutingEvents.length; i++) {
+    html += renderRoutingEventRow(analysisRoutingEvents[i]);
+  }
+  html += "</tbody></table></div>";
+  if (analysisRoutingEvents.length < analysisRoutingEventsTotal) {
+    html += '<div style="text-align:center;margin-top:8px">' +
+      '<button type="button" id="analysis-routing-load-more" style="padding:4px 14px;font-size:12px"' +
+      ' title="加载更多路由事件">加载更多</button></div>';
+  }
+  el.innerHTML = html;
+  // 绑定加载更多按钮。
+  var loadMoreBtn = analysisEl("analysis-routing-load-more");
+  if (loadMoreBtn) {
+    loadMoreBtn.addEventListener("click", function () { loadMoreRoutingEvents(); });
+  }
+}
+
+function renderRoutingEventRow(ev) {
+  var scope = routingLabel(routingScopeLabels, ev.scope);
+  var kind = routingLabel(routingKindLabels, ev.kind);
+  var kindStyle = ev.kind === "applied"
+    ? 'style="color:var(--green)"'
+    : (ev.kind === "warning" ? 'style="color:var(--yellow)"' : "");
+  var agent = ev.agent_id ? ev.agent_id.substring(0, 8) : "-";
+  var goal = (ev.goal || "-").substring(0, 32);
+  var diffSource = ev.difficulty_source ? "（" + routingLabel(routingSourceLabels, ev.difficulty_source) + "）" : "";
+  var route = [ev.provider, ev.model].filter(Boolean).join(" / ") || "未记录";
+  var routeChanged = triStateLabel(ev.route_changed, routingFlagLabels.routeChanged, routingFlagLabels.routeUnchanged);
+  var fallback = triStateLabel(ev.fallback_used, routingFlagLabels.fallbackUsed, routingFlagLabels.fallbackUnused);
+  var warnings = (ev.warnings || []);
+  var warnText = warnings.length > 0 ? warnings.length + " 条" : "-";
+  var attempt = ev.attempt || 0;
+  var maxAtt = ev.max_attempts || 0;
+  var attemptLabel = (maxAtt > 1) ? attempt + "/" + maxAtt : String(attempt);
+  var time = analysisTime(ev.recorded_at);
+  return '<tr class="cache-row">' +
+    "<td>" + esc(time) + "</td>" +
+    "<td>" + esc(scope) + "</td>" +
+    "<td><span " + kindStyle + ">" + esc(kind) + "</span></td>" +
+    '<td style="font-family:monospace;font-size:11px">' + esc(agent) + "</td>" +
+    '<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' +
+    esc(ev.goal || "") + '">' + esc(goal) + "</td>" +
+    "<td>" + esc(ev.difficulty || "未记录") + esc(diffSource) + "</td>" +
+    '<td style="font-size:11px">' + esc(route) + "</td>" +
+    "<td>" + esc(routeChanged) + " · " + esc(fallback) + "</td>" +
+    '<td style="color:var(--yellow)">' + esc(warnText) + "</td>" +
+    "<td>" + esc(attemptLabel) + "</td></tr>";
+}
+
+function loadMoreRoutingEvents() {
+  if (analysisRoutingEventsLoading) { return; }
+  analysisRoutingEventsLoading = true;
+  var btn = analysisEl("analysis-routing-load-more");
+  if (btn) { btn.textContent = "加载中…"; btn.disabled = true; }
+  analysisAPI(analysisBase + "/routing/events" + analysisQuery() +
+    "&limit=50&offset=" + analysisRoutingEventsOffset).then(function (result) {
+    analysisRoutingEventsLoading = false;
+    var body = result && result.status === 200 && result.body ? result.body : null;
+    var rows = (body && body.events) ? body.events : [];
+    for (var i = 0; i < rows.length; i++) {
+      analysisRoutingEvents.push(rows[i]);
+    }
+    analysisRoutingEventsOffset += rows.length;
+    renderAnalysisRoutingEvents(true);
+  }).catch(function () {
+    analysisRoutingEventsLoading = false;
+    var loadMoreBtn = analysisEl("analysis-routing-load-more");
+    if (loadMoreBtn) { loadMoreBtn.textContent = "加载失败，点击重试"; loadMoreBtn.disabled = false; }
+  });
 }
 
 // ---- 行下钻弹层 ----

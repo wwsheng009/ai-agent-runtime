@@ -9,24 +9,36 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   AnalyticsErrorPattern,
+  AnalyticsRouteEventsResponse,
+  AnalyticsRouteStatsResponse,
   AnalyticsSubagentStatsResponse,
   AnalyticsToolStatsResponse,
 } from "@/types/runtime";
 
-const { listAnalyticsToolsMock, getAnalyticsSubagentsMock, listAnalyticsErrorsMock } =
-  vi.hoisted(() => ({
-    listAnalyticsToolsMock: vi.fn(),
-    getAnalyticsSubagentsMock: vi.fn(),
-    listAnalyticsErrorsMock: vi.fn(),
-  }));
+const {
+  listAnalyticsToolsMock,
+  getAnalyticsSubagentsMock,
+  listAnalyticsErrorsMock,
+  getAnalyticsRoutingStatsMock,
+  listAnalyticsRoutingEventsMock,
+} = vi.hoisted(() => ({
+  listAnalyticsToolsMock: vi.fn(),
+  getAnalyticsSubagentsMock: vi.fn(),
+  listAnalyticsErrorsMock: vi.fn(),
+  getAnalyticsRoutingStatsMock: vi.fn(),
+  listAnalyticsRoutingEventsMock: vi.fn(),
+}));
 
 vi.mock("@/api/runtime/analytics", () => ({
   listAnalyticsTools: listAnalyticsToolsMock,
   getAnalyticsSubagents: getAnalyticsSubagentsMock,
   listAnalyticsErrors: listAnalyticsErrorsMock,
+  getAnalyticsRoutingStats: getAnalyticsRoutingStatsMock,
+  listAnalyticsRoutingEvents: listAnalyticsRoutingEventsMock,
 }));
 
 import { ErrorPatternsPanel } from "./error-patterns-panel";
+import { RoutingObservabilityPanel } from "./routing-observability-panel";
 import { SubagentStatsPanel } from "./subagent-stats-panel";
 import { ToolStatsPanel } from "./tool-stats-panel";
 
@@ -175,6 +187,120 @@ const timeoutPattern: AnalyticsErrorPattern = {
   count: 2,
 };
 
+function routeStatsResponse(): AnalyticsRouteStatsResponse {
+  return {
+    schema_version: "usage.analytics.v2",
+    generated_at: "2026-09-22T00:00:00Z",
+    totals: {
+      total: 3,
+      main_agent: 1,
+      subagent: 2,
+      applied: 2,
+      cleared: 1,
+      warnings: 1,
+      route_changed: 1,
+      fallback_used: 1,
+      candidate_total: 4,
+      distinct_sessions: 2,
+      distinct_models: 2,
+    },
+    by_scope: [
+      { key: "subagent", count: 2, route_changed: 1, fallback_used: 1 },
+      { key: "main_agent", count: 1, route_changed: 0, fallback_used: 0 },
+    ],
+    by_kind: [
+      { key: "applied", count: 2, route_changed: 1, fallback_used: 1 },
+      { key: "warning", count: 1, route_changed: 0, fallback_used: 0 },
+    ],
+    by_reason: [{ key: "resolved", count: 3, route_changed: 1, fallback_used: 1 }],
+    by_source: [{ key: "explicit_promoted", count: 1, route_changed: 1, fallback_used: 0 }],
+    by_provider: [{ key: "ds2api", count: 2, route_changed: 1, fallback_used: 1 }],
+    by_model: [{ key: "deepseek-v4-flash", count: 2, route_changed: 1, fallback_used: 1 }],
+    by_difficulty: [{ key: "hard", count: 2, route_changed: 1, fallback_used: 1 }],
+    by_difficulty_source: [{ key: "inferred", count: 1, route_changed: 0, fallback_used: 0 }],
+    by_role: [{ key: "verifier", count: 1, route_changed: 1, fallback_used: 0 }],
+    warnings: [{ key: "difficulty_promoted_over_explicit", count: 1, route_changed: 0, fallback_used: 0 }],
+    sampled: false,
+    sample_size: 0,
+  };
+}
+
+function emptyRouteStatsResponse(): AnalyticsRouteStatsResponse {
+  return {
+    ...routeStatsResponse(),
+    totals: {
+      total: 0,
+      main_agent: 0,
+      subagent: 0,
+      applied: 0,
+      cleared: 0,
+      warnings: 0,
+      route_changed: 0,
+      fallback_used: 0,
+      candidate_total: 0,
+      distinct_sessions: 0,
+      distinct_models: 0,
+    },
+    by_scope: [],
+    by_kind: [],
+    by_reason: [],
+    by_source: [],
+    by_provider: [],
+    by_model: [],
+    by_difficulty: [],
+    by_difficulty_source: [],
+    by_role: [],
+    warnings: [],
+  };
+}
+
+function routeEventsResponse(): AnalyticsRouteEventsResponse {
+  return {
+    schema_version: "usage.analytics.v2",
+    generated_at: "2026-09-22T00:00:00Z",
+    events: [
+      {
+        recorded_at: "2026-09-22T10:00:00Z",
+        session_id: "session-1",
+        child_session_id: "child-route-1",
+        scope: "subagent",
+        kind: "applied",
+        agent_id: "subagent-route-1",
+        role: "verifier",
+        goal: "改一个文件",
+        step: 1,
+        reason: "resolved",
+        source: "explicit_promoted",
+        difficulty: "hard",
+        difficulty_source: "explicit_promoted",
+        provider: "ds2api",
+        model: "deepseek-v4-flash",
+        reasoning_effort: "max",
+        route_changed: true,
+        fallback_used: true,
+        candidate_count: 2,
+        warnings: ["difficulty_promoted_over_explicit"],
+        attempt: 1,
+        max_attempts: 2,
+      },
+    ],
+    count: 1,
+    limit: 50,
+    offset: 0,
+  };
+}
+
+function emptyRouteEventsResponse(): AnalyticsRouteEventsResponse {
+  return {
+    schema_version: "usage.analytics.v2",
+    generated_at: "2026-09-22T00:00:00Z",
+    events: [],
+    count: 0,
+    limit: 50,
+    offset: 0,
+  };
+}
+
 describe("usage analytics observability panels", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -187,6 +313,8 @@ describe("usage analytics observability panels", () => {
     listAnalyticsToolsMock.mockReset();
     getAnalyticsSubagentsMock.mockReset();
     listAnalyticsErrorsMock.mockReset();
+    getAnalyticsRoutingStatsMock.mockReset();
+    listAnalyticsRoutingEventsMock.mockReset();
     Element.prototype.scrollIntoView = vi.fn();
   });
 
@@ -337,5 +465,70 @@ describe("usage analytics observability panels", () => {
       drilldown?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(onDrilldown).toHaveBeenCalledWith(timeoutPattern);
+  });
+
+  it("路由面板：空数组渲染「暂无路由事件」并传会话过滤", async () => {
+    getAnalyticsRoutingStatsMock.mockResolvedValue(emptyRouteStatsResponse());
+    listAnalyticsRoutingEventsMock.mockResolvedValue(emptyRouteEventsResponse());
+    act(() => {
+      root.render(<RoutingObservabilityPanel sessionId="session-1" />);
+    });
+    await flush();
+
+    expect(container.querySelector('[data-testid="routing-observability-empty"]')).not.toBeNull();
+    expect(container.textContent).toContain("暂无路由事件");
+    expect(getAnalyticsRoutingStatsMock).toHaveBeenCalledWith({
+      session: "session-1",
+      scope: undefined,
+      warnings_only: undefined,
+      adminToken: undefined,
+    });
+    expect(listAnalyticsRoutingEventsMock).toHaveBeenCalledWith({
+      session: "session-1",
+      scope: undefined,
+      warnings_only: undefined,
+      adminToken: undefined,
+      limit: 50,
+      offset: 0,
+    });
+  });
+
+  it("路由面板：渲染主/子切换指标、分布与三态明细", async () => {
+    getAnalyticsRoutingStatsMock.mockResolvedValue(routeStatsResponse());
+    listAnalyticsRoutingEventsMock.mockResolvedValue(routeEventsResponse());
+    act(() => {
+      root.render(<RoutingObservabilityPanel sessionId="session-1" />);
+    });
+    await flush();
+
+    // 指标卡：主 Agent / 子 Agent / 改道 / 回退。
+    expect(container.textContent).toContain("主 Agent");
+    expect(container.textContent).toContain("子 Agent");
+    expect(container.textContent).toContain("改道");
+    expect(container.textContent).toContain("回退");
+    // 分布桶标签归一：显式+提升 / 难度档位 hard。
+    expect(container.textContent).toContain("显式+提升");
+    expect(container.textContent).toContain("hard");
+    // 难度来源维度：区分「模型显式声明」与「本地推断」，是本地网是否过火的判据。
+    expect(container.textContent).toContain("推断");
+    // 明细行：路由组合、三态布尔与护栏告警。
+    expect(container.textContent).toContain("subagent-route-1");
+    expect(container.textContent).toContain("ds2api / deepseek-v4-flash");
+    // 子代理任务目标（goal）落到明细列。
+    expect(container.textContent).toContain("改一个文件");
+    expect(container.textContent).toContain("已显示 1 / 1");
+    expect(container.textContent).toContain("1 条");
+  });
+
+  it("路由面板：加载失败渲染 role=alert", async () => {
+    getAnalyticsRoutingStatsMock.mockRejectedValue(new Error("403 forbidden"));
+    listAnalyticsRoutingEventsMock.mockRejectedValue(new Error("403 forbidden"));
+    act(() => {
+      root.render(<RoutingObservabilityPanel sessionId="session-1" />);
+    });
+    await flush();
+
+    const alert = container.querySelector('[role="alert"]');
+    expect(alert?.textContent).toContain("403 forbidden");
   });
 });

@@ -29,6 +29,7 @@ import { ArtifactFlowPanel } from "./artifact-flow-panel";
 import { emptyCoverage, emptyDimensions, emptyTotals } from "./defaults";
 import { AnalyticsHeader, FilterInput, FilterSelect, Metric, QualityNotice, UsageAnalyticsChartsFallback } from "./primitives";
 import { UsageQuotaPanel } from "./quota";
+import { RoutingObservabilityPanel } from "./routing-observability-panel";
 import { SessionTable } from "./sessions";
 
 const UsageAnalyticsCharts = lazy(() =>
@@ -277,6 +278,9 @@ export function UsageOverview() {
           <UsageQuotaPanel adminToken={adminToken} />
 
           <ArtifactFlowPanel snapshot={toolEfficiency} loading={false} />
+
+          {/* 路由切换观测（主/子 Agent）：全局视图，独立拉取，不阻塞首屏。 */}
+          <RoutingObservabilityPanel adminToken={adminToken} />
 
           <Suspense fallback={<UsageAnalyticsChartsFallback />}>
             <UsageAnalyticsCharts

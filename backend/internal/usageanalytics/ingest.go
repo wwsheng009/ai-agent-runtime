@@ -108,6 +108,15 @@ func (c *collector) subscribe(bus *runtimeevents.Bus) {
 		EventLLMRequestStartedAlias, EventLLMRequestFinishedAlias,
 		EventAssistantMessage, EventSessionStart, EventSessionEnd, EventSessionInterrupted,
 		EventToolRequested, EventToolCompleted, EventSubagentCompleted,
+		// 路由切换观测（主 Agent / 子 Agent）：常量取 internal/events 的权威定义，
+		// 避免此处再抄一份字面量。
+		runtimeevents.EventSubagentRouteResolved,
+		runtimeevents.EventMainAgentRouteApplied,
+		runtimeevents.EventMainAgentRouteCleared,
+		runtimeevents.EventMainAgentRoutePredictionInvalid,
+		runtimeevents.EventMainAgentRoutePredictionUnresolvable,
+		runtimeevents.EventMainAgentRouteDisabledForTurn,
+		runtimeevents.EventMainAgentRouteCostGuardTripped,
 	} {
 		c.unsubs = append(c.unsubs, bus.SubscribeCancelable(eventType, c.handleEvent))
 	}
@@ -148,6 +157,19 @@ func (c *collector) handleEvent(event runtimeevents.Event) {
 		c.onToolCompleted(event)
 	case EventSubagentCompleted:
 		c.onSubagentCompleted(event)
+	case runtimeevents.EventSubagentRouteResolved:
+		c.onSubagentRouteResolved(event)
+	case runtimeevents.EventMainAgentRouteApplied:
+		c.onMainAgentRouteApplied(event)
+	case runtimeevents.EventMainAgentRouteCleared:
+		c.onMainAgentRouteCleared(event)
+	case runtimeevents.EventMainAgentRoutePredictionInvalid,
+		runtimeevents.EventMainAgentRoutePredictionUnresolvable,
+		runtimeevents.EventMainAgentRouteDisabledForTurn,
+		runtimeevents.EventMainAgentRouteCostGuardTripped:
+		if reason := mainAgentRouteWarningReason(event.Type); reason != "" {
+			c.onMainAgentRouteWarning(event, reason)
+		}
 	}
 }
 

@@ -207,6 +207,35 @@ func (s *Service) ErrorPatterns(q ErrorPatternsQuery) (ErrorPatternsResult, erro
 	return ErrorPatternsResult{SchemaVersion: SchemaVersion, GeneratedAt: time.Now().UTC(), Patterns: []ErrorPattern{}}, nil
 }
 
+// RouteStats 返回主/子 Agent 路由切换观测总览（空库返回零值 totals + 空桶）。
+func (s *Service) RouteStats(q RouteQuery) (RouteStatsResult, error) {
+	if store := s.Query(); store != nil {
+		return store.RouteStats(q)
+	}
+	return RouteStatsResult{
+		SchemaVersion:      SchemaVersion,
+		GeneratedAt:        time.Now().UTC(),
+		ByScope:            []RouteBucket{},
+		ByKind:             []RouteBucket{},
+		ByReason:           []RouteBucket{},
+		BySource:           []RouteBucket{},
+		ByProvider:         []RouteBucket{},
+		ByModel:            []RouteBucket{},
+		ByDifficulty:       []RouteBucket{},
+		ByDifficultySource: []RouteBucket{},
+		ByRole:             []RouteBucket{},
+		Warnings:           []RouteBucket{},
+	}, nil
+}
+
+// RouteEvents 返回路由切换观测明细（空库返回空数组）。
+func (s *Service) RouteEvents(q RouteQuery) (RouteEventsResult, error) {
+	if store := s.Query(); store != nil {
+		return store.RouteEvents(q)
+	}
+	return RouteEventsResult{SchemaVersion: SchemaVersion, GeneratedAt: time.Now().UTC(), Events: []RouteEvent{}}, nil
+}
+
 // ============================================================================
 // 路径解析
 // ============================================================================

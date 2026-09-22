@@ -4,6 +4,9 @@ import type {
   AnalyticsErrorPatternsResponse,
   AnalyticsDimensionsResponse,
   AnalyticsOverviewResponse,
+  AnalyticsRouteEventsResponse,
+  AnalyticsRouteStatsResponse,
+  AnalyticsRoutingQuery,
   AnalyticsRuntimeStatusEnvelope,
   AnalyticsSessionUsageDetail,
   AnalyticsSessionsQuery,
@@ -394,4 +397,61 @@ function readStringArray(value: unknown): string[] {
     return [];
   }
   return value.filter((entry): entry is string => typeof entry === "string");
+}
+
+// ============================================================================
+// 路由切换观测（主 Agent / 子 Agent）客户端。
+//
+// 端点（backend/internal/api/skills/handler.go，实现 routing_analytics_handlers.go）：
+//   GET /api/runtime/analytics/routing?scope=&kind=&source=&provider=&model=&difficulty=&session=&warnings_only=&from=&to=&limit=&offset=
+//   GET /api/runtime/analytics/routing/events?...
+// 两个端点均受 authorizeUsageAdmin 限制（Bearer admin token），空库返回空数组（不 500）。
+// ============================================================================
+
+export async function getAnalyticsRoutingStats(
+  options: AnalyticsRoutingQuery & AnalyticsRequestOptions = {},
+): Promise<AnalyticsRouteStatsResponse> {
+  return fetchRuntimeJson<AnalyticsRouteStatsResponse>(
+    buildRuntimeUrlWithQuery("/api/runtime/analytics/routing", {
+      from: options.from,
+      to: options.to,
+      scope: options.scope,
+      kind: options.kind,
+      source: options.source,
+      provider: options.provider,
+      model: options.model,
+      difficulty: options.difficulty,
+      session: options.session,
+      warnings_only: options.warnings_only,
+      limit: options.limit,
+      offset: options.offset,
+    }),
+    {
+      headers: buildAnalyticsHeaders(options.adminToken),
+    },
+  );
+}
+
+export async function listAnalyticsRoutingEvents(
+  options: AnalyticsRoutingQuery & AnalyticsRequestOptions = {},
+): Promise<AnalyticsRouteEventsResponse> {
+  return fetchRuntimeJson<AnalyticsRouteEventsResponse>(
+    buildRuntimeUrlWithQuery("/api/runtime/analytics/routing/events", {
+      from: options.from,
+      to: options.to,
+      scope: options.scope,
+      kind: options.kind,
+      source: options.source,
+      provider: options.provider,
+      model: options.model,
+      difficulty: options.difficulty,
+      session: options.session,
+      warnings_only: options.warnings_only,
+      limit: options.limit,
+      offset: options.offset,
+    }),
+    {
+      headers: buildAnalyticsHeaders(options.adminToken),
+    },
+  );
 }

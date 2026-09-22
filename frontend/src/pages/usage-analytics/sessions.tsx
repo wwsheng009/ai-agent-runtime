@@ -17,10 +17,11 @@ import { ErrorPatternsPanel } from "./error-patterns-panel";
 import { AnalyticsHeader, Metric, QualityBadge, QualityNotice, TabButton } from "./primitives";
 import { SubagentStatsPanel } from "./subagent-stats-panel";
 import { ToolStatsPanel } from "./tool-stats-panel";
+import { RoutingObservabilityPanel } from "./routing-observability-panel";
 
 // 批次 7.2：会话观测 tab 清单。tab 状态只存在 URL query（刷新/分享可复现），
 // 面板数据在对应 tab 激活（组件挂载）时才拉取。
-const sessionTabs = ["overview", "tokens", "tools", "subagents", "diagnostics"] as const;
+const sessionTabs = ["overview", "tokens", "tools", "subagents", "routing", "diagnostics"] as const;
 
 type SessionTab = (typeof sessionTabs)[number];
 
@@ -233,6 +234,7 @@ export function SessionDetail() {
                   <TabButton active={tab === "tokens"} onClick={() => selectTab("tokens")}>{t("detail.tabs.tokens")}</TabButton>
                   <TabButton active={tab === "tools"} onClick={() => selectTab("tools")}>{t("detail.tabs.tools")}</TabButton>
                   <TabButton active={tab === "subagents"} onClick={() => selectTab("subagents")}>{t("detail.tabs.subagents")}</TabButton>
+                  <TabButton active={tab === "routing"} onClick={() => selectTab("routing")}>{t("detail.tabs.routing")}</TabButton>
                   <TabButton active={tab === "diagnostics"} onClick={() => selectTab("diagnostics")}>{t("detail.tabs.diagnostics")}</TabButton>
                 </div>
               </section>
@@ -244,6 +246,9 @@ export function SessionDetail() {
               ) : null}
               {tab === "subagents" && sessionId ? (
                 <SubagentStatsPanel sessionId={sessionId} adminToken={adminToken} />
+              ) : null}
+              {tab === "routing" && sessionId ? (
+                <RoutingObservabilityPanel sessionId={sessionId} adminToken={adminToken} />
               ) : null}
               {tab === "diagnostics" ? (
                 <>

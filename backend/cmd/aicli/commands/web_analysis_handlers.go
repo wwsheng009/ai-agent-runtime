@@ -30,6 +30,8 @@ import (
 //	GET /web/api/analysis/subagents  子代理维度聚合（SubagentStatsResult）
 //	GET /web/api/analysis/errors     失败模式 Top-N（ErrorPatternsResult）
 //	GET /web/api/analysis/tool_efficiency  工具效率 / Artifact 链路快照
+//	GET /web/api/analysis/routing        路由观测总览（RouteStatsResult）
+//	GET /web/api/analysis/routing/events 路由观测明细分页（RouteEventsResult）
 //	（observability.ToolEfficiencySnapshot，与 runtime /api/runtime/status 的
 //	runtime.tool_efficiency 块同一结构体、同一 JSON tag —— 契约只定义一次）。
 //
@@ -121,6 +123,32 @@ func HandleChatWebAPIAnalysis(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		result, err := service.ErrorPatterns(query)
+		if err != nil {
+			writeWebAPIJSON(w, http.StatusInternalServerError,
+				chatWebAnalysisErrorBody(chatWebAnalysisInternalCode, "usage analytics query failed"))
+			return
+		}
+		writeWebAPIJSON(w, http.StatusOK, result)
+	case "routing":
+		query, err := chatWebAnalysisRouteQuery(values)
+		if err != nil {
+			writeWebAPIJSON(w, http.StatusBadRequest, chatWebAnalysisErrorBody(chatWebAnalysisInvalidCode, err.Error()))
+			return
+		}
+		result, err := service.RouteStats(query)
+		if err != nil {
+			writeWebAPIJSON(w, http.StatusInternalServerError,
+				chatWebAnalysisErrorBody(chatWebAnalysisInternalCode, "usage analytics query failed"))
+			return
+		}
+		writeWebAPIJSON(w, http.StatusOK, result)
+	case "routing/events":
+		query, err := chatWebAnalysisRouteQuery(values)
+		if err != nil {
+			writeWebAPIJSON(w, http.StatusBadRequest, chatWebAnalysisErrorBody(chatWebAnalysisInvalidCode, err.Error()))
+			return
+		}
+		result, err := service.RouteEvents(query)
 		if err != nil {
 			writeWebAPIJSON(w, http.StatusInternalServerError,
 				chatWebAnalysisErrorBody(chatWebAnalysisInternalCode, "usage analytics query failed"))
@@ -300,6 +328,55 @@ func chatWebAnalysisOptionalTime(raw string) (time.Time, error) {
 // chatWebAnalysisLimit 解析 limit/top：非法值或负值归一为 0（由查询层取默认上限），
 // 只读端点不因过滤参数拼写失败而 400。
 func chatWebAnalysisLimit(raw string) int {
+	parsed, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || parsed < 0 {
+		return 0
+	}
+	return parsed
+}
+
+// chatWebAnalysisRouteQuery 解析 /routing 与 /routing/events 参数
+//（对齐 runtime-server parseRouteQuery：scope/kind/source/provider/model/difficulty/
+// session/warnings_only/limit/offset）。
+func chatWebAnalysisRouteQuery(values url.Values) (usageanalytics.RouteQuery, error) {
+	query := usageanalytics.RouteQuery{}
+	from, to, err := chatWebAnalysisTimeWindow(values)
+	if err != nil {
+		return query, err
+	}
+	query.From = from
+	query.To = to
+	query.Scope = chatWebAnalysisNormalizeRouteScope(values.Get("scope"))
+	query.Kind = strings.TrimSpace(values.Get("kind"))
+	query.Source = strings.TrimSpace(values.Get("source"))
+	query.Provider = strings.TrimSpace(values.Get("provider"))
+	query.Model = strings.TrimSpace(values.Get("model"))
+	query.Difficulty = strings.TrimSpace(values.Get("difficulty"))
+	query.SessionID = chatWebAnalysisFirstValue(values, "session", "session_id")
+	query.Limit = chatWebAnalysisLimit(values.Get("limit"))
+	query.Offset = chatWebAnalysisOffset(values.Get("offset"))
+	if query.Kind == "" && chatWebAnalysisBool(values.Get("warnings_only")) {
+		query.Kind = usageanalytics.RouteKindWarning
+	}
+	return query, nil
+}
+
+// chatWebAnalysisNormalizeRouteScope 归一 scope 简写（与 runtime-server 同口径）。
+func chatWebAnalysisNormalizeRouteScope(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return ""
+	case "main", "main_agent", "main-agent", "primary":
+		return usageanalytics.RouteScopeMainAgent
+	case "sub", "subagent", "sub_agent", "child":
+		return usageanalytics.RouteScopeSubagent
+	default:
+		return strings.TrimSpace(raw)
+	}
+}
+
+// chatWebAnalysisOffset 解析分页偏移：非法值或负值归一为 0。
+func chatWebAnalysisOffset(raw string) int {
 	parsed, err := strconv.Atoi(strings.TrimSpace(raw))
 	if err != nil || parsed < 0 {
 		return 0
