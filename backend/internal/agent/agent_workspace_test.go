@@ -110,8 +110,8 @@ func TestNewAgentWithLLM_AttachesProjectMemory(t *testing.T) {
 		Name:  "project-memory-disabled",
 		Model: "test-model",
 		Options: map[string]interface{}{
-			"workspace_path":          tmpDir,
-			"context_project_memory":  false,
+			"workspace_path":         tmpDir,
+			"context_project_memory": false,
 		},
 	}, nil, nil)
 	if disabled == nil {

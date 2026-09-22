@@ -13,9 +13,9 @@ import (
 const authStoreVersion = 1
 
 const (
-	AuthKeyTypeAPIKey                   = "api_key"
-	AuthKeyTypeOAuth                    = "oauth"
-	AuthKeyTypeNewAPISystemAccessToken  = "newapi_system_access_token"
+	AuthKeyTypeAPIKey                  = "api_key"
+	AuthKeyTypeOAuth                   = "oauth"
+	AuthKeyTypeNewAPISystemAccessToken = "newapi_system_access_token"
 )
 
 // ProviderAuthRecord stores user-level credentials that must not be written to config.yaml.

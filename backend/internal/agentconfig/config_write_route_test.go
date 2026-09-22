@@ -27,11 +27,11 @@ func TestWriteTargetForKeysPrefersSpecificThenHigherLayer(t *testing.T) {
 			{Kind: LayerKindProject, Path: projectFile, Present: true},
 		},
 		ConfigOriginFiles: map[string]string{
-			"providers.items.openai":              projectFile,
-			"providers.items.openai.api_key":      userFile,
-			"providers.items.openai.api_key_ref":  projectFile,
-			"providers.default_provider":          userFile,
-			"aicli.chat.default_model":            userFile,
+			"providers.items.openai":             projectFile,
+			"providers.items.openai.api_key":     userFile,
+			"providers.items.openai.api_key_ref": projectFile,
+			"providers.default_provider":         userFile,
+			"aicli.chat.default_model":           userFile,
 		},
 	}
 

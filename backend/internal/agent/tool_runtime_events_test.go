@@ -1292,6 +1292,7 @@ func TestFinalizeDeniedToolResultEmitsCompletedWithFailedOutcome(t *testing.T) {
 		t.Fatalf("expected 1 tool.reduced, got %d", len(reduced))
 	}
 }
+
 // TestToolCompletedEventPayloadPromotesEnvelopeDuration 锁定耗时同源：事件载荷
 // 缺失 duration_ms 时提升 tool_metadata.duration_ms。实时标题（bridge 编码）
 // 与事件日志/重放投影共用该字段，bridge 对已有值不再按墙钟覆盖，因此 live 与
