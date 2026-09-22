@@ -750,6 +750,29 @@ aicli:
           reasoning_effort: high
 ```
 
+#### 显式难度与启发式提升
+
+子 Agent 显式声明 `difficulty` 时，历史上会直接短路启发式。默认（`enforce`）改为：显式声明仍可被高风险信号**提升**，且提升是单调的——只抬高 rank，绝不会把显式声明的 `expert` 降回 `hard`。
+
+```yaml
+aicli:
+  subagents:
+    routing:
+      # enforce（默认）| warn | off
+      promote_explicit_difficulty: enforce
+      heuristics:
+        disabled: false
+        # 追加语义：内置词表始终生效，这里只做补充
+        promote_keywords: ["kafka", "分库分表"]
+        promote_keywords_combo: ["压测", "容量规划"]
+```
+
+- 三态：`enforce` 真正提升；`warn` 不提升、只把「本该提升」写进 `route_warnings`（先用它观测误报再决定是否 enforce）；`off` 回到历史行为，且不产生任何提升告警。`off` / `warn` 即回滚开关，无需改代码或降级版本。
+- 高信号词（`promote_keywords`）：单命中即升 `hard`。内置词表同时覆盖中英文（`security` / `权限` / `migration` / `迁移` / `协议` …）。
+- 弱信号词（`promote_keywords_combo`）：需 ≥2 命中，或 1 命中 + 非只读 `writer`，用于压制「保持风格一致性」这类误报。
+- 英文词条带词形归一：同词干的词尾变体都算命中（`migrate` / `migrating` / `migrated` / `migrations` → 词表里的 `migration`，`encrypt` → `encryption`）。只按固定后缀表剥离一次、不做模糊匹配，并有词长 ≥5、词干 ≥6 两条护栏压制误报；中文与多词条目仍为子串匹配。命中记录的是词表条目本身，`route_warnings` 的格式与调优方式不变。
+- 角色规则独立于词表：`verifier` 与非只读 `writer` 至少升到 `normal`，`heuristics.disabled` 不会关闭它。
+
 在 runtime-server Web 配置页的“Agent 难度路由”中可维护这两套配置。保存后，新创建的子 Agent 和 Team task 会立即使用新策略；已经运行中的任务不会被重新路由。
 
 可观测入口：
@@ -759,6 +782,9 @@ aicli:
 - `/agents routing test --role writer --difficulty hard`：在 chat 内基于当前会话 parent provider/model/reasoning 做 route dry-run。该命令支持 `--provider`、`--model`、`--reasoning-effort` 值补全。
 - `subagent.started` / `subagent.completed` runtime event、`subagent_start` / `subagent_stop` hook payload、AgentControl mailbox/display mirror 会携带 `difficulty`、`difficulty_source`、`difficulty_rationale`、`route_provider`、`route_model`、`route_reasoning_effort`、`route_source`、`route_warnings`、`fallback_used`、`fallback_reason` 和使用量字段。
 - `validate_model_capabilities: true` 时，routing 会校验已声明 capability 的 route model。若 route model 明确不支持，会优先 fallback 到 parent provider/model 并记录 `model_unsupported`、`model_fallback_parent` 和 `fallback_reason`；无法 fallback 时返回错误。未声明能力目录的 provider 不会被强制拒绝。
+- 提升证据链：`route_warnings` 会写 `difficulty_promoted_over_explicit`（显式难度被提升）、`difficulty_promotion_warn_only`（`warn` 模式下的观测）、以及 `difficulty_promoted_by_keyword:<词>` / `difficulty_promoted_by_role:<role>`（命中证据，最多 3 条），因此「为什么被升档」在审计里自解释，误报可按词回溯调优。
+- `subagent_route_resolved` 审计事件额外携带 `expert_limit`：`unlimited` 或十进制上限，用于确认 expert 并发闸门是否真的生效。`aicli doctor subagent-route` 输出的 `preflight.promote_explicit_difficulty` / `preflight.expert_limit` / `preflight.config_warnings` 可在不调用模型的前提下确认三态与词表是否被正确解析。
+- `spawn_agent` / `spawn_subagents` 的结果元数据带 `route_receipt`（整批 ≤8 行、≤1 KB，无路由信息时不产生该字段）：父 Agent 无需额外查询即可看到每个子 Agent 的实际落点与告警数。
 - `unsupported_reasoning_policy` 控制模型不支持 route `reasoning_effort` 时的行为：`ignore` 清空并 warning，`downgrade` 降到已支持的较低档位，`fail` / `reject` 直接拒绝该 route。默认是 `ignore`。
 
 tool 参数边界：
