@@ -6210,6 +6210,8 @@ func decodeSubagentTasks(args map[string]interface{}) ([]SubagentTask, error) {
 		task := SubagentTask{
 			ID:                    stringValue(item["id"]),
 			Role:                  stringValue(item["role"]),
+			TaskType:              stringValue(item["task_type"]),
+			TaskSubject:           stringValue(item["task_subject"]),
 			Goal:                  stringValue(item["goal"]),
 			Difficulty:            difficulty,
 			DifficultyRationale:   stringValue(item["difficulty_rationale"]),
@@ -6354,6 +6356,8 @@ var decodedSubagentFieldTypes = []struct {
 }{
 	{"id", subagentFieldString},
 	{"role", subagentFieldString},
+	{"task_type", subagentFieldString},
+	{"task_subject", subagentFieldString},
 	{"goal", subagentFieldString},
 	{"difficulty", subagentFieldString},
 	{"difficulty_rationale", subagentFieldString},
@@ -6937,7 +6941,7 @@ func cloneOptionValue(value interface{}) interface{} {
 func spawnSubagentsToolDefinition() types.ToolDefinition {
 	return types.ToolDefinition{
 		Name:        "spawn_subagents",
-		Description: "Spawn isolated subagents for parallel subtasks. Use only when tasks are independent or when hard/expert work benefits from isolated research, writing, or verification. Include difficulty and difficulty_rationale for every child task when known. Leave provider/model empty unless explicitly requested; runtime routing maps difficulty to local provider/model configuration.",
+		Description: "Spawn isolated subagents for parallel subtasks. Use only when tasks are independent or when hard/expert work benefits from isolated research, writing, or verification. Include difficulty, difficulty_rationale and task_type for every child task when known. Leave provider/model empty unless explicitly requested; runtime routing maps difficulty to local provider/model configuration.",
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -6960,13 +6964,22 @@ func spawnSubagentsToolDefinition() types.ToolDefinition {
 						"type": "object",
 						"properties": map[string]interface{}{
 							"id":                   map[string]interface{}{"type": "string"},
-							"role":                 map[string]interface{}{"type": "string"},
+							"role":                 map[string]interface{}{"type": "string", "description": "Deprecated routing alias (kept one release); prefer task_type."},
 							"goal":                 map[string]interface{}{"type": "string"},
 							"difficulty":           map[string]interface{}{"type": "string", "enum": []string{"easy", "normal", "hard", "expert"}, "description": "Estimated task difficulty. Local runtime treats this as a routing hint."},
 							"difficulty_rationale": map[string]interface{}{"type": "string", "description": "Short reason for the difficulty rating."},
-							"provider":             map[string]interface{}{"type": "string", "description": "Optional provider hint. The local runtime may ignore it unless explicitly allowed."},
-							"reasoning_effort":     map[string]interface{}{"type": "string", "enum": []string{"low", "medium", "high"}, "description": "Optional reasoning effort hint. The local runtime validates it against local policy."},
-							"thinking_effort":      map[string]interface{}{"type": "string", "description": "Deprecated alias for reasoning_effort."},
+							"task_type": map[string]interface{}{
+								"type":        "string",
+								"enum":        modelrouting.TaskTypes(),
+								"description": "Optional closed-enum task category for routing and audit.",
+							},
+							"task_subject": map[string]interface{}{
+								"type":        "string",
+								"description": "Optional audit-only one-line task summary.",
+							},
+							"provider":         map[string]interface{}{"type": "string", "description": "Optional provider hint. The local runtime may ignore it unless explicitly allowed."},
+							"reasoning_effort": map[string]interface{}{"type": "string", "enum": []string{"low", "medium", "high"}, "description": "Optional reasoning effort hint. The local runtime validates it against local policy."},
+							"thinking_effort":  map[string]interface{}{"type": "string", "description": "Deprecated alias for reasoning_effort."},
 							"completion_requirement": map[string]interface{}{
 								"type":        "string",
 								"enum":        []string{"none", "complete_task"},

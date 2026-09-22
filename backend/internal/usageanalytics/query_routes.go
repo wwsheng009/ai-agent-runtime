@@ -33,6 +33,7 @@ func (s *Store) RouteStats(q RouteQuery) (RouteStatsResult, error) {
 		ByDifficulty:       []RouteBucket{},
 		ByDifficultySource: []RouteBucket{},
 		ByRole:             []RouteBucket{},
+		ByTaskType:         []RouteBucket{},
 		Warnings:           []RouteBucket{},
 	}
 	where, args := routeWhere(q)
@@ -43,6 +44,9 @@ func (s *Store) RouteStats(q RouteQuery) (RouteStatsResult, error) {
 	result.Totals = totals
 
 	// 每个维度一次 GROUP BY 全量聚合；列名是包内常量，不接受外部输入。
+	// task_type 是 v6 增量列：只读旧库缺列时表达式退化为空串常量，聚合自然得到
+	// 空桶，而不是让整个 stats 查询报错（与明细读路径的列存在性退化同策略）。
+	taskTypeColumn := s.routeColumnExpr("task_type")
 	for _, dimension := range []struct {
 		column string
 		target *[]RouteBucket
@@ -56,6 +60,7 @@ func (s *Store) RouteStats(q RouteQuery) (RouteStatsResult, error) {
 		{"difficulty", &result.ByDifficulty},
 		{"difficulty_source", &result.ByDifficultySource},
 		{"role", &result.ByRole},
+		{taskTypeColumn, &result.ByTaskType},
 	} {
 		buckets, err := s.routeBuckets(where, args, dimension.column)
 		if err != nil {
@@ -165,20 +170,19 @@ func (s *Store) RouteEvents(q RouteQuery) (RouteEventsResult, error) {
 	if err := s.routeEventCount(where, args, &result); err != nil {
 		return result, err
 	}
-	// goal 是 v5 增量列：只读旧库缺列时退化为空串（前端显示「未记录」），
-	// 而不是让整个明细查询报错。
-	goalExpr := "''"
-	if hasGoal, err := s.hasColumn("usage_routes", "goal"); err == nil && hasGoal {
-		goalExpr = "goal"
-	}
+	// goal（v5）/ task_type、task_subject（v6）是增量列：只读旧库缺列时退化为空串
+	// （前端显示「未记录」），而不是让整个明细查询报错。
+	goalExpr := s.routeColumnExpr("goal")
+	taskTypeExpr := s.routeColumnExpr("task_type")
+	taskSubjectExpr := s.routeColumnExpr("task_subject")
 	rows, ok, err := s.query(fmt.Sprintf(`
 SELECT recorded_at_unix_nano, session_id, parent_session_id, child_session_id, trace_id, scope, kind,
-       agent_id, role, %s, step, reason, source, difficulty, difficulty_source, provider, model, reasoning_effort,
+       agent_id, role, %s, %s, %s, step, reason, source, difficulty, difficulty_source, provider, model, reasoning_effort,
        route_changed, fallback_used, fallback_reason, candidate_count, attempt, max_attempts, batch_id, warnings_json
 FROM usage_routes
 WHERE %s
 ORDER BY recorded_at_unix_nano DESC, route_event_id ASC
-LIMIT ? OFFSET ?`, goalExpr, where), append(args, limit, offset)...)
+LIMIT ? OFFSET ?`, goalExpr, taskTypeExpr, taskSubjectExpr, where), append(args, limit, offset)...)
 	if err != nil {
 		return result, fmt.Errorf("query route events: %w", err)
 	}
@@ -195,7 +199,8 @@ LIMIT ? OFFSET ?`, goalExpr, where), append(args, limit, offset)...)
 		)
 		if err := rows.Scan(
 			&recordedNano, &event.SessionID, &event.ParentSessionID, &event.ChildSessionID, &event.TraceID,
-			&event.Scope, &event.Kind, &event.AgentID, &event.Role, &event.Goal, &event.Step, &event.Reason, &event.Source,
+			&event.Scope, &event.Kind, &event.AgentID, &event.Role, &event.Goal, &event.TaskType, &event.TaskSubject,
+			&event.Step, &event.Reason, &event.Source,
 			&event.Difficulty, &event.DifficultySource, &event.Provider, &event.Model, &event.ReasoningEffort,
 			&changedFlag, &fallbackFlag, &event.FallbackReason, &event.CandidateCount,
 			&event.Attempt, &event.MaxAttempts, &event.BatchID, &warningsJSON,
@@ -218,6 +223,13 @@ LIMIT ? OFFSET ?`, goalExpr, where), append(args, limit, offset)...)
 		return result, fmt.Errorf("scan route events: %w", err)
 	}
 	return result, nil
+}
+
+// routeColumnExpr 返回可用于 SELECT 的 usage_routes 列表达式：列存在时是列名本身，
+// 缺列时退化为空串常量。只读旧库不改 schema，读路径必须按列存在性退化，而不是让
+// 整条查询报错。列名是包内常量，不接受外部输入。
+func (s *Store) routeColumnExpr(column string) string {
+	return s.columnExpr("usage_routes", column)
 }
 
 // routeTotals 全量精确计数（不受分布抽样上限影响）。

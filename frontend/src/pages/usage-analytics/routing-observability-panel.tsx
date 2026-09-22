@@ -44,17 +44,59 @@ const sourceKeys = {
   explicit_promoted: "observability.routing.difficultySources.explicitPromoted",
   heuristic: "observability.routing.difficultySources.heuristic",
   role: "observability.routing.difficultySources.role",
+  // P4：profile source 新值 task_type_override；历史值 role_override 继续映射。
+  role_override: "observability.routing.difficultySources.role",
+  task_type_override: "observability.routing.difficultySources.taskTypeOverride",
   read_only: "observability.routing.difficultySources.readOnly",
   default: "observability.routing.difficultySources.default",
 } as const;
 
-// 难度来源（difficulty_source）归一表：后端 resolver.go 只产出这四个取值，与
-// route_source 的 sourceKeys 是两套词表，勿混用（后者含 parent_inherit 等）。
+// 难度来源（difficulty_source）归一表：后端 resolver.go 产出的取值 + P4 新增的
+// task_type_floor / task_type_downgrade，与 route_source 的 sourceKeys 是两套
+// 词表，勿混用（后者含 parent_inherit 等）。
 const difficultySourceKeys = {
   explicit: "observability.routing.difficultySources.explicit",
   explicit_promoted: "observability.routing.difficultySources.explicitPromoted",
   inferred: "observability.routing.difficultySources.inferred",
   default: "observability.routing.difficultySources.default",
+  task_type_floor: "observability.routing.difficultySources.taskTypeFloor",
+  task_type_downgrade: "observability.routing.difficultySources.taskTypeDowngrade",
+} as const;
+
+// 任务类型（12 类封闭枚举）归一表：与配置编辑器 task_types 键集一致。
+const taskTypeKeys = {
+  config: "observability.routing.taskTypes.config",
+  explore: "observability.routing.taskTypes.explore",
+  generate: "observability.routing.taskTypes.generate",
+  implement: "observability.routing.taskTypes.implement",
+  integration: "observability.routing.taskTypes.integration",
+  migrate: "observability.routing.taskTypes.migrate",
+  modify: "observability.routing.taskTypes.modify",
+  refactor: "observability.routing.taskTypes.refactor",
+  security: "observability.routing.taskTypes.security",
+  test: "observability.routing.taskTypes.test",
+  understand: "observability.routing.taskTypes.understand",
+  verify: "observability.routing.taskTypes.verify",
+} as const;
+
+// 护栏告警 token 归一表：精确 token + 「prefix:value」前缀 token（用 {{value}} 插值）。
+// 未收录 token 原样回显，后端扩词表时页面不空白。
+const warningKeys = {
+  difficulty_missing_defaulted: "observability.routing.warningLabels.difficulty_missing_defaulted",
+  difficulty_invalid_defaulted: "observability.routing.warningLabels.difficulty_invalid_defaulted",
+  difficulty_promoted_by_heuristic: "observability.routing.warningLabels.difficulty_promoted_by_heuristic",
+  difficulty_promoted_over_explicit: "observability.routing.warningLabels.difficulty_promoted_over_explicit",
+  difficulty_promotion_warn_only: "observability.routing.warningLabels.difficulty_promotion_warn_only",
+  max_expert_concurrency_zero_means_unlimited:
+    "observability.routing.warningLabels.max_expert_concurrency_zero_means_unlimited",
+} as const;
+
+const warningPrefixKeys = {
+  difficulty_promoted_by_keyword: "observability.routing.warningLabels.difficulty_promoted_by_keyword",
+  difficulty_promoted_by_role: "observability.routing.warningLabels.difficulty_promoted_by_role",
+  difficulty_floor_by_task_type: "observability.routing.warningLabels.difficulty_floor_by_task_type",
+  difficulty_downgraded_by_task_type: "observability.routing.warningLabels.difficulty_downgraded_by_task_type",
+  task_type_unknown: "observability.routing.warningLabels.task_type_unknown",
 } as const;
 
 const reasonKeys = {
@@ -72,6 +114,9 @@ type ScopeKey = (typeof scopeKeys)[keyof typeof scopeKeys];
 type KindKey = (typeof kindKeys)[keyof typeof kindKeys];
 type SourceKey = (typeof sourceKeys)[keyof typeof sourceKeys];
 type DifficultySourceKey = (typeof difficultySourceKeys)[keyof typeof difficultySourceKeys];
+type TaskTypeKey = (typeof taskTypeKeys)[keyof typeof taskTypeKeys];
+type WarningKey = (typeof warningKeys)[keyof typeof warningKeys];
+type WarningPrefixKey = (typeof warningPrefixKeys)[keyof typeof warningPrefixKeys];
 type ReasonKey = (typeof reasonKeys)[keyof typeof reasonKeys];
 type RouteFlagKey = (typeof routeFlagKeys)[keyof typeof routeFlagKeys];
 
@@ -102,6 +147,30 @@ function difficultySourceLabel(t: TFunction<"usageAnalytics">, raw?: string): st
   const key = difficultySourceKeys[normalized as keyof typeof difficultySourceKeys] as DifficultySourceKey | undefined;
   if (key) return t(key);
   return (raw ?? "").trim() || t("observability.routing.difficultySources.unknown");
+}
+
+// 任务类型标签（词表见 taskTypeKeys）：12 类封闭枚举走 i18n，未知取值原样回显。
+function taskTypeLabel(t: TFunction<"usageAnalytics">, raw?: string): string {
+  const normalized = (raw ?? "").trim().toLowerCase();
+  const key = taskTypeKeys[normalized as keyof typeof taskTypeKeys] as TaskTypeKey | undefined;
+  if (key) return t(key);
+  return (raw ?? "").trim() || t("observability.routing.flags.notRecorded");
+}
+
+// 护栏告警 token → 标签：精确 token 优先；否则按 ":" 拆前缀做 {{value}} 插值；
+// 两者都不命中时回显原始 token（保留排障可读性）。
+function warningLabel(t: TFunction<"usageAnalytics">, raw?: string): string {
+  const token = (raw ?? "").trim();
+  if (!token) return t("observability.routing.flags.notRecorded");
+  const exact = warningKeys[token as keyof typeof warningKeys] as WarningKey | undefined;
+  if (exact) return t(exact);
+  const separator = token.indexOf(":");
+  if (separator > 0) {
+    const prefix = token.slice(0, separator).trim().toLowerCase();
+    const key = warningPrefixKeys[prefix as keyof typeof warningPrefixKeys] as WarningPrefixKey | undefined;
+    if (key) return t(key, { value: token.slice(separator + 1).trim() });
+  }
+  return token;
 }
 
 function reasonLabel(t: TFunction<"usageAnalytics">, raw?: string): string {
@@ -218,10 +287,11 @@ export function RoutingObservabilityPanel({
       { title: t("observability.routing.distributions.source"), entries: bucketsToEntries(t, stats.by_source, sourceLabel) },
       { title: t("observability.routing.distributions.difficulty"), entries: bucketsToEntries(t, stats.by_difficulty, rawOrNotRecorded) },
       { title: t("observability.routing.distributions.difficultySource"), entries: bucketsToEntries(t, stats.by_difficulty_source, difficultySourceLabel) },
+      { title: t("observability.routing.distributions.taskType"), entries: bucketsToEntries(t, stats.by_task_type, taskTypeLabel) },
       { title: t("observability.routing.distributions.role"), entries: bucketsToEntries(t, stats.by_role, rawOrNotRecorded) },
       { title: t("observability.routing.distributions.provider"), entries: bucketsToEntries(t, stats.by_provider, rawOrNotRecorded) },
       { title: t("observability.routing.distributions.model"), entries: bucketsToEntries(t, stats.by_model, rawOrNotRecorded) },
-      { title: t("observability.routing.distributions.warnings"), entries: bucketsToEntries(t, stats.warnings, rawOrNotRecorded) },
+      { title: t("observability.routing.distributions.warnings"), entries: bucketsToEntries(t, stats.warnings, warningLabel) },
     ];
   }, [stats, t]);
 
@@ -361,13 +431,14 @@ export function RoutingObservabilityPanel({
         </div>
       ) : (
         <div className="w-full max-w-full overflow-x-auto rounded-card border border-border">
-          <table className="w-full min-w-[1320px] border-collapse text-left text-sm">
+          <table className="w-full min-w-[1440px] border-collapse text-left text-sm">
             <thead className="bg-surface-softer text-xs text-muted-foreground">
               <tr className="border-b border-border">
                 <th className="px-3 py-2 font-medium">{t("observability.routing.columns.time")}</th>
                 <th className="px-3 py-2 font-medium">{t("observability.routing.columns.scope")}</th>
                 <th className="px-3 py-2 font-medium">{t("observability.routing.columns.kind")}</th>
                 <th className="px-3 py-2 font-medium">{t("observability.routing.columns.agent")}</th>
+                <th className="px-3 py-2 font-medium">{t("observability.routing.columns.taskType")}</th>
                 <th className="px-3 py-2 font-medium">{t("observability.routing.columns.goal")}</th>
                 <th className="px-3 py-2 font-medium">{t("observability.routing.columns.reason")}</th>
                 <th className="px-3 py-2 font-medium">{t("observability.routing.columns.difficulty")}</th>
@@ -427,6 +498,17 @@ function RouteRow({ event }: { event: AnalyticsRouteEvent }) {
         ) : null}
       </td>
       <td className="px-3 py-2.5">
+        <div>{event.task_type ? taskTypeLabel(t, event.task_type) : "-"}</div>
+        {event.task_subject ? (
+          <div
+            className="mt-0.5 max-w-[16rem] truncate text-xs text-muted-foreground"
+            title={event.task_subject}
+          >
+            {event.task_subject}
+          </div>
+        ) : null}
+      </td>
+      <td className="px-3 py-2.5">
         <div className="max-w-[16rem] truncate text-xs" title={event.goal || undefined}>
           {event.goal || "-"}
         </div>
@@ -463,7 +545,9 @@ function RouteRow({ event }: { event: AnalyticsRouteEvent }) {
         {warnings.length > 0 ? (
           <div title={warnings.join("\n")} className="text-analytics-warning">
             {t("observability.routing.warningCount", { count: warnings.length })}
-            <div className="mt-0.5 font-mono text-[0.7rem] break-all text-muted-foreground">{warnings[0]}</div>
+            <div className="mt-0.5 font-mono text-[0.7rem] break-all text-muted-foreground">
+              {warningLabel(t, warnings[0])}
+            </div>
           </div>
         ) : (
           "-"

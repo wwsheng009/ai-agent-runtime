@@ -84,6 +84,8 @@ func TestCollectorIngestsSchemaV2Events(t *testing.T) {
 		"session_id":        "child-1",
 		"parent_session_id": "session-v2",
 		"role":              "researcher",
+		"task_type":         "research",
+		"task_subject":      "subagent stats task_type 往返",
 		"success":           false,
 		"error_code":        "UPSTREAM_RATE_LIMITED",
 		"attempt":           1,
@@ -126,7 +128,7 @@ func TestCollectorIngestsSchemaV2Events(t *testing.T) {
 
 	// --- usage_subagents（幂等合并成一行）---
 	assertRowCount(t, store, `SELECT COUNT(*) FROM usage_subagents`, 1)
-	subagent := queryRow(t, store, `SELECT success, completion_reason, failure_category, attempt, max_attempts, usage_total_tokens, source FROM usage_subagents WHERE subagent_id='child-1'`)
+	subagent := queryRow(t, store, `SELECT success, completion_reason, failure_category, attempt, max_attempts, usage_total_tokens, source, task_type, task_subject FROM usage_subagents WHERE subagent_id='child-1'`)
 	if subagent[0] != int64(1) {
 		t.Fatalf("后写入的 status=idle 应合并为 success=1，实际 %v", subagent)
 	}
@@ -138,6 +140,11 @@ func TestCollectorIngestsSchemaV2Events(t *testing.T) {
 	}
 	if subagent[5] != int64(42) || subagent[6] != SubagentSourceAgentController {
 		t.Fatalf("usage_total_tokens/source 合并不符: %v", subagent)
+	}
+	// 第二条事件（agent_controller 风格）未带 task_type/task_subject：
+	// 按 role 同款 CASE 合并保留首值，不得被空串覆盖。
+	if subagent[7] != "research" || subagent[8] != "subagent stats task_type 往返" {
+		t.Fatalf("task_type/task_subject 应保留首值: %v", subagent)
 	}
 
 	// --- usage_turns ---

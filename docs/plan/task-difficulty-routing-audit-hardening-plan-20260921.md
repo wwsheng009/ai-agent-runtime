@@ -1,7 +1,7 @@
 # 任务难度路由审计与安全网加固实施方案
 
-更新时间: 2026-09-21（方案）；2026-09-22（P0 实施回写）
-状态: **partially-implemented** — P0（改动点 1–7，审计完整性）已实施并通过门禁（见 §6.1.1）；P1/P2 未开始
+更新时间: 2026-09-21（方案）；2026-09-22（P0/P1/P2 实施回写）；2026-09-22（v2：task_type 收编修订，见 §12）；2026-09-22（P4 实施回写）
+状态: **partially-implemented** — P0（改动点 1–7）、P1（8–13）、P2（14–18）与 **P4（task_type 收编，改动点 19–29）** 已实施并通过门禁（见 §6.1.1、§7 各阶段状态行与 §10 验收状态）；P3（字面量改常量，可选增强）待实施
 适用仓库: `E:\projects\ai\ai-agent-runtime`
 证据基线: 2026-09-21 工作树 + 四组只读取证（事件库 / 渲染日志 / 批次账本 / 路由代码走查）
 审查方法: 静态代码走查（grep/view）+ 三类持久存储只读 SQL 取证（不写入、不触发任何子代理运行）+ 与 `docs/plan/` 既有 123 份方案的覆盖比对
@@ -34,6 +34,7 @@
 | `docs/plan/multi-agent-execution-optimization-plan.md` | 主计划（等待/唤醒/配额/可观测性）；本文件 G6 的并发闸门与其配额章节相邻 |
 | `docs/plan/session-analytics-subagent-reliability-implementation-plan.md` | 子代理可靠性统计口径；本文件 G1 的路由审计字段应纳入其统计面 |
 | `docs/plan/main-agent-dynamic-provider-model-switching-plan-20260921.md` | **姊妹方案**：主 Agent 自身的动态 provider/model 切换。与本文件**功能正交**（它修的是「主 Agent 路由**根本没有**」，本文件修的是「子 Agent 路由**查不到账**」），但**共享事件契约与门禁**——见 §2.1 与 §5.2 第三步 |
+| `plan.md`（仓库根，2026-09-22） | **task_type 收编的评审与拍板来源**：5 项决策（`task_type` 替换路由层 `role` + 新增 `task_subject`、跨类降档 1 步确认、同步 `spawn_team` 与批次账本、修订本文件与姊妹方案、同步观测与两个前端）。本文件 §5.4 修订块 / §6.4 / §7 P4 / §12 均以它为准 |
 
 ### 2.1 编号约定（与姊妹方案的跨文件引用）
 
@@ -318,6 +319,8 @@ G2 的真正病因不是漏登记，而是**门禁覆盖不到生产者的裸字
 
 **为什么默认 `warn`**：本改动会实打实提高部分任务的模型档位与成本。先在 `warn` 下收集命中率，确认不会把大量正常任务误升档，再切 `enforce`——这是"零行为变化上线"纪律与"安全网必须生效"之间的最小冲突路径。
 
+**修订（2026-09-22 v2，task_type 收编）**：G3 的 rank-max 公式扩为 `rank = max(显式 difficulty, floor(task_type), 角色底, 关键词命中)`——`floor(task_type)` 是**新增的第四个输入**，与本节的三态开关、单调性、`explicit_promoted` 审计语义**正交叠加**；`task_type` 缺省时公式退化为今天的形态，`off` 下逐字节不变。详见 §5.4 修订块与 §6.4。
+
 ### 5.4 G4：关键词启发式中文化与可配置
 
 **改动**：`promotedDifficulty` 的关键词表从「英文 6 词」扩展为「高信号 + 弱信号组合」两档，并支持配置追加。
@@ -337,6 +340,27 @@ G2 的真正病因不是漏登记，而是**门禁覆盖不到生产者的裸字
 **误报控制**：每次提升把命中的词写进 `route_warnings`（形如 `difficulty_promoted_by_keyword:migration`），使误报可观测、可回溯、可按词调优。
 
 **词表来源建议**：从批次账本里真实的中文 `difficulty_rationale` 反推词表，而不是凭空构造——§3.4 已证明该字段有充足的中文语料。
+
+**修订（2026-09-22 v2）：关键词启发式收编为 `task_type` 查表的可选后手**（用户 5 项拍板，来源见 §2 的 `plan.md`）。
+
+1. **分类职责上移**：`spawn_subagents` / `spawn_agent` / `spawn_team` 任务与主 Agent `predict_task_difficulty` 均新增可选字段 `task_type`（封闭枚举）+ `task_subject`（短说明，只进审计不进映射）。harness 不再对 `goal` 做子串猜测，而是直接消费 LLM 的结构化声明——本节词表从「主判据」降级为「可选后手」。
+2. **枚举与底档**（12 类，`taskTypeFloor` 封闭 map + `Validate` 门禁；未知值 → `task_type_unknown:<v>` warning 且档位不变）：
+
+| task_type | floor | 说明 |
+| --- | --- | --- |
+| `explore` | easy | 只读探查；任意类 → `explore` 属跨类降档 |
+| `understand` | normal | 理解/解释 |
+| `modify` / `test` / `config` | normal | 局部写 |
+| `implement` / `refactor` / `integration` | hard | 结构性写；`implement` 承接原 `role=writer&&!readonly` 的写语义 |
+| `verify` | normal | 只读复核；**对齐既有 `role=verifier` 底**，不抬到 hard |
+| `migrate` / `security` | hard（`allow_expert` 时可 expert） | 对齐既有高信号词 floor=hard；**不默认 expert**（`allow_expert=false` 是默认，expert floor 会与之冲突） |
+| `generate` | easy | 低风险写；相对原 writer 抬到 normal 的**有意放宽** |
+
+3. **`role` 的替换边界**：被替换的是**路由层** `role`（`promotedDifficulty` 的 verifier/writer 角色底 + `routeProfileForTask` 的 `role_override` 查表）；**编排层** `role`（`SubagentTask.Role` 的 writer→verifier 拓扑、强制只读、`only one writer`、`requires hard-or-higher verifier`）**保留不动**——它是结构轴不是风险轴。`task_type` 缺省时按别名推导隐式 `task_type`：`verifier→verify`、`writer&&!readonly→implement`、`researcher→explore`，其余不推导（回落 level default）；配置 `routing.roles.<role>` 映射为 `routing.task_types.<task_type>` 并给 deprecation warning。
+4. **关键词的去留**：`heuristics.promote_keywords*` 保留为可选后手，默认关（`heuristics.disabled` 语义沿用），观测一个 release 后移除；`floor(task_type)` 为长期主判据。新增 warnings：`difficulty_floor_by_task_type:<t>` / `difficulty_downgraded_by_task_type:<t>` / `task_type_unknown:<v>`（口径对齐既有 `difficulty_promoted_by_keyword:*`）。
+5. **同步范围（决策 4）**：`spawn_team` teammate 任务（`team_tasks` 表增列、派发事件、teammate runner）与批次账本 `subagent_tasks`（结构体 + 增列）一并透传 `task_type`/`task_subject`，避免「子路径有、team 路径无」的审计缺口（G1 同款教训）。
+6. **观测与两个前端（决策 5）**：`usage_routes` 增 `task_type`/`task_subject` 列，聚合新增 `by_task_type`（`by_role` 保留一个 release）；micro web client（`backend/cmd/aicli/commands/web/js/analysis.js`）与 React `frontend/`（`routing-observability-panel.tsx`、`subagent-stats-panel.tsx`、i18n、路由配置编辑器 `roles→task_types`）同步展示。
+7. **跨类降档（决策 3）**：定义在姊妹方案 §5.5（v4）——同档降级仍需 `downgrade_confirm_steps`，跨类降档收敛为 1 步确认，`min_dwell_steps` 一律不绕过；本文件只消费其结果（子 Agent 路径每任务只解析一次，无迟滞状态机）。
 
 ### 5.5 G5：别名键冲突门禁
 
@@ -378,7 +402,8 @@ route: doc-plan  · normal(explicit_promoted) · hanhe/deepseek-v4-flash · warn
 **边界约束**（沿用大输出治理的既有口径）：
 - 最多 8 行，超出折叠为 `+k more`；
 - 回执总字节上限 1 KB；
-- 只在 `route_*` 解析成功时输出，未路由时明确写 `route: <id> · <difficulty>(<source>) · unrouted`。
+- 只在 `route_*` 解析成功时输出，未路由时明确写 `route: <id> · <difficulty>(<source>) · unrouted`；
+- v4 修订：回执行可附 `task_type`（如 `route: <id> · hard(explicit) · explore · provider/model`），截断口径与 G1 载荷一致。
 
 **异步模式**：批次 start ack 给出同一回执行；完成态沿用同一格式（不重复展开）。
 
@@ -459,6 +484,24 @@ route: doc-plan  · normal(explicit_promoted) · hanhe/deepseek-v4-flash · warn
 | 17 | 路由审计载荷 | `mergeRouteAuditPayload` 邻位 | 新增 `expert_limit` 字段 | G6 |
 | 18 | `aicli doctor subagent-route` | 诊断命令 | 输出别名冲突与 expert 限流语义的预检结论 | G5 G6 |
 
+### 6.4 task_type 收编（P4，2026-09-22 新增，**已实施 2026-09-22**）
+
+对应 §5.4 修订块。缺口列标注收编来源（`G3 G4`）与审计同步（`G1`）。完整分步与验证口径见仓库根 `plan.md` §6–§9。
+
+| # | 文件 | 符号 | 动作 | 缺口 |
+| --- | --- | --- | --- | --- |
+| 19 | `backend/internal/modelrouting/types.go` | `TaskHint` | 新增可选 `TaskType`/`TaskSubject`；`Role` 保留为兼容别名 | G3 G4 |
+| 20 | `backend/internal/modelrouting/resolver.go` | `promotedDifficulty` / `routeProfileForTask` | `floor(task_type)` 并入 rank-max；查表改 `cfg.TaskTypes`；`role` 别名推导（§5.4 修订块第 3 条） | G3 G4 |
+| 21 | `backend/internal/modelrouting/validate.go` + `agentconfig/config.go` | `ValidateTaskType` / `roles→task_types` 别名 | 未知 `task_type` → warning；配置键别名 + deprecation | G4 G5 |
+| 22 | `backend/internal/modelrouting/types.go` + `config.yaml` | `heuristics.*` | 关键词降级为可选后手，默认关 | G4 |
+| 23 | `agent/loop.go` + `toolbroker/broker.go` + `spawn_*_arg_types.go` | `spawn_subagents` / `spawn_agent` / `spawn_team` schema | 新增 `task_type`/`task_subject`；`role`/`agent_type` 标注 deprecated | G3 |
+| 24 | `agent/scheduler.go` / `subagent_route_audit.go` / `child_factory.go` / `planner.go` | 子任务结构体 + 审计 payload + planner 契约 + 工具回执 | 透传并写入 `task_type`/`task_subject`（截断） | G1 G7 |
+| 25 | `agent/subagent_batch_coordinator.go` + 批次账本 schema | `subagent_tasks` | 结构体与表增 `task_type`/`task_subject` 列 | G1 |
+| 26 | `internal/team/*`（types / lead_planner / run_meta / task_dispatch_event / sqlite_store / teammate_runner） | `team_tasks` + 派发事件 | spawn_team 任务透传 + 增列 | G1 |
+| 27 | `backend/pkg/skillsapi/client.go` | `PlanningSubagentTask` | `task_type`/`task_subject` 透传 | G1 |
+| 28 | `usageanalytics`（ingest / schema / contracts） | `usage_routes` + `RouteStats` | 增列 + `by_task_type` 聚合（`by_role` 保留一个 release） | G1 |
+| 29 | micro web client `analysis.js` + React `frontend/` | 分布卡 / 事件行 / 统计表 / i18n / 路由配置编辑器 | 展示 `task_type`/`task_subject`；配置编辑器 `roles→task_types` | G1 |
+
 ---
 
 ## 7. 实施阶段
@@ -508,6 +551,17 @@ route: doc-plan  · normal(explicit_promoted) · hanhe/deepseek-v4-flash · warn
 
 批次终态载荷加 `route_digest`；把路由审计字段纳入子代理可靠性统计口径（`session-analytics-subagent-reliability-implementation-plan.md`）。
 
+### P4：task_type 收编（2026-09-22 新增，**已实施 2026-09-22**）
+
+| 项 | 内容 |
+| --- | --- |
+| 范围 | §6.4 改动点 19–29；分五步（字段透传 → floor 查表 → 类别感知降档 → 观测/界面 → 移除词表），见 `plan.md` §8 |
+| 交付物 | `task_type`/`task_subject` 贯通子 Agent、spawn_team、批次账本；关键词降级为后手；`by_task_type` 与两个前端 |
+| 行为变化 | Step 1 **零**（字段可选，`off` 下逐字节不变）；Step 2 起升档走三态开关；Step 5 移除词表 |
+| 验收 | A10–A13（§10） |
+| 回滚 | `task_type` 缺省 + `heuristics.disabled: false`（重开词表）即回退到关键词路径；路由层 `role` 别名一个 release 内可回退 |
+| 状态 | **已完成（2026-09-22）**：改动点 19–29 全部落地（Step 1–4；Step 5「满一个 release 移除词表」按计划延后）。门禁：`go build ./...` + 10 包 `go test` 全绿（modelrouting/agentconfig/agent/toolbroker/team/agentcontrol/api/skills/subagentbatch/skillsapi/usageanalytics），`node --check analysis.js` + Go 侧 Analysis 断言绿，React 侧 `tsc -b` + 定向 vitest（34 用例）+ i18n lint 绿。落点修正：`team_tasks` 表已在此前 V19 迁移中删除，A13 所述 team 落点实际为 `agent_control_task_records`（新增迁移 V25 `agent_control_task_type_metadata`）；`subagent_tasks` 走 `internal/migrate` 追加迁移 v2；`usage_routes` 增量列记 v6、`usage_subagents` 记 v7（均沿用列存在性探测，只读旧库退化不改写） |
+
 ---
 
 ## 8. 测试计划
@@ -524,6 +578,10 @@ route: doc-plan  · normal(explicit_promoted) · hanhe/deepseek-v4-flash · warn
 | G5 确定性 | `routeProfileFromMap` 对同一 map 多次调用（含不同插入顺序）结果一致 |
 | G6 限流语义 | `0` / `-1` / 正数三态下的 semaphore 构造与告警输出；审计字段 `expert_limit` 取值正确 |
 | G1 载荷约束 | `goal` / `difficulty_rationale` 超长时按 256 字符截断；整行 ≤ 2 KB |
+| task_type floor（P4） | 表驱动：`(difficulty, task_type) → 期望档位与 warnings`；`verify→normal`、`migrate/security→hard`、未知 `task_type` → `task_type_unknown:<v>` 且档位不变；`off` 模式与今天逐字一致 |
+| role 别名推导（P4） | `task_type` 缺省 + `role=verifier/writer/researcher` → 隐式 `task_type`，档位与 v3 逐字一致；编排层 `role`（writer/verifier 约束）行为不变 |
+| 配置别名（P4） | `routing.roles.<role>` 读入映射 `task_types` + deprecation warning；显式 `task_types` 优先 |
+| 账本 / team 同步（P4） | `subagent_tasks` 与 `team_tasks` 均落 `task_type`/`task_subject`；缺省为空与既有行/旧库迁移兼容 |
 
 ### 8.2 契约测试
 
@@ -562,6 +620,8 @@ route: doc-plan  · normal(explicit_promoted) · hanhe/deepseek-v4-flash · warn
 | R6 | 别名冲突报错打断现有部署 | 中 | profile 相同时只告警；`doctor` 预检；错误消息给出可直接照做的修复建议 |
 | R7 | 765 个批次库文件中 4 个打开失败 | 未知 | 本方案不据此下结论；实施时顺带复核是空文件还是损坏（与既有 sqlite 损坏观察一并处理） |
 | R8 | 事件归属从子会话改为父会话引发下游误判 | 中 | 本方案不改既有事件的归属，只新增事件；父/子会话 id 同时写入载荷，下游可自行判别 |
+| R9 | `task_type` 误分类（LLM 把 `migrate` 报成 `modify`）导致底档偏低 | 中 | 单调 rank 底 + 关键词后手可重开 + `task_type` 落审计可回看；`migrate/security` floor=hard 对齐既有词表强度 |
+| R10 | 迁移期双分类轴（路由 `task_type` vs 编排 `role`）造成理解成本 | 低 | 文档明确两层职责（§5.4 修订块第 3 条）；路由层 `role` 只作别名，一个 release 后移除 |
 
 ---
 
@@ -578,13 +638,18 @@ route: doc-plan  · normal(explicit_promoted) · hanhe/deepseek-v4-flash · warn
 | A7 | `enforce` 模式下，显式 `easy` + 高风险关键词的任务实际升档，且审计 `difficulty_source=explicit_promoted` | P2 |
 | A8 | 同时配置 `normal:` 与 `medium:` 且 profile 不同时，启动期报错并指明两个原始键 | P2 |
 | A9 | `max_expert_concurrency` 的 `0` / `-1` / 正数三态语义在文档、校验、审计字段三处一致 | P2 |
+| A10 | `spawn_subagents`/`spawn_agent`/`spawn_team` 任务带 `task_type`/`task_subject` 时，路由审计与 `subagent.route.resolved` payload 均携带截断后的字段；缺省时行为与今天逐字一致 | P4 |
+| A11 | `task_type=migrate`（缺省难度 easy）→ 升 hard 且 warning `difficulty_floor_by_task_type:migrate`；未知 `task_type` → `task_type_unknown:<v>` 且档位不变 | P4 |
+| A12 | `usage_routes` 出现 `task_type`/`task_subject` 列且 `by_task_type` 聚合有数；micro web client 与 React 面板均能显示任务类型分布 | P4 |
+| A13 | 批次账本 `subagent_tasks` 与 `team_tasks` 均落 `task_type`/`task_subject`；旧库缺列时迁移不破坏读写 | P4 |
 
 **P0 验收状态（2026-09-22）**：
 
 - **A1**：单元级证据已就绪（`TestBuildSubagentRouteResolvedPayload*` 断言 `route_model` / `route_provider` / `route_source` 非空且与决策一致）；**端到端取证待跑**（§8.3 的受控批次）。
 - **A2**：4 个失败态已登记为 A+D 通道并改由常量发射（由 `TestSubagentAuditEventChannelRegistrations` 锁定）；**端到端取证待跑**（主动取消或构造超时后查事件库）。
 - **A3**：无回归——`subagent.started` / `subagent.completed` 的发射点与载荷均未改动（本次只新增事件与登记），`internal/agent`、`internal/api/skills` 全包测试 ok。
-- A4–A9（P1/P2）：未开始。
+- A4–A9（P1/P2）：实现已完成（见 §7 各阶段状态行与门禁记录）。
+- **A10–A13（P4，2026-09-22 已验收）**：A10——三条委派路径（spawn_subagents/spawn_agent/spawn_team）schema、解析、审计载荷与回执均带 `task_type`/`task_subject`（`task_subject` 参与 256 字符截断与 2 KB 收敛；缺省路径由 modelrouting/agent/team/toolbroker 全包单测锁定与今日逐字一致）；A11——`TestResolveExplicitDifficulty_TaskTypeFloor`（migrate→hard + `difficulty_floor_by_task_type:migrate`）与 `task_type_unknown:bogus-class` 且档位不变用例绿；A12——`usage_routes` v6 迁移 + `by_task_type` 聚合用例、micro web（`node --check` + Go needle 断言）、React（`tsc -b` + `observability-panels.test.tsx` by_task_type/by_role 并存断言）全绿；A13——`subagent_tasks` 迁移 v2 旧库补列用例与 `agent_control_task_records` V25 迁移随 `internal/team`/`internal/subagentbatch` 全包测试绿（`team_tasks` 表已于 V19 删除，见 §7 P4 状态行的落点修正）。
 
 **全局门禁**：`go test ./...`（`internal/events`、`internal/modelrouting`、`internal/agent`、`internal/toolbroker` 为重点包）+ 契约门禁 + §8.4 的取证脚本输出前后对比。
 
@@ -594,4 +659,22 @@ route: doc-plan  · normal(explicit_promoted) · hanhe/deepseek-v4-flash · warn
 
 难度**声明**已经有账，难度**路由决策**没有账；安全网**存在但可被绕过**，且在中文场景下基本失效。本方案用「一条新的 A 通道审计事件 + 四个失败态登记 + 门禁覆盖裸字面量」补齐审计，用「提升不再短路 + 中文关键词 + 三态开关」补齐安全网，全部改动可按 P0→P2 分阶段独立发布，P0/P1 零行为变化。
 
-截至 2026-09-22：**P0 已实施并通过门禁**（§6.1.1），「零行为变化」得到保持（只新增事件与登记，未改任何路由决策与投递顺序）；A1/A2 的端到端取证与 P1/P2 待推进。
+截至 2026-09-22：**P0/P1/P2 已实施并通过门禁**（§6.1.1、§7 各阶段状态行），「零行为变化」口径由字段可选与 `off` 开关延续到 P4；A1/A2 的端到端取证与 **P4（task_type 收编）** 待推进。
+
+---
+
+## 12. 修订记录（v2，2026-09-22：task_type 收编）
+
+**触发**：用户对「用 LLM 结构化返回任务类别替代关键词防降档」的 5 项拍板（评审与全文见仓库根 `plan.md`）。
+
+| # | 决策 | 本文件落点 |
+| --- | --- | --- |
+| 1 | `task_type` 替换**路由层** `role`，新增 `task_type`/`task_subject` | §5.3 修订注、§5.4 修订块 1–3、§6.4 改动点 19–23 |
+| 2 | `task_subject` 与 `difficulty_rationale` 并存不合并 | §5.4 修订块 1 |
+| 3 | 跨类降档保留**最小 1 步确认**（同档仍 N 步，`min_dwell` 不绕过） | 定义在姊妹方案 §5.5（v4）；本文件 §5.4 修订块 7 消费其结果 |
+| 4 | 同步进 `spawn_team` 与批次账本 `subagent_tasks` | §5.4 修订块 5、§6.4 改动点 25–27 |
+| 5 | 同步观测采集与两个前端 | §5.4 修订块 6、§6.4 改动点 28–29 |
+
+**核实口径**（P4 实施后执行）：① 全文 grep `role_override` / `roles:` / `subject` 残留，确认落在「编排层 role / 兼容别名 / 保留一个 release」三类之一；② 对照 `plan.md` §5 枚举 floor（`verify=normal`、`migrate/security=hard` 且 `allow_expert` 才 expert）；③ 对照上表逐行确认 5 项决策均已落点。
+
+**状态**：**P4（§6.4/§7）已实施（2026-09-22），核实口径三步均通过**——① 全仓 grep `role_override`/`by_role`/`subject` 残留全部落在「编排层 role / 兼容别名 / 保留一个 release」三类（modelrouting Roles 兜底、source 历史标签、orchestration 测试与 UI 兼容键）；② floor 表与 `plan.md` §5 一致（`verify=normal`、`migrate/security=hard`，expert 仅来自显式声明 + allow_expert 门禁，floor 永不产出 expert）；③ 5 项决策逐条落地（枚举与两字段、task_subject 不并入 rationale、跨类 1 步确认、spawn_team/账本同步、观测与两前端），证据见 §7 P4 状态行与 §10 A10–A13。P0–P2 的实施结论不受本轮修订影响（`task_type` 只增 rank-max 输入，不改已落地的三态开关、单调性、别名门禁与 expert 限流语义）。

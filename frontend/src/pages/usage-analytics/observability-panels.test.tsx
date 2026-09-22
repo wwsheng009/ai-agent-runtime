@@ -131,6 +131,8 @@ function subagentResponse(): AnalyticsSubagentStatsResponse {
         parent_session_id: "session-1",
         child_session_id: "child-1",
         role: "explore",
+        task_type: "explore",
+        task_subject: "排查路由面板",
         source: "scheduler",
         success: true,
         completion_reason: "completed",
@@ -144,6 +146,7 @@ function subagentResponse(): AnalyticsSubagentStatsResponse {
       {
         subagent_id: "subagent-failed-1",
         parent_session_id: "session-1",
+        task_type: "verify",
         success: false,
         source: "spawn_team",
         completion_reason: "timeout",
@@ -218,8 +221,13 @@ function routeStatsResponse(): AnalyticsRouteStatsResponse {
     by_model: [{ key: "deepseek-v4-flash", count: 2, route_changed: 1, fallback_used: 1 }],
     by_difficulty: [{ key: "hard", count: 2, route_changed: 1, fallback_used: 1 }],
     by_difficulty_source: [{ key: "inferred", count: 1, route_changed: 0, fallback_used: 0 }],
-    by_role: [{ key: "verifier", count: 1, route_changed: 1, fallback_used: 0 }],
-    warnings: [{ key: "difficulty_promoted_over_explicit", count: 1, route_changed: 0, fallback_used: 0 }],
+    // P4：任务类型分布（新主维度）与 role 分布（编排角色，兼容保留）并存。
+    by_task_type: [
+      { key: "security", count: 2, route_changed: 1, fallback_used: 1 },
+      { key: "verify", count: 1, route_changed: 0, fallback_used: 0 },
+    ],
+    by_role: [{ key: "researcher", count: 1, route_changed: 1, fallback_used: 0 }],
+    warnings: [{ key: "difficulty_floor_by_task_type:security", count: 1, route_changed: 0, fallback_used: 0 }],
     sampled: false,
     sample_size: 0,
   };
@@ -249,6 +257,7 @@ function emptyRouteStatsResponse(): AnalyticsRouteStatsResponse {
     by_model: [],
     by_difficulty: [],
     by_difficulty_source: [],
+    by_task_type: [],
     by_role: [],
     warnings: [],
   };
@@ -267,6 +276,8 @@ function routeEventsResponse(): AnalyticsRouteEventsResponse {
         kind: "applied",
         agent_id: "subagent-route-1",
         role: "verifier",
+        task_type: "verify",
+        task_subject: "核对 P4 契约",
         goal: "改一个文件",
         step: 1,
         reason: "resolved",
@@ -279,7 +290,7 @@ function routeEventsResponse(): AnalyticsRouteEventsResponse {
         route_changed: true,
         fallback_used: true,
         candidate_count: 2,
-        warnings: ["difficulty_promoted_over_explicit"],
+        warnings: ["difficulty_floor_by_task_type:security"],
         attempt: 1,
         max_attempts: 2,
       },
@@ -417,6 +428,11 @@ describe("usage analytics observability panels", () => {
     expect(container.textContent).toContain("调度器");
     expect(container.textContent).toContain("团队");
     expect(container.textContent).toContain("第 2/2 次");
+    // P4：任务类型列（12 类枚举归一为标签）与 task_subject 次行，role 列保留。
+    expect(container.textContent).toContain("任务类型");
+    expect(container.textContent).toContain("探索");
+    expect(container.textContent).toContain("排查路由面板");
+    expect(container.textContent).toContain("角色");
   });
 
   it("失败模式面板：空数组渲染「暂无数据」", async () => {
@@ -514,6 +530,14 @@ describe("usage analytics observability panels", () => {
     // 明细行：路由组合、三态布尔与护栏告警。
     expect(container.textContent).toContain("subagent-route-1");
     expect(container.textContent).toContain("ds2api / deepseek-v4-flash");
+    // P4：by_task_type 分布卡与 by_role 分布卡并存渲染（role 卡兼容保留）。
+    expect(container.textContent).toContain("安全");
+    expect(container.textContent).toContain("researcher");
+    expect(container.textContent).toContain("任务类型");
+    // 明细行：task_type 归一为标签，task_subject 落到次行。
+    expect(container.textContent).toContain("核对 P4 契约");
+    // 新 warning token 前缀（prefix:value）按 {{value}} 插值出标签。
+    expect(container.textContent).toContain("任务类型下限：security");
     // 子代理任务目标（goal）落到明细列。
     expect(container.textContent).toContain("改一个文件");
     expect(container.textContent).toContain("已显示 1 / 1");

@@ -50,6 +50,8 @@ var spawnAgentFieldKinds = []struct {
 	{"agent_type", toolArgFieldString},
 	{"difficulty", toolArgFieldString},
 	{"difficulty_rationale", toolArgFieldString},
+	{"task_type", toolArgFieldString},
+	{"task_subject", toolArgFieldString},
 	{"provider", toolArgFieldString},
 	{"model", toolArgFieldString},
 	{"reasoning_effort", toolArgFieldString},

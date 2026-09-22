@@ -23,6 +23,8 @@ func (r Resolver) Resolve(parent ParentDefaults, task TaskHint) (RouteDecision, 
 
 	decision := RouteDecision{
 		DifficultyRationale: strings.TrimSpace(task.DifficultyRationale),
+		TaskType:            EffectiveTaskType(task.TaskType, task.Role, task.ReadOnly),
+		TaskSubject:         strings.TrimSpace(task.TaskSubject),
 		Provider:            strings.TrimSpace(parent.Provider),
 		Model:               strings.TrimSpace(parent.Model),
 		ReasoningEffort:     NormalizeReasoningEffort(parent.ReasoningEffort),
@@ -42,7 +44,7 @@ func (r Resolver) Resolve(parent ParentDefaults, task TaskHint) (RouteDecision, 
 	decision.Warnings = append(decision.Warnings, staticWarnings...)
 	decision.Warnings = append(decision.Warnings, difficultyWarnings...)
 
-	profile, source, ok := routeProfileForTask(r.Config, task.Role, difficulty)
+	profile, source, ok := routeProfileForTask(r.Config, task, difficulty)
 	if ok {
 		if err := r.applyRouteProfile(&decision, profile, source, difficulty); err != nil {
 			return RouteDecision{}, err
@@ -60,6 +62,8 @@ func (r Resolver) resolveDisabled(parent ParentDefaults, task TaskHint) RouteDec
 	decision := RouteDecision{
 		Provider:            strings.TrimSpace(parent.Provider),
 		Model:               strings.TrimSpace(parent.Model),
+		TaskType:            EffectiveTaskType(task.TaskType, task.Role, task.ReadOnly),
+		TaskSubject:         strings.TrimSpace(task.TaskSubject),
 		ReasoningEffort:     NormalizeReasoningEffort(parent.ReasoningEffort),
 		MaxTokens:           parent.MaxTokens,
 		Timeout:             parent.Timeout,
@@ -85,11 +89,24 @@ func (r Resolver) resolveDisabled(parent ParentDefaults, task TaskHint) RouteDec
 }
 
 func resolveDifficulty(cfg *agentconfig.AICLISubagentRoutingConfig, task TaskHint) (string, string, []string, error) {
+	// v4（K-4）：显式但未知的 task_type 一律记 task_type_unknown:<v> 并忽略该
+	// 字段（不报错、不回退猜词、不参与 floor）。off 模式也保留这条输入校验告警：
+	// 它描述的是新字段本身非法，不是"被提升"，不属于三态开关管辖。
+	taskTypeWarnings := []string{}
+	if raw := strings.TrimSpace(task.TaskType); raw != "" {
+		if _, ok := ValidateTaskType(raw); !ok {
+			taskTypeWarnings = append(taskTypeWarnings, "task_type_unknown:"+NormalizeTaskType(raw))
+		}
+	}
 	if difficulty, ok := NormalizeDifficulty(task.Difficulty); ok {
-		return resolveExplicitDifficulty(cfg, task, difficulty)
+		difficulty, source, warnings, err := resolveExplicitDifficulty(cfg, task, difficulty)
+		if err != nil {
+			return "", "", nil, err
+		}
+		return difficulty, source, append(taskTypeWarnings, warnings...), nil
 	}
 
-	warnings := []string{}
+	warnings := append([]string(nil), taskTypeWarnings...)
 	if strings.TrimSpace(task.Difficulty) == "" {
 		warnings = append(warnings, "difficulty_missing_defaulted")
 	} else {
@@ -137,11 +154,24 @@ func resolveExplicitDifficulty(
 	return promoted, SourceExplicitPromoted, warnings, nil
 }
 
-// promotedDifficulty 返回提升后的难度与命中证据。提升是单调的：只抬高 rank，
-// 不降低。角色规则（verifier / 非只读 writer）与关键词规则相互独立、可叠加。
+// promotedDifficulty 返回提升后的难度与命中证据（v4 G3 四输入 rank-max）：
+//
+//	rank = max(显式 difficulty, floor(显式 task_type), 角色底, 关键词命中)
+//
+// 提升是单调的：只抬高 rank，不降低。floor 只认**显式** task_type——缺省时按
+// role 别名推导出的隐式 task_type 只喂 profile 查表与审计（见 EffectiveTaskType），
+// 不参与 floor，否则 role=writer（v3 底 normal）会经 implement（floor=hard）
+// 被抬档，破坏「task_type 缺省 ⇒ 档位与 v3 逐字一致」（doc8 §8.1）。角色规则
+// 与关键词规则保持 v3 原样，相互独立、可叠加；关键词与三态开关正交（doc8 §5.3）。
 func promotedDifficulty(task TaskHint, difficulty string, cfg *agentconfig.AICLISubagentRoutingConfig) (string, promotionHits) {
 	rank := difficultyRank(difficulty)
 	hits := promotionHits{}
+	if normalized, ok := ValidateTaskType(task.TaskType); ok {
+		if floor, ok := TaskTypeFloor(normalized); ok && rank < difficultyRank(floor) {
+			rank = difficultyRank(floor)
+			hits.TaskType = normalized
+		}
+	}
 	role := NormalizeRole(task.Role)
 	if (role == "verifier" || (role == "writer" && !task.ReadOnly)) && rank < difficultyRank(DifficultyNormal) {
 		rank = difficultyRank(DifficultyNormal)
@@ -196,11 +226,38 @@ func difficultyForRank(rank int) string {
 	}
 }
 
-func routeProfileForTask(cfg *agentconfig.AICLISubagentRoutingConfig, role, difficulty string) (agentconfig.AICLISubagentRouteProfile, string, bool) {
+// routeProfileForTask 按 v4 查表顺序取 profile（cfg.Roles 是 cfg.TaskTypes 的
+// 别名，plan K-3）：
+//  1. 生效 task_type（显式合法值优先，缺省/未知按 role 别名推导）查
+//     cfg.TaskTypes，命中 → source=task_type_override；
+//  2. 未命中回落 cfg.Roles[role] → source=role_override：迁移窗口内"配置还没搬
+//     到 task_types、但任务已开始带 task_type"时仍命中旧 profile，保证未迁移
+//     旧配置、无别名自定义 role、只读 writer 行为不变；
+//  3. 最终兜底 cfg.Levels[difficulty] → source=difficulty_level。
+func routeProfileForTask(cfg *agentconfig.AICLISubagentRoutingConfig, task TaskHint, difficulty string) (agentconfig.AICLISubagentRouteProfile, string, bool) {
 	if cfg == nil {
 		return agentconfig.AICLISubagentRouteProfile{}, "", false
 	}
-	role = NormalizeRole(role)
+	if taskType, ok := ValidateTaskType(task.TaskType); ok {
+		for configuredType, levels := range cfg.TaskTypes {
+			if NormalizeTaskType(configuredType) != taskType {
+				continue
+			}
+			if profile, ok := routeProfileFromMap(levels, difficulty); ok {
+				return profile, SourceTaskTypeOverride, true
+			}
+		}
+	} else if derived := TaskTypeFromRole(task.Role, task.ReadOnly); derived != "" {
+		for configuredType, levels := range cfg.TaskTypes {
+			if NormalizeTaskType(configuredType) != derived {
+				continue
+			}
+			if profile, ok := routeProfileFromMap(levels, difficulty); ok {
+				return profile, SourceTaskTypeOverride, true
+			}
+		}
+	}
+	role := NormalizeRole(task.Role)
 	if role != "" {
 		for configuredRole, levels := range cfg.Roles {
 			if NormalizeRole(configuredRole) != role {

@@ -320,13 +320,15 @@ func (c *collector) onSubagentCompleted(event runtimeevents.Event) {
 	}
 	if err := c.store.execWithLockRetry(`
 INSERT INTO usage_subagents (
-  subagent_id, parent_session_id, child_session_id, role, read_only, success, completion_reason,
+  subagent_id, parent_session_id, child_session_id, role, task_type, task_subject, read_only, success, completion_reason,
   failure_category, error_code, attempt, max_attempts, retry_reason, id_synthesized, duration_ms,
   started_at_unix_nano, completed_at_unix_nano, usage_total_tokens, source, conflict_count, record_json
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(subagent_id, parent_session_id) DO UPDATE SET
   child_session_id = CASE WHEN excluded.child_session_id <> '' THEN excluded.child_session_id ELSE usage_subagents.child_session_id END,
   role = CASE WHEN excluded.role <> '' THEN excluded.role ELSE usage_subagents.role END,
+  task_type = CASE WHEN excluded.task_type <> '' THEN excluded.task_type ELSE usage_subagents.task_type END,
+  task_subject = CASE WHEN excluded.task_subject <> '' THEN excluded.task_subject ELSE usage_subagents.task_subject END,
   read_only = COALESCE(excluded.read_only, usage_subagents.read_only),
   success = COALESCE(excluded.success, usage_subagents.success),
   completion_reason = CASE WHEN excluded.completion_reason <> '' AND excluded.completion_reason <> 'unknown' THEN excluded.completion_reason ELSE usage_subagents.completion_reason END,
@@ -353,6 +355,8 @@ ON CONFLICT(subagent_id, parent_session_id) DO UPDATE SET
 		normalized.ParentSessionID,
 		normalized.ChildSessionID,
 		normalized.Role,
+		normalized.TaskType,
+		normalized.TaskSubject,
 		readOnlyValue,
 		successValue,
 		normalized.CompletionReason,

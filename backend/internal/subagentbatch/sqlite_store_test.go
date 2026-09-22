@@ -2,11 +2,14 @@ package subagentbatch
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/migrate"
 )
 
 func newTestStore(t *testing.T) BatchStore {
@@ -515,6 +518,79 @@ func TestFileBackedStoreRoundTrip(t *testing.T) {
 // timeHour allows the sample helper to express a deadline without extra imports.
 const timeHour = time.Hour
 
+// TestTaskTypeSubjectColumnsMigrateLegacyDatabase pins the old-database path
+// (plan §6.4 B-2): a store file whose schema stopped at migration v1 has no
+// task_type/task_subject columns. Opening it with the current code must add the
+// columns, read pre-existing rows back with empty strings (byte-identical to
+// today), and accept the new fields through the normal CAS write path.
+func TestTaskTypeSubjectColumnsMigrateLegacyDatabase(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy-subagent-batches.db")
+
+	// Build a v1-era database exactly as an older release would have left it:
+	// v1 recorded in schema_migrations plus a task row written without the new
+	// columns.
+	legacy, err := sql.Open("sqlite3", batchDSNOptions(path))
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	legacy.SetMaxOpenConns(1)
+	if err := migrate.Apply(ctx, legacy, batchMigrations[:1]); err != nil {
+		t.Fatalf("apply v1 schema: %v", err)
+	}
+	stamp := Now().UTC().Format(time.RFC3339Nano)
+	if _, err := legacy.ExecContext(ctx, `
+		INSERT INTO subagent_batches (batch_id, status, execution_mode, created_at, updated_at, heartbeat_at, version)
+		VALUES ('batch-legacy', 'queued', 'wait', ?, ?, ?, 1)`, stamp, stamp, stamp); err != nil {
+		t.Fatalf("insert legacy batch: %v", err)
+	}
+	if _, err := legacy.ExecContext(ctx, `
+		INSERT INTO subagent_tasks (task_id, batch_id, role, difficulty, status, order_index, updated_at, spec_json, version)
+		VALUES ('task-legacy', 'batch-legacy', 'writer', 'hard', 'ready', 1, ?, '{"id":"task-legacy","role":"writer","difficulty":"hard"}', 1)`,
+		stamp); err != nil {
+		t.Fatalf("insert legacy task: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close legacy db: %v", err)
+	}
+
+	store, err := NewSQLiteBatchStore(&StoreConfig{Path: path})
+	if err != nil {
+		t.Fatalf("open migrated store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	got, err := store.GetTask(ctx, "batch-legacy", "task-legacy")
+	if err != nil || got == nil {
+		t.Fatalf("GetTask(legacy): task=%+v err=%v", got, err)
+	}
+	if got.TaskType != "" || got.TaskSubject != "" {
+		t.Fatalf("legacy row task_type/task_subject = %q/%q, want empty strings", got.TaskType, got.TaskSubject)
+	}
+	if got.Role != "writer" || got.Difficulty != "hard" {
+		t.Fatalf("legacy row role/difficulty = %q/%q, want writer/hard", got.Role, got.Difficulty)
+	}
+
+	// The migrated columns are writable through the standard CAS path.
+	updated, err := store.UpdateTask(ctx, "batch-legacy", "task-legacy", got.Version, func(record *SubagentTaskRecord) {
+		record.TaskType = "implement"
+		record.TaskSubject = "legacy row gains routing audit fields"
+	})
+	if err != nil {
+		t.Fatalf("UpdateTask(migrated row): %v", err)
+	}
+	if updated.TaskType != "implement" || updated.TaskSubject != "legacy row gains routing audit fields" {
+		t.Fatalf("UpdateTask returned task_type/task_subject = %q/%q", updated.TaskType, updated.TaskSubject)
+	}
+	again, err := store.GetTask(ctx, "batch-legacy", "task-legacy")
+	if err != nil || again == nil {
+		t.Fatalf("GetTask(after update): task=%+v err=%v", again, err)
+	}
+	if again.TaskType != "implement" || again.TaskSubject != "legacy row gains routing audit fields" {
+		t.Fatalf("task_type/task_subject after update = %q/%q", again.TaskType, again.TaskSubject)
+	}
+}
+
 // TestTaskRecordReadProjectionRoundTripsWriteColumns pins the read projection
 // against the write projection: every column serialized by
 // insertTaskRow/overwriteTaskRow must land back on SubagentTaskRecord through
@@ -535,6 +611,8 @@ func TestTaskRecordReadProjectionRoundTripsWriteColumns(t *testing.T) {
 	tasks[0].ParentTaskID = "task-parent"
 	tasks[0].DependencyIDs = []string{"dep-a", "dep-b"}
 	tasks[0].ChildSessionID = "child-session-a"
+	tasks[0].TaskType = "implement"
+	tasks[0].TaskSubject = "add task_type/task_subject passthrough"
 	tasks[0].ReadOnly = true
 	tasks[0].Attempt = 3
 	tasks[0].TaskDeadline = deadline
@@ -579,6 +657,9 @@ func TestTaskRecordReadProjectionRoundTripsWriteColumns(t *testing.T) {
 	if sibling.TaskDeadline != (time.Time{}) || sibling.StartedAt != nil || sibling.FinishedAt != nil || sibling.LastProgressAt != nil {
 		t.Fatalf("task-b nullable time columns = deadline=%v started=%v finished=%v progress=%v, want zero/nil", sibling.TaskDeadline, sibling.StartedAt, sibling.FinishedAt, sibling.LastProgressAt)
 	}
+	if sibling.TaskType != "" || sibling.TaskSubject != "" {
+		t.Fatalf("task-b task_type/task_subject = %q/%q, want empty (omitted fields stay absent)", sibling.TaskType, sibling.TaskSubject)
+	}
 
 	// UpdateTask writes LastProgressAt, and the stamp must be visible to the
 	// very next read (this is what the M1 throttled write-back relies on).
@@ -609,6 +690,9 @@ func TestTaskRecordReadProjectionRoundTripsWriteColumns(t *testing.T) {
 	if !again.TaskDeadline.Equal(deadline) {
 		t.Fatalf("TaskDeadline after UpdateTask = %v, want %v", again.TaskDeadline, deadline)
 	}
+	if again.TaskType != "implement" || again.TaskSubject != "add task_type/task_subject passthrough" {
+		t.Fatalf("task_type/task_subject after UpdateTask = %q/%q, want the CreateBatch values", again.TaskType, again.TaskSubject)
+	}
 }
 
 func assertTaskRecordProjection(t *testing.T, source string, got, want SubagentTaskRecord) {
@@ -625,6 +709,9 @@ func assertTaskRecordProjection(t *testing.T, source string, got, want SubagentT
 	}
 	if got.Role != want.Role || got.Difficulty != want.Difficulty {
 		t.Errorf("%s: role/difficulty = %q/%q, want %q/%q", source, got.Role, got.Difficulty, want.Role, want.Difficulty)
+	}
+	if got.TaskType != want.TaskType || got.TaskSubject != want.TaskSubject {
+		t.Errorf("%s: task_type/task_subject = %q/%q, want %q/%q", source, got.TaskType, got.TaskSubject, want.TaskType, want.TaskSubject)
 	}
 	if got.ReadOnly != want.ReadOnly {
 		t.Errorf("%s: ReadOnly = %v, want %v", source, got.ReadOnly, want.ReadOnly)

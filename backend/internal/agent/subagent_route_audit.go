@@ -28,7 +28,7 @@ const (
 // fallback_*）来自 mergeRouteAuditPayload，自由文本按字符截断后整体再按字节收敛。
 func buildSubagentRouteResolvedPayload(base map[string]interface{}, decision modelrouting.RouteDecision) map[string]interface{} {
 	payload := mergeRouteAuditPayload(base, decision)
-	for _, key := range []string{"goal", "difficulty_rationale"} {
+	for _, key := range []string{"goal", "difficulty_rationale", "task_subject"} {
 		if text, ok := payload[key].(string); ok && text != "" {
 			payload[key] = truncateSubagentParentText(text, subagentRouteAuditTextLimit)
 		}
@@ -47,7 +47,7 @@ func boundSubagentRouteAuditPayload(payload map[string]interface{}, limit int) m
 		return payload
 	}
 	for _, budget := range []int{192, 128, 96, 64, 32, 0} {
-		for _, key := range []string{"goal", "difficulty_rationale"} {
+		for _, key := range []string{"goal", "difficulty_rationale", "task_subject"} {
 			if text, ok := payload[key].(string); ok && text != "" {
 				payload[key] = truncateSubagentParentText(text, budget)
 			}
@@ -69,6 +69,8 @@ func (s *SubagentScheduler) emitSubagentRouteResolved(options SubagentRunOptions
 	base := map[string]interface{}{
 		"subagent_id":       task.ID,
 		"role":              task.Role,
+		"task_type":         task.TaskType,
+		"task_subject":      task.TaskSubject,
 		"goal":              task.Goal,
 		"parent_session_id": options.ParentSessionID,
 		"child_session_id":  childSessionID,

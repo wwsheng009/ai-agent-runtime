@@ -52,6 +52,8 @@ func TestStoreRouteStatsAndEvents(t *testing.T) {
 		"subagent_id":            "sub-1",
 		"role":                   "writer",
 		"goal":                   "改一个文件",
+		"task_type":              "migrate",
+		"task_subject":           "把配置迁到新 schema",
 		"parent_session_id":      "session-routes",
 		"child_session_id":       "child-1",
 		"attempt":                1,
@@ -77,6 +79,8 @@ func TestStoreRouteStatsAndEvents(t *testing.T) {
 		"difficulty_source": "explicit",
 		"provider":          "remote",
 		"model":             "strong-model",
+		"task_type":         "implement",
+		"task_subject":      "接入 by_task_type 聚合",
 		"route_changed":     true,
 		"candidates": []interface{}{
 			map[string]interface{}{"provider": "remote"},
@@ -139,6 +143,12 @@ func TestStoreRouteStatsAndEvents(t *testing.T) {
 		t.Fatalf("难度来源桶应只有 explicit 一个: %#v", stats.ByDifficultySource)
 	}
 	assertBucket(t, stats.ByRole, "writer", 1)
+	// task_type 是新分类轴：缺省行（cleared / warning）不进桶，桶计数与 ByRole 对照。
+	assertBucket(t, stats.ByTaskType, "migrate", 1)
+	assertBucket(t, stats.ByTaskType, "implement", 1)
+	if len(stats.ByTaskType) != 2 {
+		t.Fatalf("task_type 桶应只有 migrate / implement 两个: %#v", stats.ByTaskType)
+	}
 	assertBucket(t, stats.Warnings, "provider_fallback_parent", 1)
 
 	// 过滤：scope=subagent 只剩 1 行。
@@ -190,6 +200,9 @@ func TestStoreRouteStatsAndEvents(t *testing.T) {
 	if first.Goal != "" {
 		t.Fatalf("主 Agent 行不应携带 goal: %#v", first)
 	}
+	if first.TaskType != "" || first.TaskSubject != "" {
+		t.Fatalf("未携带 task_type / task_subject 的护栏行应为空: %#v", first)
+	}
 	second, err := store.RouteEvents(RouteQuery{Limit: 2, Offset: 2})
 	if err != nil {
 		t.Fatalf("RouteEvents(offset): %v", err)
@@ -213,6 +226,9 @@ func TestStoreRouteStatsAndEvents(t *testing.T) {
 	}
 	if row.Goal != "改一个文件" {
 		t.Fatalf("子代理明细 goal 不符: %#v", row)
+	}
+	if row.TaskType != "migrate" || row.TaskSubject != "把配置迁到新 schema" {
+		t.Fatalf("子代理明细 task_type / task_subject 不符: %#v", row)
 	}
 	if row.RouteChanged != nil || row.FallbackUsed == nil || !*row.FallbackUsed {
 		t.Fatalf("三态字段不符: %#v", row)
@@ -258,6 +274,7 @@ func TestServiceRouteStatsDegradedBuckets(t *testing.T) {
 		"by_difficulty":        stats.ByDifficulty,
 		"by_difficulty_source": stats.ByDifficultySource,
 		"by_role":              stats.ByRole,
+		"by_task_type":         stats.ByTaskType,
 		"warnings":             stats.Warnings,
 	}
 	for name, bucket := range buckets {

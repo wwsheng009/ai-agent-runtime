@@ -57,6 +57,15 @@ func reportDifficulty(t *testing.T, loop *ReActLoop, difficulty string) (string,
 	return loop.reportPredictedDifficulty("session_test", "trace_test", 1, map[string]interface{}{"difficulty": difficulty})
 }
 
+// reportDifficultyTyped 上报难度并附带 v4 的可选类别声明（U20/U21）。
+func reportDifficultyTyped(t *testing.T, loop *ReActLoop, difficulty, taskType string) (string, error) {
+	t.Helper()
+	return loop.reportPredictedDifficulty("session_test", "trace_test", 1, map[string]interface{}{
+		"difficulty": difficulty,
+		"task_type":  taskType,
+	})
+}
+
 // TestNewReActLoopDeepClonesRoutingConfig 覆盖 §5.2：值拷贝 + 嵌套深拷贝。
 // 直接改宿主对象会让 route 跨 turn 泄漏，也会污染子 Agent 复用的父配置。
 func TestNewReActLoopDeepClonesRoutingConfig(t *testing.T) {
@@ -210,6 +219,168 @@ func TestDowngradeBlockedByMinDwell(t *testing.T) {
 	if loop.config.Model != "claude-hard" {
 		t.Fatalf("min_dwell_steps must gate the downgrade, got %q", loop.config.Model)
 	}
+}
+
+// U20（doc9 §5.5/§9.1）：跨类降档收敛为 1 步确认（非即时），min_dwell_steps
+// 两类均不绕过——这里先把驻留养满，再证明"首报即生效"。
+func TestCrossTierDowngradeConfirmsInOneStep(t *testing.T) {
+	loop, _ := mainAgentRouteTestLoop(t)
+	if _, err := reportDifficultyTyped(t, loop, "hard", "migrate"); err != nil {
+		t.Fatalf("escalate: %v", err)
+	}
+	if loop.config.Model != "claude-hard" {
+		t.Fatalf("escalation must apply on the first report, got %q", loop.config.Model)
+	}
+	if loop.mainAgentRoute.activeTaskType != "migrate" {
+		t.Fatalf("active task type = %q, want migrate", loop.mainAgentRoute.activeTaskType)
+	}
+
+	// 养满 min_dwell_steps=2（不带降档上报）。
+	loop.onStepBoundary("session_test", "trace_test", 2)
+	loop.onStepBoundary("session_test", "trace_test", 3)
+
+	// migrate(hard 底) → explore(easy 底)：跨类降档 confirm=1 ⇒ 首报即生效。
+	if _, err := reportDifficultyTyped(t, loop, "easy", "explore"); err != nil {
+		t.Fatalf("cross-tier downgrade: %v", err)
+	}
+	if loop.config.Model != "claude-easy" {
+		t.Fatalf("cross-tier downgrade must apply after 1 confirmation, got %q", loop.config.Model)
+	}
+}
+
+// U20 对照组：类别相同（migrate→migrate）不构成跨类，仍需 DowngradeConfirmSteps
+// 连续确认——fast path 不得被"带了 task_type"本身触发。
+func TestSameTierDowngradeWithTaskTypeStillNeedsConfirmations(t *testing.T) {
+	loop, _ := mainAgentRouteTestLoop(t)
+	// 本用例需要 4 个驻留边界才凑满 3 次确认，恰好会撞上默认的
+	// MaxConsecutiveExpensiveSteps=4 成本护栏（hard 是昂贵档）——测试目标是
+	// 迟滞确认数，不是护栏，显式关掉计数以免被 tripMainAgentCostGuard 抢跑。
+	loop.config.MainAgentRouting.MaxConsecutiveExpensiveSteps = 0
+	if _, err := reportDifficultyTyped(t, loop, "hard", "migrate"); err != nil {
+		t.Fatalf("escalate: %v", err)
+	}
+	loop.onStepBoundary("session_test", "trace_test", 2)
+	loop.onStepBoundary("session_test", "trace_test", 3)
+
+	if _, err := reportDifficultyTyped(t, loop, "easy", "migrate"); err != nil {
+		t.Fatalf("downgrade #1: %v", err)
+	}
+	if loop.config.Model != "claude-hard" {
+		t.Fatalf("same-tier downgrade must not apply on the first report, got %q", loop.config.Model)
+	}
+	loop.onStepBoundary("session_test", "trace_test", 4)
+	if _, err := reportDifficultyTyped(t, loop, "easy", "migrate"); err != nil {
+		t.Fatalf("downgrade #2: %v", err)
+	}
+	if loop.config.Model != "claude-hard" {
+		t.Fatalf("same-tier downgrade must wait for %d confirmations, got %q", loop.config.MainAgentRouting.DowngradeConfirmSteps, loop.config.Model)
+	}
+	loop.onStepBoundary("session_test", "trace_test", 5)
+	if _, err := reportDifficultyTyped(t, loop, "easy", "migrate"); err != nil {
+		t.Fatalf("downgrade #3: %v", err)
+	}
+	if loop.config.Model != "claude-easy" {
+		t.Fatalf("confirmed same-tier downgrade must apply, got %q", loop.config.Model)
+	}
+}
+
+// 未知 task_type 不拒报（与子 Agent 路径同款「警告 + 忽略」）：档位照常生效，
+// route_applied 的 route_warnings 带 task_type_unknown:<v>，task_type 归一为空。
+func TestUnknownTaskTypeWarnsWithoutRejecting(t *testing.T) {
+	host := mainAgentRouteTestConfig()
+	agent := &Agent{config: &Config{Name: "task-type-unknown-agent"}}
+	loop := NewReActLoop(agent, nil, host)
+	collected := captureMainAgentRouteEvents(t, agent)
+	loop.beginTurnRoute("session_test", "trace_test")
+	defer loop.endTurnRoute("session_test", "trace_test")
+
+	if _, err := loop.reportPredictedDifficulty("session_test", "trace_test", 1, map[string]interface{}{
+		"difficulty":   "hard",
+		"task_type":    "bogus-class",
+		"task_subject": "  move schema  ",
+	}); err != nil {
+		t.Fatalf("unknown task_type must not reject the report: %v", err)
+	}
+	applied := collected[runtimeevents.EventMainAgentRouteApplied]
+	if len(applied) == 0 {
+		t.Fatal("route_applied missing")
+	}
+	payload := applied[len(applied)-1]
+	if got := payload["task_type"]; got != "" {
+		t.Fatalf("unknown task_type must normalize to empty, got %v", got)
+	}
+	if got := payload["task_subject"]; got != "move schema" {
+		t.Fatalf("task_subject = %v, want %q", got, "move schema")
+	}
+	warnings := warningsAsStrings(t, payload["route_warnings"])
+	if !containsRouteWarning(warnings, "task_type_unknown:bogus-class") {
+		t.Fatalf("route_warnings missing task_type_unknown:bogus-class: %v", warnings)
+	}
+}
+
+// route_prediction_invalid（v4/MA-4）：带 task_type/task_subject 与 raw_task_type，
+// 被拒的是难度，但类别声明同样可回溯。
+func TestPredictionInvalidCarriesRawTaskType(t *testing.T) {
+	host := mainAgentRouteTestConfig()
+	agent := &Agent{config: &Config{Name: "invalid-task-type-agent"}}
+	loop := NewReActLoop(agent, nil, host)
+	collected := captureMainAgentRouteEvents(t, agent)
+	loop.beginTurnRoute("session_test", "trace_test")
+	defer loop.endTurnRoute("session_test", "trace_test")
+
+	_, err := loop.reportPredictedDifficulty("session_test", "trace_test", 2, map[string]interface{}{
+		"difficulty":   "banana",
+		"task_type":    "migrate",
+		"task_subject": "move schema",
+	})
+	if err == nil {
+		t.Fatal("invalid difficulty must be rejected")
+	}
+	invalid := collected[runtimeevents.EventMainAgentRoutePredictionInvalid]
+	if len(invalid) != 1 {
+		t.Fatalf("route_prediction_invalid 事件数 = %d, want 1", len(invalid))
+	}
+	payload := invalid[0]
+	if got := payload["raw_task_type"]; got != "migrate" {
+		t.Fatalf("raw_task_type = %v, want migrate", got)
+	}
+	if got := payload["task_type"]; got != "migrate" {
+		t.Fatalf("task_type = %v, want migrate", got)
+	}
+	if got := payload["task_subject"]; got != "move schema" {
+		t.Fatalf("task_subject = %v, want %q", got, "move schema")
+	}
+	if got := payload["reported"]; got != "banana" {
+		t.Fatalf("reported = %v, want banana", got)
+	}
+}
+
+// warningsAsStrings 兼容内存态 []string 与序列化后的 []interface{}。
+func warningsAsStrings(t *testing.T, raw interface{}) []string {
+	t.Helper()
+	switch value := raw.(type) {
+	case []string:
+		return value
+	case []interface{}:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			text, _ := item.(string)
+			out = append(out, text)
+		}
+		return out
+	default:
+		t.Fatalf("route_warnings 类型 = %T, want []string", raw)
+		return nil
+	}
+}
+
+func containsRouteWarning(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
 
 // TestCostGuardResetsRouteAndAllowsLaterEscalation 覆盖 §5.7。
@@ -388,6 +559,18 @@ func TestPredictToolDefinitionIsStableAndHidesBackends(t *testing.T) {
 	}
 	if _, ok := properties["rationale"]; !ok {
 		t.Fatal("rationale must stay optional and available")
+	}
+	// U21（doc9 §9.1）：task_type/task_subject 是可选参数；枚举 = 封闭 12 类。
+	taskTypeProp, ok := properties["task_type"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("task_type property missing: %v", properties)
+	}
+	typeEnum, ok := taskTypeProp["enum"].([]string)
+	if !ok || !reflect.DeepEqual(typeEnum, modelrouting.TaskTypes()) {
+		t.Fatalf("task_type enum must equal modelrouting.TaskTypes(), got %v", taskTypeProp["enum"])
+	}
+	if _, ok := properties["task_subject"]; !ok {
+		t.Fatal("task_subject must stay optional and available")
 	}
 	if required, ok := first.Parameters["required"].([]string); !ok || len(required) != 1 || required[0] != "difficulty" {
 		t.Fatalf("required must contain only difficulty: %v", first.Parameters["required"])
@@ -570,6 +753,7 @@ func captureMainAgentRouteEvents(t *testing.T, agent *Agent) map[string][]map[st
 	for _, eventType := range []string{
 		runtimeevents.EventMainAgentRouteApplied,
 		runtimeevents.EventMainAgentRouteCleared,
+		runtimeevents.EventMainAgentRoutePredictionInvalid,
 	} {
 		eventType := eventType
 		bus.Subscribe(eventType, func(event runtimeevents.Event) {
@@ -659,6 +843,7 @@ func TestRouteAppliedPayloadCarriesContractFields(t *testing.T) {
 	for _, key := range []string{
 		"step", "difficulty", "source", "provider", "model",
 		"baseline_provider", "baseline_model", "rationale", "candidates",
+		"task_type", "task_subject",
 		"route_warnings", "input_tokens", "output_tokens",
 	} {
 		if _, ok := applied[0][key]; !ok {

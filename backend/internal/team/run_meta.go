@@ -10,6 +10,8 @@ type TeamRunMeta struct {
 	Difficulty           string   `json:"difficulty,omitempty"`
 	DifficultySource     string   `json:"difficulty_source,omitempty"`
 	DifficultyRationale  string   `json:"difficulty_rationale,omitempty"`
+	TaskType             string   `json:"task_type,omitempty"`
+	TaskSubject          string   `json:"task_subject,omitempty"`
 	RouteProvider        string   `json:"route_provider,omitempty"`
 	RouteModel           string   `json:"route_model,omitempty"`
 	RouteReasoningEffort string   `json:"route_reasoning_effort,omitempty"`
@@ -76,6 +78,8 @@ func TaskExecutionRouteFromRunMeta(runMeta *RunMeta) *TaskExecutionRoute {
 		Difficulty:          strings.TrimSpace(meta.Difficulty),
 		DifficultySource:    strings.TrimSpace(meta.DifficultySource),
 		DifficultyRationale: strings.TrimSpace(meta.DifficultyRationale),
+		TaskType:            strings.TrimSpace(meta.TaskType),
+		TaskSubject:         strings.TrimSpace(meta.TaskSubject),
 		Provider:            strings.TrimSpace(meta.RouteProvider),
 		Model:               strings.TrimSpace(meta.RouteModel),
 		ReasoningEffort:     strings.TrimSpace(meta.RouteReasoningEffort),
@@ -87,6 +91,8 @@ func TaskExecutionRouteFromRunMeta(runMeta *RunMeta) *TaskExecutionRoute {
 	if route.Difficulty == "" &&
 		route.DifficultySource == "" &&
 		route.DifficultyRationale == "" &&
+		route.TaskType == "" &&
+		route.TaskSubject == "" &&
 		route.Provider == "" &&
 		route.Model == "" &&
 		route.ReasoningEffort == "" &&

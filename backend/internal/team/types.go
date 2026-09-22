@@ -122,6 +122,8 @@ type Task struct {
 	Goal                string     `json:"goal"`
 	Difficulty          string     `json:"difficulty,omitempty"`
 	DifficultyRationale string     `json:"difficulty_rationale,omitempty"`
+	TaskType            string     `json:"task_type,omitempty"`
+	TaskSubject         string     `json:"task_subject,omitempty"`
 	Inputs              []string   `json:"inputs,omitempty"`
 	Status              TaskStatus `json:"status"`
 	Priority            int        `json:"priority"`
@@ -145,6 +147,8 @@ type TaskExecutionRoute struct {
 	Difficulty          string    `json:"difficulty,omitempty"`
 	DifficultySource    string    `json:"difficulty_source,omitempty"`
 	DifficultyRationale string    `json:"difficulty_rationale,omitempty"`
+	TaskType            string    `json:"task_type,omitempty"`
+	TaskSubject         string    `json:"task_subject,omitempty"`
 	Provider            string    `json:"provider,omitempty"`
 	Model               string    `json:"model,omitempty"`
 	ReasoningEffort     string    `json:"reasoning_effort,omitempty"`

@@ -310,6 +310,12 @@ func taskDispatchPayload(request TaskTriggerRequest) map[string]interface{} {
 	if rationale := strings.TrimSpace(request.DifficultyRationale); rationale != "" {
 		payload["difficulty_rationale"] = rationale
 	}
+	if taskType := strings.TrimSpace(request.TaskType); taskType != "" {
+		payload["task_type"] = taskType
+	}
+	if taskSubject := strings.TrimSpace(request.TaskSubject); taskSubject != "" {
+		payload["task_subject"] = taskSubject
+	}
 	appendTaskDispatchRoutePayload(payload, request.Route)
 	if request.RunMeta != nil {
 		if permissionMode := strings.TrimSpace(request.RunMeta.PermissionMode); permissionMode != "" {
@@ -331,6 +337,12 @@ func appendTaskDispatchRoutePayload(payload map[string]interface{}, route *TaskE
 	}
 	if rationale := strings.TrimSpace(route.DifficultyRationale); rationale != "" {
 		payload["difficulty_rationale"] = rationale
+	}
+	if taskType := strings.TrimSpace(route.TaskType); taskType != "" {
+		payload["task_type"] = taskType
+	}
+	if taskSubject := strings.TrimSpace(route.TaskSubject); taskSubject != "" {
+		payload["task_subject"] = taskSubject
 	}
 	if provider := strings.TrimSpace(route.Provider); provider != "" {
 		payload["route_provider"] = provider

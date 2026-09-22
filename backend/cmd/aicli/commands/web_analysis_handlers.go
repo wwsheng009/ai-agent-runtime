@@ -336,7 +336,7 @@ func chatWebAnalysisLimit(raw string) int {
 }
 
 // chatWebAnalysisRouteQuery 解析 /routing 与 /routing/events 参数
-//（对齐 runtime-server parseRouteQuery：scope/kind/source/provider/model/difficulty/
+// （对齐 runtime-server parseRouteQuery：scope/kind/source/provider/model/difficulty/
 // session/warnings_only/limit/offset）。
 func chatWebAnalysisRouteQuery(values url.Values) (usageanalytics.RouteQuery, error) {
 	query := usageanalytics.RouteQuery{}
@@ -346,7 +346,14 @@ func chatWebAnalysisRouteQuery(values url.Values) (usageanalytics.RouteQuery, er
 	}
 	query.From = from
 	query.To = to
-	query.Scope = chatWebAnalysisNormalizeRouteScope(values.Get("scope"))
+	// scope=session|all 是页签「统计范围」开关（由 chatWebAnalysisValues 以
+	// session_id 注入/清除表达），不是路由维度（仅 main_agent|subagent）。
+	// 若透传，routeWhere 会生成 scope='session' 恒 0 行——真实 UI 请求
+	// /routing?scope=session 将永远空。此处仅接受路由维度过滤值。
+	rawScope := strings.TrimSpace(values.Get("scope"))
+	if !strings.EqualFold(rawScope, "session") && !strings.EqualFold(rawScope, chatWebAnalysisScopeAll) {
+		query.Scope = chatWebAnalysisNormalizeRouteScope(rawScope)
+	}
 	query.Kind = strings.TrimSpace(values.Get("kind"))
 	query.Source = strings.TrimSpace(values.Get("source"))
 	query.Provider = strings.TrimSpace(values.Get("provider"))

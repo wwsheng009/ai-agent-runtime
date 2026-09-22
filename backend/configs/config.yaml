@@ -32,10 +32,18 @@ aicli:
       #   warn    —— 不提升，只把「本该提升」写进 route_warnings，用于先观测误报；
       #   off     —— 回到历史行为：显式声明短路启发式，且不产生任何提升告警。
       # promote_explicit_difficulty: enforce
-      # 关键词启发式词表（追加语义：内置词表始终生效，这里只做补充）：
+      # v4（task_type 收编）：路由覆盖表 task_type → difficulty → profile。
+      # 封闭枚举 12 类：explore|generate→easy；understand|modify|test|config|verify→normal；
+      # implement|refactor|integration|migrate|security→hard。未知键启动期告警并忽略。
+      # 旧键 roles.<role> 仍可读（读入映射到 task_types 并给 deprecation warning，
+      # 保留一个 release：verifier→verify、writer→implement、researcher→explore）。
+      # task_types:
+      #   migrate:
+      #     hard: {}
+      # 关键词启发式词表（v4 起降级为 task_type floor 之下的可选后手；追加语义不变）：
       #   promote_keywords       高信号，单命中即升 hard
       #   promote_keywords_combo 弱信号，需 ≥2 命中，或 1 命中 + 非只读 writer
-      #   disabled               关闭全部关键词启发式（角色提升仍生效）
+      #   disabled               关闭全部关键词启发式（task_type floor / 角色提升仍生效）
       # 英文词条带词形归一：migrate / migrating / migrated 都能命中词表里的
       # migration；中文与多词条目仍为子串匹配。
       # heuristics:

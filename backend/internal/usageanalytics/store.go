@@ -367,6 +367,8 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
   parent_session_id       TEXT NOT NULL DEFAULT '',
   child_session_id        TEXT NOT NULL DEFAULT '',
   role                    TEXT NOT NULL DEFAULT '',
+  task_type               TEXT NOT NULL DEFAULT '',
+  task_subject            TEXT NOT NULL DEFAULT '',
   read_only               INTEGER NOT NULL DEFAULT 0,
   success                 INTEGER,
   completion_reason       TEXT NOT NULL DEFAULT '',
@@ -423,6 +425,8 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
   agent_id                TEXT NOT NULL DEFAULT '',
   role                    TEXT NOT NULL DEFAULT '',
   goal                    TEXT NOT NULL DEFAULT '',
+  task_type               TEXT NOT NULL DEFAULT '',
+  task_subject            TEXT NOT NULL DEFAULT '',
   step                    INTEGER NOT NULL DEFAULT 0,
   reason                  TEXT NOT NULL DEFAULT '',
   source                  TEXT NOT NULL DEFAULT '',
@@ -475,6 +479,42 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 			return err
 		} else if !hasGoal {
 			if _, err := s.db.Exec("ALTER TABLE usage_routes ADD COLUMN goal TEXT NOT NULL DEFAULT ''"); err != nil {
+				return fmt.Errorf("migrate usage analytics db: %w", err)
+			}
+		}
+	}
+	// v6 增量列：usage_routes.task_type / task_subject（路由分类轴与短说明）。
+	// 约束风格对齐同表自由文本列 goal（TEXT NOT NULL DEFAULT ''）。旧库缺列时补齐；
+	// 只读库不改库，读路径按列存在性退化（见 query_routes.go 的 routeColumnExpr）。
+	// 列名是包内常量，不接受外部输入。
+	if !s.readOnly {
+		for _, column := range []string{"task_type", "task_subject"} {
+			exists, err := s.hasColumn("usage_routes", column)
+			if err != nil {
+				return err
+			}
+			if exists {
+				continue
+			}
+			if _, err := s.db.Exec("ALTER TABLE usage_routes ADD COLUMN " + column + " TEXT NOT NULL DEFAULT ''"); err != nil {
+				return fmt.Errorf("migrate usage analytics db: %w", err)
+			}
+		}
+	}
+	// v7 增量列：usage_subagents.task_type / task_subject（子代理分类轴与短说明）。
+	// 约束风格对齐同表自由文本列 role（TEXT NOT NULL DEFAULT ''）。旧库缺列时补齐；
+	// 只读库不改库，读路径按列存在性退化（见 query_v2.go 的 columnExpr 用法）。
+	// 列名是包内常量，不接受外部输入。
+	if !s.readOnly {
+		for _, column := range []string{"task_type", "task_subject"} {
+			exists, err := s.hasColumn("usage_subagents", column)
+			if err != nil {
+				return err
+			}
+			if exists {
+				continue
+			}
+			if _, err := s.db.Exec("ALTER TABLE usage_subagents ADD COLUMN " + column + " TEXT NOT NULL DEFAULT ''"); err != nil {
 				return fmt.Errorf("migrate usage analytics db: %w", err)
 			}
 		}

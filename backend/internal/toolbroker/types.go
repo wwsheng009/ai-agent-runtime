@@ -88,6 +88,8 @@ type SpawnTaskSpec struct {
 	Goal                string   `json:"goal,omitempty"`
 	Difficulty          string   `json:"difficulty,omitempty"`
 	DifficultyRationale string   `json:"difficulty_rationale,omitempty"`
+	TaskType            string   `json:"task_type,omitempty"`
+	TaskSubject         string   `json:"task_subject,omitempty"`
 	Inputs              []string `json:"inputs,omitempty"`
 	ReadPaths           []string `json:"read_paths,omitempty"`
 	WritePaths          []string `json:"write_paths,omitempty"`
@@ -213,6 +215,8 @@ type ReadTaskSpecResult struct {
 	Goal                string   `json:"goal,omitempty"`
 	Difficulty          string   `json:"difficulty,omitempty"`
 	DifficultyRationale string   `json:"difficulty_rationale,omitempty"`
+	TaskType            string   `json:"task_type,omitempty"`
+	TaskSubject         string   `json:"task_subject,omitempty"`
 	Inputs              []string `json:"inputs,omitempty"`
 	Status              string   `json:"status,omitempty"`
 	Priority            int      `json:"priority,omitempty"`
@@ -340,6 +344,8 @@ type SpawnAgentArgs struct {
 	AgentType           string `json:"agent_type,omitempty"`
 	Difficulty          string `json:"difficulty,omitempty"`
 	DifficultyRationale string `json:"difficulty_rationale,omitempty"`
+	TaskType            string `json:"task_type,omitempty"`
+	TaskSubject         string `json:"task_subject,omitempty"`
 	Provider            string `json:"provider,omitempty"`
 	Model               string `json:"model,omitempty"`
 	ReasoningEffort     string `json:"reasoning_effort,omitempty"`
@@ -447,6 +453,8 @@ type AgentStatusResult struct {
 	Difficulty               string   `json:"difficulty,omitempty"`
 	DifficultySource         string   `json:"difficulty_source,omitempty"`
 	DifficultyRationale      string   `json:"difficulty_rationale,omitempty"`
+	TaskType                 string   `json:"task_type,omitempty"`
+	TaskSubject              string   `json:"task_subject,omitempty"`
 	RouteSource              string   `json:"route_source,omitempty"`
 	RouteWarnings            []string `json:"route_warnings,omitempty"`
 	FallbackUsed             bool     `json:"fallback_used,omitempty"`
@@ -1058,6 +1066,8 @@ const (
 	AgentSessionContextDifficulty            = agentcontrol.SessionContextDifficulty
 	AgentSessionContextDifficultySource      = agentcontrol.SessionContextDifficultySource
 	AgentSessionContextDifficultyRationale   = agentcontrol.SessionContextDifficultyRationale
+	AgentSessionContextTaskType              = agentcontrol.SessionContextTaskType
+	AgentSessionContextTaskSubject           = agentcontrol.SessionContextTaskSubject
 	AgentSessionContextRouteSource           = agentcontrol.SessionContextRouteSource
 	AgentSessionContextRouteWarnings         = agentcontrol.SessionContextRouteWarnings
 	AgentSessionContextFallbackUsed          = agentcontrol.SessionContextFallbackUsed
@@ -1128,6 +1138,12 @@ func ApplySpawnAgentRouteContext(session agentcontrol.ContextSetter, args SpawnA
 	}
 	if rationale := strings.TrimSpace(args.DifficultyRationale); rationale != "" {
 		session.SetContext(AgentSessionContextDifficultyRationale, rationale)
+	}
+	if taskType := strings.TrimSpace(args.TaskType); taskType != "" {
+		session.SetContext(AgentSessionContextTaskType, taskType)
+	}
+	if taskSubject := strings.TrimSpace(args.TaskSubject); taskSubject != "" {
+		session.SetContext(AgentSessionContextTaskSubject, taskSubject)
 	}
 	if source := strings.TrimSpace(args.RouteSource); source != "" {
 		session.SetContext(AgentSessionContextRouteSource, source)
@@ -1227,6 +1243,12 @@ func ApplySpawnAgentRouteStatusContext(result *AgentStatusResult, session agentc
 	}
 	if rationale := agentcontrol.ContextString(session, AgentSessionContextDifficultyRationale); rationale != "" {
 		result.DifficultyRationale = rationale
+	}
+	if taskType := agentcontrol.ContextString(session, AgentSessionContextTaskType); taskType != "" {
+		result.TaskType = taskType
+	}
+	if taskSubject := agentcontrol.ContextString(session, AgentSessionContextTaskSubject); taskSubject != "" {
+		result.TaskSubject = taskSubject
 	}
 	if source := agentcontrol.ContextString(session, AgentSessionContextRouteSource); source != "" {
 		result.RouteSource = source

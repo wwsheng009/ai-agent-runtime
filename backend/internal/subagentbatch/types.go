@@ -129,8 +129,14 @@ type PatchSpec struct {
 // full tool arguments are intentionally NOT part of the lifecycle schema; they
 // remain in the calling runtime.
 type TaskSpec struct {
-	ID                    string      `json:"id,omitempty"`
-	Role                  string      `json:"role,omitempty"`
+	ID   string `json:"id,omitempty"`
+	Role string `json:"role,omitempty"`
+	// TaskType/TaskSubject are the optional v4 routing fields (plan §6.4 B-1):
+	// TaskType is the closed-enum routing category, TaskSubject is audit-only.
+	// Role stays the orchestration axis; both fields are omitempty so specs
+	// written before this change decode byte-identically.
+	TaskType              string      `json:"task_type,omitempty"`
+	TaskSubject           string      `json:"task_subject,omitempty"`
 	Goal                  string      `json:"goal,omitempty"`
 	Difficulty            string      `json:"difficulty,omitempty"`
 	DifficultyRationale   string      `json:"difficulty_rationale,omitempty"`
@@ -213,17 +219,22 @@ func NewID(prefix string) string {
 
 // SubagentTaskRecord is the durable per-task record (plan §4.3 SubagentTaskRecord).
 type SubagentTaskRecord struct {
-	TaskID         string     `json:"task_id,omitempty"`
-	BatchID        string     `json:"batch_id,omitempty"`
-	ParentTaskID   string     `json:"parent_task_id,omitempty"`
-	DependencyIDs  []string   `json:"dependency_ids,omitempty"`
-	ChildSessionID string     `json:"child_session_id,omitempty"`
-	Role           string     `json:"role,omitempty"`
-	Difficulty     string     `json:"difficulty,omitempty"`
-	ReadOnly       bool       `json:"read_only,omitempty"`
-	Status         TaskStatus `json:"status,omitempty"`
-	OrderIndex     int        `json:"order_index,omitempty"`
-	Attempt        int        `json:"attempt,omitempty"`
+	TaskID         string   `json:"task_id,omitempty"`
+	BatchID        string   `json:"batch_id,omitempty"`
+	ParentTaskID   string   `json:"parent_task_id,omitempty"`
+	DependencyIDs  []string `json:"dependency_ids,omitempty"`
+	ChildSessionID string   `json:"child_session_id,omitempty"`
+	Role           string   `json:"role,omitempty"`
+	// TaskType/TaskSubject mirror the subagent_tasks.task_type/task_subject
+	// columns (plan §6.4 B-2). Legacy rows migrated from the v1 schema read
+	// back as empty strings, which keeps them byte-identical to today.
+	TaskType    string     `json:"task_type,omitempty"`
+	TaskSubject string     `json:"task_subject,omitempty"`
+	Difficulty  string     `json:"difficulty,omitempty"`
+	ReadOnly    bool       `json:"read_only,omitempty"`
+	Status      TaskStatus `json:"status,omitempty"`
+	OrderIndex  int        `json:"order_index,omitempty"`
+	Attempt     int        `json:"attempt,omitempty"`
 
 	TaskDeadline   time.Time  `json:"task_deadline,omitempty"`
 	StartedAt      *time.Time `json:"started_at,omitempty"`
@@ -263,8 +274,13 @@ func (t SubagentTaskRecord) SpecBudgetTokens() int {
 // Full child output must be referenced (ArtifactRef), never embedded here by
 // default.
 type TaskResult struct {
-	TaskID      string      `json:"task_id,omitempty"`
-	Role        string      `json:"role,omitempty"`
+	TaskID string `json:"task_id,omitempty"`
+	Role   string `json:"role,omitempty"`
+	// TaskType/TaskSubject carry the routing category and audit subject of the
+	// task that produced this capsule (plan §6.4 B-1). Optional; empty for
+	// results produced before the field existed.
+	TaskType    string      `json:"task_type,omitempty"`
+	TaskSubject string      `json:"task_subject,omitempty"`
 	SessionID   string      `json:"session_id,omitempty"`
 	Success     bool        `json:"success"`
 	Summary     string      `json:"summary,omitempty"`

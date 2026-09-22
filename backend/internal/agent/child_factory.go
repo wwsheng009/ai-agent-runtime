@@ -182,6 +182,8 @@ func subagentTaskRouteHint(task SubagentTask) modelrouting.TaskHint {
 	return modelrouting.TaskHint{
 		ID:                  task.ID,
 		Role:                task.Role,
+		TaskType:            task.TaskType,
+		TaskSubject:         task.TaskSubject,
 		Goal:                task.Goal,
 		Difficulty:          task.Difficulty,
 		DifficultyRationale: task.DifficultyRationale,
@@ -198,6 +200,10 @@ func subagentTaskRouteHint(task SubagentTask) modelrouting.TaskHint {
 func taskWithRouteDecision(task SubagentTask, decision modelrouting.RouteDecision) SubagentTask {
 	task.Difficulty = decision.Difficulty
 	task.DifficultyRationale = decision.DifficultyRationale
+	if decision.TaskType != "" {
+		task.TaskType = decision.TaskType
+	}
+	task.TaskSubject = decision.TaskSubject
 	task.Provider = decision.Provider
 	task.Model = decision.Model
 	task.ReasoningEffort = decision.ReasoningEffort
@@ -240,6 +246,8 @@ func routeAuditPayload(decision modelrouting.RouteDecision) map[string]interface
 		"difficulty":             decision.Difficulty,
 		"difficulty_source":      decision.DifficultySource,
 		"difficulty_rationale":   decision.DifficultyRationale,
+		"task_type":              decision.TaskType,
+		"task_subject":           decision.TaskSubject,
 		"route_provider":         decision.Provider,
 		"route_model":            decision.Model,
 		"route_reasoning_effort": decision.ReasoningEffort,

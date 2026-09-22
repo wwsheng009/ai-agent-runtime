@@ -67,6 +67,8 @@ var spawnTeamTaskFieldKinds = []struct {
 	{"goal", spawnTeamFieldString},
 	{"difficulty", spawnTeamFieldString},
 	{"difficulty_rationale", spawnTeamFieldString},
+	{"task_type", spawnTeamFieldString},
+	{"task_subject", spawnTeamFieldString},
 	{"assignee", spawnTeamFieldString},
 	{"priority", spawnTeamFieldNumber},
 	{"inputs", spawnTeamFieldStringOrList},

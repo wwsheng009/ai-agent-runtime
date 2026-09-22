@@ -72,6 +72,30 @@ func ValidateConfigWithWarnings(cfg *agentconfig.AICLISubagentRoutingConfig) ([]
 			return nil, err
 		}
 	}
+	// v4（K-4/K-6）：task_types 是封闭枚举查表。未知键 → task_type_unknown:<v>
+	// warning（不报错、不静默）：该键是死条目（运行期只按已知类别匹配），但仍照常
+	// 校验其内层 difficulty profile，以便抓出难度键拼写错误。
+	for _, taskType := range sortedTaskTypeKeys(cfg.TaskTypes) {
+		levels := cfg.TaskTypes[taskType]
+		normalized, ok := ValidateTaskType(taskType)
+		if !ok {
+			warnings = append(warnings, "task_type_unknown:"+NormalizeTaskType(taskType))
+			normalized = NormalizeTaskType(taskType)
+		}
+		if err := validateRouteAliases("task_types."+normalized, levels, &warnings); err != nil {
+			return nil, err
+		}
+		for _, key := range sortedRouteKeys(levels) {
+			profile := levels[key]
+			difficulty, ok := NormalizeDifficulty(key)
+			if !ok {
+				return nil, fmt.Errorf("invalid subagent task_type route key %q.%q", taskType, key)
+			}
+			if err := validateRouteProfile(normalized+"."+difficulty, profile, cfg); err != nil {
+				return nil, err
+			}
+		}
+	}
 	for _, role := range sortedRoleKeys(cfg.Roles) {
 		levels := cfg.Roles[role]
 		if strings.TrimSpace(role) == "" {
@@ -160,6 +184,15 @@ func sortedRouteKeys(levels map[string]agentconfig.AICLISubagentRouteProfile) []
 func sortedRoleKeys(roles map[string]map[string]agentconfig.AICLISubagentRouteProfile) []string {
 	keys := make([]string, 0, len(roles))
 	for key := range roles {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedTaskTypeKeys(taskTypes map[string]map[string]agentconfig.AICLISubagentRouteProfile) []string {
+	keys := make([]string, 0, len(taskTypes))
+	for key := range taskTypes {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)

@@ -2291,6 +2291,8 @@ func taskToBatchSpec(t SubagentTask, taskID string) subagentbatch.TaskSpec {
 	return subagentbatch.TaskSpec{
 		ID:                    taskID,
 		Role:                  t.Role,
+		TaskType:              t.TaskType,
+		TaskSubject:           t.TaskSubject,
 		Goal:                  t.Goal,
 		Difficulty:            t.Difficulty,
 		DifficultyRationale:   t.DifficultyRationale,
@@ -2328,6 +2330,8 @@ func subagentTaskFromBatchSpec(record subagentbatch.SubagentTaskRecord, spec sub
 	return SubagentTask{
 		ID:                    taskID,
 		Role:                  spec.Role,
+		TaskType:              spec.TaskType,
+		TaskSubject:           spec.TaskSubject,
 		Goal:                  spec.Goal,
 		Difficulty:            spec.Difficulty,
 		DifficultyRationale:   spec.DifficultyRationale,

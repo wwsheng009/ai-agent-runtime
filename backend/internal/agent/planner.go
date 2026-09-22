@@ -62,6 +62,8 @@ type PlanStep struct {
 	Priority            int                    `json:"priority" yaml:"priority"`
 	Difficulty          string                 `json:"difficulty,omitempty" yaml:"difficulty,omitempty"`
 	DifficultyRationale string                 `json:"difficulty_rationale,omitempty" yaml:"difficulty_rationale,omitempty"`
+	TaskType            string                 `json:"task_type,omitempty" yaml:"task_type,omitempty"`
+	TaskSubject         string                 `json:"task_subject,omitempty" yaml:"task_subject,omitempty"`
 }
 
 // CreatePlanWithLLM 使用 LLM 创建计划
@@ -306,7 +308,9 @@ Respond with a JSON plan:
       "dependsOn": [],
       "priority": 1,
       "difficulty": "easy|normal|hard|expert",
-      "difficulty_rationale": "short reason for this step difficulty"
+      "difficulty_rationale": "short reason for this step difficulty",
+      "task_type": "explore|understand|modify|implement|refactor|test|verify|migrate|security|config|integration|generate",
+      "task_subject": "one line: what this step touches"
     }
   ]
 }
@@ -321,9 +325,9 @@ Rules:
 7. Prefer apply_patch for code edits, multi-line replacements, and structured multi-hunk edits; use edit only for small exact strings that were just confirmed with view/grep
 8. Prefer append_write for long text chunks and write for small full-file writes
 9. If content could exceed one tool-call payload, explicitly split it into multiple chunked append_write steps
-10. Assign each step a difficulty of easy, normal, hard, or expert with a short difficulty_rationale
+10. Assign each step a difficulty of easy, normal, hard, or expert with a short difficulty_rationale, plus a task_type from the closed list and a one-line task_subject
 11. Do not assign provider, model, or reasoning_effort in the plan; runtime routing maps difficulty to local policy
-12. An explicit difficulty is NOT a free pass: runtime heuristics still promote a step whose goal touches security, permissions, migration, architecture, provider/protocol changes or cross-system consistency. Declare the honest difficulty (a too-low value is only corrected upward, never downward) and expect the audit to record it
+12. An explicit difficulty is NOT a free pass: the runtime floors difficulty by task_type (e.g. migrate/security → hard, verify → normal) and may still promote a step whose goal touches security, permissions, migration, architecture, provider/protocol changes or cross-system consistency. Declare the honest difficulty and task_type (a too-low value is only corrected upward, never downward); classify by what a competent engineer would recognize, never downgrade the category to steer model choice — the audit records both
 `, goal, strings.Join(toolDescriptions, "\n"))
 }
 
@@ -358,6 +362,8 @@ func (p *Plan) Clone() *Plan {
 			Priority:            step.Priority,
 			Difficulty:          step.Difficulty,
 			DifficultyRationale: step.DifficultyRationale,
+			TaskType:            step.TaskType,
+			TaskSubject:         step.TaskSubject,
 		}
 	}
 

@@ -245,6 +245,8 @@ func (c *sessionAgentController) resolveSpawnAgentRoute(parentSession *chat.Sess
 		Goal:                strings.TrimSpace(args.Message),
 		Difficulty:          strings.TrimSpace(args.Difficulty),
 		DifficultyRationale: strings.TrimSpace(args.DifficultyRationale),
+		TaskType:            strings.TrimSpace(args.TaskType),
+		TaskSubject:         strings.TrimSpace(args.TaskSubject),
 		Provider:            strings.TrimSpace(args.Provider),
 		Model:               strings.TrimSpace(args.Model),
 		ReasoningEffort:     firstNonEmptyString(strings.TrimSpace(args.ReasoningEffort), strings.TrimSpace(args.ThinkingEffort)),
@@ -275,6 +277,8 @@ func (c *sessionAgentController) resolveSpawnAgentRoute(parentSession *chat.Sess
 		args.Difficulty = strings.TrimSpace(decision.Difficulty)
 		args.DifficultySource = strings.TrimSpace(decision.DifficultySource)
 		args.DifficultyRationale = strings.TrimSpace(decision.DifficultyRationale)
+		args.TaskType = firstNonEmptyString(decision.TaskType, args.TaskType)
+		args.TaskSubject = firstNonEmptyString(decision.TaskSubject, args.TaskSubject)
 		args.RouteSource = strings.TrimSpace(decision.Source)
 		args.RouteWarnings = append([]string(nil), decision.Warnings...)
 		args.FallbackUsed = decision.FallbackUsed
@@ -287,6 +291,8 @@ func (c *sessionAgentController) resolveSpawnAgentRoute(parentSession *chat.Sess
 	args.Difficulty = strings.TrimSpace(decision.Difficulty)
 	args.DifficultySource = strings.TrimSpace(decision.DifficultySource)
 	args.DifficultyRationale = strings.TrimSpace(decision.DifficultyRationale)
+	args.TaskType = firstNonEmptyString(decision.TaskType, args.TaskType)
+	args.TaskSubject = firstNonEmptyString(decision.TaskSubject, args.TaskSubject)
 	args.RouteSource = strings.TrimSpace(decision.Source)
 	args.RouteWarnings = append([]string(nil), decision.Warnings...)
 	args.FallbackUsed = decision.FallbackUsed
@@ -422,6 +428,8 @@ func teamTaskRouteHint(request team.TaskRouteRequest) modelrouting.TaskHint {
 		Goal:                firstNonEmptyString(strings.TrimSpace(task.Goal), strings.TrimSpace(task.Title)),
 		Difficulty:          strings.TrimSpace(task.Difficulty),
 		DifficultyRationale: strings.TrimSpace(task.DifficultyRationale),
+		TaskType:            strings.TrimSpace(task.TaskType),
+		TaskSubject:         strings.TrimSpace(task.TaskSubject),
 		ReadOnly:            !teamTaskHasWritePaths(task),
 	}
 }

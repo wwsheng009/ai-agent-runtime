@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 )
 
 // LeadPlanner coordinates task decomposition and summary generation.
@@ -24,6 +25,8 @@ type planTask struct {
 	Goal                string   `json:"goal"`
 	Difficulty          string   `json:"difficulty,omitempty"`
 	DifficultyRationale string   `json:"difficulty_rationale,omitempty"`
+	TaskType            string   `json:"task_type,omitempty"`
+	TaskSubject         string   `json:"task_subject,omitempty"`
 	Inputs              []string `json:"inputs,omitempty"`
 	ReadPaths           []string `json:"read_paths,omitempty"`
 	WritePaths          []string `json:"write_paths,omitempty"`
@@ -251,12 +254,16 @@ func (p *LeadPlanner) materializePlan(ctx context.Context, teamID string, payloa
 			return nil, fmt.Errorf("invalid task difficulty: %s", strings.TrimSpace(spec.Difficulty))
 		}
 		difficultyRationale := strings.TrimSpace(spec.DifficultyRationale)
+		taskType := modelrouting.NormalizeTaskType(spec.TaskType)
+		taskSubject := strings.TrimSpace(spec.TaskSubject)
 		task := Task{
 			TeamID:              teamID,
 			Title:               spec.Title,
 			Goal:                spec.Goal,
 			Difficulty:          difficulty,
 			DifficultyRationale: difficultyRationale,
+			TaskType:            taskType,
+			TaskSubject:         taskSubject,
 			Status:              TaskStatusPending,
 			Priority:            spec.Priority,
 			Inputs:              cleanStringSlice(spec.Inputs),
@@ -288,6 +295,8 @@ func (p *LeadPlanner) materializePlan(ctx context.Context, teamID string, payloa
 				Goal:                tasks[i].Goal,
 				Difficulty:          tasks[i].Difficulty,
 				DifficultyRationale: tasks[i].DifficultyRationale,
+				TaskType:            tasks[i].TaskType,
+				TaskSubject:         tasks[i].TaskSubject,
 				Status:              string(tasks[i].Status),
 				Priority:            tasks[i].Priority,
 				Assignee:            assignee,
@@ -352,12 +361,15 @@ func buildPlanPrompt(goal string, failed *Task, teamContext string) string {
 	lines := []string{
 		"You are the team lead. Decompose the goal into a DAG plan.",
 		"Return JSON only with the following schema:",
-		`{"tasks":[{"id":"task-1","title":"...","goal":"...","difficulty":"normal","difficulty_rationale":"...","inputs":[],"read_paths":[],"write_paths":[],"deliverables":[],"priority":0,"assignee":""}],"dependencies":[{"task":"task-2","depends_on":"task-1"}]}`,
+		`{"tasks":[{"id":"task-1","title":"...","goal":"...","difficulty":"normal","difficulty_rationale":"...","task_type":"implement","task_subject":"...","inputs":[],"read_paths":[],"write_paths":[],"deliverables":[],"priority":0,"assignee":""}],"dependencies":[{"task":"task-2","depends_on":"task-1"}]}`,
 		"Rules:",
 		"- Use stable task ids within the JSON.",
 		"- Keep tasks atomic and outcome-focused.",
 		"- Set difficulty to one of easy, normal, hard, expert for every task.",
 		"- Keep difficulty_rationale short and focused on routing/audit context.",
+		"- Set task_type to one of " + strings.Join(modelrouting.TaskTypes(), ", ") + " for every task; omit it only if none applies.",
+		"- Classify task_type by the standard a competent engineer would apply; never misreport the category to obtain a different model.",
+		"- Keep task_subject short (a few words) and focused on audit context.",
 		"- Leave assignee empty unless a teammate is explicitly required.",
 	}
 	if strings.TrimSpace(goal) != "" {

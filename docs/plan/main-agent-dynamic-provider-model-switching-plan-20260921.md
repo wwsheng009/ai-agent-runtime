@@ -1,7 +1,7 @@
 # 主 Agent 动态 Provider/Model 切换实施方案
 
-更新时间: 2026-09-21
-状态: proposed（待评审；本文件只记录方案与改动点，未修改任何代码）
+更新时间: 2026-09-21（方案）；2026-09-22（v3 实施回写，§15）；2026-09-22（v4：task_type 收编修订，见 §16）
+状态: **partially-implemented** — MA-P0–MA-P4、MG5–MG8 与 **v4 task_type 收编（§5.4/§5.5/§6.2/§7 + §16）** 已实施并通过门禁（见 §15 与 §16 实施状态）
 适用仓库: `E:\projects\ai\ai-agent-runtime`
 上游依据: `docs/analysis/main-agent-dynamic-provider-model-switching.md`（v2.1，可行性论证）
 姊妹方案: `docs/plan/task-difficulty-routing-audit-hardening-plan-20260921.md`（子 Agent 路径加固，共享事件契约）
@@ -55,6 +55,7 @@
 | `docs/plan/multi-agent-execution-optimization-plan.md` | 等待/唤醒/配额/可观测性主计划；本文件 §6.2 的事件需纳入其可观测面 |
 | `docs/plan/session-analytics-subagent-reliability-implementation-plan.md` | 路由统计口径；本文件的 `main_agent.route_*` 应纳入同一统计面 |
 | **在途特性：provider 健康 + 路由候选链**（`internal/providerhealth/`、`internal/modelrouting/candidates.go`） | **无设计文档**（§3.6 已核）。**本方案的最大外部变量**：它改变了 `Resolver.Resolve` 的签名与语义，本方案 §5.10 的耦合规则直接依赖它。**⚠️ 未提交**——见 §8.1 第 0 步与门禁 G-0 |
+| `plan.md`（仓库根，2026-09-22） | **task_type 收编的评审与拍板来源**：5 项决策（`task_type` 替换路由层 `role` + 新增 `task_subject`、跨类降档 1 步确认、同步 `spawn_team` 与批次账本、修订本文件与姊妹方案、同步观测与两个前端）。本文件 v4 修订（§5.4/§5.5/§16）以它为准 |
 
 ### 2.1 编号约定（避免与姊妹方案冲突）
 
@@ -355,11 +356,13 @@ func NewReActLoop(agent *Agent, llmRuntime *llm.LLMRuntime, config *LoopReActCon
 
 ### 5.4 MA-P2：预测生产者 —— `predict_task_difficulty` 工具契约
 
-**工具形态**：新增一个只读、无副作用的「上报」工具，参数**只有难度**：
+**工具形态**：新增一个只读、无副作用的「上报」工具，参数为**难度 + 可选的任务类别与说明**（v4 修订，`plan.md` 决策 1）：
 
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |
 | `difficulty` | string enum | `easy` / `normal` / `hard`（`expert` 仅在 opt-in 时进入 enum，§5.9） |
+| `task_type` | string enum | **可选**（v4 新增）。有限任务类别：`explore`/`understand`/`modify`/`implement`/`refactor`/`test`/`verify`/`migrate`/`security`/`config`/`integration`/`generate`（全表与底档见姊妹方案 §5.4 修订块）。未知值 → `task_type_unknown:<v>` warning + 忽略，不影响档位 |
+| `task_subject` | string | **可选**（v4 新增）。短说明（如 `explore the files list`），截断后仅进事件/payload，不进 prompt、不参与映射；与 `rationale`（为何这个难度）语义不同、**并存不合并**（决策 2） |
 | `rationale` | string | 可选，短理由；仅进事件，不进 prompt |
 
 > **硬约束（主设计 `:2002`）**：该工具**不接受** provider/model 参数。LLM 只表达「多难」，本地 resolver 决定「用谁」——防止主 Agent 绕过本地策略指定任意 provider/model。
@@ -390,7 +393,7 @@ func NewReActLoop(agent *Agent, llmRuntime *llm.LLMRuntime, config *LoopReActCon
 | 通道 | 复用既有 system-reminder 通道（`ReminderKindMainAgentRouting = "main_agent_routing"` + `FormatSystemReminder`），**不新增**旁路通道 |
 | 注入位置 | `run()` 入口、首个 `think()` **之前**一次性写入本回合请求历史（紧随 `WithTurnSystemMessages` 注入点之后） |
 | 持久化 | `MetaSystemReminderDurable=false` + `MetaEphemeralInstruction=true` ⇒ 落盘前被 `DurableMessagesForPersist` 剥掉：不改写任何已发送消息（INV-1），也不跨 turn 累积重复片段 |
-| 片段内容 | 档位清单（`mainAgentAllowedLevels`，排序后）+ 未上报时的默认档 + 反博弈条款；**无** provider/model，**无**「上报会换模型」因果披露（本节两条修订） |
+| 片段内容 | 档位清单（`mainAgentAllowedLevels`，排序后）+ **有限 `task_type` 列表与各类别风险倾向的纯文字说明**（v4 新增，决策 1；**不含任何「类别→model/provider」映射**，INV-3）+ 未上报时的默认档 + 反博弈条款；**无** provider/model，**无**「上报会换模型」因果披露（本节两条修订） |
 | 关闭态 | `nil` 或 `enabled=false` ⇒ 不产出消息，请求历史**逐字节不变**（REG1） |
 | turn 内稳定性 | 片段只依赖配置、**不随 route 切换变化** ⇒ 满足 INV-2/INV-4（U18 断言） |
 
@@ -398,14 +401,18 @@ func NewReActLoop(agent *Agent, llmRuntime *llm.LLMRuntime, config *LoopReActCon
 
 ### 5.5 MA-P1 配套：防振荡迟滞
 
-纯「按上报立即切换」会在边界难度反复上报时导致 route **横跳**，每次横跳都可能触发 provider 侧冷启动。两条规则：
+纯「按上报立即切换」会在边界难度反复上报时导致 route **横跳**，每次横跳都可能触发 provider 侧冷启动。规则（v4 修订：加入类别感知，`plan.md` 决策 3）：
 
 | 规则 | 配置项 | 语义 |
 | --- | --- | --- |
-| **降级迟滞** | `downgrade_confirm_steps`（默认 3） | 降级需**连续 N step** 上报更低难度才生效；升级可立即生效（升级是安全方向） |
-| **最小驻留** | `min_dwell_steps`（默认 2） | 一次切换后至少 K step 不再切换 |
+| **同档降级迟滞** | `downgrade_confirm_steps`（默认 3） | **同一 `task_type` 内**降难度：需**连续 N step** 上报更低难度才生效 |
+| **跨类降级确认（v4 新增）** | 固定 **1 步** | 降档同时发生**类别跨类**（如 `modify→explore`，`floor(task_type)` 更低）：确认步数收敛为 **1 步**（第 N 步上报、第 N+1 步生效）。**不是即时生效**——1 步确认防止 LLM 在类别边界反复跳类导致模型横跳，同时比同档 N 步更及时准确（决策 3） |
+| **最小驻留** | `min_dwell_steps`（默认 2） | 一次切换后至少 K step 不再切换；**同档与跨类降档均不绕过** |
+| **升级** | —— | 始终立即生效（升级是安全方向），与既有不对称设计一致 |
 
-> **不对称设计的理由**：升级的代价是钱，降级的代价是**质量**。让降级更难发生，符合「宁可多花钱，不可掉质量」的默认倾向；反之升级的误判代价可被成本护栏（§5.7）兜住。
+> **口径（v4）**：`effective_confirm_steps = 跨类降档 ? 1 : downgrade_confirm_steps`，再叠加 `min_dwell_steps`。`task_type` 缺省时全部上报按「同档」处理 ⇒ 与 v3 行为逐字一致。
+
+> **不对称设计的理由**：升级的代价是钱，降级的代价是**质量**。让降级更难发生，符合「宁可多花钱，不可掉质量」的默认倾向；反之升级的误判代价可被成本护栏（§5.7）兜住。v4 的跨类 1 步是该原则的**语义细分**：类别跨类本身是强语义信号（比同档难度波动更可信），故确认门槛更低，但仍保留 1 步以防边界振荡。
 
 ### 5.6 前缀冻结不变式（INV-1 … INV-4）
 
@@ -417,6 +424,8 @@ func NewReActLoop(agent *Agent, llmRuntime *llm.LLMRuntime, config *LoopReActCon
 | **INV-4** | 同 provider 内跨难度换 model 时，序列化前缀**字节一致** | 持续 miss |
 
 > **INV-3 是最容易被"顺手做掉"的红线**：直觉上「告诉 LLM 当前用什么模型」像是无害的可观测性改进，实际是把策略状态交给被观测方。**该实现位置不是风格问题，是收益红线。**
+>
+> **v4 澄清（task_type 列表不违反 INV-3）**：§5.4 注入的有限 `task_type` 枚举与风险倾向纯文字，**不含任何「类别→model/provider」映射**，也不随 route 切换变化（INV-2/INV-4）——它是分类语义，不是策略状态，与 INV-3 禁止的「暴露当前 model」是两回事。
 
 **与回合级路由提示的关系（v3 澄清）**：§5.4 的提示片段是**唯一**一处 prompt 侧新增物，其位置满足 INV-1/INV-2——在**首个请求之前**写入，此后 turn 内不再改写；`applyTurnRoute()` 仍然**不产生任何** prompt 侧写入（A13 的机械检查口径不变）。「回合级注入」与「route 切换不改写前缀」并不矛盾：前者是 turn 的开局事实，后者是 turn 内的不变式。
 
@@ -609,8 +618,8 @@ type AICLIMainAgentRoutingConfig struct {
 
 | 事件名 | 触发时机 | payload 关键字段 |
 | --- | --- | --- |
-| `main_agent.route_applied` | 某 step **实际使用**了非基线 route | `step`, `difficulty`, `source`(**四值**，见下), `provider`, `model`, `baseline_provider`, `baseline_model`, `rationale`, `candidates`, `input_tokens`, `output_tokens` |
-| `main_agent.route_prediction_invalid` | 上报格式非法 / 难度值非法 | `step`, `raw_difficulty`, `reason`, `consecutive_invalid` |
+| `main_agent.route_applied` | 某 step **实际使用**了非基线 route | `step`, `difficulty`, `source`(**四值**，见下), `provider`, `model`, `baseline_provider`, `baseline_model`, `rationale`, **`task_type`, `task_subject`（v4 新增）**, `candidates`, `input_tokens`, `output_tokens` |
+| `main_agent.route_prediction_invalid` | 上报格式非法 / 难度值非法 | `step`, `raw_difficulty`, **`raw_task_type`（v4 新增，原始非法值）**, `reason`, `consecutive_invalid` |
 | `main_agent.route_prediction_unresolvable` | provider/model 无法解析 | `step`, `difficulty`, `requested_provider`, `requested_model`, `reason` |
 | `main_agent.route_disabled_for_turn` | 连续非法上报达阈值 | `step`, `consecutive_invalid`, `turn_id` |
 | `main_agent.route_cost_guard_tripped` | 昂贵档位连续达阈值 | `step`, `consecutive_steps`, `difficulty`, `provider`, `model`, `cost_guard_mode` |
@@ -620,6 +629,7 @@ type AICLIMainAgentRoutingConfig struct {
 
 - `source=baseline` 的 `route_applied` **照常发**，便于统计「本 turn 有多少 step 走了基线」；此时 `difficulty = default_difficulty`；
 - `baseline_provider` / `baseline_model` 取**用户 `/model` 的显式值**，不是 `default_difficulty` 的映射结果；
+- v4 新增：`task_type` / `task_subject`（最近一次上报的类别与短说明；缺省为空串），进 `usage_routes` 与 `by_task_type` 聚合（姊妹方案 §6.4 改动点 28）；两者只进事件，不进 prompt；
 - token 字段允许为 `0`（部分 provider 不回传用量），但**字段必须存在**，便于下游统一解析。
 
 **`source` 四值口径（本轮修订，对齐 §5.10 规则 5）**：
@@ -713,18 +723,18 @@ type AICLIMainAgentRoutingConfig struct {
 | --- | --- | --- | --- |
 | 1 | `agent/loop.go` | `applyTurnRoute()` | 实现三字段**整体**复写 |
 | 2 | `agent/loop.go` | `resetTurnRoute()` | 实现三字段**还原**到 `baselineRoute` |
-| 3 | `agent/loop.go` | 迟滞状态机（新增） | `downgrade_confirm_steps` 连续计数 + `min_dwell_steps` 驻留 |
+| 3 | `agent/loop.go` | 迟滞状态机（新增） | 同档 `downgrade_confirm_steps` 连续计数 + **跨类降档 1 步确认（v4，§5.5）** + `min_dwell_steps` 驻留 |
 | 4 | `agent/loop.go` | step 边界接线 | `think()` 返回后、下一轮 `think()` 前应用待生效 route |
 
 ### 7.3 MA-P2：预测生产者
 
 | # | 文件 | 符号 | 改动 |
 | --- | --- | --- | --- |
-| 1 | `agent/loop.go` | 工具定义（新增，对照 `spawnSubagentsToolDefinition` `:6856`） | `predict_task_difficulty` 的 schema；`enum` 随 `allow_expert` 变化 |
+| 1 | `agent/loop.go` | 工具定义（新增，对照 `spawnSubagentsToolDefinition` `:6856`） | `predict_task_difficulty` 的 schema；`enum` 随 `allow_expert` 变化；**v4 增可选 `task_type`（enum）/`task_subject` 参数（§5.4）** |
 | 2 | `agent/loop.go` | 工具注册 | **仅** `enabled=true` 时注册（`enabled=false` ⇒ 工具列表逐字节不变） |
 | 3 | `agent/loop.go:2701` | 工具分流点 | 在 `spawn_subagents` 分流**之前/之后**新增 `predict_task_difficulty` 拦截分支 |
 | 4 | `agent/loop.go:1610` | `think()` 返回处理 | 实现 **§5.4 的 R1–R5**（上游五条硬规则）：剥离上报、占位、不消耗 step、允许并存、meta-only 续轮 |
-| 5 | system prompt | 注入片段 | 仅 `enabled=true`；turn 内**稳定**（INV-2）。**v3 落地口径见 §5.4 实施补充**（回合级 system-reminder、`Durable=false`、run 入口一次性注入） |
+| 5 | system prompt | 注入片段 | 仅 `enabled=true`；turn 内**稳定**（INV-2）。**v3 落地口径见 §5.4 实施补充**（回合级 system-reminder、`Durable=false`、run 入口一次性注入）；**v4 片段含有限 `task_type` 列表**（不含类别→model 映射，INV-3） |
 | 6 | `modelrouting` | 复用 `NormalizeDifficulty`（对照 `loop.go:6184`） | 难度归一；**不新增**解析组件 |
 
 ### 7.4 MA-P3：配置
@@ -852,8 +862,10 @@ type AICLIMainAgentRoutingConfig struct {
 | **U15** | **健康维度闩锁**（MG5） | turn 内翻转 `providerhealth` 状态（healthy→open→half-open），`applyTurnRoute()` 产出的 route **不随之变化**；且 `applyTurnRoute()` 内**不调用** `providerhealth` / `Resolver.Resolve`（§5.10 规则 1/2） | MA-P1 |
 | **U16** | **健康降级不绕过迟滞**（MG5） | 健康驱动的降级在 `min_dwell_steps` 内**不生效**（§5.10 规则 2） | MA-P1 |
 | **U17** | **候选链耗尽降级**（MG6/MG7） | 注入 `errRouteHealthExhausted` ⇒ 还原 `baselineRoute` + `source=health_exhausted_baseline`；**不调用** `degradeToParentForHealth`；其他 error ⇒ 保持当前 route 且 **turn 不禁用** | MA-P1 |
-| **U18** | **回合级提示片段**（v3 新增，§5.4） | 片段内容只含档位清单 + 默认档 + 反博弈条款；**不含**任何 provider/model 字样；`enabled=false` / `nil` ⇒ 不产出消息；同一配置重复调用**逐字节相同**（INV-2） | MA-P2 |
+| **U18** | **回合级提示片段**（v3 新增，§5.4） | 片段内容只含档位清单 + **有限 `task_type` 列表（v4）** + 默认档 + 反博弈条款；**不含**任何 provider/model 字样、**不含**类别→model 映射；`enabled=false` / `nil` ⇒ 不产出消息；同一配置重复调用**逐字节相同**（INV-2） | MA-P2 |
 | **U19** | **meta 工具不参与语义重复指纹**（v3 新增，§5.11） | 连续 N 次相同 `predict_task_difficulty` 调用**不触发** doom-loop warning/hard stop；真实工具的重复调用**仍然触发**（豁免粒度是工具名，不是响应） | MA-P2 |
+| **U20** | **跨类降档 1 步确认**（v4，§5.5） | `modify→explore`（跨类）：第 1 次连续上报不生效、第 2 次生效；同档降级仍需 `downgrade_confirm_steps`；两类降档在 `min_dwell_steps` 内均不生效；`task_type` 缺省 ⇒ 全部按同档（与 v3 一致） | MA-P1 |
+| **U21** | **`task_type` 契约**（v4，§5.4/§6.2） | 合法 `task_type`/`task_subject` 进 `route_applied` payload（截断）；未知 `task_type` → `task_type_unknown:<v>` warning 且档位不变；缺省 `task_type` ⇒ 与 v3 行为逐字一致 | MA-P2 |
 
 ### 9.2 集成测试（loop 级 + mock provider）
 
@@ -958,6 +970,7 @@ go build ./...
 | **A7** | `enabled=true` 时 step N 上报 ⇒ step N+1 生效；I1/I2/I5 全绿 |
 | **A8** | REG7 / REG8 全绿（前缀冻结 + 不暴露 model） |
 | **A9** | 工具 schema **不含** provider/model 参数（主设计 `:2002` 硬约束） |
+| **A17** | **v4（task_type 收编）**：`predict_task_difficulty` 接受可选 `task_type`/`task_subject`；U20/U21 全绿；缺省 `task_type` 下 REG1/REG8 保持（枚举注入不违反 INV-3） |
 
 ### 11.4 MA-P4 验收
 
@@ -999,6 +1012,16 @@ go build ./...
 >
 > **本文件对该分析文档的反向引用**：上游 `docs/analysis/main-agent-dynamic-provider-model-switching.md` 此前在仓库内**无任何入站引用**（孤立文档）；本文件 §1.1 / §2 已建立引用关系，使其进入 `docs/plan/` 的文档图谱。
 
+### 12.3 已决策（2026-09-22，`plan.md` 拍板，v4 修订的依据）
+
+| # | 原开放问题 | 决策 | 落点 |
+| --- | --- | --- | --- |
+| D1 | 难度之外是否让 LLM 返回任务类别 + 说明 | **是**：`task_type`（封闭枚举）+ `task_subject`（短说明）；`task_type` 替换**路由层** `role`（编排层 role 保留） | §5.4、§16 |
+| D2 | `task_subject` 与 `rationale` 是否合并 | 不合并，语义不同、并存 | §5.4 |
+| D3 | 跨类降档是否需最小确认 | **保留 1 步确认**防边界反跳；同档仍 `downgrade_confirm_steps`；`min_dwell` 不绕过 | §5.5 |
+| D4 | 是否进 `spawn_team` 与批次账本 | 是 | 姊妹方案 §6.4 改动点 25–27 |
+| D5 | 是否改观测采集与两个前端 | 是（`usage_routes` + micro web client + React `frontend/`） | 姊妹方案 §6.4 改动点 28–29、本文件 §6.2 |
+
 ---
 
 ## 13. 一句话结论
@@ -1012,6 +1035,8 @@ go build ./...
 > **三条红线不可越**：**① 不向 LLM 暴露当前 provider/model**（否则闭环自激）；**② 健康维度必须在 turn 内闩锁**（否则与难度维度叠加成 per-step 振荡）；**③ MA-P4 之前必须完成 O5 成本量化**（否则收益假设不成立）。
 >
 > 与姊妹方案（子 Agent 审计加固）**功能正交、契约共享**：本方案的新事件必须走同一套契约注册与门禁，**先建门禁、再登记事件**（§8.1）。
+>
+> **v4 补充（2026-09-22）**：难度生产者扩展为 `difficulty + task_type + task_subject` 三元组；跨类降档以「1 步确认」替代即时生效（§5.5），分类枚举注入不触碰 INV-3（§5.6）；两项均以仓库根 `plan.md` 的 5 项拍板为准（§12.3、§16）。
 
 ---
 
@@ -1144,3 +1169,21 @@ go test ./cmd/aicli/commands/ -run 'TestMainAgentRouting|TestLocalChatMainAgentR
 1. **设计侧**：MA-P0–MA-P4 + §5.10 全部落地，MG1–MG8 **八个缺口全部有对应实现或明确记录**。
 2. **默认安全**：`enabled=false` 是唯一默认；关闭态下工具不注册、片段不注入、宿主写入点为空操作——三条路径各有测试。
 3. **剩余工作的性质**：I1/I2/I3/I5/REG2 五个**取证缺口已全部闭环**（行为已实现 + loop/宿主级断言 + 反向灵敏度证明，见 §15.2 与 §15.3 第 5 组）；**唯一未完成项是 O5**——**数据缺口**，需要真实运行样本，非代码缺口（可测性核实见 §15.1）。它不阻塞 `enabled=true` 的小流量试用，但 **O5 未完成前不得作为默认配置发布**（A12）。
+
+---
+
+## 16. 修订记录（v4，2026-09-22：task_type 收编）
+
+**触发**：用户对「用 LLM 结构化返回任务类别替代关键词防降档」的 5 项拍板（评审与全文见仓库根 `plan.md`；§12.3 为决策表）。本节只列**对本文件的净改动**，不推翻 v2/v3 的任何结论。
+
+| # | 修订内容 | 落点 |
+| --- | --- | --- |
+| 1 | `predict_task_difficulty` 增可选 `task_type`（封闭枚举）/`task_subject` 参数；注入片段增有限类别列表（不含类别→model 映射） | §5.4、§7.3、§9.1 U21 |
+| 2 | 迟滞状态机类别感知：同档降级仍需 `downgrade_confirm_steps`，**跨类降档收敛为 1 步确认**，`min_dwell_steps` 两类均不绕过；`task_type` 缺省 ⇒ 与 v3 逐字一致 | §5.5、§7.2、§9.1 U20 |
+| 3 | INV-3 增 v4 澄清：类别枚举注入是分类语义、不是策略状态 | §5.6 |
+| 4 | 事件 schema：`route_applied` 增 `task_type`/`task_subject`，`route_prediction_invalid` 增 `raw_task_type`；进 `usage_routes` 与 `by_task_type` | §6.2、§11.3 A17 |
+| 5 | 跨文档：`spawn_team`/批次账本/观测与两个前端的同步项记在姊妹方案 §6.4 改动点 25–29（本文件只定义主 Agent 侧契约） | §12.3 D4/D5 |
+| 6 | 头部状态修正为 partially-implemented（v3 已实施未回写头部）；新增 §2 的 `plan.md` 引用与 §12.3 决策表 | 头部、§2、§12.3 |
+
+**实施状态**：**v4 已实施（2026-09-22）**——工具契约增 `task_type`（12 类封闭枚举）/`task_subject`（U21：required 仍仅 difficulty）；注入片段增类别列表与风险倾向纯文字（U18 断言补类别存在，INV-3 复验通过）；迟滞状态机跨类降档 1 步确认、同档 N 步、`min_dwell` 两类均不绕过（U20 正反用例绿：migrate→explore 首报生效、migrate→migrate 仍需 3 确认）；`route_applied`/`route_cleared`/`route_prediction_invalid` 增 `task_type`/`task_subject`（invalid 另带 `raw_task_type`），turn_floor/cost_guard 载荷字段必存在。门禁：`go test ./internal/agent/...` 全绿。v3 的 MA-P0–MA-P4 与 MG1–MG8 结论不变。
+**核实口径**：实施后对照 `plan.md` §11 决策表逐行核对 + grep 本文件 `role` 残留（确认仅存「编排层 role / 兼容别名」语义）+ 跑 §9.4 验证命令含 U20/U21。

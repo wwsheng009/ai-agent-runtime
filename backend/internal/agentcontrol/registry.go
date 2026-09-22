@@ -17,6 +17,8 @@ const (
 	SessionContextDifficulty          = "agent_difficulty"
 	SessionContextDifficultySource    = "agent_difficulty_source"
 	SessionContextDifficultyRationale = "agent_difficulty_rationale"
+	SessionContextTaskType            = "agent_task_type"
+	SessionContextTaskSubject         = "agent_task_subject"
 	SessionContextRouteSource         = "agent_route_source"
 	SessionContextRouteWarnings       = "agent_route_warnings"
 	SessionContextFallbackUsed        = "agent_fallback_used"

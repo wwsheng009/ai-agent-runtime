@@ -64,6 +64,18 @@ function analysisOrDash(value) {
   return text === "" ? "--" : text;
 }
 
+// analysisText 归一展示文本：null/undefined/非字符串安全 → 去首尾空白字符串。
+function analysisText(value) {
+  if (value === undefined || value === null) { return ""; }
+  return String(value).trim();
+}
+
+// analysisClip 截断展示文本（超出长度补省略号；完整值由 title 承载）。
+function analysisClip(text, max) {
+  var value = analysisText(text);
+  return value.length > max ? value.substring(0, max) + "…" : value;
+}
+
 function analysisInt(value) {
   if (value === undefined || value === null) { return "--"; }
   return String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
@@ -484,7 +496,11 @@ function renderAnalysisTools(result) {
 }
 
 function analysisSubagentLabel(stat) {
-  var role = (stat.role || "").trim();
+  // task_type 优先、role 兜底（W-5）：路由层 role 已由 task_type 取代，旧库/旧事件
+  // 仍只有 role；两者都缺才退回 subagent_id。
+  var taskType = analysisText(stat.task_type);
+  if (taskType) { return taskType; }
+  var role = analysisText(stat.role);
   if (role) { return role; }
   return analysisOrDash(stat.subagent_id);
 }
@@ -566,8 +582,32 @@ var routingSourceLabels = {
   parent_inherit: "父级继承", fallback: "降级回退", role_override: "角色覆盖",
   difficulty_level: "难度路由", explicit: "显式声明", explicit_promoted: "显式提升",
   heuristic: "启发式", default: "默认", inferred: "推断",
+  // task_type 轴新增来源（W-2）；role_override 保留为历史值。
+  task_type_override: "任务类型覆盖", task_type_floor: "任务类型抬档",
+  task_type_downgrade: "任务类型降档",
 };
 var routingFlagLabels = { routeChanged: "路由已变", routeUnchanged: "路由未变", fallbackUsed: "降级已用", fallbackUnused: "降级未用" };
+
+// 告警词前缀归一（W-6）：只改写 task_type 三个新 token 前缀，其余 token
+// （如历史 difficulty_promoted_by_keyword:*）原样透出，渲染口径不变。
+var routingWarningPrefixLabels = [
+  { prefix: "difficulty_floor_by_task_type:", label: "任务类型抬档：" },
+  { prefix: "difficulty_downgraded_by_task_type:", label: "任务类型降档：" },
+  { prefix: "task_type_unknown:", label: "未知任务类型：" },
+];
+
+function routingWarningLabel(raw) {
+  var token = analysisText(raw);
+  for (var i = 0; i < routingWarningPrefixLabels.length; i++) {
+    var entry = routingWarningPrefixLabels[i];
+    if (token.indexOf(entry.prefix) === 0) {
+      var suffix = token.substring(entry.prefix.length).trim();
+      // 前缀后无取值（退化 token）时不做半截改写，原样透出。
+      return suffix ? entry.label + suffix : token;
+    }
+  }
+  return routingLabel({}, token);
+}
 
 function routingLabel(map, raw) {
   var key = (raw || "").trim().toLowerCase();
@@ -609,10 +649,13 @@ function renderAnalysisRouting(result) {
     { title: "来源", buckets: result.body.by_source, label: function (k) { return routingLabel(routingSourceLabels, k); } },
     { title: "难度", buckets: result.body.by_difficulty, label: function (k) { return routingLabel({}, k); } },
     { title: "难度来源", buckets: result.body.by_difficulty_source, label: function (k) { return routingLabel(routingSourceLabels, k); } },
+    // 任务类型轴（W-1）：字段缺失（旧服务端）时与既有卡片一致渲染「暂无数据」；
+    // by_role 保留一个 release，暂不删除。
+    { title: "任务类型", buckets: result.body.by_task_type, label: function (k) { return routingLabel({}, k); } },
     { title: "角色", buckets: result.body.by_role, label: function (k) { return routingLabel({}, k); } },
     { title: "Provider", buckets: result.body.by_provider, label: function (k) { return routingLabel({}, k); } },
     { title: "Model", buckets: result.body.by_model, label: function (k) { return routingLabel({}, k); } },
-    { title: "告警词", buckets: result.body.warnings, label: function (k) { return routingLabel({}, k); } },
+    { title: "告警词", buckets: result.body.warnings, label: function (k) { return routingWarningLabel(k); } },
   ];
   html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px;margin-top:8px">';
   for (var g = 0; g < bucketGroups.length; g++) {
@@ -665,7 +708,7 @@ function renderAnalysisRoutingEvents(append) {
     '（' + analysisInt(analysisRoutingEvents.length) + " / " + analysisInt(analysisRoutingEventsTotal) + "）</div>";
   html += '<div style="overflow-x:auto"><table class="cache-table"><thead><tr>' +
     "<th>时间</th><th>范围</th><th>类型</th><th>Agent</th><th>目标</th>" +
-    "<th>难度</th><th>路由</th><th>标记</th><th>告警</th><th>尝试</th>" +
+    "<th>难度 / 任务类型</th><th>路由</th><th>标记</th><th>告警</th><th>尝试</th>" +
     "</tr></thead><tbody>";
   for (var i = 0; i < analysisRoutingEvents.length; i++) {
     html += renderRoutingEventRow(analysisRoutingEvents[i]);
@@ -693,6 +736,18 @@ function renderRoutingEventRow(ev) {
   var agent = ev.agent_id ? ev.agent_id.substring(0, 8) : "-";
   var goal = (ev.goal || "-").substring(0, 32);
   var diffSource = ev.difficulty_source ? "（" + routingLabel(routingSourceLabels, ev.difficulty_source) + "）" : "";
+  // 任务类型与难度同格并列（W-3）：缺字段（旧库/主 Agent 行）不占位；task_subject
+  // 有值时以次行小字 + 单元格 title 展示完整值。
+  var taskType = analysisText(ev.task_type);
+  var taskSubject = analysisText(ev.task_subject);
+  var difficultyTitle = [];
+  if (taskType) { difficultyTitle.push("任务类型：" + taskType); }
+  if (taskSubject) { difficultyTitle.push("任务主题：" + taskSubject); }
+  var difficultyCell = "<td" +
+    (difficultyTitle.length > 0 ? ' title="' + esc(difficultyTitle.join(" · ")) + '"' : "") + ">" +
+    esc(ev.difficulty || "未记录") + esc(diffSource) + (taskType ? " · " + esc(taskType) : "") +
+    (taskSubject ? '<div style="font-size:10px;color:var(--fg3)">' + esc(analysisClip(taskSubject, 24)) + "</div>" : "") +
+    "</td>";
   var route = [ev.provider, ev.model].filter(Boolean).join(" / ") || "未记录";
   var routeChanged = triStateLabel(ev.route_changed, routingFlagLabels.routeChanged, routingFlagLabels.routeUnchanged);
   var fallback = triStateLabel(ev.fallback_used, routingFlagLabels.fallbackUsed, routingFlagLabels.fallbackUnused);
@@ -709,7 +764,7 @@ function renderRoutingEventRow(ev) {
     '<td style="font-family:monospace;font-size:11px">' + esc(agent) + "</td>" +
     '<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' +
     esc(ev.goal || "") + '">' + esc(goal) + "</td>" +
-    "<td>" + esc(ev.difficulty || "未记录") + esc(diffSource) + "</td>" +
+    difficultyCell +
     '<td style="font-size:11px">' + esc(route) + "</td>" +
     "<td>" + esc(routeChanged) + " · " + esc(fallback) + "</td>" +
     '<td style="color:var(--yellow)">' + esc(warnText) + "</td>" +
@@ -794,9 +849,12 @@ function openAnalysisToolDetail(stat) {
 
 function openAnalysisSubagentDetail(stat) {
   if (!stat) { return; }
+  var taskType = analysisText(stat.task_type);
+  var taskSubject = analysisText(stat.task_subject);
   var html = '<div class="cache-detail-title">子代理明细</div>' +
     analysisKV("子代理", analysisOrDash(stat.subagent_id)) +
     analysisKV("角色 / 来源", analysisOrDash(stat.role) + " / " + analysisOrDash(stat.source)) +
+    analysisKV("任务类型", analysisOrDash(taskType) + (taskSubject ? "（" + taskSubject + "）" : "")) +
     analysisKV("状态", analysisSubagentOutcome(stat.success) + "（" + analysisOrDash(stat.completion_reason) + "）") +
     analysisKV("失败分类 / 错误码", analysisOrDash(stat.failure_category) + " / " + analysisOrDash(stat.error_code)) +
     analysisKV("重试", analysisAttemptLabel(stat) + (stat.retry_reason ? "（" + stat.retry_reason + "）" : "")) +

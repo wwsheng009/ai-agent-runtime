@@ -69,6 +69,8 @@ type SubagentStat struct {
 	ParentSessionID  string    `json:"parent_session_id"`
 	ChildSessionID   string    `json:"child_session_id,omitempty"`
 	Role             string    `json:"role,omitempty"`
+	TaskType         string    `json:"task_type,omitempty"`
+	TaskSubject      string    `json:"task_subject,omitempty"`
 	Source           string    `json:"source,omitempty"`
 	Success          *bool     `json:"success"`
 	CompletionReason string    `json:"completion_reason"`
@@ -373,14 +375,18 @@ func (s *Store) SubagentStats(q SubagentStatsQuery) (SubagentStatsResult, error)
 		Subagents: []SubagentStat{},
 	}
 	where, args := subagentStatsWhere(q)
+	// task_type / task_subject 是 v7 增量列：只读旧库缺列时表达式退化为空串常量
+	// （与 usage_routes 的 routeColumnExpr 同策略），而不是让整个 stats 查询报错。
+	taskTypeExpr := s.columnExpr("usage_subagents", "task_type")
+	taskSubjectExpr := s.columnExpr("usage_subagents", "task_subject")
 	rows, ok, err := s.query(fmt.Sprintf(`
-SELECT subagent_id, parent_session_id, child_session_id, role, source, success, completion_reason,
+SELECT subagent_id, parent_session_id, child_session_id, role, %s, %s, source, success, completion_reason,
        failure_category, error_code, attempt, max_attempts, retry_reason, duration_ms,
        usage_total_tokens, conflict_count, completed_at_unix_nano
 FROM usage_subagents
 WHERE %s
 ORDER BY completed_at_unix_nano DESC, subagent_id ASC
-LIMIT ?`, where), append(args, normalizeLimit(q.Limit, maxSubagentStatsRows, maxSubagentStatsRows))...)
+LIMIT ?`, taskTypeExpr, taskSubjectExpr, where), append(args, normalizeLimit(q.Limit, maxSubagentStatsRows, maxSubagentStatsRows))...)
 	if err != nil {
 		return result, fmt.Errorf("query subagent stats: %w", err)
 	}
@@ -395,7 +401,7 @@ LIMIT ?`, where), append(args, normalizeLimit(q.Limit, maxSubagentStatsRows, max
 			completedNano int64
 		)
 		if err := rows.Scan(
-			&stat.SubagentID, &stat.ParentSessionID, &stat.ChildSessionID, &stat.Role, &stat.Source,
+			&stat.SubagentID, &stat.ParentSessionID, &stat.ChildSessionID, &stat.Role, &stat.TaskType, &stat.TaskSubject, &stat.Source,
 			&successFlag, &stat.CompletionReason, &stat.FailureCategory, &stat.ErrorCode,
 			&stat.Attempt, &stat.MaxAttempts, &stat.RetryReason, &stat.DurationMS,
 			&stat.UsageTotalTokens, &stat.ConflictCount, &completedNano,

@@ -10,7 +10,7 @@ import { editorControlClassName } from "../editor-control-class";
 import { type AgentRoutingDifficulty } from "../runtime-agent-routing-domain-utils";
 import { SettingsNoticeCard } from "../settings-notice-card";
 
-import { difficultyOptions } from "./format";
+import { difficultyOptions, taskTypeOptions } from "./format";
 import { RoutePreviewResult } from "./route-preview-result";
 
 export function RoutingPreviewSection({
@@ -20,10 +20,12 @@ export function RoutingPreviewSection({
   previewGoal,
   previewResult,
   previewRole,
+  previewTaskType,
   runRoutePreview,
   setPreviewDifficulty,
   setPreviewGoal,
   setPreviewRole,
+  setPreviewTaskType,
   t,
 }: {
   isPreviewing: boolean;
@@ -32,10 +34,12 @@ export function RoutingPreviewSection({
   previewGoal: string;
   previewResult: RuntimeAgentRoutePreviewResult | null;
   previewRole: string;
+  previewTaskType: string;
   runRoutePreview: () => Promise<void>;
   setPreviewDifficulty: (difficulty: AgentRoutingDifficulty) => void;
   setPreviewGoal: (goal: string) => void;
   setPreviewRole: (role: string) => void;
+  setPreviewTaskType: (taskType: string) => void;
   t: TFunction<"runtimeConfig">;
 }) {
   return (
@@ -45,7 +49,7 @@ export function RoutingPreviewSection({
           <RouteIcon size={16} className="text-accent-primary" />
           {t("editor.agentRouting.preview.title")}
         </div>
-        <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-[10rem_minmax(10rem,0.8fr)_minmax(16rem,1.4fr)_auto] xl:items-end">
+        <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-[10rem_10rem_minmax(10rem,0.8fr)_minmax(16rem,1.4fr)_auto] xl:items-end">
           <ConfigFormField label={t("editor.agentRouting.preview.difficulty")}>
             <Select
               ariaLabel={t("editor.agentRouting.preview.difficulty")}
@@ -54,6 +58,20 @@ export function RoutingPreviewSection({
               onChange={(value) =>
                 setPreviewDifficulty(value as AgentRoutingDifficulty)
               }
+            />
+          </ConfigFormField>
+          <ConfigFormField label={t("editor.agentRouting.preview.taskType")}>
+            <Select
+              ariaLabel={t("editor.agentRouting.preview.taskType")}
+              options={[
+                {
+                  value: "",
+                  label: t("editor.agentRouting.preview.taskTypeAny"),
+                },
+                ...taskTypeOptions(t),
+              ]}
+              value={previewTaskType}
+              onChange={setPreviewTaskType}
             />
           </ConfigFormField>
           <ConfigFormField label={t("editor.agentRouting.preview.role")}>

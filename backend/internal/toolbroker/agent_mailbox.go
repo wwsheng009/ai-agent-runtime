@@ -109,6 +109,8 @@ func BuildSubagentCompletionMailboxMessage(parentSessionID, childSessionID, chil
 			"difficulty",
 			"difficulty_source",
 			"difficulty_rationale",
+			"task_type",
+			"task_subject",
 			"route_provider",
 			"route_model",
 			"route_reasoning_effort",

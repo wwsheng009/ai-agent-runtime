@@ -308,6 +308,10 @@ export type AnalyticsSubagentStat = {
   parent_session_id: string;
   child_session_id?: string;
   role?: string;
+  /** 任务类型（12 类封闭枚举；未记录 task_type 的历史行为空）。 */
+  task_type?: string;
+  /** 任务主体（发射端截断；未记录的历史行为空）。 */
+  task_subject?: string;
   source?: string;
   success: boolean | null;
   completion_reason: string;

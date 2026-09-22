@@ -328,6 +328,8 @@ func (r AgentControlTaskRegistry) CreateAgentControlTask(ctx context.Context, re
 		Goal:                request.Goal,
 		Difficulty:          difficulty,
 		DifficultyRationale: request.DifficultyRationale,
+		TaskType:            request.TaskType,
+		TaskSubject:         request.TaskSubject,
 		Status:              status,
 		Priority:            request.Priority,
 		Assignee:            assignee,
@@ -423,6 +425,12 @@ func (r AgentControlTaskRegistry) UpdateAgentControlTask(ctx context.Context, re
 	}
 	if request.DifficultyRationale != nil {
 		task.DifficultyRationale = *request.DifficultyRationale
+	}
+	if request.TaskType != nil {
+		task.TaskType = *request.TaskType
+	}
+	if request.TaskSubject != nil {
+		task.TaskSubject = *request.TaskSubject
 	}
 	closedStatusUpdate := false
 	if request.Status != nil && *request.Status != "" {

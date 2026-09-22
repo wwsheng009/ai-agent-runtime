@@ -202,7 +202,11 @@ type mainAgentRouteState struct {
 	floorResolved bool
 
 	// activeDifficulty 为空表示「尚未显式上报」，按 default_difficulty 处理。
-	activeDifficulty   string
+	activeDifficulty string
+	// activeTaskType 是当前生效 route 的最新合法类别声明（v4 决策 3）：空表示
+	// 「未声明/未采纳」——跨类降档判定要求两侧均非空，否则按同档（N 步）。
+	// 换 route 时整体替换（缺省即清空，保守）；同档无改道时仅在新声明非空时采纳。
+	activeTaskType     string
 	dwellSteps         int
 	downgradeCandidate string
 	downgradeStreak    int
@@ -328,7 +332,10 @@ func (loop *ReActLoop) beginTurnRoute(sessionID, traceID string) {
 		"baseline_model":    st.baselineEffective.Model,
 		// turn floor 不由模型上报驱动，没有 rationale 可报；字段仍必须存在，
 		// 下游才能统一解析（与 §6.2「token 允许为 0，但字段必须存在」同理）。
-		"rationale":      "",
+		"rationale": "",
+		// v4（MA-4）：floor 不由模型声明类别，字段仍必须存在（口径同 rationale）。
+		"task_type":      "",
+		"task_subject":   "",
 		"candidates":     candidates,
 		"route_warnings": routeWarnings,
 		"input_tokens":   0,
@@ -358,8 +365,11 @@ func (loop *ReActLoop) endTurnRoute(sessionID, traceID string) {
 			"steps_total":         st.stepsTotal,
 			"steps_with_override": st.stepsWithOverride,
 			"final_difficulty":    finalDifficulty,
-			"cost_guard_trips":    st.costGuardTrips,
-			"disabled_for_turn":   st.disabledForTurn,
+			// v4（MA-4）：cleared 无模型声明，字段仍必须存在（§6.2 统一解析）。
+			"task_type":         "",
+			"task_subject":      "",
+			"cost_guard_trips":  st.costGuardTrips,
+			"disabled_for_turn": st.disabledForTurn,
 			// §6.2：这两个字段存在的唯一目的是证明「确实还原到了正确基线」。
 			// 必须报**请求路径实际会用的**基线（含 agent.config 回退），否则在
 			// 会话路径下（loop.config 的 provider/model 恒为空）永远是空串。
@@ -427,6 +437,7 @@ func (loop *ReActLoop) tripMainAgentCostGuard(cfg *agentconfig.AICLIMainAgentRou
 	// 「连续 N step 昂贵」再次触发（否则计数越过阈值就永远不再命中边沿）。
 	st.consecutiveExpensiveSteps = 0
 	st.activeDifficulty = mainAgentDefaultDifficulty(cfg)
+	st.activeTaskType = ""
 	st.dwellSteps = 0
 	st.downgradeCandidate = ""
 	st.downgradeStreak = 0
@@ -460,9 +471,11 @@ func (loop *ReActLoop) tripMainAgentCostGuard(cfg *agentconfig.AICLIMainAgentRou
 		"route_changed":     mainAgentRouteChanged(st.baselineEffective, st.floor),
 		"baseline_provider": st.baselineEffective.Provider,
 		"baseline_model":    st.baselineEffective.Model,
-		// 护栏由运行时触发，没有模型上报的 rationale；字段仍必须存在（§6.2）。
-		"rationale":  "",
-		"candidates": []modelrouting.RouteCandidateEvaluation{},
+		// 护栏由运行时触发，没有模型上报的 rationale/类别；字段仍必须存在（§6.2）。
+		"rationale":    "",
+		"task_type":    "",
+		"task_subject": "",
+		"candidates":   []modelrouting.RouteCandidateEvaluation{},
 		// 护栏是运行时动作、不经过 Resolver，因此没有决策告警可报；字段仍必须
 		// 存在（空切片序列化成 []），下游 usage_routes.warnings_json 才能统一解析。
 		"route_warnings": []string{},
@@ -585,12 +598,22 @@ func mainAgentRouteSnapshotFromDecision(decision modelrouting.RouteDecision, fal
 //
 // 生效时机：工具在 step N 的 act 阶段被调用，而 step N 的请求已经发出，因此
 // 复写 loop.config 天然只影响 step N+1（R5）。
-func (loop *ReActLoop) applyPredictedDifficulty(cfg *agentconfig.AICLIMainAgentRoutingConfig, difficulty, rationale string, step int, sessionID, traceID string) string {
+func (loop *ReActLoop) applyPredictedDifficulty(cfg *agentconfig.AICLIMainAgentRoutingConfig, difficulty, rationale, taskTypeRaw, taskSubject string, step int, sessionID, traceID string) string {
 	st := &loop.mainAgentRoute
 	placeholder := predictTaskDifficultyPlaceholder(difficulty)
 	if st.disabledForTurn {
 		return placeholder
 	}
+
+	// v4（MA-1/MA-3）：task_type 是可选提示——未知值不拒报（与子 Agent 路径同款
+	// 「警告 + 忽略」），只影响类别迟滞与审计；task_subject 仅进审计。
+	taskType, typeKnown := modelrouting.ValidateTaskType(taskTypeRaw)
+	var typeWarnings []string
+	if strings.TrimSpace(taskTypeRaw) != "" && !typeKnown {
+		typeWarnings = append(typeWarnings, "task_type_unknown:"+modelrouting.NormalizeTaskType(taskTypeRaw))
+		taskType = ""
+	}
+	taskSubject = strings.TrimSpace(taskSubject)
 
 	current := st.activeDifficulty
 	if current == "" {
@@ -602,6 +625,11 @@ func (loop *ReActLoop) applyPredictedDifficulty(cfg *agentconfig.AICLIMainAgentR
 	switch {
 	case targetRank == currentRank:
 		// 与当前档位一致：无需改道，也不消耗任何预算。
+		// 类别声明非空时采纳（供后续降档判定「前一类别」）；空声明不抹掉既有
+		// 类别——route 没变，上一次声明仍描述当前 route。
+		if taskType != "" {
+			st.activeTaskType = taskType
+		}
 		return placeholder
 	case targetRank < currentRank:
 		// 降级更难（§5.5）：连续 N step 上报同一档位才生效，且必须已驻留
@@ -614,6 +642,12 @@ func (loop *ReActLoop) applyPredictedDifficulty(cfg *agentconfig.AICLIMainAgentR
 		}
 		confirm := cfg.DowngradeConfirmSteps
 		if confirm < 1 {
+			confirm = 1
+		}
+		// 决策 3（plan §4 / doc9 §5.5）：跨类降档收敛为 1 步确认（非即时）；
+		// 任一侧类别缺省 ⇒ 按同档（N 步）。min_dwell_steps 两类均不绕过——
+		// 下面的与条件继续把守。
+		if modelrouting.TaskTypeCrossTierDowngrade(st.activeTaskType, taskType) {
 			confirm = 1
 		}
 		if st.downgradeStreak < confirm || st.dwellSteps < cfg.MinDwellSteps {
@@ -652,6 +686,9 @@ func (loop *ReActLoop) applyPredictedDifficulty(cfg *agentconfig.AICLIMainAgentR
 	}
 
 	st.activeDifficulty = difficulty
+	// 换 route：类别整体替换为本次声明（缺省即清空——旧类别不再描述新 route，
+	// 后续降档按同档处理，保守方向）。
+	st.activeTaskType = taskType
 	st.dwellSteps = 0
 	st.downgradeCandidate = ""
 	st.downgradeStreak = 0
@@ -670,6 +707,8 @@ func (loop *ReActLoop) applyPredictedDifficulty(cfg *agentconfig.AICLIMainAgentR
 		"difficulty":           difficulty,
 		"difficulty_rationale": rationale,
 		"rationale":            rationale,
+		"task_type":            taskType,
+		"task_subject":         taskSubject,
 		"provider":             target.Provider,
 		"model":                target.Model,
 		"reasoning_effort":     target.ReasoningEffort,
@@ -690,7 +729,7 @@ func (loop *ReActLoop) applyPredictedDifficulty(cfg *agentconfig.AICLIMainAgentR
 	payload["candidates"] = candidates
 	// 同 §5.10 规则 3 的告警口径：升档/降级/回退的证据必须进 payload，
 	// 否则「为什么被升档」在审计里无法自解释（install.md 的提升证据链承诺）。
-	payload["route_warnings"] = mainAgentRouteWarnings(decision)
+	payload["route_warnings"] = append(mainAgentRouteWarnings(decision), typeWarnings...)
 	loop.emitRuntimeEvent(events.EventMainAgentRouteApplied, sessionID, predictTaskDifficultyToolName, payload)
 	return placeholder
 }
@@ -705,30 +744,43 @@ func (loop *ReActLoop) reportPredictedDifficulty(sessionID, traceID string, step
 	raw, _ := args["difficulty"].(string)
 	reported := strings.TrimSpace(raw)
 	difficulty, ok := modelrouting.NormalizeDifficulty(reported)
+	rawTaskType, _ := args["task_type"].(string)
+	rawTaskType = strings.TrimSpace(rawTaskType)
+	taskSubject, _ := args["task_subject"].(string)
+	taskSubject = strings.TrimSpace(taskSubject)
 
 	switch {
 	case !ok:
-		return "", loop.rejectPredictedDifficulty(cfg, st, sessionID, traceID, step, reported, "unknown_difficulty")
+		return "", loop.rejectPredictedDifficulty(cfg, st, sessionID, traceID, step, reported, rawTaskType, taskSubject, "unknown_difficulty")
 	case !mainAgentLevelInList(cfg.Levels, difficulty):
-		return "", loop.rejectPredictedDifficulty(cfg, st, sessionID, traceID, step, reported, "difficulty_not_allowed")
+		return "", loop.rejectPredictedDifficulty(cfg, st, sessionID, traceID, step, reported, rawTaskType, taskSubject, "difficulty_not_allowed")
 	case difficulty == modelrouting.DifficultyExpert && !cfg.AllowExpert:
 		// §5.9：expert 是显式 opt-in，未开启时按非法上报计数（而不是静默降级）。
-		return "", loop.rejectPredictedDifficulty(cfg, st, sessionID, traceID, step, reported, "expert_not_allowed")
+		return "", loop.rejectPredictedDifficulty(cfg, st, sessionID, traceID, step, reported, rawTaskType, taskSubject, "expert_not_allowed")
 	}
 
 	st.invalidStreak = 0
 	rationale, _ := args["rationale"].(string)
-	return loop.applyPredictedDifficulty(cfg, difficulty, strings.TrimSpace(rationale), step, sessionID, traceID), nil
+	return loop.applyPredictedDifficulty(cfg, difficulty, strings.TrimSpace(rationale), rawTaskType, taskSubject, step, sessionID, traceID), nil
 }
 
 // rejectPredictedDifficulty 记录一次非法上报，并在连续非法达到上限时禁用本 turn
 // 的改道能力（§6.2）。返回给模型的错误文本只描述「值不被接受」，不披露后端。
-func (loop *ReActLoop) rejectPredictedDifficulty(cfg *agentconfig.AICLIMainAgentRoutingConfig, st *mainAgentRouteState, sessionID, traceID string, step int, reported, reason string) error {
+func (loop *ReActLoop) rejectPredictedDifficulty(cfg *agentconfig.AICLIMainAgentRoutingConfig, st *mainAgentRouteState, sessionID, traceID string, step int, reported, taskTypeRaw, taskSubject, reason string) error {
 	st.invalidStreak++
+	// §6.2（v4）：route_prediction_invalid 带 task_type/task_subject 与
+	// raw_task_type——被拒的是难度，但类别声明同样要可回溯（MA-4）。
+	declaredType, typeOK := modelrouting.ValidateTaskType(taskTypeRaw)
+	if !typeOK {
+		declaredType = ""
+	}
 	loop.emitRuntimeEvent(events.EventMainAgentRoutePredictionInvalid, sessionID, predictTaskDifficultyToolName, map[string]interface{}{
 		"trace_id":       traceID,
 		"step":           step,
 		"reported":       reported,
+		"task_type":      declaredType,
+		"task_subject":   strings.TrimSpace(taskSubject),
+		"raw_task_type":  strings.TrimSpace(taskTypeRaw),
 		"reason":         reason,
 		"invalid_streak": st.invalidStreak,
 	})
@@ -757,6 +809,7 @@ func predictTaskDifficultyToolDefinition(cfg *agentconfig.AICLIMainAgentRoutingC
 			"Call it only when the estimate is worth recording; it is a hint, not an action, and it never replaces the real tool calls the task still requires. " +
 			"Reporting does not consume a step and does not change permissions, approvals, or the tool surface. " +
 			"Rate the work itself: do not inflate it to obtain a stronger setup, and do not deflate it to save budget. " +
+			"Classify the work honestly via task_type: never misdeclare the category to steer setup choices, and expect the declaration to be recorded in the audit. " +
 			"Values outside the allowed set are rejected and repeated rejections disable reporting for the rest of the turn.",
 		Parameters: map[string]interface{}{
 			"type": "object",
@@ -769,6 +822,15 @@ func predictTaskDifficultyToolDefinition(cfg *agentconfig.AICLIMainAgentRoutingC
 				"rationale": map[string]interface{}{
 					"type":        "string",
 					"description": "Optional one-line reason for the estimate.",
+				},
+				"task_type": map[string]interface{}{
+					"type":        "string",
+					"enum":        modelrouting.TaskTypes(),
+					"description": "Optional closed-enum category of the current work (routing classification only; never paired with any backend identity).",
+				},
+				"task_subject": map[string]interface{}{
+					"type":        "string",
+					"description": "Optional one-line description of what this work touches. Audit-only.",
 				},
 			},
 			"required": []string{"difficulty"},
@@ -799,7 +861,11 @@ func mainAgentRoutingSystemFragment(cfg *agentconfig.AICLIMainAgentRoutingConfig
 	b.WriteString(strings.Join(levels, ", "))
 	b.WriteString(". Default level when you do not report: ")
 	b.WriteString(mainAgentDefaultDifficulty(cfg))
-	b.WriteString(". It is a hint, not an action: rate the work itself, and do not inflate or deflate the estimate.")
+	b.WriteString(". It is a hint, not an action: rate the work itself, and do not inflate or deflate the estimate. ")
+	b.WriteString("Optional task categories for the `task_type` parameter: ")
+	b.WriteString(strings.Join(modelrouting.TaskTypes(), ", "))
+	b.WriteString(". Risk tendencies, in plain words: explore and generate are low-risk reads or boilerplate; understand, modify, test, config and verify are routine changes and review; implement, refactor, integration and migrate, security indicate structurally risky work that usually warrants hard difficulty. ")
+	b.WriteString("Classify by what a competent engineer would recognize from the task itself; never misdeclare a category to steer setup choices — declarations are recorded in the audit.")
 	return b.String()
 }
 

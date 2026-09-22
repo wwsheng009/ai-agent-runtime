@@ -34,6 +34,8 @@ type TaskRecord struct {
 	Summary              string    `json:"summary,omitempty"`
 	Difficulty           string    `json:"difficulty,omitempty"`
 	DifficultyRationale  string    `json:"difficulty_rationale,omitempty"`
+	TaskType             string    `json:"task_type,omitempty"`
+	TaskSubject          string    `json:"task_subject,omitempty"`
 	RouteProvider        string    `json:"route_provider,omitempty"`
 	RouteModel           string    `json:"route_model,omitempty"`
 	RouteReasoningEffort string    `json:"route_reasoning_effort,omitempty"`
@@ -187,6 +189,8 @@ type TaskCreateRequest struct {
 	Goal                 string
 	Difficulty           string
 	DifficultyRationale  string
+	TaskType             string
+	TaskSubject          string
 	RouteProvider        string
 	RouteModel           string
 	RouteReasoningEffort string
@@ -219,6 +223,8 @@ type TaskUpdateRequest struct {
 	Goal                *string
 	Difficulty          *string
 	DifficultyRationale *string
+	TaskType            *string
+	TaskSubject         *string
 	Status              *string
 	Priority            *int
 	Assignee            *string
@@ -435,6 +441,8 @@ func (r TaskRecord) Normalize() TaskRecord {
 	r.Summary = strings.TrimSpace(r.Summary)
 	r.Difficulty = strings.TrimSpace(r.Difficulty)
 	r.DifficultyRationale = strings.TrimSpace(r.DifficultyRationale)
+	r.TaskType = strings.TrimSpace(r.TaskType)
+	r.TaskSubject = strings.TrimSpace(r.TaskSubject)
 	r.RouteProvider = strings.TrimSpace(r.RouteProvider)
 	r.RouteModel = strings.TrimSpace(r.RouteModel)
 	r.RouteReasoningEffort = strings.TrimSpace(r.RouteReasoningEffort)
@@ -520,6 +528,8 @@ func (r TaskCreateRequest) Normalize() TaskCreateRequest {
 	r.Goal = strings.TrimSpace(r.Goal)
 	r.Difficulty = strings.TrimSpace(r.Difficulty)
 	r.DifficultyRationale = strings.TrimSpace(r.DifficultyRationale)
+	r.TaskType = strings.TrimSpace(r.TaskType)
+	r.TaskSubject = strings.TrimSpace(r.TaskSubject)
 	r.RouteProvider = strings.TrimSpace(r.RouteProvider)
 	r.RouteModel = strings.TrimSpace(r.RouteModel)
 	r.RouteReasoningEffort = strings.TrimSpace(r.RouteReasoningEffort)
@@ -550,6 +560,8 @@ func (r TaskUpdateRequest) Normalize() TaskUpdateRequest {
 	trimStringPtr(&r.Goal)
 	trimStringPtr(&r.Difficulty)
 	trimStringPtr(&r.DifficultyRationale)
+	trimStringPtr(&r.TaskType)
+	trimStringPtr(&r.TaskSubject)
 	trimStringPtr(&r.Status)
 	trimStringPtr(&r.Assignee)
 	trimStringPtr(&r.Summary)

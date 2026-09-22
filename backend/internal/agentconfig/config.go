@@ -698,9 +698,13 @@ type AICLISubagentRoutingConfig struct {
 	AvailabilityPolicy string `yaml:"availability_policy" mapstructure:"availability_policy"`
 	// RequirePromptCache 为 true 时，显式标注 prompt_cache=false 的候选会被跳过。
 	// 用于把实测不参与 prompt 缓存的免费档排除出以缓存经济性为前提的路由目标。
-	RequirePromptCache bool                                            `yaml:"require_prompt_cache" mapstructure:"require_prompt_cache"`
-	Levels             map[string]AICLISubagentRouteProfile            `yaml:"levels" mapstructure:"levels"`
-	Roles              map[string]map[string]AICLISubagentRouteProfile `yaml:"roles" mapstructure:"roles"`
+	RequirePromptCache bool                                 `yaml:"require_prompt_cache" mapstructure:"require_prompt_cache"`
+	Levels             map[string]AICLISubagentRouteProfile `yaml:"levels" mapstructure:"levels"`
+	// TaskTypes 是 v4 的路由覆盖表：task_type → difficulty → profile（plan K-3）。
+	// Roles 保留为兼容别名（保留一个 release），读入时映射到 TaskTypes 并给
+	// deprecation warning；显式 TaskTypes 优先。键归一语义见 modelrouting。
+	TaskTypes map[string]map[string]AICLISubagentRouteProfile `yaml:"task_types" mapstructure:"task_types"`
+	Roles     map[string]map[string]AICLISubagentRouteProfile `yaml:"roles" mapstructure:"roles"`
 }
 
 // AICLISubagentRoutingHeuristics 是可追加的启发式词表配置（G4）。
@@ -1341,6 +1345,50 @@ func validateSubagentRoutingConfig(configPath string, cfg *AICLISubagentRoutingC
 			return nil, err
 		}
 	}
+	// v4（plan K-3/K-4）：roles.<role> 是 task_types.<task_type> 的兼容别名，
+	// 读入时映射（显式 task_types 优先，不覆盖已有项）并给 deprecation warning；
+	// 未知 task_type 键 → task_type_unknown warning + 忽略（不回退猜词）。
+	if len(cfg.Roles) > 0 && cfg.TaskTypes == nil {
+		cfg.TaskTypes = map[string]map[string]AICLISubagentRouteProfile{}
+	}
+	for _, role := range sortedSubagentRoleKeys(cfg.Roles) {
+		mapped := subagentRoleTaskTypeAlias(role)
+		if mapped == "" {
+			// 无别名的自定义 role 保留在 Roles 里兜底（routeProfileForTask 仍查），
+			// 不强行搬进 task_types——封闭枚举放不进未知类别。
+			continue
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"%s.roles.%s deprecated: mapped to %s.task_types.%s (alias kept for one release)",
+			configPath, strings.TrimSpace(role), configPath, mapped,
+		))
+		if _, exists := cfg.TaskTypes[mapped]; !exists {
+			cfg.TaskTypes[mapped] = cfg.Roles[role]
+		}
+	}
+	for _, taskType := range sortedSubagentTaskTypeKeys(cfg.TaskTypes) {
+		levels := cfg.TaskTypes[taskType]
+		normalized, ok := normalizeSubagentTaskType(taskType)
+		if !ok {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s.task_types key %q is unknown (task_type_unknown:%s); entry ignored for routing",
+				configPath, taskType, normalized,
+			))
+		}
+		if err := validateSubagentRouteAliases(configPath+".task_types."+normalized, levels, &warnings); err != nil {
+			return nil, err
+		}
+		for _, key := range sortedSubagentRouteKeys(levels) {
+			profile := levels[key]
+			difficulty, ok := normalizeSubagentDifficulty(key)
+			if !ok {
+				return nil, fmt.Errorf("invalid %s.task_types.%s key %q", configPath, taskType, key)
+			}
+			if err := validateSubagentRouteProfile(configPath+".task_types."+normalized+"."+difficulty, profile, cfg); err != nil {
+				return nil, err
+			}
+		}
+	}
 	for _, role := range sortedSubagentRoleKeys(cfg.Roles) {
 		levels := cfg.Roles[role]
 		trimmedRole := strings.TrimSpace(role)
@@ -1454,6 +1502,51 @@ func sortedSubagentRoleKeys(roles map[string]map[string]AICLISubagentRouteProfil
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func sortedSubagentTaskTypeKeys(taskTypes map[string]map[string]AICLISubagentRouteProfile) []string {
+	keys := make([]string, 0, len(taskTypes))
+	for key := range taskTypes {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// subagentTaskTypes 是 task_type 封闭枚举在 agentconfig 侧的镜像（modelrouting
+// 反向依赖本包，无法互 import；按仓库既有惯例——difficulty 归一同样两包各持一份）。
+// 与 modelrouting.taskTypeFloors 键集合必须一致，由 modelrouting 的枚举测试守住。
+var subagentTaskTypes = map[string]struct{}{
+	"explore": {}, "understand": {}, "modify": {}, "implement": {},
+	"refactor": {}, "test": {}, "verify": {}, "migrate": {},
+	"security": {}, "config": {}, "integration": {}, "generate": {},
+}
+
+// normalizeSubagentTaskType 归一并校验 task_type 是否为已知类别。
+func normalizeSubagentTaskType(raw string) (string, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	if normalized == "" {
+		return "", false
+	}
+	_, ok := subagentTaskTypes[normalized]
+	return normalized, ok
+}
+
+// subagentRoleTaskTypeAlias 返回配置键 roles.<role> 对应的 task_type 别名；
+// 无别名（自定义 role）返回 ""，保留在 Roles 兜底。只覆盖有路由层语义的三个
+// 历史 role（plan §1）；writer 的 readonly 维度在配置层不存在，统一映射 implement
+// ——只读 writer 的任务级回落仍走 cfg.Roles（任务未声明 task_type 时查得到）。
+func subagentRoleTaskTypeAlias(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "verifier":
+		return "verify"
+	case "writer":
+		return "implement"
+	case "researcher":
+		return "explore"
+	default:
+		return ""
+	}
 }
 
 func validateSubagentRouteProfile(label string, profile AICLISubagentRouteProfile, cfg *AICLISubagentRoutingConfig) error {

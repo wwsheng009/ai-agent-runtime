@@ -35,6 +35,9 @@ const weakSignalMinHits = 2
 type promotionHits struct {
 	// Role 为 true 表示提升来自角色规则（verifier / 非只读 writer），而不是关键词。
 	Role bool
+	// TaskType 非空表示提升来自显式 task_type 的 floor（v4 K-2），值为归一后的
+	// 类别，用于展开 difficulty_floor_by_task_type:<t> 告警。
+	TaskType string
 	// Strong 是高信号命中词（按词表顺序，最多记录 3 个）。
 	Strong []string
 	// Combo 是弱信号命中词（按词表顺序，最多记录 3 个）。
@@ -42,7 +45,7 @@ type promotionHits struct {
 }
 
 func (h promotionHits) empty() bool {
-	return !h.Role && len(h.Strong) == 0 && len(h.Combo) == 0
+	return !h.Role && h.TaskType == "" && len(h.Strong) == 0 && len(h.Combo) == 0
 }
 
 // keywords 返回要写入告警的命中词（高信号在前），并有界收敛到 3 个，
@@ -263,9 +266,13 @@ func keywordPromotionWarnings(hits promotionHits) []string {
 	return warnings
 }
 
-// promotionWarnings 汇总一次提升的全部证据：角色规则 + 关键词命中。
+// promotionWarnings 汇总一次提升的全部证据：task_type floor + 角色规则 +
+// 关键词命中（v4 K-6，口径对齐 difficulty_promoted_by_keyword:*）。
 func promotionWarnings(hits promotionHits, role string) []string {
 	warnings := []string{}
+	if hits.TaskType != "" {
+		warnings = append(warnings, "difficulty_floor_by_task_type:"+hits.TaskType)
+	}
 	if hits.Role {
 		warnings = append(warnings, "difficulty_promoted_by_role:"+NormalizeRole(role))
 	}

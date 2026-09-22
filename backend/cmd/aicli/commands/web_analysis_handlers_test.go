@@ -642,6 +642,174 @@ func TestHandleChatWebAPIAnalysis_Routing(t *testing.T) {
 	}
 }
 
+// 回归：页签「统计范围」开关复用 scope=session|all（analysisQuery()），
+// 但 usage_routes.scope 仅存 main_agent|subagent。若透传给 routeWhere 会
+// 生成 scope='session' / scope='all' 恒 0 行——真实 UI 请求永远空。
+// 锁定真实 UI 请求形态：/routing?scope=session|all 与
+// /routing/events?scope=session 必须仍能读回事件。
+func TestHandleChatWebAPIAnalysis_RoutingUIScopeToggle(t *testing.T) {
+	session, bus := newAnalysisTestSession(t)
+	sessionID := session.RuntimeSession.ID
+
+	publishAnalysisRouteEvent(t, bus, runtimeevents.EventMainAgentRouteApplied, sessionID, map[string]interface{}{
+		"trace_id":       "trace-ui-scope",
+		"step":           1,
+		"route_source":   "difficulty_level",
+		"route_provider": "local",
+		"route_model":    "fast-model",
+	})
+
+	for _, query := range []string{"?scope=session", "?scope=all"} {
+		code, body := analysisGetJSON(t, ChatWebAPIAnalysisPath+"/routing"+query)
+		if code != http.StatusOK {
+			t.Fatalf("routing%s status = %d, want 200; body: %v", query, code, body)
+		}
+		totals, ok := body["totals"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("routing%s totals missing: %v", query, body)
+		}
+		if totals["total"] != float64(1) {
+			t.Fatalf("routing%s total = %v, want 1（范围开关值不得污染路由维度过滤）",
+				query, totals["total"])
+		}
+	}
+
+	// events 端点同样携带范围开关值（analysis.js ?scope=session&limit=50）。
+	code, body := analysisGetJSON(t, ChatWebAPIAnalysisPath+"/routing/events?scope=session&limit=50")
+	if code != http.StatusOK {
+		t.Fatalf("routing/events?scope=session status = %d, want 200; body: %v", code, body)
+	}
+	if body["count"] != float64(1) {
+		t.Fatalf("routing/events?scope=session count = %v, want 1", body["count"])
+	}
+}
+
+// 难度切换：先 easy 后 hard 两条子代理路由决策，锁定分析页「难度」分桶
+// 与 /routing?difficulty= 过滤；同时叠加 scope=session|all（范围开关），
+// 确认两者组合不互相污染。
+func TestHandleChatWebAPIAnalysis_RoutingDifficultySwitch(t *testing.T) {
+	session, bus := newAnalysisTestSession(t)
+	sessionID := session.RuntimeSession.ID
+
+	// 难度 easy：小型只读子任务。
+	publishAnalysisRouteEvent(t, bus, runtimeevents.EventSubagentRouteResolved, sessionID, map[string]interface{}{
+		"subagent_id":       "sub-easy",
+		"role":              "retriever",
+		"goal":              "查一个符号",
+		"parent_session_id": sessionID,
+		"child_session_id":  "child-easy",
+		"attempt":           1,
+		"max_attempts":      1,
+		"trace_id":          "trace-diff-easy",
+		"difficulty":        "easy",
+		"difficulty_source": "explicit",
+		"route_provider":    "local",
+		"route_model":       "small-model",
+		"route_source":      "difficulty_level",
+	})
+	// 难度 hard：切换到跨文件重构子任务。
+	publishAnalysisRouteEvent(t, bus, runtimeevents.EventSubagentRouteResolved, sessionID, map[string]interface{}{
+		"subagent_id":       "sub-hard",
+		"role":              "writer",
+		"goal":              "跨文件重构",
+		"parent_session_id": sessionID,
+		"child_session_id":  "child-hard",
+		"attempt":           1,
+		"max_attempts":      2,
+		"trace_id":          "trace-diff-hard",
+		"difficulty":        "hard",
+		"difficulty_source": "explicit",
+		"route_provider":    "remote",
+		"route_model":       "strong-model",
+		"route_source":      "difficulty_level",
+	})
+
+	// 总览：两档各 1，by_difficulty 恰好两个桶。
+	for _, query := range []string{"", "?scope=session", "?scope=all"} {
+		code, body := analysisGetJSON(t, ChatWebAPIAnalysisPath+"/routing"+query)
+		if code != http.StatusOK {
+			t.Fatalf("routing%s status = %d, want 200; body: %v", query, code, body)
+		}
+		totals, ok := body["totals"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("routing%s totals missing: %v", query, body)
+		}
+		if totals["total"] != float64(2) {
+			t.Fatalf("routing%s total = %v, want 2", query, totals["total"])
+		}
+		byDifficulty := analysisArray(t, body, "by_difficulty")
+		if len(byDifficulty) != 2 {
+			t.Fatalf("routing%s by_difficulty = %d items, want 2: %v", query, len(byDifficulty), byDifficulty)
+		}
+		got := map[string]float64{}
+		for _, item := range byDifficulty {
+			bucket, ok := item.(map[string]interface{})
+			if !ok {
+				t.Fatalf("by_difficulty item not a map: %T", item)
+			}
+			key, _ := bucket["key"].(string)
+			count, _ := bucket["count"].(float64)
+			got[key] = count
+		}
+		if got["easy"] != float64(1) || got["hard"] != float64(1) {
+			t.Fatalf("routing%s by_difficulty = %v, want easy=1 hard=1", query, got)
+		}
+	}
+
+	// 难度过滤：easy/hard 各自只回本档，且与范围开关组合可用。
+	for _, tc := range []struct {
+		query string
+		want  string
+	}{
+		{"?difficulty=easy", "easy"},
+		{"?difficulty=hard", "hard"},
+		{"?scope=session&difficulty=easy", "easy"},
+		{"?scope=all&difficulty=hard", "hard"},
+	} {
+		code, body := analysisGetJSON(t, ChatWebAPIAnalysisPath+"/routing"+tc.query)
+		if code != http.StatusOK {
+			t.Fatalf("routing%s status = %d, want 200; body: %v", tc.query, code, body)
+		}
+		totals, ok := body["totals"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("routing%s totals missing: %v", tc.query, body)
+		}
+		if totals["total"] != float64(1) {
+			t.Fatalf("routing%s total = %v, want 1", tc.query, totals["total"])
+		}
+		byDifficulty := analysisArray(t, body, "by_difficulty")
+		if len(byDifficulty) != 1 {
+			t.Fatalf("routing%s by_difficulty = %d items, want 1", tc.query, len(byDifficulty))
+		}
+		bucket, _ := byDifficulty[0].(map[string]interface{})
+		if key, _ := bucket["key"].(string); key != tc.want {
+			t.Fatalf("routing%s by_difficulty key = %v, want %s", tc.query, bucket["key"], tc.want)
+		}
+	}
+
+	// events 端点难度过滤（明细列与分桶一致）。
+	for _, tc := range []struct {
+		query string
+		model string
+	}{
+		{"?difficulty=easy", "small-model"},
+		{"?difficulty=hard", "strong-model"},
+	} {
+		code, body := analysisGetJSON(t, ChatWebAPIAnalysisPath+"/routing/events"+tc.query)
+		if code != http.StatusOK {
+			t.Fatalf("routing/events%s status = %d, want 200; body: %v", tc.query, code, body)
+		}
+		if body["count"] != float64(1) {
+			t.Fatalf("routing/events%s count = %v, want 1", tc.query, body["count"])
+		}
+		events := analysisArray(t, body, "events")
+		first, _ := events[0].(map[string]interface{})
+		if model, _ := first["model"].(string); model != tc.model {
+			t.Fatalf("routing/events%s model = %v, want %s", tc.query, first["model"], tc.model)
+		}
+	}
+}
+
 func TestHandleChatWebAPIAnalysis_RequestBoundaries(t *testing.T) {
 	newAnalysisTestSession(t)
 
@@ -702,12 +870,12 @@ func TestHandleChatWebPage_AnalysisModule(t *testing.T) {
 	}
 	body := rec.Body.String()
 	for _, needle := range []string{
-		"/web/api/analysis",  // 数据源固定为分析端点前缀
-		`cache: "no-store"`,  // 与 cache.js 同模式：禁用浏览器缓存
-		"attached=false",     // 未挂载 → 顶部健康条（§9.1 降级）
-		"暂无数据",               // 空库渲染
-		"data-analysis-tool", // 工具行下钻
-		"routing",            // 路由观测
+		"/web/api/analysis",     // 数据源固定为分析端点前缀
+		`cache: "no-store"`,     // 与 cache.js 同模式：禁用浏览器缓存
+		"attached=false",        // 未挂载 → 顶部健康条（§9.1 降级）
+		"暂无数据",                  // 空库渲染
+		"data-analysis-tool",    // 工具行下钻
+		"routing",               // 路由观测
 		"loadMoreRoutingEvents", // 路由分页加载
 	} {
 		if !strings.Contains(body, needle) {

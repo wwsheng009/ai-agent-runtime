@@ -202,6 +202,17 @@ func (s *Store) hasColumn(table, column string) (bool, error) {
 	return false, nil
 }
 
+// columnExpr 返回可用于 SELECT 的列表达式：列存在时是列名本身，缺列时退化为
+// 空串常量。只读旧库不改 schema，读路径必须按列存在性退化，而不是让整条查询
+// 报错（usage_routes 与 usage_subagents 的增量列共用此策略）。
+// 表名/列名是包内常量，不接受外部输入。
+func (s *Store) columnExpr(table, column string) string {
+	if has, err := s.hasColumn(table, column); err == nil && has {
+		return column
+	}
+	return "''"
+}
+
 // requestsStatsColumnsComplete 报告 usage_requests 是否具备 v3 回填所需的
 // 全部列。v1 部分 schema（历史遗留/裁剪库）缺列时跳过 v3，保持 v2 与旧读路径。
 func (s *Store) requestsStatsColumnsComplete() (bool, error) {

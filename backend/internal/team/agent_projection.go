@@ -136,6 +136,8 @@ func AgentControlTaskRecord(task Task, teammate *Teammate) agentcontrol.TaskReco
 		Summary:             task.Summary,
 		Difficulty:          task.Difficulty,
 		DifficultyRationale: task.DifficultyRationale,
+		TaskType:            task.TaskType,
+		TaskSubject:         task.TaskSubject,
 		Status:              string(task.Status),
 		Priority:            task.Priority,
 		Attempt:             task.Attempt,

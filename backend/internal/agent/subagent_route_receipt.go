@@ -29,6 +29,8 @@ const (
 type subagentRouteReceipt struct {
 	Difficulty       string
 	DifficultySource string
+	TaskType         string
+	TaskSubject      string
 	Provider         string
 	Model            string
 	ReasoningEffort  string
@@ -49,6 +51,8 @@ func (r subagentRouteReceipt) empty() bool {
 func subagentRouteReceiptFromTask(task SubagentTask) subagentRouteReceipt {
 	return subagentRouteReceipt{
 		Difficulty:      strings.TrimSpace(task.Difficulty),
+		TaskType:        strings.TrimSpace(task.TaskType),
+		TaskSubject:     strings.TrimSpace(task.TaskSubject),
 		Provider:        strings.TrimSpace(task.Provider),
 		Model:           strings.TrimSpace(task.Model),
 		ReasoningEffort: strings.TrimSpace(task.ReasoningEffort),
@@ -62,6 +66,8 @@ func subagentRouteReceiptFromDecision(decision modelrouting.RouteDecision) subag
 	return subagentRouteReceipt{
 		Difficulty:       strings.TrimSpace(decision.Difficulty),
 		DifficultySource: strings.TrimSpace(decision.Source),
+		TaskType:         strings.TrimSpace(decision.TaskType),
+		TaskSubject:      strings.TrimSpace(decision.TaskSubject),
 		Provider:         strings.TrimSpace(decision.Provider),
 		Model:            strings.TrimSpace(decision.Model),
 		ReasoningEffort:  strings.TrimSpace(decision.ReasoningEffort),
@@ -84,6 +90,16 @@ func (r subagentRouteReceipt) line(id string) string {
 		target = strings.Trim(provider+"/"+model, "/")
 	}
 	parts := []string{"route: " + label, difficulty, target}
+	if taskType := strings.TrimSpace(r.TaskType); taskType != "" {
+		parts = append(parts, "task_type="+taskType)
+	}
+	if subject := strings.TrimSpace(r.TaskSubject); subject != "" {
+		// task_subject 是自由文本：截断到 48 字节，避免撑爆 1 KB 回执预算。
+		if len(subject) > 48 {
+			subject = subject[:48] + "…"
+		}
+		parts = append(parts, "subject="+subject)
+	}
 	if effort := strings.TrimSpace(r.ReasoningEffort); effort != "" {
 		parts = append(parts, "effort="+effort)
 	}

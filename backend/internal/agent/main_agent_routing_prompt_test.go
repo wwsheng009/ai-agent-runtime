@@ -42,6 +42,15 @@ func TestMainAgentRoutingSystemFragmentStableAndGuarded(t *testing.T) {
 	if !strings.Contains(first, predictTaskDifficultyToolName) {
 		t.Fatalf("fragment must name the reporting tool: %q", first)
 	}
+	// U18 补充（doc9 v4）：有限 task_type 类别列表必须注入，且只含分类语义。
+	if !strings.Contains(first, "task_type") {
+		t.Fatalf("fragment must list the task_type parameter: %q", first)
+	}
+	for _, taskType := range []string{"explore", "migrate", "verify", "generate"} {
+		if !strings.Contains(first, taskType) {
+			t.Fatalf("fragment must list task category %q: %q", taskType, first)
+		}
+	}
 	lowered := strings.ToLower(first)
 	for _, forbidden := range []string{"provider", "model", "anthropic", "claude"} {
 		if strings.Contains(lowered, forbidden) {

@@ -213,6 +213,8 @@ func (s *SubagentScheduler) emitSubagentAttemptEvent(
 	s.parent.emitRuntimeEvent("subagent.completed", childSessionID, "", mergeRouteAuditPayload(map[string]interface{}{
 		"subagent_id":          task.ID,
 		"role":                 task.Role,
+		"task_type":            task.TaskType,
+		"task_subject":         task.TaskSubject,
 		"read_only":            task.ReadOnly,
 		"success":              false,
 		"status":               "failed",

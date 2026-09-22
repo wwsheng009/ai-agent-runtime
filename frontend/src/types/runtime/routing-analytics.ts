@@ -9,6 +9,27 @@
 //     因此 totals 只计 true，未知不并入 false；
 //   - 分布桶与 totals 同源同过滤集（后端全量 SQL 聚合），桶计数之和恒等于 totals。
 
+/**
+ * 任务类型封闭枚举（P4 收编，后端 NormalizeTaskType 的 12 类，已排序）。
+ * 配置编辑器 task_types 的键必须取自该集合；观测面板按此表映射展示标签。
+ */
+export const agentRoutingTaskTypes = [
+  "config",
+  "explore",
+  "generate",
+  "implement",
+  "integration",
+  "migrate",
+  "modify",
+  "refactor",
+  "security",
+  "test",
+  "understand",
+  "verify",
+] as const;
+
+export type AgentRoutingTaskType = (typeof agentRoutingTaskTypes)[number];
+
 export type AnalyticsRouteTotals = {
   total: number;
   main_agent: number;
@@ -47,6 +68,13 @@ export type AnalyticsRouteStatsResponse = {
    * 与 by_difficulty 对照即可判断本地提升是否过火。
    */
   by_difficulty_source: AnalyticsRouteBucket[];
+  /**
+   * 任务类型分布（P4 task_type 收编后的主维度）：键为 12 类封闭枚举
+   * （config/explore/generate/implement/integration/migrate/modify/refactor/
+   * security/test/understand/verify），历史缺列行为空串桶。
+   * 与 by_role 并存：by_role 是编排角色维度，兼容保留不删。
+   */
+  by_task_type: AnalyticsRouteBucket[];
   by_role: AnalyticsRouteBucket[];
   warnings: AnalyticsRouteBucket[];
   /** 兼容保留字段：分布桶已是全量精确聚合，后端恒为 false。 */
@@ -65,6 +93,10 @@ export type AnalyticsRouteEvent = {
   kind: string;
   agent_id?: string;
   role?: string;
+  /** 任务类型（12 类封闭枚举；未记录 task_type 的历史行为空）。 */
+  task_type?: string;
+  /** 任务主体（发射端按 256 字符截断；未记录的历史行为空）。 */
+  task_subject?: string;
   /** 子代理任务目标（发射端按 256 字符截断；主 Agent 行与缺列旧库为空）。 */
   goal?: string;
   step: number;

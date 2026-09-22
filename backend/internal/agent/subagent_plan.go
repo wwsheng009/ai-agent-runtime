@@ -23,6 +23,8 @@ func BuildSubagentTasksFromPlan(plan *Plan) []SubagentTask {
 		task := SubagentTask{
 			ID:                  firstNonEmptyString(step.ID, role),
 			Role:                role,
+			TaskType:            strings.TrimSpace(step.TaskType),
+			TaskSubject:         strings.TrimSpace(step.TaskSubject),
 			Goal:                subagentGoalForStep(plan.Goal, step),
 			Difficulty:          difficulty,
 			DifficultyRationale: difficultyRationale,

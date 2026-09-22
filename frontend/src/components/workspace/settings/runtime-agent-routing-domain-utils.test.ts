@@ -61,7 +61,7 @@ describe("runtime agent routing domain utils", () => {
         subagents: {
           routing: {
             enabled: true,
-            roles: { verifier: { hard: { model: "audit" } } },
+            task_types: { verify: { hard: { model: "audit" } } },
             levels: { hard: { timeout: "2m", thinking_effort: "high" } },
           },
         },
@@ -75,13 +75,130 @@ describe("runtime agent routing domain utils", () => {
 
     const record = buildRuntimeAgentRoutingRecord(settings.subagents);
     const levels = record.levels as Record<string, Record<string, unknown>>;
-    expect(record.roles).toEqual({ verifier: { hard: { model: "audit" } } });
+    expect(record.task_types).toEqual({ verify: { hard: { model: "audit" } } });
     expect(levels.hard).toEqual({
       timeout: "2m",
       provider: "strong",
       model: "strong-model",
       reasoning_effort: "medium",
     });
+  });
+
+  it("maps legacy roles onto the closed task_type enum on read", () => {
+    const settings = getRuntimeAgentRoutingSettings({
+      aicli: {
+        subagents: {
+          routing: {
+            roles: {
+              verifier: { hard: { provider: "audit", model: "audit-model" } },
+              writer: { normal: { model: "writer-model" } },
+              researcher: { easy: { model: "explore-model" } },
+              auditor: { expert: { model: "custom-auditor" } },
+            },
+          },
+        },
+      },
+    });
+
+    const entries = settings.subagents.taskTypes;
+    expect(entries.map((entry) => entry.key)).toEqual([
+      "verify",
+      "implement",
+      "explore",
+      "auditor",
+    ]);
+    expect(entries[0].legacy).toBe(false);
+    expect(entries[0].levels.hard).toEqual({
+      provider: "audit",
+      model: "audit-model",
+      reasoningEffort: "",
+    });
+    // 无别名的自定义 role 保留展示（legacy 条目）。
+    expect(entries[3].legacy).toBe(true);
+    expect(entries[3].levels.expert.model).toBe("custom-auditor");
+  });
+
+  it("prefers explicit task_types over aliased roles entries", () => {
+    const settings = getRuntimeAgentRoutingSettings({
+      aicli: {
+        subagents: {
+          routing: {
+            task_types: { verify: { hard: { model: "explicit-verify" } } },
+            roles: {
+              verifier: { normal: { model: "role-verify" } },
+              auditor: { normal: { model: "custom-auditor" } },
+            },
+          },
+        },
+      },
+    });
+
+    const entries = settings.subagents.taskTypes;
+    expect(entries.map((entry) => entry.key)).toEqual(["verify", "auditor"]);
+    expect(entries[0].legacy).toBe(false);
+    expect(entries[0].levels.hard.model).toBe("explicit-verify");
+    // roles.verifier 被显式 task_types.verify 覆盖 ⇒ 其 normal 难度不并入。
+    expect(entries[0].levels.normal.model).toBe("");
+    expect(entries[1].legacy).toBe(true);
+  });
+
+  it("writes task_types and keeps custom roles on submit", () => {
+    const settings = getRuntimeAgentRoutingSettings({
+      aicli: {
+        subagents: {
+          routing: {
+            roles: {
+              verifier: { hard: { model: "audit", timeout: "2m" } },
+              auditor: { normal: { model: "custom-auditor" } },
+            },
+          },
+        },
+      },
+    });
+    settings.subagents.taskTypes[0].levels.hard.provider = "strong";
+    settings.subagents.taskTypes.push({
+      key: "test",
+      legacy: false,
+      levels: {
+        easy: { provider: "", model: "", reasoningEffort: "" },
+        normal: { provider: "", model: "", reasoningEffort: "" },
+        hard: { provider: "", model: "", reasoningEffort: "" },
+        expert: { provider: "", model: "", reasoningEffort: "" },
+      },
+      raw: {},
+    });
+
+    const record = buildRuntimeAgentRoutingRecord(settings.subagents);
+
+    // verifier → verify 写进 task_types，未暴露的 raw 字段（timeout）保留。
+    expect(record.task_types).toEqual({
+      verify: {
+        hard: { timeout: "2m", model: "audit", provider: "strong" },
+      },
+    });
+    // 无别名的自定义 role 写回 roles 兜底；空条目（test）不产生噪音。
+    expect(record.roles).toEqual({
+      auditor: { normal: { model: "custom-auditor" } },
+    });
+  });
+
+  it("drops task_types and roles when no override remains", () => {
+    const settings = getRuntimeAgentRoutingSettings({
+      aicli: {
+        subagents: {
+          routing: {
+            task_types: { verify: { hard: { model: "audit" } } },
+            roles: { auditor: { normal: { model: "custom-auditor" } } },
+          },
+        },
+      },
+    });
+    settings.subagents.taskTypes = [];
+
+    const record = buildRuntimeAgentRoutingRecord(settings.subagents);
+
+    expect(record.task_types).toBeUndefined();
+    expect(record.roles).toBeUndefined();
   });
 
   it("normalizes the expert concurrency tri-state on write", () => {

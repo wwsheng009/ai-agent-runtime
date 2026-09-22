@@ -8,17 +8,22 @@ import {
 
 import {
   agentRoutingDifficulties,
+  agentRoutingTaskTypes,
   analyzeRuntimeAgentRoutingConfig,
   type AgentRoutingDifficulty,
   type AgentRoutingScope,
   type RuntimeAgentRoutingConfigSummary,
   type RuntimeAgentRoutingSettings,
 } from "./runtime-agent-routing-domain-utils";
-import { cloneRoutingConfig } from "./runtime-agent-routing-domain-editor/format";
+import {
+  cloneRoutingConfig,
+  emptyRouteLevels,
+} from "./runtime-agent-routing-domain-editor/format";
 import { RoutingDifficultyTable } from "./runtime-agent-routing-domain-editor/routing-difficulty-table";
 import { RoutingHeaderCard } from "./runtime-agent-routing-domain-editor/routing-header";
 import { RoutingLimitsSection } from "./runtime-agent-routing-domain-editor/routing-limits-section";
 import { RoutingPreviewSection } from "./runtime-agent-routing-domain-editor/routing-preview-section";
+import { RoutingTaskTypesSection } from "./runtime-agent-routing-domain-editor/routing-task-types-section";
 import { RoutingTogglesSection } from "./runtime-agent-routing-domain-editor/routing-toggles-section";
 import { type RuntimeProviderSummary } from "./runtime-provider-config-utils";
 
@@ -65,6 +70,7 @@ export function RuntimeAgentRoutingDomainEditor({
   const [previewDifficulty, setPreviewDifficulty] =
     useState<AgentRoutingDifficulty>(config.defaultDifficulty);
   const [previewRole, setPreviewRole] = useState("");
+  const [previewTaskType, setPreviewTaskType] = useState("");
   const [previewGoal, setPreviewGoal] = useState("");
   const [previewResult, setPreviewResult] =
     useState<RuntimeAgentRoutePreviewResult | null>(null);
@@ -77,7 +83,7 @@ export function RuntimeAgentRoutingDomainEditor({
     setPreviewResult(null);
     setPreviewError(null);
     setIsPreviewing(false);
-  }, [config, previewDifficulty, previewGoal, previewRole, scope]);
+  }, [config, previewDifficulty, previewGoal, previewRole, previewTaskType, scope]);
 
   async function runRoutePreview() {
     const requestID = previewRequestID.current + 1;
@@ -90,6 +96,10 @@ export function RuntimeAgentRoutingDomainEditor({
         goal: previewGoal.trim(),
         read_only: true,
         role: previewRole.trim(),
+        // P4（F-5/F-7）：task_type 优先命中 task_types 覆盖表；留空表示未声明。
+        ...(previewTaskType.trim()
+          ? { task_type: previewTaskType.trim() }
+          : {}),
       });
       if (previewRequestID.current !== requestID) return;
       setPreviewResult(result);
@@ -137,6 +147,59 @@ export function RuntimeAgentRoutingDomainEditor({
     });
   }
 
+  function updateTaskTypeProfile(
+    key: string,
+    difficulty: AgentRoutingDifficulty,
+    field: "provider" | "model" | "reasoningEffort",
+    value: string,
+  ) {
+    updateConfig((next) => {
+      const entry = next.taskTypes.find((item) => item.key === key);
+      if (!entry) return;
+      const profile = entry.levels[difficulty];
+      profile[field] = value;
+      if (field === "provider") {
+        const provider = providers.find((item) => item.name === value);
+        const supported = new Set(provider?.supportedModels ?? []);
+        if (
+          provider?.defaultModel &&
+          (!profile.model || (supported.size > 0 && !supported.has(profile.model)))
+        ) {
+          profile.model = provider.defaultModel;
+        }
+      }
+    });
+  }
+
+  function addTaskType() {
+    updateConfig((next) => {
+      const used = new Set(next.taskTypes.map((entry) => entry.key));
+      const free = agentRoutingTaskTypes.find((key) => !used.has(key));
+      if (!free) return;
+      next.taskTypes.push({
+        key: free,
+        legacy: false,
+        levels: emptyRouteLevels(),
+        raw: {},
+      });
+    });
+  }
+
+  function removeTaskType(key: string) {
+    updateConfig((next) => {
+      next.taskTypes = next.taskTypes.filter((entry) => entry.key !== key);
+    });
+  }
+
+  function renameTaskType(key: string, nextKey: string) {
+    if (key === nextKey) return;
+    updateConfig((next) => {
+      if (next.taskTypes.some((entry) => entry.key === nextKey)) return;
+      const entry = next.taskTypes.find((item) => item.key === key);
+      if (entry) entry.key = nextKey;
+    });
+  }
+
   return (
     <div className="space-y-3">
       <RoutingHeaderCard
@@ -170,6 +233,18 @@ export function RuntimeAgentRoutingDomainEditor({
         updateProfile={updateProfile}
       />
 
+      <RoutingTaskTypesSection
+        config={config}
+        inherited={inherited}
+        onAddTaskType={addTaskType}
+        onRemoveTaskType={removeTaskType}
+        onRenameTaskType={renameTaskType}
+        onUpdateTaskTypeProfile={updateTaskTypeProfile}
+        providerOptions={providerOptions}
+        providers={providers}
+        t={t}
+      />
+
       <RoutingLimitsSection
         config={config}
         inherited={inherited}
@@ -184,10 +259,12 @@ export function RuntimeAgentRoutingDomainEditor({
         previewGoal={previewGoal}
         previewResult={previewResult}
         previewRole={previewRole}
+        previewTaskType={previewTaskType}
         runRoutePreview={runRoutePreview}
         setPreviewDifficulty={setPreviewDifficulty}
         setPreviewGoal={setPreviewGoal}
         setPreviewRole={setPreviewRole}
+        setPreviewTaskType={setPreviewTaskType}
         t={t}
       />
     </div>

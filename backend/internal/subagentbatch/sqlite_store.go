@@ -103,6 +103,18 @@ CREATE INDEX IF NOT EXISTS idx_subagent_tasks_status ON subagent_tasks(batch_id,
 CREATE INDEX IF NOT EXISTS idx_subagent_tasks_session ON subagent_tasks(child_session_id);
 `,
 	},
+	{
+		Version: 2,
+		Name:    "subagent_tasks_task_type_subject",
+		// 旧库补列：v1 的 CREATE TABLE IF NOT EXISTS 不会改写既有表，缺列的
+		// 旧库只能靠 ALTER 补齐；migrate.Apply 以 schema_migrations 记账，
+		// 新库（v1→v2）与旧库都恰好执行一次。列定义对齐 task_type 契约：
+		// TEXT NOT NULL DEFAULT ''，迁移后的历史行读出空串。
+		UpSQL: `
+ALTER TABLE subagent_tasks ADD COLUMN task_type TEXT NOT NULL DEFAULT '';
+ALTER TABLE subagent_tasks ADD COLUMN task_subject TEXT NOT NULL DEFAULT '';
+`,
+	},
 }
 
 // NewSQLiteBatchStore creates a SQLite-backed batch store.
@@ -352,13 +364,13 @@ func insertTaskRow(ctx context.Context, tx *sql.Tx, t *SubagentTaskRecord, now t
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO subagent_tasks (
 			task_id, batch_id, parent_task_id, dependency_ids, child_session_id,
-			role, difficulty, read_only, status, order_index, attempt,
+			role, task_type, task_subject, difficulty, read_only, status, order_index, attempt,
 			task_deadline, started_at, updated_at, finished_at, last_progress_at,
 			spec_json, result_json, artifact_ref, error_class, error_code, version
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	`,
 		t.TaskID, t.BatchID, t.ParentTaskID, batchJSONList(t.DependencyIDs), t.ChildSessionID,
-		t.Role, t.Difficulty, boolInt(t.ReadOnly), string(t.Status), t.OrderIndex, t.Attempt,
+		t.Role, t.TaskType, t.TaskSubject, t.Difficulty, boolInt(t.ReadOnly), string(t.Status), t.OrderIndex, t.Attempt,
 		formatTimeOrNil(t.TaskDeadline), formatNullableBatchTime(t.StartedAt),
 		formatBatchTime(t.UpdatedAt), formatNullableBatchTime(t.FinishedAt),
 		formatNullableBatchTime(t.LastProgressAt),
@@ -644,7 +656,7 @@ func (s *sqliteBatchStore) getTaskTx(ctx context.Context, q interface {
 }, batchID, taskID string) (*SubagentTaskRecord, error) {
 	return scanTaskRow(q.QueryRowContext(ctx, `
 		SELECT task_id, batch_id, parent_task_id, dependency_ids, child_session_id,
-		       role, difficulty, read_only, status, order_index, attempt,
+		       role, task_type, task_subject, difficulty, read_only, status, order_index, attempt,
 		       task_deadline, started_at, updated_at, finished_at, last_progress_at,
 		       spec_json, result_json, artifact_ref, error_class, error_code, version
 		FROM subagent_tasks WHERE batch_id = ? AND task_id = ?`, batchID, taskID))
@@ -704,13 +716,15 @@ func overwriteTaskRow(ctx context.Context, tx *sql.Tx, batchID, taskID string, e
 		res, err = tx.ExecContext(ctx, `
 			UPDATE subagent_tasks SET
 				parent_task_id=?, dependency_ids=?, child_session_id=?, role=?,
-				difficulty=?, read_only=?, status=?, order_index=?, attempt=?,
+				task_type=?, task_subject=?, difficulty=?, read_only=?, status=?,
+				order_index=?, attempt=?,
 				task_deadline=?, started_at=?, updated_at=?, finished_at=?, last_progress_at=?,
 				spec_json=?, result_json=?, artifact_ref=?, error_class=?, error_code=?,
 				version=version+1
 			 WHERE batch_id = ? AND task_id = ? AND version = ?`,
 			t.ParentTaskID, batchJSONList(t.DependencyIDs), t.ChildSessionID, t.Role,
-			t.Difficulty, boolInt(t.ReadOnly), string(t.Status), t.OrderIndex, t.Attempt,
+			t.TaskType, t.TaskSubject, t.Difficulty, boolInt(t.ReadOnly), string(t.Status),
+			t.OrderIndex, t.Attempt,
 			formatTimeOrNil(t.TaskDeadline), formatNullableBatchTime(t.StartedAt),
 			formatBatchTime(t.UpdatedAt), formatNullableBatchTime(t.FinishedAt),
 			formatNullableBatchTime(t.LastProgressAt),
@@ -721,13 +735,15 @@ func overwriteTaskRow(ctx context.Context, tx *sql.Tx, batchID, taskID string, e
 		res, err = tx.ExecContext(ctx, `
 			UPDATE subagent_tasks SET
 				parent_task_id=?, dependency_ids=?, child_session_id=?, role=?,
-				difficulty=?, read_only=?, status=?, order_index=?, attempt=?,
+				task_type=?, task_subject=?, difficulty=?, read_only=?, status=?,
+				order_index=?, attempt=?,
 				task_deadline=?, started_at=?, updated_at=?, finished_at=?, last_progress_at=?,
 				spec_json=?, result_json=?, artifact_ref=?, error_class=?, error_code=?,
 				version=version+1
 			 WHERE batch_id = ? AND task_id = ?`,
 			t.ParentTaskID, batchJSONList(t.DependencyIDs), t.ChildSessionID, t.Role,
-			t.Difficulty, boolInt(t.ReadOnly), string(t.Status), t.OrderIndex, t.Attempt,
+			t.TaskType, t.TaskSubject, t.Difficulty, boolInt(t.ReadOnly), string(t.Status),
+			t.OrderIndex, t.Attempt,
 			formatTimeOrNil(t.TaskDeadline), formatNullableBatchTime(t.StartedAt),
 			formatBatchTime(t.UpdatedAt), formatNullableBatchTime(t.FinishedAt),
 			formatNullableBatchTime(t.LastProgressAt),
@@ -1095,7 +1111,8 @@ func scanTaskRow(s singleRow) (*SubagentTaskRecord, error) {
 	)
 	err := s.Scan(
 		&t.TaskID, &t.BatchID, &t.ParentTaskID, &depIDs, &t.ChildSessionID,
-		&t.Role, &t.Difficulty, &t.ReadOnly, &t.Status, &t.OrderIndex, &t.Attempt,
+		&t.Role, &t.TaskType, &t.TaskSubject, &t.Difficulty, &t.ReadOnly,
+		&t.Status, &t.OrderIndex, &t.Attempt,
 		&taskDeadline, &startedAt, &updatedAt, &finishedAt, &lastProgressAt,
 		&specJSON, &resultJSON, &t.ArtifactRef, &t.ErrorClass, &t.ErrorCode, &t.Version,
 	)
@@ -1125,7 +1142,7 @@ func (s *sqliteBatchStore) GetTask(ctx context.Context, batchID, taskID string) 
 	}
 	task, err := scanTaskRow(db.QueryRowContext(ctx, `
 		SELECT task_id, batch_id, parent_task_id, dependency_ids, child_session_id,
-		       role, difficulty, read_only, status, order_index, attempt,
+		       role, task_type, task_subject, difficulty, read_only, status, order_index, attempt,
 		       task_deadline, started_at, updated_at, finished_at, last_progress_at,
 		       spec_json, result_json, artifact_ref, error_class, error_code, version
 		FROM subagent_tasks WHERE batch_id = ? AND task_id = ?`, batchID, taskID))
@@ -1145,7 +1162,7 @@ func (s *sqliteBatchStore) ListTasks(ctx context.Context, batchID string) ([]Sub
 	}
 	rows, err := db.QueryContext(ctx, `
 		SELECT task_id, batch_id, parent_task_id, dependency_ids, child_session_id,
-		       role, difficulty, read_only, status, order_index, attempt,
+		       role, task_type, task_subject, difficulty, read_only, status, order_index, attempt,
 		       task_deadline, started_at, updated_at, finished_at, last_progress_at,
 		       spec_json, result_json, artifact_ref, error_class, error_code, version
 		FROM subagent_tasks WHERE batch_id = ? ORDER BY order_index ASC`, batchID)

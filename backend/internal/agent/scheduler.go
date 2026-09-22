@@ -31,8 +31,12 @@ type FilePatch struct {
 
 // SubagentTask 描述一个子代理任务包。
 type SubagentTask struct {
-	ID                  string      `json:"id,omitempty" yaml:"id,omitempty"`
-	Role                string      `json:"role,omitempty" yaml:"role,omitempty"`
+	ID   string `json:"id,omitempty" yaml:"id,omitempty"`
+	Role string `json:"role,omitempty" yaml:"role,omitempty"`
+	// TaskType/TaskSubject 是 v4 新增可选字段（plan SA-1/SA-3）：封闭枚举类别
+	// 与审计短说明。Role 保留为编排轴 + 路由兼容别名。
+	TaskType            string      `json:"task_type,omitempty" yaml:"task_type,omitempty"`
+	TaskSubject         string      `json:"task_subject,omitempty" yaml:"task_subject,omitempty"`
 	Goal                string      `json:"goal" yaml:"goal"`
 	Difficulty          string      `json:"difficulty,omitempty" yaml:"difficulty,omitempty"`
 	DifficultyRationale string      `json:"difficulty_rationale,omitempty" yaml:"difficulty_rationale,omitempty"`

@@ -56,6 +56,8 @@ type TaskTriggerRequest struct {
 	TaskID              string
 	Difficulty          string
 	DifficultyRationale string
+	TaskType            string
+	TaskSubject         string
 	Route               *TaskExecutionRoute
 	Prompt              string
 	RunMeta             *RunMeta
@@ -192,6 +194,8 @@ func (r *TeammateRunner) StartTask(ctx context.Context, team Team, mate Teammate
 		TaskID:              strings.TrimSpace(task.ID),
 		Difficulty:          strings.TrimSpace(task.Difficulty),
 		DifficultyRationale: strings.TrimSpace(task.DifficultyRationale),
+		TaskType:            strings.TrimSpace(task.TaskType),
+		TaskSubject:         strings.TrimSpace(task.TaskSubject),
 		Route:               route.Clone(),
 		Prompt:              prompt,
 		RunMeta:             runMeta,
@@ -293,6 +297,12 @@ func normalizeTaskExecutionRoute(route *TaskExecutionRoute, task Task, attempt i
 	if strings.TrimSpace(clone.DifficultyRationale) == "" {
 		clone.DifficultyRationale = strings.TrimSpace(task.DifficultyRationale)
 	}
+	if strings.TrimSpace(clone.TaskType) == "" {
+		clone.TaskType = strings.TrimSpace(task.TaskType)
+	}
+	if strings.TrimSpace(clone.TaskSubject) == "" {
+		clone.TaskSubject = strings.TrimSpace(task.TaskSubject)
+	}
 	if clone.Attempt <= 0 {
 		clone.Attempt = attempt
 	}
@@ -334,6 +344,8 @@ func applyRouteToTeamRunMeta(meta *TeamRunMeta, route *TaskExecutionRoute) {
 	meta.Difficulty = strings.TrimSpace(route.Difficulty)
 	meta.DifficultySource = strings.TrimSpace(route.DifficultySource)
 	meta.DifficultyRationale = strings.TrimSpace(route.DifficultyRationale)
+	meta.TaskType = strings.TrimSpace(route.TaskType)
+	meta.TaskSubject = strings.TrimSpace(route.TaskSubject)
 	meta.RouteProvider = strings.TrimSpace(route.Provider)
 	meta.RouteModel = strings.TrimSpace(route.Model)
 	meta.RouteReasoningEffort = strings.TrimSpace(route.ReasoningEffort)
@@ -458,6 +470,12 @@ func buildTaskPrompt(teamID, teammateName string, task Task, mailboxDigest strin
 	}
 	if rationale := strings.TrimSpace(task.DifficultyRationale); rationale != "" {
 		lines = append(lines, fmt.Sprintf("- Difficulty rationale: %s", rationale))
+	}
+	if taskType := strings.TrimSpace(task.TaskType); taskType != "" {
+		lines = append(lines, fmt.Sprintf("- Task type: %s", taskType))
+	}
+	if taskSubject := strings.TrimSpace(task.TaskSubject); taskSubject != "" {
+		lines = append(lines, fmt.Sprintf("- Task subject: %s", taskSubject))
 	}
 	if len(task.Inputs) > 0 {
 		lines = append(lines, fmt.Sprintf("- Inputs: %s", strings.Join(task.Inputs, ", ")))

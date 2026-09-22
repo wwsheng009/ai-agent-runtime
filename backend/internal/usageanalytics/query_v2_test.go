@@ -52,6 +52,7 @@ func seedV2Fixture(t *testing.T, store *Store, sessionID string) {
 	// 子代理：一个失败（rate_limited），一个成功。
 	publish(EventSubagentCompleted, map[string]interface{}{
 		"subagent_id": "sa-1", "parent_session_id": sessionID, "role": "researcher", "read_only": true,
+		"task_type": "research", "task_subject": "调查统计行字段",
 		"success": false, "error_code": "UPSTREAM_RATE_LIMITED", "attempt": 2, "max_attempts": 2, "source": "scheduler",
 	}, started.Add(7*time.Second))
 	publish(EventSubagentCompleted, map[string]interface{}{
@@ -132,6 +133,17 @@ func TestStoreV2StatsQueries(t *testing.T) {
 	}
 	if subagents.Summary.Retried != 1 {
 		t.Fatalf("重试计数应为 1: %+v", subagents.Summary)
+	}
+	// task_type/task_subject 逐行往返（v7 增量列）；sa-2 未携带字段 → 空串缺省。
+	bySubagent := map[string]SubagentStat{}
+	for _, stat := range subagents.Subagents {
+		bySubagent[stat.SubagentID] = stat
+	}
+	if got := bySubagent["sa-1"]; got.TaskType != "research" || got.TaskSubject != "调查统计行字段" {
+		t.Fatalf("子代理 task_type/task_subject 往返不符: %+v", got)
+	}
+	if got := bySubagent["sa-2"]; got.TaskType != "" || got.TaskSubject != "" {
+		t.Fatalf("缺省 task_type/task_subject 应为空串: %+v", got)
 	}
 
 	failedOnly, err := store.SubagentStats(SubagentStatsQuery{SessionID: "session-v2-stats", FailedOnly: true})

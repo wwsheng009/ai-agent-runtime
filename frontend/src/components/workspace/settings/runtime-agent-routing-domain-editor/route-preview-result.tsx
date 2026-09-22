@@ -3,7 +3,7 @@ import { type TFunction } from "i18next";
 
 import { type RuntimeAgentRoutePreviewResult } from "@/types/runtime";
 
-import { previewTranslation } from "./format";
+import { previewTranslation, taskTypeLabel } from "./format";
 import { HealthBadge, PreviewValue } from "./primitives";
 
 export function RoutePreviewResult({
@@ -35,6 +35,15 @@ export function RoutePreviewResult({
             {previewTranslation(t, "sources", decision.source)}
           </HealthBadge>
         ) : null}
+        {decision.difficulty_source ? (
+          <HealthBadge tone="neutral">
+            {previewTranslation(
+              t,
+              "difficultySources",
+              decision.difficulty_source,
+            )}
+          </HealthBadge>
+        ) : null}
         {decision.fallback_used ? (
           <HealthBadge tone="warning">
             {t("editor.agentRouting.preview.fallback")}
@@ -63,7 +72,19 @@ export function RoutePreviewResult({
               : ""
           }
         />
+        <PreviewValue
+          label={t("editor.agentRouting.preview.taskType")}
+          value={
+            decision.task_type ? taskTypeLabel(t, decision.task_type) : ""
+          }
+        />
       </div>
+
+      {decision.task_subject ? (
+        <div className="mt-2 break-words text-xs leading-5 text-muted-foreground">
+          {t("editor.agentRouting.preview.taskSubject")}: {decision.task_subject}
+        </div>
+      ) : null}
 
       <div className="mt-3 text-xs leading-5 text-muted-foreground">
         {t("editor.agentRouting.preview.parent")}: {result.parent.provider || "-"}

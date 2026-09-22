@@ -564,6 +564,8 @@ func TestAgentChatResponse_DecodeResult(t *testing.T) {
 					{
 						"id":              "step_write",
 						"role":            "writer",
+						"task_type":       "implement",
+						"task_subject":    "write the implementation",
 						"goal":            "Write the implementation",
 						"tools_whitelist": []string{"write_file"},
 						"depends_on":      []string{},
@@ -572,6 +574,8 @@ func TestAgentChatResponse_DecodeResult(t *testing.T) {
 					{
 						"id":              "step_verify",
 						"role":            "verifier",
+						"task_type":       "verify",
+						"task_subject":    "verify the implementation",
 						"goal":            "Verify the implementation",
 						"tools_whitelist": []string{"run_tests"},
 						"depends_on":      []string{"step_write"},
@@ -679,6 +683,10 @@ func TestAgentChatResponse_DecodeResult(t *testing.T) {
 	require.Len(t, planning.SubagentTasks, 2)
 	assert.Equal(t, "writer", planning.SubagentTasks[0].Role)
 	assert.Equal(t, "verifier", planning.SubagentTasks[1].Role)
+	assert.Equal(t, "implement", planning.SubagentTasks[0].TaskType)
+	assert.Equal(t, "write the implementation", planning.SubagentTasks[0].TaskSubject)
+	assert.Equal(t, "verify", planning.SubagentTasks[1].TaskType)
+	assert.Equal(t, "verify the implementation", planning.SubagentTasks[1].TaskSubject)
 	assert.False(t, planning.HasError())
 
 	subagentSummary, err := decoded.DecodeSubagentSummary()
@@ -3449,4 +3457,35 @@ func TestClient_SessionBacktrackEndpoints(t *testing.T) {
 	require.NotNil(t, apply.Result.CodeRestore)
 	require.Equal(t, []string{"a.txt"}, apply.Result.CodeRestore.AppliedPaths)
 	require.Contains(t, apply.Result.EventsEmitted, "backtrack_started")
+}
+
+// TestPlanningSubagentTaskTaskTypeSubjectCompatibility pins the optional-field
+// contract for the planning passthrough (plan §6.4 B-3): payloads carrying
+// task_type/task_subject decode them, payloads written before the fields existed
+// still decode into empty strings, and an empty pair stays omitted on re-encode
+// so downstream renderers see byte-identical output.
+func TestPlanningSubagentTaskTaskTypeSubjectCompatibility(t *testing.T) {
+	var withFields StreamPlanningPayload
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"subagent_tasks": [
+			{"id": "step_write", "role": "writer", "task_type": "implement", "task_subject": "write the implementation"},
+			{"id": "step_verify", "role": "verifier", "task_type": "verify"}
+		]
+	}`), &withFields))
+	require.Len(t, withFields.SubagentTasks, 2)
+	assert.Equal(t, "implement", withFields.SubagentTasks[0].TaskType)
+	assert.Equal(t, "write the implementation", withFields.SubagentTasks[0].TaskSubject)
+	assert.Equal(t, "verify", withFields.SubagentTasks[1].TaskType)
+	assert.Empty(t, withFields.SubagentTasks[1].TaskSubject)
+
+	var legacy StreamPlanningPayload
+	require.NoError(t, json.Unmarshal([]byte(`{"subagent_tasks":[{"id":"step_write","role":"writer"}]}`), &legacy))
+	require.Len(t, legacy.SubagentTasks, 1)
+	assert.Empty(t, legacy.SubagentTasks[0].TaskType)
+	assert.Empty(t, legacy.SubagentTasks[0].TaskSubject)
+
+	encoded, err := json.Marshal(PlanningSubagentTask{ID: "step_write", Role: "writer"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "task_type")
+	assert.NotContains(t, string(encoded), "task_subject")
 }

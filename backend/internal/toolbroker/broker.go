@@ -347,14 +347,23 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":                     map[string]interface{}{"type": "string", "description": "Optional explicit child session id."},
-						"session_id":             map[string]interface{}{"type": "string", "description": "Alias for id."},
-						"message":                map[string]interface{}{"type": "string", "description": "Required: the child's initial task prompt. A spawn_agent call without a task prompt (or its alias goal/task) is rejected instead of creating an empty child session that has no task in context."},
-						"goal":                   map[string]interface{}{"type": "string", "description": "Alias for message (spawn_subagents/spawn_team name the same concept goal). Prefer message."},
-						"task":                   map[string]interface{}{"type": "string", "description": "Alias for message. Prefer message."},
-						"agent_type":             map[string]interface{}{"type": "string", "description": "Optional role hint for the child agent."},
-						"difficulty":             map[string]interface{}{"type": "string", "enum": []string{"easy", "normal", "hard", "expert"}, "description": "Optional task difficulty hint for local child routing."},
-						"difficulty_rationale":   map[string]interface{}{"type": "string", "description": "Optional short rationale for the selected task difficulty."},
+						"id":                   map[string]interface{}{"type": "string", "description": "Optional explicit child session id."},
+						"session_id":           map[string]interface{}{"type": "string", "description": "Alias for id."},
+						"message":              map[string]interface{}{"type": "string", "description": "Required: the child's initial task prompt. A spawn_agent call without a task prompt (or its alias goal/task) is rejected instead of creating an empty child session that has no task in context."},
+						"goal":                 map[string]interface{}{"type": "string", "description": "Alias for message (spawn_subagents/spawn_team name the same concept goal). Prefer message."},
+						"task":                 map[string]interface{}{"type": "string", "description": "Alias for message. Prefer message."},
+						"agent_type":           map[string]interface{}{"type": "string", "description": "Optional orchestration role hint for the child agent (compatibility alias; prefer task_type for routing)."},
+						"difficulty":           map[string]interface{}{"type": "string", "enum": []string{"easy", "normal", "hard", "expert"}, "description": "Optional task difficulty hint for local child routing."},
+						"difficulty_rationale": map[string]interface{}{"type": "string", "description": "Optional short rationale for the selected task difficulty."},
+						"task_type": map[string]interface{}{
+							"type":        "string",
+							"enum":        modelrouting.TaskTypes(),
+							"description": "Optional closed-enum task category for routing and audit.",
+						},
+						"task_subject": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional audit-only one-line task summary.",
+						},
 						"provider":               map[string]interface{}{"type": "string", "description": "Optional provider override hint. Runtime policy may deny or ignore it."},
 						"model":                  map[string]interface{}{"type": "string", "description": "Optional model hint stored on the child session."},
 						"reasoning_effort":       map[string]interface{}{"type": "string", "description": "Optional reasoning effort hint for the child session."},
@@ -525,14 +534,23 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":                     map[string]interface{}{"type": "string", "description": "Optional explicit child session id."},
-						"session_id":             map[string]interface{}{"type": "string", "description": "Alias for id."},
-						"message":                map[string]interface{}{"type": "string", "description": "Required: the child's initial task prompt. A spawn_agent call without a task prompt (or its alias goal/task) is rejected instead of creating an empty child session that has no task in context."},
-						"goal":                   map[string]interface{}{"type": "string", "description": "Alias for message (spawn_subagents/spawn_team name the same concept goal). Prefer message."},
-						"task":                   map[string]interface{}{"type": "string", "description": "Alias for message. Prefer message."},
-						"agent_type":             map[string]interface{}{"type": "string", "description": "Optional role hint for the child agent."},
-						"difficulty":             map[string]interface{}{"type": "string", "enum": []string{"easy", "normal", "hard", "expert"}, "description": "Optional task difficulty hint for local child routing."},
-						"difficulty_rationale":   map[string]interface{}{"type": "string", "description": "Optional short rationale for the selected task difficulty."},
+						"id":                   map[string]interface{}{"type": "string", "description": "Optional explicit child session id."},
+						"session_id":           map[string]interface{}{"type": "string", "description": "Alias for id."},
+						"message":              map[string]interface{}{"type": "string", "description": "Required: the child's initial task prompt. A spawn_agent call without a task prompt (or its alias goal/task) is rejected instead of creating an empty child session that has no task in context."},
+						"goal":                 map[string]interface{}{"type": "string", "description": "Alias for message (spawn_subagents/spawn_team name the same concept goal). Prefer message."},
+						"task":                 map[string]interface{}{"type": "string", "description": "Alias for message. Prefer message."},
+						"agent_type":           map[string]interface{}{"type": "string", "description": "Optional orchestration role hint for the child agent (compatibility alias; prefer task_type for routing)."},
+						"difficulty":           map[string]interface{}{"type": "string", "enum": []string{"easy", "normal", "hard", "expert"}, "description": "Optional task difficulty hint for local child routing."},
+						"difficulty_rationale": map[string]interface{}{"type": "string", "description": "Optional short rationale for the selected task difficulty."},
+						"task_type": map[string]interface{}{
+							"type":        "string",
+							"enum":        modelrouting.TaskTypes(),
+							"description": "Optional closed-enum task category for routing and audit.",
+						},
+						"task_subject": map[string]interface{}{
+							"type":        "string",
+							"description": "Optional audit-only one-line task summary.",
+						},
 						"provider":               map[string]interface{}{"type": "string", "description": "Optional provider override hint. Runtime policy may deny or ignore it."},
 						"model":                  map[string]interface{}{"type": "string", "description": "Optional model hint stored on the child session."},
 						"reasoning_effort":       map[string]interface{}{"type": "string", "description": "Optional reasoning effort hint for the child session."},
@@ -801,6 +819,15 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 								"difficulty_rationale": map[string]interface{}{
 									"type":        "string",
 									"description": "Optional short rationale for the selected task difficulty.",
+								},
+								"task_type": map[string]interface{}{
+									"type":        "string",
+									"enum":        modelrouting.TaskTypes(),
+									"description": "Optional closed-enum task category for local routing (replaces the routing role axis). The runtime floors difficulty by category and records it in the route audit.",
+								},
+								"task_subject": map[string]interface{}{
+									"type":        "string",
+									"description": "Optional one-line description of what this task touches. Audit-only: never used for routing maps.",
 								},
 								"inputs": map[string]interface{}{
 									"type":  "array",
@@ -1488,6 +1515,12 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["difficulty_rationale"].(string); ok {
 			request.DifficultyRationale = strings.TrimSpace(value)
 		}
+		if value, ok := args["task_type"].(string); ok {
+			request.TaskType = strings.TrimSpace(value)
+		}
+		if value, ok := args["task_subject"].(string); ok {
+			request.TaskSubject = strings.TrimSpace(value)
+		}
 		if value, ok := args["provider"].(string); ok {
 			request.Provider = strings.TrimSpace(value)
 		}
@@ -1686,6 +1719,12 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			}
 			if difficulty := strings.TrimSpace(result.Difficulty); difficulty != "" {
 				metadata["difficulty"] = difficulty
+			}
+			if taskType := strings.TrimSpace(result.TaskType); taskType != "" {
+				metadata["task_type"] = taskType
+			}
+			if taskSubject := strings.TrimSpace(result.TaskSubject); taskSubject != "" {
+				metadata["task_subject"] = taskSubject
 			}
 			if source := strings.TrimSpace(result.RouteSource); source != "" {
 				metadata["route_source"] = source
@@ -2420,6 +2459,12 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				if value, ok := entry["difficulty_rationale"].(string); ok {
 					spec.DifficultyRationale = strings.TrimSpace(value)
 				}
+				if value, ok := entry["task_type"].(string); ok {
+					spec.TaskType = strings.TrimSpace(value)
+				}
+				if value, ok := entry["task_subject"].(string); ok {
+					spec.TaskSubject = strings.TrimSpace(value)
+				}
 				spec.Inputs = coerceStringSlice(entry["inputs"])
 				spec.ReadPaths = coerceStringSlice(entry["read_paths"])
 				spec.WritePaths = coerceStringSlice(entry["write_paths"])
@@ -2628,6 +2673,8 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				Goal:                strings.TrimSpace(spec.Goal),
 				Difficulty:          strings.TrimSpace(spec.Difficulty),
 				DifficultyRationale: strings.TrimSpace(spec.DifficultyRationale),
+				TaskType:            strings.TrimSpace(spec.TaskType),
+				TaskSubject:         strings.TrimSpace(spec.TaskSubject),
 				Priority:            spec.Priority,
 				Assignee:            strings.TrimSpace(spec.Assignee),
 				Inputs:              append([]string(nil), spec.Inputs...),
@@ -3188,6 +3235,7 @@ var spawnAgentMessageAliasKeys = []string{"goal", "task", "prompt"}
 var spawnAgentToolArgKeys = []string{
 	"id", "session_id", "message", "goal", "task", "prompt",
 	"agent_type", "difficulty", "difficulty_rationale",
+	"task_type", "task_subject",
 	"provider", "model", "reasoning_effort", "thinking_effort",
 	"permission_mode", "completion_requirement", "completionRequirement",
 	"isolation", "read_only", "fork_context", "fork_turns",
@@ -3985,6 +4033,8 @@ func buildTaskSpecResult(task *team.Task) ReadTaskSpecResult {
 		Goal:                task.Goal,
 		Difficulty:          task.Difficulty,
 		DifficultyRationale: task.DifficultyRationale,
+		TaskType:            task.TaskType,
+		TaskSubject:         task.TaskSubject,
 		Inputs:              append([]string(nil), task.Inputs...),
 		Status:              string(task.Status),
 		Priority:            task.Priority,

@@ -72,7 +72,8 @@ func brokerIgnoredArgHint(toolName, key string) string {
 	case "message", "goal", "task", "prompt", "instruction", "instructions",
 		"task_description", "objective", "goal_text", "content", "text", "description":
 		return "this tool carries no task prompt; spawn_agent (message, alias goal/task/prompt), send_message, followup_task and send_input do"
-	case "read_only", "permission_mode", "difficulty", "difficulty_rationale", "isolation",
+	case "read_only", "permission_mode", "difficulty", "difficulty_rationale",
+		"task_type", "task_subject", "isolation",
 		"fork_context", "fork_turns", "completion_requirement", "provider", "model",
 		"reasoning_effort", "thinking_effort":
 		return "delegation options are accepted by spawn_agent, spawn_subagents and spawn_team"

@@ -82,6 +82,10 @@ export type RuntimeAgentRoutePreviewParent = {
 
 export type RuntimeAgentRoutePreviewTask = {
   role?: string;
+  /** 任务类型（12 类封闭枚举；与 role 并存，task_type 优先命中 task_types 配置）。 */
+  task_type?: string;
+  /** 任务主体（用于展示与启发式判断的可读描述）。 */
+  task_subject?: string;
   goal?: string;
   difficulty?: string;
   difficulty_rationale?: string;
@@ -105,6 +109,9 @@ export type RuntimeAgentRoutePreviewDecision = {
   difficulty?: string;
   difficulty_source?: string;
   difficulty_rationale?: string;
+  /** 命中的任务类型（回显；未声明时为空）。 */
+  task_type?: string;
+  task_subject?: string;
   provider?: string;
   model?: string;
   reasoning_effort?: string;

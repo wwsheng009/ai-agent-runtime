@@ -224,6 +224,7 @@ func (s *Service) RouteStats(q RouteQuery) (RouteStatsResult, error) {
 		ByDifficulty:       []RouteBucket{},
 		ByDifficultySource: []RouteBucket{},
 		ByRole:             []RouteBucket{},
+		ByTaskType:         []RouteBucket{},
 		Warnings:           []RouteBucket{},
 	}, nil
 }

@@ -57,6 +57,31 @@ function subagentSourceLabel(t: TFunction<"usageAnalytics">, source?: string): s
   return (source ?? "").trim() || t("observability.subagents.sourceLabels.unknown");
 }
 
+// 任务类型（12 类封闭枚举，P4 收编）→ i18n key；未知取值原样回显。
+const taskTypeKeys = {
+  config: "observability.routing.taskTypes.config",
+  explore: "observability.routing.taskTypes.explore",
+  generate: "observability.routing.taskTypes.generate",
+  implement: "observability.routing.taskTypes.implement",
+  integration: "observability.routing.taskTypes.integration",
+  migrate: "observability.routing.taskTypes.migrate",
+  modify: "observability.routing.taskTypes.modify",
+  refactor: "observability.routing.taskTypes.refactor",
+  security: "observability.routing.taskTypes.security",
+  test: "observability.routing.taskTypes.test",
+  understand: "observability.routing.taskTypes.understand",
+  verify: "observability.routing.taskTypes.verify",
+} as const;
+
+type TaskTypeKey = (typeof taskTypeKeys)[keyof typeof taskTypeKeys];
+
+function taskTypeLabel(t: TFunction<"usageAnalytics">, raw?: string): string {
+  const normalized = (raw ?? "").trim().toLowerCase();
+  const key = taskTypeKeys[normalized as keyof typeof taskTypeKeys] as TaskTypeKey | undefined;
+  if (key) return t(key);
+  return (raw ?? "").trim();
+}
+
 function subagentStatusKey(
   success: boolean | null,
 ): "observability.subagents.status.succeeded" | "observability.subagents.status.failed" | "observability.subagents.status.unknown" {
@@ -284,11 +309,12 @@ export function SubagentStatsPanel({
         </div>
       ) : (
         <div className="w-full max-w-full overflow-x-auto rounded-card border border-border">
-          <table className="w-full min-w-[1080px] border-collapse text-left text-sm">
+          <table className="w-full min-w-[1200px] border-collapse text-left text-sm">
             <thead className="bg-surface-softer text-xs text-muted-foreground">
               <tr className="border-b border-border">
                 <th className="px-3 py-2 font-medium">{t("observability.subagents.columns.subagent")}</th>
                 <th className="px-3 py-2 font-medium">{t("observability.subagents.columns.role")}</th>
+                <th className="px-3 py-2 font-medium">{t("observability.subagents.columns.taskType")}</th>
                 <th className="px-3 py-2 font-medium">{t("observability.subagents.columns.source")}</th>
                 <th className="px-3 py-2 font-medium">{t("observability.subagents.columns.status")}</th>
                 <th className="px-3 py-2 font-medium">{t("observability.subagents.columns.failureCategory")}</th>
@@ -326,6 +352,17 @@ function SubagentRow({ stat }: { stat: AnalyticsSubagentStat }) {
         ) : null}
       </td>
       <td className="px-3 py-2.5">{stat.role || "-"}</td>
+      <td className="px-3 py-2.5">
+        <div>{stat.task_type ? taskTypeLabel(t, stat.task_type) : "-"}</div>
+        {stat.task_subject ? (
+          <div
+            className="mt-0.5 max-w-[16rem] truncate text-xs text-muted-foreground"
+            title={stat.task_subject}
+          >
+            {stat.task_subject}
+          </div>
+        ) : null}
+      </td>
       <td className="px-3 py-2.5">{subagentSourceLabel(t, stat.source)}</td>
       <td className="px-3 py-2.5">
         <Badge className={subagentStatusTone(stat.success)}>

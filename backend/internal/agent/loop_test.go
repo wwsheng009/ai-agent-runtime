@@ -2611,10 +2611,14 @@ func TestReActLoop_RunWithSession_AutoCompactionRecoveryContinuesAfterPromptPref
 			// tool result (~2.7 KiB, including the raw-output artifact notice)
 			// must stay under budget so the loop proceeds to the second tool
 			// call, exceeds the budget again, and only then exercises session
-			// compaction recovery. A tighter value (<=1500) flips the first
-			// reduction into a preflight failure, so compaction consumes a
-			// different mock response and the assertion sequence below fails.
-			"context_max_prompt_tokens":    1600,
+			// compaction recovery. A tighter value flips the first reduction
+			// into a preflight failure, so compaction consumes a different mock
+			// response and the assertion sequence below fails.
+			// v4（task_type 收编）给 spawn_subagents schema 增加了封闭枚举与
+			// 两个可选字段（tool_schema_tokens 575），首个越界点由 req2 承担的
+			// 约束把预算夹在 [req1_after=1666, req2_after=1791)：取 1750，
+			// 越界点与校准前的基线完全一致（req1 存活、req2 触发会话压缩）。
+			"context_max_prompt_tokens":    1750,
 			"context_max_messages":         16,
 			"context_keep_recent_messages": 8,
 		},

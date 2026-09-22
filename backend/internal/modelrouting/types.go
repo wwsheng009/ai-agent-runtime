@@ -1,6 +1,7 @@
 package modelrouting
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +21,9 @@ const (
 	SourceDisabled         = "disabled"
 	SourceExplicitOverride = "explicit_override"
 	SourceRoleOverride     = "role_override"
+	// SourceTaskTypeOverride 是 v4：按 task_type 查 cfg.TaskTypes 命中的 profile。
+	// SourceRoleOverride 保留一个 release，兜底未映射的自定义 role 与旧配置直读。
+	SourceTaskTypeOverride = "task_type_override"
 	SourceDifficultyLevel  = "difficulty_level"
 	SourceParentInherit    = "parent_inherit"
 	SourceFallback         = "fallback"
@@ -69,6 +73,130 @@ func PromoteExplicitMode(cfg *agentconfig.AICLISubagentRoutingConfig) string {
 		return mode
 	}
 	return PromoteExplicitEnforce
+}
+
+// ---------------------------------------------------------------------------
+// 任务类别轴（v4，plan.md §5/§6 K-1..K-6）
+//
+// task_type 是封闭枚举（12 类），替换「路由层 role」作为风险分类轴；编排层
+// role（writer→verifier 拓扑、强制只读等）不在本包职责内，原样保留。floor 对齐
+// 既有行为、不因换轴无故抬档：verify=normal（原 role=verifier）、migrate/security
+// =hard（原高信号词；不默认 expert——expert 只能来自显式声明，rank-max 只抬不降）。
+// ---------------------------------------------------------------------------
+
+const (
+	TaskTypeExplore     = "explore"
+	TaskTypeUnderstand  = "understand"
+	TaskTypeModify      = "modify"
+	TaskTypeImplement   = "implement"
+	TaskTypeRefactor    = "refactor"
+	TaskTypeTest        = "test"
+	TaskTypeVerify      = "verify"
+	TaskTypeMigrate     = "migrate"
+	TaskTypeSecurity    = "security"
+	TaskTypeConfig      = "config"
+	TaskTypeIntegration = "integration"
+	TaskTypeGenerate    = "generate"
+)
+
+// taskTypeFloors 是封闭 floor 查表（plan.md §5）。键为归一（lower+trim）后的
+// task_type；未知键不在表内 ⇒ ValidateTaskType 拒绝、写 task_type_unknown
+// warning 且不回退关键词猜词（K-4）。
+var taskTypeFloors = map[string]string{
+	TaskTypeExplore:     DifficultyEasy,
+	TaskTypeGenerate:    DifficultyEasy,
+	TaskTypeUnderstand:  DifficultyNormal,
+	TaskTypeModify:      DifficultyNormal,
+	TaskTypeTest:        DifficultyNormal,
+	TaskTypeConfig:      DifficultyNormal,
+	TaskTypeVerify:      DifficultyNormal,
+	TaskTypeImplement:   DifficultyHard,
+	TaskTypeRefactor:    DifficultyHard,
+	TaskTypeIntegration: DifficultyHard,
+	TaskTypeMigrate:     DifficultyHard,
+	TaskTypeSecurity:    DifficultyHard,
+}
+
+// NormalizeTaskType 归一 task_type 取值（lower+trim）。空串原样返回。
+func NormalizeTaskType(raw string) string {
+	return strings.ToLower(strings.TrimSpace(raw))
+}
+
+// ValidateTaskType 归一并校验是否为已知类别；未知值返回 ok=false，调用方应写
+// task_type_unknown:<v> warning 并忽略该字段（K-4）。
+func ValidateTaskType(raw string) (string, bool) {
+	normalized := NormalizeTaskType(raw)
+	if normalized == "" {
+		return "", false
+	}
+	_, ok := taskTypeFloors[normalized]
+	return normalized, ok
+}
+
+// TaskTypes 返回封闭枚举清单（排序稳定），供工具 schema enum、注入片段与测试使用。
+func TaskTypes() []string {
+	types := make([]string, 0, len(taskTypeFloors))
+	for taskType := range taskTypeFloors {
+		types = append(types, taskType)
+	}
+	sort.Strings(types)
+	return types
+}
+
+// TaskTypeFloor 返回已知类别的难度 floor；未知或空值返回 ok=false。
+func TaskTypeFloor(taskType string) (string, bool) {
+	floor, ok := taskTypeFloors[NormalizeTaskType(taskType)]
+	return floor, ok
+}
+
+// TaskTypeRiskRank 返回类别的风险底档 rank（与 difficulty 同序：easy=1 …
+// expert=4）；未知或空类别返回 0，调用方据此判定"无法比较"。
+func TaskTypeRiskRank(taskType string) int {
+	floor, ok := TaskTypeFloor(taskType)
+	if !ok {
+		return 0
+	}
+	return difficultyRank(floor)
+}
+
+// TaskTypeCrossTierDowngrade 报告一次降档是否构成「跨类降档」（plan 决策 3 /
+// doc9 §5.5）：两侧类别均已声明且新类风险底更低 ⇒ 确认步数收敛为 1 步；任一侧
+// 缺省或未知 ⇒ 调用方按同档（N 步）处理。min_dwell_steps 由调用方继续把守，
+// 本函数不绕过任何驻留约束。
+func TaskTypeCrossTierDowngrade(prev, next string) bool {
+	prevRank := TaskTypeRiskRank(prev)
+	nextRank := TaskTypeRiskRank(next)
+	return prevRank > 0 && nextRank > 0 && nextRank < prevRank
+}
+
+// TaskTypeFromRole 按兼容别名从路由层 role 推导隐式 task_type（plan §1）：
+// verifier→verify、writer&&!readonly→implement、researcher→explore，其余不推导
+// （返回 ""，回落 level default）。只用于 profile 查表与审计展示；**不参与 floor**
+// ——floor 只认显式 task_type，保证 task_type 缺省时档位与 v3 逐字一致。
+func TaskTypeFromRole(role string, readOnly bool) string {
+	switch NormalizeRole(role) {
+	case "verifier":
+		return TaskTypeVerify
+	case "writer":
+		if readOnly {
+			return ""
+		}
+		return TaskTypeImplement
+	case "researcher":
+		return TaskTypeExplore
+	default:
+		return ""
+	}
+}
+
+// EffectiveTaskType 返回任务的生效类别：显式合法 task_type 优先；缺省或未知时
+// 按 role 别名推导；都不成立返回 ""。显式非法值被"忽略"，因此允许回落到 role
+// 推导（K-4 的忽略语义：不报错、不参与 floor）。
+func EffectiveTaskType(taskType, role string, readOnly bool) string {
+	if normalized, ok := ValidateTaskType(taskType); ok {
+		return normalized
+	}
+	return TaskTypeFromRole(role, readOnly)
 }
 
 // HeuristicsDisabled 报告关键词启发式是否被显式关闭。
@@ -161,8 +289,13 @@ type ParentDefaults struct {
 
 // TaskHint is the routing-relevant subset of a subagent task.
 type TaskHint struct {
-	ID                  string
-	Role                string
+	ID   string
+	Role string
+	// TaskType/TaskSubject 是 v4 新增可选字段（K-1）：封闭枚举类别 + 短说明。
+	// TaskSubject 只进审计不进映射；TaskType 缺省时按 role 别名推导（见
+	// EffectiveTaskType），编排层 Role 字段本身原样保留。
+	TaskType            string
+	TaskSubject         string
 	Goal                string
 	Difficulty          string
 	DifficultyRationale string
@@ -180,16 +313,20 @@ type RouteDecision struct {
 	Difficulty          string
 	DifficultySource    string
 	DifficultyRationale string
-	Provider            string
-	Model               string
-	ReasoningEffort     string
-	MaxTokens           int
-	Timeout             time.Duration
-	Temperature         *float64
-	Source              string
-	Warnings            []string
-	FallbackUsed        bool
-	FallbackReason      string
+	// TaskType 是解析后的生效类别（显式合法值或 role 别名推导结果），空串表示
+	// 两者都不成立；TaskSubject 原样透传（调用方负责截断后写入审计载荷）。
+	TaskType        string
+	TaskSubject     string
+	Provider        string
+	Model           string
+	ReasoningEffort string
+	MaxTokens       int
+	Timeout         time.Duration
+	Temperature     *float64
+	Source          string
+	Warnings        []string
+	FallbackUsed    bool
+	FallbackReason  string
 	// Candidates is the audited gate outcome for every candidate the resolver
 	// considered, including the ones it skipped.
 	Candidates []RouteCandidateEvaluation

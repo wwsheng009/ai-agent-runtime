@@ -68,7 +68,11 @@ type RouteStatsResult struct {
 	// default（未声明且未命中）。与 ByDifficulty 对照即可判断本地提升是否过火。
 	ByDifficultySource []RouteBucket `json:"by_difficulty_source"`
 	ByRole             []RouteBucket `json:"by_role"`
-	Warnings           []RouteBucket `json:"warnings"`
+	// ByTaskType 回答「这一批路由决策都在做什么类别的任务」：task_type 是 v4 的
+	// 路由分类轴（封闭枚举，缺省时事件不带该字段）。与 ByRole 并存一个 release，
+	// 便于迁移窗口内对照「旧 role 轴」与「新 task_type 轴」的口径差。
+	ByTaskType []RouteBucket `json:"by_task_type"`
+	Warnings   []RouteBucket `json:"warnings"`
 	// SampleSize 是分布桶覆盖的行数（全量精确，等于 Totals.Total）。
 	// Sampled 是兼容保留字段：桶不再抽样，当前实现恒为 false。
 	Sampled    bool `json:"sampled"`
@@ -88,7 +92,11 @@ type RouteEvent struct {
 	Role            string    `json:"role,omitempty"`
 	// Goal 是子代理任务目标（发射点按 256 字符截断，见 internal/agent/subagent_route_audit.go）；
 	// 主 Agent 行与缺列旧库为空。
-	Goal             string   `json:"goal,omitempty"`
+	Goal string `json:"goal,omitempty"`
+	// TaskType / TaskSubject 是 v4 的路由分类轴与短说明（缺省时事件不带这两个键，
+	// 旧库缺列时为空串）；只进审计与聚合，不进 prompt。
+	TaskType         string   `json:"task_type,omitempty"`
+	TaskSubject      string   `json:"task_subject,omitempty"`
 	Step             int      `json:"step"`
 	Reason           string   `json:"reason"`
 	Source           string   `json:"source,omitempty"`

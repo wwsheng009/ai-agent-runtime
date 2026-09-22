@@ -603,8 +603,14 @@ type PlanningStep struct {
 }
 
 type PlanningSubagentTask struct {
-	ID             string   `json:"id,omitempty"`
-	Role           string   `json:"role,omitempty"`
+	ID   string `json:"id,omitempty"`
+	Role string `json:"role,omitempty"`
+	// TaskType/TaskSubject mirror the agent-side SubagentTask v4 fields
+	// (plan §6.4 B-3): a closed-enum routing category plus an audit-only
+	// subject. Optional, so payloads produced before the field existed decode
+	// into empty strings and keep their previous rendering.
+	TaskType       string   `json:"task_type,omitempty"`
+	TaskSubject    string   `json:"task_subject,omitempty"`
 	Goal           string   `json:"goal,omitempty"`
 	ToolsWhitelist []string `json:"tools_whitelist,omitempty"`
 	DependsOn      []string `json:"depends_on,omitempty"`

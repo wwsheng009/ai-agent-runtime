@@ -38,6 +38,8 @@ func TestCollectorIngestsRouteObservability(t *testing.T) {
 		"subagent_id":            "sub-1",
 		"role":                   "writer",
 		"goal":                   "改一个文件",
+		"task_type":              "migrate",
+		"task_subject":           "把配置迁到新 schema",
 		"parent_session_id":      "session-routes",
 		"child_session_id":       "child-1",
 		"attempt":                1,
@@ -77,7 +79,7 @@ func TestCollectorIngestsRouteObservability(t *testing.T) {
 	publish(runtimeevents.EventSubagentRouteResolved, retryRoute, started.Add(time.Second))
 	assertRowCount(t, store, `SELECT COUNT(*) FROM usage_routes WHERE scope='subagent'`, 2)
 
-	// 重复投递的合并语义：先落一行无 goal，再带 goal 重投同一自然键 → 补写而非新增。
+	// 重复投递的合并语义：先落一行无 goal / task_type，再带值重投同一自然键 → 补写而非新增。
 	mergeRoute := map[string]interface{}{
 		"subagent_id":            "sub-2",
 		"role":                   "verifier",
@@ -94,14 +96,16 @@ func TestCollectorIngestsRouteObservability(t *testing.T) {
 	}
 	publish(runtimeevents.EventSubagentRouteResolved, mergeRoute, started.Add(2*time.Second))
 	mergeRoute["goal"] = "补写目标"
+	mergeRoute["task_type"] = "verify"
+	mergeRoute["task_subject"] = "复核改动"
 	publish(runtimeevents.EventSubagentRouteResolved, mergeRoute, started.Add(2*time.Second))
-	mergeRow := queryRow(t, store, `SELECT goal FROM usage_routes WHERE child_session_id='child-3'`)
-	if mergeRow[0] != "补写目标" {
-		t.Fatalf("重复投递应补写 goal: %v", mergeRow)
+	mergeRow := queryRow(t, store, `SELECT goal, task_type, task_subject FROM usage_routes WHERE child_session_id='child-3'`)
+	if mergeRow[0] != "补写目标" || mergeRow[1] != "verify" || mergeRow[2] != "复核改动" {
+		t.Fatalf("重复投递应补写 goal / task_type / task_subject: %v", mergeRow)
 	}
 	assertRowCount(t, store, `SELECT COUNT(*) FROM usage_routes WHERE child_session_id='child-3'`, 1)
 
-	subagentRow := queryRow(t, store, `SELECT session_id, parent_session_id, child_session_id, kind, reason, source, difficulty, difficulty_source, provider, model, reasoning_effort, fallback_used, warning_count, attempt, goal FROM usage_routes WHERE child_session_id='child-1'`)
+	subagentRow := queryRow(t, store, `SELECT session_id, parent_session_id, child_session_id, kind, reason, source, difficulty, difficulty_source, provider, model, reasoning_effort, fallback_used, warning_count, attempt, goal, task_type, task_subject FROM usage_routes WHERE child_session_id='child-1'`)
 	if subagentRow[0] != "session-routes" || subagentRow[1] != "session-routes" || subagentRow[2] != "child-1" {
 		t.Fatalf("子代理路由行归属不符: %v", subagentRow)
 	}
@@ -117,9 +121,13 @@ func TestCollectorIngestsRouteObservability(t *testing.T) {
 	if subagentRow[14] != "改一个文件" {
 		t.Fatalf("子代理路由行 goal 未落列: %v", subagentRow)
 	}
-	retryGoalRow := queryRow(t, store, `SELECT goal FROM usage_routes WHERE child_session_id='child-2'`)
-	if retryGoalRow[0] != "" {
-		t.Fatalf("未携带 goal 的行应为空: %v", retryGoalRow)
+	if subagentRow[15] != "migrate" || subagentRow[16] != "把配置迁到新 schema" {
+		t.Fatalf("子代理路由行 task_type / task_subject 未落列: %v", subagentRow)
+	}
+	// 缺省兼容：未携带这些键的事件落空串（与今天逐字节一致）。
+	retryGoalRow := queryRow(t, store, `SELECT goal, task_type, task_subject FROM usage_routes WHERE child_session_id='child-2'`)
+	if retryGoalRow[0] != "" || retryGoalRow[1] != "" || retryGoalRow[2] != "" {
+		t.Fatalf("未携带 goal / task_type / task_subject 的行应为空: %v", retryGoalRow)
 	}
 
 	// --- 主 Agent 改道（prediction，带候选链）---
@@ -132,6 +140,8 @@ func TestCollectorIngestsRouteObservability(t *testing.T) {
 		"provider":         "remote",
 		"model":            "strong-model",
 		"reasoning_effort": "high",
+		"task_type":        "implement",
+		"task_subject":     "接入 task_type 聚合",
 		"route_changed":    true,
 		"candidates": []interface{}{
 			map[string]interface{}{"provider": "remote", "model": "strong-model", "selected": true},
@@ -167,7 +177,7 @@ func TestCollectorIngestsRouteObservability(t *testing.T) {
 		"trips":    1,
 	}, started.Add(5*time.Second))
 
-	mainRow := queryRow(t, store, `SELECT kind, reason, step, source, provider, model, route_changed, candidate_count FROM usage_routes WHERE scope='main_agent' AND kind='applied'`)
+	mainRow := queryRow(t, store, `SELECT kind, reason, step, source, provider, model, route_changed, candidate_count, task_type, task_subject FROM usage_routes WHERE scope='main_agent' AND kind='applied'`)
 	if mainRow[0] != RouteKindApplied || mainRow[1] != "prediction" || mainRow[2] != int64(3) {
 		t.Fatalf("主 Agent 改道行语义不符: %v", mainRow)
 	}
@@ -177,19 +187,28 @@ func TestCollectorIngestsRouteObservability(t *testing.T) {
 	if mainRow[6] != int64(1) || mainRow[7] != int64(2) {
 		t.Fatalf("主 Agent 改道行计数不符: %v", mainRow)
 	}
+	if mainRow[8] != "implement" || mainRow[9] != "接入 task_type 聚合" {
+		t.Fatalf("主 Agent 改道行 task_type / task_subject 未落列: %v", mainRow)
+	}
 
-	clearedRow := queryRow(t, store, `SELECT kind, reason, step, difficulty, provider, model, reasoning_effort FROM usage_routes WHERE scope='main_agent' AND kind='cleared'`)
+	clearedRow := queryRow(t, store, `SELECT kind, reason, step, difficulty, provider, model, reasoning_effort, task_type, task_subject FROM usage_routes WHERE scope='main_agent' AND kind='cleared'`)
 	if clearedRow[0] != RouteKindCleared || clearedRow[1] != RouteKindCleared || clearedRow[2] != int64(5) {
 		t.Fatalf("主 Agent 还原行语义不符: %v", clearedRow)
 	}
 	if clearedRow[3] != "hard" || clearedRow[4] != "local" || clearedRow[5] != "baseline-model" || clearedRow[6] != "medium" {
 		t.Fatalf("主 Agent 还原行目标不符: %v", clearedRow)
 	}
+	if clearedRow[7] != "" || clearedRow[8] != "" {
+		t.Fatalf("未携带 task_type / task_subject 的还原行应为空: %v", clearedRow)
+	}
 
 	assertRowCount(t, store, `SELECT COUNT(*) FROM usage_routes WHERE scope='main_agent' AND kind='warning'`, 2)
-	invalidRow := queryRow(t, store, `SELECT reason, step, difficulty FROM usage_routes WHERE scope='main_agent' AND reason='prediction_invalid'`)
+	invalidRow := queryRow(t, store, `SELECT reason, step, difficulty, task_type, task_subject FROM usage_routes WHERE scope='main_agent' AND reason='prediction_invalid'`)
 	if invalidRow[0] != "prediction_invalid" || invalidRow[1] != int64(2) || invalidRow[2] != "impossible" {
 		t.Fatalf("非法上报行不符: %v", invalidRow)
+	}
+	if invalidRow[3] != "" || invalidRow[4] != "" {
+		t.Fatalf("未携带 task_type / task_subject 的护栏行应为空: %v", invalidRow)
 	}
 	guardRow := queryRow(t, store, `SELECT reason, difficulty, step FROM usage_routes WHERE scope='main_agent' AND reason='cost_guard_tripped'`)
 	if guardRow[0] != "cost_guard_tripped" || guardRow[1] != "expert" || guardRow[2] != int64(4) {

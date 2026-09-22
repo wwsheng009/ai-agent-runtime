@@ -28,10 +28,15 @@ const (
 // 与 ingest 读取侧共用这一处归一化实现；历史数据缺字段时以 unknown 单列，
 // 绝不把 unknown 计入失败。
 type SubagentCompletion struct {
-	SubagentID       string
-	ParentSessionID  string
-	ChildSessionID   string
-	Role             string
+	SubagentID      string
+	ParentSessionID string
+	ChildSessionID  string
+	Role            string
+	// TaskType/TaskSubject（schema v7 增量列）：子代理分类轴与短说明，
+	// 由生产方在 subagent.completed / subagent.route.resolved 等事件载荷上附带；
+	// 历史载荷缺字段时留空串（不猜测、不从 role 反推）。
+	TaskType         string
+	TaskSubject      string
 	ReadOnly         bool
 	ReadOnlyKnown    bool
 	Success          *bool
@@ -60,6 +65,8 @@ func NormalizeSubagentCompletion(event runtimeevents.Event) (SubagentCompletion,
 		ParentSessionID: firstPayloadString(payload, "parent_session_id", "root_session_id"),
 		ChildSessionID:  firstPayloadString(payload, "child_session_id", "session_id", "agent_id"),
 		Role:            firstPayloadString(payload, "role", "agent_type", "target_role"),
+		TaskType:        firstPayloadString(payload, "task_type"),
+		TaskSubject:     firstPayloadString(payload, "task_subject"),
 		ErrorCode:       firstPayloadString(payload, "error_code"),
 		RetryReason:     firstPayloadString(payload, "retry_reason"),
 		RetryAdvice:     firstPayloadString(payload, "retry_advice"),

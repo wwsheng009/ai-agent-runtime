@@ -51,6 +51,8 @@ type routeRecord struct {
 	agentID          string
 	role             string
 	goal             string
+	taskType         string
+	taskSubject      string
 	step             int
 	reason           string
 	source           string
@@ -87,6 +89,8 @@ func (c *collector) onSubagentRouteResolved(event runtimeevents.Event) {
 		agentID:          payloadString(payload, "subagent_id", "agent_id"),
 		role:             payloadString(payload, "role"),
 		goal:             payloadString(payload, "goal"),
+		taskType:         payloadString(payload, "task_type"),
+		taskSubject:      payloadString(payload, "task_subject"),
 		step:             payloadInt(payload, "step"),
 		reason:           routeReasonResolved,
 		source:           payloadString(payload, "route_source"),
@@ -127,6 +131,8 @@ func (c *collector) onMainAgentRouteApplied(event runtimeevents.Event) {
 		provider:         payloadString(payload, "provider"),
 		model:            payloadString(payload, "model"),
 		effort:           payloadString(payload, "reasoning_effort"),
+		taskType:         payloadString(payload, "task_type"),
+		taskSubject:      payloadString(payload, "task_subject"),
 		recordedAt:       routeEventTime(event, c.now()),
 	}
 	if value, ok := payloadBoolValue(payload, "route_changed"); ok {
@@ -144,18 +150,20 @@ func (c *collector) onMainAgentRouteApplied(event runtimeevents.Event) {
 func (c *collector) onMainAgentRouteCleared(event runtimeevents.Event) {
 	payload := event.Payload
 	record := routeRecord{
-		scope:      RouteScopeMainAgent,
-		kind:       RouteKindCleared,
-		sessionID:  firstNonEmpty(payloadString(payload, "session_id"), event.SessionID),
-		traceID:    firstNonEmpty(payloadString(payload, "trace_id"), event.TraceID),
-		step:       payloadInt(payload, "steps_total"),
-		reason:     RouteKindCleared,
-		source:     "baseline",
-		difficulty: payloadString(payload, "final_difficulty"),
-		provider:   payloadString(payload, "restored_provider"),
-		model:      payloadString(payload, "restored_model"),
-		effort:     payloadString(payload, "restored_effort"),
-		recordedAt: routeEventTime(event, c.now()),
+		scope:       RouteScopeMainAgent,
+		kind:        RouteKindCleared,
+		sessionID:   firstNonEmpty(payloadString(payload, "session_id"), event.SessionID),
+		traceID:     firstNonEmpty(payloadString(payload, "trace_id"), event.TraceID),
+		step:        payloadInt(payload, "steps_total"),
+		reason:      RouteKindCleared,
+		source:      "baseline",
+		difficulty:  payloadString(payload, "final_difficulty"),
+		provider:    payloadString(payload, "restored_provider"),
+		model:       payloadString(payload, "restored_model"),
+		effort:      payloadString(payload, "restored_effort"),
+		taskType:    payloadString(payload, "task_type"),
+		taskSubject: payloadString(payload, "task_subject"),
+		recordedAt:  routeEventTime(event, c.now()),
 	}
 	c.insertRoute(record, payload)
 }
@@ -165,18 +173,20 @@ func (c *collector) onMainAgentRouteCleared(event runtimeevents.Event) {
 func (c *collector) onMainAgentRouteWarning(event runtimeevents.Event, reason string) {
 	payload := event.Payload
 	record := routeRecord{
-		scope:      RouteScopeMainAgent,
-		kind:       RouteKindWarning,
-		sessionID:  firstNonEmpty(payloadString(payload, "session_id"), event.SessionID),
-		traceID:    firstNonEmpty(payloadString(payload, "trace_id"), event.TraceID),
-		step:       payloadInt(payload, "step"),
-		reason:     reason,
-		source:     payloadString(payload, "source"),
-		difficulty: payloadString(payload, "difficulty", "level"),
-		provider:   payloadString(payload, "provider"),
-		model:      payloadString(payload, "model"),
-		effort:     payloadString(payload, "reasoning_effort"),
-		recordedAt: routeEventTime(event, c.now()),
+		scope:       RouteScopeMainAgent,
+		kind:        RouteKindWarning,
+		sessionID:   firstNonEmpty(payloadString(payload, "session_id"), event.SessionID),
+		traceID:     firstNonEmpty(payloadString(payload, "trace_id"), event.TraceID),
+		step:        payloadInt(payload, "step"),
+		reason:      reason,
+		source:      payloadString(payload, "source"),
+		difficulty:  payloadString(payload, "difficulty", "level"),
+		provider:    payloadString(payload, "provider"),
+		model:       payloadString(payload, "model"),
+		effort:      payloadString(payload, "reasoning_effort"),
+		taskType:    payloadString(payload, "task_type"),
+		taskSubject: payloadString(payload, "task_subject"),
+		recordedAt:  routeEventTime(event, c.now()),
 	}
 	c.insertRoute(record, payload)
 }
@@ -227,14 +237,16 @@ func (c *collector) insertRoute(record routeRecord, payload map[string]interface
 	if err := c.store.execWithLockRetry(`
 INSERT INTO usage_routes (
   route_event_id, session_id, parent_session_id, child_session_id, trace_id, scope, kind,
-  agent_id, role, goal, step, reason, source, difficulty, difficulty_source, provider, model,
+  agent_id, role, goal, task_type, task_subject, step, reason, source, difficulty, difficulty_source, provider, model,
   reasoning_effort, route_changed, fallback_used, fallback_reason, candidate_count,
   warning_count, attempt, max_attempts, batch_id, recorded_at_unix_nano,
   warnings_json, candidates_json, record_json
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(route_event_id) DO UPDATE SET
   child_session_id = CASE WHEN excluded.child_session_id <> '' THEN excluded.child_session_id ELSE usage_routes.child_session_id END,
   goal = CASE WHEN excluded.goal <> '' THEN excluded.goal ELSE usage_routes.goal END,
+  task_type = CASE WHEN excluded.task_type <> '' THEN excluded.task_type ELSE usage_routes.task_type END,
+  task_subject = CASE WHEN excluded.task_subject <> '' THEN excluded.task_subject ELSE usage_routes.task_subject END,
   provider = CASE WHEN excluded.provider <> '' THEN excluded.provider ELSE usage_routes.provider END,
   model = CASE WHEN excluded.model <> '' THEN excluded.model ELSE usage_routes.model END,
   reasoning_effort = CASE WHEN excluded.reasoning_effort <> '' THEN excluded.reasoning_effort ELSE usage_routes.reasoning_effort END,
@@ -257,6 +269,8 @@ ON CONFLICT(route_event_id) DO UPDATE SET
 		record.agentID,
 		record.role,
 		record.goal,
+		record.taskType,
+		record.taskSubject,
 		record.step,
 		record.reason,
 		record.source,
