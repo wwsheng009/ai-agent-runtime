@@ -374,6 +374,14 @@ chat 侧同批 6 个守卫用例（含开关关闭的钉子用例）`-count=1` �
   均全绿，判定为**环境负载下的时限抖动**。
   建议（未实施，避免与并行改动冲突）：该看门狗由 2s 放宽至 5–10s 或改为轮询等待。
 
+- **2026-09-22 复核（结论修正）**：该用例不是单纯的负载抖动，而是**竞态假绿**。它原先在断言前
+  `cancel()` 父 ctx，而 `SubmitPrompt` 的等待 `select` 在 ctx 取消时**先于 run 收尾返回**，用例因此
+  抢在 run 终态收尾前完成断言与决议；该取消源（`execution_context`）属终态取消类，按 P0-4 语义
+  审批本应随 run 退役。把 2s 看门狗改成轮询（首评在 20ms 后）后竞态变为必输，用例稳定失败于
+  「取消后仍要求 `waiting_approval` + pending 完整」。修法：保持 run 活跃、由无内存 waiter 的
+  actor2 决议，稳定覆盖「活跃会话 + 无内存 waiter 仍自愈恢复」这条守卫不得误伤的合法路径；
+  终态退役语义仍由 `TestSessionActorApproveToolAfterTerminalRunDoesNotResume` 覆盖。提交 `21ad1e1f`。
+
 ### 11.5 §7 验收标准对照
 
 | 标准 | 结论 | 依据 |
