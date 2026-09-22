@@ -126,24 +126,39 @@ func (t *StdioTransport) stderrDiagnostics(failureHint bool) string {
 	t.mu.Lock()
 	buf := t.stderr
 	pid := 0
-	if t.cmd != nil && t.cmd.Process != nil {
-		pid = t.cmd.Process.Pid
+	exitCode := 0
+	hasExitCode := false
+	if t.cmd != nil {
+		if t.cmd.Process != nil {
+			pid = t.cmd.Process.Pid
+		}
+		// SDK 的 CommandTransport 在 Close 内部调用 cmd.Wait：Wait 返回后
+		// ProcessState 已落定，退出码仍然可读；而按 PID 重新 OpenProcess 通常
+		// 已经拿不到（进程对象随 Wait 回收）。「启动即失败」的诊断必须给出退出码，
+		// 因此这里优先使用 Wait 落定的结果（P1）。
+		if state := t.cmd.ProcessState; state != nil {
+			if code := state.ExitCode(); code >= 0 {
+				exitCode, hasExitCode = code, true
+			}
+		}
 	}
 	t.mu.Unlock()
 	if buf == nil {
 		return ""
 	}
-	return formatStderrDiagnostics(buf, pid, failureHint)
+	return formatStderrDiagnostics(buf, pid, failureHint, exitCode, hasExitCode)
 }
 
 // formatStderrDiagnostics 把缓冲内容与进程状态渲染成多行诊断文本。
 // failureHint 为 true 时附加「启动命令本身失败 / 握手超时」一类归因提示。
-func formatStderrDiagnostics(buf *stderrTailBuffer, pid int, failureHint bool) string {
+func formatStderrDiagnostics(buf *stderrTailBuffer, pid int, failureHint bool, exitCode int, hasExitCode bool) string {
 	if buf == nil {
 		return ""
 	}
 	deadline := time.Now().Add(stdioStderrFlushWait)
-	for {
+	// hasExitCode 说明 Wait 已经落定：进程必然已退出、stderr 不会再增长，
+	// 无需再等「退出但尾部尚未落盘」的收尾窗口。
+	for !hasExitCode {
 		data, _, _ := buf.Snapshot()
 		if len(data) > 0 || pid <= 0 {
 			break
@@ -164,7 +179,7 @@ func formatStderrDiagnostics(buf *stderrTailBuffer, pid int, failureHint bool) s
 
 	var b strings.Builder
 	b.WriteString("[stdio 子进程诊断]")
-	if status := describeProcessStatus(pid, failureHint); status != "" {
+	if status := describeProcessStatus(pid, failureHint, exitCode, hasExitCode); status != "" {
 		b.WriteString("\n")
 		b.WriteString(status)
 	}
@@ -190,9 +205,13 @@ func formatStderrDiagnostics(buf *stderrTailBuffer, pid int, failureHint bool) s
 
 // describeProcessStatus 渲染进程存活状态；未知时返回空串。
 // failureHint 为 true 时附加失败归因提示（仅用于连接失败的错误信息）。
-func describeProcessStatus(pid int, failureHint bool) string {
+func describeProcessStatus(pid int, failureHint bool, exitCode int, hasExitCode bool) string {
 	if pid <= 0 {
 		return ""
+	}
+	if hasExitCode {
+		// Wait 落定的退出码优先：即使进程对象已被回收也照样可读（P1）。
+		return exitedProcessStatus(pid, exitCode, failureHint)
 	}
 	exited, code, hasCode, known := processExitStatus(pid)
 	if !known {
@@ -211,6 +230,12 @@ func describeProcessStatus(pid int, failureHint bool) string {
 		}
 		return status
 	}
+	return exitedProcessStatus(pid, code, failureHint)
+}
+
+// exitedProcessStatus 渲染「进程已退出」的状态行；failureHint 为 true 时附加
+// 启动失败归因提示（仅用于连接失败的错误信息）。
+func exitedProcessStatus(pid, code int, failureHint bool) string {
 	status := fmt.Sprintf("子进程已退出（PID %d，exit code = %d）", pid, code)
 	if failureHint {
 		status += "：通常说明启动命令本身失败（如路径不存在、引号被截断、缺少依赖）"

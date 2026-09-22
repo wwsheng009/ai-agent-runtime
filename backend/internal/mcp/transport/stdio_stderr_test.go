@@ -54,7 +54,7 @@ func TestFormatStderrDiagnosticsIncludesTailAndTruncation(t *testing.T) {
 	_, _ = buf.Write([]byte("0123456789"))
 
 	// pid=0：跳过进程状态探测，只验证文本渲染。
-	out := formatStderrDiagnostics(buf, 0, true)
+	out := formatStderrDiagnostics(buf, 0, true, 0, false)
 	if !strings.Contains(out, "[stdio 子进程诊断]") {
 		t.Fatalf("missing header: %q", out)
 	}
