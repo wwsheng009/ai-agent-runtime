@@ -129,20 +129,20 @@ type ChatSession struct {
 	MCPStatus                       *MCPStatus                   // MCP 状态
 	// ACPMCPSession 是 ACP 会话私有的 MCP 运行时（客户端下发来源）。
 	// 非 ACP 会话恒为 nil；会话关闭/删除时负责回收其子进程。
-	ACPMCPSession *acpSessionMCP
-	SkillsBinding                   *skillsRuntimeBinding        // Skills 运行时绑定
-	SkillsMode                      string                       // Skills 暴露模式
-	SkillsDebug                     bool                         // Skills 调试输出
-	Config                          *config.Config               // 载入的 aicli 全局配置，用于偏好持久化与 provider/model 解析
-	RetryConfig                     RetryConfig                  // 重试配置
-	RequestTimeout                  time.Duration                // 请求超时（0 表示不设置）
-	OutputFormat                    string                       // 输出格式（interactive|text|json）
-	InputReader                     *bufio.Reader                // 共享 stdin reader，避免交互阶段重复缓冲吞掉后续输入
-	InputQueue                      *chatInputQueue              // interactive line queue fed by stdin pump
-	ProfileReference                string                       // 用户指定或配置解析出的 profile 引用
-	ProfileName                     string                       // 当前 profile 名称
-	ProfileAgent                    string                       // 当前 profile agent
-	ProfileRoot                     string                       // 当前 profile 根目录
+	ACPMCPSession    *acpSessionMCP
+	SkillsBinding    *skillsRuntimeBinding // Skills 运行时绑定
+	SkillsMode       string                // Skills 暴露模式
+	SkillsDebug      bool                  // Skills 调试输出
+	Config           *config.Config        // 载入的 aicli 全局配置，用于偏好持久化与 provider/model 解析
+	RetryConfig      RetryConfig           // 重试配置
+	RequestTimeout   time.Duration         // 请求超时（0 表示不设置）
+	OutputFormat     string                // 输出格式（interactive|text|json）
+	InputReader      *bufio.Reader         // 共享 stdin reader，避免交互阶段重复缓冲吞掉后续输入
+	InputQueue       *chatInputQueue       // interactive line queue fed by stdin pump
+	ProfileReference string                // 用户指定或配置解析出的 profile 引用
+	ProfileName      string                // 当前 profile 名称
+	ProfileAgent     string                // 当前 profile agent
+	ProfileRoot      string                // 当前 profile 根目录
 	// AgentSourcePath is the winning agentdef/profile agent config path
 	// (or builtin:<name>) that produced the active role binding.
 	AgentSourcePath string
@@ -226,6 +226,15 @@ type ChatSession struct {
 	queuedInputEchoed             bool           // queued input was already echoed in the fixed prompt while busy
 	lastInteractiveInputQueued    bool           // last chatInteractiveReadLine result came from InputQueue
 	ImagePaths                    []string       // explicit local image attachments for current turn
+
+	// accountListMu guards the /accounts async refresh state: the in-flight job,
+	// the per-provider snapshot cache it publishes, and the optional refresh
+	// function used by tests that must not touch the network.
+	accountListMu        sync.Mutex
+	accountListJob       *chatAccountsRefreshJob
+	accountListProviders map[string]config.Provider
+	accountListUpdatedAt time.Time
+	accountListRefresh   chatAccountBalanceRefreshFunc
 }
 
 type chatRuntimeHTTPCapture struct {

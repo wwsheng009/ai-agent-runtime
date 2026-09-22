@@ -278,6 +278,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 	cleanup := func() {
 		mcpmanager.SetStatusOutput(os.Stdout)
 		stopChatAccountBalanceRefresh(session)
+		stopChatAccountsRefresh(session)
 		if session.TitleNotifier != nil {
 			session.TitleNotifier.Close()
 		}

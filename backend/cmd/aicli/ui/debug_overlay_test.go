@@ -60,7 +60,7 @@ func TestDebugOverlayWideGlyphAlignment(t *testing.T) {
 	// height=8 → viewportRows=6 < totalRows, so the scrollbar is active and
 	// every body row is padded to width-1 then gets the scrollbar glyph.
 	width, height := 110, 8
-	frame := renderDebugOverlayFrame("调试信息", strings.Split(body, "\n"), 0, width, height)
+	frame := renderDebugOverlayFrame("调试信息", strings.Split(body, "\n"), 0, width, height, "")
 	rows := strings.Split(frame, "\r\n")
 	for i, row := range rows {
 		row = strings.TrimPrefix(row, "\x1b[2K")
@@ -192,7 +192,7 @@ func TestDebugOverlayRenderFrame(t *testing.T) {
 		"line two",
 		"line three",
 	}, "\n")
-	frame := renderDebugOverlayFrame("调试信息", strings.Split(body, "\n"), 0, 40, 10)
+	frame := renderDebugOverlayFrame("调试信息", strings.Split(body, "\n"), 0, 40, 10, "")
 	if !strings.Contains(frame, "Debug") || !strings.Contains(frame, "调试信息") {
 		t.Fatalf("frame missing header:\n%q", frame)
 	}
@@ -208,7 +208,7 @@ func TestDebugOverlayRenderFrame(t *testing.T) {
 
 	// Body rows must preserve alignment spaces (fitFullScreenText would
 	// collapse them); header/footer labels are normalized single-line text.
-	aligned := renderDebugOverlayFrame("调试信息", []string{"Provider:  openai", "  indented"}, 0, 40, 10)
+	aligned := renderDebugOverlayFrame("调试信息", []string{"Provider:  openai", "  indented"}, 0, 40, 10, "")
 	if !strings.Contains(aligned, "Provider:  openai") {
 		t.Fatalf("body row lost alignment spaces:\n%q", aligned)
 	}
@@ -222,7 +222,7 @@ func TestDebugOverlayRenderFrame(t *testing.T) {
 	for i := 1; i <= 12; i++ {
 		longBody = append(longBody, "row "+strconv.Itoa(i))
 	}
-	scrolled := renderDebugOverlayFrame("调试信息", longBody, 1, 40, 10)
+	scrolled := renderDebugOverlayFrame("调试信息", longBody, 1, 40, 10, "")
 	if strings.Contains(scrolled, "row 1") {
 		t.Fatalf("scrolled frame still shows row 1:\n%q", scrolled)
 	}
@@ -231,7 +231,7 @@ func TestDebugOverlayRenderFrame(t *testing.T) {
 	}
 
 	// A tall body draws a right-edge scrollbar whose thumb tracks the offset.
-	top := renderDebugOverlayFrame("调试信息", longBody, 0, 40, 10)
+	top := renderDebugOverlayFrame("调试信息", longBody, 0, 40, 10, "")
 	if !strings.Contains(top, "█") || !strings.Contains(top, "░") {
 		t.Fatalf("scrollable frame missing scrollbar glyphs:\n%q", top)
 	}
@@ -253,9 +253,102 @@ func TestDebugOverlayRenderFrame(t *testing.T) {
 	if !strings.HasSuffix(firstBody, "█") {
 		t.Fatalf("offset=0 thumb must sit at the top of the track, first body row=%q", firstBody)
 	}
-	bottom := renderDebugOverlayFrame("调试信息", longBody, 4, 40, 10)
+	bottom := renderDebugOverlayFrame("调试信息", longBody, 4, 40, 10, "")
 	lastBody := strings.Split(bottom, "\r\n")[8]
 	if !strings.HasSuffix(lastBody, "█") {
 		t.Fatalf("offset=max thumb must sit at the bottom of the track, last body row=%q", lastBody)
+	}
+}
+
+// TestDebugOverlayRefreshKey 覆盖屏内刷新快捷键的判定：r/R 刷新，其余键（包括
+// 滚动、关闭键）绝不能触发刷新。
+func TestDebugOverlayRefreshKey(t *testing.T) {
+	for _, key := range []editorKey{
+		{kind: editorKeyRune, r: 'r'},
+		{kind: editorKeyRune, r: 'R'},
+	} {
+		if !debugOverlayRefreshKey(key) {
+			t.Fatalf("key %+v should refresh the overlay", key)
+		}
+	}
+	for _, key := range []editorKey{
+		{kind: editorKeyRune, r: 'q'},
+		{kind: editorKeyRune, r: 'j'},
+		{kind: editorKeyRune, r: 'k'},
+		{kind: editorKeyRune, r: 'G'},
+		{kind: editorKeyDown},
+		{kind: editorKeyHome},
+		{kind: editorKeyCancelPopup},
+	} {
+		if debugOverlayRefreshKey(key) {
+			t.Fatalf("key %+v must not refresh the overlay", key)
+		}
+	}
+}
+
+// TestDebugOverlayFooterAdvertisesRefreshKey 覆盖页脚提示：可刷新屏必须把刷新键
+// 写进页脚（屏内唯一的常驻提示位），静态屏不得凭空多出一个按不出效果的键。
+func TestDebugOverlayFooterAdvertisesRefreshKey(t *testing.T) {
+	refreshable := renderDebugOverlayFrame("全部账户", []string{"alpha"}, 0, 60, 10, "r 刷新显示")
+	if !strings.Contains(refreshable, "r 刷新显示") {
+		t.Fatalf("refreshable frame is missing the refresh hint:\n%q", refreshable)
+	}
+	if !strings.Contains(refreshable, "q 或 Esc 关闭") {
+		t.Fatalf("refreshable frame lost the dismiss hint:\n%q", refreshable)
+	}
+
+	static := renderDebugOverlayFrame("调试信息", []string{"alpha"}, 0, 60, 10, "")
+	if strings.Contains(static, "r 刷新") {
+		t.Fatalf("static frame must not advertise a refresh key:\n%q", static)
+	}
+
+	if got := debugOverlayRefreshHint("  "); got != debugOverlayDefaultRefreshHint {
+		t.Fatalf("empty hint = %q want %q", got, debugOverlayDefaultRefreshHint)
+	}
+	if got := debugOverlayRefreshHint(" r 刷新显示 "); got != "r 刷新显示" {
+		t.Fatalf("hint normalization = %q", got)
+	}
+}
+
+// TestDebugOverlayInvokeRefreshIsolatesPanic 覆盖回调隔离：刷新回调在备用屏内
+// 运行，一次 panic 不能连带炸掉整个 TUI（必须降级为 ok=false 并保留上一帧）。
+func TestDebugOverlayInvokeRefreshIsolatesPanic(t *testing.T) {
+	title, body, changed, ok := invokeDebugOverlayRefresh(nil, DebugOverlayRefreshKey)
+	if ok || changed || title != "" || body != "" {
+		t.Fatalf("nil callback = %q/%q/%v/%v", title, body, changed, ok)
+	}
+
+	trigger := DebugOverlayRefreshTick
+	gotTitle, gotBody, gotChanged, ok := invokeDebugOverlayRefresh(func(got DebugOverlayRefreshTrigger) (string, string, bool) {
+		trigger = got
+		return "全部账户", "alpha", true
+	}, DebugOverlayRefreshKey)
+	if !ok || !gotChanged || gotTitle != "全部账户" || gotBody != "alpha" {
+		t.Fatalf("callback passthrough = %q/%q/%v/%v", gotTitle, gotBody, gotChanged, ok)
+	}
+	if trigger != DebugOverlayRefreshKey {
+		t.Fatalf("trigger = %v want %v", trigger, DebugOverlayRefreshKey)
+	}
+
+	panicTitle, panicBody, panicChanged, panicOK := invokeDebugOverlayRefresh(func(DebugOverlayRefreshTrigger) (string, string, bool) {
+		panic("refresh callback boom")
+	}, DebugOverlayRefreshTick)
+	if panicOK || panicChanged || panicTitle != "" || panicBody != "" {
+		t.Fatalf("panicking callback leaked state: %q/%q/%v/%v", panicTitle, panicBody, panicChanged, panicOK)
+	}
+}
+
+// TestDebugOverlaySplitBody 覆盖正文切分：CRLF 归一化必须与旧实现一致，否则正文
+// 会多出 \r 尾巴。
+func TestDebugOverlaySplitBody(t *testing.T) {
+	got := splitDebugOverlayBody("alpha\r\nbeta\ngamma")
+	want := []string{"alpha", "beta", "gamma"}
+	if len(got) != len(want) {
+		t.Fatalf("split = %q want %q", got, want)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("split = %q want %q", got, want)
+		}
 	}
 }
