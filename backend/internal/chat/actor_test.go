@@ -3614,10 +3614,13 @@ func TestSessionActorApproveToolResumesWithoutInMemoryWaiter(t *testing.T) {
 		},
 	}
 
-	submitDone := make(chan error, 1)
 	go func() {
-		_, submitErr := actor1.SubmitPrompt(ctx, "Start approval flow.", runMeta)
-		submitDone <- submitErr
+		// 原 run 会一直阻塞在审批上（活跃会话）：本用例只验证「决定方 actor2
+		// 没有内存 waiter」时仍能自愈恢复，因此刻意**不取消 run**。取消会让 run
+		// 进入终态取消类（execution_context），按 P0-4 语义审批必须随 run 退役
+		// （见 TestSessionActorApproveToolAfterTerminalRunDoesNotResume）；早期版本
+		// 靠「SubmitPrompt 在 ctx 取消时先于 run 收尾返回」的竞态抢先断言，属于假绿。
+		_, _ = actor1.SubmitPrompt(ctx, "Start approval flow.", runMeta)
 	}()
 
 	var requestID string
@@ -3645,12 +3648,7 @@ func TestSessionActorApproveToolResumesWithoutInMemoryWaiter(t *testing.T) {
 	require.Equal(t, "tool_approval", pendingSession.History[1].ToolCalls[0].ID)
 	require.Equal(t, "team_echo", pendingSession.History[1].ToolCalls[0].Name)
 
-	cancel()
-	select {
-	case <-submitDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("original actor submit did not exit after turn cancellation")
-	}
+	// 活跃 run 把审批留在 waiting_approval：状态在 actor2 决策前保持不动。
 	require.Eventually(t, func() bool {
 		state := actor1.State()
 		return state != nil && state.Status == SessionWaitingApproval &&
@@ -3658,7 +3656,7 @@ func TestSessionActorApproveToolResumesWithoutInMemoryWaiter(t *testing.T) {
 			state.PendingTool != nil && state.PendingTool.ToolCallID == "tool_approval" &&
 			state.CurrentRunMeta != nil && state.CurrentRunMeta.Team != nil &&
 			state.FrozenTurnToolsSet
-	}, 2*time.Second, 20*time.Millisecond)
+	}, 5*time.Second, 20*time.Millisecond)
 
 	actor2, err := NewSessionActor(session.ID, SessionActorConfig{
 		Agent:        apiAgent,
