@@ -1,7 +1,9 @@
 package modelrouting
 
 import (
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
@@ -14,7 +16,8 @@ func (r Resolver) Resolve(parent ParentDefaults, task TaskHint) (RouteDecision, 
 	if !RoutingEnabled(r.Config) {
 		return r.resolveDisabled(parent, task), nil
 	}
-	if err := ValidateConfig(r.Config); err != nil {
+	staticWarnings, err := ValidateConfigWithWarnings(r.Config)
+	if err != nil {
 		return RouteDecision{}, err
 	}
 
@@ -36,12 +39,14 @@ func (r Resolver) Resolve(parent ParentDefaults, task TaskHint) (RouteDecision, 
 	}
 	decision.Difficulty = difficulty
 	decision.DifficultySource = difficultySource
+	decision.Warnings = append(decision.Warnings, staticWarnings...)
 	decision.Warnings = append(decision.Warnings, difficultyWarnings...)
 
 	profile, source, ok := routeProfileForTask(r.Config, task.Role, difficulty)
 	if ok {
-		applyProfile(&decision, profile)
-		decision.Source = source
+		if err := r.applyRouteProfile(&decision, profile, source, difficulty); err != nil {
+			return RouteDecision{}, err
+		}
 	}
 
 	r.applyExplicitOverrides(&decision, task)
@@ -81,7 +86,7 @@ func (r Resolver) resolveDisabled(parent ParentDefaults, task TaskHint) RouteDec
 
 func resolveDifficulty(cfg *agentconfig.AICLISubagentRoutingConfig, task TaskHint) (string, string, []string, error) {
 	if difficulty, ok := NormalizeDifficulty(task.Difficulty); ok {
-		return difficulty, "explicit", nil, nil
+		return resolveExplicitDifficulty(cfg, task, difficulty)
 	}
 
 	warnings := []string{}
@@ -96,28 +101,71 @@ func resolveDifficulty(cfg *agentconfig.AICLISubagentRoutingConfig, task TaskHin
 
 	difficulty := DefaultDifficulty(cfg)
 	source := "default"
-	if promoted := promotedDifficulty(task, difficulty); promoted != difficulty {
+	if promoted, hits := promotedDifficulty(task, difficulty, cfg); promoted != difficulty {
 		warnings = append(warnings, "difficulty_promoted_by_heuristic")
+		warnings = append(warnings, promotionWarnings(hits, task.Role)...)
 		difficulty = promoted
 		source = "inferred"
 	}
 	return difficulty, source, warnings, nil
 }
 
-func promotedDifficulty(task TaskHint, difficulty string) string {
+// resolveExplicitDifficulty 处理「LLM 显式声明了合法难度」的分支（G3）。
+//
+// 历史行为是立即返回、完全短路启发式；改后按 promote_explicit_difficulty 三态
+// 决定：off 回到历史行为，warn 只写告警，enforce 真正提升。提升取 rank 最大值，
+// 因此只会升档，绝不会把显式声明的 expert 降下来。
+func resolveExplicitDifficulty(
+	cfg *agentconfig.AICLISubagentRoutingConfig,
+	task TaskHint,
+	difficulty string,
+) (string, string, []string, error) {
+	mode := PromoteExplicitMode(cfg)
+	if mode == PromoteExplicitOff {
+		return difficulty, "explicit", nil, nil
+	}
+	promoted, hits := promotedDifficulty(task, difficulty, cfg)
+	if promoted == difficulty || hits.empty() {
+		return difficulty, "explicit", nil, nil
+	}
+	warnings := []string{"difficulty_promoted_over_explicit"}
+	warnings = append(warnings, promotionWarnings(hits, task.Role)...)
+	if mode == PromoteExplicitWarn {
+		warnings = append(warnings, "difficulty_promotion_warn_only")
+		return difficulty, "explicit", warnings, nil
+	}
+	return promoted, SourceExplicitPromoted, warnings, nil
+}
+
+// promotedDifficulty 返回提升后的难度与命中证据。提升是单调的：只抬高 rank，
+// 不降低。角色规则（verifier / 非只读 writer）与关键词规则相互独立、可叠加。
+func promotedDifficulty(task TaskHint, difficulty string, cfg *agentconfig.AICLISubagentRoutingConfig) (string, promotionHits) {
 	rank := difficultyRank(difficulty)
+	hits := promotionHits{}
 	role := NormalizeRole(task.Role)
 	if (role == "verifier" || (role == "writer" && !task.ReadOnly)) && rank < difficultyRank(DifficultyNormal) {
 		rank = difficultyRank(DifficultyNormal)
+		hits.Role = true
 	}
-	lowerGoal := strings.ToLower(task.Goal)
-	for _, keyword := range []string{"security", "permission", "migration", "architecture", "provider", "protocol"} {
-		if strings.Contains(lowerGoal, keyword) && rank < difficultyRank(DifficultyHard) {
-			rank = difficultyRank(DifficultyHard)
-			break
+	if HeuristicsDisabled(cfg) {
+		return difficultyForRank(rank), hits
+	}
+	if goal := normalizeKeywordText(task.Goal); goal != "" {
+		if strong := matchedKeywords(goal, PromoteKeywords(cfg)); len(strong) > 0 {
+			if rank < difficultyRank(DifficultyHard) {
+				rank = difficultyRank(DifficultyHard)
+			}
+			hits.Strong = strong
+		}
+		combo := matchedKeywords(goal, PromoteComboKeywords(cfg))
+		if len(combo) >= weakSignalMinHits || (len(combo) >= 1 && role == "writer" && !task.ReadOnly) {
+			if rank < difficultyRank(DifficultyHard) {
+				rank = difficultyRank(DifficultyHard)
+			}
+			hits.Combo = combo
 		}
 	}
-	return difficultyForRank(rank)
+	return difficultyForRank(rank), hits
 }
 
 func difficultyRank(difficulty string) int {
@@ -170,26 +218,90 @@ func routeProfileForTask(cfg *agentconfig.AICLISubagentRoutingConfig, role, diff
 }
 
 func routeProfileFromMap(levels map[string]agentconfig.AICLISubagentRouteProfile, difficulty string) (agentconfig.AICLISubagentRouteProfile, bool) {
-	for key, profile := range levels {
+	keys := make([]string, 0, len(levels))
+	for key := range levels {
+		keys = append(keys, key)
+	}
+	// 排序后扫描：即使校验被绕过（例如别名撞车未走 Validate），命中哪个 profile
+	// 也是确定的，不再依赖 Go map 的随机迭代顺序（G5）。
+	sort.Strings(keys)
+	for _, key := range keys {
 		normalized, ok := NormalizeDifficulty(key)
 		if ok && normalized == difficulty {
-			return profile, true
+			return levels[key], true
 		}
 	}
 	return agentconfig.AICLISubagentRouteProfile{}, false
 }
 
-func applyProfile(decision *RouteDecision, profile agentconfig.AICLISubagentRouteProfile) {
-	profileModel := strings.TrimSpace(profile.Model)
-	if provider := strings.TrimSpace(profile.Provider); provider != "" {
-		if profileModel == "" && !strings.EqualFold(provider, decision.Provider) {
+// applyRouteProfile applies a difficulty/role profile. When the profile's
+// primary target is gated out by an availability or prompt-cache annotation,
+// the same-difficulty fallback chain takes over. The chain is resolved exactly
+// once, here, so a subagent keeps a single model for its whole lifetime and its
+// own prompt cache stays warm.
+func (r Resolver) applyRouteProfile(
+	decision *RouteDecision,
+	profile agentconfig.AICLISubagentRouteProfile,
+	source string,
+	label string,
+) error {
+	applyProfileSettings(decision, profile)
+
+	target, evaluations, err := r.selectRouteTarget(profile, label)
+	decision.Candidates = evaluations
+	if errors.Is(err, errRouteHealthExhausted) {
+		r.degradeToParentForHealth(decision)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	if provider := strings.TrimSpace(target.Provider); provider != "" {
+		if strings.TrimSpace(target.Model) == "" && !strings.EqualFold(provider, decision.Provider) {
 			decision.Model = ""
 		}
 		decision.Provider = provider
 	}
-	if profileModel != "" {
-		decision.Model = profileModel
+	if model := strings.TrimSpace(target.Model); model != "" {
+		decision.Model = model
 	}
+
+	decision.Source = source
+	if !target.Primary {
+		decision.Source = SourceFailoverCandidate
+		decision.Warnings = append(decision.Warnings, "route_failover_candidate_used")
+		markFallback(decision, target.FallbackReason)
+	} else if hasGatedFallback(evaluations) {
+		// The primary carried the route, but a configured fallback was gated
+		// out. Surface it now rather than at the moment failover is needed.
+		decision.Warnings = append(decision.Warnings, "route_fallback_chain_degraded")
+	}
+	if availability, ok := NormalizeAvailability(target.Availability); ok && availability == AvailabilityDegraded {
+		decision.Warnings = append(decision.Warnings, "route_candidate_degraded")
+	}
+	return nil
+}
+
+// degradeToParentForHealth 在整条候选链都被动态健康门禁拦下时，把决策退回父
+// Agent 的 provider/model。
+//
+// 这里刻意不改 decision.Provider/Model：它们在 Resolve 开头已初始化为父 Agent 的
+// 取值，保持不动即为继承。父 Agent 此刻正在运行，是当前唯一可证可用的目标；
+// 若连它也不健康，也没有更好的选择，但至少子任务还能推进——把子 Agent 的构造
+// 直接判失败，只会让「某个后端凌晨挂了」升级成「所有委派都不可用」。
+//
+// profile 里的 max_tokens/timeout/temperature 仍然保留：它们是按难度调的预算，
+// 与落在哪个 provider 无关。
+func (r Resolver) degradeToParentForHealth(decision *RouteDecision) {
+	decision.Source = SourceFallback
+	decision.Warnings = append(decision.Warnings, "route_health_exhausted_parent")
+	markFallback(decision, "route_health_exhausted_parent")
+}
+
+// applyProfileSettings applies the profile fields shared by every candidate of
+// a route: only the target provider/model varies between candidates.
+func applyProfileSettings(decision *RouteDecision, profile agentconfig.AICLISubagentRouteProfile) {
 	if effort := ProfileReasoningEffort(profile); effort != "" {
 		decision.ReasoningEffort = effort
 	}

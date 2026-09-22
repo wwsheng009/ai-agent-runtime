@@ -9,7 +9,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,17 +28,21 @@ type DatabaseConfig struct {
 
 // Config holds the aicli-relevant subset of the gateway config.
 type Config struct {
-	Server         ServerConfig         `yaml:"server" mapstructure:"server"`
-	Database       DatabaseConfig       `yaml:"database" mapstructure:"database"`
-	Providers      ProvidersConfig      `yaml:"providers" mapstructure:"providers"`
-	ProviderGroups []ProviderGroup      `yaml:"provider_groups" mapstructure:"provider_groups"`
-	Retry          *RetryConfig         `yaml:"retry" mapstructure:"retry"`
-	AICLI          *AICLIConfig         `yaml:"aicli" mapstructure:"aicli"`
-	Profiles       *ProfilesConfig      `yaml:"profiles" mapstructure:"profiles"`
-	SkillsRuntime  *SkillsRuntimeConfig `yaml:"skills_runtime" mapstructure:"skills_runtime"`
-	Supervision    supervision.Config   `yaml:"supervision" mapstructure:"supervision"`
-	Log            logger.LogConfig     `yaml:"log" mapstructure:"log"`
-	ConfigFilePath string               `yaml:"-" mapstructure:"-"`
+	Server         ServerConfig    `yaml:"server" mapstructure:"server"`
+	Database       DatabaseConfig  `yaml:"database" mapstructure:"database"`
+	Providers      ProvidersConfig `yaml:"providers" mapstructure:"providers"`
+	ProviderGroups []ProviderGroup `yaml:"provider_groups" mapstructure:"provider_groups"`
+	Retry          *RetryConfig    `yaml:"retry" mapstructure:"retry"`
+	// CircuitBreaker 描述 provider 级健康熔断策略，是子 Agent 路由动态健康源
+	// 的策略来源。该块此前只存在于配置模板中而无 Go 结构消费；缺失或字段不可
+	// 解析时由 providerhealth 回落缺省值，不影响加载。
+	CircuitBreaker *CircuitBreakerConfig `yaml:"circuit_breaker" mapstructure:"circuit_breaker"`
+	AICLI          *AICLIConfig          `yaml:"aicli" mapstructure:"aicli"`
+	Profiles       *ProfilesConfig       `yaml:"profiles" mapstructure:"profiles"`
+	SkillsRuntime  *SkillsRuntimeConfig  `yaml:"skills_runtime" mapstructure:"skills_runtime"`
+	Supervision    supervision.Config    `yaml:"supervision" mapstructure:"supervision"`
+	Log            logger.LogConfig      `yaml:"log" mapstructure:"log"`
+	ConfigFilePath string                `yaml:"-" mapstructure:"-"`
 	// ConfigLayers, ConfigOrigins and ConfigMergeMode describe how this config
 	// was assembled when layered merging is active. They are diagnostics only
 	// and never participate in YAML decoding.
@@ -528,6 +534,10 @@ type AICLIConfig struct {
 	ModelCards *AICLIModelCardsConfig `yaml:"model_cards" mapstructure:"model_cards"`
 	Subagents  *AICLISubagentsConfig  `yaml:"subagents" mapstructure:"subagents"`
 	Teams      *AICLITeamsConfig      `yaml:"teams" mapstructure:"teams"`
+	// MainAgent 承载主 Agent 的动态 provider/model 切换配置（方案
+	// main-agent-dynamic-provider-model-switching-plan-20260921 §6.1）。
+	// 独立配置节：与 aicli.subagents.routing 互不干扰，默认关闭。
+	MainAgent *AICLIMainAgentConfig `yaml:"main_agent" mapstructure:"main_agent"`
 }
 
 // AICLIMCPConfig holds aicli MCP configuration.
@@ -661,21 +671,46 @@ func EffectiveTeamRoutingConfig(cfg *Config) *AICLISubagentRoutingConfig {
 
 // AICLISubagentRoutingConfig maps subtask difficulty and role to model routes.
 type AICLISubagentRoutingConfig struct {
-	Enabled                        *bool                                           `yaml:"enabled" mapstructure:"enabled"`
-	CompatibilityMode              string                                          `yaml:"compatibility_mode" mapstructure:"compatibility_mode"`
-	DefaultDifficulty              string                                          `yaml:"default_difficulty" mapstructure:"default_difficulty"`
-	AllowExplicitProviderOverride  bool                                            `yaml:"allow_explicit_provider_override" mapstructure:"allow_explicit_provider_override"`
-	AllowExplicitModelOverride     bool                                            `yaml:"allow_explicit_model_override" mapstructure:"allow_explicit_model_override"`
-	AllowExplicitReasoningOverride bool                                            `yaml:"allow_explicit_reasoning_override" mapstructure:"allow_explicit_reasoning_override"`
-	AllowedProviderOverrides       []string                                        `yaml:"allowed_provider_overrides" mapstructure:"allowed_provider_overrides"`
-	AllowedModelOverrides          []string                                        `yaml:"allowed_model_overrides" mapstructure:"allowed_model_overrides"`
-	InheritParentWhenMissing       *bool                                           `yaml:"inherit_parent_when_missing" mapstructure:"inherit_parent_when_missing"`
-	ValidateModelCapabilities      *bool                                           `yaml:"validate_model_capabilities" mapstructure:"validate_model_capabilities"`
-	UnsupportedReasoningPolicy     string                                          `yaml:"unsupported_reasoning_policy" mapstructure:"unsupported_reasoning_policy"`
-	OnReasoningUnsupported         string                                          `yaml:"on_reasoning_unsupported" mapstructure:"on_reasoning_unsupported"`
-	MaxExpertConcurrency           int                                             `yaml:"max_expert_concurrency" mapstructure:"max_expert_concurrency"`
-	Levels                         map[string]AICLISubagentRouteProfile            `yaml:"levels" mapstructure:"levels"`
-	Roles                          map[string]map[string]AICLISubagentRouteProfile `yaml:"roles" mapstructure:"roles"`
+	Enabled                        *bool    `yaml:"enabled" mapstructure:"enabled"`
+	CompatibilityMode              string   `yaml:"compatibility_mode" mapstructure:"compatibility_mode"`
+	DefaultDifficulty              string   `yaml:"default_difficulty" mapstructure:"default_difficulty"`
+	AllowExplicitProviderOverride  bool     `yaml:"allow_explicit_provider_override" mapstructure:"allow_explicit_provider_override"`
+	AllowExplicitModelOverride     bool     `yaml:"allow_explicit_model_override" mapstructure:"allow_explicit_model_override"`
+	AllowExplicitReasoningOverride bool     `yaml:"allow_explicit_reasoning_override" mapstructure:"allow_explicit_reasoning_override"`
+	AllowedProviderOverrides       []string `yaml:"allowed_provider_overrides" mapstructure:"allowed_provider_overrides"`
+	AllowedModelOverrides          []string `yaml:"allowed_model_overrides" mapstructure:"allowed_model_overrides"`
+	InheritParentWhenMissing       *bool    `yaml:"inherit_parent_when_missing" mapstructure:"inherit_parent_when_missing"`
+	ValidateModelCapabilities      *bool    `yaml:"validate_model_capabilities" mapstructure:"validate_model_capabilities"`
+	UnsupportedReasoningPolicy     string   `yaml:"unsupported_reasoning_policy" mapstructure:"unsupported_reasoning_policy"`
+	OnReasoningUnsupported         string   `yaml:"on_reasoning_unsupported" mapstructure:"on_reasoning_unsupported"`
+	MaxExpertConcurrency           int      `yaml:"max_expert_concurrency" mapstructure:"max_expert_concurrency"`
+	// PromoteExplicitDifficulty 控制启发式提升与显式难度声明的交互（G3）：
+	// "off" 回到历史行为（显式声明短路提升）；"warn" 只写告警不改档；
+	// "enforce"（默认）真正按 rank 最大值提升，且永不降级。
+	PromoteExplicitDifficulty string `yaml:"promote_explicit_difficulty" mapstructure:"promote_explicit_difficulty"`
+	// Heuristics 是可追加的启发式词表（G4）。nil 表示只用内置词表。
+	Heuristics *AICLISubagentRoutingHeuristics `yaml:"heuristics" mapstructure:"heuristics"`
+	// Failover 控制难度级别的候选链是否生效：nil/true 启用，显式 false 只保留主选。
+	// 候选链在子 Agent 构造时一次性解析完成，因此不会引入请求级改道。
+	Failover *bool `yaml:"failover" mapstructure:"failover"`
+	// AvailabilityPolicy 控制被标注为不可用的候选如何处置：
+	// "skip"（默认）跳过该候选并前移到下一个；"ignore" 保持历史行为（照常使用）。
+	AvailabilityPolicy string `yaml:"availability_policy" mapstructure:"availability_policy"`
+	// RequirePromptCache 为 true 时，显式标注 prompt_cache=false 的候选会被跳过。
+	// 用于把实测不参与 prompt 缓存的免费档排除出以缓存经济性为前提的路由目标。
+	RequirePromptCache bool                                            `yaml:"require_prompt_cache" mapstructure:"require_prompt_cache"`
+	Levels             map[string]AICLISubagentRouteProfile            `yaml:"levels" mapstructure:"levels"`
+	Roles              map[string]map[string]AICLISubagentRouteProfile `yaml:"roles" mapstructure:"roles"`
+}
+
+// AICLISubagentRoutingHeuristics 是可追加的启发式词表配置（G4）。
+// 词表为**追加**语义：内置词表始终生效，这里补充的条目只在命中时多产生一条
+// route_warnings，不会替换内置词表。Disabled 关闭全部关键词启发式（角色提升
+// 仍然生效），用于排除误报。
+type AICLISubagentRoutingHeuristics struct {
+	Disabled             bool     `yaml:"disabled" mapstructure:"disabled"`
+	PromoteKeywords      []string `yaml:"promote_keywords" mapstructure:"promote_keywords"`
+	PromoteKeywordsCombo []string `yaml:"promote_keywords_combo" mapstructure:"promote_keywords_combo"`
 }
 
 // AICLISubagentRouteProfile defines the runtime settings for one route.
@@ -687,6 +722,32 @@ type AICLISubagentRouteProfile struct {
 	MaxTokens       int           `yaml:"max_tokens,omitempty" mapstructure:"max_tokens"`
 	Timeout         time.Duration `yaml:"timeout,omitempty" mapstructure:"timeout"`
 	Temperature     *float64      `yaml:"temperature,omitempty" mapstructure:"temperature"`
+	// Availability 标注主选的实测可用性：available（默认）、degraded、unavailable。
+	Availability string `yaml:"availability,omitempty" mapstructure:"availability"`
+	// AvailabilityReason 记录该标注的依据，便于审计与 doctor 输出。
+	AvailabilityReason string `yaml:"availability_reason,omitempty" mapstructure:"availability_reason"`
+	// PromptCache 标注主选后端是否参与 prompt 缓存；nil 表示未知（视为可用）。
+	PromptCache *bool `yaml:"prompt_cache,omitempty" mapstructure:"prompt_cache"`
+	// Candidates 是同一难度级别的有序后备链（不含主选）。仅当主选或更靠前的候选
+	// 被可用性/缓存门禁拦下时才生效，因此未配置时行为与历史完全一致。
+	Candidates []AICLISubagentRouteCandidate `yaml:"candidates,omitempty" mapstructure:"candidates"`
+}
+
+// AICLISubagentRouteCandidate is one ordered fallback entry of a route.
+// The route's primary target lives on the profile itself; candidates are only
+// consulted when an earlier entry is gated out by the availability or prompt
+// cache annotation.
+type AICLISubagentRouteCandidate struct {
+	Provider string `yaml:"provider,omitempty" mapstructure:"provider"`
+	Model    string `yaml:"model,omitempty" mapstructure:"model"`
+	// Availability annotates observed provider health:
+	// "available" (default), "degraded", "unavailable".
+	Availability string `yaml:"availability,omitempty" mapstructure:"availability"`
+	// AvailabilityReason records the evidence behind the annotation.
+	AvailabilityReason string `yaml:"availability_reason,omitempty" mapstructure:"availability_reason"`
+	// PromptCache annotates whether the backend participates in prompt caching.
+	// nil means unknown and is treated as eligible.
+	PromptCache *bool `yaml:"prompt_cache,omitempty" mapstructure:"prompt_cache"`
 }
 
 // ProfilesConfig holds profile topology configuration.
@@ -1191,6 +1252,14 @@ func ValidateConfig(cfg *Config) error {
 			return err
 		}
 	}
+	if cfg.AICLI.MainAgent != nil && cfg.AICLI.MainAgent.Routing != nil {
+		// warnings（expensive_levels 越界项）已由校验函数就地剔除；这里没有
+		// warning 通道，需要展示告警的宿主应直接调用
+		// ValidateMainAgentRoutingConfig 取返回值。
+		if _, err := ValidateMainAgentRoutingConfig(cfg.AICLI.MainAgent.Routing); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1206,57 +1275,185 @@ func validateProviderCompatibilityConfig(providerName string, provider Provider)
 }
 
 func validateAgentRoutingConfig(configPath string, cfg *AICLISubagentRoutingConfig) error {
-	if cfg == nil || cfg.Enabled == nil || !*cfg.Enabled {
-		return nil
+	_, err := validateSubagentRoutingConfig(configPath, cfg)
+	return err
+}
+
+// ValidateSubagentRoutingConfig 返回子代理路由配置的告警与错误（G5/G6）。
+// Config.Validate() 只取 error；需要展示告警的宿主（例如
+// `aicli doctor subagent-route`）应直接调用本函数，以免告警只停留在代码里。
+// configPath 为空时按 "aicli.subagents.routing" 输出。
+func ValidateSubagentRoutingConfig(configPath string, cfg *AICLISubagentRoutingConfig) ([]string, error) {
+	if strings.TrimSpace(configPath) == "" {
+		configPath = "aicli.subagents.routing"
 	}
+	return validateSubagentRoutingConfig(configPath, cfg)
+}
+
+func validateSubagentRoutingConfig(configPath string, cfg *AICLISubagentRoutingConfig) ([]string, error) {
+	if cfg == nil || cfg.Enabled == nil || !*cfg.Enabled {
+		return nil, nil
+	}
+	warnings := []string{}
 	if strings.TrimSpace(cfg.CompatibilityMode) != "" {
 		if _, ok := normalizeSubagentCompatibilityMode(cfg.CompatibilityMode); !ok {
-			return fmt.Errorf("invalid %s.compatibility_mode %q", configPath, cfg.CompatibilityMode)
+			return nil, fmt.Errorf("invalid %s.compatibility_mode %q", configPath, cfg.CompatibilityMode)
 		}
 	}
 	if strings.TrimSpace(cfg.DefaultDifficulty) != "" {
 		if _, ok := normalizeSubagentDifficulty(cfg.DefaultDifficulty); !ok {
-			return fmt.Errorf("invalid %s.default_difficulty %q", configPath, cfg.DefaultDifficulty)
+			return nil, fmt.Errorf("invalid %s.default_difficulty %q", configPath, cfg.DefaultDifficulty)
 		}
 	}
 	if strings.TrimSpace(cfg.UnsupportedReasoningPolicy) != "" {
 		if _, ok := normalizeSubagentUnsupportedReasoningPolicy(cfg.UnsupportedReasoningPolicy); !ok {
-			return fmt.Errorf("invalid %s.unsupported_reasoning_policy %q", configPath, cfg.UnsupportedReasoningPolicy)
+			return nil, fmt.Errorf("invalid %s.unsupported_reasoning_policy %q", configPath, cfg.UnsupportedReasoningPolicy)
 		}
 	}
 	if strings.TrimSpace(cfg.OnReasoningUnsupported) != "" {
 		if _, ok := normalizeSubagentUnsupportedReasoningPolicy(cfg.OnReasoningUnsupported); !ok {
-			return fmt.Errorf("invalid %s.on_reasoning_unsupported %q", configPath, cfg.OnReasoningUnsupported)
+			return nil, fmt.Errorf("invalid %s.on_reasoning_unsupported %q", configPath, cfg.OnReasoningUnsupported)
 		}
 	}
-	for key, profile := range cfg.Levels {
+	if strings.TrimSpace(cfg.PromoteExplicitDifficulty) != "" {
+		if _, ok := normalizeSubagentPromoteExplicitMode(cfg.PromoteExplicitDifficulty); !ok {
+			return nil, fmt.Errorf("invalid %s.promote_explicit_difficulty %q (want off|warn|enforce)", configPath, cfg.PromoteExplicitDifficulty)
+		}
+	}
+	if cfg.Heuristics != nil {
+		if err := validateSubagentKeywordList(configPath+".heuristics.promote_keywords", cfg.Heuristics.PromoteKeywords); err != nil {
+			return nil, err
+		}
+		if err := validateSubagentKeywordList(configPath+".heuristics.promote_keywords_combo", cfg.Heuristics.PromoteKeywordsCombo); err != nil {
+			return nil, err
+		}
+	}
+	if err := validateSubagentRouteAliases(configPath+".levels", cfg.Levels, &warnings); err != nil {
+		return nil, err
+	}
+	for _, key := range sortedSubagentRouteKeys(cfg.Levels) {
+		profile := cfg.Levels[key]
 		difficulty, ok := normalizeSubagentDifficulty(key)
 		if !ok {
-			return fmt.Errorf("invalid %s.levels key %q", configPath, key)
+			return nil, fmt.Errorf("invalid %s.levels key %q", configPath, key)
 		}
 		if err := validateSubagentRouteProfile(configPath+".levels."+difficulty, profile, cfg); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	for role, levels := range cfg.Roles {
-		role = strings.TrimSpace(role)
-		if role == "" {
-			return fmt.Errorf("%s.roles key cannot be empty", configPath)
+	for _, role := range sortedSubagentRoleKeys(cfg.Roles) {
+		levels := cfg.Roles[role]
+		trimmedRole := strings.TrimSpace(role)
+		if trimmedRole == "" {
+			return nil, fmt.Errorf("%s.roles key cannot be empty", configPath)
 		}
-		for key, profile := range levels {
+		if err := validateSubagentRouteAliases(configPath+".roles."+trimmedRole, levels, &warnings); err != nil {
+			return nil, err
+		}
+		for _, key := range sortedSubagentRouteKeys(levels) {
+			profile := levels[key]
 			difficulty, ok := normalizeSubagentDifficulty(key)
 			if !ok {
-				return fmt.Errorf("invalid %s.roles.%s key %q", configPath, role, key)
+				return nil, fmt.Errorf("invalid %s.roles.%s key %q", configPath, trimmedRole, key)
 			}
-			if err := validateSubagentRouteProfile(configPath+".roles."+role+"."+difficulty, profile, cfg); err != nil {
-				return err
+			if err := validateSubagentRouteProfile(configPath+".roles."+trimmedRole+"."+difficulty, profile, cfg); err != nil {
+				return nil, err
 			}
 		}
 	}
-	if cfg.MaxExpertConcurrency < 0 {
-		return fmt.Errorf("%s.max_expert_concurrency cannot be negative", configPath)
+	if cfg.MaxExpertConcurrency < -1 {
+		return nil, fmt.Errorf("%s.max_expert_concurrency must be -1 (explicit unlimited) or a positive limit, got %d", configPath, cfg.MaxExpertConcurrency)
+	}
+	if cfg.MaxExpertConcurrency == 0 {
+		warnings = append(warnings, configPath+".max_expert_concurrency=0 means unlimited (no expert gate); set -1 to say so explicitly, or a positive value to bound expert concurrency")
+	}
+	return warnings, nil
+}
+
+// normalizeSubagentPromoteExplicitMode 归一 promote_explicit_difficulty 三态。
+// 空值返回 enforce：本仓库选择"安全网默认生效"，off/warn 作为显式回退开关。
+func normalizeSubagentPromoteExplicitMode(raw string) (string, bool) {
+	key := strings.ToLower(strings.TrimSpace(raw))
+	if key == "" {
+		return "enforce", true
+	}
+	switch key {
+	case "off", "false", "disabled", "none":
+		return "off", true
+	case "warn", "warning", "dry_run":
+		return "warn", true
+	case "enforce", "on", "true", "enabled":
+		return "enforce", true
+	default:
+		return "", false
+	}
+}
+
+// validateSubagentKeywordList 拒绝空条目与归一后重复的词，避免同一命中产生
+// 多条重复告警、以及无法解释的"空关键词"。
+func validateSubagentKeywordList(label string, keywords []string) error {
+	seen := map[string]string{}
+	for _, keyword := range keywords {
+		trimmed := strings.TrimSpace(keyword)
+		if trimmed == "" {
+			return fmt.Errorf("%s contains an empty keyword", label)
+		}
+		folded := strings.ToLower(trimmed)
+		if prev, dup := seen[folded]; dup {
+			return fmt.Errorf("%s contains duplicate keyword %q (already declared as %q)", label, trimmed, prev)
+		}
+		seen[folded] = trimmed
 	}
 	return nil
+}
+
+// validateSubagentRouteAliases 检测归一后撞车的难度键（G5）：profile 完全一致时
+// 允许并记 warning（无行为风险），不一致时返回 error 并指明两个原始键与归一结果。
+func validateSubagentRouteAliases(label string, levels map[string]AICLISubagentRouteProfile, warnings *[]string) error {
+	seen := map[string]string{}
+	for _, key := range sortedSubagentRouteKeys(levels) {
+		difficulty, ok := normalizeSubagentDifficulty(key)
+		if !ok {
+			return fmt.Errorf("invalid %s key %q", label, key)
+		}
+		prev, dup := seen[difficulty]
+		if !dup {
+			seen[difficulty] = key
+			continue
+		}
+		if reflect.DeepEqual(levels[prev], levels[key]) {
+			if warnings != nil {
+				*warnings = append(*warnings, fmt.Sprintf(
+					"%s alias keys %q and %q both normalize to %q with identical profiles",
+					label, prev, key, difficulty,
+				))
+			}
+			continue
+		}
+		return fmt.Errorf(
+			"%s keys %q and %q both normalize to %q with different profiles; keep one spelling (accepted: easy|normal|hard|expert, plus synonyms such as medium|complex) or make both profiles identical",
+			label, prev, key, difficulty,
+		)
+	}
+	return nil
+}
+
+func sortedSubagentRouteKeys(levels map[string]AICLISubagentRouteProfile) []string {
+	keys := make([]string, 0, len(levels))
+	for key := range levels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedSubagentRoleKeys(roles map[string]map[string]AICLISubagentRouteProfile) []string {
+	keys := make([]string, 0, len(roles))
+	for key := range roles {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func validateSubagentRouteProfile(label string, profile AICLISubagentRouteProfile, cfg *AICLISubagentRoutingConfig) error {
