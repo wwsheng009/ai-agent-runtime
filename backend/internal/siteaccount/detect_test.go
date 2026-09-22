@@ -116,6 +116,28 @@ func TestDetectSiteType_DeepSeek(t *testing.T) {
 	}
 }
 
+func TestDetectSiteType_DeepSeekPlainTextChallenge(t *testing.T) {
+	// api.deepseek.com answers an unauthenticated /user/balance probe with HTTP
+	// 401 and a plain-text body, not the JSON error envelope.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == deepSeekBalancePath {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte("Authentication Fails (governor)"))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	result, err := NewClient(server.Client()).DetectSiteType(context.Background(), DetectInput{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("DetectSiteType: %v", err)
+	}
+	if result.SiteType != SiteTypeDeepSeek || result.Confidence != ConfidenceHigh {
+		t.Fatalf("site type=%q confidence=%q scores=%v hits=%v", result.SiteType, result.Confidence, result.Score, result.Hits)
+	}
+}
+
 func TestDetectSiteType_DeepSeekWinsOverGenericGatewayResponses(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
