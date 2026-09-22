@@ -324,3 +324,46 @@ func TestWaitForAICLIActorReady_ReturnsImmediatelyWhenActorIdle(t *testing.T) {
 		t.Fatalf("idle actor should be ready immediately, got: %v", err)
 	}
 }
+
+// A mid-turn plan transition (enter_plan_mode / exit_plan_mode) is published on
+// RunMeta by the session actor, while the control-plane live source exists only
+// to carry an in-flight session mode switch. The source must therefore stay
+// silent while the CLI mode is unchanged: reporting the unchanged submit-time
+// value shadows the actor's update and keeps exit_plan_mode's writes denied
+// (observed live 2026-09-22: status=exited but the same-turn write/apply_patch
+// still returned plan_mode_write_path_not_allowed / mode:plan_denies_non_readonly).
+func TestWithLivePermissionModeSourceDefersToRunMetaUntilModeChanges(t *testing.T) {
+	session := &ChatSession{PermissionMode: runtimepolicy.ModePlan}
+	ctx := withLivePermissionModeSource(context.Background(), session)
+	source, ok := team.PermissionModeSourceFromContext(ctx)
+	if !ok || source == nil {
+		t.Fatal("live permission mode source missing")
+	}
+	if got := source(); got != "" {
+		t.Fatalf("unchanged CLI mode must defer to RunMeta, got %q", got)
+	}
+
+	// An in-flight control-plane switch still wins from the next evaluation.
+	setChatPermissionMode(session, runtimepolicy.ModeAcceptEdits)
+	if got := source(); got != string(runtimepolicy.ModeAcceptEdits) {
+		t.Fatalf("changed CLI mode = %q, want %q", got, runtimepolicy.ModeAcceptEdits)
+	}
+}
+
+// The deferral must not depend on a pre-set CLI mode: a session that never had
+// one still lets an in-flight switch through once the control plane writes it.
+func TestWithLivePermissionModeSourceReportsFirstInFlightSwitch(t *testing.T) {
+	session := &ChatSession{}
+	ctx := withLivePermissionModeSource(context.Background(), session)
+	source, ok := team.PermissionModeSourceFromContext(ctx)
+	if !ok || source == nil {
+		t.Fatal("live permission mode source missing")
+	}
+	if got := source(); got != "" {
+		t.Fatalf("unset CLI mode must defer to RunMeta, got %q", got)
+	}
+	setChatPermissionMode(session, runtimepolicy.ModeBypassPermissions)
+	if got := source(); got != string(runtimepolicy.ModeBypassPermissions) {
+		t.Fatalf("in-flight switch = %q, want %q", got, runtimepolicy.ModeBypassPermissions)
+	}
+}

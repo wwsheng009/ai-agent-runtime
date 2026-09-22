@@ -496,14 +496,29 @@ func currentRunMetaForSession(session *ChatSession) *team.RunMeta {
 // session-scoped permission-mode switch (for example the ACP
 // session/set_config_option "mode" option) from the next tool evaluation
 // instead of waiting for the next turn. RunMeta.PermissionMode is frozen at
-// submit time, so the resolver reads the session state under its own lock and
-// wins over that snapshot whenever it reports a mode.
+// submit time, so the resolver reads the session state under its own lock.
+//
+// The resolver only reports a mode when the session value actually changed
+// after the turn was submitted. Reporting the unchanged submit-time value
+// would shadow the actor's own live channel: RunMeta carries every in-turn
+// plan-mode transition (enter_plan_mode / exit_plan_mode republish it through
+// syncLivePermissionMode, and the durable plan state pins it at turn start),
+// while plan transitions are rejected for in-flight control-plane switches.
+// An unchanged value therefore returns "" so permissionModeFromContext falls
+// back to RunMeta / the engine mode, which is what keeps a mid-turn
+// exit_plan_mode from leaving the rest of the turn frozen in plan mode (and a
+// mid-turn enter_plan_mode from being bypassed by a stale CLI mode).
 func withLivePermissionModeSource(ctx context.Context, session *ChatSession) context.Context {
 	if session == nil {
 		return ctx
 	}
+	submitted := chatSessionPermissionMode(session)
 	return team.WithPermissionModeSource(ctx, func() string {
-		return string(chatSessionPermissionMode(session))
+		current := chatSessionPermissionMode(session)
+		if current == submitted {
+			return ""
+		}
+		return string(current)
 	})
 }
 

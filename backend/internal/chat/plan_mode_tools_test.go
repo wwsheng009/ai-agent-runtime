@@ -392,3 +392,34 @@ func TestSessionActorPersistSessionTypedSessionNotFound(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, runtimeerrors.Is(err, runtimeerrors.ErrSessionNotFound), "got %v", err)
 }
+
+// The agent loop evaluates every tool call with permissionModeFromContext(ctx),
+// which reads the RunMeta pointer attached to the run context. A mid-turn plan
+// transition must therefore republish the new mode on that very pointer,
+// otherwise the rest of the turn keeps the pre-transition mode (observed live
+// 2026-09-22: exit_plan_mode returned status=exited while the same-turn write
+// and shell calls stayed denied as plan).
+func TestSessionActorPlanModeToolsRepublishLiveRunMeta(t *testing.T) {
+	actor, _, engine := newPlanModeTestActor(t, "plan-live-meta-1", runtimepolicy.ModeAcceptEdits)
+	ctx := team.WithRunMeta(context.Background(), &team.RunMeta{
+		PermissionMode: string(runtimepolicy.ModeDefault),
+	})
+
+	_, err := actor.EnterPlanMode(ctx, "", toolbroker.EnterPlanModeArgs{})
+	require.NoError(t, err)
+	live, ok := team.GetRunMeta(ctx)
+	require.True(t, ok)
+	require.NotNil(t, live)
+	assert.Equal(t, string(runtimepolicy.ModePlan), live.PermissionMode)
+	assert.Equal(t, runtimepolicy.ModePlan, engine.Mode)
+
+	result, err := actor.ExitPlanMode(ctx, "", toolbroker.ExitPlanModeArgs{
+		Decision: "approve",
+		Notes:    "ship it",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.Active)
+	assert.Equal(t, string(runtimepolicy.ModeAcceptEdits), live.PermissionMode)
+	assert.Equal(t, runtimepolicy.ModeAcceptEdits, engine.Mode)
+}
