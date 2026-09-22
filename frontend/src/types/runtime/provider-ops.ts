@@ -43,6 +43,33 @@ export type ProviderModelMetadata = {
   max_tokens?: number;
 };
 
+/**
+ * `model_capabilities.<model>` 条目：字段与后端 `agentconfig.ModelCapabilitySpec`
+ * 对齐。auto-import 返回的是全量结构（字段没有 omitempty），未匹配字段会以 Go
+ * 零值出现（`input_modalities: null`、`max_tokens: 0`、`native_tools: {..false}`），
+ * 前端合并进草稿时按「非空值才覆盖」处理，避免零值抹平已保存的能力声明。
+ */
+export type ProviderModelCapabilitySpec = {
+  input_modalities?: string[] | null;
+  native_tools?: {
+    image_generation?: boolean;
+    images_generations_api?: boolean;
+  } | null;
+  reasoning_model?: boolean;
+  replay_reasoning_content?: boolean | null;
+  reasoning_efforts?: string[] | null;
+  reasoning_effort_budgets?: Record<string, number> | null;
+  default_reasoning_effort?: string;
+  max_context_tokens?: number;
+  max_tokens?: number;
+  auto_compact_ratio?: number;
+  auto_compact_token_limit?: number;
+  auto_compact_mode?: string;
+  supports_remote_compact?: boolean;
+  compact_reasoning_effort?: string;
+  [key: string]: unknown;
+};
+
 /** /models 清单里的单个模型（raw 字段不上行，后端已 `json:"-"`）。 */
 export type ProviderModelInfo = {
   id: string;
@@ -96,9 +123,9 @@ export type ProviderModelsResult = {
  * 「自动导入」响应：一份可直接合并进当前编辑草稿的补丁，
  * runtime server 不在该接口内写配置（落盘走既有保存链路）。
  *
- * 说明：后端还返回 max_tokens_limit / model_capabilities / models 等字段，
- * 前端当前只消费可编辑的表单字段；未消费字段不会丢失保存语义
- * （保存时以表单为准），需要时再扩展。
+ * `model_capabilities` / `max_tokens_limit` 是后端按站点类型与模型清单匹配出的
+ * 能力声明与上限，编辑表单没有对应字段，因此经草稿 `extraJson` 透传保存——
+ * 丢弃它们会让新建 provider 完全没有能力声明，直到用户手工补写。
  */
 export type ProviderAutoImportResult = {
   name: string;
@@ -114,6 +141,8 @@ export type ProviderAutoImportResult = {
   site_type?: string;
   site_type_confidence?: string;
   site_type_scores?: Record<string, number>;
+  max_tokens_limit?: number;
+  model_capabilities?: Record<string, ProviderModelCapabilitySpec>;
   account?: ProviderAccountCache | null;
   warnings?: string[];
 };

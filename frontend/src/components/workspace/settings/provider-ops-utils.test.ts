@@ -152,6 +152,40 @@ describe("providerModelsPatch", () => {
       providerModelsPatch({ model_ids: [] } as unknown as ProviderModelsResult),
     ).toBeNull();
   });
+
+  it("merges the metadata re-match into extraJson.model_capabilities", () => {
+    const result = {
+      model_ids: ["gpt-4o", "o3"],
+      metadata: {
+        "gpt-4o": { id: "gpt-4o", max_context_tokens: 128000 },
+        o3: {
+          id: "o3",
+          reasoning_model: true,
+          reasoning_efforts: ["low", "high"],
+        },
+      },
+    } as unknown as ProviderModelsResult;
+    const patch = providerModelsPatch(
+      result,
+      JSON.stringify({ model_capabilities: { legacy: { max_tokens: 4096 } } }),
+    );
+    expect(patch?.supportedModelsText).toBe("gpt-4o\no3");
+    expect(JSON.parse(patch?.extraJson ?? "{}")).toEqual({
+      model_capabilities: {
+        legacy: { max_tokens: 4096 },
+        "gpt-4o": { max_context_tokens: 128000 },
+        o3: { reasoning_model: true, reasoning_efforts: ["low", "high"] },
+      },
+    });
+  });
+
+  it("leaves extraJson untouched when the fetch carried no metadata", () => {
+    const patch = providerModelsPatch(
+      { model_ids: ["a"] } as ProviderModelsResult,
+      JSON.stringify({ model_capabilities: { a: { max_tokens: 1 } } }),
+    );
+    expect(patch).toEqual({ supportedModelsText: "a" });
+  });
 });
 
 describe("providerAutoImportPatch", () => {
@@ -201,6 +235,48 @@ describe("providerAutoImportPatch", () => {
       site_type_scores: {},
     } as unknown as ProviderAutoImportResult;
     expect(providerAutoImportPatch(result).siteTypeScores).toBeUndefined();
+  });
+
+  it("carries model capabilities and the token limit through extraJson", () => {
+    const result = {
+      name: "site",
+      protocol: "openai",
+      base_url: "https://api.example.com",
+      max_tokens_limit: 200000,
+      model_capabilities: {
+        m1: { reasoning_model: true, max_tokens: 8192, input_modalities: null },
+      },
+    } as unknown as ProviderAutoImportResult;
+    const patch = providerAutoImportPatch(result, "{}");
+    expect(JSON.parse(patch.extraJson ?? "{}")).toEqual({
+      max_tokens_limit: 200000,
+      model_capabilities: {
+        m1: { reasoning_model: true, max_tokens: 8192 },
+      },
+    });
+  });
+
+  it("keeps hand written capabilities the import did not mention", () => {
+    const extraJson = JSON.stringify({
+      model_capabilities: { keep: { native_tools: { image_generation: true } } },
+    });
+    const result = {
+      name: "site",
+      protocol: "openai",
+      base_url: "",
+      model_capabilities: {
+        m1: {
+          reasoning_model: false,
+          max_tokens: 0,
+          native_tools: {
+            image_generation: false,
+            images_generations_api: false,
+          },
+        },
+      },
+    } as unknown as ProviderAutoImportResult;
+    const patch = providerAutoImportPatch(result, extraJson);
+    expect(patch.extraJson).toBeUndefined();
   });
 });
 
