@@ -332,6 +332,12 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if commandMatches(cmdLower, "/debug") {
 		return handleDebugCommand(session, command)
 	}
+	// 2026-09-22 手动核查入口（docs/plan/supervision-manual-audit-plan-20260922.md）：
+	// /supervision 是 /debug supervision 的上层入口，统一渲染会话走有限文档路径，
+	// 其余会话沿用 legacy 终端输出；/debug supervision 本身保持不变。
+	if commandMatches(cmdLower, "/supervision") {
+		return handleSupervisionCommand(session, command)
+	}
 	if commandMatches(cmdLower, "/export") {
 		return handleExportCommand(session, command)
 	}

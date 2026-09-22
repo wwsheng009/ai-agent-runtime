@@ -823,8 +823,10 @@ func (h *localChatRuntimeHost) wireLocalSupervisionWakeConsumer() {
 	// asynchronously start a real auto-wake turn before the first prompt is
 	// rendered, which flips the SessionActor into Busy and suppresses the
 	// composer (`aicli resume` showed "Analyzing" with no prompt input area).
-	// The wake stays durable and is drained by bindSupervisionWakeConsumer on
-	// the parent's first turn-end (doc 6.5 rule 2 closure).
+	// The wake stays durable and surfaces through the next natural turn's
+	// preflight digest, or through an explicit `/supervision wake`
+	// (2026-09-22: turn-end auto drain is opt-in via
+	// supervision.turn_end_check).
 	if !chatHostSessionInteractive(h.BaseSession) && h.BaseSession != nil && h.BaseSession.RuntimeSession != nil {
 		rootSessionID := strings.TrimSpace(h.BaseSession.RuntimeSession.ID)
 		if rootSessionID != "" {
@@ -982,8 +984,17 @@ func (h *localChatRuntimeHost) bindRuntimeEventPersistence() {
 // bindSupervisionWakeConsumer subscribes the parent root session turn end so
 // wakes accumulated while the parent was busy are drained as soon as the
 // parent becomes idle again (doc 6.5 rule 2 closure).
+//
+// 2026-09-22 调整（docs/plan/supervision-manual-audit-plan-20260922.md）：该
+// 自动核查默认关闭（supervision.turn_end_check，nil/false 等价）。关闭时本
+// 函数不订阅 EventSessionEnd：turn 结束路径零回调，积压 wake 由下一次自然
+// turn 的 preflight digest 被动注入，或由用户显式执行 `/supervision audit`
+// （只读）/ `/supervision wake`（投递）。显式 true 才恢复历史自动闭合语义。
 func (h *localChatRuntimeHost) bindSupervisionWakeConsumer() {
 	if h == nil || h.supervisionWake == nil || h.EventBus == nil || h.BaseSession == nil || h.BaseSession.RuntimeSession == nil {
+		return
+	}
+	if !h.supervisionConfig.TurnEndCheckEnabled() {
 		return
 	}
 	rootSessionID := strings.TrimSpace(h.BaseSession.RuntimeSession.ID)
@@ -1382,6 +1393,9 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		return nil, leaseErr
 	}
 	loopConfig := buildLocalChatLoopConfig(runtimeConfig, session, requestedReasoningEffort)
+	// §6.1 宿主接线：主 Agent 路由只接主会话。子会话走 aicli.subagents.routing
+	// （scheduler 侧），主 Agent 的开关不得改变子 Agent 行为（§6.3 配置隔离）。
+	applyLocalChatMainAgentRouting(loopConfig, session, isBaseSession)
 	applyLocalChatCompletionRequirement(loopConfig, session, childAgentType, childCompletionRequirement, workspaceRoot)
 	actor, err := runtimechat.NewSessionActor(sessionID, runtimechat.SessionActorConfig{
 		Agent:        apiAgent,
@@ -2275,6 +2289,30 @@ func localChatSubagentRoutingConfig(session *ChatSession) *config.AICLISubagentR
 		return nil
 	}
 	return session.Config.AICLI.Subagents.Routing
+}
+
+// localChatMainAgentRoutingConfig 返回主 Agent 动态路由配置
+// （aicli.main_agent.routing）。与子 Agent 路由是两个独立配置节：任一方的开关都
+// 不改变另一方（§6.3 配置隔离）。enabled=false 视为未配置，宿主不接线。
+func localChatMainAgentRoutingConfig(session *ChatSession) *config.AICLIMainAgentRoutingConfig {
+	if session == nil || session.Config == nil {
+		return nil
+	}
+	routing := config.EffectiveMainAgentRoutingConfig(session.Config)
+	if routing == nil || !routing.Enabled {
+		return nil
+	}
+	return routing
+}
+
+// applyLocalChatMainAgentRouting 把主 Agent 路由接到**主会话**的 loop 配置上
+// （§6.1 宿主接线）。子会话不接：子 Agent 走 aicli.subagents.routing（scheduler
+// 侧），主 Agent 的开关不得改变子 Agent 行为（§6.3 配置隔离）。
+func applyLocalChatMainAgentRouting(loopConfig *agent.LoopReActConfig, session *ChatSession, isBaseSession bool) {
+	if loopConfig == nil || !isBaseSession {
+		return
+	}
+	loopConfig.MainAgentRouting = localChatMainAgentRoutingConfig(session)
 }
 
 func localChatTeamRoutingConfig(session *ChatSession) *config.AICLISubagentRoutingConfig {

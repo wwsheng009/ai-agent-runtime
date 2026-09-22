@@ -145,15 +145,15 @@ type Handler struct {
 	runtimeEventPersistMu     sync.Mutex
 	runtimeEventPersistBuffer *chat.EventPersistBuffer
 	// P4-刷新续传：会话在途回合注册表（懒初始化，见 session_active_turn.go）。
-	activeTurnsOnce             sync.Once
-	activeTurns                 *activeTurnRegistry
-	observeMu                   sync.RWMutex
-	observeService              *runtimeobserve.Service
-	scopeResolverMu             sync.RWMutex
-	scopeResolverConfig         ScopeResolverConfig
-	runtimeConfig               *runtimecfg.RuntimeConfig
-	runtimeConfigFile           string
-	runtimeConfigResolver       func(UsageScope) *runtimecfg.RuntimeConfig
+	activeTurnsOnce       sync.Once
+	activeTurns           *activeTurnRegistry
+	observeMu             sync.RWMutex
+	observeService        *runtimeobserve.Service
+	scopeResolverMu       sync.RWMutex
+	scopeResolverConfig   ScopeResolverConfig
+	runtimeConfig         *runtimecfg.RuntimeConfig
+	runtimeConfigFile     string
+	runtimeConfigResolver func(UsageScope) *runtimecfg.RuntimeConfig
 	// subagentLimiterMu / subagentLimiter 缓存进程级子代理并发上限
 	//（P1-4/H12）：与 CLI 宿主同口径——agents.maxThreads > 0 时本进程构建的
 	// 全部 scheduler 共用同一 limiter；≤0（含 -1 显式不限）时为 nil，只保留
@@ -469,6 +469,18 @@ func (h *Handler) teamRoutingConfig() *agentconfig.AICLISubagentRoutingConfig {
 	return agentconfig.EffectiveTeamRoutingConfig(h.aicliConfigSnapshot())
 }
 
+// mainAgentRoutingConfig 返回主 Agent 动态路由配置（aicli.main_agent.routing）。
+//
+// 与 subagentRoutingConfig 是**两个独立配置节**：主 Agent 的开关不改变子 Agent
+// 路由，子 Agent 的开关也不改变主 Agent（§6.3 配置隔离）。
+func (h *Handler) mainAgentRoutingConfig() *agentconfig.AICLIMainAgentRoutingConfig {
+	config := h.aicliConfigSnapshot()
+	if config == nil || config.AICLI == nil || config.AICLI.MainAgent == nil {
+		return nil
+	}
+	return config.AICLI.MainAgent.Routing
+}
+
 func (h *Handler) aicliConfigSnapshot() *agentconfig.Config {
 	if h == nil {
 		return nil
@@ -508,6 +520,15 @@ func cloneAICLIRoutingConfig(config *agentconfig.Config) *agentconfig.Config {
 	if config.AICLI.Teams != nil {
 		cloned.AICLI.Teams = &agentconfig.AICLITeamsConfig{
 			Routing: cloneAgentRoutingConfig(config.AICLI.Teams.Routing),
+		}
+	}
+	// MainAgent 必须随快照保留：主 Agent 动态路由（aicli.main_agent.routing）经
+	// mainAgentRoutingConfig() 读取本字段并在 buildSessionActor 接进 loop 配置；
+	// 漏拷会让「宿主接线」静默失效，而配置侧看起来一切正常（与 SkillsRuntime
+	// 同类问题）。
+	if config.AICLI.MainAgent != nil {
+		cloned.AICLI.MainAgent = &agentconfig.AICLIMainAgentConfig{
+			Routing: cloneMainAgentRoutingConfigForHandler(config.AICLI.MainAgent.Routing),
 		}
 	}
 	// SkillsRuntime 必须随快照保留：handler 侧 catalog 注入（SK-1/SK-2）与
@@ -553,6 +574,26 @@ func cloneAgentRouteProfile(profile agentconfig.AICLISubagentRouteProfile) agent
 		cloned.Temperature = &temperature
 	}
 	return cloned
+}
+
+// cloneMainAgentRoutingConfigForHandler 深拷贝主 Agent 路由配置。快照与运行期
+// 共享 map/slice 会让热重载后的配置写入互相影响，因此与 subagent 路由同口径克隆。
+func cloneMainAgentRoutingConfigForHandler(config *agentconfig.AICLIMainAgentRoutingConfig) *agentconfig.AICLIMainAgentRoutingConfig {
+	if config == nil {
+		return nil
+	}
+	cloned := *config
+	cloned.Levels = append([]string(nil), config.Levels...)
+	cloned.ExpensiveLevels = append([]string(nil), config.ExpensiveLevels...)
+	if len(config.Profiles) > 0 {
+		cloned.Profiles = make(map[string]agentconfig.AICLISubagentRouteProfile, len(config.Profiles))
+		for difficulty, profile := range config.Profiles {
+			cloned.Profiles[difficulty] = cloneAgentRouteProfile(profile)
+		}
+	} else {
+		cloned.Profiles = nil
+	}
+	return &cloned
 }
 
 func cloneBoolPointer(value *bool) *bool {
@@ -813,6 +854,8 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/analytics/tools/{tool}", h.GetAnalyticsToolStatsDetail).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/analytics/subagents", h.ListAnalyticsSubagentStats).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/analytics/errors", h.ListAnalyticsErrorPatterns).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/routing", h.ListAnalyticsRoutingStats).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/routing/events", h.ListAnalyticsRoutingEvents).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/traces/stats", h.GetRuntimeTraceStats).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/traces/governance", h.GetRuntimeTraceGovernance).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/traces", h.GetRuntimeTraces).Methods(http.MethodGet)
@@ -970,6 +1013,12 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/supervision/notifications/{id}/ack", h.AcknowledgeSupervisionNotification).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/supervision/notifications/{id}/defer", h.DeferSupervisionNotification).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/supervision/wake", h.ScheduleSupervisionWake).Methods(http.MethodPost)
+	// 2026-09-22 手动核查（docs/plan/supervision-manual-audit-plan-20260922.md）：
+	// turn 结束自动核查关闭后，核查与投递只能显式发起——audit 只读聚合
+	// （digest + snapshot + pending wake + 预算），wake/drain 复用宿主唯一
+	// consumer 的 runnable/预算闸门，绝不绕过。
+	runtimeRouter.HandleFunc("/supervision/audit", h.GetSupervisionAudit).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/supervision/wake/drain", h.DrainSupervisionWakes).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/supervision/team-edges", h.RecordSupervisionTeamEdge).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/supervision/team-edges", h.ListSupervisionTeamEdges).Methods(http.MethodGet)
 

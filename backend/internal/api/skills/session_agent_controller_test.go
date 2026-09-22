@@ -99,6 +99,12 @@ func TestSessionAgentControllerSpawnPersistsRouteContext(t *testing.T) {
 				Routing: &agentconfig.AICLISubagentRoutingConfig{
 					Enabled:           &enabled,
 					DefaultDifficulty: "normal",
+					// 必须显式声明：零值 0 与「键省略」在 Go 里不可区分，加载路径会把
+					// 它当作「未声明」并追加启动告警 max_expert_concurrency_zero_means_unlimited
+					// （task-difficulty-routing-audit-hardening §G6-P2 的有意为之）。
+					// 本用例断言的是「干净 spawn 不产生任何路由告警」，所以取推荐写法
+					// -1（显式不限），而不是改断言去容忍配置告警。
+					MaxExpertConcurrency: -1,
 					Levels: map[string]agentconfig.AICLISubagentRouteProfile{
 						"hard": {
 							Provider:        "codex",

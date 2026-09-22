@@ -368,6 +368,14 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 	if (commandMatches(cmdLower, "/shell") || commandMatches(cmdLower, "/cmd")) && unifiedDirectInteractiveOutput(session) {
 		return executeStructuredShellCommand(session, command), true, nil
 	}
+	// 2026-09-22 手动核查（docs/plan/supervision-manual-audit-plan-20260922.md）：
+	// /supervision 是 turn 结束自动核查关闭后的显式核查入口（status/audit 只读，
+	// wake 显式投递，其余子命令委托 /debug supervision）。它必须在宽 legacy 围栏
+	// 之前识别，否则统一渲染会话会回退到 legacy 终端写入（与 /shell 同一约束）。
+	if commandMatches(cmdLower, "/supervision") && unifiedDirectInteractiveOutput(session) {
+		result, handled := tryExecuteStructuredSupervisionCommand(session, command)
+		return result, handled, nil
+	}
 	if !commandMatches(cmdLower, "/debug") && !commandMatches(cmdLower, "/status") && !commandMatches(cmdLower, "/usage") && !commandMatches(cmdLower, "/load") &&
 		!commandMatches(cmdLower, "/goal") && !commandMatches(cmdLower, "/memory") && !commandMatches(cmdLower, "/stream") &&
 		cmdLower != "/s" && cmdLower != "/n" && !commandMatches(cmdLower, "/fast") && !commandMatches(cmdLower, "/reasoning") &&

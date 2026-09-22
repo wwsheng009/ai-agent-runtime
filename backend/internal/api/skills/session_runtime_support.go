@@ -25,6 +25,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
+	"github.com/wwsheng009/ai-agent-runtime/internal/providerhealth"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -257,6 +258,7 @@ func (c *sessionAgentController) resolveSpawnAgentRoute(parentSession *chat.Sess
 	decision, err := (modelrouting.Resolver{
 		Config:  routingConfig,
 		Catalog: catalog,
+		Health:  providerhealth.Default(),
 	}).Resolve(parent, task)
 	if err != nil {
 		return args, err
@@ -377,6 +379,7 @@ func (r *apiTeamTaskRouteResolver) ResolveTaskRoute(ctx context.Context, request
 	decision, err := (modelrouting.Resolver{
 		Config:  routingConfig,
 		Catalog: catalog,
+		Health:  providerhealth.Default(),
 	}).Resolve(parent, teamTaskRouteHint(request))
 	strict := modelrouting.StrictCompatibilityMode(routingConfig)
 	if err != nil {
@@ -828,7 +831,7 @@ func (c *sessionAgentController) ApplyWorktree(ctx context.Context, args toolbro
 		Paths:          append([]string(nil), args.Paths...),
 		Applied:        true,
 		Kept:           args.Keep,
-		SkippedPaths: append([]string(nil), report.SkippedPaths...),
+		SkippedPaths:   append([]string(nil), report.SkippedPaths...),
 	}
 	if len(report.SkippedPaths) > 0 {
 		result.NextAction = fmt.Sprintf(
@@ -3920,6 +3923,11 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		return nil, leaseErr
 	}
 	loopConfig := buildSessionLoopConfig(selectedConfig, requestedReasoningEffort)
+	// §6.1 宿主接线：主 Agent 路由只接主会话。child 标记（agent_type / depth /
+	// read_only）与上面的子会话策略同口径——带任一标记的会话是子 Agent，走
+	// aicli.subagents.routing，主 Agent 的开关不得改变其行为（§6.3 配置隔离）。
+	applyAPISessionMainAgentRouting(loopConfig, h.mainAgentRoutingConfig(),
+		strings.TrimSpace(childAgentType) == "" && childDepth == 0 && !childReadOnly)
 	applyAPISessionCompletionRequirement(loopConfig, profileState, childAgentType, childCompletionRequirement, workspacePath)
 
 	// The session lease is scoped to each run rather than to the actor
@@ -4119,6 +4127,19 @@ func buildSessionLoopConfig(selectedConfig *runtimecfg.RuntimeConfig, requestedR
 		}
 	}
 	return config
+}
+
+// applyAPISessionMainAgentRouting 把主 Agent 动态路由接到**主会话**的 loop 配置上
+// （方案 §6.1 宿主接线）。
+//
+// baseSession 为 false 时不接：子会话走 aicli.subagents.routing（scheduler 侧），
+// 主 Agent 的开关不得改变子 Agent 行为（§6.3 配置隔离）。enabled=false 时同样不接，
+// 保证关闭态是零行为变化。
+func applyAPISessionMainAgentRouting(config *agent.LoopReActConfig, routing *agentconfig.AICLIMainAgentRoutingConfig, baseSession bool) {
+	if config == nil || !baseSession || routing == nil || !routing.Enabled {
+		return
+	}
+	config.MainAgentRouting = routing
 }
 
 // applyAPISessionCompletionRequirement sets loop completion from explicit session

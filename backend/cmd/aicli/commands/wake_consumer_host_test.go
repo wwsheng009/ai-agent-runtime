@@ -25,6 +25,20 @@ func newWakeConsumerTestHost(t *testing.T, name string) (*localChatRuntimeHost, 
 // one-unit class budget plus its own allowance to be observable.
 func newWakeConsumerTestHostWithConfig(t *testing.T, name string, schedulerConfig supervision.WakeSchedulerConfig) (*localChatRuntimeHost, *supervision.SQLiteSupervisionStore, *syncWaitDeliveries) {
 	t.Helper()
+	// 2026-09-22 手动核查调整（docs/plan/supervision-manual-audit-plan-20260922.md）：
+	// turn 结束自动 drain 现在默认关闭，本夹具显式打开
+	// （supervision.turn_end_check=true）以覆盖灰度回退语义；默认关闭的对照见
+	// TestLocalHostTurnEndCheck_DefaultOffKeepsWakePending。
+	return newWakeConsumerTestHostWithTurnEndCheck(t, name, schedulerConfig, true)
+}
+
+// newWakeConsumerTestHostWithTurnEndCheck additionally controls the
+// supervision.turn_end_check fallback switch: true restores the historical
+// turn-end auto drain (2026-09-16 §6.5 规则 2), false keeps the manual audit
+// default where a pending wake stays durable until the next natural turn
+// preflight or an explicit /supervision wake --deliver.
+func newWakeConsumerTestHostWithTurnEndCheck(t *testing.T, name string, schedulerConfig supervision.WakeSchedulerConfig, turnEndCheck bool) (*localChatRuntimeHost, *supervision.SQLiteSupervisionStore, *syncWaitDeliveries) {
+	t.Helper()
 	store, err := supervision.NewSQLiteSupervisionStore(&supervision.StoreConfig{
 		DSN: "file:" + name + "?mode=memory&cache=shared",
 	})
@@ -33,6 +47,7 @@ func newWakeConsumerTestHostWithConfig(t *testing.T, name string, schedulerConfi
 
 	scheduler := supervision.NewWakeScheduler(store, schedulerConfig)
 	deliveries := &syncWaitDeliveries{}
+	turnEnd := turnEndCheck
 
 	var host *localChatRuntimeHost
 	host = &localChatRuntimeHost{
@@ -40,7 +55,8 @@ func newWakeConsumerTestHostWithConfig(t *testing.T, name string, schedulerConfi
 		BaseSession: &ChatSession{
 			RuntimeSession: &runtimechat.Session{ID: "root-session"},
 		},
-		RuntimeStore: runtimechat.NewInMemoryRuntimeStore(16),
+		RuntimeStore:      runtimechat.NewInMemoryRuntimeStore(16),
+		supervisionConfig: supervision.Config{TurnEndCheck: &turnEnd},
 		supervisionWake: &supervision.WakeConsumer{
 			Wakes: scheduler,
 			Runnable: func(ctx context.Context, rootScopeID, parentSessionID, parentTeamID string) bool {
@@ -61,6 +77,40 @@ func newWakeConsumerTestHostWithConfig(t *testing.T, name string, schedulerConfi
 	}
 	host.bindSupervisionWakeConsumer()
 	return host, store, deliveries
+}
+
+// TestLocalHostTurnEndCheck_DefaultOffKeepsWakePending pins the manual audit
+// default: with supervision.turn_end_check unset/false the host must not
+// subscribe the turn-end drain, so a pending wake stays durable and is only
+// surfaced by the next natural turn preflight or by an explicit
+// /supervision wake --deliver.
+func TestLocalHostTurnEndCheck_DefaultOffKeepsWakePending(t *testing.T) {
+	host, store, deliveries := newWakeConsumerTestHostWithTurnEndCheck(t, "aicli-turn-end-check-off", supervision.WakeSchedulerConfig{}, false)
+	ctx := context.Background()
+	require.NoError(t, host.RuntimeStore.SaveState(ctx, &runtimechat.RuntimeState{
+		SessionID: "root-session",
+		Status:    runtimechat.SessionIdle,
+		UpdatedAt: time.Now().UTC(),
+	}))
+	scheduleCriticalWake(t, store, host.supervisionWake.Wakes)
+
+	host.EventBus.Publish(runtimeevents.Event{
+		Type:      runtimechat.EventSessionEnd,
+		SessionID: "root-session",
+		Payload:   map[string]interface{}{"success": true},
+	})
+
+	require.Equal(t, 0, deliveries.count(), "turn_end_check=false 时 turn 结束不得自动 drain")
+	pending, err := store.ListWakePending(ctx, supervision.WakeFilter{
+		RootScopeID:   "root-session",
+		UnclaimedOnly: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, pending, 1, "wake 必须保持 durable，等待下一次自然 turn 的 preflight 或显式投递")
+
+	// 显式投递仍走同一 runnable 门：空闲父会话可以被手动 drain。
+	require.NoError(t, host.supervisionWake.MaybeWakeParent(ctx, "root-session", "", "root-session"))
+	require.Equal(t, 1, deliveries.count(), "显式投递必须仍然可用")
 }
 
 // syncWaitDeliveries records wake deliveries with a channel for waiting.

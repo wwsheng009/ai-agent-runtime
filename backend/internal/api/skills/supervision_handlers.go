@@ -91,6 +91,13 @@ func (h *Handler) SetSupervisionWakeScheduler(scheduler *supervision.WakeSchedul
 // the parent becomes idle again (doc 6.5 rule 2 closure). It reacts to any
 // session turn end: for a root session it drains root wakes; for an
 // intermediate parent it drains that parent's own child wakes.
+//
+// 2026-09-22 调整（docs/plan/supervision-manual-audit-plan-20260922.md）：该
+// 自动核查默认关闭（supervision.turn_end_check，nil/false 等价）。开关在事件
+// 回调里判定而不是订阅时判定，因为 SetSupervisionWakeScheduler 先于
+// SetSupervisionConfig 调用（cmd/runtime-server/main.go），订阅时配置尚未到达。
+// 关闭时 turn 结束不产生任何 drain/self-check；积压 wake 由下一次自然 turn 的
+// preflight digest 被动注入，或经 POST /supervision/wake/drain 显式投递。
 func (h *Handler) bindSupervisionTurnEndConsumer() {
 	if h == nil {
 		return
@@ -101,6 +108,9 @@ func (h *Handler) bindSupervisionTurnEndConsumer() {
 			return
 		}
 		bus.SubscribeCancelable(chat.EventSessionEnd, func(event runtimeevents.Event) {
+			if !h.supervisionTuning().TurnEndCheckEnabled() {
+				return
+			}
 			sessionID := strings.TrimSpace(event.SessionID)
 			if sessionID == "" {
 				return
@@ -664,6 +674,209 @@ func (h *Handler) ScheduleSupervisionWake(w http.ResponseWriter, r *http.Request
 	h.writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"wake": result,
 	})
+}
+
+// GetSupervisionAudit is the read-only manual audit endpoint
+// (2026-09-22 调整，docs/plan/supervision-manual-audit-plan-20260922.md)。
+//
+// 语义与 CLI `/supervision audit` 完全一致：把 lifecycle digest、descendant
+// 快照、未领取 durable wake 与 wake 预算聚合成一份只读报告。它不 claim、不
+// resolve、不改任何通知/动作状态，因此可以随时安全调用；turn 结束自动核查
+// 关闭（supervision.turn_end_check）后，这是运维与脚本的显式核查入口。
+//
+// Query params: root_scope_id, root_session_id, root_team_id, mode,
+// target_parent_session_id, target_parent_team_id, after_seq, limit,
+// include_terminal, include_resolved_since.
+func (h *Handler) GetSupervisionAudit(w http.ResponseWriter, r *http.Request) {
+	if h.supervisionUnavailable(w) {
+		return
+	}
+	q := r.URL.Query()
+	rootSessionID := strings.TrimSpace(q.Get("root_session_id"))
+	rootTeamID := strings.TrimSpace(q.Get("root_team_id"))
+	rootScopeID := strings.TrimSpace(q.Get("root_scope_id"))
+	if rootScopeID == "" {
+		rootScopeID = firstNonEmptySupervision(rootSessionID, rootTeamID)
+	}
+	if rootScopeID == "" {
+		h.writeError(w, http.StatusBadRequest, runtimeerrors.New(runtimeerrors.ErrValidationFailed, "root_scope_id or root_session_id is required"))
+		return
+	}
+	targetParentSessionID := strings.TrimSpace(q.Get("target_parent_session_id"))
+	targetParentTeamID := strings.TrimSpace(q.Get("target_parent_team_id"))
+	limit := intQuery(q.Get("limit"))
+	afterSeq := int64Query(q.Get("after_seq"))
+	if rootSessionID == "" && rootTeamID == "" {
+		rootSessionID = rootScopeID
+	}
+	digest, err := supervision.BuildDigest(r.Context(), h.getSupervisionStore(), supervision.DigestRequest{
+		RootScopeID:           rootScopeID,
+		TargetParentSessionID: targetParentSessionID,
+		TargetParentTeamID:    targetParentTeamID,
+		AfterSeq:              afterSeq,
+		Limit:                 limit,
+		IncludeResolvedSince:  boolQuery(q.Get("include_resolved_since")),
+		SubjectPresence:       h.supervisionSubjectPresence(),
+		HostCapabilities:      h.supervisionHostCapabilities(),
+	})
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	snapshot, err := supervision.BuildSnapshot(r.Context(), h.getSupervisionStore(), supervision.SnapshotRequest{
+		Scope: supervision.Scope{
+			RootSessionID: rootSessionID,
+			RootTeamID:    rootTeamID,
+			Mode:          strings.TrimSpace(q.Get("mode")),
+		},
+		AfterSeq:         afterSeq,
+		Health:           strings.TrimSpace(q.Get("health")),
+		IncludeTerminal:  boolQuery(q.Get("include_terminal")),
+		Limit:            limit,
+		DefaultLimit:     h.supervisionTuning().SnapshotMaxItems,
+		Provider:         h.getSupervisionDescendantProvider(),
+		HostCapabilities: h.supervisionHostCapabilities(),
+	})
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	pending, err := h.getSupervisionStore().ListWakePending(r.Context(), supervision.WakeFilter{
+		RootScopeID:           rootScopeID,
+		TargetParentSessionID: targetParentSessionID,
+		TargetParentTeamID:    targetParentTeamID,
+		UnclaimedOnly:         true,
+		Limit:                 limit,
+	})
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if pending == nil {
+		pending = []supervision.WakePending{}
+	}
+	turnEndCheck := h.supervisionTuning().TurnEndCheckEnabled()
+	payload := map[string]interface{}{
+		"generated_at": time.Now().UTC(),
+		// 自动核查开关：false（默认）表示 turn 结束不再 drain / 不起
+		// digest-only self-check，核查只能由本端点或 CLI `/supervision` 显式发起。
+		"auto_audit_enabled": turnEndCheck,
+		"turn_end_check":     turnEndCheck,
+		"root_scope_id":      rootScopeID,
+		"digest":             digest,
+		"snapshot":           snapshot,
+		"pending_wakes":      pending,
+		"pending_wake_count": len(pending),
+	}
+	if budget := h.supervisionWakeBudgetStates(r.Context(), rootScopeID); budget != nil {
+		payload["wake_budget"] = budget
+	}
+	h.writeJSON(w, http.StatusOK, payload)
+}
+
+// DrainSupervisionWakes is the explicit manual delivery endpoint
+// (POST /api/runtime/supervision/wake/drain).
+//
+// 它复用宿主唯一的 wake consumer（同一 runnable 门 + 同一预算账本 + 同一
+// Deliver 路径），因此手动投递不会绕过"父会话忙 / 预算耗尽"闸门：被闸门拦下
+// 时 wake 保持 durable，下一次自然 turn 的 preflight digest 仍会注入。
+//
+// Body: root_scope_id, target_parent_session_id, target_parent_team_id,
+// dry_run (只统计不投递), limit。
+func (h *Handler) DrainSupervisionWakes(w http.ResponseWriter, r *http.Request) {
+	if h.supervisionUnavailable(w) {
+		return
+	}
+	var req struct {
+		RootScopeID           string `json:"root_scope_id"`
+		TargetParentSessionID string `json:"target_parent_session_id"`
+		TargetParentTeamID    string `json:"target_parent_team_id"`
+		DryRun                bool   `json:"dry_run"`
+		Limit                 int    `json:"limit"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, runtimeerrors.New(runtimeerrors.ErrValidationFailed, "failed to parse request body"))
+		return
+	}
+	rootScopeID := strings.TrimSpace(req.RootScopeID)
+	if rootScopeID == "" {
+		h.writeError(w, http.StatusBadRequest, runtimeerrors.New(runtimeerrors.ErrValidationFailed, "root_scope_id is required"))
+		return
+	}
+	scheduler := h.getSupervisionWakeScheduler()
+	if scheduler == nil {
+		h.writeError(w, http.StatusServiceUnavailable, runtimeerrors.New(runtimeerrors.ErrConfigInvalid, "supervision wake scheduler not configured"))
+		return
+	}
+	targetParentSessionID := strings.TrimSpace(req.TargetParentSessionID)
+	targetParentTeamID := strings.TrimSpace(req.TargetParentTeamID)
+	filter := supervision.WakeFilter{
+		RootScopeID:           rootScopeID,
+		TargetParentSessionID: targetParentSessionID,
+		TargetParentTeamID:    targetParentTeamID,
+		UnclaimedOnly:         true,
+		Limit:                 req.Limit,
+	}
+	pending, err := h.getSupervisionStore().ListWakePending(r.Context(), filter)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	payload := map[string]interface{}{
+		"root_scope_id":      rootScopeID,
+		"pending_wake_count": len(pending),
+		"pending_wakes":      pending,
+	}
+	if budget := h.supervisionWakeBudgetStates(r.Context(), rootScopeID); budget != nil {
+		payload["wake_budget"] = budget
+	}
+	if req.DryRun {
+		payload["dry_run"] = true
+		payload["reason"] = "dry_run"
+		h.writeJSON(w, http.StatusOK, payload)
+		return
+	}
+	consumer := h.supervisionWakeConsumer(scheduler)
+	if consumer == nil {
+		h.writeError(w, http.StatusServiceUnavailable, runtimeerrors.New(runtimeerrors.ErrConfigInvalid, "supervision wake consumer not configured"))
+		return
+	}
+	deliverErr := consumer.MaybeWakeParent(r.Context(), targetParentSessionID, targetParentTeamID, rootScopeID)
+	remaining, listErr := h.getSupervisionStore().ListWakePending(r.Context(), filter)
+	if listErr != nil {
+		h.writeError(w, http.StatusInternalServerError, listErr)
+		return
+	}
+	consumed := len(pending) - len(remaining)
+	payload["pending_remaining"] = len(remaining)
+	payload["consumed"] = consumed
+	status := http.StatusOK
+	reason := "delivered"
+	switch {
+	case deliverErr == nil:
+		switch {
+		case len(pending) == 0:
+			reason = "no_pending_wake"
+		case consumed == 0:
+			// 消费 0 行：digest 无投递内容（通知已被 ack/resolve）或并发 drainer
+			// 抢先 claim；wake 行按既有语义已被清理，不需要重试。
+			reason = "no_deliverable_content"
+		}
+	case isSupervisionSentinel(deliverErr, supervision.ErrWakeParentBusy):
+		status = http.StatusConflict
+		reason = "parent_busy"
+	case isSupervisionSentinel(deliverErr, supervision.ErrWakeRateLimited):
+		status = http.StatusTooManyRequests
+		reason = "wake_rate_limited"
+	default:
+		h.writeError(w, http.StatusInternalServerError, deliverErr)
+		return
+	}
+	if deliverErr != nil {
+		payload["delivery_error"] = deliverErr.Error()
+	}
+	payload["reason"] = reason
+	h.writeJSON(w, status, payload)
 }
 
 // RecordSupervisionTeamEdge records a durable parent Team -> child Team edge

@@ -52,6 +52,15 @@ type Config struct {
 	// mailbox/digest 的父 turn，避免父会话在子 agent 仍异常时静默空闲。
 	// 0（默认）关闭该行为，保持历史语义；正数即该 scope 每窗口的自检次数上限。
 	WakeSelfCheckPerWindow int `json:"wake_self_check_per_window,omitempty" yaml:"wake_self_check_per_window,omitempty"`
+	// TurnEndCheck 是「父会话 turn 结束后自动做一次技术核查」的开关
+	// （docs/plan/supervision-manual-audit-plan-20260922.md）。
+	// nil（未配置）与显式 false 都表示关闭：turn 结束后不再 drain durable wake、
+	// 不再触发 digest-only self-check，父会话完全交还用户；积压事件由下一次自然
+	// turn 的 preflight digest 被动注入，或由用户显式执行
+	// `/supervision audit`（只读核查）/ `/supervision wake`（显式投递）处理。
+	// 显式 true 恢复 2026-09-16 方案 doc 6.5 规则 2 的 turn-end 闭合语义，用于
+	// 灰度回退；此开关不影响事件驱动（子会话完成 / 审批）的异常投递。
+	TurnEndCheck *bool `json:"turn_end_check,omitempty" yaml:"turn_end_check,omitempty"`
 	// ProgressCheckInterval 是 P2-D 的 opt-in 周期巡查间隔：正数时宿主按该
 	// 间隔检查"是否存在 running background batch"，只在父会话空闲且无待投递
 	// wake 时经既有 wake 通道注入一次 progress 汇报 turn。
@@ -151,6 +160,10 @@ func (c Config) WithDefaults() Config {
 	if c.TaskProgressInterval > 0 {
 		d.TaskProgressInterval = c.TaskProgressInterval
 	}
+	// TurnEndCheck 默认关：nil 保持 nil（等价关闭），仅显式值需传递。
+	if c.TurnEndCheck != nil {
+		d.TurnEndCheck = c.TurnEndCheck
+	}
 	// ApprovalTerminalGuard 默认开：nil 保持 nil（等价启用），仅显式值需传递。
 	if c.ApprovalTerminalGuard != nil {
 		d.ApprovalTerminalGuard = c.ApprovalTerminalGuard
@@ -171,6 +184,18 @@ func (c Config) WithDefaults() Config {
 // zero-valued config keeps the historical behavior.
 func (c Config) ProgressCheckEnabled() bool {
 	return c.WithDefaults().ProgressCheckInterval > 0
+}
+
+// TurnEndCheckEnabled reports whether the turn-end automatic technical check
+// (drain + optional digest-only self-check) is enabled. Unset means disabled:
+// the manual audit plan (2026-09-22) makes the check opt-in so a parent turn
+// end never starts a supervision turn on its own. Only an explicit true
+// restores the 2026-09-16 §6.5 rule 2 closure for gray rollback.
+func (c Config) TurnEndCheckEnabled() bool {
+	if c.TurnEndCheck == nil {
+		return false
+	}
+	return *c.TurnEndCheck
 }
 
 // ApprovalTerminalGuardEnabled reports whether the terminal-run approval guard

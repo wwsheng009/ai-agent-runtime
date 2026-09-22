@@ -1185,6 +1185,10 @@ func chatSlashCommandQueueSafe(text string) bool {
 	case "debug":
 		// 只读诊断可排队；on/off/export 变更状态或写文件，忙时拒绝。
 		return chatDebugSubcommandQueueSafe(fields[1:])
+	case "supervision":
+		// 2026-09-22 手动核查：status/audit/list 等只读核查可排队；
+		// wake/ack/defer/resolve/control 是动作（投递或 CAS 写入），忙时拒绝。
+		return chatSupervisionSubcommandQueueSafe(fields[1:])
 	default:
 		return false
 	}
