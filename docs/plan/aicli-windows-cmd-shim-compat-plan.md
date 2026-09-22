@@ -581,3 +581,49 @@ stderr 诊断:
 $ aicli mcp -C %TEMP%\diag-env-stderr.yaml test-server diag-stderr --show-stderr --output json
 ... "success":true, "stderr_tail":"[stdio 子进程诊断]\n子进程 PID 416 仍在运行\nstderr 尾部（共 518 字节）..."
 ```
+
+### 11.7 回切官方形态与二进制部署验收（2026-09-21）
+
+**背景**：§6 的规避形态（`command: node` + `edge-mcp-wrapper.js`）只为绕开 P0 缺陷；修复进入 `main`（`e41fed46`、`635ba1bd`）后回切官方推荐形态，并在真实项目上复验。
+
+**编译与部署**：
+
+| 项 | 值 |
+|---|---|
+| 源码 | `main@635ba1bd`（工作区干净） |
+| 构建 | `cd backend && go build -o aicli-new.exe ./cmd/aicli`（55,587,328 B，约 75s） |
+| 部署 | `E:\bins\aicli.exe`（PATH 唯一入口，`where aicli` 仅此一处） |
+| 旧二进制备份 | `E:\bins\aicli.exe.bak-20260921-213341` |
+
+**配置回切**（`E:\projects\itsm\.aicli\mcp.yaml`，本地 gitignored 配置）：
+
+```yaml
+    command: npx
+    args:
+      - -y
+      - chrome-devtools-mcp@latest
+      - --autoConnect
+      - --userDataDir
+      - C:\Users\wwsheng\AppData\Local\Microsoft\Edge\User Data
+      - --logFile
+      - E:\projects\itsm\.aicli\logs\chrome-devtools-mcp.log
+      - --no-usage-statistics
+      - --no-performance-crux
+```
+
+规避形态备份：`.aicli/backups/mcp.yaml.workaround-20260921-213009.yaml`（`edge-mcp-wrapper.js` 同步备份）；wrapper 原文件暂留 `E:\projects\itsm\.aicli\` 备查。
+
+**验收**（新二进制 + 官方形态，argv 含空格 `--userDataDir`）：
+
+```text
+$ aicli mcp test-server chrome-devtools --show-stderr
+  ✅ 已连接 / 工具数量: 29        exit=0
+  stderr 诊断: 子进程 PID 11036 仍在运行；stderr 尾部（共 256 字节）
+
+$ aicli mcp test-server chrome-devtools --output json
+  {"status":{"connected":true,"toolCount":29,...},"success":true}
+```
+
+`--logFile` 落盘正常：`Starting Chrome DevTools MCP Server v1.9.0` → `Chrome DevTools MCP Server connected`（后随 `Shutting down (stdin end)`，即 test-server 主动收尾）。
+
+**注意**：回切前已启动的 aicli 会话仍运行旧二进制（Windows 允许重命名运行中的可执行文件，已加载进程不受影响），需重启会话以启用修复。

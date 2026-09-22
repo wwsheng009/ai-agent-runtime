@@ -615,6 +615,8 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 | `/theme [mode\|palette\|list\|status\|preview\|select]` | 查看或切换终端主题（明暗 auto/dark/light + 配色 classic/focus/contrast/mono） |
 | `/model [name|status|clear-reasoning|--provider ...]` | 查看或切换 provider/model/reasoning_effort |
 | `/login [provider|--provider ...]` | 在 chat 内新增或更新 provider 登录凭证，并可刷新/切换当前模型 |
+| `/account [provider] [show\|detect] [--save] [--no-refresh] [--json] [--timeout 15s]` | 查看或刷新「当前（或指定）provider」的账户余额/订阅额度；`--save` 才写回 `config.yaml` |
+| `/accounts [refresh\|display] [--wait] [--enabled-only] [--no-refresh] [--json] [--timeout 15s]` | 全部 provider 的余额总览：默认提交后台刷新并立刻渲染缓存快照，`refresh` 只提交、`display` 只看缓存（零网络）、`--wait` 才是阻塞拉取；备用屏内按 `r` 刷新显示 |
 | `/compact [auto|local|remote]` | 手动触发会话压缩 |
 | `/attach [path|clear]` | 查看、添加或清空待发送图片附件 |
 | `/image [prompt] [--provider <name>] [--model <name>] [--path auto\|api\|codex_native]` | 调用 `openai_image_generate` 生成图片，行为与 `aicli image` 对齐 |
@@ -649,6 +651,9 @@ aicli agent stdio --session-dir ~/.aicli/sessions
   - 新增 stdio 传输：`/mcp add local-fs --command npx --arg -y --arg @modelcontextprotocol/server-filesystem --disabled`。
   - `--header` 会映射为 `HEADER_*` 环境变量（与 console / 微型 Web 面板同一约定）；`/mcp status <name>` 查看连接状态、工具数与最近错误。
 - `/login` 与 `aicli login` 共用 provider 登录逻辑，支持 API key、Codex OAuth、`--models-path`、`--default-model`、`--set-default`、`--dry-run` 和 JSON 输出。
+- `/account [provider] [show|detect] [--save] [--no-refresh] [--json] [--timeout <dur>]` 与 `aicli balance` 共用同一套站点类型探测与额度换算：缺省（或 `refresh`）实时拉取当前（或指定）provider 并刷新底部状态栏（仅当目标是当前生效 provider 时才写回会话快照，避免后台周期刷新覆盖新值），`--save` 才把快照写回 `config.yaml`；`show`/`--no-refresh` 只读展示缓存快照，`detect` 只探测站点类型。
+- `/accounts [refresh|display] [--wait] [--enabled-only] [--no-refresh] [--json] [--timeout <dur>]` 是全部 provider 的总览，默认不再阻塞：提交一个后台刷新任务后立刻渲染缓存快照（状态行显示「后台刷新中」）；`refresh` 只提交并返回一行确认，`display`（`status`/`--no-refresh` 同义）只看缓存、零网络，`--wait` 回到「拉完再渲染」的旧语义，`--json` 默认隐含 `--wait`（`display` 时只序列化缓存）。同一会话同时只允许一个在飞刷新任务（重复提交复用同一任务），结果写入会话缓存供后续 `display` 复用；会话退出时取消在飞任务且不发布半成品结果，后台刷新绝不写 `config.yaml`。
+- `/accounts` 的备用屏是**可刷新**的：屏内按 `r`（或 `R`）提交（或复用）一次后台刷新并立刻重投影缓存快照，页脚常驻 `r 刷新显示` 提示；任务完成时屏幕会自动从「后台刷新中」翻到「已刷新」并带上新余额，不需要退出屏幕再敲一次命令。屏内刷新沿用打开屏幕那一刻的 `--enabled-only` / `--timeout` 参数，提交失败（例如过滤后没有目标）只在状态行显示 `刷新未提交` + 原因，缓存表格照常显示。`/account` 单账户屏、`/usage`、`/debug`、`/web` 仍是静态快照屏（没有 `r` 键）。
 - 交互式 TUI 会把当前 provider 的账户余额显示在底部状态栏，并在启动后立即刷新一次，随后按 `aicli.balance.refresh_interval` 定时刷新。对于未声明 `site_type` 的 `openai` 协议 provider（例如直连 DeepSeek 网关），TUI 会在首个刷新周期内探测并识别站点类型（`deepseek` / `sub2api` / `new-api`）后拉取余额；探测结果与余额仅保存在会话本地，不改写配置文件。刷新失败时保留最后一次成功值；探测到不支持账户查询的 upstream 则仅探测一次，不再每轮重试探测。
 - `/stream`、`/s`、`/normal` 会更新当前会话，并在可写配置存在时写回 `aicli.chat.stream`。
 - `/theme` 支持双轴主题：明暗（`auto|dark|light`）与配色（`classic|focus|contrast|mono`）。会立即切换当前终端主题，并在可写配置存在时写回 `aicli.theme.name`（配色）与 `aicli.theme.mode`（明暗）。无参数时交互选择；`list`/`status`/`preview` 只读（`list`/`preview` 带角色色样例）；可写 `/theme dark`、`/theme focus`、`/theme light contrast` 等。配色别名：`default`/`balanced`→focus，`high-contrast`→contrast，`minimal`→mono。启动优先级：`--theme` > `AICLI_THEME`/`AICLI_THEME_MODE` > 配置文件。

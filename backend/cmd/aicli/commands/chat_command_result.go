@@ -145,6 +145,17 @@ type CommandResult struct {
 	// command cell in the main message stream. Plain/JSON/noninteractive
 	// projections keep the §6.4 document cell.
 	OpenUsageScreen *UsageScreenRequest
+	// OpenAccountScreen requests the lease-bound alternate-screen single-account
+	// viewer for /account. The report (including the live balance fetch when the
+	// command ran in refresh mode) is captured before the command result crosses
+	// the dispatch boundary, so the screen only renders: it never performs I/O.
+	// Plain/JSON/noninteractive projections keep the §6.4 document cell.
+	OpenAccountScreen *AccountScreenRequest
+	// OpenAccountsScreen requests the lease-bound alternate-screen provider
+	// table for /accounts, the all-accounts counterpart of OpenAccountScreen.
+	// The two commands therefore never share a screen: /account shows one
+	// provider, /accounts shows the whole configuration.
+	OpenAccountsScreen *AccountListScreenRequest
 	// OpenResumePicker requests the typed alternate-screen session picker. It
 	// has no document payload: the picker borrows a ScreenLease, publishes its
 	// lease-bound state through the UI actor, and only its final result becomes
@@ -377,6 +388,7 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		return result, handled, nil
 	}
 	if !commandMatches(cmdLower, "/debug") && !commandMatches(cmdLower, "/status") && !commandMatches(cmdLower, "/usage") && !commandMatches(cmdLower, "/load") &&
+		!commandMatches(cmdLower, "/account") && !commandMatches(cmdLower, "/accounts") &&
 		!commandMatches(cmdLower, "/goal") && !commandMatches(cmdLower, "/memory") && !commandMatches(cmdLower, "/stream") &&
 		cmdLower != "/s" && cmdLower != "/n" && !commandMatches(cmdLower, "/fast") && !commandMatches(cmdLower, "/reasoning") &&
 		!commandMatches(cmdLower, "/reasoning_effort") && !commandMatches(cmdLower, "/reasoning-effort") &&
@@ -558,6 +570,15 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		// errors stay inside the document so the unified command gate never
 		// observes a fall-through.
 		return executeStructuredUsageCommand(session, command), true, nil
+	}
+
+	if commandMatches(cmdLower, "/account") || commandMatches(cmdLower, "/accounts") {
+		// /account (one provider) and /accounts (all providers) share the
+		// account/balance implementation with `aicli balance` — the former also
+		// owns show/detect — while each renders on its own alternate screen on a
+		// unified TTY. Both stay inside a CommandResult: no branch may fall
+		// through to the legacy terminal writer.
+		return executeStructuredChatAccountCommand(session, command), true, nil
 	}
 
 	if commandMatches(cmdLower, "/load") {

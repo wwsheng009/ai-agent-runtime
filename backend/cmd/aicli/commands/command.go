@@ -101,6 +101,18 @@ func dispatchChatCommand(session *ChatSession, command string, noInteractive boo
 				// hosted the viewer degrades to the §6.4 document cell.
 				openChatUsageScreen(session, *result.OpenUsageScreen)
 			}
+			if renderErr == nil && result.OpenAccountScreen != nil && session != nil {
+				// /account owns its own alternate screen: the single-provider
+				// report (already fetched) is rendered there instead of being
+				// appended to the main message stream. When the alternate screen
+				// cannot be hosted the viewer degrades to the document cell.
+				openChatAccountScreen(session, *result.OpenAccountScreen)
+			}
+			if renderErr == nil && result.OpenAccountsScreen != nil && session != nil {
+				// /accounts owns a second, separate alternate screen (the whole
+				// provider table), so /account and /accounts never share a view.
+				openChatAccountsScreen(session, *result.OpenAccountsScreen)
+			}
 			if renderErr == nil && result.ApplyBacktrack != nil && session != nil {
 				// Direct backtrack apply has no alternate screen, but it still owns
 				// the same destructive transaction: actor mutation, canonical Scene
@@ -280,6 +292,12 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	}
 	if commandMatches(cmdLower, "/queue") {
 		return handleQueueCommand(session, command)
+	}
+	// /account 与 /accounts 与 `aicli balance` 同源（抓取/换算实现共用）：结构化
+	// 路径在 tryExecuteStructuredChatCommand 中接管，这里只保留 legacy/JSON 出口。
+	// 旧的 /balance 别名已移除。
+	if commandMatches(cmdLower, "/account") || commandMatches(cmdLower, "/accounts") {
+		return handleChatAccountCommand(session, command)
 	}
 	if commandMatches(cmdLower, "/retry") {
 		return handleRetryCommand(session, command)

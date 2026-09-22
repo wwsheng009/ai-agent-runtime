@@ -66,6 +66,10 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 		return completeModelSlashArgs(session, argsText, cursor)
 	case "/login":
 		return completeLoginSlashArgs(session, argsText, cursor)
+	case "/account":
+		return completeChatAccountSlashArgs(session, argsText, cursor)
+	case "/accounts":
+		return completeChatAccountsSlashArgs(session, argsText, cursor)
 	case "/stream":
 		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
 			{Command: "on", Summary: "开启流式输出", Group: string(chatSlashCommandGroupModel)},

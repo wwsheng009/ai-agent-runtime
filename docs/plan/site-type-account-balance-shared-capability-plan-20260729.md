@@ -558,6 +558,58 @@ JSON 输出需包含 `site_type` 与 `account` 对象，供脚本使用。
   - `/balance` 或 `/account`：对当前 provider 刷新并展示
   - `/account refresh [provider]`
 
+实现状态（2026-09-21，已落地）：TUI 命令拆成两条语义不同的顶层命令，各自独占一块备用屏，
+与 `aicli balance` 共用 `refreshProviderAccountBalance` / `accountViewFromProviderSnapshot`：
+
+- `/account [provider] [show|detect] [--save] [--no-refresh]`：单 provider 视图；缺省（或
+  `refresh`）实时拉取并刷新状态行，`--save` 才写回 `config.yaml`；`show`/`--no-refresh` 只读
+  缓存快照，`detect` 仅站点类型探测
+- `/accounts [refresh|display] [--wait] [--enabled-only] [--no-refresh]`：全部 provider 总览，
+  异步刷新契约见 7.2.1，备用屏的屏内刷新键见 7.2.2
+
+所有子命令支持 `--json` 与 `--timeout <dur>`（默认 15s）。
+
+#### 7.2.1 `/accounts` 异步化（2026-09-21）
+
+旧行为：`/accounts`（等价 `aicli balance`）逐个 provider 串行拉取，最多阻塞 N × `--timeout`
+（默认 15s/个），期间 TUI 整条命令卡住，用户既看不到已缓存的快照也无法继续输入。
+
+现在的契约（实现：`chat_account_command.go` + `chat_account_async.go`）：
+
+- `/accounts`：提交后台刷新 + 立刻渲染缓存快照，命令不再等待网络
+- `/accounts refresh`（别名 `sync`/`reload`）：只提交刷新，返回一行确认（provider 数 + 单次超时），
+  不打开备用屏（提交动作没有新数据可看）
+- `/accounts display`（别名 `show`/`status`/`cache`，`--no-refresh` 等价）：只渲染缓存，零网络
+- `/accounts --wait`：保留旧的阻塞语义（拉完再渲染）；`--json` 默认隐含 `--wait`，但
+  `display`/`--no-refresh` 时只序列化缓存，不因 JSON 强行拉网络
+- 单飞任务：同一会话同时只允许一个在飞刷新，重复提交复用同一 job（避免连按把上游打爆）；
+  提交那刻冻结 provider 值副本，后台 goroutine 不读可变的 `Providers` map
+- 结果发布：全部结果写入会话缓存（`accountListMu` 保护），当前生效 provider 走
+  `applyChatAccountProviderSnapshot(..., wake=true)` 同款发布路径（状态行 + 周期刷新目标）
+- 取消与写盘：会话退出时 `stopChatAccountsRefresh` 取消在飞任务，被取消的任务不发布半成品；
+  后台刷新绝不写 `config.yaml`（写盘仍然只有 `/account refresh --save` 一条路径）
+
+#### 7.2.2 `/accounts` 备用屏的屏内刷新键（2026-09-21）
+
+旧行为：全部账户屏是**静态快照**——正文在进入备用屏前捕获一次，用户看完缓存后只能退出屏幕、
+再敲一次命令才能看到新值（`display` 甚至完全不提交刷新）。
+
+现在的契约（实现：`ui/debug_overlay.go` 的 `DebugOverlayOptions.Refresh` + `chat_account_screen.go`
+的 `chatAccountsScreenRefresher`）：
+
+- `r`/`R`：提交（或复用）一次后台刷新，**立刻**用缓存快照重投影一帧——状态行先翻到
+  「后台刷新中」，缓存表格照常显示，渲染循环不阻塞
+- 备用屏的空闲轮询节拍（≈75ms）也重投影一次：任务完成时屏幕自己从「后台刷新中」翻到
+  「已刷新」并带上新余额，不需要再按一次键（`changed=false` 时不重绘）
+- 页脚常驻提示 `… · r 刷新显示`：只有携带刷新回调的屏幕才有这个键；`/usage`、`/debug`、
+  `/web` 与 `/account` 单账户屏仍是静态快照屏
+- 冻结契约不破：provider 值副本在开屏前拷贝，缓存与当前 provider 实时快照都取 mutex 保护的
+  副本，渲染循环既不读可变的 `Providers` map，也不发起阻塞 I/O
+- 参数冻结：屏幕携带打开那一刻的 `--enabled-only` 与 `--timeout`，屏内刷新按同样的过滤与超时
+  提交（`submitChatAccountsRefresh` 的单飞语义照旧：连按 `r` 不会重复打上游）
+- 提交失败（例如 `--enabled-only` 过滤后为空）只改状态行（`刷新未提交` + 原因），缓存表格
+  照常显示，也不会留下任务句柄
+
 ### 7.3 独立命令（建议 P1）
 
 ```text

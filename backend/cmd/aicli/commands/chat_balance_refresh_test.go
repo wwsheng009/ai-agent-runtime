@@ -3,6 +3,8 @@ package commands
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -539,5 +541,49 @@ func TestChatAccountBalanceRefresherDeepSeekOpenAIProtocolDisplaysBalance(t *tes
 	line := formatProviderAccountBalanceLine(provider.Account, provider.SiteType, provider.SiteTypeConfidence)
 	if !strings.Contains(line, "110.00 CNY") {
 		t.Fatalf("expected DeepSeek balance line, got %q", line)
+	}
+}
+
+func TestRefreshProviderAccountBalanceHandlesRealDeepSeekChallengeShape(t *testing.T) {
+	// Regression for the real api.deepseek.com edge: an unauthenticated probe of
+	// /user/balance returns HTTP 401 with a plain-text body, which previously
+	// left the site type unknown and blocked every refresh for providers without
+	// an explicit site_type (e.g. the `deepseek` entry in config.yaml), so the
+	// balance never reached the status line.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/user/balance" {
+			http.NotFound(w, r)
+			return
+		}
+		if strings.TrimSpace(r.Header.Get("Authorization")) == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte("Authentication Fails (governor)"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"is_available":true,"balance_infos":[{"currency":"CNY","total_balance":"110.00","granted_balance":"0.00","topped_up_balance":"110.00"}]}`))
+	}))
+	defer server.Close()
+
+	provider := config.Provider{Protocol: "openai", BaseURL: server.URL, APIKey: "test-key"}
+	outcome, err := refreshProviderAccountBalance(
+		context.Background(),
+		siteaccount.NewClient(server.Client()),
+		"deepseek",
+		&provider,
+		5*time.Second,
+	)
+	if err != nil {
+		t.Fatalf("refreshProviderAccountBalance: %v", err)
+	}
+	if outcome.SiteType != string(siteaccount.SiteTypeDeepSeek) {
+		t.Fatalf("site type = %q, want deepseek", outcome.SiteType)
+	}
+	if outcome.Account == nil || outcome.Account.WalletBalance == nil || *outcome.Account.WalletBalance != 110 {
+		t.Fatalf("wallet balance not refreshed: %+v", outcome.Account)
+	}
+	line := formatProviderAccountBalanceLine(outcome.Account, outcome.SiteType, outcome.SiteTypeConfidence)
+	if !strings.Contains(line, "110.00 CNY") {
+		t.Fatalf("balance line = %q, want it to contain 110.00 CNY", line)
 	}
 }

@@ -12,16 +12,48 @@ import (
 	"golang.org/x/term"
 )
 
-// DebugOverlayOptions describes the static content of a debug overlay.
-// The body is captured once before the alternate screen is entered, so the
-// overlay never reads live session state mid-frame and needs no actor-owned
-// semantic projection.
+// DebugOverlayRefreshTrigger tells a DebugOverlayRefreshFunc why it was invoked.
+type DebugOverlayRefreshTrigger int
+
+const (
+	// DebugOverlayRefreshKey is the user-invoked refresh (the `r`/`R` key).
+	DebugOverlayRefreshKey DebugOverlayRefreshTrigger = iota
+	// DebugOverlayRefreshTick is the idle poll tick (≈75ms). Implementations
+	// must stay cheap and report changed=false when nothing new is available.
+	DebugOverlayRefreshTick
+)
+
+// DebugOverlayRefreshFunc re-projects the overlay content. Returning
+// changed=true repaints the frame with the returned title and body.
+type DebugOverlayRefreshFunc func(trigger DebugOverlayRefreshTrigger) (title, body string, changed bool)
+
+// DebugOverlayOptions describes the content of a debug overlay.
+//
+// The body is captured once before the alternate screen is entered, so a
+// static overlay never reads live session state mid-frame and needs no
+// actor-owned semantic projection. Setting Refresh turns the snapshot viewer
+// into a refreshable one: the captured body is the first frame and every later
+// frame is a projection the callback produced.
 type DebugOverlayOptions struct {
 	// Title is a short human-readable header line.
 	Title string
 	// Body is the plain-text body (ANSI-free) shown on the alternate screen.
 	Body string
+	// Refresh, when non-nil, makes the overlay live: it is invoked for the
+	// refresh key (`r`/`R`) and on every idle poll tick, and a changed=true
+	// answer repaints the frame with the returned title and body. The callback
+	// runs between frames on the viewer's own goroutine, so it must not block
+	// (a slow callback freezes the screen) and must be safe to call from that
+	// non-actor goroutine.
+	Refresh DebugOverlayRefreshFunc
+	// RefreshHint is the footer hint for the refresh key. It defaults to
+	// "r 刷新" and is ignored while Refresh is nil.
+	RefreshHint string
 }
+
+// debugOverlayDefaultRefreshHint is the footer hint used when a refreshable
+// overlay does not name its own.
+const debugOverlayDefaultRefreshHint = "r 刷新"
 
 const debugOverlayPollInterval = 75 * time.Millisecond
 
@@ -107,7 +139,12 @@ func runDebugOverlayLoop(ctx context.Context, terminal *Terminal, options DebugO
 	if terminal == nil || reader == nil || stdinFile == nil || pending == nil || writer == nil {
 		return fullScreenUnavailable("debug overlay is not configured", nil)
 	}
-	bodyLines := strings.Split(strings.ReplaceAll(options.Body, "\r\n", "\n"), "\n")
+	title := options.Title
+	bodyLines := splitDebugOverlayBody(options.Body)
+	refreshHint := ""
+	if options.Refresh != nil {
+		refreshHint = debugOverlayRefreshHint(options.RefreshHint)
+	}
 	state := debugOverlayState{}
 	lastWidth, lastHeight := -1, -1
 	dirty := true
@@ -119,10 +156,25 @@ func runDebugOverlayLoop(ctx context.Context, terminal *Terminal, options DebugO
 		if height < minFullScreenListHeight {
 			return fullScreenUnavailable("terminal height is too small", nil)
 		}
+		// Poll the refresh source between frames: a background job that lands
+		// while the viewer is open updates the screen without another key press.
+		if options.Refresh != nil {
+			nextTitle, nextBody, changed, ok := invokeDebugOverlayRefresh(options.Refresh, DebugOverlayRefreshTick)
+			if !ok {
+				// A panicking callback would otherwise tear down the TUI (and
+				// skip the terminal restore) once per tick: keep the last good
+				// frame and stop refreshing.
+				options.Refresh = nil
+				refreshHint = ""
+			} else if changed {
+				title, bodyLines = nextTitle, splitDebugOverlayBody(nextBody)
+				dirty = true
+			}
+		}
 		if dirty || width != lastWidth || height != lastHeight {
 			state.offset = clampDebugOverlayOffset(state.offset, len(wrapDebugOverlayBody(bodyLines, width)), height)
 			if err := writeLeaseManagedFullScreenText(lease, writer,
-				renderDebugOverlayFrame(options.Title, bodyLines, state.offset, width, height)); err != nil {
+				renderDebugOverlayFrame(title, bodyLines, state.offset, width, height, refreshHint)); err != nil {
 				return fullScreenUnavailable("write debug overlay frame", err)
 			}
 			lastWidth, lastHeight = width, height
@@ -135,16 +187,65 @@ func runDebugOverlayLoop(ctx context.Context, terminal *Terminal, options DebugO
 		if !ok {
 			continue
 		}
-		wrapped := wrapDebugOverlayBody(bodyLines, width)
 		if debugOverlayKeyCloses(key) {
 			return nil
 		}
-		next := applyDebugOverlayKey(state.offset, len(wrapped), height, key)
+		if options.Refresh != nil && debugOverlayRefreshKey(key) {
+			// The refresh key re-projects through the same callback that owns
+			// the refresh trigger; the frame is always repainted so the key
+			// visibly reacts even when the projected text is unchanged.
+			nextTitle, nextBody, _, refreshOK := invokeDebugOverlayRefresh(options.Refresh, DebugOverlayRefreshKey)
+			if !refreshOK {
+				options.Refresh = nil
+				refreshHint = ""
+				continue
+			}
+			title, bodyLines = nextTitle, splitDebugOverlayBody(nextBody)
+			dirty = true
+			continue
+		}
+		next := applyDebugOverlayKey(state.offset, len(wrapDebugOverlayBody(bodyLines, width)), height, key)
 		if next != state.offset {
 			state.offset = next
 			dirty = true
 		}
 	}
+}
+
+// splitDebugOverlayBody 把捕获的正文切成行：CRLF 归一化后按 \n 切分。
+func splitDebugOverlayBody(body string) []string {
+	return strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
+}
+
+// debugOverlayRefreshKey reports whether the key asks for a content refresh.
+// `r` and `R` are the refresh keys (a shifted press or caps lock must not
+// silently turn the shortcut off).
+func debugOverlayRefreshKey(key editorKey) bool {
+	return key.kind == editorKeyRune && (key.r == 'r' || key.r == 'R')
+}
+
+// debugOverlayRefreshHint 归一化页脚里的刷新提示。
+func debugOverlayRefreshHint(hint string) string {
+	if hint = strings.TrimSpace(hint); hint == "" {
+		return debugOverlayDefaultRefreshHint
+	}
+	return hint
+}
+
+// invokeDebugOverlayRefresh 调用刷新回调并隔离 panic：备用屏持有 raw mode 与
+// lease 管理的视口，回调里的一次 panic 会直接炸掉整个 TUI 并跳过终端恢复，因此
+// 这里降级为「保留上一帧 + 停用后续刷新」（ok=false）。
+func invokeDebugOverlayRefresh(refresh DebugOverlayRefreshFunc, trigger DebugOverlayRefreshTrigger) (title, body string, changed, ok bool) {
+	if refresh == nil {
+		return "", "", false, false
+	}
+	defer func() {
+		if recover() != nil {
+			title, body, changed, ok = "", "", false, false
+		}
+	}()
+	title, body, changed = refresh(trigger)
+	return title, body, changed, true
 }
 
 func readDebugOverlayKey(readCtx context.Context, reader io.Reader, pending *[]byte, stdinFile *os.File) (editorKey, bool, error) {
@@ -316,7 +417,9 @@ func debugOverlayScrollbarCells(totalRows, viewportRows, offset int) []string {
 // renderDebugOverlayFrame renders one complete alternate-screen frame: a
 // header line, the visible slice of the wrapped body with a right-edge
 // scrollbar, and a footer with dismiss/scroll hints and the cursor position.
-func renderDebugOverlayFrame(title string, bodyLines []string, offset, width, height int) string {
+// refreshHint, when non-empty, advertises the refresh key in that footer (it is
+// empty for static overlays).
+func renderDebugOverlayFrame(title string, bodyLines []string, offset, width, height int, refreshHint string) string {
 	if width < 1 {
 		width = 1
 	}
@@ -344,7 +447,7 @@ func renderDebugOverlayFrame(title string, bodyLines []string, offset, width, he
 		lines[index-start+1] = text
 	}
 	if height > 1 {
-		lines[height-1] = debugOverlayPosition(offset, len(wrapped)) + "  j/k 或 ↑/↓ 滚动 · q 或 Esc 关闭"
+		lines[height-1] = debugOverlayFooter(offset, len(wrapped), refreshHint)
 	}
 	var builder strings.Builder
 	builder.WriteString("\x1b[H")
@@ -373,6 +476,15 @@ func renderDebugOverlayFrame(title string, bodyLines []string, offset, width, he
 		}
 	}
 	return builder.String()
+}
+
+// debugOverlayFooter 是页脚提示：位置 + 滚动/关闭键；可刷新屏再追加刷新键。
+func debugOverlayFooter(offset, total int, refreshHint string) string {
+	footer := debugOverlayPosition(offset, total) + "  j/k 或 ↑/↓ 滚动 · q 或 Esc 关闭"
+	if hint := strings.TrimSpace(refreshHint); hint != "" {
+		footer += " · " + hint
+	}
+	return footer
 }
 
 func debugOverlayPosition(offset, total int) string {

@@ -303,11 +303,20 @@ func looksLikeNewAPIAuthChallenge(body []byte) bool {
 	return strings.TrimSpace(payload.Message) != ""
 }
 
+// looksLikeDeepSeekBalanceChallenge recognizes both challenge shapes served by
+// api.deepseek.com for an unauthenticated or invalid-key GET /user/balance:
+// the JSON error envelope ({"error":{...}}) and the plain-text body emitted by
+// the DeepSeek edge ("Authentication Fails (governor)"). Only the JSON shape
+// was matched previously, so real DeepSeek deployments were detected as
+// unknown and never displayed a balance.
 func looksLikeDeepSeekBalanceChallenge(body []byte) bool {
 	var payload struct {
 		Error json.RawMessage `json:"error"`
 	}
-	return json.Unmarshal(body, &payload) == nil && len(payload.Error) > 0 && string(payload.Error) != "null"
+	if json.Unmarshal(body, &payload) == nil && len(payload.Error) > 0 && string(payload.Error) != "null" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(strings.TrimSpace(string(body))), "authentication fails")
 }
 
 func compactHits(hits []EndpointHit) []EndpointHit {

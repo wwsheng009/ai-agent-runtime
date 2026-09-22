@@ -60,7 +60,10 @@ func TestChatRuntimeEventBridge_EventLogPrefersLegacyLayoutWhenPresent(t *testin
 	require.NoError(t, logger.SetLogDir(t.TempDir()))
 
 	legacyPaths := logger.LegacyRuntimeEventsLogPaths()
-	require.Len(t, legacyPaths, 2)
+	// 候选路径数量取决于 sessionID 是否还带旧格式字符：新会话 ID
+	// （session_YYYYMMDDHHMMSS_<suffix>）解析后与目录名一致，只产生扁平
+	// <session-id>.events/ 一个候选；旧 ID 才会额外追加嵌套布局候选。
+	require.NotEmpty(t, legacyPaths)
 	legacy := legacyPaths[0]
 	require.NoError(t, os.MkdirAll(filepath.Dir(legacy), 0o755))
 	require.NoError(t, os.WriteFile(legacy, []byte(`{"type":"assistant.reasoning"}`+"\n"), 0o644))
