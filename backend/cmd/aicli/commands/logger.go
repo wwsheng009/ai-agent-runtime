@@ -985,8 +985,15 @@ func (cl *ChatLogger) LegacyRuntimeEventsLogPaths() []string {
 	paths := []string{
 		aiclipaths.JoinDatePartition(cl.logDir, partitionAt, base+".events", "runtime-events.jsonl"),
 	}
-	if raw := strings.TrimSpace(cl.sessionID); raw != "" && raw != base {
-		paths = append(paths, aiclipaths.JoinDatePartition(cl.logDir, partitionAt, raw, "runtime-events.jsonl"))
+	// 嵌套布局候选必须始终返回：新式会话 ID（session_YYYYMMDDHHMMSS_suffix）无需
+	// 转义时 base == raw，但二者指向不同文件（<id>.events/runtime-events.jsonl 与
+	// <id>/runtime-events.jsonl），按 base == raw 去重会漏掉更早的嵌套日志，
+	// 使 /resume 事件链断连。
+	if raw := strings.TrimSpace(cl.sessionID); raw != "" {
+		nested := aiclipaths.JoinDatePartition(cl.logDir, partitionAt, raw, "runtime-events.jsonl")
+		if nested != paths[0] {
+			paths = append(paths, nested)
+		}
 	}
 	return paths
 }
