@@ -24,6 +24,8 @@ export type RuntimeEventChannel =
 
 export type RuntimeEventType =
   | "agent.reclaimed"
+  | "agent.turn.finished"
+  | "agent.turn.started"
   | "approval_requested"
   | "approval_resolved"
   | "assistant.delta"
@@ -35,15 +37,40 @@ export type RuntimeEventType =
   | "backtrack_finished"
   | "backtrack_started"
   | "checkpoint_created"
+  | "completion.requirement_recovery"
+  | "context.preflight.compacted"
+  | "context.preflight.failed"
+  | "context.preflight.started"
   | "context.profile.injected"
+  | "context.tool_schema.compacted"
+  | "context.tool_schema.frozen"
   | "context_reconciled"
+  | "hooks.stop_blocked"
   | "job_cancelled"
   | "job_finished"
   | "job_output"
   | "job_started"
+  | "llm.max_output_tokens.escalated"
+  | "llm.prompt_cache.backoff_applied"
+  | "llm.prompt_cache.breaker_tripped"
+  | "llm.provider.health_opened"
+  | "llm.reasoning_only.guardrail_hit"
+  | "llm.reasoning_only.recovered"
+  | "llm.request.finished"
+  | "llm.request.started"
+  | "llm.retry"
+  | "llm.retry.aggregated"
   | "llm_request_finished"
   | "llm_request_started"
   | "mailbox_received"
+  | "main_agent.route_applied"
+  | "main_agent.route_cleared"
+  | "main_agent.route_cost_guard_tripped"
+  | "main_agent.route_disabled_for_turn"
+  | "main_agent.route_prediction_invalid"
+  | "main_agent.route_prediction_unresolvable"
+  | "patch.applied"
+  | "patch.decision"
   | "question_answered"
   | "question_asked"
   | "recall.performed"
@@ -57,11 +84,20 @@ export type RuntimeEventType =
   | "session_end"
   | "session_interrupted"
   | "session_start"
+  | "subagent.batch.canceled"
+  | "subagent.batch.circuit_open"
   | "subagent.batch.completed"
+  | "subagent.batch.created"
+  | "subagent.batch.failed"
+  | "subagent.batch.orphaned"
   | "subagent.batch.progress"
   | "subagent.batch.started"
+  | "subagent.batch.timed_out"
   | "subagent.completed"
+  | "subagent.denied"
   | "subagent.progress"
+  | "subagent.requires_write"
+  | "subagent.route.resolved"
   | "subagent.started"
   | "subagent.task.completed"
   | "subagent.task.started"
@@ -73,6 +109,8 @@ export type RuntimeEventType =
   | "tool.reduced"
   | "tool.requested"
   | "tool_finished"
+  | "tool_loop.exploration_stall_observed"
+  | "tool_loop.repeated_prompt_observed"
   | "tool_receipt_recorded"
   | "tool_receipt_replayed"
   | "tool_started"
@@ -83,6 +121,8 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   readonly RuntimeEventChannel[]
 > = {
   "agent.reclaimed": ["session_store"],
+  "agent.turn.finished": [],
+  "agent.turn.started": [],
   "approval_requested": ["session_store"],
   "approval_resolved": ["session_store"],
   "assistant.delta": [],
@@ -94,15 +134,40 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "backtrack_finished": [],
   "backtrack_started": [],
   "checkpoint_created": ["session_store"],
+  "completion.requirement_recovery": [],
+  "context.preflight.compacted": [],
+  "context.preflight.failed": [],
+  "context.preflight.started": [],
   "context.profile.injected": ["session_store"],
+  "context.tool_schema.compacted": [],
+  "context.tool_schema.frozen": [],
   "context_reconciled": ["session_store"],
+  "hooks.stop_blocked": [],
   "job_cancelled": [],
   "job_finished": [],
   "job_output": [],
   "job_started": [],
+  "llm.max_output_tokens.escalated": [],
+  "llm.prompt_cache.backoff_applied": [],
+  "llm.prompt_cache.breaker_tripped": ["session_store"],
+  "llm.provider.health_opened": ["session_store"],
+  "llm.reasoning_only.guardrail_hit": [],
+  "llm.reasoning_only.recovered": [],
+  "llm.request.finished": [],
+  "llm.request.started": [],
+  "llm.retry": [],
+  "llm.retry.aggregated": [],
   "llm_request_finished": [],
   "llm_request_started": [],
   "mailbox_received": [],
+  "main_agent.route_applied": ["session_store"],
+  "main_agent.route_cleared": ["session_store"],
+  "main_agent.route_cost_guard_tripped": ["session_store"],
+  "main_agent.route_disabled_for_turn": ["session_store"],
+  "main_agent.route_prediction_invalid": ["session_store"],
+  "main_agent.route_prediction_unresolvable": ["session_store"],
+  "patch.applied": [],
+  "patch.decision": [],
   "question_answered": [],
   "question_asked": [],
   "recall.performed": ["session_store"],
@@ -116,11 +181,20 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "session_end": ["session_store"],
   "session_interrupted": ["session_store"],
   "session_start": ["session_store"],
+  "subagent.batch.canceled": ["session_store", "tail_only"],
+  "subagent.batch.circuit_open": [],
   "subagent.batch.completed": ["tail_only"],
+  "subagent.batch.created": [],
+  "subagent.batch.failed": ["session_store", "tail_only"],
+  "subagent.batch.orphaned": ["session_store", "tail_only"],
   "subagent.batch.progress": ["live_only"],
   "subagent.batch.started": ["tail_only"],
+  "subagent.batch.timed_out": ["session_store", "tail_only"],
   "subagent.completed": ["session_store", "tail_only"],
+  "subagent.denied": [],
   "subagent.progress": ["live_only"],
+  "subagent.requires_write": [],
+  "subagent.route.resolved": ["session_store", "tail_only"],
   "subagent.started": ["tail_only"],
   "subagent.task.completed": ["tail_only"],
   "subagent.task.started": ["tail_only"],
@@ -132,6 +206,8 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "tool.reduced": [],
   "tool.requested": ["session_store", "chat_bridge"],
   "tool_finished": [],
+  "tool_loop.exploration_stall_observed": [],
+  "tool_loop.repeated_prompt_observed": [],
   "tool_receipt_recorded": [],
   "tool_receipt_replayed": [],
   "tool_started": [],
@@ -148,6 +224,14 @@ export const RUNTIME_EVENT_PERSISTED_TYPES: readonly RuntimeEventType[] = [
   "checkpoint_created",
   "context.profile.injected",
   "context_reconciled",
+  "llm.prompt_cache.breaker_tripped",
+  "llm.provider.health_opened",
+  "main_agent.route_applied",
+  "main_agent.route_cleared",
+  "main_agent.route_cost_guard_tripped",
+  "main_agent.route_disabled_for_turn",
+  "main_agent.route_prediction_invalid",
+  "main_agent.route_prediction_unresolvable",
   "recall.performed",
   "session_compact_completed",
   "session_compact_failed",
@@ -156,7 +240,12 @@ export const RUNTIME_EVENT_PERSISTED_TYPES: readonly RuntimeEventType[] = [
   "session_end",
   "session_interrupted",
   "session_start",
+  "subagent.batch.canceled",
+  "subagent.batch.failed",
+  "subagent.batch.orphaned",
+  "subagent.batch.timed_out",
   "subagent.completed",
+  "subagent.route.resolved",
   "tool.completed",
   "tool.requested",
 ];
@@ -173,9 +262,14 @@ export const RUNTIME_EVENT_CHAT_BRIDGE_TYPES: readonly RuntimeEventType[] = [
 ];
 
 export const RUNTIME_EVENT_TAIL_ONLY_TYPES: readonly RuntimeEventType[] = [
+  "subagent.batch.canceled",
   "subagent.batch.completed",
+  "subagent.batch.failed",
+  "subagent.batch.orphaned",
   "subagent.batch.started",
+  "subagent.batch.timed_out",
   "subagent.completed",
+  "subagent.route.resolved",
   "subagent.started",
   "subagent.task.completed",
   "subagent.task.started",
