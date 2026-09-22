@@ -2122,6 +2122,97 @@ func TestSessionActorRunStallWatchdogToleratesSlowStreaming(t *testing.T) {
 	require.Equal(t, SessionStopped, actor.State().Status, "stall must trigger once deltas stop")
 }
 
+// TestSessionActorRunStallWatchdogToleratesToolProgress 回归：tool.progress
+// （toolprotocol.EventTypeProgress）必须算作进展。长任务可能长时间只上报进度、
+// 没有 tool.completed，watchdog 若只认 tool.completed 就会把这类 run 误判为
+// 挂死并以 context.Canceled 结束整个 turn。
+func TestSessionActorRunStallWatchdogToleratesToolProgress(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+	session, err := manager.CreateSession(ctx, "actor-stall-progress-user")
+	require.NoError(t, err)
+
+	bus := runtimeevents.NewBus()
+	provider := &cancelBlockingLLMProvider{
+		name:    "progress-only-provider",
+		entered: make(chan struct{}, 1),
+	}
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 1})
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-stall-progress-test",
+		Provider: provider.Name(),
+		Model:    "test-model",
+		MaxSteps: 3,
+	}, nil, runtime)
+	runtimeStore := NewInMemoryRuntimeStore(64)
+
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:           apiAgent,
+		LLMRuntime:      runtime,
+		SessionStore:    storage,
+		StateStore:      runtimeStore,
+		EventStore:      runtimeStore,
+		EventBus:        bus,
+		RunStallTimeout: 500 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	t.Cleanup(actor.Stop)
+
+	go func() {
+		_, _ = actor.SubmitPrompt(ctx, "long tool call, progress only", nil)
+	}()
+	select {
+	case <-provider.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider did not start")
+	}
+
+	// 只上报 tool.progress：没有任何 tool.completed / assistant_delta。
+	stopProgress := make(chan struct{})
+	progressDone := make(chan struct{})
+	go func() {
+		defer close(progressDone)
+		ticker := time.NewTicker(60 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopProgress:
+				return
+			case <-ticker.C:
+				bus.Publish(runtimeevents.Event{
+					Type:      "tool.progress",
+					SessionID: session.ID,
+					Payload: map[string]interface{}{
+						"tool_call_id": "call-progress",
+						"message":      "still running",
+					},
+				})
+			}
+		}
+	}()
+
+	time.Sleep(900 * time.Millisecond)
+	if got := actor.State().Status; got != SessionRunning {
+		t.Fatalf("progress-only run was wrongly aborted, status=%s", got)
+	}
+
+	close(stopProgress)
+	<-progressDone
+
+	// 停发进度后 watchdog 仍应最终触发（阻塞 provider 一直无结果）。
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if actor.State().Status == SessionStopped {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	require.Equal(t, SessionStopped, actor.State().Status, "stall must trigger once progress stops")
+}
+
 func TestSessionActorRunStallWatchdogOldRunTailDoesNotClobberNewTurn(t *testing.T) {
 	ctx := context.Background()
 	storage := NewInMemoryStorage()

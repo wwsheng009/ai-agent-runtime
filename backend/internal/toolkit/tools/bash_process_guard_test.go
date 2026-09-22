@@ -58,6 +58,58 @@ func TestResolveShellTimeoutBudgetCeiling(t *testing.T) {
 	}
 }
 
+// TestResolveShellTimeoutBudgetCeilingDisabledByDefault 回归：运行时上限默认
+// 关闭（0 = 不限制）。自动化场景必须能把命令跑到自然结束，唯一的时间上界
+// 来自模型显式传入的 timeout/timeout_ms；只有显式配置
+// AICLI_SHELL_MAX_COMMAND_TIMEOUT 时才恢复硬上限。
+func TestResolveShellTimeoutBudgetCeilingDisabledByDefault(t *testing.T) {
+	t.Setenv("AICLI_SHELL_MAX_COMMAND_TIMEOUT", "")
+	if got := resolveMaxShellCommandTimeout(); got != 0 {
+		t.Fatalf("default ceiling = %s, want 0 (disabled)", got)
+	}
+	budget := resolveShellTimeoutBudget(context.Background(), 2*time.Hour)
+	if budget.Effective != 2*time.Hour || budget.Requested != 2*time.Hour {
+		t.Fatalf("explicit timeout must not be capped by default: %+v", budget)
+	}
+	if budget.Source == "runtime_ceiling" {
+		t.Fatalf("budget source = %q, want the requested timeout", budget.Source)
+	}
+
+	t.Setenv("AICLI_SHELL_MAX_COMMAND_TIMEOUT", "off")
+	if got := resolveMaxShellCommandTimeout(); got != 0 {
+		t.Fatalf("off ceiling = %s, want 0 (disabled)", got)
+	}
+
+	t.Setenv("AICLI_SHELL_MAX_COMMAND_TIMEOUT", "15") // 漏写单位
+	if got := resolveMaxShellCommandTimeout(); got != 0 {
+		t.Fatalf("unparsable ceiling = %s, want 0 (disabled, no silent cap)", got)
+	}
+
+	t.Setenv("AICLI_SHELL_MAX_COMMAND_TIMEOUT", "20m")
+	if got := resolveMaxShellCommandTimeout(); got != 20*time.Minute {
+		t.Fatalf("configured ceiling = %s, want 20m", got)
+	}
+}
+
+// TestDefaultCommandExecuterUnlimitedTimeoutRunsToCompletion 回归：上限关闭且
+// 调用方未指定超时时 budget.Effective == 0 表示"不设超时"，绝不能被实现成
+// context.WithTimeout(ctx, 0)——那会让命令立即以 DeadlineExceeded 失败。
+func TestDefaultCommandExecuterUnlimitedTimeoutRunsToCompletion(t *testing.T) {
+	t.Setenv("AICLI_SHELL_MAX_COMMAND_TIMEOUT", "")
+	executer := &DefaultCommandExecuter{}
+	result, err := executer.Execute(context.Background(), "echo unlimited-timeout-ok", 0)
+	if err != nil {
+		t.Fatalf("unlimited timeout must not fail the command: %v", err)
+	}
+	if !strings.Contains(result.Output, "unlimited-timeout-ok") {
+		t.Fatalf("output=%q, want the echo marker", result.Output)
+	}
+	if result.TimeoutEffectiveMs != 0 || result.TimeoutSource != "tool_default" {
+		t.Fatalf("timeout budget = (%d ms, %s), want (0, tool_default) = unlimited",
+			result.TimeoutEffectiveMs, result.TimeoutSource)
+	}
+}
+
 func TestLongRunningShellCommandHint(t *testing.T) {
 	if hint := longRunningShellCommandHint("bsk daemon status"); hint == "" {
 		t.Fatal("expected daemon lifecycle hint")

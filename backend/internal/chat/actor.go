@@ -130,9 +130,11 @@ type SessionActorConfig struct {
 	RecoverStale bool
 	OnStop       func()
 	// RunStallTimeout 无进展超时：run 启动后，若超过该时长没有任何进展事件
-	// （assistant_delta / assistant.reasoning / tool.* / 状态更新），判定 run
-	// 挂死（如上游挂死），自动强制中止并写回 stopped 状态，解除 busy 锁。
-	// 0 表示禁用。
+	// （assistant_delta / assistant.reasoning / tool.progress / tool.requested /
+	// tool.completed / 状态更新），判定 run 挂死（如上游挂死），自动强制中止并
+	// 写回 stopped 状态，解除 busy 锁。
+	// 0 表示禁用；宿主默认禁用（0），因为强制中止会以 context.Canceled 结束
+	// 整个 turn，属于"意外结束会话"。
 	RunStallTimeout time.Duration
 	// OnRunStalled 在 run 因停滞被 watchdog 强制中止后回调（宿主在此释放 lease）。
 	OnRunStalled func(turnID string)
@@ -1271,6 +1273,9 @@ func (a *SessionActor) touchRunActivity(run *sessionRunControl, event runtimeeve
 // stop function (never nil) that unsubscribes progress events and halts it.
 // A stall is judged as zero progress events for RunStallTimeout; when hit the
 // run is force-aborted, the busy state released and OnRunStalled invoked.
+// RunStallTimeout <= 0 disables the watchdog, which is the default: automation
+// must be able to run to completion, so an unexpected context.Canceled from
+// this watchdog only happens when a caller explicitly opts in.
 func (a *SessionActor) startRunStallWatchdog(runCtx context.Context, run *sessionRunControl) func() {
 	if a == nil || run == nil || a.runStallTimeout <= 0 {
 		return func() {}
@@ -1293,6 +1298,10 @@ func (a *SessionActor) startRunStallWatchdog(runCtx context.Context, run *sessio
 			"assistant_delta",
 			"assistant.reasoning",
 			"tool.requested",
+			// tool.progress（toolprotocol.EventTypeProgress）同样是进展信号：
+			// 长任务可能长时间只上报进度而没有 tool.completed，不能因此被
+			// 误判为挂死。
+			"tool.progress",
 			"tool.completed",
 		} {
 			u := bus.SubscribeCancelable(t, func(event runtimeevents.Event) {

@@ -49,13 +49,41 @@ const (
 	localChatSessionActorLeaseOwnerKind   = "aicli-actor"
 	localSubagentBatchRestartGrace        = 5 * time.Minute
 	localSubagentBatchRecoveryPassTimeout = 15 * time.Second
+	// runStallTimeoutEnv 显式启用 run 无进展 watchdog（默认关闭）。
+	runStallTimeoutEnv = "AICLI_RUN_STALL_TIMEOUT"
 	// defaultLocalChatRunStallTimeout 是 run 无进展 watchdog 的默认阈值：
-	// run 启动后超过该时长没有任何进展事件（assistant_delta /
-	// assistant.reasoning / tool.* / 状态更新）即判定挂死并强制中止。
-	// 15 分钟对正常长任务（多步工具调用、长流式输出）足够，同时远小于
-	// 用户遇到的"上游挂死 30+ 分钟无事件"场景。
-	defaultLocalChatRunStallTimeout = 15 * time.Minute
+	// 0 = 关闭（默认）。看门狗触发会以 context.Canceled 中止整个 run/turn，
+	// 在用户侧表现为"操作错误: context canceled"，属于意外结束会话；自动化
+	// 长任务应当自然执行到结束，因此默认不设 run 级超时。
+	// 上游挂死由请求级超时负责（provider 的 response_header / stream_read /
+	// 单请求 timeout），失败以类型化错误返回并走重试，不会让会话卡在 busy。
+	// 需要 run 级兜底时用 AICLI_RUN_STALL_TIMEOUT 显式启用（Go duration，
+	// 如 30m；off/0/disable 关闭）。
+	defaultLocalChatRunStallTimeout = time.Duration(0)
 )
+
+// localChatRunStallTimeoutFromEnv 解析 run 无进展 watchdog 的阈值。
+//
+// 未设置返回默认值 0 = 关闭：run 级看门狗一旦触发就以 context.Canceled
+// 结束整个 turn，长任务/自动化不应被它意外打断，所以只有显式配置才启用。
+// AICLI_RUN_STALL_TIMEOUT 接受 Go duration（如 30m、1h）以及
+// off/0/disable（关闭）；非法值（例如漏写单位的 "30"）按默认（关闭）处理，
+// 避免误开看门狗把长任务打断。
+func localChatRunStallTimeoutFromEnv() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(runStallTimeoutEnv))
+	if raw == "" {
+		return defaultLocalChatRunStallTimeout
+	}
+	switch strings.ToLower(raw) {
+	case "off", "0", "false", "no", "disable", "disabled":
+		return 0
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil || value <= 0 {
+		return defaultLocalChatRunStallTimeout
+	}
+	return value
+}
 
 // localChatSessionCheckpointIntervalFromEnv 解析长 turn 中途落库间隔的覆盖值。
 //
@@ -1425,10 +1453,11 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		// 状态（默认 15s，见 chat.DefaultSessionCheckpointInterval；可用
 		// AICLI_SESSION_CHECKPOINT_INTERVAL 覆盖或关闭）。
 		CheckpointInterval: localChatSessionCheckpointIntervalFromEnv(),
-		// 上游挂死/网络卡死时 run 可能长时间无任何进展（无 delta、无工具
-		// 事件、无状态更新），状态卡在 running，busy 锁让用户无法继续也无法
-		// 重启接管。watchdog 超时后强制中止并释放 lease，让会话可恢复。
-		RunStallTimeout: defaultLocalChatRunStallTimeout,
+		// run 无进展 watchdog 默认关闭（0）：长任务/自动化自然执行到结束，
+		// 上游挂死由请求级超时 + 重试负责（失败以类型化错误返回，不会把会话
+		// 卡在 busy）。需要 run 级兜底时用 AICLI_RUN_STALL_TIMEOUT 显式启用；
+		// 启用后触发会以 context.Canceled 中止 run 并释放 lease 让会话可恢复。
+		RunStallTimeout: localChatRunStallTimeoutFromEnv(),
 		OnRunStalled: func(turnID string) {
 			if leaseHandle != nil {
 				_ = leaseHandle.Release(context.Background())

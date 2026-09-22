@@ -63,10 +63,13 @@ const (
 	// deliberate sub-100ms budgets remain available through timeout="30ms".
 	shellTimeoutNoiseFloor = 100 * time.Millisecond
 
-	// Runtime-side ceiling: even an explicit tool timeout cannot exceed this,
-	// so a single shell call cannot wedge a turn forever.
+	// Runtime-side ceiling on an explicitly supplied shell timeout. The default
+	// is 0 = no ceiling: automation must be able to run a command to completion,
+	// and the model's own timeout/timeout_ms argument is the only bound.
+	// Operators can restore a hard cap via AICLI_SHELL_MAX_COMMAND_TIMEOUT
+	// (see docs/tools/shell-command-guard.md).
 	maxShellCommandTimeoutEnv     = "AICLI_SHELL_MAX_COMMAND_TIMEOUT"
-	defaultMaxShellCommandTimeout = 15 * time.Minute
+	defaultMaxShellCommandTimeout = time.Duration(0)
 )
 
 // modelHistoryArtifactThresholdBytes keeps shell output artifacts aligned with
@@ -813,8 +816,14 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 	if configured := b.sandbox.Config().MaxExecutionTime; configured > 0 {
 		budget = runtimeexecution.LimitTimeout(budget, configured, runtimeexecution.TimeoutSourceSandboxPolicy)
 	}
-	cmdCtx, cancel := context.WithTimeout(ctx, budget.Effective)
-	defer cancel()
+	// budget.Effective == 0 表示不设超时（默认关闭上限且调用方未指定）。
+	// context.WithTimeout(ctx, 0) 会立刻过期并取消命令，因此必须显式跳过。
+	cmdCtx := ctx
+	if budget.Effective > 0 {
+		withTimeout, cancel := context.WithTimeout(ctx, budget.Effective)
+		defer cancel()
+		cmdCtx = withTimeout
+	}
 
 	// 使用智能 shell 检测
 	shell := runtimeexecutor.DefaultUserShell()
@@ -984,8 +993,13 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 	}
 
 	budget := resolveShellTimeoutBudget(ctx, timeout)
-	cmdCtx, cancel := context.WithTimeout(ctx, budget.Effective)
-	defer cancel()
+	// 同上：Effective == 0 表示不设超时，不能用 WithTimeout(0) 立即取消命令。
+	cmdCtx := ctx
+	if budget.Effective > 0 {
+		withTimeout, cancel := context.WithTimeout(ctx, budget.Effective)
+		defer cancel()
+		cmdCtx = withTimeout
+	}
 
 	// 使用智能 shell 检测
 	shell := runtimeexecutor.DefaultUserShell()
@@ -1127,17 +1141,28 @@ func applyCommandTimeoutBudget(result *CommandExecutionResult, budget runtimeexe
 }
 
 // resolveShellTimeoutBudget applies the runtime-side ceiling on top of the
-// requested timeout so an explicit tool argument cannot wedge a turn forever.
+// requested timeout. The ceiling is disabled by default (0 = unlimited) and is
+// only applied when AICLI_SHELL_MAX_COMMAND_TIMEOUT opts into a hard cap.
 func resolveShellTimeoutBudget(ctx context.Context, requested time.Duration) runtimeexecution.TimeoutBudget {
 	budget := runtimeexecution.ResolveTimeout(ctx, requested)
 	return runtimeexecution.LimitTimeout(budget, resolveMaxShellCommandTimeout(), runtimeexecution.TimeoutSourceRuntimeCeiling)
 }
 
+// resolveMaxShellCommandTimeout returns the configured hard cap, or 0 when the
+// ceiling is disabled (the default). off/0/disable also disable it, and an
+// unparsable value falls back to the default (disabled) instead of silently
+// imposing a cap.
 func resolveMaxShellCommandTimeout() time.Duration {
-	if raw := strings.TrimSpace(os.Getenv(maxShellCommandTimeoutEnv)); raw != "" {
-		if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
-			return parsed
-		}
+	raw := strings.TrimSpace(os.Getenv(maxShellCommandTimeoutEnv))
+	if raw == "" {
+		return defaultMaxShellCommandTimeout
+	}
+	switch strings.ToLower(raw) {
+	case "off", "0", "false", "no", "disable", "disabled":
+		return 0
+	}
+	if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
+		return parsed
 	}
 	return defaultMaxShellCommandTimeout
 }

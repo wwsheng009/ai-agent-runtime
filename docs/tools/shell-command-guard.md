@@ -20,7 +20,7 @@
 4. **静默提示**：命令仍在运行但持续无输出超过阈值时，向捕获输出（含实时镜像）追加 `[runtime] shell command has been quiet for …` 提示，包含 pid、已运行时长与命令摘要。
 5. **结构化诊断**：结果元数据新增 `wait_delay_ms`、`wait_delay_used`、`process_tree_kill`、`killed_pids`、`leftover_descendant_pids`、`termination`（`timeout|cancel|error`）。
    终止方式与降级原因分别记录在 `process_tree_mode`（`job_object|taskkill|direct_kill|process_group`）与 `process_tree_error`。
-6. **超时上限**：即使模型显式传入超大 timeout，也被 `AICLI_SHELL_MAX_COMMAND_TIMEOUT`（默认 15m）截断，来源标记为 `runtime_ceiling`。
+6. **超时上限**：默认**不设上限**（`AICLI_SHELL_MAX_COMMAND_TIMEOUT` 默认 `0`）：自动化场景应当把命令执行到自然结束，唯一的时间上界来自模型显式传入的 `timeout`/`timeout_ms`。只有运维显式配置了该变量时，才会截断超大的模型参数，来源标记为 `runtime_ceiling`。
 7. **常驻命令提示**：daemon/dev-server/watch 类命令超时失败时，结果附带 `long_running_command_hint` 与 next_action，建议改用 background_task 或显式 timeout。
 8. **管道占用提示**：命令本体已结束但后代仍占用输出管道时（`wait_delay_used=true`），失败结果附带 `wait_delay_note` 与 next_action，说明输出可能不完整以及如何保留/清理该守护进程。
 
@@ -29,7 +29,7 @@
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `AICLI_SHELL_WAIT_DELAY` | `5s` | 子进程退出/取消后等待 I/O 的上限；`0` 关闭（不建议） |
-| `AICLI_SHELL_MAX_COMMAND_TIMEOUT` | `15m` | 单次 shell 调用的运行时上限（覆盖模型参数） |
+| `AICLI_SHELL_MAX_COMMAND_TIMEOUT` | `0`（不限制） | 单次 shell 调用的运行时上限（截断模型传入的超大 timeout）；`0`/`off`/`disable` 关闭上限，非法值同样按关闭处理 |
 | `AICLI_SHELL_QUIET_NOTICE_TIMEOUT` | `2m` | 静默多久后追加提示；`0` 关闭 |
 | `AICLI_SHELL_KILL_ORPHANS_ON_EXIT` | `false` | 命令结束时是否连离开的后代进程一起清理 |
 | `AICLI_SHELL_ALLOW_DETACH` | `true` | 是否允许 `detach=true` 的独立进程启动；`0/false/off/no/disabled` 时拒绝 |
