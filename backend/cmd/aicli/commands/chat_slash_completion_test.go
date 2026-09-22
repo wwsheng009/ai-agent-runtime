@@ -152,7 +152,7 @@ func TestMatchSlashCommandCandidates(t *testing.T) {
 		{
 			name:  "slash s prefix order",
 			query: "/s",
-			want:  []string{"/s", "/session", "/sessions", "/status", "/stream", "/skill", "/skills", "/shell"},
+			want:  []string{"/s", "/session", "/sessions", "/status", "/supervision", "/stream", "/skill", "/skills", "/shell"},
 		},
 		{
 			name:  "exact alias outranks prefix",
@@ -435,6 +435,7 @@ func TestChatSlashCommandCatalogMatchesHandleCommandRoutes(t *testing.T) {
 		{canonical: "/session", forms: []string{"/session"}, acceptsArgs: false, requiresArgs: false},
 		{canonical: "/status", forms: []string{"/status"}, acceptsArgs: false, requiresArgs: false},
 		{canonical: "/debug", forms: []string{"/debug"}, acceptsArgs: true, requiresArgs: false},
+		{canonical: "/supervision", forms: []string{"/supervision"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/agents", forms: []string{"/agents"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/agent", forms: []string{"/agent"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/timeline", forms: []string{"/timeline"}, acceptsArgs: true, requiresArgs: false},
@@ -835,6 +836,75 @@ func TestChatSlashArgumentCompletionGoal(t *testing.T) {
 	}
 	if nextText != "/goal finish-goal-audit" || nextCursor != len([]rune("/goal finish-goal-audit")) {
 		t.Fatalf("expected free-form /goal submission to remain unchanged, got %q/%d", nextText, nextCursor)
+	}
+}
+
+func TestChatSlashArgumentCompletionSupervision(t *testing.T) {
+	t.Parallel()
+
+	controller := newChatSlashCompletionController(&ChatSession{})
+	controller.UpdateAt("/supervision ", len([]rune("/supervision ")))
+	if !controller.state.Active || !controller.state.Context.InArguments {
+		t.Fatalf("expected /supervision args popup to be active, got %#v", controller.state)
+	}
+	for _, command := range []string{"status", "audit", "wake", "list", "ack", "defer", "resolve", "control", "watchdog", "help"} {
+		if !containsSlashCandidate(controller.state.Candidates, command) {
+			t.Fatalf("expected /supervision candidates to include %q, got %#v", command, controller.state.Candidates)
+		}
+	}
+
+	nextText, nextCursor, ok := controller.ApplyCompletion("/supervision wa", len([]rune("/supervision wa")))
+	if !ok {
+		t.Fatal("expected /supervision wa completion to be accepted")
+	}
+	if nextText != "/supervision wake " || nextCursor != len([]rune("/supervision wake ")) {
+		t.Fatalf("expected /supervision wa to complete to wake with trailing space, got %q/%d", nextText, nextCursor)
+	}
+	controller.UpdateAt(nextText, nextCursor)
+	if !containsSlashCandidate(controller.state.Candidates, "--deliver") {
+		t.Fatalf("expected wake flags after completing wake, got %#v", controller.state.Candidates)
+	}
+
+	controller.UpdateAt("/supervision wake --", len([]rune("/supervision wake --")))
+	if !controller.state.Active || !controller.state.Context.InArguments {
+		t.Fatalf("expected /supervision wake flags popup to be active, got %#v", controller.state)
+	}
+	for _, command := range []string{"--deliver", "--dry-run", "--team", "--limit", "--json"} {
+		if !containsSlashCandidate(controller.state.Candidates, command) {
+			t.Fatalf("expected /supervision wake candidates to include %q, got %#v", command, controller.state.Candidates)
+		}
+	}
+	if containsSlashCandidate(controller.state.Candidates, "--state") {
+		t.Fatalf("did not expect resolve-only flags on /supervision wake, got %#v", controller.state.Candidates)
+	}
+
+	controller.UpdateAt("/supervision resolve --state ", len([]rune("/supervision resolve --state ")))
+	if !controller.state.Active || !controller.state.Context.InArguments {
+		t.Fatalf("expected /supervision resolve --state value popup to be active, got %#v", controller.state)
+	}
+	for _, command := range []string{"closed", "recovered", "failed"} {
+		if !containsSlashCandidate(controller.state.Candidates, command) {
+			t.Fatalf("expected --state candidates to include %q, got %#v", command, controller.state.Candidates)
+		}
+	}
+
+	controller.UpdateAt("/supervision control --action ", len([]rune("/supervision control --action ")))
+	for _, command := range []string{"cancel", "close", "cancel_subtree", "retry", "reassign"} {
+		if !containsSlashCandidate(controller.state.Candidates, command) {
+			t.Fatalf("expected --action candidates to include %q, got %#v", command, controller.state.Candidates)
+		}
+	}
+
+	controller.UpdateAt("/supervision ack ", len([]rune("/supervision ack ")))
+	for _, command := range []string{"<notification_id>", "--note", "--expected-version"} {
+		if !containsSlashCandidate(controller.state.Candidates, command) {
+			t.Fatalf("expected /supervision ack candidates to include %q, got %#v", command, controller.state.Candidates)
+		}
+	}
+	// --note 是自由文本取值位：不做枚举补全，弹窗关闭而不是给出错误候选。
+	controller.UpdateAt("/supervision ack --note ", len([]rune("/supervision ack --note ")))
+	if controller.state.Active {
+		t.Fatalf("expected free-form --note value to close the popup, got %#v", controller.state)
 	}
 }
 

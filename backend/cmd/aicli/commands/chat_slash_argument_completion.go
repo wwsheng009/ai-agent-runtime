@@ -180,6 +180,12 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 			{Command: "--output", Summary: "指定 zip 输出文件", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
 			{Command: "--dir", Summary: "指定 zip 输出目录", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
 		})
+	case "/supervision":
+		// 2026-09-22 手动核查：/supervision 此前只注册了 catalog 与 handler，
+		// 参数模式没有候选，输入 "/supervision " 后弹窗为空，子命令只能靠
+		// /help 记忆。这里按 chat_supervision.go 的 parseChatSupervisionRequest
+		// 与委托的 /debug supervision 用法逐位给出候选。
+		return completeSupervisionSlashArgs(argsText, cursor)
 	case "/agents":
 		return completeAgentsSlashArgs(session, argsText, cursor)
 	case "/agent":
@@ -1122,6 +1128,202 @@ func formatResumeSessionCompletionSummary(session *runtimechat.Session, now time
 		messageCount,
 		formatSessionUpdatedAt(session.UpdatedAt, now),
 	)
+}
+
+// completeSupervisionSlashArgs 补全 /supervision 的子命令、开关与枚举取值。
+func completeSupervisionSlashArgs(argsText string, cursor int) []chatSlashCompletionCandidate {
+	ctx := parseSlashArgumentContext(argsText, cursor)
+	first := strings.ToLower(slashArgumentTokenText(ctx, 0))
+	if first == "" || slashArgumentCursorInToken(ctx, 0) {
+		return matchSlashArgumentCandidates(supervisionTopLevelArgumentCandidates(), activeSlashArgumentQuery(ctx))
+	}
+
+	switch first {
+	case "status", "audit":
+		return completeSupervisionFlagArguments(ctx, supervisionScopeFlagCandidates())
+	case "wake":
+		flags := append(supervisionWakeFlagCandidates(), supervisionScopeFlagCandidates()...)
+		return completeSupervisionFlagArguments(ctx, flags)
+	case "list":
+		return completeSupervisionFlagArguments(ctx, supervisionListFlagCandidates())
+	case "ack":
+		flags := append(supervisionNotificationIDCandidates(), supervisionAckFlagCandidates()...)
+		return completeSupervisionFlagArguments(ctx, flags)
+	case "defer":
+		flags := append(supervisionNotificationIDCandidates(), supervisionDeferFlagCandidates()...)
+		return completeSupervisionFlagArguments(ctx, flags)
+	case "resolve":
+		flags := append(supervisionNotificationIDCandidates(), supervisionResolveFlagCandidates()...)
+		return completeSupervisionFlagArguments(ctx, flags)
+	case "control":
+		flags := append(supervisionNotificationIDCandidates(), supervisionControlFlagCandidates()...)
+		return completeSupervisionFlagArguments(ctx, flags)
+	case "watchdog", "supervisor", "execution-supervisor":
+		// 委托 /debug supervision watchdog：只读，不接受额外参数。
+		return nil
+	default:
+		return matchSlashArgumentCandidates(supervisionTopLevelArgumentCandidates(), activeSlashArgumentQuery(ctx))
+	}
+}
+
+// completeSupervisionFlagArguments 在 flag 位给出开关候选，在取值位给出枚举值；
+// 自由文本/数值取值位返回 nil 关闭弹窗（与 /agents cleanup --idle 的既有行为一致）。
+func completeSupervisionFlagArguments(ctx slashArgumentContext, flags []chatSlashCompletionCandidate) []chatSlashCompletionCandidate {
+	if flag, valueQuery := supervisionFlagValueFocus(ctx); flag != "" {
+		if values, known := supervisionArgumentValueCandidates(flag, valueQuery); known {
+			return values
+		}
+	}
+	return matchSlashArgumentCandidates(flags, activeSlashArgumentQuery(ctx))
+}
+
+// supervisionFlagValueFocus 判断光标是否落在某个 flag 的取值位（"--state " 之后
+// 或 "--state=cl" 之中），返回 flag 名与该取值的前缀。
+func supervisionFlagValueFocus(ctx slashArgumentContext) (string, string) {
+	current := strings.ToLower(strings.TrimSpace(ctx.Current.Text))
+	previous := strings.ToLower(strings.TrimSpace(ctx.Previous.Text))
+	if strings.HasPrefix(current, "--") {
+		if idx := strings.Index(current, "="); idx > 0 {
+			return current[:idx], slashArgumentAssignmentValue(current)
+		}
+	}
+	if strings.HasPrefix(previous, "--") && !strings.HasPrefix(current, "--") {
+		if current == "" {
+			return previous, activeSlashArgumentQuery(ctx)
+		}
+		return previous, current
+	}
+	return "", ""
+}
+
+// supervisionArgumentValueCandidates 返回 flag 的取值候选。known=false 表示该
+// flag 不在 /supervision 的语义内（继续按开关名匹配）。
+func supervisionArgumentValueCandidates(flag, query string) ([]chatSlashCompletionCandidate, bool) {
+	group := string(chatSlashCommandGroupSession)
+	switch flag {
+	case "--state":
+		return matchSlashArgumentCandidates([]chatSlashCompletionCandidate{
+			{Command: "closed", Summary: "通知已关闭", Group: group},
+			{Command: "recovered", Summary: "标的已恢复", Group: group},
+			{Command: "failed", Summary: "标的已失败收敛", Group: group},
+		}, query), true
+	case "--action":
+		return matchSlashArgumentCandidates([]chatSlashCompletionCandidate{
+			{Command: "cancel", Summary: "取消标的", Group: group},
+			{Command: "close", Summary: "关闭标的", Group: group},
+			{Command: "cancel_subtree", Summary: "取消标的下整棵子树", Group: group},
+			{Command: "retry", Summary: "重试标的", Group: group},
+			{Command: "reassign", Summary: "重新指派标的", Group: group},
+		}, query), true
+	case "--cascade":
+		return matchSlashArgumentCandidates([]chatSlashCompletionCandidate{
+			{Command: "target", Summary: "只作用于标的本身", Group: group},
+			{Command: "descendants", Summary: "作用于标的下所有后代", Group: group},
+		}, query), true
+	case "--until":
+		return matchSlashArgumentCandidates([]chatSlashCompletionCandidate{
+			{Command: "30m", Summary: "延后 30 分钟", Group: group},
+			{Command: "2h", Summary: "延后 2 小时", Group: group},
+			{Command: "<RFC3339>", Summary: "绝对时间，如 2026-09-22T15:00:00+08:00", Group: group, Informational: true},
+		}, query), true
+	case "--note", "--reason", "--team", "--limit", "--expected-version":
+		// 自由文本/数值取值：不做枚举补全，弹窗关闭。
+		return nil, true
+	default:
+		return nil, false
+	}
+}
+
+func supervisionTopLevelArgumentCandidates() []chatSlashCompletionCandidate {
+	group := string(chatSlashCommandGroupSession)
+	return []chatSlashCompletionCandidate{
+		{Command: "status", Summary: "只读：自动核查开关（turn_end_check）与 digest 计数", Group: group},
+		{Command: "audit", Summary: "只读：digest 明细 + descendants 矩阵 + pending wake", Group: group},
+		{Command: "wake", Summary: "查看 durable wake 与预算；--deliver 显式投递", Group: group, AcceptsArgs: true},
+		{Command: "list", Summary: "列出监督通知与版本号（委托 /debug supervision list）", Group: group, AcceptsArgs: true},
+		{Command: "ack", Summary: "确认通知，需 --note（委托 /debug supervision ack）", Group: group, AcceptsArgs: true},
+		{Command: "defer", Summary: "延后通知，需 --until（委托 /debug supervision defer）", Group: group, AcceptsArgs: true},
+		{Command: "resolve", Summary: "收敛 resolution 状态，需 --state（委托 /debug supervision resolve）", Group: group, AcceptsArgs: true},
+		{Command: "control", Summary: "执行 durable 控制动作，需 --action/--reason（委托 /debug supervision control）", Group: group, AcceptsArgs: true},
+		{Command: "watchdog", Summary: "打印本地执行看门狗状态（委托 /debug supervision watchdog）", Group: group},
+		{Command: "help", Summary: "显示 /supervision 用法", Group: group},
+	}
+}
+
+func supervisionNotificationIDCandidates() []chatSlashCompletionCandidate {
+	return []chatSlashCompletionCandidate{
+		{
+			Command:       "<notification_id>",
+			Summary:       "从 /supervision list 复制的通知 id（运行期取值，不做枚举）",
+			Group:         string(chatSlashCommandGroupSession),
+			Informational: true,
+		},
+	}
+}
+
+func supervisionScopeFlagCandidates() []chatSlashCompletionCandidate {
+	group := string(chatSlashCommandGroupSession)
+	return []chatSlashCompletionCandidate{
+		{Command: "--team", Summary: "指定 team id（缺省沿用当前 scope）", Group: group, AcceptsArgs: true},
+		{Command: "--limit", Summary: "限制 digest / descendants 矩阵行数", Group: group, AcceptsArgs: true},
+		{Command: "--json", Summary: "以 JSON 输出核查结果", Group: group},
+	}
+}
+
+func supervisionWakeFlagCandidates() []chatSlashCompletionCandidate {
+	group := string(chatSlashCommandGroupSession)
+	return []chatSlashCompletionCandidate{
+		{Command: "--deliver", Summary: "真正投递一次 durable wake（父会话忙或预算耗尽时保持 pending）", Group: group},
+		{Command: "--dry-run", Summary: "只预览不投递（默认行为，显式写出便于脚本自解释）", Group: group},
+	}
+}
+
+func supervisionListFlagCandidates() []chatSlashCompletionCandidate {
+	group := string(chatSlashCommandGroupSession)
+	return []chatSlashCompletionCandidate{
+		{Command: "--all", Summary: "包含已收敛/已过期的通知", Group: group},
+		{Command: "--limit", Summary: "限制返回行数", Group: group, AcceptsArgs: true},
+		{Command: "--team", Summary: "指定 team id（缺省沿用当前 scope）", Group: group, AcceptsArgs: true},
+	}
+}
+
+func supervisionAckFlagCandidates() []chatSlashCompletionCandidate {
+	group := string(chatSlashCommandGroupSession)
+	return []chatSlashCompletionCandidate{
+		{Command: "--note", Summary: "审计说明（ack 必填）", Group: group, AcceptsArgs: true},
+		{Command: "--expected-version", Summary: "CAS 版本校验（可选）", Group: group, AcceptsArgs: true},
+		{Command: "--team", Summary: "指定 team id（缺省沿用当前 scope）", Group: group, AcceptsArgs: true},
+	}
+}
+
+func supervisionDeferFlagCandidates() []chatSlashCompletionCandidate {
+	group := string(chatSlashCommandGroupSession)
+	return []chatSlashCompletionCandidate{
+		{Command: "--until", Summary: "延后到 30m / 2h / RFC3339 时间", Group: group, AcceptsArgs: true},
+		{Command: "--reason", Summary: "延后原因（审计）", Group: group, AcceptsArgs: true},
+		{Command: "--expected-version", Summary: "CAS 版本校验（可选）", Group: group, AcceptsArgs: true},
+		{Command: "--team", Summary: "指定 team id（缺省沿用当前 scope）", Group: group, AcceptsArgs: true},
+	}
+}
+
+func supervisionResolveFlagCandidates() []chatSlashCompletionCandidate {
+	group := string(chatSlashCommandGroupSession)
+	return []chatSlashCompletionCandidate{
+		{Command: "--state", Summary: "收敛状态 closed|recovered|failed", Group: group, AcceptsArgs: true},
+		{Command: "--expected-version", Summary: "CAS 版本校验（可选）", Group: group, AcceptsArgs: true},
+		{Command: "--team", Summary: "指定 team id（缺省沿用当前 scope）", Group: group, AcceptsArgs: true},
+	}
+}
+
+func supervisionControlFlagCandidates() []chatSlashCompletionCandidate {
+	group := string(chatSlashCommandGroupSession)
+	return []chatSlashCompletionCandidate{
+		{Command: "--action", Summary: "控制动作 cancel|close|cancel_subtree|retry|reassign", Group: group, AcceptsArgs: true},
+		{Command: "--reason", Summary: "控制动作原因（审计必填）", Group: group, AcceptsArgs: true},
+		{Command: "--cascade", Summary: "作用范围 target|descendants", Group: group, AcceptsArgs: true},
+		{Command: "--expected-version", Summary: "CAS 版本校验（可选）", Group: group, AcceptsArgs: true},
+		{Command: "--team", Summary: "指定 team id（缺省沿用当前 scope）", Group: group, AcceptsArgs: true},
+	}
 }
 
 func matchSlashArgumentCandidates(candidates []chatSlashCompletionCandidate, query string) []chatSlashCompletionCandidate {
