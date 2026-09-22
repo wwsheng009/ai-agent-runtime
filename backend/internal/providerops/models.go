@@ -16,11 +16,25 @@ import (
 )
 
 type ModelInfo struct {
-	ID                  string                 `json:"id"`
-	DisplayName         string                 `json:"display_name,omitempty"`
-	InputModalities     []string               `json:"input_modalities,omitempty"`
-	ReasoningEfforts    []string               `json:"reasoning_efforts,omitempty"`
-	MaxContextTokens    int                    `json:"max_context_tokens,omitempty"`
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name,omitempty"`
+	// InputModalities 是端点声明的输入模态（text/image/audio/video/file）。
+	// 类别解析器负责把嵌套形状（如 openrouter 的 architecture.input_modalities）
+	// 归一到这里。
+	InputModalities []string `json:"input_modalities,omitempty"`
+	// ReasoningModel 是端点显式声明的 reasoning/thinking 模型标记；此前只能由
+	// reasoning_efforts 非空隐式推断，导致「声明了推理能力但没有档位列表」的
+	// 模型被当成普通模型。
+	ReasoningModel         bool     `json:"reasoning_model,omitempty"`
+	ReasoningEfforts       []string `json:"reasoning_efforts,omitempty"`
+	DefaultReasoningEffort string   `json:"default_reasoning_effort,omitempty"`
+	MaxContextTokens       int      `json:"max_context_tokens,omitempty"`
+	// MaxTokens 是端点声明的最大输出 token 数（openrouter: top_provider
+	// .max_completion_tokens）。
+	MaxTokens int `json:"max_tokens,omitempty"`
+	// SupportsTools 是端点声明支持函数调用（openrouter: supported_parameters
+	// 含 tools）；端点未声明该清单时为 false（未知，不代表不支持）。
+	SupportsTools       bool                   `json:"supports_tools,omitempty"`
 	SupportsRemoteCodex bool                   `json:"supports_remote_codex,omitempty"`
 	Raw                 map[string]interface{} `json:"-"`
 }
@@ -35,10 +49,13 @@ type FetchModelsRequest struct {
 }
 
 type FetchModelsResult struct {
-	Endpoint   string              `json:"endpoint"`
-	StatusCode int                 `json:"status_code"`
+	Endpoint   string      `json:"endpoint"`
+	StatusCode int         `json:"status_code"`
 	Models     []ModelInfo `json:"models"`
-	VerifiedAt string              `json:"verified_at"`
+	// Category 是本次响应命中的解析类别（generic/openrouter/...），便于调用方
+	// 在 UI 或日志里说明「用哪种形状解析的」。
+	Category   ModelListCategory `json:"category,omitempty"`
+	VerifiedAt string            `json:"verified_at"`
 }
 
 // FetchModels 等价于 commands.validateProviderModels；ctx 用于请求取消，
@@ -100,7 +117,10 @@ func fetchModels(ctx context.Context, req FetchModelsRequest) (*FetchModelsResul
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("models endpoint %s returned HTTP %d: %s", endpoint, resp.StatusCode, responsePreview(body, 600))
 	}
-	models, err := parseProviderModelsResponse(body, loginProtocol)
+	// 类别先按 provider 名称 / base_url 判定（openrouter.ai 等），未命中再看
+	// 载荷形状：镜像站、别名域名同样能走到对应解析器。
+	category := DetectModelListCategory(req.ProviderName, provider.BaseURL, body)
+	models, err := parseProviderModelsResponseForCategory(body, loginProtocol, category)
 	if err != nil {
 		return nil, fmt.Errorf("parse models response from %s: %w", endpoint, err)
 	}
@@ -111,6 +131,7 @@ func fetchModels(ctx context.Context, req FetchModelsRequest) (*FetchModelsResul
 		Endpoint:   endpoint,
 		StatusCode: resp.StatusCode,
 		Models:     models,
+		Category:   category,
 		VerifiedAt: time.Now().UTC().Format(time.RFC3339),
 	}, nil
 }
@@ -144,6 +165,12 @@ func BuildProviderModelsURL(provider config.Provider, modelsPath string) (string
 // ParseProviderModelsResponse 解析 /models 响应体为模型清单（兼容多种网关形状）。
 func ParseProviderModelsResponse(raw []byte, loginProtocol string) ([]ModelInfo, error) {
 	return parseProviderModelsResponse(raw, loginProtocol)
+}
+
+// ParseProviderModelsResponseForCategory 按显式类别解析 /models 响应体；类别为
+// 空或未注册时按通用扁平形状解析。
+func ParseProviderModelsResponseForCategory(raw []byte, loginProtocol string, category ModelListCategory) ([]ModelInfo, error) {
+	return parseProviderModelsResponseForCategory(raw, loginProtocol, category)
 }
 
 // DedupeProviderModels 按模型 ID 去重并保持输入顺序。
@@ -269,28 +296,43 @@ func buildProviderModelsURL(provider config.Provider, modelsPath string) (string
 }
 
 func parseProviderModelsResponse(raw []byte, loginProtocol string) ([]ModelInfo, error) {
+	return parseProviderModelsResponseForCategory(raw, loginProtocol, DetectModelListCategory("", "", raw))
+}
+
+func parseProviderModelsResponseForCategory(raw []byte, loginProtocol string, category ModelListCategory) ([]ModelInfo, error) {
 	var decoded interface{}
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		return nil, err
 	}
-	models := collectProviderModels(decoded, NormalizeLoginProtocol(loginProtocol, ""))
+	models := collectProviderModels(decoded, NormalizeLoginProtocol(loginProtocol, ""), category)
 	return dedupeProviderModels(models), nil
 }
 
-func collectProviderModels(value interface{}, loginProtocol string) []ModelInfo {
+func collectProviderModels(value interface{}, loginProtocol string, category ModelListCategory) []ModelInfo {
+	entries := collectProviderModelEntries(value)
+	if len(entries) == 0 {
+		return nil
+	}
+	return collectProviderModelsFromList(entries, loginProtocol, category)
+}
+
+// collectProviderModelEntries 从任意 /models 载荷里取出模型条目列表
+// （data / models / items，兼容 result / response 包裹）。形状探测与解析共用，
+// 避免两处各写一遍列表定位逻辑。
+func collectProviderModelEntries(value interface{}) []interface{} {
 	switch typed := value.(type) {
 	case []interface{}:
-		return collectProviderModelsFromList(typed, loginProtocol)
+		return typed
 	case map[string]interface{}:
 		for _, key := range []string{"data", "models", "items"} {
 			if list, ok := typed[key].([]interface{}); ok {
-				return collectProviderModelsFromList(list, loginProtocol)
+				return list
 			}
 		}
 		for _, key := range []string{"result", "response"} {
 			if nested, ok := typed[key]; ok {
-				if models := collectProviderModels(nested, loginProtocol); len(models) > 0 {
-					return models
+				if entries := collectProviderModelEntries(nested); len(entries) > 0 {
+					return entries
 				}
 			}
 		}
@@ -298,7 +340,7 @@ func collectProviderModels(value interface{}, loginProtocol string) []ModelInfo 
 	return nil
 }
 
-func collectProviderModelsFromList(items []interface{}, loginProtocol string) []ModelInfo {
+func collectProviderModelsFromList(items []interface{}, loginProtocol string, category ModelListCategory) []ModelInfo {
 	models := make([]ModelInfo, 0, len(items))
 	for _, item := range items {
 		switch typed := item.(type) {
@@ -307,7 +349,7 @@ func collectProviderModelsFromList(items []interface{}, loginProtocol string) []
 				models = append(models, ModelInfo{ID: id, DisplayName: id})
 			}
 		case map[string]interface{}:
-			if model := providerModelInfoFromMap(typed, loginProtocol); model.ID != "" {
+			if model := providerModelInfoFromMap(typed, loginProtocol, category); model.ID != "" {
 				models = append(models, model)
 			}
 		}
@@ -315,7 +357,20 @@ func collectProviderModelsFromList(items []interface{}, loginProtocol string) []
 	return models
 }
 
-func providerModelInfoFromMap(item map[string]interface{}, loginProtocol string) ModelInfo {
+// providerModelInfoFromMap 按类别解析单条模型载荷；类别未注册或该条解析不出 ID
+// 时回退到通用扁平解析。
+func providerModelInfoFromMap(item map[string]interface{}, loginProtocol string, category ModelListCategory) ModelInfo {
+	if spec, ok := modelListCategorySpecFor(category); ok && spec.parseEntry != nil {
+		if model := spec.parseEntry(item, loginProtocol); model.ID != "" {
+			return model
+		}
+	}
+	return genericProviderModelInfoFromMap(item, loginProtocol)
+}
+
+// genericProviderModelInfoFromMap 解析扁平键形状（OpenAI 兼容网关 / Codex /
+// vLLM 等），是历史实现，也是类别解析器的兜底。
+func genericProviderModelInfoFromMap(item map[string]interface{}, loginProtocol string) ModelInfo {
 	id := firstStringField(item, "id", "slug", "name", "model")
 	id = normalizeProviderModelID(id, loginProtocol)
 	if id == "" {
@@ -331,6 +386,7 @@ func providerModelInfoFromMap(item map[string]interface{}, loginProtocol string)
 		InputModalities:     firstStringSliceField(item, "input_modalities", "inputModalities", "modalities"),
 		ReasoningEfforts:    providerModelReasoningEfforts(item),
 		MaxContextTokens:    firstIntField(item, "max_context_tokens", "maxContextTokens", "context_window", "contextWindow", "context_length"),
+		SupportsTools:       stringSliceFieldContains(item, "tools", "supported_parameters", "supportedParameters"),
 		SupportsRemoteCodex: firstBoolField(item, "supports_remote_codex", "supportsRemoteCodex"),
 		Raw:                 item,
 	}
@@ -435,6 +491,23 @@ func stringSliceField(item map[string]interface{}, key string) []string {
 	default:
 		return nil
 	}
+}
+
+// stringSliceFieldContains 判断字符串列表字段是否包含目标值（大小写不敏感，
+// 命中任一 key 即返回 true）。用于 supported_parameters 之类的端点能力清单。
+func stringSliceFieldContains(item map[string]interface{}, target string, keys ...string) bool {
+	target = strings.ToLower(strings.TrimSpace(target))
+	if target == "" {
+		return false
+	}
+	for _, key := range keys {
+		for _, value := range stringSliceField(item, key) {
+			if strings.EqualFold(strings.TrimSpace(value), target) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func dedupeProviderStringOptions(values []string) []string {

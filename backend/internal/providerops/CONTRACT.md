@@ -258,6 +258,55 @@ func MatchFetchedModelMetadata(providerName, loginProtocol string,
 为既有类型，字段见源码；`MatchFetchedModelMetadata` 返回的是前端 reasoning
 编辑器可直接回显的配置视图（覆盖语义，已保存 capabilities 不参与合并）。
 
+### /models 解析类别（category，2026-09-22 补充）
+
+不同网关的 `/models` 载荷形状差异很大：OpenAI 兼容网关是扁平键，OpenRouter
+及同族聚合网关把元数据嵌在 `architecture` / `reasoning` / `top_provider` /
+`supported_parameters` 子对象里。类别解析器把「形状差异」收敛到一处，通用
+链路（收集 → 去重 → 能力投影）保持不变。
+
+```go
+// models_category.go —— 类别注册表与探测
+type ModelListCategory string
+const (
+	ModelListCategoryGeneric    ModelListCategory = "generic"    // 扁平键：OpenAI 兼容 / Codex / vLLM / 自建站
+	ModelListCategoryOpenRouter ModelListCategory = "openrouter" // 嵌套：OpenRouter 及同族聚合网关
+)
+
+// DetectModelListCategory 先按 provider 名称 / base_url 命中，再按载荷形状探测
+// （只看前 5 条），都无法判定时回退 generic；raw 为空或无法解码也回退 generic。
+func DetectModelListCategory(providerName, baseURL string, raw []byte) ModelListCategory
+func ModelListCategoryName(category ModelListCategory) string
+
+// ParseProviderModelsResponseForCategory 按显式类别解析；类别为空或未注册时
+// 按通用扁平形状解析（等价 ParseProviderModelsResponse）。
+func ParseProviderModelsResponseForCategory(raw []byte, loginProtocol string,
+	category ModelListCategory) ([]ModelInfo, error)
+
+// models_openrouter.go —— openrouter 类别逐条解析（包内私有，由注册表引用）
+// openRouterEntryMatches(item) bool                     // 形状判定
+// openRouterModelInfoFromMap(item, loginProtocol) ModelInfo
+```
+
+`FetchModels` 会在拉取后写入 `FetchModelsResult.Category`，调用方可用它记录/
+展示本次实际生效的解析类别。
+
+新增同族网关时只需在 `modelListCategorySpecs` 追加一条
+`modelListCategorySpec{category, matchesProvider, matchesEntry, parseEntry}`：
+`matchesProvider` 命中 provider 名称 / base_url，`matchesEntry` 覆盖别名域名与
+自建镜像站，`parseEntry` 负责逐条解析为 `ModelInfo`。
+
+openrouter 类别当前解析的必要参数（端点声明优先，未声明则不写）：
+`architecture.input_modalities`（缺失时由 `architecture.modality` 推导）、
+`reasoning.supported_efforts` / `reasoning.default_effort`、
+`reasoning` 对象或 `supported_parameters` 中的推理参数（→ `reasoning_model`）、
+`min(context_length, top_provider.context_length)`（→ `max_context_tokens`，
+请求会路由到 top provider，取较小值才不会触发上游 400）、
+`top_provider.max_completion_tokens`（→ `max_tokens`）、
+`supported_parameters` 含 `tools`（→ `supports_tools`，仅供展示，不写入
+`ModelCapabilitySpec`）。`pricing` 与 `:free` 等变体后缀一律不参与解析，
+模型 ID 原样保留。
+
 ## commands 侧的兼容方式
 
 在 `backend/cmd/aicli/commands/` 新增一个 `providerops_alias.go`：

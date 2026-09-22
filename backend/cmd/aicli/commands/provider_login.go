@@ -2252,8 +2252,18 @@ func providerLoginModelCapabilitySpec(model providerModelInfo) config.ModelCapab
 		spec.ReasoningEfforts = dedupeProviderStringOptions(model.ReasoningEfforts)
 		spec.ReasoningModel = true
 	}
+	// 端点显式声明的 reasoning 标记（无档位列表时同样生效）。
+	if model.ReasoningModel {
+		spec.ReasoningModel = true
+	}
+	if effort := strings.TrimSpace(model.DefaultReasoningEffort); effort != "" {
+		spec.DefaultReasoningEffort = effort
+	}
 	if model.MaxContextTokens > 0 {
 		spec.MaxContextTokens = model.MaxContextTokens
+	}
+	if model.MaxTokens > 0 {
+		spec.MaxTokens = model.MaxTokens
 	}
 	if model.SupportsRemoteCodex {
 		spec.SupportsRemoteCompact = true
@@ -2417,8 +2427,14 @@ func mergeProviderLoginModelCapabilitySpec(base, update config.ModelCapabilitySp
 	if len(update.ReasoningEfforts) > 0 {
 		base.ReasoningEfforts = append([]string(nil), update.ReasoningEfforts...)
 	}
+	if effort := strings.TrimSpace(update.DefaultReasoningEffort); effort != "" {
+		base.DefaultReasoningEffort = effort
+	}
 	if update.MaxContextTokens > 0 {
 		base.MaxContextTokens = update.MaxContextTokens
+	}
+	if update.MaxTokens > 0 {
+		base.MaxTokens = update.MaxTokens
 	}
 	if update.SupportsRemoteCompact {
 		base.SupportsRemoteCompact = true
@@ -2458,6 +2474,7 @@ func providerLoginModelCapabilityIsEmpty(spec config.ModelCapabilitySpec) bool {
 		!spec.NativeTools.ImageGeneration &&
 		!spec.NativeTools.ImagesGenerationsAPI &&
 		!spec.ReasoningModel &&
+		spec.ReplayReasoningContent == nil &&
 		len(spec.ReasoningEfforts) == 0 &&
 		len(spec.ReasoningEffortBudgets) == 0 &&
 		strings.TrimSpace(spec.DefaultReasoningEffort) == "" &&

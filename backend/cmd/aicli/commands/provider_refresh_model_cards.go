@@ -189,20 +189,27 @@ type providerRefreshBuildResult struct {
 }
 
 func selectProvidersForModelCardRefresh(cfg *config.Config, req providerRefreshModelCardsRequest) ([]providerRefreshSelection, error) {
+	return selectProvidersForRefresh(cfg, req.Names, req.All, req.Protocol)
+}
+
+// selectProvidersForRefresh 是 refresh-model-cards / refresh-models 共用的 provider
+// 选择逻辑：未提供名称时默认全部，支持按协议过滤，未知名称直接报错。
+func selectProvidersForRefresh(cfg *config.Config, names []string, all bool, protocol string) ([]providerRefreshSelection, error) {
 	if cfg == nil || cfg.Providers.Items == nil {
 		return nil, fmt.Errorf("no providers configured")
 	}
 
-	protocolFilter := strings.ToLower(strings.TrimSpace(req.Protocol))
-	names := make([]string, 0, len(req.Names))
-	for _, name := range req.Names {
+	protocolFilter := strings.ToLower(strings.TrimSpace(protocol))
+	cleaned := make([]string, 0, len(names))
+	for _, name := range names {
 		name = strings.TrimSpace(name)
 		if name != "" {
-			names = append(names, name)
+			cleaned = append(cleaned, name)
 		}
 	}
+	names = cleaned
 
-	useAll := req.All || len(names) == 0
+	useAll := all || len(names) == 0
 	selected := make([]providerRefreshSelection, 0)
 	seen := make(map[string]struct{})
 
@@ -453,6 +460,10 @@ func diffModelCapabilityFields(before, after config.ModelCapabilitySpec) []strin
 	}
 	if before.ReasoningModel != after.ReasoningModel {
 		fields = append(fields, "reasoning_model")
+	}
+	if (before.ReplayReasoningContent == nil) != (after.ReplayReasoningContent == nil) ||
+		(before.ReplayReasoningContent != nil && after.ReplayReasoningContent != nil && *before.ReplayReasoningContent != *after.ReplayReasoningContent) {
+		fields = append(fields, "replay_reasoning_content")
 	}
 	if !stringSlicesEqualExact(before.ReasoningEfforts, after.ReasoningEfforts) {
 		fields = append(fields, "reasoning_efforts")

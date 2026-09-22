@@ -21,6 +21,21 @@ func MergeCapabilityPreferCard(card, existing agentconfig.ModelCapabilitySpec) a
 	return MergeCapability(card, existing, agentconfig.ModelCapabilitySpec{}, agentconfig.ModelCapabilitySpec{})
 }
 
+// MergeCapabilityPreferRemote makes endpoint-declared fields authoritative, then
+// keeps any remaining provider-local fields the endpoint does not declare.
+//
+// 用于「刷新模型元数据」（aicli provider refresh-models / 重新拉取 /models）：
+// 端点能声明的字段（input_modalities / reasoning_* / max_context_tokens /
+// max_tokens）以端点为权威，可以覆盖配置里由兜底 model card 或旧端点写下的
+// 过期值；端点没有的字段（native_tools / auto_compact_* /
+// replay_reasoning_content / compact_reasoning_effort ...）保留本地配置。
+//
+// 与 login 语义（MergeCapability 的 existing 优先）相反：login 期间不动用户
+// 已保存的显式配置，刷新命令才做覆盖。
+func MergeCapabilityPreferRemote(remote, existing agentconfig.ModelCapabilitySpec) agentconfig.ModelCapabilitySpec {
+	return MergeCapability(remote, existing, agentconfig.ModelCapabilitySpec{}, agentconfig.ModelCapabilitySpec{})
+}
+
 func CloneCapabilitySpec(input agentconfig.ModelCapabilitySpec) agentconfig.ModelCapabilitySpec {
 	if len(input.InputModalities) > 0 {
 		input.InputModalities = append([]string(nil), input.InputModalities...)
@@ -53,6 +68,13 @@ func fillCapabilityMissing(target *agentconfig.ModelCapabilitySpec, source agent
 	}
 	if !target.ReasoningModel && source.ReasoningModel {
 		target.ReasoningModel = true
+	}
+	// replay_reasoning_content 是端点行为声明（*bool，nil = 未声明），只补空不覆盖，
+	// 与其它字段一致：显式声明必须能在 merge 中存活，否则 login / 刷新会把用户
+	// 写下的契约悄悄抹掉。
+	if target.ReplayReasoningContent == nil && source.ReplayReasoningContent != nil {
+		value := *source.ReplayReasoningContent
+		target.ReplayReasoningContent = &value
 	}
 	if len(target.ReasoningEfforts) == 0 && len(source.ReasoningEfforts) > 0 {
 		target.ReasoningEfforts = append([]string(nil), source.ReasoningEfforts...)
@@ -103,6 +125,9 @@ func CapabilityFieldNames(spec agentconfig.ModelCapabilitySpec) []string {
 	if spec.ReasoningModel {
 		fields = append(fields, "reasoning_model")
 	}
+	if spec.ReplayReasoningContent != nil {
+		fields = append(fields, "replay_reasoning_content")
+	}
 	if len(spec.ReasoningEfforts) > 0 {
 		fields = append(fields, "reasoning_efforts")
 	}
@@ -148,6 +173,9 @@ func CapabilitySpecsEqual(a, b agentconfig.ModelCapabilitySpec) bool {
 	if a.ReasoningModel != b.ReasoningModel {
 		return false
 	}
+	if !boolPointersEqual(a.ReplayReasoningContent, b.ReplayReasoningContent) {
+		return false
+	}
 	if !stringSlicesEqualFoldOrder(a.ReasoningEfforts, b.ReasoningEfforts) {
 		return false
 	}
@@ -185,6 +213,13 @@ func stringSlicesEqualFoldOrder(a, b []string) bool {
 	return true
 }
 
+func boolPointersEqual(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
 func intMapsEqual(a, b map[string]int) bool {
 	if len(a) != len(b) {
 		return false
@@ -202,6 +237,7 @@ func capabilityIsEmpty(spec agentconfig.ModelCapabilitySpec) bool {
 		!spec.NativeTools.ImageGeneration &&
 		!spec.NativeTools.ImagesGenerationsAPI &&
 		!spec.ReasoningModel &&
+		spec.ReplayReasoningContent == nil &&
 		len(spec.ReasoningEfforts) == 0 &&
 		len(spec.ReasoningEffortBudgets) == 0 &&
 		strings.TrimSpace(spec.DefaultReasoningEffort) == "" &&
