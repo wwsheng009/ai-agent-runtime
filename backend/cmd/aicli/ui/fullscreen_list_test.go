@@ -592,3 +592,154 @@ func TestFullScreenListMultiTokenSearch(t *testing.T) {
 		}
 	}
 }
+
+// 方案 §5.3：数值/文本字段没有目录候选，面板改为单值输入（FreeTextMode）。
+// 这里钉住输入组件本身：编辑语义（含 j/k 等导航键必须按普通字符输入）、
+// Enter 提交前的同源校验（OnConfirmText 返回错误时保持打开并就地提示）、
+// 以及提交值的前后空白裁剪。
+
+func TestApplyFullScreenFreeTextKeyEditsValue(t *testing.T) {
+	state := fullScreenListState{query: "1024"}
+	if _, done := applyFullScreenFreeTextKey(&state, editorKey{kind: editorKeyRune, r: 'x'}); done {
+		t.Fatalf("可打印字符不应提交")
+	}
+	if state.query != "1024x" {
+		t.Fatalf("可打印字符应追加到输入值，得到 %q", state.query)
+	}
+	// 列表模式的 j/k/g/G/q/x 是导航/删除键；自由文本模式必须按字面输入。
+	for _, r := range []rune{'j', 'k', 'g', 'G', 'q', 'x'} {
+		if _, done := applyFullScreenFreeTextKey(&state, editorKey{kind: editorKeyRune, r: r}); done {
+			t.Fatalf("%q 在自由文本模式不应提交", r)
+		}
+	}
+	if state.query != "1024xjkgGqx" {
+		t.Fatalf("导航键应作为普通字符输入，得到 %q", state.query)
+	}
+	if _, done := applyFullScreenFreeTextKey(&state, editorKey{kind: editorKeyBackspace}); done || state.query != "1024xjkgGq" {
+		t.Fatalf("Backspace 应删除最后一个字符，得到 %q done=%v", state.query, done)
+	}
+	if _, done := applyFullScreenFreeTextKey(&state, editorKey{kind: editorKeyDelete}); done || state.query != "1024xjkgG" {
+		t.Fatalf("Delete 在自由文本模式同样删除字符，得到 %q done=%v", state.query, done)
+	}
+
+	result, done := applyFullScreenFreeTextKey(&state, editorKey{kind: editorKeyEnter})
+	if !done || result.Cancelled || result.Index != -1 || result.Text != "1024xjkgG" {
+		t.Fatalf("Enter 应提交裁剪后的输入值，得到 %#v done=%v", result, done)
+	}
+
+	state.query = " 42 "
+	result, _ = applyFullScreenFreeTextKey(&state, editorKey{kind: editorKeyEnter})
+	if result.Text != "42" {
+		t.Fatalf("提交值应裁剪前后空白，得到 %q", result.Text)
+	}
+
+	if cancel, done := applyFullScreenFreeTextKey(&state, editorKey{kind: editorKeyCancelPopup}); !done || !cancel.Cancelled || cancel.Text != "" {
+		t.Fatalf("Esc 应取消且不携带文本，得到 %#v done=%v", cancel, done)
+	}
+	if nilResult, done := applyFullScreenFreeTextKey(nil, editorKey{kind: editorKeyEnter}); !done || !nilResult.Cancelled {
+		t.Fatalf("nil state 应安全取消，得到 %#v done=%v", nilResult, done)
+	}
+}
+
+func TestRunFullScreenListLoopFreeTextKeepsInputOnValidationError(t *testing.T) {
+	keys := []editorKey{
+		{kind: editorKeyRune, r: 'x'},
+		{kind: editorKeyBackspace},
+		{kind: editorKeyEnter}, // 第一次：校验失败 → 保持打开并就地提示
+		{kind: editorKeyEnter}, // 第二次：校验通过 → 提交
+	}
+	index := 0
+	attempts := 0
+	var frames []string
+	result, _, err := runFullScreenListLoop(context.Background(), FullScreenListOptions{
+		Title:         "输入 max_tokens 值",
+		FreeTextMode:  true,
+		FreeTextValue: "1024",
+		FreeTextHint:  "非负整数",
+		OnConfirmText: func(text string) error {
+			attempts++
+			if attempts == 1 {
+				return errors.New("max_tokens 需要数字: bad")
+			}
+			if text != "1024" {
+				t.Fatalf("第二次提交应带回用户输入，得到 %q", text)
+			}
+			return nil
+		},
+	}, fullScreenListLoopHooks{
+		refreshSize: func() (int, int) { return 80, 12 },
+		writeFrame: func(frame string) error {
+			frames = append(frames, frame)
+			return nil
+		},
+		readKey: func(context.Context) (editorKey, bool, error) {
+			if index >= len(keys) {
+				return editorKey{kind: editorKeyCancelPopup}, true, nil
+			}
+			key := keys[index]
+			index++
+			return key, true, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("自由文本循环不应报错：%v", err)
+	}
+	if result.Cancelled || result.Index != -1 || result.Text != "1024" {
+		t.Fatalf("第二次 Enter 应提交预填值，得到 %#v", result)
+	}
+	if attempts != 2 {
+		t.Fatalf("校验应被调用两次（失败一次后成功一次），得到 %d", attempts)
+	}
+	if len(frames) < 2 {
+		t.Fatalf("校验失败后必须重绘（就地提示），得到 %d 帧", len(frames))
+	}
+	last := frames[len(frames)-1]
+	if !strings.Contains(last, "max_tokens 需要数字") {
+		t.Fatalf("最后一帧应在副标题显示校验错误：%q", last)
+	}
+	if !strings.Contains(last, "1024") {
+		t.Fatalf("校验失败时不得丢失用户输入：%q", last)
+	}
+}
+
+func TestRenderFullScreenFreeTextFrameShowsValueHintAndLegend(t *testing.T) {
+	frame := renderTestFullScreenListFrame(FullScreenListOptions{
+		Title:         "输入 temperature 值",
+		Subtitle:      "scope: main · level: hard · Enter 校验并继续，Esc 取消",
+		FreeTextMode:  true,
+		FreeTextValue: "0.2",
+		FreeTextHint:  "数字，例如 0.2",
+	}, fullScreenListState{query: "0.2"}, nil, 80, 12)
+	for _, want := range []string{"输入 temperature 值", "Enter 校验并继续", "> 0.2", "数字，例如 0.2", "Backspace 删除"} {
+		if !strings.Contains(frame, want) {
+			t.Fatalf("自由文本帧缺少 %q：\n%s", want, frame)
+		}
+	}
+	// 输入值必须行内可见且带插入标记（备用屏隐藏硬件光标）。
+	if !strings.Contains(frame, "▌") {
+		t.Fatalf("自由文本帧应带插入标记：\n%s", frame)
+	}
+	if strings.Count(frame, "\x1b[2K") != 12 {
+		t.Fatalf("自由文本帧应铺满视口高度，得到 %d 行", strings.Count(frame, "\x1b[2K"))
+	}
+}
+
+func TestRenderFullScreenFreeTextFrameWrapsLongValidationError(t *testing.T) {
+	long := "字段 profiles.hard.max_tokens 未写入: aicli.main_agent.routing.profiles.hard.max_tokens cannot be negative；建议: 把该字段改为非负值（>=0）"
+	frame := renderTestFullScreenListFrame(FullScreenListOptions{
+		Title:         "输入 max_tokens 值",
+		Subtitle:      long,
+		FreeTextMode:  true,
+		FreeTextValue: "1024",
+		FreeTextHint:  "非负整数",
+	}, fullScreenListState{query: "1024"}, nil, 80, 12)
+	for _, want := range []string{"profiles.hard.max_tokens", "> 1024", "▌", "非负整数"} {
+		if !strings.Contains(frame, want) {
+			t.Fatalf("长校验文案下自由文本帧缺少 %q：\n%s", want, frame)
+		}
+	}
+	// 校验错误可能很长：副标题最多两行，输入行位置不随之漂移。
+	if strings.Count(frame, "\x1b[2K") != 12 {
+		t.Fatalf("自由文本帧应铺满视口高度，得到 %d 行", strings.Count(frame, "\x1b[2K"))
+	}
+}

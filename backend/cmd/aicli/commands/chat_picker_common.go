@@ -140,6 +140,25 @@ func chatPickerStageResult(ctx context.Context, session *ChatSession, lease ui.S
 	return picked, nil
 }
 
+// chatPickerFreeTextStage runs one single-value input stage on an already
+// acquired lease (options.FreeTextMode is forced on). Items stay empty by
+// design -- there is no catalog -- which is why this cannot reuse
+// chatPickerStage's non-empty item contract. OnConfirmText carries the
+// caller's validator: returning an error keeps the input open and shows the
+// reason inline. Returns the trimmed submitted text, whether the user
+// cancelled, or a stage error.
+func chatPickerFreeTextStage(ctx context.Context, session *ChatSession, lease ui.ScreenLease, options ui.FullScreenListOptions) (string, bool, error) {
+	options.FreeTextMode = true
+	result, err := ui.SelectFullScreenListWithLease(ctx, resumeFullScreenTerminal(session), options, lease)
+	if err != nil {
+		return "", false, err
+	}
+	if result.Cancelled {
+		return "", true, nil
+	}
+	return strings.TrimSpace(result.Text), false, nil
+}
+
 // chatPickerLeaseHooks binds one picker kind to its UI-actor barrier actions so
 // the lease lifecycle stays generic while each picker keeps its own action
 // identity in controller state.

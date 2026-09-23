@@ -6,6 +6,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 // 方案 §5.3/§5.3.1：会话级路由面板（Level → 字段 → 值 三级导航）单测。
@@ -317,5 +318,195 @@ func TestChatRoutingPanelReasoningOptionsFollowLevelModel(t *testing.T) {
 	}
 	if derived := chatRoutingLevelFromKey("main", "profiles.hard.reasoning_effort"); derived != "hard" {
 		t.Fatalf("chatRoutingLevelFromKey = %q，期望 hard", derived)
+	}
+}
+
+// 方案 §5.3/§3.5：无目录候选的数值/文本字段（thinking_effort/max_tokens/temperature）
+// 由面板自由文本录入。这里钉住两点：
+//  1. 「可录入字段」是闭集——表外字段仍走「直接写入」提示，不开必然被拒的输入框；
+//  2. 校验与写入路径同源（chatRoutingApplyKey + chatRoutingValidateCandidate），
+//     预演拒绝的值写入也必然拒绝，预演通过的值写入必须成功（不会出现「面板能确认、
+//     落盘却被拒」或反向的假入口）。
+func TestChatRoutingPanelFreeTextFieldsUseWritePathValidation(t *testing.T) {
+	session := routingCommandSessionWithOverride(t)
+
+	for _, field := range []string{"thinking_effort", "max_tokens", "temperature"} {
+		if !chatRoutingPanelFieldUsesFreeText(field) {
+			t.Fatalf("%s 应支持自由文本录入", field)
+		}
+		if strings.TrimSpace(chatRoutingPanelFreeTextHint(field)) == "" {
+			t.Fatalf("%s 应给出输入提示", field)
+		}
+	}
+	for _, field := range []string{"model", "provider", "reasoning_effort", "enabled", "prompt_cache", "unknown", ""} {
+		if chatRoutingPanelFieldUsesFreeText(field) {
+			t.Fatalf("%s 不应走自由文本录入（有目录候选或不在可写键空间）", field)
+		}
+		if strings.TrimSpace(chatRoutingPanelFreeTextHint(field)) != "" {
+			t.Fatalf("%s 不应给出自由文本提示", field)
+		}
+	}
+
+	cases := []struct {
+		name    string
+		field   string
+		value   string
+		wantErr string // 空串表示必须通过
+	}{
+		{name: "max_tokens 正数", field: "max_tokens", value: "2048"},
+		{name: "max_tokens 非数字", field: "max_tokens", value: "abc", wantErr: "max_tokens"},
+		{name: "max_tokens 负数与档位校验同源", field: "max_tokens", value: "-1", wantErr: "max_tokens"},
+		{name: "temperature 数字", field: "temperature", value: "0.2"},
+		{name: "temperature 非数字", field: "temperature", value: "hot", wantErr: "temperature"},
+		{name: "thinking_effort 文本", field: "thinking_effort", value: "high"},
+		{name: "thinking_effort 空值", field: "thinking_effort", value: "   ", wantErr: "thinking_effort"},
+		{name: "表外字段不得绕过字段解析", field: "bogus", value: "1", wantErr: "bogus"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := chatRoutingPanelValidateValue(session, chatRoutingScopeMain, "hard", tc.field, tc.value)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("应通过与写入同源的校验：%v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("应被拒绝并回显字段 %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("错误应回显字段 %q：%v", tc.wantErr, err)
+			}
+		})
+	}
+
+	// 预演通过 → 真写入必须成功；预演拒绝 → 真写入必须同样拒绝。
+	for field, value := range map[string]string{
+		"max_tokens": "2048", "temperature": "0.2", "thinking_effort": "high",
+	} {
+		if err := chatRoutingPanelValidateValue(session, chatRoutingScopeMain, "hard", field, value); err != nil {
+			t.Fatalf("预演应通过 %s=%s：%v", field, value, err)
+		}
+		key := chatRoutingPanelWriteKey(chatRoutingScopeMain, "hard", field)
+		text, err := chatRoutingWriteKey(session, chatRoutingScopeMain, key, value, chatRoutingLayerSession, false)
+		if err != nil {
+			t.Fatalf("预演通过的值必须可写入 %s=%s：%v", field, value, err)
+		}
+		if !strings.Contains(text, "已写入会话路由覆盖") {
+			t.Fatalf("写入回执不符：%q", text)
+		}
+	}
+	// 面板预演与写入必须给出**同一文案**（同源不只是同结论）：负数 max_tokens 在
+	// 解析器的回退阶梯下会把整层 enabled 丢回下层，两处都必须按字段回显真实原因
+	// 并给出下一步（§10.2 I-4），不得一边报「路由未启用」一边报「数值非法」。
+	previewErr := chatRoutingPanelValidateValue(session, chatRoutingScopeMain, "hard", "max_tokens", "-1")
+	if previewErr == nil {
+		t.Fatalf("负数 max_tokens 预演必须被拒")
+	}
+	_, writeErr := chatRoutingWriteKey(session, chatRoutingScopeMain, "profiles.hard.max_tokens", "-1", chatRoutingLayerSession, false)
+	if writeErr == nil {
+		t.Fatalf("负数 max_tokens 写入必须被拒（与面板预演一致）")
+	}
+	if previewErr.Error() != writeErr.Error() {
+		t.Fatalf("面板预演与写入必须同源同文案：preview=%q write=%q", previewErr, writeErr)
+	}
+	if !strings.Contains(previewErr.Error(), "非负") {
+		t.Fatalf("拒绝文案应给出下一步（I-4）：%v", previewErr)
+	}
+}
+
+// ---------- §5.6/I-8/INV-A3（M16）：子会话只读全屏导航 ----------
+
+// chatRoutingPanelChildSessionForTest 构造带子会话标记的会话：depth>0 与宿主接线
+// （chat_actor_host.go 的 isBaseSession 分支）同源，命中 chatRoutingSessionIsChildAgent。
+func chatRoutingPanelChildSessionForTest(t *testing.T) *ChatSession {
+	t.Helper()
+	session := routingStatusTestSession(t, nil, &agentconfig.AICLIConfig{})
+	session.RuntimeSession.SetContext(toolbroker.AgentSessionContextDepth, 1)
+	return session
+}
+
+// TestChatRoutingReadOnlyNavigationKeepsFieldSpace 钉住只读导航的字段闭集与行内信息：
+// 只读视图必须覆盖与写入面板相同的字段（否则用户看不到真实键空间），行内给出当前
+// 生效值/候选/取值说明，且每行都带上「写入不会生效」的原因（INV-A3）。
+func TestChatRoutingReadOnlyNavigationKeepsFieldSpace(t *testing.T) {
+	session := chatRoutingPanelChildSessionForTest(t)
+
+	items := chatRoutingReadOnlyFieldItems(session, chatRoutingScopeMain, "hard")
+	if len(items) != len(chatRoutingPanelFields) {
+		t.Fatalf("只读字段数 = %d，期望与写入面板一致 = %d", len(items), len(chatRoutingPanelFields))
+	}
+	for i, item := range items {
+		if want := chatRoutingPanelFields[i].Key; item.Title != want {
+			t.Fatalf("第 %d 行 = %q，期望 %q（顺序与写入面板一致）", i, item.Title, want)
+		}
+		if !strings.Contains(item.Detail, "当前:") {
+			t.Fatalf("%s 行内应带当前生效值：%q", item.Title, item.Detail)
+		}
+		if !strings.Contains(item.Preview, chatRoutingChildSessionReadOnlyNote) {
+			t.Fatalf("%s 预览应说明写入不生效（INV-A3）：\n%s", item.Title, item.Preview)
+		}
+	}
+
+	// 有目录候选的字段（enabled → on/off）行内直接给候选，不再多开一层无动作选择器。
+	if !strings.Contains(items[0].Detail, "候选: off|on") {
+		t.Fatalf("enabled 行内应给出候选：%q", items[0].Detail)
+	}
+	// 无目录候选的字段给取值说明（与写入面板同源），不伪造建议值（I-3）。
+	fieldIndex := -1
+	for i, item := range items {
+		if item.Title == "max_tokens" {
+			fieldIndex = i
+			break
+		}
+	}
+	if fieldIndex < 0 {
+		t.Fatalf("只读字段缺少 max_tokens：%+v", items)
+	}
+	if !strings.Contains(items[fieldIndex].Detail, "非负整数") {
+		t.Fatalf("max_tokens 行内应给出取值说明：%q", items[fieldIndex].Detail)
+	}
+}
+
+// TestChatRoutingReadOnlyFieldSummaryStaysReadOnly 钉住只读摘要的终点语义：给出当前
+// 生效值 + 候选/取值说明 + 写入键，并说明写入不生效；整个过程不写任何路由覆盖。
+func TestChatRoutingReadOnlyFieldSummaryStaysReadOnly(t *testing.T) {
+	session := chatRoutingPanelChildSessionForTest(t)
+	before := chatSessionRoutingOverrideRaw(session)
+
+	summary := chatRoutingReadOnlyFieldSummary(session, chatRoutingScopeMain, "hard", "provider")
+	for _, want := range []string{"只读视图（子会话）", "当前生效值", "写入键: profiles.hard.provider", chatRoutingChildSessionReadOnlyNote} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("只读摘要缺少 %q：\n%s", want, summary)
+		}
+	}
+	if !strings.Contains(summary, "未设置（继承下层）") {
+		t.Fatalf("未覆盖字段应说明继承语义：\n%s", summary)
+	}
+	freeText := chatRoutingReadOnlyFieldSummary(session, chatRoutingScopeMain, "hard", "temperature")
+	if !strings.Contains(freeText, "取值说明") {
+		t.Fatalf("无目录候选字段应给取值说明而不是候选：\n%s", freeText)
+	}
+	// 只读承诺：行渲染与摘要都不得改写会话覆盖（INV-A5/§5.6）。
+	if after := chatSessionRoutingOverrideRaw(session); after != before {
+		t.Fatalf("只读导航改写了路由覆盖：%q → %q", before, after)
+	}
+}
+
+// TestChatRoutingPanelEntryReadOnlyRoutingBySessionKind 钉住入口分流：子会话走只读
+// 路径（无全屏能力时=文本摘要+原因，且与 chatRoutingPanelEntryText 拼接一致），
+// 主会话不得被误标只读（INV-A3/M16）。
+func TestChatRoutingPanelEntryReadOnlyRoutingBySessionKind(t *testing.T) {
+	child := chatRoutingPanelChildSessionForTest(t)
+	childEntry := chatRoutingPanelEntry(child, chatRoutingScopeMain, "", "")
+	wantChild := chatRoutingPanelEntryText(child, chatRoutingScopeMain, "") + "\n" + chatRoutingChildSessionReadOnlyNote
+	if childEntry != wantChild {
+		t.Fatalf("子会话无全屏能力时应退化为「只读摘要 + 原因」：\n得到 %q\n期望 %q", childEntry, wantChild)
+	}
+
+	main := routingCommandSessionWithOverride(t)
+	mainEntry := chatRoutingPanelEntry(main, chatRoutingScopeMain, "", "")
+	if strings.Contains(mainEntry, chatRoutingChildSessionReadOnlyNote) {
+		t.Fatalf("主会话入口不得出现子会话只读原因：\n%s", mainEntry)
 	}
 }

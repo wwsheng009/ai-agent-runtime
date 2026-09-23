@@ -715,6 +715,11 @@ func chatRoutingValidationSuggestion(scope, message string) string {
 		return fmt.Sprintf("/routing %s allow_expert on（或从 levels 移除 expert）", scope)
 	case strings.Contains(lower, "not listed in levels"):
 		return fmt.Sprintf("先用 /routing %s levels <level,...> 把该档位纳入 levels", scope)
+	case strings.Contains(lower, "max_tokens cannot be negative"), strings.Contains(lower, "timeout cannot be negative"):
+		// 数值档位字段越界时解析器会把整层 enabled 丢回下层，警告里只有硬校验原文；
+		// 这条模板既让 chatRoutingRollbackReason 认领该原因（不再误报「未启用」），
+		// 也让面板/命令的拒绝文案带上字段与下一步（§10.2 I-4）。
+		return "把该字段改为非负值（>=0），例如 /routing " + scope + " level <level> <field> <value>"
 	case strings.Contains(lower, "must list the allowed difficulties"):
 		return fmt.Sprintf("/routing %s levels easy,normal,hard", scope)
 	case strings.Contains(lower, "levels entry"), strings.Contains(lower, "profiles key"):

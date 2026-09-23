@@ -53,6 +53,20 @@ type FullScreenListOptions struct {
 	OnDelete func(index int) error
 	// PreviewForItem, when set, replaces item.Preview for the highlighted row.
 	PreviewForItem func(index int) string
+
+	// FreeTextMode switches the picker into single-value input: the item list is
+	// not rendered and typed characters edit FreeTextValue (prefilled when set).
+	// Enter submits the trimmed text through OnConfirmText -- a non-nil error
+	// keeps the input open and is shown in the subtitle (inline validation), so
+	// callers can reuse their write-path validator without losing the user's
+	// input. Esc/q cancels. Callers use this for fields whose value has no
+	// catalog (for example routing max_tokens/temperature/thinking_effort).
+	FreeTextMode  bool
+	FreeTextValue string
+	FreeTextHint  string
+	// OnConfirmText validates/consumes the submitted text. It runs only in
+	// FreeTextMode; nil accepts any text.
+	OnConfirmText func(text string) error
 }
 
 // FullScreenListResult identifies the selected original item index.
@@ -63,6 +77,9 @@ type FullScreenListResult struct {
 	// on the highlighted enabled row. Index names the row. The list has
 	// already closed; the caller owns confirmation and persistence.
 	DeleteRequested bool
+	// Text carries the submitted value in FreeTextMode (trimmed). Index is -1
+	// for text submissions.
+	Text string
 }
 
 type fullScreenListState struct {
@@ -135,7 +152,7 @@ func selectFullScreenListWithLeaseState(ctx context.Context, terminal *Terminal,
 	if terminal == nil || !terminal.SupportsANSI() || reader == nil || writer == nil {
 		return FullScreenListResult{}, ErrFullScreenUnavailable
 	}
-	if len(options.Items) == 0 {
+	if len(options.Items) == 0 && !options.FreeTextMode {
 		return FullScreenListResult{Index: -1, Cancelled: true}, nil
 	}
 	stdinFile, _ := reader.(*os.File)
@@ -207,6 +224,11 @@ func runFullScreenListLoop(ctx context.Context, options FullScreenListOptions, h
 	}
 
 	state := fullScreenListState{}
+	if options.FreeTextMode {
+		// Free-text mode reuses the query buffer as the value being edited; the
+		// item list and its filtering are bypassed entirely.
+		state.query = options.FreeTextValue
+	}
 	dirty := true
 	lastWidth, lastHeight := -1, -1
 	lastNotifiedIndex := -2 // force initial OnSelectionChanged
@@ -218,8 +240,11 @@ func runFullScreenListLoop(ctx context.Context, options FullScreenListOptions, h
 		if height < minFullScreenListHeight {
 			return FullScreenListResult{}, editorKey{}, fullScreenUnavailable("terminal height is too small", nil)
 		}
-		matches := fullScreenListMatches(options.Items, state.query)
-		state.clampToEnabled(options.Items, matches, fullScreenListPageSize(height))
+		var matches []int
+		if !options.FreeTextMode {
+			matches = fullScreenListMatches(options.Items, state.query)
+			state.clampToEnabled(options.Items, matches, fullScreenListPageSize(height))
+		}
 		if len(matches) > 0 {
 			curIdx := matches[state.selected]
 			if curIdx != lastNotifiedIndex {
@@ -249,8 +274,26 @@ func runFullScreenListLoop(ctx context.Context, options FullScreenListOptions, h
 		if !ok {
 			continue
 		}
-		result, done := applyFullScreenListKey(&state, key, options.Items, matches, height)
+		result, done := FullScreenListResult{}, false
+		if options.FreeTextMode {
+			result, done = applyFullScreenFreeTextKey(&state, key)
+		} else {
+			result, done = applyFullScreenListKey(&state, key, options.Items, matches, height)
+		}
 		if done {
+			if options.FreeTextMode {
+				if options.OnConfirmText != nil {
+					if confErr := options.OnConfirmText(result.Text); confErr != nil {
+						// Inline validation feedback: keep the input open with the
+						// reason in the subtitle so the value can be corrected
+						// without re-entering the panel.
+						options.Subtitle = confErr.Error()
+						dirty = true
+						continue
+					}
+				}
+				return result, key, nil
+			}
 			if result.DeleteRequested {
 				if options.OnDelete == nil {
 					// Delete keys are only meaningful when the caller opted in.
@@ -450,6 +493,29 @@ func applyFullScreenListKey(state *fullScreenListState, key editorKey, items []F
 	return FullScreenListResult{}, false
 }
 
+// applyFullScreenFreeTextKey handles one key in FreeTextMode: printable runes
+// edit the value, Backspace/Delete drop the last rune, Enter submits the trimmed
+// text, Esc/q/interrupt/EOF cancels. Navigation keys are inert (there is no
+// list to move through).
+func applyFullScreenFreeTextKey(state *fullScreenListState, key editorKey) (FullScreenListResult, bool) {
+	if state == nil {
+		return FullScreenListResult{Index: -1, Cancelled: true}, true
+	}
+	switch key.kind {
+	case editorKeyRune:
+		if key.r >= 32 && key.r != 127 {
+			state.query += string(key.r)
+		}
+	case editorKeyBackspace, editorKeyDelete:
+		state.query = trimLastRune(state.query)
+	case editorKeyEnter:
+		return FullScreenListResult{Index: -1, Text: strings.TrimSpace(state.query)}, true
+	case editorKeyCancelPopup, editorKeyInterrupt, editorKeyEOF:
+		return FullScreenListResult{Index: -1, Cancelled: true}, true
+	}
+	return FullScreenListResult{}, false
+}
+
 func (state *fullScreenListState) clamp(count, pageSize int) {
 	if state == nil {
 		return
@@ -592,6 +658,9 @@ func renderFullScreenListFrameWithProfile(
 	if height < minFullScreenListHeight {
 		return renderCompactFullScreenListFrame(options, state, matches, width, height)
 	}
+	if options.FreeTextMode {
+		return renderFullScreenFreeTextFrame(options, state, width, height, profile)
+	}
 	pageSize := fullScreenListPageSize(height)
 	previewRows := fullScreenListPreviewRows(height)
 	state.clamp(len(matches), pageSize)
@@ -687,6 +756,13 @@ func renderFullScreenListFrameWithProfile(
 		lines[height-1].text = "  Enter " + fullScreenListConfirmLabel(options) + "  Esc/q 取消"
 	}
 
+	return composeFullScreenFrame(lines, width, profile)
+}
+
+// composeFullScreenFrame renders pre-sized frame lines into one alternate-screen
+// update (clear-line per row, optional inverse-video row) so the list and the
+// single-value input frames share identical writer behavior.
+func composeFullScreenFrame(lines []fullScreenFrameLine, width int, profile render.ColorProfile) string {
 	var builder strings.Builder
 	builder.WriteString("\x1b[H")
 	for row, line := range lines {
@@ -707,6 +783,63 @@ func renderFullScreenListFrameWithProfile(
 		}
 	}
 	return builder.String()
+}
+
+// renderFullScreenFreeTextFrame draws the single-value input view. Inline
+// validation errors reach this frame through options.Subtitle: the loop rewrites
+// the subtitle and redraws when OnConfirmText returns an error, so the layout
+// always keeps a dedicated subtitle row above the input.
+func renderFullScreenFreeTextFrame(options FullScreenListOptions, state fullScreenListState, width, height int, profile render.ColorProfile) string {
+	if width < 1 {
+		width = 1
+	}
+	if height < 1 {
+		height = 1
+	}
+	lines := make([]fullScreenFrameLine, height)
+	title := strings.TrimSpace(options.Title)
+	if title == "" {
+		title = "输入值"
+	}
+	lines[0].text = "  " + title
+	// Validation errors arrive through the subtitle and can be long (for example
+	// the parser's full key path in a rollback reason), so the subtitle spans up
+	// to two rows; the input row stays at a fixed position regardless of length.
+	if height > 1 {
+		subtitle := strings.TrimSpace(options.Subtitle)
+		if subtitle == "" {
+			subtitle = "输入内容后按 Enter 确认，Esc 取消"
+		}
+		for index, line := range wrapFullScreenText(subtitle, max(1, width-2), 2) {
+			row := 1 + index
+			if row >= height-3 {
+				break
+			}
+			lines[row].text = "  " + line
+		}
+	}
+	if height > 3 {
+		lines[3].text = strings.Repeat("─", width)
+	}
+	if height > 4 {
+		// The alternate screen hides the hardware cursor; the block marks the
+		// insertion point and makes the prefill/typed value visible.
+		lines[4].text = "  > " + state.query + "▌"
+	}
+	if hint := strings.TrimSpace(options.FreeTextHint); hint != "" {
+		if rows := max(0, height-2-5); rows > 0 {
+			for index, line := range wrapFullScreenText(hint, max(1, width-2), rows) {
+				lines[5+index].text = "  " + line
+			}
+		}
+	}
+	if height > 5 {
+		lines[height-2].text = fmt.Sprintf("  已输入 %d 字符", utf8.RuneCountInString(state.query))
+	}
+	if height > 4 {
+		lines[height-1].text = "  Enter " + fullScreenListConfirmLabel(options) + "  Backspace 删除  Esc 取消"
+	}
+	return composeFullScreenFrame(lines, width, profile)
 }
 
 func renderCompactFullScreenListFrame(options FullScreenListOptions, state fullScreenListState, matches []int, width, height int) string {
