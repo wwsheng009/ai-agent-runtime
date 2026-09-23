@@ -55,6 +55,13 @@ func (e Evaluator) evaluateAllowedActions(n Notification) []string {
 		}
 	case SubjectAgentSession, SubjectAgentRun, SubjectTeamTask:
 		allowed = append(allowed, string(ActionAcknowledge), string(ActionDefer), string(ActionCancel), string(ActionClose))
+		if n.SubjectKind == SubjectAgentRun {
+			// A run owns the ledger row extend_deadline moves (doc 6.5), so it is
+			// the only subject that can answer the escalate-first window with an
+			// extension instead of an ending. The I5/I6 bounds are re-validated
+			// when the action executes.
+			allowed = append(allowed, string(ActionExtendDeadline))
+		}
 	default:
 		allowed = append(allowed, string(ActionAcknowledge), string(ActionDefer))
 	}

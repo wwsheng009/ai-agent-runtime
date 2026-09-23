@@ -360,6 +360,19 @@ func (s *SQLiteSupervisionStore) init(ctx context.Context) error {
 					ON supervision_execution_runs(turn_id, status);
 			`,
 		},
+		{
+			// P0 / C1-2: extend_deadline payload columns (doc 6.5). Additive with
+			// zero-value defaults so pre-existing action rows read back as "not an
+			// extension" instead of erroring, and the migration is applied exactly
+			// once through schema_migrations (same discipline as AC-P0-3a).
+			Version: 4,
+			Name:    "action_extend_deadline_payload",
+			UpSQL: `
+				ALTER TABLE supervision_actions ADD COLUMN extend_by_ms INTEGER NOT NULL DEFAULT 0;
+				ALTER TABLE supervision_actions ADD COLUMN new_deadline TEXT;
+				ALTER TABLE supervision_actions ADD COLUMN extend_which TEXT NOT NULL DEFAULT '';
+			`,
+		},
 	}
 	return migrate.Apply(ctx, s.db, migrations)
 }
@@ -970,8 +983,9 @@ func (s *SQLiteSupervisionStore) CreateAction(ctx context.Context, a ActionRecor
 			action_id, root_scope_id, requested_by_kind, requested_by_id,
 			target_kind, target_id, action, cascade_mode, reason,
 			expected_version, expected_fencing_token, status, result, result_detail,
+			extend_by_ms, new_deadline, extend_which,
 			created_at, started_at, finished_at, version
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		a.ActionID,
 		a.RootScopeID,
@@ -987,6 +1001,9 @@ func (s *SQLiteSupervisionStore) CreateAction(ctx context.Context, a ActionRecor
 		string(a.Status),
 		a.Result,
 		a.ResultDetail,
+		int64(a.ExtendBy/time.Millisecond),
+		formatNullableSupervisionTime(a.NewDeadline),
+		strings.TrimSpace(a.ExtendWhich),
 		formatSupervisionTime(a.CreatedAt),
 		formatNullableSupervisionTime(a.StartedAt),
 		formatNullableSupervisionTime(a.FinishedAt),
@@ -1007,6 +1024,7 @@ func (s *SQLiteSupervisionStore) GetAction(ctx context.Context, actionID string)
 		SELECT action_id, root_scope_id, requested_by_kind, requested_by_id,
 			target_kind, target_id, action, cascade_mode, reason,
 			expected_version, expected_fencing_token, status, result, result_detail,
+			extend_by_ms, new_deadline, extend_which,
 			created_at, started_at, finished_at, version
 		FROM supervision_actions WHERE action_id = ?
 	`, actionID)
@@ -1048,7 +1066,7 @@ func (s *SQLiteSupervisionStore) ListActions(ctx context.Context, filter ActionF
 	if filter.Limit > 0 {
 		order += " LIMIT " + fmt.Sprintf("%d", filter.Limit)
 	}
-	query := "SELECT action_id, root_scope_id, requested_by_kind, requested_by_id, target_kind, target_id, action, cascade_mode, reason, expected_version, expected_fencing_token, status, result, result_detail, created_at, started_at, finished_at, version FROM supervision_actions WHERE " + strings.Join(clauses, " AND ") + order
+	query := "SELECT action_id, root_scope_id, requested_by_kind, requested_by_id, target_kind, target_id, action, cascade_mode, reason, expected_version, expected_fencing_token, status, result, result_detail, extend_by_ms, new_deadline, extend_which, created_at, started_at, finished_at, version FROM supervision_actions WHERE " + strings.Join(clauses, " AND ") + order
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list actions: %w", err)
@@ -1099,16 +1117,20 @@ type actionScanner interface {
 
 func scanAction(scanner actionScanner) (ActionRecord, error) {
 	var a ActionRecord
-	var startedAt, finishedAt, createdAt sql.NullString
+	var startedAt, finishedAt, createdAt, newDeadline sql.NullString
+	var extendByMs int64
 	err := scanner.Scan(
 		&a.ActionID, &a.RootScopeID, &a.RequestedByKind, &a.RequestedByID,
 		&a.TargetKind, &a.TargetID, &a.Action, &a.CascadeMode, &a.Reason,
 		&a.ExpectedVersion, &a.ExpectedFencingToken, &a.Status, &a.Result, &a.ResultDetail,
+		&extendByMs, &newDeadline, &a.ExtendWhich,
 		&createdAt, &startedAt, &finishedAt, &a.Version,
 	)
 	if err != nil {
 		return a, err
 	}
+	a.ExtendBy = time.Duration(extendByMs) * time.Millisecond
+	a.NewDeadline = parseNullableSupervisionTime(newDeadline)
 	a.CreatedAt = parseSupervisionTime(createdAt)
 	a.StartedAt = parseNullableSupervisionTime(startedAt)
 	a.FinishedAt = parseNullableSupervisionTime(finishedAt)

@@ -76,6 +76,12 @@ type ActionRequest struct {
 	Reason               string
 	ExpectedVersion      int64
 	ExpectedFencingToken string
+	// ExtendBy / NewDeadline / ExtendWhich are the extend_deadline payload
+	// (doc 6.5). Exactly one of ExtendBy / NewDeadline must be set; ExtendWhich
+	// selects execution|progress|both (empty means execution).
+	ExtendBy    time.Duration
+	NewDeadline *time.Time
+	ExtendWhich string
 }
 
 // ActionService is the durable control plane entry (doc 6.6). Every request,
@@ -92,6 +98,10 @@ type ActionService struct {
 	// control-action capability (P2-12 方案 1), so preflight never announces a
 	// cancel/close this host could only record, never execute.
 	executorReady bool
+	// extensionLimits is the I5 budget applied to extend_deadline. Zero value
+	// means "use the operator defaults", so an unwired service still enforces
+	// the documented caps instead of extending without bound.
+	extensionLimits ExtensionLimits
 }
 
 // NewActionService wires the durable action service. executor is required for
@@ -212,6 +222,9 @@ func (s *ActionService) RequestAction(ctx context.Context, req ActionRequest) (A
 		Status:               ActionRequested,
 		CreatedAt:            now,
 		Version:              1,
+		ExtendBy:             req.ExtendBy,
+		NewDeadline:          req.NewDeadline,
+		ExtendWhich:          strings.TrimSpace(req.ExtendWhich),
 	}
 	return s.store.CreateAction(ctx, record)
 }
@@ -307,7 +320,16 @@ func (s *ActionService) ExecuteAction(ctx context.Context, actionID string) (Act
 		return ActionRecord{}, ErrActionNotFound
 	}
 
-	result, execErr := s.executor.Execute(ctx, executing)
+	// extend_deadline is a control-plane mutation: it moves the ledger's own
+	// deadlines, so it is executed here instead of through the host runtime
+	// executor. Every other action keeps the host executor path.
+	var result ActionResult
+	var execErr error
+	if executing.Action == ActionExtendDeadline {
+		result, execErr = s.executeExtendDeadline(ctx, executing)
+	} else {
+		result, execErr = s.executor.Execute(ctx, executing)
+	}
 
 	terminal := *fresh
 	terminal.FinishedAt = s.ptrTime(s.now().UTC())
@@ -512,7 +534,7 @@ func (s *ActionService) emitResolutionNotification(ctx context.Context, record A
 
 func isMutationAction(action ActionKind) bool {
 	switch action {
-	case ActionCancel, ActionClose, ActionCancelSubtree, ActionRetry, ActionReassign:
+	case ActionCancel, ActionClose, ActionCancelSubtree, ActionRetry, ActionReassign, ActionExtendDeadline:
 		return true
 	default:
 		return false
@@ -534,7 +556,7 @@ func validateActionRequest(req ActionRequest) error {
 		return fmt.Errorf("%w: target_kind and target_id are required", ErrActionInvalid)
 	}
 	switch req.Action {
-	case ActionInspect, ActionAcknowledge, ActionDefer, ActionCancel, ActionClose, ActionCancelSubtree, ActionRetry, ActionReassign:
+	case ActionInspect, ActionAcknowledge, ActionDefer, ActionCancel, ActionClose, ActionCancelSubtree, ActionRetry, ActionReassign, ActionExtendDeadline:
 	default:
 		return fmt.Errorf("%w: unsupported action %q", ErrActionInvalid, req.Action)
 	}
@@ -552,7 +574,55 @@ func validateActionRequest(req ActionRequest) error {
 	if req.CascadeMode == CascadeDescendants && req.Action != ActionCancelSubtree && req.Action != ActionClose && req.Action != ActionRetry {
 		return fmt.Errorf("%w: cascade requires cancel_subtree/close/retry", ErrActionInvalid)
 	}
+	if req.Action == ActionExtendDeadline {
+		if err := validateExtendPayload(req); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// validateExtendPayload enforces the doc 6.5 request shape:
+// {extend_by | new_deadline, extend_which: execution|progress|both}. The I5
+// budget and the I6 irreversible-point checks need the ledger row, so they run
+// at execute time (executeExtendDeadline) where the run is loaded under CAS.
+func validateExtendPayload(req ActionRequest) error {
+	hasExtendBy := req.ExtendBy != 0
+	hasNewDeadline := req.NewDeadline != nil && !req.NewDeadline.IsZero()
+	switch {
+	case hasExtendBy && hasNewDeadline:
+		return fmt.Errorf("%w: extend_deadline accepts extend_by or new_deadline, not both", ErrActionInvalid)
+	case !hasExtendBy && !hasNewDeadline:
+		return fmt.Errorf("%w: extend_deadline requires extend_by or new_deadline", ErrActionInvalid)
+	case hasExtendBy && req.ExtendBy < 0:
+		return fmt.Errorf("%w: extend_by must be positive", ErrActionInvalid)
+	}
+	if _, err := normalizeExtendWhich(req.ExtendWhich); err != nil {
+		return err
+	}
+	return nil
+}
+
+// extendWhichExecution / extendWhichProgress / extendWhichBoth are the
+// extend_which values (doc 6.5). An empty value means "execution", which keeps
+// the common case (move the run's own deadline) short for the caller.
+const (
+	extendWhichExecution = "execution"
+	extendWhichProgress  = "progress"
+	extendWhichBoth      = "both"
+)
+
+func normalizeExtendWhich(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", extendWhichExecution:
+		return extendWhichExecution, nil
+	case extendWhichProgress:
+		return extendWhichProgress, nil
+	case extendWhichBoth:
+		return extendWhichBoth, nil
+	default:
+		return "", fmt.Errorf("%w: unsupported extend_which %q (want execution|progress|both)", ErrActionInvalid, raw)
+	}
 }
 
 func containsString(values []string, target string) bool {
@@ -562,4 +632,319 @@ func containsString(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+// --- extend_deadline (doc 6.5 / change #2) ---
+
+const (
+	// HintExtensionBudgetExhausted is the stable next_action hint for an
+	// extension rejected by the I5 caps: the budget is spent, so the parent must
+	// end or replace the obligation instead of extending it again.
+	HintExtensionBudgetExhausted = "extend_budget_exhausted_use_cancel_or_reassign"
+	// HintExtensionIrreversible is the stable next_action hint for an extension
+	// rejected at an I6 irreversible point (cancel requested/canceling/terminal):
+	// the run is already ending, so only retry/reassign can continue the work.
+	HintExtensionIrreversible = "extend_rejected_irreversible_use_retry_or_reassign"
+	// HintExtensionTargetMissing is the stable next_action hint when the
+	// notification subject has no execution-run row to extend.
+	HintExtensionTargetMissing = "extend_requires_agent_run_subject"
+)
+
+// ExtensionLimits is the I5 budget for extend_deadline (doc 6.5): at most
+// MaxExtensions calls per obligation, each at most MaxExtensionPerCall × the
+// original budget, and at most MaxExtensionTotal × the original budget in
+// total. A non-positive value falls back to the operator default, so a
+// partially wired service can never extend without bound.
+type ExtensionLimits struct {
+	MaxExtensions       int
+	MaxExtensionPerCall float64
+	MaxExtensionTotal   float64
+}
+
+// DefaultExtensionLimits returns the doc 6.5 / Q4 defaults (3 calls, 1× per
+// call, 4× in total).
+func DefaultExtensionLimits() ExtensionLimits {
+	cfg := DefaultConfig()
+	return ExtensionLimits{
+		MaxExtensions:       cfg.MaxExtensions,
+		MaxExtensionPerCall: cfg.MaxExtensionPerCall,
+		MaxExtensionTotal:   cfg.MaxExtensionTotal,
+	}
+}
+
+// ExtensionLimitsFromConfig maps the operator config onto the I5 budget so a
+// host wires the same numbers the supervisor's ladder uses.
+func ExtensionLimitsFromConfig(cfg Config) ExtensionLimits {
+	resolved := cfg.WithDefaults()
+	return ExtensionLimits{
+		MaxExtensions:       resolved.MaxExtensions,
+		MaxExtensionPerCall: resolved.MaxExtensionPerCall,
+		MaxExtensionTotal:   resolved.MaxExtensionTotal,
+	}
+}
+
+// SetExtensionLimits overrides the I5 budget (hosts call it during assembly
+// with the operator config). Non-positive fields keep the defaults.
+func (s *ActionService) SetExtensionLimits(limits ExtensionLimits) {
+	if s == nil {
+		return
+	}
+	s.extensionLimits = limits
+}
+
+func (s *ActionService) effectiveExtensionLimits() ExtensionLimits {
+	defaults := DefaultExtensionLimits()
+	if s == nil {
+		return defaults
+	}
+	limits := s.extensionLimits
+	if limits.MaxExtensions <= 0 {
+		limits.MaxExtensions = defaults.MaxExtensions
+	}
+	if limits.MaxExtensionPerCall <= 0 {
+		limits.MaxExtensionPerCall = defaults.MaxExtensionPerCall
+	}
+	if limits.MaxExtensionTotal <= 0 {
+		limits.MaxExtensionTotal = defaults.MaxExtensionTotal
+	}
+	return limits
+}
+
+// executeExtendDeadline applies one extension: load the run, reject the I6
+// irreversible points, enforce the I5 budget, CAS the new deadlines and
+// counters, then project the visible "已延长 ×N, +时长" lifecycle event.
+func (s *ActionService) executeExtendDeadline(ctx context.Context, record ActionRecord) (ActionResult, error) {
+	run, err := s.loadExtensionRun(ctx, record)
+	if err != nil {
+		return ActionResult{}, err
+	}
+	now := s.now().UTC()
+	if err := ensureExtendable(*run); err != nil {
+		return ActionResult{}, err
+	}
+	which, err := normalizeExtendWhich(record.ExtendWhich)
+	if err != nil {
+		return ActionResult{}, err
+	}
+
+	limits := s.effectiveExtensionLimits()
+	if run.ExtensionCount >= limits.MaxExtensions {
+		return ActionResult{}, fmt.Errorf(
+			"%w: extension budget exhausted for run %s (calls=%d/%d); next_action=%s",
+			ErrActionInvalid, run.RunID, run.ExtensionCount, limits.MaxExtensions, HintExtensionBudgetExhausted)
+	}
+	budget := extensionBudget(*run)
+
+	updated := *run
+	var deltas []time.Duration
+	var parts []string
+	if which == extendWhichExecution || which == extendWhichBoth {
+		target, delta, err := extensionTarget(run.ExecutionDeadlineAt, now, record.ExtendBy, record.NewDeadline)
+		if err != nil {
+			return ActionResult{}, err
+		}
+		updated.ExecutionDeadlineAt = &target
+		deltas = append(deltas, delta)
+		parts = append(parts, "execution_deadline_at="+target.Format(time.RFC3339))
+	}
+	if which == extendWhichProgress || which == extendWhichBoth {
+		target, delta, err := extensionTarget(run.ProgressDeadlineAt, now, record.ExtendBy, record.NewDeadline)
+		if err != nil {
+			return ActionResult{}, err
+		}
+		updated.ProgressDeadlineAt = &target
+		deltas = append(deltas, delta)
+		parts = append(parts, "progress_deadline_at="+target.Format(time.RFC3339))
+	}
+	applied := maxDuration(deltas)
+	if err := enforceExtensionCaps(limits, budget, run.ExtendedTotal, applied); err != nil {
+		return ActionResult{}, err
+	}
+
+	updated.ExtensionCount = run.ExtensionCount + 1
+	updated.ExtendedTotal = run.ExtendedTotal + applied
+	// The parent decided: the escalate-first window for this episode is spent,
+	// so a later stall escalates afresh instead of firing the fallback for a
+	// decision that was already taken (I8).
+	updated.DecisionWindowUntil = nil
+
+	runs, err := s.executionRunStore()
+	if err != nil {
+		return ActionResult{}, err
+	}
+	ok, err := runs.UpdateExecutionRunCAS(ctx, updated, run.Version)
+	if err != nil {
+		// A concurrent writer (another extension, or the scanner judging the
+		// run) won the row: the caller must re-read instead of blindly
+		// retrying, so the run-level conflict surfaces as the action-level
+		// conflict sentinel (EC-B1).
+		if errors.Is(err, ErrRunConflict) {
+			return ActionResult{}, fmt.Errorf("%w: run %s changed while extending", ErrActionConflict, run.RunID)
+		}
+		return ActionResult{}, fmt.Errorf("extend run %s: %w", run.RunID, err)
+	}
+	if !ok {
+		return ActionResult{}, fmt.Errorf("%w: run %s changed while extending", ErrActionConflict, run.RunID)
+	}
+
+	result := "extended " + which + " deadline by " + applied.String() +
+		" (已延长 ×" + formatInt(int64(updated.ExtensionCount)) + ", +" + updated.ExtendedTotal.String() + ")"
+	if err := s.projectExtension(ctx, updated, applied, result, record); err != nil {
+		return ActionResult{}, err
+	}
+	return ActionResult{Status: ActionCompleted, Result: result, ResultDetail: strings.Join(parts, " ")}, nil
+}
+
+// loadExtensionRun resolves the action's target to the execution-run row the
+// extension mutates. Only agent_run subjects own a run ledger, so a session or
+// team target is rejected with the actionable hint instead of silently
+// extending nothing.
+func (s *ActionService) loadExtensionRun(ctx context.Context, record ActionRecord) (*ExecutionRun, error) {
+	kind := SubjectKind(strings.TrimSpace(string(record.TargetKind)))
+	if kind != SubjectAgentRun {
+		return nil, fmt.Errorf("%w: extend_deadline targets agent_run, got %q; next_action=%s",
+			ErrActionInvalid, record.TargetKind, HintExtensionTargetMissing)
+	}
+	runs, err := s.executionRunStore()
+	if err != nil {
+		return nil, err
+	}
+	run, err := runs.GetExecutionRun(ctx, strings.TrimSpace(record.TargetID))
+	if err != nil {
+		if errors.Is(err, ErrRunNotFound) {
+			return nil, fmt.Errorf("%w: run %s not found; next_action=%s", ErrActionInvalid, record.TargetID, HintExtensionTargetMissing)
+		}
+		return nil, fmt.Errorf("load run %s: %w", record.TargetID, err)
+	}
+	if run == nil {
+		return nil, fmt.Errorf("%w: run %s not found; next_action=%s", ErrActionInvalid, record.TargetID, HintExtensionTargetMissing)
+	}
+	return run, nil
+}
+
+// executionRunStore exposes the execution-run ledger behind the action store.
+// The plain Store contract does not include run rows, so a host that persists
+// actions without a run ledger gets an explicit rejection instead of a panic.
+func (s *ActionService) executionRunStore() (ExecutionRunStore, error) {
+	if s == nil || s.store == nil {
+		return nil, fmt.Errorf("%w: supervision store is not configured; next_action=%s",
+			ErrActionInvalid, HintExtensionTargetMissing)
+	}
+	runs, ok := s.store.(ExecutionRunStore)
+	if !ok || runs == nil {
+		return nil, fmt.Errorf("%w: execution-run ledger is not available on this host; next_action=%s",
+			ErrActionInvalid, HintExtensionTargetMissing)
+	}
+	return runs, nil
+}
+
+// ensureExtendable enforces I6: once a cancel is in flight or the run reached a
+// terminal state, the extension is refused outright (the deadline no longer
+// governs anything) with the retry/reassign hint from EC-B3.
+func ensureExtendable(run ExecutionRun) error {
+	if run.Terminal() {
+		return fmt.Errorf("%w: run %s is terminal (%s); next_action=%s",
+			ErrActionInvalid, run.RunID, run.Status, HintExtensionIrreversible)
+	}
+	status := strings.TrimSpace(run.Status)
+	if status == RunStatusCancelRequested || status == RunStatusCanceling ||
+		(run.CancelRequestedAt != nil && !run.CancelRequestedAt.IsZero()) {
+		return fmt.Errorf("%w: run %s is past the irreversible point (status=%s); next_action=%s",
+			ErrActionInvalid, run.RunID, status, HintExtensionIrreversible)
+	}
+	return nil
+}
+
+// extensionTarget computes the new absolute deadline and the delta the I5
+// accounting must charge. The base is the current deadline, or "now" when the
+// deadline is missing or already in the past: an extension always grants the
+// requested forward window instead of leaving a past deadline in place.
+func extensionTarget(current *time.Time, now time.Time, extendBy time.Duration, newDeadline *time.Time) (time.Time, time.Duration, error) {
+	base := now
+	if current != nil && !current.IsZero() && current.After(now) {
+		base = *current
+	}
+	if newDeadline != nil && !newDeadline.IsZero() {
+		target := newDeadline.UTC()
+		if !target.After(base) {
+			return time.Time{}, 0, fmt.Errorf("%w: new_deadline must move the deadline forward (base=%s)",
+				ErrActionInvalid, base.Format(time.RFC3339))
+		}
+		return target, target.Sub(base), nil
+	}
+	if extendBy <= 0 {
+		return time.Time{}, 0, fmt.Errorf("%w: extend_by must be positive", ErrActionInvalid)
+	}
+	return base.Add(extendBy), extendBy, nil
+}
+
+// extensionBudget is the obligation's original budget used by the I5 ratios:
+// the declared dispatch budget when present, otherwise the originally computed
+// deadline span (current span minus what previous extensions already added).
+// Zero means "not derivable", in which case only the call-count cap applies.
+func extensionBudget(run ExecutionRun) time.Duration {
+	if run.DeclaredBudget > 0 {
+		return run.DeclaredBudget
+	}
+	if run.ExecutionDeadlineAt == nil || run.ExecutionDeadlineAt.IsZero() || run.StartedAt.IsZero() {
+		return 0
+	}
+	span := run.ExecutionDeadlineAt.Sub(run.StartedAt) - run.ExtendedTotal
+	if span <= 0 {
+		return 0
+	}
+	return span
+}
+
+func enforceExtensionCaps(limits ExtensionLimits, budget, alreadyExtended, applied time.Duration) error {
+	if budget <= 0 || applied <= 0 {
+		return nil
+	}
+	if maxPerCall := time.Duration(limits.MaxExtensionPerCall * float64(budget)); maxPerCall > 0 && applied > maxPerCall {
+		return fmt.Errorf(
+			"%w: extend_by %s exceeds the per-call cap %s (%.1f× of the %s budget); next_action=%s",
+			ErrActionInvalid, applied, maxPerCall, limits.MaxExtensionPerCall, budget, HintExtensionBudgetExhausted)
+	}
+	if maxTotal := time.Duration(limits.MaxExtensionTotal * float64(budget)); maxTotal > 0 && alreadyExtended+applied > maxTotal {
+		return fmt.Errorf(
+			"%w: extension %s exceeds the total cap %s (%.1f× of the %s budget, already extended %s); next_action=%s",
+			ErrActionInvalid, applied, maxTotal, limits.MaxExtensionTotal, budget, alreadyExtended, HintExtensionBudgetExhausted)
+	}
+	return nil
+}
+
+// projectExtension writes the durable, parent-visible extension event
+// (doc 6.8: obligation.deadline.extended carries the new deadline, the reason
+// and the extension counter) so the digest and UI can show "已延长 ×N, +时长".
+func (s *ActionService) projectExtension(ctx context.Context, run ExecutionRun, applied time.Duration, detail string, record ActionRecord) error {
+	reason := "deadline extended (已延长 ×" + formatInt(int64(run.ExtensionCount)) + ", +" + run.ExtendedTotal.String() + "): " + detail
+	if trimmed := strings.TrimSpace(record.Reason); trimmed != "" {
+		reason += "; reason=" + trimmed
+	}
+	_, err := ProjectLifecycle(ctx, s.store, nil, LifecycleProjection{
+		RootScopeID:           run.RootSessionID,
+		TargetParentSessionID: run.ParentSessionID,
+		SubjectKind:           SubjectAgentRun,
+		SubjectID:             run.RunID,
+		SubjectVersion:        run.Version,
+		EventType:             "obligation.deadline.extended",
+		Severity:              SeverityInfo,
+		SupervisionState:      SupervisionRunning,
+		Reason:                reason,
+		RecommendedAction:     string(ActionInspect),
+	})
+	if err != nil {
+		return fmt.Errorf("project extension event for run %s: %w", run.RunID, err)
+	}
+	return nil
+}
+
+func maxDuration(values []time.Duration) time.Duration {
+	var max time.Duration
+	for _, value := range values {
+		if value > max {
+			max = value
+		}
+	}
+	return max
 }

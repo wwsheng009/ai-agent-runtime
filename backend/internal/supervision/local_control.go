@@ -228,6 +228,11 @@ type ControlRequest struct {
 	// ExpectedVersion guards against acting on a state the caller never saw.
 	ExpectedVersion    int64
 	HasExpectedVersion bool
+	// ExtendBy / NewDeadline / ExtendWhich are the extend_deadline payload
+	// (doc 6.5); they are ignored for every other action.
+	ExtendBy    time.Duration
+	NewDeadline *time.Time
+	ExtendWhich string
 }
 
 // Control executes a durable control action against the notification subject.
@@ -245,7 +250,7 @@ func (s *LocalControlService) Control(ctx context.Context, req ControlRequest) (
 	}
 	action := req.Action
 	switch action {
-	case ActionInspect, ActionCancel, ActionClose, ActionCancelSubtree, ActionRetry, ActionReassign:
+	case ActionInspect, ActionCancel, ActionClose, ActionCancelSubtree, ActionRetry, ActionReassign, ActionExtendDeadline:
 	default:
 		return ActionRecord{}, fmt.Errorf("%w: unsupported control action %q", ErrActionInvalid, req.Action)
 	}
@@ -275,6 +280,9 @@ func (s *LocalControlService) Control(ctx context.Context, req ControlRequest) (
 		Reason:               reason,
 		ExpectedVersion:      version,
 		ExpectedFencingToken: record.DiagnosticRef,
+		ExtendBy:             req.ExtendBy,
+		NewDeadline:          req.NewDeadline,
+		ExtendWhich:          req.ExtendWhich,
 	})
 	if err != nil {
 		return ActionRecord{}, err

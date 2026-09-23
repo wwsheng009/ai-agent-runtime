@@ -199,6 +199,11 @@ const (
 	ActionCancelSubtree ActionKind = "cancel_subtree"
 	ActionRetry         ActionKind = "retry"
 	ActionReassign      ActionKind = "reassign"
+	// ActionExtendDeadline moves a run's deadlines forward instead of ending
+	// the obligation (doc 6.5). It is the decision the escalate-first window
+	// exists for, so it is a mutation action with its own payload
+	// (extend_by | new_deadline + extend_which).
+	ActionExtendDeadline ActionKind = "extend_deadline"
 )
 
 // CascadeMode controls how far a control action propagates.
@@ -226,10 +231,18 @@ type ActionRecord struct {
 	Status               ActionStatus `json:"status,omitempty"`
 	Result               string       `json:"result,omitempty"`
 	ResultDetail         string       `json:"result_detail,omitempty"`
-	CreatedAt            time.Time    `json:"created_at,omitempty"`
-	StartedAt            *time.Time   `json:"started_at,omitempty"`
-	FinishedAt           *time.Time   `json:"finished_at,omitempty"`
-	Version              int64        `json:"version,omitempty"`
+	// ExtendBy / NewDeadline / ExtendWhich are the extend_deadline payload
+	// (doc 6.5). Exactly one of ExtendBy / NewDeadline is set. They are
+	// persisted with the request so the accept/execute split (HTTP host) and a
+	// crash between the two steps keep the parameters, and so the audit trail
+	// answers "extended by how much" without replaying the tool call.
+	ExtendBy    time.Duration `json:"extend_by,omitempty"`
+	NewDeadline *time.Time    `json:"new_deadline,omitempty"`
+	ExtendWhich string        `json:"extend_which,omitempty"`
+	CreatedAt   time.Time     `json:"created_at,omitempty"`
+	StartedAt   *time.Time    `json:"started_at,omitempty"`
+	FinishedAt  *time.Time    `json:"finished_at,omitempty"`
+	Version     int64         `json:"version,omitempty"`
 }
 
 // ActionFilter selects durable actions.
