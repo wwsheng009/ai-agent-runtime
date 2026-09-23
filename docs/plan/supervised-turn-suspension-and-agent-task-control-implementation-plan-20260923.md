@@ -891,7 +891,7 @@ P3: C4-1(#5 移除) ─► C4-2(#16 GC/保留) ─► C4-3(重启恢复) ─► 
 
 ### 13.6 补丁登记：P2 收尾（C3-1 命名映射 / C3-7 steer 状态），2026-09-23
 
-> 本节为**当前口径**：登记 P2 剩余两项的字面偏差与落地状态，并据此维持 **P3 不进入**（§5 进入条件：P2 DoD + 兼容期结束）。
+> 本节为**当时口径**：登记 P2 剩余两项的字面偏差与落地状态（P3 判定见 §13.8：7a 闭环后已可进入）。
 
 **C3-1（改动 #7）工具命名映射（能力等价，字面偏差）**
 
@@ -903,18 +903,18 @@ P3: C4-1(#5 移除) ─► C4-2(#16 GC/保留) ─► C4-3(重启恢复) ─► 
 - 影响面：AC-P2-1a..1e 与 C3-5 的豁免集合（`wait_agent` / `read_agent_events` / 巡检工具）按**实际工具名**复述；`subagent_status` / `subagent_inspect_task` 全仓零命中（仅存在于本方案文档）。
 - 判定：**能力等价，不补建别名**（别名会引入第二套命名与额外的工具面面积）。
 
-**C3-7（改动 #18）steer 状态：L1 已落地，L2 未闭环**
+**C3-7（改动 #18）steer 状态：L1 / L2 已闭环（7a 见 §13.8，7b / 7e 见 §13.7）**
 
 | AC | 状态 | 证据 |
 | --- | --- | --- |
 | AC-P2-7c（steer 不改 `progress_seq`、不计入 stall / 延长计数） | **已落地（L1）** | 新增 `backend/internal/supervision/steer_resume_no_count_test.go`：wake 被投递并消费后，目标 obligation 的 `ProgressSeq` / `ExtensionCount` / `ExtendedTotal` / `LastProgressAt` / `DecisionWindowUntil` 逐字段不变 |
 | AC-P2-7d（目标已终态 ⇒ 回执带 `next_action`；投递审计 `Queued→Delivered` / `Failed`） | **已落地（L1）** | 新增 `toolbroker.AgentSessionClosedError`（`backend/internal/toolbroker/types.go`）统一两个宿主 4 个调用点的终态回执：保留 `errors.Is(ErrAgentSessionClosed)`（P0-3a 不静默丢弃）并追加 `next_action=inspect\|finalize`；审计状态沿用既有三态矩阵断言（`chat_actor_message_semantics_test.go` / `session_agent_controller_test.go`） |
-| AC-P2-7a（挂起态收到 steer ⇒ 起新 episode、同 `turn_id`、账本不变） | **未闭环（L2）** | 方案自述 "steer 全仓不存在，属待建概念"；现有载体只有恢复回合（`WakeConsumer` → resume）与 mailbox 投递，尚无"挂起 turn 内联注入"语义 |
-| AC-P2-7b（steer 与审批同时到达 ⇒ 审批优先） | **未闭环（L2）** | 审批闸门与 `next_action` 引导已就位（`agentWaitPendingApprovalNextAction`），但无 steer 侧排队序 |
-| AC-P2-7e（active wait 中 steer ⇒ 等待段立即结束并返回） | **未闭环（L2）** | 属宿主侧等待段改造（同 AC-P2-4c），未做 |
+| AC-P2-7a（挂起态收到 steer ⇒ 起新 episode、同 `turn_id`、账本不变） | **已落地（L2，见 §13.8）** | 事实来源＝durable batch 控制面的 §6.12 挂起记录：提交入口 `nextTurnID` 命中即复用挂起 `turn_id`（同 turn 新 episode、steer 天然置顶），run 收尾 `syncSuspendedTurn` 写回缓存，记录被清则缓存自愈。原登记依据（当时未建）：方案自述 "steer 全仓不存在，属待建概念"；现有载体只有恢复回合（`WakeConsumer` → resume）与 mailbox 投递，尚无"挂起 turn 内联注入"语义 |
+| AC-P2-7b（steer 与审批同时到达 ⇒ 审批优先） | **已落地（L2，见 §13.7）** | 两宿主 `send_input` 排队分支在目标 `PendingApproval` 时回执 `next_action=approval_first…`（`toolbroker.AgentSteerApprovalFirstNextAction`）：消息仍排队、不越过审批闸门；`AgentStatusResult.NextAction` 已透出到 `send_input` 摘要 |
+| AC-P2-7e（active wait 中 steer ⇒ 等待段立即结束并返回） | **已落地（L2，见 §13.7）** | 两宿主等待段：调用方 ctx 被 steer/ESC/interrupt 打断，或 CLI 侧有新输入排队 ⇒ 立即返回 `interrupted=true` + `next_action=steer_pending…`，不再谎报 `timed_out`（`toolbroker.AgentWaitSteerInterruptNextAction`） |
 
-- 结论：**P2 DoD 未满**（C3-7 的 7a / 7b / 7e 未闭环），叠加兼容期（Q6：一个发布周期）未走完 ⇒ **P3（§5，含改动 #5 / C4-1）不进入**。
-- 下一步顺序：① C3-7 L2（挂起态内联注入 + 审批优先 + active wait 返回）→ ② 一个发布周期 → ③ P3（C4-1..C4-4）。
+- 结论（**2026-09-23 修订**）：C3-7 仅剩 **7a（挂起态内联注入）** 未闭环；兼容期（Q6：一个发布周期）约束**已由用户解除**（"插话功能是必要的…不用管旧客户端"）⇒ P3 进入条件收敛为 **P2 DoD = 7a 闭环**。**（2026-09-23 三修：7a 已闭环，见 §13.8 ⇒ P2 DoD 达成、P3 进入条件满足。）**
+- 下一步顺序：① ~~C3-7 7a~~（已闭环，见 §13.8）→ ② **P3（C4-1..C4-4）**。
 
 **验证证据（2026-09-23 实测）**
 
@@ -924,3 +924,94 @@ P3: C4-1(#5 移除) ─► C4-2(#16 GC/保留) ─► C4-3(重启恢复) ─► 
 - `go test ./internal/supervision/ -count=1` ok（含新增 `steer_resume_no_count_test.go`）。
 - `go test ./cmd/aicli/commands/ -run 'TestLocalActorRegistry' -count=1` ok（14.7s）。
 - `go test ./internal/api/skills/ -run 'TestSessionAgentControllerV2TerminalTargetReturnsSessionClosed' -count=1` ok（1.1s）。
+
+---
+
+### 13.7 补丁登记：C3-7 steer 收尾（7b 审批优先 / 7e 等待段可打断），2026-09-23
+
+> 用户口径（本轮）：**插话（steer）是必做能力** —— 主 agent 要能对子代理"打断 / 插话 / 继续执行"，且**不再受旧客户端兼容期约束**（"不用管旧客户端"）。据此 §13.6 中"兼容期未走完"一条作废，P2 DoD 收敛为 **C3-7 仅剩 7a**。
+
+**AC-P2-7b（审批优先）—— 已落地（L2）**
+
+| 位置 | 改动 |
+| --- | --- |
+| `backend/internal/toolbroker/types.go` | 新增 `AgentSteerApprovalFirstNextAction(approvalID, reason)`：`approval_first: the target is blocked on a pending approval (<id> <reason>); call resolve_agent_approval with allow=true\|false before steering — this message stays queued and is injected only after the approval resolves; do not bypass the approval gate`；`AgentStatusResult` 新增 `NextAction`（`json:"next_action,omitempty"`） |
+| `backend/internal/toolbroker/broker.go` | `send_input` 摘要透出 `next_action`（模型可见） |
+| `backend/internal/api/skills/session_runtime_support.go`、`backend/cmd/aicli/commands/chat_actor_registry.go` | busy + `interrupt=false` 排队分支：目标 `PendingApproval` ⇒ 回执带审批优先引导 |
+
+- 语义边界（重要）：**审批优先靠"排队序"实现，而不是靠丢弃**。busy 态 steer 仍 `Queued→Delivered`（`trigger_turn=true`），而 busy 态消息只在当前 run 结束后注入 ⇒ 注入天然晚于审批解决。若将来引入"busy 态即时内联注入"，必须同时加真正的排队门槛，否则该 AC 失效。
+
+**AC-P2-7e（active wait 中 steer ⇒ 等待段立即结束并返回）—— 已落地（L2）**
+
+| 位置 | 改动 |
+| --- | --- |
+| `backend/internal/toolbroker/types.go` | `AgentWaitResult` 新增 `Interrupted`（`json:"interrupted,omitempty"`）+ `AgentWaitSteerInterruptNextAction()`；`FinalizeAgentWaitResult` 首分支：`Interrupted` ⇒ 强制 `timed_out=false`、`execution_continues=true`、`next_action=steer_pending…` |
+| 两宿主 `Wait` 等待段 | `waitCtx.Done()` 时区分"调用方被打断"（`ctx.Err() != nil`）与"观测窗口超时"：前者 `interrupted=true` 立即返回，后者维持 `timed_out=true` |
+| CLI 额外 | `localActorRegistry.localAgentSteerPendingInput()`：等待段内 `host.BaseSession.InputQueue` 出现排队新输入（steer / 新输入）⇒ 立即结束等待段返回 |
+
+- 触发链：CLI ESC/`cancel` → `interruptChatTurnFromBusyInputCancel` → 回合 ctx 取消；API `interrupt` 命令 → `activeTurnRegistry` 取消在途回合 ctx ⇒ 两者都沿 ctx 传播到等待段，因此"立即返回"不需要新线程，也不引入轮询。
+- 语义边界：等待段结束**不取消子代理**（`execution_continues=true`）、不改变账本；`interrupted` 与 `timed_out` 互斥（被打断的等待不再谎报超时）。
+- 未覆盖（留待 7a 或后续）：API 侧"新输入排队但未 interrupt"的 steer 形态（API 目前只有 `interrupt` 命令，无排队输入通道）；CLI 侧排队输入的识别挂在根会话 `BaseSession`，子代理自身发起的等待以 ctx 打断为准。
+
+**验证证据（2026-09-23 实测）**
+
+- `gofmt -l`（6 个改动文件）无输出。
+- `go build ./...` exit 0。
+- `go test ./internal/toolbroker/ -run TestFinalizeAgentWaitResultProvidesSchedulingGuidance -count=1` ok（含新增 `interrupted` 断言）。
+- `go test ./cmd/aicli/commands/ -run 'TestLocalActorRegistryV2SendInputApprovalFirstNextAction|TestLocalActorRegistryWaitEndsOnCallerSteerInterrupt|TestLocalActorRegistryWaitEndsOnQueuedUserInput' -count=1` ok。
+- `go test ./internal/api/skills/ -run 'TestSessionAgentControllerV2SendInputApprovalFirstNextAction|TestSessionAgentControllerWaitEndsOnCallerSteerInterrupt' -count=1` ok。
+
+---
+
+### 13.8 补丁登记：C3-7 7a 挂起态内联注入（同一 turn 的新 episode），2026-09-23
+
+> 用户口径（本轮）：**插话（steer）是必做能力**（主 agent 可打断 / 插话 / 继续执行），且**不再受旧客户端兼容期约束**（"不用管旧客户端"）。7a 是 P2 最后一项；本节登记其落地口径与验证证据，并据此宣告 **P2 DoD 达成、P3 进入条件满足**（§5 进入条件＝P2 DoD + 兼容期结束；兼容期由用户解除）。
+
+**落地形态：不做"窄注入"，做"同一 turn 的新 episode"**
+
+7a 的字面是"挂起 turn 收到 steer ⇒ 起新 episode、同 `turn_id`、账本不变"。落地上把它做成**同一 `turn_id` 的第二次 run**：
+
+| 语义 | 落地 |
+| --- | --- |
+| 同一 turn | 新 episode 复用挂起 turn 的 `turn_id`（`SessionActor.nextTurnID`） |
+| 输入置顶 | steer 文本就是本 episode 的 prompt ⇒ 天然位于请求历史末尾，无需改写历史（设计 §6.15） |
+| 账本不变 | episode 的投递不经过 supervision 账本写路径 ⇒ `progress_seq` / 延长计数 / stall 判定逐字段不变（与 7c 同口径） |
+| 事实来源 | durable batch 控制面的 §6.12 挂起记录（`subagentbatch.TurnSuspension`，键 `(session_id, turn_id)`）；`RuntimeState.SuspendedTurnID` **只是派生缓存**，每次使用前回查记录，记录被清即停止复用 |
+
+**改动清单**
+
+| 位置 | 改动 |
+| --- | --- |
+| `backend/internal/chat/runtime_state.go` | `RuntimeState` 新增 `SuspendedTurnID`（`json:"suspended_turn_id,omitempty"`）：记录"本会话当前挂起 turn"，供重启后的冷启动复用 |
+| `backend/internal/chat/actor_resume_episode.go`（新增） | `nextTurnID`（挂起 ⇒ 复用，否则 `turn_<uuid>`）；`suspendedTurnID`（内存缓存 → 冷启动 durable 回查 → durable 记录校验，失效则收敛清理）；`parkedTurnRecord` / `turnSuspended`（要求 `BatchStore.IsDurable()`，未接线 / 非 durable 一律按"未挂起"）；`syncSuspendedTurn`（run 收尾写回）；`adoptSuspendedTurnID` / `clearSuspendedTurnID`（收敛写） |
+| `backend/internal/chat/actor.go` | ① `handleSubmitPrompt` / `handleContinueSession` 改用 `nextTurnID`；② 审批 / 问答恢复入口（`state.CurrentTurnID` 为空时）同样改走 `nextTurnID`——resume 也是一次续跑；③ run 收尾 `publishTerminal` 之后用 `syncSuspendedTurn` 写回 `SuspendedTurnID` |
+| `backend/internal/chat/actor_resume_episode_test.go`（新增） | 三个用例（见下） |
+
+**测试落点（L1 / L2）**
+
+| 用例 | 断言 |
+| --- | --- |
+| `TestSubmitPromptOnSuspendedTurnResumesSameTurnID` | 真 durable SQLite batch store + 已挂起记录 ⇒ `SubmitPrompt` 后 `PrepareRun` 观测到的 run `turn_id` 等于挂起 `turn_id`；steer 文本进入会话历史；episode 结束后 `CurrentTurnID==""` 且 `SuspendedTurnID` 仍是挂起 turn；挂起记录的 `ObligationIDs` / `ResumeQueue` / `ParkedAt` 逐字段不变（账本不变） |
+| `TestSubmitPromptClearsStaleSuspendedTurnID` | 只有缓存、没有挂起记录（记录已被清 / 放弃）⇒ 提交不得复用旧 `turn_id`，且陈旧缓存被清掉（EC-E1"turn 永不结束"防线） |
+| `TestRunEndStampsSuspendedTurnIDForParkedTurn` | 回合内落盘 §6.12 挂起记录（模拟 loop 的 background 派发）⇒ 收尾后 `SuspendedTurnID` 等于本回合 `turn_id`，下一次 steer 才能落回同一 turn |
+
+**语义边界 / 留白**
+
+- 判读失败一律 fail-open 回旧行为：未接线 / 非 durable store / 读错误 ⇒ 按"未挂起"处理，新开 turn；**绝不丢输入、绝不静默改账本**。
+- 宿主 store 的 durability 决定 7a 是否生效：CLI 宿主按会话落文件（`resolveLocalChatSubagentBatchStorePath`，ephemeral 会话除外）⇒ durable；API 宿主需 runtime-server 调 `EnableDurableSubagentBatches(dir)` 注入文件型 store（`supervision_batch_recovery.go:289`），否则默认是进程内内存库（`resolveBatchDSN` 无 Path/DSN 时生成 uuid 内存 DSN）⇒ 按"未挂起"fail-open：不误伤，但也不复用 `turn_id`。
+- `startSessionRun` 内的兜底默认（`turnID == ""` ⇒ 新 `turn_<uuid>`）保留：它只服务直调（测试 / 内部），三个真实入口（submit / continue / 审批恢复）都走 `nextTurnID`。
+- 宿主（`internal/api/skills/handler.go`）在 agent ctx 上携带的 `turn_id` 是**事件渲染身份**，与 actor 的 run `turn_id` 无关：actor 在 `startSessionRun` 里用 run `turn_id` 覆盖 ctx 值（该行为本次改动前后一致）。
+- busy 态 steer 仍走排队（`Queued→Delivered`）：7b 的"审批优先"依赖排队序；7a 覆盖的是**挂起态（无在途 run）**的 steer。
+- API 侧"新输入排队但未 interrupt"的 steer 形态仍缺（同 §13.7 留白）：API 目前只有 `interrupt` 命令，无排队输入通道。
+
+**验证证据（2026-09-23 实测）**
+
+- `gofmt -l`（4 个改动 / 新增文件）无输出。
+- `go build ./...` exit 0；`go vet ./internal/chat/` exit 0。
+- `go test ./internal/chat/ -count=1` ok（37.5s，含上述三个新用例）。
+- `go test ./internal/api/skills/ -count=1` ok（39.1s）；`go test ./cmd/aicli/commands/ -count=1` ok（137.0s）。
+
+**P3 进入判定**
+
+- §5 进入条件＝**P2 DoD + 兼容期结束**：P2 登记项由 §13.6 / §13.7 / 本节共同闭环（C3-1 能力等价不补别名；C3-7 七项全闭环）；兼容期约束已由用户解除。
+- ⇒ **P3 可进入**，首项 C4-1（删除阻塞分支与 `wait` 取值，`execution_mode` 标记 deprecated）。
