@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -536,4 +537,43 @@ func TestLockConfigFileWriteAllHoldsEveryTarget(t *testing.T) {
 	unlockSecond := LockConfigFileWrite(second)
 	unlockSecond()
 	unlockFirst()
+}
+
+// TestLockConfigFileWriteAllOppositeOrdersDoNotDeadlock：两个调用方以**相反顺序**请求
+// 同一对文件时必须都能完成。LockConfigFileWriteAll 内部按归一化锁键字典序取锁，定序是
+// 避免 ABBA 死锁的唯一保证——一旦有人把定序去掉（或改成按传入顺序取锁），本用例会在超时
+// 后失败，而不是让生产环境偶发挂死。
+//
+// 同时断言事务互斥：任一时刻只能有一个事务在临界区内（多文件取锁若只锁住一部分，
+// 并发事务就会交错进入）。
+func TestLockConfigFileWriteAllOppositeOrdersDoNotDeadlock(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "config.yaml")
+	second := filepath.Join(dir, "runtime.yaml")
+
+	var inFlight int32
+	done := make(chan string, 2)
+	run := func(name string, paths ...string) {
+		go func() {
+			unlock := LockConfigFileWriteAll(paths...)
+			if n := atomic.AddInt32(&inFlight, 1); n != 1 {
+				t.Errorf("两个事务同时在临界区内（in_flight=%d）：多文件取锁未互斥", n)
+			}
+			time.Sleep(50 * time.Millisecond)
+			atomic.AddInt32(&inFlight, -1)
+			unlock()
+			done <- name
+		}()
+	}
+
+	run("first-then-second", first, second)
+	run("second-then-first", second, first)
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("相反顺序请求同一对文件时事务未能在超时内完成：LockConfigFileWriteAll 失去字典序定序（ABBA 死锁）")
+		}
+	}
 }
